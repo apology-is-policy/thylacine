@@ -21,7 +21,7 @@ hazards: [haz-shared-stream-desync, haz-single-waiter-rendez, haz-death-path-wak
 abis: []
 design: ["docs/ARCHITECTURE.md sections 21 + 21.10 + 8.8.1.1"]
 created: 2026-07-31
-updated: 2026-10-27
+updated: 2026-11-02
 ---
 ## Purpose
 
@@ -546,6 +546,24 @@ the principals at its two ends, the system principal and a hostowner
   `stop_unwound` — owner-written only, same-call-stack read.
 
 ## Concurrency
+
+**`c->lock` is a DEFERRING lock** (the poll chunk, 2026-10-28, [[chg-2026-10-28-poll-hook-walks]]): every
+acquire and release goes through `client_lock` / `client_unlock`, which count it
+in the thread's `defer_depth` ([[spec-poll-defer]]). A hook walk reached while
+it is held -- the client's own send and role lists (`client_mark_dead_locked`,
+the reader handoff, the send-progress signal), its transport endpoint's list
+(a srvconn's, a pipe ring's, the test loopback/mq's), and a Loom's CQ list from
+an async completion -- is owed, and the release that leaves the thread in no
+deferring lock runs it, holding nothing. `client_unlock` drops the spinlock
+BEFORE the drain. The client is the WAIT owner of its two records:
+`p9_client_destroy` calls `poll_deferred_await` on both after its own
+`client_unlock`. Test `9p_client.transport_walk_runs_after_the_client_lock`
+reads `c->lock` between two batches of the transport's walk. The private-progress
+paths (`p9_client_progress_bind` / `_abort` / `_step` and `submit_async`'s
+progress branches) take it the same way since the corona join
+([[chg-2026-10-29-aux-corona-join]]), and `tools/check-lock-helpers.py` holds every
+`spin_*` call in `9p_client.c` to the two helpers and fails a client's `->lock`
+named anywhere else, through any declared name, header member or cast.
 
 A retired closer kthread commits `THREAD_EXITING` through
 `thread_kthread_retire` (under kproc's thread lock, [[lock-proc-threads]]) with

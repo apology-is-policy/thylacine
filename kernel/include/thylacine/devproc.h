@@ -33,9 +33,11 @@ size_t devproc_imperium_read_gated(const struct Proc *caller, struct Proc *targe
 bool devproc_kill_authorized(const struct Proc *caller, const struct Proc *target);
 bool devproc_maps_code_visible(const struct Proc *caller, const struct Proc *target);
 bool devproc_park_state_is_settled(bool registered, bool on_cpu, int state);
+bool devproc_parse_step_tid_for_test(const char *s, long n, int *tid_out);
 bool devproc_sched_authorized(const struct Proc *caller, const struct Proc *target);
 size_t devproc_sched_read_gated(const struct Proc *caller, struct Proc *target,
                                 char *buf, size_t cap, bool *denied);
+int devproc_step_arm_for_test(int pid, int tid, struct Proc *caller, struct Spoor *ctl);
 long devproc_step_result_for_test(int ev, long n);
 int devproc_wait_state_for_test(int pid, struct Proc *caller, struct Spoor *ctl);
 int devproc_wait_verdict_for_test(int state);

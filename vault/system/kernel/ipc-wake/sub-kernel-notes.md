@@ -12,7 +12,7 @@ hazards: []
 abis: [abi-note-names]
 design: ["docs/ARCHITECTURE.md", "docs/ERRORS.md"]
 created: 2026-08-03
-updated: 2026-10-27
+updated: 2026-11-02
 ---
 ## Purpose
 
@@ -35,6 +35,18 @@ be interpreted as an ordinary foreground interrupt. The held process-table
 lock to note-queue lock ordering is unchanged; episode ownership is specified
 in [[sub-kernel-cons]].
 
+**A new thread starts with its creator's mask (2026-10-29, operator vote;
+thread-model C7; ARCH 7.6.2).** Both spawn arms -- `SYS_THREAD_SPAWN` and the
+phenotype's clone -- copy the creating thread's `note_mask` into the new thread
+before the admit links it, as POSIX `pthread_create` does. The queue is
+Proc-directed, and since C7 every first entry takes the EL0-return tail, whose
+notes leg runs before the entry's first instruction: a thread born unmasked would
+take a note every other thread masks -- a `pipe` queued while all of them mask it
+-- before it could mask itself. Before the vote a native thread started at zero
+(the rfork rule, which still governs a new Proc), and the Go runtime, whose
+`minit` makes a syscall before it masks `pipe`, died at its next new M. Only the
+mask crosses: the handler snapshot a fork copies stays behind, since a new thread
+runs on its own stack, not inside a handler.
 
 Three paths, **one queue**:
 
@@ -56,6 +68,7 @@ four against five rows until 2026-08-16, five against six after `pipe`, and
 |---|---|---|
 | `interrupt` | anyone | terminate (unless the Proc reads its own notes) |
 | `term` | anyone | terminate (unless the Proc reads its own notes); SIGTERM's note since 2026-10-13 |
+| `usr1`, `usr2` | anyone | terminate (unless the Proc reads its own notes); SIGUSR1's and SIGUSR2's since 2026-11-02 |
 | `kill` | anyone | terminate, **uncatchable** |
 | `pipe` | kernel | terminate (SIGPIPE's default; a reader-less write posts it) |
 | `child_exit` | kernel | nothing — queue for the fd reader |
@@ -210,9 +223,10 @@ on Ctrl-C. Both directions wrong, and it is exactly the call a shell makes. So
 declined until it had a name of its own. It has one since 2026-10-13: `term`
 ([[dec-2026-10-13-term-note]]; Plan 9 APE's sigtab spells SIGTERM the same
 way), catchable, terminating by default, with its own mask bit
-(`NOTE_BIT_TERM`, 7; `NOTE_MASK_SUPPORTED` is 0xff), its own caught bit and
+(`NOTE_BIT_TERM`, 7), its own caught bit and
 claim bit, and its own terminate latch -- so ignoring or masking Ctrl-C leaves
-SIGTERM's disposition alone, as POSIX keeps them.
+SIGTERM's disposition alone, as POSIX keeps them. `usr1` and `usr2` have the same
+shape on bits 8 and 9 (2026-11-02, operator vote), so `NOTE_MASK_SUPPORTED` is 0x3ff.
 
 The lesson generalises past this pair: in a design where the name is the
 identity, **collapsing two identities onto one name is a decision that cannot
@@ -255,7 +269,7 @@ liveness bug when the thing being exempted is a latch.*
 A note with a live handler must run at the return tail — but a peer thread
 blocked in a syscall reaches no return tail until something wakes it, and a
 thread spinning at EL0 reaches one only at an interrupt. So a caught note ARMS a
-per-Proc mask (`notes_arm_caught_note_locked`, the caught latch: the low byte of
+per-Proc mask (`notes_arm_caught_note_locked`, the caught latch: the low half of
 `Proc.note_caught`), and the posting walk (`proc_caught_note_wake`, under the
 process-table lock) chooses the thread that takes it and wakes or kicks that
 thread (next section); a stopped thread waits for the stop to clear.
@@ -269,7 +283,7 @@ outside the lock: a Proc noting itself takes the lock for its wakes after the
 post, and `pipe` needs none -- it posts to the writer's own Proc from inside
 the write, which delivers at that thread's return tail, as Linux sends SIGPIPE
 to the writing thread alone. One caught note unwinds at most ONE sleeper. An unwinding sleeper claims the
-note's family in the claim byte, the high byte of `Proc.note_caught` (`thread_caught_note_claim`,
+note's family in the claim half, the high half of `Proc.note_caught` (`thread_caught_note_claim`,
 the sleep arms' last test) by a CAS that re-validates the caught bit, and
 records the family as its own (`Thread.note_claim`); its peers find the family
 claimed and stay parked. In a Linux-phenotype Proc the walk usually takes that
@@ -279,12 +293,12 @@ designation ends at its thread's EL0-return tail whatever that tail delivered:
 `notes_deliver_at_el0_return` runs the delivery body (`notes_deliver_tail`),
 once more after each stop it applied (below), and then `notes_release_claims`,
 which clears the thread's claim and designation, ANDs their bits out of the
-Proc's claim byte and, if a family is still caught -- the tail ended short
+Proc's claim half and, if a family is still caught -- the tail ended short
 of its note -- walks again, skipping this thread, whose tail has just passed the
 note by. A thread's own claim stays open to it, so a wait that claimed and then
 completed anyway cannot make the call's next wait refuse the note only it may
 unwind for. The drain of a family's last queued note clears the caught bit
-alone. Exec clears the claim byte, the claim and the designation under the
+alone. Exec clears the claim half, the claim and the designation under the
 thread's `wait_lock` (exec runs alone, but a walk can have designated it). A
 thread that exits gives up both at its `THREAD_EXITING` commit, under its
 Proc's thread lock (`notes_exit_drop_locked`), and walks again if a family's
@@ -371,10 +385,12 @@ unwind it), and `notes.caught_note_claim_once`.
 
 **Why the caught latch and the claim live in their own word.** Both were 7-bit
 sub-fields of `proc_flags` until `term` needed an eighth bit in each and
-`proc_flags` (a u32) had none free. They moved together into the u16
-`Proc.note_caught` (the u16 that sat reserved beside `term_sig`; the struct
-did not grow): the latch is the low byte (`CAUGHT_LATCH_SHIFT`/`_MASK`), the
-claim the high byte (`CAUGHT_CLAIM_SHIFT`/`_MASK`). One word, because the
+`proc_flags` (a u32) had none free. They moved together into
+`Proc.note_caught`, a u16 then and a u32 since `usr1` and `usr2` took bits 8 and 9
+(2026-11-02; `term_sig` and `group_term_sig` left that slot for the pad after
+`supp_gid_count`, so the struct has not grown): the latch is the low half
+(`CAUGHT_LATCH_SHIFT`/`_MASK`), the claim the high half
+(`CAUGHT_CLAIM_SHIFT`/`_MASK`). One word, because the
 claim's CAS re-validates the caught bit. The move is sound because every
 reader and writer touches those two fields alone (the arm, the drain, the
 deliverable test, the claim CAS, the family drop, the exit drop, the
@@ -450,6 +466,103 @@ Modelled in `specs/caught_target.tla` ([[spec-caught-target]]): `OneClaimant`,
 and `NoStrand` (a caught note stays queued forever only if no thread stays able
 to take it), with a buggy cfg per defect. The witnesses are under Tests.
 
+### A note aimed at one thread (thread-model C4, 2026-11-02)
+
+Until this chunk a thread-directed signal reached a Proc: `tkill` and `tgkill` found
+the thread, then posted a note any unmasked thread could take, and musl's
+`pthread_kill` answered ENOSYS (operator vote 5; ARCH 7.6.4). Now the named thread
+takes it and no other (`NoStolenDirect`, [[spec-caught-target]]). The queue and the
+group's death stay what they were; this is a word beside them.
+
+**The word.** `Thread.note_direct` is a u16 with one bit per family. A bit can stand
+for a name because every name a program may post owns its family (`notes_direct_bit`;
+`notes.direct_names_own_their_family` walks the table to keep that true). It coalesces
+as a Linux standard signal does. It carries no sender and no time: a phenotype's
+siginfo says `SI_KERNEL` for every note, claiming nothing about either. `kill` never
+lands here, since it ends the group wherever it is aimed. A new thread starts with
+the word empty, so neither a thread spawn nor a fork inherits it; exec keeps it, as
+it keeps the queue, so a caught note waiting behind a mask can become fatal when exec
+resets the handler.
+
+**The post.** `proc_note_thread` holds `p->threads_lock` and no queue lock. In one
+hold it finds the tid (absent: ESRCH), does nothing for a thread past
+`THREAD_EXITING` or a Proc past `ALIVE`, drops a note the phenotype ignores, and sets
+the bit with an atomic OR. It then rouses the target under the target's `wait_lock`,
+unless the target is the caller. A fatal note wakes any rendez but `debug_rendez` and
+kicks the thread; a caught one goes through `caught_rouse_locked`.
+
+It rouses a masked target too. The owner writes `note_mask` with no lock and no fence,
+then reads the word acquire-only, and the post sets the word and would then read the
+mask: the store-buffer shape, where ARMv8 lets each see the other's old value. A post
+that skipped the rouse on the mask could leave a thread that had just unmasked asleep
+over a word it read empty. The target's re-read under `wait_lock` is the precision, as
+the queue's wakers already have it, and a masked sleeper re-reads and parks again.
+`caught_target_buggy_direct_stale_mask.cfg` holds the bug.
+
+A self-managing Proc reads its notes from an fd with no per-thread reader and runs no
+handler, so there the note joins the queue with its sender. `notes_mark_self_managing`
+moves words already set, through `notes_move_to_queue_locked`. Their posts already
+answered 0, so the move cannot be refused: the ring has `NOTE_RING_SPARE` slots past
+`NOTE_QUEUE_DEPTH` that no post may fill, and past the depth a moved note coalesces
+with a queued note of its name or takes one. Only the move fills a spare slot, each
+time with a name not then queued at sender 0, so a full ring holds a moved note of
+every family and the slots cannot run out, and running out would extinct, as losing a
+kill's re-enqueue does. A static assert keeps one per family. Moved notes count against
+admission until they are read, so after a move a post can be refused until the reader
+has drained them too.
+Every ring walk's modulus is `NOTE_RING_SLOTS`; the admission and the tail's budgets
+stay at the depth.
+
+**The disposition.** The post reads `SIG_IGN` and sets the bit in one hold of
+`threads_lock`. `rt_sigaction` stores the disposition, then `notes_discard_name` ends
+its `q->lock` hold and walks the threads under `threads_lock`. Whichever hold comes
+first, the note is refused or removed.
+
+A disposition that becomes terminate has the same shape. `viv_sigaction_settled`
+(`SIG_DFL` for a family that terminates), `notes_handler_resets` (`SA_RESETHAND` at a
+delivery) and `notes_set_handler` (`SYS_NOTIFY(0)`) store it and then call
+`proc_note_direct_rouse`, which under `threads_lock` rouses every other
+thread with a nonzero word: a post that held the lock first has set a bit the walk
+sees, and one that holds it after reads the new disposition itself. Without it a peer
+riding a caught note out in a hold wait would sleep on, since the unregistering thread's
+tail reads only its own word.
+
+**The tail.** `notes_tail_candidate_locked` takes a queued kill, then the lowest
+unmasked direct bit, then the queue's FIFO: private before shared, as Linux's
+`dequeue_signal`. `q->lock` does not guard the word, so a peer's `rt_sigaction` can
+take a bit between the peek and the consume. `notes_tail_consume_locked` is therefore
+a `fetch_and`, last, and on a raced discard it returns 0 and nothing is delivered. A
+native push that faults puts the bit back (`notes_tail_unconsume_locked`); a native
+Proc has no `rt_sigaction` to discard it in the meantime. A peer may have opened the
+note fd while it was out, so a Proc now self-managing gets it on the queue instead: the
+mark stores its flag under `q->lock`, so a flag not seen there means the mark's walk is
+yet to come and moves the bit itself.
+
+**Death.** Whether a direct note is fatal is read at use (`notes_direct_is_fatal`),
+never latched at the post, so exec's reset and `SYS_NOTIFY(0)` are honest.
+`thread_die_pending` asks the word after the queue's latches: a fatal note ends every
+wait of this thread and no peer's, and the tail's `exits_note` then runs the group's
+one death, so there is no second termination primitive. A masked fatal note stays
+pending until that thread unmasks, as in Linux, where `complete_signal`'s group exit
+is not reached while `wants_signal` refuses.
+`notes_terminate_pending_name_locked` scans the word first, so the fault arm's
+`FAULT_USER_DYING` finds what the predicate saw.
+
+**No claim.** `thread_caught_note_deliverable` and `thread_caught_note_claim` answer
+true for an unmasked direct bit with a live handler, and touch neither `note_claim`
+nor `note_target`. The claim keeps a note many threads could take to one sleeper; this
+note has one taker, and `OneClaimant` would break if it took one. The bit stays until
+the tail, so a 9P call that carries on after a lost flush reads it again and unwinds
+again, as a claim holder does. The walk is unchanged. Only a phenotype's waits unwind
+(`proc_caught_note_eintr_ready`); a native thread rides the wait out and takes the
+note at its tail, as it does a queued caught note.
+
+**The entries.** `viv_kill`'s self arm and `postnote_walk_cb`'s cross arm call
+`proc_note_thread` when a tid is named, with their gates unchanged; `kill(pid)` stays
+process-directed. `SYS_POSTNOTE_TID` ([[sub-kernel-syscall-abi]]) is the native
+entry, and patch 0067 points Pouch's `pthread_kill` and `raise` at it
+([[sub-pouch-thread]]).
+
 ### A fault under a terminate latch is the latch's death, at the fault
 
 A user fault left unresolved while a terminate latch is pending reaches the
@@ -481,8 +594,8 @@ text). A Proc that does not end by its own exit ends because of a note, and the
 kernel now records which, as a POSIX signal number beside the exit status
 (`Proc.term_sig`, set at the ZOMBIE chokepoint -- [[sub-kernel-death]]). The
 table is here: `g_known_notes` gained a `death_sig` column, nonzero exactly on
-the `NOTE_DEFAULT_TERMINATE` rows (`interrupt` 2, `term` 15, `kill` 9, `pipe` 13,
-`tty:quit` 3, `tty:hup` 1), and `g_snare_deaths` maps the fault family
+the `NOTE_DEFAULT_TERMINATE` rows (`interrupt` 2, `term` 15, `usr1` 10, `usr2` 12,
+`kill` 9, `pipe` 13, `tty:quit` 3, `tty:hup` 1), and `g_snare_deaths` maps the fault family
 (`snare:segv` 11, `snare:bus` and `snare:align` 7, `snare:ill` and `snare:bti`
 4, `snare:brk` 5, `snare:fpe` 8, `snare:abort` 6). `notes_death_signal(name)`
 reads both and answers 0 for a name that cannot kill. The numbers are Linux's
@@ -516,7 +629,7 @@ vivarium's numbers).
 ### A terminate latch wakes every sleep but a stop park's, and ends none of them (5g)
 
 An uncaught note whose default is terminate (an `interrupt` nothing catches,
-`term`, `tty:quit`, `tty:hup`, `pipe`) arms the LS-5c terminate latch -- one
+`term`, `usr1`, `usr2`, `tty:quit`, `tty:hup`, `pipe`) arms the LS-5c terminate latch -- one
 per family, so `term`'s (`PROC_FLAG_TERM_TERMINATE_PENDING`) is not held by a
 thread that masks only `interrupt` -- and its post
 wakes every blocked thread of the Proc outside a stop park
@@ -660,6 +773,15 @@ a reader's condition check and a poster's wake disappears.
 
 ## Concurrency
 
+**No poll-list walk runs under the queue lock** (the poll chunk, 2026-10-28):
+`notes_post` drops `q->lock` and then calls `proc_wake_or_owe(&q->owed)`, which
+owes the walk when the poster holds the process table lock (most callers) and
+walks at once otherwise ([[spec-poll-owed]]); `notes_reenqueue_head_locked` no
+longer wakes -- its callers walk after `spin_unlock`. The queue's `owed` record
+is cancelled at the reap with the Proc's. Residue: the three re-enqueue walks of
+`notes_deliver_at_el0_return` run after `q->lock` but still in the IRQ-masked
+EL0-return tail; their hooks are only the Proc's own threads.
+
 **The queue lock is the mutual-exclusion argument for the whole invariant.**
 Both delivery paths take it; whichever gets it first owns the note.
 
@@ -680,11 +802,18 @@ depends on a property (no writable file-backed mapping) that
 The caught-note claim takes no lock: a CAS on `Proc.note_caught` takes it, an atomic
 AND releases it, and only the release's walk -- run from the EL0-return tail,
 which holds nothing, and only while the family is still caught -- takes the
-process-table lock. A designation is made under the designee's `wait_lock`,
-inside the walk's process-table lock, so the order is process-table lock ->
-`wait_lock` -> `r->lock`. The sleep side's hand-off drops its `wait_lock` before
-it takes the process-table lock, and the exit drop runs under the process-table
-lock with no `wait_lock` held.
+Proc's `threads_lock` (since thread-model C3). A designation is made under the
+designee's `wait_lock`, inside the walk's `threads_lock`, so the order is
+`threads_lock` -> `wait_lock` -> `r->lock`. The sleep side's hand-off drops its
+`wait_lock` before it takes `threads_lock`, and the exit drop runs under
+`threads_lock` with no `wait_lock` held.
+
+`Thread.note_direct` takes no lock of its own and is not guarded by `q->lock`: ARCH
+7.3.1 has no edge between `q->lock` and `threads_lock`, and the post holds only the
+second. Set by an atomic OR, taken by a `fetch_and` or an exchange, read with acquire.
+The post's rouse runs under the target's `wait_lock`, the lock a thread entering a
+wait reads the word under, so the entry and the post cannot both miss (I-9). The
+self-managing fallback calls `notes_post` after it drops `threads_lock`.
 
 ## Invariants enforced
 
@@ -735,6 +864,14 @@ records no signal).
 
 - The two-consumers-of-one-queue shape has no model. The claim and the
   designation do (`caught_target.tla`).
+- **A family word is a width every cast must keep.** `(u8)(1u << 8)` is 0 and it
+  compiles, so a cast left narrow loses a claim or a designation with no error and
+  every test on a family below bit 8 stays green. The fields' fit is asserted in
+  `notes.c`; a cast is not, so `notes.family_past_the_first_byte` and
+  `rendez.caught_note_family_past_the_first_byte` drive `usr2` through every path.
+- **A native or Pouch thread's blocked wait rides a direct note out**, as it does a
+  queued caught one, so `pthread_kill` reaches a blocked Pouch worker only when its
+  call ends. That is item 11c, its own chunk (operator vote 16).
 - Per-kind masking within the `tty:` and `snare:` families is one bit each today.
 - `snare:*` is defined, prefix-gated, and **not deliverable**: fault termination
   calls the exit path directly rather than posting (since gcpark-b,
@@ -744,13 +881,13 @@ records no signal).
 
 ## Caveats
 
-**Re-measured 2026-10-06: the first caveat below is history.** IM-1 added
-`NOTE_BIT_SAK` (bit 6), so the kernel's `NOTE_MASK_SUPPORTED` is `0x7f`, and it
-is consumed now: `thread_caught_note_deliverable` and `thread_caught_note_claim`
-AND it into the deliverable set, and three `_Static_assert`s tie it to the
-32-bit `proc_flags` caught-note fields and to the `u8` `Thread.note_claim`. That
-last assert bounds every supported note bit at 7. libthyla-rs is `0x7f` and
-names `T_NOTE_BIT_TTY` and `T_NOTE_BIT_SAK`; pouch is still `0x2f` (no `snare`,
+**Re-measured 2026-11-02: the first caveat below is history.** The kernel's
+`NOTE_MASK_SUPPORTED` is `0x3ff` (IM-1 added `NOTE_BIT_SAK`, bit 6; `term` is bit 7;
+`usr1` and `usr2` are bits 8 and 9), and it is consumed now:
+`thread_caught_note_deliverable` and `thread_caught_note_claim` AND it into the
+deliverable set, and `_Static_assert`s tie it to both halves of the 32-bit
+`note_caught` and to the `u16` `Thread.note_claim`, `note_direct` and `note_target`.
+libthyla-rs is `0x3ff`; pouch is `0x3af` (no `snare`,
 no `sak`, a kernel-synthetic note for the native login authority). The
 per-thread `note_mask` is `u64`, and so is every local the queue scans read it
 into: they were `u32`, lossless only because of that bound, and the kernel now
@@ -869,6 +1006,24 @@ no longer wakes a wait that cannot unwind. On the device: viv-pheno-probe
 L331-L333 (a spinning main takes a child's `SIGCHLD` while a polling peer is
 left alone) and jc-probe's spinint and spinnote rungs (a native spinner ended by
 `^C`, and one whose handler runs).
+
+Thread-directed notes. `test_notes.c`: `notes.direct_fallback_records_its_sender`,
+`notes.direct_move_survives_a_full_ring`,
+`notes.direct_unconsume_after_the_mark_goes_to_the_queue`,
+`notes.direct_names_own_their_family`,
+`_reaches_only_its_thread`, `_post_gates`, `_ignored_and_discarded`,
+`_candidate_discarded_delivers_nothing`, `_die_predicate`,
+`_deliverable_takes_no_claim`, `_self_managing_uses_the_queue`. `test_rendez.c`, on
+the `nt_*` interpreter: `rendez.direct_note_turns_fatal_when_the_handler_goes`,
+`rendez.direct_note_unwinds_only_its_target`,
+`_held_waits_ride_it_out`, `_read_at_wait_entry`, `_fatal_ends_any_wait`,
+`_native_rides_it_out`. `syscall.native_gap_unassigned` pins the numbers beside 138 and
+`vivarium.rejects_are_deliberate` the Linux rows they meet. On the device:
+viv-pheno-probe L339-L343 (`tgkill` runs the handler on the blocked peer it names and
+reads `EINTR` there while the caller's own `ppoll`s run their full time; a blocked
+caller's self-directed note waits through an open peer; with no handler, `tgkill` at a
+blocked peer ends the group with `SIGTERM`), and pouch-hello-threads' `kill-worker`,
+`kill-masked`, `raise-masked`, `kill-blocked` and `kill-answers`.
 
 ## Referenced by
 

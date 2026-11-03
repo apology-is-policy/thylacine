@@ -54,7 +54,8 @@ caller, and the kernel ends the process with it
 does carry signals since gcpark-b (2026-10-12): the kernel records the
 signal of every death by note, a fault (`snare:segv` → `SIGSEGV`, …,
 `snare:abort` → `SIGABRT`) or an uncaught terminating note (`interrupt` →
-`SIGINT`, `term` → `SIGTERM`, `kill` → `SIGKILL`, `pipe` → `SIGPIPE`,
+`SIGINT`, `term` → `SIGTERM`, `usr1` → `SIGUSR1`, `usr2` → `SIGUSR2`,
+`kill` → `SIGKILL`, `pipe` → `SIGPIPE`,
 `tty:quit`, `tty:hup`),
 and a parent's `waitpid` reads it as `WIFSIGNALED` / `WTERMSIG`
 (docs/ERRORS.md "The wait status"). No handler runs for a fault signal.
@@ -79,6 +80,11 @@ no note can reach a registered handler over an unset sigtab.
 shared `interrupt`: the dispatcher guessed by handler-presence (SIGINT's if
 installed, else SIGTERM's), blocking SIGINT blocked SIGTERM, and a child
 killed with SIGTERM read `WTERMSIG == SIGINT`.
+
+**SIGUSR1 and SIGUSR2 have a note each** since 0068 (operator vote 15, 2026-11-02):
+`usr1` and `usr2`, bits 8 and 9, which took the supported mask to 0x3af. `sigaction`,
+`kill`, `raise` and `pthread_kill` all answered EINVAL for them before it. SIGALRM is
+now what a signal with no note means.
 
 **The tty family is RECEIVE-ONLY.** The kernel's POST axis rejects any
 userspace `tty:*` post — the I-39 gate that makes a terminal event
@@ -124,7 +130,12 @@ so an impossible return cannot fall off the end into adjacent `.text`.
 `__pouch_sigtab[_NSIG]` — per-Proc dispositions (POSIX semantics).
 `__pouch_note_mask_shadow` — a `__thread` shadow of the kernel's
 per-Thread note mask, needed for `SIG_BLOCK`/`SIG_UNBLOCK`
-read-modify-write; pouch is its sole writer.
+read-modify-write; pouch is its sole writer. A new thread's shadow starts at
+zero (TLS) while the kernel starts the thread with its creator's mask, which
+`pthread_create` has set to every supported note across the spawn; the two
+agree again at the thread's first act, `start()`/`start_c11()` restoring the
+creator's own mask through `__restore_sigs` (0065). No note can run a handler
+in that window, since every one is blocked.
 
 ## Concurrency
 
@@ -204,7 +215,6 @@ updates only that thread's kernel mask; POSIX wants Proc-wide) ·
   additive within the tty family, which shares one bit (reading back a mask
   containing SIGHUP also reports SIGQUIT, SIGTSTP, SIGCONT and SIGWINCH).
   SIGINT and SIGTERM stopped aliasing at 0049.
-- No mask inheritance across `pthread_create` (the child starts at 0).
 - `SIG_IGN` does not DISCARD pending SIGPIPE notes (POSIX §2.4); the mask
   defers them, and a later real handler sees them retroactively.
 - `siglongjmp` does not restore masks; `sigaltstack` / `sigpending` /
@@ -221,4 +231,6 @@ updates only that thread's kernel mask; POSIX wants Proc-wide) ·
 self-post sentinel; [[adt-signals13b-r1]] DIRTY 2 P1 + 6 P2 →
 [[adt-signals13b-r2]] CLEAN) → [[chg-2026-07-18-pty3]] (the tty family) →
 gcpark-b (2026-10-12: the patch prose for `abort()` and the dropped
-`__abort_lock` interlock; deaths by note report their signal).
+`__abort_lock` interlock; deaths by note report their signal) → thread-model
+C7 (2026-10-29, operator vote: 0065, a new thread starts with its creator's
+mask; the kernel half is `SYS_THREAD_SPAWN` inheriting `note_mask`).

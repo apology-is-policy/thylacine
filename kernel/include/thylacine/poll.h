@@ -62,7 +62,8 @@
 //   (and the sample sees the mutation directly).
 //
 //   `poll_waiter_list_unregister(pw)` takes ONLY the list lock — no
-//   object lock. Lock order globally:
+//   object lock — and is O(1): the list is doubly linked, so a poller's
+//   re-arm costs it nothing per hook of anyone else's. Lock order globally:
 //     object → list → g_timerwait → rendez → cpu_sched
 //   The list lock is taken IRQSAVE by every operation (register,
 //   unregister, wake, empty). No IRQ handler enters it, but it nests
@@ -78,6 +79,30 @@
 //   inversion. The hook stores a back-pointer `pw->list` set at register
 //   time so the kernel-side unregister sweep knows which list each hook
 //   is on without consulting the Dev.
+//
+// THE WALK GOES IN BATCHES (operator vote 12, 2026-10-27; specs/poll_walk.tla)
+//
+//   Nothing bounds how many hooks one list carries: every poll call and
+//   every multi-waiter of every thread that can reach the object. So the
+//   wake reaches at most POLL_WAKE_BATCH hooks per hold of the list lock.
+//   Between holds it leaves a BOOKMARK -- a poll_waiter of its own, on the
+//   producer's stack, magic POLL_MARK_MAGIC, owned by no poller -- behind
+//   the last hook it reached, drops the lock (IRQs back on; preemptible
+//   when the caller holds nothing else) and goes on from the bookmark.
+//   Other walks step over it, and so does poll_waiter_list_empty. A walk
+//   owes only the hooks listed when it began: register pushes at the HEAD
+//   and the walk goes head to tail, so every hook past its bookmark is
+//   older than the walk, the walk never meets a newer one, and it ends
+//   (poll_walk.tla Covered / NoStray / WalkEnds). A hook that leaves and
+//   comes back is a new registration with a new sample, owed nothing.
+//   specs/poll.tla's Walk + Reach split the reach from the mutation.
+//
+//   ONE HOOK PER LIST PER CALL. Every wake re-samples every fd of the
+//   call, so a second hook of the same call on the same list (the same
+//   fd twice, two fds of one object) only lengthens the producers' walk:
+//   sys_poll_for_proc drops it right after it goes on. The earlier hook
+//   went on before the dropped one's sample, so every walk of a mutation
+//   that sample did not see reaches it.
 //
 // REGISTERED-OBJECT LIFETIME (multi-thread-Proc safe -- RW-2 2C-F1)
 //
@@ -247,14 +272,19 @@ struct poll_waiter_list;
 // currently on `*list`"; the kernel-side unregister sweep uses this
 // back-pointer to find each hook's home without a Dev vtable op.
 struct poll_waiter {
-    u32                       magic;   // POLL_WAITER_MAGIC
+    u32                       magic;   // POLL_WAITER_MAGIC (POLL_MARK_MAGIC: a walk's bookmark)
     bool                      ready;   // set under list->lock by a producer
     struct Rendez            *rendez;  // back-ref to the poller's private Rendez
     struct poll_waiter_list  *list;    // non-NULL while listed; NULL otherwise
-    struct poll_waiter       *next;    // singly-linked; valid only while listed
+    struct poll_waiter       *next;    // valid only while listed
+    struct poll_waiter       *prev;    // valid only while listed; NULL at the head
 };
 
 #define POLL_WAITER_MAGIC  0x504F4C57u   // "POLW" little-endian
+#define POLL_MARK_MAGIC    0x504F4C4Du   // "POLM": a wake's bookmark, never a hook
+
+// Hooks one wake reaches per hold of the list lock.
+#define POLL_WAKE_BATCH    32u
 
 // A pollable object embeds one of these — `struct pipe_ring` at v1.0,
 // `struct SrvService` + `struct SrvConn` at P5-poll-b. The list lock
@@ -264,7 +294,7 @@ struct poll_waiter {
 // list — see this header's preamble.
 struct poll_waiter_list {
     spin_lock_t         lock;
-    struct poll_waiter *head;     // singly-linked; NULL when empty
+    struct poll_waiter *head;     // doubly linked; NULL when empty
 };
 
 // Initialize a poll_waiter for one poll call. Sets `magic`, `rendez`,
@@ -288,14 +318,19 @@ void poll_waiter_list_init(struct poll_waiter_list *l);
 void poll_waiter_list_register(struct poll_waiter_list *l,
                                struct poll_waiter *pw);
 
-// Unregister `pw` from its list. Takes `pw->list->lock` internally;
-// requires NO outer lock. Idempotent: a hook that is already
+// Unregister `pw` from its list, in O(1). Takes `pw->list->lock`
+// internally; requires NO outer lock. Idempotent: a hook that is already
 // unregistered (`pw->list == NULL`) is a no-op. Used by every
-// `sys_poll_for_proc` re-arm pass and by its return sweep.
+// `sys_poll_for_proc` re-arm pass and by its return sweep. Extincts when
+// the hook's neighbours do not point back at it (a corrupted list).
 void poll_waiter_list_unregister(struct poll_waiter *pw);
 
-// Wake every registered poller: walk `l` (under `l->lock`), set each
-// hook's `ready` flag, then signal each hook's `rendez`.
+// Wake every registered poller: walk `l`, set each hook's `ready` flag,
+// then signal each hook's `rendez` -- POLL_WAKE_BATCH hooks per hold of
+// `l->lock`, behind a bookmark between holds (THE WALK GOES IN BATCHES
+// above). A caller holding a spinlock across the call keeps its own
+// masking and its own non-preemptibility between the batches, so the
+// sites walk after dropping their object lock.
 //
 // THE CONTRACT is an ORDER, not a lock: the walk must FOLLOW the
 // readiness mutation's becoming visible under the lock the Dev's
@@ -311,11 +346,105 @@ void poll_waiter_list_unregister(struct poll_waiter *pw);
 // Extincts on a corrupted `pw->magic` mid-walk (UAF on a stale hook).
 void poll_waiter_list_wake(struct poll_waiter_list *l);
 
-// Whether `l` has no registered hooks (a momentary snapshot under l->lock). Used
+// Whether `l` has no registered hooks (a momentary snapshot under l->lock;
+// a walk's bookmark is not a hook). Used
 // by the dev9p_poll GC (net-6b-2b) to detect a stranded readiness op (no poller
 // cares) while holding g_dev9p_poll_lock -- so the check is atomic with the
 // op unlink vs a concurrent poller that registers its hook before reusing the op.
 bool poll_waiter_list_empty(struct poll_waiter_list *l);
+
+// A walk owed to a hook list (operator vote 13; specs/poll_owed.tla). A
+// producer that must not walk where it stands -- under g_proc_table_lock,
+// which masks IRQs and is also what keeps the list's owner alive -- OWES the
+// walk instead: poll_owe chains the list's record on the producer's own
+// chain. The lock's release begins each owed walk while still holding it
+// (poll_owed_begin lists a bookmark at the list's head, and that bookmark
+// pins the owner: its free waits in poll_waiter_list_await_unmarked) and
+// finishes it after the drop (poll_waiter_list_wake_from). One lock -- the
+// caller's -- serializes every chain and every record; a record is on at
+// most one chain.
+struct poll_owed_chain;
+struct poll_owed {
+    struct poll_waiter_list *list;
+    struct poll_owed_chain  *chain;   // non-NULL while owed
+    struct poll_owed        *next;
+    struct poll_owed        *prev;    // NULL at the chain's head
+};
+struct poll_owed_chain {
+    struct poll_owed *head;
+};
+
+void poll_owed_init(struct poll_owed *o, struct poll_waiter_list *l);
+
+// Owe `o`'s walk on `c`. A record owed already, on any chain, stays where it
+// is: its walk has not begun, so it begins after this event and reaches every
+// hook listed now.
+void poll_owe(struct poll_owed_chain *c, struct poll_owed *o);
+
+// Take `o` off its chain, if it is on one. For the reap: the owner's threads,
+// and so its hooks, are gone.
+void poll_owed_cancel(struct poll_owed *o);
+
+// Pop one record off `c` and list `mark` at the head of its list; returns the
+// list, or NULL when nothing is owed. The walk owes every hook behind `mark`.
+struct poll_waiter_list *poll_owed_begin(struct poll_owed_chain *c,
+                                         struct poll_waiter *mark);
+
+// Finish the walk poll_owed_begin began: from `mark` to the tail, in batches,
+// then `mark` comes off. The caller holds no lock.
+void poll_waiter_list_wake_from(struct poll_waiter_list *l,
+                                struct poll_waiter *mark);
+
+// Spin until no walk's bookmark is on `l`, before its owner is freed. The
+// owner's threads are gone, so a hook still listed would dangle: extinction.
+void poll_waiter_list_await_unmarked(struct poll_waiter_list *l);
+
+// A walk deferred past a DEFERRING lock (operator vote 13;
+// specs/poll_defer.tla): the 9P client's c->lock and g_dev9p_poll_lock, which
+// nests around it. Unlike the table lock's, these records can be owed by
+// threads holding different locks (a Loom's CQ list, from completions on two
+// clients), so a record's `chain` is tested and set under its LIST's lock;
+// `next` belongs to the thread whose chain holds the record. Nothing holds the
+// owner across the drain, so each owner keeps itself alive one of two ways:
+//  - `ops` set: the owe takes a reference (ops->tryget) and the walk's end
+//    drops it (ops->put, which may free the owner);
+//  - `ops` NULL: the owner is freed only once no deferring-lock holder can
+//    post to it, and its free first calls poll_deferred_await.
+struct poll_defer_ops {
+    bool (*tryget)(void *owner);   // false: the owner is in its free
+    void (*put)(void *owner);
+};
+struct poll_defer_chain;
+struct poll_deferred {
+    struct poll_waiter_list     *list;
+    const struct poll_defer_ops *ops;
+    void                        *owner;   // ops' argument
+    struct poll_defer_chain     *chain;   // under list->lock; non-NULL while owed
+    struct poll_deferred        *next;
+};
+struct poll_defer_chain {
+    struct poll_deferred *head;
+};
+
+void poll_deferred_init(struct poll_deferred *d, struct poll_waiter_list *l,
+                        const struct poll_defer_ops *ops, void *owner);
+
+// Count a deferring lock just taken, and one just dropped. The release that
+// leaves the thread in none drains its chain there, holding nothing: each
+// record's walk begins (its bookmark at the head) in the same hold of the list
+// lock that takes it off the chain.
+void poll_defer_enter(void);
+void poll_defer_exit(void);
+
+// Walk `d`'s list now, or -- inside a deferring lock -- owe the walk. A record
+// owed already stays where it is (its walk has not begun). A REF owner already
+// in its free has no poller, so its list is walked at once: it is empty.
+void poll_wake_deferred(struct poll_deferred *d);
+
+// For a WAIT owner's free, once no deferring-lock holder can reach it: spin
+// until its record is on no chain and no bookmark is on its list. A free by
+// the thread that owes the walk itself would spin forever: extinction.
+void poll_deferred_await(struct poll_deferred *d);
 
 // =============================================================================
 // Remote readiness: the per-fd snapshot slot (see REMOTE READINESS above).
@@ -455,6 +584,21 @@ void poll_test_set_snap_bound_ns(u64 bound_ns);
 // later fail-safe from the gates.
 bool poll_test_snap_bound_release(void);
 #endif // KERNEL_TESTS
+
+#ifdef KERNEL_TESTS
+// Tests only: run between two batches of a wake, with the list lock dropped
+// and the walk's bookmark listed; NULL runs nothing.
+extern void (*volatile g_poll_wake_batch_hook)(struct poll_waiter_list *l);
+// Tests only: run in sys_poll_for_proc after entry i's scan and dedupe, before
+// entry i + 1's; NULL runs nothing.
+extern void (*volatile g_poll_scan_hook)(u64 i);
+// The test runner's release, after every test: clears both hooks and says
+// whether a test left one set -- every later wake or poll would run it.
+bool poll_test_wake_hook_release(void);
+// Tests only: the hooks on `l` (bookmarks not counted), under its lock.
+u32 poll_waiter_list_count_for_test(struct poll_waiter_list *l);
+u32 poll_waiter_list_marks_for_test(struct poll_waiter_list *l);
+#endif
 
 
 #endif // THYLACINE_POLL_H

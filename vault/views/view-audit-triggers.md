@@ -39,11 +39,11 @@ Generated from note fields — do not edit between the markers
 | [[sub-kernel-content]] | kernel/devramfs.c, kernel/include/thylacine/devramfs.h, kernel/devenv.c, kernel/env.c, kernel/include/thylacine/env.h, kernel/random.c, kernel/chacha20.c, kernel/include/thylacine/random.h, kernel/include/thylacine/chacha20.h | inv-i1, inv-i12, inv-i16, inv-i28, inv-i32, inv-i33 | - **The random buffer's first fill is not secret, and only boot ordering hides |
 | [[sub-kernel-death]] | kernel/proc.c | inv-i24, inv-i9, inv-i44 | The #811 audit's **verified-sound set** is the do-not-re-prosecute preamble |
 | [[sub-kernel-devdev]] | kernel/devdev.c | inv-i27 | - **A new console-adjacent leaf must be added to the right gate set.** The sets |
-| [[sub-kernel-devproc]] | kernel/devproc.c, kernel/include/thylacine/devproc.h, kernel/test/test_devproc.c | inv-i26, inv-i39 | - **none owns nothing on any owner axis, and the wall is the caller's.** A new |
+| [[sub-kernel-devproc]] | kernel/devproc.c, kernel/include/thylacine/devproc.h, kernel/test/test_devproc.c, kernel/test/test_devproc_thread.c | inv-i26, inv-i39 | - **none owns nothing on any owner axis, and the wall is the caller's.** A new |
 | [[sub-kernel-devsrv]] | kernel/devsrv.c, kernel/include/thylacine/devsrv.h, kernel/test/test_devsrv.c, tools/test-srv-registry-abi.py, tools/test-srv-registry-factory.py, kernel/test/test_devsrv_conn.c, tools/test-service-admission.py, tools/host-tests/service-admission.c | inv-i1 | What an auditor attacks here: |
 | [[sub-kernel-dtb]] | lib/dtb.c, tools/test-pci-msi-dtb.py, kernel/include/thylacine/dtb.h, kernel/test/test_dtb.c | inv-i15 | - **Property order independence.** Any new node-matching lookup must accumulate |
 | [[sub-kernel-elf]] | kernel/elf.c, kernel/include/thylacine/elf.h | inv-i12 | On any change: that the W^X check stays **above** the switch, so a new segment |
-| [[sub-kernel-exception]] | arch/arm64/vectors.S, arch/arm64/exception.c, arch/arm64/exception.h, arch/arm64/userland.S | inv-i21, inv-i13, inv-i24, inv-i39 | - **Any new hand-rolled `eret` to EL0 must mask across the link-register-set to |
+| [[sub-kernel-exception]] | arch/arm64/vectors.S, arch/arm64/exception.c, arch/arm64/exception.h | inv-i21, inv-i13, inv-i24, inv-i39 | - **There is one `eret` to EL0; do not add another.** A new way into userspace |
 | [[sub-kernel-exec]] | kernel/exec.c, kernel/include/thylacine/exec.h | inv-i36, inv-i12, inv-i32, inv-i33, inv-i44 | On any change: that the Spoor ref ledger balances on every path — the Image |
 | [[sub-kernel-fault]] | arch/arm64/fault.c, arch/arm64/fault.h | inv-i12, inv-i32, inv-i7, inv-i36, inv-i44 | On any change here: that the file arm's four-step protocol keeps its pin across |
 | [[sub-kernel-gic]] | arch/arm64/gic.c, arch/arm64/gic.h, kernel/test/test_gic.c | inv-i15, inv-i18 | - The two generations are **different code for the same behaviour**, and a run |
@@ -77,12 +77,12 @@ Generated from note fields — do not edit between the markers
 | [[sub-kernel-pci-irq]] | kernel/pci_irq.c, kernel/include/thylacine/pci_irq.h, kernel/test/test_pci_irq.c | inv-i5, inv-i9, inv-i15, inv-i34 | Guest shared-ticket test passes: two asserting functions, stalled peer isolation, |
 | [[sub-kernel-perm]] | kernel/perm.c, kernel/include/thylacine/perm.h |  | - No `principal_id` may ever be special-cased here. Adding a |
 | [[sub-kernel-pipe]] | kernel/pipe.c, kernel/include/thylacine/pipe.h | inv-i9 | - Every mutation that can enable a waiter must keep its wake — the |
-| [[sub-kernel-poll]] | kernel/poll.c, kernel/include/thylacine/poll.h | inv-i9 | - The sweep's three phases must keep their order: unregister → |
+| [[sub-kernel-poll]] | kernel/poll.c, kernel/include/thylacine/poll.h, kernel/test/test_poll.c | inv-i9 | - The sweep's three phases must keep their order: unregister → |
 | [[sub-kernel-proc]] | kernel/proc.c, kernel/include/thylacine/proc.h, kernel/test/test_proc.c, kernel/test/test_resource.c | inv-i1, inv-i32, inv-i33, inv-i44, inv-i48 | - The `rfork` ledger: every field is inherited, freshened or stripped |
 | [[sub-kernel-pts]] | kernel/pts.c, kernel/include/thylacine/pts.h, kernel/test/test_pts.c | inv-i20, inv-i1, inv-i22, inv-i9 | - The signal call must never grow a target parameter. The invariant is the |
 | [[sub-kernel-rendez]] | kernel/sched.c, kernel/include/thylacine/rendez.h, kernel/test/test_rendez.c | inv-i9, inv-i8 | - **The unconditional `r->lock` acquire in `wakeup` is LOAD-BEARING** |
 | [[sub-kernel-sched]] | kernel/sched.c, kernel/include/thylacine/sched.h | inv-i8, inv-i17, inv-i21, inv-i44, inv-i48 | - **The mask-before-read rule holds at every per-CPU read.** Any new site |
-| [[sub-kernel-sched-smp]] | kernel/sched.c, kernel/smp.c, arch/arm64/context.S | inv-i21, inv-i18, inv-i8, inv-i9, inv-i48 | - **The claim happens under the victim's lock.** Moving `on_cpu = true` |
+| [[sub-kernel-sched-smp]] | kernel/sched.c, kernel/smp.c, arch/arm64/context.S, kernel/include/thylacine/context.h | inv-i21, inv-i18, inv-i8, inv-i9, inv-i48 | - **The claim happens under the victim's lock.** Moving `on_cpu = true` |
 | [[sub-kernel-spoor]] | kernel/spoor.c, kernel/include/thylacine/spoor.h | inv-i33 | - **The refcount balances on every path.** `spoor_total_allocated` / |
 | [[sub-kernel-srvconn]] | kernel/srvconn.c, kernel/include/thylacine/srvconn.h, kernel/test/test_srvconn.c, tools/test-srvconn-admission.py | inv-i9 | What an auditor attacks here (the CLAUDE.md CF-3 B row absorbed): |
 | [[sub-kernel-stalk]] | kernel/stalk.c, kernel/include/thylacine/stalk.h, kernel/test/test_stalk.c | inv-i28, inv-i33 | Standing obligations for any change (the ARCH §25.4 POUNCE row is the |

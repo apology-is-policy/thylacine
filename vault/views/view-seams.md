@@ -26,6 +26,8 @@ Generated from note fields — do not edit between the markers
 | [[seam-extinction-line-unserialized]] | closed | abi-boot-banner | chg-2026-08-16-cons-writer-set | unfiled -- yip to main 2026-08-16 |
 | [[seam-login-halcyond-fallback]] | closed | sub-stratum-session | fnd-kt1-r1-c12 | the KT-1 audit round 1 (C-F12); the d-1a deferral |
 | [[seam-loom-sqpoll-owner-unbackstopped]] | closed | sub-kernel-loom | chg-2026-08-16-loom-charge-ledger | unfiled -- yip to main 2026-08-16 |
+| [[seam-poll-dedupe-direction-test]] | closed | sub-kernel-poll | fnd-pollwalk-r1-f2 | aux follow-up after the poll chunk |
+| [[seam-poll-hooks-per-list]] | closed | sub-kernel-poll | fnd-b0poll-r7-f1 | v1.x |
 | [[seam-poll-srv-registry-retain]] | closed | sub-kernel-poll | chg-2026-06-10-rw2-poll-retain | RW-2 R2-poll F1 (#18) |
 | [[seam-posix-pathname-form-gates]] | closed | sub-kernel-stalk | chg-2026-07-31-stalk-sweep | tasks #79-#87 (vivarium numbering) |
 | [[seam-pouch-guard-pages]] | closed | sub-pouch-thread, sub-pouch-process | chg-2026-05-23-p6-threads-b | threads-9b F2 |
@@ -56,6 +58,7 @@ Generated from note fields — do not edit between the markers
 | [[seam-cwg-parenthetical-refuted]] | open | sub-kernel-boot-sequence | chg-2026-08-16-boot-cwg-parenthetical | unfiled -- yip to main 2026-08-16 |
 | [[seam-death-cascade-smp-harness]] | open | sub-kernel-death | chg-2026-06-01-811-death-interruptible | unfiled |
 | [[seam-devdev-winsize-statless]] | open | sub-kernel-devdev, sub-kernel-cons | chg-2026-08-02-console-sweep | task #19 |
+| [[seam-dirent-type-is-qid-type]] | open | sub-kernel-devproc | fnd-thread-c7-r1-f5 | OPEN-BUGS 2026-10-29T09:22:54Z |
 | [[seam-dtb-blob-internally-trusted]] | open | sub-kernel-dtb | chg-2026-08-02-boot-sweep |  |
 | [[seam-eevdf-math]] | open | sub-kernel-sched | chg-2026-05-05-p2b-sched-dispatch | ARCH 2A-F6 -> RW-13 |
 | [[seam-exiting-tails-never-sleep]] | open | sub-kernel-death | chg-2026-07-14-68-last-thread-out-close | unfiled |
@@ -83,7 +86,6 @@ Generated from note fields — do not edit between the markers
 | [[seam-netd-host-tests]] | open | sub-netd-server, sub-netd-nic | adt-net2d-r1 |  |
 | [[seam-nuname-trust-stamp]] | open | sub-kernel-syscall-dispatch, sub-kernel-ninep-attach | chg-2026-09-06-9p-identity-absorb | v1.x (the n_uname trust-stamp seam family) |
 | [[seam-poll-heap-waiters]] | open | sub-kernel-poll | chg-2026-06-24-355-poll-decouple | #355 companion |
-| [[seam-poll-hooks-per-list]] | open | sub-kernel-poll | fnd-b0poll-r7-f1 | v1.x |
 | [[seam-pouch-dirfd]] | open | sub-pouch-fs | chg-2026-07-23-cl1a-fs-wires | CL-1a |
 | [[seam-pouch-dup2-target]] | open | sub-pouch-process | chg-2026-07-23-cl1b-process | CL-1b |
 | [[seam-pouch-errno-channel]] | open | sub-pouch-seam, sub-pouch-fs, sub-pouch-net | chg-2026-05-22-p6-syscall-seam | POUCH-DESIGN.md 5.1 |
@@ -98,6 +100,7 @@ Generated from note fields — do not edit between the markers
 | [[seam-proc-find-no-refcount]] | open | sub-kernel-proc | chg-2026-08-01-proc-thread-sweep | unfiled |
 | [[seam-proc-name-torn-read]] | open | sub-kernel-devproc, sub-kernel-devctl, sub-kernel-proc | chg-2026-08-02-introspection-sweep | task #17 |
 | [[seam-proxy-coord-eof]] | open | sub-stratum-session | chg-2026-08-02-stratum-sweep |  |
+| [[seam-queue-note-fatal-after-post-wakes-nobody]] | open | sub-kernel-notes | fnd-thread-c4-r2-f1 | OPEN-BUGS 2026-11-02T11:37Z; owned by item 11c |
 | [[seam-rfnameg-shared-territory]] | open | sub-kernel-territory | chg-2026-05-13-p5-attach-mount | unfiled |
 | [[seam-rfork-flags-unimplemented]] | open | sub-kernel-proc | chg-2026-05-05-p2d-rfork-exits-wait | unfiled |
 | [[seam-runq-rbtree]] | open | sub-kernel-sched | chg-2026-05-05-p2b-sched-dispatch | ARCH 8.4 design intent; Phase 7 |

@@ -12,7 +12,7 @@ hazards: []
 abis: [abi-pty-interaction]
 design: ["docs/PTY-DESIGN.md section 3"]
 created: 2026-08-03
-updated: 2026-09-25
+updated: 2026-11-02
 ---
 ## Purpose
 
@@ -390,6 +390,18 @@ binding under pts, then wake its poll list after dropping pts, then drop the pin
 The polling caller's Spoor reference survives unregister, so close/rebind cannot
 recycle a list in use. Retired watchers return EOF/POLLHUP; stale live watchers
 return EAGAIN. STATE remains available for recovery after a read copyout fault.
+
+No binding's wake runs under [[lock-proc-table]] either: a binding's poll list
+may hold any number of hooks, and that lock masks IRQs ([[spec-poll-owed]]).
+`pts_interaction_locked` and `pts_interaction_invalidate_locked` list the
+bindings to wake in the caller's `struct pts_wakes` -- pool slot indices, at most
+one per slot per call, 68 bytes on the exit and exec frames -- each holding its
+wake pin, and every holder (`proc_pts_interaction`, `setsid`, `setpgid`, the two
+zombie paths, the exec swap) runs `pts_interaction_wake` after its release. Test
+`pts.interaction_wakes_after_the_table_lock` puts 33 hooks on one binding and
+records at the walk's batch boundaries that the table lock is free and IRQs are
+on, for an APP ACK and for a nominated member's `setsid`
+([[chg-2026-10-29-aux-corona-join]]).
 
 Kernel regressions in `test_pts.c` cover role/seal checks, epochs, true lifecycle
 hooks, watch readiness/retirement and bounded retired capacity. Real SrvConn-backed

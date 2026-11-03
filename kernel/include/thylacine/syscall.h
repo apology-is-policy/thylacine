@@ -43,6 +43,7 @@
 #ifdef KERNEL_TESTS
 #include <thylacine/caps.h>       // caps_t, in the tests' declarations below
 #include <thylacine/handle.h>     // hidx_t, likewise
+#include <thylacine/vivarium.h>   // enum viv_signote, struct viv_ksigaction, likewise
 #endif
 
 // Syscall numbers. v1.0 P3-Ec stable; new syscalls append.
@@ -767,8 +768,9 @@ enum {
     // Allocates a new Thread + 16 KiB kstack in the CALLING Proc (same
     // pgtable_root + ASID — the new thread shares the caller's address
     // space). The new Thread is registered on the run-tree as RUNNABLE;
-    // the first dispatch lands at thread_user_trampoline which erets to
-    // EL0 at entry_va running on sp_va with TPIDR_EL0 = tls_va + x0 = arg.
+    // the first dispatch lands at thread_user_trampoline, which takes the
+    // EL0-return tail over a frame entering EL0 at entry_va on sp_va with
+    // x0 = arg (TPIDR_EL0 = tls_va from ctx).
     //
     // Returns the new thread's tid (positive int) on success. Returns
     // negative -errno on failure (Linux/musl-numeric; pouch's
@@ -784,10 +786,10 @@ enum {
     // -- the spawn still succeeds and the tid is returned in x0 -- mirroring
     // the exit-time clear_child_tid store's discipline.
     //
-    // The new Thread inherits no user state from the caller — the entry
-    // function is the responsible adult. fd inheritance is implicit
-    // (single handle table per Proc); register state is the four parked
-    // args + zeros.
+    // The new Thread inherits no user state from the caller but its note
+    // mask (POSIX pthread_create; ARCH 7.6.2) -- the entry function is the
+    // responsible adult. fd inheritance is implicit (single handle table per
+    // Proc); register state is the four parked args + zeros.
     SYS_THREAD_SPAWN = 41,   // arg: entry_va, sp_va, arg, tls_va, ptid_va
 
     // SYS_THREAD_EXIT — terminate the calling Thread. NEVER returns.
@@ -927,7 +929,9 @@ enum {
     //   x0 = new_mask         the new mask (bit set = defer that note)
     //   x1 = old_mask_out_va  user-VA pointer to a u64; the previous mask
     //                          is written there if old_mask_out_va != 0
-    // The mask is per-Thread (POSIX pthread_sigmask semantics).
+    // The mask is per-Thread (POSIX pthread_sigmask semantics). A new thread
+    // starts with its creator's mask (SYS_THREAD_SPAWN and the phenotype's
+    // clone); a native exec clears it.
     // Unsupported bits are tolerated (set but unused) so future supported-
     // note additions don't break old userspace that wrote a wider mask.
     //
@@ -2505,6 +2509,31 @@ enum {
     // the higher ceiling expose.
     SYS_SRV_REGISTRY_NEW = 134, // boot O_PATH fd, 40-byte routes, count, flags=0
 
+    // SYS_POSTNOTE_TID(tid, name_va, name_len): post a note at ONE thread of the
+    // caller's own Proc (ARCH 7.6.4; operator vote 2026-11-02). It reaches no
+    // other Proc: SYS_POSTNOTE's parent gate is for Procs, and a thread is only
+    // ever named from inside its own.
+    //   x0 = tid        a thread of the caller's Proc, or 0 for the caller
+    //   x1 = name_va    as SYS_POSTNOTE
+    //   x2 = name_len   as SYS_POSTNOTE
+    //
+    // Only that thread takes the note, at its next EL0-return with the note's
+    // bit unmasked; a masked note stays pending on it, never on a peer. `kill`
+    // and a self-chosen snare death end the whole Proc, whichever thread is
+    // named. Pending notes of one family at one thread coalesce.
+    //
+    // Returns 0 on success, else a negative errno:
+    //   -T_E_INVAL  as SYS_POSTNOTE's name rules; a tid wider than an int
+    //   -T_E_FAULT  name_va outside the user-VA bound / unmapped
+    //   -T_E_SRCH   the caller's Proc holds no such thread
+    //   -T_E_AGAIN  a Proc reading its notes from an fd, with a full queue
+    // The name is judged before the tid, and the tid before any death.
+    //
+    // Explicitly 138: 135..137 are main's READLINK, LSTAT and FILE_LOCK, and this
+    // tree assigns nothing there. Linux's 138 is rt_sigqueueinfo, an ENOSYS row
+    // consumed before the native switch (vivarium.c).
+    SYS_POSTNOTE_TID = 138,
+
     // NOT A SYSCALL. One past the highest assigned number, so that
     // VIV_NATIVE_CEILING can be pinned to a value the compiler recomputes
     // rather than to a symbol a person must remember to re-point.
@@ -4048,6 +4077,7 @@ int sys_pipe_for_proc(struct Proc *p, hidx_t *out_rd, hidx_t *out_wr);
 s64 sys_postnote_cross_for_test(struct Proc *caller, int target_pid,
                                 const char *name);
 s64 sys_postnote_self_for_test(struct Proc *caller, const char *name);
+s64 sys_postnote_tid_for_test(struct Proc *caller, int tid, const char *name);
 s64 sys_pread_for_proc(struct Proc *p, hidx_t h, u8 *kbuf, u64 len, s64 off);
 s64 sys_pty_register_for_proc(struct Proc *p, u64 op, u64 a1, u64 a2, u64 a3);
 s64 sys_pwrite_for_proc(struct Proc *p, hidx_t h, const u8 *kbuf, u64 len,
@@ -4147,6 +4177,8 @@ s64 viv_getdents64_for_test(struct Proc *p, u64 fd, u64 dirp, u64 count);
 s64 viv_getsockopt_for_test(struct Proc *p, u64 fd, u64 level, u64 optname,
                             u64 optval_va, u64 optlen_va);
 s64 viv_kill_for_test(struct Proc *caller, int pid, int tid, u64 sig);
+void viv_sigaction_settled_for_test(struct Proc *p, enum viv_signote note,
+                                    const struct viv_ksigaction *act);
 bool viv_linux_dispatch_for_test(struct exception_context *ctx, struct Proc *p);
 s64 viv_listen_for_test(struct Proc *p, u64 fd);
 s64 viv_pipe2_for_test(struct Proc *p, u64 fds_va, u64 flags);

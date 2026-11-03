@@ -388,6 +388,15 @@ build_kernel() {
         || { echo "==> kernel test registry check FAILED -- register the test in" >&2
              echo "    kernel/test/test.c's g_tests and test_registry.h" >&2
              exit 1; }
+    # A raw acquire or release of a lock that defers hook walks compiles and
+    # passes, and loses the walks it should have run (the corona join merged
+    # eighteen such sites without a conflict). Textual, fatal, self-testing.
+    echo "==> deferring-lock helper check"
+    python3 "$REPO_ROOT/tools/check-lock-helpers.py" --self-test \
+        && python3 "$REPO_ROOT/tools/check-lock-helpers.py" \
+        || { echo "==> deferring-lock helper check FAILED -- take the lock through its helper" >&2
+             echo "    (client_lock, dpl_lock, proc_table_lock_acquire)" >&2
+             exit 1; }
     echo "==> Kernel built: $KERNEL_BUILD/thylacine.elf"
     ledger "kernel ELF: BUILT ($build_type, sanitize='${sanitize_cmake:-none}', tests=$kernel_tests)"
     ls -la "$KERNEL_BUILD/thylacine.elf"

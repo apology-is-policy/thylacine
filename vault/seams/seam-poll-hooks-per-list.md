@@ -2,12 +2,13 @@
 id: seam-poll-hooks-per-list
 type: seam
 title: "Nothing caps hooks on one poll_waiter_list, so the masked walks are attacker-scaled and the producer's crosses no preemption point"
-status: open
+status: closed
 surface: [sub-kernel-poll]
 opened-by: fnd-b0poll-r7-f1
 tracker: "v1.x"
 created: 2026-09-22
-updated: 2026-10-27
+updated: 2026-10-28
+closed-by: chg-2026-10-28-poll-hook-walks
 ---
 ## Owed
 
@@ -51,3 +52,14 @@ unprivileged shape as [[fnd-b0poll-r5-f1]], one level down. ARCHITECTURE.md
 23.3 states the "one pass" bound with this qualification attached rather than
 claiming a bound it does not have, and `docs/browser-status.md` carries it as
 open B-0 residue.
+
+## Closed (2026-10-28)
+
+By the span, not the count ([[dec-2026-10-27-poll-walk-span]],
+[[dec-2026-10-27-locked-walks-out]]): a wake walks at most 32 hooks per hold of
+the list lock behind a stack bookmark, with IRQs restored and preemption possible
+between holds; no walk runs under its owner's lock (table-lock walks begin under
+it and finish after; 9P client-lock walks are deferred to the outermost release).
+No hook cap and no new refusal. The total work stays O(pollers) -- each poller is
+a pool-charged thread -- but no single masked or non-preemptible span grows with
+it. See [[chg-2026-10-28-poll-hook-walks]].

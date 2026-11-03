@@ -16,6 +16,7 @@
 #include <thylacine/types.h>
 #include <thylacine/spinlock.h>
 #include <thylacine/rendez.h>   // 8a-1b-beta: embedded per-Thread debug_rendez
+#include <thylacine/poll.h>     // table_owed, lock_owed
 
 struct Proc;
 struct Rendez;
@@ -229,13 +230,13 @@ struct Thread {
     // P6-pouch-signals-impl (sub-chunk 13a): note-delivery state per Thread.
     //
     // `note_mask`  — bit per NOTE_BIT_* (see <thylacine/notes.h>). Bit set
-    //                means this Thread defers delivery of that note (queue
-    //                entry is left in place; another Thread of the Proc, or
-    //                a future unmask, picks it up). Written ONLY by the owning
-    //                thread: SYS_NOTE_MASK, the phenotype rt_sigprocmask row,
-    //                the Linux delivery store, and the sigreturn restore --
-    //                never while that thread is inside a sleep/tsleep/torpor
-    //                (the lock-free read in thread_die_pending relies on this).
+    //                defers that note (the entry stays queued for a peer or a
+    //                later unmask). Before the thread is linked its creator
+    //                writes it (rfork_internal, both spawn arms; the link's lock
+    //                release orders that store); after, ONLY the owner writes
+    //                it: SYS_NOTE_MASK, the phenotype rt_sigprocmask row, the
+    //                Linux delivery store, the sigreturn restore -- never inside
+    //                a sleep/tsleep/torpor (thread_die_pending relies on this).
     //
     // `in_handler` — true while an async note handler is RUNNING on this
     //                Thread (between the EL0-return-tail dispatch and the
@@ -255,6 +256,10 @@ struct Thread {
     //                  SYS_NOTED syscall's exception_context.
     u64                note_mask;
     bool               in_handler;
+    // enum caught_wait: the kind of wait the thread is in, published under its
+    // wait_lock on entry to sleep/tsleep, where the walk re-checks a pick.
+    // Owner-written; KP_ZERO is CAUGHT_WAIT_NONE.
+    u8                 caught_wait;
     // ARCH 8.8.3 (dec-2026-10-12-note-target): the caught-note families the
     // posting walk claimed on this thread's behalf -- a designation, the
     // walk's choice of who takes the note. The walk sets bits under this
@@ -263,17 +268,20 @@ struct Thread {
     // exit), and thread_caught_note_claim turns one into note_claim when it
     // unwinds. Atomic: written across threads. KP_ZERO; not rfork-propagated;
     // exec clears it.
-    u8                 note_target;
-    // enum caught_wait: the kind of wait the thread is in, published under its
-    // wait_lock on entry to sleep/tsleep, where the walk re-checks a pick.
-    // Owner-written; KP_ZERO is CAUGHT_WAIT_NONE.
-    u8                 caught_wait;
+    u16                note_target;
     // The user-pool pages this thread's kernel memory is charged as (ARCH
     // 7.3.5): THREAD_POOL_PAGES, or 0 for a kproc thread that is the reserve's.
     // Set at create, before anything can free the thread; returned once, by
     // thread_destroy. Carved from in_handler's pad -- no size change.
     u8                 pool_pages;
-    u8                 _pad_in_handler[4];   // explicit 8-byte alignment
+    u8                 _pad_in_handler;      // explicit 2-byte alignment
+    // ARCH 7.6.4: the note families posted at this thread by name (tkill,
+    // tgkill, pthread_kill, raise). No other thread can take them, whatever its
+    // mask. A poster sets a bit holding the Proc's threads_lock; the owner's
+    // tail, or a discard or the self-managing mark holding that lock, clears it,
+    // each by an atomic op whose old value says who took the note. q->lock does not guard it. KP_ZERO;
+    // not inherited by a spawn or a fork; survives exec, as the queue does.
+    u16                note_direct;
     u64                note_saved_regs[31];   // x0..x30
     u64                note_saved_sp_el0;
     u64                note_saved_elr;
@@ -511,13 +519,6 @@ struct Thread {
     // padding before debug_stepover_va -- no size change.
     bool               note_interruptible;
 
-    // ARCH 8.8.3: the caught-note families whose unwind this thread claimed
-    // (thread_caught_note_claim), mirrored in proc_flags' claim sub-field. A
-    // claim ends at the thread's next EL0-return tail, delivered or not
-    // (notes_deliver_at_el0_return releases it). Owner-only; KP_ZERO inits it
-    // 0; not rfork-propagated; exec clears it. Also fits that padding.
-    u8                 note_claim;
-
     u64                debug_stepover_va;
 
     // prowl-1 (docs/PROWL-DESIGN.md section 3.1; I-8/I-17 untouched): cumulative
@@ -593,7 +594,14 @@ struct Thread {
     u64                nsleeps;
     u64                nmigrations;
     u16                last_cpu;
-    u16                _pad_prowl3[3];
+    // ARCH 8.8.3: the caught-note families whose unwind this thread claimed
+    // (thread_caught_note_claim), mirrored in Proc.note_caught's claim half. A
+    // claim ends at the thread's next EL0-return tail, delivered or not
+    // (notes_deliver_at_el0_return releases it). Owner-only; KP_ZERO inits it
+    // 0; not rfork-propagated; exec clears it. Carved from this pad when a
+    // family word outgrew the byte beside note_interruptible.
+    u16                note_claim;
+    u16                _pad_prowl3[2];
 
     // Task #96: the FP/SIMD half of the note-delivery context save.
     //
@@ -618,10 +626,29 @@ struct Thread {
     // _Alignas(16) is REQUIRED, not decorative: fp_save_area/fp_restore_area
     // reach it with STP/LDP (SIMD&FP) pair instructions.
     _Alignas(16) u8    note_saved_fp[FP_AREA_SIZE];
+
+    // The walks this thread owes while it holds g_proc_table_lock
+    // (proc_wake_or_owe), drained by its proc_table_lock_release before the
+    // release returns (specs/poll_owed.tla ChainDrained): empty whenever the
+    // thread is outside the lock. Under g_proc_table_lock.
+    struct poll_owed_chain table_owed;
+
+    // The walks this thread owes while it holds a deferring lock (a 9P
+    // client's c->lock, g_dev9p_poll_lock), and how many it holds: the
+    // release that leaves it in none drains the chain (specs/poll_defer.tla
+    // ChainDrained). Only this thread touches either.
+    struct poll_defer_chain lock_owed;
+    u32                     defer_depth;
 };
 
-_Static_assert(sizeof(struct Thread) == 1760,
-               "notetarget carved note_target + caught_wait (2 x u8) from "
+_Static_assert(sizeof(struct Thread) == 1776,
+               "the deferred-walk chunk appended lock_owed (a pointer) + "
+               "defer_depth (u32) after table_owed: 1760 -> 1776 (12 bytes + "
+               "4 trailing pad to the 16-byte alignment); the thread cache "
+               "keeps 2 objects per 4 KiB slab. "
+               "Before that the poll hook chunk appended table_owed (a pointer) after "
+               "note_saved_fp, into the 8 bytes of tail pad -- NO size change. "
+               "Before that: notetarget carved note_target + caught_wait (2 x u8) from "
                "in_handler's explicit pad -- no size change. "
                "aux item 7 (2026-08-17) inserted note_saved_mask (u64) after "
                "note_saved_spsr: every later field moves +8 and the 8-byte "
@@ -823,14 +850,15 @@ struct Thread *thread_create_kthread_for(struct Proc *owner,
 // user_sp_va, with x0 = user_arg and TPIDR_EL0 = user_tls_va.
 //
 // SLUB-allocates the Thread descriptor + 16 KiB kstack (same kstack
-// layout as the EL1-side helpers); ctx is laid out so the first
-// cpu_switch_context into the new thread lands at thread_user_trampoline,
-// which release-pairs sched_finish_task_switch + unmasks IRQs + erets
-// to EL0 at user_entry_va.
+// layout as the EL1-side helpers) and builds the thread's EL0 frame at the
+// top of the kstack; the first cpu_switch_context into the new thread lands
+// at thread_user_trampoline, which takes the EL0-return tail over that frame
+// (thread-model C7), so a thread spawned into a stopped Proc parks before its
+// first instruction.
 //
 // Caller-provided values are NOT validated here — the syscall handler
-// is responsible for the user-VA bound + alignment checks. The kernel
-// trampoline programs them verbatim into ELR_EL1 / SP_EL0 / TPIDR_EL0;
+// is responsible for the user-VA bound + alignment checks. They are
+// programmed verbatim into the frame's ELR / SP_EL0 and ctx's TPIDR_EL0;
 // a malformed address will fault at EL0 (which translates into a
 // user-mode extinction for the misbehaving Proc, not a kernel issue).
 //
@@ -894,9 +922,9 @@ void fork_frame_init(struct exception_context *dst,
 // `ctx` syscall_dispatch already holds. It is copied (via fork_frame_init)
 // onto the top of the child's own fresh kernel stack, exactly where
 // KERNEL_ENTRY would have built it, and ctx.sp points at it; the child's
-// first switch-in lands in thread_fork_trampoline, which runs the same
-// first-entry die-check thread_user_trampoline does and then falls into the
-// SHARED exception-return path rather than a second hand-rolled eret.
+// first switch-in lands in thread_user_trampoline, which takes the shared
+// EL0-return tail over that frame, exactly as a spawned thread's first entry
+// does (thread-model C7).
 //
 // FP/SIMD is inherited from the LIVE registers (fp_save_area), not from the
 // caller's saved Context -- the caller is running, so its Context holds

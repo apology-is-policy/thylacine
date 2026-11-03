@@ -321,7 +321,7 @@ fn fih_am_child() -> u64 { unsafe { core::ptr::read_volatile(&raw const FIH_AM_C
 /// the change the sigreturn must undo -- and, by mode, forks or execs from
 /// inside the handler so the mask a handler PASSES ON is witnessed too.
 /// SIGWINCH/SIGINT/SIGCHLD/SIGPIPE are used because each maps to a note bit;
-/// a signal with no note (SIGUSR1/2) reads back clear no matter what.
+/// a signal with no note (SIGALRM) reads back clear no matter what.
 static mut MH_MODE: u64 = 0;       // 0 = plain, 1 = fork inside, 2 = exec inside
 static mut MH_RUNS: u64 = 0;
 static mut MH_MASK_IN: u64 = 0;
@@ -5166,6 +5166,281 @@ unsafe fn run_linux() -> ! {
         let _ = svc4(NR_RT_SIGPROCMASK, NT_SIG_SETMASK, &kf_oldmask as *const u64 as u64, 0, 8);
     }
     leg!(rep, kn == 0, &kc_mk[..kn]);
+
+    // --- L344-L345: SIGUSR1 and SIGUSR2 have a note each ----------------------
+    //
+    // Operator vote 15 (2026-11-02). Their family bits are past the first byte, so
+    // the mask round trip is part of the claim. L344: each runs its handler with its
+    // own number through kill, tgkill and tkill while its twin is blocked; the blocked
+    // twin's tkill runs nothing until the unblock, and then runs it once. L345: each
+    // ends a child asleep with no handler, and the wait reads its number.
+    const SIGUSR1: u64 = 10;
+    const SIGUSR2: u64 = 12;
+    let mut ku_mk = [0u8; 200];
+    let mut ku_n = 0;
+    ksa = [handler_addr(), SA_RESTORER | SA_SIGINFO, restorer_addr(), 0];
+    let ku_h1 = svc4(NR_RT_SIGACTION, SIGUSR1, &ksa as *const u64 as u64, 0, 8) == 0;
+    let ku_h2 = svc4(NR_RT_SIGACTION, SIGUSR2, &ksa as *const u64 as u64, 0, 8) == 0;
+    let mut ku_oldmask = 0u64;
+    let ku_query = svc4(NR_RT_SIGPROCMASK, SIG_BLOCK, 0, &mut ku_oldmask as *mut u64 as u64, 8) == 0;
+    if !(ku_h1 && ku_h2 && ku_query) {
+        ku_n = put_bytes(&mut ku_mk, 0, b"L344 setup\n");
+    } else {
+        stamp_armed(rep, b"L344\n");
+        for (sig, twin) in [(SIGUSR1, SIGUSR2), (SIGUSR2, SIGUSR1)] {
+            let only_twin = 1u64 << (twin - 1);
+            let _ = svc4(NR_RT_SIGPROCMASK, NT_SIG_SETMASK, &only_twin as *const u64 as u64, 0, 8);
+            let mut seen = 0u64;
+            let _ = svc4(NR_RT_SIGPROCMASK, SIG_BLOCK, 0, &mut seen as *mut u64 as u64, 8);
+            if seen != only_twin && ku_n == 0 {
+                ku_n = put_bytes(&mut ku_mk, 0, b"L344 mask read back wrong\n");
+            }
+            for (c, nr, a0, a1, a2) in [
+                (b'k', NR_KILL, 0, sig, 0),
+                (b'g', NR_TGKILL, kf_pid as u64, kf_tid as u64, sig),
+                (b't', NR_TKILL, kf_tid as u64, sig, 0),
+            ] {
+                let f0 = sig_fired();
+                let r = svc3(nr, a0, a1, a2);
+                let fired = sig_fired() - f0;
+                let signo = sig_signo();
+                if !(r == 0 && fired == 1 && signo == sig) && ku_n == 0 {
+                    ku_n = put_bytes(&mut ku_mk, 0, b"L344 ");
+                    ku_n = put_bytes(&mut ku_mk, ku_n, &[c, b'=']);
+                    ku_n = put_dec(&mut ku_mk, ku_n, r);
+                    ku_n = put_bytes(&mut ku_mk, ku_n, b"/");
+                    ku_n = put_dec(&mut ku_mk, ku_n, fired as i64);
+                    ku_n = put_bytes(&mut ku_mk, ku_n, b"/");
+                    ku_n = put_dec(&mut ku_mk, ku_n, signo as i64);
+                    ku_n = put_bytes(&mut ku_mk, ku_n, b"\n");
+                }
+            }
+            let f0 = sig_fired();
+            let r = svc3(NR_TKILL, kf_tid as u64, twin, 0);
+            let held = sig_fired() - f0;
+            let none = 0u64;
+            let _ = svc4(NR_RT_SIGPROCMASK, NT_SIG_SETMASK, &none as *const u64 as u64, 0, 8);
+            let after = sig_fired() - f0;
+            let signo = sig_signo();
+            if !(r == 0 && held == 0 && after == 1 && signo == twin) && ku_n == 0 {
+                ku_n = put_bytes(&mut ku_mk, 0, b"L344 twin=");
+                ku_n = put_dec(&mut ku_mk, ku_n, r);
+                ku_n = put_bytes(&mut ku_mk, ku_n, b"/");
+                ku_n = put_dec(&mut ku_mk, ku_n, held as i64);
+                ku_n = put_bytes(&mut ku_mk, ku_n, b"/");
+                ku_n = put_dec(&mut ku_mk, ku_n, after as i64);
+                ku_n = put_bytes(&mut ku_mk, ku_n, b"/");
+                ku_n = put_dec(&mut ku_mk, ku_n, signo as i64);
+                ku_n = put_bytes(&mut ku_mk, ku_n, b"\n");
+            }
+        }
+        stamp_disarm(rep);
+    }
+    ksa = [SIG_DFL, 0, 0, 0];
+    let _ = svc4(NR_RT_SIGACTION, SIGUSR1, &ksa as *const u64 as u64, 0, 8);
+    let _ = svc4(NR_RT_SIGACTION, SIGUSR2, &ksa as *const u64 as u64, 0, 8);
+    if ku_query {
+        let _ = svc4(NR_RT_SIGPROCMASK, NT_SIG_SETMASK, &ku_oldmask as *const u64 as u64, 0, 8);
+    }
+    leg!(rep, ku_n == 0, &ku_mk[..ku_n]);
+
+    ku_n = 0;
+    for sig in [SIGUSR1, SIGUSR2] {
+        let kid = svc6(NR_CLONE, SIGCHLD, 0, 0, 0, 0, 0);
+        if kid == 0 {
+            let un = 1u64 << (sig - 1);
+            let _ = svc4(NR_RT_SIGPROCMASK, SIG_UNBLOCK, &un as *const u64 as u64, 0, 8);
+            let ts: [i64; 2] = [10, 0];
+            let _ = svc4(NR_PPOLL, 0, 0, ts.as_ptr() as u64, 0);
+            linux_exit(0)
+        }
+        // Posted at once, the note beats the child's first entry and kills it there, and
+        // no sleeper is ever woken. Correct code passes either way, so a late child is safe.
+        let settle: [i64; 2] = [0, 200_000_000];
+        let _ = svc4(NR_PPOLL, 0, 0, settle.as_ptr() as u64, 0);
+        let posted = if kid > 0 { svc3(NR_KILL, kid as u64, sig, 0) } else { 1 };
+        let ws = if kid > 0 { reap_or_kill(kid) } else { None };
+        if !(posted == 0 && matches!(ws, Some(w) if (w & 0x7f) == sig as i32)) && ku_n == 0 {
+            ku_n = put_bytes(&mut ku_mk, 0, b"L345 sig=");
+            ku_n = put_dec(&mut ku_mk, ku_n, sig as i64);
+            ku_n = put_bytes(&mut ku_mk, ku_n, b" fork=");
+            ku_n = put_dec(&mut ku_mk, ku_n, kid);
+            ku_n = put_bytes(&mut ku_mk, ku_n, b" kill=");
+            ku_n = put_dec(&mut ku_mk, ku_n, posted);
+            ku_n = put_bytes(&mut ku_mk, ku_n, b" ws=");
+            ku_n = put_dec(&mut ku_mk, ku_n, ws.map_or(-1, |w| w as i64));
+            ku_n = put_bytes(&mut ku_mk, ku_n, b"\n");
+        }
+    }
+    leg!(rep, ku_n == 0, &ku_mk[..ku_n]);
+
+    // --- L339-L343: tgkill reaches exactly the thread it names ---------------
+    //
+    // ARCH 7.6.4 (operator vote 5, 2026-10-21). A peer blocks in ppoll with
+    // SIGTERM open in both threads. L339: the setup. L340: tgkill(pid, peer) runs
+    // the handler once, on the peer, and its ppoll reads EINTR; a process-directed
+    // post runs it on this thread instead, at the tail of the tgkill itself, and
+    // the peer's wait never moves. L341: this thread's own ppolls across that all
+    // ran their full time. L342: this thread blocks SIGTERM and tgkills itself:
+    // the open, blocked peer must leave it alone, and unblocking runs the handler
+    // here. L343: in a child with no handler, tgkill at a peer blocked in ppoll
+    // ends the group with SIGTERM while the caller, which blocks it, sleeps.
+    const TD_LONG_NS: i64 = 200_000_000;
+    let mut td_pp: [i32; 2] = [-1, -1];
+    let td_pipe = svc3(NR_PIPE2, td_pp.as_mut_ptr() as u64, 0, 0) == 0;
+    ksa = [nt_sig_handler as usize as u64, SA_RESTORER | SA_SIGINFO, restorer_addr(), 0];
+    let td_act = svc4(NR_RT_SIGACTION, SIGTERM, &ksa as *const u64 as u64, 0, 8) == 0;
+    let td_un = 1u64 << (SIGTERM - 1);
+    let mut td_old = 0u64;
+    let td_mask = svc4(NR_RT_SIGPROCMASK, SIG_UNBLOCK, &td_un as *const u64 as u64,
+                       &mut td_old as *mut u64 as u64, 8) == 0;
+    NT_POLL_FD.store(td_pp[0] as u32, Ordering::SeqCst);
+    NT_ENTERED.store(0, Ordering::SeqCst);
+    NT_RESULT.store(NP5_UNSET, Ordering::SeqCst);
+    NT_REVENTS.store(0, Ordering::SeqCst);
+    NT_INTRS.store(0, Ordering::SeqCst);
+    NT_FIRED.store(0, Ordering::SeqCst);
+    NT_TP.store(NT_NO_TP, Ordering::SeqCst);
+    CTID_WORD.store(CTID_ARMED, Ordering::SeqCst);
+    let td_tls = core::ptr::addr_of!(THREAD_TLS_AREA) as u64;
+    let td_peer = if td_pipe {
+        __viv_clone_thread(
+            nt_poller_main,
+            core::ptr::addr_of!(THREAD_STACK) as u64 + (16 * 1024),
+            CLONE_FLAGS_THREAD,
+            0,
+            core::ptr::addr_of!(PTID_WORD) as u64,
+            td_tls,
+            core::ptr::addr_of!(CTID_WORD) as u64,
+        )
+    } else {
+        -1
+    };
+    let td_entered = td_peer > 0 && futex_wait_until_ne(core::ptr::addr_of!(NT_ENTERED), 0, 8);
+    let td_settle: [i64; 2] = [0, 300_000_000];
+    let _ = svc6(NR_PPOLL, 0, 0, td_settle.as_ptr() as u64, 0, 8, 0);
+
+    let td_pid = svc3(NR_GETPID, 0, 0, 0);
+    let td_self = svc3(NR_GETTID, 0, 0, 0);
+    let td_main_tp = nt_tp();
+    let td_rc = svc3(NR_TGKILL, td_pid as u64, td_peer as u64, SIGTERM);
+    // Each nap is a wait a note taken here would end in EINTR.
+    let td_nap: [i64; 2] = [0, 50_000_000];
+    let mut td_main_intrs = 0i64;
+    let mut td_naps = 0u32;
+    while NT_FIRED.load(Ordering::SeqCst) == 0 && td_naps < 80 {
+        if svc6(NR_PPOLL, 0, 0, td_nap.as_ptr() as u64, 0, 8, 0) == -4 {
+            td_main_intrs += 1;
+        }
+        td_naps += 1;
+    }
+    let td_full: [i64; 2] = [0, TD_LONG_NS];
+    let td_main_r = svc6(NR_PPOLL, 0, 0, td_full.as_ptr() as u64, 0, 8, 0);
+    let td_fired1 = NT_FIRED.load(Ordering::SeqCst);
+    let td_on_peer = NT_TP.load(Ordering::SeqCst) == td_tls;
+
+    NT_TP.store(NT_NO_TP, Ordering::SeqCst);
+    let td_blocked = svc4(NR_RT_SIGPROCMASK, SIG_BLOCK, &td_un as *const u64 as u64, 0, 8) == 0;
+    let td_rc2 = svc3(NR_TGKILL, td_pid as u64, td_self as u64, SIGTERM);
+    let _ = svc6(NR_PPOLL, 0, 0, td_full.as_ptr() as u64, 0, 8, 0);
+    let td_held = NT_FIRED.load(Ordering::SeqCst) - td_fired1;
+    let _ = svc4(NR_RT_SIGPROCMASK, SIG_UNBLOCK, &td_un as *const u64 as u64, 0, 8);
+    let td_after = NT_FIRED.load(Ordering::SeqCst) - td_fired1;
+    let td_on_main = NT_TP.load(Ordering::SeqCst) == td_main_tp;
+
+    let td_one = [b'x'];
+    let td_wrote = td_pipe && svc3(NR_WRITE, td_pp[1] as u64, td_one.as_ptr() as u64, 1) == 1;
+    let td_joined = td_entered
+        && futex_wait_until_ne(core::ptr::addr_of!(CTID_WORD), CTID_ARMED, 8)
+        && CTID_WORD.load(Ordering::SeqCst) == 0;
+    let td_r = NT_RESULT.load(Ordering::SeqCst) as i64;
+    let td_intrs = NT_INTRS.load(Ordering::SeqCst);
+
+    // Drained first, so a child inheriting this pipe polls an empty one.
+    let mut td_drain = [0u8; 1];
+    let _ = svc3(NR_READ, td_pp[0] as u64, td_drain.as_mut_ptr() as u64, 1);
+    let td_kid = svc6(NR_CLONE, SIGCHLD, 0, 0, 0, 0, 0);
+    if td_kid == 0 {
+        ksa = [SIG_DFL, 0, 0, 0];
+        let _ = svc4(NR_RT_SIGACTION, SIGTERM, &ksa as *const u64 as u64, 0, 8);
+        NT_ENTERED.store(0, Ordering::SeqCst);
+        CTID_WORD.store(CTID_ARMED, Ordering::SeqCst);
+        let kp = __viv_clone_thread(
+            nt_poller_main,
+            core::ptr::addr_of!(THREAD_STACK) as u64 + (16 * 1024),
+            CLONE_FLAGS_THREAD,
+            0,
+            core::ptr::addr_of!(PTID_WORD) as u64,
+            td_tls,
+            core::ptr::addr_of!(CTID_WORD) as u64,
+        );
+        if kp <= 0 || !futex_wait_until_ne(core::ptr::addr_of!(NT_ENTERED), 0, 8) {
+            linux_exit(3)
+        }
+        let _ = svc6(NR_PPOLL, 0, 0, td_settle.as_ptr() as u64, 0, 8, 0);
+        if svc4(NR_RT_SIGPROCMASK, SIG_BLOCK, &td_un as *const u64 as u64, 0, 8) != 0 {
+            linux_exit(4)
+        }
+        if svc3(NR_TGKILL, svc3(NR_GETPID, 0, 0, 0) as u64, kp as u64, SIGTERM) != 0 {
+            linux_exit(5)
+        }
+        let td_hold: [i64; 2] = [5, 0];
+        let _ = svc6(NR_PPOLL, 0, 0, td_hold.as_ptr() as u64, 0, 8, 0);
+        linux_exit(6)
+    }
+    let mut td_ws: i32 = -1;
+    let td_reaped = td_kid > 0
+        && wait4_r(td_kid as u64, &mut td_ws as *mut i32 as u64, 0) == td_kid;
+
+    ksa = [SIG_DFL, 0, 0, 0];
+    let _ = svc4(NR_RT_SIGACTION, SIGTERM, &ksa as *const u64 as u64, 0, 8);
+    if td_mask {
+        let _ = svc4(NR_RT_SIGPROCMASK, NT_SIG_SETMASK, &td_old as *const u64 as u64, 0, 8);
+    }
+    if td_pipe {
+        svc3(NR_CLOSE, td_pp[0] as u64, 0, 0);
+        svc3(NR_CLOSE, td_pp[1] as u64, 0, 0);
+    }
+    leg!(
+        rep,
+        td_pipe && td_act && td_mask && td_entered && td_wrote && td_joined && td_blocked
+            && td_main_tp != td_tls && td_rc == 0 && td_rc2 == 0 && td_kid > 0,
+        b"L339\n"
+    );
+    let mut td_mk = [0u8; 160];
+    let mut tn = 0usize;
+    if !(td_fired1 == 1 && td_on_peer && td_intrs == 1 && td_r == 1) {
+        tn = put_bytes(&mut td_mk, 0, b"L340 fired=");
+    } else if !(td_main_intrs == 0 && td_main_r == 0) {
+        tn = put_bytes(&mut td_mk, 0, b"L341 fired=");
+    } else if !(td_held == 0 && td_after == 1 && td_on_main) {
+        tn = put_bytes(&mut td_mk, 0, b"L342 fired=");
+    } else if !(td_reaped && td_ws & 0x7f == SIGTERM as i32) {
+        tn = put_bytes(&mut td_mk, 0, b"L343 fired=");
+    }
+    if tn > 0 {
+        tn = put_dec(&mut td_mk, tn, td_fired1 as i64);
+        tn = put_bytes(&mut td_mk, tn, b" on_peer=");
+        tn = put_dec(&mut td_mk, tn, td_on_peer as i64);
+        tn = put_bytes(&mut td_mk, tn, b" intrs=");
+        tn = put_dec(&mut td_mk, tn, td_intrs as i64);
+        tn = put_bytes(&mut td_mk, tn, b" r=");
+        tn = put_dec(&mut td_mk, tn, td_r);
+        tn = put_bytes(&mut td_mk, tn, b" main=");
+        tn = put_dec(&mut td_mk, tn, td_main_intrs);
+        tn = put_bytes(&mut td_mk, tn, b"/");
+        tn = put_dec(&mut td_mk, tn, td_main_r);
+        tn = put_bytes(&mut td_mk, tn, b" held=");
+        tn = put_dec(&mut td_mk, tn, td_held as i64);
+        tn = put_bytes(&mut td_mk, tn, b" after=");
+        tn = put_dec(&mut td_mk, tn, td_after as i64);
+        tn = put_bytes(&mut td_mk, tn, b" on_main=");
+        tn = put_dec(&mut td_mk, tn, td_on_main as i64);
+        tn = put_bytes(&mut td_mk, tn, b" ws=");
+        tn = put_dec(&mut td_mk, tn, td_ws as i64);
+        tn = put_bytes(&mut td_mk, tn, b"\n");
+    }
+    leg!(rep, tn == 0, &td_mk[..tn]);
 
     // --- the verdict, which is also the write leg ---------------------------
     // Linux write(64) puts these bytes in the file; joey reads them from its

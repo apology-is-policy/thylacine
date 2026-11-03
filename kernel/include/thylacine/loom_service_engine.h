@@ -23,8 +23,8 @@ struct loom_service_engine {
     bool submitting, rejected;
     struct ProcSqpollTicket worker_ticket;
     bool worker_starting; // Ll serializes unpublished internal start attempts
-    // Single wait owner, retained entry pins and embedded native hooks fit the
-    // already charged index page. Only that owner touches the wait fields.
+    // Single wait owner, retained entry pins and embedded native hooks, charged
+    // with the index by its buddy footprint. Only that owner touches the wait fields.
     // change is atomic: the Rendez predicate NEVER takes Ll (lock inversion).
     u64 change, wait_change, wait_mask, wait_deadline;
     u32 wait_cq_head;

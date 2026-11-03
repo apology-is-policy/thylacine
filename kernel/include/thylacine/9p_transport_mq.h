@@ -50,6 +50,9 @@ struct p9_mq_loopback {
     // recv_ready's hooks, walked after every reply appended and at close. An
     // empty FIFO models a real transport's blocking recv: not ready.
     struct poll_waiter_list ready_list;
+    // ready_list's walk, owed past the client's lock that send and close run
+    // under (poll.h); destroy awaits it.
+    struct poll_deferred    ready_owed;
     // Back-pressure knob (#349 regression). A test sets it to K, through
     // p9_mq_loopback_set_eagain_budget, to make
     // the next K send calls return P9_TRANSPORT_EAGAIN (a transiently-full-but-ALIVE

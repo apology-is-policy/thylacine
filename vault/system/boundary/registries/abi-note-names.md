@@ -17,8 +17,10 @@ mirrors:
   - "usr/lib/pouch/patches/0049-pouch-sigterm-term-note.patch: SIGTERM -> term, POUCH_NOTE_BIT_TERM; raise/kill of self with SIGABRT -> abort()"
   - "kernel/vivarium.c: viv_signal_note / viv_notebit_map (the Linux phenotype's mirror, SIGTERM -> term)"
   - "usr/lib/pouch/patches/0050-pouch-self-fault-signals-errnos.patch: raise/kill of self with SIGSEGV, SIGBUS, SIGILL or SIGFPE -> the snare:* self-post; kill's EACCES -> EPERM"
+  - "usr/lib/pouch/patches/0067-pouch-thread-directed-kill.patch: pthread_kill of any signal, and raise -> SYS_postnote_tid; pthread_kill with SIGABRT -> snare:abort"
+  - "usr/lib/pouch/patches/0068-pouch-usr-notes.patch: SIGUSR1 -> usr1, SIGUSR2 -> usr2, POUCH_NOTE_BIT_USR1 and POUCH_NOTE_BIT_USR2, the sigset map and the dispatcher"
 created: 2026-08-02
-updated: 2026-10-27
+updated: 2026-11-02
 ---
 ## The surface
 
@@ -27,7 +29,7 @@ Names are strings, not numbers — the Plan 9 model — bounded by
 `NOTE_NAME_MAX = 16` bytes including the NUL.
 
 `g_known_notes[]` in `kernel/notes.c` is the authoritative set: a name not in
-it is refused at post. Ten names are deliverable, in classes that differ by
+it is refused at post. Thirteen names are deliverable, in classes that differ by
 **who may post** and **what an uncaught one does**: the open class, the `tty:`
 class and `sak` (all below). The table also records, per name, the POSIX signal
 a death by that note reports to a packed wait (gcpark-b; "The death signal"
@@ -39,6 +41,8 @@ below).
 |---|---|---|
 | `interrupt` | 0 | **terminate** (LS-5) |
 | `term` | 0 | **terminate** (SIGTERM's; registered 2026-10-13, [[dec-2026-10-13-term-note]]) |
+| `usr1` | 0 | **terminate** (SIGUSR1's; registered 2026-11-02, operator vote) |
+| `usr2` | 0 | **terminate** (SIGUSR2's; registered 2026-11-02, operator vote) |
 | `kill` | 0 | terminate — **non-catchable**, bypasses mask and handler |
 | `pipe` | 0 | **terminate** (SIGPIPE's default; a write to a reader-less pipe posts it) |
 | `child_exit` | packed pid + status | none (informational) |
@@ -159,8 +163,8 @@ per-Proc, so a multi-thread Proc can route different notes to different
 threads.
 
 `INTERRUPT` 0 · `KILL` 1 · `PIPE` 2 · `CHILD_EXIT` 3 · `SNARE` 4 · `TTY` 5 ·
-`SAK` 6 · `TERM` 7, with `NOTE_MASK_SUPPORTED = 0xff` (0x3f until `sak`, 0x7f
-until `term`).
+`SAK` 6 · `TERM` 7 · `USR1` 8 · `USR2` 9, with `NOTE_MASK_SUPPORTED = 0x3ff` (0x3f
+until `sak`, 0x7f until `term`, 0xff until `usr1`).
 
 Two bits cover **families**, one bit each: masking `NOTE_BIT_TTY` defers all
 five tty names, and `NOTE_BIT_SNARE` would defer all eight snare names.
@@ -183,6 +187,8 @@ are Linux's aarch64 ones so both boundary-lines pass them through:
 |---|---|
 | `interrupt` | SIGINT 2 |
 | `term` | SIGTERM 15 |
+| `usr1` | SIGUSR1 10 |
+| `usr2` | SIGUSR2 12 |
 | `kill` | SIGKILL 9 |
 | `pipe` | SIGPIPE 13 |
 | `tty:quit` | SIGQUIT 3 |
@@ -218,20 +224,22 @@ bits are tolerated rather than validated.
 `sys_postnote_handler` described "the v1.0 supported set" as
 `"interrupt"/"kill"/"pipe"/"child_exit"` until 2026-10-13, when `term` made
 that list wrong as "what this path accepts" too; the comment now points at
-`g_known_notes` and names no set. The deliverable set is eleven names; the
-userspace-postable subset is the open class's five, since the other six are
+`g_known_notes` and names no set. The deliverable set is thirteen names; the
+userspace-postable subset is the open class's seven, since the other six are
 gated (the `tty:` prefix and `sak`'s exact name).
 
 ## The POSIX mapping, and what it loses
 
-`__pouch_sig_to_note` is the mirror, split across two boundary-line patches:
-the open class in `0007-pouch-signals.patch`, the tty class in
-`0021-pouch-pty.patch`.
+`__pouch_sig_to_note` is the mirror, split across boundary-line patches: the
+open class in `0007-pouch-signals.patch`, the tty class in
+`0021-pouch-pty.patch`, `term` in `0049` and `usr1` and `usr2` in `0068`.
 
 | signal | note | note |
 |---|---|---|
 | SIGINT | `interrupt` | catchable |
 | SIGTERM | `term` | catchable; its own note since 0049 (2026-10-13) |
+| SIGUSR1 | `usr1` | catchable; its own note since 0068 (2026-11-02) |
+| SIGUSR2 | `usr2` | catchable; its own note since 0068 (2026-11-02) |
 | SIGPIPE | `pipe` | pouch masks it at startup |
 | SIGCHLD | `child_exit` | default ignore |
 | SIGKILL | `kill` | non-catchable; `sigaction()` returns `EINVAL` |

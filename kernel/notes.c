@@ -5,7 +5,8 @@
 // the async-handler path is a parallel consumer; mutual exclusion across
 // the two paths is enforced by the queue lock.
 //
-// Mechanism — the queue is a fixed-size ring of NOTE_QUEUE_DEPTH entries.
+// Mechanism — the queue is a fixed-size ring of NOTE_RING_SLOTS entries, of which
+// a post may fill NOTE_QUEUE_DEPTH.
 // notes_post enqueues (under lock); the EL0-return-tail dispatch and
 // devnotes_read each dequeue (under lock). When the queue becomes non-
 // empty, the post path wakes the devnotes_read Rendez AND walks the
@@ -47,9 +48,8 @@
 // dispatch uses to recognize the non-catchable note (N-4).
 //
 // We accept input names ONLY from the closed v1.0 set. SYS_POSTNOTE rejects
-// anything else with -EINVAL (per ARCH §7.6.5 — alarm/hangup/usr1/usr2/
-// stop/cont are deferred); kernel-synthetic posters only call with the
-// known names (child_exit, pipe).
+// anything else with -EINVAL (per ARCH §7.6.5; `alarm` has no note yet);
+// kernel-synthetic posters only call with the known names (child_exit, pipe).
 
 // #15: `dfl` is the third column. notes_default_action (the NDFLT arm) and
 // notes_name_terminate_latch (the EL0-tail uncaught TERMINATE arm) both read
@@ -89,6 +89,10 @@ static const struct note_name_entry g_known_notes[] = {
     // as `interrupt`, so a death by it read back as SIGINT and a Proc could not
     // ignore Ctrl-C without ignoring SIGTERM too. Userspace-postable.
     { NOTE_NAME_TERM, NOTE_BIT_TERM,     NOTE_DFL_TERMINATE, NOTE_SIG_TERM },
+    // SIGUSR1's and SIGUSR2's (operator vote 2026-11-02): a program's own, and
+    // terminating until it says otherwise, as POSIX has them.
+    { NOTE_NAME_USR1, NOTE_BIT_USR1,     NOTE_DFL_TERMINATE, NOTE_SIG_USR1 },
+    { NOTE_NAME_USR2, NOTE_BIT_USR2,     NOTE_DFL_TERMINATE, NOTE_SIG_USR2 },
     // SIGCHLD's POSIX default is ignore. Before #15 an NDFLT from a
     // child_exit handler killed the Proc; pouch worked around the kernel by
     // spelling this default NCONT instead (patches 0007/0021), which is why
@@ -146,7 +150,8 @@ _Static_assert(NOTE_SIG_HUP  == VIV_SIGHUP  && NOTE_SIG_INT  == VIV_SIGINT  &&
                NOTE_SIG_ABRT == VIV_SIGABRT && NOTE_SIG_BUS  == VIV_SIGBUS  &&
                NOTE_SIG_FPE  == VIV_SIGFPE  && NOTE_SIG_KILL == VIV_SIGKILL &&
                NOTE_SIG_SEGV == VIV_SIGSEGV && NOTE_SIG_PIPE == VIV_SIGPIPE &&
-               NOTE_SIG_TERM == VIV_SIGTERM,
+               NOTE_SIG_TERM == VIV_SIGTERM && NOTE_SIG_USR1 == VIV_SIGUSR1 &&
+               NOTE_SIG_USR2 == VIV_SIGUSR2,
                "NOTE_SIG_* must be the Linux aarch64 numbers vivarium.h names");
 
 // strncmp-style name compare bounded by NOTE_NAME_MAX (so we don't read
@@ -322,13 +327,14 @@ static void notes_queue_init(struct NoteQueue *q) {
     q->tail = 0;
     q->count = 0;
     q->_pad = 0;
-    for (u32 i = 0; i < NOTE_QUEUE_DEPTH; i++) {
+    for (u32 i = 0; i < NOTE_RING_SLOTS; i++) {
         for (u32 j = 0; j < NOTE_NAME_MAX; j++) q->ring[i].name[j] = 0;
         q->ring[i].arg = 0;
         q->ring[i].sender_pid = 0;
         q->ring[i].timestamp_ns = 0;
     }
     poll_waiter_list_init(&q->poll_list);
+    poll_owed_init(&q->owed, &q->poll_list);
 }
 
 struct NoteQueue *notes_queue_alloc(void) {
@@ -341,9 +347,10 @@ struct NoteQueue *notes_queue_alloc(void) {
 void notes_queue_free(struct NoteQueue *q) {
     if (!q) return;
     // Defense-in-depth: at free time the queue MUST be quiescent — no
-    // registered poll_waiter. proc_free's calling sequence guarantees
-    // this (ZOMBIE state set, all Threads EXITING, handles closed); a
-    // violation here would be a serious lifecycle bug.
+    // registered poll_waiter and no walk's bookmark. proc_free's calling
+    // sequence guarantees this (ZOMBIE state set, all Threads EXITING,
+    // handles closed, the bookmarks waited out); a violation here would
+    // be a serious lifecycle bug.
     if (q->poll_list.head != NULL) {
         extinction("notes_queue_free: poll_waiter still registered on "
                    "q->poll_list (poll caller leaked a hook?)");
@@ -366,7 +373,7 @@ static int notes_find_locked(struct NoteQueue *q, const char *name,
             notes_name_eq(q->ring[idx].name, name)) {
             return (int)idx;
         }
-        idx = (idx + 1) % NOTE_QUEUE_DEPTH;
+        idx = (idx + 1) % NOTE_RING_SLOTS;
     }
     return -1;
 }
@@ -445,6 +452,10 @@ static u32 notes_name_terminate_latch(const char *name) {
         return PROC_FLAG_PIPE_TERMINATE_PENDING;
     if (bit == (int)NOTE_BIT_TERM)
         return PROC_FLAG_TERM_TERMINATE_PENDING;
+    if (bit == (int)NOTE_BIT_USR1)
+        return PROC_FLAG_USR1_TERMINATE_PENDING;
+    if (bit == (int)NOTE_BIT_USR2)
+        return PROC_FLAG_USR2_TERMINATE_PENDING;
     return 0;
 }
 
@@ -544,6 +555,10 @@ _Static_assert((NOTE_MASK_SUPPORTED << CAUGHT_CLAIM_SHIFT) == CAUGHT_CLAIM_MASK,
 // that did not fit Thread.note_claim would be claimed in note_caught forever.
 _Static_assert(((u64)NOTE_MASK_SUPPORTED >> (8u * sizeof(((struct Thread *)0)->note_claim))) == 0,
                "ARCH 8.8.3: Thread.note_claim must hold every supported note family");
+_Static_assert(((u64)NOTE_MASK_SUPPORTED >> (8u * sizeof(((struct Thread *)0)->note_direct))) == 0,
+               "ARCH 7.6.4: Thread.note_direct must hold every supported note family");
+_Static_assert(((u64)NOTE_MASK_SUPPORTED >> (8u * sizeof(((struct Thread *)0)->note_target))) == 0,
+               "ARCH 8.8.3: Thread.note_target must hold every supported note family");
 
 // item 11 (ARCH 8.8.3): the CAUGHT-note twin of the terminate arm above -- its
 // EXACT COMPLEMENT. The terminate arm REFUSES when a live handler exists OR the
@@ -564,8 +579,7 @@ static void notes_arm_caught_note_locked(struct Proc *p, const char *name) {
     if (bit < 0 || bit == (int)NOTE_BIT_KILL) return;
     if (!notes_proc_has_live_handler(p, name) && !proc_is_self_managing_notes(p))
         return;
-    __atomic_or_fetch(&p->note_caught,
-                      (u16)(1u << (CAUGHT_LATCH_SHIFT + (u32)bit)),
+    __atomic_or_fetch(&p->note_caught, 1u << (CAUGHT_LATCH_SHIFT + (u32)bit),
                       __ATOMIC_RELEASE);
 }
 
@@ -605,7 +619,7 @@ static void notes_drain_intr_locked(struct Proc *p, struct NoteQueue *q,
     for (u32 n = 0; n < q->count; n++) {
         if (notes_name_terminate_latch(q->ring[idx].name) == latch)
             return;             // another same-class note remains queued
-        idx = (idx + 1) % NOTE_QUEUE_DEPTH;
+        idx = (idx + 1) % NOTE_RING_SLOTS;
     }
     __atomic_and_fetch(&p->proc_flags, ~latch, __ATOMIC_RELEASE);
 }
@@ -621,18 +635,94 @@ static void notes_drain_caught_note_locked(struct Proc *p, struct NoteQueue *q,
                                            const struct Note *popped) {
     int bit = notes_name_to_bit(popped->name);
     if (bit < 0 || bit == (int)NOTE_BIT_KILL) return;
-    u16 fambit = (u16)(1u << (CAUGHT_LATCH_SHIFT + (u32)bit));
+    u32 fambit = 1u << (CAUGHT_LATCH_SHIFT + (u32)bit);
     u32 idx = q->head;
     for (u32 n = 0; n < q->count; n++) {
         if (notes_name_to_bit(q->ring[idx].name) == bit)
             return;             // another same-family note remains queued
-        idx = (idx + 1) % NOTE_QUEUE_DEPTH;
+        idx = (idx + 1) % NOTE_RING_SLOTS;
     }
     // The family's unwind claim is not cleared here: it belongs to the thread
     // that took it and ends at that thread's EL0-return tail (notes_release_-
     // claims). A sleeper's claim CAS that raced this drain fails on the changed
     // word, so no claim is taken for a family with nothing queued.
-    __atomic_and_fetch(&p->note_caught, (u16)~fambit, __ATOMIC_RELEASE);
+    __atomic_and_fetch(&p->note_caught, ~fambit, __ATOMIC_RELEASE);
+}
+
+// ---------------------------------------------------------------------------
+// Thread-directed notes (ARCH 7.6.4, specs/caught_target.tla).
+// ---------------------------------------------------------------------------
+//
+// A word beside the queue, one bit per family. A bit can stand for one name only
+// because every name a program may post owns its family: the tty rows share a
+// bit, and they are the line discipline's to post. notes.direct_names_own_their_-
+// family walks the table to keep that true. `kill` never lands here: it ends the
+// group wherever it is aimed.
+
+int notes_direct_bit(const char *name) {
+    if (!notes_name_user_postable(name) || notes_name_is_kill(name)) return -1;
+    return notes_name_to_bit(name);
+}
+
+static const char *notes_direct_name(u32 bit) {
+    for (u32 i = 0; i < NOTE_NUM_KNOWN; i++) {
+        if (g_known_notes[i].bit == bit && notes_direct_bit(g_known_notes[i].name) >= 0)
+            return g_known_notes[i].name;
+    }
+    return NULL;
+}
+
+// The families on `t`'s word that its mask admits. Owner-read of note_mask, as
+// at every caller. A word load decides the common case on every sleep and tail.
+static u32 notes_direct_unmasked(const struct Thread *t) {
+    return (u32)__atomic_load_n(&t->note_direct, __ATOMIC_ACQUIRE) &
+           ~(u32)t->note_mask & NOTE_MASK_SUPPORTED;
+}
+
+bool notes_direct_is_fatal(struct Proc *p, const char *name) {
+    return notes_default_action(name) == NOTE_DFL_TERMINATE &&
+           __atomic_load_n(&p->handler_va, __ATOMIC_ACQUIRE) == 0 &&
+           !proc_is_self_managing_notes(p) &&
+           notes_proc_default_applies(p, name);
+}
+
+bool notes_direct_ignored(struct Proc *p, const char *name) {
+    if (p->phenotype != PHENO_LINUX) return false;
+    const struct viv_sigtab *tab = __atomic_load_n(&p->sigtab, __ATOMIC_ACQUIRE);
+    return viv_sigtab_note_ignored(tab, viv_signote_from_note_name(name));
+}
+
+// The note on `t`'s word that would end the Proc at this thread's tail, or NULL.
+// The disposition is read now, not latched at the post: exec and SYS_NOTIFY(0)
+// can make a caught note fatal while it waits behind a mask.
+static const char *notes_direct_fatal_name(struct Proc *p, const struct Thread *t) {
+    u32 d = notes_direct_unmasked(t);
+    for (; d; d &= d - 1u) {
+        const char *name = notes_direct_name((u32)__builtin_ctz(d));
+        if (name && notes_direct_is_fatal(p, name)) return name;
+    }
+    return NULL;
+}
+
+// A note on `t`'s word that a handler will run. It unwinds a wait with no claim:
+// the claim keeps a note many threads could take to one sleeper, and this one has
+// one taker. The bit stays until the tail, so a 9P call that carries on after a
+// lost flush reads it again and unwinds again, as a claim holder does.
+static bool notes_direct_caught(struct Proc *p, const struct Thread *t) {
+    u32 d = notes_direct_unmasked(t);
+    for (; d; d &= d - 1u) {
+        const char *name = notes_direct_name((u32)__builtin_ctz(d));
+        if (name && notes_proc_has_live_handler(p, name)) return true;
+    }
+    return false;
+}
+
+static void notes_direct_fill(struct Note *out, u32 bit) {
+    const char *name = notes_direct_name(bit);
+    notes_name_copy(out->name, name ? name : "");
+    out->arg = 0;
+    out->sender_pid = 0;
+    out->timestamp_ns = 0;
 }
 
 int notes_post(struct Proc *p, const char *name, u32 arg,
@@ -732,10 +822,10 @@ int notes_post(struct Proc *p, const char *name, u32 arg,
             // disposition too (a handler may have been installed since the
             // original post declined to arm it).
             notes_arm_caught_note_locked(p, name);
-            // Wake registered poll_waiters AND devnotes_read's pollers
-            // (same list at F3 close).
-            poll_waiter_list_wake(&q->poll_list);
             spin_unlock(&q->lock);
+            // Wake registered poll_waiters AND devnotes_read's pollers
+            // (same list at F3 close), as the enqueue below does.
+            proc_wake_or_owe(&q->owed);
             return 0;
         }
     }
@@ -752,7 +842,7 @@ int notes_post(struct Proc *p, const char *name, u32 arg,
     q->ring[idx].arg = arg;
     q->ring[idx].sender_pid = sender_pid;
     q->ring[idx].timestamp_ns = ts;
-    q->tail = (q->tail + 1) % NOTE_QUEUE_DEPTH;
+    q->tail = (q->tail + 1) % NOTE_RING_SLOTS;
     q->count++;
 
     // LS-5c (P3-terminate): a freshly-enqueued `interrupt` whose disposition
@@ -772,44 +862,70 @@ int notes_post(struct Proc *p, const char *name, u32 arg,
     // item 11 (ARCH 8.8.3): the CAUGHT-note twin -- arms a family bit iff the
     // committed note is caught (handler or self-managing). Same "arm on COMMIT"
     // ordering as the STOP twin. The wake of ALREADY-blocked peers is likewise
-    // the caller's duty (proc_caught_note_wake, needs g_proc_table_lock); a
+    // the caller's duty (proc_caught_note_wake); a
     // not-yet-sleeping thread reads this latch at its own register-then-observe.
     notes_arm_caught_note_locked(p, name);
 
-    // Wake every registered poll_waiter (including any devnotes_read
-    // parked on this list per F3 close) BEFORE we drop the queue lock.
-    // The register-then-observe discipline requires that any concurrent
-    // dev->poll's sample either happens-before our enqueue (and sees
-    // empty; the subsequent post wakes it) or after (and sees the new
-    // entry). poll_waiter_list_wake takes its own lock per the documented
-    // lock order (object → list).
-    poll_waiter_list_wake(&q->poll_list);
-
     spin_unlock(&q->lock);
+
+    // Wake every registered poll_waiter (including any devnotes_read
+    // parked on this list per F3 close) AFTER the enqueue is visible:
+    // a concurrent dev->poll registers and samples under q->lock, so it
+    // either sampled before our enqueue (and its hook is listed now) or
+    // after (and saw the entry) -- the poll.h contract is an order, not
+    // a lock. Unlocked, so the walk masks nothing; a poster holding
+    // g_proc_table_lock (most of them) owes it to the lock's release,
+    // which keeps `p` alive through it (proc_wake_or_owe).
+    proc_wake_or_owe(&q->owed);
     return 0;
 }
 
-// F5/F6 audit close: re-enqueue at head. Caller MUST hold q->lock.
-// Cannot fail at v1.0 since the caller just popped (so there is a free
-// slot). Pre-decrement head with wrap; the new entry is the next dequeue.
+// F5/F6 audit close: re-enqueue at head. Caller MUST hold q->lock, and
+// wakes q's hooks once it drops it (proc_wake_or_owe(&q->owed)): the
+// queue's readiness is back where the pop found it, but a consumer that
+// sampled the queue between a pop and this push in a separate hold may
+// have registered and parked. Cannot fail at v1.0 since the caller just
+// popped (so there is a free slot). Pre-decrement head with wrap; the new
+// entry is the next dequeue.
 VISIBLE_IF_KERNEL_TESTS
 int notes_reenqueue_head_locked(struct NoteQueue *q, const struct Note *n) {
     if (!q || !n) return -1;
-    if (q->count >= NOTE_QUEUE_DEPTH) {
+    if (q->count >= NOTE_RING_SLOTS) {
         // Should be unreachable for the caller pattern (just popped).
         // Defense-in-depth: refuse.
         return -1;
     }
     // Decrement head with modulo wrap.
-    q->head = (q->head + NOTE_QUEUE_DEPTH - 1) % NOTE_QUEUE_DEPTH;
+    q->head = (q->head + NOTE_RING_SLOTS - 1) % NOTE_RING_SLOTS;
     q->ring[q->head] = *n;
     q->count++;
-    // Caller has not changed the readiness state of the queue (a note
-    // popped and re-pushed is back where it started); we wake regardless
-    // so any consumer that was about to register-and-sleep finds the
-    // queue non-empty.
-    poll_waiter_list_wake(&q->poll_list);
     return 0;
+}
+
+_Static_assert(__builtin_popcount(NOTE_MASK_SUPPORTED) <= NOTE_RING_SPARE,
+               "ARCH 7.6.4: one spare ring slot per note family");
+
+// A note whose direct post already answered 0 joins the queue. It cannot be
+// refused, so past the depth it coalesces with a queued note of its name or takes
+// a spare slot. Spare slots always suffice: only this fills past the depth, each
+// time with a name not then queued at sender 0, so a full ring holds
+// NOTE_RING_SPARE distinct such names, which is every family, this one included.
+// Losing one would be a note its poster was told 0 for: N-2, as kill's re-enqueue.
+// The caller wakes q's hooks once it drops q->lock.
+static void notes_move_to_queue_locked(struct Proc *p, const char *name) {
+    struct NoteQueue *q = p->notes;
+    if (q->count < NOTE_QUEUE_DEPTH || notes_find_locked(q, name, 0u) < 0) {
+        if (q->count >= NOTE_RING_SLOTS)
+            extinction("notes_move_to_queue_locked: no spare slot -- N-2 violation");
+        u32 idx = q->tail;
+        notes_name_copy(q->ring[idx].name, name);
+        q->ring[idx].arg = 0;
+        q->ring[idx].sender_pid = 0;
+        q->ring[idx].timestamp_ns = timer_now_ns();
+        q->tail = (q->tail + 1) % NOTE_RING_SLOTS;
+        q->count++;
+    }
+    notes_arm_caught_note_locked(p, name);
 }
 
 int notes_peek_locked(struct Proc *p, struct Thread *t, struct Note *out) {
@@ -828,7 +944,7 @@ int notes_peek_locked(struct Proc *p, struct Thread *t, struct Note *out) {
                 *out = q->ring[idx];
                 return 1;
             }
-            idx = (idx + 1) % NOTE_QUEUE_DEPTH;
+            idx = (idx + 1) % NOTE_RING_SLOTS;
         }
     }
 
@@ -842,36 +958,36 @@ int notes_peek_locked(struct Proc *p, struct Thread *t, struct Note *out) {
                 *out = q->ring[idx];
                 return 1;
             }
-            idx = (idx + 1) % NOTE_QUEUE_DEPTH;
+            idx = (idx + 1) % NOTE_RING_SLOTS;
         }
     }
     return 0;
 }
 
 // Pop the entry at `idx` from a ring of count `n` starting at head `head`.
-// `idx` is an absolute ring index in [0, NOTE_QUEUE_DEPTH). Updates head/
+// `idx` is an absolute ring index in [0, NOTE_RING_SLOTS). Updates head/
 // tail/count + shifts intermediate entries to preserve N-1 ordering.
 static void notes_pop_at_locked(struct NoteQueue *q, u32 idx) {
     // Compute the entry's offset from head (0..count-1).
-    u32 off = (idx + NOTE_QUEUE_DEPTH - q->head) % NOTE_QUEUE_DEPTH;
+    u32 off = (idx + NOTE_RING_SLOTS - q->head) % NOTE_RING_SLOTS;
     // Shift down: each subsequent entry moves one slot toward head.
     // Iterate from `idx` forward (count - off - 1) times.
     u32 cur = idx;
     for (u32 i = off; i + 1 < q->count; i++) {
-        u32 next = (cur + 1) % NOTE_QUEUE_DEPTH;
+        u32 next = (cur + 1) % NOTE_RING_SLOTS;
         q->ring[cur] = q->ring[next];
         cur = next;
     }
     // Zero the now-empty tail slot (defense-in-depth: dirty entries
     // can't leak into a peek/dequeue).
-    u32 last = (q->head + q->count - 1) % NOTE_QUEUE_DEPTH;
+    u32 last = (q->head + q->count - 1) % NOTE_RING_SLOTS;
     for (u32 j = 0; j < NOTE_NAME_MAX; j++) q->ring[last].name[j] = 0;
     q->ring[last].arg = 0;
     q->ring[last].sender_pid = 0;
     q->ring[last].timestamp_ns = 0;
 
     q->count--;
-    q->tail = (q->head + q->count) % NOTE_QUEUE_DEPTH;
+    q->tail = (q->head + q->count) % NOTE_RING_SLOTS;
 }
 
 // R2-F1 / R2-F6 audit close: fd-read peek that SKIPS kill. Returns the
@@ -887,7 +1003,7 @@ int notes_peek_for_fd_locked(struct Proc *p, struct Thread *t,
     u32 idx = q->head;
     for (u32 n = 0; n < q->count; n++) {
         if (notes_name_is_kill(q->ring[idx].name)) {
-            idx = (idx + 1) % NOTE_QUEUE_DEPTH;
+            idx = (idx + 1) % NOTE_RING_SLOTS;
             continue;
         }
         int bit = notes_name_to_bit(q->ring[idx].name);
@@ -895,7 +1011,7 @@ int notes_peek_for_fd_locked(struct Proc *p, struct Thread *t,
             *out = q->ring[idx];
             return 1;
         }
-        idx = (idx + 1) % NOTE_QUEUE_DEPTH;
+        idx = (idx + 1) % NOTE_RING_SLOTS;
     }
     return 0;
 }
@@ -911,7 +1027,7 @@ int notes_dequeue_for_fd_locked(struct Proc *p, struct Thread *t,
     u32 idx = q->head;
     for (u32 n = 0; n < q->count; n++) {
         if (notes_name_is_kill(q->ring[idx].name)) {
-            idx = (idx + 1) % NOTE_QUEUE_DEPTH;
+            idx = (idx + 1) % NOTE_RING_SLOTS;
             continue;
         }
         int bit = notes_name_to_bit(q->ring[idx].name);
@@ -924,7 +1040,7 @@ int notes_dequeue_for_fd_locked(struct Proc *p, struct Thread *t,
             notes_drain_caught_note_locked(p, q, out);  // item 11: the caught twin
             return 1;
         }
-        idx = (idx + 1) % NOTE_QUEUE_DEPTH;
+        idx = (idx + 1) % NOTE_RING_SLOTS;
     }
     return 0;
 }
@@ -947,7 +1063,7 @@ int notes_dequeue_locked(struct Proc *p, struct Thread *t, struct Note *out) {
                 notes_pop_at_locked(q, idx);
                 return 1;
             }
-            idx = (idx + 1) % NOTE_QUEUE_DEPTH;
+            idx = (idx + 1) % NOTE_RING_SLOTS;
         }
     }
 
@@ -968,7 +1084,7 @@ int notes_dequeue_locked(struct Proc *p, struct Thread *t, struct Note *out) {
                 notes_drain_caught_note_locked(p, q, out);  // item 11: caught twin
                 return 1;
             }
-            idx = (idx + 1) % NOTE_QUEUE_DEPTH;
+            idx = (idx + 1) % NOTE_RING_SLOTS;
         }
     }
     return 0;
@@ -1017,7 +1133,7 @@ u32 notes_discard_name(struct Proc *p, const char *name) {
         u32 idx = q->head;
         for (u32 n = 0; n < q->count; n++) {
             if (notes_name_eq(q->ring[idx].name, name)) { found = (int)idx; break; }
-            idx = (idx + 1) % NOTE_QUEUE_DEPTH;
+            idx = (idx + 1) % NOTE_RING_SLOTS;
         }
         if (found < 0) break;
         struct Note gone = q->ring[found];
@@ -1027,6 +1143,22 @@ u32 notes_discard_name(struct Proc *p, const char *name) {
         removed++;
     }
     spin_unlock(&q->lock);
+
+    // Each thread's word too. A thread-directed post reads the disposition and
+    // sets its bit in one hold of threads_lock, and the caller stored the
+    // disposition before this hold, so the post either saw it and refused or set
+    // the bit first, and it goes here. No q->lock across this: ARCH 7.3.1 has no
+    // edge between the two locks.
+    int bit = notes_direct_bit(name);
+    if (bit >= 0) {
+        u16 b = (u16)(1u << (u32)bit);
+        irq_state_t s = proc_threads_lock(p);
+        for (struct Thread *x = p->threads; x; x = x->next_in_proc) {
+            if (__atomic_fetch_and(&x->note_direct, (u16)~b, __ATOMIC_ACQ_REL) & b)
+                removed++;
+        }
+        proc_threads_unlock(p, s);
+    }
     return removed;
 }
 
@@ -1118,6 +1250,12 @@ static const char *notes_terminate_pending_name_locked(struct Proc *p,
                                                        struct Thread *t) {
     struct NoteQueue *q = p->notes;
     u64 mask = (t != NULL) ? t->note_mask : 0u;
+    // The thread's own note first, so the fault arm's FAULT_USER_DYING finds what
+    // thread_die_pending saw, and the tail dies of it.
+    if (t) {
+        const char *dname = notes_direct_fatal_name(p, t);
+        if (dname) return dname;
+    }
     u32 idx = q->head;
     for (u32 n = 0; n < q->count; n++) {
         const char *name = q->ring[idx].name;
@@ -1125,7 +1263,7 @@ static const char *notes_terminate_pending_name_locked(struct Proc *p,
             (mask & (1u << (u32)notes_name_to_bit(name))) == 0 &&
             notes_proc_default_applies(p, name))
             return notes_canonical_name_ptr(name);
-        idx = (idx + 1) % NOTE_QUEUE_DEPTH;
+        idx = (idx + 1) % NOTE_RING_SLOTS;
     }
     return NULL;
 }
@@ -1190,7 +1328,7 @@ static int notes_stop_pending_idx_locked(struct Proc *p, struct Thread *t) {
             (mask & (1u << (u32)notes_name_to_bit(name))) == 0 &&
             notes_proc_default_applies(p, name))
             return (int)idx;
-        idx = (idx + 1) % NOTE_QUEUE_DEPTH;
+        idx = (idx + 1) % NOTE_RING_SLOTS;
     }
     return -1;
 }
@@ -1293,12 +1431,16 @@ void notes_set_handler(struct Proc *p, u64 handler_va) {
         // (Unregistering does NOT re-arm -- the unregistering thread reaches
         // its own tail right after this syscall, where LS-5b re-evaluates,
         // and a blocked peer is then covered by the death cascade exits()
-        // triggers; see ARCH 8.8.2.)
+        // triggers; see ARCH 8.8.2. A thread that masks the family finds nothing
+        // at that tail, so the note then waits for a tail that can take it.)
         __atomic_and_fetch(&p->proc_flags,
                            ~PROC_FLAG_TERMINATE_PENDING_MASK,
                            __ATOMIC_RELEASE);
     }
     spin_unlock(&q->lock);
+    // A direct note a peer is riding out is now fatal, and the unregistering
+    // thread's tail reads only its own word.
+    if (handler_va == 0) proc_note_direct_rouse(p);
 }
 
 // LS-5c: the SYS_NOTE_OPEN tail. The self-managing mark and the latch clear
@@ -1316,6 +1458,23 @@ void notes_mark_self_managing(struct Proc *p) {
                        ~PROC_FLAG_TERMINATE_PENDING_MASK,
                        __ATOMIC_RELEASE);
     spin_unlock(&q->lock);
+
+    // The fd has no per-thread reader, and no handler will ever run for a
+    // self-managing Proc, so what its threads' words hold moves to the queue
+    // (N-2: nothing posted is left where nobody consumes it).
+    u32 moved = 0;
+    irq_state_t s = proc_threads_lock(p);
+    for (struct Thread *x = p->threads; x; x = x->next_in_proc)
+        moved |= __atomic_exchange_n(&x->note_direct, (u16)0, __ATOMIC_ACQ_REL);
+    proc_threads_unlock(p, s);
+    for (; moved; moved &= moved - 1u) {
+        const char *name = notes_direct_name((u32)__builtin_ctz(moved));
+        if (!name) continue;
+        spin_lock(&q->lock);
+        notes_move_to_queue_locked(p, name);
+        spin_unlock(&q->lock);
+        proc_wake_or_owe(&q->owed);
+    }
 }
 
 // No death reaches this thread's sleeps: loom_free's kthread join always, and
@@ -1332,9 +1491,9 @@ static bool thread_death_held(const struct Thread *t) {
 // loads of group_exit_msg + proc_flags, and the OWNER-read note_mask (`t` is
 // always the calling thread at every site -- sleep/tsleep's register-then-
 // observe, torpor's post-register check, the 9P reader's unwind decision --
-// and note_mask is written ONLY by the owning thread: SYS_NOTE_MASK, the
-// phenotype's rt_sigprocmask row, the Linux delivery store, and the phenotype
-// sigreturn restore -- never while that thread is inside one of those waits).
+// and once the thread is linked note_mask is written ONLY by its owner -- the
+// writers, and the creator's store before the link, are listed at
+// Thread.note_mask in thread.h -- never while it is inside one of those waits).
 // A masked thread reads false from the latch
 // leg: it neither unwinds nor terminates until it unmasks (masking defers --
 // matching the EL0-return tail, which also applies the observing thread's
@@ -1403,6 +1562,18 @@ bool thread_die_pending(struct Thread *t) {
         if ((flags & PROC_FLAG_TERM_TERMINATE_PENDING) != 0 &&
             (t->note_mask & (1u << NOTE_BIT_TERM)) == 0)
             return true;
+        // Each user-defined latch pairs with its own bit: SIGUSR1 blocked leaves
+        // a pending usr2 fatal, and the reverse.
+        if ((flags & PROC_FLAG_USR1_TERMINATE_PENDING) != 0 &&
+            (t->note_mask & (1u << NOTE_BIT_USR1)) == 0)
+            return true;
+        if ((flags & PROC_FLAG_USR2_TERMINATE_PENDING) != 0 &&
+            (t->note_mask & (1u << NOTE_BIT_USR2)) == 0)
+            return true;
+        // A note aimed at this thread alone ends every wait of this thread, and
+        // no peer's: the tail's exits_note then runs the group's one death.
+        if (notes_direct_fatal_name(p, t))
+            return true;
     }
     return false;
 }
@@ -1447,7 +1618,7 @@ void notes_fault_dying_latch(struct Thread *t) {
             const char *name = q->ring[idx].name;
             if (notes_proc_default_applies(p, name))
                 live |= notes_name_terminate_latch(name);
-            idx = (idx + 1) % NOTE_QUEUE_DEPTH;
+            idx = (idx + 1) % NOTE_RING_SLOTS;
         }
     }
     u32 armed = __atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE) &
@@ -1500,6 +1671,7 @@ bool thread_caught_note_deliverable(struct Thread *t) {
     if (t->in_handler) return false;
     struct Proc *p = t->proc;
     if (!p || p == kproc()) return false;
+    if (notes_direct_caught(p, t)) return true;
     u32 caught = ((u32)__atomic_load_n(&p->note_caught, __ATOMIC_ACQUIRE) &
                   CAUGHT_LATCH_MASK) >> CAUGHT_LATCH_SHIFT;
     return (caught & ~t->note_mask & NOTE_MASK_SUPPORTED) != 0;
@@ -1509,10 +1681,11 @@ VISIBLE_IF_KERNEL_TESTS
 bool thread_caught_note_claim(struct Thread *t) {
     if (!thread_caught_note_deliverable(t)) return false;
     struct Proc *p = t->proc;
-    u16 flags = __atomic_load_n(&p->note_caught, __ATOMIC_ACQUIRE);
+    if (notes_direct_caught(p, t)) return true;
+    u32 flags = __atomic_load_n(&p->note_caught, __ATOMIC_ACQUIRE);
     for (;;) {
-        u32 caught  = ((u32)flags & CAUGHT_LATCH_MASK) >> CAUGHT_LATCH_SHIFT;
-        u32 claimed = ((u32)flags & CAUGHT_CLAIM_MASK) >> CAUGHT_CLAIM_SHIFT;
+        u32 caught  = (flags & CAUGHT_LATCH_MASK) >> CAUGHT_LATCH_SHIFT;
+        u32 claimed = (flags & CAUGHT_CLAIM_MASK) >> CAUGHT_CLAIM_SHIFT;
         u32 deliv   = caught & ~t->note_mask & NOTE_MASK_SUPPORTED;
         // A claim this thread holds is its own to unwind on. A wait that claimed
         // and then completed anyway leaves the claim until the call's tail, and
@@ -1522,19 +1695,19 @@ bool thread_caught_note_claim(struct Thread *t) {
         // posting walk set the claim bit on this thread's behalf, so no CAS is
         // owed. The claim is recorded before the designation goes, so the
         // family's bit always has a holder (the walk's re-wake looks for one).
-        u8 tgt = (u8)(__atomic_load_n(&t->note_target, __ATOMIC_ACQUIRE) & deliv);
+        u16 tgt = (u16)(__atomic_load_n(&t->note_target, __ATOMIC_ACQUIRE) & deliv);
         if (tgt) {
-            __atomic_store_n(&t->note_claim, (u8)(t->note_claim | tgt), __ATOMIC_RELAXED);
-            __atomic_and_fetch(&t->note_target, (u8)~tgt, __ATOMIC_RELEASE);
+            __atomic_store_n(&t->note_claim, (u16)(t->note_claim | tgt), __ATOMIC_RELAXED);
+            __atomic_and_fetch(&t->note_target, (u16)~tgt, __ATOMIC_RELEASE);
             return true;
         }
         u32 open    = deliv & ~claimed;
         if (open == 0) return false;   // every family deliverable here is taken
         u32 fam = open & (~open + 1u); // the lowest: any one family unwinds us
         if (__atomic_compare_exchange_n(&p->note_caught, &flags,
-                                        (u16)(flags | (fam << CAUGHT_CLAIM_SHIFT)),
+                                        flags | (fam << CAUGHT_CLAIM_SHIFT),
                                         false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
-            __atomic_store_n(&t->note_claim, (u8)(t->note_claim | fam), __ATOMIC_RELAXED);
+            __atomic_store_n(&t->note_claim, (u16)(t->note_claim | fam), __ATOMIC_RELAXED);
             return true;
         }
         // `flags` now holds the fresh word: a post, a drain or a peer's claim.
@@ -1615,10 +1788,10 @@ u8 thread_caught_wait_kind(const struct Thread *t, bool caught_ok) {
 // walk skips `skip`. Called with no lock held.
 static void notes_drop_families(struct Thread *t, u32 mine, struct Thread *skip) {
     struct Proc *p   = t->proc;
-    u16          was = __atomic_fetch_and(&p->note_caught,
-                                          (u16)~(mine << CAUGHT_CLAIM_SHIFT),
+    u32          was = __atomic_fetch_and(&p->note_caught,
+                                          ~(mine << CAUGHT_CLAIM_SHIFT),
                                           __ATOMIC_ACQ_REL);
-    u32 caught = ((u32)was & CAUGHT_LATCH_MASK) >> CAUGHT_LATCH_SHIFT;
+    u32 caught = (was & CAUGHT_LATCH_MASK) >> CAUGHT_LATCH_SHIFT;
     if ((caught & mine) == 0) return;
     proc_caught_note_walk(p, skip);
 }
@@ -1629,8 +1802,8 @@ static void notes_drop_families(struct Thread *t, u32 mine, struct Thread *skip)
 // holds, a masked one when it unwinds. The walk re-checks a pick under that
 // lock, so it cannot designate `t` again for one of these families until the
 // wait ends; a family whose note is still queued goes to another thread now.
-void notes_handoff_target(struct Thread *t, u8 keep) {
-    u8 drop = (u8)(__atomic_fetch_and(&t->note_target, keep, __ATOMIC_ACQ_REL) & (u8)~keep);
+void notes_handoff_target(struct Thread *t, u16 keep) {
+    u16 drop = (u16)(__atomic_fetch_and(&t->note_target, keep, __ATOMIC_ACQ_REL) & (u16)~keep);
     if (drop == 0 || !t->proc) return;
     notes_drop_families(t, drop, NULL);
 }
@@ -1646,11 +1819,109 @@ void notes_exit_drop_locked(struct Thread *t) {
     u32 mine = t->note_claim | __atomic_exchange_n(&t->note_target, 0, __ATOMIC_ACQ_REL);
     __atomic_store_n(&t->note_claim, 0, __ATOMIC_RELAXED);
     if (mine == 0) return;
-    u16 was = __atomic_fetch_and(&p->note_caught, (u16)~(mine << CAUGHT_CLAIM_SHIFT),
+    u32 was = __atomic_fetch_and(&p->note_caught, ~(mine << CAUGHT_CLAIM_SHIFT),
                                  __ATOMIC_ACQ_REL);
-    u32 caught = ((u32)was & CAUGHT_LATCH_MASK) >> CAUGHT_LATCH_SHIFT;
+    u32 caught = (was & CAUGHT_LATCH_MASK) >> CAUGHT_LATCH_SHIFT;
     if (caught & mine) proc_caught_note_walk_locked(p, NULL);
 }
+
+// The tail's candidate, q->lock held: a queued kill, then the thread's own lowest
+// family, then the queue in FIFO order. A thread's own notes come before shared
+// ones, as Linux's dequeue_signal takes private before shared. `*direct` is the
+// family bit for a note off the word, else -1.
+static int notes_tail_candidate_locked(struct Proc *p, struct Thread *t,
+                                       struct Note *out, int *direct) {
+    *direct = -1;
+    int queued = notes_peek_locked(p, t, out);
+    if (queued && notes_name_is_kill(out->name)) return 1;
+    u32 d = notes_direct_unmasked(t);
+    if (d == 0) return queued;
+    *direct = __builtin_ctz(d);
+    notes_direct_fill(out, (u32)*direct);
+    return 1;
+}
+
+// Consume the candidate. q->lock serializes the queue, not the word: an
+// rt_sigaction on a peer can take a direct bit between the peek and here, and
+// then this returns 0 and the caller delivers nothing. Popping whatever came next
+// instead would run the handler it built a frame for on some other note.
+static int notes_tail_consume_locked(struct Proc *p, struct Thread *t, int direct,
+                                     struct Note *out) {
+    if (direct < 0) return notes_dequeue_locked(p, t, out);
+    u16 b = (u16)(1u << (u32)direct);
+    if ((__atomic_fetch_and(&t->note_direct, (u16)~b, __ATOMIC_ACQ_REL) & b) == 0) return 0;
+    notes_direct_fill(out, (u32)direct);
+    return 1;
+}
+
+#ifdef KERNEL_TESTS
+// The candidate + consume split with q->lock around each, as the tail holds it
+// across both: a test runs a discard between them, which is the race they exist
+// for. A kernel test's own thread has no tail to drive them.
+int notes_tail_candidate_for_test(struct Proc *p, struct Thread *t, struct Note *out,
+                                  int *direct) {
+    spin_lock(&p->notes->lock);
+    int r = notes_tail_candidate_locked(p, t, out, direct);
+    spin_unlock(&p->notes->lock);
+    return r;
+}
+int notes_tail_consume_for_test(struct Proc *p, struct Thread *t, int direct,
+                                struct Note *out) {
+    spin_lock(&p->notes->lock);
+    int r = notes_tail_consume_locked(p, t, direct, out);
+    spin_unlock(&p->notes->lock);
+    return r;
+}
+#endif
+
+// Put a consumed candidate back after a push that faulted. Native only, and a
+// native Proc has no sigaction to discard a direct bit, so the bit cannot have
+// been owed a discard while it was out. A peer may have opened the note fd while
+// it was out, and nothing reads a word then: the mark stores its flag under
+// q->lock, so a flag not seen here means the mark's walk is still to come and
+// moves the bit itself.
+static void notes_tail_unconsume_locked(struct Proc *p, struct Thread *t, int direct,
+                                        const struct Note *n) {
+    if (direct >= 0) {
+        if (proc_is_self_managing_notes(p)) {
+            notes_move_to_queue_locked(p, n->name);
+            return;
+        }
+        __atomic_or_fetch(&t->note_direct, (u16)(1u << (u32)direct), __ATOMIC_RELEASE);
+        return;
+    }
+    (void)notes_reenqueue_head_locked(p->notes, n);
+    // item 11 (round F2): the pop drained the caught latch, but the note is back
+    // in the queue -- re-arm so a re-blocking sleep_noteintr stays interruptible
+    // for it. This native path runs only with a live handler, so the re-arm sets
+    // the bit (arm re-checks handler/self-mgmt).
+    notes_arm_caught_note_locked(p, n->name);
+}
+
+#ifdef KERNEL_TESTS
+void notes_tail_unconsume_for_test(struct Proc *p, struct Thread *t, int direct,
+                                   const struct Note *n) {
+    spin_lock(&p->notes->lock);
+    notes_tail_unconsume_locked(p, t, direct, n);
+    spin_unlock(&p->notes->lock);
+}
+#endif
+
+// SA_RESETHAND's store. A default that terminates makes a caught direct note a peer
+// is riding out fatal, as rt_sigaction's SIG_DFL does.
+static void notes_handler_resets(struct Proc *p, enum viv_signote sn) {
+    struct viv_sigtab *tab = __atomic_load_n(&p->sigtab, __ATOMIC_ACQUIRE);
+    struct viv_ksigaction dfl = { .handler = VIV_SIG_DFL, .flags = 0,
+                                  .restorer = 0, .mask = 0 };
+    (void)viv_sigtab_set(tab, sn, &dfl);
+    if (viv_signote_default_is_terminate(sn)) proc_note_direct_rouse(p);
+}
+
+#ifdef KERNEL_TESTS
+void notes_handler_resets_for_test(struct Proc *p, u32 sn) {
+    notes_handler_resets(p, (enum viv_signote)sn);
+}
+#endif
 
 // VIVARIUM V-6c: deliver the head note to a Linux-phenotype handler.
 //
@@ -1665,7 +1936,8 @@ static void notes_deliver_linux_locked(struct exception_context *ctx,
                                        struct Proc *p, struct Thread *t,
                                        struct NoteQueue *q,
                                        enum viv_signote sn,
-                                       const struct viv_ksigaction *act) {
+                                       const struct viv_ksigaction *act,
+                                       int direct) {
     u64 signum = viv_signote_to_signal(sn);
     if (signum == 0) {                  // defence in depth: no entry can exist
         spin_unlock(&q->lock);          // for a note no signal maps to
@@ -1735,7 +2007,7 @@ static void notes_deliver_linux_locked(struct exception_context *ctx,
     // the Plan 9 path there is no re-enqueue case to get wrong: a failure above
     // simply leaves the note queued for the next return to EL0.
     struct Note popped;
-    if (!notes_dequeue_locked(p, t, &popped)) {
+    if (!notes_tail_consume_locked(p, t, direct, &popped)) {
         spin_unlock(&q->lock);
         return;
     }
@@ -1783,12 +2055,7 @@ static void notes_deliver_linux_locked(struct exception_context *ctx,
     // SA_RESETHAND: Linux restores SIG_DFL before invoking the handler, which is
     // what makes the one-shot `sysv_signal` idiom safe against a second signal
     // arriving mid-handler. Cheap to honour and wrong to skip.
-    if (act->flags & VIV_SA_RESETHAND) {
-        struct viv_sigtab *tab = __atomic_load_n(&p->sigtab, __ATOMIC_ACQUIRE);
-        struct viv_ksigaction dfl = { .handler = VIV_SIG_DFL, .flags = 0,
-                                      .restorer = 0, .mask = 0 };
-        (void)viv_sigtab_set(tab, sn, &dfl);
-    }
+    if (act->flags & VIV_SA_RESETHAND) notes_handler_resets(p, sn);
 
     // The aarch64 signal-delivery register contract (Linux's setup_return):
     //   x0 = signum, x1 = &siginfo, x2 = &ucontext, x29 = &next_frame->fp,
@@ -1848,7 +2115,8 @@ again:
     // Peek under q->lock to identify the dispatcher candidate.
     spin_lock(&q->lock);
     struct Note candidate;
-    if (!notes_peek_locked(p, t, &candidate)) {
+    int direct;
+    if (!notes_tail_candidate_locked(p, t, &candidate, &direct)) {
         spin_unlock(&q->lock);
         return false;
     }
@@ -1898,6 +2166,7 @@ again:
             spin_lock(&q->lock);
             int re_rc = notes_reenqueue_head_locked(q, &kill_popped);
             spin_unlock(&q->lock);
+            proc_wake_or_owe(&q->owed);
             if (re_rc != 0) {
                 extinction("notes_deliver_at_el0_return: re-enqueue of "
                            "kill failed (queue full) -- N-2/N-4 violation; "
@@ -1983,7 +2252,7 @@ again:
         if (!have_handler && (viv_sigtab_note_ignored(tab, sn) ||
                               viv_signote_default_is_ignore(sn))) {
             struct Note drop;
-            (void)notes_dequeue_locked(p, t, &drop);
+            (void)notes_tail_consume_locked(p, t, direct, &drop);
             spin_unlock(&q->lock);
             // Linux's get_signal loops past an ignored signal to the next one
             // pending, so a caught note queued behind this one is delivered on
@@ -1994,7 +2263,7 @@ again:
         }
 
         if (have_handler) {
-            notes_deliver_linux_locked(ctx, p, t, q, sn, &act);
+            notes_deliver_linux_locked(ctx, p, t, q, sn, &act, direct);
             return false;               // the helper owns the unlock either way
         }
 
@@ -2096,7 +2365,7 @@ again:
     // push under the SAME q->lock so a failing push can re-enqueue at
     // head without losing the note (round-2 close M2 — the F5/F6 race).
     struct Note popped;
-    int got = notes_dequeue_locked(p, t, &popped);
+    int got = notes_tail_consume_locked(p, t, direct, &popped);
     if (!got) {
         // Defense-in-depth: peek returned a candidate, dequeue under the
         // same lock must return the same note. Reaching here would be a
@@ -2108,13 +2377,9 @@ again:
     // Compute new_sp under lock. Defense-in-depth on alignment-down.
     u64 new_sp = (ctx->sp - NOTE_NAME_MAX) & ~(u64)0xf;
     if (new_sp == 0 || new_sp >= UACCESS_USER_VA_TOP) {
-        (void)notes_reenqueue_head_locked(q, &popped);
-        // item 11 (round F2): the pop above drained the caught latch, but the
-        // note is back in the queue -- re-arm so a re-blocking sleep_noteintr
-        // stays interruptible for it. This native path runs only with a live
-        // handler, so the re-arm sets the bit (arm re-checks handler/self-mgmt).
-        notes_arm_caught_note_locked(p, popped.name);
+        notes_tail_unconsume_locked(p, t, direct, &popped);
         spin_unlock(&q->lock);
+        proc_wake_or_owe(&q->owed);
         return false;
     }
 
@@ -2125,9 +2390,9 @@ again:
     // queue could not have been filled by others during our hold).
     for (u32 i = 0; i < NOTE_NAME_MAX; i++) {
         if (uaccess_store_u8(new_sp + i, (u8)popped.name[i]) != 0) {
-            (void)notes_reenqueue_head_locked(q, &popped);
-            notes_arm_caught_note_locked(p, popped.name);  // item 11 (round F2)
+            notes_tail_unconsume_locked(p, t, direct, &popped);
             spin_unlock(&q->lock);
+            proc_wake_or_owe(&q->owed);
             return false;
         }
     }
@@ -2183,7 +2448,7 @@ again:
 // again before it does, and every peer's wait refuses a claimed family.
 // Released, the family is open again; if its note is still queued, the walk
 // picks a thread for it, and not this one, whose tail has just passed it by.
-// Every IRQ return from EL0 reaches here, so the common case reads two bytes.
+// Every IRQ return from EL0 reaches here, so the common case reads two fields.
 static void notes_release_claims(struct Thread *t) {
     if (t->note_claim == 0 && __atomic_load_n(&t->note_target, __ATOMIC_RELAXED) == 0)
         return;

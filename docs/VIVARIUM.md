@@ -489,7 +489,7 @@ this exact translation in userspace); errno is already POSIX-aligned by `ERRORS.
   piece; it composes with notes (I-19) and the EL0-return-tail delivery checkpoint
   that already exists for note delivery and for the I-39 debug stop.
 - **Tier 2 (v1.x)**: full `sigprocmask`/`sigaltstack`/`SA_RESTART`/queued
-  `siginfo`/`tgkill` fidelity.
+  `siginfo` fidelity. (`tgkill` fidelity landed at thread-model C4; §6.22.)
 
 **CORRECTION to Tier 1, 2026-07-30 (V-6 entry; user-voted).** The clause *"restores
 `pstate`/`pc` from user memory at `rt_sigreturn`"* described Linux's mechanism, not
@@ -2493,7 +2493,8 @@ rather than new machinery:
 | `SIGSEGV`/`SIGBUS`/`SIGILL`/`SIGFPE` | `snare:*` | never caught or ignored (a handler is refused); the fault ends the Proc |
 | `SIGHUP`/`SIGQUIT`/`SIGWINCH`/`SIGTSTP`/`SIGCONT` | `tty:*` | PTY-1 semantics |
 | `SIGABRT` | none; a self-directed one ends the caller as `snare:abort` | default only; see below |
-| `SIGALRM`, `SIGUSR1/2` | — | no note exists; see below |
+| `SIGUSR1`, `SIGUSR2` | `usr1`, `usr2` | catchable; default terminate (operator vote 2026-11-02) |
+| `SIGALRM` | — | no note exists; see below |
 
 `SIGTERM` shared `interrupt` with `SIGINT` in the pouch mapping until V-6b took
 it off (a shared note cannot represent `SIGINT` ignored with `SIGTERM` at its
@@ -2523,11 +2524,12 @@ default), and the signal chunk's S-2 gave it its own note, `term`
   become a way to signal a Proc the caller could not otherwise reach, so there
   is no third gate. `kill(0, sig)` is the caller, as Pouch's sentinel makes it;
   a negative pid (a process group, or every process) is refused with `EPERM`,
-  because the gate admits no group. Notes are per-Proc, so `tkill` and `tgkill`
-  resolve the thread id to its Proc and post there: a thread-directed signal
-  reaches whichever thread of that Proc takes the note, not necessarily the
-  thread named (a stated imprecision; `tgkill` still refuses a tid outside the
-  named thread group with `ESRCH`). Signal 0 runs the gate and posts nothing. A
+  because the gate admits no group. `tkill` and `tgkill` resolve the thread id to
+  its Proc, ask the same gate, and post at that thread (ARCH 7.6.4 *Thread-directed
+  notes*; operator vote 5, 2026-10-21): only it takes the note, and a blocked one
+  waits on it alone. `kill` ends the whole group whichever thread is named.
+  `tgkill` refuses a tid outside the named thread group with `ESRCH`. Signal 0
+  runs the gate and posts nothing. A
   missing target, or a child already reaped, is `ESRCH`; a refusal by the gate
   is `EPERM`, and the gate is asked first, so a dead Proc that is not the
   caller's child reads `EPERM` too. A child that has died but is not yet reaped
@@ -2542,7 +2544,7 @@ default), and the signal chunk's S-2 gave it its own note, `term`
 `rt_sigtimedwait` (137), `rt_sigqueueinfo` (138) and `restart_syscall` (128) are
 explicit `ENOSYS` rows — Tier 2, and recorded rather than defaulted, per the
 file's standard that a number never considered and one considered-and-rejected
-are different facts. `SIGALRM`/`SIGUSR1`/`SIGUSR2` have no note to carry them;
+are different facts. `SIGALRM` has no note to carry it;
 `SIGABRT` has no note: a self-directed one (`raise`, which is `tkill` to self)
 ends the caller as `snare:abort` whatever its mask, so it terminates rather than
 running a handler.

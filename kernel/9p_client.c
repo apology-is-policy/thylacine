@@ -25,11 +25,24 @@
 _Static_assert(P9_CLIENT_MAGIC == 0x50394354u, "client magic drift");
 _Static_assert(P9_CLIENT_OUT_BUF_MAX >= 256u,  "client out buf too small");
 
+// c->lock defers hook walks (specs/poll_defer.tla): a walk reached while it
+// is held is owed, and the release that leaves the thread in no deferring
+// lock runs it, holding nothing. Every acquire and release goes through these.
+static void client_lock(struct p9_client *c) {
+    spin_lock(&c->lock);
+    poll_defer_enter();
+}
+
+static void client_unlock(struct p9_client *c) {
+    spin_unlock(&c->lock);
+    poll_defer_exit();
+}
+
 // R15-c F230: per-client lock acquired around every public op for the
 // full build + transport-exchange + dispatch + bookkeeping window.
 // Helpers keep the lock-release boilerplate out of every early-return
 // path.
-#define CLIENT_UNLOCK_RET(c, rc) do { spin_unlock(&(c)->lock); return (rc); } while (0)
+#define CLIENT_UNLOCK_RET(c, rc) do { client_unlock(c); return (rc); } while (0)
 
 // =============================================================================
 // Internal: explicit struct copies. The kernel doesn't link libc, so
@@ -254,10 +267,10 @@ static void client_mark_dead_locked(struct p9_client *c, bool devgone) {
     // true) -> each returns -EIO. A death from a path with no subsequent
     // reader-clear signal (e.g. the c2s send-break in client_run) would otherwise
     // leave them parked indefinitely. (mark_dead is the SOLE c->dead setter.)
-    if (c->send_waiters) poll_waiter_list_wake(&c->send_waiters_list);
+    if (c->send_waiters) poll_wake_deferred(&c->send_owed);
     // And every role waiter: a dead session has no role to take (its
     // re-register returns -P9_E_IO).
-    if (c->role_waiters) poll_waiter_list_wake(&c->role_waiters_list);
+    if (c->role_waiters) poll_wake_deferred(&c->role_owed);
 }
 
 // Hand the reader role to one still-pending op so a survivor keeps reading
@@ -302,7 +315,7 @@ static void client_handoff_reader_locked(struct p9_client *c,
         }
     }
     if (!c->reader_active && c->role_waiters)
-        poll_waiter_list_wake(&c->role_waiters_list);
+        poll_wake_deferred(&c->role_owed);
 }
 
 // #349 send flow control. Signal senders parked on c2s back-pressure that a
@@ -310,10 +323,10 @@ static void client_handoff_reader_locked(struct p9_client *c,
 // or the reader departed -> a sender may itself self-pump). Bump the progress
 // generation the parked senders' conds compare against, and wake EVERY parked
 // sender iff any is waiting (gating the list-walk off the hot demux path).
-// c->lock HELD (lock order c->lock -> send_waiters_list.lock -> rendez.lock).
+// c->lock HELD; the walk is owed past it (client_unlock).
 static void client_send_progress_signal(struct p9_client *c) {
     c->send_progress++;
-    if (c->send_waiters) poll_waiter_list_wake(&c->send_waiters_list);
+    if (c->send_waiters) poll_wake_deferred(&c->send_owed);
 }
 
 // Read ONE complete 9P frame into c->transport.recv_buf, mirroring
@@ -650,9 +663,9 @@ static bool client_stop_pending(struct Thread *t) {
 static int client_debug_stop_park(struct p9_client *c, struct p9_rpc *rpc) {
     struct Thread *t = current_thread();
     rpc->stop_parked = true;
-    spin_unlock(&c->lock);
+    client_unlock(c);
     int drc = proc_stop_sleeper_park(t);
-    spin_lock(&c->lock);
+    client_lock(c);
     rpc->stop_parked = false;
     return drc;
 }
@@ -721,11 +734,11 @@ static int client_wait(struct p9_client *c, struct p9_rpc *rpc) {
             for (;;) {
                 if (rpc->done || rpc->dead || rpc->flushed) break;
                 if (client_self_dying())    break;
-                spin_unlock(&c->lock);
+                client_unlock(c);
                 // A caught note that already interrupted this op is still
                 // pending: a later wait for it (the flush wait) is killable only.
                 int rr = reader_recv_frame(c, /*caught_ok=*/!rpc->noted);
-                spin_lock(&c->lock);
+                client_lock(c);
                 if (rr > 0) {
                     demux_frame_locked(c, (size_t)rr);
                     client_send_progress_signal(c);     // #349: a c2s slot freed
@@ -817,7 +830,7 @@ static int client_wait(struct p9_client *c, struct p9_rpc *rpc) {
             // lost wakeup: a handoff re-setting be_reader + waking me after this
             // clear is observed by sleep's register-then-observe cond-check.
             rpc->be_reader = false;
-            spin_unlock(&c->lock);
+            client_unlock(c);
             // 11b-9p: a non-reader waiter (another thread holds the reader role)
             // is caught-note-interruptible. sleep_noteintr returns SLEEP_NOTEINTR
             // only when a caught note is deliverable AND cond was false (the sched
@@ -839,7 +852,7 @@ static int client_wait(struct p9_client *c, struct p9_rpc *rpc) {
             int sr = rpc->noted ? sleep(&rpc->rendez, rpc_wait_cond, rpc)
                                 : sleep_noteintr(&rpc->rendez, rpc_wait_cond, rpc);
             if (t) { t->stop_unwinds = false; t->stop_unwound = false; }
-            spin_lock(&c->lock);
+            client_lock(c);
             if (sr == SLEEP_NOTEINTR && !rpc->done && !rpc->dead) {
                 if (rpc->be_reader) {
                     rpc->be_reader = false;
@@ -881,11 +894,11 @@ static void client_park_for_progress_locked(struct p9_client *c) {
     struct send_wait_ctx w = { c, c->send_progress };
     poll_waiter_list_register(&c->send_waiters_list, &pw);
     c->send_waiters++;
-    spin_unlock(&c->lock);
+    client_unlock(c);
     if (t) t->stop_unwinds = true;
     (void)sleep(&pr, send_wait_cond, &w);
     if (t) { t->stop_unwinds = false; t->stop_unwound = false; }
-    spin_lock(&c->lock);
+    client_lock(c);
     c->send_waiters--;
     poll_waiter_list_unregister(&pw);
 }
@@ -929,13 +942,13 @@ static void client_pump_or_park_locked(struct p9_client *c, struct p9_rpc *rpc) 
         // path too, not only the read path).
         c->reader_active = true;
         rpc->be_reader   = false;
-        spin_unlock(&c->lock);
+        client_unlock(c);
         // 11b-9p: caught_ok=false -- the send-path self-pump must NOT caught-unwind
         // (it drains OTHER ops' replies to free a c2s slot for MY send; a caught
         // unwind here drains nothing -> the send retry spins). A caught note on a
         // back-pressured sender delivers at its EL0-return tail, as pre-item-11.
         int rr = reader_recv_frame(c, /*caught_ok=*/false);
-        spin_lock(&c->lock);
+        client_lock(c);
         struct Thread *self = current_thread();
         if (rr > 0) {
             demux_frame_locked(c, (size_t)rr);
@@ -1203,10 +1216,10 @@ static int client_run(struct p9_client *c, size_t built_len,
         // no peer thread can reach c->lock / out_buf / session). The elected-
         // reader steady state already follows this exact drop discipline
         // (client_wait line ~384).
-        spin_unlock(&c->lock);
+        client_unlock(c);
         int rc = p9_transport_exchange(&c->transport, &c->session,
                                        c->out_buf, built_len, out);
-        spin_lock(&c->lock);
+        client_lock(c);
         return map_error(0, rc, out);
     }
     if (!p9_session_entry(&c->session, tag)) {
@@ -1415,15 +1428,15 @@ int p9_client_submit_async(struct p9_client *c, struct p9_rpc *rpc,
     if (!c || c->magic != P9_CLIENT_MAGIC)     return -P9_E_INVAL;
     if (!rpc || !rpc->on_complete || !build)   return -P9_E_INVAL;
 
-    spin_lock(&c->lock);
+    client_lock(c);
     if (c->dead || !p9_session_is_open(&c->session)) {
-        spin_unlock(&c->lock);
+        client_unlock(c);
         rpc->on_complete(rpc, -P9_E_IO, NULL);   // own it: complete + bail
         return -P9_E_IO;
     }
     if (c->progress && c->progress->io.tx) {
         // The shared out_buf is immutable until the partial frame is sent.
-        spin_unlock(&c->lock);
+        client_unlock(c);
         rpc->on_complete(rpc, -P9_E_AGAIN, NULL);
         return -P9_E_AGAIN;
     }
@@ -1435,7 +1448,7 @@ int p9_client_submit_async(struct p9_client *c, struct p9_rpc *rpc,
     // them cannot take the tags the ops a thread waits on need.
     if (!p9_session_async_room(&c->session) ||
         !p9_session_has_free_tag(&c->session)) {
-        spin_unlock(&c->lock);
+        client_unlock(c);
         rpc->on_complete(rpc, -P9_E_AGAIN, NULL);
         return -P9_E_AGAIN;
     }
@@ -1443,7 +1456,7 @@ int p9_client_submit_async(struct p9_client *c, struct p9_rpc *rpc,
     // + marking it outstanding); a >0 return is a well-formed frame.
     int built = build(&c->session, c->out_buf, c->out_buf_cap, build_ctx);
     if (built <= 0) {
-        spin_unlock(&c->lock);
+        client_unlock(c);
         rpc->on_complete(rpc, -P9_E_IO, NULL);
         return -P9_E_IO;
     }
@@ -1457,7 +1470,7 @@ int p9_client_submit_async(struct p9_client *c, struct p9_rpc *rpc,
         // is then moot (the session is unusable) -- and complete this op. `rpc`
         // is not yet registered, so mark_dead does not double-fire it.
         client_mark_dead_locked(c, false);
-        spin_unlock(&c->lock);
+        client_unlock(c);
         rpc->on_complete(rpc, -P9_E_IO, NULL);
         return -P9_E_IO;
     }
@@ -1484,11 +1497,11 @@ int p9_client_submit_async(struct p9_client *c, struct p9_rpc *rpc,
         if (p9_transport_progress_queue(&c->progress->io, c->out_buf,
                                         (size_t)built) < 0) {
             client_mark_dead_locked(c, false);
-            spin_unlock(&c->lock);
+            client_unlock(c);
             return -P9_E_IO;
         }
         c->total_ops++;
-        spin_unlock(&c->lock);
+        client_unlock(c);
         return 0;
     }
 
@@ -1503,7 +1516,7 @@ int p9_client_submit_async(struct p9_client *c, struct p9_rpc *rpc,
         client_unregister(c, tag, rpc);
         p9_session_retract_unsent(&c->session, tag);
         client_send_progress_signal(c);   // a tag drain parks for a freed tag
-        spin_unlock(&c->lock);
+        client_unlock(c);
         rpc->on_complete(rpc, -P9_E_AGAIN, NULL);
         return -P9_E_AGAIN;
     }
@@ -1511,11 +1524,11 @@ int p9_client_submit_async(struct p9_client *c, struct p9_rpc *rpc,
         // The byte stream is broken: latch dead + complete every in-flight op.
         // `rpc` is registered, so mark_dead fires its on_complete (error CQE).
         client_mark_dead_locked(c, false);
-        spin_unlock(&c->lock);
+        client_unlock(c);
         return -P9_E_IO;
     }
     c->total_ops++;
-    spin_unlock(&c->lock);
+    client_unlock(c);
     return 0;
 }
 
@@ -1525,16 +1538,16 @@ int p9_client_progress_bind(struct p9_client *c, struct p9_client_progress *p,
                             struct p9_transport_try_ops ops, u32 principal,
                             u64 deadline_ns) {
     if (!c || c->magic != P9_CLIENT_MAGIC || !p) return -P9_E_INVAL;
-    spin_lock(&c->lock);
+    client_lock(c);
     if (c->progress || c->dead || c->reader_active ||
         c->session.state != P9_SESS_INIT || c->session.total_sent ||
         p9_session_inflight(&c->session)) {
-        spin_unlock(&c->lock); return -P9_E_INVAL;
+        client_unlock(c); return -P9_E_INVAL;
     }
     *p = (struct p9_client_progress){0};
     if (p9_transport_progress_init(&p->io, &c->transport, ops,
                                    c->session.msize) < 0) {
-        spin_unlock(&c->lock); return -P9_E_INVAL;
+        client_unlock(c); return -P9_E_INVAL;
     }
     p->sending = NULL;
     p->rx_next = false;
@@ -1543,27 +1556,27 @@ int p9_client_progress_bind(struct p9_client *c, struct p9_client_progress *p,
                                         c->out_buf, c->out_buf_cap, principal,
                                         deadline_ns);
     if (rc < 0) client_mark_dead_locked(c, false);
-    spin_unlock(&c->lock);
+    client_unlock(c);
     return rc;
 }
 
 void p9_client_progress_abort(struct p9_client *c) {
     if (!c || c->magic != P9_CLIENT_MAGIC) return;
-    spin_lock(&c->lock);
+    client_lock(c);
     if (c->progress) client_mark_dead_locked(c, false);
-    spin_unlock(&c->lock);
+    client_unlock(c);
 }
 
 int p9_client_progress_step(struct p9_client *c, u64 now_ns) {
     if (!c || c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
-    spin_lock(&c->lock);
+    client_lock(c);
     struct p9_client_progress *p = c->progress;
-    if (!p) { spin_unlock(&c->lock); return -P9_E_INVAL; }
-    if (c->dead) { spin_unlock(&c->lock); return -P9_E_IO; }
+    if (!p) { client_unlock(c); return -P9_E_INVAL; }
+    if (c->dead) { client_unlock(c); return -P9_E_IO; }
     if (p->handshake.phase != P9_HS_READY) {
         int rc = p9_handshake_progress_step(&p->handshake, now_ns);
         if (rc < 0) client_mark_dead_locked(c, false);
-        spin_unlock(&c->lock);
+        client_unlock(c);
         return rc;
     }
     int rc;
@@ -1581,7 +1594,7 @@ int p9_client_progress_step(struct p9_client *c, u64 now_ns) {
     }
     if (rc < 0) client_mark_dead_locked(c, false);
     if (c->dead) rc = -P9_E_IO;
-    spin_unlock(&c->lock);
+    client_unlock(c);
     return rc;
 }
 
@@ -1594,16 +1607,16 @@ static bool client_unreadable_locked(const struct p9_client *c) {
 
 int p9_client_reader_pump_ready(struct p9_client *c) {
     if (!c || c->magic != P9_CLIENT_MAGIC) return P9_PUMP_DEAD;
-    spin_lock(&c->lock);
-    if (c->progress) { spin_unlock(&c->lock); return -P9_E_INVAL; }
-    if (client_unreadable_locked(c)) { spin_unlock(&c->lock); return P9_PUMP_DEAD; }
-    if (c->reader_active)            { spin_unlock(&c->lock); return P9_PUMP_BUSY; }
+    client_lock(c);
+    if (c->progress) { client_unlock(c); return -P9_E_INVAL; }
+    if (client_unreadable_locked(c)) { client_unlock(c); return P9_PUMP_DEAD; }
+    if (c->reader_active)            { client_unlock(c); return P9_PUMP_BUSY; }
     if (!p9_transport_recv_ready(&c->transport, NULL)) {
-        spin_unlock(&c->lock);
+        client_unlock(c);
         return P9_PUMP_IDLE;
     }
     c->reader_active = true;
-    spin_unlock(&c->lock);
+    client_unlock(c);
 
     // Reads only what is waiting, so it never sleeps: a server that stops
     // inside a frame, or another reader of the backend that took the bytes
@@ -1611,7 +1624,7 @@ int p9_client_reader_pump_ready(struct p9_client *c) {
     // reader (LOOM.md 8.6). c->lock dropped (single reader).
     int rr = do_reader_recv_frame(c, /*now=*/true);
 
-    spin_lock(&c->lock);
+    client_lock(c);
     int ret;
     if (rr > 0) {
         demux_frame_locked(c, (size_t)rr);
@@ -1631,16 +1644,16 @@ int p9_client_reader_pump_ready(struct p9_client *c) {
     // pump left: the handoff below never designates a sender.
     client_send_progress_signal(c);
     client_handoff_reader_locked(c, NULL);
-    spin_unlock(&c->lock);
+    client_unlock(c);
     return ret;
 }
 
 #ifdef KERNEL_TESTS
 void p9_client_handoff_reader(struct p9_client *c) {
     if (!c || c->magic != P9_CLIENT_MAGIC) return;
-    spin_lock(&c->lock);
+    client_lock(c);
     client_handoff_reader_locked(c, NULL);
-    spin_unlock(&c->lock);
+    client_unlock(c);
 }
 #endif // KERNEL_TESTS
 
@@ -1648,7 +1661,7 @@ int p9_client_reader_hook(struct p9_client *c, struct p9_reader_hook *h) {
     if (!c || c->magic != P9_CLIENT_MAGIC || !h) return -P9_E_INVAL;
     h->pw.ready = false;   // off every list: only its owner touches it
     h->place    = P9_HOOK_NONE;
-    spin_lock(&c->lock);
+    client_lock(c);
     int rc = 1;
     if (client_unreadable_locked(c)) {
         rc = -P9_E_IO;
@@ -1673,20 +1686,20 @@ int p9_client_reader_hook(struct p9_client *c, struct p9_reader_hook *h) {
         // meanwhile reads what arrives, and the arrival still wakes us.
         h->place = P9_HOOK_READY;
     }
-    spin_unlock(&c->lock);
+    client_unlock(c);
     return rc;
 }
 
 void p9_client_reader_unhook(struct p9_client *c, struct p9_reader_hook *h) {
     if (!c || !h) return;
     if (h->place == P9_HOOK_ROLE) {
-        spin_lock(&c->lock);
+        client_lock(c);
         // pw->list is written only by its owner's register and unregister.
         if (h->pw.list == &c->role_waiters_list) {
             poll_waiter_list_unregister(&h->pw);
             c->role_waiters--;
         }
-        spin_unlock(&c->lock);
+        client_unlock(c);
     } else if (h->place == P9_HOOK_READY) {
         // The backend's own list and lock; the caller's pin keeps the backend.
         poll_waiter_list_unregister(&h->pw);
@@ -1717,13 +1730,13 @@ void p9_client_abandon_async(struct p9_client *c, struct p9_rpc *rpc) {
     // Either way, after this returns rpc is registered nowhere -> the
     // caller owns the container's teardown with no concurrent completer.
     if (!c || c->magic != P9_CLIENT_MAGIC || !rpc) return;
-    spin_lock(&c->lock);
+    client_lock(c);
     if (c->progress) {
         // Preserve abandon's no-callback promise for this RPC, then abort the
         // exclusive stream instead of waiting for peer flush acknowledgement.
         client_unregister(c, rpc->tag, rpc);
         client_mark_dead_locked(c, false);
-        spin_unlock(&c->lock);
+        client_unlock(c);
         return;
     }
 
@@ -1764,7 +1777,7 @@ void p9_client_abandon_async(struct p9_client *c, struct p9_rpc *rpc) {
             }
         }
     }
-    spin_unlock(&c->lock);
+    client_unlock(c);
 }
 
 #ifdef KERNEL_TESTS
@@ -1778,9 +1791,9 @@ void p9_client_abandon_async(struct p9_client *c, struct p9_rpc *rpc) {
 // yields device-gone CQEs without this.
 void p9_client_mark_devgone(struct p9_client *c) {
     if (!c || c->magic != P9_CLIENT_MAGIC) return;
-    spin_lock(&c->lock);
+    client_lock(c);
     client_mark_dead_locked(c, true);
-    spin_unlock(&c->lock);
+    client_unlock(c);
 }
 #endif // KERNEL_TESTS
 
@@ -1868,6 +1881,8 @@ static int p9_client_init_storage(struct p9_client *c,
     c->send_waiters   = 0;
     poll_waiter_list_init(&c->role_waiters_list);
     c->role_waiters   = 0;
+    poll_deferred_init(&c->send_owed, &c->send_waiters_list, NULL, NULL);
+    poll_deferred_init(&c->role_owed, &c->role_waiters_list, NULL, NULL);
     c->poll_next       = NULL;   // the dev9p poll kthread's entry (it inits the hook)
     c->poll_pin        = NULL;
     c->poll_listed     = false;
@@ -1913,9 +1928,12 @@ void p9_client_destroy(struct p9_client *c) {
     // under c->lock" invariant. Destroy runs when the last attached ref drops
     // (no op is in flight), so the lock is uncontended -- this is defense in
     // depth against a future caller that destroys a still-shared client.
-    spin_lock(&c->lock);
+    client_lock(c);
     if (c->done_reply_buf) { kfree(c->done_reply_buf); c->done_reply_buf = NULL; }
-    spin_unlock(&c->lock);
+    client_unlock(c);
+    // A walk owed on either list by an op's last release may still be running.
+    poll_deferred_await(&c->send_owed);
+    poll_deferred_await(&c->role_owed);
     // CF-3 B: release a heap out_buf (bulk-msize tier). The inline tier is
     // storage inside *c -- nothing to free. Preallocated private storage belongs
     // to its enclosing charged owner, which releases it after destroy. No op is
@@ -1937,7 +1955,7 @@ void p9_client_ctl_snapshot(struct p9_client *c, struct p9_client_ctl *out) {
     if (!c || !out) return;
     for (size_t i = 0; i < sizeof(*out); i++) ((u8 *)out)[i] = 0;
     if (c->magic != P9_CLIENT_MAGIC) return;
-    spin_lock(&c->lock);
+    client_lock(c);
     out->frames_rx          = c->frames_rx;
     out->demux_owned        = c->demux_owned;
     out->demux_orphan       = c->demux_orphan;
@@ -1966,17 +1984,17 @@ void p9_client_ctl_snapshot(struct p9_client *c, struct p9_client_ctl *out) {
         }
         out->n_inflight++;
     }
-    spin_unlock(&c->lock);
+    client_unlock(c);
 }
 
 int p9_client_close(struct p9_client *c) {
     if (!c) return -P9_E_INVAL;
     if (c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
-    spin_lock(&c->lock);
+    client_lock(c);
     if (c->progress) CLIENT_UNLOCK_RET(c, -P9_E_INVAL);
     int rc = p9_transport_close(&c->transport);
     int rc2 = p9_session_close(&c->session);
-    spin_unlock(&c->lock);
+    client_unlock(c);
     if (rc < 0) return -P9_E_IO;
     if (rc2 < 0) return -P9_E_IO;
     return 0;
@@ -1992,7 +2010,7 @@ int p9_client_handshake(struct p9_client *c,
                          u32 n_uname) {
     if (!c) return -P9_E_INVAL;
     if (c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
-    spin_lock(&c->lock);
+    client_lock(c);
     if (c->progress) CLIENT_UNLOCK_RET(c, -P9_E_INVAL);
 
     // Phase 1: Tversion → Rversion (drives INIT → VERSIONED). Tversion is the
@@ -2016,7 +2034,7 @@ int p9_client_handshake(struct p9_client *c,
     e = client_run(c, (size_t)len, &r);
     c->total_ops++;
     if (e != 0) { c->total_errors++; CLIENT_UNLOCK_RET(c, e); }
-    spin_unlock(&c->lock);
+    client_unlock(c);
     return 0;
 }
 
@@ -2031,7 +2049,7 @@ int p9_client_walk(struct p9_client *c,
                     u16 *out_nwqid, struct p9_qid *out_qids) {
     if (!c) return -P9_E_INVAL;
     if (c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
-    spin_lock(&c->lock);
+    client_lock(c);
     if (c->progress) CLIENT_UNLOCK_RET(c, -P9_E_INVAL);
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
@@ -2052,7 +2070,7 @@ int p9_client_walk(struct p9_client *c,
             copy_qid(&out_qids[i], &r.qids[i]);
         }
     }
-    spin_unlock(&c->lock);
+    client_unlock(c);
     return 0;
 }
 
@@ -2082,7 +2100,7 @@ int p9_client_walkgetattr(struct p9_client *c,
                           struct p9_attr *out_attrs) {
     if (!c) return -P9_E_INVAL;
     if (c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
-    spin_lock(&c->lock);
+    client_lock(c);
     if (c->progress) CLIENT_UNLOCK_RET(c, -P9_E_INVAL);
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
@@ -2116,7 +2134,7 @@ int p9_client_walkgetattr(struct p9_client *c,
             }
         }
     }
-    spin_unlock(&c->lock);
+    client_unlock(c);
     return 0;
 }
 
@@ -2124,7 +2142,7 @@ int p9_client_walkgetattr(struct p9_client *c,
 int p9_client_clunk(struct p9_client *c, u32 fid) {
     if (!c) return -P9_E_INVAL;
     if (c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
-    spin_lock(&c->lock);
+    client_lock(c);
     if (c->progress) CLIENT_UNLOCK_RET(c, -P9_E_INVAL);
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
@@ -2145,7 +2163,7 @@ int p9_client_clunk(struct p9_client *c, u32 fid) {
     if (e == -P9_E_AGAIN) CLIENT_UNLOCK_RET(c, e);   // taken back, never sent
     c->total_ops++;
     if (e != 0) { c->total_errors++; CLIENT_UNLOCK_RET(c, e); }
-    spin_unlock(&c->lock);
+    client_unlock(c);
     return 0;
 }
 #endif // KERNEL_TESTS
@@ -2187,7 +2205,7 @@ int p9_client_clunk(struct p9_client *c, u32 fid) {
 static int client_clunk_async(struct p9_client *c, u32 fid, bool no_wait) {
     if (!c) return -P9_E_INVAL;
     if (c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
-    spin_lock(&c->lock);
+    client_lock(c);
     if (c->progress) CLIENT_UNLOCK_RET(c, -P9_E_INVAL);
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
@@ -2248,7 +2266,7 @@ static int client_clunk_async(struct p9_client *c, u32 fid, bool no_wait) {
         CLIENT_UNLOCK_RET(c, -P9_E_IO);
     }
     c->total_ops++;
-    spin_unlock(&c->lock);
+    client_unlock(c);
     return 0;
 }
 
@@ -2268,7 +2286,7 @@ int p9_client_lopen(struct p9_client *c, u32 fid, u32 flags,
                      struct p9_qid *out_qid, u32 *out_iounit) {
     if (!c) return -P9_E_INVAL;
     if (c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
-    spin_lock(&c->lock);
+    client_lock(c);
     if (c->progress) CLIENT_UNLOCK_RET(c, -P9_E_INVAL);
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
@@ -2283,7 +2301,7 @@ int p9_client_lopen(struct p9_client *c, u32 fid, u32 flags,
     if (e != 0) { c->total_errors++; CLIENT_UNLOCK_RET(c, e); }
     if (out_qid) copy_qid(out_qid, &r.open_qid);
     if (out_iounit) *out_iounit = r.open_iounit;
-    spin_unlock(&c->lock);
+    client_unlock(c);
     return 0;
 }
 
@@ -2293,7 +2311,7 @@ int p9_client_lcreate(struct p9_client *c, u32 fid,
                        struct p9_qid *out_qid, u32 *out_iounit) {
     if (!c) return -P9_E_INVAL;
     if (c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
-    spin_lock(&c->lock);
+    client_lock(c);
     if (c->progress) CLIENT_UNLOCK_RET(c, -P9_E_INVAL);
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
@@ -2309,7 +2327,7 @@ int p9_client_lcreate(struct p9_client *c, u32 fid,
     if (e != 0) { c->total_errors++; CLIENT_UNLOCK_RET(c, e); }
     if (out_qid) copy_qid(out_qid, &r.open_qid);
     if (out_iounit) *out_iounit = r.open_iounit;
-    spin_unlock(&c->lock);
+    client_unlock(c);
     return 0;
 }
 
@@ -2342,7 +2360,7 @@ int p9_client_read(struct p9_client *c, u32 fid, u64 offset,
     if (!c) return -P9_E_INVAL;
     if (c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
     if (count > 0 && !out_data) return -P9_E_INVAL;
-    spin_lock(&c->lock);
+    client_lock(c);
     if (c->progress) CLIENT_UNLOCK_RET(c, -P9_E_INVAL);
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
@@ -2369,7 +2387,7 @@ int p9_client_read(struct p9_client *c, u32 fid, u64 offset,
         out_data[i] = r.read_data[i];
     }
     if (out_count) *out_count = r.read_count;
-    spin_unlock(&c->lock);
+    client_unlock(c);
     return 0;
 }
 
@@ -2378,7 +2396,7 @@ int p9_client_write(struct p9_client *c, u32 fid, u64 offset,
     if (!c) return -P9_E_INVAL;
     if (c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
     if (count > 0 && !data) return -P9_E_INVAL;
-    spin_lock(&c->lock);
+    client_lock(c);
     if (c->progress) CLIENT_UNLOCK_RET(c, -P9_E_INVAL);
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
@@ -2398,7 +2416,7 @@ int p9_client_write(struct p9_client *c, u32 fid, u64 offset,
     c->total_ops++;
     if (e != 0) { c->total_errors++; CLIENT_UNLOCK_RET(c, e); }
     if (out_accepted) *out_accepted = r.write_count;
-    spin_unlock(&c->lock);
+    client_unlock(c);
     return 0;
 }
 
@@ -2410,7 +2428,7 @@ int p9_client_getattr(struct p9_client *c, u32 fid,
                        u64 request_mask, struct p9_attr *out_attr) {
     if (!c) return -P9_E_INVAL;
     if (c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
-    spin_lock(&c->lock);
+    client_lock(c);
     if (c->progress) CLIENT_UNLOCK_RET(c, -P9_E_INVAL);
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
@@ -2425,7 +2443,7 @@ int p9_client_getattr(struct p9_client *c, u32 fid,
     c->total_ops++;
     if (e != 0) { c->total_errors++; CLIENT_UNLOCK_RET(c, e); }
     if (out_attr) copy_attr(out_attr, &r.attr);
-    spin_unlock(&c->lock);
+    client_unlock(c);
     return 0;
 }
 
@@ -2433,7 +2451,7 @@ int p9_client_setattr(struct p9_client *c, u32 fid,
                        const struct p9_setattr *attr) {
     if (!c || !attr) return -P9_E_INVAL;
     if (c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
-    spin_lock(&c->lock);
+    client_lock(c);
     if (c->progress) CLIENT_UNLOCK_RET(c, -P9_E_INVAL);
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
@@ -2446,7 +2464,7 @@ int p9_client_setattr(struct p9_client *c, u32 fid,
     int e = client_run(c, (size_t)len, &r);
     c->total_ops++;
     if (e != 0) { c->total_errors++; CLIENT_UNLOCK_RET(c, e); }
-    spin_unlock(&c->lock);
+    client_unlock(c);
     return 0;
 }
 
@@ -2455,7 +2473,7 @@ int p9_client_readdir(struct p9_client *c, u32 fid, u64 offset,
     if (!c) return -P9_E_INVAL;
     if (c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
     if (count > 0 && !out_data) return -P9_E_INVAL;
-    spin_lock(&c->lock);
+    client_lock(c);
     if (c->progress) CLIENT_UNLOCK_RET(c, -P9_E_INVAL);
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
@@ -2474,7 +2492,7 @@ int p9_client_readdir(struct p9_client *c, u32 fid, u64 offset,
         out_data[i] = r.readdir_data[i];
     }
     if (out_count) *out_count = r.readdir_count;
-    spin_unlock(&c->lock);
+    client_unlock(c);
     return 0;
 }
 
@@ -2483,7 +2501,7 @@ int p9_client_statfs(struct p9_client *c, u32 fid,
                       struct p9_statfs *out_statfs) {
     if (!c) return -P9_E_INVAL;
     if (c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
-    spin_lock(&c->lock);
+    client_lock(c);
     if (c->progress) CLIENT_UNLOCK_RET(c, -P9_E_INVAL);
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
@@ -2497,7 +2515,7 @@ int p9_client_statfs(struct p9_client *c, u32 fid,
     c->total_ops++;
     if (e != 0) { c->total_errors++; CLIENT_UNLOCK_RET(c, e); }
     if (out_statfs) copy_statfs(out_statfs, &r.statfs);
-    spin_unlock(&c->lock);
+    client_unlock(c);
     return 0;
 }
 #endif // KERNEL_TESTS
@@ -2505,7 +2523,7 @@ int p9_client_statfs(struct p9_client *c, u32 fid,
 int p9_client_fsync(struct p9_client *c, u32 fid, u32 datasync) {
     if (!c) return -P9_E_INVAL;
     if (c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
-    spin_lock(&c->lock);
+    client_lock(c);
     if (c->progress) CLIENT_UNLOCK_RET(c, -P9_E_INVAL);
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
@@ -2518,7 +2536,7 @@ int p9_client_fsync(struct p9_client *c, u32 fid, u32 datasync) {
     int e = client_run(c, (size_t)len, &r);
     c->total_ops++;
     if (e != 0) { c->total_errors++; CLIENT_UNLOCK_RET(c, e); }
-    spin_unlock(&c->lock);
+    client_unlock(c);
     return 0;
 }
 
@@ -2534,7 +2552,7 @@ int p9_client_weft(struct p9_client *c, u32 fid,
                    struct p9_weft_geom *out) {
     if (!c) return -P9_E_INVAL;
     if (c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
-    spin_lock(&c->lock);
+    client_lock(c);
     if (c->progress) CLIENT_UNLOCK_RET(c, -P9_E_INVAL);
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
@@ -2548,7 +2566,7 @@ int p9_client_weft(struct p9_client *c, u32 fid,
     c->total_ops++;
     if (e != 0) { c->total_errors++; CLIENT_UNLOCK_RET(c, e); }
     if (out) *out = r.weft_geom;
-    spin_unlock(&c->lock);
+    client_unlock(c);
     return 0;
 }
 
@@ -2560,7 +2578,7 @@ int p9_client_weftio(struct p9_client *c, u32 fid,
                      u32 off, u32 len, u32 dir, u32 *out_count) {
     if (!c) return -P9_E_INVAL;
     if (c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
-    spin_lock(&c->lock);
+    client_lock(c);
     if (c->progress) CLIENT_UNLOCK_RET(c, -P9_E_INVAL);
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
@@ -2574,7 +2592,7 @@ int p9_client_weftio(struct p9_client *c, u32 fid,
     c->total_ops++;
     if (e != 0) { c->total_errors++; CLIENT_UNLOCK_RET(c, e); }
     if (out_count) *out_count = r.weftio_count;
-    spin_unlock(&c->lock);
+    client_unlock(c);
     return 0;
 }
 
@@ -2587,7 +2605,7 @@ int p9_client_readlink(struct p9_client *c, u32 fid,
     if (!c) return -P9_E_INVAL;
     if (c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
     if (!out_target || !out_target_len) return -P9_E_INVAL;
-    spin_lock(&c->lock);
+    client_lock(c);
     if (c->progress) CLIENT_UNLOCK_RET(c, -P9_E_INVAL);
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
@@ -2608,7 +2626,7 @@ int p9_client_readlink(struct p9_client *c, u32 fid,
     for (u16 i = 0; i < to_copy; i++) out_target[i] = r.readlink_target[i];
     *out_target_len = r.readlink_target_len;
     if (r.readlink_target_len > cap) CLIENT_UNLOCK_RET(c, -P9_E_INVAL);
-    spin_unlock(&c->lock);
+    client_unlock(c);
     return 0;
 }
 
@@ -2617,7 +2635,7 @@ int p9_client_mkdir(struct p9_client *c, u32 dfid,
                      u32 mode, u32 gid, struct p9_qid *out_qid) {
     if (!c) return -P9_E_INVAL;
     if (c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
-    spin_lock(&c->lock);
+    client_lock(c);
     if (c->progress) CLIENT_UNLOCK_RET(c, -P9_E_INVAL);
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
@@ -2632,7 +2650,7 @@ int p9_client_mkdir(struct p9_client *c, u32 dfid,
     c->total_ops++;
     if (e != 0) { c->total_errors++; CLIENT_UNLOCK_RET(c, e); }
     if (out_qid) copy_qid(out_qid, &r.created_qid);
-    spin_unlock(&c->lock);
+    client_unlock(c);
     return 0;
 }
 
@@ -2642,7 +2660,7 @@ int p9_client_renameat(struct p9_client *c, u32 olddirfid,
                         const u8 *newname, size_t newname_len) {
     if (!c) return -P9_E_INVAL;
     if (c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
-    spin_lock(&c->lock);
+    client_lock(c);
     if (c->progress) CLIENT_UNLOCK_RET(c, -P9_E_INVAL);
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
@@ -2657,7 +2675,7 @@ int p9_client_renameat(struct p9_client *c, u32 olddirfid,
     int e = client_run(c, (size_t)len, &r);
     c->total_ops++;
     if (e != 0) { c->total_errors++; CLIENT_UNLOCK_RET(c, e); }
-    spin_unlock(&c->lock);
+    client_unlock(c);
     return 0;
 }
 
@@ -2665,7 +2683,7 @@ int p9_client_unlinkat(struct p9_client *c, u32 dfid,
                         const u8 *name, size_t name_len, u32 flags) {
     if (!c) return -P9_E_INVAL;
     if (c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
-    spin_lock(&c->lock);
+    client_lock(c);
     if (c->progress) CLIENT_UNLOCK_RET(c, -P9_E_INVAL);
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
@@ -2679,7 +2697,7 @@ int p9_client_unlinkat(struct p9_client *c, u32 dfid,
     int e = client_run(c, (size_t)len, &r);
     c->total_ops++;
     if (e != 0) { c->total_errors++; CLIENT_UNLOCK_RET(c, e); }
-    spin_unlock(&c->lock);
+    client_unlock(c);
     return 0;
 }
 
@@ -2690,14 +2708,14 @@ int p9_client_unlinkat(struct p9_client *c, u32 dfid,
 u32 p9_client_alloc_fid(struct p9_client *c) {
     if (!c) return P9_NOFID;
     if (c->magic != P9_CLIENT_MAGIC) return P9_NOFID;
-    spin_lock(&c->lock);
+    client_lock(c);
     if (c->next_fid == P9_NOFID) {
-        spin_unlock(&c->lock);
+        client_unlock(c);
         return P9_NOFID;       // exhausted
     }
     u32 fid = c->next_fid;
     c->next_fid++;
-    spin_unlock(&c->lock);
+    client_unlock(c);
     return fid;
 }
 
@@ -2706,19 +2724,19 @@ bool p9_client_is_open(const struct p9_client *c) {
     if (c->magic != P9_CLIENT_MAGIC) return false;
     // const-cast for the lock: spin_lock requires non-const; the read
     // through the lock is logically const at the caller's level.
-    spin_lock(&((struct p9_client *)c)->lock);
+    client_lock((struct p9_client *)c);
     bool open = p9_session_is_open(&c->session);
-    spin_unlock(&((struct p9_client *)c)->lock);
+    client_unlock((struct p9_client *)c);
     return open;
 }
 
 bool p9_client_fid_held(struct p9_client *c, u32 fid) {
     if (!c) return false;
     if (c->magic != P9_CLIENT_MAGIC) return false;
-    spin_lock(&c->lock);
+    client_lock(c);
     bool held = !c->dead && p9_session_is_open(&c->session) &&
                 p9_session_fid_bound(&c->session, fid);
-    spin_unlock(&c->lock);
+    client_unlock(c);
     return held;
 }
 
@@ -2726,19 +2744,19 @@ void p9_client_set_orphan_sink(struct p9_client *c, p9_orphan_sink_fn fn,
                                void *arg) {
     if (!c) return;
     if (c->magic != P9_CLIENT_MAGIC) return;
-    spin_lock(&c->lock);
+    client_lock(c);
     c->orphan_sink     = fn;
     c->orphan_sink_arg = arg;
-    spin_unlock(&c->lock);
+    client_unlock(c);
 }
 
 #ifdef KERNEL_TESTS
 size_t p9_client_inflight(const struct p9_client *c) {
     if (!c) return 0;
     if (c->magic != P9_CLIENT_MAGIC) return 0;
-    spin_lock(&((struct p9_client *)c)->lock);
+    client_lock((struct p9_client *)c);
     size_t n = p9_session_inflight(&c->session);
-    spin_unlock(&((struct p9_client *)c)->lock);
+    client_unlock((struct p9_client *)c);
     return n;
 }
 #endif // KERNEL_TESTS

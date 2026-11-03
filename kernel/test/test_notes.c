@@ -248,6 +248,7 @@ void test_notes_mask_defers(void) {
 
     // Simulate a Thread with interrupt masked (bit 0).
     struct Thread fake_t;
+    fake_t.note_direct = 0;
     fake_t.note_mask = (1u << NOTE_BIT_INTERRUPT);
 
     // Dequeue with the masked Thread: skip "interrupt", return "pipe".
@@ -313,6 +314,7 @@ void test_notes_kill_bypasses_mask(void) {
 
     // Thread with EVERY supported bit masked.
     struct Thread fake_t;
+    fake_t.note_direct = 0;
     fake_t.note_mask = (1u << NOTE_BIT_INTERRUPT) | (1u << NOTE_BIT_KILL) |
                        (1u << NOTE_BIT_PIPE) | (1u << NOTE_BIT_CHILD_EXIT);
 
@@ -607,6 +609,7 @@ void test_notes_interrupt_terminate_gate(void) {
 
     // A Thread with `interrupt` masked: not deliverable -> no terminate.
     struct Thread fake_t;
+    fake_t.note_direct = 0;
     fake_t.note_mask = (1u << NOTE_BIT_INTERRUPT);
     spin_lock(&p->notes->lock);
     d = notes_interrupt_should_terminate_locked(p, &fake_t);
@@ -787,6 +790,7 @@ void test_notes_die_pending_predicate(void) {
     // (the LS-5b fake-thread idiom, plus the proc binding; #68 F1 added the
     // exit-close gate, so the flag must be explicitly initialized here).
     struct Thread fake_t;
+    fake_t.note_direct = 0;
     fake_t.proc              = p;
     fake_t.note_mask         = 0u;
     fake_t.exit_close_active = false;
@@ -862,6 +866,7 @@ void test_notes_death_reaches_predicate(void) {
     struct Proc *p = proc_alloc();
     TEST_ASSERT(p != NULL, "proc_alloc succeeded");
     struct Thread fake_t;
+    fake_t.note_direct = 0;
     fake_t.proc              = p;
     fake_t.exit_close_active = false;
     fake_t.kthread_join_active = false;
@@ -891,6 +896,7 @@ void test_notes_forced_close_lifts_the_hold(void) {
     TEST_ASSERT(p != NULL, "proc_alloc succeeded");
     __atomic_store_n(&p->group_exit_msg, "killed", __ATOMIC_RELEASE);
     struct Thread fake_t;
+    fake_t.note_direct = 0;
     fake_t.proc                = p;
     fake_t.note_mask           = 0u;
     fake_t.exit_close_active   = true;
@@ -945,6 +951,7 @@ void test_notes_pipe_die_pending(void) {
     TEST_ASSERT(p != NULL, "proc_alloc succeeded");
 
     struct Thread fake_t;
+    fake_t.note_direct = 0;
     fake_t.proc              = p;
     fake_t.note_mask         = 0u;
     fake_t.exit_close_active = false;
@@ -1006,6 +1013,7 @@ void test_notes_term_die_pending(void) {
     TEST_ASSERT(p != NULL, "proc_alloc succeeded");
 
     struct Thread fake_t;
+    fake_t.note_direct = 0;
     fake_t.proc                = p;
     fake_t.note_mask           = 0u;
     fake_t.exit_close_active   = false;
@@ -1142,6 +1150,7 @@ void test_notes_caught_note_deliverable_predicate(void) {
     p->state = PROC_STATE_ALIVE;
 
     struct Thread fake_t;
+    fake_t.note_direct = 0;
     fake_t.proc               = p;
     fake_t.note_mask          = 0u;
     fake_t.exit_close_active  = false;
@@ -1210,11 +1219,11 @@ void test_notes_caught_note_deliverable_predicate(void) {
 
     // kproc guard: forced caught bits never make a kproc thread deliverable.
     fake_t.proc = kproc();
-    __atomic_or_fetch(&kproc()->note_caught, (u16)CAUGHT_LATCH_MASK,
+    __atomic_or_fetch(&kproc()->note_caught, CAUGHT_LATCH_MASK,
                       __ATOMIC_RELEASE);
     TEST_ASSERT(!thread_caught_note_deliverable(&fake_t),
                 "kproc guarded even when the caught sub-field is forced");
-    __atomic_and_fetch(&kproc()->note_caught, (u16)~CAUGHT_LATCH_MASK,
+    __atomic_and_fetch(&kproc()->note_caught, ~CAUGHT_LATCH_MASK,
                        __ATOMIC_RELEASE);
 
     p->state = PROC_STATE_ZOMBIE;
@@ -1270,7 +1279,7 @@ void test_notes_caught_note_claim_once(void) {
     bool c4    = thread_caught_note_claim(&c);
     // a's tail releases its claim with an interrupt still queued.
     notes_release_claims_for_test(&a);
-    u8   a_rec = a.note_claim;
+    u16  a_rec = a.note_claim;
     bool c5    = thread_caught_note_claim(&c);
     // Drain the rest: every caught bit clears, and the claims stay with their
     // owners until their tails.
@@ -1408,7 +1417,7 @@ void test_notes_caught_note_stop_dequeue_drains(void) {
     // realistic arm needs a phenotype per-signal sigtab; forcing the bit tests
     // the FIX -- does the stop-dequeue drain it? -- with the same end state.)
     __atomic_or_fetch(&p->note_caught,
-                      (u16)(1u << (CAUGHT_LATCH_SHIFT + NOTE_BIT_TTY)),
+                      1u << (CAUGHT_LATCH_SHIFT + NOTE_BIT_TTY),
                       __ATOMIC_RELEASE);
     TEST_ASSERT(proc_caught_note_pending(p),
                 "caught-TTY bit armed (simulated caught tty:winch sibling)");
@@ -1757,7 +1766,7 @@ static u32 ndflt_note_count(struct Proc *p, const char *name) {
             if (name[i] == 0) break;
         }
         if (eq) found++;
-        idx = (idx + 1) % NOTE_QUEUE_DEPTH;
+        idx = (idx + 1) % NOTE_RING_SLOTS;
     }
     spin_unlock(&q->lock);
     return found;
@@ -2048,6 +2057,8 @@ static void kfg_thread(struct Thread *t, struct Proc *p, int tid) {
     t->proc              = p;
     t->tid               = tid;
     t->note_mask         = 0;
+    t->note_direct       = 0;
+    t->state             = THREAD_RUNNING;
     t->next_in_proc      = NULL;
     t->rendez_blocked_on = NULL;
     p->threads           = t;
@@ -2081,14 +2092,18 @@ void test_notes_kill_family_gate(void) {
     s64 r_xabrt  = viv_kill_for_test(caller, child->pid, 0, VIV_SIGABRT);
     s64 r_sabrt  = viv_kill_for_test(caller, caller->pid, 0, VIV_SIGABRT);
     s64 r_range  = viv_kill_for_test(caller, child->pid, 0, 65);
+    u32 const intr_bit = 1u << NOTE_BIT_INTERRUPT;
     s64 r_tkill  = viv_kill_for_test(caller, 0, kth.tid, VIV_SIGINT);
+    u32 c_word1  = __atomic_load_n(&kth.note_direct, __ATOMIC_ACQUIRE);
     u32 c_intr   = ndflt_note_count(child, NOTE_NAME_INTERRUPT);
     s64 r_tgbad  = viv_kill_for_test(caller, other->pid, kth.tid, VIV_SIGINT);
     s64 r_tgok   = viv_kill_for_test(caller, child->pid, kth.tid, VIV_SIGINT);
+    u32 c_word2  = __atomic_load_n(&kth.note_direct, __ATOMIC_ACQUIRE);
     u32 c_intr2  = ndflt_note_count(child, NOTE_NAME_INTERRUPT);
     s64 r_toth   = viv_kill_for_test(caller, 0, oth.tid, VIV_SIGINT);
     s64 r_notid  = viv_kill_for_test(caller, 0, NO_TID, VIV_SIGINT);
     s64 r_tself  = viv_kill_for_test(caller, 0, cth.tid, VIV_SIGTERM);
+    u32 s_word   = __atomic_load_n(&cth.note_direct, __ATOMIC_ACQUIRE);
     u32 s_term   = ndflt_note_count(caller, NOTE_NAME_TERM);
     s64 r_sprobe = viv_kill_for_test(caller, 0, 0, 0);
     child->state = PROC_STATE_ZOMBIE;
@@ -2125,15 +2140,18 @@ void test_notes_kill_family_gate(void) {
     TEST_EXPECT_EQ(r_xabrt, -(s64)T_E_INVAL, "SIGABRT to another Proc: a snare death is its own");
     TEST_EXPECT_EQ(r_sabrt, (s64)1, "SIGABRT to itself reaches the snare:abort death");
     TEST_EXPECT_EQ(r_range, -(s64)T_E_INVAL, "signal 65 is out of range");
-    TEST_EXPECT_EQ(r_tkill, (s64)0, "tkill(child's tid) posts to the child");
-    TEST_EXPECT_EQ(c_intr, 1u, "the child holds the interrupt");
+    TEST_EXPECT_EQ(r_tkill, (s64)0, "tkill(child's tid) posts at that thread");
+    TEST_EXPECT_EQ(c_word1, intr_bit, "the named thread holds the interrupt");
+    TEST_EXPECT_EQ(c_intr, 0u, "and none of it reached the Proc's queue");
     TEST_EXPECT_EQ(r_tgbad, -(s64)T_E_SRCH, "tgkill with a tgid that does not hold the tid");
     TEST_EXPECT_EQ(r_tgok, (s64)0, "tgkill(child, child's tid) posts");
-    TEST_EXPECT_EQ(c_intr2, 2u, "a second interrupt queued");
+    TEST_EXPECT_EQ(c_word2, intr_bit, "a second interrupt coalesces, as a standard signal does");
+    TEST_EXPECT_EQ(c_intr2, 0u, "and the queue stays empty");
     TEST_EXPECT_EQ(r_toth, -(s64)T_E_PERM, "tkill(a non-child's tid) is EPERM");
     TEST_EXPECT_EQ(r_notid, -(s64)T_E_SRCH, "tkill(no such tid) is ESRCH");
     TEST_EXPECT_EQ(r_tself, (s64)0, "tkill(own tid) is self-directed");
-    TEST_EXPECT_EQ(s_term, 1u, "and the caller holds its own term");
+    TEST_EXPECT_EQ(s_word, 1u << NOTE_BIT_TERM, "and the caller's own thread holds the term");
+    TEST_EXPECT_EQ(s_term, 0u, "and the queue does not");
     TEST_EXPECT_EQ(r_sprobe, (s64)0, "kill(0, 0) probes the caller");
     TEST_EXPECT_EQ(r_dead, (s64)0, "a dead, unreaped child accepts it, as Linux's zombie does");
     TEST_EXPECT_EQ(c_term3, 1u, "and nothing was queued to it");
@@ -2142,6 +2160,735 @@ void test_notes_kill_family_gate(void) {
     TEST_EXPECT_EQ(r_drange, -(s64)T_E_INVAL, "signal 65 to the dead child: EINVAL, not the zombie's 0");
     TEST_EXPECT_EQ(r_ntty, -(s64)T_E_INVAL, "SIGHUP to no such pid: EINVAL before ESRCH");
     TEST_EXPECT_EQ(r_odead, -(s64)T_E_PERM, "a dead non-child reads EPERM: the gate is asked first");
+}
+
+// ---------------------------------------------------------------------------
+// Thread-directed notes (ARCH 7.6.4; specs/caught_target.tla). Two fixture threads
+// of one Proc: neither runs, so each read is of what a post left. test_rendez.c
+// holds the legs that need a thread actually blocked.
+// ---------------------------------------------------------------------------
+#define DN_TID_A 0x3f000011
+#define DN_TID_B 0x3f000012
+#define DN_NO_TID 0x3f0000fe
+#define DN_HANDLER_VA 0x1000ull
+
+static struct Thread g_dn_a, g_dn_b;
+
+static struct Proc *dn_proc(void) {
+    struct Proc *p = proc_alloc();
+    if (!p) return NULL;
+    p->state = PROC_STATE_ALIVE;
+    kfg_thread(&g_dn_a, p, DN_TID_A);
+    kfg_thread(&g_dn_b, p, DN_TID_B);
+    g_dn_b.next_in_proc = &g_dn_a;
+    return p;
+}
+
+static void dn_free(struct Proc *p) {
+    p->threads = NULL;
+    p->state   = PROC_STATE_ZOMBIE;
+    proc_free(p);
+}
+
+static u32 dn_word(const struct Thread *t) {
+    return __atomic_load_n(&t->note_direct, __ATOMIC_ACQUIRE);
+}
+
+static bool dn_same_name(const char *a, const char *b) {
+    for (u32 i = 0; i < NOTE_NAME_MAX; i++) {
+        if (a[i] != b[i]) return false;
+        if (a[i] == 0) return true;
+    }
+    return true;
+}
+
+// The sender the newest queued note of this name recorded, or ~0u with none queued.
+static u32 dn_queued_sender(struct Proc *p, const char *name) {
+    struct NoteQueue *q = p->notes;
+    u32 sender = ~0u;
+    spin_lock(&q->lock);
+    u32 idx = q->head;
+    for (u32 n = 0; n < q->count; n++) {
+        if (dn_same_name(q->ring[idx].name, name)) sender = q->ring[idx].sender_pid;
+        idx = (idx + 1) % NOTE_RING_SLOTS;
+    }
+    spin_unlock(&q->lock);
+    return sender;
+}
+
+static int dn_pop(struct Proc *p, struct Note *out) {
+    spin_lock(&p->notes->lock);
+    int r = notes_dequeue_locked(p, NULL, out);
+    spin_unlock(&p->notes->lock);
+    return r;
+}
+
+// A bit can stand for one name only because every name a program may post owns its
+// family. A row added to the table is checked here without anyone extending a list.
+void test_notes_direct_names_own_their_family(void) {
+    struct Proc *p = dn_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc succeeded");
+    p->handler_va = DN_HANDLER_VA;
+    u32 seen = 0, walked = 0;
+    const char *name;
+    for (u32 i = 0; (name = notes_known_name_for_test(i)) != NULL; i++) {
+        walked++;
+        int bit = notes_direct_bit(name);
+        bool want = notes_name_user_postable(name) && !notes_name_is_kill(name);
+        TEST_EXPECT_EQ(bit >= 0, want, "a name may land on the word iff a program may post it, and it is not kill");
+        if (bit < 0) continue;
+        TEST_ASSERT((u32)bit < 8u * sizeof(g_dn_a.note_direct), "the family fits note_direct");
+        TEST_ASSERT(!(seen & (1u << (u32)bit)), "two postable names share a family: the word could not say which");
+        seen |= 1u << (u32)bit;
+        // What the word says back is the name that was posted.
+        TEST_EXPECT_EQ(proc_note_thread(p, DN_TID_A, name, NULL), 0, "the post lands");
+        struct Note n;
+        int direct = -2;
+        TEST_EXPECT_EQ(notes_tail_candidate_for_test(p, &g_dn_a, &n, &direct), 1, "and the thread has a candidate");
+        TEST_EXPECT_EQ(direct, bit, "the word's bit");
+        TEST_ASSERT(dn_same_name(n.name, name), "whose name is the name posted");
+        struct Note got;
+        TEST_EXPECT_EQ(notes_tail_consume_for_test(p, &g_dn_a, direct, &got), 1, "consumed");
+    }
+    TEST_ASSERT(walked > 4 && seen != 0, "the walk saw the table");
+    TEST_ASSERT(notes_direct_bit(NOTE_NAME_INTERRUPT) == NOTE_BIT_INTERRUPT &&
+                notes_direct_bit(NOTE_NAME_TERM) == NOTE_BIT_TERM &&
+                notes_direct_bit(NOTE_NAME_PIPE) == NOTE_BIT_PIPE &&
+                notes_direct_bit(NOTE_NAME_CHILD_EXIT) == NOTE_BIT_CHILD_EXIT,
+                "the four a program can post");
+    TEST_ASSERT(notes_direct_bit(NOTE_NAME_KILL) < 0 && notes_direct_bit(NOTE_NAME_TTY_HUP) < 0 &&
+                notes_direct_bit(NOTE_NAME_SAK) < 0 && notes_direct_bit("snare:segv") < 0 &&
+                notes_direct_bit("nope") < 0, "never kill, a kernel-only name, or nonsense");
+    dn_free(p);
+}
+
+void test_notes_direct_reaches_only_its_thread(void) {
+    struct Proc *p = dn_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc succeeded");
+    p->handler_va = DN_HANDLER_VA;
+    u32 const intr = 1u << NOTE_BIT_INTERRUPT, term = 1u << NOTE_BIT_TERM;
+    struct Note n, got;
+    int direct;
+
+    TEST_EXPECT_EQ(proc_note_thread(p, DN_TID_A, NOTE_NAME_INTERRUPT, NULL), 0, "post at a");
+    TEST_EXPECT_EQ(dn_word(&g_dn_a), intr, "a holds it");
+    TEST_EXPECT_EQ(dn_word(&g_dn_b), 0u, "b does not");
+    TEST_EXPECT_EQ(p->notes->count, 0u, "nor does the Proc's queue");
+    TEST_EXPECT_EQ(notes_tail_candidate_for_test(p, &g_dn_b, &n, &direct), 0, "b's tail finds nothing");
+    TEST_EXPECT_EQ(notes_tail_candidate_for_test(p, &g_dn_a, &n, &direct), 1, "a's tail finds it");
+    TEST_EXPECT_EQ(direct, (int)NOTE_BIT_INTERRUPT, "on the word");
+
+    TEST_EXPECT_EQ(proc_note_thread(p, DN_TID_A, NOTE_NAME_INTERRUPT, NULL), 0, "a second post");
+    TEST_EXPECT_EQ(dn_word(&g_dn_a), intr, "coalesces");
+
+    // Masked, it waits on this thread: the peer still cannot have it.
+    g_dn_a.note_mask = intr;
+    TEST_EXPECT_EQ(notes_tail_candidate_for_test(p, &g_dn_a, &n, &direct), 0, "masked: a's tail passes");
+    TEST_EXPECT_EQ(notes_tail_candidate_for_test(p, &g_dn_b, &n, &direct), 0, "and b's still finds nothing");
+    TEST_EXPECT_EQ(dn_word(&g_dn_a), intr, "it stays");
+    g_dn_a.note_mask = 0;
+    TEST_EXPECT_EQ(notes_tail_candidate_for_test(p, &g_dn_a, &n, &direct), 1, "unmasked: a's tail takes it");
+    TEST_EXPECT_EQ(notes_tail_consume_for_test(p, &g_dn_a, direct, &got), 1, "consumed");
+    TEST_ASSERT(dn_same_name(got.name, NOTE_NAME_INTERRUPT), "the interrupt");
+    TEST_EXPECT_EQ(dn_word(&g_dn_a), 0u, "exactly once: the word is clear");
+    TEST_EXPECT_EQ(notes_tail_consume_for_test(p, &g_dn_a, direct, &got), 0, "and a second consume finds nothing");
+
+    // The control, one variable away: a queued note reaches the peer's tail, so
+    // b's refusals above were the word's doing.
+    TEST_EXPECT_EQ(notes_post(p, NOTE_NAME_INTERRUPT, 0u, NULL, true), 0, "queue an interrupt");
+    TEST_EXPECT_EQ(notes_tail_candidate_for_test(p, &g_dn_b, &n, &direct), 1, "control: b can take a queued note");
+    TEST_EXPECT_EQ(direct, -1, "from the queue");
+
+    // The thread's own note comes first, as Linux's dequeue takes private before
+    // shared. Lowest family first on the word.
+    TEST_EXPECT_EQ(proc_note_thread(p, DN_TID_A, NOTE_NAME_TERM, NULL), 0, "post term at a");
+    TEST_EXPECT_EQ(dn_word(&g_dn_a), term, "a holds term");
+    TEST_EXPECT_EQ(notes_tail_candidate_for_test(p, &g_dn_a, &n, &direct), 1, "a's tail");
+    TEST_EXPECT_EQ(direct, (int)NOTE_BIT_TERM, "takes its own before the queued interrupt");
+    TEST_ASSERT(dn_same_name(n.name, NOTE_NAME_TERM), "the term");
+
+    // A queued kill beats everything: it is the group's end.
+    TEST_EXPECT_EQ(notes_post(p, NOTE_NAME_KILL, 0u, NULL, true), 0, "queue a kill");
+    TEST_EXPECT_EQ(notes_tail_candidate_for_test(p, &g_dn_a, &n, &direct), 1, "a's tail");
+    TEST_EXPECT_EQ(direct, -1, "takes the kill first");
+    TEST_ASSERT(notes_name_is_kill(n.name), "and it is the kill");
+    dn_free(p);
+}
+
+void test_notes_direct_post_gates(void) {
+    struct Proc *p = dn_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc succeeded");
+    p->handler_va = DN_HANDLER_VA;
+    u32 const term = 1u << NOTE_BIT_TERM;
+
+    TEST_EXPECT_EQ(proc_note_thread(p, DN_NO_TID, NOTE_NAME_TERM, NULL), -(int)T_E_SRCH, "no such thread");
+    TEST_EXPECT_EQ(proc_note_thread(p, DN_TID_A, NOTE_NAME_KILL, NULL), -(int)T_E_INVAL, "kill never lands on the word");
+    TEST_EXPECT_EQ(proc_note_thread(p, DN_TID_A, NOTE_NAME_TTY_HUP, NULL), -(int)T_E_INVAL, "nor a kernel-only name");
+    TEST_EXPECT_EQ(proc_note_thread(p, DN_NO_TID, "nope", NULL), -(int)T_E_INVAL, "the name is judged before the tid");
+    TEST_EXPECT_EQ(dn_word(&g_dn_a), 0u, "nothing landed");
+
+    // An exiting thread accepts it and nothing receives it, as a dead child does.
+    g_dn_a.state = THREAD_EXITING;
+    TEST_EXPECT_EQ(proc_note_thread(p, DN_TID_A, NOTE_NAME_TERM, NULL), 0, "an exiting thread answers 0");
+    TEST_EXPECT_EQ(dn_word(&g_dn_a), 0u, "and holds nothing");
+    g_dn_a.state = THREAD_RUNNING;
+
+    p->state = PROC_STATE_ZOMBIE;
+    TEST_EXPECT_EQ(proc_note_thread(p, DN_TID_A, NOTE_NAME_TERM, NULL), 0, "a dead Proc answers 0");
+    TEST_EXPECT_EQ(dn_word(&g_dn_a), 0u, "and holds nothing");
+    p->state = PROC_STATE_ALIVE;
+
+    TEST_EXPECT_EQ(proc_note_thread(p, DN_TID_A, NOTE_NAME_TERM, NULL), 0, "control: alive and running, it lands");
+    TEST_EXPECT_EQ(dn_word(&g_dn_a), term, "on a");
+    __atomic_store_n(&g_dn_a.note_direct, 0, __ATOMIC_RELEASE);
+
+    // SYS_POSTNOTE_TID past its copy: the name, then the tid, then any death.
+    TEST_EXPECT_EQ(sys_postnote_tid_for_test(p, DN_TID_A, "nope"), -(s64)T_E_INVAL, "a bad name");
+    TEST_EXPECT_EQ(sys_postnote_tid_for_test(p, DN_NO_TID, "nope"), -(s64)T_E_INVAL, "a bad name before a bad tid");
+    TEST_EXPECT_EQ(sys_postnote_tid_for_test(p, DN_TID_A, NOTE_NAME_TTY_HUP), -(s64)T_E_INVAL, "a kernel-only name");
+    TEST_EXPECT_EQ(sys_postnote_tid_for_test(p, DN_NO_TID, NOTE_NAME_TERM), -(s64)T_E_SRCH, "a thread that is gone");
+    TEST_EXPECT_EQ(sys_postnote_tid_for_test(p, DN_NO_TID, NOTE_NAME_KILL), -(s64)T_E_SRCH, "ends nothing, even for kill");
+    TEST_EXPECT_EQ(sys_postnote_tid_for_test(p, DN_NO_TID, "snare:segv"), -(s64)T_E_SRCH, "or a snare");
+    TEST_EXPECT_EQ(sys_postnote_tid_for_test(p, DN_TID_A, "snare:segv"), (s64)1, "a named thread reaches the snare death");
+    TEST_EXPECT_EQ(sys_postnote_tid_for_test(p, DN_TID_B, NOTE_NAME_TERM), (s64)0, "a plain post");
+    TEST_EXPECT_EQ(dn_word(&g_dn_b), term, "lands on the thread it named");
+    TEST_EXPECT_EQ(dn_word(&g_dn_a), 0u, "and no other");
+    dn_free(p);
+}
+
+void test_notes_direct_ignored_and_discarded(void) {
+    struct Proc *p = dn_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc succeeded");
+    struct viv_sigtab *tab = (struct viv_sigtab *)kzalloc(sizeof(struct viv_sigtab), 0);
+    TEST_ASSERT(tab != NULL, "sigtab alloc");
+    p->sigtab    = tab;                // freed by proc_free
+    p->phenotype = PHENO_LINUX;
+    u32 const intr = 1u << NOTE_BIT_INTERRUPT, term = 1u << NOTE_BIT_TERM;
+
+    // Both threads hold an interrupt, a term on a beside it. rt_sigaction ignoring
+    // interrupt reaches every thread, and only that family.
+    TEST_EXPECT_EQ(proc_note_thread(p, DN_TID_A, NOTE_NAME_INTERRUPT, NULL), 0, "post at a");
+    TEST_EXPECT_EQ(proc_note_thread(p, DN_TID_A, NOTE_NAME_TERM, NULL), 0, "and term at a");
+    TEST_EXPECT_EQ(proc_note_thread(p, DN_TID_B, NOTE_NAME_INTERRUPT, NULL), 0, "post at b");
+    TEST_EXPECT_EQ(dn_word(&g_dn_a), intr | term, "a holds both");
+    TEST_EXPECT_EQ(notes_post(p, NOTE_NAME_INTERRUPT, 0u, NULL, true), 0, "and one queued");
+    TEST_EXPECT_EQ(notes_discard_name(p, NOTE_NAME_INTERRUPT), 3u, "the queue's and both words'");
+    TEST_EXPECT_EQ(dn_word(&g_dn_a), term, "a keeps term");
+    TEST_EXPECT_EQ(dn_word(&g_dn_b), 0u, "b holds nothing");
+    TEST_EXPECT_EQ(p->notes->count, 0u, "the queue is empty");
+    TEST_EXPECT_EQ(notes_discard_name(p, NOTE_NAME_INTERRUPT), 0u, "a second discard finds nothing");
+    TEST_EXPECT_EQ(notes_discard_name(p, NOTE_NAME_KILL), 0u, "a kill is never discarded");
+
+    // Ignored already: the post refuses it, so it never takes a bit.
+    struct viv_ksigaction ign = { .handler = VIV_SIG_IGN, .flags = 0, .restorer = 0, .mask = 0 };
+    TEST_ASSERT(viv_sigtab_set(tab, VIV_SIGNOTE_INTERRUPT, &ign), "SIG_IGN interrupt");
+    TEST_EXPECT_EQ(proc_note_thread(p, DN_TID_B, NOTE_NAME_INTERRUPT, NULL), 0, "an ignored post answers 0");
+    TEST_EXPECT_EQ(dn_word(&g_dn_b), 0u, "and holds nothing");
+    TEST_EXPECT_EQ(proc_note_thread(p, DN_TID_B, NOTE_NAME_PIPE, NULL), 0, "control: pipe is not ignored");
+    TEST_EXPECT_EQ(dn_word(&g_dn_b), 1u << NOTE_BIT_PIPE, "and lands");
+    dn_free(p);
+}
+
+// The race the candidate + consume split exists for: q->lock does not guard the
+// word, so an rt_sigaction on a peer can take a bit between the tail's peek and its
+// consume. Then the tail delivers nothing; it must never run the frame it built on
+// whatever note came next.
+void test_notes_direct_candidate_discarded_delivers_nothing(void) {
+    struct Proc *p = dn_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc succeeded");
+    p->handler_va = DN_HANDLER_VA;
+    struct Note n, got;
+    int direct;
+    TEST_EXPECT_EQ(notes_post(p, NOTE_NAME_CHILD_EXIT, 0u, NULL, true), 0, "a queued note behind it");
+    TEST_EXPECT_EQ(proc_note_thread(p, DN_TID_A, NOTE_NAME_INTERRUPT, NULL), 0, "post at a");
+    TEST_EXPECT_EQ(notes_tail_candidate_for_test(p, &g_dn_a, &n, &direct), 1, "the tail peeks");
+    TEST_EXPECT_EQ(direct, (int)NOTE_BIT_INTERRUPT, "the word's");
+    TEST_EXPECT_EQ(notes_discard_name(p, NOTE_NAME_INTERRUPT), 1u, "a peer's rt_sigaction takes it");
+    TEST_EXPECT_EQ(notes_tail_consume_for_test(p, &g_dn_a, direct, &got), 0, "the consume finds it gone");
+    TEST_EXPECT_EQ(p->notes->count, 1u, "and popped nothing else");
+
+    TEST_EXPECT_EQ(proc_note_thread(p, DN_TID_A, NOTE_NAME_INTERRUPT, NULL), 0, "control: post again");
+    TEST_EXPECT_EQ(notes_tail_candidate_for_test(p, &g_dn_a, &n, &direct), 1, "peek");
+    TEST_EXPECT_EQ(notes_tail_consume_for_test(p, &g_dn_a, direct, &got), 1, "undisturbed, it is consumed");
+    TEST_ASSERT(dn_same_name(got.name, NOTE_NAME_INTERRUPT), "the interrupt");
+    dn_free(p);
+}
+
+// A note whose default ends the Proc, read at the moment of asking, for this thread.
+void test_notes_direct_die_predicate(void) {
+    struct Proc *p = dn_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc succeeded");
+    u32 const term = 1u << NOTE_BIT_TERM;
+
+    TEST_ASSERT(!thread_die_pending(&g_dn_a), "fresh: a would not die");
+    TEST_EXPECT_EQ(proc_note_thread(p, DN_TID_A, NOTE_NAME_TERM, NULL), 0, "post term at a, no handler");
+    TEST_EXPECT_EQ(p->notes->count, 0u, "the queue holds nothing");
+    TEST_ASSERT(thread_die_pending(&g_dn_a), "a dies of it");
+    TEST_ASSERT(!thread_die_pending(&g_dn_b), "b, which it does not name, does not");
+    TEST_ASSERT(!proc_intr_terminate_pending(p), "and no group latch armed");
+
+    g_dn_a.note_mask = term;
+    TEST_ASSERT(!thread_die_pending(&g_dn_a), "masked, it waits behind that thread's mask");
+    g_dn_a.note_mask = 0;
+    TEST_ASSERT(thread_die_pending(&g_dn_a), "unmasked, it is fatal again");
+
+    // Read at use, not latched at the post: a handler makes it a caught note, and
+    // losing the handler makes it fatal again.
+    __atomic_store_n(&p->handler_va, DN_HANDLER_VA, __ATOMIC_RELEASE);
+    TEST_ASSERT(!thread_die_pending(&g_dn_a), "with a handler it is caught");
+    __atomic_store_n(&p->handler_va, 0ull, __ATOMIC_RELEASE);
+    TEST_ASSERT(thread_die_pending(&g_dn_a), "without one, fatal");
+
+    // A note whose default is to ignore never kills.
+    __atomic_store_n(&g_dn_a.note_direct, 1u << NOTE_BIT_CHILD_EXIT, __ATOMIC_RELEASE);
+    TEST_ASSERT(!thread_die_pending(&g_dn_a), "child_exit's default ignores");
+    __atomic_store_n(&g_dn_a.note_direct, 0, __ATOMIC_RELEASE);
+    dn_free(p);
+}
+
+// A caught note unwinds its one taker with no family claim, in a phenotype Proc;
+// a native wait rides it out (item 11c).
+void test_notes_direct_deliverable_takes_no_claim(void) {
+    struct Proc *p = dn_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc succeeded");
+    struct viv_sigtab *tab = (struct viv_sigtab *)kzalloc(sizeof(struct viv_sigtab), 0);
+    TEST_ASSERT(tab != NULL, "sigtab alloc");
+    p->sigtab    = tab;                // freed by proc_free
+    p->phenotype = PHENO_LINUX;
+    struct viv_ksigaction hand = { .handler = 0x1000, .flags = 0, .restorer = 0x2000, .mask = 0 };
+    TEST_ASSERT(viv_sigtab_set(tab, VIV_SIGNOTE_INTERRUPT, &hand), "catch interrupt");
+    g_dn_a.note_interruptible = true;
+    g_dn_b.note_interruptible = true;
+    u32 const intr = 1u << NOTE_BIT_INTERRUPT;
+
+    TEST_ASSERT(!thread_caught_note_deliverable(&g_dn_a), "fresh: nothing to deliver");
+    TEST_EXPECT_EQ(proc_note_thread(p, DN_TID_A, NOTE_NAME_INTERRUPT, NULL), 0, "post at a");
+    TEST_ASSERT(thread_caught_note_deliverable(&g_dn_a), "a's listed wait would unwind");
+    TEST_ASSERT(!thread_caught_note_deliverable(&g_dn_b), "b's would not");
+    TEST_ASSERT(!thread_die_pending(&g_dn_a), "and it is caught, not fatal");
+    TEST_ASSERT(thread_caught_note_claim(&g_dn_a), "a's unwind test passes");
+    TEST_EXPECT_EQ(__atomic_load_n(&g_dn_a.note_claim, __ATOMIC_ACQUIRE), 0u, "holding no claim");
+    TEST_EXPECT_EQ(__atomic_load_n(&p->note_caught, __ATOMIC_ACQUIRE), 0u, "and arming no family bit");
+
+    g_dn_a.note_mask = intr;
+    TEST_ASSERT(!thread_caught_note_deliverable(&g_dn_a), "masked: not deliverable");
+    g_dn_a.note_mask = 0;
+    g_dn_a.in_handler = true;
+    TEST_ASSERT(!thread_caught_note_deliverable(&g_dn_a), "in a handler: not deliverable (N-3)");
+    g_dn_a.in_handler = false;
+    g_dn_a.note_interruptible = false;
+    TEST_ASSERT(!thread_caught_note_deliverable(&g_dn_a), "a wait a signal may not interrupt rides it out");
+    g_dn_a.note_interruptible = true;
+    TEST_ASSERT(thread_caught_note_deliverable(&g_dn_a), "control: all three lifted, deliverable");
+    g_dn_a.note_interruptible = false;
+    g_dn_b.note_interruptible = false;
+    dn_free(p);
+}
+
+// A Proc reading its notes from an fd has no per-thread reader, and runs no handler.
+void test_notes_direct_self_managing_uses_the_queue(void) {
+    struct Proc *p = dn_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc succeeded");
+    p->handler_va = DN_HANDLER_VA;
+    TEST_EXPECT_EQ(proc_note_thread(p, DN_TID_A, NOTE_NAME_TERM, NULL), 0, "post at a");
+    TEST_EXPECT_EQ(proc_note_thread(p, DN_TID_B, NOTE_NAME_INTERRUPT, NULL), 0, "post at b");
+    TEST_EXPECT_EQ(p->notes->count, 0u, "before the mark, each on its word");
+    __atomic_store_n(&p->handler_va, 0ull, __ATOMIC_RELEASE);
+
+    notes_mark_self_managing(p);
+    TEST_EXPECT_EQ(dn_word(&g_dn_a), 0u, "the mark moves a's word");
+    TEST_EXPECT_EQ(dn_word(&g_dn_b), 0u, "and b's");
+    TEST_EXPECT_EQ(ndflt_note_count(p, NOTE_NAME_TERM), 1u, "to the queue the fd reads");
+    TEST_EXPECT_EQ(ndflt_note_count(p, NOTE_NAME_INTERRUPT), 1u, "both of them");
+    TEST_EXPECT_EQ(dn_queued_sender(p, NOTE_NAME_TERM), 0u, "a moved note records no sender");
+
+    TEST_ASSERT(p->pid != 0, "a sender is told from none by its pid");
+    TEST_EXPECT_EQ(proc_note_thread(p, DN_TID_A, NOTE_NAME_PIPE, p), 0, "after the mark");
+    TEST_EXPECT_EQ(dn_word(&g_dn_a), 0u, "a post takes no bit");
+    TEST_EXPECT_EQ(ndflt_note_count(p, NOTE_NAME_PIPE), 1u, "and joins the queue");
+    TEST_EXPECT_EQ(dn_queued_sender(p, NOTE_NAME_PIPE), (u32)p->pid, "with its sender");
+    TEST_EXPECT_EQ(proc_note_thread(p, DN_TID_A, NOTE_NAME_CHILD_EXIT, NULL), 0, "control: no sender");
+    TEST_EXPECT_EQ(dn_queued_sender(p, NOTE_NAME_CHILD_EXIT), 0u, "control: none recorded");
+    TEST_EXPECT_EQ(proc_note_thread(p, DN_NO_TID, NOTE_NAME_PIPE, NULL), -(int)T_E_SRCH, "the tid is still judged");
+    dn_free(p);
+}
+
+// Every way a program reaches the self-managing fallback names who sent the note.
+void test_notes_direct_fallback_records_its_sender(void) {
+    struct Proc *caller = proc_alloc();
+    struct Proc *child  = proc_alloc();
+    TEST_ASSERT(caller && child, "proc_alloc x2");
+    proc_test_link(caller);
+    proc_test_link_child(caller, child);
+    static struct Thread cth, kth;
+    kfg_thread(&cth, caller, 0x3f000021);
+    kfg_thread(&kth, child,  0x3f000022);
+    notes_mark_self_managing(caller);
+    notes_mark_self_managing(child);
+
+    s64 r_cross = viv_kill_for_test(caller, child->pid, kth.tid, VIV_SIGINT);
+    u32 s_cross = dn_queued_sender(child, NOTE_NAME_INTERRUPT);
+    s64 r_self  = viv_kill_for_test(caller, 0, cth.tid, VIV_SIGTERM);
+    u32 s_self  = dn_queued_sender(caller, NOTE_NAME_TERM);
+    s64 r_tid   = sys_postnote_tid_for_test(caller, cth.tid, NOTE_NAME_PIPE);
+    u32 s_tid   = dn_queued_sender(caller, NOTE_NAME_PIPE);
+    u32 caller_pid = (u32)caller->pid;
+
+    child->state = PROC_STATE_ZOMBIE;
+    proc_test_unlink(child);
+    child->threads = NULL;
+    proc_free(child);
+    proc_test_unlink(caller);
+    caller->threads = NULL;
+    caller->state   = PROC_STATE_ZOMBIE;
+    proc_free(caller);
+
+    TEST_ASSERT(caller_pid != 0, "a sender is told from none by its pid");
+    TEST_EXPECT_EQ(r_cross, (s64)0, "tgkill at a child's thread posts");
+    TEST_EXPECT_EQ(s_cross, caller_pid, "and the child's queue names the parent");
+    TEST_EXPECT_EQ(r_self, (s64)0, "tkill at the caller's own thread posts");
+    TEST_EXPECT_EQ(s_self, caller_pid, "and names the caller");
+    TEST_EXPECT_EQ(r_tid, (s64)0, "SYS_POSTNOTE_TID posts");
+    TEST_EXPECT_EQ(s_tid, caller_pid, "and names the caller");
+}
+
+// A direct post answered 0 before the mark, so the move to the queue cannot be refused.
+// A post is still refused at the depth; each moved family takes a slot past it, and a
+// move of a name still queued coalesces, which is why those slots cannot run out.
+void test_notes_direct_move_survives_a_full_ring(void) {
+    struct Proc *p = dn_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc succeeded");
+    TEST_ASSERT(p->pid != 0, "a post's sender is told from a move's none");
+    p->handler_va = DN_HANDLER_VA;
+    for (u32 i = 0; i < NOTE_QUEUE_DEPTH; i++)
+        TEST_EXPECT_EQ(notes_post(p, NOTE_NAME_INTERRUPT, i, p, false), 0, "fill to the depth");
+    TEST_EXPECT_EQ(notes_post(p, NOTE_NAME_INTERRUPT, 99u, p, false), -(int)T_E_AGAIN, "the depth refuses a post");
+    TEST_EXPECT_EQ(proc_note_thread(p, DN_TID_A, NOTE_NAME_TERM, NULL), 0, "term at a");
+    TEST_EXPECT_EQ(proc_note_thread(p, DN_TID_A, NOTE_NAME_PIPE, NULL), 0, "pipe at a");
+    TEST_EXPECT_EQ(proc_note_thread(p, DN_TID_A, NOTE_NAME_CHILD_EXIT, NULL), 0, "child_exit at a");
+    TEST_EXPECT_EQ(proc_note_thread(p, DN_TID_B, NOTE_NAME_INTERRUPT, NULL), 0, "interrupt at b");
+    TEST_EXPECT_EQ(proc_note_thread(p, DN_TID_B, NOTE_NAME_TERM, NULL), 0, "term at b");
+
+    notes_mark_self_managing(p);
+    TEST_EXPECT_EQ(dn_word(&g_dn_a), 0u, "the mark emptied a's word");
+    TEST_EXPECT_EQ(dn_word(&g_dn_b), 0u, "and b's");
+    TEST_EXPECT_EQ(p->notes->count, NOTE_QUEUE_DEPTH + 4u, "each family took a slot past the depth");
+    TEST_EXPECT_EQ(ndflt_note_count(p, NOTE_NAME_TERM), 1u, "term from two words is one family");
+    TEST_EXPECT_EQ(notes_post(p, NOTE_NAME_TERM, 98u, p, false), -(int)T_E_AGAIN, "past the depth a post is refused");
+
+    // A pop past the depth still has its slot to go back to, as kill's re-enqueue needs.
+    struct Note n;
+    TEST_EXPECT_EQ(dn_pop(p, &n), 1, "a pop past the depth");
+    spin_lock(&p->notes->lock);
+    int re = notes_reenqueue_head_locked(p->notes, &n);
+    spin_unlock(&p->notes->lock);
+    TEST_EXPECT_EQ(re, 0, "and its re-enqueue");
+    TEST_EXPECT_EQ(p->notes->count, NOTE_QUEUE_DEPTH + 4u, "leaves the count");
+
+    for (u32 i = 0; i < NOTE_QUEUE_DEPTH; i++) {
+        TEST_EXPECT_EQ(dn_pop(p, &n), 1, "the posts first");
+        TEST_EXPECT_EQ(n.arg, i, "in the order posted");
+        TEST_EXPECT_EQ(n.sender_pid, (u32)p->pid, "with their sender");
+    }
+    int last_bit = -1;
+    for (u32 i = 0; i < 4u; i++) {
+        TEST_EXPECT_EQ(dn_pop(p, &n), 1, "then the moved families");
+        TEST_ASSERT(notes_direct_bit(n.name) > last_bit, "each once, in bit order");
+        last_bit = notes_direct_bit(n.name);
+        TEST_EXPECT_EQ(n.sender_pid, 0u, "with no sender");
+    }
+    TEST_EXPECT_EQ(p->notes->count, 0u, "drained");
+
+    // The next fill crosses the ring's last slot, so the walks below wrap there.
+    for (u32 i = 0; i < NOTE_QUEUE_DEPTH; i++)
+        TEST_EXPECT_EQ(notes_post(p, NOTE_NAME_INTERRUPT, 100u + i, p, false), 0, "fill again");
+    __atomic_and_fetch(&p->proc_flags, ~PROC_FLAG_SELF_MANAGING_NOTES, __ATOMIC_RELEASE);
+    TEST_EXPECT_EQ(proc_note_thread(p, DN_TID_A, NOTE_NAME_TERM, NULL), 0, "term again");
+    notes_mark_self_managing(p);
+    TEST_EXPECT_EQ(p->notes->count, NOTE_QUEUE_DEPTH + 1u, "takes a slot past the depth");
+    __atomic_and_fetch(&p->proc_flags, ~PROC_FLAG_SELF_MANAGING_NOTES, __ATOMIC_RELEASE);
+    TEST_EXPECT_EQ(proc_note_thread(p, DN_TID_A, NOTE_NAME_TERM, NULL), 0, "term once more");
+    notes_mark_self_managing(p);
+    TEST_EXPECT_EQ(p->notes->count, NOTE_QUEUE_DEPTH + 1u, "coalesces with the one queued");
+    TEST_EXPECT_EQ(ndflt_note_count(p, NOTE_NAME_TERM), 1u, "one term");
+    for (u32 i = 0; i < NOTE_QUEUE_DEPTH; i++) {
+        TEST_EXPECT_EQ(dn_pop(p, &n), 1, "the wrapped fill");
+        TEST_EXPECT_EQ(n.arg, 100u + i, "in order across the wrap");
+    }
+    TEST_EXPECT_EQ(dn_pop(p, &n), 1, "then term");
+    TEST_ASSERT(dn_same_name(n.name, NOTE_NAME_TERM), "named term");
+    TEST_EXPECT_EQ(p->notes->count, 0u, "drained again");
+    dn_free(p);
+}
+
+// A consumed direct note goes back when its frame's push faults. If a peer opened the
+// note fd while it was out, nothing will ever read a word again, so it goes to the queue.
+void test_notes_direct_unconsume_after_the_mark_goes_to_the_queue(void) {
+    struct Proc *p = dn_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc succeeded");
+    p->handler_va = DN_HANDLER_VA;
+    const u32 term = 1u << (u32)NOTE_BIT_TERM;
+    struct Note n;
+    int direct = -1;
+
+    TEST_EXPECT_EQ(proc_note_thread(p, DN_TID_A, NOTE_NAME_TERM, NULL), 0, "post at a");
+    TEST_EXPECT_EQ(notes_tail_candidate_for_test(p, &g_dn_a, &n, &direct), 1, "a's tail finds it");
+    TEST_EXPECT_EQ(direct, (int)NOTE_BIT_TERM, "on the word");
+    TEST_EXPECT_EQ(notes_tail_consume_for_test(p, &g_dn_a, direct, &n), 1, "and consumes it");
+    TEST_EXPECT_EQ(dn_word(&g_dn_a), 0u, "the word is empty");
+    notes_tail_unconsume_for_test(p, &g_dn_a, direct, &n);
+    TEST_EXPECT_EQ(dn_word(&g_dn_a), term, "control: with no mark it goes back on the word");
+    TEST_EXPECT_EQ(p->notes->count, 0u, "control: and not to the queue");
+
+    TEST_EXPECT_EQ(notes_tail_consume_for_test(p, &g_dn_a, direct, &n), 1, "consumed again");
+    notes_mark_self_managing(p);
+    notes_tail_unconsume_for_test(p, &g_dn_a, direct, &n);
+    TEST_EXPECT_EQ(dn_word(&g_dn_a), 0u, "after the mark no word holds it");
+    TEST_EXPECT_EQ(ndflt_note_count(p, NOTE_NAME_TERM), 1u, "the queue does");
+    dn_free(p);
+}
+
+// The user-defined notes: each terminates by default and records its own signal, on
+// a latch of its own, so blocking one leaves the other fatal. Red before they existed,
+// when neither name was a note and the post was refused.
+void test_notes_usr_notes_die_apart(void) {
+    static const struct {
+        const char *name;
+        u32 bit, other_bit, latch, other_latch;
+        int sig;
+    } rows[2] = {
+        { NOTE_NAME_USR1, NOTE_BIT_USR1, NOTE_BIT_USR2, PROC_FLAG_USR1_TERMINATE_PENDING,
+          PROC_FLAG_USR2_TERMINATE_PENDING, 10 },
+        { NOTE_NAME_USR2, NOTE_BIT_USR2, NOTE_BIT_USR1, PROC_FLAG_USR2_TERMINATE_PENDING,
+          PROC_FLAG_USR1_TERMINATE_PENDING, 12 },
+    };
+    for (u32 i = 0; i < 2u; i++) {
+        struct Proc *p = proc_alloc();
+        TEST_ASSERT(p != NULL, "proc_alloc succeeded");
+
+        struct Thread fake_t;
+        fake_t.note_direct         = 0;
+        fake_t.proc                = p;
+        fake_t.note_mask           = 0u;
+        fake_t.exit_close_active   = false;
+        fake_t.kthread_join_active = false;
+
+        const char *name = rows[i].name;
+        bool fresh = thread_die_pending(&fake_t);
+        int  dfl   = (int)notes_default_action(name);
+        int  sig   = notes_death_signal(name);
+        int  bit   = notes_direct_bit(name);
+        int  post  = notes_post(p, name, 0u, NULL, false);
+        u32  flags = __atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE);
+        bool gate  = proc_intr_terminate_pending(p);
+        bool open_ = thread_die_pending(&fake_t);
+        fake_t.note_mask = (u64)1u << rows[i].other_bit;
+        bool other_masked = thread_die_pending(&fake_t);
+        fake_t.note_mask = (u64)1u << rows[i].bit;
+        bool own_masked = thread_die_pending(&fake_t);
+        fake_t.note_mask = 0u;
+        struct Note got;
+        got.name[0] = 0;
+        spin_lock(&p->notes->lock);
+        int deq = notes_dequeue_for_fd_locked(p, NULL, &got);
+        spin_unlock(&p->notes->lock);
+        bool got_it  = dn_same_name(got.name, name);
+        bool drained = thread_die_pending(&fake_t);
+
+        p->state = PROC_STATE_ZOMBIE;
+        proc_free(p);
+
+        TEST_ASSERT(!fresh, "fresh Proc -> false");
+        TEST_EXPECT_EQ(dfl, (int)NOTE_DFL_TERMINATE, "its default action is TERMINATE");
+        TEST_EXPECT_EQ(sig, rows[i].sig, "a death by it records its own signal");
+        TEST_EXPECT_EQ(bit, (int)rows[i].bit, "a program may aim it at a thread, on its own bit");
+        TEST_EXPECT_EQ(post, 0, "a userspace post of it is accepted");
+        TEST_ASSERT((flags & rows[i].latch) != 0, "it arms its own latch");
+        TEST_ASSERT((flags & rows[i].other_latch) == 0, "and not its twin's");
+        TEST_ASSERT(gate, "the wake gate fires on it");
+        TEST_ASSERT(open_, "armed + unmasked -> true");
+        TEST_ASSERT(other_masked, "its twin masked -> still true (per-family)");
+        TEST_ASSERT(!own_masked, "itself masked -> false");
+        TEST_ASSERT(deq >= 0 && got_it, "the queued note is it");
+        TEST_ASSERT(!drained, "drained -> the latch clears -> false");
+    }
+}
+
+static u32 fb_latch(const struct Proc *p) {
+    return (__atomic_load_n(&p->note_caught, __ATOMIC_ACQUIRE) & CAUGHT_LATCH_MASK) >> CAUGHT_LATCH_SHIFT;
+}
+static u32 fb_claim(const struct Proc *p) {
+    return (__atomic_load_n(&p->note_caught, __ATOMIC_ACQUIRE) & CAUGHT_CLAIM_MASK) >> CAUGHT_CLAIM_SHIFT;
+}
+
+// A family bit a byte cannot hold, through every word it passes: the latch, the claim
+// half, a thread's claim, its designation, a hand-off, and the direct word's post,
+// consume, unconsume, discard and move. Each is a cast a narrower type turns into 0,
+// which compiles.
+void test_notes_family_past_the_first_byte(void) {
+    const u32 usr1 = 1u << NOTE_BIT_USR1, usr2 = 1u << NOTE_BIT_USR2;
+
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc succeeded");
+    p->state     = PROC_STATE_ALIVE;
+    p->phenotype = PHENO_LINUX;
+    notes_set_handler(p, 0x1000u);
+
+    static struct Thread a, b;          // BSS-zeroed, reset each run
+    a.proc = b.proc = p;
+    a.note_mask = b.note_mask = 0u;
+    a.exit_close_active = b.exit_close_active = false;
+    a.in_handler = b.in_handler = false;
+    a.note_interruptible = b.note_interruptible = true;
+    a.note_claim = b.note_claim = 0u;
+    a.note_target = b.note_target = 0u;
+    a.note_direct = b.note_direct = 0u;
+
+    int  post   = notes_post(p, NOTE_NAME_USR2, 0u, NULL, true);
+    u32  latch  = fb_latch(p);
+    bool a1     = thread_caught_note_claim(&a);
+    u32  a_rec  = a.note_claim;
+    u32  held   = fb_claim(p);
+    bool b1     = thread_caught_note_claim(&b);
+
+    // A drain clears its latch bit and leaves the claim half alone.
+    struct Note got;
+    spin_lock(&p->notes->lock);
+    int  drain  = notes_dequeue_for_fd_locked(p, NULL, &got);
+    spin_unlock(&p->notes->lock);
+    u32  latch0 = fb_latch(p);
+    u32  held1  = fb_claim(p);
+    notes_release_claims_for_test(&a);
+    u32  a_rec0 = a.note_claim;
+    u32  held0  = fb_claim(p);
+
+    // A designation of the family becomes the claim when its thread unwinds.
+    int  post2  = notes_post(p, NOTE_NAME_USR2, 0u, NULL, true);
+    __atomic_or_fetch(&p->note_caught, usr2 << CAUGHT_CLAIM_SHIFT, __ATOMIC_RELEASE);
+    b.note_target = (u16)usr2;
+    bool b2     = thread_caught_note_claim(&b);
+    u32  b_rec  = b.note_claim;
+    u32  b_tgt  = b.note_target;
+    notes_release_claims_for_test(&b);
+
+    // A hand-off keeps the family it is told to, and gives up the claim bit otherwise.
+    __atomic_or_fetch(&p->note_caught, usr2 << CAUGHT_CLAIM_SHIFT, __ATOMIC_RELEASE);
+    a.note_target = (u16)usr2;
+    notes_handoff_target(&a, (u16)usr2);
+    u32  kept   = a.note_target;
+    u32  heldk  = fb_claim(p);
+    notes_handoff_target(&a, 0u);
+    u32  gone   = a.note_target;
+    u32  heldg  = fb_claim(p);
+
+    // Two families at once. Giving one up leaves the other's claim alone, a masked
+    // designation stays when its twin becomes the claim, and an exit gives up only
+    // what the thread holds: a mask cast to 16 bits would clear the whole claim half.
+    const u32 both = usr1 | usr2;
+    __atomic_or_fetch(&p->note_caught, both << CAUGHT_CLAIM_SHIFT, __ATOMIC_RELEASE);
+    a.note_target = (u16)usr1;
+    notes_handoff_target(&a, 0u);
+    u32  held2  = fb_claim(p);
+
+    int  post3  = notes_post(p, NOTE_NAME_USR1, 0u, NULL, true);
+    __atomic_or_fetch(&p->note_caught, both << CAUGHT_CLAIM_SHIFT, __ATOMIC_RELEASE);
+    b.note_mask   = usr2;
+    b.note_target = (u16)both;
+    bool b3     = thread_caught_note_claim(&b);
+    u32  b_rec3 = b.note_claim;
+    u32  b_tgt3 = b.note_target;
+    b.note_mask   = 0u;
+    b.note_target = 0u;
+    notes_release_claims_for_test(&b);
+
+    __atomic_or_fetch(&p->note_caught, both << CAUGHT_CLAIM_SHIFT, __ATOMIC_RELEASE);
+    a.note_claim  = (u16)usr1;
+    irq_state_t ts = proc_threads_lock(p);
+    notes_exit_drop_locked(&a);
+    proc_threads_unlock(p, ts);
+    u32  a_rec3 = a.note_claim;
+    u32  held3  = fb_claim(p);
+
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+
+    TEST_EXPECT_EQ(post, 0, "a caught usr2 is accepted");
+    TEST_EXPECT_EQ(latch, usr2, "its bit in the latch half");
+    TEST_ASSERT(a1, "the first sleeper claims it");
+    TEST_EXPECT_EQ(a_rec, usr2, "and records it");
+    TEST_EXPECT_EQ(held, usr2, "its bit in the claim half");
+    TEST_ASSERT(!b1, "a second sleeper is refused: the claim was seen");
+    TEST_ASSERT(drain >= 0, "the drain pops it");
+    TEST_EXPECT_EQ(latch0, 0u, "the latch bit cleared");
+    TEST_EXPECT_EQ(held1, usr2, "the claim survived the drain");
+    TEST_EXPECT_EQ(a_rec0, 0u, "the release empties the thread's record");
+    TEST_EXPECT_EQ(held0, 0u, "and the claim half");
+    TEST_EXPECT_EQ(post2, 0, "a second usr2 is accepted");
+    TEST_ASSERT(b2, "the designee unwinds");
+    TEST_EXPECT_EQ(b_rec, usr2, "its designation became its claim");
+    TEST_EXPECT_EQ(b_tgt, 0u, "and went");
+    TEST_EXPECT_EQ(kept, usr2, "a hand-off keeping the family leaves the designation");
+    TEST_EXPECT_EQ(heldk, usr2, "and the claim bit");
+    TEST_EXPECT_EQ(gone, 0u, "one that does not gives the designation up");
+    TEST_EXPECT_EQ(heldg, 0u, "and the claim bit");
+    TEST_EXPECT_EQ(held2, usr2, "a hand-off of usr1 leaves usr2's claim");
+    TEST_EXPECT_EQ(post3, 0, "a caught usr1 is accepted");
+    TEST_ASSERT(b3, "a designee of both, usr2 masked, unwinds");
+    TEST_EXPECT_EQ(b_rec3, usr1, "for usr1 alone");
+    TEST_EXPECT_EQ(b_tgt3, usr2, "and keeps the masked designation");
+    TEST_EXPECT_EQ(a_rec3, 0u, "an exit empties the thread's record");
+    TEST_EXPECT_EQ(held3, usr2, "and gives up its own family only");
+
+    struct Proc *d = dn_proc();
+    TEST_ASSERT(d != NULL, "proc_alloc succeeded");
+    d->handler_va = DN_HANDLER_VA;
+    struct Note n;
+    int direct = -1;
+    TEST_EXPECT_EQ(proc_note_thread(d, DN_TID_A, NOTE_NAME_USR2, NULL), 0, "post at a");
+    TEST_EXPECT_EQ(dn_word(&g_dn_a), usr2, "on a's word");
+    TEST_EXPECT_EQ(dn_word(&g_dn_b), 0u, "and not b's");
+    TEST_EXPECT_EQ(notes_tail_candidate_for_test(d, &g_dn_a, &n, &direct), 1, "a's tail finds it");
+    TEST_EXPECT_EQ(direct, (int)NOTE_BIT_USR2, "as this family");
+    TEST_ASSERT(dn_same_name(n.name, NOTE_NAME_USR2), "by name");
+    TEST_EXPECT_EQ(notes_tail_consume_for_test(d, &g_dn_a, direct, &n), 1, "and consumes it");
+    TEST_EXPECT_EQ(dn_word(&g_dn_a), 0u, "the word is empty");
+    notes_tail_unconsume_for_test(d, &g_dn_a, direct, &n);
+    TEST_EXPECT_EQ(dn_word(&g_dn_a), usr2, "an unconsume puts it back");
+    TEST_EXPECT_EQ(notes_discard_name(d, NOTE_NAME_USR2), 1u, "a discard takes it");
+    TEST_EXPECT_EQ(dn_word(&g_dn_a), 0u, "off the word");
+    TEST_EXPECT_EQ(proc_note_thread(d, DN_TID_A, NOTE_NAME_USR2, NULL), 0, "post again");
+    notes_mark_self_managing(d);
+    TEST_EXPECT_EQ(dn_word(&g_dn_a), 0u, "the mark empties the word");
+    TEST_EXPECT_EQ(ndflt_note_count(d, NOTE_NAME_USR2), 1u, "into the queue");
+    dn_free(d);
+}
+
+// NOTE_RING_SPARE is one per family, and a full ring must take every family a program
+// can aim at a thread: the table is walked, so a new row is counted.
+void test_notes_every_direct_family_fits_past_a_full_ring(void) {
+    struct Proc *p = dn_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc succeeded");
+    p->handler_va = DN_HANDLER_VA;
+    for (u32 i = 0; i < NOTE_QUEUE_DEPTH; i++)
+        TEST_EXPECT_EQ(notes_post(p, NOTE_NAME_INTERRUPT, i, p, false), 0, "fill to the depth");
+    u32 families = 0;
+    const char *name;
+    for (u32 i = 0; (name = notes_known_name_for_test(i)) != NULL; i++) {
+        if (notes_direct_bit(name) < 0) continue;
+        families++;
+        TEST_EXPECT_EQ(proc_note_thread(p, DN_TID_A, name, NULL), 0, "the post lands");
+    }
+    TEST_ASSERT(families >= 6u, "interrupt, pipe, child_exit, term, usr1 and usr2 at least");
+    notes_mark_self_managing(p);
+    TEST_EXPECT_EQ(dn_word(&g_dn_a), 0u, "the mark emptied the word");
+    TEST_EXPECT_EQ(p->notes->count, NOTE_QUEUE_DEPTH + families, "every family past the depth");
+    TEST_EXPECT_EQ(ndflt_note_count(p, NOTE_NAME_INTERRUPT), NOTE_QUEUE_DEPTH + 1u,
+                   "a move coalesces only at sender 0, and the fill's interrupts name theirs");
+    for (u32 i = 0; (name = notes_known_name_for_test(i)) != NULL; i++) {
+        if (notes_direct_bit(name) < 0 || dn_same_name(name, NOTE_NAME_INTERRUPT)) continue;
+        TEST_EXPECT_EQ(ndflt_note_count(p, name), 1u, "and each is queued once");
+    }
+    dn_free(p);
 }
 
 // aux#253: the SELF arm's twin of the above. Round-2 F4 -- a self `kill` used

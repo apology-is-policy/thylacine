@@ -1114,7 +1114,94 @@ cfgs run with `-deadlock`; `poll.tla`'s `Done` self-loop keeps a
 legitimate terminal state from tripping the deadlock check. See
 ARCH §23.3.
 
+**The walk's Walk/Reach split (2026-10-28, the poll chunk; operator vote 12).**
+`MakeReady` no longer flags the hook in the same step: `Walk(f)` records that a
+walk OWES the listed hook a reach (`owed`), `Reach(f)` sets the flag and wakes
+(weak fairness). NoMissedPoll / HookedReadyIsFlagged accept an owed hook; new
+invariant OwedIsListed; the re-arm's unhook clears what walks owed. Buggy cfgs
+`walk_drops_owed` -> NoMissedPoll, `walk_stalls` -> StableReadyReturns. Walk <->
+the producer's wake call; Reach <-> the batch of `poll_walk` that reaches the
+hook. The batching itself is `poll_walk.tla`'s. Clean counts re-pinned in the
+vault note from the 2026-10-27 run (poll 22276, poll_armfail 461108, ...);
+check-poll.sh does not pin them.
+
+## poll_walk.tla — the poll chunk P-a/P-b (operator vote 12, 2026-10-27; spec-first)
+
+Status: **spec landed 49c3e034b; mechanism 73fc51435; TLC all cfgs as claimed
+(2026-10-27).** One list, hooks churning with no fairness, two producers walking
+in batches of K behind stack bookmarks.
+
+| Spec | Code |
+|---|---|
+| `Batch(w)` (one hold, up to K hooks, park behind the last) | `poll_walk` in `kernel/poll.c`: `POLL_WAKE_BATCH`, the park behind `last`, the resume from `mark->next` + `poll_list_unlink` |
+| `Register(k)` (push at the head) | `poll_waiter_list_register` |
+| `Unregister(k)` | `poll_waiter_list_unregister` (O(1), both neighbour checks) |
+| a walk stepping over another's bookmark | the `POLL_MARK_MAGIC` skip in `poll_walk` |
+| Covered / NoStray / MarkIffParked / WalkEnds | runtime: `poll.wake_reaches_every_hook_in_batches`, `wake_batches_owe_only_older_hooks`, `wake_steps_over_another_walks_bookmark`, `wake_bookmark_alone_reads_empty` |
+
+Buggy cfgs: `tail_insert` -> WalkEnds, `tail_insert_stray` -> NoStray,
+`resume_skips` -> Covered, `mark_ends` -> Covered. Each test above was shown red
+under a code sabotage on cc82c1d17 (S1, S2b, S3, S4).
+
+## poll_owed.tla — the poll chunk P-c/P-d (operator vote 13, 2026-10-27; spec-first)
+
+Status: **spec landed ea54736c8; mechanism dfa2fe372 + e9aeccb4f; console
+episode 8d18a87cd; TLC all cfgs as claimed.** Walks owed under
+`g_proc_table_lock` (IRQSAVE; it is also what keeps a Proc alive).
+
+| Spec | Code |
+|---|---|
+| `Acquire(h)` / `Release(h)` | `proc_table_lock_acquire` / `proc_table_lock_release` -- the ONLY path to the lock; the holder in `g_proc_table_holder`; a mismatched release extincts |
+| `Event(h, o)` (owe once) | `proc_wake_or_owe` -> `poll_owe` at the six `child_waiters` sites, `notes_post` (+ re-enqueue callers) and `cons_episode_wake_all` |
+| Release's pop + bookmark at the head, under the lock | `poll_owed_begin` inside `proc_table_lock_release` |
+| `Batch(h)` after the drop | `poll_waiter_list_wake_from` |
+| `Unlink(o)` (cancel) | `poll_owed_cancel` in `proc_unlink_child` / `proc_test_unlink` |
+| `Free(o)` (wait for no bookmark) | `proc_free`: extinction on a chained record, then `poll_waiter_list_await_unmarked` (yields the CPU: audit F1) |
+
+Buggy cfgs: `skip_drain` -> ChainDrained, `skip_drain_live` -> OwedReached,
+`no_cancel` / `free_no_wait` / `begin_after_unlock` -> NoUAF, `owe_joins_walk` ->
+OwedCovered, `drain_all` -> DrainEnds. Runtime: `poll.owed_walk_runs_at_the_table_release`,
+`owed_records_chain_once_and_cancel`, `owed_walk_owes_only_hooks_behind_the_bookmark`,
+`notes_post_under_the_table_lock_owes_its_walk`, `reap_cancels_the_walks_owed_to_a_proc`,
+`cons_episode_walks_owed_under_the_table_lock` -- each shown red under sabotage.
+The model's drainer has weak fairness; the same-CPU starvation of a preempted
+drainer by a never-preempted waiter is below it (runtime:
+`poll.await_yields_to_a_drainer_on_its_cpu`).
+
+## poll_defer.tla — the poll chunk P-e (operator vote 13; spec-first)
+
+Status: **spec landed 543dacebf, fairness fixed f6f49c134 (the outermost release
+strongly fair); mechanism 96f259231 (+ d1a0bf094 build fix, 71402f7f6, cc82c1d17);
+TLC all cfgs as claimed.** Walks deferred past a deferring lock: a 9P client's
+`c->lock`, and `g_dev9p_poll_lock` around it.
+
+| Spec | Code |
+|---|---|
+| `Lock(h)` / `Unlock(h)` (depth; the outermost drains) | `client_lock` / `client_unlock`, `dpl_lock` / `dpl_unlock` -> `poll_defer_enter` / `poll_defer_exit` |
+| `Event(h, o)` (test-and-set under the list lock; tryget) | `poll_wake_deferred` |
+| `Pop(h)` (unchain + clear + bookmark, one hold) + `Batch(h)` + put | the drain in `poll_defer_exit` |
+| `Close(h, o)` | `p9_client_close` -> the srvconn transport's close (teardown + `srvconn_unref` under `c->lock`) |
+| REF owners (`Get` / `Put`) | srvconn (`srvconn_defer_tryget` / `srvconn_unref`), pipe ring (`pipe_defer_tryget` / `pipe_ring_unref`) |
+| WAIT owners (`Detach` + `Free`) | `loom_free` after its abandon loop, `p9_client_destroy`, `p9_loopback_destroy`, `p9_mq_loopback_destroy` -> `poll_deferred_await` |
+
+Buggy cfgs: `no_get` / `put_at_pop` / `free_ignores_chain` / `split_pop` ->
+NoUAF, `split_owe` -> OneChain, `drain_inner` -> NoWalkUnderLock, `skip_drain` ->
+ChainDrained, `skip_drain_live` -> OwedReached, `skip_drain_free` -> FreeEnds,
+`owe_joins_walk` -> OwedCovered. Runtime: `poll.deferred_walk_runs_at_the_outermost_release`,
+`deferred_ref_owner_holds_a_ref_across_the_walk`, `deferred_walks_a_dying_owner_at_once`,
+`deferred_await_waits_out_an_owed_walk`, `srvconn_send_under_a_client_lock_owes_its_walk`,
+`srvconn_close_under_a_client_lock_outlives_its_walks`,
+`pipe_hangup_under_a_client_lock_owes_its_walk`, `await_yields_to_a_drainer_on_its_cpu`,
+`9p_client.transport_walk_runs_after_the_client_lock` -- each shown red under
+sabotage. `dpl_lock`'s deferral has no dedicated test.
+
 ## cons_poll.tla — P7-LS-8a (the pollable-console deferred poll-wake; spec-first re-enabled)
+
+**Poll chunk note (2026-10-28, P-d):** the episode's four list walks are now
+owed under the process table lock (`proc_wake_or_owe`) and run at
+`proc_console_sak_from`'s release -- on the console manager, before its relay --
+so `Begin`'s atomic Begin + WalkBoth still abstracts the code. No change to this
+module.
 
 Status: **spec landed at LS-8 scripture; the mechanism lands at LS-8a
 (source map filled then).** Models the LS-8a DEFERRED poll-wake: the
@@ -2480,16 +2567,18 @@ docs/DEBUG-FS-DESIGN.md section 6) -- the 6th instance of re-enabling point (a).
 Written + TLC-green BEFORE the 8a-1 impl. Models the stop/continue/step state
 machine and its composition with the death path (#811/#68) -- an SMP wait/wake
 race on the most bug-prone lineage in the tree, the class the runtime tests are
-blind to (the death_wake / loom / asid / allowance precedent). Two clean cfgs
+blind to (the death_wake / loom / asid / allowance precedent). Three clean cfgs
 TLC-green -- `debug_stop.cfg` (Safety = NoLostStop + NoEL0AfterStopped +
 ExactlyOnceResume + StopImpliesOwned + NoEL0WhileHeld + SpawnReturnsAfterBirth
-[the birth two vacuous without HELD]; PROPERTIES EventuallyAllDead
++ NoEL0BornStopped [the birth two vacuous without HELD, the last without a
+Spawned Thread]; PROPERTIES EventuallyAllDead
 [DeathWinsOverStop] + EventuallyResumed [NoStrand] + EventuallyLaunchedDies +
 EventuallyStopSettles + NoEretIntoDeath + ParkEndsOnlyInDeath) and
 `debug_stop_held.cfg` (the birth hold, DEBUG-FS-DESIGN 5f: the same plus
-EventuallyHoldResolved + BirthWaitReleases + HoldMonotone) -- and 17 buggy
-cfgs, each a counterexample on its named property. `specs/check-debug-stop.sh`
-runs all 19 and checks each verdict.
+EventuallyHoldResolved + BirthWaitReleases + HoldMonotone) and
+`debug_stop_spawn.cfg` (a Thread spawned mid-run, inside a stop or out of one:
+thread-model C7, F-7) -- and 18 buggy cfgs, each a counterexample on its named
+property. `specs/check-debug-stop.sh` runs all 21 and checks each verdict.
 
 **The stop machinery LANDED at 8a-1b-beta** -- the code sites below are as-built
 (the mapping was a reservation at 8a-1a). The impl faithfully realizes the model:
@@ -2503,6 +2592,7 @@ they read a stopped frame, off the race surface).
 |---|---|---|---|---|
 | `debug_stop.cfg` | all knobs FALSE (2 Threads) | `Safety` + `EventuallyAllDead` + `EventuallyResumed` + `EventuallyLaunchedDies` + `EventuallyStopSettles` + `NoEretIntoDeath` + `ParkEndsOnlyInDeath` | clean | 12830 |
 | `debug_stop_held.cfg` | `HELD` (1 Thread) | the above + `EventuallyHoldResolved` + `BirthWaitReleases` + `HoldMonotone` | clean | 17330 |
+| `debug_stop_spawn.cfg` | `Spawned = {t2}` (2 Threads, t2 nascent) | as `debug_stop.cfg` | clean | 24485 |
 | `debug_stop_buggy_park_before_die.cfg` | `BUGGY_STOP_BEFORE_DIE` | `EventuallyAllDead` | violation | 1480 |
 | `debug_stop_buggy_lost_stop.cfg` | `BUGGY_OBSERVE_BEFORE_REGISTER` | `NoLostStop` | violation | 128 |
 | `debug_stop_buggy_double_wake.cfg` | `BUGGY_DOUBLE_WAKE` | `ExactlyOnceResume` | violation | 720 |
@@ -2520,6 +2610,7 @@ they read a stopped frame, off the race surface).
 | `debug_stop_buggy_tail_latch_erets.cfg` | `BUGGY_TAIL_LATCH_ERETS` (1 Thread) | `NoLostStop` | violation | 679 |
 | `debug_stop_buggy_latch_ends_stop.cfg` | `HELD` + `BUGGY_LATCH_ENDS_STOP` | `ParkEndsOnlyInDeath` | violation | 1817 |
 | `debug_stop_buggy_spawner_latch_returns.cfg` | `HELD` + `BUGGY_SPAWNER_LATCH_RETURNS` | `SpawnReturnsAfterBirth` | violation | 133 |
+| `debug_stop_buggy_spawn_at_el0.cfg` | `Spawned = {t2}` + `BUGGY_SPAWN_AT_EL0` | `NoEL0BornStopped` | violation | 244 |
 
 Distinct counts are TLC with `-workers 1` (re-measured 2026-09-30 by
 `specs/check-debug-stop.sh`). A multi-worker run stops a safety violation at a
@@ -2532,7 +2623,7 @@ spawner a latch of its own (`slatch`).
 
 | Spec action | Code site (as-built, 8a-1b-beta) | Invariant pinned |
 |---|---|---|
-| `TailStep` (die-check FIRST, then the stop handshake) | `arch/arm64/vectors.S` EL0-return tail: `.Lel0_sync_return` (`bl el0_return_stop_check` AFTER `el0_return_die_check` and BEFORE `notes_deliver_at_el0_return`, whose re-pass runs both again for a stop the notes leg applies -- `tail_order.tla`) + the `0x480` IRQ slot (AFTER `el0_return_die_check`). The leg is `kernel/proc.c::el0_return_stop_check` (fast-path load, else the park loop) | `EventuallyAllDead` (DeathWinsOverStop): the die-check precedes the stop-check; the loop re-checks `group_exit_msg` (-> `thread_exit_self`) on every wake so a resume never eret-s a dying Thread. `BUGGY_STOP_BEFORE_DIE` = the leg ordered before the die-check. |
+| `TailStep` (die-check FIRST, then the stop handshake) | `arch/arm64/vectors.S` EL0-return tail: `.Lel0_return` (`bl el0_return_stop_check` AFTER `el0_return_die_check` and BEFORE `notes_deliver_at_el0_return`, whose re-pass runs both again for a stop the notes leg applies -- `tail_order.tla`) + the `0x480` IRQ slot (AFTER `el0_return_die_check`). The leg is `kernel/proc.c::el0_return_stop_check` (fast-path load, else the park loop) | `EventuallyAllDead` (DeathWinsOverStop): the die-check precedes the stop-check; the loop re-checks `group_exit_msg` (-> `thread_exit_self`) on every wake so a resume never eret-s a dying Thread. `BUGGY_STOP_BEFORE_DIE` = the leg ordered before the die-check. |
 | `Acquire` / `RegisterObserve` (register-then-observe UNDER `wlock`; proceed only while no death is published; a latch at the handshake parks the Thread all the same) | `kernel/proc.c::el0_stop_park` (the loop both stop legs share; the tail's leg `el0_return_stop_check` passes `stop_park_wake_cond`) parks via `sleep_death_only(&t->debug_rendez, wake_cond, p)` -- `kernel/sched.c::sleep_common` in its death-only mode takes the per-Thread `wait_lock`, registers `rendez_blocked_on = &t->debug_rendez` + `THREAD_SLEEPING`, re-checks the cond BEFORE sleeping, and returns early only for `group_exit_msg` (`thread_group_death_pending`), never for a latch. The proceed path re-checks `group_exit_msg` (ACQUIRE) after `wake_cond` passes | `NoLostStop` (I-9): a Thread the debugger confirms is genuinely parked. `NoEretIntoDeath`: the EXITKILL release (`devproc_debug_release_cb`) terminates and THEN clears the stop, both RELEASE, so a Thread that read the cleared flag sees the terminate at the re-check. `BUGGY_NO_DEATH_RECHECK` = no re-check (`no_death_recheck_tail`). The pre-5g exits for a latch (`LatchExit`) are knobs here and on `ResumeThread`. |
 | `RegisterBuggy` (observe BEFORE register, OUTSIDE the lock) | (none -- the anti-pattern the impl does NOT do; the buggy cfg only) | `BUGGY_OBSERVE_BEFORE_REGISTER` makes `NoLostStop` fail. |
 | `Confirm(t)` (the delivery walk marks t confirmed-parked under `~wlock[t]`) | `kernel/devproc.c::devproc_stopscan_cb` -- walk `p->threads` under `g_proc_table_lock`, read `rendez_blocked_on == &peer->debug_rendez` under each peer `wait_lock`, confirm when `debug_stop_req` is set (the model's `sflag`) and every thread is `parked && on_cpu==false` (a job stop or a birth hold parks threads too, and neither is a debug stop). A dying target (`group_exit_msg` set) reads gone and ends the wait instead: its closer no longer parks for a stop (DEBUG-FS-DESIGN 5g), and the model's death is its Threads reaching `dead`, below this. Delivery: `kernel/proc.c::proc_debug_stop_deliver` sets the flag + `smp_resched_others()` (a broadcast reschedule IPI kicks an EL0-running peer to its `0x480` tail; targeted STOP_SGI is a v1.x optimization) | the confirm sees only a genuinely-parked Thread (mutual exclusion on `wait_lock` vs `RegisterObserve`). |
@@ -2549,9 +2640,10 @@ spawner a latch of its own (`slatch`).
 | `MarkExitkill` (the `exitkill` verb -> mark a launched target die-with-launcher; 5d) | `kernel/devproc.c`: the `exitkill` ctl verb (`devproc_debug_walk_cb` / `CTL_VERB_EXITKILL`) sets `target->debug_exitkill = true`, owner-gated (`target->debug_owner == c`, under `g_proc_table_lock`). Ambush: `pkg/proc/native/proc_thylacine.go::Launch` sends it after attach+stop; `Attach` does not | (the mark; the invariant it feeds is `EventuallyLaunchedDies` on `ReleaseSlot`). |
 | `ReleaseSlot` (detach / ctl-fd close / debugger death -> resume, OR terminate a launched target) | `kernel/devproc.c`: the `detach` verb branch (`devproc_debug_walk_cb`, which CLEARS `debug_exitkill` -> resume) + the ctl-fd close hook (`devproc_close` -> `devproc_debug_release_cb`, incl. #68/#926 close-at-exit) clear `debug_owner`; the close hook branches on `debug_exitkill`: an `exitkill`-marked ALIVE target is `proc_group_terminate`d (5d, the EXITKILL refinement -- the #811 cascade wakes the debug-parked threads to die at the die-check), else `proc_debug_resume` (clear the stop + wake all parked) | `EventuallyResumed` (NoStrand) for an attached target + `EventuallyLaunchedDies` for a launched one: the handle-lifetime-tied slot resumes-OR-terminates the target on release. `BUGGY_STRAND_ON_CLOSE` = the release neither clears the stop nor wakes; `BUGGY_EXITKILL_IGNORED` = a launched target is resumed (orphaned) instead of terminated. |
 | `SetGflag` / the death legs | `kernel/proc.c::proc_group_terminate` (the set-once `group_exit_msg`) + `el0_return_die_check` | death completes even against a live debugger holding a stop (the death cascade wakes debugger-parked Threads via `rendez_blocked_on`). |
+| `Spawn(t)` (a running Thread spawns `t`, refused once the group is dying; `t` is born at the tail, its first entry, and the ghost `born` records it when a stop stands) | the spawn arms (`kernel/syscall.c::sys_thread_spawn_handler`, the clone arm, `rfork`) refuse a dying Proc (`group_exit_msg`) before `proc_thread_admit` decides exactly; the new Thread's frame is built at its kstack top (`kernel/thread.c::thread_alloc_user` / `thread_alloc_forked` via `thread_first_frame` + `kernel/proc.c::el0_birth_frame_init`), and its first switch-in lands in `arch/arm64/vectors.S::thread_user_trampoline`, which takes `.Lel0_return`. An exec thunk's `userland_enter` builds the same frame and takes the same tail | `NoEL0BornStopped`: a Thread born while a stop stands runs no EL0 instruction before the stop clears. `BUGGY_SPAWN_AT_EL0` = the pre-C7 first entry, which erets straight from registers and meets the stop only at its first trap (`spawn_at_el0`). Runtime: `first_entry.spawn_into_stop_parks` (a thread spawned into a job-stopped Proc parks on a fresh frame at its entry; the control, with no stop, faults at the unmapped entry) and `first_entry.exec_into_stop_parks` (`/hello` exec'd with a stop pending parks at its entry; with none it exits 0). |
 
-Pre-commit gate: `debug_stop.cfg` + `debug_stop_held.cfg` clean GREEN + all 17
-buggy cfgs confirmed (`specs/check-debug-stop.sh`), on any change to the
+Pre-commit gate: `debug_stop.cfg` + `debug_stop_held.cfg` + `debug_stop_spawn.cfg`
+clean GREEN + all 18 buggy cfgs confirmed (`specs/check-debug-stop.sh`), on any change to the
 EL0-return tail stop leg (`el0_return_stop_check`), the shared park loop
 (`el0_stop_park`, its register-then-observe `sleep_death_only` on
 `debug_rendez` and its death re-check), the death-only sleep itself
@@ -2559,6 +2651,8 @@ EL0-return tail stop leg (`el0_return_stop_check`), the shared park loop
 stop-delivery cascade (`proc_debug_stop_deliver`), the resume cascade
 (`proc_debug_resume`), the ctl-fd-close resume (`devproc_close`), the birth
 park (`userland_enter_held`, `el0_birth_park`, `birth_park_wake_cond`), the
+first entries (`thread_user_trampoline`, `userland_enter`, `thread_first_frame`,
+`el0_birth_frame_init`, and the spawn arms' dying-Proc refusals), the
 hold's writers (`proc_birth_hold_*_locked`), the STOP / START / detach handling
 of the hold, the birth wait (`spawn_await_birth`, `await_child_release`), or
 the orphan rule, or to the park predicate (`proc_stop_requested` and its death
@@ -2704,6 +2798,15 @@ tick while a peer that could unwind slept on.
 | `caught_target_buggy_release_no_wake.cfg` | `BUGGY_RELEASE_NO_WAKE` | the same | violation (`NoStrand`) | 165597 |
 | `caught_target_buggy_irq_no_notes.cfg` | `BUGGY_IRQ_NO_NOTES` | the same | violation (`NoStrand`) | 613245 |
 | `caught_target_buggy_stale_keeps.cfg` | `BUGGY_STALE_KEEPS` | the same | violation (`NoStrand`) | 616829 |
+| `caught_target_direct.cfg` | none; one process-directed post, one direct, a caught family | `TypeOK` + `OneClaimant` + `NoStolenDirect` + `NoStrand` + `NoDirectStrand` | clean | 795560 |
+| `caught_target_direct_fatal.cfg` | none; the same, a family whose default terminates (`DIRECT_FATAL`) | the same | clean | 434763 |
+| `caught_target_buggy_direct_to_queue.cfg` | `BUGGY_DIRECT_TO_QUEUE` (no process-directed post) | the invariants | violation (`NoStolenDirect`) | 57 |
+| `caught_target_buggy_direct_claims.cfg` | `BUGGY_DIRECT_CLAIMS` | the invariants | violation (`OneClaimant`) | 993 |
+| `caught_target_buggy_direct_needs_claim.cfg` | `BUGGY_DIRECT_NEEDS_CLAIM` | the invariants + `NoDirectStrand` | violation (`NoDirectStrand`) | 812160 |
+| `caught_target_buggy_direct_no_rouse.cfg` | `BUGGY_DIRECT_NO_ROUSE` | the same | violation (`NoDirectStrand`) | 792792 |
+| `caught_target_buggy_direct_no_observe.cfg` | `BUGGY_DIRECT_NO_OBSERVE` | the same | violation (`NoDirectStrand`) | 813712 |
+| `caught_target_buggy_fatal_unwinds_only.cfg` | `BUGGY_FATAL_UNWINDS_ONLY`, `DIRECT_FATAL` | the same | violation (`NoDirectStrand`) | 422531 |
+| `caught_target_buggy_direct_stale_mask.cfg` | `BUGGY_DIRECT_STALE_MASK` | the same | violation (`NoDirectStrand`) | 3174542 |
 
 Each counterexample was read for its mechanism, not only its verdict: the
 designee blocks in a hold wait holding the family while a peer sleeps in an
@@ -2721,9 +2824,37 @@ designation lands after its release, and the thread carries it into an
 unwinding wait while a peer sleeps in one (`STALE_KEEPS`). The 2-thread counts
 were re-pinned after the revision above (from 140075 clean).
 
+Thread-directed notes (ARCH 7.6.4; the C4 chunk of the thread-model overhaul)
+extended the model the same way: a word `dq` per thread, a post that names its
+target, and a ghost `stolen` that a delivery of the named note by any other
+thread sets. `NoStolenDirect` is `~stolen`, and `NoDirectStrand` says the word
+never stays set while its one thread could take it. The existing cfgs keep their
+counts, since `MAX_DIRECT = 0` disables the post. Each new counterexample was read
+for its mechanism on the final model: a peer's tick tail takes the note the post
+named (`DIRECT_TO_QUEUE`, which is what `tkill` did before this chunk); a direct
+unwind takes the family while a peer holds its designation (`DIRECT_CLAIMS`); a
+peer's designation keeps the target from unwinding as it enters a wait, the peer's
+tail takes the queue's note and releases, and with the queue empty no walk comes
+back, so the target sleeps on over its own note (`DIRECT_NEEDS_CLAIM`); the post leaves the target asleep in an unwinding
+wait (`DIRECT_NO_ROUSE`); the post lands before the target enters a wait, the
+entry does not read the word, and nothing wakes it (`DIRECT_NO_OBSERVE`, the I-9
+shape); a fatal note leaves its target in a hold wait (`FATAL_UNWINDS_ONLY`); the
+target unmasks, enters a wait with its word empty, and the post skips the rouse on
+the mask it still reads (`DIRECT_STALE_MASK`).
+
+The post rouses a masked target, because a rouse gated on the mask is the store-buffer
+litmus test: the owner's plain store of `note_mask` and acquire read of the word, and
+the poster's OR and read of the mask, can each see the other's old value. The model
+cannot produce that order, since `Mask` and its tail's read are one step, so the
+ghost `wasMasked` stands for the stale read. It is `FALSE` in every other cfg and
+moves no count; in its own cfg it stays set, a stronger staleness than a store buffer
+holds, so that cfg's space (3174542 states) is by far the largest. A disposition turning fatal after the post is not modelled either:
+`DIRECT_FATAL` is a constant, and `proc_note_direct_rouse` is held by
+`rendez.direct_note_turns_fatal_when_the_handler_goes`.
+
 | Spec action | Code site (as-built) | Property pinned |
 |---|---|---|
-| `Post` | `notes_post` arming the caught bit, then the poster's `proc_caught_note_wake` under `g_proc_table_lock` (every caught-note poster; a release and an exit run it too) | -- |
+| `Post` | `notes_post` arming the caught bit, then the poster's `proc_caught_note_wake`, whose walk holds the Proc's `threads_lock` (every caught-note poster; a release and an exit run it too) | -- |
 | `Walk1` (re-wake every holder in an unwinding wait; pick a candidate, never `wskip`) | `kernel/proc.c::proc_caught_note_walk` (`proc_caught_note_wake` is the walk with no skip): the holder pass under each thread's `wait_lock` (`note_claim` / `note_target` holding a queued, claimed family, `caught_wait == CAUGHT_WAIT_UNWINDS` -> `wakeup`), then `caught_pick`, which reads `caught_candidate` (not `THREAD_EXITING`, the family unmasked, no handler, `caught_wait != CAUGHT_WAIT_HOLDS`) without the lock | `NoStrand` (`NO_REKICK` drops the holder pass) |
 | `Walk2` (re-check, designate) | `caught_designate`: the pick's `wait_lock` taken, `caught_candidate` again (`Fresh`: the wait's kind and the exit read exactly there, the mask and the handler flag exactly only for a blocked thread), then the CAS of the family's claim bit (caught set, claim clear) and `note_target`; a stale pick is re-picked with the same skip, and after `CAUGHT_REPICKS` the walk wakes every unwinding sleeper (`caught_wake_unwinders`) | `OneClaimant` (`DOUBLE_DESIGNATE` drops the open check); `NoStrand` (`UNLOCKED_DESIGNATE` drops the re-check) |
 | `EnterUWait` / `EnterHWait` / `Handoff` | `kernel/sched.c::sleep_caught_wait_enter`, called by `sleep_common` / `tsleep_common` under `wait_lock` on entry: `caught_wait` published (`thread_caught_wait_kind`; a thread in a handler waits as `HOLDS`), the outer kind restored on every exit (the stop park nests a wait in a wait); a designation the wait cannot honour, every family for a hold wait and a masked one for an unwinding wait (`uentry`), dropped by `notes_handoff_target`, which walks if the note is queued, before the thread blocks | `NoStrand` (`NO_HANDOFF`; `STALE_KEEPS` keeps the `uentry` designation) |
@@ -2731,13 +2862,24 @@ were re-pinned after the revision above (from 140075 clean).
 | `Unwound` / `FlushDone` / `ContWait` | the 9P client's caught-note unwind: `Tflush`, then the flush wait, killable only (ARCH 8.8.3 *A 9P wait honours flush(5)*); the claim kept to the tail | -- (the flush's end is a fairness assumption) |
 | `Irq` | `arch/arm64/vectors.S` `0x480` -> `.Lel0_return` (#964) | `NoStrand` (`IRQ_NO_NOTES`) |
 | `Deliver` / `Release` | `kernel/notes.c::notes_deliver_at_el0_return`: the delivery loop, then `notes_release_claims` (the claim and the designation; a walk skipping the releaser while the note is queued) | `NoStrand` (`RELEASE_NO_WAKE`) |
-| `Exit` | `kernel/proc.c::thread_exit_self` -> `notes_exit_drop_locked`: the claim and the designation dropped and the walk run under the `g_proc_table_lock` hold that commits `THREAD_EXITING` | `NoStrand` (`EXIT_KEEPS`) |
+| `Exit` | `kernel/proc.c::thread_exit_self` -> `notes_exit_drop_locked`: the claim and the designation dropped and the walk run under the `threads_lock` hold that commits `THREAD_EXITING` | `NoStrand` (`EXIT_KEEPS`) |
+| `PostDirect` | `kernel/proc.c::proc_note_thread`, under `p->threads_lock` alone (ARCH 7.3.1 has no `threads_lock` <-> `q->lock` edge): the tid found, an atomic OR of `Thread.note_direct`, then under the target's `wait_lock` the rouse, masked or not: `caught_rouse_locked` for a caught note, any rendez but `debug_rendez` plus a kick for a fatal one | `NoStolenDirect` (`DIRECT_TO_QUEUE`); `NoDirectStrand` (`DIRECT_NO_ROUSE`, `FATAL_UNWINDS_ONLY`, `DIRECT_STALE_MASK`) |
+| `DirectEnds` / `UnwindDirect` | `kernel/notes.c::thread_caught_note_claim`: an unmasked direct bit with a live handler returns true without touching `note_claim` or `note_target`; `thread_die_pending` for a fatal one, whose mask gate is the only one | `OneClaimant` (`DIRECT_CLAIMS`); `NoDirectStrand` (`DIRECT_NEEDS_CLAIM`) |
+| `HoldEnds` / `ResumeHold` | `thread_die_pending` in `sleep_common` and `tsleep_common`, register-then-observe and post-`sched()`: it ends every wait but the debug stop | `NoDirectStrand` (`FATAL_UNWINDS_ONLY`) |
+| The reads in `EnterUWait` / `EnterHWait` / `Handoff` | the same predicates, read under `wait_lock` on entry, the lock the post's rouse takes | `NoDirectStrand` (`DIRECT_NO_OBSERVE`) |
+| `TakesDirect` / `Deliver` | `kernel/notes.c::notes_tail_candidate_locked` (a queued kill, then the lowest unmasked direct bit, then the queue's FIFO) and `notes_tail_consume_locked` (a `fetch_and`, last, that delivers nothing if a discard took the bit) | `NoStolenDirect` |
+| `DeliverFatal` | the tail's `exits_note`, the group's one death | `NoDirectStrand` |
 
 Abstracted, said so the green reads no larger: one note family; a delivered
 note's handler is one bit (`inh`) that `rt_sigreturn` clears; discarded and
 uncaught notes (the terminate latch's wake is `death_wake.tla`'s and §8.8.2's);
 the preference order; the kick (the tick is the fairness that matters, a kick
-only makes it prompt); a call enters at most `MAX_WAITS` waits. The kernel
+only makes it prompt); a call enters at most `MAX_WAITS` waits. For a direct note,
+also: one post, so no coalescing; `SIG_IGN` at the post and in
+`notes_discard_name`'s walk; the self-managing fallback to the queue and
+`notes_mark_self_managing`'s move; a native Proc's direct note, which rides its
+waits out as a queued caught note does (`proc_caught_note_eintr_ready`), and is
+left out of the model. The kernel
 tests in `test_rendez.c` (`rendez.caught_note_prefers_awake`, `_poster_first`,
 `_handoff` (sleep and tsleep), `_exit_drop`, `_holder_rewake`,
 `_native_kicks_only`, `_repick_fallback` (the model's `Walk2` re-picks
@@ -2746,13 +2888,17 @@ sleeper instead, which this test holds with forced stale picks), and the
 rewritten `_one_unwind` and `_release_wakes_peer`), viv-pheno-probe L331-L333
 (a running main takes `SIGCHLD` with a polling peer undisturbed) and jc-probe's
 spinint and spinnote rungs (a native spinner ended by Ctrl-C, and one whose
-handler runs) hold the code to it.
+handler runs) hold the code to it. `test_rendez.c`'s `rendez.direct_note_*`, `test_notes.c`'s
+`notes.direct_*`, viv-pheno-probe L339-L343 and pouch-hello-threads' `kill-*` and
+`raise-masked` legs hold the direct half.
 
-Pre-commit gate: `specs/check-caught-target.sh` (the clean cfg at its pinned
-count, the 8 buggy cfgs violating their named properties), on any change to
+Pre-commit gate: `specs/check-caught-target.sh` (the 3 clean cfgs at their pinned
+counts, the 15 buggy cfgs violating their named properties), on any change to
 `proc_caught_note_walk`, `thread_caught_note_claim`, `notes_release_claims`,
 `sleep_caught_wait_enter`, `notes_handoff_target`, `notes_exit_drop_locked`,
-or where a claim or a designation is set or cleared.
+`proc_note_thread`, `notes_tail_candidate_locked`, `notes_tail_consume_locked`,
+`thread_die_pending`, or where a claim, a designation or a direct bit is set or
+cleared.
 
 ## tapestry_present.tla — T-1 (the surface present/weave lifecycle; spec-first re-enabled, model-first)
 

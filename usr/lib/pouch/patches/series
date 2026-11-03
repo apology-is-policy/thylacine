@@ -173,3 +173,13 @@
 # child's whole environment; the tail's refusals return their errno. Numbered
 # after b3's 0051-0063, which join this series at that merge, before it.
 0064-pouch-spawn-env.patch
+# 0065 (thread-model C7, vote 2026-10-29): a new thread starts with its creator's
+# signal mask -- start() and start_c11() restore it via __restore_sigs.
+0065-pouch-thread-inherits-mask.patch
+# 0066 (thread-model C7): a thrd_create thread registers clear_child_tid + its tid
+# as start() does -- without it thrd_join hangs.
+0066-pouch-c11-thread-registers.patch
+# 0067 (thread-model C4, operator votes 5 and 14): pthread_kill and raise name one thread over SYS_postnote_tid; kill(pid) stays process-directed.
+0067-pouch-thread-directed-kill.patch
+# 0068 (operator vote 15): SIGUSR1 and SIGUSR2 are the usr1 and usr2 notes.
+0068-pouch-usr-notes.patch

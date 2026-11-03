@@ -289,9 +289,11 @@ reached the console. Its three legs:
   the console. Sampling fd 2 at print time would instead write it into the
   connection.
 
-The pumps mask the `pipe` note at entry. `tell` from a pump can meet a stderr
-that `ut` handed over as a pipe nobody reads, and the unmasked default would
-kill haul before its main thread reported.
+The pumps run with the `pipe` note masked, inherited from the main thread,
+which libthyla-rs masks at start (a new thread starts with its creator's mask,
+ARCH 7.6.2). `tell` from a pump can meet a stderr that `ut` handed over as a
+pipe nobody reads, and the unmasked default would kill haul before its main
+thread reported.
 
 `haul-cape` serves a writable 0700/0600 export from its own npxf and compares
 the guest's view with the host file's own ids, so a fixture whose ids happened

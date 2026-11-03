@@ -43,7 +43,16 @@ poll_liveness_notimeout:-
 poll_local:-
 poll_armfail:-
 poll_armfail_liveness:-
-poll_armfail_liveness_notimeout:-"
+poll_armfail_liveness_notimeout:-
+poll_walk:-
+poll_walk_k2:-
+poll_walk_liveness:-
+poll_owed:-
+poll_owed_h2:-
+poll_owed_liveness:-
+poll_defer:-
+poll_defer_h2:-
+poll_defer_liveness:-"
 
 # buggy: cfg, invariant that must be the one reported
 BUGGY="poll_buggy_check_before_register:NoMissedPoll
@@ -59,11 +68,34 @@ poll_buggy_no_retry:NoMissedPoll
 poll_buggy_retry_is_timeout:NoSpuriousZero
 poll_buggy_no_loop_caught_check:CaughtTerminates
 poll_buggy_caught_before_ready:EintrNotOverReady
-poll_buggy_deadline_before_caught:NoZeroOverCaught"
+poll_buggy_deadline_before_caught:NoZeroOverCaught
+poll_buggy_walk_drops_owed:NoMissedPoll
+poll_buggy_walk_stalls:StableReadyReturns
+poll_walk_buggy_tail_insert:WalkEnds
+poll_walk_buggy_tail_insert_stray:NoStray
+poll_walk_buggy_resume_skips:Covered
+poll_walk_buggy_mark_ends:Covered
+poll_owed_buggy_skip_drain:ChainDrained
+poll_owed_buggy_skip_drain_live:OwedReached
+poll_owed_buggy_no_cancel:NoUAF
+poll_owed_buggy_free_no_wait:NoUAF
+poll_owed_buggy_begin_after_unlock:NoUAF
+poll_owed_buggy_owe_joins_walk:OwedCovered
+poll_owed_buggy_drain_all:DrainEnds
+poll_defer_buggy_no_get:NoUAF
+poll_defer_buggy_put_at_pop:NoUAF
+poll_defer_buggy_free_ignores_chain:NoUAF
+poll_defer_buggy_split_pop:NoUAF
+poll_defer_buggy_split_owe:OneChain
+poll_defer_buggy_drain_inner:NoWalkUnderLock
+poll_defer_buggy_skip_drain:ChainDrained
+poll_defer_buggy_skip_drain_live:OwedReached
+poll_defer_buggy_skip_drain_free:FreeEnds
+poll_defer_buggy_owe_joins_walk:OwedCovered"
 
 run() {  # $1 = cfg basename -> sets RC and LOG
     LOG="$TMP/$1.log"
-    MOD=poll
+    case $1 in poll_walk*) MOD=poll_walk ;; poll_owed*) MOD=poll_owed ;; poll_defer*) MOD=poll_defer ;; *) MOD=poll ;; esac
     java -cp "$JAR" tlc2.TLC -workers "${TLC_WORKERS:-auto}" -deadlock -metadir "$TMP/$1.meta" \
         -config "$1.cfg" "$MOD.tla" > "$LOG" 2>&1
     RC=$?
@@ -118,7 +150,7 @@ done
 # A violation drops a <module>_TTrace_<epoch>.{tla,bin} pair beside the spec.
 # They are gitignored, but quaestor's spec census counts files: sweep the ones
 # THIS run made, and only those.
-find . -maxdepth 1 -name 'poll_TTrace_*' -newer "$STAMP" -exec rm -f {} +
+find . -maxdepth 1 \( -name 'poll_TTrace_*' -o -name 'poll_walk_TTrace_*' -o -name 'poll_owed_TTrace_*' -o -name 'poll_defer_TTrace_*' \) -newer "$STAMP" -exec rm -f {} +
 
 fail=0
 [ -f "$TMP/failed" ] && fail=1

@@ -82,7 +82,7 @@ design:
   - "docs/LOOM.md"
   - "docs/reference/107-loom.md"
 created: 2026-08-02
-updated: 2026-10-27
+updated: 2026-11-02
 ---
 
 ## Approved private service lifecycle
@@ -574,6 +574,17 @@ field offsets — size alone would let a same-size field reorder shift the layou
 the userspace mirror reads.
 
 ## Concurrency
+
+**The CQ wait-list walk is a WAIT-owned deferred record** (the poll chunk,
+2026-10-28, [[chg-2026-10-28-poll-hook-walks]]): every `cq_waiters` walk is `poll_wake_deferred(&l->cq_owed)`.
+`loom_post_cqe` from `loom_async_complete` runs under the completing client's
+`c->lock`, so there the walk is owed and runs at that client's release; the CQE
+write and the CQ flag still precede it (I-29 untouched). An async op holds no
+Loom reference -- a reference taken at the owe could make a drainer, the SQPOLL
+kthread itself, run `loom_free` -- so the Loom is the record's WAIT owner:
+`loom_free` calls `poll_deferred_await(&l->cq_owed)` after its abandon loop,
+when no completion can post any more (each op is abandoned under its client's
+lock).
 
 An SQPOLL kthread is charged to its creator's thread budget under the
 creator's thread lock (`proc_sqpoll_charge` / `proc_sqpoll_uncharge`,
@@ -2389,9 +2400,15 @@ per-ring index checkpoint, then close queue/executor and AS-3/4/MM0-MM4.
 
 Astra added a bounded 64-entry protocol-owner index under the existing Loom
 lock. Each 24-byte entry holds an exact scope incarnation, protocol pointer,
-entry pin count and INSTALLING/LIVE phase. The 1544-byte index occupies one
-separately charged private-only 4096-byte buddy allocation, including a consumed
-one-shot allocation-failure witness and complete unwind/final-free coverage.
+entry pin count and INSTALLING/LIVE phase. The index, with its wait fields and
+64 embedded poll hooks, is one separately charged private-only buddy allocation,
+charged by its buddy footprint (`burrow_backing_pages(sizeof(struct
+loom_service_engine))`, two pages at 4176 bytes since aux-3's O(1) unregister
+grew `struct poll_waiter` to 40 bytes; [[chg-2026-10-29-aux-corona-join]];
+`loom.metadata_charge_matches_kmalloc_order` checks every charged size against
+the order kmalloc really takes),
+including a consumed one-shot allocation-failure witness and complete
+unwind/final-free coverage.
 ARM64 Loom remains2944 bytes (one buddy page); protocol remains42264 bytes
 (16 buddy pages). Legacy rings do not allocate an index page. This is exact
 per-image metadata charging, not the pending MM0-MM4 physical accounting.
@@ -2651,9 +2668,9 @@ for a peer. Native poll directions follow handshake phase. An exclusive wait
 sweep retains entry pins, registers native interests before checking readiness,
 then sleeps on atomic changes, CQ head, poll flags and the earliest absolute
 ACTIVE deadline. READY discards its CONNECT timer; full-CQ terminals park.
-The Rendez predicate never takes Ll or a device lock. Embedded64 poll hooks
-fit within the existing charged4096-byte index page, checked on actual ARM64.
-Every hook is unregistered before any wait pin is returned.
+The Rendez predicate never takes Ll or a device lock. The 64 embedded poll hooks
+live in the index allocation and are charged with it. Every hook is unregistered
+before any wait pin is returned.
 
 The executor borrows the ring lifetime. The zero-reference retirer wakes, joins
 and frees the actual worker before ticket refund or table/storage destruction.

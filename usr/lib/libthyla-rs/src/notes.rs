@@ -38,7 +38,8 @@ use crate::poll::AsFd;
 use crate::{
     t_note_mask, t_note_open, t_postnote, t_read, t_poll, TNoteRecord, TPollFd,
     T_NOTE_BIT_CHILD_EXIT, T_NOTE_BIT_INTERRUPT, T_NOTE_BIT_KILL, T_NOTE_BIT_PIPE,
-    T_NOTE_BIT_SAK, T_NOTE_BIT_SNARE, T_NOTE_BIT_TERM, T_NOTE_BIT_TTY, T_NOTE_MASK_SUPPORTED,
+    T_NOTE_BIT_SAK, T_NOTE_BIT_SNARE, T_NOTE_BIT_TERM, T_NOTE_BIT_TTY, T_NOTE_BIT_USR1,
+    T_NOTE_BIT_USR2, T_NOTE_MASK_SUPPORTED,
     T_NOTE_NAME_MAX,
     T_POLLIN, T_POSTNOTE_SELF_PID,
 };
@@ -151,6 +152,10 @@ pub enum NoteClass {
     Sak,
     /// `term` — a request to end (SIGTERM). Catchable; default terminate.
     Term,
+    /// `usr1` — SIGUSR1: the program's own. Catchable; default terminate.
+    Usr1,
+    /// `usr2` — SIGUSR2: the program's own. Catchable; default terminate.
+    Usr2,
 }
 
 impl NoteClass {
@@ -167,12 +172,14 @@ impl NoteClass {
             NoteClass::Tty => T_NOTE_BIT_TTY,
             NoteClass::Sak => T_NOTE_BIT_SAK,
             NoteClass::Term => T_NOTE_BIT_TERM,
+            NoteClass::Usr1 => T_NOTE_BIT_USR1,
+            NoteClass::Usr2 => T_NOTE_BIT_USR2,
         }
     }
 
     /// Every class, in bit order. The one place a new variant has to be
     /// added for `MASK_SUPPORTED_COVERS_EVERY_CLASS` below to see it.
-    pub const ALL: [NoteClass; 8] = [
+    pub const ALL: [NoteClass; 10] = [
         NoteClass::Interrupt,
         NoteClass::Kill,
         NoteClass::Pipe,
@@ -181,6 +188,8 @@ impl NoteClass {
         NoteClass::Tty,
         NoteClass::Sak,
         NoteClass::Term,
+        NoteClass::Usr1,
+        NoteClass::Usr2,
     ];
 }
 

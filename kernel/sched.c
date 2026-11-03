@@ -2074,8 +2074,8 @@ static u8 sleep_caught_wait_enter(struct Thread *t, bool caught_ok, irq_state_t 
     u8 outer = t->caught_wait;
     u8 kind  = thread_caught_wait_kind(t, caught_ok);
     __atomic_store_n(&t->caught_wait, kind, __ATOMIC_RELAXED);
-    u8 keep  = kind == CAUGHT_WAIT_UNWINDS ? (u8)~t->note_mask : 0u;
-    if (__atomic_load_n(&t->note_target, __ATOMIC_RELAXED) & (u8)~keep) {
+    u16 keep = kind == CAUGHT_WAIT_UNWINDS ? (u16)~t->note_mask : 0u;
+    if (__atomic_load_n(&t->note_target, __ATOMIC_RELAXED) & (u16)~keep) {
         spin_unlock_irqrestore(&t->wait_lock, *s);
         notes_handoff_target(t, keep);
         *s = spin_lock_irqsave(&t->wait_lock);

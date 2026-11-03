@@ -169,6 +169,7 @@ pub const T_SYS_NOTE_OPEN: u64        = 44;
 pub const T_SYS_NOTIFY: u64           = 45;
 pub const T_SYS_NOTED: u64            = 46;
 pub const T_SYS_POSTNOTE: u64         = 47;
+pub const T_SYS_POSTNOTE_TID: u64     = 138;
 pub const T_SYS_NOTE_MASK: u64        = 48;
 
 // P5-mount-syscall + P5-chroot-syscall + P6-16c-pivot_root: namespace
@@ -818,6 +819,10 @@ pub const T_NOTE_BIT_SAK:        u8 = 6;
 // catchable, default terminate. Its own bit, so a program masks or catches it
 // apart from `interrupt`.
 pub const T_NOTE_BIT_TERM:       u8 = 7;
+// `usr1` and `usr2` -- SIGUSR1's and SIGUSR2's notes: a program's own to mean what
+// it likes. Catchable, default terminate, a bit each.
+pub const T_NOTE_BIT_USR1:       u8 = 8;
+pub const T_NOTE_BIT_USR2:       u8 = 9;
 
 // NOTE_MASK_SUPPORTED — the union of every NOTE_BIT_* the kernel knows
 // about today. Setting bits outside this is tolerated (no-op) so future
@@ -830,7 +835,7 @@ pub const T_NOTE_BIT_TERM:       u8 = 7;
 // ties it to the NoteClass set at compile time, which catches a variant added
 // without the bit; it CANNOT catch the kernel growing a bit this file never
 // hears about, because both sides of that check live here.
-pub const T_NOTE_MASK_SUPPORTED: u64 = 0xff;
+pub const T_NOTE_MASK_SUPPORTED: u64 = 0x3ff;
 
 // SYS_POSTNOTE sentinel for "send to my own Proc" (kernel maps pid == 0
 // to the calling Proc's pid; matches POSIX kill(0, sig) "send to my
@@ -1706,6 +1711,29 @@ pub unsafe fn t_postnote(pid: i64, name_va: *const u8, name_len: usize) -> i64 {
         in("x1") name_va as u64,
         in("x2") name_len as u64,
         in("x8") T_SYS_POSTNOTE,
+        options(nostack)
+    );
+    x0
+}
+
+// t_postnote_tid -- post a note at one thread of the caller's own Proc; `tid` 0
+// is the caller. Only that thread takes it, and a masked note stays pending on
+// it. `kill` and a self-chosen snare death end the whole Proc.
+//
+// Returns 0 on success, else a negative errno: -T_E_SRCH the Proc holds no such
+// thread, -T_E_INVAL a name no program may post, -T_E_FAULT an unreadable name,
+// -T_E_AGAIN a Proc reading its notes from an fd with a full queue.
+//
+// Safety: `name_va` must point to `name_len` readable bytes in user-VA memory.
+#[inline(always)]
+pub unsafe fn t_postnote_tid(tid: i64, name_va: *const u8, name_len: usize) -> i64 {
+    let mut x0: i64 = tid;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") name_va as u64,
+        in("x2") name_len as u64,
+        in("x8") T_SYS_POSTNOTE_TID,
         options(nostack)
     );
     x0
@@ -3708,14 +3736,10 @@ unsafe extern "C" fn __libthyla_rt_start(argc: usize, argv: *const *const u8) ->
     // A native Proc resets note_mask to 0 at exec, so a plain SET is correct. The
     // libt (C) _start carries the identical mask for C-native bins.
     //
-    // SCOPE: the MAIN thread only. note_mask is per-thread and native thread-spawn
-    // does NOT inherit it (the kernel rfork rule), so a thread started via
-    // thread::spawn_raw begins PIPE-unmasked and would take the proc-wide pipe
-    // latch on a closed-pipe write. A spawned thread that writes pipes (or
-    // stderr, which a shell may hand over as a pipe nobody reads) masks
-    // NOTE_BIT_PIPE itself: haul does at each relay pump's entry, and the Go
-    // runtime per-M in minit. The other spawners are benchmarks and torture
-    // tests over sockets or CPU/memory.
+    // SCOPE: note_mask is per-thread, and a thread started via thread::spawn_raw
+    // starts with its creator's mask (ARCH 7.6.2), so every thread main makes, and
+    // every thread they make, inherits this mask too. A thread that wants
+    // pipe-death unmasks NOTE_BIT_PIPE itself.
     let _ = t_note_mask(1u64 << T_NOTE_BIT_PIPE, core::ptr::null_mut());
     rs_main()
 }

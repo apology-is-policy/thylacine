@@ -607,24 +607,34 @@ static struct pti_binding *pti_change_locked(struct pts_entry *e, bool retire) {
     return NULL;
 }
 
-void pts_interaction_invalidate_locked(struct Proc *p, bool retire_role) {
+_Static_assert(PTS_MAX <= 256u, "a pts_wakes slot index is a u8");
+
+static void pti_wake_later(struct pts_wakes *w, struct pti_binding *b) {
+    if (!b) return;
+    if (w->n >= PTS_MAX) extinction("pts interaction: wake batch overflow");
+    w->slot[w->n++] = (u8)(b - g_pti);
+}
+
+void pts_interaction_wake(struct pts_wakes *w) {
+    for (u32 i = 0; i < w->n; ++i) pti_wake(&g_pti[w->slot[i]]);
+    w->n = 0;
+}
+
+void pts_interaction_invalidate_locked(struct Proc *p, bool retire_role, struct pts_wakes *w) {
     // Called before group/exec/death publication, with lifecycle held. No
     // process-table callback or lookup while pts is held on this path.
-    struct pti_binding *wake[PTS_MAX];
-    u32 count = 0;
     u64 who = proc_stripes(p);
     spin_lock(&g_pts_lock);
     for (u32 i = 0; i < PTS_MAX; ++i) {
-        struct pti_binding *b = &g_pti[i], *w = NULL;
+        struct pti_binding *b = &g_pti[i], *nb = NULL;
         if (!b->used || !b->live) continue;
         if (retire_role && (b->binder == who || b->observer == who))
-            w = pti_retire_locked(b);
+            nb = pti_retire_locked(b);
         else if (b->subject == who)
-            w = pti_change_locked(pts_lookup_locked(b->pts_id), false);
-        if (w) wake[count++] = w;
+            nb = pti_change_locked(pts_lookup_locked(b->pts_id), false);
+        pti_wake_later(w, nb);
     }
     spin_unlock(&g_pts_lock);
-    for (u32 i = 0; i < count; ++i) pti_wake(wake[i]);
 }
 
 static void pti_snapshot_locked(struct pti_binding *b, struct pts_entry *e,
@@ -654,7 +664,8 @@ static void pti_watch_release(struct pti_watch *w) {
 // Process pointers are borrowed under the lifecycle lock. Do not retain them in
 // a binding or return them to userspace. Group, principal and incarnation are
 // checked in the SAME lock interval as epoch/nomination state.
-s64 pts_interaction_locked(struct Proc *p, u64 op, struct pts_interaction_call *c) {
+s64 pts_interaction_locked(struct Proc *p, u64 op, struct pts_interaction_call *c,
+                           struct pts_wakes *wakes) {
     s64 result = -T_E_INVAL;
     struct pti_binding *wake = NULL, *b = NULL;
     struct pts_entry *e = NULL;
@@ -775,7 +786,7 @@ s64 pts_interaction_locked(struct Proc *p, u64 op, struct pts_interaction_call *
     }
 done:
     spin_unlock(&g_pts_lock);
-    pti_wake(wake);
+    pti_wake_later(wakes, wake);
     return result;
 }
 

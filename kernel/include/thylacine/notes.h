@@ -109,6 +109,13 @@ struct Thread;
 // infallible.
 #define NOTE_QUEUE_DEPTH  16u
 
+// Slots past the depth, which no post may fill. A direct note the post already
+// answered 0 for and that must move to the queue cannot be refused, and it takes
+// one of these unless a note of its name is queued (notes_move_to_queue_locked).
+// One per family suffices; notes.c asserts it.
+#define NOTE_RING_SPARE   10u
+#define NOTE_RING_SLOTS   (NOTE_QUEUE_DEPTH + NOTE_RING_SPARE)
+
 // Coalesce threshold: when count >= this, kernel-synthetic posters of an
 // already-queued same-name note merge (preserving the most recent arg,
 // post-order ordering unchanged for that name). Userspace SYS_POSTNOTE
@@ -163,12 +170,20 @@ struct Thread;
 // INTERRUPT's, so a Proc that ignores Ctrl-C still dies of an unhandled term.
 #define NOTE_BIT_TERM        7u
 
+// The user-defined notes (SIGUSR1, SIGUSR2; docs/ERRORS.md "The user-defined
+// notes"): catchable, default terminate, and meaning whatever the program says.
+// A bit each, so a program can catch or mask one alone.
+#define NOTE_BIT_USR1        8u
+#define NOTE_BIT_USR2        9u
+
 // F4 audit close: includes NOTE_BIT_SNARE (bit 4) for the snare:*
 // family even though no v1.0 consumer exists; reserves the bit
 // position for v1.x. PTY-1b adds NOTE_BIT_TTY (bit 5), live. IM-1 adds
-// NOTE_BIT_SAK (bit 6), live. The signal chunk adds NOTE_BIT_TERM (bit 7),
-// live -- the last family the per-Thread u8 claim and designation hold.
-#define NOTE_MASK_SUPPORTED  0xffu
+// NOTE_BIT_SAK (bit 6), live. The signal chunk adds NOTE_BIT_TERM (bit 7), live.
+// The user-defined pair takes bits 8 and 9. A family word is therefore wider than
+// a byte: Thread's note_target, note_claim and note_direct are u16, and
+// Proc.note_caught holds latch and claim in a u32. notes.c asserts each fits.
+#define NOTE_MASK_SUPPORTED  0x3ffu
 
 // #15: the DEFAULT ACTION of a note -- what happens when nobody catches it.
 // One value per row of `g_known_notes`, so a note's disposition is a property
@@ -243,12 +258,15 @@ struct NoteQueue {
     u32                      tail;        // index of next enqueue
     u32                      count;
     u32                      _pad;        // explicit 8-byte alignment
-    struct Note              ring[NOTE_QUEUE_DEPTH];
+    struct Note              ring[NOTE_RING_SLOTS];
     // F3 audit close (sub-chunk 13a): devnotes_read uses the poll_-
     // waiter_list mechanism — each reader has its own private Rendez +
     // stack-allocated poll_waiter; producers wake via poll_waiter_list_-
     // wake which is multi-waiter-safe. No per-queue single-waiter Rendez.
     struct poll_waiter_list  poll_list;   // register-then-observe hooks (devnotes_read AND SYS_POLL)
+    // The walk of `poll_list` a post under g_proc_table_lock owes
+    // (proc_wake_or_owe; specs/poll_owed.tla). Under g_proc_table_lock.
+    struct poll_owed         owed;
 };
 
 // `kill` recognition — the special-case non-catchable note. The constant is
@@ -275,6 +293,14 @@ struct NoteQueue {
 
 _Static_assert(sizeof(NOTE_NAME_TERM) <= NOTE_NAME_MAX,
                "NOTE_NAME_TERM does not fit NOTE_NAME_MAX");
+
+// The user-defined notes, SIGUSR1's and SIGUSR2's. Userspace-postable.
+#define NOTE_NAME_USR1 "usr1"
+#define NOTE_NAME_USR2 "usr2"
+
+_Static_assert(sizeof(NOTE_NAME_USR1) <= NOTE_NAME_MAX &&
+               sizeof(NOTE_NAME_USR2) <= NOTE_NAME_MAX,
+               "NOTE_NAME_USR1 and NOTE_NAME_USR2 do not fit NOTE_NAME_MAX");
 
 // `snare:*` family — kernel-synthetic notes posted on EL0 unhandled
 // fault. Per docs/ERRORS.md "Fault-note naming". Each name fits within
@@ -386,7 +412,8 @@ _Static_assert(sizeof(NOTE_NAME_SNARE_ABORT) <= NOTE_NAME_MAX,
 enum note_death_sig {
     NOTE_SIG_HUP  = 1,  NOTE_SIG_INT  = 2,  NOTE_SIG_QUIT = 3,  NOTE_SIG_ILL  = 4,
     NOTE_SIG_TRAP = 5,  NOTE_SIG_ABRT = 6,  NOTE_SIG_BUS  = 7,  NOTE_SIG_FPE  = 8,
-    NOTE_SIG_KILL = 9,  NOTE_SIG_SEGV = 11, NOTE_SIG_PIPE = 13, NOTE_SIG_TERM = 15,
+    NOTE_SIG_KILL = 9,  NOTE_SIG_USR1 = 10, NOTE_SIG_SEGV = 11, NOTE_SIG_USR2 = 12,
+    NOTE_SIG_PIPE = 13, NOTE_SIG_TERM = 15,
 };
 
 // The signal a death by the note `name` records: a snare:* name, or a
@@ -419,7 +446,8 @@ struct NoteQueue *notes_queue_alloc(void);
 
 // Release a NoteQueue. Caller must ensure no thread is currently
 // registered on `q->poll_list` (handled by proc_free's ordering: ZOMBIE
-// state is set, all threads EXITING, no devnotes_read can be in flight).
+// state is set, all threads EXITING, no devnotes_read can be in flight)
+// and no walk's bookmark is on it (proc_free waits them out).
 void notes_queue_free(struct NoteQueue *q);
 
 // Post a note to `p->notes`. `name` is bounded to NOTE_NAME_MAX-1 chars +
@@ -443,7 +471,9 @@ void notes_queue_free(struct NoteQueue *q);
 // poster would revisit (e.g. reserve the head slot for interrupt/kill).
 //
 // Wakes every registered hook on q->poll_list (devnotes_read parkers AND
-// SYS_POLL pollers; multi-waiter via the poll_waiter_list mechanism).
+// SYS_POLL pollers; multi-waiter via the poll_waiter_list mechanism), after
+// dropping q->lock; a poster holding g_proc_table_lock owes the walk to the
+// lock's release instead (proc_wake_or_owe).
 int notes_post(struct Proc *p, const char *name, u32 arg,
                struct Proc *sender, bool synthetic);
 
@@ -504,14 +534,23 @@ int notes_name_is_kill(const char *name);
 // makes "no stale ignored note survives" hold. See kernel/notes.c.
 u32 notes_discard_name(struct Proc *p, const char *name);
 
+// Thread-directed notes (ARCH 7.6.4). notes_direct_bit: the family bit of a name a
+// program may aim at one thread, or -1 (`kill`, and every name no program may
+// post). notes_direct_is_fatal: this name's default would end `p` now.
+// notes_direct_ignored: `p` has chosen to ignore it, so a post drops it.
+int  notes_direct_bit(const char *name);
+bool notes_direct_is_fatal(struct Proc *p, const char *name);
+bool notes_direct_ignored(struct Proc *p, const char *name);
+
 #ifdef KERNEL_TESTS
 // F5 + F6 audit close (sub-chunk 13a): re-enqueue a previously-dequeued
 // note at the HEAD of the queue. Used by devnotes_read on uaccess failure
 // and by notes_deliver_at_el0_return on user-stack-push failure to
 // preserve the N-2 (consumed exactly once) invariant — the note is put
 // back so the next consume can pick it up. Caller MUST hold
-// p->notes->lock. Returns 0 on success. Cannot fail at v1.0 since the
-// caller just popped (so there is space).
+// p->notes->lock, and wakes the queue's hooks after dropping it
+// (proc_wake_or_owe(&q->owed)): this does not. Returns 0 on success. Cannot
+// fail at v1.0 since the caller just popped (so there is space).
 int notes_reenqueue_head_locked(struct NoteQueue *q, const struct Note *n);
 
 // LS-5 P2 (ARCH 8.8.2): would an uncaught `interrupt` default-terminate `p` at
@@ -722,7 +761,7 @@ bool thread_caught_note_claim(struct Thread *t);
 // locked ends `t`'s claim and designation at its THREAD_EXITING commit, under
 // t->proc->threads_lock.
 u8   thread_caught_wait_kind(const struct Thread *t, bool caught_ok);
-void notes_handoff_target(struct Thread *t, u8 keep);
+void notes_handoff_target(struct Thread *t, u16 keep);
 void notes_exit_drop_locked(struct Thread *t);
 
 // bug-2 (VIVARIUM 6.23): does `t` hold a PHENO_LINUX note handler that ESCAPED
@@ -798,6 +837,13 @@ const char *notes_known_name_for_test(u32 i);
 u32 notes_name_terminate_latch_for_test(const char *name);
 void notes_release_claims_for_test(struct Thread *t);
 const char *notes_snare_death_name_for_test(u32 i);
+int notes_tail_candidate_for_test(struct Proc *p, struct Thread *t, struct Note *out,
+                                  int *direct);
+int notes_tail_consume_for_test(struct Proc *p, struct Thread *t, int direct,
+                                struct Note *out);
+void notes_tail_unconsume_for_test(struct Proc *p, struct Thread *t, int direct,
+                                   const struct Note *n);
+void notes_handler_resets_for_test(struct Proc *p, u32 sn);   // an enum viv_signote
 #endif // KERNEL_TESTS
 
 #endif  // THYLACINE_NOTES_H

@@ -240,6 +240,65 @@ built group on every exit, and the live-count premise against this tree's reap, 
 
 **What "fixed" covers.** On corona/async-memory: a spawned child born with no environment, the dot-name rule, pouch 0025's two skips, one read per value, the live Env count and its refusal leg, the rfork word in check-flag-words. Not here: b3's v19 handle refcounting and bind-at-open, so `> /env/NAME` from ut still empties the shell's variable on this branch until the merge, along with main's `env` and `unset`. Go env-b waits for branch main to carry bit 2, on main's word (0266 note 7): main c5451ed84 refuses the bit, so a tree building the fork's tip from it would lose every Go spawn. Vote 36 and its P1 (corvus choosing its medium from the seat phase alone, on main's tree too) remain open, unlanded.
 
+## 2026-11-02 (aux, Opus 5.5 1M) -- SIGUSR1 and SIGUSR2 become notes, and every family word outgrows its byte
+
+**Decisions that were the operator's:** vote 15 of project_aux_votes_1021: a separate chunk straight after C4, on bits 8 and 9, which is also the signoff for `docs/ERRORS.md`.
+
+**What it is.** SIGUSR1 and SIGUSR2 had no note, so `kill(pid, SIGUSR1)` could not reach a handler through the note machinery. `term` (S-2) was the template: a user-postable, default-terminating, catchable note with its own family. Two rows are the easy part. Bits 8 and 9 do not fit the words that carry a family, so `note_caught` goes to u32 and `note_claim`, `note_target` and `note_direct` to u16.
+
+**Why the width is the chunk.** `(u8)(1u << 8)` is 0, and it compiles. A cast left narrow loses a claim or a designation silently, while every test on a family below bit 8 stays green. `(u16)~mask` applied to the u32 `note_caught` clears the whole high half, which is the claim half. So every cast on these words was read and widened, and the tests were made to run on usr1 and usr2 rather than on the families they already used.
+
+**The layout, measured.** My first attempt widened `note_claim` where it stood and grew `struct Thread` to 1792; that slot had one byte free. It moved beside `last_cpu`, into `_pad_prowl3`. `note_caught` takes the slot `term_sig` and `group_term_sig` had, and those two move into `_pad_identity`. By `clang -fdump-record-layouts`, `sizeof(struct Proc)` stays 504 and `sizeof(struct Thread)` stays 1776.
+
+**What writing the sabotages found, before anything ran.** Fifty-three mutations were listed against the code as written. Three of them had no test to kill them: `(u16)~(mine << shift)` on the drop and on the exit path, and `(u8)~tgt` with two high designations, because a single-family fixture cannot see an over-clearing mask; and the holder's re-wake cast had no test at all. b429cb8e6 adds two-family legs and the holder's body. The list is `~/projects/aux-gate/usr/sabs.py`; whether each one goes red on its own line is still to be read.
+
+**Exactly what is verified at this entry.** On b429cb8e6, into a scratch directory: four changed kernel objects and two guest C programs compile with 0 warnings; `cargo check` of libthyla-rs, libutopia, viv-pheno-probe and u-job-test passes with no warning on the new lines; `check-flag-words.py` passes. Nothing has been linked, booted or run on a guest. Vault lint and `check-invariants.py` pass on the merged tree. This entry gains lines as the leases report.
+
+**Audit r1, before the first boot.** The Mac was held, so Fable 5.1 read the code first: 0 P0, 1 P1, 0 P2, 2 P3 (9f77a7394). The P1 was my test expecting a move to coalesce with interrupts that name a sender; a move coalesces only at sender 0. The kernel bound was right. A `note_target` width assert and stale widths were the rest.
+
+**Lease 1, 15:12Z to 15:27Z on 9f77a7394.** The CI bake passed, so the Rust and guest C link. The suite stopped at 2171 of 2172 on `vivarium.sigset_to_notemask`, whose exact pin of what block-all covers still read six notes. The kernel was right and the pin was stale, and neither my widening nor the audit saw it: a pin on a derived set that names its members has to be found by running it. A failed suite stops the boot, so joey did not run and the guest legs are still unproven.
+
+**Lease 2, 15:56Z to 18:06Z on 33fbf2198.** Suite 2173/0, the boot reached joey, and every guest leg passed on the first boot that ran them. Regreen rebuilt an identical ELF (5a56fe06a7a7a3a7). K01-K36 bar two went red with their own messages, B1-B7 each failed to build on their own guard, R1 on its const assert, and G1, G2, G4, G5, G6, P2, P3 and P4 on the right legs. Three sabotages did not earn their reds, and those are this lease's result.
+
+K12 stayed green. Its cast makes a thread hand off a high designation it could have honoured. `caught_note_prefers_awake` could not see it, because its designee is main and the walk, preferring the first awake thread, gave main the family straight back. So the wrong-thread case needed a designee that is not main: `caught_note_designee_keeps`, where the peer posts its own note.
+
+K15 stayed green. Its cast clears every claim on a designation, so a peer's wait could claim the same note and both threads unwind. That was not a width gap: no test at any family asserted that a designation closes its family. The model holds it; nothing at runtime did. `caught_note_designation_closes_the_family` does, and K38 is its twin with no cast.
+
+G3 stayed green, and the cause was my sabotage, not the kernel: a default death has two arms, so a flag on the predicate one of them asks could never have touched L345. L345 had therefore never turned red. G3 and G7 are rewritten to hit the wait's status and the latch. P1 went red with no line of its own, because stdio lost what the dying process had not flushed; I reasoned that it died at kill-usr, and a flush before that leg lets the next run show it instead.
+
+K12, K15 and the new twins, G3, G7 and P1 are owed by the landing lease with the SMP subset, and until then nothing above says they hold.
+
+**The landing lease, 19:36Z to 21:18Z on a37734c18, and two explanations it killed.** Suite 2175/0, guest legs passed, regreen ELF identical (6b6084b4e5a75992), and the SMP subset `default-smp4` and `ubsan-smp4` each 10/10 with 0 corruption. That subset is my reading of the hold as a narrow gate, not a vote: vote 17 named C4, and I told the operator so during the run. K15 and K38 went red on the new test. G3 turned L345 red for the first time, `sig=12 ws=15`. P1's flush showed what I had only reasoned: its last line is kill-worker's OK, and it dies at kill-usr.
+
+K12 and its twin K37 stayed green. What I wrote above about K12 is wrong, including the comment I put in the test: a hand-off does not move the family to main. The walk prefers the calling thread (`poster = self`, proc.c), and a thread entering an unwinding wait with the family unmasked is a candidate, so it wins its own designation straight back. Who unwinds cannot show that, so my new test could not fail. What differs is a walk that did no good and a moment with the claim open. The test now counts walks through a test-only counter. If K12 and K37 go red on it, that also proves this reading, which so far is only a reading.
+
+G7 stayed green, against what I predicted. Withholding the latch should have left the child asleep past the probe's 4 seconds. My hypothesis is that the parent's kill beats the child's first entry, so the child dies there and L345 never had a sleeper to wake. A 200 ms settle before the kill makes the child sleep. If G7 goes red with `ws=-1`, the hypothesis holds; if it stays green, it is wrong too.
+
+The next lease owes K12, K37 and G7. The SMP subset ran on a37734c18; what follows it is a test-only counter, a test and a probe's nap.
+
+**Lease 3, 23:17Z to 23:30Z on f5546b2be.** Both readings held, exactly as predicted. K12 went red only in the family test, "the wait walked no one", since its cast touches only the high bits; K37 went red in both families, same message. G7 went red on L345, `sig=10 fork=8240 kill=0 ws=-1`: without the latch a sleeping child outlives the probe's 4 seconds. Suite 2175/0, regreen ELF identical (57b66ede4b4f850c). The chunk lands on these, with the full matrix, `tools/test-fault.sh`, the interactive fleet and `tools/check-production.sh` not run, and the merge to main owing them.
+
+What I would keep from this run: three of the sabotages I wrote stayed green, and each time the first explanation I reached for was wrong or incomplete. Two of those explanations got written down as fact before anything had tested them. Only a prediction the next run could break told them apart.
+
+## 2026-11-02 (aux, Opus 5.5 1M) -- thread-model C4: a note aimed at one thread, and the wake I had narrowed
+
+**Decisions that were the operator's:** votes 14-17 of project_aux_votes_1021: `SYS_POSTNOTE_TID` at 138, SIGUSR1/2 as the next chunk, item 11c as its own chunk, and the SMP amplifier subset at landing, since the 11-02 hold forbids the full matrix.
+
+**What it is.** `tkill` and `tgkill` posted a process-directed note, so a peer could take a note aimed at someone else. Each thread now has a word beside the queue, one bit per family, and only that thread's tail takes from it. Pouch's `pthread_kill` and `raise` use it through patch 0067.
+
+**The wake I narrowed.** To make a test pass, I had the post skip the rouse when the target's mask held the family, with a written argument that a blocked thread's mask cannot change. Fable's round 1 showed that this is the store-buffer litmus test: the owner's plain store of its mask and read of the word, against the poster's OR and read of the mask, can each see the other's old value on ARMv8. It is latent today, because every served unmask has an eret and an svc before a wait, and the first served unmask-and-wait syscall would make it live. The model could not see it, since its `Mask` step and the tail's read are atomic. Nothing checked that argument but the audit. The rouse no longer asks the mask; the reader's re-check is the precision, which is what the queue's wakers already did for this reason (proc.c, "per-family mask precision lives in the reader's re-check"). A new buggy cfg holds it, at 3174542 states, because the ghost that stands for the stale read is monotone.
+
+**A check on the revert.** Removing the narrowing should put every count back, and it did exactly: direct 807792, direct_fatal 434763, needs_claim 812160, no_observe 813712, fatal_unwinds_only 422531, all as measured before I narrowed it. The whole checker then passed 18 of 18.
+
+**Round 1's four P3s, and what the plan missed.** A note moved on a full ring was dropped after its poster was told 0; a bit could go back on a Proc turned self-managing; a caught note made fatal after its post woke nobody; the fallback recorded sender 0. Applying them surfaced two things neither the audit nor my plan had: three test files walking the ring by hand, and `SA_RESETHAND` at a delivery, a third store that turns a disposition fatal. The second came from enumerating the stores instead of trusting the list of two. Round 2 enumerated them independently and found the same three.
+
+**Round 2.** Fable 5.1 on the fixes, 0 P0, 0 P1, 0 P2, 2 P3, 2 observations. The silent overflow arm now extincts. The other P3 is the process queue's twin of round 1's fatal-after-post, pre-existing since LS-5c and pinned as a contract by two tests. It is NOT fixed here: it is in OPEN-BUGS, owned by 11c, because it bites a native wait that rode the note out at post, which 11c changes, and what remains after that is Linux-equivalent. 11c must decide it.
+
+**Wrong turns the lease caught.** Lease 1 ended on one test expecting `SLEEP_*` from a `tsleep`, which answers `TSLEEP_*`, and a failed suite stops the boot, so joey never ran. On lease 2 the suite passed 2169 of 2169, the boot reached joey, and every kernel sabotage K01-K33 went red with its own message; regreen rebuilt a byte-identical ELF (5088ce7a12fadf07). Two guest sabotages did not earn their reds, and reading why mattered more than the count. G1 "failed" in 11 seconds: the mutation left `postnote_tid` unused, so the production shape did not compile, and the FAIL line in its summary was K33's left-over log. G7 stayed green, and I had predicted it might lose a race, but the cause was worse: it mutated `thread_caught_note_deliverable` alone, while a wait unwinds through `thread_caught_note_claim`, so it could never have fired. Had I taken the race explanation, L341 would have kept a witness that had never turned red. Both are reworked, and K34 is the same mutation with no flag and no race.
+
+**Exactly what is verified at this entry.** On ce6e929a1: the suite, the guest legs, K01-K33, G2-G6, G8 and P1, on one boot each with no SMP matrix. NOT yet verified: 84987124d's extinction line, K34, G1 and G7 as reworked, and the SMP subset. The landing lease owes all of those, and this entry gains a line when it reports. The full SMP matrix did not run and will not at landing, under the operator's hold.
+
+**What the landing lease proved, on f27c9f4ea.** Suite 2169/0, the boot reached joey, the guest legs passed, and regreen rebuilt an identical ELF (facf5e46ed8407b2). K23 ended the boot on `notes_move_to_queue_locked: no spare slot -- N-2 violation`, so 84987124d's line is proven, not argued. K34 went red on two tests, with no flag and no race. G1 went red on kill-worker, `on_worker=0 on_main=1`, this time for its own reason. G7, with the claim mutated too, went red on L341 with `on_peer=1`, so L341 holds and needs no race note. The SMP subset passed, `default-smp4` and `ubsan-smp4` each 10/10 with 0 corruption. The full matrix did not run, nor `tools/test-fault.sh`, the interactive fleet or `tools/check-production.sh`; the merge to main owes them.
 
 ## 2026-10-29 -- an image gate, the hang behind it, and a GPU stall that takes no verdict (corona)
 
@@ -457,6 +516,109 @@ and lc_login's session arm now write an `IMAGE:` marker, and the wrapper stops r
 wrapper with scratch scenarios, HEAD's wrapper took 3 attempts and counted "1 guest"; the fix takes 1 attempt and
 counts "1 IMAGE". The image-gate host test now asks for the marker, with 8 legs red on HEAD's lib.exp (663f76855).
 
+## 2026-10-29 (aux, Opus 5.5 1M) -- the corona join: aux-3 carries env-a and env-c; the merge hid three seams
+
+aux-3 merged corona/async-memory at its pushed tip c38f1cb1f for env-a + env-c (yip 0267, 0272; corona confirmed the
+tip at 16:04Z), on aux-3-join in the c7probe tree, built in the reap tree. The gates finished 2026-10-29 18:33Z; the
+landing commit after 009d20767 went to aux-3 and GitHub on 2026-11-02, for the reason under "What I got wrong".
+
+**Thirty conflicts were the easy part.** Each was read and resolved: `struct Proc` 504 (456 + D7's ledger 16 +
+`child_owed` 32), one `SPAWN_PERM_ALL` assert, pouch series 0050, 0064, 0065, 0066, JOURNAL / phase7-status interleaved
+by date with every header kept (406 and 57 = ours + theirs - base). The NULL-envp sweep found every `posix_spawn` in
+the merged tree already passing `environ`, so pouch 0064's empty-environment rule changes nothing in tree.
+
+**The merge hid three seams no conflict marked.** Two were the poll chunk's deferring locks: corona's private-progress
+code took `c->lock` raw fourteen times -- one inside `submit_async`, which poll-e had moved to `client_lock`, so the
+raw release left `defer_depth` raised -- and `g_proc_table_lock` raw four times. Both read as correct code on either
+branch alone. All eighteen now take the helpers, and `tools/check-lock-helpers.py` (a68fc0eca) fails any raw site.
+The third surfaced only at the first compile (842c0c908): Astra's protocol index embeds 64 `struct poll_waiter` and
+was sized to one 4096-byte page at 32 bytes a hook; the poll chunk's `prev` link made it 4176. It is now charged by
+its buddy footprint, the pattern the same function uses for its other tables. A sweep found no other corona-side
+fixed-size allocation holding a struct aux grew outside a static assert.
+
+**The audit.** Fable r1 (5.1, start == end): 0/0/0/2. F1: corona's pts interaction woke binding pollers under
+`g_proc_table_lock` -- the walk vote 13 removed -- now carried out of each holder in a `struct pts_wakes` of u8 pool
+slots (a list of pointers would have put 520 bytes on the exit and exec frames). F2: the checker's first form missed
+multi-line calls, aliases, `_raw` variants and client locks outside `9p_client.c`. F1 moved a wake, so round 2 was owed
+on the fixes: 0/0/0/4, all fixed in 009d20767 -- the F1 test leaked its fixture on an early assert; the checker still
+missed a client lock through a header member, parenthesised, cast or in a header, and exempted two shapes that write
+the table lock's word; nothing pinned the index charge to kmalloc's real order. The header plant "passed" the old
+checker too, because a planted header joins the sources whatever `load()` reads, so the self-test now asserts `load()`
+returns the client header, and it goes red with header scanning removed. I took the checker change over the
+reviewer's field rename because the rename would have changed production code after the SMP gate had run on it.
+
+**What the sabotages said.** SJ1 and SJ2 (a raw client unlock in the private-progress paths) extinct `poll_deferred_await
+inside a deferring lock` in `loom.private_native_operations`: the seam has a runtime witness, by a different guard than
+the `thread_free` one my runner was counting. SJ4 (the index charged one page) reds `loom.private_slot_owner`. SJ3a and
+SJ3b put the pts wake back in its pre-F1 place, one path each, and each reds the F1 test on that path's own assertion.
+SJ5 (kmalloc over-allocating two-page requests) reds the new charge test, on the pool table, first in its order of the
+two-page sizes.
+
+**Gates** (`~/projects/aux-gate/join/runs/summary.txt`). On 842c0c908: ci bake, suite and regreen 2150 tests / 0 fails
+with identical ELFs, the C7 and env markers, `specs/check-poll.sh` all as claimed, SMP gate default-smp1/4/8 +
+ubsan-smp4/8 each 10/10, 0 corruption. On 009d20767: suite 2151 / 0 with every marker, check-decls and check-production
+PASS, regreen ELF identical. The production kernel ELF is byte-identical between the two (`1cba396bb13fcd39`), so the
+SMP result covers the production code exactly; the reworked and new tests had one suite and no SMP run. Owed: the F1
+test's cleanup on an early assert has not executed, since SJ3a/b fail at its last asserts; a planted early failure is
+queued for my next lease.
+
+**What I got wrong.** The first SJ3 was a broken sabotage: an inline `pti_wake` inside the invalidate's `g_pts_lock`
+loop retakes that lock, so the boot hung in an earlier test for 300 s and never reached the F1 test. Its rc=1 read as
+red; asserting which message fired is what showed otherwise. I declared the SMP gate at 50 minutes; it is 50 boots of
+about two minutes, and I re-stated the lease at 17:15Z. I told the operator the tests with no same-line verdict were
+"gated off"; measured, all 2151 started and none failed, and the difference was my pattern. My first checker loop
+under zsh passed `"name --self-test"` as one filename, so five checkers "failed" with rc 2.
+
+I also called C7 "the overhaul's last chunk" in its status section, journal entry and change note. It is not: the
+review's own chunk list has C4 (thread-directed notes, vote 5 YES, F-3 P2 still open on every ref: the phenotype's
+`tkill`/`tgkill` use the tid only to find the Proc and post a note any unmasked thread may take, and native
+`pthread_kill` gets ENOSYS) and C8-C10 unstarted. I found it writing the operator's 11-02 status, by reading that list
+instead of recalling it, and first checked only aux-3 and described the mechanism wrongly; main's code settled both. `chg-2026-11-02-thread-overhaul-position` holds the position.
+
+And the lease. `run-final.sh` ended at 18:33:56Z with no release in it, relying on me to read the monitor. The session
+stopped there, so the Mac showed EXPIRED under my name until 2026-11-02 08:03Z (87.9 h held), and the landing waited
+too. No ref in the repo moved in that time and nobody was queued at the release, so I have no evidence it held anyone
+up, and none that it did not: corona had been queued behind me at 17:15Z. A chained last runner should release the
+lease itself.
+
+Evidence: memory design_aux_corona_join.md and audit_aux_corona_join_closed_list.md.
+
+## 2026-10-29 (aux, Opus 5.5 1M) -- thread-model C7: one first entry, per-thread /proc, a new thread inherits its creator's mask
+
+A chunk of the overhaul, run across three compactions (this entry first called it the last; corrected 2026-11-02: C4 and C8-C10 remain). C7b routes every first entry to EL0 through the shared
+return tail; C7c adds `/proc/<pid>/thread/<tid>/`, `step <tid>` and a listable `/proc`. Landing: aux-3 at the
+landing commit after 86d1eccaf, GitHub.
+
+**What the sabotages caught in my own tests.** Ten sabotages (S1-S10) each had to turn a named test red. S5 did
+not: the exec first-entry test passed on a kernel whose exec path skipped the tail, because `/hello` is
+demand-paged -- its first fetch faults, and that fault's own return parks the thread exactly where a correct first
+entry would. The test now reads the entry page in first (d159e3024), and S5 went red. The readdir test never
+crossed a batch inside one call (4d2c3b15e). And the new debug-probe leg asserted that `step <tid>` holds the other
+threads; it does not, and never has -- a step resumes the Proc and only the named thread single-steps, which is
+sound because the breakpoint step-over is per thread. The leg now asserts one instruction and the focus.
+
+**The audit's P1 became an ABI vote.** Fable r1 (0/1/0/4) found the Linux clone did not copy the creator's mask;
+C7b had made that a deterministic misdelivery. Fixing it raised the native arm: native threads started unmasked by
+documented contract, and a `pipe` note queued while every thread masked it was taken by the next newborn -- the Go
+runtime met it at every new M (its minit calls getpid before masking), haul's pumps since C7b. I asked; the
+operator voted inherit (V5). pouch 0065 makes a new thread restore its creator's mask (its old restore was an
+ENOSYS sentinel); haul's own masking went.
+
+**Round 2 and the hang it led to.** Fable r2 (0/0/0/3) said the pouch `mask` leg read only pouch's TLS shadow. The
+two legs I added for it found a real bug at the next boot: `mask-c11` hung, because a C11 `thrd_create` thread
+never registered clear_child_tid -- pouch 0004 re-armed that in `start()` only -- so `thrd_join` waited forever.
+It had passed as "patched but untested" since 0004 (pouch 0066). I stopped phase e's SMP gate on purpose, since
+the new legs run in every boot it makes; it ran once, on the final tip: 50/50, 0 corruption.
+
+**What I got wrong.** I committed the r2 fixes claiming the kernel ELF would stay byte-identical because the
+comment edits kept every line count; phase f's hash differed, cause not established. One commit body claimed a
+dossier was co-staged when the script had stopped before staging it (86d1eccaf corrects it). And my first
+`mask-queued` red-first plan used S15, which cannot work: a failed kernel test extincts the boot before joey runs,
+so S18 also unregisters the kernel twin.
+
+Evidence: `~/projects/aux-gate/c7/runs/summary.txt` (phases a-f2); memory design_thread_c7.md and
+audit_thread_c7_closed_list.md.
+
 ## 2026-10-29 -- the goodbye bound measured the host, not a hang (corona)
 
 **What it closes.** OPEN-BUGS 2026-10-29T00:33Z, a P1 I introduced in 6443f1874
@@ -529,6 +691,47 @@ still write.**
 record now makes fixable. The rp5/rp6/rp7 wrappers' first run.
 `--show-config` writing the record (02:30Z).
 
+## 2026-10-28 (aux, Opus 5.5 1M) -- the poll chunk: hook walks bounded, and none under its owner's lock
+
+**The ask.** Vote 11 sequenced the hook-list bound after C6; votes 12 (bound the span, not the count) and 13 (move every
+locked walk out, the console's and the 9P client's included) set the design. Never re-asked.
+
+**What landed (aux-3-poll, 13 commits, tip cc82c1d17).** P-a/P-b the batched walk; P-c walks owed under the process
+table lock, pinned by a bookmark at the head; P-d the console episode; P-e walks deferred past `c->lock` and
+`g_dev9p_poll_lock`. Each spec before its code: `poll_walk.tla`, `poll_owed.tla`, `poll_defer.tla`.
+
+**The design turn that mattered.** Vote 13 said the 9P walks move after `c->lock` "using the refs they hold". The Loom
+broke that: an async op does not reference its Loom, and `loom_free` serializes with completions only through each
+op's `c->lock` in its abandon loop. A reference taken at the owe would have been a resurrection at refcount zero, and
+worse, the SQPOLL kthread could end up running `loom_free` on itself (its self-join). So the owners split: REF owners
+(srvconn, pipe ring -- refcounted, frees safe anywhere) take a reference; WAIT owners (the Loom, the client, the test
+transports) wait in their free. The srvconn could not be a WAIT owner: its last unref can run under `c->lock` in
+`p9_client_close`, where a wait would spin on the same CPU as the thread it waits for.
+
+**Wrong turns, and what caught each.**
+- 96f259231 added `srvconn_total_freed`, which already existed: two commits do not compile. The per-file compile had
+  run on srvconn.c before the accessor went in; the sabotage set's per-variant compile check caught it (d1a0bf094).
+  Lesson, again: the posture is measured after the LAST edit.
+- The first boot extincted (`pw_await: a hook outlived its list's owner`): the WAIT owners' wait reused the table
+  lock's, whose hook check belongs to `proc_free`, not to the spec's Free (71402f7f6).
+- The first TLC run failed the clean `poll_defer_liveness`: weak fairness on Unlock admits a thread cycling depth 1-2
+  forever inside one outer hold (f6f49c134).
+- Audit F1 (Fable): both bookmark waits spun on the core's `yield` hint. Making the walks preemptible made every spin
+  on them a same-CPU livelock from a syscall body, which is never preempted -- the third shape of the loom_free join
+  lesson. The regression pins both threads to one CPU; sabotage S18 shows the spin hangs it (cc82c1d17).
+- Sabotage S2 and S8 hung the boot at test 112 before reaching their targets: every owed walk ENTERS `poll_walk`
+  parked, so breaking the resume broke `wait_pid`. Narrowed to S2b/S8b, both red. The judge also missed the 9P
+  fixture's `P9-FIXTURE FAIL:` lines (S17 was red all along).
+
+**Evidence.** ~/projects/aux-gate/poll/runs/summary.txt: green 2068/0 on cc82c1d17, 19/19 new tests red under
+sabotage, regreen ELF == green, check-production PASS, SMP gate 5 rows x 10/10 0 corruption; TLC every cfg as
+claimed. Audit: `vault/record/audits/adt-pollwalk-r1.md`.
+
+**What "fixed" covers.** No walk runs under its owner's lock and no hold exceeds 32 hooks; the TOTAL work per event is
+still O(pollers), each a pool-charged thread. Open: the dedupe-direction test (seam), `dpl_lock` untested directly,
+the EL0-return re-enqueue residue, the `SPAWN_PERM_ALL` alias assert.
+
+---
 ## 2026-10-28 -- pouch's posix_spawn stops dropping envp (corona)
 
 **What it closes.** seam-pouch-spawn-envp, pouch's third of OPEN-BUGS

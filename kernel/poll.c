@@ -135,6 +135,7 @@ void poll_waiter_init(struct poll_waiter *pw, struct Rendez *r) {
     pw->rendez = r;
     pw->list   = NULL;
     pw->next   = NULL;
+    pw->prev   = NULL;
 }
 
 void poll_waiter_list_init(struct poll_waiter_list *l) {
@@ -157,10 +158,25 @@ void poll_waiter_list_register(struct poll_waiter_list *l,
     if (pw->list != NULL)                     extinction("pw_register: double register");
 
     irq_state_t s = spin_lock_irqsave(&l->lock);
+    pw->prev = NULL;
     pw->next = l->head;
+    if (l->head) l->head->prev = pw;
     pw->list = l;
     l->head  = pw;
     spin_unlock_irqrestore(&l->lock, s);
+}
+
+// Unlink `pw` (a hook or a bookmark) from `l`, whose lock the caller holds.
+static void poll_list_unlink(struct poll_waiter_list *l, struct poll_waiter *pw) {
+    if (pw->prev ? pw->prev->next != pw : l->head != pw)
+        extinction("pw_unregister: the hook's predecessor does not lead to it (corruption)");
+    if (pw->next && pw->next->prev != pw)
+        extinction("pw_unregister: the hook's successor does not lead back to it (corruption)");
+    if (pw->prev) pw->prev->next = pw->next;
+    else          l->head        = pw->next;
+    if (pw->next) pw->next->prev = pw->prev;
+    pw->next = NULL;
+    pw->prev = NULL;
 }
 
 void poll_waiter_list_unregister(struct poll_waiter *pw) {
@@ -168,27 +184,13 @@ void poll_waiter_list_unregister(struct poll_waiter *pw) {
     struct poll_waiter_list *l = pw->list;
     if (!l) return;   // already unregistered — idempotent no-op.
 
+    // No concurrent unregister of this pw is possible (it belongs to the
+    // calling poller); its neighbours may be anyone's, a walk's bookmark
+    // included, and the unlink checks both point back at it.
     irq_state_t s = spin_lock_irqsave(&l->lock);
-    // Re-check under lock: a concurrent unregister on this pw isn't
-    // possible (pw belongs to the calling poller), but the list could
-    // have been modified by other pollers' register/unregister against
-    // their own hooks. Walk for pw; remove if found.
-    struct poll_waiter **slot = &l->head;
-    while (*slot) {
-        if (*slot == pw) {
-            *slot    = pw->next;
-            pw->next = NULL;
-            pw->list = NULL;
-            spin_unlock_irqrestore(&l->lock, s);
-            return;
-        }
-        slot = &(*slot)->next;
-    }
-    // Not on the list — pw->list was non-NULL on entry but pw is gone.
-    // That's a corruption: the unregister-on-NULL idempotency check
-    // above already covered the legitimate "already gone" case.
+    poll_list_unlink(l, pw);
+    pw->list = NULL;
     spin_unlock_irqrestore(&l->lock, s);
-    extinction("pw_unregister: pw->list set but pw not on list (corruption)");
 }
 
 // Whether the list currently has no registered hooks. Under the list lock (a
@@ -197,33 +199,291 @@ void poll_waiter_list_unregister(struct poll_waiter *pw) {
 // readiness op is stranded (no poller cares) -- so the check + the unlink + the
 // ps->op clear are one critical section vs a concurrent reuse that registers its
 // hook BEFORE taking g_dev9p_poll_lock.
+// Bookmarks are skipped: a list holding only parked walks has no hook.
 bool poll_waiter_list_empty(struct poll_waiter_list *l) {
     if (!l) return true;
     irq_state_t s = spin_lock_irqsave(&l->lock);
-    bool empty = (l->head == NULL);
+    struct poll_waiter *pw = l->head;
+    while (pw && pw->magic == POLL_MARK_MAGIC) pw = pw->next;
+    bool empty = (pw == NULL);
     spin_unlock_irqrestore(&l->lock, s);
     return empty;
 }
 
+#ifdef KERNEL_TESTS
+void (*volatile g_poll_wake_batch_hook)(struct poll_waiter_list *l);
+void (*volatile g_poll_scan_hook)(u64 i);
+
+bool poll_test_wake_hook_release(void) {
+    bool left = g_poll_wake_batch_hook != NULL || g_poll_scan_hook != NULL;
+    g_poll_wake_batch_hook = NULL;
+    g_poll_scan_hook = NULL;
+    return left;
+}
+
+u32 poll_waiter_list_count_for_test(struct poll_waiter_list *l) {
+    irq_state_t s = spin_lock_irqsave(&l->lock);
+    u32 n = 0;
+    for (struct poll_waiter *pw = l->head; pw; pw = pw->next)
+        if (pw->magic != POLL_MARK_MAGIC) n++;
+    spin_unlock_irqrestore(&l->lock, s);
+    return n;
+}
+
+u32 poll_waiter_list_marks_for_test(struct poll_waiter_list *l) {
+    irq_state_t s = spin_lock_irqsave(&l->lock);
+    u32 n = 0;
+    for (struct poll_waiter *pw = l->head; pw; pw = pw->next)
+        if (pw->magic == POLL_MARK_MAGIC) n++;
+    spin_unlock_irqrestore(&l->lock, s);
+    return n;
+}
+#endif
+
+// specs/poll_walk.tla Batch: each hold of the lock reaches up to
+// POLL_WAKE_BATCH hooks from the head (an unparked walk's first) or from the
+// element after the bookmark (every later one), stepping over other walks'
+// bookmarks. Past the last hook the walk is over; otherwise the bookmark goes
+// back in right behind the last hook reached.
+static void poll_walk(struct poll_waiter_list *l, struct poll_waiter *mark,
+                      bool parked) {
+    for (;;) {
+        irq_state_t s = spin_lock_irqsave(&l->lock);
+        struct poll_waiter *pw = l->head;
+        if (parked) {
+            pw = mark->next;
+            poll_list_unlink(l, mark);
+            parked = false;
+        }
+        struct poll_waiter *last = NULL;
+        u32 reached = 0;
+        for (; pw; pw = pw->next) {
+            if (pw->magic == POLL_MARK_MAGIC) continue;
+            if (pw->magic != POLL_WAITER_MAGIC) {
+                // The walker mid-iteration found a corrupted link. A
+                // stack-lifetime'd hook leaked past its poll call's
+                // return would dereference clobbered stack memory here.
+                extinction("pw_wake: corrupted waiter magic (stale hook / UAF)");
+            }
+            if (reached == POLL_WAKE_BATCH) {
+                // A hook is left: park the walk right behind `last`.
+                mark->prev = last;
+                mark->next = last->next;
+                last->next->prev = mark;
+                last->next = mark;
+                parked = true;
+                break;
+            }
+            // Order matters: write `ready` FIRST, then call `wakeup`.
+            // wakeup acquires the rendez's lock — the release/acquire pair
+            // makes pw->ready=true visible to the woken poller's cond
+            // re-check (which runs under the same rendez lock).
+            pw->ready = true;
+            (void)wakeup(pw->rendez);
+            last = pw;
+            reached++;
+        }
+        spin_unlock_irqrestore(&l->lock, s);
+        if (!parked) return;
+#ifdef KERNEL_TESTS
+        void (*hook)(struct poll_waiter_list *) = g_poll_wake_batch_hook;
+        if (hook) hook(l);
+#endif
+    }
+}
+
 void poll_waiter_list_wake(struct poll_waiter_list *l) {
     if (!l) return;
+    struct poll_waiter mark = { .magic = POLL_MARK_MAGIC };
+    poll_walk(l, &mark, false);
+}
 
+void poll_waiter_list_wake_from(struct poll_waiter_list *l,
+                                struct poll_waiter *mark) {
+    if (!l || !mark || mark->magic != POLL_MARK_MAGIC)
+        extinction("pw_wake_from: no bookmark to walk from");
+    poll_walk(l, mark, true);
+}
+
+// =============================================================================
+// Owed walks (specs/poll_owed.tla). Every function here but the wait runs
+// under the caller's lock, the one that serializes the chains and records.
+// =============================================================================
+
+// A walk begins here: every hook listed now is behind the bookmark. l->lock HELD.
+static void poll_list_push_mark(struct poll_waiter_list *l,
+                                struct poll_waiter *mark) {
+    mark->prev = NULL;
+    mark->next = l->head;
+    if (l->head) l->head->prev = mark;
+    l->head = mark;
+}
+
+void poll_owed_init(struct poll_owed *o, struct poll_waiter_list *l) {
+    if (!o || !l) extinction("poll_owed_init: NULL");
+    o->list  = l;
+    o->chain = NULL;
+    o->next  = NULL;
+    o->prev  = NULL;
+}
+
+void poll_owe(struct poll_owed_chain *c, struct poll_owed *o) {
+    if (o->chain) return;
+    o->prev = NULL;
+    o->next = c->head;
+    if (c->head) c->head->prev = o;
+    c->head  = o;
+    o->chain = c;
+}
+
+void poll_owed_cancel(struct poll_owed *o) {
+    struct poll_owed_chain *c = o->chain;
+    if (!c) return;
+    if (o->prev) o->prev->next = o->next;
+    else         c->head       = o->next;
+    if (o->next) o->next->prev = o->prev;
+    o->next  = NULL;
+    o->prev  = NULL;
+    o->chain = NULL;
+}
+
+struct poll_waiter_list *poll_owed_begin(struct poll_owed_chain *c,
+                                         struct poll_waiter *mark) {
+    struct poll_owed *o = c->head;
+    if (!o) return NULL;
+    poll_owed_cancel(o);
+
+    struct poll_waiter_list *l = o->list;
+    *mark = (struct poll_waiter){ .magic = POLL_MARK_MAGIC };
     irq_state_t s = spin_lock_irqsave(&l->lock);
-    for (struct poll_waiter *pw = l->head; pw; pw = pw->next) {
-        if (pw->magic != POLL_WAITER_MAGIC) {
-            // The walker mid-iteration found a corrupted link. A
-            // stack-lifetime'd hook leaked past its poll call's
-            // return would dereference clobbered stack memory here.
-            extinction("pw_wake: corrupted waiter magic (stale hook / UAF)");
-        }
-        // Order matters: write `ready` FIRST, then call `wakeup`.
-        // wakeup acquires the rendez's lock — the release/acquire pair
-        // makes pw->ready=true visible to the woken poller's cond
-        // re-check (which runs under the same rendez lock).
-        pw->ready = true;
-        (void)wakeup(pw->rendez);
-    }
+    poll_list_push_mark(l, mark);
     spin_unlock_irqrestore(&l->lock, s);
+    return l;
+}
+
+// The holder of a bookmark (or of a record not yet begun) is between two
+// batches of a walk no lock of the owner's covers, and may be preempted -- onto
+// THIS CPU's run tree. A syscall body is never preempted, so an awaiter there
+// that only spun would never let it back on (audit r1 F1): yield the CPU while
+// anything else can run on it. Every caller holds no spinlock.
+static void poll_await_pause(void) {
+    if (!sched_yield_hint()) __asm__ __volatile__("yield" ::: "memory");
+}
+
+static void poll_list_await_no_mark(struct poll_waiter_list *l, bool hook_fatal) {
+    for (;;) {
+        bool marked = false;
+        irq_state_t s = spin_lock_irqsave(&l->lock);
+        for (struct poll_waiter *pw = l->head; pw; pw = pw->next) {
+            if (pw->magic == POLL_MARK_MAGIC) marked = true;
+            else if (hook_fatal)
+                extinction("pw_await: a hook outlived its list's owner");
+        }
+        spin_unlock_irqrestore(&l->lock, s);
+        if (!marked) return;
+        poll_await_pause();
+    }
+}
+
+void poll_waiter_list_await_unmarked(struct poll_waiter_list *l) {
+    poll_list_await_no_mark(l, true);
+}
+
+// =============================================================================
+// Walks deferred past a deferring lock (specs/poll_defer.tla). A thread's
+// lock_owed chain and defer_depth are its own: only it pushes and pops. An IRQ
+// handler never owes -- it would be touching the interrupted thread's chain --
+// and neither does a section with IRQs masked under the lock: both walk at
+// once.
+// =============================================================================
+
+void poll_deferred_init(struct poll_deferred *d, struct poll_waiter_list *l,
+                        const struct poll_defer_ops *ops, void *owner) {
+    if (!d || !l) extinction("poll_deferred_init: NULL");
+    if (ops && (!ops->tryget || !ops->put))
+        extinction("poll_deferred_init: a ref owner without tryget and put");
+    d->list  = l;
+    d->ops   = ops;
+    d->owner = owner;
+    d->chain = NULL;
+    d->next  = NULL;
+}
+
+void poll_defer_enter(void) {
+    struct Thread *t = current_thread();
+    if (t) t->defer_depth++;
+}
+
+void poll_defer_exit(void) {
+    struct Thread *t = current_thread();
+    if (!t) return;
+    if (t->defer_depth == 0)
+        extinction("poll_defer_exit: no deferring lock held");
+    if (--t->defer_depth) return;
+
+    struct poll_deferred *d;
+    while ((d = t->lock_owed.head) != NULL) {
+        struct poll_waiter_list *l = d->list;
+        // A WAIT owner may be freed the moment the bookmark leaves its list,
+        // and the record with it: read what the put needs first.
+        const struct poll_defer_ops *ops = d->ops;
+        void *owner = d->owner;
+        struct poll_waiter mark = { .magic = POLL_MARK_MAGIC };
+        irq_state_t s = spin_lock_irqsave(&l->lock);
+        t->lock_owed.head = d->next;
+        d->next  = NULL;
+        d->chain = NULL;
+        poll_list_push_mark(l, &mark);
+        spin_unlock_irqrestore(&l->lock, s);
+        poll_walk(l, &mark, true);
+        if (ops) ops->put(owner);
+    }
+}
+
+void poll_wake_deferred(struct poll_deferred *d) {
+    struct Thread *t = current_thread();
+    struct poll_waiter_list *l = d->list;
+    if (!t || t->defer_depth == 0 || irqs_masked()) {
+        poll_waiter_list_wake(l);
+        return;
+    }
+    irq_state_t s = spin_lock_irqsave(&l->lock);
+    // Owed already (its walk has not begun), or nothing listed to owe: a hook
+    // that registers after this samples the condition itself.
+    if (d->chain || !l->head) {
+        spin_unlock_irqrestore(&l->lock, s);
+        return;
+    }
+    if (d->ops && !d->ops->tryget(d->owner)) {
+        spin_unlock_irqrestore(&l->lock, s);
+        poll_waiter_list_wake(l);
+        return;
+    }
+    d->chain = &t->lock_owed;
+    d->next  = t->lock_owed.head;
+    t->lock_owed.head = d;
+    spin_unlock_irqrestore(&l->lock, s);
+}
+
+void poll_deferred_await(struct poll_deferred *d) {
+    struct Thread *t = current_thread();
+    struct poll_waiter_list *l = d->list;
+    if (t && t->defer_depth)
+        extinction("poll_deferred_await inside a deferring lock");
+    for (;;) {
+        irq_state_t s = spin_lock_irqsave(&l->lock);
+        struct poll_defer_chain *c = d->chain;
+        spin_unlock_irqrestore(&l->lock, s);
+        if (!c) break;
+        if (t && c == &t->lock_owed)
+            extinction("poll_deferred_await: the freeing thread owes the walk itself");
+        poll_await_pause();
+    }
+    // Off every chain, so each walk owed to it has its bookmark listed or is
+    // over (the drain clears `chain` and lists the bookmark in one hold). Its
+    // hooks are the owner's to account for (specs/poll_defer.tla Free waits on
+    // the record and the bookmarks only).
+    poll_list_await_no_mark(l, false);
 }
 
 // =============================================================================
@@ -370,6 +630,22 @@ static void poll_scan_one(struct Proc *p, struct pollfd *pfd, struct Spoor *pre,
     }
 }
 
+// One hook per list per call (vote 12): every wake re-samples every fd, so a
+// second hook of this call on a list it is already on only lengthens the
+// producers' walk. The earlier hook went on before this one's sample (or its
+// arm), so every walk of a mutation the sample did not see reaches it. The
+// flag this one may have caught stays readable: the cond reads every slot.
+static void poll_hook_once(struct poll_waiter *waiters, u64 i) {
+    struct poll_waiter_list *l = waiters[i].list;
+    if (!l) return;
+    for (u64 j = 0; j < i; j++) {
+        if (waiters[j].list == l) {
+            poll_waiter_list_unregister(&waiters[i]);
+            return;
+        }
+    }
+}
+
 // Take every hook off its list, THEN drop every retained object ref, then
 // clear each hook (specs/poll.tla Rearm). The order is load-bearing (RW-2
 // 2C-F1): a final handle_put may run an object's close hook against its
@@ -494,6 +770,7 @@ static bool poll_arm_remote(struct pollfd *kfds, struct poll_waiter *waiters,
         if (!snaps[i].remote) continue;
         struct Spoor *sp = (struct Spoor *)held[i].obj;
         if (!sp->dev->poll_arm(sp, kfds[i].events, &waiters[i])) covered = false;
+        poll_hook_once(waiters, i);
     }
     return covered;
 }
@@ -563,7 +840,12 @@ s64 sys_poll_for_proc_spoors(struct Proc *p, struct pollfd *kfds, u64 nfds,
         for (u64 i = 0; i < nfds; i++) {
             poll_scan_one(p, &kfds[i], pre ? pre[i] : NULL,
                           expired ? NULL : &waiters[i], &held[i], &snaps[i]);
+            poll_hook_once(waiters, i);
             if (snaps[i].remote) any_remote = true;
+#ifdef KERNEL_TESTS
+            void (*scan_hook)(u64) = g_poll_scan_hook;
+            if (scan_hook) scan_hook(i);
+#endif
         }
 
         // SETTLE, then take in the answers. The verdict waits for every

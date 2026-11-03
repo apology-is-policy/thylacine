@@ -22,7 +22,7 @@ design:
   - "docs/VIVARIUM.md"
   - "docs/LINEAGE.md"
 created: 2026-08-03
-updated: 2026-10-29
+updated: 2026-11-02
 ---
 ## Session registry factory
 
@@ -36,18 +36,22 @@ cannot be delegated by a caller lacking internal factory role bit 29.
 The C/kernel, C/libt and Rust compiled ABI witnesses agree on number, bit and
 record layout. See [[sub-kernel-devsrv]].
 
-Numbers 129..133 are assigned nothing on this tree (b3 holds them; 127 and 128
-are main's JIT_CREATE_SEALED and ICACHE_SYNC_SPACE).
+Numbers 129..133 and 135..137 are assigned nothing on this tree (b3 and main hold
+them; 127 and 128 are main's JIT_CREATE_SEALED and ICACHE_SYNC_SPACE).
 `syscall.native_gap_unassigned` (`kernel/test/test_syscall.c`) pins the gap by
 the unknown arm's own counter, `syscall_unknown_count()`, rather than by the -1
 that arm answers, because many native handlers refuse zeroed arguments with the
-same -1. Its control, 134, answers the factory-role gate and leaves the counter
-alone.
+same -1. Its controls leave the counter alone: 134 answers the factory-role gate
+and 138, whose empty name is its own refusal, answers EINVAL.
+
+Native call 138 is POSTNOTE_TID, which posts to one thread of the caller's own Proc
+([[sub-kernel-syscall-abi]], [[sub-kernel-notes]]). It shares `postnote_copy_name` with
+`SYS_POSTNOTE`.
 
 ## Trusted-seat and nonblocking entries
 
 Native calls 121/122/123 are TRUSTED_SEAT, SEAT_IMPORT and SET_NONBLOCK;
-the native ceiling is now 134 (SRV_REGISTRY_NEW; [[sub-kernel-vivarium]]). [[abi-trusted-seat]] and [[abi-native-nonblock]] pin
+the native ceiling is now 138 (POSTNOTE_TID; [[sub-kernel-vivarium]]). [[abi-trusted-seat]] and [[abi-native-nonblock]] pin
 the mirrors. TRUSTED_SEAT snapshots the bounded 544-byte envelope before taking
 the process lock, scrubs temporary key material and validates copyout. SEAT_IMPORT
 checks the bound service, owned live peer connection and DMA allowance before
@@ -1008,7 +1012,10 @@ the hard maximum. Both thread-create arms (`sys_thread_spawn_handler` and
 thread made then would only die at its first die-check, after a kstack
 allocation, and the spawner dies at the call's own return), then pre-check
 `proc_thread_cap_ok`; both reads are lockless early refusals, and
-`proc_thread_admit` decides both exactly under [[lock-proc-threads]]. The cap
+`proc_thread_admit` decides both exactly under [[lock-proc-threads]]. Both copy
+the creating thread's `note_mask` into the new thread before that admit links it
+(operator vote 2026-10-29, POSIX `pthread_create`; [[sub-kernel-notes]]): no
+reader reaches an unlinked thread, and the mask is owner-written after. The cap
 counts live threads (`live_threads`, operator vote 7): a thread stops counting at
 its EXITING commit, and its joiner is woken only after that commit, so a Proc at
 the cap that has just joined a thread can start another at once, though the
@@ -1858,7 +1865,14 @@ them, as Linux's prototypes do: a guest may leave the high half of a register
 unspecified.
 `viv_kill_for_test` drives the real shell with an explicit caller and a NULL
 `ctx`; a self-directed `snare:*` death answers 1 there instead of ending the
-harness (`notes.kill_family_gate`).
+harness (`notes.kill_family_gate`). A tid goes to `proc_note_thread` with the caller
+as sender, which only a self-managing target's queue records
+(`notes.direct_fallback_records_its_sender`).
+
+`rt_sigaction`'s tail is `viv_sigaction_settled`: what a stored disposition means for
+what is already pending. One that ignores discards it (`notes_discard_name`); one that
+terminates rouses every peer with a pending word (`proc_note_direct_rouse`,
+[[sub-kernel-notes]]). `viv_sigaction_settled_for_test` drives it.
 
 ## SYS_POSTNOTE answers errnos; a self-posted fault snare ends the caller (2026-10-14, S-3)
 

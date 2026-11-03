@@ -5,7 +5,7 @@
 # state space, so its distinct-state count is a deterministic fingerprint (a
 # change means the MODEL changed); a BUGGY cfg halts at the first violation, so
 # it is judged on its verdict -- the exit status plus the NAME of the property
-# that fired. The temporal cfg explores the whole space before liveness is
+# that fired (temporal_fired, below, says how that NAME is known on each TLC). The temporal cfg explores the whole space before liveness is
 # judged (`-lncheck final`), so its count is pinned too. Every run is `-workers 1`, so each count
 # is the one specs/SPEC-TO-CODE.md records.
 #
@@ -23,10 +23,14 @@ trap 'rm -rf "$TMP"' EXIT
 STAMP="$TMP/stamp"; : > "$STAMP"
 
 # clean: cfg, expected distinct states ("-" = do not pin)
-CLEAN="caught_target:613245"
+CLEAN="caught_target:613245
+caught_target_direct:807792
+caught_target_direct_fatal:434763"
 
 # buggy: cfg, invariant that must be the one reported
-BUGGY="caught_target_buggy_double_designate:OneClaimant"
+BUGGY="caught_target_buggy_double_designate:OneClaimant
+caught_target_buggy_direct_to_queue:NoStolenDirect
+caught_target_buggy_direct_claims:OneClaimant"
 
 # temporal: cfg, the property that must be the one reported, expected distinct
 # states ("-" = do not pin)
@@ -36,7 +40,12 @@ caught_target_buggy_no_rekick:NoStrand:613245
 caught_target_buggy_exit_keeps:NoStrand:639673
 caught_target_buggy_release_no_wake:NoStrand:165597
 caught_target_buggy_irq_no_notes:NoStrand:613245
-caught_target_buggy_stale_keeps:NoStrand:616829"
+caught_target_buggy_stale_keeps:NoStrand:616829
+caught_target_buggy_direct_needs_claim:NoDirectStrand:812160
+caught_target_buggy_direct_no_rouse:NoDirectStrand:792792
+caught_target_buggy_direct_no_observe:NoDirectStrand:813712
+caught_target_buggy_fatal_unwinds_only:NoDirectStrand:422531
+caught_target_buggy_direct_stale_mask:NoDirectStrand:3174542"
 
 # Every temporal run is `-lncheck final`: liveness is judged once the whole
 # space is explored. Without it TLC checks liveness at TIME-triggered points
@@ -52,6 +61,18 @@ run() {  # $1 = cfg basename -> sets RC, LOG and GOT (distinct states)
 }
 
 fail() { echo "$1"; echo fail > "$TMP/failed"; }
+
+# Did the temporal property $2 fire in the run of cfg $1? TLC 1.8.0 names it. TLC2
+# 2.19 prints only "Temporal properties were violated.", and that identifies it
+# only when the cfg lists this property and no other (docs/agent/SPEC-POLICY.md).
+listed_properties() {
+    awk '/^PROPERT/ { f = 1; next } /^[A-Z]+/ { f = 0 } f && NF { print $1 }' "$1.cfg"
+}
+temporal_fired() {
+    grep -q "Temporal property $2 was violated" "$LOG" && return 0
+    grep -q "Temporal properties were violated" "$LOG" || return 1
+    [ "$(listed_properties "$1")" = "$2" ]
+}
 
 echo "== clean (must run to completion) =="
 echo "$CLEAN" | while IFS=: read -r cfg want; do
@@ -82,8 +103,8 @@ echo "$TEMPORAL" | while IFS=: read -r cfg prop want; do
     run "$cfg"
     if grep -q "Invariant [A-Za-z]* is violated" "$LOG"; then
         fail "FAIL $cfg: a SAFETY invariant fired -- this cfg documents a hang, not an unsafe state"
-    elif ! grep -q "Temporal property $prop was violated" "$LOG"; then
-        fail "FAIL $cfg: rc=$RC, $prop not reported violated -- got: $(grep -o 'Temporal property [A-Za-z]* was violated' "$LOG" | head -1)"
+    elif ! temporal_fired "$cfg" "$prop"; then
+        fail "FAIL $cfg: rc=$RC, $prop not reported violated -- got: $(grep -oE 'Temporal propert(y [A-Za-z]* was|ies were) violated' "$LOG" | head -1); cfg lists: $(listed_properties "$cfg" | tr '\n' ' ')"
     elif [ "$want" != "-" ] && [ "$GOT" != "$want" ]; then
         fail "FAIL $cfg: $GOT distinct states, expected $want -- the model CHANGED"
     else

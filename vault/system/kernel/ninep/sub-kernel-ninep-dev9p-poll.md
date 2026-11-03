@@ -12,7 +12,7 @@ hazards: [haz-death-path-wake]
 abis: []
 design: [docs/NET-DESIGN.md]
 created: 2026-07-31
-updated: 2026-10-06
+updated: 2026-10-29
 ---
 ## Purpose
 
@@ -190,6 +190,18 @@ count, the snapshot list + its atomic live count, the rendez, the init flag,
 the test hold.
 
 ## Concurrency
+
+**`g_dev9p_poll_lock` is a DEFERRING lock** (the poll chunk, 2026-10-28, [[chg-2026-10-28-poll-hook-walks]]):
+all eight acquire/release pairs are `dpl_lock` / `dpl_unlock`. It is taken
+around `c->lock` (the arm submit; the collector's abandon of a stranded arm), so
+a walk reached under both -- the transport's send of a Tflush, say -- is owed
+past BOTH and runs at `dpl_unlock`, the outermost release ([[spec-poll-defer]],
+NoWalkUnderLock). `poll.dev9p_poll_lock_defers_its_walks` (thread-model C7-0)
+runs a wake under the lock through its own wrappers: the walk is owed, not run,
+while the lock is held, and runs at `dpl_unlock` with no lock counted on the
+thread (the spin lock dropped before the drain). Each half was seen red -- a
+`dpl_unlock` that drains before it releases, and a `dpl_lock` that defers
+nothing.
 
 Lock order (verified acyclic, documented at the file head):
 `g_dev9p_poll_lock → c->lock` (the arm submit; the collector's flush),

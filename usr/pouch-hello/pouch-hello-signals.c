@@ -19,7 +19,7 @@
 //                                         dispatcher hits SIG_IGN -> NCONT
 //                                         without invoking the user handler;
 //                                         the flag must NOT change.
-//   sigaction(SIGUSR1, ...)            -> EINVAL (unsupported v1.0 signum).
+//   sigaction(SIGALRM, ...)            -> EINVAL (unsupported v1.0 signum).
 //   deaths (gcpark-b)                  -> the binary re-spawns itself to die
 //                                         by abort(), a failed assert(), a
 //                                         plain `brk #1`, a NULL store,
@@ -56,9 +56,11 @@
 //   pouch-hello-signals: count unchanged (count=2)
 //   pouch-hello-signals: unsupported sigaction returns EINVAL
 //   pouch-hello-signals: SIGTERM runs its own handler, apart from SIGINT
+//   pouch-hello-signals: SIGUSR1 and SIGUSR2 run their own handlers, each blocked apart
 //   pouch-hello-signals: death abort reads WIFSIGNALED SIGABRT  (x4 legs)
 //   pouch-hello-signals: death raise-segv reads WIFSIGNALED SIGSEGV  (x4 legs)
 //   pouch-hello-signals: death term reads WIFSIGNALED SIGTERM
+//   pouch-hello-signals: death usr1 reads WIFSIGNALED SIGUSR1  (and usr2)
 //   pouch-hello-signals: kill errnos read ESRCH and EPERM
 //   POUCH_CENSUS_SIGNALS (pouch-census.h; joey matches it)
 //
@@ -156,32 +158,32 @@ static int test_deaths(void) {
     return bad ? -1 : 0;
 }
 
-// kill(pid, SIGTERM) posts `term`, and the child's death reads back as SIGTERM.
-// Before patch 0049 Pouch posted `interrupt` and this read SIGINT. The child
-// may not have reached main yet: a term it has no handler for ends it the same
-// way, by the kernel's default.
-static int test_term_death(void) {
+// kill(pid, sig) posts the signal's own note, and the child's death reads back as
+// that signal. Before patch 0049 Pouch posted `interrupt` for SIGTERM and this read
+// SIGINT. The child may not have reached main yet: a note it has no handler for ends
+// it the same way, by the kernel's default.
+static int test_kill_death(int sig, const char *note, const char *signame) {
     char *cargv[] = { (char *)SELF, (char *)"die", (char *)"wait", NULL };
     pid_t pid;
     int st = 0;
     if (posix_spawn(&pid, SELF, NULL, NULL, cargv, environ) != 0) {
-        printf("pouch-hello-signals: death term: respawn failed errno=%d\n", errno);
+        printf("pouch-hello-signals: death %s: respawn failed errno=%d\n", note, errno);
         return -1;
     }
-    if (kill(pid, SIGTERM) != 0) {
-        printf("pouch-hello-signals: death term: kill failed errno=%d\n", errno);
+    if (kill(pid, sig) != 0) {
+        printf("pouch-hello-signals: death %s: kill failed errno=%d\n", note, errno);
         return -1;
     }
     if (waitpid(pid, &st, 0) != pid) {
-        printf("pouch-hello-signals: death term: waitpid failed errno=%d\n", errno);
+        printf("pouch-hello-signals: death %s: waitpid failed errno=%d\n", note, errno);
         return -1;
     }
-    if (!WIFSIGNALED(st) || WTERMSIG(st) != SIGTERM) {
-        printf("pouch-hello-signals: death term: status %#x (want WIFSIGNALED SIGTERM)\n",
-               (unsigned)st);
+    if (!WIFSIGNALED(st) || WTERMSIG(st) != sig) {
+        printf("pouch-hello-signals: death %s: status %#x (want WIFSIGNALED %s)\n",
+               note, (unsigned)st, signame);
         return -1;
     }
-    printf("pouch-hello-signals: death term reads WIFSIGNALED SIGTERM\n");
+    printf("pouch-hello-signals: death %s reads WIFSIGNALED %s\n", note, signame);
     return 0;
 }
 
@@ -294,6 +296,49 @@ static int test_term_apart(void) {
         return -1;
     }
     printf("pouch-hello-signals: SIGTERM runs its own handler, apart from SIGINT\n");
+    return 0;
+}
+
+// SIGUSR1 and SIGUSR2 have a note each (0068). A handler on one runs at once with its
+// own number while the other is blocked, and the blocked one waits for its unblock:
+// the family bit reaches the kernel's mask and comes back through the shadow.
+static int test_usr_apart(void) {
+    struct sigaction ua;
+    memset(&ua, 0, sizeof ua);
+    ua.sa_handler = on_sigint;
+    if (sigaction(SIGUSR1, &ua, NULL) != 0 || sigaction(SIGUSR2, &ua, NULL) != 0) {
+        printf("pouch-hello-signals: sigaction(SIGUSR1/2) failed: errno=%d\n", errno);
+        return -1;
+    }
+    sigset_t blk, old, seen;
+    sigemptyset(&blk);
+    sigaddset(&blk, SIGUSR2);
+    sigprocmask(SIG_BLOCK, &blk, &old);
+    sigprocmask(SIG_BLOCK, NULL, &seen);
+    int blocked = sigismember(&seen, SIGUSR2) == 1 && sigismember(&seen, SIGUSR1) != 1;
+
+    int before = (int)g_handler_count;
+    g_handler_sig = -1;
+    raise(SIGUSR1);
+    int after1 = (int)g_handler_count;
+    int sig1   = g_handler_sig;
+    raise(SIGUSR2);
+    int after2 = (int)g_handler_count;
+    sigprocmask(SIG_SETMASK, &old, NULL);
+    int after3 = (int)g_handler_count;
+    int sig3   = g_handler_sig;
+
+    ua.sa_handler = SIG_DFL;
+    sigaction(SIGUSR1, &ua, NULL);
+    sigaction(SIGUSR2, &ua, NULL);
+
+    if (!blocked || after1 != before + 1 || sig1 != SIGUSR1 || after2 != after1 ||
+        after3 != after2 + 1 || sig3 != SIGUSR2) {
+        printf("pouch-hello-signals: usr-apart: blocked=%d count %d -> %d -> %d -> %d, sig %d then %d\n",
+               blocked, before, after1, after2, after3, sig1, sig3);
+        return -1;
+    }
+    printf("pouch-hello-signals: SIGUSR1 and SIGUSR2 run their own handlers, each blocked apart\n");
     return 0;
 }
 
@@ -460,20 +505,25 @@ int main(int argc, char **argv) {
 
     // ===== Unsupported signum path =====
     sa.sa_handler = on_sigint;
-    int rc = sigaction(SIGUSR1, &sa, NULL);
+    int rc = sigaction(SIGALRM, &sa, NULL);
     if (rc == 0) {
-        printf("pouch-hello-signals: sigaction(SIGUSR1) unexpectedly succeeded\n");
+        printf("pouch-hello-signals: sigaction(SIGALRM) unexpectedly succeeded\n");
         fflush(stdout);
         return 8;
     }
     if (errno != EINVAL) {
-        printf("pouch-hello-signals: sigaction(SIGUSR1) wrong errno=%d (expected EINVAL=%d)\n",
+        printf("pouch-hello-signals: sigaction(SIGALRM) wrong errno=%d (expected EINVAL=%d)\n",
                errno, EINVAL);
         fflush(stdout);
         return 9;
     }
     printf("pouch-hello-signals: unsupported sigaction returns EINVAL\n");
     fflush(stdout);
+
+    if (test_usr_apart() != 0) {
+        fflush(stdout);
+        return 17;
+    }
 
     if (test_term_apart() != 0) {
         fflush(stdout);
@@ -484,11 +534,14 @@ int main(int argc, char **argv) {
     // The death legs are separate processes: both groups run before either
     // verdict, so a failure in one does not hide the other.
     int deaths = test_deaths();
-    int term_death = test_term_death();
+    int term_death = test_kill_death(SIGTERM, "term", "SIGTERM");
+    int usr_death  = test_kill_death(SIGUSR1, "usr1", "SIGUSR1") |
+                     test_kill_death(SIGUSR2, "usr2", "SIGUSR2");
     int errnos = test_errnos();
     fflush(stdout);
     if (deaths != 0) return 15;
     if (term_death != 0) return 14;
+    if (usr_death != 0) return 18;
     if (errnos != 0) return 16;
 
     printf("%s\n", POUCH_CENSUS_SIGNALS);

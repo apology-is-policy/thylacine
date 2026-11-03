@@ -246,6 +246,21 @@ NAME is ABI, hence the entry.
 reserved to the kernel: any poster that passes `SYS_POSTNOTE`'s gate may send
 it.
 
+## The user-defined notes — `usr1` and `usr2`
+
+**Registered 2026-11-02 (operator vote).** A note NAME is ABI, hence the entry.
+
+| Name | Length | POSIX-equiv signal | Cause |
+|---|---|---|---|
+| `usr1` | 4+1 | `SIGUSR1` (10) | Posted by a program: Pouch's `kill` and `pthread_kill`, the Linux phenotype's `kill`/`tkill`/`tgkill`, or a native `SYS_POSTNOTE` or `SYS_POSTNOTE_TID`. Its meaning is the program's own. |
+| `usr2` | 4+1 | `SIGUSR2` (12) | The same. |
+
+**Default action**: TERMINATE (`NOTE_DFL_TERMINATE`). An uncaught, unmasked one on a
+Proc that is not self-managing ends it, and the death records its signal. **Bit
+position**: `NOTE_BIT_USR1 = 8`, `NOTE_BIT_USR2 = 9` (`NOTE_MASK_SUPPORTED` 0xff ->
+0x3ff). Neither is reserved to the kernel: any poster that passes `SYS_POSTNOTE`'s
+gate may send either.
+
 ## Exit-status semantics
 
 *Rewritten 2026-10-12 (gcpark-b, operator votes "snare:abort" and "every note
@@ -283,6 +298,8 @@ holds whether the last thread left by `exits` or by `SYS_THREAD_EXIT`
 | `snare:abort` | `SIGABRT` (6) |
 | an uncaught `interrupt` | `SIGINT` (2) |
 | an uncaught `term` | `SIGTERM` (15) |
+| an uncaught `usr1` | `SIGUSR1` (10) |
+| an uncaught `usr2` | `SIGUSR2` (12) |
 | an uncaught `pipe` | `SIGPIPE` (13) |
 | an uncaught `tty:quit` | `SIGQUIT` (3) |
 | an uncaught `tty:hup`; the end of a session whose leader died | `SIGHUP` (1) |

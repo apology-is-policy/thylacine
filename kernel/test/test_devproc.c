@@ -4138,6 +4138,7 @@ void test_devproc_park_state_settled(void) {
     pt->state = PROC_STATE_ALIVE;
     struct Thread pth;
     pth.proc = pt;
+    pth.note_direct = 0;
     pth.next_in_proc = NULL;
     spin_lock_init(&pth.wait_lock);
     pth.rendez_blocked_on = &pth.debug_rendez;    // registered in the debug park

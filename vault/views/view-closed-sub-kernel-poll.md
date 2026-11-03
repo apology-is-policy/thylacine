@@ -24,10 +24,13 @@ Read it WITH two standing facts about this surface:
   found the seam, not a new bug.
 
 <!-- generated:begin -->
-16 closed findings on [[sub-kernel-poll]] — do NOT re-report
+21 closed findings on [[sub-kernel-poll]] — do NOT re-report
 these in a future round (open/deferred findings are NOT listed
 here; see the seam inbox):
 
+- [[fnd-aux-corona-join-r1-f2]] [P3] check-lock-helpers missed multi-line calls, aliases, the _raw variants and client locks in other files (fixed)
+- [[fnd-aux-corona-join-r2-f2]] [P3] check-lock-helpers missed a client lock through a header member, parenthesised, or in a header (fixed)
+- [[fnd-aux-corona-join-r2-f3]] [P3] check-lock-helpers exempted two shapes that write a deferring lock's word (fixed)
 - [[fnd-b0poll-r5-f1]] [P1] A noise-driven poll(-1) holds its CPU IRQ-masked for as long as the noise lasts, and the noise is unprivileged (fixed) — FIXED at the time with a per-thread spin budget (`nsleeps`) plus a 1 ms
 - [[fnd-b0poll-r6-s1]] [P1] Two masked pollers on one CPU hand it to each other through sched() inside the masked syscall, so a per-thread sleep bound never unmasks the CPU (fixed) — FIXED by [[chg-2026-09-22-poll-preemption-point]]: the backstop is deleted and
 - [[fnd-b0poll-r7-f3]] [P2] Both point tests stay GREEN with sched_preempt_point's body replaced by `return;` -- the test pollers are kthreads, so the unmask is inert (fixed) — FIXED by `sched.preempt_point_takes_a_pending_irq`: mask with
@@ -38,6 +41,8 @@ here; see the seam inbox):
 - [[fnd-poll-r1-f2]] [P2] Teardown latched the two EOF flags under separate locks — a poll between saw half a hangup (fixed)
 - [[fnd-poll-r1-f3]] [P1] The handle-slot borrow across the scan — doc-fixed on a precondition the lift later voided (fixed)
 - [[fnd-poll-r1-f4]] [P1] A NULL-obj KOBJ_SPOOR slot reached the Dev dispatch (fixed)
+- [[fnd-pollwalk-r1-f1]] [P1] The bookmark waits spun while their preemptible drainer sat runnable on the same CPU (fixed)
+- [[fnd-pollwalk-r1-f3]] [P3] A WAIT owner's free did not check the spec's empty-chain assumption (fixed)
 - [[fnd-pouchb0-r3-f2]] [P2] client-side poll on a byte-mode /srv connection is neither implemented nor fail-closed: it samples the server's end, and the reply wakes nobody (fixed) — Fixed in full, not fail-closed: POLLNVAL for a client endpoint is indistinguishable from the libc defect 0039 fixes, so the prover could no longer discriminate, and the browser's IPC would still have had nothing to poll. `srvconn_poll(cn, client, events, pw)` gives the two endpoints mirror-image rows, and reading `srvconn.c` end to end found the wake set incomplete in BOTH directions -- a nonblocking server polling for write room was never woken by a client drain either -- so every ring mutation now walks the one hook list. That is sound only with a second fix nobody had asked for: `sys_poll_for_proc` returned 0 when a post-wake re-sample found nothing, so a timed poll "timed out" in microseconds and `poll(-1)` could return 0. `specs/poll.tla` modelled readiness as a one-way edge and could not see it; the spec was extended first. The libc half is pouch 0041 (the stream-socket shape at EOF). Not covered and recorded: an ACCEPTED socket, untagged by 0006's design.
 - [[fnd-pouchb0-r4-f1]] [P1] a console poller registered during a trusted episode is stranded on the episode list after END: the re-arm kept hooks where the first scan put them (fixed) — Fixed differently. The suggested fix leaves the secondary as a side channel (each wake is a kernel pass whose CPU cost the caller can time -- the cadence of the secret), so the spec was extended first (`cons_poll.tla` NoSecretCadence) and the poll loop re-registers EVERY pass: unhook all, put all, clear, then each `.poll` WITH its hook. The Dev re-chooses its list each pass; the fd re-resolves with its hook (the parked S1 item). Both real-poller tests fail on the sabotaged sample-only loop.
 - [[fnd-pouchb0-r4-f2]] [P2] the poll re-arm loop never checks death or stop itself, and tsleep's checks sit behind its cond test: a noise-driven poll(-1) is unkillable and unstoppable (fixed) — Fixed as suggested, spec first: each pass checks `thread_die_pending` and parks on `proc_stop_sleeper_park` with every hook off (DEATH WINS: the park returns SLEEP_INTR), and a noise pass `sched_yield_hint`s so queued work runs. RESIDUE, the operator's: with nothing else runnable the loop still spins with interrupts off, because syscalls run IRQ-masked end to end -- a preemption-model question recorded for the F3-F9 kernel-design conversation, not invented here.

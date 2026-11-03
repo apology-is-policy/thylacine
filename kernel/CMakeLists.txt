@@ -50,7 +50,6 @@ set(KERNEL_SRCS
     ../arch/arm64/hwdebug.c
     ../arch/arm64/alternatives.c
     ../arch/arm64/context.S
-    ../arch/arm64/userland.S
     ../arch/arm64/psci.c
     ../arch/arm64/asid.c
     ../lib/dtb.c
@@ -200,6 +199,7 @@ set(KERNEL_TEST_SRCS
     test/test_dev.c
     test/test_trivial_devs.c
     test/test_devproc.c
+    test/test_devproc_thread.c
     test/test_birth_hold.c
     test/test_spawn_cwd.c
     test/test_spawn_env.c

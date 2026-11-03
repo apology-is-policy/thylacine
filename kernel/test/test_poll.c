@@ -24,13 +24,16 @@
 #include <thylacine/cons.h>
 #include <thylacine/caps.h>
 #include <thylacine/dev.h>
+#include <thylacine/dev9p.h>        // dev9p_poll_test_under_lock
 #include <thylacine/devsrv.h>
 #include <thylacine/errno.h>
 #include <thylacine/handle.h>
+#include <thylacine/notes.h>
 #include <thylacine/pipe.h>
 #include <thylacine/poll.h>
 #include <thylacine/proc.h>
 #include <thylacine/sched.h>
+#include <thylacine/smp.h>         // smp_cpu_idx_self
 #include <thylacine/spoor.h>
 #include <thylacine/srvconn.h>
 #include <thylacine/thread.h>
@@ -1931,4 +1934,849 @@ void test_poll_caught_note_ends_pause(void) {
     TEST_ASSERT(forever.on_post && forever.joined,
         "a caught note ends pause() itself, which has no deadline to end it");
     TEST_EXPECT_EQ(forever.rc, -(long)T_E_INTR, "no timeout: EINTR");
+}
+
+// =============================================================================
+// The walk in batches (vote 12; specs/poll_walk.tla). Hooks on a private list,
+// each with its own Rendez nobody sleeps on, so a reach is only its flag.
+// =============================================================================
+
+#define TPW_N (3u * POLL_WAKE_BATCH + 5u)
+static struct poll_waiter_list g_tpw_list;
+static struct Rendez           g_tpw_r[TPW_N + 1];
+static struct poll_waiter      g_tpw[TPW_N + 1];   // [TPW_N] is a spare, never listed at setup
+static u32  g_tpw_batches;
+static u32  g_tpw_hooks_seen;
+static bool g_tpw_ok;
+
+static void tpw_setup(u32 n) {
+    poll_waiter_list_init(&g_tpw_list);
+    for (u32 i = 0; i <= TPW_N; i++) {
+        rendez_init(&g_tpw_r[i]);
+        poll_waiter_init(&g_tpw[i], &g_tpw_r[i]);
+    }
+    for (u32 i = 0; i < n; i++) poll_waiter_list_register(&g_tpw_list, &g_tpw[i]);
+    g_tpw_batches = 0;
+    g_tpw_hooks_seen = 0;
+    g_tpw_ok = true;
+}
+
+static void tpw_teardown(void) {
+    g_poll_wake_batch_hook = NULL;
+    for (u32 i = 0; i <= TPW_N; i++) poll_waiter_list_unregister(&g_tpw[i]);
+}
+
+static void tpw_count_batch(struct poll_waiter_list *l) {
+    g_tpw_batches++;
+    g_tpw_hooks_seen = poll_waiter_list_count_for_test(l);
+    if (l != &g_tpw_list || poll_waiter_list_empty(l)) g_tpw_ok = false;
+}
+
+void test_poll_wake_reaches_every_hook_in_batches(void) {
+    tpw_setup(TPW_N);
+    g_poll_wake_batch_hook = tpw_count_batch;
+    poll_waiter_list_wake(&g_tpw_list);
+    g_poll_wake_batch_hook = NULL;
+
+    u32 reached = 0;
+    for (u32 i = 0; i < TPW_N; i++) reached += g_tpw[i].ready ? 1u : 0u;
+    TEST_EXPECT_EQ(reached, TPW_N, "the walk reached every listed hook");
+    TEST_EXPECT_EQ(g_tpw_batches, (TPW_N - 1u) / POLL_WAKE_BATCH,
+        "it dropped the lock between every two batches of POLL_WAKE_BATCH");
+    TEST_EXPECT_EQ(g_tpw_hooks_seen, TPW_N,
+        "between batches every hook stays listed and the bookmark is not counted");
+    TEST_ASSERT(g_tpw_ok, "between batches the list is the walked one and reads non-empty");
+    TEST_EXPECT_EQ(poll_waiter_list_count_for_test(&g_tpw_list), TPW_N,
+        "the bookmark left with the walk");
+    tpw_teardown();
+}
+
+// Hooks are pushed at the head, so the first batch reaches g_tpw[n-1] down to
+// g_tpw[n-POLL_WAKE_BATCH] and g_tpw[0] comes last.
+#define TPW_M (2u * POLL_WAKE_BATCH + 3u)
+
+static void tpw_churn_once(struct poll_waiter_list *l) {
+    if (g_tpw_batches++ != 0) return;
+    // A hook the walk owes leaves before it is reached: it is owed nothing.
+    poll_waiter_list_unregister(&g_tpw[0]);
+    // A hook registered after the walk began sampled for itself.
+    poll_waiter_list_register(l, &g_tpw[TPW_N]);
+    // A reached hook comes back (a re-arm): a new registration, owed nothing.
+    poll_waiter_list_unregister(&g_tpw[TPW_M - 1]);
+    g_tpw[TPW_M - 1].ready = false;
+    poll_waiter_list_register(l, &g_tpw[TPW_M - 1]);
+}
+
+void test_poll_wake_batches_owe_only_older_hooks(void) {
+    tpw_setup(TPW_M);
+    g_poll_wake_batch_hook = tpw_churn_once;
+    poll_waiter_list_wake(&g_tpw_list);
+    g_poll_wake_batch_hook = NULL;
+
+    TEST_EXPECT_EQ(g_tpw_batches, 2u, "the walk took three batches");
+    TEST_ASSERT(!g_tpw[0].ready, "a hook that left before its reach was not reached");
+    TEST_ASSERT(!g_tpw[TPW_N].ready, "a hook registered mid-walk was not reached (NoStray)");
+    TEST_ASSERT(!g_tpw[TPW_M - 1].ready, "a re-registered hook was not reached twice");
+    u32 reached = 0;
+    for (u32 i = 1; i < TPW_M - 1; i++) reached += g_tpw[i].ready ? 1u : 0u;
+    TEST_EXPECT_EQ(reached, TPW_M - 2u, "every other hook it owed was reached (Covered)");
+    tpw_teardown();
+}
+
+static u32 g_tpw_depth;
+
+static void tpw_nested_walk(struct poll_waiter_list *l) {
+    if (g_tpw_depth != 0) return;
+    if (g_tpw_batches++ != 0) return;
+    for (u32 i = 0; i < TPW_M; i++) g_tpw[i].ready = false;
+    g_tpw_depth = 1;
+    poll_waiter_list_wake(l);       // steps over the outer walk's bookmark
+    g_tpw_depth = 0;
+    u32 reached = 0;
+    for (u32 i = 0; i < TPW_M; i++) reached += g_tpw[i].ready ? 1u : 0u;
+    if (reached != TPW_M) g_tpw_ok = false;
+}
+
+void test_poll_wake_steps_over_another_walks_bookmark(void) {
+    tpw_setup(TPW_M);
+    g_tpw_depth = 0;
+    g_poll_wake_batch_hook = tpw_nested_walk;
+    poll_waiter_list_wake(&g_tpw_list);
+    g_poll_wake_batch_hook = NULL;
+
+    TEST_ASSERT(g_tpw_batches >= 1u, "the outer walk parked at least once");
+    TEST_ASSERT(g_tpw_ok, "a walk begun while another was parked reached every hook");
+    TEST_EXPECT_EQ(poll_waiter_list_count_for_test(&g_tpw_list), TPW_M,
+        "both bookmarks left with their walks");
+    tpw_teardown();
+}
+
+static void tpw_drain_all(struct poll_waiter_list *l) {
+    if (g_tpw_batches++ != 0) return;
+    for (u32 i = 0; i < TPW_M; i++) poll_waiter_list_unregister(&g_tpw[i]);
+    // Only the walk's own bookmark is left.
+    if (!poll_waiter_list_empty(l)) g_tpw_ok = false;
+    if (poll_waiter_list_count_for_test(l) != 0) g_tpw_ok = false;
+}
+
+void test_poll_wake_bookmark_alone_reads_empty(void) {
+    tpw_setup(TPW_M);
+    g_poll_wake_batch_hook = tpw_drain_all;
+    poll_waiter_list_wake(&g_tpw_list);
+    g_poll_wake_batch_hook = NULL;
+
+    TEST_EXPECT_EQ(g_tpw_batches, 1u, "the walk parked once, then found the list drained");
+    TEST_ASSERT(g_tpw_ok, "a list holding only a bookmark reads empty");
+    TEST_ASSERT(poll_waiter_list_empty(&g_tpw_list), "and the bookmark left with the walk");
+    tpw_teardown();
+}
+
+// One hook per list per call: the same fd twice parks with one hook on the
+// ring's list, and both entries report the readiness.
+static void consumer_poll_twice_entry(void) {
+    struct pollfd pfds[2] = {
+        { .fd = g_pollee_fd, .events = POLLIN, .revents = 0 },
+        { .fd = g_pollee_fd, .events = POLLIN, .revents = 0 },
+    };
+    s64 r = sys_poll_for_proc(g_pollee_proc, pfds, 2, -1);
+    g_poll_revents = (s16)(pfds[0].revents & pfds[1].revents);
+    __atomic_store_n(&g_poll_result, r, __ATOMIC_RELEASE);
+    test_kthread_park_terminal(&g_poll_exited);
+}
+
+void test_poll_one_hook_per_list_per_call(void) {
+    struct Proc *p = make_test_proc();
+    struct Spoor *rd = NULL, *wr = NULL;
+    TEST_EXPECT_EQ(pipe_create(&rd, &wr), 0, "pipe_create");
+    hidx_t hrd = install_spoor(p, rd, RIGHT_READ);
+    hidx_t hwr = install_spoor(p, wr, RIGHT_WRITE);
+    TEST_ASSERT(hrd >= 0 && hwr >= 0, "fds installed");
+
+    g_pollee_proc  = p;
+    g_pollee_fd    = hrd;
+    g_poll_result  = -999; g_poll_exited = false;
+    g_poll_revents = 0;
+    struct Thread *consumer = thread_create(kproc(), consumer_poll_twice_entry);
+    TEST_ASSERT(consumer != NULL, "thread_create");
+    ready(consumer);
+    TEST_YIELD_UNTIL(consumer->state == THREAD_SLEEPING);
+    TEST_EXPECT_EQ(consumer->state, THREAD_SLEEPING, "consumer SLEEPING in poll");
+    TEST_EXPECT_EQ(pipe_poll_hooks_for_test(rd), 1u,
+        "one hook on the ring's list for two entries of one call");
+
+    static const u8 payload = 0x5A;
+    TEST_EXPECT_EQ(wr->dev->write(wr, &payload, 1, 0), 1L, "boot writes 1 byte");
+    TEST_YIELD_UNTIL(__atomic_load_n(&g_poll_result, __ATOMIC_ACQUIRE) != -999);
+    TEST_EXPECT_EQ(g_poll_result, 2L, "both entries report ready");
+    TEST_EXPECT_EQ((s64)g_poll_revents, (s64)POLLIN, "each entry's revents = POLLIN");
+    TEST_EXPECT_EQ(pipe_poll_hooks_for_test(rd), 0u, "the call left no hook");
+
+    test_kthread_join_free(consumer, &g_poll_exited);
+    drop_test_proc(p);
+}
+
+// Which hook the dedupe keeps, for two objects on one list (a pipe's read and
+// write ends share the ring's list). A write after the read end's sample starts
+// a walk that parks, past TDD_FILL hooks pushed ahead of the read end's, before
+// the write end registers; the write end's hook goes on at the head, behind the
+// walk. Only the EARLIER hook is still ahead of that walk, so dropping it
+// instead of the later one leaves the poller asleep with the byte unread.
+#define TDD_FILL POLL_WAKE_BATCH
+static struct Rendez      g_tdd_fill_r[TDD_FILL];
+static struct poll_waiter g_tdd_fill[TDD_FILL];
+static struct Spoor      *g_tdd_rd;
+static struct Spoor      *g_tdd_wr;
+static hidx_t             g_tdd_fd_wr;
+static struct Thread     *g_tdd_poller;
+static struct Thread     *g_tdd_writer;
+static volatile bool      g_tdd_go, g_tdd_parked, g_tdd_released, g_tdd_writer_exited;
+static volatile u32       g_tdd_batches, g_tdd_hooks_at_release;
+static volatile bool      g_tdd_staged;
+
+static bool tdd_wait(volatile bool *flag) {
+    u64 deadline = timer_now_ns() + TEST_YIELD_BUDGET_NS;
+    while (!__atomic_load_n(flag, __ATOMIC_ACQUIRE)) {
+        if (timer_now_ns() >= deadline) return false;
+        sched();
+    }
+    return true;
+}
+
+static void tdd_scan(u64 i) {
+    if (current_thread() != g_tdd_poller || g_tdd_staged) return;
+    if (i == 0) {
+        for (u32 k = 0; k < TDD_FILL; k++)
+            (void)g_tdd_rd->dev->poll(g_tdd_rd, POLLIN, &g_tdd_fill[k]);
+        __atomic_store_n(&g_tdd_go, true, __ATOMIC_RELEASE);
+        (void)tdd_wait(&g_tdd_parked);
+        return;
+    }
+    g_tdd_hooks_at_release = pipe_poll_hooks_for_test(g_tdd_rd);
+    g_tdd_staged = true;
+    __atomic_store_n(&g_tdd_released, true, __ATOMIC_RELEASE);
+}
+
+static void tdd_batch(struct poll_waiter_list *l) {
+    (void)l;
+    if (current_thread() != g_tdd_writer) return;
+    g_tdd_batches++;
+    __atomic_store_n(&g_tdd_parked, true, __ATOMIC_RELEASE);
+    (void)tdd_wait(&g_tdd_released);
+}
+
+static void tdd_writer_entry(void) {
+    if (tdd_wait(&g_tdd_go)) {
+        static const u8 byte = 0x5A;
+        (void)g_tdd_wr->dev->write(g_tdd_wr, &byte, 1, 0);
+    }
+    test_kthread_park_terminal(&g_tdd_writer_exited);
+}
+
+static void consumer_poll_both_ends_entry(void) {
+    struct pollfd pfds[2] = {
+        { .fd = g_pollee_fd, .events = POLLIN, .revents = 0 },
+        { .fd = g_tdd_fd_wr, .events = 0,      .revents = 0 },
+    };
+    s64 r = sys_poll_for_proc(g_pollee_proc, pfds, 2, -1);
+    g_poll_revents = pfds[0].revents;
+    __atomic_store_n(&g_poll_result, r, __ATOMIC_RELEASE);
+    test_kthread_park_terminal(&g_poll_exited);
+}
+
+void test_poll_dedupe_keeps_the_earlier_hook(void) {
+    struct Proc *p = make_test_proc();
+    struct Spoor *rd = NULL, *wr = NULL;
+    TEST_EXPECT_EQ(pipe_create(&rd, &wr), 0, "pipe_create");
+    hidx_t hrd = install_spoor(p, rd, RIGHT_READ);
+    hidx_t hwr = install_spoor(p, wr, RIGHT_WRITE);
+    TEST_ASSERT(hrd >= 0 && hwr >= 0, "fds installed");
+    for (u32 k = 0; k < TDD_FILL; k++) {
+        rendez_init(&g_tdd_fill_r[k]);
+        poll_waiter_init(&g_tdd_fill[k], &g_tdd_fill_r[k]);
+    }
+
+    g_tdd_rd = rd; g_tdd_wr = wr; g_tdd_fd_wr = hwr;
+    g_pollee_proc = p; g_pollee_fd = hrd;
+    g_poll_result = -999; g_poll_exited = false; g_poll_revents = 0;
+    g_tdd_go = g_tdd_parked = g_tdd_released = g_tdd_writer_exited = false;
+    g_tdd_staged = false; g_tdd_batches = 0; g_tdd_hooks_at_release = 0;
+    g_tdd_writer = thread_create(kproc(), tdd_writer_entry);
+    g_tdd_poller = thread_create(kproc(), consumer_poll_both_ends_entry);
+    TEST_ASSERT(g_tdd_writer && g_tdd_poller, "thread_create");
+    g_poll_scan_hook = tdd_scan;
+    g_poll_wake_batch_hook = tdd_batch;
+    ready(g_tdd_writer);
+    ready(g_tdd_poller);
+
+    TEST_YIELD_UNTIL_SOFT(__atomic_load_n(&g_poll_result, __ATOMIC_ACQUIRE) != -999);
+    bool woke = __atomic_load_n(&g_poll_result, __ATOMIC_ACQUIRE) != -999;
+    g_poll_scan_hook = NULL;
+    g_poll_wake_batch_hook = NULL;
+    __atomic_store_n(&g_tdd_released, true, __ATOMIC_RELEASE);
+    if (!woke) {
+        static const u8 again = 0x5B;   // a fresh walk from the head frees it
+        (void)wr->dev->write(wr, &again, 1, 0);
+        TEST_YIELD_UNTIL_SOFT(__atomic_load_n(&g_poll_result, __ATOMIC_ACQUIRE) != -999);
+    }
+    test_kthread_join_free(g_tdd_writer, &g_tdd_writer_exited);
+    test_kthread_join_free(g_tdd_poller, &g_poll_exited);
+    for (u32 k = 0; k < TDD_FILL; k++) poll_waiter_list_unregister(&g_tdd_fill[k]);
+
+    TEST_ASSERT(g_tdd_parked && g_tdd_batches == 1u,
+        "the write's walk parked once, behind the hooks ahead of the read end's");
+    TEST_EXPECT_EQ(g_tdd_hooks_at_release, TDD_FILL + 1u,
+        "the write end's hook was dropped: one of this call's hooks is listed");
+    TEST_ASSERT(woke, "the walk begun before the second registration woke the poller");
+    TEST_EXPECT_EQ(g_poll_result, 1L, "the read end reports ready");
+    TEST_EXPECT_EQ((s64)g_poll_revents, (s64)POLLIN, "with POLLIN");
+    TEST_EXPECT_EQ(pipe_poll_hooks_for_test(rd), 0u, "nothing is left on the ring's list");
+    drop_test_proc(p);
+}
+
+// =============================================================================
+// Walks owed under the table lock (vote 13; specs/poll_owed.tla).
+// =============================================================================
+
+
+static struct poll_owed g_tpo;
+static bool g_tpo_irqs_were_on;
+
+// Between two batches of the owed walk: the table lock is not held (IRQs are
+// as they were before it was taken), and the walk's bookmark is listed -- the
+// pin proc_free waits out.
+static void tpo_check_batch(struct poll_waiter_list *l) {
+    g_tpw_batches++;
+    if (proc_table_held_for_test()) g_tpw_ok = false;
+    if (g_tpo_irqs_were_on && irqs_masked()) g_tpw_ok = false;
+    if (poll_waiter_list_marks_for_test(l) != 1u) g_tpw_ok = false;
+}
+
+void test_poll_owed_walk_runs_at_the_table_release(void) {
+    tpw_setup(TPW_N);
+    poll_owed_init(&g_tpo, &g_tpw_list);
+    g_tpo_irqs_were_on = !irqs_masked();
+    TEST_ASSERT(g_tpo_irqs_were_on, "the test runs with IRQs on (else the IRQ check is empty)");
+    g_poll_wake_batch_hook = tpo_check_batch;
+
+    irq_state_t s = proc_table_lock_acquire();
+    proc_wake_or_owe(&g_tpo);
+    proc_wake_or_owe(&g_tpo);
+    bool owed = g_tpo.chain == &current_thread()->table_owed;
+    bool once = current_thread()->table_owed.head == &g_tpo && g_tpo.next == NULL;
+    u32 reached_held = 0;
+    for (u32 i = 0; i < TPW_N; i++) reached_held += g_tpw[i].ready ? 1u : 0u;
+    proc_table_lock_release(s);
+    g_poll_wake_batch_hook = NULL;
+
+    TEST_ASSERT(owed, "an event under the table lock owes the walk to the holder");
+    TEST_ASSERT(once, "a second event owes nothing more (the record is chained once)");
+    TEST_EXPECT_EQ(reached_held, 0u, "nothing was walked under the lock");
+    u32 reached = 0;
+    for (u32 i = 0; i < TPW_N; i++) reached += g_tpw[i].ready ? 1u : 0u;
+    TEST_EXPECT_EQ(reached, TPW_N, "the release walked every hook");
+    TEST_EXPECT_EQ(g_tpw_batches, (TPW_N - 1u) / POLL_WAKE_BATCH,
+        "one walk, in batches");
+    TEST_ASSERT(g_tpw_ok, "between batches: unlocked, IRQs on, the bookmark listed");
+    TEST_ASSERT(g_tpo.chain == NULL && current_thread()->table_owed.head == NULL,
+        "nothing is owed after the release (ChainDrained)");
+    TEST_EXPECT_EQ(poll_waiter_list_marks_for_test(&g_tpw_list), 0u,
+        "the bookmark left with the walk");
+
+    // Without the lock the same call walks at once.
+    for (u32 i = 0; i < TPW_N; i++) g_tpw[i].ready = false;
+    proc_wake_or_owe(&g_tpo);
+    reached = 0;
+    for (u32 i = 0; i < TPW_N; i++) reached += g_tpw[i].ready ? 1u : 0u;
+    TEST_EXPECT_EQ(reached, TPW_N, "unlocked, the walk runs in the call");
+    TEST_ASSERT(g_tpo.chain == NULL, "and owes nothing");
+    tpw_teardown();
+}
+
+void test_poll_owed_records_chain_once_and_cancel(void) {
+    poll_waiter_list_init(&g_tpw_list);
+    struct poll_owed_chain c = { NULL }, c2 = { NULL };
+    struct poll_owed a, b, d;
+    poll_owed_init(&a, &g_tpw_list);
+    poll_owed_init(&b, &g_tpw_list);
+    poll_owed_init(&d, &g_tpw_list);
+
+    poll_owe(&c, &a);
+    poll_owe(&c, &b);
+    poll_owe(&c, &a);           // owed already: stays where it is
+    poll_owe(&c2, &a);          // even on another chain
+    TEST_ASSERT(c.head == &b && b.next == &a && a.prev == &b && a.next == NULL,
+        "a record is chained once");
+    TEST_ASSERT(a.chain == &c && c2.head == NULL, "a record owed elsewhere is not re-chained");
+
+    poll_owe(&c, &d);           // d, b, a
+    poll_owed_cancel(&b);       // the middle
+    TEST_ASSERT(c.head == &d && d.next == &a && a.prev == &d && b.chain == NULL,
+        "a cancel unlinks from the middle");
+    poll_owed_cancel(&b);       // idempotent
+    poll_owed_cancel(&d);       // the head
+    TEST_ASSERT(c.head == &a && a.prev == NULL, "a cancel unlinks the head");
+
+    struct poll_waiter mark;
+    struct poll_waiter_list *l = poll_owed_begin(&c, &mark);
+    TEST_ASSERT(l == &g_tpw_list && a.chain == NULL && c.head == NULL,
+        "begin pops the record and returns its list");
+    TEST_EXPECT_EQ(poll_waiter_list_marks_for_test(l), 1u, "with the bookmark listed");
+    poll_waiter_list_wake_from(l, &mark);
+    TEST_EXPECT_EQ(poll_waiter_list_marks_for_test(l), 0u, "the finished walk unlisted it");
+    TEST_ASSERT(poll_owed_begin(&c, &mark) == NULL, "nothing owed: begin returns NULL");
+}
+
+void test_poll_owed_walk_owes_only_hooks_behind_the_bookmark(void) {
+    tpw_setup(TPW_M);
+    struct poll_owed_chain c = { NULL };
+    poll_owed_init(&g_tpo, &g_tpw_list);
+    poll_owe(&c, &g_tpo);
+    struct poll_waiter mark;
+    struct poll_waiter_list *l = poll_owed_begin(&c, &mark);
+    // Registered after the walk began: in front of the bookmark.
+    poll_waiter_list_register(&g_tpw_list, &g_tpw[TPW_N]);
+    poll_waiter_list_wake_from(l, &mark);
+
+    u32 reached = 0;
+    for (u32 i = 0; i < TPW_M; i++) reached += g_tpw[i].ready ? 1u : 0u;
+    TEST_EXPECT_EQ(reached, TPW_M, "every hook listed at the begin was reached");
+    TEST_ASSERT(!g_tpw[TPW_N].ready, "a hook registered after the begin was not (NoStray)");
+    TEST_EXPECT_EQ(poll_waiter_list_count_for_test(&g_tpw_list), TPW_M + 1u,
+        "every hook stays listed");
+    TEST_EXPECT_EQ(poll_waiter_list_marks_for_test(&g_tpw_list), 0u, "the bookmark left");
+    tpw_teardown();
+}
+
+void test_poll_notes_post_under_the_table_lock_owes_its_walk(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL && p->notes != NULL, "proc_alloc with a notes queue");
+    struct Rendez r;
+    struct poll_waiter pw;
+    rendez_init(&r);
+    poll_waiter_init(&pw, &r);
+    poll_waiter_list_register(&p->notes->poll_list, &pw);
+
+    irq_state_t s = proc_table_lock_acquire();
+    int rc = notes_post(p, "pipe", 1u, NULL, true);
+    bool owed = p->notes->owed.chain != NULL;
+    bool early = pw.ready;
+    proc_table_lock_release(s);
+    TEST_EXPECT_EQ(rc, 0, "the post landed");
+    TEST_ASSERT(owed, "a post under the table lock owes the queue's walk");
+    TEST_ASSERT(!early, "and walks nothing under it");
+    TEST_ASSERT(pw.ready, "the release walked it");
+    TEST_ASSERT(p->notes->owed.chain == NULL, "nothing is owed after");
+
+    pw.ready = false;
+    TEST_EXPECT_EQ(notes_post(p, "pipe", 2u, NULL, true), 0, "an unlocked post");
+    TEST_ASSERT(pw.ready && p->notes->owed.chain == NULL, "walks in the call");
+
+    poll_waiter_list_unregister(&pw);
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+}
+
+// The child chains its own records on a chain no thread drains, then exits:
+// only the reap's cancel takes them off, and proc_free extincts on a record
+// still chained.
+static struct poll_owed_chain g_tpo_stray;
+static volatile u32 g_tpo_child_ran;
+
+static void tpo_child_owes_then_exits(void *arg) {
+    (void)arg;
+    struct Proc *self = current_thread()->proc;
+    irq_state_t s = proc_table_lock_acquire();
+    poll_owe(&g_tpo_stray, &self->child_owed);
+    poll_owe(&g_tpo_stray, &self->notes->owed);
+    proc_table_lock_release(s);
+    g_tpo_child_ran = 1;
+    exits("ok");
+}
+
+void test_poll_reap_cancels_the_walks_owed_to_a_proc(void) {
+    g_tpo_stray.head = NULL;
+    g_tpo_child_ran = 0;
+    int pid = rfork(RFPROC, tpo_child_owes_then_exits, NULL);
+    TEST_ASSERT(pid > 0, "rfork");
+    int status = -1;
+    TEST_EXPECT_EQ(wait_pid(&status), pid, "the child was reaped and freed");
+    TEST_EXPECT_EQ(g_tpo_child_ran, 1u, "the child chained its records");
+    TEST_ASSERT(g_tpo_stray.head == NULL, "the reap took both off their chain");
+}
+
+// The console episode's wake (P-d): its four list walks are owed when the
+// transition runs under the table lock, as every production transition does.
+void test_poll_cons_episode_walks_owed_under_the_table_lock(void) {
+    struct Rendez r;
+    struct poll_waiter pw;
+    rendez_init(&r);
+    poll_waiter_init(&pw, &r);
+    poll_waiter_list_register(cons_test_episode_waiters(), &pw);
+
+    irq_state_t s = proc_table_lock_acquire();
+    cons_test_episode_wake_all();
+    u32 owed = 0;
+    for (struct poll_owed *o = current_thread()->table_owed.head; o; o = o->next) owed++;
+    bool early = pw.ready;
+    proc_table_lock_release(s);
+
+    TEST_EXPECT_EQ(owed, 4u, "a transition under the table lock owes all four console walks");
+    TEST_ASSERT(!early, "and walks none of them under it");
+    TEST_ASSERT(pw.ready, "the release walked them");
+    TEST_ASSERT(current_thread()->table_owed.head == NULL, "nothing is owed after");
+    poll_waiter_list_unregister(&pw);
+}
+
+// =============================================================================
+// Walks deferred past a deferring lock (vote 13; specs/poll_defer.tla). The
+// tests count the deferring locks with poll_defer_enter/exit directly, as
+// client_lock and dpl_lock do around their spinlocks.
+// =============================================================================
+
+static struct poll_deferred g_tpd;
+
+// Between two batches of the drained walk: no deferring lock is counted, IRQs
+// are as before, and the walk's bookmark is listed (what poll_deferred_await
+// waits out).
+static void tpd_check_batch(struct poll_waiter_list *l) {
+    g_tpw_batches++;
+    if (current_thread()->defer_depth != 0) g_tpw_ok = false;
+    if (irqs_masked()) g_tpw_ok = false;
+    if (poll_waiter_list_marks_for_test(l) != 1u) g_tpw_ok = false;
+}
+
+static u32 tpd_reached(u32 n) {
+    u32 reached = 0;
+    for (u32 i = 0; i < n; i++) reached += g_tpw[i].ready ? 1u : 0u;
+    return reached;
+}
+
+void test_poll_deferred_walk_runs_at_the_outermost_release(void) {
+    tpw_setup(TPW_N);
+    poll_deferred_init(&g_tpd, &g_tpw_list, NULL, NULL);
+    struct Thread *t = current_thread();
+    TEST_ASSERT(!irqs_masked(), "the test runs with IRQs on (else the IRQ check is empty)");
+    g_poll_wake_batch_hook = tpd_check_batch;
+
+    poll_defer_enter();                 // the poll lock
+    poll_defer_enter();                 // a client's lock inside it
+    poll_wake_deferred(&g_tpd);
+    poll_wake_deferred(&g_tpd);
+    bool owed = g_tpd.chain == &t->lock_owed;
+    bool once = t->lock_owed.head == &g_tpd && g_tpd.next == NULL;
+    u32 reached_held = tpd_reached(TPW_N);
+    poll_defer_exit();                  // the inner release
+    bool still_owed = g_tpd.chain == &t->lock_owed;
+    u32 reached_inner = tpd_reached(TPW_N);
+    poll_defer_exit();                  // the outermost
+    g_poll_wake_batch_hook = NULL;
+
+    TEST_ASSERT(owed, "an event inside a deferring lock owes the walk to the thread");
+    TEST_ASSERT(once, "a second event owes nothing more (the record is chained once)");
+    TEST_EXPECT_EQ(reached_held, 0u, "nothing was walked inside the locks");
+    TEST_ASSERT(still_owed, "the inner release does not drain (NoWalkUnderLock)");
+    TEST_EXPECT_EQ(reached_inner, 0u, "and walks nothing");
+    TEST_EXPECT_EQ(tpd_reached(TPW_N), TPW_N, "the outermost release walked every hook");
+    TEST_EXPECT_EQ(g_tpw_batches, (TPW_N - 1u) / POLL_WAKE_BATCH, "one walk, in batches");
+    TEST_ASSERT(g_tpw_ok, "between batches: no lock counted, IRQs on, the bookmark listed");
+    TEST_ASSERT(g_tpd.chain == NULL && t->lock_owed.head == NULL && t->defer_depth == 0,
+        "nothing is owed after the release (ChainDrained)");
+    TEST_EXPECT_EQ(poll_waiter_list_marks_for_test(&g_tpw_list), 0u,
+        "the bookmark left with the walk");
+
+    // Outside every deferring lock the same call walks at once.
+    for (u32 i = 0; i < TPW_N; i++) g_tpw[i].ready = false;
+    poll_wake_deferred(&g_tpd);
+    TEST_EXPECT_EQ(tpd_reached(TPW_N), TPW_N, "unlocked, the walk runs in the call");
+    TEST_ASSERT(g_tpd.chain == NULL, "and owes nothing");
+    tpw_teardown();
+}
+
+// The dev9p poll lock defers through its own wrappers: an event under it owes
+// the walk, and the walk runs at its release with no lock counted on this
+// thread -- the spin lock dropped before the drain, not after.
+static bool g_tdl_owed;
+static u32  g_tdl_reached_held;
+static bool g_tdl_counted;
+
+static void tdl_owe(void *arg) {
+    struct poll_deferred *d = (struct poll_deferred *)arg;
+    poll_wake_deferred(d);
+    g_tdl_owed = d->chain == &current_thread()->lock_owed;
+    g_tdl_reached_held = tpd_reached(TPW_N);
+}
+
+static void tdl_check_batch(struct poll_waiter_list *l) {
+    tpd_check_batch(l);
+    if (current_thread()->preempt_count != 0u) g_tdl_counted = true;
+}
+
+void test_poll_dev9p_poll_lock_defers_its_walks(void) {
+    tpw_setup(TPW_N);
+    poll_deferred_init(&g_tpd, &g_tpw_list, NULL, NULL);
+    TEST_ASSERT(!irqs_masked(), "the test runs with IRQs on (else the IRQ check is empty)");
+    g_tdl_owed = false; g_tdl_reached_held = 0; g_tdl_counted = false;
+    g_poll_wake_batch_hook = tdl_check_batch;
+    dev9p_poll_test_under_lock(tdl_owe, &g_tpd);
+    g_poll_wake_batch_hook = NULL;
+
+    TEST_ASSERT(g_tdl_owed, "an event under the poll lock owes its walk to the thread");
+    TEST_EXPECT_EQ(g_tdl_reached_held, 0u, "nothing was walked under the lock");
+    TEST_EXPECT_EQ(tpd_reached(TPW_N), TPW_N, "the release walked every hook");
+    TEST_EXPECT_EQ(g_tpw_batches, (TPW_N - 1u) / POLL_WAKE_BATCH, "one walk, in batches");
+    TEST_ASSERT(!g_tdl_counted, "between batches this thread counts no lock (unlocked first)");
+    TEST_ASSERT(g_tpw_ok, "between batches: depth 0, IRQs on, the bookmark listed");
+    TEST_ASSERT(g_tpd.chain == NULL && current_thread()->lock_owed.head == NULL &&
+                current_thread()->defer_depth == 0, "nothing is owed after the release");
+    tpw_teardown();
+}
+
+// A REF owner's test double: a count, and a put that checks the walk it ends
+// is over.
+static int  g_tpd_ref;
+static u32  g_tpd_puts;
+static bool g_tpd_put_after_walk;
+
+static bool tpd_tryget(void *owner) {
+    if (owner != &g_tpd_ref || g_tpd_ref <= 0) return false;
+    g_tpd_ref++;
+    return true;
+}
+
+static void tpd_put(void *owner) {
+    if (owner != &g_tpd_ref) return;
+    g_tpd_ref--;
+    g_tpd_puts++;
+    g_tpd_put_after_walk = tpd_reached(TPW_M) == TPW_M &&
+                           poll_waiter_list_marks_for_test(&g_tpw_list) == 0u;
+}
+
+static const struct poll_defer_ops g_tpd_ops = { .tryget = tpd_tryget, .put = tpd_put };
+
+void test_poll_deferred_ref_owner_holds_a_ref_across_the_walk(void) {
+    tpw_setup(TPW_M);
+    poll_deferred_init(&g_tpd, &g_tpw_list, &g_tpd_ops, &g_tpd_ref);
+    g_tpd_ref = 1;                      // the transport's
+    g_tpd_puts = 0;
+    g_tpd_put_after_walk = false;
+
+    poll_defer_enter();
+    poll_wake_deferred(&g_tpd);
+    poll_wake_deferred(&g_tpd);
+    int held = g_tpd_ref;
+    g_tpd_ref--;                        // the transport's close drops its own
+    poll_defer_exit();
+    TEST_EXPECT_EQ(held, 2, "the owe took one reference, once");
+    TEST_EXPECT_EQ(g_tpd_puts, 1u, "the walk's end dropped it");
+    TEST_ASSERT(g_tpd_put_after_walk, "after the walk was over, its bookmark gone");
+    TEST_EXPECT_EQ(g_tpd_ref, 0, "no reference leaked (RefExact)");
+    tpw_teardown();
+}
+
+// An owner already in its free has no poller: the owe that cannot take a
+// reference walks at once instead of chaining a record nothing pins.
+void test_poll_deferred_walks_a_dying_owner_at_once(void) {
+    tpw_setup(TPW_M);
+    poll_deferred_init(&g_tpd, &g_tpw_list, &g_tpd_ops, &g_tpd_ref);
+    g_tpd_ref = 0;
+    g_tpd_puts = 0;
+    poll_defer_enter();
+    poll_wake_deferred(&g_tpd);
+    bool chained = g_tpd.chain != NULL;
+    u32 reached = tpd_reached(TPW_M);
+    poll_defer_exit();
+    TEST_ASSERT(!chained, "nothing was chained");
+    TEST_EXPECT_EQ(reached, TPW_M, "the walk ran in the call");
+    TEST_EXPECT_EQ(g_tpd_puts, 0u, "and dropped nothing it never took");
+    TEST_EXPECT_EQ(g_tpd_ref, 0, "the count was left alone");
+    tpw_teardown();
+}
+
+// A WAIT owner's free waits out a walk another thread owes it. The child owes
+// the walk and then holds its deferring lock for TPD_HOLD_NS before draining:
+// an await that returned before the drain would find the hooks unreached.
+#define TPD_HOLD_NS (20ull * 1000ull * 1000ull)
+static volatile u32 g_tpd_owed;
+static volatile u32 g_tpd_go;
+
+static void tpd_child_owes_then_drains(void *arg) {
+    (void)arg;
+    poll_defer_enter();
+    poll_wake_deferred(&g_tpd);
+    __atomic_store_n(&g_tpd_owed, 1u, __ATOMIC_RELEASE);
+    while (!__atomic_load_n(&g_tpd_go, __ATOMIC_ACQUIRE)) sched();
+    u64 t0 = timer_now_ns();
+    while (timer_now_ns() - t0 < TPD_HOLD_NS) sched();
+    poll_defer_exit();
+    exits("ok");
+}
+
+void test_poll_deferred_await_waits_out_an_owed_walk(void) {
+    tpw_setup(TPW_M);
+    poll_deferred_init(&g_tpd, &g_tpw_list, NULL, NULL);
+    g_tpd_owed = 0;
+    g_tpd_go = 0;
+    int pid = rfork(RFPROC, tpd_child_owes_then_drains, NULL);
+    TEST_ASSERT(pid > 0, "rfork");
+    while (!__atomic_load_n(&g_tpd_owed, __ATOMIC_ACQUIRE)) sched();
+    bool owed = g_tpd.chain != NULL;
+    __atomic_store_n(&g_tpd_go, 1u, __ATOMIC_RELEASE);
+    poll_deferred_await(&g_tpd);
+    u32 reached = tpd_reached(TPW_M);
+    bool clear = g_tpd.chain == NULL && poll_waiter_list_marks_for_test(&g_tpw_list) == 0u;
+    int status = -1;
+    TEST_EXPECT_EQ(wait_pid(&status), pid, "the child was reaped");
+    TEST_ASSERT(owed, "the child owed the walk before the await began");
+    TEST_EXPECT_EQ(reached, TPW_M, "the await returned only after the owed walk was over");
+    TEST_ASSERT(clear, "with the record off every chain and no bookmark listed");
+    tpw_teardown();
+}
+
+// A srvconn send under a client's lock (the client holds c->lock across its
+// transport's send) owes the poll_list walk and holds the conn across it.
+void test_poll_srvconn_send_under_a_client_lock_owes_its_walk(void) {
+    struct SrvConn *cn = srvconn_create(0, 1, PRINCIPAL_INVALID, false, 0,
+                                        PRINCIPAL_INVALID, SRVCONN_MSIZE);
+    TEST_ASSERT(cn != NULL, "srvconn_create");
+    struct Rendez r;
+    struct poll_waiter pw;
+    rendez_init(&r);
+    poll_waiter_init(&pw, &r);
+    poll_waiter_list_register(&cn->poll_list, &pw);
+
+    u8 frame[16] = { 16, 0, 0, 0 };
+    poll_defer_enter();
+    long put = srvconn_client_send_frame(cn, frame, (long)sizeof(frame));
+    bool owed = cn->poll_owed.chain != NULL;
+    bool early = pw.ready;
+    int held = __atomic_load_n(&cn->ref, __ATOMIC_RELAXED);
+    poll_defer_exit();
+    TEST_EXPECT_EQ(put, (long)sizeof(frame), "the frame went in");
+    TEST_ASSERT(owed, "the send under the lock owed the conn's walk");
+    TEST_ASSERT(!early, "and walked nothing under it");
+    TEST_EXPECT_EQ(held, 2, "the owed walk holds a conn reference");
+    TEST_ASSERT(pw.ready, "the release walked it");
+    TEST_EXPECT_EQ(__atomic_load_n(&cn->ref, __ATOMIC_RELAXED), 1, "and dropped the reference");
+    poll_waiter_list_unregister(&pw);
+    srvconn_unref(cn);
+}
+
+// p9_client_close: the transport's close tears the conn down and drops its
+// reference under c->lock. The walks the teardown owes keep the conn alive,
+// and the drain's last put frees it, after the lock.
+void test_poll_srvconn_close_under_a_client_lock_outlives_its_walks(void) {
+    struct SrvConn *cn = srvconn_create(0, 1, PRINCIPAL_INVALID, false, 0,
+                                        PRINCIPAL_INVALID, SRVCONN_MSIZE);
+    TEST_ASSERT(cn != NULL, "srvconn_create");
+    struct Rendez r[3];
+    struct poll_waiter pw[3];
+    struct poll_waiter_list *lists[3] = {
+        &cn->c2s.role_waiters, &cn->s2c.role_waiters, &cn->poll_list };
+    for (u32 i = 0; i < 3u; i++) {
+        rendez_init(&r[i]);
+        poll_waiter_init(&pw[i], &r[i]);
+        poll_waiter_list_register(lists[i], &pw[i]);
+    }
+    u64 freed0 = srvconn_total_freed();
+    poll_defer_enter();
+    srvconn_teardown(cn);
+    u32 owed = 0;
+    for (struct poll_deferred *d = current_thread()->lock_owed.head; d; d = d->next) owed++;
+    bool early = pw[0].ready || pw[1].ready || pw[2].ready;
+    // The pollers see the hangup and leave; then the transport's reference
+    // goes, which is not the last.
+    for (u32 i = 0; i < 3u; i++) poll_waiter_list_unregister(&pw[i]);
+    srvconn_unref(cn);
+    u64 freed_held = srvconn_total_freed();
+    poll_defer_exit();
+    TEST_ASSERT(!early, "the teardown under the lock walked nothing");
+    TEST_EXPECT_EQ(owed, 3u, "the teardown owed all three conn walks");
+    TEST_EXPECT_EQ(freed_held, freed0, "the owed walks kept the conn alive past its close");
+    TEST_EXPECT_EQ(srvconn_total_freed(), freed0 + 1u, "the drain's last put freed it");
+    TEST_ASSERT(current_thread()->lock_owed.head == NULL, "nothing is owed after");
+}
+
+// The pipe a 9P transport writes and hangs up under c->lock: the ring's walk
+// is owed, and the ring outlives both ends' closes until it is walked.
+void test_poll_pipe_hangup_under_a_client_lock_owes_its_walk(void) {
+    struct Spoor *rd = NULL, *wr = NULL;
+    TEST_EXPECT_EQ(pipe_create(&rd, &wr), 0, "pipe_create");
+    struct Rendez r;
+    struct poll_waiter pw;
+    rendez_init(&r);
+    poll_waiter_init(&pw, &r);
+    short rev = rd->dev->poll(rd, POLLIN, &pw);
+    TEST_EXPECT_EQ(rev & (POLLIN | POLLHUP), 0, "an empty pipe is not ready; the hook is listed");
+
+    poll_defer_enter();
+    TEST_ASSERT(pipe_hangup_write(wr), "the hangup");
+    bool early = pw.ready;
+    poll_defer_exit();
+    TEST_ASSERT(!early, "the hangup under the lock walked nothing");
+    TEST_ASSERT(pw.ready, "the release walked the ring");
+    poll_waiter_list_unregister(&pw);
+
+    pw.ready = false;
+    (void)rd->dev->poll(rd, POLLIN, &pw);
+    u64 freed0 = pipe_total_freed();
+    poll_defer_enter();
+    spoor_clunk(wr);                    // owes the ring's walk: a poller is listed
+    poll_waiter_list_unregister(&pw);   // which leaves before its end closes
+    spoor_clunk(rd);
+    u64 freed_held = pipe_total_freed();
+    poll_defer_exit();
+    TEST_EXPECT_EQ(freed_held, freed0, "the owed walk kept the ring past both closes");
+    TEST_EXPECT_EQ(pipe_total_freed(), freed0 + 1u, "the drain's put freed it");
+}
+
+// Audit r1 F1: a free in a syscall body (never preempted) awaits a walk whose
+// drainer is a kthread preempted between two batches on the SAME CPU. An await
+// that only spins never lets the drainer back on -- the thread waited on
+// cannot run -- so it hangs; it must yield the CPU. Both threads are pinned to
+// one CPU so a peer cannot rescue the drainer.
+static struct Thread *volatile g_tpd_drainer;
+static volatile u32  g_tpd_parked;
+static volatile bool g_tpd_drainer_done;
+
+static void tpd_park_between_batches(struct poll_waiter_list *l) {
+    (void)l;
+    if (current_thread() != g_tpd_drainer) return;
+    if (__atomic_fetch_add(&g_tpd_parked, 1u, __ATOMIC_ACQ_REL) != 0) return;
+    sched();                            // runnable, its bookmark listed, off the CPU
+}
+
+static void tpd_drainer_entry(void) {
+    poll_defer_enter();
+    poll_wake_deferred(&g_tpd);
+    poll_defer_exit();                  // the drain parks once between batches
+    test_kthread_park_terminal(&g_tpd_drainer_done);
+}
+
+void test_poll_await_yields_to_a_drainer_on_its_cpu(void) {
+    tpw_setup(TPW_N);
+    poll_deferred_init(&g_tpd, &g_tpw_list, NULL, NULL);
+    struct Thread *me = current_thread();
+    bool was_pinned = me->cpu_pinned;
+    me->cpu_pinned = true;
+    g_tpd_parked = 0;
+    g_tpd_drainer_done = false;
+    struct Thread *k = thread_create(kproc(), tpd_drainer_entry);
+    TEST_ASSERT(k != NULL, "thread_create");
+    k->cpu_pinned = true;
+    g_tpd_drainer = k;
+    g_poll_wake_batch_hook = tpd_park_between_batches;
+    me->in_syscall = 1u;                // no timer preemption from here on
+    ready_on(smp_cpu_idx_self(), k);
+    while (!__atomic_load_n(&g_tpd_parked, __ATOMIC_ACQUIRE)) sched();
+    bool marked = poll_waiter_list_marks_for_test(&g_tpw_list) == 1u;
+    poll_deferred_await(&g_tpd);
+    u32 reached = tpd_reached(TPW_N);
+    me->in_syscall = 0u;
+    g_poll_wake_batch_hook = NULL;
+    me->cpu_pinned = was_pinned;
+    test_kthread_join_free(k, &g_tpd_drainer_done);
+    TEST_ASSERT(marked, "the drainer parked with its bookmark listed");
+    TEST_EXPECT_EQ(reached, TPW_N, "the await let the drainer finish its walk");
+    TEST_EXPECT_EQ(poll_waiter_list_marks_for_test(&g_tpw_list), 0u, "the bookmark left");
+    tpw_teardown();
 }

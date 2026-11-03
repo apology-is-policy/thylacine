@@ -15,7 +15,7 @@ validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/POUCH-DESIGN.md"]
 created: 2026-08-01
-updated: 2026-10-27
+updated: 2026-11-02
 ---
 ## Purpose
 
@@ -245,7 +245,40 @@ the caller's Proc).
   CPU still finishing. joey runs it as the system principal, which the cap
   exempts, so only the count shows a leak there; with no reap at all the leg
   read 310 (2026-10-20).
-- C11 `thrd_create` (the `start_c11` path) is patched but untested.
+- **A new thread starts with its creator's signal mask** (POSIX; thread-model
+  C7, operator vote 2026-10-29). `pthread_create` blocks every application
+  signal across `SYS_THREAD_SPAWN`, the kernel starts the thread with that mask,
+  and the thread's first act restores its creator's own: `start()` and
+  `start_c11()` call `__restore_sigs(&args->sig_mask)` (0065), where `start()`
+  used the `SYS_rt_sigprocmask` sentinel (ENOSYS) and so ran every thread
+  unmasked, and upstream's `start_c11()` restores nothing. The `mask` leg makes a
+  thread while main blocks SIGINT (it reads SIGINT blocked) and, as the control,
+  one while SIGINT is open (it reads it open). That leg reads the TLS shadow,
+  which `__restore_sigs` writes whatever the kernel did, so two more legs reach
+  past it (C7 audit r2 F2): `mask-c11` is the same pair through `thrd_create`
+  (the `start_c11` path, untested until then), and `mask-queued` is the kernel
+  half -- main catches SIGINT, blocks and raises it so it queues, makes and joins
+  a thread, and unblocks; the handler must run on main, where a newborn the
+  kernel started unmasked would have taken it at its first entry.
+- **`pthread_kill` names one thread since 0067 (thread-model C4, 2026-11-02).**
+  It was the `SYS_tkill` sentinel, so it answered ENOSYS, and `raise` posted a
+  process-directed note a peer could take, although POSIX makes `raise` the same as
+  `pthread_kill(pthread_self())`. Both now call `SYS_postnote_tid` (138), under the
+  killlock for `pthread_kill`. SIGABRT is `snare:abort`. Signal 0 posts nothing, a
+  signal with no note is EINVAL, and a `tty:*` one is EPERM. A blocked worker's wait rides the note out
+  ([[sub-kernel-notes]]'s seams), so `kill-blocked` asks only that the worker takes it
+  no later than the call's end. `kill-worker` (a spinning worker takes it, main does
+  not), `kill-masked` and `raise-masked` (a masked target keeps it while an open main
+  is left alone, and the unblock delivers) and `kill-answers` pin the rest; `kill-usr` is `kill-worker` with `SIGUSR1`, which has
+  its note since 0068 (2026-11-02), and `kill-answers` uses `SIGALRM` for a signal with none.
+  `mask-queued` moved to `kill(getpid())`: `raise` now waits on its own thread, which
+  no newborn can take from, so the leg would prove nothing.
+- **C11 `thrd_create` works since 0066 (2026-10-29).** Until then `start_c11()`
+  never registered `&__thread_list_lock` as clear_child_tid (0004 re-armed that
+  handoff in `start()` only, having replaced musl's `CLONE_CHILD_CLEARTID`
+  clone), so a C11 thread exited holding the thread-list lock and `thrd_join`,
+  and every later thread create, waited forever. `mask-c11` found it by hanging
+  C7's phase f boot; it had passed as "patched but untested" since 0004.
 
 ## Provenance
 

@@ -109,7 +109,7 @@ static u32 pts_note_count(struct Proc *p, const char *name) {
     u32 idx = q->head;
     for (u32 n = 0; n < q->count; n++) {
         if (pts_streq(q->ring[idx].name, name)) found++;
-        idx = (idx + 1) % NOTE_QUEUE_DEPTH;
+        idx = (idx + 1) % NOTE_RING_SLOTS;
     }
     spin_unlock(&q->lock);
     return found;
@@ -1381,4 +1381,120 @@ cleanup:
     if (linked) pts_drop_linked(host); else pts_drop_proc(host);
     TEST_ASSERT(!failure, failure);
 #undef PTI_EDGE_CHECK
+}
+
+// A binding's pollers are unbounded, so a walk of them owes the poll chunk's
+// rule (specs/poll_owed.tla): never under g_proc_table_lock, and IRQs on
+// between batches. More than one batch of hooks makes the walk cross a batch
+// boundary, where g_poll_wake_batch_hook samples the lock and the IRQ mask.
+// Driven through both table-lock holders that wake: an ACK
+// (proc_pts_interaction) and a setsid (the invalidate under the hold).
+static u32  g_tpti_batches;
+static bool g_tpti_under_table;
+static bool g_tpti_masked;
+
+static void tpti_batch(struct poll_waiter_list *l) {
+    (void)l;
+    g_tpti_batches++;
+    if (proc_table_held_for_test()) g_tpti_under_table = true;
+    if (irqs_masked())              g_tpti_masked = true;
+}
+
+#define TPTI_HOOKS (POLL_WAKE_BATCH + 1u)
+
+void test_pts_interaction_wakes_after_the_table_lock(void) {
+    static struct Rendez      rendez[TPTI_HOOKS];
+    static struct poll_waiter hook[TPTI_HOOKS];
+    const char *failure = NULL;
+    struct Proc *host = proc_alloc(), *observer = proc_alloc(), *subject = proc_alloc();
+    struct Proc *member = proc_alloc();
+    bool linked = false, member_linked = false;
+    struct SrvConn *cn = NULL;
+    s64 id = -1, bid = -1, werr = -1, ack = -1;
+    struct Spoor *watch = NULL;
+    struct pts_interaction_call c = { 0 };
+    u32 ack_batches = 0, sid_batches = 0;
+    bool ack_under = false, ack_masked = false, sid_under = false, sid_masked = false;
+    int sid = -1;
+    for (u32 i = 0; i < TPTI_HOOKS; i++) {
+        rendez_init(&rendez[i]);
+        poll_waiter_init(&hook[i], &rendez[i]);
+    }
+#define TPTI_CHECK(cond, msg) do { if (!(cond)) { failure = (msg); goto cleanup; } } while (0)
+    TPTI_CHECK(host && observer && subject && member, "TPTI fixture processes");
+    proc_test_link(host); proc_test_link(observer); proc_test_link(subject);
+    linked = true;
+    subject->principal_id = host->principal_id = member->principal_id = 1001;
+    proc_seal(host, PROC_FLAG_NOTRACE | PROC_FLAG_NODUMP);
+    cn = pts_make_conn(host);
+    TPTI_CHECK(cn, "TPTI fixture transport");
+    id = pts_mint(host, cn, 930);
+    TPTI_CHECK(id > 0, "TPTI fixture terminal");
+    TPTI_CHECK(pts_bind_slave(host, cn, 931, (u64)id) == 0, "TPTI fixture slave");
+    TPTI_CHECK(pts_tty_acquire(subject, cn, 931) == 0, "TPTI acquire");
+    member->sid = subject->sid; member->pgid = subject->pgid;
+    proc_test_link(member);
+    member_linked = true;
+    c = (struct pts_interaction_call){ .pts_id = (u64)id, .observer_stripes = proc_stripes(observer) };
+    bid = proc_pts_interaction(host, PTY_INTERACTION_BIND, &c);
+    TPTI_CHECK(bid > 0, "TPTI bind");
+    c.binding_id = (u64)bid;
+    TPTI_CHECK(proc_pts_interaction(observer, PTY_INTERACTION_STATE, &c) == 0, "TPTI state");
+    c.request = (struct t_pty_interaction_check){ .version = 1, .size = 24,
+        .expected_epoch = c.state.foreground_epoch, .subject_stripes = proc_stripes(member) };
+    TPTI_CHECK(proc_pts_interaction(observer, PTY_INTERACTION_ACK, &c) == 0, "TPTI nominate the member");
+    watch = pts_interaction_watch(observer, (u64)bid, &werr);
+    TPTI_CHECK(watch && werr == 0, "TPTI observer watch");
+    for (u32 i = 0; i < TPTI_HOOKS; i++) (void)pti_test_poll(observer, watch, &hook[i]);
+
+    // An ACK that changes the binding (the APP acknowledgement) wakes it.
+    g_tpti_batches = 0; g_tpti_under_table = g_tpti_masked = false;
+    g_poll_wake_batch_hook = tpti_batch;
+    c.request.subject_stripes = 0;
+    ack = proc_pts_interaction(observer, PTY_INTERACTION_ACK, &c);
+    g_poll_wake_batch_hook = NULL;
+    ack_batches = g_tpti_batches;
+    ack_under = g_tpti_under_table; ack_masked = g_tpti_masked;
+
+    // setsid of the nominated member invalidates the binding under the hold.
+    TPTI_CHECK(proc_pts_interaction(observer, PTY_INTERACTION_STATE, &c) == 0, "TPTI state again");
+    c.request.expected_epoch = c.state.foreground_epoch;
+    c.request.subject_stripes = proc_stripes(member);
+    TPTI_CHECK(proc_pts_interaction(observer, PTY_INTERACTION_ACK, &c) == 0, "TPTI renominate the member");
+    g_tpti_batches = 0; g_tpti_under_table = g_tpti_masked = false;
+    g_poll_wake_batch_hook = tpti_batch;
+    sid = proc_setsid(member);
+    g_poll_wake_batch_hook = NULL;
+    sid_batches = g_tpti_batches;
+    sid_under = g_tpti_under_table; sid_masked = g_tpti_masked;
+
+    TPTI_CHECK(ack == 0, "TPTI the APP acknowledgement");
+    TPTI_CHECK(ack_batches >= 1u, "TPTI the ACK's walk crossed a batch boundary (the sampler ran)");
+    TPTI_CHECK(!ack_under, "TPTI no batch of the ACK's walk ran under g_proc_table_lock");
+    TPTI_CHECK(!ack_masked, "TPTI the ACK's walk ran with IRQs on between batches");
+    TPTI_CHECK(sid > 0, "TPTI setsid");
+    TPTI_CHECK(sid_batches >= 1u, "TPTI the setsid's walk crossed a batch boundary (the sampler ran)");
+    TPTI_CHECK(!sid_under, "TPTI no batch of the setsid's walk ran under g_proc_table_lock");
+    TPTI_CHECK(!sid_masked, "TPTI the setsid's walk ran with IRQs on between batches");
+cleanup:
+    // Every exit releases the whole fixture, so a red here cannot strand a live
+    // binding (which would refuse every later empty-pool ID fixture).
+    g_poll_wake_batch_hook = NULL;
+    for (u32 i = 0; i < TPTI_HOOKS; i++) poll_waiter_list_unregister(&hook[i]);
+    if (bid > 0) {
+        c.binding_id = (u64)bid;
+        if (proc_pts_interaction(host, PTY_INTERACTION_UNBIND, &c) != 0 && !failure)
+            failure = "TPTI unbind";
+    }
+    if (watch) spoor_clunk(watch);
+    if (id > 0 && pts_free(host, (u64)id) != 0 && !failure) failure = "TPTI free terminal";
+    pts_drop_conn(cn);
+    if (member_linked) pts_drop_linked(member); else pts_drop_proc(member);
+    if (linked) {
+        pts_drop_linked(subject); pts_drop_linked(observer); pts_drop_linked(host);
+    } else {
+        pts_drop_proc(subject); pts_drop_proc(observer); pts_drop_proc(host);
+    }
+    TEST_ASSERT(!failure, failure);
+#undef TPTI_CHECK
 }

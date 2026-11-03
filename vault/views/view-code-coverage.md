@@ -65,19 +65,19 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**696 owned · 42 unowned · 738 files (94% owned) · ~10973 unswept lines.**
+**696 owned · 41 unowned · 737 files (94% owned) · ~10831 unswept lines.**
 
-Excluded as harness and counted here rather than dropped: **92 files, ~44656 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
+Excluded as harness and counted here rather than dropped: **92 files, ~45191 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
 | area | owned | unowned | unswept lines |
 |---|---:|---:|---:|
 | usr/warp-prove | 0 | 1 | 4349 |
-| usr/pouch-hello | 13 | 16 | 2598 |
+| usr/pouch-hello | 13 | 16 | 2651 |
 | usr/ports | 19 | 5 | 1691 |
-| kernel | 190 | 11 | 1434 |
+| kernel | 191 | 10 | 1239 |
 | usr/gl-sdl-prove | 0 | 1 | 262 |
 | usr/libthyla-rs | 34 | 1 | 196 |
-| arch | 42 | 2 | 146 |
+| arch | 41 | 2 | 146 |
 | usr/susp-mask-child | 0 | 1 | 139 |
 | usr/lib | 124 | 1 | 72 |
 | usr/bus-probe-child | 0 | 1 | 63 |
@@ -132,7 +132,7 @@ Excluded as harness and counted here rather than dropped: **92 files, ~44656 lin
 |---|---:|
 | usr/warp-prove/src/main.rs | 4349 |
 | usr/ports/gnumake/config.h | 1357 |
-| usr/pouch-hello/pouch-hello-signals.c | 497 |
+| usr/pouch-hello/pouch-hello-signals.c | 550 |
 | usr/pouch-hello/pouch-hello-fs.c | 350 |
 | usr/pouch-hello/pouch-hello-net.c | 293 |
 | kernel/include/thylacine/spinlock.h | 287 |
@@ -140,7 +140,6 @@ Excluded as harness and counted here rather than dropped: **92 files, ~44656 lin
 | kernel/include/thylacine/smp.h | 276 |
 | usr/gl-sdl-prove/gl-sdl-prove.c | 262 |
 | usr/pouch-hello/pouch-hello-pty.c | 231 |
-| kernel/include/thylacine/context.h | 201 |
 | usr/lib/libthyla-rs/src/sync.rs | 196 |
 | usr/pouch-hello/pouch-hello-sodium.c | 196 |
 | usr/ports/gnumake/generated/glob.h | 163 |
@@ -148,8 +147,8 @@ Excluded as harness and counted here rather than dropped: **92 files, ~44656 lin
 | usr/susp-mask-child/src/main.rs | 139 |
 | usr/pouch-hello/pouch-hello-reentry.c | 133 |
 | usr/pouch-hello/pouch-hello-mallocng-torture.c | 126 |
-| kernel/include/thylacine/9p_transport_loopback.h | 99 |
-| kernel/include/thylacine/9p_transport_mq.h | 96 |
+| kernel/include/thylacine/9p_transport_loopback.h | 102 |
+| kernel/include/thylacine/9p_transport_mq.h | 99 |
 | usr/pouch-hello/pouch-hello-exitgroup.c | 91 |
 | kernel/include/thylacine/9p_spoor_transport.h | 87 |
 | usr/pouch-hello/pouch-hello-getrandom.c | 79 |

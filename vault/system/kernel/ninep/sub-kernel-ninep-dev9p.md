@@ -15,7 +15,7 @@ hazards: [haz-shared-stream-desync]
 abis: []
 design: [docs/LARDER-DESIGN.md, docs/FID-LIFECYCLE-DESIGN.md, docs/POUNCE-DESIGN.md]
 created: 2026-07-31
-updated: 2026-10-07
+updated: 2026-10-29
 ---
 ## Purpose
 
@@ -657,6 +657,8 @@ replace `.poll`), #955, D44, task-#44, #80 the
 name-op errno propagation, the V-4c-3 self-audit's class correction, and (L)
 the Haul identity cape.)
 [[chg-2026-08-16-dev9p-errno-class]] records the last two.
+
+2026-10-29 (thread-model C7-0): `dev9p.h` declares two KERNEL_TESTS-only hooks, `dev9p_poll_test_under_lock` and `dev9p_poll_test_lock_held`, which `poll.dev9p_poll_lock_defers_its_walks` uses ([[sub-kernel-ninep-dev9p-poll]]).
 
 ## Tests
 

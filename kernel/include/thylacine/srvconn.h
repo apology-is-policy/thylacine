@@ -197,6 +197,8 @@ struct srvconn_chan {
                                   // party re-checks its own role under lock
                                   // and re-parks if still held). Woken on
                                   // every role release + at teardown.
+    struct poll_deferred role_owed;  // role_waiters' walk, owed past a 9P
+                                  // client's lock (poll.h); holds a conn ref
     u8            *buf;           // heap ring storage, `cap` bytes; owned by
                                   // the SrvConn (freed at the last unref)
     // #210 loss discriminator: lifetime byte totals through this ring,
@@ -277,6 +279,10 @@ struct SrvConn {
     // poll_waiter_list_wake(&poll_list) after releasing the channel lock,
     // mirroring kernel/pipe.c's discipline (specs/poll.tla MakeReady).
     struct poll_waiter_list poll_list;
+    // poll_list's walk, owed past a 9P client's lock (poll.h): the client's
+    // sends and its transport's teardown and close all run under c->lock. An
+    // owed walk holds a conn reference until it ends.
+    struct poll_deferred    poll_owed;
 
     // P6-pouch-sockets (sub-chunk 12): transport mode propagated from
     // the service at mint (read service->mode under the registry lock;

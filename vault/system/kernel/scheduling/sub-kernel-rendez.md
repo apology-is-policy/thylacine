@@ -49,7 +49,11 @@ that are not obvious.
   and its timeout-only sleep, `wait_pid_for` and the futex wait (ARCH 8.8.3
   names the three that do not). A caller RETURNS on `*_NOTEINTR`: the claim
   lasts until its tail, so a second wait in the same call would unwind at
-  once. Witnesses:
+  once. A wake promises nothing about a note: a direct post rouses its target masked
+  or not, and a disposition turning fatal rouses every peer with a pending word
+  ([[sub-kernel-notes]]), so a waiter re-reads under `wait_lock` and a masked one
+  parks again (`rendez.direct_note_held_waits_ride_it_out`,
+  `rendez.direct_note_turns_fatal_when_the_handler_goes`). Witnesses:
   `rendez.caught_note_one_unwind` -- two sleepers of one Linux Proc, one caught
   note: the walk wakes main alone, and a caught note of another family, posted
   once main has gone, unwinds the peer;

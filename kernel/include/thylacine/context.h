@@ -106,46 +106,15 @@ void cpu_switch_context(struct Context *prev, struct Context *next);
 // WFE — Phase 2 close adds the real thread_exit + reap path.
 extern void thread_trampoline(void);
 
-// P6-pouch-threads (sub-chunk 9): user-mode variant of thread_trampoline.
-// Used as the initial ctx.lr for Threads created by thread_create_user;
-// the first cpu_switch_context's `ret` lands here. The trampoline:
-//
-//   1. bti c
-//   2. bl sched_finish_task_switch — release the run-tree lock prev held
-//   3. msr daifclr, #2 — unmask IRQs for the new thread
-//   4. consume the four parked args from ctx (x19=sp, x20=arg, x21=entry,
-//      x22=tls), installs SP_EL0, TPIDR_EL0, ELR_EL1, SPSR_EL1, x0=arg,
-//      zeroes every other GPR
-//   5. eret to EL0 at user_entry_va running on user_sp_va
-//
-// Mirrors userland_enter's discipline (arch/arm64/userland.S) but does
-// it inline from the trampoline so x0 = user_arg survives the GPR-
-// zeroing sweep.
+// The first switch-in of a thread that enters EL0 (asm in arch/arm64/vectors.S;
+// thread-model C7): the initial ctx.lr of a spawned thread (thread_alloc_user)
+// and of a forked one (thread_alloc_forked), whose creator built its EL0 frame
+// at the top of its kstack and pointed ctx.sp at it. It releases the run-tree
+// lock prev held (sched_finish_task_switch), masks DAIF, and takes the shared
+// EL0-return tail over that frame -- the preempt check, the die-check, the stop
+// leg, the notes leg, KERNEL_EXIT -- so the thread's first EL0 instruction is
+// reached the way every later one is.
 extern void thread_user_trampoline(void);
-
-// LINEAGE L-3b: initial ctx.lr for a Thread created by
-// thread_create_forked. The third entry shape, and the shortest, because it
-// RESTORES a frame instead of constructing one:
-//
-//   1. bti c
-//   2. bl sched_finish_task_switch — release the run-tree lock prev held
-//   3. bl el0_return_die_check — I-24 first-entry check, same as
-//      thread_user_trampoline (a child forked while its parent's group is
-//      already terminating must never reach EL0)
-//   4. b .Lexception_return — the SHARED KERNEL_EXIT
-//
-// Step 4 is why this lives in vectors.S and not context.S: .Lexception_return
-// is deliberately a LOCAL label, so that no kernel caller can eret on whatever
-// happens to sit on the current SP. Branching to it from inside vectors.S is
-// exactly the use its own comment sanctions, and reusing the single audited
-// exit beats hand-rolling a second one on the tree's most load-bearing path.
-//
-// ctx.sp is the child's frame (thread_create_forked put it at the top of the
-// child's kstack, where KERNEL_ENTRY would have), so KERNEL_EXIT's sp-relative
-// loads and its closing `add sp, sp, #EXCEPTION_CTX_SIZE` behave exactly as on
-// a return from a real exception. The trampoline's own C calls run BELOW the
-// frame and cannot disturb it.
-extern void thread_fork_trampoline(void);
 
 // P4-Ic5-FP: enable CPACR_EL1.FPEN = 0b11 (no FP/SIMD trap at any EL)
 // on the calling CPU. Called from boot_main (primary) + per_cpu_main

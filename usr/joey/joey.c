@@ -1096,7 +1096,7 @@ static int do_pouch_hello_smoke(void) {
     //   - SYS_NOTED(NCONT) restores the saved user context, raise() returns 0
     //   - sigaction(SIGINT, SIG_IGN)  bootstrap fast-paths to NCONT without
     //                                  invoking the user handler
-    //   - sigaction(SIGUSR1, ...)     -> EINVAL (unsupported signum)
+    //   - sigaction(SIGALRM, ...)     -> EINVAL (unsupported signum)
     //   - deaths: children that abort(), fail an assert(), brk #1 and NULL-
     //     store read WIFSIGNALED SIGABRT/SIGABRT/SIGTRAP/SIGSEGV (gcpark-b);
     //     raise(SIGABRT) and kill(getpid(), SIGABRT) read SIGABRT (S-2)

@@ -559,7 +559,9 @@ inherited or ever cleared: both mark a Proc that is going.
 Bit 11 is `PROC_FLAG_TERM_TERMINATE_PENDING` (2026-10-13), `term`'s terminate
 latch, in `PROC_FLAG_TERMINATE_PENDING_MASK` with the interrupt, tty and pipe
 latches. It became free when the caught-note latch and claim sub-fields (bits
-11..17 and 22..28) left for `Proc.note_caught`. `PROC_FLAGS_ALL` names every
+11..17 and 22..28) left for `Proc.note_caught`. Bits 22 and 23 are
+`PROC_FLAG_USR1_TERMINATE_PENDING` and `PROC_FLAG_USR2_TERMINATE_PENDING`
+(2026-11-02), in the same mask, a latch each. `PROC_FLAGS_ALL` names every
 flag, and a `_Static_assert` that the popcount of their union equals the sum
 of their popcounts proves them disjoint at compile time. Membership in that
 list is by hand, so the build's guard is `tools/check-flag-words.py`, which
@@ -580,6 +582,27 @@ failing test left behind ([[sub-substrate-gates]]). Its assert names every
 flag below it.
 
 ## Concurrency
+
+**Every acquire and release of `g_proc_table_lock` is `proc_table_lock_acquire` /
+`proc_table_lock_release`** (the poll chunk, 2026-10-28,
+[[chg-2026-10-28-poll-hook-walks]]): the holder is recorded, a release by a
+thread that did not take the lock through the wrapper extincts, and every
+release drains the walks the holder OWED while it held the lock
+([[spec-poll-owed]]). `proc_wake_or_owe` is the call at every walk of a Proc's
+`child_waiters` (reparent, exit-notify, exec-replace, the birth hold, job
+stop/resume) and of its notes queue: under the lock it chains the list's record
+on the holder's chain; outside it walks at once. The release begins each owed
+walk under the lock (a bookmark at the head) and finishes it after the drop, so
+a release may RETAKE the lock: no caller holds a lock ordered after it across a
+release. The reap (`proc_unlink_child`) cancels a Proc's two records under the
+lock; `proc_free` extincts on a record still chained and waits (yielding the
+CPU) until no walk's bookmark is on `child_waiters` or the notes poll list --
+the pin that replaces the lock's coverage of the walk. The corona join converted corona's raw sites (the SQPOLL ticket's
+charge and release walks, `proc_console_renderer_held`, `proc_pts_interaction`;
+[[chg-2026-10-29-aux-corona-join]]), and `tools/check-lock-helpers.py` fails any
+mention of `g_proc_table_lock` outside the two wrappers bar its definition and an
+`__atomic_load_n` of its word. The lock is statically initialised, so a
+`spin_lock_init` of it -- like a store to `.value` -- would release it, and fails.
 
 Two locks. [[lock-proc-table]], `g_proc_table_lock`, file-static in `proc.c`
 and exposed only as an acquire/release pair, guards the children lists, the
@@ -858,6 +881,14 @@ proc_alloc_in uses addrspace_try_ref under the AS lock. Any private-ring guard
 refuses a new process owner; the unpublished Proc keeps as NULL and follows
 normal rollback, balancing creation/destruction. Existing kernel descriptor pins
 alone do not block sharing. Private setup is still inactive.
+
+## A note aimed at one thread
+
+`proc_note_thread` sits beside the caught-note walk because both hold `threads_lock`
+and rouse under a thread's `wait_lock`. `proc_note_direct_rouse` is the same rouse for
+a disposition that has just become terminate: it walks under `threads_lock` and takes
+every thread but the caller with a nonzero word. Neither takes `q->lock`, which ARCH
+7.3.1 keeps apart from `threads_lock`. The mechanism is in [[sub-kernel-notes]].
 
 ## Private worker accounting tickets
 
