@@ -1312,26 +1312,6 @@ fn a_clunk_refused_under_a_ready_scope_fails_the_ring() {
     assert_eq!(scope.walk(b"f", None).err(), Some(EIO as i32));
 }
 
-/// The kernel's allocation for a request can fail where the book admitted it,
-/// which breaks no contract, so the ring stays up and the fid waits for its scope.
-#[test]
-fn a_clunk_refused_for_memory_leaves_the_ring_up() {
-    let sim = Sim::new();
-    file(&sim, "f", b"x");
-    let r = ring(&sim, 8, &[4096]);
-    let target = r.target(5, b"clip").unwrap();
-    let scope = run(&r, target.connect(None).unwrap()).unwrap();
-    let fid = run(&r, scope.walk(b"f", None).unwrap()).unwrap();
-    sim.s().refuse_clunk = Some(-12);
-    drop(fid);
-    for _ in 0..3 {
-        r.turn(Some(r.now() + MS)).unwrap();
-    }
-    assert_eq!(sim.s().clunk_sqes, 1, "it is not asked again and again");
-    let again = run(&r, scope.walk(b"f", None).unwrap());
-    assert!(again.is_ok());
-}
-
 /// A CLUNK refused because the kernel aborted the scope before the adapter
 /// saw it is a race, not a fault: the fid is reaped once the scope retires,
 /// and the ring stays up.

@@ -27,7 +27,6 @@ pub(crate) const EBUSY: i32 = 16;
 pub(crate) const EINTR: i32 = 4;
 pub(crate) const EINVAL: i32 = 22;
 pub(crate) const EIO: i32 = 5;
-pub(crate) const ENOMEM: i32 = 12;
 pub(crate) const ENOENT: i32 = 2;
 pub(crate) const ENOSPC: i32 = 28;
 pub(crate) const ETIMEDOUT: i32 = 110;

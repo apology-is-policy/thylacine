@@ -155,10 +155,11 @@ two differ, the sections below say which side they describe.
   reading would kill a ring on the legal deadline race. The scope's `reason` is
   set only atomically with a state that is not READY (`loom_service_control.c`),
   so a -ECANCELED CLUNK never coincides with a ready scope -- no false red.
-  The Rust side exempts -ENOMEM: the kernel's own allocation can fail where the
-  book admitted the request, which breaks no contract. The fid goes to REAP and
-  waits for its scope, since sending the CLUNK again would spin a host for as long
-  as memory stayed short. The server keeps that fid until the session ends.
+  The premise has one known hole: the kernel charges a page and allocates for each
+  request (`loom_service_operation.c:85-92`), so a CLUNK can be refused -ENOMEM under
+  a ready scope, and the ring then fails for the host's life. Vote 11 asks for the
+  ring to fail loudly on any refused CLUNK, so that is what happens; the hole is
+  OPEN-BUGS 2026-11-03T15:50Z and waits on the operator.
 
 ## Mechanism
 

@@ -32,7 +32,7 @@ The P1s were both wrong readings of what a refusal means, and the tests pinned t
 
 The sim had no msize, so the number table was false: a 16 KiB record takes three writes at the server's 8192. The sim now cuts each count as `loom_service_wire.c:18-24` does, and the table is re-pinned from measured output at 39 numbers, not 35. The audit had computed 39 by hand, which agrees.
 
-One thing I chose against its suggestion: a CLUNK refused for memory goes to REAP and waits for its scope rather than being re-sent, since re-sending would spin a host for as long as memory stayed short.
+One wrong turn of mine. P3-5 says a CLUNK refused -ENOMEM closes the ring for the host's life, and I changed the adapter to send that fid to REAP instead. The dossier I was updating named vote 11, and vote 11 says in so many words that adapters fail the ring loudly if a CLUNK is ever refused. I had overridden an operator's decision on a prosecutor's suggestion, and reverted it within the hour, before anything left this branch. The finding itself stands: the vote's premise, that the kernel admits every request the book admits, does not hold when `loom_service_operation.c:85-92` cannot charge a page. That is new information for the operator rather than a re-ask, so it is enqueued for the next vote (OPEN-BUGS 2026-11-03T15:50Z) and the code does what was voted.
 
 My own reading of the open question from AS-4c came out the same as the audit's before I saw its answer: a dead connection's in-flight operation gets -EIO, and the next one -ECANCELED from `loom_admission_scope_locked`. Neither is in the HIN1 table. The sim was answering -104, a value the kernel never produces; it now answers those two.
 
