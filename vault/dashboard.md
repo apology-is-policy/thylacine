@@ -123,6 +123,7 @@ Generated — do not edit between the markers (`quaestor render`).
 
 ## Recent changes
 
+- 2026-11-03 [[chg-2026-11-03-b3h-first-boots]] — B-3h's first boots: two wrong tests, a survivor, a budget
 - 2026-11-02 [[chg-2026-11-02-b3h-audit-r1-fixes]] — B-3h audit round 1's fixes
 - 2026-11-02 [[chg-2026-11-02-b3h-audit-r2-fixes]] — B-3h audit round 2's fixes
 - 2026-11-02 [[chg-2026-11-02-b3h-audit-r3-fixes]] — B-3h audit round 3's fixes
@@ -130,5 +131,4 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-11-02 [[chg-2026-11-02-b3h-audit-r5-fixes]] — B-3h audit round 5's fixes
 - 2026-11-02 [[chg-2026-11-02-b3h-audit-r6-fixes]] — B-3h audit round 6's fixes
 - 2026-11-02 [[chg-2026-11-02-b3h-sa3-write-count]] — A server write count is bounded by the request
-- 2026-11-02 [[chg-2026-11-02-b3h3-b3h4-cached-locks-pouch]] — B-3h3 and B-3h4: a cached open reaches its file; Pouch fcntl locks and flock
 <!-- generated:end -->

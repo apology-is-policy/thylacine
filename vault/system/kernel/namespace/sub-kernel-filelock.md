@@ -171,7 +171,13 @@ Mutants run in the B-3h2 lease (each must turn its named leg red):
 - F12, a get does not learn the identity: `filelock.reused_number`.
 - F13, the closer sends a Tclunk for a job alone: the p9_closer leg.
 
-B-3h3's mutants, each of which must go red at its own leg (not yet run):
+Every list below ran on real Stratum, at `c0184d5dc` and for the last four at `5711f3c3e`
+(2026-11-03): 116 mutants, the suite 2156/2156 before them and after. 111 turned their
+named leg red. G20, G44, G45 and G81 turn none red, because the kernel extincts inside the
+named leg, which starts and never answers; that extinction is their verdict. G33 turned
+nothing red, for the reason its line gives.
+
+B-3h3's mutants, each red at its own leg:
 - G1, a take syncs nothing; G2, the table ignores a failed ACQUIRE; G13, it
   refuses a peer's ESTALE; G19, a take skips the table:
   `filelock.acquire_syncs`.
@@ -189,7 +195,7 @@ B-3h3's mutants, each of which must go red at its own leg (not yet run):
   `dev9p.cached_open_loose_lock`.
 - G16, a NULL generation is kept: `larder.attr_gen`.
 
-Audit round 1's regressions, each of which must go red at its own leg (not yet run):
+Audit round 1's regressions, each red at its own leg:
 - G20, a `_TEST` answer is not range-checked: the kernel extincts at
   `filelock.refusals`.
 - G21a, only an unlock flushes: `dev9p.lock_unlock_flushes_first`. G21b, only a
@@ -204,17 +210,24 @@ Audit round 1's regressions, each of which must go red at its own leg (not yet r
 - G27, a range may reach 2^64: `filelock.refusals`.
 - G29, G30, `proc_id` 0: `dev9p.lock_wire_and_status`, `dev9p.lock_test_answers`.
 
-Audit round 2's regressions, each of which must go red at its own leg (not yet run):
-- G31, a Twalk reply capped at `P9_MAX_WALK`; G32, a Twalkgetattr reply;
-  G33, a late one: `9p_client.walk_overcount_fails_closed`,
-  `9p_client.walkgetattr_overcount_fails_closed`, `9p_session.walk_reply_overcount`.
+Audit round 2's regressions, each red at its own leg:
+- G31, a Twalk reply capped at `P9_MAX_WALK`; G32, a Twalkgetattr reply:
+  `9p_client.walk_overcount_fails_closed`, `9p_client.walkgetattr_overcount_fails_closed`.
+- G33, a late Rwalk capped at `P9_MAX_WALK`, changes nothing: the next line of
+  `honour_late_walk` refuses any count but the walk's, and `out->qids` holds `P9_MAX_WALK`.
+  G33b and G106 raise the cap and let only an over-count past that line, on either walk;
+  G107 removes the line from the Twalkgetattr arm; G108 has that arm bind nothing:
+  `9p_session.walk_reply_overcount`.
 - G34, a close sends no unlock; G35, one that may not wait does; G36, a loose
   open's bound fid; G37, a fid-owning open's: `dev9p.lock_close_releases`.
 - G38, a bind leaves the Larder's attributes: `dev9p.cached_open_loose_wstat`.
 - G39, an open-file set-lock lands only its own run: `filelock.file_owner`.
+- G40, G41, a Twrite's, a Tweftio's count is handed back unbounded:
+  `9p_client.write_overcount_refused`. G42, G43, the same through Loom:
+  `9p_client.loom_write_e2e`, `9p_client.loom_weft_write_e2e`.
 
-Audit round 3's regressions, each of which must go red at its own leg (not yet run;
-G34 to G37 were retargeted to `dev9p_fd_close`):
+Audit round 3's regressions, each red at its own leg (G34 to G37 were retargeted to
+`dev9p_fd_close`):
 - G34, the last close sends no unlock; G36, only a fid-owning open's does; G59, an
   unknown take records no grant: `dev9p.lock_close_releases`.
 - G37, the unlock before the flush: `dev9p.lock_close_order`.
@@ -223,8 +236,8 @@ G34 to G37 were retargeted to `dev9p_fd_close`):
 - G46, the last close does not flush: `dev9p.wb_last_close_with_holder`.
 - G48, the take's re-check of an open descriptor removed; G49, the close that drops a
   lock lands only its own run: `filelock.last_descriptor_closes`.
-- G44, G45, no count at the table copy, at `dup_to`: read by hand, since the miscount
-  extincts (`spoor_fd_drop`).
+- G44, G45, no count at the table copy, at `dup_to`: the kernel extincts at `spoor_fd_drop`
+  inside `filelock.fork_exec_dup_teardown`.
 - G50, G51, G52, no forget at the kill, a late reply, a lone Rflush; G53, no generation
   jump: `9p_client.dying_mutator_forgets_larder`.
 - G54, a failed write keeps the Larder: `dev9p.write_failure_drops_larder`.
@@ -235,7 +248,28 @@ G34 to G37 were retargeted to `dev9p_fd_close`):
 `lseek(fd, 0, SEEK_CUR)`'s missing store has no deterministic leg: only a peer thread's
 read landing inside the call can show it.
 
-Audit round 5's regressions, each of which must go red at its own leg (not yet run):
+Audit round 4's regressions and votes 38 and 39, each red at its own leg:
+- G60, a grown env table keeps no name; G61, the cap back at 64: `env.table_grows`. G62, an
+  install leaves the entries it takes over their old ids: `env.install_any_size`.
+- G63, a take names no client: `dev9p.lock_wire_and_status`.
+- G64, an endowment counts no descriptor: `filelock.endowment_is_a_descriptor`.
+- G65, a job releases nothing after its flush; G66, a job past the last close keeps pages:
+  `p9_closer.dying_last_close_with_holder`. G67, a job drops nothing a staged run replaced;
+  G70, it spins instead of waiting: `p9_closer.job_waits_out_a_peer_flush`. G68, its loss is
+  silent: `p9_closer.job_loses_a_run_loudly`. G69, a root's clunk never comes:
+  `p9_closer.dying_last_close_of_a_root`.
+- G71, a live mutator keeps its mark past its answer:
+  `9p_client.note_flush_live_mutator_keeps_larder`. G79, a note's flush of a dying mutator
+  forgets nothing: `9p_client.note_flush_death_forgets_larder`.
+- G72, G73, G74, a forgotten attribute, dentry, page still reads valid; G75, no generation
+  jump: `larder.forget_all`. G76, a parked directory fid outlives the forget:
+  `dev9p.dirfid_forget_outdates_parked`.
+- G77, a Tunlinkat does not mutate; G78, a reused entry keeps its mark:
+  `9p_session.mutates_kinds`. G80, a short late Rwalk binds: `9p_session.walk_reply_overcount`.
+- G81, a multi-name walk's failure does not fall back to one name at a time: the kernel
+  extincts inside `stalk.walk_attrs_unknown_mount_split`, in `kfree` under `stalk_core`.
+
+Audit round 5's regressions, each red at its own leg:
 - G82, the job goes by what it finds: `p9_closer.job_drops_a_flush_that_retired_first`.
 - G83, the same, for the latch: `p9_closer.job_reports_a_first_jobs_loss`.
 - G84, a caped take names its principal: `dev9p.lock_caped_names_nothing`.
@@ -250,7 +284,7 @@ Audit round 5's regressions, each of which must go red at its own leg (not yet r
 The dentry CLOCK reading a forgotten slot as live costs time alone (the hand clears its
 reference bit on the first pass and takes it on the second): no leg can show it.
 
-Audit round 6's regressions, each of which must go red at its own leg (not yet run):
+Audit round 6's regressions, each red at its own leg:
 - G96, a dying close says nothing of a flush that retired first:
   `p9_closer.dying_close_reports_a_retired_flush`.
 - G97, a live close no program hears says nothing: `p9_closer.unheard_close_reports_its_loss`.
