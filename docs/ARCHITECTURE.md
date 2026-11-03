@@ -1717,9 +1717,11 @@ are default, ignore or caught. Only a caught row's note unwinds a wait.
   the kernel's default and never reaches the handler. An ignored note is dropped
   at the post, as the phenotype's is. A caught row with neither a handler nor a
   notes fd behind it reads as default: the write's gate binds only at the write, and
-  a fork carries the row but not the notes fd. Pouch's constructor writes
-  `child_exit`'s default row, which allocates nothing, so the table governs from
-  the image's start and a dead child's note is discarded at the tail. Pouch registers
+  a fork carries the row but not the notes fd. Pouch's constructor writes SIGPIPE's
+  ignore row, so a write to a closed pipe answers `EPIPE` and posts nothing (operator
+  vote 25), and `child_exit`'s default row, which allocates nothing, so the table
+  governs from the image's start even if the first could not allocate it, and a dead
+  child's note is discarded at the tail. Pouch registers
   its dispatcher and writes a caught row when a program first installs a real
   handler, and until then has no handler at all. Its constructor used to register
   unconditionally, and `handler_va != 0` read as caught for every note, so a
@@ -3908,7 +3910,7 @@ POSIX signals map to Plan 9 notes:
 | `SIGTERM` | `term` | 7 | supported (handler + fd-read paths; default terminate) |
 | `SIGUSR1` | `usr1` | 8 | supported (handler + fd-read paths; default terminate) |
 | `SIGUSR2` | `usr2` | 9 | supported (handler + fd-read paths; default terminate) |
-| `SIGPIPE` | `pipe` | 2 | supported; pouch default-masks per [RESOLVED 6.4] (write returns EPIPE) |
+| `SIGPIPE` | `pipe` | 2 | supported; pouch's default is a row that ignores, per [RESOLVED 6.4] (write returns EPIPE) |
 | `SIGCHLD` | `child_exit` | 3 | supported (synthetic on child exits()) |
 | `SIGHUP`/`SIGALRM`/`SIGSTOP`/`SIGCONT` | (deferred) | n/a | `sigaction` returns EINVAL |
 

@@ -13,7 +13,13 @@ sigsuspend, a copy of it here is wrong in a handler and after one. So the copy g
       wants. pthread_sigmask reads the caller's set before any swap, so a bad pointer faults
       with the mask as it was.
   src/signal/sigaction.c        The row carries SA_RESETHAND, SA_NODEFER and sa_mask in the
-      flags word (bits 16..31). __pouch_pipe_mask reads the kernel's mask.
+      flags word (bits 16..31).
+  SIGPIPE (operator vote 25)    Its default is a row that ignores and no longer a mask bit.
+      The restore at a handler's return undid a bit set in a handler, so signal(SIGPIPE,
+      SIG_DFL) there left a default row and a clear bit, and the next write to a closed pipe
+      terminated. A row also holds for every thread, which a bit never did. The constructor
+      writes it, __pouch_pipe_mask goes, and the dispatcher writes it back after a one-shot,
+      since the kernel resets to its own default.
   src/signal/_pouch_signal.c    The dispatcher takes x2, the row's flags, and under
       RESETHAND resets the table with a compare from the handler it read, so a peer's
       sigaction that has landed since stands. The name-to-signal table is
@@ -32,7 +38,7 @@ sigsuspend, a copy of it here is wrong in a handler and after one. So the copy g
       awk filter: m["note_wait"]="141";
 
 Witnesses: pouch-hello-signals `suspend-*`, `sigpause`, `sa-mask`, `nodefer`, `one-shot`,
-`one-shot-row`, `handler-mask`, `setjmp-mask`, `pipe-mask`, `siginfo`, `take-*`.
+`one-shot-row`, `handler-mask`, `setjmp-mask`, `pipe-*`, `siginfo`, `take-*`.
 
 --- a/arch/aarch64/bits/syscall.h.in
 +++ b/arch/aarch64/bits/syscall.h.in
@@ -77,10 +83,16 @@ Witnesses: pouch-hello-signals `suspend-*`, `sigpause`, `sa-mask`, `nodefer`, `o
   * synchronous-handler ABI is hidden from POSIX source. POSIX programs see
   * standard sigaction + raise + kill.
   *
-@@ -53,6 +55,14 @@
+@@ -53,22 +55,27 @@
   * delivery it re-issues a call on the signal(7) list instead of returning
   * EINTR. Nothing in pouch or musl re-issues a call.
   *
+- * SIGPIPE default-mask at startup (POUCH-DESIGN section 6.4 [RESOLVED
+- * 6.4]): the constructor sets the main thread's note_mask to
+- * NOTE_BIT_PIPE so a write-to-closed-pipe returns EPIPE without
+- * delivering a SIGPIPE — modern-daemon-friendly default. A subsequent
+- * sigaction(SIGPIPE, &sa) with a non-default handler clears the mask
+- * bit (so the note is delivered + the handler fires).
 + * sa_mask, SA_NODEFER and SA_RESETHAND are the row's too. The kernel enters a
 + * handler under sa_mask plus the signal's family, and SYS_NOTED puts the thread's
 + * mask back, so what a handler does to the mask lasts until its return. Every note
@@ -88,12 +100,13 @@ Witnesses: pouch-hello-signals `suspend-*`, `sigpause`, `sa-mask`, `nodefer`, `o
 + * sa_mask and SA_NODEFER change what a handler reads and passes on, not what can
 + * interrupt it. Under SA_RESETHAND the kernel resets its row as it takes the note,
 + * and the dispatcher resets the table from the flags it is handed.
-+ *
-  * SIGPIPE default-mask at startup (POUCH-DESIGN section 6.4 [RESOLVED
-  * 6.4]): the constructor sets the main thread's note_mask to
-  * NOTE_BIT_PIPE so a write-to-closed-pipe returns EPIPE without
-@@ -62,13 +72,11 @@
   *
++ * SIGPIPE's default is a row that ignores (POUCH-DESIGN section 6.4, operator
++ * vote 25): a write to a closed pipe returns EPIPE and posts nothing — the
++ * modern-daemon-friendly default. SIG_DFL and SIG_IGN write the same row, and a
++ * real handler writes a caught one. It is a row and not a mask bit because a row
++ * holds for every thread of the Proc and outlasts any handler's mask.
++ *
   * v1.0 limitations documented in docs/reference/83-pouch-signals.md
   * (created at sub-chunk 13b):
 - *   - sigsetjmp/siglongjmp do NOT preserve signal masks (the
@@ -110,7 +123,7 @@ Witnesses: pouch-hello-signals `suspend-*`, `sigpause`, `sa-mask`, `nodefer`, `o
   *   - SIGABRT not in the supported set (sigaction(SIGABRT) returns
   *     EINVAL). abort() does not raise it: 0011-pouch-abort.patch makes
   *     abort() one `brk #0xab06`, which the kernel ends as the fault note
-@@ -121,22 +129,41 @@
+@@ -121,22 +128,41 @@
  #define POUCH_NOTE_DISP_IGNORE   1u
  #define POUCH_NOTE_DISP_CAUGHT   2u
  #define POUCH_NOTE_DISP_RESTART  1u
@@ -157,7 +170,7 @@ Witnesses: pouch-hello-signals `suspend-*`, `sigpause`, `sa-mask`, `nodefer`, `o
  
  /* Translate POSIX signum -> note name string. Writes the static-storage
   * canonical name to *out on success. Returns 0 on the supported set
-@@ -145,6 +172,12 @@
+@@ -145,6 +171,12 @@
   * family), -1 on unsupported. */
  hidden int __pouch_sig_to_note(int sig, const char **out);
  
@@ -170,7 +183,7 @@ Witnesses: pouch-hello-signals `suspend-*`, `sigpause`, `sa-mask`, `nodefer`, `o
  /* The snare a fault signal names, for a process ending itself with it:
   * SIGSEGV -> "snare:segv", SIGBUS -> "snare:bus", SIGILL -> "snare:ill",
   * SIGFPE -> "snare:fpe"; NULL for every other signal. Posted to the caller
-@@ -156,8 +189,9 @@
+@@ -156,8 +188,9 @@
   * that installs a real handler; the kernel calls this at EL0-return tail
   * when a caught note is dispatched.
   * Plan-9-style ABI: x0 = pointer to 16-byte note name on user stack;
@@ -182,7 +195,7 @@ Witnesses: pouch-hello-signals `suspend-*`, `sigpause`, `sa-mask`, `nodefer`, `o
  
  /* Bounded name compare: the kernel pushes exactly POUCH_NOTE_NAME_MAX
   * (= 16) bytes onto the user stack, NUL-padded. Returns 1 if `name`'s
-@@ -171,6 +205,11 @@
+@@ -171,6 +204,11 @@
   * undefined-behaviour or silently ignored). */
  hidden uint64_t __pouch_sigset_to_note(const sigset_t *s);
  
@@ -196,14 +209,18 @@ Witnesses: pouch-hello-signals `suspend-*`, `sigpause`, `sa-mask`, `nodefer`, `o
  hidden void __pouch_note_to_sigset(uint64_t m, sigset_t *out);
 --- a/src/signal/_pouch_signal.c
 +++ b/src/signal/_pouch_signal.c
-@@ -2,7 +2,6 @@
+@@ -2,10 +2,9 @@
   * sub-chunk 13b). See src/internal/_pouch_signal.h for the design
   * preamble. This file holds:
   *   - the per-Proc sigaction table (__pouch_sigtab)
 - *   - the per-thread note-mask shadow (__pouch_note_mask_shadow)
   *   - the signum<->note name translation helpers
   *   - the async dispatcher (__pouch_note_handler), which sigaction registers
-  *   - the constructor that sets the SIGPIPE default mask and child_exit's row
+- *   - the constructor that sets the SIGPIPE default mask and child_exit's row
++ *   - the constructor that writes SIGPIPE's row and child_exit's
+  */
+ 
+ #include <signal.h>
 @@ -18,8 +17,14 @@
  #include "_pouch_signal.h"
  
@@ -314,19 +331,40 @@ Witnesses: pouch-hello-signals `suspend-*`, `sigpause`, `sa-mask`, `nodefer`, `o
  
      if (sig < 0) {
          /* Unknown note name (kernel only delivers supported names; this
-@@ -186,6 +200,11 @@
+@@ -186,11 +200,22 @@
  
      void (*h)(int) = __pouch_sigtab[sig].sa_handler;
  
 +    /* The kernel reset its row as it took this note. A compare, because a peer's
 +     * sigaction that has landed since is the disposition now. */
-+    if (flags & POUCH_NOTE_DISP_RESETHAND)
-+        a_cas_p(&__pouch_sigtab[sig].sa_handler, (void *)h, (void *)SIG_DFL);
++    if (flags & POUCH_NOTE_DISP_RESETHAND) {
++        void *was = a_cas_p(&__pouch_sigtab[sig].sa_handler, (void *)h, (void *)SIG_DFL);
++        /* The kernel reset to its own default, which ends the Proc; SIGPIPE's here
++         * is the row that ignores. */
++        if (sig == SIGPIPE && was == (void *)h)
++            __syscall(SYS_note_dispose, "pipe", 4L, (long)POUCH_NOTE_DISP_IGNORE, 0L);
++    }
 +
      if (h == SIG_DFL || h == 0) {
          /* Default action for the v1.0 supported set:
-          *   SIGINT / SIGTERM / SIGUSR1 / SIGUSR2 / SIGPIPE: terminate (NDFLT →
-@@ -235,10 +254,15 @@
+-         *   SIGINT / SIGTERM / SIGUSR1 / SIGUSR2 / SIGPIPE: terminate (NDFLT →
++         *   SIGINT / SIGTERM / SIGUSR1 / SIGUSR2: terminate (NDFLT →
+          *       kernel exits)
+          *   SIGCHLD: ignore (NCONT — child_exit's default per POSIX)
++         *   SIGPIPE: ignore (NCONT — Pouch's own default, POUCH-DESIGN 6.4)
+          *   SIGKILL: terminate (NDFLT; though this branch is unreachable
+          *            because the kernel handles kill before delivery)
+          *
+@@ -217,7 +242,7 @@
+          *   SIGCHLD / SIGWINCH / SIGCONT: NCONT. The kernel agrees these
+          *       default to ignore, so NDFLT would be equivalent -- NCONT is
+          *       kept because a no-op should not need the kernel's table. */
+-        if (sig == SIGCHLD || sig == SIGWINCH || sig == SIGCONT) {
++        if (sig == SIGCHLD || sig == SIGWINCH || sig == SIGCONT || sig == SIGPIPE) {
+             __syscall(SYS_noted, POUCH_SYS_NOTED_NCONT);
+         } else {
+             long r = __syscall(SYS_noted, POUCH_SYS_NOTED_NDFLT);
+@@ -235,29 +260,32 @@
          for (;;);     /* unreachable */
      }
  
@@ -346,13 +384,33 @@ Witnesses: pouch-hello-signals `suspend-*`, `sigpause`, `sa-mask`, `nodefer`, `o
  
      __syscall(SYS_noted, POUCH_SYS_NOTED_NCONT);
      for (;;);         /* unreachable */
-@@ -257,7 +281,6 @@
-      * SIGPIPE is masked at startup so a write to a closed pipe returns
-      * EPIPE without delivering the note. A subsequent sigaction(SIGPIPE)
-      * with a real handler clears the mask bit (sigaction.c). */
+ }
+ 
+ /* Constructor: runs once at process startup on the main thread, before
+- * main(). Static-init iteration via musl's CRT (.init_array). Sets the
+- * SIGPIPE default-mask. It registers no handler: a program with none gets the
+- * kernel's default for every note, including while blocked in a wait. And it
+- * writes child_exit's default row, which allocates nothing: a table now governs,
+- * so the kernel discards a dead child's note at the tail. With no table and no
+- * handler that note would wait for a notes fd nobody opened, and hold a slot. */
++ * main(). Static-init iteration via musl's CRT (.init_array). It registers no
++ * handler: a program with none gets the kernel's default for every note,
++ * including while blocked in a wait. It writes SIGPIPE's row, which ignores, and
++ * child_exit's default row: a table now governs, so the kernel discards a dead
++ * child's note at the tail. With no table and no handler that note would wait for
++ * a notes fd nobody opened, and hold a slot. child_exit's row allocates nothing,
++ * so it governs even if SIGPIPE's could not allocate the table. */
+ static __attribute__((constructor)) void __pouch_signal_init(void)
+ {
+-    /* SIGPIPE default-mask. POUCH-DESIGN.md section 6.4 [RESOLVED 6.4]:
+-     * SIGPIPE is masked at startup so a write to a closed pipe returns
+-     * EPIPE without delivering the note. A subsequent sigaction(SIGPIPE)
+-     * with a real handler clears the mask bit (sigaction.c). */
 -    __pouch_note_mask_shadow = POUCH_NOTE_BIT_PIPE;
 -    __syscall(SYS_note_mask, (long)__pouch_note_mask_shadow, 0L);
-+    __syscall(SYS_note_mask, (long)POUCH_NOTE_BIT_PIPE, 0L);
++    /* A write to a closed pipe returns EPIPE and posts nothing, POUCH-DESIGN.md
++     * section 6.4. */
++    __syscall(SYS_note_dispose, "pipe", 4L, (long)POUCH_NOTE_DISP_IGNORE, 0L);
      __syscall(SYS_note_dispose, "child_exit", 10L, (long)POUCH_NOTE_DISP_DEFAULT, 0L);
  }
 --- a/src/signal/block.c
@@ -398,34 +456,67 @@ Witnesses: pouch-hello-signals `suspend-*`, `sigpause`, `sa-mask`, `nodefer`, `o
  }
 --- a/src/signal/sigaction.c
 +++ b/src/signal/sigaction.c
-@@ -41,7 +41,10 @@
+@@ -41,8 +41,12 @@
  		long r = __syscall(SYS_notify, (long)(uintptr_t)__pouch_note_handler);
  		if (r < 0) return r;
  		disposition = POUCH_NOTE_DISP_CAUGHT;
 -		if (sa->sa_flags & SA_RESTART) flags = POUCH_NOTE_DISP_RESTART;
+-	} else if (sa->sa_handler == SIG_IGN) {
 +		if (sa->sa_flags & SA_RESTART) flags |= POUCH_NOTE_DISP_RESTART;
 +		if (sa->sa_flags & SA_RESETHAND) flags |= POUCH_NOTE_DISP_RESETHAND;
 +		if (sa->sa_flags & SA_NODEFER) flags |= POUCH_NOTE_DISP_NODEFER;
 +		flags |= POUCH_NOTE_DISP_MASK(__pouch_sigset_to_note(&sa->sa_mask));
- 	} else if (sa->sa_handler == SIG_IGN) {
++	} else if (sa->sa_handler == SIG_IGN || sig == SIGPIPE) {
++		/* SIGPIPE's default here is the EPIPE alone (POUCH-DESIGN 6.4). */
  		disposition = POUCH_NOTE_DISP_IGNORE;
  	}
-@@ -52,13 +55,10 @@
  
- static void __pouch_pipe_mask(int masked)
- {
+@@ -50,17 +54,6 @@
+ 	return r < 0 ? r : 0;
+ }
+ 
+-static void __pouch_pipe_mask(int masked)
+-{
 -	uint64_t cur = __pouch_note_mask_shadow;
-+	uint64_t cur = __pouch_note_mask_hold();
- 	uint64_t new_m = masked ? cur | (uint64_t)POUCH_NOTE_BIT_PIPE
- 	                        : cur & ~(uint64_t)POUCH_NOTE_BIT_PIPE;
+-	uint64_t new_m = masked ? cur | (uint64_t)POUCH_NOTE_BIT_PIPE
+-	                        : cur & ~(uint64_t)POUCH_NOTE_BIT_PIPE;
 -	if (new_m != cur) {
 -		__pouch_note_mask_shadow = new_m;
 -		__syscall(SYS_note_mask, (long)new_m, 0L);
 -	}
-+	__syscall(SYS_note_mask, (long)new_m, 0L);
- }
- 
+-}
+-
  int __libc_sigaction(int sig, const struct sigaction *restrict sa,
+                      struct sigaction *restrict old)
+ {
+@@ -98,27 +91,13 @@
+ 		int live = (uintptr_t)sa->sa_handler > 1UL;
+ 		__pouch_sigtab[sig] = *sa;
+ 
+-		/* SIGPIPE special: installing a real handler clears the kernel's
+-		 * NOTE_BIT_PIPE mask so the kernel will deliver pipe notes to
+-		 * the dispatcher. Removing the handler (SIG_DFL/SIG_IGN) restores
+-		 * the default mask. POUCH-DESIGN section 6.4 [RESOLVED 6.4]:
+-		 * masked-by-default is the modern-daemon-friendly behavior. The
+-		 * mask moves on whichever side of the row keeps a pipe note from
+-		 * meeting a default row unmasked: set before the handler is given
+-		 * up, cleared after it is taken. */
+-		if (sig == SIGPIPE && !live) __pouch_pipe_mask(1);
+-
+ 		long r = __pouch_sig_dispose(sig, sa, live);
+ 		if (r < 0) {
+ 			__pouch_sigtab[sig] = prev;
+-			if (sig == SIGPIPE && !live)
+-				__pouch_pipe_mask((uintptr_t)prev.sa_handler <= 1UL);
+ 			errno = -r;
+ 			return -1;
+ 		}
+ 
+-		if (sig == SIGPIPE && live) __pouch_pipe_mask(0);
+-
+ 		/* The kernel restarts a call for an SA_RESTART row. This flag is
+ 		 * only musl's futex filter (__timedwait): an EINTR from a futex is
+ 		 * real once some handler without SA_RESTART exists. */
 --- a/src/signal/sigsetjmp_tail.c
 +++ b/src/signal/sigsetjmp_tail.c
 @@ -5,6 +5,6 @@

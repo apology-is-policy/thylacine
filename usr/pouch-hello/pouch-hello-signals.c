@@ -62,7 +62,7 @@
 //   pouch-hello-signals: death usr1 reads WIFSIGNALED SIGUSR1  (and usr2)
 //   pouch-hello-signals: kill errnos read ESRCH and EPERM
 //   pouch-hello-signals: blocked <leg> ok  (x18 legs; see test_blocked)
-//   pouch-hello-signals: note-wait ok: 22 legs  (see test_note_wait)
+//   pouch-hello-signals: note-wait ok: 25 legs  (see test_note_wait)
 //   pouch-hello-signals: a poll or select over no fds sleeps for its timeout
 //   POUCH_CENSUS_SIGNALS (pouch-census.h; joey matches it)
 //
@@ -80,6 +80,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <pthread.h>
 #include <setjmp.h>
 #include <time.h>
 #include <unistd.h>
@@ -571,6 +572,49 @@ static void nw_handler_info(int sig, siginfo_t *si, void *uc) {
     g_nw_uc_null = uc == NULL;
 }
 
+static void nw_handler_pipe_dfl(int sig) {
+    (void)sig;
+    signal(SIGPIPE, SIG_DFL);
+}
+
+static void nw_handler_pipe_catch(int sig) {
+    (void)sig;
+    nw_catch(SIGPIPE, nw_handler, 0, 0);
+}
+
+// A pipe with no reader. A write to it answers EPIPE and the program lives to see that,
+// or the leg's driver reads a death.
+static int nw_closed_pipe(void) {
+    int p[2];
+    if (pipe(p) != 0) return -1;
+    close(p[0]);
+    return p[1];
+}
+
+static int nw_write_reads_epipe(int fd) {
+    char c = 'x';
+    errno = 0;
+    return write(fd, &c, 1) == -1 && errno == EPIPE;
+}
+
+static int g_nw_pipe_fd;
+static int g_nw_pipe_go[2];
+static pthread_t g_nw_pipe_thread;
+static volatile int g_nw_ran_on_thread;
+
+static void nw_handler_notes_thread(int sig) {
+    (void)sig;
+    g_nw_runs++;
+    g_nw_ran_on_thread = pthread_equal(pthread_self(), g_nw_pipe_thread);
+}
+
+static void *nw_pipe_writer(void *arg) {
+    char b = 0;
+    (void)arg;
+    if (read(g_nw_pipe_go[0], &b, 1) != 1) return NULL;
+    return nw_write_reads_epipe(g_nw_pipe_fd) ? (void *)1 : NULL;
+}
+
 static int nw_done(void) {
     char b = 0;
     leg_ready();
@@ -722,12 +766,62 @@ static int nw_child(const char *mode) {
         if (!nw_masked(SIGUSR1)) return 126;
         return nw_done();
     }
-    if (!strcmp(mode, "pipe-mask")) {
-        if (!nw_masked(SIGPIPE)) return 127;
+    // SIGPIPE's default is the EPIPE alone (POUCH-DESIGN 6.4), a row and not a mask bit:
+    // nothing reads it blocked, and clearing the whole mask does not make it fatal.
+    if (!strcmp(mode, "pipe-row")) {
+        struct sigaction now;
+        int fd = nw_closed_pipe();
+        if (fd < 0) return 60;
+        if (nw_masked(SIGPIPE)) return 127;
+        if (!nw_write_reads_epipe(fd)) return 128;
+        if (raise(SIGPIPE) != 0) return 129;
+        if (sigprocmask(SIG_SETMASK, &none, NULL) != 0) return 60;
+        if (!nw_write_reads_epipe(fd)) return 144;
         if (nw_catch(SIGPIPE, nw_handler, 0, 0) != 0) return 60;
-        if (nw_masked(SIGPIPE)) return 128;
+        if (!nw_write_reads_epipe(fd) || g_nw_runs != 1) return 145;
         if (signal(SIGPIPE, SIG_DFL) == SIG_ERR) return 60;
-        if (!nw_masked(SIGPIPE)) return 129;
+        if (!nw_write_reads_epipe(fd) || g_nw_runs != 1) return 146;
+        if (sigaction(SIGPIPE, NULL, &now) != 0 || now.sa_handler != SIG_DFL) return 147;
+        return nw_done();
+    }
+    // The change of disposition outlasts the handler that made it. With a mask bit the
+    // first of these ended the program at its next write, and the second kept the note
+    // masked on this thread.
+    if (!strcmp(mode, "pipe-handler")) {
+        int fd = nw_closed_pipe();
+        if (fd < 0) return 60;
+        if (nw_catch(SIGPIPE, nw_handler, 0, 0) != 0) return 60;
+        if (nw_catch(SIGUSR1, nw_handler_pipe_dfl, 0, 0) != 0) return 60;
+        raise(SIGUSR1);
+        if (!nw_write_reads_epipe(fd) || g_nw_runs != 0) return 148;
+        if (nw_catch(SIGUSR1, nw_handler_pipe_catch, 0, 0) != 0) return 60;
+        raise(SIGUSR1);
+        if (!nw_write_reads_epipe(fd) || g_nw_runs != 1) return 149;
+        return nw_done();
+    }
+    // The kernel resets a one-shot's row to its own default, which would end the program.
+    if (!strcmp(mode, "pipe-oneshot")) {
+        int fd = nw_closed_pipe();
+        if (fd < 0) return 60;
+        if (nw_catch(SIGPIPE, nw_handler, SA_RESETHAND, 0) != 0) return 60;
+        if (!nw_write_reads_epipe(fd) || g_nw_runs != 1) return 150;
+        if (!nw_write_reads_epipe(fd) || g_nw_runs != 1) return 151;
+        return nw_done();
+    }
+    // A sigaction on one thread reaches a thread that was already running. Main blocks
+    // the signal, so the only thread that can run the handler is the one that wrote. With
+    // a mask bit that thread still held SIGPIPE from the constructor, and no handler ran.
+    if (!strcmp(mode, "pipe-thread")) {
+        void *wrote = NULL;
+        g_nw_pipe_fd = nw_closed_pipe();
+        if (g_nw_pipe_fd < 0 || pipe(g_nw_pipe_go) != 0) return 60;
+        if (pthread_create(&g_nw_pipe_thread, NULL, nw_pipe_writer, NULL) != 0) return 60;
+        if (nw_catch(SIGPIPE, nw_handler_notes_thread, 0, 0) != 0) return 60;
+        nw_block(SIGPIPE, 0);
+        char go = 'G';
+        if (write(g_nw_pipe_go[1], &go, 1) != 1) return 60;
+        if (pthread_join(g_nw_pipe_thread, &wrote) != 0) return 60;
+        if (wrote == NULL || g_nw_runs != 1 || !g_nw_ran_on_thread) return 152;
         return nw_done();
     }
     if (!strcmp(mode, "siginfo")) {
@@ -1134,7 +1228,10 @@ static int test_note_wait(void) {
         { .mode = "one-shot-row",    .sig = SIGCHLD, .data = 1 },
         { .mode = "handler-mask",    .data = 1 },
         { .mode = "setjmp-mask",     .data = 1 },
-        { .mode = "pipe-mask",       .data = 1 },
+        { .mode = "pipe-row",        .data = 1 },
+        { .mode = "pipe-handler",    .data = 1 },
+        { .mode = "pipe-oneshot",    .data = 1 },
+        { .mode = "pipe-thread",     .data = 1 },
         { .mode = "siginfo",         .data = 1 },
         { .mode = "take-queued",     .data = 1 },
         { .mode = "take-asleep",     .sig = SIGUSR1 },

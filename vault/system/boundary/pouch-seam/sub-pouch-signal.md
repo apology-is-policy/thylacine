@@ -72,10 +72,10 @@ The musl `__abort_lock` interlock in `sigaction` is not carried: Pouch's
 ## Mechanism
 
 **No handler until a program asks for one (0069, operator vote 18).** The
-`.init_array` constructor runs before `main`, sets `NOTE_BIT_PIPE` in the kernel
-mask (SIGPIPE masked-by-default — the modern-daemon posture), and writes
-`child_exit`'s default row. That row allocates nothing, and it makes the kernel's
-table govern from the image's start, so there is no window in which every note
+`.init_array` constructor runs before `main`, writes SIGPIPE's ignore row (the
+modern-daemon posture, below) and `child_exit`'s default row. The second allocates
+nothing, and it makes the kernel's table govern from the image's start even if the
+first could not allocate it, so there is no window in which every note
 reaches a catch-all, and the kernel discards a dead child's note at the tail, where no
 reader would ever take it. The constructor registers no handler. It used to register
 one, and to the kernel that read as "caught" for every note: a `SIG_DFL` `SIGINT` armed
@@ -120,6 +120,17 @@ used to find the dispatcher's own `x1` and `x2` in its arguments, so reading `si
 through a note arg. The dispatcher now builds a `siginfo_t` for every delivery and passes
 `(sig, &si, NULL)`, which a `void (int)` never reads. It does not look at `sa_flags` to
 decide, because its read set stays {`sa_handler`}.
+
+**SIGPIPE's default is a row that ignores (0071, operator vote 25).** It was a mask bit,
+which the one restore broke: `signal(SIGPIPE, SIG_DFL)` in a handler set the bit in the
+handler's mask, `SYS_NOTED` put the old mask back, and the next write to a closed pipe
+terminated ([[fnd-note-wait-r1-f6]]). `SIG_DFL` and `SIG_IGN` now write the same row, so the
+kernel drops the `pipe` note at its post and the write answers `EPIPE`. A row holds for every
+thread, so a `sigaction` on one thread reaches the others, and nothing reads SIGPIPE
+blocked. Under `SA_RESETHAND` the kernel resets to its own default, which would end the
+Proc, so the dispatcher writes the ignore row back, if its compare says no peer's
+`sigaction` has landed. The table keeps what the program asked for, so `sigaction` reads
+back `SIG_DFL`.
 
 **A blocked call unwinds for a caught note, and the kernel re-issues it** (votes 19 and
 20). Nothing in pouch or musl re-issues a call; the comment that said `SA_RESTART`
@@ -195,7 +206,9 @@ first make the store atomic. The table's reset is a compare on that one word. A
 `sigaction` that lands between the kernel's reset of its row and the dispatcher's read
 of `h` is read as the handler to run, and the compare then resets the table it wrote while
 its row stays caught: the next delivery reads default. That needs a `sigaction` racing a
-one-shot delivery, and it is stated here rather than fixed.
+one-shot delivery, and it is stated here rather than fixed. A one-shot SIGPIPE has a window
+of its own: between the kernel's reset and the dispatcher writing the ignore row back, a
+peer's write to a closed pipe meets the kernel's default and ends the Proc.
 
 ## Invariants enforced
 
@@ -222,7 +235,8 @@ is `-1`, which the seam reads as `EIO`. Until 0050 every one of these read
 
 ## Performance
 
-`sigaction` is pure userspace except the SIGPIPE mask adjust. A `pthread_sigmask`
+`sigaction` is one syscall for its row, two for a real handler. Every Pouch image
+allocates a table at startup for SIGPIPE's row. A `pthread_sigmask`
 is one syscall for `SIG_SETMASK` and two for the rest, where the shadow made it one or
 none. `raise` is
 one syscall whose EL0-return tail runs the handler — so by the time
@@ -232,8 +246,9 @@ one syscall whose EL0-return tail runs the handler — so by the time
 
 - The bootstrap must reach a `SYS_NOTED` on EVERY arm (unknown name
   included), or the Thread wedges with `in_handler` set.
-- The constructor's row: without it a program with no handler keeps a slot per dead
-  child, and a first `sigaction` opens a catch-all window.
+- The constructor's rows: without `child_exit`'s a program with no handler keeps a slot per
+  dead child, and a first `sigaction` opens a catch-all window; without `pipe`'s a write to a
+  closed pipe ends it.
 - The tty EPERM gate must cover every tty literal (all are ≥ 4 chars and
   no non-tty name collides with the `tty:` prefix) while still forwarding
   `SIGKILL` → `"kill"`.
@@ -245,8 +260,8 @@ one syscall whose EL0-return tail runs the handler — so by the time
 
 ## Seams
 
-[[seam-pouch-sigmask-per-thread]] (a `sigaction(SIGPIPE)` on one thread
-updates only that thread's kernel mask; POSIX wants Proc-wide) ·
+[[seam-pouch-sigmask-per-thread]] (closed at this chunk's landing, once `pipe-thread` has
+run) ·
 [[seam-native-exec-drops-sig-ign]] (a native exec drops an ignored row). Closed by
 0069: [[seam-pouch-sigtstp-ignore]].
 
@@ -268,8 +283,6 @@ updates only that thread's kernel mask; POSIX wants Proc-wide) ·
   additive within the tty family, which shares one bit (reading back a mask
   containing SIGHUP also reports SIGQUIT, SIGTSTP, SIGCONT and SIGWINCH).
   SIGINT and SIGTERM stopped aliasing at 0049.
-- `SIG_IGN` does not DISCARD pending SIGPIPE notes (POSIX §2.4); the mask
-  defers them, and a later real handler sees them retroactively.
 - **A handler that `longjmp`s out never reaches `SYS_NOTED`**, so `in_handler` stays
   set: no later note reaches a handler in that thread, and waits ride a caught note out
   (OPEN-BUGS). A fatal note with a default row still ends the program.
@@ -277,13 +290,11 @@ updates only that thread's kernel mask; POSIX wants Proc-wide) ·
   `sa_mask` and `SA_NODEFER` change what a handler reads and passes on, and not what can
   interrupt it. A `sigsuspend` in a handler ends at a note its mask admits, and that note
   runs at the handler's return (OPEN-BUGS).
-- **What a handler does to the mask ends at its return**, `sigaction(SIGPIPE)`'s bit
-  included, and Pouch's SIGPIPE default rides on that bit. A program that installs a SIGPIPE
-  handler from inside another handler keeps SIGPIPE masked on that thread. One that goes back
-  to `SIG_DFL` or `SIG_IGN` from inside a handler is worse: the row is default and the bit
-  clear, so its next write to a closed pipe ends it instead of answering `EPIPE`
-  (OPEN-BUGS, with the row-based default that would close this and
-  [[seam-pouch-sigmask-per-thread]] together).
+- **What a handler does to the mask ends at its return.** A disposition is a row, and outlasts
+  it.
+- **SIGPIPE at its default cannot be observed.** `raise` and `kill` of it do nothing, and a
+  `sigwait` on it blocked never returns, because the note is dropped at its post (POSIX has it
+  pending). A real handler or a Linux guest has the POSIX behaviour.
 - `siglongjmp` out of a handler restores the mask and leaves `in_handler` set, as above.
 - `sigaltstack` / `sigpending` / `sigqueue` are sentinels; no real-time signals. An
   `SA_SIGINFO` handler's `siginfo_t` names the signal, with `SI_KERNEL` and a zero union,

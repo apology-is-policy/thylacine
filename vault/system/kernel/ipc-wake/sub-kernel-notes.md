@@ -280,9 +280,9 @@ question, and every disposition reader asks it, never the phenotype. `SYS_NOTIFY
 no table keeps Plan 9's shape: the handler catches every note and no wait unwinds.
 
 A default row needs no table, so a governed Proc may have `sigtab` NULL, and every note
-then takes its default. Every Pouch image starts that way: its constructor writes
-`child_exit`'s default row ([[sub-pouch-signal]]), so the tail discards a dead child's
-note. With no table and no handler that note waits for a notes fd nobody opened, and
+then takes its default. A Pouch image's constructor writes SIGPIPE's ignore row, which
+allocates the table, and `child_exit`'s default row, which does not, so the Proc is governed
+either way ([[sub-pouch-signal]]) and the tail discards a dead child's note. With no table and no handler that note waits for a notes fd nobody opened, and
 twelve of the sixteen slots fill before such notes coalesce.
 
 **A native row holds a token, and a token needs a taker.** The caught value is

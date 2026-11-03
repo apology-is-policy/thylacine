@@ -3,11 +3,12 @@ id: fnd-note-wait-r1-f6
 type: fnd
 round: adt-note-wait-r1
 severity: P3
-status: deferred
+status: fixed
+fixed-by: chg-2026-11-03-note-wait
 title: "A SIGPIPE default set inside a handler loses its mask half"
 surface: [sub-kernel-notes, sub-pouch-signal]
 threatens: []
-regression: "none yet"
+regression: "pouch-hello-signals pipe-handler; sabotage P08"
 created: 2026-11-03
 ---
 ## Prosecution

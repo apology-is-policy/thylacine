@@ -23,6 +23,7 @@ the note depends on which thread called `sigaction` before which was spawned.
 
 ## The lift
 
-Either a Proc-wide flag on `SYS_NOTE_MASK`, or `sigaction` iterating the
-Proc's threads. The kernel-side flag is the cleaner shape and also fixes
-inheritance if the spawn path copies the parent's mask.
+Operator vote 25, 2026-11-03: the disposition leaves the mask. Pouch's SIGPIPE default is a row
+that ignores and a real handler a caught row, each per Proc ([[dec-2026-11-03-sigpipe-row]],
+patch 0071). This closes at that chunk's landing, once `pouch-hello-signals pipe-thread` has
+run.

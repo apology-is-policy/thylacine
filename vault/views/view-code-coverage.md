@@ -65,14 +65,14 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**696 owned · 41 unowned · 737 files (94% owned) · ~12000 unswept lines.**
+**696 owned · 41 unowned · 737 files (94% owned) · ~12097 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **92 files, ~45618 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
 | area | owned | unowned | unswept lines |
 |---|---:|---:|---:|
 | usr/warp-prove | 0 | 1 | 4349 |
-| usr/pouch-hello | 13 | 16 | 3820 |
+| usr/pouch-hello | 13 | 16 | 3917 |
 | usr/ports | 19 | 5 | 1691 |
 | kernel | 191 | 10 | 1239 |
 | usr/gl-sdl-prove | 0 | 1 | 262 |
@@ -131,7 +131,7 @@ Excluded as harness and counted here rather than dropped: **92 files, ~45618 lin
 | file | lines |
 |---|---:|
 | usr/warp-prove/src/main.rs | 4349 |
-| usr/pouch-hello/pouch-hello-signals.c | 1394 |
+| usr/pouch-hello/pouch-hello-signals.c | 1491 |
 | usr/ports/gnumake/config.h | 1357 |
 | usr/pouch-hello/pouch-hello-net.c | 618 |
 | usr/pouch-hello/pouch-hello-fs.c | 350 |
