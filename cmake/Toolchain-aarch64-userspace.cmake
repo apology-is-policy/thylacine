@@ -76,7 +76,9 @@ set(THYLACINE_USERSPACE_C_FLAGS
     "-fno-common"
     "-fno-omit-frame-pointer"
     "-fstack-protector-strong"
-    "-fstack-clash-protection"
+    # Through -Xclang, as Toolchain-aarch64-thylacine.cmake explains: the driver
+    # drops -fstack-clash-protection for a non-Linux triple.
+    "SHELL:-Xclang -fstack-clash-protection"
     "-mbranch-protection=pac-ret+bti"
     "-Wall"
     "-Wextra"
