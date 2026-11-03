@@ -450,7 +450,7 @@ impl PciIrq {
     pub fn new(pci: &PciDev, mode: PciIrqMode) -> Result<Self> {
         let raw = unsafe { crate::t_pci_irq_create(pci.handle.raw() as i64, mode as u32, 0) };
         if raw < 0 { return Err(hw_error(raw)); }
-        let handle = unsafe { Handle::from_raw(raw as i32, Rights::READ | Rights::WRITE | Rights::SIGNAL) };
+        let handle = Handle::from_raw(raw as i32, Rights::READ | Rights::WRITE | Rights::SIGNAL);
         let mut info = crate::TPciIrqInfo::default();
         Error::from_syscall_return(unsafe { crate::t_pci_irq_info(handle.raw() as i64, &mut info) })?;
         if info.mode != mode as u32 || (mode == PciIrqMode::Msix && info.table_index >= 0xffff) {
