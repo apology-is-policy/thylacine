@@ -33,6 +33,11 @@ static struct Burrow *burrow_create_anon(size_t n,bool exempt) {
 static bool loom_layout_ring_fault_take(const struct Loom *l) {(void)l;return false;}
 void poll_waiter_list_init(struct poll_waiter_list *l) {memset(l,0,sizeof(*l));}
 void poll_waiter_list_wake(struct poll_waiter_list *l) {(void)l;wakes++;}
+void poll_deferred_init(struct poll_deferred *d, struct poll_waiter_list *l,
+                        const struct poll_defer_ops *ops, void *owner) {
+    (void)d;(void)l;(void)ops;(void)owner;
+}
+void poll_wake_deferred(struct poll_deferred *d) {(void)d;wakes++;}
 void loom_unref(struct Loom *l) {
     if(!l)return;
     if(l->service_slots||l->service_pools||l->service_requests.records){

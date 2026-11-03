@@ -56,7 +56,10 @@ struct srv_admission_snapshot { u32 local_count, session_count, global_count, do
 #define SRVCONN_STATE_LIVE 1
 #define SRVCONN_STATE_TORN 2
 #define CHECK(x, why) do { if (!(x)) { fputs(why "\n", stderr); exit(1); } } while (0)
-struct channel { void *buf; int lock, rendez, wrendez, role_waiters; bool eof; };
+struct poll_defer_ops { int unused; };
+struct poll_deferred { int bound; };
+static const struct poll_defer_ops g_srvconn_defer_ops;
+struct channel { void *buf; int lock, rendez, wrendez, role_waiters; bool eof; struct poll_deferred role_owed; };
 struct SrvConn {
     u64 magic, peer_stripes, server_stripes, client_deadline_ns;
     int ref, lock, state, peer_pid, poll_list;
@@ -64,6 +67,7 @@ struct SrvConn {
     u32 msize, credit_charge, peer_principal, server_principal;
     struct SrvDomain *domain;
     struct channel c2s, s2c;
+    struct poll_deferred poll_owed;
 };
 static u64 g_srvconn_created, g_srvconn_freed;
 static u32 g_srvconn_reserved, g_srvconn_session_reserved, g_srv_domains;
@@ -91,6 +95,11 @@ static void spin_lock(int *p) { CHECK(!*p, "recursive fixture lock"); *p = 1; }
 static void spin_unlock(int *p) { CHECK(*p, "unheld fixture lock"); *p = 0; }
 static void poll_waiter_list_init(int *p) { *p = 0; }
 static void poll_waiter_list_wake(int *p) { (void)p; }
+static void poll_deferred_init(struct poll_deferred *d, int *l, const struct poll_defer_ops *ops, void *owner) {
+    (void)l; (void)ops; (void)owner; d->bound = 1;
+}
+static void poll_wake_deferred(struct poll_deferred *d) { CHECK(d->bound, "a wake on an unbound walk"); }
+static void poll_deferred_await(struct poll_deferred *d) { CHECK(d->bound, "an await on an unbound walk"); }
 static void wakeup(int *p) { (void)p; }
 static void srvconn_ctl_link(struct SrvConn *p) { (void)p; linked++; }
 static void srvconn_ctl_unlink(struct SrvConn *p) { (void)p; CHECK(linked, "unlink imbalance"); linked--; }

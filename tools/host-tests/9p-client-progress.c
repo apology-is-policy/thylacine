@@ -11,7 +11,7 @@ static void spin_lock_init(spin_lock_t *l) { l->held=0; }
 static void spin_lock(spin_lock_t *l) { if(l->held)abort();l->held=1; }
 static void spin_unlock(spin_lock_t *l) { if(!l->held)abort();l->held=0; }
 #include <thylacine/9p_client.h>
-#define CLIENT_UNLOCK_RET(c, rc) do {spin_unlock(&(c)->lock);return(rc);}while(0)
+#define CLIENT_UNLOCK_RET(c, rc) do {client_unlock(c);return(rc);}while(0)
 // Host doubles of the kernel allocator and panic, with external linkage: the
 // real 9p_session.c grows its tag table through kmalloc (KP_ZERO honoured) and
 // frees it at destroy, so its storage is owned and leak-checked here too.
@@ -30,6 +30,14 @@ void larder_init(struct larder *l) { memset(l,0,sizeof(*l)); }
 void larder_destroy(struct larder *l) { (void)l; }
 void poll_waiter_list_init(struct poll_waiter_list *l) { memset(l,0,sizeof(*l)); }
 void poll_waiter_list_wake(struct poll_waiter_list *l) { (void)l; }
+void poll_deferred_init(struct poll_deferred *d, struct poll_waiter_list *l,
+                        const struct poll_defer_ops *ops, void *owner) {
+    (void)d;(void)l;(void)ops;(void)owner;
+}
+void poll_defer_enter(void) { }
+void poll_defer_exit(void) { }
+void poll_wake_deferred(struct poll_deferred *d) { (void)d; }
+void poll_deferred_await(struct poll_deferred *d) { (void)d; }
 int wakeup(struct Rendez *r) { (void)r; return 0; }
 static void uart_puts(const char *s) { (void)s; }
 static void uart_putdec(u64 n) { (void)n; }
