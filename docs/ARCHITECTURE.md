@@ -1831,7 +1831,9 @@ for it:
 `SYS_WALK_OPEN_OINTR` (vote 20) marks the one open that waits for a peer. A Pouch
 `accept` waits in the open of netd's `listen`, and a `connect` in the open of its
 `data`; the kernel cannot tell those from a regular file's open without a round
-trip per open. A native slow file is its stat type: `S_IFIFO`, `S_IFCHR` or
+trip per open. The bit covers the open's wait and not the walk to it: a failed walk
+has no errno to carry `EINTR` and reads as `ENOENT`, so the resolver rides a caught
+note through the walk, as a Linux path lookup does, for either phenotype. A native slow file is its stat type: `S_IFIFO`, `S_IFCHR` or
 `S_IFSOCK`, and netd's `data` and `listen` report `S_IFSOCK`.
 
 A call that is not on the list rides the note out. Death still unwinds it,

@@ -687,6 +687,14 @@ unpublished quarry. `stalk_err` returns its positive magnitude to SYS_OPEN;
 unknown/non-9P errors remain EIO. Resource admission errors no longer collapse
 into transport failure. [[sub-kernel-ninep-dev9p]] owns the per-open record.
 
+**Only the final open may unwind for a caught note.** A failed walk returns NULL, which
+reads as `ENOENT`, so a note that unwound a walk's 9P wait would report a file that
+exists as absent, and a connect or an accept would fail for it. `stalk_core` wraps
+`stalk_resolve`: it saves the thread's `note_interruptible` and clears it for the
+resolution, the final `dev->open` alone runs with the saved value, and the wrapper
+restores it on the way out. The walk rides the note out, as a Linux path lookup does, and
+the open's wait then takes it. Test: `stalk.open_is_the_only_interruptible_step`.
+
 ## Data structures
 
 None persistent. Per call: `struct Spoor *trail[STALK_MAX_DEPTH]` (40

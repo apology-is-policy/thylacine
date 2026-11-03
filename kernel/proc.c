@@ -2024,9 +2024,9 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
     // thread's note_mask. Written before ready() -- the child has not run, so no
     // reader can race the plain store; the mask is owner-written thereafter
     // (rt_sigprocmask, SYS_NOTE_MASK). A native fork's handler crossed above, so its
-    // mask crosses too: Pouch's fork blocks every note until the child has fixed
-    // its thread state, and a child born unmasked would run a handler before that.
-    // A native spawn keeps a zero mask (ARCH 7.6).
+    // mask crosses too: a caller that blocked its notes around the fork, to fix up the
+    // child first, would otherwise have a handler run in a child born unmasked. A
+    // native spawn keeps a zero mask (ARCH 7.6).
     if (parent->phenotype == PHENO_LINUX || fc != NULL) {
         ct->note_mask = t->note_mask;
         // And the HANDLER-EXECUTION SNAPSHOT (the d3a11c8e round's F1): this

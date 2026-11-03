@@ -37,6 +37,7 @@
 #include <thylacine/errno.h>      // T_E_* (the errno-rollout arc; stalk *errp)
 #include <thylacine/perm.h>
 #include <thylacine/proc.h>       // struct Proc -> territory
+#include <thylacine/thread.h>     // current_thread -> note_interruptible
 #include <thylacine/spoor.h>
 #include <thylacine/syscall.h>    // SYS_WALK_OPEN_NAME_MAX + struct t_stat
 #include <thylacine/territory.h>  // mount_lookup + PGRP_MAX_MOUNTS + root_ref
@@ -1039,12 +1040,12 @@ struct Spoor *stalk_union_member_holding(struct Proc *p, struct Spoor *point,
 // Dev.walk_attrs and the leaf is clean, the core fills *stat_out, sets
 // *stat_done, unwinds, and returns NULL WITHOUT touching *errp -- no quarry
 // Spoor ever exists. Every other caller passes NULL/NULL.
-static struct Spoor *stalk_core(struct Proc *p, struct Spoor *start,
-                                const char *path, u64 pathlen,
-                                int amode, u32 omode, int *errp,
-                                struct t_stat *stat_out, bool *stat_done,
-                                bool *crossed_pheno, bool *union_point_out,
-                                struct stalk_name *nm) {
+static struct Spoor *stalk_resolve(struct Proc *p, struct Spoor *start,
+                                   const char *path, u64 pathlen,
+                                   int amode, u32 omode, int *errp,
+                                   struct t_stat *stat_out, bool *stat_done,
+                                   bool *crossed_pheno, bool *union_point_out,
+                                   struct stalk_name *nm, bool open_intr) {
     if (!start || !path) { if (errp) *errp = T_E_INVAL; return NULL; }
     // Reject an unknown amode LOUDLY rather than silently degrading to walk-only
     // (stalk-1 audit F1). stalk-2 adds STALK_MOUNT; POUNCE adds STALK_STAT; D-1
@@ -2264,7 +2265,9 @@ per_component:
         // byte-mode one -- is returned; STALK-DESIGN.md §5.2). The returned
         // Spoor carries one owned ref; if it differs, the old quarry is spent
         // (open did not consume its ref) -> clunk it and adopt the replacement.
+        current_thread()->note_interruptible = open_intr;
         struct Spoor *opened = quarry->dev->open(quarry, (int)omode);
+        current_thread()->note_interruptible = false;
         if (!opened) {
             err = stalk_err_code((int)spoor_open_errno(quarry));
             goto fail;
@@ -2294,6 +2297,24 @@ fail:
     stalk_unwind(trail, depth);        // release any remaining ancestors
     stalk_expand_free(ex);             // D-1
     return NULL;
+}
+
+// ARCH 8.8.3: a call's interruptible wait is its open, never the walk to it. A failed
+// walk has no errno to carry EINTR and reads as ENOENT, for a file that exists. So the
+// walk rides a caught note out, as a Linux path lookup does, and the open's wait takes it.
+static struct Spoor *stalk_core(struct Proc *p, struct Spoor *start,
+                                const char *path, u64 pathlen,
+                                int amode, u32 omode, int *errp,
+                                struct t_stat *stat_out, bool *stat_done,
+                                bool *crossed_pheno, bool *union_point_out,
+                                struct stalk_name *nm) {
+    struct Thread *t    = current_thread();
+    bool           intr = t->note_interruptible;
+    t->note_interruptible = false;
+    struct Spoor *q = stalk_resolve(p, start, path, pathlen, amode, omode, errp, stat_out,
+                                    stat_done, crossed_pheno, union_point_out, nm, intr);
+    t->note_interruptible = intr;
+    return q;
 }
 
 struct Spoor *stalk_err(struct Proc *p, struct Spoor *start,
