@@ -164,7 +164,7 @@ the normalization cannot sign-extend a negative into a near-`UINT32_MAX`
 
 - **[[inv-i9]] (consumer side).** Every pouch wait is a torpor
   `(addr, expected, timeout)` whose compare-and-register the kernel does
-  under `torpor_lock`; pouch's obligation is to pass an expected value it
+  under a bucket's lock; pouch's obligation is to pass an expected value it
   read before the decision to wait, which musl's futex idiom already
   guarantees. The F1 clamp bug was the one place pouch broke the contract
   — not by losing a wake, but by turning a legal wait into a spin.
@@ -188,7 +188,7 @@ disable the handoff and hang every `pthread_join`.
 A spawn is one syscall. An uncontended lock/unlock never enters the
 kernel (musl's userspace fast path is untouched). A contended wait is one
 torpor call; since the #343 lock-free mismatch return, a wait whose value
-already changed does not even take `torpor_lock`.
+already changed does not even take a bucket's lock.
 
 ## Prosecution
 

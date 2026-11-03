@@ -1274,7 +1274,9 @@ Replaces the `futex.tla` the 2026-05-23 suspension dropped; the overhaul's plan 
 Buggy cfgs: `no_wait`, `lifo`, `count_any`, `eintr_any`, `unlocked_check`, `stop_at_mark`, each
 with the invariant it breaks in the module's header. What it does not model: the death walk, which
 holds the lock across wakeup, so its record cannot leave; two buckets, since a lock per bucket
-changes nothing a single bucket's order depends on; and the hash.
+changes nothing a single bucket's order depends on; and the hash. A stop or a caught note that
+wakes a waiter before a mark reaches it lands in the code as an uncounted OK, which the model
+reaches only through `Deadline`: the same state and the same count.
 
 ## notes.tla — DROPPED (2026-05-23 spec-to-code suspension)
 

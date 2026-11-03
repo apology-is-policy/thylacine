@@ -43,7 +43,7 @@ Zircon convergent; the seL4 synchronous stall was rejected):
   the three delivery vehicles guarantee it gets there — the #811 universal
   death-wake for rendez sleepers, `torpor_wake_all_for_proc` for futex
   sleepers ([[sub-kernel-torpor]] — whose post-register die-pending
-  re-check under `torpor_lock` closes the register-after-walk race on
+  re-check under the bucket's lock closes the register-after-walk race on
   the futex leg), and a broadcast `smp_resched_others` (with the
   periodic tick as the floor) for peers running at EL0.
 

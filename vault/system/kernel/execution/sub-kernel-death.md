@@ -488,7 +488,7 @@ each thread on its own single-waiter rendez.
 
 Lock order, exhaustively:
 `g_proc_table_lock → p->threads_lock → wait_lock → g_timerwait.lock → r->lock → cs->lock`,
-plus the torpor leg `p->threads_lock → torpor_lock → g_timerwait → r->lock`
+plus the torpor leg `p->threads_lock → a bucket's lock → g_timerwait → r->lock`
 ([[lock-proc-threads]], thread-model C3). The exit decision is one hold of the
 thread lock: a non-last thread commits there and takes nothing else; the last
 thread reads the claim, marks the close, drops every lock for the handle close,
@@ -498,7 +498,7 @@ thread still live (`thread_reap.tla` `ZombieImpliesAllExiting`). The
 clear-child-tid store follows the commit and cannot sleep: the FILE page-in
 refuses a thread that is not RUNNING ([[sub-kernel-fault]],
 [[seam-exiting-tails-never-sleep]]).
-`torpor_lock` and `wait_lock` never nest (torpor drops its lock before
+A bucket's lock and `wait_lock` never nest (torpor drops its lock before
 `tsleep`). `smp_resched_others` and the IPI handler take no locks. No ABBA.
 
 Acyclicity rests on one asymmetry: only the **owner** writes

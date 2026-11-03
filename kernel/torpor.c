@@ -157,6 +157,13 @@ static void torpor_after_prefault_point(void) {
     void (*fn)(void *) = __atomic_exchange_n(&g_torpor_after_prefault, NULL, __ATOMIC_ACQ_REL);
     if (fn) fn(g_torpor_after_prefault_arg);
 }
+
+// Times a waiter has found a wake still holding its record: the positive half of a
+// test that a waiter does not leave, which a waiter that never ran would also pass.
+static volatile u64 g_torpor_held_spins;
+u64 torpor_held_spins_for_test(void) {
+    return __atomic_load_n(&g_torpor_held_spins, __ATOMIC_ACQUIRE);
+}
 #endif
 
 // F4 (P3): the passed `p` MUST be `current_thread()->proc`. The user-VA
@@ -358,8 +365,12 @@ s64 sys_torpor_wait_for_proc(struct Proc *p, u64 addr_va, u32 expected,
     // the record is this frame. wake_held is written under the lock just dropped, so
     // this load sees any wake that took the record. The waker is non-preemptible until
     // it clears it, so this spin is bounded by a running thread.
-    while (__atomic_load_n(&w.wake_held, __ATOMIC_ACQUIRE))
+    while (__atomic_load_n(&w.wake_held, __ATOMIC_ACQUIRE)) {
+#ifdef KERNEL_TESTS
+        __atomic_fetch_add(&g_torpor_held_spins, 1u, __ATOMIC_RELAXED);
+#endif
         __asm__ __volatile__("yield" ::: "memory");
+    }
 
     // Defense-in-depth: scribble the rendez pointer to NULL so a
     // future use-after-stack-return would null-deref instead of
@@ -385,7 +396,7 @@ s64 sys_torpor_wait_for_proc(struct Proc *p, u64 addr_va, u32 expected,
 // dropped, until the stall is lifted or its budget runs out, which is the window a
 // batch holds records it has not reached. Holds no lock, and stays non-preemptible,
 // so a test on one CPU cannot use it.
-#define TORPOR_STALL_BUDGET_NS 2000000000ull
+#define TORPOR_STALL_BUDGET_NS 10000000000ull
 static volatile bool g_torpor_stall, g_torpor_stalled;
 void torpor_stall_wakes_for_test(bool on) {
     __atomic_store_n(&g_torpor_stall, on, __ATOMIC_RELEASE);

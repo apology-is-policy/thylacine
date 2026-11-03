@@ -149,7 +149,7 @@ _Static_assert((TORPOR_HASH_BUCKETS & (TORPOR_HASH_BUCKETS - 1u)) == 0,
 s64 sys_torpor_wait_for_proc(struct Proc *p, u64 addr_va, u32 expected,
                              s64 timeout_us);
 
-// Wake up to `count` threads whose `(p, addr_va)` matches. Returns the
+// Wake up to `count` threads whose `(p->as, addr_va)` matches. Returns the
 // number of waiters actually woken (`>= 0`), or `TORPOR_ERR_EINVAL` /
 // `TORPOR_ERR_EFAULT` for bad args. `count == 0` is legal (no-op,
 // returns 0). `count == UINT32_MAX` means "wake all"
@@ -188,6 +188,7 @@ void torpor_stop_wake_all_for_proc(struct Proc *p);
 
 #ifdef KERNEL_TESTS
 void torpor_after_prefault_for_test(void (*fn)(void *), void *arg);
+u64  torpor_held_spins_for_test(void);
 void torpor_stall_wakes_for_test(bool on);
 bool torpor_wake_stalled_for_test(void);
 #endif
