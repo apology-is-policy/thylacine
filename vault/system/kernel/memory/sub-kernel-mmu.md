@@ -33,6 +33,7 @@ Grouped by what they are for, since the file is long:
 | bring-up | `mmu_enable`, `mmu_program_this_cpu`, `mmu_retire_ttbr0_identity` |
 | kernel views | `mmu_map_mmio`, `pa_to_kva` / `kva_to_pa` (in `page.h`) |
 | guard pages | `mmu_set_no_access_range`, `mmu_restore_normal_range` (the single-page forms are the tests'), `mmu_pagemap_directmap` |
+| kernel stack range | `mmu_kstack_map`, `mmu_kstack_unmap` |
 | per-Proc tables | `proc_pgtable_create` / `_destroy`, `mmu_install_user_pte[_attr](as, exempt, ..)` (1 on an identical leaf), `mmu_replace_user_pte_attr` (the COW break's in-place leaf replace), `mmu_user_pte_admits` (the fault path's resolved-by-a-peer probe), `mmu_uninstall_user_range(as, ..)` (returns the leaves cleared) and `_keep_tables` (the fork's clear) -- the tables charged and reclaimed since B-1a' (below) |
 | self-modification | `mmu_patch_text`, `arch_icache_sync_range` |
 | cross-Proc | `mmu_cross_proc_read` / `_write` |
@@ -553,6 +554,24 @@ Witnesses: `capacity.fork_clone_charges_pages_and_nodes` and
 tables stay across the fork; the pool pays the child only its node mirror),
 `protect.uninstall_range_skips_absent_subtrees` (the range form answers 1 for
 its one leaf).
+
+## The kernel stack range (2026-11-03; thread-model C10)
+
+`l0_ttbr1[288]` holds a range of its own at `0xFFFF_9000_0000_0000`: `l1_kstack` and
+sixteen `l2_kstack` tables, all wired at boot, 16 GiB of address space. The only tables
+that come later are L3s: `kstack_l3_make` allocates one when the first stack in its
+2 MiB does, zeroes it, `dsb`s, and publishes under a leaf lock, freeing its page if a
+peer's creator got there first. No table is ever freed. A stack is 1/64 of one, so the
+most a burst of threads can leave behind is 1/256 of the pages those stacks held, and
+freeing one would mean invalidating walk caches for a table a peer may be about to fill.
+Linux's vmalloc keeps its page tables for the same reason.
+
+`mmu_kstack_map` writes `PTE_KERN_RW` leaves, invalid to valid, and invalidates nothing:
+a faulting translation is never cached. `mmu_kstack_unmap` reads the pages back from the
+leaves, clears them, and sends one `tlbi vaae1is` per page before it returns; the caller
+frees the pages and the slot only then. The operand masks the TTL hint as the direct-map
+path does. The range's addresses are fixed, as the direct map's are, and its low slots
+are predictable; KASLR moves only the image (I-16).
 
 ## Provenance
 

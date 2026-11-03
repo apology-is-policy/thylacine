@@ -23,12 +23,15 @@
 #include "gic.h"
 #include "halls.h"                    // HX-1: per-CPU live-frame tracking for the crash dump
 #include "hwdebug.h"                  // 8a-2a: the EL0 hardware-breakpoint verify (EC 0x30 swallow)
+#include "kaslr.h"                    // what the image's addresses can be, for the SP test's pins
+#include "mmu.h"                      // the ranges the SP test tells apart
 #include "uaccess.h"                  // R12-uaccess: kernel-mode user-VA fault-fixup
 #include "uart.h"                     // #214: raw banner in the recursion-guard runaway path
 
 #include <thylacine/cons.h>           // #214: cons_tx_claim_for_dump in the runaway path
 #include <thylacine/extinction.h>
 #include <thylacine/notes.h>          // P6 #3a: NOTE_NAME_SNARE_* constants for proc_fault_terminate
+#include <thylacine/page.h>           // KERNEL_DIRECT_MAP_BASE, for the SP test's pins
 #include <thylacine/proc.h>           // R12-uaccess: struct Proc for demand-page synth; P6 #3a: proc_fault_terminate
 #include <thylacine/smp.h>            // #214: smp_cpu_idx_self for the recursion guard
 #include <thylacine/syscall.h>        // P3-Ec: syscall_dispatch
@@ -205,6 +208,35 @@ void exception_sync_curr_el(struct exception_context *ctx) {
     halls_leave_frame(prev);
 
     g_el1_sync_depth[cpu] = 0;
+}
+
+// The two bits vectors.S reads SP with, against the ranges they tell apart. A
+// tag bit set anywhere else would send a healthy stack's fault to the overflow
+// stack and kill the machine; one clear in the range would miss every overflow.
+_Static_assert((KSTACK_RANGE_BASE >> KSTACK_RANGE_TAG_BIT) & 1u,
+               "the tag bit is set at the bottom of the stack range");
+_Static_assert(((KSTACK_RANGE_BASE + KSTACK_RANGE_SIZE - 1u) >> KSTACK_RANGE_TAG_BIT) & 1u,
+               "and at the top of it");
+_Static_assert(!((KERNEL_DIRECT_MAP_BASE >> KSTACK_RANGE_TAG_BIT) & 1u),
+               "the tag bit is clear in the direct map");
+_Static_assert(!((VMALLOC_BASE >> KSTACK_RANGE_TAG_BIT) & 1u),
+               "and in the MMIO range");
+_Static_assert(!(((KASLR_LINK_VA + KASLR_OFFSET_MASK + (1ull << KASLR_ALIGN_BITS)) >>
+                  KSTACK_RANGE_TAG_BIT) & 1u),
+               "and everywhere KASLR can put the image, whose stacks the boot and idle threads run on");
+_Static_assert((1u << KSTACK_USABLE_BIT) == THREAD_KSTACK_SIZE &&
+               THREAD_KSTACK_GUARD_SIZE == THREAD_KSTACK_SIZE,
+               "a stack's span is two equal halves, so one bit tells the guard from the usable half");
+
+// Its x0 was spent getting here, so the value comes in by hand. Nothing here may
+// try to handle the fault that raised this: it could be any fault, taken with
+// too little stack left for its frame.
+void exception_kstack_overflow(struct exception_context *ctx, u64 overflowed_frame,
+                               u64 x0_at_entry) {
+    ctx->regs[0] = x0_at_entry;
+    halls_enter_frame(ctx);
+    extinction_with_addr("kernel stack overflow (thread stack, caught at the vector)",
+                         (uintptr_t)overflowed_frame);
 }
 
 void exception_irq_curr_el(struct exception_context *ctx) {

@@ -483,14 +483,36 @@ interrupt slot currently holds **thirty-one** of its thirty-two instructions.
 
 ## Seams
 
-- **Kernel stack overflow faults recursively.** The save builds its frame on the
-  same overflowing stack, so an overflow into the guard page re-faults rather
-  than landing somewhere safe. A dedicated overflow stack is reserved and
-  unbuilt.
+- **A boot or idle stack's overflow still recurses, and a wild SP still spins.** A thread
+  stack's overflow is caught at the vector (below). A boot or idle stack has one guard
+  page over mapped BSS: its frame re-faults through the guard and lands in that BSS,
+  where the C-side depth guard parks the CPU. An SP that is nowhere at all recurses
+  store-free below the C layer, harmless to memory, and that CPU spins.
 - **The alignment-fault paths are not fixup-recoverable.** The fixup table
   covers translation, permission and access-flag faults; an unaligned kernel
   access to a user address is not in that set and extincts. Callers that could
   produce one validate alignment themselves.
+
+## The SP test at the 0x200 slot (2026-11-03; thread-model C10)
+
+A thread's stack overflows into unmapped address space with nothing sure to be mapped
+below it, so a frame built on the way down would store nothing and print nothing for as
+long as SP lasted. The slot is one branch, to `el1h_sync`, because the test and the frame
+do not fit in 0x80 bytes. It reads the address the frame would take: `KSTACK_RANGE_TAG_BIT`
+(44) set says a thread's stack, set in every address of that range and in no other a
+kernel SP holds, and `KSTACK_USABLE_BIT` (14) clear says the guard, a stack's span being
+aligned to itself. `exception.c` pins both against the ranges. No register is free, so x0
+travels inside SP for three instructions, with every exception masked by the entry:
+Linux's arm64 `kernel_ventry` does this, with the same geometry, for its `VMAP_STACK`.
+
+A hit goes to `el1h_sync_overflow`, which spends EL0's two thread registers on the frame's
+address and x0 (nothing returns to their thread), finds this CPU's `g_overflow_stacks` slot
+from MPIDR, builds the frame there and calls `exception_kstack_overflow`. That never tries
+to handle the fault that raised it, which could be any fault taken with too little stack
+left for its frame; it extincts, `kernel stack overflow (thread stack, caught at the vector)`.
+Because the test reads the frame's address and not SP, ELR and FAR still name the original
+fault. The IRQ, FIQ and SError slots need no test: a frame they start in a guard faults
+at its first store, and that fault comes here. The EL0 slots start at the top of a stack.
 
 ## Caveats
 

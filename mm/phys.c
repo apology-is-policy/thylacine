@@ -55,7 +55,6 @@ static paddr_t g_zone_end;
 // only this cap is the loose end. At Lazarus board bringup, express the cap as
 // the absolute ceiling -- min(mem_base + 8 GiB, 9 GiB) -- or widen the direct
 // map. (Pre-existing; surfaced by the #808 audit F2.)
-#define DIRECTMAP_USABLE_RAM_MAX (8ull << 30)   /* 8 GiB */
 
 // ---------------------------------------------------------------------------
 // Layout helpers.

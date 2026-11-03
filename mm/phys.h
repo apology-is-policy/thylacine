@@ -24,6 +24,8 @@
 bool phys_init(void);
 
 // Diagnostic accessors used by the boot banner.
+#define DIRECTMAP_USABLE_RAM_MAX (8ull << 30)   // what the direct map reaches: 8 GiB
+
 u64 phys_total_pages(void);     // total pages in the zone
 u64 phys_free_pages(void);      // currently free pages (across all orders)
 u64 phys_reserved_pages(void);  // total - free, computed at init

@@ -161,6 +161,17 @@ static u64 l3_vmalloc[ENTRIES_PER_TABLE]   __attribute__((aligned(PAGE_SIZE)));
 // l2_vmalloc[1]->l3_vmalloc2 the VA-contiguous second 2 MiB.
 static u64 l3_vmalloc2[ENTRIES_PER_TABLE]  __attribute__((aligned(PAGE_SIZE)));
 
+// The kernel stack range (mmu.h): l0_ttbr1[KSTACK_L0_INDEX] -> l1_kstack ->
+// l2_kstack, every entry down to here set at boot, so no path adds to a table a
+// peer may be walking except at the L3 level, invalid to valid.
+#define KSTACK_L0_INDEX 288u
+_Static_assert(((KSTACK_RANGE_BASE >> 39) & 0x1ffu) == KSTACK_L0_INDEX,
+               "the range's L0 slot, which vmalloc's 256 and the image's 320 do not share");
+_Static_assert((KSTACK_RANGE_BASE & ((1ull << 39) - 1u)) == 0, "the range starts its L1 table");
+_Static_assert(KSTACK_L2_TABLES <= ENTRIES_PER_TABLE, "one L1 table holds them");
+static u64 l1_kstack[ENTRIES_PER_TABLE]                  __attribute__((aligned(PAGE_SIZE)));
+static u64 l2_kstack[KSTACK_L2_TABLES][ENTRIES_PER_TABLE] __attribute__((aligned(PAGE_SIZE)));
+
 // Total MMIO vmalloc capacity in 4-KiB pages -- the bump allocator's bound.
 #define VMALLOC_MMIO_ENTRIES  (2u * ENTRIES_PER_TABLE)
 
@@ -478,6 +489,16 @@ static void build_page_tables(u64 slide) {
             u32 ig_idx = (u32)((ig_pa - kernel_2mib_pa) >> PAGE_SHIFT);
             l3_kernel[ig_idx] = 0;
         }
+
+        // The overflow stacks' guards (smp.h), bounds-checked the same way.
+        for (unsigned c = 0; c < DTB_MAX_CPUS; c++) {
+            u64 og_pa = (u64)(uintptr_t)&g_overflow_stacks[c].guard[0];
+            if (og_pa < kernel_2mib_pa ||
+                ((og_pa - kernel_2mib_pa) >> PAGE_SHIFT) >=
+                    (u64)(ENTRIES_PER_TABLE * KERNEL_L3_TABLES))
+                extinction("g_overflow_stacks guard outside the kernel 8 MiB L3 region");
+            l3_kernel[(og_pa - kernel_2mib_pa) >> PAGE_SHIFT] = 0;
+        }
     }
 
     // TTBR0: link the two kernel L3 tables into the identity map (so the
@@ -639,6 +660,13 @@ static void build_page_tables(u64 slide) {
                     l3_directmap_kernel[ig_idx] = 0;
                 }
 
+                // The overflow stacks' guards: the l3_kernel pass above checked
+                // the same bounds.
+                for (unsigned c = 0; c < DTB_MAX_CPUS; c++) {
+                    u64 og_pa = (u64)(uintptr_t)&g_overflow_stacks[c].guard[0];
+                    l3_directmap_kernel[(og_pa - kernel_2mib_pa) >> PAGE_SHIFT] = 0;
+                }
+
                 // Wire the kernel-image 8 MiB → l3_directmap_kernel's
                 // KERNEL_L3_TABLES L3 tables (consecutive L2 entries).
                 // kernel_l2_idx derives from the fixed KERNEL_LOAD_PA, so
@@ -678,6 +706,13 @@ static void build_page_tables(u64 slide) {
         l2_vmalloc[1] = make_table_pte(l3_vmalloc2);
         // l3 entries left zero — populated by mmu_map_mmio post-boot.
         g_vmalloc_next_idx = 0;
+    }
+
+    // The kernel stack range: the L3 tables come with the first stack in each.
+    {
+        l0_ttbr1[KSTACK_L0_INDEX] = make_table_pte(l1_kstack);
+        for (u32 i = 0; i < KSTACK_L2_TABLES; i++)
+            l1_kstack[i] = make_table_pte(l2_kstack[i]);
     }
 }
 
@@ -1369,6 +1404,106 @@ bool mmu_restore_normal_range(paddr_t pa, unsigned n_pages) {
     __atomic_add_fetch(&g_guard_toggles_for_test, 1, __ATOMIC_RELAXED);
 #endif
     return true;
+}
+
+// =============================================================================
+// The kernel stack range (mmu.h).
+// =============================================================================
+//
+// A table, once made, stays. A stack is 1/64 of one, so the most a burst of
+// threads can leave behind is 1/256 of the pages those stacks held; freeing one
+// would mean invalidating walk caches for a table a peer may be about to fill.
+// Linux's vmalloc keeps its page tables for the same reason.
+//
+// Mapping is invalid to valid, so it invalidates nothing (a translation fault is
+// never cached). The new stack's first user may be a peer, and it got there
+// through a publish that the dsb below is ordered before.
+
+static spin_lock_t g_kstack_table_lock = SPIN_LOCK_INIT;   // a leaf
+#ifdef KERNEL_TESTS
+static u64 g_kstack_changes_for_test;
+static u32 g_kstack_tables_for_test;
+u64 mmu_kstack_changes_for_test(void) {
+    return __atomic_load_n(&g_kstack_changes_for_test, __ATOMIC_RELAXED);
+}
+u32 mmu_kstack_tables_for_test(void) {
+    return __atomic_load_n(&g_kstack_tables_for_test, __ATOMIC_RELAXED);
+}
+#endif
+
+static u64 *kstack_l2_entry(u64 va) {
+    u64 off = va - KSTACK_RANGE_BASE;
+    if (va < KSTACK_RANGE_BASE || off >= KSTACK_RANGE_SIZE)
+        extinction_with_addr("an address outside the kernel stack range", (uintptr_t)va);
+    return &l2_kstack[off >> 30][(off >> BLOCK_SHIFT_L2) & (ENTRIES_PER_TABLE - 1u)];
+}
+
+static u64 *kstack_table_of(u64 l2e) {
+    return (u64 *)pa_to_kva((paddr_t)(l2e & 0x0000FFFFFFFFF000ull));
+}
+
+static u64 *kstack_l3_make(u64 va) {
+    u64 *slot = kstack_l2_entry(va);
+    u64 e = __atomic_load_n(slot, __ATOMIC_ACQUIRE);
+    if (e) return kstack_table_of(e);
+
+    struct page *pg = alloc_pages(0, KP_ZERO);
+    if (!pg) return NULL;
+    paddr_t pa = page_to_pa(pg);
+    dsb_ishst();    // a walker that finds the table finds it zeroed
+
+    irq_state_t s = spin_lock_irqsave(&g_kstack_table_lock);
+    e = *slot;
+    if (!e) {
+        e = make_table_pte_pa(pa);
+        __atomic_store_n(slot, e, __ATOMIC_RELEASE);
+        dsb_ishst();
+        pg = NULL;
+#ifdef KERNEL_TESTS
+        __atomic_add_fetch(&g_kstack_tables_for_test, 1u, __ATOMIC_RELAXED);
+#endif
+    }
+    spin_unlock_irqrestore(&g_kstack_table_lock, s);
+    if (pg) free_pages(pg, 0);      // a peer's creator got there first
+    return kstack_table_of(e);
+}
+
+bool mmu_kstack_map(u64 va, const paddr_t *pa, unsigned n) {
+    u64 *l3 = kstack_l3_make(va);
+    if (!l3) return false;
+    u32 idx = (u32)((va >> PAGE_SHIFT) & (ENTRIES_PER_TABLE - 1u));
+    for (unsigned i = 0; i < n; i++)
+        __atomic_store_n(&l3[idx + i], make_page_pte_l3(pa[i], PTE_KERN_RW), __ATOMIC_RELAXED);
+    dsb_ishst();
+    isb();
+#ifdef KERNEL_TESTS
+    __atomic_add_fetch(&g_kstack_changes_for_test, 1u, __ATOMIC_RELAXED);
+#endif
+    return true;
+}
+
+void mmu_kstack_unmap(u64 va, paddr_t *pa, unsigned n) {
+    u64 e = __atomic_load_n(kstack_l2_entry(va), __ATOMIC_ACQUIRE);
+    if (!e) extinction_with_addr("kstack unmap with no table", (uintptr_t)va);
+    u64 *l3 = kstack_table_of(e);
+    u32 idx = (u32)((va >> PAGE_SHIFT) & (ENTRIES_PER_TABLE - 1u));
+    for (unsigned i = 0; i < n; i++) {
+        u64 pte = __atomic_load_n(&l3[idx + i], __ATOMIC_RELAXED);
+        if (!(pte & PTE_VALID))
+            extinction_with_addr("kstack unmap of a page that is not mapped", (uintptr_t)va);
+        pa[i] = (paddr_t)(pte & 0x0000FFFFFFFFF000ull);
+        __atomic_store_n(&l3[idx + i], 0ull, __ATOMIC_RELAXED);
+    }
+    dsb_ishst();
+    for (unsigned i = 0; i < n; i++)
+        __asm__ __volatile__("tlbi vaae1is, %0"
+                             :: "r" (((va + (u64)i * PAGE_SIZE) >> 12) & ((1ull << 44) - 1u))
+                             : "memory");
+    dsb_ish();
+    isb();
+#ifdef KERNEL_TESTS
+    __atomic_add_fetch(&g_kstack_changes_for_test, 1u, __ATOMIC_RELAXED);
+#endif
 }
 
 // =============================================================================

@@ -133,7 +133,7 @@ block)`, `... (kernel L1 block)` and `... (user page)` (the
 four `wxe_install_*` variants, printed by `arch/arm64/mmu.c`'s leaf encoders;
 operator vote 22; `extinction_mmu_off`, since 2026-10-27, expects the `(kernel
 page)` body too, printed before the MMU is on), `... BTI fault`,
-`... kernel stack overflow` (three provokers), `... recursive kernel fault`,
+`... kernel stack overflow` (four provokers, and since 2026-11-03 `kstack_overflow` expects the whole body `(thread stack, caught at the vector)`, which only that path prints, and `overflow_stack_guard` `(overflow-stack guard)`; the prefix every consumer matches is unchanged), `... recursive kernel fault`,
 `... el1-sync recursion` (printed by `arch/arm64/exception.c`'s recursion
 guard, not by `extinction()`), and, since 2026-10-14, `EXTINCTION: peer chatter:
 this banner must reach the wire whole` (`extinction_peer_chatter`, which

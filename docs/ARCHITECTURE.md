@@ -397,7 +397,8 @@ None at Gate 3. KASLR seed entropy source on bare metal Pi 5+ is a Phase post-v1
 
 Kernel VA breakdown:
   0xFFFF_0000_0000_0000 – 0xFFFF_7FFF_FFFF_FFFF   Direct map (linear phys)
-  0xFFFF_8000_0000_0000 – 0xFFFF_9FFF_FFFF_FFFF   Vmalloc / kmap
+  0xFFFF_8000_0000_0000 – 0xFFFF_8FFF_FFFF_FFFF   Vmalloc / kmap
+  0xFFFF_9000_0000_0000 – 0xFFFF_9FFF_FFFF_FFFF   Kernel stacks (the first 16 GiB in use)
   0xFFFF_A000_0000_0000 – 0xFFFF_BFFF_FFFF_FFFF   Kernel modules + KASLR
   0xFFFF_C000_0000_0000 – 0xFFFF_FFFF_FFFF_FFFF   Per-CPU + percpu data
 ```
@@ -715,7 +716,7 @@ struct Proc {
 
 A `Thread` owns:
 - A register context (GPRs, PC, SP, PSTATE — saved/restored on context switch).
-- A kernel stack (`THREAD_STACK_SIZE = 16 KiB` default, with a guard page).
+- A kernel stack (`THREAD_STACK_SIZE = 16 KiB` default, four pages, over a 16 KiB guard of unmapped address space in the kernel stack range).
 - A signal mask (note mask, more precisely — Plan 9 idiom).
 - A per-thread `errstr` buffer (`struct errstr { char buf[ERRMAX]; }`).
 - The `TPIDR_EL0` register value (TLS pointer; set on context switch).
@@ -796,7 +797,7 @@ Validated by `specs/thread_reap.tla`'s C6 additions (spec-first by operator vote
 
 ### 7.3.5 What a thread costs (thread-model C6)
 
-A user process's thread is charged to the user pool (`mm/phys.h`): its kernel stack block (eight pages, the guard included) and one page for its slot, `THREAD_POOL_PAGES` = 9 pages (36 KiB). Until C6 kernel stacks came out of the TCB reserve, so threads under the per-process cap still drew on memory the kernel had set aside for itself; the pool's bound now covers threads as it covers user pages (operator vote 4, 2026-10-21). Linux likewise charges a task's kernel stack and `task_struct` to its memory cgroup (`memcg_charge_kernel_stack`, `SLAB_ACCOUNT`).
+A user process's thread is charged to the user pool (`mm/phys.h`): its kernel stack's four pages (the guard is address space and costs nothing) and one page for its slot, `THREAD_POOL_PAGES` = 5 pages (20 KiB). Until C6 kernel stacks came out of the TCB reserve, so threads under the per-process cap still drew on memory the kernel had set aside for itself; the pool's bound now covers threads as it covers user pages (operator vote 4, 2026-10-21). Linux likewise charges a task's kernel stack and `task_struct` to its memory cgroup (`memcg_charge_kernel_stack`, `SLAB_ACCOUNT`).
 
 - **Who pays.** The charge is taken at create, after the tid and before anything is allocated, from the process the thread works for: its own, or, for a kernel thread that works for a user process (a Loom's SQPOLL poller), that process (`thread_create_kthread_for`). An exempt process (the TCB, I-32) is counted and never refused, as for its user pages. kproc's own threads cost the pool nothing: they are the reserve's, as are the C2 cache's idle stacks (at most `THREAD_KSTACK_CACHE_MAX`).
 - **Refused.** A refused charge fails the create with nothing allocated: ENOMEM from a thread spawn or a clone, -1 from `rfork` and from a SQPOLL setup. As for a user page, the pool first reclaims idle image pages before it refuses.
@@ -2244,8 +2245,9 @@ LOWER bound on the true worst case, so the one observation that would matter is
 a boot whose measured peak EXCEEDS the static bound -- which would prove the
 graph missed an edge. That observation is now taken on every boot rather than
 by hand, which is the only form in which it would ever be taken at all (#245).
-The guard pages remain the safety net under both numbers: an overflow faults
-into a no-access page and extincts, it does not corrupt a neighbour.
+The guard remains the safety net under both numbers: a frame bound for its
+unmapped address space is caught at the vector and extincts on the CPU's overflow
+stack, it does not corrupt a neighbour.
 
 #### Two things that are load-bearing only in prose, and get instruments here
 

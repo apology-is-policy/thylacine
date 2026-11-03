@@ -23,8 +23,12 @@
 #                     at the target's first instruction, which a dump naming
 #                     a live ELR at a call would print as the symbol before
 #                     it
-#   kstack_overflow — per-thread kstack guard page fires (P2-Dc) →
-#                     "EXTINCTION: kernel stack overflow"
+#   kstack_overflow — a thread stack's frame reaches its guard, and the
+#                     vector takes it to the overflow stack →
+#                     "EXTINCTION: kernel stack overflow (thread stack, caught at
+#                     the vector)"
+#   overflow_stack_guard — an overflow stack's guard page fires →
+#                     "EXTINCTION: kernel stack overflow (overflow-stack guard)"
 #   secondary_stack_guard — secondary-CPU boot-stack guard page fires
 #                     (P5-secondary-stack-guard) →
 #                     "EXTINCTION: kernel stack overflow"
@@ -119,7 +123,7 @@ fi
 
 # variant → expected extinction substring (case-sensitive prefix match
 # against the EXTINCTION: line). Keep the case below in sync with this.
-ALL_VARIANTS="canary_smash wxe_violation wxe_install_kernel wxe_install_block wxe_install_gib wxe_install_user bti_fault kstack_overflow secondary_stack_guard bootcpu_idle_guard recursive_kernel_fault el1_sync_runaway extinction_peer_chatter extinction_mmu_off vbar_pre_reloc vbar_pre_mmu vbar_boot_main no_entropy"
+ALL_VARIANTS="canary_smash wxe_violation wxe_install_kernel wxe_install_block wxe_install_gib wxe_install_user bti_fault kstack_overflow secondary_stack_guard bootcpu_idle_guard overflow_stack_guard recursive_kernel_fault el1_sync_runaway extinction_peer_chatter extinction_mmu_off vbar_pre_reloc vbar_pre_mmu vbar_boot_main no_entropy"
 
 # Launcher settings a variant boots under, word-split into run-vm.sh's
 # environment. Empty = the caller's own.
@@ -193,7 +197,8 @@ expected_for() {
         wxe_install_gib)    echo "EXTINCTION: PTE violates W^X at install (kernel L1 block)" ;;
         wxe_install_user)   echo "EXTINCTION: PTE violates W^X at install (user page)" ;;
         bti_fault)       echo "EXTINCTION: BTI fault" ;;
-        kstack_overflow) echo "EXTINCTION: kernel stack overflow" ;;
+        kstack_overflow) echo "EXTINCTION: kernel stack overflow (thread stack, caught at the vector)" ;;
+        overflow_stack_guard) echo "EXTINCTION: kernel stack overflow (overflow-stack guard)" ;;
         secondary_stack_guard) echo "EXTINCTION: kernel stack overflow" ;;
         bootcpu_idle_guard)    echo "EXTINCTION: kernel stack overflow" ;;
         recursive_kernel_fault) echo "EXTINCTION: recursive kernel fault" ;;

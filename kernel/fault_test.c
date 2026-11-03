@@ -135,11 +135,12 @@ static void provoke_bti_fault(void) {
 
 // ---------------------------------------------------------------------------
 // kstack_overflow — recurse on a thread_create'd kstack until SP runs
-// off the bottom of the 16 KiB usable region into the 16 KiB guard.
-// The guard pages are mapped no-access (P2-Dc); the next memory access
-// raises a data abort with FAR inside the guard region. The exception
-// handler's addr_is_stack_guard() recognizes the FAR is inside the
-// current thread's kstack guard and emits "kernel stack overflow".
+// off the bottom of the 16 KiB usable region into the 16 KiB guard, which is
+// unmapped address space. The next store raises a data abort with SP in the
+// guard, and the 0x200 vector, reading that SP, takes the frame to the CPU's
+// overflow stack. The gate expects the body that path alone prints: a stack
+// whose slot below happens to be mapped would otherwise pass by descending into
+// it, without the vector having done anything.
 //
 // Each recursion frame allocates a 1 KiB volatile array; ~16 frames
 // chew through the 16 KiB usable stack and SP drops into the guard.
@@ -212,6 +213,24 @@ static void provoke_secondary_stack_guard(void) {
     // Launder the pointer through inline asm so clang cannot prove the
     // store targets a known BSS object and elide it.
     volatile char *g = (volatile char *)&g_secondary_boot_stacks[0].guard[0];
+    __asm__ __volatile__("" : "+r"(g));
+    *g = (char)0xA5;
+}
+#endif
+
+// ---------------------------------------------------------------------------
+// overflow_stack_guard — write into an overflow stack's guard page (smp.h),
+// mapped no-access by build_page_tables. The dump that runs on one has this below
+// it, and a stack the gate never saw fault is a guess.
+// ---------------------------------------------------------------------------
+
+#ifdef THYLACINE_FAULT_TEST_overflow_stack_guard
+#include <thylacine/smp.h>
+
+__attribute__((noinline))
+__attribute__((no_stack_protector))
+static void provoke_overflow_stack_guard(void) {
+    volatile char *g = (volatile char *)&g_overflow_stacks[1].guard[0];
     __asm__ __volatile__("" : "+r"(g));
     *g = (char)0xA5;
 }
@@ -428,6 +447,10 @@ void fault_test_run(void) {
     uart_puts("  fault-test: invoking secondary_stack_guard...\n");
     provoke_secondary_stack_guard();
     uart_puts("FAIL: provoke_secondary_stack_guard returned (guard did not fire)\n");
+#elif defined(THYLACINE_FAULT_TEST_overflow_stack_guard)
+    uart_puts("  fault-test: invoking overflow_stack_guard...\n");
+    provoke_overflow_stack_guard();
+    uart_puts("FAIL: provoke_overflow_stack_guard returned (guard did not fire)\n");
 #elif defined(THYLACINE_FAULT_TEST_bootcpu_idle_guard)
     uart_puts("  fault-test: invoking bootcpu_idle_guard...\n");
     provoke_bootcpu_idle_guard();

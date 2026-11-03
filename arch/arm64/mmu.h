@@ -166,6 +166,14 @@ struct AddrSpace;             // <thylacine/addrspace.h>: the user tree's owner 
 
 #define VMALLOC_BASE  0xFFFF800000000000ull
 
+// The kernel stack range (ARCH 6.2): where a thread's stack is mapped, so that
+// its guard is address space and costs no memory. 16 GiB of address space is
+// 512 Ki stacks at 32 KiB, and the direct map's 8 GiB can back no more than that
+// at 16 KiB each, so this range is never what refuses a stack (thread.c pins it).
+#define KSTACK_RANGE_BASE  0xFFFF900000000000ull
+#define KSTACK_L2_TABLES   16u
+#define KSTACK_RANGE_SIZE  ((u64)KSTACK_L2_TABLES << 30)
+
 // User-half VA upper bound (exclusive). ARM IHI 0487 D5.2.4: with 48-bit
 // VAs and no TBI, valid TTBR0 addresses occupy bits [46:0]; bits 63..47
 // must be all-0 (bit 47 is the TTBR selector — set for TTBR1, clear for
@@ -280,6 +288,15 @@ void mmu_fault_test_wxe_install(void);
 // B2.7.1 break-before-make: zero the entry, dsb_ishst, tlbi_vmalle1is,
 // dsb_ish, isb).
 void mmu_retire_ttbr0_identity(void);
+
+// Maps pa[0..n) at `va` in the kernel stack range, all within one 2 MiB. False
+// only when the L3 table that needs cannot be allocated; a table once made stays
+// (mmu.c). The caller owns `va`, and nothing has it mapped.
+bool mmu_kstack_map(u64 va, const paddr_t *pa, unsigned n);
+
+// Unmaps them, every CPU's TLB included, and says what they were. On return the
+// address can be handed out again and the pages freed.
+void mmu_kstack_unmap(u64 va, paddr_t *pa, unsigned n);
 
 #ifdef KERNEL_TESTS
 // P3-Bca: per-thread kstack guard pages — direct map flavor.
@@ -573,6 +590,8 @@ long mmu_cross_proc_write(paddr_t pgtable_root, u64 vaddr, const void *src, long
 // functions that are static in a production build (VISIBLE_IF_KERNEL_TESTS).
 u64 mmu_directmap_tlbi_operand_for_test(paddr_t pa);
 u64 mmu_guard_toggles_for_test(void);
+u64 mmu_kstack_changes_for_test(void);   // maps + unmaps
+u32 mmu_kstack_tables_for_test(void);    // L3 tables made so far
 bool mmu_kva_readable_for_test(const void *kva);
 #endif // KERNEL_TESTS
 
