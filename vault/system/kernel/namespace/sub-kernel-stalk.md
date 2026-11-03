@@ -801,7 +801,10 @@ to `T_E_IO` — never errno 1), or `T_E_IO` (OOM, cross failure, transport).
 The kernel's own `perm_check` is the ACCES authority for what the resolver gates; a
 server's own `EACCES` crosses by value like any other reason. `clone_walk_zero` and
 `stalk_union_has_child` call the vtable raw on purpose: a cross failure has its
-caller's disposition, and the readdir merge's presence probe reports nothing.
+caller's disposition, and the readdir merge's presence probe reports nothing. A member
+that cannot answer that probe reads as not holding the name, so the later entry is still
+listed: a name may show twice in a listing, and is never lost to a member that could not
+say. No create or unlink follows from it; both ask `stalk_union_member_holding`.
 
 ## Performance
 

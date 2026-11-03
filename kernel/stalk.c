@@ -272,7 +272,9 @@ int stalk_cross_mounts(struct Proc *p, struct Spoor *probe,
 // cleanups exactly (NULL / reuse-violation share the parent aux -> detach+unref;
 // nqid mismatch reused nc -> clunk-safe). No perm_check, no symlink follow: this
 // asks only whether the NAME is present, so an earlier member's entry shadows a
-// later member's same-named entry regardless of access or link-ness.
+// later member's same-named entry regardless of access or link-ness. A member that
+// cannot answer reads as not holding the name: the later entry is still listed, so a
+// listing may show a name twice and never loses one to a member that could not say.
 bool stalk_union_has_child(struct Proc *p, struct Spoor *dir,
                            const char *name, u32 namelen) {
     (void)p;

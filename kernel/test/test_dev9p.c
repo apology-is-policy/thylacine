@@ -4738,9 +4738,19 @@ void test_dev9p_walk_enosys_reads_eio(void) {
         struct Walkqid *w = dev_walk(root, nc, &name, 1, &why);
         bool failed = w == NULL;
         if (w) { walkqid_free(w); spoor_clunk(nc); } else { nc->aux = NULL; spoor_unref(nc); }
+        // The clone walk, nname 0, has its own arm.
+        struct Spoor *nc0 = spoor_clone(root);
+        if (!nc0) { teardown(root); TEST_ASSERT(false, "clone"); }
+        g_walk_lerror_ecode = ecodes[i];
+        int why0 = -1;
+        struct Walkqid *w0 = dev_walk(root, nc0, NULL, 0, &why0);
+        bool failed0 = w0 == NULL;
+        if (w0) { walkqid_free(w0); spoor_clunk(nc0); } else { nc0->aux = NULL; spoor_unref(nc0); }
         teardown(root);
         TEST_ASSERT(failed, "the walk failed");
         TEST_EXPECT_EQ(why, T_E_IO, "the server is broken: EIO");
+        TEST_ASSERT(failed0, "the clone walk failed");
+        TEST_EXPECT_EQ(why0, T_E_IO, "and it says EIO too");
     }
 }
 

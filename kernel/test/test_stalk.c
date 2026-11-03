@@ -377,8 +377,8 @@ static int fix_stat_qid(u64 qid_path, struct t_stat *out) {
 static int g_fix_stat_calls;
 
 static int fix_stat_native(struct Spoor *c, struct t_stat *out) {
-    if (g_fix_stat_err_qid && c->qid.path == g_fix_stat_err_qid) return -T_E_IO;
     if (!c || !out) return -1;
+    if (g_fix_stat_err_qid && c->qid.path == g_fix_stat_err_qid) return -T_E_IO;
     g_fix_stat_calls++;
     return fix_stat_qid(c->qid.path, out);
 }
@@ -5323,6 +5323,12 @@ void test_stalk_union_walk_failure(void) {
     if (held_past) spoor_clunk(held_past);
     g_fix_stat_err_qid = 0;
 
+    walk_reason_set("shared", 22, -T_E_IO, 0);
+    bool dedup_failed = stalk_union_has_child(&p, um1, "shared", 6);
+    walk_reason_clear();
+    bool dedup_held   = stalk_union_has_child(&p, um1, "shared", 6);
+    bool dedup_missed = stalk_union_has_child(&p, um1, "nosuch", 6);
+
     struct Spoor *q4 = stalk_err(&p, root, "umpt/nosuch", 11, STALK_OPEN, 0, &e_plain);
     struct Spoor *m2 = stalk_union_member_holding(&p, pt, "nosuch", &h_plain);
     struct Spoor *m3 = stalk_union_member_holding(&p, pt, "only1", &h_held);
@@ -5342,6 +5348,9 @@ void test_stalk_union_walk_failure(void) {
     TEST_ASSERT(m0_qid != 0, "the member holding a leaf: a later member still answers");
     TEST_EXPECT_EQ(h_skip, 0, "and that is no error either");
     TEST_ASSERT(none, "a name no member could produce resolves to nothing");
+    TEST_ASSERT(!dedup_failed, "a member that cannot answer hides no later member's entry");
+    TEST_ASSERT(dedup_held, "control: a member that holds the name shadows it");
+    TEST_ASSERT(!dedup_missed, "control: a member that misses it does not");
     TEST_EXPECT_EQ(e_first, T_E_IO, "the first member failed, no other holds it: EIO");
     TEST_EXPECT_EQ(e_second, T_E_IO, "a miss, then a failure: EIO");
     TEST_EXPECT_EQ(e_named, T_E_NOENT, "a member's own ENOENT is a miss");
@@ -5385,26 +5394,30 @@ void test_stalk_fused_failure_keeps_the_x_gate(void) {
 
 // A spawn is a walk: it reports the walk's reason, and only a miss reads ENOENT. A
 // file the walk found and the loader cannot use is no miss either.
+static int spawn_reason(struct Proc *p, const char *path, size_t len) {
+    return sys_spawn_full_argv_debug_for_proc(p, path, len, NULL, 0u, 0u, NULL, 0u,
+                                              CAP_NONE, 0u, false, 0u, 0u, NULL, 0u,
+                                              NULL, 0u, 0u, 0u);
+}
+
 void test_stalk_spawn_reports_the_walk_reason(void) {
     fixmade_reset();
     struct Proc *p = ocp_proc("/");
     TEST_ASSERT(p != NULL, "proc + territory");
     walk_reason_set("wf", 0, -T_E_IO, 0);
-    int refused = sys_spawn_full_argv_debug_for_proc(p, "/a/wf", 5, NULL, 0u, 0u, NULL, 0u,
-                                                     CAP_NONE, 0u, false, 0u, 0u, NULL, 0u,
-                                                     NULL, 0u, 0u, 0u);
+    int refused = spawn_reason(p, "/a/wf", 5);
     walk_reason_set("wf", 0, -116, 0);
-    int stale = sys_spawn_full_argv_debug_for_proc(p, "/a/wf", 5, NULL, 0u, 0u, NULL, 0u,
-                                                   CAP_NONE, 0u, false, 0u, 0u, NULL, 0u,
-                                                   NULL, 0u, 0u, 0u);
+    int stale = spawn_reason(p, "/a/wf", 5);
     walk_reason_clear();
-    int missed = sys_spawn_full_argv_debug_for_proc(p, "/a/wf", 5, NULL, 0u, 0u, NULL, 0u,
-                                                    CAP_NONE, 0u, false, 0u, 0u, NULL, 0u,
-                                                    NULL, 0u, 0u, 0u);
+    int missed = spawn_reason(p, "/a/wf", 5);
+    int denied = spawn_reason(p, "/nox/sekret", 11);
+    int unreadable = spawn_reason(p, "/xfile", 6);   // the fixture Dev has no read op
     ocp_teardown(p);
     TEST_EXPECT_EQ(refused, -T_E_IO, "a binary's walk failed: EIO, not absent");
     TEST_EXPECT_EQ(stale, -116, "the server's own errno, by value");
     TEST_EXPECT_EQ(missed, -T_E_NOENT, "control: a real miss reads ENOENT");
+    TEST_EXPECT_EQ(denied, -T_E_ACCES, "the X-search denied it: EACCES, not absent");
+    TEST_EXPECT_EQ(unreadable, -T_E_ACCES, "a Dev with no read: EACCES");
 }
 
 // The fused run went through and the re-walk to its split or its link did not.
