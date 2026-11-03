@@ -3359,6 +3359,9 @@ static const char *loom_operation_storage_case(struct Loom *l,struct Proc *creat
     spin_lock(&creator->as->lock);creator->as->page_budget=old_budget;spin_unlock(&creator->as->lock);
     OS(!refused && creator->as->page_count==baseline && !loom_private_node_rollback(l,uncharged),
        "a SCOPE reservation costs no page at the same budget");
+    OS(!loom_private_node_prepare(l,creator,&bare,&uncharged) && creator->as->page_count==baseline &&
+       !l->service_slots->clunk_storage[uncharged.slot] && !loom_private_node_rollback(l,uncharged),
+       "a SCOPE reservation holds no page with room in the budget");
     OS(!loom_private_node_prepare(l,creator,&reserve,&child) && creator->as->page_count==baseline+1 &&
        l->service_slots->clunk_storage[child.slot],"a FID RESERVE charges and holds one page");
     OS(!loom_private_node_rollback(l,child) && creator->as->page_count==baseline &&
@@ -3366,6 +3369,10 @@ static const char *loom_operation_storage_case(struct Loom *l,struct Proc *creat
     OS(!loom_private_node_prepare(l,creator,&reserve,&child) && !loom_private_node_publish(l,child) &&
        !loom_private_node_reap_unused(l,child) && creator->as->page_count==baseline &&
        !l->service_slots->clunk_storage[child.slot],"an unused FID's reap frees and refunds the page");
+    OS(!loom_private_node_prepare(l,creator,&reserve,&child) &&
+       loom_private_operation_prepare_clunk(l,scope,child,917,0,0,&other)==-T_E_NOENT && !other &&
+       l->service_slots->clunk_storage[child.slot] && !loom_private_node_rollback(l,child) &&
+       creator->as->page_count==baseline,"a FID not yet published has no CLUNK");
     // A CLUNK takes that page: at the budget, with the allocator refusing, no page moves.
     OS(!loom_private_node_prepare(l,creator,&reserve,&child) && !loom_private_node_publish(l,child),
        "a FID for the CLUNK legs");
