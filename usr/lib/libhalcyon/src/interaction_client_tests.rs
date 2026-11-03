@@ -70,11 +70,20 @@ impl Server {
         }
         let bytes = match request {
             Request::Hello => Response::Hello { session: 77 }.encode(id),
-            Request::Bind { session, context, epoch } => {
+            Request::Bind {
+                session,
+                context,
+                epoch,
+            } => {
                 assert_eq!((session, context, epoch), (77, CONTEXT, EPOCH));
                 Response::Bound { controller: 5 }.encode(id)
             }
-            Request::Mode { scope, sequence, mode, .. } => {
+            Request::Mode {
+                scope,
+                sequence,
+                mode,
+                ..
+            } => {
                 assert_eq!(scope.controller, 5);
                 self.modes.push((sequence, mode));
                 Response::Mode.encode(id)
@@ -91,23 +100,40 @@ impl Server {
             Request::Read { offset, count, .. } => {
                 let start = (offset as usize).min(self.clipboard.len());
                 let end = (start + count as usize).min(self.clipboard.len());
-                Response::Read { offset, data: &self.clipboard[start..end] }.encode(id)
+                Response::Read {
+                    offset,
+                    data: &self.clipboard[start..end],
+                }
+                .encode(id)
             }
             Request::Begin { .. } => {
                 self.write_slots.clear();
                 self.transfer += 1;
-                Response::Begun { transfer: self.transfer }.encode(id)
+                Response::Begun {
+                    transfer: self.transfer,
+                }
+                .encode(id)
             }
             Request::Write { offset, data, .. } => {
-                assert_eq!(offset as usize, self.write_slots.len(), "contiguous offsets");
+                assert_eq!(
+                    offset as usize,
+                    self.write_slots.len(),
+                    "contiguous offsets"
+                );
                 self.write_slots.extend_from_slice(data);
-                Response::Written { count: data.len() as u32 }.encode(id)
+                Response::Written {
+                    count: data.len() as u32,
+                }
+                .encode(id)
             }
             Request::Commit { expected, .. } => {
                 assert_eq!(expected, self.generation);
                 self.clipboard = core::mem::take(&mut self.write_slots);
                 self.generation += 1;
-                Response::Committed { generation: self.generation }.encode(id)
+                Response::Committed {
+                    generation: self.generation,
+                }
+                .encode(id)
             }
             Request::Cancel { .. } => Response::Cancelled.encode(id),
             Request::Unbind { .. } => Response::Unbound.encode(id),
@@ -134,14 +160,24 @@ fn drive(c: &mut Client, s: &mut Server, now: u64) -> Vec<&'static str> {
             None => return seen,
             Some(Step::Connect) => Action::Connect,
             Some(Step::Close) => Action::Close,
-            Some(Step::Write { lane, offset, bytes }) => {
+            Some(Step::Write {
+                lane,
+                offset,
+                bytes,
+            }) => {
                 let i = index(lane);
-                assert_eq!(offset as usize, s.wires[i].record.len(), "contiguous from zero");
+                assert_eq!(
+                    offset as usize,
+                    s.wires[i].record.len(),
+                    "contiguous from zero"
+                );
                 Action::Write(lane, bytes.to_vec())
             }
-            Some(Step::Read { lane, offset, count }) => {
-                Action::Read(lane, offset as usize, count as usize)
-            }
+            Some(Step::Read {
+                lane,
+                offset,
+                count,
+            }) => Action::Read(lane, offset as usize, count as usize),
         };
         match action {
             Action::Connect => {
@@ -229,10 +265,18 @@ fn a_mode_report_connects_then_hello_bind_and_report_in_order() {
     let c = bound(&mut s, 0);
     assert_eq!(
         s.log,
-        vec![Operation::Hello, Operation::BindController, Operation::ReportMode]
+        vec![
+            Operation::Hello,
+            Operation::BindController,
+            Operation::ReportMode
+        ]
     );
     assert_eq!(s.modes, vec![(1, Mode::Normal)]);
-    assert_eq!(c.next_deadline(), None, "bound and idle owes nothing, so the host may sleep");
+    assert_eq!(
+        c.next_deadline(),
+        None,
+        "bound and idle owes nothing, so the host may sleep"
+    );
 }
 
 #[test]
@@ -255,14 +299,20 @@ fn mode_reports_coalesce_while_one_is_in_flight() {
         c.report_mode(m, false, "Nora", 0).unwrap();
         drive(&mut c, &mut s, 0);
     }
-    assert_eq!(s.operations(Operation::ReportMode), 1, "one in flight, nothing queued behind it");
+    assert_eq!(
+        s.operations(Operation::ReportMode),
+        1,
+        "one in flight, nothing queued behind it"
+    );
     // The answer lands: only the latest follows.
     s.hold = None;
     s.wires[0].refusal = None;
     let id = c.lanes[0].as_ref().unwrap().id;
     s.wires[0].reply = Response::Mode.encode(id).unwrap();
     drive(&mut c, &mut s, 0);
-    let Some(exchange) = c.lanes[0].as_ref() else { panic!("the read was still owed") };
+    let Some(exchange) = c.lanes[0].as_ref() else {
+        panic!("the read was still owed")
+    };
     assert!(exchange.in_flight);
     let reply = s.wires[0].reply.clone();
     c.read(Lane::Control, &reply, 0);
@@ -279,15 +329,25 @@ fn an_unchanged_mode_is_not_sent_again() {
     assert_eq!(s.operations(Operation::ReportMode), 1);
     c.report_mode(Mode::Normal, true, "Nora", 0).unwrap();
     drive(&mut c, &mut s, 0);
-    assert_eq!(s.operations(Operation::ReportMode), 2, "readonly is part of the report");
+    assert_eq!(
+        s.operations(Operation::ReportMode),
+        2,
+        "readonly is part of the report"
+    );
 }
 
 #[test]
 fn a_bad_label_is_refused_before_anything_is_sent() {
     let mut c = Client::new();
-    assert_eq!(c.report_mode(Mode::Normal, false, "a\nb", 0), Err(Refusal::NotText));
+    assert_eq!(
+        c.report_mode(Mode::Normal, false, "a\nb", 0),
+        Err(Refusal::NotText)
+    );
     let long = "x".repeat(MAX_LABEL + 1);
-    assert_eq!(c.report_mode(Mode::Normal, false, &long, 0), Err(Refusal::TooLarge));
+    assert_eq!(
+        c.report_mode(Mode::Normal, false, &long, 0),
+        Err(Refusal::TooLarge)
+    );
     assert_eq!(c.next_step(0), None);
 }
 
@@ -302,7 +362,11 @@ fn bind_retries_gone_and_busy_on_its_deadline_without_sleeping() {
     c.report_mode(Mode::Normal, false, "Nora", 0).unwrap();
     drive(&mut c, &mut s, 0);
     assert!(!c.is_bound());
-    assert_eq!(c.next_deadline(), Some(BIND_RETRY_NS), "the retry is a deadline, not a sleep");
+    assert_eq!(
+        c.next_deadline(),
+        Some(BIND_RETRY_NS),
+        "the retry is a deadline, not a sleep"
+    );
     // Nothing happens before it, however often the host pumps.
     drive(&mut c, &mut s, BIND_RETRY_NS - 1);
     assert_eq!(s.operations(Operation::BindController), 1);
@@ -324,8 +388,14 @@ fn bind_gives_up_after_its_attempts_and_says_so_to_a_job() {
         drive(&mut c, &mut s, now);
         now += BIND_RETRY_NS;
     }
-    assert_eq!(s.operations(Operation::BindController), BIND_ATTEMPTS as usize);
-    assert_eq!(c.take_event(), Some(Event::PasteFailed(Why::Refused(Failure::Gone))));
+    assert_eq!(
+        s.operations(Operation::BindController),
+        BIND_ATTEMPTS as usize
+    );
+    assert_eq!(
+        c.take_event(),
+        Some(Event::PasteFailed(Why::Refused(Failure::Gone)))
+    );
 }
 
 #[test]
@@ -336,7 +406,11 @@ fn a_denied_bind_is_not_retried_until_the_host_asks_again() {
     c.report_mode(Mode::Normal, false, "Nora", 0).unwrap();
     drive(&mut c, &mut s, 0);
     assert_eq!(s.closes, 1);
-    assert_eq!(c.next_deadline(), None, "a background process does not hammer the server");
+    assert_eq!(
+        c.next_deadline(),
+        None,
+        "a background process does not hammer the server"
+    );
     c.report_mode(Mode::Insert, false, "Nora", SEC).unwrap();
     drive(&mut c, &mut s, SEC);
     assert_eq!(s.connects, 2);
@@ -369,7 +443,10 @@ fn reconnects_back_off_and_stop_until_the_host_asks_again() {
         let Some(at) = c.next_deadline() else { break };
         gaps.push(at - now);
         now = at;
-        assert!(gaps.len() <= RECONNECT_ATTEMPTS as usize, "the retries must end");
+        assert!(
+            gaps.len() <= RECONNECT_ATTEMPTS as usize,
+            "the retries must end"
+        );
     }
     assert_eq!(gaps.len(), RECONNECT_ATTEMPTS as usize);
     assert_eq!(gaps[0], RECONNECT_MIN_NS);
@@ -395,7 +472,11 @@ fn a_lost_connection_rebinds_and_reports_the_mode_again() {
     let at = c.next_deadline().unwrap();
     drive(&mut c, &mut s, at);
     assert!(c.is_bound());
-    assert_eq!(s.modes.len(), 3, "the report the cut lost goes again on the new connection");
+    assert_eq!(
+        s.modes.len(),
+        3,
+        "the report the cut lost goes again on the new connection"
+    );
     assert_eq!(s.modes.last().unwrap().1, Mode::Insert);
     assert_eq!(s.operations(Operation::Hello), 2);
 }
@@ -518,7 +599,10 @@ fn a_refused_commit_is_a_definite_failure_and_releases_its_transfer() {
     c.copy(text(10), 0).unwrap();
     s.log.clear();
     drive(&mut c, &mut s, 0);
-    assert_eq!(c.take_event(), Some(Event::CopyFailed(Why::Refused(Failure::Conflict))));
+    assert_eq!(
+        c.take_event(),
+        Some(Event::CopyFailed(Why::Refused(Failure::Conflict)))
+    );
     assert_eq!(s.log.last(), Some(&Operation::Cancel));
     assert!(c.is_bound());
     c.paste(0).unwrap();
@@ -557,7 +641,11 @@ fn a_clipboard_that_is_not_text_is_never_delivered() {
     s.clipboard = b"a\x1b[31m".to_vec();
     c.paste(0).unwrap();
     drive(&mut c, &mut s, 0);
-    assert_eq!(s.operations(Operation::Cancel), 1, "the snapshot is still released");
+    assert_eq!(
+        s.operations(Operation::Cancel),
+        1,
+        "the snapshot is still released"
+    );
     assert_eq!(c.take_event(), Some(Event::PasteFailed(Why::Malformed)));
 }
 
@@ -569,9 +657,15 @@ fn a_refused_read_fails_the_paste_and_releases_the_snapshot() {
     s.refuse = vec![(Operation::ReadClipboard, -22)];
     c.paste(0).unwrap();
     drive(&mut c, &mut s, 0);
-    assert_eq!(c.take_event(), Some(Event::PasteFailed(Why::Refused(Failure::Invalid))));
+    assert_eq!(
+        c.take_event(),
+        Some(Event::PasteFailed(Why::Refused(Failure::Invalid)))
+    );
     assert_eq!(s.log.last(), Some(&Operation::Cancel));
-    assert!(c.paste(0).is_ok(), "the release finished, so the next job may start");
+    assert!(
+        c.paste(0).is_ok(),
+        "the release finished, so the next job may start"
+    );
 }
 
 #[test]
@@ -623,10 +717,99 @@ fn a_reply_with_the_wrong_identity_ends_the_connection() {
     c.paste(0).unwrap();
     drive(&mut c, &mut s, 0);
     let id = c.lanes[1].as_ref().unwrap().id;
-    let wrong = Response::Clipboard { transfer: 1, generation: 0, length: 0 }.encode(id + 1).unwrap();
+    let wrong = Response::Clipboard {
+        transfer: 1,
+        generation: 0,
+        length: 0,
+    }
+    .encode(id + 1)
+    .unwrap();
     c.read(Lane::Transfer, &wrong, 0);
     assert_eq!(c.take_event(), Some(Event::PasteFailed(Why::Malformed)));
     assert_eq!(drive(&mut c, &mut s, 0)[0], "close");
+}
+
+/// The header alone decides, so a server cannot make the client read a record it has
+/// already said is not the reply.
+#[test]
+fn a_header_that_is_not_the_reply_ends_the_connection_without_reading_on() {
+    let body = [b'x'; 100];
+    for case in 0..3 {
+        let mut s = Server::new();
+        let mut c = bound(&mut s, 0);
+        s.hold = Some(Operation::GetClipboard);
+        c.paste(0).unwrap();
+        drive(&mut c, &mut s, 0);
+        let id = c.lanes[1].as_ref().unwrap().id;
+        let scope = c.scope.unwrap();
+        let record = match case {
+            0 => Response::Clipboard {
+                transfer: 1,
+                generation: 0,
+                length: 0,
+            }
+            .encode(id + 1)
+            .unwrap(),
+            1 => Response::Read {
+                offset: 0,
+                data: &body,
+            }
+            .encode(id)
+            .unwrap(),
+            _ => Request::Get { scope }.encode(id).unwrap(),
+        };
+        c.read(Lane::Transfer, &record[..HEADER_BYTES], 0);
+        assert_eq!(
+            c.take_event(),
+            Some(Event::PasteFailed(Why::Malformed)),
+            "case {case}"
+        );
+    }
+}
+
+#[test]
+fn a_read_longer_than_the_record_it_announces_ends_the_connection() {
+    let mut s = Server::new();
+    let mut c = bound(&mut s, 0);
+    s.hold = Some(Operation::GetClipboard);
+    c.paste(0).unwrap();
+    drive(&mut c, &mut s, 0);
+    let id = c.lanes[1].as_ref().unwrap().id;
+    let mut record = Response::Clipboard {
+        transfer: 1,
+        generation: 0,
+        length: 0,
+    }
+    .encode(id)
+    .unwrap();
+    record.extend_from_slice(b"more than it said");
+    c.read(Lane::Transfer, &record, 0);
+    assert_eq!(c.take_event(), Some(Event::PasteFailed(Why::Malformed)));
+}
+
+#[test]
+fn a_second_copy_commits_against_the_generation_it_read() {
+    let mut s = Server::new();
+    let mut c = bound(&mut s, 0);
+    for generation in 1..=3 {
+        c.copy(text(10), 0).unwrap();
+        drive(&mut c, &mut s, 0);
+        assert_eq!(c.take_event(), Some(Event::Copied { generation }));
+    }
+}
+
+#[test]
+fn a_commit_the_server_says_is_gone_is_a_definite_failure() {
+    let mut s = Server::new();
+    let mut c = bound(&mut s, 0);
+    s.refuse = vec![(Operation::CommitCopy, ENOENT)];
+    c.copy(text(10), 0).unwrap();
+    drive(&mut c, &mut s, 0);
+    assert_eq!(
+        c.take_event(),
+        Some(Event::CopyFailed(Why::Refused(Failure::Gone)))
+    );
+    assert_eq!(c.take_event(), None);
 }
 
 #[test]
@@ -638,7 +821,12 @@ fn a_read_past_the_reply_or_an_empty_one_ends_the_connection() {
         c.paste(0).unwrap();
         drive(&mut c, &mut s, 0);
         c.read(Lane::Transfer, &bytes, 0);
-        assert_eq!(c.take_event(), Some(Event::PasteFailed(Why::Malformed)), "{}", bytes.len());
+        assert_eq!(
+            c.take_event(),
+            Some(Event::PasteFailed(Why::Malformed)),
+            "{}",
+            bytes.len()
+        );
     }
 }
 

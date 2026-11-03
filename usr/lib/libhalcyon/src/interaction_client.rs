@@ -39,7 +39,11 @@ pub enum Step<'a> {
     /// Connect, walk to the interaction file and open both lanes' fids.
     Connect,
     /// Write from the start of `bytes`; a short write is fine.
-    Write { lane: Lane, offset: u64, bytes: &'a [u8] },
+    Write {
+        lane: Lane,
+        offset: u64,
+        bytes: &'a [u8],
+    },
     /// Read up to `count`; a short read is fine.
     Read { lane: Lane, offset: u64, count: u32 },
     /// End the connection now: drop every fid, the scope and what is in flight.
@@ -61,7 +65,9 @@ pub enum Why {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Event {
-    Copied { generation: u64 },
+    Copied {
+        generation: u64,
+    },
     /// The commit may or may not have landed. Never retried: the user may copy again.
     CopyUnknown,
     CopyFailed(Why),
@@ -98,33 +104,70 @@ struct Exchange {
 }
 
 enum Link {
-    Down { retry_at: Option<u64> },
-    Connecting { deadline: u64 },
-    Hello { deadline: u64 },
-    Bind { deadline: u64, session: u64, attempt: u32, not_before: u64 },
+    Down {
+        retry_at: Option<u64>,
+    },
+    Connecting {
+        deadline: u64,
+    },
+    Hello {
+        deadline: u64,
+    },
+    Bind {
+        deadline: u64,
+        session: u64,
+        attempt: u32,
+        not_before: u64,
+    },
     Bound,
     Closing,
 }
 
 enum Job {
     Paste(PasteStage),
-    Copy { text: Vec<u8>, stage: CopyStage },
+    Copy {
+        text: Vec<u8>,
+        stage: CopyStage,
+    },
     /// A failed job's open transfer. Its event has gone; only the slot is owed.
-    Release { transfer: u64 },
+    Release {
+        transfer: u64,
+    },
 }
 enum PasteStage {
     Get,
-    Reading { transfer: u64, length: usize, bytes: Vec<u8> },
+    Reading {
+        transfer: u64,
+        length: usize,
+        bytes: Vec<u8>,
+    },
     /// All read. The bytes are the host's however the release goes.
-    Releasing { transfer: u64, result: Result<Vec<u8>, Why> },
+    Releasing {
+        transfer: u64,
+        result: Result<Vec<u8>, Why>,
+    },
 }
 enum CopyStage {
     /// The current generation, which Commit must name.
     Get,
-    ReleaseRead { transfer: u64, generation: u64 },
-    Begin { generation: u64 },
-    Writing { transfer: u64, generation: u64, offset: usize, length: usize },
-    Commit { transfer: u64, generation: u64, handed: bool },
+    ReleaseRead {
+        transfer: u64,
+        generation: u64,
+    },
+    Begin {
+        generation: u64,
+    },
+    Writing {
+        transfer: u64,
+        generation: u64,
+        offset: usize,
+        length: usize,
+    },
+    Commit {
+        transfer: u64,
+        generation: u64,
+        handed: bool,
+    },
 }
 
 pub struct Client {
@@ -195,7 +238,11 @@ impl Client {
         if label.chars().any(char::is_control) {
             return Err(Refusal::NotText);
         }
-        self.wanted = Some(ModeReport { mode, readonly, label: String::from(label) });
+        self.wanted = Some(ModeReport {
+            mode,
+            readonly,
+            label: String::from(label),
+        });
         self.want_link(now);
         Ok(())
     }
@@ -210,7 +257,10 @@ impl Client {
         if wire::clipboard_text(&text).is_err() {
             return Err(Refusal::NotText);
         }
-        self.job = Some(Job::Copy { text, stage: CopyStage::Get });
+        self.job = Some(Job::Copy {
+            text,
+            stage: CopyStage::Get,
+        });
         self.job_expires = now.saturating_add(LIFETIME_NS);
         self.want_link(now);
         Ok(())
@@ -251,9 +301,15 @@ impl Client {
         let mut soonest = match self.link {
             Link::Down { retry_at } => retry_at,
             Link::Connecting { deadline } | Link::Hello { deadline } => Some(deadline),
-            Link::Bind { deadline, not_before, .. } => {
-                Some(if self.lanes[0].is_none() { deadline.min(not_before) } else { deadline })
-            }
+            Link::Bind {
+                deadline,
+                not_before,
+                ..
+            } => Some(if self.lanes[0].is_none() {
+                deadline.min(not_before)
+            } else {
+                deadline
+            }),
             Link::Bound => None,
             Link::Closing => Some(0),
         };
@@ -273,11 +329,15 @@ impl Client {
         self.check_deadlines(now);
         match self.link {
             Link::Closing => {
-                self.link = Link::Down { retry_at: self.retry_time(now) };
+                self.link = Link::Down {
+                    retry_at: self.retry_time(now),
+                };
                 return Some(Step::Close);
             }
             Link::Down { retry_at: Some(at) } if now >= at => {
-                self.link = Link::Connecting { deadline: now.saturating_add(HANDSHAKE_NS) };
+                self.link = Link::Connecting {
+                    deadline: now.saturating_add(HANDSHAKE_NS),
+                };
                 return Some(Step::Connect);
             }
             Link::Down { .. } | Link::Connecting { .. } => return None,
@@ -291,17 +351,29 @@ impl Client {
         let exchange = self.lanes[index(lane)].as_mut()?;
         exchange.in_flight = true;
         if exchange.sent < exchange.record.len() {
-            if let Some(Job::Copy { stage: CopyStage::Commit { handed, .. }, .. }) = &mut self.job {
+            if let Some(Job::Copy {
+                stage: CopyStage::Commit { handed, .. },
+                ..
+            }) = &mut self.job
+            {
                 if lane == Lane::Transfer {
                     *handed = true;
                 }
             }
             let offset = exchange.sent as u64;
-            return Some(Step::Write { lane, offset, bytes: &exchange.record[exchange.sent..] });
+            return Some(Step::Write {
+                lane,
+                offset,
+                bytes: &exchange.record[exchange.sent..],
+            });
         }
         let got = exchange.reply.len();
         let count = exchange.length.unwrap_or(MAX_RECORD) - got;
-        Some(Step::Read { lane, offset: got as u64, count: count as u32 })
+        Some(Step::Read {
+            lane,
+            offset: got as u64,
+            count: count as u32,
+        })
     }
 
     fn check_deadlines(&mut self, now: u64) {
@@ -368,13 +440,23 @@ impl Client {
         }
         match self.link {
             Link::Hello { .. } => self.exchange(Lane::Control, Request::Hello, now),
-            Link::Bind { session, not_before, .. } if now >= not_before => self.exchange(
+            Link::Bind {
+                session,
+                not_before,
+                ..
+            } if now >= not_before => self.exchange(
                 Lane::Control,
-                Request::Bind { session, context: CONTEXT, epoch: EPOCH },
+                Request::Bind {
+                    session,
+                    context: CONTEXT,
+                    epoch: EPOCH,
+                },
                 now,
             ),
             Link::Bound if self.wanted != self.reported => {
-                let (Some(scope), Some(report)) = (self.scope, self.wanted.clone()) else { return };
+                let (Some(scope), Some(report)) = (self.scope, self.wanted.clone()) else {
+                    return;
+                };
                 self.sequence += 1;
                 let request = Request::Mode {
                     scope,
@@ -399,7 +481,11 @@ impl Client {
         match &mut job {
             Some(Job::Paste(stage)) => match stage {
                 PasteStage::Get => self.exchange(Lane::Transfer, Request::Get { scope }, now),
-                PasteStage::Reading { transfer, length, bytes } => {
+                PasteStage::Reading {
+                    transfer,
+                    length,
+                    bytes,
+                } => {
                     if bytes.len() < *length {
                         let request = Request::Read {
                             transfer: *transfer,
@@ -409,20 +495,36 @@ impl Client {
                         self.exchange(Lane::Transfer, request, now);
                     }
                 }
-                PasteStage::Releasing { transfer, .. } => {
-                    self.exchange(Lane::Transfer, Request::Cancel { transfer: *transfer }, now)
-                }
+                PasteStage::Releasing { transfer, .. } => self.exchange(
+                    Lane::Transfer,
+                    Request::Cancel {
+                        transfer: *transfer,
+                    },
+                    now,
+                ),
             },
             Some(Job::Copy { text, stage }) => match stage {
                 CopyStage::Get => self.exchange(Lane::Transfer, Request::Get { scope }, now),
-                CopyStage::ReleaseRead { transfer, .. } => {
-                    self.exchange(Lane::Transfer, Request::Cancel { transfer: *transfer }, now)
-                }
+                CopyStage::ReleaseRead { transfer, .. } => self.exchange(
+                    Lane::Transfer,
+                    Request::Cancel {
+                        transfer: *transfer,
+                    },
+                    now,
+                ),
                 CopyStage::Begin { .. } => {
-                    let request = Request::Begin { scope, length: text.len() as u32 };
+                    let request = Request::Begin {
+                        scope,
+                        length: text.len() as u32,
+                    };
                     self.exchange(Lane::Transfer, request, now);
                 }
-                CopyStage::Writing { transfer, offset, length, .. } => {
+                CopyStage::Writing {
+                    transfer,
+                    offset,
+                    length,
+                    ..
+                } => {
                     let end = (*offset + MAX_CHUNK).min(*length);
                     let request = Request::Write {
                         transfer: *transfer,
@@ -431,15 +533,26 @@ impl Client {
                     };
                     self.exchange(Lane::Transfer, request, now);
                 }
-                CopyStage::Commit { transfer, generation, .. } => {
-                    let request =
-                        Request::Commit { scope, transfer: *transfer, expected: *generation };
+                CopyStage::Commit {
+                    transfer,
+                    generation,
+                    ..
+                } => {
+                    let request = Request::Commit {
+                        scope,
+                        transfer: *transfer,
+                        expected: *generation,
+                    };
                     self.exchange(Lane::Transfer, request, now);
                 }
             },
-            Some(Job::Release { transfer }) => {
-                self.exchange(Lane::Transfer, Request::Cancel { transfer: *transfer }, now)
-            }
+            Some(Job::Release { transfer }) => self.exchange(
+                Lane::Transfer,
+                Request::Cancel {
+                    transfer: *transfer,
+                },
+                now,
+            ),
             None => {}
         }
         if self.job.is_none() {
@@ -454,9 +567,10 @@ impl Client {
         self.scope = None;
         self.reported = None;
         match self.job.take() {
-            Some(Job::Copy { stage: CopyStage::Commit { handed: true, .. }, .. }) => {
-                self.events.push_back(Event::CopyUnknown)
-            }
+            Some(Job::Copy {
+                stage: CopyStage::Commit { handed: true, .. },
+                ..
+            }) => self.events.push_back(Event::CopyUnknown),
             Some(Job::Copy { .. }) => self.events.push_back(Event::CopyFailed(why)),
             Some(Job::Paste(PasteStage::Releasing { result, .. })) => self.deliver_paste(result),
             Some(Job::Paste(_)) => self.events.push_back(Event::PasteFailed(why)),
@@ -503,7 +617,9 @@ impl Client {
     }
 
     pub fn wrote(&mut self, lane: Lane, count: usize, now: u64) {
-        let Some(exchange) = self.live(lane) else { return };
+        let Some(exchange) = self.live(lane) else {
+            return;
+        };
         exchange.in_flight = false;
         if count == 0 || count > exchange.record.len() - exchange.sent {
             self.lose_link(Why::Malformed);
@@ -514,7 +630,9 @@ impl Client {
     }
 
     pub fn read(&mut self, lane: Lane, bytes: &[u8], now: u64) {
-        let Some(exchange) = self.live(lane) else { return };
+        let Some(exchange) = self.live(lane) else {
+            return;
+        };
         exchange.in_flight = false;
         let room = exchange.length.unwrap_or(MAX_RECORD) - exchange.reply.len();
         if bytes.is_empty() || bytes.len() > room {
@@ -529,8 +647,6 @@ impl Client {
                     if h.response
                         && h.request_id == exchange.id
                         && h.operation == exchange.operation
-                        && h.length >= HEADER_BYTES
-                        && h.length <= MAX_RECORD
                         && exchange.reply.len() <= h.length =>
                 {
                     exchange.length = Some(h.length);
@@ -562,9 +678,12 @@ impl Client {
         self.lanes[index(lane)] = None;
         if lane == Lane::Control {
             match self.link {
-                Link::Bind { deadline, session, attempt, .. }
-                    if matches!(f, Failure::Gone | Failure::Busy) && attempt + 1 < BIND_ATTEMPTS =>
-                {
+                Link::Bind {
+                    deadline,
+                    session,
+                    attempt,
+                    ..
+                } if matches!(f, Failure::Gone | Failure::Busy) && attempt + 1 < BIND_ATTEMPTS => {
                     self.link = Link::Bind {
                         deadline,
                         session,
@@ -593,7 +712,10 @@ impl Client {
                 }
                 return;
             }
-            Some(Job::Copy { stage: CopyStage::ReleaseRead { generation, .. }, .. }) => {
+            Some(Job::Copy {
+                stage: CopyStage::ReleaseRead { generation, .. },
+                ..
+            }) => {
                 let generation = *generation;
                 if let Some(Job::Copy { stage, .. }) = &mut self.job {
                     *stage = CopyStage::Begin { generation };
@@ -605,12 +727,22 @@ impl Client {
                 return;
             }
             Some(Job::Paste(PasteStage::Reading { transfer, .. })) => Some(*transfer),
-            Some(Job::Copy { stage: CopyStage::Writing { transfer, .. }, .. })
-            | Some(Job::Copy { stage: CopyStage::Commit { transfer, .. }, .. }) => Some(*transfer),
+            Some(Job::Copy {
+                stage: CopyStage::Writing { transfer, .. },
+                ..
+            })
+            | Some(Job::Copy {
+                stage: CopyStage::Commit { transfer, .. },
+                ..
+            }) => Some(*transfer),
             _ => None,
         };
         if f == Failure::Gone {
-            if let Some(Job::Copy { stage: CopyStage::Commit { handed, .. }, .. }) = &mut self.job {
+            if let Some(Job::Copy {
+                stage: CopyStage::Commit { handed, .. },
+                ..
+            }) = &mut self.job
+            {
                 // A definite refusal, not a lost reply.
                 *handed = false;
             }
@@ -621,8 +753,11 @@ impl Client {
     }
 
     fn answered(&mut self, lane: Lane, now: u64) {
-        let Some(exchange) = self.lanes[index(lane)].take() else { return };
-        let Ok(response) = Response::decode(&exchange.reply, exchange.operation, exchange.id) else {
+        let Some(exchange) = self.lanes[index(lane)].take() else {
+            return;
+        };
+        let Ok(response) = Response::decode(&exchange.reply, exchange.operation, exchange.id)
+        else {
             self.lose_link(Why::Malformed);
             return;
         };
@@ -635,12 +770,20 @@ impl Client {
     fn control_answer(&mut self, response: Response<'_>, now: u64) {
         match (&self.link, response) {
             (Link::Hello { deadline }, Response::Hello { session }) => {
-                self.link =
-                    Link::Bind { deadline: *deadline, session, attempt: 0, not_before: now };
+                self.link = Link::Bind {
+                    deadline: *deadline,
+                    session,
+                    attempt: 0,
+                    not_before: now,
+                };
             }
             (Link::Bind { session, .. }, Response::Bound { controller }) => {
-                self.scope =
-                    Some(Scope { session: *session, controller, context: CONTEXT, epoch: EPOCH });
+                self.scope = Some(Scope {
+                    session: *session,
+                    controller,
+                    context: CONTEXT,
+                    epoch: EPOCH,
+                });
                 self.link = Link::Bound;
                 self.retries = RECONNECT_ATTEMPTS;
                 self.backoff = RECONNECT_MIN_NS;
@@ -654,7 +797,9 @@ impl Client {
         match (self.job.take(), response) {
             (
                 Some(Job::Paste(PasteStage::Get)),
-                Response::Clipboard { transfer, length, .. },
+                Response::Clipboard {
+                    transfer, length, ..
+                },
             ) => {
                 // length was bounded by the decoder, so this cannot be a hostile size.
                 let mut bytes = Vec::new();
@@ -665,13 +810,24 @@ impl Client {
                 }
                 let length = length as usize;
                 self.job = Some(Job::Paste(if length == 0 {
-                    PasteStage::Releasing { transfer, result: Ok(bytes) }
+                    PasteStage::Releasing {
+                        transfer,
+                        result: Ok(bytes),
+                    }
                 } else {
-                    PasteStage::Reading { transfer, length, bytes }
+                    PasteStage::Reading {
+                        transfer,
+                        length,
+                        bytes,
+                    }
                 }));
             }
             (
-                Some(Job::Paste(PasteStage::Reading { transfer, length, mut bytes })),
+                Some(Job::Paste(PasteStage::Reading {
+                    transfer,
+                    length,
+                    mut bytes,
+                })),
                 Response::Read { offset, data },
             ) => {
                 if offset as usize != bytes.len()
@@ -684,7 +840,11 @@ impl Client {
                 }
                 bytes.extend_from_slice(data);
                 self.job = Some(Job::Paste(if bytes.len() < length {
-                    PasteStage::Reading { transfer, length, bytes }
+                    PasteStage::Reading {
+                        transfer,
+                        length,
+                        bytes,
+                    }
                 } else {
                     let result = match wire::clipboard_text(&bytes) {
                         Ok(_) => Ok(bytes),
@@ -697,56 +857,105 @@ impl Client {
                 self.deliver_paste(result);
             }
             (
-                Some(Job::Copy { text, stage: CopyStage::Get }),
-                Response::Clipboard { transfer, generation, .. },
+                Some(Job::Copy {
+                    text,
+                    stage: CopyStage::Get,
+                }),
+                Response::Clipboard {
+                    transfer,
+                    generation,
+                    ..
+                },
             ) => {
                 self.job = Some(Job::Copy {
                     text,
-                    stage: CopyStage::ReleaseRead { transfer, generation },
+                    stage: CopyStage::ReleaseRead {
+                        transfer,
+                        generation,
+                    },
                 });
             }
             (
-                Some(Job::Copy { text, stage: CopyStage::ReleaseRead { generation, .. } }),
+                Some(Job::Copy {
+                    text,
+                    stage: CopyStage::ReleaseRead { generation, .. },
+                }),
                 Response::Cancelled,
             ) => {
-                self.job = Some(Job::Copy { text, stage: CopyStage::Begin { generation } });
+                self.job = Some(Job::Copy {
+                    text,
+                    stage: CopyStage::Begin { generation },
+                });
             }
             (
-                Some(Job::Copy { text, stage: CopyStage::Begin { generation } }),
+                Some(Job::Copy {
+                    text,
+                    stage: CopyStage::Begin { generation },
+                }),
                 Response::Begun { transfer },
             ) => {
                 let length = text.len();
                 let stage = if length == 0 {
-                    CopyStage::Commit { transfer, generation, handed: false }
+                    CopyStage::Commit {
+                        transfer,
+                        generation,
+                        handed: false,
+                    }
                 } else {
-                    CopyStage::Writing { transfer, generation, offset: 0, length }
+                    CopyStage::Writing {
+                        transfer,
+                        generation,
+                        offset: 0,
+                        length,
+                    }
                 };
                 self.job = Some(Job::Copy { text, stage });
             }
             (
                 Some(Job::Copy {
                     text,
-                    stage: CopyStage::Writing { transfer, generation, offset, length },
+                    stage:
+                        CopyStage::Writing {
+                            transfer,
+                            generation,
+                            offset,
+                            length,
+                        },
                 }),
                 Response::Written { count },
             ) => {
                 let asked = (length - offset).min(MAX_CHUNK);
                 let count = count as usize;
                 if count == 0 || count > asked {
-                    self.job = Some(Job::Copy { text, stage: CopyStage::Get });
+                    self.job = Some(Job::Copy {
+                        text,
+                        stage: CopyStage::Get,
+                    });
                     self.fail_job(Why::Malformed, Some(transfer));
                     return;
                 }
                 let offset = offset + count;
                 let stage = if offset < length {
-                    CopyStage::Writing { transfer, generation, offset, length }
+                    CopyStage::Writing {
+                        transfer,
+                        generation,
+                        offset,
+                        length,
+                    }
                 } else {
-                    CopyStage::Commit { transfer, generation, handed: false }
+                    CopyStage::Commit {
+                        transfer,
+                        generation,
+                        handed: false,
+                    }
                 };
                 self.job = Some(Job::Copy { text, stage });
             }
             (
-                Some(Job::Copy { stage: CopyStage::Commit { .. }, .. }),
+                Some(Job::Copy {
+                    stage: CopyStage::Commit { .. },
+                    ..
+                }),
                 Response::Committed { generation },
             ) => {
                 self.events.push_back(Event::Copied { generation });

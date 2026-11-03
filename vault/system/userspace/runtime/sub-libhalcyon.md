@@ -851,8 +851,8 @@ session's slots until it expires. `cancel` closes the connection, because only t
 sure to end a request the server has stopped answering.
 
 The tests run real HIN1 records against a scripted server
-(`interaction_client_tests.rs`). The native adapter and the guest witnesses are
-separate chunks (ASYNC-SERVICE-LIFECYCLE, "AS-4 adoption design").
+(`interaction_client_tests.rs`). Its native adapter is [[sub-interaction-native]]. The
+guest witnesses are separate chunks (ASYNC-SERVICE-LIFECYCLE, "AS-4 adoption design").
 
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)

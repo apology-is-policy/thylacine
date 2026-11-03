@@ -13,3 +13,9 @@ path = "src/lib.rs"
 
 # The native Loom client cores. They make no syscall, so the host tests them
 # (make test-rust) and libthyla-rs supplies the kernel calls, as with thyla-heap.
+
+[features]
+# The simulated kernel, for a crate that drives this adapter in its own host
+# tests. A dev-dependency only: resolver 2 keeps it out of `cargo build`, and it
+# needs std.
+sim = []

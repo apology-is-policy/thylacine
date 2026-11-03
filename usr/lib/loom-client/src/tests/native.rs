@@ -1,7 +1,6 @@
 //! The native adapter against a simulated kernel (sim.rs).
-mod sim;
 use crate::native::{POLLERR, PoolMember, Ring, Shot};
-use sim::{
+use crate::sim::{
     ABORTING, EACCES, EBADF, EBUSY, ECANCELED, EINTR, EINVAL, EIO, ENOENT, ENOSPC, ENOTDIR,
     ETIMEDOUT, RETIRED, Sim, SimKernel, SlotKind,
 };
@@ -39,6 +38,46 @@ fn setup_registers_every_buffer_and_drop_detaches_every_region() {
     drop(r);
     assert_eq!(sim.regions(), 0);
     assert_eq!(sim.s().closed_fds, vec![7]);
+}
+
+#[test]
+fn poll_fd_names_the_ring_until_it_closes_and_a_turn_at_now_never_sleeps() {
+    let sim = Sim::new();
+    let r = ring(&sim, 8, &[4096]);
+    assert_eq!(r.poll_fd(), 7);
+    // Nothing is due, so a sleeping turn would be seen as a poll.
+    sim.s().hold = true;
+    for _ in 0..3 {
+        assert_eq!(r.turn(Some(r.now())), Ok(0));
+    }
+    assert!(sim.s().polls.is_empty());
+    r.close();
+    assert_eq!(r.poll_fd(), -1);
+}
+
+#[test]
+fn a_turn_at_now_learns_a_close_a_host_poll_would_otherwise_report_for_ever() {
+    for latch in [false, true] {
+        let sim = Sim::new();
+        let r = ring(&sim, 8, &[4096]);
+        if latch {
+            sim.latch_under();
+        } else {
+            sim.close_under();
+        }
+        assert_eq!(r.turn(Some(r.now())), Err(ECANCELED as i32), "latch {latch}");
+        assert_eq!(r.poll_fd(), -1, "latch {latch}");
+        assert!(sim.s().polls.is_empty(), "latch {latch}");
+    }
+}
+
+#[test]
+fn a_failed_ring_closes_its_descriptor_so_it_leaves_the_poll_set() {
+    let sim = Sim::new();
+    let r = ring(&sim, 8, &[4096]);
+    sim.s().enter_errno = Some(EINVAL);
+    assert_eq!(r.turn(Some(r.now())), Err(EIO as i32));
+    assert_eq!(r.poll_fd(), -1);
 }
 
 #[test]
@@ -1535,7 +1574,7 @@ fn a_read_result_keeps_the_storage_until_it_drops() {
 fn admission_follows_the_kernels_order() {
     use crate::ring_records::{OP_CLUNK, OP_READ, OP_WALK, Submission};
     use crate::service_abi::{SQE_BUFFER_SELECT, SlotRef, Snapshot};
-    use sim::{ABORTING, READY, RESERVED, RETIRED, Slot};
+    use crate::sim::{ABORTING, READY, RESERVED, RETIRED, Slot};
     let mut buf = *b"a/bxname";
     let fixture = |buf: &mut [u8; 8]| {
         let sim = Sim::new();

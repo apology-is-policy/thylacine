@@ -837,6 +837,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "interaction-native"
+version = "0.1.0"
+dependencies = [
+ "libhalcyon",
+ "loom-client",
+]
+
+[[package]]
 name = "irq-bench"
 version = "0.1.0"
 dependencies = [

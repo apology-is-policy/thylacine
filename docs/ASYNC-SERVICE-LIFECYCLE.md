@@ -310,9 +310,15 @@ its input, its server pipes and its note queue, with no tick. The adapter adds t
 ring's descriptor (`Ring::poll_fd`) and the client adds the earliest deadline it
 owes (`next_deadline`). The host puts the first in its poll set and bounds the
 sleep by the second, then calls `pump`, which runs `Ring::turn` with a deadline of
-now and polls what that woke. `pump` never sleeps. A scope's retirement is not a
-poll event, so while one is owed `next_deadline` carries a short bound and the host
-wakes without a descriptor reason. A host may not call `Ring::block_on`.
+now and polls what that woke. `pump` never sleeps. A turn at a past deadline issues
+no poll, so it asks about the ring with an ENTER that submits nothing, which also
+sees a reused descriptor number. Once the ring has closed, a failure included,
+`poll_fd` reports that and the host drops it, since a number closed under it answers
+POLLNVAL or POLLHUP for ever and polling it would spin. Nothing waits on a scope's
+retirement. Closing aborts the scope, the terminals of what was in flight are poll
+events, and its slot is reaped on a later pump. One pump runs a bounded number of
+passes, so a server answering as fast as it is asked cannot hold the host's input; the
+ring announces whatever is left. A host may not call `Ring::block_on`.
 
 **`libhalcyon::interaction_client`.** The protocol has no I/O, as HALCYON-INTERACTION
 7 requires of the shared library: a future Mycelium adapter keeps its behaviour,

@@ -115,8 +115,21 @@ struct Ring {
     sq_head: u32,
     cq_tail: u32,
 }
+/// A service that answers READ and WRITE itself, for a protocol the flat file
+/// tree cannot speak. None keeps the operation running: the server has not replied.
+pub trait Service {
+    fn connected(&mut self, _scope: usize) {}
+    fn write(&mut self, scope: usize, fid: usize, offset: u64, bytes: &[u8]) -> Option<i64>;
+    fn read(&mut self, scope: usize, fid: usize, offset: u64, out: &mut [u8]) -> Option<i64>;
+}
 pub struct State {
     pub clock: u64,
+    /// Answers READ and WRITE instead of `files`, whose names still route WALKs.
+    pub service: Option<Box<dyn Service>>,
+    /// Answer this many more operations, then behave as held.
+    pub hold_after: Option<u32>,
+    /// Run the server inside ENTER too, as a peer CPU may.
+    pub step_on_enter: bool,
     regions: HashMap<usize, Region>,
     pub attach_fail_at: Option<usize>,
     attaches: usize,
@@ -195,6 +208,9 @@ impl Sim {
     pub fn new() -> Self {
         Sim(Rc::new(RefCell::new(State {
             clock: 1_000_000_000,
+            service: None,
+            hold_after: None,
+            step_on_enter: false,
             regions: HashMap::new(),
             attach_fail_at: None,
             attaches: 0,
@@ -557,9 +573,15 @@ impl State {
         if !self.hold {
             let n = self.ops.len();
             for _ in 0..n {
+                if self.hold_after == Some(0) {
+                    self.hold = true;
+                    break;
+                }
                 let op = self.ops.pop_front().unwrap();
                 if let Some(op) = self.answer(op) {
                     self.ops.push_back(op);
+                } else if let Some(left) = self.hold_after.as_mut() {
+                    *left -= 1;
                 }
             }
         }
@@ -585,6 +607,9 @@ impl State {
                 let scope = self.slots[op.scope].as_mut().unwrap();
                 if self.services.contains(&name) {
                     scope.state = READY;
+                    if let Some(service) = self.service.as_mut() {
+                        service.connected(op.scope);
+                    }
                     op.scope as i64
                 } else {
                     scope.state = RETIRED;
@@ -592,17 +617,24 @@ impl State {
                 }
             }
             OpKind::Walk { dest, name } => {
-                if file.is_some() && !name.is_empty() {
-                    ENOTDIR
-                } else if name.is_empty() || self.files.contains_key(name) {
+                // A file's name may hold slashes; each prefix of one is a directory.
+                let child = match &file {
+                    Some(dir) => [dir.as_slice(), b"/", name].concat(),
+                    None => name.clone(),
+                };
+                let is_dir = |n: &[u8]| {
+                    self.files
+                        .keys()
+                        .any(|k| k.len() > n.len() && k[n.len()] == b'/' && k.starts_with(n))
+                };
+                let found = self.files.contains_key(&child) || is_dir(&child);
+                if name.is_empty() || found {
                     let d = self.slots[*dest].as_mut().unwrap();
                     d.state = READY;
-                    d.name = if name.is_empty() {
-                        file
-                    } else {
-                        Some(name.clone())
-                    };
+                    d.name = if name.is_empty() { file } else { Some(child) };
                     *dest as i64
+                } else if file.as_ref().is_some_and(|f| !is_dir(f)) {
+                    ENOTDIR
                 } else {
                     ENOENT
                 }
@@ -614,6 +646,24 @@ impl State {
             }
             // The root is the service's only directory: a byte READ of it fails.
             OpKind::Read { .. } if file.is_none() => EISDIR,
+            OpKind::Read { buf, at, len } if self.service.is_some() => {
+                let dst = self.buffer(*buf, *at, *len).unwrap();
+                let out = unsafe { std::slice::from_raw_parts_mut(dst, *len as usize) };
+                let service = self.service.as_mut().unwrap();
+                match service.read(op.scope, op.source, op.offset, out) {
+                    Some(rc) => rc,
+                    None => return Some(op),
+                }
+            }
+            OpKind::Write { buf, at, len } if self.service.is_some() => {
+                let src = self.buffer(*buf, *at, *len).unwrap();
+                let bytes = unsafe { std::slice::from_raw_parts(src, *len as usize) };
+                let service = self.service.as_mut().unwrap();
+                match service.write(op.scope, op.source, op.offset, bytes) {
+                    Some(rc) => rc,
+                    None => return Some(op),
+                }
+            }
             OpKind::Read { buf, at, len } => {
                 let data = self
                     .files
@@ -771,7 +821,7 @@ impl State {
         0
     }
     /// ENTER's admission of one SQE and nothing else: 0 admits it.
-    pub fn admit_one(&mut self, s: Submission) -> i64 {
+    pub(crate) fn admit_one(&mut self, s: Submission) -> i64 {
         self.admit(s)
     }
     /// A registered buffer over `b`, which must outlive every admission.
@@ -1362,6 +1412,9 @@ unsafe impl Kernel for SimKernel {
                     }
                 }
             }
+        }
+        if s.step_on_enter {
+            s.step();
         }
         consumed
     }
