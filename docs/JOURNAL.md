@@ -22,6 +22,34 @@ needed the operator.
 
 
 ---
+## 2026-11-03 -- AS-3a closes, and the fixture counted the wrong limit (corona)
+
+The parley outbox set ran for the first time, on the env tree at f6c70aab1 under the mac
+lease, 19:28Z to 19:56Z. m1, m3, m4, m5 and x13 each went red on its own line
+(work/nov03-as3a/run3.log). With x11, y1 and x14 earlier in the evening, that is every row
+of AS-3a's sabotage, so the four entries waiting on it closed: the outbox, stderr's spin,
+the runner's stray child, and F20's bystanders. x1 is F20's evidence: 7 FAILs before the
+bounded wait, 4 after, all its own. Seven rows ran only before r2's fixes, which did not
+change them. No CPU1 or SMP soak of any of this; the full gate is on hold.
+
+The first boots of Nora's stopped copy and ut's paste were red before either program ran,
+at the fixture's own post, 3 attempts each. I wrote the entry before reading the constant,
+so it says the value was unread; the next command showed SRV_CAP_SCOPE_SLOTS is 2. `--srv`
+posted three. The fixture's comment gave a reason, that a registry holds sixteen, which is
+true and is the wrong limit: a poster's scope runs out first. I added the third post for
+AS-4e without looking, and nothing but a boot could tell. fceab8f1f makes `--srv` take the
+one hold service a probe needs, and a refused post now names its service, since "-1" could
+not tell the third post from a missing capability. This is still a reading: the re-boot is
+what tests it, and those scenarios have not yet reached the code they exist to test.
+
+Reading vote 50's fix while the set ran changed its size. The takeover moving off "every
+chain retired" is not enough: `Device::restore` has the same rule, so a poisoned chain
+would let the trusted scene up and then strand it there. Scoping restore to the presented
+resource does not help either, because direct scanout presents a client's own blob. The
+reading is in design_surface_retire_deferred.md. It has not been written, and the
+reproduction comes first, by vote.
+
+---
 ## 2026-11-03 -- three votes written, none of them booted (corona)
 
 Votes 49, 52 and 51 went in while the mac was queued behind main: df64467f8, d9fa76f80,
