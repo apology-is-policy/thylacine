@@ -1580,7 +1580,7 @@ fn exec_external_raw(
             //    Drop) this is the sole restore, so a crashed TUI never wedges the
             //    console in the alt-screen with a hidden cursor.
             if let Some(fd) = consctl_fd {
-                console::set_mode(fd, console::PROMPT_MODE);
+                console::set_mode(fd, mode_after_child(env));
             }
             console::restore_screen();
             env.status_set(if rc < 0 { 0 } else { status_of_packed(st) });
@@ -1592,7 +1592,7 @@ fn exec_external_raw(
             // RAW it); no screen escapes. Report the failure like the normal
             // spawn-fail path.
             if let Some(fd) = consctl_fd {
-                console::set_mode(fd, console::PROMPT_MODE);
+                console::set_mode(fd, mode_after_child(env));
             }
             let mut s = String::new();
             let _ = write!(&mut s, "spawn failed: {:?}", e);
@@ -2712,6 +2712,15 @@ fn wait_fg_job_jc(pids: &[i32], job_pgid: u64) -> FgOutcome {
     FgOutcome::Done(statuses)
 }
 
+/// Written after every child, whatever it did to the terminal.
+fn mode_after_child(env: &Env) -> &'static [u8] {
+    if env.line_running {
+        console::CHILD_MODE
+    } else {
+        console::PROMPT_MODE
+    }
+}
+
 /// The jc foreground run around an already-spawned job: cooked child mode ->
 /// terminal to the job (-> optional `SYS_TTY_CONT` resume) -> the stop-aware
 /// wait -> terminal back -> prompt mode. Returns per-element statuses (a
@@ -2728,8 +2737,9 @@ fn wait_fg_job_jc(pids: &[i32], job_pgid: u64) -> FgOutcome {
 ///     command's result -- the U-7b `fg` convention).
 ///
 /// The mode discipline is the real-shell shape: cooked (`CHILD_MODE`) is the
-/// CHILD's terminal, raw (`PROMPT_MODE`) is the line editor's -- restored on
-/// every path, stop included.
+/// CHILD's terminal, raw (`PROMPT_MODE`) is the line editor's. A job started from
+/// an accepted line finds it cooked already and leaves it so for the line's next
+/// command; one started from an idle note handler flips it here, and back.
 pub(crate) fn run_foreground_jc(
     env: &mut Env,
     pids: &[i32],
@@ -2758,7 +2768,7 @@ pub(crate) fn run_foreground_jc(
     // SAFETY: as above; the restore pairs the handoff on EVERY outcome.
     let _ = unsafe { t_tty_set_fg(0, own_pgid) };
     if let Some(fd) = env.consctl_fd {
-        console::set_mode(fd, console::PROMPT_MODE);
+        console::set_mode(fd, mode_after_child(env));
     }
     match out {
         FgOutcome::Done(statuses) => {

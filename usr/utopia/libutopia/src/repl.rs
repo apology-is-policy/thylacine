@@ -879,6 +879,10 @@ impl Repl {
                 }
                 EditorAction::Accept(line) => {
                     self.end_edit();
+                    // Before anything else this line does. A spawn takes a while, and
+                    // what is typed during it belongs to the command: left raw, its
+                    // Enter would stay a bare CR, which no line reader ever ends on.
+                    self.set_line_running(true);
                     accepted();
                     // The user pressed Enter; move the terminal past the
                     // edited line before any eval output or the next prompt.
@@ -915,6 +919,7 @@ impl Repl {
                     // `exit` (directly, or via a function / sourced / eval'd
                     // sub-script) sets the exit request; honour it now.
                     if let Some(code) = self.env.exit_requested() {
+                        self.set_line_running(false);
                         return Some(code);
                     }
                     // U-7a: reclaim + report any background jobs that finished
@@ -941,6 +946,7 @@ impl Repl {
                     self.zone_open(out, beacon::sink::Zone::Prompt);
                     self.cwd_report(out);
                     self.prog_report(out);
+                    self.set_line_running(false);
                     self.emit_prompt(out);
                     // H-2 F10: one completed cycle -- the caller's cue to
                     // re-check the renderer tier before this fresh prompt
@@ -1035,6 +1041,23 @@ impl Repl {
             self.env.let_set(name, Value::scalar(a.clone()));
         }
         self.env.let_set("*", Value::list(args.to_vec()));
+    }
+
+    /// Only job control hands the terminal over: a console session's children see no
+    /// discipline, so its mode never moves here.
+    fn set_line_running(&mut self, running: bool) {
+        if self.env.job_control.is_none() {
+            return;
+        }
+        self.env.line_running = running;
+        if let Some(fd) = self.env.consctl_fd {
+            let mode = if running {
+                crate::eval::console::CHILD_MODE
+            } else {
+                crate::eval::console::PROMPT_MODE
+            };
+            crate::eval::console::set_mode(fd, mode);
+        }
     }
 
     fn emit_prompt(&mut self, out: &mut dyn IoWrite) {

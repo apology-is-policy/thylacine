@@ -370,6 +370,16 @@ clobbering the pts ctl. Either way the *same* `console_apply_default` writes the
 *same* `PROMPT_MODE` vocabulary, defined once in `eval::console` and shared with
 the foreground-child restore, so the two cannot drift apart.
 
+**Who the terminal belongs to.** Under job control the pts is the line editor's at a
+prompt and the command's from the moment a line is accepted. `set_line_running` writes
+`CHILD_MODE` first thing in the Accept arm, before the announcement and before anything
+is parsed or spawned, and `PROMPT_MODE` just before the next prompt is drawn. The gaps
+between one line's commands stay cooked: `mode_after_child` is what every finished child
+is followed by, so a child that left the terminal strange is corrected on either side. A
+mode write does not reinterpret bytes already in the ring, so an Enter typed while the
+pts is still raw stays a bare CR, and a line reader waits on a line that has ended. An
+idle note handler's job flips the mode for itself, and a console session never moves it.
+
 **The loop** polls fd 0 and the note fd together. A note wake is serviced first —
 a finished background job prints `[N]+ Done`, an idle `Ctrl-C` cancels the line —
 and a simultaneous keystroke repaints over the notification. A note fd that errors

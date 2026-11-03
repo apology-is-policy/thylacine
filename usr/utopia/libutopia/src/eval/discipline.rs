@@ -49,8 +49,9 @@ pub(crate) const RAW_MODE: &[u8] = b"-icanon -echo -isig -icrnl -onlcr";
 /// or line-oriented child expects (canonical line assembly, kernel echo,
 /// ISIG signal cooking, CR/NL translation both ways; byte-identical to the
 /// ptyfs cooked default, PTY-2b). The real-shell discipline: raw is the LINE
-/// EDITOR's mode, cooked is the CHILD's -- bash/readline restore the tty to
-/// cooked around every foreground job and re-raw it at the next prompt. Only
+/// EDITOR's mode, cooked is the CHILD's -- readline gives the tty back when a
+/// line is accepted, before anything is parsed or spawned, and takes it again at
+/// the next prompt. Only
 /// the jc path uses this (the console session never hands children the
 /// console input, so its children see no discipline at all).
 pub(crate) const CHILD_MODE: &[u8] = b"+icanon +echo +isig +icrnl +onlcr";

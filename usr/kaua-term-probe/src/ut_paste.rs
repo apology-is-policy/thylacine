@@ -9,7 +9,7 @@ use crate::stopped_nora::{
     after, pause, Fixture, Result, DRAIN_STACK, PROMPTLY_MS, ROOM_MS, TICK_MS,
 };
 use ::alloc::{format, string::String, vec, vec::Vec};
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use interaction_native::{parse_locator, Host};
 use libhalcyon::interaction_client::Event;
 use libthyla_rs::{
@@ -55,6 +55,28 @@ const TOO_LONG_BYTES: usize = 65 * 1024;
 
 static SEEN: AtomicU32 = AtomicU32::new(0);
 static DRAINED: AtomicBool = AtomicBool::new(false);
+/// The terminal's last bytes, for a failure to show what the shell was doing.
+const TAIL_BYTES: usize = 240;
+static TAIL: [AtomicU8; TAIL_BYTES] = [const { AtomicU8::new(0) }; TAIL_BYTES];
+static TAIL_NEXT: AtomicU32 = AtomicU32::new(0);
+
+fn remember(bytes: &[u8]) {
+    for &b in bytes {
+        let at = TAIL_NEXT.fetch_add(1, Ordering::Relaxed) as usize % TAIL_BYTES;
+        TAIL[at].store(b, Ordering::Relaxed);
+    }
+}
+
+fn tail() -> String {
+    let next = TAIL_NEXT.load(Ordering::Relaxed) as usize;
+    let first = next.saturating_sub(TAIL_BYTES);
+    (first..next)
+        .map(|i| match TAIL[i % TAIL_BYTES].load(Ordering::Relaxed) {
+            b @ 0x20..=0x7e => b as char,
+            _ => '.',
+        })
+        .collect()
+}
 
 /// A pts master does not poll, so the shell's output has a thread of its own.
 extern "C" fn drain(arg: u64) {
@@ -67,6 +89,7 @@ extern "C" fn drain(arg: u64) {
             break;
         }
         let end = kept + n as usize;
+        remember(&buffer[kept..end]);
         for (i, word) in WORDS.iter().enumerate() {
             if buffer[..end].windows(word.len()).any(|w| w == *word) {
                 SEEN.fetch_or(1 << i, Ordering::SeqCst);
@@ -266,7 +289,9 @@ fn stopped(fixture: &mut Fixture) -> Result {
     fixture.wait(b'e', PROMPTLY_MS, "Enter did not end the fetch")?;
 
     // A command does not keep a fetch open: `head` sits on the pts until it is told to go
-    // on, and the session ends while it does.
+    // on, and the session ends while it does. The shell ends the fetch after making the
+    // terminal the command's and before spawning it, so `go` is a line however far the
+    // spawn has got: an Enter that stays a bare CR leaves `head` waiting here for good.
     fixture.ask(b'H')?;
     fixture.ask(b'E')?;
     ut.keys(PASTE_KEY)?;
@@ -351,6 +376,7 @@ pub fn run() -> i64 {
     match test() {
         Ok(()) => 0,
         Err(why) => {
+            t_putstr(&format!("ut-paste: terminal's last bytes: {}\n", tail()));
             t_putstr(&format!("ut-paste: FAIL -- {}\n", why));
             1
         }
