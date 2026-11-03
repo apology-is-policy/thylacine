@@ -459,6 +459,17 @@ static void leg_handler_escapes(int sig) {
     longjmp(g_leg_escape, 1);
 }
 
+// Pouch declines fork (POUCH-DESIGN 8.3), and SYS_clone is its sentinel, so what crosses
+// the kernel's fork is reached the way a native program reaches it: SYS_RFORK, RFPROC
+// alone, on this stack and thread pointer. The child runs nothing that needs musl's
+// thread list set up again: read, write, wait and _exit.
+#define LEG_SYS_RFORK 105
+#define LEG_RFPROC    1L
+
+static pid_t leg_native_fork(void) {
+    return (pid_t)syscall(LEG_SYS_RFORK, LEG_RFPROC, 0L, 0L);
+}
+
 // With SIGUSR1 blocked, reap 14 children and count how many notes then fit. The kernel
 // discards a dead child's note at the tail, so all of NOTE_QUEUE_DEPTH's 16 slots are
 // free. With no table governing, each child leaves an entry until they coalesce at 12.
@@ -469,7 +480,7 @@ static int leg_ring_room(void) {
     sigaddset(&s, SIGUSR1);
     if (sigprocmask(SIG_BLOCK, &s, NULL) != 0) return -1;
     for (int i = 0; i < 14; i++) {
-        pid_t k = fork();
+        pid_t k = leg_native_fork();
         if (k < 0) return -1;
         if (k == 0) _exit(0);
         if (waitpid(k, &st, 0) != k) return -1;
@@ -582,7 +593,7 @@ static int leg_child(const char *mode) {
         // A forked child first, whose table crossed the fork; the ring is then still
         // empty for the image's own count.
         int st = 0;
-        pid_t kid = fork();
+        pid_t kid = leg_native_fork();
         if (kid < 0) return 60;
         if (kid == 0) _exit(leg_ring_room());
         if (waitpid(kid, &st, 0) != kid) return 60;
@@ -597,7 +608,7 @@ static int leg_child(const char *mode) {
         int p[2];
         if (leg_catch(SIGUSR1, leg_handler, 0) != 0) return 60;
         if (pipe(p) != 0) return 60;
-        pid_t kid = fork();
+        pid_t kid = leg_native_fork();
         if (kid < 0) return 60;
         if (kid == 0) {
             close(p[0]);

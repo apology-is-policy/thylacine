@@ -14,7 +14,7 @@ nothing. Nothing unwound a wait for a real handler either.
       child's note included: it is discarded, where it would otherwise hold a ring slot.
   src/signal/sigaction.c        Every disposition writes the note's row through
       SYS_note_dispose. Each real handler registers the dispatcher first, which is
-      idempotent, so no flag here can disagree with the kernel in a forked child. Until a
+      idempotent, so no flag here can disagree with the kernel in a child of SYS_RFORK. Until a
       row lands its note takes the default, as POSIX has it. A refused row puts the old
       table entry back and answers the errno. The comment saying SA_RESTART needed nothing
       was false: musl re-issues no call, and the row's flag is what restarts one, in the
@@ -492,7 +492,7 @@ and `recv`; pouch-hello-net `accept-eintr`, `accept-restart`, `connect`.
 + *
 + * The dispatcher goes first, on every real install: a caught row with no handler
 + * is refused, registering is idempotent, and no flag here can disagree with the
-+ * kernel in a forked child. Until the row lands the note takes its default, as
++ * kernel in a child of SYS_RFORK. Until the row lands the note takes its default, as
 + * POSIX has it before sigaction returns; the constructor's row has the table
 + * governing already, so there is no window in which every note reaches the
 + * dispatcher. A default row allocates nothing. */
