@@ -22,6 +22,24 @@ needed the operator.
 
 
 ---
+## 2026-11-03 -- the prosecutor read what the sim could not see (corona)
+
+The audit of AS-4a, AS-4b and AS-4c returned at 15:32Z, Opus on Opus with the model steady: 1 P0, 2 P1, 2 P2, 10 P3, nothing executed. All of it was reachable only because the sim is a model I wrote.
+
+The P0 would have cost a whole boot. `ls-halcyon-clipboard-async.exp:138` used `[^ ]*` between the outcome word and ` lost=`, and `Copied { generation: 3 }` has a space in it. Number 1 of every run prints that, so the scenario would have timed out at its first verdict. I ran the regex in tclsh against all three real shapes before believing it: the old one rejects `Copied`, the new one matches all three.
+
+The P1s were both wrong readings of what a refusal means, and the tests pinned the wrong reading because their scripts refused on the read. No real server does: `paneplace.rs:587-591` answers a request on the write that finishes its record, so a successful write means the request ran. A -ENOENT on a commit's reply, which a pane closing between the two can produce (`paneplace.rs:554`), was being told to the user as a definite failure of a copy that had landed. And `apprecord.rs:89-92` poisons a fid on a record it cannot take, with the client keeping that connection, so every later job on it was refused for ever. Reading the same code I found the same wedge under `BadHandle`, whose only source is `application.rs:60`. All of these now end the connection. The scripts moved to refuse on the write.
+
+The sim had no msize, so the number table was false: a 16 KiB record takes three writes at the server's 8192. The sim now cuts each count as `loom_service_wire.c:18-24` does, and the table is re-pinned from measured output at 39 numbers, not 35. The audit had computed 39 by hand, which agrees.
+
+One thing I chose against its suggestion: a CLUNK refused for memory goes to REAP and waits for its scope rather than being re-sent, since re-sending would spin a host for as long as memory stayed short.
+
+My own reading of the open question from AS-4c came out the same as the audit's before I saw its answer: a dead connection's in-flight operation gets -EIO, and the next one -ECANCELED from `loom_admission_scope_locked`. Neither is in the HIN1 table. The sim was answering -104, a value the kernel never produces; it now answers those two.
+
+While writing AS-4d's scenario, `SRV_MAX_SERVICES` turned out to be 16 and the fixture posts 15, so posting them all in the real /srv could not have worked. With `--srv` it posts two. A walk-only handle also has no `RIGHT_TRANSFER`, so a probe cannot hand /srv to a child at all. Both would have been first-boot failures.
+
+Dirty close by rule, because of the P0, so a second round is owed, and it must also cover Nora and the stopped-server scenario, which this one did not. Nothing here has booted yet.
+
 ## 2026-11-03 -- AS-3a's sabotage set, and what its misses were really about (corona)
 
 The set ran 10:24Z to 11:41Z at f44b1d198 (work/nov03-as3a/sabotage-20261103T102427Z), and x1, x2, x3, x5, x7, x8, x9 and x12 turned red where predicted. Three missed. All three were defects in my tests and none in the kernel, but each said something different.

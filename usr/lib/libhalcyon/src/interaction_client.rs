@@ -101,6 +101,8 @@ struct Exchange {
     length: Option<usize>,
     in_flight: bool,
     idle_at: u64,
+    /// However steadily a server trickles, an exchange ends here.
+    give_up: u64,
 }
 
 enum Link {
@@ -431,6 +433,7 @@ impl Client {
             length: None,
             in_flight: false,
             idle_at: now.saturating_add(IDLE_NS),
+            give_up: now.saturating_add(LIFETIME_NS),
         });
     }
 
@@ -626,7 +629,7 @@ impl Client {
             return;
         }
         exchange.sent += count;
-        exchange.idle_at = now.saturating_add(IDLE_NS);
+        exchange.idle_at = now.saturating_add(IDLE_NS).min(exchange.give_up);
     }
 
     pub fn read(&mut self, lane: Lane, bytes: &[u8], now: u64) {
@@ -640,7 +643,7 @@ impl Client {
             return;
         }
         exchange.reply.extend_from_slice(bytes);
-        exchange.idle_at = now.saturating_add(IDLE_NS);
+        exchange.idle_at = now.saturating_add(IDLE_NS).min(exchange.give_up);
         if exchange.length.is_none() && exchange.reply.len() >= HEADER_BYTES {
             match Header::decode(&exchange.reply[..HEADER_BYTES]) {
                 Ok(h)
@@ -662,20 +665,33 @@ impl Client {
         }
     }
 
-    /// A refusal the server chose is an answer. Anything else means the transport
-    /// failed, and with it the connection.
+    /// A refusal the server chose is an answer, and it comes on the write that finishes
+    /// a record: success there means the request ran. So an errno on a reply's read is
+    /// no answer whatever its value, and on a commit's reply it leaves the commit
+    /// unknown. Anything else means the transport failed, and with it the connection.
     pub fn failed(&mut self, lane: Lane, errno: i32, now: u64) {
-        if self.live(lane).is_none() {
+        let Some(exchange) = self.live(lane) else {
             return;
-        }
+        };
+        let written = exchange.sent == exchange.record.len();
+        let partial = exchange.sent > 0;
         match failure(errno) {
-            Some(f) => self.refused(lane, f, now),
-            None => self.lose_link(Why::Lost),
+            Some(f) if !written => self.refused(lane, f, partial, now),
+            _ => self.lose_link(Why::Lost),
         }
     }
 
-    fn refused(&mut self, lane: Lane, f: Failure, now: u64) {
+    fn refused(&mut self, lane: Lane, f: Failure, partial: bool, now: u64) {
         self.lanes[index(lane)] = None;
+        // A record the server could not take poisons its fid until the fid closes, and
+        // part of a record leaves the next request at the wrong offset. These values are
+        // also what a whole request can be refused with, and nothing here tells the two
+        // apart. Keeping the connection would have every later request refused for ever.
+        let spoiled = partial
+            || matches!(
+                f,
+                Failure::Invalid | Failure::TooLarge | Failure::NoMemory | Failure::Unsupported
+            );
         if lane == Lane::Control {
             match self.link {
                 Link::Bind {
@@ -683,7 +699,10 @@ impl Client {
                     session,
                     attempt,
                     ..
-                } if matches!(f, Failure::Gone | Failure::Busy) && attempt + 1 < BIND_ATTEMPTS => {
+                } if !partial
+                    && matches!(f, Failure::Gone | Failure::Busy)
+                    && attempt + 1 < BIND_ATTEMPTS =>
+                {
                     self.link = Link::Bind {
                         deadline,
                         session,
@@ -692,16 +711,36 @@ impl Client {
                     };
                 }
                 Link::Bind { .. } | Link::Hello { .. } => {
-                    // Only a nomination still to come, or an owner still leaving,
-                    // can change the answer without the host asking again.
-                    if !matches!(f, Failure::Gone | Failure::Busy) {
+                    // A nomination still to come, an owner still leaving and a seat
+                    // away for a trusted episode can each change the answer without the
+                    // host asking again, and the schedule bounds what is spent on them.
+                    if !matches!(f, Failure::Gone | Failure::Busy | Failure::Denied) {
                         self.retries = 0;
                     }
                     self.lose_link(Why::Refused(f));
                 }
+                _ if spoiled => {
+                    // Not sent again until the host reports anew, or a server that
+                    // always refuses it would be connected to for ever.
+                    self.wanted = None;
+                    self.events.push_back(Event::ModeRefused(f));
+                    self.lose_link(Why::Lost);
+                }
                 _ if matches!(f, Failure::Gone | Failure::BadHandle) => self.lose_link(Why::Lost),
                 _ => self.events.push_back(Event::ModeRefused(f)),
             }
+            return;
+        }
+        // On the write, so a commit refused here did not land.
+        if let Some(Job::Copy {
+            stage: CopyStage::Commit { handed, .. },
+            ..
+        }) = &mut self.job
+        {
+            *handed = false;
+        }
+        if spoiled {
+            self.lose_link(Why::Refused(f));
             return;
         }
         // A release that fails has nothing left to protect.
@@ -737,15 +776,8 @@ impl Client {
             }) => Some(*transfer),
             _ => None,
         };
-        if f == Failure::Gone {
-            if let Some(Job::Copy {
-                stage: CopyStage::Commit { handed, .. },
-                ..
-            }) = &mut self.job
-            {
-                // A definite refusal, not a lost reply.
-                *handed = false;
-            }
+        // A fid the server no longer knows answers every later request the same way.
+        if matches!(f, Failure::Gone | Failure::BadHandle) {
             self.lose_link(Why::Refused(f));
             return;
         }
@@ -953,11 +985,28 @@ impl Client {
             }
             (
                 Some(Job::Copy {
-                    stage: CopyStage::Commit { .. },
-                    ..
+                    text,
+                    stage:
+                        CopyStage::Commit {
+                            transfer,
+                            generation: expected,
+                            handed,
+                        },
                 }),
                 Response::Committed { generation },
             ) => {
+                if expected.checked_add(1) != Some(generation) {
+                    self.job = Some(Job::Copy {
+                        text,
+                        stage: CopyStage::Commit {
+                            transfer,
+                            generation: expected,
+                            handed,
+                        },
+                    });
+                    self.lose_link(Why::Malformed);
+                    return;
+                }
                 self.events.push_back(Event::Copied { generation });
             }
             (Some(Job::Release { .. }), Response::Cancelled) => {}

@@ -130,6 +130,8 @@ pub struct State {
     pub hold_after: Option<u32>,
     /// Run the server inside ENTER too, as a peer CPU may.
     pub step_on_enter: bool,
+    /// What the session negotiated, which bounds each READ and WRITE of a `service`.
+    pub msize: Option<usize>,
     regions: HashMap<usize, Region>,
     pub attach_fail_at: Option<usize>,
     attaches: usize,
@@ -211,6 +213,7 @@ impl Sim {
             service: None,
             hold_after: None,
             step_on_enter: false,
+            msize: None,
             regions: HashMap::new(),
             attach_fail_at: None,
             attaches: 0,
@@ -588,6 +591,12 @@ impl State {
         self.settle();
         self.flush();
     }
+    /// loom_service_wire.c: a count is cut to what one message of the session can carry.
+    fn io_count(&self, len: u32, overhead: usize) -> usize {
+        let len = len as usize;
+        self.msize.map_or(len, |msize| len.min(msize - overhead))
+    }
+
     fn buffer(&self, index: u32, at: u64, len: u32) -> Option<*mut u8> {
         let &(va, n) = self.buffers.get(index as usize)?;
         if at.checked_add(len as u64)? > n as u64 {
@@ -648,7 +657,8 @@ impl State {
             OpKind::Read { .. } if file.is_none() => EISDIR,
             OpKind::Read { buf, at, len } if self.service.is_some() => {
                 let dst = self.buffer(*buf, *at, *len).unwrap();
-                let out = unsafe { std::slice::from_raw_parts_mut(dst, *len as usize) };
+                let count = self.io_count(*len, 11);
+                let out = unsafe { std::slice::from_raw_parts_mut(dst, count) };
                 let service = self.service.as_mut().unwrap();
                 match service.read(op.scope, op.source, op.offset, out) {
                     Some(rc) => rc,
@@ -657,7 +667,8 @@ impl State {
             }
             OpKind::Write { buf, at, len } if self.service.is_some() => {
                 let src = self.buffer(*buf, *at, *len).unwrap();
-                let bytes = unsafe { std::slice::from_raw_parts(src, *len as usize) };
+                let count = self.io_count(*len, 23);
+                let bytes = unsafe { std::slice::from_raw_parts(src, count) };
                 let service = self.service.as_mut().unwrap();
                 match service.write(op.scope, op.source, op.offset, bytes) {
                     Some(rc) => rc,
@@ -1185,6 +1196,10 @@ unsafe impl Kernel for SimKernel {
                 let name = t.name[..t.name_len as usize].to_vec();
                 if name.iter().any(|&b| b == 0 || b == b'/') {
                     return EINVAL;
+                }
+                // srv_capture_post: the name is resolved here, not at CONNECT.
+                if !s.services.contains(&name) {
+                    return ENOENT;
                 }
                 let Some(r) = s.mint(Slot {
                     kind: SlotKind::Target,

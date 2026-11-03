@@ -37,10 +37,12 @@ struct Script {
     refuse: Option<(Operation, i64)>,
     /// Refuse the next write outright with this errno.
     refuse_write: Option<i64>,
+    fail_reply: Option<(Operation, i64)>,
     /// Answer the next request with the wrong id.
     garble: bool,
     /// The connection has ended; only a new CONNECT makes another.
     sak: bool,
+    sak_answered: bool,
 }
 
 #[derive(Clone, Default)]
@@ -57,8 +59,15 @@ impl Script {
         }
         if let Some((_, errno)) = self.refuse.filter(|(o, _)| *o == op) {
             self.refuse = None;
-            self.wires.get_mut(&fid).unwrap().refusal = Some(errno);
+            let w = self.wires.get_mut(&fid).unwrap();
+            w.reply.clear();
+            w.refusal = Some(errno);
             return;
+        }
+        // The request runs, and this comes on its reply's read.
+        if let Some((_, errno)) = self.fail_reply.filter(|(o, _)| *o == op) {
+            self.fail_reply = None;
+            self.wires.get_mut(&fid).unwrap().refusal = Some(errno);
         }
         let id = if core::mem::take(&mut self.garble) {
             id + 1
@@ -140,6 +149,13 @@ impl Service for Server {
         w.record.extend_from_slice(bytes);
         if wire::frame(&w.record).is_ok() {
             s.answer(fid);
+            // The server refuses on the write that finishes the record.
+            let w = s.wires.get_mut(&fid).unwrap();
+            if w.reply.is_empty() {
+                if let Some(errno) = w.refusal.take() {
+                    return Some(errno);
+                }
+            }
         }
         Some(bytes.len() as i64)
     }
@@ -166,6 +182,9 @@ impl Service for Server {
     }
 }
 
+/// paneplace.rs's limit on what a session negotiates.
+const SRV_MSIZE: usize = 8192;
+
 fn locator() -> Locator<'static> {
     Locator {
         service: b"clip",
@@ -180,6 +199,7 @@ fn fixture() -> (Sim, Server, Host<SimKernel>) {
         .files
         .insert(b"tok/interaction".to_vec(), Vec::new());
     sim.s().service = Some(Box::new(server.clone()));
+    sim.s().msize = Some(SRV_MSIZE);
     let host = Host::new(sim.kernel(), 5, locator()).expect("the host starts");
     (sim, server, host)
 }
@@ -269,14 +289,13 @@ fn no_private_ring_is_reported_to_the_host_and_nothing_else_is_tried() {
 }
 
 #[test]
-fn a_service_the_registry_does_not_hold_is_a_lost_connection() {
+fn a_service_the_registry_does_not_hold_is_refused_at_the_start() {
     let sim = Sim::new();
     let missing = Locator {
         service: b"gone",
         token: b"tok",
     };
-    let mut host = Host::new(sim.kernel(), 5, missing).expect("names are checked at connect");
-    assert_eq!(copy(&sim, &mut host, TEXT), Event::CopyFailed(Why::Lost));
+    assert_eq!(Host::new(sim.kernel(), 5, missing).err(), Some(-2));
 }
 
 #[test]
@@ -518,7 +537,7 @@ fn a_ring_that_fails_loses_the_connection_rather_than_refusing_the_request() {
 }
 
 #[test]
-fn a_refused_read_is_the_servers_answer_and_arrives_at_once() {
+fn a_refused_commit_is_the_servers_answer_and_arrives_at_once() {
     let (sim, server, mut host) = fixture();
     assert_eq!(copy(&sim, &mut host, TEXT), Event::Copied { generation: 1 });
     server.0.borrow_mut().refuse = Some((Operation::CommitCopy, -11));
@@ -529,6 +548,34 @@ fn a_refused_read_is_the_servers_answer_and_arrives_at_once() {
     );
     assert_eq!(host.now(), start, "the answer did not wait for a deadline");
     assert!(host.is_bound(), "a refusal is not a lost connection");
+}
+
+#[test]
+fn an_errno_on_a_commits_reply_is_no_answer_and_leaves_it_unknown() {
+    let (sim, server, mut host) = fixture();
+    assert_eq!(copy(&sim, &mut host, TEXT), Event::Copied { generation: 1 });
+    server.0.borrow_mut().fail_reply = Some((Operation::CommitCopy, -2));
+    assert_eq!(copy(&sim, &mut host, b"two"), Event::CopyUnknown);
+    assert_eq!(server.0.borrow().generation, 2, "the commit did land");
+    assert_eq!(paste(&sim, &mut host), Event::Pasted(b"two".to_vec()));
+}
+
+#[test]
+fn a_record_too_big_for_one_write_is_written_in_parts_and_refused_on_its_last() {
+    let (sim, server, mut host) = fixture();
+    let big = alloc::vec![b'x'; 20_000];
+    assert_eq!(copy(&sim, &mut host, &big), Event::Copied { generation: 1 });
+    assert_eq!(paste(&sim, &mut host), Event::Pasted(big.clone()));
+    server.0.borrow_mut().refuse = Some((Operation::WriteCopy, -11));
+    assert_eq!(
+        copy(&sim, &mut host, &big),
+        Event::CopyFailed(Why::Refused(Failure::Conflict)),
+        "a part-written record's refusal"
+    );
+    assert_eq!(server.0.borrow().generation, 1);
+    // The record had gone in parts, so the fid is not to be trusted again.
+    assert_eq!(paste(&sim, &mut host), Event::Pasted(big));
+    assert_eq!(server.0.borrow().connects, 2);
 }
 
 #[test]
@@ -567,7 +614,10 @@ mod sak {
     const OLD: &[u8] = b"what was already on the clipboard";
     /// Two chunks on the wire and two records back, as the guest's payload is.
     const NEW: &[u8] = &[b'x'; 20_000];
-    const ECONNRESET: i64 = -104;
+    /// What the kernel answers on a connection the server ended: what was in flight
+    /// fails with -EIO, and the scope then refuses what comes next.
+    const EIO: i64 = -5;
+    const ECANCELED: i64 = -125;
 
     #[derive(Clone, Copy, Default)]
     struct Faults {
@@ -601,6 +651,7 @@ mod sak {
             s.files.insert(b"tok/interaction".to_vec(), Vec::new());
             s.service = Some(Box::new(Dying(server.clone())));
             s.step_on_enter = faults.answer_on_enter;
+            s.msize = Some(SRV_MSIZE);
         }
         server.0.borrow_mut().refuse = faults.refuse;
         let on_hold = server.clone();
@@ -635,20 +686,36 @@ mod sak {
 
     impl Service for Dying {
         fn connected(&mut self, scope: usize) {
-            self.0 .0.borrow_mut().sak = false;
+            let mut s = self.0 .0.borrow_mut();
+            s.sak = false;
+            s.sak_answered = false;
+            drop(s);
             self.0.connected(scope);
         }
         fn write(&mut self, scope: usize, fid: usize, offset: u64, bytes: &[u8]) -> Option<i64> {
-            if self.0 .0.borrow().sak {
-                return Some(ECONNRESET);
+            if let Some(errno) = self.dead() {
+                return Some(errno);
             }
             self.0.write(scope, fid, offset, bytes)
         }
         fn read(&mut self, scope: usize, fid: usize, offset: u64, out: &mut [u8]) -> Option<i64> {
-            if self.0 .0.borrow().sak {
-                return Some(ECONNRESET);
+            if let Some(errno) = self.dead() {
+                return Some(errno);
             }
             self.0.read(scope, fid, offset, out)
+        }
+    }
+
+    impl Dying {
+        fn dead(&self) -> Option<i64> {
+            let mut s = self.0 .0.borrow_mut();
+            s.sak.then(|| {
+                if core::mem::replace(&mut s.sak_answered, true) {
+                    ECANCELED
+                } else {
+                    EIO
+                }
+            })
         }
     }
 
@@ -709,8 +776,9 @@ mod sak {
         }
         let phases = phases.borrow();
         // Connect and both lanes' walks and opens, which a server's log does not see, then
-        // each request's write and reply. Two clunks fall in Hello's. The scenario's header
-        // quotes this table.
+        // each request's write and reply. A clunk falls in Hello's. A server logs a request
+        // at the last write of its record, so the first chunk's first two writes fall under
+        // Begin here. The scenario's header quotes this table.
         let mut want = vec![None; 8];
         for (op, submissions) in [
             (Operation::Hello, 3),
@@ -718,17 +786,20 @@ mod sak {
             (Operation::ReportMode, 2),
             (Operation::GetClipboard, 2),
             (Operation::Cancel, 2),
-            (Operation::BeginCopy, 2),
+            (Operation::BeginCopy, 4),
             (Operation::WriteCopy, 4),
             (Operation::CommitCopy, 2),
             (Operation::GetClipboard, 2),
-            (Operation::ReadClipboard, 4),
+            (Operation::ReadClipboard, 6),
             (Operation::Cancel, 2),
         ] {
             want.extend(std::iter::repeat_n(Some(op), submissions));
         }
         assert_eq!(*phases, want, "{total}");
     }
+
+    /// Bind's reply: before it the client cannot yet see the connection stay up.
+    const LAST_BEFORE_BOUND: u32 = 13;
 
     #[test]
     fn a_connection_that_survives_the_sak_is_caught() {
@@ -743,10 +814,7 @@ mod sak {
                 match drive(Some((n, moment)), faults) {
                     Err("the connection survived the SAK") => caught += 1,
                     Err(other) => panic!("{moment:?} {n}: {other}"),
-                    Ok(report) => assert!(
-                        !report.bound_at_hold,
-                        "{moment:?} {n}: a bound connection passed"
-                    ),
+                    Ok(_) => assert!(n <= LAST_BEFORE_BOUND, "{moment:?} {n}: it passed"),
                 }
             }
         }
@@ -805,6 +873,22 @@ mod sak {
             drive(None, read).err(),
             Some("a paste failed with no SAK to blame")
         );
+        for (op, errno) in [
+            (Operation::CommitCopy, -11),
+            (Operation::CommitCopy, -2),
+            (Operation::WriteCopy, -22),
+            (Operation::BeginCopy, -16),
+        ] {
+            let copy = Faults {
+                refuse: Some((op, errno)),
+                ..Faults::default()
+            };
+            assert_eq!(
+                drive(None, copy).err(),
+                Some("a copy failed with no SAK to blame"),
+                "{op:?} {errno}"
+            );
+        }
     }
 
     #[test]

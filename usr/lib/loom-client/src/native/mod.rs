@@ -34,7 +34,7 @@ use core::{
     task::{Context, Poll, Waker},
 };
 use kernel::{
-    Backend, EBADF, ECANCELED, EINTR, EINVAL, EIO, ENOENT, ENOSPC, ETIMEDOUT, Map, PAGE, Shared,
+    Backend, EBADF, ECANCELED, EINTR, EINVAL, EIO, ENOENT, ENOMEM, ENOSPC, ETIMEDOUT, Map, PAGE, Shared,
 };
 
 /// A negative errno.
@@ -791,14 +791,19 @@ impl<K: Kernel> Inner<K> {
         let Some((i, mut request)) = done else {
             return Ok(());
         };
-        let refused = matches!(request.take(), Ok(Some(c)) if c.result < 0);
+        let result = match request.take() {
+            Ok(Some(c)) => c.result,
+            _ => 0,
+        };
         drop(request);
         let entry = self.shared.slots.borrow()[i];
         let Some(e) = entry else {
             return Ok(());
         };
         let ready = |r| self.shared.state(r) == Ok(SERVICE_READY);
-        if refused && ready(e.r) && ready(e.scope) {
+        // The kernel's own allocation can fail where the book admitted the request. The
+        // server keeps its fid until the scope ends, and REAP is retried until then.
+        if result < 0 && result != -ENOMEM && ready(e.r) && ready(e.scope) {
             self.fail();
             return Err(-EIO);
         }

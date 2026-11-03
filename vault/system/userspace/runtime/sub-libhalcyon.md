@@ -854,6 +854,20 @@ The tests run real HIN1 records against a scripted server
 (`interaction_client_tests.rs`). Its native adapter is [[sub-interaction-native]]. The
 guest witnesses are separate chunks (ASYNC-SERVICE-LIFECYCLE, "AS-4 adoption design").
 
+**What a refusal means depends on where it came.** The server answers a request on the
+write that finishes its record, so success there means the request ran. An errno on a
+reply's read is therefore no answer, whatever its value: it ends the connection, and on a
+commit's reply the outcome is unknown. On the write, a value in the HIN1 table is a refusal.
+A record the server could not take poisons its fid until the fid closes
+(`usr/halcyond/src/apprecord.rs`), and the values that does it are also what a whole request
+can be refused with, so `Invalid`, `TooLarge`, `NoMemory` and `Unsupported` end the connection
+rather than be guessed at, as does any refusal part way through a record. Otherwise every
+later request on that fid would be refused for ever. A mode report refused that way is not
+sent again until the host reports anew, or a server that always refuses it would be
+connected to for ever. A `Denied` bind is asked again on the reconnect schedule, since a seat
+away for a trusted episode answers it and comes back on its own, and the schedule bounds what
+a real denial costs. No exchange outlives the job lifetime, however steadily its reply trickles.
+
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)
 

@@ -23,7 +23,14 @@ struct Server {
     /// Requests seen, in order.
     log: Vec<Operation>,
     modes: Vec<(u64, Mode)>,
+    /// Refused on the write that finishes the record, as the real server refuses.
     refuse: Vec<(Operation, i32)>,
+    /// The request ran, and this errno comes on its reply's read.
+    refuse_reply: Vec<(Operation, i32)>,
+    /// This errno comes on a write after the first part of this operation's record.
+    refuse_partway: Option<(Operation, i32)>,
+    /// Added to the generation a commit answers with.
+    skew: u64,
     /// Never answer this operation: its read stays in flight.
     hold: Option<Operation>,
     /// Cut the connection at this operation's answer.
@@ -46,6 +53,9 @@ impl Server {
             log: Vec::new(),
             modes: Vec::new(),
             refuse: Vec::new(),
+            refuse_reply: Vec::new(),
+            refuse_partway: None,
+            skew: 0,
             hold: None,
             cut: None,
             max_io: usize::MAX,
@@ -64,9 +74,8 @@ impl Server {
         let (id, request) = Request::decode(&record).expect("the client sent a valid record");
         let op = wire::frame(&record).unwrap().0.operation;
         self.log.push(op);
-        if let Some(i) = self.refuse.iter().position(|(o, _)| *o == op) {
-            self.wires[lane].refusal = Some(self.refuse.remove(i).1);
-            return;
+        if let Some(i) = self.refuse_reply.iter().position(|(o, _)| *o == op) {
+            self.wires[lane].refusal = Some(self.refuse_reply.remove(i).1);
         }
         let bytes = match request {
             Request::Hello => Response::Hello { session: 77 }.encode(id),
@@ -129,7 +138,7 @@ impl Server {
             Request::Commit { expected, .. } => {
                 assert_eq!(expected, self.generation);
                 self.clipboard = core::mem::take(&mut self.write_slots);
-                self.generation += 1;
+                self.generation += 1 + self.skew;
                 Response::Committed {
                     generation: self.generation,
                 }
@@ -198,9 +207,30 @@ fn drive(c: &mut Client, s: &mut Server, now: u64) -> Vec<&'static str> {
             Action::Write(lane, bytes) => {
                 let i = index(lane);
                 let n = bytes.len().min(s.max_io);
+                if s.wires[i].record.len() >= HEADER_BYTES {
+                    let op = wire::Header::decode(&s.wires[i].record[..HEADER_BYTES])
+                        .unwrap()
+                        .operation;
+                    if s.refuse_partway.is_some_and(|(o, _)| o == op) {
+                        let errno = s.refuse_partway.take().unwrap().1;
+                        s.wires[i].record.clear();
+                        c.failed(lane, errno, now);
+                        continue;
+                    }
+                }
                 s.wires[i].record.extend_from_slice(&bytes[..n]);
-                c.wrote(lane, n, now);
                 let complete = wire::frame(&s.wires[i].record).is_ok();
+                if complete {
+                    let op = wire::frame(&s.wires[i].record).unwrap().0.operation;
+                    if let Some(at) = s.refuse.iter().position(|(o, _)| *o == op) {
+                        let errno = s.refuse.remove(at).1;
+                        s.log.push(op);
+                        s.wires[i].record.clear();
+                        c.failed(lane, errno, now);
+                        continue;
+                    }
+                }
+                c.wrote(lane, n, now);
                 if complete {
                     let op = wire::frame(&s.wires[i].record).unwrap().0.operation;
                     if s.hold == Some(op) {
@@ -399,22 +429,40 @@ fn bind_gives_up_after_its_attempts_and_says_so_to_a_job() {
 }
 
 #[test]
-fn a_denied_bind_is_not_retried_until_the_host_asks_again() {
+fn a_denied_bind_is_asked_again_on_the_schedule_and_then_waits_for_the_host() {
     let mut s = Server::new();
+    // A seat away for a trusted episode answers this, and it comes back on its own.
     s.refuse = vec![(Operation::BindController, EACCES)];
     let mut c = Client::new();
     c.report_mode(Mode::Normal, false, "Nora", 0).unwrap();
     drive(&mut c, &mut s, 0);
     assert_eq!(s.closes, 1);
+    let retry = c.next_deadline().expect("a seat can come back");
+    drive(&mut c, &mut s, retry);
+    assert_eq!(s.connects, 2);
+    assert!(c.is_bound());
+    assert_eq!(s.modes.last().unwrap().1, Mode::Normal);
+
+    // One that never comes back spends the schedule and no more.
+    let mut s = Server::new();
+    s.refuse = vec![(Operation::BindController, EACCES); 2 * RECONNECT_ATTEMPTS as usize];
+    let mut c = Client::new();
+    c.report_mode(Mode::Normal, false, "Nora", 0).unwrap();
+    drive(&mut c, &mut s, 0);
+    let mut spent = 0;
+    while let Some(at) = c.next_deadline() {
+        drive(&mut c, &mut s, at);
+        spent += 1;
+        assert!(spent <= RECONNECT_ATTEMPTS, "it kept asking");
+    }
+    assert_eq!(spent, RECONNECT_ATTEMPTS);
     assert_eq!(
         c.next_deadline(),
         None,
         "a background process does not hammer the server"
     );
     c.report_mode(Mode::Insert, false, "Nora", SEC).unwrap();
-    drive(&mut c, &mut s, SEC);
-    assert_eq!(s.connects, 2);
-    assert!(c.is_bound());
+    assert!(c.next_deadline().is_some(), "the host asked again");
 }
 
 #[test]
@@ -654,12 +702,12 @@ fn a_refused_read_fails_the_paste_and_releases_the_snapshot() {
     let mut s = Server::new();
     let mut c = bound(&mut s, 0);
     s.clipboard = text(10);
-    s.refuse = vec![(Operation::ReadClipboard, -22)];
+    s.refuse = vec![(Operation::ReadClipboard, EAGAIN)];
     c.paste(0).unwrap();
     drive(&mut c, &mut s, 0);
     assert_eq!(
         c.take_event(),
-        Some(Event::PasteFailed(Why::Refused(Failure::Invalid)))
+        Some(Event::PasteFailed(Why::Refused(Failure::Conflict)))
     );
     assert_eq!(s.log.last(), Some(&Operation::Cancel));
     assert!(
@@ -810,6 +858,166 @@ fn a_commit_the_server_says_is_gone_is_a_definite_failure() {
         Some(Event::CopyFailed(Why::Refused(Failure::Gone)))
     );
     assert_eq!(c.take_event(), None);
+}
+
+#[test]
+fn an_errno_on_a_commits_reply_leaves_the_commit_unknown() {
+    // The route can go between the write and the read, and the ring can run out of
+    // memory for the read. Either way the write's success said the commit ran.
+    for errno in [ENOENT, -12, EAGAIN, EBUSY, -22] {
+        let mut s = Server::new();
+        let mut c = bound(&mut s, 0);
+        s.refuse_reply = vec![(Operation::CommitCopy, errno)];
+        c.copy(text(10), 0).unwrap();
+        drive(&mut c, &mut s, 0);
+        assert_eq!(c.take_event(), Some(Event::CopyUnknown), "{errno}");
+        assert_eq!(s.closes, 1, "{errno}");
+        assert_eq!(s.generation, 1, "{errno}: the commit did land");
+    }
+}
+
+#[test]
+fn an_errno_on_any_other_reply_ends_the_connection_too() {
+    for op in [
+        Operation::GetClipboard,
+        Operation::ReadClipboard,
+        Operation::Cancel,
+    ] {
+        let mut s = Server::new();
+        s.clipboard = text(10);
+        let mut c = bound(&mut s, 0);
+        s.refuse_reply = vec![(op, EAGAIN)];
+        c.paste(0).unwrap();
+        drive(&mut c, &mut s, 0);
+        match op {
+            // The bytes were whole, so they are the host's however the release went.
+            Operation::Cancel => assert!(matches!(c.take_event(), Some(Event::Pasted(_)))),
+            _ => assert_eq!(c.take_event(), Some(Event::PasteFailed(Why::Lost)), "{op:?}"),
+        }
+        assert_eq!(s.closes, 1, "{op:?}");
+    }
+}
+
+#[test]
+fn a_refusal_that_spoils_the_fid_ends_the_connection_and_the_next_job_works() {
+    for errno in [-22, -7, -12, -95] {
+        let mut s = Server::new();
+        let mut c = bound(&mut s, 0);
+        s.refuse = vec![(Operation::GetClipboard, errno)];
+        c.paste(0).unwrap();
+        drive(&mut c, &mut s, 0);
+        assert!(
+            matches!(c.take_event(), Some(Event::PasteFailed(Why::Refused(_)))),
+            "{errno}"
+        );
+        assert_eq!(s.closes, 1, "{errno}");
+        c.paste(SEC).unwrap();
+        drive(&mut c, &mut s, SEC);
+        assert!(matches!(c.take_event(), Some(Event::Pasted(_))), "{errno}");
+    }
+}
+
+#[test]
+fn a_badhandle_on_a_job_ends_the_connection_and_the_next_job_works() {
+    let mut s = Server::new();
+    let mut c = bound(&mut s, 0);
+    s.refuse = vec![(Operation::GetClipboard, -9)];
+    c.paste(0).unwrap();
+    drive(&mut c, &mut s, 0);
+    assert_eq!(
+        c.take_event(),
+        Some(Event::PasteFailed(Why::Refused(Failure::BadHandle)))
+    );
+    assert_eq!(s.closes, 1);
+    c.paste(SEC).unwrap();
+    drive(&mut c, &mut s, SEC);
+    assert!(matches!(c.take_event(), Some(Event::Pasted(_))));
+}
+
+#[test]
+fn a_write_refused_part_way_through_a_record_ends_the_connection() {
+    // The next request would start at offset 0 against a half-assembled record.
+    let mut s = Server::new();
+    let mut c = bound(&mut s, 0);
+    s.max_io = 8169;
+    s.refuse_partway = Some((Operation::WriteCopy, EAGAIN));
+    c.copy(text(16 * 1024), 0).unwrap();
+    drive(&mut c, &mut s, 0);
+    assert_eq!(
+        c.take_event(),
+        Some(Event::CopyFailed(Why::Refused(Failure::Conflict)))
+    );
+    assert_eq!(s.closes, 1);
+    assert_eq!(s.generation, 0);
+    c.copy(text(10), SEC).unwrap();
+    drive(&mut c, &mut s, SEC);
+    assert_eq!(c.take_event(), Some(Event::Copied { generation: 1 }));
+}
+
+#[test]
+fn a_mode_refused_so_that_it_spoils_the_fid_is_not_sent_for_ever() {
+    let mut s = Server::new();
+    let mut c = bound(&mut s, 0);
+    s.refuse = vec![(Operation::ReportMode, -22)];
+    let before = s.connects;
+    c.report_mode(Mode::Insert, false, "Nora", 0).unwrap();
+    drive(&mut c, &mut s, 0);
+    assert_eq!(c.take_event(), Some(Event::ModeRefused(Failure::Invalid)));
+    assert_eq!(s.closes, 1);
+    assert_eq!(c.next_deadline(), None, "nothing is owed until the host asks");
+    assert_eq!(s.connects, before);
+    c.report_mode(Mode::Normal, false, "Nora", SEC).unwrap();
+    drive(&mut c, &mut s, SEC);
+    assert!(c.is_bound());
+    assert_eq!(s.modes.last().unwrap().1, Mode::Normal);
+}
+
+#[test]
+fn a_commit_answered_with_the_wrong_generation_is_unknown() {
+    let mut s = Server::new();
+    let mut c = bound(&mut s, 0);
+    s.skew = 1;
+    c.copy(text(10), 0).unwrap();
+    drive(&mut c, &mut s, 0);
+    assert_eq!(c.take_event(), Some(Event::CopyUnknown));
+    assert_eq!(s.closes, 1);
+}
+
+#[test]
+fn a_reply_trickled_for_ever_still_ends() {
+    let mut s = Server::new();
+    let mut c = bound(&mut s, 0);
+    c.report_mode(Mode::Insert, false, "Nora", 0).unwrap();
+    let Some(Step::Write { lane, bytes, .. }) = c.next_step(0) else {
+        panic!("the report's write");
+    };
+    let n = bytes.len();
+    let id = wire::frame(bytes).unwrap().0.request_id;
+    c.wrote(lane, n, 0);
+    let Some(Step::Read { .. }) = c.next_step(0) else {
+        panic!("the report's read");
+    };
+    let header = Header {
+        operation: Operation::ReportMode,
+        response: true,
+        request_id: id,
+        length: MAX_RECORD,
+    }
+    .encode()
+    .unwrap();
+    c.read(lane, &header, 0);
+    let mut now = 0;
+    let step = IDLE_NS / 2;
+    while now < LIFETIME_NS {
+        assert!(c.is_bound(), "lost at {now}");
+        let Some(Step::Read { .. }) = c.next_step(now) else {
+            panic!("the next read");
+        };
+        now += step;
+        c.read(lane, &[0], now);
+    }
+    assert!(c.next_deadline().is_some_and(|at| at <= LIFETIME_NS));
+    assert!(matches!(c.next_step(LIFETIME_NS), Some(Step::Close)));
 }
 
 #[test]

@@ -17,10 +17,12 @@
 # in interaction-native's tests) and in the kernel by NA-4d's fixture.
 #
 # What a number names, while nothing retries (pinned by a_number_names_one_phase):
-#   1 connect; 2-4 and 5-7 walk, walk and open each lane; 8-11 Hello and the clunks of
-#   the two walked directories; 12-13 Bind; 14-15 Mode; 16-17 Get; 18-19 release;
-#   20-21 Begin; 22-25 Write twice; 26-27 Commit; 28-29 Get; 30-33 Read twice;
-#   34-35 release. Past that the run ends without a hold, which ends that moment's loop.
+#   1-8 connect and both lanes' walks, opens and a clunk; 9-11 Hello and a clunk;
+#   12-13 Bind; 14-15 Mode; 16-17 Get; 18-19 release; 20-21 Begin; 22-27 Write twice,
+#   at the server's msize of 8192 three writes and a read and then one and one;
+#   28-29 Commit; 30-31 Get; 32-37 Read twice, one write and three reads and then one
+#   and one; 38-39 release. Past that the run ends without a hold, which ends that
+#   moment's loop.
 #
 # What each run must show:
 #   - Trusted input only after the cancellation. Console output parks during the
@@ -135,7 +137,7 @@ proc run_held {moment n} {
     key "ret"
     set timeout 70
     expect {
-        -re "clipboard-probe: SAK DONE $name bound=(\[01\]) down=(\[01\]) copy=(\[A-Za-z\]+)\[^ \]* lost=(\[0-9\]+)" {
+        -re "clipboard-probe: SAK DONE $name bound=(\[01\]) down=(\[01\]) copy=(\[A-Za-z\]+)\[^\r\n\]* lost=(\[0-9\]+)" {
             lc_step "$name: $expect_out(0,string)"
             incr bound $expect_out(1,string)
             dict incr outcomes $expect_out(3,string)
@@ -170,9 +172,9 @@ foreach moment {before after} {
     }
 }
 # One more for the record of both scenes, at the Commit.
-type "kaua-term-probe --clipboard async-sak before 27\n"
+type "kaua-term-probe --clipboard async-sak before 29\n"
 set timeout 40
-lc_expect "clipboard-probe: SAK READY before-27" "held at the Commit's reply"
+lc_expect "clipboard-probe: SAK READY before-29" "held at the Commit's reply"
 capture clipboard-async-held
 key "ctrl+alt+f10"
 capture clipboard-async-sak
@@ -180,7 +182,7 @@ key "ret"
 lc_expect "corvus: imperium: SAK with nothing pending" "the last trusted episode"
 after 1500
 key "ret"
-lc_expect "clipboard-probe: SAK DONE before-27" "recovered after the last"
+lc_expect "clipboard-probe: SAK DONE before-29" "recovered after the last"
 capture clipboard-async-restored
 lc_pass "private ring clipboard: physical F10 at every operation, value intact, no stale bytes, recovery"
 lc_quit

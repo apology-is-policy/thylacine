@@ -32,7 +32,8 @@ pub enum Moment {
 #[derive(Default)]
 pub struct Progress {
     submitted: Cell<u32>,
-    held: Cell<bool>,
+    /// The number the hold came at, 0 before it.
+    held_at: Cell<u32>,
 }
 
 impl Progress {
@@ -40,7 +41,7 @@ impl Progress {
         self.submitted.get()
     }
     pub fn held(&self) -> bool {
-        self.held.get()
+        self.held_at.get() > 0
     }
 }
 
@@ -66,8 +67,9 @@ impl<K, H: Fn()> Stepping<K, H> {
         (stepping, progress)
     }
 
-    fn hold_once(&self) {
-        if !self.progress.held.replace(true) {
+    fn hold_once(&self, at: u32) {
+        if self.progress.held_at.get() == 0 {
+            self.progress.held_at.set(at);
             (self.hold)();
         }
     }
@@ -85,7 +87,7 @@ unsafe impl<K: Kernel, H: Fn()> Kernel for Stepping<K, H> {
     fn enter(&self, fd: i32, to_submit: u32, min_complete: u32, flags: u32) -> i64 {
         if let Some((at, Moment::Before)) = self.at {
             if to_submit > 0 && self.progress.submitted.get() + to_submit >= at {
-                self.hold_once();
+                self.hold_once(at);
             }
         }
         let rc = self.kernel.enter(fd, to_submit, min_complete, flags);
@@ -96,7 +98,7 @@ unsafe impl<K: Kernel, H: Fn()> Kernel for Stepping<K, H> {
         }
         if let Some((at, Moment::After)) = self.at {
             if self.progress.submitted.get() >= at {
-                self.hold_once();
+                self.hold_once(at);
             }
         }
         rc
@@ -265,12 +267,17 @@ pub fn run<K: Kernel + 'static>(
     run.step(|host, now| asked = host.copy(text.clone(), now));
     asked.map_err(|_| "the copy was turned down")?;
     let copy = run.event()?;
+    if !run.progress.held() && !matches!(copy, Event::Copied { .. }) {
+        return Err("a copy failed with no SAK to blame");
+    }
 
     let value = run.paste_through()?;
     check_value(before, &text, &copy, &value)?;
 
-    if run.bound_at_hold && !run.down_after {
-        // Nothing has used the connection since the SAK. It must fail now.
+    // Number 1 is the CONNECT itself, which may reach the server after the episode. Past
+    // it the connection had formed when the SAK came, and a client that has not noticed
+    // has not used it since. It must fail now.
+    if run.progress.held_at.get() > 1 && !run.down_after {
         if run.paste()?.is_ok() {
             return Err("the connection survived the SAK");
         }

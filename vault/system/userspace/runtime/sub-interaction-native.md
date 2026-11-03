@@ -86,9 +86,10 @@ that crosses a numbered submission: before it reaches the kernel, or just after.
 SQE goes through ENTER, so the numbers cover every operation with no list of phases to
 go stale. `run` reports a mode, copies, then reads back through whatever connection is
 left. What a copy reported bounds what the read may find: `Copied` the new text,
-`CopyFailed` the old, `CopyUnknown` either. A connection bound at the hold must fail at
-its next use, and the value is read again after recovery, because the first read may
-have finished before the SAK landed. `kaua-term-probe --clipboard async-sak` supplies
+`CopyFailed` the old, `CopyUnknown` either, and with nothing held only `Copied` will do. A
+connection that had formed when the hold began must fail at its next use, unless the
+client has already seen it go, and the value is read again after recovery, because the
+first read may have finished before the SAK landed. `kaua-term-probe --clipboard async-sak` supplies
 the system calls and `ls-halcyon-clipboard-async` the key presses.
 
 ## Data structures
@@ -116,18 +117,18 @@ apart, which the client relies on to decide between an answer and a lost connect
 | A walk or open fails | The same, from the boxed future. |
 | A write refused at submission with -EBUSY | Parked. |
 | Any other refusal at submission, -ENOSPC included | `failed(lane, -EIO)`. -EIO is outside the table of HIN1 failures, so the client sees a lost connection, never a refusal. |
-| A completion's negative result | Passed to `failed` as it stands: a server's refusal is an answer, anything else loses the connection. |
+| A completion's negative result | Passed to `failed` as it stands. On the write that finishes a record, a value in the table is the server's refusal. On a reply's read, or outside the table, it loses the connection. |
 | The ring closed or failed | Every future fails, `poll_fd` is None, and the next use reports `Lost`. The ring is not rebuilt. |
 
 ## Performance
 
-One ENTER per submission, plus one per pump's last pass to ask whether the ring is still
-there. No poll. A paste of the full 1 MiB clipboard is 64 Read records. Each copy or
+At least one ENTER per pass of a pump, since each pass turns the ring and that is how it
+learns the ring is still there. No poll. A paste of the full 1 MiB clipboard is 64 Read records. Each copy or
 paste allocates its text once, and a parked write copies its record.
 
 ## Prosecution
 
-Host tests (`tests.rs`, 24) drive the adapter against [[sub-loom-native-adapter]]'s
+Host tests (`tests.rs`, 26) drive the adapter against [[sub-loom-native-adapter]]'s
 simulated kernel and a scripted server speaking real HIN1 records. Every wait goes
 through one poll loop, as a host's does, and the loop asserts that only its own poll
 reached the kernel. The sweep `a_server_that_stops_at_any_operation_...` stops the
@@ -140,7 +141,11 @@ each operation in flight and with its completion unrouted. Its negatives are a s
 that keeps the connection, stale bytes, a closed ring, and failures with no SAK to blame.
 `a_number_names_one_phase` pins what each number means, and the scenario quotes it.
 
-Sabotage, run 2026-11-03 on the Pi against a private copy: 49 named mutants across this
+The tests run the session's real message size, 8192, so a record longer than one message
+goes in parts and the number table matches a guest's. Round 1 of the audit found that the
+sim had no such limit and that its scripts refused on the read, where no real server does.
+
+Sabotage, run 2026-11-03 on the Pi against a private copy: named mutants across this
 crate, `Ring`'s turn at a past deadline and the client core, each predicted to redden a
 named test. The first sweep showed four real gaps, each now a test: a close with nothing
 in flight, a refused read, a stale generation at commit, and a `Gone` commit. It also
@@ -173,6 +178,14 @@ spun on POLLHUP. See [[sub-loom-native-adapter]].
 3. **A closed or failed ring is not rebuilt.** Both mean something broke the adapter's
    contract, such as another thread closing the descriptor. The host keeps its local
    registers from then on.
+4. **A descriptor number reused by another ring is not seen.** ENTER admits any Loom, so
+   if something closes this ring's descriptor behind the adapter's back and a new ring
+   takes the number, the host polls that ring. It takes a broken contract and a second
+   ring in the same process, so nothing guards it.
+5. **A target outlives no re-post.** The name is resolved at `Host::new`. If the service
+   is posted again under the same name, every later connect answers -ENOENT, so the job
+   reports `Lost` for the host's life. A session's service lasts as long as the session
+   the host runs in.
 
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)

@@ -334,8 +334,15 @@ property this arc exists for, so nothing takes a blocking path around it.
 
 The client's rules, each from a rule above it:
 - **Mode reports coalesce.** One in flight, the latest waits, older values are
-  dropped, sequences only grow. A mode report grants nothing and is never retried
-  across a new controller generation.
+  dropped, sequences only grow. A mode report grants nothing. A report lost with its
+  connection is not resent as it was: a new binding is told the latest mode, under the
+  next sequence. A report refused as a record is not sent again until the host reports
+  anew, or a server that always refuses it would be connected to for ever.
+- **A refusal is read where the server gives it.** The server answers a request on the
+  write that finishes its record, so success there means the request ran. An errno on
+  a reply's read is no answer, and on a commit's reply it leaves the outcome unknown.
+  A refusal that may have poisoned the fid, or that came part way through a record,
+  ends the connection, or every later request would be refused for ever.
 - **Only Bind retries,** on Gone or Busy, as the blocking qualification client
   does, but on `next_deadline`, never by sleeping. A nomination the host has not
   published yet looks like that.
