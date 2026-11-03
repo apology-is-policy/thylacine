@@ -361,6 +361,9 @@ static int leg_cached_ro(void) {
     close(p0);
     int ro = open(FILE_A, O_RDONLY);
     if (ro < 0) return fail("cached-ro: open");
+    // A child that inherits it holds this same open file, and its take would move
+    // these reads to the server: leg_cached_inherited.
+    if (fcntl(ro, F_SETFD, FD_CLOEXEC) != 0) return fail("cached-ro: FD_CLOEXEC");
     if (child("wbyte", 0, 0, 0, 0, 0) != 0) return fail("cached-ro: another Proc's locked write");
     // The legs below prove nothing unless this open is the cached one: until the
     // lock it reads the file as it saw it.
@@ -381,6 +384,26 @@ static int leg_cached_ro(void) {
     if (close(ro) != 0) return fail("cached-ro: close");
     if (other_set('s', 'w', 0, 1, 0) != 0) return fail("cached-ro: its close kept the Proc's lock");
     printf("pouch-hello-locks: cached-ro ok\n");
+    return 0;
+}
+
+// The same steps as leg_cached_ro with one change: the child inherits the open.
+// Its descriptor is this open file, so its take has this descriptor read the
+// server too.
+static int leg_cached_inherited(int fd) {
+    static char whole[4096];
+    if (pwrite(fd, "d", 1, 0) != 1) return fail("cached-inherited: restore the byte");
+    int p0 = open(FILE_A, O_RDONLY);
+    if (p0 < 0) return fail("cached-inherited: the filling open");
+    if (read(p0, whole, sizeof whole) != (ssize_t)sizeof whole) return fail("cached-inherited: the filling read");
+    close(p0);
+    int ro = open(FILE_A, O_RDONLY);
+    if (ro < 0) return fail("cached-inherited: open");
+    if (child("wbyte", 0, 0, 0, 0, 0) != 0) return fail("cached-inherited: the child's locked write");
+    char b = 0;
+    if (pread(ro, &b, 1, 0) != 1 || b != 'x') return fail("cached-inherited: the child's take left this open on its snapshot");
+    if (close(ro) != 0) return fail("cached-inherited: close");
+    printf("pouch-hello-locks: cached-inherited ok\n");
     return 0;
 }
 
@@ -532,6 +555,7 @@ int main(int argc, char **argv) {
         || leg_wait(fd) || release_all(fd) != 0
         || leg_sqlite(fd) || release_all(fd) != 0
         || leg_cached_ro() || release_all(fd) != 0
+        || leg_cached_inherited(fd) || release_all(fd) != 0
         || leg_downgrade(fd) || release_all(fd) != 0
         || leg_whence(fd) || release_all(fd) != 0
         || leg_mapped() || release_all(fd) != 0

@@ -68,8 +68,12 @@ host, with the ABI parsed from the kernel's `syscall.h`: 135 cases at each of tw
 optimisation levels, with named mutants for each rule. On the guest,
 `/bin/pouch-hello-locks` (`POUCH_CENSUS_LOCKS`) runs its legs over Stratum's table
 (`own`, `split`, `posix-close`, `ofd`, `ofd-vs-proc`, `flock`, `wait`, `sqlite`,
-`cached-ro`, `downgrade`, `errors`). Each conflict is between two Procs, or two open files of
-one Proc: the prover spawns itself with a mode in `argv[1]` to ask.
+`cached-ro`, `cached-inherited`, `downgrade`, `whence`, `mapped`, `mapped-write`,
+`spawned`, `errors`). Each conflict is between two Procs, or two open files of
+one Proc: the prover spawns itself with a mode in `argv[1]` to ask. The child
+inherits every descriptor not marked close-on-exec and each of those is the
+parent's open file, so `cached-ro` marks its open before the child's take, and
+`cached-inherited` runs the same steps without the mark and reads the child's byte.
 
 ## utimensat sets times; chmod's refusal is EPERM (2026-10-22, 0063)
 

@@ -267,7 +267,9 @@ A take must leave the snapshot of every open it covers, or the holder reads the
 file as it was at open. `file_lock_acquire_sync` runs before every take attempt,
 on `c` and then, for either owner, on every open of the file in the table
 (`handle_lock_sync_file(..., DEV_LOCK_SYNC_ACQUIRE)`), because the lock covers what
-any of the Proc's opens read. The open-file owner learns
+any of the Proc's opens read. An inherited descriptor names the parent's open file,
+so a child's take has the parent's reads through it leave the snapshot as well: the
+parent sees newer bytes, which any open with a read fid would. The open-file owner learns
 its file first, as an entry's get does, so an open of a dead file sharing its
 number is left alone. A failed sync refuses the take, except that a table peer
 answering ESTALE keeps its snapshot and the take through the descriptor that can
