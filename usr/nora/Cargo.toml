@@ -38,9 +38,11 @@ default = ["backend"]
 #
 # The LSP client (8e-2) rides the same feature: `parley/backend` is the
 # persistent-child transport, which needs libthyla-rs exactly as kaua's does.
-backend = ["kaua/backend", "parley/backend", "dep:libthyla-rs"]
+backend = ["kaua/backend", "parley/backend", "dep:libthyla-rs", "dep:interaction-native", "dep:libhalcyon"]
 
 [dependencies]
 kaua = { path = "../lib/kaua", default-features = false }
 parley = { path = "../lib/parley", default-features = false }
 libthyla-rs = { path = "../lib/libthyla-rs", optional = true }
+interaction-native = { path = "../lib/interaction-native", optional = true }
+libhalcyon = { path = "../lib/libhalcyon", optional = true }

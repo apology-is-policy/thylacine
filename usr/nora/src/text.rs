@@ -22,6 +22,7 @@
 // a single space -- expand-to-tabstop is a documented seam). Insert-mode Tab
 // inserts soft spaces (nora::editor), so new content stays 1-cell-per-char.
 
+use alloc::collections::TryReserveError;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
@@ -413,6 +414,69 @@ impl TextBuffer {
         }
     }
 
+    /// Insert `s` at the cursor as one undo step, or change nothing: everything it
+    /// needs is reserved first. Linear in the text, so that the largest clipboard does
+    /// not stop the editor, where `insert_str` is quadratic in the length of a line.
+    pub fn try_paste(&mut self, s: &str) -> Result<(), TryReserveError> {
+        let snapshot = self.try_snapshot()?;
+        self.undo.try_reserve(1)?;
+        let breaks = s.bytes().filter(|&b| b == b'\n').count();
+        let at = byte_of(&self.lines[self.row], self.col);
+        let tail = self.lines[self.row].len() - at;
+        let mut parts = s.split('\n');
+        let first = parts.next().unwrap_or_default();
+        let mut added = Vec::new();
+        added.try_reserve_exact(breaks)?;
+        for (i, part) in parts.enumerate() {
+            let mut line = String::new();
+            line.try_reserve_exact(part.len() + if i + 1 == breaks { tail } else { 0 })?;
+            line.push_str(part);
+            added.push(line);
+        }
+        self.lines.try_reserve(breaks)?;
+        self.lines[self.row].try_reserve(first.len())?;
+
+        // Nothing below allocates.
+        if self.undo.len() == UNDO_CAP {
+            self.undo.remove(0);
+        }
+        self.undo.push(snapshot);
+        self.rev += 1;
+        if breaks == 0 {
+            self.lines[self.row].insert_str(at, first);
+            self.col += first.chars().count();
+            return Ok(());
+        }
+        let last_chars = s.rsplit('\n').next().unwrap_or_default().chars().count();
+        if let Some(last) = added.last_mut() {
+            last.push_str(&self.lines[self.row][at..]);
+        }
+        let line = &mut self.lines[self.row];
+        line.truncate(at);
+        line.push_str(first);
+        self.lines.extend(added);
+        self.lines[self.row + 1..].rotate_right(breaks);
+        self.row += breaks;
+        self.col = last_chars;
+        Ok(())
+    }
+
+    fn try_snapshot(&self) -> Result<Snapshot, TryReserveError> {
+        let mut lines = Vec::new();
+        lines.try_reserve_exact(self.lines.len())?;
+        for line in &self.lines {
+            let mut copy = String::new();
+            copy.try_reserve_exact(line.len())?;
+            copy.push_str(line);
+            lines.push(copy);
+        }
+        Ok(Snapshot {
+            lines,
+            row: self.row,
+            col: self.col,
+        })
+    }
+
     /// Delete the character before the cursor (Backspace); at column 0 joins
     /// the current line onto the end of the previous one.
     pub fn backspace(&mut self) {
@@ -786,6 +850,63 @@ mod tests {
         assert_eq!(TextBuffer::new("a\nb\n").content(), "a\nb\n");
         assert_eq!(TextBuffer::new("").line_count(), 1);
         assert_eq!(TextBuffer::new("a\nb\n").line_count(), 3);
+    }
+
+    #[test]
+    fn a_paste_lands_at_the_cursor_and_ends_after_itself() {
+        let mut t = TextBuffer::new("héllo");
+        t.set_cursor(0, 2);
+        t.try_paste("XY").unwrap();
+        assert_eq!(t.content(), "héXYllo");
+        assert_eq!(t.cursor(), (0, 4));
+        let mut t = TextBuffer::new("one\nhéllo\nthree");
+        t.set_cursor(1, 2);
+        t.try_paste("a\nbb\nccé").unwrap();
+        assert_eq!(t.content(), "one\nhéa\nbb\nccéllo\nthree");
+        assert_eq!(t.cursor(), (3, 3));
+        let mut t = TextBuffer::new("ab");
+        t.set_cursor(0, 1);
+        t.try_paste("x\n").unwrap();
+        assert_eq!(t.content(), "ax\nb");
+        assert_eq!(t.cursor(), (1, 0));
+    }
+
+    #[test]
+    fn a_paste_is_what_inserting_it_a_character_at_a_time_would_make() {
+        for text in ["", "\n", "\n\n", "a", "a\n", "\na", "é\n\nü", "tab\there\n  x"] {
+            for (row, col) in [(0, 0), (0, 1), (1, 2), (2, 1)] {
+                let mut slow = TextBuffer::new("aé\nbcd\ne");
+                let mut fast = TextBuffer::new("aé\nbcd\ne");
+                slow.set_cursor(row, col);
+                fast.set_cursor(row, col);
+                slow.insert_str(text);
+                fast.try_paste(text).unwrap();
+                assert_eq!(fast.content(), slow.content(), "{text:?} at {row},{col}");
+                assert_eq!(fast.cursor(), slow.cursor(), "{text:?} at {row},{col}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_paste_is_one_undo_step_and_a_content_change() {
+        let mut t = TextBuffer::new("abc");
+        t.set_cursor(0, 1);
+        let rev = t.rev();
+        t.try_paste("1\n2\n3").unwrap();
+        assert_ne!(t.rev(), rev);
+        assert!(t.undo());
+        assert_eq!(t.content(), "abc");
+        assert_eq!(t.cursor(), (0, 1));
+        assert!(!t.undo());
+    }
+
+    #[test]
+    fn the_largest_clipboard_pastes_in_linear_time() {
+        let text = "x".repeat(1024 * 1024);
+        let mut t = TextBuffer::new("");
+        t.try_paste(&text).unwrap();
+        assert_eq!(t.content().len(), text.len());
+        assert_eq!(t.cursor(), (0, text.len()));
     }
 
     #[test]

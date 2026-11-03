@@ -1119,6 +1119,7 @@ fn mode_color(mode: &Mode) -> Color {
         | Mode::DebugMenu
         | Mode::BufferPicker { .. }
         | Mode::FilePicker { .. } => theme::active().ember,
+        Mode::VisualMenu => mode_color(&Mode::Visual),
         // Completion overlays Insert; keeping the accent means the cursor does
         // not change colour under the user just because a popup opened.
         Mode::Insert | Mode::Completion { .. } => theme::active().green,

@@ -7,6 +7,7 @@ code:
   - usr/nora/src/main.rs
   - usr/nora/src/lsp_host.rs
   - usr/nora/src/dap_host.rs
+  - usr/nora/src/clip_host.rs
 audit: light
 guarded-by: []
 validated-by: [prose, gate-interactive]
@@ -265,6 +266,18 @@ the Invariants section otherwise reads as "no kernel surface at all":
   Ambush stitch. At a user breakpoint the kernel rows are the debug-trap path; a
   goroutine blocked in a syscall shows its block path. Selecting a kernel frame
   reports `kernel frame: <name> (no source)` because kernel DWARF is deferred.
+
+**The session clipboard (`clip_host`).** `Clip::start` is None without
+`HALCYON_INTERACTION` or the private ring, and the shared-clipboard keys then say so:
+nothing else is tried. Otherwise the ring's descriptor joins the one poll with
+`TAG_CLIP` and the client's `next_deadline` bounds its sleep, beside an ending debug
+session's. Because the timeout can now be the clipboard's, `poll_all` also says whether
+it was the debugger's: `Dap::on_deadline` reads a timed-out poll as its grace being
+spent, and would otherwise kill a session early. `drive_clipboard` runs at the loop's
+tail and once before it, for type-ahead: it reports a changed mode, starts what a key
+asked, and pumps only when the ring woke the poll or a deadline has passed. Events
+become status text, and a paste reaches `Editor::paste_text`. Nothing here blocks.
+See [[sub-interaction-native]].
 
 ## Data structures
 

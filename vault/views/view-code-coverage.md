@@ -65,7 +65,7 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**700 owned · 41 unowned · 741 files (94% owned) · ~10881 unswept lines.**
+**701 owned · 41 unowned · 742 files (94% owned) · ~10881 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **94 files, ~46795 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
@@ -108,7 +108,7 @@ Excluded as harness and counted here rather than dropped: **94 files, ~46795 lin
 | usr/netdev-driver | 1 | 0 | 0 |
 | usr/nocturne-vol | 1 | 0 | 0 |
 | usr/nocturned | 3 | 0 | 0 |
-| usr/nora | 13 | 0 | 0 |
+| usr/nora | 14 | 0 | 0 |
 | usr/protect-guard-child | 1 | 0 | 0 |
 | usr/prowl | 3 | 0 | 0 |
 | usr/ptyfs | 2 | 0 | 0 |

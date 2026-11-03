@@ -19,6 +19,13 @@ use crate::syntax::Lang;
 use crate::text::{Pos, TextBuffer};
 use crate::wrap;
 
+/// What the engine asks of the session clipboard. The binary resolves it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ClipboardRequest {
+    Copy(String),
+    Paste,
+}
+
 /// The editor mode. `Command(buf)` holds the in-progress command/search line
 /// (the leading `:` or `/` distinguishes the two on Enter).
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -34,6 +41,8 @@ pub enum Mode {
     /// the next key toggles a dashboard panel (a nested which-key level under
     /// `Menu`; reachable only via `[Space]` -> `d` when debugging).
     DebugMenu,
+    /// The `[Space]` menu open over a selection, which it closes back to.
+    VisualMenu,
     /// The buffer picker (Space-b): an arrow-selectable list of open buffers;
     /// Enter switches. `sel` is the highlighted buffer index.
     BufferPicker { sel: usize },
@@ -410,8 +419,9 @@ pub struct Editor {
     pending_jump: Option<Pos>,
     /// Visual-mode selection anchor (the other end is the cursor).
     anchor: Option<Pos>,
-    /// The internal yank/paste register (replaces the system clipboard).
+    /// The local yank/paste register, separate from the shared clipboard.
     register: String,
+    clipboard_request: Option<ClipboardRequest>,
     /// Multi-cursor selections (Helix `%`/`s`/`,`). Empty == single-cursor mode
     /// (the `TextBuffer` cursor + `anchor`), so single-cursor paths are
     /// untouched; non-empty == multi, with `carets[0]` the primary (synced to
@@ -475,6 +485,7 @@ impl Editor {
             pending_jump: None,
             anchor: None,
             register: String::new(),
+            clipboard_request: None,
             carets: Vec::new(),
             split_buf: None,
             pending: None,
@@ -510,7 +521,7 @@ impl Editor {
             // Completion overlays Insert -- the chip stays INS because that is
             // the mode Enter and Esc both return to.
             Mode::Insert | Mode::Completion { .. } => "INS",
-            Mode::Visual => "VIS",
+            Mode::Visual | Mode::VisualMenu => "VIS",
             Mode::Command(_) => "CMD",
         }
     }
@@ -540,16 +551,16 @@ impl Editor {
 
     /// The menu table for the current mode (the root `MENU` or `DEBUG_MENU`).
     fn menu_table(&self) -> &'static [MenuItem] {
-        if matches!(self.mode, Mode::DebugMenu) {
-            DEBUG_MENU
-        } else {
-            MENU
+        match self.mode {
+            Mode::DebugMenu => DEBUG_MENU,
+            Mode::VisualMenu => VISUAL_MENU,
+            _ => MENU,
         }
     }
 
     /// Whether a which-key menu (root or debug submenu) is open.
     pub fn menu_open(&self) -> bool {
-        matches!(self.mode, Mode::Menu | Mode::DebugMenu)
+        matches!(self.mode, Mode::Menu | Mode::DebugMenu | Mode::VisualMenu)
     }
 
     /// The buffer-picker's highlighted index, if it is open.
@@ -609,6 +620,76 @@ impl Editor {
     /// rest act on the live one.
     pub fn take_dap_request(&mut self) -> Option<DapRequest> {
         self.dap_request.take()
+    }
+
+    /// Take the pending shared-clipboard request, if any. The engine knows nothing of
+    /// where the clipboard is: the binary resolves this and calls `paste_text` back.
+    pub fn take_clipboard_request(&mut self) -> Option<ClipboardRequest> {
+        self.clipboard_request.take()
+    }
+
+    pub fn is_readonly(&self) -> bool {
+        self.readonly
+    }
+
+    /// Whether a key would edit the buffer, rather than a debugger tile.
+    fn editing_buffer(&self) -> bool {
+        !self.readonly && !(self.debugging() && self.dash.focus != DashPane::Editor)
+    }
+
+    fn end_selection(&mut self) {
+        if matches!(self.mode, Mode::Visual) {
+            self.anchor = None;
+            self.carets.clear();
+            self.mode = Mode::Normal;
+        }
+    }
+
+    /// Space y: every selection, several joined with LF. The local register is not
+    /// touched, as a local yank never reaches the clipboard.
+    fn clipboard_copy(&mut self) {
+        let ranges = self.selection_ranges();
+        if ranges.is_empty() {
+            self.status = Some("nothing selected to copy".to_string());
+            return;
+        }
+        let parts: Vec<String> = ranges
+            .iter()
+            .map(|&(lo, hi)| self.text.range_text(lo, hi))
+            .collect();
+        self.clipboard_request = Some(ClipboardRequest::Copy(parts.join("\n")));
+        self.end_selection();
+    }
+
+    /// Space p. The text lands when it arrives, at the cursor as it is then.
+    fn clipboard_paste(&mut self) {
+        if !self.editing_buffer() {
+            self.status = Some("nothing here to paste into".to_string());
+            return;
+        }
+        self.clipboard_request = Some(ClipboardRequest::Paste);
+        self.end_selection();
+    }
+
+    /// The clipboard's text has arrived. One undo step, or no change at all.
+    pub fn paste_text(&mut self, text: &str) -> bool {
+        let ready = self.editing_buffer()
+            && self.split_buf.is_none()
+            && matches!(self.mode, Mode::Normal | Mode::Insert | Mode::Visual);
+        if !ready {
+            self.status = Some("clipboard: paste not applied here".to_string());
+            return false;
+        }
+        if self.text.try_paste(text).is_err() {
+            self.status = Some("clipboard: no memory for the paste; nothing changed".to_string());
+            return false;
+        }
+        // Their positions no longer name what they did.
+        self.carets.clear();
+        self.end_selection();
+        self.modified = true;
+        self.status = Some("pasted".to_string());
+        true
     }
 
     /// The debugger dashboard snapshot, or `None` when no session is live (the
@@ -996,7 +1077,7 @@ impl Editor {
     /// The visual selection span `(lo, hi)` inclusive, if in visual mode.
     pub fn selection(&self) -> Option<(Pos, Pos)> {
         match (self.mode.clone(), self.anchor) {
-            (Mode::Visual, Some(a)) => {
+            (Mode::Visual | Mode::VisualMenu, Some(a)) => {
                 let c = self.text.cursor();
                 if a <= c {
                     Some((a, c))
@@ -1414,7 +1495,7 @@ impl Editor {
             Mode::Insert => self.insert(key),
             Mode::Visual => self.visual(key),
             Mode::Command(_) => self.command(key),
-            Mode::Menu | Mode::DebugMenu => self.menu(key),
+            Mode::Menu | Mode::DebugMenu | Mode::VisualMenu => self.menu(key),
             Mode::BufferPicker { .. } => self.buffer_picker(key),
             Mode::FilePicker { .. } => self.file_picker(key),
             Mode::Completion { .. } => self.completion_key(key),
@@ -1656,6 +1737,7 @@ impl Editor {
                 self.carets.clear();
                 self.mode = Mode::Normal;
             }
+            KeyCode::Char(' ') => self.mode = Mode::VisualMenu,
             KeyCode::Char('s') => self.split_buf = Some(String::new()),
             KeyCode::Char('c') if !self.readonly => self.change(),
             KeyCode::Char(',') if !self.carets.is_empty() => self.collapse_carets(),
@@ -2198,14 +2280,19 @@ impl Editor {
     }
 
     fn menu(&mut self, key: KeyEvent) {
+        let back = if matches!(self.mode, Mode::VisualMenu) {
+            Mode::Visual
+        } else {
+            Mode::Normal
+        };
         match key.code {
-            KeyCode::Esc | KeyCode::Char(' ') => self.mode = Mode::Normal,
+            KeyCode::Esc | KeyCode::Char(' ') => self.mode = back,
             KeyCode::Char(c) => {
                 // Which-key: a bound key runs its action; any other key dismisses
                 // the menu (Helix-style -- no arrow navigation, no selection).
                 // The table is the root `MENU` or the `[Space]d` submenu.
                 let action = self.menu_table().iter().find(|m| m.key == c).map(|m| m.action);
-                self.mode = Mode::Normal;
+                self.mode = back;
                 if let Some(a) = action {
                     self.run_menu(a);
                 }
@@ -2307,6 +2394,8 @@ impl Editor {
             MenuAction::BufferPicker => {
                 self.mode = Mode::BufferPicker { sel: self.active };
             }
+            MenuAction::ClipboardCopy => self.clipboard_copy(),
+            MenuAction::ClipboardPaste => self.clipboard_paste(),
             MenuAction::NextBuffer => self.next_buffer(),
             MenuAction::PrevBuffer => self.prev_buffer(),
             MenuAction::CloseBuffer => self.close_buffer(false),
@@ -2568,6 +2657,8 @@ struct MenuItem {
 
 #[derive(Clone, Copy)]
 enum MenuAction {
+    ClipboardCopy,
+    ClipboardPaste,
     FilePicker,
     BufferPicker,
     NextBuffer,
@@ -2585,9 +2676,34 @@ enum MenuAction {
     Evaluate,
 }
 
+/// The `[Space]` menu over a selection: the shared clipboard, and nothing that would
+/// take the selection away.
+const VISUAL_MENU: &[MenuItem] = &[
+    MenuItem {
+        key: 'y',
+        label: "copy selection to clipboard",
+        action: MenuAction::ClipboardCopy,
+    },
+    MenuItem {
+        key: 'p',
+        label: "paste clipboard",
+        action: MenuAction::ClipboardPaste,
+    },
+];
+
 /// The fixed `[Space]` menu (Helix bindings where they map; nora-specific where
 /// they don't). A richer / user-extensible set accretes later.
 const MENU: &[MenuItem] = &[
+    MenuItem {
+        key: 'y',
+        label: "copy selections to clipboard",
+        action: MenuAction::ClipboardCopy,
+    },
+    MenuItem {
+        key: 'p',
+        label: "paste clipboard",
+        action: MenuAction::ClipboardPaste,
+    },
     MenuItem {
         key: 'f',
         label: "open file picker",
@@ -2604,7 +2720,7 @@ const MENU: &[MenuItem] = &[
         action: MenuAction::NextBuffer,
     },
     MenuItem {
-        key: 'p',
+        key: 'N',
         label: "previous buffer",
         action: MenuAction::PrevBuffer,
     },
@@ -2773,7 +2889,7 @@ Space then c) to return to your work.
     A             append at the end of the line
     x             delete the character under the cursor
     d             delete the current line
-    p             paste the yank register
+    p             paste the yank register, which is local to this editor
     u             undo
     v             start a visual selection
     %             select the whole buffer
@@ -2789,6 +2905,7 @@ Space then c) to return to your work.
 
   VISUAL -- the selection extends as you move (h j k l w b g G 0 $)
     y    yank (copy) the selection        d / x  delete (cut) it
+    Space y    copy it to the session clipboard   Space p  paste that clipboard
     c    change: delete it and drop to INSERT
     s    select within: type a word, Enter puts a cursor per match
     Esc  clear the selection
@@ -2812,8 +2929,9 @@ Space then c) to return to your work.
     :help       open this manual
 
   THE Space MENU  (press Space, then one key)
+    y  copy to the session clipboard      p  paste the session clipboard
     f  open file picker        b  open buffer picker
-    n  next buffer             p  previous buffer
+    n  next buffer             N  previous buffer
     c  close buffer            w  toggle soft-wrap
     d  debug submenu           s  save file
     q  quit
@@ -3543,6 +3661,139 @@ mod tests {
         ed.handle_key(ch('l')); // a stray key collapses to the primary, then acts
         assert!(ed.carets().is_empty());
         assert_eq!(ed.mode, Mode::Normal);
+    }
+
+    fn visual_over(ed: &mut Editor, right: usize) {
+        ed.handle_key(ch('v'));
+        for _ in 0..right {
+            ed.handle_key(ch('l'));
+        }
+    }
+
+    #[test]
+    fn space_y_copies_the_selection_and_leaves_the_local_register() {
+        let mut ed = Editor::new(None, "hello world", false);
+        visual_over(&mut ed, 2);
+        ed.handle_key(ch('y')); // the register holds "hel", locally
+        assert_eq!(ed.take_clipboard_request(), None);
+        ed.handle_key(ch('0'));
+        visual_over(&mut ed, 4);
+        ed.handle_key(ch(' '));
+        assert_eq!(ed.mode_str(), "VIS");
+        assert!(ed.menu_open());
+        ed.handle_key(ch('y'));
+        assert_eq!(
+            ed.take_clipboard_request(),
+            Some(ClipboardRequest::Copy("hello".to_string()))
+        );
+        assert_eq!(ed.mode, Mode::Normal);
+        assert_eq!(ed.selection(), None);
+        ed.handle_key(ch('p')); // plain p is still the local register
+        assert_eq!(ed.text.content(), "hellhelo world");
+    }
+
+    #[test]
+    fn several_selections_join_with_lf() {
+        let mut ed = Editor::new(None, "foo bar foo", false);
+        ed.handle_key(ch('%'));
+        ed.handle_key(ch('s'));
+        type_str(&mut ed, "foo");
+        ed.handle_key(code(KeyCode::Enter));
+        assert_eq!(ed.carets().len(), 2);
+        ed.handle_key(ch(' '));
+        ed.handle_key(ch('y'));
+        assert_eq!(
+            ed.take_clipboard_request(),
+            Some(ClipboardRequest::Copy("foo\nfoo".to_string()))
+        );
+    }
+
+    #[test]
+    fn space_y_with_nothing_selected_asks_nothing() {
+        let mut ed = Editor::new(None, "hello", false);
+        ed.handle_key(ch(' '));
+        ed.handle_key(ch('y'));
+        assert_eq!(ed.take_clipboard_request(), None);
+        assert_eq!(ed.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn the_menu_over_a_selection_closes_back_to_it() {
+        for key in [code(KeyCode::Esc), ch(' '), ch('z')] {
+            let mut ed = Editor::new(None, "hello", false);
+            visual_over(&mut ed, 2);
+            ed.handle_key(ch(' '));
+            assert!(ed.selection().is_some(), "a menu takes no selection away");
+            ed.handle_key(key);
+            assert_eq!(ed.mode, Mode::Visual);
+            assert_eq!(ed.selection(), Some(((0, 0), (0, 2))));
+        }
+    }
+
+    #[test]
+    fn space_p_asks_and_the_text_lands_as_one_undo_step() {
+        let mut ed = Editor::new(None, "ab", false);
+        ed.handle_key(ch('l'));
+        ed.handle_key(ch(' '));
+        ed.handle_key(ch('p'));
+        assert_eq!(ed.take_clipboard_request(), Some(ClipboardRequest::Paste));
+        assert_eq!(ed.text.content(), "ab", "nothing lands before it arrives");
+        assert!(ed.paste_text("1\n2"));
+        assert_eq!(ed.text.content(), "a1\n2b");
+        assert!(ed.modified);
+        ed.handle_key(ch('u'));
+        assert_eq!(ed.text.content(), "ab");
+    }
+
+    #[test]
+    fn a_read_only_buffer_neither_asks_for_a_paste_nor_takes_one() {
+        let mut ed = Editor::new(None, "ab", true);
+        ed.handle_key(ch(' '));
+        ed.handle_key(ch('p'));
+        assert_eq!(ed.take_clipboard_request(), None);
+        assert!(!ed.paste_text("x"));
+        assert_eq!(ed.text.content(), "ab");
+        assert!(!ed.modified);
+        // Reading is what a read-only buffer is for, so copying still works.
+        visual_over(&mut ed, 1);
+        ed.handle_key(ch(' '));
+        ed.handle_key(ch('y'));
+        assert_eq!(
+            ed.take_clipboard_request(),
+            Some(ClipboardRequest::Copy("ab".to_string()))
+        );
+    }
+
+    #[test]
+    fn a_paste_that_arrives_at_a_prompt_changes_nothing() {
+        let mut ed = Editor::new(None, "ab", false);
+        ed.handle_key(ch(':'));
+        assert!(!ed.paste_text("x"));
+        assert_eq!(ed.text.content(), "ab");
+        assert_eq!(ed.command_buf(), Some(":"));
+    }
+
+    #[test]
+    fn a_paste_lands_while_typing_and_drops_a_selection_it_moved() {
+        let mut ed = Editor::new(None, "ab", false);
+        ed.handle_key(ch('i'));
+        assert!(ed.paste_text("x"));
+        assert_eq!(ed.mode, Mode::Insert);
+        ed.handle_key(code(KeyCode::Esc));
+        visual_over(&mut ed, 1);
+        assert!(ed.paste_text("y"));
+        assert_eq!(ed.mode, Mode::Normal);
+        assert_eq!(ed.selection(), None);
+    }
+
+    #[test]
+    fn previous_buffer_moved_to_capital_n() {
+        let mut ed = Editor::new(Some("a".to_string()), "", false);
+        ed.open_buffer(Some("b".to_string()), "");
+        assert_eq!(ed.filename.as_deref(), Some("b"));
+        ed.handle_key(ch(' '));
+        ed.handle_key(ch('N'));
+        assert_eq!(ed.filename.as_deref(), Some("a"));
     }
 
     #[test]

@@ -247,8 +247,15 @@ The count prefix is bounded twice over (saturating arithmetic, then a cap), so
   round-trips to disk unchanged; expanding to a tabstop is the view's decision
   and is not made. Insert-mode Tab inserts four spaces so new content stays
   one-cell-per-char.
-- **No system clipboard.** The yank register is internal — Thylacine has none at
-  v1.0.
+- **The local register and the shared clipboard are separate.** Plain `y` and `p`
+  use the register and never touch the clipboard. `Space y` and `Space p`, from the
+  which-key menu over Normal or over a selection, raise a `ClipboardRequest` like any
+  other request, several selections joined with LF. The binary resolves it and calls
+  `paste_text` when the text arrives, which may be later, at the cursor as it is then.
+  `TextBuffer::try_paste` reserves everything first, so the paste is one undo step or
+  no change at all, and it is linear in the text, where `insert_str` is quadratic in
+  the length of a line. A paste arriving at a prompt or a picker is not applied.
+  `Space N` is previous buffer, since `p` went to the clipboard.
 - **A col-0 line-join does not shift other carets** during a multi-cursor
   backspace. Documented as rare in a multi-insert and left.
 - **Character indexing is linear.** Every `char_len` / `char_at` walks the line.
