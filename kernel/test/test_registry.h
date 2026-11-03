@@ -677,6 +677,7 @@ void test_loom_private_bridge(void);
 void test_loom_bridge_probe(void);
 void test_loom_native_probe_rust(void);
 void test_loom_native_probe_c(void);
+void test_loom_native_probe_death(void);
 void test_loom_setup_rollback_settles(void);
 void test_loom_setup_rollback_identity(void);
 void test_loom_private_setup_rollback_identity(void);

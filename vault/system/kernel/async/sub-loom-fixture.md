@@ -12,7 +12,7 @@ validated-by: [prose]
 design:
   - "docs/ASYNC-SERVICE-ABI.md \"Sub-chunks\" NA-4d"
 created: 2026-10-18
-updated: 2026-10-19
+updated: 2026-11-03
 ---
 ## Purpose
 
@@ -27,7 +27,7 @@ qualification lever and pins every outcome. A rule a sim gets wrong -- the hole
 NA-4d exists to close -- surfaces as a probe that passes on the sim and fails in
 the guest.
 
-The fixture and the kernel test are owned here. The two probes are HARNESS (they
+The fixture and the kernel test are owned here. The probes are HARNESS (they
 exercise the adapter, they are not part of the system); the adapter they
 exercise is [[sub-loom-native-adapter]], the kernel service they run against is
 [[sub-kernel-loom]].
@@ -51,13 +51,24 @@ exercise is [[sub-loom-native-adapter]], the kernel service they run against is
   a trailing byte or an oversized count -- is answered Rlerror AND counts a
   violation.
 - `stats` reports sessions accepted and ended, violations, stalled reads,
-  flushes, clunks, getattrs, walks, opens, reads and writes, so a probe check can
-  tell a refusal the kernel made at admission from one the server answered.
+  flushes, clunks, getattrs, walks, opens, reads, writes and faults, so a probe
+  check can tell a refusal the kernel made at admission from one the server
+  answered.
+- **Hostile services (AS-3).** Twelve more names serve the same tree with one
+  fault at the first message of one type: `hold-version`, `-attach`, `-getattr`,
+  `-walk`, `-open` hold it unanswered; `torn-version` and `torn-read` send part of
+  the reply and stop; `garbled-version` and `garbled-read` answer an impossible
+  frame length; `wrong-version` and `wrong-read` answer the wrong reply type;
+  `hangup-read` ends the session. `unaccepted` is posted and never accepted. A
+  fault counts in `stats`, never as a violation: the kernel's client did nothing
+  wrong, and the count is how a probe tells an operation that reached the named
+  stage from one stopped earlier.
 - **Exit codes.** The fixture exits 76 when it saw zero sessions (the default
   image, where private setup is refused), 77 when it saw at least one, every
-  session ended and no violation, else 1. The probes exit 72 (Rust) / 74 (C) on
-  the default image's -EOPNOTSUPP setup refusal, and 73 / 75 when every leg
-  passed on the qualification image.
+  session ended and no violation, else 1. On the default image's -EOPNOTSUPP
+  setup refusal `loom-native-probe` exits 78, `loom-c-probe` 74 and
+  `loom-death-probe` 72; with every leg passed on the qualification image, 79, 75
+  and 73.
 
 ## Mechanism
 
@@ -69,8 +80,28 @@ builds a registry with `srv_registry_create` + `devsrv_attach_registry` +
 monotonic private-ring counters (`loom_private_created`/`_retired`), pins both
 exit statuses against `LOOM_PRIVATE_QUALIFICATION` (never against what ran), and
 checks rings made == retired, connections freed, and the registry destroyed
-after its own unref. The qualification image expects two rings and six
-connections, all released; the default image expects none.
+after its own unref. The qualification image expects two rings and twenty-six
+connections per adapter probe, and twelve rings and ten connections for the death
+probe, all released; the default image expects none.
+
+Past the NA-4d legs, each adapter probe drives the AS-3 list against the hostile
+services: a hold at each handshake and setup stage, ended by a deadline once and
+by a drop otherwise; a garbled, wrong or torn reply at the handshake and at a
+READ; a service that never accepts; a stream staying live while a sibling scope
+stalls and is cancelled; a cancel with the CQ full, which posts nothing past it;
+and the pool and request bounds an honest program can reach. Quota refusals that
+need a resource floor stay with the kernel fixtures
+(`loom_private_protocol_fault` and the charge tests).
+
+`/bin/loom-death-probe` (`loom.native_probe_death`) is the whole-userspace half
+the kernel's close-boundary schedules left open. Its driver spawns itself per
+case; each victim holds a stalled READ (or a CONNECT the server holds, or one
+nobody accepts, or a stream with a lease held), then exits, exits from a sibling
+thread, is killed, closes its ring from a sibling thread, or execs, from the main
+thread and from a sibling. The driver bounds the victim's end and reads the
+session's end at the server. The new image of an exec finds no descriptor that
+answers ENTER and makes a ring of its own. Rust only: the paths under test are
+the kernel's, and an adapter's teardown does not run on any of them.
 
 The retire witness is a `Q`/`Z` handshake: after the ring retires the probe
 writes `Q` on the control pipe, and the fixture, once its connection set is
@@ -144,6 +175,9 @@ kernel test runs two boots, one per probe.
 
 - [[sub-loom-native-adapter]] is the adapter this qualifies; [[sub-kernel-loom]]
   is the kernel service it runs against.
+- **AS-3's list** (ASYNC-SERVICE-LIFECYCLE.md section 9) is the map from a
+  required case to its leg or kernel schedule; a whole-boot SMP qualification of
+  these legs is owed and is not run while the full gate is on hold.
 - **AS-4** (the clipboard client) is the first real guest consumer of the
   adapter; the fixture is its stand-in until then.
 

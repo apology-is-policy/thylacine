@@ -23,8 +23,11 @@
 
 // The kernel's errno registry (kernel/include/thylacine/errno.h).
 #define E_NOENT      2
+#define E_IO         5
 #define E_BADF       9
 #define E_ACCES     13
+#define E_BUSY      16
+#define E_INVAL     22
 #define E_NOSPC     28
 #define E_OPNOTSUPP 95
 #define E_TIMEDOUT 110
@@ -37,6 +40,8 @@
 // Targets, scopes, fids and pools share the kernel's LOOM_SERVICE_SLOT_COUNT
 // slots (kernel/include/thylacine/loom_service_abi.h).
 #define SLOTS      64u
+// LOOM_SERVICE_POOL_MEMBERS: the most members one pool may name.
+#define POOL_MEMBERS 64u
 
 // The fixture's files and its stats counters (usr/loom-fixture).
 #define DATA_LEN   (3u * 4096u + 1000u)
@@ -50,7 +55,8 @@
 #define CLUNKS     5
 #define GETATTRS   6
 #define WALKS      7
-#define STAT_COUNT 11
+#define FAULTS     11
+#define STAT_COUNT 12
 
 static T_LOOM_RING_STORAGE(ENTRIES) g_store;
 static T_LOOM_RING_STORAGE(ENTRIES) g_store2;
@@ -213,10 +219,25 @@ static void read_refused(struct t_loom_fid *fid, int32_t want, const char *why) 
     CHECK(res == want && !rr, why, res);
 }
 
+// A dropped operation keeps its entry in the request book until a turn routes its
+// terminal, so a read right after a drop may first have to make that room.
 static void stats(struct t_loom_fid *fid, uint32_t v[STAT_COUNT]) {
     const unsigned char *b;
     size_t len;
-    struct t_fixed_read_result *rr = read_at(fid, range(2, 0, 64), 0, &b, &len);
+    uint64_t until = soon();
+    struct t_loom_op *op;
+    int rc;
+    while ((rc = t_loom_read(fid, range(2, 0, 64), 0, 1, soon(), &op)) == -E_NOSPC) {
+        CHECK(t_loom_now(g_cur) < until, "room for a stats read", rc);
+        int64_t turned = t_loom_turn(g_cur, 1, t_loom_now(g_cur) + 10000000ull);
+        CHECK(turned >= 0, "a turn with the book full", turned);
+    }
+    CHECK(rc == 0, "submit a stats read", rc);
+    int32_t res = -1;
+    struct t_fixed_read_result *rr = NULL;
+    AWAIT(t_loom_read_done(op, &res, &rr), "a stats read");
+    CHECK(res >= 0 && rr, "a stats read", res);
+    b = t_loom_read_bytes(rr, &len);
     CHECK(len == 4 * STAT_COUNT, "the stats file holds one u32 per counter", len);
     for (int i = 0; i < STAT_COUNT; i++)
         v[i] = (uint32_t)b[4 * i] | (uint32_t)b[4 * i + 1] << 8 |
@@ -321,14 +342,311 @@ static unsigned fill(struct t_loom_scope *s) {
     return n;
 }
 
+// A service with one fault in it (the fixture's HOSTILE table).
+static struct t_loom_target *hostile_target(const char *name) {
+    struct t_loom_target *t = NULL;
+    int rc = t_loom_target(g_cur, REGISTRY, name, name_len(name), &t);
+    CHECK(rc == 0 && t, "TARGET of a hostile service", rc);
+    return t;
+}
+
+// The CONNECT reaches the fault and stops there, and dropping it must still end
+// the session.
+static void hold_connect(struct t_loom_fid *sf, const char *name) {
+    uint32_t base[STAT_COUNT], v[STAT_COUNT];
+    struct t_loom_target *t = hostile_target(name);
+    stats(sf, base);
+    struct t_loom_op *op;
+    int rc = t_loom_connect(t, 0, 0, &op);
+    CHECK(rc == 0, "submit a CONNECT the server holds", rc);
+    stats_until(sf, FAULTS, base[FAULTS] + 1, v);
+    t_loom_op_drop(op);
+    stats_until(sf, ENDED, base[ENDED] + 1, v);
+    t_loom_target_drop(t);
+}
+
+// The handshake's reply is malformed: the CONNECT answers -EIO by itself, and the
+// session ends with no abort from here.
+static void broken_connect(struct t_loom_fid *sf, const char *name) {
+    uint32_t base[STAT_COUNT], v[STAT_COUNT];
+    struct t_loom_target *t = hostile_target(name);
+    stats(sf, base);
+    struct t_loom_op *op;
+    int rc = t_loom_connect(t, 1, soon(), &op);
+    CHECK(rc == 0, "submit a CONNECT", rc);
+    int32_t res = 0;
+    struct t_loom_scope *s = NULL;
+    AWAIT(t_loom_connect_done(op, &res, &s), "a malformed handshake");
+    CHECK(res == -E_IO && !s, "a malformed handshake reply fails the CONNECT", res);
+    stats_until(sf, ENDED, base[ENDED] + 1, v);
+    CHECK(v[FAULTS] == base[FAULTS] + 1, "the fault was the service's", v[FAULTS]);
+    t_loom_target_drop(t);
+}
+
+// Past the handshake, the first Tgetattr or Twalk of a WALK is held.
+static void hold_walk(struct t_loom_fid *sf, const char *name) {
+    uint32_t base[STAT_COUNT], v[STAT_COUNT];
+    struct t_loom_target *t = hostile_target(name);
+    struct t_loom_scope *s = connect(t);
+    stats(sf, base);
+    struct t_loom_op *op;
+    int rc = t_loom_walk(s, "data", 4, 0, 0, &op);
+    CHECK(rc == 0, "submit a WALK the server holds", rc);
+    stats_until(sf, FAULTS, base[FAULTS] + 1, v);
+    t_loom_op_drop(op);
+    t_loom_scope_drop(s);
+    stats_until(sf, ENDED, base[ENDED] + 1, v);
+    t_loom_target_drop(t);
+}
+
+// The Tread's reply is malformed or the peer hung up: the READ answers -EIO by
+// itself, and the whole scope goes with it.
+static void broken_read(struct t_loom_fid *sf, const char *name) {
+    uint32_t base[STAT_COUNT], v[STAT_COUNT];
+    struct t_loom_target *t = hostile_target(name);
+    struct t_loom_scope *s = connect(t);
+    struct t_loom_fid *f = walk(s, "data", 0);
+    open_as(f, 0, 0);
+    stats(sf, base);
+    struct t_loom_op *op;
+    int rc = t_loom_read(f, range(4, 0, PAGE), 0, 1, soon(), &op);
+    CHECK(rc == 0, "submit a READ", rc);
+    int32_t res = 0;
+    struct t_fixed_read_result *rr = NULL;
+    AWAIT(t_loom_read_done(op, &res, &rr), "a malformed READ reply");
+    CHECK(res == -E_IO && !rr, "a malformed READ reply fails the READ", res);
+    stats_until(sf, ENDED, base[ENDED] + 1, v);
+    CHECK(v[FAULTS] == base[FAULTS] + 1, "the fault was the service's", v[FAULTS]);
+    walk_refused(s, "data", -E_NOENT, "no FID reserves under the scope the peer broke");
+    t_loom_fid_drop(f);
+    t_loom_scope_drop(s);
+    t_loom_target_drop(t);
+}
+
+static void hostile_peers(struct t_loom_fid *sf, struct t_loom_fid *data) {
+    uint32_t base[STAT_COUNT], v[STAT_COUNT];
+    struct t_loom_op *op;
+    int rc;
+    int32_t res;
+
+    say("a peer that holds the handshake");
+    struct t_loom_target *t = hostile_target("hold-version");
+    stats(sf, base);
+    uint64_t deadline = t_loom_now(g_cur) + 3000000000ull;
+    rc = t_loom_connect(t, 1, deadline, &op);
+    CHECK(rc == 0, "submit a CONNECT the server holds", rc);
+    stats_until(sf, FAULTS, base[FAULTS] + 1, v);
+    res = 0;
+    struct t_loom_scope *none = NULL;
+    AWAIT(t_loom_connect_done(op, &res, &none), "the held CONNECT");
+    CHECK(res == -E_TIMEDOUT && !none, "the deadline ends the held CONNECT", res);
+    stats_until(sf, ENDED, base[ENDED] + 1, v);
+    t_loom_target_drop(t);
+    hold_connect(sf, "hold-version");
+    hold_connect(sf, "hold-attach");
+    hold_connect(sf, "torn-version");
+
+    say("a peer that garbles the handshake");
+    broken_connect(sf, "garbled-version");
+    broken_connect(sf, "wrong-version");
+
+    say("a service that never accepts");
+    t = hostile_target("unaccepted");
+    stats(sf, base);
+    deadline = t_loom_now(g_cur) + 200000000ull;
+    rc = t_loom_connect(t, 1, deadline, &op);
+    CHECK(rc == 0, "submit a CONNECT nobody accepts", rc);
+    res = 0;
+    none = NULL;
+    AWAIT(t_loom_connect_done(op, &res, &none), "the unaccepted CONNECT");
+    CHECK(res == -E_TIMEDOUT && !none, "the deadline ends the unaccepted CONNECT", res);
+    rc = t_loom_connect(t, 0, 0, &op);
+    CHECK(rc == 0, "submit a CONNECT nobody accepts", rc);
+    nap(20);
+    t_loom_op_drop(op);
+    stats(sf, v);
+    CHECK(v[ACCEPTED] == base[ACCEPTED], "the server accepted nothing", v[ACCEPTED]);
+    t_loom_target_drop(t);
+
+    say("a peer that holds a walk or an open");
+    hold_walk(sf, "hold-getattr");
+    hold_walk(sf, "hold-walk");
+    t = hostile_target("hold-open");
+    struct t_loom_scope *s = connect(t);
+    struct t_loom_fid *f = walk(s, "data", 0);
+    stats(sf, base);
+    rc = t_loom_open(f, 0, 0, 0, &op);
+    CHECK(rc == 0, "submit an LOPEN the server holds", rc);
+    stats_until(sf, FAULTS, base[FAULTS] + 1, v);
+    t_loom_op_drop(op);
+    t_loom_fid_drop(f);
+    t_loom_scope_drop(s);
+    stats_until(sf, ENDED, base[ENDED] + 1, v);
+    t_loom_target_drop(t);
+
+    say("a peer that tears a reply");
+    t = hostile_target("torn-read");
+    s = connect(t);
+    f = walk(s, "data", 0);
+    open_as(f, 0, 0);
+    stats(sf, base);
+    rc = t_loom_read(f, range(4, 0, PAGE), 0, 0, 0, &op);
+    CHECK(rc == 0, "submit a READ the server tears", rc);
+    stats_until(sf, FAULTS, base[FAULTS] + 1, v);
+    t_loom_op_drop(op);
+    t_loom_fid_drop(f);
+    t_loom_scope_drop(s);
+    stats_until(sf, ENDED, base[ENDED] + 1, v);
+    t_loom_target_drop(t);
+
+    say("a peer that garbles a reply or hangs up");
+    broken_read(sf, "garbled-read");
+    broken_read(sf, "wrong-read");
+    broken_read(sf, "hangup-read");
+
+    // None of it touched a sibling scope, and none of it was the client's fault.
+    const unsigned char *bytes;
+    size_t len;
+    struct t_fixed_read_result *rr = read_at(data, range(0, 0, PAGE), 2 * PAGE, &bytes, &len);
+    CHECK(len == PAGE && matches(bytes, len, 2 * PAGE), "a scope beside the hostile ones still reads", len);
+    t_loom_read_drop(rr);
+    stats(sf, v);
+    CHECK(v[VIOLATIONS] == 0, "no hostile leg made the client break the protocol", v[VIOLATIONS]);
+}
+
+// Waits for a stream to fill the CQ with nothing reaping it.
+static void cq_full(void) {
+    uint64_t until = soon();
+    while (t_loom_backlog(g_cur) < CQ_ENTRIES) {
+        CHECK(t_loom_now(g_cur) < until, "the CQ fills while no turn reaps it", t_loom_backlog(g_cur));
+        nap(1);
+    }
+}
+
+// A stream keeps delivering while another scope stalls and is cancelled, and that
+// cancel needs no room in a full CQ.
+static void independent_scopes(struct t_loom_fid *sf, struct t_loom_target *t) {
+    uint32_t base[STAT_COUNT], v[STAT_COUNT];
+    struct t_loom_op *op;
+    int rc;
+    static struct t_loom_service_pool_member members[8];
+    for (unsigned i = 0; i < 8; i++) members[i] = range(5, i * SHOT, SHOT);
+    struct t_loom_pool *pool = NULL;
+    rc = t_loom_pool(g_cur, members, 8, &pool);
+    CHECK(rc == 0 && pool, "pool D", rc);
+
+    say("a stream beside a stalled scope");
+    struct t_loom_scope *media = connect(t);
+    struct t_loom_fid *shots = walk(media, "stream", 0);
+    open_as(shots, 0, 0);
+    struct t_loom_op *st = stream(shots, pool);
+    size_t got = 0, len;
+    struct t_ring_payload *p = shot(st);
+    const unsigned char *pb = t_loom_payload_bytes(p, &len);
+    got = append(got, pb, len);
+    give_back(p, "return a lease");
+    struct t_loom_scope *stalled = connect(t);
+    struct t_loom_fid *held = walk(stalled, "stall", 0);
+    open_as(held, 0, 0);
+    stats(sf, base);
+    rc = t_loom_read(held, range(4, 0, PAGE), 0, 0, 0, &op);
+    CHECK(rc == 0, "submit a READ the server holds", rc);
+    stats_until(sf, STALLED, base[STALLED] + 1, v);
+    p = shot(st);
+    pb = t_loom_payload_bytes(p, &len);
+    got = append(got, pb, len);
+    give_back(p, "a stream delivers while a sibling scope stalls");
+    t_loom_op_drop(op);
+    t_loom_fid_drop(held);
+    t_loom_scope_drop(stalled);
+    stats_until(sf, ENDED, base[ENDED] + 1, v);
+    CHECK(v[ENDED] == base[ENDED] + 1, "only the stalled scope's session ended", v[ENDED]);
+    // drain() fills g_got from its start, so the two shots above go first.
+    static unsigned char first[2 * SHOT];
+    CHECK(got <= sizeof(first), "two shots fit their copy", got);
+    for (size_t i = 0; i < got; i++) ((volatile unsigned char *)first)[i] = ((volatile unsigned char *)g_got)[i];
+    size_t rest = drain(st, 0);
+    CHECK(got + rest == STREAM_LEN && matches(first, got, 0) && matches(g_got, rest, got),
+          "the stream lost no shot to its sibling", got + rest);
+    t_loom_op_drop(st);
+    t_loom_fid_drop(shots);
+    t_loom_scope_drop(media);
+
+    say("a scope aborted with the CQ full");
+    stalled = connect(t);
+    held = walk(stalled, "stall", 0);
+    open_as(held, 0, 0);
+    struct t_loom_scope *filler = connect(t);
+    shots = walk(filler, "stream", 0);
+    open_as(shots, 0, 0);
+    stats(sf, base);
+    rc = t_loom_read(held, range(4, 0, PAGE), 0, 0, 0, &op);
+    CHECK(rc == 0, "submit a READ the server holds", rc);
+    stats_until(sf, STALLED, base[STALLED] + 1, v);
+    st = stream(shots, pool);
+    cq_full();
+    t_loom_op_drop(op);
+    t_loom_fid_drop(held);
+    t_loom_scope_drop(stalled);
+    // Long enough for an engine that posted the cancel's terminal past a full CQ.
+    nap(100);
+    CHECK(t_loom_backlog(g_cur) == CQ_ENTRIES, "a cancel posts nothing past a full CQ", t_loom_backlog(g_cur));
+    got = drain(st, 0);
+    CHECK(got == STREAM_LEN && matches(g_got, got, 0), "no shot lost behind the full CQ", got);
+    stats_until(sf, ENDED, base[ENDED] + 1, v);
+    t_loom_op_drop(st);
+    t_loom_fid_drop(shots);
+    t_loom_scope_drop(filler);
+    t_loom_pool_drop(pool);
+}
+
+// The bounds an honest program can reach, each refused at its own gate.
+static void quotas(struct t_loom_fid *sf, struct t_loom_target *t, struct t_loom_service_pool_member pool_a) {
+    uint32_t base[STAT_COUNT], v[STAT_COUNT];
+    int rc;
+    say("a pool past its bound, and one over a member in use");
+    static struct t_loom_service_pool_member many[POOL_MEMBERS + 1];
+    for (unsigned i = 0; i < POOL_MEMBERS + 1; i++) many[i] = range(5, i * 16, 16);
+    struct t_loom_pool *pool = NULL;
+    rc = t_loom_pool(g_cur, many, POOL_MEMBERS + 1, &pool);
+    CHECK(rc == -E_INVAL && !pool, "a pool of more than the most members", rc);
+    rc = t_loom_pool(g_cur, &pool_a, 1, &pool);
+    CHECK(rc == -E_BUSY && !pool, "a pool over a member a live pool holds", rc);
+
+    say("the bound on requests in flight");
+    struct t_loom_scope *s = connect(t);
+    struct t_loom_fid *held = walk(s, "stall", 0);
+    open_as(held, 0, 0);
+    stats(sf, base);
+    static struct t_loom_op *reads[2 * CQ_ENTRIES + 1];
+    unsigned n = 0;
+    for (;;) {
+        rc = t_loom_read(held, range(4, n * 16u, 16), 0, 0, 0, &reads[n]);
+        if (rc != 0) {
+            CHECK(rc == -E_NOSPC, "the first read past the bound refuses at submit", rc);
+            break;
+        }
+        n++;
+        CHECK(n <= 2 * CQ_ENTRIES, "requests in flight are bounded", n);
+    }
+    t_putstr("loom-c-probe: ");
+    put_dec((long)n);
+    t_putstr(" reads in flight\n");
+    CHECK(n >= CQ_ENTRIES - 1, "the bound admits a full CQ's requests", n);
+    for (unsigned i = 0; i < n; i++) t_loom_op_drop(reads[i]);
+    t_loom_fid_drop(held);
+    t_loom_scope_drop(s);
+    stats_until(sf, ENDED, base[ENDED] + 1, v);
+}
+
 static int run(void) {
     unsigned char b = 0;
     long n = t_read(NOTIFY, &b, 1);
     CHECK(n == 1 && b == 'R', "the fixture has posted its service", n);
     g_kernel = t_loom_kernel_native();
-    static const size_t lengths[5] = { PAGE, PAGE, PAGE, PAGE, PAGE };
+    static const size_t lengths[6] = { PAGE, PAGE, PAGE, PAGE, PAGE, PAGE };
     // 0: fixed data and sink I/O; 1: pool A; 2: stats; 3: pool B; 4: stalled reads.
-    int rc = T_LOOM_RING_SETUP(&g_store, &g_kernel, ENTRIES, lengths, 5, &g_ring);
+    int rc = T_LOOM_RING_SETUP(&g_store, &g_kernel, ENTRIES, lengths, 6, &g_ring);
     if (rc == -E_OPNOTSUPP) {
         say("default image: setup refuses -EOPNOTSUPP");
         return PASS_DEFAULT;
@@ -541,6 +859,10 @@ static int run(void) {
     stats_until(sf, CLUNKS, base[CLUNKS] + f1 + f2, v);
     CHECK(v[CLUNKS] == base[CLUNKS] + f1 + f2 && v[VIOLATIONS] == base[VIOLATIONS],
           "a Tclunk for each live scope's dropped fid, and no other", v[CLUNKS]);
+
+    hostile_peers(sf, data);
+    independent_scopes(sf, t);
+    quotas(sf, t, range(1, 0, SHOT));
 
     say("closing a ring with leases held");
     rc = T_LOOM_RING_SETUP(&g_store2, &g_kernel, ENTRIES, lengths, 5, &g_ring2);

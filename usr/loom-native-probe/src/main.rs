@@ -8,8 +8,8 @@
 // exit, which ends the fixture) and fd 2 the notify pipe. A 'Q' on fd 1 asks the
 // fixture for a 'Z' on fd 2 once it holds no session. The legs read the
 // fixture's stats file for what the server saw: the sessions it accepted and
-// ended, its stalled reads, Tgetattrs, Twalks and Tclunks, and the violations it
-// counted.
+// ended, its stalled reads, Tgetattrs, Twalks and Tclunks, the faults its hostile
+// services delivered, and the violations it counted.
 
 #![no_std]
 #![no_main]
@@ -36,8 +36,11 @@ const NOTIFY: i64 = 2;
 
 // The kernel's errno registry (kernel/include/thylacine/errno.h).
 const E_NOENT: i32 = 2;
+const E_IO: i32 = 5;
 const E_BADF: i32 = 9;
 const E_ACCES: i32 = 13;
+const E_BUSY: i32 = 16;
+const E_INVAL: i32 = 22;
 const E_NOSPC: i32 = 28;
 const E_OPNOTSUPP: i32 = 95;
 const E_TIMEDOUT: i32 = 110;
@@ -46,12 +49,15 @@ const E_CANCELED: i32 = 125;
 const PAGE: u64 = 4096;
 const ENTRIES: u32 = 2;
 const CQ_ENTRIES: usize = 4;
-// 0: fixed data and sink I/O; 1: pool A; 2: stats; 3: pool B; 4: stalled reads.
-const BUFFERS: [usize; 5] = [PAGE as usize; 5];
+// 0: fixed data and sink I/O; 1: pool A; 2: stats; 3: pool B; 4: stalled reads;
+// 5: pool D.
+const BUFFERS: [usize; 6] = [PAGE as usize; 6];
 const WAIT_NS: u64 = 5_000_000_000;
 // Targets, scopes, fids and pools share the kernel's LOOM_SERVICE_SLOT_COUNT
 // slots (kernel/include/thylacine/loom_service_abi.h).
 const SLOTS: usize = 64;
+// LOOM_SERVICE_POOL_MEMBERS: the most members one pool may name.
+const POOL_MEMBERS: u64 = 64;
 
 // The fixture's files and its stats counters (usr/loom-fixture).
 const DATA_LEN: usize = 3 * 4096 + 1000;
@@ -65,7 +71,8 @@ const STALLED: usize = 3;
 const CLUNKS: usize = 5;
 const GETATTRS: usize = 6;
 const WALKS: usize = 7;
-const STAT_COUNT: usize = 11;
+const FAULTS: usize = 11;
+const STAT_COUNT: usize = 12;
 
 struct Fail {
     line: u32,
@@ -166,8 +173,20 @@ fn connect(ring: &ServiceRing, target: &Target<K>) -> R<Scope<K>> {
     Ok(done!(ring, ok!(target.connect(soon(ring)), "submit a CONNECT"), "a CONNECT"))
 }
 
+// A dropped operation keeps its entry in the request book until a turn routes its
+// terminal, so a read right after a drop may first have to make that room.
 fn stats(ring: &ServiceRing, fid: &Fid<K>) -> R<[u32; STAT_COUNT]> {
-    let read = done!(ring, ok!(fid.read(range(2, 0, 64), 0, soon(ring)), "submit a stats read"), "a stats read");
+    let until = ring.now() + WAIT_NS;
+    let submitted = loop {
+        match fid.read(range(2, 0, 64), 0, soon(ring)) {
+            Err(e) if e == -E_NOSPC => {
+                check!(ring.now() < until, "room for a stats read", e);
+                ok!(ring.turn(Some(ring.now() + 10_000_000)), "a turn with the book full");
+            }
+            r => break ok!(r, "submit a stats read"),
+        }
+    };
+    let read = done!(ring, submitted, "a stats read");
     let b = read.bytes();
     check!(b.len() == 4 * STAT_COUNT, "the stats file holds one u32 per counter", b.len());
     let mut v = [0u32; STAT_COUNT];
@@ -250,6 +269,250 @@ fn fill(ring: &ServiceRing, scope: &Scope<K>) -> R<usize> {
         check!(held.len() <= SLOTS, "the slot table holds at most its slots", held.len());
     }
     Ok(held.len())
+}
+
+// A service with one fault in it (the fixture's HOSTILE table): the CONNECT
+// reaches the fault and stops there, and dropping it must still end the session.
+fn hold_connect(ring: &ServiceRing, st: &Fid<K>, name: &[u8]) -> R<()> {
+    let t = ok!(ring.target(REGISTRY, name), "TARGET of a hostile service");
+    let base = stats(ring, st)?;
+    let c = ok!(t.connect(None), "submit a CONNECT the server holds");
+    stats_until(ring, st, FAULTS, base[FAULTS] + 1)?;
+    drop(c);
+    stats_until(ring, st, ENDED, base[ENDED] + 1)?;
+    Ok(())
+}
+
+// The handshake's reply is malformed: the CONNECT answers -EIO by itself, and the
+// session ends with no abort from here.
+fn broken_connect(ring: &ServiceRing, st: &Fid<K>, name: &[u8]) -> R<()> {
+    let t = ok!(ring.target(REGISTRY, name), "TARGET of a hostile service");
+    let base = stats(ring, st)?;
+    done_refused!(ring, ok!(t.connect(soon(ring)), "submit a CONNECT"), E_IO,
+                  "a malformed handshake reply fails the CONNECT");
+    let v = stats_until(ring, st, ENDED, base[ENDED] + 1)?;
+    check!(v[FAULTS] == base[FAULTS] + 1, "the fault was the service's", v[FAULTS]);
+    Ok(())
+}
+
+// Past the handshake, the first Tgetattr or Twalk of a WALK is held.
+fn hold_walk(ring: &ServiceRing, st: &Fid<K>, name: &[u8]) -> R<()> {
+    let t = ok!(ring.target(REGISTRY, name), "TARGET of a hostile service");
+    let s = connect(ring, &t)?;
+    let base = stats(ring, st)?;
+    let w = ok!(s.walk(b"data", None), "submit a WALK the server holds");
+    stats_until(ring, st, FAULTS, base[FAULTS] + 1)?;
+    drop(w);
+    drop(s);
+    stats_until(ring, st, ENDED, base[ENDED] + 1)?;
+    Ok(())
+}
+
+// A session that has walked and opened `data`, with a fault at its first Tread.
+fn hostile_read(ring: &ServiceRing, name: &[u8]) -> R<(Target<K>, Scope<K>, Fid<K>)> {
+    let t = ok!(ring.target(REGISTRY, name), "TARGET of a hostile service");
+    let s = connect(ring, &t)?;
+    let f = walk(ring, &s, b"data")?;
+    open(ring, &f, 0)?;
+    Ok((t, s, f))
+}
+
+// The Tread's reply is malformed or the peer hung up: the READ answers -EIO by
+// itself, and the whole scope goes with it.
+fn broken_read(ring: &ServiceRing, st: &Fid<K>, name: &[u8]) -> R<()> {
+    let (_t, s, f) = hostile_read(ring, name)?;
+    let base = stats(ring, st)?;
+    done_refused!(ring, ok!(f.read(range(4, 0, PAGE), 0, soon(ring)), "submit a READ"), E_IO,
+                  "a malformed READ reply fails the READ");
+    let v = stats_until(ring, st, ENDED, base[ENDED] + 1)?;
+    check!(v[FAULTS] == base[FAULTS] + 1, "the fault was the service's", v[FAULTS]);
+    refused!(s.walk(b"data", soon(ring)), E_NOENT, "no FID reserves under the scope the peer broke");
+    Ok(())
+}
+
+fn hostile_peers(ring: &ServiceRing, st: &Fid<K>, data: &Fid<K>) -> R<()> {
+    say("a peer that holds the handshake");
+    let t = ok!(ring.target(REGISTRY, b"hold-version"), "TARGET of a hostile service");
+    let base = stats(ring, st)?;
+    let deadline = ring.now() + 3_000_000_000;
+    let c = ok!(t.connect(Some(deadline)), "submit a CONNECT the server holds");
+    stats_until(ring, st, FAULTS, base[FAULTS] + 1)?;
+    match ring.block_on(c, Some(deadline + WAIT_NS)) {
+        Ok(Err(e)) => check!(e == -E_TIMEDOUT, "the deadline ends the held CONNECT", e),
+        Ok(Ok(_)) => check!(false, "a CONNECT the server never answered completed", 0),
+        Err(e) => check!(false, "the held CONNECT ended", e),
+    }
+    stats_until(ring, st, ENDED, base[ENDED] + 1)?;
+    drop(t);
+    hold_connect(ring, st, b"hold-version")?;
+    hold_connect(ring, st, b"hold-attach")?;
+    hold_connect(ring, st, b"torn-version")?;
+
+    say("a peer that garbles the handshake");
+    broken_connect(ring, st, b"garbled-version")?;
+    broken_connect(ring, st, b"wrong-version")?;
+
+    say("a service that never accepts");
+    let t = ok!(ring.target(REGISTRY, b"unaccepted"), "TARGET of a service nobody accepts");
+    let base = stats(ring, st)?;
+    let deadline = ring.now() + 200_000_000;
+    let c = ok!(t.connect(Some(deadline)), "submit a CONNECT nobody accepts");
+    match ring.block_on(c, Some(deadline + WAIT_NS)) {
+        Ok(Err(e)) => check!(e == -E_TIMEDOUT, "the deadline ends the unaccepted CONNECT", e),
+        Ok(Ok(_)) => check!(false, "a CONNECT nobody accepted completed", 0),
+        Err(e) => check!(false, "the unaccepted CONNECT ended", e),
+    }
+    let c = ok!(t.connect(None), "submit a CONNECT nobody accepts");
+    let _ = libthyla_rs::time::sleep(Duration::from_millis(20));
+    drop(c);
+    let v = stats(ring, st)?;
+    check!(v[ACCEPTED] == base[ACCEPTED], "the server accepted nothing", v[ACCEPTED]);
+    drop(t);
+
+    say("a peer that holds a walk or an open");
+    hold_walk(ring, st, b"hold-getattr")?;
+    hold_walk(ring, st, b"hold-walk")?;
+    let t = ok!(ring.target(REGISTRY, b"hold-open"), "TARGET of a hostile service");
+    let s = connect(ring, &t)?;
+    let f = walk(ring, &s, b"data")?;
+    let base = stats(ring, st)?;
+    let o = ok!(f.open(0, None), "submit an LOPEN the server holds");
+    stats_until(ring, st, FAULTS, base[FAULTS] + 1)?;
+    drop(o);
+    drop(f);
+    drop(s);
+    stats_until(ring, st, ENDED, base[ENDED] + 1)?;
+    drop(t);
+
+    say("a peer that tears a reply");
+    let (t, s, f) = hostile_read(ring, b"torn-read")?;
+    let base = stats(ring, st)?;
+    let rd = ok!(f.read(range(4, 0, PAGE), 0, None), "submit a READ the server tears");
+    stats_until(ring, st, FAULTS, base[FAULTS] + 1)?;
+    drop(rd);
+    drop(f);
+    drop(s);
+    stats_until(ring, st, ENDED, base[ENDED] + 1)?;
+    drop(t);
+
+    say("a peer that garbles a reply or hangs up");
+    broken_read(ring, st, b"garbled-read")?;
+    broken_read(ring, st, b"wrong-read")?;
+    broken_read(ring, st, b"hangup-read")?;
+
+    // None of it touched a sibling scope, and none of it was the client's fault.
+    let r = done!(ring, ok!(data.read(range(0, 0, PAGE), 2 * PAGE, soon(ring)), "submit a READ"), "a READ");
+    check!(r.bytes().len() == PAGE as usize && matches(r.bytes(), 2 * PAGE as usize),
+           "a scope beside the hostile ones still reads", r.bytes().len());
+    drop(r);
+    let v = stats(ring, st)?;
+    check!(v[VIOLATIONS] == 0, "no hostile leg made the client break the protocol", v[VIOLATIONS]);
+    Ok(())
+}
+
+// Waits for a stream to fill the CQ with nothing reaping it.
+fn cq_full(ring: &ServiceRing) -> R<()> {
+    let until = ring.now() + WAIT_NS;
+    while ring.backlog() < CQ_ENTRIES {
+        check!(ring.now() < until, "the CQ fills while no turn reaps it", ring.backlog());
+        let _ = libthyla_rs::time::sleep(Duration::from_millis(1));
+    }
+    Ok(())
+}
+
+// A stream keeps delivering while another scope stalls and is cancelled, and that
+// cancel needs no room in a full CQ.
+fn independent_scopes(ring: &ServiceRing, target: &Target<K>, st: &Fid<K>) -> R<()> {
+    let members: Vec<PoolMember> = (0..8).map(|i| range(5, i * SHOT, SHOT)).collect();
+    let pool = ok!(ring.pool(&members), "pool D");
+
+    say("a stream beside a stalled scope");
+    let media = connect(ring, target)?;
+    let shots = walk(ring, &media, b"stream")?;
+    open(ring, &shots, 0)?;
+    let mut stream = ok!(shots.stream(&pool, 0, SHOT as u32, true, None), "a multishot stream");
+    let mut got = Vec::new();
+    let p = shot(ring, &mut stream)?;
+    got.extend_from_slice(p.bytes());
+    returned!(p, "return a lease");
+    let stalled = connect(ring, target)?;
+    let held = walk(ring, &stalled, b"stall")?;
+    open(ring, &held, 0)?;
+    let base = stats(ring, st)?;
+    let rd = ok!(held.read(range(4, 0, PAGE), 0, None), "submit a READ the server holds");
+    stats_until(ring, st, STALLED, base[STALLED] + 1)?;
+    let p = shot(ring, &mut stream)?;
+    got.extend_from_slice(p.bytes());
+    returned!(p, "a stream delivers while a sibling scope stalls");
+    drop(rd);
+    drop(held);
+    drop(stalled);
+    let v = stats_until(ring, st, ENDED, base[ENDED] + 1)?;
+    check!(v[ENDED] == base[ENDED] + 1, "only the stalled scope's session ended", v[ENDED]);
+    got.extend_from_slice(&drain(ring, &mut stream, false)?);
+    check!(got.len() == STREAM_LEN && matches(&got, 0), "the stream lost no shot to its sibling", got.len());
+    drop(stream);
+    drop(shots);
+    drop(media);
+
+    say("a scope aborted with the CQ full");
+    let stalled = connect(ring, target)?;
+    let held = walk(ring, &stalled, b"stall")?;
+    open(ring, &held, 0)?;
+    let filler = connect(ring, target)?;
+    let shots = walk(ring, &filler, b"stream")?;
+    open(ring, &shots, 0)?;
+    let base = stats(ring, st)?;
+    let rd = ok!(held.read(range(4, 0, PAGE), 0, None), "submit a READ the server holds");
+    stats_until(ring, st, STALLED, base[STALLED] + 1)?;
+    let mut stream = ok!(shots.stream(&pool, 0, SHOT as u32, true, None), "a multishot stream");
+    cq_full(ring)?;
+    drop(rd);
+    drop(held);
+    drop(stalled);
+    // Long enough for an engine that posted the cancel's terminal past a full CQ.
+    let _ = libthyla_rs::time::sleep(Duration::from_millis(100));
+    check!(ring.backlog() == CQ_ENTRIES, "a cancel posts nothing past a full CQ", ring.backlog());
+    let got = drain(ring, &mut stream, false)?;
+    check!(got.len() == STREAM_LEN && matches(&got, 0), "no shot lost behind the full CQ", got.len());
+    stats_until(ring, st, ENDED, base[ENDED] + 1)?;
+    drop(stream);
+    drop(shots);
+    drop(filler);
+    Ok(())
+}
+
+// The bounds an honest program can reach, each refused at its own gate.
+fn quotas(ring: &ServiceRing, target: &Target<K>, st: &Fid<K>, pool_a: PoolMember) -> R<()> {
+    say("a pool past its bound, and one over a member in use");
+    let many: Vec<PoolMember> = (0..POOL_MEMBERS + 1).map(|i| range(5, i * 16, 16)).collect();
+    refused!(ring.pool(&many), E_INVAL, "a pool of more than the most members");
+    refused!(ring.pool(&[pool_a]), E_BUSY, "a pool over a member a live pool holds");
+
+    say("the bound on requests in flight");
+    let s = connect(ring, target)?;
+    let held = walk(ring, &s, b"stall")?;
+    open(ring, &held, 0)?;
+    let base = stats(ring, st)?;
+    let mut reads = Vec::new();
+    loop {
+        let at = reads.len() as u64;
+        match held.read(range(4, at * 16, 16), 0, None) {
+            Ok(r) => reads.push(r),
+            Err(e) => {
+                check!(e == -E_NOSPC, "the first read past the bound refuses at submit", e);
+                break;
+            }
+        }
+        check!(reads.len() <= 2 * CQ_ENTRIES, "requests in flight are bounded", reads.len());
+    }
+    say(&format!("{} reads in flight", reads.len()));
+    check!(reads.len() >= CQ_ENTRIES - 1, "the bound admits a full CQ's requests", reads.len());
+    drop(reads);
+    drop(held);
+    drop(s);
+    stats_until(ring, st, ENDED, base[ENDED] + 1)?;
+    Ok(())
 }
 
 fn run() -> R<i64> {
@@ -442,6 +705,10 @@ fn run() -> R<i64> {
     let v = stats_until(&ring, &stats_fid, CLUNKS, base[CLUNKS] + (f1 + f2) as u32)?;
     check!(v[CLUNKS] == base[CLUNKS] + (f1 + f2) as u32 && v[VIOLATIONS] == base[VIOLATIONS],
            "a Tclunk for each live scope's dropped fid, and no other", v[CLUNKS]);
+
+    hostile_peers(&ring, &stats_fid, &data)?;
+    independent_scopes(&ring, &target, &stats_fid)?;
+    quotas(&ring, &target, &stats_fid, range(1, 0, SHOT))?;
 
     say("closing a ring with leases held");
     let ring2 = ok!(ServiceRing::setup(ThylaKernel, ENTRIES, &BUFFERS), "a second private ring");

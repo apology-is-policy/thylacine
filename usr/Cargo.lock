@@ -1040,6 +1040,13 @@ name = "loom-client"
 version = "0.1.0"
 
 [[package]]
+name = "loom-death-probe"
+version = "0.1.0"
+dependencies = [
+ "libthyla-rs",
+]
+
+[[package]]
 name = "loom-fixture"
 version = "0.1.0"
 dependencies = [

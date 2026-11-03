@@ -1,5 +1,7 @@
 // loom.native_probe_rust and loom.native_probe_c -- both native Loom adapters
-// driven from EL0 against an EL0 9P server (docs/ASYNC-SERVICE-ABI.md, NA-4d).
+// driven from EL0 against an EL0 9P server (docs/ASYNC-SERVICE-ABI.md, NA-4d), and
+// loom.native_probe_death: programs that exit, exec or die with a private
+// connection in flight against that server.
 //
 // The test makes a registry of its own and gives its walk-only root to
 // /bin/loom-fixture, which posts in it, and to the probe, which names it in
@@ -30,21 +32,31 @@
 #include "../../arch/arm64/uart.h"
 #include "../../mm/phys.h"
 
-// Each probe makes two rings: one it retires, one it closes with leases held.
-// Its connections are six scopes: the main one, the deadline, the dropped READ,
-// the dropped stream, the explicit abort and the second ring's.
+// Each adapter probe makes two rings: one it retires, one it closes with leases
+// held. Its connections are six scopes (the main one, the deadline, the dropped
+// READ, the dropped stream, the explicit abort, the second ring's), fifteen to the
+// hostile services, two beside a stream, two with the CQ full, and one at the
+// request bound. The death probe makes one ring and one connection of its own,
+// and one of each for each of its nine victims, plus a ring in each of the two
+// images that exec.
 #ifdef LOOM_PRIVATE_QUALIFICATION
 #define NP_FIXTURE_STATUS 77
 #define NP_RUST_STATUS    79
 #define NP_C_STATUS       75
+#define NP_DEATH_STATUS   73
 #define NP_RINGS          2ull
-#define NP_CONNECTS       6ull
+#define NP_CONNECTS       26ull
+#define NP_DEATH_RINGS    12ull
+#define NP_DEATH_CONNECTS 10ull
 #else
 #define NP_FIXTURE_STATUS 76
 #define NP_RUST_STATUS    78
 #define NP_C_STATUS       74
+#define NP_DEATH_STATUS   72
 #define NP_RINGS          0ull
 #define NP_CONNECTS       0ull
+#define NP_DEATH_RINGS    0ull
+#define NP_DEATH_CONNECTS 0ull
 #endif
 
 // Each program gets pages of its own: cpio data is 4-aligned where the ELF
@@ -133,7 +145,7 @@ static void np_say(const char *what, u64 got, u64 want) {
     uart_puts("\n");
 }
 
-static void np_run(const char *path, const char *label, int want) {
+static void np_run(const char *path, const char *label, int want, u64 want_rings, u64 want_conns) {
     const void *probe_blob = NULL;
     size_t probe_size = 0;
     if (test_probe_lookup(path, &probe_blob, &probe_size) != 0) return;
@@ -223,25 +235,29 @@ static void np_run(const char *path, const char *label, int want) {
     uart_puts(":\n");
     np_say("  fixture status", (u64)fixture_status, NP_FIXTURE_STATUS);
     np_say("  probe status", (u64)probe_status, (u64)want);
-    np_say("  rings made", made, NP_RINGS);
+    np_say("  rings made", made, want_rings);
     np_say("  rings retired", gone, made);
-    np_say("  connections made", conns, NP_CONNECTS);
+    np_say("  connections made", conns, want_conns);
     np_say("  connections freed", freed, conns);
     np_say("  registries destroyed", regs, 1);
     NP(fixture_status == NP_FIXTURE_STATUS,
        "the fixture's verdict matches this kernel's qualification lever");
     NP(probe_status == want, "the probe's verdict matches this kernel's qualification lever");
-    NP(made == NP_RINGS && gone == made, "the probe made its private ring and it retired");
-    NP(conns == NP_CONNECTS && freed == conns, "every scope's connection was made and freed");
+    NP(made == want_rings && gone == made, "the probe made its private rings and they retired");
+    NP(conns == want_conns && freed == conns, "every scope's connection was made and freed");
     NP(regs == 1, "the run's registry was destroyed once the test let go");
 #undef NP
     TEST_ASSERT(!error, error);
 }
 
 void test_loom_native_probe_rust(void) {
-    np_run("bin/loom-native-probe", "loom-native-probe", NP_RUST_STATUS);
+    np_run("bin/loom-native-probe", "loom-native-probe", NP_RUST_STATUS, NP_RINGS, NP_CONNECTS);
 }
 
 void test_loom_native_probe_c(void) {
-    np_run("bin/loom-c-probe", "loom-c-probe", NP_C_STATUS);
+    np_run("bin/loom-c-probe", "loom-c-probe", NP_C_STATUS, NP_RINGS, NP_CONNECTS);
+}
+
+void test_loom_native_probe_death(void) {
+    np_run("bin/loom-death-probe", "loom-death-probe", NP_DEATH_STATUS, NP_DEATH_RINGS, NP_DEATH_CONNECTS);
 }

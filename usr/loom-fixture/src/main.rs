@@ -25,6 +25,13 @@
 // that is not 9P2000.L answers Rversion "unknown", and a frame that cannot be
 // parsed, or whose size is out of range, ends its session.
 //
+// Hostile: each name in HOSTILE is the same server, with one fault at the first
+// message of one type. It holds the message unanswered, sends part of the reply
+// and stops, answers an impossible frame length or the wrong reply type, or hangs
+// up. `unaccepted` is posted and never accepted. A fault counts in FAULTS, which
+// tells a probe's stalled operation from one that never reached the stage it
+// named. None of these is a violation: the kernel's client did nothing wrong.
+//
 // Exit 76: no session was accepted (the default image). 77: at least one
 // session, every one ended, no violation. 1: a violation or a setup failure.
 // 2: a session outlived the probe.
@@ -50,6 +57,7 @@ const REGISTRY: i64 = 0;
 const CONTROL: i64 = 1;
 const NOTIFY: i64 = 2;
 const NAME: &[u8] = b"fixture";
+const UNACCEPTED: &[u8] = b"unaccepted";
 const MSIZE: u32 = 32768;
 const SETTLE_NS: u64 = 5_000_000_000;
 
@@ -96,7 +104,33 @@ const WALKS: usize = 7;
 const OPENS: usize = 8;
 const READS: usize = 9;
 const WRITES: usize = 10;
-const STAT_COUNT: usize = 11;
+const FAULTS: usize = 11;
+const STAT_COUNT: usize = 12;
+
+#[derive(Clone, Copy)]
+enum Fault {
+    Hold,
+    // Sends this many bytes of the correct reply, then nothing more.
+    Torn(usize),
+    Garbled,
+    Wrong,
+    Hangup,
+}
+
+const HOSTILE: [(&[u8], u8, Fault); 12] = [
+    (b"hold-version", p9::P9_TVERSION, Fault::Hold),
+    (b"hold-attach", p9::P9_TATTACH, Fault::Hold),
+    (b"hold-getattr", p9::P9_TGETATTR, Fault::Hold),
+    (b"hold-walk", p9::P9_TWALK, Fault::Hold),
+    (b"hold-open", p9::P9_TLOPEN, Fault::Hold),
+    (b"torn-version", p9::P9_TVERSION, Fault::Torn(3)),
+    (b"torn-read", p9::P9_TREAD, Fault::Torn(13)),
+    (b"garbled-version", p9::P9_TVERSION, Fault::Garbled),
+    (b"garbled-read", p9::P9_TREAD, Fault::Garbled),
+    (b"wrong-version", p9::P9_TVERSION, Fault::Wrong),
+    (b"wrong-read", p9::P9_TREAD, Fault::Wrong),
+    (b"hangup-read", p9::P9_TREAD, Fault::Hangup),
+];
 
 // A period of 251 does not divide a page, so a shot delivered at the wrong
 // offset reads as wrong bytes.
@@ -155,6 +189,8 @@ struct Conn {
     msize: u32,
     fids: BTreeMap<u32, Fid>,
     stalled: Vec<u16>,
+    // The message type and the fault still to come.
+    fault: Option<(u8, Fault)>,
 }
 
 struct Server {
@@ -167,6 +203,7 @@ enum Reply {
     Send(usize),
     Held,
     Fatal,
+    Hangup,
 }
 
 // The exact frame length of a message this server answers, from its parsed
@@ -218,7 +255,49 @@ impl Server {
         }
     }
 
+    // The fault this message meets, if any: the reply a correct server would
+    // send is built first, so a torn, garbled or wrong one differs from it only
+    // where it means to.
     fn dispatch(&mut self, c: &mut Conn, frame: &[u8], h: p9::Header) -> Reply {
+        let fault = match c.fault {
+            Some((mtype, fault)) if mtype == h.mtype => {
+                c.fault = None;
+                self.count[FAULTS] += 1;
+                fault
+            }
+            _ => return self.answer(c, frame, h),
+        };
+        match fault {
+            Fault::Hold => {
+                c.stalled.push(h.tag);
+                Reply::Held
+            }
+            Fault::Hangup => Reply::Hangup,
+            Fault::Torn(n) => match self.answer(c, frame, h) {
+                Reply::Send(len) if n < len => {
+                    c.stalled.push(h.tag);
+                    Reply::Send(n)
+                }
+                _ => Reply::Fatal,
+            },
+            Fault::Garbled => match self.answer(c, frame, h) {
+                Reply::Send(_) => {
+                    self.out[..4].copy_from_slice(&6u32.to_le_bytes());
+                    Reply::Send(7)
+                }
+                _ => Reply::Fatal,
+            },
+            Fault::Wrong => match self.answer(c, frame, h) {
+                Reply::Send(len) => {
+                    self.out[4] = p9::P9_RCLUNK;
+                    Reply::Send(len)
+                }
+                _ => Reply::Fatal,
+            },
+        }
+    }
+
+    fn answer(&mut self, c: &mut Conn, frame: &[u8], h: p9::Header) -> Reply {
         self.out.clear();
         self.out.resize(MSIZE as usize, 0);
         if c.stalled.contains(&h.tag) {
@@ -507,6 +586,7 @@ impl Server {
             c.inb.drain(..size);
             match self.dispatch(c, &frame, h) {
                 Reply::Held => {}
+                Reply::Hangup => return false,
                 Reply::Fatal => {
                     self.violation("a malformed message");
                     return false;
@@ -526,12 +606,26 @@ impl Server {
     }
 }
 
-fn run() -> i64 {
-    let listener = unsafe { t_walk_create(REGISTRY, NAME.as_ptr(), NAME.len(), T_OREAD, 0) };
-    if listener < 0 {
-        say(&format!("FAIL: post the service ({})", listener));
-        return 1;
+fn post(name: &[u8]) -> Option<i64> {
+    let fd = unsafe { t_walk_create(REGISTRY, name.as_ptr(), name.len(), T_OREAD, 0) };
+    if fd < 0 {
+        say(&format!("FAIL: post a service ({})", fd));
+        return None;
     }
+    Some(fd)
+}
+
+fn run() -> i64 {
+    // Index 0 serves the correct protocol; each later one its HOSTILE row.
+    let mut listeners: Vec<i64> = Vec::with_capacity(1 + HOSTILE.len());
+    let Some(fd) = post(NAME) else { return 1 };
+    listeners.push(fd);
+    for (name, _, _) in HOSTILE.iter() {
+        let Some(fd) = post(name) else { return 1 };
+        listeners.push(fd);
+    }
+    // Held open, so a CONNECT to it waits in the backlog until it is cancelled.
+    let Some(unaccepted) = post(UNACCEPTED) else { return 1 };
     if unsafe { t_write(NOTIFY, b"R".as_ptr(), 1) } != 1 {
         say("FAIL: notify the probe");
         return 1;
@@ -559,8 +653,11 @@ fn run() -> i64 {
                 return 2;
             }
         }
-        let mut fds = Vec::with_capacity(conns.len() + 2);
-        fds.push(TPollFd { fd: listener as i32, events: T_POLLIN, revents: 0 });
+        let mut fds = Vec::with_capacity(conns.len() + listeners.len() + 1);
+        for l in &listeners {
+            fds.push(TPollFd { fd: *l as i32, events: T_POLLIN, revents: 0 });
+        }
+        let control = fds.len();
         if settle.is_none() {
             fds.push(TPollFd { fd: CONTROL as i32, events: T_POLLIN, revents: 0 });
         }
@@ -574,7 +671,7 @@ fn run() -> i64 {
             say(&format!("FAIL: poll ({})", rc));
             return 1;
         }
-        if settle.is_none() && fds[1].revents != 0 {
+        if settle.is_none() && fds[control].revents != 0 {
             let mut b = [0u8; 16];
             let n = unsafe { t_read(CONTROL, b.as_mut_ptr(), b.len()) };
             if n < 0 {
@@ -602,32 +699,38 @@ fn run() -> i64 {
                 s.count[ENDED] += 1;
             }
         }
-        if fds[0].revents & T_POLLIN != 0 {
-            let fd = unsafe { t_srv_accept(listener) };
-            if fd < 0 {
-                say(&format!("FAIL: accept ({})", fd));
+        for (i, l) in listeners.iter().enumerate() {
+            if fds[i].revents & T_POLLIN != 0 {
+                let fd = unsafe { t_srv_accept(*l) };
+                if fd < 0 {
+                    say(&format!("FAIL: accept ({})", fd));
+                    return 1;
+                }
+                s.count[ACCEPTED] += 1;
+                conns.push(Conn {
+                    fd,
+                    inb: Vec::new(),
+                    versioned: false,
+                    msize: MSIZE,
+                    fids: BTreeMap::new(),
+                    stalled: Vec::new(),
+                    fault: if i == 0 { None } else { Some((HOSTILE[i - 1].1, HOSTILE[i - 1].2)) },
+                });
+            } else if fds[i].revents != 0 {
+                say(&format!("FAIL: a listener polled {:#x}", fds[i].revents));
                 return 1;
             }
-            s.count[ACCEPTED] += 1;
-            conns.push(Conn {
-                fd,
-                inb: Vec::new(),
-                versioned: false,
-                msize: MSIZE,
-                fids: BTreeMap::new(),
-                stalled: Vec::new(),
-            });
-        } else if fds[0].revents != 0 {
-            say(&format!("FAIL: the listener polled {:#x}", fds[0].revents));
-            return 1;
         }
     }
-    unsafe { t_close(listener) };
+    for l in &listeners {
+        unsafe { t_close(*l) };
+    }
+    unsafe { t_close(unaccepted) };
     let k = &s.count;
     say(&format!(
-        "sessions {} ended {} violations {} stalled {} flushes {} clunks {} getattrs {} walks {} opens {} reads {} writes {}",
+        "sessions {} ended {} violations {} stalled {} flushes {} clunks {} getattrs {} walks {} opens {} reads {} writes {} faults {}",
         k[ACCEPTED], k[ENDED], k[VIOLATIONS], k[STALLED], k[FLUSHES], k[CLUNKS], k[GETATTRS],
-        k[WALKS], k[OPENS], k[READS], k[WRITES]
+        k[WALKS], k[OPENS], k[READS], k[WRITES], k[FAULTS]
     ));
     if k[VIOLATIONS] != 0 {
         1
