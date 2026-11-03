@@ -187,6 +187,7 @@ void torpor_wake_all_for_proc(struct Proc *p);
 void torpor_stop_wake_all_for_proc(struct Proc *p);
 
 #ifdef KERNEL_TESTS
+void torpor_after_prefault_for_test(void (*fn)(void *), void *arg);
 void torpor_stall_wakes_for_test(bool on);
 bool torpor_wake_stalled_for_test(void);
 #endif

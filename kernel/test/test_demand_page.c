@@ -1076,6 +1076,45 @@ void test_demand_page_file_miss_refuses_exiting_thread(void) {
     TEST_EXPECT_EQ(g_ns_ctl_installed, 1, "control: it installed the page");
 }
 
+// A kernel access holding a counted lock cannot wait for a page-in, since sched()
+// refuses a held lock, and torpor_wait's load under its bucket lock can land on an
+// unfaulted file page. So the miss refuses, with nothing read and nothing pinned, and
+// the same fault with no lock pages in. The stub does not sleep, so the read count is
+// what tells: on a real server the read would be the extinction.
+void test_demand_page_file_miss_under_a_lock_refuses(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+    g_rev_read_fail  = false;
+    g_rev_read_calls = 0;
+    struct Spoor *s = spoor_alloc(&g_rev_test_dev);
+    TEST_ASSERT(s != NULL, "spoor_alloc");
+    struct Burrow *v = burrow_create_file(s, 0, ONE_PAGE);
+    TEST_ASSERT(v != NULL, "burrow_create_file");
+    TEST_EXPECT_EQ(burrow_map(p, v, USER_VA, ONE_PAGE, VMA_PROT_RX), 0, "burrow_map RX");
+    int handles = __atomic_load_n(&v->handle_count, __ATOMIC_ACQUIRE);
+
+    struct fault_info fi;
+    make_fi(&fi, USER_VA, /*is_write=*/false, /*is_instr=*/false);
+    spin_lock_t held = SPIN_LOCK_INIT;
+    spin_lock(&held);
+    enum fault_result r = userland_demand_page(p, &fi);
+    spin_unlock(&held);
+
+    TEST_EXPECT_EQ(r, FAULT_UNHANDLED_USER, "the miss refuses under a held lock");
+    TEST_EXPECT_EQ(g_rev_read_calls, 0, "the refused fault read nothing");
+    TEST_ASSERT(burrow_file_slot_for_test(v, 0) == NULL, "and installed nothing");
+    TEST_EXPECT_EQ(__atomic_load_n(&v->handle_count, __ATOMIC_ACQUIRE), handles,
+                   "and left no pin behind");
+
+    r = userland_demand_page(p, &fi);
+    TEST_EXPECT_EQ(r, FAULT_HANDLED, "control: with no lock held it pages in");
+    TEST_EXPECT_NE(g_rev_read_calls, 0, "control: it read the page");
+    TEST_ASSERT(burrow_file_slot_for_test(v, 0) != NULL, "control: it installed the page");
+
+    drop_proc(p);
+    burrow_unref(v);
+}
+
 // Pending is sampled before the page-in as well as after. A terminate latch
 // that a peer revokes while the read runs (a handler registered, interposed in
 // the stub read) leaves only the first sample true; the failed read is still

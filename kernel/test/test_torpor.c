@@ -45,12 +45,15 @@
 #include "test.h"
 
 #include <thylacine/burrow.h>
+#include <thylacine/dev.h>
 #include <thylacine/exec.h>
 #include <thylacine/page.h>
 #include <thylacine/proc.h>
 #include <thylacine/rendez.h>
 #include <thylacine/sched.h>
 #include <thylacine/smp.h>
+#include <thylacine/spinlock.h>
+#include <thylacine/spoor.h>
 #include <thylacine/thread.h>
 #include <thylacine/torpor.h>
 #include <thylacine/types.h>
@@ -794,4 +797,76 @@ void test_torpor_record_outlives_the_wake(void) {
     TEST_EXPECT_EQ(woken, (s64)1, "the wake counted it");
     TEST_EXPECT_EQ(rc, (s64)TORPOR_OK, "and the waiter read the mark, deadline or no");
     TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree empty after cleanup");
+}
+
+// A peer's MAP_FIXED over the word, between the wait's first load and its lock. The load
+// under the lock misses on a file page it may not wait for. The wait comes back as if
+// spuriously, having read nothing, and the next call faults the word in. A read under
+// the lock would be an extinction on a real server, which sleeps; this stub does not,
+// so the read count is what tells.
+#define TR_WORD_BYTE 0xABu
+static volatile int  g_tr_reads;
+static volatile int  g_tr_map_rc;
+static volatile s64  g_tr_rc[2];
+static volatile int  g_tr_reads_at[2];
+static struct Burrow *g_tr_file;
+
+static long tr_read(struct Spoor *c, void *buf, long n, s64 off) {
+    (void)c; (void)off;
+    g_tr_reads++;
+    u8 *b = (u8 *)buf;
+    for (long i = 0; i < n; i++) b[i] = TR_WORD_BYTE;
+    return n;
+}
+
+static struct Dev g_tr_dev = { .dc = '?', .name = "tr", .read = tr_read };
+
+static void tr_replace(void *arg) {
+    struct Proc *p = (struct Proc *)arg;
+    struct Burrow *gone = NULL;
+    spin_lock(&p->as->lock);
+    g_tr_map_rc = burrow_map_fixed(p, g_tr_file, g_torpor_vaddr, PAGE_SIZE, VMA_PROT_READ,
+                                   0, &gone);
+    spin_unlock(&p->as->lock);
+    if (gone) burrow_free_deferred(gone);
+}
+
+static void tr_entry(void) {
+    struct Proc *p = current_thread()->proc;
+    torpor_after_prefault_for_test(tr_replace, p);
+    for (int i = 0; i < 2; i++) {
+        g_tr_rc[i] = sys_torpor_wait_for_proc(p, g_torpor_vaddr, 0, 1000000);
+        g_tr_reads_at[i] = g_tr_reads;
+    }
+    __atomic_store_n(&g_torpor_done, 1u, __ATOMIC_RELEASE);
+    test_thread_park_terminal(&g_torpor_exited);
+}
+
+void test_torpor_word_replaced_under_the_wait(void) {
+    TEST_EXPECT_EQ(torpor_consumer_setup(0, 1000000), 0, "consumer fixture setup");
+    g_tr_reads = 0;
+    g_tr_map_rc = -999;
+    g_tr_rc[0] = g_tr_rc[1] = (s64)-999;
+    g_tr_reads_at[0] = g_tr_reads_at[1] = -1;
+    struct Spoor *s = spoor_alloc(&g_tr_dev);
+    TEST_ASSERT(s != NULL, "spoor_alloc");
+    g_tr_file = burrow_create_file(s, 0, PAGE_SIZE);
+    TEST_ASSERT(g_tr_file != NULL, "burrow_create_file");
+
+    struct Thread *consumer = thread_create(g_torpor_proc, tr_entry);
+    TEST_ASSERT(consumer != NULL, "thread_create failed");
+    ready(consumer);
+    TEST_YIELD_UNTIL(__atomic_load_n(&g_torpor_done, __ATOMIC_ACQUIRE) != 0u);
+    bool done = __atomic_load_n(&g_torpor_done, __ATOMIC_ACQUIRE) != 0u;
+
+    torpor_consumer_teardown(consumer);
+    burrow_unref(g_tr_file);
+    g_tr_file = NULL;
+
+    TEST_ASSERT(done, "the waiter came back");
+    TEST_EXPECT_EQ(g_tr_map_rc, 0, "the MAP_FIXED landed in the window");
+    TEST_EXPECT_EQ(g_tr_rc[0], (s64)TORPOR_OK, "the first wait returned as if spuriously");
+    TEST_EXPECT_EQ(g_tr_reads_at[0], 0, "and read nothing under the bucket's lock");
+    TEST_EXPECT_EQ(g_tr_rc[1], (s64)TORPOR_OK, "the second saw the file's word, not 0");
+    TEST_ASSERT(g_tr_reads_at[1] > 0, "having faulted it in with no lock held");
 }

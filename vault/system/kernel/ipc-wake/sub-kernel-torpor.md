@@ -9,7 +9,7 @@ guarded-by: [inv-i9, inv-i24]
 validated-by: [spec-torpor, spec-tsleep, gate-smp]
 locks: [lock-torpor, lock-rendez, lock-wait, lock-timerwait]
 created: 2026-08-01
-updated: 2026-10-05
+updated: 2026-11-03
 ---
 ## Purpose
 
@@ -85,10 +85,9 @@ WAIT, in order (`kernel/torpor.c::sys_torpor_wait_for_proc`):
    outside the lock, so the page is resident before step 5's load.
    Pre-REVENANT every user page was eager-anon and an under-lock fault
    could alloc-in-place but never SLEEP; file-backed text pages made
-   the under-lock fault a **blocking 9P read under the lock**, a
-   futex stall for everything hashed there, permanent under a
-   wedged FS. See [[seam-torpor-reclaim-uaccess]] for the obligation a
-   future reclaim pass inherits.
+   the under-lock fault a **blocking 9P read under the lock**, which
+   `sched()` answers with an extinction. The pre-fault narrows that to a
+   window, and step 5 closes the window.
 3. **Lock-free mismatch return** (#343,
    [[chg-2026-07-04-torpor-lockfree]]): `prefault != expected` ⇒
    `TORPOR_OK` without ever taking a lock. Sound because no
@@ -161,11 +160,15 @@ Lock order: a bucket's lock → `w->rendez.lock` (WAKE side only — the
 sleeper releases the bucket's lock before `tsleep` takes the wait chain). Bucket locks
 never nest. A key is never dangling: every thread of a Proc is gone before an exec swaps
 its space, so a waiter's space outlives its record.
-The under-lock reload can still demand-page in exactly one window — a
-concurrent decommit between the pre-fault and the reload re-faults
-into the **non-blocking** lazy-anon arm — so the edge
-bucket lock → `vma_lock` → buddy still exists, but only there, and it
-never sleeps. A VMA teardown in the same window is a clean `-EFAULT`.
+The under-lock reload can still fault, in the window between the pre-fault and
+itself, and EL0 can hold that window open by keeping the bucket busy. A concurrent
+decommit re-faults into the **non-blocking** lazy-anon arm, so the edge bucket lock →
+`vma_lock` → buddy exists, only there, and never sleeps. A VMA teardown fails the load.
+A `MAP_FIXED` that puts an unfaulted file page there reaches the one arm that sleeps,
+which refuses a faulter holding a counted lock ([[sub-kernel-fault]]), so that load
+fails too. Either failure is a spurious return, not `-EFAULT`: the address was good a
+moment ago, the caller re-evaluates, and its next call faults the word in or answers
+`-EFAULT` from the pre-fault. Regression: `torpor.word_replaced_under_the_wait`.
 
 The death and stop walks hold one bucket at a time across `wakeup()`, which can spin on the
 woken thread's `on_cpu`. That is what keeps a record there alive, as the waiter must take the
@@ -214,9 +217,8 @@ the sleep plus the tsleep machinery.
 - The mark sets `awoken` under the rendez's lock. A later `wakeup` used to carry it to a waiter
   parked by a stop (PTY-4e R2), and an uncounted mark now has no wakeup, so that lock is the carry.
 - Any new exit path from WAIT must unlink before the frame pops.
-- The pre-fault must stay OUTSIDE the lock; any future
-  page-eviction/reclaim pass must re-establish
-  non-blocking-uaccess-under-lock ([[seam-torpor-reclaim-uaccess]]).
+- The pre-fault must stay OUTSIDE the lock. The load under the lock rests on the fault
+  arm's refusal, so a future arm that sleeps (a swap-in) must honour it too.
 
 ## Seams
 

@@ -144,6 +144,21 @@ static int torpor_addr_va_ok(u64 addr_va) {
     return 1;
 }
 
+#ifdef KERNEL_TESTS
+// Test hook: run once in the next wait, between its first load and its lock, which
+// is the window a peer's MAP_FIXED lands in.
+static void (*g_torpor_after_prefault)(void *);
+static void *g_torpor_after_prefault_arg;
+void torpor_after_prefault_for_test(void (*fn)(void *), void *arg) {
+    g_torpor_after_prefault_arg = arg;
+    __atomic_store_n(&g_torpor_after_prefault, fn, __ATOMIC_RELEASE);
+}
+static void torpor_after_prefault_point(void) {
+    void (*fn)(void *) = __atomic_exchange_n(&g_torpor_after_prefault, NULL, __ATOMIC_ACQ_REL);
+    if (fn) fn(g_torpor_after_prefault_arg);
+}
+#endif
+
 // F4 (P3): the passed `p` MUST be `current_thread()->proc`. The user-VA
 // load implicitly walks the CURRENT thread's TTBR0 (the running thread's
 // `proc->pgtable_root`); the fault dispatcher recovers via
@@ -195,21 +210,16 @@ s64 sys_torpor_wait_for_proc(struct Proc *p, u64 addr_va, u32 expected,
     w._pad      = 0;
     struct torpor_bucket *b = torpor_bucket_of(w.as, addr_va);
 
-    // REVENANT R-5 audit F1: fault the futex word in BEFORE taking the bucket's lock.
-    // Pre-REVENANT every user page was eager-anon, so the under-lock
-    // uaccess_load_u32 below could fault but never SLEEP (the ANON demand-page arm
-    // allocs + installs in place). REVENANT adds file-backed (BURROW_TYPE_FILE)
-    // text VMAs whose demand-page does a BLOCKING dev->read; a crafted
-    // torpor_wait(addr = an unfaulted text VA) would make the under-lock load sleep
-    // on that 9P read while holding the lock -> a stall for everything hashed there
-    // (a wedged FS makes it permanent). Pre-faulting outside the lock makes the page resident
-    // + its PTE installed, so the under-lock load cannot fault-and-sleep; a
-    // concurrent unmap in the window makes the under-lock load -EFAULT (no VMA ->
-    // the sleeping FILE arm is never reached), handled there. FILE pages are not
-    // individually evicted at v1.0; a future reclaim pass (REVENANT section 9) must
-    // re-establish this non-blocking-uaccess-under-lock property (e.g. a
-    // pagefault-disabled atomic uaccess + drop-lock-fault-in-retry, the Linux
-    // futex pattern).
+    // REVENANT R-5 audit F1: fault the futex word in BEFORE taking the bucket's lock,
+    // because a file page's demand-page does a blocking dev->read and a held lock may
+    // not sleep. This makes the page resident, so the load under the lock normally
+    // takes no fault.
+    //
+    // It can still miss: a peer's munmap, or a MAP_FIXED that puts an unfaulted file
+    // page here, can land between the two loads, and EL0 can hold the window open by
+    // keeping this bucket busy. A kernel access holding a counted lock takes no page-in
+    // (demand_page_locked), so that load fails rather than sleeps, the shape of Linux's
+    // pagefault_disable() around get_futex_value_locked. See its arm below.
     {
         u32 prefault = 0;
         if (uaccess_load_u32(addr_va, &prefault) != 0)
@@ -233,6 +243,10 @@ s64 sys_torpor_wait_for_proc(struct Proc *p, u64 addr_va, u32 expected,
             return TORPOR_OK;
     }
 
+#ifdef KERNEL_TESTS
+    torpor_after_prefault_point();
+#endif
+
     spin_lock(&b->lock);
 
     // Load the user-VA word and compare under the bucket's lock. The lock
@@ -242,10 +256,15 @@ s64 sys_torpor_wait_for_proc(struct Proc *p, u64 addr_va, u32 expected,
     // value, we return 0 without sleeping), or this lock happens-
     // before WAKE's lock (and we register before WAKE walks the
     // bucket — WAKE delivers the wakeup).
+    //
+    // A load that fails here is a spurious return, the same as a word that changed.
+    // The address was good a moment ago, and it may be good now with a page this load
+    // could not wait for. The caller re-evaluates, and its next call faults the word in
+    // above, or answers EFAULT there if the address really has gone.
     u32 observed = 0;
     if (uaccess_load_u32(addr_va, &observed) != 0) {
         spin_unlock(&b->lock);
-        return TORPOR_ERR_EFAULT;
+        return TORPOR_OK;
     }
     if (observed != expected) {
         // Rare post-lock-free-compare: the word changed from `expected` to !=
