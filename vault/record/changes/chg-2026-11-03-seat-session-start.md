@@ -4,7 +4,7 @@ type: chg
 title: "A chord at session start is a wait: the seat's P3s, a member that may owe, and a needle checker"
 date: 2026-11-03
 arc: arc-halcyon-interaction
-commits: ["fc61093a2", "659023862", "c263b9080", "46d65fb35", "70e76dff2", "4227bfde1"]
+commits: ["fc61093a2", "659023862", "c263b9080", "46d65fb35", "70e76dff2", "4227bfde1", "9884921f5"]
 touched:
   - sub-halcyond
   - sub-libhalcyon
