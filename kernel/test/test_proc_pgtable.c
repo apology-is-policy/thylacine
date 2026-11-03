@@ -29,6 +29,7 @@
 // installing the tree the way demand paging will once it lands.
 
 #include "test.h"
+#include "../../arch/arm64/uart.h"
 
 #include "../../arch/arm64/asid.h"
 #include "../../arch/arm64/mmu.h"
@@ -182,7 +183,7 @@ void test_proc_pgtable_destroy_walk_releases_subtables(void) {
     // cache, handle table fill, etc.) — but proc_free releases them
     // symmetrically, so the round-trip check `free_after == free_before`
     // is the meaningful invariant.
-    u64 free_before = phys_free_pages();
+    u64 free_before = test_free_pages_settled();
 
     struct Proc *p = proc_alloc();
     TEST_ASSERT(p != NULL, "proc_alloc failed");
@@ -217,7 +218,12 @@ void test_proc_pgtable_destroy_walk_releases_subtables(void) {
     // Round-trip: free count returns to baseline IFF the walker freed
     // every sub-table. Pre-P3-Db implementation freed only the L0 →
     // free_after = free_before - 3 (L1+L2+L3 leaked).
-    u64 free_after = phys_free_pages();
+    u64 free_after = test_free_pages_settled();
+    if (free_after != free_before) {
+        uart_puts("  free_before="); uart_putdec(free_before);
+        uart_puts(" free_after=");   uart_putdec(free_after);
+        uart_puts("\n");
+    }
     TEST_EXPECT_EQ(free_after, free_before,
         "proc_pgtable_destroy must walk + free ALL sub-tables; "
         "if 3 pages are missing, only L0 got freed (the bug this test pins)");

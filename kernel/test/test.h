@@ -175,6 +175,11 @@ struct test_caught_leg test_caught_run(struct Proc *p, long (*call)(void *arg),
                                        void (*release)(void *arg), void *arg,
                                        bool pre_post);
 
+// The buddy's free count with every CPU's magazine returned to it. A page in a
+// magazine is free but phys_free_pages does not count it, so an exact round trip
+// over the raw count moves with a refill, a drain or a migration, nothing leaked.
+u64 test_free_pages_settled(void);
+
 // TEST_YIELD_UNTIL(cond) — wait for a PEER-THREAD observable, bounded.
 //
 // The thread_create / ready / sched pattern assumes one sched() runs the peer

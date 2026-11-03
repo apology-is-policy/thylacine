@@ -25,7 +25,7 @@ bool phys_init(void);
 
 // Diagnostic accessors used by the boot banner.
 u64 phys_total_pages(void);     // total pages in the zone
-u64 phys_free_pages(void);      // currently free pages (across all orders)
+u64 phys_free_pages(void);      // free pages in the buddy, all orders; per-CPU magazines hold more
 u64 phys_reserved_pages(void);  // total - free, computed at init
 
 // #808: page table pages consumed by the boot-time direct-map page-map
