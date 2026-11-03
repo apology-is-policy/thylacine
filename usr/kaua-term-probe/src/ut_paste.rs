@@ -30,7 +30,9 @@ const STILL_FETCHING: u32 = 10;
 const NO_ANSWER: u32 = 11;
 const THREE_IN_BUFFER: u32 = 12;
 const SEVEN_RAN: u32 = 13;
-const WORDS: [&[u8]; 14] = [
+const EIGHT_RAN: u32 = 14;
+const NINE_RAN: u32 = 15;
+const WORDS: [&[u8]; 16] = [
     b"UT-PASTE-UP",
     b"ut-paste-one",
     b"UT-PASTE-ONE",
@@ -45,6 +47,8 @@ const WORDS: [&[u8]; 14] = [
     b"no answer in time",
     b"ut-paste-three",
     b"UT-PASTE-SEVEN",
+    b"UT-PASTE-EIGHT",
+    b"UT-PASTE-NINE",
 ];
 const LONGEST_WORD: usize = 29;
 const PASTE_KEY: &[u8] = b"\x1bp";
@@ -308,14 +312,15 @@ fn stopped(fixture: &mut Fixture) -> Result {
     ut.keys(b"go\r")?;
     ut.sees(SEVEN_RAN, "the command did not run on")?;
 
-    // The key and Enter in one read: the edit it was pressed in is over, so nothing is
-    // fetched.
-    fixture.ask(b'H')?;
-    ut.keys(b"\x1bp\r")?;
-    pause(SETTLE_MS)?;
-    if fixture.said(b'h')? {
-        return Err("a paste key in the same read as Enter still fetched");
-    }
+    // A line typed for the command, in one write with the line that runs it: the shell
+    // reads no further than its Enter. A line feed, since what is already in the ring
+    // when the terminal turns cooked keeps its bare CR. The second `head` gets an Enter
+    // typed once the first has gone: the gap between them stays cooked, so it is a line
+    // feed wherever it lands.
+    ut.keys(b"head -n 1 | tr a-z A-Z; head -n 1 | tr a-z A-Z\rut-paste-eight\n")?;
+    ut.sees(EIGHT_RAN, "a line typed for the command went to the shell")?;
+    ut.keys(b"ut-paste-nine\r")?;
+    ut.sees(NINE_RAN, "the line's second command did not get its line")?;
 
     // Ctrl-C ends one too.
     fixture.ask(b'H')?;

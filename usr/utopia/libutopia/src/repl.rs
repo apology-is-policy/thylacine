@@ -347,6 +347,17 @@ impl Repl {
         }
     }
 
+    pub fn job_control(&self) -> bool {
+        self.env.job_control.is_some()
+    }
+
+    /// A shell that leaves gives the terminal back as a command's, to whatever runs next.
+    pub fn leave_terminal(&self) {
+        if let (Some(_), Some(fd)) = (&self.env.job_control, self.env.consctl_fd) {
+            crate::eval::console::set_mode(fd, crate::eval::console::CHILD_MODE);
+        }
+    }
+
     /// PTY-4b: the pts session dance. If fd 0 is a pts SLAVE (the shell was
     /// spawned by a session host -- `ptyhost` -- with the slave as its
     /// stdio), become the pts's controlling session and activate job
@@ -721,6 +732,10 @@ impl Repl {
 
     /// Fetched clipboard bytes, into the edit in progress, or a refusal above it.
     pub fn paste(&mut self, bytes: &[u8], out: &mut dyn IoWrite) {
+        if bytes.is_empty() {
+            self.notice("clipboard: it is empty, nothing pasted", out);
+            return;
+        }
         let refused = match core::str::from_utf8(bytes) {
             Ok(text) => self.editor.paste_text(text).err(),
             Err(_) => Some(PasteRefused::Unprintable),
@@ -919,7 +934,6 @@ impl Repl {
                     // `exit` (directly, or via a function / sourced / eval'd
                     // sub-script) sets the exit request; honour it now.
                     if let Some(code) = self.env.exit_requested() {
-                        self.set_line_running(false);
                         return Some(code);
                     }
                     // U-7a: reclaim + report any background jobs that finished
@@ -935,6 +949,10 @@ impl Repl {
                     // command held the loop. An idle interrupt drained here is
                     // discarded (benign at a sync point) -- the bool is ignored.
                     self.deliver_notes();
+                    // A handler's `exit`, or a hangup with none, raised in that drain.
+                    if let Some(code) = self.env.exit_requested() {
+                        return Some(code);
+                    }
                     // H-1c: the command's completion mark + the output zone
                     // close, then the NEXT prompt zone opens around the fresh
                     // prompt. Job-reap lines + note output above land inside
@@ -1208,7 +1226,10 @@ impl Repl {
         for line in &lines {
             self.env.emit_line(line); // PTY-4b: the session terminal, not the UART
         }
+        // A handler may run a job, and a job writes its own modes once it is running.
+        self.set_line_running(true);
         let interrupted = crate::eval::stmt::dispatch_notes(&mut self.env, &notes);
+        self.set_line_running(false);
         if interrupted {
             self.end_edit();
             self.editor.reset();

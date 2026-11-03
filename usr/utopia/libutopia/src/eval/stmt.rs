@@ -1525,7 +1525,7 @@ fn exec_external(
 /// held, RAW the console (ISIG off -> Ctrl-C is the child's keystroke); hand the
 /// child fd 0/1/2 (Inherit); wait by pid; then -- on EVERY exit path -- re-emit
 /// the screen-restore escapes (the crash backstop, ALWAYS) and, when held,
-/// restore ut's PROMPT mode. Without a consctl fd the discipline flips are
+/// write what follows a child. Without a consctl fd the discipline flips are
 /// skipped (the console keeps its mode) but the screen backstop still runs, so a
 /// crashed TUI never wedges the alt-screen (#106-F1). I-27: ut stays the sole
 /// consctl writer; the child never touches the discipline and is never
@@ -1575,7 +1575,7 @@ fn exec_external_raw(
             let rc = unsafe { t_wait_pid_for(pid, T_WAIT_PACKED, &mut st as *mut i32) };
             // 4. Restore on EVERY exit path (clean, error, OR death): re-emit the
             //    screen escapes (ALWAYS -- the crash backstop) and, when a consctl
-            //    fd is held, ut's PROMPT mode. The child's own Drop emitted the same
+            //    fd is held, what follows a child. The child's own Drop emitted the same
             //    escapes on a clean exit (idempotent); on a CRASH (panic=abort, no
             //    Drop) this is the sole restore, so a crashed TUI never wedges the
             //    console in the alt-screen with a hidden cursor.
@@ -2721,9 +2721,9 @@ fn mode_after_child(env: &Env) -> &'static [u8] {
     }
 }
 
-/// The jc foreground run around an already-spawned job: cooked child mode ->
-/// terminal to the job (-> optional `SYS_TTY_CONT` resume) -> the stop-aware
-/// wait -> terminal back -> prompt mode. Returns per-element statuses (a
+/// The jc foreground run around an already-spawned job: terminal to the job
+/// (-> optional `SYS_TTY_CONT` resume) -> the stop-aware wait -> terminal back
+/// -> what follows a child. Returns per-element statuses (a
 /// stopped element reports `STATUS_STOPPED`).
 ///
 /// Table maintenance is folded in, keyed by `existing`:
@@ -2737,9 +2737,10 @@ fn mode_after_child(env: &Env) -> &'static [u8] {
 ///     command's result -- the U-7b `fg` convention).
 ///
 /// The mode discipline is the real-shell shape: cooked (`CHILD_MODE`) is the
-/// CHILD's terminal, raw (`PROMPT_MODE`) is the line editor's. A job started from
-/// an accepted line finds it cooked already and leaves it so for the line's next
-/// command; one started from an idle note handler flips it here, and back.
+/// CHILD's terminal, raw (`PROMPT_MODE`) is the line editor's. A job run from an
+/// accepted line or a note handler finds it cooked already and leaves it so. The
+/// write here is for anything else, and it can overwrite what a child that is already
+/// running has set, which is why nothing relies on it.
 pub(crate) fn run_foreground_jc(
     env: &mut Env,
     pids: &[i32],
@@ -2752,8 +2753,10 @@ pub(crate) fn run_foreground_jc(
         Some(jc) => jc.own_pgid,
         None => return wait_pids_interruptible(env, pids), // defensive: not jc
     };
-    if let Some(fd) = env.consctl_fd {
-        console::set_mode(fd, console::CHILD_MODE);
+    if !env.line_running {
+        if let Some(fd) = env.consctl_fd {
+            console::set_mode(fd, console::CHILD_MODE);
+        }
     }
     // Terminal to the job BEFORE the resume: a continued job must already be
     // the foreground group when it runs (else its first terminal read races

@@ -1,8 +1,9 @@
 //! The paste key's fetch over a private ring: the binary's half, as Nora's clip_host
 //! is. One ring per paste. A shell sits at its prompt for days and most never paste,
 //! and while a foreground command runs nothing here can pump, so nothing is held open
-//! between pastes or into a command. No clipboard byte crosses the pts, and nothing
-//! here can block.
+//! between pastes or into an accepted line's command. A job an idle note handler runs
+//! leaves a fetch up and unpumped until it ends, and the fetch's deadline still holds.
+//! No clipboard byte crosses the pts, and nothing here can block.
 use interaction_native::{parse_locator, Host};
 use libhalcyon::interaction_client::{Event, Why};
 use libthyla_rs::io::Write;

@@ -606,7 +606,10 @@ pub extern "C" fn rs_main() -> i64 {
             }
         }
         if cons_ready {
-            match io::stdin().read(&mut buf) {
+            // Under job control what follows an Enter is the command's, so a read never
+            // goes past the key it needs. A console session's children read no console.
+            let wanted = if repl.job_control() { 1 } else { buf.len() };
+            match io::stdin().read(&mut buf[..wanted]) {
                 Ok(0) | Err(_) => break repl.exit_code(),
                 Ok(n) => {
                     let ended = repl.feed_announcing(&buf[..n], &mut out, &mut || {
@@ -646,5 +649,6 @@ pub extern "C" fn rs_main() -> i64 {
         }
     };
 
+    repl.leave_terminal();
     exit_code as i64
 }

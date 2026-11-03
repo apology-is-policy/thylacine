@@ -377,8 +377,16 @@ is parsed or spawned, and `PROMPT_MODE` just before the next prompt is drawn. Th
 between one line's commands stay cooked: `mode_after_child` is what every finished child
 is followed by, so a child that left the terminal strange is corrected on either side. A
 mode write does not reinterpret bytes already in the ring, so an Enter typed while the
-pts is still raw stays a bare CR, and a line reader waits on a line that has ended. An
-idle note handler's job flips the mode for itself, and a console session never moves it.
+pts is still raw stays a bare CR, and a line reader waits on a line that has ended. A
+note handler at an idle prompt gets the same window around it, so a job writes no mode
+of its own once it is running. A console session never moves the mode.
+
+Under job control the loop reads one byte per read: what follows an Enter is the
+command's, and bytes a shell has already read cannot be given back. A shell that leaves
+writes `CHILD_MODE` (`leave_terminal`), so a nested one such as Imperium's hands its
+parent's next command a cooked terminal. A pts read that ends on a line limit is a
+known gap: a canonical read is not yet bounded to one line, and the line limit is 256
+bytes (OPEN-BUGS 2026-11-03T23:41:33Z).
 
 **The loop** polls fd 0 and the note fd together. A note wake is serviced first —
 a finished background job prints `[N]+ Done`, an idle `Ctrl-C` cancels the line —

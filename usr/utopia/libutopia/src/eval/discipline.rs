@@ -31,8 +31,8 @@
 /// renderer (the Aurora fbcon) drew the ls staircase. The editor's own output
 /// is ONLCR-proof either way: its explicit `\r`+CSI redraws pass through
 /// untouched, and its deliberate `\n`s WANT the implied carriage return.
-/// This is BOTH the mode `Repl::console_apply_default` establishes at startup
-/// AND the mode ut restores after a raw child -- one vocabulary, no drift.
+/// This is the mode `Repl::console_apply_default` establishes at startup, the mode
+/// each prompt is drawn under, and what a console session's raw child is followed by.
 pub(crate) const PROMPT_MODE: &[u8] = b"-icanon -echo +isig -icrnl +onlcr";
 
 /// Full-raw line discipline for a TUI child: like `PROMPT_MODE` but ISIG is

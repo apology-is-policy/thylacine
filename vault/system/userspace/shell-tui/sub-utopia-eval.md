@@ -231,9 +231,10 @@ On a pts the routing inverts — the kernel fans a terminal signal to the
 foreground *process group* — so `run_foreground_jc` places the job in its own
 group, hands that group the terminal, waits stop-aware (`WAIT_UNTRACED`), and
 takes the terminal back and rewrites the line discipline on **every** outcome
-including a stop. What it rewrites is `mode_after_child`: cooked while an accepted
-line is still running (`Env.line_running`, set by the REPL at Accept), the prompt's
-mode for a job an idle note handler started. No note forwarding happens on this path. Every job-control arm
+including a stop. What it rewrites is `mode_after_child`: cooked while a line or a note
+handler is running (`Env.line_running`, set by the REPL), the prompt's mode otherwise.
+On entry it writes `CHILD_MODE` only when neither is, since the job is already running
+and may have set modes of its own. No note forwarding happens on this path. Every job-control arm
 is inert while `job_control` is `None`, so the console path is unchanged by the
 existence of the other one.
 

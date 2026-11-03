@@ -419,9 +419,13 @@ giving the tty back at accept, before it parses or spawns; ut used to write
 `CHILD_MODE` after the spawn, and `PROMPT_MODE` after each job, so the window was a
 whole spawn and came back between the commands of a line. `ut` now writes
 `CHILD_MODE` as the first act of an accepted line and `PROMPT_MODE` just before the
-next prompt. `ls-ut-paste` is the witness: it presses a line's `go` after the fetch
-ends, and the shell ends the fetch after the write, so the ordering is by
-construction and not by a pause.
+next prompt, and a job writes no mode of its own, because it can already be running
+and have set some. Under job control it also reads one byte per read, as readline
+does, because bytes a shell has read cannot go back to the command they were typed
+for. `ls-ut-paste` is the witness: it presses a line's `go` after the fetch ends, and
+the shell ends the fetch after the write, so the ordering is by construction and not
+by a pause. What is already in the ring when the write lands keeps its bare CR, on
+Linux as here.
 
 **ISIG characters DISCARD the pending line (2026-08-17, operator-voted; the
 ccb597b8 round's F5).** POSIX termios (NOFLSH clear, the default) performs "the

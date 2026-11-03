@@ -10,6 +10,7 @@
 // visual/command handlers, the `:w`/`:q`/`:wq`/`:q!` ex-commands -- ports 1:1,
 // plus `/` search and `:e`.
 
+use alloc::collections::VecDeque;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use kaua::event::{KeyCode, KeyEvent, Mods};
@@ -30,6 +31,22 @@ pub enum ClipboardRequest {
 /// do: closing a buffer moves the next one into its place.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BufferId(u64);
+
+/// Who asked for each paste the client has taken and not answered, oldest first. An
+/// answer can be waiting in the client's queue when the next paste is taken, and one
+/// slot would hand it to the later asker.
+#[derive(Default)]
+pub struct PasteAskers(VecDeque<BufferId>);
+
+impl PasteAskers {
+    pub fn asked(&mut self, id: BufferId) {
+        self.0.push_back(id);
+    }
+
+    pub fn answered(&mut self) -> Option<BufferId> {
+        self.0.pop_front()
+    }
+}
 
 /// The editor mode. `Command(buf)` holds the in-progress command/search line
 /// (the leading `:` or `/` distinguishes the two on Enter).
@@ -3861,6 +3878,25 @@ mod tests {
         ed.prev_buffer();
         assert!(ed.paste_text(into, "x"), "it is back where it was asked");
         assert_eq!(ed.text.content(), "xaa");
+    }
+
+    #[test]
+    fn an_answer_waiting_when_the_next_paste_is_taken_goes_to_who_asked_it() {
+        let mut ed = Editor::new(Some("a".into()), "aa", false);
+        let mut askers = PasteAskers::default();
+        askers.asked(ask_for_a_paste(&mut ed));
+        ed.open_buffer(Some("b".into()), "bb");
+        askers.asked(ask_for_a_paste(&mut ed));
+
+        let first = askers.answered().expect("the first asker");
+        assert!(!ed.paste_text(first, "from a's request"));
+        assert_eq!(ed.text.content(), "bb", "a's answer does not land in b");
+        assert!(!ed.modified);
+
+        let second = askers.answered().expect("the second asker");
+        assert!(ed.paste_text(second, "x"));
+        assert_eq!(ed.text.content(), "xbb");
+        assert!(askers.answered().is_none());
     }
 
     #[test]

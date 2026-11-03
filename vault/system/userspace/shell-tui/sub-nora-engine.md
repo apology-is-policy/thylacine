@@ -267,6 +267,8 @@ The count prefix is bounded twice over (saturating arithmetic, then a cap), so
 - **`find` and `find_all` are literal, single-line, and non-overlapping.** No
   regex, and a pattern is never matched across a newline.
 
+A paste's answer goes to whoever asked for that paste: the binary's `Clip` keeps `PasteAskers`, a queue with one entry per paste the client has taken, because an answer can be waiting in the client's queue when the next paste is taken.
+
 ## Caveats
 
 - **`find_all`'s documentation opens with a description of a different

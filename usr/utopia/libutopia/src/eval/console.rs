@@ -20,7 +20,7 @@
 //   3. a plain by-pid wait (NOT the interruptible one): with ISIG off the kernel
 //      posts no `interrupt` for this child, and forwarding a note to a raw TUI
 //      would be wrong -- the child owns the console until it exits.
-//   4. on the child's exit OR death, restore ut's PROMPT mode + re-emit the
+//   4. on the child's exit OR death, write what follows a child + re-emit the
 //      screen-restore escapes to fd 1 -- the CRASH BACKSTOP. `no_std` apps run
 //      `panic = abort`, so a crashed TUI's `Terminal::Drop` does NOT run; without
 //      ut's restore the console would be wedged in the alt-screen with a hidden
