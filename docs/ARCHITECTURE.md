@@ -1853,7 +1853,8 @@ for it:
   `SYS_TORPOR_WAIT` with no timeout, `SYS_OPEN` with `SYS_WALK_OPEN_OINTR`,
   `SYS_FILE_LOCK`'s wait, and on a slow file `SYS_READ`, `SYS_WRITE`, `SYS_PREAD`
   and `SYS_PWRITE`.
-- **`EINTR` under any flag:** `SYS_POLL`, and `SYS_TORPOR_WAIT` with a timeout.
+- **`EINTR` under any flag:** `SYS_POLL`, `SYS_TORPOR_WAIT` with a timeout, and
+  `SYS_NOTE_WAIT`, which marks itself interruptible.
 
 `SYS_WALK_OPEN_OINTR` (vote 20) marks the one open that waits for a peer. A Pouch
 `accept` waits in the open of netd's `listen`, and a `connect` in the open of its
@@ -2026,12 +2027,14 @@ the same two cores.
   The call answers `-EINTR` once a handler has run, under `SA_RESTART` as well
   (signal(7)). A note no handler takes leaves it standing: `NOTE_WF_NOHAND`, Linux's
   `ERESTARTNOHAND`, re-issues the call after the tail has taken the note, so a stop and
-  a cont or a default-ignored note do not end it. The call sets the flag itself, because
-  the native class runs only for a Proc with a handler or a notes fd. A Proc no table
-  governs gets `-EINVAL`, since no note could end its wait.
+  a cont or a default-ignored note do not end it. The call sets that flag and its own
+  interruptibility itself, because the native class runs only for a Proc with a handler or
+  a notes fd, and a peer can install the first handler while this wait stands. A Proc no
+  table governs gets `-EINVAL`, since no note could end its wait.
 - **In a handler** no other handler can run. The call leaves the masks alone, waits until
-  a note its mask admits is queued, and answers `-EINTR`; that note runs when the outer
-  handler returns. This is a stated imprecision, and nesting is the real fix.
+  a note its mask admits is queued that a handler would take, and answers `-EINTR`; that
+  note runs when the outer handler returns. This is a stated imprecision, and nesting is
+  the real fix.
 - **`NOTE_WAIT_TAKE`** takes the note a take word names, the caller's own direct notes
   first and then the oldest queued, masked or not, and runs no handler. The tty family
   shares one mask bit, so the word names its rows one at a time (bits 16..20): waiting

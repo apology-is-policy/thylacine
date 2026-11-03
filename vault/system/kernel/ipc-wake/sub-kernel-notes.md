@@ -792,7 +792,8 @@ reads through it, so a frame's `uc_sigmask` reads the caller's mask and never th
 `NOTE_WF_NOHAND` is Linux's `ERESTARTNOHAND`: re-issue the call if it unwound and no handler
 ran. The call sets it itself and not its class, because `native_note_class` runs only for
 a Proc with a table and either a handler or a fd, and a call with neither must still
-re-issue after its tail. At the tail's end, in order: settle, restore if held, clear the
+re-issue after its tail. It sets `note_interruptible` the same way: a peer can install the
+first handler while the wait stands, and the wait has no other end. At the tail's end, in order: settle, restore if held, clear the
 byte, release claims. The settle rewinds on `note_restartable || NOHAND`; the handler arm's
 `SA_RESTART` rewind stays on `note_restartable` alone, so a `sigsuspend` under `SA_RESTART`
 still answers `EINTR`.
@@ -801,8 +802,8 @@ still answers `EINTR`.
 is re-read after the unlock, so two threads cannot both read caught.
 
 `notes_wait_suspend`: refuses a Proc no table governs. In a handler it leaves the masks
-alone (the saved slot is in use) and waits on the queue hook for a note `~mask` admits, then
-answers `EINTR`; the note runs at the outer handler's return. Otherwise it stores the mask,
+alone (the saved slot is in use) and waits on the queue hook for a note `~mask` admits and a
+handler would take, then answers `EINTR`; the note runs at the outer handler's return. Otherwise it stores the mask,
 peeks `notes_tail_candidate_locked` (a default stop or ignore queued under the old mask
 needs the tail, and no latch wakes for it) and marks an unwind if one is there, not for a
 self-managing Proc, whose fd holds its notes; then `tsleep_noteintr` forever. A pending

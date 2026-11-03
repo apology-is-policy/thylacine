@@ -16828,9 +16828,6 @@ static void native_note_class(struct Thread *t, struct Proc *p,
     case SYS_OPEN:
         intr = restart = (ctx->regs[3] & SYS_WALK_OPEN_OINTR) != 0;
         break;
-    case SYS_NOTE_WAIT:
-        intr = true;    // and NOHAND, set by the call: signal(7) lists neither form
-        break;
     default:
         break;
     }

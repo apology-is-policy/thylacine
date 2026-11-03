@@ -2755,14 +2755,16 @@ static bool notes_take_locked(struct Proc *p, struct Thread *t, u64 take,
     return false;
 }
 
-// A queued note or a note on this thread's word that the families in `admit` let in.
+// A note on this thread's word, or a queued one a handler would take, that the families
+// in `admit` let in. A default-ignored note waits for the tail and ends nothing.
 static bool notes_admitted_locked(struct Proc *p, const struct Thread *t, u64 admit) {
     struct NoteQueue *q = p->notes;
     if ((u32)__atomic_load_n(&t->note_direct, __ATOMIC_ACQUIRE) & (u32)admit) return true;
     u32 idx = q->head;
     for (u32 n = 0; n < q->count; n++) {
         int bit = notes_name_to_bit(q->ring[idx].name);
-        if (bit >= 0 && (admit & (1ull << (u32)bit))) return true;
+        if (bit >= 0 && (admit & (1ull << (u32)bit)) &&
+            notes_proc_has_live_handler(p, q->ring[idx].name)) return true;
         idx = (idx + 1) % NOTE_RING_SLOTS;
     }
     return false;
@@ -2845,6 +2847,9 @@ s64 notes_wait_suspend(struct Thread *t, u64 mask) {
     if (!p || !p->notes) return -(s64)T_E_INVAL;
     // Its waits never unwind for a caught note: nothing could end this one.
     if (!notes_table_governs(p)) return -(s64)T_E_INVAL;
+    // Here and not only in the class, which skips a Proc with no handler yet: a peer can
+    // install one while this waits, and this wait has no other end.
+    t->note_interruptible = true;
 
     if (t->in_handler) {
         struct Note unused;
@@ -2879,6 +2884,7 @@ s64 notes_wait_take(struct Thread *t, u64 take, s64 timeout_ns, struct Note *out
                     int *direct) {
     struct Proc *p = t ? t->proc : NULL;
     if (!p || !p->notes || !out || !direct) return -(s64)T_E_INVAL;
+    t->note_interruptible = true;       // as notes_wait_suspend's
     if (timeout_ns < 0) t->note_wait_flags |= NOTE_WF_NOHAND;
     return notes_wait_on_queue(t, take, 0, timeout_ns, out, direct);
 }

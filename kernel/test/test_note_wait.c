@@ -247,7 +247,6 @@ static void nw_entry(void) {
     struct Thread *t = current_thread();
     int d = -2;
 
-    t->note_interruptible = true;       // syscall_dispatch's class
     t->note_call_x0       = 0x77u;
     t->note_mask          = g_nw_old;
     if (g_nw_in_handler) {
@@ -485,6 +484,8 @@ void test_notewait_suspend_in_a_handler(void) {
         (void)notes_post(p, NOTE_NAME_USR1, 0u, NULL, true);
         proc_caught_note_wake(p);
         for (u32 i = 0; i < 16u; i++) sched();
+        (void)notes_post(p, NOTE_NAME_CHILD_EXIT, 0u, NULL, true);
+        for (u32 i = 0; i < 16u; i++) sched();
         rode = g_nw_done == 0 && test_thread_sleeping(p, r.tid);
         (void)notes_post(p, NOTE_NAME_USR2, 0u, NULL, true);
         proc_caught_note_wake(p);
@@ -494,12 +495,42 @@ void test_notewait_suspend_in_a_handler(void) {
     nw_finish(&r);
 
     TEST_ASSERT(started && blocked, "the wait stands");
-    TEST_ASSERT(rode, "a note its mask holds does not end it");
+    TEST_ASSERT(rode, "a note its mask holds does not end it, nor one no handler takes");
     TEST_ASSERT(done, "one it admits does");
     TEST_EXPECT_EQ(g_nw_rc, NW_EINTR, "EINTR");
     TEST_EXPECT_EQ((u64)g_nw_mask_during, NW_USR1 | NW_USR2, "the handler's mask untouched");
     TEST_EXPECT_EQ((u32)g_nw_flags_during, 0u, "nothing held: the saved slot is the handler's");
-    TEST_EXPECT_EQ(left, 2u, "both notes wait for the handler's return");
+    TEST_EXPECT_EQ(left, 3u, "all three wait for the handler's return");
+}
+
+// A handler no one had installed when the wait began. The class skips a Proc with no
+// handler, and a wait with no other end must still unwind for it.
+void test_notewait_suspend_handler_installed_late(void) {
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree must be empty at test entry");
+    struct Proc *p = nw_proc(false);
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    TEST_EXPECT_EQ(sys_note_dispose_for_proc(p, NOTE_NAME_CHILD_EXIT, NOTE_DISP_DEFAULT, 0), 0ll,
+                   "a table, and no handler");
+    nw_reset(0, 0, false, -1);
+    struct nw_run r;
+    bool started = nw_start(&r, p);
+    bool blocked = started && nw_until_blocked(&r);
+    s64 row = -1;
+    bool posted = false;
+    if (blocked) {
+        notes_set_handler(p, NW_HANDLER);
+        row = sys_note_dispose_for_proc(p, NOTE_NAME_USR1, NOTE_DISP_CAUGHT, 0);
+        posted = notes_post(p, NOTE_NAME_USR1, 0u, NULL, true) == 0;
+        proc_caught_note_wake(p);
+    }
+    bool done = blocked && nw_until_done();
+    nw_finish(&r);
+
+    TEST_ASSERT(started && blocked, "the wait stands with no handler");
+    TEST_EXPECT_EQ(row, 0ll, "the peer's row");
+    TEST_ASSERT(posted && done, "the note ends it");
+    TEST_EXPECT_EQ(g_nw_rc, NW_EINTR, "EINTR");
+    TEST_ASSERT(g_nw_unwound, "it unwound for the note");
 }
 
 // Masked, as POSIX asks of a taker: it arms no latch and wakes no walk. The queue's own
