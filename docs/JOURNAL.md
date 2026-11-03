@@ -22,6 +22,32 @@ needed the operator.
 
 
 ---
+## 2026-11-03 (main, Opus 5.5) -- Stratum snapshots: a P0 that kept growing, and a fix that made one of its own
+
+The chunk was one line in OPEN-BUGS: a snapshot's dead list wedges at the 257th overwrite. It went on to be the sole work of the day, on a private Stratum clone (`stratum-private/f7`, branch `f7next`, 801a286 over Stratum main 20b45ce). Nothing of it has landed. No tracked Thylacine code creates a snapshot: `git grep` finds no writer of the verb in `usr` or `tools`, so only an operator or a tool writing `/ctl` reaches any of this. That is the only comfort in it.
+
+What the base does, each run on a worktree of the unfixed tree unless marked:
+- hot list: wedge at the 257th overwrite (`written=256`, then -204, with 51400 blocks free);
+- node list: every commit answers OK, then rollback answers -200: the snapshot is gone, silently;
+- cold list: `written=263 listed=256`, wedged, with room in the pool;
+- a promote under a snapshot derefs the view's only reference: rollback's read answers -200, no capacity needed;
+- a clone and its origin overwriting one shared block: the second answers -204 and wedges, in either order, 16 MiB pool, 64 KiB file;
+- deleting a newer snapshot hands blocks an older view names to the allocator (`freed=2`, pending 0 to 257). The first end-to-end read of this PASSED: my fill stopped on reservations and the placements never reached the freed run. A second fixture answered ENOSPC at its truncate on the base too. The third rewrites 1 MiB for 4x the pool, which the base cannot run since its drops all go on the list, so the loss was read red only by restoring the old delete on the fixed tree: rollback -200 and a 1 MiB mismatch (mutant `no move down on delete`, f7m/summary.txt);
+- a clone cannot use a real file it inherited: stat, lookup, chmod, write and create all answer -200, read answers 0 (`scratch-keep/test_fs_clone_files.c`). inode.c:297 compares `si_dataset_id` with the clone's id. `test_fs_clone` only ever used raw inos. Own chunk, after this one.
+
+The fix's shape: route a drop by birth so a block in no view spends no entry; past the 256-entry cap retain rather than refuse, because a buffered write's drain cannot refuse; a delete moves the lists down onto the older neighbour. The reasoning that made me reverse R54 P3-2's cold refusal is in `memory/design_f7_dead_lists.md`.
+
+Wrong turns, each caught by something other than me being careful:
+- Rollback's cascade called the delete whose lists now move down, onto the rollback's target, after it had cleared its own. A block the rollback brought back would stay listed and go at the target's delete. MY BUG, unlanded. Caught by two old legs in `test_fs` (`fs_rollback_4d_cold_*`) on the first build, by a count; the hot half is silent.
+- Two mutants survived of 22 at fa29e71: nothing noticed a clone freeing nodes its origin reads through. Legs added; not yet proven red.
+- My route for a clone's reflink holding a block's last count. I reasoned it onto the clone's snapshot, refuted that by hand, moved it to the origin's most recent, and then, while the audit ran, saw that a rollback to that snapshot frees the block under an older view. An entry has to sit on exactly the newest view naming the block, and only the origin's own last drop is there. So a clone's reflink of an inherited block now takes no count at all, and the route is gone. The audit found the same hole independently (P1-1), which is the only reason I trust the conclusion more than the two I had already held.
+
+The audit (holotype-reviewer on Opus, read only, against 56b13f0): 3 P0, 4 P1, 3 P2, 5 P3, nothing run yet. Dirty; a second round is owed. All the P0s are older than this work, and I had read past each one. `scratchpad/f7-audit-r1.md` has them; the ones I have confirmed by reading: deleting a snapshot with a newer neighbour makes the pool UNMOUNTABLE (dangling `prev_snap_id`, `sp_validate_shadow`; `test_fs.c:9837` deletes a middle snapshot and never remounts); mount's reconcile sweeps boot-list entries so a later delete frees a live node; incremental send omits every write in the first gen after S_from (`send.c:179`, `link_gen <= from.extent_txg`). Rollback with no commit since a cold drop losing the file: its ordering is confirmed, the loss is not yet run. A rollback restoring records but not counts: fixed in 801a286, unbuilt. Each gets a reproducer on the base before its fix counts.
+
+What I would have told the operator wrongly at noon: "three faces". Then "six". The honest count is whatever the next round leaves.
+
+A format question is still coming: retained blocks leak once their snapshot goes, and curing that means chunked lists with a version bump or a walk on overflow. Not asked yet: every ask waits for no hold of mine to be armed. Not run on any of this: host sanitizers.
+
 ## 2026-11-03 (main, Opus 5.5) -- B-3h's first boots: two wrong tests, a survivor, a budget
 
 **What this covers.** B-3h had been through six audit rounds without booting, on purpose: the rounds were batched and the lease came after them. Three boots then found what the rounds could not, and none of it was in the kernel. Everything here is on `b3h`, not on `main`.
