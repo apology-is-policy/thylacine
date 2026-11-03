@@ -23,6 +23,8 @@ bool devproc_owner_or_hostowner(const struct Proc *caller, const struct Proc *ta
 // The in-kernel tests' reach into devproc.c (.claude/rules/kernel-code.md,
 // "Cross-file declarations"): hooks compiled only with the tests, and
 // functions that are static in a production build (VISIBLE_IF_KERNEL_TESTS).
+size_t devproc_account_read_gated(const struct Proc *caller, struct Proc *target,
+                                  char *buf, size_t cap, bool *denied);
 bool devproc_all_threads_parked(struct Proc *target);
 bool devproc_debug_authorized(const struct Proc *caller, const struct Proc *target);
 int devproc_debug_stop_state_for_test(int pid, struct Spoor *ctl);

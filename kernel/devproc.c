@@ -42,6 +42,7 @@
 #include <thylacine/env.h>      // V-4b-6: env_render_environ -- /proc/<pid>/environ
 #include <thylacine/errno.h>    // T_E_SRCH -- a step whose target died (DEBUG-FS-DESIGN 5.5)
 #include <thylacine/exec.h>     // V-4b-2: EXEC_USER_STACK_BASE / EXEC_USER_VDSO_BASE -- maps role tags
+#include <thylacine/memaccount.h>  // MM-1: /proc/<pid>/account
 #include <thylacine/extinction.h>
 #include <thylacine/joey.h>   // 8a-2c F2: boot_is_complete() -- gate hwverify to the boot window
 #include <thylacine/notes.h>  // gcpark-b: NOTE_SIG_KILL -- EXITKILL records a kill
@@ -103,6 +104,7 @@ enum {
     PQS_IMPERIUM = 17,       // /proc/<pid>/imperium         (QTFILE; IM-2; RO, owner-or-CAP_HOSTOWNER: the legate scope + what flows)
     PQS_THREAD_DIR = 18,     // /proc/<pid>/thread/          (QTDIR; thread-model C7, DEBUG-FS-DESIGN 5h)
     PQS_TID_DIR  = 19,       // /proc/<pid>/thread/<tid>/    (QTDIR; per-thread, under PQS_TID_FLAG)
+    PQS_ACCOUNT  = 20,       // /proc/<pid>/account          (QTFILE; MM-1; RO, owner-or-CAP_HOSTOWNER)
 };
 
 // Marks a per-thread path. Its qid.vers carries the pid, as Plan 9's devproc
@@ -172,6 +174,7 @@ static const struct proc_pid_file g_proc_pid_files[] = {
     { "sched",   PQS_SCHED   },
     { "environ", PQS_ENVIRON },
     { "imperium", PQS_IMPERIUM },
+    { "account", PQS_ACCOUNT },
 };
 
 #define PROC_PID_FILE_COUNT \
@@ -1080,6 +1083,10 @@ static u32 devproc_mode_for_kind(u32 kind) {
     // about ANOTHER user's authority -- the sched/environ posture (0400 + the
     // owner-or-CAP_HOSTOWNER gate at the read site), not status's 0444.
     case PQS_IMPERIUM: return T_S_IFREG | 0400u;
+    // What a session holds is another user's business, the sched posture. Text for the
+    // shell and diagnostics: SHARED-MEMORY-ACCOUNTING section 13 forbids parsing it to
+    // decide policy.
+    case PQS_ACCOUNT: return T_S_IFREG | 0400u;
     // V-4b-6: 0400 -- Linux's own mode for environ, and for Linux's own reason.
     // Environment variables are where secrets live by universal convention
     // (tokens, passwords, keys), and unlike exe/cwd/ns/maps NOTHING discloses
@@ -1413,6 +1420,49 @@ size_t devproc_imperium_read_gated(const struct Proc *caller, struct Proc *targe
     return format_imperium(target, buf, cap);
 }
 
+// The same fill SYS_ACCOUNT answers with, so the two views cannot disagree in kind. The
+// account is held while p is, and the caller holds g_proc_table_lock over p.
+static size_t format_account(const struct Proc *p, char *buf, size_t cap) {
+    static const char *const class_names[ACCOUNT_CLASSES] = {
+        [CLASS_ALLOC] = "alloc", [CLASS_RETAIN] = "retain",
+        [CLASS_META] = "meta", [CLASS_DEVICE] = "device",
+    };
+    struct account_query q;
+    account_query_fill(p->account, &q);
+
+    size_t off = 0;
+    size_t n;
+    n = fmt_str(buf, cap, off, "incarnation: "); if (!n) return 0; off += n;
+    n = fmt_udec(buf, cap, off, (unsigned long)q.h.incarnation); if (!n) return 0; off += n;
+    n = fmt_str(buf, cap, off, "\nheadroom: "); if (!n) return 0; off += n;
+    n = fmt_udec(buf, cap, off, (unsigned long)q.headroom); if (!n) return 0; off += n;
+    n = fmt_str(buf, cap, off, "\nlimiting: "); if (!n) return 0; off += n;
+    n = fmt_str(buf, cap, off, class_names[q.limiting]); if (!n) return 0; off += n;
+    n = fmt_str(buf, cap, off, "\n"); if (!n) return 0; off += n;
+    for (unsigned cls = 0; cls < ACCOUNT_CLASSES; cls++) {
+        n = fmt_str(buf, cap, off, class_names[cls]); if (!n) return 0; off += n;
+        n = fmt_str(buf, cap, off, ": used "); if (!n) return 0; off += n;
+        n = fmt_udec(buf, cap, off, (unsigned long)q.c[cls].used); if (!n) return 0; off += n;
+        n = fmt_str(buf, cap, off, " reserved "); if (!n) return 0; off += n;
+        n = fmt_udec(buf, cap, off, (unsigned long)q.c[cls].reserved); if (!n) return 0; off += n;
+        n = fmt_str(buf, cap, off, " limit "); if (!n) return 0; off += n;
+        if (q.c[cls].limit == ~0ull) n = fmt_str(buf, cap, off, "none");
+        else n = fmt_udec(buf, cap, off, (unsigned long)q.c[cls].limit);
+        if (!n) return 0;
+        off += n;
+        n = fmt_str(buf, cap, off, "\n"); if (!n) return 0; off += n;
+    }
+    return off;
+}
+
+VISIBLE_IF_KERNEL_TESTS
+size_t devproc_account_read_gated(const struct Proc *caller, struct Proc *target,
+                                  char *buf, size_t cap, bool *denied) {
+    if (!devproc_owner_or_hostowner(caller, target)) { *denied = true; return 0; }
+    *denied = false;
+    return format_account(target, buf, cap);
+}
+
 struct devproc_read_ctx {
     int                 pid;
     u32                 kind;
@@ -1462,6 +1512,9 @@ static int devproc_read_cb(struct Proc *p, void *arg) {
         break;
     case PQS_IMPERIUM:                         // IM-2: owner-or-CAP_HOSTOWNER
         r->total = devproc_imperium_read_gated(r->caller, p, r->buf, r->cap, &r->denied);
+        break;
+    case PQS_ACCOUNT:                          // MM-1: owner-or-CAP_HOSTOWNER
+        r->total = devproc_account_read_gated(r->caller, p, r->buf, r->cap, &r->denied);
         break;
     default:          break;                  // kind pre-validated by the caller
     }
@@ -1528,7 +1581,8 @@ static long devproc_read(struct Spoor *c, void *buf, long n, s64 off) {
     // machinery, and adding one would route it there as well, formatting nothing.
     if (kind != PQS_STATUS && kind != PQS_CMDLINE && kind != PQS_NS &&
         kind != PQS_CTL && kind != PQS_EXE && kind != PQS_SCHED &&
-        kind != PQS_CWD && kind != PQS_MAPS && kind != PQS_IMPERIUM) return -1;
+        kind != PQS_CWD && kind != PQS_MAPS && kind != PQS_IMPERIUM &&
+        kind != PQS_ACCOUNT) return -1;
 
     // prowl-3b (OQ-4): capture the reading Proc BEFORE the lock so the gated
     // PQS_SCHED kind can be authorized against the target found inside the walk.

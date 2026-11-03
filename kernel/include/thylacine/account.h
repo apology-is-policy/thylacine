@@ -1,6 +1,6 @@
-// The memory account ABI, docs/SHARED-MEMORY-ACCOUNTING.md section 13. Reserved at
-// MM-0: no kernel code is behind it, and SYS_ACCOUNT answers as an unknown number until
-// MM-1 brings the accounts. tools/test-account-abi.py holds this header, libt's and
+// The memory account ABI, docs/SHARED-MEMORY-ACCOUNTING.md section 13. MM-1 serves the
+// query on the caller's own account; the other operations answer -T_E_OPNOTSUPP until
+// their code exists. tools/test-account-abi.py holds this header, libt's and
 // libthyla-rs's to one frozen byte record.
 #ifndef THYLACINE_ACCOUNT_H
 #define THYLACINE_ACCOUNT_H

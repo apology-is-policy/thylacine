@@ -541,8 +541,7 @@ record never filled in names none. `level` is 0 NORMAL, 1 WARNING and 2 CRITICAL
 `limiting` is the class that is tightest. The self selector is -1, since no handle is
 negative.
 
-Reserved at MM-0: `SYS_ACCOUNT` is 140, with no dispatch arm until MM-1, so it answers as
-an unknown number and `syscall.native_gap_unassigned` pins that. Linux's 140 is
+`SYS_ACCOUNT` is 140, reserved at MM-0 and given its dispatch arm at MM-1. Linux's 140 is
 setpriority, which has no row, so a Linux Proc takes ENOSYS before the native switch,
 reaches no account operation and is charged without one. The kernel's `thylacine/account.h`, libt's
 `thyla/account.h` and libthyla-rs's `account` are held to one byte record by
@@ -584,3 +583,30 @@ context.
 **A broken pairing does not stop the kernel,** because at this stage nothing depends on
 the ledger. It is counted, and the test runner reddens the test it happened under. That
 changes when a decision first reads the ledger.
+
+**The query is the whole of the call, also not yet booted.** `ACCOUNT_QUERY` on the self
+selector is served. Any other handle is `-EBADF`, since `KOBJ_ACCOUNT` does not exist,
+and the other operations are `-EOPNOTSUPP`. A stale incarnation is `-EINVAL`, because the
+error registry has no `ESTALE` and this is not worth a change to it.
+
+`used` is the account's and its descendants', in bytes. Nothing charges `CLASS_RETAIN`
+or `CLASS_DEVICE` yet. An account has no limits of its own until MM-1c, so `limit` is
+section 4's default: the pool for a RAM class, and all ones for device storage, which
+has no budget yet. `headroom` is the least of each class's room at each level up the
+chain and the pool's own room, floored at zero, and `limiting` names the class of the
+chain's tightest room even when the pool is tighter still, because the pool is no class.
+`generation`, `level` and the three reclaim figures are zero, as no pressure machinery
+exists. The header is read once and the whole record then written, so a peer thread
+cannot steer a check, and a fault on the way out may leave a part-written record, which
+`-EFAULT` tells the caller not to trust.
+
+**`/proc/<pid>/account` takes `sched`'s posture:** 0400, owner or `CAP_HOSTOWNER`, and it
+reads through a dump seal. Section 13 says only "the /proc gates". What a session holds
+is another user's business once sessions have accounts, so the stricter of the two
+postures was chosen, and it can be relaxed without breaking anything. It renders the same
+fill the call returns. `/ctl/memory` gains `ledger:` and `underflow:`.
+
+**Until sessions have children, every Proc's account is the root,** so a query shows
+machine totals. `/ctl/memory` already shows them to every process, but a sandboxed Proc
+whose namespace has no `/ctl` learns them only through this call. MM-1c ends that for a
+session and leaves a sandbox seeing its session's totals.

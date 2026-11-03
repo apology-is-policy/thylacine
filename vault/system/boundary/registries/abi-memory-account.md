@@ -17,9 +17,14 @@ updated: 2026-11-03
 ---
 ## Layout / semantics
 
-**Reserved; no kernel code is behind it.** The contract is
-`docs/SHARED-MEMORY-ACCOUNTING.md` section 13. `SYS_ACCOUNT` is 140, with no dispatch arm
-until MM-1, so it answers as an unknown number. The self selector is -1. Version is 1.
+**The query is live; the other operations are reserved.** The contract is
+`docs/SHARED-MEMORY-ACCOUNTING.md` section 13. `SYS_ACCOUNT` is 140. The self selector is
+-1, sign-extended to the register. Version is 1. `ACCOUNT_QUERY` on the self selector
+returns 0 and replaces the record. Otherwise: `-EINVAL` for an operation outside 1 to 6,
+a wrong `rec_size`, version, size, flags or pad, or an incarnation neither 0 nor the
+account's; `-EOPNOTSUPP` for operations 2 to 6; `-EBADF` for any other handle; `-EFAULT`
+for a record that is not the caller's readable and writable memory, after which any part
+of it may have been written. The checks run in that order. Amounts are bytes.
 
 Operations: QUERY 1, CHILD 2, SET_LIMITS 3, VOUCHER_CREATE 4, VOUCHER_CLOSE 5,
 ALLOCATE_FUNDED 6. Classes: ALLOC 0, RETAIN 1, META 2, DEVICE 3, four in all. Levels:
@@ -44,7 +49,7 @@ zero, so a swap of two like fields shows. This checks numbers and layout, not be
 Update all six mirrors and the oracle in one commit, and record `abi-memory-account` in
 the change note's mirrors-checked edge. Records for the other operations come with those
 operations. Version and size are what lets them, so nothing here is renumbered for them.
-No admission path may consume this before MM-1 has the accounts behind it.
+No admission path consumes the query: section 4 has admission recheck live state.
 
-The number's collision with Linux's rt_sigreturn is argued in [[sub-kernel-vivarium]],
+The number's collision with Linux's setpriority is argued in [[sub-kernel-vivarium]],
 and the number space is [[sub-kernel-syscall-abi]]'s.

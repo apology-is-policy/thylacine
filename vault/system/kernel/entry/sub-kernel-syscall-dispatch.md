@@ -48,8 +48,9 @@ Native call 138 is POSTNOTE_TID, which posts to one thread of the caller's own P
 ([[sub-kernel-syscall-abi]], [[sub-kernel-notes]]). It shares `postnote_copy_name` with
 `SYS_POSTNOTE`.
 
-140 is reserved for SYS_ACCOUNT ([[abi-memory-account]]) and has no arm until MM-1, so it
-reaches the unknown arm, as the empty 139 does, and the same test pins that.
+140 is SYS_ACCOUNT ([[abi-memory-account]]), whose arm serves the query on the caller's
+own account. The empty 139 reaches the unknown arm, and the same test pins that, with 140
+as a control that does not.
 
 ## Trusted-seat and nonblocking entries
 

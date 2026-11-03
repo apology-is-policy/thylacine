@@ -6,11 +6,9 @@
 #include <thylacine/proc.h>
 #include <thylacine/thread.h>
 
+#include "../mm/phys.h"
 #include "../mm/slub.h"
 
-// 1 and 2 are the two static accounts. The counter is 64 bits and only ever rises, so
-// no account in a boot's life shares an incarnation with one that came before it.
-static u64 g_account_incarnation = 3;
 static u64 g_account_underflows;
 // Sponsored pages outside the capacity pool, which is what separates the two totals.
 static u64 g_account_unpooled;
@@ -46,6 +44,11 @@ void account_init(void) {
     if (!g_account_cache) extinction("kmem_cache_create(memory_account) returned NULL");
 }
 
+#ifdef KERNEL_TESTS
+// 1 and 2 are the two static accounts. The counter is 64 bits and only ever rises, so
+// no account in a boot's life shares an incarnation with one that came before it.
+static u64 g_account_incarnation = 3;
+
 struct MemoryAccount *account_child(struct MemoryAccount *parent) {
     if (parent->depth + 1u >= ACCOUNT_MAX_DEPTH) return NULL;
     struct MemoryAccount *a = kmem_cache_alloc(g_account_cache, KP_ZERO);
@@ -57,6 +60,7 @@ struct MemoryAccount *account_child(struct MemoryAccount *parent) {
     account_ref(parent);
     return a;
 }
+#endif
 
 void account_ref(struct MemoryAccount *a) {
     if (__atomic_fetch_add(&a->refs, 1u, __ATOMIC_RELAXED) == 0u)
@@ -100,6 +104,43 @@ void account_refund(struct MemoryAccount *a, unsigned cls, u64 pages) {
 
 u64 account_used(const struct MemoryAccount *a, unsigned cls) {
     return __atomic_load_n(&a->used[cls], __ATOMIC_RELAXED);
+}
+
+// Section 4's unconfined default: a RAM class may reach the pool, and nothing bounds
+// device storage here. An account has no limits of its own until something sets them.
+static u64 class_limit_bytes(unsigned cls) {
+    if (cls == CLASS_DEVICE) return ~0ull;
+    return (u64)capacity_pool_pages() << PAGE_SHIFT;
+}
+
+void account_query_fill(const struct MemoryAccount *a, struct account_query *q) {
+    *q = (struct account_query){
+        .h = { .version = ACCOUNT_VERSION, .size = sizeof(*q), .incarnation = a->incarnation },
+        .level = ACCOUNT_NORMAL,
+        .limiting = CLASS_ALLOC,
+    };
+    for (unsigned cls = 0; cls < ACCOUNT_CLASSES; cls++) {
+        q->c[cls].used = account_used(a, cls) << PAGE_SHIFT;
+        q->c[cls].limit = class_limit_bytes(cls);
+    }
+
+    u64 tightest = ~0ull;
+    for (const struct MemoryAccount *up = a; up; up = up->parent) {
+        for (unsigned cls = 0; cls < ACCOUNT_CLASSES; cls++) {
+            u64 limit = class_limit_bytes(cls);
+            u64 used = account_used(up, cls) << PAGE_SHIFT;
+            u64 room = limit > used ? limit - used : 0;
+            if (room < tightest) {
+                tightest = room;
+                q->limiting = cls;
+            }
+        }
+    }
+
+    u64 pool = (u64)capacity_pool_pages() << PAGE_SHIFT;
+    u64 charged = (u64)capacity_pool_charged() << PAGE_SHIFT;
+    u64 pool_room = pool > charged ? pool - charged : 0;
+    q->headroom = pool_room < tightest ? pool_room : tightest;
 }
 
 u64 account_underflows(void) {

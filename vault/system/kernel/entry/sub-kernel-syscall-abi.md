@@ -242,10 +242,10 @@ branches.
 of up to 64 bytes onto the stack, so REAP, ABORT, QUERY and RETURN are not refused for
 memory; only TARGET and POOL allocate.
 
-**The memory account call, reserved (2026-11-03, operator votes 47 and 48).**
+**The memory account call (2026-11-03, operator votes 47 and 48).**
 `SYS_ACCOUNT` = 140: handle or `ACCOUNT_SELF`, operation, record pointer, record size.
-It is a number and a layout and nothing else: no dispatch arm until MM-1, so it reaches
-the unknown arm, and `syscall.native_gap_unassigned` pins that. `SYS__NATIVE_TOP` is 141
+Reserved at MM-0 as a number and a layout; MM-1b gave it an arm, which serves the query
+on the caller's own account ([[abi-memory-account]]). `SYS__NATIVE_TOP` is 141
 and `VIV_NATIVE_CEILING` 140. The live count below does not move. [[abi-memory-account]]
 holds the records.
 
@@ -518,7 +518,7 @@ hand back a budget the caller did not ask for and hide the misconfiguration".
 
 The CSPRNG read clamps. See Caveats.
 
-**The accounts behind `SYS_ACCOUNT` (MM-1).** `kernel/account.c` now holds the account tree and its ledger, which [[sub-kernel-accounts]] owns in substance. 140 still has no dispatch arm, so `syscall.native_gap_unassigned` still pins it as unknown.
+**The accounts behind `SYS_ACCOUNT` (MM-1).** `kernel/account.c` now holds the account tree and its ledger, which [[sub-kernel-accounts]] owns in substance. The call is live for `ACCOUNT_QUERY` on `ACCOUNT_SELF`, and the wrappers are `t_account` in libt and `t_account` and `t_account_query` in libthyla-rs.
 
 ## Data structures
 

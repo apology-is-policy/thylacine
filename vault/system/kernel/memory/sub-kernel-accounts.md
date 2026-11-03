@@ -34,6 +34,8 @@ statement; sections 3 and 4 are the design it serves.
 - An account lives until the last of its Procs, threads and blocks has gone, so an
   orphan stays charged to its ancestors. Its parent never changes.
 - A Proc's account never changes, and a fork inherits it, so no fork resets anything.
+- `account_query_fill` reports bytes and decides nothing. `SYS_ACCOUNT`'s query and
+  `/proc/<pid>/account` both render it, so they differ only by when they read.
 
 ## Mechanism
 
@@ -113,7 +115,13 @@ gets its dispatch arm.
 3. `kstack_alloc`, `proc_pgtable_create` and slabs are not sponsored. The thread's stack
    is in the ledger through its pool pages; the rest are section 12's metadata rows.
 
+4. Until sessions have children every Proc's account is the root, so a query shows machine
+   totals. `/ctl/memory` already shows them to every process, but a sandboxed Proc whose
+   namespace has no `/ctl` learns them only through this call.
+5. `account_child` compiles only under `KERNEL_TESTS` until something outside the suite
+   creates an account, so a production boot has only the two static ones.
+
 ## Provenance
 
-MM-1a, operator votes 47 and 48 for the interface it will serve. Written while the mac
-was queued, on top of an unbooted AS-4.
+MM-1a and MM-1b, operator votes 47 and 48 for the interface they serve. Written while the
+mac was queued, on top of an unbooted AS-4.

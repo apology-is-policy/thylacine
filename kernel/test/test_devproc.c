@@ -33,6 +33,7 @@
 #include <thylacine/env.h>             // V-4b-6: env_create/write -- /proc/<pid>/environ
 #include <thylacine/errno.h>
 #include <thylacine/exec.h>            // V-4b-2: EXEC_USER_STACK_BASE -- the maps role tag
+#include <thylacine/memaccount.h>      // MM-1: /proc/<pid>/account
 #include <thylacine/page.h>
 #include <thylacine/notes.h>
 #include <thylacine/path.h>            // V-4a-0: /proc/<pid>/exe
@@ -896,6 +897,15 @@ void test_devproc_stat_native_ctl_owner(void) {
     TEST_EXPECT_EQ(devproc.stat_native(status, &st), 0, "stat_native(status) ok");
     TEST_EXPECT_EQ(st.mode, (u32)(T_S_IFREG | 0444u),
                    "status mode = S_IFREG|0444 (world-readable)");
+    {
+        struct Spoor *acct = walk_one(piddir, "account");
+        TEST_ASSERT(acct != NULL, "walk account");
+        struct t_stat acct_st;
+        TEST_EXPECT_EQ(devproc.stat_native(acct, &acct_st), 0, "stat account");
+        TEST_EXPECT_EQ(acct_st.mode, (u32)(T_S_IFREG | 0400u),
+                       "account mode = S_IFREG|0400 (the gate is at the read site)");
+        spoor_unref(acct);
+    }
     spoor_unref(status);
 
     // The FILE-TYPE bits (V-4b-5). S_ISDIR/S_ISREG read S_IFMT alone, so a bare
@@ -1454,6 +1464,8 @@ void test_devproc_dump_seal_disclosure(void) {
           "sched is telemetry -- it still reads when sealed" },
         { "imperium", false, "control: imperium reads while unsealed",
           "imperium is the kernel's attestation -- it still reads when sealed (I-25)" },
+        { "account",  false, "control: account reads while unsealed",
+          "account is telemetry -- it still reads when sealed" },
         { "environ",  true,  "control: environ reads while unsealed",
           "the dump seal refuses environ" },
     };
@@ -4223,6 +4235,59 @@ void test_devproc_imperium_read_gated(void) {
     TEST_ASSERT(!denied && contains(buf, n, "propagating 0 rods 0 axe 0 caps 0x800 until 12345"),
                 "plain member line: nothing flows, JIT held shows in caps only");
 
+    caller->state = PROC_STATE_ZOMBIE;
+    target->state = PROC_STATE_ZOMBIE;
+    proc_free(caller);
+    proc_free(target);
+}
+
+// MM-1: /proc/<pid>/account, behind the sched posture, and the figures as a fill reads
+// them from the account the target really has.
+void test_devproc_account_read_gated(void) {
+    struct Proc *caller = proc_alloc();
+    struct Proc *target = proc_alloc();
+    TEST_ASSERT(caller && target, "proc_alloc caller + target");
+    target->principal_id = 0xA11CEu;
+
+    char buf[512];
+    bool denied;
+    size_t n;
+
+    caller->principal_id = 0xB0Bu;
+    caller->caps         = 0;
+    denied = false;
+    n = devproc_account_read_gated(caller, target, buf, sizeof(buf), &denied);
+    TEST_ASSERT(denied && n == 0, "non-owner account read denied, no bytes");
+
+    caller->caps = CAP_DAC_OVERRIDE;
+    denied = false;
+    n = devproc_account_read_gated(caller, target, buf, sizeof(buf), &denied);
+    TEST_ASSERT(denied && n == 0, "CAP_DAC_OVERRIDE is not a read axis");
+
+    caller->principal_id = 0xA11CEu;
+    caller->caps         = 0;
+    denied = true;
+    n = devproc_account_read_gated(caller, target, buf, sizeof(buf), &denied);
+    TEST_ASSERT(!denied && n > 0, "owner account read allowed");
+    TEST_ASSERT(contains(buf, n, "incarnation: 1\n"), "a fresh Proc reads the boot account");
+
+    struct MemoryAccount *a = account_child(account_root());
+    TEST_ASSERT(a != NULL, "an account of the target's own");
+    account_unref(target->account);
+    target->account = a;
+    account_charge(a, CLASS_META, 2);
+
+    caller->principal_id = 0xB0Bu;
+    caller->caps         = CAP_HOSTOWNER;
+    denied = true;
+    n = devproc_account_read_gated(caller, target, buf, sizeof(buf), &denied);
+    TEST_ASSERT(!denied && n > 0, "CAP_HOSTOWNER account read allowed");
+    TEST_ASSERT(!contains(buf, n, "incarnation: 1\n"), "the target's account, not the boot one");
+    TEST_ASSERT(contains(buf, n, "alloc: used 0 reserved 0 limit "), "alloc line");
+    TEST_ASSERT(contains(buf, n, "meta: used 8192 reserved 0 limit "), "meta line, in bytes");
+    TEST_ASSERT(contains(buf, n, "device: used 0 reserved 0 limit none\n"), "device has no ceiling");
+
+    account_refund(a, CLASS_META, 2);
     caller->state = PROC_STATE_ZOMBIE;
     target->state = PROC_STATE_ZOMBIE;
     proc_free(caller);

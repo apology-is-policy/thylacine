@@ -6,6 +6,7 @@
 
 #include "test.h"
 
+#include "../../arch/arm64/exception.h"
 #include "../../mm/phys.h"
 
 #include <thylacine/burrow.h>
@@ -14,6 +15,7 @@
 #include <thylacine/page.h>
 #include <thylacine/proc.h>
 #include <thylacine/sched.h>
+#include <thylacine/syscall.h>
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
@@ -312,4 +314,129 @@ void test_account_ledger_reconciles_with_the_pool(void) {
     settled = ledger_settled(&ledger, &pool);
     TEST_EXPECT_EQ(ledger, (u64)pool, "and still agrees after both have gone");
     TEST_ASSERT(settled, "and they held still");
+}
+
+// A fill whose reading of the root's two classes and the pool held still across it, since
+// a reaper finishing an earlier test's Proc can move them. Bounded: a defect that moves
+// them forever is the assertions' to report.
+static void settled_fill(const struct MemoryAccount *a, struct account_query *q) {
+    for (int tries = 0; tries < 64; tries++) {
+        u64 alloc = alloc_of(account_root());
+        u64 meta = meta_of(account_root());
+        u32 charged = capacity_pool_charged();
+        account_query_fill(a, q);
+        if (alloc == alloc_of(account_root()) && meta == meta_of(account_root()) &&
+            charged == capacity_pool_charged())
+            return;
+    }
+}
+
+void test_account_query_reports_bytes_up_the_chain(void) {
+    struct MemoryAccount *parent = account_child(account_root());
+    struct MemoryAccount *child = parent ? account_child(parent) : NULL;
+    struct MemoryAccount *sibling = parent ? account_child(parent) : NULL;
+    TEST_ASSERT(parent && child && sibling, "three accounts");
+
+    const u64 pool_pages = capacity_pool_pages();
+    const u64 pool = pool_pages << PAGE_SHIFT;
+    struct account_query q;
+
+    account_charge(child, CLASS_ALLOC, 3);
+    account_charge(child, CLASS_META, 2);
+    settled_fill(child, &q);
+    TEST_EXPECT_EQ(q.h.version, ACCOUNT_VERSION, "the record names its version");
+    TEST_EXPECT_EQ(q.h.size, (u32)sizeof(q), "and its size");
+    TEST_EXPECT_EQ(q.h.incarnation, child->incarnation, "and whose account it read");
+    TEST_EXPECT_EQ(q.c[CLASS_ALLOC].used, 3ull << PAGE_SHIFT, "used crosses in bytes");
+    TEST_EXPECT_EQ(q.c[CLASS_META].used, 2ull << PAGE_SHIFT, "per class");
+    TEST_EXPECT_EQ(q.c[CLASS_RETAIN].used, 0ull, "nothing charges RETAIN yet");
+    TEST_EXPECT_EQ(q.c[CLASS_DEVICE].used, 0ull, "nothing charges DEVICE yet");
+    TEST_EXPECT_EQ(q.c[CLASS_ALLOC].limit, pool, "a RAM class may reach the pool");
+    TEST_EXPECT_EQ(q.c[CLASS_RETAIN].limit, pool, "every RAM class");
+    TEST_EXPECT_EQ(q.c[CLASS_META].limit, pool, "every RAM class");
+    TEST_EXPECT_EQ(q.c[CLASS_DEVICE].limit, ~0ull, "nothing bounds device storage here");
+    TEST_EXPECT_EQ(q.level, (u32)ACCOUNT_NORMAL, "no pressure machinery yet");
+    TEST_EXPECT_EQ(q.generation, 0ull, "so no generation either");
+    account_refund(child, CLASS_ALLOC, 3);
+    account_refund(child, CLASS_META, 2);
+
+    // A sibling's use reaches the child only through their ancestors, so this needs the
+    // walk: the root's ALLOC comes to five pages short of the pool, and the pool itself
+    // has more room than that because the charge never touched it.
+    u64 used_alloc = alloc_of(account_root());
+    u64 to_short = pool_pages - used_alloc - 5u;
+    account_charge(sibling, CLASS_ALLOC, to_short);
+    settled_fill(child, &q);
+    TEST_EXPECT_EQ(q.headroom, (pool_pages - alloc_of(account_root())) << PAGE_SHIFT,
+                   "the tightest ancestor bounds the child");
+    TEST_EXPECT_EQ(q.limiting, (u32)CLASS_ALLOC, "and the class it is tight in is named");
+    account_refund(sibling, CLASS_ALLOC, to_short);
+
+    // The same through META, so limiting cannot be a constant.
+    u64 used_meta = meta_of(account_root());
+    to_short = pool_pages - used_meta - 5u;
+    account_charge(sibling, CLASS_META, to_short);
+    settled_fill(child, &q);
+    TEST_EXPECT_EQ(q.headroom, (pool_pages - meta_of(account_root())) << PAGE_SHIFT,
+                   "META's room bounds it now");
+    TEST_EXPECT_EQ(q.limiting, (u32)CLASS_META, "and META is named");
+    account_refund(sibling, CLASS_META, to_short);
+
+    // The pool's own room is the other bound: a charge the ledger never sees (the same
+    // call thread_new makes before it charges the account) tightens it alone.
+    u64 ledger = alloc_of(account_root());
+    u64 charged = capacity_pool_charged();
+    u64 extra = (ledger > charged ? ledger - charged : 0u) + 16u;
+    TEST_ASSERT(capacity_charge((u32)extra, true), "an exempt charge proceeds");
+    settled_fill(child, &q);
+    TEST_EXPECT_EQ(q.headroom, (pool_pages - capacity_pool_charged()) << PAGE_SHIFT,
+                   "the pool's room bounds every account");
+    capacity_uncharge((u32)extra);
+
+    account_unref(sibling);
+    account_unref(child);
+    account_unref(parent);
+}
+
+static s64 account_call(u64 handle, u64 op, u64 va, u64 size) {
+    struct exception_context ctx;
+    for (int i = 0; i < 31; i++) ctx.regs[i] = 0;
+    ctx.regs[0] = handle;
+    ctx.regs[1] = op;
+    ctx.regs[2] = va;
+    ctx.regs[3] = size;
+    ctx.regs[8] = SYS_ACCOUNT;
+    TEST_SYSCALL_DISPATCH(&ctx);
+    return (s64)ctx.regs[0];
+}
+
+// What needs a record in user memory is capacity-probe's, from EL0. A test thread has none,
+// and that is the control here: a kernel address passes every gate before the range check,
+// so each refusal below is one variable away from reaching it.
+void test_account_syscall_refuses_by_name(void) {
+    struct account_query rec;
+    const u64 va = (u64)&rec;
+    const u64 size = sizeof(rec);
+    const u64 self = (u64)(s64)ACCOUNT_SELF;
+    u64 op;
+
+    TEST_EXPECT_EQ(account_call(self, ACCOUNT_QUERY, va, size), (s64)-T_E_FAULT,
+                   "control: a well-formed call stops at the range check");
+    TEST_EXPECT_EQ(account_call(self, ACCOUNT_QUERY, 0, size), (s64)-T_E_FAULT,
+                   "a null record is no record");
+    TEST_EXPECT_EQ(account_call(self, 0, va, size), (s64)-T_E_INVAL, "zero is no operation");
+    TEST_EXPECT_EQ(account_call(self, ALLOCATE_FUNDED + 1u, va, size), (s64)-T_E_INVAL,
+                   "nor is one past the last");
+    for (op = ACCOUNT_CHILD; op <= ALLOCATE_FUNDED; op++) {
+        TEST_EXPECT_EQ(account_call(self, op, va, size), (s64)-T_E_OPNOTSUPP,
+                       "an operation with no code behind it says so");
+    }
+    TEST_EXPECT_EQ(account_call(3, ACCOUNT_QUERY, va, size), (s64)-T_E_BADF,
+                   "a handle names nothing until KOBJ_ACCOUNT exists");
+    TEST_EXPECT_EQ(account_call(0xffffffffull, ACCOUNT_QUERY, va, size), (s64)-T_E_BADF,
+                   "the self selector is sign-extended, compared at full width");
+    TEST_EXPECT_EQ(account_call(self, ACCOUNT_QUERY, va, size - 1u), (s64)-T_E_INVAL,
+                   "a short record");
+    TEST_EXPECT_EQ(account_call(self, ACCOUNT_QUERY, va, size + 1u), (s64)-T_E_INVAL,
+                   "a long record");
 }

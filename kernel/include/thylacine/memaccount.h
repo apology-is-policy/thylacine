@@ -37,9 +37,6 @@ struct MemoryAccount *account_current(void);
 
 void account_init(void);            // after slub_init, before the first child
 
-// A new account under `parent`, with one reference for the caller. NULL when the tree
-// is already ACCOUNT_MAX_DEPTH deep or memory is short.
-struct MemoryAccount *account_child(struct MemoryAccount *parent);
 void account_ref(struct MemoryAccount *a);
 void account_unref(struct MemoryAccount *a);
 
@@ -49,6 +46,9 @@ void account_unref(struct MemoryAccount *a);
 void account_charge(struct MemoryAccount *a, unsigned cls, u64 pages);
 void account_refund(struct MemoryAccount *a, unsigned cls, u64 pages);
 u64 account_used(const struct MemoryAccount *a, unsigned cls);
+// Section 13's query, in bytes. Each figure is read alone, so this informs and decides
+// nothing: section 4's admission rechecks live state. Takes no lock.
+void account_query_fill(const struct MemoryAccount *a, struct account_query *q);
 u64 account_underflows(void);
 // What of the ledger the capacity pool should also read: the two share a unit and
 // differ only by the sponsored blocks outside the pool, so this equals
@@ -63,6 +63,10 @@ void account_sponsor_block(struct page *head, struct MemoryAccount *a, unsigned 
 void account_release_block(struct page *head, unsigned order);
 
 #ifdef KERNEL_TESTS
+// A new account under `parent`, with one reference for the caller. NULL when the tree
+// is already ACCOUNT_MAX_DEPTH deep or memory is short. Test-only until something
+// outside the suite creates an account.
+struct MemoryAccount *account_child(struct MemoryAccount *parent);
 // Tests that break the pairing on purpose put the count back before the runner reads it.
 void account_underflows_rewind_for_test(u64 count);
 #endif

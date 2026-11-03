@@ -60,10 +60,9 @@ void test_syscall_dispatch_unknown(void) {
 // number, and then this pin moves. The suite runs before init, so the only
 // unknown calls in flight are the ones tests make.
 //
-// SYS_ACCOUNT at 140 is reserved with no dispatch arm until MM-1, so it is pinned
-// the same way, as is the empty 139: an arm arriving at either moves this test with it.
+// The empty 139 is pinned the same way: an arm arriving there moves this test with it.
 void test_syscall_native_gap_unassigned(void) {
-    for (u64 nr = 129; nr <= SYS_ACCOUNT; nr++) {
+    for (u64 nr = 129; nr < SYS_ACCOUNT; nr++) {
         if (nr == SYS_SRV_REGISTRY_NEW || nr == SYS_POSTNOTE_TID) continue;
         struct exception_context ctx;
         for (int i = 0; i < 31; i++) ctx.regs[i] = 0;
@@ -98,6 +97,15 @@ void test_syscall_native_gap_unassigned(void) {
         "138 is SYS_POSTNOTE_TID: it never reaches the unknown arm");
     TEST_EXPECT_EQ((s64)ctx.regs[0], (s64)-T_E_INVAL,
         "138 is SYS_POSTNOTE_TID: an empty name is its own refusal");
+
+    for (int i = 0; i < 31; i++) ctx.regs[i] = 0;
+    ctx.regs[8] = SYS_ACCOUNT;
+    before = syscall_unknown_count();
+    TEST_SYSCALL_DISPATCH(&ctx);
+    TEST_EXPECT_EQ(syscall_unknown_count() - before, 0ull,
+        "140 is SYS_ACCOUNT: it never reaches the unknown arm");
+    TEST_EXPECT_EQ((s64)ctx.regs[0], (s64)-T_E_INVAL,
+        "140 is SYS_ACCOUNT: operation 0 is its own refusal");
 }
 
 void test_syscall_dispatch_puts_smoke(void) {

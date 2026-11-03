@@ -14,7 +14,7 @@ updated: 2026-11-03
 ---
 ## Native ceiling 140
 
-The native ceiling is the reserved SYS_ACCOUNT, at 140 under votes 47 and 48
+The native ceiling is SYS_ACCOUNT, at 140 under votes 47 and 48
 (2026-11-03). It rose over rt_sigreturn and setpriority, each argued per number in
 vivarium.c. setpriority has no row, so a Linux Proc takes ENOSYS before the native switch,
 reaches no account operation and is charged without one, and a native program mis-declared

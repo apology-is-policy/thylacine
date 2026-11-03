@@ -660,7 +660,7 @@ void test_devproc_readdir_lists_every_dir(void) {
     // (b) The pid directory: its files in table order, then thread/.
     static const char *const pid_files[] = {
         "status", "cmdline", "ctl", "ns", "mem", "regs", "fpregs", "wait", "kregs",
-        "kstack", "exe", "cwd", "maps", "sched", "environ", "imperium", "thread",
+        "kstack", "exe", "cwd", "maps", "sched", "environ", "imperium", "account", "thread",
     };
     const int npf = (int)(sizeof(pid_files) / sizeof(pid_files[0]));
     bool pid_inc = false;

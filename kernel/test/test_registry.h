@@ -623,6 +623,8 @@ void test_account_fork_keeps_the_account(void);
 void test_account_dma_charges_whole_blocks_outside_the_pool(void);
 void test_account_thread_charges_meta_to_its_payer(void);
 void test_account_ledger_reconciles_with_the_pool(void);
+void test_account_query_reports_bytes_up_the_chain(void);
+void test_account_syscall_refuses_by_name(void);
 void test_vma_range_is_mapped(void);                     // B-1b
 void test_mmap_eager_copy_charge_pairing(void);   // #197
 void test_torpor_wait_rejects_bad_args(void);
@@ -864,6 +866,7 @@ void test_devproc_walk_to_status_file(void);
 void test_devproc_walk_dotdot_to_root(void);
 void test_devproc_read_status_format(void);
 void test_devproc_imperium_read_gated(void);   // IM-2: /proc/<pid>/imperium gate
+void test_devproc_account_read_gated(void);    // MM-1: /proc/<pid>/account gate
 void test_devproc_read_imperium_format(void);  // IM-2: /proc/<pid>/imperium line
 void test_proc_cpu_ns_accounting(void);     // prowl-1: name + run_ns substrate
 void test_sched_prowl_counters(void);       // prowl-3a: per-thread sched counters + per-CPU idle_ns

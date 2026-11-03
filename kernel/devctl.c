@@ -33,6 +33,7 @@
 #include <thylacine/addrspace.h>  // B-1a': the user pool figures (/ctl/memory)
 #include <thylacine/caps.h>
 #include <thylacine/cons.h>      // #95: cons_rx_drops + cons_tx_drops (/ctl/cons)
+#include <thylacine/memaccount.h>  // MM-1: the ledger lines of /ctl/memory
 #include <thylacine/dev.h>
 #include <thylacine/extinction.h>
 #include <thylacine/proc.h>
@@ -509,6 +510,15 @@ static size_t format_memory(const struct Proc *reader, char *buf, size_t cap) {
     n = fmt_str(buf, cap, off, "charged:  "); if (!n) return 0; off += n;
     n = fmt_udec(buf, cap, off, capacity_pool_charged()); off += n;
     n = fmt_str(buf, cap, off, " pages\n"); if (!n) return 0; off += n;
+
+    // MM-1: the accounts' count of the same pages, and the pairings they caught broken.
+    n = fmt_str(buf, cap, off, "ledger:   "); if (!n) return 0; off += n;
+    n = fmt_udec(buf, cap, off, account_pool_share()); off += n;
+    n = fmt_str(buf, cap, off, " pages\n"); if (!n) return 0; off += n;
+
+    n = fmt_str(buf, cap, off, "underflow: "); if (!n) return 0; off += n;
+    n = fmt_udec(buf, cap, off, account_underflows()); off += n;
+    n = fmt_str(buf, cap, off, "\n"); if (!n) return 0; off += n;
 
     return off;
 }
