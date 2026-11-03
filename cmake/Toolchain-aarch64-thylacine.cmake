@@ -137,9 +137,8 @@ set(THYLACINE_TARGET_TRIPLE "aarch64-none-elf"
 #                                    u64); a u32 local or parameter would
 #                                    truncate it with no other symptom.
 #   -Werror                        — every warning fails the build, with the
-#                                    tests and without (operator vote 20,
-#                                    .claude/rules/kernel-code.md "Cross-file
-#                                    declarations"). A warning a merge or a
+#                                    tests and without (operator vote 20).
+#                                    A warning a merge or a
 #                                    toolchain upgrade brings in is fixed
 #                                    where it appears, never silenced for the
 #                                    file. It reaches the fault-test and
