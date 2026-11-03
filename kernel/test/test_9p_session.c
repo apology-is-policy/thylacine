@@ -1916,7 +1916,7 @@ static u32 fill_op_share(struct p9_session *s, u32 n, u16 *first) {
 // the flush-less abandon the headroom exists to prevent.
 void test_9p_session_flush_headroom_grows_table(void) {
     const u32 share = P9_TAG_CHUNK;
-    struct p9_session s;
+    static struct p9_session s;      // two would nearly fill a thread stack
     TEST_EXPECT_EQ(drive_session_open(&s, 0), 0, "open");
     s.ops_max = share;
     u16 first = P9_NOTAG;
@@ -1934,7 +1934,7 @@ void test_9p_session_flush_headroom_grows_table(void) {
     u64 after = p9_session_inflight(&s);
     p9_session_destroy(&s);
 
-    struct p9_session c;
+    static struct p9_session c;
     TEST_EXPECT_EQ(drive_session_open(&c, 0), 0, "open (control)");
     c.ops_max   = share;
     c.tag_limit = share;

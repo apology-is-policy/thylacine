@@ -25,10 +25,21 @@
 #                     it
 #   kstack_overflow — a thread stack's frame reaches its guard, and the
 #                     vector takes it to the overflow stack →
-#                     "EXTINCTION: kernel stack overflow (thread stack, caught at
-#                     the vector)"
+#                     "EXTINCTION: kernel stack overflow" with "(thread stack,
+#                     caught at the vector)", which only that path prints, the
+#                     dump naming the thread's stack in the range and finishing
+#   kstack_overflow_frame — the same, a frame straddling the guard's top with SP
+#                     still in the stack: x0 at the fault comes back whole
+#   kstack_overflow_irq — the same, an IRQ taken with no room for its frame: its
+#                     first store, named, is the fault the vector takes
+#   kstack_overflow_peer — the frame shape on cpu 1, on its own overflow stack
+#   kstack_dump_at_top — a fault with SP a line under the stack's top: the frame
+#                     fits, so "EXTINCTION: kernel stack overflow" comes with
+#                     "(current-thread kstack guard)", and the dump stops at
+#                     the 16 bytes that translate
 #   overflow_stack_guard — an overflow stack's guard page fires →
-#                     "EXTINCTION: kernel stack overflow (overflow-stack guard)"
+#                     "EXTINCTION: kernel stack overflow" with "(overflow-stack
+#                     guard)"
 #   secondary_stack_guard — secondary-CPU boot-stack guard page fires
 #                     (P5-secondary-stack-guard) →
 #                     "EXTINCTION: kernel stack overflow"
@@ -123,7 +134,7 @@ fi
 
 # variant → expected extinction substring (case-sensitive prefix match
 # against the EXTINCTION: line). Keep the case below in sync with this.
-ALL_VARIANTS="canary_smash wxe_violation wxe_install_kernel wxe_install_block wxe_install_gib wxe_install_user bti_fault kstack_overflow secondary_stack_guard bootcpu_idle_guard overflow_stack_guard recursive_kernel_fault el1_sync_runaway extinction_peer_chatter extinction_mmu_off vbar_pre_reloc vbar_pre_mmu vbar_boot_main no_entropy"
+ALL_VARIANTS="canary_smash wxe_violation wxe_install_kernel wxe_install_block wxe_install_gib wxe_install_user bti_fault kstack_overflow kstack_overflow_frame kstack_overflow_irq kstack_overflow_peer kstack_dump_at_top secondary_stack_guard bootcpu_idle_guard overflow_stack_guard recursive_kernel_fault el1_sync_runaway extinction_peer_chatter extinction_mmu_off vbar_pre_reloc vbar_pre_mmu vbar_boot_main no_entropy"
 
 # Launcher settings a variant boots under, word-split into run-vm.sh's
 # environment. Empty = the caller's own.
@@ -166,16 +177,43 @@ require_for() {
         # A live ELR names the instruction it took, here a function's first:
         # named at a call instead, it would read as the symbol before it.
         bti_fault)          echo "  _bti_unguarded_target+0x0" ;;
-        # The dump finishes. The frame sits at the top of the overflow stack's slot,
-        # right under the next slot's guard, and a hexdump that read past it would
-        # fault and lose the end of the dump and the reports after it.
-        kstack_overflow)    echo "HALLS: --- end ---" ;;
+        # Only the vector's path prints that body. The dump names the stack that
+        # overflowed, not the one it runs on, and it finishes: forbid_for says it
+        # did not fault on the way.
+        kstack_overflow)    printf '%s\n' "(thread stack, caught at the vector)" \
+                                           "HALLS: SP   0xffff9" "HALLS: --- end ---" ;;
+        # x0 was held inside SP while the vector tested the frame's address.
+        kstack_overflow_frame)
+                            printf '%s\n' "(thread stack, caught at the vector)" \
+                                           "HALLS: SP   0xffff9" "HALLS: --- end ---" \
+                                           "HALLS:  x0  = 0x5a17c0de5a17c0de" ;;
+        # The ELR is the IRQ slot's first store, KERNEL_ENTRY's instruction after
+        # its sub: the fault the sync slot took came from inside the IRQ's entry.
+        kstack_overflow_irq)
+                            printf '%s\n' "(thread stack, caught at the vector)" \
+                                           "HALLS: SP   0xffff9" "HALLS: --- end ---" \
+                                           "HALLS:  x0  = 0x5a17c0de5a17c0de" \
+                                           "  _exception_vectors+0x284" ;;
+        kstack_overflow_peer)
+                            printf '%s\n' "(thread stack, caught at the vector)" \
+                                           "HALLS: SP   0xffff9" "HALLS: --- end ---" \
+                                           "HALLS:  x0  = 0x5a17c0de5a17c0de" \
+                                           "HALLS: cpu 1" ;;
+        # The dump starts one line from the next slot's unmapped guard, and a
+        # hexdump that read past it would fault and lose the end of the dump and
+        # the reports after it.
+        kstack_dump_at_top) printf '%s\n' "(current-thread kstack guard)" \
+                                           "(16 bytes, ascending)" "HALLS: --- end ---" ;;
+        overflow_stack_guard) echo "(overflow-stack guard)" ;;
         *)                  echo "" ;;
     esac
 }
 
 forbid_for() {
     case "$1" in
+        # What extinction prints when the dump itself faulted.
+        kstack_overflow|kstack_overflow_frame|kstack_overflow_irq|kstack_overflow_peer|kstack_dump_at_top)
+                          echo "(recursive on cpu" ;;
         el1_sync_runaway) echo "console-ring: NOT held" ;;
         extinction_peer_chatter) echo "console-claim: taken with irqs on" ;;
         # The ring is not claimed before the MMU, so no ring report is true.
@@ -201,8 +239,10 @@ expected_for() {
         wxe_install_gib)    echo "EXTINCTION: PTE violates W^X at install (kernel L1 block)" ;;
         wxe_install_user)   echo "EXTINCTION: PTE violates W^X at install (user page)" ;;
         bti_fault)       echo "EXTINCTION: BTI fault" ;;
-        kstack_overflow) echo "EXTINCTION: kernel stack overflow (thread stack, caught at the vector)" ;;
-        overflow_stack_guard) echo "EXTINCTION: kernel stack overflow (overflow-stack guard)" ;;
+        kstack_overflow|kstack_overflow_frame|kstack_overflow_irq|kstack_overflow_peer)
+                         echo "EXTINCTION: kernel stack overflow" ;;
+        kstack_dump_at_top) echo "EXTINCTION: kernel stack overflow" ;;
+        overflow_stack_guard) echo "EXTINCTION: kernel stack overflow" ;;
         secondary_stack_guard) echo "EXTINCTION: kernel stack overflow" ;;
         bootcpu_idle_guard)    echo "EXTINCTION: kernel stack overflow" ;;
         recursive_kernel_fault) echo "EXTINCTION: recursive kernel fault" ;;

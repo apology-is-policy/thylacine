@@ -9,7 +9,7 @@ guarded-by: [inv-i21, inv-i31, inv-i32, inv-i44, inv-i48]
 validated-by: [gate-smp, spec-thread-reap]
 locks: [lock-proc-threads, lock-proc-table]
 created: 2026-08-01
-updated: 2026-10-29
+updated: 2026-11-03
 ---
 ## Purpose
 
@@ -110,6 +110,17 @@ can have a clear bit. 16 GiB of address space is 512 Ki slots and the direct map
 can back no more than that, so the range never refuses a thread the pool admits (a
 `_Static_assert` pins it). `kstack_new` takes the pages, then the slot, then the mapping,
 and each failure gives back what was taken (`thread.kstack_refused_step_leaks_nothing`).
+A put of a clear bit extincts (`kstack slot freed twice`), as a map over a valid leaf does
+([[sub-kernel-mmu]]). Either takes a double free, which nothing reaches, so neither has a
+witness.
+
+**What the guard rests on.** A frame that moved SP past the guard in one step would land in
+the slot below, where the vector's test sees a healthy stack. `-fstack-clash-protection`
+probes every move of a page or more: measured 2026-11-03, all 79 prologues in the kernel's
+objects that move SP by 4 KiB or more store to the stack before going on.
+`-Wframe-larger-than=8192` fails the build on a frame over half a stack, with UBSan's frames
+too. It found four, all tests holding a `struct p9_session` on the stack, and those are
+statics now.
 A thread's stack is no longer followed by mapped memory, so anything reading upward past
 its top now faults; the crash dump asks first ([[sub-kernel-halls]]).
 

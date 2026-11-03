@@ -1162,7 +1162,8 @@ bool mmu_kva_readable_for_test(const void *kva) {
 // A table, once made, stays. A stack is 1/64 of one, so the most a burst of
 // threads can leave behind is 1/256 of the pages those stacks held; freeing one
 // would mean invalidating walk caches for a table a peer may be about to fill.
-// Linux's vmalloc keeps its page tables for the same reason.
+// Linux's vmalloc keeps its page tables for the same reason. They come out of the
+// reserve (mm/phys.h), bounded by the pool's own bound on threads.
 //
 // Mapping is invalid to valid, so it invalidates nothing (a translation fault is
 // never cached). The new stack's first user may be a peer, and it got there
@@ -1221,8 +1222,12 @@ bool mmu_kstack_map(u64 va, const paddr_t *pa, unsigned n) {
     u64 *l3 = kstack_l3_make(va);
     if (!l3) return false;
     u32 idx = (u32)((va >> PAGE_SHIFT) & (ENTRIES_PER_TABLE - 1u));
-    for (unsigned i = 0; i < n; i++)
+    for (unsigned i = 0; i < n; i++) {
+        if (__atomic_load_n(&l3[idx + i], __ATOMIC_RELAXED) & PTE_VALID)
+            extinction_with_addr("kstack map over a page already mapped",
+                                 (uintptr_t)(va + (u64)i * PAGE_SIZE));
         __atomic_store_n(&l3[idx + i], make_page_pte_l3(pa[i], PTE_KERN_RW), __ATOMIC_RELAXED);
+    }
     dsb_ishst();
     isb();
 #ifdef KERNEL_TESTS

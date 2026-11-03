@@ -264,8 +264,11 @@ static u64 kstack_slot_take(void) {
 static void kstack_slot_put(u64 va) {
     u64 i = (va - KSTACK_RANGE_BASE) / THREAD_KSTACK_TOTAL_SIZE;
     u32 w = (u32)(i / KSTACK_SLOT_WORD_BITS);
+    u64 bit = 1ull << (i % KSTACK_SLOT_WORD_BITS);
     irq_state_t s = spin_lock_irqsave(&g_kstack_lock);
-    g_kstack_slots[w] &= ~(1ull << (i % KSTACK_SLOT_WORD_BITS));
+    if (!(g_kstack_slots[w] & bit))
+        extinction_with_addr("kstack slot freed twice", (uintptr_t)va);
+    g_kstack_slots[w] &= ~bit;
     if (w < g_kstack_slot_hint) g_kstack_slot_hint = w;
     spin_unlock_irqrestore(&g_kstack_lock, s);
 }

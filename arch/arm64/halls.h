@@ -52,6 +52,11 @@ void halls_dump(const struct exception_context *ctx);
 const struct exception_context *halls_enter_frame(const struct exception_context *ctx);
 void halls_leave_frame(const struct exception_context *prev);
 
+// The SP the dump names and reads up from, when the frame in the slot is not on the
+// stack worth reading: an overflow's frame sits on the overflow stack, and what
+// overflowed is the thread's. Only for a CPU about to extinct: nothing clears it.
+void halls_anchor_stack(u64 sp);
+
 #ifdef KERNEL_TESTS
 // The current per-CPU live exception frame (NULL if none). For tests.
 const struct exception_context *halls_current_frame(void);

@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/ARCHITECTURE.md", "docs/PORTABILITY.md"]
 created: 2026-08-03
-updated: 2026-10-27
+updated: 2026-11-03
 ---
 ## Purpose
 
@@ -556,7 +556,8 @@ freeing one would mean invalidating walk caches for a table a peer may be about 
 Linux's vmalloc keeps its page tables for the same reason.
 
 `mmu_kstack_map` writes `PTE_KERN_RW` leaves, invalid to valid, and invalidates nothing:
-a faulting translation is never cached. `mmu_kstack_unmap` reads the pages back from the
+a faulting translation is never cached. A valid leaf under it is a double map and extincts;
+it takes a caller's double free, so nothing tests it. `mmu_kstack_unmap` reads the pages back from the
 leaves, clears them, and sends one `tlbi vaae1is` per page before it returns; the caller
 frees the pages and the slot only then. The operand masks the TTL hint as the direct-map
 path does. The range's addresses are fixed, as the direct map's are, and its low slots

@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/HALLS-OF-EXTINCTION.md", "docs/TOOLING.md section 10"]
 created: 2026-08-03
-updated: 2026-10-27
+updated: 2026-11-03
 ---
 ## Purpose
 
@@ -81,9 +81,14 @@ guard, and a thread's outermost frame sits at the top of it, so a hexdump readin
 upward from an extinction taken in a syscall starts within a line or two of that
 guard. The walk and the hexdump ask `AT S1E1R` first, and the hexdump's header states
 how many bytes it read (`halls_stack_dump_extent`, witnessed by
-`thread.kstack_dump_stops_at_the_top` and by `tools/test-fault.sh kstack_overflow`,
-which requires the dump's last line). A fault here would be caught, but it would cost
+`thread.kstack_dump_stops_at_the_top` and by `tools/test-fault.sh kstack_dump_at_top`,
+whose dump must say 16 bytes and finish). A fault here would be caught, but it would cost
 the reports `extinction()` prints after the dump.
+
+**A frame can name another stack.** `halls_anchor_stack` sets the SP the dump names and
+reads up from, per CPU. Only the vector's overflow path sets it: that frame sits on the
+overflow stack, and the frames worth reading are the thread's ([[sub-kernel-exception]]).
+Nothing clears it, since the CPU is about to extinct.
 
 **Three sources for the frame, in order.** An explicit `ctx` from the caller; else
 the per-CPU slot; else a synthetic frame built from the current stack pointer,

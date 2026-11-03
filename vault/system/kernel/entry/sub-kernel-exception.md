@@ -16,7 +16,7 @@ design:
   - "docs/ARCHITECTURE.md section 12"
   - "docs/reference/08-exception.md"
 created: 2026-08-02
-updated: 2026-10-29
+updated: 2026-11-03
 ---
 ## Purpose
 
@@ -510,9 +510,16 @@ address and x0 (nothing returns to their thread), finds this CPU's `g_overflow_s
 from MPIDR, builds the frame there and calls `exception_kstack_overflow`. That never tries
 to handle the fault that raised it, which could be any fault taken with too little stack
 left for its frame; it extincts, `kernel stack overflow (thread stack, caught at the vector)`.
+Its frame is on the overflow stack and what overflowed is the thread's, so it names that
+stack to the dump (`halls_anchor_stack`): the SP the fault was taken with, or the stack's
+bottom if that SP had already left it.
 Because the test reads the frame's address and not SP, ELR and FAR still name the original
 fault. The IRQ, FIQ and SError slots need no test: a frame they start in a guard faults
 at its first store, and that fault comes here. The EL0 slots start at the top of a stack.
+`tools/test-fault.sh` takes each shape: `kstack_overflow` recurses into the guard,
+`kstack_overflow_frame` straddles its top with SP still in the stack and wants x0 back
+whole, `kstack_overflow_irq` names the IRQ slot's first store as the ELR, and
+`kstack_overflow_peer` dies on cpu 1's own overflow stack.
 
 ## Caveats
 

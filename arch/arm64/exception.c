@@ -234,6 +234,11 @@ _Static_assert((1u << KSTACK_USABLE_BIT) == THREAD_KSTACK_SIZE &&
 void exception_kstack_overflow(struct exception_context *ctx, u64 overflowed_frame,
                                u64 x0_at_entry) {
     ctx->regs[0] = x0_at_entry;
+    // The SP the fault was taken with, or the stack's bottom if that SP had already
+    // left it: the frames that overflowed are what the dump should read.
+    u64 sp = overflowed_frame + EXCEPTION_CTX_SIZE;
+    u64 usable = (sp & ~((u64)THREAD_KSTACK_TOTAL_SIZE - 1u)) + THREAD_KSTACK_GUARD_SIZE;
+    halls_anchor_stack(sp > usable ? sp : usable);
     halls_enter_frame(ctx);
     extinction_with_addr("kernel stack overflow (thread stack, caught at the vector)",
                          (uintptr_t)overflowed_frame);

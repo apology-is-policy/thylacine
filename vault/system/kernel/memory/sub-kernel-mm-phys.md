@@ -9,7 +9,7 @@ guarded-by: [inv-i32]
 validated-by: [gate-smp, spec-capacity, gate-magazines-tsan]
 locks: [lock-buddy-zone, lock-magazine-set]
 created: 2026-08-01
-updated: 2026-10-27
+updated: 2026-11-03
 ---
 
 ## Shared-memory accounting review
@@ -248,8 +248,11 @@ total - reserve`, both u32 pages (clamped at 16 TiB); a second call, or a
 machine that leaves no pool, extincts; until it runs the pool reads 0 and
 refuses every non-exempt charge -- the fail-closed reading of "not sized
 yet". 256 MiB is the TCB's measured ceiling with headroom: the Larder
-caches at most 128 MiB, the DMA envelope 64 MiB, then the slabs, the kernel
-stacks and the direct map's tables; the Image cache is NOT in it -- its
+caches at most 128 MiB, the DMA envelope 64 MiB, then the slabs, kproc's
+kernel stacks and the stack cache (512 KiB), and the kernel stack range's L3
+tables, which a burst of threads leaves behind at one per 64 stacks, so at most
+1/320 of the pool, until reboot; the direct map's tables are in the image and
+ask the reserve for nothing; the Image cache is NOT in it -- its
 pages are pool memory, reclaimed under pressure (below). The 2 GiB CI guest
 reads 65536 / 458752
 (`capacity.default_is_ram_minus_reserve` pins it and asserts the facts a

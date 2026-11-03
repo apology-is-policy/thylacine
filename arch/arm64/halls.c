@@ -53,6 +53,7 @@
 //     HX-I4 catches.
 static const struct exception_context *g_halls_frame[DTB_MAX_CPUS];
 static u8 g_halls_in_dump[DTB_MAX_CPUS];
+static u64 g_halls_anchor[DTB_MAX_CPUS];   // halls_anchor_stack: 0 reads the frame's own stack
 
 // A live exception frame sits just above the current SP (KERNEL_ENTRY built it
 // at a higher address; the dump descended a few call frames below it). The
@@ -84,6 +85,10 @@ const struct exception_context *halls_enter_frame(const struct exception_context
 
 void halls_leave_frame(const struct exception_context *prev) {
     g_halls_frame[halls_cpu()] = prev;
+}
+
+void halls_anchor_stack(u64 sp) {
+    g_halls_anchor[halls_cpu()] = sp;
 }
 
 #ifdef KERNEL_TESTS
@@ -498,7 +503,9 @@ void halls_dump(const struct exception_context *ctx) {
         // #EXCEPTION_CTX_SIZE` then `mov x0, sp`, so the interrupted kernel SP
         // is ctx + the frame size. (For an EL0 source, ctx->sp holds SP_EL0;
         // the kernel SP at entry is still ctx + size -- the thread's kstack.)
-        u64 ksp = (u64)(uintptr_t)ctx + (u64)EXCEPTION_CTX_SIZE;
+        // A frame the vector took to the overflow stack names the stack it left.
+        u64 ksp = g_halls_anchor[c] ? g_halls_anchor[c]
+                                    : (u64)(uintptr_t)ctx + (u64)EXCEPTION_CTX_SIZE;
         halls_emit(ctx, ksp, /*have_gp_regs=*/true, /*from_exception=*/true);
     } else {
         // Bare extinction (or a rejected stale slot): no live exception frame.
