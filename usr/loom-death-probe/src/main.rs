@@ -395,12 +395,50 @@ fn reap(ring: &ServiceRing, child: &Child) -> R<i32> {
         if rc != 0 {
             return Ok(status);
         }
-        if ring.now() >= until {
-            let _ = child.kill();
-        }
         check!(ring.now() < until, "a victim ends although its server is silent", child.pid());
         let _ = libthyla_rs::time::sleep(Duration::from_millis(5));
     }
+}
+
+// A victim left behind outlives this driver and is adopted by whoever started it. In
+// the kernel suite that is the test runner, whose next reap-any collects the stray in
+// place of its own child, and every later wait is then one behind.
+fn bury(ring: &ServiceRing, child: &Child) {
+    let _ = child.kill();
+    let until = ring.now() + WAIT_NS;
+    loop {
+        let mut status = 0i32;
+        let rc = unsafe { t_wait_pid_for(child.pid(), T_WAIT_WNOHANG, &mut status) };
+        if rc != 0 {
+            return;
+        }
+        if ring.now() >= until {
+            say("a killed victim did not end");
+            return;
+        }
+        let _ = libthyla_rs::time::sleep(Duration::from_millis(5));
+    }
+}
+
+fn end_victim(ring: &ServiceRing, st: &Fid<K>, case: &Case, base: &[u32; STAT_COUNT], child: &Child) -> R<i32> {
+    wait_ready(child)?;
+    stats_until(ring, st, case.reached, base[case.reached] + 1)?;
+    match case.stop {
+        Stop::Go => {
+            let Some(go) = child.stdin.as_ref() else {
+                check!(false, "a piped stdin", 0);
+                return Ok(0);
+            };
+            let n = unsafe { t_write(go.as_raw_fd() as i64, b"G".as_ptr(), 1) };
+            check!(n == 1, "tell a victim to go", n);
+        }
+        Stop::Kill => {
+            let _ = libthyla_rs::time::sleep(INTO_TURN);
+            let rc = unsafe { t_postnote(child.pid() as i64, b"kill".as_ptr(), 4) };
+            check!(rc == 0, "kill a victim", rc);
+        }
+    }
+    reap(ring, child)
 }
 
 fn run_case(ring: &ServiceRing, st: &Fid<K>, case: &Case) -> R<()> {
@@ -413,24 +451,13 @@ fn run_case(ring: &ServiceRing, st: &Fid<K>, case: &Case) -> R<()> {
         .stdout(Stdio::Piped)
         .inherit_fd(REGISTRY);
     let child = ok!(command.spawn().map_err(|e| e.as_errno()), "spawn a victim");
-    wait_ready(&child)?;
-    stats_until(ring, st, case.reached, base[case.reached] + 1)?;
-    match case.stop {
-        Stop::Go => {
-            let Some(go) = child.stdin.as_ref() else {
-                check!(false, "a piped stdin", 0);
-                return Ok(());
-            };
-            let n = unsafe { t_write(go.as_raw_fd() as i64, b"G".as_ptr(), 1) };
-            check!(n == 1, "tell a victim to go", n);
+    let status = match end_victim(ring, st, case, &base, &child) {
+        Ok(status) => status,
+        Err(f) => {
+            bury(ring, &child);
+            return Err(f);
         }
-        Stop::Kill => {
-            let _ = libthyla_rs::time::sleep(INTO_TURN);
-            let rc = unsafe { t_postnote(child.pid() as i64, b"kill".as_ptr(), 4) };
-            check!(rc == 0, "kill a victim", rc);
-        }
-    }
-    let status = reap(ring, &child)?;
+    };
     if t_wait_if_exited(status) {
         say(&format!("{} ended, status {}", case.role, t_wait_exitstatus(status)));
     } else {
