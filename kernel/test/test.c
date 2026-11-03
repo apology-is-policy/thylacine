@@ -3353,6 +3353,8 @@ bool test_strong_entropy(void) {
     return false;
 }
 
+#define TEST_STRAY_WAIT_NS 2000000000ull
+
 void test_run_all(void) {
     // Legacy console transition tests require the serial recovery posture.
     // Select it explicitly for the fixture; the real boot policy is restored
@@ -3365,6 +3367,11 @@ void test_run_all(void) {
     skipped_count = 0;
     proc_wait_timeout_total = 0;
     __atomic_store_n(&g_test_proc_wait_timeouts, 0u, __ATOMIC_RELEASE);
+
+    // A child alive before any test ran is nobody's stray, and waiting on it after
+    // every test would only cost the bound each time.
+    int stray_probe = -1;
+    bool standing_child = wait_pid_for(-1, WAIT_WNOHANG, &stray_probe) == 0;
 
     for (int i = 0; g_tests[i].fn != NULL; i++) {
         current_test = &g_tests[i];
@@ -3496,6 +3503,37 @@ void test_run_all(void) {
             uart_puts(") ");
             if (!current_test->failed)
                 test_fail("test left a fabricated Proc linked (see LEAKED-PROC)");
+        }
+
+        // And a real child: one a failing assert walked past, or an orphan this
+        // thread adopted. Its next reap-any takes that child in place of its own, so
+        // every later wait is one behind and the reds land far from the cause. A
+        // dying one gets a moment to finish; one that stays alive is reported once.
+        u32 strays = 0;
+        bool stray_alive = false;
+        u64 stray_deadline = timer_now_ns() + TEST_STRAY_WAIT_NS;
+        for (;;) {
+            int stray_status = -1;
+            int rc = wait_pid_for(-1, WAIT_WNOHANG, &stray_status);
+            if (rc > 0) {
+                strays++;
+                continue;
+            }
+            if (rc < 0 || standing_child) break;
+            if (timer_now_ns() >= stray_deadline) {
+                stray_alive = standing_child = true;
+                break;
+            }
+            sched();
+        }
+        if (strays != 0 || stray_alive) {
+            uart_puts("STRAY-CHILD(");
+            uart_putdec(strays);
+            uart_puts(" reaped");
+            if (stray_alive) uart_puts(", one alive");
+            uart_puts(") ");
+            if (!current_test->failed)
+                test_fail("test left a child behind (see STRAY-CHILD)");
         }
 
         // #134: a bounded wait inside a CHILD PROC's entry thunk cannot fail the

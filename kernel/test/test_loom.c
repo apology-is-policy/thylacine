@@ -98,7 +98,7 @@ static const char *loom_request_owner_fixture(void) {
     struct Loom *l = NULL;
     struct loom_service_ref scope = {0};
     struct loom_request_ref ref = {0};
-    u64 goal = loom_private_retired();
+    u64 goal = lp_settled();
     u32 base = p ? p->as->page_count : 0;
 #define RO(c,m) do { if (!(c)) { error=m;goto done; } } while (0)
     RO(p && p->as,"request owner creator");
@@ -184,6 +184,7 @@ void test_loom_private_requests(void) {
 
 void test_loom_private_node_owner(void) {
     struct Proc *p = test_proc_make();
+    (void)lp_settled();
     struct Loom *l = p ? loom_create_private(p,2,2,true) : NULL;
     u64 goal = loom_private_retired() + (l ? 1 : 0);
     const char *error = !l ? "node owner allocation" : loom_node_owner_fixture(l,p);
@@ -229,7 +230,7 @@ static const char *loom_slot_owner_fixture(void) {
     struct Proc *p = test_proc_make();
     struct Loom *l = NULL;
     struct loom_service_ref ref = {0};
-    u64 goal = loom_private_retired();
+    u64 goal = lp_settled();
     bool pinned = false;
 #define SO_CHECK(c, msg) do { if (!(c)) { error = msg; goto done; } } while (0)
     SO_CHECK(p && p->as, "slot owner creator allocated");
@@ -372,7 +373,7 @@ static const char *loom_private_buffers_fixture(void) {
     struct Proc *p = test_proc_make(), *q = test_proc_make();
     struct Loom *l = NULL;
     struct loom_service_ref pool = {0};
-    u64 goal = loom_private_retired();
+    u64 goal = lp_settled();
     u64 va = 0, ring_va = 0;
     u32 ring_size = 0, base = 0;
 #define PB_CHECK(c,msg) do { if (!(c)) { error = msg; goto done; } } while (0)
@@ -501,7 +502,7 @@ static const char *loom_private_pool_pins_fixture(void) {
     struct Proc *p = test_proc_make();
     struct Loom *l = NULL;
     struct loom_service_ref pool = {0}, again = {0};
-    u64 goal = loom_private_retired(), va = 0;
+    u64 goal = lp_settled(), va = 0;
     u32 baseline = 0;
     struct loom_service_pool_create in;
     for (u32 i = 0; i < sizeof(in); ++i) ((u8 *)&in)[i] = 0;
@@ -608,7 +609,7 @@ static const char *loom_private_fixed_fixture(void) {
     struct loom_service_pool_create in;
     for (u32 i=0; i<sizeof(in); ++i) ((u8 *)&in)[i]=0;
     in.size=sizeof(in);in.version=1;in.count=1;
-    u64 goal=loom_private_retired(), va=0;
+    u64 goal=lp_settled(), va=0;
     u32 baseline=0;
 #define FX_CHECK(c,msg) do { if (!(c)) { error=msg; goto done; } } while (0)
     FX_CHECK(p,"fixed creator allocated");baseline=p->as->page_count;
@@ -1394,7 +1395,7 @@ void test_loom_sq_release_after_index(void) {
 static bool sq_private_refill_run(bool bad_index, struct sq_refill_obs *o) {
     struct Proc *p = test_proc_make();
     if (!p) return false;
-    u64 goal = loom_private_retired();
+    u64 goal = lp_settled();
     struct Loom *l = loom_create_private(p, 1, 2, false);
     if (!l) { test_proc_drop(p); return false; }
     ++goal;
@@ -2380,7 +2381,7 @@ static const char *loom_targets_fixture(void) {
     struct loom_service_ref ref = {0}, stale = {0}, provisional = {0};
     const struct SrvServiceTarget *borrow = NULL;
     bool pinned = false, owner_dropped = false;
-    u64 goal = loom_private_retired(), destroyed = srv_registry_total_destroyed();
+    u64 goal = lp_settled(), destroyed = srv_registry_total_destroyed();
     u32 base = 0;
     struct loom_service_target in;
     for (u32 i = 0; i < sizeof(in); ++i) ((u8 *)&in)[i] = 0;
@@ -4077,7 +4078,7 @@ static const char *loom_protocol_fixture(u32 kind) {
     struct Loom *l = NULL;
     struct loom_service_protocol *prepared = NULL;
     struct loom_service_ref refs[2] = {{0},{0}};
-    u64 goal = loom_private_retired();
+    u64 goal = lp_settled();
     u32 base = p ? p->as->page_count : 0;
     u32 old_budget = p ? p->as->page_budget : 0;
     bool owner_dropped = false, creator_linked = false;
