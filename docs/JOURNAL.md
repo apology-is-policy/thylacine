@@ -22,6 +22,21 @@ needed the operator.
 
 
 ---
+## 2026-11-03 -- aux-3 joins the seat line; B-3h lands and the bigger merge begins (corona)
+
+**What this run closed.** Vote 42 came back: a scenario that passes only after a failed attempt stays named, rc 0, with an UNEXPLAINED line at both of the wrapper's exits, to be revisited after one fleet run. The merge of aux-3 3407cf093 into corona/async-memory (1227710c2) got its first compile and first run.
+
+**The join's evidence, all on 1227710c2 in the env worktree (q-join.log, 06:04:43Z to 07:01:04Z).** Default build and suite 2176/2176, with both sides' boot markers present: debug-probe threads and PASS, the three thread-mask lines, joey's spawn-env, pouch-hello-spawn. Host: libhalcyon 184, lictor 51, halcyond 559, libtapestry 27, seat-control with 32 mutants red. Session image at one attempt each: -start, -refused, -unread, plain, -recover, -dead, -states, -soak at its default cycles. CI image at one attempt each: interaction-seat, im1-sak-lever, ls-imperium, im3-lex-curiata, viv-run, pty-4. All rc 0. Not the full CI gate: the operator's hold of 11-02 stands, and no SMP gate or sanitizer ran. `ended-nonzero=1` on -unread and ls-imperium is what both showed on their earlier green runs.
+
+**The arc's list, read against the evidence.** The status table understated AS-2 and AS-3: Astra's kernel fixtures already cover reconnects, stages, faults, close and exec boundaries and isolation. What stays owed is the EL0 half, so AS-3a (0b10ae26b) adds hostile services to the fixture, independent scopes and quotas to both adapter probes, and a new death probe. It compiles and links in a scratch directory. It has not run; every errno and count in it is a prediction.
+
+**Main landed B-3h while the gate ran (e3ed48dee, vote 41), so I began that merge in a spare worktree.** corona/main-merge = b04a4c3eb: 98 conflicted paths, resolved. It compiles and links with -Werror with tests on and off, the text checkers pass, and all 69 Pouch patches apply exactly. No image has booted it. The seams are in its commit message. The one that decides behaviour: main's `kill(pid, 0)` probe narrowed a wide pid to its low word, and its two test legs said so, "as a post does". Vote 8 refused that on this line, so the probe and its legs now answer EINVAL as a post does.
+
+**Wrong turns.** The memory index said vote 41 was free; main had taken it. The votes file was right, the index was stale: read the file. The dossier gate refused the AS-3a commit silently behind a `tail`; `git log` caught it. A `.`-as-wildcard in my own grep dropped test_clock.c from a conflict list, and the leftover marker scan caught it.
+
+**Open.** AS-3a's first run and its reds, then the status-table fix and the audit round. The merge's image, suite, B-3h's mutant lists, census and audit. Disk: 12 GiB free at 07:01Z, 36.8 at 01:54Z; the floor from October is 7000 MiB.
+
+---
 ## 2026-11-03 -- a chord during session start, and the hole my own narrowing opened (corona)
 
 **What this run closed.** r3's four P3s: a chord around session start ended the session, a request across a long episode

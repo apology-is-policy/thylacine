@@ -3172,3 +3172,11 @@ Code fc61093a2, 659023862, 70e76dff2; witnesses and checker c263b9080, 46d65fb35
   counted as unread, 0 spanning.
 - **Audit.** Opus reviewing Opus, Fable having refused this conversation's shape: 0 P0, 1 P1, 2 P2, 2 P3, all fixed but part
   of F5. Open: `age`'s guest wiring, `reserve`'s parked write and `Client::call` without a bound, the 69 all-variable lines.
+
+## The aux-3 join -- 2026-11-03
+
+aux-3 3407cf093 merged into corona/async-memory at 1227710c2: the deferring-lock conversions, pts wakes, the index charge in pages, check-lock-helpers, thread-model C4, usr1 and usr2.
+
+- **Gate (narrow; the full CI gate stays on the operator's hold).** Default build and suite 2176/2176 with both sides' boot markers. Host: libhalcyon 184, lictor 51, halcyond 559, libtapestry 27, seat-control 32 mutants red. Session scenarios -start, -refused, -unread, plain, -recover, -dead, -states, -soak; CI scenarios interaction-seat, im1-sak-lever, ls-imperium, im3-lex-curiata, viv-run, pty-4. One attempt each, all rc 0.
+- **Not run on this tree.** The SMP gate, the sanitizer matrix and the Pi.
+- **Vote 42.** A pass after a failed attempt stays named, rc 0, revisit after one fleet run.
