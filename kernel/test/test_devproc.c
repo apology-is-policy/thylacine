@@ -1479,7 +1479,7 @@ void test_devproc_dump_seal_disclosure(void) {
     struct Spoor *f[NFILES];
     long before[NFILES], after[NFILES];
     bool premise = false;
-    long other_environ = -2, other_maps = -2;
+    long other_environ = -2, other_maps = -2, other_account = -2;
     char buf[512];
     for (int i = 0; i < NFILES; i++) { f[i] = NULL; before[i] = -2; after[i] = -2; }
 
@@ -1508,10 +1508,13 @@ void test_devproc_dump_seal_disclosure(void) {
         proc_test_link(other);
         struct Spoor *oe = open_pidfile_for(other->pid, "environ", 0);
         struct Spoor *om = open_pidfile_for(other->pid, "maps", 0);
+        struct Spoor *oa = open_pidfile_for(other->pid, "account", 0);
         other_environ = oe ? devproc.read(oe, buf, (long)sizeof(buf), 0) : -2;
         other_maps    = om ? devproc.read(om, buf, (long)sizeof(buf), 0) : -2;
+        other_account = oa ? devproc.read(oa, buf, (long)sizeof(buf), 0) : -2;
         if (oe) spoor_clunk(oe);
         if (om) spoor_clunk(om);
+        if (oa) spoor_clunk(oa);
         proc_test_unlink(other);
     }
     if (target) { target->state = PROC_STATE_ZOMBIE; proc_free(target); }
@@ -1527,6 +1530,8 @@ void test_devproc_dump_seal_disclosure(void) {
         else                TEST_ASSERT(after[i] >= 0, files[i].sealed_msg);
     }
     TEST_ASSERT(other_maps >= 0, "control: an unsealed cross-principal maps read is ambient");
+    TEST_EXPECT_EQ(other_account, (long)-T_E_ACCES,
+                   "another principal's account is refused through the read dispatch");
     TEST_EXPECT_EQ(other_environ, (long)-T_E_ACCES,
                    "environ refuses a cross-principal reader that holds no CAP_HOSTOWNER (EACCES)");
 }

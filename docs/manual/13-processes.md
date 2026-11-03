@@ -135,9 +135,9 @@ services. `pool` is the rest, the pages every user process may hold together.
 `charged` is what they hold now. The headroom is `pool` minus `charged`.
 
 `ledger` is the same pages as the memory accounts count them, and it reads the same as
-`charged` unless something is being freed at that moment. `underflow` counts the times an
-account was refunded more than it was charged, and it should stay at 0. Accounts limit
-nothing yet, so neither figure changes what a process may hold.
+`charged` unless pages are being allocated or freed at that moment. `unpaired` counts the
+times an account's charges and refunds failed to match, and it should stay at 0. Accounts
+limit nothing yet, so neither figure changes what a process may hold.
 
 ### Judge the headroom
 

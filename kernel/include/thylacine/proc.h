@@ -1420,7 +1420,8 @@ _Static_assert(__builtin_popcount(PROC_FLAGS_ALL) ==
 // were deliberately stripped from that prose -- duplicating the number in a
 // comment is what made it go stale here in the first place.
 _Static_assert(sizeof(struct Proc) == 512,
- "struct Proc size: the poll hook chunk appended child_owed (a 32-byte "
+ "struct Proc size: MM-1 appended account (a pointer): 504 -> 512. "
+ "Before that the poll hook chunk appended child_owed (a 32-byte "
  "struct poll_owed): 472 -> 504. Before that: "
  "thread-model C5 appended exec_task (a pointer) + "
  "exec_rendez (a 16-byte Rendez), thread-model C3 threads_lock (a u32 "

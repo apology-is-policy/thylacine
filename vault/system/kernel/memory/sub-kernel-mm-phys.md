@@ -124,7 +124,7 @@ batch. The bulk-op under one hold is the named lift
 so it is safe while peers allocate. It does not give a stable global
 count: a peer may refill its set the moment the drain lets go.
 
-**The account ledger (MM-1).** `alloc_user_pages` sponsors its block to the current account and `alloc_user_pages_for` to a named one. `free_pages` refunds it before clearing PG_USER, since the ledger reads that flag. `struct page` stays 48 bytes: `holder` is a union of `slab_cache` and `sponsor`, told apart by PG_SLAB and PG_SPONSORED. [[sub-kernel-accounts]].
+**The account ledger (MM-1).** `alloc_user_pages` sponsors its block to the current account and `alloc_user_pages_for` to a named one. `free_pages` refunds it before clearing PG_USER, since the ledger reads that flag. `struct page` stays 48 bytes: `holder` is a union of `slab_cache` and `sponsor`, told apart by PG_SLAB and PG_SPONSORED. [[sub-kernel-accounts]]. `phys_block_pages_for_test` walks every frame so a test can hold the ledger to the blocks that exist, and `holder` is the one overlay in `struct page`, its flags saying which member it is.
 
 ## Data structures
 

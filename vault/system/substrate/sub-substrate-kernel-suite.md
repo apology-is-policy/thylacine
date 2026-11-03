@@ -97,7 +97,7 @@ soft-warn count appended when any fired, or `<passed>/<total> FAIL`. A
 production build compiles no suite and prints `  tests: DISABLED` with a reason:
 the same prefix, no numbers, no verdict word.
 
-**Ledger check.** After each test the runner prints `ACCOUNT-UNDERFLOW` and reddens the test if a memory account refund went past zero, then clears the count: [[sub-kernel-accounts]].
+**Ledger check.** After each test the runner prints `ACCOUNT-UNPAIRED` and reddens the test if a memory account pairing broke, then clears the count: [[sub-kernel-accounts]].
 
 ## Data structures
 

@@ -127,6 +127,9 @@ void capacity_pool_unpark_for_test(u32 npages);
 // The runner releases whatever a test left parked, after every test, and
 // reddens a test that passed while leaking it; answers the pages released.
 u32 capacity_pool_unpark_all_for_test(void);
+// The pages of every block whose head carries `flag`: the blocks that exist, as
+// against what any counter says of them.
+u64 phys_block_pages_for_test(u32 flag);
 #endif // KERNEL_TESTS
 
 // Public allocation API per ARCHITECTURE.md §6.3.

@@ -28,9 +28,13 @@ statement; sections 3 and 4 are the design it serves.
 - Every buddy block the capacity pool counts, and every DMA block, carries a sponsor on
   its head page from allocation to free. The sponsor is never NULL.
 - A charge is the whole block, including the buddy's rounding.
-- `account_pool_share()` equals `capacity_pool_charged()` whenever nothing is being
-  freed. That is the ledger's whole claim, and `account.ledger_reconciles_with_the_pool`
-  checks it across every allocation since boot.
+- `account_pool_share()` equals `capacity_pool_charged()` except while a block is landing
+  or leaving. `account.ledger_reconciles_with_the_pool` checks that at three instants, and
+  `capacity-probe` checks it on the live machine, where every class of page is held.
+- ALLOC is the sponsored blocks that exist, and the pool is the PG_USER blocks plus thread
+  pages: `account.blocks_that_exist_are_the_ledger` walks the frames to say so.
+- A block freed at the wrong order refunds its own order to the ledger and the caller's to
+  the pool. Giving both the caller's would leave them equal and the fault invisible.
 - An account lives until the last of its Procs, threads and blocks has gone, so an
   orphan stays charged to its ancestors. Its parent never changes.
 - A Proc's account never changes, and a fork inherits it, so no fork resets anything.
@@ -80,10 +84,10 @@ decides when a page can go; the ledger only follows.
 
 `account_child` answers NULL past `ACCOUNT_MAX_DEPTH` or when memory is short, with no
 reference kept. An allocation that fails charges nothing and keeps no reference. A
-refund past zero is counted in `account_underflows` and goes no further up; so is an
-account dying with anything still charged. Neither stops the kernel, because nothing
-depends on this ledger yet, so the test runner reddens the test during which either
-happened.
+refund past zero is counted in `account_unpaired` and goes no further up; an account dying
+charged and a block freed at the wrong order are counted there too. None stops the kernel,
+because nothing depends on this ledger yet, so the test runner reddens the test during
+which one happened.
 
 ## Performance
 
@@ -106,9 +110,8 @@ gets its dispatch arm.
 
 ## Caveats
 
-1. A page table or pagemap node for a FILE Burrow is sponsored by whoever faulted it,
-   not the system cache. Small and bounded by the object, and it can stay charged after
-   that Proc exits. MM-2's class-aware allocation is where it moves.
+1. A page table is sponsored by whoever faulted it, which is right: it dies with that
+   space. A FILE Burrow's map nodes are the system cache's, through `pm.node_sponsor`.
 2. A kthread that allocates user pages for a Proc charges the root, since its Proc is
    kproc. `thread_create_kthread_for` already pays by its owner for the thread itself.
    Not yet inventoried for pages.
@@ -119,7 +122,13 @@ gets its dispatch arm.
    totals. `/ctl/memory` already shows them to every process, but a sandboxed Proc whose
    namespace has no `/ctl` learns them only through this call.
 5. `account_child` compiles only under `KERNEL_TESTS` until something outside the suite
-   creates an account, so a production boot has only the two static ones.
+   creates an account, so a production boot has only the two static ones, and its slab
+   cache is created with nothing to allocate from it until then.
+6. `headroom` can read low: `CLASS_ALLOC` counts DMA blocks outside the pool, against a limit
+   that is the pool. MM-2 must not admit on it as it stands.
+7. A DMA create that fails part way releases sponsors through `dma_free_blocks`, with no test
+   or injection reaching that unwind. MM-2 routes DMA through the pool, which makes it
+   injectable.
 
 ## Provenance
 

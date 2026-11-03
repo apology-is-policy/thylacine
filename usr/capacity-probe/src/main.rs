@@ -346,9 +346,8 @@ fn account_legs() -> i64 {
     }
     ok("account-record-memory");
 
-    // Bytes, and the pages this program holds are among them whatever else the account
-    // is charged: a figure in pages, or from nowhere, cannot reach 16 MiB here. A thread
-    // is running, so META holds its pool pages.
+    // Bytes: a figure in pages cannot reach 16 MiB here, whatever else the account is
+    // charged. A thread is running, so META holds its pool pages.
     let touched = 16 * MIB;
     let region = unsafe { t_burrow_reserve(touched, RW, 0) };
     if region <= 0 {
@@ -376,12 +375,33 @@ fn account_legs() -> i64 {
     }
     ok("account-used-in-bytes");
 
-    // /ctl/memory names the same pool, and shows no pairing broken since boot.
+    // /ctl/memory names the same pool, and shows no pairing broken since boot. Every class
+    // of page is live here, held by the running services, which is what a kernel test
+    // cannot arrange. A block landing between the two lines reads as a difference for that
+    // one read, so only a difference that outlasts every read is a finding.
     let mut mem = [0u8; 512];
-    let n = match read_path(b"/ctl/memory", &mut mem) {
-        Some(n) => n,
-        None => return fail("account-ctl-memory"),
-    };
+    let mut n = 0;
+    let mut balanced = false;
+    let (mut charged, mut ledger) = (None, None);
+    for _ in 0..64 {
+        n = match read_path(b"/ctl/memory", &mut mem) {
+            Some(n) => n,
+            None => return fail("account-ctl-memory"),
+        };
+        charged = field(&mem[..n], b"charged:");
+        ledger = field(&mem[..n], b"ledger:");
+        if charged.is_some() && charged == ledger {
+            balanced = true;
+            break;
+        }
+    }
+    if !balanced {
+        return fail_num(
+            "account-ledger-is-the-pool",
+            ledger.unwrap_or(0),
+            charged.unwrap_or(0),
+        );
+    }
     let pool = match field(&mem[..n], b"pool:") {
         Some(p) => p * PAGE,
         None => return fail("account-pool-line"),
@@ -396,13 +416,10 @@ fn account_legs() -> i64 {
     if q.headroom > pool {
         return fail_num("account-headroom-within-the-pool", q.headroom, pool);
     }
-    if field(&mem[..n], b"ledger:").is_none() {
-        return fail("account-ledger-line");
-    }
-    match field(&mem[..n], b"underflow:") {
+    match field(&mem[..n], b"unpaired:") {
         Some(0) => {}
-        Some(u) => return fail_num("account-underflow-line", u, 0),
-        None => return fail("account-underflow-line"),
+        Some(u) => return fail_num("account-unpaired-line", u, 0),
+        None => return fail("account-unpaired-line"),
     }
     ok("account-ctl-memory");
 

@@ -516,8 +516,8 @@ static size_t format_memory(const struct Proc *reader, char *buf, size_t cap) {
     n = fmt_udec(buf, cap, off, account_pool_share()); off += n;
     n = fmt_str(buf, cap, off, " pages\n"); if (!n) return 0; off += n;
 
-    n = fmt_str(buf, cap, off, "underflow: "); if (!n) return 0; off += n;
-    n = fmt_udec(buf, cap, off, account_underflows()); off += n;
+    n = fmt_str(buf, cap, off, "unpaired: "); if (!n) return 0; off += n;
+    n = fmt_udec(buf, cap, off, account_unpaired()); off += n;
     n = fmt_str(buf, cap, off, "\n"); if (!n) return 0; off += n;
 
     return off;

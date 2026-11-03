@@ -576,6 +576,38 @@ void test_demand_page_file_smoke(void) {
     burrow_unref(v);
 }
 
+// A map past the inline size has node pages, and they outlive the first faulter just as
+// the data pages do, so they are not that faulter's to pay for either.
+void test_demand_page_file_nodes_are_the_system_caches(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+
+    g_rev_read_fail  = false;
+    g_rev_read_chunk = 0;
+    g_rev_read_calls = 0;
+
+    struct Spoor *s = spoor_alloc(&g_rev_test_dev);
+    TEST_ASSERT(s != NULL, "spoor_alloc");
+    const u64 size = (PAGEMAP_INLINE_MAX + 8u) * PAGE_SIZE;
+    struct Burrow *v = burrow_create_file(s, 0, size);
+    TEST_ASSERT(v != NULL, "burrow_create_file");
+    TEST_ASSERT(v->pm.depth > 0, "the premise: a radix map");
+    int rc = burrow_map(p, v, USER_VA, size, VMA_PROT_RX);
+    TEST_EXPECT_EQ(rc, 0, "burrow_map RX");
+
+    struct fault_info fi;
+    make_fi(&fi, USER_VA + 0x40, /*is_write=*/false, /*is_instr=*/true);
+    TEST_EXPECT_EQ(userland_demand_page(p, &fi), FAULT_HANDLED, "a fault installs a page");
+    TEST_ASSERT(v->pm.nodes > 0, "and so a node");
+    const struct page *node = pa_to_page(kva_to_pa(v->pm.root));
+    TEST_ASSERT(node->flags & PG_SPONSORED, "the node is on the ledger");
+    TEST_ASSERT(node->holder.sponsor == account_system_cache(),
+        "and it is the system cache's, not the first faulter's");
+
+    drop_proc(p);
+    burrow_unref(v);
+}
+
 // ARCH 8.8.3 (signal(7)'s list): a page-in waits killable, as Linux's
 // filemap_fault does. A caught note that cut it short would be a SIGBUS at EL0,
 // or an EFAULT from inside an interruptible read's copy-out -- so

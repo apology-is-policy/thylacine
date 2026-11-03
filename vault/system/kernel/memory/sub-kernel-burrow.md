@@ -459,6 +459,8 @@ shares taken. The header says the caller charges the clone's footprint
 ref lands; as built `clone_one_vma` charges the resident count only, so the
 clone's nodes are uncharged ([[sub-kernel-pagemap]] Seams).
 
+`burrow_create_file` names the system cache as its map's node sponsor: [[sub-kernel-pagemap]].
+
 ## Data structures
 
 `struct Burrow`: magic, type, size, page count, the lock, the two counts, the

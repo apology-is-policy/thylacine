@@ -490,12 +490,6 @@ struct Thread *thread_create_bootcpu_idle(void (*entry)(void), void *stack_top) 
 _Static_assert(sizeof(struct Thread) <= PAGE_SIZE, "a thread's slot is charged as one page");
 _Static_assert(THREAD_POOL_PAGES <= 255, "Thread.pool_pages is a u8");
 
-// A new thread of `proc` whose kernel memory `payer` is charged for, with the
-// fields every create shares set: the tid, the pool charge, the slot and the
-// stack, in that order, each undone if a later one fails. NULL when the id
-// space is spent, the pool refuses `payer`, or memory is short. kproc pays
-// nothing (its threads are the reserve's); an exempt payer is counted, never
-// refused, as in alloc_user_pages.
 static void thread_pool_return(u32 pool, struct MemoryAccount *sponsor) {
     if (!pool) return;
     capacity_uncharge(pool);
@@ -503,6 +497,12 @@ static void thread_pool_return(u32 pool, struct MemoryAccount *sponsor) {
     account_unref(sponsor);
 }
 
+// A new thread of `proc` whose kernel memory `payer` is charged for, with the
+// fields every create shares set: the tid, the pool charge, the slot and the
+// stack, in that order, each undone if a later one fails. NULL when the id
+// space is spent, the pool refuses `payer`, or memory is short. kproc pays
+// nothing (its threads are the reserve's); an exempt payer is counted, never
+// refused, as in alloc_user_pages.
 static struct Thread *thread_new(struct Proc *proc, struct Proc *payer) {
     // The tid first: a spent id space refuses before anything is allocated
     // (one a later failure burns is skipped, never reused).

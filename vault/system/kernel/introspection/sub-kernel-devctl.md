@@ -89,7 +89,7 @@ shape as the lines above them. Two are boot-static and one is an atomic, so
 nothing here takes a lock ([[sub-kernel-addrspace]]).
 
 **Two more lines since MM-1b (2026-11-03):** `ledger:` is `account_pool_share`, the
-accounts' count of the same pages, and `underflow:` is `account_underflows`, the broken
+accounts' count of the same pages, and `unpaired:` is `account_unpaired`, the broken
 pairings they caught ([[sub-kernel-accounts]]). Both are atomics. The test reads the file
 through a larger buffer now, because the two lines can pass 256 bytes.
 

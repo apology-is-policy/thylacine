@@ -11,6 +11,7 @@
 
 #include <thylacine/burrow.h>
 #include <thylacine/dma_handle.h>
+#include <thylacine/image.h>
 #include <thylacine/memaccount.h>
 #include <thylacine/page.h>
 #include <thylacine/proc.h>
@@ -104,6 +105,8 @@ void test_account_orphan_stays_charged_until_its_last_page(void) {
 void test_account_refused_allocation_leaves_the_ledger(void) {
     struct MemoryAccount *a = account_child(account_root());
     TEST_ASSERT(a != NULL, "an account");
+    // A full pool reclaims idle images before it refuses, which would move this point.
+    (void)image_cache_evict_idle_for_test();
     u32 pool0 = capacity_pool_charged();
 
     struct page *p = alloc_user_pages_for(a, MAX_ORDER + 1u, KP_ZERO, false);
@@ -164,17 +167,17 @@ void test_account_incarnation_never_repeats(void) {
 void test_account_refund_past_zero_is_counted(void) {
     struct MemoryAccount *a = account_child(account_root());
     TEST_ASSERT(a != NULL, "an account");
-    u64 before = account_underflows();
+    u64 before = account_unpaired();
     u64 root0 = alloc_of(account_root());
     account_charge(a, CLASS_ALLOC, 2);
     account_refund(a, CLASS_ALLOC, 3);
-    TEST_EXPECT_EQ(account_underflows() - before, 1u, "counted once");
+    TEST_EXPECT_EQ(account_unpaired() - before, 1u, "counted once");
     TEST_EXPECT_EQ(alloc_of(a), 2u, "with the account left as it was");
     TEST_EXPECT_EQ(alloc_of(account_root()), root0 + 2u, "and nothing taken from its parent");
     account_refund(a, CLASS_ALLOC, 2);
     TEST_EXPECT_EQ(alloc_of(a), 0u, "the right refund still lands");
     account_unref(a);
-    account_underflows_rewind_for_test(before);
+    account_unpaired_rewind_for_test(before);
 }
 
 // The grandchild runs under the account its parent adopted, so a default of "the root"
@@ -291,8 +294,10 @@ static bool ledger_settled(u64 *ledger, u32 *pool) {
     return false;
 }
 
-// Whole-boot, so every allocation since the first is in it: a path that charges the
-// pool and not the ledger, or a block freed at the wrong order, lands here.
+// A path that charged one side and not the other stays in the difference, as does a block
+// freed at the wrong order, since the ledger refunds the block's own and the pool the
+// caller's. A charge and return that both happened cancel here, and the next test looks
+// at what is left.
 void test_account_ledger_reconciles_with_the_pool(void) {
     u64 ledger = 0;
     u32 pool = 0;
@@ -300,7 +305,7 @@ void test_account_ledger_reconciles_with_the_pool(void) {
     TEST_EXPECT_EQ(ledger, (u64)pool, "the ledger's share is the pool, to the page");
     TEST_ASSERT(settled, "and they held still");
     TEST_ASSERT(pool != 0u, "the control: a boot has charged the pool by now");
-    TEST_EXPECT_EQ(account_underflows(), 0u, "and no refund has ever gone past zero");
+    TEST_EXPECT_EQ(account_unpaired(), 0u, "and no refund has ever gone past zero");
 
     struct Burrow *b = burrow_create_anon(4 * PAGE_SIZE, false);
     TEST_ASSERT(b != NULL, "pool pages");
@@ -316,19 +321,52 @@ void test_account_ledger_reconciles_with_the_pool(void) {
     TEST_ASSERT(settled, "and they held still");
 }
 
-// A fill whose reading of the root's two classes and the pool held still across it, since
-// a reaper finishing an earlier test's Proc can move them. Bounded: a defect that moves
-// them forever is the assertions' to report.
-static void settled_fill(const struct MemoryAccount *a, struct account_query *q) {
-    for (int tries = 0; tries < 64; tries++) {
-        u64 alloc = alloc_of(account_root());
-        u64 meta = meta_of(account_root());
-        u32 charged = capacity_pool_charged();
-        account_query_fill(a, q);
-        if (alloc == alloc_of(account_root()) && meta == meta_of(account_root()) &&
-            charged == capacity_pool_charged())
-            return;
+// Counters agreeing with each other prove less than counters agreeing with the blocks.
+// Section 10's reconciliation: every sponsored block, rounded, is ALLOC and nothing else is;
+// every PG_USER block and every thread's pool pages are the pool and nothing else is.
+void test_account_blocks_that_exist_are_the_ledger(void) {
+    struct Burrow *b = burrow_create_anon(4 * PAGE_SIZE, false);
+    struct KObj_DMA *k = kobj_dma_create(3 * PAGE_SIZE);
+    u64 alloc = 0, meta = 0, sponsored = 0, pooled = 0;
+    u32 charged = 0;
+    bool steady = false;
+    for (u32 tries = 0; b && k && !steady && tries < 64u; tries++) {
+        alloc = alloc_of(account_root());
+        meta = meta_of(account_root());
+        charged = capacity_pool_charged();
+        sponsored = phys_block_pages_for_test(PG_SPONSORED);
+        pooled = phys_block_pages_for_test(PG_USER);
+        steady = alloc == alloc_of(account_root()) && meta == meta_of(account_root()) &&
+                 charged == capacity_pool_charged();
+        if (!steady) sched();
     }
+    if (k) kobj_dma_unref(k);
+    if (b) burrow_unref(b);
+    TEST_ASSERT(b && k, "a rounded pool block and a rounded raw one");
+    TEST_ASSERT(steady, "the counters held still across a walk");
+    TEST_EXPECT_EQ(sponsored, alloc, "ALLOC is the sponsored blocks, to the page");
+    TEST_EXPECT_EQ(pooled + meta, (u64)charged, "the pool is the PG_USER blocks and thread pages");
+    TEST_ASSERT(sponsored >= pooled + 4u, "control: a raw block is sponsored and outside the pool");
+}
+
+// What free_pages(p, 0) would do to an order-2 block, stopped before the pool and the
+// buddy see it.
+void test_account_wrong_order_release_is_counted(void) {
+    struct MemoryAccount *a = account_child(account_root());
+    TEST_ASSERT(a != NULL, "an account");
+    u64 before = account_unpaired();
+    struct page *p = alloc_user_pages_for(a, 2, 0, false);
+    TEST_ASSERT(p != NULL, "an order-2 block");
+    u64 charged = alloc_of(a);
+    account_release_block(p, 0);
+    u64 counted = account_unpaired() - before;
+    u64 left = alloc_of(a);
+    account_unpaired_rewind_for_test(before);
+    free_pages(p, 2);
+    account_unref(a);
+    TEST_EXPECT_EQ(charged, 4u, "the control: four pages charged");
+    TEST_EXPECT_EQ(counted, 1u, "the wrong order is counted");
+    TEST_EXPECT_EQ(left, 0u, "and what was charged is what comes back");
 }
 
 void test_account_query_reports_bytes_up_the_chain(void) {
@@ -339,63 +377,64 @@ void test_account_query_reports_bytes_up_the_chain(void) {
 
     const u64 pool_pages = capacity_pool_pages();
     const u64 pool = pool_pages << PAGE_SHIFT;
-    struct account_query q;
+    const u64 five_pages = 5ull << PAGE_SHIFT;
+
+    // Each reading is taken with its charge on and judged after all of them are off, so a
+    // red assert leaves the root as it found it.
+    struct account_query plain, by_alloc, by_meta, by_pool;
 
     account_charge(child, CLASS_ALLOC, 3);
     account_charge(child, CLASS_META, 2);
-    settled_fill(child, &q);
-    TEST_EXPECT_EQ(q.h.version, ACCOUNT_VERSION, "the record names its version");
-    TEST_EXPECT_EQ(q.h.size, (u32)sizeof(q), "and its size");
-    TEST_EXPECT_EQ(q.h.incarnation, child->incarnation, "and whose account it read");
-    TEST_EXPECT_EQ(q.c[CLASS_ALLOC].used, 3ull << PAGE_SHIFT, "used crosses in bytes");
-    TEST_EXPECT_EQ(q.c[CLASS_META].used, 2ull << PAGE_SHIFT, "per class");
-    TEST_EXPECT_EQ(q.c[CLASS_RETAIN].used, 0ull, "nothing charges RETAIN yet");
-    TEST_EXPECT_EQ(q.c[CLASS_DEVICE].used, 0ull, "nothing charges DEVICE yet");
-    TEST_EXPECT_EQ(q.c[CLASS_ALLOC].limit, pool, "a RAM class may reach the pool");
-    TEST_EXPECT_EQ(q.c[CLASS_RETAIN].limit, pool, "every RAM class");
-    TEST_EXPECT_EQ(q.c[CLASS_META].limit, pool, "every RAM class");
-    TEST_EXPECT_EQ(q.c[CLASS_DEVICE].limit, ~0ull, "nothing bounds device storage here");
-    TEST_EXPECT_EQ(q.level, (u32)ACCOUNT_NORMAL, "no pressure machinery yet");
-    TEST_EXPECT_EQ(q.generation, 0ull, "so no generation either");
-    account_refund(child, CLASS_ALLOC, 3);
+    account_query_fill(child, &plain);
     account_refund(child, CLASS_META, 2);
+    account_refund(child, CLASS_ALLOC, 3);
 
-    // A sibling's use reaches the child only through their ancestors, so this needs the
-    // walk: the root's ALLOC comes to five pages short of the pool, and the pool itself
+    // A sibling's use reaches the child only through their ancestors, so these need the
+    // walk: the root's class comes to five pages short of the pool, and the pool itself
     // has more room than that because the charge never touched it.
-    u64 used_alloc = alloc_of(account_root());
-    u64 to_short = pool_pages - used_alloc - 5u;
-    account_charge(sibling, CLASS_ALLOC, to_short);
-    settled_fill(child, &q);
-    TEST_EXPECT_EQ(q.headroom, (pool_pages - alloc_of(account_root())) << PAGE_SHIFT,
-                   "the tightest ancestor bounds the child");
-    TEST_EXPECT_EQ(q.limiting, (u32)CLASS_ALLOC, "and the class it is tight in is named");
-    account_refund(sibling, CLASS_ALLOC, to_short);
+    u64 fake = pool_pages - alloc_of(account_root()) - 5u;
+    account_charge(sibling, CLASS_ALLOC, fake);
+    account_query_fill(child, &by_alloc);
+    account_refund(sibling, CLASS_ALLOC, fake);
 
-    // The same through META, so limiting cannot be a constant.
-    u64 used_meta = meta_of(account_root());
-    to_short = pool_pages - used_meta - 5u;
-    account_charge(sibling, CLASS_META, to_short);
-    settled_fill(child, &q);
-    TEST_EXPECT_EQ(q.headroom, (pool_pages - meta_of(account_root())) << PAGE_SHIFT,
-                   "META's room bounds it now");
-    TEST_EXPECT_EQ(q.limiting, (u32)CLASS_META, "and META is named");
-    account_refund(sibling, CLASS_META, to_short);
+    fake = pool_pages - meta_of(account_root()) - 5u;
+    account_charge(sibling, CLASS_META, fake);
+    account_query_fill(child, &by_meta);
+    account_refund(sibling, CLASS_META, fake);
 
-    // The pool's own room is the other bound: a charge the ledger never sees (the same
-    // call thread_new makes before it charges the account) tightens it alone.
+    // The pool's own room is the other bound. A park reaches the pool and not the ledger,
+    // and the runner releases it should anything below go wrong.
     u64 ledger = alloc_of(account_root());
     u64 charged = capacity_pool_charged();
-    u64 extra = (ledger > charged ? ledger - charged : 0u) + 16u;
-    TEST_ASSERT(capacity_charge((u32)extra, true), "an exempt charge proceeds");
-    settled_fill(child, &q);
-    TEST_EXPECT_EQ(q.headroom, (pool_pages - capacity_pool_charged()) << PAGE_SHIFT,
-                   "the pool's room bounds every account");
-    capacity_uncharge((u32)extra);
+    u32 extra = (u32)(ledger > charged ? ledger - charged : 0u) + 16u;
+    capacity_pool_park_for_test(extra);
+    u64 pool_room = (pool_pages - capacity_pool_charged()) << PAGE_SHIFT;
+    account_query_fill(child, &by_pool);
+    capacity_pool_unpark_for_test(extra);
 
     account_unref(sibling);
     account_unref(child);
     account_unref(parent);
+
+    TEST_EXPECT_EQ(plain.h.version, ACCOUNT_VERSION, "the record names its version");
+    TEST_EXPECT_EQ(plain.h.size, (u32)sizeof(plain), "and its size");
+    TEST_ASSERT(plain.h.incarnation > 2u, "and an account that is neither static one");
+    TEST_EXPECT_EQ(plain.c[CLASS_ALLOC].used, 3ull << PAGE_SHIFT, "used crosses in bytes");
+    TEST_EXPECT_EQ(plain.c[CLASS_META].used, 2ull << PAGE_SHIFT, "per class");
+    TEST_EXPECT_EQ(plain.c[CLASS_RETAIN].used, 0ull, "nothing charges RETAIN yet");
+    TEST_EXPECT_EQ(plain.c[CLASS_DEVICE].used, 0ull, "nothing charges DEVICE yet");
+    TEST_EXPECT_EQ(plain.c[CLASS_ALLOC].limit, pool, "a RAM class may reach the pool");
+    TEST_EXPECT_EQ(plain.c[CLASS_RETAIN].limit, pool, "every RAM class");
+    TEST_EXPECT_EQ(plain.c[CLASS_META].limit, pool, "every RAM class");
+    TEST_EXPECT_EQ(plain.c[CLASS_DEVICE].limit, ~0ull, "nothing bounds device storage here");
+    TEST_EXPECT_EQ(plain.level, (u32)ACCOUNT_NORMAL, "no pressure machinery yet");
+    TEST_EXPECT_EQ(plain.generation, 0ull, "so no generation either");
+
+    TEST_EXPECT_EQ(by_alloc.headroom, five_pages, "the tightest ancestor bounds the child");
+    TEST_EXPECT_EQ(by_alloc.limiting, (u32)CLASS_ALLOC, "and the class it is tight in is named");
+    TEST_EXPECT_EQ(by_meta.headroom, five_pages, "META's room bounds it now");
+    TEST_EXPECT_EQ(by_meta.limiting, (u32)CLASS_META, "and META is named");
+    TEST_EXPECT_EQ(by_pool.headroom, pool_room, "the pool's room bounds every account");
 }
 
 static s64 account_call(u64 handle, u64 op, u64 va, u64 size) {

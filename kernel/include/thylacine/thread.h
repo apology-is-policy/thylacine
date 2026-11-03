@@ -646,7 +646,8 @@ struct Thread {
 };
 
 _Static_assert(sizeof(struct Thread) == 1792,
-               "the deferred-walk chunk appended lock_owed (a pointer) + "
+               "MM-1 appended pool_sponsor (a pointer): 1776 -> 1792. "
+               "Before that the deferred-walk chunk appended lock_owed (a pointer) + "
                "defer_depth (u32) after table_owed: 1760 -> 1776 (12 bytes + "
                "4 trailing pad to the 16-byte alignment); the thread cache "
                "keeps 2 objects per 4 KiB slab. "

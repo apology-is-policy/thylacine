@@ -344,6 +344,16 @@ static void pool_uncharge(u32 npages) {
 // after every test: a parking test unparks on its last line, and a failing
 // assertion returns before that line with the pool full for every test after.
 static u32 g_pool_parked;
+// Walks every frame: slow, and for a test that wants the blocks themselves.
+u64 phys_block_pages_for_test(u32 flag) {
+    u64 total = 0;
+    for (u64 i = 0; i < g_zone0.num_pages; i++) {
+        const struct page *p = pa_to_page(g_zone0.base_pa + i * PAGE_SIZE);
+        if (p->flags & flag) total += 1ull << p->order;
+    }
+    return total;
+}
+
 void capacity_pool_park_for_test(u32 npages) {
     if (pool_charge(npages, true))
         __atomic_add_fetch(&g_pool_parked, npages, __ATOMIC_RELAXED);
@@ -447,7 +457,7 @@ struct page *alloc_user_pages_for(struct MemoryAccount *sponsor, unsigned order,
     // The tag rides the block's HEAD page: the descriptor the buddy keys
     // everything on (flags, order, refcount) and the one free_pages is given.
     p->flags |= PG_USER;
-    account_sponsor_block(p, sponsor, order);
+    account_sponsor_block(p, sponsor);
     return p;
 }
 

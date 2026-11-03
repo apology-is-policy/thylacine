@@ -408,6 +408,7 @@ void test_demand_page_no_vma(void);
 void test_demand_page_permission_denied(void);
 void test_demand_page_lifecycle_round_trip(void);
 void test_demand_page_file_smoke(void);
+void test_demand_page_file_nodes_are_the_system_caches(void);
 void test_demand_page_file_pagein_not_note_interruptible(void);
 void test_demand_page_file_pages_charge_the_holder(void);
 void test_demand_page_idle_image_reclaimed_under_pressure(void);
@@ -623,6 +624,8 @@ void test_account_fork_keeps_the_account(void);
 void test_account_dma_charges_whole_blocks_outside_the_pool(void);
 void test_account_thread_charges_meta_to_its_payer(void);
 void test_account_ledger_reconciles_with_the_pool(void);
+void test_account_blocks_that_exist_are_the_ledger(void);
+void test_account_wrong_order_release_is_counted(void);
 void test_account_query_reports_bytes_up_the_chain(void);
 void test_account_syscall_refuses_by_name(void);
 void test_vma_range_is_mapped(void);                     // B-1b

@@ -10,6 +10,7 @@
 
 #include <thylacine/account.h>
 #include <thylacine/types.h>
+#include <thylacine/visibility.h>
 
 // Section 6's bound on one transaction: a root and fifteen generations below it.
 #define ACCOUNT_MAX_DEPTH 16u
@@ -42,24 +43,24 @@ void account_unref(struct MemoryAccount *a);
 
 // Adds to or takes from `a` and each ancestor. A parent's total covers its child's, so a
 // refund past zero is a broken pairing: it is counted and goes no further up, and cannot
-// pass as a smaller number. account_underflows also counts an account dying while charged.
+// pass as a smaller number. account_unpaired also counts an account dying while charged
+// and a block freed at another order than it has.
 void account_charge(struct MemoryAccount *a, unsigned cls, u64 pages);
 void account_refund(struct MemoryAccount *a, unsigned cls, u64 pages);
-u64 account_used(const struct MemoryAccount *a, unsigned cls);
 // Section 13's query, in bytes. Each figure is read alone, so this informs and decides
 // nothing: section 4's admission rechecks live state. Takes no lock.
 void account_query_fill(const struct MemoryAccount *a, struct account_query *q);
-u64 account_underflows(void);
+u64 account_unpaired(void);
 // What of the ledger the capacity pool should also read: the two share a unit and
 // differ only by the sponsored blocks outside the pool, so this equals
-// capacity_pool_charged whenever nothing is being freed.
+// capacity_pool_charged except while a block is landing or leaving.
 u64 account_pool_share(void);
 
 // The ledger's one way on and off a buddy block, keyed on its head page like PG_USER:
-// charges 1 << order to `a`, holds a reference for as long as the block lives, and
+// charges the whole block to `a`, holds a reference for as long as the block lives, and
 // free_pages hands it back. So an account outlives every Proc that used it until its
 // last page has really returned, which is section 4's orphan rule.
-void account_sponsor_block(struct page *head, struct MemoryAccount *a, unsigned order);
+void account_sponsor_block(struct page *head, struct MemoryAccount *a);
 void account_release_block(struct page *head, unsigned order);
 
 #ifdef KERNEL_TESTS
@@ -68,7 +69,8 @@ void account_release_block(struct page *head, unsigned order);
 // outside the suite creates an account.
 struct MemoryAccount *account_child(struct MemoryAccount *parent);
 // Tests that break the pairing on purpose put the count back before the runner reads it.
-void account_underflows_rewind_for_test(u64 count);
+void account_unpaired_rewind_for_test(u64 count);
+u64 account_used(const struct MemoryAccount *a, unsigned cls);
 #endif
 
 #endif // THYLACINE_MEMACCOUNT_H

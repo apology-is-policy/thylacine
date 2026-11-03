@@ -293,7 +293,7 @@ static struct KObj_DMA *dma_create_body(size_t size, size_t max_size,
         }
         // The whole buddy block, tail included: section 7 of
         // SHARED-MEMORY-ACCOUNTING charges what was taken, not the logical length.
-        account_sponsor_block(pages, account_current(), order);
+        account_sponsor_block(pages, account_current());
         k->blk[i].pages = pages;
         k->blk[i].order = order;
         k->blk[i].pa    = page_to_pa(pages);

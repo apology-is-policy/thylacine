@@ -906,6 +906,7 @@ struct test_case g_tests[] = {
                                        test_demand_page_lifecycle_round_trip,
                                                                            false, NULL },
     { "demand_page.file_smoke",        test_demand_page_file_smoke,        false, NULL },
+    { "demand_page.file_nodes_are_the_system_caches", test_demand_page_file_nodes_are_the_system_caches, false, NULL },
     { "demand_page.file_pagein_not_note_interruptible", test_demand_page_file_pagein_not_note_interruptible, false, NULL },
     { "demand_page.file_pages_charge_the_holder",
                                        test_demand_page_file_pages_charge_the_holder,
@@ -1216,6 +1217,8 @@ struct test_case g_tests[] = {
     { "account.dma_charges_whole_blocks_outside_the_pool", test_account_dma_charges_whole_blocks_outside_the_pool, false, NULL },
     { "account.thread_charges_meta_to_its_payer", test_account_thread_charges_meta_to_its_payer, false, NULL },
     { "account.ledger_reconciles_with_the_pool", test_account_ledger_reconciles_with_the_pool, false, NULL },
+    { "account.blocks_that_exist_are_the_ledger", test_account_blocks_that_exist_are_the_ledger, false, NULL },
+    { "account.wrong_order_release_is_counted", test_account_wrong_order_release_is_counted, false, NULL },
     { "account.query_reports_bytes_up_the_chain", test_account_query_reports_bytes_up_the_chain, false, NULL },
     { "account.syscall_refuses_by_name", test_account_syscall_refuses_by_name, false, NULL },
     { "vma.range_is_mapped",              test_vma_range_is_mapped,              false, NULL },
@@ -3449,21 +3452,21 @@ void test_run_all(void) {
                 test_fail("test left global console state armed (see LEAKED-STATE)");
         }
 
+        // A charge and its return no longer pair. Nothing else would say so, because at
+        // MM-1 no decision reads this ledger.
+        if (account_unpaired() != 0u) {
+            uart_puts("ACCOUNT-UNPAIRED ");
+            if (!current_test->failed)
+                test_fail("a ledger pairing broke (see ACCOUNT-UNPAIRED)");
+            account_unpaired_rewind_for_test(0u);
+        }
+
         // The user pool's test park is the seventh piece of that state. A
         // capacity test parks the pool to its edge, asserts, and unparks on its
         // last line, so the first failing assert left the pool FULL and every
         // allocation after it refused: one red test became a hundred and
         // seventy under the nowantstrip and noshortfall sabotages. Same
         // discipline: release it, name it, redden a test that passed leaking it.
-        // A refund past zero means a charge and its return no longer pair. Nothing else
-        // would say so, because at MM-1 no decision reads this ledger.
-        if (account_underflows() != 0u) {
-            uart_puts("ACCOUNT-UNDERFLOW ");
-            if (!current_test->failed)
-                test_fail("a refund went past zero (see ACCOUNT-UNDERFLOW)");
-            account_underflows_rewind_for_test(0u);
-        }
-
         u32 parked = capacity_pool_unpark_all_for_test();
         if (parked != 0) {
             uart_puts("POOL-PARKED(");

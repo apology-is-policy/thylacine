@@ -575,8 +575,9 @@ stays 48 bytes. `free_pages` is the one way off, as it is for the pool. Each blo
 a reference to its account, which is what makes section 4's orphan rule true without
 any list of orphans.
 
-**The requesting account pays,** which is the current thread's Proc's. File pages take a
-static system cache account on both fault paths, section 3's rule. A thread's pool pages
+**The requesting account pays,** which is the current thread's Proc's. File pages and the
+map nodes that index them take a static system cache account on both fault paths, section
+3's rule. A thread's pool pages
 are charged to its payer and remembered on the thread, because its reaper runs in another
 context.
 
@@ -604,7 +605,18 @@ cannot steer a check, and a fault on the way out may leave a part-written record
 reads through a dump seal. Section 13 says only "the /proc gates". What a session holds
 is another user's business once sessions have accounts, so the stricter of the two
 postures was chosen, and it can be relaxed without breaking anything. It renders the same
-fill the call returns. `/ctl/memory` gains `ledger:` and `underflow:`.
+fill the call returns. `/ctl/memory` gains `ledger:` and `unpaired:`.
+
+**A wrong order is visible.** The ledger refunds the block's own order and the pool the
+caller's, on purpose: if both took the caller's, a block freed at the wrong order would
+leave them equal. It is also counted in `unpaired`, with a refund past zero and an account
+dying charged. Section 10's reconciliation walks the frames in a test, so the ledger is
+held to the blocks that exist and not only to the other counter.
+
+**`headroom` can read low.** `CLASS_ALLOC` counts DMA blocks outside the pool, and its limit
+is the pool, so a class's room can reach zero while the pool has room and allocations
+succeed. That is honest for a figure that decides nothing. MM-2 must not admit on it as it
+stands, and critical device DMA stays outside the pool even after section 7's routing.
 
 **Until sessions have children, every Proc's account is the root,** so a query shows
 machine totals. `/ctl/memory` already shows them to every process, but a sandboxed Proc
