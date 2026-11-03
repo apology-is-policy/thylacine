@@ -185,7 +185,7 @@ two differ, the sections below say which side they describe.
 - **Slots.** A scope's fids pin it, so `reap_pass` repeats while a pass frees
   a slot. `Shared` tracks every target, scope and fid the adapter minted:
   Live, Clunk (a dropped fid, clunked when the SQ has room), Clunking, Reap
-  (REAP retried each turn, and before a reservation answers -ENOSPC). Pools are
+  (REAP retried each turn, and before a reservation answers -ENOSPC or -ENOMEM, since a slot awaiting REAP still holds the CLUNK page a FID is charged at RESERVE). Pools are
   the cores' and are reaped through `destroy_pool`.
 - **Retirement.** `retire` closes admission and aborts every scope. `retired()`
   holds once every SQE pushed has had its terminal CQE taken (`Shared`'s

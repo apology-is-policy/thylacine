@@ -20,7 +20,8 @@ query = hdr + struct.pack('<QIIQQQQ', 0x1112131415161718, 2, 3, 0x21222324252627
 outcome = struct.pack('<QIIQQQ', 0x6162636465666768, 1, 9, 0x7172737475767778,
                       0x8182838485868788, 0x9192939495969798)
 assert len(query) == 168 and len(outcome) == 40
-constants = struct.pack('<Q25i', 140, 1, -1, 1, 2, 3, 4, 5, 6, 0, 1, 2, 3, 4, 0, 1, 2, 1, 2, 3, 4, 5, 6, 7, 8, 9)
+# The explicit pad keeps the records eight-aligned and every byte defined.
+constants = struct.pack('<Q25i4x', 140, 1, -1, 1, 2, 3, 4, 5, 6, 0, 1, 2, 3, 4, 0, 1, 2, 1, 2, 3, 4, 5, 6, 7, 8, 9)
 EXPECTED = constants + query + outcome
 
 
@@ -33,6 +34,7 @@ def values(p):
   {p}REASON_ACCOUNT_LIMIT, {p}REASON_RETENTION_LIMIT, {p}REASON_PHYSICAL_PRESSURE,
   {p}REASON_CONTIGUOUS_UNAVAILABLE, {p}REASON_DEVICE_BUDGET, {p}REASON_METADATA_LIMIT,
   {p}REASON_UNSUPPORTED_LAYOUT, {p}REASON_PERMISSION_DENIED, {p}REASON_STALE_GRANT }},
+ 0,
  {{ .h = {{ .version = 1, .size = 168, .flags = 0x0a, .pad = 0x0b, .incarnation = 0x0102030405060708ull }},
    .generation = 0x1112131415161718ull, .level = 2, .limiting = 3, .headroom = 0x2122232425262728ull,
    .reclaim_target = 0x3132333435363738ull, .retained_after_exit = 0x4142434445464748ull,
@@ -50,7 +52,7 @@ with tempfile.TemporaryDirectory(prefix='account-abi-') as tmp:
         ('libt', 'usr/lib/libt/include', '#include <thyla/syscall.h>\n#include <thyla/account.h>', 't_', 'T_'),
     ]:
         (tmp / 'fixture.c').write_text(f'''{headers}
-struct fixture {{ unsigned long long sysno; int constants[25];
+struct fixture {{ unsigned long long sysno; int constants[25]; int pad;
   struct {sprefix}account_query query; struct {sprefix}account_outcome outcome; }};
 __attribute__((used, section(".account_abi"))) const struct fixture fixture = {values(p)};
 ''')
@@ -80,6 +82,7 @@ fn main() {{
   REASON_CONTIGUOUS_UNAVAILABLE as i32, REASON_DEVICE_BUDGET as i32, REASON_METADATA_LIMIT as i32,
   REASON_UNSUPPORTED_LAYOUT as i32, REASON_PERMISSION_DENIED as i32, REASON_STALE_GRANT as i32];
  for c in constants {{ o.write_all(&c.to_le_bytes()).unwrap(); }}
+ o.write_all(&[0u8; 4]).unwrap();
  let c = |i: u64| AccountClass {{ used: 0x10 + i, reserved: 0x20 + i, limit: 0x30 + i }};
  let q = AccountQuery {{
   h: AccountRecHdr {{ version: 1, size: 168, flags: 0x0a, pad: 0x0b, incarnation: 0x0102030405060708 }},

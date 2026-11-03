@@ -290,7 +290,9 @@ whose CLUNK is refused fails the ring loudly. Without this, a program at its pag
 lost its private ring to a background CLUNK. Built November 3, not yet booted: a FID's
 RESERVE charges and allocates the one page its CLUNK will run on, so that RESERVE is
 where the budget refuses, with nothing yet at the server. A CLUNK that never started
-gives the page back to its FID, and a FID that goes without one frees it.
+gives the page back to its FID, and a FID that goes without one frees it. Both adapters
+try the slots awaiting REAP before a reservation answers -ENOMEM, as they do for -ENOSPC,
+since each of those still holds its page.
 
 Review conclusion: this is the recommended single design. It costs a native
 9P progress refactor, but avoids permanently assigning clipboard availability

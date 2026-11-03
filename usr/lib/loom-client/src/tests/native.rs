@@ -1,7 +1,7 @@
 //! The native adapter against a simulated kernel (sim.rs).
 use crate::native::{POLLERR, PoolMember, Ring, Shot};
 use crate::sim::{
-    ABORTING, EACCES, EBADF, EBUSY, ECANCELED, EINTR, EINVAL, EIO, ENOENT, ENOSPC, ENOTDIR,
+    ABORTING, EACCES, EBADF, EBUSY, ECANCELED, EINTR, EINVAL, EIO, ENOENT, ENOMEM, ENOSPC, ENOTDIR,
     ETIMEDOUT, RETIRED, Sim, SimKernel, SlotKind,
 };
 use std::future::Future;
@@ -722,6 +722,33 @@ fn an_exhausted_slot_table_reaps_before_it_refuses() {
     drop(spare.pop());
     let fid = run(&r, scope.walk(b"f", None).unwrap());
     assert!(fid.is_ok(), "the walk took the reaped slot");
+}
+
+#[test]
+fn a_reservation_out_of_memory_reaps_before_it_refuses() {
+    let sim = Sim::new();
+    file(&sim, "f", b"x");
+    let r = ring(&sim, 8, &[4096]);
+    let target = r.target(5, b"clip").unwrap();
+    let scope = run(&r, target.connect(None).unwrap()).unwrap();
+    drop(r.target(5, b"clip").unwrap());
+    sim.s().reserve_out_of_memory = true;
+    let fid = run(&r, scope.walk(b"f", None).unwrap());
+    assert!(fid.is_ok());
+    assert!(!sim.s().reserve_out_of_memory, "the reap let it through");
+}
+
+#[test]
+fn a_reservation_out_of_memory_with_nothing_to_reap_is_refused() {
+    let sim = Sim::new();
+    file(&sim, "f", b"x");
+    let r = ring(&sim, 8, &[4096]);
+    let target = r.target(5, b"clip").unwrap();
+    let scope = run(&r, target.connect(None).unwrap()).unwrap();
+    sim.s().reserve_out_of_memory = true;
+    assert_eq!(scope.walk(b"f", None).err(), Some(ENOMEM as i32));
+    sim.s().reserve_out_of_memory = false;
+    assert!(run(&r, scope.walk(b"f", None).unwrap()).is_ok());
 }
 
 fn scope_retired_in_kernel(sim: &Sim) -> bool {

@@ -26,6 +26,7 @@ pub const EBADF: i64 = -9;
 pub const EBUSY: i64 = -16;
 pub const EINVAL: i64 = -22;
 pub const ENOENT: i64 = -2;
+pub const ENOMEM: i64 = -12;
 pub const ENOSPC: i64 = -28;
 pub const ENOTDIR: i64 = -20;
 pub const EISDIR: i64 = -21;
@@ -182,6 +183,8 @@ pub struct State {
     pub poll_answer: Option<i64>,
     /// The next RETURN answers this instead of releasing its member.
     pub refuse_return: Option<i64>,
+    /// A reservation answers ENOMEM until a slot is reaped.
+    pub reserve_out_of_memory: bool,
     /// ENTER refuses the next CLUNK with this errno.
     pub refuse_clunk: Option<i64>,
     /// Setup answers this errno, mapping nothing.
@@ -249,6 +252,7 @@ impl Sim {
             enter_errno: None,
             poll_answer: None,
             refuse_return: None,
+            reserve_out_of_memory: false,
             refuse_clunk: None,
             setup_errno: None,
             setup_unmapped: false,
@@ -1252,6 +1256,9 @@ unsafe impl Kernel for SimKernel {
                     }
                     _ => return EINVAL,
                 };
+                if s.reserve_out_of_memory {
+                    return ENOMEM;
+                }
                 let Some(r) = s.mint(slot) else { return ENOSPC };
                 if rec.kind == 2 {
                     s.slots[r.slot as usize].as_mut().unwrap().scope = r.slot as usize;
@@ -1294,6 +1301,7 @@ unsafe impl Kernel for SimKernel {
                 s.slots[i] = None;
                 s.pools.remove(&i);
                 s.reaps.push(i);
+                s.reserve_out_of_memory = false;
                 0
             }
             7 => {

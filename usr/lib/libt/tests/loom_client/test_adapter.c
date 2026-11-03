@@ -768,6 +768,33 @@ static void an_exhausted_slot_table_reaps_before_it_refuses(void) {
     drop_all(&f, fid, s, t);
     finish(&f);
 }
+static void a_reservation_out_of_memory_reaps_before_it_refuses(void) {
+    size_t b[] = { 4096 };
+    struct fx f = ring_of(8, b, 1);
+    file(f.sim, "f", "x");
+    struct t_loom_target *t = target_ok(f.r, "clip");
+    struct t_loom_scope *s = connect_ok(f.r, t);
+    t_loom_target_drop(target_ok(f.r, "clip"));
+    f.sim->reserve_out_of_memory = 1;
+    struct t_loom_fid *fid = walk_ok(f.r, s, "f");
+    assert(!f.sim->reserve_out_of_memory); /* the reap is what let it through */
+    drop_all(&f, fid, s, t);
+    finish(&f);
+}
+static void a_reservation_out_of_memory_with_nothing_to_reap_is_refused(void) {
+    size_t b[] = { 4096 };
+    struct fx f = ring_of(8, b, 1);
+    file(f.sim, "f", "x");
+    struct t_loom_target *t = target_ok(f.r, "clip");
+    struct t_loom_scope *s = connect_ok(f.r, t);
+    f.sim->reserve_out_of_memory = 1;
+    struct t_loom_op *op = NULL;
+    assert(t_loom_walk(s, "f", 1, 0, 0, &op) == SIM_ENOMEM && !op);
+    f.sim->reserve_out_of_memory = 0;
+    struct t_loom_fid *fid = walk_ok(f.r, s, "f");
+    drop_all(&f, fid, s, t);
+    finish(&f);
+}
 static int scope_retired_in_kernel(struct sim *s) {
     for (size_t i = 0; i < 64; ++i)
         if (s->slots[i].used && s->slots[i].kind == SIM_SCOPE && s->slots[i].state == SIM_RETIRED) return 1;
@@ -1921,6 +1948,8 @@ static const struct { const char *name; void (*run)(void); } tests[] = {
     T(an_explicit_scope_abort_ends_its_operations_once),
     T(a_target_dropped_under_its_connect_is_reaped_after_it),
     T(an_exhausted_slot_table_reaps_before_it_refuses),
+    T(a_reservation_out_of_memory_reaps_before_it_refuses),
+    T(a_reservation_out_of_memory_with_nothing_to_reap_is_refused),
     T(an_operation_held_across_retirement_keeps_its_terminal),
     T(retirement_waits_for_terminals_posted_after_the_scope_retires),
     T(an_sqe_not_yet_entered_holds_retirement_back),
@@ -1972,7 +2001,7 @@ static const struct { const char *name; void (*run)(void); } tests[] = {
 };
 #undef T
 /* The 70 scenarios of tests/native.rs, then the C interface's own eight. */
-_Static_assert(sizeof(tests) / sizeof(tests[0]) == 78, "every scenario of tests/native.rs and the C interface's own");
+_Static_assert(sizeof(tests) / sizeof(tests[0]) == 80, "every scenario of tests/native.rs and the C interface's own");
 
 /* With a name, runs only that scenario (exit 2 for an unknown one). */
 int main(int argc, char **argv) {
