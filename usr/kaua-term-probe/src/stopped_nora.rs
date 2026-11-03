@@ -103,12 +103,14 @@ pub(crate) struct Fixture {
 }
 
 impl Fixture {
-    pub(crate) fn start() -> Result<Self> {
+    /// `hold` is the service this probe parks on: a user scope may post only two.
+    pub(crate) fn start(hold: &str) -> Result<Self> {
         let (control_end, control) = pipe().map_err(|_| "the control pipe")?;
         let (notify, notify_end) = pipe().map_err(|_| "the notify pipe")?;
         let mut command = Command::new("/bin/loom-fixture");
         command
             .arg("--srv")
+            .arg(hold)
             .stdout(Stdio::File(control_end))
             .stderr(Stdio::File(notify_end));
         let child = command.spawn().map_err(|_| "spawn the fixture")?;
@@ -401,7 +403,7 @@ fn stopped(fixture: &mut Fixture) -> Result {
 }
 
 fn test() -> Result {
-    let mut fixture = Fixture::start()?;
+    let mut fixture = Fixture::start("hold-copy")?;
     let srv = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/srv".as_ptr(), 4, T_OPATH) };
     if srv < 0 {
         return Err("the registry");

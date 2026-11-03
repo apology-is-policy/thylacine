@@ -324,7 +324,7 @@ fn stopped(fixture: &mut Fixture) -> Result {
 
 fn test() -> Result {
     const EOPNOTSUPP: i32 = -95;
-    let mut fixture = Fixture::start()?;
+    let mut fixture = Fixture::start("hold-paste")?;
     let srv = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/srv".as_ptr(), 4, T_OPATH) };
     if srv < 0 {
         return Err("the registry");

@@ -5,10 +5,11 @@
 //
 // fd 0 is the walk-only root of a registry the kernel test made for this run,
 // fd 1 the read end of the probe's control pipe, and fd 2 the write end of the
-// notify pipe. With --srv the registry is /srv itself, for a probe in a session: a
-// walk-only handle does not transfer, so the fixture opens it, and a registry holds
-// sixteen services, so it posts only "fixture", "hold-copy" and "hold-paste" there. Otherwise it
-// posts "fixture" and the hostile services below. It writes 'R' to fd 2, and
+// notify pipe. With --srv NAME the registry is /srv itself, for a probe in a session:
+// a walk-only handle does not transfer, so the fixture opens it, and a user scope may
+// post two services (SRV_CAP_SCOPE_SLOTS), so it posts "fixture" and NAME, the one
+// its probe parks on, "hold-copy" or "hold-paste". Otherwise it posts "fixture" and
+// the hostile services below. It writes 'R' to fd 2, and
 // serves every connection until fd 1 reaches EOF. Every session must then end
 // within SETTLE_NS: the probe has exited, so its rings are closed. A 'Q' read
 // from fd 1 asks for one 'Z' on fd 2 once no session is left. Fd 2 carries only
@@ -778,7 +779,8 @@ impl Server {
 fn post(registry: i64, name: &[u8]) -> Option<i64> {
     let fd = unsafe { t_walk_create(registry, name.as_ptr(), name.len(), T_OREAD, 0) };
     if fd < 0 {
-        say(&format!("FAIL: post a service ({})", fd));
+        let shown = core::str::from_utf8(name).unwrap_or("a service");
+        say(&format!("FAIL: post {} ({})", shown, fd));
         return None;
     }
     Some(fd)
@@ -803,10 +805,14 @@ fn run() -> i64 {
     // Held open and never polled for accept, so a CONNECT waits in the backlog.
     let mut unaccepted = Vec::new();
     if in_session {
-        let Some(fd) = post(registry, HOLD_COPY) else { return 1 };
-        listeners.push(Listener { fd, fault: None, holds_copy: true, holds_paste: false });
-        let Some(fd) = post(registry, HOLD_PASTE) else { return 1 };
-        listeners.push(Listener { fd, fault: None, holds_copy: false, holds_paste: true });
+        let hold = env::args().nth(2).unwrap_or_default();
+        let (holds_copy, holds_paste) = (hold == HOLD_COPY, hold == HOLD_PASTE);
+        if !holds_copy && !holds_paste {
+            say("FAIL: --srv takes hold-copy or hold-paste");
+            return 1;
+        }
+        let Some(fd) = post(registry, hold) else { return 1 };
+        listeners.push(Listener { fd, fault: None, holds_copy, holds_paste });
     } else {
         for (name, mtype, fault) in HOSTILE.iter() {
             let Some(fd) = post(registry, name) else { return 1 };
