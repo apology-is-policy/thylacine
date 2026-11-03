@@ -21,15 +21,15 @@ abis: [abi-t-stat, abi-handle-rights, abi-errno, abi-pty-interaction]
 design:
   - "docs/ARCHITECTURE.md section 13"
 created: 2026-08-03
-updated: 2026-11-02
+updated: 2026-11-03
 ---
 ## Session registry factory ABI
 
 Native syscall 134 is SRV_REGISTRY_NEW: boot O_PATH fd, route pointer, count,
 zero flags. It was 127 until vote 13 (2026-10-19): 127..133 belong to syscalls
 other branches assigned first (main's 127/128, b3's 129..133), so the number
-no longer depends on landing order. Since corona merged main (2026-10-21) this
-tree has 127 and 128 too, and assigns nothing in 129..133. Each
+no longer depends on landing order. Since the join with main (2026-11-03) this
+tree carries every one of those numbers, and 134 sits between them. Each
 route is 40 bytes (u32 length, u32 reserved, 32 name bytes). Public spawn bit
 11 delegates the dedicated factory role. Kernel C, libt C and Rust wrappers
 agree under tools/test-srv-registry-abi.py; the native ceiling advances to

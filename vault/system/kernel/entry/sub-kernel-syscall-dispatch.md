@@ -22,11 +22,11 @@ design:
   - "docs/VIVARIUM.md"
   - "docs/LINEAGE.md"
 created: 2026-08-03
-updated: 2026-11-02
+updated: 2026-11-03
 ---
 ## Session registry factory
 
-Native call 127 copies at most sixteen 40-byte route records into bounded
+Native call 134 copies at most sixteen 40-byte route records into bounded
 kernel scratch before construction. It checks the explicit factory role before
 copyin; source-fd validation takes and releases a handle snapshot. Invalid
 flags/count, copy faults, wrong handle kind/rights, private source roots,
