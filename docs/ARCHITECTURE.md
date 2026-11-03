@@ -952,7 +952,8 @@ The `RFNOTEG` rfork bit (already reserved in `proc.h`) selects share-vs-copy of 
 | 47 | `SYS_POSTNOTE` | `pid`, `name_va`, `name_len` | 0 / -EINVAL / -EFAULT / -EACCES / -ESRCH / -EAGAIN; a self-post of a fault snare does not return |
 | 48 | `SYS_NOTE_MASK` | `new_mask`, `old_mask_out_va` | 0 / -EINVAL |
 | 138 | `SYS_POSTNOTE_TID` | `tid`, `name_va`, `name_len` | 0 / -EINVAL / -EFAULT / -ESRCH / -EAGAIN; a fault snare does not return |
-| 139 | `SYS_NOTE_DISPOSE` | `name_va`, `name_len`, `disposition` (0 = default, 1 = ignore, 2 = caught), `flags` (1 = restart) | 0 / -EINVAL / -EFAULT / -ENOMEM — write the calling Proc's row for a note (§8.8.3). `kill` has no row. `flags` is for a caught row only. A caught row needs a registered handler or an open notes fd |
+| 139 | `SYS_NOTE_DISPOSE` | `name_va`, `name_len`, `disposition` (0 = default, 1 = ignore, 2 = caught), `flags` (1 = restart, 2 = reset at delivery, 4 = no defer, bits 16..31 the handler's `sa_mask`) | 0 / -EINVAL / -EFAULT / -ENOMEM — write the calling Proc's row for a note (§8.8.3). `kill` has no row. `flags` is for a caught row only. A caught row needs a registered handler or an open notes fd |
+| 141 | `SYS_NOTE_WAIT` | `how` (0 = suspend, 1 = take), `set`, `rec_va`, `timeout_ns` | 0 / -EINTR / -EAGAIN / -EINVAL / -EFAULT — wait for a note under a mask of the call's own, or take one with no handler (§8.8.3) |
 
 **`SYS_POSTNOTE` permission gate at v1.0**: caller must be the target's parent OR `pid == self_pid`. **A-4b (IDENTITY-DESIGN §9.8) generalizes cross-process kill** via `write "kill"`/`"killgrp"` to `/proc/<pid>/ctl`, two-axis-authorized (owner-rwx on the ctl file OR `CAP_HOSTOWNER` OR the new elevation-only `CAP_KILL`); `SYS_POSTNOTE` stays the parent/self fast path. The general `/proc/<pid>/note`-file form (posting *arbitrary* notes by namespace write-rights on the Spoor) remains the later composition (§7.6.8 [OPEN Q 7.6.A]).
 
@@ -2002,6 +2003,43 @@ walk; an IRQ tail with no notes leg; and a designation kept into a wait that
 cannot unwind for it. `specs/tail_order.tla` gains the IRQ
 entry and `RunMeets`. No new section 28 invariant: this is I-19's delivery and
 I-9's wake on one more path.
+
+**The mask at a handler, and the two waits (operator vote 24, 2026-11-03;
+`dec-2026-11-03-note-wait`).** One mechanism restores a mask at a handler's return, for
+both phenotypes. Delivery saves the interrupted mask in `note_saved_mask` and sets the
+running mask to it plus the row's `sa_mask` plus the note's own family, which
+`SA_NODEFER` leaves out. `SYS_NOTED` and `rt_sigreturn` put the saved mask back. A
+native row carries these in `SYS_NOTE_DISPOSE`'s flags word: `NOTE_DISP_RESETHAND`,
+`NOTE_DISP_NODEFER`, and `sa_mask` in note bits from bit 16. A native handler reads the
+row's flags in `x2`, so Pouch resets its own table from what the kernel read. The kernel
+owns the mask, and Pouch keeps no copy of it. `in_handler` still holds every note for
+the handler's duration, on both paths: there is no nesting, so `sa_mask` and
+`SA_NODEFER` change what a handler reads and passes on, and not what can interrupt it.
+
+`SYS_NOTE_WAIT` (141) has two forms, and `rt_sigsuspend` and `rt_sigtimedwait` sit on
+the same two cores.
+- **`NOTE_WAIT_SUSPEND`** stores the caller's mask in the saved slot, sets the call's
+  mask and sleeps, with no window between them. `NOTE_WF_MASK_HELD` in
+  `Thread.note_wait_flags` says the real mask sits in the saved slot until the handler's
+  return or the call's tail, and delivery reads the interrupted mask through it, so a
+  frame's `uc_sigmask` and `SYS_NOTED` both see the caller's mask and never the wait's.
+  The call answers `-EINTR` once a handler has run, under `SA_RESTART` as well
+  (signal(7)). A note no handler takes leaves it standing: `NOTE_WF_NOHAND`, Linux's
+  `ERESTARTNOHAND`, re-issues the call after the tail has taken the note, so a stop and
+  a cont or a default-ignored note do not end it. The call sets the flag itself, because
+  the native class runs only for a Proc with a handler or a notes fd. A Proc no table
+  governs gets `-EINVAL`, since no note could end its wait.
+- **In a handler** no other handler can run. The call leaves the masks alone, waits until
+  a note its mask admits is queued, and answers `-EINTR`; that note runs when the outer
+  handler returns. This is a stated imprecision, and nesting is the real fix.
+- **`NOTE_WAIT_TAKE`** takes the note a take word names, the caller's own direct notes
+  first and then the oldest queued, masked or not, and runs no handler. The tty family
+  shares one mask bit, so the word names its rows one at a time (bits 16..20): waiting
+  for a winch does not eat a hangup. A `kill` alone in the queue answers `-EINTR`, and
+  `kill` and the snares cannot be named. The call hooks the queue's poll list before it
+  looks. A copy-out fault re-queues the note and re-arms what the take drained. A caught
+  note outside the word unwinds the call, after a last look for a take; an untimed one is
+  re-issued if no handler ran. Timeout 0 polls and a deadline answers `-EAGAIN`.
 
 ### 8.9 Open design questions
 

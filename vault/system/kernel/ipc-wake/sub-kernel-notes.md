@@ -774,6 +774,49 @@ single `note_saved_*` slot; contained (guest-self-corruption, per-Thread,
 kill-immune) and exotic (no v1.0 target does signal-driven cross-stack
 switching), documented in VIVARIUM 6.23's DEGRADED row and tracked for v1.x.
 
+### One mask restore at a handler's return, and the two waits (vote 24, 2026-11-03)
+
+[[dec-2026-11-03-note-wait]], ARCH 8.8.3. Every delivery goes through
+`notes_handler_mask_enter`, and `notes_noted_restore` puts `note_saved_mask` back with no
+question about the phenotype. The native arm's running mask is the interrupted mask, the
+row's `sa_mask`, and the note's own family unless `NOTE_DISP_NODEFER`. A native delivery
+with no table adds nothing, and still saves. A native handler reads the row's flags in
+`x2`. The old rule that a native handler's mask survives its return had no dependents:
+Pouch, the debug child and joey's smoke change no mask in a handler, and Go's runtime has
+no `noted`.
+
+`Thread.note_wait_flags` (where `_pad_in_handler` was, so the size stays 1792):
+`NOTE_WF_MASK_HELD` says this call runs under its own mask, and the thread's own sits in
+`note_saved_mask` until the handler's return or the call's tail. `notes_interrupted_mask`
+reads through it, so a frame's `uc_sigmask` reads the caller's mask and never the wait's.
+`NOTE_WF_NOHAND` is Linux's `ERESTARTNOHAND`: re-issue the call if it unwound and no handler
+ran. The call sets it itself and not its class, because `native_note_class` runs only for
+a Proc with a table and either a handler or a fd, and a call with neither must still
+re-issue after its tail. At the tail's end, in order: settle, restore if held, clear the
+byte, release claims. The settle rewinds on `note_restartable || NOHAND`; the handler arm's
+`SA_RESTART` rewind stays on `note_restartable` alone, so a `sigsuspend` under `SA_RESTART`
+still answers `EINTR`.
+
+`NOTE_DISP_RESETHAND`'s row store moved under `q->lock` on both paths, and the disposition
+is re-read after the unlock, so two threads cannot both read caught.
+
+`notes_wait_suspend`: refuses a Proc no table governs. In a handler it leaves the masks
+alone (the saved slot is in use) and waits on the queue hook for a note `~mask` admits, then
+answers `EINTR`; the note runs at the outer handler's return. Otherwise it stores the mask,
+peeks `notes_tail_candidate_locked` (a default stop or ignore queued under the old mask
+needs the tail, and no latch wakes for it) and marks an unwind if one is there, not for a
+self-managing Proc, whose fd holds its notes; then `tsleep_noteintr` forever. A pending
+caught note reads the latch at register-then-observe.
+
+`notes_wait_take`, on `notes_wait_on_queue`: hook on `q->poll_list` registered before it
+looks, the thread's own word first (`notes_tail_consume_locked`), then FIFO with the pop and
+both drains. `proc_note_thread` adds a queue wake for a direct note, which only the latch
+used to reach. A kill-only queue answers `EINTR`, as `devnotes_read`'s R3-F1. A caught note
+outside the word unwinds, after a last look for a take. `notes_wait_untake` puts a note back
+after a copy-out fault: unconsume, re-arm terminate, and the wakes (N-2). A take word's bits
+16..20 name single rows of the tty family; `notes_take_for_sigset` is the Linux row's
+spelling.
+
 ### The handler-time mask is Linux's, and it is passed on (phenotype)
 
 For a PHENO_LINUX handler, delivery sets the running mask the Linux way: the

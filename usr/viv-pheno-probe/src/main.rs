@@ -289,6 +289,27 @@ extern "C" fn viv_sig_handler(signo: i32, info: *const u8, uc: *const u8) {
     }
 }
 
+/// The note-wait legs (L352-L358): what a handler read of its own mask and of its
+/// frame's. uc_sigmask sits at offset 40 of the frame's ucontext.
+static mut NW_RUNS: u64 = 0;
+static mut NW_MASK_IN: u64 = 0;
+static mut NW_UC_MASK: u64 = 0;
+
+extern "C" fn viv_nw_handler(_signo: i32, _info: *const u8, uc: *const u8) {
+    unsafe {
+        let mut cur = 0u64;
+        let _ = svc4(NR_RT_SIGPROCMASK, 0, 0, &mut cur as *mut u64 as u64, 8);
+        core::ptr::write_volatile(&raw mut NW_MASK_IN, cur);
+        if !uc.is_null() {
+            core::ptr::write_volatile(&raw mut NW_UC_MASK,
+                core::ptr::read_unaligned(uc.add(40) as *const u64));
+        }
+        let runs = core::ptr::read_volatile(&raw const NW_RUNS);
+        core::ptr::write_volatile(&raw mut NW_RUNS, runs + 1);
+    }
+}
+fn nw_runs() -> u64 { unsafe { core::ptr::read_volatile(&raw const NW_RUNS) } }
+
 /// The fork-in-handler leg (L233-L236; the d3a11c8e round's F1): a handler
 /// that fork()s and RETURNS, in both processes. The child's return goes through
 /// the restorer -> rt_sigreturn -> the kernel's per-Thread save block, so it
@@ -5612,6 +5633,169 @@ unsafe fn run_linux() -> ! {
         tn = put_bytes(&mut td_mk, tn, b"\n");
     }
     leg!(rep, tn == 0, &td_mk[..tn]);
+
+    // --- L352-L358: rt_sigsuspend and rt_sigtimedwait -------------------------
+    //
+    // Operator vote 24. The one mechanism, from the side a Linux guest sees.
+    //   L352: a note held by the caller's mask ends a suspend that opens it. The handler
+    //         runs under the wait's mask, sa_mask and its own bit; its frame's uc_sigmask
+    //         reads the caller's mask, not the wait's; and the caller's mask is back at
+    //         its return, so the next note stays held.
+    //   L353: an SA_RESTART row changes nothing: a sigsuspend is never restarted.
+    //   L354: rt_sigtimedwait takes a held note and runs no handler; the note is gone.
+    //   L355: its timeout reads EAGAIN, after the time.
+    //   L356: the refusals: sigsetsize, a bad timespec, bad pointers.
+    //   L357: a child asleep in each wait is ended by a post from its parent.
+    //   L358: with no handler the post ends the child in its wait.
+    const NR_RT_SIGSUSPEND: u64 = 133;
+    const NR_RT_SIGTIMEDWAIT: u64 = 137;
+    const NW_SI_CODE_KERNEL: i32 = 128;
+    const NW_EAGAIN: i64 = -11;
+    const NW_EINTR: i64 = -4;
+    const NW_EFAULT: i64 = -14;
+    let nw_addr = viv_nw_handler as *const () as usize as u64;
+    let nw_usr1 = 1u64 << (SIGUSR1 - 1);
+    let nw_usr2 = 1u64 << (SIGUSR2 - 1);
+    let nw_term = 1u64 << (SIGTERM - 1);
+    let nw_held = nw_usr1 | nw_usr2;
+    let mut nw_oldmask = 0u64;
+    let nw_query = svc4(NR_RT_SIGPROCMASK, SIG_BLOCK, 0, &mut nw_oldmask as *mut u64 as u64, 8) == 0;
+    ksa = [nw_addr, SA_RESTORER | SA_SIGINFO, restorer_addr(), nw_term];
+    let nw_h1 = svc4(NR_RT_SIGACTION, SIGUSR1, &ksa as *const u64 as u64, 0, 8) == 0;
+    let nw_h2 = svc4(NR_RT_SIGACTION, SIGUSR2, &ksa as *const u64 as u64, 0, 8) == 0;
+    leg!(rep, nw_query && nw_h1 && nw_h2, b"L352 setup\n");
+
+    let _ = svc4(NR_RT_SIGPROCMASK, NT_SIG_SETMASK, &nw_held as *const u64 as u64, 0, 8);
+    let nw_r0 = svc3(NR_TKILL, kf_tid as u64, SIGUSR1, 0);
+    let nw_before = nw_runs();
+    let nw_wait_mask = nw_usr2;
+    let nw_r1 = svc4(NR_RT_SIGSUSPEND, &nw_wait_mask as *const u64 as u64, 8, 0, 0);
+    let nw_after = nw_runs();
+    let nw_in = core::ptr::read_volatile(&raw const NW_MASK_IN);
+    let nw_uc = core::ptr::read_volatile(&raw const NW_UC_MASK);
+    let mut nw_back = 0u64;
+    let _ = svc4(NR_RT_SIGPROCMASK, SIG_BLOCK, 0, &mut nw_back as *mut u64 as u64, 8);
+    let nw_r2 = svc3(NR_TKILL, kf_tid as u64, SIGUSR1, 0);
+    let nw_after2 = nw_runs();
+    let mut nw_mk = [0u8; 160];
+    let mut nw_n = 0usize;
+    if !(nw_r0 == 0 && nw_before == 0 && nw_r1 == NW_EINTR && nw_after == 1
+        && nw_in == (nw_usr2 | nw_term | nw_usr1) && nw_uc == nw_held
+        && nw_back == nw_held && nw_r2 == 0 && nw_after2 == 1)
+    {
+        nw_n = put_bytes(&mut nw_mk, 0, b"L352 r=");
+        nw_n = put_dec(&mut nw_mk, nw_n, nw_r1);
+        nw_n = put_bytes(&mut nw_mk, nw_n, b" runs=");
+        nw_n = put_dec(&mut nw_mk, nw_n, nw_before as i64);
+        nw_n = put_bytes(&mut nw_mk, nw_n, b"/");
+        nw_n = put_dec(&mut nw_mk, nw_n, nw_after as i64);
+        nw_n = put_bytes(&mut nw_mk, nw_n, b"/");
+        nw_n = put_dec(&mut nw_mk, nw_n, nw_after2 as i64);
+        nw_n = put_bytes(&mut nw_mk, nw_n, b" in=");
+        nw_n = put_dec(&mut nw_mk, nw_n, nw_in as i64);
+        nw_n = put_bytes(&mut nw_mk, nw_n, b" uc=");
+        nw_n = put_dec(&mut nw_mk, nw_n, nw_uc as i64);
+        nw_n = put_bytes(&mut nw_mk, nw_n, b" back=");
+        nw_n = put_dec(&mut nw_mk, nw_n, nw_back as i64);
+        nw_n = put_bytes(&mut nw_mk, nw_n, b"\n");
+    }
+    leg!(rep, nw_n == 0, &nw_mk[..nw_n]);
+
+    ksa = [nw_addr, SA_RESTORER | SA_SIGINFO | SA_RESTART, restorer_addr(), nw_term];
+    let _ = svc4(NR_RT_SIGACTION, SIGUSR1, &ksa as *const u64 as u64, 0, 8);
+    let nw_r3 = svc4(NR_RT_SIGSUSPEND, &nw_wait_mask as *const u64 as u64, 8, 0, 0);
+    leg!(rep, nw_r3 == NW_EINTR && nw_runs() == 2, b"L353\n");
+
+    let nw_r4 = svc3(NR_TKILL, kf_tid as u64, SIGUSR2, 0);
+    let nw_before = nw_runs();
+    let mut nw_si = [0u8; 128];
+    let nw_only2 = nw_usr2;
+    let nw_r5 = svc4(NR_RT_SIGTIMEDWAIT, &nw_only2 as *const u64 as u64,
+                     nw_si.as_mut_ptr() as u64, 0, 8);
+    let nw_signo = core::ptr::read_unaligned(nw_si.as_ptr() as *const i32);
+    let nw_code = core::ptr::read_unaligned(nw_si.as_ptr().add(8) as *const i32);
+    let nw_zero: [i64; 2] = [0, 0];
+    let nw_r6 = svc4(NR_RT_SIGTIMEDWAIT, &nw_only2 as *const u64 as u64, 0,
+                     nw_zero.as_ptr() as u64, 8);
+    leg!(rep, nw_r4 == 0 && nw_r5 == SIGUSR2 as i64 && nw_signo == SIGUSR2 as i32
+        && nw_code == NW_SI_CODE_KERNEL && nw_runs() == nw_before && nw_r6 == NW_EAGAIN,
+        b"L354\n");
+
+    let nw_ts: [i64; 2] = [0, 30_000_000];
+    let nw_t0 = mono_ns();
+    let nw_r7 = svc4(NR_RT_SIGTIMEDWAIT, &nw_only2 as *const u64 as u64, 0,
+                     nw_ts.as_ptr() as u64, 8);
+    let nw_spent = mono_ns() - nw_t0;
+    leg!(rep, nw_r7 == NW_EAGAIN && nw_spent >= 25_000_000, b"L355\n");
+
+    let nw_bad1: [i64; 2] = [0, 2_000_000_000];
+    let nw_bad2: [i64; 2] = [-1, 0];
+    leg!(rep, svc4(NR_RT_SIGSUSPEND, &nw_only2 as *const u64 as u64, 4, 0, 0) == NEG_EINVAL
+        && svc4(NR_RT_SIGSUSPEND, 8, 8, 0, 0) == NW_EFAULT
+        && svc4(NR_RT_SIGTIMEDWAIT, &nw_only2 as *const u64 as u64, 0, 0, 4) == NEG_EINVAL
+        && svc4(NR_RT_SIGTIMEDWAIT, 8, 0, 0, 8) == NW_EFAULT
+        && svc4(NR_RT_SIGTIMEDWAIT, &nw_only2 as *const u64 as u64, 0,
+                nw_bad1.as_ptr() as u64, 8) == NEG_EINVAL
+        && svc4(NR_RT_SIGTIMEDWAIT, &nw_only2 as *const u64 as u64, 0,
+                nw_bad2.as_ptr() as u64, 8) == NEG_EINVAL,
+        b"L356\n");
+
+    // SIGUSR1 stays held until the wait opens it, so a post that beats the child to its
+    // wait waits there too.
+    nw_n = 0;
+    let nw_only1 = nw_usr1;
+    let nw_none = 0u64;
+    for mode in 0..3u32 {
+        let mut rp: [i32; 2] = [-1, -1];
+        if svc3(NR_PIPE2, rp.as_mut_ptr() as u64, 0, 0) != 0 {
+            nw_n = put_bytes(&mut nw_mk, 0, b"L357 pipe\n");
+            break;
+        }
+        let kid = svc6(NR_CLONE, SIGCHLD, 0, 0, 0, 0, 0);
+        if kid == 0 {
+            if mode == 2 {
+                ksa = [SIG_DFL, 0, 0, 0];
+                let _ = svc4(NR_RT_SIGACTION, SIGUSR1, &ksa as *const u64 as u64, 0, 8);
+            }
+            let r = b"R";
+            let _ = svc3(NR_WRITE, rp[1] as u64, r.as_ptr() as u64, 1);
+            let runs = nw_runs();
+            if mode == 1 {
+                let got = svc4(NR_RT_SIGTIMEDWAIT, &nw_only1 as *const u64 as u64, 0, 0, 8);
+                linux_exit(if got == SIGUSR1 as i64 && nw_runs() == runs { 0 } else { 71 })
+            }
+            let got = svc4(NR_RT_SIGSUSPEND, &nw_none as *const u64 as u64, 8, 0, 0);
+            linux_exit(if mode == 0 && got == NW_EINTR && nw_runs() == runs + 1 { 0 } else { 72 })
+        }
+        let _ = svc3(NR_CLOSE, rp[1] as u64, 0, 0);
+        let mut one = [0u8; 1];
+        let _ = svc3(NR_READ, rp[0] as u64, one.as_mut_ptr() as u64, 1);
+        let _ = svc3(NR_CLOSE, rp[0] as u64, 0, 0);
+        let settle: [i64; 2] = [0, 100_000_000];
+        let _ = svc4(NR_PPOLL, 0, 0, settle.as_ptr() as u64, 0);
+        let posted = if kid > 0 { svc3(NR_KILL, kid as u64, SIGUSR1, 0) } else { 1 };
+        let ws = if kid > 0 { reap_or_kill(kid) } else { None };
+        let good = posted == 0 && match (mode, ws) {
+            (2, Some(w)) => (w & 0x7f) == SIGUSR1 as i32,
+            (_, Some(w)) => w == 0,
+            _ => false,
+        };
+        if !good && nw_n == 0 {
+            nw_n = put_bytes(&mut nw_mk, 0, if mode == 2 { b"L358" } else { b"L357" });
+            nw_n = put_bytes(&mut nw_mk, nw_n, b" mode=");
+            nw_n = put_dec(&mut nw_mk, nw_n, mode as i64);
+            nw_n = put_bytes(&mut nw_mk, nw_n, b" fork=");
+            nw_n = put_dec(&mut nw_mk, nw_n, kid);
+            nw_n = put_bytes(&mut nw_mk, nw_n, b" ws=");
+            nw_n = put_dec(&mut nw_mk, nw_n, ws.map_or(-1, |w| w as i64));
+            nw_n = put_bytes(&mut nw_mk, nw_n, b"\n");
+        }
+    }
+    ksa = [SIG_DFL, 0, 0, 0];
+    let _ = svc4(NR_RT_SIGACTION, SIGUSR1, &ksa as *const u64 as u64, 0, 8);
+    let _ = svc4(NR_RT_SIGACTION, SIGUSR2, &ksa as *const u64 as u64, 0, 8);
+    let _ = svc4(NR_RT_SIGPROCMASK, NT_SIG_SETMASK, &nw_oldmask as *const u64 as u64, 0, 8);
+    leg!(rep, nw_n == 0, &nw_mk[..nw_n]);
 
     // --- the verdict, which is also the write leg ---------------------------
     // Linux write(64) puts these bytes in the file; joey reads them from its

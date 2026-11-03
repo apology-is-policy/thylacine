@@ -14,9 +14,12 @@ updated: 2026-11-02
 ---
 ## Native ceiling 138
 
-The native ceiling is POSTNOTE_TID, at 138 since vote 14 (2026-11-02). The rows that
+The native ceiling is SYS_NOTE_WAIT, at 141 since vote 24 (2026-11-03); Linux's 140 and 141
+are setpriority and getpriority, which have no row. POSTNOTE_TID held it at 138 from vote
+14 (2026-11-02). The rows that
 raise newly covers are argued per number in vivarium.c: rt_sigprocmask, rt_sigpending
-and rt_sigtimedwait (135..137) meet an empty gap on this tree, and rt_sigqueueinfo
+and rt_sigtimedwait (135..137) meet an empty gap on this tree, and each is consumed by
+its own row before the native switch, and rt_sigqueueinfo
 (138) collides with POSTNOTE_TID but is an ENOSYS row, so a Linux Proc never reaches
 the post, and a native program mis-declared as Linux reads ENOSYS and is exposed to
 nothing. The ceiling argument now starts at rt_sigreturn (139). SRV_REGISTRY_NEW held
@@ -36,7 +39,8 @@ tkill, tgkill, sigaltstack and rt_sigsuspend (129..133) meet an empty gap,
 pinned by `syscall.native_gap_unassigned` (it counts the native switch's
 unknown arm, so a handler answering -1 cannot pass it), and each is consumed
 before the native switch (the kill family is TIER2 through
-`vivarium_kill_decide`; the other two are ENOSYS rows), pinned by name in
+`vivarium_kill_decide`, rt_sigsuspend is TIER2 on SYS_NOTE_WAIT's core, and sigaltstack
+is an ENOSYS row), pinned by name in
 `vivarium.rejects_are_deliberate`. There is no Linux phenotype factory operation; the
 entry is native only and keeps the kernel role gate. See
 [[sub-kernel-syscall-abi]].

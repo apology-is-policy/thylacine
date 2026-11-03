@@ -2541,9 +2541,14 @@ default), and the signal chunk's S-2 gave it its own note, `term`
   ends the caller with that death, as a fault or Pouch's `abort()` would.
 - **`rt_sigreturn` (139)** is the phenotyped spelling of `SYS_NOTED(NCONT)`.
 
-`sigaltstack` (132), `rt_sigsuspend` (133), `rt_sigpending` (136),
-`rt_sigtimedwait` (137), `rt_sigqueueinfo` (138) and `restart_syscall` (128) are
-explicit `ENOSYS` rows — Tier 2, and recorded rather than defaulted, per the
+- **`rt_sigsuspend` (133)** and **`rt_sigtimedwait` (137)** sit on `SYS_NOTE_WAIT`'s two
+  cores (operator vote 24, ARCH §8.8.3). A `sigsetsize` other than 8 is `EINVAL`. The first
+  answers `EINTR` once a handler has run, and the frame's `uc_sigmask` reads the caller's
+  mask, not the wait's. The second answers the signal, with `si_code` `SI_KERNEL` and a
+  zero union in the `siginfo`, as a frame's, and `EAGAIN` at its timeout.
+
+`sigaltstack` (132), `rt_sigpending` (136), `rt_sigqueueinfo` (138) and
+`restart_syscall` (128) are explicit `ENOSYS` rows — Tier 2, and recorded rather than defaulted, per the
 file's standard that a number never considered and one considered-and-rejected
 are different facts. `SIGALRM` has no note to carry it;
 `SIGABRT` has no note: a self-directed one (`raise`, which is `tkill` to self)
@@ -2653,8 +2658,8 @@ conservative direction. **The MASK a handler runs under is Linux's since
 sig (omitted under `SA_NODEFER`, which is therefore honoured for the mask), and
 `rt_sigreturn` restores the pre-handler mask from the kernel-side save — so a
 handler's own `rt_sigprocmask` does not outlive it, and an `execve`/`fork()`
-from inside a handler passes on what Linux passes on. The guard above is what
-still differs, and it only defers — except at a fault: an instruction in a
+from inside a handler passes on what Linux passes on. The native path has run the
+same restore since operator vote 24 (ARCH §8.8.3). The guard above is what still differs, and it only defers — except at a fault: an instruction in a
 handler that faults while a SIG_DFL terminating signal is pending ends the
 process there with that signal (ARCH §7.6.4), which is what Linux's send-time
 group exit for a fatal default signal would already have done.
