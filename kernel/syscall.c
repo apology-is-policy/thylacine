@@ -16451,12 +16451,12 @@ s64 viv_session_for_test(struct Proc *p, u64 linux_num, u64 a0, u64 a1) {
 // uninterruptible. A peer thread may close and reuse the fd between this and
 // the call. That misclassifies only that one call, for a guest racing its own
 // close: a handler that runs late, or an EINTR from the file it replaced.
-static bool file_is_slow(struct Proc *p, u64 fd) {
+static bool file_is_slow(struct Proc *p, hidx_t fd) {
     struct viv_socktab *tab = __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
     struct viv_sock row;
-    if (tab && viv_socktab_get(tab, (s32)(s64)fd, &row)) return true;
+    if (tab && viv_socktab_get(tab, fd, &row)) return true;
 
-    struct Spoor *c = sys_lookup_rw_handle(p, (hidx_t)fd, 0);
+    struct Spoor *c = sys_lookup_rw_handle(p, fd, 0);
     if (!c) return false;
     u32 f = spoor_flag_get(c);
     if (!(f & CSLOWKNOWN)) {
@@ -16475,7 +16475,7 @@ static bool file_is_slow(struct Proc *p, u64 fd) {
 static bool viv_call_interruptible(struct Proc *p, u64 linux_nr, const u64 *args) {
     switch (vivarium_intr_class(linux_nr, args)) {
     case VIV_INTR_ALWAYS:  return true;
-    case VIV_INTR_IF_SLOW: return file_is_slow(p, args[0]);
+    case VIV_INTR_IF_SLOW: return file_is_slow(p, (hidx_t)args[0]);
     case VIV_INTR_NEVER:   break;
     }
     return false;
@@ -16484,7 +16484,9 @@ static bool viv_call_interruptible(struct Proc *p, u64 linux_nr, const u64 *args
 #ifdef KERNEL_TESTS
 // Drives file_is_slow so a test can prove the classification and its
 // per-Spoor cache (ARCH 8.8.3).
-bool file_is_slow_for_test(struct Proc *p, u64 fd) { return file_is_slow(p, fd); }
+bool file_is_slow_for_test(struct Proc *p, u64 fd) {
+    return file_is_slow(p, sys_hidx_arg(fd));
+}
 #endif
 
 static bool viv_linux_dispatch(struct exception_context *ctx, struct Proc *p) {
@@ -16716,7 +16718,7 @@ static void native_note_class(struct Thread *t, struct Proc *p,
     case SYS_WRITE:
     case SYS_PREAD:
     case SYS_PWRITE:
-        intr = restart = file_is_slow(p, ctx->regs[0]);
+        intr = restart = file_is_slow(p, sys_hidx_arg(ctx->regs[0]));
         break;
     case SYS_WAIT_PID:
     case SYS_SRV_ACCEPT:
