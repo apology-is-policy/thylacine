@@ -22,6 +22,7 @@ mod application;
 mod apprecord;
 #[path = "../../halcyond/src/servicepool.rs"]
 mod servicepool;
+mod clipboard_async;
 mod clipboard_client;
 mod admission_deadline;
 mod observer;

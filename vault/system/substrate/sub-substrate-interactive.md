@@ -19,6 +19,7 @@ code:
   - tools/interactive/test-serial-bridge.py
   - tools/interactive/ls-halcyon-session-instrument.exp
   - tools/interactive/ls-halcyon-clipboard.exp
+  - tools/interactive/ls-halcyon-clipboard-async.exp
   - tools/interactive/ls-halcyon-session-media.exp
   - tools/interactive/ls-halcyon-session-dosbox.exp
   - tools/interactive/pci-net-load.exp
@@ -88,6 +89,12 @@ processes, enters physical Ctrl+Alt+F10 with a retained read snapshot, requires
 the old application connection to fail afterward, then rebinds and checks that
 the session value survived. It captures the trusted scene and restored workspace.
 This is not the pending/partial-output SAK or multi-session capacity witness.
+
+`ls-halcyon-clipboard-async` is the same workflow over a private ring, and it needs the
+private-async kernel as well: its header has the bake and the boot. One boot runs the
+probe once per submission of the client's run, held before the submission and after it,
+with physical Ctrl+Alt+F10 at each. See [[sub-interaction-native]] for what a run checks.
+It skips without the image, and it has not yet run.
 
 ## Full native service capacity witness
 

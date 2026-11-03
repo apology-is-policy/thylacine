@@ -39,6 +39,8 @@ struct Script {
     refuse_write: Option<i64>,
     /// Answer the next request with the wrong id.
     garble: bool,
+    /// The connection has ended; only a new CONNECT makes another.
+    sak: bool,
 }
 
 #[derive(Clone, Default)]
@@ -552,4 +554,281 @@ fn a_close_with_nothing_in_flight_still_ends_the_connection() {
     assert_eq!(sim.s().aborts.len(), 1, "the old scope was not aborted");
     assert_eq!(paste(&sim, &mut host), Event::Pasted(TEXT.to_vec()));
     assert_eq!(server.0.borrow().connects, 2);
+}
+
+mod sak {
+    //! The qualification run against a simulated SAK, which ends the connection the
+    //! way the server's close does: everything on it now fails, and a new CONNECT is a
+    //! new connection. In a guest the key press is what releases the hold.
+    use super::*;
+    use crate::qualification::{check_value, run, Moment, Progress, Report, Stepping};
+    use loom_client::native::Kernel;
+
+    const OLD: &[u8] = b"what was already on the clipboard";
+    /// Two chunks on the wire and two records back, as the guest's payload is.
+    const NEW: &[u8] = &[b'x'; 20_000];
+    const ECONNRESET: i64 = -104;
+
+    #[derive(Clone, Copy, Default)]
+    struct Faults {
+        /// The server keeps the connection through the SAK.
+        retain: bool,
+        /// The SAK leaves other bytes on the clipboard.
+        stale: bool,
+        /// The server answers an operation inside the ENTER that submits it, so the
+        /// hold finds its completion unrouted rather than in flight.
+        answer_on_enter: bool,
+        /// The ring itself closes at the hold, which a SAK never does.
+        close_ring: bool,
+        /// The server refuses this, with this errno, whether or not a hold comes.
+        refuse: Option<(Operation, i64)>,
+    }
+
+    fn drive(at: Option<(u32, Moment)>, faults: Faults) -> crate::qualification::Result<Report> {
+        drive_seeing(at, faults, |_| {})
+    }
+
+    fn drive_seeing(
+        at: Option<(u32, Moment)>,
+        faults: Faults,
+        at_hold: impl Fn(&Script) + 'static,
+    ) -> crate::qualification::Result<Report> {
+        let sim = Sim::new();
+        let server = Server::default();
+        server.0.borrow_mut().clipboard = OLD.to_vec();
+        {
+            let mut s = sim.s();
+            s.files.insert(b"tok/interaction".to_vec(), Vec::new());
+            s.service = Some(Box::new(Dying(server.clone())));
+            s.step_on_enter = faults.answer_on_enter;
+        }
+        server.0.borrow_mut().refuse = faults.refuse;
+        let on_hold = server.clone();
+        let ring = Sim(sim.0.clone());
+        let (kernel, progress): (_, Rc<Progress>) = Stepping::new(sim.kernel(), at, move || {
+            let mut s = on_hold.0.borrow_mut();
+            at_hold(&s);
+            s.sak = !faults.retain;
+            if faults.stale {
+                s.clipboard = b"neither of them".to_vec();
+            }
+            if faults.close_ring {
+                ring.close_under();
+            }
+        });
+        let host = Host::new(kernel, 5, locator()).expect("the host starts");
+        let poller = sim.kernel();
+        run(
+            host,
+            progress,
+            move |fd, timeout| {
+                let events = poller.poll(fd, POLLIN, timeout);
+                assert!(events >= 0, "poll: {events}");
+            },
+            OLD,
+            NEW.to_vec(),
+        )
+    }
+
+    /// Script's server with an end to its connection.
+    struct Dying(Server);
+
+    impl Service for Dying {
+        fn connected(&mut self, scope: usize) {
+            self.0 .0.borrow_mut().sak = false;
+            self.0.connected(scope);
+        }
+        fn write(&mut self, scope: usize, fid: usize, offset: u64, bytes: &[u8]) -> Option<i64> {
+            if self.0 .0.borrow().sak {
+                return Some(ECONNRESET);
+            }
+            self.0.write(scope, fid, offset, bytes)
+        }
+        fn read(&mut self, scope: usize, fid: usize, offset: u64, out: &mut [u8]) -> Option<i64> {
+            if self.0 .0.borrow().sak {
+                return Some(ECONNRESET);
+            }
+            self.0.read(scope, fid, offset, out)
+        }
+    }
+
+    fn total() -> u32 {
+        let report = drive(None, Faults::default()).expect("the plain round trip");
+        assert!(!report.held);
+        assert_eq!(report.value, NEW);
+        assert!(matches!(report.copy, Event::Copied { .. }));
+        report.submitted
+    }
+
+    const MOMENTS: [Moment; 2] = [Moment::Before, Moment::After];
+
+    #[test]
+    fn a_sak_at_every_operation_keeps_the_value_and_recovers() {
+        let total = total();
+        assert!(total >= 30, "the run's phases: {total}");
+        for answer_on_enter in [false, true] {
+            let faults = Faults {
+                answer_on_enter,
+                ..Faults::default()
+            };
+            for moment in MOMENTS {
+                let mut bound = 0;
+                for n in 1..=total {
+                    let report = drive(Some((n, moment)), faults)
+                        .unwrap_or_else(|e| panic!("{moment:?} {n}: {e}"));
+                    assert!(report.held, "{moment:?} {n}: never held");
+                    if report.bound_at_hold {
+                        assert!(report.down_after, "{moment:?} {n}: never went down");
+                        bound += 1;
+                    }
+                }
+                // Not vacuous: at the least, each of the job's eight requests, write and
+                // reply, was held on a bound connection.
+                assert!(bound >= 16, "{moment:?}: bound at {bound} holds of {total}");
+                let beyond = drive(Some((total + 1, moment)), faults).expect("past the end");
+                assert!(!beyond.held, "{moment:?}: a hold past the last submission");
+                assert_eq!(beyond.submitted, total);
+            }
+        }
+    }
+
+    #[test]
+    fn a_number_names_one_phase() {
+        let total = total();
+        let phases = Rc::new(RefCell::new(Vec::new()));
+        for n in 1..=total {
+            let seen = phases.clone();
+            let faults = Faults {
+                answer_on_enter: true,
+                ..Faults::default()
+            };
+            drive_seeing(Some((n, Moment::After)), faults, move |s: &Script| {
+                seen.borrow_mut().push(s.log.last().copied());
+            })
+            .unwrap_or_else(|e| panic!("{n}: {e}"));
+        }
+        let phases = phases.borrow();
+        // Connect and both lanes' walks and opens, which a server's log does not see, then
+        // each request's write and reply. Two clunks fall in Hello's. The scenario's header
+        // quotes this table.
+        let mut want = vec![None; 8];
+        for (op, submissions) in [
+            (Operation::Hello, 3),
+            (Operation::BindController, 2),
+            (Operation::ReportMode, 2),
+            (Operation::GetClipboard, 2),
+            (Operation::Cancel, 2),
+            (Operation::BeginCopy, 2),
+            (Operation::WriteCopy, 4),
+            (Operation::CommitCopy, 2),
+            (Operation::GetClipboard, 2),
+            (Operation::ReadClipboard, 4),
+            (Operation::Cancel, 2),
+        ] {
+            want.extend(std::iter::repeat_n(Some(op), submissions));
+        }
+        assert_eq!(*phases, want, "{total}");
+    }
+
+    #[test]
+    fn a_connection_that_survives_the_sak_is_caught() {
+        let total = total();
+        let mut caught = 0;
+        for moment in MOMENTS {
+            for n in 1..=total {
+                let faults = Faults {
+                    retain: true,
+                    ..Faults::default()
+                };
+                match drive(Some((n, moment)), faults) {
+                    Err("the connection survived the SAK") => caught += 1,
+                    Err(other) => panic!("{moment:?} {n}: {other}"),
+                    Ok(report) => assert!(
+                        !report.bound_at_hold,
+                        "{moment:?} {n}: a bound connection passed"
+                    ),
+                }
+            }
+        }
+        assert!(caught >= 32, "caught at {caught} holds");
+    }
+
+    #[test]
+    fn stale_bytes_after_a_sak_are_caught() {
+        let total = total();
+        let mut caught = 0;
+        for moment in MOMENTS {
+            for n in 1..=total {
+                let faults = Faults {
+                    stale: true,
+                    ..Faults::default()
+                };
+                let result = drive(Some((n, moment)), faults);
+                // The job's last request is read back only after recovery.
+                assert!(n + 3 <= total || result.is_err(), "{moment:?} {n}");
+                caught += result.is_err() as u32;
+            }
+        }
+        assert!(caught >= 32, "caught at {caught} holds");
+    }
+
+    #[test]
+    fn a_ring_that_closes_is_no_sak_and_is_caught() {
+        for moment in MOMENTS {
+            let faults = Faults {
+                close_ring: true,
+                ..Faults::default()
+            };
+            assert_eq!(
+                drive(Some((5, moment)), faults).err(),
+                Some("the ring closed"),
+                "{moment:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_failure_with_no_sak_to_blame_is_not_forgiven() {
+        let mode = Faults {
+            refuse: Some((Operation::ReportMode, -11)),
+            ..Faults::default()
+        };
+        assert_eq!(
+            drive(None, mode).err(),
+            Some("a mode report refused with no SAK to blame")
+        );
+        let read = Faults {
+            refuse: Some((Operation::ReadClipboard, -2)),
+            ..Faults::default()
+        };
+        assert_eq!(
+            drive(None, read).err(),
+            Some("a paste failed with no SAK to blame")
+        );
+    }
+
+    #[test]
+    fn each_outcome_promises_its_own_values() {
+        let failed = Event::CopyFailed(Why::Lost);
+        let done = Event::Copied { generation: 2 };
+        let unknown = Event::CopyUnknown;
+        for (event, value, ok) in [
+            (&done, NEW, true),
+            (&done, OLD, false),
+            (&failed, OLD, true),
+            (&failed, NEW, false),
+            (&unknown, OLD, true),
+            (&unknown, NEW, true),
+            (&unknown, b"neither".as_slice(), false),
+            (&done, b"neither".as_slice(), false),
+            (&failed, b"neither".as_slice(), false),
+        ] {
+            assert_eq!(
+                check_value(OLD, NEW, event, value).is_ok(),
+                ok,
+                "{event:?} {value:?}"
+            );
+        }
+        assert!(check_value(OLD, NEW, &Event::Pasted(NEW.to_vec()), NEW).is_err());
+    }
 }

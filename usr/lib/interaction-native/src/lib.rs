@@ -348,5 +348,8 @@ impl<K: Kernel + 'static> Host<K> {
     }
 }
 
+#[cfg(any(test, feature = "qualification"))]
+pub mod qualification;
+
 #[cfg(test)]
 mod tests;

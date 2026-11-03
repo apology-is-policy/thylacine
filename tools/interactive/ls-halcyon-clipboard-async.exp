@@ -1,0 +1,186 @@
+#!/usr/bin/expect -f
+# SAK at every operation of the interaction client over a private ring, through a real
+# foreground process and physical F10 (ASYNC-SERVICE-LIFECYCLE, AS-4c). First private
+# CONNECT against halcyond, so it also pins the peer rule: Application::new refuses a
+# connection whose t_srv_peer is not a live identity.
+#
+# Image and boot:
+#   THYLACINE_INTERACTION_QUALIFICATION=1 THYLACINE_HALCYON_SESSION=1 \
+#     THYLACINE_HALCYON_PROFILE=instrument tools/build.sh kernel --config ci --set PRIVATE_ASYNC_QUAL=y
+#   THYLACINE_INTERACTION_QUALIFICATION=1 THYLACINE_BUILD_DIR=build/kernel-private-async-qual \
+#     tools/test-interactive.sh ls-halcyon-clipboard-async
+#
+# Each number is one probe run, held once at that submission to the ring: "before"
+# with it still queued, "after" with it in flight or its completion unrouted. A real
+# halcyond cannot be stopped mid-reply, so the SAK lands between operations, and what
+# a stopped server does is covered elsewhere: every operation on the host (the sweep
+# in interaction-native's tests) and in the kernel by NA-4d's fixture.
+#
+# What a number names, while nothing retries (pinned by a_number_names_one_phase):
+#   1 connect; 2-4 and 5-7 walk, walk and open each lane; 8-11 Hello and the clunks of
+#   the two walked directories; 12-13 Bind; 14-15 Mode; 16-17 Get; 18-19 release;
+#   20-21 Begin; 22-25 Write twice; 26-27 Commit; 28-29 Get; 30-33 Read twice;
+#   34-35 release. Past that the run ends without a hold, which ends that moment's loop.
+#
+# What each run must show:
+#   - Trusted input only after the cancellation. Console output parks during the
+#     episode, so no line can show the order inside it. session_seat.rs retires every
+#     application connection before it sends its ACK, and the kernel takes no trusted
+#     input before that ACK. What this adds is that a private connection is among those
+#     retired: a connection bound at the hold must fail at its next use.
+#   - Nothing conferred: the trusted episode ends with nothing pending.
+#   - No stale bytes after recovery, and the committed value intact: the value read
+#     through a new connection is what the copy's reported outcome promises, and the
+#     other path, a native /srv connection, reads the same.
+set ::env(THYLACINE_ACCEL) [expr {[info exists ::env(LS_CI_GFX_ACCEL)] ? $::env(LS_CI_GFX_ACCEL) : "hvf"}]
+source [file join [file dirname [info script]] lib.exp]
+set repo $lc_repo
+set qmp [lc_qmp_sock]
+proc key {chord} {
+    global repo qmp
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -k $chord} e]} { lc_fail $e }
+    after 700
+}
+proc type {text} {
+    global repo qmp
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp $text} e]} { lc_fail $e }
+}
+proc capture {name} {
+    global repo qmp
+    after 1000
+    set out $repo/build/session-media-$name.png
+    if {[catch {exec $repo/tools/screendump.sh -s $qmp $out} e]} { lc_fail $e }
+    lc_step "captured $out"
+}
+lc_boot
+set timeout $lc_boot_timeout
+expect {
+    -ex "Thylacine login: " {}
+    -re {EXTINCTION:} { lc_extinction_fail "boot" }
+    timeout { lc_fail "no login" }
+    eof { lc_fail "EOF before login" }
+}
+lc_raw_send "michael\r" "login user"
+expect {
+    -ex "password: " {}
+    timeout { lc_fail "no password prompt" }
+    eof { lc_fail "EOF before password" }
+}
+lc_raw_send "correct-horse-battery-staple-v1\r" "login password"
+expect {
+    -ex "login: session compositor (halcyond) spawned" {}
+    -ex "Thylacine textual shell" {
+        # A lever the image lacks is a SKIP, never a FAIL.
+        puts "\nLS-CI SKIP: default (ut) image -- see this scenario's header for the bake"
+        lc_quit
+        exit 77
+    }
+    timeout { lc_fail "no graphical session" }
+    eof { lc_fail "EOF at session start" }
+}
+set timeout 60
+expect {
+    -re {halcyond: status bar [^\r\n]*running false panes 2} {}
+    -re {EXTINCTION:} { lc_extinction_fail "session" }
+    timeout { lc_fail "welcome and shell did not become ready" }
+}
+if {![info exists ::env(THYLACINE_INTERACTION_QUALIFICATION)] || $::env(THYLACINE_INTERACTION_QUALIFICATION) ne "1"} {
+    puts "\nLS-CI SKIP: requires explicit THYLACINE_INTERACTION_QUALIFICATION=1 build"
+    lc_quit
+    exit 77
+}
+after 1500
+key "meta_l+f"
+type "kaua-term-probe --clipboard copy\n"
+lc_expect "clipboard-probe: copy PASS" "a value to keep, by the other path"
+after 500
+type "kaua-term-probe --clipboard async-copy\n"
+set timeout 40
+expect {
+    -re {clipboard-probe: async-copy OK submitted=([0-9]+)} { set plain $expect_out(1,string) }
+    -ex "clipboard-probe: async UNAVAILABLE" {
+        puts "\nLS-CI SKIP: no private ring in this kernel -- see this scenario's header for the bake"
+        lc_quit
+        exit 77
+    }
+    -re {clipboard-probe: FAIL [^\r\n]*} { lc_fail "async-copy: $expect_out(0,string)" }
+    -re {EXTINCTION:} { lc_extinction_fail "async-copy" }
+    timeout { lc_fail "async-copy: no answer" }
+    eof { lc_fail "EOF during async-copy" }
+}
+lc_step "the plain round trip submitted $plain"
+after 500
+
+# One probe run held at one number. 1 if it was held, 0 if the run ended first.
+proc run_held {moment n} {
+    global bound outcomes ended
+    set name "$moment-$n"
+    type "kaua-term-probe --clipboard async-sak $moment $n\n"
+    set timeout 40
+    expect {
+        -re "clipboard-probe: SAK READY $name\[\r\n\]" {}
+        -re "clipboard-probe: SAK END $name submitted=(\[0-9\]+)" {
+            set ended $expect_out(1,string)
+            return 0
+        }
+        -re {clipboard-probe: FAIL [^\r\n]*} { lc_fail "$name: $expect_out(0,string)" }
+        -re {EXTINCTION:} { lc_extinction_fail $name }
+        timeout { lc_fail "$name: never held" }
+        eof { lc_fail "EOF before the hold at $name" }
+    }
+    key "ctrl+alt+f10"
+    key "ret"
+    lc_expect "corvus: imperium: SAK with nothing pending" "$name: trusted episode, nothing conferred"
+    after 1500
+    key "ret"
+    set timeout 70
+    expect {
+        -re "clipboard-probe: SAK DONE $name bound=(\[01\]) down=(\[01\]) copy=(\[A-Za-z\]+)\[^ \]* lost=(\[0-9\]+)" {
+            lc_step "$name: $expect_out(0,string)"
+            incr bound $expect_out(1,string)
+            dict incr outcomes $expect_out(3,string)
+        }
+        -re {clipboard-probe: FAIL [^\r\n]*} { lc_fail "$name: $expect_out(0,string)" }
+        -re {EXTINCTION:} { lc_extinction_fail $name }
+        timeout { lc_fail "$name: no verdict after the SAK" }
+        eof { lc_fail "EOF after the hold at $name" }
+    }
+    after 300
+    return 1
+}
+
+foreach moment {before after} {
+    set bound 0
+    set outcomes [dict create Copied 0 CopyUnknown 0 CopyFailed 0]
+    set n 1
+    while {[run_held $moment $n]} {
+        incr n
+    }
+    lc_step "$moment: $n ended it after $ended submissions; bound at $bound; $outcomes"
+    # Not vacuous: the numbers reached past a plain run's end, less what a retried Bind
+    # can add to that run, and the job's own eight requests were held on a bound one.
+    if {$n < $plain - 8} { lc_fail "$moment: only $n numbers of a run of $plain" }
+    if {$bound < 16} { lc_fail "$moment: bound at only $bound holds" }
+    # Each of the value check's branches ran.
+    if {[dict get $outcomes Copied] == 0 || [dict get $outcomes CopyFailed] == 0} {
+        lc_fail "$moment: outcomes $outcomes"
+    }
+    if {$moment eq "before" && [dict get $outcomes CopyUnknown] == 0} {
+        lc_fail "before: a Commit's reply held at no number: $outcomes"
+    }
+}
+# One more for the record of both scenes, at the Commit.
+type "kaua-term-probe --clipboard async-sak before 27\n"
+set timeout 40
+lc_expect "clipboard-probe: SAK READY before-27" "held at the Commit's reply"
+capture clipboard-async-held
+key "ctrl+alt+f10"
+capture clipboard-async-sak
+key "ret"
+lc_expect "corvus: imperium: SAK with nothing pending" "the last trusted episode"
+after 1500
+key "ret"
+lc_expect "clipboard-probe: SAK DONE before-27" "recovered after the last"
+capture clipboard-async-restored
+lc_pass "private ring clipboard: physical F10 at every operation, value intact, no stale bytes, recovery"
+lc_quit

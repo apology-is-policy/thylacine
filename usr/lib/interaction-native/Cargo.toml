@@ -13,6 +13,10 @@ license.workspace = true
 name = "interaction_native"
 path = "src/lib.rs"
 
+[features]
+# The client half of the SAK scenario. It adds a module and changes nothing in Host.
+qualification = []
+
 [dependencies]
 libhalcyon = { path = "../libhalcyon" }
 loom-client = { path = "../loom-client" }

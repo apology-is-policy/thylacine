@@ -894,6 +894,7 @@ name = "kaua-term-probe"
 version = "0.1.0"
 dependencies = [
  "inlinewire",
+ "interaction-native",
  "kaua-term",
  "libhalcyon",
  "libtapestry",

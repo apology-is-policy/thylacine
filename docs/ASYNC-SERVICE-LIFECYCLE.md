@@ -361,13 +361,23 @@ The client's rules, each from a rule above it:
   every operation against a server that stops at each step, and one that dies. Then
   its native adapter.
 - AS-4c: the kaua-term-probe qualification mode over the async client, stepped by a
-  scenario, so a red names its phase. SAK lands with the request parked at each of
-  connect, each walk, open, Hello, Bind, Mode, Get, Read, Begin, Write and Commit.
+  scenario, so a red names its phase. SAK lands at each of connect, each walk, open,
+  Hello, Bind, Mode, Get, Read, Begin, Write and Commit: at every submission the run
+  makes, with the operation still queued and with it in flight or its completion
+  unrouted. The steps are a wrapper around the ring's `Kernel` in the probe, which
+  holds its thread once at a numbered ENTER, so `Host` carries no test hook and what is
+  qualified is what ships. A number names one phase, and a host test pins that table.
+  A real halcyond cannot be held mid-reply, so a request parked at a stopped server
+  stays the host sweep's and NA-4d's fixture's to cover.
   Each needs: trusted input only after the cancellation, nothing conferred, no stale
   bytes after recovery, and the committed clipboard value intact (SEAT-REVIEW's
-  acceptance for option A, now on the private ring). This is also the first boot of
-  a private CONNECT against halcyond, so it pins the peer rule: the server samples
-  `t_srv_peer` on a connection the kernel stamped from the ring's captured identity.
+  acceptance for option A, now on the private ring). Console output parks during the
+  episode, so the first of those cannot be read off a line. It rests on the seat path
+  retiring every application connection before its ACK, and the witness is that a
+  private connection bound at the SAK fails at its next use. This is also the first
+  boot of a private CONNECT against halcyond, so it pins the peer rule: the server
+  samples `t_srv_peer` on a connection the kernel stamped from the ring's captured
+  identity.
 - AS-4d: Nora. The pure engine raises Copy and Paste, its host resolves them. Space
   y and Space p reach the shared clipboard, plain y and p stay local, and several
   selections join with LF. Mode reports follow its editing mode. A paste is one undo

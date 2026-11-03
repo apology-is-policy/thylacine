@@ -15,6 +15,7 @@ mirrors:
   - "tools/interactive/ls-halcyon-storage-output.exp"
   - "tools/interactive/ls-halcyon-clipboard-pty-capacity.exp"
   - "tools/interactive/ls-halcyon-clipboard.exp"
+  - "tools/interactive/ls-halcyon-clipboard-async.exp"
   - "tools/interactive/ls-halcyon-pointer.exp"
   - "tools/interactive/ls-halcyon-session-media.exp"
   - "tools/interactive/ls-graphical-sak.exp"
@@ -529,6 +530,11 @@ The opt-in `ls-halcyon-clipboard` scenario fails on `EXTINCTION:` during boot
 and session work. It is a new mirror of the unchanged prefix, not a new banner
 or message-body contract. Its native byte/SAK workflow is recorded in the
 Halcyon interaction status and substrate interactive dossier.
+
+### Private-ring clipboard consumer (November 3)
+
+The opt-in `ls-halcyon-clipboard-async` scenario fails on `EXTINCTION:` during boot
+and at each of its probe runs. It is a new mirror of the unchanged prefix.
 
 ### Existing PTY-envelope consumer (October 4)
 

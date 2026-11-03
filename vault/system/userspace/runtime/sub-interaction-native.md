@@ -6,6 +6,7 @@ parent: moc-userspace-runtime
 code:
   - usr/lib/interaction-native/Cargo.toml
   - usr/lib/interaction-native/src/lib.rs
+  - usr/lib/interaction-native/src/qualification.rs
   - usr/lib/interaction-native/src/tests.rs
 audit: hard
 guarded-by: [inv-i29, inv-i30]
@@ -79,6 +80,17 @@ If it never came, the client's deadline for that step would close the connection
 a write can meet this: a lane's first operation is always a write, and its buffer is
 free again by the time the read that follows it starts.
 
+**The SAK witness.** The feature `qualification` adds a module and changes nothing in
+`Host`. `Stepping` wraps a ring's `Kernel` and holds its thread once, inside the ENTER
+that crosses a numbered submission: before it reaches the kernel, or just after. Every
+SQE goes through ENTER, so the numbers cover every operation with no list of phases to
+go stale. `run` reports a mode, copies, then reads back through whatever connection is
+left. What a copy reported bounds what the read may find: `Copied` the new text,
+`CopyFailed` the old, `CopyUnknown` either. A connection bound at the hold must fail at
+its next use, and the value is read again after recovery, because the first read may
+have finished before the SAK landed. `kaua-term-probe --clipboard async-sak` supplies
+the system calls and `ls-halcyon-clipboard-async` the key presses.
+
 ## Data structures
 
 `Host` holds the `Client`, the boxed connect, the `Connection` (the scope and a fid per
@@ -115,14 +127,20 @@ paste allocates its text once, and a parked write copies its record.
 
 ## Prosecution
 
-Host tests (`tests.rs`, 17) drive the adapter against [[sub-loom-native-adapter]]'s
+Host tests (`tests.rs`, 24) drive the adapter against [[sub-loom-native-adapter]]'s
 simulated kernel and a scripted server speaking real HIN1 records. Every wait goes
 through one poll loop, as a host's does, and the loop asserts that only its own poll
 reached the kernel. The sweep `a_server_that_stops_at_any_operation_...` stops the
 server at each of 40 operation counts: each stop must cost one event in at most the 120
 s job lifetime, then a new copy must succeed over a new connection.
 
-Sabotage, run 2026-11-03 on the Pi against a private copy: 37 named mutants across this
+The module `sak` runs the qualification against a simulated SAK, which ends the
+connection the way the server's close does, at every submission, at both moments, with
+each operation in flight and with its completion unrouted. Its negatives are a server
+that keeps the connection, stale bytes, a closed ring, and failures with no SAK to blame.
+`a_number_names_one_phase` pins what each number means, and the scenario quotes it.
+
+Sabotage, run 2026-11-03 on the Pi against a private copy: 49 named mutants across this
 crate, `Ring`'s turn at a past deadline and the client core, each predicted to redden a
 named test. The first sweep showed four real gaps, each now a test: a close with nothing
 in flight, a refused read, a stale generation at commit, and a `Gone` commit. It also
@@ -136,16 +154,17 @@ spun on POLLHUP. See [[sub-loom-native-adapter]].
 
 ## Seams
 
-- **Up:** AS-4c's qualification mode in `kaua-term-probe` and AS-4d's Nora, neither
-  written. A program supplies `ThylaKernel` and opens `/srv` itself.
+- **Up:** AS-4c's qualification mode in `kaua-term-probe`, not yet booted, and AS-4d's
+  Nora, not written. A program supplies `ThylaKernel` and opens `/srv` itself.
 - **Down:** the ring's futures and `Ring::poll_fd`.
 - **Sideways:** `ut` uses the C adapter instead (AS-4e), which has no `poll_fd` yet.
 
 ## Caveats
 
 1. **No guest has run this.** The route `<token>/interaction` and the private CONNECT
-   against halcyond are first exercised by AS-4c. A host test cannot prove them, since
-   the sim is a model of the kernel and the server is a script.
+   against halcyond are first exercised by `ls-halcyon-clipboard-async`, which has not
+   run. A host test cannot prove them, since the sim is a model of the kernel and the
+   server is a script.
 2. **The death of an idle connection is learnt at its next use.** Nothing is in flight
    then, so nothing tells the client. If that use is a copy or paste, that job reports
    `Lost` and the one after it reconnects; a mode report heals the link without a
