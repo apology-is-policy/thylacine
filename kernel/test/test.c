@@ -425,6 +425,7 @@ struct test_case g_tests[] = {
     { "context.create_destroy",        test_context_create_destroy,        false, NULL },
     { "context.round_trip",            test_context_round_trip,            false, NULL },
     { "context.switch_irq_safe",       test_context_switch_irq_safe,       false, NULL },
+    { "context.switch_cost",           test_context_switch_cost,           false, NULL },
     { "fp.cpacr_enabled",              test_fp_cpacr_enabled,              false, NULL },
     { "fp.round_trip_v_regs_fpsr_fpcr",
                                        test_fp_round_trip_v_regs_fpsr_fpcr, false, NULL },

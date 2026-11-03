@@ -62,6 +62,7 @@ void test_alternatives_atomics_correct(void);
 void test_context_create_destroy(void);
 void test_context_round_trip(void);
 void test_context_switch_irq_safe(void);
+void test_context_switch_cost(void);
 void test_fp_cpacr_enabled(void);
 void test_fp_round_trip_v_regs_fpsr_fpcr(void);
 void test_fp_note_area_round_trip(void);
