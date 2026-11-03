@@ -518,6 +518,8 @@ hand back a budget the caller did not ask for and hide the misconfiguration".
 
 The CSPRNG read clamps. See Caveats.
 
+**The accounts behind `SYS_ACCOUNT` (MM-1).** `kernel/account.c` now holds the account tree and its ledger, which [[sub-kernel-accounts]] owns in substance. 140 still has no dispatch arm, so `syscall.native_gap_unassigned` still pins it as unknown.
+
 ## Data structures
 
 Thirteen argument and result records cross the boundary, each pinned by size and

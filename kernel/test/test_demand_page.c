@@ -46,6 +46,7 @@
 
 #include <thylacine/dev.h>           // REVENANT R-2: struct Dev for the stub backing Dev
 #include <thylacine/extinction.h>
+#include <thylacine/memaccount.h>
 #include <thylacine/notes.h>          // groupstatus r1 P3-2: a latch revoked mid-read
 #include <thylacine/page.h>
 #include <thylacine/proc.h>
@@ -548,6 +549,8 @@ void test_demand_page_file_smoke(void) {
     // The slot is now resident; the PTE points at it; the PTE is R+X (W^X).
     struct page *slotpg = burrow_file_slot_for_test(v, 0);
     TEST_ASSERT(slotpg != NULL, "slot 0 resident after fault");
+    TEST_ASSERT(slotpg->holder.sponsor == account_system_cache(),
+        "a file page is the system cache's, not the first faulter's (the single path)");
     u64 pte = walk_to_l3_entry(p->as->pgtable_root, USER_VA);
     TEST_ASSERT(pte != 0, "L3 PTE installed after FILE demand-page");
     TEST_EXPECT_EQ(pte & 0x0000FFFFFFFFF000ull, page_to_pa(slotpg),
@@ -856,6 +859,8 @@ void test_protect_file_pagein_racing_protect_bails_cluster(void) {
     TEST_EXPECT_EQ(walk_to_l3_entry(p->as->pgtable_root, USER_VA), 0ull,
         "NO PTE on the none page");
     TEST_ASSERT(burrow_file_slot_for_test(v, 0) != NULL, "slot 0 adopted (the cluster is kept)");
+    TEST_ASSERT(burrow_file_slot_for_test(v, 0)->holder.sponsor == account_system_cache(),
+        "a file page is the system cache's, not the first faulter's (the cluster path)");
     TEST_ASSERT(burrow_file_slot_for_test(v, 1) != NULL, "slot 1 adopted too");
     struct Vma *vma = vma_lookup(p, USER_VA);
     TEST_ASSERT(vma != NULL && vma->prot == 0, "page 0's piece reads none");

@@ -29,6 +29,7 @@
 #include <thylacine/spinlock.h>     // #109: preempt-mask across the terminal-park handshake
 #include "../../mm/magazines.h"  // test_free_pages_settled
 #include "../../mm/phys.h"   // the pool park a failing test leaves behind
+#include <thylacine/memaccount.h>   // the ledger reddens a test that breaks its pairing
 #include <thylacine/poll.h>         // the snapshot bound's test knob, released per test
 #include <thylacine/notes.h>        // test_caught: the interrupt post
 #include <thylacine/proc.h>         // test_dying: a fresh Proc, freed as a ZOMBIE
@@ -1205,6 +1206,16 @@ struct test_case g_tests[] = {
     { "mm0.today_partial_map_retains_the_whole", test_mm0_today_partial_map_retains_the_whole, false, NULL },
     { "mm0.today_orphan_pin_charges_no_proc", test_mm0_today_orphan_pin_charges_no_proc, false, NULL },
     { "mm0.today_dma_bypasses_the_pool", test_mm0_today_dma_bypasses_the_pool, false, NULL },
+    { "account.rounded_block_charges_its_whole_order", test_account_rounded_block_charges_its_whole_order, false, NULL },
+    { "account.orphan_stays_charged_until_its_last_page", test_account_orphan_stays_charged_until_its_last_page, false, NULL },
+    { "account.refused_allocation_leaves_the_ledger", test_account_refused_allocation_leaves_the_ledger, false, NULL },
+    { "account.depth_stops_at_sixteen", test_account_depth_stops_at_sixteen, false, NULL },
+    { "account.incarnation_never_repeats", test_account_incarnation_never_repeats, false, NULL },
+    { "account.refund_past_zero_is_counted", test_account_refund_past_zero_is_counted, false, NULL },
+    { "account.fork_keeps_the_account", test_account_fork_keeps_the_account, false, NULL },
+    { "account.dma_charges_whole_blocks_outside_the_pool", test_account_dma_charges_whole_blocks_outside_the_pool, false, NULL },
+    { "account.thread_charges_meta_to_its_payer", test_account_thread_charges_meta_to_its_payer, false, NULL },
+    { "account.ledger_reconciles_with_the_pool", test_account_ledger_reconciles_with_the_pool, false, NULL },
     { "vma.range_is_mapped",              test_vma_range_is_mapped,              false, NULL },
     { "demand_page.eager_copy_charge_pairing", test_mmap_eager_copy_charge_pairing,      false, NULL },
     { "torpor.wait_rejects_bad_args",          test_torpor_wait_rejects_bad_args,          false, NULL },
@@ -3441,6 +3452,15 @@ void test_run_all(void) {
         // allocation after it refused: one red test became a hundred and
         // seventy under the nowantstrip and noshortfall sabotages. Same
         // discipline: release it, name it, redden a test that passed leaking it.
+        // A refund past zero means a charge and its return no longer pair. Nothing else
+        // would say so, because at MM-1 no decision reads this ledger.
+        if (account_underflows() != 0u) {
+            uart_puts("ACCOUNT-UNDERFLOW ");
+            if (!current_test->failed)
+                test_fail("a refund went past zero (see ACCOUNT-UNDERFLOW)");
+            account_underflows_rewind_for_test(0u);
+        }
+
         u32 parked = capacity_pool_unpark_all_for_test();
         if (parked != 0) {
             uart_puts("POOL-PARKED(");

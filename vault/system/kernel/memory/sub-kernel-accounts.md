@@ -1,0 +1,119 @@
+---
+id: sub-kernel-accounts
+type: sub
+title: "Memory accounts -- the durable tree and its physical ledger"
+parent: moc-kernel-memory
+code: [kernel/account.c, kernel/include/thylacine/memaccount.h, kernel/test/test_account.c]
+audit: hard
+guarded-by: [inv-i7, inv-i32]
+validated-by: [prose]
+locks: []
+hazards: []
+abis: []
+design: ["docs/SHARED-MEMORY-ACCOUNTING.md"]
+created: 2026-11-03
+updated: 2026-11-03
+---
+## Purpose
+
+Say who paid for every page a user induced, in a tree that outlives the Procs that
+used it. The 128 MiB limit can only be replaced once this is known to be exact, so MM-1
+builds the ledger and lets it watch. Nothing here refuses an allocation.
+
+## Contract
+
+Written, not booted. `docs/SHARED-MEMORY-ACCOUNTING.md` section 14 is the as-built
+statement; sections 3 and 4 are the design it serves.
+
+- Every buddy block the capacity pool counts, and every DMA block, carries a sponsor on
+  its head page from allocation to free. The sponsor is never NULL.
+- A charge is the whole block, including the buddy's rounding.
+- `account_pool_share()` equals `capacity_pool_charged()` whenever nothing is being
+  freed. That is the ledger's whole claim, and `account.ledger_reconciles_with_the_pool`
+  checks it across every allocation since boot.
+- An account lives until the last of its Procs, threads and blocks has gone, so an
+  orphan stays charged to its ancestors. Its parent never changes.
+- A Proc's account never changes, and a fork inherits it, so no fork resets anything.
+
+## Mechanism
+
+`alloc_user_pages` sponsors a block to the current thread's Proc's account;
+`alloc_user_pages_for` names one. `free_pages` is the one way off, as it is for the
+pool: `account_release_block` refunds the chain and drops the block's reference, before
+PG_USER is cleared, because the ledger reads that flag to tell pool pages from raw ones.
+
+File pages take the static system cache account, on both the single and the cluster
+fault paths, so a shared binary's text is not whoever faulted it first. A thread's pool
+pages are `CLASS_META`, recorded on the thread with a reference, because the thread's
+reaper can run long after the charge. kproc's threads cost nobody, as they cost the pool
+nothing.
+
+## Data structures
+
+`struct MemoryAccount`: incarnation, parent, refs, depth, `used[ACCOUNT_CLASSES]` in
+pages. Each level's `used` includes its descendants'. The root and the system cache are
+static, with incarnations 1 and 2, and start with a reference nothing drops.
+
+`struct page` keeps its 48 bytes. `holder` is a union of `slab_cache` and `sponsor`, and
+the flags say which: PG_SLAB or PG_SPONSORED. A slab comes from `alloc_pages` and is
+never sponsored. `struct Proc` gained `account`, and `struct Thread` `pool_sponsor`.
+
+## Concurrency
+
+No lock. A charge lands under whatever the allocator's caller holds, `as->lock` in a
+fault, and section 6 forbids taking an account lock there. Every field but `refs` and
+`used` is immutable once the account can be reached, so the walk up needs nothing, and
+depth bounds it. The counters are relaxed atomics: nothing decides on them yet. MM-2's
+first reservation brings section 6's transaction lock, taken before those locks.
+
+A reader of the ledger and the pool can see them a moment apart, because `free_pages`
+returns the two in sequence. The reconcile test retries until the pool holds still.
+
+## Invariants enforced
+
+None yet. [[inv-i32]] is still enforced by the pool and the budgets, and [[inv-i7]]
+decides when a page can go; the ledger only follows.
+
+## Error paths
+
+`account_child` answers NULL past `ACCOUNT_MAX_DEPTH` or when memory is short, with no
+reference kept. An allocation that fails charges nothing and keeps no reference. A
+refund past zero is counted in `account_underflows` and goes no further up; so is an
+account dying with anything still charged. Neither stops the kernel, because nothing
+depends on this ledger yet, so the test runner reddens the test during which either
+happened.
+
+## Performance
+
+Two relaxed atomics per level per allocation, with a tree at most 16 deep and in
+practice 1 or 2, beside a page zero. The page struct does not grow. Not measured.
+
+## Prosecution
+
+Round owed; see the row in `docs/AUDIT-TRIGGERS.md`. Questions for it: a block freed at
+another order than it was allocated at; `flags` overwritten between alloc and free; a
+page reaching `free_pages` after its sponsor died; a kthread working for a Proc charging
+the root; and whether `account_unref`'s free is safe under every lock a `free_pages`
+caller can hold.
+
+## Seams
+
+`kernel/test/test_mm0_holders.c` still pins today's limits: [[sub-kernel-retention]].
+`CLASS_RETAIN` is unused until MM-2. No operation reaches this from EL0 until SYS_ACCOUNT
+gets its dispatch arm.
+
+## Caveats
+
+1. A page table or pagemap node for a FILE Burrow is sponsored by whoever faulted it,
+   not the system cache. Small and bounded by the object, and it can stay charged after
+   that Proc exits. MM-2's class-aware allocation is where it moves.
+2. A kthread that allocates user pages for a Proc charges the root, since its Proc is
+   kproc. `thread_create_kthread_for` already pays by its owner for the thread itself.
+   Not yet inventoried for pages.
+3. `kstack_alloc`, `proc_pgtable_create` and slabs are not sponsored. The thread's stack
+   is in the ledger through its pool pages; the rest are section 12's metadata rows.
+
+## Provenance
+
+MM-1a, operator votes 47 and 48 for the interface it will serve. Written while the mac
+was queued, on top of an unbooted AS-4.

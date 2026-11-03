@@ -9,7 +9,7 @@ guarded-by: []
 validated-by: [gate-smp]
 locks: [lock-kmem-cache, lock-cache-list, lock-buddy-zone]
 created: 2026-08-01
-updated: 2026-10-27
+updated: 2026-11-03
 ---
 ## Purpose
 
@@ -60,6 +60,8 @@ inuse == 0 ⇒ drain the page back to the buddy. Bootstrap: a static
 `g_meta_cache` carries `struct kmem_cache` itself so
 `kmem_cache_create` can allocate descriptors; the kmalloc caches are
 static BSS.
+
+**`holder` (MM-1).** The slab backref is `page->holder.slab_cache`, in a named union with a memory account sponsor, and only read after PG_SLAB. A slab comes from `alloc_pages` and is never sponsored, so a slab page never holds the other member: [[sub-kernel-accounts]].
 
 ## Data structures
 

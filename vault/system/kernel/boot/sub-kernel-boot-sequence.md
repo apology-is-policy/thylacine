@@ -20,7 +20,7 @@ abis: [abi-boot-banner]
 design:
   - "docs/TOOLING.md section 10"
 created: 2026-08-02
-updated: 2026-10-27
+updated: 2026-11-03
 ---
 ## Purpose
 
@@ -264,6 +264,8 @@ retirer must exist before anything can create a private ring, which is why it is
 started in `boot_main` rather than lazily on first use -- a lazily-created
 retirer would have to be created by the dropping thread, which is exactly the
 thread that cannot block. See [[sub-kernel-loom]] for the lifecycle it serves.
+
+**`account_init` (MM-1)** runs just before `proc_init`, for the slab cache of child accounts. The root and the system cache are static and work before it. [[sub-kernel-accounts]].
 
 ## Data structures
 

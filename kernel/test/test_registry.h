@@ -613,6 +613,16 @@ void test_mm0_today_alias_charges_each_mapping(void);
 void test_mm0_today_partial_map_retains_the_whole(void);
 void test_mm0_today_orphan_pin_charges_no_proc(void);
 void test_mm0_today_dma_bypasses_the_pool(void);
+void test_account_rounded_block_charges_its_whole_order(void);
+void test_account_orphan_stays_charged_until_its_last_page(void);
+void test_account_refused_allocation_leaves_the_ledger(void);
+void test_account_depth_stops_at_sixteen(void);
+void test_account_incarnation_never_repeats(void);
+void test_account_refund_past_zero_is_counted(void);
+void test_account_fork_keeps_the_account(void);
+void test_account_dma_charges_whole_blocks_outside_the_pool(void);
+void test_account_thread_charges_meta_to_its_payer(void);
+void test_account_ledger_reconciles_with_the_pool(void);
 void test_vma_range_is_mapped(void);                     // B-1b
 void test_mmap_eager_copy_charge_pairing(void);   // #197
 void test_torpor_wait_rejects_bad_args(void);

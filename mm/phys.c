@@ -24,6 +24,7 @@
 
 #include <thylacine/dtb.h>
 #include <thylacine/extinction.h>
+#include <thylacine/memaccount.h>
 #include <thylacine/page.h>
 #include <thylacine/types.h>
 
@@ -433,6 +434,11 @@ void capacity_uncharge(u32 npages) {
 }
 
 struct page *alloc_user_pages(unsigned order, unsigned flags, bool exempt) {
+    return alloc_user_pages_for(account_current(), order, flags, exempt);
+}
+
+struct page *alloc_user_pages_for(struct MemoryAccount *sponsor, unsigned order,
+                                  unsigned flags, bool exempt) {
     if (order > MAX_ORDER) return NULL;
     u32 n = 1u << order;
     if (!capacity_charge(n, exempt)) return NULL;
@@ -441,6 +447,7 @@ struct page *alloc_user_pages(unsigned order, unsigned flags, bool exempt) {
     // The tag rides the block's HEAD page: the descriptor the buddy keys
     // everything on (flags, order, refcount) and the one free_pages is given.
     p->flags |= PG_USER;
+    account_sponsor_block(p, sponsor, order);
     return p;
 }
 
@@ -450,6 +457,8 @@ void free_pages(struct page *p, unsigned order) {
     // detach, a decommit, a COW put, a pagemap take, a table reclaim,
     // proc_pgtable_destroy, a failed install's unwind -- returns its charge
     // here, so the pool cannot drift from the pages that exist.
+    // The ledger first: it reads PG_USER to tell pool pages from raw ones.
+    if (p->flags & PG_SPONSORED) account_release_block(p, order);
     if (p->flags & PG_USER) {
         p->flags &= ~PG_USER;
         pool_uncharge(1u << order);

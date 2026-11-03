@@ -639,9 +639,13 @@ struct Thread {
     // ChainDrained). Only this thread touches either.
     struct poll_defer_chain lock_owed;
     u32                     defer_depth;
+
+    // The account paying for pool_pages, with a reference for as long as it does.
+    // NULL exactly when pool_pages is 0. Set and cleared with pool_pages.
+    struct MemoryAccount   *pool_sponsor;
 };
 
-_Static_assert(sizeof(struct Thread) == 1776,
+_Static_assert(sizeof(struct Thread) == 1792,
                "the deferred-walk chunk appended lock_owed (a pointer) + "
                "defer_depth (u32) after table_owed: 1760 -> 1776 (12 bytes + "
                "4 trailing pad to the 16-byte alignment); the thread cache "

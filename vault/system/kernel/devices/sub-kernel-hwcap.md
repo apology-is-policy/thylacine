@@ -22,7 +22,7 @@ design:
   - "docs/ARCHITECTURE.md section 13"
   - "docs/VIRTIO-PCI-DESIGN.md"
 created: 2026-08-02
-updated: 2026-09-17
+updated: 2026-11-03
 ---
 ## Purpose
 
@@ -197,6 +197,8 @@ bus-mastering cleared so the dead device stops writing, MEM-decode KEPT so the
 client's BAR keeps answering. Full MEM-decode disable is deferred to the last
 unreference, once the last hostmem Burrow (hence the last client mapping) is
 gone.
+
+**Who pays (MM-1).** `dma_create_body` sponsors each buddy block to the caller's account for its whole order, outside the capacity pool, and `free_pages` refunds it. This only watches: [[sub-kernel-accounts]].
 
 ## Data structures
 

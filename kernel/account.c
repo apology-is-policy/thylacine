@@ -1,0 +1,137 @@
+// The memory account tree and its physical ledger, MM-1: see <thylacine/memaccount.h>.
+#include <thylacine/memaccount.h>
+
+#include <thylacine/extinction.h>
+#include <thylacine/page.h>
+#include <thylacine/proc.h>
+#include <thylacine/thread.h>
+
+#include "../mm/slub.h"
+
+// 1 and 2 are the two static accounts. The counter is 64 bits and only ever rises, so
+// no account in a boot's life shares an incarnation with one that came before it.
+static u64 g_account_incarnation = 3;
+static u64 g_account_underflows;
+// Sponsored pages outside the capacity pool, which is what separates the two totals.
+static u64 g_account_unpooled;
+static struct kmem_cache *g_account_cache;
+
+static struct MemoryAccount g_account_root = {
+    .incarnation = 1,
+    .parent = NULL,
+    .refs = 1,
+    .depth = 0,
+};
+
+static struct MemoryAccount g_account_system_cache = {
+    .incarnation = 2,
+    .parent = &g_account_root,
+    .refs = 1,
+    .depth = 1,
+};
+
+struct MemoryAccount *account_root(void) { return &g_account_root; }
+struct MemoryAccount *account_system_cache(void) { return &g_account_system_cache; }
+
+struct MemoryAccount *account_current(void) {
+    struct Thread *t = current_thread();
+    if (!t || !t->proc || !t->proc->account) return &g_account_root;
+    return t->proc->account;
+}
+
+void account_init(void) {
+    if (g_account_cache) extinction("account_init called twice");
+    g_account_cache = kmem_cache_create("memory_account", sizeof(struct MemoryAccount), 8,
+                                        KMEM_CACHE_PANIC_ON_FAIL);
+    if (!g_account_cache) extinction("kmem_cache_create(memory_account) returned NULL");
+}
+
+struct MemoryAccount *account_child(struct MemoryAccount *parent) {
+    if (parent->depth + 1u >= ACCOUNT_MAX_DEPTH) return NULL;
+    struct MemoryAccount *a = kmem_cache_alloc(g_account_cache, KP_ZERO);
+    if (!a) return NULL;
+    a->incarnation = __atomic_fetch_add(&g_account_incarnation, 1u, __ATOMIC_RELAXED);
+    a->parent = parent;
+    a->refs = 1;
+    a->depth = parent->depth + 1u;
+    account_ref(parent);
+    return a;
+}
+
+void account_ref(struct MemoryAccount *a) {
+    if (__atomic_fetch_add(&a->refs, 1u, __ATOMIC_RELAXED) == 0u)
+        extinction("account_ref of a dead account");
+}
+
+// A loop, so a chain of last references costs no stack. The static two start with a
+// reference nothing drops, so neither reaches the free.
+void account_unref(struct MemoryAccount *a) {
+    while (a) {
+        u32 was = __atomic_fetch_sub(&a->refs, 1u, __ATOMIC_ACQ_REL);
+        if (was == 0u) extinction("account_unref of a dead account");
+        if (was != 1u) return;
+        struct MemoryAccount *parent = a->parent;
+        for (unsigned cls = 0; cls < ACCOUNT_CLASSES; cls++) {
+            if (__atomic_load_n(&a->used[cls], __ATOMIC_RELAXED) != 0u)
+                __atomic_fetch_add(&g_account_underflows, 1u, __ATOMIC_RELAXED);
+        }
+        kmem_cache_free(g_account_cache, a);
+        a = parent;
+    }
+}
+
+void account_charge(struct MemoryAccount *a, unsigned cls, u64 pages) {
+    for (; a; a = a->parent)
+        __atomic_fetch_add(&a->used[cls], pages, __ATOMIC_RELAXED);
+}
+
+void account_refund(struct MemoryAccount *a, unsigned cls, u64 pages) {
+    for (; a; a = a->parent) {
+        u64 cur = __atomic_load_n(&a->used[cls], __ATOMIC_RELAXED);
+        do {
+            if (cur < pages) {
+                __atomic_fetch_add(&g_account_underflows, 1u, __ATOMIC_RELAXED);
+                return;
+            }
+        } while (!__atomic_compare_exchange_n(&a->used[cls], &cur, cur - pages, true,
+                                              __ATOMIC_RELAXED, __ATOMIC_RELAXED));
+    }
+}
+
+u64 account_used(const struct MemoryAccount *a, unsigned cls) {
+    return __atomic_load_n(&a->used[cls], __ATOMIC_RELAXED);
+}
+
+u64 account_underflows(void) {
+    return __atomic_load_n(&g_account_underflows, __ATOMIC_RELAXED);
+}
+
+#ifdef KERNEL_TESTS
+void account_underflows_rewind_for_test(u64 count) {
+    __atomic_store_n(&g_account_underflows, count, __ATOMIC_RELAXED);
+}
+#endif
+
+u64 account_pool_share(void) {
+    return account_used(&g_account_root, CLASS_ALLOC) - __atomic_load_n(&g_account_unpooled, __ATOMIC_RELAXED)
+           + account_used(&g_account_root, CLASS_META);
+}
+
+void account_sponsor_block(struct page *head, struct MemoryAccount *a, unsigned order) {
+    account_ref(a);
+    account_charge(a, CLASS_ALLOC, 1ull << order);
+    if (!(head->flags & PG_USER))
+        __atomic_fetch_add(&g_account_unpooled, 1ull << order, __ATOMIC_RELAXED);
+    head->holder.sponsor = a;
+    head->flags |= PG_SPONSORED;
+}
+
+void account_release_block(struct page *head, unsigned order) {
+    struct MemoryAccount *a = head->holder.sponsor;
+    head->holder.sponsor = NULL;
+    head->flags &= ~PG_SPONSORED;
+    if (!(head->flags & PG_USER))
+        __atomic_fetch_sub(&g_account_unpooled, 1ull << order, __ATOMIC_RELAXED);
+    account_refund(a, CLASS_ALLOC, 1ull << order);
+    account_unref(a);
+}

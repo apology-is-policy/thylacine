@@ -9,7 +9,7 @@ code:
 audit: none
 guarded-by: []
 validated-by: [prose, gate-smp]
-updated: 2026-10-26
+updated: 2026-11-03
 ---
 
 ## Purpose
@@ -96,6 +96,8 @@ carries its verdict word: `<passed>/<total> PASS`, with a parenthesised
 soft-warn count appended when any fired, or `<passed>/<total> FAIL`. A
 production build compiles no suite and prints `  tests: DISABLED` with a reason:
 the same prefix, no numbers, no verdict word.
+
+**Ledger check.** After each test the runner prints `ACCOUNT-UNDERFLOW` and reddens the test if a memory account refund went past zero, then clears the count: [[sub-kernel-accounts]].
 
 ## Data structures
 

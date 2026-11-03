@@ -59,6 +59,7 @@ set(KERNEL_SRCS
     ../mm/slub.c
     territory.c
     handle.c
+    account.c
     burrow.c
     pagemap.c
     image.c
@@ -275,6 +276,7 @@ set(KERNEL_TEST_SRCS
     test/test_protect.c
     test/test_capacity.c
     test/test_mm0_holders.c
+    test/test_account.c
     test/test_torpor.c
     test/test_loom.c
     test/test_weft_ring.c

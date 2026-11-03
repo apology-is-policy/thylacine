@@ -38,6 +38,7 @@
 
 #include <stdint.h>
 #include <thylacine/dtb.h>
+#include <thylacine/memaccount.h>
 #include <thylacine/extinction.h>
 #include <thylacine/handle.h>
 #include <thylacine/irqfwd.h>           // irqfwd_init (P4-Ib R9 F142)
@@ -557,6 +558,7 @@ void boot_main(void) {
     // phys_init (alloc_pages must be live by the time the first
     // kobj_dma_create fires).
     kobj_dma_init();
+    account_init();
     proc_init();
     thread_init();
     sched_init(0);                              // boot CPU's per-CPU sched state

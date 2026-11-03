@@ -554,3 +554,33 @@ class; whether a map needs its own operation or `burrow_share_into`'s callers ch
 inside it, section 4's MAP_ACCOUNTED (MM-2); and how a session owner's control handle
 reaches a descendant, since transfer is unavailable and spawn's descriptor inheritance
 has not been read for a new kind (MM-1).
+
+## 14. MM-1 as built
+
+Section 10's first step: durable accounts and an exact physical ledger, watching only.
+The 128 MiB limit and the capacity pool decide everything they decided before.
+
+**Written, not yet booted:** the account tree, every Proc's account, a sponsor on every
+pool block and DMA block, thread pool pages as `CLASS_META`, and a test that the ledger
+equals the pool to the page across every allocation since boot.
+
+**The ledger takes no lock.** Section 6's transaction lock is for reservations, and its
+rule is that no account lock is taken under Burrow, VMA or driver locks. An allocation
+lands under `as->lock` in a fault, so a physical charge is a walk of relaxed atomics up
+an immutable parent chain. MM-2 keeps that for the settled charge and adds the lock for
+the reservation before it. A shadow counter can be read a moment out of step with the
+pool; nothing decides on it yet, and MM-2 must not decide on a raw read of it.
+
+**A sponsor rides the block's head page,** in a union with `slab_cache`, so `struct page`
+stays 48 bytes. `free_pages` is the one way off, as it is for the pool. Each block holds
+a reference to its account, which is what makes section 4's orphan rule true without
+any list of orphans.
+
+**The requesting account pays,** which is the current thread's Proc's. File pages take a
+static system cache account on both fault paths, section 3's rule. A thread's pool pages
+are charged to its payer and remembered on the thread, because its reaper runs in another
+context.
+
+**A broken pairing does not stop the kernel,** because at this stage nothing depends on
+the ledger. It is counted, and the test runner reddens the test it happened under. That
+changes when a decision first reads the ledger.

@@ -95,6 +95,10 @@ u32  capacity_reserve_pages(void);  // the TCB reserve
 // then allocated like alloc_pages, then tagged PG_USER so free_pages returns
 // the charge. NULL, with nothing charged, when the pool or the buddy refuses.
 struct page *alloc_user_pages(unsigned order, unsigned flags, bool exempt);
+// The same with the account named: alloc_user_pages charges the caller's own.
+struct MemoryAccount;
+struct page *alloc_user_pages_for(struct MemoryAccount *sponsor, unsigned order,
+                                  unsigned flags, bool exempt);
 
 // The kernel memory a user Proc's existence costs that is not a user page (a
 // thread's kernel stack and slot, ARCH 7.3.5): charged to the same pool, with

@@ -77,7 +77,12 @@ struct page {
     // per-Burrow lock could serialise the break's decide. See cow.h.
     u32 cow_share;
     void *slab_freelist;        // SLUB: head of free objects in this slab
-    struct kmem_cache *slab_cache; // SLUB: cache backref (NULL when not a slab)
+    // Which of these a block holds is the head page's flags: PG_SLAB or PG_SPONSORED,
+    // never both, because a slab comes from alloc_pages and is never sponsored.
+    union {
+        struct kmem_cache *slab_cache;   // SLUB: cache backref (NULL when not a slab)
+        struct MemoryAccount *sponsor;   // the account the block is charged to
+    } holder;
 };
 
 // Pin struct page size at compile time (P1-I audit F35). The struct
@@ -97,6 +102,9 @@ _Static_assert(sizeof(struct page) == 48,
 #define PG_USER       (1u << 4) // B-1a': allocated by alloc_user_pages and counted in the
                                 // user pool; free_pages clears it and returns the charge
                                 // (mm/phys.h). On the block's HEAD page, like the rest.
+#define PG_SPONSORED  (1u << 5) // MM-1: holder.sponsor names the account charged for the
+                                // block; free_pages refunds it. Independent of PG_USER,
+                                // since DMA backing is charged and is outside the pool.
 
 // Allocation flags (caller-passed to alloc_pages / kpage_alloc).
 //
