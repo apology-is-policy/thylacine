@@ -56,7 +56,7 @@ locks: []
 abis: []
 design: ["docs/LIFE-SUPPORT.md"]
 created: 2026-08-01
-updated: 2026-10-29
+updated: 2026-11-03
 ---
 ## Purpose
 

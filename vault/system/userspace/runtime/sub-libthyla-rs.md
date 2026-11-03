@@ -49,7 +49,7 @@ design:
   - "docs/UTOPIA-SHELL-DESIGN.md section 15"
   - "docs/ARCHITECTURE.md section 3.5"
 created: 2026-08-03
-updated: 2026-10-29
+updated: 2026-11-03
 ---
 ## Dedicated service owner (October 2)
 

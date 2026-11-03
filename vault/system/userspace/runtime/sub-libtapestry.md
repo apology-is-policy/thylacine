@@ -18,7 +18,7 @@ hazards: []
 abis: []
 design: ["docs/TAPESTRY.md"]
 created: 2026-08-04
-updated: 2026-10-07
+updated: 2026-11-03
 ---
 ## Cooperative hidden storage (October 4)
 

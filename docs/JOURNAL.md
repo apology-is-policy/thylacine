@@ -22,6 +22,74 @@ needed the operator.
 
 
 ---
+## 2026-11-03 -- a chord during session start, and the hole my own narrowing opened (corona)
+
+**What this run closed.** r3's four P3s: a chord around session start ended the session, a request across a long episode
+timed out under an open prompt, a refused chord cleared queued input and could stick a key, and the re-sample arm had no
+durable test. Also a checker for the needle defect behind q-seat7's lost boot, and a free-page read that stays stable. All
+of it was drafted without a lease on corona/seat-p3 (fc61093a2 onward), so nothing compiled until q-p3.
+
+**The design: a seat that is not normal at start is a wait, not a failure.** `Participant` moves the Link's decisions into
+code the host compiles, which made the rest testable. A refused Reserve retries on the same fid. A refused first Join
+samples through `Coordinator::sample`, which reads a reserving peer's own record and pins nothing, and joins after the
+episode. Bring-up, setup and a flight stop counting while parked. A refused chord pushes a reset, since it moves no
+generation and nothing else would tell the compositor a release was lost.
+
+**First compile, q-p3 at 46d65fb35 (23:32Z..00:36Z).** Every crate built first time; K 2122/2122; the real leak through the
+stable read 2116/2122, `free_before=487415 free_after=487412`, 3 short. Plain, -refused, -recover, -dead and -states passed,
+and the soak ran 60 cycles in 972 s: 60 recoveries, 120 rejoined, 121 witnesses, 0 ended-nonzero. R1 (a first refused Join
+fatal) went red at the before-join leg and R2 (no reset) red at its own leg. All six CI-image scenarios passed; the one
+`code 1` in ls-imperium is cora's shell logging out after a refused request. -start went red.
+
+**The audit (Opus on Opus, Fable refusing this conversation's shape): 0 P0, 1 P1, 2 P2, 2 P3.**
+
+- **F1 [P1] was my regression.** To let a never-joined failure degrade rather than kill the session, I narrowed the exit
+  rule from "had a seat" to "the Link has read a Join's reply". The table serves a Join before its reply can be read. A
+  worker error in that window left the process alive with `potential` set, so `aggregate` returned None for the session and
+  every later chord timed out: silent, permanent loss of the SAK. I reached the same hole reading my diff while the round
+  ran, by asking what `participated` had been protecting. `may_owe` now holds from the send of a Join, and only a refused
+  first Join clears it. -unread passes, and R5 (`may_owe` reads `joined`) goes red, `the member survived its failure`.
+- **F2 [P2] was predicted, then measured.** The report said -start demanded an order the code does not give, and its
+  after-join leg did not aim at window 3 because bring-up broke at 3 s inside the episode. S-start's transcript, already on
+  disk, showed `inline-media service` before `seat link rejoined` on a correct tree. The lever now keeps bring-up unready
+  from the Join until the seat has come back, with only the parked refresh keeping it alive.
+- **F3 [P2], which I had too as S1 and S2.** `parked` read a snapshot of unbounded age, and my comment "the kernel bounds
+  it" was false: FAILED has no deadline (proc.c:3051) and a held key keeps it there. `PARKED_CEILING_MS` is 120 s from the
+  first reply away, and fresh replies do not restart it. Not taken: the suggested 1 s freshness rule, since a call to Lictor
+  can take seconds and the ceiling already bounds a silent coordinator.
+- **F4 [P3].** The commit that added check-console-lines said it took every needle. It did not: procs, nested braces, globs
+  and set variables were dropped, a comment could mask a split, and a definition could swallow the next call. It now reads
+  1838 needles, up from 1579, and counts the 10 it cannot. One new hit, the dap-probe stop line, is one write.
+- **F5 [P3].** `Interaction::age(now, parked)` puts the decision under the host test (the mutant goes red by name). A forced
+  refusal of the first Reserve makes the retry a required line (R4 red). Open by reason: no guest witness for `age`'s
+  wiring, since nothing in the tree starts a flight inside an episode without a lever that fakes one.
+
+**Then I repeated a pinned mistake in the fix.** q-p3b's S-start went red again: `saw only {rejoined}`, with the two lines
+adjacent in the transcript. I had written the two needles as separate patterns. Expect tries patterns in the order listed
+and discards the buffer through the match, so `rejoined` ate the earlier line. The project's rule says one regex alternation
+for cross-process markers, and the report's F2 had named that rule. A host expect fixture shows the old form losing the line
+in one order and the alternation reading both in either. 4227bfde1.
+
+**q-p3c at 4227bfde1 (01:36Z..01:47Z).** -start passed on three boots, 111 s, 108 s and 110 s, with `inline-media service`
+still one line before `seat link rejoined`, and both read. R3's reds had all fired at the before-join leg, so they could not
+show that the after-join leg bites, which was F2's point. R8 keeps the parked refresh only for a member that has not joined:
+red at the after-join leg, `login: session ended (code 1)`.
+
+**The rest of q-p3b at 70e76dff2 (00:38Z..01:11Z).** Host green, 32 named seat-control mutants red; -unread, -refused, plain
+and -dead pass. R3-deadline, R3-notice and R7-lane red at the before-join leg, R4 at the Reserve, R5 at -unread. K 2122/2122.
+Each mutant's build rc was read before its verdict.
+
+**What "fixed" covers.** On the mac's session image: a chord in each window of session start leaves a working session; a
+member that may owe dies on failure; a refused chord resets. Host only: the ceiling and `age`. NOT covered or still open:
+`reserve`'s parked write has no bound and `Client::call` to Lictor no timeout (OPEN-BUGS, pre-existing); `age`'s guest wiring;
+F4's Corvus half and the 10 ms note from the last close; the 69 all-variable lines. The soak ran at 46d65fb35, before the
+fixes, which touch session start and the ceiling and not the cycle. The reviewer did not audit `Applications::retire`,
+`admission_deadline.rs`, `service_owner.rs` or Loom ring teardown on a Link drop with an in-flight op.
+
+**Lessons.** A narrowing needs the question "what was the wide rule protecting?" before the question "what does it let me do?".
+A comment naming a bound is a claim about every state, including the one with no deadline. A rule that is pinned and named
+in the report can still be missed in the fix: read the fix against the finding's own text.
+
 ## 2026-11-02 -- a seat that fails has to say so, and two defects a retry would have hidden (corona)
 
 **Votes 36 and 37 (the operator's).** A dead seat service fails the seat and returns it to NORMAL (36). SEAT_QUERY

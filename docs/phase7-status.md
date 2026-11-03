@@ -2966,3 +2966,23 @@ Code ff4a7458e, ee99f3c70, 9cc84c31e, 310355dc6, e4c2dc5bc, 99e70535f, 5c325e53a
 - **Audit.** Opus reviewing Opus, Fable having refused this conversation's shape: r2 0/0/2/4, r3 (a re-audit, r2's fix
   having regressed) 0/0/2/4. F1-F6 and r3's two P2s fixed. Open: r3's four P3s and the one-write batch on corona/seat-p3,
   F4's Corvus half, a chord within Corvus's 10 ms poll after a commit, a peer refill during the settling drain.
+
+## The seat at session start, and its P3s -- 2026-11-03
+
+Code fc61093a2, 659023862, 70e76dff2; witnesses and checker c263b9080, 46d65fb35, 4227bfde1. Closes OPEN-BUGS 2026-11-02T11:57Z,
+2026-11-02T23:19Z and the spanning half of 2026-11-02T19:15Z.
+
+- **A chord at session start is a wait.** A refused Reserve retries, a refused first Join samples and joins after the episode,
+  and bring-up, setup and a flight stop counting while parked, up to `PARKED_CEILING_MS`. A member that may owe a
+  cancellation dies on any failure; one the table refused leaves the session running without the service.
+- **A refused chord** clears the batch and pushes a reset, unless input is withheld.
+- **Decisions on a host.** `seat_control::Participant`; `Interaction::age`.
+- **Gates.** q-p3 at 46d65fb35: K 2122/2122, the real leak 3 short through the stable read, soak x60 0 failures, plain,
+  -refused, -recover, -dead, -states and six CI-image scenarios PASS, R1 and R2 red. q-p3b at 70e76dff2: 32 named seat-control
+  mutants red, the `age` mutant red, -unread, -refused, plain, -dead PASS, R3-deadline, R3-notice, R4, R5, R7 red, K 2122/2122.
+  q-p3c at 4227bfde1: -start PASS on three boots, R8 red at the after-join leg. Not the full CI gate (none until the
+  operator says so).
+- **tools/check-console-lines.py** runs in `build.sh` and fails a needle read across two console writes: 1838 needles, 10
+  counted as unread, 0 spanning.
+- **Audit.** Opus reviewing Opus, Fable having refused this conversation's shape: 0 P0, 1 P1, 2 P2, 2 P3, all fixed but part
+  of F5. Open: `age`'s guest wiring, `reserve`'s parked write and `Client::call` without a bound, the 69 all-variable lines.

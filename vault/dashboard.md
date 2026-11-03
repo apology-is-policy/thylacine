@@ -127,6 +127,7 @@ Generated — do not edit between the markers (`quaestor render`).
 
 ## Recent changes
 
+- 2026-11-03 [[chg-2026-11-03-seat-session-start]] — A chord at session start is a wait: the seat's P3s, a member that may owe, and a needle checker
 - 2026-11-02 [[chg-2026-11-02-seat-failure-path]] — A seat that fails says so: votes 36 and 37, the generation retire, and the two defects behind one lost boot
 - 2026-10-29 [[chg-2026-10-29-spawn-env-shapes]] — The spawn environment tail takes b3's audited shapes: the child is born with no environment, the dot names are refused
 - 2026-10-28 [[chg-2026-10-28-spawn-env]] — The spawn environment tail: a spawner names its child's whole environment (env-a kernel + native, env-c pouch)
@@ -134,5 +135,4 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-10-22 [[chg-2026-10-22-thread-model-c1]] — Thread-model C1: an exited user thread is freed by the resume path of its last switch-out
 - 2026-10-22 [[chg-2026-10-22-thread-model-c3]] — Thread-model C3: each Proc's threads under their own lock
 - 2026-10-21 [[chg-2026-10-21-thread-model-c7a]] — Thread-model C7a: the debug focus falls back to main, never the newest thread
-- 2026-10-20 [[chg-2026-10-20-in-proc-reap]] — An exited peer thread is freed at its Proc's next thread create (the in-Proc reap)
 <!-- generated:end -->
