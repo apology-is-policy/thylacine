@@ -1396,6 +1396,7 @@ void test_stalk_walk_failure_keeps_its_errno(void);
 void test_stalk_create_refuses_on_a_failed_walk(void);
 void test_stalk_union_walk_failure(void);
 void test_stalk_walk_failure_on_the_rewalk(void);
+void test_stalk_spawn_reports_the_walk_reason(void);
 void test_devsrv_registered(void);
 void test_devsrv_open_root_dir(void);
 void test_devsrv_stat_native_root(void);

@@ -295,9 +295,15 @@ static const char *g_fix_walk_err_name;
 static u64         g_fix_walk_err_parent;
 static int         g_fix_walk_err_rc;
 static int         g_fix_walk_err_skip;
+static u64         g_fix_walk_err2_parent;
+static int         g_fix_walk_err2_rc;
 
 static bool fix_walk_refused(u64 parent, const char *name) {
     if (!g_fix_walk_err_name || !fix_streq(name, g_fix_walk_err_name)) return false;
+    if (g_fix_walk_err2_parent && g_fix_walk_err2_parent == parent) {
+        dev_walk_failed(g_fix_walk_err2_rc);
+        return true;
+    }
     if (g_fix_walk_err_parent && g_fix_walk_err_parent != parent)      return false;
     if (g_fix_walk_err_skip > 0) { g_fix_walk_err_skip--; return false; }
     if (g_fix_walk_err_rc) dev_walk_failed(g_fix_walk_err_rc);
@@ -5155,7 +5161,11 @@ static void walk_reason_set(const char *name, u64 parent, int rc, int skip) {
     g_fix_walk_err_skip   = skip;
 }
 
-static void walk_reason_clear(void) { walk_reason_set(NULL, 0, 0, 0); }
+static void walk_reason_clear(void) {
+    walk_reason_set(NULL, 0, 0, 0);
+    g_fix_walk_err2_parent = 0;
+    g_fix_walk_err2_rc     = 0;
+}
 
 #define WALK_REASONS 7u
 static void walk_reason_case(struct Spoor *root) {
@@ -5249,13 +5259,17 @@ void test_stalk_union_walk_failure(void) {
     TEST_EXPECT_EQ(mount(p.territory, um1, pt, MBEFORE), 0, "mount um1 MBEFORE umpt");
     TEST_EXPECT_EQ(mount(p.territory, um2, pt, MAFTER),  0, "mount um2 MAFTER umpt");
 
-    int e_skip = 0, e_first = 0, e_second = 0, e_named = 0, e_plain = 0;
-    int h_fail = 0, h_plain = 0, h_held = 0;
+    int e_skip = 0, e_first = 0, e_second = 0, e_named = 0, e_plain = 0, e_mixed = 0;
+    int h_fail = 0, h_plain = 0, h_held = 0, h_named = 0, h_mixed = 0;
 
     walk_reason_set("shared", 22, -T_E_IO, 0);
     struct Spoor *skip = stalk_err(&p, root, "umpt/shared", 11, STALK_OPEN, 0, &e_skip);
     u64 skip_qid = skip ? skip->qid.path : 0u;
     if (skip) spoor_clunk(skip);
+    int h_skip = 0;
+    struct Spoor *m0 = stalk_union_member_holding(&p, pt, "shared", &h_skip);
+    u64 m0_qid = m0 ? m0->qid.path : 0u;
+    if (m0) spoor_clunk(m0);
 
     walk_reason_set("only1", 22, -T_E_IO, 0);
     struct Spoor *q1 = stalk_err(&p, root, "umpt/only1", 10, STALK_OPEN, 0, &e_first);
@@ -5266,6 +5280,12 @@ void test_stalk_union_walk_failure(void) {
 
     walk_reason_set("nosuch", 22, -T_E_NOENT, 0);
     struct Spoor *q3 = stalk_err(&p, root, "umpt/nosuch", 11, STALK_OPEN, 0, &e_named);
+    struct Spoor *m4 = stalk_union_member_holding(&p, pt, "nosuch", &h_named);
+
+    g_fix_walk_err2_parent = 25;
+    g_fix_walk_err2_rc     = -T_E_IO;
+    struct Spoor *q5 = stalk_err(&p, root, "umpt/nosuch", 11, STALK_OPEN, 0, &e_mixed);
+    struct Spoor *m5 = stalk_union_member_holding(&p, pt, "nosuch", &h_mixed);
 
     walk_reason_clear();
     struct Spoor *q4 = stalk_err(&p, root, "umpt/nosuch", 11, STALK_OPEN, 0, &e_plain);
@@ -5274,7 +5294,7 @@ void test_stalk_union_walk_failure(void) {
     bool held = m3 != NULL;
     if (m3) spoor_clunk(m3);
 
-    bool none = !q1 && !q2 && !q3 && !q4 && !m1 && !m2;
+    bool none = !q1 && !q2 && !q3 && !q4 && !q5 && !m1 && !m2 && !m4 && !m5;
     territory_unref(p.territory);
     spoor_clunk(um1);
     spoor_clunk(um2);
@@ -5283,15 +5303,44 @@ void test_stalk_union_walk_failure(void) {
 
     TEST_EXPECT_EQ(skip_qid, (u64)26, "um1 cannot say: um2's shared wins");
     TEST_EXPECT_EQ(e_skip, 0, "and that is no error");
+    TEST_ASSERT(m0_qid != 0, "the member holding a leaf: a later member still answers");
+    TEST_EXPECT_EQ(h_skip, 0, "and that is no error either");
     TEST_ASSERT(none, "a name no member could produce resolves to nothing");
     TEST_EXPECT_EQ(e_first, T_E_IO, "the first member failed, no other holds it: EIO");
     TEST_EXPECT_EQ(e_second, T_E_IO, "a miss, then a failure: EIO");
     TEST_EXPECT_EQ(e_named, T_E_NOENT, "a member's own ENOENT is a miss");
+    TEST_EXPECT_EQ(h_named, 0, "and leaves the caller nothing to report");
+    TEST_EXPECT_EQ(e_mixed, T_E_IO, "a member's ENOENT does not hide the next one's EIO");
+    TEST_EXPECT_EQ(h_mixed, T_E_IO, "the member holding a leaf: the same");
     TEST_EXPECT_EQ(e_plain, T_E_NOENT, "control: an all-miss is ENOENT");
     TEST_EXPECT_EQ(h_fail, T_E_IO, "the member holding a leaf: the same");
     TEST_EXPECT_EQ(h_plain, 0, "control: no member holds it, no failure");
     TEST_ASSERT(held, "control: a member holds only1");
     TEST_EXPECT_EQ(h_held, 0, "control: and no failure");
+}
+
+// A spawn is a walk: it reports the walk's reason, and only a miss reads ENOENT. A
+// file the walk found and the loader cannot use is no miss either.
+void test_stalk_spawn_reports_the_walk_reason(void) {
+    fixmade_reset();
+    struct Proc *p = ocp_proc("/");
+    TEST_ASSERT(p != NULL, "proc + territory");
+    walk_reason_set("wf", 0, -T_E_IO, 0);
+    int refused = sys_spawn_full_argv_debug_for_proc(p, "/a/wf", 5, NULL, 0u, 0u, NULL, 0u,
+                                                     CAP_NONE, 0u, false, 0u, 0u, NULL, 0u,
+                                                     NULL, 0u, 0u, 0u);
+    walk_reason_set("wf", 0, -116, 0);
+    int stale = sys_spawn_full_argv_debug_for_proc(p, "/a/wf", 5, NULL, 0u, 0u, NULL, 0u,
+                                                   CAP_NONE, 0u, false, 0u, 0u, NULL, 0u,
+                                                   NULL, 0u, 0u, 0u);
+    walk_reason_clear();
+    int missed = sys_spawn_full_argv_debug_for_proc(p, "/a/wf", 5, NULL, 0u, 0u, NULL, 0u,
+                                                    CAP_NONE, 0u, false, 0u, 0u, NULL, 0u,
+                                                    NULL, 0u, 0u, 0u);
+    ocp_teardown(p);
+    TEST_EXPECT_EQ(refused, -T_E_IO, "a binary's walk failed: EIO, not absent");
+    TEST_EXPECT_EQ(stale, -116, "the server's own errno, by value");
+    TEST_EXPECT_EQ(missed, -T_E_NOENT, "control: a real miss reads ENOENT");
 }
 
 // The fused run went through and the re-walk to its split or its link did not.
