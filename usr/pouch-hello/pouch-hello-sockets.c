@@ -754,10 +754,12 @@ static long long intr_now_ms(void)
     return (long long)ts.tv_sec * 1000LL + ts.tv_nsec / 1000000L;
 }
 
-static int intr_asleep(pid_t pid)
+/* Main reads this while running, and no third thread exists, so a sleeping row is the
+ * waiter's. */
+static int intr_waiter_asleep(void)
 {
     char path[32], buf[512];
-    snprintf(path, sizeof path, "/proc/%d/sched", (int)pid);
+    snprintf(path, sizeof path, "/proc/%d/sched", (int)getpid());
     int fd = open(path, O_RDONLY);
     if (fd < 0) return 0;
     ssize_t n = read(fd, buf, sizeof buf - 1);
@@ -767,18 +769,21 @@ static int intr_asleep(pid_t pid)
     return strstr(buf, " SLP\n") != NULL;
 }
 
-/* Post at pid each second until it writes one byte on `from`, by the deadline. A post
- * that beat the wait ran the handler early and left the wait standing. */
-static int intr_post_until_byte(pid_t pid, int from, long long deadline)
+/* Post each second until the waiter writes one byte on `from`, by the deadline. A post
+ * that beat the wait ran the handler early and left the wait standing. Undirected, the
+ * post finds the waiter because main has the note blocked; directed, it names the
+ * thread. */
+static int intr_post_until_byte(pthread_t w, int directed, int from, long long deadline)
 {
     int seen = 0;
     while (intr_now_ms() < deadline && seen < 2) {
-        seen = intr_asleep(pid) ? seen + 1 : 0;
+        seen = intr_waiter_asleep() ? seen + 1 : 0;
         usleep(5000);
     }
     if (seen < 2) return -1;
     for (;;) {
-        kill(pid, SIGUSR1);
+        if (directed) pthread_kill(w, SIGUSR1);
+        else kill(getpid(), SIGUSR1);
         struct pollfd pf = { from, POLLIN, 0 };
         long long left = deadline - intr_now_ms();
         if (left <= 0) return -1;
@@ -791,10 +796,72 @@ static int intr_post_until_byte(pid_t pid, int from, long long deadline)
     }
 }
 
-/* Both children catch the note with no SA_RESTART, see EINTR, say so, and then finish
+struct intr_waiter {
+    int fd;              /* the listener, or the connected socket */
+    int said;            /* one byte here on seeing EINTR, or on giving up */
+    volatile int rc;     /* -1 while it runs, then 0 or the step that went wrong */
+};
+
+static void *intr_gives_up(struct intr_waiter *w, int rc)
+{
+    w->rc = rc;
+    (void)write(w->said, "X", 1);
+    return NULL;
+}
+
+/* A waiter still in its wait cannot be joined, so this does not return. */
+static int intr_stuck(const char *what, const struct intr_waiter *w)
+{
+    printf("test: note-intr: %s (waiter rc=%d)\n", what, w->rc);
+    fflush(stdout);
+    _exit(1);
+}
+
+/* A new thread starts with its creator's mask, and main has the note blocked. */
+static void intr_open_mask(void)
+{
+    sigset_t none;
+    sigemptyset(&none);
+    pthread_sigmask(SIG_SETMASK, &none, NULL);
+}
+
+static void *intr_accept_waiter(void *arg)
+{
+    struct intr_waiter *w = arg;
+    intr_open_mask();
+    int r = accept(w->fd, NULL, NULL);
+    if (!(r == -1 && errno == EINTR && g_intr_caught >= 1)) return intr_gives_up(w, 40);
+    (void)write(w->said, "E", 1);
+    do {
+        r = accept(w->fd, NULL, NULL);
+    } while (r < 0 && errno == EINTR);
+    if (r < 0) return intr_gives_up(w, 41);
+    char b = 0;
+    w->rc = read(r, &b, 1) == 1 && b == 'A' ? 0 : 42;
+    close(r);
+    return NULL;
+}
+
+static void *intr_recv_waiter(void *arg)
+{
+    struct intr_waiter *w = arg;
+    intr_open_mask();
+    char b = 0;
+    ssize_t n = recv(w->fd, &b, 1, 0);
+    if (!(n == -1 && errno == EINTR && g_intr_caught >= 1)) return intr_gives_up(w, 43);
+    (void)write(w->said, "E", 1);
+    do {
+        n = recv(w->fd, &b, 1, 0);
+    } while (n < 0 && errno == EINTR);
+    w->rc = n == 1 && b == 'B' ? 0 : 44;
+    return NULL;
+}
+
+/* The waiter catches the note with no SA_RESTART, sees EINTR, says so, and then finishes
  * the same call, because the interrupted call must have left the service and the
- * connection whole. A kernel that does not unwind these waits leaves the child asleep,
- * and the driver reports it at the deadline. */
+ * connection whole. It is a thread because Pouch has no fork, and because a second Proc
+ * may not dial this one's service. A kernel that does not unwind these waits leaves it
+ * asleep, and main reports that at the deadline. */
 static int test_note_intr(void)
 {
     int s = socket(AF_UNIX, SOCK_STREAM, 0);
@@ -814,77 +881,78 @@ static int test_note_intr(void)
         printf("test: note-intr: sigaction errno=%d\n", errno);
         return 1;
     }
-    fflush(stdout);
-
-    /* accept: the child blocks in SYS_srv_accept. */
     int said[2];
-    if (pipe(said) != 0) return 1;
-    pid_t kid = fork();
-    if (kid < 0) return 1;
-    if (kid == 0) {
-        int r = accept(s, NULL, NULL);
-        if (!(r == -1 && errno == EINTR && g_intr_caught >= 1)) _exit(40);
-        (void)write(said[1], "E", 1);
-        r = accept(s, NULL, NULL);
-        if (r < 0) _exit(41);
-        char b = 0;
-        _exit(read(r, &b, 1) == 1 && b == 'A' ? 0 : 42);
-    }
-    long long deadline = intr_now_ms() + INTR_DEADLINE_MS;
-    int st = 0;
-    if (intr_post_until_byte(kid, said[0], deadline) != 0) {
-        printf("test: note-intr: accept not interrupted\n");
-        kill(kid, SIGKILL);
-        waitpid(kid, &st, 0);
+    if (pipe(said) != 0) {
+        printf("test: note-intr: pipe errno=%d\n", errno);
         return 1;
+    }
+    sigset_t usr1, old;
+    sigemptyset(&usr1);
+    sigaddset(&usr1, SIGUSR1);
+    if (pthread_sigmask(SIG_BLOCK, &usr1, &old) != 0) {
+        printf("test: note-intr: mask failed\n");
+        return 1;
+    }
+
+    /* accept: the waiter blocks in the open of the service. The post names no thread. */
+    struct intr_waiter w = { s, said[1], -1 };
+    pthread_t t;
+    if (pthread_create(&t, NULL, intr_accept_waiter, &w) != 0) {
+        printf("test: note-intr: pthread_create failed\n");
+        return 1;
+    }
+    if (intr_post_until_byte(t, 0, said[0], intr_now_ms() + INTR_DEADLINE_MS) != 0) {
+        return intr_stuck("accept not interrupted", &w);
     }
     int c = socket(AF_UNIX, SOCK_STREAM, 0);
     if (c < 0 || connect(c, (struct sockaddr *)&addr, sizeof(addr)) != 0 ||
         write(c, "A", 1) != 1) {
         printf("test: note-intr: connect after EINTR errno=%d\n", errno);
-        kill(kid, SIGKILL);
-        waitpid(kid, &st, 0);
-        return 1;
+        return intr_stuck("no connection for the waiter", &w);
     }
-    while (waitpid(kid, &st, 0) < 0 && errno == EINTR) {}
+    pthread_join(t, NULL);
     close(c);
-    if (!WIFEXITED(st) || WEXITSTATUS(st) != 0) {
-        printf("test: note-intr: accept child status %#x\n", (unsigned)st);
+    if (w.rc != 0) {
+        printf("test: note-intr: accept waiter rc=%d\n", w.rc);
         return 1;
     }
     printf("test: accept reads EINTR, and the next accept takes the connection\n");
-    fflush(stdout);
 
-    /* recv: the child blocks reading its connected socket. */
+    /* recv: the waiter blocks reading its connected socket. The post names it. */
     c = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (c < 0 || connect(c, (struct sockaddr *)&addr, sizeof(addr)) != 0) return 1;
-    int conn = accept(s, NULL, NULL);
-    if (conn < 0) return 1;
-    kid = fork();
-    if (kid < 0) return 1;
-    if (kid == 0) {
-        char b = 0;
-        ssize_t n = recv(c, &b, 1, 0);
-        if (!(n == -1 && errno == EINTR && g_intr_caught >= 1)) _exit(43);
-        (void)write(said[1], "E", 1);
-        n = recv(c, &b, 1, 0);
-        _exit(n == 1 && b == 'B' ? 0 : 44);
-    }
-    deadline = intr_now_ms() + INTR_DEADLINE_MS;
-    if (intr_post_until_byte(kid, said[0], deadline) != 0) {
-        printf("test: note-intr: recv not interrupted\n");
-        kill(kid, SIGKILL);
-        waitpid(kid, &st, 0);
+    if (c < 0 || connect(c, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
+        printf("test: note-intr: connect for recv errno=%d\n", errno);
         return 1;
     }
-    if (write(conn, "B", 1) != 1) return 1;
-    while (waitpid(kid, &st, 0) < 0 && errno == EINTR) {}
-    if (!WIFEXITED(st) || WEXITSTATUS(st) != 0) {
-        printf("test: note-intr: recv child status %#x\n", (unsigned)st);
+    int conn = accept(s, NULL, NULL);
+    if (conn < 0) {
+        printf("test: note-intr: accept for recv errno=%d\n", errno);
+        return 1;
+    }
+    g_intr_caught = 0;
+    w.fd = c;
+    w.rc = -1;
+    if (pthread_create(&t, NULL, intr_recv_waiter, &w) != 0) {
+        printf("test: note-intr: pthread_create failed\n");
+        return 1;
+    }
+    if (intr_post_until_byte(t, 1, said[0], intr_now_ms() + INTR_DEADLINE_MS) != 0) {
+        return intr_stuck("recv not interrupted", &w);
+    }
+    if (write(conn, "B", 1) != 1) {
+        printf("test: note-intr: write errno=%d\n", errno);
+        return intr_stuck("no byte for the waiter", &w);
+    }
+    pthread_join(t, NULL);
+    if (w.rc != 0) {
+        printf("test: note-intr: recv waiter rc=%d\n", w.rc);
         return 1;
     }
     printf("test: recv reads EINTR, and the next recv takes the byte\n");
 
+    /* Unblocked under the handler, so a post still queued ends here and not in the
+     * default. */
+    pthread_sigmask(SIG_SETMASK, &old, NULL);
     sa.sa_handler = SIG_DFL;
     sigaction(SIGUSR1, &sa, NULL);
     close(conn);
