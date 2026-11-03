@@ -37,6 +37,7 @@
 #include <thylacine/path.h>     // #66: quarry->path assertions
 #include <thylacine/perm.h>
 #include <thylacine/proc.h>
+#include <thylacine/thread.h>
 #include <thylacine/spoor.h>
 #include <thylacine/stalk.h>
 #include <thylacine/syscall.h>   // struct t_stat, T_S_IFDIR/IFREG
@@ -281,8 +282,14 @@ static int g_fix_walkattrs_calls;
 // set: a dead session's Twalk. Set from a readlink hook, cleared by the test.
 static bool g_fix_walk0_fail;
 
+static u32  g_fix_intr_walks;
+static bool g_fix_walk_intr;
+static bool g_fix_open_intr;
+
 static struct Walkqid *fix_walk(struct Spoor *c, struct Spoor *nc,
                                 const char **name, int nname) {
+    g_fix_intr_walks++;
+    g_fix_walk_intr = g_fix_walk_intr || current_thread()->note_interruptible;
     if (!c || nname < 0) return NULL;
     if (nname == 0 && g_fix_walk0_fail) return NULL;
     // R2-F1 regression: a 9P server rejects a Twalk (any nwname) from an OPENED
@@ -356,6 +363,8 @@ static struct Walkqid *fix_walk_attrs(struct Spoor *c, struct Spoor *nc,
                                       const char **names,
                                       const size_t *name_lens,
                                       int nname, struct t_stat *sts) {
+    g_fix_intr_walks++;
+    g_fix_walk_intr = g_fix_walk_intr || current_thread()->note_interruptible;
     if (!c || nname <= 0 || nname > DEV_WALK_ATTRS_MAX) return NULL;
     if (!names || !name_lens || !sts) return NULL;
     // Stratum refuses a Twalkgetattr from an OPENED fid exactly as it refuses a
@@ -394,6 +403,7 @@ static struct Walkqid *fix_walk_attrs(struct Spoor *c, struct Spoor *nc,
 }
 
 static struct Spoor *fix_open(struct Spoor *c, int omode) {
+    g_fix_open_intr = current_thread()->note_interruptible;
     if (!c) return NULL;
     c->flag |= COPEN;
     c->mode  = omode;
@@ -699,6 +709,41 @@ void test_stalk_resolve_multi(void) {
     TEST_ASSERT((q->flag & COPEN) != 0, "b is opened (STALK_OPEN)");
     spoor_clunk(q);
     spoor_unref(root);
+}
+
+static void open_only_step_case(struct Spoor *root, const char *what) {
+    struct Proc p; mkproc_system(&p);
+    TEST_ASSERT(root != NULL, what);
+    struct Thread *t = current_thread();
+
+    g_fix_intr_walks = 0;
+    g_fix_walk_intr  = false;
+    g_fix_open_intr  = false;
+    t->note_interruptible = true;
+    struct Spoor *q = stalk(&p, root, "a/b", 3, STALK_OPEN, 0 /*OREAD*/);
+    bool after = t->note_interruptible;
+    t->note_interruptible = false;
+    TEST_ASSERT(q != NULL, "resolve a/b");
+    TEST_ASSERT(g_fix_intr_walks != 0, "the resolver walked");
+    TEST_ASSERT(!g_fix_walk_intr, "no walk may unwind");
+    TEST_ASSERT(g_fix_open_intr, "the open may");
+    TEST_ASSERT(after, "the flag is the call's again");
+    spoor_clunk(q);
+
+    g_fix_open_intr = true;
+    q = stalk(&p, root, "a/b", 3, STALK_OPEN, 0 /*OREAD*/);
+    TEST_ASSERT(q != NULL, "resolve a/b, not interruptible");
+    TEST_ASSERT(!g_fix_open_intr, "a call that may not unwind does not start at its open");
+    TEST_ASSERT(!t->note_interruptible, "and stays that way");
+    spoor_clunk(q);
+    spoor_unref(root);
+}
+
+// A call's interruptible wait is its open: a failed walk has no errno to carry EINTR
+// and would read as ENOENT. Both walk shapes, the fused and the per-component.
+void test_stalk_open_is_the_only_interruptible_step(void) {
+    open_only_step_case(fix_root(), "fix_root");
+    open_only_step_case(fix_root_nowa(), "fix_root_nowa");
 }
 
 void test_stalk_resolve_deep(void) {

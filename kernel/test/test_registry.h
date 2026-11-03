@@ -1391,6 +1391,7 @@ void test_stalk_open_create_open_if_present(void);
 void test_stalk_open_create_mkdir_and_nest(void);
 void test_stalk_open_create_leaf_rows(void);
 void test_stalk_open_create_containment_and_denials(void);
+void test_stalk_open_is_the_only_interruptible_step(void);
 void test_devsrv_registered(void);
 void test_devsrv_open_root_dir(void);
 void test_devsrv_stat_native_root(void);

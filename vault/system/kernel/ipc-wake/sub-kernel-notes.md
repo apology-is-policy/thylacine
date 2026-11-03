@@ -320,6 +320,10 @@ ignores SIGPIPE pays no stat per open file.
 
 Vote 20's bit is how an open that waits for a peer says so: Pouch's `accept` and
 `connect` set it on the one open that does, and a regular open stays uninterruptible.
+The bit covers the open's wait and not the walk to it, and so does the flag a Linux
+dial sets: [[sub-kernel-stalk]] holds `note_interruptible` clear through the walk and
+gives it back only around the final `dev->open`, because a failed walk has no errno to
+carry `EINTR` and would read as `ENOENT`.
 A self-managing Proc writes a caught row to let a note interrupt a listed wait; the note
 stays for the fd, and with no row nothing unwinds.
 

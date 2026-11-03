@@ -3214,6 +3214,8 @@ struct test_case g_tests[] = {
     { "stalk.open_finish_policy",        test_stalk_open_finish_policy,        false, NULL },
     { "stalk.open_create_open_if_present", test_stalk_open_create_open_if_present, false, NULL },
     { "stalk.open_create_mkdir_and_nest", test_stalk_open_create_mkdir_and_nest, false, NULL },
+    { "stalk.open_is_the_only_interruptible_step",
+                                       test_stalk_open_is_the_only_interruptible_step, false, NULL },
     { "stalk.open_create_leaf_rows",   test_stalk_open_create_leaf_rows,   false, NULL },
     { "stalk.open_create_containment_and_denials", test_stalk_open_create_containment_and_denials, false, NULL },
     { NULL, NULL, false, NULL },          // sentinel
