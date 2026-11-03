@@ -278,6 +278,11 @@ phase, paste after edit/tab/focus/session change, unknown-commit outcome, multip
 sessions, rendering/input latency and logout. Keep nondefault until whole-arc
 requirements pass. Do not claim generic remote-mount cancellation or Mycelium
 migration; the shared protocol library can adopt Mycelium separately later.
+Operator votes 44-46, November 3: AS-4 comes before MM-1 to MM-4. Nora adopts first,
+over `libhalcyon`'s client on the native adapter, and ut follows, HI-2's witness
+closing on both. SAK at every phase is witnessed by a qualification mode in
+kaua-term-probe stepped by a scenario, so a red names its phase, plus one Nora
+scenario.
 
 Review conclusion: this is the recommended single design. It costs a native
 9P progress refactor, but avoids permanently assigning clipboard availability

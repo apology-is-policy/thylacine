@@ -153,7 +153,8 @@ operations are ACCOUNT_QUERY, ACCOUNT_CHILD, ACCOUNT_SET_LIMITS,
 ACCOUNT_WATCH, VOUCHER_CREATE and ALLOCATE_FUNDED/MAP_ACCOUNTED. These names do
 not allocate syscall numbers. The ABI may multiplex account control on a new
 object operation, but must not reuse a retired number or overload hardware
-rights. Reserve the concrete layout and C/Rust mirrors at MM-0.
+rights. Reserve the concrete layout and C/Rust mirrors at MM-0. The operator chose
+the shape on November 3: section 13.
 
 Query/watch exposes separate used, reserved, limit and pressure-generation fields
 per class in bytes, with checked page rounding internally. Every mutating request
@@ -485,3 +486,60 @@ refused, so a client holds and pays for the whole object. Only an owner's own DM
 map, placed inside the burrow window, can be cut down to one page while retaining
 every page; outside the window a hardware map detaches whole. The charge today is
 none in either case, which is the defect the retention unit closes.
+
+## 13. The voted interface
+
+Operator votes 47 and 48, November 3. Section 4's proposal stands except where this
+says otherwise.
+
+**One operation on a typed handle.** `SYS_ACCOUNT(handle, op, rec_va, rec_size)` is
+one syscall number, taken when the layout below is reserved in code. It works on a
+`KOBJ_ACCOUNT` handle or a self selector for the caller's own account, so an
+application needs no handle to query or to be charged. A file tree was the other
+candidate, and Plan 9's idiom. It lost because a path can name an account, which
+section 4 forbids, and because all-or-nothing limit changes and structured outcomes
+would become parsing, with the allocation path still needing a binary call.
+
+A read-only `/proc/<pid>/account` gives the shell and diagnostics a text view, under
+the /proc gates. It confers no authority, and nothing may parse it to decide policy.
+
+**Pressure through poll.** `poll` on the handle replaces section 4's ACCOUNT_WATCH.
+Section 8's rule, read the snapshot after registering interest, is then poll's own.
+
+**A voucher is bound to one connection.** There is no voucher handle. The client
+calls `VOUCHER_CREATE` naming its end of a /srv connection and receives a
+non-repeating 64-bit id, which it sends in band on the service's protocol. The server
+calls `ALLOCATE_FUNDED` naming its own end, and the kernel checks that the two ends
+pair and the id has funds left. The id alone grants nothing, the server cannot pass it
+on, and connection death returns what is unspent, as section 5 requires. Handles
+cannot move between Procs today (`handle_transfer_via_9p` is named in comments and not
+built), and this needs no such path. Genode's session funding has the same shape:
+quota travels with the session.
+
+The layout, to be pinned with `_Static_assert` and mirrored in libthyla-rs:
+
+```c
+struct account_rec_hdr { u32 version; u32 size; u32 flags; u32 pad; u64 incarnation; };
+enum { ACCOUNT_QUERY=1, ACCOUNT_CHILD=2, ACCOUNT_SET_LIMITS=3,
+       VOUCHER_CREATE=4, VOUCHER_CLOSE=5, ALLOCATE_FUNDED=6 };
+enum { CLASS_ALLOC=0, CLASS_RETAIN=1, CLASS_META=2, CLASS_DEVICE=3, ACCOUNT_CLASSES=4 };
+struct account_class { u64 used, reserved, limit; };
+struct account_query {
+    struct account_rec_hdr h;
+    u64 generation; u32 level; u32 limiting;
+    u64 headroom, reclaim_target, retained_after_exit, awaiting_device;
+    struct account_class c[ACCOUNT_CLASSES];
+};
+struct account_outcome { u64 request_id; u32 cls; u32 reason; u64 requested, available, limiting_account; };
+```
+
+`flags` is zero and `incarnation` is the expected account or object, with 0 for self.
+Amounts cross the boundary in bytes, with checked page rounding inside, per section 4.
+`ACCOUNT_SET_LIMITS` carries the whole class vector, so all-or-nothing is the record's
+shape. `reason` takes section 9's nine values.
+
+Not settled here: whether `ALLOCATE_FUNDED` returns a `KOBJ_DMA`, a Burrow or either by
+class; whether a map needs its own operation or `burrow_share_into`'s callers charge
+inside it, section 4's MAP_ACCOUNTED (MM-2); and how a session owner's control handle
+reaches a descendant, since transfer is unavailable and spawn's descriptor inheritance
+has not been read for a new kind (MM-1).
