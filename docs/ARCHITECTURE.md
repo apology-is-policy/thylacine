@@ -675,7 +675,6 @@ This direction is consistent with Thylacine's existing commitments: handles.tla 
 - Threads are first-class siblings within a Proc (Plan 9 9Front model). PID = Proc identity; TID = thread within Proc.
 - POSIX `pthread_t`, `pid_t` semantics provided by musl translation, mapping cleanly to Thylacine internal.
 - Plan 9 notes as the internal asynchronous-message model. POSIX signals provided by translation (musl).
-- Per-thread `errstr` buffer (Plan 9 idiom).
 - Thread-local storage via ARM64 `TPIDR_EL0`.
 
 **Non-goals at v1.0**:
@@ -3146,7 +3145,6 @@ The syscall interface is Plan 9-heritage, not POSIX. The syscall table is small 
 | `nsec()` | Nanosecond clock |
 | `getpid()` | Process ID |
 | `gettid()` | Thread ID |
-| `errstr(buf, n)` | Read per-thread errstr |
 
 ### 11.2b Corvus hardening syscalls (v1.0, per CORVUS-DESIGN.md §4.1.1)
 
@@ -3248,7 +3246,7 @@ Out at v1.0: `epoll_*`, `inotify_*`, `io_uring_*`, `bpf`, `perf_event_open`, `pt
 
 ### 11.6 Syscall ABI
 
-ARM64: x0-x7 carry up to 8 args; x8 carries the syscall number; `SVC #0` traps. Return value in x0; second return (e.g., for `pipe`) in x1. Errors signaled by negative x0 with errno in `errstr` (Plan 9 style); musl translates to negative-errno return.
+ARM64: x0-x7 carry up to 8 args; x8 carries the syscall number; `SVC #0` traps. Return value in x0; second return (e.g., for `pipe`) in x1. Errors are signaled by a negative x0 (§7.8).
 
 The kernel uses a monotonic syscall number territory. **CORRECTION (VIVARIUM R-1, 2026-07-23): an earlier revision of this paragraph claimed "Linux syscall numbers don't overlap (kernel has its own numbering)" — that is FALSE as-built.** Thylacine's numbers run `0..100` and Linux aarch64's run `0..~460`; they occupy the same low range and collide densely (Thylacine `SYS_WEFT_SHARE = 81` vs Linux `sync = 81`, etc.). `svc #0` + `x8` therefore CANNOT by itself tell the kernel which ABI the caller speaks. The Linux shim's "separate entry path" is consequently NOT a number-range split but a **per-Proc phenotype** consulted at syscall entry and set at exec from the ELF brand — the FreeBSD-`sysentvec` / illumos-LX mechanism, which every system that runs unmodified foreign binaries uses. See `docs/VIVARIUM.md` §1.2 + §5 (DESIGN; the architectural fork is open pending signoff).
 
@@ -5475,7 +5473,6 @@ These are the project's promises. Every one has a spec or a runtime check or a c
 | EEVDF | Earliest Eligible Virtual Deadline First scheduler |
 | EBR | Epoch-Based Reclamation (used in `burrow.tla`) |
 | EL0/EL1/EL2/EL3 | ARM64 Exception Levels |
-| `errstr` | Plan 9's per-thread error string |
 | GIC | Generic Interrupt Controller (ARM) |
 | Halcyon | Thylacine's graphical scroll-buffer shell |
 | Handle | Typed unforgeable token referencing a kernel object |
