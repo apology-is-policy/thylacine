@@ -635,7 +635,10 @@ static int leg_child(const char *mode) {
         }
         kill(kid, SIGUSR1);
         if (leg_wait_exit(kid, &st, SIGUSR1, deadline) != 0) return 74;
-        return WIFEXITED(st) && WEXITSTATUS(st) == 0 ? 0 : 75;
+        if (!WIFEXITED(st) || WEXITSTATUS(st) != 0) return 75;
+        leg_ready();
+        n = read(LEG_DATA, &b, 1);
+        return n == 1 && b == 'D' ? 0 : 78;
     }
     return 59;
 }
@@ -709,9 +712,9 @@ static int run_blocked_leg(const struct blocked_leg *l) {
         }
     }
     if (why) {
-        printf("pouch-hello-signals: blocked %s: %s\n", l->mode, why);
         kill(pid, SIGKILL);
         waitpid(pid, &st, 0);
+        printf("pouch-hello-signals: blocked %s: %s (status %#x)\n", l->mode, why, (unsigned)st);
         goto out;
     }
     if (leg_wait_exit(pid, &st, l->repost ? l->sig : 0, deadline) != 0) {
@@ -761,7 +764,7 @@ static int test_blocked(void) {
         { .mode = "wait-norestart",    .sig = SIGUSR1, .repost = 1 },
         { .mode = "wait-restart",      .sig = SIGUSR1 },
         // The table and the handler cross a fork.
-        { .mode = "fork-read" },
+        { .mode = "fork-read",         .data = 1 },
         // A handler that longjmp'd out never told the kernel it was done, and a fatal
         // note with a default row must still end the program, not spin its waits.
         { .mode = "escape",            .sig = SIGINT,  .dies = SIGINT  },
