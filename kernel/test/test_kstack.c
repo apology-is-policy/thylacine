@@ -52,6 +52,11 @@
 //     The by-VA invalidate operand for a stack page carries VA[55:12] in bits
 //     [43:0] and nothing above, against a value worked out by hand.
 //
+//   thread.kstack_dump_stops_at_the_top
+//     The crash dump's hexdump reads upward from a frame, and a thread's outermost
+//     frame sits at the top of its stack, with the next slot's guard right above.
+//     The dump stops there rather than faulting, and reads its full length inside.
+//
 //   thread.kstack_create_free_cost
 //     Reports the cost of a create+free cycle from the cache and from the
 //     allocators. Asserts only that the cached cycles changed no mapping.
@@ -59,6 +64,7 @@
 #include "test.h"
 
 #include "../../arch/arm64/exception.h"
+#include "../../arch/arm64/halls.h"
 #include "../../arch/arm64/mmu.h"
 #include "../../arch/arm64/timer.h"
 #include "../../arch/arm64/uart.h"
@@ -423,6 +429,25 @@ void test_thread_kstack_tlbi_operand_masks_the_ttl_hint(void) {
     // And the last page of the range: VA 0xFFFF_9003_FFFF_F000.
     TEST_EXPECT_EQ(mmu_kernel_tlbi_operand_for_test(0xFFFF9003FFFFF000ull), 0xFF9003FFFFFull,
         "the invalidate operand for the range's last page is VA[55:12] and nothing above bit 43");
+}
+
+void test_thread_kstack_dump_stops_at_the_top(void) {
+    struct Thread *t = thread_create(kproc(), kstack_never_runs);
+    TEST_ASSERT(t != NULL, "thread_create failed");
+    u64 base = (u64)(uintptr_t)t->kstack_base;
+    u64 top  = base + THREAD_KSTACK_TOTAL_SIZE;
+    u32 inside  = halls_stack_dump_extent(top - 256u);
+    u32 partial = halls_stack_dump_extent(top - 64u);
+    u32 at_top  = halls_stack_dump_extent(top);
+    u32 guard   = halls_stack_dump_extent(base);
+    u32 crosses = halls_stack_dump_extent(base + THREAD_KSTACK_GUARD_SIZE - 32u);
+    thread_free(t);
+
+    TEST_EXPECT_EQ(inside, 256u, "a dump wholly inside the stack reads its full length");
+    TEST_EXPECT_EQ(partial, 64u, "a dump that starts near the top stops at the top");
+    TEST_EXPECT_EQ(at_top, 0u, "a dump from the very top reads nothing");
+    TEST_EXPECT_EQ(guard, 0u, "a dump from the guard reads nothing");
+    TEST_EXPECT_EQ(crosses, 0u, "and one starting in the guard does not reach past it");
 }
 
 #define KSC_WARM 256u

@@ -110,6 +110,8 @@ can have a clear bit. 16 GiB of address space is 512 Ki slots and the direct map
 can back no more than that, so the range never refuses a thread the pool admits (a
 `_Static_assert` pins it). `kstack_new` takes the pages, then the slot, then the mapping,
 and each failure gives back what was taken (`thread.kstack_refused_step_leaks_nothing`).
+A thread's stack is no longer followed by mapped memory, so anything reading upward past
+its top now faults; the crash dump asks first ([[sub-kernel-halls]]).
 
 **The stack cache.** A freed stack does not go straight back. `kstack_free` pushes it on
 a bounded LIFO (`THREAD_KSTACK_CACHE_MAX`, 32 stacks, 512 KiB of the TCB reserve, charged

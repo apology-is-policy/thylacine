@@ -437,6 +437,8 @@ new `require_for` names what the expected line cannot: the report line
 `console-claim: skipped with the MMU off` and a symbolized `extinction+0x` frame
 (before the MMU every code address is physical, and only the dump's rebase names
 it). Without the fix the variant printed nothing, on HVF and on thyla-pi's KVM.
+`kstack_overflow` requires `HALLS: --- end ---`: the dump's frame sits under the next
+overflow slot's guard, and a hexdump that read past it would lose the dump's end.
 Since 2026-10-28 it also requires a `  mmu_enable+0x` frame: `mmu_enable` ends in
 its call to `extinction`, so only a dump that names a return address at its call
 names that frame for it ([[sub-kernel-halls]]).

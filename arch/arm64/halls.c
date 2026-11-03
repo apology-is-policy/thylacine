@@ -7,8 +7,10 @@
 //   HX-I1  a fault DURING the dump trips the per-CPU guard and bails to
 //          _torpor (the recursive extinction sees the guard set and returns).
 //   HX-I2  the fp-chain walk is depth-capped + sanity-gated; a wild x29
-//          cannot spin or read unboundedly (a single bad read still faults,
-//          but that is caught by HX-I1).
+//          cannot spin or read unboundedly. The walk and the hexdump also ask
+//          whether an address translates before they read it: a thread's stack
+//          ends at the next slot's unmapped guard, and a fault here would cost
+//          the reports extinction prints after the dump (HX-I1 still catches it).
 //   HX-I4  the per-CPU live-frame slot is trusted only when it is a PLAUSIBLE
 //          live frame on the current stack (see halls_dump) -- a frame
 //          stranded by a since-exited Proc (whose kstack has been freed +
@@ -159,6 +161,15 @@ static u64 halls_peek(u64 addr) {
     return *(volatile u64 *)(uintptr_t)addr;
 }
 
+// AT never faults, and the dying CPU has IRQs masked, so nothing can take PAR_EL1
+// between the two.
+static bool halls_translates(u64 addr) {
+    u64 par;
+    __asm__ __volatile__("at s1e1r, %1\n\tisb\n\tmrs %0, par_el1"
+                         : "=r"(par) : "r"(addr) : "memory");
+    return (par & 1ull) == 0;
+}
+
 // HX-2: minimal-width hex (no leading zeros) for the symbol offset --
 // "boot_main+0x1a4" reads cleaner than uart_puthex64's fixed 16-digit field.
 static void halls_puthex(u64 v) {
@@ -300,6 +311,7 @@ static void halls_backtrace(const struct exception_context *ctx, u64 koff, bool 
     u64 prev = 0;
     for (unsigned i = 0; i < HALLS_BT_MAX; i++) {
         if (!halls_fp_is_sane(fp, prev, lo, hi)) break;
+        if (!halls_translates(fp) || !halls_translates(fp + 8)) break;
         u64 ra = halls_peek(fp + 8);
         uart_puts("HALLS:   #");
         uart_putdec((u64)(i + 1));
@@ -355,13 +367,25 @@ unsigned halls_walk_kernel_frames(u64 pc, u64 start_fp, u64 lo, u64 hi,
     return n;
 }
 
+// How much of the dump from `ksp` can be read. The outermost frame of a thread sits
+// at the top of its stack, so for any extinction taken from a syscall the dump starts
+// within a line or two of the next slot's guard.
+VISIBLE_IF_KERNEL_TESTS
+u32 halls_stack_dump_extent(u64 ksp) {
+    u32 n = 0;
+    while (n < HALLS_STACK_DUMP_BYTES && halls_translates(ksp + n) && halls_translates(ksp + n + 8))
+        n += 16;
+    return n;
+}
+
 static void halls_stack_hexdump(u64 ksp) {
+    u32 extent = halls_stack_dump_extent(ksp);
     uart_puts("HALLS: stack @");
     uart_puthex64(ksp);
     uart_puts(" (");
-    uart_putdec((u64)HALLS_STACK_DUMP_BYTES);
+    uart_putdec((u64)extent);
     uart_puts(" bytes, ascending):\n");
-    for (u64 a = ksp; a < ksp + HALLS_STACK_DUMP_BYTES; a += 16) {
+    for (u64 a = ksp; a < ksp + extent; a += 16) {
         uart_puts("HALLS:   ");
         uart_puthex64(a);
         uart_puts(": ");

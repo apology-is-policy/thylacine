@@ -76,6 +76,15 @@ is pure field reads off the saved frame; the backtrace and stack hexdump come
 after, because both touch live and possibly corrupt memory. If the dump dies
 partway, the data most likely to matter has already left the machine.
 
+**Both ask before they read.** A thread's stack ends at the next slot's unmapped
+guard, and a thread's outermost frame sits at the top of it, so a hexdump reading
+upward from an extinction taken in a syscall starts within a line or two of that
+guard. The walk and the hexdump ask `AT S1E1R` first, and the hexdump's header states
+how many bytes it read (`halls_stack_dump_extent`, witnessed by
+`thread.kstack_dump_stops_at_the_top` and by `tools/test-fault.sh kstack_overflow`,
+which requires the dump's last line). A fault here would be caught, but it would cost
+the reports `extinction()` prints after the dump.
+
 **Three sources for the frame, in order.** An explicit `ctx` from the caller; else
 the per-CPU slot; else a synthetic frame built from the current stack pointer,
 `__builtin_frame_address`, `__builtin_return_address`, and a best-effort read of

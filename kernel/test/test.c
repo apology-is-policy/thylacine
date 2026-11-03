@@ -1346,6 +1346,7 @@ struct test_case g_tests[] = {
     { "thread.kstack_release_invalidates_a_warm_entry", test_thread_kstack_release_invalidates_a_warm_entry, false, NULL },
     { "thread.kstack_tables_grow_and_stay",      test_thread_kstack_tables_grow_and_stay,      false, NULL },
     { "thread.kstack_refused_step_leaks_nothing", test_thread_kstack_refused_step_leaks_nothing, false, NULL },
+    { "thread.kstack_dump_stops_at_the_top",     test_thread_kstack_dump_stops_at_the_top,     false, NULL },
     { "thread.kstack_create_free_cost",          test_thread_kstack_create_free_cost,          false, NULL },
     { "proc.wait_pid_concurrent_waiters_both_reap", test_proc_wait_pid_concurrent_waiters_both_reap, false, NULL },
     { "notes.queue_alloc_free_smoke",          test_notes_queue_alloc_free_smoke,          false, NULL },

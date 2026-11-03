@@ -166,6 +166,10 @@ require_for() {
         # A live ELR names the instruction it took, here a function's first:
         # named at a call instead, it would read as the symbol before it.
         bti_fault)          echo "  _bti_unguarded_target+0x0" ;;
+        # The dump finishes. The frame sits at the top of the overflow stack's slot,
+        # right under the next slot's guard, and a hexdump that read past it would
+        # fault and lose the end of the dump and the reports after it.
+        kstack_overflow)    echo "HALLS: --- end ---" ;;
         *)                  echo "" ;;
     esac
 }

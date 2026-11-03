@@ -735,6 +735,7 @@ void test_thread_kstack_costs_its_four_pages(void);
 void test_thread_kstack_release_invalidates_a_warm_entry(void);
 void test_thread_kstack_tables_grow_and_stay(void);
 void test_thread_kstack_refused_step_leaks_nothing(void);
+void test_thread_kstack_dump_stops_at_the_top(void);
 void test_thread_kstack_create_free_cost(void);
 void test_proc_spawn_refused_in_dying_proc(void);
 void test_thread_tid_and_pid_spaces_refuse_when_spent(void);
