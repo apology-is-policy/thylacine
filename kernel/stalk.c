@@ -912,15 +912,21 @@ struct Spoor *stalk(struct Proc *p, struct Spoor *start,
 // member that FAILS TO CROSS (UM-8 F8: a dead session / transient clone OOM),
 // is not a directory, denies X-search, or lacks the component is SKIPPED (not
 // an error) -- unlike a lone directory, where an X denial is EACCES; only
-// exhausting all members is a miss (the caller reports ENOENT). *errp is set
-// ONLY on a clone OOM (a cross failure is skipped, F8); an ordinary all-miss
-// leaves *errp 0. The phenotype of the WINNING member (only) is OR'd into
+// exhausting all members is a miss (the caller reports ENOENT). *errp is set on a
+// clone OOM (a cross failure is skipped, F8), and when no member held the name and
+// one could not say, since "absent" is then not known (union_walk_failure). An
+// ordinary all-miss leaves *errp 0. The phenotype of the WINNING member (only) is OR'd into
 // *crossed_pheno -- a losing member's Linux mount must not stamp a resolution
 // that landed elsewhere.
+static int union_walk_failure(int first, int why) {
+    return first ? first : (why == T_E_NOENT ? 0 : why);
+}
+
 static struct Spoor *stalk_union_child(struct Proc *p, struct Spoor *union_base,
                                        const char *namebuf,
                                        bool *crossed_pheno, int *errp) {
     *errp = 0;
+    int failed = 0;
     struct Spoor *srcs[PGRP_MAX_MOUNTS];
     u32           sflags[PGRP_MAX_MOUNTS];
     int nsrc = mount_members_snapshot(p->territory, union_base, srcs, sflags,
@@ -960,8 +966,12 @@ static struct Spoor *stalk_union_child(struct Proc *p, struct Spoor *union_base,
         struct Spoor *nc = spoor_clone(leaf);
         if (!nc) { spoor_clunk(leaf); *errp = T_E_NOMEM; break; }   // OOM: hard fail
         const char *names[1] = { namebuf };
-        struct Walkqid *w = leaf->dev->walk(leaf, nc, names, 1);
-        if (!w) { nc->aux = NULL; spoor_unref(nc); spoor_clunk(leaf); continue; }
+        int why = 0;
+        struct Walkqid *w = dev_walk(leaf, nc, names, 1, &why);
+        if (!w) {
+            failed = union_walk_failure(failed, why);
+            nc->aux = NULL; spoor_unref(nc); spoor_clunk(leaf); continue;
+        }
         if (w->spoor != nc) {
             walkqid_free(w); nc->aux = NULL; spoor_unref(nc); spoor_clunk(leaf); continue;
         }
@@ -974,6 +984,7 @@ static struct Spoor *stalk_union_child(struct Proc *p, struct Spoor *union_base,
         hit = nc;                      // HIT: first member with the component
     }
     for (int k = 0; k < nsrc; k++) spoor_clunk(srcs[k]);   // release the snapshot
+    if (!hit && !*errp) *errp = failed;
     return hit;                        // NULL: all members exhausted -> ENOENT
 }
 
@@ -987,10 +998,12 @@ static struct Spoor *stalk_union_child(struct Proc *p, struct Spoor *union_base,
 // that fails to cross / is not a directory / denies X-search / lacks the name
 // is SKIPPED (not an error). Returns the ref-held member (mount-point name
 // transplanted -- #66/I-33) or NULL when no member holds the name (the caller
-// answers -T_E_NOENT). *errp is set ONLY on a clone OOM.
+// answers -T_E_NOENT). *errp is set on a clone OOM, and when no member held the
+// name and one could not say (union_walk_failure).
 struct Spoor *stalk_union_member_holding(struct Proc *p, struct Spoor *point,
                                          const char *leafname, int *errp) {
     *errp = 0;
+    int failed = 0;
     if (!p || !p->territory || !point || !leafname) return NULL;
     struct Spoor *srcs[PGRP_MAX_MOUNTS];
     u32           sflags[PGRP_MAX_MOUNTS];
@@ -1019,8 +1032,12 @@ struct Spoor *stalk_union_member_holding(struct Proc *p, struct Spoor *point,
         struct Spoor *nc = spoor_clone(mroot);
         if (!nc) { spoor_clunk(mroot); *errp = T_E_NOMEM; break; }   // OOM: hard fail
         const char *names[1] = { leafname };
-        struct Walkqid *w = mroot->dev->walk(mroot, nc, names, 1);
-        if (!w) { nc->aux = NULL; spoor_unref(nc); spoor_clunk(mroot); continue; }
+        int why = 0;
+        struct Walkqid *w = dev_walk(mroot, nc, names, 1, &why);
+        if (!w) {
+            failed = union_walk_failure(failed, why);
+            nc->aux = NULL; spoor_unref(nc); spoor_clunk(mroot); continue;
+        }
         if (w->spoor != nc) {
             walkqid_free(w); nc->aux = NULL; spoor_unref(nc); spoor_clunk(mroot); continue;
         }
@@ -1032,6 +1049,7 @@ struct Spoor *stalk_union_member_holding(struct Proc *p, struct Spoor *point,
         hit = mroot;               // HIT: first member that holds `leafname`
     }
     for (int k = 0; k < nsrc; k++) spoor_clunk(srcs[k]);   // release the snapshot
+    if (!hit && !*errp) *errp = failed;
     return hit;                    // NULL: no member holds the leaf -> ENOENT
 }
 
@@ -1546,8 +1564,8 @@ restart:
                 nc = spoor_clone(parent);
                 if (!nc) goto fail;
             }
-            struct Walkqid *w = parent->dev->walk_attrs(parent, nc, names, lens,
-                                                        nrun, sts);
+            int why = 0;
+            struct Walkqid *w = dev_walk_attrs(parent, nc, names, lens, nrun, sts, &why);
             if (w == DEV_WALK_ATTRS_UNSUPPORTED) {
                 // This SESSION's server does not implement the fused op
                 // (dev9p latches the first ENOSYS; the sentinel then returns
@@ -1564,10 +1582,10 @@ restart:
             if (!w) {
                 // Failed at the FIRST component (dev9p Rlerror / transport /
                 // OOM): nothing bound, nc untouched (contract). The base was
-                // X-checked above, so NOENT is correctly ordered -- the same
+                // X-checked above, so the answer is correctly ordered -- the same
                 // disposition as the per-component loop's walk-NULL arm.
                 if (nc) { nc->aux = NULL; spoor_unref(nc); }
-                err = T_E_NOENT;
+                err = why ? why : T_E_NOENT;
                 goto fail;
             }
             int  k     = w->nqid;
@@ -1662,9 +1680,9 @@ restart:
                 struct Spoor *mc = spoor_clone(parent);
                 if (!mc) goto fail;
                 // Reuse sts -- the consumed prefix's records are spent.
-                struct Walkqid *rw = parent->dev->walk_attrs(parent, mc,
-                                                             names, lens,
-                                                             split_at + 1, sts);
+                int rwhy = 0;
+                struct Walkqid *rw = dev_walk_attrs(parent, mc, names, lens,
+                                                    split_at + 1, sts, &rwhy);
                 if (rw == DEV_WALK_ATTRS_UNSUPPORTED) {
                     // Unreachable with the one-way per-session latch (the
                     // batch above just SUCCEEDED on this session), but the
@@ -1686,7 +1704,7 @@ restart:
                     } else {
                         mc->aux = NULL; spoor_unref(mc);
                     }
-                    err = T_E_NOENT;
+                    err = rwhy ? rwhy : T_E_NOENT;
                     goto fail;
                 }
                 walkqid_free(rw);
@@ -1743,9 +1761,9 @@ restart:
                     struct Spoor *lc = spoor_clone(parent);
                     if (!lc) goto fail;
                     // Reuse sts -- the consumed prefix's records are spent.
-                    struct Walkqid *rw = parent->dev->walk_attrs(parent, lc,
-                                                                 names, lens,
-                                                                 link_at, sts);
+                    int rwhy = 0;
+                    struct Walkqid *rw = dev_walk_attrs(parent, lc, names, lens,
+                                                        link_at, sts, &rwhy);
                     if (rw == DEV_WALK_ATTRS_UNSUPPORTED) {
                         // Unreachable with the one-way per-session latch
                         // (the batch above just SUCCEEDED on this session);
@@ -1766,7 +1784,7 @@ restart:
                         } else {
                             lc->aux = NULL; spoor_unref(lc);
                         }
-                        err = T_E_NOENT;
+                        err = rwhy ? rwhy : T_E_NOENT;
                         goto fail;
                     }
                     walkqid_free(rw);
@@ -1915,19 +1933,17 @@ per_component:
 
             const char *names[1] = { namebuf };
 
-            struct Walkqid *w = parent->dev->walk(parent, nc, names, 1);
+            int why = 0;
+            struct Walkqid *w = dev_walk(parent, nc, names, 1, &why);
             if (!w) {
                 // Walk failed: nc still shares the parent's aux -> detach + unref.
-                // A NULL Walkqid is dev9p's miss (p9_client_walk Rlerror/short) --
-                // the dominant case is "no such component" (ENOENT). The rare deep
-                // failures (session-dead -> EIO, OOM) also land here; reporting
-                // NOENT is the load-bearing-correct answer (os.IsNotExist), and the
-                // kernel's own perm_check above is the ACCES authority, so a walk
-                // NULL is never a masked permission denial. (ER-2 may propagate the
-                // exact dev9p errno via a walk-vtable out-param.)
+                // A miss is the common case and reads ENOENT, and ER-2 says only a
+                // miss may: a Stratum EIO, a dead session or an OOM is not an
+                // answer about the name, and a program that read "absent" could
+                // recreate a file that is there.
                 nc->aux = NULL;
                 spoor_unref(nc);
-                err = T_E_NOENT;
+                err = why ? why : T_E_NOENT;
                 goto fail;
             }
             if (w->spoor != nc) {

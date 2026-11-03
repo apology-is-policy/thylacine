@@ -135,11 +135,14 @@ impl Conn {
                         (0, b"ctl") => 1, (0, b"rings") => 2,
                         (_, b".") => path, (2, b"..") => 0,
                         (2, name) => {
-                            let id = core::str::from_utf8(name).ok().and_then(|s| s.parse::<u32>().ok()).ok_or(())?;
-                            if device.ring(id).is_none() { return Err(()); }
+                            // A name that is no live ring is a miss, not a bad request:
+                            // the kernel reports a walk's answer as it stands (ERRORS.md ER-2).
+                            let live = core::str::from_utf8(name).ok().and_then(|s| s.parse::<u32>().ok())
+                                .filter(|id| device.ring(*id).is_some());
+                            let Some(id) = live else { return Ok(Some(p9::build_rlerror(out, tag, p9::E_NOENT)?)); };
                             RING_BASE + id as u64
                         }
-                        _ => return Err(()),
+                        _ => return Ok(Some(p9::build_rlerror(out, tag, p9::E_NOENT)?)),
                     };
                     walked.push(qid(path));
                 }

@@ -17,6 +17,8 @@
 #include <thylacine/extinction.h>
 #include <thylacine/spinlock.h>
 #include <thylacine/spoor.h>
+#include <thylacine/stalk.h>
+#include <thylacine/thread.h>
 #include <thylacine/types.h>
 
 #include "../arch/arm64/uart.h"
@@ -229,4 +231,27 @@ s64 spoor_open_errno(struct Spoor *c) {
     if (c->dc == DEV9P_DC) return dev9p_open_errno(c);
     if (c->dc == 's')      return devsrv_open_errno(c);   // devsrv's Dev char
     return -1;
+}
+
+void dev_walk_failed(int rc) {
+    current_thread()->walk_errno = (u16)stalk_err_code(rc);
+}
+
+struct Walkqid *dev_walk(struct Spoor *c, struct Spoor *nc, const char **name, int nname,
+                         int *why) {
+    struct Thread *t = current_thread();
+    t->walk_errno = 0;
+    struct Walkqid *w = c->dev->walk(c, nc, name, nname);
+    *why = w ? 0 : t->walk_errno;
+    return w;
+}
+
+struct Walkqid *dev_walk_attrs(struct Spoor *c, struct Spoor *nc, const char **names,
+                               const size_t *name_lens, int nname, struct t_stat *sts,
+                               int *why) {
+    struct Thread *t = current_thread();
+    t->walk_errno = 0;
+    struct Walkqid *w = c->dev->walk_attrs(c, nc, names, name_lens, nname, sts);
+    *why = w ? 0 : t->walk_errno;
+    return w;
 }

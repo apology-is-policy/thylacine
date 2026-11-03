@@ -3198,7 +3198,8 @@ static s64 sys_walk_open_handler(u64 spoor_fd_raw, u64 name_va,
     // with new_priv (fid_owned=true); on failure it clunks the fid + frees
     // the Walkqid carrier itself.
     const char *names[1] = { name_scratch };
-    struct Walkqid *w = src->dev->walk(src, nc, names, 1);
+    int why = 0;
+    struct Walkqid *w = dev_walk(src, nc, names, 1, &why);
     // #844: src's last use is the walk above; release the borrow now. nc
     // carries the walk result (its own ref) through the rest of the handler,
     // so the post-walk exits clunk nc (unchanged), not src.
@@ -3212,7 +3213,7 @@ static s64 sys_walk_open_handler(u64 spoor_fd_raw, u64 name_va,
         // the Walkqid before returning NULL).
         nc->aux = NULL;
         spoor_unref(nc);
-        return -T_E_NOENT;   // errno-rollout (ER-1): walk-miss -> NotFound
+        return -(s64)(why ? why : T_E_NOENT);   // ER-1, ER-2: only a miss reads NotFound
     }
     // F4 close (P5-stratumd-stub-bringup audit): the Dev `walk` vtable
     // is documented as permissive ("Either reuses nc OR ignores it and
@@ -4448,7 +4449,8 @@ static s64 spoor_create_install(struct Proc *p, struct Spoor *src,
     struct Spoor *nc = spoor_clone(src);
     if (!nc)                                          { spoor_clunk(src); return -T_E_NOMEM; }
 
-    struct Walkqid *w = src->dev->walk(src, nc, NULL, 0);
+    int why = 0;
+    struct Walkqid *w = dev_walk(src, nc, NULL, 0, &why);
     // #844: src's last use is the clone-walk above; release the borrow now.
     // nc carries its own ref through create + the rest of the handler.
     spoor_clunk(src);
@@ -4465,8 +4467,8 @@ static s64 spoor_create_install(struct Proc *p, struct Spoor *src,
         // the not-a-directory half precise wants a qid.type gate on the parent
         // -- the single-hop twin of the #79 stalk gate -- which is a resolution
         // change, not an errno one, and is tracked with #81 rather than
-        // smuggled into this rollout.
-        return -T_E_IO;
+        // smuggled into this rollout. A Dev that knows why says so (ER-2).
+        return -(s64)(why ? why : T_E_IO);
     }
     // Defense-in-depth: the reuse-nc contract (same rationale as
     // SYS_WALK_OPEN's F4 close). A clone-walk returns nqid==0, so we do NOT

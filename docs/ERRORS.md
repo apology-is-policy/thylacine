@@ -464,6 +464,7 @@ errno almost always already exists at the failure source — it is only
 | Operation | Failure | Returns |
 |---|---|---|
 | `SYS_OPEN` / `SYS_WALK_OPEN` | component not found | `-T_E_NOENT` (2) |
+| `SYS_OPEN` / `SYS_WALK_OPEN` / `SYS_WALK_CREATE` | a walk failed for any other reason (the server's errno, a dead session, an OOM) | that errno by value; `-1` or one out of range reads `-T_E_IO` (5) |
 | `SYS_OPEN` / X-search | `perm_check` denial | `-T_E_ACCES` (13) |
 | `SYS_WALK_CREATE` | target already exists | `-T_E_EXIST` (17) |
 | `SYS_WALK_CREATE` | missing parent component | `-T_E_NOENT` (2) |
@@ -493,6 +494,13 @@ trigger surfaces; self + Fable audit before the arc closes):
   neither needed a registry append — only kernel-ORIGINATED errnos must be
   named here. The `SYS_FSTAT`/`LSEEK`/`READDIR`/`FSYNC`/`WSTAT`/`CHDIR` half
   is still owed.
+  **The walk half (operator vote, 2026-11-03):** only a miss reads `ENOENT`. A
+  failed `Dev.walk` or `Dev.walk_attrs` used to read `ENOENT` for any cause, so a
+  Stratum integrity `EIO` said the file was absent, and a program could recreate
+  it. dev9p records the cause with `dev_walk_failed`, and `dev_walk` and
+  `dev_walk_attrs` hand it to `stalk`, `SYS_WALK_OPEN` and `SYS_WALK_CREATE`. A
+  union keeps Plan 9's skip: a member that cannot answer does not hide a name a
+  later member holds, and its cause is reported only when no member holds the name.
 - **ER-3** — the rest of the surface: the local-validation `-1` sites
   (`EBADF`/`EINVAL`/`ACCES`/`FAULT`/...) across the syscall families.
   **The four FS name-op handlers LANDED at #80** (`SYS_WALK_OPEN`,

@@ -148,6 +148,7 @@ static u64  g_wga_size_ov;
 static u32  g_wga_vers_ov;    // 0 = the canonical body (version 0)
 static u8   g_wga_type_ov;    // 0 = the canonical P9_QTFILE
 static u32  g_wga_lerror_ecode;  // != 0: the NEXT Twalkgetattr answers Rlerror, then clears
+static u32  g_walk_lerror_ecode; // != 0: the NEXT Twalk answers Rlerror, then clears
 
 // Canonical responder — synthesizes valid Rmsgs for every op type
 // dev9p might issue. Mirrors the responder used in test_9p_client.c
@@ -185,6 +186,18 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
         return (int)total;
     }
     if (type == P9_TWALK) {
+        if (g_walk_lerror_ecode) {
+            u32 ec = g_walk_lerror_ecode;
+            g_walk_lerror_ecode = 0;
+            size_t etotal = P9_HDR_LEN + 4;
+            if (resp_cap < etotal) return -1;
+            resp[0] = 11; resp[1] = 0; resp[2] = 0; resp[3] = 0;
+            resp[4] = P9_RLERROR;
+            resp[5] = (u8)(tag & 0xff); resp[6] = (u8)((tag >> 8) & 0xff);
+            resp[7] = (u8)(ec & 0xff);         resp[8] = (u8)((ec >> 8) & 0xff);
+            resp[9] = (u8)((ec >> 16) & 0xff); resp[10] = (u8)((ec >> 24) & 0xff);
+            return (int)etotal;
+        }
         // Inspect Twalk body to learn nwname; respond with that many
         // qids so partial-walk checks pass. Body offset: hdr(7) +
         // fid(4) + newfid(4) = 15; nwname at 15..17.
@@ -3027,6 +3040,9 @@ void test_dev9p_cached_open(void) {
                 "walk FROM a fidless Spoor rejected (NOFID guard)");
     TEST_ASSERT(dev9p.walk_attrs(co, NULL, names, lens, 1, sts) == NULL,
                 "walk_attrs FROM a fidless Spoor rejected (NOFID guard)");
+    int co_why = 0;
+    TEST_ASSERT(dev_walk(co, NULL, names, 1, &co_why) == NULL, "and through the wrapper");
+    TEST_EXPECT_EQ(co_why, T_E_BADF, "a walk from a fidless Spoor is no miss");
 
     // Close: wire-free (no Tclunk) + the budget released.
     g_clunk_seen = 0;
@@ -4651,3 +4667,72 @@ void test_dev9p_origin_format_ns(void) {
 
     spoor_unref(mp); spoor_unref(conn); spoor_unref(other); spoor_unref(anon); spoor_unref(a);
 }
+
+// ER-2: what the server said about a walk reaches the caller, by value. Both wire ops.
+void test_dev9p_walk_reports_the_reason(void) {
+    static const struct { u32 ecode; int want; const char *what; } cases[] = {
+        { 5,    T_E_IO,    "Rlerror(EIO) reads EIO" },
+        { 2,    T_E_NOENT, "Rlerror(ENOENT) is a miss" },
+        { 116,  116,       "Rlerror(ESTALE) crosses, by value" },
+        { 13,   T_E_ACCES, "Rlerror(EACCES) crosses" },
+        { 1,    T_E_IO,    "Rlerror(EPERM) is -1 here, which never reads as errno 1" },
+        { 5000, T_E_IO,    "an ecode out of range reads EIO" },
+    };
+    const char  *name = "etc";
+    const char  *names[1] = { "etc" };
+    const size_t lens[1]  = { 3 };
+    for (unsigned i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        struct Spoor *root = make_open_client_and_root();
+        TEST_ASSERT(root != NULL, "client + root");
+
+        struct Spoor *nc = spoor_clone(root);
+        TEST_ASSERT(nc != NULL, "clone");
+        g_walk_lerror_ecode = cases[i].ecode;
+        int why = -1;
+        struct Walkqid *w = dev_walk(root, nc, &name, 1, &why);
+        bool walk_failed = w == NULL;
+        if (w) { walkqid_free(w); spoor_clunk(nc); } else { nc->aux = NULL; spoor_unref(nc); }
+
+        struct Spoor *nf = spoor_clone(root);
+        TEST_ASSERT(nf != NULL, "clone");
+        struct t_stat sts[1];
+        g_wga_lerror_ecode = cases[i].ecode;
+        int fwhy = -1;
+        struct Walkqid *fw = dev_walk_attrs(root, nf, names, lens, 1, sts, &fwhy);
+        bool fused_failed = fw == NULL;
+        if (fw) { walkqid_free(fw); spoor_clunk(nf); } else { nf->aux = NULL; spoor_unref(nf); }
+
+        struct Spoor *ok = spoor_clone(root);
+        TEST_ASSERT(ok != NULL, "clone");
+        int owhy = -1;
+        struct Walkqid *owalk = dev_walk(root, ok, &name, 1, &owhy);
+        bool control = owalk != NULL;
+        if (owalk) { walkqid_free(owalk); spoor_clunk(ok); }
+        else       { ok->aux = NULL; spoor_unref(ok); }
+        teardown(root);
+
+        TEST_ASSERT(walk_failed, cases[i].what);
+        TEST_EXPECT_EQ(why, cases[i].want, cases[i].what);
+        TEST_ASSERT(fused_failed, cases[i].what);
+        TEST_EXPECT_EQ(fwhy, cases[i].want, cases[i].what);
+        TEST_ASSERT(control, "control: the next walk goes through");
+        TEST_EXPECT_EQ(owhy, 0, "control: and has no reason");
+    }
+}
+
+// SYS_WALK_CREATE's clone walk: a leaf Dev's NULL stays EIO, a server's reason crosses.
+void test_dev9p_walk_create_clone_keeps_the_reason(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "client + root");
+    hidx_t base = 0;
+    struct Proc *p = oc9_proc(root, &base);
+    if (!p) { teardown(root); TEST_ASSERT(false, "the fixture's Proc"); }
+    g_walk_lerror_ecode = 28;
+    s64 r = sys_walk_create_kname_for_proc(p, (u64)base, "capefile", 8, 1 /*OWRITE*/, 0644);
+    g_walk_lerror_ecode = 0;
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+    teardown(root);
+    TEST_EXPECT_EQ(r, (s64)-28, "the clone walk's ENOSPC is what create reports");
+}
+

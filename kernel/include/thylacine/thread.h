@@ -650,6 +650,11 @@ struct Thread {
     // Owner-only; KP_ZERO inits them; not rfork-propagated.
     bool                    note_restartable;
     bool                    note_call_unwound;
+    // Why this thread's last Dev.walk or walk_attrs returned NULL, as a T_E_* code, 0
+    // for a plain miss (dev_walk_failed, read by dev_walk; ERRORS.md ER-2). A slot, since
+    // c can be a shared Spoor and the query form has no nc, and only dev9p has a reason to
+    // give. Sits in the pad before the u64. Owner-only; KP_ZERO inits it; not rfork-propagated.
+    u16                     walk_errno;
     u64                     note_call_x0;
 };
 
