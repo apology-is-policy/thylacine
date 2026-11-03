@@ -797,6 +797,7 @@ void test_notewait_suspend_held_note_ends_it(void); // the race sigsuspend close
 void test_notewait_suspend_tail_note_goes_to_the_tail(void); // a note only the tail acts on
 void test_notewait_suspend_refused(void); // no table, nothing to end it
 void test_notewait_suspend_handler_installed_late(void); // no handler when the wait began
+void test_notewait_suspend_bad_sp_keeps_eintr(void); // the tail refuses it: no re-issue
 void test_notewait_suspend_in_a_handler(void); // no nesting: the wait ends, the note waits
 void test_notewait_take_sleeps_until_posted(void); // the queue's hook wakes a masked taker
 void test_notewait_take_wakes_for_its_word(void); // so does a note at the thread

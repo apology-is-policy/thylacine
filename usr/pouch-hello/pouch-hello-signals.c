@@ -62,7 +62,7 @@
 //   pouch-hello-signals: death usr1 reads WIFSIGNALED SIGUSR1  (and usr2)
 //   pouch-hello-signals: kill errnos read ESRCH and EPERM
 //   pouch-hello-signals: blocked <leg> ok  (x18 legs; see test_blocked)
-//   pouch-hello-signals: blocked <leg> ok  (x20 legs; see test_note_wait)
+//   pouch-hello-signals: note-wait ok: 22 legs  (see test_note_wait)
 //   pouch-hello-signals: a poll or select over no fds sleeps for its timeout
 //   POUCH_CENSUS_SIGNALS (pouch-census.h; joey matches it)
 //
@@ -613,16 +613,20 @@ static int nw_child(const char *mode) {
         return rc == -1 && errno == EINTR && g_nw_runs >= 1 && nw_masked(SIGUSR1) ? 0 : 106;
     }
     // The driver posts SIGUSR2, which the wait's mask holds, and later SIGUSR1. Exactly
-    // one handler ran, and the held note is still there for a poll to take, with no
-    // handler. Its negative twin is the wait's mask: with it empty SIGUSR2 ends the wait.
+    // one handler ran, on the wait's mask and not the caller's, and the held note is still
+    // there for a poll to take, with no handler. Its negative twin is the wait's mask: with
+    // it empty SIGUSR2 ends the wait.
     if (!strcmp(mode, "suspend-mask")) {
         if (nw_catch(SIGUSR1, nw_handler, 0, 0) != 0) return 60;
         if (nw_catch(SIGUSR2, nw_other, 0, 0) != 0) return 60;
         nw_block(SIGUSR1, SIGUSR2);
+        nw_block(SIGTERM, 0);
         leg_ready();
         int rc = sigsuspend(&usr2);
         if (rc != -1 || errno != EINTR) return 107;
         if (g_nw_runs < 1 || g_nw_other != 0) return 108;
+        if (sigismember(&g_nw_seen, SIGTERM) == 1 || sigismember(&g_nw_seen, SIGUSR1) != 1 ||
+            sigismember(&g_nw_seen, SIGUSR2) != 1) return 143;
         if (sigtimedwait(&usr2, &si, &zero) != SIGUSR2 || g_nw_other != 0) return 109;
         return 0;
     }
@@ -688,6 +692,14 @@ static int nw_child(const char *mode) {
         leg_ready();
         (void)read(LEG_DATA, &b, 1);
         return 122;
+    }
+    // The kernel's half alone. A default-ignored note reaches no wait once its row is
+    // default; with the row left caught it would unwind the read, whatever the table says.
+    if (!strcmp(mode, "one-shot-row")) {
+        if (nw_catch(SIGCHLD, nw_handler, SA_RESETHAND, 0) != 0) return 60;
+        raise(SIGCHLD);
+        if (g_nw_runs != 1) return 142;
+        return nw_done();
     }
     if (!strcmp(mode, "handler-mask")) {
         if (nw_catch(SIGUSR1, nw_handler_masks, 0, 0) != 0) return 60;
@@ -994,7 +1006,7 @@ struct blocked_leg {
     int dies;    // the signal the child must die of; 0 means it must exit 0
 };
 
-static int run_blocked_leg(const struct blocked_leg *l) {
+static int run_blocked_leg(const struct blocked_leg *l, int say_ok) {
     int data[2], status[2];
     if (pipe(data) != 0 || pipe(status) != 0) {
         printf("pouch-hello-signals: blocked %s: pipe errno=%d\n", l->mode, errno);
@@ -1054,7 +1066,7 @@ static int run_blocked_leg(const struct blocked_leg *l) {
                l->mode, (unsigned)st, l->dies ? "signal" : "exit", l->dies);
         goto out;
     }
-    printf("pouch-hello-signals: blocked %s ok\n", l->mode);
+    if (say_ok) printf("pouch-hello-signals: blocked %s ok\n", l->mode);
     rc = 0;
 out:
     close(data[1]);
@@ -1100,7 +1112,7 @@ static int test_blocked(void) {
     };
     int bad = 0;
     for (size_t i = 0; i < sizeof legs / sizeof legs[0]; i++) {
-        if (run_blocked_leg(&legs[i]) != 0) bad = 1;
+        if (run_blocked_leg(&legs[i], 1) != 0) bad = 1;
         fflush(stdout);
     }
     return bad ? -1 : 0;
@@ -1119,6 +1131,7 @@ static int test_note_wait(void) {
         { .mode = "sa-mask",         .data = 1 },
         { .mode = "nodefer",         .data = 1 },
         { .mode = "one-shot",        .sig = SIGUSR1, .dies = SIGUSR1 },
+        { .mode = "one-shot-row",    .sig = SIGCHLD, .data = 1 },
         { .mode = "handler-mask",    .data = 1 },
         { .mode = "setjmp-mask",     .data = 1 },
         { .mode = "pipe-mask",       .data = 1 },
@@ -1130,12 +1143,16 @@ static int test_note_wait(void) {
         { .mode = "take-bystander",  .sig = SIGUSR1, .ack = 1, .then = SIGUSR2 },
         { .mode = "take-remaining",  .sig = SIGUSR1, .repost = 1 },
     };
+    // One line for the lot: joey's reap-first capture holds a pipe's ring, and a wide
+    // failure has to fit in it to say why.
     int bad = 0;
     for (size_t i = 0; i < sizeof legs / sizeof legs[0]; i++) {
-        if (run_blocked_leg(&legs[i]) != 0) bad = 1;
+        if (run_blocked_leg(&legs[i], 0) != 0) bad = 1;
         fflush(stdout);
     }
-    return bad ? -1 : 0;
+    if (bad) return -1;
+    printf("pouch-hello-signals: note-wait ok: %zu legs\n", sizeof legs / sizeof legs[0]);
+    return 0;
 }
 
 // The kernel sleeps a poll over no fds. These answered ENOSYS, and pause() sits on

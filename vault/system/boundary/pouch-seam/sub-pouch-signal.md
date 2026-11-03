@@ -278,8 +278,12 @@ updates only that thread's kernel mask; POSIX wants Proc-wide) ·
   interrupt it. A `sigsuspend` in a handler ends at a note its mask admits, and that note
   runs at the handler's return (OPEN-BUGS).
 - **What a handler does to the mask ends at its return**, `sigaction(SIGPIPE)`'s bit
-  included: a program that installs a SIGPIPE handler from inside another handler keeps
-  SIGPIPE masked on that thread.
+  included, and Pouch's SIGPIPE default rides on that bit. A program that installs a SIGPIPE
+  handler from inside another handler keeps SIGPIPE masked on that thread. One that goes back
+  to `SIG_DFL` or `SIG_IGN` from inside a handler is worse: the row is default and the bit
+  clear, so its next write to a closed pipe ends it instead of answering `EPIPE`
+  (OPEN-BUGS, with the row-based default that would close this and
+  [[seam-pouch-sigmask-per-thread]] together).
 - `siglongjmp` out of a handler restores the mask and leaves `in_handler` set, as above.
 - `sigaltstack` / `sigpending` / `sigqueue` are sentinels; no real-time signals. An
   `SA_SIGINFO` handler's `siginfo_t` names the signal, with `SI_KERNEL` and a zero union,

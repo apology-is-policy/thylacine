@@ -242,6 +242,7 @@ static s64           g_nw_timeout;
 static bool          g_nw_take_form, g_nw_in_handler, g_nw_discard_first;
 static struct Note   g_nw_note;
 static volatile int  g_nw_direct;
+static u64           g_nw_sp;
 
 static void nw_entry(void) {
     struct Thread *t = current_thread();
@@ -269,7 +270,7 @@ static void nw_entry(void) {
 
     struct exception_context ctx;
     for (size_t k = 0; k < sizeof(ctx); k++) ((u8 *)&ctx)[k] = 0;
-    ctx.sp      = 0x10000000u;
+    ctx.sp      = g_nw_sp;
     ctx.elr     = 0x8000u;
     ctx.regs[0] = (u64)rc;
     irq_state_t s = spin_lock_irqsave(NULL);   // the tail runs masked (#713)
@@ -298,6 +299,7 @@ static void nw_reset(u64 old, u64 set, bool take_form, s64 timeout) {
     g_nw_old = old; g_nw_set = set; g_nw_timeout = timeout;
     g_nw_take_form = take_form; g_nw_in_handler = false; g_nw_discard_first = false;
     g_nw_direct = -3;
+    g_nw_sp = 0x10000000u;
     for (u32 i = 0; i < sizeof(g_nw_note); i++) ((u8 *)&g_nw_note)[i] = 0;
 }
 
@@ -441,6 +443,30 @@ void test_notewait_suspend_tail_note_goes_to_the_tail(void) {
     TEST_EXPECT_EQ((u64)g_nw_elr, 0x7ffcull, "the tail took it and the call goes again");
     TEST_EXPECT_EQ((u64)g_nw_x0, 0x77ull, "with its first argument");
     TEST_EXPECT_EQ(left, 0u, "the note is gone");
+    TEST_EXPECT_EQ((u64)g_nw_mask_after, NW_CHILD, "the thread's mask is back");
+}
+
+// The same call and note, with an sp the tail refuses: it takes nothing, so a re-issue
+// would find the same note and never come back to EL0. The call reports instead.
+void test_notewait_suspend_bad_sp_keeps_eintr(void) {
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree must be empty at test entry");
+    struct Proc *p = nw_proc(false);
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    TEST_EXPECT_EQ(sys_note_dispose_for_proc(p, NOTE_NAME_CHILD_EXIT, NOTE_DISP_DEFAULT, 0), 0ll,
+                   "a table governs");
+    TEST_EXPECT_EQ(notes_post(p, NOTE_NAME_CHILD_EXIT, 0u, NULL, true), 0, "posted under the mask");
+    nw_reset(NW_CHILD, 0, false, -1);
+    g_nw_sp = 0;
+    struct nw_run r;
+    bool started = nw_start(&r, p);
+    bool done = started && nw_until_done();
+    u32 left = nw_queued(p);
+    nw_finish(&r);
+
+    TEST_ASSERT(started && done, "the call did not sleep");
+    TEST_EXPECT_EQ((u64)g_nw_elr, 0x8000ull, "no re-issue");
+    TEST_EXPECT_EQ((s64)g_nw_x0, NW_EINTR, "EINTR stands");
+    TEST_EXPECT_EQ(left, 1u, "the tail took nothing");
     TEST_EXPECT_EQ((u64)g_nw_mask_after, NW_CHILD, "the thread's mask is back");
 }
 

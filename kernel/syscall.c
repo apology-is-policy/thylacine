@@ -14784,6 +14784,16 @@ void viv_sigaction_settled_for_test(struct Proc *p, enum viv_signote note,
 }
 #endif
 
+// The queue's lock, because a one-shot's reset holds it across the read and the store:
+// without it the reset can land on a row a peer has written since, and that peer's
+// sigaction has returned.
+static void viv_sigtab_store(struct Proc *p, struct viv_sigtab *tab, enum viv_signote note,
+                             const struct viv_ksigaction *act) {
+    spin_lock(&p->notes->lock);
+    (void)viv_sigtab_set(tab, note, act);
+    spin_unlock(&p->notes->lock);
+}
+
 // SYS_NOTE_DISPOSE past its copy (ARCH 8.8.3). Row first, flag second, each with
 // RELEASE, so a reader that sees the table govern reads the row. Default needs a
 // table only when there is one to clear, as rt_sigaction's SIG_DFL does.
@@ -14824,7 +14834,7 @@ s64 sys_note_dispose_for_proc(struct Proc *p, const char *name, u64 disposition,
         tab = viv_sigtab_of(p);
         if (!tab) return -(s64)T_E_NOMEM;
     }
-    if (tab) (void)viv_sigtab_set(tab, note, &act);
+    if (tab) viv_sigtab_store(p, tab, note, &act);
     __atomic_or_fetch(&p->proc_flags, PROC_FLAG_NOTE_TABLE, __ATOMIC_RELEASE);
     viv_sigaction_settled(p, note, &act);
     return 0;
@@ -15670,7 +15680,7 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
                 tab = viv_sigtab_of(p);
                 if (!tab) return -(s64)T_E_NOMEM;
             }
-            (void)viv_sigtab_set(tab, note, &act);
+            viv_sigtab_store(p, tab, note, &act);
         }
 
         viv_sigaction_settled(p, note, &act);

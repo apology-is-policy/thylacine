@@ -1844,6 +1844,11 @@ static bool notes_call_unwound_eintr(const struct exception_context *ctx, const 
     return t->note_call_unwound && ctx->regs[0] == (u64)-(s64)T_E_INTR;
 }
 
+// The tail runs nothing for such an sp: it delivers nothing and discards nothing.
+static bool notes_tail_refuses_sp(const struct exception_context *ctx) {
+    return ctx->sp == 0 || ctx->sp >= UACCESS_USER_VA_TOP || ctx->sp < (u64)NOTE_NAME_MAX;
+}
+
 static bool notes_call_restarts(const struct exception_context *ctx, const struct Thread *t) {
     return notes_call_unwound_eintr(ctx, t) && t->note_restartable;
 }
@@ -2232,9 +2237,7 @@ static bool notes_deliver_tail(struct exception_context *ctx, u32 *passes) {
     // sane -- a misbehaving user can't escape kill, but kill cannot do
     // its work either. That's acceptable: a user with corrupted sp is
     // about to fault anyway.
-    if (ctx->sp == 0)                              return false;
-    if (ctx->sp >= UACCESS_USER_VA_TOP)             return false;
-    if (ctx->sp < (u64)NOTE_NAME_MAX)               return false;
+    if (notes_tail_refuses_sp(ctx)) return false;
 
     // F9 audit close: acquire-load handler_va so a multi-thread Proc
     // observes a coherent value vs a concurrent SYS_NOTIFY's store.
@@ -2636,7 +2639,8 @@ VISIBLE_IF_KERNEL_TESTS
 void notes_call_settle(struct exception_context *ctx, struct Thread *t) {
     if (notes_call_unwound_eintr(ctx, t) &&
         (t->note_restartable || (t->note_wait_flags & NOTE_WF_NOHAND)) &&
-        !proc_is_self_managing_notes(t->proc) && !notes_caught_pending_for(t->proc, t))
+        !proc_is_self_managing_notes(t->proc) && !notes_caught_pending_for(t->proc, t) &&
+        !notes_tail_refuses_sp(ctx))    // the note it would come back for would still be there
         notes_call_rewind(ctx, t);
     t->note_call_unwound = false;
 }

@@ -32,7 +32,7 @@ sigsuspend, a copy of it here is wrong in a handler and after one. So the copy g
       awk filter: m["note_wait"]="141";
 
 Witnesses: pouch-hello-signals `suspend-*`, `sigpause`, `sa-mask`, `nodefer`, `one-shot`,
-`handler-mask`, `setjmp-mask`, `pipe-mask`, `siginfo`, `take-*`.
+`one-shot-row`, `handler-mask`, `setjmp-mask`, `pipe-mask`, `siginfo`, `take-*`.
 
 --- a/arch/aarch64/bits/syscall.h.in
 +++ b/arch/aarch64/bits/syscall.h.in

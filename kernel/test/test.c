@@ -1435,6 +1435,7 @@ struct test_case g_tests[] = {
     { "notewait.suspend_held_note_ends_it", test_notewait_suspend_held_note_ends_it, false, NULL },
     { "notewait.suspend_tail_note_goes_to_the_tail", test_notewait_suspend_tail_note_goes_to_the_tail, false, NULL },
     { "notewait.suspend_refused", test_notewait_suspend_refused, false, NULL },
+    { "notewait.suspend_bad_sp_keeps_eintr", test_notewait_suspend_bad_sp_keeps_eintr, false, NULL },
     { "notewait.suspend_in_a_handler", test_notewait_suspend_in_a_handler, false, NULL },
     { "notewait.suspend_handler_installed_late", test_notewait_suspend_handler_installed_late, false, NULL },
     { "notewait.take_sleeps_until_posted", test_notewait_take_sleeps_until_posted, false, NULL },
