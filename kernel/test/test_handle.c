@@ -399,7 +399,7 @@ void test_handles_replace(void) {
     // the slot mechanics without needing a live Dev.
     hidx_t h = handle_alloc(p, KOBJ_SPOOR, RIGHT_READ, NULL);
     TEST_ASSERT(h >= 0, "handle_alloc(SPOOR) returned -1");
-    u64 count_before = handle_table_count(p->handles);
+    int count_before = handle_table_count(p->handles);
 
     // THE INDEX IS PRESERVED. That is the entire reason the primitive exists --
     // the guest is holding this number across connect().

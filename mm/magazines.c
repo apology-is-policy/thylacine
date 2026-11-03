@@ -26,7 +26,7 @@
 struct percpu_data g_percpu[NCPUS];
 
 void magazines_init(void) {
-    for (int cpu = 0; cpu < NCPUS; cpu++) {
+    for (u32 cpu = 0; cpu < NCPUS; cpu++) {
         for (int i = 0; i < NUM_MAG_ORDERS; i++) {
             g_percpu[cpu].mags[i].count = 0;
         }
@@ -152,7 +152,7 @@ bool mag_free(struct page *p, unsigned order) {
 // test harness (secondaries parked in WFI) or a single-threaded shutdown.
 // Never call it during active SMP workload.
 void magazines_drain_all(void) {
-    for (int cpu = 0; cpu < NCPUS; cpu++) {
+    for (u32 cpu = 0; cpu < NCPUS; cpu++) {
         for (int idx = 0; idx < NUM_MAG_ORDERS; idx++) {
             struct magazine *m = &g_percpu[cpu].mags[idx];
             unsigned order = mag_idx_to_order(idx);

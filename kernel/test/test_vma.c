@@ -203,7 +203,7 @@ void test_vma_drain_releases_all(void) {
 
     u64 alloc_before = vma_total_allocated();
     u64 free_before  = vma_total_freed();
-    u64 mapping_before = burrow_mapping_count(burrow);
+    int mapping_before = burrow_mapping_count(burrow);
 
     enum { N = 4 };
     for (int i = 0; i < N; i++) {

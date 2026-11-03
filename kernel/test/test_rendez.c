@@ -1041,8 +1041,8 @@ void test_rendez_reader_recv_unwinds_death(void) {
     ready(reader);
     // The deadline bounds the old rule's block-through, so this wait ends
     // either way; the verdict is which return it saw.
-    TEST_YIELD_UNTIL_SOFT(g_rf_run_cnt >= 2u);
-    bool joinable  = g_rf_run_cnt >= 2u;
+    TEST_YIELD_UNTIL_SOFT(g_rf_run_cnt >= 2);
+    bool joinable  = g_rf_run_cnt >= 2;
     int  rc        = g_rf_sleep_rc;
     bool backref   = reader->rendez_blocked_on == NULL;
     bool no_waiter = g_rf_rendez.waiter == NULL;
@@ -1087,24 +1087,24 @@ void test_rendez_reader_recv_unwinds_death_sleep(void) {
     struct Thread *reader = thread_create(g_rf_proc, rf_sleep_entry);
     TEST_ASSERT(reader != NULL, "thread_create(reader) failed");
     ready(reader);
-    TEST_YIELD_UNTIL_SOFT(g_rf_run_cnt >= 1u && reader->state == THREAD_SLEEPING);
+    TEST_YIELD_UNTIL_SOFT(g_rf_run_cnt >= 1 && reader->state == THREAD_SLEEPING);
     bool slept = g_rf_run_cnt == 1u && reader->state == THREAD_SLEEPING &&
                  g_rf_rendez.waiter == reader;
 
     // The death, as the group-termination cascade delivers it to a sleeper.
     __atomic_store_n(&g_rf_proc->group_exit_msg, "killed", __ATOMIC_RELEASE);
     int woke = wakeup(&g_rf_rendez);
-    TEST_YIELD_UNTIL_SOFT(g_rf_run_cnt >= 2u);
-    bool unwound = g_rf_run_cnt >= 2u;
+    TEST_YIELD_UNTIL_SOFT(g_rf_run_cnt >= 2);
+    bool unwound = g_rf_run_cnt >= 2;
     int  rc      = g_rf_sleep_rc;
     // The old rule re-slept here; its cond releases it, so a RED run still
     // joins its thread.
     if (!unwound) {
         g_rf_cond = 1;
         (void)wakeup(&g_rf_rendez);
-        TEST_YIELD_UNTIL_SOFT(g_rf_run_cnt >= 2u);
+        TEST_YIELD_UNTIL_SOFT(g_rf_run_cnt >= 2);
     }
-    bool joinable = g_rf_run_cnt >= 2u;
+    bool joinable = g_rf_run_cnt >= 2;
     if (joinable) {
         test_kthread_join_free(reader, &g_rf_exited);
         g_rf_proc->state = PROC_STATE_ZOMBIE;
@@ -2207,8 +2207,8 @@ void test_rendez_caught_note_handoff(void) {
     static const char *const why[3] = {
         "main blocked in a wait that holds: the peer was designated and unwound",
         "main masked the family and blocked: the peer was designated and unwound",
-        "main blocked in a timed wait that holds: the peer, in a timed wait that "
-        "unwinds, was designated and unwound",
+        ("main blocked in a timed wait that holds: the peer, in a timed wait that "
+         "unwinds, was designated and unwound"),
     };
     bool ok[3], tgt[3], unw[3], held[3], drop[3], down[3];
     nt_handoff_leg(NT_HWAIT,  NT_UWAIT,  SLEEP_NOTEINTR,

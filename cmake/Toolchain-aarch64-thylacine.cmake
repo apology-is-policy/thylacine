@@ -130,6 +130,9 @@ set(THYLACINE_TARGET_TRIPLE "aarch64-none-elf"
 #                                    no +bti needed). NOPs on ARMv8.0; active
 #                                    where start.S sets SCTLR_EL1.BT0
 #                                    (runtime-gated on FEAT_BTI).
+#   -Wno-error=missing-prototypes  — the one class still only a warning: the
+#                                    declarations it asks for are a series of
+#                                    their own, not yet on this line.
 #   -Werror=shorten-64-to-32       — an implicit u64 -> u32 narrowing fails the
 #                                    build (an explicit cast still compiles).
 #                                    The device number is u64 end to end and
@@ -177,6 +180,7 @@ set(THYLACINE_KERNEL_C_FLAGS
     "-Werror=return-type"
     "-Wstrict-prototypes"
     "-Wmissing-prototypes"
+    "-Wno-error=missing-prototypes"
     "-Wno-unused-parameter"
     "-Werror=shorten-64-to-32"
     "-std=c99"
