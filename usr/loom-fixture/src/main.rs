@@ -7,7 +7,7 @@
 // fd 1 the read end of the probe's control pipe, and fd 2 the write end of the
 // notify pipe. With --srv the registry is /srv itself, for a probe in a session: a
 // walk-only handle does not transfer, so the fixture opens it, and a registry holds
-// sixteen services, so it posts only "fixture" and "hold-copy" there. Otherwise it
+// sixteen services, so it posts only "fixture", "hold-copy" and "hold-paste" there. Otherwise it
 // posts "fixture" and the hostile services below. It writes 'R' to fd 2, and
 // serves every connection until fd 1 reaches EOF. Every session must then end
 // within SETTLE_NS: the probe has exited, so its rings are closed. A 'Q' read
@@ -46,7 +46,8 @@
 // copy's first write, and from the read for its reply on it answers nothing more on
 // that connection, whichever fid asks, until the client ends the session. An 'H' on
 // the control pipe asks for an 'h' on the notify pipe at the next such stop.
-// `hold-paste` stops the same way at a paste's first request (AS-4e, --ut-paste).
+// `hold-paste` stops at a paste's first request on that request's own write, where
+// halcyond parks one (AS-4e, --ut-paste).
 //
 // Exit 76: no session was accepted (the default image). 77: at least one
 // session, every one ended, no violation. 1: a violation or a setup failure.
@@ -553,18 +554,7 @@ impl Server {
                 c.stalled.push(tag);
                 return Reply::Held;
             }
-            INTERACTION if f.held => {
-                self.count[STALLED] += 1;
-                c.stopped = true;
-                say("stopped with a request unanswered");
-                if self.hold_asked {
-                    self.hold_asked = false;
-                    if unsafe { t_write(NOTIFY, b"h".as_ptr(), 1) } != 1 {
-                        say("the probe left before its answer");
-                    }
-                }
-                return Reply::Held;
-            }
+            INTERACTION if f.held => return self.stop(c),
             INTERACTION => bytes.extend_from_slice(&f.reply),
             STATS => {
                 self.count[BACKLOG] = self.backlog();
@@ -652,9 +642,25 @@ impl Server {
                 };
                 f.reply = reply;
                 f.held = held;
+                if held && holds_paste {
+                    return self.stop(c);
+                }
             }
         }
         Self::built(p9::build_rwrite(&mut self.out, tag, data.len() as u32))
+    }
+
+    fn stop(&mut self, c: &mut Conn) -> Reply {
+        self.count[STALLED] += 1;
+        c.stopped = true;
+        say("stopped with a request unanswered");
+        if self.hold_asked {
+            self.hold_asked = false;
+            if unsafe { t_write(NOTIFY, b"h".as_ptr(), 1) } != 1 {
+                say("the probe left before its answer");
+            }
+        }
+        Reply::Held
     }
 
     fn interaction(&mut self, holds_copy: bool, holds_paste: bool, record: &[u8]) -> Option<(Vec<u8>, bool)> {

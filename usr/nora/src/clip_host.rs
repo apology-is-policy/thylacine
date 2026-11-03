@@ -7,7 +7,7 @@ use interaction_native::{parse_locator, Host};
 use libhalcyon::interaction_client::{Event, Refusal, Why};
 use libhalcyon::interaction_wire::Mode;
 use libthyla_rs::{env, loom::ThylaKernel, t_close, t_open, T_OPATH, T_WALK_OPEN_FROM_ROOT};
-use nora::editor::{ClipboardRequest, Editor};
+use nora::editor::{BufferId, ClipboardRequest, Editor};
 use parley::transport::Tag;
 
 /// Poll tags 0 to 7 are lsp_host's and dap_host's.
@@ -18,6 +18,8 @@ const LABEL: &str = "Nora";
 pub struct Clip {
     host: Host<ThylaKernel>,
     reported: Option<(Mode, bool)>,
+    /// Who asked for the paste the client last took. It holds one request at a time.
+    paste_into: Option<BufferId>,
 }
 
 fn why(why: Why) -> &'static str {
@@ -46,6 +48,7 @@ impl Clip {
         Some(Self {
             host: host.ok()?,
             reported: None,
+            paste_into: None,
         })
     }
 
@@ -81,7 +84,13 @@ impl Clip {
         let now = self.host.now();
         let asked = match request {
             ClipboardRequest::Copy(text) => self.host.copy(text.into_bytes(), now),
-            ClipboardRequest::Paste => self.host.paste(now),
+            ClipboardRequest::Paste(into) => {
+                let asked = self.host.paste(now);
+                if asked.is_ok() {
+                    self.paste_into = Some(into);
+                }
+                asked
+            }
         };
         let refusal = match asked {
             Ok(()) => return,
@@ -110,11 +119,13 @@ impl Clip {
                 Event::CopyFailed(reason) => {
                     ed.set_status(alloc::format!("clipboard: copy failed: {}", why(reason)))
                 }
-                Event::Pasted(bytes) => match core::str::from_utf8(&bytes) {
-                    Ok(text) => {
-                        ed.paste_text(text);
+                Event::Pasted(bytes) => match (core::str::from_utf8(&bytes), self.paste_into) {
+                    (Ok(text), Some(into)) => {
+                        ed.paste_text(into, text);
                     }
-                    Err(_) => ed.set_status(String::from("clipboard: that was not text")),
+                    // The client reports only the paste it was asked for.
+                    (Ok(_), None) => {}
+                    (Err(_), _) => ed.set_status(String::from("clipboard: that was not text")),
                 },
                 Event::PasteFailed(reason) => {
                     ed.set_status(alloc::format!("clipboard: paste failed: {}", why(reason)))

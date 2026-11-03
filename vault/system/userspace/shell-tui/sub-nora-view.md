@@ -18,7 +18,7 @@ hazards: []
 abis: [abi-halcyon-palette]
 design: []
 created: 2026-08-03
-updated: 2026-09-06
+updated: 2026-11-03
 area: userspace
 ---
 ## Purpose

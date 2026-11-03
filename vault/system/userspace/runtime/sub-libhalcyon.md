@@ -866,7 +866,12 @@ later request on that fid would be refused for ever. A mode report refused that 
 sent again until the host reports anew, or a server that always refuses it would be
 connected to for ever. A `Denied` bind is asked again on the reconnect schedule, since a seat
 away for a trusted episode answers it and comes back on its own, and the schedule bounds what
-a real denial costs. No exchange outlives the job lifetime, however steadily its reply trickles.
+a real denial costs. Only the host asking restores the schedule: being bound is not having
+come back, and a server that binds and then fails the report it was bound for would otherwise
+be connected to for ever. No exchange outlives the job lifetime, however steadily its reply
+trickles, and a request parked on its write, where the real server parks one, is held to the
+same deadlines as one parked on its reply; a commit parked there may have landed, so it is
+unknown.
 
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)

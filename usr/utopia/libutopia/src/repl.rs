@@ -729,6 +729,7 @@ impl Repl {
             None => self.emit_prompt(out),
             Some(PasteRefused::TooLong) => self.notice("clipboard: too long for this line, nothing pasted", out),
             Some(PasteRefused::Unprintable) => self.notice("clipboard: a tab or control character, nothing pasted", out),
+            Some(PasteRefused::NoMemory) => self.notice("clipboard: no memory for the paste, nothing pasted", out),
         }
     }
 
@@ -842,6 +843,17 @@ impl Repl {
     /// same terminate signal and stops calling `feed`. A normal return
     /// (`None`) means "read more input".
     pub fn feed(&mut self, input: &[u8], out: &mut dyn IoWrite) -> Option<i32> {
+        self.feed_announcing(input, out, &mut || {})
+    }
+
+    /// `feed`, calling `accepted` when a line is accepted and before it runs: a foreground
+    /// command keeps the binary's loop from turning, however long it takes.
+    pub fn feed_announcing(
+        &mut self,
+        input: &[u8],
+        out: &mut dyn IoWrite,
+        accepted: &mut dyn FnMut(),
+    ) -> Option<i32> {
         for action in self.editor.feed_bytes(input) {
             // D4: the editor draws the completion-menu strip below its block
             // and knows where it is. Any action that leaves the menu erases it
@@ -867,6 +879,7 @@ impl Repl {
                 }
                 EditorAction::Accept(line) => {
                     self.end_edit();
+                    accepted();
                     // The user pressed Enter; move the terminal past the
                     // edited line before any eval output or the next prompt.
                     let _ = out.write_all(b"\r\n");

@@ -33,6 +33,8 @@ struct Server {
     skew: u64,
     /// Never answer this operation: its read stays in flight.
     hold: Option<Operation>,
+    /// Never finish the write of this operation's record, where the real server parks.
+    hold_write: Option<Operation>,
     /// Cut the connection at this operation's answer.
     cut: Option<Operation>,
     max_io: usize,
@@ -57,6 +59,7 @@ impl Server {
             refuse_partway: None,
             skew: 0,
             hold: None,
+            hold_write: None,
             cut: None,
             max_io: usize::MAX,
             connects: 0,
@@ -222,6 +225,11 @@ fn drive(c: &mut Client, s: &mut Server, now: u64) -> Vec<&'static str> {
                 let complete = wire::frame(&s.wires[i].record).is_ok();
                 if complete {
                     let op = wire::frame(&s.wires[i].record).unwrap().0.operation;
+                    if s.hold_write == Some(op) {
+                        s.log.push(op);
+                        s.wires[i].record.clear();
+                        continue;
+                    }
                     if let Some(at) = s.refuse.iter().position(|(o, _)| *o == op) {
                         let errno = s.refuse.remove(at).1;
                         s.log.push(op);
@@ -629,6 +637,52 @@ fn a_commit_past_its_deadline_is_unknown_too() {
 }
 
 #[test]
+fn a_commit_parked_on_its_write_may_have_landed() {
+    let mut s = Server::new();
+    s.hold_write = Some(Operation::CommitCopy);
+    let mut c = bound(&mut s, 0);
+    c.copy(text(10), 0).unwrap();
+    drive(&mut c, &mut s, 0);
+    assert_eq!(s.log.last(), Some(&Operation::CommitCopy));
+    let at = c.next_deadline().unwrap();
+    assert_eq!(at, IDLE_NS);
+    assert_eq!(drive(&mut c, &mut s, at - 1), Vec::<&str>::new());
+    assert_eq!(c.take_event(), None);
+    drive(&mut c, &mut s, at);
+    assert_eq!(c.take_event(), Some(Event::CopyUnknown));
+}
+
+#[test]
+fn a_get_parked_on_its_write_holds_up_no_report_and_ends_at_its_deadline() {
+    let mut s = Server::new();
+    s.hold_write = Some(Operation::GetClipboard);
+    let mut c = bound(&mut s, 0);
+    c.paste(0).unwrap();
+    drive(&mut c, &mut s, 0);
+    assert_eq!(s.log.last(), Some(&Operation::GetClipboard));
+    c.report_mode(Mode::Insert, false, "Nora", 0).unwrap();
+    drive(&mut c, &mut s, 0);
+    assert_eq!(s.modes.last().unwrap().1, Mode::Insert);
+    let at = c.next_deadline().unwrap();
+    drive(&mut c, &mut s, at);
+    assert_eq!(c.take_event(), Some(Event::PasteFailed(Why::TimedOut)));
+    assert_eq!(c.take_event(), None);
+}
+
+#[test]
+fn cancel_closes_the_connection_a_get_is_parked_on_the_write_of() {
+    let mut s = Server::new();
+    s.hold_write = Some(Operation::GetClipboard);
+    let mut c = bound(&mut s, 0);
+    c.paste(0).unwrap();
+    drive(&mut c, &mut s, 0);
+    c.cancel();
+    assert_eq!(drive(&mut c, &mut s, 0), vec!["close"]);
+    assert_eq!(c.take_event(), Some(Event::PasteFailed(Why::Cancelled)));
+    assert!(!c.is_bound());
+}
+
+#[test]
 fn a_write_lost_before_the_commit_is_a_plain_failure() {
     let mut s = Server::new();
     let mut c = bound(&mut s, 0);
@@ -952,6 +1006,34 @@ fn a_write_refused_part_way_through_a_record_ends_the_connection() {
     c.copy(text(10), SEC).unwrap();
     drive(&mut c, &mut s, SEC);
     assert_eq!(c.take_event(), Some(Event::Copied { generation: 1 }));
+}
+
+/// Hello and Bind answered, the report never: being bound is not having come back.
+#[test]
+fn a_server_that_binds_and_then_fails_the_report_spends_the_schedule_and_no_more() {
+    let losses = 2 * RECONNECT_ATTEMPTS as usize;
+    for (refused, on_the_reply) in [
+        (vec![(Operation::ReportMode, ENOENT); losses], Vec::new()),
+        (Vec::new(), vec![(Operation::ReportMode, ENOENT); losses]),
+    ] {
+        let mut s = Server::new();
+        s.refuse = refused;
+        s.refuse_reply = on_the_reply;
+        let mut c = Client::new();
+        c.report_mode(Mode::Normal, false, "Nora", 0).unwrap();
+        drive(&mut c, &mut s, 0);
+        assert!(s.operations(Operation::ReportMode) == 1, "it was asked");
+        let mut spent = 0;
+        while let Some(at) = c.next_deadline() {
+            drive(&mut c, &mut s, at);
+            spent += 1;
+            assert!(spent <= RECONNECT_ATTEMPTS, "it kept connecting");
+        }
+        assert_eq!(spent, RECONNECT_ATTEMPTS);
+        assert_eq!(s.connects, RECONNECT_ATTEMPTS + 1);
+        c.report_mode(Mode::Insert, false, "Nora", SEC).unwrap();
+        assert!(c.next_deadline().is_some(), "the host asked again");
+    }
 }
 
 #[test]

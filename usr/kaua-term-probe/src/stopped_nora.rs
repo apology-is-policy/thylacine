@@ -19,6 +19,7 @@ use libthyla_rs::{
     time::{monotonic_ns, sleep, Duration},
     *,
 };
+use vt::Vt;
 
 pub(crate) type Result<T = ()> = core::result::Result<T, &'static str>;
 
@@ -26,6 +27,8 @@ const EOPNOTSUPP: i32 = -95;
 const MS: u64 = 1_000_000;
 pub(crate) const DRAIN_STACK: u64 = 64 * 1024;
 const RAW: &[u8] = b"-icanon -echo -isig -icrnl -onlcr";
+const COLS: u16 = 80;
+const ROWS: u16 = 24;
 /// What the client's deadline would release. A wait on it is what this must catch, so
 /// whatever must not wait for it gets half of it.
 pub(crate) const PROMPTLY_MS: u64 = IDLE_MS as u64 / 2;
@@ -35,14 +38,13 @@ const ESC_SETTLE_MS: u64 = 200;
 pub(crate) const TICK_MS: u64 = 20;
 const FILE_TICK_MS: u64 = 100;
 
-// A word of a status line, without its spaces: the screen is painted by difference, and
-// a blank cell needs no paint.
+// What the status row comes to show. A frame is painted by difference, so a word's bytes
+// can have a cursor move anywhere inside them, and only the screen is sure to spell it.
 const FIRST_PAINT: u32 = 0;
 const COPIED: u32 = 1;
 const PASTED: u32 = 2;
 const NO_ANSWER: u32 = 3;
-const WORDS: [&[u8]; 4] = [b"NOR", b"copied", b"pasted", b"answer"];
-const LONGEST_WORD: usize = 6;
+const WORDS: [&str; 4] = ["NOR", "copied", "pasted", "answer"];
 
 static SEEN: AtomicU32 = AtomicU32::new(0);
 static DRAINED: AtomicBool = AtomicBool::new(false);
@@ -51,22 +53,21 @@ static DRAINED: AtomicBool = AtomicBool::new(false);
 /// its output has a thread of its own for the life of the editor.
 extern "C" fn drain(arg: u64) {
     let master = arg as i64;
+    let mut screen = Vt::new(COLS as usize, ROWS as usize);
     let mut buffer = [0u8; 2048];
-    let mut kept = 0;
     loop {
-        let n = unsafe { t_read(master, buffer[kept..].as_mut_ptr(), buffer.len() - kept) };
+        let n = unsafe { t_read(master, buffer.as_mut_ptr(), buffer.len()) };
         if n <= 0 {
             break;
         }
-        let end = kept + n as usize;
+        screen.feed(&buffer[..n as usize]);
         for (i, word) in WORDS.iter().enumerate() {
-            if buffer[..end].windows(word.len()).any(|w| w == *word) {
+            if screen.row_holds(ROWS as usize - 1, word) {
                 SEEN.fetch_or(1 << i, Ordering::SeqCst);
             }
         }
-        kept = end.min(LONGEST_WORD - 1);
-        buffer.copy_within(end - kept..end, 0);
     }
+    drop(screen);
     DRAINED.store(true, Ordering::SeqCst);
     unsafe { t_thread_exit() }
 }
@@ -79,8 +80,19 @@ pub(crate) fn after(ms: u64) -> u64 {
     monotonic_ns().saturating_add(ms * MS)
 }
 
+/// Whole occurrences, none overlapping: `alphalpha` holds one.
 fn holds(text: &[u8], word: &[u8]) -> usize {
-    text.windows(word.len()).filter(|w| *w == word).count()
+    let mut count = 0;
+    let mut at = 0;
+    while at + word.len() <= text.len() {
+        if text[at..].starts_with(word) {
+            count += 1;
+            at += word.len();
+        } else {
+            at += 1;
+        }
+    }
+    count
 }
 
 pub(crate) struct Fixture {
@@ -158,7 +170,7 @@ impl Fixture {
     }
 
     /// Whether the fixture has already said so, without waiting and without taking it.
-    fn said(&mut self, byte: u8) -> Result<bool> {
+    pub(crate) fn said(&mut self, byte: u8) -> Result<bool> {
         self.listen(0)?;
         Ok(self.heard.contains(&byte))
     }
@@ -217,7 +229,7 @@ impl Nora {
             .open(format!("/dev/pts/{}ctl", master.n))
             .and_then(|mut ctl| ctl.write_all(RAW))
             .map_err(|_| "a raw pts")?;
-        master.seed_winsize(80, 24);
+        master.seed_winsize(COLS, ROWS);
         SEEN.store(0, Ordering::SeqCst);
         DRAINED.store(false, Ordering::SeqCst);
         let child = master
@@ -264,9 +276,10 @@ impl Nora {
         Ok(())
     }
 
-    /// Text in, back to Normal, and write the file.
+    /// Text in at the end of the line, back to Normal, and write the file. A copy leaves
+    /// the cursor inside what it copied, and `i` would split that word.
     fn insert(&self, text: &[u8]) -> Result {
-        self.keys(b"i")?;
+        self.keys(b"A")?;
         self.keys(text)?;
         self.keys(b"\x1b")?;
         pause(ESC_SETTLE_MS)?;
@@ -321,6 +334,9 @@ fn control(fixture: &mut Fixture) -> Result {
     nora.insert(b"alpha")?;
     nora.copy_word()?;
     nora.sees(COPIED, "the answered copy did not land")?;
+    // Past the end of the line, so that the file holds two whole words.
+    nora.keys(b"A\x1b")?;
+    pause(ESC_SETTLE_MS)?;
     nora.keys(b" p")?;
     nora.sees(PASTED, "the answered paste did not land")?;
     let text = nora.leaves()?;
@@ -354,9 +370,6 @@ fn stopped(fixture: &mut Fixture) -> Result {
     if fixture.said(b'e')? {
         return Err("nothing typed landed until the copy's deadline");
     }
-    // Any key takes the save's words off the status line.
-    nora.keys(b"h")?;
-
     // The client gives up at its deadline, and the editor says so.
     fixture.wait(
         b'e',

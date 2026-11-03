@@ -276,7 +276,9 @@ it was the debugger's: `Dap::on_deadline` reads a timed-out poll as its grace be
 spent, and would otherwise kill a session early. `drive_clipboard` runs at the loop's
 tail and once before it, for type-ahead: it reports a changed mode, starts what a key
 asked, and pumps only when the ring woke the poll or a deadline has passed. Events
-become status text, and a paste reaches `Editor::paste_text`. Nothing here blocks.
+become status text, and a paste reaches `Editor::paste_text` with the buffer that asked,
+kept only once the client has taken the request: a second one refused as busy must not
+redirect the one out. Nothing here blocks.
 See [[sub-interaction-native]].
 
 ## Data structures

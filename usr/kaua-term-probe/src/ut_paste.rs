@@ -28,7 +28,9 @@ const TOO_LONG: u32 = 8;
 const UNPRINTABLE: u32 = 9;
 const STILL_FETCHING: u32 = 10;
 const NO_ANSWER: u32 = 11;
-const WORDS: [&[u8]; 12] = [
+const THREE_IN_BUFFER: u32 = 12;
+const SEVEN_RAN: u32 = 13;
+const WORDS: [&[u8]; 14] = [
     b"UT-PASTE-UP",
     b"ut-paste-one",
     b"UT-PASTE-ONE",
@@ -41,6 +43,8 @@ const WORDS: [&[u8]; 12] = [
     b"a tab or control character",
     b"still fetching the last paste",
     b"no answer in time",
+    b"ut-paste-three",
+    b"UT-PASTE-SEVEN",
 ];
 const LONGEST_WORD: usize = 29;
 const PASTE_KEY: &[u8] = b"\x1bp";
@@ -221,6 +225,7 @@ fn answered(fixture: &mut Fixture) -> Result {
         b"echo ut-paste-two | tr a-z A-Z\necho ut-paste-three | tr a-z A-Z\n".to_vec(),
     )?;
     ut.keys(PASTE_KEY)?;
+    ut.sees(THREE_IN_BUFFER, "the two lines never reached the buffer")?;
     pause(SETTLE_MS)?;
     if Ut::saw(TWO_RAN) || Ut::saw(THREE_RAN) {
         return Err("a pasted line feed submitted");
@@ -259,6 +264,33 @@ fn stopped(fixture: &mut Fixture) -> Result {
     ut.keys(b"echo ut-paste-five | tr a-z A-Z\r")?;
     ut.sees(FIVE_RAN, "nothing typed ran with a paste parked")?;
     fixture.wait(b'e', PROMPTLY_MS, "Enter did not end the fetch")?;
+
+    // A command does not keep a fetch open: `head` sits on the pts until it is told to go
+    // on, and the session ends while it does.
+    fixture.ask(b'H')?;
+    fixture.ask(b'E')?;
+    ut.keys(PASTE_KEY)?;
+    fixture.wait(b'h', ROOM_MS, "no new fetch before the command")?;
+    ut.keys(b"head -n 1; echo ut-paste-seven | tr a-z A-Z\r")?;
+    fixture.wait(
+        b'e',
+        PROMPTLY_MS,
+        "a foreground command kept the fetch open",
+    )?;
+    if Ut::saw(SEVEN_RAN) {
+        return Err("the command did not wait, so nothing was shown");
+    }
+    ut.keys(b"go\r")?;
+    ut.sees(SEVEN_RAN, "the command did not run on")?;
+
+    // The key and Enter in one read: the edit it was pressed in is over, so nothing is
+    // fetched.
+    fixture.ask(b'H')?;
+    ut.keys(b"\x1bp\r")?;
+    pause(SETTLE_MS)?;
+    if fixture.said(b'h')? {
+        return Err("a paste key in the same read as Enter still fetched");
+    }
 
     // Ctrl-C ends one too.
     fixture.ask(b'H')?;

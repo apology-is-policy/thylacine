@@ -16,7 +16,7 @@ hazards: []
 abis: []
 design: []
 created: 2026-08-03
-updated: 2026-08-03
+updated: 2026-11-03
 area: userspace
 ---
 ## Purpose
@@ -250,8 +250,13 @@ The count prefix is bounded twice over (saturating arithmetic, then a cap), so
 - **The local register and the shared clipboard are separate.** Plain `y` and `p`
   use the register and never touch the clipboard. `Space y` and `Space p`, from the
   which-key menu over Normal or over a selection, raise a `ClipboardRequest` like any
-  other request, several selections joined with LF. The binary resolves it and calls
-  `paste_text` when the text arrives, which may be later, at the cursor as it is then.
+  other request, several selections joined with LF and CRLF and CR exported as LF, which
+  is scripture's rule for a text-export adapter. A second clipboard key before the binary
+  has taken the first says so and keeps the first. The binary resolves a request and calls
+  `paste_text` when the text arrives, which may be later, at the cursor as it is then and
+  in the buffer that asked or nowhere: `ClipboardRequest::Paste` carries a `BufferId`, never
+  reused, because closing a buffer moves the next one into its index. Under another buffer
+  it says so and changes nothing, and so does an empty paste.
   `TextBuffer::try_paste` reserves everything first, so the paste is one undo step or
   no change at all, and it is linear in the text, where `insert_str` is quadratic in
   the length of a line. A paste arriving at a prompt or a picker is not applied.

@@ -816,9 +816,10 @@ impl Client {
                     context: CONTEXT,
                     epoch: EPOCH,
                 });
+                // The schedule stays spent: a server that binds and then fails the report
+                // it was bound for would otherwise be connected to for ever. Only the host
+                // asking again restores it.
                 self.link = Link::Bound;
-                self.retries = RECONNECT_ATTEMPTS;
-                self.backoff = RECONNECT_MIN_NS;
             }
             (Link::Bound, Response::Mode) => {}
             _ => self.lose_link(Why::Malformed),

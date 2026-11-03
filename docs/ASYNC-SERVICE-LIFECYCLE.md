@@ -396,8 +396,11 @@ The client's rules, each from a rule above it:
   identity.
 - AS-4d: Nora. The pure engine raises Copy and Paste, its host resolves them. Space
   y and Space p reach the shared clipboard, plain y and p stay local, and several
-  selections join with LF. Mode reports follow its editing mode. A paste is one undo
-  transaction. One scenario proves a server stopped mid-copy does not stop typing:
+  selections join with LF, and CRLF and CR export as LF. Mode reports follow its
+  editing mode. A paste is one undo transaction, and lands in the buffer that asked or
+  nowhere: the request carries an id never reused, and arriving under another buffer it
+  says so and changes nothing, as an empty one does. A second clipboard key in one burst
+  says the first is still out. One scenario proves a server stopped mid-copy does not stop typing:
   `ls-nora-stopped-copy`, a real Nora on a pts its probe owns, against loom-fixture.
   The fixture's `hold-copy` service takes a copy's first write and then answers nothing
   on that connection, so the client's deadline and the ring's close are all that can
@@ -413,7 +416,7 @@ The client's rules, each from a rule above it:
   because the server still admits. A paste over the line's 64 KiB limit refuses whole,
   visibly. HI-3 makes transcript NOR's Space p send the same key. The key is Alt-P. One
   ring per paste, since a shell sits at its prompt for days and cannot pump while a
-  foreground command runs. A tab or control character also refuses whole: the line
+  foreground command runs, and an accepted line ends the fetch before it runs. A tab or control character also refuses whole: the line
   echoes as it is and counts one column per character. Written and host-tested, the
   fixture half in `ls-ut-paste`; not yet booted, and the real session's half is owed.
 - AS-4f: the rest of AS-4's list: paste after edit, tab, focus and session change;

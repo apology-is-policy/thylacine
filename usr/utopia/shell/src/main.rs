@@ -609,7 +609,10 @@ pub extern "C" fn rs_main() -> i64 {
             match io::stdin().read(&mut buf) {
                 Ok(0) | Err(_) => break repl.exit_code(),
                 Ok(n) => {
-                    if let Some(code) = repl.feed(&buf[..n], &mut out) {
+                    let ended = repl.feed_announcing(&buf[..n], &mut out, &mut || {
+                        clip.line_accepted()
+                    });
+                    if let Some(code) = ended {
                         break code;
                     }
                     // H-2 F10: a completed command cycle drew a fresh prompt

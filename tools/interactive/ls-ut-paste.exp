@@ -13,7 +13,8 @@
 #   - Past the line's 64 KiB limit, or with a tab, it refuses whole and says so, and the
 #     line is still usable.
 #   - With the server stopped at the paste, typing runs, a second key says the first is
-#     out, and Enter or Ctrl-C ends the fetch at once.
+#     out, and Enter or Ctrl-C ends the fetch at once. A foreground command does too,
+#     while it runs. The key and Enter in one read fetch nothing.
 #   - Left alone, the client gives up at its deadline and the shell says so. Leaving
 #     with one parked is not held up by it.
 #   - The fixture exits 77: no violation and every session ended.

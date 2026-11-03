@@ -134,6 +134,8 @@ pub enum PasteRefused {
     /// A control character other than a line feed, or a tab: `render` counts one
     /// column per character, and a typed Tab never reaches the buffer either.
     Unprintable,
+    /// The allocator would not give the line room for it.
+    NoMemory,
 }
 
 // =============================================================================
@@ -922,6 +924,9 @@ impl LineEditor {
         self.mode = LineEditorMode::Normal;
         if self.buffer.len() + text.len() > MAX_BUFFER_LEN {
             return Err(PasteRefused::TooLong);
+        }
+        if self.buffer.try_reserve(text.len()).is_err() {
+            return Err(PasteRefused::NoMemory);
         }
         self.buffer.insert_str(self.cursor, text);
         self.cursor += text.len();

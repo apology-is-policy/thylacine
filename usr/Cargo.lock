@@ -900,6 +900,7 @@ dependencies = [
  "libtapestry",
  "libthyla-rs",
  "ptyhold",
+ "vt",
 ]
 
 [[package]]
@@ -1241,6 +1242,7 @@ dependencies = [
  "libhalcyon",
  "libthyla-rs",
  "parley",
+ "vt",
 ]
 
 [[package]]

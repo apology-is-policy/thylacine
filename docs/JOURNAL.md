@@ -55,6 +55,26 @@ The per-slot pointers went in the slot ledger's own page, which had room, becaus
 table is exactly a page. A page owned by a prepared CLUNK whose FID is reaped meanwhile was
 the case that needed thought: the operation frees it, and the slot's incarnation tells it so.
 
+AS-4's audit round 2 came back with 2 P0, 2 P2 and 8 P3, none of them in the client or
+the adapters' product paths. Both P0s were my witnesses. I read each against the code
+before fixing it, and both are real: `ls-nora-stopped-copy` could never have passed. It
+matched contiguous bytes against kaua's diff painter, and `copied to the clipboard` over
+`/home/michael/stopped-nora-control.txt` shares an `e` at column 32, so the wire says
+`copi<move>d`. And its own keys tore its words: a copy leaves the cursor inside what it
+copied, `i` inserts there, and `alphalphaa` passed its control only because the count
+took overlapping windows. A host test now renders those frames and pins the tear (the
+sabotage that makes the painter repaint everything turns it red), and running the probe's
+old `i` through the engine gives `bravcharliedeltao`.
+
+Round 2's P3 on the reconnect schedule proposed resetting it once a report was answered. I
+deleted the reset instead: every path that can lose a link starts from a host request,
+and a host request already restores the schedule, so a conditional reset would have been
+dead code. The prosecutor's P3 on a parked Twrite offered a knob or a reason: the Rust sim
+gained one, and `hold-paste` now parks on its own Twrite, so the guest runs both shapes.
+20 mutants on the Pi, all red, each naming its test. The ut legs (the key and Enter in one
+read, a fetch across `head -n 1`) can only go red in a guest, so they are owed both ways at
+first boot, with `try_reserve` in `LineEditor::paste_text`, which nothing here can make fail.
+
 ## 2026-11-03 -- one poisoned fence, reproduced, and four votes (corona)
 
 The sabotage set ended at 16:28Z (work/nov03-as3a/run4.log): x1, x6, x10 and x15
