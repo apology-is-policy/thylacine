@@ -3576,10 +3576,12 @@ static struct Thread *caught_pick(struct Proc *p, u32 fam, struct Thread *poster
 }
 
 // Make a designee take its note: wake it if it is blocked in an unwinding wait,
-// else kick it, so a thread running at EL0 takes an IRQ into its tail. Caller
+// else kick it, so a thread running at EL0 takes an IRQ into its tail. Until a
+// table governs the Proc, a wait of that kind rides the note out and the first
+// row's re-read is what ends it, so a wake here would be for nothing. Caller
 // holds x->wait_lock.
 static void caught_rouse_locked(struct Thread *x) {
-    if (caught_waits(x, CAUGHT_WAIT_UNWINDS)) {
+    if (caught_waits(x, CAUGHT_WAIT_UNWINDS) && notes_table_governs(x->proc)) {
         struct Rendez *r = x->rendez_blocked_on;
         if (r && r != &x->debug_rendez) wakeup(r);
         return;
