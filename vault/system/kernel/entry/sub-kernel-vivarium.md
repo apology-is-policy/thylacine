@@ -10,16 +10,23 @@ validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/VIVARIUM.md", "docs/LINEAGE.md"]
 created: 2026-08-06
-updated: 2026-11-02
+updated: 2026-11-03
 ---
-## Native ceiling 138
+## Native ceiling 139
 
-The native ceiling is POSTNOTE_TID, at 138 since vote 14 (2026-11-02). The rows that
+The native ceiling is the reserved SYS_ACCOUNT, at 139 since votes 47 and 48
+(2026-11-03). It rose over rt_sigreturn, which is argued per number in vivarium.c: the
+number is intercepted for a Linux Proc before the native switch, so a Linux Proc reaches
+no account operation and is charged without one, and a native program mis-declared as
+Linux restores a frame from its own stack, which confers nothing. The ceiling argument
+now starts at setgid (144).
+
+POSTNOTE_TID held it at 138 from vote 14 (2026-11-02). The rows that
 raise newly covers are argued per number in vivarium.c: rt_sigprocmask, rt_sigpending
 and rt_sigtimedwait (135..137) meet an empty gap on this tree, and rt_sigqueueinfo
 (138) collides with POSTNOTE_TID but is an ENOSYS row, so a Linux Proc never reaches
 the post, and a native program mis-declared as Linux reads ENOSYS and is exposed to
-nothing. The ceiling argument now starts at rt_sigreturn (139). SRV_REGISTRY_NEW held
+nothing. SRV_REGISTRY_NEW held
 the ceiling at 134 from vote 13 (2026-10-19), which moved it from 127 and left 127..133
 to other branches' syscalls. Raising the
 ceiling from 127 to 134 put seven signal-family rows below it, and the

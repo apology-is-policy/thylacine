@@ -128,6 +128,7 @@ Generated — do not edit between the markers (`quaestor render`).
 
 ## Recent changes
 
+- 2026-11-03 [[chg-2026-11-03-memory-account-reservation]] — Reserve the memory account call and its records
 - 2026-11-03 [[chg-2026-11-03-seat-session-start]] — A chord at session start is a wait: the seat's P3s, a member that may owe, and a needle checker
 - 2026-11-02 [[chg-2026-11-02-f3-what-it-is]] — What review finding F-3 is, read from main's code
 - 2026-11-02 [[chg-2026-11-02-join-planted-cleanup]] — The F1 test's cleanup ran on an early failure, three planted points
@@ -135,5 +136,4 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-11-02 [[chg-2026-11-02-thread-model-c4]] — Thread-model C4: a note aimed at one thread
 - 2026-11-02 [[chg-2026-11-02-thread-overhaul-position]] — The thread-model overhaul's position: C7 was not its last chunk
 - 2026-11-02 [[chg-2026-11-02-usr-notes]] — SIGUSR1 and SIGUSR2 become notes, and every family word outgrows its byte
-- 2026-10-29 [[chg-2026-10-29-aux-corona-join]] — The corona join: aux-3 carries env-a and env-c, and every deferring lock is taken through its helper
 <!-- generated:end -->

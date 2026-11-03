@@ -59,9 +59,12 @@ void test_syscall_dispatch_unknown(void) {
 // the fix is a per-number collision assert for each vivarium row at that
 // number, and then this pin moves. The suite runs before init, so the only
 // unknown calls in flight are the ones tests make.
+//
+// SYS_ACCOUNT at 139 is reserved with no dispatch arm until MM-1, so it is pinned
+// the same way: its arm arriving moves this test with it.
 void test_syscall_native_gap_unassigned(void) {
-    for (u64 nr = 129; nr <= 137; nr++) {
-        if (nr == SYS_SRV_REGISTRY_NEW) continue;
+    for (u64 nr = 129; nr <= SYS_ACCOUNT; nr++) {
+        if (nr == SYS_SRV_REGISTRY_NEW || nr == SYS_POSTNOTE_TID) continue;
         struct exception_context ctx;
         for (int i = 0; i < 31; i++) ctx.regs[i] = 0;
         ctx.regs[8] = nr;

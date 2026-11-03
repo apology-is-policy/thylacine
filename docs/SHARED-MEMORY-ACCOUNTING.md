@@ -536,7 +536,18 @@ struct account_outcome { u64 request_id; u32 cls; u32 reason; u64 requested, ava
 `flags` is zero and `incarnation` is the expected account or object, with 0 for self.
 Amounts cross the boundary in bytes, with checked page rounding inside, per section 4.
 `ACCOUNT_SET_LIMITS` carries the whole class vector, so all-or-nothing is the record's
-shape. `reason` takes section 9's nine values.
+shape. `reason` takes section 9's nine values, 1 to 9 in that section's order, so a
+record never filled in names none. `level` is 0 NORMAL, 1 WARNING and 2 CRITICAL, and
+`limiting` is the class that is tightest. The self selector is -1, since no handle is
+negative.
+
+Reserved at MM-0: `SYS_ACCOUNT` is 139, with no dispatch arm until MM-1, so it answers as
+an unknown number and `syscall.native_gap_unassigned` pins that. Linux's 139 is
+rt_sigreturn, which a Linux Proc takes before the native switch, so a Linux Proc reaches no
+account operation and is charged without one. The kernel's `thylacine/account.h`, libt's
+`thyla/account.h` and libthyla-rs's `account` are held to one byte record by
+`tools/test-account-abi.py`. Records for the operations other than the query come with
+those operations, and the version and size fields are what lets them.
 
 Not settled here: whether `ALLOCATE_FUNDED` returns a `KOBJ_DMA`, a Burrow or either by
 class; whether a map needs its own operation or `burrow_share_into`'s callers charge

@@ -13,15 +13,18 @@ code:
   - usr/lib/libt/src/start.S
   - usr/lib/libthyla-rs/src/lib.rs
   - usr/lib/libthyla-rs/src/pty_interaction.rs
+  - kernel/include/thylacine/account.h
+  - usr/lib/libt/include/thyla/account.h
+  - usr/lib/libthyla-rs/src/account.rs
 audit: hard
 guarded-by: [inv-i5, inv-i13, inv-i32]
 validated-by: [prose, gate-smp, gate-interactive]
 locks: []
-abis: [abi-t-stat, abi-handle-rights, abi-errno, abi-pty-interaction]
+abis: [abi-t-stat, abi-handle-rights, abi-errno, abi-pty-interaction, abi-memory-account]
 design:
   - "docs/ARCHITECTURE.md section 13"
 created: 2026-08-03
-updated: 2026-11-02
+updated: 2026-11-03
 ---
 ## Session registry factory ABI
 
@@ -234,6 +237,13 @@ empty. The 127..133 hole is deliberate and pinned
 native switch's unknown arm through `syscall_unknown_count()` rather than
 trusting the -1 many handlers also return): those numbers belong to other
 branches.
+
+**The memory account call, reserved (2026-11-03, operator votes 47 and 48).**
+`SYS_ACCOUNT` = 139: handle or `ACCOUNT_SELF`, operation, record pointer, record size.
+It is a number and a layout and nothing else: no dispatch arm until MM-1, so it reaches
+the unknown arm, and `syscall.native_gap_unassigned` pins that. `SYS__NATIVE_TOP` is 140
+and `VIV_NATIVE_CEILING` 139. The live count below does not move. [[abi-memory-account]]
+holds the records.
 
 **Thread-directed notes (2026-11-02, operator vote 14).** `SYS_POSTNOTE_TID` = 138:
 tid, name pointer, name length. Tid 0 is the calling thread, and the call reaches the

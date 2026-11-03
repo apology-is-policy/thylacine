@@ -2534,6 +2534,14 @@ enum {
     // consumed before the native switch (vivarium.c).
     SYS_POSTNOTE_TID = 138,
 
+    // RESERVED, NOT YET LIVE (SHARED-MEMORY-ACCOUNTING.md section 13, operator votes 47
+    // and 48): SYS_ACCOUNT(handle, op, rec_va, rec_size), on a KOBJ_ACCOUNT handle or
+    // ACCOUNT_SELF, with thylacine/account.h's records. No dispatch arm until MM-1, so
+    // it answers as an unknown number; syscall.native_gap_unassigned pins that.
+    //
+    // Linux's 139 is rt_sigreturn, intercepted before the native switch (vivarium.c).
+    SYS_ACCOUNT = 139,
+
     // NOT A SYSCALL. One past the highest assigned number, so that
     // VIV_NATIVE_CEILING can be pinned to a value the compiler recomputes
     // rather than to a symbol a person must remember to re-point.

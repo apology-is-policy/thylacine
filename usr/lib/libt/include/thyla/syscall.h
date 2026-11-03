@@ -2576,6 +2576,9 @@ static inline long t_pivot_root(long new_root_fd) {
     return x0;
 }
 
+// Reserved, not yet live: the memory account call, with thyla/account.h's records.
+#define T_SYS_ACCOUNT 139
+
 // Post a note at one thread of the caller's own Proc; tid 0 is the caller.
 #define T_SYS_POSTNOTE_TID 138
 static inline long t_postnote_tid(long tid, const char *name, unsigned long name_len) {

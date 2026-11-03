@@ -574,7 +574,11 @@ enum {
 // over rt_sigprocmask, rt_sigpending, rt_sigtimedwait and rt_sigqueueinfo. Only
 // rt_sigqueueinfo meets a native number there; each has its per-number argument
 // in vivarium.c, and the lowest still argued by the ceiling is rt_sigreturn (139).
-#define VIV_NATIVE_CEILING 138
+//
+// SYS_ACCOUNT reserves 139 (operator votes 47 and 48), and the ceiling rises over
+// rt_sigreturn, which has its own per-number argument in vivarium.c. The lowest row
+// still argued by the ceiling is setgid (144).
+#define VIV_NATIVE_CEILING 139
 
 // -----------------------------------------------------------------------------
 // TIER 2 — translators (V-2b).
