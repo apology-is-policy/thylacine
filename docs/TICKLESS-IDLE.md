@@ -155,7 +155,7 @@ another CPU). The whole restore runs under the same `spin_lock_irqsave(NULL)`
 region as the arm + WFI, so it completes before the pending IRQ is taken at the
 unmask -- a placed thread never runs un-ticked.
 
-### 3.4 Per-CPU, global deadline list
+### 3.4 Per-CPU: each CPU covers its own timer base
 
 Each CPU independently goes tickless when *its* idle thread is selected, and
 covers its own timer base only (ARCHITECTURE.md 8.8). A sleeper links on the CPU
@@ -212,7 +212,8 @@ within a tick. No deadline is lost.
 
 **Lock order:** the arm reads the base's `earliest` with no lock, so it adds no
 edge at all. A stale read costs one early wake or, for a link from another CPU,
-the kick that link sends.
+the wait until that link's kick lands: `gic_send_ipi` orders the store before the
+IPI. The test phase gates the kick off, and the backstop then bounds it.
 
 **Timekeeping is unaffected.** `CLOCK_MONOTONIC`/`REALTIME` read `CNTVCT_EL0`
 (the always-running counter), NOT the tick (`timer_now_ns`, timer.c:185). The

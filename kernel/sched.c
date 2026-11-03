@@ -1958,17 +1958,26 @@ struct TimerBase {
     // The head's deadline, 0 when the base is empty (a linked sleep_deadline is a
     // post-boot CNTVCT value, never 0). Written under the lock; read without it, so the
     // ordinary tick and an idle CPU's one-shot take no lock at all. A stale read costs a
-    // lock taken for nothing, or, for a link from another CPU, one tick.
+    // lock taken for nothing, or, for a link from another CPU, the wait until that link's
+    // kick lands (gic_send_ipi orders the store before it). In the test phase the kick is
+    // gated off: cpu0 reads it at its next tick, or an idle cpu0 at its backstop.
     u64            earliest;
 } __attribute__((aligned(64)));
 
 static struct TimerBase g_timer_base[DTB_MAX_CPUS];
 
 // IRQs masked: the answer holds only while this thread stays on this CPU.
-static struct TimerBase *timer_base_here(void) {
+static struct TimerBase *timer_base_of_this_cpu(void) {
     unsigned cpu = smp_cpu_idx_self();
-    if (cpu != 0 && !g_cpu_sched[cpu].tick_armed) cpu = 0;
+    if (cpu >= DTB_MAX_CPUS) extinction("timer base: cpu idx out of range");
     return &g_timer_base[cpu];
+}
+
+// Where a sleeper on this CPU links. IRQs masked, as above.
+static struct TimerBase *timer_base_here(void) {
+    struct TimerBase *b = timer_base_of_this_cpu();
+    if (b != &g_timer_base[0] && !g_cpu_sched[b - g_timer_base].tick_armed) return &g_timer_base[0];
+    return b;
 }
 
 static void timer_base_set_earliest(struct TimerBase *b) {
@@ -2024,8 +2033,7 @@ static void timer_base_leave(struct Thread *t) {
 VISIBLE_IF_KERNEL_TESTS
 u64 timerwait_earliest_deadline(void) {
     irq_state_t s = spin_lock_irqsave(NULL);
-    u64 earliest = __atomic_load_n(&g_timer_base[smp_cpu_idx_self()].earliest,
-                                   __ATOMIC_RELAXED);
+    u64 earliest = __atomic_load_n(&timer_base_of_this_cpu()->earliest, __ATOMIC_RELAXED);
     spin_unlock_irqrestore(NULL, s);
     return earliest;
 }
@@ -2068,8 +2076,8 @@ void timer_base_unlock_for_test(irq_state_t s) {
 // readies it. `timed_out` records the cause in t->sleep_timedout for
 // tsleep's resume.
 //
-// Caller holds r->lock and has validated r->waiter == t with t SLEEPING on r. A
-// timer entry t may have stays where it is: t takes it off when it runs.
+// Caller holds r->lock and has validated r->waiter == t with t SLEEPING on r. Any
+// timer entry of t's stays where it is: t takes it off when it runs.
 //
 // Maps to the wake effect shared by tsleep.tla's Wakeup and TickFire.
 static void wake_rendez_waiter(struct Rendez *r, struct Thread *t,
@@ -2476,7 +2484,7 @@ static int tsleep_common(struct Rendez *r, int (*cond)(void *arg), void *arg,
         // A secondary with no tick linked on cpu0's base, and cpu0 may be parked
         // past this deadline. Its next park reads the new head. The test phase's
         // cpu0 keeps its periodic tick, and sched_notify_cpu is gated off there.
-        if (b != &g_timer_base[smp_cpu_idx_self()]) sched_notify_cpu(0);
+        if (b != timer_base_of_this_cpu()) sched_notify_cpu(0);
 
         // Register-then-observe (I-9 death-wake close, ARCH §8.8.1; widened
         // by LS-5c per §8.8.2): identical to sleep() -- thread_die_pending =
@@ -2608,7 +2616,7 @@ int tsleep_noteintr(struct Rendez *r, int (*cond)(void *arg), void *arg,
 // way to this lock, or, on cpu0's base, a secondary's sleeper still switching out. It
 // is not selected, so a wake never spins in the timer IRQ handler.
 static void timerwait_tick(void) {
-    struct TimerBase *b = &g_timer_base[smp_cpu_idx_self()];
+    struct TimerBase *b = timer_base_of_this_cpu();
     u64 now = timer_get_counter();
 
     for (;;) {

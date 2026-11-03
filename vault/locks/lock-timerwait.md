@@ -36,7 +36,10 @@ base and kicks cpu0.
 
 `earliest` is written under this lock and read without it: the ordinary
 tick and an idle CPU's one-shot take no lock at all. A stale read costs a
-lock taken for nothing or, for a link from another CPU, one tick.
+lock taken for nothing or, for a link from another CPU, the wait until that
+link's kick lands: `gic_send_ipi` orders the store before the IPI. With the
+kick gated off in the test phase, cpu0 reads it at its next tick, or an idle
+cpu0 at its 4 ms backstop.
 
 ## Held across
 

@@ -9,7 +9,7 @@ guarded-by: [inv-i21, inv-i31, inv-i32, inv-i44, inv-i48]
 validated-by: [gate-smp, spec-thread-reap]
 locks: [lock-proc-threads, lock-proc-table]
 created: 2026-08-01
-updated: 2026-10-29
+updated: 2026-11-03
 ---
 ## Purpose
 
@@ -278,7 +278,9 @@ chunk (2026-10-28, [[chg-2026-10-28-poll-hook-walks]]) appended `table_owed`
 per 4 KiB slab -- the walks the thread owes under the process table lock and
 under a deferring lock, and how many deferring locks it holds
 ([[sub-kernel-poll]]). `thread_release` extincts on a thread freed still
-counting a deferring lock or owing a walk on either chain (ChainDrained).
+counting a deferring lock or owing a walk on either chain (ChainDrained), and
+on one still on a timer base, which the next tick would walk
+([[sub-kernel-rendez]]).
 `cpu_pinned` is the single
 clean unstealability predicate that replaced the old `kstack_base != NULL`
 gate — the #860 root cause was that `g_bootcpu_idle` owned a real kstack, so

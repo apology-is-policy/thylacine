@@ -233,7 +233,9 @@ wakes nothing, since it re-checks SLEEPING and `r->waiter` there.
 until it has switched out, so its own base's tick cannot find it
 mid-switch. A secondary whose tick is not armed yet (`tick_armed`, the
 deterministic test phase and the moment after it) links on cpu0's and
-kicks cpu0. `b` is re-picked after every migration point: the stop park
+kicks cpu0; the kick orders the store before the IPI, and with the kick gated
+off in the test phase cpu0 reads it at its next tick, or an idle cpu0 at its
+4 ms backstop. `b` is re-picked after every migration point: the stop park
 and `sched()`.
 
 ## Data structures

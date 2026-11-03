@@ -4,7 +4,7 @@ type: chg
 title: "Per-CPU timer bases: a wake takes no timer lock"
 date: 2026-11-03
 arc: arc-phase6-pouch
-commits: ["0905ba39d"]
+commits: ["0905ba39d", "1f561b334", "f8423a407"]
 touched:
   - sub-kernel-rendez
   - sub-kernel-sched-smp

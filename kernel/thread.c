@@ -856,6 +856,8 @@ static void thread_release(struct Thread *t, bool unlink) {
                                   extinction("thread_free of uninitialized Thread");
     if (t->state == THREAD_RUNNING)
                                   extinction("thread_free of RUNNING thread");
+    // The next tick would walk it: tsleep's way out is the only way off a timer base.
+    if (t->timer_base_cpu)        extinction("thread_free of a thread on a timer base");
     // ChainDrained (specs/poll_owed.tla, poll_defer.tla): a thread leaves every
     // lock it held, and each release drained what it owed.
     if (t->defer_depth || t->lock_owed.head || t->table_owed.head)

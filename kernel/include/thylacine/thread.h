@@ -182,7 +182,7 @@ struct Thread {
     // constants + energy model are the deferred EAS tuning (ARCH §8.4.4 "the
     // verification boundary"), landing on real heterogeneous hardware. Occupies
     // the 4 bytes of on_cpu/cpu_pinned tail padding before timerwait_next -- no
-    // struct-size change (the _Static_assert below still pins 1136).
+    // struct-size change.
     u32                util;
 
     // P5-tsleep, C8b: deadline-bounded Rendez sleep. A thread inside a

@@ -748,6 +748,11 @@ bool gic_send_ipi(unsigned target_cpu_idx, u32 sgi_intid) {
     // the silent-drop hazard for forward-looking out-of-range loops.
     if (target_cpu_idx >= smp_cpu_count()) return false;
 
+    // What the sender stored must be visible before the IPI is: a sysreg write and a
+    // Device write order with neither a release nor a dmb. A woken CPU reads what it was
+    // woken for, a timer base's head with no lock.
+    __asm__ __volatile__("dsb ishst" ::: "memory");
+
     if (g_version == GIC_VERSION_V2) {
         // GICD_SGIR (ARM IHI 0048B §4.3.15): TargetListFilter 0b00 (bits
         // [25:24] = 0, "use the CPUTargetList byte"), CPUTargetList [23:16] =

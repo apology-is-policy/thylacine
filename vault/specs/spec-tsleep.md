@@ -72,9 +72,11 @@ Two impl properties sit *beneath* the abstraction and are prose-argued:
   still switching out is skipped and met by a later tick — keeps an
   unbounded spin out of the timer IRQ handler. The model has no `on_cpu`:
   `TickPick` may take any expired entry, a superset.
-- One base is modelled. Each has its own lock and tick, and the owner may
-  re-link elsewhere while a tick holds the old one, so `Commit` is not
-  blocked by a tick that holds only the base's lock.
+- One base is modelled. Each has its own lock and tick, so `Commit` is
+  blocked by a tick holding the Rendez lock and not by one holding only the
+  base's. The correct configuration never reaches that freedom: a tick in
+  `"base"` means the entry is linked, so the owner has not left.
+  `unlink_early` does.
 
 ## Gate
 

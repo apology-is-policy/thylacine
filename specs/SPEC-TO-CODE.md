@@ -876,9 +876,11 @@ sleep atomicity for `sleep` (and `tsleep`'s no-deadline path *is*
 
 State universe: one waiter, one Rendez, one deadline (`Rendez` is
 single-waiter by construction, so one sleeper exercises the whole race;
-`MaxSleeps` bounds the spurious-wakeup re-sleep loop). One base is modelled,
-with `Commit` free to link while a tick holds its lock, since the owner may
-be on another CPU by then. CONSTANTS: `HAS_DEADLINE` (FALSE = the no-deadline
+`MaxSleeps` bounds the spurious-wakeup re-sleep loop). One base is modelled.
+`Commit` is blocked by a tick holding the Rendez lock and not by one holding
+only the base's, since the owner may be on another CPU by then. The correct
+configuration never reaches that freedom (a tick in `"base"` means the entry
+is linked, so the owner has not left); `BUGGY_UNLINK_EARLY` does. CONSTANTS: `HAS_DEADLINE` (FALSE = the no-deadline
 path), `BUGGY_OWNER_KEEPS`, `BUGGY_CLEAR_FIRST`, `BUGGY_UNLINK_EARLY`,
 `BUGGY_TIMEOUT_STALE`, `BUGGY_RECHECK_ORDER`.
 

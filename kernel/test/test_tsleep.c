@@ -12,8 +12,8 @@
 //
 //   tsleep.past_deadline_immediate
 //     A deadline already in the past + cond false → tsleep returns
-//     TSLEEP_TIMEDOUT immediately, never enqueuing on the Rendez or the
-//     timer-wait list.
+//     TSLEEP_TIMEDOUT immediately, never enqueuing on the Rendez or a
+//     timer base.
 //
 //   tsleep.woken_before_deadline
 //     Two-thread handoff. A consumer tsleeps with a far deadline; boot
@@ -471,8 +471,7 @@ static void tb_start(struct Thread **c, unsigned i, u64 deadline_ns) {
     *c = t;
 }
 
-// On a secondary, to its sleep. No sched() here: a yield onto an empty tree could steal
-// the consumer back before it ran.
+// On a secondary, to its sleep. A spin: only the IPI's dispatch there is being waited for.
 static void tb_start_on_peer(struct Thread **c, unsigned i, u64 deadline_ns, unsigned peer) {
     struct Thread *t = tb_create(i, deadline_ns);
     *c = NULL;
