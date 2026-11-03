@@ -394,30 +394,40 @@ void test_9p_session_walk_reply_overcount(void) {
         TEST_EXPECT_EQ(p9_session_dispatch_rmsg(&s, g_buf, (size_t)rlen, &r), g[i].rc, g[i].what);
         TEST_EXPECT_EQ((u64)p9_session_fid_bound(&s, 5), (u64)g[i].binds, g[i].what);
     }
-    // A late reply under a flush, for an owner that left and for one that still
-    // waits. An over-count is absorbed ownerless and refused with an owner, and a
-    // short walk is an answer to both. Neither binds.
-    static const struct { u16 nwqid; int owner_rc; } late[] = { { 2, -1 }, { 0, 0 } };
-    for (u32 l = 0; l < sizeof(late) / sizeof(late[0]); l++) {
-        for (int owner = 0; owner < 2; owner++) {
-            struct p9_session s;
-            TEST_EXPECT_EQ(drive_session_open(&s, 0), 0, "drive_session_open");
-            int len = p9_session_send_walk(&s, g_buf, sizeof(g_buf), 0, 5, 1, g_wnames, g_wlens);
-            TEST_ASSERT(len > 0, "send_walk");
-            p9_peek_header(g_buf, (size_t)len, &sz, &ty, &t);
-            len = p9_session_send_flush(&s, g_buf, sizeof(g_buf), t);
-            TEST_ASSERT(len > 0, "send_flush");
-            int rlen = synth_rwalk_n(g_buf, sizeof(g_buf), t, late[l].nwqid);
-            r.bound_new_fid = P9_NOFID;
-            if (owner) {
-                TEST_EXPECT_EQ(p9_session_dispatch_flushed_rmsg(&s, g_buf, (size_t)rlen, &r),
-                               late[l].owner_rc, "a waiting owner's answer");
-            } else {
-                TEST_EXPECT_EQ(p9_session_dispatch_rmsg(&s, g_buf, (size_t)rlen, &r), 0,
-                               "ownerless, it is absorbed");
-                TEST_EXPECT_EQ((u64)r.bound_new_fid, (u64)P9_NOFID, "and reports no bind");
+    // A late reply under a flush, to either walk, for an owner that left and for
+    // one that still waits. An over-count is absorbed ownerless and refused with an
+    // owner, a short walk is an answer to both, and neither binds; a full one binds.
+    static const struct { u16 nwqid; int owner_rc; bool binds; } late[] = {
+        { 2, -1, false }, { 0, 0, false }, { 1, 0, true },
+    };
+    for (int attrs = 0; attrs < 2; attrs++) {
+        for (u32 l = 0; l < sizeof(late) / sizeof(late[0]); l++) {
+            for (int owner = 0; owner < 2; owner++) {
+                struct p9_session s;
+                TEST_EXPECT_EQ(drive_session_open(&s, 0), 0, "drive_session_open");
+                int len = attrs
+                    ? p9_session_send_walkgetattr(&s, g_buf, sizeof(g_buf), 0, 5,
+                                                  P9_GETATTR_BASIC, 1, g_wnames, g_wlens)
+                    : p9_session_send_walk(&s, g_buf, sizeof(g_buf), 0, 5, 1, g_wnames, g_wlens);
+                TEST_ASSERT(len > 0, "send a walk");
+                p9_peek_header(g_buf, (size_t)len, &sz, &ty, &t);
+                len = p9_session_send_flush(&s, g_buf, sizeof(g_buf), t);
+                TEST_ASSERT(len > 0, "send_flush");
+                int rlen = attrs ? synth_rwga_n(g_buf, sizeof(g_buf), t, late[l].nwqid)
+                                 : synth_rwalk_n(g_buf, sizeof(g_buf), t, late[l].nwqid);
+                r.bound_new_fid = P9_NOFID;
+                if (owner) {
+                    TEST_EXPECT_EQ(p9_session_dispatch_flushed_rmsg(&s, g_buf, (size_t)rlen, &r),
+                                   late[l].owner_rc, "a waiting owner's answer");
+                } else {
+                    TEST_EXPECT_EQ(p9_session_dispatch_rmsg(&s, g_buf, (size_t)rlen, &r), 0,
+                                   "ownerless, it is absorbed");
+                    TEST_EXPECT_EQ((u64)r.bound_new_fid,
+                                   late[l].binds ? (u64)5 : (u64)P9_NOFID, "and reports its bind");
+                }
+                TEST_EXPECT_EQ((u64)p9_session_fid_bound(&s, 5), (u64)late[l].binds,
+                               "only a full walk binds");
             }
-            TEST_ASSERT(!p9_session_fid_bound(&s, 5), "it bound nothing");
         }
     }
 }
