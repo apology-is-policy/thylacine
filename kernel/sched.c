@@ -2071,7 +2071,7 @@ void timer_base_unlock_for_test(irq_state_t s) {
 // Caller holds r->lock and has validated r->waiter == t with t SLEEPING on r. A
 // timer entry t may have stays where it is: t takes it off when it runs.
 //
-// Maps to the wake effect shared by tsleep.tla's Wakeup and Timeout.
+// Maps to the wake effect shared by tsleep.tla's Wakeup and TickFire.
 static void wake_rendez_waiter(struct Rendez *r, struct Thread *t,
                                bool timed_out) {
     // P2-Cf SMP race: if t is still mid-switch-out on its previous CPU
@@ -2595,7 +2595,7 @@ int tsleep_noteintr(struct Rendez *r, int (*cond)(void *arg), void *arg,
 
 // P5-tsleep: wake every thread on THIS CPU's base whose deadline has passed. Called
 // from sched_tick() on every timer fire and from an idle CPU's wake, IRQs masked. Maps
-// to specs/tsleep.tla Timeout and StaleFire.
+// to specs/tsleep.tla TickPick, TickLock and TickFire.
 //
 // The ordinary tick reads the base's earliest and takes no lock. Past that, threads
 // are woken ONE AT A TIME: each iteration takes the lock, finds one expired entry,
