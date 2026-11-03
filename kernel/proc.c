@@ -1903,19 +1903,25 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
     // handler and table are the parent's, as Plan 9's sysrfork copies p->notify.
     // Only `fc`: a native spawn has no fork context and is on its way to an image
     // these addresses mean nothing in. The table's flag crosses at the publication.
+    //
+    // A peer may be in its first sigaction now: NOTIFY, then the row, then the flag.
+    // One read of the flag decides the clone and the publication, and the handler is
+    // read after it, so a child that takes a row also takes what the row was written
+    // against.
     bool native_fork_notes = parent->phenotype != PHENO_LINUX && fc != NULL;
-    if (native_fork_notes)
-        __atomic_store_n(&child->handler_va,
-                         __atomic_load_n(&parent->handler_va, __ATOMIC_ACQUIRE),
-                         __ATOMIC_RELAXED);
-    if ((parent->phenotype == PHENO_LINUX ||
-         (native_fork_notes && (__atomic_load_n(&parent->proc_flags, __ATOMIC_ACQUIRE) &
-                                PROC_FLAG_NOTE_TABLE))) &&
+    bool note_table_crosses =
+        native_fork_notes && (__atomic_load_n(&parent->proc_flags, __ATOMIC_ACQUIRE) &
+                              PROC_FLAG_NOTE_TABLE);
+    if ((parent->phenotype == PHENO_LINUX || note_table_crosses) &&
         viv_sigtab_clone_into(child, parent) != 0) {
         child->state = PROC_STATE_ZOMBIE;
         proc_free(child);
         return -1;
     }
+    if (native_fork_notes)
+        __atomic_store_n(&child->handler_va,
+                         __atomic_load_n(&parent->handler_va, __ATOMIC_ACQUIRE),
+                         __ATOMIC_RELAXED);
 
     // P5-hostowner-a: child->proc_flags starts 0 (KP_ZERO from proc_alloc).
     // TWO bits are copied from the parent, at the publication below and nowhere
@@ -2118,7 +2124,7 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
     if (pflags & PROC_FLAG_DEBUG_TAINTED)
         __atomic_fetch_or(&child->proc_flags, PROC_FLAG_DEBUG_TAINTED,
                           __ATOMIC_RELAXED);
-    if (native_fork_notes && (pflags & PROC_FLAG_NOTE_TABLE))
+    if (note_table_crosses)
         __atomic_fetch_or(&child->proc_flags, PROC_FLAG_NOTE_TABLE, __ATOMIC_RELAXED);
 
     // The birth hold (DEBUG-FS-DESIGN 5f), in the same hold as the publication

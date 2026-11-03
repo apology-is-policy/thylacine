@@ -7,15 +7,18 @@ kernel that read as "caught" for every note, so a SIG_DFL SIGINT or SIGTERM arme
 terminate latch: a program blocked in a wait did not die until the wait ended, and ^Z did
 nothing. Nothing unwound a wait for a real handler either.
 
-  src/signal/_pouch_signal.c    The constructor registers nothing; it keeps the SIGPIPE
-      default mask. A program with no handler has none, and the kernel takes every note's
-      default itself, in a wait as well as at the tail.
+  src/signal/_pouch_signal.c    The constructor registers no handler; it keeps the SIGPIPE
+      default mask, and writes child_exit's default row, which allocates nothing and makes
+      the table govern from the image's start. A program with no handler has none, and the
+      kernel takes every note's default itself, in a wait as well as at the tail, a dead
+      child's note included: it is discarded, where it would otherwise hold a ring slot.
   src/signal/sigaction.c        Every disposition writes the note's row through
-      SYS_note_dispose. A real handler registers the dispatcher first, so until its row
-      lands every note reaches the dispatcher, which reads the table. SIG_DFL with no row
-      ever written writes nothing. A refused row puts the old table entry back and answers
-      the errno. The comment saying SA_RESTART needed nothing was false: musl re-issues no
-      call, and the row's flag is what restarts one, in the kernel.
+      SYS_note_dispose. Each real handler registers the dispatcher first, which is
+      idempotent, so no flag here can disagree with the kernel in a forked child. Until a
+      row lands its note takes the default, as POSIX has it. A refused row puts the old
+      table entry back and answers the errno. The comment saying SA_RESTART needed nothing
+      was false: musl re-issues no call, and the row's flag is what restarts one, in the
+      kernel.
   src/unistd/pause.c            pause() sits on SYS_poll over no fds. SYS_ppoll is an
       ENOSYS sentinel, so pause returned at once.
   src/select/poll.c, select.c   A poll or select over no fds sleeps for the timeout
@@ -32,7 +35,8 @@ nothing. Nothing unwound a wait for a real handler either.
 
 Witnesses: pouch-hello-signals `dfl`, `dfl-reset`, `dfl-after-handler`, `exec-dfl`,
 `intr-norestart`, `intr-restart`, `signal-restart`, `quiet`, `pause`, `nanosleep`,
-`wait-norestart`, `wait-restart`, `fork-read`, `empty-poll`; pouch-hello-sockets `accept`
+`wait-norestart`, `wait-restart`, `fork-read`, `escape`, `ring-room`, `empty-poll`;
+pouch-hello-sockets `accept`
 and `recv`; pouch-hello-net `accept-eintr`, `accept-restart`, `connect`.
 
 --- a/arch/aarch64/bits/syscall.h.in
@@ -71,15 +75,15 @@ and `recv`; pouch-hello-net `accept-eintr`, `accept-restart`, `connect`.
 - * decided HERE, and the old NDFLT arm terminated unconditionally --
 - * ^Z was a choice between dying and nothing. The seam is closed; the
 - * ignore would now be the bug.
-+ * interrupted instruction on SIGCONT. A signal left at SIG_DFL has no row
-+ * and reaches no handler: the kernel takes the note's default itself, while
++ * interrupted instruction on SIGCONT. A signal left at SIG_DFL has a default
++ * row and reaches no handler: the kernel takes the note's default itself, while
 + * a program is blocked in a wait as well as at the tail. The dispatcher's
-+ * arms for these are the short window of a first sigaction, between
-+ * SYS_NOTIFY and its SYS_NOTE_DISPOSE, when every note still comes here.
++ * arms for these are a peer's reset that crosses a delivery: the kernel read
++ * the row as caught, and the table reads default by the time we look.
   *
   * Per-thread shadow + per-Proc sigtab: the kernel's note_mask is per-
   * Thread (POSIX pthread_sigmask semantics); pouch keeps a __thread shadow
-@@ -37,13 +35,23 @@
+@@ -37,13 +35,24 @@
   * table is per-Proc (POSIX sigaction semantics); pouch keeps it in a
   * static array indexed by signum.
   *
@@ -89,13 +93,14 @@ and `recv`; pouch-hello-net `accept-eintr`, `accept-restart`, `connect`.
 - * name to the user-registered sigaction handler and end with
 - * SYS_NOTED(NCONT) — the synchronous-handler ABI is hidden from POSIX
 - * source. POSIX programs see standard sigaction + raise + kill.
-+ * The dispatcher: the first sigaction that installs a real handler
-+ * registers __pouch_note_handler via SYS_NOTIFY, and every disposition
-+ * writes the note's row with SYS_NOTE_DISPOSE (ARCHITECTURE 8.8.3). The
-+ * first row makes the kernel's table govern the Proc until its next exec,
-+ * so only a caught note reaches the dispatcher and only a caught note
-+ * unwinds a blocking call. A program that never installs a handler has no
-+ * handler at all and the kernel gives it every note's default. The kernel
++ * The dispatcher: a sigaction that installs a real handler registers
++ * __pouch_note_handler via SYS_NOTIFY, and every disposition writes the
++ * note's row with SYS_NOTE_DISPOSE (ARCHITECTURE 8.8.3). The constructor's
++ * row makes the kernel's table govern the Proc from the image's start until
++ * its next exec, so only a caught note reaches the dispatcher and only a
++ * caught note unwinds a blocking call. A program that never installs a
++ * handler has no handler at all and the kernel gives it every note's
++ * default, a dead child's included, so its note takes no room. The kernel
 + * calls the dispatcher Plan-9-style with x0 = pointer to 16-byte note name
 + * on the user stack + x1 = note arg. We dispatch by name to the
 + * user-registered sigaction handler and end with SYS_NOTED(NCONT) — the
@@ -109,7 +114,7 @@ and `recv`; pouch-hello-net `accept-eintr`, `accept-restart`, `connect`.
   * SIGPIPE default-mask at startup (POUCH-DESIGN section 6.4 [RESOLVED
   * 6.4]): the constructor sets the main thread's note_mask to
   * NOTE_BIT_PIPE so a write-to-closed-pipe returns EPIPE without
-@@ -53,9 +61,6 @@
+@@ -53,9 +62,6 @@
   *
   * v1.0 limitations documented in docs/reference/83-pouch-signals.md
   * (created at sub-chunk 13b):
@@ -119,7 +124,7 @@ and `recv`; pouch-hello-net `accept-eintr`, `accept-restart`, `connect`.
   *   - sigsetjmp/siglongjmp do NOT preserve signal masks (the
   *     sigsetjmp_tail.c path still hits the SYS_rt_sigprocmask = 0xFFFF
   *     sentinel → -ENOSYS). v1.x extension.
-@@ -110,6 +115,12 @@
+@@ -110,6 +116,12 @@
  #define POUCH_SYS_NOTED_NCONT  0u   /* restore saved user context + resume */
  #define POUCH_SYS_NOTED_NDFLT  1u   /* take the note's default action (exits) */
  
@@ -132,7 +137,7 @@ and `recv`; pouch-hello-net `accept-eintr`, `accept-restart`, `connect`.
  /* Kernel pushes exactly NOTE_NAME_MAX (= 16) bytes of the note name onto
   * the user stack. POSIX programs never reach into this directly; the
   * bootstrap handler does the bounded compare via __pouch_note_name_eq. */
-@@ -140,8 +151,9 @@
+@@ -140,8 +152,9 @@
   * to anyone else it is refused. */
  hidden const char *__pouch_self_snare(int sig);
  
@@ -439,21 +444,24 @@ and `recv`; pouch-hello-net `accept-eintr`, `accept-restart`, `connect`.
 - *   - the bootstrap async-handler (__pouch_note_handler)
 - *   - the constructor that registers it + sets the SIGPIPE default mask
 + *   - the async dispatcher (__pouch_note_handler), which sigaction registers
-+ *   - the constructor that sets the SIGPIPE default mask
++ *   - the constructor that sets the SIGPIPE default mask and child_exit's row
   */
  
  #include <signal.h>
-@@ -246,7 +246,8 @@
+@@ -246,7 +246,11 @@
  
  /* Constructor: runs once at process startup on the main thread, before
   * main(). Static-init iteration via musl's CRT (.init_array). Sets the
 - * SIGPIPE default-mask and registers the bootstrap handler. */
 + * SIGPIPE default-mask. It registers no handler: a program with none gets the
-+ * kernel's default for every note, including while blocked in a wait. */
++ * kernel's default for every note, including while blocked in a wait. And it
++ * writes child_exit's default row, which allocates nothing: a table now governs,
++ * so the kernel discards a dead child's note at the tail. With no table and no
++ * handler that note would wait for a notes fd nobody opened, and hold a slot. */
  static __attribute__((constructor)) void __pouch_signal_init(void)
  {
      /* SIGPIPE default-mask. POUCH-DESIGN.md section 6.4 [RESOLVED 6.4]:
-@@ -255,8 +256,4 @@
+@@ -255,8 +259,5 @@
       * with a real handler clears the mask bit (sigaction.c). */
      __pouch_note_mask_shadow = POUCH_NOTE_BIT_PIPE;
      __syscall(SYS_note_mask, (long)__pouch_note_mask_shadow, 0L);
@@ -461,6 +469,7 @@ and `recv`; pouch-hello-net `accept-eintr`, `accept-restart`, `connect`.
 -    /* Register the bootstrap handler. Every async-delivery note from
 -     * here on lands at __pouch_note_handler. */
 -    __syscall(SYS_notify, (long)(uintptr_t)__pouch_note_handler);
++    __syscall(SYS_note_dispose, "child_exit", 10L, (long)POUCH_NOTE_DISP_DEFAULT, 0L);
  }
 --- a/src/signal/sigaction.c
 +++ b/src/signal/sigaction.c
@@ -470,54 +479,41 @@ and `recv`; pouch-hello-net `accept-eintr`, `accept-restart`, `connect`.
 - * table — the bootstrap handler (__pouch_note_handler) is registered
 - * once at process startup and dispatches by note name to the table.
 + * table and the kernel's per-note row, written with SYS_NOTE_DISPOSE. The
-+ * dispatcher (__pouch_note_handler) is registered by the first real handler
++ * dispatcher (__pouch_note_handler) is registered by each real handler
 + * and dispatches by note name to the table.
   *
   * v1.0 supported signums: SIGINT, SIGTERM, SIGUSR1, SIGUSR2, SIGPIPE, SIGCHLD.
   * SIGKILL/SIGSTOP/others return EINVAL (POSIX-conformant for SIGKILL/
-@@ -21,6 +22,58 @@
+@@ -21,6 +22,45 @@
  
  volatile int __eintr_valid_flag;
  
-+static volatile int __pouch_dispatcher_registered;
-+static volatile int __pouch_row_written;
-+
 +/* Write sig's row in the kernel's table. Returns 0 or a negative errno.
 + *
-+ * The dispatcher goes first: a peer thread racing here that sees it registered
-+ * must find it registered in the kernel, because a caught row with no handler
-+ * is refused. So the flag is set after the call, and two first callers both
-+ * register, which is idempotent. Until the row lands every note reaches the
-+ * dispatcher, which reads the table above and does the right thing for each.
-+ *
-+ * SIG_DFL with no row ever written writes nothing: every note already takes its
-+ * default, and a program that only resets a signal should not grow a table. */
++ * The dispatcher goes first, on every real install: a caught row with no handler
++ * is refused, registering is idempotent, and no flag here can disagree with the
++ * kernel in a forked child. Until the row lands the note takes its default, as
++ * POSIX has it before sigaction returns; the constructor's row has the table
++ * governing already, so there is no window in which every note reaches the
++ * dispatcher. A default row allocates nothing. */
 +static long __pouch_sig_dispose(int sig, const struct sigaction *sa, int live)
 +{
 +	const char *name;
 +	if (__pouch_sig_to_note(sig, &name) < 0) return -EINVAL;
 +
-+	unsigned long disposition;
++	unsigned long disposition = POUCH_NOTE_DISP_DEFAULT;
 +	unsigned long flags = 0;
 +	if (live) {
-+		if (!__pouch_dispatcher_registered) {
-+			long r = __syscall(SYS_notify, (long)(uintptr_t)__pouch_note_handler);
-+			if (r < 0) return r;
-+			a_store(&__pouch_dispatcher_registered, 1);
-+		}
++		long r = __syscall(SYS_notify, (long)(uintptr_t)__pouch_note_handler);
++		if (r < 0) return r;
 +		disposition = POUCH_NOTE_DISP_CAUGHT;
 +		if (sa->sa_flags & SA_RESTART) flags = POUCH_NOTE_DISP_RESTART;
 +	} else if (sa->sa_handler == SIG_IGN) {
 +		disposition = POUCH_NOTE_DISP_IGNORE;
-+	} else {
-+		if (!__pouch_row_written) return 0;
-+		disposition = POUCH_NOTE_DISP_DEFAULT;
 +	}
 +
 +	long r = __syscall(SYS_note_dispose, name, strlen(name), disposition, flags);
-+	if (r < 0) return r;
-+	a_store(&__pouch_row_written, 1);
-+	return 0;
++	return r < 0 ? r : 0;
 +}
 +
 +static void __pouch_pipe_mask(int masked)
@@ -534,7 +530,7 @@ and `recv`; pouch-hello-net `accept-eintr`, `accept-restart`, `connect`.
  int __libc_sigaction(int sig, const struct sigaction *restrict sa,
                       struct sigaction *restrict old)
  {
-@@ -42,7 +95,7 @@
+@@ -42,7 +82,7 @@
  
  	/* F11 audit close: reject SIG_ERR as a handler. SIG_ERR ((void(*)(int))-1)
  	 * is the error return from signal(3), not a valid sigaction input. Without
@@ -543,7 +539,7 @@ and `recv`; pouch-hello-net `accept-eintr`, `accept-restart`, `connect`.
  	 * EL0 fault → kernel extinct (FAULT_UNHANDLED_USER policy). POSIX is
  	 * silent on this case; some implementations reject. */
  	if (sa && sa->sa_handler == SIG_ERR) {
-@@ -51,36 +104,38 @@
+@@ -51,36 +91,38 @@
  	}
  
  	/* Save old before overwriting. */

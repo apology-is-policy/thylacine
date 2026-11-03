@@ -487,6 +487,18 @@ bool notes_table_governs(const struct Proc *p) {
            (__atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE) & PROC_FLAG_NOTE_TABLE) != 0;
 }
 
+// A native row holds a token, and the write's gate (a handler or a notes fd) says
+// nothing after the write: a fork leaves the notes fd's mark behind, and a peer's
+// SYS_NOTIFY(0) can cross a dispose that passed it. A token with nobody to take
+// the note reads as the default, or no signal could ever end the Proc. A guest's
+// row holds an address of its own, whatever its value.
+static bool notes_row_has_taker(struct Proc *p, u64 row_handler) {
+    return row_handler != VIV_NATIVE_CAUGHT ||
+           __atomic_load_n(&p->phenotype, __ATOMIC_ACQUIRE) == PHENO_LINUX ||
+           __atomic_load_n(&p->handler_va, __ATOMIC_ACQUIRE) != 0 ||
+           proc_is_self_managing_notes(p);
+}
+
 // V-8 F2: does THIS Proc have a live handler for `name`? The `handler_va` test
 // below answers that for a Proc no table governs, and answers it WRONG for one a
 // table does: a Linux guest never calls SYS_NOTIFY -- its handler lives in the
@@ -522,7 +534,8 @@ static bool notes_proc_has_live_handler(struct Proc *p, const char *name) {
     const struct viv_sigtab *tab = __atomic_load_n(&p->sigtab, __ATOMIC_ACQUIRE);
     if (!tab) return false;                 // all-SIG_DFL: genuinely uncaught
     struct viv_ksigaction act;              // discarded -- see above
-    return viv_sigtab_note_handler(tab, viv_signote_from_note_name(name), &act);
+    return viv_sigtab_note_handler(tab, viv_signote_from_note_name(name), &act) &&
+           notes_row_has_taker(p, act.handler);
 }
 
 // Would `name`'s DEFAULT action apply to this Proc -- i.e. does nothing
@@ -2267,8 +2280,16 @@ again:
 
     // N-3 re-entrancy guard: skip non-kill delivery while a handler is
     // running. (R2-F2: kill bypasses this check above.)
+    //
+    // A fatal note whose row is default does not wait for the handler: as on Linux
+    // it ends the Proc from inside one. And it could not wait: a native handler that
+    // longjmp'd out never reaches SYS_NOTED (thread_note_handler_escaped stays Linux-
+    // only, since a native runtime may run its handler on another stack), the latch
+    // stays armed, and every wait would return at once for as long as the Proc spins.
     if (t->in_handler) {
+        const char *fatal = notes_terminate_note_name_locked(p, t);
         spin_unlock(&q->lock);
+        if (fatal) exits_note(fatal);
         return false;
     }
 
@@ -2311,7 +2332,8 @@ again:
         // entry, or the socktab's lock discipline, is the shape of the close.
         struct viv_sigtab *tab = __atomic_load_n(&p->sigtab, __ATOMIC_ACQUIRE);
         struct viv_ksigaction act;
-        bool have_handler = viv_sigtab_note_handler(tab, sn, &act);
+        bool have_handler = viv_sigtab_note_handler(tab, sn, &act) &&
+                            notes_row_has_taker(p, act.handler);
 
         // DISCARD, two causes and one action:
         //   SIG_IGN -- DEFENSE-IN-DEPTH, not the mechanism. notes_post drops an

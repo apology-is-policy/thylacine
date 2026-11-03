@@ -79,6 +79,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <setjmp.h>
 #include <time.h>
 #include <unistd.h>
 #include <sys/select.h>
@@ -451,6 +452,33 @@ static int leg_spawn_waiter(pid_t *out) {
     return posix_spawn(out, SELF, NULL, NULL, a, environ);
 }
 
+static jmp_buf g_leg_escape;
+
+static void leg_handler_escapes(int sig) {
+    (void)sig;
+    longjmp(g_leg_escape, 1);
+}
+
+// With SIGUSR1 blocked, reap 14 children and count how many notes then fit. The kernel
+// discards a dead child's note at the tail, so all of NOTE_QUEUE_DEPTH's 16 slots are
+// free. With no table governing, each child leaves an entry until they coalesce at 12.
+static int leg_ring_room(void) {
+    sigset_t s;
+    int st = 0;
+    sigemptyset(&s);
+    sigaddset(&s, SIGUSR1);
+    if (sigprocmask(SIG_BLOCK, &s, NULL) != 0) return -1;
+    for (int i = 0; i < 14; i++) {
+        pid_t k = fork();
+        if (k < 0) return -1;
+        if (k == 0) _exit(0);
+        if (waitpid(k, &st, 0) != k) return -1;
+    }
+    int room = 0;
+    while (room < 32 && kill(getpid(), SIGUSR1) == 0) room++;
+    return room;
+}
+
 // CHILD: one leg. Exit 0 is the leg's own claim holding. A code above that names what
 // it saw instead.
 static int leg_child(const char *mode) {
@@ -539,6 +567,31 @@ static int leg_child(const char *mode) {
         int rc = waitpid(kid, &st, 0);
         return rc == kid && WIFSIGNALED(st) && WTERMSIG(st) == SIGTERM &&
                g_leg_caught >= 1 ? 0 : 70;
+    }
+    if (!strcmp(mode, "escape")) {
+        if (leg_catch(SIGUSR1, leg_handler_escapes, 0) != 0) return 60;
+        if (setjmp(g_leg_escape) == 0) {
+            raise(SIGUSR1);
+            return 76;
+        }
+        leg_ready();
+        n = read(LEG_DATA, &b, 1);
+        return 77;
+    }
+    if (!strcmp(mode, "ring-room")) {
+        // A forked child first, whose table crossed the fork; the ring is then still
+        // empty for the image's own count.
+        int st = 0;
+        pid_t kid = fork();
+        if (kid < 0) return 60;
+        if (kid == 0) _exit(leg_ring_room());
+        if (waitpid(kid, &st, 0) != kid) return 60;
+        if (!WIFEXITED(st) || WEXITSTATUS(st) != 16) return 120 + (WEXITSTATUS(st) & 31);
+        int room = leg_ring_room();
+        if (room != 16) return 80 + (room & 31);
+        leg_ready();
+        n = read(LEG_DATA, &b, 1);
+        return n == 1 && b == 'D' ? 0 : 78;
     }
     if (!strcmp(mode, "fork-read")) {
         int p[2];
@@ -676,7 +729,7 @@ static int test_blocked(void) {
         { .mode = "dfl",               .sig = SIGINT,  .dies = SIGINT  },
         { .mode = "dfl",               .sig = SIGTERM, .dies = SIGTERM },
         { .mode = "dfl",               .sig = SIGUSR1, .dies = SIGUSR1 },
-        // Resetting a signal that never had a row writes none, and dies the same.
+        // Resetting a signal that never had a row dies the same.
         { .mode = "dfl-reset",         .sig = SIGINT,  .dies = SIGINT  },
         // A dispatcher is registered, and this note's row says default.
         { .mode = "dfl-after-handler", .sig = SIGINT,  .dies = SIGINT  },
@@ -696,6 +749,11 @@ static int test_blocked(void) {
         { .mode = "wait-restart",      .sig = SIGUSR1 },
         // The table and the handler cross a fork.
         { .mode = "fork-read" },
+        // A handler that longjmp'd out never told the kernel it was done, and a fatal
+        // note with a default row must still end the program, not spin its waits.
+        { .mode = "escape",            .sig = SIGINT,  .dies = SIGINT  },
+        // A dead child's note takes no room in a program with no handler.
+        { .mode = "ring-room",         .data = 1 },
     };
     int bad = 0;
     for (size_t i = 0; i < sizeof legs / sizeof legs[0]; i++) {

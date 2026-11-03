@@ -3047,6 +3047,75 @@ void test_rendez_restart_undone_on_refused_frame(void) {
     TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree empty after cleanup");
 }
 
+// rendez.tail_discards_dead_note (ARCH 8.8.3): a thread runs its tail with a
+// child_exit queued. With a table governing, the default reads as ignore and the note
+// goes, whether the row says default, the table was never allocated (Pouch's
+// constructor), or a caught row has nobody to take it. With no table and no handler
+// the note stays for the fd path: nothing has said this Proc does not read one.
+static volatile u32  g_dd_left;
+static volatile bool g_dd_ran;
+static volatile bool g_dd_exited;
+
+static void dd_entry(void) {
+    struct Thread *t = current_thread();
+    c3_tail();
+    spin_lock(&t->proc->notes->lock);
+    g_dd_left = t->proc->notes->count;
+    spin_unlock(&t->proc->notes->lock);
+    g_dd_ran = true;
+    test_thread_park_terminal(&g_dd_exited);
+}
+
+#define DD_NO_TABLE      0
+#define DD_DEFAULT_ROW   1
+#define DD_STALE_TOKEN   2
+
+static void dd_leg(int shape, u32 want_left, const char *why) {
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree must be empty at leg entry");
+    struct Proc *par = proc_alloc();
+    TEST_ASSERT(par != NULL, "parent alloc");
+    par->state = PROC_STATE_ALIVE;
+    s64 row = 0;
+    if (shape == DD_DEFAULT_ROW)
+        row = sys_note_dispose_for_proc(par, NOTE_NAME_CHILD_EXIT, NOTE_DISP_DEFAULT, 0);
+    if (shape == DD_STALE_TOKEN) {
+        notes_set_handler(par, 0x4000u);
+        row = sys_note_dispose_for_proc(par, NOTE_NAME_CHILD_EXIT, NOTE_DISP_CAUGHT, 0);
+        __atomic_store_n(&par->handler_va, 0ull, __ATOMIC_RELEASE);
+    }
+    int post = notes_post(par, NOTE_NAME_CHILD_EXIT, 0u, NULL, true);
+    u32 queued = par->notes->count;
+    g_dd_left = 0xffffffffu; g_dd_ran = false; g_dd_exited = false;
+    struct Thread *t = thread_create(par, dd_entry);
+    if (t) {
+        ready(t);
+        u64 dl = timer_now_ns() + TEST_YIELD_BUDGET_NS;
+        while (!g_dd_ran && timer_now_ns() < dl) sched();
+    }
+    bool ran = g_dd_ran;
+    u32 left = g_dd_left;
+    bool joined = (t == NULL);
+    if (ran) {
+        test_thread_join_last(par, &g_dd_exited);
+        joined = test_proc_threads_freed(par);
+    }
+    TEST_ASSERT(joined, "the thread was joined");
+    test_proc_free_drained(par);
+
+    TEST_EXPECT_EQ(row, (s64)0, "the leg's disposition");
+    TEST_EXPECT_EQ(post, 0, "the note was posted");
+    TEST_EXPECT_EQ(queued, 1u, "and queued: only the tail may discard it");
+    TEST_ASSERT(ran, "the thread ran its tail");
+    TEST_EXPECT_EQ(left, want_left, why);
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree empty after cleanup");
+}
+
+void test_rendez_tail_discards_dead_note(void) {
+    dd_leg(DD_NO_TABLE, 1u, "no table, no handler: it stays for the fd path");
+    dd_leg(DD_DEFAULT_ROW, 0u, "a default row with no table allocated: discarded");
+    dd_leg(DD_STALE_TOKEN, 0u, "a caught row with nobody to take the note: discarded");
+}
+
 // rendez.native_tail_past_sak (ARCH 8.8.3): sak has no row in a table, so nothing
 // says to ignore it but its default. At the head of a governed native queue it held
 // every note behind it, and the wait that unwound for the caught interrupt behind it

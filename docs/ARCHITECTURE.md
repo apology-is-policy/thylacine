@@ -1712,13 +1712,17 @@ are default, ignore or caught. Only a caught row's note unwinds a wait.
   `handler_va`. The table governs from a native Proc's first `SYS_NOTE_DISPOSE`
   until its next exec (`PROC_FLAG_NOTE_TABLE`). A note whose row is default gets
   the kernel's default and never reaches the handler. An ignored note is dropped
-  at the post, as the phenotype's is. Pouch registers its dispatcher and writes a
-  row when a program first installs a real handler, and until then has no handler
-  at all. Its constructor used to register unconditionally, and `handler_va != 0`
-  read as caught for every note, so a `SIG_DFL` `SIGINT` or `SIGTERM` armed no
-  terminate latch and a program blocked in a wait did not die until the wait
-  ended (OPEN-BUGS 2026-11-02T23:46Z; `seam-pouch-sigtstp-ignore` is the same
-  mechanism on the stop side).
+  at the post, as the phenotype's is. A caught row with neither a handler nor a
+  notes fd behind it reads as default: the write's gate binds only at the write, and
+  a fork carries the row but not the notes fd. Pouch's constructor writes
+  `child_exit`'s default row, which allocates nothing, so the table governs from
+  the image's start and a dead child's note is discarded at the tail. Pouch registers
+  its dispatcher and writes a caught row when a program first installs a real
+  handler, and until then has no handler at all. Its constructor used to register
+  unconditionally, and `handler_va != 0` read as caught for every note, so a
+  `SIG_DFL` `SIGINT` or `SIGTERM` armed no terminate latch and a program blocked in
+  a wait did not die until the wait ended (OPEN-BUGS 2026-11-02T23:46Z;
+  `seam-pouch-sigtstp-ignore` is the same mechanism on the stop side).
 - **Native self-managing reader.** A note stays queued for the notes fd. A caught
   row says only that it may unwind a listed wait; `-T_E_INTR` then reaches the
   reader, which drains the fd and re-issues the wait, and the kernel never

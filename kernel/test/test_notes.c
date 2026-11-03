@@ -4344,6 +4344,55 @@ void test_notes_table_rows_govern(void) {
     nt_rows_govern_one(NOTE_NAME_USR1, VIV_SIGNOTE_USR1, PROC_FLAG_USR1_TERMINATE_PENDING);
 }
 
+// A caught row outlives what it was written against: a fork carries the row and
+// leaves the notes fd's mark behind, and a peer's SYS_NOTIFY(0) can cross a dispose.
+// With nobody to take the note the row reads as the default, or SIGTERM and ^C could
+// not end the Proc. The handler is stored directly: SYS_NOTIFY(0) takes the rows back.
+void test_notes_table_token_needs_a_taker(void) {
+    struct Proc *p = nt_proc(NT_HANDLER);
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    TEST_EXPECT_EQ(sys_note_dispose_for_proc(p, NOTE_NAME_INTERRUPT, NOTE_DISP_CAUGHT, 0), 0,
+                   "the row, with a handler to write it against");
+
+    TEST_EXPECT_EQ(notes_post(p, NOTE_NAME_INTERRUPT, 0u, NULL, true), 0, "handler: post");
+    TEST_ASSERT(proc_caught_note_pending(p), "handler: caught");
+    TEST_ASSERT(!nt_latch(p, PROC_FLAG_INTR_TERMINATE_PENDING), "handler: no terminate latch");
+    TEST_ASSERT(!notes_direct_is_fatal(p, NOTE_NAME_INTERRUPT), "handler: not fatal");
+    TEST_ASSERT(!notes_proc_default_applies(p, NOTE_NAME_INTERRUPT), "handler: no default");
+    nt_drain(p);
+
+    __atomic_store_n(&p->handler_va, 0ull, __ATOMIC_RELEASE);
+    TEST_EXPECT_EQ(notes_post(p, NOTE_NAME_INTERRUPT, 0u, NULL, true), 0, "no taker: post");
+    TEST_ASSERT(nt_latch(p, PROC_FLAG_INTR_TERMINATE_PENDING), "no taker: the default terminates");
+    TEST_ASSERT(!proc_caught_note_pending(p), "no taker: nothing caught");
+    TEST_ASSERT(notes_direct_is_fatal(p, NOTE_NAME_INTERRUPT), "no taker: a direct note is fatal");
+    TEST_ASSERT(notes_proc_default_applies(p, NOTE_NAME_INTERRUPT), "no taker: the default applies");
+    nt_drain(p);
+
+    proc_mark_self_managing_notes(p);
+    TEST_EXPECT_EQ(notes_post(p, NOTE_NAME_INTERRUPT, 0u, NULL, true), 0, "fd reader: post");
+    TEST_ASSERT(proc_caught_note_pending(p), "fd reader: the row may unwind its wait");
+    TEST_ASSERT(!nt_latch(p, PROC_FLAG_INTR_TERMINATE_PENDING), "fd reader: no terminate latch");
+    TEST_ASSERT(!notes_direct_is_fatal(p, NOTE_NAME_INTERRUPT), "fd reader: not fatal");
+    nt_drain(p);
+    nt_free(p);
+
+    // A guest's row is an address, and that address may have the token's value.
+    struct Proc *g = nt_proc(0);
+    TEST_ASSERT(g != NULL, "proc_alloc");
+    g->phenotype = PHENO_LINUX;
+    g->sigtab = (struct viv_sigtab *)kzalloc(sizeof(struct viv_sigtab), 0);
+    TEST_ASSERT(g->sigtab != NULL, "the guest's table");
+    const struct viv_ksigaction act = { .handler = VIV_NATIVE_CAUGHT, .flags = 0,
+                                        .restorer = 0, .mask = 0 };
+    (void)viv_sigtab_set(g->sigtab, VIV_SIGNOTE_INTERRUPT, &act);
+    TEST_EXPECT_EQ(notes_post(g, NOTE_NAME_INTERRUPT, 0u, NULL, true), 0, "guest: post");
+    TEST_ASSERT(proc_caught_note_pending(g), "guest: caught, with no handler_va");
+    TEST_ASSERT(!nt_latch(g, PROC_FLAG_INTR_TERMINATE_PENDING), "guest: no terminate latch");
+    nt_drain(g);
+    nt_free(g);
+}
+
 void test_notes_table_reread(void) {
     struct viv_ksigaction row;
 
