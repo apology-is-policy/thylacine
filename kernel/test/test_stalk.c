@@ -285,6 +285,8 @@ static bool g_fix_walk0_fail;
 static u32  g_fix_intr_walks;
 static bool g_fix_walk_intr;
 static bool g_fix_open_intr;
+static u32  g_fix_intr_closes;
+static bool g_fix_close_intr;
 
 static struct Walkqid *fix_walk(struct Spoor *c, struct Spoor *nc,
                                 const char **name, int nname) {
@@ -445,7 +447,12 @@ static struct Spoor *fix_create(struct Spoor *nc, const char *name, int omode,
     return nc;
 }
 
-static int fix_close(struct Spoor *c) { (void)c; return 0; /* qid-based: no heap aux */ }
+static int fix_close(struct Spoor *c) {
+    (void)c;                                     // qid-based: no heap aux
+    g_fix_intr_closes++;
+    g_fix_close_intr = g_fix_close_intr || current_thread()->note_interruptible;
+    return 0;
+}
 
 // D-1: the fixture readlink. Counted so a test can prove the resolver issued
 // exactly the expansions it should (a chain costs two, a cached answer would
@@ -740,10 +747,15 @@ static void open_only_step_case(struct Spoor *root, const char *what) {
 }
 
 // A call's interruptible wait is its open: a failed walk has no errno to carry EINTR
-// and would read as ENOENT. Both walk shapes, the fused and the per-component.
+// and would read as ENOENT. Both walk shapes, the fused and the per-component. What
+// follows the open, the trail's release, must complete too.
 void test_stalk_open_is_the_only_interruptible_step(void) {
+    g_fix_intr_closes = 0;
+    g_fix_close_intr  = false;
     open_only_step_case(fix_root(), "fix_root");
     open_only_step_case(fix_root_nowa(), "fix_root_nowa");
+    TEST_ASSERT(g_fix_intr_closes != 0, "the resolver released its trail");
+    TEST_ASSERT(!g_fix_close_intr, "nothing after the open may unwind");
 }
 
 void test_stalk_resolve_deep(void) {

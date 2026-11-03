@@ -1312,6 +1312,10 @@ struct Spoor *devsrv_open_connect(struct Proc *p, struct Spoor *c, int omode) {
     struct Spoor *root = srvconn_attach_dev9p_root(cn, NULL, 0, p, /*flags=*/0,
                                                    &err);
     if (!root) {
+        // A handshake a caught note cancelled reports that, or the call reads EIO and
+        // no restart follows (ARCH 8.8.3). Any other failure keeps the generic open
+        // error above.
+        if (err == -T_E_INTR) ref->open_errno = err;
         srvconn_teardown(cn);      // idempotent (the helper may already have torn it)
         devsrv_connect_release(&admission);         // drop admission refs; the poster drains the backlog ref
         return NULL;
