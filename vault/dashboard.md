@@ -132,8 +132,8 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-11-03 [[chg-2026-11-03-memory-account-number]] — The memory account call moves to 140
 - 2026-11-03 [[chg-2026-11-03-memory-account-reservation]] — Reserve the memory account call and its records
 - 2026-11-03 [[chg-2026-11-03-seat-session-start]] — A chord at session start is a wait: the seat's P3s, a member that may owe, and a needle checker
+- 2026-11-03 [[chg-2026-11-03-vote51-audit-close]] — Vote 51's audit: a private session's tags are paid for at CONNECT
 - 2026-11-02 [[chg-2026-11-02-f3-what-it-is]] — What review finding F-3 is, read from main's code
 - 2026-11-02 [[chg-2026-11-02-join-planted-cleanup]] — The F1 test's cleanup ran on an early failure, three planted points
 - 2026-11-02 [[chg-2026-11-02-seat-failure-path]] — A seat that fails says so: votes 36 and 37, the generation retire, and the two defects behind one lost boot
-- 2026-11-02 [[chg-2026-11-02-thread-model-c4]] — Thread-model C4: a note aimed at one thread
 <!-- generated:end -->

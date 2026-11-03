@@ -10,7 +10,7 @@ static void ls_zero(void *p, size_t n) {
     for (size_t i = 0; i < n; ++i) ((u8 *)p)[i] = 0;
 }
 static const char *loom_slots_fixture(void) {
-    // Static to avoid spending 1552 bytes of the kernel test thread's stack.
+    // Static to avoid spending 2064 bytes of the kernel test thread's stack.
     static struct loom_slot_table t;
     ls_zero(&t, sizeof(t));
     static struct loom_service_ref refs[LOOM_SERVICE_SLOT_COUNT];

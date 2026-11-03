@@ -238,6 +238,10 @@ native switch's unknown arm through `syscall_unknown_count()` rather than
 trusting the -1 many handlers also return): those numbers belong to other
 branches.
 
+**Private Loom register records (2026-11-03).** `sys_loom_register_private` copies a record
+of up to 64 bytes onto the stack, so REAP, ABORT, QUERY and RETURN are not refused for
+memory; only TARGET and POOL allocate.
+
 **The memory account call, reserved (2026-11-03, operator votes 47 and 48).**
 `SYS_ACCOUNT` = 140: handle or `ACCOUNT_SELF`, operation, record pointer, record size.
 It is a number and a layout and nothing else: no dispatch arm until MM-1, so it reaches

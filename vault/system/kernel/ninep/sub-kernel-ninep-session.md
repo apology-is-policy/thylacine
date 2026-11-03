@@ -55,6 +55,9 @@ retirement rules are mechanically enforced.
   `has_flush_tag`, `async_room`, `n_bound_fids`, `n_reserved_slots`.
   `has_free_tag` and `has_flush_tag` may grow the table (the chunk stays), so
   they take a non-const session.
+- `p9_session_reserve_tags(s, tags)` allocates the chunks `tags` tags need and caps the
+  table there, before the session is in use. After it `has_free_tag` never allocates: a
+  private Loom session uses it because it asks for a tag under the ring's lock.
 - The tag table, for the client (2026-10-07): `p9_session_entry(tag)` (NULL
   past the table), `p9_session_next_active(&tag)` (the active entry at the
   lowest tag at or above it, idle chunks skipped), `p9_session_owner` /

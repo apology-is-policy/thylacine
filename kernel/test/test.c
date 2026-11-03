@@ -2161,6 +2161,8 @@ struct test_case g_tests[] = {
     { "9p_session.walk_fid_full_no_latch", test_9p_session_walk_fid_full_no_latch, false, NULL },
     { "9p_session.flush_headroom_grows_table",
                                        test_9p_session_flush_headroom_grows_table, false, NULL },
+    { "9p_session.reserved_tags_cap_the_table",
+                                       test_9p_session_reserved_tags_cap_the_table, false, NULL },
     { "9p_session.sync_owner_index",   test_9p_session_sync_owner_index,   false, NULL },
     { "9p_session.clunk_retract_after_peer_fill",
                                        test_9p_session_clunk_retract_after_peer_fill, false, NULL },

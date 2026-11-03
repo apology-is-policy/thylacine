@@ -1587,6 +1587,14 @@ bool p9_session_has_free_tag(struct p9_session *s) {
     return alloc_tag(s, false) >= 0;
 }
 
+int p9_session_reserve_tags(struct p9_session *s, u32 tags) {
+    if (!s || s->magic != P9_SESSION_MAGIC || !tags || tags > P9_TAG_LIMIT) return -1;
+    while (s->n_chunks * P9_TAG_CHUNK < tags)
+        if (grow(s) < 0) return -1;
+    s->tag_limit = s->n_chunks * P9_TAG_CHUNK;
+    return 0;
+}
+
 bool p9_session_has_flush_tag(struct p9_session *s) {
     if (!s) return false;
     if (s->magic != P9_SESSION_MAGIC) return false;

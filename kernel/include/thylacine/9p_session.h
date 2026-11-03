@@ -677,6 +677,10 @@ size_t p9_session_inflight(const struct p9_session *s);  // outstanding count
 // growing the table if every entry is held. A grown chunk stays, so this
 // may allocate; a failed allocation reads as no free tag.
 bool   p9_session_has_free_tag(struct p9_session *s);
+// Allocate the chunks `tags` tags need now and cap the table there, for an owner that
+// pays for its memory up front and may not allocate later. Before the session is in
+// use, no lock held. 0, or -1 if an allocation failed; destroy frees what it got.
+int    p9_session_reserve_tags(struct p9_session *s, u32 tags);
 // A Tflush would get a tag now (any free entry, growing as above).
 bool   p9_session_has_flush_tag(struct p9_session *s);
 // The async share has room (P9_ASYNC_MAX less the async ops in flight).

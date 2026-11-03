@@ -531,7 +531,7 @@ struct Loom *loom_create_private_why(struct Proc *p, u32 sq, u32 cq, bool receip
     // attributes its ring's slab descriptor for as long as ring mappings live.
     _Static_assert(sizeof(struct Loom) > 2048, "private Loom metadata uses buddy kmalloc");
     _Static_assert(sizeof(struct Burrow) <= PAGE_SIZE, "descriptor page attribution bounds object");
-    // Reserve an entire buddy page for the 1552-byte identity ledger. Charging
+    // Reserve an entire buddy page for the 2064-byte identity ledger. Charging
     // that physical page avoids pretending shared slab occupancy is exact.
     // No allocator work under as->lock; unwind frees storage BEFORE its refund.
     _Static_assert(sizeof(struct loom_slot_table) <= PAGE_SIZE, "slot ledger page");
@@ -1567,8 +1567,8 @@ static struct loom_service_operation *loom_private_clunk_storage_take(struct Loo
 // The syscall owns a Loom reference and a stable creator image across prepare,
 // copyout and publish/rollback. No user pointer or Proc escapes. The same ring
 // lock protects both ledgers and the close/parent-abort publication check.
-// This only reserves metadata: it grants no protocol authority, creates no
-// client and cannot reap a node that has entered the protocol state machine.
+// This reserves metadata and, for a FID, its CLUNK's page: it grants no protocol
+// authority, creates no client and cannot reap a node in the protocol state machine.
 int loom_private_node_prepare(struct Loom *l, struct Proc *p,
                               const struct loom_service_reserve *in,
                               struct loom_service_ref *out) {

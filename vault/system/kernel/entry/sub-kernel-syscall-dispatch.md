@@ -1569,8 +1569,9 @@ The SETUP handler sends PRIVATE_SERVICE or SERVICE_BUFFERS to
 `sys_loom_setup_held_for_proc`, and returns a refusal's negative errno. The legacy path
 returns the errnos of LOOM.md 8.2a (operator vote 7, 2026-10-13; it answered -1
 before). REGISTER ops 2..9 go to `sys_loom_register_private`, which
-copies the op's fixed-size record once into kmalloc'd memory, and results return
-through `loom_record_copyout_user`. HANDLES on a private ring is -EOPNOTSUPP.
+copies the op's fixed-size record once, onto the stack for up to 64 bytes and into
+kmalloc'd memory for TARGET and POOL, and results return through
+`loom_record_copyout_user`. HANDLES on a private ring is -EOPNOTSUPP.
 BUFFERS and ENTER branch on `loom_is_private`. Both held setups hand the handler its own
 ring reference, kept across the params copyout; a copyout fault on either ring
 kind passes it to `sys_loom_setup_rollback`, which closes the descriptor and

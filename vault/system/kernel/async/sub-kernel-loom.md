@@ -2716,14 +2716,28 @@ Ll, and every page there is zero.
 `loom_private_operation_prepare_clunk` takes the page in the same Ll hold that admits the
 request, so nothing is charged or allocated: `loom_private_io_prepare` routes every CLUNK
 there. No page means another CLUNK has it, -EBUSY. A CLUNK that never started gives the page
-back through `operation_storage_release`, zeroed, while the exact incarnation lives. If the
-FID was reaped meanwhile, which only a retired scope allows, the operation frees and refunds
-it. A published CLUNK has retired the FID in the same hold, so it never comes back: it
-retires like any operation. A FID that goes with its page still there (rollback, unused
-reap, walked reap of a retired scope, ring destruction) frees and refunds it outside Ll.
+back through `operation_storage_release`, zeroed, while the exact incarnation lives. A FID
+can leave with its page out, by an unused reap at any time or a walked reap once its scope
+retired, and the slot may hold another FID by then; the operation then frees and refunds
+the page itself. A published CLUNK has retired the FID in the same hold, so it never comes
+back: it retires like any operation. A FID that goes with its page still there (rollback,
+unused reap, walked reap of a retired scope, ring destruction) frees and refunds it outside
+Ll.
 
 The cost is a page per FID slot held, at most the ring's 64 slots. The ledger page had the
 room, so the ring's metadata charge did not move.
+
+A private session's tag table does not grow after CONNECT. The READY scan asks for a tag
+under Ll, and `alloc_tag` grew the table there: an allocation under Ll, uncharged, which a
+raw program could reach with more than a chunk's worth of operations parked at a server.
+`loom_private_protocol_prepare` now charges and allocates every tag the ring can use, one
+per admitted request, and `p9_session_reserve_tags` caps the table there. A ring admitting
+64 or fewer pays nothing extra. One admitting 8192 pays about 130 pages per scope at
+CONNECT, and CONNECT is where the budget refuses it. With the table capped, a shortage of
+tags means every admitted request already holds one.
+
+REAP, ABORT, QUERY and RETURN no longer depend on the allocator: their records fit on the
+stack in `sys_loom_register_private`, so memory cannot refuse letting go of memory.
 
 ## October 10: private operation storage and callback capture prerequisites
 

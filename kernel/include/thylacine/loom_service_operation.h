@@ -57,7 +57,8 @@ void loom_private_clunk_storage_free(struct Loom *, struct loom_service_operatio
 // then physical free/refund, exact request owner-drop/reap, engine/Loom last.
 int loom_private_operation_release_retired(struct loom_service_operation *);
 #ifdef KERNEL_TESTS
-// One-shot actual allocation fault, consumed even by an early refusal.
+// One-shot actual allocation fault. A request consumes it even on an early refusal,
+// and a FID's RESERVE once it reaches the allocation.
 void loom_private_operation_fault_arm_for_test(void);
 bool loom_private_operation_fault_pending_for_test(void);
 #endif

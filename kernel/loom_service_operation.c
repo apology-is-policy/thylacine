@@ -85,8 +85,10 @@ static int operation_reserved_locked(struct Loom *l,struct loom_service_ref fid,
     return *out ? 0 : -T_E_BUSY;
 }
 // A CLUNK that never started leaves its FID as it was, so the page goes back for the
-// next one. Zeroed here because every page a slot holds is zero. A FID reaped meanwhile
-// (its scope retired) no longer owns one.
+// next one. Zeroed here because every page a slot holds is zero. A FID can leave with
+// its page out, by an unused reap at any time or a walked reap once its scope retired,
+// and the slot may hold another FID by then. An incarnation is never reused, so only
+// the exact one gets the page back; otherwise it is this operation's to free.
 static void operation_storage_release(struct Loom *l,struct loom_service_operation *op) {
     struct loom_service_ref home=op->storage_home;
     if (home.incarnation) {
@@ -94,8 +96,7 @@ static void operation_storage_release(struct Loom *l,struct loom_service_operati
         for (size_t i=0;i<sizeof(*op);++i) bytes[i]=0;
         spin_lock(&l->lock);
         struct loom_service_slot *s=&l->service_slots->slots[home.slot];
-        bool back=s->incarnation==home.incarnation && s->kind==LOOM_SERVICE_FID &&
-                  s->phase==LSLOT_LIVE;
+        bool back=s->incarnation==home.incarnation;
         if (back && l->service_slots->clunk_storage[home.slot])
             extinction("a FID held two CLUNK reservations");
         if (back) l->service_slots->clunk_storage[home.slot]=op;
@@ -142,6 +143,9 @@ static int operation_prepare(struct Loom *l,struct loom_service_ref scope,
     }
     op->owner=l; op->protocol=p; op->request=request; op->scope=scope;
     if (fid) op->storage_home=*fid;
+#ifdef KERNEL_TESTS
+    loom_private_close_boundary_for_test(l,6); // between the two Ll holds
+#endif
     // Keep the fresh creator/image snapshot, never CONNECT or worker authority.
     const u8 *src=(const u8 *)&identity.access;
     u8 *dst=(u8 *)&op->program.identity;

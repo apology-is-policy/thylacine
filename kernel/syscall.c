@@ -8548,7 +8548,9 @@ static s64 sys_loom_register_private(struct Proc *p, hidx_t loom_fd, u32 op,
     struct Handle lh;
     if (handle_get(p, loom_fd, &lh) != 0)            return -T_E_BADF;
     if (lh.kind != KOBJ_LOOM)                        { handle_put(&lh); return -T_E_BADF; }
-    u8 *record = kmalloc(size, KP_ZERO);
+    // REAP, ABORT, QUERY and RETURN fit here, so memory cannot refuse what lets go of it.
+    u64 small[8];
+    u8 *record = size <= sizeof(small) ? (u8 *)small : kmalloc(size, KP_ZERO);
     if (!record)                                     { handle_put(&lh); return -T_E_NOMEM; }
     int rc = 0;
     for (u32 i = 0; i < size && !rc; i++)
@@ -8558,7 +8560,7 @@ static s64 sys_loom_register_private(struct Proc *p, hidx_t loom_fd, u32 op,
         rc = loom_private_register_record((struct Loom *)lh.obj, p, op, record,
                                           loom_record_copyout_user, &ctx);
     }
-    kfree(record);
+    if (record != (u8 *)small) kfree(record);
     handle_put(&lh);
     return rc;
 }
