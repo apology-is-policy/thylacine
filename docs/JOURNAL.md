@@ -22,6 +22,39 @@ needed the operator.
 
 
 ---
+## 2026-11-03 -- three votes written, none of them booted (corona)
+
+Votes 49, 52 and 51 went in while the mac was queued behind main: df64467f8, d9fa76f80,
+and the CLUNK page on top. Everything below ran on the Pi or in a syntax check. No guest
+has run any of it, so "written" is all I can say.
+
+Vote 49, scoped retirement. The obvious witness was wrong: a fast surface close is also
+what a broker that scoped nothing would show, since a hold stuck on Clear never waits. So
+warp-prove's poison-hold now retires one of its own BOs on request, and the scenario
+requires the refusal line for it, one variable away from the surface it requires to pass.
+Narrowing the rule also made a bookkeeping ledger load-bearing. Reading every path that
+creates a link found the attach probe writing after the device answered, and that it could
+fail with the device linked; it now links first. 25 mutants in work/nov03-v49/mutants.py:
+24 red, and m22 equivalent, so the check it removed is gone too.
+
+Vote 52, ut's Alt-P. 14 mutants, all red (work/nov03-v49/sweep-paste.log). Repl and
+clip_host have no host test, so the real claim rests on `ls-ut-paste`, which has never run.
+My first refusal was named NotPlainText, which was untrue, because HIN1's clipboard text
+allows a tab; it is Unprintable now, and the refusal says what it found.
+
+Aux's call 0279 caught a number collision before either branch merged: I had reserved 139
+for SYS_ACCOUNT at 29c3be9c3, and aux's SYS_NOTE_DISPOSE has it by its own vote. Votes 47
+and 48 name no number, so the 139 was only my pick. It moved to 140 at 4fb34178a, and aux
+takes 141.
+
+Vote 51. The first shape I considered was to reuse the WALK's operation page as the FID's
+CLUNK page, since a FID exists because a WALK succeeded. That has a hole: the FID can be
+clunked before the WALK's page is physically released, and then the CLUNK finds nothing. So
+the page is paid for at RESERVE, where a refusal costs the program nothing at the server.
+The per-slot pointers went in the slot ledger's own page, which had room, because the node
+table is exactly a page. A page owned by a prepared CLUNK whose FID is reaped meanwhile was
+the case that needed thought: the operation frees it, and the slot's incarnation tells it so.
+
 ## 2026-11-03 -- one poisoned fence, reproduced, and four votes (corona)
 
 The sabotage set ended at 16:28Z (work/nov03-as3a/run4.log): x1, x6, x10 and x15

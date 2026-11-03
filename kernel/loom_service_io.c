@@ -69,7 +69,8 @@ int loom_private_io_prepare(struct Loom *l,struct Proc *p,const struct loom_sqe 
     rc=loom_admission_scope_locked(l,source,&scope);
     spin_unlock(&l->lock);if(rc)return rc;
     struct loom_service_operation *o;
-    rc=loom_private_operation_prepare(l,scope,s->user_data,s->_resv1[3],now,&o);
+    rc=kind==P9_TCLUNK?loom_private_operation_prepare_clunk(l,scope,source,s->user_data,s->_resv1[3],now,&o):
+                       loom_private_operation_prepare(l,scope,s->user_data,s->_resv1[3],now,&o);
     if(rc)return rc;
     o->source=source;o->destination=destination;
     if(kind==P9_TREAD || kind==P9_TWRITE || (kind==P9_TWALK && s->len)) {

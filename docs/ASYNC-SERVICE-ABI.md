@@ -69,6 +69,10 @@ answers -ENOENT for a clunked FID, which REAP still frees (operator vote,
 2026-10-13: the CLUNK's terminal CQE is the notice; REAP answers 0, -EBUSY
 while the CLUNK runs, or -ENOENT once the slot is gone). Busy reap returns-EBUSY; unsupported
 private mode returns-EOPNOTSUPP; exhaustion-ENOSPC; allocation failure-ENOMEM.
+A FID reservation charges one page to the ring's address space and can answer -ENOMEM,
+which a SCOPE reservation cannot; that page is what the FID's CLUNK runs on, so a CLUNK
+is never refused for memory (operator vote 51, November 3). It is refunded when the
+CLUNK retires or, for a FID that never ran one, when the FID is reaped.
 This adds no errno number. Protocol failure uses-EIO plus a recorded phase;
 timeout-ETIMEDOUT and cancellation-ECANCELED retain their current numeric values.
 

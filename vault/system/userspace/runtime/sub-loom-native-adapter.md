@@ -155,11 +155,9 @@ two differ, the sections below say which side they describe.
   reading would kill a ring on the legal deadline race. The scope's `reason` is
   set only atomically with a state that is not READY (`loom_service_control.c`),
   so a -ECANCELED CLUNK never coincides with a ready scope -- no false red.
-  The premise has one known hole: the kernel charges a page and allocates for each
-  request (`loom_service_operation.c:85-92`), so a CLUNK can be refused -ENOMEM under
-  a ready scope, and the ring then fails for the host's life. Vote 11 asks for the
-  ring to fail loudly on any refused CLUNK, so that is what happens; the hole is
-  OPEN-BUGS 2026-11-03T15:50Z and waits on the operator.
+  For memory the premise holds by operator vote 51: the kernel pays for a FID's CLUNK at
+  that FID's RESERVE ([[sub-kernel-loom]]), so what the budget refuses is the RESERVE,
+  an ordinary `Err` from the walk that names no book entry, and neither adapter changed.
 
 ## Mechanism
 

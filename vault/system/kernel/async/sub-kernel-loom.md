@@ -2703,6 +2703,28 @@ of AS3/4 and MM0-MM4. No Main/private user async/clipboard activation or128MiB
 protection change. Pi/A72/KVM and final guest allocator reclamation remain open.
 
 
+## A FID pays for its CLUNK (vote 51)
+
+A private request charges one page and allocates it, and that could refuse a CLUNK under a
+ready scope. A CLUNK is the request a program cannot go without, since the adapters fail
+the ring on a refused one (vote 11), so a FID's page is paid for earlier.
+`loom_private_node_prepare` charges and allocates it for a FID, after the slot is
+PROVISIONAL and before publish, and refuses -ENOMEM with the slot rolled back. A SCOPE has
+no CLUNK and pays nothing. The page sits in `clunk_storage` in the slot ledger's page, under
+Ll, and every page there is zero.
+
+`loom_private_operation_prepare_clunk` takes the page in the same Ll hold that admits the
+request, so nothing is charged or allocated: `loom_private_io_prepare` routes every CLUNK
+there. No page means another CLUNK has it, -EBUSY. A CLUNK that never started gives the page
+back through `operation_storage_release`, zeroed, while the exact incarnation lives. If the
+FID was reaped meanwhile, which only a retired scope allows, the operation frees and refunds
+it. A published CLUNK has retired the FID in the same hold, so it never comes back: it
+retires like any operation. A FID that goes with its page still there (rollback, unused
+reap, walked reap of a retired scope, ring destruction) frees and refunds it outside Ll.
+
+The cost is a page per FID slot held, at most the ring's 64 slots. The ledger page had the
+room, so the ring's metadata charge did not move.
+
 ## October 10: private operation storage and callback capture prerequisites
 
 The request ledger now separates its terminal obligation from physical RPC

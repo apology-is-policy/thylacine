@@ -287,7 +287,10 @@ Operator vote 51, November 3: a private CLUNK is never refused for memory. What 
 is reserved when the fid is created, so the premise of vote 11, that the kernel admits
 every request the book admits, holds for it. Vote 11 stands as written: an adapter
 whose CLUNK is refused fails the ring loudly. Without this, a program at its page budget
-lost its private ring to a background CLUNK. Not yet built.
+lost its private ring to a background CLUNK. Built November 3, not yet booted: a FID's
+RESERVE charges and allocates the one page its CLUNK will run on, so that RESERVE is
+where the budget refuses, with nothing yet at the server. A CLUNK that never started
+gives the page back to its FID, and a FID that goes without one frees it.
 
 Review conclusion: this is the recommended single design. It costs a native
 9P progress refactor, but avoids permanently assigning clipboard availability
