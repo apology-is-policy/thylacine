@@ -3116,6 +3116,80 @@ void test_rendez_tail_discards_dead_note(void) {
     dd_leg(DD_STALE_TOKEN, 0u, "a caught row with nobody to take the note: discarded");
 }
 
+// rendez.tail_settles_an_unwound_call (ARCH 8.8.3): the tail's own call of the settle. A
+// wait unwound for a note that is gone by the tail, a peer's or a row's that changed, so
+// no handler runs here and the call is re-issued. notes.restart_settle has the settle's
+// arms; this is that the tail reaches it, one variable from the control.
+static volatile u32  g_rs_run;
+static volatile u64  g_rs_elr, g_rs_x0, g_rs_ctl_elr, g_rs_ctl_x0;
+static volatile bool g_rs_mark_after;
+static volatile bool g_rs_exited;
+
+static void rs_ctx(struct exception_context *ctx) {
+    for (size_t k = 0; k < sizeof(*ctx); k++) ((u8 *)ctx)[k] = 0;
+    ctx->sp      = 0x10000000u;
+    ctx->elr     = 0x8000u;
+    ctx->regs[0] = (u64)-(s64)T_E_INTR;
+}
+
+static void rs_entry(void) {
+    struct Thread *t = current_thread();
+    struct exception_context ctx;
+
+    t->note_restartable  = true;
+    t->note_call_x0      = 0x77u;
+    t->note_call_unwound = true;
+    rs_ctx(&ctx);
+    irq_state_t s = spin_lock_irqsave(NULL);   // the tail runs masked (#713)
+    notes_deliver_at_el0_return(&ctx);
+    spin_unlock_irqrestore(NULL, s);
+    g_rs_elr = ctx.elr;
+    g_rs_x0  = ctx.regs[0];
+    g_rs_mark_after = t->note_call_unwound;
+
+    t->note_restartable  = true;
+    t->note_call_unwound = false;
+    rs_ctx(&ctx);
+    s = spin_lock_irqsave(NULL);
+    notes_deliver_at_el0_return(&ctx);
+    spin_unlock_irqrestore(NULL, s);
+    g_rs_ctl_elr = ctx.elr;
+    g_rs_ctl_x0  = ctx.regs[0];
+
+    g_rs_run++;
+    test_thread_park_terminal(&g_rs_exited);
+}
+
+void test_rendez_tail_settles_an_unwound_call(void) {
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree must be empty at test entry");
+    struct Proc *par = proc_alloc();
+    TEST_ASSERT(par != NULL, "parent alloc");
+    par->state = PROC_STATE_ALIVE;
+    g_rs_run = 0; g_rs_exited = false; g_rs_mark_after = true;
+    g_rs_elr = g_rs_x0 = g_rs_ctl_elr = g_rs_ctl_x0 = 0;
+
+    struct Thread *t = thread_create(par, rs_entry);
+    bool joined = (t == NULL);
+    if (t) {
+        ready(t);
+        u64 dl = timer_now_ns() + TEST_YIELD_BUDGET_NS;
+        while (g_rs_run < 1u && timer_now_ns() < dl) sched();
+        if (g_rs_run >= 1u) {
+            test_thread_join_last(par, &g_rs_exited);
+            joined = test_proc_threads_freed(par);
+        }
+    }
+    TEST_ASSERT(t != NULL, "thread_create");
+    TEST_ASSERT(joined, "the thread ran its tails and was joined");
+    test_proc_free_drained(par);
+
+    TEST_EXPECT_EQ(g_rs_elr, 0x7ffcull, "no handler ran: the call is re-issued");
+    TEST_EXPECT_EQ(g_rs_x0, 0x77ull, "with its first argument back");
+    TEST_ASSERT(!g_rs_mark_after, "and the mark is gone with the call");
+    TEST_EXPECT_EQ(g_rs_ctl_elr, 0x8000ull, "control: no mark, no re-issue");
+    TEST_EXPECT_EQ(g_rs_ctl_x0, (u64)-(s64)T_E_INTR, "control: x0 stands");
+}
+
 // rendez.native_tail_past_sak (ARCH 8.8.3): sak has no row in a table, so nothing
 // says to ignore it but its default. At the head of a governed native queue it held
 // every note behind it, and the wait that unwound for the caught interrupt behind it
