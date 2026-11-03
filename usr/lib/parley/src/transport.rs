@@ -106,15 +106,22 @@ impl Server {
     }
 
     /// Drain + discard one read of stderr (call when a [`Mux`] reports
-    /// [`stderr_fd`](Self::stderr_fd) readable). Keeps a logging server from
-    /// filling its stderr pipe and blocking on write. `Ok(true)` on stderr EOF.
+    /// [`stderr_fd`](Self::stderr_fd) ready, readable or hung up). Keeps a logging
+    /// server from filling its stderr pipe and blocking on write. `Ok(true)` on
+    /// stderr EOF, where the handle closes: a hung-up pipe stays ready, and a
+    /// server may close stderr and keep serving, so `stderr_fd` then reads `-1`
+    /// and [`Mux::poll`] stops waking for it.
     pub fn drain_stderr(&mut self) -> Result<bool> {
         let stderr = match self.child.stderr.as_mut() {
             Some(s) => s,
             None => return Ok(true),
         };
         let mut scratch = [0u8; STDERR_CHUNK];
-        Ok(stderr.read(&mut scratch)? == 0)
+        if stderr.read(&mut scratch)? != 0 {
+            return Ok(false);
+        }
+        self.child.stderr = None;
+        Ok(true)
     }
 
     /// Close the child's stdin so it observes EOF -- the graceful-shutdown

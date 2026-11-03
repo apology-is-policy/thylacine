@@ -288,7 +288,7 @@ impl Dap {
     pub fn on_ready(&mut self, r: &Ready, ed: &mut Editor) -> bool {
         match r.tag {
             TAG_DAP_ERR => {
-                if r.readable {
+                if r.readable || r.hup {
                     let _ = self.srv.drain_stderr();
                 }
                 false

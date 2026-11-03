@@ -484,7 +484,7 @@ fn run_session(spec: &ProbeSpec) {
                 // going quiet, not as an error. clangd is markedly chattier
                 // than gopls here, so this is load-bearing, not hygiene.
                 TAG_ERR => {
-                    if r.readable {
+                    if r.readable || r.hup {
                         let _ = srv.drain_stderr();
                     }
                 }

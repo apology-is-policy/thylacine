@@ -24,7 +24,7 @@ hazards: []
 abis: []
 design: []
 created: 2026-08-03
-updated: 2026-10-29
+updated: 2026-11-03
 ---
 ## Purpose
 
@@ -160,6 +160,13 @@ counter, so an endlessly-nested array or object cannot exhaust the stack. The
 depth is not decremented on error paths, which is correct because an error
 aborts the whole parse.
 
+A server may close stderr and keep serving. A pipe's read end with no bytes and no
+writer polls `POLLHUP` alone, and stays ready for as long as it is polled, so
+`Server::drain_stderr` closes its handle at EOF: `stderr_fd` then reads `-1` and
+`Mux::poll` skips it. A host calls it on `hup` as well as on `readable`, because a
+hangup's read is the only thing that finds that EOF. A read error leaves the handle
+open; only EOF is final.
+
 ## Performance
 
 Not a hot path: LSP/DAP traffic is keystroke-idle and human-paced. `Decoder`'s
@@ -204,7 +211,8 @@ probes exist to close that gap against a real peer.
   tests; the probe spawns `parley-echo` as a persistent child, frame-sends a
   request, polls, pumps, decodes, and asserts the round-trip. This proves the
   *pipe machinery*, not any protocol — `parley-echo` returns bytes and speaks
-  neither LSP nor DAP.
+  neither LSP nor DAP. A second run of the echo closes fd 2 first: stderr has to
+  leave the poll set, the next 50 ms poll has to sleep, and the echo has to answer.
 
 - **`lsp-probe` — the live gopls round-trip.** It spawns the real
   `/goroot/bin/gopls` over piped stdio **exactly as `lsp_host` does** (bare

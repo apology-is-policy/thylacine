@@ -11,7 +11,9 @@
 //   5. assert the echoed body is byte-identical to what we sent AND re-parses +
 //      classifies back into our request;
 //   6. graceful shutdown (close stdin -> the echo EOFs -> blocking reap, no
-//      zombie).
+//      zombie);
+//   7. a server that closes stderr and keeps serving: stderr leaves the poll set
+//      at its EOF, the next poll sleeps, and the server still answers.
 //
 // A pure-userspace probe: the kernel is byte-unchanged. joey spawns + reaps it
 // and gates the boot on exit 0 (the "parley-probe: PASS" marker is for the
@@ -112,7 +114,7 @@ pub extern "C" fn rs_main() -> i64 {
                     }
                 }
                 TAG_ERR => {
-                    if r.readable {
+                    if r.readable || r.hup {
                         // The echo writes no stderr; drain defensively so a
                         // hypothetical byte can never wedge it.
                         let _ = srv.drain_stderr();
@@ -154,6 +156,75 @@ pub extern "C" fn rs_main() -> i64 {
         Err(_) => fail("parley-probe: FAIL -- reap echo child\n"),
     }
 
+    closed_stderr(&mut mux, &req, sent.as_bytes());
+
     t_putstr("parley-probe: PASS\n");
     0
+}
+
+fn closed_stderr(mux: &mut Mux, req: &Value, sent: &[u8]) {
+    let mut cmd = Command::new("/bin/parley-echo");
+    cmd.arg("close-stderr");
+    let mut srv = match Server::spawn(&mut cmd) {
+        Ok(s) => s,
+        Err(_) => fail("parley-probe: FAIL -- Server::spawn(close-stderr)\n"),
+    };
+    let mut spins: u32 = 0;
+    while srv.stderr_fd() >= 0 {
+        spins += 1;
+        if spins > 1000 {
+            fail("parley-probe: FAIL -- stderr still in the poll set after 1000 polls\n");
+        }
+        let fds = [(srv.stdout_fd(), TAG_OUT), (srv.stderr_fd(), TAG_ERR)];
+        let ready = match mux.poll(&fds, PollTimeout::Millis(2000)) {
+            Ok(r) => r,
+            Err(_) => fail("parley-probe: FAIL -- mux.poll (stderr EOF)\n"),
+        };
+        if ready.is_empty() {
+            fail("parley-probe: FAIL -- poll timed out (no stderr EOF)\n");
+        }
+        for r in &ready {
+            if r.tag == TAG_ERR && (r.readable || r.hup) {
+                let _ = srv.drain_stderr();
+            }
+        }
+    }
+    let fds = [(srv.stdout_fd(), TAG_OUT), (srv.stderr_fd(), TAG_ERR)];
+    match mux.poll(&fds, PollTimeout::Millis(50)) {
+        Ok(r) if r.is_empty() => {}
+        Ok(_) => fail("parley-probe: FAIL -- a closed stderr still wakes the poll\n"),
+        Err(_) => fail("parley-probe: FAIL -- mux.poll (idle)\n"),
+    }
+    if srv.send(req).is_err() {
+        fail("parley-probe: FAIL -- send (close-stderr)\n");
+    }
+    let mut body: Option<Vec<u8>> = None;
+    let mut spins: u32 = 0;
+    while body.is_none() {
+        spins += 1;
+        if spins > 1000 {
+            fail("parley-probe: FAIL -- no echo with stderr closed\n");
+        }
+        let fds = [(srv.stdout_fd(), TAG_OUT), (srv.stderr_fd(), TAG_ERR)];
+        match mux.poll(&fds, PollTimeout::Millis(2000)) {
+            Ok(r) if !r.is_empty() => {}
+            _ => fail("parley-probe: FAIL -- poll (echo with stderr closed)\n"),
+        }
+        match srv.pump() {
+            Ok(false) => {}
+            _ => fail("parley-probe: FAIL -- pump (stderr closed)\n"),
+        }
+        match srv.next_frame() {
+            Ok(b) => body = b,
+            Err(_) => fail("parley-probe: FAIL -- frame decode (stderr closed)\n"),
+        }
+    }
+    if body.as_deref() != Some(sent) {
+        fail("parley-probe: FAIL -- echoed body mismatch (stderr closed)\n");
+    }
+    srv.close_stdin();
+    match srv.wait() {
+        Ok(st) if st.success() => {}
+        _ => fail("parley-probe: FAIL -- reap (close-stderr)\n"),
+    }
 }

@@ -10,7 +10,8 @@
 // placement OR any coreutil's internal buffering.
 //
 // Silent by design apart from the echo (no diagnostic I/O -- a concurrent print
-// would byte-race the parent's framed stream on the shared console).
+// would byte-race the parent's framed stream on the shared console). With the
+// argument `close-stderr` it closes fd 2 first and goes on serving.
 
 #![no_std]
 #![no_main]
@@ -20,10 +21,15 @@ extern crate alloc;
 #[global_allocator]
 static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
 
+use libthyla_rs::env;
 use libthyla_rs::io::{stdin, stdout, Read, Write};
+use libthyla_rs::t_close;
 
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
+    if env::args().get_str(1) == Some("close-stderr") && unsafe { t_close(2) } != 0 {
+        return 1;
+    }
     let mut inp = stdin();
     let mut out = stdout();
     let mut buf = [0u8; 4096];

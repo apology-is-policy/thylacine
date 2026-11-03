@@ -326,8 +326,9 @@ impl Lsp {
         match r.tag {
             TAG_LSP_ERR => {
                 // Drain and discard: a chatty server must not fill its stderr
-                // pipe and block, nor scribble the alt-screen.
-                if r.readable {
+                // pipe and block, nor scribble the alt-screen. A hangup with no
+                // bytes reports only `hup`; its read is the EOF that closes it.
+                if r.readable || r.hup {
                     let _ = self.srv.drain_stderr();
                 }
                 false
