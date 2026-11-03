@@ -283,6 +283,11 @@ over `libhalcyon`'s client on the native adapter, and ut follows, HI-2's witness
 closing on both. SAK at every phase is witnessed by a qualification mode in
 kaua-term-probe stepped by a scenario, so a red names its phase, plus one Nora
 scenario.
+Operator vote 51, November 3: a private CLUNK is never refused for memory. What it needs
+is reserved when the fid is created, so the premise of vote 11, that the kernel admits
+every request the book admits, holds for it. Vote 11 stands as written: an adapter
+whose CLUNK is refused fails the ring loudly. Without this, a program at its page budget
+lost its private ring to a background CLUNK. Not yet built.
 
 Review conclusion: this is the recommended single design. It costs a native
 9P progress refactor, but avoids permanently assigning clipboard availability
@@ -399,5 +404,10 @@ The client's rules, each from a rule above it:
   run first against the service that answers, as the control.
 - AS-4e: ut over the native adapter, the same client Nora uses, closing HI-2's
   witness on both clients. A paste lands in the command buffer and does not submit.
+  Operator vote 52, November 3: one key in ut's line editor starts it, beside Ctrl-Y,
+  which stays local. It carries no content: ut fetches the clipboard over its own
+  private ring, so no clipboard byte crosses the pts and a forged key grants nothing,
+  because the server still admits. A paste over the line's 64 KiB limit refuses whole,
+  visibly. HI-3 makes transcript NOR's Space p send the same key.
 - AS-4f: the rest of AS-4's list: paste after edit, tab, focus and session change;
   the unknown commit; several sessions; rendering and input latency; logout.

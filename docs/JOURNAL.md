@@ -22,6 +22,62 @@ needed the operator.
 
 
 ---
+## 2026-11-03 -- one poisoned fence, reproduced, and four votes (corona)
+
+The sabotage set ended at 16:28Z (work/nov03-as3a/run4.log): x1, x6, x10 and x15
+discriminated, and the rebuild was byte-identical to the baseline at c6f0f590a, first
+baseline with AS-4d's fixture. x11, y1 and x14 did not match their predictions, and
+they trace to two defects of mine, neither in the kernel.
+
+`bury`, written at ab5e8c1c2 to stop a failed leg leaving its victim behind, called
+`Child::kill`, which writes `/proc/<pid>/ctl`, and it ignored the answer. The suite's
+root is bare ramfs, so by reading no kill was ever sent. x11 said so: "a killed victim
+did not end" and a STRAY-CHILD where that fix promised none. It now posts the note,
+as the kill leg does, and says if that is refused. That is a reading until x11 re-runs
+(owed, queued). The other defect was the judge: the runner prints `STRAY-CHILD(1
+reaped)` in front of a verdict on the same line, and the judge counted only lines
+starting FAIL. Run offline against the real boot logs, y1 now matches its prediction
+and x6, x10 and x1 are unchanged.
+
+A wrong turn: to test that judge I imported the harness, and it ran `main()` at import.
+What stopped a second sabotage starting beside the live one was its census refusing,
+because x15's mutant happened to be in place. Nothing was disturbed: I checked the
+pids and the env tree. guest-sabotage has a main guard now; outbox-sabotage still runs
+on import.
+
+The Pi's mutant sweep left two real survivors, a11 and a12, plus a neighbour I added,
+a15: a connect failing and a read's errno dropped, each still reaching the right event
+by a later deadline, so no test noticed. Audit P3-2's sim change had moved a11's test
+past the line it covered. Each has a test now pinning that no clock moved.
+
+Then libhalcyon failed two tests on one run and passed three reruns. It was not a
+race: tar restored the mac's older mtime, so cargo called the source fresh and ran c32's
+mutant binary, the sweep's last in that crate. Reproduced on demand with `touch -d`,
+same two tests. The sync now uses `tar -x -m`. While reproducing it the Pi reset itself
+at 16:11:56Z (`uptime -s`); rsts 0x20 is a watchdog full reset, so not power, and an
+ordered reboot reads the same. With no persistent journal the cause is unknown. It is
+in OPEN-BUGS, and a monitor on the mac waits for the next one. The 15:26Z "tunnel
+outage" I noted earlier may have been the same; I did not check its uptime then.
+
+MM-0's reservation (29c3be9c3) ran beside this, as vote 44 allows. Sabotaging its new
+byte oracle found the fixture blind to a swap of like fields, positional initializers
+and two zeros, which a green first run had hidden. The gap pin itself is unrun.
+
+P2 A reproduced at 16:51Z on the Pi: one abandoned fence on an unrelated client's
+context, and the next `ls /dev/tapestry/surface` had not ended after 60 s. It stopped
+at the create, earlier than I had read, since the composed transition retires too. So
+opening a window is enough, not only closing one.
+
+The operator's votes, all four the recommended option: 49 scopes a retirement to what
+can reach its object; 50 paints the trusted scene without waiting for clients' chains,
+once reproduced; 51 has the kernel keep vote 11's premise by funding a CLUNK at the
+fid's creation; 52 gives ut a content-free paste key and has ut fetch. To ask I stepped
+out of the mac queue, since a question must not hold a lease up, and queued again after.
+
+Nothing of AS-4 has booted yet. Aux and main are ahead of me for the mac.
+
+---
+
 ## 2026-11-03 -- the prosecutor read what the sim could not see (corona)
 
 The audit of AS-4a, AS-4b and AS-4c returned at 15:32Z, Opus on Opus with the model steady: 1 P0, 2 P1, 2 P2, 10 P3, nothing executed. All of it was reachable only because the sim is a model I wrote.

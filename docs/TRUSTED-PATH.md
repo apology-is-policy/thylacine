@@ -172,6 +172,15 @@ All planes, cursors, outputs, capture paths, DMA access and pending submissions
 are part of the exclusion proof. A simple-framebuffer node or CPU mapping alone
 is insufficient evidence. Backends must pass conformance tests before enablement.
 
+**A client's GPU work does not hold the trusted scene back** (operator vote 50,
+2026-11-03). In that proof, a pending submission must be shown unable to reach the
+trusted image; it need not have retired. A chain reaches only resources attached to
+its context, the trusted image is never attached to a context, and only the broker
+binds scanouts. Waiting for every chain would let any client that keeps one in flight
+deny the SAK, with no trusted screen and no notice, while a fake prompt stays on the
+glass. Not yet built: `Seat::step` still returns before any trusted paint while a chain
+is unretired, and that denial, read in code, is to be reproduced before the change.
+
 **As built:** the serial episode gates UART output to the attached trusted
 process. The QEMU graphical backend uses Lictor as the boot-trusted physical
 GPU/input owner, with Corvus semantic frames and kernel generation/visibility
