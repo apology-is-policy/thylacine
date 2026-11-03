@@ -26,6 +26,8 @@ its pages:
   reservation cap to the burrow window and made `page_count` read as data plus
   the nodes that index it. Also owns the capacity suite. Guards [[inv-i32]];
   modelled by [[spec-capacity]].
+- **[[sub-kernel-retention]]** — what keeps backing alive and who pays today:
+  the measured start of the memory accounts, pinned by four tests.
 - **[[sub-kernel-asid]]** — address-space identifiers. The rolling
   generation cache that replaced a per-Proc permanent allocation
   (which extincted on the 256th concurrent Proc). Guards [[inv-i31]].

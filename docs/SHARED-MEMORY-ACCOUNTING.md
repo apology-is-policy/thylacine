@@ -364,3 +364,78 @@ rather than disguised as hardware facts. No guaranteed per-user partition,
 automatic process termination or broad new imperium capability is proposed.
 This is a substantial resource-lifetime implementation, staged alongside the
 async work; neither design is claimed implemented by the clipboard prerequisite.
+
+## 12. MM-0 inventory: what holds and allocates today
+
+Read from the code at f44b1d198 (November 3), every call site, by function so
+the anchors survive edits. Nothing here is a decision until the operator ratifies
+it, except where section 7 already rules. The last column of each table is a
+proposal. `kernel/test/test_mm0_holders.c` pins today's four behaviours section 10
+names; those tests must turn red when MM-2 changes them, and be changed with it.
+
+Census method and its controls: `burrow_ref(`, `kobj_dma_ref(`, the mapping-count
+increment, every struct field typed `struct Burrow *` or `struct KObj_DMA *`, and
+every cast to those types. The casts found two holders the field search cannot see,
+because their field is `const void *backing` (`struct loom_pool_extent`) or a
+handle slot's `obj`. Local arrays such as `pins[]`, `old[]`, `orphans[]` and `drop[]`
+carry an existing reference to its release outside a lock and hold nothing new.
+
+### Holders of backing
+
+| Holder | Site | Retains | Charged today | Proposed claim |
+| --- | --- | --- | --- | --- |
+| Shared-in VMA | `burrow_share_into` | whole object; a cut is refused | `shared_map_pages`, per VMA, so aliases count twice | one retention membership per account, refcounted by alias |
+| Other VMA | `vma_alloc` to `burrow_acquire_mapping`; every `burrow_map`, a fork's clone, a cut's tail piece | whole Burrow by mapping count | payer's `page_count` through the charge record, for eager anonymous; lazy per resident page | the space's existing constraint; R claim when the backing is foreign |
+| Burrow handle | `handle_acquire_obj` | whole Burrow | nothing | R claim on the holder's account |
+| DMA handle | `handle_acquire_obj`; `sys_seat_import_for_proc` for an imported one | whole KObj_DMA | nothing | R claim, by object identity |
+| DMA wrapper Burrow | `burrow_create_dma`, one per SYS_DMA_MAP | KObj_DMA | nothing; an owner's map is not shared-in | same membership as the object, never per wrapper |
+| Weft share slot | `weft_share_register`, 64 slots machine-wide, owner death reclaims | whole Burrow | nothing | outstanding-grant claim on the sharer |
+| Weft binding | `struct weft_binding`, the slot's pin moved at claim | whole Burrow until `dev9p_close` | the mapper's shared-in VMA only | follows the claimant; must exist before the slot's claim drops |
+| Loom ring | `struct Loom.ring` | ring Burrow | charge record | ring metadata, requesting account |
+| Legacy registered buffer | `struct loom_reg_buffer`, `loom_resolve_buf` | whole Burrow until re-register or `loom_unref` | nothing new | registered-buffer claim |
+| Private fixed buffer | `struct loom_private_fixed` extent | whole Burrow until settled | nothing new | registered-buffer claim |
+| Private pool member | `struct loom_pool_extent` | whole Burrow until settled | nothing new | registered-buffer claim |
+| I-30 per-operation pin | `pinned_buf` at submit | whole Burrow for the operation | nothing | covered by its buffer's claim, section 6's borrower |
+| Exec image cache | `image.c`, one handle ref per entry | FILE Burrow | clean-page policy, section 3 | bounded system cache account |
+| vDSO | `g_vdso_burrow` | one Burrow for the boot | boot | boot account |
+| Syscall and fault temporaries | JIT sync, `weft_share` registration gap, `freq->burrow` | across a lock gap in one call | nothing | none; inside a live claim, never escaping |
+
+The kernel has no type for section 6's queued backend command, CPU composition
+borrow or display/GPU pin. Each reaches the kernel as one of the rows above, a DMA
+handle or a shared-in mapping held by a driver or service. Which one, and whether a
+fence outlives it, is a userspace question not yet read: `usr/virtio-gpu` and
+`usr/tapestryd`. MM-0 stays open on this row until they are.
+
+### Allocation classes
+
+Pages charged to the capacity pool (`alloc_user_pages`, PG_USER): `burrow_create_anon`,
+lazy commit and pagemap nodes, the COW and demand paths in `arch/arm64/fault.c`,
+user page tables (`user_table_alloc`), JIT commit. They stay ordinary, with the
+requesting account as sponsor; an exempt caller keeps its exemption until section 7's
+reserve guard replaces it.
+
+Raw `alloc_pages`, outside the pool:
+
+| Site | Induced by | Proposed class |
+| --- | --- | --- |
+| `dma_create_body`, weave | Tapestry per client surface, and its screen | ordinary, voucher-funded; the screen from the operating budget, section 5 |
+| `dma_create_body`, GPU BO | Tapestry per client or renderer | ordinary, voucher-funded |
+| `dma_create_body`, plain | drivers' queues and buffers; virtio-gpu also its framebuffer | open: section 7 requires each call site read first; a framebuffer is not a virtqueue |
+| `kstack_alloc` | every thread; bounded per Proc | metadata, requesting account; a thread that cannot pay is refused at create |
+| `proc_pgtable_create` | every address space, one L0 page | metadata, requesting account |
+| `mm/slub.c` slabs and large allocations | everything | metadata; existing bounds, then charged membership records, section 3 |
+| `file_demand_page_cluster` stage | a file fault; freed before return, falls back to one page on failure | transient ordinary; must never draw on the reserve |
+| `virtio_virtqueue_create`, `random.c` pull page | kernel virtio-rng at boot | boot account, critical |
+| `gic_its.c` tables, `kpage_alloc` | ITS bring-up | boot account, critical |
+| `mmu.c` L2 and L3 demotions | kernel direct-map splits | boot account, critical; read whether a user-driven path reaches them |
+
+HOSTMEM (`burrow_create_hostmem`) is a PCI BAR extent and allocates no RAM: its own
+class, section 7.
+
+### What the four pins showed against this document
+
+Section 10's "partial map" is narrower than a client's pin. A shared-in cut is
+refused, so a client holds and pays for the whole object. Only an owner's own DMA
+map, placed inside the burrow window, can be cut down to one page while retaining
+every page; outside the window a hardware map detaches whole. The charge today is
+none in either case, which is the defect the retention unit closes.
