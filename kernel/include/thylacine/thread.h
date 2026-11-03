@@ -185,20 +185,21 @@ struct Thread {
     // struct-size change (the _Static_assert below still pins 1136).
     u32                util;
 
-    // P5-tsleep: deadline-bounded Rendez sleep. A thread inside a
-    // deadlined tsleep() is linked onto the global timer-wait list
-    // (kernel/sched.c) via timerwait_{next,prev}; sched_tick() scans
-    // that list on every timer fire and wakes any thread whose
-    // sleep_deadline has passed. sleep_deadline is an architectural-
-    // counter value (timer_get_counter units, 0 = unset); sleep_timedout
-    // is set by the timeout wake so tsleep's resume can return
-    // TSLEEP_TIMEDOUT. All four fields are touched only under the
-    // timer-wait lock and r->lock; both links NULL when the thread is
-    // not in a deadlined tsleep. Modeled by specs/tsleep.tla.
+    // P5-tsleep, C8b: deadline-bounded Rendez sleep. A thread inside a
+    // deadlined tsleep() is linked on one per-CPU timer base (kernel/sched.c)
+    // via timerwait_{next,prev}, sorted by sleep_deadline, an architectural-
+    // counter value (timer_get_counter units, 0 = unset). The links and the
+    // deadline are touched only under the base's lock; a wake leaves them, and
+    // the thread unlinks itself as it runs. sleep_timedout is set by the
+    // timeout wake, under r->lock, so tsleep's resume can return
+    // TSLEEP_TIMEDOUT. timer_base_cpu is the base's CPU + 1, 0 when on none,
+    // written under that base's lock and read without it by the owner.
+    // Modeled by specs/tsleep.tla.
     struct Thread     *timerwait_next;
     struct Thread     *timerwait_prev;
     u64                sleep_deadline;
     bool               sleep_timedout;
+    u16                timer_base_cpu;
 
     // P6-pouch-threads (sub-chunk 9): clear-child-tid address — the
     // user-VA of a 4-byte word the kernel atomically zeroes + torpor-
@@ -311,7 +312,7 @@ struct Thread {
     // takes a peer's wait_lock to READ rendez_blocked_on and wake it, so the
     // cascade-vs-register read/write is serialized (acquire/release on
     // group_exit_msg alone loses the wakeup in the miss case). wait_lock is
-    // the OUTERMOST wait-lock: order wait_lock -> g_timerwait.lock -> r->lock,
+    // the OUTERMOST wait-lock: order wait_lock -> a timer base's lock -> r->lock,
     // and it is NEVER held across sched() (a sleeper that held it would
     // deadlock the cascade). Zero (KP_ZERO from the SLUB cache) == unlocked,
     // so no explicit init is needed.

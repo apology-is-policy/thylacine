@@ -265,7 +265,7 @@ void test_tsleep_timeout_via_tick(void) {
 // common deadline, all time out on the same tick — exercising
 // timerwait_tick's one-at-a-time wake loop across multiple iterations
 // (P5-tsleep-scale / audit F6: the scan wakes a herd one thread per
-// g_timerwait.lock acquisition, not all under one hold).
+// base lock acquisition, not all under one hold).
 
 #define TSL_HERD_N 3
 
@@ -378,7 +378,7 @@ void test_timerwait_earliest_deadline(void) {
     }
 
     // Yield until both consumers have parked in tsleep (SLEEPING + linked on
-    // g_timerwait). The cap turns a stuck park into a clean failure.
+    // this CPU's timer base). The cap turns a stuck park into a clean failure.
     for (u64 spin = 0; spin < 100000000ull &&
          !(c[0]->state == THREAD_SLEEPING && c[1]->state == THREAD_SLEEPING);
          spin++) {
