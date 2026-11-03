@@ -357,8 +357,10 @@ static int test_usr_apart(void) {
 // writes 'H'. The driver watches /proc/<pid>/sched until the child's thread sleeps and
 // only then posts, so a witness reaches the wait it names. A wait a note fails to end
 // is a deadline in the driver, never a hung boot.
-#define LEG_DATA         20
-#define LEG_STATUS       21
+// Pouch's posix_spawn builds the child's table with no holes and carries only what a
+// dup2 names, so these sit just above the standard streams, and nothing needs closing.
+#define LEG_DATA         3
+#define LEG_STATUS       4
 #define LEG_DEADLINE_MS  20000LL
 #define LEG_QUIET_MS     100
 
@@ -466,6 +468,10 @@ static void leg_handler_escapes(int sig) {
 #define LEG_SYS_RFORK 105
 #define LEG_RFPROC    1L
 
+// Nor has Pouch an exec: SYS_execve is the same sentinel. SYS_EXECVE takes the path by
+// length and argc packed strings, each with its NUL, and keeps the descriptors.
+#define LEG_SYS_EXECVE 104
+
 static pid_t leg_native_fork(void) {
     return (pid_t)syscall(LEG_SYS_RFORK, LEG_RFPROC, 0L, 0L);
 }
@@ -508,8 +514,8 @@ static int leg_child(const char *mode) {
     }
     if (!strcmp(mode, "exec-dfl")) {
         if (leg_catch(SIGINT, leg_handler, 0) != 0) return 60;
-        char *a[] = { (char *)SELF, (char *)"leg", (char *)"dfl", NULL };
-        execv(SELF, a);
+        static const char args[] = "/bin/pouch-hello-signals\0leg\0dfl";
+        syscall(LEG_SYS_EXECVE, SELF, sizeof SELF - 1, args, sizeof args, 3L);
         return 61;
     }
     if (!strcmp(mode, "dfl")) {
@@ -670,10 +676,6 @@ static int run_blocked_leg(const struct blocked_leg *l) {
     posix_spawn_file_actions_init(&fa);
     posix_spawn_file_actions_adddup2(&fa, data[0], LEG_DATA);
     posix_spawn_file_actions_adddup2(&fa, status[1], LEG_STATUS);
-    posix_spawn_file_actions_addclose(&fa, data[0]);
-    posix_spawn_file_actions_addclose(&fa, data[1]);
-    posix_spawn_file_actions_addclose(&fa, status[0]);
-    posix_spawn_file_actions_addclose(&fa, status[1]);
     char *cargv[] = { (char *)SELF, (char *)"leg", (char *)l->mode, NULL };
     pid_t pid;
     int sp = posix_spawn(&pid, SELF, &fa, NULL, cargv, environ);
