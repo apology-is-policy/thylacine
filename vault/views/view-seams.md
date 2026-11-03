@@ -83,6 +83,7 @@ Generated from note fields — do not edit between the markers
 | [[seam-loom-sqpoll-p3s]] | open | sub-kernel-loom, sub-kernel-poll | fnd-kt1-r1-a1 | memory bug_loom_poll_substrate_p3s.md; the KT-1 audit round 1 (A-F1..A-F4) |
 | [[seam-mm-directmap-cap-absolute]] | open | sub-kernel-mm-phys | chg-2026-05-31-808-directmap-pagemap | #808 audit F2; Lazarus board bringup |
 | [[seam-mount-graph-unmodeled]] | open | sub-kernel-territory | fnd-stalk2-r1-f1 | unfiled |
+| [[seam-native-exec-drops-sig-ign]] | open | sub-kernel-notes, sub-pouch-signal | chg-2026-11-03-item-11c | ARCH 8.8.3, item 11c |
 | [[seam-netd-host-tests]] | open | sub-netd-server, sub-netd-nic | adt-net2d-r1 |  |
 | [[seam-nuname-trust-stamp]] | open | sub-kernel-syscall-dispatch, sub-kernel-ninep-attach | chg-2026-09-06-9p-identity-absorb | v1.x (the n_uname trust-stamp seam family) |
 | [[seam-poll-heap-waiters]] | open | sub-kernel-poll | chg-2026-06-24-355-poll-decouple | #355 companion |

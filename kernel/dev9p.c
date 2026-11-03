@@ -394,14 +394,15 @@ static int wb_write_run(struct p9_client *cl, u32 fid, u64 off, u32 total,
 // bytes written. The run stays staged and nothing is latched, so the next
 // flusher -- the last close at the latest -- sends it; a prefix that landed
 // is rewritten with the same bytes at the same offsets.
-// Was this flush's EINTR a caught note cancelling the Twrite? Every caught-note
-// unwind takes the note's claim (thread_caught_note_unwinds), held until the
-// thread's EL0-return tail, so a claim marks the client's flush(5) cancellation.
-// A server that answers Rlerror(EINTR) itself reaches here as the same value
-// with no claim: that is the server failing the write, and it latches.
+// Was this flush's EINTR a caught note cancelling the Twrite? The call's mark says
+// a wait unwound for one (thread_caught_note_unwinds), whichever way the note came:
+// a thread-directed note unwinds with no claim. client_run takes the mark back when
+// the op's own reply stood, so a server that answers Rlerror(EINTR) itself reaches
+// here as the same value with no mark, note or none: that is the server failing the
+// write, and it latches.
 static bool wb_note_cancelled(int err) {
     struct Thread *t = current_thread();
-    return err == -P9_E_INTR && t && t->note_claim != 0;
+    return err == -P9_E_INTR && t && t->note_call_unwound;
 }
 
 static int wb_flush_locked(struct dev9p_priv *p, u64 qid_path) {

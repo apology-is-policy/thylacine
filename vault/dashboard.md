@@ -41,7 +41,7 @@ Generated — do not edit between the markers (`quaestor render`).
 | [[arc-vivarium]] | active | 2 |
 | [[arc-weft]] | active | 4 |
 
-## Open seams: 82
+## Open seams: 83
 
 - [[seam-220-netd-listener-poll]] (sub-netd-server)
 - [[seam-240-lo-redial]] (sub-netd-server)
@@ -90,6 +90,7 @@ Generated — do not edit between the markers (`quaestor render`).
 - [[seam-loom-sqpoll-p3s]] (sub-kernel-loom, sub-kernel-poll)
 - [[seam-mm-directmap-cap-absolute]] (sub-kernel-mm-phys)
 - [[seam-mount-graph-unmodeled]] (sub-kernel-territory)
+- [[seam-native-exec-drops-sig-ign]] (sub-kernel-notes, sub-pouch-signal)
 - [[seam-netd-host-tests]] (sub-netd-server, sub-netd-nic)
 - [[seam-nuname-trust-stamp]] (sub-kernel-syscall-dispatch, sub-kernel-ninep-attach)
 - [[seam-poll-heap-waiters]] (sub-kernel-poll)
@@ -128,6 +129,7 @@ Generated — do not edit between the markers (`quaestor render`).
 
 ## Recent changes
 
+- 2026-11-03 [[chg-2026-11-03-item-11c]] — A per-note table for native programs, SA_RESTART in the kernel, and an open a note can interrupt
 - 2026-11-02 [[chg-2026-11-02-f3-what-it-is]] — What review finding F-3 is, read from main's code
 - 2026-11-02 [[chg-2026-11-02-join-planted-cleanup]] — The F1 test's cleanup ran on an early failure, three planted points
 - 2026-11-02 [[chg-2026-11-02-thread-model-c4]] — Thread-model C4: a note aimed at one thread
@@ -135,5 +137,4 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-11-02 [[chg-2026-11-02-usr-notes]] — SIGUSR1 and SIGUSR2 become notes, and every family word outgrows its byte
 - 2026-10-29 [[chg-2026-10-29-aux-corona-join]] — The corona join: aux-3 carries env-a and env-c, and every deferring lock is taken through its helper
 - 2026-10-29 [[chg-2026-10-29-thread-model-c7-close]] — Thread-model C7 close: round 2, the C11 join fix, the final gates
-- 2026-10-29 [[chg-2026-10-29-thread-model-c7]] — Thread-model C7: one first entry, per-thread /proc, a new thread inherits its creator's mask
 <!-- generated:end -->

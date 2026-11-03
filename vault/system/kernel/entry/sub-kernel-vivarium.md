@@ -955,9 +955,9 @@ Each of those waits now opts in ([[sub-kernel-notes]] lists them) and returns
 `-EINTR` with nothing consumed; a pipe or console write that moved bytes returns
 its count. `viv_wait4` maps `WAIT_PID_NOTEINTR` before its `ECHILD` line
 ([[sub-kernel-syscall-dispatch]]); the futex's `TORPOR_ERR_EINTR` is already
-`-EINTR` numerically. The kernel restarts none of them: a guest that installed
-its handler with `SA_RESTART` sees `EINTR` where Linux would restart `wait4`, a
-pipe or a futex -- the DEGRADED row of 6.22.
+`-EINTR` numerically. Since item 11c (vote 19) the kernel restarts what signal(7)
+restarts under `SA_RESTART`: `vivarium_call_restartable` is the positive list, and the
+machinery is [[sub-kernel-notes]]'s. That closed the DEGRADED row of 6.22.
 
 Witnesses: viv-pheno-probe L311-L318, which run under the counting `SIGCHLD`
 handler L301-L310 installed (no `SA_RESTART`), block in each listed call -- a
@@ -1017,8 +1017,8 @@ derived monotonic deadline or a step (the condition is the hook's `ready`),
 unhooks, and asks the verdict on the wall clock; a step wakes it to derive
 again, so a step past the instant ends the sleep and a step back lengthens it.
 Both rows join `vivarium_intr_class`'s ALWAYS arm. signal(7) lists the sleep
-interfaces among the calls never restarted, so the missing kernel-side
-`SA_RESTART` (the DEGRADED row of 6.22) costs them nothing.
+interfaces among the calls never restarted, so `vivarium_call_restartable` leaves
+them out.
 
 Witnesses: `vivarium.nanosleep_domain` (the clock verdicts against the gettime
 map over 21 ids, the narrowing on both maps, the flag, the request's validity

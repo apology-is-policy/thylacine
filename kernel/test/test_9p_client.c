@@ -31,6 +31,7 @@
 #include <thylacine/spinlock.h>
 #include <thylacine/spoor.h>
 #include <thylacine/syscall.h>    // T_S_IFDIR (the 8.5.1 directory Rgetattr)
+#include <thylacine/notes.h>      // flush(5) legs: a direct note
 #include <thylacine/thread.h>     // flush(5) legs: current_thread()->note_interruptible
 #include <thylacine/types.h>
 #include <thylacine/vivarium.h>  // flush(5) legs: a Linux sigtab row catches child_exit
@@ -4277,6 +4278,7 @@ static struct {
     bool noted;       // the op runs as a call on signal(7)'s list, SIGCHLD caught
     bool setup_ok;
     bool marked;      // the call's mark as the op returned: the kernel may re-issue it
+    u32  claim;       // the claim it held then
     u8   data[16];
 } g_dyop;
 
@@ -4315,6 +4317,7 @@ static void dy_run(void *arg) {
         if (rc == 0) rc = (int)got;
     }
     g_dyop.marked = current_thread()->note_call_unwound;
+    g_dyop.claim  = current_thread()->note_claim;
     g_dyop.rc = rc;
 }
 
@@ -4325,6 +4328,7 @@ static bool dy_launch(int op, u32 fid, bool dying, bool noted) {
     g_dyop.noted    = noted;
     g_dyop.setup_ok = false;
     g_dyop.marked   = false;
+    g_dyop.claim    = 0xffffffffu;
     for (u32 i = 0; i < sizeof(g_dyop.data); i++) g_dyop.data[i] = 0;
     return test_dying_start(&g_dy, dy_run, NULL, dying);
 }
@@ -5017,6 +5021,40 @@ void test_9p_client_note_flush_rflush_first_cancels(void) {
     TEST_EXPECT_EQ(after, (u64)0, "the Rclunk freed its tag");
     TEST_EXPECT_EQ(orphan, (u64)0, "no unexplained frame");
     TEST_ASSERT(!dead, "the session stays live");
+}
+
+// A thread-directed note unwinds with no claim (notes_direct_caught). The Rflush still
+// cancels the op, and the mark is what says so: dev9p's write-back asks it.
+void test_9p_client_note_flush_direct_note_marks(void) {
+    TEST_EXPECT_EQ(dy_client_open(), 0, "client over mq");
+    TEST_EXPECT_EQ(dy_bind(131), 1u, "walk binds 131");
+    g_rec_hold = P9_TREAD;
+
+    dy_hold_reader(true);
+    TEST_ASSERT(dy_start_noted(DY_READ, 131), "reader");
+    TEST_YIELD_UNTIL_SOFT(test_dying_parked(&g_dy) && rec_count(P9_TREAD) == 1);
+    bool parked = test_dying_parked(&g_dy) && !test_dying_done(&g_dy);
+    int  pn = parked ? proc_note_thread(g_dy.proc, g_dy.tid, NOTE_NAME_CHILD_EXIT, NULL) : -1;
+    TEST_YIELD_UNTIL_SOFT(test_dying_done(&g_dy) ||
+                          (rec_count(P9_TFLUSH) == 1 && test_dying_parked(&g_dy)));
+    bool waited = rec_count(P9_TFLUSH) == 1 && !test_dying_done(&g_dy);
+    dy_hold_reader(false);
+    int  pf = p9_client_reader_pump_ready(&g_client);          // the Rflush
+    bool killed;
+    dy_finish(&killed);
+    u64  cancel = g_client.flush_cancelled;
+    dy_client_close();
+
+    TEST_ASSERT(g_dyop.setup_ok, "a Linux phenotype whose SIGCHLD is caught");
+    TEST_ASSERT(parked, "the read parked behind the held reader");
+    TEST_EXPECT_EQ(pn, 0, "the note went to that thread");
+    TEST_ASSERT(waited, "the interrupted read waits for its Tflush's answer");
+    TEST_EXPECT_EQ(pf, 1, "the Rflush");
+    TEST_ASSERT(!killed, "the Rflush ended the wait");
+    TEST_EXPECT_EQ((u64)(s64)g_dyop.rc, (u64)(s64)-P9_E_INTR, "cancelled: -EINTR");
+    TEST_EXPECT_EQ(cancel, (u64)1, "counted as cancelled");
+    TEST_EXPECT_EQ(g_dyop.claim, 0u, "the note took no claim");
+    TEST_ASSERT(g_dyop.marked, "and the mark says the unwind cancelled the op");
 }
 
 // The server's own Rlerror(EINTR) beats the flush. The value is what a cancel answers,

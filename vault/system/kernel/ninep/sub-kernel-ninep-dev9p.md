@@ -98,12 +98,14 @@ under `wb_lock` ([[lock-dev9p-wb-priv]]).
    or the last close sends it; a close whose own flush is interrupted hands
    the run to the closer and returns 0. Until then the `EINTR` latched and the
    run was dropped, so every later write, fsync and close on the file
-   returned `EINTR`. The cancellation is told by the note's claim
-   (`wb_note_cancelled`: every caught-note unwind takes one and holds it to
-   the EL0-return tail); a server's own Rlerror(EINTR), with no claim, latches
-   like any failure and the last close reports it (B-2b audit F1). Witnesses
-   `dev9p.wb_interrupted_flush_keeps_run` (the claim held) and its control
-   `dev9p.wb_server_eintr_latches` (none).
+   returned `EINTR`. The cancellation is told by the call's mark
+   (`wb_note_cancelled`, `note_call_unwound`: every caught-note unwind sets it,
+   a thread-directed note's too, which takes no claim, and it holds to the
+   EL0-return tail); a server's own Rlerror(EINTR) has no mark, since `client_run`
+   takes it back when the op's own reply stands, so it latches like any failure and
+   the last close reports it (B-2b audit F1, item 11c r2 F1). Witnesses
+   `dev9p.wb_interrupted_flush_keeps_run` (the mark held) and its control
+   `dev9p.wb_server_eintr_latches` (no mark, with a claim and without).
    **A close that may not wait never flushes here** (2026-10-07, ARCH 7.9.1
    part C): `close_may_wait()` is false on a die-pending thread (a killed
    thread's own last close, or a final close a second kill forced) and on a

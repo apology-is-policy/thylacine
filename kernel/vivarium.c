@@ -3447,7 +3447,15 @@ int viv_sigtab_clone_into(struct Proc *child, const struct Proc *parent) {
     if (!src) return 0;
     struct viv_sigtab *dst = (struct viv_sigtab *)kzalloc(sizeof(*dst), 0);
     if (!dst) return -1;
-    for (u32 i = 0; i < (u32)VIV_SIGNOTE_COUNT; i++) dst->act[i] = src->act[i];
+    // A peer may be writing a row now. The handler first, as every reader has it: its
+    // RELEASE vouches for the rest of the row, and for a SYS_NOTIFY ahead of it.
+    for (u32 i = 0; i < (u32)VIV_SIGNOTE_COUNT; i++) {
+        const struct viv_ksigaction *a = &src->act[i];
+        dst->act[i].handler  = sigact_ld_handler(a);
+        dst->act[i].flags    = __atomic_load_n(&a->flags,    __ATOMIC_RELAXED);
+        dst->act[i].restorer = __atomic_load_n(&a->restorer, __ATOMIC_RELAXED);
+        dst->act[i].mask     = __atomic_load_n(&a->mask,     __ATOMIC_RELAXED);
+    }
     __atomic_store_n(&child->sigtab, dst, __ATOMIC_RELEASE);
     return 0;
 }

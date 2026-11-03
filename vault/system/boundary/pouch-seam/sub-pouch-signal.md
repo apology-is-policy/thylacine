@@ -6,26 +6,29 @@ title: "POSIX signals over kernel notes"
 code:
   - usr/lib/pouch/patches/0007-pouch-signals.patch
   - usr/lib/pouch/patches/0049-pouch-sigterm-term-note.patch
+  - usr/lib/pouch/patches/0069-pouch-note-table.patch
 audit: hard
 guarded-by: [inv-i24]
 validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/POUCH-DESIGN.md", "docs/PTY-DESIGN.md"]
 created: 2026-08-01
-updated: 2026-10-14
+updated: 2026-11-03
 ---
 ## Purpose
 
 `sigaction` / `raise` / `kill` / `sigprocmask` on a kernel that has
 string-named Plan 9 notes instead of numbered signals. pouch keeps the
-per-Proc disposition table itself and registers ONE bootstrap handler
-with the kernel; the kernel's job is delivery, pouch's is dispatch.
+handlers in its own table and writes each note's disposition in the kernel's
+(`SYS_NOTE_DISPOSE`, [[sub-kernel-notes]]). The kernel decides what a note does;
+pouch's one dispatcher runs the handler for a caught note.
 
 ## Contract
 
-- `sigaction(sig, sa, old)` — records into `__pouch_sigtab[sig]`;
-  accepts exactly the supported set, `EINVAL` for everything else
-  (which subsumes SIGKILL/SIGSTOP, POSIX-correctly).
+- `sigaction(sig, sa, old)` — records into `__pouch_sigtab[sig]` and writes the
+  kernel's row; accepts exactly the supported set, `EINVAL` for everything else
+  (which subsumes SIGKILL/SIGSTOP, POSIX-correctly). A refused row puts the old entry
+  back and answers the errno.
 - `raise(sig)` → `SYS_POSTNOTE(pid=0, name, len)` — the kernel's
   self-post sentinel. `kill(pid, sig)` → the same with the caller's pid.
 - `pthread_sigmask` / `sigprocmask` → `SYS_NOTE_MASK`, marshalling
@@ -64,15 +67,37 @@ The musl `__abort_lock` interlock in `sigaction` is not carried: Pouch's
 
 ## Mechanism
 
-**One handler, dispatched by name.** The `.init_array` constructor runs
-before `main`, sets `NOTE_BIT_PIPE` in the kernel mask (SIGPIPE
-masked-by-default — the modern-daemon posture), then registers
-`__pouch_note_handler` via `SYS_NOTIFY`. The kernel calls it Plan-9-style
-(`x0` = a pointer to the 16-byte NUL-padded note name on the user stack,
-`x1` = the arg), pouch maps the name to a signum with a bounded 16-byte
-compare, looks up the disposition, and ends with the right `SYS_NOTED`.
-The constructor's ORDER is itself the invariant: mask before notify, so
-no note can reach a registered handler over an unset sigtab.
+**No handler until a program asks for one (0069, operator vote 18).** The
+`.init_array` constructor runs before `main`, sets `NOTE_BIT_PIPE` in the kernel
+mask (SIGPIPE masked-by-default — the modern-daemon posture), and writes
+`child_exit`'s default row. That row allocates nothing, and it makes the kernel's
+table govern from the image's start, so there is no window in which every note
+reaches a catch-all, and the kernel discards a dead child's note at the tail, where no
+reader would ever take it. The constructor registers no handler. It used to register
+one, and to the kernel that read as "caught" for every note: a `SIG_DFL` `SIGINT` armed
+no terminate latch, so a program blocked in a wait did not die until the wait ended,
+and `^Z` did nothing.
+
+**One handler, dispatched by name.** A `sigaction` with a real handler calls
+`SYS_NOTIFY` with `__pouch_note_handler`, then writes a caught row, with
+`NOTE_DISP_RESTART` for `SA_RESTART`. It registers on every such install: registering
+is idempotent, and no flag in the image can disagree with the kernel in a forked child.
+Until the row lands its note takes the default, as POSIX has it before `sigaction`
+returns. `SIG_IGN` writes an ignore row and `SIG_DFL` a default one. The kernel calls the
+dispatcher Plan-9-style (`x0` = a pointer to the 16-byte NUL-padded note name on the user
+stack, `x1` = the arg), pouch maps the name to a signum with a bounded 16-byte compare,
+looks up the handler, and ends with the right `SYS_NOTED`.
+
+**A blocked call unwinds for a caught note, and the kernel re-issues it** (votes 19 and
+20). Nothing in pouch or musl re-issues a call; the comment that said `SA_RESTART`
+needed nothing was false. The patch's other half makes each blocking wrapper answer
+what the kernel now says: `waitpid` surfaces `EINTR` (it flattened every failure to
+`ECHILD`), `pause()` sits on `SYS_poll` over no fds (`SYS_ppoll` is an `ENOSYS` sentinel,
+so it returned at once), and `poll` and `select` over no fds sleep for their timeout. The
+listen open and the data open set `SYS_WALK_OPEN_OINTR`. A `connect` a note unwinds
+leaves the slot `POUCH_SOCK_CONNECTING`: the request stands, as POSIX has it, so a retry
+waits on the data open and never dials again, and I/O on such a slot waits for the
+connection first.
 
 **SIGINT and SIGTERM have a note each** since 0049: the dispatcher maps
 `interrupt` to SIGINT and `term` to SIGTERM, and each has its own mask bit
@@ -96,19 +121,12 @@ one blocks the family — documented coarseness, made survivable by the
 kernel's terminate-class latch (a masked `tty:quit`/`tty:hup` fires on
 unmask).
 
-**The SIG_DFL matrix is where the honest seam is.** quit/hup → `NDFLT`
-(whole-Proc terminate, the POSIX default); winch/cont → `NCONT` (POSIX
-ignore; a cont's RESUME already happened kernel-side at
-`SYS_TTY_CONT`); chld → `NCONT`. **susp → `NCONT` (ignore) — not STOP.**
-The reason is a composition, not laziness: the kernel's pre-delivery stop
-gate treats a Proc with a registered notify handler as "caught", and
-pouch's constructor ALWAYS registers one, so every pouch Proc is caught
-and the note delivers to the bootstrap instead of stopping the Proc; the
-bootstrap then cannot re-enter the default either, because the kernel's
-`NDFLT` arm TERMINATES (`exits` → `proc_group_terminate`) and never
-stops. `NDFLT` here would turn `^Z` into process death — the one actively
-wrong option. The clean fix is a kernel `NDFLT`-stop arm for `tty:susp`,
-an ABI-semantics change on the audited notes surface that needs signoff.
+**A signal left at `SIG_DFL` reaches no handler.** The kernel takes the note's
+default itself, in a wait as well as at the tail: `SIGTSTP` stops the Proc, and quit,
+hup, int, term, usr1 and usr2 end it. The dispatcher's `SIG_DFL` arms remain for a
+peer's reset that crosses a delivery: the kernel read the row as caught, and the table
+reads default by the time the dispatcher looks. There `NDFLT` applies the note's own
+default and `NCONT` is kept for the default-ignored ones.
 
 **The `NDFLT`-refusal fallback is now defense-in-depth only.** At 13b the
 kernel refused `NDFLT` in a multi-thread Proc (cross-thread shootdown was
@@ -181,7 +199,8 @@ one syscall whose EL0-return tail runs the handler — so by the time
 
 - The bootstrap must reach a `SYS_NOTED` on EVERY arm (unknown name
   included), or the Thread wedges with `in_handler` set.
-- The constructor's mask-then-notify order.
+- The constructor's row: without it a program with no handler keeps a slot per dead
+  child, and a first `sigaction` opens a catch-all window.
 - The tty EPERM gate must cover every tty literal (all are ≥ 4 chars and
   no non-tty name collides with the `tty:` prefix) while still forwarding
   `SIGKILL` → `"kill"`.
@@ -195,7 +214,8 @@ one syscall whose EL0-return tail runs the handler — so by the time
 
 [[seam-pouch-sigmask-per-thread]] (a `sigaction(SIGPIPE)` on one thread
 updates only that thread's kernel mask; POSIX wants Proc-wide) ·
-[[seam-pouch-sigtstp-ignore]] (the SIG_DFL `^Z` seam above).
+[[seam-native-exec-drops-sig-ign]] (a native exec drops an ignored row). Closed by
+0069: [[seam-pouch-sigtstp-ignore]].
 
 ## Caveats
 
@@ -217,6 +237,11 @@ updates only that thread's kernel mask; POSIX wants Proc-wide) ·
   SIGINT and SIGTERM stopped aliasing at 0049.
 - `SIG_IGN` does not DISCARD pending SIGPIPE notes (POSIX §2.4); the mask
   defers them, and a later real handler sees them retroactively.
+- **A handler that `longjmp`s out never reaches `SYS_NOTED`**, so `in_handler` stays
+  set: no later note reaches a handler in that thread, and waits ride a caught note out
+  (OPEN-BUGS). A fatal note with a default row still ends the program.
+- `SA_RESETHAND` and `sa_mask` are not honoured by the dispatcher (OPEN-BUGS).
+- `sigsuspend` stays `ENOSYS` (OPEN-BUGS, a vote owed).
 - `siglongjmp` does not restore masks; `sigaltstack` / `sigpending` /
   `sigtimedwait` / `sigqueue` / `sigsuspend` / `pthread_kill` are all
   sentinels; no real-time signals, no `siginfo_t` (the fd-shaped
@@ -233,4 +258,5 @@ self-post sentinel; [[adt-signals13b-r1]] DIRTY 2 P1 + 6 P2 →
 gcpark-b (2026-10-12: the patch prose for `abort()` and the dropped
 `__abort_lock` interlock; deaths by note report their signal) → thread-model
 C7 (2026-10-29, operator vote: 0065, a new thread starts with its creator's
-mask; the kernel half is `SYS_THREAD_SPAWN` inheriting `note_mask`).
+mask; the kernel half is `SYS_THREAD_SPAWN` inheriting `note_mask`) → item 11c
+(2026-11-03, votes 18 to 20: 0069, the kernel's table, restart and interruptible opens).

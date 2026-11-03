@@ -4367,9 +4367,13 @@ void test_notes_table_token_needs_a_taker(void) {
     TEST_ASSERT(!proc_caught_note_pending(p), "no taker: nothing caught");
     TEST_ASSERT(notes_direct_is_fatal(p, NOTE_NAME_INTERRUPT), "no taker: a direct note is fatal");
     TEST_ASSERT(notes_proc_default_applies(p, NOTE_NAME_INTERRUPT), "no taker: the default applies");
+
+    // Opening the notes fd gives the row a taker, so what is queued is judged again.
+    notes_mark_self_managing(p);
+    TEST_ASSERT(proc_caught_note_pending(p), "the open: the queued note reads as caught");
+    TEST_ASSERT(!nt_latch(p, PROC_FLAG_INTR_TERMINATE_PENDING), "the open: no terminate latch");
     nt_drain(p);
 
-    proc_mark_self_managing_notes(p);
     TEST_EXPECT_EQ(notes_post(p, NOTE_NAME_INTERRUPT, 0u, NULL, true), 0, "fd reader: post");
     TEST_ASSERT(proc_caught_note_pending(p), "fd reader: the row may unwind its wait");
     TEST_ASSERT(!nt_latch(p, PROC_FLAG_INTR_TERMINATE_PENDING), "fd reader: no terminate latch");

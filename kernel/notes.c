@@ -1533,6 +1533,10 @@ void notes_mark_self_managing(struct Proc *p) {
         spin_unlock(&q->lock);
         proc_wake_or_owe(&q->owed);
     }
+
+    // A caught row a fork carried here had no taker until now, and what is queued was
+    // judged as the default (notes_row_has_taker).
+    if (notes_table_governs(p)) notes_disposition_reread(p);
 }
 
 // No death reaches this thread's sleeps: loom_free's kthread join always, and
@@ -1833,8 +1837,8 @@ bool thread_caught_note_unwinds(struct Thread *t) {
 // ARCH 8.8.3: did this call's wait unwind, is the call one to re-issue, and did it
 // come back as the unwind left it? The test is the mark, never the return register
 // alone: anything can put -4 there, a 9P server's Rlerror(4) among them, and that is
-// an error to report. A 9P call that lost its flush returns its reply with the mark
-// set, so the register is asked too.
+// an error to report. A wait that moved bytes and then unwound returns its count with
+// the mark set, so the register is asked too.
 static bool notes_call_restarts(const struct exception_context *ctx, const struct Thread *t) {
     return t->note_call_unwound && t->note_restartable &&
            ctx->regs[0] == (u64)-(s64)T_E_INTR;

@@ -36,9 +36,10 @@ same metaphor, different scope.
   `-EINVAL`. Returns 0 / `-EINVAL` / `-EFAULT` / `-ETIMEDOUT` /
   `-EINTR` (Linux-numeric, so pouch's `syscall_ret.c` decodes them as
   errno). `-EINTR` (`TORPOR_ERR_EINTR`) means a caught note ended the
-  wait before any WAKE counted it (ARCH 8.8.3); only a Linux `FUTEX_WAIT`
-  — a call on signal(7)'s list — can receive it, so a native
-  `torpor_wait` stays death-only.
+  wait before any WAKE counted it (ARCH 8.8.3). A Linux `FUTEX_WAIT`, a call on
+  signal(7)'s list, can receive it, and since item 11c so can a native `torpor_wait`
+  where a table governs. Under `SA_RESTART` the kernel re-issues one with no deadline
+  (`regs[2] < 0`) and answers `-EINTR` for one with a deadline.
 - **0 is deliberately ambiguous** — it means *woken* OR *value already
   differed* (Linux returns `EAGAIN` for the latter; v1.0 collapses
   both because every futex client re-checks its own predicate on

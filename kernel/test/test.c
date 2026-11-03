@@ -2467,6 +2467,8 @@ struct test_case g_tests[] = {
                                                                            false, NULL },
     { "9p_client.flush_malformed_reply_fails_closed",
                                        test_9p_client_flush_malformed_reply_fails_closed, false, NULL },
+    { "9p_client.note_flush_direct_note_marks",
+                                       test_9p_client_note_flush_direct_note_marks, false, NULL },
     { "9p_client.note_flush_server_eintr_stands",
                                        test_9p_client_note_flush_server_eintr_stands, false, NULL },
     { "9p_client.note_flush_honours_late_read",

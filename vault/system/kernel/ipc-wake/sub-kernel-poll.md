@@ -411,7 +411,9 @@ and `NoSnapshotOutlivesCall`. The list-choosing half of re-registration is
 
 ## Error paths
 
--1 for `p`/`kfds` NULL, `nfds` 0 or > 64. Per-fd failures are
+-1 for `p`/`kfds` NULL or `nfds` > 64. `SYS_POLL` with `nfds` 0 does not read `x0` and
+sleeps for the timeout, `-T_E_INTR` for a caught note; before item 11c it refused. Per-fd
+failures are
 `POLLNVAL` in revents, never a call failure. The user-VA wrapper
 (`sys_poll_handler`) validates the whole array range before copy-in
 and scrubs partially-written revents on a writeback fault. `-T_E_INTR`

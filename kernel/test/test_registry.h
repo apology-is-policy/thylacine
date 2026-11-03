@@ -1738,6 +1738,7 @@ void test_9p_client_clunk_rlerror_drains_as_clunk(void);
 void test_9p_client_clunk_malformed_reply_fails_closed(void);
 void test_9p_client_abandoned_walk_malformed_late_reply_fails_closed(void);
 void test_9p_client_flush_malformed_reply_fails_closed(void);
+void test_9p_client_note_flush_direct_note_marks(void);
 void test_9p_client_note_flush_server_eintr_stands(void);
 void test_9p_client_note_flush_honours_late_read(void);
 void test_9p_client_note_flush_rflush_first_cancels(void);

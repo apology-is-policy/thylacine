@@ -173,7 +173,10 @@ a ledger of three columns:
   `proc_alloc_in`'s own-session default), the legate scope tag, the hardware
   allowance (deep-cloned), the environment group (deep-copied), the
   phenotype, `exe_path`, the CL-5 `page_budget` and the thread budget
-  (`thread_budget`, thread-model C6). A **PHENO_LINUX** fork
+  (`thread_budget`, thread-model C6). A **native fork** (not a native spawn) also
+  copies `handler_va`, and the note table with its flag if one governs: one load of the
+  flag decides both, and the handler is read after it (item 11c, [[sub-kernel-notes]]).
+  A **PHENO_LINUX** fork
   additionally gives the child thread the calling thread's **note mask** (#127
   — POSIX fork's signal-mask inheritance; a native fork keeps the zero mask, the
   rfork rule) and preserves the handler-execution snapshot, so a `fork()` issued

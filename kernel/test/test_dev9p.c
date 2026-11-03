@@ -3682,12 +3682,13 @@ void test_dev9p_wb_loom_register_keeps_the_latch(void) {
 
 // A caught note that interrupts a flush has its Twrite cancelled (flush(5)):
 // EINTR, never applied. The run stays staged and nothing latches, so the next
-// fsync sends it whole. The dev9p half is driven here: the thread holds a note
-// claim, as every caught-note unwind leaves it (thread_caught_note_unwinds),
-// and the flush meets -P9_E_INTR -- injected as a server Rlerror(EINTR), which
-// the client returns as the same value. The client half (a Tflush answered
-// first returns -P9_E_INTR) is 9p_client.note_flush_rflush_first_cancels.
-// The control, one variable away, is wb_server_eintr_latches: no claim.
+// fsync sends it whole. The dev9p half is driven here: the call carries the mark,
+// as every caught-note unwind leaves it (thread_caught_note_unwinds), and the
+// flush meets -P9_E_INTR -- injected as a server Rlerror(EINTR), which the client
+// returns as the same value. The client half (a Tflush answered first returns
+// -P9_E_INTR with the mark kept) is 9p_client.note_flush_rflush_first_cancels and
+// note_flush_direct_note_marks. The control, one variable away, is
+// wb_server_eintr_latches: no mark.
 void test_dev9p_wb_interrupted_flush_keeps_run(void) {
     struct Spoor *root = NULL;
     struct Spoor *f = wb_make_created(&root);
@@ -3696,14 +3697,14 @@ void test_dev9p_wb_interrupted_flush_keeps_run(void) {
     TEST_ASSERT(chunk != NULL, "scratch");
     for (u32 i = 0; i < 512; i++) chunk[i] = wb_pat(i);
     struct Thread *t = current_thread();
-    TEST_ASSERT(t != NULL && t->note_claim == 0, "a test thread holds no claim");
+    TEST_ASSERT(t != NULL && !t->note_call_unwound, "a test thread's call has no mark");
     wb_wire_reset();
     g_twrite_pat_on = true;
     TEST_EXPECT_EQ((u64)dev9p.write(f, chunk, 256, 0), 256ull, "stage");
     g_twrite_fail_ecode = P9_E_INTR;
-    t->note_claim = 1;                  // the claim an unwind would hold
+    t->note_call_unwound = true;        // what an unwind leaves, claim or no claim
     long fe0    = dev9p.fsync(f, 0);
-    t->note_claim = 0;                  // what the EL0-return tail releases
+    t->note_call_unwound = false;       // what the EL0-return tail clears
     u32  seen0  = g_twrite_seen;
     long fe1    = dev9p.fsync(f, 0);
     u32  seen1  = g_twrite_seen;
@@ -3728,10 +3729,12 @@ void test_dev9p_wb_interrupted_flush_keeps_run(void) {
 }
 
 // A server that answers a flush's Twrite with Rlerror(EINTR) has failed the
-// write: with no note claim the EINTR is the server's, not a cancellation, so
-// it latches and drops the run like ENOSPC, and the last close reports it
-// rather than handing the run to a closer and returning 0.
-void test_dev9p_wb_server_eintr_latches(void) {
+// write: with no mark the EINTR is the server's, not a cancellation, so it
+// latches and drops the run like ENOSPC, and the last close reports it rather
+// than handing the run to a closer and returning 0. A claim changes nothing: it
+// is what a thread holds when that answer beats its flush, and client_run has
+// taken the mark back by then.
+static void wb_server_eintr_leg(u32 claim) {
     struct Spoor *root = NULL;
     struct Spoor *f = wb_make_created(&root);
     TEST_ASSERT(f != NULL, "create");
@@ -3739,11 +3742,13 @@ void test_dev9p_wb_server_eintr_latches(void) {
     TEST_ASSERT(chunk != NULL, "scratch");
     for (u32 i = 0; i < 256; i++) chunk[i] = wb_pat(i);
     struct Thread *t = current_thread();
-    TEST_ASSERT(t != NULL && t->note_claim == 0, "no note claim");
+    TEST_ASSERT(t != NULL && !t->note_call_unwound, "no mark");
     wb_wire_reset();
     TEST_EXPECT_EQ((u64)dev9p.write(f, chunk, 256, 0), 256ull, "stage");
     g_twrite_fail_ecode = P9_E_INTR;
+    t->note_claim = (u16)claim;
     long fe0  = dev9p.fsync(f, 0);
+    t->note_claim = 0;
     long fe1  = dev9p.fsync(f, 0);
     u32  seen = g_twrite_seen;
     int  crc  = spoor_clunk_rc(f);
@@ -3755,6 +3760,11 @@ void test_dev9p_wb_server_eintr_latches(void) {
     TEST_EXPECT_EQ((u64)seen, 1ull, "nothing was resent");
     TEST_EXPECT_EQ((u64)seen_close, 1ull, "the close sends nothing: the run was dropped");
     TEST_EXPECT_EQ((u64)(s64)crc, (u64)(s64)-P9_E_INTR, "and the last close reports it");
+}
+
+void test_dev9p_wb_server_eintr_latches(void) {
+    wb_server_eintr_leg(0u);
+    wb_server_eintr_leg(1u);
 }
 
 // A non-append write (the Go buildid interior pwrite) flushes the staged run

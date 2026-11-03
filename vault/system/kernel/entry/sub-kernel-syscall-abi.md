@@ -245,6 +245,17 @@ Measured on this tree: **128** live numbers, the span runs to 138 with holes at 
 differences are empty. `syscall.native_gap_unassigned` counts the eight holes above 128.
 libt has `t_postnote_tid`, libthyla-rs the same name.
 
+**The note table (2026-11-03, operator votes 18 and 20).** `SYS_NOTE_DISPOSE` = 139:
+name pointer, name length, disposition (`NOTE_DISP_DEFAULT` 0, `_IGNORE` 1, `_CAUGHT` 2),
+flags (`NOTE_DISP_RESTART` 1, on a caught row only). A name with no row (`sak`, any
+snare) and `kill` are EINVAL, as is a caught row with no handler and no notes fd. The
+first call governs the Proc until its next exec ([[sub-kernel-notes]]). Linux's 139 is
+`rt_sigreturn`, which `viv_linux_dispatch` intercepts ahead of the table.
+`SYS__NATIVE_TOP` is 140 and `VIV_NATIVE_CEILING` 139. `SYS_WALK_OPEN_OINTR` (0x2000) is
+an omode bit `SYS_OPEN` alone admits, outside `SYS_WALK_OPEN_OMODE_VALID`, and is stripped
+before a Dev sees it. `T_S_IFSOCK` 0140000 is the stat type of a socket's data or listen
+file. `SYS_POLL` admits `nfds` 0. libt and libthyla-rs have `t_note_dispose` and `T_OINTR`. Pouch's `0069` carries `__NR_note_dispose`.
+
 **Merge of main (2026-10-21).** corona/async-memory merged main `cba52ec9f`, so
 the three appends above meet: `SYS_JIT_CREATE_SEALED` = 127,
 `SYS_ICACHE_SYNC_SPACE` = 128, `SYS_SRV_REGISTRY_NEW` = 134; `SYS__NATIVE_TOP`

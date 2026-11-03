@@ -1907,7 +1907,8 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
     // A peer may be in its first sigaction now: NOTIFY, then the row, then the flag.
     // One read of the flag decides the clone and the publication, and the handler is
     // read after it, so a child that takes a row also takes what the row was written
-    // against.
+    // against. A peer's SYS_NOTIFY(0) can still cross this, and then the child's row
+    // has no taker and reads as the default (notes_row_has_taker).
     bool native_fork_notes = parent->phenotype != PHENO_LINUX && fc != NULL;
     bool note_table_crosses =
         native_fork_notes && (__atomic_load_n(&parent->proc_flags, __ATOMIC_ACQUIRE) &
