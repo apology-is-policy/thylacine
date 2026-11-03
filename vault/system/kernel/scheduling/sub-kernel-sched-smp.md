@@ -383,6 +383,11 @@ a half-initialized CPU that reaches the idle loop is worse than no CPU.
   the placement IPI on a bare-volatile flag a peer can read stale-FALSE
   reintroduces up-to-backstop placement latency — the exact class #363
   closed. The comment at the site forbids it in words for this reason.
+- **An idle CPU covers its own timer base and no other.** Every other base
+  has its own CPU ([[sub-kernel-rendez]]). A secondary marks `tick_armed`
+  (`sched_mark_tick_armed`, right after `timer_arm_this_cpu` in `per_cpu_main`);
+  until then its sleepers link on cpu0's base and kick cpu0, so no deadline
+  sits on a base with no tick.
 - **The park's ordering is fixed**: announce, then `sched()`, then the
   re-check loop, then arm, then WFI. Any reordering breaks either the
   register-then-observe or the #363 guard.

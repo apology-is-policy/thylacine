@@ -487,8 +487,8 @@ each thread on its own single-waiter rendez.
 ## Concurrency
 
 Lock order, exhaustively:
-`g_proc_table_lock → p->threads_lock → wait_lock → g_timerwait.lock → r->lock → cs->lock`,
-plus the torpor leg `p->threads_lock → a bucket's lock → g_timerwait → r->lock`
+`g_proc_table_lock → p->threads_lock → wait_lock → a timer base's lock → r->lock → cs->lock`,
+plus the torpor leg `p->threads_lock → a bucket's lock → r->lock`
 ([[lock-proc-threads]], thread-model C3). The exit decision is one hold of the
 thread lock: a non-last thread commits there and takes nothing else; the last
 thread reads the claim, marks the close, drops every lock for the handle close,

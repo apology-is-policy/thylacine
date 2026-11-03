@@ -2030,6 +2030,39 @@ u64 timerwait_earliest_deadline(void) {
     return earliest;
 }
 
+#ifdef KERNEL_TESTS
+unsigned timer_base_walk_for_test(struct Thread **out, unsigned cap,
+                                  struct Thread **tail, u64 *earliest) {
+    irq_state_t s = spin_lock_irqsave(NULL);
+    struct TimerBase *b = timer_base_here();
+    spin_lock(&b->lock);
+    unsigned n = 0;
+    struct Thread *prev = NULL;
+    bool broken = false;
+    for (struct Thread *p = b->head; p; prev = p, p = p->timerwait_next) {
+        if (p->timerwait_prev != prev) broken = true;
+        if (n < cap) out[n] = p;
+        n++;
+    }
+    *tail     = b->tail;
+    *earliest = __atomic_load_n(&b->earliest, __ATOMIC_RELAXED);
+    spin_unlock(&b->lock);
+    spin_unlock_irqrestore(NULL, s);
+    return broken ? ~0u : n;
+}
+
+irq_state_t timer_base_lock_for_test(void) {
+    irq_state_t s = spin_lock_irqsave(NULL);
+    spin_lock(&timer_base_here()->lock);
+    return s;
+}
+
+void timer_base_unlock_for_test(irq_state_t s) {
+    spin_unlock(&timer_base_here()->lock);
+    spin_unlock_irqrestore(NULL, s);
+}
+#endif // KERNEL_TESTS
+
 // P5-tsleep: the wake transition shared by wakeup() and the sched_tick
 // timeout scan. Transitions the SLEEPING waiter t of r to RUNNABLE and
 // readies it. `timed_out` records the cause in t->sleep_timedout for

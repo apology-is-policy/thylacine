@@ -9,7 +9,7 @@ guarded-by: [inv-i9, inv-i8]
 validated-by: [spec-scheduler, spec-tsleep, spec-death-wake, gate-smp]
 locks: [lock-wait, lock-timerwait, lock-rendez]
 created: 2026-08-01
-updated: 2026-10-27
+updated: 2026-11-03
 ---
 ## Purpose
 
@@ -136,7 +136,7 @@ out, so a waiter is never readied off a half-saved context.
 
 **`wait_lock` is the outermost lock and carries the IRQ mask** for the
 entire call, including across the `sched()` yields. It is taken before
-`r->lock` (and before `g_timerwait.lock`) so that the group-terminate
+`r->lock` (and before a timer base's lock) so that the group-terminate
 cascade — which holds a peer's `wait_lock` while it reads
 `rendez_blocked_on` and wakes the rendez — is serialized against this
 thread's register-then-observe. It is emphatically **not** held across
@@ -148,8 +148,8 @@ lock both wakers take per peer. Either this thread registered before the
 waker's walk (so the walk finds and wakes it), or the flag-set
 happens-before this thread's `wait_lock` acquire (so the re-check sees
 it). There is no third interleaving. On a hit it undoes the **full**
-registration — rendez waiter, backref, and in `tsleep` the timer-wait
-link — and returns INTR.
+registration — rendez waiter, backref, and in `tsleep` the timer
+entry — and returns INTR.
 
 The same check repeats on the resume path as the *prompt* path: the
 registered check would catch it on the next iteration anyway, but
@@ -201,27 +201,40 @@ the backref stays valid until it resumes.
 
   Death still wins over a stop at every branch.
 
-**`tsleep`'s third wake source.** A deadlined sleeper is also linked into
-one global list, `g_timerwait`, and registered atomically with the rendez
-under all three locks. `sched_tick` calls `timerwait_tick` on every fire,
-which wakes expired sleepers **one at a time**: each iteration takes
-`g_timerwait.lock`, finds one expired sleeper, unlinks and wakes it under
-both locks, then *releases the global lock* before the next. Each wake is
-still atomic, but a burst of simultaneous timeouts can no longer stall
-every other CPU's tick behind one long hold (the P5-tsleep F6 fix). `now`
-is sampled once so the set this pass wakes is fixed and the loop
+**`tsleep`'s third wake source.** A deadlined sleeper is also linked on
+one CPU's timer base, sorted by deadline, registered atomically with the
+rendez under all three locks ([[dec-2026-11-03-c8b-timer-bases]]).
+`sched_tick` calls `timerwait_tick` on every fire. It reads the base's
+`earliest` with no lock and is usually done. Past that it wakes expired
+sleepers **one at a time**: each iteration takes the base's lock, finds
+one expired entry, takes its `r->lock`, unlinks, wakes on a hit, and drops
+both before the next, so a burst of simultaneous timeouts cannot stall a
+sleeper leaving that base behind one long hold (the P5-tsleep F6 fix).
+`now` is sampled once so the set this pass wakes is fixed and the loop
 terminates.
 
-`timerwait_tick` **pre-filters on `on_cpu`**: a mid-switch sleeper is
-skipped and caught by a later tick, so the wake never spins inside the
-timer IRQ handler.
+`timerwait_tick` **filters on `on_cpu`**: an expired entry whose owner
+runs elsewhere, or a secondary's sleeper still switching out on cpu0's
+base, is skipped and met by a later tick, so the wake never spins inside
+the timer IRQ handler.
 
-**`wakeup`'s lock order.** It takes `g_timerwait.lock` as the *outer*
-lock even for a plain `sleep` waiter that is never on the list, because
-it cannot know whether the waiter is deadlined until it holds `r->lock` —
-by which point taking the global lock would invert the order. It releases
-the global lock the moment the unlink is done, so the `on_cpu` spin and
-the `ready()` run under `r->lock` alone.
+**A wake takes no timer lock.** `wakeup` and the death and note wakers
+take `r->lock` alone, so a wake leaves its sleeper's entry on the base,
+and the sleeper unlinks it on its way out of `tsleep`, in
+`timer_base_leave`, before it clears `rendez_blocked_on`. That is what
+keeps an entry's `r` valid under the base's lock: the owner cannot leave
+`tsleep`, and so cannot end `r`'s life, without passing through that lock
+or `r->lock`. An owner that reads its mark clear skips the base's lock
+and takes `r->lock` next, which is why the tick unlinks under `r->lock`
+and not before it. A stale entry is harmless: the tick takes it off and
+wakes nothing, since it re-checks SLEEPING and `r->waiter` there.
+
+**Which base.** A sleeper links on the CPU it runs on, with IRQs masked
+until it has switched out, so its own base's tick cannot find it
+mid-switch. A secondary whose tick is not armed yet (`tick_armed`, the
+deterministic test phase and the moment after it) links on cpu0's and
+kicks cpu0. `b` is re-picked after every migration point: the stop park
+and `sched()`.
 
 ## Data structures
 
@@ -229,33 +242,32 @@ the `ready()` run under `r->lock` alone.
 statically initializable (`RENDEZ_INIT`) or `rendez_init`'d, embedded
 freely in other objects.
 
-`g_timerwait { lock; head }` — one global doubly-linked list of deadlined
-sleepers, threaded through `Thread.timerwait_next/prev`. One lock, not
-per-CPU: deadlined waits are the cold path, the scan is O(timed
-sleepers), and the global lock is what [[spec-tsleep]] verifies.
-`timerwait_is_linked` uses the same three-way test as the run tree,
-because a sole element has both links NULL.
+`struct TimerBase { lock; head; tail; earliest }`, cache-line aligned, one
+per CPU in `g_timer_base[]`: a doubly-linked list of deadlined sleepers
+sorted by deadline, threaded through `Thread.timerwait_next/prev`.
+Insertion walks from the tail, since a program's waits tend to share a
+timeout, and goes after equal deadlines, so they expire in the order they
+slept. `earliest` is the head's deadline, 0 when empty. `Thread.timer_base_cpu`
+is the CPU + 1 while linked, 0 otherwise.
 
 Thread fields owned here: `rendez_blocked_on`, `sleep_deadline`,
-`sleep_timedout`, `timerwait_next/prev`, `wait_lock`, `debug_rendez`,
+`sleep_timedout`, `timer_base_cpu`, `timerwait_next/prev`, `wait_lock`, `debug_rendez`,
 `stop_no_park`, `stop_unwinds`, `stop_unwound`.
 
 ## Concurrency
 
 The full chain, outermost first:
 
-    lock-proc-table -> wait_lock -> g_timerwait.lock -> r->lock -> cs->lock
+    lock-proc-table -> wait_lock -> a timer base's lock -> r->lock -> cs->lock
 
-Every one of those edges is taken in that order at every site, and the
-reverse of the middle edge (`r->lock` then `g_timerwait.lock`) is exactly
-what `wakeup`'s outer acquire exists to avoid.
+Every one of those edges is taken in that order at every site. The tick
+enters at the base's lock and a wake at `r->lock`; at most one base's lock
+is held at a time.
 
-`timerwait_earliest_deadline` — read by the tickless idle path — is a
-**leaf** acquisition of `g_timerwait.lock` alone, irqsave because the
-timer IRQ's `timerwait_tick` takes the same lock and an IRQ landing
-mid-hold would self-deadlock. Unlike `timerwait_tick` it does *not*
-filter `on_cpu`: it reads deadlines and wakes nothing, and a mid-switch
-sleeper's near deadline still needs covering.
+`timerwait_earliest_deadline` — read by the tickless idle path — is one
+load of this CPU's `earliest`, with no lock. It covers this CPU's base
+only: every other base has its own CPU to expire it. A stale entry at the
+head costs one early wake.
 
 ## Invariants enforced
 
@@ -277,7 +289,9 @@ sleeper's near deadline still needs covering.
 | a second sleeper on one Rendez | the registration guard |
 | current is not RUNNING | the registration guard |
 | current already blocked on a rendez | the registration guard |
-| already on the timer-wait list | `tsleep` only |
+| already on a timer base | `tsleep` only |
+| leaving with a timer entry | `tsleep`'s exit |
+| a timer entry with no rendez | `timerwait_tick` |
 | waker sees a corrupted waiter, a non-SLEEPING waiter, or a backref mismatch | `wakeup` |
 
 The three `wakeup` checks are worth reading as a set: they assert the
@@ -289,10 +303,12 @@ state has been corrupted by someone else.
 
 - `sleep`'s fast path (condition already true) takes two locks and
   returns without any state transition.
-- `timerwait_tick`'s rescan-from-head is O(n²) in the per-tick herd size.
-  Bounded and cheap for a cold path; per-CPU sharding would make it O(n)
-  and is an optimization, not a correctness need.
-- `wakeup` holds the global timer lock for exactly one unlink.
+- The ordinary tick and an idle CPU's arm read one word and take no lock.
+- `wakeup` takes `r->lock` alone, so a wake contends with nothing but that
+  one Rendez, and a plain `sleep` waiter costs no timer work at all.
+- A link is O(this CPU's timed sleepers with a later deadline), usually
+  none. A tick's pass past `earliest` rescans from the head per wake, O(n)
+  in the expired herd, skipping only `on_cpu` entries.
 
 ## Prosecution
 
@@ -307,11 +323,10 @@ state has been corrupted by someone else.
 - **`wake_rendez_waiter` must not clear `rendez_blocked_on`.** Clearing
   it there races the cascade's read (#811).
 - **The register-then-observe must undo the FULL registration.** In
-  `tsleep` that means the timer-wait link as well as the rendez waiter;
-  leaving the link behind strands an entry the tick will later wake into
-  a thread that is no longer sleeping.
+  `tsleep` that means the timer entry as well as the rendez waiter;
+  leaving the entry behind trips the extinction at `tsleep`'s exit.
 - **The detour ordering is fixed**: death check precedes the stop check,
-  the stop detour precedes `timerwait_link`, and the detour is gated
+  the stop detour precedes `timer_base_link`, and the detour is gated
   against its own rendez. A stop-parked `tsleep` re-registers with its
   *original* deadline on resume, and a deadline that lapsed while stopped
   correctly reports TIMEDOUT — wall-clock advances while a thread is
@@ -321,8 +336,13 @@ state has been corrupted by someone else.
   may unwind at any byte because the client keeps the partial frame
   ([[spec-reader-frame]]); a guard put back on one path is the superseded
   block-through, and `rendez.reader_recv_unwinds_*` turn RED on it.
-- **`timerwait_tick`'s `on_cpu` pre-filter stays.** Removing it puts an
+- **`timerwait_tick`'s `on_cpu` filter stays.** Removing it puts an
   unbounded spin inside a timer IRQ handler.
+- **`timer_base_leave` precedes the clear of `rendez_blocked_on`, and the
+  tick's unlink stays under `r->lock`.** Each order is what a
+  [[spec-tsleep]] buggy cfg breaks.
+- **A wake must not grow a timer lock.** `timerbase.wake_takes_no_timer_lock`
+  hangs on one.
 - **Single-waiter is enforced, not assumed.** Any new caller that could
   see two threads on one Rendez needs a `poll_waiter_list`, not a second
   sleeper — the extinction is an unprivileged panic if it is reachable
@@ -337,7 +357,7 @@ state has been corrupted by someone else.
 
 ## Seams
 
-- [[seam-timerwait-sharding]] — the one global timer-wait lock.
+- [[seam-timerwait-sharding]] — closed: the per-CPU bases.
 
 ## Caveats
 

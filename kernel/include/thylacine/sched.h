@@ -21,6 +21,7 @@
 #ifndef THYLACINE_SCHED_H
 #define THYLACINE_SCHED_H
 
+#include <thylacine/spinlock.h>
 #include <thylacine/types.h>
 
 struct Thread;
@@ -132,6 +133,14 @@ bool sched_idle_in_wfi(unsigned cpu_idx);
 // min(this, now + TICKLESS_IDLE_BACKSTOP) before WFI so a genuinely-idle CPU
 // takes no 1 kHz ticks yet still wakes for the next real deadline. One load.
 u64 timerwait_earliest_deadline(void);
+
+// The base a sleeper on this CPU would link on: head to tail into out (at most cap),
+// its stored tail and earliest. The count, or ~0u on a broken back link.
+unsigned timer_base_walk_for_test(struct Thread **out, unsigned cap,
+                                  struct Thread **tail, u64 *earliest);
+// That base's lock, IRQs masked, for a test that must show a path does not take it.
+irq_state_t timer_base_lock_for_test(void);
+void timer_base_unlock_for_test(irq_state_t s);
 #endif // KERNEL_TESTS
 
 // Tickless idle re-poll backstop (NO_HZ_IDLE; docs/TICKLESS-IDLE.md TI-4e, #299).

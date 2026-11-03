@@ -4,7 +4,7 @@ type: lock
 title: "A torpor bucket's lock"
 kind: spin (non-irqsave)
 guards: "one bucket's chain, its waiters' links, and every waker's write of their awoken"
-orders-before: [lock-timerwait, lock-rendez]
+orders-before: [lock-rendez]
 created: 2026-08-01
 updated: 2026-11-03
 ---
