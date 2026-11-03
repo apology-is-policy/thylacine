@@ -3002,7 +3002,7 @@ fn poisoned_ctx(root: i64, nop: &[u8]) -> u32 {
 
 /// Hold a poisoned slot for `argv[2]` seconds, then let it heal and say so.
 /// Nothing here judges the retirement a second client makes meanwhile.
-fn poison_hold() -> i32 {
+fn poison_hold() -> i64 {
     let secs: u64 = libthyla_rs::env::args()
         .get_str(2)
         .and_then(|s| s.parse().ok())
