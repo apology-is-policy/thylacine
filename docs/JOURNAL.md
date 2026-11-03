@@ -59,6 +59,12 @@ Also found on the way: native `SYS_POLL` refused zero fds, so the plan's `pause(
 
 The errno underneath is older and still open: every failure of a 9P walk reads ENOENT, so a Stratum integrity EIO on a lookup says the file is absent. It has been in OPEN-BUGS since 09-29 and I enqueued it a second time before reading the queue. I rate it P2 now. It needs `docs/ERRORS.md`'s ER-2 scope, so it is the operator's to sign off.
 
+**The walk errno, written while the Mac was corona's, 15:50Z to 16:18Z, on `aux-3-walkerr`, not booted.** Vote 23 put the walk into ER-2. I had said an out-param on the vtable and changed my mind: only dev9p has a reason, and an out-param touches every Dev and about 115 test call sites. It is a per-thread slot read through `dev_walk`, and a caller that skips the wrapper keeps today's miss, which fails safe. `6a4a276c9`.
+
+Fable's round was reading that commit when my own read of the same surface found the reason being thrown away after the resolver had it: execve answered ENOENT for everything, `SYS_SPAWN_FULL_ARGV` a flat -1 that Pouch turned into ENOENT, and a Linux chdir mapped every failure to ENOENT on a comment saying the native handler collapses to -1. That comment was stale: the handler has answered real errnos since the spawn cwd chunk, so ENOTDIR and EACCES had been reading ENOENT for a Linux guest with no walk failure in sight. Writing the sabotage list then showed one I could not turn red: nothing covered a union member's ENOENT hiding a later member's EIO. `f4495467b`.
+
+Round 1 came back 0/0/1/4 at 16:06Z or so. The P2 is the one to remember: I had written `union_walk_failure` so that a union member who could not answer would not read as absent, and then let a failed cross and a failed X-stat stay silent skips, two lines above it. So a union with a dead member still read ENOENT and open-or-create still created the file, which is exactly what the chunk exists to stop, in the one place it added code for it. The reviewer named the tree's own precedent, four hundred lines up the same file. `10e66bef7`. None of it has run; round 2 is owed on all of it, and the userspace that reads ENOENT as absence on a 9P mount is the shape to watch at the first boot.
+
 ## 2026-11-02 (aux, Opus 5.5 1M) -- SIGUSR1 and SIGUSR2 become notes, and every family word outgrows its byte
 
 **Decisions that were the operator's:** vote 15 of project_aux_votes_1021: a separate chunk straight after C4, on bits 8 and 9, which is also the signoff for `docs/ERRORS.md`.
