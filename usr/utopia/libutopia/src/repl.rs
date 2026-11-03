@@ -58,7 +58,7 @@ use libthyla_rs::t_putstr;
 use crate::ansi;
 use crate::completion::ShellCompletionSource;
 use crate::eval::{builtin, deliver_pending_notes, eval_source, Env, Value};
-use crate::line_editor::{EditorAction, LineEditor};
+use crate::line_editor::{EditorAction, LineEditor, PasteRefused};
 use crate::palette::{PromptRoles, Role};
 
 /// H-1c: render an exit code decimal into a stack buffer (no_std, no alloc
@@ -114,6 +114,11 @@ pub struct Repl {
     /// tier per prompt -- a renderer swap resets the kernel tier, and a
     /// stale `/env/BEACON` would defeat that reset for every child.
     prompt_cycles: u64,
+    /// The paste key was pressed in the edit in progress. The binary owns the ring.
+    paste_wanted: bool,
+    /// Moves when an edit ends (accept, cancel, an interrupt). A paste asked for in
+    /// one edit must never land in another.
+    edit: u64,
     /// #115a: the cached `/bin` external-command scan (the #58 exec namespace,
     /// static for the session). Merged with the live builtins / aliases / funcs
     /// to form the Tab-completion command index. Empty until `install_completion`.
@@ -164,6 +169,8 @@ impl Repl {
             env,
             editor: LineEditor::new(),
             prompt_cycles: 0,
+            paste_wanted: false,
+            edit: 0,
             bin_commands: Vec::new(),
             completion_installed: false,
             history_path: None,
@@ -696,6 +703,46 @@ impl Repl {
         self.prompt_cycles
     }
 
+    fn end_edit(&mut self) {
+        self.edit = self.edit.wrapping_add(1);
+        self.paste_wanted = false;
+    }
+
+    /// Whether the paste key was pressed since the last ask, and is still wanted.
+    pub fn take_paste_wanted(&mut self) -> bool {
+        core::mem::take(&mut self.paste_wanted)
+    }
+
+    /// Which edit is in progress: unchanged means the prompt is the one the user
+    /// asked from.
+    pub fn edit(&self) -> u64 {
+        self.edit
+    }
+
+    /// Fetched clipboard bytes, into the edit in progress, or a refusal above it.
+    pub fn paste(&mut self, bytes: &[u8], out: &mut dyn IoWrite) {
+        let refused = match core::str::from_utf8(bytes) {
+            Ok(text) => self.editor.paste_text(text).err(),
+            Err(_) => Some(PasteRefused::Unprintable),
+        };
+        match refused {
+            None => self.emit_prompt(out),
+            Some(PasteRefused::TooLong) => self.notice("clipboard: too long for this line, nothing pasted", out),
+            Some(PasteRefused::Unprintable) => self.notice("clipboard: a tab or control character, nothing pasted", out),
+        }
+    }
+
+    /// One line above the prompt, for a refusal the user is owed.
+    pub fn notice(&mut self, line: &str, out: &mut dyn IoWrite) {
+        let clear = self.editor.clear_menu();
+        let _ = out.write_all(clear.as_bytes());
+        let _ = out.write_all(b"\r\n");
+        let _ = out.write_all(line.as_bytes());
+        let _ = out.write_all(b"\r\n");
+        self.editor.reset_render_position();
+        self.emit_prompt(out);
+    }
+
     /// Emit the current prompt + buffer to `out`. Call once before the first
     /// `feed` to draw the initial prompt.
     pub fn draw_prompt(&mut self, out: &mut dyn IoWrite) {
@@ -814,7 +861,12 @@ impl Repl {
                 EditorAction::Redraw => {
                     self.emit_prompt(out);
                 }
+                EditorAction::PasteWanted => {
+                    self.paste_wanted = true;
+                    self.emit_prompt(out);
+                }
                 EditorAction::Accept(line) => {
+                    self.end_edit();
                     // The user pressed Enter; move the terminal past the
                     // edited line before any eval output or the next prompt.
                     let _ = out.write_all(b"\r\n");
@@ -885,6 +937,7 @@ impl Repl {
                 EditorAction::Cancel => {
                     // Ctrl-C: discard the edit, fresh prompt. The editor has
                     // already reset its buffer.
+                    self.end_edit();
                     let _ = out.write_all(b"\r\n");
                     self.emit_prompt(out);
                 }
@@ -1121,6 +1174,7 @@ impl Repl {
         }
         let interrupted = crate::eval::stmt::dispatch_notes(&mut self.env, &notes);
         if interrupted {
+            self.end_edit();
             self.editor.reset();
         }
         // The leading `\r\n` + any notification moved the cursor to a fresh

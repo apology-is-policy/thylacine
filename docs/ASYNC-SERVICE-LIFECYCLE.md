@@ -408,6 +408,10 @@ The client's rules, each from a rule above it:
   which stays local. It carries no content: ut fetches the clipboard over its own
   private ring, so no clipboard byte crosses the pts and a forged key grants nothing,
   because the server still admits. A paste over the line's 64 KiB limit refuses whole,
-  visibly. HI-3 makes transcript NOR's Space p send the same key.
+  visibly. HI-3 makes transcript NOR's Space p send the same key. The key is Alt-P. One
+  ring per paste, since a shell sits at its prompt for days and cannot pump while a
+  foreground command runs. A tab or control character also refuses whole: the line
+  echoes as it is and counts one column per character. Written and host-tested, the
+  fixture half in `ls-ut-paste`; not yet booted, and the real session's half is owed.
 - AS-4f: the rest of AS-4's list: paste after edit, tab, focus and session change;
   the unknown commit; several sessions; rendering and input latency; logout.

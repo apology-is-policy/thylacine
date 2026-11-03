@@ -688,6 +688,7 @@ Approximate scope: 1500-2500 LOC across the following capabilities:
 - Raw-mode terminal handling: `termios`-equivalent via `/dev/consctl` writes (see `ARCHITECTURE.md §23.5`).
 - Display: glyph + cursor management within a single line, with prompt-length tracking that accounts for ANSI escapes (`palette` helpers register zero-width markers).
 - Editing: standard cursor motion (Ctrl-A, Ctrl-E, Ctrl-B, Ctrl-F, Alt-B, Alt-F), kill/yank (Ctrl-K, Ctrl-U, Ctrl-W, Ctrl-Y), insert/delete (backspace, delete), single-character commands.
+- Clipboard: Alt-P fetches the session clipboard into the line at the cursor, over ut's own private ring, so no clipboard byte crosses the terminal and nothing submits. It refuses whole, and says so, past the line's 64 KiB limit or on a tab or control character, which the line cannot show. Ctrl-Y stays the local kill buffer. Enter or Ctrl-C ends a fetch still out, so a paste asked for in one edit never lands in another.
 - Multi-line input: continuation when brackets/quotes unbalanced; per-line cursor tracking; continuation glyph from `UTOPIA-VISUAL.md §3.2`.
 - History: up/down arrows walk history; Ctrl-R initiates incremental search.
 - Tab completion: pluggable completion source (the shell provides paths, command names, fn names, env vars, capability names).

@@ -20,19 +20,19 @@ use libthyla_rs::{
     *,
 };
 
-type Result<T = ()> = core::result::Result<T, &'static str>;
+pub(crate) type Result<T = ()> = core::result::Result<T, &'static str>;
 
 const EOPNOTSUPP: i32 = -95;
 const MS: u64 = 1_000_000;
-const DRAIN_STACK: u64 = 64 * 1024;
+pub(crate) const DRAIN_STACK: u64 = 64 * 1024;
 const RAW: &[u8] = b"-icanon -echo -isig -icrnl -onlcr";
 /// What the client's deadline would release. A wait on it is what this must catch, so
 /// whatever must not wait for it gets half of it.
-const PROMPTLY_MS: u64 = IDLE_MS as u64 / 2;
-const ROOM_MS: u64 = IDLE_MS as u64 * 2;
+pub(crate) const PROMPTLY_MS: u64 = IDLE_MS as u64 / 2;
+pub(crate) const ROOM_MS: u64 = IDLE_MS as u64 * 2;
 /// Longer than the keyboard source's hold on a lone Escape.
 const ESC_SETTLE_MS: u64 = 200;
-const TICK_MS: u64 = 20;
+pub(crate) const TICK_MS: u64 = 20;
 const FILE_TICK_MS: u64 = 100;
 
 // A word of a status line, without its spaces: the screen is painted by difference, and
@@ -71,11 +71,11 @@ extern "C" fn drain(arg: u64) {
     unsafe { t_thread_exit() }
 }
 
-fn pause(ms: u64) -> Result {
+pub(crate) fn pause(ms: u64) -> Result {
     sleep(Duration::from_millis(ms)).map_err(|_| "sleep")
 }
 
-fn after(ms: u64) -> u64 {
+pub(crate) fn after(ms: u64) -> u64 {
     monotonic_ns().saturating_add(ms * MS)
 }
 
@@ -83,7 +83,7 @@ fn holds(text: &[u8], word: &[u8]) -> usize {
     text.windows(word.len()).filter(|w| *w == word).count()
 }
 
-struct Fixture {
+pub(crate) struct Fixture {
     child: Child,
     control: File,
     notify: File,
@@ -91,7 +91,7 @@ struct Fixture {
 }
 
 impl Fixture {
-    fn start() -> Result<Self> {
+    pub(crate) fn start() -> Result<Self> {
         let (control_end, control) = pipe().map_err(|_| "the control pipe")?;
         let (notify, notify_end) = pipe().map_err(|_| "the notify pipe")?;
         let mut command = Command::new("/bin/loom-fixture");
@@ -110,7 +110,7 @@ impl Fixture {
         Ok(fixture)
     }
 
-    fn ask(&mut self, byte: u8) -> Result {
+    pub(crate) fn ask(&mut self, byte: u8) -> Result {
         self.control
             .write_all(&[byte])
             .map_err(|_| "ask the fixture")
@@ -146,7 +146,7 @@ impl Fixture {
         }
     }
 
-    fn wait(&mut self, byte: u8, patience_ms: u64, why: &'static str) -> Result {
+    pub(crate) fn wait(&mut self, byte: u8, patience_ms: u64, why: &'static str) -> Result {
         let limit = after(patience_ms);
         while !self.take(byte) {
             if monotonic_ns() >= limit {
@@ -164,13 +164,13 @@ impl Fixture {
     }
 
     /// No session left, with whoever had one gone.
-    fn no_sessions(&mut self) -> Result {
+    pub(crate) fn no_sessions(&mut self) -> Result {
         self.ask(b'Q')?;
         self.wait(b'Z', PROMPTLY_MS, "a session outlived its editor")
     }
 
     /// With no session, the fixture answers 76.
-    fn finish_unused(self) -> Result {
+    pub(crate) fn finish_unused(self) -> Result {
         let Self {
             mut child, control, ..
         } = self;
@@ -180,7 +180,7 @@ impl Fixture {
     }
 
     /// 77 is every session ended and no violation.
-    fn finish(self) -> Result {
+    pub(crate) fn finish(self) -> Result {
         let Self {
             mut child, control, ..
         } = self;

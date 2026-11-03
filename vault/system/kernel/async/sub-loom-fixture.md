@@ -131,7 +131,7 @@ empties whether or not the ask was read first.
 clipboard, so that a real client can run against a server that can be stopped. The
 session's own service cannot be: typing goes through it. With `--srv` the fixture posts
 in /srv itself. It opens /srv because a walk-only handle does not transfer, and it posts
-only `fixture` and `hold-copy`, because a registry holds sixteen services. `hold-copy`
+only `fixture`, `hold-copy` and `hold-paste`, because a registry holds sixteen services. `hold-paste` stops the same way at a paste's first request, for `kaua-term-probe --ut-paste`. `hold-copy`
 takes a copy's first write, and from the read for that write's reply it answers nothing
 more on that connection, whichever fid asks, so the session ends only when the client
 ends it. An 'H' on the control pipe asks for an 'h' on the notify pipe at the next such

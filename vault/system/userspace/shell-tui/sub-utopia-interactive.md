@@ -6,6 +6,7 @@ parent: moc-userspace-shell-tui
 code:
   - usr/utopia/libutopia/src/line_editor.rs
   - usr/utopia/libutopia/src/repl.rs
+  - usr/utopia/shell/src/clip_host.rs
   - usr/utopia/libutopia/src/completion.rs
   - usr/utopia/libutopia/src/palette.rs
   - usr/utopia/libutopia/src/ansi.rs
@@ -21,7 +22,7 @@ hazards: []
 abis: []
 design: []
 created: 2026-08-03
-updated: 2026-09-25
+updated: 2026-11-03
 area: userspace
 ---
 ## Graphical elevation banner
@@ -128,7 +129,7 @@ from discarding bytes intended for the trusted corvus episode.
 
 
 **The byte pipeline.** `ParserState` is a four-state machine — `Ground`, `Escape`,
-`Csi`, `Utf8`. Ground maps C0 controls to emacs bindings (`Ctrl-A/E/B/F/K/U/W/Y/D`,
+`Csi`, `Utf8`. Alt-P (`ESC p`) yields `EditorAction::PasteWanted`; it changes nothing and holds no clipboard (AS-4e, vote 52). `Repl` keeps the wish and an edit counter, and `usr/utopia/shell/src/clip_host.rs` opens one private ring per paste, reads `HALCYON_INTERACTION` then, and drops the ring when the answer comes or the edit ends. `LineEditor::paste_text` lands text at the cursor whole or not at all: past `MAX_BUFFER_LEN`, or with a tab or control character (`render` echoes the buffer as it is), it refuses and `Repl::notice` says so above the prompt. A line feed stays in the buffer and nothing submits. Witness: `ls-ut-paste`, written and not yet booted. Ground maps C0 controls to emacs bindings (`Ctrl-A/E/B/F/K/U/W/Y/D`,
 `Ctrl-C`, `Ctrl-L`, `Ctrl-R`, Tab) and enters `Escape` on ESC or `Utf8` on a
 multi-byte leading byte. CSI collects up to four numeric parameters and dispatches
 on the final byte (arrows, Home/End, Delete via `CSI 3~`). A stray ESC aborts to
@@ -570,7 +571,7 @@ not.
   width-budget middle-ellipsis truncation are unbuilt.
 - **Multi-line history entries are not persisted** — an embedded newline would
   split into separate entries on reload, so such lines are skipped.
-- **vi mode, bracketed paste, and modifier-key recognition** (Ctrl-arrow, Alt-x)
+- **vi mode, bracketed paste, and modifier-key recognition** (Ctrl-arrow, Alt-x other than Alt-P)
   are unbuilt.
 
 ## Caveats

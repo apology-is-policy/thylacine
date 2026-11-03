@@ -46,6 +46,7 @@
 // copy's first write, and from the read for its reply on it answers nothing more on
 // that connection, whichever fid asks, until the client ends the session. An 'H' on
 // the control pipe asks for an 'h' on the notify pipe at the next such stop.
+// `hold-paste` stops the same way at a paste's first request (AS-4e, --ut-paste).
 //
 // Exit 76: no session was accepted (the default image). 77: at least one
 // session, every one ended, no violation. 1: a violation or a setup failure.
@@ -137,6 +138,7 @@ enum Fault {
 }
 
 const HOLD_COPY: &[u8] = b"hold-copy";
+const HOLD_PASTE: &[u8] = b"hold-paste";
 const HOSTILE: [(&[u8], u8, Fault); 12] = [
     (b"hold-version", p9::P9_TVERSION, Fault::Hold),
     (b"hold-attach", p9::P9_TATTACH, Fault::Hold),
@@ -231,6 +233,7 @@ struct Conn {
     // The message type and the fault still to come.
     fault: Option<(u8, Fault)>,
     holds_copy: bool,
+    holds_paste: bool,
     stopped: bool,
 }
 
@@ -249,6 +252,7 @@ struct Listener {
     fd: i64,
     fault: Option<(u8, Fault)>,
     holds_copy: bool,
+    holds_paste: bool,
 }
 
 enum Reply {
@@ -552,7 +556,7 @@ impl Server {
             INTERACTION if f.held => {
                 self.count[STALLED] += 1;
                 c.stopped = true;
-                say("stopped with a copy's write unanswered");
+                say("stopped with a request unanswered");
                 if self.hold_asked {
                     self.hold_asked = false;
                     if unsafe { t_write(NOTIFY, b"h".as_ptr(), 1) } != 1 {
@@ -629,7 +633,7 @@ impl Server {
         data: &[u8],
         tag: u16,
     ) -> Reply {
-        let holds_copy = c.holds_copy;
+        let (holds_copy, holds_paste) = (c.holds_copy, c.holds_paste);
         let Some(f) = c.fids.get_mut(&fid) else { return Reply::Fatal };
         if offset == 0 {
             f.record.clear();
@@ -643,7 +647,7 @@ impl Server {
                 return self.refuse(tag, p9::E_INVAL, "a malformed HIN1 header");
             };
             if f.record.len() == h.length {
-                let Some((reply, held)) = self.interaction(holds_copy, &f.record) else {
+                let Some((reply, held)) = self.interaction(holds_copy, holds_paste, &f.record) else {
                     return self.refuse(tag, p9::E_INVAL, "a malformed HIN1 record");
                 };
                 f.reply = reply;
@@ -653,7 +657,7 @@ impl Server {
         Self::built(p9::build_rwrite(&mut self.out, tag, data.len() as u32))
     }
 
-    fn interaction(&mut self, holds_copy: bool, record: &[u8]) -> Option<(Vec<u8>, bool)> {
+    fn interaction(&mut self, holds_copy: bool, holds_paste: bool, record: &[u8]) -> Option<(Vec<u8>, bool)> {
         const GET: u64 = 1;
         const COPY: u64 = 2;
         let (id, request) = Request::decode(record).ok()?;
@@ -662,11 +666,14 @@ impl Server {
             Request::Hello => Response::Hello { session: 1 },
             Request::Bind { .. } => Response::Bound { controller: 1 },
             Request::Mode { .. } => Response::Mode,
-            Request::Get { .. } => Response::Clipboard {
-                transfer: GET,
-                generation: self.generation,
-                length: self.clipboard.len() as u32,
-            },
+            Request::Get { .. } => {
+                held = holds_paste;
+                Response::Clipboard {
+                    transfer: GET,
+                    generation: self.generation,
+                    length: self.clipboard.len() as u32,
+                }
+            }
             Request::Read { offset, count, .. } => {
                 let from = (offset as usize).min(self.clipboard.len());
                 let to = from.saturating_add(count as usize).min(self.clipboard.len());
@@ -786,16 +793,18 @@ fn run() -> i64 {
     };
     let mut listeners: Vec<Listener> = Vec::with_capacity(1 + HOSTILE.len());
     let Some(fd) = post(registry, NAME) else { return 1 };
-    listeners.push(Listener { fd, fault: None, holds_copy: false });
+    listeners.push(Listener { fd, fault: None, holds_copy: false, holds_paste: false });
     // Held open and never polled for accept, so a CONNECT waits in the backlog.
     let mut unaccepted = Vec::new();
     if in_session {
         let Some(fd) = post(registry, HOLD_COPY) else { return 1 };
-        listeners.push(Listener { fd, fault: None, holds_copy: true });
+        listeners.push(Listener { fd, fault: None, holds_copy: true, holds_paste: false });
+        let Some(fd) = post(registry, HOLD_PASTE) else { return 1 };
+        listeners.push(Listener { fd, fault: None, holds_copy: false, holds_paste: true });
     } else {
         for (name, mtype, fault) in HOSTILE.iter() {
             let Some(fd) = post(registry, name) else { return 1 };
-            listeners.push(Listener { fd, fault: Some((*mtype, *fault)), holds_copy: false });
+            listeners.push(Listener { fd, fault: Some((*mtype, *fault)), holds_copy: false, holds_paste: false });
         }
         for name in UNACCEPTED.iter() {
             let Some(fd) = post(registry, name) else { return 1 };
@@ -915,6 +924,7 @@ fn run() -> i64 {
                     stalled: Vec::new(),
                     fault: l.fault,
                     holds_copy: l.holds_copy,
+                    holds_paste: l.holds_paste,
                     stopped: false,
                 });
             } else if fds[i].revents != 0 {
