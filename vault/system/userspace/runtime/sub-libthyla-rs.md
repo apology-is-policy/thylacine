@@ -55,7 +55,8 @@ updated: 2026-10-29
 
 `ServiceWorker<S>` owns shared state, four nonblocking pipe FDs and a 128-KiB
 stack plus 4-KiB guard. Its child borrows those allocations until kernel clear-tid
-join. Setup and explicit shutdown have five-second bounds; ambiguous join
+join. Setup waits five seconds past the worker's last notice, and explicit shutdown
+has a five-second bound; ambiguous join
 retains storage until Proc exit rather than freeing live memory. Drop emits no
 ordinary console write, which could park during SAK. Pipe bytes are coalesced
 wake hints; durable caller state and stop/status atomics carry meaning. Reads

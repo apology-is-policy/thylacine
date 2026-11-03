@@ -206,11 +206,16 @@ undeclared, and count a skip on what is undeclared and absent
 ([[sub-substrate-kernel-suite]]); `tools/test.sh` mirrors the same rules from
 its own environment ([[sub-substrate-gates]]). Every other token is appended
 before the walk, so a userspace reader with a short buffer (aurora and
-debug-probe read 256 bytes) still finds its own word where it was. One of
-those is a test lever: `THYLACINE_TEST_LATCH_DEAD=1` appends
+debug-probe read 256 bytes) still finds its own word where it was. Three of
+those are test levers. `THYLACINE_TEST_LATCH_DEAD=1` appends
 `thylacine.test-latch-dead`, which a test-mode tapestryd reads to arm the GPU
 broker's dead-engine latch ([[sub-lictor]]; the gate is
-`tools/interactive/ls-gpu-dead.exp`).
+`tools/interactive/ls-gpu-dead.exp`). `THYLACINE_TEST_SEAT_START=1` appends
+`thylacine.test-seat-start`, which holds a test-mode halcyond at each window of
+session start a chord can land in and has tapestryd refuse the first Reserve
+(`tools/interactive/ls-graphical-sak-start.exp`). `THYLACINE_TEST_SEAT_UNREAD=1` appends
+`thylacine.test-seat-unread`, which fails the same owner with its first Join unread
+(`tools/interactive/ls-graphical-sak-unread.exp`).
 
 ## Data structures
 

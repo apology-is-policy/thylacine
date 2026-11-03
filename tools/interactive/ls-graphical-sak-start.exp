@@ -96,18 +96,17 @@ step "halcyond: seat link joined after a lost first join" "the first Join lost t
 step "halcyond: seat start held after-join" "the lever held bring-up after the Join" 15
 episode after-join
 # Two threads print these, and nothing orders the re-Join against the setup's end.
+# One regex, so the earliest in the buffer wins: separate patterns are tried in the
+# order listed, and a match on a later line would discard an earlier one unread.
 set timeout 30
 set after_join {}
 expect {
-    -ex "halcyond: seat link rejoined" {
-        lappend after_join rejoined
+    -re {halcyond: (seat link rejoined|inline-media service /srv/halcyon-|inline-media service unavailable)} {
+        set line $expect_out(1,string)
+        if {[string match "*unavailable" $line]} { lc_fail "after-join: the session lost its service to a chord" }
+        if {$line ni $after_join} { lappend after_join $line }
         if {[llength $after_join] < 2} { exp_continue }
     }
-    -ex "halcyond: inline-media service /srv/halcyon-" {
-        lappend after_join service
-        if {[llength $after_join] < 2} { exp_continue }
-    }
-    -ex "inline-media service unavailable" { lc_fail "after-join: the session lost its service to a chord" }
     -re {login: session ended \(code [1-9]} { lc_fail "after-join: the session ended under a chord" }
     -re {EXTINCTION:} { lc_extinction_fail "after-join" }
     timeout { lc_fail "after-join: saw only {$after_join} of the re-Join and the service" }

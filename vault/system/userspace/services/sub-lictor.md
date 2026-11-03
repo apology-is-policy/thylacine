@@ -42,6 +42,9 @@ code:
   - tools/interactive/ls-graphical-sak-recover.exp
   - tools/interactive/ls-graphical-sak-dead.exp
   - tools/interactive/ls-graphical-sak-soak.exp
+  - tools/interactive/ls-graphical-sak-start.exp
+  - tools/interactive/ls-graphical-sak-refused.exp
+  - tools/interactive/ls-graphical-sak-unread.exp
   - usr/lictor/src/rpc_client.rs
   - usr/lictor/src/skein.rs
   - usr/lictor/src/wire.rs
@@ -297,6 +300,11 @@ A dead engine can restore nothing, so the seat goes back without its display
   `Seat.withheld` keeps every later keyboard and pointer event from the
   compositor for the rest of the boot. The first such event says
   `input withheld from the compositor`.
+
+A refused INPUT loses its batch. A refused chord moves no generation, so nothing else
+tells the compositor a release it was owed is gone: `Seat::input` clears every device's
+batch and pushes one reset (SYN_DROPPED), unless input is withheld. The reset carries no
+key content. The witness is `tools/interactive/ls-graphical-sak-refused.exp`.
 
 Until 2026-10-29 the restore was retried forever: every compositor request
 parked for good and the kernel refused the serial BREAK into the failed

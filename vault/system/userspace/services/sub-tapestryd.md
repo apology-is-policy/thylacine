@@ -56,7 +56,12 @@ A guarded independent service thread owns `seat_coordinator` and the reserved
 GPU RPCs. The fixed eight-member table binds an HSR reservation on the declared
 renderer connection to a fresh kernel-stripes-matched HSC physical lane. At
 most two unbound lanes and ten total connections exist, each with four fids and
-4 KiB input/output. Unknown peers are refused before protocol use.
+4 KiB input/output. Unknown peers are refused before protocol use. A lane that has
+not joined can read its own reservation's record (`Coordinator::sample`), since a first
+Join can lose to a chord and needs a fresh pair, and the connection that reserved parks
+with the compositor. The five-second bound on an unjoined lane does not run while the
+seat is away. Under `thylacine.test-seat-start` a test-mode tapestryd refuses the boot's
+first Reserve, so that a gate always reaches the client's retry.
 
 A frozen generation/revision requires exact cancellation from every potentially
 active member. Raw EOF or normal declaration loss does not discharge a live

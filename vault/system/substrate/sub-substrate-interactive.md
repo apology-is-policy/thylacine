@@ -130,7 +130,10 @@ qualify a thirty-two-controller/multiple-session allocation guarantee.
 - A needle reads one console write. The kernel keeps one write whole against other
   writers and promises nothing between two, so a needle across two can miss when
   another process's line lands inside. `tools/check-console-lines.py`, run by
-  `build.sh`, fails on one.
+  `build.sh`, fails on one. It reads a needle given literally, through a proc that
+  passes an argument on to expect, or through a variable set to a literal, and its
+  last line counts the ones it cannot read. It does not see a line whose text is all
+  variable with its newline written separately, nor a writer helper it does not name.
 - Scenario exit 77 = SKIP (a missing optional host artifact).
 
 ## Mechanism

@@ -115,11 +115,17 @@ fixed 32-entry desired table, pruned with route removal. It is not an applicatio
 registration endpoint and does not make a path token an authority credential.
 
 The seat can move under any request `session_seat::Link` has in flight, so a refusal
-from a joined participant re-samples and restores no authority
-(`seat_control::Refusals`); a seat recovery moves the generation
-([[dec-2026-11-02-seat-failure-retires-generation]]), and a Join refused for that
-reason must not end the session. Any other seat link error still exits the whole
-process (`paneplace`), because a participant unsure of its cancellation must die.
+re-samples and restores no authority (`seat_control::Participant`); a seat recovery
+moves the generation ([[dec-2026-11-02-seat-failure-retires-generation]]), and a Join
+refused for that reason must not end the session. A chord can also land during
+session start, which is a wait and not a failure: a first Join it refuses samples
+until the seat is normal and joins at the new generation
+(`tools/interactive/ls-graphical-sak-start.exp`). Any other seat link error ends the
+service. `paneplace` then exits the whole process if the member may owe a cancellation
+(`Participant::may_owe`) or the service was published, because only process death
+answers for a member the table holds (`tools/interactive/ls-graphical-sak-unread.exp`).
+A member the table refused owes nothing, so its failure leaves the session running
+without the service.
 `session_seat::Link` dispatches Bind/Unbind through the already-preopened ordered
 HIA channel on the dedicated service executor. Interaction supplies the shared
 request sequence and transport slot. `hostbindings::Bindings` separately tracks
@@ -182,6 +188,15 @@ work/oct2-hi-replies; public clipboard dispatch remains disabled.
 Some(0) is the initial normal seat; only None removes membership. Both the
 controller table and shared owner preserve that distinction. Seat revocation
 retires scopes even when a later join carries the same generation.
+
+While the seat is away from normal the compositor answers nothing, so neither kind of
+deadline below runs out against it. `Interaction::age` gives an unreported flight its
+full time back while the Link reads the seat parked, and `paneplace`'s bring-up loop
+refreshes its 4 s and tells the thread waiting in `ServiceWorker::new` that it is
+alive. Both stop at `seat_control::PARKED_CEILING_MS`, so a session that cannot start
+still reaches login's console fallback. A stopping owner's flight keeps aging. No
+guest witness drives a flight through an episode: nothing in the tree starts one
+there, and the host test covers `age`.
 
 Every shared-owner request carries the existing 30-second admission allowance.
 Expiry of host control or publication returns one failure without freeing its

@@ -62,7 +62,10 @@ A parked read does not prevent writes. HSC cancellation uses its separate lane.
 
 ## Independent seat channel (October 2)
 
-`seat` separates normal-connection HSR setup from HSC cancellation. The latter
+`seat` separates normal-connection HSR setup from HSC cancellation. `reserve`'s write
+parks through an episode with the compositor. The table can then refuse it for a moment,
+as the compositor returns or before the coordinator's first sample, so a refusal retries
+on the same fid with a higher request number, up to 200 times at 10 ms. The latter
 uses an independently opened resident service connection, fixed 96-byte buffer,
 four-entry SQPOLL ring, monotone request/CQE identities and one exchange. Pump
 never waits on rendering. Ring teardown precedes registered buffer/fid release.

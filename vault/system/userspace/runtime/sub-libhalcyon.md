@@ -52,11 +52,21 @@ Coordinator. Kernel-derived Peer identity is separate from decoded records.
 Eight slots retain live cancellation obligations across notification, EOF and
 failed episodes. Exact peer/lane/generation/revision checks, fresh rejoin,
 request/identity exhaustion and an initially unknown seat all fail closed.
-`Refusals` says which refused requests a joined participant re-samples from: a
-Cancelled, a Retire, and a Join once per snapshot, since a Join refused twice at one
-snapshot raced nothing and retrying would spin. A first Join stays fatal.
-`tools/test-seat-control.py` runs the actual-core schedules and fails eight
-coordinator mutations and two Lictor gate mutations at their intended assertions. This does not activate HIN1.
+`Participant` is one lane owner's seat decisions with the I/O left out: given a
+completed exchange it says whether to revoke, which generation normal authority
+returns at and what to send next. The owner only executes that, so every arm runs on
+a host. Its private `Refusals` says which refused requests it re-samples from: a
+Cancelled, a Retire, and a Join once per snapshot, first Join included, since a Join
+refused twice at one snapshot raced nothing and retrying would spin. A member that
+has not joined samples and waits: `Coordinator::sample` reads a reserving peer's own
+record before its lane is pinned, and pins nothing and certifies nothing.
+`Participant::may_owe` holds from the send of a Join, because the table serves one
+before its reply can be read, and only a refusal of a first Join clears it.
+`Participant::parked` says the compositor cannot answer, so that time is not the
+member's to account for. It stops holding `PARKED_CEILING_MS` (120 s) after the first
+reply away, whatever replies follow: the kernel gives FAILED no deadline and a held
+key keeps it there. `tools/test-seat-control.py` runs the actual-core schedules and
+fails its named mutations at their intended assertions. This does not activate HIN1.
 
 ## Renderer admission codec (October 1)
 
