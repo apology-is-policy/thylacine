@@ -415,6 +415,9 @@ twice.
   intact. This layer is where such text enters, so it is the natural place to
   sanitize even though the omission is shared with the renderer. Task #130.
 
+- **The hosts' stderr `hup` arm has no witness of its own.** `parley-probe` proves the
+  rule in its own loop, so reverting the arm in `Lsp`, `Dap` or `lsp-probe` stays
+  green. `parley-echo close-stderr` under a real host would close it.
 - **gopls can still orphan a `go` that is not nora's doing.** Its imports refresh,
   scheduled thirty seconds or more after the view is created, runs `go list -m`
   that gopls's shutdown does not wait for; and a disconnect that lands while

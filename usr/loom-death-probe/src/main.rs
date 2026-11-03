@@ -26,8 +26,9 @@ use libthyla_rs::loom::{ServiceRing, ThylaKernel};
 use libthyla_rs::process::{Child, Command, Stdio};
 use libthyla_rs::service_worker::{Control, ServiceWorker};
 use libthyla_rs::{
-    t_close, t_execve, t_exits, t_loom_enter, t_poll, t_postnote, t_putstr, t_read, t_write, TPollFd,
-    T_POLLIN,
+    t_close, t_execve, t_exits, t_loom_enter, t_poll, t_postnote, t_putstr, t_read, t_wait_exitstatus,
+    t_wait_if_exited, t_wait_if_signaled, t_wait_pid_for, t_wait_termsig, t_write, TPollFd, T_POLLIN,
+    T_WAIT_PACKED, T_WAIT_WNOHANG,
 };
 
 #[global_allocator]
@@ -57,18 +58,18 @@ const AFTER_EXEC: &[u8] = b"/bin/loom-death-probe\0after-exec\0";
 
 // Every descriptor a victim could hold is below this.
 const FD_SCAN: i64 = 32;
-// LOOM_ENTER_NONBLOCK (kernel/include/thylacine/loom.h): a live ring answers an
-// ENTER of nothing with no wait, one latched shut -ECANCELED, and anything else
-// -EBADF.
+// LOOM_ENTER_NONBLOCK (kernel/include/thylacine/loom.h): the ring's own image gets
+// an answer to an ENTER of nothing with no wait, and what is not a ring -EBADF.
 const ENTER_NONBLOCK: u64 = 1 << 1;
 
 // The fixture's stats counters (usr/loom-fixture).
-const ACCEPTED: usize = 0;
 const ENDED: usize = 1;
 const VIOLATIONS: usize = 2;
 const STALLED: usize = 3;
 const FAULTS: usize = 11;
-const STAT_COUNT: usize = 12;
+const BACKLOG: usize = 12;
+const STAT_COUNT: usize = 13;
+const SIGKILL: i32 = 9;
 
 const EXIT_PLAIN: i32 = 42;
 const EXIT_GROUP: i32 = 43;
@@ -85,24 +86,25 @@ enum Stop {
 
 struct Case {
     role: &'static str,
-    // The counter that shows the victim's operation reached the server; None for
-    // the one that must never be accepted.
-    reached: Option<usize>,
+    // The counter that shows the victim's operation reached the server.
+    reached: usize,
+    // A session the server accepted, so its end shows at the server.
+    ends: bool,
     stop: Stop,
     // None: killed, so the status is the kernel's.
     status: Option<i32>,
 }
 
 const CASES: [Case; 9] = [
-    Case { role: "exit", reached: Some(STALLED), stop: Stop::Go, status: Some(EXIT_PLAIN) },
-    Case { role: "group", reached: Some(STALLED), stop: Stop::Go, status: Some(EXIT_GROUP) },
-    Case { role: "close", reached: Some(STALLED), stop: Stop::Go, status: Some(EXIT_CLOSED) },
-    Case { role: "kill", reached: Some(STALLED), stop: Stop::Kill, status: None },
-    Case { role: "exec", reached: Some(STALLED), stop: Stop::Go, status: Some(EXIT_AFTER_EXEC) },
-    Case { role: "exec-sibling", reached: Some(STALLED), stop: Stop::Go, status: Some(EXIT_AFTER_EXEC) },
-    Case { role: "connect", reached: Some(FAULTS), stop: Stop::Kill, status: None },
-    Case { role: "unaccepted", reached: None, stop: Stop::Go, status: Some(EXIT_UNACCEPTED) },
-    Case { role: "lease", reached: Some(STALLED), stop: Stop::Go, status: Some(EXIT_LEASE) },
+    Case { role: "exit", reached: STALLED, ends: true, stop: Stop::Go, status: Some(EXIT_PLAIN) },
+    Case { role: "group", reached: STALLED, ends: true, stop: Stop::Go, status: Some(EXIT_GROUP) },
+    Case { role: "close", reached: STALLED, ends: true, stop: Stop::Go, status: Some(EXIT_CLOSED) },
+    Case { role: "kill", reached: STALLED, ends: true, stop: Stop::Kill, status: None },
+    Case { role: "exec", reached: STALLED, ends: true, stop: Stop::Go, status: Some(EXIT_AFTER_EXEC) },
+    Case { role: "exec-sibling", reached: STALLED, ends: true, stop: Stop::Go, status: Some(EXIT_AFTER_EXEC) },
+    Case { role: "connect", reached: FAULTS, ends: true, stop: Stop::Kill, status: None },
+    Case { role: "unaccepted", reached: BACKLOG, ends: false, stop: Stop::Go, status: Some(EXIT_UNACCEPTED) },
+    Case { role: "lease", reached: STALLED, ends: true, stop: Stop::Go, status: Some(EXIT_LEASE) },
 ];
 
 struct Fail {
@@ -182,7 +184,10 @@ const ROLE_GROUP: u8 = 1;
 const ROLE_CLOSE: u8 = 2;
 const ROLE_EXEC: u8 = 3;
 
+static TURNING: AtomicBool = AtomicBool::new(false);
 static CLOSED: AtomicBool = AtomicBool::new(false);
+// Long enough for a thread that has just said so to be parked in its turn.
+const INTO_TURN: Duration = Duration::from_millis(10);
 
 struct Sibling {
     role: u8,
@@ -199,6 +204,10 @@ fn exec_after() -> ! {
 fn sibling(s: &Sibling, control: &Control) -> libthyla_rs::err::Result<()> {
     control.ready()?;
     wait_go();
+    while !TURNING.load(Ordering::Acquire) {
+        let _ = libthyla_rs::time::sleep(Duration::from_millis(1));
+    }
+    let _ = libthyla_rs::time::sleep(INTO_TURN);
     match s.role {
         ROLE_GROUP => unsafe { t_exits(EXIT_GROUP as i64) },
         ROLE_EXEC => exec_after(),
@@ -214,12 +223,15 @@ fn sibling(s: &Sibling, control: &Control) -> libthyla_rs::err::Result<()> {
     Ok(())
 }
 
-// The main thread's turn, until something ends the program. `target` tells a turn
-// that did not notice the close from one that did: a closed ring admits nothing.
+// The main thread's turn, until something ends the program. One long deadline, so a
+// wake the kernel lost shows as a victim the driver's bound finds still here.
+// `target` tells a turn that did not notice the close from one that did: a closed
+// ring admits nothing.
 fn turn_forever(ring: &ServiceRing, target: &Target<K>) -> ! {
     let until = ring.now() + 4 * WAIT_NS;
+    TURNING.store(true, Ordering::Release);
     loop {
-        let turned = ring.turn(Some(ring.now() + 50_000_000));
+        let turned = ring.turn(Some(until));
         if CLOSED.load(Ordering::Acquire) && (turned.is_err() || target.connect(None).is_err()) {
             unsafe { t_exits(EXIT_CLOSED as i64) }
         }
@@ -307,8 +319,9 @@ fn victim(role: &str) -> R<i64> {
 }
 
 // The image an exec put here: exec closes a private ring whatever userspace asked
-// for. Exec also latches it, and a latched ring's descriptor answers -ECANCELED, so
-// only -EBADF from every number shows the descriptor went. A new ring can be made.
+// for. A descriptor that outlived it would answer -EACCES, refused for this image
+// before the kernel looks at the latch, so only -EBADF from every number shows the
+// descriptor went. A new ring can be made.
 fn after_exec() -> R<i64> {
     for fd in 3..FD_SCAN {
         let rc = unsafe { t_loom_enter(fd as u64, 0, 0, ENTER_NONBLOCK) };
@@ -371,12 +384,16 @@ fn wait_ready(child: &Child) -> R<()> {
     Ok(())
 }
 
-// The point of the probe: however the server behaves, the program ends.
-fn reap(ring: &ServiceRing, child: &mut Child) -> R<i32> {
+// The point of the probe: however the server behaves, the program ends. The packed
+// word, so a victim that exited 1 is not read as one that was killed.
+fn reap(ring: &ServiceRing, child: &Child) -> R<i32> {
     let until = ring.now() + WAIT_NS;
     loop {
-        if let Some(status) = ok!(child.try_wait().map_err(|e| e.as_errno()), "reap a victim") {
-            return Ok(status.raw());
+        let mut status = 0i32;
+        let rc = unsafe { t_wait_pid_for(child.pid(), T_WAIT_WNOHANG | T_WAIT_PACKED, &mut status) };
+        check!(rc >= 0, "reap a victim", rc);
+        if rc != 0 {
+            return Ok(status);
         }
         check!(ring.now() < until, "a victim ends although its server is silent", child.pid());
         let _ = libthyla_rs::time::sleep(Duration::from_millis(5));
@@ -392,13 +409,9 @@ fn run_case(ring: &ServiceRing, st: &Fid<K>, case: &Case) -> R<()> {
         .stdin(Stdio::Piped)
         .stdout(Stdio::Piped)
         .inherit_fd(REGISTRY);
-    let mut child = ok!(command.spawn().map_err(|e| e.as_errno()), "spawn a victim");
+    let child = ok!(command.spawn().map_err(|e| e.as_errno()), "spawn a victim");
     wait_ready(&child)?;
-    if let Some(at) = case.reached {
-        stats_until(ring, st, at, base[at] + 1)?;
-    } else {
-        let _ = libthyla_rs::time::sleep(Duration::from_millis(20));
-    }
+    stats_until(ring, st, case.reached, base[case.reached] + 1)?;
     match case.stop {
         Stop::Go => {
             let Some(go) = child.stdin.as_ref() else {
@@ -409,24 +422,28 @@ fn run_case(ring: &ServiceRing, st: &Fid<K>, case: &Case) -> R<()> {
             check!(n == 1, "tell a victim to go", n);
         }
         Stop::Kill => {
+            let _ = libthyla_rs::time::sleep(INTO_TURN);
             let rc = unsafe { t_postnote(child.pid() as i64, b"kill".as_ptr(), 4) };
             check!(rc == 0, "kill a victim", rc);
         }
     }
-    let status = reap(ring, &mut child)?;
-    say(&format!("{} ended, status {}", case.role, status));
-    match case.status {
-        Some(want) => check!(status == want, "a victim took the path it named", status),
-        None => check!(status != 0, "a killed victim did not exit cleanly", status),
+    let status = reap(ring, &child)?;
+    if t_wait_if_exited(status) {
+        say(&format!("{} ended, status {}", case.role, t_wait_exitstatus(status)));
+    } else {
+        say(&format!("{} ended, signal {}", case.role, t_wait_termsig(status)));
     }
-    let v = if case.reached.is_some() {
+    match case.status {
+        Some(want) => check!(t_wait_if_exited(status) && t_wait_exitstatus(status) == want,
+                             "a victim took the path it named", status),
+        None => check!(t_wait_if_signaled(status) && t_wait_termsig(status) == SIGKILL,
+                       "a killed victim died of the kill", status),
+    }
+    let v = if case.ends {
         stats_until(ring, st, ENDED, base[ENDED] + 1)?
     } else {
         stats(ring, st)?
     };
-    if case.reached.is_none() {
-        check!(v[ACCEPTED] == base[ACCEPTED], "nothing accepted the connection", v[ACCEPTED]);
-    }
     check!(v[VIOLATIONS] == base[VIOLATIONS], "the victim's end broke no protocol rule", v[VIOLATIONS]);
     Ok(())
 }

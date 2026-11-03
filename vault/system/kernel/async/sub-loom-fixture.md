@@ -59,7 +59,11 @@ exercise is [[sub-loom-native-adapter]], the kernel service they run against is
   `-walk`, `-open` hold it unanswered; `torn-version` and `torn-read` send part of
   the reply and stop; `garbled-version` and `garbled-read` answer an impossible
   frame length; `wrong-version` and `wrong-read` answer the wrong reply type;
-  `hangup-read` ends the session. `unaccepted` is posted and never accepted. A
+  `hangup-read` ends the session. `unaccepted` and `unaccepted-drop` are posted and
+  never accepted; `stats` carries a bit per service while its listener polls
+  readable, the positive control that a CONNECT reached the backlog. An `E` on the
+  control pipe asks for an `e` on the notify pipe at the next session end, for a
+  probe whose full CQ rules out a stats read. A
   fault counts in `stats`, never as a violation: the kernel's client did nothing
   wrong, and the count is how a probe tells an operation that reached the named
   stage from one stopped earlier.
@@ -88,9 +92,13 @@ Past the NA-4d legs, each adapter probe drives the AS-3 list against the hostile
 services: a hold at each handshake and setup stage, ended by a deadline once and
 otherwise by a drop, after turns show the operation still pending; a garbled, wrong or torn reply at the handshake and at a
 READ; a service that never accepts; a stream staying live while a sibling scope
-stalls and is cancelled; a cancel with the CQ full, which posts nothing past it;
-and the pool and request bounds an honest program can reach. Quota refusals that
-need a resource floor stay with the kernel fixtures
+stalls and is cancelled; a cancel with the CQ full, whose session ends while the CQ
+is still full and which posts nothing past it; and the pool and request bounds an
+honest program can reach. Those bounds are the adapters' own gates, reached before
+the kernel is asked: a pool over a live member answers `-EINVAL`, a second fixed
+operation on one buffer `-EBUSY`, and the read past the book's four `-ENOSPC`. The
+kernel's own answers, and quota refusals that need a resource floor, stay with the
+kernel fixtures
 (`loom_private_protocol_fault` and the charge tests).
 
 `/bin/loom-death-probe` (`loom.native_probe_death`) is the whole-userspace half
@@ -99,10 +107,15 @@ case; each victim holds a stalled READ (or a CONNECT the server holds, or one
 nobody accepts, or a stream with a lease held), then exits, exits from a sibling
 thread, is killed, closes its ring from a sibling thread, or execs, from the main
 thread and from a sibling. The driver bounds the victim's end and reads the
-session's end at the server. Exec latches a private ring and also closes it, and a
-latched ring's descriptor answers ENTER `-ECANCELED`, so the new image requires
-`-EBADF` from every number below the scan's end, and makes a ring of its own. The
-victim found its own ring with the same scan before the exec. Rust only: the paths under test are
+session's end at the server. A sibling acts only once the main thread has said it
+is entering its turn, and that turn has one long deadline, so a wake the kernel
+loses shows as a victim the driver's 5 s bound finds still alive. The driver reads
+the packed wait word, so a kill must read signal 9, not any nonzero status. Exec
+latches a private ring and also closes it. A descriptor that survived would answer
+a new image's ENTER `-EACCES`, refused for that image before the kernel looks at the
+latch, so the new image requires `-EBADF` from every number below the scan's end,
+and makes a ring of its own. The victim found its own ring with the same scan before
+the exec. Rust only: the paths under test are
 the kernel's, and an adapter's teardown does not run on any of them.
 
 The retire witness is a `Q`/`Z` handshake: after the ring retires the probe

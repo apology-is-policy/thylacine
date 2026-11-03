@@ -757,7 +757,7 @@ impl Lsp {
             };
             for r in &ready {
                 if r.tag == TAG_LSP_ERR {
-                    // A closed pipe polls readable forever: stop asking.
+                    // A hung-up pipe stays ready: stop asking.
                     err_open = matches!(self.srv.drain_stderr(), Ok(false));
                 } else if r.tag == TAG_LSP_OUT && self.goodbye_output(&mut answered) {
                     return if self.dead {
