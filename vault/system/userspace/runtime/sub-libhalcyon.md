@@ -7,6 +7,8 @@ code:
   - usr/lib/libhalcyon/src/interaction_events.rs
   - usr/lib/libhalcyon/src/seat_control.rs
   - usr/lib/libhalcyon/src/interaction_control.rs
+  - usr/lib/libhalcyon/src/interaction_client.rs
+  - usr/lib/libhalcyon/src/interaction_client_tests.rs
   - usr/lib/libhalcyon/src/lib.rs
   - usr/lib/libhalcyon/src/cursor.rs
   - usr/lib/libhalcyon/src/interaction_wire.rs
@@ -825,6 +827,32 @@ says why) rather than guessing a profile and building the wrong tree.
 read `/lib/halcyon.rc`, a system path. The five usage lines and the tour's code
 span now say `~/lib/halcyon...`; code comments keep the notation. Found by the
 Operator's Manual chunk, which writes `~/` for the same reason.
+
+## `interaction_client` -- the HIN1 client with no I/O (AS-4b, 2026-11-03)
+
+`interaction_client::Client` is the protocol a UI host needs and no transport. An
+adapter asks `next_step` what to start (connect, write, read, close) and reports
+what happened. The host asks `next_deadline` to bound its poll and takes `Event`s.
+Nothing in it can block, so a stopped server costs a deadline and never a frozen
+loop.
+
+Two lanes, because the server takes one outstanding request per fid: control carries
+Hello, Bind and Mode, transfer carries one copy or paste. A mode report therefore
+passes a parked Get. Mode reports coalesce: one in flight, the latest behind it. Only
+Bind retries, on Gone or Busy, 8 times 20 ms apart, as a deadline. Reconnects back off
+from 250 ms to 8 s and stop after 8 tries until the host asks for something, so a
+process refused its binding does not hammer the server.
+
+A commit is never retried. Once its record has been handed to the transport, a lost
+connection or a missed deadline reports `CopyUnknown`; a refusal the server chose is
+a definite `CopyFailed`. A paste is delivered whole and checked as text, or not at
+all. A failed job's open transfer is released first, since it holds one of the
+session's slots until it expires. `cancel` closes the connection, because only that is
+sure to end a request the server has stopped answering.
+
+The tests run real HIN1 records against a scripted server
+(`interaction_client_tests.rs`). The native adapter and the guest witnesses are
+separate chunks (ASYNC-SERVICE-LIFECYCLE, "AS-4 adoption design").
 
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)

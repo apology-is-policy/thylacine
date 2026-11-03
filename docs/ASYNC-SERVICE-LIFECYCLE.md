@@ -314,15 +314,17 @@ now and polls what that woke. `pump` never sleeps. A scope's retirement is not a
 poll event, so while one is owed `next_deadline` carries a short bound and the host
 wakes without a descriptor reason. A host may not call `Ring::block_on`.
 
-**`libhalcyon::interaction_client`.** One client owns one private ring, one CONNECT
-scope and at most two fids on the same route: a control fid for Hello, Bind, Mode,
-Cancel and Unbind, and a transfer fid for one copy or paste. The server allows one
-outstanding request per fid and one asynchronous reply per connection, and Cancel
-completes synchronously beside it, so that split is what lets a mode report and a
-cancel pass a parked Get. Each operation is an owned future polled with a flag
-waker. Dropping one cancels what it started, and dropping the client closes the
-ring, which ends the whole private connection whatever the server is doing. That
-is the property this arc exists for, so the client takes no blocking path around it.
+**`libhalcyon::interaction_client`.** The protocol has no I/O, as HALCYON-INTERACTION
+7 requires of the shared library: a future Mycelium adapter keeps its behaviour,
+ownership and errors. An adapter connects, moves bytes and reports what happened;
+the client decides what comes next, what each deadline is and what the host is told.
+The native adapter owns one private ring, one CONNECT scope and two fids on the same
+route: a control fid for Hello, Bind and Mode, and a transfer fid for one copy or
+paste. The server allows one outstanding request per fid, so that split is what lets
+a mode report pass a parked Get. Giving up on a request the server has stopped
+answering closes the connection, since only that is sure to end it, and closing the
+ring ends the whole private connection whatever the server is doing. That is the
+property this arc exists for, so nothing takes a blocking path around it.
 
 The client's rules, each from a rule above it:
 - **Mode reports coalesce.** One in flight, the latest waits, older values are
@@ -349,8 +351,9 @@ The client's rules, each from a rule above it:
 **Adoption order.**
 - AS-4a: `Ring::poll_fd`, and its C twin when ut needs it. The host test drives a
   simulated ring and a poll loop with no blocking call.
-- AS-4b: the client, on the native adapter's simulated kernel: every operation
-  against a server that stops at each step, and against one that dies.
+- AS-4b: the client, tested against a scripted server speaking real HIN1 records:
+  every operation against a server that stops at each step, and one that dies. Then
+  its native adapter.
 - AS-4c: the kaua-term-probe qualification mode over the async client, stepped by a
   scenario, so a red names its phase. SAK lands with the request parked at each of
   connect, each walk, open, Hello, Bind, Mode, Get, Read, Begin, Write and Commit.
