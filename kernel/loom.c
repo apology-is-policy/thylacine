@@ -1068,11 +1068,11 @@ static void loom_free(struct Loom *l) {
     //
     // WHAT BOUNDS IT: the kthread's own work, never a server. It must never
     // block on a wire RPC (loom_dir_mutation_gate's rule: those ops are refused
-    // on an SQPOLL ring), and its reap's last close never waits for one either:
-    // no death reaches a kernel thread, so its Tclunk goes to the closer where
-    // it would wait for a tag or ring space (ARCH 8.8.1.1), and a write-behind
-    // run it cannot flush at once goes to the closer as a close job (ARCH 7.9.1
-    // part C).
+    // on an SQPOLL ring), and its reap never waits for one either: it holds
+    // references, never a descriptor, and a last reference waits for no server.
+    // Its Tclunk goes to a closer where it would wait for a tag or ring space
+    // (ARCH 8.8.1.1), and a run still staged goes with it as a close job (ARCH
+    // 7.9.1 part C).
     if (l->sqpoll) {
         __atomic_store_n(&l->sqpoll_stopping, true, __ATOMIC_RELEASE);
         wakeup(&l->sqpoll_park);
@@ -1948,9 +1948,8 @@ _Static_assert(__builtin_offsetof(struct p9_statfs, namelen) == 56, "Loom p9_sta
 
 // 6c audit F1: map a byte COUNT to a CQE result without aliasing the error
 // region. The CQE ABI is result >= 0 = byte count, result < 0 = -errno; a count
-// that would set the sign bit (> INT32_MAX -- a multi-GiB registered buffer, or
-// an over-large server-reported write/read count) must NOT wrap to a spurious
-// -errno. The data was already placed (READ) / accepted (WRITE); only the
+// that would set the sign bit (> INT32_MAX -- a multi-GiB registered buffer)
+// must NOT wrap to a spurious -errno. The data was already placed (READ) / accepted (WRITE); only the
 // reported magnitude caps. Clamp so the s32 cast stays non-negative.
 static s32 loom_count_result(u32 got) {
     if (got > 0x7FFFFFFFu) got = 0x7FFFFFFFu;
@@ -1964,7 +1963,12 @@ static s32 loom_payload_result(struct loom_async_op *op, int status,
     // (netd in place -- a READ's bytes are in the guest's ring slice; a WRITE's were
     // read out of it), so the kernel copies NOTHING. The Rweftio count IS the result
     // (the byte count netd moved). No loom_bufcopy -- that is the zero-copy property.
-    if (op->weft) return dr ? loom_count_result(dr->weftio_count) : 0;
+    if (op->weft) {
+        if (!dr) return 0;
+        u32 got = dr->weftio_count;
+        if (got > op->op_count) got = op->op_count;
+        return loom_count_result(got);
+    }
     switch (op->opcode) {
     case LOOM_OP_READ: {
         if (!dr) return 0;
@@ -1974,8 +1978,12 @@ static s32 loom_payload_result(struct loom_async_op *op, int status,
             loom_bufcopy(op->buf_kva, dr->read_data, got);
         return loom_count_result(got);
     }
-    case LOOM_OP_WRITE:
-        return dr ? loom_count_result(dr->write_count) : 0;
+    case LOOM_OP_WRITE: {
+        if (!dr) return 0;
+        u32 got = dr->write_count;
+        if (got > op->op_count) got = op->op_count;   // its CQE is write(2)'s answer
+        return loom_count_result(got);
+    }
     // Loom-6b read-shaped output: copy the reply payload INTO the pinned dest
     // slice, bounded by op_count (the dest capacity) so a short buffer can never
     // overrun. READDIR / READLINK stream bytes; GETATTR / STATFS copy the parsed
@@ -2316,14 +2324,26 @@ static const struct Proc *loom_ident_live(const struct Loom *l) {
 }
 
 // The sync twins' parent check, verbatim in shape: gated on perm_enforced, no
-// stat -> -EIO, no W|X -> -EACCES.
-static s32 loom_dir_writable(const struct Proc *who, struct Spoor *dir) {
+// stat -> -EIO, no W|X -> -EACCES. When a stat was taken, *bound_by (if asked
+// for) points at it in *st -- M8's bound; it is NULL where the Dev enforces no
+// rwx.
+static s32 loom_dir_writable(const struct Proc *who, struct Spoor *dir,
+                             struct t_stat *st, const struct t_stat **bound_by) {
+    if (bound_by) *bound_by = NULL;
     if (!dir->dev)                                   return -(s32)T_E_IO;
     if (!dir->dev->perm_enforced)                    return 0;
-    struct t_stat st;
-    if (spoor_stat_native(dir, &st) != 0)            return -(s32)T_E_IO;
-    if (perm_check(who, &st, PERM_W | PERM_X) != 0)  return -(s32)T_E_ACCES;
+    if (spoor_stat_native(dir, st) != 0)             return -(s32)T_E_IO;
+    if (perm_check(who, st, PERM_W | PERM_X) != 0)   return -(s32)T_E_ACCES;
+    if (bound_by) *bound_by = st;
     return 0;
+}
+
+// The ops that make a new entry, and so answer to IDENTITY-DESIGN 9.7's M7 and
+// M8 as the sync create does. LINK names an existing file: like RENAMEAT, not a
+// create.
+static bool loom_op_creates(u8 opcode) {
+    return opcode == LOOM_OP_MKDIR || opcode == LOOM_OP_MKNOD ||
+           opcode == LOOM_OP_SYMLINK;
 }
 
 // The gate. Runs in the submitter's syscall context only: the caller has refused
@@ -2332,23 +2352,43 @@ static s32 loom_dir_writable(const struct Proc *who, struct Spoor *dir) {
 // the owner's exit). `dir2` is RENAMEAT's newdir; LINK's second handle is its
 // SOURCE, which POSIX link does not ask to be writable, so it is not checked.
 // For the create ops, *gid_out is the resolved group: SQE gid 0 (GID_INVALID) is
-// the creator's primary group, as the sync create always uses; any other must be
-// one the creator may chgrp a file it owns to (perm_wstat_check, cur_uid = the
-// creator: a member group, or chown-any authority). On a caped session
-// (IDENTITY-DESIGN 3.2) the group is the cape's and the wire carries P9_NOGID, so
-// the server leaves its own alone; naming a group there is a chgrp, which the cape
-// refuses.
+// the parent directory's group (IDENTITY-DESIGN 3.5 F-5), as the sync create
+// sends, read from the parent's stat (taken for it where the Dev enforces no rwx
+// and loom_dir_writable took none); any other must be one the creator may chgrp
+// a file it owns to (perm_wstat_check against a stat the creator owns: a member
+// group, or chown-any authority). On a caped session (IDENTITY-DESIGN 3.2) the group is
+// the cape's and the wire carries P9_NOGID, so the server leaves its own alone;
+// naming a group there is a chgrp, which the cape refuses.
+//
+// M7: the server stamps a create with its session's credential, never the
+// submitter's, so a create is admitted only to a principal at one of the
+// session's two ends -- decided before the stat, whether or not the Dev
+// enforces rwx, and whatever the creator's DAC override, as the sync create
+// decides it. M8: *mode_out is MKDIR's or MKNOD's rwx, less the creator's umask
+// and bounded by the parent where the Dev enforces rwx.
 static s32 loom_dir_mutation_gate(const struct Loom *l, const struct loom_sqe *sqe,
                                   const struct p9_client *cl,
                                   struct Spoor *dir, struct Spoor *dir2,
-                                  u32 *gid_out, bool *gid_set) {
+                                  u32 *gid_out, bool *gid_set, u32 *mode_out) {
     const struct Proc *who = loom_ident_live(l);
     if (!who)                                        return -(s32)T_E_ACCES;
-    s32 e = loom_dir_writable(who, dir);
-    if (e == 0 && sqe->opcode == LOOM_OP_RENAMEAT)   e = loom_dir_writable(who, dir2);
+    bool creates = loom_op_creates(sqe->opcode);
+    if (creates && !dev9p_create_admits(dir, __atomic_load_n(&who->principal_id,
+                                                             __ATOMIC_ACQUIRE)))
+        return -(s32)T_E_ACCES;
+    struct t_stat st, st2;
+    const struct t_stat *bound_by = NULL;
+    s32 e = loom_dir_writable(who, dir, &st, &bound_by);
+    if (e == 0 && sqe->opcode == LOOM_OP_RENAMEAT)   e = loom_dir_writable(who, dir2, &st2, NULL);
     if (e != 0)                                      return e;
-    if (sqe->opcode != LOOM_OP_MKDIR && sqe->opcode != LOOM_OP_MKNOD &&
-        sqe->opcode != LOOM_OP_SYMLINK)              return 0;
+    if (!creates)                                    return 0;
+    // An MKNOD whose type is a directory takes a directory's bound, as M8
+    // bounds every directory made.
+    if (sqe->opcode != LOOM_OP_SYMLINK) {
+        u32  asked  = (u32)sqe->_resv1[1];
+        bool is_dir = sqe->opcode == LOOM_OP_MKDIR || (asked & T_S_IFMT) == T_S_IFDIR;
+        *mode_out = perm_create_mode(asked, is_dir, proc_umask(who), bound_by);
+    }
     u64 raw = (sqe->opcode == LOOM_OP_MKNOD) ? sqe->offset : sqe->_resv1[2];
     if (raw > (u64)0xFFFFFFFFu)                      return -(s32)T_E_INVAL;
     u32 gid = (u32)raw;
@@ -2356,9 +2396,15 @@ static s32 loom_dir_mutation_gate(const struct Loom *l, const struct loom_sqe *s
         if (gid != GID_INVALID)                      return -(s32)T_E_ACCES;
         gid = P9_NOGID;
     } else if (gid == GID_INVALID) {
-        gid = who->primary_gid;
-    } else if (perm_wstat_check(who, who->principal_id, T_WSTAT_GID, gid) != 0) {
-        return -(s32)T_E_ACCES;
+        if (!bound_by && spoor_stat_native(dir, &st) != 0) return -(s32)T_E_IO;
+        gid = st.gid;
+    } else {
+        // Only the owner field is read for T_WSTAT_GID.
+        struct t_stat own;
+        for (size_t i = 0; i < sizeof(own); i++) ((u8 *)&own)[i] = 0;
+        own.uid = who->principal_id;
+        if (perm_wstat_check(who, &own, T_WSTAT_GID, gid) != 0)
+            return -(s32)T_E_ACCES;
     }
     *gid_out = gid;
     *gid_set = true;
@@ -2399,6 +2445,7 @@ static void loom_submit_payload(struct Loom *l, const struct loom_sqe *sqe,
     // LOOM.md 8.5.1: a create op's resolved group, written into the op's snapshot.
     u32  cgid     = 0;
     bool cgid_set = false;
+    u32  cmode    = 0;                      // M8: MKDIR's / MKNOD's rwx, from the gate
 
     // Opcode -> (Tmsg builder, primary right, secondary right). need2 != 0 marks
     // a two-fid op (RENAMEAT / LINK) whose SECOND registered-handle index lives in
@@ -2516,7 +2563,10 @@ static void loom_submit_payload(struct Loom *l, const struct loom_sqe *sqe,
     //     chmod/chown ANY X-reachable file. v1.0 Loom SETATTR therefore supports ONLY
     //     size-truncate; the identity axes are rejected FAIL-CLOSED. Async
     //     identity-setattr is a v1.x seam (a submit-stat or a completion-recheck).
-    //   * atime/mtime (and any other bit) are unsupported -- reject (sync parity).
+    //   * atime/mtime (and any other bit) are rejected. A time needs the owner, or
+    //     for "now" write permission: the same owner-stat the identity axes lack
+    //     at submit. The sync path takes that stat (G12), so this is a Loom-only
+    //     seam, like async identity-setattr.
     if (sqe->opcode == LOOM_OP_SETATTR) {
         struct p9_setattr sa_chk;
         loom_bufcopy((u8 *)&sa_chk, buf_kva, (u32)sizeof(sa_chk));
@@ -2557,7 +2607,7 @@ static void loom_submit_payload(struct Loom *l, const struct loom_sqe *sqe,
         if (!op)                                        { err = -(s32)T_E_NOMEM;     goto fail; }
         loom_bufcopy(op->names, buf_kva, nlen);
         if (!loom_names_ok(sqe, op->names, count))      { err = -(s32)T_E_INVAL;     goto fail; }
-        err = loom_dir_mutation_gate(l, sqe, cl, sp, sp2, &cgid, &cgid_set);
+        err = loom_dir_mutation_gate(l, sqe, cl, sp, sp2, &cgid, &cgid_set, &cmode);
         if (err != 0) goto fail;
     }
     // Weft-6c fast-path (NET-THROUGHPUT 6; I-37): a READ/WRITE whose pinned /net
@@ -2610,14 +2660,14 @@ static void loom_submit_payload(struct Loom *l, const struct loom_sqe *sqe,
         if (sqe->opcode == LOOM_OP_MKNOD) op->sqe.offset    = cgid;
         else                              op->sqe._resv1[2] = cgid;
     }
-    // 8.5.1: a create mode carries the rwx bits only, as the sync create's
-    // `perm & 0777` does -- setuid/setgid/sticky are never honoured and SYS_WSTAT
-    // refuses them, so a create must not be the way to plant them. MKNOD keeps
-    // its file type.
+    // 8.5.1: a create mode carries the rwx bits only, as the sync create's does
+    // -- setuid/setgid/sticky are never honoured and SYS_WSTAT refuses them, so a
+    // create must not be the way to plant them -- and since M8 those bits are the
+    // gate's: the umask, then the parent's bound. MKNOD keeps its file type.
     if (sqe->opcode == LOOM_OP_MKDIR)
-        op->sqe._resv1[1] = (u32)sqe->_resv1[1] & 0777u;
+        op->sqe._resv1[1] = cmode;
     else if (sqe->opcode == LOOM_OP_MKNOD)
-        op->sqe._resv1[1] = (u32)sqe->_resv1[1] & (T_S_IFMT | 0777u);
+        op->sqe._resv1[1] = ((u32)sqe->_resv1[1] & T_S_IFMT) | cmode;
     op->opcode      = sqe->opcode;
     op->weft        = is_weft;            // Weft-6c: zero-copy completion (no bufcopy)
     op->terminal    = false;
@@ -3851,9 +3901,6 @@ static void loom_sqpoll_main(void *arg) {
     struct poll_waiter pw_cq;
     poll_waiter_init(&pw_cq, &l->sqpoll_park);
     struct loom_sqpoll_wait w = { .l = l, .cq = &pw_cq, .fs = &fs };
-    // loom_free joins this thread, so a reap's last close must not wait for
-    // its server (ARCH 7.9.1 part C).
-    current_thread()->closes_never_wait = true;
     if (loom_is_private(l)) {
         loom_private_executor_loop(l);
         goto executor_exiting;

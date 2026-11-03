@@ -38,7 +38,7 @@ child, against a variable that is in the parent's /env but not its environ.
  
 +/* The SPAWN_EXT_ENV tail (struct sys_spawn_ext_env): ext_flags bit 2 names
 + * the child's whole environment. Tails sit after the record in bit order, so
-+ * with no cwd or thread tail it is the record's next 16 bytes. */
++ * with no lower tail announced it is the record's next 16 bytes. */
 +#define POUCH_SPAWN_EXT_ENV (1u << 2)
 +struct pouch_spawn_ext_env {
 +	unsigned long long env_va;         /* 0 -- may be 0 when env_len is 0 */
@@ -63,9 +63,9 @@ child, against a variable that is in the parent's /env but not its environ.
  hidden int __pouch_wait(int pid, int *status, int options);
 --- a/src/process/posix_spawn.c
 +++ b/src/process/posix_spawn.c
-@@ -9,9 +9,9 @@
-  * i, contiguous, lowest-free). The dominant toolchain pattern (open/dup2 a
-  * redirect onto fd 0/1/2, close a temp) resolves to {0,1,2}.
+@@ -5,9 +5,9 @@
+  * actions in the parent into an explicit contiguous list, not a general
+  * inherited descriptor table. Its close-on-exec model is child-local.
   *
 - * envp is inherited via the kernel /env clone (env_clone_into), NOT the passed
 - * envp -- a per-child override would be a SYS_SPAWN_FULL_ARGV ext_flags
@@ -76,7 +76,7 @@ child, against a variable that is in the parent's /env but not its environ.
   * hook and is ignored: a fresh Thylacine child inherits the parent's
   * session/pgroup/identity and starts with default note dispositions, so the
   * toolchain's (unset) attr is satisfied by construction.
-@@ -35,6 +35,11 @@
+@@ -31,6 +31,11 @@
  #undef realloc
  #include "_pouch_process.h"
  
@@ -88,7 +88,7 @@ child, against a variable that is in the parent's /env but not its environ.
  /* The largest child-fd slot a file_action may target. A file_action that
   * targets a higher slot (very unusual) fails EBADF rather than silently
   * dropping. The dup2 SOURCE may be any parent fd; sources >= this are used
-@@ -60,7 +65,6 @@
+@@ -102,7 +107,6 @@
  	char *const argv[restrict], char *const envp[restrict])
  {
  	(void)attr;    /* no post-spawn child hook; see the file header */
@@ -96,7 +96,7 @@ child, against a variable that is in the parent's /env but not its environ.
  
  	if (!path || !path[0]) return EINVAL;
  	size_t name_len = strlen(path);
-@@ -83,6 +87,7 @@
+@@ -126,6 +130,7 @@
  	int opened[PSPAWN_MAXSLOT];   /* parent fds WE opened (close after spawn) */
  	int nopened = 0;
  	char *argv_buf = 0;
@@ -104,7 +104,7 @@ child, against a variable that is in the parent's /env but not its environ.
  	int ec = 0;
  
  	if (fa && fa->__actions) {
-@@ -178,26 +183,59 @@
+@@ -230,26 +235,59 @@
  		}
  	}
  
@@ -178,7 +178,7 @@ child, against a variable that is in the parent's /env but not its environ.
  	} else {
  		if (res) *res = (pid_t)r;
  		ec = 0;
-@@ -205,6 +243,7 @@
+@@ -257,6 +295,7 @@
  
  done:
  	free(argv_buf);

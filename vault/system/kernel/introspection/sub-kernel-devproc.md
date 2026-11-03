@@ -162,7 +162,10 @@ its image files to nobody but itself; `status`, `sched` and `imperium` stay read
 **Ordering is a LOCK, not a load order.** `proc_seal` (kernel/proc.c) is the only writer
 of both seal bits and stamps them under `g_proc_table_lock`; every read above tests the
 seal under that same lock and renders there too (environ under `env->lock`, maps under
-`vma_lock`, ns under `ns_lock`, the mem copy directly -- all leaves below it). So a read
+`vma_lock`, the mem copy directly -- all leaves below it). ns alone renders after the
+lock is dropped, because a shed can hold its `ns_lock` for about a million steps, and
+so it asks its admission again under the lock once the render is done, of the Proc that
+still holds the rendered Territory (`devproc.ns_admission_after_render`). So a read
 happens wholly before or wholly after a seal, whichever axis admitted the reader,
 including against a Proc that seals itself and then loads a secret, and
 `SPAWN_PERM_SEAL`'s two bits land in one critical section. The first correction had
@@ -184,7 +187,11 @@ WRITES, each with a positive control one variable away); `devproc.dump_seal_pred
 (seven legs: both controls unsealed, the NOTRACE-only mirror, absolute-vs-hostowner,
 the same-principal peer, the self exemption, NODUMP-is-not-a-debug-refusal);
 `devproc.dump_seal_scope` (the same split at the predicate level, so a predicate
-regression is reported as one). Every seal test sets the bit through `proc_seal`, the
+regression is reported as one); `devproc.ns_admission_after_render` (ns's second look:
+a hook between the two walks seals the target, exits it through the real Territory
+release, or unlinks it, against a control hook that does nothing -- EACCES, the empty
+file with the reader's ref the last one holding the Territory, and gone). Every seal
+test sets the bit through `proc_seal`, the
 production writer, and captures its verdicts before freeing its Procs.
 
 **What 3.2 does not close:** the disclosure gate's owner axis still carries no
@@ -262,6 +269,27 @@ Two mutually exclusive machineries serve reads:
 - **format-and-slice** — the whole file is generated into a 2 KiB stack buffer
   under `g_proc_table_lock`, then the `[off, off+n)` slice is copied out.
   Eight kinds: `status`, `cmdline`, `ctl`, `ns`, `sched`, `exe`, `cwd`, `maps`.
+  `ns` is the one WINDOWED kind: it shares the dispatch, so the seal and the
+  none wall reach it as they reach the rest, but its listing is as long as the
+  mount table, so the read's offset goes to `territory_format_ns`, which
+  renders that window (at most the caller's room, at most 2 KiB, ending at a
+  line end), and the read copies it from its start rather than slicing at the
+  offset ([[sub-kernel-territory]]; `devproc.ns_reads_past_the_buffer`). It is
+  also the one kind rendered OUTSIDE the table lock: the walk takes a WEAK ref
+  on the Proc's Territory, the render runs after the lock is dropped, and a second
+  walk asks the seal and the none wall again. A refusal there refuses the read;
+  a Proc that dropped its Territory meanwhile is exiting and reads empty; a pid
+  that names no Proc any more reads as gone. A Proc holding a DIFFERENT
+  Territory also reads as gone, but that cannot happen today: pids never
+  recycle, and a linked Proc's Territory only goes from its own to NULL, so the
+  check is a defence for a future in-place namespace swap. The weak ref keeps
+  the struct and nothing else ([[sub-kernel-territory]]): a Proc that exits
+  during the render still releases its namespace at death, on its own thread,
+  and the render then reads an empty table; the reader's drop, after the second
+  walk with no lock held, at most frees the struct, so a reader never runs
+  another Proc's mount clunks or waits on its 9P server (OPEN-BUGS SA-5).
+  `devproc.ns_admission_after_render`'s exit leg mounts a source in the target
+  and sees the source's ref go at the exit, not at the read's end.
 - **own read path** — a purpose-built function, because the content is not a
   formatted snapshot. Seven kinds: `mem` (VA-addressed), `regs`/`fpregs`/`kregs`
   (struct-offset), `kstack`, `wait` (blocks), `environ` (offset-aware over an
@@ -755,10 +783,15 @@ Lock order, all nested *under* `g_proc_table_lock` and all acyclic on the same
 ground (each is a leaf; nothing held under it takes the global lock):
 
 - `vma_lock` — the `maps` walk and the cross-Proc memory copy
-- `ns_lock` — the mount-list render
 - `dot_lock` — the cwd render
 - `env_lock` — the environ render
 - each peer's `wait_lock` — the parked-thread scan and the resume wake
+
+`ns_lock` was on this list until 2026-10-19. A Proc can hold it for a whole shed,
+about a million steps at `PGRP_MOUNT_CAP`, by repeating an ungated `pivot_root`, and
+every CPU queued on the IRQ-masked table lock waited with it (audit round 1 F1). The
+mount-list render now runs with no lock held, and `territory_format_ns` asserts IRQs
+are enabled.
 
 Per-thread telemetry fields are read with relaxed atomic loads, because the
 scheduler mutates a running peer's state and band **lock-free**; a plain read
@@ -903,9 +936,10 @@ performance backlog.
   re-stop; only the named thread is held to one instruction (above).
 - **`wait` is level-triggered**: an already-stopped target returns immediately
   rather than delivering one message per stop edge.
-- **Deep renders truncate.** `ns` with long mount paths, `maps` with many
-  regions, and `kstack` past 2 KiB all truncate at a line boundary; the fix is
-  an offset-aware multi-read.
+- **Deep renders truncate.** `maps` with many regions and `kstack` past 2 KiB
+  truncate at a line boundary; the fix is an offset-aware multi-read, which
+  `ns` has had since the dynamic mount table made a long listing reachable
+  by count (2026-10-19).
 - **`cmdline` is a placeholder** that reports a fixed string rather than argv.
 - **Proxying `environ` needs a deputy that acts with its client's authority.**
   The gate keys on the *reader*, so a server proxying this file is authorized as

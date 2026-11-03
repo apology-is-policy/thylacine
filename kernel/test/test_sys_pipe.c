@@ -296,6 +296,7 @@ struct pa_seen {
     s64  sent;       // bytes written to the client-to-server pipe; < 0: fixture failed
     bool origin, origin_named;   // the root's /proc/<pid>/ns name (dev9p_spoor_origin)
     char origin_dc;
+    u32  client_end, server_end; // the session's create ends (M7)
 };
 
 static int pa_stage(struct Proc *p, hidx_t wr, u8 type, u16 tag) {
@@ -326,7 +327,7 @@ static const u8 g_pa_aname[SYS_ATTACH_ANAME_MAX + 8] = { '/' };
 
 static struct pa_seen pipe_attach_ex(u64 flags, u64 n_uname, u64 aname_len,
                                      bool null_aname, enum pa_ends ends) {
-    struct pa_seen r = { 0x7BAD, false, false, false, -1, false, false, 0 };
+    struct pa_seen r = { 0x7BAD, false, false, false, -1, false, false, 0, 0xBADu, 0xBADu };
     struct Proc *p = make_test_proc();
     if (!p) return r;
     p->principal_id = 0x1234u;
@@ -353,8 +354,10 @@ static struct pa_seen pipe_attach_ex(u64 flags, u64 n_uname, u64 aname_len,
                                         ? dev9p_priv_of((struct Spoor *)h.obj) : NULL;
             r.attached = rp != NULL && rp->client != NULL;
             if (r.attached) {
-                r.cape   = rp->client->cape;
-                r.remote = rp->client->remote;
+                r.cape       = rp->client->cape;
+                r.remote     = rp->client->remote;
+                r.client_end = rp->client->client_end;
+                r.server_end = rp->client->server_end;
                 const struct Path *on = NULL;
                 r.origin = dev9p_spoor_origin((struct Spoor *)h.obj, &on, &r.origin_dc);
                 r.origin_named = on != NULL;
@@ -384,6 +387,15 @@ void test_sys_attach_9p_names_root_by_its_pipe(void) {
     TEST_ASSERT(r.origin, "its root carries the name of the file it came over");
     TEST_ASSERT(!r.origin_named, "a pipe has no name");
     TEST_EXPECT_EQ((u64)(u8)r.origin_dc, (u64)(u8)DEVPIPE_DC, "so the root reads the pipe's device spec");
+}
+
+// M7 (IDENTITY-DESIGN 9.7): the kernel does not know the server behind a
+// caller-supplied transport, so the session has one recorded end, the attacher.
+void test_sys_attach_9p_stamps_attacher_end(void) {
+    struct pa_seen r = pipe_attach(0);
+    TEST_ASSERT(r.ret >= 0 && r.attached, "a pipe attach attaches");
+    TEST_EXPECT_EQ((u64)r.client_end, 0x1234ull, "client end = the attacher");
+    TEST_EXPECT_EQ((u64)r.server_end, (u64)PRINCIPAL_INVALID, "no server end");
 }
 
 // SYS_ATTACH_9P's refusals, each before a byte reaches the wire. The admitted
@@ -523,6 +535,35 @@ void test_sys_prw_pipe_not_seekable(void) {
     TEST_ASSERT(got[0] == 1 && got[3] == 4, "payload intact");
 
     drop_test_proc(p);
+}
+
+// A buffer outside the user half is EFAULT for the positioned twins exactly as
+// for SYS_READ / SYS_WRITE (#100); it used to be a flat -1, which a Linux-shaped
+// caller reads as EPERM and Pouch as EIO. The control is the same call with an
+// in-range buffer: the guard passes it and the free fd answers instead, so an
+// EFAULT from the kernel-range leg is the guard's and nobody else's.
+void test_sys_prw_bad_buffer_is_efault(void) {
+    struct Proc *p = make_test_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    const u64 kern_va = 0x0000800000000000ull;   // == UACCESS_USER_VA_TOP
+    const u64 user_ok = 0x40000ull;
+
+    s64 rk = sys_pread_for_test(p, 5, kern_va, 1, 0);
+    s64 wk = sys_pwrite_for_test(p, 5, kern_va, 1, 0);
+    s64 rn = sys_pread_for_test(p, 5, 0, 1, 0);
+    s64 wn = sys_pwrite_for_test(p, 5, 0, 1, 0);
+    s64 rc = sys_pread_for_test(p, 5, user_ok, 1, 0);
+    s64 wz = sys_pwrite_for_test(p, 5, kern_va, 0, 0);
+    drop_test_proc(p);
+
+    TEST_EXPECT_EQ(rk, -(s64)T_E_FAULT, "pread into the kernel half is EFAULT");
+    TEST_EXPECT_EQ(wk, -(s64)T_E_FAULT, "pwrite from the kernel half is EFAULT");
+    TEST_EXPECT_EQ(rn, -(s64)T_E_FAULT, "pread into NULL is EFAULT");
+    TEST_EXPECT_EQ(wn, -(s64)T_E_FAULT, "pwrite from NULL is EFAULT");
+    TEST_ASSERT(rc < 0 && rc != -(s64)T_E_FAULT,
+                "CONTROL: an in-range buffer passes the guard; the free fd refuses");
+    TEST_ASSERT(wz < 0 && wz != -(s64)T_E_FAULT,
+                "CONTROL: zero length touches no buffer; the free fd refuses");
 }
 
 void test_sys_pread_devramfs_offset_and_cursor(void) {

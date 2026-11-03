@@ -19,12 +19,14 @@ pub mod file;
 pub mod metadata;
 pub mod options;
 pub mod path;
+mod times;
 
 pub use self::dir::{read_dir, DirEntry, ReadDir};
 pub use self::file::File;
 pub use self::metadata::Metadata;
 pub use self::options::OpenOptions;
 pub use self::path::{Component, Components, Display, Path, PathBuf, SEPARATOR};
+pub use self::times::FileTimes;
 
 // =============================================================================
 // Free functions (mirror std::fs's top-level functions).
@@ -48,19 +50,19 @@ pub fn metadata<P: AsRef<Path>>(path: P) -> Result<Metadata> {
 /// write, matching POSIX chmod) -- then writes only the mode (`T_WSTAT_MODE`).
 /// The kernel re-runs the owner perm_check. `mode` is masked to the 9 rwx bits.
 pub fn chmod<P: AsRef<Path>>(path: P, mode: u32) -> Result<()> {
-    let f = File::open_stalk(path.as_ref(), crate::T_OPATH)?;
-    // SAFETY: t_wstat is the SYS_WSTAT SVC wrapper; f.as_raw_fd() is a live
-    // KOBJ_SPOOR; uid/gid are ignored when only T_WSTAT_MODE is set.
-    let rc = unsafe {
-        crate::t_wstat(
-            f.as_raw_fd() as i64,
-            crate::T_WSTAT_MODE,
-            mode & crate::T_WSTAT_MODE_MASK,
-            0,
-            0,
-        )
-    };
-    Error::from_syscall_return(rc).map(|_| ())
+    File::open_stalk(path.as_ref(), crate::T_OPATH)?.chmod(mode)
+}
+
+/// Set `path`'s access and/or modification times (POSIX utimensat), following
+/// a final symlink. Opens `T_OPATH` as `chmod` does, so it works on a
+/// directory and on a file the caller cannot open for writing. A `FileTimes`
+/// that changes nothing succeeds without looking `path` up, as POSIX's two
+/// `UTIME_OMIT` do.
+pub fn set_times<P: AsRef<Path>>(path: P, times: FileTimes) -> Result<()> {
+    if times == FileTimes::new() {
+        return Ok(());
+    }
+    File::open_stalk(path.as_ref(), crate::T_OPATH)?.set_times(times)
 }
 
 /// `true` iff `path` exists and is reachable to the caller (open

@@ -38,9 +38,11 @@
 // handle_acquire_obj / handle_release_obj; all are SMP-safe (burrow gained a
 // per-Burrow lock in #847, the rest are atomic ACQ_REL).
 
+#include <thylacine/dev.h>
 #include <thylacine/devsrv.h>
 #include <thylacine/dma_handle.h>
 #include <thylacine/extinction.h>
+#include <thylacine/errno.h>
 #include <thylacine/handle.h>
 #include <thylacine/irqfwd.h>
 #include <thylacine/loom.h>
@@ -49,6 +51,7 @@
 #include <thylacine/proc.h>
 #include <thylacine/spoor.h>
 #include <thylacine/srvconn.h>
+#include <thylacine/syscall.h>
 #include <thylacine/types.h>
 #include <thylacine/burrow.h>
 #include <thylacine/visibility.h>
@@ -327,6 +330,280 @@ void handle_private_exec_latch(struct Proc *p) {
     spin_unlock(&t->lock);
 }
 
+// A slot has come to name obj. Under the table lock.
+static void handle_fd_count(enum kobj_kind kind, void *obj) {
+    if (kind == KOBJ_SPOOR && obj) spoor_fd_ref((struct Spoor *)obj);
+}
+
+// =============================================================================
+// B-3h: the Proc owner of SYS_FILE_LOCK_PROC locks (ARCH 9.6.11; the contract is
+// at struct lock_owner_ent in handle.h).
+// =============================================================================
+
+static struct HandleTable *proc_handles_or_extinct(struct Proc *p);
+
+// The entry naming c's file, or NULL. Under t->lock. Dev.lock_same_file is
+// non-blocking by contract, and is asked only of an entry of c's own Dev.
+static struct lock_owner_ent *lock_owner_find_locked(struct HandleTable *t,
+                                                     struct Spoor *c) {
+    struct Dev *d = c->dev;
+    if (!d || !d->lock_same_file) return NULL;
+    for (u32 i = 0; i < t->nlockowners; i++) {
+        struct lock_owner_ent *e = &t->lockowners[i];
+        if (!e->dead && e->spoor->dev == d && d->lock_same_file(e->spoor, c))
+            return e;
+    }
+    return NULL;
+}
+
+// Remove an entry, keeping the live ones packed at the front. Under t->lock;
+// the caller owns the returned Spoor's table reference.
+static struct Spoor *lock_owner_remove_locked(struct HandleTable *t,
+                                              struct lock_owner_ent *e) {
+    struct Spoor *sp = e->spoor;
+    struct lock_owner_ent *last = &t->lockowners[t->nlockowners - 1];
+    *e = *last;
+    last->spoor   = NULL;
+    last->users   = 0;
+    last->granted = 0;
+    last->dead    = 0;
+    // Stored atomically: lock_owners_on_close reads the count without t->lock.
+    __atomic_store_n(&t->nlockowners, t->nlockowners - 1, __ATOMIC_RELAXED);
+    return sp;
+}
+
+int handle_lock_owner_get(struct Proc *p, struct Spoor *c, bool mint,
+                          struct Spoor **out) {
+    struct HandleTable *t = proc_handles_or_extinct(p);
+    *out = NULL;
+    struct Dev *d = c ? c->dev : NULL;
+    if (!d || !d->lock || !d->lock_owner || !d->lock_same_file)
+        return -T_E_NOLCK;
+    // Settle which file c names before any entry is compared with it: an
+    // entry may name the file that took the number of c's dead one.
+    if (d->lock_ident) {
+        int ir = d->lock_ident(c);
+        if (ir != 0) return ir;
+    }
+
+    spin_lock(&t->lock);
+    struct lock_owner_ent *e = lock_owner_find_locked(t, c);
+    if (e) {
+        e->users++;
+        spoor_ref(e->spoor);
+        *out = e->spoor;
+    }
+    spin_unlock(&t->lock);
+    if (*out || !mint) return 0;
+
+    // Minting sends a walk, so it runs outside the table lock; a peer that
+    // minted the same file meanwhile wins, and ours is dropped.
+    int err = -T_E_NOLCK;
+    struct Spoor *n = d->lock_owner(c, &err);
+    if (!n) return err < 0 ? err : -T_E_NOLCK;
+
+    struct Spoor *drop = NULL;
+    int rc = 0;
+    spin_lock(&t->lock);
+    e = lock_owner_find_locked(t, c);
+    if (e) {
+        e->users++;
+        spoor_ref(e->spoor);
+        *out = e->spoor;
+        drop = n;
+    } else if (t->nlockowners >= PROC_LOCK_OWNER_MAX) {
+        drop = n;
+        rc = -T_E_NOLCK;
+    } else {
+        e = &t->lockowners[t->nlockowners];
+        __atomic_store_n(&t->nlockowners, t->nlockowners + 1, __ATOMIC_RELAXED);
+        e->spoor   = n;            // the mint's reference becomes the table's
+        e->users   = 1;
+        e->granted = 0;
+        e->dead    = 0;
+        spoor_ref(n);              // and this one the caller's
+        *out = n;
+    }
+    spin_unlock(&t->lock);
+    if (drop) spoor_clunk(drop);   // nothing was locked on it
+    return rc;
+}
+
+void handle_lock_owner_put(struct Proc *p, struct Spoor *owner, bool granted) {
+    if (!owner) return;
+    struct HandleTable *t = proc_handles_or_extinct(p);
+    struct Spoor *drop = NULL;
+    spin_lock(&t->lock);
+    // An entry is only ever removed with users == 0, so it is still here.
+    for (u32 i = 0; i < t->nlockowners; i++) {
+        struct lock_owner_ent *e = &t->lockowners[i];
+        if (e->spoor != owner) continue;
+        if (e->users == 0) extinction("handle_lock_owner_put: entry not in use");
+        if (granted) e->granted = 1;
+        if (--e->users == 0 && (!e->granted || e->dead))
+            drop = lock_owner_remove_locked(t, e);
+        break;
+    }
+    spin_unlock(&t->lock);
+    spoor_clunk(owner);            // the caller's reference
+    if (drop) spoor_clunk(drop);   // the table's: it holds no lock
+}
+
+void handle_lock_owner_retire(struct Proc *p, struct Spoor *owner) {
+    if (!owner) return;
+    struct HandleTable *t = proc_handles_or_extinct(p);
+    spin_lock(&t->lock);
+    for (u32 i = 0; i < t->nlockowners; i++) {
+        struct lock_owner_ent *e = &t->lockowners[i];
+        if (e->spoor != owner) continue;
+        if (e->users == 0) extinction("handle_lock_owner_retire: entry not in use");
+        e->dead = 1;
+        break;
+    }
+    spin_unlock(&t->lock);
+}
+
+// The per-slot walk: one slot per lock hold, so no sync runs under the lock.
+// A slot closed or reused mid-walk is either seen or not. A descriptor of the
+// file opened after the walk passed its slot was opened during the event that
+// asked for it: a cached open minted before a take's grant keeps its snapshot
+// under the lock (ARCH 9.6.11).
+static int lock_sync_table(struct HandleTable *t, struct Spoor *owner, u32 how) {
+    struct Dev *d = owner->dev;
+    if (!d || !d->lock_sync || !d->lock_same_file) return 0;
+    for (int i = 0; i < PROC_HANDLE_MAX; i++) {
+        struct Spoor *sp = NULL;
+        spin_lock(&t->lock);
+        struct Handle *h = &t->slots[i];
+        if (h->magic == HANDLE_MAGIC && h->kind == KOBJ_SPOOR && h->obj) {
+            struct Spoor *c = (struct Spoor *)h->obj;
+            if (c->dev == d && d->lock_same_file(owner, c)) {
+                spoor_ref(c);
+                sp = c;
+            }
+        }
+        spin_unlock(&t->lock);
+        if (sp) {
+            int rc = d->lock_sync(sp, how);
+            spoor_clunk(sp);
+            // A release lands what it can. A take that cannot have an open of
+            // its file read the server is refused, unless that open answers
+            // ESTALE: it can no longer reach the file (a loose cached open of a
+            // file renamed since) and keeps its snapshot, and the take through
+            // the descriptor that can reach it stands. A dead file refuses that
+            // descriptor's own sync first.
+            if (rc != 0 && rc != -T_E_STALE && how == DEV_LOCK_SYNC_ACQUIRE)
+                return rc;
+        }
+    }
+    return 0;
+}
+
+int handle_lock_sync_file(struct Proc *p, struct Spoor *owner, u32 how) {
+    if (!owner) return 0;
+    return lock_sync_table(proc_handles_or_extinct(p), owner, how);
+}
+
+u32 handle_lock_owner_count(struct Proc *p) {
+    struct HandleTable *t = proc_handles_or_extinct(p);
+    spin_lock(&t->lock);
+    u32 n = t->nlockowners;
+    spin_unlock(&t->lock);
+    return n;
+}
+
+// A descriptor naming `obj` has just left t (its slot is already empty) and obj
+// is not yet released. Linux drops every POSIX lock the process holds on the
+// file at any close of it, so if the Proc owns locks on obj's file: land the
+// file's staged writes (obj's own, and every other open of it the table still
+// holds), unlock the whole file through the entry and wait for the answer, and
+// remove the entry unless a lock call is using it (struct lock_owner_ent). The
+// release is sent only after the flushes return (ARCH 9.6.11).
+static void lock_owners_on_close(struct HandleTable *t, enum kobj_kind kind,
+                                 void *obj) {
+    if (kind != KOBJ_SPOOR || !obj) return;
+    // A navigation-only descriptor is no open of the file, and chmod(path) and
+    // utimensat(path) close one inside the call. Linux's filp_flush skips the
+    // POSIX-lock release under FMODE_PATH.
+    if (((struct Spoor *)obj)->flag & CWALKONLY) return;
+    // Read without t->lock. An entry inserted before the slot was emptied (both
+    // under t->lock) is visible here; one inserted after was taken after this
+    // close, and the post-grant fd re-check covers a take through this fd.
+    if (__atomic_load_n(&t->nlockowners, __ATOMIC_RELAXED) == 0) return;
+    struct Spoor *c = (struct Spoor *)obj;
+
+    // An entry found by number alone may name the file that took the number
+    // of c's dead one, so a candidate makes c learn its identity first (a
+    // round trip at most once per Spoor, and only on a match). If c cannot
+    // learn it, no entry can be shown to name c's file, and an entry that
+    // names another file must keep its locks; one that does name c's file
+    // keeps them until the Proc's next close of the file or its exit.
+    struct Dev *cd = c->dev;
+    if (cd && cd->lock_ident) {
+        spin_lock(&t->lock);
+        bool candidate = lock_owner_find_locked(t, c) != NULL;
+        spin_unlock(&t->lock);
+        if (!candidate) return;
+        if (cd->lock_ident(c) != 0) return;
+    }
+
+    struct Spoor *owner = NULL;
+    spin_lock(&t->lock);
+    struct lock_owner_ent *e = lock_owner_find_locked(t, c);
+    if (e) {
+        e->users++;
+        spoor_ref(e->spoor);
+        owner = e->spoor;
+    }
+    spin_unlock(&t->lock);
+    if (!owner) return;
+
+    struct Dev *d = owner->dev;
+    if (d->lock_sync) (void)d->lock_sync(c, DEV_LOCK_SYNC_RELEASE);
+    (void)lock_sync_table(t, owner, DEV_LOCK_SYNC_RELEASE);
+    // A refusal (a dying thread cannot send) still removes the entry below, and
+    // its clunk releases every lock the fid held.
+    (void)d->lock(owner, SYS_FILE_LOCK_UN, 0, 0, NULL);
+
+    struct Spoor *drop = NULL;
+    spin_lock(&t->lock);
+    for (u32 i = 0; i < t->nlockowners; i++) {
+        if (t->lockowners[i].spoor != owner) continue;
+        if (--t->lockowners[i].users == 0)
+            drop = lock_owner_remove_locked(t, &t->lockowners[i]);
+        break;
+    }
+    spin_unlock(&t->lock);
+    spoor_clunk(owner);            // this hook's reference
+    if (drop) spoor_clunk(drop);   // the table's
+}
+
+// A slot has stopped naming a Spoor. Its last close runs here, on this thread,
+// though other references may keep the Spoor alive. The lock that close drops
+// admits a waiter, so every open of the file the table still holds lands its
+// writes first (ARCH 9.6.11). 0, or the close's negative errno.
+static int handle_fd_drop(struct HandleTable *t, enum kobj_kind kind, void *obj,
+                          bool heard) {
+    if (kind != KOBJ_SPOOR || !obj) return 0;
+    struct Spoor *c = (struct Spoor *)obj;
+    if (!spoor_fd_drop(c)) return 0;
+    struct Dev *d = c->dev;
+    if (!d || !d->fd_close) return 0;
+    if (d->lock_held && d->lock_held(c))
+        (void)lock_sync_table(t, c, DEV_LOCK_SYNC_RELEASE);
+    return d->fd_close(c, heard);
+}
+
+// A descriptor naming `obj` has left t, by close or by replacement: the Proc's
+// locks on the file, the last close if it was one, then the slot's reference.
+static int handle_fd_left(struct HandleTable *t, enum kobj_kind kind, void *obj,
+                          bool heard) {
+    lock_owners_on_close(t, kind, obj);
+    int frc = handle_fd_drop(t, kind, obj, heard);
+    int crc = handle_release_owner(kind, obj);
+    return frc ? frc : crc;
+}
+
 void handle_table_free(struct HandleTable *t) {
     if (!t) return;
 
@@ -351,8 +628,15 @@ void handle_table_free(struct HandleTable *t) {
     // table -- breaks the self-only premise and would need the table lock
     // here AND coordination with the #926/#68 at-exit close. The
     // slot-zeroing is belt-and-suspenders before the kfree.
+    // B-3h: land each locked file's staged writes before its owner gives the
+    // lock up. The entries go after the slots: a last close that cannot wait
+    // hands its run and its clunk to a closer, and the owner's clunk must not
+    // overtake it.
+    for (u32 j = 0; j < t->nlockowners; j++)
+        lock_sync_table(t, t->lockowners[j].spoor, DEV_LOCK_SYNC_RELEASE);
     for (int i = 0; i < PROC_HANDLE_MAX; i++) {
         if (t->slots[i].magic == HANDLE_MAGIC) {
+            (void)handle_fd_drop(t, t->slots[i].kind, t->slots[i].obj, /*heard=*/false);
             handle_release_owner(t->slots[i].kind, t->slots[i].obj);
             t->slots[i].magic  = 0;
             t->slots[i].kind   = KOBJ_INVALID;
@@ -360,6 +644,13 @@ void handle_table_free(struct HandleTable *t) {
             t->slots[i].obj    = NULL;
             __atomic_fetch_add(&g_handle_freed, 1, __ATOMIC_RELAXED);
         }
+    }
+    while (t->nlockowners) {
+        struct Spoor *sp = lock_owner_remove_locked(t, &t->lockowners[0]);
+        // No slot ever named an owner, so nothing counted it: this is its
+        // last close.
+        if (sp->dev->fd_close) (void)sp->dev->fd_close(sp, /*heard=*/false);
+        spoor_clunk(sp);
     }
     kfree(t);
 }
@@ -437,6 +728,7 @@ static void handle_fill_locked(struct HandleTable *t, hidx_t i, enum kobj_kind k
     t->slots[i].kind   = kind;
     t->slots[i].rights = rights;
     t->slots[i].obj    = obj;
+    handle_fd_count(kind, obj);
     cloexec_set_locked(t, i, cloexec);
     __atomic_fetch_add(&g_handle_allocated, 1, __ATOMIC_RELAXED);
 }
@@ -601,7 +893,7 @@ void handle_unreserve(struct Proc *p, hidx_t h) {
 // only while it still names (kind, obj) when `obj` is non-NULL, decided in the
 // same hold as the vacate; *close_rc is what the object's last close reported.
 static int handle_close_matching(struct Proc *p, hidx_t h, enum kobj_kind kind,
-                                 const void *obj, int *close_rc) {
+                                 const void *obj, int *close_rc, bool heard) {
     struct HandleTable *t = proc_handles_or_extinct(p);
 
     *close_rc = 0;
@@ -634,24 +926,24 @@ static int handle_close_matching(struct Proc *p, hidx_t h, enum kobj_kind kind,
     __atomic_fetch_add(&g_handle_freed, 1, __ATOMIC_RELAXED);
     spin_unlock(&t->lock);
 
-    *close_rc = handle_release_owner(gone_kind, gone_obj);
+    *close_rc = handle_fd_left(t, gone_kind, gone_obj, heard);
     return 0;
 }
 
 int handle_close_report(struct Proc *p, hidx_t h, int *close_rc) {
-    return handle_close_matching(p, h, KOBJ_INVALID, NULL, close_rc);
+    return handle_close_matching(p, h, KOBJ_INVALID, NULL, close_rc, /*heard=*/true);
 }
 
 VISIBLE_IF_KERNEL_TESTS
 int handle_close(struct Proc *p, hidx_t h) {
     int close_rc;
-    return handle_close_matching(p, h, KOBJ_INVALID, NULL, &close_rc);
+    return handle_close_matching(p, h, KOBJ_INVALID, NULL, &close_rc, /*heard=*/false);
 }
 
 int handle_close_obj(struct Proc *p, hidx_t h, enum kobj_kind kind, const void *obj) {
     if (!obj) return -1;
     int close_rc;
-    return handle_close_matching(p, h, kind, obj, &close_rc);
+    return handle_close_matching(p, h, kind, obj, &close_rc, /*heard=*/false);
 }
 
 #ifdef KERNEL_TESTS
@@ -718,13 +1010,14 @@ int handle_replace_hooked(struct Proc *p, hidx_t h, const void *expect,
     slot->rights = rights;
     slot->obj    = obj;
     t->installs++;
+    handle_fd_count(kind, obj);
     if (under_lock) under_lock(arg);
     spin_unlock(&t->lock);
 
     // May sleep (spoor_clunk's Dev close hook) -- outside the lock, and after
     // the new object is already installed, so the slot is never momentarily
     // empty for a peer thread to allocate into.
-    handle_release_owner(old_kind, old_obj);
+    (void)handle_fd_left(t, old_kind, old_obj, /*heard=*/false);
     return 0;
 }
 
@@ -769,6 +1062,35 @@ void handle_put(struct Handle *h) {
     h->kind   = KOBJ_INVALID;
     h->rights = RIGHT_NONE;
     h->obj    = NULL;
+}
+
+// A spawn's endowment: the slot's Spoor, with its reference and a descriptor's
+// count taken in one hold, so no peer's close between them can be the last. The
+// count stands until the child's table holds the file (ARCH 9.6.11). A slot of
+// any other kind answers -1, as a bad index does.
+int handle_endow_spoor(struct Proc *p, hidx_t h, struct Spoor **out,
+                       rights_t *rights_out) {
+    if (!p || p->magic != PROC_MAGIC || !p->handles) return -1;
+    if (h < 0 || h >= PROC_HANDLE_MAX) return -1;
+    struct HandleTable *t = p->handles;
+    spin_lock(&t->lock);
+    struct Handle *slot = &t->slots[h];
+    if (slot->magic != HANDLE_MAGIC || slot->kind != KOBJ_SPOOR) {
+        spin_unlock(&t->lock);
+        return -1;
+    }
+    handle_acquire_obj(KOBJ_SPOOR, slot->obj);
+    handle_fd_count(KOBJ_SPOOR, slot->obj);
+    *out        = (struct Spoor *)slot->obj;
+    *rights_out = slot->rights;
+    spin_unlock(&t->lock);
+    return 0;
+}
+
+// An endowment no table took: a descriptor's close, then its reference.
+void handle_endow_drop(struct Proc *p, struct Spoor *c) {
+    (void)handle_fd_drop(p->handles, KOBJ_SPOOR, c, /*heard=*/false);
+    spoor_clunk(c);
 }
 
 void handle_snapshot_spoor(struct Handle *out, struct Spoor *sp) {
@@ -869,6 +1191,7 @@ int handle_table_copy_into_hooked(struct Proc *dst, struct Proc *src,
         // an inherited fd silently less capable than the one it was forked from.
         dt->slots[i].rights = s->rights;
         dt->slots[i].obj    = s->obj;
+        handle_fd_count(s->kind, s->obj);
         // #151: fork PRESERVES close-on-exec -- POSIX, and the only reading that
         // makes the flag usable. A shell sets it on a bookkeeping fd once and
         // then forks per command; clearing it here would leak that fd into every
@@ -898,12 +1221,19 @@ int handle_table_copy_into_hooked(struct Proc *dst, struct Proc *src,
 // create a second handle naming one object and so face the same hazards.
 // `into` >= 0 fills that reservation instead of scanning from min_idx; a
 // refusal then leaves the reservation in place for the caller to return.
-static hidx_t handle_dup_common(struct Proc *p, hidx_t h, rights_t new_rights,
-                                bool inherit_rights, hidx_t min_idx,
-                                bool cloexec, hidx_t into) {
+//
+// B-3b: the reason for a refusal is decided HERE, under the lock that decided
+// it -- -T_E_BADF (no such source), -T_E_INVAL (min_idx out of range),
+// -T_E_ACCES (a kind or rights the dup may not copy), -T_E_MFILE (no free slot
+// at or above min_idx) -- so no caller has to re-query a slot to tell them
+// apart (a re-query races a peer's close or reuse). The flat-error wrappers
+// below keep their -1 contract. A closed source outranks a bad minimum, as
+// Linux's fcntl looks the descriptor up before it reads the argument.
+static int handle_dup_common(struct Proc *p, hidx_t h, rights_t new_rights,
+                             bool inherit_rights, hidx_t min_idx,
+                             bool cloexec, hidx_t into) {
     struct HandleTable *t = proc_handles_or_extinct(p);
-    if (h < 0 || h >= PROC_HANDLE_MAX) return -1;
-    if (min_idx < 0 || min_idx >= PROC_HANDLE_MAX) return -1;
+    if (h < 0 || h >= PROC_HANDLE_MAX) return -T_E_BADF;
 
     // #844: validate the parent + acquire the child's ref + install the child
     // slot under ONE table-lock hold, so a concurrent handle_close of the
@@ -915,7 +1245,11 @@ static hidx_t handle_dup_common(struct Proc *p, hidx_t h, rights_t new_rights,
     struct Handle *parent = &t->slots[h];
     if (parent->magic != HANDLE_MAGIC) {
         spin_unlock(&t->lock);
-        return -1;
+        return -T_E_BADF;
+    }
+    if (min_idx < 0 || min_idx >= PROC_HANDLE_MAX) {
+        spin_unlock(&t->lock);
+        return -T_E_INVAL;
     }
 
     // P4-Ib NoHwDup + P5-corvus-srv NoSrvDup: dup is forbidden for every
@@ -927,7 +1261,7 @@ static hidx_t handle_dup_common(struct Proc *p, hidx_t h, rights_t new_rights,
     //   - Srv: exactly one connection Spoor per Proc (CORVUS-DESIGN.md §6.2).
     if (!kobj_kind_is_transferable(parent->kind)) {
         spin_unlock(&t->lock);
-        return -1;
+        return -T_E_ACCES;
     }
 
     // stalk-3b-β NoSrvSpoorDup: a devsrv Spoor (dc='s' -- a /srv root, a
@@ -938,7 +1272,7 @@ static hidx_t handle_dup_common(struct Proc *p, hidx_t h, rights_t new_rights,
     if (parent->kind == KOBJ_SPOOR && parent->obj &&
         ((struct Spoor *)parent->obj)->dc == 's') {
         spin_unlock(&t->lock);
-        return -1;
+        return -T_E_ACCES;
     }
 
     // #151: POSIX dup gives the new descriptor the SAME access as the old, so
@@ -956,11 +1290,11 @@ static hidx_t handle_dup_common(struct Proc *p, hidx_t h, rights_t new_rights,
     // where `new_rights` comes from should still have to clear this bar.
     if ((new_rights & parent->rights) != new_rights) {
         spin_unlock(&t->lock);
-        return -1;
+        return -T_E_ACCES;
     }
     if (!valid_alloc_args(parent->kind, new_rights)) {
         spin_unlock(&t->lock);
-        return -1;
+        return -T_E_ACCES;
     }
 
     // Capture BEFORE install (the install skips the occupied parent slot, so
@@ -985,54 +1319,63 @@ static hidx_t handle_dup_common(struct Proc *p, hidx_t h, rights_t new_rights,
         // Roll back the acquire on table-full, OUTSIDE the lock (release may
         // sleep for a Spoor's last drop; harmless for the kinds dup allows).
         handle_release_obj(kind, obj);
+        return -T_E_MFILE;
     }
     return child;
 }
 
 hidx_t handle_dup(struct Proc *p, hidx_t h, rights_t new_rights) {
-    return handle_dup_common(p, h, new_rights, /*inherit_rights=*/false,
-                             /*min_idx=*/0, /*cloexec=*/false, /*into=*/-1);
+    int r = handle_dup_common(p, h, new_rights, /*inherit_rights=*/false,
+                              /*min_idx=*/0, /*cloexec=*/false, /*into=*/-1);
+    return r < 0 ? -1 : (hidx_t)r;
+}
+
+int handle_dup_posix_checked(struct Proc *p, hidx_t h, hidx_t min_idx,
+                             bool cloexec) {
+    return handle_dup_common(p, h, RIGHT_NONE, /*inherit_rights=*/true,
+                             min_idx, cloexec, /*into=*/-1);
 }
 
 #ifdef KERNEL_TESTS
 hidx_t handle_dup_posix(struct Proc *p, hidx_t h, hidx_t min_idx, bool cloexec) {
-    return handle_dup_common(p, h, RIGHT_NONE, /*inherit_rights=*/true,
-                             min_idx, cloexec, /*into=*/-1);
+    int r = handle_dup_posix_checked(p, h, min_idx, cloexec);
+    return r < 0 ? -1 : (hidx_t)r;
 }
 #endif // KERNEL_TESTS
 
 int handle_dup_into_reserved(struct Proc *p, hidx_t src, hidx_t h, bool cloexec) {
     if (h < 0 || h >= PROC_HANDLE_MAX)
         extinction("handle_dup_into_reserved: slot not reserved");
-    return handle_dup_common(p, src, RIGHT_NONE, /*inherit_rights=*/true,
-                             /*min_idx=*/0, cloexec, h) < 0 ? -1 : 0;
+    int r = handle_dup_common(p, src, RIGHT_NONE, /*inherit_rights=*/true,
+                              /*min_idx=*/0, cloexec, h);
+    return r < 0 ? r : 0;
 }
 
 // #157: dup onto a SPECIFIC index. The header carries the contract and why this
 // is not close-then-dup; the body is handle_dup_common's capture-and-acquire
 // followed by handle_replace's install-then-release-outside-the-lock, with the
 // install going to a caller-named slot that may be free.
-hidx_t handle_dup_to(struct Proc *p, hidx_t old, hidx_t new_h, bool cloexec) {
+int handle_dup_to_checked(struct Proc *p, hidx_t old, hidx_t new_h, bool cloexec) {
     struct HandleTable *t = proc_handles_or_extinct(p);
-    if (old < 0   || old   >= PROC_HANDLE_MAX) return -1;
-    if (new_h < 0 || new_h >= PROC_HANDLE_MAX) return -1;
+    if (old < 0   || old   >= PROC_HANDLE_MAX) return -T_E_BADF;
+    if (new_h < 0 || new_h >= PROC_HANDLE_MAX) return -T_E_BADF;
     // Defence in depth: the caller returns EINVAL for this. Serving it here
     // would be nearly harmless (acquire, capture the same slot, install the
     // same values, release -- net zero) EXCEPT that it would set cloexec on a
     // descriptor POSIX says dup2 returns untouched. Refusing is one line.
-    if (old == new_h) return -1;
+    if (old == new_h) return -T_E_INVAL;
 
     table_lock(t);
     struct Handle *src = &t->slots[old];
     if (src->magic != HANDLE_MAGIC) {
         spin_unlock(&t->lock);
-        return -1;
+        return -T_E_BADF;
     }
     // The SAME predicate handle_dup and the fork copy use -- all three create a
     // second handle naming one object, so all three must answer identically.
     if (!handle_slot_may_alias(src)) {
         spin_unlock(&t->lock);
-        return -1;
+        return -T_E_ACCES;
     }
 
     // Another call's number in flight: Linux's dup2/dup3 answer EBUSY here.
@@ -1064,6 +1407,7 @@ hidx_t handle_dup_to(struct Proc *p, hidx_t old, hidx_t new_h, bool cloexec) {
     dst->kind   = kind;
     dst->rights = rights;
     dst->obj    = obj;
+    handle_fd_count(kind, obj);
     // #151: SET, not inherited. dup2's new descriptor is close-on-exec exactly
     // when the caller asked (dup3's O_CLOEXEC), regardless of what `old` or the
     // previous occupant of this index carried. Inheriting from `old` is the
@@ -1079,8 +1423,14 @@ hidx_t handle_dup_to(struct Proc *p, hidx_t old, hidx_t new_h, bool cloexec) {
     // the new object is installed, so the slot is never momentarily empty for a
     // peer thread to allocate into. handle_replace does it in this order for
     // the same reason.
-    if (had) handle_release_owner(old_kind, old_obj);
+    if (had) (void)handle_fd_left(t, old_kind, old_obj, /*heard=*/false);
     return new_h;
+}
+
+// Preserve the historical flat-error contract for existing Vivarium callers.
+hidx_t handle_dup_to(struct Proc *p, hidx_t old, hidx_t new_h, bool cloexec) {
+    int ret = handle_dup_to_checked(p, old, new_h, cloexec);
+    return ret < 0 ? -1 : (hidx_t)ret;
 }
 
 int handle_set_cloexec(struct Proc *p, hidx_t h, bool on) {
@@ -1170,6 +1520,29 @@ int handle_get_status_flags(struct Proc *p, hidx_t h,
         // flag is RMW'd from other lock domains (see handle_set_nonblock) --
         // read it atomically even under this table's lock.
         if (nonblock_out) *nonblock_out = (spoor_flag_get(s) & CNONBLOCK) != 0;
+    }
+    spin_unlock(&t->lock);
+    return 0;
+}
+
+int handle_get_status(struct Proc *p, hidx_t h, struct handle_status *out) {
+    out->cloexec  = false;
+    out->omode    = 0;
+    out->nonblock = false;
+
+    struct HandleTable *t = proc_handles_or_extinct(p);
+    if (h < 0 || h >= PROC_HANDLE_MAX) return -1;
+
+    spin_lock(&t->lock);
+    if (t->slots[h].magic != HANDLE_MAGIC) {
+        spin_unlock(&t->lock);
+        return -1;
+    }
+    out->cloexec = cloexec_get_locked(t, h);
+    if (t->slots[h].kind == KOBJ_SPOOR && t->slots[h].obj) {
+        struct Spoor *s = (struct Spoor *)t->slots[h].obj;
+        out->omode    = (u32)s->mode;                        // open-time, plain
+        out->nonblock = (spoor_flag_get(s) & CNONBLOCK) != 0; // see handle_set_nonblock
     }
     spin_unlock(&t->lock);
     return 0;

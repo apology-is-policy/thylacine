@@ -186,6 +186,13 @@ static const struct fixnode g_fix[] = {
     // name walks back to them (stalk.landed_name's union legs).
     { 64, 48, "lnsub",  QTSYMLINK, 0777u, "sub" },
     { 65, 51, "ln3",    QTSYMLINK, 0777u, "../sub" },
+    // The create errno order: `rx` may be searched but not written by its owner,
+    // and holds a file, a directory and a dangling link. Nothing else references
+    // these nodes (the phx pattern).
+    { 66,  0, "rx",     QTDIR,     0555u, NULL },
+    { 67, 66, "kid",    QTFILE,    0644u, NULL },
+    { 68, 66, "sub",    QTDIR,     0755u, NULL },
+    { 69, 66, "lnk",    QTSYMLINK, 0777u, "nosuch" },
 };
 #define FIX_SRV_LO 37u
 #define FIX_SRV_HI 53u
@@ -349,6 +356,10 @@ static int fix_stat_native(struct Spoor *c, struct t_stat *out) {
     return fix_stat_qid(c->qid.path, out);
 }
 
+// dev9p's answer to a multi-name walk that failed at a name it cannot name.
+static bool g_fix_wa_unknown;
+static int  g_fix_wa_unknown_in;   // > 0: the Nth multi-name walk from now answers it
+
 // The POUNCE fixture walk_attrs. Honors the sharpened contract in
 // <thylacine/dev.h>: transitions nc ONLY on a full walk; partial/query leave
 // nc untouched and return w->spoor == NULL.
@@ -365,6 +376,9 @@ static struct Walkqid *fix_walk_attrs(struct Spoor *c, struct Spoor *nc,
     // wrong once was invisible to every name leg in this file.
     if (c->flag & COPEN) return NULL;
     g_fix_walkattrs_calls++;
+    if (g_fix_wa_unknown && nname > 1) return DEV_WALK_ATTRS_UNSUPPORTED;
+    if (nname > 1 && g_fix_wa_unknown_in > 0 && --g_fix_wa_unknown_in == 0)
+        return DEV_WALK_ATTRS_UNSUPPORTED;
 
     struct Walkqid *wq = walkqid_alloc(nname);
     if (!wq) return NULL;
@@ -784,6 +798,31 @@ void test_stalk_missing_component(void) {
 
     struct Spoor *q = stalk(&p, root, "a/nope", 6, STALK_OPEN, 0);
     TEST_ASSERT(q == NULL, "a/nope -> miss -> NULL");
+    spoor_unref(root);
+}
+
+// A fused run that failed at a name the Dev cannot name decides nothing: the
+// resolver walks name by name, so each X gate runs in order and a name that
+// exists stays resolvable.
+void test_stalk_walk_attrs_unknown_failure(void) {
+    struct Proc p; mkproc_system(&p);
+    struct Spoor *root = fix_root();
+    TEST_ASSERT(root != NULL, "fix_root");
+    g_fix_wa_unknown = true;
+    int e = -12345;
+    struct Spoor *deny = stalk_err(&p, root, "nox/sekret", 10, STALK_OPEN, 0, &e);
+    u64 deny_e = (u64)e;
+    e = -12345;
+    struct Spoor *miss = stalk_err(&p, root, "a/nope", 6, STALK_OPEN, 0, &e);
+    u64 miss_e = (u64)e;
+    struct Spoor *ok = stalk_err(&p, root, "a/b", 3, STALK_OPEN, 0, &e);
+    g_fix_wa_unknown = false;
+    TEST_ASSERT(deny == NULL, "nox/sekret is denied");
+    TEST_EXPECT_EQ(deny_e, (u64)T_E_ACCES, "as ACCES: nox's X gate ran");
+    TEST_ASSERT(miss == NULL, "a/nope misses");
+    TEST_EXPECT_EQ(miss_e, (u64)T_E_NOENT, "as NOENT");
+    TEST_ASSERT(ok != NULL, "a/b still resolves");
+    if (ok) spoor_clunk(ok);
     spoor_unref(root);
 }
 
@@ -2163,6 +2202,64 @@ void test_stalk_union_one_member_creates_alike(void) {
     spoor_unref(root);
 }
 
+// A union with more members than the resolver's inline snapshot holds (16,
+// stalk.c UNION_MEMBERS_INLINE) is searched whole: its snapshot is taken again
+// into a heap array sized from the count. Sixteen um1 members come first; um2,
+// the only member holding "only2" and the only one mounted MCREATE, is the
+// seventeenth. So the walk, the create target and the remove's holder reach it
+// only through the heap snapshot, and an open's readdir snapshot holds all
+// seventeen. No Spoor leaks.
+void test_stalk_union_past_the_inline_snapshot(void) {
+    struct Proc p;
+    struct Spoor *root = cross_setup(&p);
+    TEST_ASSERT(root != NULL && p.territory != NULL, "cross_setup");
+    struct Spoor *pt  = stalk(&p, root, "umpt", 4, STALK_MOUNT, 0);
+    struct Spoor *um2 = stalk(&p, root, "um2",  3, STALK_WALK,  0);
+    struct Spoor *um1[16];
+    int resolved = 0;
+    for (int i = 0; i < 16; i++) {
+        um1[i] = stalk(&p, root, "um1", 3, STALK_WALK, 0);
+        if (um1[i]) resolved++;
+    }
+    TEST_ASSERT(pt && um2 && resolved == 16, "resolve umpt, um2 and sixteen um1s");
+    // MREPL first, so no covered member: the union is exactly the seventeen.
+    int mounted = 0;
+    for (int i = 0; i < 16; i++)
+        if (mount(p.territory, um1[i], pt, i == 0 ? MREPL : MAFTER) == 0) mounted++;
+    int seventeenth = mount(p.territory, um2, pt, MAFTER | MCREATE);
+    u64 live_before = spoor_total_allocated() - spoor_total_freed();
+
+    struct Spoor *q = stalk(&p, root, "umpt/only2", 10, STALK_OPEN, 0);
+    u64 walked = q ? q->qid.path : 0;
+    if (q) spoor_clunk(q);
+    int ce = 0, he = 0;
+    struct Spoor *cm = stalk_union_create_member(&p, pt, &ce);
+    u64 create_target = cm ? cm->qid.path : 0;
+    if (cm) spoor_clunk(cm);
+    struct Spoor *hm = stalk_union_member_holding(&p, pt, "only2", &he);
+    u64 holder = hm ? hm->qid.path : 0;
+    if (hm) spoor_clunk(hm);
+    struct Spoor *d = stalk(&p, root, "umpt", 4, STALK_OPEN, 0);
+    int opened = (d && d->union_snap) ? d->union_snap->n : -1;
+    if (d) spoor_clunk(d);
+    u64 live_after = spoor_total_allocated() - spoor_total_freed();
+
+    territory_unref(p.territory);
+    for (int i = 0; i < 16; i++) spoor_clunk(um1[i]);
+    spoor_clunk(um2); spoor_clunk(pt);
+    spoor_unref(root);
+
+    TEST_EXPECT_EQ(mounted, 16, "sixteen um1 members");
+    TEST_EXPECT_EQ(seventeenth, 0, "um2 MAFTER|MCREATE, the seventeenth");
+    TEST_EXPECT_EQ(walked, (u64)27, "the walk reaches um2's only2 past the inline snapshot");
+    TEST_EXPECT_EQ(ce, 0, "the create's snapshot was taken");
+    TEST_EXPECT_EQ(create_target, (u64)25, "the create target is the seventeenth member, um2");
+    TEST_EXPECT_EQ(he, 0, "the remove's snapshot was taken");
+    TEST_EXPECT_EQ(holder, (u64)25, "the member holding only2 is um2");
+    TEST_EXPECT_EQ(opened, 17, "an open of the union holds all seventeen members");
+    TEST_EXPECT_EQ(live_after, live_before, "no Spoor leak across the four");
+}
+
 // =============================================================================
 // UM (union mounts) -- REMOVE targets the member HOLDING the leaf (UM-7 F3).
 //
@@ -3367,6 +3464,41 @@ void test_stalk_pounce_full_walk_past_mount(void) {
     spoor_unref(root);
 }
 
+// A fused run past a mount point re-walks its prefix to the point, and that re-walk
+// can fail where the batch succeeded. A failure of two names answers the sentinel,
+// which the resolver must not take for a Walkqid: it fails closed, as T_E_IO. The
+// control, one variable away, misses in the mounted tree.
+void test_stalk_walk_attrs_unknown_mount_split(void) {
+    struct Proc p;
+    struct Spoor *root = cross_setup(&p);
+    TEST_ASSERT(root != NULL && p.territory != NULL, "cross_setup");
+
+    // loop has no leaf; a/deep, under it, does.
+    struct Spoor *src = stalk(&p, root, "loop", 4, STALK_WALK, 0);
+    struct Spoor *mp  = stalk(&p, root, "a/deep", 6, STALK_MOUNT, 0);
+    TEST_ASSERT(src != NULL && mp != NULL, "resolve loop + a/deep");
+    TEST_EXPECT_EQ(mount(p.territory, src, mp, 0), 0, "mount loop onto a/deep");
+
+    int e = -12345;
+    struct Spoor *q = stalk_err(&p, root, "a/deep/leaf", 11, STALK_WALK, 0, &e);
+    TEST_ASSERT(q == NULL, "the control: no leaf in the mounted tree");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_NOENT, "a miss");
+
+    e = -12345;
+    g_fix_wa_unknown_in = 2;          // the batch of three, then the re-walk of two
+    q = stalk_err(&p, root, "a/deep/leaf", 11, STALK_WALK, 0, &e);
+    int armed = g_fix_wa_unknown_in;
+    g_fix_wa_unknown_in = 0;
+    TEST_ASSERT(q == NULL, "the failed re-walk resolves nothing");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_IO, "and fails closed");
+    TEST_EXPECT_EQ((u64)armed, 0ull, "it reached the re-walk");
+
+    territory_unref(p.territory);
+    spoor_clunk(src);
+    spoor_clunk(mp);
+    spoor_unref(root);
+}
+
 void test_stalk_stat_query(void) {
     struct Proc p; mkproc_system(&p);
     struct Spoor *root = fix_root();
@@ -3473,6 +3605,85 @@ void test_sys_stat_for_proc(void) {
 
     territory_unref(p.territory);
     spoor_unref(root);
+}
+
+// The native SYS_LSTAT and SYS_READLINK (vote 2026-10-20) over the symlink
+// fixture, through the cores their handlers call: sys_stat_for_proc with
+// STALK_NOFOLLOW, and the readlink inner. Then each handler's own path checks,
+// which run before either core.
+
+void test_sys_lstat_readlink_for_proc(void) {
+    struct Proc p;
+    struct Spoor *root = cross_setup(&p);   // the symlink fixture's root
+    TEST_ASSERT(root != NULL && p.territory != NULL, "cross_setup");
+    TEST_EXPECT_EQ(territory_chroot(p.territory, root), 0, "chroot to fixture");
+
+    struct t_stat st;
+    TEST_EXPECT_EQ((u64)sys_stat_for_proc(&p, "/lnb", 4, STALK_NOFOLLOW, &st),
+                   (u64)0, "lstat /lnb");
+    TEST_EXPECT_EQ((u64)st.qid_path, (u64)FIX_LNB_PATH, "-> the link itself (qid 10)");
+    TEST_EXPECT_EQ((u64)(st.mode & T_S_IFMT), (u64)T_S_IFLNK, "-> S_IFLNK");
+    TEST_EXPECT_EQ((u64)sys_stat_for_proc(&p, "lnb", 3, STALK_NOFOLLOW, &st),
+                   (u64)0, "lstat lnb, relative, through the cwd join");
+    TEST_EXPECT_EQ((u64)st.qid_path, (u64)FIX_LNB_PATH, "-> the same link");
+    TEST_EXPECT_EQ((u64)sys_stat_for_proc(&p, "/lndead", 7, STALK_NOFOLLOW, &st),
+                   (u64)0, "lstat of a dangling link succeeds");
+    TEST_EXPECT_EQ((u64)(st.mode & T_S_IFMT), (u64)T_S_IFLNK, "-> S_IFLNK");
+    TEST_EXPECT_EQ((u64)sys_stat_for_proc(&p, "/lndead", 7, 0, &st),
+                   (u64)(s64)-T_E_NOENT, "stat of the same link -> NOENT");
+    TEST_EXPECT_EQ((u64)sys_stat_for_proc(&p, "/lnself", 7, STALK_NOFOLLOW, &st),
+                   (u64)0, "lstat of a self-loop succeeds");
+    TEST_EXPECT_EQ((u64)st.qid_path, (u64)FIX_LNSELF_PATH, "-> the link (qid 14)");
+    TEST_EXPECT_EQ((u64)sys_stat_for_proc(&p, "/lnself", 7, 0, &st),
+                   (u64)(s64)-T_E_LOOP, "stat of the same link -> LOOP");
+    // Only the FINAL component is held back: a link earlier in the path is
+    // followed, so this is a/deep/leaf.
+    TEST_EXPECT_EQ((u64)sys_stat_for_proc(&p, "/lndir/leaf", 11, STALK_NOFOLLOW, &st),
+                   (u64)0, "lstat through a link to a directory");
+    TEST_EXPECT_EQ((u64)st.qid_path, (u64)4, "-> a/deep/leaf (qid 4)");
+
+    char tgt[SYS_OPEN_PATH_MAX + 1];
+    TEST_EXPECT_EQ((u64)sys_readlink_target_for_proc(&p, "/lnb", 4, tgt), (u64)3,
+                   "readlink /lnb reads 3 bytes");
+    TEST_EXPECT_EQ((u64)(tgt[0] == 'a' && tgt[1] == '/' && tgt[2] == 'b'), (u64)1,
+                   "-> a/b");
+    TEST_EXPECT_EQ((u64)sys_readlink_target_for_proc(&p, "/lndead", 7, tgt), (u64)6,
+                   "readlink of a dangling link reads its target (nosuch)");
+    TEST_EXPECT_EQ((u64)sys_readlink_target_for_proc(&p, "/lnabs", 6, tgt), (u64)4,
+                   "readlink of an absolute link reads /a/b, unanchored");
+    TEST_EXPECT_EQ((u64)sys_readlink_target_for_proc(&p, "/lndir/lnleaf", 13, tgt),
+                   (u64)4, "an earlier link is followed, the final one read (leaf)");
+    TEST_EXPECT_EQ((u64)sys_readlink_target_for_proc(&p, "/a/b", 4, tgt),
+                   (u64)(s64)-T_E_INVAL, "a file is not a link -> INVAL");
+    TEST_EXPECT_EQ((u64)sys_readlink_target_for_proc(&p, "/a", 2, tgt),
+                   (u64)(s64)-T_E_INVAL, "a directory is not a link -> INVAL");
+    TEST_EXPECT_EQ((u64)sys_readlink_target_for_proc(&p, "/nope", 5, tgt),
+                   (u64)(s64)-T_E_NOENT, "absent -> NOENT");
+    TEST_EXPECT_EQ((u64)sys_readlink_target_for_proc(&p, "/nox/sekret", 11, tgt),
+                   (u64)(s64)-T_E_ACCES, "no X-search -> ACCES");
+    TEST_EXPECT_EQ((u64)sys_readlink_target_for_proc(&p, "/lnself/x", 9, tgt),
+                   (u64)(s64)-T_E_LOOP, "an intermediate loop -> LOOP");
+
+    territory_unref(p.territory);
+    spoor_unref(root);
+
+    // The handlers on the test thread's Proc. Each check fires before any
+    // resolution, and a kernel-half buffer is what a user pointer outside
+    // the user half looks like.
+    static const char kpath[] = "/lnb";
+    u64 kva = (u64)(unsigned long)kpath;
+    TEST_EXPECT_EQ(sys_lstat_handler(kva, 0, kva), (s64)-T_E_INVAL,
+                   "SYS_LSTAT: an empty path -> INVAL");
+    TEST_EXPECT_EQ(sys_lstat_handler(kva, SYS_OPEN_PATH_MAX + 1, kva),
+                   (s64)-T_E_INVAL, "SYS_LSTAT: an over-long path -> INVAL");
+    TEST_EXPECT_EQ(sys_lstat_handler(kva, 4, kva), (s64)-T_E_FAULT,
+                   "SYS_LSTAT: a path outside the user half -> FAULT");
+    TEST_EXPECT_EQ(sys_readlink_handler(kva, 0, kva, 16), (s64)-T_E_INVAL,
+                   "SYS_READLINK: an empty path -> INVAL");
+    TEST_EXPECT_EQ(sys_readlink_handler(kva, SYS_OPEN_PATH_MAX + 1, kva, 16),
+                   (s64)-T_E_INVAL, "SYS_READLINK: an over-long path -> INVAL");
+    TEST_EXPECT_EQ(sys_readlink_handler(kva, 4, kva, 16), (s64)-T_E_FAULT,
+                   "SYS_READLINK: a path outside the user half -> FAULT");
 }
 
 // A Dev whose walk_attrs always reports the backing as incapable (the netd
@@ -4690,6 +4901,46 @@ void test_stalk_open_create_containment_and_denials(void) {
     TEST_EXPECT_EQ((u64)g_fixmade_n, (u64)made_before,
                    "neither symlink row created anything");
     ocp_teardown(p);
+}
+
+// An existing name in a directory the caller may search but not write answers
+// EEXIST from mkdir and an exclusive create, where it used to answer EACCES:
+// the write check ran before existence was asked. The ABSENT name in the same
+// directory is the control one variable away (still EACCES), and a directory
+// the caller cannot SEARCH discloses nothing (EACCES for a name it holds).
+void test_stalk_open_create_exists_before_access(void) {
+    fixmade_reset();
+    struct Proc *p = ocp_proc("/");
+    TEST_ASSERT(p != NULL, "proc");
+    const u64 mk   = (u64)SYS_WALK_CREATE_DMDIR | 0755;
+    const u64 excl = 1 | (u64)SYS_WALK_OPEN_OEXCL;
+    u64 live_before = spoor_total_allocated() - spoor_total_freed();
+
+    s64 m_dir  = sys_open_create_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT, "/rx/sub", 7, 0, mk);
+    s64 m_file = sys_open_create_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT, "/rx/kid", 7, 0, mk);
+    s64 m_lnk  = sys_open_create_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT, "/rx/lnk", 7, 0, mk);
+    s64 m_new  = sys_open_create_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT, "/rx/new", 7, 0, mk);
+    s64 x_kid  = sys_open_create_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT, "/rx/kid", 7, excl, 0644);
+    s64 x_new  = sys_open_create_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT, "/rx/new", 7, excl, 0644);
+    s64 m_nox  = sys_open_create_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT, "/nox/sekret", 11, 0, mk);
+    s64 p_lnk  = sys_open_create_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT, "/rx/lnk", 7, 1, 0644);
+    u64 live_after = spoor_total_allocated() - spoor_total_freed();
+    int calls = g_fix_create_calls;
+    ocp_teardown(p);
+
+    TEST_EXPECT_EQ(m_dir,  -(s64)T_E_EXIST, "mkdir of an existing directory is EEXIST");
+    TEST_EXPECT_EQ(m_file, -(s64)T_E_EXIST, "mkdir over an existing file is EEXIST");
+    TEST_EXPECT_EQ(m_lnk,  -(s64)T_E_EXIST,
+                   "mkdir over a dangling link is EEXIST: the probe does not follow");
+    TEST_EXPECT_EQ(m_new,  -(s64)T_E_ACCES, "CONTROL: an absent name is still EACCES");
+    TEST_EXPECT_EQ(x_kid,  -(s64)T_E_EXIST, "an exclusive create of an existing file is EEXIST");
+    TEST_EXPECT_EQ(x_new,  -(s64)T_E_ACCES, "CONTROL: an exclusive create of an absent name is EACCES");
+    TEST_EXPECT_EQ(m_nox,  -(s64)T_E_ACCES,
+                   "no search right, no disclosure: a held name in a no-X dir is EACCES");
+    TEST_EXPECT_EQ(p_lnk,  -(s64)T_E_NOENT,
+                   "a plain O_CREAT through a dangling link is NOENT, never EEXIST");
+    TEST_EXPECT_EQ(calls, 0, "no leg reached the Dev's create");
+    TEST_EXPECT_EQ(live_after, live_before, "the existence probe leaks no Spoor");
 }
 
 // =============================================================================

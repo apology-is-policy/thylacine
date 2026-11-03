@@ -41,6 +41,7 @@ int devproc_step_arm_for_test(int pid, int tid, struct Proc *caller, struct Spoo
 long devproc_step_result_for_test(int ev, long n);
 int devproc_wait_state_for_test(int pid, struct Proc *caller, struct Spoor *ctl);
 int devproc_wait_verdict_for_test(int state);
+void devproc_ns_test_set_window_hook(void (*fn)(void));
 #endif // KERNEL_TESTS
 
 #endif // THYLACINE_DEVPROC_H

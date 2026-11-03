@@ -308,12 +308,31 @@ unread, and a deleted socket looked exactly like that.
 
 **The DISTRO / CLADE arc gates are propagated into the exit status (#212/#232).**
 `check-arc-gates.sh` answers for the D-5 / L-6c arc chain and the three clade
-gates; both soft-skip when their external Alpine/clade bundle is absent (right on
+gates (with CL-2's C++ prover, `cxx=`); both soft-skip when their external Alpine/clade bundle is absent (right on
 a fresh clone), but nothing carried the skip into the exit status, so a tree with
 a REGRESSED D-1..D-4 chain exited 0 identically to one where the arc ran. The
 checker now FAILS on an ABSENT report (a dropped gate — the shape a green boot
 hides) and otherwise states what ran; `THYLA_ARC_GATES=require` /
 `THYLA_CLADE_GATES=require` make a skip fatal for shapes that ship the fixture.
+A third family answers for joey's Go boot probes (`joey: GO-GATES hello=...
+net=... go4c=... gopls=...`: the six probes, the on-device `go build`, gopls):
+each skips when the image has no binary for it. `tools/test.sh` derives a
+require flag per binary from what this image was built with. The ramfs is
+rebaked every build and each build step leaves its binary in `build/` only
+when it built it, so `--require-go` keys on `build/go/go-hello` and
+`--require-cxx` on `build/pouch/progs/pouch-hello-cxx`. The pool can outlive
+a build (`THYLACINE_MKFS_PRESERVE`), so `--require-goroot` and
+`--require-gopls` key on the `GOROOT` and `GOPLS` payloads the populate
+verified in the pool (`build/pool-contents`, which a preserved pool keeps),
+never on the goroot stage. So a binary that went missing from an image built
+to run it fails the run; a lean image's `not-built` passes under them, the
+shape being the build's choice. `--require-clade` asks for the three clade
+gates and not the prover, which has its own flag. The checker runs under macOS's bash 3.2
+(no associative arrays: one aborted it there with exit 0 and no report), an
+empty prose for a key fails rather than matching every line, and test.sh
+fails a report that lacks any family's line, since a checker that dies early
+can exit 0. The selftest drives 62 cases, under bash 3.2 and 5, and each pass
+string matches joey's text.
 
 **netd's boot selftests reach the exit status (2026-09-24).** netd prints a
 `netd: <name> PASS/FAIL` line per selftest, and no gate read them. A netd whose

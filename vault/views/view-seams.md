@@ -20,10 +20,13 @@ Generated from note fields — do not edit between the markers
 | [[seam-90-hung-server]] | closed | sub-kernel-ninep-client | chg-2026-07-19-90-death-block-through | v1.x |
 | [[seam-9p-tag-block-on-full]] | closed | sub-kernel-ninep-session | adt-rw4-r1 | RW-4 R3-F3 register (scripture-vs-impl; user call) |
 | [[seam-close-flush-unbounded]] | closed | sub-kernel-death | fnd-68-r2-f3 | unfiled |
+| [[seam-co-fidless-wstat]] | closed | sub-kernel-ninep-dev9p | chg-2026-07-11-fid-lifecycle |  |
 | [[seam-devcap-plain-caps-read]] | closed | sub-kernel-caps | chg-2026-08-02-authority-sweep | task #15 |
+| [[seam-devdev-winsize-statless]] | closed | sub-kernel-devdev, sub-kernel-cons | chg-2026-08-02-console-sweep | task #19 |
 | [[seam-el0-irq-tail-no-notes]] | closed | sub-kernel-exception | chg-2026-08-02-entry-sweep | task #21 |
 | [[seam-exited-threads-wait-for-a-create]] | closed | sub-kernel-thread | chg-2026-10-20-in-proc-reap | OPEN-BUGS 2026-10-20 (the multi-threading overhaul, chunk C1) |
 | [[seam-extinction-line-unserialized]] | closed | abi-boot-banner | chg-2026-08-16-cons-writer-set | unfiled -- yip to main 2026-08-16 |
+| [[seam-fstat-errno-flattened-above-the-leaf]] | closed | sub-kernel-ninep-dev9p | chg-2026-08-16-dev9p-errno-class | unfiled -- yip to main 2026-08-16 |
 | [[seam-login-halcyond-fallback]] | closed | sub-stratum-session | fnd-kt1-r1-c12 | the KT-1 audit round 1 (C-F12); the d-1a deferral |
 | [[seam-loom-sqpoll-owner-unbackstopped]] | closed | sub-kernel-loom | chg-2026-08-16-loom-charge-ledger | unfiled -- yip to main 2026-08-16 |
 | [[seam-poll-dedupe-direction-test]] | closed | sub-kernel-poll | fnd-pollwalk-r1-f2 | aux follow-up after the poll chunk |
@@ -53,11 +56,9 @@ Generated from note fields — do not edit between the markers
 | [[seam-affinity-mask]] | open | sub-kernel-sched-smp | chg-2026-06-22-ti4-work-conservation | a future SYS_SCHED_SETATTR |
 | [[seam-boot-banner-coupdate-list]] | open | sub-substrate-gates | chg-2026-08-16-boot-banner-mirror-set | yip to main 2026-08-16; sequel to main#244 |
 | [[seam-buddy-bulk-op]] | open | sub-kernel-mm-phys | chg-2026-05-04-p1d-phys-allocator | HT11.R1-F6 |
-| [[seam-co-fidless-wstat]] | open | sub-kernel-ninep-dev9p | chg-2026-07-11-fid-lifecycle |  |
 | [[seam-console-chrome-on-handoff]] | open | sub-tapestryd | fnd-kt1-r1-c11 | the KT-1 audit round 1 (C-F11) |
 | [[seam-cwg-parenthetical-refuted]] | open | sub-kernel-boot-sequence | chg-2026-08-16-boot-cwg-parenthetical | unfiled -- yip to main 2026-08-16 |
 | [[seam-death-cascade-smp-harness]] | open | sub-kernel-death | chg-2026-06-01-811-death-interruptible | unfiled |
-| [[seam-devdev-winsize-statless]] | open | sub-kernel-devdev, sub-kernel-cons | chg-2026-08-02-console-sweep | task #19 |
 | [[seam-dirent-type-is-qid-type]] | open | sub-kernel-devproc | fnd-thread-c7-r1-f5 | OPEN-BUGS 2026-10-29T09:22:54Z |
 | [[seam-dtb-blob-internally-trusted]] | open | sub-kernel-dtb | chg-2026-08-02-boot-sweep |  |
 | [[seam-eevdf-math]] | open | sub-kernel-sched | chg-2026-05-05-p2b-sched-dispatch | ARCH 2A-F6 -> RW-13 |
@@ -65,7 +66,6 @@ Generated from note fields — do not edit between the markers
 | [[seam-expect-channel-close]] | open | sub-substrate-interactive | chg-2026-08-01-substrate-sweep | #78 residual |
 | [[seam-f-notif-unwired]] | open | sub-kernel-weft, sub-kernel-loom | chg-2026-08-02-async-sweep |  |
 | [[seam-fid-monotonic-reclaim]] | open | sub-kernel-ninep-client | fnd-stalk2-r1-f2 | RW-4 R3-F2 register |
-| [[seam-fstat-errno-flattened-above-the-leaf]] | open | sub-kernel-ninep-dev9p | chg-2026-08-16-dev9p-errno-class | unfiled -- yip to main 2026-08-16 |
 | [[seam-gic-handler-slot-never-cleared]] | open | sub-kernel-gic, sub-kernel-irqfwd | chg-2026-08-02-devices-interrupt-time-sweep |  |
 | [[seam-handle-based-dot]] | open | sub-kernel-territory | chg-2026-06-09-ls4-cwd | unfiled |
 | [[seam-hmp-push]] | open | sub-kernel-sched-smp | chg-2026-06-05-864-hmp-foundation | ARCH 8.4.4 -- the verification boundary |

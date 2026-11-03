@@ -403,10 +403,13 @@ rule below closes it.
   there without blocking, so the ops fail closed there. This is the same
   disposition 8.5's SETATTR took for identity-setattr, and no SQPOLL consumer
   issues these ops. Mutation ops belong on a non-SQPOLL ring.
-- **The create ops' group is the creator's own.** The SQE's gid (`MKDIR`/`SYMLINK`
-  `_resv1[2]`, `MKNOD` `offset`) is resolved at submit:
-  - 0 (`GID_INVALID`) means the creator's primary group, as the sync create
-    always uses;
+- **The create ops' group is the directory's, or one the creator chooses.** The
+  SQE's gid (`MKDIR`/`SYMLINK` `_resv1[2]`, `MKNOD` `offset`) is resolved at
+  submit:
+  - 0 (`GID_INVALID`) means the parent directory's group (IDENTITY-DESIGN.md
+    3.5 F-5), as the sync create sends, read from the parent's stat (taken for
+    it where the Dev does not enforce rwx; `-EIO` without one). A directory
+    whose stat names no group passes none on;
   - any other value must be a group the creator is in, unless it holds
     `CAP_HOSTOWNER` or `CAP_CHOWN`: perm_wstat_check's chgrp rule applied at
     birth;
@@ -419,15 +422,29 @@ rule below closes it.
   it and never the ring's bytes. (On a caped session `GETATTR` likewise hands
   userspace the cape's owner and group, with both `valid` bits set, so a ring
   and `SYS_FSTAT` report the same owner.)
+- **The create ops answer to IDENTITY-DESIGN 9.7's M7 and M8, as the sync
+  create does** (2026-10-19). `MKDIR`, `MKNOD` and `SYMLINK` are admitted only
+  to a principal at one of the session's two ends (`dev9p_create_admits`),
+  decided before the parent's stat and whether or not the Dev enforces rwx:
+  the server stamps a create with its session's credential, never the
+  submitter's, so a creator at neither end would make entries owned by an end.
+  A refusal answers `-EACCES` inline, and nothing goes on the wire. `MKDIR`'s
+  and `MKNOD`'s rwx bits are then reduced by the creator's umask and bounded
+  by the parent's mode (`perm_create_mode`, the bound only where the Dev
+  enforces rwx), and the op's SQE snapshot carries the result; `MKNOD` keeps
+  its file type, and one whose type is a directory takes a directory's bound.
+  A symlink has no mode to bound. `LINK` makes no new file and
+  takes neither rule, like `RENAMEAT`.
 - **Names are checked like the sync twins', on the copy the wire carries.**
   Each child name must be 1 to 255 bytes, hold no `/` or NUL, and not be `.`
   or `..` (`sys_copy_component`'s rule); a bad one answers `-EINVAL` before
   any stat. `SYMLINK`'s target is a path and is not a name. The names are
   copied out of the registered buffer into the op at submit, and the build
   sends that copy, so userspace cannot change a name after it was checked.
-- **A create mode carries the rwx bits only.** `MKDIR` sends `mode & 0777`
-  and `MKNOD` keeps its file type plus `mode & 0777`, as the sync create's
-  `perm & 0777` does. Setuid, setgid and sticky are never honoured and
+- **A create mode carries the rwx bits only.** `MKDIR` sends the rwx bits
+  and `MKNOD` keeps its file type plus the rwx bits, as the sync create does,
+  after the umask and the parent's bound above. Setuid, setgid and sticky are
+  never honoured and
   `SYS_WSTAT` refuses them, so a create must not be a way to plant them.
 - **`LCREATE` joins this gate when it is dispatched.** It creates a child too.
   Today it answers `-ENOSYS` with the other fid-lifecycle ops (the #916 seam),

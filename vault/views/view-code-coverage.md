@@ -65,18 +65,18 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**696 owned · 41 unowned · 737 files (94% owned) · ~10831 unswept lines.**
+**716 owned · 39 unowned · 755 files (94% owned) · ~9931 unswept lines.**
 
-Excluded as harness and counted here rather than dropped: **93 files, ~46246 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
+Excluded as harness and counted here rather than dropped: **93 files, ~46369 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
 | area | owned | unowned | unswept lines |
 |---|---:|---:|---:|
 | usr/warp-prove | 0 | 1 | 4349 |
-| usr/pouch-hello | 13 | 16 | 2651 |
+| usr/pouch-hello | 24 | 14 | 1751 |
 | usr/ports | 19 | 5 | 1691 |
-| kernel | 191 | 10 | 1239 |
+| kernel | 193 | 10 | 1239 |
 | usr/gl-sdl-prove | 0 | 1 | 262 |
-| usr/libthyla-rs | 34 | 1 | 196 |
+| usr/libthyla-rs | 35 | 1 | 196 |
 | arch | 41 | 2 | 146 |
 | usr/susp-mask-child | 0 | 1 | 139 |
 | usr/lib | 124 | 1 | 72 |
@@ -84,7 +84,7 @@ Excluded as harness and counted here rather than dropped: **93 files, ~46246 lin
 | usr/tapestryd | 11 | 2 | 23 |
 | mm | 8 | 0 | 0 |
 | usr/aurora | 5 | 0 | 0 |
-| usr/coreutils | 65 | 0 | 0 |
+| usr/coreutils | 67 | 0 | 0 |
 | usr/corvus | 3 | 0 | 0 |
 | usr/curl | 3 | 0 | 0 |
 | usr/diorama | 2 | 0 | 0 |
@@ -103,6 +103,7 @@ Excluded as harness and counted here rather than dropped: **93 files, ~46246 lin
 | usr/loom-fixture | 1 | 0 | 0 |
 | usr/loom-stress | 1 | 0 | 0 |
 | usr/manual | 7 | 0 | 0 |
+| usr/muster | 2 | 0 | 0 |
 | usr/net-echo | 1 | 0 | 0 |
 | usr/netd | 3 | 0 | 0 |
 | usr/netdev-driver | 1 | 0 | 0 |
@@ -115,7 +116,7 @@ Excluded as harness and counted here rather than dropped: **93 files, ~46246 lin
 | usr/ptyhost | 1 | 0 | 0 |
 | usr/quarry | 1 | 0 | 0 |
 | usr/sntp | 1 | 0 | 0 |
-| usr/utopia | 28 | 0 | 0 |
+| usr/utopia | 30 | 0 | 0 |
 | usr/view | 2 | 0 | 0 |
 | usr/virtio-blk-rw | 1 | 0 | 0 |
 | usr/virtio-gpu | 1 | 0 | 0 |
@@ -132,8 +133,6 @@ Excluded as harness and counted here rather than dropped: **93 files, ~46246 lin
 |---|---:|
 | usr/warp-prove/src/main.rs | 4349 |
 | usr/ports/gnumake/config.h | 1357 |
-| usr/pouch-hello/pouch-hello-signals.c | 550 |
-| usr/pouch-hello/pouch-hello-fs.c | 350 |
 | usr/pouch-hello/pouch-hello-net.c | 293 |
 | kernel/include/thylacine/spinlock.h | 287 |
 | usr/pouch-hello/pouch-hello.c | 277 |

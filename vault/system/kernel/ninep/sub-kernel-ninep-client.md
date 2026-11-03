@@ -23,6 +23,33 @@ design: ["docs/ARCHITECTURE.md sections 21 + 21.10 + 8.8.1.1"]
 created: 2026-07-31
 updated: 2026-11-02
 ---
+## Tlock and Tgetlock (B-3h, 2026-10-29)
+
+`p9_client_lock(c, fid, type, flags, start, length, client, client_len, &status)` and
+`p9_client_getlock(c, fid, type, start, length, client, client_len, &out)` follow
+`p9_client_fsync`'s shape. A conflict is a status (`P9_LOCK_BLOCKED`), not an
+error: the server never waits. The session sends the fid as `proc_id` and an
+empty client id. Stratum keys its owner on the fid and ignores both. An Rlerror
+maps through `map_error`, which folds a server EBADF to `-P9_E_IO`. The
+callers are [[sub-kernel-ninep-dev9p]]'s lock slots.
+
+## The session's create ends (2026-10-19, B-3e M7)
+
+`struct p9_client` gains `client_end` and `server_end`, two principals
+([[dec-2026-10-18-create-speaks-for-a-session-end]]): the one the server
+authenticates (a `/srv` conn's opener, or a caller-supplied transport's
+attacher) and the `/srv` poster (PRINCIPAL_INVALID for a caller-supplied
+transport). `p9_client_set_ends(c, client_end, server_end)` is their one stamp,
+made by the attach paths on the still-private client before the root Spoor
+publishes, under the cape's rule: plain fields, never flipped, ordered against
+every later op by the handle publication. `p9_client_init` resets both to
+PRINCIPAL_INVALID, so a client struct re-initialized in place never carries its
+last life's ends, and a client never stamped admits no create. The client only
+holds them: the attach layer decides them ([[sub-kernel-ninep-attach]];
+SYS_ATTACH_9P in [[sub-kernel-syscall-dispatch]]) and `dev9p_create_admits`
+consults them ([[sub-kernel-ninep-dev9p]]). `dev9p.client_init_clears_ends`
+pins the reset.
+
 ## Purpose
 
 The kernel's 9P2000.L client: consolidates the wire codec, the session state
@@ -71,6 +98,10 @@ One function per op, `0` on success / `-errno` on failure:
   (`client_max_read_count` = msize − 11; `client_max_write_payload` =
   `min(msize, out_buf_cap)` − 23); callers loop per POSIX short-op
   discipline.
+  A reply that claims more than its request carried, an Rread, Rreaddir,
+  Rwrite or Rweftio count past the op's, fails that op with `-EIO` and leaves
+  the session up: the caller subtracts the count from what it has left, and so
+  does the program behind `write(2)`.
 - **Metadata / mutation**: `getattr` / `setattr` / `readdir` / `statfs` /
   `fsync` / `symlink` / `mknod` / `rename` / `readlink` / `link` / `mkdir` /
   `renameat` / `unlinkat`.
@@ -103,7 +134,8 @@ One function per op, `0` on success / `-errno` on failure:
 Error convention: `-EINVAL` bad args/magic · `-EBUSY` not-OPEN · `-EIO`
 lower-layer failure · `-<ecode>` the server's Rlerror ecode, **bounded to
 `[1,4095]` (Linux `MAX_ERRNO`) before negation** and otherwise collapsed to
-`-EIO` (`map_error`); callers of Stratum-extension surfaces may still need
+`-EIO` (`map_error`), except EBADF, which reads `-EIO` (only the kernel's
+handle gate answers EBADF); callers of Stratum-extension surfaces may still need
 to translate the in-range `STM_E*` codes. `-P9_E_INTR` (EINTR) means a caught
 note interrupted the op AND the server's `Rflush` confirmed it cancelled, so
 the op had no effect (flush(5)); an op whose reply beat that `Rflush` returns
@@ -529,7 +561,9 @@ the principals at its two ends, the system principal and a hostowner
   NARROWS: `dev9p_spoor_remote` reads it for `territory_format_ns` and, as
   dev9p's `remote` slot, for the resolver, which contains a link the session
   serves beneath its mount (DISTRO 4.6, [[sub-kernel-stalk]]); nothing that
-  checks permission, caches or vouches for exec consults it.
+  checks permission, caches or vouches for exec consults it. The create ends
+  `client_end` / `server_end` (M7) follow the same rule with their own stamp,
+  `p9_client_set_ends`, and the same reset (the 2026-10-19 section).
 - `struct p9_rpc` (stack-allocated per op): tag, `done`/`dead`/`be_reader`
   flags, `sending` (registered, not yet waiting in `client_wait`: the
   handoff skips it), its OWN single-waiter rendez, `reply_buf`, `on_complete` (the
@@ -643,13 +677,43 @@ total wake (I-9); `alloc_tag`/`clear_outstanding` + the
   `Rlerror(ecode=0)`-as-success corner into `-EIO`. I-14's hostile-ecode
   bound is realised here, not deferred to dev9p (the A-3c audit F1 fix; the
   sibling wire codec [[sub-kernel-ninep-wire]] asserts the same bound).
+  **A server's EBADF (ecode 9) reads `-EIO`** (operator vote 2026-10-21 #16,
+  `docs/ERRORS.md`'s binding rule "only the kernel's handle gate answers
+  EBADF"). The server means its own fid, while the caller's descriptor is
+  live, so passed through it would read as the handle gate's verdict. Every
+  server errno reaches an errno at `map_error` and nowhere else, at all three
+  sites (the sync op, the handshake, the async completion), so one test
+  covers every path, among them read, write, fsync and close on an open
+  file, the resolver's calls (open, stat, lstat, readlink, create), the name
+  ops that forward the server's verdict (unlink, rename), a Loom 9P op's CQE
+  and the attach beside a srv fd. The closer's bounded retry of a close
+  job's -EIO now covers a server's EBADF too ([[sub-kernel-ninep-attach]]). `9p_client.rlerror_ebadf_reads_eio` reads ecode 9 as
+  `-EIO` and its neighbours 8 and 10 as themselves;
+  `p9_attached.handshake_rlerror_ebadf_reads_eio` and
+  `dev9p.wb_server_ebadf_reads_eio` (a flush Twrite answered EBADF: the
+  fsync and the close read EIO) cover the attach and an open file.
 - Congestion is NOT an error path: EAGAIN → spill/pump/park/retry; a
   stopped reader → role release, no latch; a dying owner → Tflush or the
   abandoned-bit reclaim; a caught note → Tflush and a killable wait for the
   first answer (flush(5)). Only a genuine break (or demux violation) latches
   `c->dead`, which fails everything `-EIO` including parked senders.
-- Partial walks (`nwqid < nwname`) return `-EIO` at this layer (the
-  resolver's pounce handles partial semantics above).
+- `p9_client_walk` and `p9_client_walkgetattr` copy `r.nwqid` elements into the
+  caller's arrays, which the walk's `nwname` sizes; the session has refused a reply
+  naming more, and the session goes dead with it.
+- A partial walk (`nwqid < nwname`) succeeds at this layer with the elements it
+  got, and the caller reads the short count (`co_bind` and the resolver's pounce
+  decide what it means).
+- `p9_client_lock` and `p9_client_getlock` carry `client_id` from their caller (operator vote 38).
+- A live owner whose reply beat its Rflush left no abandoned op: its mark clears at that
+  reply, so the Rflush forgets nothing (audit round 4, leg
+  `9p_client.note_flush_live_mutator_keeps_larder`). A death in the flush wait forgets at
+  once (leg `9p_client.note_flush_death_forgets_larder`).
+- **An abandoned mutator** (B-3h audit round 3, 2026-11-02): an op marked `mutates`
+  in the session whose caller a death pulled out can still land, and its caller's
+  own invalidate never runs. `client_abandon_forgets_locked` runs
+  `larder_forget_all` in both died arms of the send and receive, and the demux runs
+  it for a late reply to such an op and for a lone Rflush that answers for one
+  ([[sub-kernel-larder]]). Leg: `9p_client.dying_mutator_forgets_larder`.
 
 ## Performance
 
@@ -766,11 +830,13 @@ the reader unwinds at any byte).
 2. `read`/`readdir`/`readlink` are COPY semantics at the public API; the
    internal zero-copy alias is valid only under the `done_reply_buf`
    discipline.
-3. Partial walks are `-EIO` at this layer.
+3. A partial walk succeeds at this layer; `nwqid` says how far it got.
 4. Rlerror ecodes are bounded to `[1,4095]` here (`map_error`) before
    negation — NOT passed through unbounded — yielding the `[-4095,-1]`
    passthrough window; a zero or out-of-range ecode collapses to `-EIO`
-   (A-3c F1, closing the `-(int)0x80000000` signed-overflow UB).
+   (A-3c F1, closing the `-(int)0x80000000` signed-overflow UB), and so
+   does EBADF (vote 2026-10-21 #16: only the kernel's handle gate answers
+   it).
 5. No retry/reconnect — a dead session stays dead until destroy + re-init.
 6. Callers do NOT serialize (the old serial client's external-serialization
    contract is retired); the client serializes internally.

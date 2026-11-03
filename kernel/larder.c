@@ -96,9 +96,28 @@ static bool attr_ensure_array_locked(struct larder *l) {
     return true;
 }
 
-// Find the VALID slot holding `qid_path`, or NULL. Caller holds l->lock.
-static struct larder_attr_ent *attr_find_locked(struct larder *l, u64 qid_path) {
-    if (!l->attr) return NULL;
+// A forget moved the epoch: a slot stamped before it is as good as empty. It
+// stays chained until a fill of its own key or CLOCK reuses it, and CLOCK's reuse
+// unlinks it. Caller holds l->lock.
+static inline bool attr_live(const struct larder *l,
+                             const struct larder_attr_ent *e) {
+    return e->valid && e->epoch == l->epoch;
+}
+
+static inline bool dentry_live(const struct larder *l,
+                               const struct larder_dentry_ent *e) {
+    return e->valid && e->epoch == l->epoch;
+}
+
+static inline bool page_live(const struct larder *l,
+                             const struct larder_page_ent *e) {
+    return e->valid && e->epoch == l->epoch;
+}
+
+// The one slot a key can hold, live or forgotten. A fill after a forget takes its
+// key's old slot, so no number of forgets lengthens a chain. Caller holds l->lock;
+// the array exists.
+static struct larder_attr_ent *attr_key_slot_locked(struct larder *l, u64 qid_path) {
     u32 b = attr_bucket(l->attr_nbuckets, qid_path);
     for (s32 si = l->attr_hash[b]; si != -1; si = l->attr[si].hnext) {
         struct larder_attr_ent *e = &l->attr[si];
@@ -108,12 +127,19 @@ static struct larder_attr_ent *attr_find_locked(struct larder *l, u64 qid_path) 
     return NULL;
 }
 
+// Find the live slot holding `qid_path`, or NULL. Caller holds l->lock.
+static struct larder_attr_ent *attr_find_locked(struct larder *l, u64 qid_path) {
+    if (!l->attr) return NULL;
+    struct larder_attr_ent *e = attr_key_slot_locked(l, qid_path);
+    return e && attr_live(l, e) ? e : NULL;
+}
+
 static s32 attr_clock_evict_locked(struct larder *l) {
     for (u32 spin = 0; spin < 2u * l->attr_cap; spin++) {
         u32 h = l->attr_hand;
         l->attr_hand = (h + 1u) % l->attr_cap;
         struct larder_attr_ent *e = &l->attr[h];
-        if (!e->valid) return (s32)h;
+        if (!attr_live(l, e)) return (s32)h;
         if (e->ref) { e->ref = false; continue; }
         return (s32)h;
     }
@@ -176,14 +202,14 @@ bool larder_attr_fresh_size(struct larder *l, u64 qid_path, u32 cvers,
 // under the new key). Caller holds l->lock; the array exists. Never NULL.
 static struct larder_attr_ent *attr_install_slot_locked(struct larder *l,
                                                         u64 qid_path) {
-    struct larder_attr_ent *e = attr_find_locked(l, qid_path);
+    struct larder_attr_ent *e = attr_key_slot_locked(l, qid_path);
     if (e) return e;                           // overwrite (revalidate-by-overwrite)
     s32 si;
     if (l->attr_used < l->attr_cap) {
         si = (s32)l->attr_used++;              // fresh slot (KP_ZERO'd, hnext = -1)
     } else {
         si = attr_clock_evict_locked(l);
-        if (l->attr[si].valid) l->attr_evictions++;
+        if (attr_live(l, &l->attr[si])) l->attr_evictions++;
         attr_hash_unlink_locked(l, si);
     }
     struct larder_attr_ent *ne = &l->attr[si];
@@ -194,7 +220,7 @@ static struct larder_attr_ent *attr_install_slot_locked(struct larder *l,
 }
 
 void larder_attr_install(struct larder *l, u64 seq0, u64 qid_path,
-                         u32 cvers, const struct t_stat *attr) {
+                         u32 cvers, const struct t_stat *attr, const u64 *gen) {
     if (!l || !attr) return;
     spin_lock(&l->lock);
     // The gen guard, G4 qid-scoped: skip only if an invalidation event named
@@ -215,11 +241,24 @@ void larder_attr_install(struct larder *l, u64 seq0, u64 qid_path,
     struct larder_attr_ent *e = attr_install_slot_locked(l, qid_path);
     e->cvers     = cvers;
     e->valid     = true;
+    e->epoch     = l->epoch;
     e->ref       = true;
     e->perm_only = false;      // a full fresh record upgrades a G3 downgrade
+    e->gen_known = gen != NULL;
+    e->gen       = gen ? *gen : 0;
     e->attr      = *attr;
     l->attr_installs++;
     spin_unlock(&l->lock);
+}
+
+bool larder_attr_gen(struct larder *l, u64 qid_path, u64 *gen_out) {
+    if (!l || !gen_out) return false;
+    spin_lock(&l->lock);
+    struct larder_attr_ent *e = attr_find_locked(l, qid_path);
+    bool known = e && e->gen_known;
+    if (known) *gen_out = e->gen;
+    spin_unlock(&l->lock);
+    return known;
 }
 
 void larder_attr_invalidate(struct larder *l, u64 qid_path) {
@@ -310,12 +349,11 @@ static bool dentry_ensure_array_locked(struct larder *l) {
 
 // Find the dentry (parent_qid_path, name[0..name_len)), or NULL. Caller holds
 // l->lock. A too-long name is never cached, so it can never match.
-static struct larder_dentry_ent *dentry_find_locked(struct larder *l,
-                                                    u64 parent_qid_path,
-                                                    const char *name,
-                                                    size_t name_len) {
-    if (name_len == 0 || name_len > LARDER_DENTRY_NAME_MAX) return NULL;
-    if (!l->dentry) return NULL;
+// The one slot a key can hold, as attr_key_slot_locked.
+static struct larder_dentry_ent *dentry_key_slot_locked(struct larder *l,
+                                                        u64 parent_qid_path,
+                                                        const char *name,
+                                                        size_t name_len) {
     u32 b = larder_bucket2(l->dentry_nbuckets, parent_qid_path,
                            dentry_name_hash(name, name_len));
     for (s32 si = l->dentry_hash[b]; si != -1; si = l->dentry[si].hnext) {
@@ -327,12 +365,23 @@ static struct larder_dentry_ent *dentry_find_locked(struct larder *l,
     return NULL;
 }
 
+static struct larder_dentry_ent *dentry_find_locked(struct larder *l,
+                                                    u64 parent_qid_path,
+                                                    const char *name,
+                                                    size_t name_len) {
+    if (name_len == 0 || name_len > LARDER_DENTRY_NAME_MAX) return NULL;
+    if (!l->dentry) return NULL;
+    struct larder_dentry_ent *e =
+        dentry_key_slot_locked(l, parent_qid_path, name, name_len);
+    return e && dentry_live(l, e) ? e : NULL;
+}
+
 static s32 dentry_clock_evict_locked(struct larder *l) {
     for (u32 spin = 0; spin < 2u * l->dentry_cap; spin++) {
         u32 h = l->dentry_hand;
         l->dentry_hand = (h + 1u) % l->dentry_cap;
         struct larder_dentry_ent *e = &l->dentry[h];
-        if (!e->valid) return (s32)h;
+        if (!dentry_live(l, e)) return (s32)h;
         if (e->ref) { e->ref = false; continue; }
         return (s32)h;
     }
@@ -445,14 +494,14 @@ static struct larder_dentry_ent *dentry_install_slot_locked(struct larder *l,
                                                             const char *name,
                                                             size_t name_len) {
     struct larder_dentry_ent *e =
-        dentry_find_locked(l, parent_qid_path, name, name_len);
+        dentry_key_slot_locked(l, parent_qid_path, name, name_len);
     if (e) return e;                           // overwrite (same key/bucket kept)
     s32 si;
     if (l->dentry_used < l->dentry_cap) {
         si = (s32)l->dentry_used++;            // fresh slot (KP_ZERO'd, hnext = -1)
     } else {
         si = dentry_clock_evict_locked(l);
-        if (l->dentry[si].valid) l->dentry_evictions++;
+        if (dentry_live(l, &l->dentry[si])) l->dentry_evictions++;
         dentry_hash_unlink_locked(l, si);      // drop the OLD (parent,name) key
     }
     struct larder_dentry_ent *ne = &l->dentry[si];
@@ -490,6 +539,7 @@ void larder_dentry_install(struct larder *l, u64 seq0, u64 parent_qid_path,
     // Key fields (parent/name) were set by the slot chooser before linking.
     e->child_qid_path  = negative ? 0 : child_qid_path;
     e->valid           = true;
+    e->epoch           = l->epoch;
     e->negative        = negative;
     e->ref             = true;
     l->dentry_installs++;
@@ -627,10 +677,10 @@ static bool page_ensure_array_locked(struct larder *l) {
     return true;
 }
 
-// O(1) chained find of the VALID slot for (qid_path, page_index), or NULL.
-static struct larder_page_ent *page_find_locked(struct larder *l, u64 qid_path,
-                                                u64 page_index) {
-    if (!l->page) return NULL;
+// The one slot a key can hold, as attr_key_slot_locked. A slot found here held
+// content, so it has its buffer.
+static struct larder_page_ent *page_key_slot_locked(struct larder *l, u64 qid_path,
+                                                    u64 page_index) {
     u32 b = page_bucket(l->page_nbuckets, qid_path, page_index);
     for (s32 si = l->page_hash[b]; si != -1; si = l->page[si].hnext) {
         struct larder_page_ent *e = &l->page[si];
@@ -640,6 +690,14 @@ static struct larder_page_ent *page_find_locked(struct larder *l, u64 qid_path,
     return NULL;
 }
 
+// O(1) chained find of the live slot for (qid_path, page_index), or NULL.
+static struct larder_page_ent *page_find_locked(struct larder *l, u64 qid_path,
+                                                u64 page_index) {
+    if (!l->page) return NULL;
+    struct larder_page_ent *e = page_key_slot_locked(l, qid_path, page_index);
+    return e && page_live(l, e) ? e : NULL;
+}
+
 // CLOCK second-chance: advance the hand clearing ref bits; the first ref==0 (or an
 // already-free slot) is the victim slot index. Terminates within 2*cap. l->lock held.
 static s32 page_clock_evict_locked(struct larder *l) {
@@ -647,7 +705,7 @@ static s32 page_clock_evict_locked(struct larder *l) {
         u32 h = l->page_hand;
         l->page_hand = (h + 1u) % l->page_cap;
         struct larder_page_ent *e = &l->page[h];
-        if (!e->valid) return (s32)h;      // a freed (invalidated) slot -- take it
+        if (!page_live(l, e)) return (s32)h;   // a freed or forgotten slot -- take it
         if (e->ref) { e->ref = false; continue; }
         return (s32)h;                      // ref == 0: the victim
     }
@@ -688,7 +746,7 @@ u32 larder_page_serve(struct larder *l, u64 qid_path, u64 page_index,
 static struct larder_page_ent *page_install_slot_locked(struct larder *l,
                                                         u64 qid_path,
                                                         u64 page_index) {
-    struct larder_page_ent *e = page_find_locked(l, qid_path, page_index);
+    struct larder_page_ent *e = page_key_slot_locked(l, qid_path, page_index);
     if (e) return e;                           // overwrite (revalidate; key/bucket kept)
     s32 si;
     if (l->page_used < l->page_cap) {
@@ -696,7 +754,7 @@ static struct larder_page_ent *page_install_slot_locked(struct larder *l,
     } else {
         si = page_clock_evict_locked(l);       // full: CLOCK-pick a victim to reuse
         struct larder_page_ent *v = &l->page[si];
-        if (v->valid) { l->page_evictions++; }
+        if (page_live(l, v)) { l->page_evictions++; }
         page_hash_unlink_locked(l, si);        // drop the victim's OLD key from both
         page_qhash_unlink_locked(l, si);       //   indexes (kept in lockstep)
     }
@@ -754,6 +812,7 @@ void larder_page_install(struct larder *l, u64 seq0, u64 qid_path, u64 page_inde
     e->cvers      = cvers;
     e->valid_len  = len;
     e->valid      = true;
+    e->epoch      = l->epoch;
     e->ref        = true;          // CLOCK: freshly installed -> a second chance
     e->own        = false;         // a read-populate observed SERVER content: the
                                    // own bypass upgrades to the normal cvers gate
@@ -801,6 +860,7 @@ void larder_page_install_own(struct larder *l, u64 qid_path, u64 page_index,
     e->cvers     = 0;
     e->valid_len = len;
     e->valid     = true;
+    e->epoch     = l->epoch;
     e->ref       = true;
     e->own       = true;
     l->page_own_installs++;
@@ -831,14 +891,30 @@ void larder_page_invalidate(struct larder *l, u64 qid_path) {
                 page_hash_unlink_locked(l, si);   // drop from the (path,index) bucket
                 *pp = e->qnext;                   // splice out of the qbucket
                 e->qnext = -1;
+                if (page_live(l, e)) l->page_invalidations++;
                 e->valid = false;                 // buffer retained for reuse
-                l->page_invalidations++;
             } else {
                 pp = &e->qnext;                   // keep walking the qbucket
             }
         }
     }
     spin_unlock(&l->lock);
+}
+
+void larder_forget_all(struct larder *l) {
+    if (!l) return;
+    spin_lock(&l->lock);
+    l->gen += LARDER_INVAL_RING + 1u;
+    l->epoch++;
+    l->forgets++;
+    spin_unlock(&l->lock);
+}
+
+u64 larder_epoch(struct larder *l) {
+    spin_lock(&l->lock);
+    u64 e = l->epoch;
+    spin_unlock(&l->lock);
+    return e;
 }
 
 void larder_page_invalidate_range(struct larder *l, u64 qid_path,
@@ -864,8 +940,8 @@ void larder_page_invalidate_range(struct larder *l, u64 qid_path,
                 page_hash_unlink_locked(l, si);
                 *pp = e->qnext;
                 e->qnext = -1;
+                if (page_live(l, e)) l->page_invalidations++;
                 e->valid = false;
-                l->page_invalidations++;
             } else {
                 pp = &e->qnext;
             }

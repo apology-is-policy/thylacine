@@ -15,11 +15,12 @@ mirrors:
   - "usr/lib/pouch/patches/0024-pouch-fs-process-wires.patch: unsigned char t[88] + literal +40 in faccessat.c (NO guard)"
   - "go-thylacine src/syscall/syscall_thylacine.go: type Stat_t (NO guard)"
 created: 2026-08-02
-updated: 2026-09-28
+updated: 2026-10-20
 ---
 ## The layout
 
-The result of `SYS_FSTAT` and `SYS_STAT`. **88 bytes**, naturally aligned,
+The result of `SYS_FSTAT`, `SYS_STAT` and `SYS_LSTAT` (the final component's
+own record, so a link reports `T_S_IFLNK`). **88 bytes**, naturally aligned,
 Plan-9-shaped at the core and POSIX-shaped at the surface — the qid carries
 the 9P identity verbatim, and `mode`/`size`/the timestamps are POSIX so the
 pouch boundary-line can fill musl's `struct stat` without an intermediate.

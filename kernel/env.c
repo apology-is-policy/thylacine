@@ -2,14 +2,14 @@
 // /env device (devenv.c): the ref-counted Env table, its lock discipline, and
 // the per-name primitives devenv drives. See env.h for the model.
 //
-// Lifetime: the Env is owned 1:1 by its Proc (RFENVG sharing is deferred, so
-// `ref` is always 1 at v1.0 -- the field is the forward hook + the territory_-
-// unref-shaped double-free guard). It is allocated lazily on the first set
-// (env_lazy's CAS closes the peer-thread alloc race), deep-copied on spawn
-// (env_clone_into) or built from a spawn's SPAWN_EXT_ENV tail and adopted by a
-// child forked without one (env_from_block, env_install), and freed at proc_free
-// (env_free). Names are inline; each
-// value is kmalloc'd individually, so the struct stays modest and a long value
+// Lifetime: the Env is owned by its Proc and by every open /env/NAME handle
+// opened in it (env_ref at devenv open/create, env_unref at its close; RFENVG
+// sharing stays deferred). It is allocated lazily on the first set (env_lazy's
+// CAS closes the peer-thread alloc race), deep-copied on spawn (env_clone_into)
+// or refilled in place from a spawn's SPAWN_EXT_ENV tail (env_install), and
+// dropped by its Proc at proc_free (env_free); the last ref frees it. Names
+// are inline in a table that starts small and doubles on demand, so a typical
+// Proc pays for few slots; each value is kmalloc'd individually, so a long value
 // never needs a large contiguous allocation.
 
 #include <thylacine/env.h>
@@ -36,9 +36,19 @@ u64 env_live_count(void) {
 }
 #endif // KERNEL_TESTS
 
+static struct EnvEntry *env_table_alloc(int cap) {
+    return (struct EnvEntry *)kmalloc(sizeof(struct EnvEntry) * (size_t)cap, KP_ZERO);
+}
+
 static struct Env *env_alloc(void) {
     struct Env *e = (struct Env *)kmalloc(sizeof(struct Env), KP_ZERO);
     if (!e) return NULL;
+    e->entries = env_table_alloc(ENV_FIRST_ENTRIES);
+    if (!e->entries) {
+        kfree(e);
+        return NULL;
+    }
+    e->cap = ENV_FIRST_ENTRIES;
     __atomic_add_fetch(&g_env_live, 1, __ATOMIC_RELAXED);
     spin_lock_init(&e->lock);
     __atomic_store_n(&e->ref, 1, __ATOMIC_RELAXED);
@@ -60,12 +70,13 @@ static struct Env *env_alloc(void) {
 // destroyed or was never published).
 static void env_destroy(struct Env *e) {
     if (!e) return;
-    for (int i = 0; i < ENV_MAX_ENTRIES; i++) {
+    for (int i = 0; i < e->cap; i++) {
         if (e->entries[i].value) {
             kfree(e->entries[i].value);
             e->entries[i].value = NULL;
         }
     }
+    kfree(e->entries);
     kfree(e);
     __atomic_sub_fetch(&g_env_live, 1, __ATOMIC_RELAXED);
 }
@@ -100,7 +111,7 @@ static bool name_matches(const char *a, const char *b, u32 b_len) {
 }
 
 static int find_by_name_locked(struct Env *e, const char *name, u32 name_len) {
-    for (int i = 0; i < ENV_MAX_ENTRIES; i++) {
+    for (int i = 0; i < e->cap; i++) {
         if (e->entries[i].id != 0 && name_matches(e->entries[i].name, name, name_len))
             return i;
     }
@@ -109,17 +120,39 @@ static int find_by_name_locked(struct Env *e, const char *name, u32 name_len) {
 
 static int find_by_id_locked(struct Env *e, u64 id) {
     if (id == 0) return -1;
-    for (int i = 0; i < ENV_MAX_ENTRIES; i++) {
+    for (int i = 0; i < e->cap; i++) {
         if (e->entries[i].id == id) return i;
     }
     return -1;
 }
 
 static int find_free_locked(struct Env *e) {
-    for (int i = 0; i < ENV_MAX_ENTRIES; i++) {
+    for (int i = 0; i < e->cap; i++) {
         if (e->entries[i].id == 0) return i;
     }
     return -1;
+}
+
+// One step up from `seen` slots, unless a peer already took it. The table is
+// allocated outside the leaf lock: at this size kmalloc goes to the page
+// allocator. Slot indices survive, which keeps the id order env_install relies
+// on. False on OOM; the caller's view of the table is simply unchanged.
+bool env_grow(struct Env *e, int seen) {
+    int ncap = seen * 2;
+    if (ncap > ENV_MAX_ENTRIES) ncap = ENV_MAX_ENTRIES;
+    struct EnvEntry *table = env_table_alloc(ncap);
+    if (!table) return false;
+    spin_lock(&e->lock);
+    struct EnvEntry *spare = table;
+    if (e->cap == seen) {
+        for (int i = 0; i < seen; i++) table[i] = e->entries[i];
+        spare = e->entries;
+        e->entries = table;
+        e->cap = ncap;
+    }
+    spin_unlock(&e->lock);
+    kfree(spare);
+    return true;
 }
 
 // A valid env var name is a single non-empty component that fits with a NUL and
@@ -160,17 +193,21 @@ u64 env_create(struct Proc *p, const char *name, u32 name_len) {
     struct Env *e = env_lazy(p);
     if (!e) return 0;
 
-    spin_lock(&e->lock);
-    int i = find_by_name_locked(e, name, name_len);
-    if (i >= 0) {                   // create-or-get: name already exists
-        u64 id = e->entries[i].id;
+    int slot;
+    for (;;) {
+        spin_lock(&e->lock);
+        int i = find_by_name_locked(e, name, name_len);
+        if (i >= 0) {               // create-or-get: name already exists
+            u64 id = e->entries[i].id;
+            spin_unlock(&e->lock);
+            return id;
+        }
+        slot = find_free_locked(e);
+        if (slot >= 0) break;       // with the lock held
+        int cap = e->cap;
         spin_unlock(&e->lock);
-        return id;
-    }
-    int slot = find_free_locked(e);
-    if (slot < 0) {                 // ENV_MAX_ENTRIES reached (DoS floor)
-        spin_unlock(&e->lock);
-        return 0;
+        if (cap >= ENV_MAX_ENTRIES) return 0;   // the DoS floor
+        if (!env_grow(e, cap)) return 0;
     }
     struct EnvEntry *en = &e->entries[slot];
     en->id    = e->next_id++;
@@ -185,8 +222,10 @@ u64 env_create(struct Proc *p, const char *name, u32 name_len) {
 }
 
 void env_truncate(struct Proc *p, u64 id) {
-    if (!p) return;
-    struct Env *e = __atomic_load_n(&p->env, __ATOMIC_ACQUIRE);
+    env_truncate_in(env_current(p), id);
+}
+
+void env_truncate_in(struct Env *e, u64 id) {
     if (!e) return;
     spin_lock(&e->lock);
     int i = find_by_id_locked(e, id);
@@ -211,9 +250,11 @@ u64 env_devno(struct Proc *p) {
 // every other op, so a variable removed between the walk and the stat reports
 // gone rather than another variable's length (the monotonic-id guarantee).
 bool env_size(struct Proc *p, u64 id, u64 *out_len) {
-    if (!p || !out_len) return false;
-    struct Env *e = __atomic_load_n(&p->env, __ATOMIC_ACQUIRE);
-    if (!e) return false;
+    return env_size_in(env_current(p), id, out_len);
+}
+
+bool env_size_in(struct Env *e, u64 id, u64 *out_len) {
+    if (!e || !out_len) return false;
     spin_lock(&e->lock);
     int i = find_by_id_locked(e, id);
     if (i < 0) { spin_unlock(&e->lock); return false; }
@@ -223,10 +264,12 @@ bool env_size(struct Proc *p, u64 id, u64 *out_len) {
 }
 
 long env_read(struct Proc *p, u64 id, s64 off, void *buf, long n) {
-    if (!p || !buf) return -1;
+    return env_read_in(env_current(p), id, off, buf, n);
+}
+
+long env_read_in(struct Env *e, u64 id, s64 off, void *buf, long n) {
+    if (!e || !buf) return -1;
     if (n < 0 || off < 0) return -1;
-    struct Env *e = __atomic_load_n(&p->env, __ATOMIC_ACQUIRE);
-    if (!e) return -1;
     spin_lock(&e->lock);
     int i = find_by_id_locked(e, id);
     if (i < 0) { spin_unlock(&e->lock); return -1; }   // entry gone (monotonic-id)
@@ -240,12 +283,14 @@ long env_read(struct Proc *p, u64 id, s64 off, void *buf, long n) {
 }
 
 long env_write(struct Proc *p, u64 id, s64 off, const void *buf, long n) {
-    if (!p || !buf) return -1;
+    return env_write_in(env_current(p), id, off, buf, n);
+}
+
+long env_write_in(struct Env *e, u64 id, s64 off, const void *buf, long n) {
+    if (!e || !buf) return -1;
     if (n < 0 || off < 0) return -1;
     if (n == 0) return 0;
     if ((u64)off + (u64)n > ENV_VALUE_MAX) return -1;   // bound (DoS floor)
-    struct Env *e = __atomic_load_n(&p->env, __ATOMIC_ACQUIRE);
-    if (!e) return -1;
 
     spin_lock(&e->lock);
     int i = find_by_id_locked(e, id);
@@ -289,16 +334,20 @@ bool env_unset(struct Proc *p, const char *name, u32 name_len) {
 
 bool env_iter(struct Proc *p, u64 after_id, u64 *out_id, char *name_out,
               u32 name_cap, u32 *name_len_out) {
-    if (!p || !out_id || !name_out || name_cap == 0) return false;
-    struct Env *e = __atomic_load_n(&p->env, __ATOMIC_ACQUIRE);
-    if (!e) return false;
+    return env_iter_in(env_current(p), after_id, out_id, name_out, name_cap,
+                       name_len_out);
+}
+
+bool env_iter_in(struct Env *e, u64 after_id, u64 *out_id, char *name_out,
+                 u32 name_cap, u32 *name_len_out) {
+    if (!e || !out_id || !name_out || name_cap == 0) return false;
     spin_lock(&e->lock);
     // The live entry with the smallest id strictly greater than after_id -- so a
     // readdir resuming from cookie `after_id` advances monotonically and emits
     // strictly-increasing cookies. O(n) per step; n <= ENV_MAX_ENTRIES.
     int best = -1;
     u64 best_id = 0;
-    for (int i = 0; i < ENV_MAX_ENTRIES; i++) {
+    for (int i = 0; i < e->cap; i++) {
         u64 id = e->entries[i].id;
         if (id != 0 && id > after_id && (best < 0 || id < best_id)) {
             best = i; best_id = id;
@@ -353,8 +402,8 @@ static bool env_linux_encodable(const struct EnvEntry *en, u32 nlen) {
 //
 // OFFSET-AWARE BY CONSTRUCTION, unlike every other /proc file, which formats the
 // whole thing into a 2 KiB devproc buffer and slices. That would not do here: an
-// Env holds up to ENV_MAX_ENTRIES (64) values of ENV_VALUE_MAX (4096) bytes, a
-// quarter-megabyte, and a SINGLE long PATH would overflow the buffer on its own.
+// Env holds up to ENV_MAX_ENTRIES (256) values of ENV_VALUE_MAX (4096) bytes, a
+// megabyte, and a SINGLE long PATH would overflow the buffer on its own.
 // The failure mode of a format-and-slice render is silently dropping environment
 // variables -- which does not look like an error to the consumer, it looks like
 // the variable was never set, and sends it down a different path with nothing to
@@ -383,7 +432,7 @@ long env_render_environ(struct Proc *p, s64 off, void *buf, long n) {
         // env_iter's ordering, so the block's record order matches readdir's.
         int best = -1;
         u64 best_id = 0;
-        for (int i = 0; i < ENV_MAX_ENTRIES; i++) {
+        for (int i = 0; i < e->cap; i++) {
             u64 id = e->entries[i].id;
             if (id != 0 && id > after && (best < 0 || id < best_id)) {
                 best = i; best_id = id;
@@ -459,7 +508,11 @@ struct Env *env_from_block(const char *block, u32 len, int *err) {
         bool fresh_slot = slot < 0;
         if (fresh_slot) {
             slot = find_free_locked(e);
-            if (slot < 0) { *err = -(int)T_E_2BIG; break; }
+            if (slot < 0) {
+                if (e->cap >= ENV_MAX_ENTRIES) { *err = -(int)T_E_2BIG; break; }
+                if (!env_grow(e, e->cap)) { *err = -(int)T_E_NOMEM; break; }
+                slot = find_free_locked(e);
+            }
         }
         char *v = NULL;
         if (vlen > 0) {
@@ -494,34 +547,35 @@ void env_install(struct Proc *p, struct Env *fresh) {
         return;                     // p had no group: fresh becomes it
     }
 
-    // Refill p's group in place. Its new entries take ids from its own counter,
-    // after every id it ever issued, so no id is reused within the group (the
-    // monotonic-id guarantee). fresh's slots fill lowest-first in increasing id
-    // order and it never frees one, so moving slot for slot keeps the records'
-    // order, which env_iter and the exec projection both follow.
+    // Refill p's group in place, by taking fresh's table: the spawn has committed,
+    // so this may not fail, and fresh may be larger than the table p has. Its
+    // entries take ids from p's own counter, after every id p ever issued, so no
+    // id is reused within the group (the monotonic-id guarantee). fresh's slots
+    // fill lowest-first in increasing id order and it never frees one, so its
+    // table keeps the records' order, which env_iter and the exec projection both
+    // follow.
     spin_lock(&old->lock);
-    for (int i = 0; i < ENV_MAX_ENTRIES; i++) {
+    for (int i = 0; i < old->cap; i++) {
         struct EnvEntry *d = &old->entries[i];
         if (d->value) kfree(d->value);
-        d->value   = NULL;
-        d->len     = 0;
-        d->id      = 0;
-        d->name[0] = '\0';
+        d->value = NULL;
+        d->len   = 0;
+        d->id    = 0;
     }
-    old->count = 0;
-    for (int i = 0; i < ENV_MAX_ENTRIES; i++) {
-        struct EnvEntry *s = &fresh->entries[i];
-        if (s->id == 0) continue;
-        struct EnvEntry *d = &old->entries[i];
-        d->id    = old->next_id++;
-        d->value = s->value;        // moved: fresh no longer owns it
-        d->len   = s->len;
-        for (u32 k = 0; k < ENV_NAME_MAX; k++) d->name[k] = s->name[k];
+    struct EnvEntry *emptied = old->entries;
+    int              emptied_cap = old->cap;
+    old->entries = fresh->entries;
+    old->cap     = fresh->cap;
+    old->count   = 0;
+    for (int i = 0; i < old->cap; i++) {
+        if (old->entries[i].id == 0) continue;
+        old->entries[i].id = old->next_id++;
         old->count++;
-        s->value = NULL;
     }
+    fresh->entries = emptied;
+    fresh->cap     = emptied_cap;
     spin_unlock(&old->lock);
-    env_destroy(fresh);             // every value moved; frees the struct
+    env_destroy(fresh);             // holds no value now; frees the struct and table
 }
 
 void env_discard(struct Env *e) {
@@ -542,10 +596,23 @@ int env_clone_into(struct Proc *child, struct Proc *parent) {
 
     // Deep-copy under the parent's lock (a peer thread of the parent may mutate
     // concurrently). The child is not yet running, so writing ne is unraced; the
-    // per-value kmalloc-under-lock mirrors territory_clone's dot_path dup.
-    spin_lock(&src->lock);
+    // per-value kmalloc-under-lock mirrors territory_clone's dot_path dup. The copy
+    // keeps slot indices, so ne's table must first reach src's size, which a peer
+    // can raise until the lock is held with ne big enough.
+    for (;;) {
+        spin_lock(&src->lock);
+        if (ne->cap >= src->cap) break;
+        int want = src->cap;
+        spin_unlock(&src->lock);
+        while (ne->cap < want) {
+            if (!env_grow(ne, ne->cap)) {
+                env_destroy(ne);
+                return -1;
+            }
+        }
+    }
     ne->next_id = src->next_id;
-    for (int i = 0; i < ENV_MAX_ENTRIES; i++) {
+    for (int i = 0; i < src->cap; i++) {
         if (src->entries[i].id == 0) continue;          // free slot (ne is KP_ZERO)
         struct EnvEntry *s = &src->entries[i];
         struct EnvEntry *d = &ne->entries[i];           // same slot index (keep layout)
@@ -575,7 +642,22 @@ void env_free(struct Proc *p) {
     struct Env *e = __atomic_load_n(&p->env, __ATOMIC_ACQUIRE);
     if (!e) return;
     __atomic_store_n(&p->env, NULL, __ATOMIC_RELEASE);  // a second call no-ops
+    env_unref(e);                                       // the Proc's ref
+}
+
+struct Env *env_current(struct Proc *p) {
+    return p ? __atomic_load_n(&p->env, __ATOMIC_ACQUIRE) : NULL;
+}
+
+void env_ref(struct Env *e) {
+    if (!e) return;
+    int pre = __atomic_fetch_add(&e->ref, 1, __ATOMIC_ACQ_REL);
+    if (pre <= 0) extinction("env_ref of a freed Env");
+}
+
+void env_unref(struct Env *e) {
+    if (!e) return;
     int pre = __atomic_fetch_sub(&e->ref, 1, __ATOMIC_ACQ_REL);
-    if (pre <= 0) extinction("env_free of zero-ref Env");
+    if (pre <= 0) extinction("env_unref of zero-ref Env");
     if (pre == 1) env_destroy(e);                       // last owner drops -> free
 }

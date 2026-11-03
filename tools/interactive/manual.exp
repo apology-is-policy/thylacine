@@ -29,17 +29,14 @@
 # other. (Before 2026-09-16 every such read in ut came out 0, whatever the
 # command returned; that defect is why these legs were once withheld.)
 #
-# The RICH tier is not driven here. `echo -n rich > /env/BEACON` cannot set it
-# from the shell: ut opens the target and truncates ITS OWN BEACON, while echo's
-# write lands in echo's copy of the environment and dies with it (measured
-# 2026-09-16: children saw `cells` before the redirect and an empty value
-# after). Rich output is pinned byte-for-byte by the host tests (`cargo test -p
-# manual`) and is seen for real in a Halcyon tile, whose pts advertises `rich`
-# (MANUAL-DESIGN.md 8.3).
-#
 # This image's console advertises the `cells` tier (ut exports BEACON=cells,
 # measured 2026-09-16), which the reader renders exactly as plain -- a
-# host-tested identity -- so every leg matches plain text.
+# host-tested identity -- so legs (a)-(f) match plain text. Leg (g) sets
+# BEACON=rich with `echo -n rich > /env/BEACON`, which works because an open
+# /env file acts on the environment that opened it, ut's (ARCH 9.7); before
+# that the write landed in echo's copy and children saw an empty BEACON
+# (measured 2026-09-16). Rich output is pinned byte-for-byte by the host tests
+# (`cargo test -p manual`); the leg asks only for the heading's frame.
 
 # HVF: the scenario is boot-dominated, and nothing the reader does depends on
 # the CPU model or the GIC version that the TCG anchor set covers.
@@ -110,6 +107,19 @@ lc_run_expect_hardfail {manual /tmp/mfbad.md; echo mfbadshow $status} "links are
 manual_status mfbadshow 1 "manual(f) exit status" "mfbadbody"
 lc_pass "manual(f): a file that fails the check is not displayed: its diagnostic, exit 1, none of its rendering"
 
+# (g) The same line puts BEACON back to cells, so nothing after it sees rich.
+lc_send {echo -n rich > /env/BEACON; manual /tmp/mf.md; echo mfrich $status; echo -n cells > /env/BEACON}
+set timeout $lc_cmd_timeout
+expect {
+    -ex "\x1b]1936;v1;hdr;level=1\x1b\\Fixture " { lc_step "saw: the rich heading frame" }
+    -ex "mfrich 0\r"  { lc_fail "manual(g): the section rendered with no rich frame: BEACON=rich did not reach manual" }
+    -re {EXTINCTION:} { lc_extinction_fail "kernel extinction during 'manual(g)'" }
+    timeout           { lc_fail "timeout (${lc_cmd_timeout}s) waiting for the rich heading frame during 'manual(g)'" }
+    eof               { lc_fail "unexpected EOF during 'manual(g)'" }
+}
+manual_status mfrich 0 "manual(g) exit status"
+lc_pass "manual(g): a redirect into /env sets the shell's BEACON, and the next command renders at the rich tier"
+
 lc_quit
-lc_pass "LS-CI manual: the listing, check, render, lookup and refusal legs verified, with their exit statuses"
+lc_pass "LS-CI manual: the listing, check, render, lookup, refusal and rich-tier legs verified, with their exit statuses"
 exit 0

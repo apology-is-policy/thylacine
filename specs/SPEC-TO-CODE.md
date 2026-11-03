@@ -347,7 +347,7 @@ its QTDIR check, and `EmountOK`, which guards `MountBefore` / `MountAfter` /
 `MountRepl`, is `kernel/syscall.c::sys_mount_for_proc`'s type check, Plan 9's
 Emount, since the 2026-09-25 votes: every source in the model is a directory,
 so no EL0 mount reaches a file point, and the kernel answers `-T_E_NOTDIR`)
-and the two `mount_install_at` calls that place the covered entry, MCOVERED alone (`<new, covered>` for MBEFORE, `<covered, new>` for
+and the two `mount_link` calls that place the covered entry, MCOVERED alone (`<new, covered>` for MBEFORE, `<covered, new>` for
 MAFTER); `Reposition` -> the #219 / F6 reposition arm (the point is not fresh,
 so no covered entry); `Unmount` -> `::unmount` (the covered entry is never
 removed by name and leaves with the last mounted member); `NoSelfMount` ->
@@ -2170,9 +2170,8 @@ Spec action ↔ impl mapping (`kernel/dev9p_poll.c` unless noted):
   `exit_close_active`): `dev9p_clunk_fid` sends through
   `p9_client_clunk_nowait`, which takes the same -P9_E_AGAIN where it would
   wait for a tag or ring space; where it would not, the close is `UserClose`.
-  Part C maps here too: a dev9p last close that may not wait (a die-pending
-  thread, a `closes_never_wait` kernel thread) with a staged write-behind run
-  hands the fid with a close job (`p9_attached_defer_close`); the spec's fid
+  Part C maps here too: a dev9p last reference (`Dev.close`, which never waits)
+  with a staged write-behind run hands the fid with a close job (`p9_attached_defer_close`); the spec's fid
   is that entry, and the job's Twrites are not modelled (they precede the
   Tclunk on the same closer, so `CloserSend` still clunks each entry once).
   That is the safety half; the liveness half weakens (below).
@@ -3414,11 +3413,13 @@ that shares no operator with the rule.
   open of a union directory; `NoPoint` otherwise). `new = root` is explored on
   purpose: the kernel skips only a swap to the SAME Spoor, and a chroot into
   another directory of the same tree is a real swap.
-- **`ImplReach` / `Seeds` / `Widen` / `Close`** -> the closure loop in
-  `territory_shed_unreachable_locked`: `shed_add` of the root's instance and of
-  the union point's instance (`Seeds`), `shed_has`'s `any_devno` arm (`Widen`;
-  set from `Dev.devno_per_walker`), the `while (changed)` fixpoint (`Close`).
-- **`Keep`** -> the compaction pass (survivors keep their relative order; that
+- **`ImplReach` / `Seeds` / `Widen` / `Close`** -> the closure pass in
+  `territory_shed_unreachable_locked`: `shed_reach` of the root and of the union
+  point (`Seeds`), `shed_reach`'s `any_devno` arm (`Widen`; set from
+  `Dev.devno_per_walker`), and the worklist loop that runs `shed_reach` on the
+  source of every member of each point it queued (`Close`). A point reached is
+  marked with the pass (`mvisit_next`) and queued on its own `work` link.
+- **`Keep`** -> the unlink pass over the table list (survivors keep their relative order; that
   order is the union search order, which this module does not model --
   `territory.tla`'s `OrderCorrect` owns it).
 - **The walker (`WalkStart` / `WalkCross` / `WalkRestamp`)** -> `stalk_core`
@@ -3512,6 +3513,36 @@ second invariant and why both buggy cfgs are judged on it.
   and `detach.range_across_burrows_and_holes` (a held Burrow ref sees the
   whole mapping ALIVE with nothing resident: the release ran before the
   mapping went).
+- **`Extend(a, b)`** (ARCH 6.5's merge, B-3e vote 2, 2026-10-19) ->
+  `kernel/vma.c::vma_extend_anon_in`, reached under `as->lock` from
+  `kernel/syscall.c::lazy_reserve_core` (`SYS_BURROW_RESERVE` 124, the
+  phenotype's anonymous mmap, `SYS_BURROW_ATTACH_LAZY` 83): the placed range
+  is served by the adjacent mapping's Burrow at the offsets its bias names
+  (`prev->burrow_offset` + the predecessor's length going forward,
+  `next->burrow_offset - length` going backward), through
+  `kernel/burrow.c::burrow_lazy_extend`, which refuses a Burrow a handle names
+  and grows the pagemap (`pagemap_grow`) when the range runs past `page_count`.
+  The model's guard `~resident[b][s]` is the kernel's pre-extension check
+  (`pagemap_next_resident` over the slots that exist), an extinction there
+  rather than a precondition.
+- **`NoAlias`** -> the one-bias rule that makes the model's `s = a` true in
+  the kernel: `kernel/burrow.c::burrow_lazy_bind_va0`, called from
+  `vma_insert_in` once a mapping of an ANON_LAZY Burrow is linked, stamps
+  `lazy_va0` at the first and marks the Burrow `lazy_multi_bias` at a second;
+  `burrow_lazy_extend` refuses a marked Burrow, so the model's `s = a` holds
+  for every Burrow an extension touches. The model has one address space;
+  the kernel makes that true of every Burrow it extends by refusing one a
+  handle names or one whose `mapping_count` exceeds its mappings in this space
+  (`kernel/vma.c::mappings_here`). Witnesses:
+  `anon_merge.hole_refill_joins_the_pieces` (a detach's pieces and the refill
+  between them, one bias), `anon_merge.fork_clones_the_merged_burrow` (a clone
+  maps at the same bias), `anon_merge.second_bias_is_never_extended` and
+  `anon_merge.another_space_is_never_extended`.
+- **`ZeroRead`** -> the same empty check, "a slot no mapping covers still
+  holds a page (NoOrphan broken)", which needs `NoOrphan` on EVERY unmap path:
+  `kernel/burrow.c::burrow_unmap_reporting_in` now releases a plain ANON_LAZY
+  mapping's slots before the remove, as the range detach does (OPEN-BUGS
+  20:36Z). Witness: `anon_merge.unmap_releases_lazy_slots`.
 
 What the model cannot see, listed so the green reads no larger: one address
 space, so no fork clone of the pagemap (`pagemap_mirror` is `cow.tla`'s
@@ -3529,14 +3560,22 @@ F8: `demand_page.file_pages_charge_the_holder`,
 `demand_page.idle_image_reclaimed_under_pressure`); the walk bound (`pagemap_walk_steps`;
 `capacity.window_sized_reservation_releases_in_bounded_steps`: the whole
 64 TiB window reserved, two pages touched, released in a few thousand entry
-visits, not 2^34).
+visits, not 2^34). The merge's growth and its handle refusal are below the
+model too: its Burrows have a fixed number of slots and no handles
+(`pagemap.grow_keeps_every_page`, `anon_merge.growth_crosses_every_shape`,
+`anon_merge.never_across_a_boundary`); so is ADJACENCY, since an `Extend`
+may reuse any live Burrow, a superset of the kernel's neighbour.
 
 Gate: `specs/check-capacity.sh`. `capacity.cfg` clean, pinned at
-**625 distinct states** (4 slots x 2 Burrows);
+**625 distinct and 5785 generated states** (4 addresses x 2 Burrows; the
+generated count is the pin that sees an action change -- without `Extend`
+it is 5001, with the distinct count unmoved);
 `capacity_buggy_replace_orphans.cfg` and `capacity_buggy_detach_no_refund.cfg`
 must each violate `NoOrphan` with `ChargeConserved` listed ahead of it and
 HOLDING -- a run that reported the counter instead would mean the model no
-longer says the counter is blind.
+longer says the counter is blind; `capacity_buggy_extend_alias.cfg` must
+violate `NoAlias` with `ChargeConserved`, `NoOrphan` and `ZeroRead` ahead of
+it and holding.
 
 ---
 

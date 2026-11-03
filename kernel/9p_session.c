@@ -167,7 +167,7 @@ static void entry_zero(struct p9_outstanding *e) {
     e->abandoned      = false;
     e->holds_slot     = false;
     e->flush_oldtag   = 0;
-    e->wga_nwname     = 0;
+    e->walk_nwname    = 0;
     e->flush_tag      = 0;
     e->async          = false;
     e->owner          = NULL;
@@ -207,6 +207,19 @@ static int alloc_tag(struct p9_session *s, bool flush) {
     return grow(s);
 }
 
+// Does a server running this kind change what a client caches? A Tlopen does when
+// it truncates (p9_session_send_lopen).
+bool p9_session_kind_mutates(u8 kind) {
+    switch (kind) {
+    case P9_TLCREATE: case P9_TWRITE:   case P9_TSETATTR: case P9_TSYMLINK:
+    case P9_TMKNOD:   case P9_TRENAME:  case P9_TLINK:    case P9_TMKDIR:
+    case P9_TRENAMEAT: case P9_TUNLINKAT:
+        return true;
+    default:
+        return false;
+    }
+}
+
 // Mark tag `t` active with the given op shape. Caller validates `t` is
 // free.
 static void mark_outstanding(struct p9_session *s, u16 t,
@@ -219,6 +232,7 @@ static void mark_outstanding(struct p9_session *s, u16 t,
     e->fid     = fid;
     e->new_fid = new_fid;
     e->op_id   = s->next_op_id;
+    e->mutates = p9_session_kind_mutates(kind);
     chunk(s, t / P9_TAG_CHUNK)->n_active++;
     s->n_active++;
     if (kind == P9_TFLUSH) s->n_flush++;
@@ -437,6 +451,7 @@ int p9_session_send_walk(struct p9_session *s,
                             nwname, names, name_lens);
     if (rc < 0) return -1;
     mark_outstanding(s, (u16)t, P9_TWALK, src_fid, new_fid);
+    entry(s, (u32)t)->walk_nwname = nwname;
     slot_reserve(s, (u16)t);
     return rc;
 }
@@ -474,7 +489,7 @@ int p9_session_send_walkgetattr(struct p9_session *s,
                                    nwname, names, name_lens);
     if (rc < 0) return -1;
     mark_outstanding(s, (u16)t, P9_TWALKGETATTR, src_fid, new_fid);
-    entry(s, (u32)t)->wga_nwname = nwname;
+    entry(s, (u32)t)->walk_nwname = nwname;
     if (new_fid != P9_NOFID) slot_reserve(s, (u16)t);
     return rc;
 }
@@ -686,6 +701,7 @@ int p9_session_send_lopen(struct p9_session *s,
     int rc = p9_build_tlopen(out, cap, (u16)t, fid, flags);
     if (rc < 0) return -1;
     mark_outstanding(s, (u16)t, P9_TLOPEN, fid, fid);
+    if (flags & 01000u) entry(s, (u16)t)->mutates = true;   // 9P2000.L's O_TRUNC
     return rc;
 }
 
@@ -841,6 +857,46 @@ int p9_session_send_fsync(struct p9_session *s,
     int rc = p9_build_tfsync(out, cap, (u16)t, fid, datasync);
     if (rc < 0) return -1;
     mark_outstanding(s, (u16)t, P9_TFSYNC, fid, fid);
+    return rc;
+}
+
+// A lock request's proc_id is its fid, never a pid. Its client_id is the caller's
+// to name: the identity a take's records count against, which a server keying
+// owners by the two also reads, so a fid's requests must all name the same one.
+int p9_session_send_lock(struct p9_session *s, u8 *out, size_t cap,
+                         u32 fid, u8 type, u32 flags, u64 start, u64 length,
+                         const u8 *client, u16 client_len) {
+    if (!s) return -1;
+    if (s->magic != P9_SESSION_MAGIC) return -1;
+    if (s->state != P9_SESS_OPEN) return -1;
+    if (!out) return -1;
+    if (!fid_bound(s, fid)) return -1;
+    int t = alloc_tag(s, false);
+    if (t < 0) return -1;
+    // Stratum keys a lock by its fid, and counts a take's records against
+    // client_id, which names the identity and not the owner. proc_id names the
+    // owner within one session; fid numbers restart per session.
+    int rc = p9_build_tlock(out, cap, (u16)t, fid, type, flags, start, length,
+                            fid, client, client_len);
+    if (rc < 0) return -1;
+    mark_outstanding(s, (u16)t, P9_TLOCK, fid, fid);
+    return rc;
+}
+
+int p9_session_send_getlock(struct p9_session *s, u8 *out, size_t cap,
+                            u32 fid, u8 type, u64 start, u64 length,
+                            const u8 *client, u16 client_len) {
+    if (!s) return -1;
+    if (s->magic != P9_SESSION_MAGIC) return -1;
+    if (s->state != P9_SESS_OPEN) return -1;
+    if (!out) return -1;
+    if (!fid_bound(s, fid)) return -1;
+    int t = alloc_tag(s, false);
+    if (t < 0) return -1;
+    int rc = p9_build_tgetlock(out, cap, (u16)t, fid, type, start, length,
+                               fid, client, client_len);
+    if (rc < 0) return -1;
+    mark_outstanding(s, (u16)t, P9_TGETLOCK, fid, fid);
     return rc;
 }
 
@@ -1175,8 +1231,8 @@ static int dispatch_rversion(struct p9_session *s,
 // The only fid state a reply creates is a walk's new fid, so a late successful
 // walk binds it -- into the slot the walk reserved -- and reports it in
 // out->bound_new_fid for the closer, since its owner is gone
-// (FID-LIFECYCLE section 9). The bind rule is the ordinary arms' (a TWALK
-// binds on any Rwalk, a TWALKGETATTR only on a full walk). holds_slot doubles
+// (FID-LIFECYCLE section 9). The bind rule is the ordinary arms' (only a full
+// walk binds). holds_slot doubles
 // as "not yet honoured": a duplicate late reply finds it clear and binds
 // nothing. The tag itself stays reserved until the Rflush, as before.
 static void honour_late_walk(struct p9_session *s, struct p9_outstanding *op,
@@ -1188,12 +1244,13 @@ static void honour_late_walk(struct p9_session *s, struct p9_outstanding *op,
     u16 nwqid;
     if (op->kind == P9_TWALK) {
         if (p9_parse_rwalk(rmsg, len, &tag_check, &nwqid,
-                           out->qids, P9_MAX_WALK) < 0) return;
+                           out->qids, op->walk_nwname) < 0) return;
+        if (nwqid != op->walk_nwname) return;
     } else if (op->kind == P9_TWALKGETATTR) {
         const u8 *body = NULL;
         if (p9_parse_rwalkgetattr(rmsg, len, &tag_check, &nwqid,
-                                  out->qids, P9_MAX_WALK, &body) < 0) return;
-        if (nwqid != op->wga_nwname) return;
+                                  out->qids, op->walk_nwname, &body) < 0) return;
+        if (nwqid != op->walk_nwname) return;
     } else {
         return;
     }
@@ -1238,16 +1295,17 @@ static int apply_rmsg(struct p9_session *s, struct p9_outstanding *op,
     } else if (op->kind == P9_TWALK) {
         u16 tag_check;
         u16 nwqid;
-        rc = p9_parse_rwalk(rmsg, len, &tag_check, &nwqid, out->qids, P9_MAX_WALK);
+        rc = p9_parse_rwalk(rmsg, len, &tag_check, &nwqid, out->qids, op->walk_nwname);
         if (rc < 0) return -1;
         if (tag_check != tag) return -1;
         // Per 9P2000.L: bind new_fid into the fid table at Rwalk time
         // (server-side WalkBindsWithCurrentGen — see
-        // `stratum/v2/docs/reference/20-9p.md` §"fid.tla composition").
-        // At this bring-up subset we bind unconditionally; nuanced
-        // partial-walk semantics (when nwqid < requested nwname) land
-        // in P5-session-walk-partial.
-        if (slot_bind(s, tag, op->new_fid) < 0) {
+        // `stratum/v2/docs/reference/20-9p.md` §"fid.tla composition"), and only
+        // for a full walk: a shorter one bound nothing on the server, and its
+        // caller, which asked for every name, reports the walk failed.
+        if (nwqid != op->walk_nwname) {
+            out->nwqid = nwqid;
+        } else if (slot_bind(s, tag, op->new_fid) < 0) {
             // The bind goes into the slot send_walk reserved, so capacity
             // cannot refuse it; only a redundant already-bound fid can, a LOCAL
             // condition -- the server's Rwalk is conformant. Surface it as a
@@ -1267,16 +1325,13 @@ static int apply_rmsg(struct p9_session *s, struct p9_outstanding *op,
         u16 nwqid;
         const u8 *body = NULL;
         rc = p9_parse_rwalkgetattr(rmsg, len, &tag_check, &nwqid,
-                                   out->qids, P9_MAX_WALK, &body);
+                                   out->qids, op->walk_nwname, &body);
         if (rc < 0) return -1;
         if (tag_check != tag) return -1;
         // Bind new_fid ONLY on a FULL walk with a real destination -- the
         // correct partial-walk semantics (a partial Rwalkgetattr binds
         // nothing server-side; the NOFID query never names a destination).
-        // This is the nuance the TWALK arm defers (its callers send 0/1
-        // names, where partial cannot exist); the multi-name pounce
-        // requires it.
-        if (op->new_fid != P9_NOFID && nwqid == op->wga_nwname) {
+        if (op->new_fid != P9_NOFID && nwqid == op->walk_nwname) {
             if (slot_bind(s, tag, op->new_fid) < 0) {
                 // Same LOCAL-failure posture as the TWALK arm: a redundant
                 // bind completes THIS op with -EIO; it must not latch the
@@ -1405,6 +1460,16 @@ static int apply_rmsg(struct p9_session *s, struct p9_outstanding *op,
     } else if (op->kind == P9_TFSYNC) {
         u16 tag_check;
         rc = p9_parse_rfsync(rmsg, len, &tag_check);
+        if (rc < 0) return -1;
+        if (tag_check != tag) return -1;
+    } else if (op->kind == P9_TLOCK) {
+        u16 tag_check;
+        rc = p9_parse_rlock(rmsg, len, &tag_check, &out->lock_status);
+        if (rc < 0) return -1;
+        if (tag_check != tag) return -1;
+    } else if (op->kind == P9_TGETLOCK) {
+        u16 tag_check;
+        rc = p9_parse_rgetlock(rmsg, len, &tag_check, &out->getlock);
         if (rc < 0) return -1;
         if (tag_check != tag) return -1;
     } else if (op->kind == P9_TSYMLINK) {
@@ -1552,6 +1617,7 @@ int p9_session_dispatch_flushed_rmsg(struct p9_session *s,
     // has acted, so its fid is free for the owner's next op.
     int rc = apply_rmsg(s, op, tag, type, rmsg, len, out);
     op->owner_waits = false;
+    op->mutates     = false;   // the owner has its answer and invalidates for itself
     return rc;
 }
 

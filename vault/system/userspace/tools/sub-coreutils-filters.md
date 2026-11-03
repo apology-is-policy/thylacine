@@ -49,7 +49,7 @@ hazards: []
 abis: []
 design: []
 created: 2026-08-04
-updated: 2026-10-28
+updated: 2026-10-29
 ---
 ## Purpose
 
@@ -158,6 +158,48 @@ options, so an operand after it may begin with a dash; `tail -n -N` is
 large to hold is refused with `invalid count` and exit one, in every form
 either takes.
 
+**`touch` and `cp -p` set file times** (2026-10-22). `touch` with no time
+operand sets both times to the file server's clock, the one form write
+permission allows; one time alone (`-a` or `-m`) or a given time (`-r`, `-t`,
+`-d`) needs the owner, as POSIX has it ([[dec-2026-10-22-wstat-times]]). It opens each FILE for writing with
+create (asking 0666, POSIX touch's mode, under the umask) and no truncate
+and sets the times on that handle; a FILE that will not
+open so (a directory, a read-only file its owner touches) gets them through the
+path, and only if that fails too does the open's error stand. `-t` and `-d` are
+read by `coreutils::stamp`, in UTC. `cp -p` sets, on the destination it just
+wrote, the source's times, then its owner and group (each separately, and a
+refusal is silent, which POSIX allows), then its mode; a directory gets them
+after its entries, which moved its mtime and which a read-only mode would have
+refused. `-a` is `-R -p -P`.
+
+**`cp` knows a file by identity, not by name** (2026-10-22). It compares the Dev
+instance and qid path from a stat that follows links, as its opens do: a
+destination that IS its source, anywhere in a tree, is refused before the
+truncating open could empty it; a directory met again below itself is a symlink
+cycle and is not descended; and the destination tree met inside the source is
+not copied into itself. The lexical check it used before predated symlinks: a
+link made `cp a b` with `b -> a` truncate `a` and copy nothing, exit zero. The
+lexical into-itself refusal stays, so the plain case is refused before anything
+is created. A created file takes the source's mode under the umask (it took
+0644), and a failed entry no longer stops its siblings.
+
+**`env` changes its own environment and execs the command in place.** The
+environment is the per-Proc `/env` device: a variable is the file `/env/NAME`, a
+spawned child receives a copy, and the copy survives exec. So `env -i` removes
+every entry of its own `/env`, each `NAME=VALUE` writes `/env/NAME`, and the
+command replaces `env`'s image through `SYS_EXECVE`, whose projection of `/env`
+into the new image's envp is what a Pouch program's `getenv` reads. The command
+keeps `env`'s pid and descriptors, its status is `env`'s, and the caller's
+environment is untouched. A bare name is searched on `$PATH` after the
+assignments, on `/bin` when there is none. With no command, `env` prints its own
+`/proc/<pid>/environ`, the kernel's `NAME=VALUE` rendering of `/env`, one variable
+to a line, so it lists what a command it started would receive. The operand
+grammar (`-i` and `-`, `--`, assignments until the first operand without `=`)
+is `coreutils::envcmd`, host-tested ([[sub-coreutils-lib]]). A redirect into
+`/env/NAME` from `ut` does the opposite of what `env` does: `ut` opens the file,
+and an open `/env` file acts on the environment that opened it, so the value
+lands in the shell's own environment.
+
 **Path cleaning and input streaming are the shared behaviour.** `realpath` no
 longer carries its own lexical normaliser; the collapse of `.`, `..` and `//`
 lives in `coreutils::path::normalize`, so a filter and the colour-linking
@@ -198,8 +240,9 @@ user's own files at the invoking user's own authority — which is the
 correct blast radius for `rm`.
 
 The filesystem permission checks that bound them are the kernel's, applied
-at every walk and open. `chmod` is the one that *changes* metadata, and its
-authority is the kernel's identity check, not anything in this file.
+at every walk and open. `chmod`, `touch` and `cp -p` are the ones that *change*
+metadata, and their authority is the kernel's identity check, not anything in
+this file.
 
 ## Error paths
 
@@ -316,15 +359,34 @@ report a symlink as a plain file even where the mode string shows `l`.
   in each (`cmp` wants two on a failed write), a sweep owed after B-1c, with
   the network presenters' ([[sub-coreutils-presenters]]).
 
-- **`env` reports an empty environment that is not empty.** `env` prints
-  nothing and refuses every `NAME=VALUE` and `COMMAND` form with status 125.
-  Its header says Thylacine gives a native program no environment and no
-  accessor for one; the per-Proc `/env` device and `libthyla_rs::env::vars`
-  have made that untrue, so the tool is behind the system it reports on
-  (enqueued). `coreutil-smoke` runs before the pivot in the initrd's `bin/`,
-  and a leg pins that a bare `env` reaches the utility; while the initrd was
-  flat, the same name met the `/env` device and the utility could not be
-  reached before the pivot ([[dec-2026-09-25-initrd-bin-directory]]).
+- **`env` runs only a program the kernel loads.** The kernel execs a static
+  ELF and nothing else; `ut` reads a script's `#!` line itself, but `env` does
+  not, so `env NAME=VALUE script` exits 126. A variable whose value holds a NUL,
+  or whose name holds `=`, stays in `/env` but is left out of the printed list,
+  as the kernel leaves it out of every envp. `coreutil-smoke` runs before the
+  pivot in the initrd's `bin/`, and a leg pins that a bare `env` reaches the
+  utility; while the initrd was flat, the same name met the `/env` device and
+  the utility could not be reached before the pivot
+  ([[dec-2026-09-25-initrd-bin-directory]]).
+  Two legs pin `Command::env` end to end (2026-10-28,
+  [[dec-2026-10-28-spawn-env]]): `ls --beacon=always /bin/version` writes a
+  rich Beacon frame only when `BEACON=rich` reaches it. Before the run's own
+  `BEACON` is written, the frame is absent with no tail, present with
+  `env("BEACON", "rich")`, and the smoke's own `BEACON` is still unset after.
+  After it is written, the frame is present when inherited and under
+  `env_remove` of another name (so a removal that emptied the environment
+  fails), and absent under `env_remove("BEACON")` and under `env_clear()`.
+
+- **`cp -P` and `-a` refuse a symlink source.** Copying a link as a link needs
+  a call that creates one, and native code has only the Loom op; until an
+  `fs::symlink` exists, the copy says so and exits one rather than copying the
+  target behind the user's back. A directory `cp` creates without `-p` gets
+  0755 under the umask, not the source's mode as POSIX has it. Both are
+  enqueued (OPEN-BUGS 2026-10-22 09:47Z).
+
+- **Times read back are whole seconds.** `t_stat` carries no nanoseconds, so
+  `touch -r` and `cp -p` copy the seconds a stat shows, and a server's
+  sub-second part is lost.
   Two legs pin `Command::env` end to end (2026-10-28,
   [[dec-2026-10-28-spawn-env]]): `ls --beacon=always /bin/version` writes a
   rich Beacon frame only when `BEACON=rich` reaches it. Before the run's own

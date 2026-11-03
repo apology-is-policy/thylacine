@@ -12,7 +12,7 @@ locks: []
 abis: []
 design: ["docs/reference/86-pouch-stratumd-boot.md (the 16c design section)"]
 created: 2026-08-02
-updated: 2026-10-29
+updated: 2026-11-02
 ---
 ## Session factory handoff
 
@@ -80,7 +80,27 @@ died of) is what tells the new binary from an old one that also exits 0.
 Signal chunk S-3 (2026-10-14) grows that census by `self-faults` (children
 that raise or kill themselves with SIGSEGV, SIGBUS, SIGILL and SIGFPE read
 each signal) and `errnos` (`kill()` refusals read ESRCH and EPERM, not EIO).
-Both rungs are boot-fatal like every other. The marker goes out on fd 1
+Both rungs are boot-fatal like every other. After the pivot, on the Stratum
+root, the file-surface provers run in turn on their census lines:
+`/bin/pouch-hello-fopen` (`POUCH_CENSUS_FOPEN`), `/bin/pouch-hello-fd`
+(`POUCH_CENSUS_FD`, B-3a and B-3b; since 2026-10-20 it also reads EBADF
+for a closed descriptor from fstat, isatty and tcgetattr) and, from B-3f'
+(2026-10-20),
+`/bin/pouch-hello-links` (`POUCH_CENSUS_LINKS`): legs over the real links
+the bake puts at `/lib/pouch-links` ([[sub-substrate-build]]), lstat and
+readlink through the native `SYS_LSTAT` and `SYS_READLINK`
+([[sub-pouch-fs]]), `hardlink`, where `link` answers EPERM and makes
+nothing (0062), and `dtype`, readdir's `d_type` on the fixture and on `/hw`
+([[sub-kernel-spoor]]), then, from G12 (2026-10-22), `/bin/pouch-hello-times`
+(`POUCH_CENSUS_TIMES`): file times set, kept and read back through every musl
+spelling, a link's own times included ([[sub-pouch-fs]]), and then
+`/bin/pouch-hello-tz` (`POUCH_CENSUS_TZ`): five
+legs over a TZif file the prover writes itself, which musl opens through
+`openat`'s translation and maps private (0060), and then, from B-3h4
+(2026-11-02), `/bin/pouch-hello-locks` (`POUCH_CENSUS_LOCKS`): the file-lock
+prover's eleven legs, every conflict between two Procs or two open files over
+Stratum's lock table ([[sub-pouch-fs]]). Each is boot-fatal. The
+marker goes out on fd 1
 (`t_write`), not `t_putstr`: `SYS_PUTS` is the console, and the census reads
 the pipe ([[sub-kernel-protect-witness]]).
 
@@ -422,6 +442,26 @@ surface is unswept).
 Every step returns 1 and fails the boot. The one deliberate non-fatality is
 the drainer spawn.
 
+**The `/bin/system.key` metadata probe asserts each refusal's errno
+(2026-10-22, G12).** On the read-only boot FS it checks that SYS_WSTAT
+refuses an empty mask, the reserved bit 6, the first bit past
+`T_WSTAT_VALID`, a `_SET` time bit alone and a setuid mode with EINVAL
+(-22), and a chmod and a "now" mtime with EOPNOTSUPP (-95: devramfs has no
+metadata slot). It used to accept any -1, which let its "reserved bit"
+leg, 0x8, keep passing after 0x8 became `T_WSTAT_SIZE` (Go Stage 5), refused
+by the Dev and not by the mask. A wrong answer prints the leg and the rc
+(`joey: probe SYS_WSTAT leg <n> wrong rc=<rc>`).
+
+**The `/bin/system.key` metadata probe asserts each refusal's errno
+(2026-10-22, G12).** On the read-only boot FS it checks that SYS_WSTAT
+refuses an empty mask, the reserved bit 6, the first bit past
+`T_WSTAT_VALID`, a `_SET` time bit alone and a setuid mode with EINVAL
+(-22), and a chmod and a "now" mtime with EOPNOTSUPP (-95: devramfs has no
+metadata slot). It used to accept any -1, which let its "reserved bit"
+leg, 0x8, keep passing after 0x8 became `T_WSTAT_SIZE` (Go Stage 5), refused
+by the Dev and not by the mask. A wrong answer prints the leg and the rc
+(`joey: probe SYS_WSTAT leg <n> wrong rc=<rc>`).
+
 ## Performance
 
 The mount is crypto-heavy and its duration varies by an order of magnitude
@@ -479,6 +519,24 @@ event-driven; no timing constant appears in this path.
   the only header it takes from outside `libt`. What those provers pin is
   documented with the mechanisms they pin ([[sub-pouch-seam]],
   [[sub-pouch-net]], [[sub-pouch-fs]], [[sub-pouch-thread]]), not here.
+  `/bin/go-fs` is matched the same way on `GO_CENSUS_FS`, which it prints
+  from its own copy (Go cannot include the header; a disagreement fails the
+  boot). joey runs it through `pouch_smoke_core` with its fds 0-2 on the
+  pipe, drained to EOF before the reap because a Go panic's trace is
+  unbounded. A program the build may leave out (the Go probes without the
+  Go fork, the C++ prover without the LLVM fork, the storm fixture, gopls) is
+  skipped only when a walk to it answers ENOENT (`optional_absent`, an
+  `O_PATH` open of the same name the spawn resolves); a present program whose
+  spawn fails, or any other refusal, is boot-fatal (Go-4c's `/goroot/bin/go`
+  probe included). The six Go probes, Go-4c and gopls record PASS or SKIPPED
+  and joey prints them in one `joey: GO-GATES` line, CL-2's prover as `cxx=`
+  in `CLADE-GATES` (one write each, MISSING by default), which
+  `tools/check-arc-gates.sh` reads ([[sub-substrate-gates]]). An ENOENT from a
+  pool-served name is weaker than from the ramfs: a 9P walk that fails for
+  any reason reaches the resolver as ENOENT, so a present gopls or storm
+  fixture can skip; `--require-goroot` and `--require-gopls` (set wherever the
+  pool was populated with them) and `--require-clade` turn those skips into
+  failures.
 
 - joey's **warden** spawn mask is `CAP_HW_CREATE | CAP_CSPRNG_READ` (+
   `SPAWN_PERM_MAY_POST_SERVICE`) since H-4b-1 (2026-09-02): the warden never

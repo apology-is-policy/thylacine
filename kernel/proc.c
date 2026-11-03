@@ -226,6 +226,9 @@ static void proc_init_fields(struct Proc *p, int pid) {
     // parent's.
     p->page_budget = proc_default_page_budget();
     p->thread_budget = proc_default_thread_budget();   // likewise; 0 would admit no thread
+    // M8: the same chokepoint, for the same reason -- KP_ZERO's 0 is the widest
+    // creation mask. rfork_internal overwrites it with the parent's.
+    p->umask = PROC_UMASK_DEFAULT;
     poll_waiter_list_init(&p->child_waiters);   // #344: multi-waiter child-reap
     poll_owed_init(&p->child_owed, &p->child_waiters);
     // P3-Bcb: pgtable_root + context_id left at 0 by KP_ZERO. proc_alloc
@@ -875,10 +878,11 @@ void proc_free(struct Proc *p) {
     // heap struct, independent of the handle/notes/VMA frees above.
     allowance_free(p);
 
-    // G15: release the per-Proc environment group (NULL-tolerant; frees every
-    // entry's value + the struct). Like the allowance, a plain heap struct
-    // independent of the frees above; owned 1:1 by this Proc (RFENVG sharing
-    // deferred), so this is the sole release.
+    // G15: drop this Proc's reference on its environment group (NULL-tolerant).
+    // Like the allowance, a plain heap struct independent of the frees above. An
+    // open /env/NAME handle holds a reference too (ARCH 9.7), so the group is
+    // freed here -- every entry's value and the struct -- only if nothing
+    // opened in it is still open; otherwise its last close frees it.
     env_free(p);
 
     // VIVARIUM V-4a-0: drop this Proc's ref on its executable's #66 Path.
@@ -1007,9 +1011,11 @@ int proc_for_each(int (*callback)(struct Proc *p, void *arg), void *arg) {
 // find one Proc's parent, and so the locking lives here with the rest of the
 // tree discipline rather than being re-derived per call site.
 //
-// 0 for a parentless Proc. Only kproc is genuinely parentless -- an orphan
-// reparents to init rather than to nothing -- and 0 is also what Linux reports
-// for the same case, so the sentinel needs no translation.
+// 0 for a parentless Proc, and 0 for a child of kproc, whose pid is 0: init,
+// and an orphan adopted while init is not alive (proc_reparent_children falls
+// back to kproc). Only kproc is genuinely parentless. Linux also reports 0 for
+// a parent outside the caller's pid namespace, so the value needs no
+// translation.
 int proc_parent_pid(struct Proc *p) {
     if (!p) return 0;
     irq_state_t s = proc_table_lock_acquire();
@@ -1817,6 +1823,9 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
     child->thread_budget  = __atomic_load_n(&parent->thread_budget, __ATOMIC_RELAXED);
     child->principal_id   = parent->principal_id;
     child->primary_gid    = parent->primary_gid;
+    // M8: POSIX fork semantics. Another thread of the parent may be exchanging
+    // the mask; the child gets one value the parent held.
+    child->umask          = proc_umask(parent);
     // A-1a R1 F2: clamp the inherited count symmetrically with the copy loop
     // below. The loop is already bounded by PROC_SUPP_GIDS_MAX; clamping the
     // stored count too means a (corruption-induced) parent count > 15 can
@@ -4625,15 +4634,20 @@ static inline void exit_tail_test_hook(void) {}
 // sessions (the per-user home --single-session proxy) the instant it dies rather
 // than when its (possibly much later, or deadlocked) parent reaps it.
 //
-// The FOOTGUN this avoids: devproc format_ns / format_cwd read p->territory
-// under g_proc_table_lock (the #57a F2 envelope), so the free cannot run
-// lock-free the way the #926 handle-table free does (ARCHITECTURE.md the #66c
-// note). Hence the LOCKED-DETACH + UNLOCKED-FREE split: NULL p->territory UNDER
-// the lock (a concurrent format_ns then observes NULL and renders empty --
-// territory_format_ns(NULL) and format_cwd's `if(!p->territory)` are both
-// NULL-safe), THEN territory_unref the detached pointer with the lock DROPPED
-// (territory_unref's spoor_clunk may sleep on a 9P Tclunk; the detached pointer
-// is unreachable by any reader, so the sleep is safe).
+// The FOOTGUN this avoids: devproc's ns read (which takes its weak Territory
+// ref there) and format_cwd read p->territory under g_proc_table_lock (the #57a
+// F2 envelope), so the free cannot run lock-free the way the #926 handle-table
+// free does (ARCHITECTURE.md the #66c note). Hence the LOCKED-DETACH +
+// UNLOCKED-FREE split: NULL p->territory UNDER the lock (a concurrent ns read
+// then observes NULL and renders empty -- territory_format_ns(NULL) and
+// format_cwd's `if(!p->territory)` are both NULL-safe; one that took its weak
+// ref first renders from the struct it holds, and its second look, finding
+// NULL, answers the empty file), THEN territory_unref the detached
+// pointer with the lock DROPPED
+// (territory_unref's spoor_clunk may sleep on a 9P Tclunk, and nothing is held
+// here, so the sleep is safe). No new reader can reach the detached pointer, and
+// one that took its weak ref before the detach keeps only the struct: the
+// namespace is released here, at death, on this thread.
 //
 // CALLED with g_proc_table_lock HELD (*s = the saved irq state); on return the
 // lock is re-held with *s refreshed. CALLED only from the last-live-thread exit
@@ -4651,6 +4665,16 @@ static void proc_release_territory_at_exit(struct Proc *p, irq_state_t *s) {
     territory_unref(dead);                                // sleep-legal, lock dropped
     *s = proc_table_lock_acquire();
 }
+
+// The release above, driven on a Proc a test built and never ran: the ns
+// read's window test exits its target between the read's two looks.
+#ifdef KERNEL_TESTS
+void proc_release_territory_at_exit_for_test(struct Proc *p) {
+    irq_state_t s = proc_table_lock_acquire();
+    proc_release_territory_at_exit(p, &s);
+    proc_table_lock_release(s);
+}
+#endif
 
 // Internal: count peer Threads that are NOT in THREAD_EXITING state
 // (i.e. still live — RUNNING / RUNNABLE / SLEEPING / etc.) AND are not

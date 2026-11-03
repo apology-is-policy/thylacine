@@ -146,7 +146,112 @@ file       = "icu4c-78.3-sources.tgz"
 dir        = "build/cache"
 url        = "https://github.com/unicode-org/icu/releases/download/release-78.3/icu4c-78.3-sources.tgz"
 sha256     = "3a2e7a47604ba702f345878308e6fefeca612ee895cf4a5f222e7955fabfe0c0"
-feeds      = "CHUNK_WEBKIT (ICU 78.3, cross-built static for JavaScriptCore's Intl)"
+feeds      = "CHUNK_WEBKIT (ICU 78.3, cross-built static for JavaScriptCore's Intl); CHUNK_LIBTESTS (ICU's cintltst + intltest and their data)"
+forageable = "download"
+
+[cache.libpng]
+file       = "libpng-1.6.59.tar.xz"
+dir        = "build/cache"
+url        = "https://download.sourceforge.net/libpng/libpng-1.6.59.tar.xz"
+sha256     = "d80dd2a38a37f803cb9b6ac7b14bd6e74ddc3b654780a8380bdf93523fdb4389"
+feeds      = "CHUNK_LIBTESTS (libpng 1.6.59 static, with upstream's CTest list run by muster; usr/ports/libpng/patches)"
+forageable = "download"
+
+[cache.libjpeg-turbo]
+file       = "libjpeg-turbo-3.2.0.tar.gz"
+dir        = "build/cache"
+url        = "https://github.com/libjpeg-turbo/libjpeg-turbo/releases/download/3.2.0/libjpeg-turbo-3.2.0.tar.gz"
+sha256     = "6f30092cef9fb839779646608f4ee14ae3cbac989c47fa05e841b0841f09878e"
+feeds      = "CHUNK_LIBTESTS (libjpeg-turbo 3.2.0 static, with upstream's CTest list run by muster)"
+forageable = "download"
+
+[cache.libwebp]
+file       = "libwebp-1.6.0.tar.gz"
+dir        = "build/cache"
+url        = "https://storage.googleapis.com/downloads.webmproject.org/releases/webp/libwebp-1.6.0.tar.gz"
+sha256     = "e4ab7009bf0629fd11982d4c2aa83964cf244cffba7347ecd39019a9e38c4564"
+feeds      = "CHUNK_LIBTESTS (libwebp 1.6.0 static; tools/libtests-webp.json's checks run by muster)"
+forageable = "download"
+
+[cache.libxml2]
+file       = "libxml2-2.15.4.tar.xz"
+dir        = "build/cache"
+url        = "https://download.gnome.org/sources/libxml2/2.15/libxml2-2.15.4.tar.xz"
+sha256     = "98087fd181d9070724f3fbc65c7377db03038eb92bd882374daff44940138821"
+feeds      = "CHUNK_LIBTESTS (libxml2 2.15.4 static, GNOME's published sha256; its CTest list run by muster)"
+forageable = "download"
+
+# The W3C XML conformance suite, which libxml2's CI image installs as xmlconf/
+# (its .gitlab-ci/Dockerfile) and which registers runxmlconf. W3C publishes no
+# checksum: the sha256 is the one measured on the first fetch, 2026-10-15.
+[cache.xmlts]
+file       = "xmlts20080827.tar.gz"
+dir        = "build/cache"
+url        = "https://www.w3.org/XML/Test/xmlts20080827.tar.gz"
+sha256     = "96151685cec997e1f9f3387e3626d61e6284d4d6e66e0e440c209286c03e9cc7"
+feeds      = "CHUNK_LIBTESTS (libxml2's runxmlconf, unpacked into its source tree)"
+forageable = "download"
+
+# FreeType and HarfBuzz register their tests only with meson, which this host
+# lacks; build.sh runs meson.py from this tarball (GitHub's published digest).
+[cache.meson]
+file       = "meson-1.12.1.tar.gz"
+dir        = "build/cache"
+url        = "https://github.com/mesonbuild/meson/releases/download/1.12.1/meson-1.12.1.tar.gz"
+sha256     = "ab0a6ca09f8ef70c564c8241fb5a23957886a0b53fb58412b5e07eaf07dba743"
+feeds      = "CHUNK_LIBTESTS (the meson that builds FreeType and HarfBuzz and lists their tests)"
+forageable = "download"
+
+# The digest agrees across savannah, SourceForge and Homebrew's formula; the
+# release's .sig was not checked (no gpg on the build host).
+[cache.freetype]
+file       = "freetype-2.15.0.tar.xz"
+dir        = "build/cache"
+url        = "https://download.savannah.gnu.org/releases/freetype/freetype-2.15.0.tar.xz"
+sha256     = "93cd47eb719c325107f2d3cf087d06299e944c3b48a40b55537302304dea1dd5"
+feeds      = "CHUNK_LIBTESTS (FreeType 2.15.0 static, built twice around HarfBuzz; its meson tests run by muster)"
+forageable = "download"
+
+# The font FreeType's issue-1063 test opens, which its
+# tests/scripts/download-test-fonts.py fetches. The zip's sha256 is the first
+# fetch's (2026-10-15); the font inside is also checked by its own sha256, whose
+# first 8 bytes are the digest upstream's script pins (ef146bbc2673b387).
+# NOT REDISTRIBUTABLE: the font grants no licence (its name table's copyright
+# record reads "Typeface (c) (your company). 2005. All Rights Reserved"), and
+# the sites that list it say personal use only. It is fetched as upstream's
+# script fetches it, for a test run on the builder's own machines; an image
+# baked with CHUNK_LIBTESTS carries it, so that image and this zip are never
+# published or put on an install disc.
+[cache.ftfont]
+file       = "As.I.Lay.Dying.zip"
+dir        = "build/cache"
+url        = "https://github.com/python-pillow/Pillow/files/6622147/As.I.Lay.Dying.zip"
+sha256     = "09fceee7c335975a454500b000f75ee7f7b5c4f14b2dc241d6416f77967e9d1b"
+feeds      = "CHUNK_LIBTESTS (FreeType's tests/data, for issue-1063)"
+forageable = "download"
+
+[cache.harfbuzz]
+file       = "harfbuzz-14.6.0.tar.xz"
+dir        = "build/cache"
+url        = "https://github.com/harfbuzz/harfbuzz/releases/download/14.6.0/harfbuzz-14.6.0.tar.xz"
+sha256     = "d07a007327277708a2a73ae437887cdbaf282937f6d03ca5467723e9099af586"
+feeds      = "CHUNK_LIBTESTS (HarfBuzz 14.6.0 static with FreeType and ICU, GitHub's published digest; its meson tests run by muster)"
+forageable = "download"
+
+[cache.fontconfig]
+file       = "fontconfig-2.18.3.tar.xz"
+dir        = "build/cache"
+url        = "https://gitlab.freedesktop.org/api/v4/projects/890/packages/generic/fontconfig/2.18.3/fontconfig-2.18.3.tar.xz"
+sha256     = "4f7b554a38cdf78c033f666c8871f3749e14a094f65a07f630c91ed0b43d35e3"
+feeds      = "CHUNK_LIBTESTS (fontconfig 2.18.3 static with libxml2 and FreeType, upstream's published .sha256sum; its meson tests run by muster, its tools and config baked under /usr and /etc/fonts)"
+forageable = "download"
+
+[cache.dejavu]
+file       = "dejavu-fonts-ttf-2.37.tar.bz2"
+dir        = "build/cache"
+url        = "https://github.com/dejavu-fonts/dejavu-fonts/releases/download/version_2_37/dejavu-fonts-ttf-2.37.tar.bz2"
+sha256     = "fa9ca4d13871dd122f61258a80d01751d603b4d3ee14095d65453b4e846e17d7"
+feeds      = "CHUNK_LIBTESTS (/lib/font: DejaVu Sans, Serif and Sans Mono, the release the vendored third_party/dejavu-fonts Condensed faces came from, byte-identical)"
 forageable = "download"
 
 # --- network: build.sh fetches it itself at build time -----------------------

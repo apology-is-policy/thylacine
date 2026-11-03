@@ -4,18 +4,26 @@
 // unset + the monotonic-id stale-resolution guarantee, the readdir iterator
 // order, the DoS bounds, deep-copy clone independence, NULL-tolerant free) on
 // throwaway Procs, plus the devenv Dev structurally (bestiary, the reuse-nc walk
-// contract) and an end-to-end walk+read against the CURRENT Proc's env (devenv
-// resolves current_thread()->proc->env, cleaned up via env_free).
+// contract) and an end-to-end walk+read against the CURRENT Proc's env (the
+// directory resolves current_thread()->proc->env, cleaned up via env_free), and
+// the open-handle binding: a handle acts on the Env it was opened in.
 
 #include "test.h"
 
 #include <thylacine/dev.h>
 #include <thylacine/env.h>
+#include <thylacine/errno.h>
+#include <thylacine/exec.h>      // EXEC_USER_BURROW_BASE
+#include <thylacine/handle.h>
+#include <thylacine/page.h>
 #include <thylacine/proc.h>
 #include <thylacine/spoor.h>
 #include <thylacine/syscall.h>   // V-4b-5: struct t_stat + T_S_IF*
+#include <thylacine/territory.h>
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
+#include <thylacine/vivarium.h>  // VIV_PROT_* (the MAP_FIXED prot word)
+#include <thylacine/vma.h>
 
 // proc_alloc gives a fresh Proc with a NULL (empty) env; ZOMBIE + proc_free
 // releases it (env_free runs in proc_free). Mirrors test_allowance.c::amk/adrop.
@@ -264,6 +272,127 @@ void test_env_bounds(void) {
     edrop(p);
 }
 
+// The table starts small and doubles to the cap. A name and a value set before
+// a growth keep their id and bytes after it, a clone of a grown table is whole,
+// and a full table refuses until a slot frees.
+void test_env_table_grows(void) {
+    TEST_EXPECT_EQ(ENV_FIRST_ENTRIES, 64, "the first table holds what one always has");
+    struct Proc *p = emk();
+    u64 ids[256];
+    char nm[5];
+    int made = 0;
+    for (int i = 0; i < 256; i++) {
+        nm[0] = 'g'; nm[1] = (char)('0' + i / 100); nm[2] = (char)('0' + (i / 10) % 10);
+        nm[3] = (char)('0' + i % 10); nm[4] = '\0';
+        ids[i] = env_create(p, nm, 4);
+        if (ids[i] != 0) made++;
+        char v = (char)('A' + i % 26);
+        TEST_EXPECT_EQ(env_write(p, ids[i], 0, &v, 1), (long)1, "a value in each slot");
+    }
+    TEST_EXPECT_EQ(made, 256, "256 names fit: the table grew past 64 and 128");
+    TEST_EXPECT_EQ(env_create(p, "over", 4), (u64)0, "the next distinct name is refused");
+    for (int i = 0; i < 256; i++) {
+        nm[0] = 'g'; nm[1] = (char)('0' + i / 100); nm[2] = (char)('0' + (i / 10) % 10);
+        nm[3] = (char)('0' + i % 10); nm[4] = '\0';
+        TEST_EXPECT_EQ(env_lookup(p, nm, 4), ids[i], "a name keeps its id across growth");
+        char v = 0;
+        TEST_EXPECT_EQ(env_read(p, ids[i], 0, &v, 1), (long)1, "its value reads back");
+        TEST_ASSERT(v == (char)('A' + i % 26), "with its bytes");
+    }
+    u64 after = 0, id = 0;
+    char name[ENV_NAME_MAX];
+    u32 nlen = 0;
+    int seen = 0;
+    while (env_iter(p, after, &id, name, sizeof(name), &nlen)) {
+        TEST_ASSERT(id > after, "iteration stays in id order");
+        after = id;
+        seen++;
+    }
+    TEST_EXPECT_EQ(seen, 256, "iteration visits every slot of the grown table");
+
+    struct Proc *c = emk();
+    TEST_EXPECT_EQ(env_clone_into(c, p), 0, "a grown table clones");
+    TEST_EXPECT_EQ(env_lookup(c, "g255", 4), ids[255], "the clone holds the last slot");
+    char v = 0;
+    TEST_EXPECT_EQ(env_read(c, ids[255], 0, &v, 1), (long)1, "and its value");
+    TEST_ASSERT(v == (char)('A' + 255 % 26), "with its bytes");
+
+    TEST_ASSERT(env_unset(p, "g100", 4), "a slot frees");
+    TEST_ASSERT(env_create(p, "over", 4) != 0, "and the refused name now fits");
+    TEST_EXPECT_EQ(env_lookup(c, "over", 4), (u64)0, "the clone is independent");
+    edrop(c);
+    edrop(p);
+}
+
+// A caller that read the table's size before a peer grew it changes nothing: its
+// copy would hold only the slots it saw. The control is env.table_grows.
+void test_env_grow_after_a_peer(void) {
+    struct Proc *p = emk();
+    u64 ids[100];
+    char nm[4];
+    for (int i = 0; i < 100; i++) {
+        nm[0] = 'p'; nm[1] = (char)('0' + i / 10); nm[2] = (char)('0' + i % 10); nm[3] = '\0';
+        ids[i] = env_create(p, nm, 3);
+        char v = (char)('A' + i % 26);
+        TEST_EXPECT_EQ(env_write(p, ids[i], 0, &v, 1), (long)1, "a value in each slot");
+    }
+    struct Env *e = p->env;
+    int cap = e->cap;
+    TEST_ASSERT(cap > ENV_FIRST_ENTRIES, "the table grew once");
+    TEST_ASSERT(env_grow(e, ENV_FIRST_ENTRIES), "the stale caller succeeds");
+    TEST_EXPECT_EQ(e->cap, cap, "and leaves the table its size");
+    for (int i = 0; i < 100; i++) {
+        nm[0] = 'p'; nm[1] = (char)('0' + i / 10); nm[2] = (char)('0' + i % 10); nm[3] = '\0';
+        TEST_EXPECT_EQ(env_lookup(p, nm, 3), ids[i], "every name stands");
+        char v = 0;
+        TEST_EXPECT_EQ(env_read(p, ids[i], 0, &v, 1), (long)1, "its value reads back");
+        TEST_ASSERT(v == (char)('A' + i % 26), "with its bytes");
+    }
+    edrop(p);
+}
+
+// A spawn's refill takes the block's table whichever is larger, and issues ids
+// the group never used, so an open handle's old id resolves to nothing.
+void test_env_install_any_size(void) {
+    // A small group takes a grown block.
+    struct Proc *p = emk();
+    u64 old_id = env_create(p, "old", 3);
+    TEST_ASSERT(old_id != 0, "a small group");
+    static char block[256 * 7];
+    u32 o = 0;
+    for (int i = 0; i < 256; i++) {
+        block[o++] = 'b';
+        block[o++] = (char)('0' + i / 100);
+        block[o++] = (char)('0' + (i / 10) % 10);
+        block[o++] = (char)('0' + i % 10);
+        block[o++] = '=';
+        block[o++] = (char)('A' + i % 26);
+        block[o++] = '\0';
+    }
+    int err = 0;
+    struct Env *big = env_from_block(block, o, &err);
+    TEST_ASSERT(big != NULL, "256 names in a block");
+    env_install(p, big);
+    TEST_EXPECT_EQ(env_lookup(p, "old", 3), (u64)0, "the refill replaces");
+    u64 last = env_lookup(p, "b255", 4);
+    TEST_ASSERT(last > old_id, "with ids the group never issued");
+    char v = 0;
+    TEST_EXPECT_EQ(env_read(p, last, 0, &v, 1), (long)1, "the last slot reads");
+    TEST_ASSERT(v == (char)('A' + 255 % 26), "with its bytes");
+    TEST_EXPECT_EQ(env_read(p, old_id, 0, &v, 1), (long)-1, "and the old id resolves to nothing");
+
+    // A grown group takes a small block.
+    static const char small[] = "s=1";
+    struct Env *one = env_from_block(small, sizeof(small), &err);
+    TEST_ASSERT(one != NULL, "a one-name block");
+    env_install(p, one);
+    TEST_EXPECT_EQ(env_lookup(p, "b255", 4), (u64)0, "the grown table's names are gone");
+    TEST_ASSERT(env_lookup(p, "s", 1) != 0, "and the block's is there");
+    u64 next = env_create(p, "after", 5);
+    TEST_ASSERT(next != 0, "the group goes on");
+    edrop(p);
+}
+
 void test_env_clone_deep_independent(void) {
     struct Proc *parent = emk();
     u64 g = env_create(parent, "GOROOT", 6);
@@ -464,4 +593,289 @@ void test_devenv_stat_native_shapes(void) {
     spoor_unref(vf);
     spoor_unref(root);
     env_free(p);                              // restore an empty env
+}
+
+// An /env entry's readdir record carries d_type DT_REG (8) in its type byte
+// (offset 21), beside QTFILE in its qid (byte 0).
+void test_devenv_readdir_type_byte(void) {
+    struct Thread *t = current_thread();
+    TEST_ASSERT(t != NULL && t->proc != NULL, "current proc");
+    struct Proc *p = t->proc;
+    env_free(p);
+    TEST_ASSERT(env_create(p, "TESTVAR", 7) != 0, "create TESTVAR on the current Proc");
+    struct Spoor *root = devenv.attach("");
+    TEST_ASSERT(root != NULL, "attach /env root");
+    static u8 buf[256];
+    long got = devenv.readdir(root, buf, (long)sizeof(buf), 0);
+    TEST_EXPECT_EQ(got, (long)(24 + 7), "one record, for TESTVAR");
+    TEST_EXPECT_EQ(buf[0], (u8)QTFILE, "its qid type is QTFILE");
+    TEST_EXPECT_EQ(buf[21], (u8)8, "its type byte is DT_REG (8)");
+    spoor_unref(root);
+    env_free(p);
+}
+
+// The current Proc stands in for both ends of a passed handle: install `e` as
+// its Env to act as the Proc holding it. Returns the Env it replaced.
+static struct Env *env_become(struct Proc *p, struct Env *e) {
+    struct Env *old = p->env;
+    __atomic_store_n(&p->env, e, __ATOMIC_RELEASE);
+    return old;
+}
+
+static int env_refs(struct Env *e) { return __atomic_load_n(&e->ref, __ATOMIC_ACQUIRE); }
+
+// ut's `echo -n rich > /env/BEACON`: ut opens /env/BEACON (O_TRUNC) in its own
+// Proc and hands the descriptor to echo, a spawned child holding a COPY of the
+// environment. The write has to land in ut's Env: per-caller resolution put it
+// in echo's copy, which died with echo, and left ut's variable truncated.
+void test_devenv_open_binds_opener(void) {
+    struct Thread *t = current_thread();
+    TEST_ASSERT(t != NULL && t->proc != NULL, "current proc");
+    struct Proc *p = t->proc;
+    env_free(p);
+    u64 id = env_create(p, "BEACON", 6);
+    TEST_ASSERT(id != 0, "create BEACON");
+    TEST_EXPECT_EQ(env_write(p, id, 0, "none", 4), (long)4, "BEACON=none");
+    struct Env *shell = p->env;
+
+    struct Spoor *root = devenv.attach("");
+    TEST_ASSERT(root != NULL, "attach /env");
+    const char *names[1] = { "BEACON" };
+    struct Walkqid *wq = devenv.walk(root, NULL, names, 1);
+    TEST_ASSERT(wq != NULL && wq->nqid == 1, "walk /env/BEACON");
+    struct Spoor *h = wq->spoor;
+    walkqid_free(wq);
+    TEST_ASSERT(devenv.open(h, 0x01 | 0x10) == h, "open OWRITE|OTRUNC");
+    TEST_EXPECT_EQ(env_refs(shell), 2, "the open handle holds a ref on the opener's Env");
+    TEST_ASSERT(h->aux == shell, "and names it");
+
+    struct Proc *echo = emk();
+    TEST_ASSERT(echo != NULL, "the child");
+    TEST_EXPECT_EQ(env_clone_into(echo, p), 0, "the child's copy of the environment");
+    struct Env *copy = echo->env;
+
+    // A spoor_clone of the open handle shallow-copies aux but not COPEN, so it
+    // owns nothing: its last clunk must not drop the handle's ref.
+    struct Spoor *cl = spoor_clone(h);
+    TEST_ASSERT(cl != NULL && (cl->flag & COPEN) == 0, "a clone is not open");
+    spoor_clunk(cl);
+    TEST_EXPECT_EQ(env_refs(shell), 2, "a clone's clunk leaves the handle's ref");
+
+    env_become(p, copy);                         // now act as echo, holding h
+    TEST_EXPECT_EQ(devenv.write(h, "rich", 4, 0), (long)4, "echo writes through the handle");
+    char buf[8];
+    TEST_EXPECT_EQ(devenv.read(h, buf, sizeof(buf), 0), (long)4, "and reads back through it");
+    TEST_ASSERT(bytes_eq(buf, "rich", 4), "the value it wrote");
+    struct t_stat st;
+    TEST_EXPECT_EQ(devenv.stat_native(h, &st), 0, "fstat through the handle");
+    TEST_EXPECT_EQ(st.size, (u64)4, "sizes the opener's variable");
+    TEST_EXPECT_EQ(env_read_in(copy, id, 0, buf, sizeof(buf)), (long)0,
+                   "echo's own copy is untouched (truncated before the spawn)");
+    env_become(p, shell);                        // back to the shell
+
+    TEST_EXPECT_EQ(env_read(p, id, 0, buf, sizeof(buf)), (long)4, "the shell's BEACON");
+    TEST_ASSERT(bytes_eq(buf, "rich", 4), "is rich, as the next child will inherit");
+    edrop(echo);
+
+    // The handle keeps the Env alive past its Proc's drop, and its close frees it.
+    env_free(p);
+    TEST_EXPECT_EQ(env_refs(shell), 1, "the handle's ref is the last");
+    TEST_EXPECT_EQ(devenv.read(h, buf, sizeof(buf), 0), (long)4, "still readable");
+    spoor_clunk(h);                              // the last ref: env_destroy
+    spoor_unref(root);
+}
+
+// A create through /env opens the new variable bound to the creator's Env, and
+// stamps that Env's devno: the parent directory carried 0 while the Proc had
+// no Env.
+void test_devenv_create_binds_creator(void) {
+    struct Thread *t = current_thread();
+    TEST_ASSERT(t != NULL && t->proc != NULL, "current proc");
+    struct Proc *p = t->proc;
+    env_free(p);
+
+    struct Spoor *root = devenv.attach("");
+    TEST_ASSERT(root != NULL, "attach /env");
+    struct Walkqid *wq = devenv.walk(root, NULL, NULL, 0);
+    TEST_ASSERT(wq != NULL && wq->nqid == 0, "0-element walk to the directory");
+    struct Spoor *dir = wq->spoor;
+    walkqid_free(wq);
+    TEST_EXPECT_EQ(dir->devno, (u64)0, "no Env yet: the directory carries 0");
+
+    struct Spoor *h = devenv.create(dir, "NEWVAR", 0x01, 0644, 0);
+    TEST_ASSERT(h == dir, "create transitions the parent into the file");
+    struct Env *mine = p->env;
+    TEST_ASSERT(mine != NULL, "the create allocated the Env");
+    TEST_ASSERT(h->aux == mine, "bound to the creator's Env");
+    TEST_EXPECT_EQ(h->devno, mine->devno, "and stamped with its devno");
+    TEST_EXPECT_EQ(env_refs(mine), 2, "Proc + handle");
+
+    struct Proc *child = emk();
+    TEST_ASSERT(child != NULL, "the child");
+    TEST_EXPECT_EQ(env_clone_into(child, p), 0, "its copy");
+    env_become(p, child->env);
+    TEST_EXPECT_EQ(devenv.write(h, "v1", 2, 0), (long)2, "write through the created handle");
+    env_become(p, mine);
+    char buf[4];
+    TEST_EXPECT_EQ(env_read(p, h->qid.path, 0, buf, sizeof(buf)), (long)2, "lands in the creator's Env");
+    TEST_ASSERT(bytes_eq(buf, "v1", 2), "v1");
+    edrop(child);
+
+    spoor_clunk(h);
+    TEST_EXPECT_EQ(env_refs(mine), 1, "the close dropped the handle's ref");
+    spoor_unref(root);
+    env_free(p);
+}
+
+// Ids restart in every Env and a spawned copy keeps them, so an id resolved in
+// one Env names a different variable in another. A walked, unopened entry (an
+// O_PATH handle passed on) carries its Env's devno, and an op from a Proc with
+// a different Env fails rather than act on the other variable.
+void test_devenv_unopened_id_needs_its_env(void) {
+    struct Thread *t = current_thread();
+    TEST_ASSERT(t != NULL && t->proc != NULL, "current proc");
+    struct Proc *p = t->proc;
+    env_free(p);
+    u64 id = env_create(p, "PATHVAR", 7);
+    TEST_ASSERT(id != 0, "create PATHVAR");
+    TEST_EXPECT_EQ(env_write(p, id, 0, "parent", 6), (long)6, "PATHVAR=parent");
+    struct Env *mine = p->env;
+
+    struct Spoor *root = devenv.attach("");
+    TEST_ASSERT(root != NULL, "attach /env");
+    const char *names[1] = { "PATHVAR" };
+    struct Walkqid *wq = devenv.walk(root, NULL, names, 1);
+    TEST_ASSERT(wq != NULL && wq->nqid == 1, "walk /env/PATHVAR");
+    struct Spoor *vf = wq->spoor;
+    walkqid_free(wq);
+    TEST_EXPECT_EQ(vf->devno, mine->devno, "the walk stamps the resolving Env");
+
+    struct Proc *child = emk();
+    TEST_ASSERT(child != NULL, "the child");
+    TEST_EXPECT_EQ(env_clone_into(child, p), 0, "its copy keeps the ids");
+    struct Env *copy = child->env;
+    TEST_EXPECT_EQ(env_write_in(copy, id, 0, "child!", 6), (long)6,
+                   "the copy's PATHVAR diverges under the same id");
+
+    env_become(p, copy);                         // act as the child holding vf
+    char buf[8];
+    TEST_EXPECT_EQ(devenv.read(vf, buf, sizeof(buf), 0), (long)-1,
+                   "a read of the parent's id in the child's Env fails");
+    struct t_stat st;
+    TEST_EXPECT_EQ(devenv.stat_native(vf, &st), -1, "so does a stat");
+    // A 0-element walk from the entry (an O_PATH re-open) resolves nothing, so
+    // it keeps the id's Env, and opening it here fails too.
+    struct Walkqid *w0 = devenv.walk(vf, NULL, NULL, 0);
+    TEST_ASSERT(w0 != NULL && w0->nqid == 0, "0-element walk from the entry");
+    struct Spoor *re = w0->spoor;
+    walkqid_free(w0);
+    TEST_EXPECT_EQ(re->devno, mine->devno, "keeps the id's Env");
+    TEST_ASSERT(devenv.open(re, 0) == NULL, "an open in another Env is refused");
+    spoor_clunk(re);
+    // A walk BY NAME is the caller's: the child reaches its own PATHVAR.
+    struct Walkqid *w1 = devenv.walk(root, NULL, names, 1);
+    TEST_ASSERT(w1 != NULL && w1->nqid == 1, "the child walks /env/PATHVAR");
+    struct Spoor *own = w1->spoor;
+    walkqid_free(w1);
+    TEST_EXPECT_EQ(own->devno, copy->devno, "in its own Env");
+    TEST_EXPECT_EQ(devenv.read(own, buf, sizeof(buf), 0), (long)6, "reads its own value");
+    TEST_ASSERT(bytes_eq(buf, "child!", 6), "child!");
+    spoor_unref(own);
+    env_become(p, mine);
+
+    TEST_EXPECT_EQ(devenv.read(vf, buf, sizeof(buf), 0), (long)6, "the parent reads its id");
+    TEST_ASSERT(bytes_eq(buf, "parent", 6), "its own value");
+    edrop(child);
+    spoor_unref(vf);
+    spoor_unref(root);
+    env_free(p);
+}
+
+// The unlink contract: a specific errno per refusal. A name the caller's Env does
+// not hold -- absent, or one no Env could hold -- is ENOENT, so a remover (ut's
+// unset) can tell "nothing there" from a failure; /env holds no directories.
+void test_devenv_unlink_answers_its_errno(void) {
+    struct Thread *t = current_thread();
+    TEST_ASSERT(t != NULL && t->proc != NULL, "current proc");
+    struct Proc *p = t->proc;
+    env_free(p);
+    struct Spoor *root = devenv.attach("");
+    TEST_ASSERT(root != NULL, "attach /env");
+    TEST_EXPECT_EQ((s64)devenv.unlink(root, "ABSENT", 0), -(s64)T_E_NOENT,
+                   "no Env yet: ENOENT");
+    u64 id = env_create(p, "GONE", 4);
+    TEST_ASSERT(id != 0, "create GONE");
+    TEST_EXPECT_EQ((s64)devenv.unlink(root, "ABSENT", 0), -(s64)T_E_NOENT,
+                   "an absent name: ENOENT");
+    TEST_EXPECT_EQ((s64)devenv.unlink(root, "a/b", 0), -(s64)T_E_NOENT,
+                   "a name no Env holds: ENOENT");
+    TEST_EXPECT_EQ((s64)devenv.unlink(root, "GONE", SYS_UNLINK_REMOVEDIR),
+                   -(s64)T_E_NOTDIR, "a directory removal of a variable: ENOTDIR");
+    TEST_EXPECT_EQ((s64)devenv.unlink(root, "ABSENT", SYS_UNLINK_REMOVEDIR),
+                   -(s64)T_E_NOENT, "a directory removal of nothing: ENOENT");
+    TEST_EXPECT_EQ(env_lookup(p, "GONE", 4), id, "which left GONE in place");
+    TEST_EXPECT_EQ((s64)devenv.unlink(root, "GONE", 0), (s64)0, "a held name goes");
+    TEST_EXPECT_EQ(env_lookup(p, "GONE", 4), (u64)0, "gone");
+    TEST_EXPECT_EQ((s64)devenv.unlink(root, "GONE", 0), -(s64)T_E_NOENT,
+                   "a second removal: ENOENT");
+    spoor_unref(root);
+    env_free(p);
+}
+
+// A variable backs no file mapping (Dev.no_file_mapping). The open entry passes
+// every earlier gate of both mapping cores -- it is readable and its size is
+// known -- so ENODEV is that gate's answer and no other's. Measure first, assert
+// last: a broken gate would leave a mapping to drain before any assert returns.
+void test_devenv_entry_backs_no_mapping(void) {
+    struct Thread *t = current_thread();
+    TEST_ASSERT(t != NULL && t->proc != NULL, "current proc");
+    struct Proc *me = t->proc;
+    env_free(me);
+    u64 id = env_create(me, "MAPVAR", 6);
+    TEST_ASSERT(id != 0, "create MAPVAR");
+    TEST_EXPECT_EQ(env_write(me, id, 0, "abc", 3), (long)3, "MAPVAR=abc");
+    struct Env *mine = me->env;
+    struct Spoor *root = devenv.attach("");
+    TEST_ASSERT(root != NULL, "attach /env");
+    const char *names[1] = { "MAPVAR" };
+    struct Walkqid *wq = devenv.walk(root, NULL, names, 1);
+    TEST_ASSERT(wq != NULL && wq->nqid == 1, "walk /env/MAPVAR");
+    struct Spoor *vf = wq->spoor;
+    walkqid_free(wq);
+    TEST_ASSERT(devenv.open(vf, 0) == vf, "open binds MAPVAR");
+    char buf[4];
+    TEST_EXPECT_EQ(devenv.read(vf, buf, sizeof(buf), 0), (long)3, "premise: readable");
+    struct t_stat st;
+    TEST_EXPECT_EQ(devenv.stat_native(vf, &st), 0, "premise: its size is known");
+
+    struct Proc *p = emk();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    p->territory = territory_alloc();
+    spoor_ref(vf); hidx_t fd  = handle_alloc(p, KOBJ_SPOOR, RIGHT_READ, vf);
+    spoor_ref(vf); hidx_t fdx = handle_alloc(p, KOBJ_SPOOR, RIGHT_READ, vf);
+    s64 m = 0, mf = 0, mx = 0, mfx = 0;
+    if (p->territory && fd >= 0 && fdx >= 0) {
+        m  = sys_mmap_file_for_proc(p, (u64)fd, PAGE_SIZE, false, 0);
+        mf = sys_mmap_fixed_file_for_proc(p, EXEC_USER_BURROW_BASE + 0x200000ull,
+                                          (u64)fdx, PAGE_SIZE, (u32)VIV_PROT_READ, 0);
+        mx  = sys_mmap_file_for_proc(p, (u64)fd, PAGE_SIZE, true, 0);
+        mfx = sys_mmap_fixed_file_for_proc(p, EXEC_USER_BURROW_BASE + 0x200000ull,
+                                           (u64)fdx, PAGE_SIZE,
+                                           (u32)(VIV_PROT_READ | VIV_PROT_EXEC), 0);
+    }
+    vma_drain(p);
+    edrop(p);
+
+    TEST_ASSERT(fd >= 0 && fdx >= 0, "handle_alloc");
+    TEST_EXPECT_EQ(m, -(s64)T_E_NODEV, "a map of a variable: ENODEV");
+    TEST_EXPECT_EQ(mf, -(s64)T_E_NODEV, "its MAP_FIXED twin: ENODEV");
+    // Both cores ask the exec floor first, as Linux asks noexec before mmap.
+    TEST_EXPECT_EQ(mx, -(s64)T_E_PERM, "an executable map of a variable: EPERM");
+    TEST_EXPECT_EQ(mfx, -(s64)T_E_PERM, "its MAP_FIXED twin: EPERM");
+    spoor_clunk(vf);
+    // The gate's purpose, not only its errno: nothing (no cached Image entry)
+    // kept the open entry, so its close dropped the Env reference it held.
+    TEST_EXPECT_EQ(env_refs(mine), 1, "no mapping kept the entry open");
+    spoor_unref(root);
+    env_free(me);
 }

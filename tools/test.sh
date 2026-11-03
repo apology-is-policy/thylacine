@@ -572,10 +572,34 @@ case "$result" in
         # THYLA_CLADE_GATES=require is its separate opt-in (a clade bake is far
         # rarer than the Alpine bundle, so folding it into --require would
         # break that flag's existing callers).
-        if ! gate_report="$("$REPO_ROOT/tools/check-arc-gates.sh" "$LOG_FILE")"; then
+        # The optional binaries: a skip of one this image was built to run is
+        # a lost binary. The ramfs is rebaked every build, and each build step
+        # leaves its binary in build/ only when it built it, so the Go probes
+        # and the C++ prover key on build/. The pool can be kept across builds
+        # (THYLACINE_MKFS_PRESERVE), so /goroot keys on what the populate
+        # verified in it (build/pool-contents, kept with the pool), never on
+        # the goroot stage.
+        gate_requires=()
+        [[ -f "$BUILD_DIR/go/go-hello" ]] && gate_requires+=( --require-go )
+        [[ -f "$BUILD_DIR/pouch/progs/pouch-hello-cxx" ]] && gate_requires+=( --require-cxx )
+        pool_payloads=""
+        [[ -r "$BUILD_DIR/pool-contents" ]] \
+            && pool_payloads="$(sed -n 's/^payloads=//p' "$BUILD_DIR/pool-contents" | tail -1)"
+        [[ " $pool_payloads " == *" GOROOT "* ]] && gate_requires+=( --require-goroot )
+        [[ " $pool_payloads " == *" GOPLS "* ]] && gate_requires+=( --require-gopls )
+        if ! gate_report="$("$REPO_ROOT/tools/check-arc-gates.sh" ${gate_requires[@]+"${gate_requires[@]}"} "$LOG_FILE")"; then
             echo "==> FAIL: arc/clade gate verdict (see the reason above)." >&2
             exit 1
         fi
+        # A checker that died before its verdicts exits 0 with nothing to say
+        # (bash 3.2 did, on a bash-4 construct), so each family's line must be
+        # in the report.
+        for gate_family in "arc gates:" "clade gates:" "go gates:"; do
+            if [[ "$gate_report" != *"$gate_family"* ]]; then
+                echo "==> FAIL: the gate checker reported no '$gate_family' verdict -- it did not run to its end." >&2
+                exit 1
+            fi
+        done
         while IFS= read -r gate_line; do
             [[ -n "$gate_line" ]] && echo "==> $gate_line"
         done <<<"$gate_report"

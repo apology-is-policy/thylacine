@@ -767,10 +767,11 @@ pub extern "C" fn rs_main() -> i64 {
         // /tmp is NOT guaranteed to exist here: joey creates it inside the clade
         // gate, which returns early when /clade is not baked -- and which runs
         // AFTER this probe, so on a clade-baked boot WE are the one that makes
-        // it. Hence 0777, matching clade_gate's own create exactly: whichever
-        // runs first must leave the same directory behind. Both levels tolerate
-        // "already there" -- a create failure is not the assertion, the mount is.
-        mkdir_ok(T_WALK_OPEN_FROM_ROOT, b"tmp", 0o777);
+        // it. Hence 0755, matching clade_gate's own create and the bake exactly:
+        // whichever runs first must leave the same directory behind. Both levels
+        // tolerate "already there" -- a create failure is not the assertion, the
+        // mount is.
+        mkdir_ok(T_WALK_OPEN_FROM_ROOT, b"tmp", 0o755);
         let tmp = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/tmp".as_ptr(), 4, T_OPATH) };
         if tmp < 0 {
             fail("open /tmp (create failed?)");

@@ -233,7 +233,9 @@ struct p9_close_job {
 };
 
 // p9_attached_defer_clunk with a job that runs before the Tclunk. On -1 the
-// caller still owns the job, and the fid stays bound.
+// caller still owns the job, and the fid stays bound. fid P9_NOFID queues the
+// job alone, with no Tclunk: writes that must reach the server before an entry
+// queued after it, since the closer serves a session's entries in order.
 int p9_attached_defer_close(struct p9_attached *a, u32 fid,
                             struct p9_close_job *job);
 
@@ -244,6 +246,13 @@ void p9_clunk_refused(u32 fid, int rc);
 // Print `9p: close: flush of fid N failed rc R`: a last close's write-behind
 // run never reached a live server, so bytes write() reported written are lost.
 void p9_close_flush_failed(u32 fid, int rc);
+
+// A job alone lost a run past the file's last close: print that line and count
+// it as a job error, since closer_serve cannot tell. Holds no lock.
+void p9_close_job_lost(u32 fid, int rc);
+
+// Tests: a leg that loses a run on purpose keeps the line out of the log.
+void p9_close_flush_quiet_for_test(bool quiet);
 
 // Boot: start the pool with its first closer. -1 if it could not be created.
 int p9_closer_start(void);
@@ -262,7 +271,8 @@ struct p9_closer_stats {
                          // (its fids with it) or the fid was not bound
     u64 refused;         // entries left live on a live session (reported)
     u64 jobs;            // close jobs run (p9_attached_defer_close)
-    u64 job_errors;      // of those, run failed on a live session (reported)
+    u64 job_errors;      // runs lost on a live session (reported): a job's, or a
+                         // last close's that no program hears
     u64 spawned;
     u64 spawn_failed;
     u64 reaped;

@@ -248,13 +248,15 @@
 // or a code path is reachable but stubbed at v1.0. POSIX: ENOSYS.
 #define T_E_NOSYS      38
 
-// Too many levels of symbolic links. Two emitters, both in the resolver
+// Too many levels of symbolic links. Three emitters. Two are in the resolver
 // (DISTRO D-1, docs/DISTRO.md section 4): a resolution that exceeds
 // STALK_MAX_FOLLOWS (40, Linux parity) symlink expansions -- a cycle, or
 // a chain past the bound -- and an open carrying the no-follow flag whose
 // FINAL component is a symlink (the Linux O_NOFOLLOW contour: the caller
 // asked for not-a-symlink and got one; ELOOP is the errno Linux fixed for
-// that answer, so a guest's symlink-attack defenses read correctly).
+// that answer, so a guest's symlink-attack defenses read correctly). The
+// third is SYS_MOUNT refusing a mount that would close a cycle in the mount
+// graph (I-3; operator vote 2026-10-19, ERRORS.md "Mount and unmount").
 //
 // Registered under the 2026-08-05 DISTRO design signoff + the per-value
 // D-1 approval (the append-under-ratified-scripture precedent: T_E_SRCH /
@@ -301,7 +303,8 @@
 // keeps working.
 // ---------------------------------------------------------------------------
 
-// Too many open files -- the per-Proc socket table (VIV_SOCK_MAX) is full.
+// Too many open files -- the per-Proc socket table (VIV_SOCK_MAX) is full, or
+// no handle slot at or above a SYS_HANDLE_DUP_LOWEST floor is free (B-3b).
 // POSIX: EMFILE.
 #define T_E_MFILE      24
 
@@ -310,6 +313,12 @@
 // for any request the terminal surface does not serve. isatty() reads this (via
 // a failed TIOCGWINSZ) as "not a tty". POSIX: ENOTTY.
 #define T_E_NOTTY      25
+
+// No space left. Kernel-originated for one cause: a mount into a Territory
+// whose mount table is at its cap (SYS_MOUNT; operator vote 2026-10-19). A
+// server's ENOSPC (a full pool) crosses by value, as it always has.
+// POSIX: ENOSPC.
+#define T_E_NOSPC      28
 
 // The fd is not a socket. Returned when a socket call names an fd with no
 // socktab entry -- a plain file, or a socket whose entry was dropped.
@@ -348,6 +357,23 @@
 // the connect verb was accepted. POSIX: ECONNREFUSED.
 #define T_E_CONNREFUSED 111
 
+// ---------------------------------------------------------------------------
+// File locks (B-3h, ARCH 9.6.11; operator votes 34-35, 2026-10-29).
+//
+// No lock can be had for a reason that is not another owner's lock:
+// SYS_FILE_LOCK on a file whose Dev serves no locks, a Proc whose lock
+// table is full (I-32), or a server that answered its lock with
+// ERROR/GRACE or at its own bound. POSIX: ENOLCK.
+#define T_E_NOLCK      37
+
+// Stale file handle: the file a descriptor names can no longer be reached
+// to act on it. Kernel-originated for a loose cached open (FID-LIFECYCLE
+// 3.3) whose re-walk no longer reaches the same qid.path and generation
+// (renamed away, unlinked or replaced). Signed off with PX-22's ESTALE
+// (operator vote 2026-10-18 (28)); a server's ESTALE crosses by value.
+// POSIX: ESTALE.
+#define T_E_STALE      116
+
 // ABI pins: changing a value here is an ABI break. The boundary-line
 // patch (and any future POSIX-aware userspace) depends on these
 // matching the AArch64 POSIX errno numbers.
@@ -361,6 +387,7 @@ _Static_assert(T_E_OPNOTSUPP == 95,  "T_E_OPNOTSUPP ABI pin (POSIX EOPNOTSUPP)")
 // is what a Linux guest's libc compares against.
 _Static_assert(T_E_MFILE          == 24,  "T_E_MFILE ABI pin (POSIX EMFILE)");
 _Static_assert(T_E_NOTTY          == 25,  "T_E_NOTTY ABI pin (POSIX ENOTTY)");
+_Static_assert(T_E_NOSPC          == 28,  "T_E_NOSPC ABI pin (POSIX ENOSPC)");
 _Static_assert(T_E_NOTSOCK        == 88,  "T_E_NOTSOCK ABI pin (POSIX ENOTSOCK)");
 _Static_assert(T_E_PROTONOSUPPORT == 93,  "T_E_PROTONOSUPPORT ABI pin (POSIX EPROTONOSUPPORT)");
 _Static_assert(T_E_AFNOSUPPORT    == 97,  "T_E_AFNOSUPPORT ABI pin (POSIX EAFNOSUPPORT)");
@@ -369,6 +396,8 @@ _Static_assert(T_E_CONNABORTED    == 103, "T_E_CONNABORTED ABI pin (POSIX ECONNA
 _Static_assert(T_E_ISCONN         == 106, "T_E_ISCONN ABI pin (POSIX EISCONN)");
 _Static_assert(T_E_NOTCONN        == 107, "T_E_NOTCONN ABI pin (POSIX ENOTCONN)");
 _Static_assert(T_E_CONNREFUSED    == 111, "T_E_CONNREFUSED ABI pin (POSIX ECONNREFUSED)");
+_Static_assert(T_E_NOLCK          == 37,  "T_E_NOLCK ABI pin (POSIX ENOLCK)");
+_Static_assert(T_E_STALE          == 116, "T_E_STALE ABI pin (POSIX ESTALE)");
 _Static_assert(T_E_IO        == 5,   "T_E_IO ABI pin (POSIX EIO)");
 _Static_assert(T_E_2BIG      == 7,   "T_E_2BIG ABI pin (POSIX E2BIG)");
 _Static_assert(T_E_NODEV     == 19,  "T_E_NODEV ABI pin (POSIX ENODEV)");

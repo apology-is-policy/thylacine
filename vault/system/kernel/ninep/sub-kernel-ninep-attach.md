@@ -12,8 +12,44 @@ hazards: []
 abis: []
 design: []
 created: 2026-07-31
-updated: 2026-10-27
+updated: 2026-11-02
 ---
+## A closer entry may be a job alone (B-3h2, 2026-10-29)
+
+`p9_attached_defer_close(a, P9_NOFID, job)` queues a job with no fid. The
+closer runs it in queue order and sends no Tclunk, and the entry counts in
+`jobs` but in none of `sent`, `refused` or `dropped`
+(FID-LIFECYCLE-DESIGN.md 9). dev9p's lock release uses it: a thread with a
+death pending cannot flush the open file's staged run itself, so it queues
+the flush as a job alone ahead of the lock owner's deferred Tclunk
+([[sub-kernel-ninep-dev9p]]). Because the queue is per-session FIFO, with
+tail append, head pop and one closer per session, the run lands before the
+lock is released. A job alone that fails leaves its failure with the open file
+it wrote for: the run is dropped and the error latches for that open's next
+write, fsync or close. A flush a death cancelled keeps its run for the close that
+follows. Test: `p9_closer.dying_lock_release_flushes_shared_run`.
+It asserts one write, the Tclunk after it, the shared fid left open,
+`jobs` +1, `sent` +1, and `dropped` and `refused` unchanged.
+
+## The create ends are the conn's (2026-10-19, B-3e M7)
+
+`srvconn_attach_dev9p_root` stamps the session's create ends
+([[dec-2026-10-18-create-speaks-for-a-session-end]]) as the conn's own:
+`p9_client_set_ends(client, cn->peer_principal, cn->server_principal)`, the
+conn's opener and its poster. Not the attaching Proc (`who`): it differs from
+the opener when a conn handle was passed on, and the server stamps a create
+with what SO_PEERCRED reports, the opener. The `/ctl/9p-sessions` owners beside
+it keep the attaching Proc (`p9_attached_set_ctl_owners(att, who,
+cn->server_principal)`): the two pairs answer different questions, who may read
+the session's counters and whom the server will name as a creator. The stamp is
+made on the still-private client before the root Spoor publishes, under the
+cape's rule ([[sub-kernel-ninep-client]]), and only when the attach produced a
+client. `SYS_ATTACH_9P` stamps (the attacher, PRINCIPAL_INVALID) in
+[[sub-kernel-syscall-dispatch]]. `9p_srvconn_transport.attach_stamps_conn_ends`
+attaches through a conn whose opener, poster and attaching Proc are three
+different principals: the opener and the poster may create, the attacher may
+not.
+
 ## Purpose
 
 The mount-creation composition: wrap a transport in a heap `p9_client`,
@@ -71,7 +107,9 @@ Tclunk is sent.
   the job-less form. A job whose run fails with `-P9_E_IO` while the fid is
   still bound is run again with `closer_send`'s backoff (`closer_run_job`: 10
   tries from 1 ms, about 1 s): a write never sent for want of memory comes
-  back as the same `-EIO` as a server's refusal, and a resend at the run's
+  back as the same `-EIO` as a server's refusal (its EIO, or its EBADF, which
+  `map_error` folds to EIO since vote 2026-10-21 #16, so a server's EBADF on a
+  close job is retried too where it once ended the job), and a resend at the run's
   explicit offsets is idempotent (witness
   `p9_closer.close_job_retries_a_refused_write`). A job whose run still fails
   while the session holds the fid prints `9p: close: flush of fid N failed rc R`
@@ -329,6 +367,14 @@ most one),
 idle_parked, retired, runq, pending, sent, dropped, refused, spawned,
 spawn_failed, reaped, live_refusals).
 
+`p9_close_job_lost` prints the flush-failed line and counts a job error for a job alone,
+which `closer_serve` cannot tell: its entry names no fid. Such a job runs once, because the
+flush it runs drops the run on a failure. The job of a last close reports whichever flush
+left the latch, an earlier job's included, since nobody reads it after that close. A last
+close no program hears reports a loss it finds itself, with no job, so `job_errors` counts
+losses and can pass `jobs`. Legs: `p9_closer.job_loses_a_run_loudly`,
+`.job_reports_a_first_jobs_loss`, `.dying_close_reports_a_retired_flush`.
+
 ## Concurrency
 
 The attach sequence itself is serial (one caller constructs a private
@@ -485,8 +531,8 @@ writes, 256 patterned bytes staged at offset 0: `dying_close_hands_off_staged_ru
 then clunks), `forced_exit_close_hands_off_flush` (every send meets a full
 ring; a plain exit close sleeps -- the control -- until `proc_group_kill`
 forces it, then returns without the server, and the closer writes the run once
-the ring frees) and `kthread_close_hands_off_staged_run` (a kproc thread marked
-`closes_never_wait` returns at once). Each checks the Twrite's offset, length
+the ring frees) and `kthread_close_hands_off_staged_run` (a kproc thread's last
+reference returns at once, as any `Dev.close` does). Each checks the Twrite's offset, length
 and byte sum, that it precedes the Tclunk, one job, and the write-behind budget
 back at its baseline. Each leaves the pool as
 it found it -- one closer, idle and asleep (`idle_parked`), nothing queued.
@@ -495,7 +541,9 @@ The stall transport wraps the mq loopback and declares no `hangup` (ARCH
 backend has none to forward, so its server learns of a death at the close.
 
 `kernel/test/test_9p_attach.c` (`p9_attached.*`): lifecycle,
-handshake-failure cleanup (the OOM/rollback ladder), root-walk-read
+handshake-failure cleanup (the OOM/rollback ladder), the handshake's Rlerror
+ecode (EACCES crosses as itself; a server's EBADF reads `-EIO`,
+`handshake_rlerror_ebadf_reads_eio`, vote 2026-10-21 #16), root-walk-read
 composition, and `p9_attached.walked_outlives_root_no_uaf` — the F236
 regression (close the root BEFORE the walks; pre-fix UAF'd on the walked
 clunk). `test_9p_srvconn_transport.c::kernel_attached_skips_teardown_on_handle_close`

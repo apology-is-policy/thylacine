@@ -239,10 +239,16 @@ _Static_assert(sizeof(struct t_timespec) == 16, "t_timespec is the 16-byte ABI r
 
 // SYS_WSTAT valid-mask bits (A-2a; IDENTITY-DESIGN.md §9.5). Mirror the kernel
 // T_WSTAT_* / wire P9_SETATTR_* bits. chmod sets T_WSTAT_MODE; chown sets
-// T_WSTAT_UID | T_WSTAT_GID.
+// T_WSTAT_UID | T_WSTAT_GID; a time alone is "now" (G12), with its _SET bit
+// the value at x6.
 #define T_WSTAT_MODE       0x1u
 #define T_WSTAT_UID        0x2u
 #define T_WSTAT_GID        0x4u
+#define T_WSTAT_SIZE       0x8u
+#define T_WSTAT_ATIME      0x10u
+#define T_WSTAT_MTIME      0x20u
+#define T_WSTAT_ATIME_SET  0x80u
+#define T_WSTAT_MTIME_SET  0x100u
 #define T_WSTAT_MODE_MASK  0777u
 
 // Torpor error codes — match kernel's TORPOR_ERR_* (Linux/musl-numeric
@@ -924,16 +930,21 @@ static inline long t_attach_9p(long tx_fd, long rx_fd,
 // `flags` is T_MREPL / T_MBEFORE / T_MAFTER / T_MCREATE / T_MNOEXEC /
 // T_MPHENO_LINUX (bit-or'd; at most one of the first three).
 //
-// Returns 0 on success, -T_E_NOTDIR (-20) on Plan 9's Emount (ARCH 9.6.1),
-// and -1 on every other refusal:
-//   - path absent / empty / too long / not resolvable (a trailing '/' on a
-//     point that is not a directory is unresolvable)
-//   - invalid source_spoor_fd (not KOBJ_SPOOR or out-of-range)
-//   - source handle missing T_RIGHT_READ
-//   - flags has bits outside the valid set, or more than one of
-//     T_MREPL / T_MBEFORE / T_MAFTER
-//   - Territory mount table full (PGRP_MAX_MOUNTS, 32)
-//   - the mount would close a cycle in the mount graph (I-3)
+// Returns 0 on success, or one errno per refusal (ERRORS.md "Mount and
+// unmount"):
+//   - -T_E_INVAL: an empty, over-long or NUL-embedded path; flags with bits
+//     outside the valid set, or more than one of T_MREPL / T_MBEFORE /
+//     T_MAFTER
+//   - -T_E_FAULT: a path the kernel cannot read
+//   - the resolver's errno for a point that does not resolve (a trailing '/'
+//     on a point that is not a directory is unresolvable)
+//   - -T_E_BADF: source_spoor_fd is not a live KOBJ_SPOOR handle, or lacks
+//     T_RIGHT_READ
+//   - -T_E_NOTDIR (-20): Plan 9's Emount (ARCH 9.6.1)
+//   - -T_E_LOOP (-40): the mount would close a cycle in the mount graph (I-3)
+//   - -T_E_NOSPC (-28): the Territory mount table holds its most entries (1024)
+//   - -T_E_NOMEM (-12): the kernel could not allocate the mount's entries; the
+//     namespace is unchanged
 __attribute__((always_inline))
 static inline long t_mount(const char *path, unsigned long path_len,
                            long source_spoor_fd, unsigned long flags) {
@@ -955,8 +966,8 @@ static inline long t_mount(const char *path, unsigned long path_len,
 // the absolute `path` (`path_len` bytes) from the caller's Territory mount
 // table; drop the source's per-entry refcount. (Union mounts with multiple
 // entries at the same point require multiple t_unmount calls — Phase 5+ once
-// walk-side union support lands.) Returns 0 on success, -1 if no entry exists
-// (or the path does not resolve).
+// walk-side union support lands.) Returns 0 on success, -T_E_INVAL (-22) if no
+// entry exists, or the path's errno as t_mount answers it.
 __attribute__((always_inline))
 static inline long t_unmount(const char *path, unsigned long path_len) {
     register long x0 __asm__("x0") = (long)path;
@@ -2047,8 +2058,9 @@ static inline long t_open(long start_fd, const char *path,
 // for the Territory root). Returns a new opened KOBJ_SPOOR fd referring to the
 // created object (file, or directory when perm carries T_WALK_CREATE_DMDIR).
 // perm's low 9 bits are the rwxrwxrwx mode; the created object's group is the
-// caller's primary_gid. omode is the Plan 9 open mode for the returned fd
-// (T_OREAD / T_OWRITE / T_ORDWR [+ T_OTRUNC]); a directory is opened OREAD.
+// directory's (IDENTITY-DESIGN 3.5 F-5). omode is the Plan 9 open mode for the
+// returned fd (T_OREAD / T_OWRITE / T_ORDWR [+ T_OTRUNC]); a directory is
+// opened OREAD.
 // Returns the new fd (>=0), -1 on any error (see SYS_WALK_CREATE). FS-mutation
 // foundation (IDENTITY-DESIGN.md section 9.2).
 #define T_WALK_CREATE_DMDIR  0x80000000u
@@ -2153,10 +2165,12 @@ static inline long t_unlink(long parent_fd, const char *name, size_t name_len,
     return x0;
 }
 
-// t_wstat — apply chmod/chown to `fd` (KOBJ_SPOOR, RIGHT_WRITE) via Tsetattr.
-// `valid` selects which of (mode, uid, gid) to set (T_WSTAT_* bits; >=1 bit).
-// mode is the 9 rwx bits only (setuid/setgid/sticky rejected). Returns 0 / -1.
-// A-2a (IDENTITY-DESIGN.md §9.5). The per-file permission policy is A-2d.
+// t_wstat — apply chmod/chown/"now" times to `fd` (KOBJ_SPOOR, any rights) via
+// Tsetattr. `valid` selects which of (mode, uid, gid) to set, and may add
+// T_WSTAT_ATIME / T_WSTAT_MTIME (>=1 bit); never T_WSTAT_SIZE or a _SET bit,
+// whose x5 / x6 this wrapper does not set. mode is the 9 rwx bits only
+// (setuid/setgid/sticky rejected). Returns 0 / -errno (EINVAL, EBADF, EACCES,
+// EOPNOTSUPP, the server's). A-2a (IDENTITY-DESIGN.md §9.5); policy A-2d.
 __attribute__((always_inline))
 static inline long t_wstat(long fd, unsigned long valid, unsigned long mode,
                            unsigned long uid, unsigned long gid) {
@@ -2425,8 +2439,9 @@ _Static_assert(__builtin_offsetof(struct t_stat, devno)     == 80, "t_stat.devno
 #define T_SEEK_END 2
 
 // t_fstat — populate `*out` with metadata for `fd`. Returns 0 on success
-// (*out filled), -1 on bad fd / no native stat / uaccess fault. `out`
-// must be a writable buffer of at least sizeof(struct t_stat) bytes.
+// (*out filled), -T_E_BADF for a bad fd, -T_E_FAULT for an unwritable `out`,
+// or the Dev's -errno (-T_E_IO when it has none). `out` must be a writable
+// buffer of at least sizeof(struct t_stat) bytes.
 __attribute__((always_inline))
 static inline long t_fstat(long fd, struct t_stat *out) {
     register long x0 __asm__("x0") = fd;
@@ -2649,6 +2664,106 @@ static inline long t_burrow_protect(unsigned long va, unsigned long length,
     register long x8 __asm__("x8") = T_SYS_BURROW_PROTECT;
     __asm__ volatile ("svc #0" : "+r"(x0) : "r"(x1), "r"(x2), "r"(x3), "r"(x8)
                       : "memory", "cc");
+    return x0;
+}
+
+// Instantaneous metadata query on the caller's own handle; no rights probe.
+#define T_SYS_HANDLE_FLAGS_GET 129
+#define T_HANDLE_CLOSE_ON_EXEC 1u
+// T_SYS_HANDLE_DUP_TO only: the target is a floor (lowest free at or above).
+#define T_HANDLE_DUP_LOWEST 2u
+// t_handle_flags_get's open-file status beside bit0 (kernel SYS_HANDLE_STATUS_*).
+#define T_HANDLE_STATUS_OMODE_SHIFT 8u
+#define T_HANDLE_STATUS_OMODE_MASK  0x300u
+#define T_HANDLE_STATUS_NONBLOCK    0x400u
+#define T_HANDLE_STATUS_APPEND      0x800u
+__attribute__((always_inline))
+static inline long t_handle_flags_get(long fd) {
+    register long x0 __asm__("x0") = fd;
+    register long x8 __asm__("x8") = T_SYS_HANDLE_FLAGS_GET;
+    __asm__ volatile ("svc #0" : "+r"(x0) : "r"(x8) : "memory", "cc");
+    return x0;
+}
+
+// Caller-local descriptor operations; raw native errno results.
+#define T_SYS_HANDLE_FLAGS_SET 130
+#define T_SYS_HANDLE_DUP_TO 131
+static inline long t_handle_flags_set(long fd, unsigned long flags) {
+    register long x0 __asm__("x0") = fd;
+    register unsigned long x1 __asm__("x1") = flags;
+    register long x8 __asm__("x8") = T_SYS_HANDLE_FLAGS_SET;
+    __asm__ volatile("svc #0" : "+r"(x0) : "r"(x1), "r"(x8) : "memory", "cc");
+    return x0;
+}
+static inline long t_handle_dup_to(long source, long target, unsigned long flags) {
+    register long x0 __asm__("x0") = source;
+    register long x1 __asm__("x1") = target;
+    register unsigned long x2 __asm__("x2") = flags;
+    register long x8 __asm__("x8") = T_SYS_HANDLE_DUP_TO;
+    __asm__ volatile("svc #0" : "+r"(x0) : "r"(x1), "r"(x2), "r"(x8) : "memory", "cc");
+    return x0;
+}
+
+// t_getppid -- the caller's parent's pid, 0 when that parent is kproc or there
+// is none (SYS_GETPPID, vote 2026-10-14 #6). Never fails.
+#define T_SYS_GETPPID 132
+__attribute__((always_inline))
+static inline long t_getppid(void) {
+    register long x0 __asm__("x0");
+    register long x8 __asm__("x8") = T_SYS_GETPPID;
+    __asm__ volatile("svc #0" : "=r"(x0) : "r"(x8) : "memory", "cc");
+    return x0;
+}
+
+// t_umask -- set the caller's creation mask and return the previous one
+// (SYS_UMASK, IDENTITY-DESIGN 9.7 M8). A mask with a bit outside 0777 is
+// -T_E_INVAL and changes nothing.
+#define T_SYS_UMASK 133
+__attribute__((always_inline))
+static inline long t_umask(unsigned long mask) {
+    register long x0 __asm__("x0") = (long)mask;
+    register long x8 __asm__("x8") = T_SYS_UMASK;
+    __asm__ volatile("svc #0" : "+r"(x0) : "r"(x8) : "memory", "cc");
+    return x0;
+}
+
+// t_file_lock -- a byte-range lock the file's server holds (SYS_FILE_LOCK,
+// ARCH 9.6.11). op = a type | WAIT | TEST | PROC: PROC makes the Proc the
+// owner (POSIX F_SETLK), otherwise the open file is (OFD, flock). len 0 runs
+// to the end of the file. A TEST writes *out: type UN when the lock would be
+// granted, else the first conflicting lock, pid always -1.
+#define T_SYS_FILE_LOCK 137
+#define T_FILE_LOCK_RD        0u
+#define T_FILE_LOCK_WR        1u
+#define T_FILE_LOCK_UN        2u
+#define T_FILE_LOCK_TYPE_MASK 0xfu
+#define T_FILE_LOCK_WAIT      0x10u
+#define T_FILE_LOCK_TEST      0x20u
+#define T_FILE_LOCK_PROC      0x40u
+#define T_FILE_LOCK_FLAGS_ALL (T_FILE_LOCK_WAIT | T_FILE_LOCK_TEST | T_FILE_LOCK_PROC)
+struct t_file_lock {
+    unsigned char      type;
+    unsigned char      _pad0[7];
+    unsigned long long start;
+    unsigned long long len;
+    int                pid;
+    unsigned int       _pad1;
+};
+_Static_assert(sizeof(struct t_file_lock) == 32, "t_file_lock is the 32-byte ABI record");
+_Static_assert(__builtin_offsetof(struct t_file_lock, start) == 8 &&
+               __builtin_offsetof(struct t_file_lock, len) == 16 &&
+               __builtin_offsetof(struct t_file_lock, pid) == 24,
+               "t_file_lock field offsets");
+static inline long t_file_lock(long fd, unsigned long op, unsigned long start,
+                               unsigned long len, struct t_file_lock *out) {
+    register long x0 __asm__("x0") = fd;
+    register unsigned long x1 __asm__("x1") = op;
+    register unsigned long x2 __asm__("x2") = start;
+    register unsigned long x3 __asm__("x3") = len;
+    register struct t_file_lock *x4 __asm__("x4") = out;
+    register long x8 __asm__("x8") = T_SYS_FILE_LOCK;
+    __asm__ volatile("svc #0" : "+r"(x0)
+                     : "r"(x1), "r"(x2), "r"(x3), "r"(x4), "r"(x8) : "memory", "cc");
     return x0;
 }
 

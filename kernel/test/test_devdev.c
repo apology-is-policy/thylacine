@@ -805,9 +805,10 @@ void test_devdev_spawn_unbump_runs_close(void) {
     // frees it -- on either kernel -- so nothing below may touch it again.
     TEST_ASSERT(dopen == drain, "dev_simple_open opens in place");
     spoor_ref(dopen);                         // the spawn's bump (sys_bump_inherit_fds)
+    spoor_fd_ref(dopen);                      // and its count: this Spoor is in no table
     spoor_clunk(dopen);                       // a sibling's close(fd): not the last ref
     struct Spoor *bumped[1] = { dopen };
-    sys_spawn_unbump_fds(bumped, 1);          // the failure unwind: the LAST drop
+    sys_spawn_unbump_fds(t->proc, bumped, 1); // the failure unwind: the LAST drop
 
     int reopen = cons_drain_open();
     TEST_EXPECT_EQ(reopen, 0, "the unwind's last drop ran the close hook: the drain is disarmed");

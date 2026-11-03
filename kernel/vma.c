@@ -277,6 +277,10 @@ int vma_insert_in(struct AddrSpace *as, bool exempt, struct Vma *v) {
     if (prev) prev->next = v;
     else      as->vmas   = v;
     if (cur)  cur->prev  = v;
+
+    // ARCH 6.5, the merge's ONE BIAS, recorded when a mapping becomes real: a
+    // VMA allocated and then refused never names its Burrow's bias.
+    if (v->burrow) burrow_lazy_bind_va0(v->burrow, v->vaddr_start - v->burrow_offset);
     return 0;
 }
 
@@ -846,6 +850,80 @@ rollback:
     first->burrow_offset = first_off;
     last->vaddr_end      = last_end;
     return -(int)T_E_NOMEM;
+}
+
+// =============================================================================
+// ARCH 6.5: adjacent anonymous mappings merge (vma.h has the contract).
+// =============================================================================
+
+// A neighbour that may absorb a lazy reservation is one a reservation itself
+// would have made: ANON_LAZY, the same prot, and a flags word that is exactly
+// the RW ceiling -- no seal below it, no COW routing (a fork's mappings never
+// extend), not shared-in -- lying wholly inside the reservation's window.
+static bool extend_admits(const struct Vma *n, u32 prot, u64 win_lo, u64 win_hi) {
+    if (!n->burrow || n->burrow->magic != VMO_MAGIC)             return false;
+    if (n->burrow->type != BURROW_TYPE_ANON_LAZY)                return false;
+    if (n->prot != prot)                                         return false;
+    if (n->flags != ((u32)VMA_PROT_RW << VMA_FLAG_MAX_SHIFT))    return false;
+    return n->vaddr_start >= win_lo && n->vaddr_end <= win_hi;
+}
+
+// The mappings of `b` in this space, which an extension holds against the
+// Burrow's own mapping count: one mapped in another space is never extended.
+static int mappings_here(const struct AddrSpace *as, const struct Burrow *b) {
+    int n = 0;
+    for (const struct Vma *v = as->vmas; v; v = v->next) {
+        if (v->magic != VMA_MAGIC) extinction("vma_extend_anon: corrupted list entry");
+        if (v->burrow == b) n++;
+    }
+    return n;
+}
+
+int vma_extend_anon_in(struct AddrSpace *as, bool exempt, u64 vaddr, u64 length,
+                       u32 prot, u64 win_lo, u64 win_hi) {
+    if (!as || length == 0)                                return -1;
+    if ((vaddr | length) & (PAGE_SIZE - 1))                return -1;
+    u64 end = vaddr + length;
+    if (end < vaddr || vaddr < win_lo || end > win_hi)     return -1;
+
+    // The mappings either side of the range. The caller found the range free
+    // under this lock; a neighbour that overlaps it says otherwise, and then
+    // nothing is extended (the caller's insert refuses the overlap too).
+    struct Vma *prev = NULL, *next = as->vmas;
+    while (next && next->vaddr_start < vaddr) {
+        if (next->magic != VMA_MAGIC) extinction("vma_extend_anon: corrupted list entry");
+        prev = next;
+        next = next->next;
+    }
+    if (prev && prev->vaddr_end > vaddr)                   return -1;
+    if (next && next->vaddr_start < end)                   return -1;
+
+    // The predecessor grows forward over the offsets that follow its own: at
+    // its Burrow's one bias those are exactly the offsets of the free range.
+    if (prev && prev->vaddr_end == vaddr && extend_admits(prev, prot, win_lo, win_hi)) {
+        u64 off = prev->burrow_offset + (prev->vaddr_end - prev->vaddr_start);
+        if (burrow_lazy_extend(as, exempt, prev->burrow, mappings_here(as, prev->burrow),
+                               (size_t)(off / PAGE_SIZE), (size_t)(length / PAGE_SIZE)) == 0) {
+            prev->vaddr_end = end;
+            reprotect_merge_in(as, vaddr, end);    // a hole refill joins the tail
+            return 0;
+        }
+    }
+    // The successor grows backward only into offsets it has below it (left by
+    // an earlier trim of its head): growing a Burrow at its front would
+    // re-index every slot.
+    if (next && next->vaddr_start == end && extend_admits(next, prot, win_lo, win_hi) &&
+        next->burrow_offset >= length) {
+        u64 off = next->burrow_offset - length;
+        if (burrow_lazy_extend(as, exempt, next->burrow, mappings_here(as, next->burrow),
+                               (size_t)(off / PAGE_SIZE), (size_t)(length / PAGE_SIZE)) == 0) {
+            next->burrow_offset = off;
+            next->vaddr_start   = vaddr;
+            reprotect_merge_in(as, vaddr, end);
+            return 0;
+        }
+    }
+    return -1;
 }
 
 #ifdef KERNEL_TESTS

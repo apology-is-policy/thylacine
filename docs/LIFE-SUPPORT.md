@@ -192,8 +192,8 @@ most of #925. Split:
 - **LS-3c — misc [done]**: `sleep` (rides `libthyla-rs::time::sleep` ->
   `SYS_TORPOR_WAIT`; magnitude-guarded so a pathological operand can't overflow
   `Duration::from_secs_f64`), `hexdump` (`hexdump -C`-style), `cmp` (byte
-  compare), `yes`, `realpath`, `which`, `env` (degenerate, no envp -- G15),
-  `uname` (static -- G16). Adopted from the aux branch onto the libthyla-rs
+  compare), `yes`, `realpath`, `which`, `env` (degenerate, no envp -- G15;
+  since 2026-10-22 it sets variables and execs the command, B-3g), `uname` (static -- G16). Adopted from the aux branch onto the libthyla-rs
   surface (the LS-3a/3b pattern: `aux-rt` -> `env::args` + `io::` + the print
   macros). Two now-satisfied dependencies were folded in (LS-4 cwd):
   **realpath** anchors a relative input against `env::current_dir()` instead of
@@ -575,6 +575,11 @@ composes for a real workflow. Closes the LS arc.
 ships the name-based form, and the handle-based upgrade lands *with* symlinks/G11
 — they force it), `find -exec`, atime/mtime setter (G12), `uname`-real sysinfo
 (G16). Each a named kernel/lib surface; mostly v1.x.
+
+G12 was pulled forward into the browser arc's B-3 on 2026-10-22 (operator vote
+17): fontconfig's upstream test copies with `cp -a`, which needs the setter, and
+runs unmodified. Vote 18 shaped it: SYS_WSTAT gains the 9P time bits (x6 points
+at the two times), with no new syscall number, and answers an errno per refusal.
 
 ---
 

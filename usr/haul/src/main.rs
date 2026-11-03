@@ -694,7 +694,8 @@ const TOKEN_ENV_MAX: usize = 4096;
 /// `/env/<NAME>` is a plain file on the per-Proc env device, so reading it here
 /// costs nothing and removes that stack copy. It does NOT make `--token-env` a
 /// wiped path, and the difference matters: the authoritative bytes live in the
-/// kernel's Env entry for the life of the Proc, untouched by our `drop`, and
+/// kernel's Env entry for the life of the Env (the Proc's, and any handle opened
+/// in it), untouched by our `drop`, and
 /// `env_clone_into` hands them to every child the command form spawns. npxf's
 /// `getenv` has exactly the same exposure, so this is parity rather than a
 /// weaker posture -- but `-t` remains the source to reach for when the token
@@ -1155,9 +1156,9 @@ fn run(argv: Args) -> Result<(), String> {
     };
     let _ = unsafe { t_close(root) };
     if rc < 0 {
-        // The kernel names one cause, Plan 9's Emount (-ENOTDIR: an attach root
-        // is a directory, so the mount point is not); every other refusal is
-        // its generic -1.
+        // Each refusal names its errno (ERRORS.md "Mount and unmount"): among
+        // them Plan 9's Emount, -ENOTDIR (an attach root is a directory, so the
+        // mount point is not).
         return Err(match Error::from_syscall_return(rc) {
             Err(e) if rc != -1 => alloc::format!("mount {}: {}", args.mountpoint, e),
             _ => "mount".into(),

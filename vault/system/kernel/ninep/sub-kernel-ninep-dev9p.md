@@ -15,8 +15,187 @@ hazards: [haz-shared-stream-desync]
 abis: []
 design: [docs/LARDER-DESIGN.md, docs/FID-LIFECYCLE-DESIGN.md, docs/POUNCE-DESIGN.md]
 created: 2026-07-31
-updated: 2026-10-29
+updated: 2026-11-02
 ---
+## The fid a cached open keeps, and locks on it (B-3h3, 2026-11-02)
+
+FID-LIFECYCLE 3.3 and ARCH 9.6.11. A cached open still serves its snapshot with
+no wire. What it gained is a way to reach the server, `lock_fid(p)`: a strict
+open's kept fid, or the fid a loose open bound on its first need (`P9_NOFID`
+until then). Any other open answers its own fid.
+- **Strict** (operator vote 20, retain the walk fid unopened). The revalidating
+  Twalkgetattr in `dev9p_open_cached` binds a fresh fid (mask BASIC|GEN), which
+  `priv_alloc` keeps as `p->fid`, `fid_owned` and unopened. The walk teaches
+  `lock_gen` and `lock_ident`, so `lock_ident` costs no wire. A mint that fails
+  after the bind clunks the fid (`co_abandon`, `co_mint_fail`).
+- **Loose** (operator vote B1, the SYSTEM mount). The mint binds nothing, so its
+  open stays wire-free. It keeps `co_start` (a reference on the run's base),
+  `co_names` (packed, each a u16 LE length and its bytes; `co_nname`,
+  `co_names_len`) and the generation `larder_attr_gen` knows. A file with no
+  known generation is not minted loose: the normal path opens it. The budget
+  charge is the snapshot's size plus `co_names_len`.
+- **`co_bind`** is a loose open's first need. It walks the kept names from the
+  base (Twalkgetattr, BASIC|GEN) into a fresh fid and accepts only a full walk
+  to the same `qid.path` with a valid generation equal to `lock_gen`. An accepted
+  walk installs the leaf's attributes in the Larder (guarded by a pre-walk
+  `seq0`), so the stat a `wstat` judges next is the walk's even if the Larder held
+  a view another session has since changed. A name that
+  no longer reaches the file (a partial walk, ENOENT, ENOTDIR, ESTALE) or reaches
+  another one answers `-T_E_STALE`, and any fid goes back. A wire that failed says
+  nothing about the file and answers its own errno through `dev9p_wire_errno`
+  (`-T_E_INTR` for an interrupted walk; `-T_E_NOMEM` with nothing sent), so a table
+  peer's failure refuses a take rather than letting that peer keep its snapshot
+  under the lock. A run from an opened base is not minted loose: a server refuses
+  a walk from an opened fid, so that open could never bind (strict learns it at its
+  wire query). The fid is CAS-installed in
+  `co_kfid`; a loser clunks its own (`dev9p.cached_open_install_race`).
+- **`co_read_live`** ends the snapshot: a zero-name clone of the kept fid and a
+  Tlopen O_RDONLY, CAS-installed in `co_rfid`, the loser clunking its own.
+  `DEV_LOCK_SYNC_ACQUIRE` and `dev9p_loom_register` run it. A failure installs
+  nothing and the snapshot still serves. `dev9p_read` and `dev9p_client_fid`
+  address `co_rfid` once it is installed; before that `dev9p_client_fid` offers
+  a ring `P9_NOFID`, which fixes OPEN-BUGS 2026-10-22 16:34Z's Loom path.
+- **Locks.** `dev9p_lock` binds first, except that an unlock with nothing bound
+  holds nothing and answers 0 with no wire. A failure to bind answers ESTALE or
+  EINTR as they are and otherwise ENOLCK (`co_bind_lock_errno`).
+  `dev9p_lock_owner` clones `lock_fid(p)`. `dev9p_lock_sync(ACQUIRE)` answers
+  what a lock call can: ESTALE, EINTR, else ENOLCK.
+- **Metadata.** `dev9p_wstat_bind` (the Dev's `wstat_bind`) binds before
+  `wstat_apply` reads the stat its policy judges, because the open-time stat may
+  name a former owner. `dev9p_wstat_native` binds too and sends Tsetattr on the
+  kept fid.
+  `dev9p_stat_native` serves the open-time stat until a fid is bound, then asks
+  the server through it. `co_patch_stat` reports the snapshot's size and version
+  while reads still serve the snapshot, so a reader sized by fstat reads what is
+  there; the rest is the file's own, so a wstat through the open shows in it.
+- **Close** clunks `co_rfid` and `co_kfid` asynchronously, frees the names, lets
+  go of `co_start` and gives back the budget. A strict open's `p->fid` clunks as
+  any walked fid does.
+
+The residual, on the loose mount only: a read-only small cached file renamed,
+unlinked or replaced since its open answers ESTALE to a lock or wstat, and never
+reaches the wrong file; its reads keep serving the snapshot. Binding at every
+loose open would close it at about 1604 wire walks per W1 run, the walks vote B1
+removed ([[seam-co-fidless-wstat]], closed).
+
+## Byte-range locks and lock-to-unlock consistency (B-3h2, 2026-10-29)
+
+dev9p serves the five lock slots of [[sub-kernel-dev]] for
+[[sub-kernel-filelock]] (ARCH 9.6.11):
+- `dev9p_lock(c, type, start, len, test)` acts as the open file `c`. It sends
+  Tlock on `c`'s fid, and Tgetlock for a test. BLOCKED on a take is
+  `-T_E_AGAIN` (the wait loop is generic). ERROR, GRACE or an undefined status
+  is `-T_E_NOLCK`. A Tgetlock type 9P2000.L does not define is `-T_E_IO`. The
+  test answer's `pid` is -1.
+- A flush with the append anchor gone drops the file's pages rather than installing
+  them, and the job of a last close that left a run or a flush standing drops what that
+  flush installed: that write is unordered with the file's later writers. The job goes by
+  what stood at the close (`j->staged`), since a flush can retire before the closer looks,
+  as the first of a lock's two jobs always does. It also gives back the buffer, and
+  reports a failure itself, its own or the latch that flush left, since nobody reads the
+  latch from there. A thread no death
+  reaches sleeps out a peer's flush (`wb_flush_wait`, doubling to 64 ms) rather than
+  yield for as long as a server hangs. A dying last close of an attach root queues the
+  job with no holder, since no clunk follows it. Legs:
+  `p9_closer.dying_last_close_with_holder`, `.job_loses_a_run_loudly`,
+  `.job_waits_out_a_peer_flush`, `.job_drops_a_flush_that_retired_first`,
+  `.job_reports_a_first_jobs_loss`, `.dying_last_close_of_a_root`.
+- A parked directory fid carries the Larder's epoch: a forget says an op with no owner
+  may have removed any directory, so `dirfid_take` clunks one from before it, and
+  `dirfid_put` lets a fresh fid replace it. Leg: `dev9p.dirfid_forget_outdates_parked`.
+- A take names the taking Proc's principal, in decimal, in Tlock's `client_id`
+  (`lock_client_id`; operator vote 38), so a limit on the server can count what one
+  identity holds. The kernel composes it, so a Proc cannot spend another identity's
+  share. Every other request on the fid, a Tgetlock and an unlock on any thread, names
+  what the latest take named (`lock_principal`), so a server keying owners by `proc_id`
+  and `client_id` sees one owner. A caped session names nobody (IDENTITY-DESIGN 3.2).
+  Legs: `dev9p.lock_one_name_on_a_fid`, `dev9p.lock_caped_names_nothing`.
+- A grant drops the qid's Larder attributes and pages. The invalidates log
+  the qid, so a fill in flight from before the grant is dropped rather than
+  installed after it.
+- `dev9p_fd_close`, the last descriptor's close (`Dev.fd_close`), flushes the
+  open's run, then exchanges `lock_granted` (sticky until then) and, if it was set,
+  sends a whole-file unlock and waits for it. `dev9p_close`, the last reference,
+  clunks. The clunk would release the locks too, but it never waits (ARCH 7.9.1
+  part A) and Stratum's pool may serve the next request first. A close that may not
+  wait (`close_may_wait`) queues the flush and the unlock to a closer when another
+  reference holds the Spoor (`dev9p_lock_flush_queue` with `release_locks`), and
+  otherwise leaves them to the last reference, which follows at once and hands the
+  run to a closer with its clunk. `dev9p_lock_held` tells the handle layer to land
+  every open's run first (ARCH 9.6.11).
+- Every set-lock first lands `c`'s write-behind run (`dev9p_lock_sync`): an
+  unlock gives its range up, and a conversion to a read lock admits readers. A
+  test lands nothing. A flush that fails still sends the request, and the error
+  latches for the next write or fsync.
+- `dev9p_lock_owner(c)` mints a second owner on `c`'s file: a zero-name
+  Twalk clone of `c`'s fid into a fresh fid (Stratum admits the clone of an
+  open fid). A clone that fails answers ESTALE or EINTR as they are and otherwise
+  ENOLCK. The clone is unopened, never published, and flagged
+  `fid_locks`, so `dev9p_close` never parks it in the directory-fid cache.
+  It inherits `c`'s learned generation.
+- `dev9p_lock_ident(c)` learns once, with one Tgetattr for
+  `P9_GETATTR_GEN`, the inode generation of the file `c`'s fid names. It
+  stores `lock_gen` and `lock_ident` (GEN, or NONE when the server reports
+  no generation). A dead file's fid answers ESTALE and learns nothing.
+  `dev9p_lock_same_file(a, b)` requires the same client and qid.path, and
+  the same generation when both have learned one. Stratum does not keep a
+  file a fid names, and reuses inode numbers.
+- `dev9p_lock_sync(c, RELEASE)` flushes `c`'s run when the thread may wait.
+  A thread that may not (a death is pending) queues `dev9p_lock_flush_job`,
+  which holds `c`, on the session closer as a job alone (`P9_NOFID`, see
+  [[sub-kernel-ninep-attach]]). It is queued ahead of the owner's deferred
+  Tclunk, and the closer serves a session's entries in order. Without it, a
+  killed holder whose open file another Proc shares would release its lock
+  before its staged bytes landed.
+
+## Create admission by session end (2026-10-19, B-3e M7)
+
+`dev9p_create_admits(c, principal)` answers whether `principal` may create
+through the 9P session `c` belongs to
+([[dec-2026-10-18-create-speaks-for-a-session-end]], IDENTITY-DESIGN 9.7 M7):
+true only for one of the session's two recorded ends (`client->client_end`,
+`client->server_end`, [[sub-kernel-ninep-client]]) and never for
+PRINCIPAL_INVALID, so a session whose ends were never stamped admits no create.
+A Spoor of any other Dev is not a 9P session and answers true; a dev9p Spoor
+without a priv or a client answers false, and the dc test comes first so that
+one whose priv fails the magic check refuses rather than passing as not-9P. The
+reason is the server's: it stamps a create with its session's credential (the
+conn opener's SO_PEERCRED, or the attacher's), never the caller's, so a third
+principal sharing the mount would create entries recorded as an end's. Two
+callers ask it, `spoor_create_install` ([[sub-kernel-syscall-dispatch]]) and
+Loom's directory-mutation gate for `MKDIR`, `MKNOD` and `SYMLINK`
+([[sub-kernel-loom]]), and each refuses before the wire: a refused create sends
+no Tlcreate, Tmkdir, Tmknod or Tsymlink.
+
+The mode a create carries is taken as before, `perm & 0777` into Tlcreate or
+Tmkdir, but since M8 ([[dec-2026-10-19-create-mode-bound-and-umask]]) those
+nine bits arrive already reduced by the creator's umask and bounded by the
+parent's mode.
+
+The test fake gained three knobs: `g_twalk_enoent_n` answers the next N named
+Twalks Rlerror(ENOENT), so a create's existence probe can find a name absent;
+`g_ga_mode` sets the mode both Rgetattr and Rwalkgetattr report;
+`g_create_mode` captures the mode the last Tlcreate or Tmkdir carried.
+Witnesses: `dev9p.create_admits_session_ends`,
+`dev9p.create_refuses_invalid_principal`, `dev9p.create_refusal_keeps_eexist`,
+`dev9p.create_refusal_without_rwx` (a copy of the Dev with `perm_enforced`
+false still refuses), `dev9p.open_create_refuses_non_end`,
+`dev9p.client_init_clears_ends` and `dev9p.create_mode_on_the_wire`. Every M7
+creator holds CAP_DAC_OVERRIDE, so only M7 can refuse, and each refusal sits
+beside an admitted control one variable away.
+
+F-5 ([[dec-2026-10-19-create-group-from-parent]]): the gid a create carries is
+the parent directory's, which `spoor_create_install` reads from the parent's
+stat ([[sub-kernel-syscall-dispatch]]); `dev9p_create` still replaces it with
+`P9_NOGID` on a caped session. The fake's Rgetattr reports `g_ga_gid` (0x5678
+by default, the primary group of the identity under test, so the witness moves
+it), and `g_ga_fail_ecode` answers every Tgetattr Rlerror; `m8_wire_mode` arms
+it from `g_create_ga_fail` around its create alone. Witness:
+`dev9p.create_group_from_parent`: both create doors, a file and a directory, a
+copy of the Dev with `perm_enforced` false (the stat taken for the group
+alone), a parent whose stat leaves the gid out (GID_INVALID on the wire), and a
+parent that cannot be stat'd (-EIO, and no Tlcreate reaches the server).
+
 ## Purpose
 
 The Dev (`dc='9'`, `.name "9p"`) that makes a remote 9P server
@@ -69,7 +248,8 @@ priv — the F236 discipline; walks inherit the parent's), `create_errno`
 (#99 transient), `fid_gen`/`fid_suspect` (G2), `poll` (the lazily-allocated
 arm state: the hook list an arm's answer walks, refcounted independently — #294), `weft` (the lazily-bound
 flow ring; CAS-installed, ACQUIRE-read), the cached-open triple
-(`cached_open`/`co_buf`/`co_size`/`co_stat`), and the write-behind block
+(`cached_open`/`co_buf`/`co_size`/`co_stat`) with what it reaches the server by
+(`co_rfid`, `co_kfid`, `co_start`, `co_names`, section above), and the write-behind block
 under `wb_lock` ([[lock-dev9p-wb-priv]]).
 
 **`dev9p_close` teardown order** (each step's position is load-bearing):
@@ -104,12 +284,13 @@ under `wb_lock` ([[lock-dev9p-wb-priv]]).
    like any failure and the last close reports it (B-2b audit F1). Witnesses
    `dev9p.wb_interrupted_flush_keeps_run` (the claim held) and its control
    `dev9p.wb_server_eintr_latches` (none).
-   **A close that may not wait never flushes here** (2026-10-07, ARCH 7.9.1
-   part C): `close_may_wait()` is false on a die-pending thread (a killed
-   thread's own last close, or a final close a second kill forced) and on a
-   kernel thread marked `closes_never_wait` (the Loom SQPOLL kthread, which
-   `loom_free` joins). A run still staged after this step -- never tried, or
-   kept by a death that ended the flush -- goes to a closer with the fid's
+   **`dev9p_close` never flushes** (B-3h audit round 3, 2026-11-02): the last
+   reference can fall on any thread, an image-cache eviction or a Loom reap, so
+   the flush lives in `dev9p_fd_close` on the closing thread. That one flushes
+   only when `close_may_wait()` holds, which is false on a die-pending thread (a
+   killed thread's own last close, or a final close a second kill forced;
+   2026-10-07, ARCH 7.9.1 part C). A run still staged at the last reference --
+   never tried, or kept by a death that ended the flush -- goes to a closer with the fid's
    clunk (`wb_close_hand_off` -> `p9_attached_defer_close`, a
    `dev9p_close_job` owning the buffer and its budget charge), and the close
    returns 0: nothing is lost yet. The closer writes the run
@@ -282,11 +463,25 @@ drop), then `wb_note_through` advances the append anchor.
 channel** (the voted NFS model: a latched flush error surfaces here even
 after the run is gone) — then Tfsync with real-errno propagation.
 
-`dev9p_wstat_native` (Tsetattr; `T_WSTAT_* == P9_SETATTR_*` pinned by four
-`_Static_assert`s): a caped session refuses UID/GID before anything else
-(the cape, below); cached-open fails LOUD ([[seam-co-fidless-wstat]]);
-write-behind: flush first (a truncate must land after the staged bytes)
-then stop staging by clearing the append anchor (`wb_known`; a size change
+`dev9p_wstat_native` (Tsetattr; `T_WSTAT_* == P9_SETATTR_*` pinned by eight
+`_Static_assert`s, and a ninth keeps the wire's CTIME bit out of
+`T_WSTAT_VALID`): every refusal is a `-errno`, the slot's contract. The
+times (G12) go out as the 9P bits they equal: an explicit time carries the
+caller's `t_timespec` in the atime/mtime fields, and "now" carries its bit
+with zeroed fields, which the server answers with its own clock (Stratum
+honours that since its 2026-10-22 Tsetattr fix; before it stored the
+fields, the epoch). A caped session refuses UID/GID before anything else
+with EACCES (the cape, below); a cached open sends it on its kept fid, and a
+loose one binds first and answers ESTALE if the file moved since its open; a
+failed flush or Tsetattr answers the wire's
+errno through `dev9p_wire_errno` (its EPERM folded to EACCES);
+write-behind: flush first (a truncate must land after the staged bytes;
+a time must land after the write that would stamp it). The flush is the
+NAMED Spoor's run only: a time set by path, through a fresh O_PATH Spoor,
+while another open of the same file still stages bytes is overwritten when
+that open flushes, so `write; utimensat(path); close` ends at the flush's
+clock where Linux keeps the time set (OPEN-BUGS 2026-10-22, the G12 round's
+F3; `cp -p` sets times on the handle that wrote). It then stops staging by clearing the append anchor (`wb_known`; a size change
 destroys it) -- never the eligibility flag, which gates the read overlay,
 fsync's flush and the write ordering of a run a death kept, and the latch's
 report on every write and fsync, for another Proc sharing the fd too
@@ -364,8 +559,8 @@ the fields). dev9p consults it at exactly three points:
   `fchownat` as the group; `haul-cape.exp`'s create and mkdir land on the
   host through it). The creator's group never crosses.
 - **wstat_native.** UID or GID in `valid` is refused FIRST -- ahead of the
-  cached-open seam and any write-behind flush -- with the path's generic
-  -1. chmod and truncate pass: the mode is the server's own.
+  cached-open seam and any write-behind flush -- with EACCES. chmod,
+  truncate and the times pass: they are the server's own.
 
 Kernel DAC stays on. The owner bits of the server's mode now apply to the
 mounter, so a 0600 host file is readable by the principal that mounted it,
@@ -457,7 +652,7 @@ when the transport has no name, `origin_dc`, its device character -- and
 the root and `handle_alloc` ([[sub-kernel-syscall-dispatch]]), so the plain
 fields are set before publication and never change; `dev9p_close` drops the
 reference. Only an unstamped root takes the stamp: a walked priv (`fid_owned`)
-and a cached-open priv (fidless like the root, but not one) refuse it, and a
+and a cached-open priv (not a root, and with no fid on a loose client) refuse it, and a
 walk -- the zero-name clone every mount crossing makes included -- always
 builds a fresh priv, so no copy of the root carries the name. A root reached
 by opening a 9P-mode /srv service is named through its `->path` instead
@@ -478,8 +673,9 @@ the vtable, its first leg read the guest's own decoy (2026-10-06).
 `dev9p.origin_format_ns` pins the origin: the accessor's negatives (NULL,
 another Dev, a bare dev9p Spoor), an unstamped root's `/`, the stamp sharing
 the name (its count rises by one) and refusing a second stamp, the rendered
-name with and without ` remote`, caps inside the name and before the newline,
-a clone walk carrying no origin and refusing the stamp, a covered entry on a
+name with and without ` remote`, windows inside the name, short of the
+newline and inside the binds line (the listing is read in windows since the
+dynamic mount table, [[sub-kernel-territory]]), a clone walk carrying no origin and refusing the stamp, a covered entry on a
 stamped root keeping its own name, the root's close releasing the reference,
 a nameless transport's device spec, and a cached-open priv refusing what the
 same priv shaped as a root takes.
@@ -530,8 +726,10 @@ deliberately not owned here — the resolver post-scans.
 ## Error paths
 
 Real-errno propagation on read/write/fsync/getattr (#3/Area-F) and on
-rename/unlink (#80). A chown/chgrp on a caped session answers `-1` before
-the wire (sys_wstat's generic refusal, like its other refusals). `dev9p_create`'s errno record + accessor (#99).
+rename/unlink (#80), and on wstat (G12): a chown/chgrp on a caped session
+answers EACCES before the wire, a loose cached open that cannot reach its file
+ESTALE, and a flush or
+Tsetattr failure the wire's errno. `dev9p_create`'s errno record + accessor (#99).
 NULL/`-1` per the Dev convention elsewhere. `walk_attrs` returns the
 distinct `DEV_WALK_ATTRS_UNSUPPORTED` sentinel for the capability miss (NOT
 a walk failure — nothing about the path was learned).
@@ -546,6 +744,7 @@ mapper rejects only ecode 0 and anything above 4095 — so it arrives as
 | rename / unlink (#80) | folded to `-T_E_ACCES` | EACCES |
 | write (#3) | returned raw | the flat sentinel → EIO |
 | create (#99) | falls outside the `[-4095,-2]` accessor window → `-1` | EIO under pouch; a blanket EPERM on go's native seam |
+| stat_native (ER-1, ER-2) | returned raw as `-1`; stat and fstat read it as `-T_E_IO` | EIO |
 
 The write path documents its collision as a known residual owed to the
 rollout. The create accessor's window silently excludes it, so a
@@ -553,14 +752,22 @@ permission-denied create and a permission-denied unlink give the same
 caller different answers to the same class of denial. Neither is a bug
 today; both are the shape the remaining ER stages exist to converge.
 
-**One comment on this surface asserts immunity it does not have.** The
-native-stat arm claims the integrity invariant bounds the code into
-`[-4095,-2]` so `-1` can never arrive, and claims both its named callers
-propagate. The mapper's clamp refutes the first; the resolver propagates
-but the stat syscall flattens to `-1`, refuting the second — and the
-resolver's own converter **guards explicitly against the value the leaf says
-cannot occur**, which is the strongest available evidence that it can.
-[[seam-fstat-errno-flattened-above-the-leaf]].
+**The native-stat arm's comment states the one mapping both its callers
+apply.** A server EPERM reaches `dev9p_stat_native` as `-1`, because the
+mapper's clamp passes ecode 1 through by value, and the comment says so: the
+resolver's `err_code` names that value, so the frame below knew it before the
+frame above. stalk's `err_code` for `*errp` (ER-1) and `sys_fstat_for_proc`'s
+return (ER-2, 2026-10-20) map the arm's answer alike: a -errno in `[-4095,-2]`
+crosses as itself, and the `-1`, a server EPERM included, reads `-T_E_IO`.
+A server's EBADF never reaches the arm: the client reads it as `-EIO` at
+`map_error` (vote 2026-10-21 #16), so stalk and fstat both see `-T_E_IO`.
+`dev9p.wb_server_ebadf_reads_eio` drives it through an open file: a flush
+Twrite the server answers EBADF makes the fsync and the close read EIO, and
+`wb_fsync_flush_and_error`, whose ENOSPC crosses as itself, is the control.
+On a close the closer finishes (an exit close), that EIO takes the closer's
+bounded retry, as a server's EIO always did ([[sub-kernel-ninep-attach]]).
+[[seam-fstat-errno-flattened-above-the-leaf]] records the comment's earlier
+claim that both callers propagated, when the fstat half flattened to `-1`.
 
 ## Performance
 
@@ -570,6 +777,44 @@ gofmt 1352→1147 ms at L1f; S3 wire reads 6.7k→3.5k at G1; the arc ledgers
 live in the go-build measurement series. Hot-path allocations: one priv
 kmalloc per walk; the attrs scratch on the walk_attrs RPC path (heap — 16
 × ~152 B is too big for the 16 KiB kstack above stalk's own arrays).
+
+## Last close and last reference (B-3h audit round 3, 2026-11-02)
+
+The image cache keeps a file's first map's own Spoor until 128 other images
+churn, so a lock or a staged run tied to the last reference outlived the Proc,
+and a flush at the last reference waited on a stranger's thread. `dev9p_fd_close`
+now does what the closing thread owes, and `dev9p_close` does what any thread may.
+
+- `dev9p_close`'s clunks go through `dev9p_close_clunk`, always
+  `p9_client_clunk_nowait`. A live thread's clunk used to wait out a full tag
+  pool; it now spills to a closer, which waits instead.
+- A last close's failure with no run left goes to its caller. When no program will hear it,
+  on a dying thread or because the caller says so (`heard` false: an exit, a replace, an
+  endowment no table took), the close reports it with `p9_close_job_lost`. A latch a write or
+  an fsync already returned prints again. Legs: `p9_closer.dying_close_reports_a_retired_flush`,
+  `.unheard_close_reports_its_loss`.
+- A job with no run behind it only unlocks: what landed inside the open keeps its pages. Leg:
+  `p9_closer.job_keeps_what_landed_inside_the_open`.
+- `dev9p_fd_close` is idempotent: `sys_file_lock_handler` runs it again for a take
+  that lost the race with the close (`spoor_fd_open`; [[sub-kernel-filelock]]). The
+  grant store and the close's exchange are sequentially consistent for that.
+- `dev9p_lock_flush_job` gains `release_locks`.
+- `wb_flush_locked`'s wait for another flusher leaves on `thread_die_pending` with
+  `-P9_E_IO`; a killed thread used to burn a CPU there.
+- `dev9p_lock` records `lock_granted` on a take's `-P9_E_IO`: a death may have
+  abandoned a reply that granted it.
+- `dev9p_write`'s failure arm drops the file's attr and pages: a server can fail a
+  write it applied in part. `larder_forget_all` covers the write nobody answered
+  ([[sub-kernel-larder]]).
+- `dev9p_walk_attrs` answers `DEV_WALK_ATTRS_UNSUPPORTED`, unlatched, for a walk of
+  several names that fails with anything but ENOENT: the reply cannot say at which
+  name, and [[sub-kernel-stalk]] runs its X gates and mount split in order by walking
+  name by name.
+
+Legs: `dev9p.lock_close_order`, `dev9p.wb_last_close_with_holder`,
+`dev9p.wb_dying_waiter_leaves_flush_wait`, `dev9p.wga_failure_at_an_unknown_name`,
+`p9_closer.dying_last_close_with_holder`, and the added arms of
+`dev9p.lock_close_releases`.
 
 ## Prosecution
 
@@ -617,18 +862,12 @@ kmalloc per walk; the attrs scratch on the walk_attrs RPC path (heap — 16
 - [[seam-wb-close-flush-slot]] — the close-flush is best-effort (void
   `Dev.close`); fsync is the reliable channel; the bounded/abortable
   close-flush error slot is the v1.x lift.
-- [[seam-co-fidless-wstat]] — fchmod/fchown on a cached-open fd fails
-  loud (no fid to Tsetattr; no v1.0 consumer does this).
 - [[seam-larder-loom-bypass]] — the Loom-async-mutation bypass of the
   wb/Larder invalidates (self-inflicted-reachable only, L1f-F2 wording);
   [[seam-larder-stale-child-attr]] — rename/unlink leave the moved
   file's OWN attr stale in metadata-only fields (L1f-F3);
   [[seam-larder-cacheable-proxy]] — the Twalkgetattr-success latch as
   the cacheability proxy. All three live on [[sub-kernel-larder]].
-- [[seam-fstat-errno-flattened-above-the-leaf]] — the native-stat arm's
-  comment asserts an immunity the mapper does not grant and a propagation
-  the stat syscall does not perform. Comment-only; the behaviour matches
-  the rollout's own staging.
 
 ## Caveats
 

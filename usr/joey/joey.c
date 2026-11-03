@@ -579,6 +579,19 @@ static long reap_bounded(long pid, int *status, unsigned long max_sec) {
     }
 }
 
+// A program the build may leave out (the Go probes without the Go fork, the
+// C++ prover without the LLVM fork, an unbaked fixture) is absent only when a
+// walk to it answers ENOENT. Any other refusal, or a present program whose
+// spawn fails, is a broken image and must fail the boot rather than skip.
+static int optional_absent(const char *path, size_t path_len) {
+    long fd = t_open(T_WALK_OPEN_FROM_ROOT, path, path_len, T_OPATH);
+    if (fd >= 0) {
+        (void)t_close(fd);
+        return 0;
+    }
+    return fd == -2;   // -T_E_NOENT
+}
+
 // pouch_smoke_core — pouch_smoke_one's body, parameterized by optional
 // cap_mask and optional perm_flags. If both are 0, uses t_spawn_with_fds
 // (no extra caps, no perm stamps). If cap_mask != 0 and perm_flags == 0,
@@ -4100,20 +4113,35 @@ static long go4c_spawn_wait_hb(const char *name, unsigned int name_len,
                                    max_sec, hb_sec, cap_mask, (unsigned int *)0);
 }
 
-// #231/#232: the three clade gates' dispositions, for the one structured
-// CLADE-GATES line below. Same contract as g_arc_* above, for the same reason:
+// #231/#232: the clade gates' dispositions (the three gates and the C++
+// runtime prover), for the one structured CLADE-GATES line below. Same contract as g_arc_* above, for the same reason:
 // these gates SOFT-SKIP on an unbaked pool, and a skip that reaches no exit
 // status is a silent UNKNOWN reported as a pass (#212).
 //
 // MISSING is the load-bearing default -- a gate call dropped by a later edit
 // prints MISSING and reddens the boot rather than printing nothing.
 //
-// FAILED is deliberately absent: all three gates are BOOT-FATAL, so a failure
+// FAILED is deliberately absent: all four are BOOT-FATAL, so a failure
 // returns from main() before the report line and can never be observed there.
 // The failure is already carried by the missing boot banner.
 static const char *g_clade_cl4   = "MISSING";
 static const char *g_clade_gl    = "MISSING";
 static const char *g_clade_storm = "MISSING";
+static const char *g_clade_cxx   = "MISSING";
+
+// The Go boot probes' dispositions (the six probes, the on-device `go build`
+// and gopls), for the GO-GATES line below. Same contract as g_clade_*: a probe
+// skips when its binary is absent (no Go fork, GOROOT or gopls fork at build),
+// and the boot passes, so only this line lets the harness see it. A failure
+// returns from main() before the line, so FAILED never appears.
+static const char *g_go_hello      = "MISSING";
+static const char *g_go_env        = "MISSING";
+static const char *g_go_goroutines = "MISSING";
+static const char *g_go_fs         = "MISSING";
+static const char *g_go_exec       = "MISSING";
+static const char *g_go_net        = "MISSING";
+static const char *g_go_go4c       = "MISSING";
+static const char *g_go_gopls      = "MISSING";
 
 // Clade CL-4c: the device-toolchain gate. When /clade is baked
 // (THYLACINE_BAKE_CLADE=1), the cross-built clang++ compiles + links (via
@@ -4135,9 +4163,11 @@ static int clade_gate(void) {
     (void)t_close(probe);
 
     // Writable scratch on the pool root for the source + build outputs.
+    // 0755, as the bake makes it: system's own scratch, which no other
+    // principal writes (IDENTITY-DESIGN 9.7 M7).
     {
         long m = t_walk_create(T_WALK_OPEN_FROM_ROOT, "tmp", 3, T_OREAD,
-                               T_WALK_CREATE_DMDIR | 0777u);
+                               T_WALK_CREATE_DMDIR | 0755u);
         if (m >= 0) (void)t_close(m);
     }
 
@@ -4526,16 +4556,14 @@ static int clade_storm_gate(void) {
         g_clade_storm = "DECLINED";
         return 0;
     }
-    long probe = t_open(T_WALK_OPEN_FROM_ROOT, "/storm/Makefile", 15, T_OPATH);
-    if (probe < 0) {
+    if (optional_absent("/storm/Makefile", 15)) {
         t_putstr("joey: clade CL-5 storm: /storm absent -- skipping\n");
         g_clade_storm = "SKIPPED";
         return 0;  // not baked -> not a failure
     }
-    (void)t_close(probe);
     // The C-mode driver copy (stage_clade adds it for CL-5). Without it the
     // storm's .c sources would be compiled as C++ by a clang++ copy.
-    probe = t_open(T_WALK_OPEN_FROM_ROOT, "/clade/bin/clang", 16, T_OPATH);
+    long probe = t_open(T_WALK_OPEN_FROM_ROOT, "/clade/bin/clang", 16, T_OPATH);
     if (probe < 0) {
         t_putstr("joey: clade CL-5 storm FAILED: /clade/bin/clang missing "
                  "(stale /clade bake -- re-run stage_clade)\n");
@@ -6913,7 +6941,12 @@ int main(void) {
             gh_pid = t_spawn(go_hello_name, sizeof(go_hello_name) - 1);
         }
         if (gh_pid <= 0) {
+            if (!optional_absent(go_hello_name, sizeof(go_hello_name) - 1)) {
+                t_putstr("joey: go-hello FAILED -- in the image but not spawned\n");
+                return 1;
+            }
             t_putstr("joey: go-hello NOT spawned (Go fork absent at build) -- skipping\n");
+            g_go_hello = "SKIPPED";
         } else {
             int gh_status = -1;
             long gh_reaped = t_wait_pid_for((int)gh_pid, 0, &gh_status);
@@ -6922,6 +6955,7 @@ int main(void) {
                 return 1;
             }
             t_putstr("joey: go-hello reaped status=0 -- GOOS=thylacine Stage 1 RUNS in-VM\n");
+            g_go_hello = "PASS";
         }
     }
 
@@ -6970,7 +7004,12 @@ int main(void) {
             (void)t_close(edir);
         }
         if (ge_pid <= 0) {
+            if (!optional_absent(go_env_name, sizeof(go_env_name) - 1)) {
+                t_putstr("joey: go-env FAILED -- in the image but not spawned\n");
+                return 1;
+            }
             t_putstr("joey: go-env NOT spawned (Go fork absent at build) -- skipping\n");
+            g_go_env = "SKIPPED";
         } else {
             int ge_status = -1;
             long ge_reaped = t_wait_pid_for((int)ge_pid, 0, &ge_status);
@@ -6979,6 +7018,7 @@ int main(void) {
                 return 1;
             }
             t_putstr("joey: go-env reaped status=0 -- GOOS=thylacine Stage 4a /env RUNS in-VM\n");
+            g_go_env = "PASS";
         }
     }
 
@@ -7100,7 +7140,12 @@ int main(void) {
             gg_pid = t_spawn(go_gor_name, sizeof(go_gor_name) - 1);
         }
         if (gg_pid <= 0) {
+            if (!optional_absent(go_gor_name, sizeof(go_gor_name) - 1)) {
+                t_putstr("joey: go-goroutines FAILED -- in the image but not spawned\n");
+                return 1;
+            }
             t_putstr("joey: go-goroutines NOT spawned (Go fork absent at build) -- skipping\n");
+            g_go_goroutines = "SKIPPED";
         } else {
             int gg_status = -1;
             long gg_reaped = t_wait_pid_for((int)gg_pid, 0, &gg_status);
@@ -7109,6 +7154,7 @@ int main(void) {
                 return 1;
             }
             t_putstr("joey: go-goroutines reaped status=0 -- GOOS=thylacine Stage 2 RUNS in-VM\n");
+            g_go_goroutines = "PASS";
 
             // The thread budget against Go's M model (ARCH 7.3.5; review F-5):
             // built beside go-goroutines, so absent only if this one failed to
@@ -7732,25 +7778,37 @@ int main(void) {
         // the real SYS_FSTAT + SYS_WSTAT handlers. /bin/system.key is on the
         // read-only system boot FS (devramfs): fstat now reports owner/group
         // (system-owned), and wstat must reject structurally-invalid requests
-        // AND a chmod on a Dev with no wstat_native. The handle carries
-        // RIGHT_WRITE (walk_open grants R|W|T), so the RIGHT_WRITE gate passes
-        // and the handler validation + dispatch is what's under test.
+        // with EINVAL, ahead of the Dev, AND a chmod or a time on a Dev with no
+        // wstat_native with EOPNOTSUPP (G12: an errno per refusal). Each leg
+        // asserts its own errno, so a leg refused at the wrong gate fails.
         if (sk_st.uid != T_PRINCIPAL_SYSTEM || sk_st.gid != T_GID_SYSTEM) {
             t_putstr("joey: probe /bin/system.key not system-owned (A-2a)\n");
             (void)t_close(sk_fd);
             return 1;
         }
-        if (t_wstat(sk_fd, 0, 0, 0, 0) != -1 ||              // empty mask
-            t_wstat(sk_fd, 0x8u, 0, 0, 0) != -1 ||           // reserved valid bit
-            t_wstat(sk_fd, T_WSTAT_MODE, 04000u, 0, 0) != -1) {  // setuid in mode
-            t_putstr("joey: probe SYS_WSTAT bad-arg not rejected (A-2a)\n");
-            (void)t_close(sk_fd);
-            return 1;
-        }
-        if (t_chmod(sk_fd, 0600u) != -1) {   // read-only Dev: no wstat_native slot
-            t_putstr("joey: probe chmod on read-only FS not rejected (A-2a)\n");
-            (void)t_close(sk_fd);
-            return 1;
+        {
+            // -22 = -T_E_INVAL, -95 = -T_E_OPNOTSUPP.
+            static const struct { unsigned long valid, mode; long want; } wl[] = {
+                { 0,                 0,      -22 },   // empty mask
+                { 0x40u,             0,      -22 },   // reserved bit 6 (9P CTIME)
+                { 0x200u,            0,      -22 },   // past T_WSTAT_VALID
+                { T_WSTAT_MTIME_SET, 0,      -22 },   // _SET without its time
+                { T_WSTAT_MODE,      04000u, -22 },   // setuid in mode
+                { T_WSTAT_MODE,      0600u,  -95 },   // no wstat_native slot
+                { T_WSTAT_MTIME,     0,      -95 },   // a time ("now") likewise
+            };
+            for (unsigned i = 0; i < sizeof(wl) / sizeof(wl[0]); i++) {
+                long wrc = t_wstat(sk_fd, wl[i].valid, wl[i].mode, 0, 0);
+                if (wrc != wl[i].want) {
+                    t_putstr("joey: probe SYS_WSTAT leg ");
+                    t_putstr(itoa_dec((long)i, buf, sizeof(buf)));
+                    t_putstr(" wrong rc=");
+                    t_putstr(itoa_dec(wrc, buf, sizeof(buf)));
+                    t_putstr(" (A-2a/G12)\n");
+                    (void)t_close(sk_fd);
+                    return 1;
+                }
+            }
         }
         // POUNCE: SYS_STAT end-to-end through the real SVC dispatch + uaccess
         // path copy-in + the stalk walk-query (devramfs walk_attrs) + t_stat
@@ -7905,9 +7963,10 @@ int main(void) {
     // #66b: /proc/<pid>/ns -- the Plan 9 `ns` substrate (the territory mount
     // list). Read kproc's (/proc/0/ns): pid 0 ALWAYS exists + carries the boot
     // mounts (/srv, /proc, /ctl, /dev), so the rendered list is non-empty + has
-    // a "mount " line. Proves the devproc_read -> format_ns -> territory_format_ns
-    // path end-to-end through the REAL syscall (the g_proc_table_lock + ns_lock
-    // nesting), not just the unit test's direct territory_format_ns call. T_OREAD
+    // a "mount " line. Proves the devproc_read -> territory_format_ns path
+    // end-to-end through the REAL syscall (the walk, the render outside the table
+    // lock, the second walk), not just the unit test's direct territory_format_ns
+    // call. T_OREAD
     // (a real read, NOT T_OPATH -- #81 blocks byte I/O on O_PATH handles).
     {
         long nf = t_open(T_WALK_OPEN_FROM_ROOT, "/proc/0/ns", 10, T_OREAD);
@@ -8708,7 +8767,7 @@ int main(void) {
                 // persists across boots).
                 {
                     long m = t_walk_create(T_WALK_OPEN_FROM_ROOT, "tmp", 3,
-                                           T_OREAD, T_WALK_CREATE_DMDIR | 0777u);
+                                           T_OREAD, T_WALK_CREATE_DMDIR | 0755u);
                     if (m >= 0) (void)t_close(m);
                 }
                 long tmpd = t_open(T_WALK_OPEN_FROM_ROOT, "/tmp", 4, T_OPATH);
@@ -8804,19 +8863,19 @@ int main(void) {
             // goenvs -> os.Getenv), runs `go version` + `go build` + the built
             // binary, then UNSETs the vars so they do not leak into the session.
             {
-                long goprobe = t_open(T_WALK_OPEN_FROM_ROOT, "/goroot/bin/go",
-                                      14, T_OPATH);
-                if (goprobe < 0) {
+                if (optional_absent("/goroot/bin/go", 14)) {
                     t_putstr("joey: Go-4c /goroot absent (THYLACINE_BAKE_GOROOT "
                              "not set) -- skipping\n");
+                    t_putstr("joey: go8d gopls absent -- skipping\n");
+                    g_go_go4c  = "SKIPPED";
+                    g_go_gopls = "SKIPPED";
                 } else {
-                    (void)t_close(goprobe);
                     // Writable scratch on the pool root: /tmp ($WORK + the build
                     // output). mkdir idempotent (the pool persists across boots).
                     {
                         long m = t_walk_create(T_WALK_OPEN_FROM_ROOT, "tmp", 3,
                                                T_OREAD,
-                                               T_WALK_CREATE_DMDIR | 0777u);
+                                               T_WALK_CREATE_DMDIR | 0755u);
                         if (m >= 0) (void)t_close(m);
                     }
                     // The Go env -> joey's /env. GO111MODULE=off (GOPATH/script
@@ -9128,12 +9187,10 @@ int main(void) {
                     // interactive go8d.exp is transport-fragile under ut's redraw
                     // storm (the #66 class). Gated on the baked /goroot/bin/gopls.
                     {
-                        long gpb = t_open(T_WALK_OPEN_FROM_ROOT,
-                                          "/goroot/bin/gopls", 17, T_OREAD);
-                        if (gpb < 0) {
+                        if (optional_absent("/goroot/bin/gopls", 17)) {
                             t_putstr("joey: go8d gopls absent -- skipping\n");
+                            g_go_gopls = "SKIPPED";
                         } else {
-                            (void)t_close(gpb);
                             long tmpd = t_open(T_WALK_OPEN_FROM_ROOT, "/tmp", 4,
                                                T_OPATH);
                             long gpd = (tmpd >= 0)
@@ -9316,6 +9373,7 @@ int main(void) {
                                 t_putstr("joey: go8d OK -- gopls "
                                          "(GOOS=thylacine) type-checks + "
                                          "resolves a definition on-device\n");
+                                g_go_gopls = "PASS";
                                 // The 8e-2 gate. Separate from go8d's above so
                                 // the boot log names WHICH surface broke: the
                                 // engine (go8d) or the LSP client (8e-2). Placed
@@ -9366,6 +9424,7 @@ int main(void) {
                         t_putstr("joey: Go-4c reaped status=0 -- the "
                                  "GOOS=thylacine toolchain BUILT + RAN a "
                                  "program ON-DEVICE\n");
+                        g_go_go4c = "PASS";
                     }
                 }
 
@@ -11162,18 +11221,17 @@ int main(void) {
             // hard-failing ONLY when it is present but regresses.
             {
                 static const char phcxx_name[] = "/bin/pouch-hello-cxx";
-                long cxx_probe = t_open(T_WALK_OPEN_FROM_ROOT, phcxx_name,
-                                        sizeof(phcxx_name) - 1, T_OREAD);
-                if (cxx_probe < 0) {
+                if (optional_absent(phcxx_name, sizeof(phcxx_name) - 1)) {
                     t_putstr("joey: /pouch-hello-cxx NOT present (LLVM fork absent at build) -- skipping\n");
+                    g_clade_cxx = "SKIPPED";
                 } else {
-                    (void)t_close(cxx_probe);
                     if (pouch_smoke_one(phcxx_name, sizeof(phcxx_name) - 1,
                                         "ALL C++ WIRES PASS", 18) != 0) {
                         t_putstr("joey: /pouch-hello-cxx FAILED (CL-2 C++ runtime regression)\n");
                         return 1;
                     }
                     t_putstr("joey: /pouch-hello-cxx PASS; CL-2 C++ runtime (EH/RTTI/threads/TLS-dtors/filesystem) verified\n");
+                    g_clade_cxx = "PASS";
                 }
             }
 
@@ -11186,35 +11244,26 @@ int main(void) {
             // the pre-pivot go-hello/go-goroutines which do no file I/O). The
             // binary self-checks every step and panics (exit != 0) on mismatch.
             //
-            // Same /dev/cons stdio wiring as the other go probes (Go writes via
-            // SYS_WRITE on fd 1/2, so a real stdout/stderr is required; the
-            // spawner provides it). GATING: a non-zero exit or fault FAILS the
-            // boot -- the Stage-3a regression sentinel. Fork-absent (the Go fork
-            // was not present at build) -> graceful skip.
+            // Its fds 0-2 are a pipe joey drains to EOF before the reap (a Go
+            // panic's trace is unbounded) and echoes to the boot log. GATING: a
+            // non-zero exit, a fault, or a missing leg census (GO_CENSUS_FS: a
+            // stale binary that never ran a newer leg) FAILS the boot -- the
+            // Stage-3a regression sentinel. Fork-absent (the Go fork was not
+            // present at build, so no /bin/go-fs) -> graceful skip.
             {
                 const char go_fs_name[] = "/bin/go-fs";  // #58: post-pivot /bin bind
-                long gf_cfd = t_console_open();
-                long gf_pid;
-                if (gf_cfd >= 0) {
-                    unsigned int gf_fds[3] = { (unsigned int)gf_cfd,
-                                               (unsigned int)gf_cfd,
-                                               (unsigned int)gf_cfd };
-                    gf_pid = t_spawn_with_fds(go_fs_name, sizeof(go_fs_name) - 1,
-                                              gf_fds, 3);
-                    (void)t_close(gf_cfd);
-                } else {
-                    gf_pid = t_spawn(go_fs_name, sizeof(go_fs_name) - 1);
-                }
-                if (gf_pid <= 0) {
+                const char gf_expect[]  = GO_CENSUS_FS;
+                if (optional_absent(go_fs_name, sizeof(go_fs_name) - 1)) {
                     t_putstr("joey: go-fs NOT spawned (Go fork absent at build) -- skipping\n");
+                    g_go_fs = "SKIPPED";
+                } else if (pouch_smoke_core(go_fs_name, sizeof(go_fs_name) - 1,
+                                            gf_expect, sizeof(gf_expect) - 1,
+                                            0, 0, 0, 1, -1, 1) != 0) {
+                    t_putstr("joey: go-fs FAILED -- GOOS=thylacine Stage 3a regression (see fatal error / panic / snare:* above)\n");
+                    return 1;
                 } else {
-                    int gf_status = -1;
-                    long gf_reaped = t_wait_pid_for((int)gf_pid, 0, &gf_status);
-                    if (gf_reaped != gf_pid || gf_status != 0) {
-                        t_putstr("joey: go-fs FAILED -- GOOS=thylacine Stage 3a regression (see fatal error / panic / snare:* above)\n");
-                        return 1;
-                    }
                     t_putstr("joey: go-fs reaped status=0 -- GOOS=thylacine Stage 3a (fs file I/O) RUNS in-VM\n");
+                    g_go_fs = "PASS";
                 }
             }
 
@@ -11246,7 +11295,12 @@ int main(void) {
                     ge_pid = t_spawn(go_exec_name, sizeof(go_exec_name) - 1);
                 }
                 if (ge_pid <= 0) {
+                    if (!optional_absent(go_exec_name, sizeof(go_exec_name) - 1)) {
+                        t_putstr("joey: go-exec FAILED -- in the image but not spawned\n");
+                        return 1;
+                    }
                     t_putstr("joey: go-exec NOT spawned (Go fork absent at build) -- skipping\n");
+                    g_go_exec = "SKIPPED";
                 } else {
                     int ge_status = -1;
                     long ge_reaped = t_wait_pid_for((int)ge_pid, 0, &ge_status);
@@ -11255,6 +11309,7 @@ int main(void) {
                         return 1;
                     }
                     t_putstr("joey: go-exec reaped status=0 -- GOOS=thylacine Stage 3b (os/exec) RUNS in-VM\n");
+                    g_go_exec = "PASS";
                 }
             }
 
@@ -11288,7 +11343,12 @@ int main(void) {
                     gn_pid = t_spawn(go_net_name, sizeof(go_net_name) - 1);
                 }
                 if (gn_pid <= 0) {
+                    if (!optional_absent(go_net_name, sizeof(go_net_name) - 1)) {
+                        t_putstr("joey: go-net FAILED -- in the image but not spawned\n");
+                        return 1;
+                    }
                     t_putstr("joey: go-net NOT spawned (Go fork absent at build) -- skipping\n");
+                    g_go_net = "SKIPPED";
                 } else {
                     int gn_status = -1;
                     long gn_reaped = t_wait_pid_for((int)gn_pid, 0, &gn_status);
@@ -11297,6 +11357,7 @@ int main(void) {
                         return 1;
                     }
                     t_putstr("joey: go-net reaped status=0 -- GOOS=thylacine Stage 3c (net over /net) RUNS in-VM\n");
+                    g_go_net = "PASS";
                 }
             }
 #endif /* THYLA_BOOT_PROBES (post-pivot boot-test probe ladder) */
@@ -11854,8 +11915,8 @@ int main(void) {
             //
             // Leg A -- the DISCRIMINATOR. The same binary, spawned with NO
             // declaration, asserts that a Linux syscall number is NOT
-            // translated (brk 214 falls to the native dispatcher's default and
-            // answers -1, not -ENOSYS). Without this leg, leg B's success
+            // translated (getpid 172 falls to the native dispatcher's default
+            // and answers -ENOSYS, not a pid). Without this leg, leg B's success
             // would not prove the phenotype caused it.
             //
             // Leg B -- the CHAIN. A container whose manifest declares
@@ -12524,6 +12585,106 @@ int main(void) {
                      " + SYS_UNLINK)\n");
         }
 
+        // B-3a/B-3b: the fd-surface prover (0051, 0056). Spawn
+        // /bin/pouch-hello-fd -- it fsyncs a file on the Stratum FS (a real
+        // Tsync), refuses fsync on a socket, proves writev is ONE gathered
+        // write (EAGAIN with nothing written on a nonblocking pipe with two
+        // bytes free), scatters a readv, round-trips 3 MiB through
+        // pwritev/preadv, runs preadv2/pwritev2 without flags on them, reads
+        // ESPIPE / S_ISSOCK for a socket's seek, positional I/O and fstat, and
+        // drives dup, F_DUPFD, F_GETFL, F_SETFL, O_CLOEXEC on open and stdio,
+        // and fdopendir, and reads EBADF for a closed descriptor from fstat,
+        // isatty and tcgetattr. Boot-fatal.
+        {
+            const char fd_name[]   = "/bin/pouch-hello-fd";
+            const char fd_expect[] = POUCH_CENSUS_FD;
+            if (pouch_smoke_one(fd_name, sizeof(fd_name) - 1,
+                                fd_expect, sizeof(fd_expect) - 1) != 0) {
+                t_putstr("joey: B-3a/B-3b PROBE pouch-hello-fd FAILED\n");
+                return 1;
+            }
+            t_putstr("joey: B-3a/B-3b PROBE OK (fd surface: fsync, vectored I/O "
+                     "as one transfer, a socket's seek/pread/fstat, dup, fcntl, "
+                     "close-on-exec)\n");
+        }
+
+        // B-3f': the symlink prover (0059, operator vote 2026-10-20). Spawn
+        // /bin/pouch-hello-links -- it reads the real links the bake puts at
+        // /lib/pouch-links: lstat (native SYS_LSTAT) reports a link where
+        // stat follows it, readlink (native SYS_READLINK) answers its target,
+        // realpath expands it, open honours O_NOFOLLOW, O_PATH and
+        // O_DIRECTORY, and lchmod refuses a link; link answers EPERM (0062,
+        // operator vote 2026-10-21); readdir's d_type is the entry's type on
+        // Stratum and on /hw, a kernel Dev. Boot-fatal.
+        {
+            const char ln_name[]   = "/bin/pouch-hello-links";
+            const char ln_expect[] = POUCH_CENSUS_LINKS;
+            if (pouch_smoke_one(ln_name, sizeof(ln_name) - 1,
+                                ln_expect, sizeof(ln_expect) - 1) != 0) {
+                t_putstr("joey: B-3f' PROBE pouch-hello-links FAILED\n");
+                return 1;
+            }
+            t_putstr("joey: B-3f' PROBE OK (symlinks: lstat, readlink, "
+                     "realpath, O_NOFOLLOW/O_PATH/O_DIRECTORY, lchmod; "
+                     "link EPERM; readdir d_type)\n");
+        }
+
+        // G12: the file-times prover (0063, operator votes 2026-10-22). Spawn
+        // /bin/pouch-hello-times -- in its own directory at the pool root it
+        // sets times explicitly, leaves one with UTIME_OMIT, takes the
+        // server's clock with null times, and goes through futimens, utimes,
+        // futimes, utime, lutimes, AT_EMPTY_PATH and AT_SYMLINK_NOFOLLOW (the
+        // fixture's dangling link), then the refusals' errnos. Boot-fatal.
+        {
+            const char tm_name[]   = "/bin/pouch-hello-times";
+            const char tm_expect[] = POUCH_CENSUS_TIMES;
+            if (pouch_smoke_one(tm_name, sizeof(tm_name) - 1,
+                                tm_expect, sizeof(tm_expect) - 1) != 0) {
+                t_putstr("joey: G12 PROBE pouch-hello-times FAILED\n");
+                return 1;
+            }
+            t_putstr("joey: G12 PROBE OK (file times: explicit, OMIT, now, "
+                     "the descriptor and legacy forms, AT_EMPTY_PATH, a "
+                     "link's own times; the refusals' errnos)\n");
+        }
+
+        // The time zone prover (patch 0060). Spawn /bin/pouch-hello-tz -- it
+        // writes a TZif file and has musl read it: tzset opens it through
+        // openat's translation and maps it private and read-only (one row of
+        // /proc/<pid>/maps, gone after a switch to UTC), localtime follows the
+        // file's transition table, and a POSIX TZ string needs no file.
+        // Boot-fatal.
+        {
+            const char tz_name[]   = "/bin/pouch-hello-tz";
+            const char tz_expect[] = POUCH_CENSUS_TZ;
+            if (pouch_smoke_one(tz_name, sizeof(tz_name) - 1,
+                                tz_expect, sizeof(tz_expect) - 1) != 0) {
+                t_putstr("joey: raw-open PROBE pouch-hello-tz FAILED\n");
+                return 1;
+            }
+            t_putstr("joey: raw-open PROBE OK (time zone file: opened, mapped "
+                     "private, unmapped, its transition table read)\n");
+        }
+
+        // B-3h4: the file-lock prover (0065, operator votes 34 and 35). Spawn
+        // /bin/pouch-hello-locks -- it and the children it spawns contend for
+        // one file over Stratum's lock table: one Proc's locks against
+        // another's, a close of any descriptor dropping the Proc's F_SETLK
+        // locks, OFD locks per open file, flock against fcntl, an F_SETLKW
+        // that waits for a release, SQLite's lock sequence with its
+        // downgrade, and the refusals' errnos. Boot-fatal.
+        {
+            const char lk_name[]   = "/bin/pouch-hello-locks";
+            const char lk_expect[] = POUCH_CENSUS_LOCKS;
+            if (pouch_smoke_one(lk_name, sizeof(lk_name) - 1,
+                                lk_expect, sizeof(lk_expect) - 1) != 0) {
+                t_putstr("joey: B-3h4 PROBE pouch-hello-locks FAILED\n");
+                return 1;
+            }
+            t_putstr("joey: B-3h4 PROBE OK (file locks: the Proc and the open "
+                     "file as owners, flock, F_SETLKW, the SQLite sequence)\n");
+        }
+
         // PTY-4: the job-control E2E. The driver (/bin/jc-probe) hosts a
         // REAL /bin/ut on a freshly-minted pts (the ptyhost shape) and
         // scripts the ladder against the master: the session dance + prompt;
@@ -12972,7 +13133,7 @@ int main(void) {
     }
 
     // #231/#232: the line tools/check-arc-gates.sh keys on. All three gates
-    // have run and recorded a disposition; say which, in a form an exit status
+    // and CL-2's prover have run and recorded a disposition; say which, in a form an exit status
     // can carry -- otherwise a boot where all three silently skipped is
     // indistinguishable from one where the calls were deleted (#212).
     //
@@ -12983,8 +13144,27 @@ int main(void) {
     {
         const char *parts[] = { "joey: CLADE-GATES cl4=", g_clade_cl4,
                                 " gl=", g_clade_gl,
-                                " storm=", g_clade_storm, "\n" };
+                                " storm=", g_clade_storm,
+                                " cxx=", g_clade_cxx, "\n" };
         char   rb[128];
+        size_t rn = 0;
+        for (unsigned pi = 0; pi < sizeof(parts) / sizeof(parts[0]); pi++)
+            for (const char *p = parts[pi]; *p && rn < sizeof(rb) - 1; p++)
+                rb[rn++] = *p;
+        rb[rn] = '\0';
+        t_putstr(rb);
+    }
+    // The Go boot probes' line, built the same way (one write).
+    {
+        const char *parts[] = { "joey: GO-GATES hello=", g_go_hello,
+                                " env=", g_go_env,
+                                " goroutines=", g_go_goroutines,
+                                " fs=", g_go_fs,
+                                " exec=", g_go_exec,
+                                " net=", g_go_net,
+                                " go4c=", g_go_go4c,
+                                " gopls=", g_go_gopls, "\n" };
+        char   rb[160];
         size_t rn = 0;
         for (unsigned pi = 0; pi < sizeof(parts) / sizeof(parts[0]); pi++)
             for (const char *p = parts[pi]; *p && rn < sizeof(rb) - 1; p++)
@@ -12997,7 +13177,8 @@ int main(void) {
     // the harness infer a build shape from an absent line -- an absence it
     // cannot tell from a deleted gate.
     t_putstr("joey: CLADE-GATES not-built (THYLA_BOOT_PROBES=OFF)\n");
-#endif /* THYLA_BOOT_PROBES (the three clade gates) */
+    t_putstr("joey: GO-GATES not-built (THYLA_BOOT_PROBES=OFF)\n");
+#endif /* THYLA_BOOT_PROBES (the three clade gates, the Go probes) */
 
     // #80: dump the daemon registry before the banner. The reaper's ability to
     // say "DAEMON EXITED" instead of "adopted orphan" is only as complete as

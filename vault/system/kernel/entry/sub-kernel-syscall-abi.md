@@ -37,6 +37,167 @@ agree under tools/test-srv-registry-abi.py; the native ceiling advances to
 vivarium.c ([[sub-kernel-vivarium]]). No Linux-number translation row or
 Imperium capability is introduced. See [[sub-kernel-devsrv]].
 
+## SYS_FILE_LOCK 137 (B-3h2, 2026-10-29)
+
+A range reaching 2^64 answers `-T_E_INVAL`. `SYS_WSTAT` on dev9p's loose cached open of a
+file that moved since its open answers `-T_E_STALE`.
+
+`file_lock(fd, op, start, len, out)` = 137 (operator votes 34-35,
+`dec-2026-10-29-b3h-file-locks`, ARCH 9.6.11; the full contract is in
+[[sub-kernel-filelock]]).
+- `op` is a type (`SYS_FILE_LOCK_RD` 0, `_WR` 1, `_UN` 2) plus the flags
+  `_WAIT`, `_TEST` and `_PROC`. Any other bit, type 3, `_TEST|_UN`,
+  `_TEST|_WAIT`, or a range whose end would reach 2^64 is `-T_E_INVAL`.
+- `_TEST` writes a `struct t_file_lock` (32 bytes,
+  `_Static_assert`ed: type, start, len, pid = -1) to `out`. An `out` outside the
+  user half is `-T_E_FAULT` before the server is asked.
+- The errnos are EBADF, ENOLCK (`T_E_NOLCK` 37), ESTALE (`T_E_STALE` 116),
+  EAGAIN, EINTR and EFAULT.
+
+`tools/check-flag-words.py` holds the op flags (the type values excluded)
+under its no-collision rule. `tools/test-native-handle-query.py` pins
+`SYS_FILE_LOCK = 137`. Linux rt_sigtimedwait shares the number
+([[sub-kernel-vivarium]]). The libthyla-rs and libt mirrors landed with their
+wrappers in B-3h4: `T_SYS_FILE_LOCK`, `T_FILE_LOCK_*`, `struct t_file_lock` and
+`TFileLock` (32 bytes, asserted each side), and `t_file_lock`.
+`tools/check-prot-mirror.py` holds the op words across all three in a FILE_LOCK
+family, and `tools/test-native-handle-query.py` pins 137 in libt, libthyla-rs and
+Pouch's 0065. Pouch's host checker parses the same values from this header.
+
+## SYS_FSTAT answers an errno (2026-10-20, ERRORS.md ER-2)
+
+`SYS_FSTAT` (50; handle, stat_va) answers 0 or a -errno, where it answered a
+bare -1 for every refusal. A handle that names no Spoor (empty, closed, out of
+range, or another kind) is -EBADF, the answer `docs/ERRORS.md`'s table already
+gave it. A stat_va that is not user memory, or that faults during the copy-out,
+is -EFAULT, checked before the handle. Otherwise the Dev's refusal crosses: its
+-errno as itself, or -EIO from a Dev with no `stat_native` or a flat failure.
+A Dev's -EBADF reads -EIO too, since the handle is live, so -EBADF from
+SYS_FSTAT always means the handle names nothing. No number, record or layout
+changes.
+
+A 9P server's EBADF reads -EIO on every call that reaches a server (operator
+vote 2026-10-21 #16; `docs/ERRORS.md`: only the kernel's handle gate answers
+EBADF). The 9P client folds it where an Rlerror ecode becomes an errno, so
+every call a server's errno reaches answers -EIO where it answered -EBADF:
+among them read, write, fsync and close on an open file, the resolver's calls
+(SYS_OPEN, SYS_STAT, SYS_LSTAT, SYS_READLINK, the create arm), SYS_UNLINK and
+SYS_RENAME, a Loom 9P operation's CQE, and SYS_ATTACH_9P /
+SYS_ATTACH_9P_SRV. Every other
+server errno crosses as itself. No number, record or layout changes.
+
+Mirrors: the libt and Rust wrapper comments say 0 / -errno, and libthyla-rs's
+`Error::from_syscall_return` reads -9 as `BadHandle`. Pouch's `fstat` passes
+the errno through (0061, [[sub-pouch-fs]]), and the phenotype's fstat returns
+it to a Linux guest ([[sub-kernel-syscall-dispatch]]). The Go fork decodes it
+as `Errno(9)`, EBADF, unchanged; its assembly comment that the legacy file
+calls answer a generic -1 read as EPERM is stale for fstat until the fork next
+moves (corona's pin).
+
+## SYS_READLINK 135 and SYS_LSTAT 136 (B-3f', 2026-10-20)
+
+Two native symlink reads, by operator vote
+([[dec-2026-10-20-native-lstat-readlink]]). Each is a thin entry over a core
+the phenotype already calls.
+
+- `SYS_READLINK` (135; path_va, path_len, buf_va, bufsiz) copies
+  min(target length, bufsiz) bytes of the final link's target to buf_va, writes
+  no NUL and answers the count, as readlink(2) does. bufsiz 0 is -EINVAL, and
+  so is a final component that is not a link or is one on a Dev with no
+  `.readlink`. An unwritable buf_va is -EFAULT, and a failed read of the target
+  answers the Dev's own errno.
+- `SYS_LSTAT` (136; path_va, path_len, stat_va) is SYS_STAT's no-follow twin:
+  the same walk-query, one RPC and no handle on a walk_attrs Dev, filling the
+  88-byte struct t_stat ([[abi-t-stat]]) with the final component's own
+  record, so a link reports `T_S_IFLNK`. An unwritable stat_va is -EFAULT,
+  checked before the walk.
+
+Both resolve the path as SYS_STAT does: absolute from root_spoor, relative
+joined with the LS-4 cwd, contained at root_spoor (I-28). Neither follows the
+final component; a link earlier in the path is followed. Their path checks are
+SYS_OPEN_CREATE's: an empty or over-long path or an embedded NUL is -EINVAL and
+an unreadable one -EFAULT, where SYS_STAT answers a bare -1. A path that does
+not resolve answers the resolver's errno. A relative path whose cwd join
+outgrows SYS_OPEN_PATH_MAX answers a bare -1, which Pouch reads as EIO
+(OPEN-BUGS 2026-10-20). Neither takes a capability; the walk's per-component
+X-search gates both, as it gates SYS_STAT.
+
+Mirrors: libt and Rust carry no wrapper, since no native program calls either
+yet. Pouch reaches both through 0059 (`SYS_thyla_readlink`, `SYS_thyla_lstat`;
+[[sub-pouch-fs]]), and the phenotype's readlinkat and newfstatat call the same
+cores ([[sub-kernel-vivarium]]). Linux 134, 135 and 136 are rt_sigaction
+(VIV_TIER2), rt_sigprocmask (VIV_TIER2) and rt_sigpending (VIV_ENOSYS), each
+consumed before native dispatch; `VIV_NATIVE_CEILING` is 136 and each
+collision is pinned per number. 134 is a hole held for corona's
+SYS_SRV_REGISTRY_NEW (vote 2026-10-19), which is assigned on its own branch.
+`tools/test-native-handle-query.py` pins the kernel and 0059 numbers, the
+ceiling and the collision asserts.
+
+## SYS_UMASK 133 (B-3e M8, 2026-10-19)
+
+`SYS_UMASK` (133, mask) sets the calling Proc's creation mask and returns the
+previous one ([[dec-2026-10-19-create-mode-bound-and-umask]]; the operator's
+vote signed off the addition). A mask with any bit outside 0777, anywhere in
+the 64-bit register, is -EINVAL and changes nothing, as SYS_WSTAT refuses stray
+mode bits; the POSIX front ends pass `mask & 0777`, so their umask cannot fail.
+Registers only: no user memory, no capability. There is no read-only form, so a
+reader exchanges twice, as POSIX's umask has it. The Proc's threads share the
+mask and a child inherits it ([[sub-kernel-proc]]); every create applies it
+([[sub-kernel-syscall-dispatch]]).
+
+Mirrors: libt `T_SYS_UMASK` and `t_umask`, Rust `T_SYS_UMASK` and `t_umask`.
+Pouch reaches it through 0058 (`SYS_thyla_umask`, [[sub-pouch-seam]]), the
+phenotype through Linux umask 166 ([[sub-kernel-vivarium]]), and go-thylacine's
+`syscall.Umask` (mask & 0o777) calls it directly. Linux 133 is rt_sigsuspend, a
+VIV_ENOSYS row consumed before native dispatch, and the collision is pinned per
+number. `tools/test-native-handle-query.py` pins the kernel, libt, Rust and 0058
+numbers and the collision asserts.
+
+## Native descriptor calls 129-131 and SYS_GETPPID 132 (B-3b, 2026-10-15)
+
+Three operator-approved descriptor calls, designed by Astra on codex/astra
+(her 128-130) and numbered 129-131 on main (main's 128 is
+`SYS_ICACHE_SYNC_SPACE`); all take registers only, read no user memory and
+confer no authority.
+
+- `SYS_HANDLE_FLAGS_GET` (129, fd) returns a word read under one table-lock
+  hold: bit0 `SYS_HANDLE_CLOSE_ON_EXEC`, and the open-file status F_GETFL
+  reports (B-3b, vote 7) -- `SYS_HANDLE_STATUS_OMODE` (omode & 3) at bits 8-9,
+  `SYS_HANDLE_STATUS_NONBLOCK` bit 10, `SYS_HANDLE_STATUS_APPEND` bit 11. A
+  non-Spoor kind reports no status. -EBADF for an out-of-range (full-width) or
+  absent slot, -EINVAL without a current Proc. An instant observation, not a
+  pin against close and reuse.
+- `SYS_HANDLE_FLAGS_SET` (130, fd, flags) returns 0. Only bit0 is accepted;
+  the status bits are read-only and a static assert keeps them disjoint from
+  every SET and DUP_TO flag.
+- `SYS_HANDLE_DUP_TO` (131, source, target, flags) returns the new index.
+  Flags are bit0 (the copy's close-on-exec) and `SYS_HANDLE_DUP_LOWEST` (2,
+  B-3b): without it x1 is the exact target, replaced atomically; with it x1 is
+  a floor and the copy goes to the lowest free index at or above it (dup is
+  floor 0, F_DUPFD the caller's). Errno order: unknown flags EINVAL, source
+  out of range EBADF; then the exact form checks the target's range (EBADF)
+  and distinct indices (EINVAL) before the lock, and under one table-lock
+  hold a non-live source EBADF and a forbidden alias kind EACCES; the lowest
+  form decides everything else under the hold -- a non-live source EBADF (a
+  closed fd outranks a bad floor, as on Linux), the floor's range EINVAL, a
+  forbidden alias EACCES, no free index at or above the floor EMFILE. Rights
+  are copied verbatim, never widened.
+- `SYS_GETPPID` (132, vote 6) returns the parent's pid through
+  `proc_parent_pid` under `g_proc_table_lock`: 0 when the parent is kproc
+  (pid 0 -- init, and an orphan adopted while init is not alive) and for
+  kproc itself. It never fails for a Proc, as `SYS_GETPID` does not.
+
+No call returns EPERM. Linux 129-131 (kill, tkill, tgkill) are Vivarium TIER2
+rows and Linux 132 (sigaltstack) a VIV_ENOSYS row, all consumed before native
+dispatch; each carries a per-number collision pin in `vivarium.c`
+([[sub-kernel-vivarium]]). The C (libt) and Rust
+mirrors carry all four (`t_handle_flags_get/_set`, `t_handle_dup_to`,
+`t_getppid`); Pouch reaches them through patches 0053-0057
+([[sub-pouch-fs]], [[sub-pouch-process]]). `tools/test-native-handle-query.py`
+pins the query's mirrors, the ceiling and the collision asserts; designs and
+qualification: `docs/NATIVE-HANDLE-QUERY-PROPOSAL.md`,
+`docs/NATIVE-DESCRIPTOR-OPERATIONS-PROPOSAL.md` and its REVIEW.
+
 ## Purpose
 
 The contract half of the userspace boundary. [[sub-kernel-exception]] defines
@@ -44,8 +205,12 @@ The contract half of the userspace boundary. [[sub-kernel-exception]] defines
 the register convention, the argument records copied across, and the bounds
 every one of them is checked against.
 
-It is three files saying the same thing in three languages, and nothing in the
-build checks that they agree.
+C/kernel, C/libt and Rust mirror this contract. A focused check
+(`tools/test-native-handle-query.py`) pins the numbers appended since B-3b in
+every mirror that carries them, the native ceiling and the phenotype's
+collision asserts; build.sh runs it before every target and
+`tools/test-host-boundaries.sh` runs its mutants. This is not a claim that
+every mirror has an automated check.
 
 ## Contract
 
@@ -224,6 +389,34 @@ the subset rule below. The C JIT header `usr/lib/thylajit/thyla_jit.h`
 `THYLA_SYS_ICACHE_SYNC_SPACE` and `thyla_jit_icache_sync_space`, and its
 `THYLA_JIT_REGION_MAX` follows the kernel's `JIT_REGION_MAX` to 128 MiB.
 
+**B-3b append (2026-10-15).** `SYS_HANDLE_FLAGS_GET` = 129,
+`SYS_HANDLE_FLAGS_SET` = 130, `SYS_HANDLE_DUP_TO` = 131 and `SYS_GETPPID` =
+132; `SYS__NATIVE_TOP` is 133 and `VIV_NATIVE_CEILING` 132. Re-measured on this
+tree after the last append, not incremented: **130** live numbers, the span
+runs 0-132 with the same three holes (26, 30, 43), `syscall_dispatch_body` has
+exactly 130 arms, and both set differences are empty. The section at the top
+of this dossier carries the contracts.
+
+**M8 append (2026-10-19).** `SYS_UMASK` = 133; `SYS__NATIVE_TOP` is 134 and
+`VIV_NATIVE_CEILING` 133. Re-measured on this tree, not incremented: **131**
+live numbers, the span runs 0-133 with the same three holes (26, 30, 43),
+`syscall_dispatch_body` has exactly 131 arms, and both set differences are
+empty. Of the mirrors, the libt enum names 95 kernel numbers and the Rust
+mirror 124, and neither disagrees with the kernel on a value. The script that
+counted reproduced main's recorded 126 and 126 on main's tree, and caught a
+planted missing arm and a planted wrong Rust value.
+
+**B-3f' append (2026-10-20).** `SYS_READLINK` = 135 and `SYS_LSTAT` = 136, with
+134 held for corona's SYS_SRV_REGISTRY_NEW; `SYS__NATIVE_TOP` is 137 and
+`VIV_NATIVE_CEILING` 136. Re-measured on this tree, not incremented: **133**
+live numbers, the span runs 0-136 with four holes (26, 30, 43 and 134),
+`syscall_dispatch_body` has exactly 133 arms, and both set differences are
+empty. The mirrors are unchanged: the libt enum names 95 kernel numbers and the
+Rust mirror 124, and neither disagrees with the kernel on a value. The script
+that counted reproduced M8's 131, 95 and 124 on the M8 tree, and caught a
+planted missing arm and a planted wrong Rust value.
+
+
 **Vote 13 (2026-10-19).** `SYS_SRV_REGISTRY_NEW` = 134 (the D7 append, first
 minted at 127); `SYS__NATIVE_TOP` is 135 and `VIV_NATIVE_CEILING` 134.
 Measured on this tree, not incremented: **125** live numbers, the span runs to
@@ -257,6 +450,9 @@ differences are empty. The deliberate hole is now 129..133 (b3's numbers), and
 `syscall.native_gap_unassigned` counts those five.
 
 
+**The join with main (2026-11-03).** Both lines' appends meet: 129-133 and 135-137 from main, 134 and 138 from this line. Measured on the merged tree, not added up: **136** live numbers, the span runs 0-138 with holes 26, 30 and 43; `SYS__NATIVE_TOP` is 139 and `VIV_NATIVE_CEILING` 138. `syscall.native_holes_unassigned` counts the three holes through the unknown arm, which answers ENOSYS (vote 2026-10-22) and still counts them.
+
+
 `x8` carries the syscall number, `x0..x5` the arguments, `x0` the result —
 deliberately Linux's AArch64 convention, so a ported libc's syscall stub needs
 renumbering and nothing else. Userspace issues `svc #0`; the immediate is
@@ -272,7 +468,7 @@ now filled: `SYS_FD_DEVCLASS` (80, H-1a) returns a Dev's class character, so
 is-a-terminal is `dc == 'c'` (the console) OR `dc == 't'` (a pts slave, H-4d) --
 `libthyla-rs::stdout_is_terminal()` is the one wrapper that folds both, since a
 program in a session tile is on a terminal exactly as one on `/dev/cons` is. Each
-hole carries a comment naming what used to be there. An unknown number returns `-1` rather than terminating the
+hole carries a comment naming what used to be there. An unknown number returns `-T_E_NOSYS` (`ENOSYS`) rather than terminating the
 caller.
 
 Return values follow two conventions and the split is per-syscall, not
@@ -572,12 +768,13 @@ entry point.
 
 ## Error paths
 
-Two conventions, per-syscall. The bare `-1` set predates the errno set and has
-not been converted; the header documents which each call uses, individually, in
-its enum comment. A caller cannot tell from the number which convention applies.
+Two conventions, per-syscall. The bare `-1` set predates the errno set, and the
+error rollout (`docs/ERRORS.md`, ER-1 to ER-4) converts it call by call; the
+header documents which each call uses, individually, in its enum comment. A
+caller cannot tell from the number which convention applies.
 
-The unknown-number arm returns `-1` and lets userspace decide — the header notes
-that a signal-equivalent note is the eventual behaviour and was not built.
+The unknown-number arm returns `-T_E_NOSYS` (`ENOSYS`, as on Linux) and lets
+userspace decide.
 
 ## Performance
 
@@ -621,9 +818,12 @@ be one 4 KiB staging buffer per round trip.
 
 ## Seams
 
-- **The two return conventions are not converging.** New syscalls use errno, old
-  ones use `-1`, and there is no migration underway. A caller handling both must
-  know which is which per call. One exception, 2026-10-13 (operator vote 6):
+- **The two return conventions converge call by call.** New syscalls use errno,
+  and the old `-1` calls move to it in the error rollout's stages
+  (`docs/ERRORS.md`, ER-2 and ER-3). Most of SYS_READDIR's and SYS_CHDIR's
+  refusals and SYS_STAT's path checks still answer a bare -1 (OPEN-BUGS
+  2026-10-20 08:24Z); SYS_WSTAT converted on 2026-10-22. Until a call
+  converts, a caller handling both must know which is which per call. One exception, 2026-10-13 (operator vote 6):
   Loom's ENTER and REGISTER answer a descriptor that names no ring with
   `-T_E_BADF`, and an unknown REGISTER op with `-T_E_INVAL`. Since vote 7 the
   same day every Loom refusal is an errno (LOOM.md 8.2a), as the comments on
@@ -759,14 +959,14 @@ the result for that class of call went from `-1` to `0`.
 ## Protected PCI windows (2026-09-17)
 
 [[abi-pci-windows]] appends `PCI_MAP_WINDOW` 113 and `PCI_WINDOWS` 114 in kernel,
-C and Rust. The native ceiling is 114. Linux clock_gettime 113 is handled by the
+C and Rust, raising the native ceiling to 114. Linux clock_gettime 113 is handled by the
 existing phenotype Tier-2 translator before native dispatch; its former ceiling
 assertion is replaced by an explicit collision pin. The old PCI_INFO record and
 four-argument whole-BAR map remain unchanged; protected whole-BAR maps now fail.
 
 ## PCI endpoint append (2026-09-17)
 
-[[abi-pci-irq]] appends calls 115..120; native ceiling is 123 after the trusted-seat/nonblocking append, with SYS__NATIVE_TOP
+[[abi-pci-irq]] appends calls 115..120; with the trusted-seat/nonblocking append after them the native ceiling reached 123, with SYS__NATIVE_TOP
 124. Kernel/C/Rust records pin event 32 bytes and info 48 bytes. Clock_gettime's
 113 collision remains consumed by its Tier-2 phenotype row. Remaining ceiling
 assertions compile. MSI-X mode currently fails ENODEV; backend implementation
@@ -775,7 +975,7 @@ must precede any support claim.
 ## Trusted-seat and nonblocking append
 
 [[abi-trusted-seat]] pins native 121/122 and [[abi-native-nonblock]] pins 123.
-The ceiling is 123, SYS__NATIVE_TOP is 124. Existing call numbers and Linux
+They took the ceiling to 123 and SYS__NATIVE_TOP to 124. Existing call numbers and Linux
 phenotype translation retain their meanings. The 2026-09-21 review changed no
 number and no envelope: `seat.h` gained names for the six chord key codes, and
 RESTORED is now also accepted in the failed phase ([[abi-trusted-seat]]).
@@ -818,7 +1018,7 @@ keeps mapping -1 to `InvalidArgument`.
 
 Two new numbers rather than flags on `SYS_BURROW_ATTACH_LAZY`, per the
 2026-06-23 blast-radius precedent; both answer `-T_E_*`, never a bare -1. The
-ceiling is 125 and `SYS__NATIVE_TOP` 126 (`vivarium.c`'s static assert pins
+pair took the ceiling to 125 and `SYS__NATIVE_TOP` to 126 (`vivarium.c`'s static assert pins
 `VIV_NATIVE_CEILING == SYS__NATIVE_TOP - 1`). Linux `mprotect` is 226, above
 the ceiling, so its collision argument is discharged by construction.
 
@@ -1078,9 +1278,9 @@ maps ONE execute-only alias at a random address, written as a u64 to `out_va`
 unseeded), `-ENOMEM` (page budget -- a sealed region is charged at creation --
 VMA cap, gap or allocator). 127 also named astra's unlanded
 `SYS_SRV_REGISTRY_NEW` on her base; B-2 lands first and she renumbers at her
-merge, the pre-merge-collision exception under Mechanism. The ceiling is 127,
-so the next native append, 128, is the first that owes `restart_syscall` a
-decision (Linux 128 is `restart_syscall`; [[sub-kernel-vivarium]]).
+merge, the pre-merge-collision exception under Mechanism. It took the ceiling
+to 127, so the next native append, 128, was the first that owed
+`restart_syscall` a decision (Linux 128 is `restart_syscall`; [[sub-kernel-vivarium]]).
 
 Existing numbers whose answers changed, no number or record moved:
 
@@ -1188,3 +1388,69 @@ phenotype, four answers follow Linux more closely:
 
 The rationale is in [[dec-2026-10-14-descriptor-slot-reservation]].
 
+
+## SYS_MOUNT and SYS_UNMOUNT answer an errno per refusal (2026-10-19)
+
+No number or record changed. `SYS_MOUNT` (14) and `SYS_UNMOUNT` (15) moved from
+the bare -1 set to the errno set ([[dec-2026-10-19-mount-errnos]]; ERRORS.md
+"Mount and unmount"). `SYS_MOUNT`: `-EINVAL` for an empty, over-long or
+NUL-embedded path and for flags outside the set or naming two placements,
+`-EFAULT` for a path the kernel cannot read, the resolver's errno for a point
+that does not resolve, `-EBADF` for a source that is not a live readable Spoor
+handle (an index of 2^32 or more no longer narrows onto a live handle),
+`-ENOTDIR` as before, `-ELOOP` for a cycle and `-ENOSPC` for a full table.
+`SYS_UNMOUNT`: the same path answers, and `-EINVAL` when nothing is mounted at
+the point. `T_E_NOSPC` (28) joins `errno.h`. A caller that tested `rc != 0` or
+`rc < 0` is unaffected. Mirrors: libt's `t_mount` and `t_unmount` comments;
+`libthyla_rs` gains `Error::NoSpace`, and `territory::unmount` maps the value
+instead of answering `NotFound` for every failure; ut's `unmount` names the
+cause, as `bind` and `mount` already did for any code but -1.
+
+## SYS_MOUNT answers ENOMEM; its full table is 1024 entries (2026-10-19)
+
+No number or record changed. The mount table is dynamic
+([[dec-2026-10-19-mount-table-dynamic]]; ARCH 9.1): `SYS_MOUNT` answers
+`-ENOMEM` (`T_E_NOMEM`, 12) when the kernel cannot allocate the mount's
+entries, with the namespace unchanged, and its `-ENOSPC` now means the table
+holds `PGRP_MOUNT_CAP` (1024) entries rather than 32. Mirrors: the kernel and
+libt `syscall.h` comments and libthyla-rs's `territory::mount` doc
+(`Error::NoMemory`, already in its errno map); ut prints the errno's text
+(`out of memory`) as it does every other.
+
+The order of the checks is part of the answer. `SYS_MOUNT` judges two
+arguments' width before it resolves the point: flags past 32 bits answer
+`-EINVAL`, and a source handle index at or above the table size `-EBADF`.
+Every other refusal is judged after the point resolves, so a point that does
+not resolve answers the resolver's errno even beside a closed handle in range
+(ERRORS.md, "Mount and unmount"; audit round 1 F3, which also put the cycle
+refusal among `T_E_LOOP`'s emitters and `-ENOMEM` in libthyla-rs's `t_mount`
+doc).
+
+## SYS_WALK_CREATE's group is the directory's (2026-10-19)
+
+[[dec-2026-10-19-create-group-from-parent]] (IDENTITY-DESIGN 3.5 F-5): the
+group a create sends is the parent directory's, not the caller's
+`primary_gid`. The argument record is unchanged; the `SYS_WALK_CREATE` comment
+in `kernel/include/thylacine/syscall.h` and libt's `t_walk_create` comment say
+so. The mechanism is [[sub-kernel-syscall-dispatch]]'s.
+
+## SYS_WSTAT sets times and answers errnos (2026-10-22)
+
+[[dec-2026-10-22-wstat-times]]: SYS_WSTAT (59) gains `T_WSTAT_ATIME` /
+`T_WSTAT_MTIME` (bits 4/5, the file server's clock) and `T_WSTAT_ATIME_SET`
+/ `T_WSTAT_MTIME_SET` (bits 7/8, the caller's values), equal to 9P's
+`P9_SETATTR_*`. Its argument record grows by one register: x6 points at a
+`struct t_timespec[2]` (atime, mtime; the SYS_CLOCK_GETTIME record, 16 bytes
+each), read only when a `_SET` bit asks in an otherwise well-formed mask (a
+malformed mask is EINVAL before x6 is read). Bit 6 stays reserved. Every refusal
+now answers its errno, never EPERM (the -1 alias); the list is in the
+`SYS_WSTAT` comment in `kernel/include/thylacine/syscall.h` and in
+`docs/ERRORS.md` ER-2. Old callers keep working: a mask without time bits
+reads no x6, and a native caller testing `r < 0` sees the same sign. The
+mechanism is [[sub-kernel-syscall-dispatch]]'s; the policy
+[[sub-kernel-perm]]'s. The C mirror (`usr/lib/libt/include/thyla/syscall.h`)
+carries the bits and a `t_wstat` without x6; the Rust mirror
+(`usr/lib/libthyla-rs/src/lib.rs`) carries the bits, the same `t_wstat` and
+`t_wstat_times`, which sets x6 ([[sub-libthyla-rs]]). Pouch's front end is patch
+0063 and the vivarium's is Linux `utimensat` (88); go-thylacine follows in
+G12-d.

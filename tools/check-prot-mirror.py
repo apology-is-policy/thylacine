@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Compare the kernel's protection-bit definitions against their hand-written
-userspace mirrors.
+"""Compare kernel bit definitions (the protection bits, the file-lock op word)
+against their hand-written userspace mirrors.
 
 Userspace cannot include a kernel header -- different toolchain and sysroot --
 so `VMA_PROT_*` and `BURROW_PROT_*` are retyped in usr/lib/libt and
@@ -50,6 +50,14 @@ FAMILIES = [
             ("usr/lib/libthyla-rs/src/lib.rs", "T_BURROW_PROT_"),
         ],
     ),
+    (
+        "FILE_LOCK",
+        "kernel/include/thylacine/syscall.h", "SYS_FILE_LOCK_",
+        [
+            ("usr/lib/libt/include/thyla/syscall.h", "T_FILE_LOCK_"),
+            ("usr/lib/libthyla-rs/src/lib.rs", "T_FILE_LOCK_"),
+        ],
+    ),
 ]
 
 C_DEFINE = re.compile(r"^\s*#define\s+([A-Z0-9_]+)\s+(.+?)\s*(?://.*)?$")
@@ -81,18 +89,27 @@ def collect(relpath, prefix):
     pat = RS_CONST if relpath.endswith(".rs") else C_DEFINE
     out, known = {}, {}
     with open(path, encoding="utf-8", errors="replace") as fh:
-        for line in fh:
-            m = pat.match(line)
-            if not m:
-                continue
-            name, expr = m.group(1), m.group(2)
-            v = value_of(expr, known)
-            if v is not None:
-                known[name] = v
-            if name.startswith(prefix):
-                if v is None:
-                    return None, "unparsable value for %s: %r" % (name, expr)
-                out[name[len(prefix):]] = v
+        lines = fh.read().split("\n")
+    joined, held = [], ""
+    for line in lines:
+        # A C definition continued with a backslash is one definition.
+        if line.endswith("\\"):
+            held += line[:-1] + " "
+            continue
+        joined.append(held + line)
+        held = ""
+    for line in joined:
+        m = pat.match(line)
+        if not m:
+            continue
+        name, expr = m.group(1), m.group(2)
+        v = value_of(expr, known)
+        if v is not None:
+            known[name] = v
+        if name.startswith(prefix):
+            if v is None:
+                return None, "unparsable value for %s: %r" % (name, expr)
+            out[name[len(prefix):]] = v
     return out, None
 
 

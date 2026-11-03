@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/ARCHITECTURE.md section 9", "docs/STALK-DESIGN.md"]
 created: 2026-08-03
-updated: 2026-10-27
+updated: 2026-11-02
 ---
 ## Purpose
 
@@ -40,6 +40,9 @@ void          spoor_ref(struct Spoor *c);             // +1; extincts on NULL/co
 void          spoor_unref(struct Spoor *c);           // -1, free at 0; NO dev->close
 void          spoor_clunk(struct Spoor *c);           // -1, dev->close THEN free at 0
 int           spoor_clunk_rc(struct Spoor *c);        // spoor_clunk; returns dev->close's result
+void          spoor_fd_ref(struct Spoor *c);          // a handle slot now names c
+bool          spoor_fd_drop(struct Spoor *c);         // a slot left; true on the last; full fence
+bool          spoor_fd_open(const struct Spoor *c);   // does any slot name c? sequentially consistent
 struct Spoor *spoor_clone(struct Spoor *c);           // fresh Spoor, copied state, ref 1
 u64           spoor_next_devno(void);                 // monotonic from 1; never wraps, never reused
 int           spoor_stat_native(struct Spoor *c, struct t_stat *out);
@@ -69,6 +72,20 @@ wrong one is a live bug class rather than a style question:
 `spoor_clunk` treat NULL as a no-op (the `burrow_unref` convention) but
 extinct on a corrupted magic or a non-positive pre-value. After the drop
 that reaches zero, the pointer is invalid.
+
+**A readdir record's type byte is a d_type, not a qid type.** A
+`SYS_READDIR` record is the 9P2000.L dirent: qid(13), offset(8), type(1),
+name_len(2), name. The qid's own type is byte 0; the lone type byte at
+offset 21 is Linux's `d_type`, which is how 9P servers write it (Stratum
+and every `ninep::pack_dirent` server) and how its readers take it (Pouch's
+`readdir`, Vivarium's `getdents64`). A native Dev derives it with
+`qid_type_to_dtype` (`spoor.h`): `QTDIR` is `DIRENT_DT_DIR` (4),
+`QTSYMLINK` `DIRENT_DT_LNK` (10), anything else `DIRENT_DT_REG` (8).
+devenv, devhw, devpci and devramfs wrote the qid type there until
+2026-10-21, so a reader saw 0x80, no `d_type` at all, for their
+directories; native readers (`libthyla-rs`'s `DirEntry`, joey) read byte 0
+and were not affected. A union passes each member's records through
+unchanged, so this rule is what makes a mixed union's listing uniform.
 
 ## Mechanism
 
@@ -192,6 +209,9 @@ fork shares the Spoor, and `spoor_clone` strips them with `COPEN` and
 `CWALKONLY`: a clone may walk to a different file, and a directory's "known, not
 slow" inherited by a pts below it would make the pts read uninterruptible.
 
+`fd_refs` counts handle-table slots and a spawn's endowments on their way to a child's
+table. Every other reference is no descriptor.
+
 ## Concurrency
 
 The refcount is the whole concurrency story. `spoor_ref` uses
@@ -202,6 +222,15 @@ two CPUs **exactly one sees `pre == 1`** and owns the free — and, in
 the decrement (so the count reads 0) but before the free, so it can
 still safely read `aux`, `dev` and `qid`. A `pre <= 0` on any path is
 treated as a use-after-free diagnostic and extincts.
+
+`fd_refs` counts handle slots and a spawn's endowments in flight (`handle_endow_spoor`,
+`handle_endow_drop`), where `ref` counts every holder (B-3h audit round
+3, 2026-11-02; ARCH 7.9.1). Its last drop is the file's last close and `ref`'s is
+its last reference. `spoor_fd_drop` extincts on a drop below zero, and
+`spoor_clunk_rc` on a last reference that finds `fd_refs` non-zero, so a slot site
+missing its count shows in either direction. The fence in `spoor_fd_drop` pairs
+with `spoor_fd_open` in a take that has just recorded its grant
+([[sub-kernel-filelock]]).
 
 `spoor_clone` reads the source's ref atomically for diagnosis only; it
 does not mutate it, and the caller is responsible for holding the
@@ -241,7 +270,9 @@ clunks the source and returns -1). `walkqid_alloc` returns NULL on a
 negative count or OOM. `spoor_stat_native` returns -1 when the Spoor,
 the output buffer, or the Dev's `stat_native` slot is absent — the
 NULL-slot arm that makes an fstat on a slotless Dev fail, which has
-been a live bug class twice ([[sub-kernel-dev]], Caveats).
+been a live bug class twice ([[sub-kernel-dev]], Caveats) — and
+otherwise the Dev's own answer, which for dev9p is the server's -errno
+([[sub-kernel-syscall-dispatch]] has how fstat maps it).
 
 Everything else on this surface is an extinction rather than an error
 return: allocating before `spoor_init`, initializing twice, a corrupted

@@ -178,6 +178,10 @@ struct Walkqid *(*walk_attrs)(struct Spoor *c, struct Spoor *nc,
   other reply — success OR a real errno like ENOENT — proves the server
   parsed the op, and is handled normally. A NULL return stays "the walk
   failed at the first component"; the sentinel is a THIRD, non-error state.
+  A walk of several names that fails with anything but ENOENT cannot say at
+  which name, so `dev9p_walk_attrs` answers the sentinel for that too, unlatched:
+  this one resolution walks name by name, its X gates and mount split in order
+  (2026-11-02, B-3h audit round 3).
   KNOWN COST on the latched fallback (P-5 audit F1, P3, tracked as #372):
   the pounce block runs its base X-check `stat_native` BEFORE the sentinel
   returns, and the per-component fall-through then X-searches the same
@@ -264,10 +268,14 @@ it:
   `newfid = P9_NOFID`): the leaf's attrs return in the reply and NO quarry
   Spoor/fid ever exists — nothing to clunk. On a Dev without `walk_attrs`,
   fall back to walk + `stat_native` + clunk (correct everywhere).
-- Result: `os.Stat` = **1 RPC** on the pool (vs 13). Symlinks do not exist
-  at v1.0 (G11), so stat == lstat; the Go port routes both `os.Stat` and
-  `os.Lstat` here, libthyla-rs `fs::metadata` likewise, pouch `stat`/
-  `lstat`/`fstatat(path)` via the 0001 seam.
+- Result: `os.Stat` = **1 RPC** on the pool (vs 13). `SYS_STAT` follows a
+  final symlink (DISTRO D-1). Its no-follow twin `SYS_LSTAT` (136, operator
+  vote 2026-10-20, `dec-2026-10-20-native-lstat-readlink`) takes the same
+  three arguments and the same walk-query, so `lstat` also costs one RPC and
+  holds no handle. Pouch `stat`/`fstatat(path)` ride `SYS_STAT` and
+  `lstat`/`fstatat(AT_SYMLINK_NOFOLLOW)` `SYS_LSTAT` (Boosty B-3f');
+  libthyla-rs `fs::metadata` rides `SYS_STAT`. The Go port still routes
+  `os.Lstat` to `SYS_STAT`, a gap that waits on the Go fork moving.
 - The amode joins `stalk_err`'s LOUD amode gate (`stalk-1 audit F1`: any new
   amode gets its own final-hop arm; a missed arm fails closed).
 

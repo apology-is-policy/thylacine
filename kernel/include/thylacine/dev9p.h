@@ -88,6 +88,13 @@ extern struct Dev dev9p;
 // root_fid) directly (no p9_attached wrapper), attached_owner stays
 // NULL and dev9p_close skips the unref. The fid_owned semantics still
 // apply: walks from those test roots clunk their fid as today.
+// What dev9p_priv.lock_gen holds.
+enum dev9p_lock_ident_state {
+    DEV9P_IDENT_UNKNOWN = 0,   // not asked yet
+    DEV9P_IDENT_GEN     = 1,   // lock_gen is the file's generation
+    DEV9P_IDENT_NONE    = 2,   // the server reports none: identity by qid.path
+};
+
 struct dev9p_priv {
     u32                magic;
     struct p9_client  *client;     // pointer to the client; lifecycle managed externally
@@ -107,6 +114,26 @@ struct dev9p_priv {
     // that misbehaved once is clunked at close, never re-served.
     u64                fid_gen;
     bool               fid_suspect;
+    // B-3h: this fid is a Proc lock owner (dev9p_lock_owner), so it may carry
+    // server-side locks: its close clunks it, and never parks it in the
+    // dir-fid cache, where a later consumer would inherit the locks.
+    bool               fid_locks;
+    // B-3h: a lock may stand on this priv's lock fid, so its last close waits for
+    // an unlock. Set at a grant (and a take a death abandoned), taken by that
+    // close. Sequentially consistent against Spoor.fd_refs: a take in flight
+    // when the last descriptor closes either has its grant seen by the close or
+    // sees the close (sys_file_lock_handler).
+    bool               lock_granted;
+    // The principal the fid's latest take named in Tlock's client_id; every later
+    // request on the fid names it too. PRINCIPAL_INVALID for none yet, and always
+    // on a caped session.
+    u32                lock_principal;
+    // B-3h: the inode generation of the file the fid names, learned once by
+    // dev9p_lock_ident (a file keeps its generation for life; a file that
+    // takes a dead one's inode number gets a new one). lock_ident is a
+    // dev9p_lock_ident_state, published with release after lock_gen.
+    u64                lock_gen;
+    u8                 lock_ident;
     // #99 (#102 errno-loss): the last dev9p_create failure's real errno, in the
     // syscall passthrough range (e.g. -T_E_EXIST on a racing/duplicate create).
     // Transient create-path state: born 0 (kzalloc), set by dev9p_create on a
@@ -148,17 +175,33 @@ struct dev9p_priv {
     // __atomic-acquire; dev9p_close reads it plainly (it runs at the LAST ref, so
     // no concurrent mapper exists).
     struct weft_binding      *weft;
-    // FID-LIFECYCLE cached-open (docs/FID-LIFECYCLE-DESIGN.md section 3.3): the
-    // fidless open's per-open state. cached_open == true implies fid == P9_NOFID
-    // + fid_owned == false; co_buf holds the [0, co_size) content snapshot taken
+    // FID-LIFECYCLE cached-open (docs/FID-LIFECYCLE-DESIGN.md section 3.3): an
+    // open served from a snapshot. co_buf holds the [0, co_size) content taken
     // at open (NULL iff co_size == 0 -- the empty-file open), immutable for the
-    // Spoor's lifetime (reads copy out with no lock); co_stat is the open-time
-    // metadata (serves fstat -- the same close-to-open discipline as the attr
-    // cache). dev9p_close frees co_buf + uncharges the global budget.
+    // Spoor's lifetime (reads copy out with no lock); dev9p_close frees it and
+    // uncharges the global budget. A strict client's cached open keeps its
+    // revalidating walk's fid, never opened, in `fid` (fid_owned; operator vote
+    // 20): fstat, a wstat and a lock address it. A loose client's has no fid,
+    // and co_stat, the open-time metadata, serves its fstat. co_rfid stays
+    // P9_NOFID until the open must read what the server holds (a lock's
+    // DEV_LOCK_SYNC_ACQUIRE, a Loom registration): then a clone of its lock fid
+    // (`fid`, or a loose open's co_kfid), opened for reading, is installed once
+    // (CAS), and reads go through it.
     bool                      cached_open;
     u8                       *co_buf;
     u64                       co_size;
     struct t_stat             co_stat;
+    u32                       co_rfid;
+    // A loose cached open binds no fid at mint (B1: its open is wire-free).
+    // co_start (a reference) and co_names (co_nname names, each a little-endian
+    // u16 length and its bytes) are the run that minted it, walked again on the
+    // first need. co_kfid is the fid that walk bound: P9_NOFID until then,
+    // installed once. The budget's charge is co_size + co_names_len.
+    struct Spoor             *co_start;
+    u8                       *co_names;
+    u32                       co_names_len;
+    u8                        co_nname;
+    u32                       co_kfid;
     // F1 write-behind (LARDER-DESIGN section 12): the per-open-file append-run
     // staging state. wb_lock is a PURE LEAF (only byte copies + state reads
     // under it -- wire I/O never; nothing else is ever acquired under it).
@@ -218,6 +261,9 @@ u64 dev9p_co_budget_used(void);
 // Diagnostics: bytes currently held by live staged-run buffers (the global
 // wb budget's occupancy). Tests assert the charge/uncharge balance.
 u64 dev9p_wb_budget_used(void);
+
+// Diagnostics: sleeps a thread no death reaches took waiting out a peer's flush.
+u64 dev9p_wb_flush_sleeps(void);
 
 // Test-only: bias the wb budget occupancy by +/-n (a signed add). Lets the
 // budget-denial fallback be exercised without minting DEV9P_WB_BUDGET worth
@@ -317,6 +363,13 @@ bool dev9p_spoor_origin(struct Spoor *c, const struct Path **name, char *dc);
 // errno (e.g. -T_E_EXIST). Self-gating: returns -1 (the prior generic-failure
 // sentinel) for a non-dev9p Spoor, an unrecorded value, or an out-of-range one.
 s64 dev9p_create_errno(struct Spoor *c);
+
+// M7 (IDENTITY-DESIGN 9.7): may `principal` create through the 9P session `c`
+// belongs to? True only for one of the session's two recorded ends
+// (p9_client_set_ends), and never for PRINCIPAL_INVALID, so a session whose ends
+// were never stamped admits no create. A Spoor of any other Dev is not a 9P
+// session and answers true; a dev9p Spoor without a valid priv answers false.
+bool dev9p_create_admits(struct Spoor *c, u32 principal);
 // Failed Tlopen cause in [-4095,-2], otherwise -1; only before clunk.
 s64 dev9p_open_errno(struct Spoor *c);
 
@@ -328,7 +381,7 @@ s64 dev9p_open_errno(struct Spoor *c);
 struct poll_snap;
 
 // The Dev `.poll_snapshot` slot (<thylacine/dev.h> documents the contract). For a
-// QTPOLL file on a deadline-capable client it sends the snapshot read (offset =
+// QTPOLL file it sends the snapshot read (offset =
 // the requested events | P9_POLL_SNAPSHOT), which the server answers at once;
 // any other dev9p file is answered here, POSIX always-ready
 // (`events & POLL_REQUESTABLE`).

@@ -38,7 +38,7 @@ any thread is sound; the old multi-thread hazard of this patch was closed by
  #include <stdint.h>
  #include <sys/mman.h>
  #include <pthread.h>
-@@ -29,8 +30,13 @@
+@@ -29,9 +30,14 @@
  #if USE_REAL_ASSERT
  #include <assert.h>
  #else
@@ -53,3 +53,4 @@ any thread is sound; the old multi-thread hazard of this patch was closed by
  #endif
 
  #define brk(p) ((uintptr_t)__syscall(SYS_brk, p))
+

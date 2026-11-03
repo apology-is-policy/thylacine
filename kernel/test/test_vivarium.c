@@ -248,6 +248,18 @@ void test_vivarium_t1_keeps_guest_registers(void) {
 // future change promotes one to a table row, this test fails and forces the
 // promotion to be deliberate rather than incidental.
 void test_vivarium_rejects_are_deliberate(void) {
+    // Linux 129-131 share numbers with the native descriptor calls. A TIER2
+    // verdict is consumed by viv_linux_dispatch before the native switch;
+    // TRANSLATED is the one verdict that would hand the frame to a handle op.
+    u64 mutation_args[VIV_NARGS] = {1, 1, 1, 0, 0, 0};
+    struct viv_call mutation_out = {0};
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_KILL, mutation_args, &mutation_out),
+                   (int)VIV_TIER2, "Linux kill is the kill shell, never HANDLE_FLAGS_GET");
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_TKILL, mutation_args, &mutation_out),
+                   (int)VIV_TIER2, "Linux tkill is the kill shell, never HANDLE_FLAGS_SET");
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_TGKILL, mutation_args, &mutation_out),
+                   (int)VIV_TIER2, "Linux tgkill is the kill shell, never HANDLE_DUP_TO");
+
     u64 args[VIV_NARGS];
     struct viv_call out;
     viv_fill_args(args);
@@ -338,6 +350,31 @@ void test_vivarium_rejects_are_deliberate(void) {
     TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_SIGALTSTACK, args, &out),
                    (int)VIV_ENOSYS,
                    "sigaltstack stays ENOSYS -- load-bearing for the 6.23 escape detector");
+    // rt_sigsuspend (133) shares its number with the native SYS_UMASK (M8); its
+    // ENOSYS row is what keeps a Linux Proc's call from reaching the mask
+    // (vivarium.c's per-number pin names this test).
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_RT_SIGSUSPEND, args, &out),
+                   (int)VIV_ENOSYS,
+                   "rt_sigsuspend stays ENOSYS -- consumed before native 133, SYS_UMASK");
+    // rt_sigaction (134) sits at the number held for corona's
+    // SYS_SRV_REGISTRY_NEW; rt_sigprocmask (135) and rt_sigpending (136) share
+    // theirs with SYS_READLINK and SYS_LSTAT (vote 2026-10-20). Each row is
+    // consumed before the native switch (vivarium.c's per-number pins name
+    // this test).
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_RT_SIGACTION, args, &out),
+                   (int)VIV_TIER2,
+                   "rt_sigaction stays T2 -- answered by its shell, never native 134");
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_RT_SIGPROCMASK, args, &out),
+                   (int)VIV_TIER2,
+                   "rt_sigprocmask stays T2 -- consumed before native 135, SYS_READLINK");
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_RT_SIGPENDING, args, &out),
+                   (int)VIV_ENOSYS,
+                   "rt_sigpending stays ENOSYS -- consumed before native 136, SYS_LSTAT");
+    // rt_sigtimedwait (137) shares its number with SYS_FILE_LOCK (votes 34-35);
+    // its ENOSYS row keeps a Linux Proc's call from taking a lock.
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_RT_SIGTIMEDWAIT, args, &out),
+                   (int)VIV_ENOSYS,
+                   "rt_sigtimedwait stays ENOSYS -- consumed before native 137, SYS_FILE_LOCK");
 
     // VIVARIUM 6.29: the sleep rows. Until them both FORWARDed to ENOSYS, and
     // musl's sleep() and usleep() returned at once.
@@ -496,6 +533,96 @@ void test_vivarium_faccessat_gate(void) {
                    (int)VIV_FORWARD, "a small non-negative fd forwards");
     TEST_EXPECT_EQ((int)vivarium_faccessat_decide((u64)(s64)-1),
                    (int)VIV_FORWARD, "-1 (the FROM_ROOT sentinel) is not AT_FDCWD -> forward");
+}
+
+// G12: utimensat (88). The row translates, its native collision is pinned, the
+// mask is Linux's split of the two sentinels, and the decide is do_utimes'
+// order: the descriptor form first (no flag allowed), then the flags, the
+// null path, AT_EMPTY_PATH, and the AT_FDCWD gate a real dirfd with a name
+// forwards on.
+void test_vivarium_utimensat(void) {
+    u64 args[VIV_NARGS];
+    struct viv_call out;
+    viv_fill_args(args);
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_UTIMENSAT, args, &out),
+                   (int)VIV_TIER2, "utimensat is T2 (time mask -> the wstat core)");
+    TEST_ASSERT(VIV_LINUX_UTIMENSAT == SYS_STAT,
+                "utimensat(88) collides with SYS_STAT -- the damage-envelope bound");
+
+    const u32 A = T_WSTAT_ATIME, M = T_WSTAT_MTIME;
+    const u32 AS = T_WSTAT_ATIME_SET, MS = T_WSTAT_MTIME_SET;
+    u32 v = 0xdeadbeefu;
+    struct t_timespec tv[2];
+    TEST_EXPECT_EQ(vivarium_utimens_mask(NULL, &v), 0L, "null times: accepted");
+    TEST_EXPECT_EQ((u64)v, (u64)(A | M), "...as the touch (both bits, no _SET)");
+    tv[0] = (struct t_timespec){ 9, VIV_UTIME_NOW };
+    tv[1] = (struct t_timespec){ 9, VIV_UTIME_NOW };
+    TEST_EXPECT_EQ(vivarium_utimens_mask(tv, &v), 0L, "both UTIME_NOW");
+    TEST_EXPECT_EQ((u64)v, (u64)(A | M), "...is the touch too");
+    tv[0] = (struct t_timespec){ 1, 2 };
+    tv[1] = (struct t_timespec){ 3, 999999999 };
+    TEST_EXPECT_EQ(vivarium_utimens_mask(tv, &v), 0L, "two values");
+    TEST_EXPECT_EQ((u64)v, (u64)(A | AS | M | MS), "...each bit with its _SET bit");
+    tv[0] = (struct t_timespec){ 1, VIV_UTIME_OMIT };
+    tv[1] = (struct t_timespec){ 3, 0 };
+    TEST_EXPECT_EQ(vivarium_utimens_mask(tv, &v), 0L, "omit atime, set mtime");
+    TEST_EXPECT_EQ((u64)v, (u64)(M | MS), "...atime out of the mask");
+    tv[1] = (struct t_timespec){ 3, VIV_UTIME_NOW };
+    TEST_EXPECT_EQ(vivarium_utimens_mask(tv, &v), 0L, "omit atime, now mtime");
+    TEST_EXPECT_EQ((u64)v, (u64)M, "...the mtime bit alone");
+    v = 0xdeadbeefu;
+    tv[1] = (struct t_timespec){ 3, VIV_UTIME_OMIT };
+    TEST_EXPECT_EQ(vivarium_utimens_mask(tv, &v), 1L, "both UTIME_OMIT: nothing to do");
+    TEST_EXPECT_EQ((u64)v, 0xdeadbeefull, "...and no mask written");
+    tv[0] = (struct t_timespec){ 1, -1 };
+    TEST_EXPECT_EQ(vivarium_utimens_mask(tv, &v), -(s64)T_E_INVAL, "nsec -1");
+    tv[0] = (struct t_timespec){ 1, 1000000000L };
+    TEST_EXPECT_EQ(vivarium_utimens_mask(tv, &v), -(s64)T_E_INVAL, "nsec 1e9");
+    tv[0] = (struct t_timespec){ 1, VIV_UTIME_OMIT - 1 };
+    TEST_EXPECT_EQ(vivarium_utimens_mask(tv, &v), -(s64)T_E_INVAL,
+                   "a nanosecond just below the sentinels");
+    tv[0] = (struct t_timespec){ 1, VIV_UTIME_NOW + 1 };
+    TEST_EXPECT_EQ(vivarium_utimens_mask(tv, &v), -(s64)T_E_INVAL,
+                   "a nanosecond just above them");
+    TEST_EXPECT_EQ(vivarium_utimens_mask(NULL, NULL), -(s64)T_E_INVAL, "no out-param");
+
+    const u64 cwd = (u64)(s64)VIV_AT_FDCWD;
+    const u64 nf = VIV_AT_SYMLINK_NOFOLLOW, ep = VIV_AT_EMPTY_PATH;
+    const u64 path = 0x400000ull;
+    TEST_EXPECT_EQ((int)vivarium_utimensat_decide(5, 0, 0, false),
+                   (int)VIV_UTIMENS_FD, "null path, real fd: the descriptor form");
+    TEST_EXPECT_EQ((int)vivarium_utimensat_decide((u64)-1, 0, 0, false),
+                   (int)VIV_UTIMENS_FD, "...for any fd but AT_FDCWD (the wstat judges it)");
+    TEST_EXPECT_EQ((int)vivarium_utimensat_decide(5, 0, nf, false),
+                   (int)VIV_UTIMENS_EINVAL, "the descriptor form takes no flag");
+    TEST_EXPECT_EQ((int)vivarium_utimensat_decide(5, 0, ep, false),
+                   (int)VIV_UTIMENS_EINVAL, "...not even AT_EMPTY_PATH");
+    TEST_EXPECT_EQ((int)vivarium_utimensat_decide(cwd, 0, 0, false),
+                   (int)VIV_UTIMENS_EFAULT, "AT_FDCWD with a null path: EFAULT");
+    TEST_EXPECT_EQ((int)vivarium_utimensat_decide(cwd, 0, 0x40000u, false),
+                   (int)VIV_UTIMENS_EINVAL, "...but a bad flag first");
+    TEST_EXPECT_EQ((int)vivarium_utimensat_decide(cwd, path, 0, false),
+                   (int)VIV_UTIMENS_PATH, "a name under AT_FDCWD");
+    TEST_EXPECT_EQ((int)vivarium_utimensat_decide((u64)(u32)(s32)VIV_AT_FDCWD, path, nf, false),
+                   (int)VIV_UTIMENS_PATH, "...AT_FDCWD zero-extended, NOFOLLOW");
+    TEST_EXPECT_EQ((int)vivarium_utimensat_decide(0xABCD0000FFFFFF9Cull, path, 0, false),
+                   (int)VIV_UTIMENS_PATH, "...only dirfd's low 32 bits count");
+    TEST_EXPECT_EQ((int)vivarium_utimensat_decide(cwd, path, 0x100000000ull, false),
+                   (int)VIV_UTIMENS_PATH, "...and only flags' low 32 bits");
+    TEST_EXPECT_EQ((int)vivarium_utimensat_decide(cwd, path, VIV_AT_REMOVEDIR, false),
+                   (int)VIV_UTIMENS_EINVAL, "a flag Linux refuses here");
+    TEST_EXPECT_EQ((int)vivarium_utimensat_decide(5, path, 0, false),
+                   (int)VIV_UTIMENS_FORWARD, "a name under a real dirfd forwards");
+    TEST_EXPECT_EQ((int)vivarium_utimensat_decide(5, path, ep, true),
+                   (int)VIV_UTIMENS_FD, "AT_EMPTY_PATH with \"\": the descriptor itself");
+    TEST_EXPECT_EQ((int)vivarium_utimensat_decide(cwd, path, ep | nf, true),
+                   (int)VIV_UTIMENS_CWD, "...or the working directory under AT_FDCWD");
+    TEST_EXPECT_EQ((int)vivarium_utimensat_decide(cwd, path, ep, false),
+                   (int)VIV_UTIMENS_PATH, "AT_EMPTY_PATH with a name changes nothing");
+    TEST_EXPECT_EQ((int)vivarium_utimensat_decide(5, path, ep, false),
+                   (int)VIV_UTIMENS_FORWARD, "...under a real dirfd either");
+    TEST_EXPECT_EQ((int)vivarium_utimensat_decide(cwd, path, 0, true),
+                   (int)VIV_UTIMENS_PATH, "\"\" without AT_EMPTY_PATH is a name (ENOENT later)");
 }
 
 void test_vivarium_fails_closed(void) {
@@ -3585,6 +3712,9 @@ void test_vivarium_startup_batch_rows(void) {
 
     TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_GETPPID, args, &out),
                    (int)VIV_TIER2, "getppid is T2 -- there is no native twin");
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_UMASK, args, &out),
+                   (int)VIV_TIER2,
+                   "umask is T2 -- it keeps mask & 0777, which the native call would refuse");
     TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_UNAME, args, &out),
                    (int)VIV_TIER2, "uname is T2 (a fabrication, not a translation)");
     TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_SET_TID_ADDRESS, args, &out),
@@ -3974,6 +4104,17 @@ void test_vivarium_fcntl_domain(void) {
     TEST_EXPECT_EQ((int)op, (int)VIV_FCNTL_DUPFD, "classifies as DUPFD");
     TEST_EXPECT_EQ((u64)(cx ? 1 : 0), (u64)0, "the plain form leaves the flag off");
     TEST_EXPECT_EQ(minfd, (u64)3, "and carries its minimum");
+
+    // The minimum is an int to Linux: only its low 32 bits are significant.
+    minfd = 0xBADu;
+    TEST_EXPECT_EQ((int)vivarium_fcntl_decide(VIV_F_DUPFD, (1ull << 32) | 10u, &op, &cx,
+                                              &minfd),
+                   (int)VIV_TRANSLATED, "F_DUPFD with a stale upper half is served");
+    TEST_EXPECT_EQ(minfd, (u64)10, "the minimum is the low 32 bits");
+    minfd = 0xBADu;
+    TEST_EXPECT_EQ((int)vivarium_fcntl_decide(VIV_F_DUPFD_CLOEXEC, ~0ull, &op, &cx, &minfd),
+                   (int)VIV_TRANSLATED, "F_DUPFD_CLOEXEC(-1) is served (the shell refuses it)");
+    TEST_EXPECT_EQ(minfd, (u64)0xFFFFFFFFu, "a sign-extended -1 narrows to 0xFFFFFFFF");
 
     op = VIV_FCNTL_UNSERVED; cx = true; minfd = 0xBADu;
     TEST_EXPECT_EQ((int)vivarium_fcntl_decide(VIV_F_GETFD, 0, &op, &cx, &minfd),
@@ -4368,6 +4509,8 @@ void test_vivarium_fcntl_dupfd_errnos(void) {
     // arm reaches handle_dup_posix and honours the minimum first.
     hidx_t live = handle_alloc(p, KOBJ_PROCESS, RIGHT_READ | RIGHT_TRANSFER, p);
     s64 ctl = viv_fcntl_for_test(p, (u64)live, VIV_F_DUPFD, 10);
+    // The minimum is an int to Linux: 2^32 + 10 asks for 10, not past the table.
+    s64 ctl_hi = viv_fcntl_for_test(p, (u64)live, VIV_F_DUPFD, (1ull << 32) + 10u);
 
     // ---- LEG A: F_DUPFD on a CLOSED fd is EBADF -- the ash probe. ---------
     // fd 3 is closed in a fresh Proc (the control's source took slot 0 and its
@@ -4376,6 +4519,9 @@ void test_vivarium_fcntl_dupfd_errnos(void) {
     s64 a = viv_fcntl_for_test(p, 3, VIV_F_DUPFD, 10);
     // The CLOEXEC spelling is the same op with the flag on -- same answer.
     s64 a2 = viv_fcntl_for_test(p, 3, VIV_F_DUPFD_CLOEXEC, 10);
+    // A closed fd with a bad minimum too: Linux looks the fd up first, so the
+    // probe's answer must not depend on the minimum it passed.
+    s64 a3 = viv_fcntl_for_test(p, 3, VIV_F_DUPFD, (u64)PROC_HANDLE_MAX);
 
     // ---- LEG B: F_DUPFD on a LIVE fd with a FULL table is EMFILE. ---------
     // Fill every free slot, prove fullness two ways (the count and a live
@@ -4390,6 +4536,8 @@ void test_vivarium_fcntl_dupfd_errnos(void) {
 
     // ---- LEG C: a minimum at or past the table is EINVAL (Linux: RLIMIT). --
     s64 c = viv_fcntl_for_test(p, (u64)live, VIV_F_DUPFD, (u64)PROC_HANDLE_MAX);
+    // A sign-extended -1 narrows to 0xFFFFFFFF: past the table, EINVAL.
+    s64 c2 = viv_fcntl_for_test(p, (u64)live, VIV_F_DUPFD, ~0ull);
 
     // ---- TEARDOWN, then assert. ---------------------------------------
     p->state = PROC_STATE_ZOMBIE;
@@ -4399,12 +4547,17 @@ void test_vivarium_fcntl_dupfd_errnos(void) {
     TEST_ASSERT(ctl >= 10,
                 "CONTROL: F_DUPFD(live, 10) lands at or above 10 -- the arm is "
                 "wired and honours the minimum");
+    TEST_ASSERT(ctl_hi >= 10,
+                "CONTROL: F_DUPFD(live, 2^32 + 10) lands at or above 10 -- Linux "
+                "reads the minimum as an int (pre-fix: EINVAL)");
     TEST_EXPECT_EQ(a_closed, -1, "A precondition: fd 3 is CLOSED");
     TEST_EXPECT_EQ(a, -(s64)T_E_BADF,
                    "A: F_DUPFD on a closed fd is EBADF -- ash's `N>&M` probe "
                    "reads any other errno as fatal (pre-fix: EMFILE)");
     TEST_EXPECT_EQ(a2, -(s64)T_E_BADF,
                    "A: F_DUPFD_CLOEXEC on a closed fd is EBADF too");
+    TEST_EXPECT_EQ(a3, -(s64)T_E_BADF,
+                   "A: a closed fd is EBADF even with a minimum past the table");
     TEST_ASSERT(filled > 0, "B precondition: the fill allocated something");
     TEST_EXPECT_EQ(b_count, PROC_HANDLE_MAX, "B precondition: the table is FULL");
     TEST_EXPECT_EQ(b_refused, -1, "B precondition: a live alloc is now refused");
@@ -4414,6 +4567,8 @@ void test_vivarium_fcntl_dupfd_errnos(void) {
                    "would fail here)");
     TEST_EXPECT_EQ(c, -(s64)T_E_INVAL,
                    "C: a minimum at the table size is EINVAL, not EMFILE");
+    TEST_EXPECT_EQ(c2, -(s64)T_E_INVAL,
+                   "C: a sign-extended -1 minimum is EINVAL");
 }
 
 // F_GETFL / F_SETFL round-trip through the REAL fcntl shell -> handle_set_nonblock
@@ -4439,6 +4594,28 @@ void test_vivarium_fcntl_nonblock_roundtrip(void) {
     s64 g2  = viv_fcntl_for_test(p, (u64)rd, VIV_F_GETFL, 0);
     s64 gw  = viv_fcntl_for_test(p, (u64)wr, VIV_F_GETFL, 0);
     s64 bad = viv_fcntl_for_test(p, 5, VIV_F_SETFL, VIV_O_NONBLOCK);   // fd 5 is closed
+    // The fd is an unsigned int to Linux: a stale upper half still names rd.
+    s64 ghi = viv_fcntl_for_test(p, (1ull << 32) + (u64)rd, VIV_F_GETFL, 0);
+    // Flags with no mechanism are refused, never dropped; an unrelated bit
+    // (O_LARGEFILE, which musl ORs into every F_SETFL) still is dropped.
+    s64 son   = viv_fcntl_for_test(p, (u64)rd, VIV_F_SETFL, VIV_O_APPEND);
+    s64 sasy  = viv_fcntl_for_test(p, (u64)rd, VIV_F_SETFL, VIV_O_ASYNC);
+    s64 sdir  = viv_fcntl_for_test(p, (u64)rd, VIV_F_SETFL, VIV_O_DIRECT);
+    s64 snoa  = viv_fcntl_for_test(p, (u64)rd, VIV_F_SETFL, VIV_O_NOATIME);
+    s64 slrg  = viv_fcntl_for_test(p, (u64)rd, VIV_F_SETFL, VIV_O_LARGEFILE);
+    // O_APPEND rides the open-time mode, which no Dev a kernel test can open
+    // honours; stamp the write end's mode, read, restore (before any assert).
+    s64 ga = -1, soff = -1, skeep = -1;
+    if (pr == 0) {
+        struct Spoor *ws = (struct Spoor *)p->handles->slots[wr].obj;
+        int wsaved = ws->mode;
+        ws->mode = 1 | (int)SYS_WALK_OPEN_OAPPEND;
+        ga = viv_fcntl_for_test(p, (u64)wr, VIV_F_GETFL, 0);
+        soff  = viv_fcntl_for_test(p, (u64)wr, VIV_F_SETFL, 0);
+        skeep = viv_fcntl_for_test(p, (u64)wr, VIV_F_SETFL,
+                                   VIV_O_APPEND | VIV_O_NONBLOCK);
+        ws->mode = wsaved;
+    }
 
     // Observe -> teardown -> assert (TEST_* may early-return).
     p->state = PROC_STATE_ZOMBIE;
@@ -4455,6 +4632,17 @@ void test_vivarium_fcntl_nonblock_roundtrip(void) {
     TEST_EXPECT_EQ((s64)(g2 & (s64)VIV_O_NONBLOCK), 0, "F_SETFL 0 CLEARS O_NONBLOCK");
     TEST_EXPECT_EQ((s64)(gw & 3), 1, "F_GETFL: write end reports OWRITE (1) -- the F2 mode fix");
     TEST_EXPECT_EQ(bad, -(s64)T_E_BADF, "F_SETFL on a closed fd is EBADF, not silent success");
+    TEST_EXPECT_EQ(ga, (s64)(VIV_O_WRONLY | VIV_O_APPEND),
+                   "F_GETFL reports O_APPEND for an append open");
+    TEST_EXPECT_EQ(ghi, g2, "F_GETFL on 2^32 + fd reads fd (pre-fix EBADF)");
+    TEST_EXPECT_EQ(son, -(s64)T_E_INVAL,
+                   "F_SETFL turning O_APPEND on is EINVAL (pre-fix: silently dropped)");
+    TEST_EXPECT_EQ(sasy, -(s64)T_E_INVAL, "F_SETFL O_ASYNC is EINVAL");
+    TEST_EXPECT_EQ(sdir, -(s64)T_E_INVAL, "F_SETFL O_DIRECT is EINVAL");
+    TEST_EXPECT_EQ(snoa, -(s64)T_E_INVAL, "F_SETFL O_NOATIME is EINVAL");
+    TEST_EXPECT_EQ(slrg, 0, "F_SETFL drops O_LARGEFILE, as Linux does");
+    TEST_EXPECT_EQ(soff, -(s64)T_E_INVAL, "F_SETFL turning O_APPEND off is EINVAL");
+    TEST_EXPECT_EQ(skeep, 0, "F_SETFL restating O_APPEND with O_NONBLOCK is served");
 }
 
 // The dup(2) arm (git-remote-https' helper pipe). Drives viv_dup_for_test on a

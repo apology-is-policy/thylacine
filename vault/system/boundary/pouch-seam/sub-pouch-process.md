@@ -5,10 +5,19 @@ parent: moc-pouch-seam
 title: "Process lifecycle — posix_spawn, wait, pipe, the environ populate, the terminators"
 code:
   - usr/lib/pouch/patches/0026-pouch-process.patch
+  - usr/lib/pouch/patches/0052-pouch-spawn-action-sources.patch
+  - usr/lib/pouch/patches/0053-pouch-spawn-source-query.patch
+  - usr/lib/pouch/patches/0054-pouch-dup2-self-query.patch
+  - usr/lib/pouch/patches/0055-pouch-descriptor-operations.patch
+  - usr/lib/pouch/patches/0057-pouch-kill-probe-getppid.patch
+  - usr/pouch-hello/pouch-hello-descriptor-ops.c
+  - usr/pouch-hello/pouch-hello-dup2-self.c
+  - usr/pouch-hello/pouch-hello-handle-query.c
   - usr/lib/pouch/patches/0064-pouch-spawn-env.patch
   - usr/pouch-hello/pouch-hello-spawn.c
   - usr/lib/pouch/patches/0043-pouch-identity-calls.patch
   - usr/pouch-hello/pouch-hello-identity.c
+  - usr/pouch-hello/pouch-hello-spawn-actions.c
   - usr/lib/pouch/patches/0025-pouch-env.patch
   - usr/lib/pouch/patches/0011-pouch-abort.patch
   - usr/lib/pouch/patches/0012-pouch-mallocng-crash.patch
@@ -21,6 +30,49 @@ design: ["docs/POUCH-DESIGN.md", "docs/LLVM-DESIGN.md"]
 created: 2026-08-01
 updated: 2026-10-29
 ---
+## Descriptor operations checkpoint (October 11; main B-3b)
+
+Patch0055 (codex/astra 0052) consumes approved native 130/131 for public F_SETFD
+and exact-target dup2/dup3; F_GETFD uses 129. Self-dup preserves flags. Live tagged sockets remain
+explicit ENOSYS for unsupported flag/target operations; invalid tags are EBADF.
+The current spawn interpreter tracks child flags and applies final exclusion
+after actions; self-DUP2 actions clear the child flag. OPEN with O_CLOEXEC is
+rejected before temporaries; sparse lists still fail. Raw internal SYS_fcntl
+callers and general inheritance remain gaps. See `docs/NATIVE-DESCRIPTOR-OPERATIONS-REVIEW.md` for actual-source tests, audit reasoning and source-matched qualification limits.
+
+Patch0056 (B-3b) completes the family: `dup` is DUP_TO with DUP_LOWEST and
+floor 0; fcntl's F_DUPFD / F_DUPFD_CLOEXEC pass their floor (a negative one
+widens and the kernel refuses it after a closed fd's EBADF); F_GETFL decodes
+FLAGS_GET's status word; F_SETFL changes O_NONBLOCK only (native 123),
+accepts a restated O_APPEND and refuses a flipped one; `pipe2` now honours
+O_CLOEXEC (FLAGS_SET) and O_NONBLOCK (123) on both ends; a set that fails
+fails the call and closes both ends, except an end whose own set answered
+EBADF (a peer thread closed it, and its number may already be another
+thread's; round 2). Astra's four guest witnesses (descriptor-ops, dup2-self, handle-query,
+spawn-actions) were built and run by nothing on main; B-3b compiles them into
+`/bin` and `tools/interactive/ls-descriptors.exp` runs each as uid 1000.
+dup2-self and handle-query set close-on-exec before they read it. As written,
+both read only a clear flag, and a CI image whose FLAGS_GET hid the flag from
+uid 1000 passed them; descriptor-ops alone turned red (2026-10-15).
+With that image and a posix_spawn whose addclose did nothing for uid 1000, all
+four turned red (2026-10-18), but spawn-actions only where the skipped close
+left a hole in the child's table, which posix_spawn refuses with EINVAL. The
+child gets only stdio and the slots its actions establish (the F7 inheritance
+gap), so closing any other descriptor is a no-op, and a skipped close that
+leaves the table dense is invisible from the parent. The child now checks that
+each slot it was told to close answers EBADF, and established-close-dense
+closes a slot established directly above stdio.
+
+The round-1 close (2026-10-15): `pipe2`'s failure unwind closes with the raw
+`__syscall(SYS_close)`, as `popen` does, never the cancellable
+`close()`. The descriptor-ops witness reads a std stream's FLAGS_GET word as
+the flag bit plus status (a console stream is ORDWR, word 0x200), testing
+bit0 alone. With `pipe2(O_CLOEXEC)` flagging both ends, a `popen("r")` whose
+caller has fd 0 closed gets its read end at fd 0, which spawn's final
+exclusion then removes from the child, leaving a hole at child fd 0: spawn
+refuses it EINVAL (the approved sparse-spawn contract) where it used to hand
+the child the read end as its stdin (a Caveat below; OPEN-BUGS).
+
 ## Identity — the calls that could not report failure (A-6)
 
 A program's own identity belongs here with the rest of what it knows about
@@ -54,9 +106,11 @@ is the no-ambient-authority invariant holding by construction. A future change
 that made `geteuid()` diverge would be an invariant violation before it was an
 ABI change.
 
-`getppid` is deliberately **left parked** — it is the only one of the five with
-no kernel call behind it, and it has zero callers in the tree. A known lie, by
-decision rather than oversight.
+`getppid` was **left parked** here -- the only one of the five with no kernel
+call behind it, returning the sentinel's -38 as a pid. Vote 6 (2026-10-14)
+gave it native `SYS_GETPPID` (132); patch 0057 points it there, as `getpid`
+points at 72, and `pouch-hello-signals`' `probe` leg checks a child's
+`getppid()` against the pid its parent handed it.
 
 The witness is `pouch-hello-identity`, and it deliberately does **not** assert a
 literal principal — that would pass for the wrong reason the moment the boot
@@ -114,6 +168,28 @@ Slots 0/1/2 are seeded by PROBING the parent's std fds (a lowest-free dup
 with each right, then close) — a parent lacking stderr must not list a
 non-existent fd and fail the whole spawn.
 
+**Action history and temporary descriptor provenance (0052).** A source
+closed by an earlier child action cannot fall back to the parent's live fd.
+The nearest earlier CLOSE/OPEN/DUP2 decides whether that source was removed
+or reestablished. This check runs before opening parent-side temporaries.
+Each newly opened fd is then checked against every original-parent source
+mentioned in the action list, including aliases later closed or overwritten.
+A collision proves that original source was absent: reject EBADF after
+registering the temporary for cleanup. An explicitly child-created source
+continues to resolve through the existing model. No additional R/W existence
+probes or shared state are introduced; concurrent parent fd close/reuse stays
+outside the existing supported envelope. The final kernel list still validates
+original sources, with its existing errno collapse; a discarded invalid
+original source without a temporary collision remains a tracked gap.
+See `docs/POUCH-SPAWN-ACTION-REVIEW.md` for single-agent self-review, host
+baseline/mutant evidence and the native14-case ordinary-user witness. The
+full official sysroot rebuild includes static/shared libc; runtime7's static
+probe verifies child bytes/wait/errors and exits0 with clean harness shutdown.
+The witness measures an identical O_CREAT open to locate its temporary slot:
+the parent-directory handle means /dev/null predicts a different slot. The
+initial wrong-slot run is preserved as a failed fixture, not a code regression.
+Existing Ninja and dynamic-loader behavior are not requalified by this probe.
+
 **Contiguity is a hard requirement, not a nicety.** The kernel installs
 the list at consecutive lowest-free slots, so a HOLE (`{0,2}`) cannot be
 expressed and is `EINVAL`.
@@ -137,12 +213,16 @@ and the write fd in `x1`; musl's `__syscall` captures only `x0`, so
 shape). It is therefore OUTSIDE the seam's sentinel guard by
 construction — correct only because it names a real number.
 
-**`dup2` onto a target has no primitive and no consumer.** `handle_dup`
-allocates the lowest free slot — that is `dup()`, not `dup2()`. The
-toolchain never needs it (posix_spawn resolves statically), so
-onto-target fails LOUD with `ENOSYS`; `old == new` returns `new`
-best-effort, since there is no rights-independent fd-existence probe (a
-0-rights dup is rejected, and the source's own rights are unknown).
+**`dup2` onto a target** was ENOSYS until patch0055 (DUP_TO); `dup` until
+patch0056 (DUP_TO's DUP_LOWEST). Patch0054 validates `old == new`
+using native129 for a kernel descriptor or the existing locked Pouch socket
+resolver for a tagged socket, including fresh sockets without kernel handles.
+Absent slots return EBADF; historical native unknown-call -1 maps to ENOSYS.
+Self-dup allocates nothing, acquires no object reference and preserves flags.
+It observes validity at one instant; it does not pin concurrent close/reuse.
+The12-case actual-source host suite and native uid1000 probes cover both
+owners, table exhaustion and old-kernel refusal. See
+`docs/POUCH-DUP2-SELF-REVIEW.md` for exact evidence and limits.
 
 **`abort()` dies of `snare:abort`; mallocng's `assert` calls it.** musl's
 `abort()` and mallocng's internal `assert` both ended in `a_crash()` — a
@@ -188,7 +268,10 @@ it packs `argv`, as NUL-terminated records, and always announces the tail, so
 a `struct pouch_spawn_ext_env` directly follows the record. The child's
 `/env` is exactly those records, built by the spawner's kernel before rfork
 ([[dec-2026-10-28-spawn-env]]). A later record for a name replaces an earlier
-one, and nothing of the parent's `/env` carries over. A NULL `envp` is an
+one, which is not Linux's reading: there the child keeps both and `getenv`
+finds the first, so the idiom of putting an override such as `LANG=C` ahead of
+`environ`'s entries loses the override here. Nothing of the parent's `/env`
+carries over. A NULL `envp` is an
 empty environment, as Linux's `execve` takes it, rather than an inherited
 one. A caller that passes `environ` therefore hands its child whatever
 `setenv` changed, which closes the seam's second half.
@@ -281,6 +364,26 @@ internal-allocator remapping in `fdop.h` is undone and the plain
 allocators are used. The `opened[]` array is bounded independently of the
 slot count, because many opens can target the same bounded slot.
 
+## Native source validation (October 11)
+
+Patch0050 queries each original-parent DUP2 source before temporary opens,
+including sources whose child aliases are later closed or overwritten. Earlier
+child assignments still use the ordered child model. Standard streams are
+seeded with the same nonallocating, rights-independent native128 query: EBADF
+means absent; other errors stop spawn. A full parent table no longer makes a
+live stream appear absent. Historical kernels return raw -1 for an unknown native call; this query alone
+normalizes that value to ENOSYS and the new libc fails closed before publishing
+a child. Explicit -ENOSYS is also passed through. Kernel and libc must therefore ship together.
+Close-history and temporary-origin guards remain. Parent close/reuse and action
+edits must still be serialized by the caller; this query does not pin a handle.
+
+The maintained real-source host suite now has25 cases and close/query/legacy-error mutants;
+the native spawn witness has16 cases. The dedicated metadata witness covers
+narrowed aliases, rights-independent access and saturated tables, with a
+separate old-kernel mode. Qualification is recorded in
+`docs/NATIVE-HANDLE-QUERY-PROPOSAL.md`. General inheritance, F_GETFD/F_SETFD,
+spawn attributes and signal policy remain separate unfinished contracts.
+
 ## Invariants enforced
 
 - **[[inv-i24]] (consumer side).** An `abort()` from any thread kills the
@@ -359,13 +462,24 @@ non-functional). Closed: [[seam-pouch-spawn-envp]] (0064).
 
 ## Caveats
 
+- **A close-on-exec descriptor at fd 0 or 1 makes a stdio-inheriting spawn
+  fail `EINVAL`** (since 0056) when a higher standard stream is open. A
+  process with fd 0 (or 1) closed that opens anything O_CLOEXEC -- open,
+  fopen "e", opendir, shm_open, mkostemp, the loader's opens, Rust std's
+  File::open, the read end of `popen("r")`'s pipe -- gets it there flagged;
+  spawn's final exclusion drops it from the child, and the hole is the
+  sparse list spawn refuses. Linux would give the child a closed fd 0. Before
+  0056 open ignored O_CLOEXEC and the child inherited the descriptor.
+  OPEN-BUGS 2026-10-15 owns the inheritance model this belongs to.
+
 - `posix_spawnattr` (SETSID / SETPGROUP / RESETIDS / SETSIG*) is ignored:
   there is no post-spawn child hook, and a fresh child inherits session,
   pgroup, identity, and default note dispositions — which satisfies the
   toolchain's (unset) attr by construction, but would silently ignore a
   program that set one.
-- `pipe2(O_NONBLOCK)` is accepted and not honored (no `F_SETFL`);
-  `O_CLOEXEC` is a true no-op (a child inherits only listed fds).
+- `pipe2` sets its flags after SYS_PIPE creates the ends, so a peer
+  thread's spawn between the two steps can see an unflagged end (Linux's one
+  call cannot).
 - The `/env` populate caps at 512 variables / 256-byte names /
   8 KiB values, and silently skips a variable removed between readdir and
   open.

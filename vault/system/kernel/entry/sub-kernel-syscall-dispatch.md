@@ -36,9 +36,9 @@ cannot be delegated by a caller lacking internal factory role bit 29.
 The C/kernel, C/libt and Rust compiled ABI witnesses agree on number, bit and
 record layout. See [[sub-kernel-devsrv]].
 
-Numbers 129..133 and 135..137 are assigned nothing on this tree (b3 and main hold
-them; 127 and 128 are main's JIT_CREATE_SEALED and ICACHE_SYNC_SPACE).
-`syscall.native_gap_unassigned` (`kernel/test/test_syscall.c`) pins the gap by
+Since the join with main (2026-11-03) every number from 44 through 138 is
+assigned; the table's holes are 26, 30 and 43.
+`syscall.native_holes_unassigned` (`kernel/test/test_syscall.c`) pins them by
 the unknown arm's own counter, `syscall_unknown_count()`, rather than by the -1
 that arm answers, because many native handlers refuse zeroed arguments with the
 same -1. Its controls leave the counter alone: 134 answers the factory-role gate
@@ -47,6 +47,185 @@ and 138, whose empty name is its own refusal, answers EINVAL.
 Native call 138 is POSTNOTE_TID, which posts to one thread of the caller's own Proc
 ([[sub-kernel-syscall-abi]], [[sub-kernel-notes]]). It shares `postnote_copy_name` with
 `SYS_POSTNOTE`.
+
+## SYS_WSTAT on a resolved Spoor (2026-10-22, G12)
+
+`sys_wstat_for_proc` splits into `wstat_prepare` (the mask sanity, the per-field
+bounds, the times copied by their _SET bits) and `wstat_apply` (the O_PATH size
+refusal, the Dev's `wstat_bind`, perm_wstat_check, the Dev), with the handle lookup between them, so its
+order (EINVAL before EBADF) is unchanged. `sys_wstat_spoor_for_proc` runs the
+same two on a Spoor the kernel resolved for itself, refuses SIZE (no write
+envelope) and leaves the caller's reference alone. The phenotype's utimensat and
+fchmodat use it with `sys_resolve_kpath_for_proc` so they install no descriptor
+a peer thread could close and reuse ([[sub-kernel-vivarium]]); each folds only
+the wstat's EACCES into Linux's EPERM, never the resolve's (a search denied on
+the way stays EACCES). `dev9p.wstat_spoor_private` covers it.
+Since that bind, a loose cached open of a file that moved since its open answers
+`-T_E_STALE`, not `-T_E_OPNOTSUPP`.
+
+## SYS_FSTAT's errnos (2026-10-20, ERRORS.md ER-2)
+
+`sys_fstat_for_proc(p, hraw, out_k)` is the core that `sys_fstat_handler` (50)
+and the phenotype's fstat share. It answers -T_E_BADF when
+`sys_lookup_rw_handle` finds no Spoor at the index, which covers an empty,
+closed or out-of-range slot and a handle of another kind. A failure from
+`spoor_stat_native` is mapped as stalk's `err_code` maps it, so `fstat` and
+`stat` answer one object's failure alike: a -errno in [-4095,-2] crosses as
+itself, and anything else (a NULL `stat_native`, a Dev's flat -1, a server
+EPERM arriving as -1) reads -T_E_IO. The one exception is a Dev's -T_E_BADF,
+which also reads -T_E_IO: the handle is live at that point, so a Dev's EBADF
+cannot pass for the handle gate's verdict (a 9P server's never arrives: the
+client folds it at `map_error`, vote 2026-10-21 #16), and an
+EBADF from fstat always means the number names nothing (round 1 F1: Pouch's
+`O_DIRECTORY` unwind and its ioctl refusal both rely on that). The core's
+`!p` and `!out_k` guards and the handler's `!t` and `!p` still answer -1; no
+EL0 call reaches them (ER-3).
+
+The handler validates the 88-byte destination before the lookup, as
+`sys_lstat_handler` does, and copies the record out a byte at a time; either
+refusal is -T_E_FAULT. A bad destination therefore answers -T_E_FAULT whatever
+the handle, where Linux asks the descriptor first. The phenotype's fstat copies
+out after the core, in Linux's order, and returns the core's answer unchanged,
+so a Linux guest reads -EBADF for a dead descriptor.
+
+The core is exported, with a prototype, so `syscall.fstat_errnos`
+(test_syscall) drives it without EL0: a live write-only handle stats; a closed,
+out-of-range or other-kind handle is -T_E_BADF; a Dev with no `stat_native`
+(devzero) is -T_E_IO; a mock Dev's refusals cross or read -T_E_IO at each edge
+of the window, and its -T_E_BADF reads -T_E_IO; and through the dispatcher a
+NULL destination is -T_E_FAULT, a closed handle -T_E_BADF, and a live handle
+whose destination faults at the first store (0x10000000, on kproc, whose user
+half is empty) -T_E_FAULT from the copy-out.
+
+## The native symlink reads: SYS_READLINK and SYS_LSTAT (2026-10-20, B-3f')
+
+`sys_readlink_handler` (135) marshals x0-x3 and `sys_lstat_handler` (136)
+x0-x2; [[sub-kernel-syscall-abi]] has the contracts
+([[dec-2026-10-20-native-lstat-readlink]]). Each copies its path in as
+`sys_stat_handler` does: the span is validated as user memory, loaded a byte at
+a time with an embedded NUL refused, and NUL-terminated in a kernel scratch of
+SYS_OPEN_PATH_MAX + 1. At those steps they answer SYS_OPEN_CREATE's errnos,
+-T_E_INVAL for an empty or over-long path or a NUL and -T_E_FAULT for an
+unreadable one, where SYS_STAT answers a bare -1. `sys_lstat_handler` validates
+the 88-byte destination before the walk, runs `sys_stat_for_proc` with
+`STALK_NOFOLLOW` (the flag the phenotype's newfstatat passes for
+AT_SYMLINK_NOFOLLOW), and copies the record out a byte at a time; any fault is
+-T_E_FAULT.
+
+The readlink path is two functions, so the suite drives the core without EL0:
+
+- `sys_readlink_target_for_proc(p, path, len, tgt)` resolves with
+  `STALK_WALK | STALK_NOFOLLOW` through `stalk_err`, so a walk failure keeps its
+  cause (EACCES at a component without X-search, ELOOP on an earlier link's
+  cycle). A quarry that is not `QTSYMLINK`, or whose Dev has no `.readlink`, is
+  -T_E_INVAL. Otherwise it reads the target into kernel memory and answers the
+  length (1..SYS_OPEN_PATH_MAX). A negative answer from the Dev is its own
+  errno and passes through, because EINVAL there would tell a caller such as
+  git's real_path that the component is a plain file. An empty or over-long
+  answer is -T_E_INVAL.
+- `sys_readlink_for_proc` is the shell both entries share, the phenotype's
+  readlinkat and SYS_READLINK. bufsiz 0 is -T_E_INVAL before any walk. After
+  the core it copies min(target, bufsiz) bytes out, once `sys_validate_user_buf`
+  has checked exactly that span: `uaccess_copy_out`'s fixup engages only for
+  user-half addresses (the getdents64 P0 class). The phenotype's readlinkat
+  answers as it did before the split.
+
+The readlink entry holds three SYS_OPEN_PATH_MAX + 1 buffers on its 16 KiB
+kernel stack (the path scratch, the target, the core's cwd join), the depth
+the phenotype's readlinkat already had. Tests: `sys_stat.lstat_readlink_for_proc`
+(test_stalk, the cores over the D-1 symlink fixture) and
+`syscall.dispatch_symlink_reads` (both numbers reach their handlers).
+
+## The sync create chokepoint: session ends, the created mode, SYS_UMASK (2026-10-19, B-3e M7 + M8)
+
+`spoor_create_install` admits a create through a 9P session only to a principal
+at one of the session's two ends
+([[dec-2026-10-18-create-speaks-for-a-session-end]], IDENTITY-DESIGN 9.7 M7):
+the server stamps a create with its session's credential, never the caller's,
+so anyone else's create would be recorded as an end's.
+`dev9p_create_admits(src, principal_id)` ([[sub-kernel-ninep-dev9p]]) answers
+it before the `/srv` branch and answers true for every other Dev, so a service
+post is unaffected. The parent's stat block now runs where the Dev enforces rwx
+OR the create is not admitted, and the refusal joins the W|X one: -T_E_ACCES,
+except that a caller holding X on the parent gets -T_E_EXIST for a name that is
+there (the existing `stalk_union_has_child` probe), so ported code that tests
+for EEXIST after a failed mkdir keeps working on a mount it may not create on. It is
+decided where the Dev does not enforce rwx too, and whatever the caller's DAC
+override: `perm_check` answers for the mode bits, not for whom the server will
+name as the creator. `sys_attach_9p_for_proc` stamps a pipe session's ends as
+(the attacher, PRINCIPAL_INVALID) beside the `/ctl/9p-sessions` owners it
+already stamped, since the kernel cannot name the server behind a
+caller-supplied transport; the `/srv` attach stamps the conn's own ends
+([[sub-kernel-ninep-attach]]). Loom's `MKDIR`, `MKNOD` and `SYMLINK`, the one
+other way to create through a session, ask the same at their own gate
+([[sub-kernel-loom]]).
+
+After the `/srv` branch and the DMSRV reject, the create's rwx bits are
+rewritten ([[dec-2026-10-19-create-mode-bound-and-umask]], M8): `perm = (perm &
+~0777) | perm_create_mode(perm, perm & DMDIR, proc_umask(p), bound_by)`
+([[sub-kernel-perm]]). `bound_by` is the parent's stat, the one the block above
+took, where `dev->perm_enforced`, and NULL elsewhere, so a Dev whose modes
+carry no authority gets the umask alone. The server applies neither: Stratum
+stamps `mode & 07777` as it receives it, the 9P2000.L convention in which the
+client masks, so the kernel must, here and in Loom's `MKDIR` and `MKNOD`
+([[sub-kernel-loom]]). The create then opens
+the new file with the access asked, never checked against its new mode (Plan 9
+and POSIX create semantics): a file created 0400 is writable through the
+descriptor that created it.
+
+**The created group (2026-10-19, [[dec-2026-10-19-create-group-from-parent]],
+IDENTITY-DESIGN 3.5 F-5).** The create sends the parent directory's group,
+`parent_st.gid`, where it sent the caller's `primary_gid` before: Stratum stamps
+the gid it is sent, so a group directory now keeps what is made in it. The stat
+block above runs only where the Dev enforces rwx or the create is not admitted;
+on every other Dev the parent's stat is taken after the DMSRV reject, so a
+`/srv` post still takes none. A parent that cannot be stat'd refuses the create
+with -T_E_IO, as on the enforcing Devs, and a parent whose stat names no group
+(GID_INVALID: the server left the gid out of Rgetattr) passes GID_INVALID on. A
+caped session's create still carries `P9_NOGID` ([[sub-kernel-ninep-dev9p]]),
+and Loom's gid-0 default asks the same of its own stat ([[sub-kernel-loom]]).
+
+`sys_umask_handler` (133) calls `umask_of`: a bit outside 0777 anywhere in the
+64-bit argument is -T_E_INVAL with the mask unchanged, as `sys_wstat` refuses
+stray mode bits; otherwise `proc_umask_exchange` stores the new mask and
+returns the previous one ([[sub-kernel-proc]]). No user memory, no capability,
+no lock. The phenotype's umask (Linux 166, a Tier-2 row) is `viv_umask`: it
+keeps `mask & 0777` and exchanges through the same accessor, so the two ABIs
+share the Proc's one mask, and it never fails, as Linux's does not.
+`sys_umask_for_test` and `viv_umask_for_test` drive the two cores.
+
+Witnesses: `dev9p.create_admits_session_ends`,
+`dev9p.create_refuses_invalid_principal`, `dev9p.create_refusal_keeps_eexist`,
+`dev9p.create_refusal_without_rwx`, `dev9p.open_create_refuses_non_end`
+(SYS_OPEN_CREATE's create leg reaches the same chokepoint),
+`dev9p.create_mode_on_the_wire` (the wire mode through both create doors, each
+leg one input from a neighbour), `sys_attach_9p.stamps_attacher_end` and
+`proc_identity.umask_syscall` (the exchange, a refusal anywhere in the
+register, the phenotype's masking). Every M7 creator holds CAP_DAC_OVERRIDE, so
+the mode bits admit it and only M7 can refuse.
+
+## Native descriptor mutations (October 11; main B-3b)
+
+Native 130/131 validate full-width arguments before invoking existing locked
+handle operations. No user pointers, allocation or cross-process target.
+Checked duplication errors are produced within the replacement lock, not by
+querying a source again after failure. Linux tkill/tgkill (130/131) are
+Vivarium TIER2 rows, consumed before these handlers. See [[sub-kernel-handle]]
+and [[sub-kernel-syscall-abi]].
+
+## Handle metadata query (October 11; main B-3b)
+
+Native 129 range-checks the full u64 argument before narrowing, then calls
+`handle_get_status` for the current process, which reads the slot's
+close-on-exec flag, its open mode and its nonblock flag in one hold of the
+table lock, and answers the status word: bit 0 close-on-exec, the access mode
+in bits 8-9 (masked, so OTRUNC and OAPPEND never reach it), nonblock 0x400 and
+append 0x800 (from the open mode's OAPPEND) -- the layout
+[[sub-kernel-syscall-abi]] gives. No user-memory access, object operation,
+allocation or rights/capability acquisition occurs. EBADF describes an invalid
+slot; EINVAL describes a missing current thread/process. Linux kill (129) is a
+Vivarium TIER2 row, consumed before native dispatch. The metadata does not
+protect against concurrent close/reuse. See [[sub-kernel-syscall-abi]].
 
 ## Trusted-seat and nonblocking entries
 
@@ -119,7 +298,7 @@ and the thread-exit call, which abandon the frame on the exiting thread's kernel
 stack until the resume path of its last switch-out frees it ([[inv-i48]]). Three others take **the frame itself** and
 so break the uniform result-write; see below.
 
-An unknown number writes `-1` and returns.
+An unknown number writes `-T_E_NOSYS` (38, Linux's `ENOSYS`) and returns.
 
 **The dispatcher is no longer contentless.** The pre-phenotype claim — no
 validation, no capability check, no bookkeeping, every gate a handler's — held
@@ -204,7 +383,7 @@ Nothing pins the translation table's native targets to real dispatch arms by
 construction — but a compile-time assertion pins the table's native/Linux
 boundary constant to the highest assigned native number, and a census of every
 native symbol the table can emit finds a dispatch arm for each. A translated
-number with no arm would land on `default` and return the bare sentinel with no
+number with no arm would land on `default` and return `ENOSYS` with no
 unserved report, which is the one failure shape the four-way naming above does
 not cover.
 
@@ -702,13 +881,24 @@ post branch ignoring the bit.
 
 ### SYS_WSTAT is the third FS identity gate, and it splits metadata from content
 
-`sys_wstat_handler` thins to the all-scalar `sys_wstat_for_proc(p, h, valid, mode,
-uid, gid, size)` — the handler/inner split that makes the gate testable without a
-live EL0 thread (the #37 pattern). It validates structurally first: at least one
+`sys_wstat_handler` thins to `sys_wstat_for_proc(p, h, valid, mode, uid, gid,
+size, times)` — the handler/inner split that makes the gate testable without a
+live EL0 thread (the #37 pattern). The handler's one piece of work is the x6
+copy-in: the two `struct t_timespec` (atime, mtime) are read from the caller only
+when `ATIME_SET` or `MTIME_SET` is in the mask, so the residue a chmod or a "now"
+leaves in x6 is never touched; an unreadable pointer is EFAULT. The mask's shape
+(`wstat_mask_check`: a known bit, no reserved one, no `_SET` without its time)
+is checked before the copy, so a malformed mask is EINVAL whatever x6 holds; with
+the copy first, joey's `_SET`-alone leg answered EFAULT on its first device run
+(lease 5), an errno that depended on register residue. The inner takes a
+kernel copy. It validates structurally first, each refusal EINVAL: at least one
 known `valid` bit and no reserved one (so a future `T_WSTAT_*` cannot be silently
-dropped), the mode masked to the rwx nine (setuid/setgid/sticky reject), `uid`/
-`gid` rejected on the invalid sentinel, a `size` with its sign bit set rejected up
-front.
+dropped), no `_SET` bit without its time bit, the mode masked to the rwx nine
+(setuid/setgid/sticky reject), `uid`/`gid` rejected on the invalid sentinel, a
+`size` with its sign bit set rejected up front, and an explicit time with a
+negative second or an nsec outside [0, 999999999]. Only a `_SET` entry is read
+and checked; the Dev is handed a local copy holding those entries alone, so the
+other slot never travels.
 
 **The fd is kind-gated, not rights-gated — for the metadata axes.** The handle
 need only be a `KOBJ_SPOOR` of *any* rights (it rejects `KOBJ_SRV`), so `fchmod(2)`
@@ -733,12 +923,28 @@ with `CWALKONLY` set is rejected. A navigation handle is not a byte-I/O channel,
 and truncate is byte I/O.
 
 **The metadata policy check is placed here; the policy itself is not.**
-`perm_wstat_check` runs only for `{MODE, UID, GID}` and only on a `perm_enforced`
-Dev, reading the file's *current* owner first — the who-may-chmod/chown/chgrp
-adjudication is [[sub-kernel-perm]]'s three-authority rule. A size-only call skips
-it (its identity check was the open-time `perm_check`). Since #47 this is the
-*sole* write-authority gate on the mode/uid/gid path: load-bearing, not additive
-to a handle right.
+`perm_wstat_check` runs for `{MODE, UID, GID}` and the time bits, only on a
+`perm_enforced` Dev, reading the file's *current* stat first — the who-may
+adjudication is [[sub-kernel-perm]]'s table (owner or CAP for a time, also
+write permission for the touch, both times to "now"). A size-only call skips it (its identity check
+was the open-time `perm_check`). Since #47 this is the *sole* write-authority gate
+on the mode/uid/gid/times path: load-bearing, not additive to a handle right. The
+times, like chmod, work through an `O_PATH` handle, which is how a path-form
+`utimensat` reaches them.
+
+**Every refusal answers its errno** (G12, operator vote 18 of 2026-10-22; until
+then a flat -1): EINVAL for the structure above, EBADF for a handle naming no
+Spoor and for a truncate through a handle without `RIGHT_WRITE` or through
+`O_PATH`, EFAULT for x6, EACCES for the policy's denial, EOPNOTSUPP for a Dev
+with no `.wstat_native`, and a stat's or the Dev's `-errno` by `wstat_dev_errno`,
+which is `SYS_FSTAT`'s rule (a value in [-4095,-2] as itself, EBADF and anything
+else as EIO, so a live fd is never blamed). The denial is EACCES, never EPERM:
+`-EPERM` is -1, the pouch seam's EIO sentinel ([[sub-pouch-seam]]). The POSIX
+front ends answer EPERM where ownership is the only refusal; the vivarium's
+fchmodat does so here, turning the inner's EACCES into Linux's -EPERM.
+Witnesses: `dev9p.wstat_times_wire`, `dev9p.wstat_times_einval`,
+`dev9p.wstat_times_permission`, `dev9p.wstat_errnos`, and the errno-asserting
+legs of `dev9p.wstat_readonly_fd` / `dev9p.wstat_size`.
 
 ### Positioned byte I/O reuses the read/write inner with the cursor held still
 
@@ -768,6 +974,10 @@ Three positioned-specific gates guard the offset, and their ORDER is load-bearin
 - **`len > INT64_MAX - off` is rejected** as a `u64`-arithmetic overflow guard, so
   the offset addition never wraps.
 
+A buffer the range check refuses (outside the user half, or NULL with a nonzero
+length) answers -T_E_FAULT before any of them, as `SYS_READ` / `SYS_WRITE` do
+(#100); until B-3b it was a flat -1, which Pouch read as EIO
+(`sys_prw.bad_buffer_is_efault`, with an in-range buffer as its control).
 Everything else is byte-identical to the cursored path: the ref-held lookup, the
 `CWALKONLY` reject, the errno clamp. One asymmetry is worth holding onto — a
 copy-out fault mid-`pread` loses nothing, because the cursor never moved and the
@@ -780,6 +990,32 @@ The soundness pin on the metadata sibling — `dev_register` extincts a
 `wstat_native` Dev that is not `perm_enforced`, since `perm_wstat_check` is the
 only write-authority gate there — lives with the Dev registration
 ([[sub-kernel-dev]]), not here.
+
+### The native descriptor handlers and the create order (B-3b)
+
+HANDLE_FLAGS_GET / FLAGS_SET / DUP_TO (129-131) are thin `_handler` wrappers
+over `sys_handle_*_in(p, ...)` bodies, so the kernel tests drive the real
+argument checks on a synthetic Proc (`sys_handle_*_for_test`). DUP_TO's
+DUP_LOWEST flag never narrows a floor: one at or past `PROC_HANDLE_MAX` is
+CLAMPED to it and handed to `handle_dup_posix_checked`, which tests the source
+first and answers the floor EINVAL second -- a closed fd is EBADF whatever the
+floor, and a 64-bit floor such as 2^32+10 cannot alias slot 10. The Linux
+F_DUPFD arm does the same and passes EBADF and EINVAL through.
+
+`spoor_create_install`'s A-2d parent check now asks existence before it
+refuses: when the caller lacks W|X on a perm-enforced parent, or is not one of
+the 9P session's ends (M7, on any Dev; the 2026-10-19 section), but holds X, it
+probes the leaf with `stalk_union_has_child` (a one-component walk: no perm
+check, no symlink follow) and answers -T_E_EXIST if the name is there,
+-T_E_ACCES if not. Without X it answers EACCES and discloses nothing. Every
+exclusive create and mkdir takes this path. A plain create opens first, so an
+existing name is opened there; the one name a plain create can still meet
+here is a dangling final link (the open finds nothing, the create never
+follows a link and answers EEXIST), and after the retry that case answers
+-T_E_NOENT, never EEXIST (`stalk.open_create_exists_before_access`'s
+`p_lnk` leg). Ported code's `mkdir(p) < 0 && errno
+!= EEXIST` relies on Linux's lookup-then-may_create order
+(`stalk.open_create_exists_before_access`).
 
 ### The hardware-mint sequence, and where the same idea is factored and where it is copied
 
@@ -912,6 +1148,11 @@ None owned. The dispatcher operates on the exception frame
 ([[sub-kernel-exception]]) and on per-process state it does not define. Its own
 state is the two staging buffers, both stack-local, and a per-process atomic
 byte counter for the heap tier.
+
+Spawn's inherited descriptors count from the call (`sys_bump_inherit_fds`, by
+`handle_endow_spoor`): the parent's close is not the last, however soon it comes. The thunk
+drops the count once the child's slot holds the file, and every un-installed arm closes
+the file as the descriptor it counts as (`sys_spawn_unbump_fds`).
 
 ## Concurrency
 
@@ -1056,8 +1297,8 @@ line held at the child-creation boundary.
 
 Every handler returns a negative on failure and the dispatcher writes it back
 unexamined — there is no central error translation. The unknown-number arm
-returns `-1`; the source notes that a signal-equivalent notification is the
-eventual behaviour and was not built.
+returns `-T_E_NOSYS` (`ENOSYS`), as Linux does, and does not terminate the
+caller.
 
 The device-error clamp is the one piece of central error handling, and it lives
 in the shared read and write bodies rather than in the dispatcher.
@@ -1176,7 +1417,7 @@ threshold so small transfers never pay the extra handle lookup.
 - **The unknown-syscall arm has no notification.** Documented as owed. It is
   also the one hole in the phenotype layer's otherwise careful four-way naming of
   refusals: a *translated* number that had no native arm would land here and
-  return the sentinel with no unserved report at all. Nothing constructs that
+  return `ENOSYS` with no unserved report at all. Nothing constructs that
   case today — every native symbol the table can emit has an arm, and a
   compile-time assertion pins the native/Linux boundary constant — but the
   guarantee is a census, not a mechanism.
@@ -1681,6 +1922,23 @@ one named errno in a call whose other refusals stay the flat -1
 [[dec-2026-09-25-mrepl-only-at-a-file]], which replaced
 [[dec-2026-09-25-sys-mount-emount]].
 
+**Vote 6 (2026-10-19): an errno per refusal.** `sys_mount_for_proc` answers
+`-T_E_INVAL` for its flag checks and `-T_E_BADF` for a failed source lookup,
+and maps `mount()`'s -3 (cycle) to `-T_E_LOOP` and -2 (full table) to
+`-T_E_NOSPC`; `sys_unmount_for_proc` answers `-T_E_INVAL` when no entry
+matches. Only the NULL guards, which EL0 cannot reach, stay -1.
+`sys_resolve_mountpoint` reports its refusal through an out-parameter:
+`SYS_OPEN_CREATE`'s path checks, then `stalk_err`'s cause, and a 0 from it
+never reads as success. The `SYS_MOUNT` handler bounds the source index at
+full width before the cast to `hidx_t`, so 2^32 + 3 no longer names handle 3
+([[dec-2026-10-19-mount-errnos]]).
+
+**Vote 5 (2026-10-19): -4 is ENOMEM.** The dynamic mount table
+([[dec-2026-10-19-mount-table-dynamic]]; [[sub-kernel-territory]]) allocates a
+mount's entries per mount, before `ns_lock`, and `mount()` answers -4 when it
+cannot; `sys_mount_for_proc` maps that to `-T_E_NOMEM`, the namespace
+unchanged. -2 now means the table holds `PGRP_MOUNT_CAP` (1024) entries.
+
 ## viv_poll_translated passes a zero timeout through (2026-09-28, #98 NP-4c)
 
 The guest poll translation no longer widens a literal timeout of 0 to
@@ -1905,6 +2163,38 @@ syscall's own answer. `notes.postnote_errnos` pins each refusal on both arms
 against a control post that lands, and `notes.self_death_snare` compares the
 native set with the phenotype's row by row.
 
+## The empty name is the probe; SYS_GETPPID (2026-10-15, B-3b vote 6)
+
+A zero `name_len` no longer answers `-T_E_INVAL`: it is the probe `kill(pid,
+0)` maps to, handled by `postnote_probe(p, pid_raw)` before the name is
+read (x1 is ignored). Self -- `pid` 0, or the caller's own after the same
+`(int)` narrowing a post applies -- answers 0 with no gate; any other pid goes
+to `postnote_cross(p, pid, NULL)`, whose name check now skips a NULL name, and
+the walk's existing `!w->name` arm answers after the parent gate and the
+past-ALIVE check without posting. So a probe answers 0 for the caller's child
+(dead but unreaped included), `-T_E_ACCES` for any other Proc and `-T_E_SRCH`
+for none, and never `-T_E_INVAL` or `-T_E_AGAIN`; it discloses nothing a
+post with a valid name does not. `sys_postnote_probe_for_test` drives it;
+`notes.postnote_errnos` pins self, pid 0, child, a 2^32-aliased child,
+non-child, missing pid, a child probing its parent, a dead child and a dead
+non-child, with no note queued by any of them.
+
+`sys_getppid_handler` (132) returns `proc_parent_pid(p)` through its arm
+`getppid_of`, the accessor the phenotype's getppid shell already used, under
+`g_proc_table_lock`. `clock.identity_syscalls` asks the handler as the test
+thread, which runs as kproc, whose pid and parent pid are both 0, so that
+assert alone cannot tell the parent from the Proc itself; it also asks the arm
+(`sys_getppid_for_test`) and the accessor of the child of a linked pair, where
+the two differ.
+
+## `lseek(fd, 0, SEEK_CUR)` does not store (2026-11-02, B-3h audit round 3)
+
+It answers the cursor and writes nothing, so `ftell` or a lock request's `SEEK_CUR`
+cannot rewind a read a peer thread has just finished. Linux's `fcntl` never writes
+`f_pos` either. Any other `lseek` still stores without a lock, and so does a read's
+own advance, so two threads racing on one cursor can lose an update, against POSIX's
+atomicity list (2.9.7).
+
 ## SYS_LOOM_REGISTER answers -errno (2026-10-07, B-2b)
 
 `sys_loom_register_handler` and its two `_for_proc` cores moved from the bare
@@ -2100,3 +2390,30 @@ address and an empty payload, so no user memory is read), and the KERNEL_TESTS
 hook `viv_sock_pin_hook_for_test`, which runs a test's stand-in peer thread
 between an arm's row read and its pin.
 
+
+## Lazy reservations share one core, and it merges (2026-10-19, B-3e vote 2)
+
+`lazy_reserve_core` is now the one body of `SYS_BURROW_RESERVE` (124; the
+phenotype's anonymous `mmap` reaches it through the reserve handler) and
+`SYS_BURROW_ATTACH_LAZY` (83). Under `as->lock` it places the range first-fit
+in the burrow window, then tries `vma_extend_anon_in` ([[sub-kernel-vma]]),
+which serves the range from an adjacent lazy mapping's Burrow and adds no VMA;
+when nothing qualifies it mints a fresh Burrow, maps it and raises the ceiling
+to RW, as before. The core answers `-T_E_NOMEM`; `SYS_BURROW_ATTACH_LAZY` still
+answers -1 for every refusal, its long-standing ABI. The construction handle is
+dropped in the same `as->lock` hold as the map (the mapping holds the Burrow,
+so the drop cannot free it), so a sibling thread's reservation beside it never
+finds the Burrow named by a handle and mints where it would extend: the mapping
+shape does not depend on scheduling. `MAP_FIXED` anonymous maps keep their own
+path and are never served by an extension; the anonymous arm drops its handle
+in the same hold on success, and a later kernel-placed reservation may extend
+the mapping like any lazy mapping in the window.
+
+`unmap_if_still_ours(p, b, va, len)` guards the five unmaps that re-take
+`as->lock` after dropping it since their own map -- the Loom ring setup's three
+failure paths and weft map's failure and CAS-loser paths. It unmaps only while
+the VMA at `va` is still the Burrow this call mapped, over exactly that range:
+the identity check the weft clunk already made (G-2 audit F1). Without it a
+sibling thread could swap its own lazy mapping in at the VA and have it
+removed, and with the merge the orphaned slots became an extinction
+([[sub-kernel-burrow]], OPEN-BUGS 20:36Z).

@@ -42,6 +42,12 @@ struct Block;       // 9P-style block I/O carrier; defined when bread/bwrite-usi
 struct poll_waiter; // <thylacine/poll.h>; the hook a polling thread installs on .poll
 struct poll_snap;   // <thylacine/poll.h>; a remote fd's snapshot slot (.poll_snapshot)
 struct t_stat;      // <thylacine/syscall.h>; the SYS_FSTAT native metadata record
+struct t_timespec;  // <thylacine/syscall.h>; a SYS_WSTAT time
+struct t_file_lock; // <thylacine/syscall.h>; SYS_FILE_LOCK's TEST answer
+
+// Dev.lock_sync's `how`.
+#define DEV_LOCK_SYNC_RELEASE 1u
+#define DEV_LOCK_SYNC_ACQUIRE 2u
 
 // Per-call component cap for Dev.walk_attrs (POUNCE). Vtable-level so
 // non-9P Devs and the resolver need no wire header; dev9p _Static_asserts
@@ -54,8 +60,10 @@ struct t_stat;      // <thylacine/syscall.h>; the SYS_FSTAT native metadata reco
 // to the per-component loop -- correctness identical, RPC count higher.
 // Distinct from NULL (a REAL walk failure at the first component). Callers
 // must NOT walkqid_free it. dev9p latches the answer per-session, so after
-// the one probe RPC the sentinel returns instantly. Native implementations
-// (devramfs) never return it.
+// the one probe RPC the sentinel returns instantly. dev9p answers it unlatched
+// too when a multi-name walk failed and cannot say at which name: only the
+// per-component loop can then tell what the caller may know. Native
+// implementations (devramfs) never return it.
 extern struct Walkqid dev_walk_attrs_unsupported;
 #define DEV_WALK_ATTRS_UNSUPPORTED (&dev_walk_attrs_unsupported)
 
@@ -98,8 +106,8 @@ struct Dev {
     // Why this is a FLOOR under the per-mount MNOEXEC flag rather than the same
     // thing: MNOEXEC is consulted via the (dc, devno) a file shares with its
     // mount source, which assumes devno names the MOUNTED INSTANCE. devenv
-    // breaks that assumption on purpose -- devenv_walk stamps the CALLING Proc's
-    // env devno (an I-1 fix: entry ids restart at 1 per Env, so without it two
+    // breaks that assumption on purpose -- devenv_walk stamps the env
+    // devno of the Proc whose walk resolved the name (an I-1 fix: entry ids restart at 1 per Env, so without it two
     // Procs' unrelated variables claim to be the same file and the REVENANT
     // Image cache serves one the other's bytes). A container's /env files
     // therefore never match the /env mount source that viv installed, and NO
@@ -113,6 +121,19 @@ struct Dev {
     // same lesson `seekable` above learned when it was inferred from
     // `.stat_native != NULL` and the inference turned out to be wrong.
     bool         may_back_exec;
+
+    // no_file_mapping -- this Dev's files back no file mapping (mmap, its
+    // MAP_FIXED twin, burrow_map_file): both mapping cores refuse it with
+    // -T_E_NODEV, Linux's answer for a file whose driver has no mmap, after the
+    // argument, handle and exec checks (an exec request answers the exec floor's
+    // -T_E_PERM first: Linux checks noexec before mmap). A mapping is served
+    // from the Image cache, keyed on (dc, devno, qid.path, qid.vers) and holding
+    // a Spoor reference for as long as the entry is cached, so a file whose content
+    // changes without a qid.vers bump can serve old bytes to a later mapping,
+    // and whatever the Spoor keeps alive outlives every handle. devenv sets it:
+    // a variable has no version, any holder may write it, and its open Spoor
+    // holds the Env it was opened in.
+    bool         no_file_mapping;
 
     // devno_per_walker -- this Dev's walk stamps a devno that depends on WHO is
     // walking rather than on the instance walked (devenv: the calling Proc's
@@ -149,24 +170,29 @@ struct Dev {
     //   stat_native(c, out) — Thylacine-native fstat surface (P6-pouch-
     //                    stratumd-boot sub-chunk 16b-gamma). Fill *out
     //                    with the file's metadata in struct t_stat shape.
-    //                    Returns 0 on success, -1 on failure. A NULL slot
-    //                    means "no native stat available" — SYS_FSTAT on
-    //                    a Spoor backed by such a Dev returns -1. Devs
-    //                    that have real file metadata (devramfs in
-    //                    particular) implement this; trivial leaf Devs
-    //                    (devcons / devnull / devzero / devnotes) leave
-    //                    the slot NULL.
-    //   wstat_native(c, valid, mode, uid, gid, size) — Thylacine-native
-    //                    chmod/chown/ftruncate surface (A-2a + Go Stage 5;
-    //                    IDENTITY-DESIGN.md §9.5). Apply the subset of
-    //                    (mode, uid, gid, size) selected by the `valid`
-    //                    mask (T_WSTAT_* bits) to the file backed by c.
-    //                    Returns 0 on success, -1 on failure. NULL-permitted
+    //                    Returns 0 on success, else a -errno (dev9p
+    //                    returns the server's) or -1; SYS_FSTAT and stalk
+    //                    pass a -errno in [-4095,-2] through and read
+    //                    anything else as -T_E_IO (SYS_FSTAT reads a
+    //                    -T_E_BADF as -T_E_IO too: its handle is live).
+    //                    A NULL slot means "no
+    //                    native stat available" (-T_E_IO): devcap and the
+    //                    leaf Devs reached only by a direct attach
+    //                    (devnull / devzero / devfull / devrandom) leave
+    //                    it NULL.
+    //   wstat_native(c, valid, mode, uid, gid, size, times) — Thylacine-
+    //                    native chmod/chown/ftruncate/utimens surface (A-2a +
+    //                    Go Stage 5 + G12; IDENTITY-DESIGN.md §9.5). Apply the
+    //                    subset of (mode, uid, gid, size, times) selected by
+    //                    the `valid` mask (T_WSTAT_* bits) to the file backed
+    //                    by c. `times` is a KERNEL copy of {atime, mtime}, read
+    //                    only for a _SET bit (NULL when none is set). Returns 0
+    //                    on success, or a -errno in [-4095, -2]. NULL-permitted
     //                    (like .stat_native / .fsync): a NULL slot => SYS_WSTAT
-    //                    returns -1. dev9p -> Tsetattr; read-only / metadata-
-    //                    less Devs (devramfs at v1.0) leave it NULL. The
-    //                    handler has already validated the mask + value bounds;
-    //                    the Dev forwards to its backing.
+    //                    answers EOPNOTSUPP. dev9p -> Tsetattr; read-only /
+    //                    metadata-less Devs (devramfs at v1.0) leave it NULL.
+    //                    The handler has already validated the mask + value
+    //                    bounds; the Dev forwards to its backing.
     //                    A Dev exposing this MUST set .perm_enforced = true
     //                    (#47 audit F1): SYS_WSTAT's fd gate is kind-only, so
     //                    perm_wstat_check -- which runs only when
@@ -178,8 +204,13 @@ struct Dev {
                             const char **name, int nname);
     int             (*stat)(struct Spoor *c, u8 *dp, int n);
     int             (*stat_native)(struct Spoor *c, struct t_stat *out);
+    // wstat_bind(c): before SYS_WSTAT reads the stat its policy judges, make
+    // stat_native report the file as it is now, not as it was at open. A failure
+    // refuses the wstat with that errno. NULL-permitted.
+    int             (*wstat_bind)(struct Spoor *c);
     int             (*wstat_native)(struct Spoor *c, u32 valid,
-                                    u32 mode, u32 uid, u32 gid, u64 size);
+                                    u32 mode, u32 uid, u32 gid, u64 size,
+                                    const struct t_timespec *times);
 
     // walk_attrs(c, nc, names, name_lens, nname, sts) — the walk-fused getattr
     // (POUNCE; docs/POUNCE-DESIGN.md §4). OPTIONAL (NULL-permitted, like
@@ -211,21 +242,22 @@ struct Dev {
                                   const char **names, const size_t *name_lens,
                                   int nname, struct t_stat *sts);
 
-    // open_cached(c, names, name_lens, nname, sts) — the FID-LIFECYCLE fidless
-    // cached open (docs/FID-LIFECYCLE-DESIGN.md §3.3; refines I-38). OPTIONAL
+    // open_cached(c, names, name_lens, nname, sts) — the FID-LIFECYCLE cached
+    // open (docs/FID-LIFECYCLE-DESIGN.md §3.3; refines I-38). OPTIONAL
     // (NULL-permitted, like .walk_attrs): stalk calls it on the FINAL run of a
     // plain read-only STALK_OPEN resolution (omode == 0 exactly) BEFORE the
     // normal bind walk. Names are (ptr, len) pairs like walk_attrs; 1 <= nname
     // <= DEV_WALK_ATTRS_MAX.
     //
     // The Dev attempts, wholly internally: an RPC-free eligibility hint; ONE
-    // FORCED-WIRE query walk of the run (no fid binds on either end — the
-    // close-to-open revalidation, which MUST be server-fresh, never served
-    // from a cache); a snapshot of the leaf's full content at the fresh
-    // content-version; and the mint of an OPENED read-only fidless Spoor.
+    // FORCED-WIRE walk of the run (the close-to-open revalidation, which MUST be
+    // server-fresh, never served from a cache; its fid stays bound, unopened);
+    // a snapshot of the leaf's full content at the fresh content-version; and
+    // the mint of an OPENED read-only Spoor with no opened fid. A loose client's
+    // mint sends nothing and binds nothing until the open first needs a fid.
     //
-    //   - Success: returns the opened Spoor (one owned ref; wire-free to
-    //     destroy) AND fills sts[0..nname) with the walk's FRESH per-component
+    //   - Success: returns the opened Spoor (one owned ref; its destroy waits
+    //     for nothing unless a lock was granted on it) AND fills sts[0..nname) with the walk's FRESH per-component
     //     records. The CALLER (the resolver) then MUST run its fail-ordering
     //     post-scan on those records — per-component X-search, mount-membership
     //     scan, final-hop R/W perm — and destroy the Spoor on any denial or
@@ -249,21 +281,38 @@ struct Dev {
     //                    c is mutated to refer to the new opened object and
     //                    returned (Plan 9 create semantics; mirrors open's
     //                    return shape). `perm` low 9 bits = mode; the DMDIR
-    //                    bit selects a directory. `gid` is the creator's
-    //                    primary group, carried into the 9P gid field (the
-    //                    Dev treats it as an opaque number -- identity-
-    //                    agnostic). Returns NULL on failure (the caller
+    //                    bit selects a directory. `gid` is the new object's
+    //                    group -- the parent directory's (IDENTITY-DESIGN 3.5
+    //                    F-5) -- carried into the 9P gid field (the Dev treats
+    //                    it as an opaque number -- identity-agnostic).
+    //                    Returns NULL on failure (the caller
     //                    spoor_clunks c, which clunks the walked fid).
     //                    A read-only Dev returns NULL.
     //   close(c)       — release any per-Spoor resources held while open.
     //                    Called by spoor_clunk on the last drop. Returns 0,
     //                    or a negative error for work the close could not
-    //                    finish (dev9p: its write-behind flush); close(2)
-    //                    reports that as EIO.
+    //                    hand on (dev9p: a staged run no closer could take);
+    //                    close(2) reports that as EIO.
     struct Spoor *(*open)(struct Spoor *c, int omode);
     struct Spoor *(*create)(struct Spoor *c, const char *name, int omode,
                             u32 perm, u32 gid);
     int           (*close)(struct Spoor *c);
+    //   fd_close(c, heard) -- c's last descriptor has closed, and c may live on
+    //     behind other references (a map, a mount, a Loom registration). What
+    //     close(2) owes happens here, on the closing thread, which may wait for a
+    //     server: dev9p lands its staged run and releases its locks. 0, or a
+    //     negative errno. heard says the caller hands that answer to a program; a
+    //     loss nobody will hear is the close's own to report. Runs once: nothing
+    //     publishes a Spoor whose count has reached zero. NULL-permitted, and may
+    //     run again only when a lock call finds the close passed it.
+    //     close, by contrast, runs at the last REFERENCE, which can fall on any
+    //     thread (an exec evicting an image, a reap draining a mapping), so it
+    //     must never wait on anything outside the kernel.
+    //   lock_held(c) -- might a lock taken through c itself stand? fd_close
+    //     would release it. A cheap read, may answer true after an unlock.
+    //     NULL-permitted.
+    int           (*fd_close)(struct Spoor *c, bool heard);
+    bool          (*lock_held)(struct Spoor *c);
 
     // I/O.
     //   read / write   — byte-stream I/O at offset.
@@ -337,6 +386,42 @@ struct Dev {
     // (DISTRO 4.6). Read lock-free, so the answer must be fixed before c's
     // session published. NULL-permitted: a NULL slot is never remote.
     bool           (*remote)(struct Spoor *c);
+
+    // File locks (B-3h; ARCH 9.6.11). The lock state lives in the file's
+    // server; these slots only forward to it. The first four are NULL-permitted
+    // together: a Dev with no .lock answers SYS_FILE_LOCK -T_E_NOLCK. Each
+    // returns 0 or a specific -T_E_* (a server errno bounded first, the
+    // dev9p_wire_errno discipline).
+    //   lock(c, type, start, len, test) -- act as the owner c names: take
+    //     (SYS_FILE_LOCK_RD / _WR) or drop (_UN) the range on c's own fid, or,
+    //     with `test` non-NULL, ask without changing anything and fill *test.
+    //     Never waits: a conflict is -T_E_AGAIN, and the caller retries. A
+    //     granted take leaves c reading what the server holds (lock-to-unlock
+    //     consistency); every set-lock sends only after c's staged writes land,
+    //     since an unlock and a conversion each give something up.
+    //   lock_owner(c, err) -- mint an UNOPENED Spoor naming c's file with its
+    //     own server-side owner (dev9p: a zero-name clone of c's fid). It is
+    //     never published as a descriptor; only the Proc owner table holds
+    //     it. NULL with *err set on failure.
+    //   lock_same_file(a, b) -- do a and b name one file of one server? Called
+    //     under the handle-table spinlock: it must not block. It may answer by
+    //     what the two Spoors already know of their files.
+    //   lock_sync(c, how) -- DEV_LOCK_SYNC_RELEASE: land c's staged writes
+    //     before a set-lock on its file, by any open of it in the Proc. DEV_LOCK_SYNC_ACQUIRE: from now
+    //     on c reads what the server holds (dev9p: a cached open leaves its
+    //     snapshot); asked before a take on c's file, and a failure refuses
+    //     the take.
+    //   lock_ident(c) -- learn what lock_same_file needs to tell c's file from
+    //     a file that has since taken its number (dev9p: the inode generation,
+    //     asked of the server once per Spoor). 0, or -T_E_STALE when c's file
+    //     has died. May block. NULL-permitted: lock_same_file then answers
+    //     alone.
+    int            (*lock)(struct Spoor *c, u32 type, u64 start, u64 len,
+                           struct t_file_lock *test);
+    struct Spoor  *(*lock_owner)(struct Spoor *c, int *err);
+    bool           (*lock_same_file)(struct Spoor *a, struct Spoor *b);
+    int            (*lock_sync)(struct Spoor *c, u32 how);
+    int            (*lock_ident)(struct Spoor *c);
 
     // Readiness probe — the SYS_POLL plumbing (§23.3; specs/poll.tla).
     //   poll(c, events, pw)

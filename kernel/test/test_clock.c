@@ -83,6 +83,34 @@ void test_clock_identity_syscalls(void) {
         "SYS_GETUID must return principal_id");
     TEST_ASSERT(sys_getgid_handler(0, 0, 0, 0) == (s64)(u64)p->primary_gid,
         "SYS_GETGID must return primary_gid");
+
+    // SYS_GETPPID (vote 2026-10-14 #6) reads the parent through
+    // proc_parent_pid. The test thread runs as kproc, whose pid and parent pid
+    // are both 0, so a handler answering the Proc's own pid would pass here;
+    // the handler's arm and the accessor are also asked of a linked pair,
+    // where reading the wrong Proc shows.
+    s64 here = sys_getppid_handler(0, 0, 0, 0);
+    int want_here = proc_parent_pid(p);
+    struct Proc *par = proc_alloc();
+    struct Proc *kid = proc_alloc();
+    TEST_ASSERT(par && kid, "proc_alloc x2");
+    proc_test_link(par);
+    proc_test_link_child(par, kid);
+    int kid_ppid = proc_parent_pid(kid), kid_pid = kid->pid, par_pid = par->pid;
+    s64 kid_sys = sys_getppid_for_test(kid);
+    proc_test_unlink(kid);
+    kid->threads = NULL;
+    kid->state   = PROC_STATE_ZOMBIE;
+    proc_free(kid);
+    proc_test_unlink(par);
+    par->threads = NULL;
+    par->state   = PROC_STATE_ZOMBIE;
+    proc_free(par);
+    TEST_ASSERT(here == (s64)want_here, "SYS_GETPPID must return the parent's pid");
+    TEST_ASSERT(kid_ppid == par_pid && kid_ppid != kid_pid,
+        "proc_parent_pid reads the parent, not the Proc itself");
+    TEST_ASSERT(kid_sys == (s64)par_pid,
+        "SYS_GETPPID's arm answers a child its parent's pid, not its own");
 }
 
 void test_clock_gettime_errors(void) {

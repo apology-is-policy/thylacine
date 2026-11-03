@@ -83,6 +83,7 @@
 #include <thylacine/territory.h>
 #include <thylacine/types.h>
 #include <thylacine/syscall.h>
+#include "../../mm/slub.h"       // kcalloc: points as many as the cap
 
 // Mint a synthetic mount-point Spoor with a distinct identity (devnone dc '-',
 // devno 0, the given qid.path). The mount table keys on (dc, devno, qid.path).
@@ -190,17 +191,17 @@ void test_sys_mount_rejects_bad_fd(void) {
     TEST_ASSERT(mp != NULL, "mkmp");
 
     // Out-of-range fd. handle_get rejects via h < 0 || h >= PROC_HANDLE_MAX.
-    TEST_EXPECT_EQ(sys_mount_for_proc(p, (hidx_t)9999, mp, 0), -1,
-        "mount with out-of-range fd -> -1");
+    TEST_EXPECT_EQ(sys_mount_for_proc(p, (hidx_t)9999, mp, 0), -T_E_BADF,
+        "mount with out-of-range fd -> -EBADF");
     // Negative fd (raw u64 -> hidx_t saturates to negative int).
-    TEST_EXPECT_EQ(sys_mount_for_proc(p, (hidx_t)-1, mp, 0), -1,
-        "mount with negative fd -> -1");
+    TEST_EXPECT_EQ(sys_mount_for_proc(p, (hidx_t)-1, mp, 0), -T_E_BADF,
+        "mount with negative fd -> -EBADF");
     // Closed fd. Allocate a pipe, close the read end, then try to mount it.
     hidx_t fd_rd = -1, fd_wr = -1;
     TEST_EXPECT_EQ(sys_pipe_for_proc(p, &fd_rd, &fd_wr), 0, "sys_pipe");
     TEST_EXPECT_EQ(handle_close(p, fd_rd), 0, "close fd_rd");
-    TEST_EXPECT_EQ(sys_mount_for_proc(p, fd_rd, mp, 0), -1,
-        "mount with closed fd -> -1");
+    TEST_EXPECT_EQ(sys_mount_for_proc(p, fd_rd, mp, 0), -T_E_BADF,
+        "mount with closed fd -> -EBADF");
     TEST_EXPECT_EQ(territory_nmounts(p->territory), 0,
         "no entries installed");
 
@@ -223,8 +224,8 @@ void test_sys_mount_rejects_missing_right_read(void) {
     TEST_ASSERT(fd_wronly >= 0, "dup with WRITE-only succeeded");
 
     // sys_mount_for_proc requires RIGHT_READ on the source handle.
-    TEST_EXPECT_EQ(sys_mount_for_proc(p, fd_wronly, mp, 0), -1,
-        "mount on WRITE-only fd -> -1");
+    TEST_EXPECT_EQ(sys_mount_for_proc(p, fd_wronly, mp, 0), -T_E_BADF,
+        "mount on WRITE-only fd -> -EBADF");
     TEST_EXPECT_EQ(territory_nmounts(p->territory), 0,
         "no entry installed");
 
@@ -249,23 +250,23 @@ void test_sys_mount_rejects_invalid_flags(void) {
     // 0x40) rather than deleted: what it guards (junk bits are refused, and
     // refused WITHOUT installing an entry) is exactly as load-bearing as before,
     // and the next flag to land should trip it again.
-    TEST_EXPECT_EQ(sys_mount_for_proc(p, fd_rd, mp, 0x40), -1,
-        "flags 0x40 (the lowest unassigned bit) -> -1");
-    TEST_EXPECT_EQ(sys_mount_for_proc(p, fd_rd, mp, 0xFFFFFFFFu), -1,
-        "flags 0xFFFFFFFFu -> -1");
+    TEST_EXPECT_EQ(sys_mount_for_proc(p, fd_rd, mp, 0x40), -T_E_INVAL,
+        "flags 0x40 (the lowest unassigned bit) -> -EINVAL");
+    TEST_EXPECT_EQ(sys_mount_for_proc(p, fd_rd, mp, 0xFFFFFFFFu), -T_E_INVAL,
+        "flags 0xFFFFFFFFu -> -EINVAL");
     // A valid bit ORed with a junk bit is still refused wholesale -- an
     // allowlist that masked junk off instead of rejecting would pass the two
     // assertions above and silently honour the request.
-    TEST_EXPECT_EQ(sys_mount_for_proc(p, fd_rd, mp, MREPL | 0x40), -1,
+    TEST_EXPECT_EQ(sys_mount_for_proc(p, fd_rd, mp, MREPL | 0x40), -T_E_INVAL,
         "a valid flag ORed with junk is refused, not masked");
     // UM-8 F10: MREPL / MBEFORE / MAFTER are mutually-exclusive placement modes;
     // more than one set is refused wholesale (mount()'s dispatch would silently
     // take MREPL then MBEFORE). Each bit is individually VALID -- only the
     // COMBINATION is rejected, so these survive the invalid-bit allowlist above.
-    TEST_EXPECT_EQ(sys_mount_for_proc(p, fd_rd, mp, MBEFORE | MAFTER), -1,
-        "MBEFORE|MAFTER (two placements) -> -1");
-    TEST_EXPECT_EQ(sys_mount_for_proc(p, fd_rd, mp, MREPL | MBEFORE), -1,
-        "MREPL|MBEFORE (two placements) -> -1");
+    TEST_EXPECT_EQ(sys_mount_for_proc(p, fd_rd, mp, MBEFORE | MAFTER), -T_E_INVAL,
+        "MBEFORE|MAFTER (two placements) -> -EINVAL");
+    TEST_EXPECT_EQ(sys_mount_for_proc(p, fd_rd, mp, MREPL | MBEFORE), -T_E_INVAL,
+        "MREPL|MBEFORE (two placements) -> -EINVAL");
     TEST_EXPECT_EQ(territory_nmounts(p->territory), 0,
         "no entry installed for invalid flags");
 
@@ -343,15 +344,15 @@ void test_sys_unmount_rejects_nonexistent_target(void) {
     TEST_ASSERT(mp42 != NULL && mp43 != NULL, "mkmp");
 
     // No mounts yet; any unmount should fail.
-    TEST_EXPECT_EQ(sys_unmount_for_proc(p, mp42), -1,
-        "unmount of unmounted point -> -1");
+    TEST_EXPECT_EQ(sys_unmount_for_proc(p, mp42), -T_E_INVAL,
+        "unmount of unmounted point -> -EINVAL");
 
     // Add a mount; unmount of a DIFFERENT mount point still fails.
     hidx_t fd_rd = -1, fd_wr = -1;
     TEST_EXPECT_EQ(sys_pipe_for_proc(p, &fd_rd, &fd_wr), 0, "sys_pipe");
     TEST_EXPECT_EQ(sys_mount_for_proc(p, fd_rd, mp42, MREPL), 0, "mount at 42");
-    TEST_EXPECT_EQ(sys_unmount_for_proc(p, mp43), -1,
-        "unmount of unrelated point -> -1");
+    TEST_EXPECT_EQ(sys_unmount_for_proc(p, mp43), -T_E_INVAL,
+        "unmount of unrelated point -> -EINVAL");
     TEST_EXPECT_EQ(territory_nmounts(p->territory), 1,
         "mount at 42 intact");
 
@@ -551,4 +552,97 @@ void test_sys_mount_accepts_an_ordered_mount_at_a_directory(void) {
 
     drop_test_proc(p);
     spoor_unref(dir_mp);
+}
+
+// A full table answers -T_E_NOSPC and installs nothing. Each point is a
+// distinct file identity and each mount an MREPL, so each adds one entry. The
+// points live on the heap: at the cap they would not fit a kernel stack.
+// Results are read first and asserted after the release, since a failing
+// TEST_EXPECT_EQ returns.
+void test_sys_mount_full_table_answers_enospc(void) {
+    struct Proc *p = make_test_proc_with_territory();
+    TEST_ASSERT(p != NULL, "proc + territory alloc");
+    hidx_t fd_rd = -1, fd_wr = -1;
+    int pipe_rc = sys_pipe_for_proc(p, &fd_rd, &fd_wr);
+    struct Spoor **mps = kcalloc(PGRP_MOUNT_CAP + 1, sizeof(*mps), 0);
+    int made = 0, filled = 0, last = 0, n_after = -1;
+    if (mps) {
+        for (int i = 0; i <= PGRP_MOUNT_CAP; i++) {
+            mps[i] = mkmp(1000u + (u64)i);
+            if (mps[i]) made++;
+        }
+    }
+    if (pipe_rc == 0 && made == PGRP_MOUNT_CAP + 1) {
+        for (int i = 0; i < PGRP_MOUNT_CAP; i++)
+            if (sys_mount_for_proc(p, fd_rd, mps[i], MREPL) == 0) filled++;
+        last = sys_mount_for_proc(p, fd_rd, mps[PGRP_MOUNT_CAP], MREPL);
+        n_after = territory_nmounts(p->territory);
+    }
+    if (mps) {
+        for (int i = 0; i <= PGRP_MOUNT_CAP; i++)
+            if (mps[i]) spoor_unref(mps[i]);
+        kfree(mps);
+    }
+    drop_test_proc(p);
+    TEST_EXPECT_EQ(pipe_rc, 0, "sys_pipe");
+    TEST_EXPECT_EQ(made, PGRP_MOUNT_CAP + 1, "every point allocated");
+    TEST_EXPECT_EQ(filled, PGRP_MOUNT_CAP, "the table fills one entry per point");
+    TEST_EXPECT_EQ(last, -T_E_NOSPC, "one more mount into the full table -> -ENOSPC");
+    TEST_EXPECT_EQ(n_after, PGRP_MOUNT_CAP, "the refused mount installed nothing");
+}
+
+// A mount whose entries cannot be allocated answers -T_E_NOMEM and installs
+// nothing (ARCH 9.1: the allocation precedes ns_lock); the same mount with the
+// allocations left alone installs.
+void test_sys_mount_enomem_answers_enomem(void) {
+    struct Proc *p = make_test_proc_with_territory();
+    TEST_ASSERT(p != NULL, "proc + territory alloc");
+    hidx_t fd_rd = -1, fd_wr = -1;
+    int pipe_rc = sys_pipe_for_proc(p, &fd_rd, &fd_wr);
+    struct Spoor *mp = mkmp(77u);
+    int refused = 0, control = -99;
+    int n_refused = -1, n_control = -1;
+    u32 left = 99;
+    if (pipe_rc == 0 && mp) {
+        territory_mount_fail_nodes_for_test(1);
+        refused   = sys_mount_for_proc(p, fd_rd, mp, MREPL);
+        left      = territory_mount_fail_nodes_for_test(0);
+        n_refused = territory_nmounts(p->territory);
+        control   = sys_mount_for_proc(p, fd_rd, mp, MREPL);
+        n_control = territory_nmounts(p->territory);
+    }
+    if (mp) spoor_unref(mp);
+    drop_test_proc(p);
+    TEST_EXPECT_EQ(pipe_rc, 0, "sys_pipe");
+    TEST_EXPECT_EQ(refused, -T_E_NOMEM, "an allocation failure -> -ENOMEM");
+    TEST_EXPECT_EQ(left, 0u, "the mount asked for the node the knob failed");
+    TEST_EXPECT_EQ(n_refused, 0, "and installed nothing");
+    TEST_EXPECT_EQ(control, 0, "control: the same mount installs");
+    TEST_EXPECT_EQ(n_control, 1, "control: one entry");
+}
+
+// A mount that would close a cycle answers -T_E_LOOP (I-3) and installs
+// nothing: with A[10] over B[20] standing, B over A would close 20->10->20,
+// and A over its own identity is the one-node cycle.
+void test_sys_mount_cycle_answers_eloop(void) {
+    struct Proc *p = make_test_proc_with_territory();
+    TEST_ASSERT(p != NULL, "proc + territory alloc");
+    struct Spoor *sa = NULL, *sb = NULL;
+    hidx_t fa = install_typed_source(p, QTDIR, 10u, &sa);
+    hidx_t fb = install_typed_source(p, QTDIR, 20u, &sb);
+    struct Spoor *mpa = mkdirmp(10u), *mpb = mkdirmp(20u);
+    int first = -99, cycle = -99, self = -99, n = -1;
+    if (fa >= 0 && fb >= 0 && mpa && mpb) {
+        first = sys_mount_for_proc(p, fa, mpb, MREPL);
+        cycle = sys_mount_for_proc(p, fb, mpa, MREPL);
+        self  = sys_mount_for_proc(p, fa, mpa, MREPL);
+        n = territory_nmounts(p->territory);
+    }
+    if (mpa) spoor_unref(mpa);
+    if (mpb) spoor_unref(mpb);
+    drop_test_proc(p);
+    TEST_EXPECT_EQ(first, 0, "A over B installs");
+    TEST_EXPECT_EQ(cycle, -T_E_LOOP, "B over A would close a cycle -> -ELOOP");
+    TEST_EXPECT_EQ(self, -T_E_LOOP, "A over its own identity -> -ELOOP");
+    TEST_EXPECT_EQ(n, 1, "the refused mounts installed nothing");
 }

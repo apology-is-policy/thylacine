@@ -77,7 +77,8 @@ static u32 se_many(char *buf, int n) {
     u32 o = 0;
     for (int k = 0; k < n; k++) {
         buf[o++] = 'V';
-        if (k >= 10) buf[o++] = (char)('0' + k / 10);
+        if (k >= 100) buf[o++] = (char)('0' + k / 100);
+        if (k >= 10)  buf[o++] = (char)('0' + (k / 10) % 10);
         buf[o++] = (char)('0' + k % 10);
         buf[o++] = '=';
         buf[o++] = '1';

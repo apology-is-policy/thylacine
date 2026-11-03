@@ -1,0 +1,54 @@
+From: Michal Frdlik <noreply@example.invalid>
+Subject: [PATCH] tests: name the test data relative to the build root
+
+test-bz89617 and test-bz106632 compile in the path of their test data
+(SRCDIR, FONTFILE) as meson.current_source_dir(), an absolute path in the
+build host's source tree. Thylacine runs the cross-built tests on the
+device, where the build and source trees are copied side by side under
+another root (tools/libtests-manifest.py), so the absolute path names
+nothing there. The tests run in the build root, on the host as on the
+device, so the path is now the source test directory relative to that root:
+the same file in both places. fs is imported at the top, where the path is
+first needed, rather than further down.
+
+diff -ruN a/test/meson.build b/test/meson.build
+--- a/test/meson.build
++++ b/test/meson.build
+@@ -1,3 +1,10 @@
++# The tests run in the build root, where meson's harness runs them, on the
++# build host and on a machine the build and source trees are copied to side by
++# side. A path relative to that root names the test data in both places; an
++# absolute one names only the build host's tree.
++fs = import('fs')
++test_srcdir = fs.relative_to(meson.current_source_dir(), meson.project_build_root())
++
+ if get_option('tests-external-fonts').allowed()
+   fetch_test_fonts = custom_target(
+     'fetch_test_fonts',
+@@ -17,7 +24,7 @@
+ endif
+ 
+ tests = [
+-  ['test-bz89617.c', {'c_args': ['-DSRCDIR="@0@"'.format(meson.current_source_dir())]}],
++  ['test-bz89617.c', {'c_args': ['-DSRCDIR="@0@"'.format(test_srcdir)]}],
+   ['test-bz131804.c'],
+   ['test-bz96676.c'],
+   ['test-name-parse.c'],
+@@ -36,7 +43,7 @@
+ if host_machine.system() != 'windows'
+   tests += [
+     # FIXME: ['test-migration.c'],
+-    ['test-bz106632.c', {'c_args': ['-DFONTFILE="@0@"'.format(join_paths(meson.current_source_dir(), '4x6.pcf'))]}],
++    ['test-bz106632.c', {'c_args': ['-DFONTFILE="@0@"'.format(join_paths(test_srcdir, '4x6.pcf'))]}],
+     ['test-issue107.c'], # FIXME: fails on mingw
+   ]
+   tests_not_parallel += [
+@@ -88,8 +95,6 @@
+   rust = import('rust')
+   rust.test('fc_fontations_rust_tests', fc_fontations, link_with: [libfontconfig_internal], depends: fetch_test_fonts, env: ['builddir=@0@'.format(meson.project_build_root())],)
+ endif
+-
+-fs = import('fs')
+ 
+ if conf.get('FREETYPE_PCF_LONG_FAMILY_NAMES')
+   out_expected = fs.copyfile('out.expected-long-family-names',

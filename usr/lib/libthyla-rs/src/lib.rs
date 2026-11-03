@@ -379,9 +379,15 @@ pub const T_UNLINK_REMOVEDIR: u32     = 0x200;
 
 // SYS_WSTAT valid-mask bits (A-2a). Mirror the kernel T_WSTAT_* / wire
 // P9_SETATTR_* bits. chmod sets T_WSTAT_MODE; chown sets T_WSTAT_UID|GID.
+// A time bit alone sets that time to the file server's clock; with its _SET
+// bit as well, to the value x6 points at (G12). A _SET bit alone is EINVAL.
 pub const T_WSTAT_MODE: u32           = 0x1;
 pub const T_WSTAT_UID: u32            = 0x2;
 pub const T_WSTAT_GID: u32            = 0x4;
+pub const T_WSTAT_ATIME: u32          = 0x10;
+pub const T_WSTAT_MTIME: u32          = 0x20;
+pub const T_WSTAT_ATIME_SET: u32      = 0x80;
+pub const T_WSTAT_MTIME_SET: u32      = 0x100;
 pub const T_WSTAT_MODE_MASK: u32      = 0o777;
 
 // SYS_WALK_OPEN omode bits — must mirror SYS_WALK_OPEN_OMODE_VALID in
@@ -1771,16 +1777,24 @@ pub unsafe fn t_note_mask(new_mask: u64, old_mask_out_va: *mut u64) -> i64 {
 // EXIST and be of the source's type (a directory over a directory, a file over
 // a file), and at a file only T_MREPL is accepted.
 //
-// Returns 0 on success, -20 (T_E_NOTDIR) on Plan 9's Emount (ARCH 9.6.1), and
-// -1 on every other refusal:
-//   - path absent / empty / too long / not resolvable (a trailing '/' on a
-//     point that is not a directory is unresolvable)
-//   - source_spoor_fd not a KOBJ_SPOOR or out-of-range
-//   - missing RIGHT_READ on source
-//   - flags has bits outside the supported set, or more than one of
-//     T_MREPL / T_MBEFORE / T_MAFTER
-//   - territory mount table full
-//   - the mount would close a cycle in the mount graph (I-3)
+// Returns 0 on success, or one -errno per refusal (ERRORS.md "Mount and
+// unmount"):
+//   - -22 (EINVAL): an empty, over-long or NUL-embedded path; flags with bits
+//     outside the supported set, or more than one of T_MREPL / T_MBEFORE /
+//     T_MAFTER
+//   - -14 (EFAULT): a path the kernel cannot read
+//   - the resolver's -errno for a point that does not resolve (a trailing '/'
+//     on a point that is not a directory is unresolvable)
+//   - -9 (EBADF): source_spoor_fd is not a live KOBJ_SPOOR handle, or lacks
+//     RIGHT_READ
+//   - -20 (ENOTDIR): Plan 9's Emount (ARCH 9.6.1)
+//   - -40 (ELOOP): the mount would close a cycle in the mount graph (I-3)
+//   - -28 (ENOSPC): the territory mount table is full
+//   - -12 (ENOMEM): the kernel could not allocate the mount's entries; the
+//     namespace is unchanged
+//
+// The flags' width and the handle index's range are judged before the mount
+// point is resolved, everything else after it (ERRORS.md "Mount and unmount").
 #[inline(always)]
 pub unsafe fn t_mount(path: *const u8, path_len: usize,
                       source_spoor_fd: i64, flags: u32) -> i64 {
@@ -1799,7 +1813,7 @@ pub unsafe fn t_mount(path: *const u8, path_len: usize,
 
 // t_unmount — remove the mount entry whose mount-point identity matches the
 // absolute `path` (`path_len` bytes) in the calling Proc's territory. Returns
-// 0 on success, -1 if no entry matches (or the path does not resolve). Drops
+// 0 on success, -EINVAL if no entry matches, or the resolver's -errno. Drops
 // the per-entry Spoor refcount; the Spoor's Dev close runs if this was the
 // last ref.
 #[inline(always)]
@@ -3426,8 +3440,8 @@ pub unsafe fn t_stat_path(path: *const u8, path_len: usize, stat_va: *mut u8) ->
 
 // t_fstat — fill a user-VA 88-byte `struct t_stat` (laid out per
 // kernel/include/thylacine/syscall.h's ABI pins) with the open Spoor's
-// metadata. Returns 0 on success, -1 on bad fd / unaligned stat_va /
-// stat_va outside user VA / Dev without stat_native vtable op.
+// metadata. Returns 0 on success, -T_E_BADF for a bad fd, -T_E_FAULT for a
+// stat_va outside user VA, or the Dev's -errno (-T_E_IO when it has none).
 //
 // `stat_va` must point to at least 88 bytes of writable, 8-byte-aligned
 // user memory. Backs t::fs::Metadata (U-2c-fs).
@@ -3444,12 +3458,13 @@ pub unsafe fn t_fstat(spoor_fd: i64, stat_va: *mut u8) -> i64 {
     x0
 }
 
-// t_wstat — chmod/chown an open Spoor `fd` (KOBJ_SPOOR, RIGHT_WRITE) via
+// t_wstat — chmod/chown an open Spoor `fd` (KOBJ_SPOOR, any rights) via
 // Tsetattr. `valid` selects which of (mode, uid, gid) to apply (T_WSTAT_*
-// bits; at least one). `mode` is the 9 rwx bits only (setuid/setgid/sticky
-// rejected). Returns 0 on success, -1 on bad fd / bad mask / out-of-range
-// value / Dev without wstat_native / server error. A-2a (the mechanism;
-// the per-file permission policy is A-2d). Backs t::fs metadata mutation.
+// bits; at least one), and may add T_WSTAT_ATIME / T_WSTAT_MTIME ("now"),
+// never a _SET bit, whose x6 this wrapper does not set. `mode` is the 9 rwx
+// bits only (setuid/setgid/sticky rejected). Returns 0 / -errno (EINVAL,
+// EBADF, EACCES, EOPNOTSUPP, the server's). A-2a (the mechanism; the
+// per-file permission policy is A-2d). Backs t::fs metadata mutation.
 #[inline(always)]
 pub unsafe fn t_wstat(fd: i64, valid: u32, mode: u32, uid: u32, gid: u32) -> i64 {
     let mut x0: i64 = fd;
@@ -3460,6 +3475,31 @@ pub unsafe fn t_wstat(fd: i64, valid: u32, mode: u32, uid: u32, gid: u32) -> i64
         in("x2") mode as u64,
         in("x3") uid as u64,
         in("x4") gid as u64,
+        in("x8") T_SYS_WSTAT,
+        options(nostack)
+    );
+    x0
+}
+
+// t_wstat_times — set `fd`'s atime and/or mtime (G12). `valid` holds only
+// T_WSTAT_ATIME / T_WSTAT_MTIME, each optionally with its _SET bit; `times_va`
+// points at two struct t_timespec (atime, mtime), read only for the entries
+// whose _SET bit is set. Any explicit time needs the owner or CAP_HOSTOWNER;
+// ATIME | MTIME alone (both to the server's clock) also admits write
+// permission. Returns 0 / -errno (EINVAL, EBADF, EFAULT, EACCES, EOPNOTSUPP,
+// the server's). Backs t::fs::FileTimes.
+#[inline(always)]
+pub unsafe fn t_wstat_times(fd: i64, valid: u32, times_va: u64) -> i64 {
+    let mut x0: i64 = fd;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") valid as u64,
+        in("x2") 0u64,
+        in("x3") 0u64,
+        in("x4") 0u64,
+        in("x5") 0u64,
+        in("x6") times_va,
         in("x8") T_SYS_WSTAT,
         options(nostack)
     );
@@ -4048,4 +4088,91 @@ pub unsafe fn t_srv_registry_new(source: i64, routes: *const SrvRoute, count: us
     asm!("svc #0", inlateout("x0") x0, in("x1") routes, in("x2") count,
          in("x3") flags, in("x8") T_SYS_SRV_REGISTRY_NEW, options(nostack));
     x0
+}
+
+/// Native descriptor metadata, not a lifetime pin. Returns -EBADF if absent.
+pub const T_SYS_HANDLE_FLAGS_GET: u64 = 129;
+pub const T_HANDLE_CLOSE_ON_EXEC: u64 = 1;
+/// `t_handle_dup_to` only: the target is a floor (lowest free at or above).
+pub const T_HANDLE_DUP_LOWEST: u64 = 2;
+/// `t_handle_flags_get`'s open-file status beside bit0 (kernel SYS_HANDLE_STATUS_*).
+pub const T_HANDLE_STATUS_OMODE_SHIFT: u64 = 8;
+pub const T_HANDLE_STATUS_OMODE_MASK: u64 = 0x300;
+pub const T_HANDLE_STATUS_NONBLOCK: u64 = 0x400;
+pub const T_HANDLE_STATUS_APPEND: u64 = 0x800;
+pub unsafe fn t_handle_flags_get(fd: i64) -> i64 {
+    let mut x0 = fd;
+    asm!("svc #0", inout("x0") x0, in("x8") T_SYS_HANDLE_FLAGS_GET,
+         options(nostack));
+    x0
+}
+pub const T_SYS_HANDLE_FLAGS_SET: u64 = 130;
+pub const T_SYS_HANDLE_DUP_TO: u64 = 131;
+/// Set caller-local descriptor flags. Returns raw native negative errno.
+pub unsafe fn t_handle_flags_set(fd: i64, flags: u64) -> i64 {
+    let mut x0 = fd as u64;
+    asm!("svc #0", inout("x0") x0, in("x1") flags,
+         in("x8") T_SYS_HANDLE_FLAGS_SET, options(nostack));
+    x0 as i64
+}
+/// Atomically replace a distinct caller-local target; preserve source rights.
+pub unsafe fn t_handle_dup_to(source: i64, target: i64, flags: u64) -> i64 {
+    let mut x0 = source as u64;
+    asm!("svc #0", inout("x0") x0, in("x1") target as u64, in("x2") flags,
+         in("x8") T_SYS_HANDLE_DUP_TO, options(nostack));
+    x0 as i64
+}
+pub const T_SYS_GETPPID: u64 = 132;
+/// The caller's parent's pid, 0 when that parent is kproc or there is none
+/// (vote 2026-10-14 #6).
+#[inline(always)]
+pub unsafe fn t_getppid() -> i64 {
+    let mut x0: i64 = 0;
+    asm!("svc #0", inlateout("x0") x0, in("x8") T_SYS_GETPPID, options(nostack));
+    x0
+}
+pub const T_SYS_UMASK: u64 = 133;
+/// Set the caller's creation mask and return the previous one (IDENTITY-DESIGN
+/// 9.7 M8). A mask with a bit outside 0o777 is `-T_E_INVAL` and changes nothing.
+#[inline(always)]
+pub unsafe fn t_umask(mask: u64) -> i64 {
+    let mut x0 = mask;
+    asm!("svc #0", inout("x0") x0, in("x8") T_SYS_UMASK, options(nostack));
+    x0 as i64
+}
+pub const T_SYS_FILE_LOCK: u64 = 137;
+/// `t_file_lock`'s op word (kernel SYS_FILE_LOCK_*): a type, then the flags.
+pub const T_FILE_LOCK_RD: u64 = 0;
+pub const T_FILE_LOCK_WR: u64 = 1;
+pub const T_FILE_LOCK_UN: u64 = 2;
+pub const T_FILE_LOCK_TYPE_MASK: u64 = 0xf;
+pub const T_FILE_LOCK_WAIT: u64 = 0x10;
+pub const T_FILE_LOCK_TEST: u64 = 0x20;
+pub const T_FILE_LOCK_PROC: u64 = 0x40;
+pub const T_FILE_LOCK_FLAGS_ALL: u64 = T_FILE_LOCK_WAIT | T_FILE_LOCK_TEST | T_FILE_LOCK_PROC;
+/// A TEST's answer: type `T_FILE_LOCK_UN` when the lock would be granted,
+/// else the first conflicting lock (len 0 = to the end of the file).
+#[repr(C)]
+#[derive(Clone, Copy, Default, Debug)]
+pub struct TFileLock {
+    pub type_: u8,
+    pub _pad0: [u8; 7],
+    pub start: u64,
+    pub len: u64,
+    pub pid: i32,
+    pub _pad1: u32,
+}
+const _: () = assert!(core::mem::size_of::<TFileLock>() == 32);
+const _: () = assert!(core::mem::offset_of!(TFileLock, start) == 8);
+const _: () = assert!(core::mem::offset_of!(TFileLock, len) == 16);
+const _: () = assert!(core::mem::offset_of!(TFileLock, pid) == 24);
+/// A byte-range lock the file's server holds (ARCH 9.6.11). With
+/// `T_FILE_LOCK_PROC` the Proc owns it (POSIX F_SETLK), otherwise the open
+/// file does (OFD, flock). Returns 0 or a raw native negative errno.
+pub unsafe fn t_file_lock(fd: i64, op: u64, start: u64, len: u64,
+                          out: *mut TFileLock) -> i64 {
+    let mut x0 = fd as u64;
+    asm!("svc #0", inout("x0") x0, in("x1") op, in("x2") start, in("x3") len,
+         in("x4") out, in("x8") T_SYS_FILE_LOCK, options(nostack));
+    x0 as i64
 }

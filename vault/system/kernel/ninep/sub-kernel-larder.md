@@ -3,7 +3,7 @@ id: sub-kernel-larder
 type: sub
 title: "The Larder — the guest-side 9P FS cache (attr + dentry + page)"
 parent: moc-kernel-ninep
-code: [kernel/larder.c, kernel/include/thylacine/larder.h]
+code: [kernel/larder.c, kernel/include/thylacine/larder.h, kernel/test/test_larder.c]
 audit: hard
 guarded-by: [inv-i38]
 validated-by: [spec-fs-cache, gate-smp]
@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: [docs/LARDER-DESIGN.md, docs/FID-LIFECYCLE-DESIGN.md]
 created: 2026-07-31
-updated: 2026-07-31
+updated: 2026-11-02
 ---
 ## Purpose
 
@@ -59,7 +59,14 @@ lazily-allocated array + page buffer.
   0 RPC-free.
 - `larder_attr_install` — Open/Refetch: install `{attr, cvers}` iff no
   invalidation event named this qid since `seq0` (the G4-scoped gen
-  guard); upgrades a `perm_only` entry to full.
+  guard); upgrades a `perm_only` entry to full. It also takes the inode
+  generation (`gen`, NULL when the server's answer left it out); every install
+  overwrites what the entry knew, so NULL forgets.
+- `larder_attr_gen` (B-3h3, 2026-11-02) — the generation the entry for this qid
+  holds, if any, for a loose cached open's mint. A caller reads it between the
+  hint and the snapshot: `seq0` fails the snapshot on any invalidate of this
+  number, so the generation read names the file the snapshot copies. Walks and
+  getattr populates ask BASIC|GEN, so a served file usually has one.
 - `larder_attr_invalidate` — OwnWrite: drop the entry + log a HARD event
   (always, even when nothing was cached — the concurrent-populate guard).
 - `larder_attr_downgrade` — G3: mark a PARENT dir's entry `perm_only`
@@ -111,6 +118,10 @@ lazily-allocated array + page buffer.
 - `larder_page_invalidate_range` — G1b: drop only `[first_idx, last_idx]`
   (the write-through discipline — a ~100-byte buildid pwrite must not
   nuke a just-populated archive); same event logging.
+- `larder_forget_all` — drop everything in this Larder and move `gen` by
+  `LARDER_INVAL_RING + 1`, so every fill in flight fails safe. For an op that
+  changed the server and whose caller is gone: nothing says which file it touched
+  (B-3h audit round 3, LARDER-DESIGN section 12, which states the residual).
 
 **Cached-open pure readers** (FID-LIFECYCLE; mutate nothing beyond the
 CLOCK ref bit):
@@ -204,10 +215,11 @@ attr/page installs + the snapshot witness key on the file.
 - **The dentry cache has NO version and NO cvers gate** (the L1d
   ground-truth correction): a name→child binding is a fact about the
   PARENT's dirent set, and Stratum surfaces no directory-content version
-  that tracks a dirent change (a child create/unlink never runs
-  `stm_inode_set` on the parent, so the parent `si_cvers` does not bump;
-  only rename stamps it). A parent-cvers gate would FALSELY MATCH a stale
-  negative dentry after a create. Sole coherence: name-specific own-write
+  that reliably tracks a dirent change (since Stratum `af7f8a5` a child
+  create/unlink stamps the parent's mtime and ctime, which bumps its
+  `si_cvers`, but best-effort after the dirent is published: a failed
+  stamp leaves it unmoved). A parent-cvers gate could FALSELY MATCH a
+  stale negative dentry after a create. Sole coherence: name-specific own-write
   invalidation. Negative entries (`→ ENOENT`) are first-class — the
   failed-lookup-storm win.
 - **Own pages bypass the cvers gate** (G1): no post-flush cvers is
@@ -253,12 +265,22 @@ Capacities (all tunable; the sizing history is load-bearing context):
 - `LARDER_PAGE_SIZE` = 4096 (aligns with the buddy/demand-page system and
   Go's page-aligned archive reads).
 
+**A forget is one store** (B-3h audit round 4). `larder_forget_all` moves `l->epoch` and
+jumps gen past the ring. Each entry is stamped at install, and `attr_live`, `dentry_live`
+and `page_live` read another epoch as an empty slot, so finds miss it and CLOCK takes it
+first; it stays chained until that reuse unlinks it, or a fill of its own key takes it over
+(`attr_key_slot_locked` and its twins). A key holds one slot however often a session forgets,
+so no chain outgrows the table's load factor, and a forgotten page counts in neither
+`page_evictions` nor `page_invalidations`. 64 bits: a forget costs one round trip, so 32 could
+wrap in a day and revive a stale slot. Lock order: `c->lock` -> `l->lock` at a forget. Legs:
+`larder.forget_all`, `.forget_one_slot_per_key`, `.forget_full_page_table`.
+
 ## Concurrency
 
 Every entry point is a single lock/unlock pair on the one leaf lock — no
 mid-op release, no cross-op held state ([[lock-larder-l-lock]]: only the
 buddy zone lock ever nests below, via the non-blocking kmalloc/kfree;
-never held with `c->lock`; never across an RPC). The two SMP disciplines
+`c->lock` nests above it only at a forget; never across an RPC). The two SMP disciplines
 that make the shared-client exposure sound:
 
 1. **Serve/invalidate atomicity** — a serve copies the whole entry (or

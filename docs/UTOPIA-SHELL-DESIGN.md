@@ -498,6 +498,7 @@ Must be internal (no other choice — they modify the shell's own state):
 - `exit` — exit the shell with optional code.
 - `return` — return from a function.
 - `set`, `unset`, `export` — variable management.
+  `unset NAME` also removes `NAME` from the shell's own environment (`/env`), so the commands it starts afterwards no longer receive it. Only the shell can do that: a removal acts on the remover's environment, so a spawned `rm /env/NAME` removes the name from its own copy alone (operator vote 2026-10-28).
 - `source` (also `.`) — execute a script in the current shell's scope.
 - `eval` — evaluate a string as commands.
 - `alias`, `unalias` — manage aliases.
@@ -513,14 +514,15 @@ Must be internal (no other choice — they modify the shell's own state):
 - `true`, `false` — exit 0 / exit 1.
 - `time` — time a command or pipeline. Internal for pipeline-aware timing.
 - `kill` — send a note (§10). Default note: `term`, the catchable terminate request (POSIX `kill`'s `SIGTERM`).
+- `umask` — `umask [MODE]` — with no argument, print the creation mask as four octal digits (`0022`); with one, set it from MODE, one to four octal digits of value at most 0777. Symbolic modes are not taken. The mask is the shell's Proc state, which the commands it starts inherit (IDENTITY-DESIGN 9.7 M8; operator vote 2026-10-19).
 
 ### 9.2 The Thylacine extensions
 
 Cannot sensibly be external — they modify the calling process's namespace, capabilities, or note delivery state:
 
-- `bind` — `bind [-a|-b|-r] OLD NEW` — Plan 9 namespace bind. Calls the `rfork` + bind syscall path.
-- `mount` — `mount [-c] SERVER NEW` — Plan 9 namespace mount. Mounts a 9P server at a namespace point.
-- `unmount` — `unmount [OLD] NEW` — undo a mount.
+- `bind` — `bind [-b|-a] [-c] new old` — Plan 9 namespace bind: the file `new`, already in the namespace, is grafted over the name `old`. `-b` and `-a` place it before or after `old` in a union (replace is the default); `-c` lets creates land in it. One syscall on an `O_PATH` handle of `new`; the shell's Territory is already its own. (As built 2026-10-18; the earlier sketch, `bind [-a|-b|-r] OLD NEW`, named the operands the other way round and had a `-r` that the default makes redundant and Plan 9 lacks.)
+- `mount` — `mount [-b|-a] [-c] SERVICE OLD [ANAME]` — Plan 9 namespace mount. Attaches a posted 9P service and mounts it at `OLD`, with `bind`'s flags.
+- `unmount` — `unmount OLD` — remove the first mount or bind at `OLD` in search order.
 - `pivot_root` — `pivot_root NEW` — atomic root swap. Rare; used by containers and bootstrap.
 - `rfork` — `rfork [FLAGS]` — explicit fork with namespace-control flags.
 - `cap` — `cap [ls|get|drop]` — inspect or drop capabilities held by the current process.

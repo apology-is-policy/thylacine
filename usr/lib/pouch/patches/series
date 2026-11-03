@@ -169,17 +169,48 @@
 # 0050 (signal chunk S-3): raise()/kill(self) of SIGSEGV/SIGBUS/SIGILL/SIGFPE post
 # the snare to self and die of that signal; kill() reads ESRCH/EPERM, not EIO.
 0050-pouch-self-fault-signals-errnos.patch
-# 0064 (env-c, vote 28): posix_spawn sends envp as the SPAWN_EXT_ENV tail, the
-# child's whole environment; the tail's refusals return their errno. Numbered
-# after b3's 0051-0063, which join this series at that merge, before it.
+# 0051 (B-3a): fsync/fdatasync on SYS_FSYNC; readv/writev/preadv/pwritev as one
+# gathered transfer; a socket answers lseek/pread/pwrite ESPIPE and fstat S_IFSOCK.
+0051-pouch-fd-sync-vectored.patch
+# 0052 (codex/astra 0049): Preserve child action history and parent temporary-fd provenance.
+0052-pouch-spawn-action-sources.patch
+# 0053 (codex/astra 0050): Requires native129 (HANDLE_FLAGS_GET); rights-independent, nonallocating source queries.
+0053-pouch-spawn-source-query.patch
+# 0054 (codex/astra 0051): validate self-dup with the native query or the Pouch socket-slot owner.
+0054-pouch-dup2-self-query.patch
+# 0055 (codex/astra 0052): native descriptor flag setter and atomic target replacement (130/131).
+0055-pouch-descriptor-operations.patch
+# 0056 (B-3b): dup, F_DUPFD(_CLOEXEC), F_GETFL, F_SETFL, pipe2 flags, open O_CLOEXEC, stdio raw fcntl callers over native 129-131 + SET_NONBLOCK 123.
+0056-pouch-dup-fcntl-status.patch
+# 0057 (B-3b, vote 6): kill(pid, 0) over the SYS_POSTNOTE empty-name probe; getppid over native SYS_GETPPID 132.
+0057-pouch-kill-probe-getppid.patch
+# 0058 (M8, operator vote 2026-10-19): umask over native SYS_UMASK 133, mask & 0777 so it never fails.
+0058-pouch-umask.patch
+# 0059 (B-3f', operator vote 2026-10-20): lstat/fstatat NOFOLLOW over native SYS_LSTAT 136, readlink over SYS_READLINK 135, open O_NOFOLLOW/O_PATH/O_DIRECTORY, lchmod EOPNOTSUPP on a link.
+0059-pouch-symlinks.patch
+# 0060 (OPEN-BUGS 10-15 O-4, B-3b audit round 2): musl's raw opens (the sys_open family) through openat's translation, __pouch_sys_open; __map_file maps MAP_PRIVATE; 0023's stdio openers back to sys_open.
+0060-pouch-raw-open.patch
+# 0061 (raw-open audit round 1 F1; ERRORS.md ER-2, the SYS_FSTAT half): fstat passes the kernel's EBADF through; ioctl answers EBADF for a dead descriptor (refuse_fd), which isatty keeps.
+0061-pouch-fstat-ebadf.patch
+# 0062 (B-3g, operator vote 2026-10-21): link and linkat answer EPERM without a trap, as Linux on a filesystem without hard links; linkat refuses a flag Linux refuses, EINVAL, first.
+0062-pouch-link-eperm.patch
+# 0063 (B-3g, G12, operator votes 17 and 18 of 2026-10-22): utimensat sets times over SYS_WSTAT's four time bits (x6 carries the values; __syscall7); every time but the touch is the owner's, so its refusal is EPERM, as chmod's is in fchmod and fchmodat.
+0063-pouch-utimensat.patch
+# 0064 (env-c, vote 28; corona's, after B-3's 0051-0063): posix_spawn sends envp
+# as the SPAWN_EXT_ENV tail, the child's whole environment; the tail's refusals
+# return their errno.
 0064-pouch-spawn-env.patch
-# 0065 (thread-model C7, vote 2026-10-29): a new thread starts with its creator's
+# 0065 (B-3h4, votes 34-35): fcntl F_SETLK/F_SETLKW/F_GETLK (the Proc owns)
+# and F_OFD_* (the open file owns), and flock (the open file, the whole file),
+# over SYS_FILE_LOCK 137.
+0065-pouch-file-locks.patch
+# 0066 (thread-model C7, vote 2026-10-29): a new thread starts with its creator's
 # signal mask -- start() and start_c11() restore it via __restore_sigs.
-0065-pouch-thread-inherits-mask.patch
-# 0066 (thread-model C7): a thrd_create thread registers clear_child_tid + its tid
+0066-pouch-thread-inherits-mask.patch
+# 0067 (thread-model C7): a thrd_create thread registers clear_child_tid + its tid
 # as start() does -- without it thrd_join hangs.
-0066-pouch-c11-thread-registers.patch
-# 0067 (thread-model C4, operator votes 5 and 14): pthread_kill and raise name one thread over SYS_postnote_tid; kill(pid) stays process-directed.
-0067-pouch-thread-directed-kill.patch
-# 0068 (operator vote 15): SIGUSR1 and SIGUSR2 are the usr1 and usr2 notes.
-0068-pouch-usr-notes.patch
+0067-pouch-c11-thread-registers.patch
+# 0068 (thread-model C4, operator votes 5 and 14): pthread_kill and raise name one thread over SYS_postnote_tid; kill(pid) stays process-directed.
+0068-pouch-thread-directed-kill.patch
+# 0069 (operator vote 15): SIGUSR1 and SIGUSR2 are the usr1 and usr2 notes.
+0069-pouch-usr-notes.patch

@@ -358,10 +358,13 @@ void test_9p_transport_exchange_drives_session_walk(void) {
                                   aname, sizeof(aname), 0);
     p9_transport_exchange(&t, &s, g_send_buf, (size_t)len, &r);
 
-    // Now walk root → fid 7 (clone).
+    // Now walk root → fid 7.
+    const u8 wname[1] = { 'a' };
+    const u8 *const wnames[1] = { wname };
+    const size_t wlens[1] = { 1 };
     len = p9_session_send_walk(&s, g_send_buf, sizeof(g_send_buf),
                                 /*src=*/0, /*new=*/7,
-                                /*nwname=*/0, NULL, NULL);
+                                /*nwname=*/1, wnames, wlens);
     TEST_ASSERT(len > 0, "send_walk ok");
     struct p9_dispatch_result rw;
     int rc = p9_transport_exchange(&t, &s, g_send_buf, (size_t)len, &rw);

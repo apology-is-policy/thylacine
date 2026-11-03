@@ -264,6 +264,8 @@ uniform-mode cape):
 *Nothing identity-bearing crosses to a caped server:*
 - Tattach sends `n_uname` = none (F-4).
 - A create sends gid `(u32)-1`, which a POSIX server reads as "leave the group".
+- A lock request sends an empty `client_id`, so a take counts against no identity's
+  share on that server.
 - chown and chgrp are refused before the wire, with `SYS_WSTAT`'s generic
   failure like its other refusals (a Loom create that names a group is a chgrp
   too, and answers `-EACCES`): the cape imposes ownership, and a server-side
@@ -381,7 +383,19 @@ reads, B writes") = namespace composition, not an ACL.
   annotation (F-3: a legate's files are owned by the durable user).
 - group = the **parent directory's group** (Plan 9 / BSD inheritance —
   collaboration-friendly; the natural partner to F-2's namespace-sharing).
-- mode = a default, masked by a umask-equivalent.
+  **Built 2026-10-19** (operator vote, `dec-2026-10-19-create-group-from-parent`;
+  until then every create path stamped the creator's primary group, which
+  holotype round 1 found): the sync create and Loom's `MKDIR`, `MKNOD` and
+  `SYMLINK` for a gid of 0 send the group the parent's stat names. The stat is
+  taken on every Dev, not only where rwx is enforced, and a create whose parent
+  cannot be stat'd is refused (`EIO`); a parent whose stat names no group (the
+  server left it out) passes none on. An explicit Loom gid keeps the chgrp rule
+  (a group the creator may chgrp a file it owns to); a caped session keeps
+  `P9_NOGID` (§3.2).
+- mode = a default, masked by a umask-equivalent. **Built 2026-10-19** (operator
+  votes, `dec-2026-10-19-create-mode-bound-and-umask`): the mode the caller asks for,
+  less the caller's umask, bounded by the parent directory's mode as Plan 9's
+  create(5) bounds it (9.7 M8).
 - Intended consequence: create cannot stamp an owner until identity exists →
   `SYS_WALK_CREATE` is formally gated on login. The original redirect-create
   thread lands here.
@@ -699,7 +713,8 @@ the remaining walks (brief any in full on request).
   authenticated remote = v1.x).
 - **F-5** — Ownership-on-create. **RESOLVED 2026-05-28 → §3.5** (owner = caller's
   durable principal-id, never the clearance; group inherits parent dir; mode =
-  default & umask).
+  default & umask). The group rule was found unbuilt, voted on and built on
+  2026-10-19 (§3.5).
 - **F-6** — HW capability granularity. **RESOLVED 2026-05-28 → §3.6**: v1.0 blanket
   `CAP_HW_CREATE` (resource-scoping deferred to v1.x for consistency with F-3);
   contained by legate scope + dev-mode; representation allowlist-extensible.
@@ -1189,12 +1204,14 @@ SYS_WALK_CREATE(parent_fd, name_va, name_len, omode, perm) -> opened_fd / -1
 - **Returned fd rights:** `RIGHT_READ | RIGHT_WRITE | RIGHT_TRANSFER` (same as
   `walk_open`). The underlying fid's omode is what the server enforces.
 - **Mechanism:** `dev->create` (the real `dev9p_create`): `perm & DMDIR` ?
-  `p9_client_mkdir(mode = perm & 0777, gid = caller primary_gid)` then walk+open
-  the new directory : `p9_client_lcreate(flags from omode | O_CREAT [+ O_TRUNC],
-  mode = perm & 0777, gid = caller primary_gid)`. For `devramfs` (the
-  kernel-test target) the existing in-memory create path is reused.
-- **Ownership-on-create (SEAM at this chunk):** the create carries the caller's
-  `primary_gid` into the 9P `gid` field. Full owner attribution = caller
+  `p9_client_mkdir(mode = perm & 0777, gid)` then walk+open the new directory :
+  `p9_client_lcreate(flags from omode | O_CREAT [+ O_TRUNC], mode = perm & 0777,
+  gid)`, where `gid` is the parent directory's group (§3.5 F-5). For `devramfs`
+  (the kernel-test target) the existing in-memory create path is reused.
+- **Ownership-on-create (SEAM at this chunk):** the create carries a group into
+  the 9P `gid` field: the caller's `primary_gid` as this chunk built it, and the
+  parent directory's group since the vote of 2026-10-19 was built (§3.5 F-5).
+  Full owner attribution = caller
   `principal_id` is recorded where the KERNEL mediates the metadata -- the
   mount-cape for self-declared-non-POSIX backings (A-2c) and the kernel rwx
   layer (A-2d); for a Stratum-backed dev9p file the owner is the connection
@@ -1778,13 +1795,95 @@ is correct. The "shared mount stamps the attacher's principal" limitation is exa
 what per-user stratumd resolves at login -- and the kernel `perm_check` (per-Proc, at
 the chokepoint) already denies a non-system Proc's write to a SYSTEM-owned dir BEFORE
 the create reaches the server, so enforcement is per-Proc-correct even over the shared
-mount.
+mount. **Corrected 2026-10-18:** that holds only while no directory on the shared mount
+grants a non-system principal write. Three `tools/build.sh` sites stamped 1777 on the
+pool and a fourth stamped Quake's game directories 0777 (found at implementation), and a
+2026-10-15 probe showed uid 1000's create in one of them owned by system. M7 closes the
+hole in the kernel.
+
+**M7 -- a create speaks for a session end (kernel; operator vote 2026-10-18,
+`dec-2026-10-18-create-speaks-for-a-session-end`).** A create through a 9P session is
+admitted only to a principal at one of the session's two ends:
+- the **client end**, the identity the server authenticates: a `/srv` connection's
+  opener (`SrvConn.peer_principal`, what `SO_PEERCRED` reports), or the attaching Proc
+  for a transport the caller supplies (`SYS_ATTACH_9P`);
+- the **server end**, the service's poster (`SrvConn.server_principal`). A
+  caller-supplied transport has none.
+
+Any other principal gets `EACCES`; this covers a Proc creating through a mount it
+inherited from another identity. A session whose ends were never recorded admits no
+create. The check sits at both kernel paths that create through a session, the sync
+chokepoint (`spoor_create_install`) and Loom's directory-mutation gate for `MKDIR`,
+`MKNOD` and `SYMLINK` (LOOM.md 8.5.1), and runs whether or not the Dev enforces rwx.
+On the sync path a name that already exists still answers `EEXIST` to a caller that may
+search the directory, the A-2d order; Loom answers `EACCES`, as its W|X refusal does.
+(Corrected 2026-10-19: this said "the one create chokepoint". Loom's three create ops
+were a second door, found by the M8 self-audit before either rule had run.)
+- **Why both ends.** The server stamps a create with its connection's credential, or
+  with its own when it relays, never with the asking Proc's. The pool's two ends are
+  system, so an ordinary user cannot make a system-owned file there. login attaches a
+  home as system, but the home's server end is the per-user proxy, which runs as the
+  user and relays as the user. So the user's creates in the home, and in the `/tmp`
+  that ut binds from it, are admitted and stamped as the user.
+- **The pool's world-writable directories go.** Their consumers write where the running
+  user owns the storage. `viv run` binds the invoker's own `/tmp/.viv/<rootfs path>/tmp`
+  over the bundle's `/tmp`, made on first use and kept as the rootfs's own was
+  (VIVARIUM 7.2). The user who runs the library tests binds a layer of their own over
+  each tree a test writes into (`bind -bc`). Quake writes under `$HOME`. World-writable
+  directories matter beyond create: M7 does not cover remove or rename, so one on the
+  pool would still let any user delete system's files there. No create applied a mask
+  either (F-5's was never built), so a system program that asked for 0666 or 0777 made
+  a world-writable file or directory on the pool; M8 closes that.
+- **Elevation is not an end.** The legate grants `CAP_HOSTOWNER` / `CAP_DAC_OVERRIDE`,
+  which override rwx; neither makes a Proc a session end. An elevated user may modify
+  existing objects on system's mount but cannot create there; administration that
+  must create on the system pool runs as system.
+- **No ABI change.** The syscall arguments and the wire are unchanged. The only new
+  behaviour is a refusal, and `EACCES` is already in the create errno set.
+- **Long term:** per-user attach (Plan 9's newns), where each login attaches the pool as
+  the user so the server sees and stamps the real principal, remains the faithful
+  shape. M7 is the kernel's floor until then.
+
+**M8 -- a create's mode is bounded by its directory and the creator's umask (kernel;
+operator votes 2026-10-19, `dec-2026-10-19-create-mode-bound-and-umask`).** F-5's mask,
+built. On both create paths (`spoor_create_install`, and Loom's `MKDIR` and `MKNOD`),
+before the request reaches the server, the mode a create asks for is reduced twice:
+- by the creator's **umask**, a per-Proc mask that `SYS_UMASK` exchanges. It is 0022 at
+  boot, a child inherits its parent's at spawn, and a Proc's threads share it;
+- by the **parent directory's mode**, as Plan 9's create(5) bounds it. A file's read and
+  write bits are ANDed with the directory's, `perm & (~0666 | (dir.perm & 0666))`, so
+  its execute bits pass; a directory's rwx are ANDed with the directory's,
+  `perm & (~0777 | (dir.perm & 0777))`. The bound applies wherever the Dev enforces rwx,
+  which is where a mode carries authority.
+
+A `/srv` post is not a file and takes neither.
+- **Why both.** The bound is the floor no program can lower: a system program that asks
+  for 0666, clears its umask or restores modes from an archive still cannot make a file
+  in a 0755 directory that others may write. A wider mode takes an explicit chmod, which
+  only the owner may make. The umask is the creator's own restriction: ported code sets
+  it (`umask(077)` before writing a secret), and POSIX says `umask()` always succeeds.
+- **The servers apply none.** Stratum stamps `mode & 07777`, the 9P2000.L convention in
+  which the client masks, so the kernel, the client of every session, is the one place
+  a mask applies.
+- **What changes.** Native code already asks for 0644 and 0755, so under 0022 in a 0755
+  directory its modes are unchanged; ported code's 0666 and 0777 become 0644 and 0755
+  there. In a 0700 directory a new file is at most 0600 and a new directory 0700; an
+  executable asked for 0777 is 0711, Plan 9's answer, where Linux under 0022 gives 0755.
+- **ABI.** `SYS_UMASK` = 133 sets the mask and returns the previous one; a mask with a
+  bit outside 0777 is refused with `EINVAL` and changes nothing, as `SYS_WSTAT` refuses
+  stray mode bits. The POSIX front ends pass `mask & 0777`, so their `umask` always
+  succeeds: Pouch's `umask`, the phenotype's Linux `umask` (166) and go-thylacine's
+  `syscall.Umask`. ut's `umask` builtin sets the shell's mask.
 
 **Invariants.**
 - **I-22 preserved** -- the `SO_PEERCRED` principal is kernel-stamped (`SYS_srv_peer`),
   not client-asserted; no identity self-elevates. `CAP_HOSTOWNER` remains the only
-  DAC-override (a capability, not an identity).
-- **I-2 / I-4 / I-6 unaffected** -- M1-M6 add no capability, no handle-transfer path, no
+  DAC-override (a capability, not an identity). M7 (2026-10-18) closes the way round it:
+  a Proc can no longer create, through a session it inherited, files stamped as that
+  session's identity. M8 (2026-10-19) closes the other way: an identity's files cannot
+  be made writable to others by what a program asks for, only by the owner's chmod or
+  in a directory whose owner made it writable to them.
+- **I-2 / I-4 / I-6 unaffected** -- M1-M8 add no capability, no handle-transfer path, no
   rights expansion. F1 *narrows* the handle-rights envelope (omode-derived) --
   monotonic-reduction-friendly.
 - **A-1.7 (I-23) preserved** -- F1's `T_OPATH` carve-out keeps the storage-capability
@@ -2723,13 +2822,17 @@ deadlock -- logout hangs, no getty respawn, no new prompt.
   its Territory at **EXIT**, not reap -- the direct analog of #68/#926 moving the
   handle-table close to exit so a peer sees EOF immediately. So an
   exited/zombie session member stops pinning the home mount without waiting to be
-  reaped. Because `/proc/<pid>/ns` (`devproc format_ns`) reads `p->territory`
-  under `g_proc_table_lock` (the #57a F2 envelope), the release uses a
+  reaped. Because `/proc/<pid>/ns` reads `p->territory` under
+  `g_proc_table_lock`, the release uses a
   **locked-detach + unlocked-free split**: under `g_proc_table_lock` set
-  `p->territory = NULL` (serializes with `format_ns`, which then renders empty --
-  `territory_format_ns(NULL)`/`format_cwd` are both NULL-safe), then
-  `territory_unref` the detached pointer OUTSIDE the lock (the `spoor_clunk` may
-  sleep on `Tclunk`; the detached pointer is unreachable by any reader).
+  `p->territory = NULL` (serializes with the ns read's walks: one that finds NULL
+  renders empty -- `territory_format_ns(NULL)`/`format_cwd` are both NULL-safe),
+  then `territory_unref` the detached pointer OUTSIDE the lock (the `spoor_clunk`
+  may sleep on `Tclunk`). The ns read holds a WEAK ref across its render (B-3),
+  which keeps only the struct: a reader that took it before the detach does not
+  delay the release, which runs here, at death, on the exiting thread, and the
+  reader's drop frees only the struct -- a reader never waits on the dead Proc's
+  9P server.
   Idempotent with `proc_free`'s `territory_unref(NULL)`. **Part D alone closes
   the imperium (killed-zombie) case** -- the abdicate-swept job already exited, so
   it releases its mount ref at exit.

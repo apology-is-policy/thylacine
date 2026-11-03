@@ -58,6 +58,7 @@
 // dispatcher that calls into here -- so keeping the dependency one-way now
 // removes an include cycle before it can exist.
 struct t_stat;
+struct t_timespec;
 
 // A Linux aarch64 syscall carries at most 6 argument words (x0..x5).
 #define VIV_NARGS 6
@@ -316,9 +317,10 @@ enum {
     // native occupant is SYS_WSTAT(fd, valid, mode, uid, gid, size). The mis-
     // declared native program is refused TWICE OVER, and the outer refusal is
     // the DOMAIN CHECK rather than a memory guard: `valid` is a bitmask of
-    // T_WSTAT_{MODE,UID,GID,SIZE} == 0xF, so every legal wstat mask lands in
-    // [1,15], and the pipe2 domain admits only {0, O_CLOEXEC == 0x80000}. No
-    // wstat a native caller can legally make is even reachable past the decide.
+    // T_WSTAT_VALID == 0x1BF (bits 0-5 and 7-8), so every legal wstat mask
+    // lands in [1, 0x1BF], and the pipe2 domain admits only {0, O_CLOEXEC ==
+    // 0x80000}. No wstat a native caller can legally make is even reachable
+    // past the decide.
     // Should a garbage `valid` of 0 slip through anyway, args[0] -- the fd index
     // wstat put there -- becomes the VA the fd pair is written to, which is page
     // zero, so the copy-out faults, both freshly-made fds are closed, and the
@@ -330,6 +332,9 @@ enum {
     VIV_LINUX_SETGID          = 144,
     VIV_LINUX_SETUID          = 146,
     VIV_LINUX_UNAME           = 160,
+    // M8: a Tier-2 shell onto SYS_UMASK's accessor, masking to 0777 first
+    // (Linux never fails a umask; the native call refuses stray bits).
+    VIV_LINUX_UMASK           = 166,
     VIV_LINUX_GETPID          = 172,
     VIV_LINUX_GETPPID         = 173,
     VIV_LINUX_GETUID          = 174,
@@ -494,6 +499,29 @@ enum {
     //       FORWARDs to ENOSYS on shape. Identical to 48/53's argument.
     VIV_LINUX_READLINKAT = 78,
 
+    // utimensat (G12, operator votes 17 and 18 of 2026-10-22; VIVARIUM.md
+    // section 6.30). busybox touch, cp -p and tar set times through it, and
+    // touch cannot make a file without it. The shell copies the times in,
+    // derives SYS_WSTAT's time mask (vivarium_utimens_mask), picks the object
+    // (vivarium_utimensat_decide: the descriptor form, AT_EMPTY_PATH, or a name
+    // under AT_FDCWD) and applies it through the audited wstat core, whose
+    // perm_wstat_check is the POSIX rule. A name is resolved to a private Spoor,
+    // never to a descriptor the caller's peer threads could see.
+    //
+    // 88 is BELOW the ceiling and collides with SYS_STAT(path_va, path_len,
+    // stat_va). The AT_FDCWD gate is no full shape defense here: path_va is a
+    // byte-aligned user VA, so its low 32 bits CAN read -100. The argument is
+    // the damage envelope (the pipe2-row standard):
+    //   88  vs SYS_STAT. A mis-declared native caller's stat_va is read as the
+    //       times (32 bytes of its OWN memory, or EFAULT), path_va's low 32
+    //       bits as dirfd, path_len as the path pointer and x3's residue as
+    //       flags. Every outcome is an EFAULT, an EINVAL, a FORWARD to ENOSYS,
+    //       or a time set on a file the caller names in its OWN namespace or
+    //       already holds in its OWN handle table, under its OWN identity and
+    //       perm_wstat_check. Nothing is written to stat_va; no authority
+    //       crosses.
+    VIV_LINUX_UTIMENSAT  = 88,
+
     // geteuid/getegid. Thylacine carries ONE principal per Proc (no real vs
     // effective split -- I-22: authority is the capability set, not a uid), so
     // each is the exact twin of its getuid/getgid sibling (174/176) and maps
@@ -564,16 +592,48 @@ enum {
 // native switch, so a Linux Proc's 128 never reaches the sync, and a native
 // program mis-declared as Linux loses the sync, which confers nothing anyway.
 //
-// D7 places SYS_SRV_REGISTRY_NEW at 134 (vote 13: 129..133 are held for b3's
-// syscalls), and the ceiling rises over the signal family's 129..134. Only
-// rt_sigaction (134) meets a native number there. The arguments for it and for
-// the empty 129..133 are per-number, in vivarium.c, and the lowest
-// signal-family number still argued by the ceiling is rt_sigprocmask (135).
+// B-3b appends SYS_HANDLE_FLAGS_GET at 129 (Astra's handle query, her 128 on
+// codex/astra). Linux 129 is kill, a VIV_TIER2 row, and viv_linux_dispatch
+// consumes every row that is not TRANSLATED before the native switch, so a
+// Linux Proc's kill never reaches the query; kill's argument is now
+// per-number (vivarium.c). The lowest signal-family number still argued by
+// the ceiling is tkill (130).
 //
-// SYS_POSTNOTE_TID lands at 138 (operator vote 2026-11-02), and the ceiling rises
-// over rt_sigprocmask, rt_sigpending, rt_sigtimedwait and rt_sigqueueinfo. Only
-// rt_sigqueueinfo meets a native number there; each has its per-number argument
-// in vivarium.c, and the lowest still argued by the ceiling is rt_sigreturn (139).
+// B-3b appends SYS_HANDLE_FLAGS_SET at 130 and SYS_HANDLE_DUP_TO at 131
+// (Astra's 129 and 130). Linux 130 and 131 are tkill and tgkill, VIV_TIER2
+// rows consumed before the native switch exactly as kill's is, so each now
+// has a per-number argument (vivarium.c). The lowest row still argued by the
+// ceiling is sigaltstack (132), a VIV_ENOSYS row.
+//
+// Vote 6 (2026-10-14) appends SYS_GETPPID at 132. Linux 132 is sigaltstack, a
+// VIV_ENOSYS row consumed before the native switch, so a Linux Proc's
+// sigaltstack never reaches getppid; its argument is now per-number
+// (vivarium.c). The lowest row still argued by the ceiling is rt_sigsuspend
+// (133), also VIV_ENOSYS.
+//
+// M8 (operator vote 2026-10-19) appends SYS_UMASK at 133. Linux 133 is
+// rt_sigsuspend, a VIV_ENOSYS row consumed before the native switch, so a
+// Linux Proc's rt_sigsuspend never sets its mask; its argument is now
+// per-number (vivarium.c). The lowest row still argued by the ceiling is
+// rt_sigaction (134), a VIV_TIER2 row.
+//
+// Vote 2026-10-20 (dec-2026-10-20-native-lstat-readlink) appends SYS_READLINK
+// at 135 and SYS_LSTAT at 136, leaving 134 to corona's SYS_SRV_REGISTRY_NEW
+// (vote 2026-10-19). Linux 134, 135 and 136 are rt_sigaction (VIV_TIER2),
+// rt_sigprocmask (VIV_TIER2) and rt_sigpending (VIV_ENOSYS), each consumed
+// before the native switch, and each now argues its number on its own
+// (vivarium.c). The lowest row still argued by the ceiling is rt_sigtimedwait
+// (137), a VIV_ENOSYS row.
+//
+// Votes 34-35 (2026-10-29, dec-2026-10-29-b3h-file-locks) append SYS_FILE_LOCK
+// at 137, rt_sigtimedwait's number: a VIV_ENOSYS row consumed before the native
+// switch, which now argues its number on its own (vivarium.c). The lowest row
+// still argued by the ceiling is rt_sigqueueinfo (138), a VIV_ENOSYS row.
+//
+// SYS_POSTNOTE_TID lands at 138 (operator vote 2026-11-02), rt_sigqueueinfo's
+// number: a VIV_ENOSYS row consumed before the native switch, which now argues
+// its number on its own (vivarium.c). The lowest row still argued by the
+// ceiling is rt_sigreturn (139).
 #define VIV_NATIVE_CEILING 138
 
 // -----------------------------------------------------------------------------
@@ -849,6 +909,35 @@ enum viv_verdict vivarium_fstatat_decide(u64 dirfd, u64 flags,
 // syscall carries no flags word (musl access()/faccessat(...,0) issue the 3-arg
 // form; the 4-arg faccessat2 is a different number), so there is nothing to map.
 enum viv_verdict vivarium_faccessat_decide(u64 dirfd);
+
+// TIER 2 — `utimensat` (G12; VIVARIUM.md section 6.30). Linux's two tv_nsec
+// sentinels (musl `sys/stat.h`).
+#define VIV_UTIME_NOW  0x3fffffffL
+#define VIV_UTIME_OMIT 0x3ffffffeL
+
+// SYS_WSTAT's time mask for a utimensat, from a KERNEL copy of the guest's
+// times (NULL: both now). UTIME_OMIT leaves its time out, UTIME_NOW is its bit
+// alone, a value is its bit and its _SET bit. 0 with *valid_out set; 1 when
+// both are UTIME_OMIT (Linux answers 0 and looks at nothing else); -T_E_INVAL
+// for a nanosecond that is neither sentinel nor in [0, 999999999]. PURE.
+s64 vivarium_utimens_mask(const struct t_timespec *times, u32 *valid_out);
+
+// Which object a utimensat names, from its registers (only the low 32 bits of
+// dirfd and flags count: both are `int`). `path_empty` is whether the path's
+// first byte is NUL; the shell reads it only for a non-null path under
+// AT_EMPTY_PATH. Linux's do_utimes order: a null path with a real descriptor is
+// the descriptor form, which takes no flag; otherwise the flags, then the path.
+// PURE.
+enum viv_utimens_form {
+    VIV_UTIMENS_FD,        // the descriptor dirfd names
+    VIV_UTIMENS_PATH,      // a name, under AT_FDCWD
+    VIV_UTIMENS_CWD,       // AT_EMPTY_PATH with "" under AT_FDCWD
+    VIV_UTIMENS_EINVAL,    // a flag Linux refuses for the form
+    VIV_UTIMENS_EFAULT,    // the path form with a null path
+    VIV_UTIMENS_FORWARD,   // a name under a real dirfd: outside the domain
+};
+enum viv_utimens_form vivarium_utimensat_decide(u64 dirfd, u64 path_va,
+                                                u64 flags, bool path_empty);
 
 // -----------------------------------------------------------------------------
 // TIER 2 — `mmap` (V-2d). See VIVARIUM.md §6.21.

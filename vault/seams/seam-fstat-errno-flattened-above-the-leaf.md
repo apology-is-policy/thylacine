@@ -2,13 +2,28 @@
 id: seam-fstat-errno-flattened-above-the-leaf
 type: seam
 title: "A comment claims two callers propagate; one of them is the one still owed"
-status: open
+status: closed
 surface: sub-kernel-ninep-dev9p
 opened-by: chg-2026-08-16-dev9p-errno-class
 tracker: "unfiled -- yip to main 2026-08-16"
 created: 2026-08-16
-updated: 2026-08-16
+updated: 2026-10-20
+closed-by: chg-2026-10-20-fstat-ebadf
 ---
+## Closed (2026-10-20)
+
+Both claims are now true. The native-stat arm's comment was corrected on
+2026-08-16: a server EPERM arrives as `-1`, and the client mapper's own comment
+records the one-value mismatch between the window it names and the clamp it
+implements. The second claim became true on 2026-10-20, when
+`sys_fstat_for_proc` stopped flattening ([[chg-2026-10-20-fstat-ebadf]]).
+`SYS_FSTAT` answers `-T_E_BADF` for a handle that names no Spoor, and passes
+a Dev's refusal in `[-4095,-2]` through as itself. It answers `-T_E_IO` for
+the `-1`, a server EPERM included, and for a Dev's `-T_E_BADF`, because the
+handle the core holds is live. Both callers of the arm now apply stalk's
+`err_code` mapping, the fstat core with that one extra fold
+([[sub-kernel-ninep-dev9p]]). The text below is the seam as it stood open.
+
 ## Owed
 
 Nothing behavioural. **Two false sentences in one comment**, sitting on the exact

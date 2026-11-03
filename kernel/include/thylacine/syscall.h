@@ -162,7 +162,7 @@ enum {
     // a pipe-as-mount mostly produces -1, but the lifetime discipline
     // composes regardless), or a future cross-territory share.
     //
-    // SYS_MOUNT(path_va, path_len, source_spoor_fd, flags) → 0/-1/-T_E_NOTDIR
+    // SYS_MOUNT(path_va, path_len, source_spoor_fd, flags) → 0 or -T_E_*
     //   x0 = path_va  (user VA of the absolute mount-point path)
     //   x1 = path_len (1 .. SYS_OPEN_PATH_MAX; bytes, NUL-free)
     //   x2 = source_spoor_fd (hidx_t; must be a KOBJ_SPOOR handle)
@@ -182,20 +182,25 @@ enum {
     // link itself (the mount wins, and the path is refused). Resolves from
     // root only at v1.0 (absolute paths); a relative-mount start_fd is a v1.x
     // add.
-    // Returns: 0 on success, -1 on:
-    //   - path absent / empty / too long / not resolvable / NUL-embedded
-    //     (a trailing '/' on a point that is not a directory is unresolvable:
-    //     stalk refuses it before the type check below can run)
-    //   - invalid source_spoor_fd (not KOBJ_SPOOR, out-of-range)
-    //   - missing RIGHT_READ on the source (it must be consumable as a tree)
-    //   - flags has bits outside the MREPL|MBEFORE|MAFTER|MCREATE|MNOEXEC|
-    //     MPHENO_LINUX set, or more than one of MREPL / MBEFORE / MAFTER
-    //   - territory mount table full (PGRP_MAX_MOUNTS reached)
-    //   - the mount would close a cycle in the mount graph (I-3)
-    // and -T_E_NOTDIR on Plan 9's Emount (ARCH 9.6.1): the source's type
-    // (directory or not) differs from the mount point's, under any flag,
-    // or the flags lack MREPL at a point that is not a directory (a flagless
-    // mount appends; Plan 9's flag 0 is MREPL).
+    // Returns 0 on success, or one errno per refusal (ERRORS.md "Mount and
+    // unmount"; operator vote 2026-10-19):
+    //   - -T_E_INVAL: an empty, over-long or NUL-embedded path; flags with
+    //     bits outside the MREPL|MBEFORE|MAFTER|MCREATE|MNOEXEC|MPHENO_LINUX
+    //     set, or more than one of MREPL / MBEFORE / MAFTER
+    //   - -T_E_FAULT: a path the kernel cannot read
+    //   - the resolver's errno for a point that does not resolve (a trailing
+    //     '/' on a point that is not a directory is unresolvable: stalk
+    //     refuses it before the type check below can run)
+    //   - -T_E_BADF: source_spoor_fd is not a live KOBJ_SPOOR handle (an index
+    //     at or above the table size, judged at full width, included), or
+    //     lacks RIGHT_READ (the source must be consumable as a tree)
+    //   - -T_E_NOTDIR on Plan 9's Emount (ARCH 9.6.1): the source's type
+    //     (directory or not) differs from the mount point's, under any flag,
+    //     or the flags lack MREPL at a point that is not a directory (a
+    //     flagless mount appends; Plan 9's flag 0 is MREPL)
+    //   - -T_E_LOOP: the mount would close a cycle in the mount graph (I-3)
+    //   - -T_E_NOSPC: the territory mount table holds PGRP_MOUNT_CAP entries
+    //   - -T_E_NOMEM: the kernel could not allocate the mount's entries
     //
     // Lifecycle (per ARCH §9.6.6): `mount` bumps the source Spoor's refcount
     // (the mount-table entry holds its own ref). The caller can close
@@ -209,15 +214,15 @@ enum {
     // ARCH 9.5).
     SYS_MOUNT       = 14,   // arg: path_va, path_len, source_spoor_fd, flags
 
-    // SYS_UNMOUNT(path_va, path_len) → 0/-1
+    // SYS_UNMOUNT(path_va, path_len) → 0 or -T_E_*
     //   x0 = path_va  (user VA of the absolute mount-point path)
     //   x1 = path_len (1 .. SYS_OPEN_PATH_MAX)
     // stalk-2: path-keyed. The kernel `stalk`s `path` (STALK_MOUNT) to the
     // mount point's own identity and removes the FIRST mount entry matching
     // (dc, devno, qid.path).
-    // Returns: 0 on success, -1 on:
-    //   - path absent / empty / too long / not resolvable
-    //   - no entry at that mount-point identity in the caller's Territory
+    // Returns 0 on success, or: the path's -T_E_INVAL / -T_E_FAULT and the
+    // resolver's errno, as SYS_MOUNT answers them; -T_E_INVAL when no entry
+    // stands at that mount-point identity in the caller's Territory.
     //
     // Drops the per-entry Spoor ref; the Spoor's Dev close runs if
     // this was the last ref.
@@ -891,15 +896,23 @@ enum {
     //   x0 = pid        target Proc's pid, OR the self-post sentinel
     //                    pid == 0 (P6-pouch-signals sub-chunk 13b — used
     //                    by pouch's raise() since pouch has no userspace
-    //                    getpid path at v1.0; matches POSIX kill(0, sig)
-    //                    semantics, which says "send to every process in
-    //                    the calling process's group" — Thylacine has
-    //                    no process groups, so the closest equivalent is
-    //                    "self"; the sentinel is the canonical name for
-    //                    that mapping)
+    //                    getpid path at v1.0). POSIX kill(0, sig) means
+    //                    every process in the caller's process group; the
+    //                    gate below admits one Proc at a time, so the
+    //                    sentinel reaches only the caller. A negative pid
+    //                    names no Proc (-T_E_SRCH); Pouch's kill and the
+    //                    phenotype's refuse a group target with EPERM
+    //                    before they get here
     //   x1 = name_va    user-VA pointer to the note name bytes
     //   x2 = name_len   bytes (1..NOTE_NAME_MAX-1; NUL not required —
-    //                    name_len is authoritative)
+    //                    name_len is authoritative). 0 is the PROBE
+    //                    (kill(pid, 0); operator vote 2026-10-14 #6): the
+    //                    gate below is asked and nothing is posted; x1 is
+    //                    not read. Self (pid == 0 or the caller's own)
+    //                    answers 0; another pid answers the post's own
+    //                    gate: 0 for the caller's child (dead but unreaped
+    //                    included), -T_E_ACCES for any other Proc,
+    //                    -T_E_SRCH for none.
     //
     // Permission gate at v1.0: caller must be the target's parent OR
     // pid == caller's own pid OR pid == 0 (self-post is always allowed).
@@ -908,7 +921,7 @@ enum {
     // arrives).
     //
     // Returns 0 on success, else a negative errno (operator vote 2026-10-14):
-    //   -T_E_INVAL  name_len 0 or > NOTE_NAME_MAX - 1; a NUL or non-printable
+    //   -T_E_INVAL  name_len > NOTE_NAME_MAX - 1; a NUL or non-printable
     //               byte; a name not in the supported set (NOTE_NAME_* in
     //               <thylacine/notes.h>); a kernel-only name (tty:*, sak,
     //               a snare:* to another Proc)
@@ -992,7 +1005,7 @@ enum {
     //   - rfork_with_caps OOM (Proc / Thread allocation)
     SYS_SPAWN_FULL_ARGV = 49,
 
-    // SYS_FSTAT(spoor_fd, stat_va) → 0 / -1 (P6-pouch-stratumd-boot sub-chunk
+    // SYS_FSTAT(spoor_fd, stat_va) → 0 / -errno (P6-pouch-stratumd-boot sub-chunk
     // 16b-gamma; A-2a grew it to 80). Populate the user-VA `struct t_stat` with
     // metadata for the file opened on `spoor_fd`. The Thylacine-native stat
     // surface — Plan 9 9P qid identity carried verbatim alongside POSIX-shaped
@@ -1004,12 +1017,8 @@ enum {
     //                   fully mapped + writable; alignment NOT required — the
     //                   kernel stores byte-by-byte for alignment tolerance)
     //
-    // The kernel dispatches to dev->stat_native if the Dev implements it.
-    // devramfs implements it (returning size from the cpio metadata and
-    // mode/qid from the in-kernel file table). Other Devs without a real
-    // stat_native (devcons / devnull / devzero / devpipe / devnotes / devsrv /
-    // SrvConn) leave the slot NULL — SYS_FSTAT on those fds returns -1, the
-    // graceful "no stat for this object" answer.
+    // The kernel dispatches to dev->stat_native. Every Dev a namespace fd can
+    // carry implements it except devcap (/cap); a slotless Dev answers -T_E_IO.
     //
     // Rights: none (kind-gate only, the SYS_LSEEK precedent) — #46. fstat
     // observes metadata, not content; POSIX fstat(2) works on any valid fd
@@ -1028,18 +1037,20 @@ enum {
     // fd-passing precedent (a passed fd conveys fstat; rights-stripping
     // bounds read/write/transfer, never metadata secrecy).
     //
-    // Returns 0 on success (out_stat populated), -1 on:
-    //   - spoor_fd not KOBJ_SPOOR / out-of-range
-    //   - stat_va outside the user-VA bound / unmapped at store time
-    //   - the Dev does not implement stat_native (NULL slot)
-    //   - dev->stat_native returned an error
+    // Returns 0 on success (out_stat populated), or:
+    //   - -T_E_BADF: spoor_fd names no Spoor (empty, closed, out of range, or
+    //     another kind -- a KOBJ_SRV listener)
+    //   - -T_E_FAULT: stat_va outside the user-VA bound / unmapped at store time
+    //   - the Dev's refusal: its -errno when in [-4095,-2] (dev9p carries the
+    //     server's), else -T_E_IO (no stat_native slot, or a flat Dev failure);
+    //     a Dev's -T_E_BADF reads -T_E_IO too, since the handle is live
     //
     // Audit-bearing: touches `kernel/syscall.c` (rights gate + uaccess store)
     // + `kernel/devramfs.c` (the stat_native implementation). CLAUDE.md
     // §"stratumd boot mount close" audit-trigger row.
     SYS_FSTAT        = 50,   // arg: spoor_fd (x0), stat_va (x1)
 
-    // SYS_LSEEK(spoor_fd, offset, whence) → new_offset / -1 (P6-pouch-stratumd-
+    // SYS_LSEEK(spoor_fd, offset, whence) → new_offset / -errno (P6-pouch-stratumd-
     // boot sub-chunk 16b-gamma). Position the kernel-side read/write cursor
     // for `spoor_fd`. Maps to POSIX `lseek(2)`. The cursor is the `s64 offset`
     // field of the Spoor that SYS_READ / SYS_WRITE advance per call.
@@ -1056,7 +1067,7 @@ enum {
     //   - T_SEEK_CUR: new_offset = c->offset + offset      (overflow check)
     //   - T_SEEK_END: new_offset = file_size + offset      (overflow check;
     //                 file_size queried via dev->stat_native; Devs without
-    //                 stat_native return -1)
+    //                 stat_native answer -T_E_IO)
     //
     // The kernel rejects new_offset < 0 (POSIX EINVAL). The cursor is set
     // ATOMICALLY relative to a concurrent reader/writer on the same Spoor
@@ -1064,12 +1075,15 @@ enum {
     // threads is unspecified at v1.0 (no per-Spoor cursor lock yet); the
     // POSIX user should serialize themselves.
     //
-    // Returns the new offset (>= 0) on success, -1 on:
-    //   - spoor_fd not KOBJ_SPOOR / out-of-range
-    //   - whence not in {T_SEEK_SET, T_SEEK_CUR, T_SEEK_END}
-    //   - new_offset would be < 0 (T_SEEK_SET with offset < 0; T_SEEK_CUR
-    //     underflow; T_SEEK_END underflow)
-    //   - T_SEEK_END but Dev does not implement stat_native
+    // Returns the new offset (>= 0) on success, or:
+    //   - -T_E_BADF: spoor_fd names no Spoor (empty, closed, out of range, or
+    //     another kind)
+    //   - -T_E_INVAL: whence not in {T_SEEK_SET, T_SEEK_CUR, T_SEEK_END}, or
+    //     new_offset would be < 0 or overflow (T_SEEK_SET with offset < 0;
+    //     T_SEEK_CUR or T_SEEK_END past either end)
+    //   - -T_E_IO: T_SEEK_END on a Dev without stat_native, or its stat fails
+    //   - -1: a Dev that is not seekable (POSIX names ESPIPE, which the
+    //     registry does not yet; the #100 residual)
     //
     // Audit-bearing: per the SYS_FSTAT row in CLAUDE.md.
     SYS_LSEEK        = 51,   // arg: spoor_fd (x0), offset (x1), whence (x2)
@@ -1225,10 +1239,9 @@ enum {
     //                    (Tmkdir) instead of a file (Tlcreate). Bits outside
     //                    SYS_WALK_CREATE_PERM_VALID are rejected.)
     //
-    // The created object's group is stamped from the CALLER's primary_gid
-    // (carried into the 9P Tlcreate/Tmkdir gid field). Full owner attribution
-    // (= caller principal_id) and per-file rwx ENFORCEMENT are A-2 (this is the
-    // create MECHANISM; I-22 holds -- nothing enforces rwx yet to bypass).
+    // The created object's group is the parent directory's (IDENTITY-DESIGN
+    // 3.5 F-5), carried into the 9P Tlcreate/Tmkdir gid field; its mode is the
+    // asked mode less the caller's umask, bounded by the parent's (9.7 M8).
     //
     // Returns: x0 = opened KOBJ_SPOOR fd (>=0; R|W|TRANSFER, matching
     // SYS_WALK_OPEN) on success, or -1 on:
@@ -1245,14 +1258,16 @@ enum {
     // Audit-bearing: CLAUDE.md FS-mutation-syscalls row.
     SYS_WALK_CREATE  = 54,   // arg: parent_fd, name_va, name_len, omode, perm
 
-    // SYS_FSYNC(fd, datasync) -> 0 / -1 (FS-mutation foundation; §9.2).
+    // SYS_FSYNC(fd, datasync) -> 0 / -errno (FS-mutation foundation; §9.2).
     //   x0 = fd        (hidx_t; KOBJ_SPOOR with RIGHT_WRITE -- fsync is the
     //                   write-side durability barrier.)
     //   x1 = datasync  (u32; 0 = full fsync [data + metadata], 1 = data only.)
     // The "write-then-fsync = durable" contract on the integrity FS. Dispatches
     // dev->fsync (dev9p -> p9_client_fsync -> Stratum Tsync; in-memory-durable
-    // Devs no-op success). Returns -1 on: fd not KOBJ_SPOOR / missing
-    // RIGHT_WRITE; the Dev has no .fsync slot; server Rlerror.
+    // Devs no-op success). Returns -T_E_BADF for an fd that is not a
+    // KOBJ_SPOOR or lacks RIGHT_WRITE; -T_E_OPNOTSUPP when the Dev has no
+    // .fsync slot (a pipe, the console); the Dev's -errno (a server Rlerror)
+    // otherwise, or a legacy Dev's bare -1.
     // Audit-bearing: CLAUDE.md FS-mutation-syscalls row.
     SYS_FSYNC        = 55,   // arg: fd (x0), datasync (x1)
 
@@ -1323,10 +1338,11 @@ enum {
     // MECHANISM: set a file's mode/owner/group via 9P Tsetattr. The kernel 9P
     // client already implements the wire half (p9_client_setattr); this is the
     // syscall wrapper + a new NULL-permitted Dev vtable slot (.wstat_native ->
-    // dev9p_wstat_native). Register-passed (no user buffer): the only fields a
-    // v1.0 chmod/chown sets are mode + uid + gid, which fit in x1..x4 with the
-    // valid mask in x1. SIZE (truncate) + ATIME/MTIME stay out -- separate
-    // concerns; a v1.x SYS_WSTAT2 or O_TRUNC covers them.
+    // dev9p_wstat_native). Register-passed: mode + uid + gid fit in x1..x4 with
+    // the valid mask in x1. SIZE (truncate) later took x5 (Go Stage 5), and
+    // ATIME/MTIME took x6, a pointer to the two times (G12, vote 18 of
+    // 2026-10-22: one metadata syscall, the Plan 9 wstat shape, rather than a
+    // separate utimens number).
     //
     // This chunk builds the MECHANISM only. The per-file rwx PERMISSION check
     // (who may chmod/chown -- owner-only chmod, CAP_HOSTOWNER chown) is A-2d
@@ -1343,7 +1359,7 @@ enum {
     // reachable by re-walking the path -- the fd is just a name for the file;
     // the SYS_FSTAT/#46 + SYS_LSEEK precedent).
     //
-    // SYS_WSTAT(fd, valid, mode, uid, gid, size) -> 0 / -1
+    // SYS_WSTAT(fd, valid, mode, uid, gid, size, times) -> 0 / -errno
     //   x0 = fd     (hidx_t; must be KOBJ_SPOOR -- any rights (kind-gate only,
     //                #47) for the METADATA axes. The write-authority gate for
     //                mode/uid/gid is perm_wstat_check on perm-enforced Devs,
@@ -1352,25 +1368,52 @@ enum {
     //                so the fd must carry RIGHT_WRITE -- "opened for writing"
     //                under the A-3 F1 omode-derived rights; the open-time
     //                perm_check already enforced the identity W axis.)
-    //   x1 = valid  (u32 bitmask of T_WSTAT_MODE | T_WSTAT_UID | T_WSTAT_GID
-    //                | T_WSTAT_SIZE; at least one bit set; any other bit -> -1.)
+    //   x1 = valid  (u32 bitmask of the T_WSTAT_* bits below; at least one
+    //                set; any other bit -> EINVAL; a _SET bit without its time
+    //                bit -> EINVAL.)
     //   x2 = mode   (u32; new permission bits when T_WSTAT_MODE. The 9 rwx bits
     //                only -- setuid/setgid/sticky (07000) + any bit outside 0777
-    //                are REJECTED (-1). setuid is explicitly unsupported, §S5.)
+    //                are REJECTED (EINVAL). setuid is explicitly unsupported, §S5.)
     //   x3 = uid    (u32; new owner principal-id when T_WSTAT_UID. PRINCIPAL_-
-    //                INVALID (0) -> -1.)
-    //   x4 = gid    (u32; new group when T_WSTAT_GID. GID_INVALID (0) -> -1.)
+    //                INVALID (0) -> EINVAL.)
+    //   x4 = gid    (u32; new group when T_WSTAT_GID. GID_INVALID (0) -> EINVAL.)
     //   x5 = size   (u64; new file length when T_WSTAT_SIZE (Go Stage 5:
     //                ftruncate for cmd/go's module cache). size > INT64_MAX
-    //                -> -1 (the s64 offset domain). Shrink discards; extend
+    //                -> EINVAL (the s64 offset domain). Shrink discards; extend
     //                zero-fills (Tsetattr semantics, Stratum-side).)
-    //   Returns 0 on success, -1 on: fd not KOBJ_SPOOR; valid 0 or with a
-    //   reserved bit; mode outside 0777; uid/gid INVALID; size out of the s64
-    //   domain; T_WSTAT_SIZE on a handle without RIGHT_WRITE; perm_wstat_check
-    //   denial (perm-enforced Dev, metadata axes, caller neither owner nor
-    //   CAP-holder); Dev has no .wstat_native slot; server Rlerror.
+    //   x6 = times  (user pointer to struct t_timespec[2], atime then mtime,
+    //                read ONLY when T_WSTAT_ATIME_SET or T_WSTAT_MTIME_SET is
+    //                set in an otherwise well-formed mask (a malformed one is
+    //                EINVAL before x6 is read), and only the entry whose _SET
+    //                bit is set. tv_sec < 0,
+    //                or tv_nsec outside [0, 999999999] -> EINVAL; an unreadable
+    //                pointer -> EFAULT. T_WSTAT_ATIME / T_WSTAT_MTIME alone set
+    //                that time to the file server's clock and read nothing.)
+    //   Times follow POSIX utimensat(2): a time needs the owner or
+    //   CAP_HOSTOWNER, except that both times to "now" (ATIME | MTIME with no
+    //   _SET bit, POSIX's null-times touch) also admit a caller with write
+    //   permission on the file (perm_check W). Like chmod they work through an
+    //   O_PATH handle. ctime is the server's: every change stamps it.
+    //   Returns 0, or a -errno per refusal:
+    //     EINVAL      the mask or a value above is out of its domain;
+    //     EBADF       fd is not a KOBJ_SPOOR handle; T_WSTAT_SIZE on a handle
+    //                 without RIGHT_WRITE or on an O_PATH handle;
+    //     EFAULT      x6 unreadable while a well-formed mask has a _SET bit;
+    //     EACCES      perm_wstat_check denial (perm-enforced Dev; caller neither
+    //                 owner nor CAP-holder, or for the touch without write
+    //                 permission); a caped session refusing chown/chgrp. Never
+    //                 EPERM: -EPERM is -1, which the pouch boundary-line reads
+    //                 as EIO (<thylacine/errno.h>). The POSIX front ends answer
+    //                 EPERM where ownership is the only possible refusal (mode,
+    //                 uid, gid, any time but the touch);
+    //     EOPNOTSUPP  the Dev has no .wstat_native slot;
+    //     ESTALE      the fd is a loose cached open (dev9p) of a file renamed,
+    //                 unlinked or replaced since its open;
+    //     the server's errno (crossing by value, -1 folded to EACCES like every
+    //     dev9p mutation) for a Tsetattr Rlerror or a write-behind flush
+    //     failure; the file's stat failing answers its errno; EIO otherwise.
     //   Audit-bearing: CLAUDE.md A-2 FS-permission row.
-    SYS_WSTAT        = 59,   // arg: fd (x0), valid (x1), mode (x2), uid (x3), gid (x4), size (x5)
+    SYS_WSTAT        = 59,   // arg: fd (x0), valid (x1), mode (x2), uid (x3), gid (x4), size (x5), times (x6)
 
     // SYS_EXIT_GROUP(status) -- terminate the WHOLE Proc (POSIX exit_group(2)).
     // NEVER returns. Cascades termination to every peer Thread of the calling
@@ -1710,13 +1753,14 @@ enum {
     // SYS_PREAD(fd, buf, len, off) -> bytes read (0 = EOF) / -1 / -errno
     //   x0 = fd   (hidx_t; KOBJ_SPOOR with RIGHT_READ; CWALKONLY/O_PATH
     //              rejected, as SYS_READ.)
-    //   x1 = buf  (user VA; validated + staged exactly like SYS_READ.)
+    //   x1 = buf  (user VA; staged like SYS_READ: a buffer that fails
+    //              validation or faults in the copy is -T_E_FAULT.)
     //   x2 = len  (clamped to SYS_RW_MAX per call; short reads are normal.)
-    //   x3 = off  (s64 absolute byte offset. off < 0 -> -1; off + len past
-    //              INT64_MAX -> -1. Requires dev->seekable (the SYS_LSEEK
-    //              gate) -- positioned I/O on a pipe/cons/srv stream fails up
-    //              front (the POSIX ESPIPE shape), never silently acts as a
-    //              cursor read.)
+    //   x3 = off  (s64 absolute byte offset. off < 0 -> -T_E_INVAL; off + len
+    //              past INT64_MAX -> -T_E_INVAL. Requires dev->seekable (the
+    //              SYS_LSEEK gate) -- positioned I/O on a pipe/cons/srv stream
+    //              fails up front with the flat -1 (the POSIX ESPIPE shape),
+    //              never silently acts as a cursor read.)
     //   Returns like SYS_READ: bytes read, 0 at EOF, -1 sentinel, or the
     //   Dev's -errno passthrough (#3). The Spoor cursor is untouched on
     //   every path, success or failure.
@@ -1761,8 +1805,8 @@ enum {
     //   own R/W bits are irrelevant) -- but on a walk_attrs-capable Dev
     //   (dev9p/devramfs) the resolution is the stalk POUNCE walk-QUERY: the
     //   attrs arrive fused with the walk and NO handle, Spoor, or server fid
-    //   is ever created. os.Stat = 1 RPC (was 13). Symlinks do not exist at
-    //   v1.0 (G11), so stat == lstat.
+    //   is ever created. os.Stat = 1 RPC (was 13). A final symlink is
+    //   followed (DISTRO D-1); SYS_LSTAT (136) is the no-follow twin.
     //   x0 = path_va  (user VA; NUL-free; '/'-separated multi-component)
     //   x1 = path_len (1 .. SYS_OPEN_PATH_MAX bytes)
     //   x2 = stat_va  (user VA of an 88-byte struct t_stat; copy-out)
@@ -2501,13 +2545,92 @@ enum {
     //   Errors: -EINVAL only for a caller with no address space (never EL0).
     SYS_ICACHE_SYNC_SPACE = 128,
 
+    // Read metadata from the caller's own handle slot without allocating,
+    // borrowing the object, or requiring READ/WRITE rights. Returns a flag word:
+    // the close-on-image-replacement bit (SYS_HANDLE_CLOSE_ON_EXEC) and the
+    // open-file status (SYS_HANDLE_STATUS_*: open mode, nonblock, append), all
+    // read under one table-lock hold; -EBADF for a non-live/out-of-range slot,
+    // -EINVAL without a current Proc. This is an instantaneous query, not a pin
+    // against concurrent close/reuse.
+    SYS_HANDLE_FLAGS_GET = 129, // arg: fd (x0); no user-memory pointer
+    // Caller-local metadata / exact-target replacement. SET takes 0 or bit0.
+    // DUP_TO takes bit0 and SYS_HANDLE_DUP_LOWEST: without it x1 is the exact
+    // target; with it x1 is a floor and the new descriptor goes to the lowest
+    // free index at or above it (dup, F_DUPFD). Validate Proc, flags and the
+    // source's full-width bound (EBADF). Exact form: the target's bound
+    // (EBADF), distinct indices (EINVAL), then under the table lock a
+    // non-live source (EBADF) and a forbidden alias kind (EACCES). Lowest
+    // form, all under the lock: a non-live source (EBADF, so a closed fd
+    // outranks a bad floor), the floor's bound (EINVAL), a forbidden alias
+    // kind (EACCES), no free index at or above the floor (EMFILE).
+    // No EPERM; no cross-Proc authority.
+    SYS_HANDLE_FLAGS_SET = 130, // x0 fd, x1 flags -> 0
+    SYS_HANDLE_DUP_TO = 131,    // x0 source, x1 target or floor, x2 flags -> new index
+
+    // The calling Proc's parent's pid. 0 when the parent is kproc (pid 0) --
+    // init, and an orphan adopted while init is not alive -- or there is none
+    // (kproc itself). init's pid is not fixed (a test kernel allocates Procs
+    // before it), so Linux's `getppid() == 1` orphan test does not hold here.
+    // No args, no memory, no capability, and
+    // like SYS_GETPID it never fails for a Proc (operator vote 2026-10-14
+    // #6, the twin Pouch's getppid needs). The value is a snapshot: the parent
+    // may exit and the Proc be reparented the moment after.
+    SYS_GETPPID = 132,
+
+    // The calling Proc's creation mask (IDENTITY-DESIGN 9.7 M8; operator vote
+    // 2026-10-19): set it to x0 and return the previous one. Every create
+    // drops these rwx bits before the parent directory's bound applies. A mask
+    // with a bit outside 0777 is -EINVAL and changes nothing, as SYS_WSTAT
+    // refuses stray mode bits; the POSIX front ends pass mask & 0777, so their
+    // umask cannot fail. No memory, no capability; the Proc's threads share it
+    // and a spawned child inherits it.
+    SYS_UMASK = 133,
+
     // D7: a session's private /srv registry root (docs/SRV-SESSION-REGISTRY-
-    // DESIGN.md). Explicitly 134, not the next free number: 129..133 belong to
-    // syscalls b3 assigned first, and the operator fixed this one at 134 so the
-    // branches can land in any order (vote 13, 2026-10-19). This tree assigns
-    // nothing in 129..133; vivarium.c argues the Linux rows that the gap and
-    // the higher ceiling expose.
+    // DESIGN.md). Vote 13 (2026-10-19) fixed it at 134 so the branches could land
+    // in any order; vivarium.c argues Linux's rt_sigaction there.
     SYS_SRV_REGISTRY_NEW = 134, // boot O_PATH fd, 40-byte routes, count, flags=0
+
+    // The native symlink reads (operator vote 2026-10-20,
+    // dec-2026-10-20-native-lstat-readlink): entries over the two cores the
+    // phenotype's readlinkat and newfstatat already call. Both resolve `path`
+    // as SYS_STAT does -- absolute from root_spoor, relative joined with the
+    // LS-4 cwd, contained at root_spoor (I-28) -- and neither follows its
+    // final component. Their path checks are SYS_OPEN_CREATE's: an empty or
+    // over-long path or an embedded NUL is -T_E_INVAL, an unreadable one
+    // -T_E_FAULT. A path that does not resolve answers the resolver's errno; a
+    // relative path whose cwd join outgrows SYS_OPEN_PATH_MAX, a bare -1.
+    //
+    // SYS_READLINK(path_va, path_len, buf_va, bufsiz) -> bytes placed / -errno
+    //   Copies min(target length, bufsiz) bytes of the final link's target to
+    //   buf_va and writes no NUL (readlink(2)). -T_E_INVAL for bufsiz 0 or a
+    //   final component that is not a link (or is one on a Dev with no
+    //   .readlink); -T_E_FAULT for an unwritable buf_va; the Dev's own errno
+    //   (-T_E_INTR, -T_E_IO) when the read of the target fails.
+    SYS_READLINK = 135,
+
+    // SYS_LSTAT(path_va, path_len, stat_va) -> 0 / -errno
+    //   SYS_STAT's no-follow twin: the same walk-query (one RPC and no handle
+    //   on a walk_attrs Dev), filling the 88-byte struct t_stat with the final
+    //   component's OWN record, so a link reports T_S_IFLNK. -T_E_FAULT for an
+    //   unwritable stat_va.
+    SYS_LSTAT = 136,
+
+    // SYS_FILE_LOCK(fd, op, start, len, out_va) -> 0 / -errno
+    //   A byte-range lock held by the file's server (ARCH 9.6.11; operator
+    //   votes 34-35). op = a type (SYS_FILE_LOCK_RD / _WR / _UN) | _WAIT |
+    //   _TEST | _PROC; any other bit, or type 3, is -T_E_INVAL. len 0 runs to
+    //   the end of the file; a range reaching 2^64 is -T_E_INVAL. _PROC makes the
+    //   Proc the owner (POSIX F_SETLK); without it the open file is (OFD,
+    //   flock). _WR needs a descriptor open for writing and _RD one open for
+    //   reading (-T_E_BADF); _UN and _TEST need neither. -T_E_AGAIN when
+    //   another owner holds a conflicting lock; _WAIT retries until it does
+    //   not, and a caught note ends the wait with -T_E_INTR where the caller's
+    //   waits are note-interruptible (ARCH 8.8.3). _TEST changes nothing and
+    //   writes a struct t_file_lock to out_va (-T_E_FAULT if it cannot); a
+    //   test of _UN is -T_E_INVAL. -T_E_NOLCK when the file's Dev serves no
+    //   locks, the server refuses, or the Proc's owner table is full.
+    SYS_FILE_LOCK = 137,
 
     // SYS_POSTNOTE_TID(tid, name_va, name_len): post a note at ONE thread of the
     // caller's own Proc (ARCH 7.6.4; operator vote 2026-11-02). It reaches no
@@ -2529,9 +2652,8 @@ enum {
     //   -T_E_AGAIN  a Proc reading its notes from an fd, with a full queue
     // The name is judged before the tid, and the tid before any death.
     //
-    // Explicitly 138: 135..137 are main's READLINK, LSTAT and FILE_LOCK, and this
-    // tree assigns nothing there. Linux's 138 is rt_sigqueueinfo, an ENOSYS row
-    // consumed before the native switch (vivarium.c).
+    // Linux's 138 is rt_sigqueueinfo, an ENOSYS row consumed before the native
+    // switch (vivarium.c).
     SYS_POSTNOTE_TID = 138,
 
     // NOT A SYSCALL. One past the highest assigned number, so that
@@ -2549,6 +2671,68 @@ enum {
     SYS__NATIVE_TOP,
 };
 
+
+#define SYS_HANDLE_CLOSE_ON_EXEC 1u
+_Static_assert(SYS_HANDLE_CLOSE_ON_EXEC == 1u, "handle flag ABI");
+// SYS_HANDLE_DUP_TO only: x1 is a floor, not a target (B-3b, vote 7).
+#define SYS_HANDLE_DUP_LOWEST    2u
+// SYS_HANDLE_FLAGS_GET's open-file status, beside bit0 and never accepted by
+// SYS_HANDLE_FLAGS_SET. The open mode is the Spoor's OREAD/OWRITE/ORDWR/OEXEC
+// (0-3; 0-2 are byte-equal to Linux O_RDONLY/O_WRONLY/O_RDWR); NONBLOCK is the
+// open file's CNONBLOCK; APPEND that it was opened SYS_WALK_OPEN_OAPPEND. A
+// non-Spoor descriptor reports mode 0 with neither bit.
+#define SYS_HANDLE_STATUS_OMODE_SHIFT 8u
+#define SYS_HANDLE_STATUS_OMODE_MASK  (3u << SYS_HANDLE_STATUS_OMODE_SHIFT)
+#define SYS_HANDLE_STATUS_NONBLOCK    (1u << 10)
+#define SYS_HANDLE_STATUS_APPEND      (1u << 11)
+_Static_assert(SYS_HANDLE_DUP_LOWEST == 2u &&
+               SYS_HANDLE_STATUS_OMODE_MASK == 0x300u &&
+               SYS_HANDLE_STATUS_NONBLOCK == 0x400u &&
+               SYS_HANDLE_STATUS_APPEND == 0x800u,
+               "handle flag ABI: mirrored by libt, libthyla-rs and Pouch");
+_Static_assert(((SYS_HANDLE_CLOSE_ON_EXEC | SYS_HANDLE_DUP_LOWEST) &
+                (SYS_HANDLE_STATUS_OMODE_MASK | SYS_HANDLE_STATUS_NONBLOCK |
+                 SYS_HANDLE_STATUS_APPEND)) == 0,
+               "the status bits never overlap a flag DUP_TO or SET accepts");
+
+// SYS_FILE_LOCK's op word (x1): the lock type in the low bits, three flags
+// above it. The type values and the TEST answer's are 9P2000.L's
+// (P9_LOCK_TYPE_*), so they cross the wire unchanged. ABI: mirrored by
+// libthyla-rs and Pouch.
+#define SYS_FILE_LOCK_RD        0u
+#define SYS_FILE_LOCK_WR        1u
+#define SYS_FILE_LOCK_UN        2u
+#define SYS_FILE_LOCK_TYPE_MASK 0xfu
+#define SYS_FILE_LOCK_WAIT      0x10u
+#define SYS_FILE_LOCK_TEST      0x20u
+#define SYS_FILE_LOCK_PROC      0x40u
+#define SYS_FILE_LOCK_FLAGS_ALL (SYS_FILE_LOCK_WAIT | SYS_FILE_LOCK_TEST | \
+                                 SYS_FILE_LOCK_PROC)
+_Static_assert(SYS_FILE_LOCK_RD == 0u && SYS_FILE_LOCK_WR == 1u &&
+               SYS_FILE_LOCK_UN == 2u && SYS_FILE_LOCK_WAIT == 0x10u &&
+               SYS_FILE_LOCK_TEST == 0x20u && SYS_FILE_LOCK_PROC == 0x40u,
+               "file lock op ABI: mirrored by libthyla-rs and Pouch");
+_Static_assert((SYS_FILE_LOCK_FLAGS_ALL & SYS_FILE_LOCK_TYPE_MASK) == 0,
+               "no flag overlaps the type field");
+
+// SYS_FILE_LOCK's TEST answer: type SYS_FILE_LOCK_UN when the lock would be
+// granted (start and len then echo the request), else the first conflicting
+// lock's type and range (len 0 = to the end of the file). pid is always -1:
+// an owner here is an open file or a Proc's table, never a process id, which
+// is Linux's answer for an OFD lock.
+struct t_file_lock {
+    u8  type;
+    u8  _pad0[7];
+    u64 start;
+    u64 len;
+    s32 pid;
+    u32 _pad1;
+};
+_Static_assert(sizeof(struct t_file_lock) == 32, "t_file_lock ABI: size");
+_Static_assert(__builtin_offsetof(struct t_file_lock, type)  == 0,  "t_file_lock ABI: type@0");
+_Static_assert(__builtin_offsetof(struct t_file_lock, start) == 8,  "t_file_lock ABI: start@8");
+_Static_assert(__builtin_offsetof(struct t_file_lock, len)   == 16, "t_file_lock ABI: len@16");
+_Static_assert(__builtin_offsetof(struct t_file_lock, pid)   == 24, "t_file_lock ABI: pid@24");
 
 // SYS_CONSOLE_EPISODE ops (x0). ABI: mirrored by libthyla-rs
 // T_CONSOLE_EPISODE_* and docs/ERRORS.md.
@@ -3072,8 +3256,9 @@ _Static_assert(__builtin_popcount(SPAWN_PERM_ALL) ==
 // refusal makes no child: -T_E_2BIG for env_len past SYS_SPAWN_ENV_DATA_MAX, a
 // value past ENV_VALUE_MAX or more than ENV_MAX_ENTRIES names; -T_E_INVAL for an
 // unterminated block, a record with no '=', or a name /env refuses (empty, at
-// least ENV_NAME_MAX bytes, or holding a '/'); -1 for env_flags != 0. Ungated:
-// the spawner could write the same variables into its own /env before spawning.
+// least ENV_NAME_MAX bytes, ".", "..", or holding a '/'); -1 for env_flags != 0.
+// Ungated: the spawner could write the same variables into its own /env before
+// spawning.
 #define SPAWN_EXT_ENV                (1u << 2)
 #define SPAWN_EXT_FLAGS_ALL          (SPAWN_EXT_CWD | SPAWN_EXT_THREADS | SPAWN_EXT_ENV)
 
@@ -3390,12 +3575,13 @@ _Static_assert(__builtin_offsetof(struct t_kernel_regs, tpidr_el0) == 104, "t_ke
 #define T_S_IFLNK   0120000u
 
 // SYS_WSTAT valid-mask bits (A-2a; IDENTITY-DESIGN.md §9.5). Which of the
-// (mode, uid, gid, size) register arguments the kernel applies. Chosen to
-// equal the 9P Tsetattr P9_SETATTR_{MODE,UID,GID,SIZE} bit values so
+// (mode, uid, gid, size, times) arguments the kernel applies. Chosen to
+// equal the 9P Tsetattr P9_SETATTR_* bit values so
 // dev9p_wstat_native maps the mask with no translation; the equality is
 // pinned by a _Static_assert in dev9p.c (the only TU that sees both).
 // Userspace chmod() sets T_WSTAT_MODE; chown() sets T_WSTAT_UID |
-// T_WSTAT_GID (or just one); ftruncate() sets T_WSTAT_SIZE (Go Stage 5).
+// T_WSTAT_GID (or just one); ftruncate() sets T_WSTAT_SIZE (Go Stage 5);
+// utimensat() sets the time bits (G12).
 // SIZE is a CONTENT axis: it additionally requires RIGHT_WRITE on the fd
 // (POSIX ftruncate needs a write-opened fd), unlike the #47 kind-gate-only
 // metadata axes.
@@ -3403,7 +3589,18 @@ _Static_assert(__builtin_offsetof(struct t_kernel_regs, tpidr_el0) == 104, "t_ke
 #define T_WSTAT_UID    (1u << 1)
 #define T_WSTAT_GID    (1u << 2)
 #define T_WSTAT_SIZE   (1u << 3)
-#define T_WSTAT_VALID  (T_WSTAT_MODE | T_WSTAT_UID | T_WSTAT_GID | T_WSTAT_SIZE)
+// The times, as 9P2000.L's Tsetattr has them: ATIME / MTIME set that time to
+// the file server's clock; with ATIME_SET / MTIME_SET as well, to the value
+// x6 points at. A _SET bit alone is EINVAL. Bit 6, the wire's CTIME, stays
+// reserved: ctime is the server's to stamp.
+#define T_WSTAT_ATIME      (1u << 4)
+#define T_WSTAT_MTIME      (1u << 5)
+#define T_WSTAT_ATIME_SET  (1u << 7)
+#define T_WSTAT_MTIME_SET  (1u << 8)
+#define T_WSTAT_TIMES  (T_WSTAT_ATIME | T_WSTAT_MTIME | \
+                        T_WSTAT_ATIME_SET | T_WSTAT_MTIME_SET)
+#define T_WSTAT_VALID  (T_WSTAT_MODE | T_WSTAT_UID | T_WSTAT_GID | \
+                        T_WSTAT_SIZE | T_WSTAT_TIMES)
 
 // Permission bits a SYS_WSTAT mode may carry (the 9 rwx bits). setuid/setgid/
 // sticky (07000) + any bit outside 0777 are rejected -- setuid is explicitly
@@ -4135,7 +4332,7 @@ int sys_spawn_full_argv_identity_for_proc(struct Proc *p,
 int sys_spawn_full_argv_validate_req(const struct sys_spawn_args *req);
 int sys_spawn_full_for_proc(struct Proc *p, const char *name, size_t name_len,
                             const u32 *fds, u32 fd_count, caps_t cap_mask);
-void sys_spawn_unbump_fds(struct Spoor *const *bumped, u32 n);
+void sys_spawn_unbump_fds(struct Proc *p, struct Spoor *const *bumped, u32 n);
 int sys_spawn_with_caps_for_proc(struct Proc *p, const char *name, size_t name_len,
                                  caps_t cap_mask);
 int sys_spawn_with_fds_for_proc(struct Proc *p, const char *name, size_t name_len,
@@ -4161,7 +4358,8 @@ s64 sys_walk_create_kname_for_proc(struct Proc *p, u64 parent_fd_raw,
 s64 sys_weft_share_for_proc(struct Proc *p, u64 ring_va, u64 ring_size_raw);
 s64 sys_write_for_proc(struct Proc *p, hidx_t h, const u8 *kbuf, u64 len);
 s64 sys_wstat_for_proc(struct Proc *p, hidx_t h, u32 valid, u32 mode,
-                       u32 uid, u32 gid, u64 size);
+                       u32 uid, u32 gid, u64 size,
+                       const struct t_timespec *times);
 s64 union_readdir_run(struct Proc *p, struct Spoor *c, u8 *out, long want,
                       u64 in_ordinal);
 s64 viv_accept_for_test(struct Proc *p, u64 fd);
@@ -4192,6 +4390,25 @@ s32 viv_sock_pending_error_for_test(struct Proc *p, u64 fd);
 void viv_sock_pin_hook_for_test(void (*hook)(struct Proc *, u64));
 s64 viv_socket_for_test(struct Proc *p, u64 domain, u64 type, u64 protocol);
 s64 viv_writev_for_test(struct Proc *p, u64 fd, u64 iov_va, u64 iovcnt);
+s64 sys_fstat_for_proc(struct Proc *p, u64 hraw, struct t_stat *out_k);
+s64 sys_getppid_for_test(struct Proc *p);
+s64 sys_getppid_handler(u64 a0, u64 a1, u64 a2, u64 a3);
+s64 sys_handle_dup_to_for_test(struct Proc *p, u64 old, u64 target, u64 flags);
+s64 sys_handle_flags_get_for_test(struct Proc *p, u64 h);
+s64 sys_handle_flags_set_for_test(struct Proc *p, u64 h, u64 flags);
+s64 sys_lstat_handler(u64 path_va, u64 path_len_raw, u64 stat_va);
+s64 sys_postnote_probe_for_test(struct Proc *caller, u64 pid_raw);
+s64 sys_pread_for_test(struct Proc *p, u64 h, u64 buf_va, u64 len, u64 off);
+s64 sys_pwrite_for_test(struct Proc *p, u64 h, u64 buf_va, u64 len, u64 off);
+s64 sys_readlink_handler(u64 path_va, u64 path_len_raw, u64 buf_va, u64 bufsiz);
+s64 sys_readlink_target_for_proc(struct Proc *p, const char *path, u64 path_len,
+                                 char *tgt);
+s64 sys_umask_for_test(struct Proc *p, u64 mask);
+s64 sys_umask_handler(u64 a0, u64 a1, u64 a2, u64 a3);
+s64 sys_wstat_spoor_for_proc(struct Proc *p, struct Spoor *c,
+                             u32 valid, u32 mode, u32 uid, u32 gid,
+                             const struct t_timespec *times);
+s64 viv_umask_for_test(struct Proc *p, u64 mask);
 #endif // KERNEL_TESTS
 
 #endif // THYLACINE_SYSCALL_H

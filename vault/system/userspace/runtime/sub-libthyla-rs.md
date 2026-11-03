@@ -16,6 +16,7 @@ code:
   - usr/lib/libthyla-rs/src/fs/mod.rs
   - usr/lib/libthyla-rs/src/fs/options.rs
   - usr/lib/libthyla-rs/src/fs/path.rs
+  - usr/lib/libthyla-rs/src/fs/times.rs
   - usr/lib/libthyla-rs/src/handle.rs
   - usr/lib/libthyla-rs/src/hardware.rs
   - usr/lib/libthyla-rs/src/identity.rs
@@ -113,6 +114,21 @@ through `Error::from_syscall_return` instead of flattening every failure to
 `InvalidArgument` (a name no program may post). It still refuses a `snare:`
 name before the kernel sees it: the kernel ENDS a caller that self-posts a
 fault snare ([[dec-2026-10-14-self-death-snare]]), and `send` returns.
+
+**File times (2026-10-22).** `fs::FileTimes` is std's, plus the file server's
+clock: each time is kept, set to a `SystemTime`, or set to the server's now
+(`set_accessed_now` / `set_modified_now`). The third is a different permission,
+not a convenience: SYS_WSTAT admits write permission only for both times to the
+server's now, POSIX's null-times touch, and any explicit time, `SystemTime::now()`
+included, needs the owner ([[dec-2026-10-22-wstat-times]]). `File::set_times`
+and `set_modified` act on any open file, whatever its rights; `fs::set_times`
+opens the path `T_OPATH` as `fs::chmod` does, so a directory or a file the
+caller cannot write takes it too, and a `FileTimes` that changes nothing returns
+without looking the path up, as two `UTIME_OMIT` do. `File::chmod` and
+`File::chown` (std's `fchown` shape, `None` keeping a side) are the descriptor
+forms of the same call. The raw `t_wstat_times` passes the two-record pointer in
+x6; `t_wstat` sets no x6 and so can carry only the now bits. Times read back are
+whole seconds (`Metadata::accessed` / `modified`): `t_stat` has no nanoseconds.
 
 
 A native binary does three things and gets a runtime:
@@ -335,9 +351,9 @@ None crossing a boundary; every ABI record belongs to
   to stay dependency-free. It carries its own copy of the all-rights literal,
   which is one more unpinned copy of a bound the kernel also states as a
   literal.
-- **`Error`** — a flat enum of twenty errno-mapped variants (measured from
-  `as_errno`, 2026-09-24: nineteen registry values plus `DirectoryNotEmpty`'s
-  39, which has no `T_E_*`), a catch-all
+- **`Error`** — a flat enum of errno-mapped variants (measured from `as_errno`,
+  2026-11-02: 24 of the registry's 38 values, `NoLocks` 37 and `StaleFile` 116
+  the newest, plus `DirectoryNotEmpty`'s 39, which has no `T_E_*`), a catch-all
   carrying an integer, and two library-only variants for a read that ended
   early and a write that stopped making progress. No allocation: variants are
   unit or carry one integer, and `Display` uses static strings.
@@ -396,7 +412,8 @@ None crossing a boundary; every ABI record belongs to
 - **`Metadata`** (`fs/metadata.rs`) — the crate's mirror of `t_stat`
   ([[abi-t-stat]]), size-asserted at 88 bytes and nothing more. `dev()`
   returns the whole 64-bit device number, which with `qid_path()` names a
-  file across datasets.
+  file across datasets. `accessed()` and `modified()` are the two times as a
+  `SystemTime`, whole seconds, in std's always-`Ok` `Result`.
 - **`CodeRegion`** — the two aliases of one dual-mapped region. Its mirrored
   record is the only one in the crate pinned with per-field offset assertions
   rather than a size assertion alone.
@@ -602,6 +619,12 @@ instant, and falling back to the syscall when the page is absent.
   point of different types, or a mount without `REPL` at a point that is not
   a directory. `MountFlags`' doc comments state the kernel's placements: at
   most one of `REPL` / `BEFORE` / `AFTER`, and with none the mount appends.
+  Since 2026-10-19 (operator vote 6, `dec-2026-10-19-mount-errnos`) every
+  refusal names its errno: the resolver's (`NotFound`, ...), `InvalidArgument`
+  for flags, `BadHandle` for the source, `SymlinkLoop` for a cycle and the new
+  `Error::NoSpace` (28) for a full table; `territory::unmount` maps the value
+  too (`InvalidArgument` when nothing is mounted) instead of answering
+  `NotFound` for every failure. A bare -1 still reads as `InvalidArgument`.
 
 - **`Stdio::Null` is unimplemented for a reason that expired.** Three places
   say the discard mode cannot be built for want of a kernel bit-bucket device.
@@ -703,6 +726,12 @@ absorbed from docs/reference/89: `mmio_read32`/`write32` must be a single
 base-only instruction (ISV=1) so HVF can decode the emulated access -- a plain
 `read_volatile` can inline to a writeback/unscaled form (ISV=0) that trips HVF's
 `assert(isv)` (#890, the kernel-worked-userspace-tripped signature).
+
+2026-10-22: `Error::Unsupported` (95), "operation not supported". G12 made
+`SYS_WSTAT` answer `T_E_OPNOTSUPP` for a Dev with no metadata slot (every Dev
+but dev9p, so `/dev/null`) and for dev9p's fidless cached open, which reached
+native `chmod` and `touch` as `Other(95)`, "kernel error (errno 95)". The
+Operator's Manual (File Times) quotes the new text.
 
 2026-09-24: `Error::ConnectionRefused` (111). A refused dial used to surface as
 `Other(111)`, "kernel error (errno 111)". Added `Dialing` as above (haul's slow

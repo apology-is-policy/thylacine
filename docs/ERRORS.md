@@ -119,12 +119,25 @@ below are the v1.0 set; additions append (no renumbering).
 | `T_E_NOTDIR`    | 20    | `ENOTDIR`    | A path prefix component is not a directory, so resolution cannot continue through it (`/bin/ls/foo`). Computed from the `QTDIR` bit BEFORE the X-search, so the answer does not turn on the meaningless x bit of a non-directory. Eight producers. Four share that rule: `stalk`'s real-component gate (#79); `stalk`'s `.`/`..` gate, since both are path components and the position they resolve in must be a directory too (#81); `stalk`'s trailing-slash gate, where the separator asserts the whole path names a directory (#82, POSIX 4.13 — three sites, since two success exits skip the quarry); and the single-hop `SYS_WALK_OPEN` / `SYS_WALK_CREATE` handlers, on both the source's type and a source Dev with no `.walk` slot (#80, #81). The `.`/`..` gate reads the tip UNCROSSED and the trailing-slash gate the quarry CROSSED — they ask different questions (where resolution stands vs what the path names), see `docs/reference/104-stalk.md`. The fifth is `SYS_MOUNT`'s Plan 9 `Emount` (ARCH §9.6.1, operator votes 2026-09-25, as Linux answers a bind of a file over a directory): the source's directory-ness differs from the mount point's, or a mount without `MREPL` names a point that is not a directory. `SYS_MOUNT`'s other refusals are still `-1`, and that includes a trailing `/` on a point that is not a directory: `stalk`'s trailing-slash gate refuses the path before the type check runs, and a resolution failure is `-1` in this call. The last three are the Linux phenotype's (VIVARIUM): a trailing `/` on an `unlinkat` without `AT_REMOVEDIR` or on either `renameat` path, `getdents64` on a descriptor that is not a directory, and `openat` with `O_DIRECTORY` on a file |
 | `T_E_ISDIR`     | 21    | `EISDIR`     | Is a directory — the operation names a directory where a non-directory is required. Named with user signoff at #50 (2026-08-25); mints NO new ABI value: a server-side `EISDIR` (Stratum, on write-opening a directory) already reached EL0 through the `[-4095,-2]` Rlerror passthrough. Kernel producer: `SYS_OPEN_CREATE`'s lexical leaf rows — a create against a trailing-slash / `.` / `..` / root leaf (the Linux `open_last_lookups` rows), answered before any RPC |
 | `T_E_INVAL`     | 22    | `EINVAL`     | Invalid argument |
-| `T_E_NOSPC`     | 28    | `ENOSPC`     | Bounded resource capacity exhausted (HI-1 terminal interaction bindings or exhausted IDs) |
-| `T_E_NOSYS`     | 38    | `ENOSYS`     | Function not implemented (placeholder syscall slot or unimpl path) |
+| `T_E_MFILE`     | 24    | `EMFILE`     | Too many open files: the phenotype's per-Proc socket table (`VIV_SOCK_MAX`) is full, or no handle slot at or above a `SYS_HANDLE_DUP_LOWEST` floor is free (B-3b; dup, `F_DUPFD`). The kernel's other full-handle-table answer is still `T_E_NOMEM` (#80 seam) |
+| `T_E_NOTTY`     | 25    | `ENOTTY`     | Not a terminal: the phenotype ioctl shell (C2-k1b) answers it for a `TC*`/`TIOC*` request on a non-tty fd and for any request the terminal surface does not serve; `isatty()` reads it as "not a tty" |
+| `T_E_NOSPC`     | 28    | `ENOSPC`     | No space left. Kernel-originated for these causes: a bounded resource capacity exhausted (HI-1 terminal interaction bindings, exhausted IDs, a private Loom ring's request book); a mount into a Territory whose mount table is at its cap (`SYS_MOUNT`, ARCH 9.1). A server's ENOSPC (a full pool) crosses by value, as it always has. Named by the operator's vote of 2026-10-19 (`dec-2026-10-19-mount-errnos`) |
+| `T_E_NOSYS`     | 38    | `ENOSYS`     | Function not implemented (placeholder syscall slot or unimpl path), and the answer to a syscall number the kernel does not know (operator vote 2026-10-22, `dec-2026-10-22-unknown-syscall-enosys`; kernels before it answered a bare -1, see "Unknown syscall numbers") |
 | `T_E_PIPE`      | 32    | `EPIPE`      | Broken pipe (write to closed pipe/socket) |
 | `T_E_RANGE`     | 34    | `ERANGE`     | Numerical result out of range |
-| `T_E_LOOP`      | 40    | `ELOOP`      | Symlink resolution did not terminate, or terminated on a link the caller refused to follow. TWO emitters share the code, as on Linux (DISTRO D-1, user-signed-off 2026-08-05): (1) the resolver exceeded `STALK_MAX_FOLLOWS` (40) -- a cycle, or a chain deeper than the bound; (2) the final component is a symlink and the open passed `SYS_WALK_OPEN_NOFOLLOW` **without** `T_OPATH`, i.e. Linux `O_NOFOLLOW` semantics: the caller asked for not-a-symlink and got one, and a symlink cannot be opened for byte I/O. With `T_OPATH` the same flag instead RETURNS the link (the v1.0 `lstat` spelling) and no error is raised. A trailing `/` overrides the flag entirely (POSIX 4.13), so `link/` follows and can answer `T_E_NOTDIR` instead |
+| `T_E_NOLCK`     | 37    | `ENOLCK`     | No lock available for a reason other than another owner's lock: `SYS_FILE_LOCK` on a file whose Dev serves no locks, a Proc whose lock table is full (I-32), or a server that answered ERROR/GRACE or hit its own bound (B-3h, ARCH 9.6.11; operator votes 34-35, 2026-10-29) |
+| `T_E_LOOP`      | 40    | `ELOOP`      | Symlink resolution did not terminate, or terminated on a link the caller refused to follow. THREE emitters share the code. Two are the resolver's, as on Linux (DISTRO D-1, user-signed-off 2026-08-05): (1) the resolver exceeded `STALK_MAX_FOLLOWS` (40) -- a cycle, or a chain deeper than the bound; (2) the final component is a symlink and the open passed `SYS_WALK_OPEN_NOFOLLOW` **without** `T_OPATH`, i.e. Linux `O_NOFOLLOW` semantics: the caller asked for not-a-symlink and got one, and a symlink cannot be opened for byte I/O. With `T_OPATH` the same flag instead RETURNS the link (the v1.0 `lstat` spelling) and no error is raised. A trailing `/` overrides the flag entirely (POSIX 4.13), so `link/` follows and can answer `T_E_NOTDIR` instead. (3) SYS_MOUNT refuses a mount that would close a cycle in the mount graph, I-3 (operator vote 2026-10-19; "Mount and unmount" below) |
+| `T_E_NOTSOCK`   | 88    | `ENOTSOCK`   | Not a socket: a socket call names an fd with no socktab entry (a plain file, or a socket whose entry was dropped) |
+| `T_E_PROTONOSUPPORT` | 93 | `EPROTONOSUPPORT` | Protocol not supported: a `SOCK_*` type or `IPPROTO_*` the `/net` tree has no directory for |
+| `T_E_OPNOTSUPP` | 95    | `EOPNOTSUPP` | Operation not supported. Reserved, append-only: its first emitter (`SYS_TTY_SIGNAL`'s stop class) became live at PTY-1f; `SYS_WSTAT` answers it for a Dev with no metadata slot (G12, 2026-10-22); kept for future not-yet-supported dispositions |
+| `T_E_AFNOSUPPORT` | 97  | `EAFNOSUPPORT` | Address family not supported: everything that is not `AF_INET` (`AF_INET6` included) |
+| `T_E_ADDRINUSE` | 98    | `EADDRINUSE` | Address in use: netd refused an `announce` for the port; reported by `listen()`, where the announce happens, not `bind()` |
+| `T_E_CONNABORTED` | 103 | `ECONNABORTED` | Connection aborted before it was handed back: an `accept()` whose listen fid produced a connection the data open then refused |
+| `T_E_ISCONN`    | 106   | `EISCONN`    | Already connected: a second `connect()` on a connected socket |
+| `T_E_NOTCONN`   | 107   | `ENOTCONN`   | Not connected: `getpeername()` / `shutdown()` on a socket that never connected |
 | `T_E_TIMEDOUT`  | 110   | `ETIMEDOUT`  | Operation timed out |
+| `T_E_STALE`     | 116   | `ESTALE`     | Stale file handle: the file a fid named has died (Stratum answers it for an unlinked file's fid), or a fidless cached open's re-walk no longer reaches the same `qid.path` and generation, so `SYS_FILE_LOCK` or `SYS_WSTAT` cannot name its file (B-3h). Signed off with PX-22 (operator vote 2026-10-18 (28)); a server's ESTALE crosses by value |
+| `T_E_CONNREFUSED` | 111 | `ECONNREFUSED` | Connection refused: netd rejected the dial, or the data open failed after the connect verb was accepted |
 | `T_E_CANCELED`  | 125   | `ECANCELED`  | Operation canceled (Loom LINK-chain cancel: a CQE for a linked SQE dropped when an earlier link failed) |
 
 The values follow Linux's errno numbering (which musl + glibc agree on
@@ -434,7 +447,8 @@ The original staged policy still holds for NEW syscalls:
 errno almost always already exists at the failure source — it is only
 *discarded* on the way up:
 - The 9P client (`kernel/9p_client.c`) already returns `-(int)ecode` from
-  an `Rlerror` (I-14 bounds the hostile ecode), and the errno values are
+  an `Rlerror` (I-14 bounds the hostile ecode; `EBADF` reads `EIO`, per the
+  binding rule below), and the errno values are
   POSIX-aligned (`T_E_NOENT == 2 == ENOENT == the 9P ecode`), so a
   Stratum `ENOENT`/`EEXIST` arrives intact — the Dev layer just dropped it
   by collapsing `dev9p_*` to `NULL`/`-1`.
@@ -455,6 +469,21 @@ errno almost always already exists at the failure source — it is only
   symbolic constant only.
 - Reserve a bare `-1` for a *truly generic / unclassifiable* failure. When
   the cause is known, return the specific `-T_E_<NAME>`.
+- **Only the kernel's handle gate answers `EBADF`** (operator vote
+  2026-10-21 #16). `EBADF` tells the caller that its descriptor names
+  nothing. A 9P server's `EBADF` is a verdict on the server's own fid, and
+  the caller's descriptor is live, so the 9P client reads an `Rlerror` ecode
+  9 as `-T_E_IO` (`map_error`, the one place an ecode becomes an errno).
+  Every path a server's errno takes passes through it, among them `read`,
+  `write`, `fsync` and `close` on an open file, every call the resolver
+  runs (`SYS_OPEN`, `SYS_STAT`, `SYS_LSTAT`, `SYS_READLINK`, create), the
+  name operations that forward the server's verdict (`SYS_UNLINK`,
+  `SYS_RENAME`), a Loom 9P operation's completion, and `SYS_ATTACH_9P` /
+  `SYS_ATTACH_9P_SRV` beside the caller's server descriptor. Every other
+  server errno still crosses as itself. Plan 9 and Linux's v9fs pass a
+  server's error through unchanged; this rule is Thylacine's own. No kernel
+  or library code reads a server's `EBADF`; the closer's bounded retry of a
+  close job's `EIO` now covers it as well.
 - **Backward-compatible**: native `libthyla-rs`/`libt` callers test `r < 0`
   — a `-2`/`-17` is still `< 0`, so no native consumer regresses; pouch
   and Go observe the *correct* POSIX errno instead of `EIO`/`EPERM`.
@@ -470,6 +499,9 @@ errno almost always already exists at the failure source — it is only
 | `SYS_WALK_CREATE` | not a directory | `-T_E_NOTDIR` (20) |
 | `SYS_UNLINK` (rmdir) | directory not empty | `-T_E_NOTEMPTY` (39) |
 | `SYS_FSTAT` / `SYS_*` | bad / wrong-kind handle | `-T_E_BADF` (9) |
+| `SYS_WSTAT` | not the owner (chmod, chown, a time), or no write permission (the touch: both times to "now") | `-T_E_ACCES` (13); the POSIX front ends answer `EPERM` for the owner-only kinds |
+| `SYS_WSTAT` | the Dev has no metadata slot | `-T_E_OPNOTSUPP` (95) |
+| `SYS_WSTAT` | the fd is dev9p's loose cached open of a file renamed, unlinked or replaced since its open | `-T_E_STALE` (116) |
 | `SYS_CLOSE` | the close's write-behind flush failed, now or earlier on that open file (dev9p's sticky latch) | `-T_E_IO` (5), the handle closed regardless (POSIX; ARCH 21.11, operator vote 2026-10-07) |
 | any handler | structurally bad argument | `-T_E_INVAL` (22) |
 | any handler | uaccess fault on a user VA | `-T_E_FAULT` (14) |
@@ -491,8 +523,35 @@ trigger surfaces; self + Fable audit before the arc closes):
   Stratum FS**: unlink-a-directory → `EISDIR` (21), rmdir-a-non-empty-directory
   → `ENOTEMPTY` (39). A server errno with no `T_E_*` name crosses BY VALUE, so
   neither needed a registry append — only kernel-ORIGINATED errnos must be
-  named here. The `SYS_FSTAT`/`LSEEK`/`READDIR`/`FSYNC`/`WSTAT`/`CHDIR` half
-  is still owed.
+  named here. Of the `SYS_FSTAT`/`LSEEK`/`READDIR`/`FSYNC`/`WSTAT`/`CHDIR`
+  half, `SYS_FSYNC` (Area-F) answers its errnos, `SYS_LSEEK` (#100) answers
+  its errnos except the non-seekable refusal, still the flat `-1` (POSIX's
+  `ESPIPE`, which this registry does not name; ER-3's residual), and
+  **`SYS_FSTAT` LANDED 2026-10-20**: `-T_E_BADF` for a handle that names no
+  Spoor, `-T_E_FAULT` for the destination, and a Dev's refusal mapped as the
+  resolver maps it (a `-errno` in [-4095,-2] as itself, else `-T_E_IO`),
+  except that a Dev's `-T_E_BADF` reads `-T_E_IO`: the handle is live, and
+  `SYS_FSTAT`'s `EBADF` means only that the handle names nothing. (A 9P
+  server's `EBADF` already arrives as `-T_E_IO`; the client folds it, per
+  the binding rule above.)
+  **`SYS_WSTAT` LANDED 2026-10-22** (G12, operator vote 18 of that day): it
+  answers `-T_E_INVAL` for a mask or a value out of its domain (a `_SET` time
+  bit without its time, a time before the epoch or an nsec outside
+  [0, 999999999] among them), `-T_E_BADF` for a handle that names no Spoor
+  and for a truncate through a handle not opened for writing or through an
+  O_PATH handle, `-T_E_FAULT` for an unreadable times pointer,
+  `-T_E_ACCES` for a permission denial, `-T_E_OPNOTSUPP` for a Dev with no
+  metadata slot, `-T_E_STALE` for dev9p's loose cached open of a file that moved
+  since its open, and a server's or a
+  stat's errno by value (`EBADF` reading `-T_E_IO`, as for `SYS_FSTAT`).
+  A denial is `EACCES`, never `EPERM`: `-EPERM` is the `-1` alias. The POSIX
+  front ends answer `EPERM` where ownership is the only possible refusal
+  (chmod, chown, any time but the touch), as POSIX asks, and leave `EACCES`
+  where write permission would also have done (the touch, both times to
+  "now"). `SYS_READDIR` and
+  `SYS_CHDIR` still answer a bare `-1` at most refusals (OPEN-BUGS
+  2026-10-20 08:24Z): `SYS_CHDIR`'s over-long path wants `ENAMETOOLONG`,
+  which this registry does not name.
 - **ER-3** — the rest of the surface: the local-validation `-1` sites
   (`EBADF`/`EINVAL`/`ACCES`/`FAULT`/...) across the syscall families.
   **The four FS name-op handlers LANDED at #80** (`SYS_WALK_OPEN`,
@@ -534,7 +593,9 @@ predates this design and is NOT subsumed. Thylacine consumes Stratum
 errors via two surfaces:
 - 9P wire (Stratum's server translates `stm_status_t` -> 9P `Tlerror`
   with a POSIX errno). Thylacine kernel sees the POSIX errno on the
-  client side; no translation needed.
+  client side; no translation needed, except `EBADF`, which the client
+  reads as `EIO` (the binding rule "Only the kernel's handle gate answers
+  `EBADF`").
 - `libstratum-9p` C ABI (Thylacine-userland tools link against this).
   `stm_status_t` constants pass through; the caller must include
   Stratum's header.
@@ -587,3 +648,240 @@ CAP_POST_SERVICE is bit 13 and follows elevation-only grant/redeem rules.
 The existing `/srv` WALK_CREATE failure convention remains -1, including
 missing post authority, occupied/protected names and exhausted admission quota.
 Shell `mount`/`unmount` translate these failures to status 1 plus `$errstr`.
+
+## Native handle metadata query (operator-approved, October 11)
+
+`SYS_HANDLE_FLAGS_GET` (129) returns a nonnegative flag word: bit0
+CLOSE_ON_EXEC, and the open-file status F_GETFL reports (B-3b) -- the access
+mode (omode & 3) at bits 8-9, NONBLOCK at bit 10, APPEND (opened
+SYS_WALK_OPEN_OAPPEND) at bit 11; a non-Spoor descriptor reports no status. The
+word is read under one table-lock hold, so the flag and the status describe the
+same occupant of the slot. It returns `-T_E_BADF` for a full-width out-of-range index
+or absent slot, and `-T_E_INVAL` for a missing internal current thread/process.
+No allocation or I/O is attempted. Native callers receive the raw negative
+errno. Pouch spawn returns the positive errno to its caller. Historical native
+kernels return legacy -1 for an unknown call; Pouch maps that one result to
+ENOSYS for this query alone (the defined query failures exclude EPERM).
+An explicit -ENOSYS also stops spawn before child publication. This does not alter the
+existing translation of legacy -1 results. Linux kill at number 129
+is answered by the Vivarium's kill translation rather than entering this handler.
+
+### Native descriptor mutation (130/131)
+
+HANDLE_FLAGS_SET(fd,flags) returns 0; HANDLE_DUP_TO(source,target,flags) returns
+the target. FLAGS_SET accepts only close-on-exec bit0. In order: missing
+Proc/thread EINVAL, unknown flag bits EINVAL, full-width index bounds EBADF,
+same-index dup EINVAL, locked non-live source EBADF; prohibited duplication
+aliases EACCES. No EPERM is returned. Failures do not mutate slots or flags.
+Pouch alone maps legacy unknown-call raw-1 to ENOSYS at these boundaries;
+native wrappers stay raw.
+
+DUP_TO also takes bit1 DUP_LOWEST (B-3b): `target` is then a floor and the
+call returns the lowest free slot at or above it (F_DUPFD; dup is floor 0).
+In order: unknown flag bits EINVAL, a source out of range EBADF, then under the
+table lock a non-live source EBADF, a floor out of range EINVAL (a closed source
+outranks a bad floor, as Linux looks the descriptor up first), a prohibited
+alias EACCES, and no free slot at or above the floor EMFILE. A source may be
+its own floor. The Linux phenotype's dup and F_DUPFD answer from the same
+checked core (EACCES reads there as EMFILE: Linux has no "exists but cannot be
+duplicated" answer).
+
+### Pouch fcntl and dup (B-3b)
+
+dup, dup2, dup3, F_DUPFD and F_DUPFD_CLOEXEC answer the DUP_TO errnos above.
+F_GETFL returns O_RDONLY / O_WRONLY / O_RDWR from the access mode (Plan 9's
+OEXEC reads as O_RDONLY) with O_NONBLOCK and O_APPEND. F_SETFL changes
+O_NONBLOCK only (through SYS_SET_NONBLOCK); restating the current O_APPEND is
+accepted, flipping it is EINVAL (the append lives in the server's open of the
+file), O_ASYNC, O_DIRECT and O_NOATIME are EINVAL, and every other bit is
+ignored, as Linux ignores it. A tagged Pouch socket answers these commands
+ENOSYS. Other fcntl commands remain ENOSYS. The Linux phenotype's F_SETFL
+refuses the same way: flipping O_APPEND, O_ASYNC, O_DIRECT and O_NOATIME are
+EINVAL, a restated O_APPEND is served, O_LARGEFILE is dropped.
+
+open and openat honour O_CLOEXEC by setting the descriptor flag once the open
+has its number, so a peer thread's spawn in between sees the descriptor
+unflagged (Linux's single call has no such window). pipe2(O_CLOEXEC) shares
+the window; dup3 and F_DUPFD_CLOEXEC do not, since DUP_TO sets the flag in the
+same call. A set that fails fails the open with the set's errno and
+closes the descriptor, unless the set answered EBADF: a peer thread closed it
+first, and the number may already be another thread's. fopen "e" is open's
+O_CLOEXEC. fdopen "e" and freopen with no name and "e" set the flag too but,
+as upstream musl, ignore a set that fails; a tagged Pouch socket is never
+flagged (ENOSYS), so fdopen "e" leaves it unflagged. A flagged descriptor at
+fd 0, 1 or 2 is left out of a posix_spawn child; if a lower standard stream is
+then missing while a higher one is open, spawn refuses with EINVAL (the sparse
+spawn contract), so a process that opens anything O_CLOEXEC with fd 0 or 1
+closed cannot spawn a child that inherits its standard streams.
+
+freopen with no name changes the status through fcntl's F_SETFL. The append bit
+is fixed when the file is opened, so a mode other than "a" restates the
+descriptor's own (an append descriptor keeps appending, where Linux would stop),
+and "a" on a descriptor opened without O_APPEND is EINVAL and, as POSIX directs
+for a failed freopen, closes the stream. Over a tagged Pouch socket the first
+F_GETFL answers ENOSYS, so freopen with no name fails and closes that stream
+too, as it did before B-3b, when every freopen with no name failed.
+
+### Probe and parent (B-3b, vote 6)
+
+SYS_POSTNOTE with an empty name is the probe kill(pid, 0) maps to: nothing is
+posted and the name pointer is not read. Self (pid 0 or the caller's own)
+answers 0; another pid answers the post's gate: 0 for the caller's child (dead
+but unreaped included), -T_E_ACCES for any other Proc, -T_E_SRCH for no Proc.
+A probe is never -T_E_INVAL or -T_E_AGAIN. A negative pid names no Proc
+(-T_E_SRCH). Pouch's kill spells the EACCES as EPERM, as it does for every
+signal, and refuses a negative pid (a process group, or every process) with
+EPERM for every signal, 0 included, as the Linux phenotype does: the gate admits
+one process at a time, so a group target is refused rather than widened, and
+pid 0 (the caller's group in POSIX) reaches only the caller. SYS_GETPPID (132)
+returns the parent's pid; it never fails. It is 0 when the parent is kproc --
+init's case, and an orphan's adopted while init is not alive -- and for kproc
+itself, which has none. init's pid is not fixed, so Linux's `getppid() == 1`
+orphan test does not hold.
+
+### Positioned I/O and create order (B-3b)
+
+SYS_PREAD and SYS_PWRITE answer a buffer outside the user half (or NULL with a
+nonzero length) -T_E_FAULT, as SYS_READ and SYS_WRITE do; they answered a flat
+-1 before. An exclusive create or mkdir of a name that already exists answers
+-T_E_EXIST even when the caller may not write the directory, provided it may
+search it (X); without X it answers -T_E_ACCES and discloses nothing. The
+existence probe does not follow a final symlink. A plain create (no
+exclusive flag) through a dangling final symlink answers -T_E_NOENT: the
+open finds nothing to open and the create does not create through the link;
+it answered -T_E_EXIST before.
+
+A create or mkdir through a 9P session answers -T_E_ACCES unless the caller
+is at one of the session's two ends (IDENTITY-DESIGN 9.7 M7). The client
+end is the identity the server authenticates: a `/srv` connection's opener,
+or the attacher of a transport the caller supplies. The server end is the
+service's poster. The directory's mode does not change the answer, and
+neither does an elevation's DAC override. A name that already exists still
+answers -T_E_EXIST to a caller who may search the directory, as above.
+
+Loom's `MKDIR`, `MKNOD` and `SYMLINK` ask the same admission when they are
+submitted and complete with -T_E_ACCES, whether or not the name exists:
+Loom's gate makes no existence probe (operator vote 2026-10-19,
+`dec-2026-10-19-loom-create-refusal-eacces`). An admitted op whose name
+exists completes with the server's error, -T_E_EXIST from Stratum.
+
+### The creation mask (operator votes 2026-10-19)
+
+SYS_UMASK (133) sets the calling Proc's creation mask and returns the
+previous one. A mask with a bit outside 0777 answers -T_E_INVAL and changes
+nothing, as SYS_WSTAT refuses stray mode bits. The POSIX front ends pass
+`mask & 0777`, so their umask never fails, as POSIX requires: Pouch's
+`umask`, the phenotype's Linux `umask` (166) and go-thylacine's
+`syscall.Umask`. The mask and the parent directory's bound (IDENTITY-DESIGN
+9.7 M8) narrow a create's mode and never refuse one, so a create gains no
+errno from them.
+
+### Mount and unmount (operator vote 2026-10-19)
+
+Operator vote 2026-10-19 (`dec-2026-10-19-mount-errnos`). Before it, SYS_MOUNT
+answered -T_E_NOTDIR for a type mismatch and a bare -1 for every other
+refusal, and SYS_UNMOUNT answered -1 for every refusal.
+
+Both calls check their path as SYS_OPEN_CREATE does: an empty or over-long
+path, or one with an embedded NUL, answers -T_E_INVAL, and a path buffer the
+kernel cannot read answers -T_E_FAULT. A mount point that does not resolve
+answers the resolver's errno (`stalk_err`), such as -T_E_NOENT,
+-T_E_ACCES, -T_E_NOTDIR or -T_E_LOOP.
+
+SYS_MOUNT judges the width of two arguments before it resolves the mount
+point: flags past 32 bits answer -T_E_INVAL and a source handle index at or
+above the table size answers -T_E_BADF. Every other refusal in the table below
+is judged after the point resolves, so when the point does not resolve, a
+closed handle in range answers the resolver's errno, not -T_E_BADF.
+
+| Refusal | SYS_MOUNT answers |
+|---|---|
+| flags outside the supported set, or naming more than one of MREPL, MBEFORE and MAFTER | -T_E_INVAL |
+| a source handle that is not live (an index at or above the table size, judged at full width, included), or lacks RIGHT_READ | -T_E_BADF |
+| a source whose type differs from the point's, or an ordered mount at a file | -T_E_NOTDIR, as before |
+| a mount that would close a cycle in the mount graph (I-3) | -T_E_LOOP |
+| a mount table holding `PGRP_MOUNT_CAP` (1024) entries, or a union's first mount, which adds two, at one below it (ARCH 9.1) | -T_E_NOSPC |
+| no memory for the mount's entries; they are allocated before the table is touched, so nothing changed (ARCH 9.1) | -T_E_NOMEM |
+
+SYS_UNMOUNT answers -T_E_INVAL when nothing is mounted at the point, as
+Linux's umount2 does. ut's `bind`, `mount` and `unmount` name the errno
+after their message, and libthyla-rs's `mount` and `unmount` return the
+matching `Error`.
+
+### Unknown syscall numbers (operator vote 2026-10-22)
+
+Operator vote 2026-10-22 (`dec-2026-10-22-unknown-syscall-enosys`). A
+syscall number the dispatcher does not know answers `-T_E_NOSYS`, as on
+Linux. Kernels before the vote answered a bare -1, which reads as EPERM,
+so a consumer that must also run on them cannot read -1 as "no such
+call": Pouch maps the legacy -1 to ENOSYS at the boundaries named above,
+and the Go fork decides once, by an lstat of "/", whether the kernel has
+SYS_LSTAT and SYS_READLINK.
+
+### Native lstat and readlink (operator vote 2026-10-20)
+
+Operator vote 2026-10-20 (`dec-2026-10-20-native-lstat-readlink`). SYS_READLINK
+(135) and SYS_LSTAT (136) resolve their path as SYS_STAT does and never
+follow its final component. Both check the path as SYS_OPEN_CREATE does: an
+empty or over-long path, or one with an embedded NUL, answers -T_E_INVAL,
+and a path buffer the kernel cannot read answers -T_E_FAULT. A path that
+does not resolve answers the resolver's errno (`stalk_err`), such as
+-T_E_NOENT, -T_E_ACCES, -T_E_NOTDIR, or -T_E_LOOP for an intermediate link
+that does not terminate. A relative path whose join with the cwd outgrows
+`SYS_OPEN_PATH_MAX` answers a bare -1, as SYS_STAT's does.
+
+SYS_LSTAT answers 0 and fills the 88-byte `struct t_stat` with the final
+component's own record, so a link reports `T_S_IFLNK`; a stat buffer the
+kernel cannot write answers -T_E_FAULT. SYS_READLINK answers the number of
+target bytes it placed, at most `bufsiz`, and writes no NUL. It answers
+-T_E_INVAL for a `bufsiz` of 0 and for a final component that is not a
+link, or is one on a Dev that cannot read links; -T_E_FAULT for a
+destination it cannot write; and the Dev's own errno, such as -T_E_INTR or
+-T_E_IO, when the read of the target fails. These are the answers the
+phenotype's `newfstatat` and `readlinkat` give, from the same cores.
+
+Pouch (Boosty B-3f'): `lstat` and `fstatat(AT_SYMLINK_NOFOLLOW)` return
+SYS_LSTAT's errno, and `readlink` SYS_READLINK's, except that the four
+`/proc` link-shaped files still read as their contents (VIVARIUM 6.11).
+Pouch answers `ENOENT` for an empty path and `ENAMETOOLONG` for one past
+`SYS_OPEN_PATH_MAX` (1024 bytes, the kernel's path bound, below musl's
+`PATH_MAX` of 4096) before the kernel sees it, and `EINVAL` for an `fstatat`
+or `fchmodat` flag it does not know. `open` and `openat` answer `ELOOP` for
+`O_NOFOLLOW` on a final link, `ENOTDIR` for `O_DIRECTORY` on anything but a
+directory (any descriptor opened is closed first), `EISDIR` for
+`O_DIRECTORY` with `O_TRUNC` on a directory, which is never truncated, and
+`EINVAL` for `O_CREAT` with `O_DIRECTORY`, as Linux has since 6.4. One answer
+differs from Linux: `O_DIRECTORY` with `O_NOFOLLOW`, without `O_PATH`, on a
+final link answers the kernel's `ELOOP` where Linux answers `ENOTDIR`. `lchmod` and
+`fchmodat(AT_SYMLINK_NOFOLLOW)` answer `EOPNOTSUPP` for a link and change
+nothing, as musl's own `fchmodat` does on Linux.
+
+### Hard links (operator vote 2026-10-21)
+
+Operator vote 2026-10-21 (`dec-2026-10-21-pouch-link-eperm`). Thylacine makes
+no hard links, and no native call creates one. Pouch's `link` and `linkat`
+answer `EPERM` without a trap, which is Linux's errno for a filesystem that
+cannot make hard links. Before the vote they reached the unimplemented-call
+sentinel and answered `ENOSYS`. Ported code falls back on `EPERM`:
+fontconfig's cache lock takes a directory lock instead (Boosty B-3g). Plan 9's
+APE answers `EMLINK`. `EPERM` is the answer the ported code is tested against.
+
+### File locks (operator votes 34-35, 2026-10-29)
+
+Operator votes 34 and 35 (`dec-2026-10-29-b3h-file-locks`; ARCH 9.6.11).
+SYS_FILE_LOCK (137) answers 0, or -T_E_AGAIN when another owner's lock is in
+the way of a take without `LOCK_WAIT`. It answers -T_E_INVAL for an op bit it
+does not know, a type past `LOCK_UN`, TEST with `LOCK_UN` or `LOCK_WAIT`, and a
+range whose last byte would pass 2^64. It answers -T_E_BADF for a handle that
+names no Spoor, a navigation-only (`T_OPATH`) descriptor, a `LOCK_RD` take on a
+descriptor not open for reading or a `LOCK_WR` take on one not open for
+writing, and a Proc lock granted after another thread closed its descriptor
+(the lock is dropped again first). It answers -T_E_NOLCK for a Dev that serves
+no locks, a Proc whose lock table is full, a server that answers ERROR or GRACE
+or does not serve Tlock (`ENOSYS`/`EOPNOTSUPP`), a server that refuses the
+zero-name clone a Proc lock needs, and, until Boosty B-3h3, a fidless cached
+open. A TEST whose `out` cannot be written answers -T_E_FAULT, and a wait a
+caught note ends answers -T_E_INTR (Linux phenotype only until ARCH 8.8.3's
+item 11c). A server's errno crosses by value inside [-4095,-2], -T_E_STALE
+for an unlinked file's fid among them, except its `EBADF`, which reads
+-T_E_IO.

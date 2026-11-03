@@ -96,8 +96,8 @@ never reaped permanently burns a slot → tag-pool exhaustion → the client sta
 ownerless** (dispatch it, `clear_outstanding` frees the tag). This is EXACTLY the
 **#845 Tflush ownerless-dispatch** machinery already in the tree (an ownerless
 Rflush frees its oldtag; extend the same dispatch arm to an ownerless Rclunk).
-`dev9p_close`'s `p9_client_clunk` becomes `p9_client_clunk_async` (fire-and-forget)
-on the normal close path; the error-path clunks (dev9p_walk_attrs/walk/create) may
+`dev9p_close`'s `p9_client_clunk` becomes `p9_client_clunk_nowait` on every path (as
+built: it goes to a closer where it would wait for a tag or ring space); the error-path clunks (dev9p_walk_attrs/walk/create) may
 stay synchronous (rare, off the hot path) or also go async — an implementation
 choice, prosecuted in the audit.
 
@@ -134,6 +134,11 @@ from the page cache — with nothing cached, cached-open never engages). Audit-
 bearing (the L1 dev9p surface); tracked as task #25.
 
 ### 3.3 cached-open — the fidless revalidate-at-open (the 46%; refines I-38; sub-chunk 3)
+
+**Updated 2026-11-02.** A cached open is no longer always fidless: "The fid a
+cached open keeps", below, supersedes what the next paragraphs say about binding
+no fid and about the close. The snapshot, its bounds and the resolver contract
+stand.
 
 **Today:** resolving `/go-cache/xx/file` binds a server fid at the **walk**
 (`dev9p_walk_attrs` bind-form, Twalkgetattr — 1 RT), `dev9p_open` does a **Tlopen**
@@ -209,24 +214,51 @@ minted Spoor (a wire-free close) and fails with the identical error the normal
 path would produce. On a NULL return nothing was bound or revealed — the
 caller's observable outcome comes solely from the fallback path.
 
-**Fidless-fd semantics (the v1.0 seam, documented + tested):** `fstat` serves
-the open-time snapshot stat (the same close-to-open discipline as the attr
-cache); `fsync` is a no-op success (read-only fd — POSIX-legal); `read`/`pread`
-serve the snapshot; `write` is rejected (defense-in-depth — the omode-derived
-handle rights already deny it). **`SYS_WSTAT` (fchmod/fchown *on the fd*)
-returns -1**: Tsetattr is fid-addressed and a fidless Spoor cannot late-bind
-(see above). No v1.0 consumer fchmod/fchowns an O_RDONLY dev9p fd (verified:
-cmd/go's cache mtime updates are path-based `Chtimes`; the #47 kind-gate fix was
-conformance-driven, not consumer-driven); path-based chmod/chown are untouched.
-The divergence fails LOUD (-1), is regression-tested, and the v1.x fix — if a
-real consumer appears — is the retain-the-walk-fid-unopened variant (wstat and
-getattr work on an unopened fid; costs the async clunk back). Every other wire
-op on a fidless Spoor (walk, walk_attrs, create, readdir, rename, unlink,
-re-open) is `P9_NOFID`-guarded to fail cleanly rather than emit a NOFID wire op.
+**The fid a cached open keeps (operator vote 20, 2026-10-22; built in Boosty
+B-3h3, 2026-11-02; ARCH 9.6.11).** This section first described a Spoor with no
+fid at all, with `SYS_WSTAT` refused, on the premise that nothing changes the
+metadata of an `O_RDONLY` dev9p fd. B-3g's lease 5 measured that premise false
+(go-fs's `syscall.Futimes` on `os.Open` of a file it had just written), and a
+file lock needs a fid too.
+
+- **Strict.** The revalidating Twalkgetattr is the bind form: it binds a fresh
+  fid and asks the leaf's generation. The open keeps that fid unopened, `fstat`,
+  `wstat` and a lock address it, and the close clunks it asynchronously.
+- **Loose (B1).** The mint binds nothing, so the open stays wire-free: that is
+  what vote B1 bought (about 1604 walks per warm W1 run), and binding here would
+  hand them back. It keeps the run's base (a reference), the run's names (charged
+  to the budget with the snapshot) and the generation the Larder knows. A file
+  whose generation the Larder does not know is not minted loose. On its first
+  `wstat`, lock or Loom registration it walks the run again into a fresh fid and
+  accepts only the same `qid.path` and generation. A name that no longer reaches
+  the file, or reaches another one, answers `ESTALE` and binds nothing. A wire that
+  failed says nothing about the file: it answers its own errno (`ENOLCK` on a lock
+  call) and also binds nothing. A `wstat` binds before it is judged (the Dev slot
+  `wstat_bind`), and its walk's attributes replace the Larder's, so the stat
+  `perm_wstat_check` reads is the file's as of that walk, not the open-time one,
+  which may name a former owner. A later `wstat` through the same fid reads the
+  attribute cache, as any descriptor's does, and sees another session's chown only
+  when that entry goes. A run from an opened base is not
+  minted loose: a server refuses a walk from an opened fid, so that open could
+  never bind. The objection above to a retained-path re-walk stands for a
+  walk that is trusted. This one is checked, so a rename can make it fail but
+  cannot make it reach another file, a reused inode number included. **What this
+  leaves:** on a loose mount, a read-only descriptor of a small cached file renamed
+  since its open answers `ESTALE` to a lock or a metadata change, where POSIX would
+  serve it. Before its first need, its `fstat` serves the open-time stat.
+- **Both.** `read` and `pread` serve the snapshot, until a lock or a Loom
+  registration asks for live reads: then a zero-name clone of the kept fid, opened
+  for reading and installed once, serves them, and `fstat` stops reporting the
+  snapshot's size. `fsync` is a no-op success (read-only fd, POSIX-legal). `write`
+  is rejected (defense-in-depth: the omode-derived handle rights already deny it).
+  A cached open is never a walk source: walk, walk_attrs, create, readdir, rename,
+  unlink and re-open on it fail cleanly.
 
 **RT accounting for a cached small file:** 3 fid RTs (bind-walk + lopen + clunk)
 + reads → **1 RT** (the query-getattr revalidation) + local reads = a 3-4× cut,
-and the residual 1 RT is the correct close-to-open minimum.
+and the residual 1 RT is the correct close-to-open minimum. The fid vote 20 kept
+adds a Tclunk at close, which nothing waits for. A loose cached open costs 0 RT;
+its first need adds 1 RT to bind, and a read fid 2 more (the clone and its Tlopen).
 
 **Why B2, not B1 (the resolved fork):** B1 (fully-loose — trust the cached attr,
 serve the query-walk locally, 0 RT/open) would **weaken I-38** — it drops the
@@ -524,13 +556,26 @@ session (operator vote 2026-09-29).
 - If a spare cannot be spawned, the queued sessions wait for a closer to
   finish. Nothing is lost.
 - A queued entry is a fid, or a close job (2026-10-07,
-  `dec-2026-10-07-exit-close` part C): the rest of a dev9p last close whose
-  write-behind flush may not wait (a die-pending thread's, or a kernel
-  thread's that something joins without bound, `closes_never_wait`; ARCH
-  7.9.1). The closer writes the staged run with Twrites,
+  `dec-2026-10-07-exit-close` part C): the rest of a dev9p last reference that
+  finds a write-behind run still staged, because a die-pending thread's close
+  could not flush it (ARCH 7.9.1). `Dev.close` itself never flushes, since it can
+  fall on any thread. The closer writes the staged run with Twrites,
   waiting as long as the server takes, drops the file's cached attributes and
   pages, sends the Tclunk, and frees the run and its budget charge. A session
   that died meanwhile takes the run with it, as it takes its fids.
+- A job may also be queued alone, with no fid (`P9_NOFID`; B-3h, ARCH
+  9.6.11): writes that must reach the server before an entry queued after
+  them. A die-pending lock holder's release queues the flush of an open file
+  another Proc still shares, then the lock fid's Tclunk, which its death
+  refuses too. The closer runs the job and sends no Tclunk for it; a failed
+  flush drops the run and latches on the open file. Only a death keeps a run.
+  Past the file's last close nobody reads that latch, so such a job reports its
+  own failure (`p9_close_job_lost`) and drops the file's cached pages.
+- A die-pending thread's last close of a descriptor whose Spoor another
+  reference still holds (a map, a Loom op) queues the same kind of job with
+  `release_locks` set: the closer flushes, then sends the whole-file unlock
+  now, since nothing says when that reference will go, and the fid waits for
+  it (B-3h audit round 3, ARCH 9.6.11).
 
 **A flushed request's reply is honoured** (flush(5)). The client flushes a
 request only when its owner has died or been interrupted by a note, so

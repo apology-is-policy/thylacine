@@ -315,7 +315,10 @@ EBADF (the kernel reads fd -1 under FIXED as the anonymous window, and a
 request without `MAP_ANON` must never become one); `MAP_SHARED`,
 `MAP_SHARED_VALIDATE`, a writable map without `MAP_FIXED`, a map without read
 and `MAP_FIXED_NOREPLACE` are ENOSYS -- the domain the Linux phenotype's two
-file arms admit, so the substrates agree on what is served.
+file arms admit, so the substrates agree on what is served. musl's
+`__map_file` is the second caller (0060, [[sub-pouch-fs]]): a `PROT_READ`,
+`MAP_PRIVATE` map with no `MAP_FIXED`, served as the kernel-chosen R span;
+the `MAP_SHARED` it asked for before was one of the ENOSYS answers above.
 
 **A census of the archive you have is not a census of the artifact you ship.**
 0046 found `__init_tls.c` as musl's one raw `mmap` caller by searching

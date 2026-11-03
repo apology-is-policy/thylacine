@@ -12,8 +12,37 @@ hazards: []
 abis: []
 design: ["docs/ARCHITECTURE.md section 9.2"]
 created: 2026-08-03
-updated: 2026-10-27
+updated: 2026-11-02
 ---
+## The lock slots (B-3h2, 2026-10-29)
+
+Five slots serve [[sub-kernel-filelock]] (ARCH 9.6.11):
+- `lock(c, type, start, len, test)` acts as the open file `c` and never
+  waits. A conflict is `-T_E_AGAIN`.
+- `lock_owner(c, &err)` mints an unpublished Spoor naming the same file
+  through its own fid: the Proc owner.
+- `lock_same_file(a, b)` is non-blocking. It is asked only of two Spoors of
+  the same Dev.
+- `lock_sync(c, DEV_LOCK_SYNC_RELEASE)` lands `c`'s staged writes, for any open
+  of the file in the Proc, before a
+  release.
+- `lock_ident(c)` learns once which file `c` names, and can answer ESTALE.
+- `wstat_bind(c)` readies `c` before SYS_WSTAT reads the stat its policy judges,
+  so that stat is the file's own rather than its state at open. A failure refuses
+  the wstat. NULL-permitted; dev9p binds a loose cached open.
+
+`fd_close(c, heard)` runs on the closing thread when the last handle slot naming `c` goes,
+and may wait. It must be idempotent, because a take that lost the race with that
+close runs it again. `lock_held(c)` is non-blocking and says whether a lock was
+granted through `c`. `close(c)` runs at the last reference, which can fall on any
+thread, and must not wait. `fd_close` and `lock_held` are NULL-permitted (B-3h
+audit round 3, 2026-11-02; ARCH 7.9.1).
+
+The first four are NULL-permitted together: a Dev without `lock` answers
+ENOLCK, as NFS without lockd does. `lock_ident` is NULL-permitted alone. A
+Dev without it matches files by `lock_same_file` alone. Only dev9p implements
+them.
+
 ## Purpose
 
 `struct Dev` is the Plan 9 device vtable, kept verbatim in shape: the
@@ -33,10 +62,18 @@ has its own dossier.
 
 ## Contract
 
+**`Dev.create`'s `gid` is the new object's group (2026-10-19).** The caller
+passes the parent directory's group (IDENTITY-DESIGN 3.5 F-5,
+[[dec-2026-10-19-create-group-from-parent]]), read from the parent's stat;
+before that it passed the creator's `primary_gid`. Only
+[[sub-kernel-ninep-dev9p]] uses it, as the 9P gid field (`P9_NOGID` on a caped
+session); the other seventeen create slots ignore it.
+
 **`Dev.close` returns `int` (2026-10-07).** Plan 9's close is `void`; ours
-returns 0, or a negative error for work the close could not finish. Only
-[[sub-kernel-ninep-dev9p]] has such work -- its last close flushes write-behind
-data, which Plan 9's mount driver never holds -- and every other Dev returns 0.
+returns 0, or a negative error for work the close could not hand on. Only
+[[sub-kernel-ninep-dev9p]] has such work -- a staged run no closer could take, since
+the flush itself moved to `Dev.fd_close` at the last descriptor -- and every other Dev
+returns 0.
 The hook still runs only on the last drop, and [[sub-kernel-spoor]]'s
 `spoor_clunk_rc` hands its result up; `close(2)` reports a negative as `EIO`
 once the fd is gone (ARCH section 21.11, `dec-2026-10-07-close-eio`). Every
@@ -89,9 +126,10 @@ The optional set is `stat_native`, `wstat_native`, `walk_attrs`,
 / `poll_arm`. A NULL slot has a defined meaning per slot, and the
 meanings are not uniform: a NULL `poll` (with no triple) means ALWAYS
 READY (the POSIX-correct answer for a regular file), while a NULL
-`fsync`, `readdir` or `stat_native` means the corresponding syscall
-returns -1. So one absent slot is a graceful default and another is a
-hard refusal, and only the header says which.
+`fsync` or `readdir` makes its syscall answer -T_E_OPNOTSUPP and a NULL
+`stat_native` makes `SYS_FSTAT` answer -T_E_IO. So one absent slot is a
+graceful default and another is a hard refusal, and only the header says
+which.
 
 **`remote` (2026-10-06, DISTRO 4.6)** answers whether a Spoor belongs to a
 session whose transport leaves the machine; a NULL slot means never. The
@@ -149,7 +187,10 @@ closed audit finding (#47): `SYS_WSTAT`'s fd gate is kind-only, so
 `perm_wstat_check` — which runs ONLY when `perm_enforced` is set — is
 the sole write-authority check on the metadata-mutation path. A Dev
 that offered metadata mutation without enforcement would let any handle
-holder rewrite mode/uid/gid with no identity check at all. Rather than
+holder rewrite mode/uid/gid or a file's times with no identity check at
+all. (The slot takes the times as a kernel copy since G12, 2026-10-22, and
+answers a `-errno`; a NULL slot makes `SYS_WSTAT` answer EOPNOTSUPP.)
+Rather than
 document that as a rule for Dev authors, the registration path makes it
 un-shippable: the combination fails the boot. **This is the pattern
 worth copying** — a vtable-shape constraint whose violation is caught
@@ -212,7 +253,7 @@ unused offset. The explicit flag decouples "can be fstat'd" from "has a
 meaningful position" — a worked example of one predicate answering two
 questions and needing to be split.
 
-There are two more, both statements a Dev makes about itself because
+There are three more, all statements a Dev makes about itself because
 inferring them was unsafe. `may_back_exec` is the allowlist floor under
 `MNOEXEC` (#217). `devno_per_walker` (2026-09-21) says this Dev's walk
 stamps a `devno` that depends on WHO walks rather than on the instance
@@ -223,9 +264,19 @@ is matched on `dc` alone, the conservative direction. A NEW per-walk
 stamper that leaves the flag false makes the shed drop live mounts, which
 is why the flag is opt-in to the *unsafe* behaviour's accommodation and
 the assigners of `devno` are an enumerated set.
+`no_file_mapping` (2026-10-28) says this Dev's files back no file
+mapping: both mapping cores refuse it with `ENODEV`, after the exec floor
+(an executable mapping answers `EPERM` first, Linux's order) and before
+the Image cache.
+`devenv` sets it, because a variable has no version (the Image cache keys
+pages on `qid.vers`) and its open Spoor holds the environment it was opened
+in, which a cached mapping would keep alive past every handle.
 
 `bestiary[]` is `BESTIARY_MAX + 1` (33) pointers with a NULL sentinel
 at `dev_count`. `g_dev_count` and `g_dev_init_done` are plain statics.
+
+`heard` says the caller hands `fd_close`'s answer to a program; a loss nobody will hear is the close's own to report. `Dev.fd_close` runs once: nothing publishes a Spoor whose count has reached zero, so it
+runs again only when a lock call finds the close passed it (B-3h audit round 4).
 
 ## Concurrency
 
@@ -321,19 +372,16 @@ Covered by `dev.boot_registration_smoke`, `dev.vtable_slot_coverage`,
 
 ## Caveats
 
-- **The `.stat_native` documentation names two Devs that implement
-  it.** `dev.h` says "trivial leaf Devs (devcons / devnull / devzero /
-  devnotes) leave the slot NULL". devcons implements it (`cons.c`,
-  added by #55 as the is-a-cons qid contract) and devnotes implements
-  it (added by #97). devnull and devzero are still accurate. What makes
-  this worth more than a stale-comment note is WHY both changed: a Dev
-  with no `stat_native` fails `SYS_FSTAT`, and clang treats a
-  non-EBADF fstat failure on fds 0/1/2 as fatal — which silently killed
-  every concurrent `make -j4` job until #96/#97 landed. The header
-  still teaches the shape that produced the bug, by worked example, to
-  the one audience positioned to repeat it: the next author of a leaf
-  Dev. Task #19 (`/dev/winsize` has no `stat_native`) is the same
-  family and still open (task #76).
+- **A Dev that a namespace fd can carry owes a `.stat_native`.** A
+  NULL slot makes `SYS_FSTAT` answer -T_E_IO, and clang treats any
+  fstat failure on fds 0/1/2 other than EBADF as fatal, which silently
+  killed every concurrent `make -j4` job until #96/#97 gave devcons
+  and devnotes the slot. A closed descriptor answers EBADF since
+  2026-10-20, the one failure clang's standard-fd fixup repairs. The
+  `dev.h` contract names the Devs that still leave the slot NULL:
+  devcap (the `/cap` leaves) and the leaves reached only by a direct
+  attach (devnull, devzero, devfull, devrandom). The next author of a
+  leaf Dev is the audience positioned to repeat the bug.
 - **The coverage test's Dev-count assertion is a very loose lower
   bound.** `dev.vtable_slot_coverage` ends with `devs_checked >= 8`,
   and its comment enumerates the eight Devs of P4-A through P4-E. Ten

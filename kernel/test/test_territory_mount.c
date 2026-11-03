@@ -37,7 +37,7 @@
 //     unmount of a non-existent mount-point identity returns -1.
 //
 //   territory_mount.table_full
-//     mount PGRP_MAX_MOUNTS distinct entries; next mount returns -2.
+//     mount PGRP_MOUNT_CAP distinct entries; next mount returns -2.
 //
 //   territory_mount.clone_bumps_refs
 //     mount A at mp; territory_clone parent → child; verify both
@@ -57,6 +57,7 @@
 #include <thylacine/territory.h>
 #include <thylacine/types.h>
 
+#include "../../mm/slub.h"       // kcalloc: arrays as long as the cap
 // Mint a mount-point Spoor with a distinct identity (devnone dc '-', devno 0,
 // the given qid.path). The mount table keys on (dc, devno, qid.path), so a
 // distinct qid.path = a distinct mount point. A directory, as mount points are:
@@ -341,46 +342,65 @@ void test_territory_mount_unmount_missing_returns_error(void) {
     territory_unref(p);
 }
 
+// The table takes PGRP_MOUNT_CAP entries, each at its own point, and refuses
+// the next with -2, taking no ref. The arrays live on the heap: at the cap they
+// would not fit a kernel stack. Results are read first and asserted after the
+// release, since a failing TEST_EXPECT_EQ returns.
 void test_territory_mount_table_full(void) {
     struct Territory *p = territory_alloc();
-    TEST_ASSERT(p != NULL, "territory_alloc returned NULL");
+    struct Spoor **sources = kcalloc(PGRP_MOUNT_CAP, sizeof(*sources), 0);
+    struct Spoor **mps     = kcalloc(PGRP_MOUNT_CAP, sizeof(*mps), 0);
+    TEST_ASSERT(p && sources && mps, "alloc");
+    u64 entries0 = territory_mount_entries_live(), points0 = territory_mount_points_live();
 
-    struct Spoor *sources[PGRP_MAX_MOUNTS];
-    struct Spoor *mps[PGRP_MAX_MOUNTS];
-    for (int i = 0; i < PGRP_MAX_MOUNTS; i++) {
+    int made = 0, filled = 0;
+    for (int i = 0; i < PGRP_MOUNT_CAP; i++) {
         sources[i] = spoor_alloc(&devnone);
         mps[i]     = mkmp((u64)(100u + i));
-        TEST_ASSERT(sources[i] != NULL && mps[i] != NULL,
-            "spoor_alloc/mkmp returned NULL");
+        if (sources[i] && mps[i]) made++;
     }
+    if (made == PGRP_MOUNT_CAP)
+        for (int i = 0; i < PGRP_MOUNT_CAP; i++)
+            if (mount(p, sources[i], mps[i], 0) == 0) filled++;
+    int n_full = territory_nmounts(p), pts_full = territory_npoints(p);
+    int check = territory_mount_check(p);
 
-    // Fill the table (each at a distinct mount-point identity).
-    for (int i = 0; i < PGRP_MAX_MOUNTS; i++) {
-        TEST_EXPECT_EQ(mount(p, sources[i], mps[i], 0), 0,
-            "fill: mount should succeed");
-    }
-    TEST_EXPECT_EQ(territory_nmounts(p), PGRP_MAX_MOUNTS,
-        "mounts[] full");
+    struct Spoor *extra    = spoor_alloc(&devnone);
+    struct Spoor *mp_extra = mkmp(100u + PGRP_MOUNT_CAP);
+    int over = (extra && mp_extra) ? mount(p, extra, mp_extra, 0) : 0;
+    int extra_ref = extra ? extra->ref : -1;
+    int n_after = territory_nmounts(p);
+    struct Spoor *last = made == PGRP_MOUNT_CAP
+                       ? mount_lookup(p, mps[PGRP_MOUNT_CAP - 1], NULL) : NULL;
+    bool last_crosses = last && last == sources[PGRP_MOUNT_CAP - 1];
+    if (last) spoor_clunk(last);
 
-    // One more should fail.
-    struct Spoor *extra = spoor_alloc(&devnone);
-    struct Spoor *mp_extra = mkmp(200u);
-    TEST_ASSERT(extra != NULL && mp_extra != NULL, "extra alloc returned NULL");
-    TEST_EXPECT_EQ(mount(p, extra, mp_extra, 0), -2,
-        "overflow mount returns -2");
-    TEST_EXPECT_EQ(extra->ref, 1,
-        "overflow mount must NOT bump source ref");
-
-    // Cleanup: territory_unref drops all entries' refs in one shot.
-    spoor_unref(mp_extra);
-    spoor_unref(extra);
+    // territory_unref drops every entry's ref in one shot.
     territory_unref(p);
-    for (int i = 0; i < PGRP_MAX_MOUNTS; i++) {
-        TEST_EXPECT_EQ(sources[i]->ref, 1,
-            "territory_unref must drop each source's entry-ref");
-        spoor_unref(sources[i]);
-        spoor_unref(mps[i]);
+    int refs_back = 0;
+    for (int i = 0; i < PGRP_MOUNT_CAP; i++) {
+        if (sources[i] && sources[i]->ref == 1) refs_back++;
+        if (sources[i]) spoor_unref(sources[i]);
+        if (mps[i])     spoor_unref(mps[i]);
     }
+    if (extra)    spoor_unref(extra);
+    if (mp_extra) spoor_unref(mp_extra);
+    kfree(sources);
+    kfree(mps);
+    u64 entries1 = territory_mount_entries_live(), points1 = territory_mount_points_live();
+
+    TEST_EXPECT_EQ(made, PGRP_MOUNT_CAP, "every Spoor allocated");
+    TEST_EXPECT_EQ(filled, PGRP_MOUNT_CAP, "the table takes PGRP_MOUNT_CAP entries");
+    TEST_EXPECT_EQ(n_full, PGRP_MOUNT_CAP, "nmounts counts them");
+    TEST_EXPECT_EQ(pts_full, PGRP_MOUNT_CAP, "one point per entry");
+    TEST_EXPECT_EQ(check, 0, "the full table's lists, hash and counts agree");
+    TEST_EXPECT_EQ(over, -2, "one more mount returns -2");
+    TEST_EXPECT_EQ(extra_ref, 1, "the refused mount takes no ref on its source");
+    TEST_EXPECT_EQ(n_after, PGRP_MOUNT_CAP, "and installs nothing");
+    TEST_ASSERT(last_crosses, "the last point still finds its source by key");
+    TEST_EXPECT_EQ(refs_back, PGRP_MOUNT_CAP, "territory_unref dropped each source's entry-ref");
+    TEST_EXPECT_EQ(entries1, entries0, "every entry freed");
+    TEST_EXPECT_EQ(points1, points0, "every point freed");
 }
 
 void test_territory_mount_clone_bumps_refs(void) {
@@ -809,7 +829,7 @@ void test_territory_mount_format_ns(void) {
     TEST_EXPECT_EQ(mount(p, sb, mproc, MNOEXEC), 0, "mount /proc noexec");
 
     char buf[256];
-    u64 n = territory_format_ns(p, buf, sizeof(buf));
+    u64 n = territory_format_ns(p, 0, buf, sizeof(buf));
     TEST_ASSERT(n > 0 && n < sizeof(buf), "format_ns produced bounded output");
     buf[n] = '\0';
     TEST_ASSERT(mnt_streq(buf,
@@ -817,21 +837,54 @@ void test_territory_mount_format_ns(void) {
                 "ns renders both mounts (name + #dc / source-path), the #217 "
                 "noexec suffix on the flagged entry ONLY, + the bind count");
 
-    // F2 (audit): truncation discards a partial line at a whole-line boundary --
-    // a cap that fits line 1 ("mount /srv #-\n" = 14 B) but not line 2 yields
-    // EXACTLY the first complete line, with NO partial second line AND NO
-    // trailing "binds:" (which would falsely imply completeness).
+    // F2 (audit): a window ends at its last line end -- one that holds line 1
+    // ("mount /srv #-\n" = 14 B) and part of line 2 yields EXACTLY the first
+    // complete line, with NO partial second line AND NO "binds:" (which would
+    // falsely imply completeness).
     char mid[20];
-    u64 m = territory_format_ns(p, mid, sizeof(mid));
-    TEST_ASSERT(m == 14, "format_ns truncated to one whole line (14 B)");
+    u64 m = territory_format_ns(p, 0, mid, sizeof(mid));
+    TEST_ASSERT(m == 14, "format_ns's window ends at one whole line (14 B)");
     mid[m] = '\0';
     TEST_ASSERT(mnt_streq(mid, "mount /srv #-\n"),
-                "F2: truncation is clean -- first whole line only, no partial, no binds");
+                "F2: the window is clean -- first whole line only, no partial, no binds");
 
-    // A cap too small even for line 1 yields a clean empty result (no partial).
-    char tiny[8];
-    u64 t = territory_format_ns(p, tiny, sizeof(tiny));
-    TEST_EXPECT_EQ((int)t, 0, "F2: cap below one line -> empty (no partial 'mount ')");
+    // The listing is 51 bytes: line 1 (14), line 2 (28), "binds: 0\n" (9). Each
+    // window starts at its offset and ends at its last line end; one holding no
+    // line end holds its bytes, so a read shorter than a line still advances; at
+    // or past the end there is nothing.
+    char win[33];
+    u64 w2 = territory_format_ns(p, 14, win, 32);
+    win[w2] = '\0';
+    bool w2_line2 = w2 == 28 && mnt_streq(win, "mount /proc /realsrc noexec\n");
+    u64 w3 = territory_format_ns(p, 42, win, 32);
+    win[w3] = '\0';
+    bool w3_binds = w3 == 9 && mnt_streq(win, "binds: 0\n");
+    u64 w_mid = territory_format_ns(p, 3, win, 32);
+    win[w_mid] = '\0';
+    bool mid_line = w_mid == 11 && mnt_streq(win, "nt /srv #-\n");
+    u64 tiny_n = territory_format_ns(p, 0, win, 8);
+    win[tiny_n] = '\0';
+    bool tiny_raw = tiny_n == 8 && mnt_streq(win, "mount /s");
+    u64 at_end = territory_format_ns(p, 51, win, 32);
+    u64 past   = territory_format_ns(p, 1u << 20, win, 32);
+    // Eight bytes at a time, each window starting where the last ended, the
+    // listing comes back whole.
+    char whole[64];
+    u64 off = 0, k;
+    int steps = 0;
+    while (off < sizeof(whole) - 8 && (k = territory_format_ns(p, off, whole + off, 8)) > 0) {
+        off += k;
+        steps++;
+    }
+    whole[off] = '\0';
+    bool stepped = off == 51 && mnt_streq(whole, buf);
+    TEST_ASSERT(w2_line2, "a window at line 2's start holds line 2 alone");
+    TEST_ASSERT(w3_binds, "a window at the binds line holds it");
+    TEST_ASSERT(mid_line, "a window starting mid-line ends at that line's end");
+    TEST_ASSERT(tiny_raw, "a window shorter than line 1 holds its 8 bytes");
+    TEST_EXPECT_EQ((int)at_end, 0, "a window at the end holds nothing");
+    TEST_EXPECT_EQ((int)past, 0, "a window past the end holds nothing");
+    TEST_ASSERT(stepped && steps > 6, "8-byte windows read in turn give back the whole listing");
 
     territory_unref(p);
     spoor_unref(sa);
@@ -1039,39 +1092,58 @@ void test_territory_mount_covered_leaves_with_last(void) {
     spoor_unref(a); spoor_unref(b); spoor_unref(mp);
 }
 
-// A union's first mount installs two entries, so it needs two free slots. With
-// one free it fails -2 and installs NOTHING -- no member without its covered
-// directory, no reference taken -- while a mount needing one slot still fits.
+// A union's first mount installs two entries, so it needs room for two. With
+// room for one it fails -2 and installs NOTHING -- no member without its
+// covered directory, no reference taken, no point -- while a mount needing one
+// entry still fits.
 void test_territory_mount_covered_needs_two_slots(void) {
     struct Territory *p = territory_alloc();
-    TEST_ASSERT(p != NULL, "territory_alloc");
-    struct Spoor *sources[PGRP_MAX_MOUNTS - 1];
-    struct Spoor *mps[PGRP_MAX_MOUNTS - 1];
-    for (int i = 0; i < PGRP_MAX_MOUNTS - 1; i++) {
+    struct Spoor **sources = kcalloc(PGRP_MOUNT_CAP - 1, sizeof(*sources), 0);
+    struct Spoor **mps     = kcalloc(PGRP_MOUNT_CAP - 1, sizeof(*mps), 0);
+    TEST_ASSERT(p && sources && mps, "alloc");
+    int filled = 0;
+    for (int i = 0; i < PGRP_MOUNT_CAP - 1; i++) {
         sources[i] = spoor_alloc(&devnone);
-        mps[i]     = mkmp((u64)(300u + i));
-        TEST_ASSERT(sources[i] != NULL && mps[i] != NULL, "alloc");
-        TEST_EXPECT_EQ(mount(p, sources[i], mps[i], 0), 0, "fill");
+        mps[i]     = mkmp((u64)(3000u + i));
+        if (sources[i] && mps[i] && mount(p, sources[i], mps[i], 0) == 0) filled++;
     }
-    TEST_EXPECT_EQ(territory_nmounts(p), PGRP_MAX_MOUNTS - 1, "one slot free");
+    int n_one_free = territory_nmounts(p);
 
     struct Spoor *s  = spoor_alloc(&devnone);
-    struct Spoor *mp = mkmp(400u);
-    TEST_ASSERT(s && mp, "alloc");
-    TEST_EXPECT_EQ(mount(p, s, mp, MBEFORE), -2, "MBEFORE starting a union needs two slots");
-    TEST_EXPECT_EQ(mount(p, s, mp, MAFTER),  -2, "so does MAFTER");
-    TEST_EXPECT_EQ(territory_nmounts(p), PGRP_MAX_MOUNTS - 1, "nothing installed");
-    TEST_EXPECT_EQ(s->ref, 1, "no ref on the source");
-    TEST_EXPECT_EQ(mp->ref, 1, "no ref on the point");
-    TEST_EXPECT_EQ(mount(p, s, mp, 0), 0, "a plain mount needs one slot and fits");
-    TEST_EXPECT_EQ(territory_nmounts(p), PGRP_MAX_MOUNTS, "full");
+    struct Spoor *mp = mkmp(5000u);
+    int before = -9, after = -9, n_refused = -1, s_ref = -1, mp_ref = -1, pts = -1;
+    int plain = -9, n_full = -1;
+    if (s && mp) {
+        before    = mount(p, s, mp, MBEFORE);
+        after     = mount(p, s, mp, MAFTER);
+        n_refused = territory_nmounts(p);
+        pts       = territory_npoints(p);
+        s_ref     = s->ref;
+        mp_ref    = mp->ref;
+        plain     = mount(p, s, mp, 0);
+        n_full    = territory_nmounts(p);
+    }
 
     territory_unref(p);
-    for (int i = 0; i < PGRP_MAX_MOUNTS - 1; i++) {
-        spoor_unref(sources[i]);
-        spoor_unref(mps[i]);
+    for (int i = 0; i < PGRP_MOUNT_CAP - 1; i++) {
+        if (sources[i]) spoor_unref(sources[i]);
+        if (mps[i])     spoor_unref(mps[i]);
     }
-    spoor_unref(s); spoor_unref(mp);
+    kfree(sources);
+    kfree(mps);
+    if (s)  spoor_unref(s);
+    if (mp) spoor_unref(mp);
+
+    TEST_EXPECT_EQ(filled, PGRP_MOUNT_CAP - 1, "fill");
+    TEST_EXPECT_EQ(n_one_free, PGRP_MOUNT_CAP - 1, "room for one");
+    TEST_EXPECT_EQ(before, -2, "MBEFORE starting a union needs room for two");
+    TEST_EXPECT_EQ(after,  -2, "so does MAFTER");
+    TEST_EXPECT_EQ(n_refused, PGRP_MOUNT_CAP - 1, "nothing installed");
+    TEST_EXPECT_EQ(pts, PGRP_MOUNT_CAP - 1, "no point added");
+    TEST_EXPECT_EQ(s_ref, 1, "no ref on the source");
+    TEST_EXPECT_EQ(mp_ref, 1, "no ref on the point");
+    TEST_EXPECT_EQ(plain, 0, "a plain mount needs one entry and fits");
+    TEST_EXPECT_EQ(n_full, PGRP_MOUNT_CAP, "full");
 }
 
 // A self-mount stays an I-3 cycle even though a union's covered entry is keyed
@@ -1168,7 +1240,7 @@ void test_territory_mount_covered_format_ns(void) {
     TEST_EXPECT_EQ(mount(p, a, mp, MBEFORE | MNOEXEC), 0, "A MBEFORE|MNOEXEC -> [A, covered]");
 
     char buf[128];
-    u64 n = territory_format_ns(p, buf, sizeof(buf));
+    u64 n = territory_format_ns(p, 0, buf, sizeof(buf));
     TEST_ASSERT(n > 0 && n < sizeof(buf), "bounded output");
     buf[n] = '\0';
     TEST_ASSERT(mnt_streq(buf, "mount /u #- noexec\nmount /u /u covered\nbinds: 0\n"),
@@ -1176,4 +1248,194 @@ void test_territory_mount_covered_format_ns(void) {
 
     territory_unref(p);
     spoor_unref(a); spoor_unref(mp);
+}
+
+// /proc/<pid>/ns as format_ns renders it, against what a step expects.
+static bool ns_is(struct Territory *t, const char *want) {
+    char buf[512];
+    u64 n = territory_format_ns(t, 0, buf, sizeof(buf) - 1);
+    buf[n] = '\0';
+    return mnt_streq(buf, want);
+}
+
+struct edit_seen { int rc, check, points; bool ns; };
+
+static struct edit_seen edit_seen(struct Territory *t, int rc, const char *want) {
+    struct edit_seen e = { rc, territory_mount_check(t), territory_npoints(t), ns_is(t, want) };
+    return e;
+}
+
+// The mount table's nodes through every kind of edit (ARCH 9.1). After each,
+// the lists, hash and counts agree (territory_mount_check), there is a point
+// per mount point hosting an entry, and /proc/<pid>/ns prints the order the
+// fixed array kept: MBEFORE just before the point's first member, every other
+// placement at the end. A clone copies both orders; a snapshot too small for
+// the union takes nothing; unmounting, replacing, repositioning, shedding and
+// releasing give back every node.
+void test_territory_mount_nodes_follow_every_edit(void) {
+    u64 entries0 = territory_mount_entries_live(), points0 = territory_mount_points_live();
+    struct Territory *p = territory_alloc();
+    struct Spoor *a = spoor_alloc(&devnone), *b = spoor_alloc(&devnone);
+    struct Spoor *c = spoor_alloc(&devnone), *root_x = spoor_alloc(&devnone);
+    struct Spoor *mp1 = mkmp(1u), *mp2 = mkmp(2u);
+    TEST_ASSERT(p && a && b && c && root_x && mp1 && mp2, "alloc");
+    a->path   = mkname("A");   b->path   = mkname("B");   c->path = mkname("C");
+    mp1->path = mkname("one"); mp2->path = mkname("two");
+    TEST_ASSERT(a->path && b->path && c->path && mp1->path && mp2->path, "names");
+    root_x->devno = 77u;                      // an instance no point lies in
+
+    static const char *const want[9] = {
+        "mount /one /A\nbinds: 0\n",
+        "mount /one /A\nmount /two /two covered\nmount /two /B\nbinds: 0\n",
+        "mount /one /C\nmount /one /A\nmount /two /two covered\nmount /two /B\nbinds: 0\n",
+        "mount /one /C\nmount /one /A\nmount /two /A\nmount /two /two covered\nmount /two /B\nbinds: 0\n",
+        "mount /one /C\nmount /one /A\nmount /two /B\nmount /two /A\nmount /two /two covered\nbinds: 0\n",
+        "mount /one /C\nmount /one /A\nmount /two /C\nbinds: 0\n",
+        "mount /one /A\nmount /two /C\nbinds: 0\n",
+        "mount /two /C\nbinds: 0\n",
+        "binds: 0\n",
+    };
+    static const char *const step[9] = {
+        "step 0, a plain mount: ns prints it",
+        "step 1, a union started MAFTER: <covered, B>, appended",
+        "step 2, MBEFORE at a plain point: C just before A",
+        "step 3, MBEFORE at a union: A just before the covered entry, not at the end",
+        "step 4, a reposition: B moves to its point's front, the rest keep their places",
+        "step 5, MREPL: the whole union at /two replaced by C, at the end",
+        "step 6, unmount: the first member at /one goes",
+        "step 7, unmount: the last member goes, and its point with it",
+        "step 8, chroot into an instance no point is in: the shed drops everything",
+    };
+    static const int want_points[9] = { 1, 2, 2, 2, 2, 2, 2, 1, 0 };
+    struct edit_seen s[9];
+    s[0] = edit_seen(p, mount(p, a, mp1, 0),       want[0]);
+    s[1] = edit_seen(p, mount(p, b, mp2, MAFTER),  want[1]);
+    s[2] = edit_seen(p, mount(p, c, mp1, MBEFORE), want[2]);
+    s[3] = edit_seen(p, mount(p, a, mp2, MBEFORE), want[3]);
+
+    // The snapshot takes the whole union or nothing: mp2 holds [A, covered, B].
+    struct Spoor *out[3] = { NULL, NULL, NULL };
+    u32 fl[3] = { 0, 0, 0 };
+    int a_ref = a->ref, b_ref = b->ref, mp2_ref = mp2->ref;
+    int short_n = mount_members_snapshot(p, mp2, out, fl, 2);
+    bool short_took_nothing = out[0] == NULL && out[1] == NULL && a->ref == a_ref &&
+                              b->ref == b_ref && mp2->ref == mp2_ref;
+    int full_n = mount_members_snapshot(p, mp2, out, fl, 3);
+    bool full_in_order = out[0] == a && out[1] == mp2 && out[2] == b &&
+                         fl[0] == MBEFORE && fl[1] == MCOVERED && fl[2] == MAFTER;
+    for (int i = 0; i < 3; i++) if (out[i]) spoor_clunk(out[i]);
+
+    // A clone copies the table order and every point's search order.
+    struct Territory *child = territory_clone(p);
+    bool clone_ns = child && ns_is(child, want[3]);
+    int clone_check = child ? territory_mount_check(child) : -1;
+    int clone_points = child ? territory_npoints(child) : -1;
+    struct Spoor *c0 = child ? mount_member_at(child, mp2, 0, NULL) : NULL;
+    struct Spoor *c1 = child ? mount_member_at(child, mp2, 1, NULL) : NULL;
+    bool clone_order = c0 == a && c1 == mp2;
+    if (c0) spoor_clunk(c0);
+    if (c1) spoor_clunk(c1);
+    territory_unref(child);
+
+    s[4] = edit_seen(p, mount(p, b, mp2, MBEFORE), want[4]);
+    s[5] = edit_seen(p, mount(p, c, mp2, MREPL),   want[5]);
+    int mp2_after_repl = mp2->ref;
+    s[6] = edit_seen(p, unmount(p, mp1), want[6]);
+    s[7] = edit_seen(p, unmount(p, mp1), want[7]);
+    int nothing_left = unmount(p, mp1);
+    s[8] = edit_seen(p, territory_chroot(p, root_x), want[8]);
+    int a_end = a->ref, b_end = b->ref, c_end = c->ref;
+
+    territory_unref(p);
+    spoor_unref(a); spoor_unref(b); spoor_unref(c); spoor_unref(root_x);
+    spoor_unref(mp1); spoor_unref(mp2);
+    u64 entries1 = territory_mount_entries_live(), points1 = territory_mount_points_live();
+
+    for (int i = 0; i < 9; i++) {
+        TEST_EXPECT_EQ(s[i].rc, 0, step[i]);
+        TEST_EXPECT_EQ(s[i].check, 0, step[i]);
+        TEST_EXPECT_EQ(s[i].points, want_points[i], step[i]);
+        TEST_ASSERT(s[i].ns, step[i]);
+    }
+    TEST_EXPECT_EQ(short_n, 3, "a snapshot too small still answers the member count");
+    TEST_ASSERT(short_took_nothing, "and writes and refs nothing");
+    TEST_EXPECT_EQ(full_n, 3, "a snapshot with room takes the union");
+    TEST_ASSERT(full_in_order, "in search order, each member's flags beside it");
+    TEST_ASSERT(clone_ns, "a clone prints the parent's table order");
+    TEST_EXPECT_EQ(clone_check, 0, "the clone's lists, hash and counts agree");
+    TEST_EXPECT_EQ(clone_points, 2, "the clone has the parent's two points");
+    TEST_ASSERT(clone_order, "the clone keeps /two's search order: A, then the covered entry");
+    TEST_EXPECT_EQ(mp2_after_repl, 1, "MREPL released the covered entry's ref on the point");
+    TEST_EXPECT_EQ(nothing_left, -1, "nothing is left at /one");
+    TEST_EXPECT_EQ(a_end, 1, "every entry of A released");
+    TEST_EXPECT_EQ(b_end, 1, "every entry of B released");
+    TEST_EXPECT_EQ(c_end, 1, "the shed released C");
+    TEST_EXPECT_EQ(entries1, entries0, "every entry freed");
+    TEST_EXPECT_EQ(points1, points0, "every point freed");
+}
+
+// ARCH 9.1: mount() allocates before ns_lock, so a failed allocation answers
+// -4 and changes nothing -- no entry, no point, no ref -- whichever of its
+// three allocations fails, at a point that hosts a member or a new one. A
+// clone that cannot allocate its copy fails whole. Each refusal is followed by
+// the same call with the knob off, which succeeds: the -4 came from the
+// allocation.
+void test_territory_mount_refuses_enomem(void) {
+    struct Territory *p = territory_alloc();
+    struct Spoor *a = spoor_alloc(&devnone), *b = spoor_alloc(&devnone);
+    struct Spoor *mp1 = mkmp(1u), *mp2 = mkmp(2u);
+    TEST_ASSERT(p && a && b && mp1 && mp2, "alloc");
+    int base = mount(p, a, mp1, 0);
+    u64 entries0 = territory_mount_entries_live(), points0 = territory_mount_points_live();
+
+    int refused[4], left[4];
+    bool unchanged[4];
+    for (u32 k = 1; k <= 3; k++) {
+        territory_mount_fail_nodes_for_test(k);
+        refused[k - 1] = mount(p, b, mp1, MAFTER);
+        left[k - 1]    = (int)territory_mount_fail_nodes_for_test(0);
+        unchanged[k - 1] = territory_nmounts(p) == 1 && territory_npoints(p) == 1 &&
+                           b->ref == 1 && territory_mount_check(p) == 0 &&
+                           territory_mount_entries_live() == entries0 &&
+                           territory_mount_points_live() == points0;
+    }
+    territory_mount_fail_nodes_for_test(1);
+    refused[3] = mount(p, b, mp2, MBEFORE);              // a new point, a union's start
+    left[3]    = (int)territory_mount_fail_nodes_for_test(0);
+    unchanged[3] = territory_nmounts(p) == 1 && territory_npoints(p) == 1 &&
+                   b->ref == 1 && mp2->ref == 1 &&
+                   territory_mount_entries_live() == entries0 &&
+                   territory_mount_points_live() == points0;
+
+    u64 made0 = territory_total_created(), gone0 = territory_total_destroyed();
+    territory_mount_fail_nodes_for_test(1);
+    struct Territory *child = territory_clone(p);
+    int clone_left = (int)territory_mount_fail_nodes_for_test(0);
+    bool clone_failed_whole = child == NULL && a->ref == 2 &&
+                              territory_total_created() - made0 == territory_total_destroyed() - gone0 &&
+                              territory_mount_entries_live() == entries0 &&
+                              territory_mount_points_live() == points0 &&
+                              territory_mount_check(p) == 0;
+    territory_unref(child);
+
+    int control_plain = mount(p, b, mp1, MAFTER);
+    int control_union = mount(p, b, mp2, MBEFORE);
+    struct Territory *control_child = territory_clone(p);
+    bool control_clone = control_child && territory_nmounts(control_child) == 4;
+    territory_unref(control_child);
+
+    territory_unref(p);
+    spoor_unref(a); spoor_unref(b); spoor_unref(mp1); spoor_unref(mp2);
+
+    TEST_EXPECT_EQ(base, 0, "one entry to start from");
+    for (int i = 0; i < 4; i++) {
+        TEST_EXPECT_EQ(refused[i], -4, "a failed allocation refuses the mount with -4");
+        TEST_EXPECT_EQ(left[i], 0, "mount() asked for every node the knob failed");
+        TEST_ASSERT(unchanged[i], "and changes nothing: table, points, refs, nodes");
+    }
+    TEST_EXPECT_EQ(clone_left, 0, "the clone asked for its nodes");
+    TEST_ASSERT(clone_failed_whole, "a clone that cannot allocate fails whole, leaving the parent as it was");
+    TEST_EXPECT_EQ(control_plain, 0, "control: the same mount with the knob off installs");
+    TEST_EXPECT_EQ(control_union, 0, "control: so does the union's start");
+    TEST_ASSERT(control_clone, "control: and the clone copies all four entries");
 }

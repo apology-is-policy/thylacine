@@ -847,6 +847,105 @@ void test_9p_wire_tfsync_round_trip(void) {
     TEST_EXPECT_EQ((u64)tag_out, (u64)0x0024, "Rfsync tag");
 }
 
+static u64 w_le64(const u8 *b) {
+    u64 v = 0;
+    for (int i = 0; i < 8; i++) v |= (u64)b[i] << (8 * i);
+    return v;
+}
+static u32 w_le32(const u8 *b) {
+    return (u32)b[0] | ((u32)b[1] << 8) | ((u32)b[2] << 16) | ((u32)b[3] << 24);
+}
+
+// B-3h: Tlock carries every field at its 9P2000.L offset; Rlock is exactly
+// one status byte, and a body longer or shorter than that is refused.
+void test_9p_wire_tlock_round_trip(void) {
+    const u8 cid[3] = { 'c', 'l', 'i' };
+    int total = p9_build_tlock(g_buf, sizeof(g_buf), 0x0031, /*fid*/ 9,
+                               P9_LOCK_TYPE_WRLCK, P9_LOCK_FLAGS_BLOCK,
+                               0x1122334455667788ull, 0x10ull, 0xAABBCCDDu,
+                               cid, sizeof(cid));
+    // hdr(7) + fid(4) + type(1) + flags(4) + start(8) + length(8) + proc_id(4)
+    // + client_id(2 + 3) = 41
+    TEST_EXPECT_EQ(total, 41, "Tlock total len");
+    TEST_EXPECT_EQ(w_le32(g_buf), 41u, "Tlock size field");
+    TEST_EXPECT_EQ((u32)g_buf[4], (u32)P9_TLOCK, "Tlock type");
+    TEST_EXPECT_EQ((u32)g_buf[5] | ((u32)g_buf[6] << 8), 0x31u, "Tlock tag");
+    TEST_EXPECT_EQ(w_le32(g_buf + 7), 9u, "fid");
+    TEST_EXPECT_EQ((u32)g_buf[11], (u32)P9_LOCK_TYPE_WRLCK, "lock type");
+    TEST_EXPECT_EQ(w_le32(g_buf + 12), (u32)P9_LOCK_FLAGS_BLOCK, "flags");
+    TEST_EXPECT_EQ(w_le64(g_buf + 16), 0x1122334455667788ull, "start");
+    TEST_EXPECT_EQ(w_le64(g_buf + 24), 0x10ull, "length");
+    TEST_EXPECT_EQ(w_le32(g_buf + 32), 0xAABBCCDDu, "proc_id");
+    TEST_EXPECT_EQ((u32)g_buf[36] | ((u32)g_buf[37] << 8), 3u, "client_id length");
+    TEST_ASSERT(g_buf[38] == 'c' && g_buf[39] == 'l' && g_buf[40] == 'i', "client_id bytes");
+    TEST_EXPECT_EQ(p9_build_tlock(g_buf, 40, 1, 9, 0, 0, 0, 0, 0, cid, 3), -1,
+                   "a buffer one byte short is refused");
+    TEST_EXPECT_EQ(p9_build_tlock(g_buf, sizeof(g_buf), 1, 9, 0, 0, 0, 0, 0, NULL, 3), -1,
+                   "a client_id length with no bytes is refused");
+
+    g_buf[0] = 8; g_buf[1] = 0; g_buf[2] = 0; g_buf[3] = 0;
+    g_buf[4] = P9_RLOCK;
+    g_buf[5] = 0x31; g_buf[6] = 0;
+    g_buf[7] = P9_LOCK_BLOCKED;
+    u16 tag = 0;
+    u8 status = 0xff;
+    TEST_EXPECT_EQ(p9_parse_rlock(g_buf, 8, &tag, &status), 0, "Rlock parse ok");
+    TEST_EXPECT_EQ((u32)tag, 0x31u, "Rlock tag");
+    TEST_EXPECT_EQ((u32)status, (u32)P9_LOCK_BLOCKED, "Rlock status");
+    g_buf[0] = 7;
+    TEST_EXPECT_EQ(p9_parse_rlock(g_buf, 7, &tag, &status), -1, "an Rlock with no status is refused");
+    g_buf[0] = 9; g_buf[8] = 0;
+    TEST_EXPECT_EQ(p9_parse_rlock(g_buf, 9, &tag, &status), -1, "a trailing byte is refused");
+    g_buf[0] = 8; g_buf[4] = P9_RGETLOCK;
+    TEST_EXPECT_EQ(p9_parse_rlock(g_buf, 8, &tag, &status), -1, "another reply type is refused");
+}
+
+// B-3h: Tgetlock's fields and Rgetlock's, the server's client_id read and
+// dropped; a client_id running past the frame, or a trailing byte, is refused.
+void test_9p_wire_tgetlock_round_trip(void) {
+    int total = p9_build_tgetlock(g_buf, sizeof(g_buf), 0x0032, /*fid*/ 4,
+                                  P9_LOCK_TYPE_RDLCK, 50, 0, 0, NULL, 0);
+    // hdr(7) + fid(4) + type(1) + start(8) + length(8) + proc_id(4) + client_id(2)
+    TEST_EXPECT_EQ(total, 34, "Tgetlock total len");
+    TEST_EXPECT_EQ((u32)g_buf[4], (u32)P9_TGETLOCK, "Tgetlock type");
+    TEST_EXPECT_EQ(w_le32(g_buf + 7), 4u, "fid");
+    TEST_EXPECT_EQ((u32)g_buf[11], (u32)P9_LOCK_TYPE_RDLCK, "lock type");
+    TEST_EXPECT_EQ(w_le64(g_buf + 12), 50ull, "start");
+    TEST_EXPECT_EQ(w_le64(g_buf + 20), 0ull, "length 0 = to EOF");
+    TEST_EXPECT_EQ(w_le32(g_buf + 28), 0u, "proc_id");
+    TEST_EXPECT_EQ((u32)g_buf[32] | ((u32)g_buf[33] << 8), 0u, "empty client_id");
+
+    // Rgetlock: hdr(7) + type(1) + start(8) + length(8) + proc_id(4) + "srv"(2+3)
+    size_t r = 7 + 1 + 8 + 8 + 4 + 2 + 3;
+    for (size_t i = 0; i < r; i++) g_buf[i] = 0;
+    g_buf[0] = (u8)r;
+    g_buf[4] = P9_RGETLOCK;
+    g_buf[5] = 0x32;
+    g_buf[7] = P9_LOCK_TYPE_WRLCK;
+    for (int i = 0; i < 8; i++) g_buf[8 + i]  = (u8)(0x0102030405060708ull >> (8 * i));
+    for (int i = 0; i < 8; i++) g_buf[16 + i] = (u8)(0x90ull >> (8 * i));
+    g_buf[24] = 0x44; g_buf[25] = 0x33;
+    g_buf[28] = 3; g_buf[30] = 's'; g_buf[31] = 'r'; g_buf[32] = 'v';
+    u16 tag = 0;
+    struct p9_getlock gl = { 0 };
+    TEST_EXPECT_EQ(p9_parse_rgetlock(g_buf, r, &tag, &gl), 0, "Rgetlock parse ok");
+    TEST_EXPECT_EQ((u32)tag, 0x32u, "Rgetlock tag");
+    TEST_EXPECT_EQ((u32)gl.type, (u32)P9_LOCK_TYPE_WRLCK, "type");
+    TEST_EXPECT_EQ(gl.start, 0x0102030405060708ull, "start");
+    TEST_EXPECT_EQ(gl.length, 0x90ull, "length");
+    TEST_EXPECT_EQ(gl.proc_id, 0x3344u, "proc_id");
+    g_buf[28] = 4;
+    TEST_EXPECT_EQ(p9_parse_rgetlock(g_buf, r, &tag, &gl), -1,
+                   "a client_id running past the frame is refused");
+    g_buf[28] = 2;
+    TEST_EXPECT_EQ(p9_parse_rgetlock(g_buf, r, &tag, &gl), -1,
+                   "a trailing byte after the client_id is refused");
+    g_buf[28] = 3;
+    g_buf[0] = 20;   // ends four bytes into `length`
+    TEST_EXPECT_EQ(p9_parse_rgetlock(g_buf, 20, &tag, &gl), -1,
+                   "a frame cut inside the fixed fields is refused");
+}
+
 void test_9p_wire_rreaddir_data_cap_enforced(void) {
     // Same shape attack as Rread: server claims count > caller's data_cap.
     size_t r_total = P9_HDR_LEN + 4 + 1024;

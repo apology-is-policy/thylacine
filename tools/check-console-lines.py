@@ -177,7 +177,8 @@ def find_wrappers(text, known):
         args, i = tcl_word(text, m.end())
         body, _ = tcl_word(text, i)
         if args and body and args.startswith("{") and body.startswith("{"):
-            names = [a.strip("{}").split()[0] for a in re.findall(r"\{[^{}]*\}|\S+", args[1:-1])]
+            words = [a.strip("{}").split() for a in re.findall(r"\{[^{}]*\}|\S+", args[1:-1])]
+            names = [w[0] for w in words if w]
             procs.append((m.group(1), names, body))
     for _ in range(len(procs) + 1):
         changed = False

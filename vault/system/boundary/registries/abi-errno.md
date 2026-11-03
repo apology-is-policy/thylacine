@@ -5,12 +5,12 @@ kind: registry
 stability: append-only
 title: "The errno registry — T_E_* and the POSIX-value contract"
 pinned-by:
-  - "_Static_assert per value (kernel/include/thylacine/errno.h, 37 asserts)"
+  - "_Static_assert per value (kernel/include/thylacine/errno.h, 40 asserts)"
 mirrors:
   - "usr/lib/libthyla-rs/src/err.rs: enum Error + From<i32> + as_errno + Display"
   - "usr/lib/pouch/patches/0001-pouch-syscall-seam.patch: __syscall_ret (range contract, not a value list)"
 created: 2026-08-02
-updated: 2026-09-25
+updated: 2026-11-02
 ---
 ## The surface
 
@@ -35,21 +35,22 @@ anywhere.
 | 13 | `T_E_ACCES` | EACCES | **the "denied" code handlers actually use** |
 | 14 | `T_E_FAULT` | EFAULT | a `uaccess` touch faulted on the supplied user VA |
 | 16 | `T_E_BUSY` | EBUSY | per-Proc lock held and the op cannot wait; mount busy |
-| 17 | `T_E_EXIST` | EEXIST | mount point taken; create collision |
+| 17 | `T_E_EXIST` | EEXIST | mount point taken; create collision -- answered before the parent's W check when the caller may search it (B-3b, Linux's order) |
 | 19 | `T_E_NODEV` | ENODEV | the backing endpoint went away (any clean server-side close; Loom device-gone) |
 | 20 | `T_E_NOTDIR` | ENOTDIR | X-search on a non-directory component — precedes the X-check, so 0755 and 0644 answer alike; distinct from `NOENT` ("safe to create") |
 | 21 | `T_E_ISDIR` | EISDIR | write/create names a directory — the 9P server, or `SYS_OPEN_CREATE`'s lexical leaf rows |
 | 22 | `T_E_INVAL` | EINVAL | structurally malformed argument |
-| 24 | `T_E_MFILE` | EMFILE | a per-Proc table is full (the socket table `VIV_SOCK_MAX`) |
+| 24 | `T_E_MFILE` | EMFILE | a per-Proc table is full (the socket table `VIV_SOCK_MAX`); no free handle at or above a dup floor (HANDLE_DUP_TO's DUP_LOWEST, F_DUPFD) |
 | 25 | `T_E_NOTTY` | ENOTTY | a `TC*`/`TIOC*` op on a non-tty fd; `isatty()` reads it via a failed `TIOCGWINSZ` |
 | 28 | `T_E_NOSPC` | ENOSPC | bounded terminal interaction binding pool or identifier capacity exhausted |
 | 32 | `T_E_PIPE` | EPIPE | write to a closed read end |
 | 34 | `T_E_RANGE` | ERANGE | in-range for the type, past an implementation limit |
+| 37 | `T_E_NOLCK` | ENOLCK | `SYS_FILE_LOCK`: the Dev serves no locks, the server refuses (Rlock ERROR/GRACE/undefined status, a Tlock/Tgetlock Rlerror ENOSYS), or the Proc's lock-owner table is full (I-32) |
 | 38 | `T_E_NOSYS` | ENOSYS | dispatch slot exists, handler is a placeholder |
-| 40 | `T_E_LOOP` | ELOOP | a symlink chain past `STALK_MAX_FOLLOWS` (40), or `O_NOFOLLOW` on a final symlink (DISTRO D-1) |
+| 40 | `T_E_LOOP` | ELOOP | a symlink chain past `STALK_MAX_FOLLOWS` (40), `O_NOFOLLOW` on a final symlink (DISTRO D-1), or a mount that would close a cycle in the mount graph (`SYS_MOUNT`, I-3) |
 | 88 | `T_E_NOTSOCK` | ENOTSOCK | a socket call names an fd with no socktab entry |
 | 93 | `T_E_PROTONOSUPPORT` | EPROTONOSUPPORT | a `SOCK_*`/`IPPROTO_*` the `/net` tree has no directory for |
-| 95 | `T_E_OPNOTSUPP` | EOPNOTSUPP | reserved; appended at PTY-1d, no current emitter |
+| 95 | `T_E_OPNOTSUPP` | EOPNOTSUPP | appended at PTY-1d; emitted by `SYS_TTY_SIGNAL`'s stop class (PTY-1f) and `SYS_WSTAT` (a Dev with no metadata slot, dev9p's fidless cached open; G12) |
 | 97 | `T_E_AFNOSUPPORT` | EAFNOSUPPORT | AF_INET6 and everything that is not AF_INET |
 | 98 | `T_E_ADDRINUSE` | EADDRINUSE | netd refused an `announce` for this port — reported by `listen()`, not `bind()` |
 | 103 | `T_E_CONNABORTED` | ECONNABORTED | an `accept()` whose connection the data open then refused |
@@ -57,6 +58,7 @@ anywhere.
 | 107 | `T_E_NOTCONN` | ENOTCONN | `getpeername()`/`shutdown()` on an entry still FRESH |
 | 110 | `T_E_TIMEDOUT` | ETIMEDOUT | a `tsleep`/`torpor_wait` deadline elapsed |
 | 111 | `T_E_CONNREFUSED` | ECONNREFUSED | netd rejected the dial, or the data open failed after connect |
+| 116 | `T_E_STALE` | ESTALE | the descriptor's file has died on its server (Stratum kills an unlinked file's fids and reuses the number), or a loose cached open's re-walk no longer reaches its file (renamed, unlinked or replaced since the open): `SYS_FILE_LOCK`, and `SYS_WSTAT` on such an open |
 | 125 | `T_E_CANCELED` | ECANCELED | a Loom chain op cancelled by a failed predecessor |
 
 The **socket family** (24 remapped to EMFILE for the socket table, and 88/93/97/98/103/106/107/111) was appended at VIVARIUM V-5, its values read directly from `third_party/musl/arch/generic/bits/errno.h` because a Linux guest's libc compares against exactly those numbers — collapsing them to `EINVAL` would make a guest retry a connection that can never succeed. `INTR` (4), `2BIG` (7), `CHILD` (10) and `NOTTY` (25) each landed under the same append-under-ratified-scripture precedent the `-1` and change-protocol sections describe.
@@ -106,23 +108,30 @@ The three ranges a return value can fall in, as the seam reads them:
 ## Where the registry is mirrored, and where it has drifted
 
 **`usr/lib/libthyla-rs/src/err.rs`** is the only value-by-value mirror. It
-enumerates **20** of the 36 non-zero values (`as_errno`): 1, 2, 5, 9, 11, 12,
-13, 14, 16, 17, 20, 21, 22, 28, 32, 34, 38, 40, 110, 111. Missing — **16** — is
-dominated by the V-5 socket family: `SRCH` (3), `INTR` (4), `2BIG` (7),
+enumerates **24** of the 38 non-zero values (`as_errno`): 1, 2, 3, 5, 9, 11,
+12, 13, 14, 16, 17, 20, 21, 22, 28, 32, 34, 37, 38, 40, 95, 110, 111, 116. Missing —
+**14** — is dominated by the V-5 socket family: `INTR` (4), `2BIG` (7),
 `CHILD` (10), `NODEV` (19), `MFILE` (24), `NOTTY` (25), `NOTSOCK` (88),
-`PROTONOSUPPORT` (93), `OPNOTSUPP` (95), `AFNOSUPPORT` (97), `ADDRINUSE` (98),
-`CONNABORTED` (103), `ISCONN` (106), `NOTCONN` (107), `CANCELED` (125).
+`PROTONOSUPPORT` (93), `AFNOSUPPORT` (97), `ADDRINUSE` (98),
+`CONNABORTED` (103), `ISCONN` (106), `NOTCONN` (107) and `CANCELED` (125).
+B-3h's `NOLCK` (37, `NoLocks`) and `STALE` (116, `StaleFile`) landed with the
+native lock wrappers in Boosty B-3h4.
 `CONNREFUSED` (111) joined on 2026-09-24 as `ConnectionRefused`, because haul
-now branches on it, per this page's own rule (last Prosecution bullet). The gap grew, not shrank, since this section last read
+now branches on it, per this page's own rule (last Prosecution bullet), and
+`OPNOTSUPP` (95) on 2026-10-22 as `Unsupported`, once `SYS_WSTAT` answered it
+to native `chmod` and `touch` (G12) and would otherwise have read "kernel error
+(errno 95)". `SRCH` (3, `NoSuchProcess`) and `NOSPC` (28, `NoSpace`) had
+joined earlier, unrecorded here until this count was re-derived from
+`errno.h` and `as_errno`. The gap grew, not shrank, since this section last read
 "missing four": the mirror gained `NotADirectory` (20), `IsADirectory` (21)
 and `SymlinkLoop` (40), but the whole socket family plus INTR/2BIG/CHILD/NOTTY
 appended past it.
 
 This does not lose information: `Other(i32)` carries any unenumerated errno
 through, deliberately, so unknown kernel errors stay observable. The cost is
-that a native program cannot name them. `setpgid` on a stranger's pid and a
-cancelled Loom chain op surface as `Error::Other(3)` / `Other(125)`, displaying
-as `kernel error (errno N)` and matchable only against a magic number.
+that a native program cannot name them. A cancelled Loom chain op surfaces as
+`Error::Other(125)`, displaying as `kernel error (errno 125)` and matchable only
+against a magic number.
 
 The asymmetry runs the other way once, too: `err.rs` names
 `DirectoryNotEmpty` → **39** (`ENOTEMPTY`), a server-originated value (#80)

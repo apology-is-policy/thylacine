@@ -6,6 +6,7 @@
 
 #include <thylacine/9p_client.h>
 #include <thylacine/cons.h>
+#include <thylacine/errno.h>    // T_E_BADF: map_error folds a server's EBADF
 #include <thylacine/extinction.h>
 #include <thylacine/9p_session.h>
 #include <thylacine/9p_transport.h>
@@ -131,6 +132,10 @@ static int map_error(int session_send_rc, int exchange_rc,
         // as a fact by a second author, who then asserted in `dev9p_stat_native`
         // that -1 could never arrive here.
         if (r->ecode == 0 || r->ecode > 4095u) return -P9_E_IO;
+        // Only the kernel's handle gate answers EBADF (docs/ERRORS.md). A
+        // server's EBADF is a verdict on its own fid; passed through, it would
+        // tell the caller that a live fd names nothing.
+        if (r->ecode == T_E_BADF) return -P9_E_IO;
         return -(int)r->ecode;
     }
     return 0;
@@ -571,6 +576,8 @@ static void demux_frame_locked(struct p9_client *c, size_t len) {
         c->demux_orphan_flush++;
         // Read before the dispatch, which frees oldtag and its registration.
         struct p9_rpc *victim = client_owner(c, te->flush_oldtag);
+        struct p9_outstanding *old = p9_session_entry(&c->session, te->flush_oldtag);
+        bool forget = !victim && old && old->active && old->mutates;
         struct p9_dispatch_result discard;
         if (victim && (victim->on_complete || !victim->flushing)) {
             // Every flusher but flush(5) drops its registration BEFORE its
@@ -588,6 +595,9 @@ static void demux_frame_locked(struct p9_client *c, size_t len) {
             c->flush_cancelled++;
             wakeup(&victim->rendez);
         }
+        // The last word on an op whose owner left: a fill since the abandon may
+        // have read the file before the op ran.
+        if (forget) larder_forget_all(&c->larder);
     } else if (te->active && (te->awaiting_flush || te->abandoned)) {
         // #210: the third legitimate ownerless flow — an abandoned op's
         // LATE ORIGINAL reply (#845): the owner died and unwound, the tag
@@ -602,8 +612,13 @@ static void demux_frame_locked(struct p9_client *c, size_t len) {
         // fails bound nothing and may not have filled in the result.
         c->demux_orphan_late++;
         struct p9_dispatch_result discard;
+        // The op has run, with nobody left to invalidate for it. Its Rflush, if
+        // one is coming, finds nothing more to do.
+        bool forget = te->mutates;
+        te->mutates = false;
         if (ownerless_dispatch_locked(c, len, &discard) == 0)
             client_orphan_fid_locked(c, discard.bound_new_fid);
+        if (forget) larder_forget_all(&c->larder);
     } else {
         // #210: the ownerless discard is no longer silent. With all three
         // by-design flows split out above, a frame landing here is one NO
@@ -1184,6 +1199,14 @@ static int client_take_back_unsent_locked(struct p9_client *c, u16 tag, u8 type)
     return rc;
 }
 
+// A dying thread is leaving an op that mutates. The server may have run it, or
+// may yet: nobody will invalidate for it, and the client cannot name what it
+// touched. Its late reply or Rflush forgets again, for a fill read in between.
+static void client_abandon_forgets_locked(struct p9_client *c, u16 tag) {
+    struct p9_outstanding *e = p9_session_entry(&c->session, tag);
+    if (e && e->active && e->mutates) larder_forget_all(&c->larder);
+}
+
 // Submit the Tmsg already built into c->out_buf (built_len bytes; the caller's
 // session_send_* allocated the tag and marked it outstanding), run the
 // elected-reader wait, dispatch the reply, surface the result in *out. c->lock
@@ -1319,6 +1342,7 @@ static int client_run(struct p9_client *c, size_t built_len,
         client_unregister(c, tag, &rpc);
         kfree(rpc.reply_buf);
         p9_session_flush_owner_waits(&c->session, (u16)tag, false);
+        client_abandon_forgets_locked(c, (u16)tag);
         struct cons_diag_line dl;
         cons_diag_line_init(&dl);
         cons_diag_line_puts(&dl, "9p: op abandoned (tag ");
@@ -1348,6 +1372,7 @@ static int client_run(struct p9_client *c, size_t built_len,
         // transport write means the byte stream is broken, so latch dead.
         client_unregister(c, tag, &rpc);
         kfree(rpc.reply_buf);
+        client_abandon_forgets_locked(c, (u16)tag);
         int flen = p9_session_send_flush(&c->session, c->out_buf,
                                          c->out_buf_cap, (u16)tag);
         const char *flush_note = ", no flush staged)\n";
@@ -1837,6 +1862,8 @@ static int p9_client_init_storage(struct p9_client *c,
     c->cape_uid        = 0;
     c->cape_gid        = 0;
     c->remote          = false;
+    c->client_end      = PRINCIPAL_INVALID;
+    c->server_end      = PRINCIPAL_INVALID;
     c->cacheable       = false;
     c->wga_unsupported = false;
     c->orphan_sink     = NULL;
@@ -2064,9 +2091,10 @@ int p9_client_walk(struct p9_client *c,
     int e = client_run(c, (size_t)len, &r);
     c->total_ops++;
     if (e != 0) { c->total_errors++; CLIENT_UNLOCK_RET(c, e); }
+    // The session refused a reply naming more than nwname, which sizes out_qids.
     if (out_nwqid) *out_nwqid = r.nwqid;
     if (out_qids) {
-        for (u16 i = 0; i < r.nwqid && i < P9_MAX_WALK; i++) {
+        for (u16 i = 0; i < r.nwqid; i++) {
             copy_qid(&out_qids[i], &r.qids[i]);
         }
     }
@@ -2115,9 +2143,11 @@ int p9_client_walkgetattr(struct p9_client *c,
     int e = client_run(c, (size_t)len, &r);
     c->total_ops++;
     if (e != 0) { c->total_errors++; CLIENT_UNLOCK_RET(c, e); }
+    // The session refused a reply naming more than nwname, which sizes both
+    // out arrays.
     if (out_nwqid) *out_nwqid = r.nwqid;
     if (out_qids) {
-        for (u16 i = 0; i < r.nwqid && i < P9_MAX_WALK; i++)
+        for (u16 i = 0; i < r.nwqid; i++)
             copy_qid(&out_qids[i], &r.qids[i]);
     }
     if (out_attrs && r.wga_data) {
@@ -2125,7 +2155,7 @@ int p9_client_walkgetattr(struct p9_client *c,
         // on this client and we still hold c->lock, so the fixed-stride
         // elements (frame-validated by p9_parse_rwalkgetattr) are safe
         // to extract here.
-        for (u16 i = 0; i < r.nwqid && i < P9_MAX_WALK; i++) {
+        for (u16 i = 0; i < r.nwqid; i++) {
             if (p9_parse_getattr_body(
                     r.wga_data + (size_t)i * P9_WGA_BODY_LEN,
                     P9_WGA_BODY_LEN, &out_attrs[i]) < 0) {
@@ -2415,6 +2445,9 @@ int p9_client_write(struct p9_client *c, u32 fid, u64 offset,
     int e = client_run(c, (size_t)len, &r);
     c->total_ops++;
     if (e != 0) { c->total_errors++; CLIENT_UNLOCK_RET(c, e); }
+    // A caller subtracts this from what it has left, and so does the program
+    // behind write(2): more than the Twrite carried must never reach them.
+    if (r.write_count > count) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (out_accepted) *out_accepted = r.write_count;
     client_unlock(c);
     return 0;
@@ -2540,6 +2573,56 @@ int p9_client_fsync(struct p9_client *c, u32 fid, u32 datasync) {
     return 0;
 }
 
+// Tlock: a byte-range lock on `fid` (B-3h). *status gets the server's
+// P9_LOCK_* answer; a conflict is a status (BLOCKED), not an error. Returns 0
+// or a negative errno (an Rlerror, or the transport's).
+int p9_client_lock(struct p9_client *c, u32 fid, u8 type, u32 flags,
+                   u64 start, u64 length, const u8 *client, u16 client_len,
+                   u8 *status) {
+    if (!c || !status) return -P9_E_INVAL;
+    if (c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
+    client_lock(c);
+    if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
+    if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
+    int te = client_await_tag_locked(c);
+    if (te != 0) CLIENT_UNLOCK_RET(c, te);
+    int len = p9_session_send_lock(&c->session, c->out_buf, c->out_buf_cap,
+                                   fid, type, flags, start, length,
+                                   client, client_len);
+    if (len < 0) CLIENT_UNLOCK_RET(c, -P9_E_IO);
+    struct p9_dispatch_result r;
+    int e = client_run(c, (size_t)len, &r);
+    c->total_ops++;
+    if (e != 0) { c->total_errors++; CLIENT_UNLOCK_RET(c, e); }
+    *status = r.lock_status;
+    client_unlock(c);
+    return 0;
+}
+
+// Tgetlock: would a lock on `fid` be granted? *out is the server's answer.
+int p9_client_getlock(struct p9_client *c, u32 fid, u8 type,
+                      u64 start, u64 length, const u8 *client, u16 client_len,
+                      struct p9_getlock *out) {
+    if (!c || !out) return -P9_E_INVAL;
+    if (c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
+    client_lock(c);
+    if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
+    if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
+    int te = client_await_tag_locked(c);
+    if (te != 0) CLIENT_UNLOCK_RET(c, te);
+    int len = p9_session_send_getlock(&c->session, c->out_buf,
+                                      c->out_buf_cap, fid, type, start, length,
+                                      client, client_len);
+    if (len < 0) CLIENT_UNLOCK_RET(c, -P9_E_IO);
+    struct p9_dispatch_result r;
+    int e = client_run(c, (size_t)len, &r);
+    c->total_ops++;
+    if (e != 0) { c->total_errors++; CLIENT_UNLOCK_RET(c, e); }
+    *out = r.getlock;
+    client_unlock(c);
+    return 0;
+}
+
 // =============================================================================
 // Weft operations (Weft-6).
 // =============================================================================
@@ -2591,6 +2674,7 @@ int p9_client_weftio(struct p9_client *c, u32 fid,
     int e = client_run(c, (size_t)slen, &r);
     c->total_ops++;
     if (e != 0) { c->total_errors++; CLIENT_UNLOCK_RET(c, e); }
+    if (r.weftio_count > len) CLIENT_UNLOCK_RET(c, -P9_E_IO);   // as a Twrite's
     if (out_count) *out_count = r.weftio_count;
     client_unlock(c);
     return 0;

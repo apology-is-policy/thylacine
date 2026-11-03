@@ -56,7 +56,10 @@ the weak-symbol check lives *inside* the hooks, not at the vtable, so one
 `libSDL2.a` carries all three graphics modes and each degrades on its own. It
 registers as `VideoBootStrap THYLACINE_bootstrap` (`:121`), driver name
 `"thylacine"` (`:36`), placed ahead of the platform drivers in `SDL_video.c` by
-patch 0001 so `SDL_VideoInit` picks it first.
+patch 0001 so `SDL_VideoInit` picks it first. The three patches apply under
+the pouch series' rules (`apply_patch_exact`, [[sub-substrate-build]]): exact
+context, no offset, and trailing context as long as leading, which GNU patch
+needs to place a hunk away from a file's end.
 
 **Window metadata.** `SetWindowTitle` copies SDL's UTF-8 title through the
 owning surface ctl into Halcyon's canonical pane tag. The C client bounds this

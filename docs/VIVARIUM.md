@@ -1449,6 +1449,16 @@ synth-dir posture). Two siblings in the same family were tracked, not fixed ther
 carry no `S_IFDIR`/`S_IFREG` bits — each needs a per-qid posture decision across a
 whole Dev, which is a chunk rather than a footnote. That chunk is §6.12.
 
+**Superseded in part: symlinks arrived (D-1), then a native readlink (2026-10-20).**
+The premise this section opens on, that no EL0 path creates or observes a symlink,
+stopped being true at DISTRO D-1, and the general arm's `EINVAL` became a wrong
+answer for a real link: a live link read as "not a link", so `realpath()` kept it
+unexpanded, and a dangling one read `ENOENT`. Operator vote 2026-10-20
+(`dec-2026-10-20-native-lstat-readlink`) gives the readlink core of §6.26 a native
+entry, `SYS_READLINK` (135), and Pouch's general arm calls it (Boosty B-3f'). The
+`/proc` arm and its closed whitelist stay as they are, because those four files
+are still regular files: `SYS_READLINK` on one answers `EINVAL`, truthfully.
+
 ### 6.12 The synthetic-Dev stat family (V-4b-5)
 
 The three gaps V-4b-4 surfaced, closed together because they are one question
@@ -2212,6 +2222,13 @@ round trip; admitting costs correctness later, silently. **A flag whose correctn
 depends on a feature being absent is a trap, not an admission** — and the rule is
 worth more than the reach it costs here.
 
+**Superseded at DISTRO D-1, as the rule intended.** Symlinks landed with the
+resolver's no-follow walk, and `AT_SYMLINK_NOFOLLOW` has been admitted and
+translated since: the newfstatat decide hands `STALK_NOFOLLOW` to
+`sys_stat_for_proc`, which reports the link's own record (`vivarium.c`). The flag
+was forwarded until the feature it depends on existed, which is the rule above
+working. Its native twin is `SYS_LSTAT` (136, operator vote 2026-10-20).
+
 #### `statx` is why 79 is not the whole stat story
 
 musl on aarch64 defines no `__NR_fstatat` (only `__NR_newfstatat`), so `SYS_fstatat`
@@ -2542,7 +2559,9 @@ default), and the signal chunk's S-2 gave it its own note, `term`
 
 `sigaltstack` (132), `rt_sigsuspend` (133), `rt_sigpending` (136),
 `rt_sigtimedwait` (137), `rt_sigqueueinfo` (138) and `restart_syscall` (128) are
-explicit `ENOSYS` rows — Tier 2, and recorded rather than defaulted, per the
+explicit `ENOSYS` rows (132 and 133 share their numbers with the native
+`SYS_GETPPID` and `SYS_UMASK`, and the rows are consumed before the native
+switch) — Tier 2, and recorded rather than defaulted, per the
 file's standard that a number never considered and one considered-and-rejected
 are different facts. `SIGALRM` has no note to carry it;
 `SIGABRT` has no note: a self-directed one (`raise`, which is `tkill` to self)
@@ -2904,9 +2923,15 @@ is a bounded client loop.** There is no third idiom.
 - A **dangling** final symlink + `O_CREAT` answers EEXIST where Linux creates
   the *target* (the open-first leg sees ENOENT, the create sees the link name
   occupied). git never creates through dangling links; recorded, not built.
-- No umask: the guest's `umask` syscall is ENOSYS and the kernel applies no
-  mask, so modes arrive unmasked (0666 where Linux yields 0644). Cosmetic
-  under A-2d; passing through literally beats inventing kernel state.
+- **umask (corrected 2026-10-19).** This read "No umask ... cosmetic under
+  A-2d". It was wrong on shared storage: a system program's 0666 on the pool
+  was writable by every user. `umask` (166) is now a Tier-2 row onto
+  `SYS_UMASK` that passes `mask & 0777`, as Linux takes it, and the kernel
+  reduces every create's mode by the caller's umask and bounds it by the
+  parent directory's mode (IDENTITY-DESIGN 9.7 M8). A create's mode is
+  therefore Linux's under the same umask, except where the directory narrows
+  it further: in a 0700 directory a file is at most 0600, and an executable
+  asked for 0777 is 0711 where Linux gives 0755.
 - `O_APPEND` stays rejected (milestone A runs git with reflogs off);
   `O_DIRECTORY` stays rejected wholesale as today.
 - Real (non-`AT_FDCWD`) dirfds stay out — the §6.20 Correction 2 handle-state
@@ -3348,6 +3373,50 @@ ENOSYS.
 
 ---
 
+### 6.30 Tier 2 — `utimensat` (88): the time setter (G12, as-built 2026-10-22)
+
+busybox `touch` cannot make a file without `utimensat`, and `cp -p` and `tar` set
+times through it. G12 gives `SYS_WSTAT` four time bits that mirror 9P's (operator
+votes 17 and 18 of 2026-10-22), and the row is a shell over them.
+
+- **The times first, in one copy.** The 32 bytes at x2 are copied into the
+  kernel before anything else, as Linux reads them; the mask and the values the
+  wstat applies are those bytes, so a peer thread cannot split them.
+  `vivarium_utimens_mask` (pure) is Linux's split: `UTIME_OMIT` leaves a time
+  out, `UTIME_NOW` is its bit alone (the file server's clock), a value is its bit
+  and its `_SET` bit. Both `UTIME_OMIT` answers 0 and looks at nothing else. A
+  nanosecond outside 0..999999999 that is neither sentinel is EINVAL here,
+  before the path; Linux 6 resolves the path first, so a call both malformed and
+  misdirected reads EINVAL here and ENOENT there.
+- **The object** (`vivarium_utimensat_decide`, pure, Linux's `do_utimes`
+  order). A null path with a real dirfd is the descriptor form, which takes no
+  flag; otherwise a flag outside `AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH` is EINVAL
+  and a null path EFAULT. `AT_EMPTY_PATH` with `""` names the descriptor, or the
+  working directory under AT_FDCWD. A name under AT_FDCWD is resolved (O_PATH,
+  O_NOFOLLOW under `AT_SYMLINK_NOFOLLOW`); a name under a real dirfd FORWARDs to
+  ENOSYS, as everywhere in this family.
+- **No borrowed descriptor.** A name resolves to a private Spoor
+  (`sys_resolve_kpath_for_proc`, the `viv_kpath_read` precedent) and the wstat
+  runs on it (`sys_wstat_spoor_for_proc`: SYS_WSTAT's own checks and policy). A
+  descriptor installed for the call would be visible to the caller's peer
+  threads, which could close it and reuse its index before the shell closed it.
+  `fchmodat` (53) moves to the same core in the same change; the other
+  transient-descriptor sites are tracked in OPEN-BUGS.
+- **The errno.** The kernel answers EACCES for every refusal. Write permission
+  admits only the touch (both times to now), so every other refusal is
+  ownership's and the shell answers Linux's EPERM; the touch keeps EACCES. Only
+  the wstat's EACCES folds: a name whose walk is refused (a component's search
+  denied) asked nothing of ownership and keeps EACCES, as fchmodat's open does.
+- **The collision.** 88 is native `SYS_STAT(path_va, path_len, stat_va)`.
+  path_va is byte-aligned, so its low 32 bits can read AT_FDCWD: the argument is
+  the damage envelope, not the shape gate (vivarium.h, beside the row).
+
+Kernel tests: `vivarium.utimensat` (the row, the collision, the mask's every
+branch, the decide's every form), `dev9p.wstat_spoor_private` (the private
+Spoor's policy, SIZE refused, the caller's reference untouched). Guest legs in
+`viv-run.exp`: busybox `touch -d`, `cp -p` and a bare touch, read back with
+`stat -c %Y`, and a search-denied component answering "Permission denied".
+
 ## 7. The vivarium — the container runner
 
 `thylacine-run` from `ROADMAP §9.1`, named `viv` (§11). Userspace; no new kernel
@@ -3451,6 +3520,7 @@ the manifest does not name:
 | `/dev` | assembled **by bind** per §6's finding (the trivial devdev leaves; `/dev/tty` = a bind of the pts slave `viv`'s session controls, per its §6 row; omitted when `viv` has none) | binding is the answer for `/dev`; no server interposed |
 | `/env` | a bind of the kernel env device (as-built completion, V-7) | zero-authority substrate: devenv resolves the **calling** Proc's own `Env` at op time, so one bind serves every container Proc its own environment (native binaries read env through `/env`); carries nothing across the boundary |
 | `/net` | only if the manifest grants it | I-1: the namespace firewall is the grant |
+| `/tmp` | a bind of the **invoker's own** `/tmp/.viv/<rootfs path>/tmp`, made on first use and kept across runs as the rootfs's own `/tmp` was; only when the rootfs has a `/tmp` anchor (added 2026-10-18) | a create through a 9P session is admitted only to its two ends (`IDENTITY-DESIGN.md` 9.7 M7), so the rootfs's `/tmp` on the system pool takes creates from system alone, and the invoker's storage takes them as the invoker. The one recipe mount without `MNOEXEC`: the verdict follows the session, and a system invoker's `/tmp` is on the rootfs's own |
 
 Native `/proc` and `/ctl` are **not mounted** into the container — a
 per-territory pid *view* would be a new kernel surface §7 forbids, and
@@ -3691,7 +3761,7 @@ degradation; anything that changes what the guest can *reach* is not, and is OUT
 | # | Chunk | Contents | Gate |
 |---|---|---|---|
 | V-0 | Scripture | This document; the §4 fork resolved; `ARCH §11.5/§11.6` corrected (R-1, R-2); I-43 minted; NOVEL entry | user signoff |
-| V-1 | Phenotype + brand | `Proc.phenotype`, brand detection at exec, the dispatch branch, a native-unchanged proof. **V-1a LANDED** (the field + the advisory `elf_brand_hint`). **V-1b LANDED**: the declaration (`SPAWN_PHENO_LINUX` in `sys_spawn_args.pheno_flags`, consuming the must-be-0 `_pad_allow` slot at offset 92 -> a zero-filled pre-V-1b request still means inherit) + the syscall-entry branch (T1 renumber-in-place then FALL THROUGH to the native switch; the three T2 shells over the V-2 pure translators; FORWARD and ENOSYS kept as separate arms so V-3 is a one-line change) + `sys_fstat_for_proc` extracted so the phenotyped path shares the native core + rule 4's advisory diagnostic (the hint's first caller, on an already-failed load) + `viv`'s `org.thylacine.phenotype` manifest annotation | native suite byte-unchanged (1237/1237); **PASS in-boot on two vantages** -- leg A `viv-pheno-probe native` proves a Linux number is NOT translated without a declaration (`brk` -> -1, not -ENOSYS), leg B `viv run /vivarium/pheno` proves the whole chain with a container entrypoint that speaks only raw Linux numbers and moves real bytes (openat/read/lseek/fstat/newfstatat/write/close, the two stat paths cross-checked on `(st_dev, st_ino)`, the `AT_SYMLINK_NOFOLLOW` reject still rejecting) and dies through Linux `exit_group`; revert-probed |
+| V-1 | Phenotype + brand | `Proc.phenotype`, brand detection at exec, the dispatch branch, a native-unchanged proof. **V-1a LANDED** (the field + the advisory `elf_brand_hint`). **V-1b LANDED**: the declaration (`SPAWN_PHENO_LINUX` in `sys_spawn_args.pheno_flags`, consuming the must-be-0 `_pad_allow` slot at offset 92 -> a zero-filled pre-V-1b request still means inherit) + the syscall-entry branch (T1 renumber-in-place then FALL THROUGH to the native switch; the three T2 shells over the V-2 pure translators; FORWARD and ENOSYS kept as separate arms so V-3 is a one-line change) + `sys_fstat_for_proc` extracted so the phenotyped path shares the native core + rule 4's advisory diagnostic (the hint's first caller, on an already-failed load) + `viv`'s `org.thylacine.phenotype` manifest annotation | native suite byte-unchanged (1237/1237); **PASS in-boot on two vantages** -- leg A `viv-pheno-probe native` proves a Linux number is NOT translated without a declaration (Linux `getpid`'s 172 -> -ENOSYS, where a declared Linux Proc gets its pid), leg B `viv run /vivarium/pheno` proves the whole chain with a container entrypoint that speaks only raw Linux numbers and moves real bytes (openat/read/lseek/fstat/newfstatat/write/close, the two stat paths cross-checked on `(st_dev, st_ino)`, the `AT_SYMLINK_NOFOLLOW` reject still rejecting) and dies through Linux `exit_group`; revert-probed |
 | V-2 | The translation table | The §4-C stateless 1:1 set; the split rule enforced | a static `hello` (built by *Linux* toolchain) runs and exits 0 |
 | V-3 | Supervisor channel | **DEFERRED (user-voted 2026-07-30) — §4.1; and V-5 did NOT claim it (user-voted 2026-07-31) — §4.1.1.** The sketched destination (a ring to a peer Proc) is verified unable to serve the forwarded set: no Proc can mutate another's address space, handle table or process tree, so the servable set is empty. Not "hard"; *empty*. V-5 was expected to decide the shape, and instead **measured that sockets need no supervisor**: every step is work the calling Proc could do for itself, so the kernel performs it with the caller's own authority (§5.5). The fork therefore moves to the next chunk that needs a destination it cannot synthesise — on present evidence **process creation (#93)**. The three candidates + the peer evidence stand recorded in §4.1 for it. `specs/phenotype.tla` lands with whatever that chunk chooses. **RESOLVED 2026-08-01 — the fork does not travel; it dissolves.** #93 was designed (`docs/LINEAGE.md`, user-voted: the full arc through COW fork) and it needs **no supervisor either**, for V-5's reason restated: `execve` mutates the caller's *own* address space, and `rfork`/`fork` create the caller's *own* child — both are work the calling Proc could already authorize, so the kernel performs them with the caller's authority. Two independent chunks have now been expected to claim the supervisor and both measured it unnecessary, which is evidence about the *shape of the phenotype* and not a coincidence: a phenotype confers ABI shape, never authority (I-43), so a translated call never needs a destination with more authority than its caller. `specs/phenotype.tla` accordingly has no owner and is not owed by any planned chunk | (dissolved; no chunk builds it) |
 | V-4 | The diorama | `/proc`, `/sys`, `/dev` servers + per-container mounts | `busybox ps`, `ldd`, `/proc/self/exe` |

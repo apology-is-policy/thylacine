@@ -309,6 +309,20 @@ struct Burrow {
     // of one addrspace_clone, which clears every cursor it set before it
     // unlocks -- NULL at all other times, and never read by anything else.
     struct Burrow   *clone_cursor;
+
+    // ARCH 6.5 "Adjacent anonymous mappings merge" (B-3e): ANON_LAZY only.
+    // Every mapping of the Burrow puts its byte offset 0 at ONE address,
+    // lazy_va0 = vaddr_start - burrow_offset: a split or a trim moves start
+    // and offset together, a fork's clone is mapped at the parent's
+    // addresses, and nothing maps an ANON_LAZY Burrow by handle. That is
+    // what lets an extension reason from "these addresses are free" to
+    // "these offsets are mapped by no VMA". Stamped when the Burrow's first
+    // mapping is inserted and compared at every later insert
+    // (burrow_lazy_bind_va0); a mapping at another bias sets
+    // lazy_multi_bias, and such a Burrow is never extended. Under `lock`.
+    u64              lazy_va0;
+    bool             lazy_va0_set;
+    bool             lazy_multi_bias;
 };
 
 _Static_assert(__builtin_offsetof(struct Burrow, magic) == 0,
@@ -546,6 +560,33 @@ bool burrow_lazy_swap_slot(struct Burrow *v, size_t slot,
 // each run exactly once; failing closed beats silently miscounting the charge).
 int burrow_lazy_populate(struct AddrSpace *as, bool exempt, struct Burrow *v,
                          size_t first, size_t n);
+
+// ARCH 6.5 "Adjacent anonymous mappings merge": stamp an ANON_LAZY Burrow's
+// bias -- the address of its byte offset 0 -- at its first mapping, or check
+// a later mapping against it (struct Burrow, lazy_va0). A mapping at another
+// bias marks the Burrow lazy_multi_bias, which burrow_lazy_extend refuses:
+// only the merge needs one bias, and a kernel caller may map one lazy Burrow
+// twice. Other types return at once (a CODE Burrow's two aliases differ by
+// design). vma_insert_in calls it once the mapping is linked; takes v->lock.
+void burrow_lazy_bind_va0(struct Burrow *v, u64 va0);
+
+// ARCH 6.5 "Adjacent anonymous mappings merge": make slots [first, first + n)
+// of an ANON_LAZY Burrow ready for a mapping of it to cover -- a reservation
+// an adjacent mapping absorbs instead of minting a Burrow. The caller holds
+// `as`'s lock and has found the addresses those slots sit at (at the
+// Burrow's one bias) unmapped, so no VMA maps the slots and, by NoOrphan
+// (specs/capacity.tla), none holds a page. That is CHECKED here, not
+// trusted: a resident slot in the range extincts, since it would reach EL0
+// as old memory where a fresh reservation reads zero. A Burrow that ends
+// short of the range grows to cover it (pagemap_grow; nodes charged to
+// `as`). `maps_here` is the caller's count of the Burrow's mappings in `as`.
+// Returns 0, or -1 with nothing changed: not a live ANON_LAZY Burrow, a
+// handle names it (another holder could reach it outside this address
+// space), its mapping count exceeds `maps_here` (another space maps it),
+// it is mapped at a second bias (its free addresses no longer say which
+// offsets are free), or the growth was refused.
+int burrow_lazy_extend(struct AddrSpace *as, bool exempt, struct Burrow *v,
+                       int maps_here, size_t first, size_t n);
 
 // LINEAGE L-4a: the kernel direct-map address of one resident ANON_LAZY slot, or
 // NULL if the slot is not resident (or the Burrow is the wrong type / the slot is

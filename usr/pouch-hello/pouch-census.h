@@ -16,7 +16,7 @@
 #define POUCH_CENSUS_SOCKETS \
     "pouch-hello-sockets: legs=refusals,paths,round-trip,peercred,stdio,ppoll,ppoll-eof,slots,xproc-gate,fdset-guard: exit 0"
 #define POUCH_CENSUS_SIGNALS \
-    "pouch-hello-signals: legs=handler,fp-simd,sig-ign,einval,usr-apart,term-apart,deaths,self-faults,term-death,usr-death,errnos: exit 0"
+    "pouch-hello-signals: legs=handler,fp-simd,sig-ign,einval,usr-apart,term-apart,deaths,self-faults,term-death,usr-death,errnos,probe: exit 0"
 #define POUCH_CENSUS_FOPEN \
     "pouch-hello-fopen: legs=create,append-omode,truncate,excl,unlink,remove,tmpfile,scan: exit 0"
 #define POUCH_CENSUS_IDENTITY \
@@ -25,6 +25,20 @@
     "pouch-hello-mem: legs=prot-ladder,x-refused,prot-errnos,madvise-dontneed,madvise-free,madvise-hint,madvise-errnos,partial-munmap,aligned-reserve,map-fixed,mallocng-trim,tls: exit 0"
 #define POUCH_CENSUS_DLOPEN \
     "pouch-hello-dlopen: legs=interp,noexec,confined,load,segments,relro-data,relro: exit 0"
+#define POUCH_CENSUS_FD \
+    "pouch-hello-fd: legs=fsync,fsync-sock,writev,writev-atomic,readv,heap,iov-errnos,v2,sock-seek,sock-fstat,dup,dupfd,getfl,setfl,cloexec,fdopendir,umask,fstat-ebadf,isatty-ebadf: exit 0"
+#define POUCH_CENSUS_LINKS \
+    "pouch-hello-links: legs=lstat,readlink,readlink-trunc,realpath,nofollow,opath,directory,creat-directory,lchmod,flags,hardlink,dtype: exit 0"
+#define POUCH_CENSUS_TIMES \
+    "pouch-hello-times: legs=explicit,omit,both-omit,now,futimens,utimes,empty-path,nofollow,errors: exit 0"
+#define POUCH_CENSUS_TZ \
+    "pouch-hello-tz: legs=tz-file,tz-map,tz-unmap,tz-reload,tz-posix: exit 0"
+#define POUCH_CENSUS_LOCKS \
+    "pouch-hello-locks: legs=own,split,posix-close,ofd,ofd-vs-proc,flock,wait,sqlite,cached-ro,cached-inherited,downgrade,whence,mapped,mapped-write,spawned,errors: exit 0"
+// go-fs prints its own copy (main.go's census): Go cannot include this header,
+// and a disagreement fails the boot rather than passing it.
+#define GO_CENSUS_FS \
+    "go-fs: legs=mkdir,create,read,stat,seek,readdir,race-create,excl,umask,getppid,links,root,chtimes,rename,remove: exit 0"
 // The FAULT child's marker: joey requires it AND a non-zero exit status, so the
 // census here is the one line it prints BEFORE the write that kills it.
 #define POUCH_CENSUS_GUARD \

@@ -41,10 +41,10 @@ still reaches the queue that leg is about.
   *   kill()                  SYS_postnote(target_pid, name, name_len)
   *   sigprocmask() /         SYS_note_mask(new_mask, &old_mask)
   *     pthread_sigmask()
-@@ -470,3 +470,10 @@
- #define __NR_tty_acquire 95
- #define __NR_tty_set_fg 96
- #define __NR_tty_get_fg 97
+@@ -481,3 +481,10 @@
+ #define SYS_thyla_handle_flags_set 130
+ #define __NR_thyla_handle_dup_to 131
+ #define SYS_thyla_handle_dup_to 131
 +
 +/* Thread-model C4: post a note at one thread of the caller's own Proc. Number
 + * per kernel/include/thylacine/syscall.h. After a musl re-vendor, extend 0001's

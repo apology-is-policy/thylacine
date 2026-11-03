@@ -6,7 +6,7 @@
 // P3-Ed once the ELF fixture lands).
 //
 //   syscall.dispatch_unknown
-//     Unknown syscall number → ctx->regs[0] = -1; no extinction.
+//     Unknown syscall number → ctx->regs[0] = -T_E_NOSYS; no extinction.
 //
 //   syscall.dispatch_puts_smoke
 //     SYS_PUTS with valid args writes to UART, returns len. NULL buf,
@@ -44,8 +44,16 @@ void test_syscall_dispatch_unknown(void) {
     ctx.regs[8] = 9999ull;       // not a real syscall
 
     TEST_SYSCALL_DISPATCH(&ctx);
-    TEST_EXPECT_EQ((s64)ctx.regs[0], (s64)-1,
-        "unknown syscall must return -1 (ENOSYS-equivalent)");
+    TEST_EXPECT_EQ((s64)ctx.regs[0], -(s64)T_E_NOSYS,
+        "an unknown syscall answers ENOSYS, not a bare -1 (EPERM)");
+
+    // The number is the whole register: a high bit set over a real call's
+    // number must not reach that call.
+    for (int i = 0; i < 31; i++) ctx.regs[i] = 0;
+    ctx.regs[8] = (1ull << 32) | (u64)SYS_GETPID;
+    TEST_SYSCALL_DISPATCH(&ctx);
+    TEST_EXPECT_EQ((s64)ctx.regs[0], -(s64)T_E_NOSYS,
+        "SYS_GETPID with bit 32 set is an unknown number");
 }
 
 // 129..133 and 135..137 hold no native syscall on this tree: they belong to
@@ -59,18 +67,18 @@ void test_syscall_dispatch_unknown(void) {
 // the fix is a per-number collision assert for each vivarium row at that
 // number, and then this pin moves. The suite runs before init, so the only
 // unknown calls in flight are the ones tests make.
-void test_syscall_native_gap_unassigned(void) {
-    for (u64 nr = 129; nr <= 137; nr++) {
-        if (nr == SYS_SRV_REGISTRY_NEW) continue;
-        struct exception_context ctx;
-        for (int i = 0; i < 31; i++) ctx.regs[i] = 0;
-        ctx.regs[8] = nr;
-        u64 before = syscall_unknown_count();
-        TEST_SYSCALL_DISPATCH(&ctx);
-        TEST_EXPECT_EQ(syscall_unknown_count() - before, 1ull,
-            "a native number in the gaps must reach the unknown arm on this tree");
-        TEST_EXPECT_EQ((s64)ctx.regs[0], (s64)-1,
-            "and answer the unknown arm's -1");
+void test_syscall_native_holes_unassigned(void) {
+    static const u64 holes[] = { 26, 30, 43 };
+    for (u64 k = 0; k < sizeof(holes) / sizeof(holes[0]); k++) {
+        struct exception_context hc;
+        for (int i = 0; i < 31; i++) hc.regs[i] = 0;
+        hc.regs[8] = holes[k];
+        u64 was = syscall_unknown_count();
+        TEST_SYSCALL_DISPATCH(&hc);
+        TEST_EXPECT_EQ(syscall_unknown_count() - was, 1ull,
+            "a native number the table leaves empty must reach the unknown arm");
+        TEST_EXPECT_EQ((s64)hc.regs[0], -(s64)T_E_NOSYS,
+            "and answer the unknown arm's ENOSYS");
     }
 
     // The control one variable away: 134 IS assigned, and from this kernel
@@ -355,4 +363,144 @@ void test_syscall_opath_walkonly_no_byte_io(void) {
                    "#81: O_PATH zero-length read DENIED in the inner helper "
                    "(the syscall-entry len==0 fast-path is covered by the joey E2E -- #81 F1)");
     handle_close(p, wfd);
+}
+
+// Vote 2026-10-20: SYS_READLINK (135) and SYS_LSTAT (136) reach their handlers.
+// An unknown number answers -T_E_NOSYS; each handler answers -T_E_INVAL for an empty
+// path before it reads any memory.
+void test_syscall_dispatch_symlink_reads(void) {
+    struct exception_context ctx;
+    for (int i = 0; i < 31; i++) ctx.regs[i] = 0;
+    ctx.regs[8] = SYS_READLINK;
+    TEST_SYSCALL_DISPATCH(&ctx);
+    TEST_EXPECT_EQ((s64)ctx.regs[0], (s64)-T_E_INVAL,
+        "SYS_READLINK reaches its handler (an empty path is EINVAL)");
+
+    for (int i = 0; i < 31; i++) ctx.regs[i] = 0;
+    ctx.regs[8] = SYS_LSTAT;
+    TEST_SYSCALL_DISPATCH(&ctx);
+    TEST_EXPECT_EQ((s64)ctx.regs[0], (s64)-T_E_INVAL,
+        "SYS_LSTAT reaches its handler (an empty path is EINVAL)");
+}
+
+// SYS_FSTAT's errnos (ERRORS.md: a bad or wrong-kind handle is -T_E_BADF). The
+// Dev's refusal crosses the way stalk's err_code maps it, so stat and fstat
+// agree: a -errno in [-4095,-2] as itself, anything else as -T_E_IO.
+static int g_fstat_dev_rc;
+
+static int fstat_test_stat_native(struct Spoor *c, struct t_stat *out) {
+    (void)c;
+    for (u64 i = 0; i < sizeof(*out); i++) ((u8 *)out)[i] = 0;
+    if (g_fstat_dev_rc != 0) return g_fstat_dev_rc;
+    out->size = 42;
+    return 0;
+}
+
+static struct Dev g_fstat_test_dev = {
+    .dc          = 'F',
+    .name        = "fstattest",
+    .stat_native = fstat_test_stat_native,
+};
+
+static const struct { int dev; s64 want; const char *what; } g_fstat_dev_rows[] = {
+    { -T_E_ACCES, -(s64)T_E_ACCES, "fstat: a Dev's -errno crosses as itself" },
+    { -2,         -2,              "fstat: the band's top, -2, crosses" },
+    { -4095,      -4095,           "fstat: the band's floor, -4095, crosses" },
+    { -1,         -(s64)T_E_IO,    "fstat: a Dev's flat -1 reads EIO" },
+    { -T_E_BADF,  -(s64)T_E_IO,    "fstat: a Dev's EBADF does not pass for a dead handle" },
+    { -4096,      -(s64)T_E_IO,    "fstat: a value below the band reads EIO" },
+    { 7,          -(s64)T_E_IO,    "fstat: a positive Dev failure reads EIO" },
+};
+
+// The assertions, apart from the handles: a failed TEST_ASSERT returns from
+// here, and the caller still closes what it opened.
+static void fstat_errnos_cases(struct Proc *p, hidx_t live, hidx_t dead,
+                               hidx_t other_kind, hidx_t statless) {
+    struct t_stat ks;
+    g_fstat_dev_rc = 0;
+    TEST_EXPECT_EQ(sys_fstat_for_proc(p, (u64)live, &ks), (s64)0,
+        "fstat: a live WRITE-only handle stats (no right is required)");
+    TEST_EXPECT_EQ(ks.size, (u64)42, "fstat: the Dev's record comes back");
+    for (u64 i = 0; i < sizeof(g_fstat_dev_rows) / sizeof(g_fstat_dev_rows[0]); i++) {
+        g_fstat_dev_rc = g_fstat_dev_rows[i].dev;
+        TEST_EXPECT_EQ(sys_fstat_for_proc(p, (u64)live, &ks),
+                       g_fstat_dev_rows[i].want, g_fstat_dev_rows[i].what);
+    }
+    g_fstat_dev_rc = 0;
+
+    TEST_EXPECT_EQ(sys_fstat_for_proc(p, (u64)dead, &ks), -(s64)T_E_BADF,
+        "fstat: a closed handle is EBADF");
+    TEST_EXPECT_EQ(sys_fstat_for_proc(p, (u64)-1, &ks), -(s64)T_E_BADF,
+        "fstat: handle -1 is EBADF");
+    TEST_EXPECT_EQ(sys_fstat_for_proc(p, (u64)1 << 20, &ks), -(s64)T_E_BADF,
+        "fstat: an index past the table is EBADF");
+    TEST_EXPECT_EQ(sys_fstat_for_proc(p, (u64)other_kind, &ks), -(s64)T_E_BADF,
+        "fstat: a handle of another kind is EBADF");
+    TEST_EXPECT_EQ(sys_fstat_for_proc(p, (u64)statless, &ks), -(s64)T_E_IO,
+        "fstat: a Dev with no stat_native reads EIO");
+
+    // Through the dispatcher: the handler's own refusals. The handle lookup
+    // runs before any store, so a closed handle is EBADF with a valid-range VA.
+    struct exception_context ctx;
+    for (int i = 0; i < 31; i++) ctx.regs[i] = 0;
+    ctx.regs[8] = SYS_FSTAT;
+    ctx.regs[0] = (u64)live;
+    TEST_SYSCALL_DISPATCH(&ctx);
+    TEST_EXPECT_EQ((s64)ctx.regs[0], -(s64)T_E_FAULT,
+        "SYS_FSTAT: a NULL stat_va is EFAULT");
+    for (int i = 0; i < 31; i++) ctx.regs[i] = 0;
+    ctx.regs[8] = SYS_FSTAT;
+    ctx.regs[0] = (u64)dead;
+    ctx.regs[1] = 0x10000;
+    TEST_SYSCALL_DISPATCH(&ctx);
+    TEST_EXPECT_EQ((s64)ctx.regs[0], -(s64)T_E_BADF,
+        "SYS_FSTAT: a closed handle is EBADF");
+
+    // kproc's user half is empty, so a valid-range destination passes the
+    // range check and faults at the first store: the copy-out arm.
+    TEST_ASSERT(p == kproc(), "fstat: the copy-out case runs on kproc");
+    for (int i = 0; i < 31; i++) ctx.regs[i] = 0;
+    ctx.regs[8] = SYS_FSTAT;
+    ctx.regs[0] = (u64)live;
+    ctx.regs[1] = 0x10000000ull;
+    TEST_SYSCALL_DISPATCH(&ctx);
+    TEST_EXPECT_EQ((s64)ctx.regs[0], -(s64)T_E_FAULT,
+        "SYS_FSTAT: a fault in the copy-out is EFAULT");
+}
+
+void test_syscall_fstat_errnos(void) {
+    struct Thread *t = current_thread();
+    TEST_ASSERT(t != NULL && t->proc != NULL, "test thread has a proc");
+    struct Proc *p = t->proc;
+
+    hidx_t live = -1, other_kind = -1, statless = -1;
+    struct Spoor *s = spoor_alloc(&g_fstat_test_dev);
+    if (s) {
+        s->qid.type = QTFILE;
+        live = handle_alloc(p, KOBJ_SPOOR, RIGHT_WRITE, s);
+        if (live < 0) spoor_clunk(s);
+    }
+    other_kind = handle_alloc(p, KOBJ_PROCESS, RIGHT_READ, NULL);
+    struct Spoor *z = devzero.attach("");
+    if (z) {
+        statless = handle_alloc(p, KOBJ_SPOOR, RIGHT_READ, z);
+        if (statless < 0) spoor_clunk(z);
+    }
+    // A freed index: allocated last and closed at once, so nothing reuses it.
+    hidx_t dead = -1;
+    struct Spoor *d = spoor_alloc(&g_fstat_test_dev);
+    if (d) {
+        dead = handle_alloc(p, KOBJ_SPOOR, RIGHT_READ, d);
+        if (dead < 0) spoor_clunk(d);
+        else          handle_close(p, dead);
+    }
+
+    if (live >= 0 && other_kind >= 0 && statless >= 0 && dead >= 0)
+        fstat_errnos_cases(p, live, dead, other_kind, statless);
+    else
+        test_fail("fstat: fixture allocation failed");
+
+    if (live >= 0)       handle_close(p, live);
+    if (other_kind >= 0) handle_close(p, other_kind);
+    if (statless >= 0)   handle_close(p, statless);
 }

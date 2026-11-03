@@ -14,7 +14,7 @@ updated: 2026-11-02
 ---
 ## Native ceiling 138
 
-The native ceiling is POSTNOTE_TID, at 138 since vote 14 (2026-11-02). The rows that
+The native ceiling is POSTNOTE_TID, at 138 since vote 14 (2026-11-02). Linux rt_sigqueueinfo meets it there: a VIV_ENOSYS row consumed before the native switch, argued per number in vivarium.c. The lowest row still argued by the ceiling is rt_sigreturn (139).
 raise newly covers are argued per number in vivarium.c: rt_sigprocmask, rt_sigpending
 and rt_sigtimedwait (135..137) meet an empty gap on this tree, and rt_sigqueueinfo
 (138) collides with POSTNOTE_TID but is an ENOSYS row, so a Linux Proc never reaches
@@ -32,14 +32,139 @@ and reach nothing. A well-formed registry call never gets that far: its zero
 flags word arrives as sigsetsize, which `vivarium_sigaction_decide` refuses
 before anything is written. restart_syscall (128) meets
 SYS_ICACHE_SYNC_SPACE, an ENOSYS row with its own collision assert. kill,
-tkill, tgkill, sigaltstack and rt_sigsuspend (129..133) meet an empty gap,
-pinned by `syscall.native_gap_unassigned` (it counts the native switch's
-unknown arm, so a handler answering -1 cannot pass it), and each is consumed
+tkill, tgkill, sigaltstack and rt_sigsuspend (129..133) meet main's handle,
+GETPPID and UMASK calls since the join (2026-11-03), each with its collision
+assert, and each is consumed
 before the native switch (the kill family is TIER2 through
 `vivarium_kill_decide`; the other two are ENOSYS rows), pinned by name in
 `vivarium.rejects_are_deliberate`. There is no Linux phenotype factory operation; the
 entry is native only and keeps the kernel role gate. See
 [[sub-kernel-syscall-abi]].
+
+
+## Native ceiling 137 (B-3h2, 2026-10-29)
+
+`SYS_FILE_LOCK` lands at 137 (votes 34-35), which is Linux rt_sigtimedwait's
+number. Its row is VIV_ENOSYS, and `viv_linux_dispatch` returns before the
+native switch for every row that is not TRANSLATED, so a Linux Proc never
+reaches the native lock call. test_vivarium pins the verdict (ENOSYS) after
+the rt_sigpending pin. `vivarium.c` now argues the number on its own
+(`VIV_LINUX_RT_SIGTIMEDWAIT == SYS_FILE_LOCK`). The lowest row still argued
+by the ceiling is rt_sigqueueinfo (138, VIV_ENOSYS), and
+`VIV_NATIVE_CEILING` is 137. A native program mis-declared as Linux loses
+its locks to ENOSYS, which takes nothing. A change of the row to TRANSLATED
+must re-argue this. `tools/test-native-handle-query.py` pins the ceiling and
+both asserts; its ceiling mutant (137 to 136) is refused.
+
+## utimensat (88), the time setter (G12, 2026-10-22)
+
+The row is VIV_TIER2 over SYS_WSTAT's time bits ([[dec-2026-10-22-wstat-times]];
+VIVARIUM 6.30). The shell copies the times in once, `vivarium_utimens_mask`
+derives the mask (UTIME_OMIT out, UTIME_NOW the bit alone, a value the bit and
+its _SET bit; both OMIT answers 0), and `vivarium_utimensat_decide` picks the
+object in Linux's do_utimes order: the descriptor form (no flag), AT_EMPTY_PATH
+with "" (the descriptor, or the cwd), a name under AT_FDCWD (resolved, O_NOFOLLOW
+under AT_SYMLINK_NOFOLLOW), or a FORWARD for a name under a real dirfd. A name
+resolves to a private Spoor and the wstat runs on it through
+`sys_wstat_spoor_for_proc` ([[sub-kernel-syscall-dispatch]]), so no descriptor
+is installed that a peer thread could close and reuse; fchmodat (53) moves to the
+same core. The wstat's EACCES becomes EPERM for every request but the touch; a
+walk's EACCES (a search denied on the way) stays EACCES, as fchmodat's open's
+does (the G12 round's F1: the first shell folded it too). Native 88 is
+SYS_STAT; its path_va's low 32 bits can read AT_FDCWD, so the collision
+argument is the damage envelope (vivarium.h beside the row, a static assert in
+vivarium.c). `vivarium.utimensat` covers the row, the collision, the mask and the
+decide; `viv-run.exp` drives busybox `touch`, `cp -p` and a search-denied name
+in a container.
+
+## Native ceiling 136 (B-3f', 2026-10-20)
+
+`SYS_READLINK` lands at 135 and `SYS_LSTAT` at 136
+([[dec-2026-10-20-native-lstat-readlink]]), leaving 134 to corona's
+SYS_SRV_REGISTRY_NEW (vote 2026-10-19). Linux 134, 135 and 136 are
+rt_sigaction (VIV_TIER2), rt_sigprocmask (VIV_TIER2) and rt_sigpending
+(VIV_ENOSYS). `viv_linux_dispatch` returns before the native switch for every
+row that is not TRANSLATED, so a Linux Proc reaches neither native call, and
+test_vivarium pins the three verdicts. `vivarium.c` argues each number on its
+own: `VIV_LINUX_RT_SIGPROCMASK == SYS_READLINK`,
+`VIV_LINUX_RT_SIGPENDING == SYS_LSTAT`, and
+`VIV_LINUX_RT_SIGACTION == SYS_READLINK - 1` for the number below the ceiling
+that this tree leaves unassigned; when SYS_SRV_REGISTRY_NEW lands, that
+paragraph gives way to its own collision argument. A native program
+mis-declared as Linux loses both calls. Its readlink arrives as rt_sigprocmask
+with the path pointer as `how`, which the decider FORWARDs unless it is 0, 1
+or 2, and even then the shell reads and writes only the caller's own mask and
+memory. Its lstat arrives as rt_sigpending, which is ENOSYS. A change of either
+row to TRANSLATED must re-argue this. The lowest row the ceiling argues for is
+rt_sigtimedwait (137, VIV_ENOSYS).
+
+The phenotype's readlinkat (78) and newfstatat (79) rows keep their shells.
+readlinkat's calls the readlink shell it now shares with SYS_READLINK, over
+`sys_readlink_target_for_proc` ([[sub-kernel-syscall-dispatch]]), and answers
+as before. newfstatat has admitted AT_SYMLINK_NOFOLLOW since D-1; VIVARIUM
+6.20's V-2c passage, which called the flag rejected, carries a note that D-1
+superseded it.
+
+## Native ceiling 133 (B-3e M8, 2026-10-19)
+
+`SYS_UMASK` lands at 133 ([[dec-2026-10-19-create-mode-bound-and-umask]]), over
+Linux rt_sigsuspend, a VIV_ENOSYS row consumed before the native switch, so a
+Linux Proc's rt_sigsuspend never sets its creation mask. `vivarium.c` replaces
+rt_sigsuspend's ceiling argument with a per-number collision pin
+(`VIV_LINUX_RT_SIGSUSPEND == SYS_UMASK`), test_vivarium pins its ENOSYS
+verdict, and rt_sigaction (134, VIV_TIER2) took the ceiling argument, which
+B-3f' passed to rt_sigtimedwait (137).
+Serving rt_sigsuspend must re-argue the collision.
+
+Linux umask (166) is now a Tier-2 row (`VIV_LINUX_UMASK`) onto the native
+accessor: `viv_umask` keeps `mask & 0777` and exchanges the Proc's one mask
+([[sub-kernel-proc]]), so a Linux program and native code in the same Proc see
+one mask, and it never fails, as Linux's does not; the native call refuses
+stray bits instead. Before M8 the number had no row, so it went to the
+supervisor as unclassified, a gap VIVARIUM called cosmetic; on storage several
+principals share a created mode is authority, and VIVARIUM's "umask (corrected
+2026-10-19)" says so. test_vivarium pins the T2 verdict;
+`proc_identity.umask_syscall` drives `viv_umask_for_test`.
+
+## Native ceiling 132 (B-3b, vote 6)
+
+`SYS_GETPPID` lands at 132 (operator vote 2026-10-14 #6), over Linux
+sigaltstack, a VIV_ENOSYS row consumed before the native switch, so a Linux
+Proc's sigaltstack never reads its parent. `vivarium.c` replaces
+sigaltstack's above-ceiling assertion with a per-number collision pin
+(`VIV_LINUX_SIGALTSTACK == SYS_GETPPID`), test_vivarium's sigaltstack leg
+already pins the ENOSYS verdict (which the 6.23 escape detector also leans
+on), and rt_sigsuspend (133, VIV_ENOSYS) took the ceiling argument.
+The getppid shell (Linux 173) stays a shell: it reads `proc_parent_pid`, the
+accessor the native handler reads.
+
+The fcntl shell's F_SETFL refuses what it cannot apply instead of dropping
+it, as Pouch's 0056 does: flipping O_APPEND (it lives in the server's open of
+the file), O_ASYNC, O_DIRECT and O_NOATIME are EINVAL; a restated O_APPEND is
+served and O_LARGEFILE dropped. Its fd is narrowed to 32 bits before the range
+check, as Linux declares it `unsigned int`.
+
+## Native ceiling 131 (B-3b)
+
+Astra's native descriptor calls land on main as HANDLE_FLAGS_GET (129),
+HANDLE_FLAGS_SET (130) and HANDLE_DUP_TO (131) -- her 128-130 on
+codex/astra, moved because main's 128 is `SYS_ICACHE_SYNC_SPACE`. They overlap
+Linux kill, tkill and tgkill. Those rows are VIV_TIER2 (`vivarium_kill_decide`
++ `viv_kill`), and `viv_linux_dispatch` returns before the native switch for
+every row that is not TRANSLATED, so a Linux kill-family call never reaches a
+handle operation. The family's above-ceiling assertion is replaced by three
+number-collision pins, test_vivarium checks the three TIER2 verdicts, and
+sigaltstack (132, VIV_ENOSYS) took the ceiling argument.
+Restart_syscall (128) keeps its ENOSYS row against `SYS_ICACHE_SYNC_SPACE`.
+See [[sub-kernel-syscall-abi]] and `docs/NATIVE-DESCRIPTOR-OPERATIONS-PROPOSAL.md`.
+
+The fcntl shell's F_DUPFD and dup arms now share the native lowest-free core
+(`handle_dup_posix_checked`), which decides EBADF, EINVAL and EMFILE under the
+table lock. Before, each arm re-queried the fd after a failed dup. F_GETFL
+reports O_APPEND. `vivarium_fcntl_decide` narrows the F_DUPFD minimum to 32
+bits, as the narrowing rule below requires: Linux's `do_fcntl` passes it as an
+int, so 2^32 + 10 asks for 10, and a sign-extended -1 is past every table.
+Before the fix it was kept whole, and both answered EINVAL.
 
 ## Purpose
 
@@ -571,9 +696,14 @@ its reasoning fails a test rather than passing quietly.
 
 ## Seams
 
-- **`dup3` on a socket declines** rather than half-serving. Reproducing
-  Linux needs a *refcounted* socktab entry, a real change to a table V-5
-  audited; the idiom turned away is the inetd shape.
+- **`dup3` on a socket aliases, it does not share.** The alias rule
+  (operator-voted, VIVARIUM 5.5.2) replaced the decline this seam used to
+  name: `dup2(sockfd, 0)`, the inetd idiom, works, and the target number gets
+  its OWN copy of the source's socktab row (replace-on-claim; a full table is
+  EMFILE before any mutation). What Linux has and this does not is one
+  shared description: a state mutation through one alias (`connect`, `bind`,
+  `listen`, which also swap THAT handle ctl to data) is not seen through
+  another (VIVARIUM 5.5.2; section 9 records the faithful resolution).
 - **CLONE_THREAD** has a correct target already (SYS_THREAD_SPAWN) and
   should arrive with its own reasoning — and it invalidates the lock-free
   table argument when it does.
@@ -642,9 +772,9 @@ collision; all remaining above-ceiling assertions still compile. [[abi-pci-windo
 
 ## Native ceiling 125 and the mprotect row (2026-09-23, B-1a)
 
-`VIV_NATIVE_CEILING` is 125 (`SYS_BURROW_PROTECT`), pinned to
-`SYS__NATIVE_TOP - 1` by `vivarium.c`'s static assert, so the append moved the
-sentinel and the constant with it. Linux `mprotect` (226) is above the
+B-1a moved `VIV_NATIVE_CEILING` to 125 (`SYS_BURROW_PROTECT`). The constant is
+pinned to `SYS__NATIVE_TOP - 1` by `vivarium.c`'s static assert, so the append
+moved the sentinel and the constant with it. Linux `mprotect` (226) is above the
 ceiling; its collision argument is discharged by construction.
 
 `{ VIV_LINUX_MPROTECT, VIV_TIER2 }` lands with its shell (the tier-2 rule):
@@ -725,7 +855,7 @@ reddens L23l.
 
 ## Native ceiling 126 (2026-09-24, B-1d)
 
-`VIV_NATIVE_CEILING` is 126 (`SYS_BURROW_MAP_FILE`), again moved by the
+At that checkpoint `VIV_NATIVE_CEILING` became 126 (`SYS_BURROW_MAP_FILE`), again moved by the
 sentinel rather than by hand. No vivarium row lies at 126 or 127, and the
 lowest row the ceiling argues for is `restart_syscall` (128), so the move voids
 no row's argument. The phenotype's file-backed `mmap` rows and the new native
@@ -735,12 +865,13 @@ the phenotype's deciders did not change.
 
 ## Native ceiling 127 (2026-10-07, B-2b)
 
-`VIV_NATIVE_CEILING` is 127 (`SYS_JIT_CREATE_SEALED`), moved by the sentinel.
+B-2b moved `VIV_NATIVE_CEILING` to 127 (`SYS_JIT_CREATE_SEALED`) with the
+sentinel.
 Of the table's 100 Linux numbers none lies between 120 and 127, so the move
 voids no row's argument. 127 is the last number below `restart_syscall`
-(128): the NEXT native append lands on that row and owes it a per-number
-collision paragraph, as `pselect6` and `ppoll` have, before the ceiling can
-move again. A sealed JIT region is native-only; the phenotype's `PROT_EXEC`
+(128), so the next native append (B-2e2's, below) landed on that row and owed
+it a per-number collision paragraph, as `pselect6` and `ppoll` have, before the
+ceiling could move again. A sealed JIT region is native-only; the phenotype's `PROT_EXEC`
 mappings stay readable, because `vma_alloc` promotes EXEC-alone to
 `READ | EXEC` everywhere but a code Burrow ([[sub-kernel-vma]]).
 
@@ -1288,3 +1419,18 @@ The arms that open a /net file by path from the row's N (accept's listen walk,
 recvmsg's data open) still trust the row; for them the socktab holotype's F2
 gap stands (VIVARIUM.md 5.5.2), closed only by the socket object.
 
+
+## fchmodat answers the wstat's errno; pipe2's collision proof re-read (2026-10-22, G12)
+
+`fchmodat` (53) opens the path `O_PATH` and changes the mode through
+`sys_wstat_for_proc`, which since [[dec-2026-10-22-wstat-times]] answers an
+errno per refusal instead of a flat -1. The row turns the inner's EACCES,
+the ownership denial, into Linux's -EPERM (a Linux caller reads -1 as
+EPERM; only the Pouch seam reserves it) and passes every other refusal
+as it is, so a server's ENOSPC or EROFS now reaches the program where every
+refusal used to read EPERM. utimensat (88) is served the same way (above).
+
+The pipe2 (59) paragraph in `vivarium.h` proves a mis-declared native
+SYS_WSTAT call cannot pass pipe2's flag check: every legal wstat mask is
+now in [1, 0x1BF] (bits 0-5 and 7-8, `T_WSTAT_VALID`), and pipe2's domain is
+still only {0, O_CLOEXEC = 0x80000}, so the proof holds with the time bits.

@@ -140,7 +140,7 @@ struct p9_outstanding {
     u8   kind;       // P9_TVERSION / P9_TATTACH / P9_TWALK / P9_TCLUNK /
                      // P9_TLOPEN / P9_TLCREATE / P9_TREAD / P9_TWRITE /
                      // P9_TGETATTR / P9_TSETATTR / P9_TREADDIR /
-                     // P9_TSTATFS / P9_TFSYNC /
+                     // P9_TSTATFS / P9_TFSYNC / P9_TLOCK / P9_TGETLOCK /
                      // P9_TSYMLINK / P9_TMKNOD / P9_TRENAME /
                      // P9_TREADLINK / P9_TLINK / P9_TMKDIR /
                      // P9_TRENAMEAT / P9_TUNLINKAT
@@ -181,13 +181,15 @@ struct p9_outstanding {
     // into a binding by slot_bind.
     bool holds_slot;
     u16  flush_oldtag;
-    // Twalkgetattr bookkeeping (POUNCE): the REQUESTED nwname, so the
-    // dispatch can bind new_fid ONLY on a full walk (nwqid == wga_nwname).
-    // Meaningful only on a TWALKGETATTR entry. (The TWALK arm predates
-    // this and still binds unconditionally -- safe because every TWALK
-    // caller sends 0/1 names, where a partial walk cannot exist; the
-    // pounce sends multi-name walks, where it can.)
-    u16  wga_nwname;
+    // The REQUESTED nwname of a TWALK or TWALKGETATTR. A reply naming more
+    // components is a protocol violation: the caller's arrays are sized by this
+    // count, not by P9_MAX_WALK. A TWALKGETATTR binds new_fid ONLY on a full
+    // walk (nwqid == walk_nwname), as a server binds it: a shorter reply bound
+    // nothing there. A TWALK binds the same way.
+    u16  walk_nwname;
+    // A server that ran this op changed what a client caches. If its owner goes
+    // before the answer, nobody invalidates for it (larder_forget_all).
+    bool mutates;
     // The tag of the Tflush in flight for this op; meaningful only with
     // awaiting_flush, so a flush is unstaged without a search.
     u16  flush_tag;
@@ -480,6 +482,15 @@ int p9_session_send_fsync(struct p9_session *s,
                           u8 *out, size_t cap,
                           u32 fid, u32 datasync);
 
+// Tlock / Tgetlock: a byte-range lock on `fid`, or a test for one (B-3h).
+// Read-shaped for the fid table: neither changes what the fid names.
+int p9_session_send_lock(struct p9_session *s, u8 *out, size_t cap,
+                         u32 fid, u8 type, u32 flags, u64 start, u64 length,
+                         const u8 *client, u16 client_len);
+int p9_session_send_getlock(struct p9_session *s, u8 *out, size_t cap,
+                            u32 fid, u8 type, u64 start, u64 length,
+                            const u8 *client, u16 client_len);
+
 // =============================================================================
 // Mutation-family send APIs (P5-wire-mutation).
 //
@@ -634,6 +645,10 @@ struct p9_dispatch_result {
     struct p9_weft_geom weft_geom;
     // For Tweftio, the count of payload bytes the consumer moved (Weft-6b-2).
     u32 weftio_count;
+    // For Tlock, the server's status (P9_LOCK_*); for Tgetlock, the parsed
+    // answer (plain scalars, safe past the call).
+    u8                lock_status;
+    struct p9_getlock getlock;
     // For Twalkgetattr (POUNCE), the per-component attr elements: nwqid
     // fixed-stride (P9_WGA_BODY_LEN) Rgetattr bodies aliasing the input
     // rmsg (frame validated by p9_parse_rwalkgetattr; the qids land in
@@ -662,6 +677,10 @@ int p9_session_dispatch_rmsg(struct p9_session *s,
 // guard). A duplicate reply after this is absorbed as an ownerless late
 // reply and binds nothing. Returns 0, or -1 on malformed / unmatched /
 // wrong-type replies and when the tag is not awaiting a flush.
+// Does a server running this kind change what a client caches? A Tlopen does when
+// it truncates, which the kind cannot say (p9_session_send_lopen).
+bool p9_session_kind_mutates(u8 kind);
+
 int p9_session_dispatch_flushed_rmsg(struct p9_session *s,
                                      const u8 *rmsg, size_t len,
                                      struct p9_dispatch_result *out);

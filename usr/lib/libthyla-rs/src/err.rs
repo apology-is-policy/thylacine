@@ -122,7 +122,9 @@ pub enum Error {
     /// Maps `T_E_INVAL` = 22 (POSIX `EINVAL`).
     InvalidArgument,
 
-    /// Fixed resource capacity exhausted. POSIX ENOSPC = 28 (HI-1 bindings).
+    /// No space left: a mount into a namespace whose mount table is full, or
+    /// a server's full store, which crosses by value.
+    /// Maps `T_E_NOSPC` = 28 (POSIX `ENOSPC`).
     NoSpace,
 
     /// Broken pipe: pipe or socket write hit a closed read end.
@@ -133,6 +135,11 @@ pub enum Error {
     /// an implementation limit, e.g., handle count over the bound).
     /// Maps `T_E_RANGE` = 34 (POSIX `ERANGE`).
     OutOfRange,
+
+    /// No locks available: the file's service takes no byte-range locks, its
+    /// server refused one, or the Proc's lock-owner table is full.
+    /// Maps `T_E_NOLCK` = 37 (POSIX `ENOLCK`).
+    NoLocks,
 
     /// Function not implemented: syscall slot is a placeholder or
     /// the code path is stubbed at v1.0.
@@ -148,6 +155,11 @@ pub enum Error {
     /// away (a RST), or netd rejected the dial.
     /// Maps `T_E_CONNREFUSED` = 111 (POSIX `ECONNREFUSED`).
     ConnectionRefused,
+
+    /// Stale file: the descriptor's file has died on its server (Stratum
+    /// ends an unlinked file's fids).
+    /// Maps `T_E_STALE` = 116 (POSIX `ESTALE`).
+    StaleFile,
 
     /// Target is a directory where a non-directory was required (e.g.
     /// `unlink` of a directory -- use `remove_dir`). POSIX `EISDIR` = 21.
@@ -170,6 +182,11 @@ pub enum Error {
     /// got one.
     /// Maps `T_E_LOOP` = 40 (POSIX `ELOOP`).
     SymlinkLoop,
+
+    /// The object's service has no such operation: a metadata change on a
+    /// file whose service keeps no metadata (a kernel device such as `/dev/null`).
+    /// Maps `T_E_OPNOTSUPP` = 95 (POSIX `EOPNOTSUPP`).
+    Unsupported,
 
     /// Pass-through for errno values not enumerated above. The carried
     /// integer is the positive errno reported by the kernel (i.e.,
@@ -218,11 +235,14 @@ impl Error {
             Error::NoSpace          => 28,
             Error::BrokenPipe       => 32,
             Error::OutOfRange       => 34,
+            Error::NoLocks          => 37,
             Error::NotImplemented   => 38,
             Error::DirectoryNotEmpty => 39,
             Error::SymlinkLoop      => 40,
+            Error::Unsupported      => 95,
             Error::TimedOut         => 110,
             Error::ConnectionRefused => 111,
+            Error::StaleFile        => 116,
             Error::Other(e)         => e,
             // Library-only variants have no POSIX errno mapping.
             Error::UnexpectedEof    => 0,
@@ -303,11 +323,14 @@ impl From<i32> for Error {
             28  => Error::NoSpace,
             32  => Error::BrokenPipe,
             34  => Error::OutOfRange,
+            37  => Error::NoLocks,
             38  => Error::NotImplemented,
             39  => Error::DirectoryNotEmpty,
             40  => Error::SymlinkLoop,
+            95  => Error::Unsupported,
             110 => Error::TimedOut,
             111 => Error::ConnectionRefused,
+            116 => Error::StaleFile,
             n   => Error::Other(n),
         }
     }
@@ -333,11 +356,14 @@ impl fmt::Display for Error {
             Error::NoSpace          => "no space left",
             Error::BrokenPipe       => "broken pipe",
             Error::OutOfRange       => "result out of range",
+            Error::NoLocks          => "no locks available",
             Error::NotImplemented   => "function not implemented",
             Error::DirectoryNotEmpty => "directory not empty",
             Error::SymlinkLoop      => "too many levels of symbolic links",
+            Error::Unsupported      => "operation not supported",
             Error::TimedOut         => "operation timed out",
             Error::ConnectionRefused => "connection refused",
+            Error::StaleFile        => "stale file handle",
             Error::Other(_)         => "kernel error",
             Error::UnexpectedEof    => "unexpected end of file",
             Error::WriteZero        => "writer made no progress",

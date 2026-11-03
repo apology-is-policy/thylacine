@@ -1,0 +1,376 @@
+---
+id: sub-kernel-filelock
+type: sub
+title: "File locks -- SYS_FILE_LOCK, its two owners, and the client half of 9P2000.L locking"
+parent: moc-kernel-namespace
+code: ["kernel/filelock.c", "kernel/include/thylacine/filelock.h", "kernel/test/test_filelock.c"]
+audit: hard
+guarded-by: [inv-i32, inv-i38]
+validated-by: [prose]
+locks: []
+hazards: []
+abis: []
+design: ["docs/ARCHITECTURE.md section 9.6.11"]
+created: 2026-10-29
+updated: 2026-11-02
+---
+## Purpose
+
+`SYS_FILE_LOCK` (137) is the kernel's half of byte-range file locks
+(ARCHITECTURE.md 9.6.11, operator votes 34-35,
+[[dec-2026-10-29-b3h-file-locks]]). The lock lives where the file lives: the
+file's server holds every lock record and never waits. 9P2000.L's Tlock
+answers a conflict with status BLOCKED, and the retry belongs to the client.
+`kernel/filelock.c` is that client half: it validates the op word, checks the
+descriptor's rights, chooses which owner the lock belongs to, and runs the
+retry loop. The kernel keeps no lock table of its own. Its only lock state is
+the per-Proc owner table described in [[sub-kernel-handle]]: one minted fid
+per (Proc, file), and which file each names.
+
+## Contract
+
+`file_lock(fd, op, start, len, out)`: `op` is a type (`SYS_FILE_LOCK_RD` 0,
+`_WR` 1, `_UN` 2) plus flags (`_WAIT`, `_TEST`, `_PROC`).
+
+- **Owners.** Without `_PROC` the open file owns the lock. That is Linux's OFD
+  and `flock` semantics: the Spoor's own fid is the owner, so dup'd and
+  inherited descriptors share it. With `_PROC` the Proc owns it, which is
+  POSIX `F_SETLK`. The owner is an entry in the Proc's table: a zero-name
+  clone of the descriptor's fid, minted on the Proc's first take on that
+  file. Threads share the entry. An rfork child starts with an empty table.
+  exec keeps the table, and close-on-exec closes drop entries as any other
+  close does. **Any close of the file by the Proc** drops all the Proc's
+  locks on it, except that a navigation-only descriptor is no open of the file
+  and its close drops nothing (Linux's `filp_flush` skips `FMODE_PATH`).
+- **Refusals.**
+  - `-T_E_INVAL`: an unknown op bit, type 3, `_TEST|_UN`, `_TEST|_WAIT`, or a
+    range whose end would reach 2^64 (`len` 0 means "to EOF"). A server's table
+    holds the end in a u64, and Stratum refuses more.
+  - `-T_E_BADF`: not a Spoor; a navigation-only (`T_OPATH`) descriptor; a
+    read lock without read rights; a write lock without write rights.
+  - `-T_E_NOLCK`: the Dev serves no locks; the server answers ERROR, GRACE or
+    a status 9P does not define; or the Proc's table is full
+    (`PROC_LOCK_OWNER_MAX` 128, I-32).
+  - `-T_E_STALE`: the descriptor's file has died on its server.
+  - `-T_E_FAULT`: a `_TEST` answer outside the user half, refused before any
+    wire op because only a user-half fault recovers (`uaccess_user_range_ok`,
+    [[sub-kernel-uaccess]]), or one the call cannot copy out.
+- **Conflict.** `-T_E_AGAIN`. With `_WAIT` the call polls instead, backing
+  off from 1 ms to 64 ms, doubling each time. The server cannot report when a
+  conflicting lock goes, so the cap bounds both the latency after a release
+  and the RPC rate of a long wait.
+- **Waits.** A wait for a take is note-interruptible (ARCH 8.8.3: F_SETLKW is
+  on signal(7)'s list). It ends with `-T_E_INTR` for a caught note where the
+  caller's waits are interruptible: Linux phenotype today, natives once item
+  11c lands. A kill ends any wait. An unlock or a test never waits.
+- **Tests.** `_TEST` changes nothing. It writes a `struct t_file_lock`
+  (32 bytes): the conflicting lock's type, start and length, or `_UN` with the
+  asked range. `pid` is always -1, because an owner here is a fid, not a
+  process. A Proc test with no entry asks as a fresh temporary owner, never as
+  the open file's fid, because an open-file lock conflicts with a Proc lock
+  even within one Proc.
+- **Post-grant fd re-check (Linux `fcntl_setlk`).** A Proc take re-checks,
+  once granted, that its descriptor still names the same Spoor. If it does
+  not, the call unlocks the range it took and answers `-T_E_BADF`. Without
+  this, a lock whose descriptor closed mid-call would outlive the close meant
+  to drop it.
+- **No deadlock detection.** Stratum has none, and Linux has none for OFD
+  locks. `_WAIT` never answers EDEADLK.
+
+## Mechanism
+
+`sys_file_lock_handler` validates the call. It takes the handle, refuses
+`CWALKONLY`, and refuses a Dev with no `.lock`. It sets `note_interruptible`
+for a waiting take, then loops on `file_lock_once`, with
+`file_lock_backoff` (a `tsleep_noteintr` on a private Rendez that is never
+woken) between attempts.
+
+`file_lock_once` for the FILE owner first lands every staged write of the file
+that the Proc can reach, for any set-lock, as the PROC owner does, and is then one
+`c->dev->lock(c, ...)`, which lands `c`'s own: its descriptor may have left the
+table. For the PROC owner it:
+1. Gets the entry with `handle_lock_owner_get(p, c, mint = take)`. That makes
+   `c` learn its file's identity first (`Dev.lock_ident`) and adopts or mints
+   the entry.
+2. If there is no entry, treats an unlock as done, and runs a test through a
+   temporary owner from `Dev.lock_owner`, clunked after the call.
+3. For any set-lock (an unlock, a take, a conversion), first lands every staged
+   write of the file that the Proc can reach
+   (`handle_lock_sync_file(..., DEV_LOCK_SYNC_RELEASE)`). A conversion gives up its
+   write lock and admits readers. A test lands nothing.
+4. Locks through the owner.
+5. If the owner's fid answers `-T_E_STALE` on the first try, retires the
+   entry and asks again once. The entry's file has died: Stratum kills an
+   unlinked file's fids and gives the lowest freed inode number to the next
+   create. So an entry found by number may belong to a dead file, and its
+   locks died with it.
+6. Puts the entry back, marking it granted when a take succeeded.
+
+The Dev slots it drives are in [[sub-kernel-dev]]: `.lock`, `.lock_owner`,
+`.lock_same_file`, `.lock_sync`, `.lock_ident`. The first four are
+NULL-permitted together, and `.lock_ident` alone. Only dev9p implements them
+([[sub-kernel-ninep-dev9p]]).
+
+## Data structures
+
+None of its own. `struct t_file_lock` (syscall.h, 32 bytes,
+`_Static_assert`ed) is the `_TEST` answer. The Proc owner table
+(`struct lock_owner_ent`, 16 bytes, `PROC_LOCK_OWNER_MAX` 128 per
+HandleTable) lives in handle.h and is documented in [[sub-kernel-handle]].
+
+## Concurrency
+
+The handler holds the descriptor's handle reference for the whole call, so
+`c` stays live through every attempt. Entries are reference-held: a caller
+holds one across its RPC, and an entry is removed only when its users drop
+to 0 (contract at `struct lock_owner_ent`). The server orders a close's
+whole-file unlock against a concurrent take: either order is linearizable,
+and the post-grant re-check catches the take that wins. No sleeping lock is
+held across an RPC.
+
+## Invariants enforced
+
+- I-32: the owner table is bounded, and a full table answers ENOLCK without
+  harm. A refused take spends no slot: an entry that never held a lock is
+  removed when its last user puts it.
+- I-38 (lock-to-unlock consistency): a grant drops the file's Larder attrs
+  and pages, and every set-lock lands the staged writes first (dev9p half).
+- I-5/I-6: none. A lock is not a handle, and a minted owner is never
+  published to a handle slot.
+
+## Error paths
+
+Every exit puts the handle. Every entry got is put on every path, the
+ESTALE retry included. A temporary test owner is clunked after its one call.
+A dying thread that cannot flush or send hands both to the session's closer
+(see [[sub-kernel-ninep-attach]], the job alone).
+
+## Performance
+
+A take is one Tlock round trip, plus on the Proc's first take on a file a
+zero-name Twalk and one Tgetattr for the generation (learned once per
+Spoor). A set-lock with staged writes adds the write-behind flush.
+
+## Prosecution
+
+Mutants run in the B-3h2 lease (each must turn its named leg red):
+- F1, the close hook returns early: `filelock.close_drops`.
+- F2, the close removes an entry still in use: `close_mid_call`.
+- F3, no post-grant fd re-check: `close_mid_call`.
+- F4a, the dev9p unlock does not flush: `dev9p.lock_unlock_flushes_first`.
+- F4b, the Proc unlock does not sync: `filelock.proc_owner`.
+- F5, a never-granted entry is kept: `failed_take_spends_no_slot`.
+- F6, the bound is off by one: `bound`.
+- F7, no retire on ESTALE: `stale_entry_retired`.
+- F8, a dying thread hands nothing over:
+  `p9_closer.dying_lock_release_flushes_shared_run`.
+- F9, `same_file` ignores the generation: `dev9p.lock_ident_generation`.
+- F10, the close hook does not learn the identity: `filelock.reused_number`.
+- F11, an owner does not inherit the generation:
+  `dev9p.lock_ident_generation`.
+- F12, a get does not learn the identity: `filelock.reused_number`.
+- F13, the closer sends a Tclunk for a job alone: the p9_closer leg.
+
+Every list below ran on real Stratum, at `c0184d5dc` and for the last four at `5711f3c3e`
+(2026-11-03): 116 mutants, the suite 2156/2156 before them and after. 111 turned their
+named leg red. G20, G44, G45 and G81 turn none red, because the kernel extincts inside the
+named leg, which starts and never answers; that extinction is their verdict. G33 turned
+nothing red, for the reason its line gives.
+
+B-3h3's mutants, each red at its own leg:
+- G1, a take syncs nothing; G2, the table ignores a failed ACQUIRE; G13, it
+  refuses a peer's ESTALE; G19, a take skips the table:
+  `filelock.acquire_syncs`.
+- G3, a strict mint keeps no fid; G4a, ACQUIRE re-clones; G5, a read ignores the
+  read fid; G7, the close skips the read fid: `dev9p.cached_open_lock`.
+- G4b, G4c, a plain store replaces either CAS:
+  `dev9p.cached_open_install_race`.
+- G6, a ring gets the unopened fid: `dev9p.cached_open_loom`.
+- G8, a failed mint keeps its fid: `dev9p.cached_open_fallbacks`.
+- G9, fstat does not patch the size; G18, a wstat does not bind:
+  `dev9p.cached_open_loose_wstat`.
+- G10, no generation compare; G11, no number compare; G14, a mint with no known
+  generation; G15, no validity check: `dev9p.cached_open_loose_stale`.
+- G12, the base is not released; G17, an unlock binds:
+  `dev9p.cached_open_loose_lock`.
+- G16, a NULL generation is kept: `larder.attr_gen`.
+
+Audit round 1's regressions, each red at its own leg:
+- G20, a `_TEST` answer is not range-checked: the kernel extincts at
+  `filelock.refusals`.
+- G21a, only an unlock flushes: `dev9p.lock_unlock_flushes_first`. G21b, only a
+  Proc unlock syncs; G21c, a test syncs: `filelock.proc_owner`.
+- G22, `wstat_apply` does not bind before its policy:
+  `dev9p.cached_open_loose_wstat`.
+- G23, an `O_PATH` close drops the Proc's locks: `filelock.close_drops`.
+- G24, every walk failure is ESTALE; G24b, only ENOENT is; G28, a loose mint from
+  an opened base: `dev9p.cached_open_loose_stale`.
+- G25, a clone's failure is always ENOLCK: `dev9p.lock_owner_clone`.
+- G26, only ESTALE stops the close hook: `filelock.reused_number`.
+- G27, a range may reach 2^64: `filelock.refusals`.
+- G29, G30, `proc_id` 0: `dev9p.lock_wire_and_status`, `dev9p.lock_test_answers`.
+
+Audit round 2's regressions, each red at its own leg:
+- G31, a Twalk reply capped at `P9_MAX_WALK`; G32, a Twalkgetattr reply:
+  `9p_client.walk_overcount_fails_closed`, `9p_client.walkgetattr_overcount_fails_closed`.
+- G33, a late Rwalk capped at `P9_MAX_WALK`, changes nothing: the next line of
+  `honour_late_walk` refuses any count but the walk's, and `out->qids` holds `P9_MAX_WALK`.
+  G33b and G106 raise the cap and let only an over-count past that line, on either walk;
+  G107 removes the line from the Twalkgetattr arm; G108 has that arm bind nothing:
+  `9p_session.walk_reply_overcount`.
+- G34, a close sends no unlock; G35, one that may not wait does; G36, a loose
+  open's bound fid; G37, a fid-owning open's: `dev9p.lock_close_releases`.
+- G38, a bind leaves the Larder's attributes: `dev9p.cached_open_loose_wstat`.
+- G39, an open-file set-lock lands only its own run: `filelock.file_owner`.
+- G40, G41, a Twrite's, a Tweftio's count is handed back unbounded:
+  `9p_client.write_overcount_refused`. G42, G43, the same through Loom:
+  `9p_client.loom_write_e2e`, `9p_client.loom_weft_write_e2e`.
+
+Audit round 3's regressions, each red at its own leg (G34 to G37 were retargeted to
+`dev9p_fd_close`):
+- G34, the last close sends no unlock; G36, only a fid-owning open's does; G59, an
+  unknown take records no grant: `dev9p.lock_close_releases`.
+- G37, the unlock before the flush: `dev9p.lock_close_order`.
+- G35, a dying last close with a holder queues nothing; G47, its job releases no lock:
+  `p9_closer.dying_last_close_with_holder`.
+- G46, the last close does not flush: `dev9p.wb_last_close_with_holder`.
+- G48, the take's re-check of an open descriptor removed; G49, the close that drops a
+  lock lands only its own run: `filelock.last_descriptor_closes`.
+- G44, G45, no count at the table copy, at `dup_to`: the kernel extincts at `spoor_fd_drop`
+  inside `filelock.fork_exec_dup_teardown`.
+- G50, G51, G52, no forget at the kill, a late reply, a lone Rflush; G53, no generation
+  jump: `9p_client.dying_mutator_forgets_larder`.
+- G54, a failed write keeps the Larder: `dev9p.write_failure_drops_larder`.
+- G55, a killed waiter stays in the flush wait: `dev9p.wb_dying_waiter_leaves_flush_wait`.
+- G56, G57, a short Twalk reply binds, on time and late: `9p_session.walk_reply_overcount`.
+- G58, a multi-name walk's failure reads as its first name's:
+  `dev9p.wga_failure_at_an_unknown_name`.
+`lseek(fd, 0, SEEK_CUR)`'s missing store has no deterministic leg: only a peer thread's
+read landing inside the call can show it.
+
+Audit round 4's regressions and votes 38 and 39, each red at its own leg:
+- G60, a grown env table keeps no name; G61, the cap back at 64: `env.table_grows`. G62, an
+  install leaves the entries it takes over their old ids: `env.install_any_size`.
+- G63, a take names no client: `dev9p.lock_wire_and_status`.
+- G64, an endowment counts no descriptor: `filelock.endowment_is_a_descriptor`.
+- G65, a job releases nothing after its flush; G66, a job past the last close keeps pages:
+  `p9_closer.dying_last_close_with_holder`. G67, a job drops nothing a staged run replaced;
+  G70, it spins instead of waiting: `p9_closer.job_waits_out_a_peer_flush`. G68, its loss is
+  silent: `p9_closer.job_loses_a_run_loudly`. G69, a root's clunk never comes:
+  `p9_closer.dying_last_close_of_a_root`.
+- G71, a live mutator keeps its mark past its answer:
+  `9p_client.note_flush_live_mutator_keeps_larder`. G79, a note's flush of a dying mutator
+  forgets nothing: `9p_client.note_flush_death_forgets_larder`.
+- G72, G73, G74, a forgotten attribute, dentry, page still reads valid; G75, no generation
+  jump: `larder.forget_all`. G76, a parked directory fid outlives the forget:
+  `dev9p.dirfid_forget_outdates_parked`.
+- G77, a Tunlinkat does not mutate; G78, a reused entry keeps its mark:
+  `9p_session.mutates_kinds`. G80, a short late Rwalk binds: `9p_session.walk_reply_overcount`.
+- G81, a multi-name walk's failure does not fall back to one name at a time: the kernel
+  extincts inside `stalk.walk_attrs_unknown_mount_split`, in `kfree` under `stalk_core`.
+
+Audit round 5's regressions, each red at its own leg:
+- G82, the job goes by what it finds: `p9_closer.job_drops_a_flush_that_retired_first`.
+- G83, the same, for the latch: `p9_closer.job_reports_a_first_jobs_loss`.
+- G84, a caped take names its principal: `dev9p.lock_caped_names_nothing`.
+- G85, G87, G88, an unlock names its caller, a last close's unlock or a Tgetlock names
+  nobody: `dev9p.lock_one_name_on_a_fid`. G86, the job's unlock names nobody:
+  `p9_closer.dying_last_close_with_holder`.
+- G89, G90, G91, a fill after a forget takes a new slot: `larder.forget_one_slot_per_key`.
+- G92, an own page takes no stamp; G95, a forgotten page counts as invalidated:
+  `larder.forget_all`. G93, a forgotten page counts as evicted:
+  `larder.forget_full_page_table`.
+- G94, a stale grower overwrites a peer's table: `env.grow_after_a_peer`.
+The dentry CLOCK reading a forgotten slot as live costs time alone (the hand clears its
+reference bit on the first pass and takes it on the second): no leg can show it.
+
+Audit round 6's regressions, each red at its own leg:
+- G96, a dying close says nothing of a flush that retired first:
+  `p9_closer.dying_close_reports_a_retired_flush`.
+- G97, a live close no program hears says nothing: `p9_closer.unheard_close_reports_its_loss`.
+- G98, a job with no run behind it drops pages: `p9_closer.job_keeps_what_landed_inside_the_open`.
+- G99, G101, G103, a teardown, `handle_close` and a replace claim a program reads the answer,
+  G102, close(2) claims none does: `filelock.last_descriptor_closes`. G100, an endowment's
+  unwind claims one does: `filelock.endowment_is_a_descriptor`.
+- G104, a refused take renames the fid, G105, a take of unknown outcome keeps the old name:
+  `dev9p.lock_one_name_on_a_fid`.
+
+## Cached opens and the take's sync (B-3h3, 2026-11-02)
+
+A take must leave the snapshot of every open it covers, or the holder reads the
+file as it was at open. `file_lock_acquire_sync` runs before every take attempt,
+on `c` and then, for either owner, on every open of the file in the table
+(`handle_lock_sync_file(..., DEV_LOCK_SYNC_ACQUIRE)`), because the lock covers what
+any of the Proc's opens read. An inherited descriptor names the parent's open file,
+so a child's take has the parent's reads through it leave the snapshot as well: the
+parent sees newer bytes, which any open with a read fid would. The open-file owner learns
+its file first, as an entry's get does, so an open of a dead file sharing its
+number is left alone. A failed sync refuses the take, except that a table peer
+answering ESTALE keeps its snapshot and the take through the descriptor that can
+reach the file stands. A peer's other failures refuse: nothing says the file
+moved. The descriptor's own ESTALE refuses first. A cached open's
+close now matches entries by generation as any open's does: both kinds learn one
+at mint.
+
+## The last close and the last reference (audit round 3, 2026-11-02)
+
+A Spoor's last reference can fall on any thread. The image cache keeps a file's first
+map's own Spoor until 128 other images churn, and a Loom op, a poll or a territory can
+hold one. Round 2 hung the release and the flush on that reference, so a read-only map
+kept an open-file lock past its Proc's exit, left a staged run unlanded after `close`
+returned 0, and made a stranger's `exec` or `mmap` wait on the owner's server. So the
+file's last close is now separate from its last reference, as Linux's `f_op->flush` is
+from `f_op->release`: `Spoor.fd_refs` counts handle slots, the slot that takes it to
+zero runs `Dev.fd_close` on the closing thread, and `Dev.close` waits on no thread
+([[sub-kernel-handle]], [[sub-kernel-spoor]], [[sub-kernel-ninep-dev9p]]). This covers
+every pin by construction, needs no wire at `mmap` and has no failure path. The
+reviewer's proposal, a private Spoor per map plus a per-thread marker, costs two round
+trips per image miss and can fail on a `chmod` made since the open.
+
+The visible posture: a read-only map no longer keeps a `flock` alive past the last
+close, where Linux's `fput` would. The documented "all descriptors closed" holds, and
+manual section 22 says so.
+
+A take in flight when the last close runs would otherwise leave a lock nothing
+releases, with the Spoor held for as long as a map likes. The closer decrements
+`fd_refs` (`spoor_fd_drop`, with a full fence), then exchanges `lock_granted`. The
+taker stores `lock_granted` sequentially consistent, then reads `spoor_fd_open`. Either
+the close sees the grant or the taker sees the close; the taker's arm runs
+`Dev.fd_close` again, which is idempotent, and answers EBADF. It runs on any answer,
+keeping a failure as it is: a take that failed with its outcome unknown recorded a
+grant too (self-audit SA4-1). A wait does not look at the close: it runs until a grant, a
+note or a death, and this check answers then. A spawn's endowment counts as a descriptor from the call on,
+so the parent's close cannot drop a lock its child is about to hold (audit round 4, leg
+`filelock.endowment_is_a_descriptor`, prover leg `spawned`). A latch on the priv would
+answer a later take through a re-published Spoor with a false success, so there is none.
+
+A dying thread cannot send. If it holds the last reference, `Dev.close` follows at once
+and hands the run and the fid to a closer, the well-tested path. With another holder,
+`dev9p_fd_close` queues a job that flushes and then unlocks now.
+
+## Seams
+
+None open. Pouch `fcntl`, `flock` and the libthyla-rs and libt mirrors landed
+with B-3h4 ([[sub-pouch-fs]], [[sub-kernel-syscall-abi]]). A caught note does not
+end a native or Pouch wait until item 11c (Caveats). Go's `cmd/go` file lock is
+still a no-op on Thylacine (OPEN-BUGS 2026-11-02).
+
+## Caveats
+
+- A native caller's wait ends only on grant or kill until item 11c lands
+  (ARCH 9.6.11).
+- `_WAIT` is a poll (1 to 64 ms), not a wakeup: 9P2000.L has no lock
+  callback.
+
+## History
+
+Boosty B-3h2 (commits d1853e821, c95ef3916, b693e2729 on branch b3h; close
+commit in [[chg-2026-10-29-b3h2-file-locks]]). Scripture 87ecc8153. B-3h3 and
+B-3h4: [[chg-2026-11-02-b3h3-b3h4-cached-locks-pouch]]. Audit round 3:
+[[chg-2026-11-02-b3h-audit-r3-fixes]]. Stratum's half (POSIX range records,
+the zero-name clone of an open fid, ENOLCK caps) lands as one Stratum commit
+after the B-3h audit.
+
+## Provenance
+
+(generated -- incoming `touched` backlinks, newest first; never hand-written)

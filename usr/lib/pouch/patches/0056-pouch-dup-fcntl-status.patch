@@ -1,0 +1,387 @@
+Pouch dup and the fcntl descriptor commands over native 129-131 (B-3b, vote 7).
+
+dup(fd) is SYS_thyla_handle_dup_to(fd, 0, LOWEST): the lowest free slot,
+picked and filled in one kernel step (it was __NR_dup 0xFFFF -> ENOSYS, which
+failed every file load in libxml2, whose xmlInputFromFd dup()s each fd).
+fcntl gains F_DUPFD / F_DUPFD_CLOEXEC (the same call with the floor as x1; a
+negative floor widens to a huge one, which the kernel answers EINVAL after a
+closed fd's EBADF, Linux's order), F_GETFL (the status word FLAGS_GET reports:
+access mode, O_NONBLOCK, O_APPEND; OEXEC reads as O_RDONLY) and F_SETFL
+(O_NONBLOCK through native SYS_SET_NONBLOCK 123; restating O_APPEND is
+accepted, flipping it is EINVAL because the append lives in the server's open
+of the file; O_ASYNC / O_DIRECT / O_NOATIME are EINVAL; every other bit is
+ignored, as Linux ignores it). pipe2 now honours O_CLOEXEC (FLAGS_SET) and
+O_NONBLOCK (123) on both ends, set after the pipe exists, closing both if a
+set fails (it accepted and ignored both). fdopendir's `fcntl(fd, F_GETFL) & O_PATH` read
+-1 & O_PATH as set and answered EBADF for every directory; it now works.
+open/openat honour O_CLOEXEC with the same flag (they accepted and ignored
+it, from when no Thylacine descriptor outlived a spawn), and musl's own
+callers of the raw SYS_fcntl -- the 0xFFFF sentinel -- move to the native
+calls: fopen "e" and __fopen_rb_ca rely on open(); __fdopen "e" sets the flag;
+freopen without a name sets it and goes through fcntl() for F_SETFL (every
+such call failed and closed the stream). The unreachable ones stay: fchdir and
+fchown (their own calls are sentinels and answer first), socketpair and
+signalfd (the same).
+Tagged Pouch sockets keep ENOSYS here (B-3k gives them kernel descriptors).
+
+--- a/src/internal/_pouch_descriptor.h
++++ b/src/internal/_pouch_descriptor.h
+@@ -5,6 +5,15 @@
+ #include "syscall.h"
+ #include "_pouch_socket.h"
+ 
++/* SYS_thyla_handle_flags_get / _set / _dup_to words (kernel syscall.h,
++ * SYS_HANDLE_*). The status fields are what F_GETFL reports. */
++#define POUCH_HANDLE_CLOSE_ON_EXEC   1
++#define POUCH_HANDLE_DUP_LOWEST      2
++#define POUCH_HANDLE_OMODE_SHIFT     8
++#define POUCH_HANDLE_OMODE_MASK      (3L << POUCH_HANDLE_OMODE_SHIFT)
++#define POUCH_HANDLE_NONBLOCK        0x400L
++#define POUCH_HANDLE_APPEND          0x800L
++
+ static inline int pouch_descriptor_check(int fd)
+ {
+     if (fd < 0) return EBADF;
+@@ -19,4 +28,16 @@
+ {
+     return result == -1 ? -ENOSYS : result;
+ }
++
++/* O_CLOEXEC is the native descriptor flag, set after the descriptor exists:
++ * a peer thread's spawn in between sees it unflagged, which Linux's single
++ * call rules out. A tagged socket has no native slot to flag: ENOSYS while it
++ * is live, EBADF once it is not. */
++static inline long pouch_set_cloexec(int fd)
++{
++    int e = pouch_descriptor_check(fd);
++    if (e) return -e;
++    return pouch_descriptor_result(
++        __syscall2(SYS_thyla_handle_flags_set, fd, POUCH_HANDLE_CLOSE_ON_EXEC));
++}
+ #endif
+--- a/src/fcntl/fcntl.c
++++ b/src/fcntl/fcntl.c
+@@ -3,26 +3,87 @@
+ #include <errno.h>
+ #include "_pouch_descriptor.h"
+ 
++/* The open-file status the kernel can change after open is O_NONBLOCK only:
++ * O_APPEND lives in the server's open of the file, so F_SETFL may restate it
++ * but not flip it, and O_ASYNC, O_DIRECT and O_NOATIME have no mechanism.
++ * Those answer EINVAL where Linux would serve each on a file that takes it:
++ * a refusal rather than a silent drop. Every other bit is ignored, as Linux
++ * ignores it. */
++static int status_flags(long word)
++{
++	int mode = (int)((word & POUCH_HANDLE_OMODE_MASK) >> POUCH_HANDLE_OMODE_SHIFT);
++	/* OEXEC (3) has no Linux access mode; it reads as O_RDONLY. */
++	int fl = mode == 1 ? O_WRONLY : mode == 2 ? O_RDWR : O_RDONLY;
++	if (word & POUCH_HANDLE_NONBLOCK) fl |= O_NONBLOCK;
++	if (word & POUCH_HANDLE_APPEND)   fl |= O_APPEND;
++	return fl;
++}
++
+ int fcntl(int fd, int cmd, ...)
+ {
+-    if (cmd != F_GETFD && cmd != F_SETFD) {
+-        errno = ENOSYS;
+-        return -1;
+-    }
+-    int flags = 0;
+-    if (cmd == F_SETFD) {
++    int arg = 0;
++    switch (cmd) {
++    case F_GETFD:
++    case F_GETFL:
++        break;
++    case F_SETFD:
++    case F_SETFL:
++    case F_DUPFD:
++    case F_DUPFD_CLOEXEC: {
+         va_list ap;
+         va_start(ap, cmd);
+-        flags = va_arg(ap, int);
++        arg = va_arg(ap, int);
+         va_end(ap);
+-        if (flags & ~FD_CLOEXEC) { errno = EINVAL; return -1; }
++        break;
+     }
++    default:
++        errno = ENOSYS;
++        return -1;
++    }
++    if (cmd == F_SETFD && (arg & ~FD_CLOEXEC)) { errno = EINVAL; return -1; }
+     int ec = pouch_descriptor_check(fd);
+     if (ec) { errno = ec; return -1; }
+-    long ret = cmd == F_GETFD
+-        ? __syscall1(SYS_thyla_handle_flags_get, fd)
+-        : __syscall2(SYS_thyla_handle_flags_set, fd, flags ? 1 : 0);
++    long ret;
++    switch (cmd) {
++    case F_SETFD:
++        ret = __syscall2(SYS_thyla_handle_flags_set, fd,
++                         arg ? POUCH_HANDLE_CLOSE_ON_EXEC : 0);
++        break;
++    case F_DUPFD:
++    case F_DUPFD_CLOEXEC:
++        /* A negative floor widens to one past every table; the kernel answers
++         * it EINVAL after it has answered a closed fd EBADF. */
++        ret = __syscall3(SYS_thyla_handle_dup_to, fd, (long)arg,
++                         POUCH_HANDLE_DUP_LOWEST |
++                         (cmd == F_DUPFD_CLOEXEC ? POUCH_HANDLE_CLOSE_ON_EXEC : 0));
++        break;
++    default:
++        ret = __syscall1(SYS_thyla_handle_flags_get, fd);
++        break;
++    }
+     ret = pouch_descriptor_result(ret);
+     if (ret < 0) { errno = (int)-ret; return -1; }
+-    return cmd == F_GETFD ? ((ret & 1) ? FD_CLOEXEC : 0) : 0;
++    switch (cmd) {
++    case F_GETFD:
++        return (ret & POUCH_HANDLE_CLOSE_ON_EXEC) ? FD_CLOEXEC : 0;
++    case F_GETFL:
++        return status_flags(ret);
++    case F_SETFL:
++        /* Two calls where Linux has one: a peer thread that closes fd and
++         * opens another file into its number between them gets the
++         * nonblock set, checked against the old file's append bit. */
++        if (!(arg & O_APPEND) != !(ret & POUCH_HANDLE_APPEND)
++            || (arg & (O_ASYNC | O_DIRECT | O_NOATIME))) {
++            errno = EINVAL;
++            return -1;
++        }
++        ret = pouch_descriptor_result(__syscall2(SYS_thyla_set_nonblock, fd,
++                                                 (arg & O_NONBLOCK) ? 1 : 0));
++        if (ret < 0) { errno = (int)-ret; return -1; }
++        return 0;
++    case F_SETFD:
++        return 0;
++    default:
++        return (int)ret;
++    }
+ }
+--- a/src/unistd/dup.c
++++ b/src/unistd/dup.c
+@@ -1,7 +1,15 @@
+ #include <unistd.h>
+-#include "syscall.h"
++#include <errno.h>
++#include "_pouch_descriptor.h"
+ 
++/* The lowest free descriptor is a target duplication with a floor of 0, in
++ * the one kernel step that picks the slot and installs the copy. */
+ int dup(int fd)
+ {
+-	return syscall(SYS_dup, fd);
++	int ec = pouch_descriptor_check(fd);
++	if (ec) { errno = ec; return -1; }
++	long ret = pouch_descriptor_result(__syscall3(SYS_thyla_handle_dup_to,
++	                                              fd, 0, POUCH_HANDLE_DUP_LOWEST));
++	if (ret < 0) { errno = (int)-ret; return -1; }
++	return (int)ret;
+ }
+--- a/src/unistd/pipe2.c
++++ b/src/unistd/pipe2.c
+@@ -3,14 +3,37 @@
+ #include <fcntl.h>
+ #include "syscall.h"
+ #include "_pouch_process.h"
++#include "_pouch_descriptor.h"
+ 
+-/* pouch: pipe2. O_CLOEXEC is accepted as a no-op -- a pipe fd is inherited by
+- * a child ONLY if explicitly listed in the spawn fd_list, so "close on exec"
+- * holds by construction. O_NONBLOCK is not settable at v1.0 (no fcntl
+- * F_SETFL); the pipe stays blocking (a documented best-effort, rare in the
+- * compile path). Any other flag is EINVAL (musl's contract). */
++/* pouch: pipe2. The flags are set on both ends after SYS_PIPE creates them:
++ * O_CLOEXEC through the native descriptor flag (spawn leaves a flagged stream
++ * out of the child, native exec closes it) and O_NONBLOCK through the native
++ * per-open-file flag. A peer thread's spawn between the two steps could see
++ * an unflagged end, which Linux's single call rules out. A failed flag set
++ * fails the call and closes both ends, except an end whose own set answered
++ * EBADF: a peer thread closed it first, and the number may already be another
++ * thread's. Any other flag is EINVAL (musl's contract). */
+ int pipe2(int fd[2], int flag)
+ {
+ 	if (flag & ~(O_CLOEXEC | O_NONBLOCK)) { errno = EINVAL; return -1; }
+-	return __pouch_pipe(fd);
++	int p[2];
++	if (__pouch_pipe(p) < 0) return -1;
++	for (int i = 0; i < 2; i++) {
++		long r = 0;
++		if (flag & O_CLOEXEC)
++			r = __syscall2(SYS_thyla_handle_flags_set, p[i],
++			               POUCH_HANDLE_CLOSE_ON_EXEC);
++		if (!r && (flag & O_NONBLOCK))
++			r = __syscall2(SYS_thyla_set_nonblock, p[i], 1);
++		r = pouch_descriptor_result(r);
++		if (r < 0) {
++			if (r != -EBADF || i != 0) __syscall(SYS_close, p[0]);
++			if (r != -EBADF || i != 1) __syscall(SYS_close, p[1]);
++			errno = (int)-r;
++			return -1;
++		}
++	}
++	fd[0] = p[0];
++	fd[1] = p[1];
++	return 0;
+ }
+--- a/src/fcntl/openat.c
++++ b/src/fcntl/openat.c
+@@ -25,6 +25,7 @@
+ #include <unistd.h>
+ #include "syscall.h"
+ #include "_pouch_fs.h"
++#include "_pouch_descriptor.h"
+ 
+ /* SYS_open +OTRUNC (SYS_WALK_OPEN_OMODE_VALID includes OTRUNC = 0x10). */
+ #define POUCH_OTRUNC  0x10u
+@@ -45,8 +46,9 @@
+  * The bit fixes the single-writer cases above; that atomicity is ABSENT.
+  *
+  * (2) The one-time seek, kept: for an append fd the kernel cursor is advisory,
+- * and musl's __fdopen cannot set it (its fcntl(F_SETFL) is ENOSYS here), so
+- * this is what makes ftell() and the first read of an "a+" stream start at
++ * and musl's __fdopen cannot add the append bit (fcntl's F_SETFL refuses an
++ * O_APPEND change), so this is what makes ftell() and the first read of an
++ * "a+" stream start at
+  * end-of-file, as they have since 0030. Divergences from Linux, all of them:
+  *   - the initial read position of an "a+" stream is END (the BSD choice);
+  *     musl-on-Linux and glibc start it at 0;
+@@ -59,11 +61,23 @@
+  * Both are applied where every open exit routes through -- the omode before
+  * the three opens, the seek in one helper -- rather than per return site:
+  * openat() has three successful exits (create-ok, EEXIST-fallback-open,
+- * plain-open) and a per-site fix would silently miss one. */
++ * plain-open) and a per-site fix would silently miss one. O_CLOEXEC rides the
++ * same helper: the native descriptor flag, which spawn and native exec honour.
++ * A set that fails fails the open with its errno and closes the descriptor,
++ * unless the set answered EBADF: a peer thread closed it first, and the
++ * number may already be another thread's. A file it just created stays
++ * created. */
+ #define POUCH_OAPPEND 0x40u
+ 
+ static int pouch_open_ret(long r, int flags)
+ {
++	if (r >= 0 && (flags & O_CLOEXEC)) {
++		long s = pouch_set_cloexec(r);
++		if (s < 0) {
++			if (s != -EBADF) __syscall(SYS_close, r);
++			return __syscall_ret(s);
++		}
++	}
+ 	if (r >= 0 && (flags & O_APPEND))
+ 		__syscall(SYS_lseek, r, 0, SEEK_END);
+ 	return __syscall_ret(r);
+--- a/src/fcntl/open.c
++++ b/src/fcntl/open.c
+@@ -9,9 +9,8 @@
+  * never called from inside musl because of this bypass.
+  *
+  * The fix is straight-line: forward open() to openat(AT_FDCWD, ...)
+- * which IS the patched openat C function. O_CLOEXEC is silently
+- * accepted (every Thylacine handle is cloexec by construction —
+- * documented in patch 0009).
++ * which IS the patched openat C function, where O_CLOEXEC becomes the
++ * native descriptor flag.
+  */
+ #include <fcntl.h>
+ #include <stdarg.h>
+--- a/src/stdio/fopen.c
++++ b/src/stdio/fopen.c
+@@ -23,8 +23,7 @@
+ 	 * boundary-line (SYS_open = 65 stalk resolution). */
+ 	fd = open(filename, flags, 0666);
+ 	if (fd < 0) return 0;
+-	if (flags & O_CLOEXEC)
+-		__syscall(SYS_fcntl, fd, F_SETFD, FD_CLOEXEC);
++	/* pouch: open() has set O_CLOEXEC's descriptor flag (openat.c). */
+ 
+ 	f = __fdopen(fd, mode);
+ 	if (f) return f;
+--- a/src/stdio/__fopen_rb_ca.c
++++ b/src/stdio/__fopen_rb_ca.c
+@@ -9,7 +9,7 @@
+ 	/* pouch: route through the patched open() -- see fopen.c. */
+ 	f->fd = open(filename, O_RDONLY|O_CLOEXEC);
+ 	if (f->fd < 0) return 0;
+-	__syscall(SYS_fcntl, f->fd, F_SETFD, FD_CLOEXEC);
++	/* pouch: open() has set O_CLOEXEC's descriptor flag (openat.c). */
+ 
+ 	f->flags = F_NOWR | F_PERM;
+ 	f->buf = buf + UNGET;
+--- a/src/stdio/__fdopen.c
++++ b/src/stdio/__fdopen.c
+@@ -5,6 +5,7 @@
+ #include <errno.h>
+ #include <string.h>
+ #include "libc.h"
++#include "_pouch_descriptor.h"
+ 
+ FILE *__fdopen(int fd, const char *mode)
+ {
+@@ -27,13 +28,13 @@
+ 	if (!strchr(mode, '+')) f->flags = (*mode == 'r') ? F_NOWR : F_NORD;
+ 
+ 	/* Apply close-on-exec flag */
+-	if (strchr(mode, 'e')) __syscall(SYS_fcntl, fd, F_SETFD, FD_CLOEXEC);
++	if (strchr(mode, 'e')) pouch_set_cloexec(fd);
+ 
+ 	/* Set append mode on fd if opened for append */
+ 	if (*mode == 'a') {
+-		int flags = __syscall(SYS_fcntl, fd, F_GETFL);
+-		if (!(flags & O_APPEND))
+-			__syscall(SYS_fcntl, fd, F_SETFL, flags | O_APPEND);
++		/* pouch: the append bit lives in the server's open of the file and
++		 * F_SETFL cannot add it (fcntl.c), so a descriptor opened without
++		 * O_APPEND keeps writing at its offset. */
+ 		f->flags |= F_APP;
+ 	}
+ 
+--- a/src/stdio/freopen.c
++++ b/src/stdio/freopen.c
+@@ -1,6 +1,7 @@
+ #include "stdio_impl.h"
+ #include <fcntl.h>
+ #include <unistd.h>
++#include "_pouch_descriptor.h"
+ 
+ /* The basic idea of this implementation is to open a new FILE,
+  * hack the necessary parts of the new FILE into the old one, then
+@@ -21,9 +22,21 @@
+ 
+ 	if (!filename) {
+ 		if (fl&O_CLOEXEC)
+-			__syscall(SYS_fcntl, f->fd, F_SETFD, FD_CLOEXEC);
++			pouch_set_cloexec(f->fd);
+ 		fl &= ~(O_CREAT|O_EXCL|O_CLOEXEC);
+-		if (syscall(SYS_fcntl, f->fd, F_SETFL, fl) < 0)
++		/* pouch: SYS_fcntl is the 0xFFFF sentinel, which failed every
++		 * call here and closed the stream; fcntl() carries F_SETFL. The
++		 * append bit is fixed when the file is opened and F_SETFL refuses
++		 * to flip it, so a mode other than "a" restates the descriptor's
++		 * own bit (an append descriptor keeps appending) and only "a" on
++		 * a descriptor opened without O_APPEND fails. */
++		if (*mode != 'a') {
++			int cur = fcntl(f->fd, F_GETFL);
++			if (cur < 0)
++				goto fail;
++			fl = (fl & ~O_APPEND) | (cur & O_APPEND);
++		}
++		if (fcntl(f->fd, F_SETFL, fl) < 0)
+ 			goto fail;
+ 	} else {
+ 		f2 = fopen(filename, mode);
+--- a/arch/aarch64/bits/syscall.h.in
++++ b/arch/aarch64/bits/syscall.h.in
+@@ -471,6 +471,9 @@
+ #define __NR_tty_set_fg 96
+ #define __NR_tty_get_fg 97
+ 
++#define __NR_thyla_set_nonblock 123
++#define SYS_thyla_set_nonblock 123
++
+ #define __NR_thyla_handle_flags_get 129
+ #define SYS_thyla_handle_flags_get 129
+ 

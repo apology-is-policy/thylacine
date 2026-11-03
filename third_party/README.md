@@ -112,6 +112,26 @@ that `./configure` would normally generate supplied via `-D` flags on the
 compile command line. `version.h` is generated at build time from
 `version.h.in` (placeholder substitution); the vendored tree stays clean.
 
+### zlib 1.3.1 (pruned) — `third_party/zlib/`
+
+The deflate library, vendored for DOSBox-X (DX-1) and installed into the pouch
+sysroot as `libz.a` + `zlib.h` / `zconf.h`; the browser arc's libpng, libxml2,
+FreeType and curl link it (B-3).
+
+| Field | Value |
+|---|---|
+| Version | 1.3.1 (released 2024-01-22) |
+| Source | `https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.gz` |
+| sha256 | `9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23` |
+| License | zlib — see `third_party/zlib/LICENSE` |
+| Patch series | none — zlib is portable C |
+| Built by | `tools/build.sh` (`build_zlib`): 15 `.c` files compiled directly with the pouch clang |
+
+Pruned to the 28 files the library itself needs (its `.c`/`.h` sources,
+`LICENSE`, `README`); the tarball's examples, `contrib/`, tests and build
+systems are not vendored. Every vendored file is byte-identical to the
+release (checked 2026-10-14 against the tarball above).
+
 ### DejaVu fonts 2.37 (pruned) — `third_party/dejavu-fonts/`
 
 Halcyon's proportional face (HALCYON.md §3: **DejaVu Sans Condensed**,
@@ -127,7 +147,24 @@ for the exact kept/pruned split and the re-vendor recipe.
 | sha256 | `fa9ca4d13871dd122f61258a80d01751d603b4d3ee14095d65453b4e846e17d7` (the full tarball; kept files byte-identical to its contents) |
 | License | Bitstream Vera + Arev public-domain terms — see `third_party/dejavu-fonts/LICENSE` |
 | Patch series | none — font data is consumed as-is |
-| Consumed by | `usr/halcyond` (`include_bytes!` at build; rasterized by the vendored fontdue) |
+| Consumed by | `usr/halcyond` (`include_bytes!` at build; rasterized by the vendored fontdue); `/lib/font` when the library tests are baked (`stage_font_runtime` in `tools/build.sh`, B-3g), beside DejaVu Sans, Serif and Sans Mono taken from the same release by `[cache.dejavu]` in `tools/build-manifest.toml`. That staging refuses to run unless the four kept faces are byte-identical to the tarball's. |
+
+### IBM Plex Sans 3.005 — `third_party/ibm-plex/`
+
+Halcyon's proportional faces (halcyond H-A, `ed45a164f`; the Medium, SemiBold
+and Text faces added at I-0, `d3958d68f`): Regular, Italic, Bold, Medium,
+SemiBold, Text and Text Italic, plus `OFL.txt`. Vendored PRUNED — see
+`third_party/ibm-plex/PRUNE-MANIFEST.md` for the kept/pruned split and the
+re-vendor recipe.
+
+| Field | Value |
+|---|---|
+| Version | 3.005 (each face's name table, ID 5) |
+| Source | `https://github.com/IBM/plex/releases/download/%40ibm/plex-sans%401.1.0/ibm-plex-sans.zip` (IBM's `@ibm/plex-sans@1.1.0`) |
+| sha256 | `fb365d910566e6d199cc2c15579a7dd9a267128e18431a394ed81f1970c69200` (the whole package, measured 2026-10-21: the release publishes none; the seven faces and `OFL.txt`, its `LICENSE.txt`, are byte-identical to its contents) |
+| License | SIL Open Font License 1.1 — see `third_party/ibm-plex/OFL.txt` (the faces' name tables carry the copyright and a reference to it) |
+| Patch series | none — font data is consumed as-is |
+| Consumed by | `usr/halcyond` (`include_bytes!` at build); `/lib/font` when the library tests are baked (B-3g), with `OFL.txt` beside the faces as `IBMPlex-OFL.txt` |
 
 ### Rust registry vendor — `third_party/rust/`
 

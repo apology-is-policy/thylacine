@@ -355,13 +355,21 @@ inherited, a per-user encrypted-home `--single-session` 9P proxy mount included;
 login's synchronous `proxy.wait()` at logout then deadlocked on an orphan the
 kernel could not reap in time (joey blocked in `wait(login)`; login blocked in
 `proxy.wait`). `proc_release_territory_at_exit` releases it in the SAME
-last-live-thread window as the handle close, with one added subtlety: devproc
-`format_ns`/`format_cwd` read `p->territory` under [[lock-proc-table]] (the #66c
-envelope), so the free cannot run lock-free the way the handle-table free does.
-It is a **detach-under-lock + free-outside-lock split** — NULL `p->territory`
-under the table lock (a concurrent devproc reader then renders empty; both
-readers are NULL-safe), then `territory_unref` the detached, now-unreachable
-pointer with the lock dropped (its `spoor_clunk` may sleep on a `Tclunk`).
+last-live-thread window as the handle close, with one added subtlety: devproc's
+ns read (which takes a weak ref on the Territory there) and `format_cwd` read
+`p->territory` under [[lock-proc-table]] (the #66c envelope), so the free cannot
+run lock-free the way the handle-table free does. It is a
+**detach-under-lock + free-outside-lock split** — NULL `p->territory` under the
+table lock (a concurrent devproc reader then renders empty, and an ns read that
+took its weak ref first renders from the struct it holds, then answers the
+empty file when its second look finds NULL; [[sub-kernel-devproc]]), then
+`territory_unref` the detached pointer with the lock dropped (its `spoor_clunk`
+may sleep on a `Tclunk`). That unref is the last STRONG one, so the release,
+and any wait a 9P clunk in it makes, runs here, at the instant of death, on the
+exiting thread: an ns reader that took its ref before the detach holds a WEAK
+ref, which keeps only the struct, and its drop at most frees it
+([[sub-kernel-territory]]; OPEN-BUGS SA-5, the holotype round's F1, closed by
+strong/weak refs).
 Idempotent with `proc_free`'s later `territory_unref(NULL)`. Since fork
 DEEP-COPIES the territory ([[sub-kernel-proc]]'s `territory_clone`; RFNAMEG
 sharing is unsupported at v1.0), no sibling shares it and I-1 is trivially

@@ -1,0 +1,35 @@
+Pouch umask over native SYS_UMASK (M8, operator vote 2026-10-19).
+
+umask() called the 0xFFFF sentinel, so it returned -1 from a call POSIX says
+cannot fail, and the mask it was asked for never applied. It is now native
+SYS_UMASK (133). The kernel reduces every create's mode by the caller's mask
+and bounds it by the parent directory's (IDENTITY-DESIGN 9.7 M8), so
+open(O_CREAT) and mkdir pass the mode they are given. SYS_UMASK refuses a bit
+outside 0777, which POSIX leaves to the implementation; umask passes
+mode & 0777, so it always succeeds, as on Linux.
+
+--- a/src/internal/_pouch_fs.h
++++ b/src/internal/_pouch_fs.h
+@@ -33,6 +33,7 @@
+ #define SYS_thyla_getuid       73   /* () -> principal_id (A-1a; NEVER fails) */
+ #define SYS_thyla_getgid       74   /* () -> primary_gid  (A-1a; NEVER fails) */
+ #define SYS_thyla_getppid     132   /* () -> parent pid, 0 if kproc or none (NEVER fails) */
++#define SYS_thyla_umask       133   /* (mask & 0777) -> previous mask (M8; NEVER fails) */
+ 
+ /* SYS_open sentinels / omode (mirror kernel/include/thylacine/syscall.h). */
+ #define POUCH_FROM_ROOT   ((long)-1)   /* SYS_WALK_OPEN_FROM_ROOT */
+--- a/src/stat/umask.c
++++ b/src/stat/umask.c
+@@ -1,7 +1,11 @@
++/* pouch boundary-line: SYS_umask = 0xFFFF -> Thylacine SYS_UMASK (133), operator
++ * vote 2026-10-19 (IDENTITY-DESIGN 9.7 M8). The kernel refuses a bit outside
++ * 0777, so the mask is cut to 0777 first, as Linux cuts it: umask never fails. */
+ #include <sys/stat.h>
+ #include "syscall.h"
++#include "_pouch_fs.h"
+ 
+ mode_t umask(mode_t mode)
+ {
+-	return syscall(SYS_umask, mode);
++	return __syscall(SYS_thyla_umask, mode & 0777);
+ }

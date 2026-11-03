@@ -9,6 +9,7 @@ code:
   - kernel/devenv.c
   - kernel/env.c
   - kernel/include/thylacine/env.h
+  - kernel/test/test_env.c
   - kernel/random.c
   - kernel/chacha20.c
   - kernel/include/thylacine/random.h
@@ -32,6 +33,10 @@ Devs that do not present anything — they *are* what they serve.
 
 ## Contract
 
+Both Devs' readdir records carry the entry's `d_type` at offset 21 beside
+the qid type in byte 0 ([[sub-kernel-spoor]]): every `/env` entry is
+`DT_REG`, a ramfs directory `DT_DIR` and a ramfs file `DT_REG`.
+
 - **`/` (the boot ramfs)** — the files and directories a cpio archive shipped in
   the initrd, a static tree, read-only, every entry system-owned. It is the root
   the machine starts in, and the tree the first process is executed from. The
@@ -40,7 +45,10 @@ Devs that do not present anything — they *are* what they serve.
   ([[dec-2026-09-25-initrd-bin-directory]]).
 - **`/env`** — a directory of the calling process's environment variables. Read
   a name for its value, write or create to set, remove to unset, enumerate for
-  the names. The mount is global; the contents are never anyone else's.
+  the names. The mount is global; the names are always the caller's own. An
+  open variable stays with the environment that opened it, so a descriptor
+  handed to another process reads and writes the opener's variable: that is how
+  the shell's `echo v > /env/NAME` sets the shell's.
 - **`/dev/random`** — an endless stream of bytes nobody can predict, or an error
   if the kernel cannot yet promise that.
 
@@ -130,6 +138,32 @@ the tree's instance" holds — and the mount-table shed at pivot / chroot
 that puts `/env` beyond any `MNOEXEC` mount). So `devenv` sets
 `Dev.devno_per_walker`, and the shed matches it on the device class alone.
 
+**An open variable belongs to the environment that opened it, not to whoever
+holds the descriptor** (operator vote 19, 2026-10-22, building the 2026-09-16
+decision). A shell redirect is the case that forced it: `ut` opens `/env/NAME`
+and hands the descriptor to `echo`, which holds a *copy* of the environment, so
+resolving the caller on every write put the value in `echo`'s copy, where it
+died, and left the shell's variable emptied by the open's truncate. Now the
+open (or the create) takes a reference on its environment into the Spoor's
+private slot, and every read, write and stat through it acts there; the
+directory itself — a lookup, a listing, a create or removal by name — still
+resolves the caller. The slot is owned **exactly while the Spoor is open**:
+only this Dev's open and create set the open flag, and a Spoor clone clears the
+flag while copying the slot, so a clone never owns what it copied and its close
+drops nothing. An environment therefore lives until its process *and* every
+variable opened in it have let go. A variable is held open by a descriptor, a
+mount entry or a Loom registration, each bounded by its holder's table, and
+never by a mapping: this Dev backs none (a map of a variable is refused with
+`ENODEV`, an executable one with the exec floor's `EPERM`), because a cached mapping
+would hold the environment past every descriptor and serve a changed value as
+its old bytes, a variable having no version. The id needs the same care in the other
+direction: ids restart in every environment and a copy keeps them, so a walked
+variable that is not yet open (an `O_PATH` descriptor passed on) carries the
+device number of the environment that resolved it, and an operation on it from
+a process with another environment fails rather than reading that process's
+variable under the same id; a 0-element walk from a variable resolves nothing
+and keeps the number it had.
+
 **The random source's content is manufactured on demand, and its lifetime runs
 backwards.** Where the other two must make their bytes persist, this one must
 make them *stop existing*. A served byte is zeroed in the buffer as it is copied
@@ -179,8 +213,7 @@ The spawn record's environment tail ([[sub-kernel-syscall-abi]]) carries
 NUL-terminated `NAME=VALUE` records, the same shape exec projects. The spawner
 builds a detached environment from them with `env_from_block` before any child
 exists, so a refusal makes none: a record with no `=` or a name the
-environment's own create would refuse (empty, too long, holding a `/`, or `.` or
-`..`, which a walk resolves and no create or unlink reaches) is `T_E_INVAL`, a value past 4096 bytes or
+environment's own create would refuse is `T_E_INVAL`, a value past 4096 bytes or
 a 65th name `T_E_2BIG`. The first `=` ends a name. A later record for a name
 replaces the earlier value in the earlier slot, which is what writing the file
 twice does, so a repeat is never a second entry and never counts against the
@@ -190,16 +223,20 @@ A spawn with the tail forks its child with `RFCENVG`, so the child is born with
 no group: never a copy of its spawner's, which a cross-process environment read
 could otherwise see until the thunk ran. The child's thunk hands the built group
 over with `env_install`, before exec projects it and before the child's first
-instruction; a child with no group adopts it by compare-and-exchange. A process
-that already has a group has it emptied and refilled under its own lock instead,
-the new entries taking ids from that group's counter, past every id it issued;
-no spawn reaches that branch now. **Swapping
+instruction; a child with no group adopts it by compare-and-exchange, and the
+built group's one reference becomes the process's. A process that already has a
+group has it emptied and refilled under its own lock instead, the new entries
+taking ids from that group's counter, past every id it issued; no spawn reaches
+that branch now. **Swapping
 the pointer would have been the simpler code and a use-after-free:** the
 introspection device's flat-block read loads a process's group with no reference
 and then takes its lock, so a reader that loaded the copy just before a swap
 would lock freed memory. Refilling keeps the struct, its lock and its minted
 device number where every reader already points. The install is only sound
-while the thunk is the process's one thread, which is the only place it runs.
+while the thunk is the process's one thread, which is the only place it runs,
+and while no open entry is bound to the group: an open binds the opener's own
+group, and the child has opened nothing yet, so a refill would reach no handle.
+A drained built group is freed with its one reference.
 
 **The boot filesystem manufactures directories that contain nothing.** A mount
 needs somewhere to land — a graft onto a path that does not resolve is not a
@@ -279,8 +316,15 @@ or directory type plus the permission bits; setuid, setgid and sticky are
 dropped) and the parent's index — the pointers all into the archive. The table
 is a `struct ramfs_table` the Dev serves one of; the tests load crafted archives
 into their own. A per-process environment holds
-64 slots, each an inline name of at most 64 bytes and a separately allocated
-value of at most 4096, plus the id counter and the minted device number. The
+a table of slots, each an inline name of at most 64 bytes and a separately allocated
+value of at most 4096, plus the id counter and the minted device number. The table
+starts at 64 slots and doubles on demand to 256 (`env_grow`, operator vote 39): the
+allocation runs outside the Env's lock, slot indices survive so the id order
+`env_install` relies on holds, and a peer that grew first leaves its table in place. A
+clone first grows to the source's size, and `env_install` takes the block's whole table,
+so a committed spawn cannot fail. Legs: `env.table_grows`, `env.grow_after_a_peer`,
+`env.install_any_size`. The clone's re-loop, for a peer that grows the source between its
+unlock and relock, has no leg: only a peer landing inside that window can show it. The
 random state is a cipher context, a 1024-byte output buffer, a count of bytes
 remaining in it, and a countdown to the next strong re-seed.
 
@@ -303,7 +347,7 @@ The environment's lazy allocation is a **compare-and-exchange**, because two pee
 threads of one process can both find no environment and both allocate; the loser
 frees its own and adopts the winner's.
 
-The spawn tail's install is the one writer that empties a whole group. It holds
+An install into an existing group is the one writer that empties a whole group. It holds
 the group's lock across the empty and the refill, so a cross-process block read
 sees the old environment or the new one and never a mix; the built group it
 drains is reachable from no process, so its own fields need no lock.
@@ -311,8 +355,10 @@ drains is reachable from no process, so its own fields need no lock.
 ## Invariants enforced
 
 **[[inv-i1]]** — the environment is per-process content behind a global mount, so
-every operation resolves the *calling* process, and no permission check is
-involved: there is nothing reachable to deny. The minted device number is what
+the directory resolves the *calling* process, and no permission check is
+involved: there is nothing reachable to deny. An open variable acts on the
+environment that opened it, and another process reaches it only through a
+descriptor that process passed on, which is delegation, as for any descriptor. The minted device number is what
 keeps that isolation from being undone by an identity collision in a cache
 elsewhere.
 
@@ -383,6 +429,11 @@ round-trip every megabyte.
   device number must stay stamped at walk time — the identity it prevents
   colliding is consumed by a cache in another subsystem that has no way to
   detect the collision itself.
+- An open variable's reference on its environment is owned exactly while the
+  Spoor is open. A path that set the open flag without this Dev's open or
+  create would drop a reference it never took; one that freed an open Spoor
+  without its close hook (`spoor_unref`) would keep an environment alive
+  forever.
 - The environment's flat-block render must keep **skipping** entries it cannot
   encode rather than emitting them (below).
 - The ramfs table's pointers into the archive mean the archive can never be
@@ -457,12 +508,10 @@ link to a directory is skipped).
   being true when it began preserving each source's permissions. Since B-1d the
   load keeps only a regular file or a directory, so an entry with no type bits is
   refused and counted, and the fallback was removed.
-- **An inherited environment handle reports its parent's device number.** The
-  number is stamped onto the handle at walk time from the walking process; a
-  child inheriting an open handle re-resolves its *contents* against its own
-  environment but keeps the stamp, so the pair names the parent's file while the
-  bytes are the child's — the one case the stamp cannot see. Not reachable from
-  the cache the stamp protects, which always re-walks.
+- **A refused environment id answers EIO.** A walked variable used from a
+  process with another environment fails clean, but the open and the stat report
+  the generic I/O error, which reads as a device fault. The precise answer is a
+  stale handle (`ESTALE`), which the registry does not carry yet.
 - **The flat environment block skips what it cannot encode, and this is the right
   trade.** Rendering the environment in the conventional flat form cannot express
   a name containing an equals sign or a value containing a zero byte, because

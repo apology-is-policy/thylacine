@@ -26,6 +26,7 @@
 #include <thylacine/env.h>
 #include <thylacine/exec.h>
 #include <thylacine/extinction.h>
+#include <thylacine/filelock.h>
 #include <thylacine/handle.h>
 #include <thylacine/image.h>           // D-3: the FILE mmap arm shares exec's Image cache
 #include <thylacine/irqfwd.h>
@@ -1641,12 +1642,7 @@ static struct Spoor *sys_lookup_rw_handle(struct Proc *p, hidx_t h,
 
 // Common user-VA range check (NULL / overflow / past UACCESS bound).
 static bool sys_validate_user_buf(u64 buf_va, u64 len) {
-    if (len == 0)                                    return true;
-    if (buf_va == 0)                                 return false;
-    if (buf_va >= UACCESS_USER_VA_TOP)                return false;
-    if (buf_va + len < buf_va)                        return false;
-    if (buf_va + len > UACCESS_USER_VA_TOP)           return false;
-    return true;
+    return uaccess_user_range_ok(buf_va, len);
 }
 
 // The Spoor half of spoor_write_common: every gate a write passes once the
@@ -1817,8 +1813,9 @@ static s64 sys_write_weft_fastpath(struct Proc *p, hidx_t h, u64 buf_va,
     u32 accepted = 0;
     int v = dev9p_weft_try_write(c, buf_va, (u32)len, &accepted);
     if (v == 0) { spoor_clunk(c); return 0; }       // not a weft write -> byte-copy
-    // v == 1 (handled OK) or v == -1 (weft transport error -- the flow is dead,
-    // the byte-copy path would fail identically, so surface it).
+    // v == 1 (handled OK) or v == -1 (a weft transport error, where the flow is
+    // dead and the byte-copy path would fail identically, or a server's count
+    // past the request, which is no answer to trust: surface it).
     s64 r;
     if (v == 1) { c->offset += accepted; r = (s64)accepted; }
     else        { r = -1; }
@@ -1923,8 +1920,8 @@ static s64 sys_read_weft_fastpath(struct Proc *p, hidx_t h, u64 buf_va,
     int v = dev9p_weft_try_read(c, buf_va, (u32)len, &got);
     if (v == 0) { spoor_clunk(c); return 0; }       // not a weft read -> byte-copy
     // v == 1 (handled OK; netd wrote the bytes into the guest's ring) or v == -1
-    // (weft transport error -- the flow is dead, the byte-copy path would fail
-    // identically, so surface it).
+    // (a weft transport error, where the flow is dead and the byte-copy path would
+    // fail identically, or a server's count past the request: surface it).
     s64 r;
     if (v == 1) { c->offset += got; r = (s64)got; }
     else        { r = -1; }
@@ -2002,12 +1999,11 @@ static s64 sys_read_handler(u64 hraw, u64 buf_va, u64 len) {
 // validate-then-0 path (the POSIX EBADF discipline incl. the #81 O_PATH
 // gate and the positioned off/seekable gates).
 
-static s64 sys_pread_handler(u64 hraw, u64 buf_va, u64 len, u64 off_raw) {
-    struct Thread *t = current_thread();
-    if (!t)                                          return -1;
-    struct Proc *p = t->proc;
-    if (!p)                                          return -1;
-    if (!sys_validate_user_buf(buf_va, len))         return -1;
+static s64 sys_pread_in(struct Proc *p, u64 hraw, u64 buf_va, u64 len,
+                          u64 off_raw) {
+    // A range check only (the copy below catches an unmapped page), but a bad
+    // buffer is EFAULT here exactly as in SYS_READ (#100).
+    if (!sys_validate_user_buf(buf_va, len))         return -T_E_FAULT;
     if (len > SYS_RW_MAX) len = SYS_RW_MAX;
 
     // CF-3 A: two-tier bounce (see sys_read_handler).
@@ -2032,12 +2028,11 @@ static s64 sys_pread_handler(u64 hraw, u64 buf_va, u64 len, u64 off_raw) {
     return got;
 }
 
-static s64 sys_pwrite_handler(u64 hraw, u64 buf_va, u64 len, u64 off_raw) {
-    struct Thread *t = current_thread();
-    if (!t)                                          return -1;
-    struct Proc *p = t->proc;
-    if (!p)                                          return -1;
-    if (!sys_validate_user_buf(buf_va, len))         return -1;
+static s64 sys_pwrite_in(struct Proc *p, u64 hraw, u64 buf_va, u64 len,
+                          u64 off_raw) {
+    // A range check only (the copy below catches an unmapped page), but a bad
+    // buffer is EFAULT here exactly as in SYS_WRITE (#100).
+    if (!sys_validate_user_buf(buf_va, len))         return -T_E_FAULT;
     if (len > SYS_RW_MAX) len = SYS_RW_MAX;
 
     // CF-3 A: two-tier bounce (see sys_write_handler).
@@ -2064,6 +2059,35 @@ static s64 sys_pwrite_handler(u64 hraw, u64 buf_va, u64 len, u64 off_raw) {
     if (heap_scratch) { kfree(heap_scratch); sys_bounce_uncharge(p, len); }
     return wr;
 }
+
+static s64 sys_pread_handler(u64 hraw, u64 buf_va, u64 len, u64 off_raw) {
+    struct Thread *t = current_thread();
+    if (!t)                                          return -1;
+    struct Proc *p = t->proc;
+    if (!p)                                          return -1;
+    return sys_pread_in(p, hraw, buf_va, len, off_raw);
+}
+
+static s64 sys_pwrite_handler(u64 hraw, u64 buf_va, u64 len, u64 off_raw) {
+    struct Thread *t = current_thread();
+    if (!t)                                          return -1;
+    struct Proc *p = t->proc;
+    if (!p)                                          return -1;
+    return sys_pwrite_in(p, hraw, buf_va, len, off_raw);
+}
+
+#ifdef KERNEL_TESTS
+#ifdef KERNEL_TESTS
+s64 sys_pread_for_test(struct Proc *p, u64 h, u64 buf_va, u64 len, u64 off) {
+    return sys_pread_in(p, h, buf_va, len, off);
+}
+#endif // KERNEL_TESTS
+#ifdef KERNEL_TESTS
+s64 sys_pwrite_for_test(struct Proc *p, u64 h, u64 buf_va, u64 len, u64 off) {
+    return sys_pwrite_in(p, h, buf_va, len, off);
+}
+#endif // KERNEL_TESTS
+#endif
 
 // =============================================================================
 // SYS_CLOSE / SYS_DUP — handle table operations (P5-fd-syscalls).
@@ -2120,24 +2144,24 @@ s64 sys_close_for_test(struct Proc *p, u64 h) { return sys_close_in(p, h); }
 // syscalls, stratumd's keyfile_load fails at the first fstat / lseek and
 // the system-pool mount never starts.
 //
-// SYS_FSTAT routes through dev->stat_native; six Devs implement it today
-// (devramfs, dev9p, devhw, devsrv, devproc, devpci -- #46 audit F3 refresh
-// of the stale "only devramfs" 16b-gamma note). Devs without it leave the
-// slot NULL and fstat returns -1, the graceful "no stat for this kind of
-// object" answer. KOBJ_SRV handles are rejected at the kind gate; a devsrv
-// conn SPOOR (dc='s') serves fstat via devsrv_stat_native since #957.
+// SYS_FSTAT routes through dev->stat_native. Every Dev a namespace fd can carry
+// implements it except devcap (the /cap elevation leaves); the other slotless
+// Devs (devnull, devzero, devfull, devrandom, devnone) are reached only by a
+// direct attach, since /dev/* fds carry devdev. A slotless Dev answers
+// -T_E_IO. A handle that names no Spoor answers -T_E_BADF, a KOBJ_SRV listener
+// included (the kind gate); a devsrv conn SPOOR (dc='s') serves fstat via
+// devsrv_stat_native since #957.
 //
 // SYS_LSEEK manipulates the per-Spoor `s64 offset` cursor that SYS_READ /
 // SYS_WRITE advance per call. SEEK_END queries dev->stat_native for size;
-// Devs without stat_native cannot service SEEK_END (returns -1). At v1.0
+// Devs without stat_native cannot service SEEK_END (-T_E_IO). At v1.0
 // no per-Spoor cursor lock — concurrent lseek/read/write on the same fd
 // from different threads is unspecified (POSIX user serializes).
 
 // Inner — kernel-side helper exposing the t_stat fill for a Spoor.
-// Returns 0 on success (out populated), -1 on:
-//   - c is NULL
-//   - dev->stat_native is NULL (Dev does not support native stat)
-//   - dev->stat_native returned an error
+// Returns 0 on success (out populated), -1 for a NULL Spoor or a Dev with no
+// stat_native slot, or the Dev's own failure verbatim (dev9p's is the server's
+// -errno; other Devs answer -1).
 // Non-static (declared in <thylacine/spoor.h>): the stalk resolver shares this
 // stat-fetch for its per-component X-search.
 int spoor_stat_native(struct Spoor *c, struct t_stat *out) {
@@ -2170,7 +2194,18 @@ u64 spoor_file_size(struct Spoor *c) {
 // kind gate, the ref discipline and the Dev call are literally the same code
 // for a phenotyped and a native caller, which is how I-43 ("shape, never
 // authority") holds by construction rather than by review.
-static s64 sys_fstat_for_proc(struct Proc *p, u64 hraw, struct t_stat *out_k) {
+//
+// Returns 0, -T_E_BADF for a handle that names no Spoor (empty, closed, out of
+// range, or another kind), or the Dev's refusal mapped as stalk's err_code maps
+// it, so fstat and stat answer one object's failure alike: a real -errno in
+// [-4095,-2] crosses as itself, and the generic -1 (no stat_native slot, or a
+// Dev's flat failure -- the value a server EPERM also arrives as) reads -T_E_IO.
+// The one exception is a Dev's -T_E_BADF: the handle is live here, so it reads
+// -T_E_IO, and EBADF from fstat always means the number names nothing. (A 9P
+// server's EBADF already arrives as -T_E_IO: the client folds it at map_error.)
+// The phenotype returns this verbatim, so a Linux guest sees the same errno.
+VISIBLE_IF_KERNEL_TESTS
+s64 sys_fstat_for_proc(struct Proc *p, u64 hraw, struct t_stat *out_k) {
     if (!p || !out_k)                                return -1;
 
     // No rights mask (#46): fstat observes metadata, not content -- POSIX
@@ -2194,13 +2229,13 @@ static s64 sys_fstat_for_proc(struct Proc *p, u64 hraw, struct t_stat *out_k) {
     // every exit -- the ref keeps c alive across the (possibly blocking)
     // dev->stat_native.
     struct Spoor *c = sys_lookup_rw_handle(p, sys_hidx_arg(hraw), 0);
-    if (!c)                                           return -1;
+    if (!c)                                           return -(s64)T_E_BADF;
 
-    // Fill a kernel-scratch t_stat from the Dev. Failing the Dev's
-    // stat_native (NULL slot or error return) maps to -1 here.
-    if (spoor_stat_native(c, out_k) != 0)           { spoor_clunk(c); return -1; }
+    int sr = spoor_stat_native(c, out_k);
     spoor_clunk(c);
-    return 0;
+    if (sr == 0)                                     return 0;
+    if (sr == -(int)T_E_BADF)                        return -(s64)T_E_IO;
+    return (sr <= -2 && sr >= -4095) ? (s64)sr : -(s64)T_E_IO;
 }
 
 static s64 sys_fstat_handler(u64 hraw, u64 stat_va) {
@@ -2213,7 +2248,8 @@ static s64 sys_fstat_handler(u64 hraw, u64 stat_va) {
     // user-VA bound; sys_validate_user_buf rejects an out-of-range
     // base or end. Alignment is not required — the per-byte store
     // loop tolerates any alignment.
-    if (!sys_validate_user_buf(stat_va, sizeof(struct t_stat))) return -1;
+    if (!sys_validate_user_buf(stat_va, sizeof(struct t_stat)))
+        return -(s64)T_E_FAULT;
 
     struct t_stat ks;
     s64 rc = sys_fstat_for_proc(p, hraw, &ks);
@@ -2223,7 +2259,7 @@ static s64 sys_fstat_handler(u64 hraw, u64 stat_va) {
     // have partially-written bytes (consistent with SYS_READ).
     const u8 *src = (const u8 *)&ks;
     for (u64 i = 0; i < sizeof(struct t_stat); i++) {
-        if (uaccess_store_u8(stat_va + i, src[i]) != 0) return -1;
+        if (uaccess_store_u8(stat_va + i, src[i]) != 0) return -(s64)T_E_FAULT;
     }
     return 0;
 }
@@ -2294,6 +2330,10 @@ static s64 sys_lseek_handler(u64 hraw, u64 offset_raw, u64 whence_raw) {
         if (offset < 0 && cur < INT64_MIN - offset) { spoor_clunk(c); return -T_E_INVAL; }
         new_off = cur + offset;
         if (new_off < 0)                            { spoor_clunk(c); return -T_E_INVAL; }
+        // A question: storing the answer would rewind a peer's read that moved
+        // the cursor meanwhile. ftell asks this, and so does a lock call's
+        // SEEK_CUR.
+        if (offset == 0)                            { spoor_clunk(c); return cur; }
         break;
     }
     case T_SEEK_END: {
@@ -2338,7 +2378,7 @@ static s64 sys_lseek_handler(u64 hraw, u64 offset_raw, u64 whence_raw) {
 // D-1: `stalk_flags` is 0 (follow a final symlink -- POSIX stat) or
 // STALK_NOFOLLOW (the lstat shape -- the final link's OWN record); the
 // vivarium newfstatat shell passes it for AT_SYMLINK_NOFOLLOW. Native SYS_STAT
-// always passes 0 (no native lstat surface at D-1 -- a recorded seam).
+// passes 0 and native SYS_LSTAT STALK_NOFOLLOW (operator vote 2026-10-20).
 VISIBLE_IF_KERNEL_TESTS
 s64 sys_stat_for_proc(struct Proc *p, const char *path, u64 path_len,
                       u32 stalk_flags, struct t_stat *out_k) {
@@ -2376,17 +2416,16 @@ s64 sys_stat_for_proc(struct Proc *p, const char *path, u64 path_len,
 // readlink core (the git chunk; VIVARIUM.md section 6.26). Resolves `path` (the
 // SYS_STAT resolution: cwd-join for a relative path, containment at root_spoor)
 // with STALK_WALK|STALK_NOFOLLOW so the LINK ITSELF is the quarry, then reads
-// its target via the Dev's .readlink slot and copies min(target, bufsiz) bytes
-// out -- readlink(2) does NOT NUL-terminate and returns the byte count. The
-// caller has already copied `path` into kernel memory (NUL-free); buf_va/bufsiz
-// are the still-user destination and are validated HERE, before the copy-out.
-static s64 sys_readlink_for_proc(struct Proc *p, const char *path, u64 path_len,
-                                 u64 buf_va, u64 bufsiz) {
-    if (!p || !path)                                 return -1;
+// its target via the Dev's .readlink slot into `tgt` (kernel memory, at least
+// SYS_OPEN_PATH_MAX bytes; no NUL is written). The #37 *_for_proc shape, as
+// sys_stat_for_proc: `path` is kernel memory, already NUL-free. Returns the
+// target's length (1..SYS_OPEN_PATH_MAX), -1 (structural), or -errno.
+VISIBLE_IF_KERNEL_TESTS
+s64 sys_readlink_target_for_proc(struct Proc *p, const char *path, u64 path_len,
+                                 char *tgt) {
+    if (!p || !path || !tgt)                         return -1;
     if (path_len == 0 || path_len > SYS_OPEN_PATH_MAX) return -1;
     if (!p->territory)                               return -1;
-    // POSIX readlink(2): a zero-size buffer is EINVAL.
-    if (bufsiz == 0)                                 return -(s64)T_E_INVAL;
 
     struct Spoor *start = territory_root_ref(p->territory);
     if (!start)                                      return -1;
@@ -2421,7 +2460,6 @@ static s64 sys_readlink_for_proc(struct Proc *p, const char *path, u64 path_len,
         return -(s64)T_E_INVAL;
     }
 
-    char tgt[SYS_OPEN_PATH_MAX + 1];
     long tlen = q->dev->readlink(q, tgt, SYS_OPEN_PATH_MAX);
     spoor_clunk(q);
     // A NEGATIVE return is the Dev's REAL errno (dev9p_wire_errno bounds it:
@@ -2435,6 +2473,22 @@ static s64 sys_readlink_for_proc(struct Proc *p, const char *path, u64 path_len,
     // target, which IS EINVAL.
     if (tlen < 0)                                    return (s64)tlen;
     if (tlen == 0 || tlen > SYS_OPEN_PATH_MAX)       return -(s64)T_E_INVAL;
+    return (s64)tlen;
+}
+
+// The readlink shell both entries share -- the phenotype's readlinkat and the
+// native SYS_READLINK: resolve and read the target, then copy min(target,
+// bufsiz) bytes out. readlink(2) does NOT NUL-terminate and returns the byte
+// count. buf_va/bufsiz are the still-user destination, validated HERE, before
+// the copy-out.
+static s64 sys_readlink_for_proc(struct Proc *p, const char *path, u64 path_len,
+                                 u64 buf_va, u64 bufsiz) {
+    // POSIX readlink(2): a zero-size buffer is EINVAL.
+    if (bufsiz == 0)                                 return -(s64)T_E_INVAL;
+
+    char tgt[SYS_OPEN_PATH_MAX + 1];
+    s64 tlen = sys_readlink_target_for_proc(p, path, path_len, tgt);
+    if (tlen < 0)                                    return tlen;
 
     // THE COPY-OUT (the getdents64 P0 class): the destination is a raw user
     // pointer, so validate the exact span before writing. uaccess_copy_out's
@@ -2479,6 +2533,68 @@ static s64 sys_stat_handler(u64 path_va, u64 path_len_raw, u64 stat_va) {
         if (uaccess_store_u8(stat_va + i, src[i]) != 0) return -1;
     }
     return 0;
+}
+
+// SYS_LSTAT and SYS_READLINK (operator vote 2026-10-20,
+// dec-2026-10-20-native-lstat-readlink): the native entries over the cores the
+// phenotype's newfstatat and readlinkat call. Each copies its path in as
+// SYS_STAT does, but answers SYS_OPEN_CREATE's errnos where SYS_STAT answers a
+// bare -1: -T_E_INVAL for an empty or over-long path or an embedded NUL,
+// -T_E_FAULT for one the kernel cannot read.
+VISIBLE_IF_KERNEL_TESTS
+s64 sys_lstat_handler(u64 path_va, u64 path_len_raw, u64 stat_va) {
+    struct Thread *t = current_thread();
+    if (!t)                                          return -1;
+    struct Proc *p = t->proc;
+    if (!p)                                          return -1;
+
+    if (path_len_raw == 0)                           return -(s64)T_E_INVAL;
+    if (path_len_raw > SYS_OPEN_PATH_MAX)            return -(s64)T_E_INVAL;
+    if (!sys_validate_user_buf(path_va, path_len_raw)) return -(s64)T_E_FAULT;
+    if (!sys_validate_user_buf(stat_va, sizeof(struct t_stat)))
+        return -(s64)T_E_FAULT;
+
+    char path_scratch[SYS_OPEN_PATH_MAX + 1];
+    for (u64 i = 0; i < path_len_raw; i++) {
+        u8 b;
+        if (uaccess_load_u8(path_va + i, &b) != 0)   return -(s64)T_E_FAULT;
+        if (b == '\0')                               return -(s64)T_E_INVAL;
+        path_scratch[i] = (char)b;
+    }
+    path_scratch[path_len_raw] = '\0';
+
+    struct t_stat ks;
+    s64 rc = sys_stat_for_proc(p, path_scratch, path_len_raw, STALK_NOFOLLOW, &ks);
+    if (rc != 0)                                     return rc;
+
+    const u8 *src = (const u8 *)&ks;
+    for (u64 i = 0; i < sizeof(struct t_stat); i++) {
+        if (uaccess_store_u8(stat_va + i, src[i]) != 0) return -(s64)T_E_FAULT;
+    }
+    return 0;
+}
+
+VISIBLE_IF_KERNEL_TESTS
+s64 sys_readlink_handler(u64 path_va, u64 path_len_raw, u64 buf_va, u64 bufsiz) {
+    struct Thread *t = current_thread();
+    if (!t)                                          return -1;
+    struct Proc *p = t->proc;
+    if (!p)                                          return -1;
+
+    if (path_len_raw == 0)                           return -(s64)T_E_INVAL;
+    if (path_len_raw > SYS_OPEN_PATH_MAX)            return -(s64)T_E_INVAL;
+    if (!sys_validate_user_buf(path_va, path_len_raw)) return -(s64)T_E_FAULT;
+
+    char path_scratch[SYS_OPEN_PATH_MAX + 1];
+    for (u64 i = 0; i < path_len_raw; i++) {
+        u8 b;
+        if (uaccess_load_u8(path_va + i, &b) != 0)   return -(s64)T_E_FAULT;
+        if (b == '\0')                               return -(s64)T_E_INVAL;
+        path_scratch[i] = (char)b;
+    }
+    path_scratch[path_len_raw] = '\0';
+
+    return sys_readlink_for_proc(p, path_scratch, path_len_raw, buf_va, bufsiz);
 }
 
 // =============================================================================
@@ -2698,9 +2814,11 @@ s64 sys_attach_9p_for_proc(struct Proc *p, u64 tx_fd_raw, u64 rx_fd_raw,
     // last-ref destroy handles adapter + transport cleanup.
 
     // The server behind a caller-supplied transport is not known to the kernel:
-    // the attacher is the session's one recorded end (/ctl/9p-sessions).
-    p9_attached_set_ctl_owners(att, __atomic_load_n(&p->principal_id, __ATOMIC_ACQUIRE),
-                               PRINCIPAL_INVALID);
+    // the attacher is the session's one recorded end (/ctl/9p-sessions), and the
+    // one principal its creates are admitted to (M7).
+    u32 attacher = __atomic_load_n(&p->principal_id, __ATOMIC_ACQUIRE);
+    p9_attached_set_ctl_owners(att, attacher, PRINCIPAL_INVALID);
+    p9_client_set_ends(att->client, attacher, PRINCIPAL_INVALID);
 
     // The identity cape and the remote declaration: stamped on the still-private
     // client before the root Spoor exists (the handle publication below orders
@@ -3397,9 +3515,9 @@ static s64 sys_walk_open_handler(u64 spoor_fd_raw, u64 name_va,
     hidx_t fd = handle_alloc(p, KOBJ_SPOOR, r, nc);
     if (fd < 0) {
         spoor_clunk(nc);
-        // #80 seam: POSIX names a full per-process fd table EMFILE (24), which
-        // is not in the errno registry (an ERRORS.md append needs signoff).
-        // ENOMEM is the registered out-of-resources code and is at least true.
+        // #80 seam: POSIX names a full per-process fd table EMFILE (24). It
+        // was not registered when this was written and is now (errno.h); the
+        // switch from ENOMEM is an errno change for a vote, not made here.
         return -T_E_NOMEM;
     }
     return (s64)fd;
@@ -3650,6 +3768,50 @@ s64 sys_getgid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
     struct Proc *p = t->proc;                        if (!p) return -1;
     return (s64)(u64)p->primary_gid;
 }
+
+// The parent link is rewritten when a parent exits (proc_reparent_children),
+// so it is read under g_proc_table_lock, which proc_parent_pid takes.
+static s64 getppid_of(struct Proc *p) {
+    return (s64)proc_parent_pid(p);
+}
+
+VISIBLE_IF_KERNEL_TESTS
+s64 sys_getppid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+    (void)a0; (void)a1; (void)a2; (void)a3;
+    struct Thread *t = current_thread();             if (!t) return -1;
+    struct Proc *p = t->proc;                        if (!p) return -1;
+    return getppid_of(p);
+}
+
+// M8: the full register is checked, so a stray high bit is refused rather than
+// dropped, as sys_wstat refuses stray mode bits.
+static s64 umask_of(struct Proc *p, u64 mask) {
+    if (mask & ~(u64)0777u) return -T_E_INVAL;
+    return (s64)proc_umask_exchange(p, (u32)mask);
+}
+
+VISIBLE_IF_KERNEL_TESTS
+s64 sys_umask_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+    (void)a1; (void)a2; (void)a3;
+    struct Thread *t = current_thread();             if (!t) return -1;
+    struct Proc *p = t->proc;                        if (!p) return -1;
+    return umask_of(p, a0);
+}
+
+#ifdef KERNEL_TESTS
+s64 sys_umask_for_test(struct Proc *p, u64 mask) {
+    return umask_of(p, mask);
+}
+#endif // KERNEL_TESTS
+
+// Test support, as sys_postnote_cross_for_test: the handler's own arm for a
+// Proc the test names. The test thread runs as kproc, whose pid and parent pid
+// are both 0, so only a named child can tell the parent from the Proc itself.
+#ifdef KERNEL_TESTS
+s64 sys_getppid_for_test(struct Proc *p) {
+    return getppid_of(p);
+}
+#endif // KERNEL_TESTS
 
 // =============================================================================
 // PTY-1a (PTY-DESIGN.md section 4): POSIX sessions + process groups. Thin
@@ -4210,14 +4372,14 @@ static s64 sys_open_handler(u64 start_fd_raw, u64 path_va,
 //   2. spoor_clone(parent) -> nc (shallow aux = parent's fid).
 //   3. CLONE-walk nc (dev->walk with nname=0) so nc holds its OWN fid still
 //      pointing at the parent dir (so create doesn't mutate the parent's fid).
-//   4. nc->dev->create(nc, name, omode, perm, primary_gid) — does Tlcreate
+//   4. nc->dev->create(nc, name, omode, perm, parent's gid) — does Tlcreate
 //      (file) or Tmkdir+walk+lopen (dir) on nc's fid, leaving nc opened on the
 //      new object. Returns nc on success, NULL on failure.
 //   5. install nc in the handle table (R|W|TRANSFER, matching SYS_WALK_OPEN).
 //
-// The created object's group is the CALLER's primary_gid (A-1a identity on the
-// Proc), carried into the 9P gid field. Per-file rwx ENFORCEMENT is A-2d; this
-// is the create MECHANISM (I-22 holds — nothing enforces rwx yet to bypass).
+// The created object's group is the parent directory's (IDENTITY-DESIGN 3.5
+// F-5), carried into the 9P gid field; its mode is the asked mode less the
+// caller's umask, bounded by the parent's (9.7 M8).
 // =============================================================================
 
 // #50 (VIVARIUM.md section 6.24): the create MECHANICS, extracted from
@@ -4381,10 +4543,42 @@ static s64 spoor_create_install(struct Proc *p, struct Spoor *src,
     // .create stub returns NULL) so this is effectively dead there, but correct:
     // a non-system principal lacks other-w on a 0755 dir and is denied here
     // before the create attempt. fail-closed on no stat.
-    if (src->dev->perm_enforced) {
-        struct t_stat parent_st;
+    //
+    // A name that already exists answers EEXIST even when the caller may not
+    // write the directory, as Linux's lookup-then-may_create order gives, so
+    // ported code's `mkdir(p) < 0 && errno != EEXIST` sees what it tests for.
+    // POSIX permits either answer; the lookup discloses only what the caller's
+    // search (X) right already does, so it runs only when X is granted. The
+    // probe neither follows a final symlink nor checks the child's own bits:
+    // any entry by that name is "exists", as for Linux's exclusive lookup.
+    //
+    // M7 (IDENTITY-DESIGN 9.7): the server stamps a create with its session's
+    // credential, never the caller's, so a create through a 9P session is
+    // admitted only to a principal at one of the session's two ends. The
+    // refusal joins the W|X one -- an existing name keeps its EEXIST answer --
+    // and is decided even where the Dev does not enforce rwx, and whatever the
+    // caller's DAC override: perm_check answers for the mode bits, not for whom
+    // the server will name as the creator.
+    bool admitted = dev9p_create_admits(src, __atomic_load_n(&p->principal_id,
+                                                             __ATOMIC_ACQUIRE));
+    // The parent's stat also bounds the new mode below (M8), wherever the Dev
+    // enforces rwx, and names the new object's group (F-5) on every Dev.
+    struct t_stat parent_st;
+    bool have_parent_st = false;
+    const struct t_stat *bound_by = NULL;
+    if (src->dev->perm_enforced || !admitted) {
         if (spoor_stat_native(src, &parent_st) != 0)          { spoor_clunk(src); return -T_E_IO; }
-        if (perm_check(p, &parent_st, PERM_W | PERM_X) != 0)  { spoor_clunk(src); return -T_E_ACCES; }
+        have_parent_st = true;
+        if (src->dev->perm_enforced) bound_by = &parent_st;
+        if (!admitted || perm_check(p, &parent_st, PERM_W | PERM_X) != 0) {
+            s64 deny = -T_E_ACCES;
+            if (perm_check(p, &parent_st, PERM_X) == 0 &&
+                // width: both callers refused a name past SYS_WALK_OPEN_NAME_MAX
+                stalk_union_has_child(p, src, name_scratch, (u32)name_len_raw))
+                deny = -T_E_EXIST;
+            spoor_clunk(src);
+            return deny;
+        }
     }
 
     // stalk-3b (STALK-DESIGN.md §5.3 / D2): a CREATE against a /srv directory
@@ -4423,6 +4617,31 @@ static s64 spoor_create_install(struct Proc *p, struct Spoor *src,
     // create perm (e.g. a dev9p Tlcreate), where the high bits would corrupt
     // the wire perm -- reject them.
     if (perm & SYS_WALK_CREATE_DMSRV_BITS)              { spoor_clunk(src); return -T_E_INVAL; }
+
+    // F-5 (IDENTITY-DESIGN 3.5): the new object's group is the parent
+    // directory's, as Plan 9's open(5) and BSD stamp it, never the creator's
+    // primary group. The server stamps the gid it is sent, so the kernel sends
+    // the parent's -- here and in Loom's create ops (loom_dir_mutation_gate).
+    // A Dev that does not enforce rwx took no stat above, so it is taken here,
+    // and a create whose parent cannot be stat'd is refused, as on the Devs
+    // that do. A parent whose stat names no group (GID_INVALID: the server left
+    // it out) passes none on. On a caped session dev9p_create sends P9_NOGID
+    // whatever this names.
+    if (!have_parent_st && spoor_stat_native(src, &parent_st) != 0) {
+        spoor_clunk(src);
+        return -T_E_IO;
+    }
+
+    // M8 (IDENTITY-DESIGN 9.7): the creator's umask, then the parent
+    // directory's bound (Plan 9 open(5)). The server applies neither --
+    // Stratum stamps mode & 07777, the 9P2000.L convention in which the client
+    // masks -- so the kernel must: here, and in Loom's MKDIR and MKNOD
+    // (loom_dir_mutation_gate), the one other door to a create. Without bound_by
+    // (a Dev that does not enforce rwx, where a mode carries no authority)
+    // only the umask applies.
+    perm = (perm & ~0777u) |
+           perm_create_mode(perm, (perm & SYS_WALK_CREATE_DMDIR) != 0,
+                            proc_umask(p), bound_by);
 
     // Clone the parent, then CLONE-walk so nc carries its own fid at the
     // parent dir (a 0-component walk). create then mutates nc's fid into the
@@ -4490,7 +4709,7 @@ static s64 spoor_create_install(struct Proc *p, struct Spoor *src,
     // width: both callers refused omode bits outside the valid set
     u32 omode_dev = (u32)(omode_raw & ~(u64)SYS_WALK_OPEN_NOFOLLOW);
     struct Spoor *opened = nc->dev->create(nc, name_scratch, (int)omode_dev,
-                                            perm, p->primary_gid);
+                                            perm, parent_st.gid);
     if (!opened) {
         // #99 (#102 errno-loss): propagate the real create errno the Dev
         // recorded (dev9p maps its Tlcreate/Tmkdir Rlerror -- e.g. -EEXIST on a
@@ -4741,7 +4960,10 @@ static s64 sys_open_create_kpath_how(struct Proc *p, u64 start_fd_raw,
                                                        SYS_WALK_OPEN_OTRUNC),
                                     perm, how);
         if (rc >= 0 || rc != -(s64)T_E_EXIST) break;
-        if (attempt >= 1) { rc = -(s64)T_E_EXIST; break; }
+        // Twice "not there" from the open and "exists" from the create: the
+        // name is a link to nothing (a create never follows one). A plain
+        // O_CREAT never answers EEXIST, so the answer is the open's.
+        if (attempt >= 1) { rc = -(s64)T_E_NOENT; break; }
     }
     spoor_clunk(start);
     return rc;
@@ -4776,7 +4998,8 @@ static s64 sys_open_create_handler(u64 start_fd_raw, u64 path_va,
 
 // =============================================================================
 // SYS_FSYNC — durability barrier (FS-mutation foundation; IDENTITY-DESIGN.md
-// §9.2). RIGHT_WRITE (fsync is the write-side flush). NULL .fsync slot -> -1.
+// §9.2). RIGHT_WRITE (fsync is the write-side flush), else -T_E_BADF; a Dev
+// with a NULL .fsync slot -> -T_E_OPNOTSUPP.
 // =============================================================================
 
 static s64 sys_fsync_handler(u64 fd_raw, u64 datasync_raw) {
@@ -5291,66 +5514,159 @@ static s64 sys_unlink_handler(u64 parent_fd_raw, u64 name_va, u64 name_len_raw,
 }
 
 // =============================================================================
-// SYS_WSTAT — chmod/chown MECHANISM (A-2a; IDENTITY-DESIGN.md §9.5). Apply the
-// (mode, uid, gid) subset selected by the `valid` mask to an open Spoor via
-// dev->wstat_native (dev9p -> Tsetattr). Register-passed (no user buffer).
-//
-// This is the mechanism only: the handle RIGHT_WRITE gate is the sole gate;
-// the per-file rwx PERMISSION policy (owner-only chmod, CAP_HOSTOWNER chown)
-// is A-2d (the kernel rwx-enforcement layer). I-22 stands -- no rwx enforcement
-// exists yet to bypass. The value checks here are structural (mask sanity,
-// mode in 0777 with setuid rejected per §S5, uid/gid != INVALID), not policy.
+// SYS_WSTAT — chmod/chown/ftruncate/utimens (A-2a + Go Stage 5 + G12;
+// IDENTITY-DESIGN.md §9.5). Apply the (mode, uid, gid, size, times) subset
+// selected by the `valid` mask to an open Spoor via dev->wstat_native (dev9p
+// -> Tsetattr). The value checks here are structural (mask sanity, mode in
+// 0777 with setuid rejected per §S5, uid/gid != INVALID, size in the s64
+// domain, times in range); the authority is perm_wstat_check for the metadata
+// axes (perm-enforced Devs, A-2d) and the fd's RIGHT_WRITE for SIZE. Every
+// refusal answers its errno (the SYS_WSTAT ABI comment lists them).
 // =============================================================================
 
 static int spoor_wstat_native(struct Spoor *c, u32 valid, u32 mode,
-                              u32 uid, u32 gid, u64 size) {
-    if (!c)                                          return -1;
-    if (!c->dev || !c->dev->wstat_native)            return -1;
-    return c->dev->wstat_native(c, valid, mode, uid, gid, size);
+                              u32 uid, u32 gid, u64 size,
+                              const struct t_timespec *times) {
+    if (!c->dev || !c->dev->wstat_native)            return -(int)T_E_OPNOTSUPP;
+    return c->dev->wstat_native(c, valid, mode, uid, gid, size, times);
 }
 
-// Inner — testable without a live EL0 thread (all-scalar args, no user
-// buffer). The handler thins to current_thread() + this.
-static s64 sys_wstat_spoor_consume(struct Proc *p, struct Spoor *c, u32 valid,
-                                   u32 mode, u32 uid, u32 gid, u64 size);
+// A stat's or a Dev's answer on its way out of SYS_WSTAT, by SYS_FSTAT's rule:
+// a -errno in [-4095,-2] crosses as itself, except EBADF, which would blame an
+// fd that is fine (EIO, as fstat answers it); anything else is EIO.
+static s64 wstat_dev_errno(int rc) {
+    if (rc == -(int)T_E_BADF)                        return -(s64)T_E_IO;
+    return (rc <= -2 && rc >= -4095) ? (s64)rc : -(s64)T_E_IO;
+}
 
-VISIBLE_IF_KERNEL_TESTS
-s64 sys_wstat_for_proc(struct Proc *p, hidx_t h, u32 valid, u32 mode,
-                       u32 uid, u32 gid, u64 size) {
-    if (!p)                                          return -1;
+// A SYS_WSTAT time from the caller: POSIX's range for a stored time, and no
+// time before the epoch (the 9P wire carries an unsigned second).
+static bool wstat_time_ok(const struct t_timespec *ts) {
+    return ts->tv_sec >= 0 && ts->tv_nsec >= 0 && ts->tv_nsec <= 999999999;
+}
 
-    // Mask sanity: at least one known bit, no reserved bit (so a future
-    // T_WSTAT_* extension cannot be silently dropped -- same discipline as
-    // SYS_UNLINK's flags / SYS_WALK_CREATE's perm).
-    if (valid == 0)                                  return -1;
-    if (valid & ~(u32)T_WSTAT_VALID)                 return -1;
+// Mask sanity: at least one known bit, no reserved bit (so a future
+// T_WSTAT_* extension cannot be silently dropped -- same discipline as
+// SYS_UNLINK's flags / SYS_WALK_CREATE's perm). A _SET bit modifies its time
+// bit and means nothing alone. 0, or -T_E_INVAL.
+static s64 wstat_mask_check(u32 valid) {
+    if (valid == 0)                                  return -(s64)T_E_INVAL;
+    if (valid & ~(u32)T_WSTAT_VALID)                 return -(s64)T_E_INVAL;
+    if ((valid & T_WSTAT_ATIME_SET) && !(valid & T_WSTAT_ATIME))
+        return -(s64)T_E_INVAL;
+    if ((valid & T_WSTAT_MTIME_SET) && !(valid & T_WSTAT_MTIME))
+        return -(s64)T_E_INVAL;
+    return 0;
+}
+
+// The value checks every SYS_WSTAT runs before it names a file. A field whose
+// bit is clear is zeroed; `tv` receives only the times whose _SET bit is set,
+// and *tvp is NULL when none is. 0, or -T_E_INVAL.
+static s64 wstat_prepare(u32 valid, u32 *mode, u32 *uid, u32 *gid, u64 *size,
+                         const struct t_timespec *times,
+                         struct t_timespec tv[2],
+                         const struct t_timespec **tvp) {
+    s64 me = wstat_mask_check(valid);
+    if (me != 0)                                     return me;
 
     // Per-field structural bounds. A field whose valid bit is clear is forced
     // to 0 before the Dev call (the server ignores it -- its valid bit is
     // clear -- but a defined 0 avoids passing a caller-controlled stale value).
     if (valid & T_WSTAT_MODE) {
-        if (mode & ~(u32)T_WSTAT_MODE_MASK)          return -1;  // setuid/sgid/sticky + stray bits
+        if (*mode & ~(u32)T_WSTAT_MODE_MASK)         return -(s64)T_E_INVAL;  // setuid/sgid/sticky + stray bits
     } else {
-        mode = 0;
+        *mode = 0;
     }
     if (valid & T_WSTAT_UID) {
-        if (uid == PRINCIPAL_INVALID)                return -1;
+        if (*uid == PRINCIPAL_INVALID)               return -(s64)T_E_INVAL;
     } else {
-        uid = 0;
+        *uid = 0;
     }
     if (valid & T_WSTAT_GID) {
-        if (gid == GID_INVALID)                      return -1;
+        if (*gid == GID_INVALID)                     return -(s64)T_E_INVAL;
     } else {
-        gid = 0;
+        *gid = 0;
     }
     if (valid & T_WSTAT_SIZE) {
         // The s64 offset domain (the SYS_LSEEK/SYS_PREAD bound): a length
         // whose sign bit is set cannot be represented by the size_t/off_t
         // plumbing below and is rejected up front.
-        if (size > 0x7FFFFFFFFFFFFFFFull)            return -1;
+        if (*size > 0x7FFFFFFFFFFFFFFFull)           return -(s64)T_E_INVAL;
     } else {
-        size = 0;
+        *size = 0;
     }
+    // The times reach the Dev through a local copy holding only the entries
+    // whose _SET bit is set (the rest stay 0), so nothing the caller left in
+    // the other slot travels.
+    for (size_t i = 0; i < 2 * sizeof(tv[0]); i++) ((u8 *)tv)[i] = 0;
+    *tvp = NULL;
+    if (valid & (T_WSTAT_ATIME_SET | T_WSTAT_MTIME_SET)) {
+        if (!times)                                  return -(s64)T_E_INVAL;
+        if (valid & T_WSTAT_ATIME_SET) {
+            if (!wstat_time_ok(&times[0]))           return -(s64)T_E_INVAL;
+            tv[0] = times[0];
+        }
+        if (valid & T_WSTAT_MTIME_SET) {
+            if (!wstat_time_ok(&times[1]))           return -(s64)T_E_INVAL;
+            tv[1] = times[1];
+        }
+        *tvp = tv;
+    }
+    return 0;
+}
+
+// The rest of SYS_WSTAT, on a REF-HELD Spoor already admitted by kind: the
+// O_PATH size refusal, the A-2d policy, the Dev. The caller clunks `c`.
+static s64 wstat_apply(struct Proc *p, struct Spoor *c, u32 valid, u32 mode,
+                       u32 uid, u32 gid, u64 size,
+                       const struct t_timespec *tvp) {
+    // #81 class, extended to the size axis: an O_PATH (CWALKONLY) handle is
+    // born RIGHT_WRITE but is perm_check-EXEMPT at open (it needs only path
+    // X-search, not W) -- so its RIGHT_WRITE is hollow. The metadata axes are
+    // safe (perm_wstat_check below is their real authority, applied regardless
+    // of the handle rights), but T_WSTAT_SIZE deliberately relies on
+    // RIGHT_WRITE as its sole gate, so a truncate through an O_PATH fd would
+    // mutate a file the caller has no W permission on. Reject it -- a
+    // navigation handle is not a byte-I/O channel, and truncate IS byte I/O.
+    if ((valid & T_WSTAT_SIZE) && (c->flag & CWALKONLY))
+        return -(s64)T_E_BADF;
+
+    // A-2d: the metadata policy (IDENTITY-DESIGN.md 3.7.1 + perm.c). Gated on
+    // perm_enforced (dev9p live since A-3; devramfs .wstat_native is NULL so
+    // SYS_WSTAT on it answers EOPNOTSUPP below regardless). Reads the file's
+    // CURRENT stat, then applies the policy -- for the METADATA axes and the
+    // times: since #47 this identity check is the ONLY write-authority gate on
+    // the mode/uid/gid/times path -- do not weaken it. A size-only call skips
+    // it (its identity check was the open-time perm_check, above). Its denial
+    // is EACCES, never EPERM (-EPERM is the -1 the pouch seam reads as EIO).
+    if ((valid & (T_WSTAT_MODE | T_WSTAT_UID | T_WSTAT_GID | T_WSTAT_TIMES)) &&
+        c->dev && c->dev->perm_enforced) {
+        if (c->dev->wstat_bind) {
+            int br = c->dev->wstat_bind(c);
+            if (br != 0)                             return wstat_dev_errno(br);
+        }
+        struct t_stat cur;
+        int sr = spoor_stat_native(c, &cur);
+        if (sr != 0)                                 return wstat_dev_errno(sr);
+        if (perm_wstat_check(p, &cur, valid, gid) != 0)
+            return -(s64)T_E_ACCES;
+    }
+    int rc = spoor_wstat_native(c, valid, mode, uid, gid, size, tvp);
+    return rc == 0 ? 0 : wstat_dev_errno(rc);
+}
+
+// Inner — testable without a live EL0 thread. `times` is a KERNEL copy of
+// {atime, mtime}, read only for a _SET bit (NULL when none is set). The
+// handler thins to current_thread() + the x6 copy-in + this.
+VISIBLE_IF_KERNEL_TESTS
+s64 sys_wstat_for_proc(struct Proc *p, hidx_t h, u32 valid, u32 mode,
+                       u32 uid, u32 gid, u64 size,
+                       const struct t_timespec *times) {
+    if (!p)                                          return -1;
+    struct t_timespec tv[2];
+    const struct t_timespec *tvp;
+    s64 e = wstat_prepare(valid, &mode, &uid, &gid, &size, times, tv, &tvp);
+    if (e != 0)                                      return e;
 
     // #47 (the #46 sibling): kind-gate only -- KOBJ_SPOOR, ANY rights (rights
     // mask 0, the SYS_FSTAT/#46 + SYS_LSEEK posture); rejects KOBJ_SRV. POSIX
@@ -5374,55 +5690,56 @@ s64 sys_wstat_for_proc(struct Proc *p, hidx_t h, u32 valid, u32 mode,
     // that open, so no perm_wstat_check applies to the size axis below.
     u32 want_rights = (valid & T_WSTAT_SIZE) ? RIGHT_WRITE : 0;
     struct Spoor *c = sys_lookup_rw_handle(p, h, want_rights);
-    if (!c)                                          return -1;
-    return sys_wstat_spoor_consume(p, c, valid, mode, uid, gid, size);
+    if (!c)                                          return -(s64)T_E_BADF;
+    s64 rc = wstat_apply(p, c, valid, mode, uid, gid, size, tvp);
+    spoor_clunk(c);
+    return rc;
 }
 
-// The half of SYS_WSTAT after the descriptor: `c` is ref-held (the caller's
-// reference is consumed on every exit) and the field words are already checked.
-// The phenotype's fchmodat calls it on a Spoor it resolved without a descriptor.
-static s64 sys_wstat_spoor_consume(struct Proc *p, struct Spoor *c, u32 valid,
-                                   u32 mode, u32 uid, u32 gid, u64 size) {
-    // #81 class, extended to the size axis: an O_PATH (CWALKONLY) handle is
-    // born RIGHT_WRITE but is perm_check-EXEMPT at open (it needs only path
-    // X-search, not W) -- so its RIGHT_WRITE is hollow. The metadata axes are
-    // safe (perm_wstat_check below is their real authority, applied regardless
-    // of the handle rights), but T_WSTAT_SIZE deliberately relies on
-    // RIGHT_WRITE as its sole gate, so a truncate through an O_PATH fd would
-    // mutate a file the caller has no W permission on. Reject it -- a
-    // navigation handle is not a byte-I/O channel, and truncate IS byte I/O.
-    if ((valid & T_WSTAT_SIZE) && (c->flag & CWALKONLY)) {
-        spoor_clunk(c);
-        return -1;
-    }
-
-    // A-2d: the ownership-change policy (IDENTITY-DESIGN.md 3.7.1 + perm.c).
-    // Gated on perm_enforced (dev9p live since A-3; devramfs .wstat_native is
-    // NULL so SYS_WSTAT on it returns -1 below regardless). Reads the file's
-    // CURRENT owner, then applies the policy -- for the METADATA axes only:
-    // since #47 this identity check is the ONLY write-authority gate on the
-    // mode/uid/gid path -- do not weaken it. A size-only call skips it (its
-    // identity check was the open-time perm_check, above).
-    if ((valid & (T_WSTAT_MODE | T_WSTAT_UID | T_WSTAT_GID)) &&
-        c->dev && c->dev->perm_enforced) {
-        struct t_stat cur;
-        if (spoor_stat_native(c, &cur) != 0)              { spoor_clunk(c); return -1; }
-        if (perm_wstat_check(p, cur.uid, valid, gid) != 0){ spoor_clunk(c); return -1; }
-    }
-    int rc = spoor_wstat_native(c, valid, mode, uid, gid, size);
-    spoor_clunk(c);
-    return rc == 0 ? 0 : -1;
+// SYS_WSTAT's checks and policy on a Spoor the kernel resolved for itself, with
+// no descriptor behind it (the phenotype's path forms: a descriptor installed
+// for the call would be visible to the caller's peer threads, which could close
+// it and reuse its index). `c` stays the caller's reference. SIZE is refused:
+// it is byte I/O, and a resolved Spoor carries no write envelope to gate it.
+VISIBLE_IF_KERNEL_TESTS
+s64 sys_wstat_spoor_for_proc(struct Proc *p, struct Spoor *c,
+                             u32 valid, u32 mode, u32 uid, u32 gid,
+                             const struct t_timespec *times) {
+    if (!p || !c)                                    return -1;
+    if (valid & T_WSTAT_SIZE)                        return -(s64)T_E_INVAL;
+    u64 size = 0;
+    struct t_timespec tv[2];
+    const struct t_timespec *tvp;
+    s64 e = wstat_prepare(valid, &mode, &uid, &gid, &size, times, tv, &tvp);
+    if (e != 0)                                      return e;
+    return wstat_apply(p, c, valid, mode, uid, gid, size, tvp);
 }
 
 static s64 sys_wstat_handler(u64 hraw, u64 valid_raw, u64 mode_raw,
-                             u64 uid_raw, u64 gid_raw, u64 size_raw) {
+                             u64 uid_raw, u64 gid_raw, u64 size_raw,
+                             u64 times_va) {
     struct Thread *t = current_thread();
     if (!t)                                          return -1;
     struct Proc *p = t->proc;
     if (!p)                                          return -1;
     if ((valid_raw | mode_raw | uid_raw | gid_raw) > 0xffffffffull) return -T_E_INVAL;
-    return sys_wstat_for_proc(p, sys_hidx_arg(hraw), (u32)valid_raw, (u32)mode_raw,
-                              (u32)uid_raw, (u32)gid_raw, size_raw);
+    // x6 is read only when a well-formed mask has a _SET bit: a caller setting
+    // mode, or "now", leaves x6 as register residue, and that is never
+    // touched. A malformed mask is refused first, so its EINVAL cannot turn
+    // into EFAULT on whatever x6 happens to hold.
+    u32 valid = (u32)valid_raw;
+    s64 me = wstat_mask_check(valid);
+    if (me != 0)                                     return me;
+    struct t_timespec tv[2];
+    const struct t_timespec *tvp = NULL;
+    if (valid & (T_WSTAT_ATIME_SET | T_WSTAT_MTIME_SET)) {
+        if (!sys_validate_user_buf(times_va, sizeof(tv)) ||
+            uaccess_copy_in(tv, times_va, sizeof(tv)) != 0)
+            return -(s64)T_E_FAULT;
+        tvp = tv;
+    }
+    return sys_wstat_for_proc(p, sys_hidx_arg(hraw), valid, (u32)mode_raw,
+                              (u32)uid_raw, (u32)gid_raw, size_raw, tvp);
 }
 
 // =============================================================================
@@ -6182,8 +6499,9 @@ static s64 postnote_cross(struct Proc *caller, int target_pid, const char *name)
     // The name is judged before the target is looked for, as the phenotype's
     // kill judges its signal before its walk: the walk answers a dead child 0
     // without reaching notes_post's gates, so a name they refuse is refused
-    // here, whatever the target's state.
-    if (!notes_name_user_postable(name)) return -(s64)T_E_INVAL;
+    // here, whatever the target's state. A NULL name is the probe, which the
+    // walk answers after the gate without posting.
+    if (name && !notes_name_user_postable(name)) return -(s64)T_E_INVAL;
 
     struct postnote_walk_ctx wctx = {
         .target_pid = target_pid,
@@ -6209,6 +6527,24 @@ s64 sys_postnote_cross_for_test(struct Proc *caller, int target_pid,
     return postnote_cross(caller, target_pid, name);
 }
 #endif
+
+// The probe: kill(pid, 0), an empty name (operator vote 2026-10-14 #6). Self
+// needs no gate; another pid gets the cross arm's walk with no name, which
+// answers the gate's verdict and posts nothing. It discloses no more than a
+// post does: a post names ESRCH and EACCES the same way.
+static s64 postnote_probe(struct Proc *p, u64 pid_raw) {
+    s32 target_pid = 0;
+    if (!sys_s32_arg(pid_raw, &target_pid))          return -(s64)T_E_INVAL;
+    if (target_pid == p->pid || target_pid == 0)     return 0;
+    return postnote_cross(p, target_pid, NULL);
+}
+
+// Test support, as sys_postnote_cross_for_test.
+#ifdef KERNEL_TESTS
+s64 sys_postnote_probe_for_test(struct Proc *caller, u64 pid_raw) {
+    return postnote_probe(caller, pid_raw);
+}
+#endif // KERNEL_TESTS
 
 // The SELF arm, extracted from sys_postnote_handler so it has a name a test can
 // call (aux#253). The handler resolves `p` from current_thread(); everything
@@ -6279,6 +6615,8 @@ static s64 sys_postnote_handler(struct exception_context *ctx, u64 pid_raw,
     if (!t || !t->proc) return -(s64)T_E_INVAL;
     struct Proc *p = t->proc;
 
+    if (name_len_raw == 0) return postnote_probe(p, pid_raw);
+
     char buf[NOTE_NAME_MAX];
     s64 name_err = postnote_copy_name(name_va, name_len_raw, buf);
     if (name_err) return name_err;
@@ -6291,10 +6629,11 @@ static s64 sys_postnote_handler(struct exception_context *ctx, u64 pid_raw,
     // self-post sentinel (P6-pouch-signals sub-chunk 13b): pouch's
     // raise() has no userspace getpid path at v1.0, so it passes 0 and
     // relies on this kernel-side mapping. POSIX semantics: kill(0, sig)
-    // means "send to every process in the calling process's group" —
-    // Thylacine has no process groups at v1.0, so the closest equivalent
-    // is "send to my own Proc" and the sentinel-shaped collapse is
-    // POSIX-conforming. The sentinel is documented as ABI in
+    // means "send to every process in the calling process's group". The
+    // gate admits one Proc at a time (a group post is the tty path's
+    // notes_post_pgrp, never this call), so the sentinel reaches only the
+    // caller: a divergence for a caller whose group has other members. The
+    // sentinel is documented as ABI in
     // kernel/include/thylacine/syscall.h (SYS_POSTNOTE docblock).
     //
     // SYS_EXIT_GROUP / kill cross-thread shootdown (ARCH §7.9.1, I-24): a
@@ -6647,12 +6986,64 @@ static s64 sys_burrow_detach_handler(u64 vaddr_raw, u64 length_raw) {
 // sysReserve/sysUnused (#321).
 // =============================================================================
 
-// SYS_BURROW_ATTACH_LAZY: the demand-zero twin of sys_burrow_attach_for_proc. Same
-// window placement + VMA install, but (a) the Burrow is BURROW_TYPE_ANON_LAZY (no
-// eager pages), and (b) the I-32 page_count is NOT charged here -- it is charged per
-// page at FAULT time (the whole point of a free reservation, so page_count tracks
-// true RSS). The VMA-count axis (PROC_VMA_MAX) IS charged inside vma_insert, so a
-// free lazy reservation cannot exhaust the vma slab.
+// The lazy anonymous reservation SYS_BURROW_ATTACH_LAZY and SYS_BURROW_RESERVE
+// (and the phenotype anon mmap, through the latter) all make: placed first-fit
+// in the burrow window, then served by extending an adjacent lazy mapping over
+// it (ARCH 6.5, adjacent anonymous mappings merge) or, when none qualifies, by
+// a fresh Burrow and VMA. The placement is the same either way; only the
+// representation differs. No page charge here -- a reservation commits and
+// charges per page at fault, so page_count tracks true RSS -- and the mapping's
+// ceiling is RW whatever `prot` it starts at (ARCH 6.5: the reserve-then-commit
+// idiom; an extended neighbour has that ceiling already, as part of what
+// qualified it). Returns the address, or -T_E_NOMEM.
+static s64 lazy_reserve_core(struct Proc *p, u64 length, u64 align, u32 prot) {
+    spin_lock(&p->as->lock);
+    u64 vaddr;
+    if (vma_find_gap_aligned(p, length, align, EXEC_USER_BURROW_BASE,
+                             EXEC_USER_BURROW_TOP, &vaddr) != 0) {
+        spin_unlock(&p->as->lock);
+        return -(s64)T_E_NOMEM;
+    }
+    // An extension adds no VMA; it may grow the neighbour's pagemap, whose
+    // nodes are charged like a fault's.
+    if (vma_extend_anon_in(p->as, proc_resource_exempt(p), vaddr, length, prot,
+                           EXEC_USER_BURROW_BASE, EXEC_USER_BURROW_TOP) == 0) {
+        spin_unlock(&p->as->lock);
+        return (s64)vaddr;
+    }
+    // A fresh mapping: the VMA-count cap inside burrow_map bounds the free
+    // reservation.
+    struct Burrow *b = burrow_create_anon_lazy(length);
+    if (!b) {
+        spin_unlock(&p->as->lock);
+        return -(s64)T_E_NOMEM;
+    }
+    // burrow_map installs the VMA (mapping_count -> 1, the VMA charged); the
+    // construction handle is dropped after. On a refusal (overlap / VMA cap /
+    // OOM) that handle is the only ref, and freeing an EMPTY lazy Burrow never
+    // sleeps (no Spoor, no pages), so that drop may stay under the lock.
+    if (burrow_map(p, b, vaddr, length, prot) != 0) {
+        burrow_unref(b);
+        spin_unlock(&p->as->lock);
+        return -(s64)T_E_NOMEM;
+    }
+    // vma_alloc set the ceiling to the mint prot (the safe default for every
+    // OTHER mint); raise it under the same lock hold, before anything can
+    // observe the mapping.
+    struct Vma *nv = vma_lookup(p, vaddr);
+    if (nv) vma_set_prot_max(nv, VMA_PROT_RW);
+    // The construction handle goes in the same hold, so a reservation a sibling
+    // thread places beside this one never finds the Burrow named by a handle and
+    // mints where it would extend (ARCH 6.5): the mapping shape does not depend
+    // on scheduling. The mapping holds the Burrow, so this drop cannot free it.
+    burrow_unref(b);
+    spin_unlock(&p->as->lock);
+    return (s64)vaddr;
+}
+
+// SYS_BURROW_ATTACH_LAZY: the demand-zero twin of sys_burrow_attach_for_proc --
+// the lazy reservation at RW, every refusal answered -1 as this call always
+// has.
 VISIBLE_IF_KERNEL_TESTS
 s64 sys_burrow_attach_lazy_for_proc(struct Proc *p, u64 length_raw) {
     if (!p)                                          return -1;
@@ -6665,44 +7056,8 @@ s64 sys_burrow_attach_lazy_for_proc(struct Proc *p, u64 length_raw) {
     if (length_raw > BURROW_RESERVE_MAX)             return -1;
 
     u64 length = (length_raw + (PAGE_SIZE - 1)) & ~(u64)(PAGE_SIZE - 1);
-
-    spin_lock(&p->as->lock);
-
-    u64 vaddr;
-    if (vma_find_gap(p, length, EXEC_USER_BURROW_BASE,
-                     EXEC_USER_BURROW_TOP, &vaddr) != 0) {
-        spin_unlock(&p->as->lock);
-        return -1;
-    }
-
-    // No proc_page_charge here -- lazy reservations commit (and charge) per page at
-    // fault time. The VMA-count cap (vma_insert -> proc_vma_charge) is the bound on
-    // the free reservation; a non-TCB Proc at PROC_VMA_MAX fails burrow_map below.
-    struct Burrow *b = burrow_create_anon_lazy(length);
-    if (!b) {
-        spin_unlock(&p->as->lock);
-        return -1;
-    }
-
-    // burrow_map installs the VMA (vma_alloc -> burrow_acquire_mapping; mapping_count
-    // -> 1; vma_insert -> proc_vma_charge). Then drop the construction handle:
-    // handle_count -> 0, mapping_count = 1 keeps the Burrow alive (Tier 1). On
-    // burrow_map failure (overlap / vma-cap / OOM) the construction handle is the
-    // only ref; burrow_unref frees the empty lazy Burrow (no pages committed).
-    if (burrow_map(p, b, vaddr, length, VMA_PROT_RW) != 0) {
-        // The construction handle is the only ref; freeing an EMPTY anon-lazy
-        // Burrow never sleeps (no Spoor to clunk, no pages committed), so this
-        // one may stay under the lock.
-        burrow_unref(b);
-        spin_unlock(&p->as->lock);
-        return -1;
-    }
-    spin_unlock(&p->as->lock);
-    // #193: the success-path drop sits OUTSIDE as->lock to match the FILE arm --
-    // an anon-lazy free never sleeps today, but two success paths should not
-    // need two different safety arguments.
-    burrow_unref(b);
-    return (s64)vaddr;
+    s64 r = lazy_reserve_core(p, length, 0, VMA_PROT_RW);
+    return r < 0 ? -1 : r;
 }
 
 // DISTRO D-3: the FILE mmap arm. A read-only / executable file-backed
@@ -6752,7 +7107,8 @@ static bool exec_map_vouched(struct Proc *p, const struct Spoor *sp) {
     // THE FLOOR (#217 F1). Only a Dev that serves real file content may back
     // executable pages at all. This is NOT redundant with the mount check below
     // -- it is what catches the class the mount check structurally cannot:
-    // devenv stamps the CALLING Proc's env devno at walk time, so a container's
+    // devenv stamps, at walk time, the env devno of the Proc whose walk resolved
+    // the name, so a container's
     // /env files never share (dc, devno) with the /env mount source viv
     // installed, and no MNOEXEC flag can ever cover them. An environment
     // variable is not code; nor is a /proc field, a /srv endpoint or a console.
@@ -6826,6 +7182,11 @@ s64 sys_mmap_file_for_proc(struct Proc *p, u64 fd_raw, u64 length_raw,
     if (!sp->dev || !sp->dev->read) {
         spoor_clunk(sp);
         return -(s64)T_E_INVAL;
+    }
+    // After the exec floor, as Linux checks noexec before a missing mmap.
+    if (sp->dev->no_file_mapping) {                  // Dev.no_file_mapping
+        spoor_clunk(sp);
+        return -(s64)T_E_NODEV;
     }
 
     // #194 (I-32): the backing size is REQUIRED on this guest-facing arm -- it
@@ -7044,6 +7405,11 @@ s64 sys_mmap_fixed_file_for_proc(struct Proc *p, u64 addr, u64 fd_raw,
         spoor_clunk(sp);
         return -(s64)T_E_PERM;
     }
+    // After the exec floor, as in the non-fixed arm.
+    if (sp->dev->no_file_mapping) {                  // Dev.no_file_mapping
+        spoor_clunk(sp);
+        return -(s64)T_E_NODEV;
+    }
 
     bool writable = (prot & (u32)VMA_PROT_WRITE) != 0;
     struct Burrow *b;
@@ -7131,10 +7497,14 @@ s64 sys_mmap_fixed_anon_for_proc(struct Proc *p, u64 addr, u64 length_raw,
         // is admitted now that the raise exists, and it must be raisable.
         struct Vma *nv = vma_lookup(p, addr);
         if (nv) vma_set_prot_max(nv, VMA_PROT_RW);
+        // In the same hold, as lazy_reserve_core drops its own: the mapping
+        // holds the Burrow, so this drop cannot free it.
+        burrow_unref(b);
+        b = NULL;
     }
     spin_unlock(&p->as->lock);
     if (fx_free) burrow_free_deferred(fx_free);
-    burrow_unref(b);
+    if (b) burrow_unref(b);                          // refused: the last ref
     if (rc != 0)                                     return (s64)rc;   // the surgery's -T_E_* (B-1a')
     return (s64)addr;
 }
@@ -7252,40 +7622,9 @@ s64 sys_burrow_reserve_for_proc(struct Proc *p, u64 length_raw, u64 prot_raw,
 
     u64 length = (length_raw + (PAGE_SIZE - 1)) & ~(u64)(PAGE_SIZE - 1);
     u64 align  = align_log2 ? (1ull << align_log2) : 0;
-
-    spin_lock(&p->as->lock);
-    u64 vaddr;
-    if (vma_find_gap_aligned(p, length, align, EXEC_USER_BURROW_BASE,
-                             EXEC_USER_BURROW_TOP, &vaddr) != 0) {
-        spin_unlock(&p->as->lock);
-        return -(s64)T_E_NOMEM;
-    }
-    // No page charge here -- a reservation commits (and charges) per page at
-    // fault; the VMA-count cap inside burrow_map bounds the free reservation
-    // (the SYS_BURROW_ATTACH_LAZY posture, byte for byte).
-    struct Burrow *b = burrow_create_anon_lazy(length);
-    if (!b) {
-        spin_unlock(&p->as->lock);
-        return -(s64)T_E_NOMEM;
-    }
+    // The commit is a later SYS_BURROW_PROTECT (the reserve-then-commit idiom).
     // width: burrow_prot_word_check refused every high bit
-    int rc = burrow_map(p, b, vaddr, length, (u32)prot_raw);
-    if (rc == 0) {
-        // The mint's ceiling is RW whatever prot it starts at (ARCH 6.5): this
-        // is the reserve-then-commit idiom, and the commit is a later
-        // SYS_BURROW_PROTECT. vma_alloc set the ceiling to the mint prot (the
-        // safe default for every OTHER mint); raise it here, under the same
-        // lock hold, before anything can observe the mapping.
-        struct Vma *nv = vma_lookup(p, vaddr);
-        if (nv) vma_set_prot_max(nv, VMA_PROT_RW);
-    } else {
-        burrow_unref(b);                 // the only ref; an empty lazy free never sleeps
-        spin_unlock(&p->as->lock);
-        return -(s64)T_E_NOMEM;
-    }
-    spin_unlock(&p->as->lock);
-    burrow_unref(b);                     // #193: the success-path drop, outside the lock
-    return (s64)vaddr;
+    return lazy_reserve_core(p, length, align, (u32)prot_raw);
 }
 
 VISIBLE_IF_KERNEL_TESTS
@@ -8055,6 +8394,17 @@ s64 sys_weft_share_for_proc(struct Proc *p, u64 ring_va, u64 ring_size_raw) {
     return (s64)share_id;
 }
 
+// Undo a mapping of `b` this call made at [va, va + len), only while that is
+// still exactly what sits there. The caller dropped as->lock since the map,
+// and a sibling thread may have detached it and placed its own mapping at
+// the same VA: the weft clunk's identity guard (G-2 audit F1). Caller holds
+// as->lock.
+static void unmap_if_still_ours(struct Proc *p, struct Burrow *b, u64 va, size_t len) {
+    struct Vma *v = vma_lookup(p, va);
+    if (v && v->burrow == b && v->vaddr_start == va && v->vaddr_end - va == len)
+        (void)burrow_unmap(p, va, len);
+}
+
 // The claim-and-map half of SYS_WEFT_MAP (after Tweft returned a share_id).
 // Claims the share (consume-once -> the registration pin transfers to us), maps
 // the ring whole into the guest, records the binding. Returns the guest ring VA,
@@ -8120,7 +8470,7 @@ static s64 weft_map_claimed(struct Proc *p, struct dev9p_priv *priv,
         : weft_binding_alloc(v, va, (u32)bsize, ring_entries);
     if (!b) {
         spin_lock(&p->as->lock);
-        (void)burrow_unmap(p, va, bsize);
+        unmap_if_still_ours(p, v, va, bsize);
         spin_unlock(&p->as->lock);
         burrow_unref(v);
         return -1;
@@ -8135,7 +8485,7 @@ static s64 weft_map_claimed(struct Proc *p, struct dev9p_priv *priv,
     if (!__atomic_compare_exchange_n(&priv->weft, &expected, b, false,
                                      __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
         spin_lock(&p->as->lock);
-        (void)burrow_unmap(p, va, bsize);
+        unmap_if_still_ours(p, v, va, bsize);
         spin_unlock(&p->as->lock);
         weft_binding_release(b);         // unrefs b->burrow (the pin) + frees b
         return (s64)expected->guest_va;  // expected == the winner's live binding
@@ -8678,6 +9028,86 @@ static s64 sys_torpor_wake_handler(u64 addr_va, u64 count_raw) {
     return sys_torpor_wake_for_proc(t->proc, addr_va, (u32)count_raw);
 }
 
+// Read only slot metadata under the existing handle-table lock. No object
+// reference, capability, or rights are acquired; allocation pressure cannot
+// turn a live descriptor into an invalid one. Range-check before narrowing.
+static s64 sys_handle_flags_get_in(struct Proc *p, u64 hraw) {
+    if (hraw >= (u64)PROC_HANDLE_MAX) return -(s64)T_E_BADF;
+    struct handle_status st;
+    if (handle_get_status(p, (hidx_t)hraw, &st) != 0) return -(s64)T_E_BADF;
+    u64 word = st.cloexec ? (u64)SYS_HANDLE_CLOSE_ON_EXEC : 0;
+    word |= (u64)(st.omode & 3u) << SYS_HANDLE_STATUS_OMODE_SHIFT;
+    if (st.nonblock)                       word |= SYS_HANDLE_STATUS_NONBLOCK;
+    if (st.omode & SYS_WALK_OPEN_OAPPEND)  word |= SYS_HANDLE_STATUS_APPEND;
+    return (s64)word;
+}
+
+// The descriptor flag and target replacement share existing table ownership.
+// Range checks precede narrowing; a failed mutation never re-queries a slot.
+static s64 sys_handle_flags_set_in(struct Proc *p, u64 hraw, u64 flags) {
+    if (flags & ~(u64)SYS_HANDLE_CLOSE_ON_EXEC) return -(s64)T_E_INVAL;
+    if (hraw >= (u64)PROC_HANDLE_MAX) return -(s64)T_E_BADF;
+    return handle_set_cloexec(p, (hidx_t)hraw, flags != 0) < 0
+        ? -(s64)T_E_BADF : 0;
+}
+
+// SYS_HANDLE_DUP_LOWEST makes `target` a floor: POSIX F_DUPFD answers EINVAL
+// for a floor out of range (an argument error) where dup2 answers EBADF for a
+// target out of range, and a source may equal its floor -- the result never
+// can, since the source's own slot is occupied. An out-of-range floor is
+// clamped to PROC_HANDLE_MAX rather than refused here, so the checked core
+// decides it AFTER the source (a closed source is EBADF whatever the floor).
+static s64 sys_handle_dup_to_in(struct Proc *p, u64 old, u64 target, u64 flags) {
+    if (flags & ~(u64)(SYS_HANDLE_CLOSE_ON_EXEC | SYS_HANDLE_DUP_LOWEST))
+        return -(s64)T_E_INVAL;
+    bool cloexec = (flags & SYS_HANDLE_CLOSE_ON_EXEC) != 0;
+    if (old >= (u64)PROC_HANDLE_MAX) return -(s64)T_E_BADF;
+    if (flags & SYS_HANDLE_DUP_LOWEST) {
+        // width: the arm that narrows runs only below PROC_HANDLE_MAX
+        hidx_t floor = target >= (u64)PROC_HANDLE_MAX ? PROC_HANDLE_MAX : (hidx_t)target;
+        return handle_dup_posix_checked(p, (hidx_t)old, floor, cloexec);
+    }
+    if (target >= (u64)PROC_HANDLE_MAX) return -(s64)T_E_BADF;
+    if (old == target) return -(s64)T_E_INVAL;
+    return handle_dup_to_checked(p, (hidx_t)old, (hidx_t)target, cloexec);
+}
+
+static s64 sys_handle_flags_get_handler(u64 hraw) {
+    struct Thread *t = current_thread();
+    if (!t || !t->proc) return -(s64)T_E_INVAL;
+    return sys_handle_flags_get_in(t->proc, hraw);
+}
+
+static s64 sys_handle_flags_set_handler(u64 hraw, u64 flags) {
+    struct Thread *t = current_thread();
+    if (!t || !t->proc) return -(s64)T_E_INVAL;
+    return sys_handle_flags_set_in(t->proc, hraw, flags);
+}
+
+static s64 sys_handle_dup_to_handler(u64 old, u64 target, u64 flags) {
+    struct Thread *t = current_thread();
+    if (!t || !t->proc) return -(s64)T_E_INVAL;
+    return sys_handle_dup_to_in(t->proc, old, target, flags);
+}
+
+#ifdef KERNEL_TESTS
+#ifdef KERNEL_TESTS
+s64 sys_handle_flags_get_for_test(struct Proc *p, u64 h) {
+    return sys_handle_flags_get_in(p, h);
+}
+#endif // KERNEL_TESTS
+#ifdef KERNEL_TESTS
+s64 sys_handle_flags_set_for_test(struct Proc *p, u64 h, u64 flags) {
+    return sys_handle_flags_set_in(p, h, flags);
+}
+#endif // KERNEL_TESTS
+#ifdef KERNEL_TESTS
+s64 sys_handle_dup_to_for_test(struct Proc *p, u64 old, u64 target, u64 flags) {
+    return sys_handle_dup_to_in(p, old, target, flags);
+}
+#endif // KERNEL_TESTS
+#endif
+
 static s64 sys_dup_handler(u64 hraw, u64 new_rights_raw) {
     struct Thread *t = current_thread();
     if (!t)                                          return -1;
@@ -8731,8 +9161,9 @@ static s64 sys_dup_handler(u64 hraw, u64 new_rights_raw) {
 
 // Inner — testable kernel-internally with a Proc handle + a RESOLVED
 // mount-point Spoor (stalk-2: the SVC wrapper stalk's the path; this inner
-// does the source rights gate + flags check + Plan 9's Emount (-T_E_NOTDIR;
-// every other refusal is -1) + the mount-table op). The mount
+// does the source rights gate + flags check + Plan 9's Emount + the
+// mount-table op). Each refusal answers its errno (ERRORS.md "Mount and
+// unmount"); only the NULL guards, which EL0 cannot reach, stay -1. The mount
 // table keys on the mount point's (dc, devno, qid.path) identity, extracted
 // inside territory.c::mount, which retains the mountpoint Spoor (its own ref)
 // only as the covered member of a union the mount starts.
@@ -8742,14 +9173,14 @@ int sys_mount_for_proc(struct Proc *p, hidx_t source_fd,
     if (!p)                                          return -1;
     if (!p->territory)                               return -1;
     if (!mountpoint)                                 return -1;
-    if (flags & ~SYS_MOUNT_VALID_FLAGS)               return -1;
+    if (flags & ~SYS_MOUNT_VALID_FLAGS)               return -T_E_INVAL;
     // UM-8 F10: MREPL / MBEFORE / MAFTER are mutually-exclusive placement modes
     // (Plan 9; territory.tla models one `mb` boolean + a repl action). More than
     // one set is a caller error -- mount()'s dispatch would silently take MREPL
     // then MBEFORE -- so reject loudly rather than act on an ambiguous request.
     // (place & (place-1)) != 0 iff more than one placement bit is set.
     u32 place = flags & (u32)(MREPL | MBEFORE | MAFTER);
-    if (place & (place - 1))                          return -1;
+    if (place & (place - 1))                          return -T_E_INVAL;
 
     // RIGHT_READ on the source: a mount holder consumes the source's
     // tree (walks it, reads files through it). A handle without READ
@@ -8757,7 +9188,7 @@ int sys_mount_for_proc(struct Proc *p, hidx_t source_fd,
     // separately required for cross-Proc transfer surfaces (Phase 5+),
     // not for the mount installation itself.
     struct Spoor *source = sys_lookup_spoor(p, source_fd, RIGHT_READ);
-    if (!source)                                     return -1;
+    if (!source)                                     return -T_E_BADF;
 
     // Plan 9 cmount's Emount (ARCH 9.6.1): a source whose type differs from the
     // point's would leave a name walked as one kind of file resolving as the
@@ -8774,23 +9205,29 @@ int sys_mount_for_proc(struct Proc *p, hidx_t source_fd,
     }
 
     // territory.c::mount handles: idempotency (no-op on duplicate), MREPL
-    // (replace existing entry), full-table rejection, and the per-entry
-    // spoor_ref. Returns 0 / -1 / -2 (table full) -> collapse to 0 / -1.
+    // (replace existing entry), the cycle, full-table and allocation refusals,
+    // and the per-entry spoor_ref. It answers -3 for a cycle, -2 for a full
+    // table and -4 when its entries cannot be allocated; its -1 (a NULL or
+    // corrupt Spoor) cannot arise here.
     // #844: source is REF-HELD (a borrow); mount() takes its own per-entry
     // ref, so release the borrow after.
     int rc = mount(p->territory, source, mountpoint, flags);
     spoor_clunk(source);
+    if (rc == -3)                                    return -T_E_LOOP;
+    if (rc == -2)                                    return -T_E_NOSPC;
+    if (rc == -4)                                    return -T_E_NOMEM;
     return rc == 0 ? 0 : -1;
 }
 
-// Inner — testable kernel-internally. Returns 0 on success, -1 if no
-// entry matches the mount point's identity.
+// Inner — testable kernel-internally. Returns 0 on success, -T_E_INVAL if no
+// entry matches the mount point's identity (nothing is mounted there; Linux's
+// umount2 answer).
 VISIBLE_IF_KERNEL_TESTS
 int sys_unmount_for_proc(struct Proc *p, struct Spoor *mountpoint) {
     if (!p)                                          return -1;
     if (!p->territory)                               return -1;
     if (!mountpoint)                                 return -1;
-    if (unmount(p->territory, mountpoint) != 0)       return -1;
+    if (unmount(p->territory, mountpoint) != 0)       return -T_E_INVAL;
     return 0;
 }
 
@@ -8799,14 +9236,22 @@ int sys_unmount_for_proc(struct Proc *p, struct Spoor *mountpoint) {
 // NOT open -- so a re-mount onto an already-mounted point keys on the SAME
 // underlying identity and MREPL replaces it). Shared by SYS_MOUNT + UNMOUNT.
 // Returns the owned mount-point Spoor (ref==1; the caller clunks it after the
-// table op) or NULL on any failure. v1.0 resolves from root only (absolute
-// paths); a relative-mount start_fd is a v1.x add.
+// table op), or NULL with *rc_out set to the refusal: SYS_OPEN_CREATE's path
+// checks (-T_E_INVAL, -T_E_FAULT), then the resolver's errno. v1.0 resolves
+// from root only (absolute paths); a relative-mount start_fd is a v1.x add.
 static struct Spoor *sys_resolve_mountpoint(struct Proc *p,
-                                            u64 path_va, u64 path_len_raw) {
+                                            u64 path_va, u64 path_len_raw,
+                                            s64 *rc_out) {
+    *rc_out = -1;
     if (!p || !p->territory)                          return NULL;
-    if (path_len_raw == 0)                            return NULL;
-    if (path_len_raw > SYS_OPEN_PATH_MAX)             return NULL;
-    if (!sys_validate_user_buf(path_va, path_len_raw)) return NULL;
+    if (path_len_raw == 0 || path_len_raw > SYS_OPEN_PATH_MAX) {
+        *rc_out = -(s64)T_E_INVAL;
+        return NULL;
+    }
+    if (!sys_validate_user_buf(path_va, path_len_raw)) {
+        *rc_out = -(s64)T_E_FAULT;
+        return NULL;
+    }
 
     // RW-4 SA-F1: REF-HELD root (was a bare borrow -- a concurrent pivot_root
     // could free `start` while stalk walks it -> UAF). Clunked after stalk below
@@ -8820,14 +9265,27 @@ static struct Spoor *sys_resolve_mountpoint(struct Proc *p,
     char path_scratch[SYS_OPEN_PATH_MAX + 1];
     for (u64 i = 0; i < path_len_raw; i++) {
         u8 b;
-        if (uaccess_load_u8(path_va + i, &b) != 0)    { spoor_clunk(start); return NULL; }
-        if (b == '\0')                                { spoor_clunk(start); return NULL; }
+        if (uaccess_load_u8(path_va + i, &b) != 0) {
+            spoor_clunk(start);
+            *rc_out = -(s64)T_E_FAULT;
+            return NULL;
+        }
+        if (b == '\0') {
+            spoor_clunk(start);
+            *rc_out = -(s64)T_E_INVAL;
+            return NULL;
+        }
         path_scratch[i] = (char)b;
     }
     path_scratch[path_len_raw] = '\0';
 
-    struct Spoor *mp = stalk(p, start, path_scratch, path_len_raw, STALK_MOUNT, 0);
+    int err = 0;
+    struct Spoor *mp = stalk_err(p, start, path_scratch, path_len_raw,
+                                 STALK_MOUNT, 0, &err);
     spoor_clunk(start);   // SA-F1: release the root ref (stalk only borrowed it)
+    // stalk_err names a positive cause with every NULL; a 0 must never read as
+    // success.
+    if (!mp) *rc_out = err > 0 ? -(s64)err : -1;
     return mp;
 }
 
@@ -8837,13 +9295,16 @@ static s64 sys_mount_handler(u64 path_va, u64 path_len_raw,
     if (!t)                                          return -1;
     struct Proc *p = t->proc;
     if (!p)                                          return -1;
-    if (flags_raw > (u64)0xFFFFFFFFu)                 return -1;
+    if (flags_raw > (u64)0xFFFFFFFFu)                 return -(s64)T_E_INVAL;
+    // At full width, before the narrowing cast: (1 << 32) + 3 must not name
+    // handle 3.
+    if (source_fd_raw >= (u64)PROC_HANDLE_MAX)        return -(s64)T_E_BADF;
 
-    struct Spoor *mp = sys_resolve_mountpoint(p, path_va, path_len_raw);
-    if (!mp)                                          return -1;
+    s64 rc = -1;
+    struct Spoor *mp = sys_resolve_mountpoint(p, path_va, path_len_raw, &rc);
+    if (!mp)                                          return rc;
 
-    s64 rc = (s64)sys_mount_for_proc(p, sys_hidx_arg(source_fd_raw), mp,
-                                     (u32)flags_raw);
+    rc = (s64)sys_mount_for_proc(p, sys_hidx_arg(source_fd_raw), mp, (u32)flags_raw);
     // territory.c::mount copied mp's identity (and took its own ref where it
     // keeps mp as a union's covered member) -- release ours.
     spoor_clunk(mp);
@@ -8856,10 +9317,11 @@ static s64 sys_unmount_handler(u64 path_va, u64 path_len_raw) {
     struct Proc *p = t->proc;
     if (!p)                                          return -1;
 
-    struct Spoor *mp = sys_resolve_mountpoint(p, path_va, path_len_raw);
-    if (!mp)                                          return -1;
+    s64 rc = -1;
+    struct Spoor *mp = sys_resolve_mountpoint(p, path_va, path_len_raw, &rc);
+    if (!mp)                                          return rc;
 
-    s64 rc = (s64)sys_unmount_for_proc(p, mp);
+    rc = (s64)sys_unmount_for_proc(p, mp);
     spoor_clunk(mp);
     return rc;
 }
@@ -9111,8 +9573,8 @@ static void sys_spawn_thunk(void *arg) {
 // disarm, a pipe's EOF, a SrvConn teardown, a 9P fid clunk) must run then
 // (shed audit r4 F1; aux's H6).
 VISIBLE_IF_KERNEL_TESTS
-void sys_spawn_unbump_fds(struct Spoor *const *bumped, u32 n) {
-    for (u32 j = 0; j < n; j++) spoor_clunk(bumped[j]);
+void sys_spawn_unbump_fds(struct Proc *p, struct Spoor *const *bumped, u32 n) {
+    for (u32 j = 0; j < n; j++) handle_endow_drop(p, bumped[j]);
 }
 
 static int sys_bump_inherit_fds(struct Proc *p, const u32 *fds, u32 fd_count,
@@ -9120,21 +9582,15 @@ static int sys_bump_inherit_fds(struct Proc *p, const u32 *fds, u32 fd_count,
                                 rights_t bumped_rights[SYS_SPAWN_MAX_FDS]) {
     u32 bumped_count = 0;
     for (u32 i = 0; i < fd_count; i++) {
-        // #844: snapshot + the obj ref. Take the child's long-lived spoor_ref
-        // into bumped[], then handle_put releases the borrow. On get-fail
-        // (hh zeroed -> no-op put) or kind-mismatch, put + unwind prior bumps.
-        struct Handle hh;
-        if (handle_get(p, (hidx_t)fds[i], &hh) < 0 || hh.kind != KOBJ_SPOOR) {
-            handle_put(&hh);
-            sys_spawn_unbump_fds(bumped, bumped_count);
+        // The child's long-lived reference, which counts as a descriptor until
+        // its table holds the file: the parent's close is not the last, however
+        // soon it comes (ARCH 9.6.11). The thunk or an unwind gives it back.
+        if (handle_endow_spoor(p, (hidx_t)fds[i], &bumped[bumped_count],
+                               &bumped_rights[bumped_count]) < 0) {
+            sys_spawn_unbump_fds(p, bumped, bumped_count);
             return -1;
         }
-        struct Spoor *s = (struct Spoor *)hh.obj;
-        spoor_ref(s);
-        bumped[bumped_count]        = s;
-        bumped_rights[bumped_count] = hh.rights;
         bumped_count++;
-        handle_put(&hh);
     }
     return 0;
 }
@@ -9374,9 +9830,10 @@ static void sys_spawn_with_fds_thunk(void *arg) {
     // Install each Spoor in the child's handle table at the lowest
     // free slot. Post-rfork, the table is empty, so the first install
     // is fd 0, then 1, then 2, etc. handle_alloc consumes the spoor_ref
-    // we bumped on the parent's side; if it fails partway, the child's
+    // we bumped on the parent's side, and its slot takes over from the
+    // endowment's count; if it fails partway, the child's
     // proc_free → handle_table_free will release the installed handles,
-    // and the un-installed spoors need explicit spoor_clunk.
+    // and the un-installed spoors close as the descriptors they count as.
     //
     // R15 F231 close: rights are inherited from the parent's slot, NOT
     // hardcoded. This preserves I-6 (rights monotonically reduce on
@@ -9389,10 +9846,11 @@ static void sys_spawn_with_fds_thunk(void *arg) {
         if (fd != (hidx_t)i) {
             // Drop refs on the un-installed remainder; the installed
             // prefix gets cleaned up by proc_free.
-            for (u32 j = i; j < fd_count; j++) spoor_clunk(spoors_local[j]);
+            sys_spawn_unbump_fds(p, &spoors_local[i], fd_count - i);
             spoor_clunk(exe);
             exits("fail-fd-install");
         }
+        (void)spoor_fd_drop(spoors_local[i]);   // the slot counts now
         installed++;
     }
     (void)installed;
@@ -9446,14 +9904,14 @@ int sys_spawn_with_fds_for_proc(struct Proc *p, const char *name, size_t name_le
     struct Spoor *exe = exec_resolve_from_namespace_ex(p, name, name_len, &exe_size,
                                                        &exe_pheno_linux);
     if (!exe) {
-        sys_spawn_unbump_fds(bumped, fd_count);
+        sys_spawn_unbump_fds(p, bumped, fd_count);
         return -1;
     }
 
     struct spawn_with_fds_args *sa = kmalloc(sizeof(*sa), KP_ZERO);
     if (!sa) {
         spoor_clunk(exe);
-        sys_spawn_unbump_fds(bumped, fd_count);
+        sys_spawn_unbump_fds(p, bumped, fd_count);
         return -1;
     }
     sa->exe      = exe;
@@ -9469,7 +9927,7 @@ int sys_spawn_with_fds_for_proc(struct Proc *p, const char *name, size_t name_le
     if (pid < 0) {
         kfree(sa);
         spoor_clunk(exe);
-        sys_spawn_unbump_fds(bumped, fd_count);
+        sys_spawn_unbump_fds(p, bumped, fd_count);
         return -1;
     }
     return pid;
@@ -9607,14 +10065,14 @@ static int sys_spawn_full_with_perms_for_proc(struct Proc *p,
     struct Spoor *exe = exec_resolve_from_namespace_ex(p, name, name_len, &exe_size,
                                                        &exe_pheno_linux);
     if (!exe) {
-        sys_spawn_unbump_fds(bumped, fd_count);
+        sys_spawn_unbump_fds(p, bumped, fd_count);
         return -1;
     }
 
     struct spawn_with_fds_args *sa = kmalloc(sizeof(*sa), KP_ZERO);
     if (!sa) {
         spoor_clunk(exe);
-        sys_spawn_unbump_fds(bumped, fd_count);
+        sys_spawn_unbump_fds(p, bumped, fd_count);
         return -1;
     }
     sa->exe        = exe;
@@ -9631,7 +10089,7 @@ static int sys_spawn_full_with_perms_for_proc(struct Proc *p,
     if (pid < 0) {
         kfree(sa);
         spoor_clunk(exe);
-        sys_spawn_unbump_fds(bumped, fd_count);
+        sys_spawn_unbump_fds(p, bumped, fd_count);
         return -1;
     }
     return pid;
@@ -10140,7 +10598,7 @@ static void sys_spawn_full_argv_thunk(void *arg) {
     bool cwd_ok = !sa->cwd_set || territory_setdot(p->territory, sa->cwd) == 0;
     kfree(sa);
     if (!cwd_ok) {
-        for (u32 j = 0; j < fd_count; j++) spoor_clunk(spoors_local[j]);
+        sys_spawn_unbump_fds(p, spoors_local, fd_count);
         spoor_clunk(exe);
         kfree(argv_data);
         exits("fail-cwd");
@@ -10242,9 +10700,9 @@ static void sys_spawn_full_argv_thunk(void *arg) {
                                   allowance.pci, allowance.pci_count) != 0) {
             // audit F2: no inherited fd is installed yet (the install loop is
             // below), so the bumped spoor refs in spoors_local[] would leak --
-            // clunk all of them, mirroring the fail-fd-install arm's clunk of
+            // close all of them, mirroring the fail-fd-install arm's close of
             // its un-installed range.
-            for (u32 j = 0; j < fd_count; j++) spoor_clunk(spoors_local[j]);
+            sys_spawn_unbump_fds(p, spoors_local, fd_count);
             spoor_clunk(exe);
             kfree(argv_data);
             exits("fail-allowance");
@@ -10257,11 +10715,12 @@ static void sys_spawn_full_argv_thunk(void *arg) {
         hidx_t fd = handle_alloc(p, KOBJ_SPOOR, rights_local[i],
                                  spoors_local[i]);
         if (fd != (hidx_t)i) {
-            for (u32 j = i; j < fd_count; j++) spoor_clunk(spoors_local[j]);
+            sys_spawn_unbump_fds(p, &spoors_local[i], fd_count - i);
             spoor_clunk(exe);
             kfree(argv_data);
             exits("fail-fd-install");
         }
+        (void)spoor_fd_drop(spoors_local[i]);   // the slot counts now
         installed++;
     }
     (void)installed;
@@ -10363,7 +10822,7 @@ static int sys_spawn_full_argv_with_perms_for_proc(
                                              &exe_size, &exe_pheno_linux);
     }
     if (!exe) {
-        sys_spawn_unbump_fds(bumped, fd_count);
+        sys_spawn_unbump_fds(p, bumped, fd_count);
         return -1;
     }
 
@@ -10375,7 +10834,7 @@ static int sys_spawn_full_argv_with_perms_for_proc(
         argv_data_copy = kmalloc(argv_data_len, 0);
         if (!argv_data_copy) {
             spoor_clunk(exe);
-            sys_spawn_unbump_fds(bumped, fd_count);
+            sys_spawn_unbump_fds(p, bumped, fd_count);
             return -1;
         }
         for (u32 i = 0; i < argv_data_len; i++) argv_data_copy[i] = argv_data[i];
@@ -10385,7 +10844,7 @@ static int sys_spawn_full_argv_with_perms_for_proc(
     if (!sa) {
         if (argv_data_copy) kfree(argv_data_copy);
         spoor_clunk(exe);
-        sys_spawn_unbump_fds(bumped, fd_count);
+        sys_spawn_unbump_fds(p, bumped, fd_count);
         return -1;
     }
     sa->exe           = exe;
@@ -10442,7 +10901,7 @@ static int sys_spawn_full_argv_with_perms_for_proc(
         kfree(sa);
         if (argv_data_copy) kfree(argv_data_copy);
         spoor_clunk(exe);
-        sys_spawn_unbump_fds(bumped, fd_count);
+        sys_spawn_unbump_fds(p, bumped, fd_count);
         return -1;
     }
     // 5f: the held spawn's synchronous return -- back only once the child has
@@ -12094,6 +12553,12 @@ hidx_t sys_console_open_for_proc(struct Proc *p) {
     if (!p)                            return -1;
     struct Spoor *cs = devcons.attach(NULL);   // dev_simple_attach -> ref=1
     if (!cs)                           return -1;
+    // The handle is R|W, so the descriptor's open-file status says so: F_GETFL
+    // reads Spoor.mode, which an attach that never runs Dev.open leaves 0
+    // (OREAD). 2 is ORDWR. handle.c's status readers report it and
+    // spoor_clone copies it; no Dev or write path consults it, so it carries
+    // no authority (the handle's rights do).
+    cs->mode = 2;
     hidx_t fd = handle_alloc(p, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE, cs);
     if (fd < 0) {
         spoor_clunk(cs);
@@ -12196,6 +12661,24 @@ static s64 viv_measure_user_path(u64 path_va, u32 *len_out) {
     // ENAMETOOLONG registration is a named ER-x seam, shared with #83's
     // observation that SYS_OPEN has the same gap.
     return -(s64)T_E_INVAL;
+}
+
+// A guest path into kernel memory: measured, then read once more under fault
+// fixup. A NUL inside the measured span means a peer thread rewrote it
+// between the two reads: EINVAL.
+static s64 viv_copy_user_path(u64 path_va, char *buf, u32 *len_out) {
+    u32 n = 0;
+    s64 m = viv_measure_user_path(path_va, &n);
+    if (m != 0)                                      return m;
+    for (u32 i = 0; i < n; i++) {
+        u8 b = 0;
+        if (uaccess_load_u8(path_va + i, &b) != 0)   return -(s64)T_E_FAULT;
+        if (b == '\0')                               return -(s64)T_E_INVAL;
+        buf[i] = (char)b;
+    }
+    buf[n] = '\0';
+    *len_out = n;
+    return 0;
 }
 
 // Convert a kernel `t_stat` into the 128-byte Linux layout and copy it out.
@@ -14784,6 +15267,19 @@ void viv_sigaction_settled_for_test(struct Proc *p, enum viv_signote note,
 }
 #endif
 
+// umask(mask). Linux keeps mask & 0777 and never fails; the native SYS_UMASK
+// refuses stray bits, so the shell masks first. It exchanges through the native
+// handler's accessor, so the two share one mask.
+static s64 viv_umask(struct Proc *p, u64 mask) {
+    return (s64)proc_umask_exchange(p, (u32)mask & 0777u);
+}
+
+#ifdef KERNEL_TESTS
+s64 viv_umask_for_test(struct Proc *p, u64 mask) {
+    return viv_umask(p, mask);
+}
+#endif // KERNEL_TESTS
+
 static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
                      u64 linux_nr, const u64 *args) {
     switch (linux_nr) {
@@ -15011,11 +15507,12 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         if (vivarium_fcntl_decide(args[1], args[2], &op, &cloexec, &min_fd)
                 != VIV_TRANSLATED)
             return -(s64)T_E_NOSYS;             // an unserved cmd; see vivarium.h
-        // Linux reads fcntl's fd as unsigned int, so the bound is on the low
-        // half: a negative-as-int fd is still above it, and junk above bit 31
-        // is Linux's to drop.
-        if ((u32)args[0] >= (u32)PROC_HANDLE_MAX)    return -(s64)T_E_BADF;
-        hidx_t fd = (hidx_t)(u32)args[0];
+        // Linux declares the fd an unsigned int: only the low 32 bits name it,
+        // as for cmd and the F_DUPFD minimum. Bound BEFORE narrowing to hidx_t,
+        // so a negative-as-int fd cannot wrap into a valid-looking index.
+        u32 fd32 = (u32)args[0];
+        if (fd32 >= (u32)PROC_HANDLE_MAX)            return -(s64)T_E_BADF;
+        hidx_t fd = (hidx_t)fd32;
 
         switch (op) {
         case VIV_FCNTL_GETFD: {
@@ -15029,9 +15526,12 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         case VIV_FCNTL_DUPFD: {
             // Linux answers EINVAL when the minimum exceeds the fd limit -- an
             // ARGUMENT error, distinct from the EMFILE it gives when the limit
-            // is merely reached. The range lives here rather than in the pure
-            // decide because PROC_HANDLE_MAX is a fact about the handle table.
-            if (min_fd >= (u64)PROC_HANDLE_MAX)      return -(s64)T_E_INVAL;
+            // is merely reached -- but only for an OPEN fd: it looks the
+            // descriptor up first. So the minimum is clamped (narrowing a huge
+            // one could wrap into range) and the checked core, which tests
+            // the source before the minimum, decides between the two.
+            hidx_t floor = min_fd >= (u64)PROC_HANDLE_MAX ? PROC_HANDLE_MAX
+                                                          : (hidx_t)min_fd;
             // The alias rule (VIVARIUM 5.5.2): a socket source's row is copied
             // onto the new number after the install; room checked first so a
             // refused fcntl leaves the table untouched. Before this, F_DUPFD of
@@ -15045,58 +15545,70 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
             // is the dup installed there: a refusal at any step returns a
             // number no other thread could see, where closing an installed
             // one would close whatever a peer had put at it by then.
-            hidx_t nfd = handle_reserve(p, (hidx_t)min_fd);
-            // A refused reservation or dup is one -1 for "no such fd" and
-            // "table full" alike;
-            // split them here, because the two errnos are LOAD-BEARING to a
-            // shell and not interchangeable. This used to answer EMFILE for
-            // both, on the argument that a guest which just used the fd knows
-            // it exists -- but busybox ash's redirect() probes the TARGET fd of
-            // every `N>&M` with fcntl(N, F_DUPFD, 10) precisely to learn
-            // whether N is open: EBADF means "not open, nothing to save", and
-            // ANY other errno is "strange" and aborts the command
+            hidx_t nfd = handle_reserve(p, floor);
+            // The two errnos are LOAD-BEARING to a shell and not
+            // interchangeable: busybox ash's redirect() probes the TARGET fd of
+            // every `N>&M` with fcntl(N, F_DUPFD, 10) precisely to learn whether
+            // N is open -- EBADF means "not open, nothing to save", and ANY
+            // other errno is "strange" and aborts the command
             // (`fcntl(3,F_DUPFD,10): No file descriptors available`, once per
             // `3>&1` in the L-6c gate). POSIX: closed fd -> EBADF; table full
-            // -> EMFILE. The liveness re-check is the same lookup the GETFD arm
-            // uses; the residual -1 set (table full, a non-dup-able kind, a
-            // rights failure) stays EMFILE. A peer closing the fd between the
-            // dup and this lookup misreports one errno -- unreachable for a
-            // single-threaded phenotype Proc, and harmless if it were not.
+            // -> EMFILE. A reservation that fails names neither, so the source
+            // is looked up first, then the minimum. The dup's own refusal is
+            // decided under the table lock that decided it (B-3b); a non-dup-able
+            // kind stays EMFILE, as Linux has no "exists but cannot be
+            // duplicated" answer.
             if (nfd < 0) {
                 if (handle_get_cloexec(p, fd) < 0)  return -(s64)T_E_BADF;
-                return -(s64)T_E_MFILE;
+                return floor >= PROC_HANDLE_MAX ? -(s64)T_E_INVAL
+                                                : -(s64)T_E_MFILE;
             }
             if (viv_socktab_alias(dstab, (s32)fd, (s32)nfd) < 0) {
                 handle_unreserve(p, nfd);
                 return -(s64)T_E_MFILE;
             }
-            if (handle_dup_into_reserved(p, fd, nfd, cloexec) < 0) {
+            int dr = handle_dup_into_reserved(p, fd, nfd, cloexec);
+            if (dr < 0) {
                 viv_socktab_drop(dstab, (s32)nfd);   // the reserved number's own row
                 handle_unreserve(p, nfd);
-                if (handle_get_cloexec(p, fd) < 0)  return -(s64)T_E_BADF;
-                return -(s64)T_E_MFILE;
+                return dr == -T_E_BADF ? -(s64)T_E_BADF : -(s64)T_E_MFILE;
             }
             return (s64)nfd;
         }
         case VIV_FCNTL_GETFL: {
-            // The open-file status word: the access mode + O_NONBLOCK. Plan 9
-            // OREAD/OWRITE/ORDWR (0/1/2) share their encoding byte-for-byte with
-            // Linux O_RDONLY/WRONLY/RDWR, so `omode & 3` IS the Linux access
-            // mode. git's `F_GETFL` -> `F_SETFL(flags | O_NONBLOCK)` idiom
-            // round-trips the access mode through F_SETFL (which ignores it), so
-            // this is exact for that path and faithful for a reader of the mode.
-            int omode = 0;
-            bool nb = false;
-            if (handle_get_status_flags(p, fd, &omode, &nb) != 0)
-                return -(s64)T_E_BADF;
-            return (s64)((u64)(omode & 3) | (nb ? (u64)VIV_O_NONBLOCK : 0));
+            // The open-file status word: the access mode, O_NONBLOCK and
+            // O_APPEND. Plan 9 OREAD/OWRITE/ORDWR (0/1/2) share their encoding
+            // byte-for-byte with Linux O_RDONLY/WRONLY/RDWR, so `omode & 3` IS
+            // the Linux access mode. git's `F_GETFL` -> `F_SETFL(flags |
+            // O_NONBLOCK)` idiom round-trips the access mode through F_SETFL
+            // (which ignores it), so this is exact for that path and faithful
+            // for a reader of the mode.
+            struct handle_status st;
+            if (handle_get_status(p, fd, &st) != 0)  return -(s64)T_E_BADF;
+            u64 fl = (u64)(st.omode & 3u);
+            if (st.nonblock)                      fl |= (u64)VIV_O_NONBLOCK;
+            if (st.omode & SYS_WALK_OPEN_OAPPEND) fl |= (u64)VIV_O_APPEND;
+            return (s64)fl;
         }
         case VIV_FCNTL_SETFL: {
-            // Serve O_NONBLOCK; ignore O_APPEND/O_ASYNC/O_DIRECT and the access
-            // mode, exactly as Linux's F_SETFL does (it silently drops every
-            // non-status bit rather than erroring). The arg is args[2]. On a
-            // /net socket the mode lives at netd too (NP-5c), so the socket arm
-            // carries it there.
+            // Linux's F_SETFL changes O_APPEND, O_ASYNC, O_DIRECT, O_NOATIME and
+            // O_NONBLOCK, and drops every other bit. Only O_NONBLOCK has a
+            // mechanism here: O_APPEND lives in the server's open of the file,
+            // and the other three have none. So a request that restates
+            // O_APPEND is served, and one that flips it, or asks for any of the
+            // three, is EINVAL (Pouch's answer for the same request) rather
+            // than silently dropped. Linux would serve each of them on a file
+            // that takes it, so this is a refusal where Linux serves, chosen
+            // over a silent drop (OPEN-BUGS O4, 2026-10-14).
+            // The arg is args[2]. On a /net socket the mode lives at netd too
+            // (NP-5c), so the socket arm carries it there.
+            struct handle_status cur;
+            if (handle_get_status(p, fd, &cur) != 0)  return -(s64)T_E_BADF;
+            bool was_append = (cur.omode & SYS_WALK_OPEN_OAPPEND) != 0;
+            bool want_append = (args[2] & (u64)VIV_O_APPEND) != 0;
+            if (was_append != want_append ||
+                (args[2] & (u64)(VIV_O_ASYNC | VIV_O_DIRECT | VIV_O_NOATIME)))
+                return -(s64)T_E_INVAL;
             bool on = (args[2] & (u64)VIV_O_NONBLOCK) != 0;
             struct viv_socktab *ntab =
                 __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
@@ -15142,8 +15654,9 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         hidx_t nfd = handle_reserve(p, 0);
         // Split EBADF (closed source) from EMFILE (table full / a non-dup-able
         // kind), exactly as the F_DUPFD arm: the two errnos are load-bearing and
-        // not interchangeable. The reservation and the dup fold them into -1, so the
-        // liveness re-check (the same lookup GETFD uses) disambiguates.
+        // not interchangeable. A failed reservation names neither, so the liveness
+        // check (the same lookup GETFD uses) tells them apart; the dup's own refusal
+        // is decided under the table lock that decided it.
         if (nfd < 0) {
             if (handle_get_cloexec(p, (hidx_t)oldfd) < 0)  return -(s64)T_E_BADF;
             return -(s64)T_E_MFILE;
@@ -15155,11 +15668,11 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
             handle_unreserve(p, nfd);
             return -(s64)T_E_MFILE;
         }
-        if (handle_dup_into_reserved(p, (hidx_t)oldfd, nfd, false) < 0) {
+        int dr = handle_dup_into_reserved(p, (hidx_t)oldfd, nfd, false);
+        if (dr < 0) {
             viv_socktab_drop(stab, (s32)nfd);       // the reserved number's own row
             handle_unreserve(p, nfd);
-            if (handle_get_cloexec(p, (hidx_t)oldfd) < 0)  return -(s64)T_E_BADF;
-            return -(s64)T_E_MFILE;
+            return dr == -T_E_BADF ? -(s64)T_E_BADF : -(s64)T_E_MFILE;
         }
         return (s64)nfd;
     }
@@ -15773,10 +16286,9 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
     }
 
     case VIV_LINUX_GETPPID: {
-        // getppid(void). A shell because there IS no native twin -- Thylacine
-        // exposes pid/uid/gid (72/73/74) and stops. Adding SYS_GETPPID would be
-        // a syscall-interface change, which is an escalation, and it would buy
-        // nothing a phenotype-local read does not already give.
+        // getppid(void). Its native twin, SYS_GETPPID (132, operator vote
+        // 2026-10-14 #6), came later; this shell reads the same accessor the
+        // native handler does, so the two cannot answer differently.
         //
         // proc_parent_pid takes g_proc_table_lock, which is not optional and not
         // available here: `parent` is rewritten by proc_reparent_children when a
@@ -15786,6 +16298,9 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         // which is why the accessor lives in proc.c beside the tree it walks.
         return (s64)proc_parent_pid(p);
     }
+
+    case VIV_LINUX_UMASK:
+        return viv_umask(p, args[0]);
 
     case VIV_LINUX_GETTID: {
         // gettid(void) -> the per-Thread tid. getpid stays per-Proc (Proc.pid,
@@ -15937,34 +16452,38 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         // never carry them).
         u32 mode = (u32)args[2] & T_WSTAT_MODE_MASK;
 
-        u32 path_len = 0;
-        s64 mrc = viv_measure_user_path(args[1], &path_len);
+        char path_scratch[SYS_OPEN_PATH_MAX + 1];
+        u32  path_len = 0;
+        s64  mrc = viv_copy_user_path(args[1], path_scratch, &path_len);
         if (mrc != 0)                                return mrc;
 
-        // Open O_PATH: chmod requires OWNERSHIP, never read, so the
-        // perm_check-EXEMPT navigation handle is the correct base (an O_RDONLY
+        // Resolve O_PATH: chmod requires OWNERSHIP, never read, so the
+        // perm_check-EXEMPT navigation open is the correct base (an O_RDONLY
         // open would wrongly fail for an owner who lacks read). FROM_ROOT is
         // cwd-aware for a relative path (the openat AT_FDCWD correspondence).
-        // The open core returns the real errno (ER-1 rollout: ENOENT / ENOTDIR /
+        // The resolve returns the real errno (ER-1 rollout: ENOENT / ENOTDIR /
         // EACCES from the walk), which IS the fchmodat answer. The Spoor is
-        // kept, never installed: a descriptor would be looked up
-        // again by number for the wstat, and a peer thread could close and
-        // reuse that number in between and have ITS file's mode changed.
-        char kpath[SYS_OPEN_PATH_MAX + 1];
-        if (sys_copy_open_path(args[1], (u64)path_len, kpath) != 0) return -1;
-        struct Spoor *target = NULL;
-        const struct sys_open_finish how = { .keep = &target };
-        s64 orc = sys_open_kpath_how(p, SYS_WALK_OPEN_FROM_ROOT, kpath,
-                                     (u64)path_len, (u64)SYS_WALK_OPEN_OPATH, &how);
+        // private: a descriptor installed for the call would be visible to the
+        // caller's peer threads, which could close it and reuse its index
+        // before the shell closed it (it would then close theirs).
+        struct Spoor *quarry;
+        rights_t      qr;
+        s64 orc = sys_resolve_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT,
+                                             path_scratch, path_len,
+                                             SYS_WALK_OPEN_OPATH, &quarry, &qr);
         if (orc < 0)                                 return orc;
 
         // The mode change runs through the audited wstat core, whose
         // perm_wstat_check is the POSIX owner-or-CAP authority (the #47 note:
         // the metadata axis is kind-gated, works on any-rights incl. O_PATH).
-        // Its bare -1 (perm denial / server refusal) maps to EPERM, chmod's
-        // permission-failure errno.
-        s64 rc = sys_wstat_spoor_consume(p, target, T_WSTAT_MODE, mode, 0, 0, 0);
-        return (rc == 0) ? 0 : -(s64)T_E_PERM;
+        // Its EACCES is chmod's EPERM: only ownership refuses a chmod, and a
+        // Linux caller reads -EPERM as EPERM (only the pouch seam reserves
+        // -1). Every other refusal crosses as it is.
+        s64 rc = sys_wstat_spoor_for_proc(p, quarry, T_WSTAT_MODE, mode, 0, 0,
+                                          NULL);
+        spoor_clunk(quarry);
+        if (rc == -(s64)T_E_ACCES)                   return -(s64)T_E_PERM;
+        return rc;
     }
 
     case VIV_LINUX_READLINKAT: {
@@ -15991,6 +16510,88 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         path_scratch[path_len] = '\0';
         return sys_readlink_for_proc(p, path_scratch, path_len,
                                      args[2], (u64)bufsiz);
+    }
+
+    case VIV_LINUX_UTIMENSAT: {
+        // utimensat(dirfd, path, times, flags): x0..x3. The native-88
+        // (SYS_STAT) collision argument is beside the row in vivarium.h.
+        //
+        // The times first, as Linux reads them, in ONE copy: the mask and the
+        // values the wstat applies are the same bytes, so a peer thread that
+        // rewrites them mid-call cannot split the two.
+        struct t_timespec tv[2];
+        const struct t_timespec *tvp = NULL;
+        if (args[2]) {
+            if (!sys_validate_user_buf(args[2], sizeof(tv)) ||
+                uaccess_copy_in(tv, args[2], sizeof(tv)) != 0)
+                return -(s64)T_E_FAULT;
+            tvp = tv;
+        }
+        u32 valid = 0;
+        s64 mk = vivarium_utimens_mask(tvp, &valid);
+        if (mk < 0)                                  return mk;
+        if (mk > 0)                                  return 0;   // both UTIME_OMIT
+
+        bool empty = false;
+        if (args[1] && ((u32)args[3] & VIV_AT_EMPTY_PATH)) {
+            u8 b = 0;
+            if (!sys_validate_user_buf(args[1], 1) ||
+                uaccess_load_u8(args[1], &b) != 0)   return -(s64)T_E_FAULT;
+            empty = (b == '\0');
+        }
+
+        // A name resolves to a private Spoor, as fchmodat's does: no
+        // descriptor a peer thread could close and reuse.
+        struct Spoor *quarry = NULL;
+        rights_t      qr;
+        s64           rc;
+        bool          wstat_rc = false;
+        switch (vivarium_utimensat_decide(args[0], args[1], args[3], empty)) {
+        case VIV_UTIMENS_FD:
+            rc = sys_wstat_for_proc(p, (hidx_t)(s32)(u32)args[0], valid,
+                                    0, 0, 0, 0, tvp);
+            wstat_rc = true;
+            break;
+        case VIV_UTIMENS_CWD:
+            rc = sys_resolve_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT, ".", 1,
+                                            SYS_WALK_OPEN_OPATH, &quarry, &qr);
+            if (rc == 0) {
+                rc = sys_wstat_spoor_for_proc(p, quarry, valid, 0, 0, 0, tvp);
+                wstat_rc = true;
+            }
+            break;
+        case VIV_UTIMENS_PATH: {
+            char path_scratch[SYS_OPEN_PATH_MAX + 1];
+            u32  path_len = 0;
+            rc = viv_copy_user_path(args[1], path_scratch, &path_len);
+            if (rc != 0)                             return rc;
+            u64 omode = SYS_WALK_OPEN_OPATH;
+            if ((u32)args[3] & VIV_AT_SYMLINK_NOFOLLOW)
+                omode |= SYS_WALK_OPEN_NOFOLLOW;
+            rc = sys_resolve_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT,
+                                            path_scratch, path_len, omode,
+                                            &quarry, &qr);
+            if (rc == 0) {
+                rc = sys_wstat_spoor_for_proc(p, quarry, valid, 0, 0, 0, tvp);
+                wstat_rc = true;
+            }
+            break;
+        }
+        case VIV_UTIMENS_EINVAL:                     return -(s64)T_E_INVAL;
+        case VIV_UTIMENS_EFAULT:                     return -(s64)T_E_FAULT;
+        case VIV_UTIMENS_FORWARD:
+        default:                                     return -(s64)T_E_NOSYS;
+        }
+        if (quarry) spoor_clunk(quarry);
+        // EACCES is the wstat's one refusal. Write permission admits only the
+        // touch (both times to now); every other request is ownership's, and
+        // Linux answers that EPERM (only the pouch seam reserves -1). A walk's
+        // EACCES (a component's search denied) asked nothing of ownership and
+        // stays EACCES, as fchmodat's open does.
+        if (wstat_rc && rc == -(s64)T_E_ACCES &&
+            valid != (T_WSTAT_ATIME | T_WSTAT_MTIME))
+            return -(s64)T_E_PERM;
+        return rc;
     }
 
     case VIV_LINUX_GETRANDOM: {
@@ -16869,6 +17470,18 @@ static void syscall_native_switch(struct exception_context *ctx) {
         ctx->regs[0] = (u64)sys_close_handler(ctx->regs[0]);
         return;
 
+    case SYS_HANDLE_FLAGS_GET:
+        ctx->regs[0] = (u64)sys_handle_flags_get_handler(ctx->regs[0]);
+        return;
+
+    case SYS_HANDLE_FLAGS_SET:
+        ctx->regs[0] = (u64)sys_handle_flags_set_handler(ctx->regs[0], ctx->regs[1]);
+        return;
+
+    case SYS_HANDLE_DUP_TO:
+        ctx->regs[0] = (u64)sys_handle_dup_to_handler(ctx->regs[0], ctx->regs[1], ctx->regs[2]);
+        return;
+
     case SYS_DUP:
         ctx->regs[0] = (u64)sys_dup_handler(ctx->regs[0], ctx->regs[1]);
         return;
@@ -17067,6 +17680,37 @@ static void syscall_native_switch(struct exception_context *ctx) {
                                                ctx->regs[2], ctx->regs[3]);
         return;
 
+    case SYS_GETPPID:
+        ctx->regs[0] = (u64)sys_getppid_handler(ctx->regs[0], ctx->regs[1],
+                                                ctx->regs[2], ctx->regs[3]);
+        return;
+
+    case SYS_UMASK:
+        ctx->regs[0] = (u64)sys_umask_handler(ctx->regs[0], ctx->regs[1],
+                                              ctx->regs[2], ctx->regs[3]);
+        return;
+
+    case SYS_READLINK:
+        ctx->regs[0] = (u64)sys_readlink_handler(ctx->regs[0],   // path_va
+                                                 ctx->regs[1],   // path_len
+                                                 ctx->regs[2],   // buf_va
+                                                 ctx->regs[3]);  // bufsiz
+        return;
+
+    case SYS_LSTAT:
+        ctx->regs[0] = (u64)sys_lstat_handler(ctx->regs[0],   // path_va
+                                              ctx->regs[1],   // path_len
+                                              ctx->regs[2]);  // stat_va
+        return;
+
+    case SYS_FILE_LOCK:
+        ctx->regs[0] = (u64)sys_file_lock_handler(ctx->regs[0],   // fd
+                                                  ctx->regs[1],   // op
+                                                  ctx->regs[2],   // start
+                                                  ctx->regs[3],   // len
+                                                  ctx->regs[4]);  // out_va
+        return;
+
     case SYS_GETUID:
         ctx->regs[0] = (u64)sys_getuid_handler(ctx->regs[0], ctx->regs[1],
                                                ctx->regs[2], ctx->regs[3]);
@@ -17261,7 +17905,8 @@ static void syscall_native_switch(struct exception_context *ctx) {
                                               ctx->regs[2],
                                               ctx->regs[3],
                                               ctx->regs[4],
-                                              ctx->regs[5]);
+                                              ctx->regs[5],
+                                              ctx->regs[6]);
         return;
 
     case SYS_CHROOT:
@@ -17427,10 +18072,10 @@ static void syscall_native_switch(struct exception_context *ctx) {
         return;
 
     default:
-        // Unknown syscall. Phase 5+ delivers SIGSYS-equivalent note;
-        // v1.0 returns -1 (ENOSYS) and lets userspace decide.
+        // An unknown syscall answers ENOSYS, as on Linux (operator vote
+        // 2026-10-22). A bare -1 is -T_E_PERM, which reads as EPERM.
         __atomic_fetch_add(&g_syscall_unknown, 1u, __ATOMIC_RELAXED);
-        ctx->regs[0] = (u64)(s64)-1;
+        ctx->regs[0] = (u64)-(s64)T_E_NOSYS;
         return;
     }
 }

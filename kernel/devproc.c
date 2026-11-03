@@ -487,30 +487,18 @@ static size_t format_cmdline(struct Proc *p, char *buf, size_t cap) {
     return off;
 }
 
-// ns: render the territory's mount list (mount-point name + source name) + the
-// bind count, via territory_format_ns (#66). The renderer takes the territory's
-// ns_lock to read mounts[] -- the entries + their ref-held, immutable Path
-// strings are stable for the read -- so format_ns runs under BOTH g_proc_table_-
-// lock (the #57a F2 envelope keeping p->territory alive) AND, briefly, ns_lock.
-// That g_proc_table_lock -> ns_lock edge is acyclic (nothing under ns_lock takes
-// g_proc_table_lock; mount/unmount/clone only spoor_ref / path_ref / defer the
-// sleeping clunk outside the lock). Pre-#66 this read the bind COUNT locklessly
-// (a single aligned-int read); the mount LIST is a pointer walk a concurrent
-// unmount could free, so the lock is now load-bearing for the read.
-static size_t format_ns(struct Proc *p, char *buf, size_t cap) {
-    return (size_t)territory_format_ns(p->territory, buf, (u64)cap);
-}
-
 // cwd: the Territory's current working directory (VIVARIUM V-4b-1) -- the source
 // the diorama re-presents as Linux's /proc/self/cwd. Like exe, BARE bytes: no NUL
 // and no newline, because readlink("/proc/self/cwd") yields a bare path.
 //
 // A thin call into territory_getdot, which owns the dot_lock discipline (the
-// format_ns / territory_format_ns shape -- the lock stays in territory.c). The
-// nested g_proc_table_lock -> dot_lock acquire is acyclic for the same reason
-// ns_lock is: dot_lock is a documented LEAF guarding only dot_path, and nothing
-// held under it takes g_proc_table_lock. The resolve is bounded CPU under the
-// leaf -- no alloc, no block.
+// lock stays in territory.c). The nested g_proc_table_lock -> dot_lock acquire
+// is acyclic: dot_lock is a documented LEAF guarding only dot_path, and nothing
+// held under it takes g_proc_table_lock. Unlike ns_lock, which the read renders
+// outside the table lock, every dot_lock hold is bounded and never sleeps: a
+// copy or a pointer swap, plus, in territory_clone, the SLUB allocation of the
+// child's copy. Nesting it under the table lock costs a path's length and at
+// most one slab allocation.
 //
 // NULL dot_path renders "/" (territory_getdot's own contract), so unlike exe this
 // file is never empty for a live Proc. A NULL territory (a Proc torn down past
@@ -770,7 +758,7 @@ static size_t format_maps(struct Proc *p, bool show_code, char *buf, size_t cap)
 //
 // Runs under g_proc_table_lock (proc_for_each), which keeps `p` alive; the Path
 // itself is immutable + ref-held for p's whole life, so the string is stable for
-// the copy. Same discipline as format_ns reading the Territory's mount Paths.
+// the copy.
 //
 // Posture: all-pids-visible for an UNSEALED Proc (devproc.perm_enforced == false,
 // Plan 9), refused for a dump-SEALED one -- the path of the image a Proc runs is
@@ -1082,9 +1070,10 @@ static u32 devproc_mode_for_kind(u32 kind) {
     case PQS_IMPERIUM: return T_S_IFREG | 0400u;
     // V-4b-6: 0400 -- Linux's own mode for environ, and for Linux's own reason.
     // Environment variables are where secrets live by universal convention
-    // (tokens, passwords, keys), and unlike exe/cwd/ns/maps NOTHING discloses
-    // another Proc's environment today: /env resolves current_thread()->proc->env
-    // by construction, so it is self-only. This file is therefore a genuinely NEW
+    // (tokens, passwords, keys), and unlike exe/cwd/ns/maps nothing AMBIENT
+    // discloses another Proc's environment: /env resolves the caller's own, and
+    // an open /env/NAME acts on its opener's only because the opener passed the
+    // handle on. This file is therefore a genuinely NEW
     // cross-Proc disclosure, which is why it carries a real gate at the read site
     // (devproc_owner_or_hostowner) rather than inheriting the 0444 all-pids-
     // visible posture its info-file siblings share.
@@ -1285,16 +1274,16 @@ static int devproc_close(struct Spoor *c) {
 // Read: dispatch by qid kind. Generates synthetic content into a stack
 // buffer, then copies the requested [off, off+n) slice.
 //
-// Buffer cap. status fits in <128 B; cmdline is smaller. #66 made ns render the
-// full mount list ("mount <pt> <src>\n" per entry, up to PGRP_MAX_MOUNTS, 32).
-// prowl-3b bumped 512 -> 2048: /proc/<pid>/sched formats one row per thread of a
-// possibly heavily-threaded Proc (a Go binary / stratumd), each ~40-50 B; 512
-// truncated at ~8 threads. 2048 holds ~30 thread rows (the format bounds the
-// walk cleanly on overflow either way). A deep-namespace ns render (each name up
-// to SYS_OPEN_PATH_MAX=1024) can still exceed it, truncating at a whole-line
-// boundary (territory_format_ns audit F2), best-effort per I-33. A 2 KiB frame
-// on the 16 KiB kstack is safe on the shallow Dev-read path (the DEVCTL_READ_BUF
-// precedent). (Completeness for deep namespaces is a v1.x offset-aware multi-read.)
+// Buffer cap. status fits in <128 B; cmdline is smaller. prowl-3b bumped 512 ->
+// 2048: /proc/<pid>/sched formats one row per thread of a possibly heavily-
+// threaded Proc (a Go binary / stratumd), each ~40-50 B; 512 truncated at ~8
+// threads. 2048 holds ~30 thread rows (the format bounds the walk cleanly on
+// overflow either way). ns is the exception to "the whole file fits": its listing
+// is as long as the mount table (up to PGRP_MOUNT_CAP entries, each name up to
+// SYS_OPEN_PATH_MAX), so it renders the window a read asks for
+// (territory_format_ns), and this bounds one read of it, not the file. A 2 KiB
+// frame on the 16 KiB kstack is safe on the shallow Dev-read path (the
+// DEVCTL_READ_BUF precedent).
 #define DEVPROC_READ_BUF 2048
 
 // #57a F2: format under g_proc_table_lock (the kill-path shape) so the target
@@ -1304,14 +1293,16 @@ static int devproc_close(struct Spoor *c) {
 // matched pid (also bounding the lock-hold). g_proc_table_lock keeps p (and thus
 // p->territory + p->handles) alive across the format.
 //
-// #66: format_ns now reads the territory's mount LIST (pointer-chasing
-// mounts[].mp_path / .source->path), so it takes p->territory->ns_lock inside
-// territory_format_ns -- a g_proc_table_lock -> ns_lock edge. It is ACYCLIC
-// (nothing held under ns_lock takes g_proc_table_lock: mount/unmount/clone only
-// spoor_ref / path_ref and defer the sleeping spoor_clunk to OUTSIDE ns_lock).
-// The pre-#66 lockless `binds: N` read was sound only because it was a single
-// aligned-int copy; a mount-list pointer walk a concurrent unmount could free
-// genuinely needs the lock. No sleep / no allocation runs under either lock.
+// ns is the one kind NOT formatted here. Its listing is read under the target
+// Territory's ns_lock, which that Territory's own Proc can hold for as long as
+// a root swap's shed takes, and every CPU waiting on g_proc_table_lock -- with
+// IRQs masked -- would wait with it. So the callback only takes a Territory ref
+// under the table lock, and devproc_read renders after dropping it: the ref
+// keeps the Territory alive past an exit that detaches it, as
+// proc_release_territory_at_exit relies on. The seal's ordering is a lock, so
+// devproc_read then walks the table again and asks the admission once more,
+// of the Proc that still holds the rendered Territory: a read is refused if a
+// seal or a none wall landed during the render.
 // prowl-3b: forward-declared so devproc_read_cb (below) can apply the OQ-4 gate;
 // the definition sits with the other authority predicates (after
 // devproc_kill_authorized).
@@ -1416,9 +1407,13 @@ size_t devproc_imperium_read_gated(const struct Proc *caller, struct Proc *targe
 struct devproc_read_ctx {
     int                 pid;
     u32                 kind;
+    struct Territory   *ns;         // ns: ref-held, rendered after the walk
+    bool                recheck;    // ns: the second look, after the render
+    bool                same;       // ns: the Proc still holds that Territory
     char               *buf;
     size_t              cap;
     size_t              total;
+    bool                windowed;   // buf holds the read's window, not the whole file
     bool                found;
     // prowl-3b (OQ-4): the reading Proc (captured before proc_for_each) + the
     // gate verdict for a gated kind. `caller` is read-only identity/caps; the
@@ -1449,7 +1444,24 @@ static int devproc_read_cb(struct Proc *p, void *arg) {
     switch (r->kind) {
     case PQS_STATUS:  r->total = format_status(r->caller, p, r->buf, r->cap); break;
     case PQS_CMDLINE: r->total = format_cmdline(p, r->buf, r->cap); break;
-    case PQS_NS:      r->total = format_ns(p, r->buf, r->cap);      break;
+    case PQS_NS:                               // rendered by devproc_read, unlocked
+        if (r->recheck) {
+            // No Territory now: the Proc is exiting, and its file reads empty.
+            // Another Territory cannot happen today -- pids never recycle, and
+            // a linked Proc's Territory only ever goes from its own to NULL --
+            // so `same` is a defence: an in-place namespace swap, if one is
+            // ever added, must not let this read answer for a namespace the
+            // Proc no longer has (and should re-render, not refuse).
+            if (!p->territory) r->total = 0;
+            r->same = !p->territory || p->territory == r->ns;
+            break;
+        }
+        // A weak ref: if the Proc dies during the render, its own drop releases
+        // the namespace at death, and the reader's drop frees only the struct
+        // -- a reader never runs another Proc's 9P clunks.
+        r->ns = p->territory;
+        if (r->ns && r->ns != kpgrp()) territory_weak_ref(r->ns);
+        break;
     case PQS_EXE:     r->total = format_exe(p, r->buf, r->cap);     break;  // V-4a-0
     case PQS_CWD:     r->total = format_cwd(p, r->buf, r->cap);     break;  // V-4b-1
     case PQS_MAPS:                             // V-4b-2; B-2b: the code rows' addresses
@@ -1485,6 +1497,28 @@ static long devproc_wait_read(struct Spoor *c, void *buf, long n, s64 off);
 // it is offset-aware -- see the definition for why a format-and-slice render is
 // the wrong shape for an environment.
 static long devproc_environ_read(struct Spoor *c, void *buf, long n, s64 off);
+
+// The window between an ns read's admission and its render, where a seal, a
+// none wall or an exit must be caught by the second look. A test runs a
+// function there, on the thread that set it (NULL clears it). Compiled out of
+// production.
+#ifdef KERNEL_TESTS
+static void (*g_ns_test_window)(void);
+static struct Thread *g_ns_test_owner;
+
+void devproc_ns_test_set_window_hook(void (*fn)(void)) {
+    __atomic_store_n(&g_ns_test_owner, fn ? current_thread() : NULL, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_ns_test_window, fn, __ATOMIC_RELEASE);
+}
+
+static inline void devproc_ns_test_window(void) {
+    void (*fn)(void) = __atomic_load_n(&g_ns_test_window, __ATOMIC_ACQUIRE);
+    if (fn && __atomic_load_n(&g_ns_test_owner, __ATOMIC_RELAXED) == current_thread())
+        fn();
+}
+#else
+static inline void devproc_ns_test_window(void) {}
+#endif
 
 static long devproc_read(struct Spoor *c, void *buf, long n, s64 off) {
     if (!c || !buf) return -1;
@@ -1536,21 +1570,45 @@ static long devproc_read(struct Spoor *c, void *buf, long n, s64 off) {
     struct Proc   *caller = self ? self->proc : NULL;
 
     char content[DEVPROC_READ_BUF];
+    // ns renders only the window it is asked for, so it is asked for no more
+    // than the caller can take: the window then ends at a line end the caller
+    // receives.
+    size_t cap = sizeof(content);
+    if (kind == PQS_NS && (size_t)n < cap) cap = (size_t)n;
     struct devproc_read_ctx r = {
-        .pid = pid, .kind = kind, .buf = content, .cap = sizeof(content),
-        .total = 0, .found = false, .caller = caller, .denied = false,
+        .pid = pid, .kind = kind, .ns = NULL, .recheck = false, .same = false,
+        .buf = content, .cap = cap, .total = 0, .windowed = false, .found = false,
+        .caller = caller, .denied = false,
     };
     proc_for_each(devproc_read_cb, &r);
     if (!r.found) return -1;                  // process gone since walk
     if (r.denied) return -T_E_ACCES;          // the seal, the none wall, or an owner gate
+    if (kind == PQS_NS) {
+        devproc_ns_test_window();
+        // territory_format_ns(NULL) renders nothing: an exiting Proc's empty file.
+        r.total    = (size_t)territory_format_ns(r.ns, (u64)off, content, (u64)cap);
+        r.windowed = true;
+        // Rendered outside the table lock, so what admitted the read is asked
+        // again under it: a seal or a none wall that landed during the render
+        // refuses what was rendered, as it would refuse a read begun after it.
+        r.recheck = true;
+        r.found   = false;
+        proc_for_each(devproc_read_cb, &r);
+        if (r.ns && r.ns != kpgrp()) territory_weak_unref(r.ns);
+        if (!r.found) return -1;              // gone since the render
+        if (r.denied) return -T_E_ACCES;
+        if (!r.same) return -1;               // the Proc's Territory changed (unreachable today)
+    }
 
+    // A whole file is sliced at `off`; a window already starts there.
     size_t total = r.total;
-    if ((size_t)off >= total) return 0;       // EOF
-    size_t avail = total - (size_t)off;
+    size_t from  = r.windowed ? 0 : (size_t)off;
+    if (from >= total) return 0;              // EOF
+    size_t avail = total - from;
     size_t copy = avail > (size_t)n ? (size_t)n : avail;
 
     u8 *out = (u8 *)buf;
-    for (size_t i = 0; i < copy; i++) out[i] = (u8)content[(size_t)off + i];
+    for (size_t i = 0; i < copy; i++) out[i] = (u8)content[from + i];
     return (long)copy;
 }
 
@@ -3209,8 +3267,9 @@ static long devproc_kstack_read(struct Spoor *c, void *buf, long n, s64 off) {
 // all-pids-visible for an UNSEALED Proc (Plan 9's posture), and every one of them
 // -- this file too -- is refused for a dump-SEALED Proc (devproc_kind_is_image).
 // Environ gets an owner gate on top because it is a new cross-Proc disclosure:
-// /env resolves current_thread()->proc->env BY CONSTRUCTION, so nothing else lets
-// one Proc read another's environment, and environment variables are where
+// /env resolves the caller's own environment, and an open /env/NAME reaches its
+// opener's only as a handle the opener passed on, so nothing AMBIENT lets one
+// Proc read another's environment, and environment variables are where
 // secrets live by universal convention. So it carries the owner-or-CAP_HOSTOWNER
 // gate -- the same policy sched uses, and the same posture Linux itself takes
 // (mode 0400 plus a ptrace_may_access check) -- composed with the seal in

@@ -2,20 +2,26 @@
 //
 // A Go binary that drives the os + syscall packages end-to-end against the
 // writable post-pivot Stratum FS: os.Mkdir / os.Create / (*File).Write /
-// os.ReadFile / os.Stat / (*File).Seek / os.ReadDir / os.Rename / os.Remove.
-// It runs POST-pivot (devramfs is read-only); joey spawns it under /go-fs.
+// os.ReadFile / os.Stat / (*File).Seek / os.ReadDir / os.Rename / os.Remove,
+// and the creation mask (syscall.Umask) with os.Getppid. It runs POST-pivot
+// (devramfs is read-only); joey spawns it under /go-fs.
 //
 // Self-checking: every step is asserted; any mismatch panics (exit != 0),
 // which joey's gating turns into a boot failure -- the Stage-3a regression
-// sentinel. On success it prints "go-fs: STAGE 3a OK" and exits 0.
+// sentinel. On success it prints its leg census and exits 0.
 package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
+	"syscall"
+	"time"
 )
 
 const (
@@ -25,6 +31,11 @@ const (
 )
 
 var payload = []byte("thylacine go fs stage 3a\n") // 25 bytes
+
+// joey requires this line (GO_CENSUS_FS in usr/pouch-hello/pouch-census.h; Go
+// cannot include the header, and a disagreement fails the boot). It names every
+// leg, so a stale binary that never ran a newer one cannot pass for this one.
+const census = "go-fs: legs=mkdir,create,read,stat,seek,readdir,race-create,excl,umask,getppid,links,root,chtimes,rename,remove: exit 0"
 
 func must(what string, ok bool) {
 	if !ok {
@@ -132,6 +143,45 @@ func main() {
 	must("O_EXCL create of an existing file reports EEXIST (not EPERM)", os.IsExist(ee1))
 	must("os.Remove(excl.txt)", os.Remove(exclFile) == nil)
 
+	// 6d. M8 (IDENTITY-DESIGN 9.7): the kernel takes a create's mode less the
+	//     creator's umask, then bounds it by the directory's. syscall.Umask
+	//     exchanges the mask, and joey left the default. Under 027 a 0666 file
+	//     and a 0777 directory in this 0755 directory come out 0640 and 0750;
+	//     with the mask ignored they would be 0644 and 0755.
+	must(fmt.Sprintf("/go-fs is 0755, the directory the mask legs assume (got %#o)", di.Mode().Perm()),
+		di.Mode().Perm() == 0o755)
+	old := syscall.Umask(0o027)
+	must(fmt.Sprintf("syscall.Umask returns the default 0022 (got %#o)", old), old == 0o022)
+	maskFile, maskDir := "/go-fs/m8.txt", "/go-fs/m8d"
+	mf, err := os.OpenFile(maskFile, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o666)
+	must("create under umask 027", err == nil)
+	must("m8 File.Close", mf.Close() == nil)
+	must("os.Mkdir under umask 027", os.Mkdir(maskDir, 0o777) == nil)
+	back := syscall.Umask(old)
+	must(fmt.Sprintf("syscall.Umask returns the mask it set (got %#o)", back), back == 0o027)
+	mfi, err := os.Stat(maskFile)
+	must("stat m8.txt", err == nil)
+	mdi, err := os.Stat(maskDir)
+	must("stat m8d", err == nil)
+	must(fmt.Sprintf("a 0666 create under 027 is 0640 (got %#o)", mfi.Mode().Perm()), mfi.Mode().Perm() == 0o640)
+	must(fmt.Sprintf("a 0777 mkdir under 027 is 0750 (got %#o)", mdi.Mode().Perm()), mdi.Mode().Perm() == 0o750)
+	must("os.Remove(m8.txt)", os.Remove(maskFile) == nil)
+	must("os.Remove(m8d)", os.Remove(maskDir) == nil)
+	// joey spawned this probe, so its parent is neither kproc (0) nor itself.
+	ppid := os.Getppid()
+	must(fmt.Sprintf("os.Getppid names the parent (got %d)", ppid), ppid > 0 && ppid != os.Getpid())
+
+	// 6e. Symbolic links (dec-2026-10-20-native-lstat-readlink), on the pool's
+	//     baked fixture: os.Lstat reports the link itself (SYS_LSTAT),
+	//     os.Readlink reads its target (SYS_READLINK), so filepath.EvalSymlinks
+	//     expands it, and os.ReadDir types it from the qid. Every check runs
+	//     and prints before the leg fails, so one red boot shows them all.
+	links()
+
+	// 6f. File times (G12, dec-2026-10-22-wstat-times): os.Chtimes and
+	//     syscall.UtimesNano / Futimes over SYS_WSTAT's time bits.
+	chtimes()
+
 	// 7. Rename within the directory (os.Rename -> SYS_RENAME).
 	must("os.Rename", os.Rename(file, renamed) == nil)
 	_, err = os.Stat(file)
@@ -150,4 +200,150 @@ func main() {
 	fmt.Printf("go-fs: wrote+read %d bytes; stat size=%d; seek+readdir+rename+remove OK; NumCPU=%d\n",
 		len(payload), fi.Size(), runtime.NumCPU())
 	fmt.Println("go-fs: STAGE 3a OK (fs file I/O: create/write/read/stat/seek/readdir/rename/remove)")
+	fmt.Println(census)
+}
+
+const fix = "/lib/pouch-links"
+
+// The fixture's targets, as build.sh bakes them. long's is 64 bytes: exactly
+// os.Readlink's first buffer, so reading it must grow the buffer once.
+var linkTargets = map[string]string{
+	"live": "target", "dead": "nosuch", "dir": "sub", "abs": fix + "/target",
+	"loop": "loop", "chain": "live", "long": strings.Repeat("x", 64),
+	"up": "..",
+}
+
+func links() {
+	bad := 0
+	check := func(what string, ok bool) {
+		if !ok {
+			fmt.Printf("go-fs: FAIL: links: %s\n", what)
+			bad++
+		}
+	}
+	for name, want := range linkTargets {
+		p := fix + "/" + name
+		fi, err := os.Lstat(p)
+		check(fmt.Sprintf("os.Lstat(%s) (err %v)", name, err), err == nil)
+		if err == nil {
+			check(fmt.Sprintf("os.Lstat(%s) is a link (mode %v)", name, fi.Mode()), fi.Mode()&os.ModeSymlink != 0)
+			check(fmt.Sprintf("os.Lstat(%s) size is the target's length (got %d)", name, fi.Size()), fi.Size() == int64(len(want)))
+		}
+		got, err := os.Readlink(p)
+		check(fmt.Sprintf("os.Readlink(%s) = %q (err %v)", name, got, err), err == nil && got == want)
+	}
+	fi, err := os.Lstat(fix + "/target")
+	check(fmt.Sprintf("os.Lstat(target) is a regular file (err %v)", err), err == nil && fi.Mode().IsRegular())
+	fi, err = os.Stat(fix + "/live")
+	check(fmt.Sprintf("os.Stat(live) follows to the target (err %v)", err), err == nil && fi.Mode().IsRegular() && fi.Size() == int64(len("pouch-links target\n")))
+	_, err = os.Stat(fix + "/dead")
+	check(fmt.Sprintf("os.Stat(dead) is not-exist (err %v)", err), os.IsNotExist(err))
+	_, err = os.Readlink(fix + "/target")
+	check(fmt.Sprintf("os.Readlink of a file is EINVAL (err %v)", err), errors.Is(err, syscall.EINVAL))
+	resolved, err := filepath.EvalSymlinks(fix + "/chain")
+	check(fmt.Sprintf("filepath.EvalSymlinks(chain) = %q (err %v)", resolved, err), err == nil && resolved == fix+"/target")
+	ents, err := os.ReadDir(fix)
+	check(fmt.Sprintf("os.ReadDir(%s) (err %v)", fix, err), err == nil)
+	types := map[string]os.FileMode{}
+	for _, e := range ents {
+		types[e.Name()] = e.Type()
+	}
+	check(fmt.Sprintf("ReadDir types live as a link (got %v)", types["live"]), types["live"] == os.ModeSymlink)
+	check(fmt.Sprintf("ReadDir types sub as a directory (got %v)", types["sub"]), types["sub"] == os.ModeDir)
+	check(fmt.Sprintf("ReadDir types target as a file (got %v)", types["target"]), types["target"] == 0)
+	// A trailing slash makes even lstat follow a final link (the kernel's
+	// rule, which the Root below must model).
+	fi, err = os.Lstat(fix + "/up/")
+	check(fmt.Sprintf("os.Lstat(up/) follows to a directory (err %v)", err), err == nil && fi.IsDir())
+	// An os.Root follows the links that stay inside it and refuses the rest:
+	// an absolute target escapes it whatever it names, and so does up (..),
+	// with or without a trailing slash.
+	r, err := os.OpenRoot(fix)
+	check(fmt.Sprintf("os.OpenRoot(%s) (err %v)", fix, err), err == nil)
+	if err == nil {
+		text, err := r.ReadFile("chain")
+		check(fmt.Sprintf("Root.ReadFile(chain) reads the target (err %v)", err), err == nil && string(text) == "pouch-links target\n")
+		text, err = r.ReadFile("dir/leaf")
+		check(fmt.Sprintf("Root.ReadFile(dir/leaf) goes through the link (err %v)", err), err == nil && string(text) == "pouch-links leaf\n")
+		_, err = r.ReadFile("abs")
+		check(fmt.Sprintf("Root.ReadFile(abs) is refused as an escape (err %v)", err), err != nil && strings.Contains(err.Error(), "path escapes"))
+		for _, name := range []string{"up", "up/", "up//", "up/pouch-links/target"} {
+			f, err := r.Open(name)
+			if err == nil {
+				f.Close()
+			}
+			check(fmt.Sprintf("Root.Open(%s) is refused as an escape (err %v)", name, err), err != nil && strings.Contains(err.Error(), "path escapes"))
+		}
+		_, err = r.Lstat("up/")
+		check(fmt.Sprintf("Root.Lstat(up/) is refused as an escape (err %v)", err), err != nil && strings.Contains(err.Error(), "path escapes"))
+		fi, err = r.Lstat("up")
+		check(fmt.Sprintf("Root.Lstat(up) is the link itself (err %v)", err), err == nil && fi.Mode()&os.ModeSymlink != 0)
+		check("Root.Close", r.Close() == nil)
+	}
+	must(fmt.Sprintf("links: %d checks failed (above)", bad), bad == 0)
+	fmt.Printf("go-fs: links OK (%d links: lstat, readlink, EvalSymlinks, ReadDir types, Root)\n", len(linkTargets))
+}
+
+// Two times well before any boot, so a call that changed nothing cannot pass.
+const (
+	tOld = 1000000000
+	tNew = 1100000000
+)
+
+// chtimes sets times through every Go spelling and reads them back in seconds
+// (the kernel's stat carries no nanoseconds). The caller owns the file, so the
+// refusals are the kernel tests' to prove.
+func chtimes() {
+	// okErr fails with the error in the message, so a refusal names its errno.
+	okErr := func(what string, err error) { must(fmt.Sprintf("%s (%v)", what, err), err == nil) }
+	f := root + "/times.txt"
+	okErr("os.WriteFile(times.txt)", os.WriteFile(f, payload, 0o644))
+	timesAre := func(what string, at, mt int64) {
+		var st syscall.Stat_t
+		err := syscall.Stat(f, &st)
+		must(fmt.Sprintf("%s (atime %d mtime %d, want %d %d)", what, st.Atime, st.Mtime, at, mt),
+			err == nil && int64(st.Atime) == at && int64(st.Mtime) == mt)
+	}
+
+	okErr("os.Chtimes", os.Chtimes(f, time.Unix(tOld, 5), time.Unix(tNew, 7)))
+	timesAre("os.Chtimes read back", tOld, tNew)
+	fi, err := os.Stat(f)
+	must("ModTime after os.Chtimes", err == nil && fi.ModTime().Unix() == tNew)
+
+	// A zero time.Time leaves that time.
+	okErr("os.Chtimes, zero atime", os.Chtimes(f, time.Time{}, time.Unix(tOld, 0)))
+	timesAre("a zero atime is left", tOld, tOld)
+	okErr("os.Chtimes, zero mtime", os.Chtimes(f, time.Unix(tNew, 0), time.Time{}))
+	timesAre("a zero mtime is left", tNew, tOld)
+
+	err = os.Chtimes(root+"/nosuch", time.Unix(tOld, 0), time.Unix(tOld, 0))
+	must(fmt.Sprintf("os.Chtimes of a missing file is ErrNotExist (%v)", err), errors.Is(err, os.ErrNotExist))
+
+	// Linux's UTIME_NOW in both: the file server's clock.
+	const utimeNow = (1 << 30) - 1
+	t0 := time.Now().Unix()
+	okErr("syscall.UtimesNano(now, now)",
+		syscall.UtimesNano(f, []syscall.Timespec{{Nsec: utimeNow}, {Nsec: utimeNow}}))
+	var st syscall.Stat_t
+	okErr("stat after now", syscall.Stat(f, &st))
+	t1 := time.Now().Unix()
+	must(fmt.Sprintf("now is the clock (mtime %d, clock %d..%d)", st.Mtime, t0, t1),
+		int64(st.Mtime) >= t0-2 && int64(st.Mtime) <= t1+2 && int64(st.Atime) >= t0-2 && int64(st.Atime) <= t1+2)
+
+	// The descriptor form, opened read-only: the kernel holds this small file,
+	// just written, so this is a cached open, and it takes a wstat too
+	// (FID-LIFECYCLE-DESIGN 3.3).
+	g, err := os.Open(f)
+	okErr("os.Open(times.txt)", err)
+	err = syscall.Futimes(int(g.Fd()), []syscall.Timeval{{Sec: tNew}, {Sec: tNew}})
+	g.Close()
+	okErr("syscall.Futimes", err)
+	timesAre("Futimes read back", tNew, tNew)
+
+	// A directory takes times through its path.
+	okErr("os.Chtimes(dir)", os.Chtimes(root, time.Unix(tOld, 0), time.Unix(tNew, 0)))
+	var dst syscall.Stat_t
+	must("the directory's times", syscall.Stat(root, &dst) == nil && dst.Atime == tOld && dst.Mtime == tNew)
+
+	okErr("os.Remove(times.txt)", os.Remove(f))
 }

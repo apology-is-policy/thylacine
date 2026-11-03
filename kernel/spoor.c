@@ -248,7 +248,7 @@ struct Spoor *spoor_clone(struct Spoor *c) {
 // single-instance default set in spoor_alloc_internal).
 //
 // UNIQUE AMONG LIVE INSTANCES, and three identity keys rest on that: the mount
-// key (territory.c mount_key_eq), MNOEXEC coverage (mount_noexec_covers -- #217,
+// key (territory.c mhead_find), MNOEXEC coverage (mount_noexec_covers -- #217,
 // a security decision) and the REVENANT Image cache (image.c key_match, where a
 // collision would serve one instance's cached pages for another's file, an I-1
 // alias). Every Env (env_alloc) and every dev9p / devsrv attach mints one, so an
@@ -306,6 +306,10 @@ int spoor_clunk_rc(struct Spoor *c) {
         extinction("spoor_clunk of zero-ref Spoor");
     int rc = 0;
     if (pre == 1) {
+        // Every slot holds a ref, so a slot still counted here is a release
+        // that went round the count.
+        if (__atomic_load_n(&c->fd_refs, __ATOMIC_ACQUIRE) != 0)
+            extinction("spoor_clunk: last reference of a Spoor a descriptor names");
         // Last drop. Run Dev close hook (releases per-Spoor aux),
         // then free. The close hook sees ref=0 but storage is intact.
         if (c->dev && c->dev->close) {
@@ -318,6 +322,23 @@ int spoor_clunk_rc(struct Spoor *c) {
 
 void spoor_clunk(struct Spoor *c) {
     (void)spoor_clunk_rc(c);
+}
+
+void spoor_fd_ref(struct Spoor *c) {
+    if (c->magic != SPOOR_MAGIC) extinction("spoor_fd_ref of corrupted Spoor");
+    (void)t_atomic_fetch_add_acqrel_int(&c->fd_refs, 1);
+}
+
+bool spoor_fd_drop(struct Spoor *c) {
+    if (c->magic != SPOOR_MAGIC) extinction("spoor_fd_drop of corrupted Spoor");
+    int pre = t_atomic_fetch_sub_acqrel_int(&c->fd_refs, 1);
+    if (pre <= 0) extinction("spoor_fd_drop: no descriptor names this Spoor");
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    return pre == 1;
+}
+
+bool spoor_fd_open(const struct Spoor *c) {
+    return __atomic_load_n(&c->fd_refs, __ATOMIC_SEQ_CST) > 0;
 }
 
 #ifdef KERNEL_TESTS

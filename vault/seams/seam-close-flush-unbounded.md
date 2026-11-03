@@ -7,7 +7,7 @@ surface: [sub-kernel-death]
 opened-by: fnd-68-r2-f3
 tracker: "unfiled"
 created: 2026-08-01
-updated: 2026-10-07
+updated: 2026-11-02
 closed-by: chg-2026-10-07-exit-close
 ---
 ## Owed
@@ -75,9 +75,8 @@ trade, not an oversight.
   run and fid to the closer, which writes the run (retrying -EIO while the
   fid is held), then clunks. A hand-off that fails prints
   `9p: close: flush of fid`, and `tools/test.sh` fails on it. Loom's SQPOLL
-  join keeps its own `kthread_join_active`, which no kill lifts, and the
-  SQPOLL kthread marks itself `closes_never_wait`, so its reap close never
-  waits on a server.
+  join keeps its own `kthread_join_active`, which no kill lifts, and a reap's
+  `Dev.close` never waits on a server, on any thread (B-3h audit round 3).
 - What stays as it was: an unkilled final close still waits for its server,
   as Plan 9's `closefgrp` does; only an explicit kill (the kill note or the
   ctl kill) forces. A hangup, EXITKILL or a legate scope's end never does.

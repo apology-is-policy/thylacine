@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/STALK-DESIGN.md", "docs/POUNCE-DESIGN.md", "docs/FID-LIFECYCLE-DESIGN.md", "docs/DISTRO.md", "docs/VIVARIUM.md"]
 created: 2026-08-01
-updated: 2026-10-06
+updated: 2026-11-02
 ---
 ## Purpose
 
@@ -237,7 +237,7 @@ point's); the base is crossed before the loop (the owned crossed clone
 becomes `trail[0]` since `start` is borrowed); the quarry is crossed at the
 end — EXCEPT under `STALK_MOUNT`, so `SYS_MOUNT`'s MREPL re-keys the same
 underlying point. `stalk_cross_mounts` loops a mount-over-mount chain to
-the leaf, bounded by `PGRP_MAX_MOUNTS` (32; it read 20 here, two cap raises stale) — I-3 acyclicity is ENFORCED at
+the leaf, bounded by `PGRP_MOUNT_CAP` (a chain cannot hold more mounts than the table can) — I-3 acyclicity is ENFORCED at
 `mount()` time (`would_create_mount_cycle`, the stalk-2 F1 fix,
 [[fnd-stalk2-r1-f1]]); the bound is a defensive backstop. `mount_lookup`
 returns a **ref-held** source under the Territory `ns_lock` (RW-4 SA-F1,
@@ -262,7 +262,9 @@ per member in declared order, and returns the **first hit**:
 - **Snapshot the members ATOMICALLY** (`mount_members_snapshot`, one `ns_lock`
   hold — UM-8 F4), then cross the *exact* snapshot source, never a re-derived
   index: a concurrent unmount between snapshot and cross would otherwise shift a
-  different member into slot k and cross the wrong tree.
+  different member into slot k and cross the wrong tree. The snapshot takes all
+  the members or none (`union_members_take`, below), so a union is never
+  searched cut short.
 - **Plan 9 union-skip on every non-fatal outcome.** A member that fails to cross
   (a dead 9P session, a transient clone OOM — UM-8 F8), is not a directory,
   denies X-search, or simply lacks the component is **skipped**, not an error —
@@ -605,9 +607,12 @@ returning each walked component's full attributes. Then:
   same unsynchronized-snapshot TOCTOU envelope as the per-component loop).
 - **The sentinel latch**: `DEV_WALK_ATTRS_UNSUPPORTED` (a STATIC object
   that must NEVER reach `walkqid_free`) means this session's server lacks
-  the extension (dev9p latches the first ENOSYS). Release the untouched
+  the extension (dev9p latches the first ENOSYS), or, unlatched, that a walk of
+  several names failed with something other than ENOENT and cannot say at which
+  name (B-3h audit round 3). Release the untouched
   clone, rewind to `ends[0]`, `goto per_component` — the whole resolution
-  degrades to the per-component loop with identical results.
+  degrades to the per-component loop with identical results, so its X gates and
+  mount split run in order. Leg: `stalk.walk_attrs_unknown_failure`.
 - **The shape contract** (P-3 SA-11): a full BIND walk must have
   transitioned `nc` (`w->spoor == nc`); partial and query forms must carry
   `w->spoor == NULL`. Violations fail closed — pushing an untransitioned
@@ -652,18 +657,32 @@ final Dev, a mount-point leaf — POSIX: stat reports the MOUNTED root — or
 a zero-component path) materialize a quarry, `spoor_stat_native` it, and
 clunk it: the old O_PATH+fstat shape minus the handle-table round trip.
 
+`STALK_NOFOLLOW` makes the final component's own record the answer, so a
+link reports `T_S_IFLNK`. Its callers are native `SYS_LSTAT` (136) and the
+phenotype's `newfstatat` with AT_SYMLINK_NOFOLLOW; native `SYS_STAT` passes 0
+and follows. The readlink core takes the same no-follow subject through
+`stalk_err` with `STALK_WALK | STALK_NOFOLLOW` ([[sub-kernel-syscall-dispatch]]).
+`sys_stat.lstat_readlink_for_proc` drives both over the D-1 symlink fixture:
+lstat of a live, a dangling and a self-looping link answers the link where
+stat answers the file, `T_E_NOENT` and `T_E_LOOP`; a link earlier in the
+path is followed; readlink reads relative and absolute targets verbatim and
+answers `T_E_INVAL` for a file or a directory, `T_E_NOENT`, `T_E_ACCES` at a
+component without X-search, and `T_E_LOOP` through an intermediate loop.
+
 ### The FID-LIFECYCLE cached-open arm
 
 The FINAL run of a plain read-only `STALK_OPEN` (`omode == 0` exactly —
 OTRUNC / write / OEXEC / O_PATH never take it) on a Dev with `open_cached`
-may be served FIDLESS: the Dev revalidates server-fresh (a forced-wire
-query walk; on a B1 LOOSE client the records may be cache-served),
+may be served from a snapshot: the Dev revalidates server-fresh (a forced-wire
+walk that binds the fid the open keeps unopened; on a B1 LOOSE client the records
+may be cache-served and nothing binds until the open first needs a fid),
 snapshots the fully-page-cached content, and returns an OPENED Spoor plus
 the walk's records in `sts`. **The resolver keeps every permission
 decision** — the same left-to-right X post-scan, then the final R/W gate,
 identical fail ordering. ANY mount hit in the run (leaf included — this
-path has no quarry-cross) discards the cached open (`spoor_clunk` is
-wire-free) and falls back to the normal walk, whose split/cross machinery
+path has no quarry-cross) discards the cached open (`spoor_clunk` waits for
+nothing: a loose open sends nothing, and a strict open's kept fid clunks
+asynchronously) and falls back to the normal walk, whose split/cross machinery
 owns the crossing. A NULL return reveals nothing — the observable outcome
 is the normal path's.
 
@@ -702,10 +721,18 @@ between, a target scratch, a consumed-prefix record, the follow counter, the
 ref-held `owned_base` re-anchor root, and the ref-held `owned_anchor` served
 re-anchor with its `anchor_pheno`) — freed at `stalk_expand_free`;
 resolutions that never cross a symlink allocate nothing. A union component
-snapshots its member sources into a stack `struct Spoor *srcs[PGRP_MAX_MOUNTS]`.
-The mount-table entry
-(`struct PgrpMount`: source + `mp_path` + the `(mp_dc, mp_devno,
-mp_qid_path)` key, 40 B since #66b) and `Spoor.devno` (Plan 9 `Chan.dev`,
+snapshots its member sources into a `struct union_members`: 16 inline, on the
+stack, and for a larger union a `kmalloc`'d array sized from the count that
+`mount_members_snapshot` answers, taken again if the union grew in between
+(the room doubles, up to `PGRP_MOUNT_CAP`). No stack array is sized from the
+cap, which a 16 KiB kernel stack could not hold at 1024. That allocation is
+the one a union walk can fail: `union_members_take` answers `T_E_NOMEM` with
+nothing held, and each of its four callers (the union walk, the create
+member, the remove holder, the union-open snapshot) ends the resolution with
+it. The mount-table entry
+(`struct PgrpMount`, 64 B, under its point's `struct PgrpMhead`, which holds
+the `(dc, devno, qid_path)` key; both private to `territory.c` since the
+dynamic table) and `Spoor.devno` (Plan 9 `Chan.dev`,
 minted per attach session by `spoor_next_devno`) belong to the territory
 and spoor dossiers; the key's `devno` axis exists because every dev9p
 session shares `dc = '9'` and every attach root has `qid.path == 0` — two
@@ -720,7 +747,7 @@ Its two shared-state touchpoints:
   `mount_is_point_id` (membership only), and `mount_members_snapshot` (the
   whole union set + flags, atomically — UM-8 F4), all under the per-Territory
   `ns_lock` (RW-4 SA-F1; the lock lives territory-side and is never held
-  across `clone_walk_zero` or a walk). Any new `mounts[]`/`root_spoor`
+  across `clone_walk_zero` or a walk). Any new mount-table / `root_spoor`
   reader MUST go through these — a bare lock-free read reopens the multi-thread
   UAF the P6 lift exposed. The symlink re-anchor's `territory_root_ref` is the
   same accessor, so an absolute-target expansion cannot race a `pivot_root`.
@@ -781,7 +808,9 @@ to `T_E_IO` — never errno 1), or `T_E_IO` (OOM, cross failure, transport).
 The walk-NULL arm deliberately reports NOENT for the rare deep failures
 (session-dead, OOM) too: the kernel's own `perm_check` is the ACCES
 authority, so a walk NULL is never a masked permission denial (ER-2 — a
-walk-vtable errno out-param — is the in-flight refinement; see Seams).
+walk-vtable errno out-param — is the in-flight refinement; see Seams). A failure
+past the first name of a batched walk reaches this arm only from the per-component
+loop, after the sentinel, so the gate before that name has run.
 
 ## Performance
 
@@ -883,8 +912,8 @@ authoritative audit-trigger copy):
   never reach the ordinary `return quarry`, and they read the leaf's fused
   record instead.
 - **A union crosses the EXACT snapshot source, never a re-derived index.** The
-  member set is snapshot atomically under one `ns_lock` hold; crossing member
-  `srcs[k]` (not "member k, looked up again") is what makes a concurrent unmount
+  member set is snapshot atomically under one `ns_lock` hold; crossing the
+  snapshot's `src[k]` (not "member k, looked up again") is what makes a concurrent unmount
   unable to cross a member the walk never inspected (UM-8 F4). Any new union
   operation snapshots the same way.
 - **Union resolution SKIPS a faulting member; it does not fail the walk.** A
@@ -991,7 +1020,7 @@ authoritative audit-trigger copy):
   the "no batching at v1.0" performance note predates POUNCE; the
   "borrowed-start TOCTOU deferred" caveat predates #844 (closed); the
   `#848` pivot-vs-walk note predates RW-4's `ns_lock` (closed).
-  `PGRP_MAX_MOUNTS` is 20 today.
+  Its mount-table figures predate the dynamic table ([[sub-kernel-territory]]).
 
 ## Provenance
 

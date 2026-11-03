@@ -237,7 +237,6 @@ void test_sched_runnable_count(void) {
 // The runnable counts read per-band counts kept under each CPU's lock, not a
 // walk of trees whose threads a peer may be freeing. Each count must equal its
 // tree, compared under the lock, with a thread queued and after it leaves.
-void test_sched_run_counts_match_trees(void);
 void test_sched_run_counts_match_trees(void) {
     bool entry = sched_run_counts_match_trees_for_test();
     struct Thread *t = thread_create(kproc(), sched_test_thread_a);

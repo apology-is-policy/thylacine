@@ -50,6 +50,12 @@ static u8 g_loopback_resp[4096];
 // FEWER than requested (a partial walk).
 static bool g_wga_partial = false;
 
+// A leg's hostile server: this many qids more than the walk's reply should name.
+static u16 g_walk_overcount;
+static u32 g_walk_overcounts_sent;
+static u32 g_write_overcount;
+static u32 g_weft_overcount;
+
 // Reusable responder that handles every Tmsg type with a sensible
 // canned response. Tests choose which fid path / qid the server
 // returns by reading the request opcode + tag. The SrvConn-vehicle
@@ -88,16 +94,24 @@ int canonical_responder(void *ctx, const u8 *req, size_t req_len,
         return (int)total;
     }
     if (type == P9_TWALK) {
-        // Always 1 qid back regardless of nwname requested.
-        size_t total = P9_HDR_LEN + 2 + P9_QID_LEN;
+        // One qid for a walk of any names, none for a clone, and g_walk_overcount
+        // more than that when a leg asks.
+        if (req_len < P9_HDR_LEN + 10) return -1;
+        u16 nwname = (u16)(req[P9_HDR_LEN + 8] | ((u16)req[P9_HDR_LEN + 9] << 8));
+        u16 n = (u16)((nwname ? 1 : 0) + g_walk_overcount);
+        size_t total = P9_HDR_LEN + 2 + (size_t)n * P9_QID_LEN;
         if (resp_cap < total) return -1;
-        resp[0] = (u8)(total & 0xff); resp[1] = 0; resp[2] = 0; resp[3] = 0;
+        resp[0] = (u8)(total & 0xff); resp[1] = (u8)((total >> 8) & 0xff); resp[2] = 0; resp[3] = 0;
         resp[4] = P9_RWALK;
         resp[5] = (u8)(tag & 0xff); resp[6] = (u8)((tag >> 8) & 0xff);
-        resp[7] = 1; resp[8] = 0;            // nwqid = 1
-        resp[9] = P9_QTFILE;
-        for (int i = 0; i < 4; i++) resp[10 + i] = 0;
-        resp[14] = 77; for (int i = 1; i < 8; i++) resp[14 + i] = 0;
+        resp[7] = (u8)n; resp[8] = 0;
+        for (u16 q = 0; q < n; q++) {
+            u8 *el = resp + 9 + (size_t)q * P9_QID_LEN;
+            el[0] = P9_QTFILE;
+            for (int i = 0; i < 4; i++) el[1 + i] = 0;
+            el[5] = 77; for (int i = 1; i < 8; i++) el[5 + i] = 0;
+        }
+        if (g_walk_overcount) g_walk_overcounts_sent++;
         return (int)total;
     }
     if (type == P9_TWALKGETATTR) {
@@ -109,6 +123,7 @@ int canonical_responder(void *ctx, const u8 *req, size_t req_len,
         u16 nwname = (u16)(req[P9_HDR_LEN + 16] |
                            ((u16)req[P9_HDR_LEN + 17] << 8));
         u16 n = (g_wga_partial && nwname > 0) ? (u16)(nwname - 1) : nwname;
+        n = (u16)(n + g_walk_overcount);
         size_t total = P9_HDR_LEN + 2 + (size_t)n * P9_WGA_BODY_LEN;
         if (resp_cap < total) return -1;
         resp[0] = (u8)(total & 0xff); resp[1] = (u8)((total >> 8) & 0xff);
@@ -129,6 +144,7 @@ int canonical_responder(void *ctx, const u8 *req, size_t req_len,
             el[33] = 1;                                  // nlink
             el[49] = (u8)(100 + i);                      // size
         }
+        if (g_walk_overcount) g_walk_overcounts_sent++;
         return (int)total;
     }
     if (type == P9_TCLUNK || type == P9_TSETATTR || type == P9_TFSYNC ||
@@ -170,13 +186,15 @@ int canonical_responder(void *ctx, const u8 *req, size_t req_len,
         return (int)total;
     }
     if (type == P9_TWRITE) {
-        // Echo the requested count back as accepted-count.
+        // Echo the requested count back as accepted-count, and g_write_overcount
+        // more when a leg asks.
         // Request body: fid(4) + offset(8) + count(4) + data(count).
         if (req_len < P9_HDR_LEN + 4 + 8 + 4) return -1;
         u32 count = (u32)req[P9_HDR_LEN + 4 + 8]
                   | ((u32)req[P9_HDR_LEN + 4 + 8 + 1] << 8)
                   | ((u32)req[P9_HDR_LEN + 4 + 8 + 2] << 16)
                   | ((u32)req[P9_HDR_LEN + 4 + 8 + 3] << 24);
+        count += g_write_overcount;
         size_t total = P9_HDR_LEN + 4;
         if (resp_cap < total) return -1;
         resp[0] = 11; resp[1] = 0; resp[2] = 0; resp[3] = 0;
@@ -397,7 +415,7 @@ void test_9p_client_walk_and_clunk(void) {
     int rc = p9_client_walk(&g_client, /*src=*/0, /*new=*/5,
                               /*nwname=*/0, NULL, NULL, &nwqid, qids);
     TEST_EXPECT_EQ(rc, 0, "walk(0→5, clone) ok");
-    TEST_EXPECT_EQ((u64)nwqid, (u64)1, "1 qid returned");
+    TEST_EXPECT_EQ((u64)nwqid, (u64)0, "a clone names no qids");
 
     // Walk-one convenience.
     const u8 name[] = {'a'};
@@ -409,6 +427,69 @@ void test_9p_client_walk_and_clunk(void) {
 
     rc = p9_client_clunk(&g_client, 5);
     TEST_EXPECT_EQ(rc, 0, "clunk fid 5 ok");
+
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
+
+// A server names more components than the walk asked: the session refuses the
+// reply before any of it reaches the caller's array, which is sized by the walk.
+// Any process can serve a mount, so this is kernel memory against an EL0 peer.
+void test_9p_client_walk_overcount_fails_closed(void) {
+    drive_client_open(&g_client, &g_loopback);
+    static struct { struct p9_qid q[1]; u8 canary[sizeof(struct p9_qid) * 4]; } w;
+    for (size_t i = 0; i < sizeof(w.canary); i++) w.canary[i] = 0xA5;
+    const u8 name[] = {'a'};
+    const u8 *names[1] = { name };
+    size_t lens[1] = { 1 };
+    u16 nwqid = 0xffff;
+
+    int rc = p9_client_walk(&g_client, 0, 5, 1, names, lens, &nwqid, w.q);
+    TEST_EXPECT_EQ(rc, 0, "control: a reply naming what was asked");
+    TEST_EXPECT_EQ((u64)nwqid, (u64)1, "one qid");
+
+    g_walk_overcount = 4;
+    g_walk_overcounts_sent = 0;
+    rc = p9_client_walk(&g_client, 0, 6, 1, names, lens, &nwqid, w.q);
+    g_walk_overcount = 0;
+    TEST_EXPECT_EQ(g_walk_overcounts_sent, 1u, "the server over-counted");
+    TEST_ASSERT(rc != 0, "the walk fails");
+    TEST_ASSERT(g_client.dead, "and the session with it");
+    TEST_ASSERT(!p9_session_fid_bound(&g_client.session, 6), "it bound nothing");
+    bool intact = true;
+    for (size_t i = 0; i < sizeof(w.canary); i++) intact = intact && w.canary[i] == 0xA5;
+    TEST_ASSERT(intact, "nothing landed past the caller's one qid");
+
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
+
+void test_9p_client_walkgetattr_overcount_fails_closed(void) {
+    drive_client_open(&g_client, &g_loopback);
+    static struct p9_qid qids[P9_MAX_WALK];
+    static struct { struct p9_attr a[1]; u8 canary[sizeof(struct p9_attr) * 4]; } w;
+    for (size_t i = 0; i < sizeof(w.canary); i++) w.canary[i] = 0xA5;
+    const u8 name[] = {'a'};
+    const u8 *names[1] = { name };
+    size_t lens[1] = { 1 };
+    u16 nwqid = 0xffff;
+
+    int rc = p9_client_walkgetattr(&g_client, 0, 5, P9_GETATTR_BASIC, 1, names, lens,
+                                   &nwqid, qids, w.a);
+    TEST_EXPECT_EQ(rc, 0, "control: a reply naming what was asked");
+    TEST_EXPECT_EQ((u64)nwqid, (u64)1, "one element");
+
+    g_walk_overcount = 4;
+    g_walk_overcounts_sent = 0;
+    rc = p9_client_walkgetattr(&g_client, 0, 6, P9_GETATTR_BASIC, 1, names, lens,
+                               &nwqid, qids, w.a);
+    g_walk_overcount = 0;
+    TEST_EXPECT_EQ(g_walk_overcounts_sent, 1u, "the server over-counted");
+    TEST_ASSERT(rc != 0, "the walk fails");
+    TEST_ASSERT(g_client.dead, "and the session with it");
+    bool intact = true;
+    for (size_t i = 0; i < sizeof(w.canary); i++) intact = intact && w.canary[i] == 0xA5;
+    TEST_ASSERT(intact, "nothing landed past the caller's one element");
 
     p9_client_destroy(&g_client);
     p9_loopback_destroy(&g_loopback);
@@ -483,6 +564,42 @@ void test_9p_client_lopen_read(void) {
     TEST_EXPECT_EQ(rc, 0,                          "read ok");
     TEST_EXPECT_EQ((u64)n, (u64)5,                 "read count = 5 (hello)");
     TEST_ASSERT(data[0] == 'h' && data[4] == 'o',  "read payload matches");
+
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
+
+// A server claims it took more than the request carried. A caller subtracts the
+// answer from what it has left, so the claim stops here. The op fails as an
+// over-long Rread does, and the session lives.
+void test_9p_client_write_overcount_refused(void) {
+    drive_client_open(&g_client, &g_loopback);
+    p9_client_walk_one(&g_client, 0, 11, (const u8 *)"f", 1, NULL);
+    const u8 payload[4] = {'w', 'r', 'i', 't'};
+    u32 got = 0;
+    int rc = p9_client_write(&g_client, 11, 0, (u32)sizeof(payload), payload, &got);
+    TEST_EXPECT_EQ(rc, 0, "control: a reply naming what was sent");
+    TEST_EXPECT_EQ((u64)got, (u64)sizeof(payload), "its count");
+
+    g_write_overcount = 1;
+    got = 0xffffffffu;
+    rc = p9_client_write(&g_client, 11, 0, (u32)sizeof(payload), payload, &got);
+    g_write_overcount = 0;
+    TEST_EXPECT_EQ(rc, -P9_E_IO, "an Rwrite past the Twrite is refused");
+    TEST_EXPECT_EQ((u64)got, (u64)0xffffffffu, "its count reaches no caller");
+    TEST_ASSERT(!g_client.dead, "the session lives");
+
+    // The canned Rweftio names 0x1000.
+    p9_client_walk_one(&g_client, 0, 20, (const u8 *)"d", 1, NULL);
+    got = 0;
+    rc = p9_client_weftio(&g_client, 20, 0, 0x1000u, WEFT_DIR_WRITE, &got);
+    TEST_EXPECT_EQ(rc, 0, "control: a Tweftio that asked for it");
+    TEST_EXPECT_EQ((u64)got, (u64)0x1000u, "its count");
+    got = 0xffffffffu;
+    rc = p9_client_weftio(&g_client, 20, 0, 0xfffu, WEFT_DIR_READ, &got);
+    TEST_EXPECT_EQ(rc, -P9_E_IO, "an Rweftio past the Tweftio is refused");
+    TEST_EXPECT_EQ((u64)got, (u64)0xffffffffu, "its count reaches no caller");
+    TEST_ASSERT(!g_client.dead, "the session lives");
 
     p9_client_destroy(&g_client);
     p9_loopback_destroy(&g_loopback);
@@ -607,7 +724,7 @@ void test_9p_client_weftio(void) {
     p9_client_walk_one(&g_client, 0, 20, (const u8 *)"d", 1, NULL);
 
     u32 count = 0;
-    int rc = p9_client_weftio(&g_client, 20, /*off=*/0x100u, /*len=*/0x800u,
+    int rc = p9_client_weftio(&g_client, 20, /*off=*/0x100u, /*len=*/0x1000u,
                               WEFT_DIR_WRITE, &count);
     TEST_EXPECT_EQ(rc, 0,                        "weftio ok");
     TEST_EXPECT_EQ((u64)count, (u64)0x00001000u, "weftio count round-trip");
@@ -728,6 +845,43 @@ void test_9p_client_rlerror_hostile_ecode_bounded(void) {
     g_rlerror_ecode = 4095;
     rc = p9_client_walk_one(&g_client, 0, 8, (const u8 *)"x", 1, NULL);
     TEST_EXPECT_EQ(rc, -4095, "ecode 4095 passes through");
+
+    g_rlerror_ecode = 2;
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
+
+// Only the kernel's handle gate answers EBADF (docs/ERRORS.md): map_error
+// reads a server's ecode 9 as -EIO. Its neighbours, 8 and 10, cross as
+// themselves, so the fold is one value wide.
+void test_9p_client_rlerror_ebadf_reads_eio(void) {
+    int rc = p9_loopback_init(&g_loopback, g_loopback_resp,
+                                sizeof(g_loopback_resp),
+                                rlerror_responder, NULL);
+    TEST_EXPECT_EQ(rc, 0, "loopback init (EBADF rlerror)");
+
+    rc = p9_client_init(&g_client, 0, 8192,
+                         p9_loopback_ops_for(&g_loopback),
+                         g_recv_buf, sizeof(g_recv_buf));
+    TEST_EXPECT_EQ(rc, 0, "client init");
+
+    const u8 uname[] = {'r'};
+    const u8 aname[] = {'/'};
+    rc = p9_client_handshake(&g_client, uname, sizeof(uname),
+                               aname, sizeof(aname), 0);
+    TEST_EXPECT_EQ(rc, 0, "handshake ok");
+
+    g_rlerror_ecode = T_E_BADF;
+    rc = p9_client_walk_one(&g_client, 0, 5, (const u8 *)"x", 1, NULL);
+    TEST_EXPECT_EQ(rc, -P9_E_IO, "a server's EBADF reads -EIO");
+
+    g_rlerror_ecode = T_E_BADF - 1;
+    rc = p9_client_walk_one(&g_client, 0, 6, (const u8 *)"x", 1, NULL);
+    TEST_EXPECT_EQ(rc, -(int)(T_E_BADF - 1), "ecode 8 crosses as itself");
+
+    g_rlerror_ecode = T_E_BADF + 1;
+    rc = p9_client_walk_one(&g_client, 0, 7, (const u8 *)"x", 1, NULL);
+    TEST_EXPECT_EQ(rc, -(int)(T_E_BADF + 1), "ecode 10 crosses as itself");
 
     g_rlerror_ecode = 2;
     p9_client_destroy(&g_client);
@@ -2041,6 +2195,18 @@ void test_9p_client_loom_write_e2e(void) {
                 g_loom_wcap[3]=='L' && g_loom_wcap[4]=='D' && g_loom_wcap[5]=='!',
                 "buffer bytes copied build-time onto the wire");
     TEST_EXPECT_EQ((u64)l->async_inflight, (u64)0, "op reaped");
+
+    // A CQE is write(2)'s answer: it never names more than the op asked.
+    g_write_overcount = 1;
+    cl_stage_rw(l, 1, LOOM_OP_WRITE, /*handle=*/0, /*offset=*/0, /*count=*/(u32)sizeof(payload),
+                /*bidx=*/0, /*buf_off=*/0, 0xF00D000000000007ULL);
+    __atomic_store_n(&h->sq_tail, 2u, __ATOMIC_RELEASE);
+    n = loom_enter(l, 1, /*min_complete=*/2, 0);   // the first CQE is still unreaped
+    g_write_overcount = 0;
+    TEST_EXPECT_EQ(n, 1, "the second SQE consumed");
+    TEST_EXPECT_EQ((u64)(s64)cqes[1].result, (u64)sizeof(payload),
+                   "an Rwrite past the op is held to the op");
+    TEST_EXPECT_EQ((u64)l->async_inflight, (u64)0, "op reaped");
     TEST_EXPECT_EQ(burrow_handle_count(b), hc0, "op buffer pin balanced");
 
     burrow_unref(b);
@@ -2078,11 +2244,12 @@ static int loom_weft_capture_responder(void *ctx, const u8 *req, size_t req_len,
             // Rweftio echoing the requested len (proves the len round-trips the wire).
             size_t total = P9_HDR_LEN + 4;
             if (cap < total) return -1;
+            u32 said = g_weft_len + g_weft_overcount;
             resp[0] = (u8)total; resp[1] = 0; resp[2] = 0; resp[3] = 0;
             resp[4] = P9_RWEFTIO;
             resp[5] = (u8)(tag & 0xff); resp[6] = (u8)((tag >> 8) & 0xff);
-            resp[7]  = (u8)(g_weft_len & 0xff);         resp[8]  = (u8)((g_weft_len >> 8) & 0xff);
-            resp[9]  = (u8)((g_weft_len >> 16) & 0xff); resp[10] = (u8)((g_weft_len >> 24) & 0xff);
+            resp[7]  = (u8)(said & 0xff);         resp[8]  = (u8)((said >> 8) & 0xff);
+            resp[9]  = (u8)((said >> 16) & 0xff); resp[10] = (u8)((said >> 24) & 0xff);
             return (int)total;
         }
     }
@@ -2223,6 +2390,17 @@ void test_9p_client_loom_weft_write_e2e(void) {
     TEST_EXPECT_EQ((u64)(s64)cqes[0].result, (u64)512, "result = Rweftio count");
     TEST_EXPECT_EQ((u64)l->async_inflight, (u64)0, "op reaped");
     TEST_EXPECT_EQ(burrow_handle_count(ringb), hc0, "op buffer pin balanced");
+
+    g_weft_overcount = 1;
+    cl_stage_rw(l, 1, LOOM_OP_WRITE, /*handle=*/0, /*offset=*/0, /*count=*/512,
+                /*bidx=*/0, /*buf_off=*/poff, 0xF00DF00D00000201ULL);
+    __atomic_store_n(&h->sq_tail, 2u, __ATOMIC_RELEASE);
+    n = loom_enter(l, 1, /*min_complete=*/2, 0);   // the first CQE is still unreaped
+    g_weft_overcount = 0;
+    TEST_EXPECT_EQ(n, 1, "the second SQE consumed");
+    TEST_EXPECT_EQ((u64)(s64)cqes[1].result, (u64)512,
+                   "an Rweftio past the op is held to the op");
+    TEST_EXPECT_EQ((u64)l->async_inflight, (u64)0, "op reaped");
 
     burrow_unref(ringb);
     loom_unref(l);
@@ -2699,6 +2877,12 @@ static void loom_test_ident_drop(struct Proc *p) {
     if (!p) return;
     test_proc_free_drained(p);
 }
+// M7: the session's ends admit a create, not the DAC. Stamp `principal` as the
+// client end with no server end, as SYS_ATTACH_9P stamps an attacher; a DAC table
+// moves it with the identity it tests, so the DAC, not M7, decides its legs.
+static void loom_admit(u32 principal) {
+    p9_client_set_ends(&g_client, principal, PRINCIPAL_INVALID);
+}
 // The gid a create T-message carries, or 0xDEADBEEF when the frame is short.
 // Layouts: Tmkdir dfid name mode gid; Tsymlink fid name symtgt gid; Tmknod dfid
 // name mode major minor gid (9P2000.L).
@@ -2781,7 +2965,7 @@ static int loom_mut_capture_responder(void *ctx, const u8 *req, size_t req_len,
 void test_9p_client_loom_mkdir_e2e(void) {
     g_loom_mname_len = 0; g_loom_mname_mode = 0;
     loom_ga_reset();
-    loom_ga_dir(0755u, 0x1234u, 0x5678u);   // the creator's own dir (8.5.1 passes)
+    loom_ga_dir(0755u, 0x1234u, 0x4321u);   // the creator's own dir (8.5.1 passes), another group
     int rc = p9_loopback_init(&g_loopback, g_loopback_resp, sizeof(g_loopback_resp),
                               loom_mut_capture_responder, NULL);
     TEST_EXPECT_EQ(rc, 0, "loopback init (mut capture)");
@@ -2803,6 +2987,7 @@ void test_9p_client_loom_mkdir_e2e(void) {
     TEST_ASSERT(loom_register_handles(l, &sp, &rt, 1) == 0, "register write dir handle");
     struct Proc *who = loom_test_ident(l, 0x1234u, 0x5678u, 0);
     TEST_ASSERT(who != NULL, "bind the creator identity");
+    loom_admit(0x1234u);
 
     struct Burrow *b; u8 *bkva;
     loom_install_test_buf(l, 0, PAGE_SIZE, &b, &bkva);
@@ -2826,8 +3011,8 @@ void test_9p_client_loom_mkdir_e2e(void) {
     TEST_ASSERT(g_loom_mname[0]=='s' && g_loom_mname[3]=='d' && g_loom_mname[5]=='r',
                 "mkdir name bytes read from the pinned buffer");
     TEST_EXPECT_EQ((u64)g_loom_mname_mode, (u64)0755u, "mkdir mode decoded from the SQE");
-    TEST_EXPECT_EQ((u64)g_loom_wire_gid, (u64)0x5678u,
-                   "SQE gid 0 -> the creator's primary group on the wire (8.5.1)");
+    TEST_EXPECT_EQ((u64)g_loom_wire_gid, (u64)0x4321u,
+                   "SQE gid 0 -> the directory's group on the wire, not the creator's (F-5)");
     TEST_EXPECT_EQ((u64)l->async_inflight, (u64)0, "op reaped");
     TEST_EXPECT_EQ(burrow_handle_count(b), hc0, "op buffer pin balanced");
 
@@ -3043,6 +3228,7 @@ static struct Spoor *loom_mut_open(void) {
     const u8 aname[] = {'/'};
     if (p9_client_handshake(&g_client, uname, sizeof(uname), aname,
                             sizeof(aname), 0) != 0) return NULL;
+    loom_admit(0x1234u);             // the owner every table starts from
     return dev9p_attach_client(&g_client, 0);
 }
 
@@ -3129,6 +3315,7 @@ void test_9p_client_loom_dirmut_dac(void) {
     // (2) A stranger (other bits r-x): each op refused, never on the wire.
     struct Proc *who = loom_test_ident(l, 0x9999u, 0x9999u, 0);
     TEST_ASSERT(who != NULL, "bind a stranger");
+    loom_admit(0x9999u);
     DM_MKDIR(l,    -(s32)T_E_ACCES, "stranger MKDIR -> -EACCES");
     DM_MKNOD(l,    -(s32)T_E_ACCES, "stranger MKNOD -> -EACCES");
     DM_SYMLINK(l,  -(s32)T_E_ACCES, "stranger SYMLINK -> -EACCES");
@@ -3138,6 +3325,7 @@ void test_9p_client_loom_dirmut_dac(void) {
 
     // (3) The owner (owner bits rwx): each op reaches the wire.
     who->principal_id = 0x1234u; who->primary_gid = 0x5678u;
+    loom_admit(0x1234u);
     DM_MKDIR(l,    0, "owner MKDIR reaches the wire");
     DM_MKNOD(l,    0, "owner MKNOD reaches the wire");
     DM_SYMLINK(l,  0, "owner SYMLINK reaches the wire");
@@ -3154,6 +3342,7 @@ void test_9p_client_loom_dirmut_dac(void) {
 
     // (5) Group: a member is judged on the group triple.
     who->principal_id = 0x7777u;                     // primary 0x5678 = the dir's group
+    loom_admit(0x7777u);
     loom_ga_dir(0755u, 0x1234u, 0x5678u);
     DM_MKDIR(l, -(s32)T_E_ACCES, "group member, group r-x -> -EACCES");
     loom_ga_dir(0775u, 0x1234u, 0x5678u);
@@ -3162,6 +3351,7 @@ void test_9p_client_loom_dirmut_dac(void) {
     // (6) The DAC override is a capability (I-22), read live: a stranger holding
     // CAP_HOSTOWNER or CAP_DAC_OVERRIDE passes; the same stranger without it does not.
     who->principal_id = 0x9999u; who->primary_gid = 0x9999u;
+    loom_admit(0x9999u);
     loom_ga_dir(0755u, 0x1234u, 0x5678u);
     who->caps = CAP_HOSTOWNER;
     DM_MKDIR(l, 0, "stranger + CAP_HOSTOWNER -> reaches the wire");
@@ -3172,6 +3362,7 @@ void test_9p_client_loom_dirmut_dac(void) {
 
     // (7) RENAMEAT checks BOTH directories; LINK checks only where the link lands.
     who->principal_id = 0x1234u; who->primary_gid = 0x5678u;
+    loom_admit(0x1234u);
     g_loom_ga_deny_fid = sub_fid;
     DM_RENAMEAT(l, -(s32)T_E_ACCES, "RENAMEAT, newdir unwritable -> -EACCES");
     DM_LINK(l, 0, "LINK whose SOURCE sits in an unwritable dir -> reaches the wire");
@@ -3251,13 +3442,15 @@ void test_9p_client_loom_dirmut_sqpoll(void) {
     p9_loopback_destroy(&g_loopback);
 }
 
-// The create ops' SQE gid: 0 is the creator's primary group; any other value must
-// be a group the creator is in unless it holds chown-any authority (CAP_HOSTOWNER
-// or CAP_CHOWN) -- perm_wstat_check's chgrp rule applied at birth. The wire gid is
-// the RESOLVED one. MKDIR/SYMLINK carry it in _resv1[2], MKNOD in `offset`.
+// The create ops' SQE gid: 0 is the directory's group (IDENTITY-DESIGN 3.5 F-5),
+// which here is neither the creator's primary group (0x5678) nor its
+// supplementary one; any other value must be a group the creator is in unless it
+// holds chown-any authority (CAP_HOSTOWNER or CAP_CHOWN) -- perm_wstat_check's
+// chgrp rule applied at birth. The wire gid is the RESOLVED one. MKDIR/SYMLINK
+// carry it in _resv1[2], MKNOD in `offset`.
 void test_9p_client_loom_create_gid(void) {
     loom_ga_reset();
-    loom_ga_dir(0755u, 0x1234u, 0x5678u);
+    loom_ga_dir(0755u, 0x1234u, 0x6789u);
     struct Spoor *root = loom_mut_open();
     TEST_ASSERT(root != NULL, "capture client + root");
     struct Loom *l = loom_create(8, 16, false);
@@ -3274,7 +3467,17 @@ void test_9p_client_loom_create_gid(void) {
 
     // MKDIR (gid in _resv1[2]).
     TEST_EXPECT_EQ((u64)loom_dm_submit(l, LOOM_OP_MKDIR, 3, 0, 0755u, 0, 0), (u64)0, "gid 0");
-    TEST_EXPECT_EQ((u64)g_loom_wire_gid, (u64)0x5678u, "gid 0 -> the primary group on the wire");
+    TEST_EXPECT_EQ((u64)g_loom_wire_gid, (u64)0x6789u, "gid 0 -> the directory's group on the wire");
+    g_loom_ga_gid = 0x678Au;                         // the control: the directory's group moves
+    TEST_EXPECT_EQ((u64)loom_dm_submit(l, LOOM_OP_MKDIR, 3, 0, 0755u, 0, 0), (u64)0,
+                   "gid 0, another group");
+    TEST_EXPECT_EQ((u64)g_loom_wire_gid, (u64)0x678Au, "and the wire gid follows it");
+    g_loom_ga_valid_clear = P9_GETATTR_GID;          // a stat that names no group
+    TEST_EXPECT_EQ((u64)loom_dm_submit(l, LOOM_OP_MKDIR, 3, 0, 0755u, 0, 0), (u64)0,
+                   "gid 0, no group reported");
+    g_loom_ga_valid_clear = 0;
+    g_loom_ga_gid = 0x6789u;
+    TEST_EXPECT_EQ((u64)g_loom_wire_gid, (u64)GID_INVALID, "passes none on");
     TEST_EXPECT_EQ((u64)loom_dm_submit(l, LOOM_OP_MKDIR, 3, 0, 0755u, 0x4444u, 0), (u64)0,
                    "a supplementary group");
     TEST_EXPECT_EQ((u64)g_loom_wire_gid, (u64)0x4444u, "the supplementary group on the wire");
@@ -3296,14 +3499,14 @@ void test_9p_client_loom_create_gid(void) {
 
     // SYMLINK (gid in _resv1[2]; _resv1[1] is the name split).
     TEST_EXPECT_EQ((u64)loom_dm_submit(l, LOOM_OP_SYMLINK, 6, 0, 3, 0, 0), (u64)0, "SYMLINK gid 0");
-    TEST_EXPECT_EQ((u64)g_loom_wire_gid, (u64)0x5678u, "SYMLINK: the primary group on the wire");
+    TEST_EXPECT_EQ((u64)g_loom_wire_gid, (u64)0x6789u, "SYMLINK: the directory's group on the wire");
     loom_dm_leg(l, LOOM_OP_SYMLINK, 6, 0, 3, 0x3333u, 0, -(s32)T_E_ACCES,
                 "SYMLINK into a foreign group -> -EACCES");
 
     // MKNOD (gid in `offset`; _resv1[1..3] are mode/major/minor).
     TEST_EXPECT_EQ((u64)loom_dm_submit(l, LOOM_OP_MKNOD, 3, 0, 0010644u, 0, 0), (u64)0,
                    "MKNOD gid 0");
-    TEST_EXPECT_EQ((u64)g_loom_wire_gid, (u64)0x5678u, "MKNOD: the primary group on the wire");
+    TEST_EXPECT_EQ((u64)g_loom_wire_gid, (u64)0x6789u, "MKNOD: the directory's group on the wire");
     TEST_EXPECT_EQ((u64)loom_dm_submit(l, LOOM_OP_MKNOD, 3, 0x4444u, 0010644u, 0, 0), (u64)0,
                    "MKNOD into a supplementary group");
     TEST_EXPECT_EQ((u64)g_loom_wire_gid, (u64)0x4444u, "MKNOD: the supplementary group on the wire");
@@ -3311,7 +3514,11 @@ void test_9p_client_loom_create_gid(void) {
                 "MKNOD into a foreign group -> -EACCES");
 
     // The create mode: rwx only, as the sync create sends it. The 0755 legs are
-    // the control one variable away -- a plain mode crosses unchanged.
+    // the control one variable away -- a plain mode crosses unchanged. M8's
+    // umask and bound are set aside (mask 0, a 0777 parent), so these legs pin
+    // only the rwx-only rule; loom_create_mode pins M8.
+    (void)proc_umask_exchange(who, 0);
+    loom_ga_dir(0777u, 0x1234u, 0x5678u);
     TEST_EXPECT_EQ((u64)loom_dm_submit(l, LOOM_OP_MKDIR, 3, 0, 0755u, 0, 0), (u64)0, "MKDIR 0755");
     TEST_EXPECT_EQ((u64)g_loom_wire_mode, (u64)0755u, "MKDIR: a plain mode crosses unchanged");
     TEST_EXPECT_EQ((u64)loom_dm_submit(l, LOOM_OP_MKDIR, 3, 0, 07777u, 0, 0), (u64)0, "MKDIR 07777");
@@ -3496,6 +3703,181 @@ void test_9p_client_loom_dirmut_names(void) {
     p9_loopback_destroy(&g_loopback);
 }
 #undef NM
+
+// M7 (IDENTITY-DESIGN 9.7; LOOM.md 8.5.1): MKDIR, MKNOD and SYMLINK are
+// admitted only to a principal at one of the session's two ends, before the
+// parent's stat, whether or not the Dev enforces rwx and whatever the creator's
+// DAC override. The creator owns its 0755 directory, so the DAC admits every
+// leg and only M7 can refuse; each refusal sits beside an admitted control one
+// variable away. UNLINKAT, RENAMEAT and LINK make no new file and are untouched.
+void test_9p_client_loom_create_session_ends(void) {
+    loom_ga_reset();
+    loom_ga_dir(0755u, 0x1234u, 0x5678u);
+    struct Spoor *root = loom_mut_open();
+    TEST_ASSERT(root != NULL, "capture client + root");
+    u32 sub_fid = P9_NOFID;
+    struct Spoor *sub = loom_walk_sub(root, &sub_fid);
+    TEST_ASSERT(sub != NULL, "a second directory Spoor");
+    struct Loom *l = loom_create(8, 16, false);
+    TEST_ASSERT(l != NULL, "loom_create");
+    loom_install_test_handle(l, 0, root, RIGHT_READ | RIGHT_WRITE);
+    loom_install_test_handle(l, 1, sub,  RIGHT_READ | RIGHT_WRITE);
+    struct Burrow *b; u8 *bkva;
+    loom_install_test_buf(l, 0, PAGE_SIZE, &b, &bkva);
+    const char *nm = "abcdef";
+    for (u32 i = 0; i < 6; i++) bkva[i] = (u8)nm[i];
+    struct Proc *who = loom_test_ident(l, 0x1234u, 0x5678u, 0);
+    TEST_ASSERT(who != NULL, "bind the owner");
+
+    // (1) The creator is the client end: every create reaches the wire.
+    loom_admit(0x1234u);
+    DM_MKDIR(l,   0, "client end: MKDIR reaches the wire");
+    DM_MKNOD(l,   0, "client end: MKNOD reaches the wire");
+    DM_SYMLINK(l, 0, "client end: SYMLINK reaches the wire");
+
+    // (2) At neither end: each create refuses with nothing on the wire, and the
+    // three mutations that make no new file still reach it.
+    p9_client_set_ends(&g_client, 0x2222u, 0x3333u);
+    DM_MKDIR(l,    -(s32)T_E_ACCES, "neither end: MKDIR -EACCES");
+    DM_MKNOD(l,    -(s32)T_E_ACCES, "neither end: MKNOD -EACCES");
+    DM_SYMLINK(l,  -(s32)T_E_ACCES, "neither end: SYMLINK -EACCES");
+    DM_UNLINKAT(l, 0, "neither end: UNLINKAT is not a create");
+    DM_RENAMEAT(l, 0, "neither end: RENAMEAT is not a create");
+    DM_LINK(l,     0, "neither end: LINK makes no new file");
+
+    // (3) The server end admits, as the client end does.
+    p9_client_set_ends(&g_client, 0x2222u, 0x1234u);
+    DM_MKDIR(l, 0, "server end: MKDIR reaches the wire");
+
+    // (4) The DAC override is not an end.
+    p9_client_set_ends(&g_client, 0x2222u, 0x3333u);
+    who->caps = CAP_DAC_OVERRIDE;
+    DM_MKDIR(l, -(s32)T_E_ACCES, "CAP_DAC_OVERRIDE at neither end: -EACCES");
+    who->caps = 0;
+
+    // (5) A session never stamped admits no create; and PRINCIPAL_INVALID never
+    // matches an end, even an unstamped one, under a parent the DAC opens to all.
+    p9_client_set_ends(&g_client, PRINCIPAL_INVALID, PRINCIPAL_INVALID);
+    DM_MKDIR(l, -(s32)T_E_ACCES, "unstamped session: -EACCES");
+    loom_ga_dir(0777u, 0x1234u, 0x5678u);
+    who->principal_id = PRINCIPAL_INVALID;
+    DM_MKDIR(l, -(s32)T_E_ACCES, "a PRINCIPAL_INVALID creator matches no end");
+    who->principal_id = 0x1234u;
+    loom_ga_dir(0755u, 0x1234u, 0x5678u);
+
+    // (6) Decided where the Dev enforces no rwx too, where no stat is taken: a
+    // copy of dev9p with perm_enforced false (a byte loop, not a struct copy: the
+    // kernel has no memcpy), its refusal beside its control. Each answer is read
+    // before root's Dev is restored and asserted only after (TEST_EXPECT_EQ
+    // returns).
+    struct Dev d9;
+    volatile u8 *dst = (volatile u8 *)&d9;
+    const u8 *src = (const u8 *)&dev9p;
+    for (u64 i = 0; i < sizeof d9; i++) dst[i] = src[i];
+    d9.perm_enforced = false;
+    struct Dev *real = root->dev;
+    root->dev = &d9;
+    p9_client_set_ends(&g_client, 0x2222u, 0x3333u);
+    u32 w0 = g_loom_wire_mut;
+    s32 refused = loom_dm_submit(l, LOOM_OP_MKDIR, 3, 0, 0755u, 0, 0);
+    u32 w1 = g_loom_wire_mut;
+    loom_admit(0x1234u);
+    s32 admitted = loom_dm_submit(l, LOOM_OP_MKDIR, 3, 0, 0755u, 0, 0);
+    u32 w2 = g_loom_wire_mut;
+    root->dev = real;
+    TEST_EXPECT_EQ((u64)(s64)refused, (u64)(s64)(-(s32)T_E_ACCES),
+                   "no rwx enforcement, neither end: MKDIR -EACCES");
+    TEST_EXPECT_EQ((u64)(w1 - w0), 0ull, "no rwx enforcement: the refusal sent nothing");
+    TEST_EXPECT_EQ((u64)(s64)admitted, 0ull, "no rwx enforcement, client end: reaches the wire");
+    TEST_EXPECT_EQ((u64)(w2 - w1), 1ull, "no rwx enforcement: the admitted MKDIR went out");
+
+    TEST_EXPECT_EQ((u64)l->async_inflight, (u64)0, "every op reaped");
+    burrow_unref(b);
+    loom_unref(l);
+    spoor_clunk(sub);
+    spoor_clunk(root);
+    loom_test_ident_drop(who);
+    loom_ga_reset();
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
+
+// One MKDIR or MKNOD asking `asked`; expect it admitted and `want` on the wire.
+static void loom_mode_leg(struct Loom *l, u8 opcode, u32 asked, u32 want,
+                          const char *what) {
+    g_loom_wire_mode = 0xDEADBEEFu;
+    s32 r = loom_dm_submit(l, opcode, 3, 0, asked, 0, 0);
+    TEST_EXPECT_EQ((u64)(s64)r, 0ull, what);
+    TEST_EXPECT_EQ((u64)g_loom_wire_mode, (u64)want, what);
+}
+
+// M8 (IDENTITY-DESIGN 9.7; LOOM.md 8.5.1): MKDIR's and MKNOD's rwx on the wire
+// are the asked bits less the creator's umask, bounded by the parent's mode
+// where the Dev enforces rwx, and MKNOD keeps its type. Each leg differs from a
+// neighbour in one input; the parent's mode is the fake directory's.
+void test_9p_client_loom_create_mode(void) {
+    loom_ga_reset();
+    loom_ga_dir(0777u, 0x1234u, 0x5678u);
+    struct Spoor *root = loom_mut_open();
+    TEST_ASSERT(root != NULL, "capture client + root");
+    struct Loom *l = loom_create(8, 16, false);
+    TEST_ASSERT(l != NULL, "loom_create");
+    loom_install_test_handle(l, 0, root, RIGHT_READ | RIGHT_WRITE);
+    struct Burrow *b; u8 *bkva;
+    loom_install_test_buf(l, 0, PAGE_SIZE, &b, &bkva);
+    bkva[0] = 'a'; bkva[1] = 'b'; bkva[2] = 'c';
+    struct Proc *who = loom_test_ident(l, 0x1234u, 0x5678u, 0);
+    TEST_ASSERT(who != NULL, "bind the owner, the client end");
+    TEST_EXPECT_EQ((u64)proc_umask(who), (u64)PROC_UMASK_DEFAULT, "a fresh creator's mask is 0022");
+
+    // (1) The control: no mask and a 0777 parent, so the asked rwx cross.
+    (void)proc_umask_exchange(who, 0);
+    loom_mode_leg(l, LOOM_OP_MKDIR, 0777u,    0777u,    "mask 0, parent 0777: MKDIR 0777 crosses");
+    loom_mode_leg(l, LOOM_OP_MKNOD, 0010666u, 0010666u, "mask 0, parent 0777: MKNOD 0666 crosses");
+    // (2) The umask alone.
+    (void)proc_umask_exchange(who, 027u);
+    loom_mode_leg(l, LOOM_OP_MKDIR, 0777u,    0750u,    "mask 027: MKDIR 0777 -> 0750");
+    loom_mode_leg(l, LOOM_OP_MKNOD, 0010666u, 0010640u, "mask 027: MKNOD 0666 -> 0640, the type kept");
+    // (3) The bound alone: a directory's rwx are ANDed with the parent's; a
+    // file's rw bits are, and its x bits pass.
+    (void)proc_umask_exchange(who, 0);
+    loom_ga_dir(0750u, 0x1234u, 0x5678u);
+    loom_mode_leg(l, LOOM_OP_MKDIR, 0777u,    0750u,    "parent 0750: MKDIR 0777 -> 0750");
+    loom_mode_leg(l, LOOM_OP_MKNOD, 0010777u, 0010751u, "parent 0750: MKNOD 0777 -> 0751");
+    // (4) Both, and Plan 9's executable in a private directory.
+    (void)proc_umask_exchange(who, 022u);
+    loom_ga_dir(0700u, 0x1234u, 0x5678u);
+    loom_mode_leg(l, LOOM_OP_MKDIR, 0755u,    0700u,    "mask 022, parent 0700: MKDIR 0755 -> 0700");
+    loom_mode_leg(l, LOOM_OP_MKNOD, 0010755u, 0010711u, "mask 022, parent 0700: MKNOD 0755 -> 0711");
+    // An MKNOD whose type is a directory takes a directory's bound: beside the
+    // FIFO above, only the type differs, and the x bits no longer pass.
+    loom_mode_leg(l, LOOM_OP_MKNOD, 0040755u, 0040700u, "mask 022, parent 0700: MKNOD dir 0755 -> 0700");
+
+    // (5) No bound where the Dev enforces no rwx: the same 0700 parent and the
+    // umask alone. Read before root's Dev is restored, asserted after.
+    struct Dev d9;
+    volatile u8 *dst = (volatile u8 *)&d9;
+    const u8 *src = (const u8 *)&dev9p;
+    for (u64 i = 0; i < sizeof d9; i++) dst[i] = src[i];
+    d9.perm_enforced = false;
+    struct Dev *real = root->dev;
+    root->dev = &d9;
+    g_loom_wire_mode = 0xDEADBEEFu;
+    s32 r = loom_dm_submit(l, LOOM_OP_MKDIR, 3, 0, 0777u, 0, 0);
+    u32 m = g_loom_wire_mode;
+    root->dev = real;
+    TEST_EXPECT_EQ((u64)(s64)r, 0ull, "no rwx enforcement: MKDIR reaches the wire");
+    TEST_EXPECT_EQ((u64)m, (u64)0755u, "no rwx enforcement: the umask alone, 0777 -> 0755");
+
+    TEST_EXPECT_EQ((u64)l->async_inflight, (u64)0, "every op reaped");
+    burrow_unref(b);
+    loom_unref(l);
+    spoor_clunk(root);
+    loom_test_ident_drop(who);
+    loom_ga_reset();
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
 
 // Submit-time rejections for the mutation ops -- the rights gate + the
 // memory-safety guards, all inline (no op goes async):
@@ -4268,6 +4650,7 @@ void test_9p_client_async_full_tag_pool_is_eagain(void) {
 #define DY_WALK         3
 #define DY_READ         4
 #define DY_CLUNK_NOWAIT 5
+#define DY_WRITE        6
 
 static struct test_dying g_dy;
 static struct {
@@ -4307,7 +4690,10 @@ static void dy_run(void *arg) {
         rc = p9_client_clunk_nowait(&g_client, g_dyop.fid);
     else if (g_dyop.op == DY_WALK)
         rc = p9_client_walk_one(&g_client, 0, g_dyop.fid, (const u8 *)"w", 1, NULL);
-    else if (g_dyop.op == DY_READ) {
+    else if (g_dyop.op == DY_WRITE) {
+        u32 acc = 0;
+        rc = p9_client_write(&g_client, g_dyop.fid, 0, 16, g_dyop.data, &acc);
+    } else if (g_dyop.op == DY_READ) {
         u32 got = 0;
         rc = p9_client_read(&g_client, g_dyop.fid, 0, (u32)sizeof(g_dyop.data),
                             g_dyop.data, &got);
@@ -4697,6 +5083,103 @@ void test_9p_client_flushed_walk_late_reply_to_sink(void) {
     dy_client_close();
 }
 
+// An op that mutates loses its owner: the server may have run it, or may yet,
+// nobody will invalidate for it, and the client cannot name what it touched.
+#define DY_QID 0x700u
+static u8 g_dy_page[LARDER_PAGE_SIZE];
+
+static void dy_larder_fill(void) {
+    struct larder *l = &g_client.larder;
+    u64 seq = larder_gen_snapshot(l);
+    struct t_stat st;
+    for (size_t i = 0; i < sizeof(st); i++) ((u8 *)&st)[i] = 0;
+    st.mode = 0644; st.qid_path = DY_QID; st.size = LARDER_PAGE_SIZE;
+    larder_attr_install(l, seq, DY_QID, /*cvers=*/1, &st, NULL);
+    larder_dentry_install(l, seq, 0x500, "f", 1, DY_QID, /*negative=*/false);
+    larder_page_install(l, seq, DY_QID, 0, /*cvers=*/1, g_dy_page, LARDER_PAGE_SIZE);
+}
+
+// How much of dy_larder_fill still serves: 3 for all, 0 for none.
+static u32 dy_larder_entries(void) {
+    struct larder *l = &g_client.larder;
+    struct t_stat st;
+    u64 seq, child;
+    u32 n = 0;
+    if (larder_attr_serve(l, DY_QID, &st, &seq)) n++;
+    if (larder_dentry_lookup(l, 0x500, "f", 1, &child)) n++;
+    if (larder_pages_cover(l, DY_QID, /*cvers=*/1, LARDER_PAGE_SIZE)) n++;
+    return n;
+}
+
+void test_9p_client_dying_mutator_forgets_larder(void) {
+    TEST_EXPECT_EQ(dy_client_open(), 0, "client over mq");
+    __atomic_store_n(&g_client.cacheable, true, __ATOMIC_RELAXED);
+    TEST_EXPECT_EQ(dy_bind(140), 1u, "walk binds 140");
+    dy_larder_fill();
+    TEST_EXPECT_EQ(dy_larder_entries(), 3u, "the fixture serves all three kinds");
+
+    // A read leaves the cache alone: the control, one variable away.
+    dy_hold_reader(true);
+    TEST_ASSERT(dy_start(DY_READ, 140, /*dying=*/false), "a reader");
+    TEST_YIELD_UNTIL(test_dying_parked(&g_dy) && rec_count(P9_TREAD) == 1);
+    test_dying_kill(&g_dy);
+    TEST_YIELD_UNTIL(test_dying_done(&g_dy));
+    test_dying_reap(&g_dy);
+    dy_hold_reader(false);
+    TEST_EXPECT_EQ(p9_client_reader_pump_ready(&g_client), 1, "the late Rread");
+    TEST_EXPECT_EQ(p9_client_reader_pump_ready(&g_client), 1, "its Rflush");
+    TEST_EXPECT_EQ(dy_larder_entries(), 3u, "a killed read forgets nothing");
+
+    // A write: gone at the kill, and a fill in flight from before it installs
+    // nothing. Filled again in the window, gone again at the late reply. The
+    // Rflush behind that reply has nothing more to do.
+    dy_hold_reader(true);
+    TEST_ASSERT(dy_start(DY_WRITE, 140, /*dying=*/false), "a writer");
+    TEST_YIELD_UNTIL(test_dying_parked(&g_dy) && rec_count(P9_TWRITE) == 1);
+    TEST_EXPECT_EQ(dy_larder_entries(), 3u, "the write is in flight, its owner alive");
+    u64 seq0 = larder_gen_snapshot(&g_client.larder);
+    test_dying_kill(&g_dy);
+    TEST_YIELD_UNTIL(test_dying_done(&g_dy));
+    test_dying_reap(&g_dy);
+    TEST_EXPECT_EQ((u64)(s64)g_dyop.rc, (u64)(s64)-P9_E_IO, "the dead owner's write failed");
+    TEST_EXPECT_EQ(dy_larder_entries(), 0u, "the kill forgets every entry");
+    struct t_stat st;
+    for (size_t i = 0; i < sizeof(st); i++) ((u8 *)&st)[i] = 0;
+    st.mode = 0644; st.qid_path = DY_QID;
+    larder_attr_install(&g_client.larder, seq0, DY_QID, 1, &st, NULL);
+    u64 sq;
+    TEST_ASSERT(!larder_attr_serve(&g_client.larder, DY_QID, &st, &sq),
+                "and a fill read before it installs nothing");
+    dy_larder_fill();
+    TEST_EXPECT_EQ(dy_larder_entries(), 3u, "a fill after the kill installs");
+    dy_hold_reader(false);
+    TEST_EXPECT_EQ(p9_client_reader_pump_ready(&g_client), 1, "the late Rwrite");
+    TEST_EXPECT_EQ(dy_larder_entries(), 0u, "says the write ran: forgotten again");
+    dy_larder_fill();
+    TEST_EXPECT_EQ(p9_client_reader_pump_ready(&g_client), 1, "its Rflush");
+    TEST_EXPECT_EQ(dy_larder_entries(), 3u, "finds nothing more to do");
+
+    // The server never answers the write, and answers the flush.
+    g_rec_hold = P9_TWRITE;
+    u32 w0 = rec_count(P9_TWRITE);
+    dy_hold_reader(true);
+    TEST_ASSERT(dy_start(DY_WRITE, 140, /*dying=*/false), "a second writer");
+    TEST_YIELD_UNTIL(test_dying_parked(&g_dy) && rec_count(P9_TWRITE) == w0 + 1);
+    test_dying_kill(&g_dy);
+    TEST_YIELD_UNTIL(test_dying_done(&g_dy));
+    test_dying_reap(&g_dy);
+    dy_larder_fill();
+    dy_hold_reader(false);
+    TEST_EXPECT_EQ(p9_client_reader_pump_ready(&g_client), 1, "the lone Rflush");
+    TEST_EXPECT_EQ(dy_larder_entries(), 0u, "forgets what was filled before it");
+    g_rec_hold = 0;
+
+    TEST_EXPECT_EQ(g_client.demux_orphan, (u64)0, "no unexplained frame");
+    TEST_ASSERT(!g_client.dead, "the session stays live");
+    TEST_EXPECT_EQ(p9_client_clunk_async(&g_client, 140), 0, "a live clunk");
+    dy_client_close();
+}
+
 // A walk whose owner died and whose Tflush met a full c2s ring is abandoned
 // without a flush (#53). Its late reply frees the tag and binds the fid all
 // the same. No sink is installed here, so the client keeps the fid: it dies
@@ -4841,6 +5324,31 @@ void test_9p_client_abandoned_walk_malformed_late_reply_fails_closed(void) {
     dy_client_close();
 }
 
+// An over-count is malformed too, and an abandoned walk's late reply fails closed.
+void test_9p_client_abandoned_walk_overcount_fails_closed(void) {
+    TEST_EXPECT_EQ(dy_client_open(), 0, "client over mq");
+    g_walk_overcount = 4;
+    g_walk_overcounts_sent = 0;
+
+    dy_hold_reader(true);
+    TEST_ASSERT(dy_start(DY_WALK, 111, /*dying=*/false), "walker");
+    TEST_YIELD_UNTIL(test_dying_parked(&g_dy) && rec_count(P9_TWALK) == 1);
+    p9_mq_loopback_set_eagain_budget(&g_mq, 1);  // the owner's Tflush meets a full ring
+    test_dying_kill(&g_dy);
+    TEST_YIELD_UNTIL(test_dying_done(&g_dy));
+    test_dying_reap(&g_dy);
+    TEST_EXPECT_EQ((u64)rec_count(P9_TFLUSH), (u64)0, "the walk is abandoned unflushed");
+
+    dy_hold_reader(false);
+    TEST_EXPECT_EQ(p9_client_reader_pump_ready(&g_client), 1, "the over-counted late Rwalk");
+    TEST_EXPECT_EQ(g_walk_overcounts_sent, 1u, "the server over-counted");
+    TEST_ASSERT(g_client.dead, "the session failed closed");
+    TEST_ASSERT(!p9_session_fid_bound(&g_client.session, 111), "it bound nothing");
+    TEST_EXPECT_EQ(g_client.orphan_kept + g_client.orphan_handed, (u64)0, "no orphan fid");
+    g_walk_overcount = 0;
+    dy_client_close();
+}
+
 // And so can an Rflush: one that fails to parse frees neither the flush's tag
 // nor the flushed walk's. The late Rwalk before it is well formed and absorbed.
 void test_9p_client_flush_malformed_reply_fails_closed(void) {
@@ -4960,6 +5468,77 @@ void test_9p_client_note_flush_honours_late_read(void) {
     TEST_EXPECT_EQ(end, (u64)0, "the Rflush frees both tags");
     TEST_EXPECT_EQ(cancel, (u64)0, "nothing cancelled");
     TEST_EXPECT_EQ(orphan, (u64)0, "no unexplained frame");
+    TEST_ASSERT(!dead, "the session stays live");
+}
+
+// A caught note on a write whose reply beats its Rflush: the owner has its answer
+// and invalidates for itself, so nothing is lost and nothing is forgotten.
+void test_9p_client_note_flush_live_mutator_keeps_larder(void) {
+    TEST_EXPECT_EQ(dy_client_open(), 0, "client over mq");
+    __atomic_store_n(&g_client.cacheable, true, __ATOMIC_RELAXED);
+    TEST_EXPECT_EQ(dy_bind(131), 1u, "walk binds 131");
+    dy_larder_fill();
+
+    dy_hold_reader(true);
+    TEST_ASSERT(dy_start_noted(DY_WRITE, 131), "writer");
+    bool parked;
+    bool waited = dy_note_and_flush(P9_TWRITE, &parked);
+    dy_hold_reader(false);
+    int  pr = p9_client_reader_pump_ready(&g_client);          // the Rwrite
+    bool killed;
+    dy_finish(&killed);
+    u32  mid = dy_larder_entries();
+    int  pf  = p9_client_reader_pump_ready(&g_client);         // the Rflush
+    u32  end = dy_larder_entries();
+    u64  honoured = g_client.flush_honoured;
+    bool dead     = g_client.dead;
+    dy_client_close();
+
+    TEST_ASSERT(g_dyop.setup_ok, "a Linux phenotype whose SIGCHLD is caught");
+    TEST_ASSERT(parked, "the write parked behind the held reader");
+    TEST_ASSERT(waited, "the interrupted write waits for its Tflush's answer");
+    TEST_EXPECT_EQ(pr, 1, "the Rwrite, before the Rflush");
+    TEST_ASSERT(!killed, "the write returned on its own");
+    TEST_EXPECT_EQ(honoured, (u64)1, "counted as honoured");
+    TEST_EXPECT_EQ(mid, 3u, "its reply forgets nothing");
+    TEST_EXPECT_EQ(pf, 1, "the Rflush");
+    TEST_EXPECT_EQ(end, 3u, "nor does its Rflush: the owner never left");
+    TEST_ASSERT(!dead, "the session stays live");
+}
+
+// A death in the flush wait of a write: no reply will tell anyone what the op did,
+// so the cache goes at the death, before the Rflush.
+void test_9p_client_note_flush_death_forgets_larder(void) {
+    TEST_EXPECT_EQ(dy_client_open(), 0, "client over mq");
+    __atomic_store_n(&g_client.cacheable, true, __ATOMIC_RELAXED);
+    TEST_EXPECT_EQ(dy_bind(133), 1u, "walk binds 133");
+    dy_larder_fill();
+    g_rec_hold = P9_TWRITE;
+
+    dy_hold_reader(true);
+    TEST_ASSERT(dy_start_noted(DY_WRITE, 133), "writer");
+    bool parked;
+    bool waited = dy_note_and_flush(P9_TWRITE, &parked);
+    u32  before = dy_larder_entries();
+    if (waited) test_dying_kill(&g_dy);
+    TEST_YIELD_UNTIL_SOFT(test_dying_done(&g_dy));
+    bool died  = test_dying_done(&g_dy);
+    u32  after = dy_larder_entries();
+    dy_hold_reader(false);
+    int  pf = p9_client_reader_pump_ready(&g_client);          // the Rflush
+    bool killed;
+    dy_finish(&killed);
+    g_rec_hold = 0;
+    bool dead = g_client.dead;
+    dy_client_close();
+
+    TEST_ASSERT(g_dyop.setup_ok, "a Linux phenotype whose SIGCHLD is caught");
+    TEST_ASSERT(parked, "the write parked behind the held reader");
+    TEST_ASSERT(waited, "the interrupted write waits for its Tflush's answer");
+    TEST_EXPECT_EQ(before, 3u, "its note forgot nothing");
+    TEST_ASSERT(died, "the kill ends the flush wait");
+    TEST_EXPECT_EQ(after, 0u, "the death forgot every entry, with the Rflush still to come");
+    TEST_EXPECT_EQ(pf, 1, "the Rflush");
     TEST_ASSERT(!dead, "the session stays live");
 }
 

@@ -22,6 +22,7 @@ code:
   - tools/check-flag-words.py
   - tools/check-audit-rows.py
   - tools/check-test-registry.py
+  - tools/test-host-boundaries.sh
 audit: none
 guarded-by: []
 validated-by: [prose, gate-smp]
@@ -165,7 +166,11 @@ footgun.** It pulls the whole chain including a pool re-bake driven by the
 / `THYLACINE_BAKE_GOROOT` / `THYLACINE_MKFS_PRESERVE` silently produces a
 pool missing payloads a previous invocation had baked in. The gate learned
 this the expensive way (#101); the countermeasure lives at the chokepoint,
-in [[sub-substrate-gates]].
+in [[sub-substrate-gates]]. The populate also checks each staged, requested
+payload is in the pool it just baked (`/goroot/bin/go`, `/goroot/bin/gopls`
+when the stage has it, the game and library-test trees) and refuses the
+bake when one is missing; the payloads it found go to `build/pool-contents`,
+the list the host gates and `tools/test.sh`'s require flags read.
 
 **Two staleness checks make the cache trustworthy, and both were added
 after a stale artifact shipped.**
@@ -190,6 +195,15 @@ underneath.
 predecessor rebuilt only when a *binary was missing*, so a Stratum source
 edit shipped a stale host `stratumd` and the pool bake failed with "unknown
 option".
+
+**A fork that is absent takes its binaries with it.** `build_ramfs` bakes
+whatever Go probe or Ambush binary `build/go` holds, and the builders skip when
+their fork is absent, so an image built without the Go fork once carried an
+earlier build's probes, which joey ran as current. `build_go_probes` and
+`build_ambush` now delete their own binaries from `build/go` when they skip, as
+`build_go_goroot` deletes its stage; `build/go/go-hello` is then present
+exactly when this build made it, which `tools/test.sh` reads (the Go gates in
+[[sub-substrate-gates]]).
 
 **The pool and its key are coupled, and the coupling is the fix for a
 year-long ghost.** `system.key` is random per regeneration, so a pool
@@ -251,11 +265,37 @@ archive and fails the build, so no stale `ramfs.cpio` survives for `test.sh` to
 boot. `bin/` and `lib/` are chmod 0755 whatever the host's umask, because every
 principal's path search crosses them.
 
+**The pool is sized from what the bake will put on it (2026-10-22).** One
+helper, `pool_data_stage`, answers for each data chunk (Quake, Duke3D, Tomb
+Raider, JavaScriptCore, the viv bundles) whether `populate_stratum_pool` bakes
+it, and both the populate blocks and the pool's size ask it, so the size counts
+every data stage that is put. The base is 64M plus four times the staged data
+(the measured ~3.3x bake amplification, rounded up); GOROOT raises it to at
+least 2560M, clade to at least 3072M (5120M with GOROOT), and the library tests
+add 1024M. Before this the base was a flat 64M and only GOROOT's 2560M covered
+the data, so a bake without the GOROOT stage, through
+`THYLACINE_BAKE_GOROOT=0` or an absent Go fork, failed `put /vivarium` with
+ENOSPC.
+
 **The snapshot twins are minted at bake time.** `populate_stratum_pool`
 finishes by cloning `pool.img` and `system.key` to `.baked-snapshot`
 siblings (`cp -c`, APFS clonefile, plain copy elsewhere). Those twins are
 what every downstream harness restores from per boot or per attempt — and
 why the key twin can be compared to prove a restore is coherent.
+
+**No directory the bake makes on the pool is world-writable (2026-10-18).** A
+create through the pool's session is admitted only to system (IDENTITY-DESIGN
+9.7 M7), and M7 does not cover remove or rename, so a world-writable directory
+there would still let any user delete system's files. `stratum-fs put` carries
+a host directory's permission bits and bakes every file 0644 or 0755 by its
+exec bit. Four stamps made pool directories world-writable and are gone: each
+viv bundle's `rootfs/tmp` 1777 (viv binds the invoker's own `/tmp` there), ICU's
+`testdata/out` and the muster build trees 1777 (ls-libs layers a user-owned
+directory over them), and Quake's game directories 0777, which populate now
+sets 0755, since a stage an earlier bake left 0777 would otherwise carry over.
+The git-net push token, the one file whose host mode matters, is restamped 0600
+after the put. Runtime creates are another matter: nothing masks a create's
+mode yet (OPEN-BUGS, 2026-10-18).
 
 **A third check now runs before any target does, and it is the file's best
 structural argument.** A hand-written patch series is validated for
@@ -279,8 +319,42 @@ the pouch musl series is applied with `patch -F 0`: a hunk whose context does
 not match exactly fails the build. That matters on the Linux builders, whose
 GNU `patch` fuzzes up to two context lines by default and says so only on
 stdout; the control was measured — a perturbed context line applies under
-`-F 2` with exit 0 and fails under `-F 0`. The port patch loops are not yet
-fuzz-strict.
+`-F 2` with exit 0 and fails under `-F 0`. `-F 0` does not refuse an offset,
+and three patches still landed away from their headers (0016's two
+`connect.c` hunks, 0028's and 0029's `ioctl.c` hunks; measured 2026-10-21
+with `patch --verbose`). Their headers now name where the context sits, and
+the loop reads each patch's `--verbose` hunk lines and refuses an offset or
+a fuzz: driven on the series with the old 0016, it stopped there. Two more
+rules keep the series right on a GNU host. `-N` refuses a patch whose changes
+are already in the tree (with `-t` alone, both BSD and GNU patch apply it in
+reverse, exit 0, and the patch's bytes leave the tree with no line saying so).
+And GNU patch reads a hunk with less context after its changes than before as
+the end of a file, so at `-F 0` it places that hunk only there, where BSD
+patch places it anywhere: 0012's second hunk and 0043's first failed under
+GNU patch 2.7.6 and applied on macOS. Both now carry trailing context as long
+as their leading context, and `tools/check-hunk-context.py` runs before each
+patch against the tree it applies to, refusing any hunk with shorter
+trailing than leading context away from its file's end. Measured against GNU
+patch 2.7.6 built from source, walking the series patch by patch: the check
+and GNU agreed on all 62 patches and on 91 mutants (one middle hunk with a
+trailing or a leading context line dropped), refusing exactly 0012 and 0043
+before the fix and nothing after; the loop, extracted from this file and
+driven under both patches, applies the series, refuses the old series at
+0012 on either host, and refuses 0062 listed twice. A hunk body line that
+starts with a tab is context to GNU patch (a space taken by a mail or an
+editor), and the check reads it the same way.
+
+The rules live in one function, `apply_patch_exact`, which every `patch`
+site in this file calls: the series, the SDL2, tyrquake, dosbox-x, vkquake
+and gnumake copies, and the `cmake_lib` / `meson_lib` tarball ports. Before
+it, the port sites ran `patch -t -F 0` alone, with no offset check, no `-N`
+and no context check, and four port patches broke a rule: SDL2's 0002 had a
+hunk that GNU patch 2.7.6 refused at `-F 0` (so the SDL2 port could not
+build on a Linux host), and SDL2's 0003 and vkquake's 0003 and 0005 applied
+4 to 7 lines from their headers. 0002 now carries a third trailing context
+line and the other three name where their context sits; each port, applied
+through the function on a fresh copy of its tree, gives the same tree under
+both patches, and the same sources as the old patches gave.
 
 **The spawn-args mirror check runs beside it (2026-09-29).**
 `tools/check-spawn-args-mirrors.py` runs right after the hunk check, before the
@@ -333,6 +407,35 @@ harness could not create its output file. A refusal while there is still room
 keeps the failure inside this build. `du` counts APFS-cloned blocks in full,
 so in a worktree with a cloned `build/` the list overstates what deleting an
 entry frees; `df` is the measure.
+
+**The host boundary checkers run on every build (2026-10-19).** Each
+`tools/test-<name>.py` compiles the code it names from this tree beside
+`tools/host-tests/<name>.c` with mocked owners, and runs it under ASan and UBSan
+at -O0 and -O2; the native ones also pin the syscall numbers in every mirror and
+the phenotype's collision asserts. A Pouch checker never mocks the seam's errno
+decoder: `tools/pouch_seam.py` stages the tree's own `src/internal/syscall_ret.c`
+(the two sentinel values its static assert pins come from the same tree, and a
+decoder without the flat -1 row is refused). Upstream musl's decoder reads -1
+as EPERM, and Pouch's reads it as EIO, so a wrapper that hands the seam -EPERM
+passes a mock and answers EIO on the device. All eight were run by nothing until this
+date, so a renumbered mirror could drift with every build green.
+`host_boundary_check` runs named drivers in parallel, each into a fresh
+`build/host-boundaries/<set>/<name>`, and stops the build with the failing
+log's tail: the native three (handle target replacement, the descriptor
+handlers, the handle query) before any target except `clean`, and the Pouch
+adapters in `build_sysroot`, step 2b, on the musl tree just patched.
+`host_boundary_sets` derives both sets as the gate below does, from
+`tools/host-tests/*.c`, a driver whose usage names a musl tree being Pouch's:
+a test with no driver stops the build, and an empty set is refused, where the
+two hand lists it replaced (round 1 F4) would have let a new checker join no
+build. `tools/test-host-boundaries.sh` runs every checker clean and under each
+mutant it declares (50 legs in 35 s when it landed), deriving the set the same way
+and the mutants from each driver's `--help`; a checker that declares no mutant
+fails it. A planted `VIV_NATIVE_CEILING` 132 stops the build at the check,
+naming the pin. Moving patch 0057's getppid number stops it there too, since
+the native handle-query checker pins that line; the Pouch call site's red is a
+kill.c body only `test-pouch-kill-probe.py` reads (2026-10-19: step 2b refused,
+three probe legs red, nothing configured after it).
 
 **Both ambush builds spawn the launch target held (2026-09-30; untagged
 2026-10-06).** The Go fork's `SysProcAttr.DebugHeld` sets the spawn record's
@@ -402,6 +505,25 @@ pane's limit). `configs/ci.config` selects a serial shell for existing
 interactive scenarios; the default profile starts the Halcyon session.
 Use an explicit `HALCYON_SESSION=y` override for graphical session gates.
 
+Every bake's pool also carries the symlink prover's fixture at
+`/lib/pouch-links` (B-3f', 2026-10-20): the files `target` and `sub/leaf` and
+real links of each shape the prover reads -- `live -> target`,
+`dead -> nosuch`, `dir -> sub`, `abs -> /lib/pouch-links/target`,
+`loop -> loop` and `chain -> live` -- the dangling `long`, whose target is
+64 `x`s, exactly the first buffer go-fs's `os.Readlink` reads (Stratum keeps
+a target of at most 100 bytes, so no longer one exists to grow it twice), and
+`up -> ..`, a directory outside the fixture, which go-fs's `os.Root` must
+refuse in every spelling, a trailing slash included.
+They are staged from nothing under `$BUILD_DIR/pouch-links` and put with
+`stratum-fs put`, which copies a link as a link (lstat, readlink,
+`stm_9p_symlink`) and refuses to omit one; the bake then syncs and reads `abs`,
+`long` and `up` back with `stratum-fs readlink`, and a failed put, sync or readback
+stops it. `pouch-hello-links` is on both curated Pouch lists,
+`build_pouch_progs`' build list and the initrd's `bin/` list
+([[sub-stratum-boot]] runs it), then `pouch-hello-times` (G12, 0063), whose
+own directory it makes at run time, and `pouch-hello-tz` (0060) after it; the time
+zone prover writes its own fixture at run time, so the bake stages none.
+
 `HALCYON_PROFILE` (`choice:instrument,legacy`, default `instrument`, since
 2026-09-21) is the option that selects WHICH Halcyon UI an image draws; it bakes
 `/lib/halcyon/profile`. The theme only colours the profile in force, and a
@@ -448,7 +570,11 @@ one line in `ExecutableAllocator.cpp` passed) and could not express a stacked
 series. `test-forage.sh` D1-D5 lift the two functions from `build.sh` and drive
 them; D5 is the extra hunk over a one-patch series, which the old check accepted. So `WEBKIT_PIN` / `ICU_SHA256` in
 `build.sh` and the manifest are two copies of one truth, and `test-forage.sh` A10
-fails when they drift (sabotaged: one hex digit -> FAIL).
+fails when they drift (sabotaged: one hex digit -> FAIL). A11 does the same for
+every `cache.*` pin whose `feeds` names `CHUNK_LIBTESTS`, found from the
+manifest rather than listed: its `file` and `sha256` must appear quoted in
+`build.sh` (sabotaged: one hex digit of `FC_SHA256`, and the DejaVu tarball's
+name -> one FAIL each).
 
 *With the chunk ON, an absent input is an error, not an announced skip.* Every
 default-on chunk skips gracefully so a bare checkout still builds. This one
@@ -491,6 +617,191 @@ speedup. Verification: the pool's bake-verify expects `/webkit/jsc` under the sa
 predicate the populate arm uses; `check-v80-floor.py --all` scans the stage; the
 device gate is `tools/interactive/ls-jsc.exp` (SKIPs with 77 when nothing is
 staged).
+
+**`CHUNK_LIBTESTS` (default OFF, since Boosty B-3, 2026-10-14;
+`THYLACINE_BAKE_LIBS`)** builds the browser libraries' compiled upstream test
+programs against the same static archives the browser links
+(`dec-2026-10-14-b3-test-bar`) and bakes them with their data under `/var`.
+`build_lib_tests` (also the `lib-tests` subcommand) stages
+`build/pouch/lib-tests/stage/var/...`, under `build/pouch/` for the same reason
+as ICU and `jsc`: a sysroot rebuild must take every binary linked to the old
+`libc.a` with it. ICU's tests need no patch for a target whose tree is not the
+build host's: `make QNX_TARGET=1` in `test/intltest` and `test/cintltst` is
+upstream's switch, compiling the data root in as `/var/icu_tests` (the source
+and build trees merged there: `bin/`, `data/{unidata,sprep,out/build}`,
+`test/testdata` plus its built `out/`), and intltest's shared MessageFormat 2
+data sits at that root's `../testdata`, so the stage carries `/var/testdata`
+too. The populate arm keys on the flag AND the staged `intltest`, the pool grows
+by 1 GiB when it bakes, and bake-verify expects three payloads (`ICUTEST`,
+`ICUDATA` = the built package `out/testdata.dat`, `MF2DATA`) so
+`tools/interactive/ls-libs.exp` can tell "no tests baked" (SKIP 77) from a
+partial bake (FAIL); its first bake named a loose `.res` that the package build
+never leaves, and bake-verify refused the pool. The masters are SYSTEM's and
+read-only, `test/testdata/out` included: cintltst's `TestFileStream` writes
+`testdata.tmp` beside `testdata.dat`, as it would in upstream's own writable
+build tree, so ls-libs binds a directory the logged-in user owns over
+`testdata/out` first (`bind -bc`). Until 2026-10-18 populate re-stamped it 1777,
+which let any user make system-owned files there; a create through the pool's
+session is now admitted only to system (IDENTITY-DESIGN 9.7 M7). Like `CHUNK_WEBKIT`, a missing input is an error
+once the chunk is on.
+
+`build_icu`'s reuse test also compares a stamp of the configure line and flags
+(`stage/.thylacine-config`). Before B-3c it compared only timestamps, so a stage
+built under different flags (B-3c added `-DU_HAVE_MMAP=0` and `--enable-tests`)
+counted as up to date because its files were newer than their inputs: the same
+stale-artifact class as the four guards above, for a flag rather than a file.
+
+**The codecs (B-3d, 2026-10-15).** `cmake_lib` builds one CMake library under
+`build/pouch/<name>`: the tarball checked against its pin (`[cache.libpng]`,
+`[cache.libjpeg-turbo]`, `[cache.libwebp]`; `tools/forage.sh codecs`),
+unpacked fresh with the port's patches in order (`usr/ports/<name>/patches`),
+configured with the pouch C++ toolchain, built whole -- the library and
+upstream's test programs -- and installed at `<name>/stage`. It installs with
+the stage as the prefix, not under `DESTDIR` with a prefix of `/`:
+GNUInstallDirs maps that prefix to `/usr`, and the first build left the
+stages' `lib/` empty for libwebp's link to miss. Its reuse stamp carries the
+pin, each patch's sha256 and the configure line, and libc, libc++ and the
+toolchain files are checked against it by time. `build_libwebp` builds
+libpng and libjpeg-turbo first and links cwebp/dwebp to them, so libwebp's
+checks also cross the other two codecs (`tools/build.sh codecs`).
+`build_lib_tests` is now two halves, ICU's and the codecs', each staging only
+its own part of the stage; before the split, ICU's up-to-date return would have
+skipped the codecs and its rebuild deleted the whole stage. The codec half
+dumps each library's CTest list, has `tools/libtests-manifest.py` translate it
+into `/var/lib_tests/<lib>.manifest` plus the files it needs
+([[sub-substrate-libtests]]), stages them (programs stripped) with the native
+runner at `/var/lib_tests/bin/muster`, and writes each manifest's test count to
+`build/pouch/lib-tests/<lib>.count`, which ls-libs reads as the number the
+device must report. The populate arm puts `/var/lib_tests`, and ls-libs layers a
+directory of the user's own over each directory the staging listed in
+`build/pouch/lib-tests/writable` (every
+library's build tree, where its tests write their outputs as in upstream's
+own tree; libxml2's source top, where runsuite and runxmlconf write their
+logs; and libxml2's own directory, the build tree's parent, because runtest
+names each output `--out` plus the input's base name with nothing between
+them and CTest passes the build tree with no trailing slash, so the outputs
+land beside it as `build<name>.res`): a list the staging derives, so a library added there cannot be
+missed by a hand-written list in ls-libs. bake-verify adds `MUSTER`, `PNGTESTS`,
+`JPEGTESTS`, `WEBPTESTS`, `XMLTESTS` and `XMLCONF`.
+
+**libxml2 (B-3e, 2026-10-15).** `build_libxml2` configures 2.15.4 as
+upstream's static CMake CI job does (`.gitlab-ci.yml` cmake:linux:gcc:static,
+`.gitlab-ci/test_cmake.sh`: schematron, zlib and the HTTP ABI stubs on; the
+Python bindings off). `cmake_lib` takes a second pinned tarball as a leading
+`+<tarball>=<sha256>`, checked like the first, unpacked into the source top
+after the patches and carried in the reuse stamp: here the W3C XML
+conformance suite (`[cache.xmlts]`), unpacked as `xmlconf/` the way
+upstream's CI image installs it, which is what registers `runxmlconf`. The
+port's patch 0001 restores the two CMake test scripts the release tarball
+omits. The muster half also stages libxml2's `test/`, `result/` and
+`xmlconf/` trees whole (merged by tar: the stage list already put some of
+their files there), since runtest, runsuite and runxmlconf walk them rather
+than naming their files; `tools/build.sh libxml2` builds it alone,
+`tools/forage.sh libxml2` gathers both tarballs.
+
+**FreeType and HarfBuzz (B-3f).** Both register their tests with meson
+alone. Meson is pinned at 1.12.1 (`[cache.meson]`) and run as `meson.py` from
+its tarball, which `meson_tool` unpacks under `build/meson`: the host has no
+meson of its own. `meson_lib` is `cmake_lib`'s contract in meson's terms. The
+pinned tarball is unpacked fresh with the port's patches
+(`usr/ports/<project>/patches`, the project named by the tarball's top
+directory, so FreeType's two passes share one series), built static with
+upstream's tests and installed at `<name>/stage`. Its reuse stamp covers every
+input by content: the tarball, each patch, meson's version, the cross file's
+text, the options, and the archives and `.pc` files of each dependency
+directory (the sysroot's among them, so a new libc relinks the tests). The
+cross file is `cmake/Toolchain-aarch64-pouch-cxx.cmake` in meson's terms. The
+toolchain flags sit in the compiler exelist, because meson's header and
+function checks drop an `-isystem <dir>` pair from `c_args`, and with
+`-nostdlibinc` that left FreeType's checks no `unistd.h` (measured, as
+`tools/clade-mesa-cross.sh` had measured for Mesa). It sets
+`cmake = 'false'`, since a dependency pkg-config cannot find would otherwise
+be looked for among the host's own CMake packages (measured). Only the named
+pkg-config directories are searched, under `--wrap-mode=nofallback`, so
+nothing comes from the host or from a subproject download.
+
+FreeType builds twice around HarfBuzz, as distributions build it:
+`freetype-nohb`, without tests, for HarfBuzz to link, then `freetype` with
+HarfBuzz and its tests, which is the one the browser links. Both have PNG
+from B-3d's libpng and zlib from the sysroot, with brotli and bzip2 off.
+HarfBuzz keeps upstream's `debugoptimized` with `b_ndebug=if-release`, so its
+tests' and the fuzzer driver's asserts stay live; ICU and FreeType are on, and
+GLib, gobject, cairo, chafa, the docs and introspection off. ICU's `.pc` files
+name `-L/lib`, because it installs with prefix `/` under `DESTDIR`, so
+HarfBuzz is handed copies naming the stage (`lib/pkgconfig-staged`).
+`build_zlib` writes zlib's own `zlib.pc` into the sysroot, which libpng's `.pc`
+requires. `cmake_lib`'s stamp includes the sha256 of each archive an option
+names, so libwebp's tests relink when libpng's bytes change, and a
+byte-identical rebuild does not cascade. issue-1063's font comes from
+`[cache.ftfont]`, checked by the
+zip's sha256 and by the font's own, whose first 8 bytes are the digest
+upstream's script pins. It grants no licence (the sites that list it say
+personal use only), so an image baked with `CHUNK_LIBTESTS` stays on the
+builder's own machines and is never published.
+
+The muster half lists the two libraries' tests with `meson introspect
+--tests` after it builds each tree's `meson-test-prereq`, as `meson test`
+does before it runs them (`mtest.py`'s `rebuild_deps`): a target only a test
+depends on, such as issue-1441's two generated fonts, is outside `all`, and
+the translator refuses a test whose depends are not built or not staged
+([[sub-substrate-libtests]]). The muster half also stages HarfBuzz's
+`perf/fonts`, `perf/texts` and `test/subset/data/fonts` for the thread tests.
+bake-verify adds `FTTESTS`, `FTFONT`, `HBTESTS` and `HBFONTS`.
+`tools/build.sh fonts` builds the three passes and fontconfig, and
+`tools/forage.sh fonts` gathers meson, the four tarballs and the font.
+
+**fontconfig (B-3g).** `build_fontconfig` builds fontconfig 2.18.3
+(`[cache.fontconfig]`) after the final FreeType and libxml2, against the
+`.pc` directories of FreeType, HarfBuzz, libpng and libxml2. fontconfig
+compiles in its config, cache and template directories from its prefix, so
+`meson_lib` takes `--prefix /usr`: meson is configured with the device's
+prefix (its sysconfdir is then `/etc`, its localstatedir `/var`), and the
+install runs under `DESTDIR=<stage>`, which meson also applies to those
+absolute directories, so the stage holds `etc/`, `usr/` and `var/` and
+nothing is written outside it. The reuse stamp names the prefix. The options
+follow `dec-2026-10-21-fontconfig-layout-dejavu`: the libxml2 backend,
+`default-fonts-dirs=/lib/font`, `additional-fonts-dirs=no` (`yes` would
+probe this host's X11 directories), and NLS, iconv, the docs, bwrap, the
+external test fonts, fontations and `cache-build` off (`cache-build` runs
+the cross-built `fc-cache` at install). The port's first patch names two
+tests' data (`SRCDIR`, `FONTFILE`) relative to the build root, where the
+tests run on the host and on the device alike, instead of the build host's
+absolute source path. Its second lets `fcstat.c` read `statfs` the Linux way
+on `__thylacine__`: musl's `struct statfs` has `f_flags`, so fontconfig takes
+its fstatfs arm, and with no BSD `MNT_LOCAL`, no `f_fstypename` and no
+`__linux__` that arm is an `#error`. Pouch's `fstatfs` answers ENOSYS, so
+`FcFStatFs` returns -1 and its callers keep their defaults (mmap safe, mtime
+not broken). The muster half adds fontconfig to the meson
+libraries, stages `test/4x6.pcf` for those two tests, skips the pytest suite
+by name when the build host has pytest (meson registers it only then), and
+lists `test_d1f48f11` as not run (`dec-2026-10-21-d1f48f11-not-run`; its
+fixture needs `symlink()`). `stage_font_runtime` then stages what fontconfig
+reads on the device into the library-test stage: `/etc/fonts` with
+`conf.d`'s relative links into `conf.avail` kept as links (each checked to
+resolve), `/usr/share/fontconfig`, `/usr/share/xml/fontconfig`, the stripped
+`fc-*` tools in `/usr/bin`, and `/lib/font`. `/lib/font` is the vendored
+DejaVu Sans Condensed and IBM Plex Sans faces plus DejaVu Sans, Serif and
+Sans Mono from `[cache.dejavu]`, the release the vendored faces came from:
+the tarball is checked by its sha256 and the four vendored faces must be
+byte-identical to its copies. Each family's licence text goes beside its
+faces. `var/` is never staged: there is no system font cache
+(`dec-2026-10-21-no-system-font-cache`). It writes `fonts.count` and
+`confd.count` for `ls-libs.exp`, from sets derived apart from the stage: the
+faces are the vendored ones (each vendored directory must hold one) plus the
+twelve named, and `conf.d` is fontconfig's own `conf_links` list in
+`conf.d/meson.build`, read line by line (either quote; a line it cannot parse
+and an empty list each refuse the bake by name), plus the link that `default-hinting`,
+`default-sub-pixel-rendering`, `bitmap-conf` and a darwin host each add (read
+with `meson introspect --buildoptions --machines`). The stage must match each
+set name for name, and every `conf.d` entry must be a link. Measured on a fake
+tree made from the native oracle: 23 faces and 24 links staged; a stage that
+lost the Plex faces, lost a link, gained a face or held a link as a file, and
+an empty Plex directory, were each refused with their own message. The populate puts all of it after the
+blocks that make `/etc` and `/lib`, makes `/usr`, `/usr/share` and
+`/usr/share/xml`, and reads back every `conf.d` link; bake-verify adds
+`FCTESTS`, `FCDATA`, `FCCONF`, `FCAVAIL`, `FCDTD`, `FCMATCH`, `FONTSANS`,
+`FONTSERIF`, `FONTMONO` and `FONTPLEX`. All of it is baked only with the
+library tests (`CHUNK_LIBTESTS`), their one consumer until the browser.
 
 ## Data structures
 

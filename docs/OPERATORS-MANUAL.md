@@ -37,12 +37,17 @@ The integration image installs these checked sections:
 | `manual` | Reading the manual and choosing output format |
 | `halcyon` | The graphical session: tiles, chords, workspaces, Normal mode and history |
 | `lantern` | Presenting a deck of slides |
+| `namespace` | Namespaces: binding, mounting and who may create |
 | `processes` | Processes, memory figures and the prowl display |
 | `remote-files` | Haul, network mounts and service posting |
 | `view` | Inline images and textual fallback |
 | `gallery` | Graphical image viewing |
 | `nocturne` | Audio playback and mixing |
 | `imperium` | Imperium and secure attention |
+| `umask` | The creation mask and the directory's limit on a new entry's mode |
+| `file-times` | Access, modification and change times; `touch` and `cp -p` |
+| `environment` | Environment variables, `/env` and `env` |
+| `file-locks` | Byte-range locks: `fcntl`, `flock`, their two owners and what a lock does to cached data |
 | `dosbox` | DOSBox-X launch and configuration |
 
 The remaining planned sections cover Utopia and native utilities, Vivarium,
@@ -77,3 +82,6 @@ A section is added when the facility it describes has settled, so sections appea
 | 2026-09-16 | The first sections and their writing order set, starting with Utopia; Containers remains a section of its own. | Operator decision. |
 | 2026-09-23 | `13-processes.md` (Processes and memory) added: the process list, `ps`, `prowl` with its memory view, `/proc/<pid>/status` and `/ctl/memory`; the `imperium` row added to the sections table, which had lacked it since `18-imperium.md` landed. | The prowl-6 sub-chunk (the B-1a' capacity figures reach the manual); index currency. |
 | 2026-09-28 | `10-halcyon.md` (Halcyon) and `11-lantern.md` (Presentations with Lantern) added, with the device scenario `ls-halcyon-manual`, which performs the Halcyon section's tasks on the default image. | Operator vote (2026-09-28): the Halcyon chapter and the lantern section as a chunk of their own, before the next feature. |
+| 2026-10-22 | `20-file-times.md` (File Times) added; the `namespace` and `umask` rows added to the sections table, which had lacked them since `12-namespace.md` and `19-umask.md` landed. | G12 (setting file times, operator vote 17) reaches the manual; index currency. |
+| 2026-10-22 | `21-environment.md` (The Environment) added: the per-process `/env`, `env` (which now sets variables for a command, `-i`, and prints the environment), and the `ut` redirect that sets nothing. | Native `env` reaches the manual with its fix. |
+| 2026-11-02 | `22-file-locks.md` (File Locks) added, and the Limitations of `20-file-times.md` corrected: a read-only descriptor served from the cache now connects to its file for a times or mode change (operator votes 20, 34, 35; B-3h). | The kernel's `SYS_FILE_LOCK` and Pouch's `fcntl` locks and `flock`. |

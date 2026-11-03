@@ -75,6 +75,20 @@ _Static_assert(sizeof(struct Qid) == 16,
                             // probes it (a netd `ready` file); P9_QTPOLL on the wire
 #define QTFILE    0x00      // plain file
 
+// The type byte of a SYS_READDIR record (offset 21; the 9P2000.L Rreaddir
+// dirent) is Linux's d_type, not the qid type: Pouch's readdir and Vivarium's
+// getdents64 hand it on as d_type, and 9P servers write it so. A native Dev
+// derives it from the entry's qid type.
+#define DIRENT_DT_DIR  4
+#define DIRENT_DT_REG  8
+#define DIRENT_DT_LNK 10
+
+static inline u8 qid_type_to_dtype(u8 qtype) {
+    if (qtype & QTDIR)     return DIRENT_DT_DIR;
+    if (qtype & QTSYMLINK) return DIRENT_DT_LNK;
+    return DIRENT_DT_REG;
+}
+
 // Spoor flag bits.
 #define COPEN     (1u << 0)    // open() has succeeded; offset is meaningful
 #define CMSG      (1u << 1)    // message-style (read returns whole records)
@@ -211,6 +225,11 @@ struct Spoor {
 
     spin_lock_t   lock;        // per-Spoor lock; reserved for Phase 5+ SMP
     int           ref;         // refcount; spoor_alloc sets to 1
+    int           fd_refs;     // handle-table slots naming this Spoor, and a spawn's
+                               // endowments on their way to a child's table, each of
+                               // which also holds a ref; every other ref (a map,
+                               // a mount, a Loom registration, a lock call) is no
+                               // descriptor. spoor_fd_ref / spoor_fd_drop.
     u32           flag;        // COPEN | CMSG
     int           mode;        // omode after open() succeeds; 0 pre-open
 
@@ -368,6 +387,16 @@ void spoor_clunk(struct Spoor *c);
 // negative error on the last drop (0 while another holder keeps the Spoor).
 int spoor_clunk_rc(struct Spoor *c);
 
+// Descriptors, as opposed to references. A handle slot counts itself here when
+// it comes to name c; the slot that takes the count to zero is c's last close
+// (Dev.fd_close), and c may live on behind other references. spoor_fd_drop
+// answers whether it was the last, and is ordered before whatever the caller
+// reads next: a lock call that stores its grant and then asks spoor_fd_open
+// either sees the close or has its grant seen by it.
+void spoor_fd_ref(struct Spoor *c);
+bool spoor_fd_drop(struct Spoor *c);
+bool spoor_fd_open(const struct Spoor *c);
+
 #ifdef KERNEL_TESTS
 // Cumulative diagnostic counters. Tests use these to verify lifecycle
 // transitions:
@@ -398,7 +427,8 @@ void            walkqid_free(struct Walkqid *w);
 // spoor_stat_native — fetch a Spoor's native metadata via its Dev's
 // stat_native vtable slot (the perm_check / fstat companion). Returns 0 on
 // success (out populated), -1 if `c`/`out` is NULL or the Dev has no
-// stat_native. Shared by the syscall handlers (fstat / walk-open / wstat /
+// stat_native, or the Dev's own failure (dev9p's is the server's -errno).
+// Shared by the syscall handlers (fstat / walk-open / wstat /
 // open) and the stalk resolver (the per-component X-search stat fetch).
 struct t_stat;
 int spoor_stat_native(struct Spoor *c, struct t_stat *out);

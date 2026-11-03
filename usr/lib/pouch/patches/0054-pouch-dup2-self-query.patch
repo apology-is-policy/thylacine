@@ -1,0 +1,56 @@
+Subject: Pouch: validate self-dup native and socket descriptors
+
+Native queries require 129 (codex/astra 128); old unknown-call -1 fails as ENOSYS.
+Tagged socket slots use their existing locked resolver, including fresh sockets.
+Self-dup preserves descriptor flags; distinct-target replacement remains ENOSYS.
+
+--- a/src/unistd/dup2.c
++++ b/src/unistd/dup2.c
+@@ -1,32 +1,28 @@
+ #include <unistd.h>
+ #include <errno.h>
+ #include "syscall.h"
+-#include "_pouch_process.h"
++#include "_pouch_socket.h"
+ 
+-/* pouch: dup2. handle_dup is lowest-free-fd only -- there is no kernel
+- * dup-onto-a-chosen-target primitive -- so an old!=new dup2 (which is DEFINED
+- * by onto-target semantics) cannot be expressed. The toolchain's spawn path
+- * does NOT need it -- posix_spawn resolves its file_actions (open/dup2/close)
+- * STATICALLY into the positional spawn fd_list, never issuing a runtime dup2,
+- * and popen/system route through that resolver. But a few libc functions DO
+- * call dup2/dup3 onto a target at runtime and are left non-functional here:
+- * freopen(filename, ...) (reopen a stream onto a fixed fd), login_tty, daemon,
+- * and wordexp. Each fails LOUD (-1 + ENOSYS). The durable fix is a kernel
+- * dup-onto-target primitive (a new syscall = an ABI addition, escalate when a
+- * real workload needs it); until then this is a documented seam.
+- *
+- * old==new returns new best-effort: Thylacine has no rights-independent
+- * fd-existence probe (a 0-rights dup is rejected by valid_alloc_args, and the
+- * source's own rights -- required as a subset for handle_dup -- are unknown),
+- * so old is NOT validated beyond old>=0. This serves the common dup2(fd,fd)
+- * clear-CLOEXEC idiom on a valid fd; a validity-check dup2 on an INVALID fd
+- * wrongly succeeds (documented, not a toolchain path). */
++/* A self-dup validates the descriptor without changing flags or acquiring
++ * another reference. Native slots and Pouch socket slots have separate owners. */
+ int dup2(int old, int new)
+ {
+ 	if (old == new) {
+ 		if (old < 0) { errno = EBADF; return -1; }
++		if (old & POUCH_SOCK_TAG) {
++			if (!pouch_sock_resolve(old)) { errno = EBADF; return -1; }
++		} else {
++			long flags = __syscall1(SYS_thyla_handle_flags_get, old);
++			if (flags < 0) {
++				/* This query excludes EPERM, so legacy unknown-call -1
++				 * means the metadata interface is unavailable. */
++				errno = flags == -1 ? ENOSYS : (int)-flags;
++				return -1;
++			}
++		}
+ 		return new;
+ 	}
++	/* Lowest-free duplication cannot atomically replace a chosen target. */
+ 	errno = ENOSYS;
+ 	return -1;
+ }

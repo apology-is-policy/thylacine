@@ -128,6 +128,10 @@ bool proc_service_identity_snapshot(const struct Proc *p,
 bool proc_service_snapshot_by_stripes(u64 stripes, const struct AddrSpace *as,
                                       struct ProcServiceIdentity *out);
 
+// The creation mask a Proc starts with (IDENTITY-DESIGN 9.7 M8): POSIX's
+// conventional 022. kproc carries it and every child inherits its parent's.
+#define PROC_UMASK_DEFAULT 0022u
+
 // #65 (invariant I-32): the per-Proc resource floor. Fixed maxima that bound a
 // non-TCB Proc's resource use so a fork/thread/memory bomb is bounded, not
 // box-extincting. Tunable; generous for any v1.0 user workload (shell +
@@ -579,10 +583,10 @@ struct Proc {
     // G15 (ARCH section 9.7): the per-Proc environment group -- the Plan 9 Egrp
     // surfaced as the per-Proc /env directory (devenv). Lazily allocated (NULL ==
     // empty), deep-COPIED across rfork by env_clone_into (the Plan 9 default-copy;
-    // the reserved RFENVG share-flag stays deferred), freed by proc_free
-    // (env_free). KP_ZERO inits it NULL. Shared across a Proc's threads (one
-    // p->env, env->lock serializes); never shared cross-Proc at v1.0. See
-    // <thylacine/env.h>.
+    // the reserved RFENVG share-flag stays deferred); proc_free drops this
+    // Proc's reference (env_free), and an open /env/NAME Spoor holds one too,
+    // so the Env can outlive the Proc. KP_ZERO inits it NULL. Shared across a
+    // Proc's threads (one p->env, env->lock serializes). See <thylacine/env.h>.
     struct Env        *env;
 
     // CF-3 A audit F1 (an I-32-shaped resource axis): live TRANSIENT bounce
@@ -839,8 +843,7 @@ struct Proc {
     // running the parent's binary; every v1.0 spawn then execs and replaces
     // it), released at proc_free. Read locklessly by /proc: the Path string is
     // immutable and its ref is held for the whole read window by the reader's
-    // g_proc_table_lock (the #57a-F2 envelope), exactly as format_ns reads the
-    // Territory's mount Paths.
+    // g_proc_table_lock (the #57a-F2 envelope).
     struct Path       *exe_path;
 
     // CL-5 (Clade F4; docs/LLVM-DESIGN.md section 7): this Proc's anon-page
@@ -1030,6 +1033,13 @@ struct Proc {
     bool               srv_posts_closed;
     struct SrvPostMembership *srv_post_memberships;
 
+    // M8 (IDENTITY-DESIGN 9.7): the creation mask, the rwx bits every create
+    // drops before the parent directory's bound applies. Identity-adjacent in
+    // meaning, appended here so no offset moves. proc_init_fields sets
+    // PROC_UMASK_DEFAULT (KP_ZERO's 0 would be the widest mask), rfork_internal
+    // copies the parent's, SYS_UMASK exchanges it. Atomic (proc_umask /
+    // proc_umask_exchange): any thread may exchange it while another creates.
+    u32                umask;
     // What the threads thread_reap_dead has freed leave behind, so the Proc's
     // on-CPU time (proc_cpu_ns) and its kernel-stack watermark
     // (proc_kstack_peak, ARCH 8.12: the deepest any of its threads EVER
@@ -1087,6 +1097,15 @@ struct Proc {
 // resolving Territory declares Linux (territory_root_pheno); else native -- the
 // section-12.1 rule-3 fail-safe. A phenotype is the ABI of the LOADED IMAGE:
 // decided at every image load, preserved by rfork (no new image).
+// M8: the mask is the whole payload, so relaxed ordering suffices.
+static inline u32 proc_umask(const struct Proc *p) {
+    return __atomic_load_n(&p->umask, __ATOMIC_RELAXED);
+}
+
+static inline u32 proc_umask_exchange(struct Proc *p, u32 mask) {
+    return __atomic_exchange_n(&p->umask, mask, __ATOMIC_RELAXED);
+}
+
 static inline u32 phenotype_decide(bool crossed_pheno, bool territory_linux) {
     return (crossed_pheno || territory_linux) ? PHENO_LINUX : PHENO_NATIVE;
 }
@@ -1414,8 +1433,10 @@ _Static_assert(__builtin_popcount(PROC_FLAGS_ALL) ==
 // message prose carries only each field's landing RATIONALE. Absolute offsets
 // were deliberately stripped from that prose -- duplicating the number in a
 // comment is what made it go stale here in the first place.
-_Static_assert(sizeof(struct Proc) == 504,
- "struct Proc size: the poll hook chunk appended child_owed (a 32-byte "
+_Static_assert(sizeof(struct Proc) == 512,
+ "struct Proc size: M8 appended the creation mask (umask u32, padded to the "
+ "next 8-byte boundary): 504 -> 512. Before that: "
+ "the poll hook chunk appended child_owed (a 32-byte "
  "struct poll_owed): 472 -> 504. Before that: "
  "thread-model C5 appended exec_task (a pointer) + "
  "exec_rendez (a 16-byte Rendez), thread-model C3 threads_lock (a u32 "
@@ -1558,6 +1579,12 @@ _Static_assert(__builtin_offsetof(struct Proc, debug_birth_hold) == 404,
  "the birth hold (DEBUG-FS-DESIGN 5f) is that next u32: it fills the tail "
  "pad after legate_flags, so sizeof stays 408 -- the sizeof assert above is "
  "the control.");
+_Static_assert(__builtin_offsetof(struct Proc, umask) == 424,
+ "M8's creation mask appends after D7's 16-byte posting ledger; the thread "
+ "reap's block follows it at the next 8-byte boundary.");
+_Static_assert(__builtin_offsetof(struct Proc, reaped_run_ns) == 432,
+ "the thread reap's block starts at the 8-byte boundary after umask; the "
+ "4 bytes between them are pad.");
 // CL-5 page_budget, placed by the aux-2 merge. On main it sat at 392 in a
 // 400-byte Proc; aux's L-1 had moved the whole address-space block OUT of Proc
 // (pgtable_root, vma_lock, vma_count, page_count, shared_map_pages,
@@ -1578,12 +1605,12 @@ _Static_assert(__builtin_offsetof(struct Proc, page_budget) == 360,
 _Static_assert(__builtin_offsetof(struct Proc, thread_budget) == 364,
                "thread-model C6 thread_budget fills the 4-byte pad after "
                "page_budget -- no struct growth; the sizeof assert is the control.");
-_Static_assert(__builtin_offsetof(struct Proc, threads_lock) == 440 &&
-               __builtin_offsetof(struct Proc, live_threads) == 444,
+_Static_assert(__builtin_offsetof(struct Proc, threads_lock) == 448 &&
+               __builtin_offsetof(struct Proc, live_threads) == 452,
                "thread-model C3: threads_lock and live_threads append after "
                "reaped_kstack_tid, behind D7's 16-byte posting ledger; nothing moves.");
-_Static_assert(__builtin_offsetof(struct Proc, exec_task) == 448 &&
-               __builtin_offsetof(struct Proc, exec_rendez) == 456,
+_Static_assert(__builtin_offsetof(struct Proc, exec_task) == 456 &&
+               __builtin_offsetof(struct Proc, exec_rendez) == 464,
                "thread-model C5: exec_task and exec_rendez append after "
                "live_threads; nothing moves.");
 _Static_assert(__builtin_offsetof(struct Proc, magic) == 0,
@@ -3211,6 +3238,7 @@ struct Proc *proc_test_console_owner(void);
 void proc_test_legate_teardown(u32 scope_id, struct Proc *except);
 void proc_test_link(struct Proc *p);
 void proc_test_link_child(struct Proc *parent, struct Proc *p);
+void proc_release_territory_at_exit_for_test(struct Proc *p);
 void proc_test_orphan_rule(struct Proc *dying);
 u32 proc_test_release_leaked(int *pids, u32 max);
 void proc_test_seat_expire(void);

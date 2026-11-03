@@ -663,6 +663,57 @@ void *burrow_lazy_slot_kva(struct Burrow *v, size_t slot) {
     return pg ? (void *)pa_to_kva(page_to_pa(pg)) : NULL;
 }
 
+// ARCH 6.5, adjacent anonymous mappings merge: see burrow.h for both
+// contracts.
+void burrow_lazy_bind_va0(struct Burrow *v, u64 va0) {
+    if (!v || v->magic != VMO_MAGIC)
+        extinction("burrow_lazy_bind_va0 of a corrupted BURROW");
+    if (v->type != BURROW_TYPE_ANON_LAZY) return;
+    spin_lock(&v->lock);
+    if (!v->lazy_va0_set) {
+        v->lazy_va0     = va0;
+        v->lazy_va0_set = true;
+    } else if (v->lazy_va0 != va0) {
+        v->lazy_multi_bias = true;
+    }
+    spin_unlock(&v->lock);
+}
+
+int burrow_lazy_extend(struct AddrSpace *as, bool exempt, struct Burrow *v,
+                       int maps_here, size_t first, size_t n) {
+    if (!as || !v || n == 0)                     return -1;
+    if (v->magic != VMO_MAGIC)                   return -1;
+    if (v->type != BURROW_TYPE_ANON_LAZY)        return -1;
+    if (!pagemap_live(&v->pm))                   return -1;
+    // The new size in bytes must fit: end * PAGE_SIZE below.
+    if (n > SIZE_MAX / PAGE_SIZE || first > SIZE_MAX / PAGE_SIZE - n) return -1;
+    size_t end = first + n;
+
+    spin_lock(&v->lock);
+    int    handles = v->handle_count;
+    int    maps    = v->mapping_count;
+    bool   multi   = v->lazy_multi_bias;
+    size_t pages   = v->page_count;
+    spin_unlock(&v->lock);
+    if (handles != 0)                            return -1;
+    if (maps != maps_here)                       return -1;
+    if (multi)                                   return -1;
+
+    // ZERO READ over the slots that exist; the ones a growth adds are new.
+    size_t have = end < pages ? end : pages;
+    if (first < have && pagemap_next_resident(&v->pm, &v->lock, first, have) != have)
+        extinction("burrow_lazy_extend: a slot no mapping covers still holds a page (NoOrphan broken)");
+
+    if (end > pages) {
+        if (pagemap_grow(&v->pm, &v->lock, end, as, exempt) != 0) return -1;
+        spin_lock(&v->lock);
+        v->page_count = end;
+        v->size       = end * PAGE_SIZE;
+        spin_unlock(&v->lock);
+    }
+    return 0;
+}
+
 // Internal: release pages + struct when both counts have reached 0.
 // The caller has already verified the precondition.
 //
@@ -1266,6 +1317,15 @@ static int burrow_unmap_reporting_in(struct AddrSpace *as, u64 vaddr, size_t len
     // B-1a' audit F8: per mapping, so a FILE mapping's leaves refund the holder.
     (void)vma_uninstall_range_in(as, vaddr, want_end);
 
+    // NoOrphan (specs/capacity.tla), as the range detach keeps it: a plain
+    // ANON_LAZY mapping's resident slots are freed and uncharged while the
+    // mapping still names them (a no-op for every other kind). Every caller
+    // means a mapping the kernel placed, but some re-take as->lock before the
+    // unmap, and a sibling thread can have put its own lazy mapping at that VA
+    // meanwhile -- one piece of a Burrow that outlives it, whose unreleased
+    // slots an extension would later find (ARCH 6.5, the merge).
+    (void)burrow_release_lazy_range_in(as, vma, vma->vaddr_start, vma->vaddr_end);
+
     // G-2: a SHARED_IN VMA's teardown uncharges the client's shared-in budget
     // (paired with burrow_share_into's charge; same p->vma_lock hold, so the
     // pairing is exact). Covers both the explicit SYS_BURROW_DETACH of a
@@ -1278,8 +1338,9 @@ static int burrow_unmap_reporting_in(struct AddrSpace *as, u64 vaddr, size_t len
     // non-NULL) -- the caller holds as->lock, and a FILE Burrow's free reaches
     // a possibly-sleeping spoor_clunk. `vma_free_deferred` hands back the
     // dead Burrow; the caller frees it after the unlock. When out_free is NULL
-    // (the burrow_unmap wrapper: JIT / Loom / weft / cons -- all ANON/CODE/DMA,
-    // whose free never sleeps) the inline free is kept.
+    // (the burrow_unmap wrapper: JIT, Loom's ring setup, weft's map, clunk and
+    // reaper -- ANON/CODE/DMA/HOSTMEM, whose free never sleeps) the inline free
+    // is kept.
     bool freed;
     if (out_free) {
         *out_free = vma_free_deferred(vma, &freed);

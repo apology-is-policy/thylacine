@@ -7,7 +7,7 @@ surface: [sub-pouch-seam, sub-pouch-fs, sub-pouch-net]
 opened-by: chg-2026-05-22-p6-syscall-seam
 tracker: "POUCH-DESIGN.md 5.1"
 created: 2026-08-01
-updated: 2026-08-01
+updated: 2026-10-20
 ---
 ## Owed
 
@@ -17,9 +17,8 @@ Thylacine's syscall convention is a flat `-1` with no errno channel, so
 `close` never gets it. The same collapse forces every lower-half wrapper
 to GUESS: `bind` answers `EACCES` for post-gate / name-taken /
 registry-full / table-full / bad-name alike; `connect` answers
-`ECONNREFUSED` for all of its causes; `fstat` answers `EBADF` for any
-non-zero return; `posix_spawn` answers `ENOENT`; `kill` loses `ESRCH`
-vs `EPERM`.
+`ECONNREFUSED` for all of its causes; `posix_spawn` answers `ENOENT`;
+`kill` loses `ESRCH` vs `EPERM`.
 
 `EIO` is a documented POSIX errno, so P-3 holds — this is imprecision,
 not silent wrongness.
@@ -27,6 +26,7 @@ not silent wrongness.
 ## The lift
 
 A richer kernel error channel (`-errno` in `[-4095,-2]`, which the decode
-ALREADY passes through — the stalk-resolved calls use it since ER-1).
+ALREADY passes through — the stalk-resolved calls use it since ER-1, and
+`SYS_FSTAT` since 2026-10-20, so `fstat` reads `EBADF` for a dead descriptor).
 Every call migrated to real `-errno` retires one guess. The decode needs
 no change; the kernel-side handlers do.

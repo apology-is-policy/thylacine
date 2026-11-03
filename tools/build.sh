@@ -453,6 +453,10 @@ build_kernel() {
     # ~40 min cold on this host, and the source is a sibling sparse clone. Must
     # follow build_libcxx (it links libc++) and precede the pool fixture.
     [[ "${THYLACINE_BAKE_WEBKIT:-0}" == "1" ]] && build_jsc
+    # Boosty B-3: the browser libraries' compiled upstream tests and their data
+    # (-> /var/icu_tests in the pool; ls-libs runs them). DEFAULT-OFF: ~200 MiB
+    # staged and ~10 min of ICU on a cold build.
+    [[ "${THYLACINE_BAKE_LIBS:-0}" == "1" ]] && build_lib_tests
     # P6-pouch-stratumd-boot (sub-chunk 16a): cross-build stratumd so it
     # lands in the ramfs alongside the pouch hello binaries. Incremental
     # on no-source-change rebuilds (CMake/ninja dep tracking inside
@@ -753,7 +757,7 @@ EOF
     # build_rust_progs, staged into $pouch_progs like the pouch binaries). The
     # -f guard in the copy loop below stages nothing when build_rust_progs
     # self-skipped off the track-R box, so this entry is inert there.
-    local pouch_bins=( "pouch-hello" "pouch-hello-stdio" "pouch-hello-printf" "pouch-hello-malloc" "pouch-hello-mallocng-torture" "pouch-hello-threads" "pouch-hello-exitgroup" "pouch-hello-poll" "pouch-hello-getrandom" "pouch-hello-sockets" "pouch-hello-net" "pouch-hello-signals" "pouch-hello-sodium" "pouch-hello-argv" "pouch-hello-fault" "pouch-hello-pty" "pouch-hello-fopen" "pouch-hello-fs" "pouch-hello-env" "pouch-hello-spawn" "pouch-hello-susp" "pouch-hello-reentry" "pouch-hello-identity" "pouch-hello-mem" "pouch-hello-guard" "pouch-hello-jitthunk" "pouch-hello-dlopen" "pouch-hello-cxx" "sdl-probe" "sdl-audio-probe" "tyr-quake" "tyr-glquake" "make" "r1hello" )
+    local pouch_bins=( "pouch-hello" "pouch-hello-stdio" "pouch-hello-printf" "pouch-hello-malloc" "pouch-hello-mallocng-torture" "pouch-hello-threads" "pouch-hello-exitgroup" "pouch-hello-poll" "pouch-hello-getrandom" "pouch-hello-sockets" "pouch-hello-net" "pouch-hello-signals" "pouch-hello-sodium" "pouch-hello-argv" "pouch-hello-fault" "pouch-hello-pty" "pouch-hello-fopen" "pouch-hello-fd" "pouch-hello-links" "pouch-hello-times" "pouch-hello-tz" "pouch-hello-locks" "pouch-hello-fs" "pouch-hello-env" "pouch-hello-spawn" "pouch-hello-susp" "pouch-hello-reentry" "pouch-hello-identity" "pouch-hello-mem" "pouch-hello-guard" "pouch-hello-jitthunk" "pouch-hello-descriptor-ops" "pouch-hello-dup2-self" "pouch-hello-handle-query" "pouch-hello-spawn-actions" "pouch-hello-dlopen" "pouch-hello-cxx" "sdl-probe" "sdl-audio-probe" "tyr-quake" "tyr-glquake" "make" "r1hello" )
     local pouch_progs="$BUILD_DIR/pouch/progs"
     # DX-2 (Cryptid): dosbox-x (17.6 MB) is DEFAULT-ON (operator direction
     # 2026-09-03; mirrors build_go_goroot's opt-out). THYLACINE_BAKE_DOSBOX=0
@@ -946,8 +950,13 @@ DOSBOXCONF
 build_go_probes() {
     local go_bin="$GOFORK/bin/go"
     local go_out="$BUILD_DIR/go"
+    local -a probes=( go-hello go-goroutines go-threads go-fs go-exec go-net go-env go-web go-get ambush-child )
+    local probe
     if [[ ! -x "$go_bin" ]]; then
         echo "==> Go-port: fork toolchain not found at $go_bin -- skipping go-hello (set GOFORK)"
+        # Drop the probes an earlier build left: build_ramfs bakes whatever is
+        # here, and joey would run a binary no current fork built.
+        for probe in "${probes[@]}"; do rm -f "$go_out/$probe"; done
         return 0
     fi
     mkdir -p "$go_out"
@@ -979,8 +988,7 @@ build_go_probes() {
     #                    demo project; /env-set module env; go mod tidy pulls
     #                    from proxy.golang.org through /net; build; run the
     #                    result). EXTERNAL-NETWORK dependent, like go-web.
-    local probe
-    for probe in go-hello go-goroutines go-threads go-fs go-exec go-net go-env go-web go-get ambush-child; do
+    for probe in "${probes[@]}"; do
         ( cd "$REPO_ROOT/usr/$probe" && \
           GOOS=thylacine GOARCH=arm64 CGO_ENABLED=0 "$go_bin" build -o "$go_out/$probe" . ) \
             || { echo "==> Go-port: go build $probe FAILED" >&2; return 1; }
@@ -1006,10 +1014,12 @@ build_ambush() {
     local go_out="$BUILD_DIR/go"
     if [[ ! -x "$go_bin" ]]; then
         echo "==> Ambush: Go fork toolchain not found at $go_bin -- skipping (set GOFORK)"
+        rm -f "$go_out/ambush"   # an earlier build's binary is not this build's
         return 0
     fi
     if [[ ! -d "$ambush_src/cmd/dlv" ]]; then
         echo "==> Ambush: fork source not found at $ambush_src -- skipping (set AMBUSHFORK)"
+        rm -f "$go_out/ambush"
         return 0
     fi
     mkdir -p "$go_out"
@@ -1030,8 +1040,8 @@ build_ambush() {
 # ships in the default image (GO-PORT-PLAN "BY DEFAULT"), retiring the
 # every-invocation THYLACINE_BAKE_GOROOT=1 recipe and its forgot-the-flag
 # footgun (a pool without /goroot broke every go probe). Set
-# THYLACINE_BAKE_GOROOT=0 to opt out for a fast iteration loop (64 MiB pool, no
-# cross-build/populate); an absent fork skips gracefully either way. When
+# THYLACINE_BAKE_GOROOT=0 to opt out for a fast iteration loop (a pool sized for
+# the staged data alone, no cross-build/populate); an absent fork skips gracefully either way. When
 # staged, build_stratum_pool_fixture grows pool.img and populate_stratum_pool
 # `stratum-fs put`s this tree at /goroot. The `go` driver shells out to
 # $GOROOT/pkg/tool/thylacine_arm64/{compile,link,asm,...} and compiles a
@@ -2090,16 +2100,16 @@ git fetch --unshallow origin >/dev/null 2>&1 && echo GITHTTPS-FETCH || { echo GI
 # N-6: push over https. Runs ONLY when the bake provisioned a push target
 # (THYLACINE_GITNET_PUSH_URL + a PAT) -- absent by default, so the standard
 # git-net gate stays clone+fetch only and the hermetic suite never pushes. The
-# token reaches the guest as /tmp/.gitnet-push-token, a 0600 file the bake wrote
+# token reaches the guest as /etc/gitnet/push-token, a 0600 file the bake wrote
 # from the operator's env (a gitignored build artifact -- NEVER a tracked file).
 # The remote URL is CLEAN: the token is supplied by an inline credential helper
 # (git never echoes helper output), so it appears in NO git output and NO boot
 # log. The push proves the smart-push path (git-remote-https POST
 # git-receive-pack) end to end -- the helper-pipe I/O rides readv (served at
 # N-5) + writev, the SAME transport the clone above proved.
-if [ -f /tmp/.gitnet-push-url ] && [ -f /tmp/.gitnet-push-token ]; then
-	GITNET_PUSH_URL=$(cat /tmp/.gitnet-push-url)
-	GITNET_TOK=$(cat /tmp/.gitnet-push-token)
+if [ -f /etc/gitnet/push-url ] && [ -f /etc/gitnet/push-token ]; then
+	GITNET_PUSH_URL=$(cat /etc/gitnet/push-url)
+	GITNET_TOK=$(cat /etc/gitnet/push-token)
 	export GITNET_TOK
 	git config --global credential.helper \
 		'!f() { test "$1" = get && printf "username=x-access-token\npassword=%s\n" "$GITNET_TOK"; }; f' \
@@ -2141,14 +2151,18 @@ VIVEOF
                             # token is written in a subshell with trace OFF + umask 077
                             # so it cannot reach a build log, and this (tracked) script
                             # holds only the env var NAME, never the secret. Absent ->
-                            # the gate is clone+fetch only (the default).
+                            # the gate is clone+fetch only (the default). They sit in
+                            # /etc/gitnet, not /tmp: viv binds the invoker's own
+                            # directory over the container's /tmp, hiding anything
+                            # baked there. The put bakes every file 0644; populate
+                            # restamps the token 0600.
                             if [[ -n "${THYLACINE_GITNET_PUSH_URL:-}" && -n "${THYLACINE_GITNET_PAT:-}" ]]; then
-                                mkdir -p "$gnb/rootfs/tmp"
+                                mkdir -p "$gnb/rootfs/etc/gitnet"
                                 printf '%s\n' "$THYLACINE_GITNET_PUSH_URL" \
-                                    > "$gnb/rootfs/tmp/.gitnet-push-url"
+                                    > "$gnb/rootfs/etc/gitnet/push-url"
                                 ( set +x 2>/dev/null; umask 077
                                   printf '%s\n' "$THYLACINE_GITNET_PAT" \
-                                      > "$gnb/rootfs/tmp/.gitnet-push-token" )
+                                      > "$gnb/rootfs/etc/gitnet/push-token" )
                                 echo "==> viv bundles: git-net PUSH target provisioned (URL ${THYLACINE_GITNET_PUSH_URL}; token in the gitignored guest artifact only, never a tracked file or log)"
                             fi
                             echo "==> viv bundles: git-net staged at $gnb (THYLACINE_BAKE_GITNET=1: net-granted clone-https boot vehicle -- the B3 gate; default bakes OMIT it, so the hermetic suite stays internet-free)"
@@ -2483,6 +2497,36 @@ VIVEOF
     ledger "viv bundles: /vivarium staged (probe$( [[ -d "$vstage/alpine" ]] && echo " + alpine" )$( [[ -d "$vstage/alpine-ash" ]] && echo " + alpine-ash" )$( [[ -d "$vstage/alpine-trap" ]] && echo " + alpine-trap" )$( [[ -d "$vstage/alpine-net" ]] && echo " + alpine-net" )$( [[ -d "$vstage/git-probe" ]] && echo " + git-probe" )$( [[ -d "$vstage/alpine-stock" ]] && echo " + alpine-stock" ))"
 }
 
+# apply_patch_exact <tree> <patch> <label>: apply one -p1 patch to <tree>, or
+# exit naming it. Every patch(1) site in this file applies through it.
+#   -F 0: a hunk whose context does not match EXACTLY fails. GNU patch
+#   (the Linux builders) fuzzes up to 2 context lines by default and
+#   says so only on stdout -- a hand-maintained patch that drifted would
+#   apply somewhere near its target, exit 0. A perturbed context line
+#   applies under -F 2 and fails under -F 0 (B-0 audit round 4 F6).
+#   An offset is refused too: exact context found away from its header
+#   is a hunk that drifted, and a context that recurs in the file is
+#   placed at the nearest copy. The hunk lines come from --verbose,
+#   which BSD and GNU patch print in the same form.
+#   -N: a patch already in the tree fails. -t alone answers it by
+#   applying it in reverse, exit 0, which takes its bytes out again.
+#   check-hunk-context.py: GNU patch matches a hunk with less trailing
+#   than leading context only at the end of its file, where BSD patch
+#   matches it anywhere, so a patch applied here could fail there.
+apply_patch_exact() {
+    local tree="$1" p="$2" label="$3" name out
+    name="$(basename "$p")"
+    python3 "$REPO_ROOT/tools/check-hunk-context.py" "$tree" "$p" >&2 \
+        || { echo "==> $label: $name has a hunk GNU patch cannot place" >&2; exit 1; }
+    out="$(patch --verbose -p1 -t -N -F 0 -d "$tree" -i "$p" 2>&1)" \
+        || { echo "$out" >&2; echo "==> $label: $name does not apply" >&2; exit 1; }
+    if grep -Eq '^Hunk #.*(offset|fuzz)' <<< "$out"; then
+        grep -E '^Hunk #' <<< "$out" >&2
+        echo "==> $label: $name applies away from its hunk headers -- correct them" >&2
+        exit 1
+    fi
+}
+
 build_sysroot() {
     # Phase 6 (Pouch) — build the pouch POSIX libc + cross-compilation sysroot.
     #
@@ -2522,21 +2566,15 @@ build_sysroot() {
     mkdir -p "$pouch_dir" "$musl_obj" "$sysroot"
     cp -R "$vendored" "$musl_src"
 
-    # 2. apply the boundary-line patch series. A failed patch aborts the
-    #    build (set -e); a rejected hunk also leaves a .rej file, caught
-    #    below. The read loop's || [[ -n ]] guard handles a final
+    # 2. apply the boundary-line patch series, each patch under
+    #    apply_patch_exact's rules. A rejected hunk also leaves a .rej file,
+    #    caught below. The read loop's || [[ -n ]] guard handles a final
     #    newline-less line in series.
-    #    -F 0: a hunk whose context does not match EXACTLY fails. GNU patch
-    #    (the Linux builders) fuzzes up to 2 context lines by default and
-    #    says so only on stdout -- a hand-maintained patch that drifted would
-    #    apply somewhere near its target, exit 0. Measured 2026-09-21: the
-    #    series applies at fuzz 0 and zero offset; a perturbed context line
-    #    applies under -F 2 and fails under -F 0 (B-0 audit round 4 F6).
     echo "==> applying pouch patch series"
     while IFS= read -r patch_line || [[ -n "$patch_line" ]]; do
         case "$patch_line" in ''|\#*) continue ;; esac
         echo "    patch: $patch_line"
-        patch -p1 -t -F 0 -d "$musl_src" -i "$patches_dir/$patch_line"
+        apply_patch_exact "$musl_src" "$patches_dir/$patch_line" "pouch sysroot"
     done < "$patches_dir/series"
     local rej
     rej="$(find "$musl_src" -name '*.rej')"
@@ -2545,6 +2583,14 @@ build_sysroot() {
         echo "$rej" >&2
         exit 1
     fi
+
+    # 2b. the Pouch adapters' host checkers, on the tree just patched: kill and
+    #     getppid, openat's close-on-exec arms, dup2 onto itself, the
+    #     descriptor calls, and spawn's handle order, each against a mocked
+    #     kernel (host_boundary_check and host_boundary_sets, defined beside
+    #     the pre-target checks).
+    host_boundary_check "$BUILD_DIR/host-boundaries/pouch" --musl "$musl_src" \
+        ${HOST_BOUNDARY_POUCH[@]+"${HOST_BOUNDARY_POUCH[@]}"} || exit 1
 
     # 3. configure the pouch libc out-of-tree for aarch64-thylacine. Same
     #    toolchain tools/pouch-clang wraps; clang treats "thylacine" as an
@@ -3526,6 +3572,27 @@ build_stratum_host_tools() {
 # Backward-compat alias: any caller using the old name still works.
 build_stratum_mkfs_host() { build_stratum_host_tools "$@"; }
 
+# The stage directory populate_stratum_pool bakes for data chunk NAME, printed
+# only when it will be baked. The pool's size and the populate blocks both ask
+# it, so the size counts every data stage the populate puts.
+pool_data_stage() {
+    local d
+    case "$1" in
+        quake)      d="$BUILD_DIR/quake/stage"
+                    [[ -f "$d/id1/pak0.pak" ]] ;;
+        duke3d)     d="$BUILD_DIR/duke3d/stage"
+                    [[ "${THYLACINE_BAKE_DOSBOX:-1}" == "1" && "${THYLACINE_BAKE_DUKE3D:-1}" == "1" && -f "$d/DUKE3D.GRP" ]] ;;
+        tombraider) d="$BUILD_DIR/tombraider/stage"
+                    [[ "${THYLACINE_BAKE_DOSBOX:-1}" == "1" && "${THYLACINE_BAKE_TOMBRAIDER:-1}" == "1" && -f "$d/TOMB.EXE" ]] ;;
+        webkit)     d="$BUILD_DIR/webkit/stage"
+                    [[ "${THYLACINE_BAKE_WEBKIT:-0}" == "1" && -f "$d/jsc" ]] ;;
+        vivarium)   d="$BUILD_DIR/vivarium"
+                    [[ -d "$d/probe/rootfs" ]] ;;
+        *)          echo "pool_data_stage: unknown chunk $1" >&2; return 2 ;;
+    esac && echo "$d"
+}
+POOL_DATA_CHUNKS="quake duke3d tombraider webkit vivarium"
+
 build_stratum_pool_fixture() {
     # Phase 6 (Pouch) sub-chunk 16b-beta. Generates the boot system pool
     # fixture that QEMU mounts as a second virtio-blk-device at boot. The
@@ -3610,7 +3677,17 @@ build_stratum_pool_fixture() {
     # filled mid-build, truncating the last _pkg_.a -> the linker's `not package
     # main`. Keyed on the staged GOROOT existing (build_go_goroot -- default-on
     # since Stage 6; THYLACINE_BAKE_GOROOT=0 opts out and removes the stage).
-    local pool_size="64M"
+    # The data stages ride every flavour: 64M of bootstrap headroom plus each
+    # staged chunk at four times its size (the measured ~3.3x bake amplification,
+    # rounded up). Before this the 64M base counted none of them and only the
+    # GOROOT bake's 2560M covered them, so a THYLACINE_BAKE_GOROOT=0 bake with
+    # the viv bundles staged failed `put /vivarium` with ENOSPC.
+    local data_kb=0 chunk stage
+    for chunk in $POOL_DATA_CHUNKS; do
+        stage="$(pool_data_stage "$chunk")" || continue
+        data_kb=$(( data_kb + $(du -sk "$stage" | cut -f1) ))
+    done
+    local pool_size="$(( 64 + data_kb * 4 / 1024 ))M"
     # CL-4b: the device toolchain (/clade) is ~375M staged (CL-5 made it THREE
     # multicall copies -- clang++/ld.lld/clang -- plus resource headers and the
     # sysroot); at ~3.3x bake amplification that is ~1.25 GiB before a single
@@ -3641,11 +3718,18 @@ build_stratum_pool_fixture() {
         # commit sweeps). 2560M = bake + boot-at-6x + margin. The REAL fix is
         # commit-on-allocation-pressure (task #39, the P1.2 write-amp lever);
         # this is capacity so the gate boot isn't hostage to it.
-        pool_size="2560M"
+        (( ${pool_size%M} >= 2560 )) || pool_size="2560M"
     fi
     if [[ "$bake_clade" == "1" ]]; then
         # clade-only -> 3072M; stacked with GOROOT (2560M) -> 5120M.
-        if [[ "$pool_size" == "2560M" ]]; then pool_size="5120M"; else pool_size="3072M"; fi
+        local clade_mb=3072
+        [[ "$bake_goroot" == "1" ]] && clade_mb=5120
+        (( ${pool_size%M} >= clade_mb )) || pool_size="${clade_mb}M"
+    fi
+    # B-3: the library tests stage ~200 MiB (~660 MiB at the 3.3x bake
+    # amplification above) and write their own scratch files when they run.
+    if [[ "${THYLACINE_BAKE_LIBS:-0}" == "1" && -d "$BUILD_DIR/pouch/lib-tests/stage" ]]; then
+        pool_size="$(( ${pool_size%M} + 1024 ))M"
     fi
     # #101: the SILENT-DESTRUCTION warning. This function is reached by every
     # `build.sh kernel` (build_kernel calls it) as well as `build.sh pool`, so
@@ -3945,14 +4029,14 @@ populate_stratum_pool() {
     # compiled into tyr-quake). Staged by build_tyrquake; skipped
     # gracefully when the stage is absent (a THYLACINE-minimal build). ---
     local quake_stage="$BUILD_DIR/quake/stage"
-    if [[ -f "$quake_stage/id1/pak0.pak" ]]; then
-        # Task #50: config.cfg persistence. Quake writes into its
-        # com_gamedir (/quake/id1) as the SESSION user, but the bake
-        # stamps SYSTEM ownership -- the game dirs must be world-writable
-        # for the created config.cfg / demo files (the put carries host
-        # modes; single-user policy, the per-user game-dir copy is the
-        # v1.x shape). The pak files stay 0644 read-only.
-        chmod 0777 "$quake_stage" "$quake_stage/id1"
+    if pool_data_stage quake > /dev/null; then
+        # The game dirs are SYSTEM's read-only masters, like the pak files.
+        # With HOME set, as login sets it, Quake writes its config and demos
+        # under $HOME/.tyrquake/id1 (common.c's last COM_AddGameDirectory),
+        # and a create through the pool's session is admitted only to system
+        # (IDENTITY-DESIGN 9.7 M7). The put carries host directory modes and
+        # an earlier bake left this stage 0777, so the mode is set, not kept.
+        chmod 0755 "$quake_stage" "$quake_stage/id1"
         echo "==> populate pool: baking Quake shareware data ($quake_stage -> /quake, $(du -sh "$quake_stage" | cut -f1))"
         "$stratum_fs_bin" -s "$sock_path" put "$quake_stage" /quake \
             || { echo "==> populate pool: put /quake FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
@@ -3970,7 +4054,7 @@ populate_stratum_pool() {
     # ls-gfx-dosbox-duke3d gate) copies /duke3d into a writable home and runs
     # from there (the quake per-user game-dir shape). ---
     local duke3d_stage="$BUILD_DIR/duke3d/stage"
-    if [[ "${THYLACINE_BAKE_DOSBOX:-1}" == "1" && "${THYLACINE_BAKE_DUKE3D:-1}" == "1" && -f "$duke3d_stage/DUKE3D.GRP" ]]; then
+    if pool_data_stage duke3d > /dev/null; then
         echo "==> populate pool: baking Duke3D shareware data ($duke3d_stage -> /duke3d, $(du -sh "$duke3d_stage" | cut -f1))"
         "$stratum_fs_bin" -s "$sock_path" put "$duke3d_stage" /duke3d \
             || { echo "==> populate pool: put /duke3d FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
@@ -3986,7 +4070,7 @@ populate_stratum_pool() {
     # (voodoo_card=software; C_OPENGL off). Read-only SYSTEM master; the gate
     # copies it to a writable home (the quake shape). ---
     local tombraider_stage="$BUILD_DIR/tombraider/stage"
-    if [[ "${THYLACINE_BAKE_DOSBOX:-1}" == "1" && "${THYLACINE_BAKE_TOMBRAIDER:-1}" == "1" && -f "$tombraider_stage/TOMB.EXE" ]]; then
+    if pool_data_stage tombraider > /dev/null; then
         echo "==> populate pool: baking Tomb Raider 3dfx demo ($tombraider_stage -> /tombraider, $(du -sh "$tombraider_stage" | cut -f1))"
         "$stratum_fs_bin" -s "$sock_path" put "$tombraider_stage" /tombraider \
             || { echo "==> populate pool: put /tombraider FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
@@ -3999,7 +4083,7 @@ populate_stratum_pool() {
     # on the flag AND the staged binary, so a stale stage never bakes past an
     # opt-out. Read-only SYSTEM master, run in place (it writes nothing). ---
     local webkit_stage="$BUILD_DIR/webkit/stage"
-    if [[ "${THYLACINE_BAKE_WEBKIT:-0}" == "1" && -f "$webkit_stage/jsc" ]]; then
+    if pool_data_stage webkit > /dev/null; then
         echo "==> populate pool: baking JavaScriptCore ($webkit_stage -> /webkit, $(du -sh "$webkit_stage" | cut -f1))"
         "$stratum_fs_bin" -s "$sock_path" put "$webkit_stage" /webkit \
             || { echo "==> populate pool: put /webkit FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
@@ -4014,28 +4098,20 @@ populate_stratum_pool() {
     # boot-fatally -- so a preserved pool missing it is STALE: re-run once
     # with THYLACINE_MKFS_PRESERVE=0. ---
     local viv_stage="$BUILD_DIR/vivarium"
-    if [[ -d "$viv_stage/probe/rootfs" ]]; then
+    if pool_data_stage vivarium > /dev/null; then
         echo "==> populate pool: baking viv bundles ($viv_stage -> /vivarium, $(du -sh "$viv_stage" | cut -f1))"
         "$stratum_fs_bin" -s "$sock_path" put "$viv_stage" /vivarium \
             || { echo "==> populate pool: put /vivarium FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
-        # #50: `put` preserves only the exec bit (dirs bake 0755), so the
-        # containers' /tmp loses its 1777 and a NON-system principal running
-        # `viv run` cannot write anywhere in the rootfs -- the A-2d W|X check
-        # denies the phenotype's openat(O_CREAT)/mkdirat legs (measured:
-        # "can't create /tmp/f50: Permission denied" from the viv-run
-        # scenario's user shell). Re-stamp each staged bundle's /tmp 1777
-        # after the put (stratum-fs chmod -> Tsetattr; the parser admits
-        # 4-digit octal). The kernel enforces no sticky bit at v1.0, so
-        # today 1777 behaves as 0777 -- baking the REAL Linux mode now means
-        # the fixture needs no revisit on the day sticky enforcement lands
-        # (the #50 holotype's F4). A bundle without a rootfs/tmp skips.
-        local vb
-        for vb in "$viv_stage"/*/rootfs/tmp; do
-            [[ -d "$vb" ]] || continue
-            local vrel="/vivarium${vb#"$viv_stage"}"
-            "$stratum_fs_bin" -s "$sock_path" chmod 1777 "$vrel" \
-                || { echo "==> populate pool: chmod $vrel FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
-        done
+        # A bundle's rootfs/tmp stays SYSTEM's: it is the anchor `viv run`
+        # binds the invoker's own /tmp/.viv/<rootfs>/tmp over, because a
+        # create through the pool's session is admitted only to system
+        # (IDENTITY-DESIGN 9.7 M7). Files bake 0644 or 0755 whatever their
+        # host mode, so the git-net push token is restamped 0600 here.
+        local gn_token=/vivarium/git-net/rootfs/etc/gitnet/push-token
+        if [[ -f "$viv_stage${gn_token#/vivarium}" ]]; then
+            "$stratum_fs_bin" -s "$sock_path" chmod 0600 "$gn_token" \
+                || { echo "==> populate pool: chmod $gn_token FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        fi
         "$stratum_fs_bin" -s "$sock_path" sync \
             || { echo "==> populate pool: sync after /vivarium FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
         echo "==> populate pool: viv bundles baked at /vivarium"
@@ -4088,6 +4164,45 @@ populate_stratum_pool() {
         || { echo "==> populate pool: system-recovery-wrap readback MISMATCH" >&2; kill -TERM "$stratumd_pid"; exit 1; }
     rm -rf "$cm_out"
     echo "==> populate pool: system identity baked + readback-verified at /var/lib/corvus (system-wrap + system-recovery-wrap, SYSTEM-owned)"
+
+    # --- Boosty B-3: the browser libraries' compiled upstream tests (staged by
+    # build_lib_tests). ICU's test programs carry their data root compiled in
+    # (/var/icu_tests, upstream's QNX_TARGET layout), and intltest reads its
+    # shared MessageFormat 2 data at that root's ../testdata. Keyed on the flag
+    # AND the stage, like /webkit. Read-only SYSTEM masters; the tests run with
+    # a writable cwd. ---
+    local libt_stage="$BUILD_DIR/pouch/lib-tests/stage"
+    if [[ "${THYLACINE_BAKE_LIBS:-0}" == "1" && -x "$libt_stage/var/icu_tests/bin/intltest" ]]; then
+        echo "==> populate pool: baking the library tests ($libt_stage/var -> /var, $(du -sh "$libt_stage" | cut -f1))"
+        for d in icu_tests testdata; do
+            "$stratum_fs_bin" -s "$sock_path" put "$libt_stage/var/$d" "/var/$d" \
+                || { echo "==> populate pool: put /var/$d FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        done
+        # ICU's tests write a scratch file beside their data package (cintltst's
+        # TestFileStream: testdata.tmp next to testdata.dat), as they would in
+        # upstream's own writable build tree. The tree stays SYSTEM's: a create
+        # through the pool's session is admitted only to system (IDENTITY-DESIGN
+        # 9.7 M7), so the user who runs the tests binds a directory of their own
+        # over testdata/out first (`bind -bc`, tools/interactive/ls-libs.exp).
+        "$stratum_fs_bin" -s "$sock_path" sync \
+            || { echo "==> populate pool: sync after the library tests FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        echo "==> populate pool: library tests baked at /var/icu_tests"
+    fi
+    # B-3d/B-3e: the muster libraries' test programs, inputs and manifests
+    # under /var/lib_tests. The tests write into the directories the staging
+    # listed (each build tree, as upstream's run in their own), and the user
+    # who runs them layers a directory of their own over each one, as above;
+    # ls-libs.exp reads the list.
+    if [[ "${THYLACINE_BAKE_LIBS:-0}" == "1" && -x "$libt_stage/var/lib_tests/bin/muster" ]]; then
+        local lt_writable="$BUILD_DIR/pouch/lib-tests/writable"
+        [[ -s "$lt_writable" ]] \
+            || { echo "==> populate pool: $lt_writable lists nothing (restage: tools/build.sh lib-tests)" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        "$stratum_fs_bin" -s "$sock_path" put "$libt_stage/var/lib_tests" /var/lib_tests \
+            || { echo "==> populate pool: put /var/lib_tests FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        "$stratum_fs_bin" -s "$sock_path" sync \
+            || { echo "==> populate pool: sync after the muster tests FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        echo "==> populate pool: muster tests baked at /var/lib_tests ($(wc -l < "$lt_writable" | tr -d ' ') dirs the tests write into)"
+    fi
 
     # --- net-4a: bake the network database at /lib/ndb/local ---
     # netd (a confined warden-bound leaf driver, I-34) compiles in a
@@ -4175,6 +4290,40 @@ populate_stratum_pool() {
             || { echo "==> populate pool: sync (shcompat) FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
         echo "==> populate pool: /bin/sh compat shim baked (/lib/shcompat/sh -> /viv/abin/sh; joey grafts MAFTER at /bin -- UM-6/X-11)"
     fi
+
+    # B-3f': the symlink prover's fixture -> /lib/pouch-links, real links of
+    # every shape pouch-hello-links reads (live, dangling, absolute, to a
+    # directory, a self-loop, a chain of two), the dangling `long`, whose
+    # 64-byte target is exactly the first buffer go-fs's os.Readlink reads
+    # (Stratum keeps a target of at most 100 bytes), and `up` (-> ..), a
+    # directory outside the fixture, which go-fs's os.Root must refuse in
+    # every spelling, a trailing slash included. Staged from nothing here,
+    # so it cannot be stale; stratum-fs put copies a link AS a link (lstat +
+    # readlink). /lib exists by now (the ndb bake). Nothing writes it after.
+    local plinks="$BUILD_DIR/pouch-links"
+    rm -rf "$plinks"; mkdir -p "$plinks/sub"
+    printf 'pouch-links target\n' > "$plinks/target"
+    printf 'pouch-links leaf\n' > "$plinks/sub/leaf"
+    ln -s target "$plinks/live"
+    ln -s nosuch "$plinks/dead"
+    ln -s sub "$plinks/dir"
+    ln -s /lib/pouch-links/target "$plinks/abs"
+    ln -s loop "$plinks/loop"
+    ln -s live "$plinks/chain"
+    ln -s "$(printf '%064d' 0 | tr 0 x)" "$plinks/long"
+    ln -s .. "$plinks/up"
+    "$stratum_fs_bin" -s "$sock_path" put "$plinks" /lib/pouch-links \
+        || { echo "==> populate pool: put /lib/pouch-links FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+    "$stratum_fs_bin" -s "$sock_path" sync \
+        || { echo "==> populate pool: sync (pouch-links) FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+    [[ "$("$stratum_fs_bin" -s "$sock_path" readlink /lib/pouch-links/abs)" == "/lib/pouch-links/target" ]] \
+        || { echo "==> populate pool: /lib/pouch-links/abs readback MISMATCH" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+    local plink
+    for plink in long up; do
+        [[ "$("$stratum_fs_bin" -s "$sock_path" readlink "/lib/pouch-links/$plink")" == "$(readlink "$plinks/$plink")" ]] \
+            || { echo "==> populate pool: /lib/pouch-links/$plink readback MISMATCH" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+    done
+    echo "==> populate pool: /lib/pouch-links baked + readback-verified (B-3f' symlink fixture)"
     [[ "$aurcfg_baked" != "$aurcfg_src" ]] && rm -f "$aurcfg_baked"
 
     # H-3c: bake the presentation verb table at /lib/beacon/verbs (BEACON.md
@@ -4544,6 +4693,39 @@ populate_stratum_pool() {
         || { echo "==> populate pool: ca-certificates.crt readback MISMATCH" >&2; kill -TERM "$stratumd_pid"; exit 1; }
     echo "==> populate pool: /etc/ssl/certs/ca-certificates.crt baked + readback-verified ($(grep -c 'BEGIN CERTIFICATE' "$cabundle_src" | tr -d ' ') roots, NET-DESIGN s9)"
 
+    # --- B-3g: fontconfig's runtime, staged with the library tests
+    # (stage_font_runtime): /etc/fonts, /usr/share/fontconfig,
+    # /usr/share/xml/fontconfig, its tools in /usr/bin, and /lib/font. Here,
+    # after the blocks that make /etc and /lib with single-level mkdirs that
+    # fail on an existing directory; the pool has no /usr before it. No
+    # /var/cache/fontconfig: there is no system font cache
+    # (dec-2026-10-21-no-system-font-cache), so a user's lookups cache in
+    # their own home. Read-only SYSTEM masters, like /var/lib_tests. ---
+    if [[ "${THYLACINE_BAKE_LIBS:-0}" == "1" && -x "$libt_stage/usr/bin/fc-match" ]]; then
+        for d in /usr /usr/share /usr/share/xml; do
+            "$stratum_fs_bin" -s "$sock_path" mkdir "$d" \
+                || { echo "==> populate pool: mkdir $d FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        done
+        for d in etc/fonts usr/share/fontconfig usr/share/xml/fontconfig usr/bin lib/font; do
+            "$stratum_fs_bin" -s "$sock_path" put "$libt_stage/$d" "/$d" \
+                || { echo "==> populate pool: put /$d FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        done
+        "$stratum_fs_bin" -s "$sock_path" sync \
+            || { echo "==> populate pool: sync (fontconfig) FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        # Every conf.d link reads back as the link that was staged: one put as
+        # a file, or with another target, would load nothing from conf.avail.
+        local fcl fcn=0
+        for fcl in "$libt_stage/etc/fonts/conf.d"/*.conf; do
+            [[ -L "$fcl" ]] || continue
+            [[ "$("$stratum_fs_bin" -s "$sock_path" readlink "/etc/fonts/conf.d/${fcl##*/}")" == "$(readlink "$fcl")" ]] \
+                || { echo "==> populate pool: /etc/fonts/conf.d/${fcl##*/} readback MISMATCH" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+            fcn=$((fcn + 1))
+        done
+        (( fcn > 0 )) \
+            || { echo "==> populate pool: $libt_stage/etc/fonts/conf.d holds no links to read back" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        echo "==> populate pool: fontconfig baked (/etc/fonts, $fcn conf.d links readback-verified; /usr/share/fontconfig; /usr/bin/fc-*; /lib/font, $(find "$libt_stage/lib/font" -name '*.ttf' | wc -l | tr -d ' ') faces)"
+    fi
+
     # --- #101: VERIFY THE ARTIFACT, NOT THE INTENT --------------------------
     # Every large payload above is `put` behind a flag, and a flag that is set
     # proves nothing about what reached the pool. The CL-6 close shipped a
@@ -4573,6 +4755,7 @@ populate_stratum_pool() {
     local vp_tombraider="$BUILD_DIR/tombraider/stage"
     local vp_dbxconf="$BUILD_DIR/dosbox-x-sysconf/dosbox-x.conf"
     local vp_webkit="$BUILD_DIR/webkit/stage"
+    local vp_libtests="$BUILD_DIR/pouch/lib-tests/stage"
 
     # /thylacine-version is written unconditionally near the top of this
     # function, so it is the POSITIVE CONTROL: it proves `stat` can see a file
@@ -4589,6 +4772,10 @@ populate_stratum_pool() {
     if [[ "${THYLACINE_BAKE_GOROOT:-1}" == "1" && -d "$vp_goroot" ]]; then
         bake_want="$bake_want
 GOROOT /goroot/bin/go"
+        if [[ -f "$vp_goroot/bin/gopls" ]]; then
+            bake_want="$bake_want
+GOPLS /goroot/bin/gopls"
+        fi
         if [[ -d "$vp_gocache" && -d "$vp_go4c" ]]; then
             bake_want="$bake_want
 GOCACHE /go-cache
@@ -4642,6 +4829,38 @@ DBXCONF /lib/dosbox-x/dosbox-x.conf"
         bake_want="$bake_want
 WEBKIT /webkit/jsc
 SUNSPIDER /webkit/sunspider/run.js"
+    fi
+    if [[ "${THYLACINE_BAKE_LIBS:-0}" == "1" && -x "$vp_libtests/var/icu_tests/bin/intltest" ]]; then
+        bake_want="$bake_want
+ICUTEST /var/icu_tests/bin/intltest
+ICUDATA /var/icu_tests/test/testdata/out/testdata.dat
+MF2DATA /var/testdata/message2/valid-tests.json"
+    fi
+    if [[ "${THYLACINE_BAKE_LIBS:-0}" == "1" && -x "$vp_libtests/var/lib_tests/bin/muster" ]]; then
+        bake_want="$bake_want
+MUSTER /var/lib_tests/bin/muster
+PNGTESTS /var/lib_tests/libpng.manifest
+JPEGTESTS /var/lib_tests/libjpeg-turbo.manifest
+WEBPTESTS /var/lib_tests/libwebp.manifest
+XMLTESTS /var/lib_tests/libxml2.manifest
+XMLCONF /var/lib_tests/libxml2/src/libxml2-$XML_VER/xmlconf/xmlconf.xml
+FTTESTS /var/lib_tests/freetype.manifest
+FTFONT /var/lib_tests/freetype/src/freetype-$FT_VER/tests/data/As.I.Lay.Dying.ttf
+HBTESTS /var/lib_tests/harfbuzz.manifest
+HBFONTS /var/lib_tests/harfbuzz/src/harfbuzz-$HB_VER/perf/fonts/Roboto-Regular.ttf
+FCTESTS /var/lib_tests/fontconfig.manifest
+FCDATA /var/lib_tests/fontconfig/src/fontconfig-$FC_VER/test/4x6.pcf"
+    fi
+    if [[ "${THYLACINE_BAKE_LIBS:-0}" == "1" && -x "$vp_libtests/usr/bin/fc-match" ]]; then
+        bake_want="$bake_want
+FCCONF /etc/fonts/fonts.conf
+FCAVAIL /usr/share/fontconfig/conf.avail/60-latin.conf
+FCDTD /usr/share/xml/fontconfig/fonts.dtd
+FCMATCH /usr/bin/fc-match
+FONTSANS /lib/font/DejaVuSans.ttf
+FONTSERIF /lib/font/DejaVuSerif.ttf
+FONTMONO /lib/font/DejaVuSansMono.ttf
+FONTPLEX /lib/font/IBMPlexSans-Regular.ttf"
     fi
 
     local bake_missing=""
@@ -4914,7 +5133,7 @@ build_pouch_progs() {
     rm -f "$progs_out"/pouch-hello*.o "$progs_out"/pouch-hello*
 
     local prog
-    for prog in pouch-hello pouch-hello-stdio pouch-hello-printf pouch-hello-malloc pouch-hello-mallocng-torture pouch-hello-threads pouch-hello-exitgroup pouch-hello-poll pouch-hello-getrandom pouch-hello-sockets pouch-hello-net pouch-hello-signals pouch-hello-sodium pouch-hello-argv pouch-hello-fault pouch-hello-pty pouch-hello-fopen pouch-hello-fs pouch-hello-env pouch-hello-spawn pouch-hello-susp pouch-hello-reentry pouch-hello-identity pouch-hello-mem pouch-hello-guard pouch-hello-jitthunk; do
+    for prog in pouch-hello pouch-hello-stdio pouch-hello-printf pouch-hello-malloc pouch-hello-mallocng-torture pouch-hello-threads pouch-hello-exitgroup pouch-hello-poll pouch-hello-getrandom pouch-hello-sockets pouch-hello-net pouch-hello-signals pouch-hello-sodium pouch-hello-argv pouch-hello-fault pouch-hello-pty pouch-hello-fopen pouch-hello-fd pouch-hello-links pouch-hello-times pouch-hello-tz pouch-hello-locks pouch-hello-fs pouch-hello-env pouch-hello-spawn pouch-hello-susp pouch-hello-reentry pouch-hello-identity pouch-hello-mem pouch-hello-guard pouch-hello-jitthunk pouch-hello-descriptor-ops pouch-hello-dup2-self pouch-hello-handle-query pouch-hello-spawn-actions; do
         echo "==> pouch prog: $prog"
         # 1. compile (clang). -nostdinc + -isystem: pouch owns the include
         #    path. -fno-pie: non-PIC codegen for a fixed-address ET_EXEC.
@@ -4923,6 +5142,10 @@ build_pouch_progs() {
         local extra_cflags=()
         case "$prog" in
             pouch-hello-jitthunk) extra_cflags=( -I"$REPO_ROOT/usr/lib/thylajit" ) ;;
+            # The native descriptor witnesses call the kernel through libt's
+            # header-inline wrappers; the ls-descriptors gate runs them.
+            pouch-hello-descriptor-ops|pouch-hello-dup2-self|pouch-hello-handle-query)
+                extra_cflags=( -I"$REPO_ROOT/usr/lib/libt/include" ) ;;
         esac
         "$pouch_clang" -std=gnu11 -O2 -Wall -Wextra \
             -nostdinc -isystem "$sysroot/include" -fno-pie \
@@ -5133,9 +5356,8 @@ build_sdl2() {
 
     local p
     for p in "$port_dir"/patches/*.patch; do
-        # -F 0: exact context or fail, the pouch series' reason (GNU patch fuzzes
-        # 2 lines by default, quietly); every port patch applies at fuzz 0 (r5 F7).
-        patch -s -p1 -t -F 0 -d "$sdl_src" -i "$p"
+        # The pouch series' rules (apply_patch_exact); every port patch meets them.
+        apply_patch_exact "$sdl_src" "$p" "sdl2"
     done
     cp "$port_dir/SDL_config.h" "$sdl_src/include/SDL_config.h"
     mkdir -p "$sdl_src/src/video/thylacine" "$sdl_src/src/audio/thylacine"
@@ -5572,9 +5794,8 @@ build_tyrquake() {
         "$tq_vendor/external" "$tq_src/"
     local qp
     for qp in "$port_dir"/patches/*.patch; do
-        # -F 0: exact context or fail, the pouch series' reason (GNU patch fuzzes
-        # 2 lines by default, quietly); every port patch applies at fuzz 0 (r5 F7).
-        patch -s -p1 -t -F 0 -d "$tq_src" -i "$qp"
+        # The pouch series' rules (apply_patch_exact); every port patch meets them.
+        apply_patch_exact "$tq_src" "$qp" "tyrquake"
     done
 
     # The window-icon header is upstream-GENERATED (ImageMagick over the
@@ -5964,7 +6185,7 @@ build_zlib() {
     if sysroot_is_stale; then build_sysroot; fi
 
     # Staleness: reuse the archive when newer than the vendored tree + this recipe.
-    if [[ -f "$archive" && -f "$sysroot/include/zlib.h" ]]; then
+    if [[ -f "$archive" && -f "$sysroot/include/zlib.h" && -f "$sysroot/lib/pkgconfig/zlib.pc" ]]; then
         local stale
         stale="$(find "$vendor" -type f -newer "$archive" -print -quit 2>/dev/null)"
         if [[ -z "$stale" && ! "${BASH_SOURCE[0]}" -nt "$archive" ]]; then
@@ -5988,6 +6209,24 @@ build_zlib() {
     "$ar_tool" rcs "$archive.tmp" "$obj"/*.o
     mv "$archive.tmp" "$archive"
     cp "$vendor/zlib.h" "$vendor/zconf.h" "$sysroot/include/"
+    # zlib's own zlib.pc.in, filled in (the vendored tree omits it): libpng's
+    # .pc requires zlib, and a static pkg-config lookup (meson's, B-3f)
+    # follows Requires.private.
+    mkdir -p "$sysroot/lib/pkgconfig"
+    cat > "$sysroot/lib/pkgconfig/zlib.pc" <<EOF_ZPC
+prefix=$sysroot
+exec_prefix=\${prefix}
+libdir=\${exec_prefix}/lib
+includedir=\${prefix}/include
+
+Name: zlib
+Description: zlib compression library
+Version: $(sed -n 's/^#define ZLIB_VERSION "\(.*\)"$/\1/p' "$vendor/zlib.h")
+
+Requires:
+Libs: -L\${libdir} -lz
+Cflags: -I\${includedir}
+EOF_ZPC
     echo "    libz.a: $n objects -> $(wc -c < "$archive" | tr -d ' ') bytes"
     ledger "libz.a (zlib 1.3.1): BUILT"
 }
@@ -6076,13 +6315,8 @@ build_dosbox_x() {
         # skipped hunk (patch -t) after a vendored-tree bump would compile with
         # __thylacine__ defined but WITHOUT the dynrec CAP_JIT arm -> the malloc
         # fallback hands back a non-executable region -> a runtime fault the gate
-        # only catches downstream. The dosbox patches all apply rc=0 (verified).
-        # -F 0: exact context or fail, the pouch series' reason (GNU patch fuzzes
-        # 2 lines by default, quietly); every port patch applies at fuzz 0 (r5 F7).
-        patch -s -p1 -t -F 0 -d "$dbx_src" -i "$pp" || {
-            echo "==> dosbox-x: patch $(basename "$pp") FAILED to apply" >&2
-            exit 1
-        }
+        # only catches downstream. The pouch series' rules (apply_patch_exact).
+        apply_patch_exact "$dbx_src" "$pp" "dosbox-x"
     done
 
     # Include search: the src root (config.h + shared headers), the top include/,
@@ -6322,9 +6556,8 @@ build_vkquake() {
     cp -R "$vq_vendor/Quake" "$vq_vendor/Shaders" "$vq_src/"
     local qp
     for qp in "$port_dir"/patches/*.patch; do
-        # -F 0: exact context or fail, the pouch series' reason (GNU patch fuzzes
-        # 2 lines by default, quietly); every port patch applies at fuzz 0 (r5 F7).
-        patch -s -p1 -t -F 0 -d "$vq_src" -i "$qp"
+        # The pouch series' rules (apply_patch_exact); every port patch meets them.
+        apply_patch_exact "$vq_src" "$qp" "vkquake"
     done
 
     # The curated object list (upstream Quake/Makefile OBJS; codecs
@@ -6450,9 +6683,8 @@ prepare_gnumake_src() {
     local p
     for p in "$port_dir"/patches/*.patch; do
         [[ -e "$p" ]] || continue
-        # -F 0: exact context or fail, the pouch series' reason (GNU patch fuzzes
-        # 2 lines by default, quietly); every port patch applies at fuzz 0 (r5 F7).
-        patch -s -p1 -t -F 0 -d "$dest" -i "$p"
+        # The pouch series' rules (apply_patch_exact); every port patch meets them.
+        apply_patch_exact "$dest" "$p" "gnumake"
     done
 }
 
@@ -6770,6 +7002,52 @@ WEBKIT_PIN="5220e80b97a253c60ed899361654142ab5021998"   # tag webkitgtk-2.54.0
 ICU_VER="78.3"
 ICU_TGZ="icu4c-78.3-sources.tgz"
 ICU_SHA256="3a2e7a47604ba702f345878308e6fefeca612ee895cf4a5f222e7955fabfe0c0"
+# --- Boosty B-3d: the browser's image codecs (libpng, libjpeg-turbo, libwebp),
+# cross-built static. Pins mirror tools/build-manifest.toml [cache.libpng] /
+# [cache.libjpeg-turbo] / [cache.libwebp]. ---
+PNG_VER="1.6.59"
+PNG_TARBALL="libpng-1.6.59.tar.xz"
+PNG_SHA256="d80dd2a38a37f803cb9b6ac7b14bd6e74ddc3b654780a8380bdf93523fdb4389"
+JPEG_VER="3.2.0"
+JPEG_TARBALL="libjpeg-turbo-3.2.0.tar.gz"
+JPEG_SHA256="6f30092cef9fb839779646608f4ee14ae3cbac989c47fa05e841b0841f09878e"
+WEBP_VER="1.6.0"
+WEBP_TARBALL="libwebp-1.6.0.tar.gz"
+WEBP_SHA256="e4ab7009bf0629fd11982d4c2aa83964cf244cffba7347ecd39019a9e38c4564"
+# --- Boosty B-3e: libxml2, with the W3C XML conformance suite its CI runs
+# (runxmlconf). Pins mirror [cache.libxml2] / [cache.xmlts]. ---
+XML_VER="2.15.4"
+XML_TARBALL="libxml2-2.15.4.tar.xz"
+XML_SHA256="98087fd181d9070724f3fbc65c7377db03038eb92bd882374daff44940138821"
+XMLTS_TARBALL="xmlts20080827.tar.gz"
+XMLTS_SHA256="96151685cec997e1f9f3387e3626d61e6284d4d6e66e0e440c209286c03e9cc7"
+# --- Boosty B-3f: FreeType and HarfBuzz. Both register their tests with meson,
+# so meson is pinned too, run from its release tarball. FreeType's issue-1063
+# reads a font its download script fetches; the zip is trusted on first fetch
+# and the font in it is checked by the digest upstream's script pins the head
+# of. Pins mirror [cache.meson] / [cache.freetype] / [cache.ftfont] /
+# [cache.harfbuzz]. ---
+MESON_VER="1.12.1"
+MESON_TARBALL="meson-1.12.1.tar.gz"
+MESON_SHA256="ab0a6ca09f8ef70c564c8241fb5a23957886a0b53fb58412b5e07eaf07dba743"
+FT_VER="2.15.0"
+FT_TARBALL="freetype-2.15.0.tar.xz"
+FT_SHA256="93cd47eb719c325107f2d3cf087d06299e944c3b48a40b55537302304dea1dd5"
+FTFONT_ZIP="As.I.Lay.Dying.zip"
+FTFONT_SHA256="09fceee7c335975a454500b000f75ee7f7b5c4f14b2dc241d6416f77967e9d1b"
+FTFONT_TTF_SHA256="ef146bbc2673b38715afcc70dca484cc64457438da8627a27cf95680e982f0a6"
+HB_VER="14.6.0"
+HB_TARBALL="harfbuzz-14.6.0.tar.xz"
+HB_SHA256="d07a007327277708a2a73ae437887cdbaf282937f6d03ca5467723e9099af586"
+# --- Boosty B-3g: fontconfig, and the DejaVu release /lib/font's DejaVu faces
+# come from (third_party/dejavu-fonts vendors that release's four Sans
+# Condensed faces). Pins mirror [cache.fontconfig] / [cache.dejavu]. ---
+FC_VER="2.18.3"
+FC_TARBALL="fontconfig-2.18.3.tar.xz"
+FC_SHA256="4f7b554a38cdf78c033f666c8871f3749e14a094f65a07f630c91ed0b43d35e3"
+DEJAVU_VER="2.37"
+DEJAVU_TARBALL="dejavu-fonts-ttf-2.37.tar.bz2"
+DEJAVU_SHA256="fa9ca4d13871dd122f61258a80d01751d603b4d3ee14095d65453b4e846e17d7"
 
 webkit_jobs() {
     # JSC's unified sources peak well over 1 GiB per job; this host has 8 GiB.
@@ -6785,8 +7063,9 @@ webkit_jobs() {
 build_icu() {
     # Two passes, because ICU's build runs its own tools (genrb, pkgdata, icupkg):
     # a HOST build supplies them, the CROSS build consumes it via --with-cross-build.
-    # Static data packaging + --disable-dyload: Thylacine links statically and has
-    # no dlopen. The target triple goes in CC/CXX THEMSELVES -- with --target only
+    # Static data packaging + --disable-dyload: jsc links statically, and ICU's
+    # data rides in libicudata.a rather than a file it would map MAP_SHARED,
+    # which Pouch does not serve. The target triple goes in CC/CXX THEMSELVES -- with --target only
     # in CFLAGS, ICU's dependency-generation steps compile for the host.
     local sysroot="$BUILD_DIR/sysroot"
     local fork="${LLVMFORK:-$HOME/projects/llvm-thylacine}"
@@ -6813,9 +7092,26 @@ build_icu() {
     fi
     [[ -f "$sysroot/lib/libc++.a" ]] || build_libcxx
 
+    # U_HAVE_MMAP=0: a data file ICU opens by path (the tests' packages; none of
+    # the common data, which libicudata.a carries) is read into memory, not
+    # mapped MAP_SHARED. --enable-tests only generates the test makefiles
+    # (build_lib_tests runs them); `make all` builds no test.
+    local tflags="--target=aarch64-thylacine -march=armv8-a -moutline-atomics"
+    local cflags="-O2 -fno-pie -nostdlibinc -D_GNU_SOURCE=1 -DU_HAVE_MMAP=0 -isystem $sysroot/include"
+    local cxxflags="-O2 -fno-pie -nostdlibinc -D_GNU_SOURCE=1 -DU_HAVE_MMAP=0 -isystem $sysroot/include/c++/v1 -isystem $sysroot/include"
+    local cfgargs=( --host=aarch64-unknown-linux-musl --with-cross-build="$host"
+          --disable-shared --enable-static --with-data-packaging=static --enable-tests
+          --disable-samples --disable-extras --disable-icuio --disable-layoutex
+          --disable-dyload --prefix=/ )
+    # The reuse test compares the flags too: a stage built under other flags is
+    # not up to date because its files are newer than their inputs.
+    local stamp="$stage/.thylacine-config"
+    local want_stamp="$tflags | $cflags | $cxxflags | ${cfgargs[*]}"
+
     if [[ -f "$stage/lib/libicuuc.a" && -f "$stage/lib/libicui18n.a" && -f "$stage/lib/libicudata.a" \
           && ! "$sysroot/lib/libc++.a" -nt "$stage/lib/libicuuc.a" \
-          && ! "$tgz" -nt "$stage/lib/libicuuc.a" ]]; then
+          && ! "$tgz" -nt "$stage/lib/libicuuc.a" \
+          && -f "$stamp" && "$(cat "$stamp")" == "$want_stamp" ]]; then
         ledger "icu $ICU_VER: REUSED (cached + up-to-date)"
         return 0
     fi
@@ -6834,24 +7130,733 @@ build_icu() {
             || { echo "==> icu: HOST build failed -- see $host/{configure,build}.log" >&2; exit 1; }
     fi
 
-    local tflags="--target=aarch64-thylacine -march=armv8-a -moutline-atomics"
-    local cflags="-O2 -fno-pie -nostdlibinc -D_GNU_SOURCE=1 -isystem $sysroot/include"
-    local cxxflags="-O2 -fno-pie -nostdlibinc -D_GNU_SOURCE=1 -isystem $sysroot/include/c++/v1 -isystem $sysroot/include"
     ( cd "$base/cross" && \
       CC="$clang_c $tflags" CXX="$clangxx $tflags" \
       CFLAGS="$cflags" CXXFLAGS="$cxxflags" LDFLAGS="--sysroot=$sysroot -static" \
       AR="$LLVM_PREFIX/bin/llvm-ar" RANLIB="$LLVM_PREFIX/bin/llvm-ranlib" \
-      "$src/configure" --host=aarch64-unknown-linux-musl --with-cross-build="$host" \
-          --disable-shared --enable-static --with-data-packaging=static --disable-tests \
-          --disable-samples --disable-extras --disable-icuio --disable-layoutex \
-          --disable-dyload --prefix=/ > configure.log 2>&1 \
+      "$src/configure" "${cfgargs[@]}" > configure.log 2>&1 \
       && make -j"$jobs" > build.log 2>&1 \
       && make install DESTDIR="$stage" > install.log 2>&1 ) \
         || { echo "==> icu: CROSS build failed -- see $base/cross/{configure,build,install}.log" >&2; exit 1; }
     [[ -f "$stage/lib/libicuuc.a" && -f "$stage/include/unicode/uversion.h" ]] \
         || { echo "==> icu: install produced no libicuuc.a / headers under $stage" >&2; exit 1; }
+    printf '%s' "$want_stamp" > "$stamp"
     echo "    icu: $(du -sh "$stage/lib" | cut -f1) of static libs at $stage"
     ledger "icu $ICU_VER: BUILT (static, data packaged in libicudata.a)"
+}
+
+# One CMake library under build/pouch/<name>: the tarball checked against its
+# pin, unpacked fresh with the port's patches (usr/ports/<name>/patches, in
+# order), configured with the pouch C++ toolchain, built WHOLE -- the library
+# and upstream's test programs, which build_lib_tests runs -- and the library
+# installed into <name>/stage. Reused when the stamp (pin, patch contents,
+# configure line) matches and neither libc nor the toolchain is newer. A
+# leading `+<tarball>=<sha256>` is a second pinned tarball (test data upstream
+# fetches separately), unpacked into the source top after the patches.
+#   cmake_lib <name> <tarball> <sha256> <top-dir> [+<tarball>=<sha256>...] [cmake args...]
+cmake_lib() {
+    local name="$1" tarball="$2" sha="$3" top="$4"; shift 4
+    local -a extras=()
+    while [[ "${1:-}" == +* ]]; do extras+=("${1#+}"); shift; done
+    local sysroot="$BUILD_DIR/sysroot"
+    local fork="${LLVMFORK:-$HOME/projects/llvm-thylacine}"
+    local base="$BUILD_DIR/pouch/$name"
+    local src="$base/src/$top" bdir="$base/build" stage="$base/stage"
+    local file="$BUILD_DIR/cache/$tarball"
+    local toolchain="$REPO_ROOT/cmake/Toolchain-aarch64-pouch-cxx.cmake"
+    local jobs; jobs="$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)"
+    local -a patches=()
+    local p
+    for p in "$REPO_ROOT/usr/ports/$name/patches"/*.patch; do
+        [[ -e "$p" ]] && patches+=("$p")
+    done
+
+    [[ -x "$fork/build/bin/clang++" ]] \
+        || { echo "==> $name: fork clang++ not found at $fork/build/bin/clang++ (build the LLVM fork)" >&2; exit 1; }
+    [[ -f "$file" ]] \
+        || { echo "==> $name: $file is absent -- run 'tools/forage.sh cache.$name'" >&2; exit 1; }
+    local have; have="$(shasum -a 256 "$file" | awk '{print $1}')"
+    [[ "$have" == "$sha" ]] \
+        || { echo "==> $name: $tarball sha256 mismatch (got $have, want $sha)" >&2; exit 1; }
+    local x xf
+    for x in ${extras[@]+"${extras[@]}"}; do
+        xf="$BUILD_DIR/cache/${x%%=*}"
+        [[ -f "$xf" ]] \
+            || { echo "==> $name: $xf is absent -- run 'tools/forage.sh' for its [cache.*] pin" >&2; exit 1; }
+        have="$(shasum -a 256 "$xf" | awk '{print $1}')"
+        [[ "$have" == "${x#*=}" ]] \
+            || { echo "==> $name: ${x%%=*} sha256 mismatch (got $have, want ${x#*=})" >&2; exit 1; }
+    done
+    [[ -f "$sysroot/lib/libc++.a" ]] || build_libcxx
+
+    # The patches by content: an edited patch rebuilds even when its name stays.
+    local patch_sums=""
+    (( ${#patches[@]} )) && patch_sums="$(shasum -a 256 "${patches[@]}" | awk '{print $1}' | tr '\n' ' ')"
+    # So are the archives an option names (libwebp's -DPNG_LIBRARY=...): a
+    # dependency rebuilt with other bytes relinks the tests here, and one
+    # rebuilt byte for byte does not.
+    local dep_sums="" arg val
+    for arg in "$@"; do
+        val="${arg#-D*=}"
+        if [[ "$val" != "$arg" && -f "$val" ]]; then
+            dep_sums="$dep_sums$(shasum -a 256 "$val" | awk '{print $1}') "
+        fi
+    done
+    local want_stamp="$sha | $patch_sums | ${extras[*]-} | $dep_sums| $*"
+    local stamp="$stage/.thylacine-config"
+    if [[ -f "$stamp" && "$(cat "$stamp")" == "$want_stamp" \
+          && ! "$sysroot/lib/libc.a" -nt "$stamp" && ! "$sysroot/lib/libc++.a" -nt "$stamp" \
+          && ! "$toolchain" -nt "$stamp" && ! "$REPO_ROOT/cmake/Platform/Thylacine.cmake" -nt "$stamp" ]]; then
+        ledger "$name: REUSED (cached + up-to-date)"
+        return 0
+    fi
+
+    echo "==> building $name (static, with upstream's tests, -j$jobs)"
+    rm -rf "$base"; mkdir -p "$base/src" "$bdir"
+    tar -xf "$file" -C "$base/src"
+    [[ -f "$src/CMakeLists.txt" ]] \
+        || { echo "==> $name: unexpected tarball layout (no $top/CMakeLists.txt)" >&2; exit 1; }
+    for p in ${patches[@]+"${patches[@]}"}; do
+        apply_patch_exact "$src" "$p" "$name"
+    done
+    for x in ${extras[@]+"${extras[@]}"}; do
+        tar -xf "$BUILD_DIR/cache/${x%%=*}" -C "$src" \
+            || { echo "==> $name: ${x%%=*} does not unpack" >&2; exit 1; }
+    done
+    cmake -S "$src" -B "$bdir" -G Ninja -DCMAKE_TOOLCHAIN_FILE="$toolchain" \
+        -DLLVMFORK="$fork/build" -DHOSTLLVM="$LLVM_PREFIX" -DTHYLACINE_SYSROOT="$sysroot" \
+        -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$stage" "$@" \
+        > "$base/configure.log" 2>&1 \
+        || { echo "==> $name: cmake configure failed -- see $base/configure.log" >&2; tail -20 "$base/configure.log" >&2; exit 1; }
+    ninja -C "$bdir" -j"$jobs" > "$base/build.log" 2>&1 \
+        || { echo "==> $name: build failed -- see $base/build.log" >&2; tail -30 "$base/build.log" >&2; exit 1; }
+    # Installed at the stage itself: GNUInstallDirs puts a prefix of / under
+    # /usr, which would leave the stage's lib/ and include/ empty.
+    cmake --install "$bdir" > "$base/install.log" 2>&1 \
+        || { echo "==> $name: install failed -- see $base/install.log" >&2; exit 1; }
+    [[ -d "$stage/lib" && -d "$stage/include" ]] \
+        || { echo "==> $name: the install left no lib/ and include/ under $stage" >&2; exit 1; }
+    printf '%s' "$want_stamp" > "$stamp"
+    ledger "$name: BUILT (static, $(du -sh "$stage/lib" | cut -f1) of libs at $stage)"
+}
+
+build_libpng() {
+    build_zlib
+    local sysroot="$BUILD_DIR/sysroot"
+    # FindZLIB's root-path search finds nothing in the sysroot's flat layout.
+    cmake_lib libpng "$PNG_TARBALL" "$PNG_SHA256" "libpng-$PNG_VER" \
+        -DPNG_SHARED=OFF -DPNG_STATIC=ON -DPNG_TESTS=ON -DPNG_TOOLS=OFF -DPNG_FRAMEWORK=OFF \
+        -DZLIB_LIBRARY="$sysroot/lib/libz.a" -DZLIB_INCLUDE_DIR="$sysroot/include"
+}
+
+build_libjpeg() {
+    cmake_lib libjpeg-turbo "$JPEG_TARBALL" "$JPEG_SHA256" "libjpeg-turbo-$JPEG_VER" \
+        -DENABLE_SHARED=OFF -DENABLE_STATIC=ON -DWITH_TURBOJPEG=ON -DWITH_TOOLS=ON -DWITH_TESTS=ON
+}
+
+# cwebp and dwebp read and write PNG and JPEG through libpng and libjpeg-turbo
+# above, so the round trip also crosses the other two codecs.
+build_libwebp() {
+    build_libpng
+    build_libjpeg
+    local png="$BUILD_DIR/pouch/libpng/stage" jpeg="$BUILD_DIR/pouch/libjpeg-turbo/stage"
+    local sysroot="$BUILD_DIR/sysroot"
+    cmake_lib libwebp "$WEBP_TARBALL" "$WEBP_SHA256" "libwebp-$WEBP_VER" \
+        -DWEBP_LINK_STATIC=ON -DBUILD_SHARED_LIBS=OFF \
+        -DWEBP_BUILD_CWEBP=ON -DWEBP_BUILD_DWEBP=ON -DWEBP_BUILD_WEBPINFO=ON \
+        -DWEBP_BUILD_WEBPMUX=ON -DWEBP_BUILD_LIBWEBPMUX=ON -DWEBP_BUILD_EXTRAS=ON \
+        -DWEBP_BUILD_IMG2WEBP=OFF -DWEBP_BUILD_GIF2WEBP=OFF -DWEBP_BUILD_ANIM_UTILS=OFF \
+        -DWEBP_BUILD_VWEBP=OFF -DWEBP_BUILD_WEBP_JS=OFF -DWEBP_BUILD_FUZZTEST=OFF \
+        -DZLIB_LIBRARY="$sysroot/lib/libz.a" -DZLIB_INCLUDE_DIR="$sysroot/include" \
+        -DPNG_LIBRARY="$png/lib/libpng16.a" -DPNG_PNG_INCLUDE_DIR="$png/include" \
+        -DJPEG_LIBRARY="$jpeg/lib/libjpeg.a" -DJPEG_INCLUDE_DIR="$jpeg/include"
+}
+
+# The configuration of upstream's static CMake CI job (.gitlab-ci.yml
+# cmake:linux:gcc:static, .gitlab-ci/test_cmake.sh): schematron, zlib and the
+# HTTP ABI stubs on; the Python bindings, which carry no C tests, off. The W3C
+# suite unpacks as xmlconf/, which registers runxmlconf, as upstream's CI
+# image links it.
+build_libxml2() {
+    build_zlib
+    local sysroot="$BUILD_DIR/sysroot"
+    cmake_lib libxml2 "$XML_TARBALL" "$XML_SHA256" "libxml2-$XML_VER" "+$XMLTS_TARBALL=$XMLTS_SHA256" \
+        -DBUILD_SHARED_LIBS=OFF -DLIBXML2_WITH_TESTS=ON -DLIBXML2_WITH_PROGRAMS=ON \
+        -DLIBXML2_WITH_HTTP=ON -DLIBXML2_WITH_SCHEMATRON=ON -DLIBXML2_WITH_ZLIB=ON \
+        -DLIBXML2_WITH_PYTHON=OFF -DLIBXML2_WITH_DOCS=OFF \
+        -DZLIB_LIBRARY="$sysroot/lib/libz.a" -DZLIB_INCLUDE_DIR="$sysroot/include"
+}
+
+# The pinned meson, unpacked once from its release tarball: meson.py runs from
+# the tree, and this host has no meson of its own. Prints the meson.py path.
+meson_tool() {
+    local file="$BUILD_DIR/cache/$MESON_TARBALL" dir="$BUILD_DIR/meson"
+    local py="$dir/meson-$MESON_VER/meson.py"
+    if [[ -f "$py" && "$(cat "$dir/.sha256" 2>/dev/null)" == "$MESON_SHA256" ]]; then
+        echo "$py"
+        return 0
+    fi
+    [[ -f "$file" ]] \
+        || { echo "==> meson: $file is absent -- run 'tools/forage.sh cache.meson'" >&2; exit 1; }
+    local have; have="$(shasum -a 256 "$file" | awk '{print $1}')"
+    [[ "$have" == "$MESON_SHA256" ]] \
+        || { echo "==> meson: $MESON_TARBALL sha256 mismatch (got $have, want $MESON_SHA256)" >&2; exit 1; }
+    rm -rf "$dir"; mkdir -p "$dir"
+    tar -xzf "$file" -C "$dir" && [[ -f "$py" ]] \
+        || { echo "==> meson: $MESON_TARBALL did not unpack to meson-$MESON_VER/meson.py" >&2; exit 1; }
+    printf '%s' "$MESON_SHA256" > "$dir/.sha256"
+    echo "$py"
+}
+
+# cmake_lib's contract for a project whose tests only meson registers: a
+# pinned tarball, the port's patches (usr/ports/<project>/patches, the project
+# named by the tarball's top directory, so FreeType's two passes share one
+# series), static, its tests built, a stamp of every input. `--pc DIR`
+# (repeated, first) names a dependency's pkg-config directory; `--prefix DIR`
+# (first too) is the prefix on the device, for a library that compiles its
+# install paths in: it installs under the stage with DESTDIR, so the stage
+# holds DIR's tree rather than lib/ and include/ at its top. The rest are
+# meson -D options. The cross file is cmake/Toolchain-aarch64-pouch-cxx.cmake
+# in meson's terms, and only the named pkg-config directories are searched,
+# so nothing from this host's own libraries can be found. The toolchain flags
+# sit in the compiler exelist, as tools/clade-mesa-cross.sh measured they must:
+# meson's header and function checks drop an `-isystem <dir>` pair from
+# c_args, and with -nostdlibinc that leaves no libc headers at all (measured
+# here too: FreeType's checks found no unistd.h, fcntl.h or sys/mman.h).
+meson_lib() {
+    local name="$1" tarball="$2" sha="$3" top="$4"; shift 4
+    local sysroot="$BUILD_DIR/sysroot"
+    local -a pcdirs=( "$sysroot/lib/pkgconfig" )
+    local prefix=""
+    while [[ "${1:-}" == --pc || "${1:-}" == --prefix ]]; do
+        if [[ "$1" == --pc ]]; then pcdirs+=("$2"); else prefix="$2"; fi
+        shift 2
+    done
+    [[ -z "$prefix" || "$prefix" == /* ]] \
+        || { echo "==> $name: --prefix $prefix is not an absolute device path" >&2; exit 1; }
+    local fork="${LLVMFORK:-$HOME/projects/llvm-thylacine}"
+    local base="$BUILD_DIR/pouch/$name"
+    local src="$base/src/$top" bdir="$base/build" stage="$base/stage"
+    # Where lib/ and include/ land: the stage, or the prefix's tree inside it.
+    local root="$stage$prefix"
+    local file="$BUILD_DIR/cache/$tarball"
+    local cc="$fork/build/bin/clang" cxx="$fork/build/bin/clang++"
+    local jobs; jobs="$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)"
+    local -a patches=()
+    local p
+    for p in "$REPO_ROOT/usr/ports/${top%-*}/patches"/*.patch; do
+        [[ -e "$p" ]] && patches+=("$p")
+    done
+
+    [[ -x "$cxx" ]] \
+        || { echo "==> $name: fork clang++ not found at $cxx (build the LLVM fork)" >&2; exit 1; }
+    [[ -f "$file" ]] \
+        || { echo "==> $name: $file is absent -- run 'tools/forage.sh' for its [cache.*] pin" >&2; exit 1; }
+    local have; have="$(shasum -a 256 "$file" | awk '{print $1}')"
+    [[ "$have" == "$sha" ]] \
+        || { echo "==> $name: $tarball sha256 mismatch (got $have, want $sha)" >&2; exit 1; }
+    [[ -f "$sysroot/lib/libc++.a" ]] || build_libcxx
+    local meson; meson="$(meson_tool)" || exit 1
+    local pkgconf; pkgconf="$(command -v pkg-config)" \
+        || { echo "==> $name: this host has no pkg-config (brew install pkgconf)" >&2; exit 1; }
+
+    local d pclist=""
+    for d in "${pcdirs[@]}"; do
+        [[ -d "$d" ]] || { echo "==> $name: pkg-config directory $d is absent" >&2; exit 1; }
+        pclist="$pclist${pclist:+, }'$d'"
+    done
+    local flags="'--target=aarch64-thylacine', '--sysroot=$sysroot', '-march=armv8-a', '-moutline-atomics', '-fno-pie', '-nostdlibinc'"
+    local cross="[binaries]
+c = ['$cc', $flags, '-isystem', '$sysroot/include']
+cpp = ['$cxx', $flags, '-isystem', '$sysroot/include/c++/v1', '-isystem', '$sysroot/include']
+ar = '$LLVM_PREFIX/bin/llvm-ar'
+nm = '$LLVM_PREFIX/bin/llvm-nm'
+ranlib = '$LLVM_PREFIX/bin/llvm-ranlib'
+strip = '$LLVM_PREFIX/bin/llvm-strip'
+objcopy = '$LLVM_PREFIX/bin/llvm-objcopy'
+pkg-config = '$pkgconf'
+# A dependency pkg-config cannot find would otherwise be looked for among this
+# host's own CMake packages (measured: \"tried pkg-config and cmake\").
+cmake = 'false'
+
+[properties]
+needs_exe_wrapper = true
+pkg_config_libdir = [$pclist]
+
+[built-in options]
+c_args = ['-D_GNU_SOURCE=1']
+cpp_args = ['-D_GNU_SOURCE=1']
+c_link_args = ['-static']
+cpp_link_args = ['-static']
+default_library = 'static'
+prefer_static = true
+
+[host_machine]
+system = 'thylacine'
+cpu_family = 'aarch64'
+cpu = 'armv8-a'
+endian = 'little'
+"
+
+    # Every input by content: the tarball, the patches, the cross file (this
+    # function's text), and the archives and .pc files of each dependency
+    # directory -- the sysroot's included, so a new libc relinks the tests.
+    local patch_sums="" dep_sums cross_sum
+    (( ${#patches[@]} )) && patch_sums="$(shasum -a 256 "${patches[@]}" | awk '{print $1}' | tr '\n' ' ')"
+    dep_sums="$(for d in "${pcdirs[@]}"; do find "$d" "$d/.." -maxdepth 1 -type f \( -name '*.pc' -o -name '*.a' \); done \
+                | LC_ALL=C sort | xargs shasum -a 256 | shasum -a 256 | awk '{print $1}')"
+    cross_sum="$(printf '%s' "$cross" | shasum -a 256 | awk '{print $1}')"
+    local want_stamp="$sha | $patch_sums | meson $MESON_VER | cross $cross_sum | deps $dep_sums | ${prefix:+prefix $prefix | }$*"
+    local stamp="$stage/.thylacine-config"
+    if [[ -f "$stamp" && "$(cat "$stamp")" == "$want_stamp" ]]; then
+        ledger "$name: REUSED (cached + up-to-date)"
+        return 0
+    fi
+
+    echo "==> building $name (static, meson, with upstream's tests, -j$jobs)"
+    rm -rf "$base"; mkdir -p "$base/src"
+    tar -xf "$file" -C "$base/src"
+    [[ -f "$src/meson.build" ]] \
+        || { echo "==> $name: unexpected tarball layout (no $top/meson.build)" >&2; exit 1; }
+    for p in ${patches[@]+"${patches[@]}"}; do
+        apply_patch_exact "$src" "$p" "$name"
+    done
+    printf '%s' "$cross" > "$base/cross.ini"
+    # nofallback: a dependency comes from the directories above or not at all,
+    # never from a subproject meson would fetch.
+    python3 "$meson" setup "$bdir" "$src" --cross-file "$base/cross.ini" \
+        --prefix "${prefix:-$stage}" --libdir lib --wrap-mode=nofallback "$@" > "$base/configure.log" 2>&1 \
+        || { echo "==> $name: meson setup failed -- see $base/configure.log" >&2; tail -20 "$base/configure.log" >&2; exit 1; }
+    ninja -C "$bdir" -j"$jobs" > "$base/build.log" 2>&1 \
+        || { echo "==> $name: build failed -- see $base/build.log" >&2; tail -30 "$base/build.log" >&2; exit 1; }
+    # A device prefix installs under DESTDIR, which meson also applies to the
+    # absolute directories it derives from that prefix (/usr's sysconfdir is
+    # /etc), so nothing is written outside the stage.
+    if [[ -n "$prefix" ]]; then
+        DESTDIR="$stage" python3 "$meson" install -C "$bdir" > "$base/install.log" 2>&1 \
+            || { echo "==> $name: install failed -- see $base/install.log" >&2; exit 1; }
+    else
+        python3 "$meson" install -C "$bdir" > "$base/install.log" 2>&1 \
+            || { echo "==> $name: install failed -- see $base/install.log" >&2; exit 1; }
+    fi
+    [[ -d "$root/lib" && -d "$root/include" ]] \
+        || { echo "==> $name: the install left no lib/ and include/ under $root" >&2; exit 1; }
+    printf '%s' "$want_stamp" > "$stamp"
+    ledger "$name: BUILT (static, meson $MESON_VER, $(du -sh "$root/lib" | cut -f1) of libs at $root)"
+}
+
+# FreeType and HarfBuzz each use the other: HarfBuzz shapes FreeType faces, and
+# FreeType's autohinter finds a script's glyphs through HarfBuzz. So FreeType
+# builds twice, the order distributions use: without HarfBuzz, for HarfBuzz to
+# build against, then with it (which also registers FreeType's issue-1441).
+# PNG for colour bitmap glyphs (libpng, B-3d); zlib from the sysroot; brotli
+# (WOFF2 inside FreeType) and bzip2 off.
+FT_OPTIONS=( -Dpng=enabled -Dzlib=system -Dbrotli=disabled -Dbzip2=disabled )
+
+build_freetype_nohb() {
+    build_libpng
+    meson_lib freetype-nohb "$FT_TARBALL" "$FT_SHA256" "freetype-$FT_VER" \
+        --pc "$BUILD_DIR/pouch/libpng/stage/lib/pkgconfig" \
+        "${FT_OPTIONS[@]}" -Dharfbuzz=disabled -Dtests=disabled
+}
+
+# Upstream's defaults (buildtype debugoptimized, b_ndebug if-release: its tests
+# and the fuzzer driver assert), with ICU and FreeType on. GLib is off, and with
+# it the utilities (hb-shape, hb-subset: util/meson.build builds them only with
+# GLib) and the suites they drive -- test/api, test/shape, test/subset:
+# dec-2026-10-14-b3-test-bar skips HarfBuzz's GLib suites. The utilities option
+# stays at its default, on: it also registers test/vector. Cairo, chafa, the
+# docs and introspection need GLib or the host.
+build_harfbuzz() {
+    build_freetype_nohb
+    build_icu
+    local icu="$BUILD_DIR/pouch/icu/stage" f
+    [[ -f "$icu/lib/libicuuc.a" ]] \
+        || { echo "==> harfbuzz: ICU is not built (see above)" >&2; exit 1; }
+    # ICU installs with prefix / under DESTDIR=<stage>, so its .pc files name
+    # -L/lib; meson gets copies naming the stage instead (ICU itself, which
+    # JSC links, is left as it is). Beside lib/pkgconfig, so meson_lib's stamp
+    # still hashes the archives in lib/.
+    rm -rf "$icu/lib/pkgconfig-staged"; mkdir -p "$icu/lib/pkgconfig-staged"
+    for f in "$icu/lib/pkgconfig"/*.pc; do
+        sed "s|^prefix = /\$|prefix = $icu|" "$f" > "$icu/lib/pkgconfig-staged/$(basename "$f")"
+        grep -q "^prefix = $icu\$" "$icu/lib/pkgconfig-staged/$(basename "$f")" \
+            || { echo "==> harfbuzz: $f has no 'prefix = /' line to rewrite" >&2; exit 1; }
+    done
+    meson_lib harfbuzz "$HB_TARBALL" "$HB_SHA256" "harfbuzz-$HB_VER" \
+        --pc "$BUILD_DIR/pouch/freetype-nohb/stage/lib/pkgconfig" \
+        --pc "$BUILD_DIR/pouch/libpng/stage/lib/pkgconfig" \
+        --pc "$icu/lib/pkgconfig-staged" \
+        -Dfreetype=enabled -Dicu=enabled -Dglib=disabled -Dgobject=disabled \
+        -Dcairo=disabled -Dchafa=disabled -Ddocs=disabled -Dintrospection=disabled \
+        -Dtests=enabled
+}
+
+# The FreeType the browser links, and the one whose tests run (harfbuzz.pc
+# requires freetype2, which the first pass provides). issue-1063's font goes
+# into tests/data, checked by its own digest as well as the zip's.
+build_freetype() {
+    build_harfbuzz
+    meson_lib freetype "$FT_TARBALL" "$FT_SHA256" "freetype-$FT_VER" \
+        --pc "$BUILD_DIR/pouch/libpng/stage/lib/pkgconfig" \
+        --pc "$BUILD_DIR/pouch/harfbuzz/stage/lib/pkgconfig" \
+        --pc "$BUILD_DIR/pouch/freetype-nohb/stage/lib/pkgconfig" \
+        "${FT_OPTIONS[@]}" -Dharfbuzz=enabled -Dtests=enabled
+    local data="$BUILD_DIR/pouch/freetype/src/freetype-$FT_VER/tests/data"
+    local ttf="$data/As.I.Lay.Dying.ttf" zip="$BUILD_DIR/cache/$FTFONT_ZIP" have
+    if [[ "$(shasum -a 256 "$ttf" 2>/dev/null | awk '{print $1}')" != "$FTFONT_TTF_SHA256" ]]; then
+        [[ -f "$zip" ]] \
+            || { echo "==> freetype: $zip is absent -- run 'tools/forage.sh cache.ftfont'" >&2; exit 1; }
+        have="$(shasum -a 256 "$zip" | awk '{print $1}')"
+        [[ "$have" == "$FTFONT_SHA256" ]] \
+            || { echo "==> freetype: $FTFONT_ZIP sha256 mismatch (got $have, want $FTFONT_SHA256)" >&2; exit 1; }
+        unzip -p "$zip" "As I Lay Dying.ttf" > "$ttf.tmp" \
+            || { echo "==> freetype: $FTFONT_ZIP holds no 'As I Lay Dying.ttf'" >&2; exit 1; }
+        have="$(shasum -a 256 "$ttf.tmp" | awk '{print $1}')"
+        [[ "$have" == "$FTFONT_TTF_SHA256" ]] \
+            || { echo "==> freetype: the font in $FTFONT_ZIP has sha256 $have, not $FTFONT_TTF_SHA256" >&2; exit 1; }
+        mv "$ttf.tmp" "$ttf"
+    fi
+}
+
+# fontconfig, against the FreeType the browser links and libxml2
+# (dec-2026-10-14-b3-fontconfig-port). It compiles in its config, cache and
+# template directories from its prefix, so it is built for /usr on the device
+# (meson then puts sysconfdir at /etc) and installed under the stage. The
+# layout is upstream's (dec-2026-10-21-fontconfig-layout-dejavu): /etc/fonts,
+# /usr/share/fontconfig/conf.avail, /usr/share/xml/fontconfig. Its one font
+# directory is /lib/font, and none of this host's X11 directories is probed.
+# The system cache directory it installs (/var/cache/fontconfig) is never
+# staged, so it caches in the user's own directory
+# (dec-2026-10-21-no-system-font-cache). NLS, iconv and the docs are off;
+# gperf and python3 run on the host. cache-build would run the cross-built
+# fc-cache at install.
+build_fontconfig() {
+    build_freetype
+    build_libxml2
+    meson_lib fontconfig "$FC_TARBALL" "$FC_SHA256" "fontconfig-$FC_VER" \
+        --pc "$BUILD_DIR/pouch/freetype/stage/lib/pkgconfig" \
+        --pc "$BUILD_DIR/pouch/harfbuzz/stage/lib/pkgconfig" \
+        --pc "$BUILD_DIR/pouch/libpng/stage/lib/pkgconfig" \
+        --pc "$BUILD_DIR/pouch/libxml2/stage/lib/pkgconfig" \
+        --prefix /usr \
+        -Dxml-backend=libxml2 -Dnls=disabled -Ddoc=disabled -Diconv=disabled \
+        -Dtests=enabled -Dtests-external-fonts=disabled -Dtests-bwrap=disabled \
+        -Dcache-build=disabled -Dtools=enabled -Dfontations=disabled \
+        -Ddefault-fonts-dirs=/lib/font -Dadditional-fonts-dirs=no
+}
+
+build_lib_tests() {
+    # Boosty B-3 (dec-2026-10-14-b3-test-bar): each browser library's compiled
+    # upstream test programs, cross-built against the same static archives the
+    # browser links, staged with the data they read for the pool's /var
+    # (tools/interactive/ls-libs.exp runs them). Under build/pouch/ ON PURPOSE:
+    # a sysroot rebuild wipes it, as it must every binary linked to the old libc.
+    # Each half stages its own part of the stage and leaves the other's alone.
+    lib_tests_icu
+    lib_tests_muster
+}
+
+lib_tests_icu() {
+    # ICU (B-3c): cintltst and intltest. QNX_TARGET=1 is upstream's switch for
+    # a target whose tree is not the build host's: it compiles the data root in
+    # as /var/icu_tests (source and build trees merged there), with no patch.
+    # iotest needs icuio, which this ICU is built without.
+    build_icu
+    local base="$BUILD_DIR/pouch/icu"
+    local src="$base/src/icu/source" cross="$base/cross"
+    # build_icu skips, announced, without the LLVM fork; the chunk asked for
+    # these tests by name, so that is an error here.
+    [[ -f "$base/stage/lib/libicuuc.a" ]] \
+        || { echo "==> lib tests: ICU is not built (see above) -- CHUNK_LIBTESTS needs it" >&2; exit 1; }
+    local out="$BUILD_DIR/pouch/lib-tests"
+    local stage="$out/stage"
+    local icu_root="$stage/var/icu_tests"
+    local jobs; jobs="$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)"
+
+    if [[ -x "$icu_root/bin/intltest" && -x "$icu_root/bin/cintltst" \
+          && ! "$base/stage/lib/libicuuc.a" -nt "$icu_root/bin/intltest" ]]; then
+        ledger "lib tests: REUSED (ICU's tests newer than its archives)"
+        return 0
+    fi
+    echo "==> building the library tests (ICU $ICU_VER: testdata, cintltst, intltest)"
+    rm -rf "$stage/var/icu_tests" "$stage/var/testdata"; mkdir -p "$icu_root/bin" "$icu_root/test" "$icu_root/data/out" "$stage/var/testdata"
+    local t
+    for t in test/testdata test/cintltst test/intltest; do
+        make -C "$cross/$t" -j"$jobs" QNX_TARGET=1 > "$out/${t//\//-}.log" 2>&1 \
+            || { echo "==> lib tests: ICU $t failed -- see $out/${t//\//-}.log" >&2; exit 1; }
+    done
+    # Stripped into the pool (the unstripped pair stays in $cross for addr2line).
+    for t in cintltst intltest; do
+        "$LLVM_PREFIX/bin/llvm-strip" -o "$icu_root/bin/$t" "$cross/test/$t/$t" \
+            || { echo "==> lib tests: llvm-strip $t failed" >&2; exit 1; }
+    done
+    # The source test data, with the build's out/ (the testdata package) merged in.
+    cp -R "$src/test/testdata" "$icu_root/test/testdata"
+    cp -R "$cross/test/testdata/out" "$icu_root/test/testdata/out"
+    # The Unicode data files and StringPrep profiles the tests parse; the rest of
+    # source/data is the prebuilt archive the build already consumed.
+    cp -R "$src/data/unidata" "$src/data/sprep" "$icu_root/data/"
+    # The unpacked common data (ICU_DATA for cintltst's by-path opens).
+    cp -R "$cross/data/out/build" "$icu_root/data/out/build"
+    cp -R "$src/../testdata/message2" "$stage/var/testdata/message2"
+    echo "    lib tests: $(du -sh "$stage" | cut -f1) staged at $stage"
+    ledger "lib tests: BUILT (ICU cintltst + intltest + data)"
+}
+
+# --- build_lib_tests, muster half (B-3d codecs, B-3e libxml2). Called after
+# the ICU half, which must neither return early past it nor rm -rf the whole
+# stage. Writes `writable`, the device directories the tests write into, which
+# the runner layers a directory of its own over (ls-libs.exp). ---
+lib_tests_muster() {
+    build_libwebp           # libpng and libjpeg-turbo first
+    build_libxml2
+    build_fontconfig        # FreeType, HarfBuzz and FreeType's first pass first
+    local meson; meson="$(meson_tool)" || exit 1
+    local out="$BUILD_DIR/pouch/lib-tests"
+    local stage="$out/stage"
+    local lt="$stage/var/lib_tests"
+    local muster="$USR_RS_BUILD/$USR_RS_TARGET/release/muster"
+    [[ -x "$muster" ]] \
+        || { echo "==> lib tests: $muster is not built (the Rust workspace; rustup target $USR_RS_TARGET)" >&2; exit 1; }
+    rm -rf "$lt"; mkdir -p "$lt/bin"
+    "$LLVM_PREFIX/bin/llvm-strip" -o "$lt/bin/muster" "$muster" \
+        || { echo "==> lib tests: llvm-strip muster failed" >&2; exit 1; }
+    # The manifest tool decides which tests the device cannot run: its rule is
+    # checked before it is trusted.
+    python3 "$REPO_ROOT/tools/test-libtests-manifest.py" > /dev/null \
+        || { echo "==> lib tests: tools/test-libtests-manifest.py failed" >&2; exit 1; }
+    local lib lbase top dev json kind host devp d
+    local -a extra skips
+    : > "$out/writable"
+    for lib in libpng libjpeg-turbo libwebp libxml2 freetype harfbuzz fontconfig; do
+        lbase="$BUILD_DIR/pouch/$lib"
+        top="$(basename "$(find "$lbase/src" -mindepth 1 -maxdepth 1 -type d)")"
+        dev="/var/lib_tests/$lib"
+        json="$out/$lib.ctest.json"
+        extra=()
+        case "$lib" in
+            libpng)   extra=( --png-template "$lbase/src/$top/scripts/cmake/test.cmake.in" ) ;;
+        esac
+        # HarfBuzz's Python tests check its source tree and NEWS on the build
+        # host; dec-2026-10-14-b3-test-bar skips them by name. (A cross build
+        # registers no check-symbols, check-static-inits or check-libstdc++:
+        # src/meson.build wants the build host's own tools for those.)
+        skips=()
+        [[ "$lib" == harfbuzz ]] && skips=( --skip check-c-linkage-decls --skip check-externs
+            --skip check-header-guards --skip check-includes --skip check-release-notes )
+        if [[ "$lib" == freetype || "$lib" == harfbuzz || "$lib" == fontconfig ]]; then
+            # What `meson test` builds before it runs (mtest.py rebuild_deps):
+            # a target only a test depends on -- issue-1441's two fonts -- is
+            # outside `all`, which is all meson_lib builds.
+            ninja -C "$lbase/build" meson-test-prereq > "$out/$lib.prereq.log" 2>&1 \
+                || { echo "==> lib tests: $lib's test prerequisites did not build -- see $out/$lib.prereq.log" >&2; tail -20 "$out/$lib.prereq.log" >&2; exit 1; }
+            json="$out/$lib.meson.json"
+            python3 "$meson" introspect --tests "$lbase/build" > "$json" \
+                || { echo "==> lib tests: meson could not list $lib's tests" >&2; exit 1; }
+            # fontconfig registers its pytest suite only on a build host that
+            # has pytest (test/meson.build); dec-2026-10-14-b3-test-bar skips it.
+            if [[ "$lib" == fontconfig ]] && python3 -c 'import json, sys; sys.exit(0 if any(t["name"] == "pytest" for t in json.load(open(sys.argv[1]))) else 1)' "$json"; then
+                skips+=( --skip pytest )
+            fi
+            # test-d1f48f11 builds its fixture with symlink(), which this
+            # system does not provide; its subject runs on every config load
+            # through /etc/fonts/conf.d's links (ls-libs.exp checks them).
+            [[ "$lib" == fontconfig ]] && skips+=( --not-run "test_d1f48f11=its fixture needs symlink(), which is ENOSYS (dec-2026-10-20-native-lstat-readlink); listed as not run by dec-2026-10-21-d1f48f11-not-run" )
+            extra=( --meson "$json" --meson-build "$lbase/build" --meson-source "$lbase/src/$top" )
+        elif [[ "$lib" == libwebp ]]; then
+            sed -e "s|@BUILD@|$lbase/build|g" -e "s|@SRC@|$lbase/src/$top|g" \
+                "$REPO_ROOT/tools/libtests-webp.json" > "$json"
+        else
+            ( cd "$lbase/build" && ctest --show-only=json-v1 ) > "$json" \
+                || { echo "==> lib tests: ctest could not list $lib's tests" >&2; exit 1; }
+        fi
+        # The build and source trees map side by side, so a path one test
+        # names relative to its directory resolves the same on the device.
+        [[ "${extra[0]:-}" == --meson ]] || extra=( --json "$json" ${extra[@]+"${extra[@]}"} )
+        python3 "$REPO_ROOT/tools/libtests-manifest.py" --lib "$lib" \
+            --map "$lbase/build=$dev/build" --map "$lbase/src=$dev/src" \
+            --logs "/tmp/muster-$lib" ${extra[@]+"${extra[@]}"} ${skips[@]+"${skips[@]}"} \
+            --out "$lt/$lib.manifest" --stage "$out/$lib.stage" \
+            || { echo "==> lib tests: $lib's test list cannot run on the device (see above)" >&2; exit 1; }
+        while read -r kind host devp; do
+            mkdir -p "$stage$(dirname "$devp")"
+            case "$kind" in
+                exe)  "$LLVM_PREFIX/bin/llvm-strip" -o "$stage$devp" "$host" \
+                          || { echo "==> lib tests: llvm-strip $host failed" >&2; exit 1; } ;;
+                file) cp "$host" "$stage$devp" ;;
+                # A tar pipe merges: `cp -R dir existing-dir` would nest.
+                tree) mkdir -p "$stage$devp"
+                      ( cd "$host" && tar -cf - . ) | ( cd "$stage$devp" && tar -xf - ) \
+                          || { echo "==> lib tests: $host did not stage" >&2; exit 1; } ;;
+                *)    echo "==> lib tests: $out/$lib.stage: unknown kind $kind" >&2; exit 1 ;;
+            esac
+        done < "$out/$lib.stage"
+        # The tests write their outputs into their build tree.
+        mkdir -p "$stage$dev/build"
+        echo "$dev/build" >> "$out/writable"
+        if [[ "$lib" == libxml2 ]]; then
+            # runtest, runsuite and runxmlconf walk these trees rather than
+            # naming their files, and the last two write their logs at the
+            # source top (not the tarball's stale runsuite.log, which the
+            # logged-in user could not replace).
+            # Merged by tar: the stage list already put some of these files
+            # there, and `cp -R dir existing-dir` nests rather than merges.
+            mkdir -p "$stage$dev/src/$top"
+            for d in test result xmlconf; do
+                ( cd "$lbase/src/$top" && tar -cf - "$d" ) | ( cd "$stage$dev/src/$top" && tar -xf - ) \
+                    || { echo "==> lib tests: $lib's $d/ did not stage" >&2; exit 1; }
+            done
+            echo "$dev/src/$top" >> "$out/writable"
+            # runtest names each output --out plus the input's base name with
+            # nothing between them (runtest.c resultFilename), and CTest passes
+            # the build tree with no trailing slash, so the outputs land beside
+            # build/, as build<name>.res.
+            echo "$dev" >> "$out/writable"
+        fi
+        if [[ "$lib" == fontconfig ]]; then
+            # test-bz89617 and test-bz106632 read 4x6.pcf by a path compiled
+            # in, relative to the build tree (the port's 0001), which the test
+            # list does not carry.
+            mkdir -p "$stage$dev/src/$top/test"
+            cp "$lbase/src/$top/test/4x6.pcf" "$stage$dev/src/$top/test/4x6.pcf" \
+                || { echo "==> lib tests: $lib's test/4x6.pcf did not stage" >&2; exit 1; }
+        fi
+        if [[ "$lib" == harfbuzz ]]; then
+            # The thread tests read fonts and texts their source names
+            # (test/threads/*.cc default_tests), run from the source top.
+            for d in perf/fonts perf/texts test/subset/data/fonts; do
+                mkdir -p "$stage$dev/src/$top/$d"
+                ( cd "$lbase/src/$top/$d" && tar -cf - . ) | ( cd "$stage$dev/src/$top/$d" && tar -xf - ) \
+                    || { echo "==> lib tests: $lib's $d/ did not stage" >&2; exit 1; }
+            done
+        fi
+        grep -c '^test ' "$lt/$lib.manifest" > "$out/$lib.count"
+    done
+    ledger "lib tests: muster lists STAGED (libpng $(cat "$out/libpng.count"), libjpeg-turbo $(cat "$out/libjpeg-turbo.count"), libwebp $(cat "$out/libwebp.count"), libxml2 $(cat "$out/libxml2.count"), freetype $(cat "$out/freetype.count"), harfbuzz $(cat "$out/harfbuzz.count"), fontconfig $(cat "$out/fontconfig.count") tests)"
+    stage_font_runtime
+}
+
+# --- B-3g: what fontconfig reads on the device, from its install under its
+# stage (prefix /usr): /etc/fonts (conf.d's relative links into conf.avail
+# stay links), /usr/share/fontconfig/conf.avail, the DTD, the tools in
+# /usr/bin, and /lib/font. Never var/: the system cache directory stays unmade
+# (dec-2026-10-21-no-system-font-cache). /lib/font holds the vendored DejaVu
+# Sans Condensed and IBM Plex Sans faces, and DejaVu Sans, Serif and Sans Mono
+# from the pinned DejaVu release (dec-2026-10-21-fontconfig-layout-dejavu),
+# which must be the one the vendored faces came from: they are compared first.
+# Each family's licence goes beside its faces (DejaVu's is also in every
+# face's name table; Plex's only by reference). Writes fonts.count and
+# confd.count, which ls-libs.exp checks fc-list and fc-conflist against; each
+# set is derived from its sources and the stage must match it name for name,
+# so a stage that lost or gained an entry cannot agree with itself. Baked only
+# with the library tests, while they are its one consumer. ---
+stage_font_runtime() {
+    local fc="$BUILD_DIR/pouch/fontconfig/stage"
+    local out="$BUILD_DIR/pouch/lib-tests"
+    local stage="$out/stage"
+    local file="$BUILD_DIR/cache/$DEJAVU_TARBALL" dv="$BUILD_DIR/pouch/dejavu" have f
+    local ttf="$dv/dejavu-fonts-ttf-$DEJAVU_VER/ttf"
+    local -a faces=( DejaVuSans DejaVuSans-Bold DejaVuSans-Oblique DejaVuSans-BoldOblique
+                     DejaVuSerif DejaVuSerif-Bold DejaVuSerif-Italic DejaVuSerif-BoldItalic
+                     DejaVuSansMono DejaVuSansMono-Bold DejaVuSansMono-Oblique DejaVuSansMono-BoldOblique )
+    [[ -f "$file" ]] \
+        || { echo "==> fonts: $file is absent -- run 'tools/forage.sh cache.dejavu'" >&2; exit 1; }
+    have="$(shasum -a 256 "$file" | awk '{print $1}')"
+    [[ "$have" == "$DEJAVU_SHA256" ]] \
+        || { echo "==> fonts: $DEJAVU_TARBALL sha256 mismatch (got $have, want $DEJAVU_SHA256)" >&2; exit 1; }
+    rm -rf "$dv"; mkdir -p "$dv"
+    tar -xjf "$file" -C "$dv" \
+        || { echo "==> fonts: $DEJAVU_TARBALL did not unpack" >&2; exit 1; }
+    for f in "$REPO_ROOT/third_party/dejavu-fonts/ttf"/*.ttf; do
+        cmp -s "$f" "$ttf/$(basename "$f")" \
+            || { echo "==> fonts: third_party/dejavu-fonts/ttf/$(basename "$f") is not DejaVu $DEJAVU_VER's" >&2; exit 1; }
+    done
+    for f in etc/fonts/fonts.conf usr/bin/fc-match usr/share/xml/fontconfig/fonts.dtd; do
+        [[ -f "$fc/$f" ]] || { echo "==> fonts: fontconfig's install has no $f" >&2; exit 1; }
+    done
+    for f in dejavu-fonts ibm-plex; do
+        compgen -G "$REPO_ROOT/third_party/$f/ttf/*.ttf" > /dev/null \
+            || { echo "==> fonts: third_party/$f/ttf holds no face" >&2; exit 1; }
+    done
+    local want_faces want_confd meson
+    want_faces="$( { for f in "$REPO_ROOT/third_party/dejavu-fonts/ttf"/*.ttf "$REPO_ROOT/third_party/ibm-plex/ttf"/*.ttf; do
+                         basename "$f"; done; printf '%s.ttf\n' "${faces[@]}"; } | LC_ALL=C sort -u)"
+    # conf.d's links as fontconfig's own build lists them: conf.d/meson.build's
+    # conf_links, plus the link each of three options and a darwin host adds.
+    meson="$(meson_tool)" || exit 1
+    python3 "$meson" introspect --buildoptions --machines "$BUILD_DIR/pouch/fontconfig/build" > "$BUILD_DIR/pouch/fontconfig/introspect.json" \
+        || { echo "==> fonts: meson introspect of fontconfig's build failed" >&2; exit 1; }
+    want_confd="$(python3 - "$BUILD_DIR/pouch/fontconfig/src/fontconfig-$FC_VER/conf.d/meson.build" "$BUILD_DIR/pouch/fontconfig/introspect.json" <<'PY'
+import json, re, sys
+m = re.search(r"^conf_links = \[\n(.*?)^\]", open(sys.argv[1]).read(), re.M | re.S)
+if not m:
+    sys.exit("==> fonts: " + sys.argv[1] + " has no conf_links list")
+links = []
+for line in m.group(1).split("\n"):
+    entry = line.split("#", 1)[0].strip()
+    if not entry:
+        continue
+    e = re.fullmatch(r"""(['"])([^'"]+\.conf)\1,?""", entry)
+    if not e:
+        sys.exit("==> fonts: conf_links holds a line this reader cannot parse: " + line.strip())
+    links.append(e.group(2))
+if not links:
+    sys.exit("==> fonts: " + sys.argv[1] + "'s conf_links list is empty")
+intro = json.load(open(sys.argv[2]))
+opt = {o["name"]: o["value"] for o in intro["buildoptions"]}
+if intro["machines"]["host"]["system"] == "darwin":
+    links.append("05-macos.conf")
+for name, fmt in (("default-hinting", "10-hinting-{}.conf"),
+                  ("default-sub-pixel-rendering", "10-sub-pixel-{}.conf")):
+    if opt[name] != "noinstall":
+        links.append(fmt.format(opt[name]))
+bitmap = {"yes": "yes-bitmaps", "no": "no-bitmaps-and-emoji",
+          "no-except-emoji": "no-bitmaps-except-emoji"}
+if opt["bitmap-conf"] in bitmap:
+    links.append("70-" + bitmap[opt["bitmap-conf"]] + ".conf")
+print("\n".join(sorted(set(links))))
+PY
+)" || exit 1
+
+    rm -rf "$stage/etc" "$stage/usr" "$stage/lib"
+    mkdir -p "$stage/etc" "$stage/usr/share/xml" "$stage/usr/bin" "$stage/lib/font"
+    ( cd "$fc/etc" && tar -cf - fonts ) | ( cd "$stage/etc" && tar -xf - ) \
+        || { echo "==> fonts: /etc/fonts did not stage" >&2; exit 1; }
+    ( cd "$fc/usr/share" && tar -cf - fontconfig ) | ( cd "$stage/usr/share" && tar -xf - ) \
+        || { echo "==> fonts: /usr/share/fontconfig did not stage" >&2; exit 1; }
+    ( cd "$fc/usr/share/xml" && tar -cf - fontconfig ) | ( cd "$stage/usr/share/xml" && tar -xf - ) \
+        || { echo "==> fonts: /usr/share/xml/fontconfig did not stage" >&2; exit 1; }
+    for f in "$fc/usr/bin"/fc-*; do
+        "$LLVM_PREFIX/bin/llvm-strip" -o "$stage/usr/bin/$(basename "$f")" "$f" \
+            || { echo "==> fonts: llvm-strip $f failed" >&2; exit 1; }
+    done
+    cp "$REPO_ROOT/third_party/dejavu-fonts/ttf"/*.ttf "$REPO_ROOT/third_party/ibm-plex/ttf"/*.ttf "$stage/lib/font/" \
+        || { echo "==> fonts: the vendored faces did not stage" >&2; exit 1; }
+    for f in "${faces[@]}"; do
+        cp "$ttf/$f.ttf" "$stage/lib/font/" \
+            || { echo "==> fonts: DejaVu $DEJAVU_VER has no ttf/$f.ttf" >&2; exit 1; }
+    done
+    cp "$REPO_ROOT/third_party/dejavu-fonts/LICENSE" "$stage/lib/font/DejaVu-LICENSE.txt" \
+        && cp "$REPO_ROOT/third_party/ibm-plex/OFL.txt" "$stage/lib/font/IBMPlex-OFL.txt" \
+        || { echo "==> fonts: the licences did not stage" >&2; exit 1; }
+
+    # conf.d's links name conf.avail relative to /etc/fonts/conf.d, so the
+    # same text resolves on the device; each one must resolve here too.
+    local n=0
+    for f in "$stage/etc/fonts/conf.d"/*.conf; do
+        [[ -e "$f" || -L "$f" ]] || continue
+        [[ -L "$f" && "$(readlink "$f")" == ../../../usr/share/fontconfig/conf.avail/* && -f "$f" ]] \
+            || { echo "==> fonts: $f is not a link into /usr/share/fontconfig/conf.avail" >&2; exit 1; }
+        n=$((n + 1))
+    done
+    [[ "$(cd "$stage/etc/fonts/conf.d" && ls | grep '\.conf$' | LC_ALL=C sort)" == "$want_confd" ]] \
+        || { echo "==> fonts: /etc/fonts/conf.d is not the $(wc -l <<< "$want_confd" | tr -d ' ') links fontconfig $FC_VER's build lists" >&2; exit 1; }
+    [[ "$(cd "$stage/lib/font" && ls | grep '\.ttf$' | LC_ALL=C sort)" == "$want_faces" ]] \
+        || { echo "==> fonts: /lib/font is not the $(wc -l <<< "$want_faces" | tr -d ' ') faces the sources name" >&2; exit 1; }
+    echo "$n" > "$out/confd.count"
+    wc -l <<< "$want_faces" | tr -d ' ' > "$out/fonts.count"
+    ledger "fonts: fontconfig $FC_VER's config, $(ls "$stage/usr/bin" | wc -l | tr -d ' ') tools and $(cat "$out/fonts.count") faces STAGED ($n conf.d links)"
 }
 
 # The tree the pin plus the patch series builds, applied IN ORDER in a scratch
@@ -7705,6 +8710,74 @@ python3 "$REPO_ROOT/tools/check-prot-mirror.py" --expect-unmirrored 5 \
          echo "    userspace mirror disagree, or a new kernel bit has no mirror" >&2
          exit 1; }
 
+# The host boundary checkers: each tools/test-<name>.py compiles the code it
+# names from this tree, tools/host-tests/<name>.c beside it with mocked owners,
+# and runs it under ASan and UBSan at -O0 and -O2; the native ones also pin
+# the syscall numbers in every mirror and the phenotype's collision asserts.
+# Nothing ran them until 2026-10-19, so a renumbered mirror could drift with
+# every build green. Runs the named drivers in parallel, each into a fresh
+# <root>/<name>; --musl hands the Pouch drivers the patched musl tree. The
+# mutant legs, which prove each checker still refuses its defect, run in
+# tools/test-host-boundaries.sh.
+host_boundary_check() {
+    local root="$1"; shift
+    local musl=""
+    if [[ "${1:-}" == --musl ]]; then musl="$2"; shift 2; fi
+    (( $# )) || { echo "==> host boundary check: no checker named for $root" >&2; return 1; }
+    rm -rf "$root"; mkdir -p "$root"
+    local name i rc=0 pids=() names=()
+    for name in "$@"; do
+        if [[ -n "$musl" ]]; then
+            python3 "$REPO_ROOT/tools/test-$name.py" "$musl" "$root/$name" \
+                --cc "$LLVM_PREFIX/bin/clang" > "$root/$name.log" 2>&1 &
+        else
+            python3 "$REPO_ROOT/tools/test-$name.py" "$root/$name" \
+                --cc "$LLVM_PREFIX/bin/clang" > "$root/$name.log" 2>&1 &
+        fi
+        pids+=("$!"); names+=("$name")
+    done
+    for i in "${!pids[@]}"; do
+        if ! wait "${pids[$i]}"; then
+            echo "==> host boundary check FAILED: tools/test-${names[$i]}.py" >&2
+            echo "    (log: $root/${names[$i]}.log)" >&2
+            tail -n 20 "$root/${names[$i]}.log" >&2
+            rc=1
+        fi
+    done
+    return "$rc"
+}
+
+# The checkers are derived as tools/test-host-boundaries.sh derives them: every
+# tools/host-tests/<name>.c, with its driver, and the ones whose usage names a
+# musl tree are Pouch's. A hand list of names here could miss a new checker
+# with every build green.
+HOST_BOUNDARY_NATIVE=() HOST_BOUNDARY_POUCH=()
+host_boundary_sets() {
+    local src name usage
+    for src in "$REPO_ROOT"/tools/host-tests/*.c; do
+        name="$(basename "$src" .c)"
+        [[ -f "$REPO_ROOT/tools/test-$name.py" ]] \
+            || { echo "==> host boundary: tools/host-tests/$name.c has no driver tools/test-$name.py" >&2; return 1; }
+        usage="$(COLUMNS=10000 python3 "$REPO_ROOT/tools/test-$name.py" --help)" \
+            || { echo "==> host boundary: tools/test-$name.py --help failed" >&2; return 1; }
+        usage="${usage%%$'\n'*}"
+        if [[ " $usage " == *" musl "* ]]; then
+            HOST_BOUNDARY_POUCH+=("$name")
+        else
+            HOST_BOUNDARY_NATIVE+=("$name")
+        fi
+    done
+}
+
+# The native checkers need only this tree, so they run before any target. The
+# Pouch ones need the patched musl tree, so build_sysroot runs them. Fatal, no
+# skip switch.
+if [[ "$target" != clean ]]; then
+    host_boundary_sets || exit 1
+    host_boundary_check "$BUILD_DIR/host-boundaries/native" \
+        ${HOST_BOUNDARY_NATIVE[@]+"${HOST_BOUNDARY_NATIVE[@]}"} || exit 1
+fi
+
 case "$target" in
     kernel)      build_kernel      ;;
     ramfs)       build_ramfs       ;;
@@ -7718,6 +8791,10 @@ case "$target" in
     gnumake)     build_gnumake     ;;
     libcxx)      build_libcxx      ;;
     icu)         build_icu         ;;
+    lib-tests)   build_lib_tests   ;;
+    codecs)      build_libwebp     ;;
+    libxml2)     build_libxml2     ;;
+    fonts)       build_fontconfig  ;;
     jsc)         build_jsc         ;;
     quake-host)  build_quake_host  ;;
     clade)       build_clade       ;;
@@ -7743,7 +8820,7 @@ case "$target" in
     clean)       clean             ;;
     *)
         echo "Unknown target: $target" >&2
-        echo "Valid: kernel, ramfs, sysroot, pouch-progs, rust-progs, sdl2, tyrquake, vkquake, dosbox-x, gnumake, libcxx, icu, jsc, stratumd, userspace, disk, pool, go-probes, all, clean" >&2
+        echo "Valid: kernel, ramfs, sysroot, pouch-progs, rust-progs, sdl2, tyrquake, vkquake, dosbox-x, gnumake, libcxx, icu, lib-tests, codecs, libxml2, fonts, jsc, stratumd, userspace, disk, pool, go-probes, all, clean" >&2
         exit 1
         ;;
 esac

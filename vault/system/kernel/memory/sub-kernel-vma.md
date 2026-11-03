@@ -3,7 +3,7 @@ id: sub-kernel-vma
 type: sub
 parent: moc-kernel-memory
 title: "VMAs — the per-Proc address-space description, and where W^X is actually decided"
-code: [kernel/vma.c, kernel/include/thylacine/vma.h]
+code: [kernel/vma.c, kernel/include/thylacine/vma.h, kernel/test/test_anon_merge.c]
 audit: hard
 guarded-by: [inv-i12, inv-i7, inv-i32, inv-i44]
 validated-by: [spec-cow, spec-capacity, prose, gate-smp]
@@ -600,7 +600,12 @@ the latter ([[sub-kernel-protect-witness]]).
 
 - The header's stale lock commentary (task #60) is documentation, but it is the
   documentation a future multi-thread change would be read against.
-- An interval tree, if a workload ever puts enough VMAs on one Proc to matter.
+- An index over the list: a balanced tree keyed by `vaddr_start` with a
+  max-gap annotation, so a fault's lookup and a reservation's first-fit are
+  both O(log n) (OPEN-BUGS 19:56Z, scheduled after B-3). libxml2's 65536
+  one-page heap groups showed the list's cost before the merge removed most
+  of them; a mapping-heavy workload (guard pages, a JIT's protect ladder,
+  many files) still walks it.
 - A sealed piece can never merge back into an unsealed neighbour (the merge
   compares `flags` whole), so a protect-then-seal ladder leaves permanent
   pieces; the range detach removes them in one call but does not merge them.
@@ -797,6 +802,81 @@ interior to ANOTHER space's list reads linked, because only the head clause
 consults the space. So a caller names the space it found the VMA in, never a
 Proc's current one: the audit of this guard found the weft reaper doing the
 latter across an exec swap ([[sub-kernel-weft]]).
+
+## Adjacent anonymous mappings merge (2026-10-19, B-3e vote 2)
+
+A Pouch heap topped out near 256 MiB: mallocng maps each small-object group
+as its own one-page reservation, every reservation was one VMA, and the
+address space's cap is `PROC_VMA_MAX` (65536); libxml2's `testHugePush` met it
+at exactly 65536 on the device. The operator's vote (2026-10-18,
+[[dec-2026-10-18-anon-mapping-merge]]; ARCH 6.5) is FreeBSD's
+`vm_object_coalesce` over the Plan 9 object: a fresh lazy reservation that
+abuts a qualifying mapping EXTENDS that mapping's Burrow instead of minting a
+Burrow and a VMA. Placement does not change (the same first-fit gap); only
+the representation does.
+
+`vma_extend_anon_in(as, exempt, vaddr, length, prot, win_lo, win_hi)` runs
+under `as->lock` after the caller placed the range
+([[sub-kernel-syscall-dispatch]]'s `lazy_reserve_core`, the one core of
+`SYS_BURROW_RESERVE`, the phenotype's anonymous `mmap` and
+`SYS_BURROW_ATTACH_LAZY`). A neighbour qualifies (`extend_admits`) only if a
+reservation could have made it: an `ANON_LAZY` Burrow, the same `prot`, a
+flags word that is EXACTLY the RW ceiling -- no seal below it, no COW routing
+(a fork's mappings never extend), not shared in -- and wholly inside the
+window. The predecessor that ends at `vaddr` grows forward over the offsets
+after its own; the successor that starts at the range's end grows backward
+only into offset room it already has (`burrow_offset >= length`, left by a
+trim of its head), because growing a Burrow at its front would re-index every
+slot. Either way [[sub-kernel-burrow]]'s `burrow_lazy_extend` checks the slots
+and grows the pagemap first, and `reprotect_merge_in` then folds a hole
+refill: the piece on the other side, if it maps the same Burrow contiguously,
+joins. A refusal changes nothing, and the caller mints as before. A
+`MAP_FIXED` anonymous map (the loader's bss tails) is a replace at the
+caller's address and is never served by an extension; a later reservation the
+kernel places beside it may extend it, like any lazy mapping in the window.
+Both arms pass `burrow_lazy_extend` the Burrow's mappings in this space
+(`mappings_here`, one walk of the list under the same hold), which it holds
+against the Burrow's `mapping_count`: a Burrow another space maps is never
+extended (`anon_merge.another_space_is_never_extended`).
+
+What makes "the addresses are free" imply "no mapping covers those offsets" is
+the ONE BIAS rule: every mapping of an `ANON_LAZY` Burrow sits at one
+`va0 = vaddr_start - burrow_offset`. `vma_insert_in` stamps it when the
+Burrow's first mapping is linked and compares every later one
+(`burrow_lazy_bind_va0`). A split, a trim and a clone keep it and there is no
+mremap, so only a kernel caller that maps one lazy Burrow twice makes a
+second bias; that marks the Burrow `lazy_multi_bias`, and such a Burrow is
+never extended. The stamp is taken at the insert, not at `vma_alloc`: lease 4's
+first suite extincted in `burrow.map_fixed_refusals`, where a fixed map
+refused after its `vma_alloc` had stamped the bias of a mapping that never
+existed, and a later map of the same Burrow then read as a second bias (the
+first design extincted on one). Without the rule an extension could reuse an offset
+another mapping still covers: one physical page at two addresses, freed by one
+detach under the other's PTE ([[spec-capacity]]'s `NoAlias`, and its buggy cfg
+`capacity_buggy_extend_alias`).
+
+I-32: a merge charges no VMA, and a growth charges its nodes as a fault does.
+`PROC_VMA_MAX` now bounds distinct runs, as Linux's `max_map_count` does. The
+list is still O(n) per fault and per placement (OPEN-BUGS 19:56Z; the vote
+says enqueue it, not drop it).
+
+Tests (`kernel/test/test_anon_merge.c`): `pagemap.grow_keeps_every_page` and
+ten `anon_merge.*`. Two adjacent reserves share one mapping; 600 one-page
+reserves cross every pagemap shape (inline, inline to radix, one level to two)
+with each page's contents surviving every growth; a hole refill joins the
+pieces; a successor extends into its offset room; nothing merges across a
+seal, a COW-routed neighbour, an eager Burrow, the window's edge, or a Burrow a
+handle names; a refused growth falls back to a fresh mapping; a fork clones the
+merged Burrow; an exact unmap releases a lazy mapping's slots. Three older
+tests assumed that two neighbours with the same `prot` stay apart, and now
+give them different ones, which keeps what each tested:
+`protect.multi_vma_and_hole`, `protect.range_walk_is_linear`
+([[sub-kernel-protect-witness]]) and `capacity.fork_clone_charges_pages_and_nodes`
+([[sub-kernel-pagemap]]). `anon_merge.second_bias_is_never_extended` maps one
+lazy Burrow at two addresses and finds no merge, against the same layout
+mapped once, which merges; `anon_merge.another_space_is_never_extended` maps
+one into two address spaces at one address and finds no merge, against the
+same Burrow in one space, which merges.
 
 ## Referenced by
 

@@ -15,9 +15,10 @@
 // client, shared by every Proc/thread resolving through the mount via the #841
 // elected reader), keyed by the 9P `qid.path` (dataset<<32 | ino, session-unique).
 // A dedicated near-leaf lock protects it (never held across a blocking RPC -- the
-// #360 lock-across-sleep rule); it composes with, but is distinct from, c->lock,
-// and the two are never held together (an RPC that takes c->lock happens OUTSIDE
-// the Larder lock).
+// #360 lock-across-sleep rule); it composes with, but is distinct from, c->lock.
+// The order is c->lock -> l->lock: a forget runs under c->lock (9p_client.c), and
+// nothing takes them the other way (an RPC that takes c->lock happens OUTSIDE the
+// Larder lock).
 //
 // Coherence is close-to-open, keyed on the true content-version `cvers` (Stratum
 // `si_cvers`, surfaced as `qid.version` -- L1a). It maps to specs/fs_cache.tla:
@@ -167,16 +168,22 @@ struct larder_attr_ent {
                                //   type); attr_serve / fresh_size / a walk LEAF
                                //   reject it (their consumers read size/times/
                                //   cvers). Any full install clears it.
+    bool           gen_known;  // the fetch that installed this learned `gen`
     s32            hnext;      // hash chain: next slot in this key's bucket, -1 = end
+    u64            epoch;      // l->epoch at install: another value is an empty slot
+    u64            gen;        // the file's generation: which file this inode number
+                               //   names (cvers runs on across a reused number)
     struct t_stat  attr;       // cached metadata (mode/uid/gid/size/times/nlink/...)
 };
 
 // A cached name->child binding (the Plan 9 dentry). Keyed by (parent_qid_path,
 // name[0..name_len)). A NEGATIVE entry caches "name does not exist in parent"
 // (the failed-lookup-storm win). NO content-version field: a name-binding is a
-// PARENT-dirent fact, and Stratum surfaces no directory-content version that
-// tracks a dirent change (a child create/unlink does not bump the parent's
-// si_cvers -- verified src/fs/fs.c; only rename stamps the parent mtime), so the
+// PARENT-dirent fact, and the parent's si_cvers is no reliable dirent version.
+// Stratum stamps the parent's mtime and ctime on a child create or unlink, which
+// bumps its si_cvers, but only best-effort after the dirent is published (a
+// failed stamp leaves the version unmoved -- src/fs/fs.c
+// fs_stamp_parent_dir_locked), so the
 // dentry cache is NOT cvers-gated -- its sole coherence is own-write invalidation
 // (larder_dentry_invalidate_name on a create/rename/unlink -- the mutated name
 // only, siblings preserved; LARDER-DESIGN §4).
@@ -190,6 +197,7 @@ struct larder_dentry_ent {
     bool negative;          // true: (parent,name) -> ENOENT (no child)
     bool ref;               // CLOCK second-chance bit (set on serve/install)
     s32  hnext;             // hash chain: next slot in this key's bucket, -1 = end
+    u64  epoch;             // l->epoch at install: another value is an empty slot
     char name[LARDER_DENTRY_NAME_MAX];   // the component (NOT NUL-terminated)
 };
 
@@ -215,12 +223,17 @@ struct larder_page_ent {
                        // premise the wb asserts -- fs_cache.tla EnableFlushPopulate)
     s32  hnext;        // (qid_path,page_index) hash chain: next slot in this bucket, -1 = end
     s32  qnext;        // qid_path-only hash chain (page_qhash): O(pages-of-file) invalidate
+    u64  epoch;        // l->epoch at install: another value is an empty slot
     u8  *page;         // heap buffer (lazily kmalloc'd; reused; freed at larder_destroy)
 };
 
 struct larder {
     spin_lock_t               lock;       // dedicated near-leaf; never held across an RPC
     u64                       gen;        // monotonic invalidation sequence (populate guard)
+    u64                       epoch;      // moved by a forget: every older entry is gone.
+                                          //   64 bits: a forget costs one RTT, so 32 could
+                                          //   wrap in a day and revive a stale slot
+    u64                       forgets;    // diagnostics: larder_forget_all calls
     u64                       inval_qid[LARDER_INVAL_RING];  // G4: qid per event seq
                                           //   (slot = seq % RING; see the ring note above)
     u8                        inval_hard[LARDER_INVAL_RING]; // G2: 1 = a HARD event
@@ -320,7 +333,12 @@ bool larder_attr_fresh_size(struct larder *l, u64 qid_path, u32 cvers,
 // seq0 snapshot (the G4 qid-scoped gen guard; an over-wide window fail-safes to
 // skip). Otherwise skipped. `attr` is copied; a perm_only entry upgrades to full.
 void larder_attr_install(struct larder *l, u64 seq0, u64 qid_path,
-                         u32 cvers, const struct t_stat *attr);
+                         u32 cvers, const struct t_stat *attr, const u64 *gen);
+
+// The generation of the file the entry for `qid_path` names, as the fetch that
+// installed it learned it (`gen` above; NULL there forgets it, so an entry never
+// keeps a generation from before an overwrite). False with no such entry.
+bool larder_attr_gen(struct larder *l, u64 qid_path, u64 *gen_out);
 
 // Invalidate (OwnWrite). Drop `qid_path`'s cached entry (if present) and log the
 // invalidation event (always -- the file was mutated even if it was not cached,
@@ -462,6 +480,16 @@ void larder_page_install(struct larder *l, u64 seq0, u64 qid_path, u64 page_inde
 // file) and bump gen (always -- a concurrent populate that read the pre-write
 // content must be skipped). Slot buffers are retained for reuse.
 void larder_page_invalidate(struct larder *l, u64 qid_path);
+// Something on the server changed and the caller cannot say what: an op that
+// mutates lost its owner (9p_client.c), so nobody will invalidate for it and it
+// may land at any moment. Every entry goes, and no guarded fill now in flight
+// installs: the epoch moves, and gen jumps past the ring, so every window fails
+// safe. O(1), whatever the cache holds, because EL0 sets the rate. A file the op
+// never touched pays a re-read.
+void larder_forget_all(struct larder *l);
+// How many forgets this Larder has seen: a parked directory fid is stamped with
+// it, since a forget says nothing about which fids still name a live object.
+u64 larder_epoch(struct larder *l);
 // G1b (term-4): drop ONLY the file's pages whose page_index lies in
 // [first_idx, last_idx] -- the write-through discipline for a non-append
 // write of a known [offset, offset+len) range. Pages OUTSIDE the range keep

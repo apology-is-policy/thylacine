@@ -57,18 +57,49 @@ _Static_assert(VIV_LINUX_RT_SIGRETURN > VIV_NATIVE_CEILING,
 // the caller's own Proc, so nothing is exposed either way.
 _Static_assert(VIV_LINUX_RT_SIGQUEUEINFO == SYS_POSTNOTE_TID,
                "revisit rt_sigqueueinfo / POSTNOTE_TID collision on renumber");
-// rt_sigprocmask (135), rt_sigpending (136) and rt_sigtimedwait (137) meet NO
-// native number on this tree: main holds them for READLINK, LSTAT and FILE_LOCK,
-// and syscall.native_gap_unassigned pins that they are empty here. Each is
-// consumed before the native switch regardless (TIER2, ENOSYS, ENOSYS), and
-// vivarium.rejects_are_deliberate pins each verdict by name.
-// SYS_SRV_REGISTRY_NEW at 134 (vote 13) lifted the ceiling over the signal
-// family's 129..134, and the assert above, then keyed to kill, stopped the
-// build until each was argued on its own. viv_linux_dispatch consumes every
-// phenotyped number that is not TRANSLATED before the native switch, so a Linux
-// Proc reaches none of them; what each argument settles is a native program
-// mis-declared as Linux.
-//
+// Linux rt_sigtimedwait (137) collides with SYS_FILE_LOCK (votes 34-35). Its
+// row is VIV_ENOSYS, and viv_linux_dispatch returns before the native switch
+// for every row that is not TRANSLATED, so a Linux Proc never reaches the
+// native lock call -- test_vivarium pins the verdict. A native program
+// mis-declared as Linux loses its locks to ENOSYS, which takes nothing. A change
+// of the row to TRANSLATED must re-argue this.
+_Static_assert(VIV_LINUX_RT_SIGTIMEDWAIT == SYS_FILE_LOCK,
+               "revisit rt_sigtimedwait / FILE_LOCK collision on renumber");
+// Linux rt_sigprocmask (135) collides with SYS_READLINK, and rt_sigpending
+// (136) with SYS_LSTAT (vote 2026-10-20). rt_sigprocmask's row is VIV_TIER2
+// (vivarium_sigprocmask_decide and its shell) and rt_sigpending's VIV_ENOSYS;
+// viv_linux_dispatch returns before the native switch for every row that is
+// not TRANSLATED, so a Linux Proc reaches neither native call -- test_vivarium
+// pins both verdicts. A native program mis-declared as Linux loses both: its
+// readlink arrives as rt_sigprocmask with the path pointer as `how`, which the
+// decide FORWARDs unless it is 0, 1 or 2, and even then the shell reads and
+// writes only the caller's own mask and memory; its lstat arrives as
+// rt_sigpending, which is ENOSYS. A change of either row to TRANSLATED must
+// re-argue this.
+// Linux utimensat (88) collides with SYS_STAT (G12). Its row is VIV_TIER2 and
+// viv_linux_dispatch answers it in its own shell, so a Linux Proc never
+// reaches the native stat; a native program mis-declared as Linux loses it to
+// the damage-envelope argument beside VIV_LINUX_UTIMENSAT in vivarium.h.
+_Static_assert(VIV_LINUX_UTIMENSAT == SYS_STAT,
+               "revisit utimensat / STAT collision on renumber");
+_Static_assert(VIV_LINUX_RT_SIGPROCMASK == SYS_READLINK,
+               "revisit rt_sigprocmask / READLINK collision on renumber");
+_Static_assert(VIV_LINUX_RT_SIGPENDING == SYS_LSTAT,
+               "revisit rt_sigpending / LSTAT collision on renumber");
+// Linux rt_sigsuspend (133) collides with SYS_UMASK (M8). Its row is
+// VIV_ENOSYS and viv_linux_dispatch consumes every row that is not TRANSLATED
+// before the native switch, so a Linux Proc's rt_sigsuspend never sets its
+// creation mask; test_vivarium pins the ENOSYS verdict. Serving rt_sigsuspend
+// must re-argue this.
+_Static_assert(VIV_LINUX_RT_SIGSUSPEND == SYS_UMASK,
+               "revisit rt_sigsuspend / UMASK collision on renumber");
+// Linux sigaltstack (132) collides with SYS_GETPPID (vote 6). Its row is
+// VIV_ENOSYS and viv_linux_dispatch consumes every row that is not TRANSLATED
+// before the native switch, so a Linux Proc's sigaltstack never reads its
+// parent; test_vivarium pins the ENOSYS verdict, which the 6.23 escape
+// detector (notes.c) also leans on. Serving sigaltstack must re-argue both.
+_Static_assert(VIV_LINUX_SIGALTSTACK == SYS_GETPPID,
+               "revisit sigaltstack / GETPPID collision on renumber");
 // Linux restart_syscall (128) collides with SYS_ICACHE_SYNC_SPACE (B-2e2). The
 // row is VIV_ENOSYS (below), so a Linux Proc never reaches the sync; a native
 // program mis-declared as Linux loses it, and the sync takes no argument and
@@ -90,16 +121,20 @@ _Static_assert(VIV_LINUX_RESTART_SYSCALL == SYS_ICACHE_SYNC_SPACE,
 // that grants nothing to a Proc without the factory role.
 _Static_assert(VIV_LINUX_RT_SIGACTION == SYS_SRV_REGISTRY_NEW,
                "revisit rt_sigaction / SRV_REGISTRY_NEW collision on renumber");
-// kill (129), tkill (130), tgkill (131), sigaltstack (132) and rt_sigsuspend
-// (133) meet NO native number on this tree: 129..133 are held for b3's
-// syscalls and assigned nothing here, which syscall.native_gap_unassigned pins
-// by counting the native switch's unknown arm (a native number landing in the
-// gap fails it, whatever it returns). Each is consumed before the native switch
-// regardless -- the kill family is TIER2 (vivarium_kill_decide, SYS_POSTNOTE's
-// own gate), sigaltstack and rt_sigsuspend are VIV_ENOSYS rows -- and
-// vivarium.rejects_are_deliberate pins each verdict by name. When the gap's
-// natives arrive, every row there takes the collision assert its native names,
-// as restart_syscall has against ICACHE_SYNC_SPACE.
+// Linux kill (129), tkill (130) and tgkill (131) collide with
+// SYS_HANDLE_FLAGS_GET, SYS_HANDLE_FLAGS_SET and SYS_HANDLE_DUP_TO (B-3b).
+// Their rows are VIV_TIER2 (vivarium_kill_decide + viv_kill), and
+// viv_linux_dispatch returns before the native switch for every row that is
+// not TRANSLATED, so a Linux Proc's kill family is answered by the kill
+// shell and never reaches a handle operation -- test_vivarium pins the
+// verdicts. A change of any of the three rows to TRANSLATED must re-argue
+// this.
+_Static_assert(VIV_LINUX_KILL == SYS_HANDLE_FLAGS_GET,
+               "revisit kill / HANDLE_FLAGS_GET collision on renumber");
+_Static_assert(VIV_LINUX_TKILL == SYS_HANDLE_FLAGS_SET,
+               "revisit tkill / HANDLE_FLAGS_SET collision on renumber");
+_Static_assert(VIV_LINUX_TGKILL == SYS_HANDLE_DUP_TO,
+               "revisit tgkill / HANDLE_DUP_TO collision on renumber");
 _Static_assert(VIV_LINUX_SOCKET > VIV_NATIVE_CEILING,
                "the socket family's collision argument is the ceiling one");
 _Static_assert(VIV_LINUX_CLONE > VIV_NATIVE_CEILING,
@@ -567,7 +602,8 @@ static const struct viv_reject g_viv_rejects[] = {
     { VIV_LINUX_READV,           VIV_TIER2 },  // N-5: writev's twin, same iovec judgement (git protocol-v2)
     { VIV_LINUX_WRITEV,          VIV_TIER2 },  // the arity rule's sharpest case
     { VIV_LINUX_GETCWD,          VIV_TIER2 },  // +1 on the length, and ERANGE
-    { VIV_LINUX_GETPPID,         VIV_TIER2 },  // no native twin exists
+    { VIV_LINUX_GETPPID,         VIV_TIER2 },  // reads SYS_GETPPID's accessor
+    { VIV_LINUX_UMASK,           VIV_TIER2 },  // SYS_UMASK's accessor, after & 0777
     { VIV_LINUX_GETUID,          VIV_TIER2 },  // the PRINCIPAL_SYSTEM mapping
     { VIV_LINUX_GETGID,          VIV_TIER2 },  // the GID_SYSTEM mapping
     { VIV_LINUX_UNAME,           VIV_TIER2 },  // a fabrication; see the header
@@ -616,6 +652,8 @@ static const struct viv_reject g_viv_rejects[] = {
     { VIV_LINUX_CHDIR,           VIV_TIER2 },  // measure len -> SYS_CHDIR
     { VIV_LINUX_FCHMODAT,        VIV_TIER2 },  // open O_PATH -> wstat(MODE)
     { VIV_LINUX_READLINKAT,      VIV_TIER2 },  // NOFOLLOW stalk -> .readlink
+    // G12 (VIVARIUM.md section 6.30): the time setter.
+    { VIV_LINUX_UTIMENSAT,       VIV_TIER2 },  // time mask -> the wstat core
     { VIV_LINUX_GETEUID,         VIV_TIER2 },  // == getuid (one principal)
     { VIV_LINUX_GETEGID,         VIV_TIER2 },  // == getgid (one principal)
     { VIV_LINUX_GETRANDOM,       VIV_TIER2 },  // -> SYS_GETRANDOM (CAP-gated)
@@ -1162,15 +1200,18 @@ enum viv_verdict vivarium_fcntl_decide(u64 cmd, u64 arg,
         *cloexec_out = (arg & VIV_FD_CLOEXEC) != 0;
         return VIV_TRANSLATED;
 
+    // The minimum is narrowed as `cmd` is: Linux's do_fcntl hands f_dupfd the
+    // argument as an int (`argi`), so a stale upper half selects nothing, and a
+    // sign-extended negative reads 0xFFFFFFFF -- past every table, EINVAL.
     case VIV_F_DUPFD:
         *op_out     = VIV_FCNTL_DUPFD;
-        *min_fd_out = arg;
+        *min_fd_out = (u32)arg;
         return VIV_TRANSLATED;
 
     case VIV_F_DUPFD_CLOEXEC:
         *op_out      = VIV_FCNTL_DUPFD;
         *cloexec_out = true;
-        *min_fd_out  = arg;
+        *min_fd_out  = (u32)arg;
         return VIV_TRANSLATED;
 
     case VIV_F_GETFL:
@@ -1365,6 +1406,51 @@ enum viv_verdict vivarium_faccessat_decide(u64 dirfd) {
     // spells out: an `int` -100 arrives sign-extended and must compare equal.
     return ((s32)(u32)dirfd == VIV_AT_FDCWD) ? VIV_TRANSLATED : VIV_FORWARD;
 }
+
+// utimensat's mask. Linux's own split: UTIME_OMIT drops a time, UTIME_NOW is
+// the server's clock, anything else must be a real nanosecond. Linux's
+// timespec on aarch64 is {s64, s64}, byte-identical to t_timespec, so the
+// shell's copy is read in place.
+s64 vivarium_utimens_mask(const struct t_timespec *times, u32 *valid_out) {
+    if (!valid_out)                                  return -(s64)T_E_INVAL;
+    if (!times) {
+        *valid_out = T_WSTAT_ATIME | T_WSTAT_MTIME;
+        return 0;
+    }
+    u32 valid = 0;
+    for (int i = 0; i < 2; i++) {
+        u32 bit = i ? T_WSTAT_MTIME     : T_WSTAT_ATIME;
+        u32 set = i ? T_WSTAT_MTIME_SET : T_WSTAT_ATIME_SET;
+        s64 ns  = times[i].tv_nsec;
+        if (ns == VIV_UTIME_OMIT)                    continue;
+        if (ns == VIV_UTIME_NOW)                     { valid |= bit; continue; }
+        if (ns < 0 || ns > 999999999L)               return -(s64)T_E_INVAL;
+        valid |= bit | set;
+    }
+    if (!valid)                                      return 1;
+    *valid_out = valid;
+    return 0;
+}
+
+enum viv_utimens_form vivarium_utimensat_decide(u64 dirfd, u64 path_va,
+                                                u64 flags, bool path_empty) {
+    // Signed, for the AT_FDCWD sign-extension reason vivarium_openat_decide
+    // spells out.
+    bool cwd = (s32)(u32)dirfd == VIV_AT_FDCWD;
+    u32  fl  = (u32)flags;
+    if (!path_va && !cwd)
+        return fl ? VIV_UTIMENS_EINVAL : VIV_UTIMENS_FD;
+    if (fl & ~(u32)(VIV_AT_SYMLINK_NOFOLLOW | VIV_AT_EMPTY_PATH))
+        return VIV_UTIMENS_EINVAL;
+    if (!path_va)                                    return VIV_UTIMENS_EFAULT;
+    if ((fl & VIV_AT_EMPTY_PATH) && path_empty)
+        return cwd ? VIV_UTIMENS_CWD : VIV_UTIMENS_FD;
+    return cwd ? VIV_UTIMENS_PATH : VIV_UTIMENS_FORWARD;
+}
+
+_Static_assert(sizeof(struct t_timespec) == 16 &&
+               __builtin_offsetof(struct t_timespec, tv_nsec) == 8,
+               "Linux aarch64's struct timespec is t_timespec's layout");
 
 // =============================================================================
 // TIER 2 — mmap (V-2d). See <thylacine/vivarium.h> and VIVARIUM.md §6.21.

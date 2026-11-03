@@ -13,8 +13,112 @@ locks: []
 abis: []
 design: ["docs/ARCHITECTURE.md section 18", "specs/handles.tla", "specs/handle_slots.tla"]
 created: 2026-08-02
-updated: 2026-10-27
+updated: 2026-11-02
 ---
+## A take's sync across the table (B-3h3, 2026-11-02)
+
+`handle_lock_sync_file` now answers an int, with a new `DEV_LOCK_SYNC_ACQUIRE`:
+before a take, every open of the file in the table leaves its snapshot
+([[sub-kernel-ninep-dev9p]]). The walk stops at the first refusal, with one
+exception: a peer answering ESTALE keeps its snapshot, because it can no longer
+reach the file (a loose cached open of a file renamed since), and the take through
+the descriptor that can reach it stands. A release still lands what it can.
+
+## Descriptor counts and the last close (B-3h audit round 3, 2026-11-02)
+
+`handle_fd_count` bumps `Spoor.fd_refs` at the four sites that put a Spoor in a
+slot: `handle_install_locked`, `handle_replace`, the table copy and `handle_dup_to`.
+`handle_get`'s snapshot is no slot and does not count, and neither does `dup`'s
+rollback. `handle_fd_left` is the path out of a slot: `lock_owners_on_close`, then
+`handle_fd_drop`, then the release, reporting `fd_close`'s error before the
+release's. `handle_fd_drop`, on the slot that takes the count to zero, lands every
+staged write the table can reach if `Dev.lock_held` says a lock is held, and runs
+`Dev.fd_close` on the closing thread. The sync sits after the decrement, so of two
+racing closes the one that sees the count reach zero does it. The teardown runs
+`handle_fd_drop` and the release per slot, and `fd_close` on each owner entry
+before its clunk. Leg: `filelock.last_descriptor_closes`.
+
+A caller tells `fd_close` whether it hands the answer to a program (`heard`). Only
+`handle_close_report`, which is close(2)'s, does. A teardown, a replace, a dup2's victim,
+`handle_close` and an endowment no table took do not, so a last close reports its own
+loss on those paths ([[sub-kernel-ninep-dev9p]]).
+
+## The Proc lock owners (B-3h2, 2026-10-29)
+
+The handle table now also holds the Proc owner of `SYS_FILE_LOCK_PROC` locks
+([[sub-kernel-filelock]], ARCH 9.6.11, votes 34-35). POSIX gives a process's
+locks to its descriptor table. Linux drops them at any close of the file by
+that table, threads share them, a fork does not inherit them, and exec keeps
+them. Here the per-Proc HandleTable plays that table. `lockowners[]`
+(`struct lock_owner_ent`, 16 bytes, at most `PROC_LOCK_OWNER_MAX` 128) keeps
+one entry per locked file: a minted Spoor naming that file through its own
+fid, a `users` count, `granted` and `dead`. `t->lock` covers the entries, as
+it covers the slots and `cloexec`. The table lives here, not in proc.c,
+because the handle table already has the right lifetime and sharing.
+
+- `handle_lock_owner_get(p, c, mint, &owner)` first has `c` learn its file's
+  identity (`Dev.lock_ident`, which can answer ESTALE). It then adopts the
+  entry naming `c`'s file, or mints one outside the lock and inserts it. A
+  peer's mint of the same file wins, and a full table answers ENOLCK. The
+  caller holds a reference and a `users` count across its RPC.
+- `handle_lock_owner_put(p, owner, granted)` drops them. An entry whose users
+  reach 0 is removed if it never held a lock (a refused take spends no slot)
+  or if it was retired.
+- `handle_lock_owner_retire` marks an entry `dead`. Its fid answered ESTALE:
+  Stratum kills an unlinked file's fids and hands the lowest freed inode
+  number to the next create, so the entry's number may now name another
+  file. A dead entry is never found again.
+- `lock_sync_table` walks slot by slot: a cached open minted after the walk passed
+  its slot and before a take's grant keeps its snapshot under the lock (ARCH 9.6.11).
+- `lock_owners_on_close` runs after a descriptor leaves the table and before
+  its object is released, from `handle_close`'s report path,
+  `handle_replace` and `handle_dup_to`. A navigation-only descriptor is no open
+  of the file, and its close skips all of this. If an entry names the closed file
+  (by number, then confirmed by the closed Spoor's identity; a descriptor that
+  cannot learn its identity, a dead file's included, shows no entry), it lands every staged write of that file the
+  table can reach (`lock_sync_table`). It then sends the whole-file unlock
+  through the entry, waits for it, and removes the entry unless a lock call
+  is using it.
+- The teardown syncs every entry's file, releases the slots, then clunks the
+  entries. A last close that cannot wait hands its run to a closer, and the
+  owner's clunk must not overtake it.
+- An rfork child's table starts with no entries.
+
+The HandleTable's size assert counts the entries (`nlockowners` replaced the
+old `_pad_lock`), and the table stays at or under 32 KiB.
+
+## Native descriptor mutation (October11)
+
+`handle_dup_to_checked` returns EBADF/EINVAL/EACCES while preserving the old
+helper's one-lock acquire/install/unlock/release order. `handle_dup_to` retains
+its flat-error wrapper for existing callers. Source rights and alias predicate
+are unchanged; prohibited aliases leave occupied targets and flags intact.
+Native 130 (HANDLE_FLAGS_SET; codex/astra 129) uses the existing locked
+live-slot flag setter; 131 (HANDLE_DUP_TO; codex/astra 130) uses the checked
+replacement core. Both are caller-local. See `docs/NATIVE-DESCRIPTOR-OPERATIONS-REVIEW.md`
+for concurrency/refcount witnesses and qualification limits.
+
+## Lowest-free dup and the status word (B-3b, October 15)
+
+`handle_dup_common` now answers each refusal's reason, decided under the
+table lock that decided it: -T_E_BADF (no live source), -T_E_INVAL (`min_idx`
+out of range), -T_E_ACCES (a kind or rights the alias rules refuse),
+-T_E_MFILE (nothing free at or above `min_idx`). The source is tested before
+the minimum, so a closed source is EBADF whatever the minimum (Linux's fcntl
+looks the descriptor up first). `handle_dup_posix_checked` is that core with
+rights inherited; `handle_dup` and `handle_dup_posix` keep their -1 wrappers.
+A refused install gives back the reference it took (`handle.dup_lowest`
+watches a pipe Spoor's refcount across an EMFILE). HANDLE_DUP_TO's
+DUP_LOWEST flag is this call with the target as the floor.
+
+`handle_get_status(p, h, &st)` reads the cloexec bit, the Spoor's open-time
+omode (unmasked: access mode, OTRUNC, OAPPEND) and CNONBLOCK in ONE lock hold,
+so F_GETFD and F_GETFL describe the same occupant of the slot; a non-Spoor
+reports omode 0 and blocking. HANDLE_FLAGS_GET packs it (access mode at bits
+8-9, NONBLOCK bit 10, APPEND bit 11); the Linux phenotype's F_GETFL reads it
+too and now reports O_APPEND. `handle.status_word` drives the word through
+the handler with each field at its own bit.
+
 ## Purpose
 
 Every kernel object a Proc can name — a Burrow, a Spoor, an MMIO window, a
@@ -254,6 +358,12 @@ reach.
 
 `hidx_t` is the handle index type: signed, with -1 for
 invalid / not-found / table-full.
+
+**A spawn's endowment counts as a descriptor** (B-3h audit round 4, ARCH 9.6.11).
+`handle_endow_spoor` takes the slot's reference and a count in one table-lock hold, so no
+peer's close between them can be the last. The count stands until the child's slot takes
+over, and `handle_endow_drop` closes one no table took. Leg:
+`filelock.endowment_is_a_descriptor`.
 
 ## Concurrency
 

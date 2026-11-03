@@ -63,6 +63,11 @@ static int synth_rattach(u8 *out, size_t cap, u16 tag,
     return synth_rmsg(out, cap, P9_RATTACH, tag, body, sizeof(body));
 }
 
+// The walk these tests send: one name, which the reply below answers.
+static const u8 g_wname[1] = { 'a' };
+static const u8 *const g_wnames[1] = { g_wname };
+static const size_t g_wlens[1] = { 1 };
+
 // Synthesize an Rwalk with a single qid (sufficient for tests).
 static int synth_rwalk_single(u8 *out, size_t cap, u16 tag,
                                u8 qtype, u32 qver, u64 qpath) {
@@ -221,16 +226,173 @@ void test_9p_session_attach_handshake(void) {
 // Walk + clunk.
 // =============================================================================
 
+// An Rwalk of n qids and an Rwalkgetattr of n elements, all zero but the count.
+static int synth_rwalk_n(u8 *out, size_t cap, u16 tag, u16 n) {
+    static u8 body[2 + P9_MAX_WALK * P9_QID_LEN];
+    for (size_t i = 0; i < sizeof(body); i++) body[i] = 0;
+    body[0] = (u8)n;
+    return synth_rmsg(out, cap, P9_RWALK, tag, body, 2 + (size_t)n * P9_QID_LEN);
+}
+static int synth_rwga_n(u8 *out, size_t cap, u16 tag, u16 n) {
+    static u8 body[2 + 4 * P9_WGA_BODY_LEN];
+    for (size_t i = 0; i < sizeof(body); i++) body[i] = 0;
+    body[0] = (u8)n;
+    return synth_rmsg(out, cap, P9_RWALKGETATTR, tag, body, 2 + (size_t)n * P9_WGA_BODY_LEN);
+}
+
+// Which ops a client must forget for when their owner goes: what a server changes
+// by running them, a Tlopen only when it truncates.
+void test_9p_session_mutates_mark(void) {
+    static const struct { bool trunc; const char *what; } o[] = {
+        { false, "a plain Tlopen changes nothing" },
+        { true,  "a truncating Tlopen does" },
+    };
+    u32 sz; u8 ty; u16 t;
+    for (u32 i = 0; i < 2; i++) {
+        struct p9_session s;
+        TEST_EXPECT_EQ(drive_session_open(&s, 0), 0, "drive_session_open");
+        int len = p9_session_send_walk(&s, g_buf, sizeof(g_buf), 0, 5, 0, NULL, NULL);
+        TEST_ASSERT(len > 0, "a clone");
+        p9_peek_header(g_buf, (size_t)len, &sz, &ty, &t);
+        int rlen = synth_rwalk_n(g_buf, sizeof(g_buf), t, 0);
+        struct p9_dispatch_result r;
+        TEST_EXPECT_EQ(p9_session_dispatch_rmsg(&s, g_buf, (size_t)rlen, &r), 0, "its Rwalk");
+        len = p9_session_send_lopen(&s, g_buf, sizeof(g_buf), 5, o[i].trunc ? 01002u : 2u);
+        TEST_ASSERT(len > 0, "a Tlopen");
+        p9_peek_header(g_buf, (size_t)len, &sz, &ty, &t);
+        TEST_EXPECT_EQ((u64)p9_session_entry(&s, t)->mutates, (u64)o[i].trunc, o[i].what);
+    }
+}
+
+static int synth_rwrite(u8 *out, size_t cap, u16 tag, u32 count);
+
+// Which kinds change what a client caches, over every kind there is. A missing row
+// would leave a dead owner's op invisible to the Larder, and only Twrite reaches a
+// Larder assert anywhere else. A tag a mutator used and a read reuses does not
+// inherit the mark.
+void test_9p_session_mutates_kinds(void) {
+    static const u8 yes[] = {
+        P9_TLCREATE, P9_TWRITE, P9_TSETATTR, P9_TSYMLINK, P9_TMKNOD,
+        P9_TRENAME, P9_TLINK, P9_TMKDIR, P9_TRENAMEAT, P9_TUNLINKAT,
+    };
+    for (u32 k = 0; k < 256u; k++) {
+        bool want = false;
+        for (u32 i = 0; i < sizeof(yes); i++) if (yes[i] == k) want = true;
+        TEST_EXPECT_EQ((u64)p9_session_kind_mutates((u8)k), (u64)want, "the kind table");
+    }
+
+    struct p9_session s;
+    TEST_EXPECT_EQ(drive_session_open(&s, 0), 0, "drive_session_open");
+    u32 sz; u8 ty; u16 t1, t2;
+    int len = p9_session_send_walk(&s, g_buf, sizeof(g_buf), 0, 5, 0, NULL, NULL);
+    TEST_ASSERT(len > 0, "a clone");
+    p9_peek_header(g_buf, (size_t)len, &sz, &ty, &t1);
+    int rlen = synth_rwalk_n(g_buf, sizeof(g_buf), t1, 0);
+    struct p9_dispatch_result r;
+    TEST_EXPECT_EQ(p9_session_dispatch_rmsg(&s, g_buf, (size_t)rlen, &r), 0, "its Rwalk");
+    const u8 payload[] = { 'x' };
+    len = p9_session_send_write(&s, g_buf, sizeof(g_buf), 5, 0, 1, payload);
+    TEST_ASSERT(len > 0, "a Twrite");
+    p9_peek_header(g_buf, (size_t)len, &sz, &ty, &t1);
+    TEST_ASSERT(p9_session_entry(&s, t1)->mutates, "is marked");
+    rlen = synth_rwrite(g_buf, sizeof(g_buf), t1, 1);
+    TEST_EXPECT_EQ(p9_session_dispatch_rmsg(&s, g_buf, (size_t)rlen, &r), 0, "its Rwrite");
+    len = p9_session_send_read(&s, g_buf, sizeof(g_buf), 5, 0, 16);
+    TEST_ASSERT(len > 0, "a Tread");
+    p9_peek_header(g_buf, (size_t)len, &sz, &ty, &t2);
+    TEST_EXPECT_EQ((u64)t2, (u64)t1, "on the lowest free tag: the write's");
+    TEST_ASSERT(!p9_session_entry(&s, t2)->mutates, "is not marked");
+}
+
+// A reply may name no more components than the walk asked: its caller's arrays
+// are sized by that count. Each count once as asked and once past it.
+void test_9p_session_walk_reply_overcount(void) {
+    struct p9_dispatch_result r;
+    u32 sz; u8 ty; u16 t;
+    static const struct { u16 nwname; u16 nwqid; int rc; bool binds; const char *what; } w[] = {
+        { 0, 0, 0,  true,  "a clone that names nothing" },
+        { 0, 1, -1, false, "a clone that names a qid" },
+        { 1, 1, 0,  true,  "one name, one qid" },
+        { 1, 2, -1, false, "one name, two qids" },
+        { 1, 16, -1, false, "one name, P9_MAX_WALK qids" },
+        { 1, 0, 0,  false, "one name, none: partial" },
+    };
+    for (u32 i = 0; i < sizeof(w) / sizeof(w[0]); i++) {
+        struct p9_session s;
+        TEST_EXPECT_EQ(drive_session_open(&s, 0), 0, "drive_session_open");
+        int len = p9_session_send_walk(&s, g_buf, sizeof(g_buf), 0, 5, w[i].nwname,
+                                       w[i].nwname ? g_wnames : NULL, w[i].nwname ? g_wlens : NULL);
+        TEST_ASSERT(len > 0, "send_walk");
+        p9_peek_header(g_buf, (size_t)len, &sz, &ty, &t);
+        int rlen = synth_rwalk_n(g_buf, sizeof(g_buf), t, w[i].nwqid);
+        TEST_EXPECT_EQ(p9_session_dispatch_rmsg(&s, g_buf, (size_t)rlen, &r), w[i].rc, w[i].what);
+        TEST_EXPECT_EQ((u64)p9_session_fid_bound(&s, 5), (u64)w[i].binds, w[i].what);
+    }
+    static const struct { u32 newfid; u16 nwqid; int rc; bool binds; const char *what; } g[] = {
+        { 5, 1, 0, true, "one name, one element" },
+        { 5, 0, 0, false, "one name, none: partial" },
+        { 5, 2, -1, false, "one name, two elements" },
+        { P9_NOFID, 2, -1, false, "a query, two elements" },
+    };
+    for (u32 i = 0; i < sizeof(g) / sizeof(g[0]); i++) {
+        struct p9_session s;
+        TEST_EXPECT_EQ(drive_session_open(&s, 0), 0, "drive_session_open");
+        int len = p9_session_send_walkgetattr(&s, g_buf, sizeof(g_buf), 0, g[i].newfid,
+                                              P9_GETATTR_BASIC, 1, g_wnames, g_wlens);
+        TEST_ASSERT(len > 0, "send_walkgetattr");
+        p9_peek_header(g_buf, (size_t)len, &sz, &ty, &t);
+        int rlen = synth_rwga_n(g_buf, sizeof(g_buf), t, g[i].nwqid);
+        TEST_EXPECT_EQ(p9_session_dispatch_rmsg(&s, g_buf, (size_t)rlen, &r), g[i].rc, g[i].what);
+        TEST_EXPECT_EQ((u64)p9_session_fid_bound(&s, 5), (u64)g[i].binds, g[i].what);
+    }
+    // A late reply under a flush, to either walk, for an owner that left and for
+    // one that still waits. An over-count is absorbed ownerless and refused with an
+    // owner, a short walk is an answer to both, and neither binds; a full one binds.
+    static const struct { u16 nwqid; int owner_rc; bool binds; } late[] = {
+        { 2, -1, false }, { 0, 0, false }, { 1, 0, true },
+    };
+    for (int attrs = 0; attrs < 2; attrs++) {
+        for (u32 l = 0; l < sizeof(late) / sizeof(late[0]); l++) {
+            for (int owner = 0; owner < 2; owner++) {
+                struct p9_session s;
+                TEST_EXPECT_EQ(drive_session_open(&s, 0), 0, "drive_session_open");
+                int len = attrs
+                    ? p9_session_send_walkgetattr(&s, g_buf, sizeof(g_buf), 0, 5,
+                                                  P9_GETATTR_BASIC, 1, g_wnames, g_wlens)
+                    : p9_session_send_walk(&s, g_buf, sizeof(g_buf), 0, 5, 1, g_wnames, g_wlens);
+                TEST_ASSERT(len > 0, "send a walk");
+                p9_peek_header(g_buf, (size_t)len, &sz, &ty, &t);
+                len = p9_session_send_flush(&s, g_buf, sizeof(g_buf), t);
+                TEST_ASSERT(len > 0, "send_flush");
+                int rlen = attrs ? synth_rwga_n(g_buf, sizeof(g_buf), t, late[l].nwqid)
+                                 : synth_rwalk_n(g_buf, sizeof(g_buf), t, late[l].nwqid);
+                r.bound_new_fid = P9_NOFID;
+                if (owner) {
+                    TEST_EXPECT_EQ(p9_session_dispatch_flushed_rmsg(&s, g_buf, (size_t)rlen, &r),
+                                   late[l].owner_rc, "a waiting owner's answer");
+                } else {
+                    TEST_EXPECT_EQ(p9_session_dispatch_rmsg(&s, g_buf, (size_t)rlen, &r), 0,
+                                   "ownerless, it is absorbed");
+                    TEST_EXPECT_EQ((u64)r.bound_new_fid,
+                                   late[l].binds ? (u64)5 : (u64)P9_NOFID, "and reports its bind");
+                }
+                TEST_EXPECT_EQ((u64)p9_session_fid_bound(&s, 5), (u64)late[l].binds,
+                               "only a full walk binds");
+            }
+        }
+    }
+}
+
 void test_9p_session_walk_round_trip(void) {
     struct p9_session s;
     TEST_EXPECT_EQ(drive_session_open(&s, /*root_fid=*/0), 0, "drive_session_open");
     TEST_ASSERT(p9_session_is_open(&s), "session OPEN");
 
-    // Walk root → fid 5 (clone, no names).
+    // Walk root → fid 5.
     int len = p9_session_send_walk(&s, g_buf, sizeof(g_buf),
                                     /*src=*/0, /*new=*/5,
-                                    /*nwname=*/0, NULL, NULL);
-    TEST_ASSERT(len > 0, "send_walk(0→5, clone) ok");
+                                    1, g_wnames, g_wlens);
+    TEST_ASSERT(len > 0, "send_walk(0→5, one name) ok");
     u32 sz; u8 ty; u16 tag;
     p9_peek_header(g_buf, (size_t)len, &sz, &ty, &tag);
     TEST_EXPECT_EQ((u64)ty, (u64)P9_TWALK, "Twalk type");
@@ -264,20 +426,20 @@ void test_9p_session_walk_fid_full_no_latch(void) {
     // here (clean -1, no server round-trip), not at dispatch.
     size_t saved = s.n_bound_fids;
     s.n_bound_fids = P9_SESSION_MAX_FIDS;
-    int len = p9_session_send_walk(&s, g_buf, sizeof(g_buf), 0, 5, 0, NULL, NULL);
+    int len = p9_session_send_walk(&s, g_buf, sizeof(g_buf), 0, 5, 1, g_wnames, g_wlens);
     TEST_ASSERT(len < 0, "send_walk fails closed when the fid table is full");
     s.n_bound_fids = saved;
 
     // (b) A walk takes the table's last slot, a peer's walk arrives while it
     // waits for its Rwalk, and the Rwalk then binds.
     s.n_bound_fids = P9_SESSION_MAX_FIDS - 1;
-    len = p9_session_send_walk(&s, g_buf, sizeof(g_buf), 0, 6, 0, NULL, NULL);
+    len = p9_session_send_walk(&s, g_buf, sizeof(g_buf), 0, 6, 1, g_wnames, g_wlens);
     TEST_ASSERT(len > 0, "send_walk(0->6) takes the last slot");
     u32 sz; u8 ty; u16 tag;
     p9_peek_header(g_buf, (size_t)len, &sz, &ty, &tag);
     TEST_EXPECT_EQ((u64)p9_session_n_reserved_slots(&s), (u64)1,
                    "the walk holds a reserved slot");
-    int peer = p9_session_send_walk(&s, g_buf, sizeof(g_buf), 0, 7, 0, NULL, NULL);
+    int peer = p9_session_send_walk(&s, g_buf, sizeof(g_buf), 0, 7, 1, g_wnames, g_wlens);
     TEST_ASSERT(peer < 0, "a peer's walk cannot take the reserved slot");
     len = synth_rwalk_single(g_buf, sizeof(g_buf), tag, P9_QTDIR, 1, 200);
     struct p9_dispatch_result r;
@@ -299,7 +461,7 @@ void test_9p_session_walk_fid_full_no_latch(void) {
 void test_9p_session_clunk_retract_after_peer_fill(void) {
     struct p9_session s;
     TEST_EXPECT_EQ(drive_session_open(&s, /*root_fid=*/0), 0, "drive_session_open");
-    int len = p9_session_send_walk(&s, g_buf, sizeof(g_buf), 0, 5, 0, NULL, NULL);
+    int len = p9_session_send_walk(&s, g_buf, sizeof(g_buf), 0, 5, 1, g_wnames, g_wlens);
     TEST_ASSERT(len > 0, "send_walk(0->5)");
     u32 sz; u8 ty; u16 wt;
     p9_peek_header(g_buf, (size_t)len, &sz, &ty, &wt);
@@ -318,7 +480,7 @@ void test_9p_session_clunk_retract_after_peer_fill(void) {
 
     // Peers bind every slot they can get meanwhile.
     s.n_bound_fids = P9_SESSION_MAX_FIDS - 1;
-    int plen = p9_session_send_walk(&s, g_buf, sizeof(g_buf), 0, 9, 0, NULL, NULL);
+    int plen = p9_session_send_walk(&s, g_buf, sizeof(g_buf), 0, 9, 1, g_wnames, g_wlens);
     if (plen > 0) {
         u16 pt;
         p9_peek_header(g_buf, (size_t)plen, &sz, &ty, &pt);
@@ -348,7 +510,7 @@ void test_9p_session_flushed_walk_late_reply_binds(void) {
     u32 sz; u8 ty;
     struct p9_dispatch_result r;
 
-    int len = p9_session_send_walk(&s, g_buf, sizeof(g_buf), 0, 8, 0, NULL, NULL);
+    int len = p9_session_send_walk(&s, g_buf, sizeof(g_buf), 0, 8, 1, g_wnames, g_wlens);
     TEST_ASSERT(len > 0, "send_walk(0->8)");
     u16 t;
     p9_peek_header(g_buf, (size_t)len, &sz, &ty, &t);
@@ -380,7 +542,7 @@ void test_9p_session_flushed_walk_late_reply_binds(void) {
     TEST_ASSERT(p9_session_fid_bound(&s, 8), "fid 8 stays bound for its clunk");
 
     // A late Rlerror binds nothing; the Rflush releases the reservation.
-    len = p9_session_send_walk(&s, g_buf, sizeof(g_buf), 0, 9, 0, NULL, NULL);
+    len = p9_session_send_walk(&s, g_buf, sizeof(g_buf), 0, 9, 1, g_wnames, g_wlens);
     TEST_ASSERT(len > 0, "send_walk(0->9)");
     p9_peek_header(g_buf, (size_t)len, &sz, &ty, &t);
     len = p9_session_send_flush(&s, g_buf, sizeof(g_buf), t);
@@ -411,7 +573,7 @@ void test_9p_session_flushed_reply_honoured_for_waiting_owner(void) {
     u32 sz; u8 ty;
     struct p9_dispatch_result r;
 
-    int len = p9_session_send_walk(&s, g_buf, sizeof(g_buf), 0, 10, 0, NULL, NULL);
+    int len = p9_session_send_walk(&s, g_buf, sizeof(g_buf), 0, 10, 1, g_wnames, g_wlens);
     TEST_ASSERT(len > 0, "send_walk(0->10)");
     u16 t;
     p9_peek_header(g_buf, (size_t)len, &sz, &ty, &t);
@@ -480,7 +642,7 @@ void test_9p_session_flush_retract_restores_live_op(void) {
     u16 t;
     struct p9_dispatch_result r;
 
-    int len = p9_session_send_walk(&s, g_buf, sizeof(g_buf), 0, 12, 0, NULL, NULL);
+    int len = p9_session_send_walk(&s, g_buf, sizeof(g_buf), 0, 12, 1, g_wnames, g_wlens);
     TEST_ASSERT(len > 0, "send_walk(0->12)");
     p9_peek_header(g_buf, (size_t)len, &sz, &ty, &t);
     int rlen = synth_rwalk_single(g_buf, sizeof(g_buf), t, P9_QTFILE, 1, 205);
@@ -524,7 +686,7 @@ void test_9p_session_flush_owner_waits_keeps_fid_live(void) {
     struct p9_dispatch_result r;
 
     for (u32 fid = 14; fid <= 15; fid++) {
-        int len = p9_session_send_walk(&s, g_buf, sizeof(g_buf), 0, fid, 0, NULL, NULL);
+        int len = p9_session_send_walk(&s, g_buf, sizeof(g_buf), 0, fid, 1, g_wnames, g_wlens);
         TEST_ASSERT(len > 0, "send_walk");
         p9_peek_header(g_buf, (size_t)len, &sz, &ty, &t);
         int rlen = synth_rwalk_single(g_buf, sizeof(g_buf), t, P9_QTFILE, 1, 206 + fid);
@@ -581,7 +743,7 @@ void test_9p_session_clunk_round_trip(void) {
     struct p9_session s;
     drive_session_open(&s, /*root_fid=*/0);
     // Walk + bind fid 7.
-    int len = p9_session_send_walk(&s, g_buf, sizeof(g_buf), 0, 7, 0, NULL, NULL);
+    int len = p9_session_send_walk(&s, g_buf, sizeof(g_buf), 0, 7, 1, g_wnames, g_wlens);
     u32 sz; u8 ty; u16 tag;
     p9_peek_header(g_buf, (size_t)len, &sz, &ty, &tag);
     len = synth_rwalk_single(g_buf, sizeof(g_buf), tag, P9_QTFILE, 1, 300);
@@ -609,7 +771,7 @@ void test_9p_session_clunk_round_trip(void) {
 void test_9p_session_clunk_send_time_unbinds(void) {
     struct p9_session s;
     drive_session_open(&s, 0);
-    int len = p9_session_send_walk(&s, g_buf, sizeof(g_buf), 0, 9, 0, NULL, NULL);
+    int len = p9_session_send_walk(&s, g_buf, sizeof(g_buf), 0, 9, 1, g_wnames, g_wlens);
     u32 sz; u8 ty; u16 tag;
     p9_peek_header(g_buf, (size_t)len, &sz, &ty, &tag);
     len = synth_rwalk_single(g_buf, sizeof(g_buf), tag, P9_QTFILE, 1, 0);
@@ -623,7 +785,7 @@ void test_9p_session_clunk_send_time_unbinds(void) {
 
     // Now attempt send_walk from 9 (which is no longer bound). Should fail.
     int len2 = p9_session_send_walk(&s, g_buf + len, sizeof(g_buf) - len,
-                                     9, 11, 0, NULL, NULL);
+                                     9, 11, 1, g_wnames, g_wlens);
     TEST_EXPECT_EQ(len2, -1, "send_walk from unbound (post Tclunk) refused");
 }
 
@@ -636,7 +798,7 @@ void test_9p_session_dispatch_rlerror(void) {
     struct p9_session s;
     drive_session_open(&s, 0);
     // Walk for fid 3.
-    int len = p9_session_send_walk(&s, g_buf, sizeof(g_buf), 0, 3, 0, NULL, NULL);
+    int len = p9_session_send_walk(&s, g_buf, sizeof(g_buf), 0, 3, 1, g_wnames, g_wlens);
     u32 sz; u8 ty; u16 tag;
     p9_peek_header(g_buf, (size_t)len, &sz, &ty, &tag);
 
@@ -660,7 +822,7 @@ void test_9p_session_dispatch_rlerror(void) {
 void test_9p_session_walk_to_root_refused(void) {
     struct p9_session s;
     drive_session_open(&s, /*root_fid=*/0);
-    int rc = p9_session_send_walk(&s, g_buf, sizeof(g_buf), 0, /*new=*/0, 0, NULL, NULL);
+    int rc = p9_session_send_walk(&s, g_buf, sizeof(g_buf), 0, /*new=*/0, 1, g_wnames, g_wlens);
     TEST_EXPECT_EQ(rc, -1, "walk targeting root fid refused");
 }
 
@@ -668,7 +830,7 @@ void test_9p_session_walk_to_bound_fid_refused(void) {
     struct p9_session s;
     drive_session_open(&s, 0);
     // Walk + bind fid 4.
-    int len = p9_session_send_walk(&s, g_buf, sizeof(g_buf), 0, 4, 0, NULL, NULL);
+    int len = p9_session_send_walk(&s, g_buf, sizeof(g_buf), 0, 4, 1, g_wnames, g_wlens);
     u32 sz; u8 ty; u16 tag;
     p9_peek_header(g_buf, (size_t)len, &sz, &ty, &tag);
     len = synth_rwalk_single(g_buf, sizeof(g_buf), tag, P9_QTFILE, 1, 0);
@@ -676,7 +838,7 @@ void test_9p_session_walk_to_bound_fid_refused(void) {
     p9_session_dispatch_rmsg(&s, g_buf, (size_t)len, &r);
     TEST_ASSERT(p9_session_fid_bound(&s, 4), "fid 4 bound");
     // Walk targeting already-bound fid refused.
-    int rc = p9_session_send_walk(&s, g_buf, sizeof(g_buf), 0, /*new=*/4, 0, NULL, NULL);
+    int rc = p9_session_send_walk(&s, g_buf, sizeof(g_buf), 0, /*new=*/4, 1, g_wnames, g_wlens);
     TEST_EXPECT_EQ(rc, -1, "walk to already-bound fid refused");
 }
 
@@ -684,7 +846,7 @@ void test_9p_session_walk_from_unbound_fid_refused(void) {
     struct p9_session s;
     drive_session_open(&s, 0);
     int rc = p9_session_send_walk(&s, g_buf, sizeof(g_buf),
-                                   /*src=*/99 /*not bound*/, /*new=*/2, 0, NULL, NULL);
+                                   /*src=*/99 /*not bound*/, /*new=*/2, 1, g_wnames, g_wlens);
     TEST_EXPECT_EQ(rc, -1, "walk from unbound src refused");
 }
 
@@ -699,14 +861,14 @@ void test_9p_session_clunk_with_inflight_on_fid_refused(void) {
     struct p9_session s;
     drive_session_open(&s, 0);
     // Walk → bind fid 6.
-    int len = p9_session_send_walk(&s, g_buf, sizeof(g_buf), 0, 6, 0, NULL, NULL);
+    int len = p9_session_send_walk(&s, g_buf, sizeof(g_buf), 0, 6, 1, g_wnames, g_wlens);
     u32 sz; u8 ty; u16 tag;
     p9_peek_header(g_buf, (size_t)len, &sz, &ty, &tag);
     len = synth_rwalk_single(g_buf, sizeof(g_buf), tag, P9_QTFILE, 1, 0);
     struct p9_dispatch_result r;
     p9_session_dispatch_rmsg(&s, g_buf, (size_t)len, &r);
     // Issue another walk that uses fid 6 as src — leaves an in-flight op on 6.
-    len = p9_session_send_walk(&s, g_buf, sizeof(g_buf), 6, 12, 0, NULL, NULL);
+    len = p9_session_send_walk(&s, g_buf, sizeof(g_buf), 6, 12, 1, g_wnames, g_wlens);
     TEST_ASSERT(len > 0, "second walk from 6 ok");
     // Now attempt clunk on 6 — refused because of in-flight op on 6.
     int rc = p9_session_send_clunk(&s, g_buf, sizeof(g_buf), 6);
@@ -719,7 +881,7 @@ void test_9p_session_fid_after_clunk_refused(void) {
     struct p9_session s;
     drive_session_open(&s, 0);
     // Walk + bind fid 8.
-    int len = p9_session_send_walk(&s, g_buf, sizeof(g_buf), 0, 8, 0, NULL, NULL);
+    int len = p9_session_send_walk(&s, g_buf, sizeof(g_buf), 0, 8, 1, g_wnames, g_wlens);
     u32 sz; u8 ty; u16 tag;
     p9_peek_header(g_buf, (size_t)len, &sz, &ty, &tag);
     len = synth_rwalk_single(g_buf, sizeof(g_buf), tag, P9_QTFILE, 1, 0);
@@ -732,7 +894,7 @@ void test_9p_session_fid_after_clunk_refused(void) {
     p9_session_dispatch_rmsg(&s, g_buf, (size_t)len, &r);
     TEST_ASSERT(!p9_session_fid_bound(&s, 8), "fid 8 fully clunked");
     // Subsequent walk from 8 → refused.
-    int rc = p9_session_send_walk(&s, g_buf, sizeof(g_buf), 8, 10, 0, NULL, NULL);
+    int rc = p9_session_send_walk(&s, g_buf, sizeof(g_buf), 8, 10, 1, g_wnames, g_wlens);
     TEST_EXPECT_EQ(rc, -1, "send_walk from post-clunk fid refused (I-11 fid-after-clunk)");
 }
 
@@ -754,7 +916,7 @@ void test_9p_session_dispatch_wrong_type_rejected(void) {
     struct p9_session s;
     drive_session_open(&s, 0);
     // Send Twalk; dispatch a synthesized Rclunk under the SAME tag.
-    int len = p9_session_send_walk(&s, g_buf, sizeof(g_buf), 0, 2, 0, NULL, NULL);
+    int len = p9_session_send_walk(&s, g_buf, sizeof(g_buf), 0, 2, 1, g_wnames, g_wlens);
     u32 sz; u8 ty; u16 tag;
     p9_peek_header(g_buf, (size_t)len, &sz, &ty, &tag);
     len = synth_rclunk(g_buf, sizeof(g_buf), tag);
@@ -771,7 +933,7 @@ void test_9p_session_close_with_inflight_refused(void) {
     struct p9_session s;
     drive_session_open(&s, 0);
     // Issue a walk to get an inflight op.
-    int len = p9_session_send_walk(&s, g_buf, sizeof(g_buf), 0, 13, 0, NULL, NULL);
+    int len = p9_session_send_walk(&s, g_buf, sizeof(g_buf), 0, 13, 1, g_wnames, g_wlens);
     TEST_ASSERT(len > 0, "walk ok");
     int rc = p9_session_close(&s);
     TEST_EXPECT_EQ(rc, -1, "close with inflight refused");
@@ -781,7 +943,7 @@ void test_9p_session_state_gate_send_walk_before_open(void) {
     struct p9_session s;
     p9_session_init(&s, 0, 8192);
     // In INIT state: send_walk refused.
-    int rc = p9_session_send_walk(&s, g_buf, sizeof(g_buf), 0, 1, 0, NULL, NULL);
+    int rc = p9_session_send_walk(&s, g_buf, sizeof(g_buf), 0, 1, 1, g_wnames, g_wlens);
     TEST_EXPECT_EQ(rc, -1, "send_walk in INIT state refused");
     // Drive to VERSIONED.
     int len = p9_session_send_version(&s, g_buf, sizeof(g_buf), NULL, 0);
@@ -790,7 +952,7 @@ void test_9p_session_state_gate_send_walk_before_open(void) {
     struct p9_dispatch_result r;
     p9_session_dispatch_rmsg(&s, g_buf, (size_t)len, &r);
     // Still refused in VERSIONED.
-    rc = p9_session_send_walk(&s, g_buf, sizeof(g_buf), 0, 1, 0, NULL, NULL);
+    rc = p9_session_send_walk(&s, g_buf, sizeof(g_buf), 0, 1, 1, g_wnames, g_wlens);
     TEST_EXPECT_EQ(rc, -1, "send_walk in VERSIONED state refused");
 }
 
@@ -834,7 +996,7 @@ static int synth_rwrite(u8 *out, size_t cap, u16 tag, u32 count) {
 static int walk_to(struct p9_session *s, u32 new_fid) {
     int len = p9_session_send_walk(s, g_buf, sizeof(g_buf),
                                     /*src=*/s->root_fid, new_fid,
-                                    /*nwname=*/0, NULL, NULL);
+                                    1, g_wnames, g_wlens);
     if (len < 0) return -1;
     u32 sz; u8 ty; u16 tag;
     if (p9_peek_header(g_buf, (size_t)len, &sz, &ty, &tag) < 0) return -1;
@@ -1663,7 +1825,7 @@ void test_9p_session_flush_reclaims_both(void) {
     // that failed to FULLY clear the reserved tag would leave it un-reusable or
     // mis-complete here -- the genuine reclaim-then-reuse proof.
     len = p9_session_send_walk(&s, g_buf, sizeof(g_buf), /*src=*/0, /*new=*/7,
-                                /*nwname=*/0, NULL, NULL);
+                                1, g_wnames, g_wlens);
     TEST_ASSERT(len > 0, "post-flush walk reuses the freed tag");
     u32 sz3; u8 ty3; u16 wt;
     p9_peek_header(g_buf, (size_t)len, &sz3, &ty3, &wt);
@@ -1744,7 +1906,7 @@ void test_9p_session_abort_unsent_reclaims_tag(void) {
 
     // The reclaimed tag completes a fresh op end-to-end (reuse proof).
     len = p9_session_send_walk(&s, g_buf, sizeof(g_buf), /*src=*/0, /*new=*/7,
-                                /*nwname=*/0, NULL, NULL);
+                                1, g_wnames, g_wlens);
     TEST_ASSERT(len > 0, "post-abort walk ok");
     u32 sz2; u8 ty2; u16 wt;
     p9_peek_header(g_buf, (size_t)len, &sz2, &ty2, &wt);
@@ -1824,7 +1986,7 @@ void test_9p_session_flush_rollback_restores_victim(void) {
     // refuse it (the netd slot leak reopened); with the abandoned bit the
     // clunk builds. The victim's tag still frees on its late reply.
     len = p9_session_send_walk(&s, g_buf, sizeof(g_buf), /*src=*/0, /*new=*/9,
-                                /*nwname=*/0, NULL, NULL);
+                                1, g_wnames, g_wlens);
     TEST_ASSERT(len > 0, "walk root -> fid 9");
     u32 szw; u8 tyw; u16 wt2;
     p9_peek_header(g_buf, (size_t)len, &szw, &tyw, &wt2);
@@ -1870,7 +2032,7 @@ void test_9p_session_flush_rollback_restores_victim(void) {
     // R2-F1: the flush-LESS abandon (pool-full at the abandon instant) --
     // mark_abandoned directly must unblock the clunk exactly like the
     // rollback path, and the late reply still frees the tag.
-    len = p9_session_send_walk(&s, g_buf, sizeof(g_buf), 0, 11, 0, NULL, NULL);
+    len = p9_session_send_walk(&s, g_buf, sizeof(g_buf), 0, 11, 1, g_wnames, g_wlens);
     TEST_ASSERT(len > 0, "walk root -> fid 11");
     p9_peek_header(g_buf, (size_t)len, &szw, &tyw, &wt2);
     wl = synth_rwalk_single(g_buf, sizeof(g_buf), wt2, P9_QTDIR, 1, 11);

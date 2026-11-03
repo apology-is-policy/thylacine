@@ -14,7 +14,7 @@ design:
   - "docs/ARCHITECTURE.md section 9.4"
   - "docs/IDENTITY-DESIGN.md section 9.8"
 created: 2026-08-02
-updated: 2026-09-17
+updated: 2026-10-20
 ---
 ## Purpose
 
@@ -273,33 +273,19 @@ first thing to look at if anything ever streams from them.
 
 ## Caveats
 
-- **The geometry leaf has no stat, and that is a live gap rather than a
-  design.** The stat switch enumerates every other kind and the geometry leaf
-  falls to the default arm, so `fstat` on `/dev/winsize` returns `-1`. Three
-  things make this worth recording rather than shrugging at. The file's own
-  vtable comment states the intent as *every* leaf answering. The rationale
-  written beside the switch is that a stat failure with the wrong errno is
-  fatal to a real toolchain — the compiler treats it that way on its standard
-  fds, which is the defect that put the slot there in the first place. And the
-  neighbouring stat test's header says it covers "every leaf shape" while
-  enumerating a hardcoded list of five that predates this leaf. Meanwhile the
-  geometry leaf's *own* test records the absence as though it were intentional
-  ("the leaf itself is statless"), so the tree currently states the rule and its
-  exception in two comments that cannot both be right. The consequence is
-  bounded — no current consumer stats it, and this leaf is *newer* than the
-  compiler fix — but the leaf exists precisely so that ordinary unprivileged
-  programs can read the geometry without minting a control fd, which is exactly
-  the population that stats what it opens. Tracked as
-  [[seam-devdev-winsize-statless]].
 - **The stat switch is the registration that fails quietly.** A leaf missing
   from the read or write dispatch is dead on arrival and obvious; a leaf missing
   from the stat switch walks, opens, reads and writes perfectly and fails only
-  when someone stats it. That is how this one got in, and it is the same shape
-  as the introspection Dev's silently-failing read whitelist
-  ([[sub-kernel-devproc]]).
+  when someone stats it. The geometry leaf sat in that state until the Beacon
+  leaf landed beside it, and the compiler's standard-fd fixup treats such a
+  failure as fatal ([[seam-devdev-winsize-statless]], closed). It is the same
+  shape as the introspection Dev's silently-failing read whitelist
+  ([[sub-kernel-devproc]]). The switch's default arm still answers `-1`, so
+  the next leaf added without a stat arm repeats it.
 - **The mode bits are documentation.** The Dev does not set the permission-
   enforcement flag, so the reported modes — a console at `0620`, the renderer
-  pair at `0600`, the trivial leaves at `0666` — describe the gates rather than
+  pair at `0600`, the trivial leaves at `0666`, the two report leaves at
+  `0444` — describe the gates rather than
   implementing them. Same posture as the introspection Devs, same operational
   consequence: grep the gate, not the mode.
 - **The control leaf's read is offset-aware over a freshly rendered line**, so a

@@ -36,7 +36,7 @@ cannot carry it (pouch_smoke_one pipes the probe's stdio).
 
 --- a/src/misc/ioctl.c	2026-07-22 09:56:36
 +++ b/src/misc/ioctl.c	2026-07-22 09:57:19
-@@ -108,6 +108,11 @@
+@@ -107,6 +107,11 @@
  #define POUCH_PTS_FK_MASTER 1
  #define POUCH_PTS_FK_SLAVE  2
  
@@ -48,7 +48,7 @@ cannot carry it (pouch_smoke_one pipes the probe's stdio).
  /* Resolve fd -> pts (n, filekind), or -1 if the fd is not a pts
   * master/slave endpoint. */
  static int pts_resolve(int fd, unsigned *n_out, int *fk_out)
-@@ -125,6 +130,54 @@
+@@ -124,6 +129,54 @@
  	return 0;
  }
  
@@ -103,7 +103,7 @@ cannot carry it (pouch_smoke_one pipes the probe's stdio).
  /* Per-op open of the pts ctl sibling /dev/pts/<n>ctl (the Plan 9
   * suffix-ctl idiom). Stateless: opened fresh per termios/winsize op,
   * closed before return — no cached fd to invalidate across a pts free. */
-@@ -336,7 +389,24 @@
+@@ -335,7 +388,24 @@
  		struct winsize *ws = arg;
  		unsigned flags, cols, rows;
  		if (!ws) { errno = EINVAL; return -1; }
@@ -129,7 +129,7 @@ cannot carry it (pouch_smoke_one pipes the probe's stdio).
  		if (pts_ctl_read(n, &flags, &cols, &rows) != 0) {
  			errno = ENOTTY;
  			return -1;
-@@ -350,7 +420,14 @@
+@@ -349,7 +419,14 @@
  	case TIOCSWINSZ: {
  		const struct winsize *ws = arg;
  		if (!ws) { errno = EINVAL; return -1; }

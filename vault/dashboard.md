@@ -41,7 +41,7 @@ Generated — do not edit between the markers (`quaestor render`).
 | [[arc-vivarium]] | active | 2 |
 | [[arc-weft]] | active | 4 |
 
-## Open seams: 82
+## Open seams: 79
 
 - [[seam-220-netd-listener-poll]] (sub-netd-server)
 - [[seam-240-lo-redial]] (sub-netd-server)
@@ -60,11 +60,9 @@ Generated — do not edit between the markers (`quaestor render`).
 - [[seam-affinity-mask]] (sub-kernel-sched-smp)
 - [[seam-boot-banner-coupdate-list]] (sub-substrate-gates)
 - [[seam-buddy-bulk-op]] (sub-kernel-mm-phys)
-- [[seam-co-fidless-wstat]] (sub-kernel-ninep-dev9p)
 - [[seam-console-chrome-on-handoff]] (sub-tapestryd)
 - [[seam-cwg-parenthetical-refuted]] (sub-kernel-boot-sequence)
 - [[seam-death-cascade-smp-harness]] (sub-kernel-death)
-- [[seam-devdev-winsize-statless]] (sub-kernel-devdev, sub-kernel-cons)
 - [[seam-dirent-type-is-qid-type]] (sub-kernel-devproc)
 - [[seam-dtb-blob-internally-trusted]] (sub-kernel-dtb)
 - [[seam-eevdf-math]] (sub-kernel-sched)
@@ -72,7 +70,6 @@ Generated — do not edit between the markers (`quaestor render`).
 - [[seam-expect-channel-close]] (sub-substrate-interactive)
 - [[seam-f-notif-unwired]] (sub-kernel-weft, sub-kernel-loom)
 - [[seam-fid-monotonic-reclaim]] (sub-kernel-ninep-client)
-- [[seam-fstat-errno-flattened-above-the-leaf]] (sub-kernel-ninep-dev9p)
 - [[seam-gic-handler-slot-never-cleared]] (sub-kernel-gic, sub-kernel-irqfwd)
 - [[seam-handle-based-dot]] (sub-kernel-territory)
 - [[seam-hmp-push]] (sub-kernel-sched-smp)
@@ -128,12 +125,12 @@ Generated — do not edit between the markers (`quaestor render`).
 
 ## Recent changes
 
+- 2026-11-03 [[chg-2026-11-03-b3h-first-boots]] — B-3h's first boots: two wrong tests, a survivor, a budget
 - 2026-11-03 [[chg-2026-11-03-seat-session-start]] — A chord at session start is a wait: the seat's P3s, a member that may owe, and a needle checker
-- 2026-11-02 [[chg-2026-11-02-f3-what-it-is]] — What review finding F-3 is, read from main's code
-- 2026-11-02 [[chg-2026-11-02-join-planted-cleanup]] — The F1 test's cleanup ran on an early failure, three planted points
-- 2026-11-02 [[chg-2026-11-02-seat-failure-path]] — A seat that fails says so: votes 36 and 37, the generation retire, and the two defects behind one lost boot
-- 2026-11-02 [[chg-2026-11-02-thread-model-c4]] — Thread-model C4: a note aimed at one thread
-- 2026-11-02 [[chg-2026-11-02-thread-overhaul-position]] — The thread-model overhaul's position: C7 was not its last chunk
-- 2026-11-02 [[chg-2026-11-02-usr-notes]] — SIGUSR1 and SIGUSR2 become notes, and every family word outgrows its byte
-- 2026-10-29 [[chg-2026-10-29-aux-corona-join]] — The corona join: aux-3 carries env-a and env-c, and every deferring lock is taken through its helper
+- 2026-11-02 [[chg-2026-11-02-b3h-audit-r1-fixes]] — B-3h audit round 1's fixes
+- 2026-11-02 [[chg-2026-11-02-b3h-audit-r2-fixes]] — B-3h audit round 2's fixes
+- 2026-11-02 [[chg-2026-11-02-b3h-audit-r3-fixes]] — B-3h audit round 3's fixes
+- 2026-11-02 [[chg-2026-11-02-b3h-audit-r4-fixes]] — B-3h audit round 4's fixes
+- 2026-11-02 [[chg-2026-11-02-b3h-audit-r5-fixes]] — B-3h audit round 5's fixes
+- 2026-11-02 [[chg-2026-11-02-b3h-audit-r6-fixes]] — B-3h audit round 6's fixes
 <!-- generated:end -->

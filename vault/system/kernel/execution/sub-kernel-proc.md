@@ -22,6 +22,32 @@ the latch and detaches the memberships before draining; proc_free repeats the
 idempotent notification for construction/rollback paths. Membership never
 depends on the current namespace. See [[sub-kernel-devsrv]].
 
+## The creation mask (2026-10-19, B-3e M8)
+
+`struct Proc` gains `u32 umask`, the rwx bits every create drops before the
+parent directory's bound applies
+([[dec-2026-10-19-create-mode-bound-and-umask]]). It is appended at the tail,
+after `debug_birth_hold` filled the last tail pad, so no offset moves: offset
+408, and the struct grows 408 -> 416 with a new 4-byte tail pad; both are
+`_Static_assert`ed. `proc_init_fields` sets `PROC_UMASK_DEFAULT` (0022, POSIX's
+conventional mask), because KP_ZERO's 0 would be the widest mask; kproc gets it
+there too. `rfork_internal` copies `proc_umask(parent)` into the unpublished
+child, so every way a Proc is made (`rfork`, `rfork_forked`,
+`rfork_forked_with_caps`, `rfork_with_caps`, `rfork_spawn_held`) inherits its
+parent's mask, and nothing resets it at exec: POSIX fork and exec semantics.
+
+Live reads and writes go through `proc_umask` (a relaxed load) and
+`proc_umask_exchange` (a relaxed exchange). The mask is the whole payload, so
+no ordering against another field is owed, and a thread exchanging it while a
+peer creates or forks hands the creator or the child one value the Proc held.
+No lock covers it. The writers are `SYS_UMASK` and the phenotype's umask; the
+readers are `rfork_internal`, `spoor_create_install`
+([[sub-kernel-syscall-dispatch]]) and Loom's directory-mutation gate
+([[sub-kernel-loom]]).
+`proc_identity.umask_default_and_inherit` checks kproc, a fresh Proc, and a
+child made under a non-default parent mask, so a child given the default
+instead reads 0022, not the parent's 0077.
+
 ## Graphical seat incarnations
 
 The kernel binds one boot-designated hardware service, one normal compositor
@@ -113,7 +139,7 @@ explicit at both ends, and the paired ACQUIRE load lives in `devproc_debug_autho
 |---|---|
 | `proc_alloc_in` / `proc_free` | allocate a KP_ZERO'd Proc with a pid drawn from the id space + stripes + pgtable + handle table + note queue (static in production: `rfork_internal` is its one caller; `proc_alloc` is the tests' wrapper); free one that is ZOMBIE with no threads and no children |
 | `rfork` / `rfork_with_caps` / `rfork_forked` / `rfork_forked_with_caps` | the sole Proc-creation chokepoint; `RFPROC` **or** `RFPROC\|RFMEM`, every other flag **extincts**, except the kernel-internal `RFCENVG` on either: the child starts with no environment group instead of a copy of the parent's, set only by a spawn whose `SPAWN_EXT_ENV` tail names the child's environment ([[sub-kernel-content]]); `SYS_RFORK` refuses it. The `_forked_with_caps` variant is the Linux `clone`'s (syscall.c), which passes `caps_mask = CAP_ALL` -- a clone has no caps argument, so the child inherits the parent's full set minus the elevation strip |
-| `rfork_init` | `RFPROC` taking `PROC_ID_INIT` (1), init's pid, exactly once; a second call extincts. joey's start ([[sub-kernel-joey]]) |
+| `rfork_init` | `rfork_with_caps` taking `PROC_ID_INIT` (1), init's pid, exactly once; a second call extincts. joey's start ([[sub-kernel-joey]]) |
 | `proc_id_alloc` / `proc_id_space_spent` | the one id space pids and tids draw from (thread-model C6, ARCH 7.3.4): a 64-bit counter seeded at 2 (0 is kproc's and its boot thread's, 1 is init's); a draw past `PROC_ID_LAST` (2^31 - 1) answers -1, a user's past `PROC_ID_USER_LAST` (the last 2^20 ids are the TCB's, vote 10), and a refused draw leaves the counter unmoved; nothing is reused |
 | `proc_spawn_thread_budget_resolve` | the spawn's thread budget (ARCH 7.3.5): 0 inherits the parent's; past `proc_thread_budget_hard_max()` refused; at or below the parent's own allowed; above it only with `PROC_FLAG_MAY_RAISE_THREAD_BUDGET`. 0 means refused |
 | `rfork_spawn_held` | `rfork_with_caps` with the child published already marked UNBORN, for the `SPAWN_DEBUG_HELD` spawn ([[sub-kernel-birth-hold]]); it takes the same flag word, `RFPROC` or `RFPROC\|RFCENVG` |
@@ -513,7 +539,10 @@ a masked-window lever.
 
 ## Data structures
 
-`struct Proc` is 424 bytes and no longer holds a page table at all — it holds a
+`struct Proc` is 432 bytes (IM-2's propagating-legate pair took it 392 -> 408,
+and M8's `umask` and the thread reap's three fields 408 -> 432; the
+`_Static_assert` expression is the authority, not this line) and no longer
+holds a page table at all — it holds a
 pointer to a refcounted address space, which is what makes the vfork and
 copy-on-write shapes above expressible. That extraction is the **only change in
 the struct's recorded history that ever made it smaller**: 408 → 376 in one

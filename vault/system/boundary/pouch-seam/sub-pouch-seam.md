@@ -22,8 +22,104 @@ validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/POUCH-DESIGN.md"]
 created: 2026-08-01
-updated: 2026-10-29
+updated: 2026-11-02
 ---
+## 0065: fcntl locks and flock (2026-11-02, B-3h4)
+
+The new `_pouch_lock.h` holds `SYS_thyla_file_lock` 137, the `POUCH_FILE_LOCK_*` op
+words, `struct pouch_file_lock` (32 bytes) and `pouch_lock_refuse`. Only the lock
+adapters include it, so a checker of `_pouch_descriptor.h` need not mock them.
+`fcntl.c` gains the lock commands, `src/linux/flock.c` the `flock` call ([[sub-pouch-fs]]).
+The census gains `POUCH_CENSUS_LOCKS`, the file-lock prover's legs.
+
+## 0063: utimensat over SYS_WSTAT, and __syscall7 (2026-10-22, B-3g G12)
+
+The series gains 0063 ([[dec-2026-10-22-wstat-times]]). `SYS_WSTAT` reads a
+time pair from x6, and Linux on aarch64 has no seven-argument call, so the
+seam gains `__syscall7`: the sentinel guard first, then x0..x6 and x8, as the
+six below it are built. musl's own `__SYSCALL_NARGS` already dispatches seven
+arguments, so `__syscall(SYS_thyla_wstat, ...)` with seven reaches it with
+no other change. `_pouch_fs.h` gains `POUCH_WSTAT_ATIME`, `MTIME`, `ATIME_SET`
+and `MTIME_SET` at the kernel's bits. `__NR_utimensat` stays the sentinel in
+`bits/syscall.h`: the new `utimensat.c` calls `SYS_thyla_wstat` and never
+names it ([[sub-pouch-fs]]). `tools/test-pouch-times.py` derives the shape of
+every `__syscallN` from `syscall_arch.h` (the guard first, argument i bound
+to register xi, the operand list x8, x0 and x1..x(N-1)) and requires exactly
+`__syscall0..7`; it refuses the tree if `__syscall7` loses its guard, binds
+x6 to the wrong argument, or drops x6 from its operands.
+
+## 0062: link and linkat answer EPERM (2026-10-21, B-3g)
+
+The series gains 0062 ([[dec-2026-10-21-pouch-link-eperm]]). `link.c` and
+`linkat.c` set `errno` to `EPERM` and return -1 themselves (-EPERM is the
+flat -1 that `__syscall_ret` reads as EIO) and no longer call the seam, so a
+call that used to reach the 0xFFFF sentinel and answer `ENOSYS` makes no
+syscall at all; `linkat` answers `EINVAL` first for a flag Linux refuses
+([[sub-pouch-fs]]). `__NR_linkat` stays the sentinel in `bits/syscall.h`, so
+the seam check's list is unchanged. `tools/test-pouch-link.py` counts every
+call into its mocked seam and requires none. The census line
+`POUCH_CENSUS_LINKS` gains `hardlink`, the links prover's eleventh leg.
+`POUCH_CENSUS_LINKS` gains `dtype` the same day (readdir's `d_type` on
+the fixture and on `/hw`; [[sub-pouch-fs]]). `pouch-census.h` also holds
+`GO_CENSUS_FS`, the census go-fs prints: a Go
+program cannot include the header, so it prints its own copy and a
+disagreement fails the boot ([[sub-stratum-boot]]). G12 (2026-10-22) adds
+`POUCH_CENSUS_TIMES`, the file-times prover's nine legs, and `chtimes` to
+`GO_CENSUS_FS`.
+
+## 0061: fstat and the tty ioctls answer EBADF (2026-10-20)
+
+The series gains 0061. The kernel's `SYS_FSTAT` answers -EBADF for a handle
+that names no Spoor ([[sub-kernel-syscall-abi]]), and `fstat`'s decode passes
+it through; 0010's fallback, which read any other non-zero return as `EBADF`,
+sat behind the decode and is gone. 0021's `ioctl` answers `EBADF` for a dead
+descriptor, where it answered `ENOTTY`, at every exit where a request does not
+fit the descriptor, and refuses a NULL argument with `EFAULT` only once the
+descriptor is known to be a terminal, where it answered `EINVAL` before
+looking at the descriptor ([[sub-pouch-tty]]). `tools/test-pouch-fstat-ebadf.py` runs
+the real `fstat.c`, `ioctl.c`, `isatty.c` and `syscall_ret.c` over a mocked
+`SYS_fstat`. The census line `POUCH_CENSUS_FD` gains `fstat-ebadf` and
+`isatty-ebadf` ([[sub-pouch-fs]]).
+
+## 0060: musl's raw opens through openat's translation (2026-10-20)
+
+The series gains 0060. `bits/syscall.h` names the native open, 65,
+`__NR_open`, so upstream `src/internal/syscall.h` expanded its `sys_open`
+family to `SYS_open` with Linux's (path, flags, mode), and every musl raw open
+sent the native call the wrong shape (OPEN-BUGS 2026-10-15 O-4). The
+raw-caller rule below was not applied to it: a census for `SYS_open` finds
+only the macro block, because the callers spell `sys_open(`, so a renumbered
+call's census also counts the users of every macro that expands to it. 0060
+routes the four macros to the hidden `__pouch_sys_open` ([[sub-pouch-fs]]),
+which leaves `SYS_open` to its native callers (`bind`, `connect`,
+`_pouch_socket.c`), and returns 0023's stdio openers to upstream's
+`sys_open`. Pouch's `bits/syscall.h` adds two names aarch64 Linux lacks,
+`open` (65) and `poll` (29): `poll`'s native call takes Linux's arguments and
+`open`'s does not. `fstat` and `lseek` are renumbered onto native calls, and
+no Linux-shaped caller of either is left. `tools/test-pouch-raw-open.py` pins
+the expansions. The census gains `POUCH_CENSUS_TZ`, the five legs of the time
+zone prover.
+
+## 0059: symlink truth over SYS_LSTAT and SYS_READLINK (2026-10-20, B-3f')
+
+The series gains 0059 ([[dec-2026-10-20-native-lstat-readlink]]).
+`_pouch_fs.h` gains `SYS_thyla_readlink` 135 and `SYS_thyla_lstat` 136 beside
+0058's umask, and `POUCH_ONOFOLLOW` (0x20, the kernel's
+`SYS_WALK_OPEN_NOFOLLOW`). `bits/syscall.h` is untouched, so the seam check's
+list is too. `tools/test-native-handle-query.py` pins both numbers, and
+`tools/test-pouch-symlinks.py` checks them, `POUCH_ONOFOLLOW`, `POUCH_OPATH`
+and `POUCH_PATH_MAX` against the kernel header. The census gains
+`POUCH_CENSUS_LINKS`, the ten legs of the symlink prover ([[sub-pouch-fs]]).
+
+## 0058: umask over SYS_UMASK (2026-10-19, B-3e M8)
+
+The series gains 0058 ([[dec-2026-10-19-create-mode-bound-and-umask]]):
+`src/stat/umask.c` returns `__syscall(SYS_thyla_umask, mode & 0777)`, with
+`SYS_thyla_umask` 133 in `_pouch_fs.h` beside 0057's getppid. `bits/syscall.h`
+keeps `SYS_umask` at the 0xFFFF sentinel, so the seam check's list is
+unchanged; the number is pinned by `tools/test-native-handle-query.py`, as
+0057's is. The census line gains `umask` after `fdopendir` ([[sub-pouch-fs]]).
+
 ## Purpose
 
 The one place a POSIX call becomes a Thylacine syscall. musl funnels
@@ -40,8 +136,9 @@ else in the series is a lower-half file riding this seam.
   file is reproducible after a musl re-vendor by the awk filter recorded
   in the 0001 header (a name→number map; everything unmapped becomes the
   sentinel).
-- **`__syscall0..6`** (`arch/aarch64/syscall_arch.h`) — each begins
+- **`__syscall0..7`** (`arch/aarch64/syscall_arch.h`) — each begins
   `if (n == POUCH_SYSCALL_UNIMPL) return -ENOSYS;` BEFORE issuing `svc`.
+  `__syscall7` is Thylacine's alone (0063): `SYS_WSTAT` reads x6.
 - **`__syscall_cp`** (`src/thread/__syscall_cp.c`) — the same guard, at
   the C chokepoint every *cancellable* call resolves through.
 - **`__syscall_ret`** (`src/internal/syscall_ret.c`) — `r == -1` →
@@ -247,7 +344,7 @@ surface, which is recorded honestly rather than papered over:
   A patch that adds a directory to that list is a P-4 review event, argued
   in its header. "stdio" is not wholly upper half: its fd-facing BACKENDS
   (`__stdio_read/write/close/seek`, the openers, `tmpfile`) are where libc
-  meets the kernel, and 0002 / 0023 / 0035 / 0036 / 0038 patch them; the
+  meets the kernel, and 0002 / 0023 / 0035 / 0036 / 0038 / 0060 patch them; the
   formatting and buffering core above them is untouched. By that
   derivation the B-0 series entered exactly TWO new directories:
   `src/legacy` (0037) and `include/sys` (0039 — the series' first PUBLIC
@@ -260,12 +357,14 @@ surface, which is recorded honestly rather than papered over:
 
 ## Error paths
 
-`-ENOSYS` (sentinel, both paths). `EIO` for every flat kernel `-1` —
-design-sanctioned imprecision, not a bug: Thylacine's convention carries
-no errno, so a lower-half wrapper that can determine something better
-does so itself before reaching the decode. Explicit `-errno` in
-`[-4095,-2]` passes through, which is how the stalk-resolved calls
-(`SYS_open` and friends, since ER-1) deliver real `ENOENT` / `EACCES`.
+`-ENOSYS` (sentinel, both paths). `EIO` for a flat kernel `-1` —
+design-sanctioned imprecision, not a bug: a call the error rollout has not
+converted answers a bare `-1`, which carries no errno, so a lower-half
+wrapper that can determine something better does so itself before reaching
+the decode. Explicit `-errno` in `[-4095,-2]` passes through, which is how
+the converted calls deliver real errnos: the stalk-resolved calls (`SYS_open`
+and friends, since ER-1) their `ENOENT` / `EACCES`, and `SYS_FSTAT` (since
+2026-10-20) its `EBADF`.
 
 ## Performance
 
@@ -419,7 +518,9 @@ per-call errno approximation built on top of it.
 
 ## Caveats
 
-- **OPEN (found 2026-09-21): the identity calls return the raw sentinel.**
+- **CLOSED (A-6, 0043; `getppid` B-3b vote 6, 0057, 2026-10-15; `umask` M8,
+  0058, 2026-10-19) -- recorded for the class, not as a live defect: the
+  identity calls returned the raw sentinel.**
   `getuid` / `geteuid` / `getgid` / `getegid` / `getppid` are
   `return __syscall(SYS_getuid)`-shaped and their numbers are `0xFFFF`, so
   each returns `(uid_t)-38` = `0xFFFFFFDA`. The kernel HAS `SYS_GETUID` = 73
@@ -431,9 +532,10 @@ per-call errno approximation built on top of it.
   Changing libc's answer changes the storage daemon's security behaviour, so
   it is its own chunk on the A-3 identity surface. CONFIRMED ON THE DEVICE
   2026-09-21: `uid=4294967258`, `ppid=-38`. Of the other parked names only
-  `uname` fails VISIBLY (`-1`/`ENOSYS`): `umask()` returns `0xFFFFFFFF` as the
-  "previous mask" from an API that cannot fail and never sets the mask, and
-  `times()` returns `(clock_t)-38` -- not the documented `-1` -- with `*tms`
+  `uname` fails VISIBLY (`-1`/`ENOSYS`): `umask()` returned `0xFFFFFFFF` as
+  the "previous mask" from an API that cannot fail and never set the mask
+  (0058 serves it over `SYS_UMASK` since 2026-10-19, cut to `mode & 0777` so
+  it cannot fail), and `times()` returns `(clock_t)-38` -- not the documented `-1` -- with `*tms`
   untouched. The audit rounds' full list of this class (r1 F1 + F8, r2 F1)
   is in `memory/audit_pouch_0033_0035_closed_list.md`. Round 2 found a
   SIXTH out-struct reader round 1's list had waved through: `ualarm()`
@@ -497,8 +599,10 @@ per-call errno approximation built on top of it.
   replaced changes the marker as surely as one added: the threads census
   traded `exited-counted` for `held-counted,exited-freed` when exited
   threads began to be freed at the switch (2026-10-22, [[sub-pouch-thread]]),
-  and gained `mask`, `mask-c11` and `mask-queued` with 0065 (2026-10-29: a new
+  and gained `mask`, `mask-c11` and `mask-queued` with 0066 (2026-10-29: a new
   thread starts with its creator's signal mask).
+  B-3b's round-1 close (2026-10-15) adds `pouch-hello-fd`'s `cloexec` leg and
+  `pouch-hello-signals`' `probe` leg to their census lines.
 - **`docs/REFERENCE.md`'s pouch row (absorbed) says "seven patches" and
   "Ten pouch binaries"** — both long stale (count the series with
   `grep -vc '^#\|^$' usr/lib/pouch/patches/series`, never from a number

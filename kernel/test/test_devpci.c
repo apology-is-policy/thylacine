@@ -19,6 +19,7 @@
 #include <thylacine/types.h>
 #include <thylacine/virtio_pci.h>  // virtio_pci_dev_count
 
+#include "../../arch/arm64/uart.h"
 // =============================================================================
 // Helpers.
 // =============================================================================
@@ -211,7 +212,7 @@ void test_devpci_readdir(void) {
 
     int entries = 0;
     u64 prev = 0;
-    bool strict = true, nonzero = true, all_dirs = true;
+    bool strict = true, nonzero = true, all_dirs = true, all_dt_dir = true;
     long pos = 0;
     for (;;) {
         u64 ck; u32 nl; u8 qt;
@@ -220,6 +221,7 @@ void test_devpci_readdir(void) {
         if (ck == 0) nonzero = false;
         if (ck <= prev) strict = false;
         if (qt != QTDIR) all_dirs = false;
+        if (buf[pos + 21] != 4) all_dt_dir = false;     // DT_DIR
         prev = ck;
         entries++;
         pos += e;
@@ -228,6 +230,9 @@ void test_devpci_readdir(void) {
     TEST_ASSERT(nonzero, "every root cookie is non-zero");
     TEST_ASSERT(strict, "root cookies strictly increase");
     TEST_ASSERT(all_dirs, "every root entry is a directory");
+    TEST_ASSERT(all_dt_dir, "every root entry's type byte is DT_DIR (4)");
+    if (count == 0)
+        uart_puts("    [skip] devpci.readdir: no PCI function, so no type byte was read\n");
 
     if (!test_requires(count > 0, "thylacine.virtio-pci-rng", 0, false,
                        "no virtio PCI function enumerates")) {
@@ -238,11 +243,12 @@ void test_devpci_readdir(void) {
     bool named = first_dirent_name(buf, n, bdf, sizeof(bdf));
     struct Spoor *fdir = named ? walk1(root, bdf) : NULL;
     bool walked = fdir != NULL, is_ctl = false;
-    u64 ck = 0; u32 nl = 0; u8 qt = 0;
+    u64 ck = 0; u32 nl = 0; u8 qt = 0, entry_type = 0;
     long e = 0, past = -1;
     if (fdir) {
         long fn = devpci.readdir(fdir, buf, sizeof(buf), 0);
         e = dirent_parse(buf, 0, fn, &ck, &nl, &qt);
+        entry_type = buf[21];
         is_ctl = nl == 3 && buf[24] == 'c' && buf[25] == 't' && buf[26] == 'l';
         // exactly one entry: resuming past it is EOD.
         past = devpci.readdir(fdir, buf, sizeof(buf), (s64)ck);
@@ -253,6 +259,7 @@ void test_devpci_readdir(void) {
     TEST_ASSERT(walked, "walk to <bdf>");
     TEST_ASSERT(e > 0, "function dir lists an entry");
     TEST_EXPECT_EQ(qt, (u8)QTFILE, "the entry is a file (ctl)");
+    TEST_EXPECT_EQ(entry_type, (u8)8, "its type byte is DT_REG (8)");
     TEST_ASSERT(is_ctl, "the entry is named ctl");
     TEST_EXPECT_EQ(past, (long)0, "function dir has exactly one entry");
 }

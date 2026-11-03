@@ -6,13 +6,17 @@
 
 // Per-Proc environment group (ARCH section 9.7 / G15) -- the Plan 9 Egrp idiom.
 // A table of name->value pairs surfaced as the per-Proc /env directory (devenv,
-// dc='E'). A program reads its environment from /env, never from an envp: write
-// /env/NAME to set, read /env/NAME to get, readdir /env to list. A spawned child
-// inherits a COPY via env_clone_into (like territory_clone), unless its
-// spawner names a different environment in the SPAWN_EXT_ENV tail: then the
-// child is forked with none (RFCENVG) and adopts the one the spawner built
-// (env_from_block, env_install). The reserved RFENVG (share
-// semantics) stays deferred, so ref is always 1 at v1.0.
+// dc='E'). /env is the environment's one home -- write /env/NAME to set, read
+// /env/NAME to get, readdir /env to list -- and exec projects it onto a new
+// image's stack as its envp (exec_stage_env). A spawned child
+// inherits a COPY via env_clone_into, like territory_clone (Plan 9's rfork SHARES
+// the group unless RFENVG; Thylacine copies, and the reserved RFENVG stays
+// deferred), unless its spawner names a different environment in the
+// SPAWN_EXT_ENV tail (env_from_block, env_install). `ref` counts the owning Proc
+// plus every open /env/NAME Spoor opened in this Env (one per open, however many
+// handles, mounts or Loom entries share it): an open entry acts on the Env it
+// was opened in, whoever holds it (ARCH 9.7), so an Env can outlive its Proc
+// until the last such Spoor closes.
 //
 // The Env is lazily allocated (a Proc with no environment carries env == NULL,
 // read as empty). Every access takes env->lock -- peer threads of a Proc share
@@ -28,7 +32,8 @@
 
 #define ENV_NAME_MAX     64        // var name incl. the NUL
 #define ENV_VALUE_MAX    4096      // var value, raw bytes (kmalloc'd; DoS floor)
-#define ENV_MAX_ENTRIES  64        // per-Proc cap (DoS floor; composes I-32)
+#define ENV_MAX_ENTRIES  256       // per-Env cap (DoS floor; composes I-32)
+#define ENV_FIRST_ENTRIES 64       // a new table's slots; it doubles up to the cap
 
 struct EnvEntry {
     u64   id;                       // monotonic; 0 == free slot (never reused)
@@ -38,8 +43,8 @@ struct EnvEntry {
 };
 
 struct Env {
-    int              ref;           // 1 at v1.0 (RFENVG sharing deferred); accessed
-                                    // via __atomic_* (the territory_unref pattern)
+    int              ref;           // the Proc + each open entry handle (env_ref);
+                                    // accessed via __atomic_* (territory_ref/unref)
     spin_lock_t      lock;          // serializes every access
     u64              devno;         // Plan 9 Chan.dev for THIS Env (V-4b-5). Every
                                     // other Dev's qid namespace is global, so a
@@ -50,19 +55,33 @@ struct Env {
                                     // the same file identity. See devenv_walk.
     u64              next_id;       // monotonic id source (>= 1; never reuses)
     int              count;         // live entries (the DoS bound)
-    struct EnvEntry  entries[ENV_MAX_ENTRIES];
+    int              cap;           // slots in entries; changes only under the lock
+    struct EnvEntry *entries;       // doubled by env_grow, replaced by env_install:
+                                    // index only under the lock
 };
 
 struct Proc;
+
+// One step up from `seen` slots, unless a peer already took it. False on OOM.
+bool env_grow(struct Env *e, int seen);
 
 // --- lifecycle (proc.c) -----------------------------------------------------
 // env_clone_into deep-copies parent's env into child (fresh ref=1); a NULL
 // parent->env leaves child->env NULL (empty). Returns 0 on success, -1 on OOM
 // (child->env stays NULL -> the proc_free rollback's env_free is a clean no-op).
-// env_free drops the ref + frees on the last drop (every value + the struct);
-// NULL-tolerant; clears p->env so a second call no-ops.
+// env_free drops the Proc's ref + frees on the last drop (every value + the
+// struct); NULL-tolerant; clears p->env so a second call no-ops.
 int  env_clone_into(struct Proc *child, struct Proc *parent);
 void env_free(struct Proc *p);
+
+// --- an open handle's Env (devenv) -------------------------------------------
+// env_current is p->env (NULL == empty), borrowed: valid while p is live, which
+// the calling Proc always is. env_ref takes a ref for an open /env/NAME handle;
+// env_unref drops one and frees on the last drop. The *_in forms below act on
+// an Env directly (a handle's), NULL-tolerant like the Proc forms.
+struct Env *env_current(struct Proc *p);
+void env_ref(struct Env *e);
+void env_unref(struct Env *e);
 
 // --- per-name ops (devenv) --------------------------------------------------
 // Each resolves p->env (lazily allocating only on the create path) and takes
@@ -95,6 +114,13 @@ bool env_iter(struct Proc *p, u64 after_id, u64 *out_id, char *name_out,
               u32 name_cap, u32 *name_len_out);
 bool env_size(struct Proc *p, u64 id, u64 *out_len);
 u64  env_devno(struct Proc *p);   // 0 if the Proc has no env yet (nothing under it)
+
+void env_truncate_in(struct Env *e, u64 id);
+long env_read_in(struct Env *e, u64 id, s64 off, void *buf, long n);
+long env_write_in(struct Env *e, u64 id, s64 off, const void *buf, long n);
+bool env_iter_in(struct Env *e, u64 after_id, u64 *out_id, char *name_out,
+                 u32 name_cap, u32 *name_len_out);
+bool env_size_in(struct Env *e, u64 id, u64 *out_len);
 
 // --- the flat block (devproc, exec) ------------------------------------------
 // env_render_environ renders the whole environment as Linux's NUL-separated
@@ -133,9 +159,10 @@ long env_render_environ(struct Proc *p, s64 off, void *buf, long n);
 // env_install hands `fresh` to p, consuming it. A tail spawn's child is forked
 // with no group (RFCENVG) and adopts `fresh` as its own. A Proc that already
 // has one has it emptied and refilled in place under its lock, never freed or
-// swapped: a cross-Proc devproc reader may hold it. Call it only before p's
-// first EL0 instruction (the spawn thunk), when no peer thread of p can mutate
-// the group.
+// swapped: a cross-Proc devproc reader may hold it. Call it only before p's first EL0
+// instruction (the spawn thunk), when no peer thread of p can mutate the group
+// and no /env handle is bound to it (only p's own opens bind p's group, and p
+// has not run), so the refill reaches no one who saw the copy.
 //
 // env_discard frees a detached Env that was never installed (NULL-tolerant).
 struct Env *env_from_block(const char *block, u32 len, int *err);
@@ -143,8 +170,8 @@ void env_install(struct Proc *p, struct Env *fresh);
 void env_discard(struct Env *e);
 
 #ifdef KERNEL_TESTS
-// Envs allocated and not yet freed, every kind counted (a Proc's group, a
-// detached one).
+// Envs allocated and not yet freed, every kind counted (a Proc's group, an
+// open handle's, a detached one).
 u64 env_live_count(void);
 #endif // KERNEL_TESTS
 

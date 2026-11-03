@@ -12,8 +12,24 @@ hazards: []
 abis: []
 design: [docs/9P-EXTENSIONS.md]
 created: 2026-07-31
-updated: 2026-10-27
+updated: 2026-10-29
 ---
+## Tlock and Tgetlock (B-3h, 2026-10-29)
+
+The codec gains P9_TLOCK (52) through P9_RGETLOCK (55), 9P2000.L as diod's
+protocol.md defines them. The fixed fields:
+- Tlock: fid, type, flags (BLOCK 1, RECLAIM 2), start, length, proc_id, and
+  then the `client_id` string.
+- Rlock: one status byte (SUCCESS 0, BLOCKED 1, ERROR 2, GRACE 3).
+- Tgetlock: fid, type, start, length, proc_id, client_id.
+- Rgetlock: the same fields, describing the conflicting lock.
+
+The parsers refuse a short body and a client id that overruns it.
+`P9_GETATTR_GEN` (0x1000) names the generation bit of the getattr mask,
+which Stratum fills from the inode's `si_gen`. Tests:
+`9p_wire.tlock_round_trip` and `9p_wire.tgetlock_round_trip`, with their
+refusal cases.
+
 ## Purpose
 
 The pure byte-level marshal/unmarshal layer for the 9P2000.L dialect plus the
@@ -61,7 +77,8 @@ change masking / covert channel; the Stratum R111 P3 F-10 doctrine).
 **Caller-cap bounds before exposure.** Server-supplied counts are bounded
 against the caller's capacity BEFORE any write or pointer exposure:
 `p9_parse_rwalk` bounds `nwqid` against `qid_cap` (and `P9_MAX_WALK`) before
-unpacking a single qid; `p9_parse_rread`/`p9_parse_rreaddir` bound `count`
+unpacking a single qid, and the session passes the op's own requested count as
+`qid_cap`; `p9_parse_rread`/`p9_parse_rreaddir` bound `count`
 against `data_cap` before exposing `*data_ptr`; `p9_parse_rwalkgetattr`
 additionally requires the body length to be exactly `nwqid *
 P9_WGA_BODY_LEN` (153 — one Rgetattr body per walked component).

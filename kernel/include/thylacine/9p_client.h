@@ -67,6 +67,7 @@
 #define P9_DIRFID_ENTRIES 64u
 struct p9_dirfid_ent {
     u64  qid_path;
+    u64  epoch;    // the Larder epoch it was parked at: a forget outdates it
     u32  fid;
     bool valid;
 };
@@ -398,10 +399,19 @@ struct p9_client {
     // permission, caches or vouches for exec consults it. Stamped once by the
     // attach path before the root Spoor publishes, like `cape`, never flipped.
     bool                 remote;
+    // The session's two ends (IDENTITY-DESIGN 9.7 M7): the principal the server
+    // authenticates (a /srv conn's opener, or a caller-supplied transport's
+    // attacher) and the /srv poster (PRINCIPAL_INVALID for a caller-supplied
+    // transport). A create through the session is admitted only to one of them
+    // (dev9p_create_admits). Stamped once by the attach path before the root
+    // Spoor publishes, like `cape`, never flipped; a client never stamped holds
+    // PRINCIPAL_INVALID in both and admits no create.
+    u32                  client_end;
+    u32                  server_end;
     // The Larder -- the guest-side FS cache (L1c; docs/LARDER-DESIGN.md, I-38).
     // Shared by every Proc/thread resolving through this mount; protected by its
-    // OWN near-leaf lock (never held with c->lock -- the RPCs that take c->lock
-    // run outside the Larder lock). Serves the base X-check re-stat storm + fstat
+    // OWN near-leaf lock, below c->lock (a forget nests it, and nothing takes them
+    // the other way: the RPCs that take c->lock run outside it). Serves the base X-check re-stat storm + fstat
     // from local metadata; own-write invalidation keeps it close-to-open coherent.
     struct larder        larder;
     // G2 (term-4): the dir-fid cache -- PARKED, walk-fresh (never-opened) server
@@ -433,6 +443,13 @@ static inline void p9_client_set_cape(struct p9_client *c, u32 uid, u32 gid) {
 // Stamp the remote declaration, under the same rule as the cape.
 static inline void p9_client_set_remote(struct p9_client *c) {
     c->remote = true;
+}
+
+// Stamp the session's two ends, under the same rule as the cape.
+static inline void p9_client_set_ends(struct p9_client *c, u32 client_end,
+                                      u32 server_end) {
+    c->client_end = client_end;
+    c->server_end = server_end;
 }
 
 // =============================================================================
@@ -500,7 +517,8 @@ void p9_client_ctl_snapshot(struct p9_client *c, struct p9_client_ctl *out);
 
 // Drive the Tversion + Tattach handshake. After this returns 0 the
 // session is OPEN and the root_fid is bound. Returns 0 on success,
-// negative errno on failure. On Rlerror, returns -Rlerror.ecode.
+// negative errno on failure. On Rlerror, returns -Rlerror.ecode (EBADF
+// reads -EIO, as for every op).
 int  p9_client_handshake(struct p9_client *c,
                           const u8 *uname, size_t uname_len,
                           const u8 *aname, size_t aname_len,
@@ -514,7 +532,7 @@ int  p9_client_handshake(struct p9_client *c,
 // component is a (name_ptr, name_len) pair; `names` is `nwname`
 // pointers, `name_lens` is `nwname` lengths. `nwname == 0` clones
 // `src_fid` into `new_fid`. The output qids array is filled with up
-// to P9_MAX_WALK entries; `*out_nwqid` is set to the actual count.
+// to `nwname` entries; `*out_nwqid` is set to the actual count.
 // Returns 0 on success.
 int  p9_client_walk(struct p9_client *c,
                      u32 src_fid, u32 new_fid,
@@ -627,6 +645,16 @@ int  p9_client_statfs(struct p9_client *c, u32 fid,
                        struct p9_statfs *out_statfs);
 #endif // KERNEL_TESTS
 int  p9_client_fsync(struct p9_client *c, u32 fid, u32 datasync);
+
+// Tlock / Tgetlock (B-3h, ARCH 9.6.11). A conflict is *status ==
+// P9_LOCK_BLOCKED, not an error: the server never waits. `client` is Tlock's
+// client_id, the identity a take's records count against; an unlock sends none.
+int  p9_client_lock(struct p9_client *c, u32 fid, u8 type, u32 flags,
+                    u64 start, u64 length, const u8 *client, u16 client_len,
+                    u8 *status);
+int  p9_client_getlock(struct p9_client *c, u32 fid, u8 type,
+                       u64 start, u64 length, const u8 *client, u16 client_len,
+                       struct p9_getlock *out);
 
 // =============================================================================
 // Weft operations (Weft-6; NET-THROUGHPUT.md section 6).
@@ -832,7 +860,9 @@ void p9_client_mark_devgone(struct p9_client *c);
 //             Loom device-gone terminal (MENAGERIE.md section 10); maps
 //             to the CQE -T_E_NODEV. Only the async (POST_CQE) completion
 //             path carries it -- the sync front-end keeps -EIO.
-//   -<n>    — Rlerror surface: n = the Linux errno the server returned.
+//   -<n>    — Rlerror surface: n = the Linux errno the server returned,
+//             except EBADF, which reads -EIO (only the kernel's handle gate
+//             answers EBADF).
 // =============================================================================
 
 #define P9_E_OK       0

@@ -16,6 +16,8 @@ code:
   - usr/utopia/libutopia/src/eval/discipline.rs
   - usr/utopia/libutopia/src/eval/value.rs
   - usr/utopia/libutopia/src/eval/error.rs
+  - usr/utopia/libutopia/src/eval/mountargs.rs
+  - usr/utopia/libutopia/src/eval/umaskargs.rs
   - usr/u-glob-test/src/main.rs
 audit: light
 guarded-by: [inv-i19, inv-i20, inv-i27, inv-i28]
@@ -26,7 +28,7 @@ abis: []
 design:
   - "docs/UTOPIA-SHELL-DESIGN.md sections 5-10"
 created: 2026-08-03
-updated: 2026-10-14
+updated: 2026-10-29
 ---
 ## October 1 spawn and foreground recheck
 
@@ -71,6 +73,45 @@ leg, the mount itself, names a cause only when the kernel gives one: since the
 PATH: not a directory" (an attach root is a directory), and the kernel's flat
 -1 still reads "mount: cannot mount at PATH".
 
+
+**`bind` (B-3e, 2026-10-18).** `bind [-b|-a] [-c] new old` grafts `new`, a name
+that already resolves in the shell's namespace, over `old`: one `t_open` of `new`
+with `T_OPATH`, then `t_mount` with Plan 9's flags. It was pulled forward because
+IDENTITY-DESIGN 9.7 M7 admits a create through a 9P session only to the session's
+ends, so a user who runs tests in a tree on the system pool layers a directory of
+their own over it (`bind -bc`) and the creates land in that layer. The grammar of
+`mount` and `bind` lives in `mountargs`, outside the `backend` gate, so its tests
+run on the host (`tools/test-rust.sh libutopia`); `builtin` asserts that its four
+flag values equal libthyla-rs's. A repeated ordering flag (`-bb`) is accepted;
+only `-b` with `-a` is refused. All three namespace builtins pass their names
+through `ns_name`: a relative name is joined onto `$cwd` with the same lexical
+`normalize_abs` that `cd` uses, because the kernel resolves a mount point from
+the root only (`sys_resolve_mountpoint`), and before 2026-10-18 a relative mount
+point named the root's entry, not one below `$cwd`. An absolute name passes
+unchanged, and a trailing `/` survives the join: `normalize_abs` drops it, and
+the trailing slash is how a name asks to follow a final symlink.
+
+**`umask` (B-3e, 2026-10-19).** `umask [mode]` prints the shell Proc's creation
+mask as four octal digits, or sets it from one to four octal digits of value at
+most 0777 (UTOPIA-SHELL-DESIGN 9.1; IDENTITY-DESIGN 9.7 M8, operator vote
+2026-10-19). It is a builtin for `cd`'s reason: the mask is the calling Proc's
+own state, which every Proc it starts inherits, so a command would change only
+itself. The kernel offers only an exchange (`SYS_UMASK`), so a bare `umask` reads
+by exchanging twice, and its first exchange asks for 0777: anything this Proc
+creates in the window comes out narrower than asked, never wider. Its grammar is
+the pure `umaskargs` module (host-tested: `bad mask X`, the usage line for two
+operands, four-digit output, every mask read back); the parse runs before any
+syscall, so a refused mode changes nothing. u-builtin-test probe 14 witnesses the
+default arriving, a set, a bare read leaving the mask unchanged and a refusal
+changing nothing; viv-run.exp the printed form and the created modes.
+
+**`unset NAME...` (operator vote 2026-10-28).** It removes each name from the
+shell's variables and from the shell's own `/env`. Only the shell can do the
+second: a removal acts on the remover's environment, so an `rm /env/NAME` the
+shell spawns removes the name from `rm`'s copy alone. An empty name, one with
+`/`, `.` and `..` are refused (`$status` 1, `$errstr` says which); a name `/env`
+lacks, or one no environment could hold (a NUL, longer than a path component),
+is not an error. ls-3b leg (o) witnesses both removals and both successes.
 
 **Haul and Imperium (2026-09-17).** `mount /srv/NAME PATH [ANAME]` connects
 a byte service, attaches it through SYS_ATTACH_9P_SRV, and mounts the returned
@@ -123,12 +164,12 @@ the kernel against the caller's namespace. `/` left the list at B-1d: it was
 there for the flat initrd root, where the pre-pivot shell found its programs;
 the initrd now keeps them in `bin/`, which is `/bin` on both sides of the pivot
 ([[dec-2026-09-25-initrd-bin-directory]]), and a `/` entry would only have
-searched the disk root ahead of the toolchain dirs. There are seventeen builtins under
-nineteen names (`source` / `.` and `type` / `whence` are pairs; `cd --` ends
+searched the disk root ahead of the toolchain dirs. There are nineteen builtins under
+twenty-one names (`source` / `.` and `type` / `whence` are pairs; `cd --` ends
 option processing — the one way to enter a directory whose name begins with
 `-`), and `BUILTIN_NAMES` — the list
 `is_builtin` tests and `type` answers from — agrees exactly with `try_builtin`'s
-dispatch arms. `mount` and `unmount` are builtins for a structural reason their
+dispatch arms. `mount`, `bind` and `unmount` are builtins for a structural reason their
 module states: Thylacine clones the namespace at every fork, so a mount made by
 a spawned command would land in the child's namespace and vanish with it. They
 landed at `5c22f90d`, whose title says they compile but do not yet work in the

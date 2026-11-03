@@ -826,3 +826,52 @@ Nothing new is asserted by the claim: the five AS-R9 witnesses it added --
 `unmap_interior_start_refused` -- are already described above, each beside the
 arm of the repair it pins. What changes is that churn in that file now flags THIS
 dossier, which is the point of ownership.
+
+## The lazy bias and the extension (2026-10-19, B-3e vote 2)
+
+ARCH 6.5's merge ([[sub-kernel-vma]]) grows an `ANON_LAZY` Burrow under a
+mapping that absorbs a neighbouring reservation. Two fields and two functions
+carry it.
+
+`lazy_va0` and `lazy_va0_set` (under `v->lock`) hold the Burrow's BIAS, the
+address of its byte offset 0. `burrow_lazy_bind_va0`, called by `vma_insert_in`
+once a mapping is linked, stamps it at the first mapping and compares every
+later one; a mismatch sets `lazy_multi_bias`, and `burrow_lazy_extend`
+refuses such a Burrow. Only the merge needs one bias, and a kernel caller may
+map one lazy Burrow twice, so a second bias disqualifies rather than
+extincts. Other types return at once: a CODE Burrow's two aliases differ by
+design.
+
+`burrow_lazy_extend(as, exempt, v, maps_here, first, n)` readies slots
+`[first, first + n)` for a mapping to cover. It refuses (-1, nothing changed) a
+Burrow a handle names, or one whose `mapping_count` exceeds `maps_here`, the
+caller's count of its mappings in `as` (another space maps it): a handle or a
+second space could reach it from outside this address
+space, and none does today (`ANON_LAZY` keeps no handle past construction,
+`burrow_share_into` refuses it, and Loom and weft need eager `ANON`). It then
+checks, rather than trusts, that the slots that already exist hold no page
+(`pagemap_next_resident`, O(depth) over an empty range). The caller found
+their addresses unmapped, so by `NoOrphan` none is resident; a resident one
+would reach EL0 as old memory where a fresh reservation reads zero, so it
+extincts ("a slot no mapping covers still holds a page (NoOrphan broken)"). A
+Burrow that ends short of the range grows (`pagemap_grow`, nodes charged to
+`as`), and `page_count` and `size` move under `v->lock`. The caller holds
+`as->lock` throughout, which is what excludes every other mutator of an
+`ANON_LAZY` map during the growth ([[sub-kernel-pagemap]]).
+
+**NoOrphan on every unmap path.** Finding the slots empty is sound only if
+every path that unmaps a lazy range releases its slots first, and one did not:
+the exact-match unmap (`burrow_unmap_reporting_in`) removed the VMA and left
+its resident slots in the Burrow. Its callers unmap a VA the kernel placed,
+but the Loom ring setup's three failure paths and weft map's failure and
+CAS-loser paths re-take `as->lock` between their map and their unmap, so a
+sibling thread could detach the ring, reserve a lazy region of the same size
+at the same VA, and have the unmap remove THAT. Before the merge this leaked
+the space's page charge (the sole mapping's Burrow was freed by
+`pagemap_destroy`, which uncharges nothing). With it, a protect could make the
+removed VMA one piece of a Burrow that outlives it, and a later extension over
+those offsets would extinct: a user-triggerable extinction. The unmap now
+releases a plain `ANON_LAZY` mapping's slots before the remove, as the range
+detach does, and those five unmaps go through an identity check
+([[sub-kernel-syscall-dispatch]]'s `unmap_if_still_ours`). Witness:
+`anon_merge.unmap_releases_lazy_slots` (OPEN-BUGS 20:36Z).

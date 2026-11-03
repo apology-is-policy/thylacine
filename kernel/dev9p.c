@@ -14,6 +14,7 @@
 #include <thylacine/cons.h>
 #include <thylacine/notes.h>   // thread_death_reaches: may the clunk wait
 #include <thylacine/proc.h>    // G-2: the mapping Proc's vma_lock + pid
+#include <thylacine/rendez.h>
 #include <thylacine/sched.h>   // sched() -- the wb single-flight yield-wait
 #include <thylacine/thread.h>  // G-2: current_thread for the clunk-unmap pid match
 #include <thylacine/page.h>
@@ -24,6 +25,7 @@
 #include <thylacine/weft.h>
 #include <thylacine/types.h>
 
+#include "../arch/arm64/timer.h"     // timer_now_ns -- wb_flush_wait's deadline
 #include "../mm/slub.h"
 
 _Static_assert(DEV9P_PRIV_MAGIC == 0x44395050u, "dev9p priv magic drift");
@@ -41,15 +43,27 @@ VISIBLE_IF_KERNEL_TESTS struct Dev dev9p;
 // A thread no kill can pull out of a wait -- a kernel thread, an exit close --
 // never waits for the server here: where the clunk would wait for a tag or
 // for room in the request ring, the fid goes to the closer (ARCH 8.8.1.1).
+static void dev9p_clunk_settle(struct p9_client *cl, struct p9_attached *owner,
+                               u32 fid, int rc) {
+    if (rc == 0) return;
+    if (rc == -P9_E_AGAIN && owner && p9_attached_defer_clunk(owner, fid) == 0)
+        return;
+    if (p9_client_fid_held(cl, fid)) p9_clunk_refused(fid, rc);
+}
+
 static void dev9p_clunk_fid(struct p9_client *cl, struct p9_attached *owner,
                             u32 fid) {
     int rc = thread_death_reaches(current_thread())
                  ? p9_client_clunk_async(cl, fid)
                  : p9_client_clunk_nowait(cl, fid);
-    if (rc == 0) return;
-    if (rc == -P9_E_AGAIN && owner && p9_attached_defer_clunk(owner, fid) == 0)
-        return;
-    if (p9_client_fid_held(cl, fid)) p9_clunk_refused(fid, rc);
+    dev9p_clunk_settle(cl, owner, fid, rc);
+}
+
+// A last reference's clunk (Dev.close): it can fall on any thread, so it never
+// waits, even where a kill could end the wait.
+static void dev9p_close_clunk(struct p9_client *cl, struct p9_attached *owner,
+                              u32 fid) {
+    dev9p_clunk_settle(cl, owner, fid, p9_client_clunk_nowait(cl, fid));
 }
 
 // =============================================================================
@@ -135,6 +149,16 @@ s64 dev9p_create_errno(struct Spoor *c) {
     return (e <= -2 && e >= -4095) ? (s64)e : -1;
 }
 
+// M7: see the header contract. The dc test comes first so that a dev9p Spoor
+// whose priv fails the magic check refuses rather than passing as "not 9P".
+bool dev9p_create_admits(struct Spoor *c, u32 principal) {
+    if (!c) return false;
+    if (c->dc != DEV9P_DC) return true;
+    struct dev9p_priv *p = priv_of(c);
+    if (!p || !p->client || principal == PRINCIPAL_INVALID) return false;
+    return principal == p->client->client_end || principal == p->client->server_end;
+}
+
 // Like create, open is performed on a freshly walked, unpublished Spoor.
 // Preserve resource refusals so callers can distinguish admission from I/O
 // failure. Non-9P devices and invalid/unspecified wire errors keep EIO.
@@ -185,16 +209,25 @@ static int dev9p_wire_errno(int rc) {
 // fids die with the session (no destroy-time wire teardown -- the session
 // close unbinds every fid server-side).
 
-// Take: remove + return the parked fid for `qid_path`, or -1.
-static s64 dirfid_take(struct p9_client *cl, u64 qid_path) {
+// Take: remove + return the parked fid for `qid_path`, or -1. An entry from
+// before a Larder forget may name an object an op with no owner removed: it is
+// no answer, and goes to *stale for the caller to clunk.
+static s64 dirfid_take(struct p9_client *cl, u64 qid_path, s64 *stale) {
     struct p9_dirfid_cache *dc = &cl->dirfid;
+    u64 epoch = larder_epoch(&cl->larder);
     s64 fid = -1;
+    *stale = -1;
     spin_lock(&dc->lock);
     for (u32 i = 0; i < P9_DIRFID_ENTRIES; i++) {
         if (dc->e[i].valid && dc->e[i].qid_path == qid_path) {
             dc->e[i].valid = false;
-            fid = (s64)dc->e[i].fid;
-            dc->takes++;
+            if (dc->e[i].epoch == epoch) {
+                fid = (s64)dc->e[i].fid;
+                dc->takes++;
+            } else {
+                *stale = (s64)dc->e[i].fid;
+                dc->drops++;
+            }
             break;
         }
     }
@@ -202,9 +235,10 @@ static s64 dirfid_take(struct p9_client *cl, u64 qid_path) {
     return fid;
 }
 
-// Park: insert {qid_path, fid}. Returns a fid the CALLER must clunk (the
-// incoming on dedup, an evicted victim on overflow), or -1.
-static s64 dirfid_put(struct p9_client *cl, u64 qid_path, u32 fid) {
+// Park: insert {qid_path, fid}, at the Larder epoch read before the fid was found
+// good. Returns a fid the CALLER must clunk (the incoming on dedup, an evicted
+// victim on overflow, a resident from before a forget), or -1.
+static s64 dirfid_put(struct p9_client *cl, u64 qid_path, u32 fid, u64 epoch) {
     struct p9_dirfid_cache *dc = &cl->dirfid;
     s64 clunk = -1;
     s32 free_i = -1;
@@ -213,10 +247,18 @@ static s64 dirfid_put(struct p9_client *cl, u64 qid_path, u32 fid) {
         if (dc->e[i].valid) {
             if (dc->e[i].qid_path == qid_path) {
                 // Already parked: keep the resident (fids do not age), clunk
-                // the incoming.
-                dc->dedup_clunks++;
+                // the incoming. A resident from before a forget gives way.
+                s64 out = (s64)fid;
+                if (dc->e[i].epoch != epoch) {
+                    out = (s64)dc->e[i].fid;
+                    dc->e[i].fid   = fid;
+                    dc->e[i].epoch = epoch;
+                    dc->drops++;
+                } else {
+                    dc->dedup_clunks++;
+                }
                 spin_unlock(&dc->lock);
-                return (s64)fid;
+                return out;
             }
         } else if (free_i < 0) {
             free_i = (s32)i;
@@ -231,6 +273,7 @@ static s64 dirfid_put(struct p9_client *cl, u64 qid_path, u32 fid) {
     }
     dc->e[free_i].qid_path = qid_path;
     dc->e[free_i].fid      = fid;
+    dc->e[free_i].epoch    = epoch;
     dc->e[free_i].valid    = true;
     dc->donates++;
     spin_unlock(&dc->lock);
@@ -372,12 +415,14 @@ static int wb_write_run(struct p9_client *cl, u32 fid, u64 off, u32 total,
 // would be unsound, not merely redundant: it completes while the FIRST
 // flusher's remaining chunks are still in flight, an ordering-dependent
 // through-write then lands, and the first flusher's stale residual chunks
-// silently overwrite it. The wait is the on_cpu-spin class -- a yield loop
-// bounded by the in-flight flusher's independent progress (it is parked in
-// the 9P recv and completes or death-unwinds per #811, decrementing either
-// way); no Rendez, so no park/wake surface, no single-waiter hazard, no new
-// I-9 leg. Close never reaches the wait (last-ref: no concurrent op); the
-// cap flush never does either (staging requires wb_flushers == 0).
+// silently overwrite it. The wait is bounded by the in-flight flusher's
+// independent progress (it is parked in the 9P recv and completes or
+// death-unwinds per #811, decrementing either way), and nobody wakes it: a yield
+// loop where a death can reach the thread, a timed sleep where none can
+// (wb_flush_wait). So no park/wake surface, no single-waiter hazard, no new I-9
+// leg. A kill ends the wait with the run kept, as a death inside the flush keeps
+// it. A last close can reach the wait (a peer holds a reference and is
+// flushing); the cap flush never does (staging requires wb_flushers == 0).
 //
 // The flusher count freezes the run: while it is nonzero, stagers stand
 // down (write-through) and growth reallocation is impossible, so the
@@ -388,12 +433,13 @@ static int wb_write_run(struct p9_client *cl, u32 fid, u64 off, u32 total,
 // On failure the run is DROPPED and the errno latched (the voted NFS-async
 // posture: the bytes are lost, the latch reports it via every subsequent
 // write/fsync and the last close -- retry-forever would wedge close). The
-// buffer itself stays allocated (freed at dev9p_close). A thread dying inside
+// buffer itself stays allocated until staging has stopped for good
+// (wb_release_dead_locked, dev9p_close at the latest). A thread dying inside
 // the flush is the exception: a death refuses its send or abandons its Twrite,
 // which says nothing about the server, and write() already reported those
 // bytes written. The run stays staged and nothing is latched, so the next
-// flusher -- the last close at the latest -- sends it; a prefix that landed
-// is rewritten with the same bytes at the same offsets.
+// flusher -- the last close or a closer at the latest -- sends it; a prefix
+// that landed is rewritten with the same bytes at the same offsets.
 // Was this flush's EINTR a caught note cancelling the Twrite? Every caught-note
 // unwind takes the note's claim (thread_caught_note_unwinds), held until the
 // thread's EL0-return tail, so a claim marks the client's flush(5) cancellation.
@@ -404,16 +450,46 @@ static bool wb_note_cancelled(int err) {
     return err == -P9_E_INTR && t && t->note_claim != 0;
 }
 
-static int wb_flush_locked(struct dev9p_priv *p, u64 qid_path) {
-    while (p->wb_flushers != 0) {
-        spin_unlock(&p->wb_lock);
+// Waiting out a peer's flush. A thread a death can reach yields, and the death
+// ends the wait. A closer has no such end and a hung server can keep the flusher
+// parked for as long as it likes, so it sleeps, doubling to a bound.
+#define WB_FLUSH_WAIT_NS_MIN 1000000ull
+#define WB_FLUSH_WAIT_NS_MAX 64000000ull
+static u64 g_wb_flush_sleeps;
+
+#ifdef KERNEL_TESTS
+u64 dev9p_wb_flush_sleeps(void) {
+    return __atomic_load_n(&g_wb_flush_sleeps, __ATOMIC_RELAXED);
+}
+#endif // KERNEL_TESTS
+
+static int wb_flush_wait_never(void *arg) { (void)arg; return 0; }
+
+static void wb_flush_wait(u64 *backoff) {
+    if (thread_death_reaches(current_thread())) {
         sched();                     // yield; the flusher owns the progress
+        return;
+    }
+    __atomic_fetch_add(&g_wb_flush_sleeps, 1, __ATOMIC_RELAXED);
+    struct Rendez r;
+    rendez_init(&r);
+    (void)tsleep(&r, wb_flush_wait_never, NULL, timer_now_ns() + *backoff);
+    if (*backoff < WB_FLUSH_WAIT_NS_MAX) *backoff *= 2;
+}
+
+static int wb_flush_locked(struct dev9p_priv *p, u64 qid_path) {
+    u64 backoff = WB_FLUSH_WAIT_NS_MIN;
+    while (p->wb_flushers != 0) {
+        if (thread_die_pending(current_thread())) return -P9_E_IO;
+        spin_unlock(&p->wb_lock);
+        wb_flush_wait(&backoff);
         spin_lock(&p->wb_lock);
     }
     if (p->wb_len == 0) return p->wb_err ? -(p->wb_err) : 0;
     u64 off   = p->wb_off;
     u32 total = p->wb_len;
     u8 *buf   = p->wb_buf;
+    bool inside_open = p->wb_known;
     p->wb_flushers++;
     spin_unlock(&p->wb_lock);
 
@@ -429,11 +505,13 @@ static int wb_flush_locked(struct dev9p_priv *p, u64 qid_path) {
     // content except the shared boundary page, which install_own extends
     // only when it is an OWN page ending exactly at our start; bytes outside
     // the run stay valid. Runs while wb_flushers > 0 (the frozen run pins
-    // wb_buf AND excludes same-file mutators -- the no-gen-guard premise).
-    // Outside wb_lock (the larder lock is its own leaf; wb_lock never nests
+    // wb_buf AND excludes same-file mutators -- the no-gen-guard premise). That
+    // premise is the open's: a flush past the last close (the anchor is gone)
+    // lands unordered with the file's later writers, so it drops as a failure
+    // does. Outside wb_lock (the larder lock is its own leaf; wb_lock never nests
     // with it).
     larder_attr_invalidate(&p->client->larder, qid_path);
-    if (err) {
+    if (err || !inside_open) {
         larder_page_invalidate(&p->client->larder, qid_path);
     } else {
         u64 ps  = LARDER_PAGE_SIZE;
@@ -706,18 +784,27 @@ int dev9p_client_fid(struct Spoor *c, struct p9_client **out_client, u32 *out_fi
     struct dev9p_priv *p = priv_of(c);
     if (!p) return -1;
     if (out_client) *out_client = p->client;
-    if (out_fid)    *out_fid    = p->fid;
+    // A cached open is registered only once its read fid is installed
+    // (dev9p_loom_register); an unregistered one's ops are refused.
+    if (out_fid)
+        *out_fid = p->cached_open ? __atomic_load_n(&p->co_rfid, __ATOMIC_ACQUIRE)
+                                  : p->fid;
     return 0;
 }
+
+static int co_read_live(struct dev9p_priv *p);
 
 int dev9p_loom_register(struct Spoor *c) {
     // A Loom op drives the fid straight to the wire, past every write-behind
     // path, so a registered priv never stages: flush the run and drop the
     // append anchor, as a metadata write does (dev9p_wstat_native). A latched
     // flush error fails the registration: the ring's ops would never report
-    // it, and the registered ref keeps the user's close from being the last.
+    // it.
     // wb_eligible stays set -- it gates the latch's report on write and fsync.
     struct dev9p_priv *p = priv_of(c);
+    // A ring's ops go to the server: a cached open reads through a read fid
+    // from now on.
+    if (p && p->cached_open) return co_read_live(p);
     if (!p || !p->wb_eligible) return 0;
     spin_lock(&p->wb_lock);
     int fe = p->wb_err ? -(p->wb_err) : 0;
@@ -754,7 +841,7 @@ static struct Walkqid *dev9p_walk(struct Spoor *c, struct Spoor *nc,
                                     const char **name, int nname) {
     struct dev9p_priv *src_priv = priv_of(c);
     if (!src_priv) return NULL;
-    if (src_priv->fid == P9_NOFID) return NULL;   // fidless (cached-open) Spoor
+    if (src_priv->fid == P9_NOFID || src_priv->cached_open) return NULL;   // a cached open
     if (nname < 0 || nname > (int)P9_MAX_WALK) return NULL;
 
     // F3 close (P5-stratumd-stub-bringup audit): allocate the Walkqid
@@ -922,12 +1009,36 @@ static void t_stat_from_p9_attr(struct t_stat *out, const struct p9_attr *attr,
 // connection's principal (A-3 completes per-user attribution). Unlike the .stat slot (the Plan 9 wire-stat,
 // still deferred), this is the metadata source the kernel rwx layer (A-2d) and
 // SYS_FSTAT consume. P9_GETATTR_BASIC covers mode/uid/gid/size/times/nlink.
+// A cached open whose reads still serve its snapshot reports the snapshot's
+// size and version, so a reader sized by fstat reads exactly what is there.
+// The rest is the file's own, so a wstat through the open shows in it.
+static void co_patch_stat(const struct dev9p_priv *p, struct t_stat *out) {
+    if (!p->cached_open || __atomic_load_n(&p->co_rfid, __ATOMIC_ACQUIRE) != P9_NOFID)
+        return;
+    out->size     = p->co_size;
+    out->qid_vers = p->co_stat.qid_vers;
+}
+
+// The fid a cached open's metadata and locks address: a strict open's kept fid,
+// or the one a loose open bound on its first need (P9_NOFID until then). Any
+// other open: its own.
+static u32 lock_fid(const struct dev9p_priv *p) {
+    if (p->fid != P9_NOFID || !p->cached_open) return p->fid;
+    return __atomic_load_n(&p->co_kfid, __ATOMIC_ACQUIRE);
+}
+
+static const u64 *attr_gen_of(const struct p9_attr *a) {
+    return (a->valid & P9_GETATTR_GEN) ? &a->gen : NULL;
+}
+
 static int dev9p_stat_native(struct Spoor *c, struct t_stat *out) {
     struct dev9p_priv *p = priv_of(c);
     if (!p || !out) return -1;
-    // FID-LIFECYCLE cached-open: fstat serves the open-time snapshot stat --
-    // the same close-to-open discipline as the attr cache (no fid to Tgetattr).
-    if (p->cached_open) {
+    // FID-LIFECYCLE cached-open: a loose one that has bound no fid serves the
+    // open-time stat (the attr cache's close-to-open discipline). One with a
+    // fid asks as any open does, with its snapshot's size while reads serve
+    // that (co_patch_stat).
+    if (p->cached_open && lock_fid(p) == P9_NOFID) {
         *out = p->co_stat;
         return 0;
     }
@@ -946,6 +1057,7 @@ static int dev9p_stat_native(struct Spoor *c, struct t_stat *out) {
     u64 seq0 = 0;
     if (cacheable && larder_attr_serve(l, key, out, &seq0)) {
         wb_patch_stat_size(p, out);
+        co_patch_stat(p, out);
         return 0;
     }
     struct p9_attr attr;
@@ -967,11 +1079,13 @@ static int dev9p_stat_native(struct Spoor *c, struct t_stat *out) {
     // as [-4095,-2], one value narrower than the clamp it sits above actually
     // implements. A mistake made once in a comment, read back as a fact.)
     //
-    // AND ONLY ONE CALLER PROPAGATES IT. stalk converts it for `*errp` (ER-1, as
-    // designed); `sys_fstat_for_proc` collapses every non-zero to the flat -1
-    // sentinel, which is precisely the half ERRORS.md ER-2 still lists as owed.
-    // So do not read this as "the path already propagates" -- half of it does.
-    int gr = p9_client_getattr(p->client, p->fid, P9_GETATTR_BASIC, &attr);
+    // Both callers apply one mapping to it: stalk's `err_code` for `*errp`
+    // (ER-1) and `sys_fstat_for_proc`'s return (ER-2). A -errno in [-4095,-2]
+    // crosses as itself; the -1, a server EPERM included, reads -T_E_IO. A
+    // server's EBADF never arrives here: map_error reads it as -P9_E_IO, since
+    // only the kernel's handle gate answers EBADF.
+    int gr = p9_client_getattr(p->client, lock_fid(p),
+                               P9_GETATTR_BASIC | P9_GETATTR_GEN, &attr);
     if (gr != 0)
         return gr;
     t_stat_from_p9_attr(out, &attr, p->client);
@@ -980,8 +1094,9 @@ static int dev9p_stat_native(struct Spoor *c, struct t_stat *out) {
     // (the populate-after-invalidate resurrection close -- larder.h note (2)).
     // Gated on `cacheable` (a non-content-versioned server is never cached).
     if (cacheable)
-        larder_attr_install(l, seq0, key, attr.qid.version, out);
+        larder_attr_install(l, seq0, key, attr.qid.version, out, attr_gen_of(&attr));
     wb_patch_stat_size(p, out);
+    co_patch_stat(p, out);
     return 0;
 }
 
@@ -999,7 +1114,7 @@ static struct Walkqid *dev9p_walk_attrs(struct Spoor *c, struct Spoor *nc,
                                         int nname, struct t_stat *sts) {
     struct dev9p_priv *src_priv = priv_of(c);
     if (!src_priv) return NULL;
-    if (src_priv->fid == P9_NOFID) return NULL;   // fidless (cached-open) Spoor
+    if (src_priv->fid == P9_NOFID || src_priv->cached_open) return NULL;   // a cached open
     if (nname <= 0 || nname > (int)P9_MAX_WALK) return NULL;
     if (!name || !name_lens || !sts) return NULL;
 
@@ -1063,7 +1178,10 @@ static struct Walkqid *dev9p_walk_attrs(struct Spoor *c, struct Spoor *nc,
                 // would exclude exactly that window's death events, leaning
                 // on the create/mkdir drop-hook backstop alone.
                 u64 g2gen = larder_gen_snapshot(&cl->larder);
-                s64 cfid = dirfid_take(cl, sts[nname - 1].qid_path);
+                s64 stale;
+                s64 cfid = dirfid_take(cl, sts[nname - 1].qid_path, &stale);
+                if (stale >= 0)
+                    dev9p_close_clunk(cl, src_priv->attached_owner, (u32)stale);
                 if (cfid >= 0) {
                     struct Walkqid *sw = walkqid_alloc(nname);
                     if (sw) {
@@ -1125,7 +1243,7 @@ static struct Walkqid *dev9p_walk_attrs(struct Spoor *c, struct Spoor *nc,
     u16 nwqid = 0;
     struct p9_qid qids[P9_MAX_WALK];
     int rc = p9_client_walkgetattr(src_priv->client, src_priv->fid, new_fid,
-                                   P9_GETATTR_BASIC, (u16)nname,
+                                   P9_GETATTR_BASIC | P9_GETATTR_GEN, (u16)nname,
                                    (const u8 *const *)name, name_lens,
                                    &nwqid, qids, attrs);
     if (rc == -T_E_NOSYS || rc == -T_E_OPNOTSUPP) {
@@ -1167,7 +1285,18 @@ static struct Walkqid *dev9p_walk_attrs(struct Spoor *c, struct Spoor *nc,
         walkqid_free(w);
         return DEV_WALK_ATTRS_UNSUPPORTED;
     }
-    if (rc != 0 || nwqid > (u16)nname) {
+    if (rc != 0 && rc != -T_E_NOENT && nname > 1) {
+        // Any other failure of a multi-name walk does not say which name failed.
+        // A server may fail past the first name (Stratum: a read error, a wedged
+        // pool), so the resolver's "the first name failed" reading would skip the
+        // X gates of the names before it and the mount split, and report a path
+        // that may exist as missing. Nothing was bound. Let it walk name by name;
+        // this says nothing about the server's ability, so nothing latches.
+        kfree(attrs);
+        walkqid_free(w);
+        return DEV_WALK_ATTRS_UNSUPPORTED;
+    }
+    if (rc != 0) {
         // L1d negative populate: a definitive first-component miss (Rlerror
         // ENOENT -- name[0] does not exist in c) is cacheable so a repeated
         // failed lookup serves RPC-free. Only for -T_E_NOENT (a clean "no such
@@ -1176,9 +1305,9 @@ static struct Walkqid *dev9p_walk_attrs(struct Spoor *c, struct Spoor *nc,
             larder_dentry_install(&src_priv->client->larder, wga_seq0,
                                   c->qid.path, name[0], name_lens[0], 0,
                                   /*negative=*/true);
-        // Rlerror (miss at the first component / server error) or a
-        // malformed over-count. Nothing was bound (the session layer binds
-        // new_fid only on a FULL walk); nc untouched.
+        // Rlerror: a miss at the first component, or a one-name walk's failure.
+        // Nothing was bound (the session layer binds new_fid only on a FULL
+        // walk); nc untouched.
         kfree(attrs);
         walkqid_free(w);
         return NULL;
@@ -1208,7 +1337,8 @@ static struct Walkqid *dev9p_walk_attrs(struct Spoor *c, struct Spoor *nc,
         // getattr/walk_attrs qid carries the true si_cvers (never a readdir qid
         // -- the L1a-2 audit-F1 rule; LARDER-DESIGN section 3.2).
         larder_attr_install(&src_priv->client->larder, wga_seq0,
-                            w->qid[i].path, w->qid[i].vers, &sts[i]);
+                            w->qid[i].path, w->qid[i].vers, &sts[i],
+                            attr_gen_of(&attrs[i]));
         // L1d populate: install the POSITIVE dentry (prev_path, name[i]) ->
         // qids[i].path. Same gen guard as the attr install (skipped if a
         // concurrent create/rename/unlink bumped gen during the RPC).
@@ -1255,11 +1385,29 @@ static struct Walkqid *dev9p_walk_attrs(struct Spoor *c, struct Spoor *nc,
     return w;
 }
 
+// A cached open that is not minted after all gives back the fid its walk
+// bound, if it bound one.
+static struct Spoor *co_abandon(struct dev9p_priv *src, u32 fid) {
+    if (fid != P9_NOFID) dev9p_clunk_fid(src->client, src->attached_owner, fid);
+    return NULL;
+}
+
+// The same after the budget was charged: what the mint held goes back too.
+static struct Spoor *co_mint_fail(struct dev9p_priv *src, u32 fid, u8 *buf,
+                                  u8 *names, u64 charge) {
+    if (buf) kfree(buf);
+    if (names) kfree(names);
+    co_budget_uncharge(charge);
+    return co_abandon(src, fid);
+}
+
 // FID-LIFECYCLE cached-open (docs/FID-LIFECYCLE-DESIGN.md section 3.3; refines
-// I-38): the fidless close-to-open open. stalk calls this on the FINAL run of a
-// plain read-only STALK_OPEN resolution, BEFORE the normal bind walk. Contract
-// per <thylacine/dev.h> open_cached: on success the returned Spoor is OPENED +
-// fidless and sts[0..nname) holds the walk's FRESH per-component records for
+// I-38): the close-to-open open served from a snapshot. stalk calls this on the
+// FINAL run of a plain read-only STALK_OPEN resolution, BEFORE the normal bind
+// walk. Contract per <thylacine/dev.h> open_cached: on success the returned
+// Spoor is OPENED with no opened fid (a strict open keeps its walk's unopened
+// fid, a loose one holds none until it needs one) and sts[0..nname) holds the
+// walk's FRESH per-component records for
 // the RESOLVER's mandatory fail-ordering post-scan (permission policy stays in
 // stalk -- I-28/I-22); on NULL nothing was bound or revealed and the caller's
 // observable outcome comes from the normal path.
@@ -1269,10 +1417,15 @@ static struct Spoor *dev9p_open_cached(struct Spoor *c, const char *const *names
     struct dev9p_priv *src_priv = priv_of(c);
     if (!src_priv || !names || !name_lens || !sts) return NULL;
     if (nname <= 0 || nname > (int)P9_MAX_WALK) return NULL;
-    if (src_priv->fid == P9_NOFID) return NULL;   // never walk FROM a fidless Spoor
+    // Never walk FROM a fidless Spoor or a cached open.
+    if (src_priv->fid == P9_NOFID || src_priv->cached_open) return NULL;
     struct p9_client *client = src_priv->client;
     if (client->wga_unsupported) return NULL;
     if (!__atomic_load_n(&client->cacheable, __ATOMIC_RELAXED)) return NULL;
+    // A server refuses a walk from an opened fid. A strict open learns that from
+    // its wire query below; a loose one would learn it on its first need, as an
+    // ESTALE on a file nothing moved.
+    if (client->loose && (c->flag & COPEN)) return NULL;
     struct larder *l = &client->larder;
     // The gen witness (B1-audit F1): captured BEFORE the hint's coverage
     // decision; larder_pages_snapshot fails closed if ANY invalidate moves
@@ -1313,8 +1466,10 @@ static struct Spoor *dev9p_open_cached(struct Spoor *c, const char *const *names
     //    its L1d dentry serve (which would answer a query-form full-positive
     //    run from the caches). On a STRICT client the B2 revalidation MUST be
     //    server-fresh, or cached-open silently degrades to B1/loose (the
-    //    FID-LIFECYCLE prosecution item). newfid = P9_NOFID: no fid binds on
-    //    either end, exactly the walk-query shape.
+    //    FID-LIFECYCLE prosecution item). The walk binds a fresh fid (operator
+    //    vote 20), which the open keeps unopened: fstat, a wstat and a lock
+    //    address it, and the close clunks it. It also asks the leaf's
+    //    generation, so the lock path knows the file without a question.
     //
     //    B1 per-attach loose mode (I-38 opt-in; user-voted option B
     //    2026-07-11, docs/chase/B1-VOTE.md + the ARCH I-38 row): a LOOSE
@@ -1327,13 +1482,20 @@ static struct Spoor *dev9p_open_cached(struct Spoor *c, const char *const *names
     //    Larder-lock atomicity. Any hint miss returned NULL above -- a
     //    loose first touch takes the normal path and populates via its
     //    walk_attrs, so the wire is never skipped on unproven state.
+    u32 cofid   = P9_NOFID;
+    u64 cogen   = 0;
+    u8  coident = DEV9P_IDENT_UNKNOWN;
     if (!client->loose) {
         struct p9_attr *attrs = kmalloc(sizeof(struct p9_attr) * (size_t)nname, 0);
         if (!attrs) return NULL;
+        // A number a walk that fails or goes partial never binds is abandoned
+        // (the monotonic allocator never reuses one).
+        cofid = p9_client_alloc_fid(client);
+        if (cofid == P9_NOFID) { kfree(attrs); return NULL; }
         u16 nwqid = 0;
         struct p9_qid qids[P9_MAX_WALK];
-        int rc = p9_client_walkgetattr(client, src_priv->fid, P9_NOFID,
-                                       P9_GETATTR_BASIC, (u16)nname,
+        int rc = p9_client_walkgetattr(client, src_priv->fid, cofid,
+                                       P9_GETATTR_BASIC | P9_GETATTR_GEN, (u16)nname,
                                        (const u8 *const *)names, name_lens,
                                        &nwqid, qids, attrs);
         if (rc == -T_E_NOSYS || rc == -T_E_OPNOTSUPP) {
@@ -1364,10 +1526,16 @@ static struct Spoor *dev9p_open_cached(struct Spoor *c, const char *const *names
         for (int i = 0; i < nname; i++) {
             t_stat_from_p9_attr(&sts[i], &attrs[i], client);
             larder_attr_install(l, seq0, attrs[i].qid.path, attrs[i].qid.version,
-                                &sts[i]);
+                                &sts[i], attr_gen_of(&attrs[i]));
             larder_dentry_install(l, seq0, prev_path, names[i], name_lens[i],
                                   attrs[i].qid.path, /*negative=*/false);
             prev_path = attrs[i].qid.path;
+        }
+        if (attrs[nname - 1].valid & P9_GETATTR_GEN) {
+            cogen   = attrs[nname - 1].gen;
+            coident = DEV9P_IDENT_GEN;
+        } else {
+            coident = DEV9P_IDENT_NONE;
         }
         kfree(attrs);
     }
@@ -1376,52 +1544,89 @@ static struct Spoor *dev9p_open_cached(struct Spoor *c, const char *const *names
     //    be stale vs the wire refill; on the loose path they re-run over the
     //    hint records, redundant with step 1 but kept as one shared gate).
     const struct t_stat *leaf = &sts[nname - 1];
-    if (leaf->qid_type != 0) { return NULL; }
+    if (leaf->qid_type != 0) { return co_abandon(src_priv, cofid); }
     if (leaf->size > (u64)DEV9P_CO_MAX_SIZE)
-        { return NULL; }
+        { return co_abandon(src_priv, cofid); }
 
     // 4. Budget + the snapshot at the leaf cvers (wire-fresh on strict;
     //    cached on loose -- the B1 contract), under ONE Larder lock hold
     //    (atomic vs a concurrent own-write invalidate -- it precedes, failing
     //    the coverage, or follows the whole copy). Any failure falls back with
     //    everything released; size == 0 (the empty file) snapshots trivially.
-    u64 size = leaf->size;
-    if (!co_budget_charge(size)) { return NULL; }
+    //    A loose open also keeps what its first lock or wstat will need to bind
+    //    a fid: its run's names, and the generation that says the walk reached
+    //    the same file. A file whose generation the Larder does not know takes
+    //    the normal path. seq0 covers the read against every mutation made
+    //    through this session's ops: it invalidates the number and fails the
+    //    snapshot below. A writer the Larder cannot see (Loom, another session)
+    //    can pair the old snapshot with a new generation. That bind can then
+    //    reach only the new file, and a take moves the reads there too.
+    u32 conames_len = 0;
+    if (client->loose) {
+        if (!larder_attr_gen(l, leaf->qid_path, &cogen)) return NULL;
+        coident = DEV9P_IDENT_GEN;
+        for (int i = 0; i < nname; i++) {
+            if (name_lens[i] > 0xffffu) return NULL;
+            conames_len += 2u + (u32)name_lens[i];
+        }
+    }
+    u64 size   = leaf->size;
+    u64 charge = size + conames_len;
+    if (!co_budget_charge(charge)) { return co_abandon(src_priv, cofid); }
     u8 *buf = NULL;
     if (size > 0) {
         buf = kmalloc((size_t)size, 0);
-        if (!buf) { co_budget_uncharge(size); return NULL; }
+        if (!buf) return co_mint_fail(src_priv, cofid, NULL, NULL, charge);
+    }
+    u8 *conames = NULL;
+    if (conames_len > 0) {
+        conames = kmalloc(conames_len, 0);
+        if (!conames) return co_mint_fail(src_priv, cofid, buf, NULL, charge);
+        u8 *w = conames;
+        for (int i = 0; i < nname; i++) {
+            size_t n = name_lens[i];
+            *w++ = (u8)n;
+            *w++ = (u8)(n >> 8);
+            for (size_t b = 0; b < n; b++) *w++ = (u8)names[i][b];
+        }
     }
     if (!larder_pages_snapshot(l, leaf->qid_path, leaf->qid_vers, size, buf,
                                seq0)) {
-        if (buf) kfree(buf);
-        co_budget_uncharge(size);
-        return NULL;
+        return co_mint_fail(src_priv, cofid, buf, conames, charge);
     }
 
-    // 5. Mint the opened fidless Spoor. The clone inherits dc/devno/path from
-    //    the run's base (the walked-child pattern); a fresh priv replaces the
-    //    clone's shared aux. fid = P9_NOFID + fid_owned = false: dev9p_close
-    //    does no wire op -- its cached_open arm frees the snapshot + uncharges.
+    // 5. Mint the opened Spoor. The clone inherits dc/devno/path from the run's
+    //    base (the walked-child pattern); a fresh priv replaces the clone's
+    //    shared aux. A strict client's priv owns the kept fid, which dev9p_close
+    //    clunks as it does any walked fid; a loose client's owns none until it
+    //    needs one (co_bind), holds the run's base, and closes wire-free if it
+    //    never did. Either way the cached_open arm frees what the mint took.
     struct Spoor *co = spoor_clone(c);
-    if (!co) {
-        if (buf) kfree(buf);
-        co_budget_uncharge(size);
-        return NULL;
-    }
-    struct dev9p_priv *np = priv_alloc(client, P9_NOFID, /*fid_owned=*/false,
+    if (!co) return co_mint_fail(src_priv, cofid, buf, conames, charge);
+    struct dev9p_priv *np = priv_alloc(client, cofid,
+                                       /*fid_owned=*/cofid != P9_NOFID,
                                        src_priv->attached_owner);
     if (!np) {
         co->aux = NULL;                 // still shares c's aux; detach first
         spoor_unref(co);
-        if (buf) kfree(buf);
-        co_budget_uncharge(size);
-        return NULL;
+        return co_mint_fail(src_priv, cofid, buf, conames, charge);
     }
-    np->cached_open = true;
-    np->co_buf      = buf;
-    np->co_size     = size;
-    np->co_stat     = *leaf;
+    np->cached_open  = true;
+    np->co_buf       = buf;
+    np->co_size      = size;
+    np->co_stat      = *leaf;
+    np->co_rfid      = P9_NOFID;
+    np->co_kfid      = P9_NOFID;
+    np->co_names     = conames;
+    np->co_names_len = conames_len;
+    np->co_nname     = (u8)nname;
+    np->co_start     = NULL;
+    if (conames) {
+        spoor_ref(c);
+        np->co_start = c;
+    }
+    np->lock_gen     = cogen;
+    np->lock_ident   = coident;
     co->aux      = np;
     co->qid.path = leaf->qid_path;
     co->qid.vers = leaf->qid_vers;
@@ -1440,8 +1645,8 @@ static struct Spoor *dev9p_open(struct Spoor *c, int omode) {
     struct dev9p_priv *p = priv_of(c);
     if (!p) return NULL;
     p->open_errno = 0;
-    if (p->fid == P9_NOFID) return NULL;   // a fidless (cached-open) Spoor is
-                                           // already open; no fid to Tlopen
+    // A cached open is already open; a kept fid stays unopened.
+    if (p->fid == P9_NOFID || p->cached_open) return NULL;
     // Map Plan 9 omode → Linux O_* flags. Plan 9: OREAD=0, OWRITE=1,
     // ORDWR=2, OEXEC=3, OTRUNC=0x10, OCEXEC=0x20, ORCLOSE=0x40,
     // OEXCL=0x1000. Linux: O_RDONLY=0, O_WRONLY=1, O_RDWR=2,
@@ -1519,7 +1724,7 @@ static struct Spoor *dev9p_create(struct Spoor *c, const char *name,
                                     int omode, u32 perm, u32 gid) {
     struct dev9p_priv *p = priv_of(c);
     if (!p) return NULL;
-    if (p->fid == P9_NOFID) return NULL;   // fidless (cached-open) Spoor
+    if (p->fid == P9_NOFID || p->cached_open) return NULL;   // a cached open
     if (!name) return NULL;
     // Capture the PARENT's qid.path before Tlcreate/Tmkdir transitions c->qid to
     // the new child -- the L1c invalidate below drops the parent's cached attr.
@@ -1700,12 +1905,12 @@ static void dev9p_close_job_release(struct p9_close_job *job) {
     kfree(j);
 }
 
-// May a last close wait for its server? Not on a thread a death has reached
-// (its sends are refused), nor on a kernel thread something joins without
-// bound (closes_never_wait: nothing would end the wait).
+// May a close wait for its server? Not on a thread a death has reached: its
+// sends are refused. Only a last descriptor's close and a lock call ask; a last
+// reference never waits.
 static bool close_may_wait(void) {
     struct Thread *t = current_thread();
-    return t && !t->closes_never_wait && !thread_die_pending(t);
+    return t && !thread_die_pending(t);
 }
 
 // Hand the staged run, and with it the fid's clunk, to a closer: 0, or a
@@ -1789,35 +1994,35 @@ static int dev9p_close(struct Spoor *c) {
     }
 
     // FID-LIFECYCLE cached-open: free the snapshot + release the global
-    // budget. fid_owned is false on a fidless priv, so the clunk branch below
-    // is naturally skipped -- the whole close is wire-free.
+    // budget, and clunk the read fid a lock or a Loom registration installed.
+    // A strict open's kept fid goes in the clunk branch below (fid_owned). A
+    // loose open owns no fid: it clunks the one co_bind bound, if it bound one,
+    // and otherwise its whole close is wire-free.
     if (p->cached_open) {
         if (p->co_buf) kfree(p->co_buf);
-        co_budget_uncharge(p->co_size);
+        co_budget_uncharge(p->co_size + p->co_names_len);
         p->co_buf = NULL;
+        if (p->co_rfid != P9_NOFID)
+            dev9p_close_clunk(p->client, p->attached_owner, p->co_rfid);
+        if (p->co_kfid != P9_NOFID)
+            dev9p_close_clunk(p->client, p->attached_owner, p->co_kfid);
+        if (p->co_names) kfree(p->co_names);
+        p->co_names = NULL;
+        if (p->co_start) spoor_clunk(p->co_start);
+        p->co_start = NULL;
     }
 
-    // F1 write-behind: flush the staged run BEFORE the async-clunk Tclunk
-    // below (the fid must be live for the flush Twrites -- a Tclunk racing
-    // ahead would write to a dead fid). LAST-ref runs here (the cached-open/
-    // weft invariant), so no concurrent op exists on this priv: the plain
-    // wb_len/wb_err reads and the uncontended flush are sound; wb_flushers is
-    // 0. The close returns this flush's failure, or the one the latch kept
-    // from an earlier flush, and close(2) reports it as EIO (ARCH 21.11).
-    // A close that may not wait never flushes here, and a death that ends
-    // the flush keeps the run: a run still staged after this step goes to a
-    // closer with the fid's clunk (ARCH 7.9.1 part C), and is no loss yet.
-    // Then release the buffer + the global budget (unconditional on wb_buf:
-    // a priv that stopped staging may still own its buffer).
+    // F1 write-behind: the last close (dev9p_fd_close) landed the run if its
+    // thread could wait. One still staged here -- a death ended that flush, or
+    // the Spoor never had a descriptor -- goes to a closer with the fid's clunk
+    // (ARCH 7.9.1 part C), since this thread may not wait for the server, and is
+    // no loss yet. LAST-ref runs here (the cached-open/weft invariant), so no
+    // concurrent op exists on this priv: the plain wb_len reads are sound and
+    // wb_flushers is 0. Then release the buffer + the global budget
+    // (unconditional on wb_buf: a priv that stopped staging may still own its
+    // buffer).
     int  crc    = 0;
     bool handed = false;
-    if (p->wb_len && close_may_wait()) {
-        spin_lock(&p->wb_lock);
-        crc = wb_flush_locked(p, c->qid.path);
-        spin_unlock(&p->wb_lock);
-    } else if (!p->wb_len && p->wb_err) {
-        crc = -(p->wb_err);
-    }
     if (p->wb_len) {
         crc    = wb_close_hand_off(p, c->qid.path);
         handed = crc == 0;
@@ -1852,26 +2057,23 @@ static int dev9p_close(struct Spoor *c) {
     // their stale client pointer (R15 F236).
     if (p->fid_owned && !handed) {
         // Walk-derived Spoor: clunk the fid. FID-LIFECYCLE async-clunk -- the
-        // normal close path fires the Tclunk fire-and-forget (the submitter is
-        // not parked for the clunk RTT; the fid unbinds at send + its number is
-        // never reused, and the ownerless Rclunk drains via a later op's reader,
-        // the #845 discipline). Every dev9p clunk goes through dev9p_clunk_fid:
-        // the rollback clunks in walk/walk_attrs/create are asynchronous too, so
-        // no dev9p Tclunk waits for its Rclunk. p9_client_clunk_async composes
-        // internally with the #841 tag pool (it drains ownerless Rclunks on a
-        // full pool -- the #926 proc-exit close-burst -- before send) and the
-        // #349 c2s back-pressure (EAGAIN is retried, never a session death). A
-        // dying thread cannot send at all -- client_send_flow refuses every
-        // dying sender at its loop top, pool full or not -- so its Tclunk goes
-        // to the closer threads (FID-LIFECYCLE section 9), which is what
+        // Tclunk goes fire-and-forget (no thread is parked for the clunk RTT; the
+        // fid unbinds at send + its number is never reused, and the ownerless
+        // Rclunk drains via a later op's reader, the #845 discipline). The clunk
+        // also releases what locks the fid still holds, for a close that could
+        // not wait for its unlock. This thread may be anyone's, so where the
+        // send would wait for a tag or for ring space the fid goes to the
+        // closer threads instead (dev9p_close_clunk; FID-LIFECYCLE section 9),
+        // and a dying thread cannot send at all -- client_send_flow refuses every
+        // dying sender at its loop top, pool full or not -- which is what
         // gopls's kill of a child still in its spawn thunk reaches. The refusal
         // line prints only for a fid the live session still holds.
         // G2 donate (docs/FID-LIFECYCLE-DESIGN.md section 4): an UNOPENED
         // DIRECTORY fid on a cacheable client parks in the dir-fid cache
         // instead of clunking -- the next bind-form resolve of this dir
         // re-issues it with zero wire ops. Gates: never-opened (COPEN would
-        // make the fid mode-bound; a cached_open priv is fidless and cannot
-        // reach here fid_owned), a dir (files are opened to be used -- no
+        // make the fid mode-bound; a cached open's kept fid names a plain file,
+        // and the dir gate refuses it), a dir (files are opened to be used -- no
         // repeat-bind win), cacheable (the Larder-backed class), NOT suspect
         // (a by-name op errored through this fid -- the stale-fid backstop),
         // and NOT staled (no invalidation event named this qid since the
@@ -1881,17 +2083,20 @@ static int dev9p_close(struct Spoor *c) {
         // (if any) is clunked OUTSIDE the table lock.
         bool parked = false;
         if ((c->flag & COPEN) == 0 && (c->qid.type & QTDIR) &&
-            !p->fid_suspect &&
-            __atomic_load_n(&p->client->cacheable, __ATOMIC_RELAXED) &&
-            !larder_qid_staled_since(&p->client->larder, p->fid_gen,
-                                     c->qid.path)) {
-            s64 vic = dirfid_put(p->client, c->qid.path, p->fid);
-            parked = true;
-            if (vic >= 0)
-                dev9p_clunk_fid(p->client, p->attached_owner, (u32)vic);
+            !p->fid_suspect && !p->fid_locks &&
+            __atomic_load_n(&p->client->cacheable, __ATOMIC_RELAXED)) {
+            // The epoch first: a forget after the check leaves an old stamp.
+            u64 epoch = larder_epoch(&p->client->larder);
+            if (!larder_qid_staled_since(&p->client->larder, p->fid_gen,
+                                         c->qid.path)) {
+                s64 vic = dirfid_put(p->client, c->qid.path, p->fid, epoch);
+                parked = true;
+                if (vic >= 0)
+                    dev9p_close_clunk(p->client, p->attached_owner, (u32)vic);
+            }
         }
         if (!parked)
-            dev9p_clunk_fid(p->client, p->attached_owner, p->fid);
+            dev9p_close_clunk(p->client, p->attached_owner, p->fid);
     }
 
     if (p->attached_owner) {
@@ -1920,7 +2125,10 @@ static long dev9p_read(struct Spoor *c, void *buf, long n, s64 off) {
     // FID-LIFECYCLE cached-open serve: the immutable open-time snapshot
     // (section 3.3) -- every read of this open sees the open-time content
     // (close-to-open). No lock, no RPC: the buffer never mutates post-mint.
-    if (p->cached_open) {
+    // Once a read fid is installed, reads go through it as any open's do.
+    u32 rfid = p->fid;
+    if (p->cached_open) rfid = __atomic_load_n(&p->co_rfid, __ATOMIC_ACQUIRE);
+    if (p->cached_open && rfid == P9_NOFID) {
         if (offset >= p->co_size) return 0;             // EOF
         u64 rem  = p->co_size - offset;
         u64 take = (count > rem) ? rem : (u64)count;
@@ -2000,7 +2208,7 @@ static long dev9p_read(struct Spoor *c, void *buf, long n, s64 off) {
         if (mis) { wire_off = offset - mis; lead = mis; }
     }
     u32 got = 0;
-    int rc = p9_client_read(p->client, p->fid, wire_off, count, (u8 *)buf, &got);
+    int rc = p9_client_read(p->client, rfid, wire_off, count, (u8 *)buf, &got);
     // #3 (Area F errno-rollout): propagate the real ecode, not -1. See dev9p_write.
     if (rc != 0) return (long)rc;
     // L1e page populate (fs_cache.tla Refetch): cache each page the read covered
@@ -2044,7 +2252,7 @@ static long dev9p_read(struct Spoor *c, void *buf, long n, s64 off) {
         // front-page heal is already installed above; the extra RPC exists
         // only on this rare arm.
         got = 0;
-        rc = p9_client_read(p->client, p->fid, offset, count, (u8 *)buf, &got);
+        rc = p9_client_read(p->client, rfid, offset, count, (u8 *)buf, &got);
         if (rc != 0) return (long)rc;
         // Populate the retry's coverage with the pre-D44 discipline (aligned
         // starts only -- the unaligned front page is skipped); same seq0 gen
@@ -2102,7 +2310,15 @@ static long dev9p_write(struct Spoor *c, const void *buf, long n, s64 off) {
     // handler returning -T_E_PERM=1). One residual: a server EPERM (Rlerror
     // ecode==1) collides with the -1 generic sentinel -> EIO; conveying it
     // needs a wider channel (the ER-rollout's job).
-    if (rc != 0) return (long)rc;
+    //
+    // A failed write may have landed: a reply this thread never read (a death),
+    // or a count past the request. As a failed flush does, drop what the file's
+    // entries said; the range is unknown, so all its pages go.
+    if (rc != 0) {
+        larder_attr_invalidate(&p->client->larder, c->qid.path);
+        larder_page_invalidate(&p->client->larder, c->qid.path);
+        return (long)rc;
+    }
     // L1c/L1e invalidate (fs_cache.tla OwnWrite): the file's attrs (size/mtime/
     // cvers) AND its content changed. Drop its cached attr entry AND the pages
     // the write actually TOUCHED (G1b range-scoped: [offset, offset+accepted)).
@@ -2133,7 +2349,8 @@ static long dev9p_write(struct Spoor *c, const void *buf, long n, s64 off) {
 // issues Tweftio(WRITE); netd reads the ring IN PLACE + replies the moved-byte
 // count. Returns 1 if handled (the weft path was taken; *accepted set), 0 if NOT
 // a weft write (the caller falls back to the byte-copy path -- small payload,
-// not weft-bound, or a buffer outside the ring), -1 on a weft transport error.
+// not weft-bound, or a buffer outside the ring), -1 on a weft transport error or
+// a server's count past the request.
 // NOT the byte-copy path: the payload is already in the shared ring (the native
 // client wrote it there), so nothing is copied through the 9P body.
 int dev9p_weft_try_write(struct Spoor *spoor, u64 ubuf_va, u32 len, u32 *accepted) {
@@ -2147,7 +2364,7 @@ int dev9p_weft_try_write(struct Spoor *spoor, u64 ubuf_va, u32 len, u32 *accepte
         return 0;                                       // buffer not in the ring -> byte-copy
     u32 got = 0;
     int e = p9_client_weftio(p->client, p->fid, off, len, WEFT_DIR_WRITE, &got);
-    if (e != 0) return -1;                              // weft attempted + failed (dead flow)
+    if (e != 0) return -1;                              // a dead flow, or a count past the request
     if (accepted) *accepted = got;
     return 1;                                           // handled zero-copy
 }
@@ -2159,7 +2376,7 @@ int dev9p_weft_try_write(struct Spoor *spoor, u64 ubuf_va, u32 len, u32 *accepte
 // into the ring + replies the recv'd byte count. Returns 1 if handled (*got set),
 // 0 if NOT a weft read (the caller falls back to the byte-copy path -- small
 // payload, not weft-bound, or a buffer outside the ring), -1 on a weft transport
-// error. NOT the byte-copy path: netd writes the bytes directly into the guest's
+// error or a server's count past the request. NOT the byte-copy path: netd writes the bytes directly into the guest's
 // shared ring, so nothing is copied back through the 9P body OR the SYS_READ
 // scratch -- the SYS_READ handler does NO uaccess_store on this path.
 int dev9p_weft_try_read(struct Spoor *spoor, u64 ubuf_va, u32 len, u32 *got) {
@@ -2173,7 +2390,7 @@ int dev9p_weft_try_read(struct Spoor *spoor, u64 ubuf_va, u32 len, u32 *got) {
         return 0;                                       // buffer not in the ring -> byte-copy
     u32 n = 0;
     int e = p9_client_weftio(p->client, p->fid, off, len, WEFT_DIR_READ, &n);
-    if (e != 0) return -1;                              // weft attempted + failed (dead flow)
+    if (e != 0) return -1;                              // a dead flow, or a count past the request
     if (got) *got = n;
     return 1;                                           // handled zero-copy
 }
@@ -2218,6 +2435,491 @@ static int dev9p_fsync(struct Spoor *c, u32 datasync) {
 // byte stream into buf at the Spoor's offset; the caller advances `off` (the
 // SYS_READDIR handler passes c->offset and bumps it). Mirrors dev9p_read's
 // count/offset clamping.
+// =============================================================================
+// B-3h file locks (ARCH 9.6.11). The server's table holds every lock; these
+// forward to it as Tlock / Tgetlock and keep the client's caches honest around
+// them (lock-to-unlock consistency).
+// =============================================================================
+
+_Static_assert(SYS_FILE_LOCK_RD == P9_LOCK_TYPE_RDLCK &&
+               SYS_FILE_LOCK_WR == P9_LOCK_TYPE_WRLCK &&
+               SYS_FILE_LOCK_UN == P9_LOCK_TYPE_UNLCK,
+               "the SYS_FILE_LOCK types cross the wire unchanged");
+
+// A server that does not serve Tlock answers ENOSYS or EOPNOTSUPP: it has no
+// lock for us, which is ENOLCK (as NFS without its lock daemon).
+static int lock_wire_errno(int rc) {
+    rc = dev9p_wire_errno(rc);
+    if (rc == -T_E_NOSYS || rc == -T_E_OPNOTSUPP) return -T_E_NOLCK;
+    return rc;
+}
+
+// Tlock's client_id (operator vote 38). A take names the taking Proc's principal,
+// in decimal, and the server counts the take's records against it; the kernel
+// composes it, so a Proc cannot spend another identity's share. Every other
+// request on the fid names what its latest take named, so a server keying owners
+// by proc_id and client_id sees one owner, whichever thread sends the unlock. A
+// caped server's ids are not ours and it learns none (IDENTITY-DESIGN 3.2).
+#define LOCK_CLIENT_ID_MAX 10   // UINT32_MAX in decimal
+
+static u32 lock_taker(const struct dev9p_priv *p) {
+    struct Thread *t = current_thread();
+    if (p->client->cape || !t || !t->proc) return PRINCIPAL_INVALID;
+    return t->proc->principal_id;
+}
+
+static u32 lock_named(const struct dev9p_priv *p) {
+    return __atomic_load_n(&p->lock_principal, __ATOMIC_RELAXED);
+}
+
+// A lock may stand: the name goes first, for the close that exchanges the flag.
+static void lock_note_granted(struct dev9p_priv *p, u32 who) {
+    __atomic_store_n(&p->lock_principal, who, __ATOMIC_RELAXED);
+    __atomic_store_n(&p->lock_granted, true, __ATOMIC_SEQ_CST);
+}
+
+static u16 lock_client_id(u32 who, char out[LOCK_CLIENT_ID_MAX]) {
+    if (who == PRINCIPAL_INVALID) return 0;
+    u32 v = who;
+    u16 n = 0;
+    do {
+        n++;
+    } while ((v /= 10) != 0);
+    v = who;
+    for (u16 i = n; i > 0; i--) {
+        out[i - 1] = (char)('0' + v % 10);
+        v /= 10;
+    }
+    return n;
+}
+
+// The flush a release owes when its thread may not wait, queued alone on the
+// session's closer, and for a last close that leaves c alive the unlock after
+// it. The job holds c, so c's fid stays bound until it has run.
+struct dev9p_lock_flush_job {
+    struct p9_close_job job;     // first: the closer hands back this pointer
+    struct Spoor       *c;
+    bool                release_locks;
+    bool                staged;  // a run or a flush stood when this was queued
+};
+
+static int dev9p_lock_flush_job_run(struct p9_close_job *job,
+                                    struct p9_client *cl, u32 fid) {
+    (void)cl;
+    (void)fid;
+    struct dev9p_lock_flush_job *j = (struct dev9p_lock_flush_job *)job;
+    struct Spoor *c = j->c;
+    struct dev9p_priv *p = priv_of(c);
+    if (!p) return 0;
+    int rc = 0;
+    spin_lock(&p->wb_lock);
+    // What stood when this was queued, not what stands now: a flush can retire
+    // before the closer gets here, and that flush installed its pages and left any
+    // failure on the latch, which wb_flush_locked answers with.
+    if (j->staged)
+        rc = wb_flush_locked(p, c->qid.path);
+    wb_release_dead_locked(p);       // a no-op while the anchor stands
+    spin_unlock(&p->wb_lock);
+    if (!j->release_locks) return rc;
+
+    // Past the last close. Nobody reads the latch from here on, so a failure is
+    // reported now; wb_flush_locked dropped the run, so there is nothing to
+    // retry. A flush that stood at that close installed its pages as the open's:
+    // they go too, as the hand-off's do (dev9p_close_job_run). One that starts
+    // later finds the anchor gone and installs nothing.
+    if (j->staged) {
+        larder_attr_invalidate(&p->client->larder, c->qid.path);
+        larder_page_invalidate(&p->client->larder, c->qid.path);
+    }
+    if (rc != 0 && p9_client_fid_held(p->client, p->fid))
+        p9_close_job_lost(p->fid, rc);
+    if (__atomic_exchange_n(&p->lock_granted, false, __ATOMIC_SEQ_CST)) {
+        u8   status = P9_LOCK_ERROR;
+        char cid[LOCK_CLIENT_ID_MAX];
+        u16  cid_len = lock_client_id(lock_named(p), cid);
+        (void)p9_client_lock(p->client, lock_fid(p), P9_LOCK_TYPE_UNLCK, 0, 0, 0,
+                             (const u8 *)cid, cid_len, &status);
+    }
+    return rc;
+}
+
+static void dev9p_lock_flush_job_release(struct p9_close_job *job) {
+    struct dev9p_lock_flush_job *j = (struct dev9p_lock_flush_job *)job;
+    spoor_clunk(j->c);
+    kfree(j);
+}
+
+// Queue that job. 0, or a negative errno with nothing queued.
+static int dev9p_lock_flush_queue(struct dev9p_priv *p, struct Spoor *c,
+                                  bool release_locks, bool staged) {
+    if (!p->attached_owner) return -T_E_IO;     // a test's bare client
+    struct dev9p_lock_flush_job *j = kmalloc(sizeof(*j), 0);
+    if (!j) return -T_E_NOMEM;
+    j->job.run       = dev9p_lock_flush_job_run;
+    j->job.release   = dev9p_lock_flush_job_release;
+    j->c             = c;
+    j->release_locks = release_locks;
+    j->staged        = staged;
+    spoor_ref(c);
+    if (p9_attached_defer_close(p->attached_owner, P9_NOFID, &j->job) != 0) {
+        spoor_clunk(c);            // the caller's reference keeps it open
+        kfree(j);
+        return -T_E_NOMEM;
+    }
+    return 0;
+}
+
+// A loose cached open binds a fid on its first need, by walking the run that
+// minted it again from the start it kept. It accepts only the same file: the
+// same qid.path and generation, so a name that now means another file binds
+// nothing, even at a reused inode number. A file renamed, unlinked or replaced
+// since the open answers ESTALE, and the open keeps serving its snapshot. The
+// names are a hint, checked and never trusted (I-33); the walk adds no authority
+// the open did not have, since it can only reach the file already open.
+// Installed once: a peer that installs one first wins, and the loser clunks its
+// own.
+static int co_bind(struct dev9p_priv *p) {
+    if (lock_fid(p) != P9_NOFID) return 0;
+    struct dev9p_priv *sp = p->co_start ? priv_of(p->co_start) : NULL;
+    if (!sp || !p->co_names) return -T_E_STALE;
+    int nname = p->co_nname;
+    const u8 *names[P9_MAX_WALK];
+    size_t lens[P9_MAX_WALK];
+    const u8 *cur = p->co_names;
+    for (int i = 0; i < nname; i++) {
+        lens[i]  = (size_t)cur[0] | ((size_t)cur[1] << 8);
+        names[i] = cur + 2;
+        cur     += 2 + lens[i];
+    }
+    struct p9_attr *attrs = kmalloc(sizeof(struct p9_attr) * (size_t)nname, 0);
+    if (!attrs) return -T_E_NOMEM;
+    u32 nf = p9_client_alloc_fid(p->client);
+    if (nf == P9_NOFID) { kfree(attrs); return -T_E_NOMEM; }
+    struct larder *l = &p->client->larder;
+    u64 seq0 = larder_gen_snapshot(l);
+    u16 nwqid = 0;
+    struct p9_qid qids[P9_MAX_WALK];
+    int rc = p9_client_walkgetattr(p->client, sp->fid, nf,
+                                   P9_GETATTR_BASIC | P9_GETATTR_GEN, (u16)nname,
+                                   (const u8 *const *)names, lens, &nwqid, qids, attrs);
+    if (rc != 0 || nwqid != (u16)nname) {   // nothing bound
+        kfree(attrs);
+        // ESTALE says the file moved, and a peer's ESTALE lets a take stand
+        // while that peer keeps its snapshot. A wire that failed says nothing
+        // about the file.
+        if (rc == 0 || rc == -T_E_NOENT || rc == -T_E_NOTDIR || rc == -T_E_STALE)
+            return -T_E_STALE;
+        return dev9p_wire_errno(rc);
+    }
+    const struct p9_attr *leaf = &attrs[nname - 1];
+    bool same = leaf->qid.path == p->co_stat.qid_path &&
+                (leaf->valid & P9_GETATTR_GEN) && leaf->gen == p->lock_gen;
+    // The stat a wstat judges next: the Larder may hold what another session has
+    // since changed.
+    if (same) {
+        struct t_stat st;
+        t_stat_from_p9_attr(&st, leaf, p->client);
+        larder_attr_install(l, seq0, leaf->qid.path, leaf->qid.version, &st,
+                            attr_gen_of(leaf));
+    }
+    kfree(attrs);
+    if (!same) {
+        dev9p_clunk_fid(p->client, p->attached_owner, nf);
+        return -T_E_STALE;
+    }
+    u32 none = P9_NOFID;
+    if (!__atomic_compare_exchange_n(&p->co_kfid, &none, nf, false,
+                                     __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+        dev9p_clunk_fid(p->client, p->attached_owner, nf);
+    return 0;
+}
+
+// A lock call answers what it can: ESTALE and EINTR as they are, and any other
+// failure to reach the file as ENOLCK.
+static int co_bind_lock_errno(int rc) {
+    return (rc == -T_E_STALE || rc == -T_E_INTR) ? rc : -T_E_NOLCK;
+}
+
+// A cached open's reads leave the snapshot, which is the file as it was at
+// open, for a zero-name clone of its fid opened for reading. Installed once: a
+// peer that installs one first wins, and the loser clunks its own.
+static int co_read_live(struct dev9p_priv *p) {
+    if (!p->cached_open) return 0;    // its reads already go to the server
+    if (__atomic_load_n(&p->co_rfid, __ATOMIC_ACQUIRE) != P9_NOFID) return 0;
+    int br = co_bind(p);
+    if (br != 0) return br;
+    u32 nf = p9_client_alloc_fid(p->client);
+    if (nf == P9_NOFID) return -T_E_NOMEM;
+    u16 nwqid = 0;
+    struct p9_qid qids[P9_MAX_WALK];
+    int rc = p9_client_walk(p->client, lock_fid(p), nf, 0, NULL, NULL, &nwqid, qids);
+    if (rc != 0) return lock_wire_errno(rc);    // nothing bound
+    struct p9_qid qid;
+    u32 iounit = 0;
+    rc = p9_client_lopen(p->client, nf, 0u /* O_RDONLY */, &qid, &iounit);
+    if (rc != 0) {
+        dev9p_clunk_fid(p->client, p->attached_owner, nf);
+        return lock_wire_errno(rc);
+    }
+    u32 none = P9_NOFID;
+    if (!__atomic_compare_exchange_n(&p->co_rfid, &none, nf, false,
+                                     __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+        dev9p_clunk_fid(p->client, p->attached_owner, nf);
+    return 0;
+}
+
+// Land c's staged writes (its write-behind run, and a run another thread is
+// flushing) so that a lock released after this returns covers them. A thread
+// that may not wait (a death is pending) hands the flush to the session's
+// closer instead. Its release cannot be sent either and goes to the closer
+// after the flush, which serves a session's entries in order. c's own last
+// close would hand its run over with its clunk, but c may outlive this thread:
+// another Proc can share the open file.
+static int dev9p_lock_sync(struct Spoor *c, u32 how) {
+    struct dev9p_priv *p = priv_of(c);
+    if (!p) return 0;
+    if (how == DEV_LOCK_SYNC_ACQUIRE) {
+        // The take it refuses answers what a lock call can: a refusal of the
+        // server's is ENOLCK.
+        int rc = co_read_live(p);
+        if (rc == 0 || rc == -T_E_STALE || rc == -T_E_INTR) return rc;
+        return -T_E_NOLCK;
+    }
+    if (how != DEV_LOCK_SYNC_RELEASE || !p->wb_eligible) return 0;
+    int rc = 0;
+    if (close_may_wait()) {
+        spin_lock(&p->wb_lock);
+        if (p->wb_len || p->wb_flushers)
+            rc = wb_flush_locked(p, c->qid.path);
+        spin_unlock(&p->wb_lock);
+        if (close_may_wait()) return rc;   // a death mid-flush keeps the run
+    }
+    spin_lock(&p->wb_lock);
+    bool staged = p->wb_len || p->wb_flushers;
+    spin_unlock(&p->wb_lock);
+    if (!staged) return 0;
+    if (!p->fid_owned) return -T_E_IO;         // a test's bare client
+    return dev9p_lock_flush_queue(p, c, /*release_locks=*/false, /*staged=*/true);
+}
+
+// c's last descriptor has closed, on the closing thread, which may wait for its
+// server (ARCH 7.9.1, 9.6.11). The close returns with c's run landed and the
+// lock c holds released, though a map or a mount may keep c alive for much
+// longer. A clunk releases a fid's locks too, but it never waits and a server's
+// workers need not serve it before the request that follows, so the unlock is
+// sent after the flush returns, and waited on. Nothing stages after this: a
+// write through what keeps c alive goes straight through.
+//
+// A thread that may not wait (a death reached it, or reaches it here) cannot
+// send. With nothing else holding c, its last reference follows at once and
+// hands the run to a closer with the clunk, which releases the locks. With a
+// holder that might never let go, a closer does the flush and the unlock now.
+//
+// Reads the grant after spoor_fd_drop, as a lock call reads spoor_fd_open after
+// storing it: a grant this close misses, that call sees it missed.
+static int dev9p_fd_close(struct Spoor *c, bool heard) {
+    struct dev9p_priv *p = priv_of(c);
+    if (!p) return 0;
+    int  rc     = 0;
+    bool staged = false;
+    if (p->wb_eligible) {
+        spin_lock(&p->wb_lock);
+        if (close_may_wait())
+            rc = wb_flush_locked(p, c->qid.path);   // or the latched failure
+        else if (!p->wb_len && p->wb_err)
+            rc = -(p->wb_err);
+        p->wb_known = false;
+        staged = p->wb_len || p->wb_flushers;
+        wb_release_dead_locked(p);
+        spin_unlock(&p->wb_lock);
+        if (staged) rc = 0;                // no loss yet: whoever lands it reports
+    }
+    // The run has gone, write() said those bytes were written, and this answer
+    // reaches no program: an exit's close, or a thread that never returns to EL0.
+    // A latch a write or an fsync already returned prints again, which costs a line.
+    if (rc != 0 && (!heard || !close_may_wait()) &&
+        p9_client_fid_held(p->client, p->fid))
+        p9_close_job_lost(p->fid, rc);
+
+    bool granted = __atomic_exchange_n(&p->lock_granted, false, __ATOMIC_SEQ_CST);
+    if (granted && close_may_wait()) {
+        u8   status = P9_LOCK_ERROR;
+        char cid[LOCK_CLIENT_ID_MAX];
+        u16  cid_len = lock_client_id(lock_named(p), cid);
+        int  lr = p9_client_lock(p->client, lock_fid(p), P9_LOCK_TYPE_UNLCK, 0, 0, 0,
+                                 (const u8 *)cid, cid_len, &status);
+        granted = lr == -P9_E_INTR || !close_may_wait();   // cut short: still owed
+    }
+    if (!staged && !granted) return rc;
+
+    if (granted) __atomic_store_n(&p->lock_granted, true, __ATOMIC_SEQ_CST);
+    // An attach root's clunk never comes: the session owns its fid.
+    if (__atomic_load_n(&c->ref, __ATOMIC_ACQUIRE) > 1 ||
+        (!p->fid_owned && !p->cached_open))
+        (void)dev9p_lock_flush_queue(p, c, /*release_locks=*/true, staged);
+    return rc;
+}
+
+static bool dev9p_lock_held(struct Spoor *c) {
+    struct dev9p_priv *p = priv_of(c);
+    return p && __atomic_load_n(&p->lock_granted, __ATOMIC_ACQUIRE);
+}
+
+static int dev9p_lock(struct Spoor *c, u32 type, u64 start, u64 len,
+                      struct t_file_lock *test) {
+    struct dev9p_priv *p = priv_of(c);
+    if (!p) return -T_E_NOLCK;
+    // A strict cached open locks on its kept fid, which names the file as the
+    // open's own owner. A loose one binds that fid now; if it bound none, it
+    // holds no lock to release.
+    if (p->cached_open) {
+        if (type == SYS_FILE_LOCK_UN && !test && lock_fid(p) == P9_NOFID) return 0;
+        int br = co_bind(p);
+        if (br != 0) return co_bind_lock_errno(br);
+    }
+    u32 fid = lock_fid(p);
+    if (fid == P9_NOFID) return -T_E_NOLCK;
+
+    if (test) {
+        struct p9_getlock gl;
+        char cid[LOCK_CLIENT_ID_MAX];
+        u16  cid_len = lock_client_id(lock_named(p), cid);
+        int rc = p9_client_getlock(p->client, fid, (u8)type, start, len,
+                                   (const u8 *)cid, cid_len, &gl);
+        if (rc != 0) return lock_wire_errno(rc);
+        if (gl.type == P9_LOCK_TYPE_UNLCK) {
+            test->type  = SYS_FILE_LOCK_UN;
+            test->start = start;
+            test->len   = len;
+        } else if (gl.type == P9_LOCK_TYPE_RDLCK || gl.type == P9_LOCK_TYPE_WRLCK) {
+            test->type  = gl.type;
+            test->start = gl.start;
+            test->len   = gl.length;
+        } else {
+            return -T_E_IO;    // no such lock type: the server is not speaking 9P2000.L
+        }
+        test->pid = -1;
+        return 0;
+    }
+
+    // Every set-lock lands c's staged writes first: an unlock gives its range
+    // up, and a write lock converted to a read lock admits readers. Linux's NFS
+    // client flushes before any setlk, for the same reason.
+    (void)dev9p_lock_sync(c, DEV_LOCK_SYNC_RELEASE);
+
+    u32  who = type == SYS_FILE_LOCK_UN ? lock_named(p) : lock_taker(p);
+    char cid[LOCK_CLIENT_ID_MAX];
+    u16  cid_len = lock_client_id(who, cid);
+    u8 status = P9_LOCK_ERROR;
+    int rc = p9_client_lock(p->client, fid, (u8)type, 0, start, len,
+                            (const u8 *)cid, cid_len, &status);
+    if (rc != 0) {
+        // A death abandons the take with its outcome unknown, and the server may
+        // have granted it. An extra unlock costs a round trip. EINTR is flush(5)'s
+        // answer: never applied.
+        if (rc == -P9_E_IO && type != SYS_FILE_LOCK_UN)
+            lock_note_granted(p, who);
+        return lock_wire_errno(rc);
+    }
+    if (status == P9_LOCK_BLOCKED && type != SYS_FILE_LOCK_UN) return -T_E_AGAIN;
+    if (status != P9_LOCK_SUCCESS) return -T_E_NOLCK;   // ERROR, GRACE, or no status 9P defines
+
+    if (type != SYS_FILE_LOCK_UN) {
+        lock_note_granted(p, who);
+        // The last holder's writes are on the server: read them from there.
+        // The invalidates log this qid, so a fill already in flight from before
+        // the grant is dropped rather than installed after it.
+        larder_attr_invalidate(&p->client->larder, c->qid.path);
+        larder_page_invalidate(&p->client->larder, c->qid.path);
+    }
+    return 0;
+}
+
+// A second owner on c's file: a zero-name clone of c's fid (the server admits
+// the clone of an open fid; ARCH 9.6.11; a cached open's kept fid is
+// unopened). Unopened, never published.
+static struct Spoor *dev9p_lock_owner(struct Spoor *c, int *err) {
+    *err = -T_E_NOLCK;
+    struct dev9p_priv *p = priv_of(c);
+    if (!p) return NULL;
+    if (p->cached_open) {
+        int br = co_bind(p);
+        if (br != 0) { *err = co_bind_lock_errno(br); return NULL; }
+    }
+    u32 fid = lock_fid(p);
+    if (fid == P9_NOFID) return NULL;
+
+    struct Spoor *nc = spoor_clone(c);
+    if (!nc) return NULL;
+    struct dev9p_priv *np = NULL;
+    u32 nf = p9_client_alloc_fid(p->client);
+    if (nf != P9_NOFID) {
+        u16 nwqid = 0;
+        struct p9_qid qids[P9_MAX_WALK];
+        int rc = p9_client_walk(p->client, fid, nf, 0, NULL, NULL, &nwqid, qids);
+        if (rc == 0) {
+            np = priv_alloc(p->client, nf, /*fid_owned=*/true, p->attached_owner);
+            if (!np) dev9p_clunk_fid(p->client, p->attached_owner, nf);
+        } else {
+            *err = co_bind_lock_errno(lock_wire_errno(rc));
+        }
+    }
+    if (!np) {
+        nc->aux = NULL;    // still c's shallow copy: never close through it
+        spoor_unref(nc);
+        return NULL;
+    }
+    np->fid_locks = true;
+    // A clone names its source's file: the identity carries over.
+    __atomic_store_n(&np->lock_gen, __atomic_load_n(&p->lock_gen, __ATOMIC_RELAXED),
+                     __ATOMIC_RELAXED);
+    __atomic_store_n(&np->lock_ident,
+                     __atomic_load_n(&p->lock_ident, __ATOMIC_ACQUIRE), __ATOMIC_RELEASE);
+    nc->aux = np;
+    return nc;
+}
+
+// One file of one server: the same session, qid.path and, when both fids have
+// learned it, inode generation. Stratum does not keep a file a fid names: an
+// unlinked file dies, its fids answer ESTALE, and the next file created can
+// take its inode number. Two live fids with one qid.path name one file, but a
+// dead file's fid shares the number with its successor, and only the
+// generation tells them apart. A fid that has not learned it matches by number
+// (dev9p_lock_ident says when the generation must be learned first).
+static bool dev9p_lock_same_file(struct Spoor *a, struct Spoor *b) {
+    struct dev9p_priv *pa = priv_of(a);
+    struct dev9p_priv *pb = priv_of(b);
+    if (!pa || !pb || pa->client != pb->client || a->qid.path != b->qid.path)
+        return false;
+    if (__atomic_load_n(&pa->lock_ident, __ATOMIC_ACQUIRE) != DEV9P_IDENT_GEN ||
+        __atomic_load_n(&pb->lock_ident, __ATOMIC_ACQUIRE) != DEV9P_IDENT_GEN)
+        return true;
+    return __atomic_load_n(&pa->lock_gen, __ATOMIC_RELAXED) ==
+           __atomic_load_n(&pb->lock_gen, __ATOMIC_RELAXED);
+}
+
+// Learn the generation of the file c's fid names, once; a file keeps it for
+// life. Two threads may both ask, and both store what the server said.
+static int dev9p_lock_ident(struct Spoor *c) {
+    struct dev9p_priv *p = priv_of(c);
+    if (!p) return -T_E_NOLCK;
+    // A cached open learned its generation at mint: from the walk that minted
+    // it (strict), or from the Larder (loose).
+    if (__atomic_load_n(&p->lock_ident, __ATOMIC_ACQUIRE) != DEV9P_IDENT_UNKNOWN)
+        return 0;
+    if (p->fid == P9_NOFID) return 0;
+    struct p9_attr a;
+    int rc = p9_client_getattr(p->client, p->fid, P9_GETATTR_GEN, &a);
+    if (rc != 0) return lock_wire_errno(rc);
+    if (a.valid & P9_GETATTR_GEN) {
+        __atomic_store_n(&p->lock_gen, a.gen, __ATOMIC_RELAXED);
+        __atomic_store_n(&p->lock_ident, (u8)DEV9P_IDENT_GEN, __ATOMIC_RELEASE);
+    } else {
+        __atomic_store_n(&p->lock_ident, (u8)DEV9P_IDENT_NONE, __ATOMIC_RELEASE);
+    }
+    return 0;
+}
+
 static long dev9p_readdir(struct Spoor *c, void *buf, long n, s64 off) {
     struct dev9p_priv *p = priv_of(c);
     if (!p) return -1;
@@ -2261,7 +2963,7 @@ static long dev9p_readdir(struct Spoor *c, void *buf, long n, s64 off) {
 static long dev9p_readlink(struct Spoor *c, char *buf, long n) {
     struct dev9p_priv *p = priv_of(c);
     if (!p || !buf || n <= 0) return -T_E_INVAL;
-    if (p->fid == P9_NOFID) return -T_E_INVAL;   // fidless Spoor (cached open)
+    if (p->fid == P9_NOFID || p->cached_open) return -T_E_INVAL;   // a cached open
     u16 cap = (n < 0xFFFF) ? (u16)n : 0xFFFFu;
     u16 len = cap;
     int rc = p9_client_readlink(p->client, p->fid, (u8 *)buf, &len);
@@ -2283,7 +2985,8 @@ static int dev9p_rename(struct Spoor *olddir, const char *oldname,
     // renameat" -> EINVAL. They are distinct from the wire verdicts, which pass
     // through dev9p_wire_errno at the tail.
     if (!od || !nd) return -T_E_INVAL;
-    if (od->fid == P9_NOFID || nd->fid == P9_NOFID) return -T_E_INVAL;  // fidless Spoor
+    if (od->fid == P9_NOFID || nd->fid == P9_NOFID ||
+        od->cached_open || nd->cached_open) return -T_E_INVAL;   // a cached open
     if (od->client != nd->client) return -T_E_INVAL;  // renameat is within one session
     if (!oldname || !newname) return -T_E_INVAL;
     size_t ol = 0; while (oldname[ol] != '\0') ol++;
@@ -2337,7 +3040,7 @@ static int dev9p_unlink(struct Spoor *parent, const char *name, u32 flags) {
     // #80: local argument rejects -> EINVAL; the wire verdict passes through
     // dev9p_wire_errno at the tail.
     if (!p) return -T_E_INVAL;
-    if (p->fid == P9_NOFID) return -T_E_INVAL;   // fidless (cached-open) Spoor
+    if (p->fid == P9_NOFID || p->cached_open) return -T_E_INVAL;   // a cached open
     if (!name) return -T_E_INVAL;
     size_t nl = 0; while (name[nl] != '\0') nl++;
     if (nl == 0) return -T_E_INVAL;
@@ -2392,6 +3095,14 @@ static void dev9p_remove(struct Spoor *c) {
     // .unlink slot (dev9p_unlink) instead. Left as a no-op stub.
 }
 
+// A loose cached open's fstat answers from the open-time stat, whose owner may
+// be a former one. Its fid makes the stat SYS_WSTAT judges the file's own.
+static int dev9p_wstat_bind(struct Spoor *c) {
+    struct dev9p_priv *p = priv_of(c);
+    if (!p || !p->cached_open) return 0;
+    return co_bind(p);
+}
+
 static int dev9p_wstat(struct Spoor *c, u8 *dp, int n) {
     (void)c; (void)dp; (void)n;
     // The Plan 9 wire-stat .wstat slot is deferred; SYS_WSTAT (chmod/chown)
@@ -2399,28 +3110,33 @@ static int dev9p_wstat(struct Spoor *c, u8 *dp, int n) {
     return -1;
 }
 
-// Native chmod/chown surface (A-2a; IDENTITY-DESIGN.md §9.5) -> Stratum
-// Tsetattr. The SYS_WSTAT handler has already validated the mask (>=1 T_WSTAT_*
-// bit, no reserved bit) + value bounds (mode in 0777, uid/gid != INVALID); this
-// maps the T_WSTAT_* mask onto P9_SETATTR_* (identical bit values, pinned below)
-// and forwards. Like dev9p_rename / dev9p_unlink it borrows the caller's fid and
-// allocates no transient fid, so the create-path fid-leak class cannot arise.
+// Native chmod/chown/truncate/utimens surface (A-2a + G12; IDENTITY-DESIGN.md
+// §9.5) -> Stratum Tsetattr. The SYS_WSTAT handler has already validated the
+// mask (>=1 T_WSTAT_* bit, no reserved bit, no _SET bit without its time) +
+// value bounds (mode in 0777, uid/gid != INVALID, times in range); this maps
+// the T_WSTAT_* mask onto P9_SETATTR_* (identical bit values, pinned below) and
+// forwards. A time without its _SET bit goes out with zeroed fields: the
+// server stamps its own clock. Like dev9p_rename / dev9p_unlink it borrows the
+// caller's fid and allocates no transient fid, so the create-path fid-leak
+// class cannot arise. Every refusal is a -errno (the .wstat_native contract).
 static int dev9p_wstat_native(struct Spoor *c, u32 valid, u32 mode,
-                              u32 uid, u32 gid, u64 size) {
+                              u32 uid, u32 gid, u64 size,
+                              const struct t_timespec *times) {
     struct dev9p_priv *p = priv_of(c);
-    if (!p) return -1;
+    if (!p) return -T_E_IO;
+    if ((valid & (T_WSTAT_ATIME_SET | T_WSTAT_MTIME_SET)) && !times)
+        return -T_E_INVAL;
     // IDENTITY-DESIGN 3.2: a caped session imposes its ownership, so chown and
     // chgrp are refused before anything else happens (a write-behind flush
-    // included). chmod and truncate pass: the mode is the server's own.
-    if (p->client->cape && (valid & (T_WSTAT_UID | T_WSTAT_GID))) return -1;
-    // FID-LIFECYCLE cached-open seam (section 3.3, documented + tested):
-    // Tsetattr is fid-addressed and a fidless Spoor cannot late-bind (no
-    // fid-from-qid op; a retained-path re-walk is rename-unsound), so
-    // fchmod/fchown ON a cached-open fd fails LOUD. No v1.0 consumer does
-    // this (cmd/go's cache mtime updates are path-based Chtimes); path-based
-    // chmod/chown are untouched. The v1.x fix, if a consumer appears, is the
-    // retain-the-walk-fid-unopened variant.
-    if (p->cached_open) return -1;
+    // included). chmod, truncate and the times pass: they are the server's own.
+    if (p->client->cape && (valid & (T_WSTAT_UID | T_WSTAT_GID))) return -T_E_ACCES;
+    // FID-LIFECYCLE cached-open (section 3.3): Tsetattr is fid-addressed, so a
+    // strict cached open sends it on its kept fid (vote 20) and a loose one
+    // binds one first, answering ESTALE if the file moved since its open.
+    if (p->cached_open) {
+        int br = co_bind(p);
+        if (br != 0) return br;
+    }
     // F1 write-behind: a metadata write is a non-append op -- flush the
     // staged run FIRST (the staged bytes are older; a truncate must land
     // after them), then STOP staging on this priv (a size change moves the
@@ -2441,7 +3157,7 @@ static int dev9p_wstat_native(struct Spoor *c, u32 valid, u32 mode,
         p->wb_known = false;
         wb_release_dead_locked(p);
         spin_unlock(&p->wb_lock);
-        if (fe != 0) return fe;
+        if (fe != 0) return dev9p_wire_errno(fe);
     }
     struct p9_setattr sa;
     for (size_t i = 0; i < sizeof(sa); i++) ((u8 *)&sa)[i] = 0;
@@ -2450,14 +3166,23 @@ static int dev9p_wstat_native(struct Spoor *c, u32 valid, u32 mode,
     sa.uid   = uid;
     sa.gid   = gid;
     sa.size  = size;         // applied only when T_WSTAT_SIZE is in valid
-    int rc = p9_client_setattr(p->client, p->fid, &sa);
-    if (rc != 0) { p->fid_suspect = true; return -1; }
+    // The handler bounded each _SET time to sec >= 0, nsec in [0, 1e9).
+    if (valid & T_WSTAT_ATIME_SET) {
+        sa.atime_sec  = (u64)times[0].tv_sec;
+        sa.atime_nsec = (u64)times[0].tv_nsec;
+    }
+    if (valid & T_WSTAT_MTIME_SET) {
+        sa.mtime_sec  = (u64)times[1].tv_sec;
+        sa.mtime_nsec = (u64)times[1].tv_nsec;
+    }
+    int rc = p9_client_setattr(p->client, lock_fid(p), &sa);
+    if (rc != 0) { p->fid_suspect = true; return dev9p_wire_errno(rc); }
     // L1c invalidate (fs_cache.tla OwnWrite): chmod/chown changed
-    // mode/uid/gid; a T_WSTAT_SIZE truncate changed CONTENT + size. The
-    // attr drop covers both axes. CRITICAL -- the base X-check perm_checks
-    // the cached mode, so a stale mode after a tighten would be a bounded
-    // I-28 window; the invalidate keeps the window at zero for the guest's
-    // own chmod.
+    // mode/uid/gid; a time change the times; a T_WSTAT_SIZE truncate changed
+    // CONTENT + size. The attr drop covers every axis. CRITICAL -- the base
+    // X-check perm_checks the cached mode, so a stale mode after a tighten
+    // would be a bounded I-28 window; the invalidate keeps the window at zero
+    // for the guest's own chmod.
     larder_attr_invalidate(&p->client->larder, c->qid.path);
     // A size change makes every cached page stale (bytes at/past the new
     // end are gone; an extend zero-fills) -- whole-file drop, the same
@@ -2479,6 +3204,17 @@ _Static_assert(T_WSTAT_GID == P9_SETATTR_GID,
                "T_WSTAT_GID must equal the 9P Tsetattr GID bit");
 _Static_assert(T_WSTAT_SIZE == P9_SETATTR_SIZE,
                "T_WSTAT_SIZE must equal the 9P Tsetattr SIZE bit");
+_Static_assert(T_WSTAT_ATIME == P9_SETATTR_ATIME,
+               "T_WSTAT_ATIME must equal the 9P Tsetattr ATIME bit");
+_Static_assert(T_WSTAT_MTIME == P9_SETATTR_MTIME,
+               "T_WSTAT_MTIME must equal the 9P Tsetattr MTIME bit");
+_Static_assert(T_WSTAT_ATIME_SET == P9_SETATTR_ATIME_SET,
+               "T_WSTAT_ATIME_SET must equal the 9P Tsetattr ATIME_SET bit");
+_Static_assert(T_WSTAT_MTIME_SET == P9_SETATTR_MTIME_SET,
+               "T_WSTAT_MTIME_SET must equal the 9P Tsetattr MTIME_SET bit");
+// The wire's CTIME bit is the server's; SYS_WSTAT keeps it reserved.
+_Static_assert((T_WSTAT_VALID & P9_SETATTR_CTIME) == 0,
+               "SYS_WSTAT must not pass the 9P Tsetattr CTIME bit");
 
 static struct Spoor *dev9p_power(struct Spoor *c, int on) {
     (void)c; (void)on;
@@ -2532,6 +3268,7 @@ VISIBLE_IF_KERNEL_TESTS struct Dev dev9p = {
     .open     = dev9p_open,
     .create   = dev9p_create,
     .close    = dev9p_close,
+    .fd_close = dev9p_fd_close,
 
     .read     = dev9p_read,
     .bread    = dev9p_bread,
@@ -2547,10 +3284,17 @@ VISIBLE_IF_KERNEL_TESTS struct Dev dev9p = {
     .rename   = dev9p_rename,
     .unlink   = dev9p_unlink,
     .readlink = dev9p_readlink,   // D-1: Treadlink (the resolver's expansion RPC)
+    .lock           = dev9p_lock,             // B-3h: Tlock / Tgetlock
+    .lock_owner     = dev9p_lock_owner,
+    .lock_same_file = dev9p_lock_same_file,
+    .lock_sync      = dev9p_lock_sync,
+    .lock_ident     = dev9p_lock_ident,
+    .lock_held      = dev9p_lock_held,
     .remote   = dev9p_spoor_remote,   // DISTRO 4.6: served-link containment
 
     .remove   = dev9p_remove,
     .wstat    = dev9p_wstat,
+    .wstat_bind   = dev9p_wstat_bind,
     .wstat_native = dev9p_wstat_native,
     .power    = dev9p_power,
 };

@@ -76,18 +76,19 @@
 //   history             -- needs the line editor's history (U-6g).
 //   note                -- `note send/list/wait`, the richer notes argv
 //                          surface (U-7c); `kill` already covers posting.
-//   echo / printf / test / [ / time / palette / bind / ... --
+//   echo / printf / test / [ / time / palette / ... --
 //                          their own surfaces; echo/printf already
-//                          exist as external coreutils. (`mount` LEFT this
-//                          list -- see below. `bind` is its obvious sibling
-//                          and is still owed.)
+//                          exist as external coreutils. (`mount` and `bind`
+//                          LEFT this list -- see below.)
 //
 // === Implemented at the HAUL /srv chunk (namespace mutation) ===
 //
-//   mount [-b|-a|-c] service mountpoint [aname]
+//   mount [-b|-a] [-c] service mountpoint [aname]
 //               attach a posted 9P service and graft it into THIS shell's
 //               namespace. Flags are Plan 9's: -b before, -a after
 //               (mutually exclusive; default REPL), -c permit creation.
+//   bind [-b|-a] [-c] new old
+//               the same graft of a file already in the namespace (B-3e).
 //   unmount mountpoint
 //               remove it again, by PATH.
 //
@@ -99,6 +100,15 @@
 // exit. In a clone-always system the shell must own namespace mutation
 // in-process -- which generalises past these two verbs to every future
 // namespace tool. See HAUL-DESIGN.md 4.6.
+//
+// === Implemented at B-3e (the creation mask, IDENTITY-DESIGN 9.7 M8) ===
+//
+//   umask [mode]
+//               print the creation mask as four octal digits, or set it from
+//               one to four octal digits (at most 0777). A built-in for `cd`'s
+//               reason: the mask is the shell Proc's own state, which the
+//               commands it starts inherit, so a `umask` command would change
+//               only itself.
 //
 // A name outside the implemented set is NOT intercepted here
 // (`try_builtin` returns `None`), so the caller falls through to an
@@ -119,6 +129,8 @@ use libthyla_rs::{t_wait_pid_for, T_WAIT_PACKED, T_WAIT_WNOHANG};
 use super::env::Env;
 use super::error::EvalResult;
 use super::jobs::status_of_packed;
+use super::mountargs;
+use super::umaskargs;
 use super::stmt::{
     eval_source_as_command, poll_notes_once, run_foreground_jc, wait_pids_interruptible,
     StatementFlow,
@@ -134,7 +146,8 @@ use super::value::Value;
 /// dispatch arms.
 pub const BUILTIN_NAMES: &[&str] = &[
     "cd", "pwd", "exit", "true", "false", "unset", "eval", "source", ".", "type",
-    "whence", "jobs", "fg", "bg", "wait", "kill", "mount", "unmount", "abdicate",
+    "whence", "jobs", "fg", "bg", "wait", "kill", "mount", "bind", "unmount", "abdicate",
+    "umask",
 ];
 
 /// The built-in names, for the #115a completion command index.
@@ -186,14 +199,16 @@ pub fn try_builtin(env: &mut Env, argv: &[String]) -> Option<EvalResult<Statemen
         "kill" => bi_kill(env, args),
         "abdicate" => bi_abdicate(env, args),
         "mount" => bi_mount(env, args),
+        "bind" => bi_bind(env, args),
         "unmount" => bi_unmount(env, args),
+        "umask" => bi_umask(env, args),
         _ => return None,
     };
     Some(r)
 }
 
 // ---------------------------------------------------------------------
-// mount / unmount -- namespace mutation, and why it MUST be a built-in
+// mount / bind / unmount -- namespace mutation, and why it MUST be a built-in
 // ---------------------------------------------------------------------
 //
 // Plan 9 ships `mount` as an ordinary binary. We cannot, and the reason is
@@ -215,79 +230,21 @@ pub fn try_builtin(env: &mut Env, argv: &[String]) -> Option<EvalResult<Statemen
 // `/srv/halcyon-<user>/<hex>/place` and handed it over before it cost us the
 // same afternoon.)
 
-/// What `mount`'s argument grammar resolved to. Pure -- no syscalls, no Env --
-/// so the grammar is testable independently of the kernel surface it drives.
-#[derive(Debug, PartialEq, Eq)]
-pub struct MountPlan {
-    /// Bitmask of T_MREPL / T_MBEFORE / T_MAFTER / T_MCREATE.
-    pub flags: u32,
-    /// The service to attach, e.g. `/srv/ptyfs`.
-    pub service: String,
-    /// Where it lands in THIS shell's namespace.
-    pub mountpoint: String,
-    /// 9P attach name; `None` means the server's default root.
-    pub aname: Option<String>,
-}
-
-/// Parse `mount`'s arguments. Plan 9's flags: `-b` before, `-a` after, `-c`
-/// permits creation in the union. `-b`/`-a` are the ORDERING (mutually
-/// exclusive, default REPL); `-c` is orthogonal and ORs in.
-pub fn parse_mount(args: &[String]) -> Result<MountPlan, String> {
-    let mut flags: u32 = 0;
-    let mut order_seen = false;
-    let mut i = 0usize;
-
-    while i < args.len() {
-        let a = args[i].as_str();
-        // A lone "-" is an operand, not a flag; anything not starting with '-'
-        // ends the option run. No `opts_done` latch: every path that would set
-        // one breaks out of the loop in the same step, so the flag would be
-        // written and never read (the compiler said so, and it was right --
-        // vestigial structure copied from a parser that genuinely needed it).
-        if !a.starts_with('-') || a.len() == 1 {
-            break;
-        }
-        if a == "--" {
-            i += 1;
-            break;
-        }
-        // Clustered short flags, as `mount -bc` is the Plan 9 spelling.
-        for c in a[1..].chars() {
-            match c {
-                'b' | 'a' => {
-                    if order_seen {
-                        return Err("mount: -b and -a are mutually exclusive".to_string());
-                    }
-                    order_seen = true;
-                    flags |= if c == 'b' { 0x0002 } else { 0x0004 };
-                }
-                'c' => flags |= 0x0008,
-                _ => return Err(alloc::format!("mount: unknown option -{}", c)),
-            }
-        }
-        i += 1;
-    }
-    if !order_seen {
-        flags |= 0x0001; // T_MREPL -- the default, as in Plan 9
-    }
-
-    let rest = &args[i..];
-    if rest.len() < 2 || rest.len() > 3 {
-        return Err("usage: mount [-b|-a|-c] service mountpoint [aname]".to_string());
-    }
-    Ok(MountPlan {
-        flags,
-        service: rest[0].clone(),
-        mountpoint: rest[1].clone(),
-        aname: rest.get(2).cloned(),
-    })
-}
+// The grammar (`mountargs`) is pure and host-tested; its flag values are the
+// kernel's, pinned here where libthyla-rs can be named.
+const _: () = assert!(
+    mountargs::MREPL == libthyla_rs::T_MREPL
+        && mountargs::MBEFORE == libthyla_rs::T_MBEFORE
+        && mountargs::MAFTER == libthyla_rs::T_MAFTER
+        && mountargs::MCREATE == libthyla_rs::T_MCREATE
+);
 
 fn bi_mount(env: &mut Env, args: &[String]) -> EvalResult<StatementFlow> {
-    let plan = match parse_mount(args) {
+    let mut plan = match mountargs::parse_mount(args) {
         Ok(p) => p,
         Err(m) => return fail(env, m, 1),
     };
+    plan.mountpoint = ns_name(env.cwd(), &plan.mountpoint);
 
     // 1. CONNECT. Opening a /srv name IS the attach-side connect; the resolver
     //    will not cross into the service on a deeper walk, so this must name the
@@ -353,8 +310,8 @@ fn bi_mount(env: &mut Env, args: &[String]) -> EvalResult<StatementFlow> {
     //    logout, and unmount here is by PATH, not by fd.
     let _ = unsafe { libthyla_rs::t_close(root) };
     if rc != 0 {
-        // The kernel's flat -1 names no cause; Plan 9's type check does
-        // (-ENOTDIR: an attach root is a directory, so the point is a file).
+        // Each refusal names its errno (-ENOTDIR: an attach root is a
+        // directory, so the point is a file); a bare -1 names none.
         let why = match libthyla_rs::err::Error::from_syscall_return(rc) {
             Err(e) if rc != -1 => alloc::format!(": {}", e),
             _ => alloc::string::String::new(),
@@ -369,14 +326,108 @@ fn bi_mount(env: &mut Env, args: &[String]) -> EvalResult<StatementFlow> {
     Ok(StatementFlow::Normal)
 }
 
+/// `bind [-b|-a] [-c] new old`: graft `new`, already in this namespace, over
+/// `old`. One step where `mount` takes two: the source is a walk-only handle on
+/// a name that resolves here, so there is nothing to connect or attach.
+fn bi_bind(env: &mut Env, args: &[String]) -> EvalResult<StatementFlow> {
+    let plan = match mountargs::parse_bind(args) {
+        Ok(p) => p,
+        Err(m) => return fail(env, m, 1),
+    };
+    let new = ns_name(env.cwd(), &plan.new);
+    let old = ns_name(env.cwd(), &plan.old);
+
+    let src = unsafe {
+        libthyla_rs::t_open(
+            libthyla_rs::T_WALK_OPEN_FROM_ROOT,
+            new.as_ptr(),
+            new.len(),
+            libthyla_rs::T_OPATH,
+        )
+    };
+    if src < 0 {
+        let why = match Error::from_syscall_return(src) {
+            Err(e) if src != -1 => alloc::format!(": {}", e),
+            _ => String::new(),
+        };
+        return fail(env, alloc::format!("bind: cannot open {}{}", new, why), 1);
+    }
+    let rc = unsafe { libthyla_rs::t_mount(old.as_ptr(), old.len(), src, plan.flags) };
+    // The mount holds its own reference on the source, as for `mount`.
+    let _ = unsafe { libthyla_rs::t_close(src) };
+    if rc != 0 {
+        // Each refusal names its errno: -ENOTDIR is Plan 9's Emount (one of
+        // the two is a directory and the other is not, or an ordering flag was
+        // given at a file), -ENOSPC a full namespace, -ELOOP a cycle.
+        let why = match Error::from_syscall_return(rc) {
+            Err(e) if rc != -1 => alloc::format!(": {}", e),
+            _ => String::new(),
+        };
+        return fail(env, alloc::format!("bind: cannot bind at {}{}", old, why), 1);
+    }
+    env.status_set(0);
+    Ok(StatementFlow::Normal)
+}
+
 fn bi_unmount(env: &mut Env, args: &[String]) -> EvalResult<StatementFlow> {
     if args.len() != 1 {
         return fail(env, "usage: unmount mountpoint".to_string(), 1);
     }
-    let mp = &args[0];
+    let mp = ns_name(env.cwd(), &args[0]);
     let rc = unsafe { libthyla_rs::t_unmount(mp.as_ptr(), mp.len()) };
     if rc != 0 {
-        return fail(env, alloc::format!("unmount: cannot unmount {}", mp), 1);
+        // -EINVAL: nothing is mounted there; otherwise the path's own errno.
+        let why = match Error::from_syscall_return(rc) {
+            Err(e) if rc != -1 => alloc::format!(": {}", e),
+            _ => String::new(),
+        };
+        return fail(env, alloc::format!("unmount: cannot unmount {}{}", mp, why), 1);
+    }
+    env.status_set(0);
+    Ok(StatementFlow::Normal)
+}
+
+/// A name for the namespace built-ins. The kernel resolves a mount point from
+/// the root only, so a relative name joins `$cwd` here, lexically as `cd` joins
+/// it. An absolute name passes unchanged, and a trailing slash survives: it asks
+/// the resolver to follow a final link.
+fn ns_name(cwd: &str, arg: &str) -> String {
+    if arg.is_empty() || arg.starts_with('/') {
+        return arg.to_string();
+    }
+    let mut s = normalize_abs(cwd, arg);
+    if arg.ends_with('/') && !s.ends_with('/') {
+        s.push('/');
+    }
+    s
+}
+
+// ---------------------------------------------------------------------
+// umask -- the creation mask (IDENTITY-DESIGN 9.7 M8)
+// ---------------------------------------------------------------------
+
+/// `umask [mode]`: print the creation mask, or set it.
+fn bi_umask(env: &mut Env, args: &[String]) -> EvalResult<StatementFlow> {
+    let set = match umaskargs::parse_umask(args) {
+        Ok(s) => s,
+        Err(m) => return fail(env, m, 1),
+    };
+    // The kernel only exchanges the mask, so a read is two exchanges. The
+    // first asks for the narrowest mask: anything this Proc creates between
+    // them comes out narrower than asked, never wider.
+    let old = unsafe { libthyla_rs::t_umask(u64::from(set.unwrap_or(umaskargs::MASK_BITS))) };
+    if old < 0 {
+        let why = match Error::from_syscall_return(old) {
+            Err(e) if old != -1 => alloc::format!(": {}", e),
+            _ => String::new(),
+        };
+        return fail(env, alloc::format!("umask: cannot set the mask{}", why), 1);
+    }
+    if set.is_none() {
+        let _ = unsafe { libthyla_rs::t_umask(old as u64) };
+        let mut line = umaskargs::format_mask(old as u32);
+        line.push('\n');
+        env.emit_line(&line);
     }
     env.status_set(0);
     Ok(StatementFlow::Normal)
@@ -571,12 +622,38 @@ fn bi_abdicate(env: &mut Env, args: &[String]) -> EvalResult<StatementFlow> {
 // unset
 // ---------------------------------------------------------------------
 
+// A name also leaves the shell's own environment, the /env its commands
+// copy. Only the shell can do that: a removal acts on the remover's /env,
+// so an `rm /env/NAME` it spawned removes the name from rm's copy alone.
 fn bi_unset(env: &mut Env, args: &[String]) -> EvalResult<StatementFlow> {
+    let mut failure: Option<String> = None;
     for name in args {
+        if name.is_empty() || name.contains('/') || name == "." || name == ".." {
+            failure.get_or_insert_with(|| alloc::format!("unset: '{}': invalid variable name", name));
+            continue;
+        }
         env.unset(name);
+        // No environment holds a name with a NUL in it, or one too long to be a
+        // path component: nothing to remove there.
+        if name.contains('\0') || name.len() > libthyla_rs::T_WALK_OPEN_NAME_MAX {
+            continue;
+        }
+        let mut path = String::from("/env/");
+        path.push_str(name);
+        match fs::remove_file(path) {
+            Ok(()) | Err(Error::NotFound) => {}
+            Err(e) => {
+                failure.get_or_insert_with(|| alloc::format!("unset: '{}': {}", name, e));
+            }
+        }
     }
-    env.status_set(0);
-    Ok(StatementFlow::Normal)
+    match failure {
+        Some(m) => fail(env, m, 1),
+        None => {
+            env.status_set(0);
+            Ok(StatementFlow::Normal)
+        }
+    }
 }
 
 // ---------------------------------------------------------------------
