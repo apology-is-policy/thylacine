@@ -6001,8 +6001,8 @@ void test_vivarium_fd_is_slow_cached(void) {
     // A real pipe: devpipe's stat says S_IFIFO.
     hidx_t rd = -1, wr = -1;
     TEST_EXPECT_EQ(sys_pipe_for_proc(p, &rd, &wr), 0, "pipe");
-    TEST_ASSERT(viv_fd_is_slow_for_test(p, (u64)rd), "a pipe's read end is slow");
-    TEST_ASSERT(viv_fd_is_slow_for_test(p, (u64)wr), "a pipe's write end is slow");
+    TEST_ASSERT(file_is_slow_for_test(p, (u64)rd), "a pipe's read end is slow");
+    TEST_ASSERT(file_is_slow_for_test(p, (u64)wr), "a pipe's write end is slow");
 
     // A regular file: stat once, cached, never again.
     g_intr_stat_fail  = 0;
@@ -6010,8 +6010,8 @@ void test_vivarium_fd_is_slow_cached(void) {
     g_intr_stat_calls = 0;
     hidx_t reg = intr_install(p);
     TEST_ASSERT(reg >= 0, "install a regular file");
-    TEST_ASSERT(!viv_fd_is_slow_for_test(p, (u64)reg), "a regular file is not slow");
-    TEST_ASSERT(!viv_fd_is_slow_for_test(p, (u64)reg), "still not slow");
+    TEST_ASSERT(!file_is_slow_for_test(p, (u64)reg), "a regular file is not slow");
+    TEST_ASSERT(!file_is_slow_for_test(p, (u64)reg), "still not slow");
     TEST_EXPECT_EQ(g_intr_stat_calls, 1, "the type was learned once and cached");
 
     // A character device (a pts, the console): slow, and cached the same way.
@@ -6019,8 +6019,8 @@ void test_vivarium_fd_is_slow_cached(void) {
     g_intr_stat_calls = 0;
     hidx_t chr = intr_install(p);
     TEST_ASSERT(chr >= 0, "install a character device");
-    TEST_ASSERT(viv_fd_is_slow_for_test(p, (u64)chr), "a character device is slow");
-    TEST_ASSERT(viv_fd_is_slow_for_test(p, (u64)chr), "still slow");
+    TEST_ASSERT(file_is_slow_for_test(p, (u64)chr), "a character device is slow");
+    TEST_ASSERT(file_is_slow_for_test(p, (u64)chr), "still slow");
     TEST_EXPECT_EQ(g_intr_stat_calls, 1, "learned once");
 
     // A failing stat: not slow, NOT cached -- the next call asks again and
@@ -6030,18 +6030,18 @@ void test_vivarium_fd_is_slow_cached(void) {
     g_intr_stat_calls = 0;
     hidx_t flaky = intr_install(p);
     TEST_ASSERT(flaky >= 0, "install a file whose stat fails");
-    TEST_ASSERT(!viv_fd_is_slow_for_test(p, (u64)flaky), "a failed stat answers not slow");
-    TEST_ASSERT(!viv_fd_is_slow_for_test(p, (u64)flaky), "and again");
+    TEST_ASSERT(!file_is_slow_for_test(p, (u64)flaky), "a failed stat answers not slow");
+    TEST_ASSERT(!file_is_slow_for_test(p, (u64)flaky), "and again");
     TEST_EXPECT_EQ(g_intr_stat_calls, 2, "a failure is not cached");
     g_intr_stat_fail = 0;
-    TEST_ASSERT(viv_fd_is_slow_for_test(p, (u64)flaky),
+    TEST_ASSERT(file_is_slow_for_test(p, (u64)flaky),
                 "once the stat succeeds, the device is slow");
     TEST_EXPECT_EQ(g_intr_stat_calls, 3, "and the answer is now cached");
-    TEST_ASSERT(viv_fd_is_slow_for_test(p, (u64)flaky), "cached slow");
+    TEST_ASSERT(file_is_slow_for_test(p, (u64)flaky), "cached slow");
     TEST_EXPECT_EQ(g_intr_stat_calls, 3, "no further stat");
 
-    TEST_ASSERT(!viv_fd_is_slow_for_test(p, 60u), "a closed fd is not slow");
-    TEST_ASSERT(!viv_fd_is_slow_for_test(p, ~0ull), "a garbage fd is not slow");
+    TEST_ASSERT(!file_is_slow_for_test(p, 60u), "a closed fd is not slow");
+    TEST_ASSERT(!file_is_slow_for_test(p, ~0ull), "a garbage fd is not slow");
 
     // A socket is slow because it has a socktab row, whatever its Dev's stat
     // says, and the row is asked before any handle lookup: fd 41 has a row
@@ -6052,8 +6052,8 @@ void test_vivarium_fd_is_slow_cached(void) {
     TEST_ASSERT(viv_socktab_claim(st, 41, VIV_NET_TCP, 3, VIV_SOCK_CONNECTED, NULL),
                 "claim a socket row for fd 41");
     __atomic_store_n(&p->socktab, st, __ATOMIC_RELEASE);
-    TEST_ASSERT(viv_fd_is_slow_for_test(p, 41u), "a socket (a socktab row) is slow");
-    TEST_ASSERT(!viv_fd_is_slow_for_test(p, 42u), "a neighbour with no row and no handle is not");
+    TEST_ASSERT(file_is_slow_for_test(p, 41u), "a socket (a socktab row) is slow");
+    TEST_ASSERT(!file_is_slow_for_test(p, 42u), "a neighbour with no row and no handle is not");
 
     p->state = PROC_STATE_ZOMBIE;
     proc_free(p);

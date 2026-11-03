@@ -639,10 +639,25 @@ struct Thread {
     // ChainDrained). Only this thread touches either.
     struct poll_defer_chain lock_owed;
     u32                     defer_depth;
+
+    // ARCH 8.8.3, the kernel's restart. For the call in hand: may the tail re-issue
+    // it (note_restartable, set where note_interruptible is), did a wait of it
+    // unwind for a caught note (note_call_unwound, set by thread_caught_note_-
+    // unwinds, and not note_unwound, the 9P reader's), and the x0 it came in with
+    // (note_call_x0). syscall_dispatch_body sets them and the EL0-return tail
+    // ends them, so a tail reached from anything but a syscall finds them clear.
+    // Owner-only; KP_ZERO inits them; not rfork-propagated.
+    bool                    note_restartable;
+    bool                    note_call_unwound;
+    u64                     note_call_x0;
 };
 
-_Static_assert(sizeof(struct Thread) == 1776,
-               "the deferred-walk chunk appended lock_owed (a pointer) + "
+_Static_assert(sizeof(struct Thread) == 1792,
+               "item 11c appended note_restartable + note_call_unwound (2 bools, "
+               "in defer_depth's trailing pad) + note_call_x0 (u64): 1776 -> 1792 "
+               "(8 bytes + 8 trailing pad to the 16-byte alignment); the thread "
+               "cache keeps 2 objects per 4 KiB slab. "
+               "Before that the deferred-walk chunk appended lock_owed (a pointer) + "
                "defer_depth (u32) after table_owed: 1760 -> 1776 (12 bytes + "
                "4 trailing pad to the 16-byte alignment); the thread cache "
                "keeps 2 objects per 4 KiB slab. "

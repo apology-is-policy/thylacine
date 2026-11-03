@@ -564,9 +564,14 @@ int notes_reenqueue_head_locked(struct NoteQueue *q, const struct Note *n);
 int notes_interrupt_should_terminate_locked(struct Proc *p, struct Thread *t);
 #endif // KERNEL_TESTS
 
+// ARCH 8.8.3: is `p`'s disposition per note, in its table? A Linux Proc's always
+// is, a native Proc's from its first SYS_NOTE_DISPOSE until its next exec. Pure; no
+// lock required.
+bool notes_table_governs(const struct Proc *p);
+
 // Would `name` take its DEFAULT action on `p`? False iff something intercepts
-// it: a native handler (handler_va), a phenotype sigtab handler, or a phenotype
-// SIG_IGN. Pure; no lock required (each read is a single atomic load).
+// it: a native handler with no table (handler_va), a table's caught row, or a
+// table's ignored row. Pure; no lock required (each read is a single atomic load).
 //
 // Exists because a decider that runs INSTEAD of notes_post cannot rely on the
 // SIG_IGN drop inside it. proc_tty_susp_would_stop_locked is the caller that
@@ -673,12 +678,18 @@ int notes_post_pid(int pid, const char *name, u32 arg);
 // handler install is not one of the clearing choke points, so its latch stays
 // armed until the note is delivered or drained.
 
+// ARCH 8.8.3: a disposition just changed. Discards nothing: it sets the terminate
+// and caught latches to what the queue says under the new disposition, then wakes
+// and rouses as a post would. The caller stored the disposition first and holds no
+// lock (it takes q->lock, then p->threads_lock). `p` is the caller's own, or one
+// it pins.
+void notes_disposition_reread(struct Proc *p);
+
 // Register/clear the async note handler (the SYS_NOTIFY body). Stores
-// handler_va with RELEASE (pairs with the dispatcher's acquire, F9) and, when
-// registering (handler_va != 0), clears the terminate latch -- BOTH under
-// q->lock, so the store+clear cannot interleave with notes_post's
-// check-handler-then-arm and leave a stale armed latch behind a registered
-// handler (which would *_INTR every future sleep of a surviving Proc).
+// handler_va with RELEASE (pairs with the dispatcher's acquire, F9); clearing it
+// resets a native table's caught rows; then notes_disposition_reread, so no stale
+// latch is left behind a registered handler (which would *_INTR every future sleep
+// of a surviving Proc) and none is missing behind a cleared one.
 void notes_set_handler(struct Proc *p, u64 handler_va);
 
 // Mark `p` self-managing (the SYS_NOTE_OPEN tail; wraps
@@ -751,6 +762,11 @@ bool thread_caught_note_deliverable(struct Thread *t);
 // releases it and walks the Proc again if its note is still queued. The sleep
 // sites evaluate it LAST, only when every other unwind gate has passed.
 bool thread_caught_note_claim(struct Thread *t);
+
+// ARCH 8.8.3: the tail's last word on a call whose wait unwound with no handler run
+// here. Re-issues it if nothing is left to report; clears the mark.
+struct exception_context;
+void notes_call_settle(struct exception_context *ctx, struct Thread *t);
 #endif // KERNEL_TESTS
 
 // ARCH 8.8.3 (dec-2026-10-12-note-target): the posting walk's designation.
@@ -783,12 +799,10 @@ bool thread_note_handler_escaped(const struct Thread *t, u64 sp_el0);
 
 // 11b-9p (item 11): does `p`'s reader handle -T_E_INTR? A caught-note wait unwind
 // returns EINTR to userspace, and a reader that does not expect it breaks (the
-// native ut $(cmd) capture, 11b-core's build bug). PHENO_LINUX programs go through
-// musl, which is EINTR-aware by construction (POSIX); native (libthyla-rs) readers
-// are NOT until they retry -T_E_INTR (11c). So the caught-note sleep unwind is gated
-// on this in the sched caught branch: only an EINTR-ready Proc unwinds; a native
-// reader's opted-in sleep degrades to death-only (the note delivers late, the
-// pre-item-11 behavior -- no regression). Widens to native per-reader at 11c.
+// native ut $(cmd) capture, 11b-core's build bug). A Proc whose table governs has
+// said which notes it expects (ARCH 8.8.3): the latch reads the row, so only a
+// caught row's note unwinds. Every other Proc has said nothing, and its opted-in
+// sleep degrades to death-only (the note delivers late, as before item 11).
 bool proc_caught_note_eintr_ready(struct Proc *p);
 
 // ARCH 8.8.3: the caught-note unwind decision, all but the wait's own condition

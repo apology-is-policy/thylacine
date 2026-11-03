@@ -4195,8 +4195,10 @@ static s64 sys_open_handler(u64 start_fd_raw, u64 path_va,
 
     char path_scratch[SYS_OPEN_PATH_MAX + 1];
     if (sys_copy_open_path(path_va, path_len_raw, path_scratch) != 0) return -1;
-    return sys_open_kpath_for_proc(p, start_fd_raw, path_scratch,
-                                   path_len_raw, omode_raw);
+    // SYS_WALK_OPEN_OINTR did its work in native_note_class: no server, no Dev and
+    // no other open sees the bit.
+    return sys_open_kpath_for_proc(p, start_fd_raw, path_scratch, path_len_raw,
+                                   omode_raw & ~(u64)SYS_WALK_OPEN_OINTR);
 }
 
 // =============================================================================
@@ -11587,6 +11589,7 @@ static s64 sys_wait_pid_handler(u64 want_pid_u, u64 flags_u, u64 status_out_va) 
 
     int status = 0;
     int reaped = wait_pid_for(want_pid, flags, &status);
+    if (reaped == WAIT_PID_NOTEINTR)                   return -(s64)T_E_INTR;
     if (reaped < 0)                                    return -1;
     if (reaped == 0)                                   return 0;  // WAIT_WNOHANG: no zombie ready
 
@@ -11644,8 +11647,11 @@ int sys_srv_accept_for_proc(struct Proc *p, hidx_t service_h) {
 
     // Block until a connection is on the backlog. NULL means the service
     // stopped being LIVE while we blocked (the poster exited / a test
-    // reset the registry) — fail closed.
-    struct SrvConn *cn = srv_accept_blocking(svc, caller);
+    // reset the registry) — fail closed. Or a caught note ended the wait with
+    // nothing taken (ARCH 8.8.3).
+    bool noted = false;
+    struct SrvConn *cn = srv_accept_interruptible(svc, caller, &noted);
+    if (noted) return -(int)T_E_INTR;
     if (!cn) return -1;
 
     // Wrap the accepted SrvConn in a devsrv connection Spoor — corvus's
@@ -11961,11 +11967,19 @@ static s64 sys_poll_handler(u64 fds_va, u64 nfds_raw, u64 timeout_ms_raw) {
     struct Proc *p = t->proc;
     if (!p)                                                  return -1;
 
+    // No fds is a sleep, as the phenotype's ppoll has it: Pouch's pause() and the
+    // poll(NULL, 0, ms) idiom reach it, and a caught note ends it.
+    if (nfds_raw == 0) {
+        s32 sleep_ms = 0;
+        if (!sys_s32_arg(timeout_ms_raw, &sleep_ms))         return -T_E_INVAL;
+        return sys_poll_sleep_for(sleep_ms);
+    }
+
     // nfds bound — same as the testable core's check, but also the
     // stack-array bound on `kfds[]` below. Reject before touching
     // user-VA. POLL_MAX_NFDS (decoupled from PROC_HANDLE_MAX) keeps the
     // kfds[] frame bounded regardless of the open-fd table size.
-    if (nfds_raw == 0 || nfds_raw > POLL_MAX_NFDS)          return -1;
+    if (nfds_raw > POLL_MAX_NFDS)                            return -1;
     u64 nfds = nfds_raw;
 
     // User-VA range check on the entire pollfd[] array.
@@ -14749,17 +14763,17 @@ s64 viv_kill_for_test(struct Proc *caller, int pid, int tid, u64 sig) {
 // SIG_IGN. Nothing to discard is the common case and costs one locked scan of an
 // empty ring.
 //
-// A disposition that TERMINATES makes a caught direct note a peer is riding out
-// fatal, and that peer's wait reads its word only when something rouses it.
+// Whatever the disposition, what stays pending is judged by it (ARCH 8.8.3): a row
+// that TERMINATES ends a wait that rode the note out, one that CATCHES interrupts
+// it, and a handler installed over an armed terminate latch disarms it.
 static void viv_sigaction_settled(struct Proc *p, enum viv_signote note,
                                   const struct viv_ksigaction *act) {
     if (act->handler == VIV_SIG_IGN ||
         (act->handler == VIV_SIG_DFL && viv_signote_default_is_ignore(note))) {
         const char *nm = viv_signote_note_name(note);
         if (nm) (void)notes_discard_name(p, nm);
-    } else if (act->handler == VIV_SIG_DFL && viv_signote_default_is_terminate(note)) {
-        proc_note_direct_rouse(p);
     }
+    notes_disposition_reread(p);
 }
 
 #ifdef KERNEL_TESTS
@@ -14768,6 +14782,52 @@ void viv_sigaction_settled_for_test(struct Proc *p, enum viv_signote note,
     viv_sigaction_settled(p, note, act);
 }
 #endif
+
+// SYS_NOTE_DISPOSE past its copy (ARCH 8.8.3). Row first, flag second, each with
+// RELEASE, so a reader that sees the table govern reads the row. Default needs a
+// table only when there is one to clear, as rt_sigaction's SIG_DFL does.
+VISIBLE_IF_KERNEL_TESTS
+s64 sys_note_dispose_for_proc(struct Proc *p, const char *name, u64 disposition,
+                              u64 flags) {
+    if (disposition > NOTE_DISP_CAUGHT) return -(s64)T_E_INVAL;
+    if (flags & ~(u64)NOTE_DISP_RESTART) return -(s64)T_E_INVAL;
+    if (flags && disposition != NOTE_DISP_CAUGHT) return -(s64)T_E_INVAL;
+    enum viv_signote note = viv_signote_from_note_name(name);
+    if (note == VIV_SIGNOTE_NONE || note == VIV_SIGNOTE_KILL) return -(s64)T_E_INVAL;
+    // With nothing to enter and no fd to read it, a caught row would hold the note
+    // forever.
+    if (disposition == NOTE_DISP_CAUGHT &&
+        __atomic_load_n(&p->handler_va, __ATOMIC_ACQUIRE) == 0 &&
+        !proc_is_self_managing_notes(p))
+        return -(s64)T_E_INVAL;
+
+    struct viv_ksigaction act = { .handler = VIV_SIG_DFL, .flags = 0,
+                                  .restorer = 0, .mask = 0 };
+    if (disposition == NOTE_DISP_IGNORE) act.handler = VIV_SIG_IGN;
+    if (disposition == NOTE_DISP_CAUGHT) {
+        act.handler = VIV_NATIVE_CAUGHT;
+        if (flags & NOTE_DISP_RESTART) act.flags = VIV_SA_RESTART;
+    }
+    struct viv_sigtab *tab = __atomic_load_n(&p->sigtab, __ATOMIC_ACQUIRE);
+    if (disposition != NOTE_DISP_DEFAULT && !tab) {
+        tab = viv_sigtab_of(p);
+        if (!tab) return -(s64)T_E_NOMEM;
+    }
+    if (tab) (void)viv_sigtab_set(tab, note, &act);
+    __atomic_or_fetch(&p->proc_flags, PROC_FLAG_NOTE_TABLE, __ATOMIC_RELEASE);
+    viv_sigaction_settled(p, note, &act);
+    return 0;
+}
+
+static s64 sys_note_dispose_handler(u64 name_va, u64 name_len_raw, u64 disposition,
+                                    u64 flags) {
+    struct Thread *t = current_thread();
+    if (!t || !t->proc) return -(s64)T_E_INVAL;
+    char buf[NOTE_NAME_MAX];
+    s64 name_err = postnote_copy_name(name_va, name_len_raw, buf);
+    if (name_err) return name_err;
+    return sys_note_dispose_for_proc(t->proc, buf, disposition, flags);
+}
 
 static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
                      u64 linux_nr, const u64 *args) {
@@ -16390,7 +16450,7 @@ s64 viv_session_for_test(struct Proc *p, u64 linux_num, u64 a0, u64 a1) {
 // uninterruptible. A peer thread may close and reuse the fd between this and
 // the call. That misclassifies only that one call, for a guest racing its own
 // close: a handler that runs late, or an EINTR from the file it replaced.
-static bool viv_fd_is_slow(struct Proc *p, u64 fd) {
+static bool file_is_slow(struct Proc *p, u64 fd) {
     struct viv_socktab *tab = __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
     struct viv_sock row;
     if (tab && viv_socktab_get(tab, (s32)(s64)fd, &row)) return true;
@@ -16402,8 +16462,8 @@ static bool viv_fd_is_slow(struct Proc *p, u64 fd) {
         struct t_stat ks;
         if (spoor_stat_native(c, &ks) != 0) { spoor_clunk(c); return false; }
         u32 type = ks.mode & T_S_IFMT;
-        f = (type == T_S_IFIFO || type == T_S_IFCHR) ? (CSLOWKNOWN | CSLOW)
-                                                     : CSLOWKNOWN;
+        f = (type == T_S_IFIFO || type == T_S_IFCHR || type == T_S_IFSOCK)
+                ? (CSLOWKNOWN | CSLOW) : CSLOWKNOWN;
         spoor_flag_set(c, f);
     }
     spoor_clunk(c);
@@ -16414,16 +16474,16 @@ static bool viv_fd_is_slow(struct Proc *p, u64 fd) {
 static bool viv_call_interruptible(struct Proc *p, u64 linux_nr, const u64 *args) {
     switch (vivarium_intr_class(linux_nr, args)) {
     case VIV_INTR_ALWAYS:  return true;
-    case VIV_INTR_IF_SLOW: return viv_fd_is_slow(p, args[0]);
+    case VIV_INTR_IF_SLOW: return file_is_slow(p, args[0]);
     case VIV_INTR_NEVER:   break;
     }
     return false;
 }
 
 #ifdef KERNEL_TESTS
-// Drives viv_fd_is_slow so a test can prove the classification and its
+// Drives file_is_slow so a test can prove the classification and its
 // per-Spoor cache (ARCH 8.8.3).
-bool viv_fd_is_slow_for_test(struct Proc *p, u64 fd) { return viv_fd_is_slow(p, fd); }
+bool file_is_slow_for_test(struct Proc *p, u64 fd) { return file_is_slow(p, fd); }
 #endif
 
 static bool viv_linux_dispatch(struct exception_context *ctx, struct Proc *p) {
@@ -16497,8 +16557,12 @@ static bool viv_linux_dispatch(struct exception_context *ctx, struct Proc *p) {
     // ARCH 8.8.3: whether a caught note may interrupt this call is Linux's
     // answer, taken once from the Linux number before it is renumbered.
     // syscall_dispatch clears it on the way out.
-    current_thread()->note_interruptible =
-        viv_call_interruptible(p, nr, args);
+    {
+        struct Thread *ct = current_thread();
+        ct->note_interruptible = viv_call_interruptible(p, nr, args);
+        ct->note_restartable   = ct->note_interruptible &&
+                                 vivarium_call_restartable(nr, args);
+    }
 
     // A CONNECTING socket's fd still names ctl, so read and write finish its
     // interrupted connect before they reach the file. A hook, as close's is,
@@ -16639,6 +16703,50 @@ void syscall_dispatch(struct exception_context *ctx) {
                        "which inherits its mask (#713)");
 }
 
+// ARCH 8.8.3: signal(7)'s list for the native numbers, for a Proc whose table says
+// which notes it expects. Taken before the call runs, as the Linux dispatcher's is.
+// Unlisted calls ride a caught note out, so the failure of a call left off is a
+// handler that runs late, never a spurious EINTR.
+static void native_note_class(struct Thread *t, struct Proc *p,
+                              const struct exception_context *ctx) {
+    bool intr = false, restart = false;
+    switch (ctx->regs[8]) {
+    case SYS_READ:
+    case SYS_WRITE:
+    case SYS_PREAD:
+    case SYS_PWRITE:
+        intr = restart = file_is_slow(p, ctx->regs[0]);
+        break;
+    case SYS_WAIT_PID:
+    case SYS_SRV_ACCEPT:
+        intr = restart = true;
+        break;
+    case SYS_TORPOR_WAIT:
+        // < 0 waits forever and re-issues as it stands. A timed wait would owe a
+        // restart block with its remaining time, as a timed futex would.
+        intr    = true;
+        restart = (s64)ctx->regs[2] < 0;
+        break;
+    case SYS_POLL:
+        intr = true;
+        break;
+    case SYS_OPEN:
+        intr = restart = (ctx->regs[3] & SYS_WALK_OPEN_OINTR) != 0;
+        break;
+    default:
+        break;
+    }
+    t->note_interruptible = intr;
+    t->note_restartable   = restart;
+}
+
+#ifdef KERNEL_TESTS
+void native_note_class_for_test(struct Thread *t, struct Proc *p,
+                                const struct exception_context *ctx) {
+    native_note_class(t, p, ctx);
+}
+#endif
+
 static void syscall_dispatch_body(struct exception_context *ctx) {
     // ARCH 8.12's property, witnessed on EVERY syscall of every boot rather
     // than in one test. This is what replaced poll's preemption point: the
@@ -16655,6 +16763,11 @@ static void syscall_dispatch_body(struct exception_context *ctx) {
     {
         struct Thread *vt = current_thread();
         struct Proc   *vp = vt ? vt->proc : NULL;
+        if (vt) {
+            vt->note_call_x0      = ctx->regs[0];
+            vt->note_call_unwound = false;
+            vt->note_restartable  = false;
+        }
         if (vp && vp->phenotype == PHENO_LINUX) {
             // Linux hands back every register but x0 as the guest left it, and a
             // compiler may keep x1-x5 or x8 live across the svc (musl declares
@@ -16669,6 +16782,14 @@ static void syscall_dispatch_body(struct exception_context *ctx) {
             ctx->regs[8] = kept_x8;
             return;
         }
+        // SYS_NOTE_DISPOSE refuses a caught row with no handler and no notes fd, and
+        // SYS_NOTIFY(0) takes them back, so without one no note can unwind a wait,
+        // and a program that only ignores SIGPIPE pays no stat per open file. A
+        // handler a peer is installing right now makes this call's note late.
+        if (vp && notes_table_governs(vp) &&
+            (__atomic_load_n(&vp->handler_va, __ATOMIC_ACQUIRE) != 0 ||
+             proc_is_self_managing_notes(vp)))
+            native_note_class(vt, vp, ctx);
     }
     syscall_native_switch(ctx);
 }
@@ -17404,6 +17525,11 @@ static void syscall_native_switch(struct exception_context *ctx) {
         ctx->regs[0] = (u64)sys_postnote_tid_handler(ctx, ctx->regs[0],
                                                       ctx->regs[1],
                                                       ctx->regs[2]);
+        return;
+
+    case SYS_NOTE_DISPOSE:
+        ctx->regs[0] = (u64)sys_note_dispose_handler(ctx->regs[0], ctx->regs[1],
+                                                     ctx->regs[2], ctx->regs[3]);
         return;
 
     case SYS_NOTE_MASK:

@@ -115,6 +115,10 @@ enum viv_intr {
 // `args`, and any number not listed (a new row included), is VIV_INTR_NEVER.
 enum viv_intr vivarium_intr_class(u64 linux_nr, const u64 *args);
 
+// ARCH 8.8.3 (signal(7)'s two lists): would SA_RESTART re-issue this call? PURE. A
+// NULL `args`, and any number not listed, is false.
+bool vivarium_call_restartable(u64 linux_nr, const u64 *args);
+
 // The Linux aarch64 numbers this table knows. Named so the tests assert against
 // symbols rather than magic numbers, and so a future row addition is a one-line
 // diff next to its number. (Linux's aarch64 table is stable ABI — these values
@@ -574,7 +578,11 @@ enum {
 // over rt_sigprocmask, rt_sigpending, rt_sigtimedwait and rt_sigqueueinfo. Only
 // rt_sigqueueinfo meets a native number there; each has its per-number argument
 // in vivarium.c, and the lowest still argued by the ceiling is rt_sigreturn (139).
-#define VIV_NATIVE_CEILING 138
+//
+// SYS_NOTE_DISPOSE lands at 139 (operator vote 18, 2026-11-03), the ceiling rises
+// over rt_sigreturn, and it has its per-number argument in vivarium.c. The lowest
+// row still argued by the ceiling is setgid (144).
+#define VIV_NATIVE_CEILING 139
 
 // -----------------------------------------------------------------------------
 // TIER 2 — translators (V-2b).
@@ -1173,6 +1181,10 @@ enum {
 #define VIV_SIG_DFL 0UL
 #define VIV_SIG_IGN 1UL
 #define VIV_SIG_ERR ((u64)-1)
+// A native Proc's caught row (SYS_NOTE_DISPOSE, ARCH 8.8.3). A token, never an
+// address: native delivery enters handler_va, and exec resets a row holding it
+// whichever phenotype comes next, so it cannot reach a sigframe.
+#define VIV_NATIVE_CAUGHT 2UL
 
 // `sa_flags` bits (musl `arch/aarch64/bits/signal.h`).
 enum {

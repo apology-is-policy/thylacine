@@ -1360,6 +1360,12 @@ _Static_assert((PROC_FLAG_EXIT_CLOSING & (PROC_FLAG_NODUMP | PROC_FLAG_NOTRACE |
 void proc_mark_session_registry(struct Proc *p);
 bool proc_may_create_srv_registry(const struct Proc *p);
 
+// ARCH 8.8.3: this native Proc's dispositions are its note table's, from its first
+// SYS_NOTE_DISPOSE until its next exec. A Linux Proc's always are, so the bit is
+// never asked of one: notes_table_governs is the one spelling. Crosses rfork
+// explicitly, because proc_flags otherwise never do.
+#define PROC_FLAG_NOTE_TABLE         (1u << 24)
+
 // The terminate-CLASS latch set (interrupt + tty:quit/hup + pipe). Used by the
 // whole-class clears -- handler registration, the self-managing mark, the
 // lock-free wake gate -- which suppress/observe EVERY terminate family at once.
@@ -1386,7 +1392,8 @@ bool proc_may_create_srv_registry(const struct Proc *p);
      PROC_FLAG_SEAT_MANAGER | PROC_FLAG_DEBUG_TAINTED | PROC_FLAG_TEST_FIXTURE | \
      PROC_FLAG_EXIT_CLOSE_FORCED | PROC_FLAG_EXIT_CLOSING | PROC_FLAG_MAIN_TID | \
      PROC_FLAG_MAY_RAISE_THREAD_BUDGET | PROC_FLAG_SESSION_REGISTRY | \
-     PROC_FLAG_USR1_TERMINATE_PENDING | PROC_FLAG_USR2_TERMINATE_PENDING)
+     PROC_FLAG_USR1_TERMINATE_PENDING | PROC_FLAG_USR2_TERMINATE_PENDING | \
+     PROC_FLAG_NOTE_TABLE)
 _Static_assert(__builtin_popcount(PROC_FLAGS_ALL) ==
     __builtin_popcount(PROC_FLAG_NODUMP) + __builtin_popcount(PROC_FLAG_NOTRACE) +
     __builtin_popcount(PROC_FLAG_MLOCKED) + __builtin_popcount(PROC_FLAG_CONSOLE_ATTACHED) +
@@ -1405,7 +1412,8 @@ _Static_assert(__builtin_popcount(PROC_FLAGS_ALL) ==
     __builtin_popcount(PROC_FLAG_EXIT_CLOSE_FORCED) + __builtin_popcount(PROC_FLAG_EXIT_CLOSING) +
     __builtin_popcount(PROC_FLAG_MAIN_TID) +
     __builtin_popcount(PROC_FLAG_MAY_RAISE_THREAD_BUDGET) +
-    __builtin_popcount(PROC_FLAG_SESSION_REGISTRY),
+    __builtin_popcount(PROC_FLAG_SESSION_REGISTRY) +
+    __builtin_popcount(PROC_FLAG_NOTE_TABLE),
     "two proc_flags bits alias");
 
 // LINEAGE L-1 re-based EVERY offset below: extracting struct AddrSpace removed

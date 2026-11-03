@@ -451,7 +451,8 @@ enum {
     // P5-poll-a: SYS_POLL(fds_va, nfds, timeout_ms) → ready-fd count / -1
     //   x0 = fds_va        user-VA pointer to a `struct pollfd[nfds]` array
     //                      (8 B each; layout pinned by <thylacine/poll.h>)
-    //   x1 = nfds          1..PROC_HANDLE_MAX = 64
+    //   x1 = nfds          0..PROC_HANDLE_MAX = 64. 0 sleeps for the timeout, and
+    //                      x0 is not read: a caught note ends it with -T_E_INTR.
     //   x2 = timeout_ms    s32: <0 = block indefinitely, 0 = non-blocking,
     //                           >0 = block at most this many milliseconds
     // The multi-fd wait primitive (ARCH §23.3; specs/poll.tla). Parks the
@@ -461,7 +462,7 @@ enum {
     // per pollfd; a partial write fault scrubs already-written bytes.
     //
     // Returns -1 on:
-    //   - nfds == 0 or > PROC_HANDLE_MAX
+    //   - nfds > PROC_HANDLE_MAX
     //   - fds_va outside the user-VA bound (or fds_va == 0 with nfds > 0)
     //   - a partial-write fault on the revents writeback
     //
@@ -2534,6 +2535,36 @@ enum {
     // consumed before the native switch (vivarium.c).
     SYS_POSTNOTE_TID = 138,
 
+    // SYS_NOTE_DISPOSE(name_va, name_len, disposition, flags): write this Proc's
+    // row for one note in its table (ARCH 8.8.3; operator vote 18, 2026-11-03).
+    //   x0 = name_va     as SYS_POSTNOTE
+    //   x1 = name_len    as SYS_POSTNOTE
+    //   x2 = disposition NOTE_DISP_DEFAULT, _IGNORE or _CAUGHT
+    //   x3 = flags       0, or NOTE_DISP_RESTART on a caught row
+    //
+    // From the first call until the next exec the table governs this Proc:
+    //   - a note whose row is default takes the kernel's default and never reaches
+    //     the handler;
+    //   - an ignored note is dropped at the post, and one already pending goes now;
+    //   - a caught note runs handler_va, and interrupts a wait on signal(7)'s list.
+    // Under NOTE_DISP_RESTART the kernel re-issues a restartable call the note
+    // interrupted. A Proc reading its notes from an fd writes a caught row to let
+    // the note interrupt a listed wait; the note stays queued for the fd, and the
+    // kernel never restarts for it. The write re-reads what is already pending, so
+    // a note stranded behind a wait is judged by the new row.
+    //
+    // Returns 0 on success, else a negative errno:
+    //   -T_E_INVAL  as SYS_POSTNOTE's name rules; a name with no row (`sak`, any
+    //               snare), and `kill`; a disposition or flag this does not name;
+    //               NOTE_DISP_RESTART on a row that is not caught; a caught row
+    //               with no handler and no notes fd to take it
+    //   -T_E_FAULT  name_va outside the user-VA bound / unmapped
+    //   -T_E_NOMEM  no memory for the table
+    //
+    // Explicitly 139, the next free number. Linux's 139 is rt_sigreturn, which
+    // viv_linux_dispatch intercepts before the table (vivarium.c).
+    SYS_NOTE_DISPOSE = 139,
+
     // NOT A SYSCALL. One past the highest assigned number, so that
     // VIV_NATIVE_CEILING can be pinned to a value the compiler recomputes
     // rather than to a symbol a person must remember to re-point.
@@ -3388,6 +3419,15 @@ _Static_assert(__builtin_offsetof(struct t_kernel_regs, tpidr_el0) == 104, "t_ke
 // P9_QTSYMLINK bit when the server's Tgetattr mode does not already carry it;
 // the value must stay POSIX S_IFLNK (0120000).
 #define T_S_IFLNK   0120000u
+// A socket's data or listen file, for a Dev that serves one (netd). Fstat's type
+// is how the kernel knows a read of it may wait for a peer (ARCH 8.8.3).
+#define T_S_IFSOCK  0140000u
+
+// SYS_NOTE_DISPOSE's disposition and flag (ARCH 8.8.3).
+#define NOTE_DISP_DEFAULT 0u
+#define NOTE_DISP_IGNORE  1u
+#define NOTE_DISP_CAUGHT  2u
+#define NOTE_DISP_RESTART 1u
 
 // SYS_WSTAT valid-mask bits (A-2a; IDENTITY-DESIGN.md §9.5). Which of the
 // (mode, uid, gid, size) register arguments the kernel applies. Chosen to
@@ -3546,6 +3586,13 @@ _Static_assert(__builtin_offsetof(struct t_kernel_regs, tpidr_el0) == 104, "t_ke
 // O_PATH handle IS (and is a valid SYS_CHROOT target). When set, the
 // access bits are ignored (the handle carries no byte-I/O open).
 #define SYS_WALK_OPEN_OPATH        0x80u
+// ARCH 8.8.3 (operator vote 20, 2026-11-03): this open's wait for the peer is one a
+// caught note may interrupt, returning -T_E_INTR, and SA_RESTART may re-issue it.
+// Pouch sets it on the one open that waits for a peer (accept's listen, connect's
+// data). SYS_OPEN only, and only on a Proc whose table governs; stripped before
+// anything sees it. Outside SYS_WALK_OPEN_OMODE_VALID, so every other open refuses
+// it. A regular open stays uninterruptible.
+#define SYS_WALK_OPEN_OINTR        0x2000u
 // D-1 (DISTRO.md section 4.3): do NOT follow a symlink at the path's FINAL
 // component -- the Linux O_NOFOLLOW / lstat-shape resolution flag. Consumed by
 // SYS_OPEN (threaded into the resolver as STALK_NOFOLLOW; the bit is STRIPPED
@@ -3590,6 +3637,8 @@ _Static_assert(__builtin_offsetof(struct t_kernel_regs, tpidr_el0) == 104, "t_ke
 _Static_assert(SYS_WALK_OPEN_OAPPEND == 0x40u &&
                (SYS_WALK_OPEN_OMODE_VALID & SYS_WALK_OPEN_OAPPEND) != 0,
                "SYS_WALK_OPEN_OAPPEND must be a bit inside SYS_WALK_OPEN_OMODE_VALID");
+_Static_assert((SYS_WALK_OPEN_OMODE_VALID & SYS_WALK_OPEN_OINTR) == 0,
+               "only SYS_OPEN's handler admits SYS_WALK_OPEN_OINTR");
 // #50 (VIVARIUM.md section 6.24): the EXCLUSIVE-create modifier, at the value
 // the comment above pre-reserved for it. Meaningful ONLY to SYS_OPEN_CREATE
 // (create-first, once; an existing leaf answers -T_E_EEXIST -- atomic at the
@@ -4078,6 +4127,8 @@ s64 sys_postnote_cross_for_test(struct Proc *caller, int target_pid,
                                 const char *name);
 s64 sys_postnote_self_for_test(struct Proc *caller, const char *name);
 s64 sys_postnote_tid_for_test(struct Proc *caller, int tid, const char *name);
+s64 sys_note_dispose_for_proc(struct Proc *p, const char *name, u64 disposition,
+                              u64 flags);
 s64 sys_pread_for_proc(struct Proc *p, hidx_t h, u8 *kbuf, u64 len, s64 off);
 s64 sys_pty_register_for_proc(struct Proc *p, u64 op, u64 a1, u64 a2, u64 a3);
 s64 sys_pwrite_for_proc(struct Proc *p, hidx_t h, const u8 *kbuf, u64 len,
@@ -4172,7 +4223,10 @@ u64 viv_dirent64_encode_run(const u8 *src, u64 src_len,
 s64 viv_dup3_for_test(struct Proc *p, u64 oldfd, u64 newfd, u64 flags);
 s64 viv_dup_for_test(struct Proc *p, u64 fd);
 s64 viv_fcntl_for_test(struct Proc *p, u64 fd, u64 cmd, u64 arg);
-bool viv_fd_is_slow_for_test(struct Proc *p, u64 fd);
+bool file_is_slow_for_test(struct Proc *p, u64 fd);
+struct Thread;
+void native_note_class_for_test(struct Thread *t, struct Proc *p,
+                                const struct exception_context *ctx);
 s64 viv_getdents64_for_test(struct Proc *p, u64 fd, u64 dirp, u64 count);
 s64 viv_getsockopt_for_test(struct Proc *p, u64 fd, u64 level, u64 optname,
                             u64 optval_va, u64 optlen_va);

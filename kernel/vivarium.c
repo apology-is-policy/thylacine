@@ -44,12 +44,20 @@ _Static_assert(VIV_NATIVE_CEILING == SYS__NATIVE_TOP - 1,
                "bump the constant to match the new top and re-run that check.");
 
 // Every row that discharges its collision re-check by the ceiling argument
-// rather than by a per-number one. The lowest such number is rt_sigreturn (139);
+// rather than by a per-number one. The lowest such number is setgid (144);
 // execve (221) is the newest. If the ceiling ever rises past one of these, the
 // build stops and the reader is forced back to the argument instead of inheriting
 // a claim that has quietly become false.
-_Static_assert(VIV_LINUX_RT_SIGRETURN > VIV_NATIVE_CEILING,
-               "the signal family above rt_sigqueueinfo argues by the ceiling");
+_Static_assert(VIV_LINUX_SETGID > VIV_NATIVE_CEILING,
+               "the rows above rt_sigreturn argue by the ceiling");
+// SYS_NOTE_DISPOSE at 139 (vote 18, 2026-11-03) lifted the ceiling over Linux
+// rt_sigreturn (139). viv_linux_dispatch intercepts rt_sigreturn before the
+// translation table, so a Linux Proc never reaches the native call. A native
+// program mis-declared as Linux loses it and has its dispose restore a frame that
+// was never saved, which rt_sigreturn refuses; the call grants nothing beyond the
+// caller's own dispositions, so nothing is exposed either way.
+_Static_assert(VIV_LINUX_RT_SIGRETURN == SYS_NOTE_DISPOSE,
+               "revisit rt_sigreturn / NOTE_DISPOSE collision on renumber");
 // SYS_POSTNOTE_TID at 138 (vote 2026-11-02) lifted the ceiling over 135..138.
 // Linux rt_sigqueueinfo (138) collides with it. The row is VIV_ENOSYS, so a Linux
 // Proc never reaches the post (tgkill is how it names a thread). A native program
@@ -697,6 +705,42 @@ enum viv_intr vivarium_intr_class(u64 linux_nr, const u64 *args) {
         return VIV_INTR_IF_SLOW;
     default:
         return VIV_INTR_NEVER;
+    }
+}
+
+// ARCH 8.8.3: of the calls above, the ones SA_RESTART re-issues. signal(7) leaves
+// ppoll, pselect6, nanosleep, clock_nanosleep, rt_sigsuspend and rt_sigtimedwait
+// out whatever the flag says; a timed futex would need a restart block with its
+// remaining time, and restart_syscall stays ENOSYS, so it returns EINTR instead.
+// The default is false on purpose: a row added later reports EINTR until someone
+// puts it here, which a program must handle anyway.
+bool vivarium_call_restartable(u64 linux_nr, const u64 *args) {
+    if (!args) return false;
+    switch (linux_nr) {
+    case VIV_LINUX_ACCEPT:
+    case VIV_LINUX_ACCEPT4:
+    case VIV_LINUX_CONNECT:
+    case VIV_LINUX_RECVFROM:
+    case VIV_LINUX_RECVMSG:
+    case VIV_LINUX_SENDTO:
+    case VIV_LINUX_SENDMSG:
+    case VIV_LINUX_WAIT4:
+    case VIV_LINUX_READ:
+    case VIV_LINUX_READV:
+    case VIV_LINUX_WRITE:
+    case VIV_LINUX_WRITEV:
+    case VIV_LINUX_PREAD64:
+    case VIV_LINUX_PWRITE64:
+    case VIV_LINUX_IOCTL:
+        return true;
+    case VIV_LINUX_FCNTL: {
+        u32 cmd = (u32)args[1];
+        return cmd == VIV_F_SETLKW || cmd == VIV_F_OFD_SETLKW;
+    }
+    case VIV_LINUX_FUTEX:
+        return args[3] == 0;
+    default:
+        return false;
     }
 }
 

@@ -22,6 +22,20 @@ needed the operator.
 
 
 ---
+## 2026-11-03 (aux, Opus 5.5 1M) -- item 11c: a native note table and a kernel that restarts (IN PROGRESS)
+
+**State at this entry: kernel half written, syntax-checked in both build shapes, never built or booted. No test exists yet, and every claim below is read from code.**
+
+The operator voted three forks on 2026-11-03: one per-note table for natives (`SYS_NOTE_DISPOSE`, 139), `SA_RESTART` in the kernel for Pouch and Linux guests, and `SYS_WALK_OPEN_OINTR` for Pouch's accept and connect. Scripture 1fbbcc9c5 holds them.
+
+Three things reading the code changed from the plan, all before anything ran:
+
+- The plan copied `handler_va` across every rfork. `SYS_SPAWN` goes through `rfork(RFPROC, thunk, sa)` too, with no fork context, on its way to a new image, so the handler and table cross only with `fc` (`kernel/proc.c`, `native_fork_notes`).
+- The plan feared a forked Pouch child dies of `pipe` because its kernel mask is zero. It does not: `_Fork` holds every note blocked and `__restore_sigs` writes the mask back in the child. The window before that write is real once handlers cross, because a handler would run before the child fixes its thread state. So a fork of either phenotype now gives the child the caller's mask. ARCH 7.6 said native starts at zero, and is amended. No in-tree native masks and raw-forks: only `fork-probe` and `attach-probe` call `SYS_RFORK`. The handler-execution snapshot crosses with it, because a Pouch child returning from the handler it forked in reaches `SYS_NOTED`, which refuses a thread not in a handler.
+- The plan marked netd's `listen` a socket. Accept reads the connection number from that fid after the open, and a note there would lose a connection, so only `data` is one. `listen`'s wait is covered by `OINTR` alone.
+
+Also found on the way: native `SYS_POLL` refused zero fds, so the plan's `pause()` would have returned at once, and `poll(NULL, 0, ms)` was failing for every Pouch program. It now sleeps, as the phenotype's ppoll does. A `sak` note in a governed queue would have held every note behind it, because it has no row, so it is discarded by its default. Without a handler or a notes fd no note can unwind a wait, so a Rust `std` program, which only ignores SIGPIPE, pays no stat per open file.
+
 ## 2026-11-02 (aux, Opus 5.5 1M) -- SIGUSR1 and SIGUSR2 become notes, and every family word outgrows its byte
 
 **Decisions that were the operator's:** vote 15 of project_aux_votes_1021: a separate chunk straight after C4, on bits 8 and 9, which is also the signoff for `docs/ERRORS.md`.

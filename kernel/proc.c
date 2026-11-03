@@ -1893,13 +1893,24 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
     // rule, ARCH 7.6): the child inherits every signal disposition -- caught
     // and ignored -- in a table of its OWN, so the immortal-per-Proc lifetime
     // that keeps the lock-free cross-Proc readers safe (#254) is unchanged. A
-    // NULL parent table is all-SIG_DFL and leaves the child's NULL. Native
-    // Procs: nothing crosses rfork (the handler_va precedent). On OOM
+    // NULL parent table is all-SIG_DFL and leaves the child's NULL. On OOM
     // child->sigtab stays NULL and proc_free's kfree is a clean no-op (the
     // allowance/env discipline above); the fork fails rather than producing a
     // child with the wrong dispositions. The mask half is copied onto the child
     // thread below, once it exists.
-    if (parent->phenotype == PHENO_LINUX &&
+    //
+    // A native fork too (ARCH 8.8.3): the child runs the parent's image, so its
+    // handler and table are the parent's, as Plan 9's sysrfork copies p->notify.
+    // Only `fc`: a native spawn has no fork context and is on its way to an image
+    // these addresses mean nothing in. The table's flag crosses at the publication.
+    bool native_fork_notes = parent->phenotype != PHENO_LINUX && fc != NULL;
+    if (native_fork_notes)
+        __atomic_store_n(&child->handler_va,
+                         __atomic_load_n(&parent->handler_va, __ATOMIC_ACQUIRE),
+                         __ATOMIC_RELAXED);
+    if ((parent->phenotype == PHENO_LINUX ||
+         (native_fork_notes && (__atomic_load_n(&parent->proc_flags, __ATOMIC_ACQUIRE) &
+                                PROC_FLAG_NOTE_TABLE))) &&
         viv_sigtab_clone_into(child, parent) != 0) {
         child->state = PROC_STATE_ZOMBIE;
         proc_free(child);
@@ -1907,9 +1918,10 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
     }
 
     // P5-hostowner-a: child->proc_flags starts 0 (KP_ZERO from proc_alloc).
-    // ONE bit is copied from the parent, at the publication below and nowhere
-    // else: PROC_FLAG_DEBUG_TAINTED, which is a RESTRICTION and must cross
-    // because the child's memory is the parent's debugged memory. Every other
+    // TWO bits are copied from the parent, at the publication below and nowhere
+    // else. PROC_FLAG_DEBUG_TAINTED is a RESTRICTION and must cross because the
+    // child's memory is the parent's debugged memory. PROC_FLAG_NOTE_TABLE says
+    // the table just copied governs, and confers nothing. Every other
     // bit -- every one that CONFERS anything -- is deliberately not copied. In
     // particular PROC_FLAG_CONSOLE_ATTACHED is never conferred by
     // rfork: console-attachment grows ONLY via an explicit
@@ -2003,12 +2015,14 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
         proc_free(child);
         return -1;
     }
-    // POSIX fork(2), the mask half (the phenotype only): the child's thread
-    // starts with the CALLING thread's note_mask. Written before ready() -- the
-    // child has not run, so no reader can race the plain store; the mask is
-    // owner-written thereafter (rt_sigprocmask). Native keeps a zero mask (the
-    // rfork rule).
-    if (parent->phenotype == PHENO_LINUX) {
+    // POSIX fork(2), the mask half: the child's thread starts with the CALLING
+    // thread's note_mask. Written before ready() -- the child has not run, so no
+    // reader can race the plain store; the mask is owner-written thereafter
+    // (rt_sigprocmask, SYS_NOTE_MASK). A native fork's handler crossed above, so its
+    // mask crosses too: Pouch's fork blocks every note until the child has fixed
+    // its thread state, and a child born unmasked would run a handler before that.
+    // A native spawn keeps a zero mask (ARCH 7.6).
+    if (parent->phenotype == PHENO_LINUX || fc != NULL) {
         ct->note_mask = t->note_mask;
         // And the HANDLER-EXECUTION SNAPSHOT (the d3a11c8e round's F1): this
         // design keeps the interrupted user context KERNEL-side -- the sigframe
@@ -2026,8 +2040,10 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
         // is the PRE-handler context it resumes at after its sigreturn. The
         // fork+exec / fork+_exit shapes were already fine (exec clears the
         // block, #247; _exit never returns); the flag is written last, once the
-        // block is whole. Native: a Plan 9 child is not notified (sysrfork), and
-        // no native handler crosses rfork either (the handler_va precedent).
+        // block is whole. A native fork the same, since its handler crosses: a
+        // Pouch child returning from the handler it forked in reaches SYS_NOTED,
+        // which refuses a thread not in a handler. Plan 9's child is not notified
+        // (sysrfork), but its noted is not called from a libc dispatcher either.
         //
         // The list below is EVERYTHING notes_noted_restore reads -- the round's
         // lesson was that a copy rule written from the standard's field list
@@ -2102,6 +2118,8 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
     if (pflags & PROC_FLAG_DEBUG_TAINTED)
         __atomic_fetch_or(&child->proc_flags, PROC_FLAG_DEBUG_TAINTED,
                           __ATOMIC_RELAXED);
+    if (native_fork_notes && (pflags & PROC_FLAG_NOTE_TABLE))
+        __atomic_fetch_or(&child->proc_flags, PROC_FLAG_NOTE_TABLE, __ATOMIC_RELAXED);
 
     // The birth hold (DEBUG-FS-DESIGN 5f), in the same hold as the publication
     // and for the taint's reason: the orphan rule runs under this lock at the
@@ -3754,8 +3772,8 @@ void proc_caught_note_walk_locked(struct Proc *p, struct Thread *skip) {
         }
     }
 
-    // Every family queued and held by nobody gets one thread. A native Proc's
-    // waits never unwind for a caught note (item 11c), so its walk only kicks.
+    // Every family queued and held by nobody gets one thread. A Proc no table
+    // governs never unwinds a wait for a caught note, so its walk only kicks.
     // No pick means no thread can take the note soon; any thread's tail still
     // delivers it.
     u32 open = caught & ~held & NOTE_MASK_SUPPORTED;
@@ -5291,6 +5309,10 @@ void proc_exec_live_dropped_locked(struct Proc *p) {
 static void proc_exec_drop_image_state(struct Proc *p, struct Thread *self,
                                        u32 pheno) {
     __atomic_store_n(&p->handler_va, 0ull, __ATOMIC_RELEASE);
+    // ARCH 8.8.3: the table's governance over a native Proc is the image's, as
+    // its handler is. A Linux image's table governs by its phenotype. Atomic AND:
+    // the word is multi-writer (the SAK kthread).
+    __atomic_and_fetch(&p->proc_flags, ~PROC_FLAG_NOTE_TABLE, __ATOMIC_RELEASE);
 
     // VIVARIUM V-6b Linux dispositions, reset IN PLACE -- the table is NOT
     // freed here (#254). It used to be, with the pointer NULLed, under no lock:
@@ -5427,6 +5449,11 @@ static void proc_exec_drop_image_state(struct Proc *p, struct Thread *self,
     // outgoing image; carried across, it would make the new image's first
     // console read wait for a slot the single-reader guard should refuse.
     self->cons_frozen_unwound = false;
+
+    // The queue survives and the dispositions just changed, so what is pending is
+    // judged by the new image's (ARCH 8.8.3). A note the old image caught is the
+    // default's now, and arms what a post now would.
+    notes_disposition_reread(p);
 }
 
 #ifdef KERNEL_TESTS

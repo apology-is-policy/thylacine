@@ -477,13 +477,24 @@ const char *notes_snare_death_name_for_test(u32 i) {
 }
 #endif
 
+// ARCH 8.8.3: is this Proc's disposition per note, in its table? A Linux Proc's
+// always is, and a native Proc's is from its first SYS_NOTE_DISPOSE. Everything
+// else is Plan 9's: a handler catches every note. Takes an arbitrary Proc: both
+// words are single-copy-atomic, and an exec racing this reads as either image's
+// answer, the latitude the table's readers have below.
+bool notes_table_governs(const struct Proc *p) {
+    return __atomic_load_n(&p->phenotype, __ATOMIC_ACQUIRE) == PHENO_LINUX ||
+           (__atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE) & PROC_FLAG_NOTE_TABLE) != 0;
+}
+
 // V-8 F2: does THIS Proc have a live handler for `name`? The `handler_va` test
-// below answers that for a native Proc, and answers it WRONG for a phenotyped
-// one: a Linux guest never calls SYS_NOTIFY -- its handler lives in the per-Proc
-// sigtab and `handler_va` stays 0 (see the phenotype branch in
+// below answers that for a Proc no table governs, and answers it WRONG for one a
+// table does: a Linux guest never calls SYS_NOTIFY -- its handler lives in the
+// per-Proc sigtab and `handler_va` stays 0 (see the table branch in
 // notes_deliver_at_el0_return, which sits above the handler_va branch for
-// exactly this reason). So the "someone will catch this, do not treat it as
-// uncaught" exemption never applied to a phenotyped Proc.
+// exactly this reason), and a native table's rows are per note where `handler_va`
+// is all notes. So the "someone will catch this, do not treat it as uncaught"
+// exemption never applied to a phenotyped Proc.
 //
 // Left unfixed that is a HANG, not a fidelity gap. The latch makes
 // thread_die_pending() true for every unmasked thread, so every sleep()/tsleep()
@@ -505,8 +516,8 @@ const char *notes_snare_death_name_for_test(u32 i) {
 // handler", not "what is it". A future cross-Proc reader that CONSUMES the
 // copied fields (delivers, composes a mask) does not inherit this argument.
 static bool notes_proc_has_live_handler(struct Proc *p, const char *name) {
-    if (__atomic_load_n(&p->handler_va, __ATOMIC_ACQUIRE) != 0) return true;
-    if (p->phenotype != PHENO_LINUX) return false;
+    if (!notes_table_governs(p))
+        return __atomic_load_n(&p->handler_va, __ATOMIC_ACQUIRE) != 0;
 
     const struct viv_sigtab *tab = __atomic_load_n(&p->sigtab, __ATOMIC_ACQUIRE);
     if (!tab) return false;                 // all-SIG_DFL: genuinely uncaught
@@ -515,8 +526,8 @@ static bool notes_proc_has_live_handler(struct Proc *p, const char *name) {
 }
 
 // Would `name`'s DEFAULT action apply to this Proc -- i.e. does nothing
-// intercept it? False when a native handler, a phenotype sigtab handler, or an
-// explicit phenotype SIG_IGN stands in the way.
+// intercept it? False when a native handler, a table's caught row, or a table's
+// ignored row stands in the way.
 //
 // The ignore leg is why this is not just notes_proc_has_live_handler. That
 // predicate serves notes_post's terminate latch, which runs BELOW the V-6b
@@ -528,7 +539,7 @@ static bool notes_proc_has_live_handler(struct Proc *p, const char *name) {
 bool notes_proc_default_applies(struct Proc *p, const char *name) {
     if (!p || !name) return true;
     if (notes_proc_has_live_handler(p, name)) return false;
-    if (p->phenotype != PHENO_LINUX) return true;
+    if (!notes_table_governs(p)) return true;
 
     const struct viv_sigtab *tab = __atomic_load_n(&p->sigtab, __ATOMIC_ACQUIRE);
     return !viv_sigtab_note_ignored(tab, viv_signote_from_note_name(name));
@@ -573,14 +584,24 @@ _Static_assert(((u64)NOTE_MASK_SUPPORTED >> (8u * sizeof(((struct Thread *)0)->n
 // lock); a not-yet-sleeping thread reads the latch at its own register-then-
 // observe. Same discipline as the terminate arm: caller holds q->lock; never
 // kproc; not rfork-propagated (proc_flags never are).
-static void notes_arm_caught_note_locked(struct Proc *p, const char *name) {
-    if (p == kproc()) return;
+//
+// A self-managing Proc a table governs is the arm's one narrowing: its row says
+// whether the note may unwind a wait (ARCH 8.8.3), so with no caught row nothing
+// arms, where a self-managing Proc with no table arms for every note and its waits
+// never read the bit.
+static u32 notes_caught_latch_bit(struct Proc *p, const char *name) {
+    if (p == kproc()) return 0;
     int bit = notes_name_to_bit(name);
-    if (bit < 0 || bit == (int)NOTE_BIT_KILL) return;
-    if (!notes_proc_has_live_handler(p, name) && !proc_is_self_managing_notes(p))
-        return;
-    __atomic_or_fetch(&p->note_caught, 1u << (CAUGHT_LATCH_SHIFT + (u32)bit),
-                      __ATOMIC_RELEASE);
+    if (bit < 0 || bit == (int)NOTE_BIT_KILL) return 0;
+    if (!notes_proc_has_live_handler(p, name) &&
+        (notes_table_governs(p) || !proc_is_self_managing_notes(p)))
+        return 0;
+    return 1u << (CAUGHT_LATCH_SHIFT + (u32)bit);
+}
+
+static void notes_arm_caught_note_locked(struct Proc *p, const char *name) {
+    u32 b = notes_caught_latch_bit(p, name);
+    if (b) __atomic_or_fetch(&p->note_caught, b, __ATOMIC_RELEASE);
 }
 
 // #240: the STOP twin of the terminate arm above. A committed STOP-disposition
@@ -681,20 +702,19 @@ static u32 notes_direct_unmasked(const struct Thread *t) {
 
 bool notes_direct_is_fatal(struct Proc *p, const char *name) {
     return notes_default_action(name) == NOTE_DFL_TERMINATE &&
-           __atomic_load_n(&p->handler_va, __ATOMIC_ACQUIRE) == 0 &&
            !proc_is_self_managing_notes(p) &&
            notes_proc_default_applies(p, name);
 }
 
 bool notes_direct_ignored(struct Proc *p, const char *name) {
-    if (p->phenotype != PHENO_LINUX) return false;
+    if (!notes_table_governs(p)) return false;
     const struct viv_sigtab *tab = __atomic_load_n(&p->sigtab, __ATOMIC_ACQUIRE);
     return viv_sigtab_note_ignored(tab, viv_signote_from_note_name(name));
 }
 
 // The note on `t`'s word that would end the Proc at this thread's tail, or NULL.
-// The disposition is read now, not latched at the post: exec and SYS_NOTIFY(0)
-// can make a caught note fatal while it waits behind a mask.
+// The disposition is read now, not latched at the post: exec, SYS_NOTIFY(0) and a
+// table's row can make a caught note fatal while it waits behind a mask.
 static const char *notes_direct_fatal_name(struct Proc *p, const struct Thread *t) {
     u32 d = notes_direct_unmasked(t);
     for (; d; d &= d - 1u) {
@@ -765,10 +785,10 @@ int notes_post(struct Proc *p, const char *name, u32 arg,
     struct NoteQueue *q = p->notes;
     spin_lock(&q->lock);
 
-    // VIVARIUM V-6b: a Linux-phenotype Proc that has set SIG_IGN for the signal
-    // this note carries DISCARDS it here, at generation, exactly as Linux does
-    // -- and returns SUCCESS, because on Linux `kill()` to a process ignoring
-    // the signal succeeds.
+    // VIVARIUM V-6b: a Proc whose table ignores the note -- a Linux guest's
+    // SIG_IGN, or a native row (ARCH 8.8.3) -- DISCARDS it here, at generation,
+    // exactly as Linux does -- and returns SUCCESS, because on Linux `kill()` to a
+    // process ignoring the signal succeeds.
     //
     // POST-time and not delivery-time, which was the first sketch: an ignored
     // note that reached the queue would occupy one of 16 slots, would ARM the
@@ -791,8 +811,9 @@ int notes_post(struct Proc *p, const char *name, u32 arg,
     // `kill` is deliberately NOT exempted here: SIGKILL cannot reach this
     // point, because vivarium_sigaction_decide refuses SIGKILL outright, so no
     // guest can put VIV_SIGNOTE_KILL in its table. The uncatchable note stays
-    // uncatchable by construction rather than by a special case (I-19 N-4).
-    if (p->phenotype == PHENO_LINUX) {
+    // uncatchable by construction rather than by a special case (I-19 N-4), and
+    // SYS_NOTE_DISPOSE refuses the name.
+    if (notes_table_governs(p)) {
         struct viv_sigtab *tab = __atomic_load_n(&p->sigtab, __ATOMIC_ACQUIRE);
         if (tab && viv_sigtab_note_ignored(tab, viv_signote_from_note_name(name))) {
             spin_unlock(&q->lock);
@@ -1237,15 +1258,14 @@ int notes_name_is_kill(const char *name) {
 //
 // Every hit is ALSO gated per note on notes_proc_default_applies. The class
 // test is a table lookup -- "this NAME's uncaught default is terminate" --
-// but whether the default applies is a per-Proc, per-note question, and for
-// a phenotyped Proc the answer lives in its sigtab: a Linux guest never calls
-// SYS_NOTIFY, so `handler_va` is 0 whatever it installed. Without the gate,
-// a SIG_DFL candidate that fell through from the phenotype branch (a masked-
+// but whether the default applies is a per-Proc, per-note question, and a table
+// answers it per note: a Linux guest never calls SYS_NOTIFY, so `handler_va` is 0
+// whatever it installed, and a native row says what `handler_va` cannot. Without
+// the gate, a SIG_DFL candidate that fell through from the table branch (a masked-
 // then-unmasked tty:susp) let this scan return a CAUGHT tty:hup or interrupt
 // queued behind it, and the tail exits()ed a guest with its SIGHUP/SIGINT
-// handler installed. Native Procs are byte-identical: with no handler and no
-// phenotype the predicate is unconditionally true, and the arm is only reached
-// with handler_va == 0.
+// handler installed. A native handler with no table catches every note, so the
+// predicate answers false for each and the scan finds nothing.
 static const char *notes_terminate_pending_name_locked(struct Proc *p,
                                                        struct Thread *t) {
     struct NoteQueue *q = p->notes;
@@ -1284,17 +1304,14 @@ int notes_interrupt_should_terminate_locked(struct Proc *p, struct Thread *t) {
 #endif // KERNEL_TESTS
 
 // PTY-1b: the name-returning generalization (interrupt + tty:quit +
-// tty:hup). Same gates as the historical interrupt-only decision: a
-// registered handler catches EVERY note (the async-delivery path runs it;
-// acquire pairs with SYS_NOTIFY's release, F9), and a self-managing Proc
-// consumes its own notes -- neither ever default-terminates. The tail
-// passes the returned canonical name to exits() so the exit_msg reports
-// WHICH signal terminated the Proc. The per-note disposition (a phenotype
-// sigtab handler or SIG_IGN for THAT name) is applied inside the scan.
+// tty:hup). A self-managing Proc consumes its own notes and never default-
+// terminates. The tail passes the returned canonical name to exits() so the
+// exit_msg reports WHICH signal terminated the Proc. The per-note disposition (a
+// table's row for THAT name, or a handler with no table, which catches them all)
+// is applied inside the scan.
 VISIBLE_IF_KERNEL_TESTS
 const char *notes_terminate_note_name_locked(struct Proc *p, struct Thread *t) {
     if (!p || !p->notes) return NULL;
-    if (__atomic_load_n(&p->handler_va, __ATOMIC_ACQUIRE) != 0) return NULL;
     if (proc_is_self_managing_notes(p)) return NULL;
     return notes_terminate_pending_name_locked(p, t);
 }
@@ -1410,37 +1427,65 @@ int notes_stop_dequeue_locked(struct Proc *p, struct Thread *t,
     return 1;
 }
 
-// LS-5c: the SYS_NOTIFY body. The handler store and the latch clear run
-// under q->lock so they serialize against notes_post's check-handler-then-arm
-// (see notes_arm_intr_terminate_locked). The store keeps RELEASE (pairs with
-// the dispatcher's acquire, F9) -- q->lock alone would not order it for the
-// LOCKLESS handler_va readers.
+// ARCH 8.8.3: a disposition changed, so judge what is pending by it. The post
+// judged each queued note by the row it read then. The latches become what the
+// queue says now, and the waits are told: a note stranded behind a wait that rode
+// it out ends the wait, as one posted now would.
+//
+// The caller stored the disposition first and this reads it under q->lock, as
+// notes_post does. A post whose hold comes before this one's enqueued a note this
+// scan sees; one after it reads the new disposition itself. So no latch is left
+// reading the old row. The claim half of note_caught is its holders', and is not
+// touched. No q->lock across the wakes (ARCH 7.3.1).
+void notes_disposition_reread(struct Proc *p) {
+    if (!p || p == kproc() || !p->notes) return;
+    struct NoteQueue *q = p->notes;
+    spin_lock(&q->lock);
+    bool self_managing = proc_is_self_managing_notes(p);
+    u32  term = 0, caught = 0;
+    u32  idx = q->head;
+    for (u32 n = 0; n < q->count; n++) {
+        const char *name = q->ring[idx].name;
+        if (!self_managing && notes_proc_default_applies(p, name))
+            term |= notes_name_terminate_latch(name);
+        caught |= notes_caught_latch_bit(p, name);
+        idx = (idx + 1) % NOTE_RING_SLOTS;
+    }
+    u32 was_term = __atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE) &
+                   PROC_FLAG_TERMINATE_PENDING_MASK;
+    if (was_term & ~term)
+        __atomic_and_fetch(&p->proc_flags, ~(was_term & ~term), __ATOMIC_RELEASE);
+    if (term & ~was_term)
+        __atomic_or_fetch(&p->proc_flags, term & ~was_term, __ATOMIC_RELEASE);
+    u32 was_caught = __atomic_load_n(&p->note_caught, __ATOMIC_ACQUIRE) & CAUGHT_LATCH_MASK;
+    if (was_caught & ~caught)
+        __atomic_and_fetch(&p->note_caught, ~(was_caught & ~caught), __ATOMIC_RELEASE);
+    if (caught & ~was_caught)
+        __atomic_or_fetch(&p->note_caught, caught & ~was_caught, __ATOMIC_RELEASE);
+    spin_unlock(&q->lock);
+
+    proc_interrupt_terminate_wake(p);
+    proc_caught_note_wake(p);
+    // A direct note a peer is riding out may be fatal or caught now, and only that
+    // peer's wait reads its word.
+    proc_note_direct_rouse(p);
+}
+
+// LS-5c: the SYS_NOTIFY body. The store keeps RELEASE (pairs with the dispatcher's
+// acquire, F9) because the LOCKLESS handler_va readers have no q->lock to order
+// them, and comes before notes_disposition_reread's hold of q->lock, which
+// serializes against notes_post's check-handler-then-arm. With no handler there is
+// nothing for a caught row to enter, so a table's caught rows go back to default;
+// a Proc reading its notes from an fd keeps them, because its rows never entered
+// a handler. Its ignored rows are not handlers, and stay.
 void notes_set_handler(struct Proc *p, u64 handler_va) {
     if (!p) return;
-    struct NoteQueue *q = p->notes;
-    if (!q) {       // pre-notes-alloc rollback window; no latch can exist
-        __atomic_store_n(&p->handler_va, handler_va, __ATOMIC_RELEASE);
-        return;
-    }
-    spin_lock(&q->lock);
     __atomic_store_n(&p->handler_va, handler_va, __ATOMIC_RELEASE);
-    if (handler_va != 0) {
-        // Registering a handler changes the disposition to CATCH: a queued
-        // terminate-class note now delivers to the handler at the tail.
-        // Un-arm BOTH latches (a handler catches every note class).
-        // (Unregistering does NOT re-arm -- the unregistering thread reaches
-        // its own tail right after this syscall, where LS-5b re-evaluates,
-        // and a blocked peer is then covered by the death cascade exits()
-        // triggers; see ARCH 8.8.2. A thread that masks the family finds nothing
-        // at that tail, so the note then waits for a tail that can take it.)
-        __atomic_and_fetch(&p->proc_flags,
-                           ~PROC_FLAG_TERMINATE_PENDING_MASK,
-                           __ATOMIC_RELEASE);
-    }
-    spin_unlock(&q->lock);
-    // A direct note a peer is riding out is now fatal, and the unregistering
-    // thread's tail reads only its own word.
-    if (handler_va == 0) proc_note_direct_rouse(p);
+    if (!p->notes) return;      // pre-notes-alloc rollback window; no latch can exist
+    if (handler_va == 0 && p->phenotype != PHENO_LINUX && notes_table_governs(p) &&
+        !proc_is_self_managing_notes(p))
+        viv_sigtab_reset_caught(__atomic_load_n(&p->sigtab, __ATOMIC_ACQUIRE));
+    notes_disposition_reread(p);
 }
 
 // LS-5c: the SYS_NOTE_OPEN tail. The self-managing mark and the latch clear
@@ -1611,8 +1656,7 @@ void notes_fault_dying_latch(struct Thread *t) {
     // notes_terminate_note_name_locked's, so a class kept here is one that
     // lookup would have found for an unmasked thread.
     u32 live = 0;
-    if (__atomic_load_n(&p->handler_va, __ATOMIC_ACQUIRE) == 0 &&
-        !proc_is_self_managing_notes(p)) {
+    if (!proc_is_self_managing_notes(p)) {
         u32 idx = q->head;
         for (u32 n = 0; n < q->count; n++) {
             const char *name = q->ring[idx].name;
@@ -1644,6 +1688,13 @@ void notes_fault_dying_latch(struct Thread *t) {
 // pending by construction: a caught bit is armed ONLY for a caught note, which
 // the terminate arm refuses -- so no note ever sets both a terminate latch and
 // a caught bit, and death (checked FIRST at every sleep site) always wins.
+static bool notes_caught_pending_for(struct Proc *p, const struct Thread *t) {
+    if (notes_direct_caught(p, t)) return true;
+    u32 caught = ((u32)__atomic_load_n(&p->note_caught, __ATOMIC_ACQUIRE) &
+                  CAUGHT_LATCH_MASK) >> CAUGHT_LATCH_SHIFT;
+    return (caught & ~t->note_mask & NOTE_MASK_SUPPORTED) != 0;
+}
+
 VISIBLE_IF_KERNEL_TESTS
 bool thread_caught_note_deliverable(struct Thread *t) {
     if (!t) return false;
@@ -1671,10 +1722,7 @@ bool thread_caught_note_deliverable(struct Thread *t) {
     if (t->in_handler) return false;
     struct Proc *p = t->proc;
     if (!p || p == kproc()) return false;
-    if (notes_direct_caught(p, t)) return true;
-    u32 caught = ((u32)__atomic_load_n(&p->note_caught, __ATOMIC_ACQUIRE) &
-                  CAUGHT_LATCH_MASK) >> CAUGHT_LATCH_SHIFT;
-    return (caught & ~t->note_mask & NOTE_MASK_SUPPORTED) != 0;
+    return notes_caught_pending_for(p, t);
 }
 
 VISIBLE_IF_KERNEL_TESTS
@@ -1755,16 +1803,35 @@ bool thread_note_handler_escaped(const struct Thread *t, u64 sp_el0) {
 }
 
 // 11b-9p (item 11): the caught-note sleep unwind returns -T_E_INTR to userspace;
-// gate it on a reader that expects EINTR. A PHENO_LINUX Proc goes through musl
-// (EINTR-aware by POSIX); a native (libthyla-rs) reader is not until 11c teaches
-// it to retry. phenotype is the proxy: exact and unforgeable (I-43 stamps it at
-// spawn/exec). See the notes.h contract for the 11c widening path.
+// gate it on a reader that expects EINTR, which is one whose note the table says
+// is caught (ARCH 8.8.3). The row is the per-note answer, thread_caught_note_-
+// deliverable's latch has read it, and a Proc no table governs has said nothing.
 bool proc_caught_note_eintr_ready(struct Proc *p) {
-    return p && p->phenotype == PHENO_LINUX;
+    return p && notes_table_governs(p);
 }
 
 bool thread_caught_note_unwinds(struct Thread *t) {
-    return t && proc_caught_note_eintr_ready(t->proc) && thread_caught_note_claim(t);
+    if (!t || !proc_caught_note_eintr_ready(t->proc) || !thread_caught_note_claim(t))
+        return false;
+    t->note_call_unwound = true;
+    return true;
+}
+
+// ARCH 8.8.3: did this call's wait unwind, is the call one to re-issue, and did it
+// come back as the unwind left it? The test is the mark, never the return register
+// alone: anything can put -4 there, a 9P server's Rlerror(4) among them, and that is
+// an error to report. A 9P call that lost its flush returns its reply with the mark
+// set, so the register is asked too.
+static bool notes_call_restarts(const struct exception_context *ctx, const struct Thread *t) {
+    return t->note_call_unwound && t->note_restartable &&
+           ctx->regs[0] == (u64)-(s64)T_E_INTR;
+}
+
+// The svc runs again, as Linux's do_signal has it: its x1..x8 are as the caller
+// left them. Before any save of the context, so a handler's return re-issues it.
+static void notes_call_rewind(struct exception_context *ctx, const struct Thread *t) {
+    ctx->elr    -= 4u;
+    ctx->regs[0] = t->note_call_x0;
 }
 
 // ARCH 8.8.3: the kind of wait `t` is entering. UNWINDS exactly when every
@@ -1874,10 +1941,11 @@ int notes_tail_consume_for_test(struct Proc *p, struct Thread *t, int direct,
 }
 #endif
 
-// Put a consumed candidate back after a push that faulted. Native only, and a
-// native Proc has no sigaction to discard a direct bit, so the bit cannot have
-// been owed a discard while it was out. A peer may have opened the note fd while
-// it was out, and nothing reads a word then: the mark stores its flag under
+// Put a consumed candidate back after a push that faulted. Native only. A peer's
+// SYS_NOTE_DISPOSE can have ignored the note while it was out, and found no bit to
+// discard: the next tail reads the row and discards it, so the bit may go back. A
+// peer may have opened the note fd while it was out, and nothing reads a word
+// then: the mark stores its flag under
 // q->lock, so a flag not seen here means the mark's walk is still to come and
 // moves the bit itself.
 static void notes_tail_unconsume_locked(struct Proc *p, struct Thread *t, int direct,
@@ -1907,14 +1975,14 @@ void notes_tail_unconsume_for_test(struct Proc *p, struct Thread *t, int direct,
 }
 #endif
 
-// SA_RESETHAND's store. A default that terminates makes a caught direct note a peer
-// is riding out fatal, as rt_sigaction's SIG_DFL does.
+// SA_RESETHAND's store, a disposition write like rt_sigaction's: a second instance
+// of the note, queued or on a peer's word, is judged by the default now.
 static void notes_handler_resets(struct Proc *p, enum viv_signote sn) {
     struct viv_sigtab *tab = __atomic_load_n(&p->sigtab, __ATOMIC_ACQUIRE);
     struct viv_ksigaction dfl = { .handler = VIV_SIG_DFL, .flags = 0,
                                   .restorer = 0, .mask = 0 };
     (void)viv_sigtab_set(tab, sn, &dfl);
-    if (viv_signote_default_is_terminate(sn)) proc_note_direct_rouse(p);
+    notes_disposition_reread(p);
 }
 
 #ifdef KERNEL_TESTS
@@ -1965,6 +2033,12 @@ static void notes_deliver_linux_locked(struct exception_context *ctx,
     // per-byte loop the Plan 9 path uses for its 16-byte name -- would be ~600
     // store calls with q->lock held.
     struct viv_sigframe_head frame;
+    // A rewind first, so the frame's uc_mcontext names the svc, as Linux's does. A
+    // failure below puts it back: the note stays queued and armed, and a rewind
+    // that outlived it would re-issue into an unwind with no return to EL0.
+    bool rewound = (act->flags & VIV_SA_RESTART) && notes_call_restarts(ctx, t);
+    u64  unwound_x0 = ctx->regs[0];
+    if (rewound) notes_call_rewind(ctx, t);
     vivarium_build_sigframe(&frame, signum,
                             viv_notemask_to_sigset(t->note_mask, &g_viv_notebits),
                             ctx->regs, ctx->sp, ctx->elr, ctx->spsr);
@@ -2000,6 +2074,7 @@ static void notes_deliver_linux_locked(struct exception_context *ctx,
     if (uaccess_copy_out(sigframe, &frame, sizeof(frame)) != 0 ||
         uaccess_copy_out(next_frame, fr, sizeof(fr)) != 0) {
         spin_unlock(&q->lock);
+        if (rewound) { ctx->elr += 4u; ctx->regs[0] = unwound_x0; }
         return;                          // nothing consumed yet -- see below
     }
 
@@ -2009,9 +2084,11 @@ static void notes_deliver_linux_locked(struct exception_context *ctx,
     struct Note popped;
     if (!notes_tail_consume_locked(p, t, direct, &popped)) {
         spin_unlock(&q->lock);
+        if (rewound) { ctx->elr += 4u; ctx->regs[0] = unwound_x0; }
         return;
     }
     spin_unlock(&q->lock);
+    t->note_call_unwound = false;       // a handler answers for the call now
 
     // SS first: a step-resume that meets this note stops at the handler's
     // entry, and the saved context never carries the bit (DEBUG-FS-DESIGN 5.5).
@@ -2196,12 +2273,14 @@ again:
     }
 
     // -----------------------------------------------------------------------
-    // VIVARIUM V-6c: Linux-phenotype delivery.
+    // VIVARIUM V-6c: delivery a table governs (ARCH 8.8.3).
     //
     // This sits ABOVE the handler_va branch, not below it, because a Linux
     // guest never calls SYS_NOTIFY: its handler lives in the per-Proc sigtab
     // and `handler_va` is 0, so leaving this underneath would route every
-    // Linux signal straight into the Plan 9 no-handler path.
+    // Linux signal straight into the Plan 9 no-handler path. A native Proc's
+    // caught row leaves here for the async delivery below; its other rows take
+    // the same arms as a guest's.
     //
     // A PHENO_LINUX image is never self-managing. Before Design D that held
     // by construction (no translation row for SYS_NOTE_OPEN, and a native
@@ -2214,7 +2293,9 @@ again:
     // consumes this queue", and reading the disposition table would be wrong
     // if that were ever true.
     // -----------------------------------------------------------------------
-    if (p->phenotype == PHENO_LINUX && !proc_is_self_managing_notes(p)) {
+    u64 deliver_va = handler_va;
+    u64 row_flags  = 0;
+    if (notes_table_governs(p) && !proc_is_self_managing_notes(p)) {
         enum viv_signote sn = viv_signote_from_note_name(candidate.name);
         // The 32-byte entry: the cross-Proc readers (notes_post's SIG_IGN
         // hook and its siblings) touch one naturally-aligned u64, the handler
@@ -2249,8 +2330,10 @@ again:
         //     Nothing will ever consume it -- a Linux guest has no notes fd --
         //     so leaving it queued would fill the ring and start failing posts.
         //     THIS cause is live: a child_exit lands under SIG_DFL constantly.
+        //     `sak` has no row to say so and ignores by default: at the head of
+        //     this queue it would hold every note behind it.
         if (!have_handler && (viv_sigtab_note_ignored(tab, sn) ||
-                              viv_signote_default_is_ignore(sn))) {
+                              notes_default_action(candidate.name) == NOTE_DFL_IGNORE)) {
             struct Note drop;
             (void)notes_tail_consume_locked(p, t, direct, &drop);
             spin_unlock(&q->lock);
@@ -2262,10 +2345,12 @@ again:
             return false;
         }
 
-        if (have_handler) {
+        if (have_handler && p->phenotype == PHENO_LINUX) {
             notes_deliver_linux_locked(ctx, p, t, q, sn, &act, direct);
             return false;               // the helper owns the unlock either way
         }
+        row_flags = have_handler ? act.flags : 0;
+        if (!have_handler) deliver_va = 0;
 
         // SIG_DFL with a TERMINATING Linux default: act here, on the
         // candidate, with the Linux table -- not by falling through to the
@@ -2279,7 +2364,7 @@ again:
         // interrupt/hup/quit, so the death records the note's signal and the
         // phenotype wait4 reports it WIFSIGNALED, as Linux does. The lock is
         // dropped first; the note stays in the about-to-be-freed queue.
-        if (viv_signote_default_is_terminate(sn)) {
+        if (!have_handler && viv_signote_default_is_terminate(sn)) {
             // sn decoded from a canonical literal, so the lookup cannot miss; a
             // miss (NULL) records no signal, and exits_note stops the kernel.
             const char *tname = notes_canonical_name_ptr(candidate.name);
@@ -2295,8 +2380,10 @@ again:
         // round-2 F2.)
     }
 
-    // No async handler registered.
-    if (handler_va == 0) {
+    // No async handler registered, or a table's default row that stops. A native
+    // row with no handler is a SYS_NOTIFY(0) on a peer, part way: its reset is
+    // coming and its reread re-judges this note.
+    if (deliver_va == 0) {
         // LS-5 P2 (ARCH 8.8.2): an uncaught `interrupt` default-terminates a
         // NON-self-managing Proc -- SIGINT's "default = die, catchable". A
         // self-managing Proc (opened its notes fd) consumes its own notes via
@@ -2399,6 +2486,12 @@ again:
 
     spin_unlock(&q->lock);
 
+    // Everything that can fail has, so the rewind stands. Before the save, as in
+    // notes_deliver_linux_locked, so SYS_NOTED's restore re-issues the call.
+    if ((row_flags & VIV_SA_RESTART) && notes_call_restarts(ctx, t))
+        notes_call_rewind(ctx, t);
+    t->note_call_unwound = false;       // a handler answers for the call now
+
     // SS first, as in notes_deliver_linux_locked (DEBUG-FS-DESIGN 5.5).
     ctx->spsr &= ~SPSR_EL1_SS;
     // Save the current user context into the Thread (inline cache; the
@@ -2433,7 +2526,7 @@ again:
     ctx->regs[0] = new_sp;
     ctx->regs[1] = (u64)popped.arg;
     ctx->sp      = new_sp;     // sp_el0 saved back to exception frame's sp
-    ctx->elr     = handler_va;
+    ctx->elr     = deliver_va;
     // BTYPE, as in notes_deliver_linux_locked; otherwise the handler runs with
     // the PSTATE EL0 had.
     ctx->spsr   &= ~SPSR_EL1_BTYPE;
@@ -2458,12 +2551,27 @@ static void notes_release_claims(struct Thread *t) {
     notes_drop_families(t, mine, t);
 }
 
+VISIBLE_IF_KERNEL_TESTS
+void notes_call_settle(struct exception_context *ctx, struct Thread *t) {
+    if (notes_call_restarts(ctx, t) && !proc_is_self_managing_notes(t->proc) &&
+        !notes_caught_pending_for(t->proc, t))
+        notes_call_rewind(ctx, t);
+    t->note_call_unwound = false;
+}
+
 // The last leg of the synchronous and birth tails (DEBUG-FS-DESIGN 4.2). A stop
 // this leg applies itself must park before the thread runs another EL0
 // instruction, so it parks through the tail's own die and stop checks and then
 // passes over the queue afresh, as Linux's get_signal parks in do_signal_stop
 // and loops. One budget bounds every pass and every discard, so a flooded queue
 // cannot hold the masked tail.
+//
+// ARCH 8.8.3: a call that unwound with no handler run here had nothing to report:
+// a peer took the note, or its row changed. Re-issued, it was never interrupted as
+// far as the program can tell. A note still deliverable keeps -T_E_INTR, because a
+// frame that would not build leaves its note queued and armed, and a rewind there
+// would spin without returning to EL0. A self-managing Proc re-issues for itself,
+// having read the fd.
 void notes_deliver_at_el0_return(struct exception_context *ctx) {
     u32 passes = 0;
     while (notes_deliver_tail(ctx, &passes)) {
@@ -2472,7 +2580,11 @@ void notes_deliver_at_el0_return(struct exception_context *ctx) {
         if (++passes >= NOTE_QUEUE_DEPTH) break;
     }
     struct Thread *t = current_thread();
-    if (t && t->proc) notes_release_claims(t);
+    if (t && t->proc) {
+        if (t->note_call_unwound) notes_call_settle(ctx, t);
+        t->note_restartable = false;
+        notes_release_claims(t);
+    }
     ASSERT_IRQS_MASKED("the EL0-return tail's last leg is about to reach "
                        "KERNEL_EXIT, which inherits its mask (#713)");
 }
