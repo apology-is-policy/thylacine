@@ -655,14 +655,13 @@ static int pouch_smoke_core(const char *name, size_t name_len,
         (void)t_close(rd);
         return -1;
     }
-    // 2048 B headroom -- pouch-hello-sockets prints 1331 B of test progress
-    // (measured 2026-09-23, after the xproc-gate leg; was ~850 B before it)
-    // lines and the marker "<bin>: exit 0" must land inside the window. Earlier
-    // 512 B sized for the leaner pre-sub-chunk-12 pouch binaries; bumped so the
-    // marker is never truncated out (the failure mode looks like "expected
-    // marker absent" even when the child exited cleanly).
+    // The size of the pipe's ring, which is what a reap-first child's output is
+    // bounded by: pouch-hello-signals prints 2.3 KiB (measured 2026-11-03, after its
+    // blocked legs) and the marker "<bin>: exit 0" comes last, so it must land inside
+    // the window. A shorter one reads "expected marker absent" for a child that
+    // exited cleanly.
     int status = -1;
-    unsigned char acc[2048];
+    unsigned char acc[4096];
     size_t acc_len = 0;
     if (drain_first) {
         // Third-party / unbounded-output child (the run_viv_bundle order): drain
