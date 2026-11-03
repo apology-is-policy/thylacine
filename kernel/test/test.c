@@ -3375,11 +3375,21 @@ bool test_strong_entropy(void) {
     return false;
 }
 
+// Boot's kthreads are still queued when the suite starts, since nothing has
+// switched yet, and a test's first line may assert an empty run tree. Letting
+// them run here keeps that premise from depending on which test came first. A
+// thread that never sleeps is left for that assertion to name.
+static void test_drain_run_tree(void) {
+    for (unsigned i = 0; i < 4096u && sched_runnable_count() != 0u; i++)
+        sched();
+}
+
 void test_run_all(void) {
     // Legacy console transition tests require the serial recovery posture.
     // Select it explicitly for the fixture; the real boot policy is restored
     // before userspace and tested independently by graphical E2E.
     int serial_posture = proc_test_serial_sak(1);
+    test_drain_run_tree();
     passed_count = 0;
     failed_count = 0;
     total_count  = 0;
