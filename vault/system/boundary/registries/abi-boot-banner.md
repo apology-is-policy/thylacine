@@ -22,6 +22,7 @@ mirrors:
   - "tools/interactive/ls-graphical-sak-recover.exp"
   - "tools/interactive/ls-graphical-sak-start.exp"
   - "tools/interactive/ls-graphical-sak-refused.exp"
+  - "tools/interactive/ls-graphical-sak-unread.exp"
   - "tools/interactive/ls-gpu-dead.exp (EXTINCTION: only -- the dead-engine witness)"
   - "tools/interactive/ls-graphical-sak-dead.exp (EXTINCTION: only -- the dead-engine seat witness)"
   - "tools/interactive/ls-graphical-sak-soak.exp (EXTINCTION: only -- the seat's return, cycled)"

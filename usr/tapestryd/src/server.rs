@@ -17959,6 +17959,8 @@ impl Conn {
             if q.request <= old.request { return Err(p9::E_INVAL); }
         }
         let result = (|| {
+            #[cfg(feature = "test-mode")]
+            if q.op == Op::Reserve && crate::test_refuse_first_reserve() { return Err(p9::E_PERM); }
             let mut info = TSrvPeerInfo::default();
             if !comp.session_declared(self.conn_id) || self.peer_stripes == 0
                 || unsafe { t_srv_peer(self.handle,&mut info) } != 0

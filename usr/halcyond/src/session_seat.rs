@@ -49,6 +49,9 @@ pub struct Link {
 }
 const _: () = assert!(core::mem::size_of::<Link>() <= 48 * 1024);
 pub const FIXED_BYTES: usize = core::mem::size_of::<Link>();
+fn now_ms() -> u64 {
+    libthyla_rs::time::monotonic_ns() / 1_000_000
+}
 impl Link {
     pub fn new(setup: Setup, principal: u32) -> Result<Self> {
         let interaction = Interaction::new(setup.snapshot.registration, principal)
@@ -65,7 +68,7 @@ impl Link {
             interaction,
             queued: None,
             routes: Routes::empty(),
-            seat: Participant::new(setup.snapshot),
+            seat: Participant::new(setup.snapshot, now_ms()),
             next: 1,
             #[cfg(feature="test-mode")]
             first_join_lost: false,
@@ -76,7 +79,8 @@ impl Link {
     fn send(&mut self, op: Op) -> Result<()> {
         let request = self.next;
         self.next = request.checked_add(1).ok_or(Error::Io)?;
-        self.channel.start(self.seat.request(op, request)).map_err(|_| Error::Io)?;
+        let q = self.seat.request(op, request);
+        self.channel.start(q).map_err(|_| Error::Io)?;
         self.channel.pump().map_err(|_| Error::Io)
     }
     pub fn fd(&self) -> i32 {
@@ -91,9 +95,12 @@ impl Link {
     pub fn joined(&self) -> bool {
         self.seat.joined()
     }
+    pub fn may_owe(&self) -> bool {
+        self.seat.may_owe()
+    }
     /// The compositor admits no one and answers nothing while this holds.
     pub fn parked(&self) -> bool {
-        self.seat.parked()
+        self.seat.parked(now_ms())
     }
     pub fn runnable(&self) -> bool {
         self.queued.is_some() || self.admission.as_ref().is_some_and(|a| a.runnable())
@@ -136,9 +143,8 @@ impl Link {
         if let Some(q) = self.queued.take() {
             self.admission.as_mut().ok_or(Error::Io)?.start(q).map_err(|_| Error::Io)?;
         }
-        let now = libthyla_rs::time::monotonic_ns() / 1_000_000;
-        if self.seat.parked() { self.interaction.hold(now); }
-        if let Some(done) = self.interaction.expire(now) { apps.complete(done); }
+        let now = now_ms();
+        if let Some(done) = self.interaction.age(now, self.seat.parked(now)) { apps.complete(done); }
         retire_overdue(&mut self.interaction, &mut self.admission, now)?;
         let admission = self.admission.as_mut().ok_or(Error::Io)?;
         admission.pump().map_err(|_| Error::Io)?;
@@ -218,7 +224,7 @@ impl Link {
         if !self.seat.joined() && reply.is_none() {
             self.first_join_lost = true;
         }
-        let step = self.seat.complete(&done.request, reply).map_err(|e| match e {
+        let step = self.seat.complete(&done.request, reply, now_ms()).map_err(|e| match e {
             libhalcyon::seat_control::Error::Invalid => Error::PermissionDenied,
             _ => Error::Io,
         })?;

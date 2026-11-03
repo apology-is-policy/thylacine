@@ -297,6 +297,18 @@ fn declared_scale() -> Option<u16> {
 /// compositor ride it out. Per boot, and set by whoever boots the machine.
 #[cfg(feature = "test-mode")]
 fn latch_dead_declared() -> bool {
+    bootarg_declared(b"thylacine.test-latch-dead")
+}
+/// Test lever: `thylacine.test-seat-start`, which halcyond also reads, refuses the
+/// boot's first seat reservation, so the client's retry is reached on every run.
+#[cfg(feature = "test-mode")]
+pub(crate) fn test_refuse_first_reserve() -> bool {
+    static REFUSED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+    bootarg_declared(b"thylacine.test-seat-start")
+        && !REFUSED.swap(true, core::sync::atomic::Ordering::Relaxed)
+}
+#[cfg(feature = "test-mode")]
+fn bootarg_declared(word: &[u8]) -> bool {
     // SAFETY: SVC wrappers over a path literal and an owned buffer.
     let fd = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/hw/chosen/bootargs".as_ptr(), 19, T_OREAD) };
     if fd < 0 {
@@ -309,7 +321,7 @@ fn latch_dead_declared() -> bool {
         && (n as usize) < buf.len()
         && buf[..n as usize]
             .split(|b| b.is_ascii_whitespace() || *b == 0)
-            .any(|w| w == b"thylacine.test-latch-dead")
+            .any(|w| w == word)
 }
 
 struct Tapestryd {

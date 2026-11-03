@@ -227,11 +227,12 @@ impl Session {
             }
 
             Action::Stopped(s) => {
-                t_putstr("dap-probe: stopped reason=\"");
-                t_putstr(&s.reason);
-                t_putstr("\" tid=");
-                print_u32(s.thread_id as u32);
-                t_putstr("\n");
+                let line = String::from("dap-probe: stopped reason=\"")
+                    + &s.reason
+                    + "\" tid="
+                    + &(s.thread_id as u32).to_string()
+                    + "\n";
+                t_putstr(&line);
                 self.thread_id = s.thread_id;
                 match self.phase {
                     // The entry stop: run to the breakpoint.

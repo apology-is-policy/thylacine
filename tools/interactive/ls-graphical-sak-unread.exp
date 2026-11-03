@@ -1,0 +1,61 @@
+#!/usr/bin/expect -f
+# ls-graphical-sak-unread -- a member that fails with its Join unread must die.
+#
+# THYLACINE_TEST_SEAT_UNREAD=1 puts thylacine.test-seat-unread on the kernel command
+# line: halcyond's owner fails right after the pump that sent its first Join. The
+# table may have pinned it by then, and only process death answers for a member the
+# table holds: one left running would make every later chord time out for the boot.
+# So the session ends, and login's fallback carries on. A failure that keeps the
+# session reports its service unavailable, and that is the red.
+#
+# Requires HALCYON_SESSION=y: the seat runs under the session compositor.
+set ::env(THYLACINE_ACCEL) [expr {[info exists ::env(LS_CI_GFX_ACCEL)] ? $::env(LS_CI_GFX_ACCEL) : "hvf"}]
+set ::env(THYLACINE_SERIAL_SAK) 0
+set ::env(THYLACINE_TEST_SEAT_UNREAD) 1
+source [file join [file dirname [info script]] lib.exp]
+
+lc_require_image {SESSION}
+
+proc step {needle why secs} {
+    global timeout
+    set timeout $secs
+    expect {
+        -ex $needle { lc_step $why }
+        -ex "inline-media service unavailable" { lc_fail "$why: the member survived its failure" }
+        -re {EXTINCTION:} { lc_extinction_fail $why }
+        timeout { lc_fail "$why: not within ${secs}s" }
+        eof { lc_fail "EOF ($why)" }
+    }
+}
+
+lc_boot
+set timeout $lc_boot_timeout
+expect {
+    -ex "Thylacine login: " {}
+    -re {EXTINCTION:} { lc_extinction_fail "boot" }
+    timeout { lc_fail "no login" }
+    eof { lc_fail "EOF before login" }
+}
+lc_raw_send "michael\r" "login user"
+expect {
+    -ex "password: " {}
+    timeout { lc_fail "no password prompt" }
+    eof { lc_fail "EOF before password" }
+}
+lc_raw_send "correct-horse-battery-staple-v1\r" "login password"
+expect {
+    -ex "login: session compositor (halcyond) spawned" {}
+    -ex "Thylacine textual shell" {
+        puts "\nLS-CI SKIP: default (ut) image -- this scenario drives the session\
+ compositor. Bake with: THYLACINE_HALCYON_SESSION=1 THYLACINE_HALCYON_PROFILE=instrument tools/build.sh kernel --config ci"
+        lc_quit
+        exit 77
+    }
+    timeout { lc_fail "no graphical session" }
+    eof { lc_fail "EOF at session start" }
+}
+step "halcyond: seat start failing with its Join unread" "the owner failed with its Join unread" 60
+step "login: session ended (code 1)" "the process died for it" 30
+step "login: session compositor unavailable -- console shell fallback" "login carried on" 30
+lc_pass "a member that may owe a cancellation dies when it fails"
+lc_quit

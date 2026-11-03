@@ -65,20 +65,35 @@ pub struct Step {
     pub normal: Option<u64>,
     pub send: Option<Op>,
 }
+/// How long a seat away from normal stops counting against a participant's own
+/// bounds. The kernel's deadlines total 100 s, but it gives FAILED none, and a held
+/// key keeps it there, so this is what returns a session that cannot start to login.
+pub const PARKED_CEILING_MS: u64 = 120_000;
 /// One lane owner's seat decisions. The owner does the I/O, so every arm is
 /// reachable here without a transport or a guest.
 #[derive(Clone, Copy, Debug)]
 pub struct Participant {
     state: Snapshot,
     joined: bool,
+    may_owe: bool,
     stopping: bool,
     retired: bool,
     acknowledged: Option<(u64, u64)>,
     refusals: Refusals,
+    away_since: Option<u64>,
 }
 impl Participant {
-    pub fn new(state: Snapshot) -> Self {
-        Self { state, joined: false, stopping: false, retired: false, acknowledged: None, refusals: Refusals::default() }
+    pub fn new(state: Snapshot, now_ms: u64) -> Self {
+        Self {
+            state,
+            joined: false,
+            may_owe: false,
+            stopping: false,
+            retired: false,
+            acknowledged: None,
+            refusals: Refusals::default(),
+            away_since: (state.phase != NORMAL).then_some(now_ms),
+        }
     }
     pub fn state(&self) -> Snapshot {
         self.state
@@ -86,21 +101,29 @@ impl Participant {
     pub fn joined(&self) -> bool {
         self.joined
     }
+    /// The table may hold this member's cancellation, which only the process's death
+    /// can then answer. It serves a Join before the reply can be read here, so this
+    /// holds from the send, and only a refusal of a first Join clears it.
+    pub fn may_owe(&self) -> bool {
+        self.may_owe
+    }
     pub fn retired(&self) -> bool {
         self.retired
     }
     pub fn stop(&mut self) {
         self.stopping = true;
     }
-    /// The compositor serves nothing while the seat is away from normal.
-    pub fn parked(&self) -> bool {
-        !self.stopping && self.state.phase != NORMAL
+    /// The compositor serves nothing while the seat is away from normal, so that
+    /// time is not this member's to account for, up to the ceiling.
+    pub fn parked(&self, now_ms: u64) -> bool {
+        !self.stopping && self.away_since.is_some_and(|t| now_ms.saturating_sub(t) < PARKED_CEILING_MS)
     }
     pub fn normal(&self) -> Option<u64> {
         (self.joined && !self.stopping && !self.retired && self.state.enabled && self.state.phase == NORMAL)
             .then_some(self.state.generation)
     }
-    pub fn request(&self, op: Op, request: u64) -> Request {
+    pub fn request(&mut self, op: Op, request: u64) -> Request {
+        self.may_owe |= op == Op::Join;
         Request {
             op,
             request,
@@ -112,8 +135,11 @@ impl Participant {
     /// `reply` is None when the table refused the request. Err ends the session's
     /// participation: Denied for a refusal with nothing to sample from, Invalid for
     /// a Join answered with a seat that is not normal.
-    pub fn complete(&mut self, q: &Request, reply: Option<Snapshot>) -> Result<Step, Error> {
+    pub fn complete(&mut self, q: &Request, reply: Option<Snapshot>, now_ms: u64) -> Result<Step, Error> {
         let Some(state) = reply else {
+            if q.op == Op::Join && !self.joined {
+                self.may_owe = false;
+            }
             if !self.refusals.stale(q) {
                 return Err(Error::Denied);
             }
@@ -121,6 +147,8 @@ impl Participant {
             return Ok(Step { revoke: true, normal: None, send: Some(Op::State) });
         };
         self.state = state;
+        // From the first reply away, so fresh replies through a long episode do not restart it.
+        self.away_since = (state.phase != NORMAL).then(|| self.away_since.unwrap_or(now_ms));
         if q.op == Op::Retire {
             self.retired = true;
             return Ok(Step { revoke: false, normal: None, send: None });
@@ -693,7 +721,7 @@ mod tests {
             Op::Retire => c.retire(s.registration, n, n, q.generation, q.revision),
             _ => unreachable!(),
         };
-        p.complete(&q, reply.ok())
+        p.complete(&q, reply.ok(), 0)
     }
     #[test]
     fn a_joined_participant_resamples_a_refusal_once_per_snapshot() {
@@ -708,10 +736,67 @@ mod tests {
         assert!(!r.stale(&q(Op::State, 2, 6)));
     }
     #[test]
+    fn a_join_may_owe_from_its_send_until_a_first_join_is_refused() {
+        let mut c = table();
+        let reserved = c.reserve(peer(1)).unwrap();
+        let mut p = Participant::new(reserved, 0);
+        assert!(!p.may_owe());
+        // The table can serve a Join before its reply is read.
+        let q = p.request(Op::Join, 1);
+        assert!(p.may_owe());
+        // A refused first Join pinned nothing, and neither does a sample.
+        p.complete(&q, None, 0).unwrap();
+        assert!(!p.may_owe());
+        let s = p.request(Op::State, 2);
+        assert!(!p.may_owe());
+        p.complete(&s, Some(reserved), 0).unwrap();
+        let q = p.request(Op::Join, 3);
+        assert!(p.may_owe());
+        let revision = reserved.revision + 1;
+        p.complete(&q, Some(Snapshot { enabled: true, revision, ..reserved }), 0).unwrap();
+        assert!(p.joined() && p.may_owe());
+        // A member that joined still owes, whatever becomes of a later Join.
+        let q = p.request(Op::Join, 4);
+        p.complete(&q, None, 0).unwrap();
+        assert!(p.joined() && p.may_owe());
+        // A served Join the owner rejects still pinned the member.
+        let mut p = Participant::new(reserved, 0);
+        let q = p.request(Op::Join, 1);
+        assert_eq!(p.complete(&q, Some(reserved), 0), Err(Error::Invalid));
+        assert!(!p.joined() && p.may_owe());
+    }
+    #[test]
+    fn a_parked_seat_stops_counting_at_the_ceiling_however_fresh_the_replies() {
+        let mut c = table();
+        let reserved = c.reserve(peer(1)).unwrap();
+        assert!(!Participant::new(reserved, 0).parked(0));
+        let mut p = Participant::new(Snapshot { phase: QUIESCING, ..reserved }, 7);
+        // A reservation can already read a seat that is away.
+        assert!(p.parked(7));
+        let mut p2 = Participant::new(reserved, 0);
+        let s = p2.request(Op::State, 1);
+        p2.complete(&s, Some(Snapshot { phase: FAILED, ..reserved }), 100).unwrap();
+        assert!(p2.parked(100 + PARKED_CEILING_MS - 1));
+        // A held key keeps FAILED live with replies still flowing.
+        p2.complete(&s, Some(Snapshot { phase: FAILED, ..reserved }), 100 + PARKED_CEILING_MS - 1).unwrap();
+        assert!(!p2.parked(100 + PARKED_CEILING_MS));
+        // A wedged coordinator sends none: the same ceiling, from the last snapshot.
+        assert!(p.parked(7 + PARKED_CEILING_MS - 1));
+        assert!(!p.parked(7 + PARKED_CEILING_MS));
+        // Back at normal, and the next episode has its full time.
+        p2.complete(&s, Some(reserved), 200_000).unwrap();
+        assert!(!p2.parked(200_000));
+        p2.complete(&s, Some(Snapshot { phase: QUIESCING, ..reserved }), 300_000).unwrap();
+        assert!(p2.parked(300_000 + PARKED_CEILING_MS - 1));
+        // Stopping owes no wait for anyone.
+        p.stop();
+        assert!(!p.parked(7));
+    }
+    #[test]
     fn a_first_join_that_lost_to_a_chord_samples_and_joins_after_the_episode() {
         let mut c = table();
         let reserved = c.reserve(peer(1)).unwrap();
-        let mut p = Participant::new(reserved);
+        let mut p = Participant::new(reserved, 0);
         c.observe(1, QUIESCING).unwrap();
         // The owner has joined nothing, so it owes nothing and holds up no one.
         assert_eq!(c.aggregate(), Some(1));
@@ -720,7 +805,7 @@ mod tests {
         assert_eq!(p.normal(), None);
         let parked = exchange(&mut c, &mut p, Op::State, 1).unwrap();
         assert_eq!(parked.send, Some(Op::State), "an unpinned lane cannot send Cancelled");
-        assert!(p.parked());
+        assert!(p.parked(0));
         c.observe(1, NORMAL).unwrap();
         let back = exchange(&mut c, &mut p, Op::State, 1).unwrap();
         assert_eq!(back.send, Some(Op::Join));
@@ -733,37 +818,37 @@ mod tests {
     fn a_join_refused_twice_at_one_snapshot_is_fatal() {
         let mut c = table();
         let reserved = c.reserve(peer(1)).unwrap();
-        let mut p = Participant::new(reserved);
+        let mut p = Participant::new(reserved, 0);
         let q = p.request(Op::Join, 1);
-        assert_eq!(p.complete(&q, None).unwrap().send, Some(Op::State));
-        assert_eq!(p.complete(&q, None), Err(Error::Denied));
+        assert_eq!(p.complete(&q, None, 0).unwrap().send, Some(Op::State));
+        assert_eq!(p.complete(&q, None, 0), Err(Error::Denied));
     }
     #[test]
     fn a_refused_state_is_fatal_since_nothing_is_left_to_sample_with() {
         let mut c = table();
         let reserved = c.reserve(peer(1)).unwrap();
-        let mut p = Participant::new(reserved);
+        let mut p = Participant::new(reserved, 0);
         let q = p.request(Op::State, 1);
-        assert_eq!(p.complete(&q, None), Err(Error::Denied));
+        assert_eq!(p.complete(&q, None, 0), Err(Error::Denied));
     }
     #[test]
     fn a_join_answered_with_a_seat_away_from_normal_is_fatal() {
         let mut c = table();
         let reserved = c.reserve(peer(1)).unwrap();
-        let mut p = Participant::new(reserved);
+        let mut p = Participant::new(reserved, 0);
         let q = p.request(Op::Join, 1);
         let reply = Snapshot { phase: QUIESCING, enabled: true, ..reserved };
-        assert_eq!(p.complete(&q, Some(reply)), Err(Error::Invalid));
+        assert_eq!(p.complete(&q, Some(reply), 0), Err(Error::Invalid));
         let reply = Snapshot { enabled: false, ..reserved };
-        assert_eq!(p.complete(&q, Some(reply)), Err(Error::Invalid));
+        assert_eq!(p.complete(&q, Some(reply), 0), Err(Error::Invalid));
     }
     #[test]
     fn a_sample_confers_nothing_even_if_the_reply_claims_enabled() {
         let mut c = table();
         let reserved = c.reserve(peer(1)).unwrap();
-        let mut p = Participant::new(reserved);
+        let mut p = Participant::new(reserved, 0);
         let q = p.request(Op::State, 1);
-        let step = p.complete(&q, Some(Snapshot { enabled: true, ..reserved })).unwrap();
+        let step = p.complete(&q, Some(Snapshot { enabled: true, ..reserved }), 0).unwrap();
         assert_eq!(step.normal, None);
         assert_eq!(p.normal(), None);
     }
@@ -771,7 +856,7 @@ mod tests {
     fn a_joined_participant_cancels_once_then_rejoins_at_the_new_generation() {
         let mut c = table();
         let reserved = c.reserve(peer(1)).unwrap();
-        let mut p = Participant::new(reserved);
+        let mut p = Participant::new(reserved, 0);
         exchange(&mut c, &mut p, Op::Join, 1).unwrap();
         c.observe(1, QUIESCING).unwrap();
         assert_eq!(c.aggregate(), None);
@@ -790,7 +875,7 @@ mod tests {
     fn a_refused_rejoin_revokes_and_the_resample_still_owes_its_cancellation() {
         let mut c = table();
         let reserved = c.reserve(peer(1)).unwrap();
-        let mut p = Participant::new(reserved);
+        let mut p = Participant::new(reserved, 0);
         exchange(&mut c, &mut p, Op::Join, 1).unwrap();
         c.observe(0, FAILED).unwrap();
         c.observe(1, NORMAL).unwrap();
@@ -806,18 +891,18 @@ mod tests {
     fn a_stopping_participant_retires_only_what_it_joined() {
         let mut c = table();
         let reserved = c.reserve(peer(1)).unwrap();
-        let mut p = Participant::new(reserved);
+        let mut p = Participant::new(reserved, 0);
         c.observe(1, QUIESCING).unwrap();
         exchange(&mut c, &mut p, Op::Join, 1).unwrap();
         p.stop();
-        assert!(!p.parked());
+        assert!(!p.parked(0));
         let done = exchange(&mut c, &mut p, Op::State, 1).unwrap();
         assert_eq!(done, Step { revoke: true, normal: None, send: None });
         assert!(p.retired());
 
         let mut c = table();
         let reserved = c.reserve(peer(1)).unwrap();
-        let mut p = Participant::new(reserved);
+        let mut p = Participant::new(reserved, 0);
         exchange(&mut c, &mut p, Op::Join, 1).unwrap();
         p.stop();
         assert_eq!(p.normal(), None);

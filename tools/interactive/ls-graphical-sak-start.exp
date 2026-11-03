@@ -7,20 +7,20 @@
 # session start must wait for it and carry on, whatever the episode's length.
 #
 # before-reserve: the Reserve meets a compositor that is parked, and is served
-#   as it returns.
+#   as it returns. The lever has tapestryd refuse that first one, as the table can
+#   for a moment while the compositor returns, so the client's retry always runs.
 # before-join: the reservation's snapshot goes stale, so the first Join is
 #   refused. The member has joined nothing and owes nothing: it samples, waits,
 #   and joins at the new generation. A first refused Join used to end the session.
-# after-join: the member owes a cancellation and pays it, while the compositor
-#   cannot admit it. Bring-up's 4 s and setup's 5 s wait both run out inside
-#   this episode unless the seat's time is not counted against them.
+# after-join: the member owes a cancellation and pays it, while bring-up cannot
+#   finish: the lever keeps it unready from the Join until the seat has come back.
+#   Bring-up's 4 s and setup's 5 s wait both run out inside this episode unless
+#   the seat's time is not counted against them.
 #
 # Each episode is held open past those and past the coordinator's 5 s bound on an
 # unjoined lane, which starts up to 3 s into the before-join episode, after the
-# hold. The lost-first-join line is what
-# makes the before-join leg bite: without it a chord that missed the window
-# would pass it. "reservation retried" is reported, not required: it is a race
-# with the coordinator's own sample.
+# hold. The lost-first-join line is what makes the before-join leg bite: without
+# it a chord that missed the window would pass it.
 #
 # Requires HALCYON_SESSION=y: the seat runs under the session compositor.
 set ::env(THYLACINE_ACCEL) [expr {[info exists ::env(LS_CI_GFX_ACCEL)] ? $::env(LS_CI_GFX_ACCEL) : "hvf"}]
@@ -89,13 +89,31 @@ expect {
 }
 step "halcyond: seat start held before-reserve" "the lever held the Reserve" 60
 episode before-reserve
+step "tapestry: seat reservation retried after a refusal" "the Reserve was refused and retried" 30
 step "halcyond: seat start held before-join" "the Reserve was served after its episode" 30
 episode before-join
 step "halcyond: seat link joined after a lost first join" "the first Join lost to the chord and joined after it" 15
 step "halcyond: seat start held after-join" "the lever held bring-up after the Join" 15
 episode after-join
-step "halcyond: seat link rejoined" "the member paid its cancellation and rejoined" 15
-step "halcyond: inline-media service /srv/halcyon-" "session start finished with its service" 30
+# Two threads print these, and nothing orders the re-Join against the setup's end.
+set timeout 30
+set after_join {}
+expect {
+    -ex "halcyond: seat link rejoined" {
+        lappend after_join rejoined
+        if {[llength $after_join] < 2} { exp_continue }
+    }
+    -ex "halcyond: inline-media service /srv/halcyon-" {
+        lappend after_join service
+        if {[llength $after_join] < 2} { exp_continue }
+    }
+    -ex "inline-media service unavailable" { lc_fail "after-join: the session lost its service to a chord" }
+    -re {login: session ended \(code [1-9]} { lc_fail "after-join: the session ended under a chord" }
+    -re {EXTINCTION:} { lc_extinction_fail "after-join" }
+    timeout { lc_fail "after-join: saw only {$after_join} of the re-Join and the service" }
+    eof { lc_fail "EOF (after-join)" }
+}
+lc_step "the member rejoined and session start finished ($after_join)"
 set timeout 60
 expect {
     -re {halcyond: status bar [^\r\n]*running false panes 2} {}

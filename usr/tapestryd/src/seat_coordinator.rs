@@ -565,7 +565,8 @@ fn serve(shared: &Shared, control: &Control, listener: &File, seat: &mut Client)
             i -= 1;
             let c: &mut Conn = &mut conns[i];
             // A first Join cannot succeed while the seat is away, so that time does
-            // not count against the bound on an unjoined lane. The kernel bounds it.
+            // not count against the bound on an unjoined lane. Only a session that
+            // reserved holds one, one slot each, for as long as a key keeps it away.
             if parked {
                 c.created = libthyla_rs::time::monotonic_ns();
             }

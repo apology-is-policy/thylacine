@@ -13,6 +13,10 @@ checker's own controls. --root DIR checks another tree.
 It reads source text, so it sees literal pieces passed to the writers named below.
 A needle must start in literal text, so a line whose text is all variable with its
 newline written separately is not seen, nor is a writer helper it does not name.
+It reads a needle given literally, through a proc that passes an argument on to
+expect, or through a variable `set` to a literal in that file. Any other variable
+needle (a foreach, a computed value) is not read, and the last line counts those.
+Any string in code that can print a needle whole exempts that needle.
 """
 import argparse
 import os
@@ -22,7 +26,10 @@ import sys
 # Console writers. A call with a string literal contributes that text; any other
 # argument contributes a VAR. `uart_puts` is the kernel's, the rest are guest code's.
 WRITERS = r"t_putstr|putbytes|puts|put_hex64|put_hex|put_dec|put_u64|uart_puts|uart_putdec|uart_puthex64"
-CALL = re.compile(r"(?<![\w.])(" + WRITERS + r")\(\s*(.*?)\s*\)\s*;", re.S)
+CALL = re.compile(r"(?<![\w.])(" + WRITERS + r")\(")
+CHAR = re.compile(r"'(?:\\.[^']*|[^\\'\n])'")
+# Longest first in effect: a quote or a comment opener met first owns what follows.
+SOURCE_TOKEN = re.compile(r'''r(#+)".*?"\1|"(?:[^"\\]|\\.)*"|'(?:\\.[^']*|[^\\'\n])'|//[^\n]*|/\*.*?\*/''', re.S)
 LITERAL = re.compile(r'^b?"((?:[^"\\]|\\.)*)"$')
 # Non-console work between two pieces this far apart still leaves a window, but a
 # piece further away than this is a different line.
@@ -46,6 +53,39 @@ def unescape(lit):
     return re.sub(r"\\(.)", lambda m: {"n": "\n", "r": "\r", "t": "\t", "0": ""}.get(m.group(1), m.group(1)), lit)
 
 
+def strip_comments(text):
+    """Source with comments blanked and line numbers kept: a comment prints nothing."""
+    def keep(m):
+        t = m.group(0)
+        return "\n" * t.count("\n") if t.startswith(("//", "/*")) else t
+    return SOURCE_TOKEN.sub(keep, text)
+
+
+def calls(text):
+    """(offset, argument text) of each writer call; a definition is not one."""
+    for m in CALL.finditer(text):
+        i, depth, n = m.end(), 1, len(text)
+        while i < n and depth:
+            c = text[i]
+            if c == '"':
+                i += 1
+                while i < n and text[i] != '"':
+                    i += 2 if text[i] == "\\" else 1
+            elif c == "'":
+                ch = CHAR.match(text, i)
+                if ch:
+                    i = ch.end()
+                    continue
+            elif c in "([{":
+                depth += 1
+            elif c in ")]}":
+                depth -= 1
+            i += 1
+        after = text[i:i + 80].lstrip()
+        if depth == 0 and not after.startswith(("{", "->")):
+            yield m.start(), text[m.end():i - 1].strip()
+
+
 def templates(text):
     """Each line a function writes in pieces: [(part, line), ...], a part being text or VAR."""
     out, cur, last, line, at = [], [], 0, 1, 0
@@ -54,13 +94,13 @@ def templates(text):
         if len(cur) > 1:
             out.append(cur)
         cur = []
-    for m in CALL.finditer(text):
-        line += text.count("\n", at, m.start())
-        at = m.start()
+    for start, arg in calls(text):
+        line += text.count("\n", at, start)
+        at = start
         if cur and line - last > MAX_GAP_LINES:
             flush()
         last = line
-        lit = LITERAL.match(m.group(2))
+        lit = LITERAL.match(arg)
         if lit is None:
             cur.append((VAR, line))
             continue
@@ -72,12 +112,95 @@ def templates(text):
     return out
 
 
-NEEDLE_ARG = r'("(?:[^"\\]|\\.)*"|\{[^{}]*\})'
-NEEDLE_FORMS = [
-    (re.compile(r"(?:-ex|-exact|lc_expect)\s+" + NEEDLE_ARG), False),
-    (re.compile(r"(?:-re|lc_expect_re)\s+" + NEEDLE_ARG), True),
-    (re.compile(r"lc_run_expect(?:_hardfail)?\s+" + NEEDLE_ARG + r"\s+" + NEEDLE_ARG), False),
-]
+# Word kinds of a needle: expect's -ex, -re, and its default of a glob.
+EXACT, REGEX, GLOB = "ex", "re", "gl"
+FLAG = re.compile(r"(?<![\w-])-(ex|exact|re)\s")
+PLAIN_EXPECT = re.compile(r"(?m)^\s*expect\s+(?=\")")
+PATTERN_ACTION = re.compile(r'(?m)^\s*(?="(?:[^"\\\n]|\\.)*"\s*\{)')
+PROC = re.compile(r"(?m)^\s*proc\s+(\w+)\s")
+SET = re.compile(r"(?m)^\s*set\s+(\w+)\s")
+TCL_COMMENT = re.compile(r"(?m)^[ \t]*#.*$")
+QUANTIFIER = re.compile(r"\{\d+(?:,\d*)?\}")
+SEED_WRAPPERS = {"lc_expect": [(0, EXACT)], "lc_expect_re": [(0, REGEX)],
+                 "lc_run_expect": [(1, EXACT)], "lc_run_expect_hardfail": [(1, EXACT)]}
+
+
+def tcl_word(text, i):
+    """The Tcl word at or after i, with its delimiters: (word, end); (None, i) at a line's end."""
+    n = len(text)
+    while i < n and text[i] in " \t":
+        i += 1
+    if i >= n or text[i] == "\n":
+        return None, i
+    start = i
+    if text[i] == '"':
+        i += 1
+        while i < n and text[i] != '"':
+            i += 2 if text[i] == "\\" else 1
+        return text[start:i + 1], i + 1
+    if text[i] == "{":
+        depth = 0
+        while i < n:
+            if text[i] == "\\":
+                i += 2
+                continue
+            depth += {"{": 1, "}": -1}.get(text[i], 0)
+            i += 1
+            if depth == 0:
+                break
+        return text[start:i], i
+    while i < n and text[i] not in " \t\n":
+        i += 1
+    return text[start:i], i
+
+
+def tcl_words(text, i, count):
+    words = []
+    for _ in range(count):
+        w, i = tcl_word(text, i)
+        if w is None:
+            break
+        words.append(w)
+    return words
+
+
+def variable_name(word):
+    m = re.fullmatch(r'"?\$\{?(\w+)\}?"?', word)
+    return m.group(1) if m else None
+
+
+def find_wrappers(text, known):
+    """Each proc's arguments used as needles: {name: [(index, kind), ...]}, to a fixpoint."""
+    found = {k: list(v) for k, v in known.items()}
+    procs = []
+    for m in PROC.finditer(text):
+        args, i = tcl_word(text, m.end())
+        body, _ = tcl_word(text, i)
+        if args and body and args.startswith("{") and body.startswith("{"):
+            names = [a.strip("{}").split()[0] for a in re.findall(r"\{[^{}]*\}|\S+", args[1:-1])]
+            procs.append((m.group(1), names, body))
+    for _ in range(len(procs) + 1):
+        changed = False
+        for name, names, body in procs:
+            uses = set(found.get(name, []))
+            for m in FLAG.finditer(body):
+                w, _ = tcl_word(body, m.end())
+                v = variable_name(w or "")
+                if v in names:
+                    uses.add((names.index(v), REGEX if m.group(1) == "re" else EXACT))
+            for wrapper, slots in found.items():
+                for m in re.finditer(r"(?<![\w$:-])" + wrapper + r"\s", body):
+                    words = tcl_words(body, m.end() - 1, 8)
+                    for index, kind in slots:
+                        v = variable_name(words[index]) if index < len(words) else None
+                        if v in names:
+                            uses.add((names.index(v), kind))
+            if uses != set(found.get(name, [])):
+                found[name] = sorted(uses)
+                changed = True
+        if not changed:
+            break
+    return found
 
 
 TCL_SUBST = re.compile(r"\$\{?\w+\}?|\$::\w+(?:\([^)]*\))?|\[[a-z_][^\]]*\]")
@@ -126,7 +249,14 @@ def regex_alternatives(rx):
             depth = max(0, depth - 1)
         elif c == ".":
             cur.append(WILD)
-        elif c in "*+?{}^$":
+        elif c == "{":
+            q = QUANTIFIER.match(rx, i)
+            if q:
+                if cur:
+                    cur[-1] = WILD
+                i = q.end()
+                continue
+        elif c in "*+?}^$":
             pass
         else:
             cur.append(c)
@@ -135,17 +265,65 @@ def regex_alternatives(rx):
     return [re.sub(WILD + "+", WILD, a).replace("\r", "").replace("\n", "") for a in alts]
 
 
-def needles(text):
-    found = []
-    for ln, line in enumerate(text.splitlines(), 1):
-        for form, is_re in NEEDLE_FORMS:
-            for m in form.finditer(line):
-                arg = m.group(m.lastindex)
-                if arg.startswith('"'):
-                    arg = TCL_SUBST.sub(WILD, arg)  # the value is variable text here
-                tokens = regex_alternatives(arg[1:-1]) if is_re else [tcl_literal(arg)]
-                found.extend((ln, t) for t in tokens if t.strip(WILD + " "))
-    return found
+def glob_tokens(arg):
+    return re.sub(WILD + "+", WILD, re.sub(r"\[[^\]]*\]|[*?]", WILD, arg))
+
+
+def needle_tokens(arg, kind):
+    if arg.startswith('"'):
+        arg = TCL_SUBST.sub(WILD, arg)  # the value is variable text here
+    if kind == REGEX:
+        return regex_alternatives(arg[1:-1])
+    lit = tcl_literal(arg)
+    return [glob_tokens(lit) if kind == GLOB else lit]
+
+
+def needles(text, wrappers=SEED_WRAPPERS):
+    """(line, tokens) of each needle given literally, plus how many are not read."""
+    text = TCL_COMMENT.sub("", text)
+    values = {}
+    for m in SET.finditer(text):
+        w, _ = tcl_word(text, m.end() - 1)
+        if w and w[0] in '"{':
+            values.setdefault(m.group(1), []).append(w)
+    # A proc's own argument is read at its callers.
+    params = set()
+    for m in PROC.finditer(text):
+        args, _ = tcl_word(text, m.end())
+        if args and args.startswith("{"):
+            params.update(a.strip("{}").split()[0] for a in re.findall(r"\{[^{}]*\}|\S+", args[1:-1]) if a.strip("{}"))
+    found, unread = [], [0]
+    def take(offset, word, kind):
+        if word is None:
+            return
+        ln = text.count("\n", 0, offset) + 1
+        v = variable_name(word)
+        if v is not None:
+            if v not in values and v not in params:
+                unread[0] += 1
+            words = values.get(v, [])
+        else:
+            words = [word] if word[0] in '"{' else []
+        for w in words:
+            found.extend((ln, t) for t in needle_tokens(w, kind) if t.strip(WILD + " "))
+    for m in FLAG.finditer(text):
+        w, _ = tcl_word(text, m.end())
+        take(m.start(), w, REGEX if m.group(1) == "re" else EXACT)
+    for form in (PLAIN_EXPECT, PATTERN_ACTION):
+        for m in form.finditer(text):
+            w, _ = tcl_word(text, m.end())
+            take(m.start(), w, GLOB)
+    proc_heads = {m.start(1) for m in PROC.finditer(text)}
+    for name, slots in wrappers.items():
+        for m in re.finditer(r"(?<![\w$:-])" + name + r"\s", text):
+            if m.start() in proc_heads:
+                continue
+            words = tcl_words(text, m.end() - 1, 8)
+            for index, kind in slots:
+                if index < len(words):
+                    take(m.start(), words[index], kind)
+    found.sort()
+    return found, unread[0]
 
 
 def crossing(needle, parts):
@@ -237,16 +415,22 @@ def check(root):
     tpl, literals = [], []
     for path in source_files(root):
         with open(path, errors="replace") as fh:
-            text = fh.read()
+            text = strip_comments(fh.read())
         literals.extend(unescape(m.group(1)) for m in STRING.finditer(text))
         if "put" in text:
             for t in templates(text):
                 tpl.append((os.path.relpath(path, root), t, "".join(p for p, _ in t if p is not VAR)))
     whole = "\n".join(lit.replace("\n", " ") for lit in literals)
-    ndl = []
+    ndl, unread = [], 0
+    scenarios = []
     for path in scenario_files(root):
         with open(path, errors="replace") as fh:
-            ndl.extend((os.path.basename(path), ln, n) for ln, n in needles(fh.read()))
+            scenarios.append((os.path.basename(path), fh.read()))
+    library = find_wrappers(next((t for n, t in scenarios if n == "lib.exp"), ""), SEED_WRAPPERS)
+    for name, text in scenarios:
+        found, missed = needles(text, find_wrappers(text, library))
+        ndl.extend((name, ln, n) for ln, n in found)
+        unread += missed
     hits = []
     for scen, ln, n in ndl:
         if printed_whole(n, whole):
@@ -260,7 +444,7 @@ def check(root):
             if c >= MIN_LITERAL and c == top and not exempt(t):
                 shown = "".join("<var>" if p is VAR else p for p, _ in t).strip()
                 hits.append((path, t[0][1], shown, scen, ln, n))
-    return len(tpl), len(ndl), hits
+    return len(tpl), len(ndl), unread, hits
 
 
 def self_test():
@@ -293,15 +477,46 @@ def self_test():
     if not any(crossing(rx[0], t) for t in tpl):
         print("self-test FAIL: a regex needle across the VAR")
         bad += 1
-    found = [n for _, n in needles('lc_expect "a b" x\nexpect {\n -re {c [0-9]+ d} { }\n -ex "e" { }\n}\nlc_expect "f $g h" y\n')]
-    if found != ["a b", "c " + WILD + " d", "e", "f " + WILD + " h"]:
-        print(f"self-test FAIL: needle forms {found!r}")
+    forms = """# -ex "commented out"
+lc_expect "a b" x
+expect {
+ -re {c [0-9]+ d} { }
+ -ex "e" { }
+ -re {q[a-z]{1,9}r} { }
+ "glob*tail" { }
+}
+lc_expect "f $g h" y
+expect "plain"
+set kept "from a variable"
+expect { -ex $kept { } }
+proc step {needle why} { expect { -ex $needle { lc_step $why } } }
+proc outer {why n} { step $n $why }
+step "through a proc" w
+outer w {through two procs}
+foreach v {not read} { expect -ex $v }
+"""
+    found, missed = needles(forms, find_wrappers(forms, SEED_WRAPPERS))
+    want = ["a b", "c " + WILD + " d", "e", "q" + WILD + "r", "glob" + WILD + "tail", "f " + WILD + " h", "plain",
+            "from a variable", "through a proc", "through two procs"]
+    if [n for _, n in found] != want:
+        print(f"self-test FAIL: needle forms {[n for _, n in found]!r}")
+        bad += 1
+    if missed != 1:  # the foreach
+        print(f"self-test FAIL: unread needles {missed}")
+        bad += 1
+    masked = strip_comments('// the "tag: PASS x done now" line\n/* t_putstr("gone"); */\nchar c = \'"\'; t_putstr("kept // not a comment");\n')
+    if "tag: PASS" in masked or "gone" in masked or "kept // not a comment" not in masked:
+        print(f"self-test FAIL: comments {masked!r}")
+        bad += 1
+    defined = [a for _, a in calls('fn put_hex64(v: u64) { helper(v); }\nvoid put_dec(u64 v) {\nt_putstr("a)b");\nif x { t_putstr("tail") }\n')]
+    if defined != ['"a)b"', '"tail"']:
+        print(f"self-test FAIL: a definition taken for a call {defined!r}")
         bad += 1
     best = crossing("tag: PASS x done", tpl[0]), crossing("tag: PASS x done", ["tag: PASS ", VAR, " never\n"])
     if not best[0] > best[1] > 0:
         print(f"self-test FAIL: the fitting line must outscore one that only starts alike: {best}")
         bad += 1
-    print("self-test:", "FAIL" if bad else f"PASS ({len(cases) + 4} controls)")
+    print("self-test:", "FAIL" if bad else f"PASS ({len(cases) + 7} controls)")
     return 1 if bad else 0
 
 
@@ -312,13 +527,13 @@ def main():
     args = ap.parse_args()
     if args.self_test:
         return self_test()
-    n_tpl, n_ndl, hits = check(args.root)
+    n_tpl, n_ndl, unread, hits = check(args.root)
     if n_tpl == 0 or n_ndl == 0:
         print(f"check-console-lines: FAIL: found {n_tpl} lines and {n_ndl} needles, so it checked nothing")
         return 2
     for path, line, shown, scen, ln, n in hits:
         print(f"{path}:{line}: {shown[:70]!r}\n    read whole by {scen}:{ln} {n.replace(WILD, '<any>')[:80]!r}")
-    print(f"check-console-lines: {n_tpl} lines written in pieces, {n_ndl} needles, {len(hits)} spanning")
+    print(f"check-console-lines: {n_tpl} lines written in pieces, {n_ndl} needles, {len(hits)} spanning; {unread} variable needles not read")
     if hits:
         print("Write each such line in one console call; two calls can have another process's line between them.")
         return 1
