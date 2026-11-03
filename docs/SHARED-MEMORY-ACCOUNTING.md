@@ -541,10 +541,10 @@ record never filled in names none. `level` is 0 NORMAL, 1 WARNING and 2 CRITICAL
 `limiting` is the class that is tightest. The self selector is -1, since no handle is
 negative.
 
-Reserved at MM-0: `SYS_ACCOUNT` is 139, with no dispatch arm until MM-1, so it answers as
-an unknown number and `syscall.native_gap_unassigned` pins that. Linux's 139 is
-rt_sigreturn, which a Linux Proc takes before the native switch, so a Linux Proc reaches no
-account operation and is charged without one. The kernel's `thylacine/account.h`, libt's
+Reserved at MM-0: `SYS_ACCOUNT` is 140, with no dispatch arm until MM-1, so it answers as
+an unknown number and `syscall.native_gap_unassigned` pins that. Linux's 140 is
+setpriority, which has no row, so a Linux Proc takes ENOSYS before the native switch,
+reaches no account operation and is charged without one. The kernel's `thylacine/account.h`, libt's
 `thyla/account.h` and libthyla-rs's `account` are held to one byte record by
 `tools/test-account-abi.py`. Records for the operations other than the query come with
 those operations, and the version and size fields are what lets them.

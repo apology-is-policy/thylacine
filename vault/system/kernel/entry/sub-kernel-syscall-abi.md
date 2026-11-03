@@ -239,10 +239,10 @@ trusting the -1 many handlers also return): those numbers belong to other
 branches.
 
 **The memory account call, reserved (2026-11-03, operator votes 47 and 48).**
-`SYS_ACCOUNT` = 139: handle or `ACCOUNT_SELF`, operation, record pointer, record size.
+`SYS_ACCOUNT` = 140: handle or `ACCOUNT_SELF`, operation, record pointer, record size.
 It is a number and a layout and nothing else: no dispatch arm until MM-1, so it reaches
-the unknown arm, and `syscall.native_gap_unassigned` pins that. `SYS__NATIVE_TOP` is 140
-and `VIV_NATIVE_CEILING` 139. The live count below does not move. [[abi-memory-account]]
+the unknown arm, and `syscall.native_gap_unassigned` pins that. `SYS__NATIVE_TOP` is 141
+and `VIV_NATIVE_CEILING` 140. The live count below does not move. [[abi-memory-account]]
 holds the records.
 
 **Thread-directed notes (2026-11-02, operator vote 14).** `SYS_POSTNOTE_TID` = 138:

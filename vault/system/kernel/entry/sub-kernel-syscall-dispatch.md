@@ -48,13 +48,13 @@ Native call 138 is POSTNOTE_TID, which posts to one thread of the caller's own P
 ([[sub-kernel-syscall-abi]], [[sub-kernel-notes]]). It shares `postnote_copy_name` with
 `SYS_POSTNOTE`.
 
-139 is reserved for SYS_ACCOUNT ([[abi-memory-account]]) and has no arm until MM-1, so it
-reaches the unknown arm, and the same test pins that.
+140 is reserved for SYS_ACCOUNT ([[abi-memory-account]]) and has no arm until MM-1, so it
+reaches the unknown arm, as the empty 139 does, and the same test pins that.
 
 ## Trusted-seat and nonblocking entries
 
 Native calls 121/122/123 are TRUSTED_SEAT, SEAT_IMPORT and SET_NONBLOCK;
-the native ceiling is now 139 (the reserved ACCOUNT; [[sub-kernel-vivarium]]). [[abi-trusted-seat]] and [[abi-native-nonblock]] pin
+the native ceiling is now 140 (the reserved ACCOUNT; [[sub-kernel-vivarium]]). [[abi-trusted-seat]] and [[abi-native-nonblock]] pin
 the mirrors. TRUSTED_SEAT snapshots the bounded 544-byte envelope before taking
 the process lock, scrubs temporary key material and validates copyout. SEAT_IMPORT
 checks the bound service, owned live peer connection and DMA allowance before

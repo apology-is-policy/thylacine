@@ -2539,8 +2539,9 @@ enum {
     // ACCOUNT_SELF, with thylacine/account.h's records. No dispatch arm until MM-1, so
     // it answers as an unknown number; syscall.native_gap_unassigned pins that.
     //
-    // Linux's 139 is rt_sigreturn, intercepted before the native switch (vivarium.c).
-    SYS_ACCOUNT = 139,
+    // Linux's 140 is setpriority, which has no row, so a Linux Proc takes ENOSYS before
+    // the native switch (vivarium.c).
+    SYS_ACCOUNT = 140,
 
     // NOT A SYSCALL. One past the highest assigned number, so that
     // VIV_NATIVE_CEILING can be pinned to a value the compiler recomputes

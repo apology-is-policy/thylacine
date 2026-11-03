@@ -12,14 +12,14 @@ design: ["docs/VIVARIUM.md", "docs/LINEAGE.md"]
 created: 2026-08-06
 updated: 2026-11-03
 ---
-## Native ceiling 139
+## Native ceiling 140
 
-The native ceiling is the reserved SYS_ACCOUNT, at 139 since votes 47 and 48
-(2026-11-03). It rose over rt_sigreturn, which is argued per number in vivarium.c: the
-number is intercepted for a Linux Proc before the native switch, so a Linux Proc reaches
-no account operation and is charged without one, and a native program mis-declared as
-Linux restores a frame from its own stack, which confers nothing. The ceiling argument
-now starts at setgid (144).
+The native ceiling is the reserved SYS_ACCOUNT, at 140 under votes 47 and 48
+(2026-11-03). It rose over rt_sigreturn and setpriority, each argued per number in
+vivarium.c. setpriority has no row, so a Linux Proc takes ENOSYS before the native switch,
+reaches no account operation and is charged without one, and a native program mis-declared
+as Linux loses the call, which confers nothing. rt_sigreturn meets no native number on this
+tree. The ceiling argument now starts at setgid (144).
 
 POSTNOTE_TID held it at 138 from vote 14 (2026-11-02). The rows that
 raise newly covers are argued per number in vivarium.c: rt_sigprocmask, rt_sigpending

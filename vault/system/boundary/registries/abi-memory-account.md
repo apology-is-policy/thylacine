@@ -18,7 +18,7 @@ updated: 2026-11-03
 ## Layout / semantics
 
 **Reserved; no kernel code is behind it.** The contract is
-`docs/SHARED-MEMORY-ACCOUNTING.md` section 13. `SYS_ACCOUNT` is 139, with no dispatch arm
+`docs/SHARED-MEMORY-ACCOUNTING.md` section 13. `SYS_ACCOUNT` is 140, with no dispatch arm
 until MM-1, so it answers as an unknown number. The self selector is -1. Version is 1.
 
 Operations: QUERY 1, CHILD 2, SET_LIMITS 3, VOUCHER_CREATE 4, VOUCHER_CLOSE 5,

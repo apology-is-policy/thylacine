@@ -400,6 +400,11 @@ void test_vivarium_rejects_are_deliberate(void) {
     TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_RT_SIGQUEUEINFO, args, &out),
                    (int)VIV_ENOSYS, "rt_sigqueueinfo (138) is an ENOSYS row");
 
+    // SYS_ACCOUNT lifted the ceiling over setpriority (vivarium.c). The number has no
+    // row, so a Linux Proc takes ENOSYS: the account call is out of its reach.
+    TEST_EXPECT_EQ((int)vivarium_translate(SYS_ACCOUNT, args, &out),
+                   (int)VIV_FORWARD, "the number SYS_ACCOUNT holds has no Linux row");
+
     // restart_syscall (128) meets SYS_ICACHE_SYNC_SPACE (asserted in
     // vivarium.c); the other four meet an empty gap (syscall.native_gap_
     // unassigned pins it). Each is consumed before the native switch: its

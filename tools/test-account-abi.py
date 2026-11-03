@@ -20,7 +20,7 @@ query = hdr + struct.pack('<QIIQQQQ', 0x1112131415161718, 2, 3, 0x21222324252627
 outcome = struct.pack('<QIIQQQ', 0x6162636465666768, 1, 9, 0x7172737475767778,
                       0x8182838485868788, 0x9192939495969798)
 assert len(query) == 168 and len(outcome) == 40
-constants = struct.pack('<Q22i', 139, 1, -1, 1, 2, 3, 4, 5, 6, 0, 1, 2, 3, 4, 0, 1, 2, 1, 5, 9, 0, 0, 0)
+constants = struct.pack('<Q22i', 140, 1, -1, 1, 2, 3, 4, 5, 6, 0, 1, 2, 3, 4, 0, 1, 2, 1, 5, 9, 0, 0, 0)
 EXPECTED = constants + query + outcome
 
 

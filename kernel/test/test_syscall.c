@@ -60,8 +60,8 @@ void test_syscall_dispatch_unknown(void) {
 // number, and then this pin moves. The suite runs before init, so the only
 // unknown calls in flight are the ones tests make.
 //
-// SYS_ACCOUNT at 139 is reserved with no dispatch arm until MM-1, so it is pinned
-// the same way: its arm arriving moves this test with it.
+// SYS_ACCOUNT at 140 is reserved with no dispatch arm until MM-1, so it is pinned
+// the same way, as is the empty 139: an arm arriving at either moves this test with it.
 void test_syscall_native_gap_unassigned(void) {
     for (u64 nr = 129; nr <= SYS_ACCOUNT; nr++) {
         if (nr == SYS_SRV_REGISTRY_NEW || nr == SYS_POSTNOTE_TID) continue;

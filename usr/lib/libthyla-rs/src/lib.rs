@@ -172,7 +172,7 @@ pub const T_SYS_NOTED: u64            = 46;
 pub const T_SYS_POSTNOTE: u64         = 47;
 pub const T_SYS_POSTNOTE_TID: u64     = 138;
 // Reserved, not yet live: the memory account call, with `account`'s records.
-pub const T_SYS_ACCOUNT: u64          = 139;
+pub const T_SYS_ACCOUNT: u64          = 140;
 pub const T_SYS_NOTE_MASK: u64        = 48;
 
 // P5-mount-syscall + P5-chroot-syscall + P6-16c-pivot_root: namespace
