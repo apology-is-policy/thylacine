@@ -5274,6 +5274,177 @@ unsafe fn run_linux() -> ! {
     }
     leg!(rep, ku_n == 0, &ku_mk[..ku_n]);
 
+    // --- L346-L349: the kernel restarts a call for SA_RESTART -----------------
+    //
+    // ARCH 8.8.3 (operator vote 19). Each runs in a child with its own rows: SIGUSR1
+    // caught under SA_RESTART, SIGCHLD back to default so no exit ends these waits. The
+    // child says it is about to wait, the parent settles and posts, then sends the byte
+    // that lets the wait finish.
+    //   L346: a pipe read returns the byte, and the frame's pc names the svc, so the
+    //         rewind came before the frame was built.
+    //   L347: wait4 reaps the child it was waiting for.
+    //   L348: an untimed futex wait is woken by its peer, not ended by the note.
+    //   L349: ppoll is on signal(7)'s never-restarted list, so it reads EINTR anyway.
+    // A note that beat the wait is no witness of it: the child exits 9 and the parent
+    // tries again with a longer settle.
+    const SA_RESTART: u64 = 0x1000_0000;
+    const RS_EARLY: i32 = 9;
+    static RS_WORD: AtomicU32 = AtomicU32::new(0);
+    static RS_DATA_FD: AtomicU32 = AtomicU32::new(0);
+
+    extern "C" fn rs_waker_main(_arg: u64) -> ! {
+        unsafe {
+            let un = 1u64 << (SIGUSR1 - 1);
+            let _ = svc4(NR_RT_SIGPROCMASK, SIG_BLOCK, &un as *const u64 as u64, 0, 8);
+            let mut one = [0u8; 1];
+            let _ = svc3(NR_READ, RS_DATA_FD.load(Ordering::SeqCst) as u64,
+                         one.as_mut_ptr() as u64, 1);
+            RS_WORD.store(1, Ordering::SeqCst);
+            let _ = svc3(NR_FUTEX, core::ptr::addr_of!(RS_WORD) as u64,
+                         FUTEX_WAKE | FUTEX_PRIVATE, 1);
+            linux_thread_exit(0)
+        }
+    }
+
+    unsafe fn rs_child(mode: u32, status_w: i32, data_r: i32) -> ! {
+        let ksa: [u64; 4] = [handler_addr(), SA_RESTORER | SA_SIGINFO | SA_RESTART,
+                             restorer_addr(), 0];
+        let dfl: [u64; 4] = [SIG_DFL, 0, 0, 0];
+        let un = 1u64 << (SIGUSR1 - 1);
+        if svc4(NR_RT_SIGACTION, SIGUSR1, &ksa as *const u64 as u64, 0, 8) != 0
+            || svc4(NR_RT_SIGACTION, SIGCHLD, &dfl as *const u64 as u64, 0, 8) != 0
+            || svc4(NR_RT_SIGPROCMASK, SIG_UNBLOCK, &un as *const u64 as u64, 0, 8) != 0
+        {
+            linux_exit(10)
+        }
+        let pre = sig_fired();
+        let say = b"R";
+        let mut one = [0u8; 1];
+        match mode {
+            0 => {
+                let _ = svc3(NR_WRITE, status_w as u64, say.as_ptr() as u64, 1);
+                let n = svc3(NR_READ, data_r as u64, one.as_mut_ptr() as u64, 1);
+                if n != 1 || one[0] != b'D' {
+                    linux_exit(11)
+                }
+                if sig_fired() <= pre {
+                    linux_exit(12)
+                }
+                const SVC_0: u32 = 0xD400_0001;
+                if core::ptr::read_volatile(sig_uc_pc() as *const u32) != SVC_0 {
+                    linux_exit(RS_EARLY as i64)
+                }
+            }
+            1 => {
+                let gc = svc6(NR_CLONE, SIGCHLD, 0, 0, 0, 0, 0);
+                if gc == 0 {
+                    let _ = svc3(NR_READ, data_r as u64, one.as_mut_ptr() as u64, 1);
+                    linux_exit(7)
+                }
+                let _ = svc3(NR_WRITE, status_w as u64, say.as_ptr() as u64, 1);
+                let mut ws: i32 = -1;
+                let r = svc4(NR_WAIT4, gc as u64, &mut ws as *mut i32 as u64, 0, 0);
+                if r != gc || (ws & 0x7f) != 0 || ((ws >> 8) & 0xff) != 7 {
+                    linux_exit(13)
+                }
+                if sig_fired() <= pre {
+                    linux_exit(RS_EARLY as i64)
+                }
+            }
+            2 => {
+                RS_DATA_FD.store(data_r as u32, Ordering::SeqCst);
+                let peer = __viv_clone_thread(
+                    rs_waker_main,
+                    core::ptr::addr_of!(THREAD_STACK) as u64 + (16 * 1024),
+                    CLONE_FLAGS_THREAD,
+                    0,
+                    core::ptr::addr_of!(PTID_WORD) as u64,
+                    core::ptr::addr_of!(THREAD_TLS_AREA) as u64,
+                    core::ptr::addr_of!(CTID_WORD) as u64,
+                );
+                if peer <= 0 {
+                    linux_exit(14)
+                }
+                let _ = svc3(NR_WRITE, status_w as u64, say.as_ptr() as u64, 1);
+                let r = svc6(NR_FUTEX, core::ptr::addr_of!(RS_WORD) as u64,
+                             FUTEX_WAIT | FUTEX_PRIVATE, 0, 0, 0, 0);
+                if r != 0 && r != -11 {
+                    linux_exit(15)
+                }
+                if RS_WORD.load(Ordering::SeqCst) != 1 {
+                    linux_exit(16)
+                }
+                if sig_fired() <= pre {
+                    linux_exit(RS_EARLY as i64)
+                }
+            }
+            _ => {
+                let _ = svc3(NR_WRITE, status_w as u64, say.as_ptr() as u64, 1);
+                let ts: [i64; 2] = [3, 0];
+                let r = svc6(NR_PPOLL, 0, 0, ts.as_ptr() as u64, 0, 8, 0);
+                if r == 0 && sig_fired() > pre {
+                    linux_exit(RS_EARLY as i64)
+                }
+                if r != -4 || sig_fired() <= pre {
+                    linux_exit(17)
+                }
+            }
+        }
+        linux_exit(0)
+    }
+
+    let mut rs_mk = [0u8; 80];
+    let mut rs_n = 0usize;
+    for (mode, mark) in [(0u32, b"L346"), (1, b"L347"), (2, b"L348"), (3, b"L349")] {
+        let mut settle_ns: i64 = 200_000_000;
+        let mut ws: Option<i32> = None;
+        let mut kid = -1i64;
+        for _ in 0..3 {
+            let mut rp: [i32; 2] = [-1, -1];
+            let mut dp: [i32; 2] = [-1, -1];
+            if svc3(NR_PIPE2, rp.as_mut_ptr() as u64, 0, 0) != 0
+                || svc3(NR_PIPE2, dp.as_mut_ptr() as u64, 0, 0) != 0
+            {
+                break;
+            }
+            kid = svc6(NR_CLONE, SIGCHLD, 0, 0, 0, 0, 0);
+            if kid == 0 {
+                let _ = svc3(NR_CLOSE, rp[0] as u64, 0, 0);
+                let _ = svc3(NR_CLOSE, dp[1] as u64, 0, 0);
+                rs_child(mode, rp[1], dp[0])
+            }
+            let _ = svc3(NR_CLOSE, rp[1] as u64, 0, 0);
+            let _ = svc3(NR_CLOSE, dp[0] as u64, 0, 0);
+            let mut one = [0u8; 1];
+            let _ = svc3(NR_READ, rp[0] as u64, one.as_mut_ptr() as u64, 1);
+            let settle: [i64; 2] = [settle_ns / 1_000_000_000, settle_ns % 1_000_000_000];
+            let _ = svc4(NR_PPOLL, 0, 0, settle.as_ptr() as u64, 0);
+            if kid > 0 {
+                let _ = svc3(NR_KILL, kid as u64, SIGUSR1, 0);
+            }
+            let after: [i64; 2] = [0, 100_000_000];
+            let _ = svc4(NR_PPOLL, 0, 0, after.as_ptr() as u64, 0);
+            let d = b"D";
+            let _ = svc3(NR_WRITE, dp[1] as u64, d.as_ptr() as u64, 1);
+            ws = if kid > 0 { reap_or_kill(kid) } else { None };
+            let _ = svc3(NR_CLOSE, rp[0] as u64, 0, 0);
+            let _ = svc3(NR_CLOSE, dp[1] as u64, 0, 0);
+            if !matches!(ws, Some(w) if (w & 0x7f) == 0 && ((w >> 8) & 0xff) == RS_EARLY) {
+                break;
+            }
+            settle_ns *= 2;
+        }
+        if !matches!(ws, Some(0)) && rs_n == 0 {
+            rs_n = put_bytes(&mut rs_mk, 0, mark);
+            rs_n = put_bytes(&mut rs_mk, rs_n, b" fork=");
+            rs_n = put_dec(&mut rs_mk, rs_n, kid);
+            rs_n = put_bytes(&mut rs_mk, rs_n, b" ws=");
+            rs_n = put_dec(&mut rs_mk, rs_n, ws.map_or(-1, |w| w as i64));
+            rs_n = put_bytes(&mut rs_mk, rs_n, b"\n");
+        }
+    }
+    leg!(rep, rs_n == 0, &rs_mk[..rs_n]);
+
     // --- L339-L343: tgkill reaches exactly the thread it names ---------------
     //
     // ARCH 7.6.4 (operator vote 5, 2026-10-21). A peer blocks in ppoll with
@@ -5472,10 +5643,82 @@ fn run_native() -> i64 {
         t_putstr("viv-pheno-probe: FAIL native brk not -1\n");
         return 1;
     }
+    if let Err(why) = native_note_table() {
+        t_putstr("viv-pheno-probe: FAIL native note table: ");
+        t_putstr(why);
+        t_putstr("\n");
+        return 1;
+    }
     // A native Proc still has its native ABI: this call is the proof, and it
     // is also how the result gets reported at all.
     t_putstr("viv-pheno-probe: native PASS\n");
     0
+}
+
+/// ARCH 8.8.3: the third native form, a self-managing reader with rows. Only a caught
+/// row's note unwinds a wait, the error reaches the reader whatever the row's restart
+/// flag says, and it drains the fd and re-issues. The poll legs are one variable apart:
+/// the same queued note, the same timed wait, and only its row differs.
+fn native_note_table() -> Result<(), &'static str> {
+    use libthyla_rs::err::Error;
+    use libthyla_rs::notes::{dispose, send, Disposition, NoteTarget, Notes};
+    use libthyla_rs::{t_pipe, t_poll, t_read, t_write, TPollFd, T_POLLIN};
+
+    const NEG_EINTR: i64 = -4;
+    let caught_nofd = dispose("usr1", Disposition::Caught { restart: false });
+    if caught_nofd != Err(Error::InvalidArgument) {
+        return Err("a caught row with nothing to take it was not refused");
+    }
+    if dispose("kill", Disposition::Ignore) != Err(Error::InvalidArgument) {
+        return Err("a row for kill was not refused");
+    }
+    if dispose("nosuchnote", Disposition::Ignore) != Err(Error::InvalidArgument) {
+        return Err("a row for an unknown name was not refused");
+    }
+
+    let notes = Notes::open_self().map_err(|_| "open_self")?;
+    let (rd, wr) = unsafe { t_pipe() };
+    if rd < 0 || wr < 0 {
+        return Err("pipe");
+    }
+    let poll_ms = |ms: i32| -> i64 {
+        let mut pf = TPollFd { fd: rd as i32, events: T_POLLIN, revents: 0 };
+        unsafe { t_poll(&mut pf as *mut TPollFd, 1, ms) }
+    };
+
+    dispose("usr2", Disposition::Default).map_err(|_| "row usr2 default")?;
+    send(NoteTarget::SelfProc, "usr2").map_err(|_| "post usr2")?;
+    if poll_ms(50) != 0 {
+        return Err("a default row's note ended a wait");
+    }
+    match notes.try_read() {
+        Ok(Some(n)) if n.name == "usr2" => {}
+        _ => return Err("a default row's note did not stay queued for the fd"),
+    }
+
+    dispose("usr1", Disposition::Caught { restart: true }).map_err(|_| "row usr1 caught")?;
+    send(NoteTarget::SelfProc, "usr1").map_err(|_| "post usr1")?;
+    if poll_ms(2000) != NEG_EINTR {
+        return Err("a caught row's note did not end poll");
+    }
+    let mut one = [0u8; 1];
+    if unsafe { t_read(rd, one.as_mut_ptr(), 1) } != NEG_EINTR {
+        return Err("a self-managing read was restarted, or was not interrupted");
+    }
+    match notes.try_read() {
+        Ok(Some(n)) if n.name == "usr1" => {}
+        _ => return Err("the unwound note was not left on the fd"),
+    }
+    if unsafe { t_write(wr, b"x".as_ptr(), 1) } != 1 || unsafe { t_read(rd, one.as_mut_ptr(), 1) } != 1 {
+        return Err("the re-issued read did not take the byte");
+    }
+
+    dispose("usr2", Disposition::Ignore).map_err(|_| "row usr2 ignore")?;
+    send(NoteTarget::SelfProc, "usr2").map_err(|_| "post usr2 ignored")?;
+    if !matches!(notes.try_read(), Ok(None)) {
+        return Err("an ignored row's note reached the fd");
+    }
+    Ok(())
 }
 
 /// #151: the re-execed image, and its whole job is to answer one question --

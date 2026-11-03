@@ -697,13 +697,14 @@ void test_notes_intr_latch_lifecycle(void) {
     TEST_ASSERT(!proc_intr_terminate_pending(p),
                 "handler-bearing Proc never arms");
 
-    // (d) Unregistering does not retro-arm; the NEXT post re-evaluates.
+    // (d) Unregistering re-reads what is queued (ARCH 8.8.3): the two interrupts
+    // posted past the handler have no handler now, and a wait must not ride them out.
     notes_set_handler(p, 0u);
-    TEST_ASSERT(!proc_intr_terminate_pending(p),
-                "unregister does not retro-arm");
+    TEST_ASSERT(proc_intr_terminate_pending(p),
+                "unregister arms from the queue");
     TEST_EXPECT_EQ(notes_post(p, "interrupt", 0u, NULL, true), 0, "post 3");
     TEST_ASSERT(proc_intr_terminate_pending(p),
-                "post after unregister re-arms");
+                "the latch stands across another post");
 
     // (e) Drain-clear: three interrupts queued; the latch survives popping
     // the first two and clears on the LAST.

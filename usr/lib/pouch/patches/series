@@ -183,3 +183,5 @@
 0067-pouch-thread-directed-kill.patch
 # 0068 (operator vote 15): SIGUSR1 and SIGUSR2 are the usr1 and usr2 notes.
 0068-pouch-usr-notes.patch
+# 0069 (operator votes 18, 19 and 20): the kernel's note table, and the calls a note can interrupt.
+0069-pouch-note-table.patch

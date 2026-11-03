@@ -14769,7 +14769,8 @@ s64 viv_kill_for_test(struct Proc *caller, int pid, int tid, u64 sig) {
 static void viv_sigaction_settled(struct Proc *p, enum viv_signote note,
                                   const struct viv_ksigaction *act) {
     if (act->handler == VIV_SIG_IGN ||
-        (act->handler == VIV_SIG_DFL && viv_signote_default_is_ignore(note))) {
+        (act->handler == VIV_SIG_DFL && viv_signote_default_is_ignore(note) &&
+         !proc_is_self_managing_notes(p))) {
         const char *nm = viv_signote_note_name(note);
         if (nm) (void)notes_discard_name(p, nm);
     }

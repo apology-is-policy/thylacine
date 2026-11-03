@@ -1078,10 +1078,9 @@ static int do_pouch_hello_smoke(void) {
     // Exercises every site of the 0007-pouch-signals boundary-line patch:
     //   - sigaction(SIGINT, &h)       sigaction.c -> __pouch_sigtab + mask adjust
     //   - raise(SIGINT)               raise.c -> SYS_postnote(pid=0=self,"interrupt",9)
-    //   - bootstrap __pouch_note_handler dispatches via __pouch_note_name_eq
+    //   - __pouch_note_handler dispatches via __pouch_note_name_eq
     //   - SYS_NOTED(NCONT) restores the saved user context, raise() returns 0
-    //   - sigaction(SIGINT, SIG_IGN)  bootstrap fast-paths to NCONT without
-    //                                  invoking the user handler
+    //   - sigaction(SIGINT, SIG_IGN)  the kernel's row drops the note at the post
     //   - sigaction(SIGALRM, ...)     -> EINVAL (unsupported signum)
     //   - deaths: children that abort(), fail an assert(), brk #1 and NULL-
     //     store read WIFSIGNALED SIGABRT/SIGABRT/SIGTRAP/SIGSEGV (gcpark-b);

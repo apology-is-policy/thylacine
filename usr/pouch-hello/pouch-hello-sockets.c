@@ -41,6 +41,7 @@
 #include <unistd.h>
 #include <string.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <poll.h>
 #include <spawn.h>
 #include <pthread.h>
@@ -733,6 +734,167 @@ static int test_round_trip(void)
     return 0;
 }
 
+/* ---------- a caught note in accept and in a byte-stream read ---------- */
+
+#define INTR_PATH "/srv/pouch-hello-intr"
+#define INTR_DEADLINE_MS 20000LL
+
+static volatile sig_atomic_t g_intr_caught;
+
+static void intr_handler(int sig)
+{
+    (void)sig;
+    g_intr_caught++;
+}
+
+static long long intr_now_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long long)ts.tv_sec * 1000LL + ts.tv_nsec / 1000000L;
+}
+
+static int intr_asleep(pid_t pid)
+{
+    char path[32], buf[512];
+    snprintf(path, sizeof path, "/proc/%d/sched", (int)pid);
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return 0;
+    ssize_t n = read(fd, buf, sizeof buf - 1);
+    close(fd);
+    if (n <= 0) return 0;
+    buf[n] = 0;
+    return strstr(buf, " SLP\n") != NULL;
+}
+
+/* Post at pid each second until it writes one byte on `from`, by the deadline. A post
+ * that beat the wait ran the handler early and left the wait standing. */
+static int intr_post_until_byte(pid_t pid, int from, long long deadline)
+{
+    int seen = 0;
+    while (intr_now_ms() < deadline && seen < 2) {
+        seen = intr_asleep(pid) ? seen + 1 : 0;
+        usleep(5000);
+    }
+    if (seen < 2) return -1;
+    for (;;) {
+        kill(pid, SIGUSR1);
+        struct pollfd pf = { from, POLLIN, 0 };
+        long long left = deadline - intr_now_ms();
+        if (left <= 0) return -1;
+        int r = poll(&pf, 1, left < 1000 ? (int)left : 1000);
+        if (r > 0) {
+            char c;
+            return read(from, &c, 1) == 1 ? 0 : -1;
+        }
+        if (r < 0 && errno != EINTR) return -1;
+    }
+}
+
+/* Both children catch the note with no SA_RESTART, see EINTR, say so, and then finish
+ * the same call, because the interrupted call must have left the service and the
+ * connection whole. A kernel that does not unwind these waits leaves the child asleep,
+ * and the driver reports it at the deadline. */
+static int test_note_intr(void)
+{
+    int s = socket(AF_UNIX, SOCK_STREAM, 0);
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    memcpy(addr.sun_path, INTR_PATH, sizeof(INTR_PATH));
+    if (s < 0 || bind(s, (struct sockaddr *)&addr, sizeof(addr)) != 0 || listen(s, 1) != 0) {
+        printf("test: note-intr: listener errno=%d\n", errno);
+        return 1;
+    }
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = intr_handler;
+    sigemptyset(&sa.sa_mask);
+    if (sigaction(SIGUSR1, &sa, NULL) != 0) {
+        printf("test: note-intr: sigaction errno=%d\n", errno);
+        return 1;
+    }
+    fflush(stdout);
+
+    /* accept: the child blocks in SYS_srv_accept. */
+    int said[2];
+    if (pipe(said) != 0) return 1;
+    pid_t kid = fork();
+    if (kid < 0) return 1;
+    if (kid == 0) {
+        int r = accept(s, NULL, NULL);
+        if (!(r == -1 && errno == EINTR && g_intr_caught >= 1)) _exit(40);
+        (void)write(said[1], "E", 1);
+        r = accept(s, NULL, NULL);
+        if (r < 0) _exit(41);
+        char b = 0;
+        _exit(read(r, &b, 1) == 1 && b == 'A' ? 0 : 42);
+    }
+    long long deadline = intr_now_ms() + INTR_DEADLINE_MS;
+    int st = 0;
+    if (intr_post_until_byte(kid, said[0], deadline) != 0) {
+        printf("test: note-intr: accept not interrupted\n");
+        kill(kid, SIGKILL);
+        waitpid(kid, &st, 0);
+        return 1;
+    }
+    int c = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (c < 0 || connect(c, (struct sockaddr *)&addr, sizeof(addr)) != 0 ||
+        write(c, "A", 1) != 1) {
+        printf("test: note-intr: connect after EINTR errno=%d\n", errno);
+        kill(kid, SIGKILL);
+        waitpid(kid, &st, 0);
+        return 1;
+    }
+    while (waitpid(kid, &st, 0) < 0 && errno == EINTR) {}
+    close(c);
+    if (!WIFEXITED(st) || WEXITSTATUS(st) != 0) {
+        printf("test: note-intr: accept child status %#x\n", (unsigned)st);
+        return 1;
+    }
+    printf("test: accept reads EINTR, and the next accept takes the connection\n");
+    fflush(stdout);
+
+    /* recv: the child blocks reading its connected socket. */
+    c = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (c < 0 || connect(c, (struct sockaddr *)&addr, sizeof(addr)) != 0) return 1;
+    int conn = accept(s, NULL, NULL);
+    if (conn < 0) return 1;
+    kid = fork();
+    if (kid < 0) return 1;
+    if (kid == 0) {
+        char b = 0;
+        ssize_t n = recv(c, &b, 1, 0);
+        if (!(n == -1 && errno == EINTR && g_intr_caught >= 1)) _exit(43);
+        (void)write(said[1], "E", 1);
+        n = recv(c, &b, 1, 0);
+        _exit(n == 1 && b == 'B' ? 0 : 44);
+    }
+    deadline = intr_now_ms() + INTR_DEADLINE_MS;
+    if (intr_post_until_byte(kid, said[0], deadline) != 0) {
+        printf("test: note-intr: recv not interrupted\n");
+        kill(kid, SIGKILL);
+        waitpid(kid, &st, 0);
+        return 1;
+    }
+    if (write(conn, "B", 1) != 1) return 1;
+    while (waitpid(kid, &st, 0) < 0 && errno == EINTR) {}
+    if (!WIFEXITED(st) || WEXITSTATUS(st) != 0) {
+        printf("test: note-intr: recv child status %#x\n", (unsigned)st);
+        return 1;
+    }
+    printf("test: recv reads EINTR, and the next recv takes the byte\n");
+
+    sa.sa_handler = SIG_DFL;
+    sigaction(SIGUSR1, &sa, NULL);
+    close(conn);
+    close(c);
+    close(s);
+    close(said[0]);
+    close(said[1]);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     /* CHILD (self-respawn, the fd_set guard leg). */
@@ -755,6 +917,8 @@ int main(int argc, char **argv)
     if (test_round_trip() != 0)          return 1;
     if (test_cross_proc_gate() != 0)     return 1;
     if (test_fdset_guard() != 0)         return 1;
+    if (test_note_intr() != 0)           return 1;
+    fflush(stdout);
 
     /* The census is what joey matches: a stale binary prints the old marker. */
     puts(POUCH_CENSUS_SOCKETS);

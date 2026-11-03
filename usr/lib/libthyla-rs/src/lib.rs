@@ -170,6 +170,7 @@ pub const T_SYS_NOTIFY: u64           = 45;
 pub const T_SYS_NOTED: u64            = 46;
 pub const T_SYS_POSTNOTE: u64         = 47;
 pub const T_SYS_POSTNOTE_TID: u64     = 138;
+pub const T_SYS_NOTE_DISPOSE: u64     = 139;
 pub const T_SYS_NOTE_MASK: u64        = 48;
 
 // P5-mount-syscall + P5-chroot-syscall + P6-16c-pivot_root: namespace
@@ -415,6 +416,9 @@ pub const T_OPATH: u32                = 0x80;
 // atomic at the server, the lockfile primitive). The other omode-taking
 // syscalls reject the bit. Mirrors SYS_WALK_OPEN_OEXCL.
 pub const T_OEXCL: u32                = 0x1000;
+// A caught note may interrupt this open's wait for a peer. SYS_OPEN only; every
+// other open refuses the bit. Mirrors SYS_WALK_OPEN_OINTR.
+pub const T_OINTR: u32                = 0x2000;
 
 // SYS_WALK_CREATE perm: low 9 bits = POSIX mode; DMDIR selects a directory.
 // Must mirror SYS_WALK_CREATE_PERM_VALID / SYS_WALK_CREATE_DMDIR in the kernel.
@@ -470,6 +474,7 @@ pub const T_S_IFCHR: u32              = 0o020000;
 // stat of a link reports the TARGET's type, so a caller that sees this asked
 // not to follow (T_ONOFOLLOW + T_OPATH, then fstat).
 pub const T_S_IFLNK: u32              = 0o120000;
+pub const T_S_IFSOCK: u32             = 0o140000;
 
 // SYS_SPAWN_FULL_ARGV bounds — must mirror SYS_SPAWN_ARGV_MAX +
 // SYS_SPAWN_ARGV_DATA_MAX in kernel/include/thylacine/syscall.h.
@@ -796,6 +801,12 @@ pub type TPathId = u32;
 // is bounded to NOTE_NAME_MAX-1 = 15 bytes; SYS_POSTNOTE rejects shorter
 // non-printable + empty names.
 pub const T_NOTE_NAME_MAX: usize  = 16;
+
+// SYS_NOTE_DISPOSE dispositions and flag (kernel syscall.h).
+pub const T_NOTE_DISP_DEFAULT: u64 = 0;
+pub const T_NOTE_DISP_IGNORE: u64  = 1;
+pub const T_NOTE_DISP_CAUGHT: u64  = 2;
+pub const T_NOTE_DISP_RESTART: u64 = 1;
 
 // NOTE_BIT_* — bit position of each supported note in the per-Thread
 // note_mask. Bit set = defer delivery of that note. Per-Thread, NOT
@@ -1734,6 +1745,32 @@ pub unsafe fn t_postnote_tid(tid: i64, name_va: *const u8, name_len: usize) -> i
         in("x1") name_va as u64,
         in("x2") name_len as u64,
         in("x8") T_SYS_POSTNOTE_TID,
+        options(nostack)
+    );
+    x0
+}
+
+// t_note_dispose -- write the calling Proc's row for one note. The first call
+// makes the table govern the Proc until its next exec: a note whose row is
+// default gets the kernel's default and never reaches the handler.
+//
+// Returns 0, or:
+// -T_E_INVAL a name with no row (a name the kernel does not know, `kill`), an
+//            unknown disposition or flag, a flag on a row that is not caught,
+//            or a caught row with neither a handler nor a notes fd to take it.
+// -T_E_NOMEM the table could not be allocated.
+//
+// Safety: `name_va` must point to `name_len` readable bytes in user-VA memory.
+#[inline(always)]
+pub unsafe fn t_note_dispose(name_va: *const u8, name_len: usize, disposition: u64, flags: u64) -> i64 {
+    let mut x0: i64 = name_va as i64;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") name_len as u64,
+        in("x2") disposition,
+        in("x3") flags,
+        in("x8") T_SYS_NOTE_DISPOSE,
         options(nostack)
     );
     x0

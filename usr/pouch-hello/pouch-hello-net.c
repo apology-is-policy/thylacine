@@ -32,8 +32,11 @@
 #include <unistd.h>
 #include <time.h>
 #include <poll.h>
+#include <signal.h>
+#include <fcntl.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
+#include <sys/wait.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
@@ -86,6 +89,182 @@ static void best_effort_live(void)
 		printf("pouch-hello-net: live recv skip (n=%ld errno=%d)\n", n, errno);
 	}
 	close(s);
+}
+
+/* ---- a caught note in accept and connect (ARCHITECTURE 8.8.3, vote 20) ---- */
+
+#define INTR_DEADLINE_MS 20000LL
+
+static volatile sig_atomic_t g_intr_caught;
+static int g_intr_ack = -1;
+
+static void intr_handler(int sig)
+{
+	(void)sig;
+	g_intr_caught++;
+	if (g_intr_ack >= 0) (void)write(g_intr_ack, "H", 1);
+}
+
+static int intr_catch(int flags)
+{
+	struct sigaction sa;
+	memset(&sa, 0, sizeof sa);
+	sa.sa_handler = intr_handler;
+	sa.sa_flags = flags;
+	sigemptyset(&sa.sa_mask);
+	return sigaction(SIGUSR1, &sa, NULL);
+}
+
+static long long intr_now_ms(void)
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (long long)ts.tv_sec * 1000LL + ts.tv_nsec / 1000000L;
+}
+
+static int intr_asleep(pid_t pid)
+{
+	char path[32], buf[512];
+	snprintf(path, sizeof path, "/proc/%d/sched", (int)pid);
+	int fd = open(path, O_RDONLY);
+	if (fd < 0) return 0;
+	ssize_t n = read(fd, buf, sizeof buf - 1);
+	close(fd);
+	if (n <= 0) return 0;
+	buf[n] = 0;
+	return strstr(buf, " SLP\n") != NULL;
+}
+
+/* Post at pid each second until a byte comes on `from`, by the deadline. */
+static int intr_post_until_byte(pid_t pid, int from, long long deadline)
+{
+	int seen = 0;
+	while (intr_now_ms() < deadline && seen < 2) {
+		seen = intr_asleep(pid) ? seen + 1 : 0;
+		usleep(5000);
+	}
+	if (seen < 2) return -1;
+	for (;;) {
+		kill(pid, SIGUSR1);
+		struct pollfd pf = { from, POLLIN, 0 };
+		long long left = deadline - intr_now_ms();
+		if (left <= 0) return -1;
+		int r = poll(&pf, 1, left < 1000 ? (int)left : 1000);
+		if (r > 0) {
+			char c;
+			return read(from, &c, 1) == 1 ? 0 : -1;
+		}
+		if (r < 0 && errno != EINTR) return -1;
+	}
+}
+
+static int intr_reap(pid_t kid, const char *what)
+{
+	int st = 0;
+	while (waitpid(kid, &st, 0) < 0 && errno == EINTR) {}
+	if (!WIFEXITED(st) || WEXITSTATUS(st) != 0) {
+		printf("pouch-hello-net: FAIL %s: child status %#x\n", what, (unsigned)st);
+		return 1;
+	}
+	return 0;
+}
+
+static int intr_fail(pid_t kid, const char *what)
+{
+	int st = 0;
+	printf("pouch-hello-net: FAIL %s (no answer by the deadline)\n", what);
+	kill(kid, SIGKILL);
+	waitpid(kid, &st, 0);
+	return 1;
+}
+
+/* The child blocks in accept's open of `listen`. mode 0 has no SA_RESTART: it sees
+ * EINTR, says so, and the next accept takes the connection, so the flushed open minted
+ * nothing and lost nothing. Mode 1 has SA_RESTART: its handler acks, and the one
+ * accept, re-issued by the kernel across the flush, takes the connection. */
+static int test_accept_note(int restart, unsigned short port)
+{
+	struct sockaddr_in sa;
+	memset(&sa, 0, sizeof(sa));
+	sa.sin_family = AF_INET;
+	sa.sin_addr.s_addr = htonl(0x7f000001u);
+	sa.sin_port = htons(port);
+	int ls = socket(AF_INET, SOCK_STREAM, 0);
+	CHECK(ls >= 0, "accept-note socket");
+	CHECK(bind(ls, (struct sockaddr *)&sa, sizeof(sa)) == 0, "accept-note bind");
+	CHECK(listen(ls, 1) == 0, "accept-note listen");
+	int said[2];
+	CHECK(pipe(said) == 0, "accept-note pipe");
+	fflush(stdout);
+	pid_t kid = fork();
+	CHECK(kid >= 0, "accept-note fork");
+	if (kid == 0) {
+		g_intr_ack = restart ? said[1] : -1;
+		if (intr_catch(restart ? SA_RESTART : 0) != 0) _exit(50);
+		int r = accept(ls, NULL, NULL);
+		if (!restart) {
+			if (!(r == -1 && errno == EINTR && g_intr_caught >= 1)) _exit(51);
+			(void)write(said[1], "E", 1);
+			r = accept(ls, NULL, NULL);
+		}
+		if (r < 0 || g_intr_caught < 1) _exit(52);
+		char b = 0;
+		_exit(read(r, &b, 1) == 1 && b == 'C' ? 0 : 53);
+	}
+	if (intr_post_until_byte(kid, said[0], intr_now_ms() + INTR_DEADLINE_MS) != 0) {
+		return intr_fail(kid, restart ? "accept-restart" : "accept-eintr");
+	}
+	int c = socket(AF_INET, SOCK_STREAM, 0);
+	if (c < 0 || connect(c, (struct sockaddr *)&sa, sizeof(sa)) != 0 || write(c, "C", 1) != 1) {
+		printf("pouch-hello-net: FAIL accept-note connect (errno=%d)\n", errno);
+		return intr_fail(kid, "accept-note connect");
+	}
+	int bad = intr_reap(kid, restart ? "accept-restart" : "accept-eintr");
+	close(c);
+	close(ls);
+	close(said[0]);
+	close(said[1]);
+	return bad;
+}
+
+/* The child's connect waits on a SYN nothing answers: 10.0.2.77 is on the link and no
+ * one holds it, so netd has it in SynSent until CONNECT_TIMEOUT_MS. A note ends the
+ * wait with EINTR. The retry must wait on that same request, and a second dial would
+ * fail at once, so EINTR again is the proof it never wrote the ctl a second time. */
+static int test_connect_note(void)
+{
+	int said[2];
+	CHECK(pipe(said) == 0, "connect-note pipe");
+	fflush(stdout);
+	pid_t kid = fork();
+	CHECK(kid >= 0, "connect-note fork");
+	if (kid == 0) {
+		struct sockaddr_in to;
+		memset(&to, 0, sizeof(to));
+		to.sin_family = AF_INET;
+		to.sin_addr.s_addr = htonl(0x0a00024du);
+		to.sin_port = htons(9);
+		int s = socket(AF_INET, SOCK_STREAM, 0);
+		if (s < 0 || intr_catch(0) != 0) _exit(60);
+		int r = connect(s, (struct sockaddr *)&to, sizeof(to));
+		if (!(r == -1 && errno == EINTR && g_intr_caught >= 1)) _exit(61);
+		(void)write(said[1], "E", 1);
+		r = connect(s, (struct sockaddr *)&to, sizeof(to));
+		if (!(r == -1 && errno == EINTR)) _exit(62);
+		(void)write(said[1], "F", 1);
+		_exit(close(s) == 0 ? 0 : 63);
+	}
+	long long deadline = intr_now_ms() + INTR_DEADLINE_MS;
+	if (intr_post_until_byte(kid, said[0], deadline) != 0) {
+		return intr_fail(kid, "connect-eintr");
+	}
+	if (intr_post_until_byte(kid, said[0], deadline) != 0) {
+		return intr_fail(kid, "connect-retry");
+	}
+	int bad = intr_reap(kid, "connect-note");
+	close(said[0]);
+	close(said[1]);
+	return bad;
 }
 
 int main(void)
@@ -285,6 +464,13 @@ int main(void)
 	printf("pouch-hello-net: control surface OK "
 	       "(socket/reject/setsockopt/bind/listen/getsockname/"
 	       "shutdown/sendto/recvfrom/poll/nonblock/close)\n");
+
+	if (test_accept_note(0, 7702) != 0) return 1;
+	printf("pouch-hello-net: accept reads EINTR, and the next accept takes the connection\n");
+	if (test_accept_note(1, 7703) != 0) return 1;
+	printf("pouch-hello-net: SA_RESTART re-issues accept across the flush\n");
+	if (test_connect_note() != 0) return 1;
+	printf("pouch-hello-net: connect reads EINTR, and the retry waits on the same request\n");
 
 	best_effort_live();
 

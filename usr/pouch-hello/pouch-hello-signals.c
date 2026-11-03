@@ -14,11 +14,10 @@
 //                                         returns; SYS_NOTED(NCONT) restores
 //                                         the saved user context; raise()
 //                                         returns 0 with the flag set.
-//   sigaction(SIGINT, SIG_IGN, NULL)   -> handler cleared.
-//   raise(SIGINT)                      -> same wire shape but the bootstrap
-//                                         dispatcher hits SIG_IGN -> NCONT
-//                                         without invoking the user handler;
-//                                         the flag must NOT change.
+//   sigaction(SIGINT, SIG_IGN, NULL)   -> the kernel's row ignores it.
+//   raise(SIGINT)                      -> same wire shape but the post drops the
+//                                         note, so the user handler does not
+//                                         run; the flag must NOT change.
 //   sigaction(SIGALRM, ...)            -> EINVAL (unsupported v1.0 signum).
 //   deaths (gcpark-b)                  -> the binary re-spawns itself to die
 //                                         by abort(), a failed assert(), a
@@ -62,6 +61,8 @@
 //   pouch-hello-signals: death term reads WIFSIGNALED SIGTERM
 //   pouch-hello-signals: death usr1 reads WIFSIGNALED SIGUSR1  (and usr2)
 //   pouch-hello-signals: kill errnos read ESRCH and EPERM
+//   pouch-hello-signals: blocked <leg> ok  (x15 legs; see test_blocked)
+//   pouch-hello-signals: a poll or select over no fds sleeps for its timeout
 //   POUCH_CENSUS_SIGNALS (pouch-census.h; joey matches it)
 //
 // Returns non-zero on any deviation — joey's content-check catches missing
@@ -76,7 +77,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <time.h>
 #include <unistd.h>
+#include <sys/select.h>
+#include <sys/time.h>
 #include <sys/wait.h>
 
 extern char **environ;
@@ -342,6 +348,386 @@ static int test_usr_apart(void) {
     return 0;
 }
 
+// ===== A blocked call and a note (ARCHITECTURE 8.8.3) =====
+//
+// Each leg is a fresh image, so it shows what that image did with nothing left over
+// from the legs above. The child holds two fixed fds: LEG_DATA, a pipe it blocks
+// reading, and LEG_STATUS, where it writes 'R' just before it blocks and its handler
+// writes 'H'. The driver watches /proc/<pid>/sched until the child's thread sleeps and
+// only then posts, so a witness reaches the wait it names. A wait a note fails to end
+// is a deadline in the driver, never a hung boot.
+#define LEG_DATA         20
+#define LEG_STATUS       21
+#define LEG_DEADLINE_MS  20000LL
+#define LEG_QUIET_MS     100
+
+static volatile sig_atomic_t g_leg_caught;
+static volatile pid_t g_leg_kid;
+
+static long long leg_now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long long)ts.tv_sec * 1000LL + ts.tv_nsec / 1000000L;
+}
+
+static void leg_handler(int sig) {
+    (void)sig;
+    g_leg_caught++;
+    char h = 'H';
+    (void)write(LEG_STATUS, &h, 1);
+}
+
+// A launcher's shape: the handler ends the child the wait is for, and the wait,
+// restarted, reaps it.
+static void leg_handler_kills(int sig) {
+    leg_handler(sig);
+    kill(g_leg_kid, SIGTERM);
+}
+
+static int leg_catch(int sig, void (*h)(int), int flags) {
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = h;
+    sa.sa_flags = flags;
+    sigemptyset(&sa.sa_mask);
+    return sigaction(sig, &sa, NULL);
+}
+
+static void leg_ready(void) {
+    char r = 'R';
+    (void)write(LEG_STATUS, &r, 1);
+}
+
+static int leg_is_asleep(pid_t pid) {
+    char path[32], buf[512];
+    snprintf(path, sizeof path, "/proc/%d/sched", (int)pid);
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return 0;
+    ssize_t n = read(fd, buf, sizeof buf - 1);
+    close(fd);
+    if (n <= 0) return 0;
+    buf[n] = 0;
+    return strstr(buf, " SLP\n") != NULL;
+}
+
+// Two readings apart, because one can catch the child paging in the call it is about
+// to make.
+static int leg_wait_asleep(pid_t pid, long long deadline) {
+    int seen = 0;
+    while (leg_now_ms() < deadline) {
+        seen = leg_is_asleep(pid) ? seen + 1 : 0;
+        if (seen >= 2) return 0;
+        usleep(5000);
+    }
+    return -1;
+}
+
+// Reap pid by the deadline. With repost, post again each second: a note that still
+// beat the wait ran its handler early and left the wait standing, and a post that
+// reaches the wait is what the leg is for. The kill on the way out keeps a failure
+// from outliving its report.
+static int leg_wait_exit(pid_t pid, int *st, int repost, long long deadline) {
+    long long next = leg_now_ms() + 1000;
+    for (;;) {
+        pid_t r = waitpid(pid, st, WNOHANG);
+        if (r == pid) return 0;
+        if (r < 0 && errno != EINTR) return -1;
+        long long now = leg_now_ms();
+        if (now >= deadline) {
+            kill(pid, SIGKILL);
+            waitpid(pid, st, 0);
+            return -1;
+        }
+        if (repost && now >= next) {
+            kill(pid, repost);
+            next = now + 1000;
+        }
+        usleep(2000);
+    }
+}
+
+static int leg_spawn_waiter(pid_t *out) {
+    char *a[] = { (char *)SELF, (char *)"die", (char *)"wait", NULL };
+    return posix_spawn(out, SELF, NULL, NULL, a, environ);
+}
+
+// CHILD: one leg. Exit 0 is the leg's own claim holding. A code above that names what
+// it saw instead.
+static int leg_child(const char *mode) {
+    char b = 0;
+    ssize_t n;
+
+    if (!strcmp(mode, "dfl-reset")) {
+        signal(SIGINT, SIG_DFL);
+        signal(SIGTERM, SIG_DFL);
+        mode = "dfl";
+    }
+    if (!strcmp(mode, "dfl-after-handler")) {
+        if (leg_catch(SIGINT, leg_handler, 0) != 0) return 60;
+        signal(SIGINT, SIG_DFL);
+        mode = "dfl";
+    }
+    if (!strcmp(mode, "exec-dfl")) {
+        if (leg_catch(SIGINT, leg_handler, 0) != 0) return 60;
+        char *a[] = { (char *)SELF, (char *)"leg", (char *)"dfl", NULL };
+        execv(SELF, a);
+        return 61;
+    }
+    if (!strcmp(mode, "dfl")) {
+        leg_ready();
+        n = read(LEG_DATA, &b, 1);
+        return 62;
+    }
+    if (!strcmp(mode, "intr-norestart")) {
+        if (leg_catch(SIGUSR1, leg_handler, 0) != 0) return 60;
+        leg_ready();
+        n = read(LEG_DATA, &b, 1);
+        return n == -1 && errno == EINTR && g_leg_caught >= 1 ? 0 : 63;
+    }
+    if (!strcmp(mode, "intr-restart")) {
+        if (leg_catch(SIGUSR1, leg_handler, SA_RESTART) != 0) return 60;
+        leg_ready();
+        n = read(LEG_DATA, &b, 1);
+        return n == 1 && b == 'D' && g_leg_caught >= 1 ? 0 : 64;
+    }
+    if (!strcmp(mode, "signal-restart")) {
+        if (signal(SIGUSR2, leg_handler) == SIG_ERR) return 60;
+        leg_ready();
+        n = read(LEG_DATA, &b, 1);
+        return n == 1 && b == 'D' && g_leg_caught >= 1 ? 0 : 65;
+    }
+    if (!strcmp(mode, "quiet")) {
+        if (leg_catch(SIGUSR1, leg_handler, 0) != 0) return 60;
+        if (signal(SIGINT, SIG_IGN) == SIG_ERR) return 60;
+        leg_ready();
+        n = read(LEG_DATA, &b, 1);
+        return n == 1 && b == 'D' && g_leg_caught == 0 ? 0 : 66;
+    }
+    if (!strcmp(mode, "pause")) {
+        if (leg_catch(SIGUSR1, leg_handler, 0) != 0) return 60;
+        leg_ready();
+        int rc = pause();
+        return rc == -1 && errno == EINTR && g_leg_caught >= 1 ? 0 : 67;
+    }
+    if (!strcmp(mode, "nanosleep")) {
+        if (leg_catch(SIGUSR1, leg_handler, 0) != 0) return 60;
+        leg_ready();
+        struct timespec req = { 60, 0 }, rem = { 0, 0 };
+        int rc = nanosleep(&req, &rem);
+        return rc == -1 && errno == EINTR && g_leg_caught >= 1 &&
+               rem.tv_sec > 0 && rem.tv_sec <= 60 ? 0 : 68;
+    }
+    if (!strcmp(mode, "wait-norestart")) {
+        pid_t kid;
+        int st = 0;
+        if (leg_catch(SIGUSR1, leg_handler, 0) != 0) return 60;
+        if (leg_spawn_waiter(&kid) != 0) return 60;
+        leg_ready();
+        int rc = waitpid(kid, &st, 0);
+        int e = errno;
+        kill(kid, SIGKILL);
+        pid_t reaped = waitpid(kid, &st, 0);
+        return rc == -1 && e == EINTR && g_leg_caught >= 1 && reaped == kid ? 0 : 69;
+    }
+    if (!strcmp(mode, "wait-restart")) {
+        pid_t kid;
+        int st = 0;
+        if (leg_spawn_waiter(&kid) != 0) return 60;
+        g_leg_kid = kid;
+        if (leg_catch(SIGUSR1, leg_handler_kills, SA_RESTART) != 0) return 60;
+        leg_ready();
+        int rc = waitpid(kid, &st, 0);
+        return rc == kid && WIFSIGNALED(st) && WTERMSIG(st) == SIGTERM &&
+               g_leg_caught >= 1 ? 0 : 70;
+    }
+    if (!strcmp(mode, "fork-read")) {
+        int p[2];
+        if (leg_catch(SIGUSR1, leg_handler, 0) != 0) return 60;
+        if (pipe(p) != 0) return 60;
+        pid_t kid = fork();
+        if (kid < 0) return 60;
+        if (kid == 0) {
+            close(p[0]);
+            char r = 'R';
+            (void)write(p[1], &r, 1);
+            n = read(LEG_DATA, &b, 1);
+            _exit(n == -1 && errno == EINTR && g_leg_caught >= 1 ? 0 : 71);
+        }
+        close(p[1]);
+        char r = 0;
+        if (read(p[0], &r, 1) != 1) return 72;
+        long long deadline = leg_now_ms() + LEG_DEADLINE_MS;
+        int st = 0;
+        if (leg_wait_asleep(kid, deadline) != 0) {
+            kill(kid, SIGKILL);
+            waitpid(kid, &st, 0);
+            return 73;
+        }
+        kill(kid, SIGUSR1);
+        if (leg_wait_exit(kid, &st, SIGUSR1, deadline) != 0) return 74;
+        return WIFEXITED(st) && WEXITSTATUS(st) == 0 ? 0 : 75;
+    }
+    return 59;
+}
+
+// One byte from the status pipe equal to `want`, by the deadline. 'H' can precede
+// nothing else that matters, so anything else read on the way is passed over.
+static int leg_read_status(int fd, char want, long long deadline) {
+    for (;;) {
+        long long left = deadline - leg_now_ms();
+        if (left <= 0) return -1;
+        struct pollfd pf = { fd, POLLIN, 0 };
+        int r = poll(&pf, 1, (int)left);
+        if (r < 0 && errno == EINTR) continue;
+        if (r <= 0) return -1;
+        char c = 0;
+        if (read(fd, &c, 1) != 1) return -1;
+        if (c == want) return 0;
+    }
+}
+
+struct blocked_leg {
+    const char *mode;
+    int sig;     // the note the driver posts once the child sleeps; 0 for none
+    int also;    // a second note the row must also keep from the wait
+    int repost;  // keep posting until the child exits
+    int ack;     // the handler must ack before any data goes
+    int data;    // write the byte that ends the read
+    int dies;    // the signal the child must die of; 0 means it must exit 0
+};
+
+static int run_blocked_leg(const struct blocked_leg *l) {
+    int data[2], status[2];
+    if (pipe(data) != 0 || pipe(status) != 0) {
+        printf("pouch-hello-signals: blocked %s: pipe errno=%d\n", l->mode, errno);
+        return -1;
+    }
+    posix_spawn_file_actions_t fa;
+    posix_spawn_file_actions_init(&fa);
+    posix_spawn_file_actions_adddup2(&fa, data[0], LEG_DATA);
+    posix_spawn_file_actions_adddup2(&fa, status[1], LEG_STATUS);
+    posix_spawn_file_actions_addclose(&fa, data[0]);
+    posix_spawn_file_actions_addclose(&fa, data[1]);
+    posix_spawn_file_actions_addclose(&fa, status[0]);
+    posix_spawn_file_actions_addclose(&fa, status[1]);
+    char *cargv[] = { (char *)SELF, (char *)"leg", (char *)l->mode, NULL };
+    pid_t pid;
+    int sp = posix_spawn(&pid, SELF, &fa, NULL, cargv, environ);
+    posix_spawn_file_actions_destroy(&fa);
+    close(data[0]);
+    close(status[1]);
+    int rc = -1;
+    int st = 0;
+    if (sp != 0) {
+        printf("pouch-hello-signals: blocked %s: spawn=%d\n", l->mode, sp);
+        goto out;
+    }
+
+    long long deadline = leg_now_ms() + LEG_DEADLINE_MS;
+    const char *why = NULL;
+    if (leg_read_status(status[0], 'R', deadline) != 0) {
+        why = "never reached its wait";
+    } else if (leg_wait_asleep(pid, deadline) != 0) {
+        why = "never slept";
+    } else {
+        if (l->sig) kill(pid, l->sig);
+        if (l->also) kill(pid, l->also);
+        if (l->ack && leg_read_status(status[0], 'H', deadline) != 0) {
+            why = "handler did not run during the wait";
+        } else {
+            if (!l->ack && !l->repost && !l->dies) usleep(LEG_QUIET_MS * 1000);
+            if (l->data) {
+                char d = 'D';
+                (void)write(data[1], &d, 1);
+            }
+        }
+    }
+    if (why) {
+        printf("pouch-hello-signals: blocked %s: %s\n", l->mode, why);
+        kill(pid, SIGKILL);
+        waitpid(pid, &st, 0);
+        goto out;
+    }
+    if (leg_wait_exit(pid, &st, l->repost ? l->sig : 0, deadline) != 0) {
+        printf("pouch-hello-signals: blocked %s: alive at the deadline\n", l->mode);
+        goto out;
+    }
+    int good = l->dies ? WIFSIGNALED(st) && WTERMSIG(st) == l->dies
+                       : WIFEXITED(st) && WEXITSTATUS(st) == 0;
+    if (!good) {
+        printf("pouch-hello-signals: blocked %s: status %#x (want %s %d)\n",
+               l->mode, (unsigned)st, l->dies ? "signal" : "exit", l->dies);
+        goto out;
+    }
+    printf("pouch-hello-signals: blocked %s ok\n", l->mode);
+    rc = 0;
+out:
+    close(data[1]);
+    close(status[0]);
+    return rc;
+}
+
+// The positive and the negative halves are one variable apart: intr-norestart and
+// quiet are the same child, and only the note's row differs. Every leg runs and
+// reports, so one regression cannot hide another.
+static int test_blocked(void) {
+    static const struct blocked_leg legs[] = {
+        // A program with no handler dies in its wait: nothing registered at startup.
+        { .mode = "dfl",               .sig = SIGINT,  .dies = SIGINT  },
+        { .mode = "dfl",               .sig = SIGTERM, .dies = SIGTERM },
+        { .mode = "dfl",               .sig = SIGUSR1, .dies = SIGUSR1 },
+        // Resetting a signal that never had a row writes none, and dies the same.
+        { .mode = "dfl-reset",         .sig = SIGINT,  .dies = SIGINT  },
+        // A dispatcher is registered, and this note's row says default.
+        { .mode = "dfl-after-handler", .sig = SIGINT,  .dies = SIGINT  },
+        // Exec drops the table and the handler it held.
+        { .mode = "exec-dfl",          .sig = SIGINT,  .dies = SIGINT  },
+        // A caught note unwinds the wait.
+        { .mode = "intr-norestart",    .sig = SIGUSR1, .repost = 1 },
+        // And the kernel re-issues it for SA_RESTART. The handler acks before the
+        // data goes, so the handler ran during the wait and not after it.
+        { .mode = "intr-restart",      .sig = SIGUSR1, .ack = 1, .data = 1 },
+        { .mode = "signal-restart",    .sig = SIGUSR2, .ack = 1, .data = 1 },
+        // A default-ignored note and an ignored one stay out of the wait.
+        { .mode = "quiet",             .sig = SIGCHLD, .also = SIGINT, .data = 1 },
+        { .mode = "pause",             .sig = SIGUSR1, .repost = 1 },
+        { .mode = "nanosleep",         .sig = SIGUSR1, .repost = 1 },
+        { .mode = "wait-norestart",    .sig = SIGUSR1, .repost = 1 },
+        { .mode = "wait-restart",      .sig = SIGUSR1 },
+        // The table and the handler cross a fork.
+        { .mode = "fork-read" },
+    };
+    int bad = 0;
+    for (size_t i = 0; i < sizeof legs / sizeof legs[0]; i++) {
+        if (run_blocked_leg(&legs[i]) != 0) bad = 1;
+        fflush(stdout);
+    }
+    return bad ? -1 : 0;
+}
+
+// The kernel sleeps a poll over no fds. These answered ENOSYS, and pause() sits on
+// the same sleep.
+static int test_empty_poll(void) {
+    const long long want = 30;
+    long long t0 = leg_now_ms();
+    int r1 = poll(NULL, 0, 40);
+    long long t1 = leg_now_ms();
+    struct pollfd neg = { -1, POLLIN, 0 };
+    int r2 = poll(&neg, 1, 40);
+    long long t2 = leg_now_ms();
+    struct timeval tv = { 0, 40000 };
+    int r3 = select(0, NULL, NULL, NULL, &tv);
+    long long t3 = leg_now_ms();
+    if (r1 != 0 || r2 != 0 || r3 != 0 ||
+        t1 - t0 < want || t2 - t1 < want || t3 - t2 < want) {
+        printf("pouch-hello-signals: empty poll: rc %d %d %d after %lld %lld %lld ms errno=%d\n",
+               r1, r2, r3, t1 - t0, t2 - t1, t3 - t2, errno);
+        return -1;
+    }
+    printf("pouch-hello-signals: a poll or select over no fds sleeps for its timeout\n");
+    return 0;
+}
+
 // Task #96 sentinel buffers. 16-byte aligned for STP/LDP-Q.
 static unsigned char g_fp_sent[512] __attribute__((aligned(16)));
 static unsigned char g_fp_seen[512] __attribute__((aligned(16)));
@@ -349,6 +735,7 @@ static unsigned char g_fp_seen[512] __attribute__((aligned(16)));
 int main(int argc, char **argv) {
     if (argc >= 3 && !strcmp(argv[1], "die")) return die(argv[2]);
     if (argc >= 3 && !strcmp(argv[1], "kill-parent")) return kill_parent(argv[2]);
+    if (argc >= 3 && !strcmp(argv[1], "leg")) return leg_child(argv[2]);
 
     printf("pouch-hello-signals: install handler\n");
     fflush(stdout);
@@ -490,9 +877,9 @@ int main(int argc, char **argv) {
         fflush(stdout);
         return 6;
     }
-    // The bootstrap dispatcher sees SIG_IGN and calls SYS_NOTED(NCONT)
-    // without invoking the user handler; g_handler_count must stay at 2
-    // (one from the raise above, one from the #96 FP leg's self-post).
+    // The kernel's row ignores it, so the handler does not run;
+    // g_handler_count must stay at 2 (one from the raise above, one from the
+    // #96 FP leg's self-post).
     if (g_handler_count != 2) {
         printf("pouch-hello-signals: SIG_IGN failed to suppress (count=%d, expected 2)\n",
                (int)g_handler_count);
@@ -539,6 +926,11 @@ int main(int argc, char **argv) {
                      test_kill_death(SIGUSR2, "usr2", "SIGUSR2");
     int errnos = test_errnos();
     fflush(stdout);
+    int blocked = test_blocked();
+    int empty = test_empty_poll();
+    fflush(stdout);
+    if (blocked != 0) return 19;
+    if (empty != 0) return 20;
     if (deaths != 0) return 15;
     if (term_death != 0) return 14;
     if (usr_death != 0) return 18;

@@ -1,0 +1,621 @@
+pouch boundary-line patch 0069 - the kernel's note table, and calls a note can interrupt.
+
+Operator votes 18, 19 and 20 (2026-11-03); ARCHITECTURE 8.8.3 and POUCH-DESIGN 6.4.
+
+Pouch used to register its dispatcher from a constructor, for every program. To the
+kernel that read as "caught" for every note, so a SIG_DFL SIGINT or SIGTERM armed no
+terminate latch: a program blocked in a wait did not die until the wait ended, and ^Z did
+nothing. Nothing unwound a wait for a real handler either.
+
+  src/signal/_pouch_signal.c    The constructor registers nothing; it keeps the SIGPIPE
+      default mask. A program with no handler has none, and the kernel takes every note's
+      default itself, in a wait as well as at the tail.
+  src/signal/sigaction.c        Every disposition writes the note's row through
+      SYS_note_dispose. A real handler registers the dispatcher first, so until its row
+      lands every note reaches the dispatcher, which reads the table. SIG_DFL with no row
+      ever written writes nothing. A refused row puts the old table entry back and answers
+      the errno. The comment saying SA_RESTART needed nothing was false: musl re-issues no
+      call, and the row's flag is what restarts one, in the kernel.
+  src/unistd/pause.c            pause() sits on SYS_poll over no fds. SYS_ppoll is an
+      ENOSYS sentinel, so pause returned at once.
+  src/select/poll.c, select.c   A poll or select over no fds sleeps for the timeout
+      instead of answering ENOSYS; the kernel has that sleep now.
+  src/process/_pouch_process.c  waitpid surfaces EINTR. Every failure read as ECHILD.
+  src/network/_pouch_socket.c, accept.c, connect.c  The listen open and the data open set
+      SYS_WALK_OPEN_OINTR and answer EINTR. SYS_srv_accept answers EINTR. A connect that
+      a note unwound leaves the slot in the new POUCH_SOCK_CONNECTING: the request stands
+      (POSIX), so a retry waits on the data open and never dials again, and I/O on such a
+      slot waits for the connection first, which is what poll-then-use after an interrupted
+      connect needs. pouch_net_open_conn_file now reports the open's errno.
+  arch/aarch64/bits/syscall.h.in  __NR_note_dispose 139. After a musl re-vendor, extend
+      0001's awk filter: m["note_dispose"]="139";
+
+Witnesses: pouch-hello-signals `dfl-read-dies`, `dfl-term-dies`, `intr-noresart`,
+`intr-restart`, `chld-dfl-quiet`, `ign-quiet`, `fork-handler`, `pause-waits`,
+`nanosleep-intr`, `accept-intr`, `recv-intr`, `empty-poll-sleeps`.
+
+--- a/arch/aarch64/bits/syscall.h.in
++++ b/arch/aarch64/bits/syscall.h.in
+@@ -380,7 +380,8 @@
+  * 13b). The pouch-side POSIX signal layer maps onto Thylacine's kernel
+  * notes substrate per POUCH-DESIGN.md section 6.4 (the fd-first novel
+  * angle landed at sub-chunk 13a, ARCH section 7.6 + NOVEL.md section 3.1):
+- *   sigaction()             pouch sigtab[NSIG] + SYS_notify(handler_va)
++ *   sigaction()             pouch sigtab[NSIG] + SYS_notify(handler_va) +
++ *                           SYS_note_dispose(name, disposition, flags)
+  *   raise() / pthread_kill  SYS_postnote_tid(tid, name, name_len)
+  *   kill()                  SYS_postnote(target_pid, name, name_len)
+  *   sigprocmask() /         SYS_note_mask(new_mask, &old_mask)
+@@ -477,3 +478,10 @@
+  *   m["postnote_tid"]="138";
+  */
+ #define __NR_postnote_tid 138
++
++/* Item 11c (operator vote 18): write the Proc's row for one note. Number per
++ * kernel/include/thylacine/syscall.h. After a musl re-vendor, extend 0001's awk
++ * filter:
++ *   m["note_dispose"]="139";
++ */
++#define __NR_note_dispose 139
+--- a/src/internal/_pouch_signal.h
++++ b/src/internal/_pouch_signal.h
+@@ -23,13 +23,11 @@
+  * (whole-Proc terminate -- the POSIX default); winch/cont NCONT
+  * (ignore -- POSIX; the cont RESUME already happened kernel-side);
+  * susp NDFLT -- the kernel job-stops the Proc and resumes it at the
+- * interrupted instruction on SIGCONT. This was NCONT-ignore and a
+- * DOCUMENTED SEAM until Thylacine #15 gave each note its own default
+- * action: pouch's always-registered bootstrap makes every pouch Proc
+- * "caught" to the pre-delivery stop gate, so the disposition is
+- * decided HERE, and the old NDFLT arm terminated unconditionally --
+- * ^Z was a choice between dying and nothing. The seam is closed; the
+- * ignore would now be the bug.
++ * interrupted instruction on SIGCONT. A signal left at SIG_DFL has no row
++ * and reaches no handler: the kernel takes the note's default itself, while
++ * a program is blocked in a wait as well as at the tail. The dispatcher's
++ * arms for these are the short window of a first sigaction, between
++ * SYS_NOTIFY and its SYS_NOTE_DISPOSE, when every note still comes here.
+  *
+  * Per-thread shadow + per-Proc sigtab: the kernel's note_mask is per-
+  * Thread (POSIX pthread_sigmask semantics); pouch keeps a __thread shadow
+@@ -37,13 +35,23 @@
+  * table is per-Proc (POSIX sigaction semantics); pouch keeps it in a
+  * static array indexed by signum.
+  *
+- * Bootstrap handler: at constructor time we register __pouch_note_handler
+- * via SYS_NOTIFY. The kernel calls it Plan-9-style with x0 = pointer to
+- * 16-byte note name on the user stack + x1 = note arg. We dispatch by
+- * name to the user-registered sigaction handler and end with
+- * SYS_NOTED(NCONT) — the synchronous-handler ABI is hidden from POSIX
+- * source. POSIX programs see standard sigaction + raise + kill.
++ * The dispatcher: the first sigaction that installs a real handler
++ * registers __pouch_note_handler via SYS_NOTIFY, and every disposition
++ * writes the note's row with SYS_NOTE_DISPOSE (ARCHITECTURE 8.8.3). The
++ * first row makes the kernel's table govern the Proc until its next exec,
++ * so only a caught note reaches the dispatcher and only a caught note
++ * unwinds a blocking call. A program that never installs a handler has no
++ * handler at all and the kernel gives it every note's default. The kernel
++ * calls the dispatcher Plan-9-style with x0 = pointer to 16-byte note name
++ * on the user stack + x1 = note arg. We dispatch by name to the
++ * user-registered sigaction handler and end with SYS_NOTED(NCONT) — the
++ * synchronous-handler ABI is hidden from POSIX source. POSIX programs see
++ * standard sigaction + raise + kill.
+  *
++ * SA_RESTART is the row's flag, and the kernel honours it: at the note's
++ * delivery it re-issues a call on the signal(7) list instead of returning
++ * EINTR. Nothing in pouch or musl re-issues a call.
++ *
+  * SIGPIPE default-mask at startup (POUCH-DESIGN section 6.4 [RESOLVED
+  * 6.4]): the constructor sets the main thread's note_mask to
+  * NOTE_BIT_PIPE so a write-to-closed-pipe returns EPIPE without
+@@ -53,9 +61,6 @@
+  *
+  * v1.0 limitations documented in docs/reference/83-pouch-signals.md
+  * (created at sub-chunk 13b):
+- *   - SIGINT and SIGTERM share "interrupt" — last-registered-wins for
+- *     mixed sigaction calls. A program registering BOTH gets the SIGINT
+- *     handler preferred (defense-in-depth in the bootstrap dispatcher).
+  *   - sigsetjmp/siglongjmp do NOT preserve signal masks (the
+  *     sigsetjmp_tail.c path still hits the SYS_rt_sigprocmask = 0xFFFF
+  *     sentinel → -ENOSYS). v1.x extension.
+@@ -110,6 +115,12 @@
+ #define POUCH_SYS_NOTED_NCONT  0u   /* restore saved user context + resume */
+ #define POUCH_SYS_NOTED_NDFLT  1u   /* take the note's default action (exits) */
+ 
++/* SYS_NOTE_DISPOSE dispositions and flag (kernel syscall.h). */
++#define POUCH_NOTE_DISP_DEFAULT  0u
++#define POUCH_NOTE_DISP_IGNORE   1u
++#define POUCH_NOTE_DISP_CAUGHT   2u
++#define POUCH_NOTE_DISP_RESTART  1u
++
+ /* Kernel pushes exactly NOTE_NAME_MAX (= 16) bytes of the note name onto
+  * the user stack. POSIX programs never reach into this directly; the
+  * bootstrap handler does the bounded compare via __pouch_note_name_eq. */
+@@ -140,8 +151,9 @@
+  * to anyone else it is refused. */
+ hidden const char *__pouch_self_snare(int sig);
+ 
+-/* The bootstrap async-handler. Registered with SYS_NOTIFY at startup;
+- * the kernel calls this at EL0-return tail when a note is dispatched.
++/* The async dispatcher. Registered with SYS_NOTIFY by the first sigaction
++ * that installs a real handler; the kernel calls this at EL0-return tail
++ * when a caught note is dispatched.
+  * Plan-9-style ABI: x0 = pointer to 16-byte note name on user stack;
+  * x1 = note arg. NEVER returns normally — ends with SYS_NOTED. */
+ hidden void __pouch_note_handler(const char *name, unsigned int arg);
+--- a/src/internal/_pouch_socket.h
++++ b/src/internal/_pouch_socket.h
+@@ -73,6 +73,9 @@
+ #define POUCH_SRV_OREAD      0u
+ #define POUCH_SRV_ORDWR      2u
+ #define POUCH_SRV_OPATH      0x80u
++/* SYS_WALK_OPEN_OINTR: a caught note may unwind this open, which waits for a
++ * peer. Set only on accept's listen open and connect's data open. */
++#define POUCH_OPEN_OINTR     0x2000u
+ #define POUCH_SRV_DMSRVBYTE  0x02000000u
+ #define POUCH_SRV_DMSRVBULK  0x01000000u /* CF-3 B: the bulk ring class */
+ /* The SO_SNDBUF/SO_RCVBUF threshold at or above which a pre-bind
+@@ -100,6 +103,10 @@
+                                  /*   a KObj_Srv listener handle            */
+     POUCH_SOCK_CONNECTED,        /* connect() done; kernel_fd is a KObj_Srv */
+                                  /*   client-side SrvConn handle            */
++    POUCH_SOCK_CONNECTING,       /* AF_INET: netd was told to connect, and  */
++                                 /*   a note unwound the wait for the data  */
++                                 /*   open; kernel_fd is -1. The request    */
++                                 /*   stands, so a retry never dials again. */
+ };
+ 
+ struct pouch_sock_slot {
+@@ -151,12 +158,21 @@
+  * For a TAGGED fd: returns the kernel handle if the slot is in
+  * LISTENING or CONNECTED state. Returns -1 if the slot is FRESH (no
+  * kernel handle yet) or vacant. The caller is expected to surface
+- * EBADF / ENOTCONN on -1 per POSIX.
++ * EBADF / ENOTCONN on -1 per POSIX. A CONNECTING slot first waits for its
++ * connection, because a program told poll() said it is writable and now
++ * expects to use it; -1 then has that wait's errno.
+  *
+  * No lock held across the read; the kernel_fd value is captured.
+  */
+ int pouch_sock_kernel_fd(int fd);
+ 
++/* pouch_sock_connect_wait -- wait for the connection a CONNECTING slot asked
++ * netd for, by opening its data file. Returns the data fd, now the slot's I/O
++ * fd, in CONNECTED. Returns -1 with errno = EINTR and the slot still CONNECTING
++ * if a caught note unwound the wait, or errno = ECONNREFUSED and the slot FRESH
++ * if the connection failed. */
++int pouch_sock_connect_wait(struct pouch_sock_slot *slot);
++
+ /* pouch_sock_poll_fd -- fd to the slot's POLL TARGET (net-6b). Distinct
+  * from pouch_sock_kernel_fd (the I/O fd): a poll()/select() over an
+  * AF_INET socket must target the QTPOLL-marked /net/<proto>/N/ready
+@@ -215,8 +231,9 @@
+ int pouch_net_clone(int proto, int *out_n);
+ 
+ /* Open /net/<proto>/<n>/<file> ("data" | "listen") with omode. Returns the
+- * fd or -1 (errno is left for the caller to set to the POSIX-appropriate
+- * value, since the file's meaning -- data vs listen -- decides it). */
++ * fd or -1 with errno the open's error. EINTR means a note unwound it; any
++ * other value a caller replaces with the POSIX-appropriate one, since the
++ * file's meaning -- data vs listen -- decides it. */
+ int pouch_net_open_conn_file(int proto, int n, const char *file, int omode);
+ 
+ /* Read the ASCII connection number from an already-open fd (the accept-side
+--- a/src/network/_pouch_socket.c
++++ b/src/network/_pouch_socket.c
+@@ -94,14 +94,55 @@
+      * (or vice versa). User-facing minor weirdness, no data harm. */
+     LOCK(g_lock);
+     int in_use = g_table[i].in_use;
++    int connecting = in_use && g_table[i].state == POUCH_SOCK_CONNECTING;
+     int k      = -1;
+     if (in_use && g_table[i].state != POUCH_SOCK_FRESH) {
+         k = g_table[i].kernel_fd;
+     }
+     UNLOCK(g_lock);
+ 
++    if (connecting) return pouch_sock_connect_wait(&g_table[i]);
+     if (k < 0) errno = in_use ? ENOTCONN : EBADF;
+     return k;
++}
++
++int pouch_sock_connect_wait(struct pouch_sock_slot *slot)
++{
++    int n = slot->conn_n;
++    int d = pouch_net_open_conn_file(slot->net_proto, n, "data",
++                                     (int)(POUCH_SRV_ORDWR | POUCH_OPEN_OINTR));
++    if (d < 0) {
++        if (errno == EINTR) return -1;
++        LOCK(g_lock);
++        if (slot->in_use && slot->conn_n == n &&
++            slot->state == POUCH_SOCK_CONNECTING) {
++            slot->state = POUCH_SOCK_FRESH;
++        }
++        UNLOCK(g_lock);
++        errno = ECONNREFUSED;
++        return -1;
++    }
++
++    /* A peer thread can be waiting on the same slot, and the socket can close
++     * while no lock is held. Publish under the lock; the loser's fd goes. */
++    LOCK(g_lock);
++    if (!slot->in_use || slot->conn_n != n) {
++        UNLOCK(g_lock);
++        __syscall(SYS_close, d);
++        errno = EBADF;
++        return -1;
++    }
++    if (slot->state != POUCH_SOCK_CONNECTING) {
++        int k = slot->kernel_fd;
++        UNLOCK(g_lock);
++        __syscall(SYS_close, d);
++        if (k < 0) errno = ENOTCONN;
++        return k;
++    }
++    slot->kernel_fd = d;
++    slot->state     = POUCH_SOCK_CONNECTED;
++    UNLOCK(g_lock);
++    return d;
+ }
+ 
+ int pouch_sock_poll_fd(int fd)
+@@ -321,7 +362,10 @@
+     int  pos = net_conn_path(path, (int)sizeof path, proto, n, file);
+     if (pos < 0) { errno = EINVAL; return -1; }
+     long fd = __syscall(SYS_open, (long)-1, path, (size_t)pos, (long)omode);
+-    if (fd < 0) return -1;   /* caller sets the POSIX errno (data vs listen) */
++    if (fd < 0) {
++        errno = (int)-fd;
++        return -1;
++    }
+     return (int)fd;
+ }
+ 
+--- a/src/network/accept.c
++++ b/src/network/accept.c
+@@ -39,10 +39,14 @@
+ 			errno = EINVAL;
+ 			return -1;
+ 		}
++		/* The one open here that waits for a peer. A note unwinding it loses
++		 * nothing: netd has minted no connection for a flushed accept. Past
++		 * this point a connection exists, so nothing else may unwind. */
+ 		int lfd = pouch_net_open_conn_file(slot->net_proto, slot->conn_n,
+-		                                   "listen", (int)POUCH_SRV_ORDWR);
++		                                   "listen",
++		                                   (int)(POUCH_SRV_ORDWR | POUCH_OPEN_OINTR));
+ 		if (lfd < 0) {
+-			errno = ECONNABORTED;
++			if (errno != EINTR) errno = ECONNABORTED;
+ 			return -1;
+ 		}
+ 		int m;
+@@ -104,7 +108,7 @@
+ 
+ 	long r = __syscall(SYS_srv_accept, slot->kernel_fd);
+ 	if (r < 0) {
+-		errno = ECONNABORTED;
++		errno = r == -EINTR ? EINTR : ECONNABORTED;
+ 		return -1;
+ 	}
+ 
+--- a/src/network/connect.c
++++ b/src/network/connect.c
+@@ -122,12 +122,19 @@
+ 
+ 	/* net-5: AF_INET active open. Write "connect a.b.c.d!port" to the held
+ 	 * ctl fd, then open the data stream (the open blocks to ESTABLISHED for
+-	 * TCP -- NET-DESIGN 4). The data fd becomes the slot's I/O target. */
++	 * TCP -- NET-DESIGN 4). The data fd becomes the slot's I/O target.
++	 *
++	 * A note can unwind that open. POSIX then says the request stands and
++	 * completes asynchronously, so a retry waits for it and never writes the
++	 * ctl again, as a blocking retry does on Linux. */
+ 	if (slot->family == POUCH_SOCK_FAM_INET) {
+ 		if (slot->state == POUCH_SOCK_CONNECTED) {
+ 			errno = EISCONN;
+ 			return -1;
+ 		}
++		if (slot->state == POUCH_SOCK_CONNECTING) {
++			return pouch_sock_connect_wait(slot) < 0 ? -1 : 0;
++		}
+ 		if (slot->state != POUCH_SOCK_FRESH) {
+ 			errno = EINVAL;
+ 			return -1;
+@@ -162,15 +169,8 @@
+ 			errno = ECONNREFUSED;
+ 			return -1;
+ 		}
+-		int d = pouch_net_open_conn_file(slot->net_proto, slot->conn_n,
+-		                                 "data", (int)POUCH_SRV_ORDWR);
+-		if (d < 0) {
+-			errno = ECONNREFUSED;
+-			return -1;
+-		}
+-		slot->kernel_fd = d;
+-		slot->state     = POUCH_SOCK_CONNECTED;
+-		return 0;
++		slot->state = POUCH_SOCK_CONNECTING;
++		return pouch_sock_connect_wait(slot) < 0 ? -1 : 0;
+ 	}
+ 
+ 	if (slot->state != POUCH_SOCK_FRESH) {
+--- a/src/process/_pouch_process.c
++++ b/src/process/_pouch_process.c
+@@ -43,8 +43,9 @@
+  *  verbatim (docs/ERRORS.md "The wait status").
+  *
+  * Returns the reaped pid (>0), 0 for WNOHANG-with-no-ready-child, or -1 with
+- * errno = ECHILD (the kernel returns a flat -1; ECHILD is the POSIX errno for
+- * "no matching child", the reachable case here). */
++ * errno = EINTR when a caught note unwound the wait, else errno = ECHILD (the
++ * kernel returns a flat -1; ECHILD is the POSIX errno for "no matching child",
++ * the reachable case here). */
+ hidden int __pouch_wait(int pid, int *status, int options)
+ {
+ 	unsigned long tf = POUCH_WAIT_PACKED;
+@@ -55,7 +56,7 @@
+ 	int word = 0;
+ 	long r = __syscall3(SYS_thyla_wait_pid, pid, (long)tf, (long)&word);
+ 	if (r < 0) {
+-		errno = ECHILD;
++		errno = r == -EINTR ? EINTR : ECHILD;
+ 		return -1;
+ 	}
+ 	if (r == 0) return 0;   /* WNOHANG: no reapable child; *status untouched */
+--- a/src/select/poll.c
++++ b/src/select/poll.c
+@@ -77,16 +77,9 @@
+ 
+ int poll(struct pollfd *fds, nfds_t n, int timeout)
+ {
+-	/* Zero fds: the kernel rejects nfds == 0, so we cannot pass it through.
+-	 * A nonblocking probe over no fds is immediately "nothing ready" (0); a
+-	 * timed or indefinite wait over no fds has no zero-fd kernel sleep surface
+-	 * at v1.0 (ENOSYS, matching 0005 select()). RND2-F1. */
++	/* Zero fds: the kernel sleeps for the timeout. */
+ 	if (n == 0) {
+-		if (timeout == 0) {
+-			return 0;
+-		}
+-		errno = ENOSYS;
+-		return -1;
++		return syscall_cp(SYS_poll, 0, 0, timeout);
+ 	}
+ 	if (!fds) {
+ 		errno = EFAULT;
+@@ -159,14 +152,8 @@
+ 	}
+ 
+ 	if (nk == 0) {
+-		/* Every entry was a POSIX-ignored negative fd. Same as the n == 0
+-		 * case above: the kernel rejects nfds == 0, so do NOT pass through
+-		 * (RND2-F1). Nonblocking -> 0; timed/indefinite -> ENOSYS. */
+-		if (timeout == 0) {
+-			return 0;
+-		}
+-		errno = ENOSYS;
+-		return -1;
++		/* Every entry was a POSIX-ignored negative fd: the n == 0 case. */
++		return syscall_cp(SYS_poll, 0, 0, timeout);
+ 	}
+ 
+ 	int r = syscall_cp(SYS_poll, kfds, nk, timeout);
+--- a/src/select/select.c
++++ b/src/select/select.c
+@@ -11,10 +11,8 @@
+  *     (= 64; PROC_HANDLE_MAX, the kernel's SYS_POLL ceiling). An fd
+  *     >= POUCH_POLL_NFDS_MAX set in any input set returns -EBADF —
+  *     the handle would be unreachable through any Thylacine syscall.
+- *   - n == 0 (or no fds set in any input set) with a NULL/positive tv
+- *     returns -ENOSYS at v1.0 — Thylacine has no sleep syscall yet, so
+- *     the "portable nanosleep via select" pattern is unsupported. n == 0
+- *     with tv == {0,0} returns 0 immediately (POSIX-correct).
++ *   - n == 0 (or no fds set in any input set) sleeps for tv, the "portable
++ *     nanosleep via select" pattern: SYS_POLL over no fds is that sleep.
+  *   - On return the output sets are CLEARED in-place and only fds whose
+  *     revents survived the events-mask gate (POLLIN → rfds, POLLOUT →
+  *     wfds, POLLPRI → efds; POLLERR/POLLHUP forward to whichever sets
+@@ -81,10 +79,8 @@
+ 
+ 	if (npfd == 0) {
+ 		/* POSIX: select(n, NULL, NULL, NULL, tv) sleeps for tv then
+-		 * returns 0. v1.0: zero-timeout returns 0 immediately; any
+-		 * positive timeout returns -ENOSYS (no sleep syscall). */
+-		if (timeout_ms == 0) return 0;
+-		return __syscall_ret(-ENOSYS);
++		 * returns 0. */
++		return syscall_cp(SYS_poll, 0, 0, timeout_ms);
+ 	}
+ 
+ 	int rc = syscall_cp(SYS_poll, pfds, (unsigned long)npfd, timeout_ms);
+--- a/src/signal/_pouch_signal.c
++++ b/src/signal/_pouch_signal.c
+@@ -4,8 +4,8 @@
+  *   - the per-Proc sigaction table (__pouch_sigtab)
+  *   - the per-thread note-mask shadow (__pouch_note_mask_shadow)
+  *   - the signum<->note name translation helpers
+- *   - the bootstrap async-handler (__pouch_note_handler)
+- *   - the constructor that registers it + sets the SIGPIPE default mask
++ *   - the async dispatcher (__pouch_note_handler), which sigaction registers
++ *   - the constructor that sets the SIGPIPE default mask
+  */
+ 
+ #include <signal.h>
+@@ -246,7 +246,8 @@
+ 
+ /* Constructor: runs once at process startup on the main thread, before
+  * main(). Static-init iteration via musl's CRT (.init_array). Sets the
+- * SIGPIPE default-mask and registers the bootstrap handler. */
++ * SIGPIPE default-mask. It registers no handler: a program with none gets the
++ * kernel's default for every note, including while blocked in a wait. */
+ static __attribute__((constructor)) void __pouch_signal_init(void)
+ {
+     /* SIGPIPE default-mask. POUCH-DESIGN.md section 6.4 [RESOLVED 6.4]:
+@@ -255,8 +256,4 @@
+      * with a real handler clears the mask bit (sigaction.c). */
+     __pouch_note_mask_shadow = POUCH_NOTE_BIT_PIPE;
+     __syscall(SYS_note_mask, (long)__pouch_note_mask_shadow, 0L);
+-
+-    /* Register the bootstrap handler. Every async-delivery note from
+-     * here on lands at __pouch_note_handler. */
+-    __syscall(SYS_notify, (long)(uintptr_t)__pouch_note_handler);
+ }
+--- a/src/signal/sigaction.c
++++ b/src/signal/sigaction.c
+@@ -1,7 +1,8 @@
+ /* sigaction(2) over Thylacine notes (pouch sub-chunk 13b). Replaces
+  * musl's Linux SYS_rt_sigaction path with the pouch per-Proc sigaction
+- * table — the bootstrap handler (__pouch_note_handler) is registered
+- * once at process startup and dispatches by note name to the table.
++ * table and the kernel's per-note row, written with SYS_NOTE_DISPOSE. The
++ * dispatcher (__pouch_note_handler) is registered by the first real handler
++ * and dispatches by note name to the table.
+  *
+  * v1.0 supported signums: SIGINT, SIGTERM, SIGUSR1, SIGUSR2, SIGPIPE, SIGCHLD.
+  * SIGKILL/SIGSTOP/others return EINVAL (POSIX-conformant for SIGKILL/
+@@ -21,6 +22,58 @@
+ 
+ volatile int __eintr_valid_flag;
+ 
++static volatile int __pouch_dispatcher_registered;
++static volatile int __pouch_row_written;
++
++/* Write sig's row in the kernel's table. Returns 0 or a negative errno.
++ *
++ * The dispatcher goes first: a peer thread racing here that sees it registered
++ * must find it registered in the kernel, because a caught row with no handler
++ * is refused. So the flag is set after the call, and two first callers both
++ * register, which is idempotent. Until the row lands every note reaches the
++ * dispatcher, which reads the table above and does the right thing for each.
++ *
++ * SIG_DFL with no row ever written writes nothing: every note already takes its
++ * default, and a program that only resets a signal should not grow a table. */
++static long __pouch_sig_dispose(int sig, const struct sigaction *sa, int live)
++{
++	const char *name;
++	if (__pouch_sig_to_note(sig, &name) < 0) return -EINVAL;
++
++	unsigned long disposition;
++	unsigned long flags = 0;
++	if (live) {
++		if (!__pouch_dispatcher_registered) {
++			long r = __syscall(SYS_notify, (long)(uintptr_t)__pouch_note_handler);
++			if (r < 0) return r;
++			a_store(&__pouch_dispatcher_registered, 1);
++		}
++		disposition = POUCH_NOTE_DISP_CAUGHT;
++		if (sa->sa_flags & SA_RESTART) flags = POUCH_NOTE_DISP_RESTART;
++	} else if (sa->sa_handler == SIG_IGN) {
++		disposition = POUCH_NOTE_DISP_IGNORE;
++	} else {
++		if (!__pouch_row_written) return 0;
++		disposition = POUCH_NOTE_DISP_DEFAULT;
++	}
++
++	long r = __syscall(SYS_note_dispose, name, strlen(name), disposition, flags);
++	if (r < 0) return r;
++	a_store(&__pouch_row_written, 1);
++	return 0;
++}
++
++static void __pouch_pipe_mask(int masked)
++{
++	uint64_t cur = __pouch_note_mask_shadow;
++	uint64_t new_m = masked ? cur | (uint64_t)POUCH_NOTE_BIT_PIPE
++	                        : cur & ~(uint64_t)POUCH_NOTE_BIT_PIPE;
++	if (new_m != cur) {
++		__pouch_note_mask_shadow = new_m;
++		__syscall(SYS_note_mask, (long)new_m, 0L);
++	}
++}
++
+ int __libc_sigaction(int sig, const struct sigaction *restrict sa,
+                      struct sigaction *restrict old)
+ {
+@@ -42,7 +95,7 @@
+ 
+ 	/* F11 audit close: reject SIG_ERR as a handler. SIG_ERR ((void(*)(int))-1)
+ 	 * is the error return from signal(3), not a valid sigaction input. Without
+-	 * this check, the bootstrap dispatcher would call h(sig) at address -1 →
++	 * this check, the dispatcher would call h(sig) at address -1 →
+ 	 * EL0 fault → kernel extinct (FAULT_UNHANDLED_USER policy). POSIX is
+ 	 * silent on this case; some implementations reject. */
+ 	if (sa && sa->sa_handler == SIG_ERR) {
+@@ -51,36 +104,38 @@
+ 	}
+ 
+ 	/* Save old before overwriting. */
+-	if (old) *old = __pouch_sigtab[sig];
++	struct sigaction prev = __pouch_sigtab[sig];
++	if (old) *old = prev;
+ 
+ 	if (sa) {
++		int live = (uintptr_t)sa->sa_handler > 1UL;
+ 		__pouch_sigtab[sig] = *sa;
+ 
+ 		/* SIGPIPE special: installing a real handler clears the kernel's
+ 		 * NOTE_BIT_PIPE mask so the kernel will deliver pipe notes to
+-		 * the bootstrap. Removing the handler (SIG_DFL/SIG_IGN) restores
++		 * the dispatcher. Removing the handler (SIG_DFL/SIG_IGN) restores
+ 		 * the default mask. POUCH-DESIGN section 6.4 [RESOLVED 6.4]:
+-		 * masked-by-default is the modern-daemon-friendly behavior. */
+-		if (sig == SIGPIPE) {
+-			uint64_t cur = __pouch_note_mask_shadow;
+-			uint64_t new_m;
+-			if (sa->sa_handler == SIG_DFL || sa->sa_handler == SIG_IGN ||
+-			    sa->sa_handler == 0) {
+-				new_m = cur | (uint64_t)POUCH_NOTE_BIT_PIPE;
+-			} else {
+-				new_m = cur & ~(uint64_t)POUCH_NOTE_BIT_PIPE;
+-			}
+-			if (new_m != cur) {
+-				__pouch_note_mask_shadow = new_m;
+-				__syscall(SYS_note_mask, (long)new_m, 0L);
+-			}
++		 * masked-by-default is the modern-daemon-friendly behavior. The
++		 * mask moves on whichever side of the row keeps a pipe note from
++		 * meeting a default row unmasked: set before the handler is given
++		 * up, cleared after it is taken. */
++		if (sig == SIGPIPE && !live) __pouch_pipe_mask(1);
++
++		long r = __pouch_sig_dispose(sig, sa, live);
++		if (r < 0) {
++			__pouch_sigtab[sig] = prev;
++			if (sig == SIGPIPE && !live)
++				__pouch_pipe_mask((uintptr_t)prev.sa_handler <= 1UL);
++			errno = -r;
++			return -1;
+ 		}
+ 
+-		/* SA_RESTART honored by default at v1.0: every pouch syscall is
+-		 * non-cancellable + returns to userspace directly; there's no
+-		 * EINTR retry surface to enable. The flag bit just sets the
+-		 * advisory. */
+-		if (!(sa->sa_flags & SA_RESTART)) {
++		if (sig == SIGPIPE && live) __pouch_pipe_mask(0);
++
++		/* The kernel restarts a call for an SA_RESTART row. This flag is
++		 * only musl's futex filter (__timedwait): an EINTR from a futex is
++		 * real once some handler without SA_RESTART exists. */
++		if (live && !(sa->sa_flags & SA_RESTART)) {
+ 			a_store(&__eintr_valid_flag, 1);
+ 		}
+ 	}
+--- a/src/unistd/pause.c
++++ b/src/unistd/pause.c
+@@ -1,11 +1,9 @@
+ #include <unistd.h>
+ #include "syscall.h"
+ 
++/* pouch: SYS_ppoll is an ENOSYS sentinel, which returned at once. A poll over no
++ * fds sleeps until a caught note unwinds it. */
+ int pause(void)
+ {
+-#ifdef SYS_pause
+-	return syscall_cp(SYS_pause);
+-#else
+-	return syscall_cp(SYS_ppoll, 0, 0, 0, 0);
+-#endif
++	return syscall_cp(SYS_poll, 0, 0, -1);
+ }
