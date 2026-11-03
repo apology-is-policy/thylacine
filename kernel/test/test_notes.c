@@ -3835,14 +3835,12 @@ void test_notes_class_scans_read_phenotype_sigtab(void) {
 }
 
 // -----------------------------------------------------------------------------
-// notes.phenotype_sigreturn_restores_mask -- the mask half of a phenotype
-// sigreturn (Linux restores uc_sigmask; here the kernel-side note_saved_mask
-// the Linux delivery path wrote beside the registers), and its NATIVE control:
-// a native noted leaves the mask exactly as the handler left it (the as-built
-// rule; the field is not written for it). Both legs use the SAME thread
-// contents, so an unconditional restore fails the control and a missing
-// restore fails the phenotype leg. vivarium.handler_mask covers the value the
-// delivery path stores; the probe's L237-L244 cover the wiring end to end.
+// notes.phenotype_sigreturn_restores_mask -- the mask half of a sigreturn (Linux
+// restores uc_sigmask; here the kernel-side note_saved_mask the delivery wrote beside
+// the registers), on both phenotypes: operator vote 24 ended the native rule that a
+// mask changed inside a handler stayed changed. A missing restore fails either leg.
+// vivarium.handler_mask covers the value the delivery path stores; the probe's
+// L237-L244 cover the wiring end to end.
 // -----------------------------------------------------------------------------
 void test_notes_phenotype_sigreturn_restores_mask(void) {
     struct Proc *m = proc_alloc();
@@ -3873,7 +3871,7 @@ void test_notes_phenotype_sigreturn_restores_mask(void) {
     bool a_left    = !th.in_handler;
     u64  a_elr     = ctx.elr;
 
-    // ---- LEG B: NATIVE, same contents -- the mask is left alone. -------
+    // ---- LEG B: NATIVE, same contents -- the restore puts PRE back. -----
     m->phenotype = PHENO_NATIVE;
     th.in_handler      = true;
     th.note_saved_mask = PRE;
@@ -3898,7 +3896,7 @@ void test_notes_phenotype_sigreturn_restores_mask(void) {
     TEST_ASSERT(a_mask == PRE, "A: PHENO_LINUX sigreturn restores the PRE-handler mask");
     TEST_EXPECT_EQ(b_rc, 0, "B: the native restore succeeds");
     TEST_ASSERT(b_left, "B: the handler is left");
-    TEST_ASSERT(b_mask == HAND, "B: a NATIVE noted leaves the mask as the handler left it (control)");
+    TEST_ASSERT(b_mask == PRE, "B: a NATIVE noted restores the PRE-handler mask too");
     TEST_EXPECT_EQ(c_rc, -1, "C: not in a handler -> refused");
     TEST_ASSERT(c_mask == HAND, "C: a refused restore touches nothing");
 }
@@ -4253,7 +4251,7 @@ void test_notes_table_refusals(void) {
     s64 r_name   = sys_note_dispose_for_proc(p, "nosuch", NOTE_DISP_IGNORE, 0);
     s64 r_sak    = sys_note_dispose_for_proc(p, NOTE_NAME_SAK, NOTE_DISP_IGNORE, 0);
     s64 r_disp   = sys_note_dispose_for_proc(p, NOTE_NAME_USR1, 3u, 0);
-    s64 r_flags  = sys_note_dispose_for_proc(p, NOTE_NAME_USR1, NOTE_DISP_CAUGHT, 2u);
+    s64 r_flags  = sys_note_dispose_for_proc(p, NOTE_NAME_USR1, NOTE_DISP_CAUGHT, 8u);
     s64 r_ignfl  = sys_note_dispose_for_proc(p, NOTE_NAME_USR1, NOTE_DISP_IGNORE,
                                              NOTE_DISP_RESTART);
     s64 r_dflfl  = sys_note_dispose_for_proc(p, NOTE_NAME_USR1, NOTE_DISP_DEFAULT,
@@ -4573,6 +4571,14 @@ void test_notes_restart_settle(void) {
     nt_settle_ctx(&ctx);
     th.note_call_unwound = true; th.note_restartable = false;
     nt_settle_expect(&th, &ctx, false, eintr);
+
+    // sigsuspend under NOHAND: not on signal(7)'s list, and re-issued all the same when
+    // no handler ran, as Linux's ERESTARTNOHAND.
+    nt_settle_ctx(&ctx);
+    th.note_call_unwound = true; th.note_restartable = false;
+    th.note_wait_flags = NOTE_WF_NOHAND;
+    nt_settle_expect(&th, &ctx, true, 0u);
+    th.note_wait_flags = 0;
 
     // A 9P call that lost its flush returns its reply with the mark set.
     nt_settle_ctx(&ctx);

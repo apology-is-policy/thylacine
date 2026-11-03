@@ -164,6 +164,7 @@ set(KERNEL_TEST_SRCS
     test/test_context.c
     test/test_fp.c
     test/test_sched.c
+    test/test_note_wait.c
     test/test_rendez.c
     test/test_tsleep.c
     test/test_smp.c

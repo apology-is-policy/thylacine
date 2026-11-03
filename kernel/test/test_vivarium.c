@@ -396,7 +396,7 @@ void test_vivarium_rejects_are_deliberate(void) {
     TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_RT_SIGPENDING, args, &out),
                    (int)VIV_ENOSYS, "rt_sigpending (136) is an ENOSYS row");
     TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_RT_SIGTIMEDWAIT, args, &out),
-                   (int)VIV_ENOSYS, "rt_sigtimedwait (137) is an ENOSYS row");
+                   (int)VIV_TIER2, "rt_sigtimedwait (137) is a TIER2 row");
     TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_RT_SIGQUEUEINFO, args, &out),
                    (int)VIV_ENOSYS, "rt_sigqueueinfo (138) is an ENOSYS row");
 
@@ -414,7 +414,7 @@ void test_vivarium_rejects_are_deliberate(void) {
     TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_TGKILL, args, &out),
                    (int)VIV_TIER2, "tgkill (131) is a TIER2 row (vivarium_kill_decide)");
     TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_RT_SIGSUSPEND, args, &out),
-                   (int)VIV_ENOSYS, "rt_sigsuspend (133) is an ENOSYS row");
+                   (int)VIV_TIER2, "rt_sigsuspend (133) is a TIER2 row (notes_wait_suspend)");
 }
 
 void test_vivarium_unknown_forwards(void) {

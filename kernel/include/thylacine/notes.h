@@ -185,6 +185,12 @@ struct Thread;
 // Proc.note_caught holds latch and claim in a u32. notes.c asserts each fits.
 #define NOTE_MASK_SUPPORTED  0x3ffu
 
+// Thread.note_wait_flags. MASK_HELD: this call runs under a mask of its own, and
+// note_saved_mask holds the thread's. NOHAND: the tail re-issues the call if it
+// unwound and no handler ran, whatever the row says, as Linux's ERESTARTNOHAND does.
+#define NOTE_WF_MASK_HELD  0x01u
+#define NOTE_WF_NOHAND     0x02u
+
 // #15: the DEFAULT ACTION of a note -- what happens when nobody catches it.
 // One value per row of `g_known_notes`, so a note's disposition is a property
 // OF the note rather than of whichever call site is asking. Before #15 the
@@ -697,6 +703,19 @@ void notes_set_handler(struct Proc *p, u64 handler_va);
 // q->lock, same serialization rationale as notes_set_handler.
 void notes_mark_self_managing(struct Proc *p);
 
+// SYS_NOTE_WAIT's two forms, and the phenotype's rt_sigsuspend and rt_sigtimedwait
+// (ARCH 8.8.3). notes_wait_suspend always answers a negative errno. notes_wait_take
+// answers 0 with the note in *out and where it came from in *direct, which
+// notes_wait_untake takes back if the caller cannot hand the note over.
+// notes_take_for_sigset is a Linux sigset as a take word: a signal with no note
+// names nothing, and SIGKILL's note is nobody's to take.
+s64  notes_wait_suspend(struct Thread *t, u64 mask);
+s64  notes_wait_take(struct Thread *t, u64 take, s64 timeout_ns, struct Note *out,
+                     int *direct);
+void notes_wait_untake(struct Thread *t, int direct, const struct Note *n);
+u64  notes_take_for_sigset(u64 set);
+bool notes_take_word_valid(u64 take);
+
 // The SYS_NOTED bodies. notes_noted_restore puts back the user context saved
 // at delivery (NCONT): 0, or -1 when `t` is not in a handler. notes_noted_default
 // takes the note's default action (NDFLT); its STOP and IGNORE dispositions
@@ -857,6 +876,8 @@ int notes_tail_consume_for_test(struct Proc *p, struct Thread *t, int direct,
                                 struct Note *out);
 void notes_tail_unconsume_for_test(struct Proc *p, struct Thread *t, int direct,
                                    const struct Note *n);
+u64  notes_interrupted_mask_for_test(const struct Thread *t);
+void notes_handler_mask_enter_for_test(struct Thread *t, u64 handler_mask);
 void notes_handler_resets_for_test(struct Proc *p, u32 sn);   // an enum viv_signote
 #endif // KERNEL_TESTS
 

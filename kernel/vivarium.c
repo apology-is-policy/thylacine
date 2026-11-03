@@ -58,6 +58,13 @@ _Static_assert(VIV_LINUX_SETGID > VIV_NATIVE_CEILING,
 // caller's own dispositions, so nothing is exposed either way.
 _Static_assert(VIV_LINUX_RT_SIGRETURN == SYS_NOTE_DISPOSE,
                "revisit rt_sigreturn / NOTE_DISPOSE collision on renumber");
+// SYS_NOTE_WAIT at 141 (vote 24, 2026-11-03) lifted the ceiling over 140 and 141. Linux
+// setpriority (140) and getpriority (141) have no row: only a row that renumbers
+// returns into the native switch, so a Linux Proc reaches neither, and a native program
+// mis-declared as Linux reads ENOSYS. Each native call there grants nothing beyond the
+// caller's own Proc, so nothing is exposed either way. Nothing can be asserted against a
+// row that does not exist; a row added at either number is a per-number argument.
+_Static_assert(SYS_NOTE_WAIT == 141, "revisit Linux getpriority's row on renumber");
 // SYS_POSTNOTE_TID at 138 (vote 2026-11-02) lifted the ceiling over 135..138.
 // Linux rt_sigqueueinfo (138) collides with it. The row is VIV_ENOSYS, so a Linux
 // Proc never reaches the post (tgkill is how it names a thread). A native program
@@ -68,7 +75,7 @@ _Static_assert(VIV_LINUX_RT_SIGQUEUEINFO == SYS_POSTNOTE_TID,
 // rt_sigprocmask (135), rt_sigpending (136) and rt_sigtimedwait (137) meet NO
 // native number on this tree: main holds them for READLINK, LSTAT and FILE_LOCK,
 // and syscall.native_gap_unassigned pins that they are empty here. Each is
-// consumed before the native switch regardless (TIER2, ENOSYS, ENOSYS), and
+// consumed before the native switch regardless (TIER2, ENOSYS, TIER2), and
 // vivarium.rejects_are_deliberate pins each verdict by name.
 // SYS_SRV_REGISTRY_NEW at 134 (vote 13) lifted the ceiling over the signal
 // family's 129..134, and the assert above, then keyed to kill, stopped the
@@ -104,7 +111,7 @@ _Static_assert(VIV_LINUX_RT_SIGACTION == SYS_SRV_REGISTRY_NEW,
 // by counting the native switch's unknown arm (a native number landing in the
 // gap fails it, whatever it returns). Each is consumed before the native switch
 // regardless -- the kill family is TIER2 (vivarium_kill_decide, SYS_POSTNOTE's
-// own gate), sigaltstack and rt_sigsuspend are VIV_ENOSYS rows -- and
+// own gate), as rt_sigsuspend is, and sigaltstack is a VIV_ENOSYS row -- and
 // vivarium.rejects_are_deliberate pins each verdict by name. When the gap's
 // natives arrive, every row there takes the collision assert its native names,
 // as restart_syscall has against ICACHE_SYNC_SPACE.
@@ -441,6 +448,8 @@ static const struct viv_reject g_viv_rejects[] = {
     // The signal family (V-6, §6.22).
     { VIV_LINUX_RT_SIGACTION,   VIV_TIER2 },  // V-6b: vivarium_sigaction_decide
     { VIV_LINUX_RT_SIGPROCMASK, VIV_TIER2 },  // V-6b: vivarium_sigprocmask_decide
+    { VIV_LINUX_RT_SIGSUSPEND,   VIV_TIER2 }, // vote 24: notes_wait_suspend
+    { VIV_LINUX_RT_SIGTIMEDWAIT, VIV_TIER2 }, // vote 24: notes_wait_take
     // The only signal rows that are an AUTHORITY question rather than a
     // disposition one: they name another Proc, so they reuse SYS_POSTNOTE's own
     // gate verbatim -- the caller, or a child it spawned; the gate Pouch's kill
@@ -454,19 +463,16 @@ static const struct viv_reject g_viv_rejects[] = {
     // "not yet":
     //   sigaltstack   — an alternate signal stack is only meaningful once
     //                   delivery honours SA_ONSTACK, which it does not.
-    //   rt_sigsuspend — atomically swap the mask and sleep; needs the mask to be
-    //                   a wait predicate, which note_mask is not.
     //   rt_sigpending — Thylacine's queue is per-Proc and consumed exactly once
     //                   (I-19 N-2); "pending but undelivered" is not a state it
     //                   distinguishes.
-    //   rt_sigtimedwait / rt_sigqueueinfo — queued siginfo, which notes do not
-    //                   carry (a note has a 16-byte name and one u32 arg).
-    //   restart_syscall — the kernel-internal restart continuation, meaningless
-    //                   without SA_RESTART.
+    //   rt_sigqueueinfo — queued siginfo, which notes do not carry (a note has a
+    //                   16-byte name and one u32 arg).
+    //   restart_syscall — the continuation of a restart block, and no call here
+    //                   owes one: a timed call the kernel would have to resume
+    //                   reports EINTR instead.
     { VIV_LINUX_SIGALTSTACK,     VIV_ENOSYS },
-    { VIV_LINUX_RT_SIGSUSPEND,   VIV_ENOSYS },
     { VIV_LINUX_RT_SIGPENDING,   VIV_ENOSYS },
-    { VIV_LINUX_RT_SIGTIMEDWAIT, VIV_ENOSYS },
     { VIV_LINUX_RT_SIGQUEUEINFO, VIV_ENOSYS },
     { VIV_LINUX_RESTART_SYSCALL, VIV_ENOSYS },
 
@@ -2931,6 +2937,18 @@ bool vivarium_parse_conn_n(const char *buf, u32 len, u32 *out_n) {
 // -----------------------------------------------------------------------------
 // Readiness (V-5c, section 5.5.4).
 // -----------------------------------------------------------------------------
+
+bool vivarium_timespec_to_ns(s64 sec, s64 nsec, s64 *out_ns, s32 *out_err) {
+    if (!out_ns || !out_err) return false;
+    *out_err = 0;
+    if (sec < 0 || nsec < 0 || nsec >= 1000000000) {
+        *out_err = (s32)T_E_INVAL;
+        return false;
+    }
+    const s64 max_ns = 0x7FFFFFFFFFFFFFFFll;
+    *out_ns = sec > (max_ns - nsec) / 1000000000 ? max_ns : sec * 1000000000 + nsec;
+    return true;
+}
 
 bool vivarium_timespec_to_ms(s64 sec, s64 nsec, s32 *out_ms, s32 *out_err) {
     if (!out_ms || !out_err) return false;

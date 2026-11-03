@@ -786,6 +786,26 @@ void test_notes_stop_dequeue_picks_its_own_note(void);  // the class-blind pop
 void test_notes_class_scans_read_phenotype_sigtab(void); // c8ab2744 F1
 void test_notes_discard_name_purges_pending(void);      // the install-time SIG_IGN discard
 void test_notes_phenotype_sigreturn_restores_mask(void); // the mask half of sigreturn
+void test_notewait_take_names_its_rows(void); // a tty row, a family, and order
+void test_notewait_take_word(void); // what a take word may name
+void test_notewait_take_drains_and_untake_rearms(void); // N-2 across a taker's fault
+void test_notewait_take_own_word_first(void); // a thread's own note first
+void test_notewait_take_leaves_a_kill(void); // a kill is the tail's
+void test_notewait_suspend_frame_fails_mask_back(void); // the wait's mask, and the tail's restore
+void test_notewait_suspend_note_gone_reissues(void); // no handler ran: re-issued
+void test_notewait_suspend_held_note_ends_it(void); // the race sigsuspend closes
+void test_notewait_suspend_tail_note_goes_to_the_tail(void); // a note only the tail acts on
+void test_notewait_suspend_refused(void); // no table, nothing to end it
+void test_notewait_suspend_in_a_handler(void); // no nesting: the wait ends, the note waits
+void test_notewait_take_sleeps_until_posted(void); // the queue's hook wakes a masked taker
+void test_notewait_take_wakes_for_its_word(void); // so does a note at the thread
+void test_notewait_take_times_out(void); // EAGAIN at the deadline
+void test_notewait_take_unwinds_for_another_note(void); // a handler owed ends the wait
+void test_notewait_take_before_unwinding(void); // taken, not interrupted
+void test_notewait_handler_mask_enter_and_restore(void); // one way in, one way out
+void test_notewait_dispose_row_carries_mask(void); // the flags word's row
+void test_notewait_syscall_refusals(void); // the call's edges
+void test_vivarium_timespec_to_ns(void); // rt_sigtimedwait's timeout
 void test_notes_self_managing_flag(void);
 void test_notes_intr_latch_lifecycle(void);
 void test_notes_fault_dying_latch_live_note_exits(void);

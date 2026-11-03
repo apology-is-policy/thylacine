@@ -582,7 +582,10 @@ enum {
 // SYS_NOTE_DISPOSE lands at 139 (operator vote 18, 2026-11-03), the ceiling rises
 // over rt_sigreturn, and it has its per-number argument in vivarium.c. The lowest
 // row still argued by the ceiling is setgid (144).
-#define VIV_NATIVE_CEILING 139
+//
+// SYS_NOTE_WAIT lands at 141 (operator vote 24, 2026-11-03), over getpriority, which
+// has no row; the same argument, in vivarium.c. 140 waits for SYS_ACCOUNT.
+#define VIV_NATIVE_CEILING 141
 
 // -----------------------------------------------------------------------------
 // TIER 2 — translators (V-2b).
@@ -1997,6 +2000,8 @@ bool vivarium_parse_conn_n(const char *buf, u32 len, u32 *out_n);
 // Returns false with *out_err = EINVAL for a malformed timespec (a negative
 // field, or tv_nsec >= 1e9), matching Linux's own validation.
 bool vivarium_timespec_to_ms(s64 sec, s64 nsec, s32 *out_ms, s32 *out_err);
+// The same validation, for a wait counted in nanoseconds. Saturates.
+bool vivarium_timespec_to_ns(s64 sec, s64 nsec, s64 *out_ns, s32 *out_err);
 
 // Decide whether a ppoll() is inside the translatable domain. PURE.
 //

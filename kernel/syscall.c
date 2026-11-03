@@ -14790,8 +14790,13 @@ void viv_sigaction_settled_for_test(struct Proc *p, enum viv_signote note,
 VISIBLE_IF_KERNEL_TESTS
 s64 sys_note_dispose_for_proc(struct Proc *p, const char *name, u64 disposition,
                               u64 flags) {
+    _Static_assert(NOTE_DISP_FLAGS < (1u << NOTE_DISP_MASK_SHIFT) &&
+                   NOTE_MASK_SUPPORTED < (1u << NOTE_DISP_MASK_SHIFT),
+                   "the flags word holds the flags below the mask, and every family");
+    u64 row_mask = flags >> NOTE_DISP_MASK_SHIFT;
     if (disposition > NOTE_DISP_CAUGHT) return -(s64)T_E_INVAL;
-    if (flags & ~(u64)NOTE_DISP_RESTART) return -(s64)T_E_INVAL;
+    if ((flags & (NOTE_DISP_MASK(1u) - 1u)) & ~(u64)NOTE_DISP_FLAGS) return -(s64)T_E_INVAL;
+    if (row_mask & ~(u64)NOTE_MASK_SUPPORTED) return -(s64)T_E_INVAL;
     if (flags && disposition != NOTE_DISP_CAUGHT) return -(s64)T_E_INVAL;
     enum viv_signote note = viv_signote_from_note_name(name);
     if (note == VIV_SIGNOTE_NONE || note == VIV_SIGNOTE_KILL) return -(s64)T_E_INVAL;
@@ -14807,7 +14812,12 @@ s64 sys_note_dispose_for_proc(struct Proc *p, const char *name, u64 disposition,
     if (disposition == NOTE_DISP_IGNORE) act.handler = VIV_SIG_IGN;
     if (disposition == NOTE_DISP_CAUGHT) {
         act.handler = VIV_NATIVE_CAUGHT;
-        if (flags & NOTE_DISP_RESTART) act.flags = VIV_SA_RESTART;
+        if (flags & NOTE_DISP_RESTART)   act.flags |= VIV_SA_RESTART;
+        if (flags & NOTE_DISP_RESETHAND) act.flags |= VIV_SA_RESETHAND;
+        if (flags & NOTE_DISP_NODEFER)   act.flags |= VIV_SA_NODEFER;
+        // In note bits, where a guest's row holds its sigset: no reader asks one of
+        // the other's, since the delivery arm goes by the Proc's phenotype.
+        act.mask = row_mask;
     }
     struct viv_sigtab *tab = __atomic_load_n(&p->sigtab, __ATOMIC_ACQUIRE);
     if (disposition != NOTE_DISP_DEFAULT && !tab) {
@@ -14828,6 +14838,68 @@ static s64 sys_note_dispose_handler(u64 name_va, u64 name_len_raw, u64 dispositi
     s64 name_err = postnote_copy_name(name_va, name_len_raw, buf);
     if (name_err) return name_err;
     return sys_note_dispose_for_proc(t->proc, buf, disposition, flags);
+}
+
+// ARCH 8.8.3; the form's rules are on the number (syscall.h).
+VISIBLE_IF_KERNEL_TESTS
+s64 sys_note_wait_handler(u64 how, u64 set, u64 rec_va, u64 timeout_raw) {
+    struct Thread *t = current_thread();
+    if (!t || !t->proc) return -(s64)T_E_INVAL;
+    s64 timeout_ns = (s64)timeout_raw;
+
+    if (how == NOTE_WAIT_SUSPEND) {
+        if (rec_va != 0 || timeout_ns >= 0) return -(s64)T_E_INVAL;
+        return notes_wait_suspend(t, set);
+    }
+    if (how != NOTE_WAIT_TAKE || !notes_take_word_valid(set)) return -(s64)T_E_INVAL;
+    if (rec_va != 0 && !sys_validate_user_buf(rec_va, sizeof(struct note_record)))
+        return -(s64)T_E_FAULT;
+
+    struct Note note;
+    int direct;
+    s64 r = notes_wait_take(t, set, timeout_ns, &note, &direct);
+    if (r != 0) return r;
+    if (rec_va != 0 && uaccess_copy_out(rec_va, &note, sizeof(note)) != 0) {
+        notes_wait_untake(t, direct, &note);
+        return -(s64)T_E_FAULT;
+    }
+    return 0;
+}
+
+// rt_sigtimedwait past its sigset. The frame's reason for SI_KERNEL holds here too: the
+// union has no source a guest should trust, so it stays zero (vivarium.h).
+static s64 viv_rt_sigtimedwait(struct Thread *t, u64 set, u64 info_va, u64 ts_va) {
+    s64 timeout_ns = -1;
+    if (ts_va != 0) {
+        struct t_timespec ts;
+        if (!sys_validate_user_buf(ts_va, sizeof(ts)) ||
+            uaccess_copy_in(&ts, ts_va, sizeof(ts)) != 0)
+            return -(s64)T_E_FAULT;
+        s32 err = 0;
+        if (!vivarium_timespec_to_ns(ts.tv_sec, ts.tv_nsec, &timeout_ns, &err))
+            return -(s64)err;
+    }
+    if (info_va != 0 && !sys_validate_user_buf(info_va, sizeof(struct viv_linux_siginfo)))
+        return -(s64)T_E_FAULT;
+
+    struct Note note;
+    int direct;
+    s64 r = notes_wait_take(t, notes_take_for_sigset(set), timeout_ns, &note, &direct);
+    if (r != 0) return r;
+
+    u64 signum = viv_signote_to_signal(viv_signote_from_note_name(note.name));
+    if (info_va != 0) {
+        struct viv_linux_siginfo si;
+        u8 *raw = (u8 *)&si;
+        for (u32 i = 0; i < (u32)sizeof(si); i++) raw[i] = 0;
+        si.si_signo = (s32)signum;
+        si.si_code  = VIV_SI_KERNEL;
+        if (uaccess_copy_out(info_va, &si, sizeof(si)) != 0) {
+            notes_wait_untake(t, direct, &note);
+            return -(s64)T_E_FAULT;
+        }
+    }
+    return (s64)signum;
 }
 
 static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
@@ -15653,6 +15725,26 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         default:              return -(s64)T_E_INVAL;   // decide screened this
         }
         return 0;
+    }
+
+    case VIV_LINUX_RT_SIGSUSPEND: {
+        // rt_sigsuspend(set, sigsetsize): x0 set, x1 sigsetsize. Through the mask row's
+        // translation, so SIGKILL drops and a tty signal lets in or holds its family.
+        if (args[1] != sizeof(u64)) return -(s64)T_E_INVAL;
+        u64 want = 0;
+        if (!sys_validate_user_buf(args[0], sizeof(u64)) || viv_load_u64(args[0], &want) != 0)
+            return -(s64)T_E_FAULT;
+        return notes_wait_suspend(current_thread(),
+                                  viv_sigset_to_notemask(want, &g_viv_notebits));
+    }
+
+    case VIV_LINUX_RT_SIGTIMEDWAIT: {
+        // rt_sigtimedwait(set, info, timeout, sigsetsize): x0..x3.
+        if (args[3] != sizeof(u64)) return -(s64)T_E_INVAL;
+        u64 want = 0;
+        if (!sys_validate_user_buf(args[0], sizeof(u64)) || viv_load_u64(args[0], &want) != 0)
+            return -(s64)T_E_FAULT;
+        return viv_rt_sigtimedwait(current_thread(), want, args[1], args[2]);
     }
 
     case VIV_LINUX_SOCKET:
@@ -16736,6 +16828,9 @@ static void native_note_class(struct Thread *t, struct Proc *p,
     case SYS_OPEN:
         intr = restart = (ctx->regs[3] & SYS_WALK_OPEN_OINTR) != 0;
         break;
+    case SYS_NOTE_WAIT:
+        intr = true;    // and NOHAND, set by the call: signal(7) lists neither form
+        break;
     default:
         break;
     }
@@ -17533,6 +17628,11 @@ static void syscall_native_switch(struct exception_context *ctx) {
     case SYS_NOTE_DISPOSE:
         ctx->regs[0] = (u64)sys_note_dispose_handler(ctx->regs[0], ctx->regs[1],
                                                      ctx->regs[2], ctx->regs[3]);
+        return;
+
+    case SYS_NOTE_WAIT:
+        ctx->regs[0] = (u64)sys_note_wait_handler(ctx->regs[0], ctx->regs[1],
+                                                  ctx->regs[2], ctx->regs[3]);
         return;
 
     case SYS_NOTE_MASK:
