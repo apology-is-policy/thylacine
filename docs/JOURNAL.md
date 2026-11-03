@@ -48,6 +48,8 @@ What I would have told the operator wrongly at noon: "three faces". Then "six". 
 
 A format question is still coming: retained blocks leak once their snapshot goes, and curing that means chunked lists with a version bump or a walk on overflow. Not asked yet: every ask waits for no hold of mine to be armed. Not run on any of this: host sanitizers.
 
+**Round 1's reds went into the tree while the Mac was queued (f7next `92a28cc`, 16:24Z, nothing built).** Each read chain held. Writing P1-4's fix turned up what the audit had not reached: a stream to a snapshot read the live index, so anything overwritten since was silently absent, whichever way the window was cut. It now reads that snapshot's own tree, and the absence of any delete record in a stream is enqueued, since that one likely needs a format change. The rollback's commit-first came out simpler than the report's two chains suggest: both were one wrong premise, an "old tree" that was not the tree after the drops. The audit asked for specs that use the code's mechanism, so `cold_rollback.tla` models the counted subtraction itself, with the two failures as buggy cfgs. Everything here is a claim until the lease runs each leg on the base: red there, or the finding is withdrawn.
+
 ## 2026-11-03 (main, Opus 5.5) -- B-3h's first boots: two wrong tests, a survivor, a budget
 
 **What this covers.** B-3h had been through six audit rounds without booting, on purpose: the rounds were batched and the lease came after them. Three boots then found what the rounds could not, and none of it was in the kernel. Everything here is on `b3h`, not on `main`.
