@@ -4,7 +4,7 @@ type: chg
 title: "B-3h3 and B-3h4: a cached open reaches its file; Pouch fcntl locks and flock"
 date: 2026-11-02
 arc: arc-boosty
-commits: ["*(pending)*"]
+commits: ["dcdfd037a", "c2eeda2cc", "ae1f84374", "4b0bdd849", "2a0844874", "676fbd9a7", "adfe466d6", "b6d39f97e", "6c085a1a3", "52ecb0a77"]
 touched:
   - sub-kernel-ninep-dev9p
   - sub-kernel-larder
