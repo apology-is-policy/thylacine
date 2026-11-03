@@ -4397,7 +4397,7 @@ void test_notes_table_reread(void) {
     proc_mark_self_managing_notes(p);
     TEST_EXPECT_EQ(notes_post(p, NOTE_NAME_CHILD_EXIT, 0u, NULL, true), 0, "post child_exit");
     TEST_EXPECT_EQ(nt_queued(p), 1u, "queued");
-    TEST_ASSERT(proc_caught_note_pending(p), "an fd reader with no table: its wait unwinds");
+    TEST_ASSERT(proc_caught_note_pending(p), "an fd reader with no table: the latch stands for its poll to read");
     TEST_EXPECT_EQ(sys_note_dispose_for_proc(p, NOTE_NAME_CHILD_EXIT, NOTE_DISP_DEFAULT, 0), 0,
                    "default");
     TEST_EXPECT_EQ(nt_queued(p), 1u, "the fd reader keeps it");
