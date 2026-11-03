@@ -18,6 +18,7 @@ extern crate alloc;
 
 use alloc::format;
 use alloc::vec::Vec;
+use core::future::Future;
 use core::time::Duration;
 use libthyla_rs::loom::native::{Fid, Payload, PoolMember, Scope, Shot, Stream, Target};
 use libthyla_rs::loom::{ServiceRing, ThylaKernel};
@@ -53,6 +54,7 @@ const CQ_ENTRIES: usize = 4;
 // 5: pool D.
 const BUFFERS: [usize; 6] = [PAGE as usize; 6];
 const WAIT_NS: u64 = 5_000_000_000;
+const HELD_NS: u64 = 20_000_000;
 // Targets, scopes, fids and pools share the kernel's LOOM_SERVICE_SLOT_COUNT
 // slots (kernel/include/thylacine/loom_service_abi.h).
 const SLOTS: usize = 64;
@@ -271,13 +273,23 @@ fn fill(ring: &ServiceRing, scope: &Scope<K>) -> R<usize> {
     Ok(held.len())
 }
 
+// The fault holds it: turns complete nothing, so what ends it next is the drop.
+fn still_held<F: Future + Unpin>(ring: &ServiceRing, op: &mut F) -> R<()> {
+    match ring.block_on(op, Some(ring.now() + HELD_NS)) {
+        Ok(_) => check!(false, "an operation the server holds stays pending", 0),
+        Err(e) => check!(e == -E_TIMEDOUT, "turns while the server holds an operation", e),
+    }
+    Ok(())
+}
+
 // A service with one fault in it (the fixture's HOSTILE table): the CONNECT
 // reaches the fault and stops there, and dropping it must still end the session.
 fn hold_connect(ring: &ServiceRing, st: &Fid<K>, name: &[u8]) -> R<()> {
     let t = ok!(ring.target(REGISTRY, name), "TARGET of a hostile service");
     let base = stats(ring, st)?;
-    let c = ok!(t.connect(None), "submit a CONNECT the server holds");
+    let mut c = ok!(t.connect(None), "submit a CONNECT the server holds");
     stats_until(ring, st, FAULTS, base[FAULTS] + 1)?;
+    still_held(ring, &mut c)?;
     drop(c);
     stats_until(ring, st, ENDED, base[ENDED] + 1)?;
     Ok(())
@@ -300,8 +312,9 @@ fn hold_walk(ring: &ServiceRing, st: &Fid<K>, name: &[u8]) -> R<()> {
     let t = ok!(ring.target(REGISTRY, name), "TARGET of a hostile service");
     let s = connect(ring, &t)?;
     let base = stats(ring, st)?;
-    let w = ok!(s.walk(b"data", None), "submit a WALK the server holds");
+    let mut w = ok!(s.walk(b"data", None), "submit a WALK the server holds");
     stats_until(ring, st, FAULTS, base[FAULTS] + 1)?;
+    still_held(ring, &mut w)?;
     drop(w);
     drop(s);
     stats_until(ring, st, ENDED, base[ENDED] + 1)?;
@@ -376,8 +389,9 @@ fn hostile_peers(ring: &ServiceRing, st: &Fid<K>, data: &Fid<K>) -> R<()> {
     let s = connect(ring, &t)?;
     let f = walk(ring, &s, b"data")?;
     let base = stats(ring, st)?;
-    let o = ok!(f.open(0, None), "submit an LOPEN the server holds");
+    let mut o = ok!(f.open(0, None), "submit an LOPEN the server holds");
     stats_until(ring, st, FAULTS, base[FAULTS] + 1)?;
+    still_held(ring, &mut o)?;
     drop(o);
     drop(f);
     drop(s);
@@ -387,8 +401,9 @@ fn hostile_peers(ring: &ServiceRing, st: &Fid<K>, data: &Fid<K>) -> R<()> {
     say("a peer that tears a reply");
     let (t, s, f) = hostile_read(ring, b"torn-read")?;
     let base = stats(ring, st)?;
-    let rd = ok!(f.read(range(4, 0, PAGE), 0, None), "submit a READ the server tears");
+    let mut rd = ok!(f.read(range(4, 0, PAGE), 0, None), "submit a READ the server tears");
     stats_until(ring, st, FAULTS, base[FAULTS] + 1)?;
+    still_held(ring, &mut rd)?;
     drop(rd);
     drop(f);
     drop(s);
