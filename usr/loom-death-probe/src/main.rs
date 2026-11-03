@@ -43,6 +43,7 @@ const VICTIM_GO: i64 = 0;
 const VICTIM_READY: i64 = 1;
 const VICTIM_REGISTRY: i32 = 3;
 
+const E_BADF: i64 = 9;
 const E_OPNOTSUPP: i32 = 95;
 const E_NOSPC: i32 = 28;
 
@@ -56,8 +57,9 @@ const AFTER_EXEC: &[u8] = b"/bin/loom-death-probe\0after-exec\0";
 
 // Every descriptor a victim could hold is below this.
 const FD_SCAN: i64 = 32;
-// LOOM_ENTER_NONBLOCK (kernel/include/thylacine/loom.h): a ring answers an ENTER
-// of nothing with no wait, and any other descriptor refuses it.
+// LOOM_ENTER_NONBLOCK (kernel/include/thylacine/loom.h): a live ring answers an
+// ENTER of nothing with no wait, one latched shut -ECANCELED, and anything else
+// -EBADF.
 const ENTER_NONBLOCK: u64 = 1 << 1;
 
 // The fixture's stats counters (usr/loom-fixture).
@@ -230,6 +232,7 @@ fn turn_forever(ring: &ServiceRing, target: &Target<K>) -> ! {
 
 fn victim(role: &str) -> R<i64> {
     let ring = ok!(ServiceRing::setup(ThylaKernel, ENTRIES, &BUFFERS), "a victim's ring");
+    let fd = ok!(ring_fd().ok_or(-1), "find the ring's descriptor");
     let service: &[u8] = match role {
         "connect" => b"hold-version",
         "unaccepted" => b"unaccepted",
@@ -294,7 +297,6 @@ fn victim(role: &str) -> R<i64> {
                 "close" => ROLE_CLOSE,
                 _ => ROLE_EXEC,
             };
-            let fd = ok!(ring_fd().ok_or(-1), "find the ring's descriptor");
             let _worker = ok!(ServiceWorker::new(Sibling { role: which, ring: fd }, sibling)
                                   .map_err(|e| e.as_errno()),
                               "a sibling thread");
@@ -305,10 +307,13 @@ fn victim(role: &str) -> R<i64> {
 }
 
 // The image an exec put here: exec closes a private ring whatever userspace asked
-// for, so no descriptor answers ENTER, and a new one can be made.
+// for. Exec also latches it, and a latched ring's descriptor answers -ECANCELED, so
+// only -EBADF from every number shows the descriptor went. A new ring can be made.
 fn after_exec() -> R<i64> {
-    let fd = ring_fd();
-    check!(fd.is_none(), "exec closed the private ring", fd.unwrap_or(0));
+    for fd in 3..FD_SCAN {
+        let rc = unsafe { t_loom_enter(fd as u64, 0, 0, ENTER_NONBLOCK) };
+        check!(rc == -E_BADF, "exec closed the private ring", rc);
+    }
     let ring = ok!(ServiceRing::setup(ThylaKernel, ENTRIES, &BUFFERS), "a ring in the new image");
     core::mem::forget(ring);
     Ok(EXIT_AFTER_EXEC as i64)

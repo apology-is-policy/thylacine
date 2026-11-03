@@ -342,6 +342,17 @@ static unsigned fill(struct t_loom_scope *s) {
     return n;
 }
 
+// The fault holds it: turns complete nothing, so what ends it next is the drop.
+#define STILL_HELD(call) do { \
+    uint64_t until_ = t_loom_now(g_cur) + 20000000ull; \
+    while (t_loom_now(g_cur) < until_) { \
+        int answer_ = (call); \
+        CHECK(answer_ == 0, "an operation the server holds stays pending", answer_); \
+        int64_t turned_ = t_loom_turn(g_cur, 1, until_); \
+        CHECK(turned_ >= 0, "turns while the server holds an operation", turned_); \
+    } \
+} while (0)
+
 // A service with one fault in it (the fixture's HOSTILE table).
 static struct t_loom_target *hostile_target(const char *name) {
     struct t_loom_target *t = NULL;
@@ -360,6 +371,9 @@ static void hold_connect(struct t_loom_fid *sf, const char *name) {
     int rc = t_loom_connect(t, 0, 0, &op);
     CHECK(rc == 0, "submit a CONNECT the server holds", rc);
     stats_until(sf, FAULTS, base[FAULTS] + 1, v);
+    int32_t res = 0;
+    struct t_loom_scope *none = NULL;
+    STILL_HELD(t_loom_connect_done(op, &res, &none));
     t_loom_op_drop(op);
     stats_until(sf, ENDED, base[ENDED] + 1, v);
     t_loom_target_drop(t);
@@ -393,6 +407,9 @@ static void hold_walk(struct t_loom_fid *sf, const char *name) {
     int rc = t_loom_walk(s, "data", 4, 0, 0, &op);
     CHECK(rc == 0, "submit a WALK the server holds", rc);
     stats_until(sf, FAULTS, base[FAULTS] + 1, v);
+    int32_t res = 0;
+    struct t_loom_fid *none = NULL;
+    STILL_HELD(t_loom_walk_done(op, &res, &none));
     t_loom_op_drop(op);
     t_loom_scope_drop(s);
     stats_until(sf, ENDED, base[ENDED] + 1, v);
@@ -478,6 +495,7 @@ static void hostile_peers(struct t_loom_fid *sf, struct t_loom_fid *data) {
     rc = t_loom_open(f, 0, 0, 0, &op);
     CHECK(rc == 0, "submit an LOPEN the server holds", rc);
     stats_until(sf, FAULTS, base[FAULTS] + 1, v);
+    STILL_HELD(t_loom_open_done(op, &res));
     t_loom_op_drop(op);
     t_loom_fid_drop(f);
     t_loom_scope_drop(s);
@@ -493,6 +511,8 @@ static void hostile_peers(struct t_loom_fid *sf, struct t_loom_fid *data) {
     rc = t_loom_read(f, range(4, 0, PAGE), 0, 0, 0, &op);
     CHECK(rc == 0, "submit a READ the server tears", rc);
     stats_until(sf, FAULTS, base[FAULTS] + 1, v);
+    struct t_fixed_read_result *torn = NULL;
+    STILL_HELD(t_loom_read_done(op, &res, &torn));
     t_loom_op_drop(op);
     t_loom_fid_drop(f);
     t_loom_scope_drop(s);

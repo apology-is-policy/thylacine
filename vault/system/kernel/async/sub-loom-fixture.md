@@ -86,7 +86,7 @@ probe, all released; the default image expects none.
 
 Past the NA-4d legs, each adapter probe drives the AS-3 list against the hostile
 services: a hold at each handshake and setup stage, ended by a deadline once and
-by a drop otherwise; a garbled, wrong or torn reply at the handshake and at a
+otherwise by a drop, after turns show the operation still pending; a garbled, wrong or torn reply at the handshake and at a
 READ; a service that never accepts; a stream staying live while a sibling scope
 stalls and is cancelled; a cancel with the CQ full, which posts nothing past it;
 and the pool and request bounds an honest program can reach. Quota refusals that
@@ -99,8 +99,10 @@ case; each victim holds a stalled READ (or a CONNECT the server holds, or one
 nobody accepts, or a stream with a lease held), then exits, exits from a sibling
 thread, is killed, closes its ring from a sibling thread, or execs, from the main
 thread and from a sibling. The driver bounds the victim's end and reads the
-session's end at the server. The new image of an exec finds no descriptor that
-answers ENTER and makes a ring of its own. Rust only: the paths under test are
+session's end at the server. Exec latches a private ring and also closes it, and a
+latched ring's descriptor answers ENTER `-ECANCELED`, so the new image requires
+`-EBADF` from every number below the scan's end, and makes a ring of its own. The
+victim found its own ring with the same scan before the exec. Rust only: the paths under test are
 the kernel's, and an adapter's teardown does not run on any of them.
 
 The retire witness is a `Q`/`Z` handshake: after the ring retires the probe
