@@ -22,6 +22,55 @@ needed the operator.
 
 
 ---
+## 2026-11-03 -- the first real boots, and a shell bug the paste test found by accident (corona)
+
+The lease came at 22:06Z after about two hours in the queue, with a stack of work that
+had compiled and never run. The worry was that the stack would come apart at once. It
+mostly did not.
+
+**What the first boot of 891c44de0 showed.** MM-1a and MM-1b had been written without a
+boot and carried a prediction: 2182 + 10 + 3 + 3 = 2198. The suite printed `tests:
+2198/2198 PASS` (work/nov03-as4/r2/nora-1.transcript:2673), capacity-probe printed `ALL
+OK` over its account legs from EL0, and joey reaped it status 0. `ls-nora-stopped-copy`
+passed at attempt 1 in 213 s, and the fixture's closing line shows 3 sessions ended, 2
+stalled and no violations, so it reached the code it exists for. That also settles the
+fixture's post, which had been a reading since 19:29Z.
+
+**AS-4c, first boot, green at attempt 1, 585 s.** Physical F10 at each of 39 operations at
+both moments, nothing conferred, the value intact, the other path agreeing, and a bound
+connection down after every SAK. The table is the answer the 14:12:34Z entry was waiting
+for: a SAK before Bind is invisible; during a copy it is `CopyFailed(Lost)`; across the
+Commit it is `CopyUnknown`, with the value checked either way; during a paste it is one
+`Lost` and then recovery. The entry's own case is `after-39`: an idle connection's next
+use fails once. So one key fails after every trusted episode. That is real and it was
+written that way. A job with nothing answered could re-run on a fresh connection, but
+that changes a written rule, so it waits for a vote.
+
+**What failed.** `ls-ut-paste` was red at 3 of 3 attempts, at `head -n 1; echo ... | tr`:
+after the probe typed `go\r`, nothing more ran. The leg was checking that a command does
+not hold a fetch open, and that part passed. What it tripped over was older.
+`run_foreground_jc` wrote `CHILD_MODE` after the spawn, so for the length of a spawn the
+pts was still raw with `-icrnl`, and a mode write does not reinterpret bytes already in
+the ring. The Enter stayed a bare CR and `head` waited on a line that had ended. A person
+gets the same thing by typing `cat`, Enter, some text and Enter quickly. The doc comment
+said this was the real shell's shape and it was not: readline gives the tty back at
+accept, before it parses or spawns.
+
+The cause was read before it was measured, and the commit says so. d884110bc makes the
+write the first act of the Accept arm and keeps the pts cooked until the next prompt. The
+probe got a tail of the terminal's last bytes, because that failure had one line of
+evidence and took a long read. The fetch ends after the write, so the leg's order is by
+construction and needed no pause. What decides it: green at attempt 1 with the fix, and
+with only that line removed red by name, the tail ending in `go` and one stray byte. The
+other two mutants of that stretch, `accepted()` gone and `self.paste_wanted = false` gone,
+were red by name too (work/nov03-as4/r2/mutants-1.log).
+
+**Not done, and not to be read as done.** No push: the default build's suite has not run
+on this tip, and every 2198 above is a qualification image. Four more both-ways runs are
+written and not run, the MM-1 harness has 24 mutants and has only been dry-run, and audit
+round 3 was started read-only as the lease went back. Nothing here says anything about
+the hot-path cost of the ledger, which is still unmeasured.
+
 ## 2026-11-03 -- a watching ledger written while the mac was queued (corona)
 
 The mac queue ran behind aux and main for the whole of this stretch, so nothing in it has
