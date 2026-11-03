@@ -33,7 +33,7 @@ convention is the whole mapping; a module whose note is named otherwise
 reads as missing, which is the intended pressure.
 
 <!-- generated:begin -->
-**52 dossiered · 2 missing · 54 modules.**
+**53 dossiered · 2 missing · 55 modules.**
 
 | module | spec note | state |
 |---|---|---|
@@ -88,6 +88,7 @@ reads as missing, which is the intended pressure.
 | territory.tla | [[spec-territory]] | dossiered |
 | territory_shed.tla | [[spec-territory-shed]] | dossiered |
 | thread_reap.tla | [[spec-thread-reap]] | dossiered |
+| torpor.tla | [[spec-torpor]] | dossiered |
 | tsleep.tla | [[spec-tsleep]] | dossiered |
 | weft.tla | [[spec-weft]] | dossiered |
 | weft_readiness.tla | [[spec-weft-readiness]] | dossiered |

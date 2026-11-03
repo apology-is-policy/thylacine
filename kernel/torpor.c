@@ -7,31 +7,27 @@
 //
 // Mechanism:
 //
-//   - One global `torpor_lock` (a `spin_lock_t`) protects the wait
-//     queue + the per-waiter `awoken` flag. Hash table of 64 buckets
-//     keyed by `hash(Proc *, user_va)`. Each bucket is a singly-linked
-//     list of `struct torpor_waiter` records.
+//   - A table of buckets, each with its own lock, keyed by
+//     `hash(AddrSpace *, user_va)`. Each bucket is a list of
+//     `struct torpor_waiter` records, oldest first.
 //   - Each waiter has its own `struct Rendez` for the actual sleep
 //     transition. `tsleep` provides the timed/cond-checked sleep
 //     primitive; the `awoken` flag is the cond.
-//   - WAIT: take `torpor_lock`, `uaccess_load_u32` the futex word, if
-//     `!= expected` unlock + return 0; else link the stack-allocated
-//     waiter into its bucket, drop `torpor_lock`, `tsleep` on the
-//     waiter's private rendez; on resume re-take `torpor_lock`,
-//     unlink, unlock, return.
-//   - WAKE: take `torpor_lock`, walk the matching bucket, for each
-//     waiter whose `(proc, user_va)` matches AND whose `awoken` is
-//     still 0: set `awoken = 1` and call `wakeup(&waiter->rendez)`.
-//     Drop `torpor_lock`.
+//   - WAIT: take the bucket's lock, `uaccess_load_u32` the futex word,
+//     if `!= expected` unlock + return 0; else append the stack-allocated
+//     waiter to its bucket, drop the lock, `tsleep` on the waiter's
+//     private rendez; on resume re-take the lock, unlink if still linked,
+//     unlock, wait for any waker still holding the record, return.
+//   - WAKE: under the bucket's lock, walk from the oldest. For each
+//     waiter whose `(as, user_va)` matches: set `awoken` and unlink it.
+//     One found asleep is counted and joins a batch. Drop the lock, then
+//     `wakeup` the batch.
 //
-// Lock order: `torpor_lock` → `waiter->rendez.lock` (only WAKE ever
-// takes both; the consumer takes `torpor_lock` then RELEASES it before
-// entering `tsleep`, so it never holds both simultaneously). No
-// inversion possible.
+// Lock order: bucket lock -> `waiter->rendez.lock`. The consumer drops the
+// bucket lock before entering `tsleep`, so it never holds both. Bucket locks
+// never nest.
 //
-// The no-lost-wakeup invariant is validated by reasoning, not a TLA+
-// model — see `<thylacine/torpor.h>` for the proof sketch (CLAUDE.md
-// "Spec-to-code suspended", 2026-05-23 broadening).
+// specs/torpor.tla models the wake and the record's lifetime.
 
 #include <thylacine/torpor.h>
 
@@ -52,10 +48,14 @@
 // the "lifetime" note in WAIT below).
 struct torpor_waiter {
     struct Rendez         rendez;       // private rendez for the sleep
-    struct Proc          *proc;         // owner Proc (key component 1)
+    struct Proc          *proc;         // whose death and stop walks reach it
+    struct AddrSpace     *as;           // key component 1
     u64                   user_va;      // address being waited on (k2)
-    struct torpor_waiter *next;         // bucket-chain link
+    struct torpor_waiter *next;         // bucket chain, or a waker's batch
+    struct torpor_waiter *prev;         // bucket chain
+    u32                   linked;       // on its bucket's chain; under its lock
     u32                   awoken;       // 0 sleeping, 1 woken (tsleep cond)
+    u32                   wake_held;    // a waker's batch still holds this record
     u32                   _pad;         // explicit alignment padding
 };
 
@@ -67,48 +67,61 @@ struct torpor_waiter {
 _Static_assert(sizeof(struct torpor_waiter) % 8 == 0,
                "struct torpor_waiter must be 8-byte aligned");
 
-static spin_lock_t           torpor_lock = SPIN_LOCK_INIT;
-static struct torpor_waiter *torpor_buckets[TORPOR_HASH_BUCKETS];
+struct torpor_bucket {
+    spin_lock_t           lock;
+    struct torpor_waiter *head;         // oldest
+    struct torpor_waiter *tail;         // newest
+} __attribute__((aligned(64)));
 
-// Hash `(Proc *, user_va) -> bucket index`. The Proc pointer's low
-// bits carry SLUB-slot identity (Procs come from the proc kmem cache)
-// and the user_va's middle bits hold the dominant variation across
-// pthread-call sites (the per-thread mutex word is a heap offset).
-// XOR'ing the two with a >>3 user-VA shift (drop the within-word bits)
-// gives a workable v1.0 hash. v1.x can pick a smarter hash if
-// `pouch-threads` shows bucket-imbalance.
-static inline u32 torpor_hash(struct Proc *p, u64 user_va) {
-    u64 mix = (u64)(uintptr_t)p ^ (user_va >> 3);
-    return (u32)mix & (TORPOR_HASH_BUCKETS - 1u);
+static struct torpor_bucket torpor_buckets[TORPOR_HASH_BUCKETS];
+
+// The address space's pointer has its low bits fixed by the allocator, and a
+// futex word's are fixed by its alignment. A multiplicative mix moves what
+// varies into the high half, where the mask reads.
+static inline struct torpor_bucket *torpor_bucket_of(const struct AddrSpace *as, u64 user_va) {
+    u64 mix = ((u64)(uintptr_t)as ^ (user_va >> 2)) * 0x9E3779B97F4A7C15ull;
+    return &torpor_buckets[(u32)(mix >> 32) & (TORPOR_HASH_BUCKETS - 1u)];
 }
 
 // tsleep condition: woken iff `waiter->awoken != 0`. Called by tsleep
-// under `waiter->rendez.lock`; ordering of the awoken set (under
-// `torpor_lock`) vs. this read is established by the WAKE-side's
-// `wakeup(&waiter->rendez)` call (which acquires/releases
-// `waiter->rendez.lock` itself), pairing release-acquire with this
-// cond's read.
+// under `waiter->rendez.lock`, and every waker sets it under that lock, so
+// the read is exact: a waiter that resumes reads what a wake's mark wrote.
 static int torpor_cond_awoken(void *arg) {
     const struct torpor_waiter *w = (const struct torpor_waiter *)arg;
     return (int)w->awoken;
 }
 
-// Unlink `w` from its bucket. Caller must hold `torpor_lock`. Safe to
-// call when `w` is already unlinked (a NULL bucket head or `w` not in
-// the chain) — quiet no-op. Used by both the consumer's post-tsleep
-// path and the early-exit fast paths.
-static void torpor_bucket_unlink_locked(struct torpor_waiter *w) {
-    u32 idx = torpor_hash(w->proc, w->user_va);
-    struct torpor_waiter **pp = &torpor_buckets[idx];
-    while (*pp != NULL) {
-        if (*pp == w) {
-            *pp = w->next;
-            w->next = NULL;
-            return;
-        }
-        pp = &(*pp)->next;
-    }
-    // Already unlinked — fall through.
+static void torpor_append_locked(struct torpor_bucket *b, struct torpor_waiter *w) {
+    w->next = NULL;
+    w->prev = b->tail;
+    if (b->tail) b->tail->next = w; else b->head = w;
+    b->tail = w;
+    w->linked = 1;
+}
+
+// A waiter a wake has already taken off the chain is a quiet no-op.
+static void torpor_unlink_locked(struct torpor_bucket *b, struct torpor_waiter *w) {
+    if (!w->linked) return;
+    if (w->prev) w->prev->next = w->next; else b->head = w->next;
+    if (w->next) w->next->prev = w->prev; else b->tail = w->prev;
+    w->next = NULL;
+    w->prev = NULL;
+    w->linked = 0;
+}
+
+// Set the cond under the rendez's lock, and answer whether the waiter is asleep on
+// it. One that is asleep will read the mark when it resumes: its deadline and a caught
+// note both ask the cond first, and only death goes before it. So it has taken this
+// wake, whichever of them gets to it first. One that is not asleep may be past its
+// wait, on its way out with a timeout or an EINTR, and has taken nothing. The lock's
+// release is also what delivers the mark to a waiter a stop has parked, on its
+// re-read (PTY-4e R2): this replaces the wakeup() that used to carry it.
+static bool torpor_mark_awoken(struct torpor_waiter *w) {
+    irq_state_t s = spin_lock_irqsave(&w->rendez.lock);
+    bool asleep = w->rendez.waiter != NULL;
+    w->awoken = 1;
+    spin_unlock_irqrestore(&w->rendez.lock, s);
+    return asleep;
 }
 
 // Validate the addr_va arg shared by WAIT + WAKE: must be 4-byte
@@ -166,24 +179,30 @@ s64 sys_torpor_wait_for_proc(struct Proc *p, u64 addr_va, u32 expected,
     // Stack-allocated per-call waiter. Initialise rendez + awoken
     // BEFORE linking into the bucket (registers are still in the
     // current_thread()'s frame — no other CPU can see the waiter
-    // until we publish it under torpor_lock).
+    // until we publish it under the bucket's lock). `p` is the caller's own,
+    // and every thread of a Proc is gone before an exec swaps its space, so
+    // the key stays this record's for its whole life.
     struct torpor_waiter w;
     rendez_init(&w.rendez);
-    w.proc    = p;
-    w.user_va = addr_va;
-    w.next    = NULL;
-    w.awoken  = 0;
-    w._pad    = 0;
+    w.proc      = p;
+    w.as        = p->as;
+    w.user_va   = addr_va;
+    w.next      = NULL;
+    w.prev      = NULL;
+    w.linked    = 0;
+    w.awoken    = 0;
+    w.wake_held = 0;
+    w._pad      = 0;
+    struct torpor_bucket *b = torpor_bucket_of(w.as, addr_va);
 
-    // REVENANT R-5 audit F1: fault the futex word in BEFORE taking torpor_lock.
+    // REVENANT R-5 audit F1: fault the futex word in BEFORE taking the bucket's lock.
     // Pre-REVENANT every user page was eager-anon, so the under-lock
     // uaccess_load_u32 below could fault but never SLEEP (the ANON demand-page arm
     // allocs + installs in place). REVENANT adds file-backed (BURROW_TYPE_FILE)
     // text VMAs whose demand-page does a BLOCKING dev->read; a crafted
     // torpor_wait(addr = an unfaulted text VA) would make the under-lock load sleep
-    // on that 9P read while holding the GLOBAL torpor_lock -> a system-wide futex
-    // stall (every CPU in torpor_wait/torpor_wake busy-spins on the lock; a wedged
-    // FS makes it permanent). Pre-faulting outside the lock makes the page resident
+    // on that 9P read while holding the lock -> a stall for everything hashed there
+    // (a wedged FS makes it permanent). Pre-faulting outside the lock makes the page resident
     // + its PTE installed, so the under-lock load cannot fault-and-sleep; a
     // concurrent unmap in the window makes the under-lock load -EFAULT (no VMA ->
     // the sleeping FILE arm is never reached), handled there. FILE pages are not
@@ -205,18 +224,18 @@ s64 sys_torpor_wait_for_proc(struct Proc *p, u64 addr_va, u32 expected,
         // `expected` and changed to != between this load and now) returning
         // TORPOR_OK is a benign spurious return the futex contract permits --
         // the caller re-evaluates its own predicate. Returning here WITHOUT
-        // touching torpor_lock removes the global-lock acquire from every
+        // touching a bucket's lock removes that acquire from every
         // osyield (torpor_wait(&sleepDummy, 1, 1)), the #343 go-build floor:
         // 36.8M of the 67.7M torpor_wait calls are this mismatch path, all on
-        // the single sleepDummy address (one bucket -- per-bucket locking can
-        // never shard them, so the lock-free skip is the only fix).
+        // the single sleepDummy address (one bucket, which a lock per bucket
+        // cannot shard, so the lock-free skip is the fix).
         if (prefault != expected)
             return TORPOR_OK;
     }
 
-    spin_lock(&torpor_lock);
+    spin_lock(&b->lock);
 
-    // Load the user-VA word and compare under torpor_lock. The lock
+    // Load the user-VA word and compare under the bucket's lock. The lock
     // serialises with WAKE's same-lock walk: either WAKE's unlock has
     // happened-before this lock (and we see the producer's pre-WAKE
     // store via the lock release/acquire chain — load returns the new
@@ -225,7 +244,7 @@ s64 sys_torpor_wait_for_proc(struct Proc *p, u64 addr_va, u32 expected,
     // bucket — WAKE delivers the wakeup).
     u32 observed = 0;
     if (uaccess_load_u32(addr_va, &observed) != 0) {
-        spin_unlock(&torpor_lock);
+        spin_unlock(&b->lock);
         return TORPOR_ERR_EFAULT;
     }
     if (observed != expected) {
@@ -234,25 +253,24 @@ s64 sys_torpor_wait_for_proc(struct Proc *p, u64 addr_va, u32 expected,
         // reload. Still correct -- no waiter is registered, caller
         // re-evaluates. (Pre-#343 this was the common osyield path; the
         // lock-free compare above now catches nearly all of them.)
-        spin_unlock(&torpor_lock);
+        spin_unlock(&b->lock);
         return TORPOR_OK;
     }
 
-    // Register: link the waiter at the bucket head. We publish the
-    // waiter under torpor_lock so WAKE's walk sees it; until we drop
-    // torpor_lock, WAKE cannot proceed past its own lock acquire.
-    u32 idx = torpor_hash(p, addr_va);
-    w.next = torpor_buckets[idx];
-    torpor_buckets[idx] = &w;
+    // Register: the newest waiter goes last, and a wake takes the oldest
+    // first (Linux's futex order within a priority). Under this lock, so WAKE's
+    // walk sees it.
+    torpor_append_locked(b, &w);
 
     // SYS_EXIT_GROUP / kill cross-thread shootdown lost-wakeup close (I-24).
-    // Re-check the death predicate AFTER registering, UNDER torpor_lock --
-    // the same lock proc_group_terminate's torpor_wake_all walk takes. This
+    // Re-check the death predicate AFTER registering, UNDER the bucket's lock --
+    // a lock proc_group_terminate's torpor_wake_all walk takes on its way through
+    // every bucket, this one included. This
     // makes the wake airtight against the register-vs-walk race:
     //   - if we registered BEFORE the wake-all walk, the walk finds us +
     //     wakes us (awoken=1) -> tsleep returns immediately;
     //   - if we register AFTER the walk (it missed us), then the flag-set
-    //     happened-before the walk, the walk released torpor_lock, and we
+    //     happened-before the walk, the walk released this lock, and we
     //     acquired it to register -- so this acquire-load observes the set
     //     flag here and we do NOT sleep.
     // Either way a group-terminating Proc's futex sleeper does not sleep
@@ -261,13 +279,13 @@ s64 sys_torpor_wait_for_proc(struct Proc *p, u64 addr_va, u32 expected,
     // LS-5c (ARCH 8.8.2): widened to thread_die_pending (group-exit death OR
     // a pending terminate-disposition `interrupt`). For the interrupt leg
     // this early-exit is conservative-prompt, not the I-9 closure -- the
-    // interrupt waker (proc_interrupt_terminate_wake) does NOT take
-    // torpor_lock; its register-after-walk race is closed one layer down by
+    // interrupt waker (proc_interrupt_terminate_wake) takes no bucket's
+    // lock; its register-after-walk race is closed one layer down by
     // tsleep's own register-then-observe under wait_lock (the torpor waiter's
     // stack rendez is reachable via rendez_blocked_on for the wake itself).
     if (thread_die_pending(current_thread())) {
-        torpor_bucket_unlink_locked(&w);
-        spin_unlock(&torpor_lock);
+        torpor_unlink_locked(b, &w);
+        spin_unlock(&b->lock);
         return TORPOR_OK;
     }
 
@@ -280,7 +298,7 @@ s64 sys_torpor_wait_for_proc(struct Proc *p, u64 addr_va, u32 expected,
         // observe TSLEEP_TIMEDOUT on entry unless awoken is already
         // set (a same-CPU producer could not, since we hold the lock;
         // a cross-CPU producer that was already mid-walk would have
-        // blocked on torpor_lock above and runs after we drop it).
+        // blocked on this lock above and runs after we drop it).
         // We must drop the lock before tsleep — see below.
         u64 now = timer_now_ns();
         deadline_ns = (now == 0) ? 1 : now;     // 0 reads as "no deadline"
@@ -294,7 +312,7 @@ s64 sys_torpor_wait_for_proc(struct Proc *p, u64 addr_va, u32 expected,
     }
     // timeout_us < 0 leaves deadline_ns = 0 → tsleep == sleep.
 
-    spin_unlock(&torpor_lock);
+    spin_unlock(&b->lock);
 
     // tsleep: blocks on w.rendez until torpor_cond_awoken(&w) returns
     // non-zero OR the deadline lapses. cond is checked under
@@ -303,23 +321,31 @@ s64 sys_torpor_wait_for_proc(struct Proc *p, u64 addr_va, u32 expected,
     // between our register and our tsleep" race is benign).
     //
     // A caught note (ARCH 8.8.3) unwinds the wait only while w.awoken is clear
-    // (its arm tests the cond first). A WAKE counts a waiter only when wakeup()
-    // found it registered, and a registered waiter's resume reads awoken set,
-    // so a counted wake is never lost to EINTR; an uncounted mark leaves the
-    // walk going on to the next waiter.
+    // (its arm tests the cond first). A WAKE counts a waiter only when its mark
+    // found it asleep, and a sleeper's resume reads awoken set, so a counted wake
+    // is never lost to EINTR; an uncounted mark leaves the walk going on to the
+    // next waiter.
     int sleep_rc = tsleep_noteintr(&w.rendez, torpor_cond_awoken, &w, deadline_ns);
 
-    // Re-take torpor_lock to unlink. Lifetime invariant: this MUST
+    // Re-take the bucket's lock to unlink. Lifetime invariant: this MUST
     // happen on every return path that reached the bucket-publish
     // step; the waiter's address (a stack local) must not outlive
     // this frame in the bucket chain.
-    spin_lock(&torpor_lock);
-    torpor_bucket_unlink_locked(&w);
+    spin_lock(&b->lock);
+    torpor_unlink_locked(b, &w);
+    spin_unlock(&b->lock);
+
+    // A wake that took this record off the chain may not have reached it yet, and
+    // the record is this frame. wake_held is written under the lock just dropped, so
+    // this load sees any wake that took the record. The waker is non-preemptible until
+    // it clears it, so this spin is bounded by a running thread.
+    while (__atomic_load_n(&w.wake_held, __ATOMIC_ACQUIRE))
+        __asm__ __volatile__("yield" ::: "memory");
+
     // Defense-in-depth: scribble the rendez pointer to NULL so a
     // future use-after-stack-return would null-deref instead of
     // walking dirty stack memory.
     w.rendez.waiter = NULL;
-    spin_unlock(&torpor_lock);
 
     if (sleep_rc == TSLEEP_TIMEDOUT) return TORPOR_ERR_ETIMEDOUT;
     if (sleep_rc == TSLEEP_NOTEINTR) return TORPOR_ERR_EINTR;
@@ -335,11 +361,34 @@ s64 sys_torpor_wait_for_proc(struct Proc *p, u64 addr_va, u32 expected,
     return TORPOR_OK;
 }
 
+#ifdef KERNEL_TESTS
+// Test hook: a wake with a batch waits here, its marks made and the bucket's lock
+// dropped, until the stall is lifted or its budget runs out, which is the window a
+// batch holds records it has not reached. Holds no lock, and stays non-preemptible,
+// so a test on one CPU cannot use it.
+#define TORPOR_STALL_BUDGET_NS 2000000000ull
+static volatile bool g_torpor_stall, g_torpor_stalled;
+void torpor_stall_wakes_for_test(bool on) {
+    __atomic_store_n(&g_torpor_stall, on, __ATOMIC_RELEASE);
+}
+bool torpor_wake_stalled_for_test(void) {
+    return __atomic_load_n(&g_torpor_stalled, __ATOMIC_ACQUIRE);
+}
+static void torpor_wake_stall_point(void) {
+    if (!__atomic_load_n(&g_torpor_stall, __ATOMIC_ACQUIRE)) return;
+    __atomic_store_n(&g_torpor_stalled, true, __ATOMIC_RELEASE);
+    u64 dl = timer_now_ns() + TORPOR_STALL_BUDGET_NS;
+    while (__atomic_load_n(&g_torpor_stall, __ATOMIC_ACQUIRE) && timer_now_ns() < dl)
+        __asm__ __volatile__("yield" ::: "memory");
+    __atomic_store_n(&g_torpor_stalled, false, __ATOMIC_RELEASE);
+}
+#endif
+
 s64 sys_torpor_wake_for_proc(struct Proc *p, u64 addr_va, u32 count) {
     if (!p)                                    return TORPOR_ERR_EINVAL;
     if (!torpor_addr_va_ok(addr_va))           return TORPOR_ERR_EINVAL;
-    // F7 (P3): `count == 0` is a literal no-op — it does NOT take
-    // `torpor_lock`, so it does NOT serve as a memory barrier between
+    // F7 (P3): `count == 0` is a literal no-op — it does NOT take the
+    // bucket's lock, so it does NOT serve as a memory barrier between
     // a producer's preceding user-side store and a consumer's
     // subsequent WAIT-side load. Producers MUST NOT rely on
     // `WAKE(addr, 0)` for any memory-ordering effect; use a real
@@ -347,56 +396,54 @@ s64 sys_torpor_wake_for_proc(struct Proc *p, u64 addr_va, u32 count) {
     // atomic-release for pure announce-without-wake semantics.
     if (count == 0)                            return 0;
 
+    const struct AddrSpace *as = p->as;
+    struct torpor_bucket   *b  = torpor_bucket_of(as, addr_va);
+    struct torpor_waiter   *batch = NULL, **batch_tail = &batch;
     u32 woken = 0;
-    spin_lock(&torpor_lock);
 
-    // Walk the matching bucket. For each unwokken waiter on
-    // `(p, addr_va)`: mark awoken + try to wake its private rendez.
-    // We leave the waiter linked — the consumer unlinks on its own
-    // post-tsleep path. Subsequent WAKE walks skip already-woken
-    // waiters via the `awoken == 0` filter.
+    // Non-preemptible from the first mark to the last clear of wake_held: a waiter
+    // spins on that clear, and it must be waiting for a running thread.
+    spin_preempt_inc();
+    spin_lock(&b->lock);
+
+    // F1 (P2 audit fix): the count reflects ACTUAL wakeups. A waiter past its
+    // wait, its deadline lapsed or a note taken, is marked and unlinked and not
+    // counted, and the walk goes on to the next: the user-side outcome is "this
+    // wake went to whoever else was asleep", as it should be. The pthread re-check
+    // discipline absorbs a waiter marked before it slept, which returns at once.
     //
-    // F1 (P2 audit fix): the count reflects ACTUAL wakeups (waiters
-    // that wakeup() transitioned from SLEEPING to RUNNABLE), not just
-    // "matched waiters whose awoken flag we set". A waiter whose
-    // tsleep already lapsed on its own deadline (timerwait_tick wake)
-    // has r->waiter == NULL by the time we get here — wakeup() returns
-    // 0 and we do NOT count it. The user-side outcome is then "wake
-    // call says 0 delivered, consumer returns ETIMEDOUT" — accurate.
-    // (Pre-fix the count overstated by one in the timer-wake-first
-    // race.) The `awoken = 1` flag is still set so a subsequent post-
-    // sched cond check returns AWOKEN if the consumer hasn't yet
-    // re-evaluated cond + sleep_timedout — the pthread re-check
-    // discipline absorbs that case.
-    //
-    // Bounded by `count`; the common pthread_cond_broadcast case
-    // passes UINT32_MAX (wake everyone). The walk visits at most the
-    // bucket length, which at v1.0 stays small (Procs are single-
-    // threaded; under multi-thread contention a bucket holds at most
-    // one per Proc/VA pair plus a small set of stragglers if the
-    // hash is uneven).
-    //
-    // F2 (P2 audit, documented hazard): `wakeup()` may call
-    // `wake_rendez_waiter`, which spins on the woken thread's `on_cpu`
-    // waiting for a peer CPU's context-switch-out to drain. We hold
-    // `torpor_lock` across that spin — under heavy multi-Proc
-    // contention this serializes everyone. v1.0 is single-Proc-mostly
-    // so the hazard is dormant; v1.x can split torpor_lock per-bucket
-    // OR adopt a two-pass "mark-and-list under lock, dispatch wakes
-    // after lock-drop" pattern. See Known caveats in
-    // `docs/reference/80-torpor.md`.
-    u32 idx = torpor_hash(p, addr_va);
-    for (struct torpor_waiter *w = torpor_buckets[idx];
-         w != NULL && woken < count;
-         w = w->next) {
-        if (w->proc != p)              continue;
+    // Bounded by `count`; the common pthread_cond_broadcast case passes
+    // UINT32_MAX. The walk visits at most the bucket's length, once, under one
+    // hold, so a thread re-waiting in a loop cannot keep it going.
+    for (struct torpor_waiter *w = b->head, *n; w != NULL && woken < count; w = n) {
+        n = w->next;
+        if (w->as != as)               continue;
         if (w->user_va != addr_va)     continue;
         if (w->awoken)                 continue;
-        w->awoken = 1;
-        if (wakeup(&w->rendez)) woken++;
+        bool asleep = torpor_mark_awoken(w);
+        torpor_unlink_locked(b, w);
+        if (!asleep) continue;
+        __atomic_store_n(&w->wake_held, 1u, __ATOMIC_RELAXED);
+        *batch_tail = w;
+        batch_tail  = &w->next;
+        woken++;
     }
+    spin_unlock(&b->lock);
+#ifdef KERNEL_TESTS
+    if (batch) torpor_wake_stall_point();
+#endif
 
-    spin_unlock(&torpor_lock);
+    // wakeup() may spin on a waiter's on_cpu until its CPU has switched it out
+    // (ARCH 8.8), and a woken waiter's first act is to come for this bucket's lock.
+    // So neither happens under it. Each record stays alive for this because its
+    // waiter waits for the clear. Read `next` first: after the clear it may be gone.
+    while (batch) {
+        struct torpor_waiter *w = batch;
+        batch = w->next;
+        (void)wakeup(&w->rendez);
+        __atomic_store_n(&w->wake_held, 0u, __ATOMIC_RELEASE);
+    }
+    spin_preempt_dec();
     return (s64)woken;
 }
 
@@ -404,25 +451,25 @@ s64 sys_torpor_wake_for_proc(struct Proc *p, u64 addr_va, u32 count) {
 // Wake EVERY torpor waiter owned by `p`, regardless of the address waited on,
 // so each returns from sys_torpor_wait_for_proc to its EL0-return die-check.
 // Called by proc_group_terminate AFTER it sets p->group_exit_msg. Walks all
-// buckets -- the group-exit path is rare + not address-keyed (unlike the
-// per-(proc,addr) WAKE). Same awoken-flag + wakeup() discipline as
-// sys_torpor_wake_for_proc; the register-after-this-walk lost-wakeup is closed
-// by the post-register group_exit_msg check in sys_torpor_wait_for_proc. Same
-// F2 hazard as the per-address wake (holds torpor_lock across wakeup()'s
-// on_cpu spin); dormant at v1.0, the v1.x per-bucket split applies uniformly.
+// buckets, one lock at a time -- the group-exit path is rare + not address-keyed
+// (unlike the per-address WAKE). The register-after-this-walk lost-wakeup is closed
+// by the post-register group_exit_msg check in sys_torpor_wait_for_proc, under the
+// same bucket's lock. The waiter stays linked, and the lock held across wakeup() is
+// what keeps its record alive: it must take that lock to leave. A rare walk may hold
+// one bucket across an on_cpu spin, which WAKE, the hot path, does not.
 void torpor_wake_all_for_proc(struct Proc *p) {
     if (!p) return;
-    spin_lock(&torpor_lock);
     for (u32 idx = 0; idx < TORPOR_HASH_BUCKETS; idx++) {
-        for (struct torpor_waiter *w = torpor_buckets[idx];
-             w != NULL; w = w->next) {
+        struct torpor_bucket *b = &torpor_buckets[idx];
+        spin_lock(&b->lock);
+        for (struct torpor_waiter *w = b->head; w != NULL; w = w->next) {
             if (w->proc != p) continue;
             if (w->awoken)    continue;
-            w->awoken = 1;
+            (void)torpor_mark_awoken(w);
             (void)wakeup(&w->rendez);
         }
+        spin_unlock(&b->lock);
     }
-    spin_unlock(&torpor_lock);
 }
 
 // The STOP cascade's non-completing wake (contract in torpor.h). Identical
@@ -432,18 +479,16 @@ void torpor_wake_all_for_proc(struct Proc *p) {
 // wait preserved. wakeup() re-validates r->waiter under r->lock, so a waiter
 // already woken (or mid-transition) is a safe no-op; the stack waiter is
 // pinned by its bucket link (unlinked only after its own tsleep returns).
-// Same F2 hazard note as the death walk (torpor_lock held across wakeup's
-// on_cpu spin); the same v1.x per-bucket split applies uniformly.
 void torpor_stop_wake_all_for_proc(struct Proc *p) {
     if (!p) return;
-    spin_lock(&torpor_lock);
     for (u32 idx = 0; idx < TORPOR_HASH_BUCKETS; idx++) {
-        for (struct torpor_waiter *w = torpor_buckets[idx];
-             w != NULL; w = w->next) {
+        struct torpor_bucket *b = &torpor_buckets[idx];
+        spin_lock(&b->lock);
+        for (struct torpor_waiter *w = b->head; w != NULL; w = w->next) {
             if (w->proc != p) continue;
             if (w->awoken)    continue;
             (void)wakeup(&w->rendez);
         }
+        spin_unlock(&b->lock);
     }
-    spin_unlock(&torpor_lock);
 }

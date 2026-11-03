@@ -2081,7 +2081,7 @@ void thread_exit_self(void);
 //
 // LOCK CONTRACT (#811, C3): the caller MUST hold g_proc_table_lock and no
 // threads_lock. The claim, the stashes and the p->threads walk run inside
-// p->threads_lock, taken here; the walk then takes torpor_lock + per-peer
+// p->threads_lock, taken here; the walk then takes the torpor bucket locks + per-peer
 // wait_lock + (via wakeup) rendez/timerwait locks, all below it in the order.
 //
 // gcpark-b: `sig` is the POSIX signal the termination records (notes.h
@@ -2471,7 +2471,7 @@ void        proc_table_lock_release(irq_state_t s);
 void proc_wake_or_owe(struct poll_owed *o);
 
 // p->threads_lock (thread-model C3, ARCH 7.3.1). Order: g_proc_table_lock ->
-// threads_lock -> {t->wait_lock, torpor_lock}. Never two threads_locks on one
+// threads_lock -> {t->wait_lock, a torpor bucket's lock}. Never two threads_locks on one
 // CPU: cross-Proc work holds g_proc_table_lock and takes each Proc's lock in
 // turn. Under KERNEL_TESTS a per-CPU slot names the held lock -- a second
 // acquire extincts, and ASSERT_TL_HELD(p) extincts unless this CPU holds p's.

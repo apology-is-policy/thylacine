@@ -34,6 +34,7 @@ Generated from note fields — do not edit between the markers
 | [[seam-pouch-spawn-envp]] | closed | sub-pouch-process | chg-2026-07-23-cl1b-process | CL-1b |
 | [[seam-scripture-invariant-mirror-drift]] | closed | inv-i32 | chg-2026-08-16-i32-scope-correction | unfiled -- yip to main 2026-08-16 |
 | [[seam-srv-registry-lifecycle]] | closed | sub-kernel-devsrv | chg-2026-05-19-srv-birth |  |
+| [[seam-torpor-lock-wake-spin]] | closed | sub-kernel-torpor | chg-2026-05-23-torpor | torpor-8 audit F2 (P2, documented) |
 | [[seam-union-mount-walk]] | closed | sub-kernel-territory, sub-kernel-stalk | chg-2026-05-13-p5-attach-mount | unfiled |
 | [[seam-wb-close-flush-slot]] | closed | sub-kernel-ninep-dev9p | chg-2026-07-11-wb-staging |  |
 | [[seam-220-netd-listener-poll]] | open | sub-netd-server | chg-2026-06-18-net6b-poll-bridge | task #220 |
@@ -115,7 +116,6 @@ Generated from note fields — do not edit between the markers
 | [[seam-tickless-bare-metal]] | open | sub-kernel-sched-smp | chg-2026-06-22-ti4-work-conservation | owed at Lazarus / RPi |
 | [[seam-timerwait-sharding]] | open | sub-kernel-rendez | chg-2026-05-17-p5-tsleep | documented future optimization |
 | [[seam-torpor-cross-proc]] | open | sub-kernel-torpor | chg-2026-05-23-torpor | POUCH-DESIGN section 7, Tier-2 burrows |
-| [[seam-torpor-lock-wake-spin]] | open | sub-kernel-torpor | chg-2026-05-23-torpor | torpor-8 audit F2 (P2, documented) |
 | [[seam-torpor-reclaim-uaccess]] | open | sub-kernel-torpor | chg-2026-07-04-torpor-lockfree | REVENANT R-5 F1 close; REVENANT section 9 |
 | [[seam-viv-tier2-frame]] | open | sub-kernel-syscall-abi, sub-kernel-vivarium | chg-2026-09-22-arch81-scripture | ARCH 8.1 prerequisite |
 | [[seam-warp-prove-unowned]] | open | sub-tapestryd | chg-2026-08-19-v3a-ring | V-3a coherent-ring doc pass, 2026-08-19 |

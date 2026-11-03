@@ -4289,7 +4289,7 @@ void proc_threads_unlock(struct Proc *p, irq_state_t s) {
 // unmapped tidptr silently skips the wake without extinction.
 //
 // The store-then-wake order matters: the joiner's torpor_wait re-checks
-// the user word inside torpor_lock; the lock acquire pairs with this
+// the user word inside its bucket's lock; the lock acquire pairs with this
 // store's preceding lock-release sequence (the producer side of the
 // Linux-futex discipline). Same as torpor's standard producer pattern.
 static void thread_clear_child_tid_handoff(struct Thread *t, struct Proc *p) {
@@ -5009,7 +5009,7 @@ static void exits_term(int code, int sig, const char *msg) {
     // torpor_wake observes a consistent state -- the EXITING write is visible
     // through the unlock's release, paired with the joiner's acquire of any
     // synchronizing lock. It runs with no lock held (torpor_wake takes
-    // torpor_lock); its store may fault but never sleeps (demand_page_locked).
+    // a bucket's lock); its store may fault but never sleeps (demand_page_locked).
     thread_clear_child_tid_handoff(t, p);
 
     // Yield. Will not return — we're EXITING, sched() doesn't re-insert,
@@ -5159,7 +5159,7 @@ void thread_exit_self(void) {
     // F3 audit close: the clear-child-tid handoff runs HERE, after the EXITING
     // commit, so a joiner that reads the zeroed word finds us EXITING -- every
     // live-peer decision relies on it --
-    // and with no lock held (torpor_wake takes torpor_lock). The store may
+    // and with no lock held (torpor_wake takes a bucket's lock). The store may
     // fault but never sleeps: demand_page_locked refuses a thread that is not
     // RUNNING the one page-in that would.
     thread_clear_child_tid_handoff(t, p);
@@ -5227,7 +5227,7 @@ static _Alignas(16) const u8 g_fp_zero_area[FP_AREA_SIZE];
 // AFTER the publish: a thread that registers after the walk re-observes the
 // death in its post-register check (register-then-observe; I-9).
 //
-// First every futex (torpor) sleeper; torpor_lock is strictly below
+// First every futex (torpor) sleeper; a torpor bucket's lock is strictly below
 // threads_lock. Then EVERY thread blocked in a sleep()/tsleep() Rendez sleep,
 // so it returns *_INTR -- which closed the 7.9.1 residual where an indefinite
 // poll(-1) / pipe / devnotes_read sleeper was never woken and its Proc never
@@ -6133,7 +6133,7 @@ int proc_stop_sleeper_park(struct Thread *t) {
 // r->waiter under r->lock, so a peer already woken (or by torpor_wake_all) is
 // a safe no-op; wait_lock held across wakeup pins a torpor waiter's stack
 // rendez. LOCK CONTRACT: caller holds p->threads_lock (pins p->threads); order
-// threads_lock -> wait_lock -> (wakeup: r->lock); torpor_lock strictly below
+// threads_lock -> wait_lock -> (wakeup: r->lock); a torpor bucket's lock strictly below
 // threads_lock. The EL0-running-peer IPI kick
 // is SEPARATE (smp_resched_others below) -- it is group-GLOBAL (a broadcast to
 // every online CPU), so a fan-out over N members issues it ONCE after the walk
@@ -6378,7 +6378,7 @@ static void proc_birth_hold_orphan_rule_locked(struct Proc *p) {
 // (job_stop_req), per-owner set/clear (StopCompatI39 / BUGGY_DOUBLE_STOP).
 // All helpers run under g_proc_table_lock (the fan-outs take it; the
 // notes_post_pgrp precedent covers every nested edge: q->lock for the posts,
-// torpor_lock + wait_lock -> r->lock for the cascade, the poll-waiter list
+// a torpor bucket's lock + wait_lock -> r->lock for the cascade, the poll-waiter list
 // for the parent wake).
 // =============================================================================
 
