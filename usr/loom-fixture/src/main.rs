@@ -8,8 +8,8 @@
 // notify pipe. It posts "fixture" in the registry, writes 'R' to fd 2, and
 // serves every connection until fd 1 reaches EOF. Every session must then end
 // within SETTLE_NS: the probe has exited, so its rings are closed. A 'Q' read
-// from fd 1 asks for one 'Z' on fd 2 once no session is left. Nothing else is
-// ever written there: a probe sleeps by polling fd 2 while it stays empty.
+// from fd 1 asks for one 'Z' on fd 2 once no session is left. Fd 2 carries only
+// what a probe has asked for: a probe sleeps by polling it while it stays empty.
 //
 // Strict: each message below is one the kernel's client never sends, and it
 // counts a violation. Most answer Rlerror: anything before Tversion, a second
@@ -28,9 +28,14 @@
 // Hostile: each name in HOSTILE is the same server, with one fault at the first
 // message of one type. It holds the message unanswered, sends part of the reply
 // and stops, answers an impossible frame length or the wrong reply type, or hangs
-// up. `unaccepted` is posted and never accepted. A fault counts in FAULTS, which
+// up. `unaccepted` and `unaccepted-drop` are posted and never accepted: BACKLOG
+// has a bit per service, set while its listener polls readable, which tells a
+// CONNECT waiting there from one that never arrived. A fault counts in FAULTS, which
 // tells a probe's stalled operation from one that never reached the stage it
 // named. None of these is a violation: the kernel's client did nothing wrong.
+//
+// An 'E' on the control pipe asks for an 'e' on the notify pipe at the next session
+// end, for a probe whose full CQ rules out a stats read.
 //
 // Exit 76: no session was accepted (the default image). 77: at least one
 // session, every one ended, no violation. 1: a violation or a setup failure.
@@ -57,7 +62,7 @@ const REGISTRY: i64 = 0;
 const CONTROL: i64 = 1;
 const NOTIFY: i64 = 2;
 const NAME: &[u8] = b"fixture";
-const UNACCEPTED: &[u8] = b"unaccepted";
+const UNACCEPTED: [&[u8]; 2] = [b"unaccepted", b"unaccepted-drop"];
 const MSIZE: u32 = 32768;
 const SETTLE_NS: u64 = 5_000_000_000;
 
@@ -105,7 +110,8 @@ const OPENS: usize = 8;
 const READS: usize = 9;
 const WRITES: usize = 10;
 const FAULTS: usize = 11;
-const STAT_COUNT: usize = 12;
+const BACKLOG: usize = 12;
+const STAT_COUNT: usize = 13;
 
 #[derive(Clone, Copy)]
 enum Fault {
@@ -197,6 +203,7 @@ struct Server {
     count: [u32; STAT_COUNT],
     sink: Vec<u8>,
     out: Vec<u8>,
+    unaccepted: [i64; UNACCEPTED.len()],
 }
 
 enum Reply {
@@ -231,6 +238,17 @@ fn body_len(mtype: u8, frame: &[u8]) -> Result<Option<usize>, ()> {
 }
 
 impl Server {
+    fn backlog(&self) -> u32 {
+        let mut bits = 0;
+        for (i, fd) in self.unaccepted.iter().enumerate() {
+            let mut p = [TPollFd { fd: *fd as i32, events: T_POLLIN, revents: 0 }];
+            if unsafe { t_poll(p.as_mut_ptr(), 1, 0) } == 1 && p[0].revents & T_POLLIN != 0 {
+                bits |= 1 << i;
+            }
+        }
+        bits
+    }
+
     fn violation(&mut self, what: &str) {
         self.count[VIOLATIONS] += 1;
         say(&format!("violation: {}", what));
@@ -484,6 +502,7 @@ impl Server {
                 return Reply::Held;
             }
             STATS => {
+                self.count[BACKLOG] = self.backlog();
                 for v in self.count.iter() {
                     bytes.extend_from_slice(&v.to_le_bytes());
                 }
@@ -624,16 +643,21 @@ fn run() -> i64 {
         let Some(fd) = post(name) else { return 1 };
         listeners.push(fd);
     }
-    // Held open, so a CONNECT to it waits in the backlog until it is cancelled.
-    let Some(unaccepted) = post(UNACCEPTED) else { return 1 };
+    // Held open and never polled for accept, so a CONNECT waits in the backlog.
+    let mut unaccepted = [0i64; UNACCEPTED.len()];
+    for (fd, name) in unaccepted.iter_mut().zip(UNACCEPTED.iter()) {
+        let Some(l) = post(name) else { return 1 };
+        *fd = l;
+    }
     if unsafe { t_write(NOTIFY, b"R".as_ptr(), 1) } != 1 {
         say("FAIL: notify the probe");
         return 1;
     }
-    let mut s = Server { count: [0; STAT_COUNT], sink: Vec::new(), out: Vec::new() };
+    let mut s = Server { count: [0; STAT_COUNT], sink: Vec::new(), out: Vec::new(), unaccepted };
     let mut conns: Vec<Conn> = Vec::new();
     let mut settle: Option<u64> = None;
     let (mut asked, mut answered) = (false, false);
+    let mut end_at: Option<u32> = None;
     loop {
         if asked && !answered && conns.is_empty() {
             answered = true;
@@ -657,13 +681,15 @@ fn run() -> i64 {
         for l in &listeners {
             fds.push(TPollFd { fd: *l as i32, events: T_POLLIN, revents: 0 });
         }
-        let control = fds.len();
-        if settle.is_none() {
-            fds.push(TPollFd { fd: CONTROL as i32, events: T_POLLIN, revents: 0 });
-        }
         let base = fds.len();
         for c in &conns {
             fds.push(TPollFd { fd: c.fd as i32, events: T_POLLIN, revents: 0 });
+        }
+        // A pass samples in order. Control goes last, so a pass that sees a session's
+        // hang-up also sees any 'E' written before that hang-up; it is handled first.
+        let control = fds.len();
+        if settle.is_none() {
+            fds.push(TPollFd { fd: CONTROL as i32, events: T_POLLIN, revents: 0 });
         }
         let timeout = if settle.is_some() { 100 } else { -1 };
         let rc = unsafe { t_poll(fds.as_mut_ptr(), fds.len(), timeout) };
@@ -682,6 +708,9 @@ fn run() -> i64 {
                 settle = Some(now() + SETTLE_NS);
             }
             asked |= b[..n as usize].contains(&b'Q');
+            if b[..n as usize].contains(&b'E') {
+                end_at = Some(s.count[ENDED] + 1);
+            }
         }
         for i in (0..conns.len()).rev() {
             let ev = fds[base + i].revents;
@@ -697,6 +726,13 @@ fn run() -> i64 {
                 let c = conns.remove(i);
                 unsafe { t_close(c.fd) };
                 s.count[ENDED] += 1;
+            }
+        }
+        if end_at.is_some_and(|at| s.count[ENDED] >= at) {
+            end_at = None;
+            let rc = unsafe { t_write(NOTIFY, b"e".as_ptr(), 1) };
+            if rc != 1 {
+                say(&format!("the probe left before its answer ({})", rc));
             }
         }
         for (i, l) in listeners.iter().enumerate() {
@@ -725,7 +761,9 @@ fn run() -> i64 {
     for l in &listeners {
         unsafe { t_close(*l) };
     }
-    unsafe { t_close(unaccepted) };
+    for l in &s.unaccepted {
+        unsafe { t_close(*l) };
+    }
     let k = &s.count;
     say(&format!(
         "sessions {} ended {} violations {} stalled {} flushes {} clunks {} getattrs {} walks {} opens {} reads {} writes {} faults {}",

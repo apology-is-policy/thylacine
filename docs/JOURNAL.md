@@ -22,6 +22,18 @@ needed the operator.
 
 
 ---
+## 2026-11-03 -- AS-3a's first boot, after a prosecutor read it first (corona)
+
+While the mac was queued (07:03Z to 09:58Z, behind main's PX-82 and aux's item 11c) I started writing the sabotage set for AS-3a, whose code had never run. Reading the kernel for the mutants' anchors found two checks a broken system satisfies: `after_exec` passed with exec's close removed, and the hold legs never showed the operation was held (306c787fa). So I spent the wait differently: a same-family holotype-reviewer, Opus 5.5 at start and end, prosecuted the chunk before its first boot.
+
+It returned 0 P0, 3 P1, 7 P2, 3 P3 and no kernel defect (memory audit_as3a_closed_list.md). Three P1s would have failed the first boot. I had predicted two errnos by reading the kernel, and both legs stop in the adapter above it: a pool over a live member answers -EINVAL from the adapter's ledger, and a second read on one buffer -EBUSY. A third was a race with the worker's own startup. It also corrected my own commit: 306c787fa said a surviving descriptor answers -ECANCELED, and the kernel refuses a new image -EACCES first (kernel/loom_service_frontend.c:58). That conclusion stood and its reason did not. Mutants x3 and x4 were equivalent, because each adapter reaches the abort by a second route. All fixed in c4c4de7fa. The close is dirty (P1+P2 = 10), so a second round on the fixes is owed.
+
+First boot, q-as3a at c4c4de7fa, 09:59Z to 10:13Z, work/oct29-warp-image/q-as3a.log: the qualification image 2177/2177 and the default image 2177/2177, tree clean. Every remaining prediction held at one attempt: 26 connections and 2 rings per adapter probe, 10 connections and 12 rings for the death probe, all freed; fixture sessions 24, 24 and 9, no violations; victim statuses 42, 43, 45, 44, 44, 46, 47 and signal 9 for the two kills. The default image refuses setup and expects none of it. parley-probe passes with its closed-stderr leg (b58b7ab45), so the 10-28 stderr spin is fixed in the boot; its drain mutant is still to be run red.
+
+Under the same lease q-compile.sh closed a claim I had overstated. The merge's commit, the entry below and my note to main said it compiled -Werror both ways, but the tests-on compile and check-decls had not run since the last fixes. Run on 94a0ff88e: tests on rc 0 with 178 objects compiled, tests off rc 0 with syscall.c, the one file changed since its last build, and check-decls rc 0 on 4521 names. The claim now holds. It was untrue when I wrote it.
+
+Not run: the sabotage set (11 mutants, work/nov03-as3a/guest-sabotage.py, requeued for the mac at 10:14Z), the second audit round, CPU1 or SMP soaks of these legs (the full gate is on hold), and tools/test-host-checkers.sh on this branch or on the merge. One boot each is one boot each.
+
 ## 2026-11-03 -- aux-3 joins the seat line; B-3h lands and the bigger merge begins (corona)
 
 **What this run closed.** Vote 42 came back: a scenario that passes only after a failed attempt stays named, rc 0, with an UNEXPLAINED line at both of the wrapper's exits, to be revisited after one fleet run. The merge of aux-3 3407cf093 into corona/async-memory (1227710c2) got its first compile and first run.

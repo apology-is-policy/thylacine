@@ -609,6 +609,10 @@ void test_capacity_fork_clone_charges_pages_and_nodes(void);
 void test_capacity_page_tables_charged_and_reclaimed(void);
 void test_capacity_memory_bomb_leaves_the_reserve(void);
 void test_capacity_fork_costs_the_pool_only_its_nodes(void);
+void test_mm0_today_alias_charges_each_mapping(void);
+void test_mm0_today_partial_map_retains_the_whole(void);
+void test_mm0_today_orphan_pin_charges_no_proc(void);
+void test_mm0_today_dma_bypasses_the_pool(void);
 void test_vma_range_is_mapped(void);                     // B-1b
 void test_mmap_eager_copy_charge_pairing(void);   // #197
 void test_torpor_wait_rejects_bad_args(void);

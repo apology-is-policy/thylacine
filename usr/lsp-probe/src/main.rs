@@ -277,6 +277,7 @@ const EXIT_NAP_MS: u64 = 5;
 
 const TAG_OUT: Tag = 1;
 const TAG_ERR: Tag = 2;
+const TAG_IN: Tag = 3;
 
 /// Bail with a tagged reason. Deliberately does NOT reap the server: exiting
 /// closes our pipe fds, the server sees stdin EOF and leaves, and a probe
@@ -472,19 +473,25 @@ fn run_session(spec: &ProbeSpec) {
         }
 
         let fds = [(srv.stdout_fd(), TAG_OUT), (srv.stderr_fd(), TAG_ERR)];
-        let ready = match mux.poll(&fds, PollTimeout::Millis(POLL_MS)) {
+        let writes = [(srv.stdin_pending_fd(), TAG_IN)];
+        let ready = match mux.poll_rw(&fds, &writes, PollTimeout::Millis(POLL_MS)) {
             Ok(r) => r,
             Err(_) => fail(spec, "mux.poll"),
         };
 
         for r in &ready {
             match r.tag {
+                TAG_IN => {
+                    if srv.flush().is_err() {
+                        fail(spec, "flush");
+                    }
+                }
                 // Drain and discard. A chatty server that fills its stderr pipe
                 // BLOCKS -- which would present as the server mysteriously
                 // going quiet, not as an error. clangd is markedly chattier
                 // than gopls here, so this is load-bearing, not hygiene.
                 TAG_ERR => {
-                    if r.readable {
+                    if r.readable || r.hup {
                         let _ = srv.drain_stderr();
                     }
                 }
@@ -756,14 +763,20 @@ fn goodbye(spec: &ProbeSpec, cl: &mut lsp::Client, srv: &mut Server, mux: &mut M
             budget_spent(spec, srv, t0, if answered { "stdout still open after exit" } else { "no answer to shutdown" });
         }
         goodbye_heartbeat(spec, t0, &mut next_hb, if answered { "answered, stdout open" } else { "awaiting the answer" });
-        // A closed pipe polls readable forever, so stderr leaves the set at EOF.
+        // A hung-up pipe stays ready, so stderr leaves the set at EOF.
         let err_fd = if err_open { srv.stderr_fd() } else { -1 };
         let fds = [(srv.stdout_fd(), TAG_OUT), (err_fd, TAG_ERR)];
-        let ready = match mux.poll(&fds, PollTimeout::Millis(POLL_MS)) {
+        let writes = [(srv.stdin_pending_fd(), TAG_IN)];
+        let ready = match mux.poll_rw(&fds, &writes, PollTimeout::Millis(POLL_MS)) {
             Ok(r) => r,
             Err(_) => end_failed(spec, srv, "mux.poll (goodbye)"),
         };
         for r in &ready {
+            if r.tag == TAG_IN {
+                // A hard error drops stdin and the queue: the fd leaves the set.
+                let _ = srv.flush();
+                continue;
+            }
             if r.tag == TAG_ERR {
                 err_open = matches!(srv.drain_stderr(), Ok(false));
                 continue;
@@ -831,7 +844,8 @@ fn goodbye(spec: &ProbeSpec, cl: &mut lsp::Client, srv: &mut Server, mux: &mut M
         goodbye_heartbeat(spec, t0, &mut next_hb, "stdout closed, awaiting the exit");
         // gopls closes stdout before it shuts down and can still log: a stderr
         // pipe nobody reads fills and stops it short of its exit.
-        if err_open {
+        // The steady-state loop may have closed it, and a poll of nothing does not nap.
+        if err_open && srv.stderr_fd() >= 0 {
             match mux.poll(&[(srv.stderr_fd(), TAG_ERR)], PollTimeout::Millis(EXIT_NAP_MS as u32)) {
                 Ok(r) if !r.is_empty() => err_open = matches!(srv.drain_stderr(), Ok(false)),
                 Ok(_) => {}

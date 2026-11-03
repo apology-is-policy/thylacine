@@ -95,6 +95,7 @@ const DEATH_POLL_MS: u64 = 10;
 
 const TAG_OUT: Tag = 1;
 const TAG_ERR: Tag = 2;
+const TAG_IN: Tag = 3;
 
 /// Where we are in the launch + inspect sequence.
 #[derive(Clone, Copy, PartialEq)]
@@ -542,12 +543,18 @@ fn drive(sess: &mut Session, srv: &mut Server, mux: &mut Mux, clock: &mut Clock,
             bail(srv, "no PASS within budget (session wedged or too slow)");
         }
         let fds = [(srv.stdout_fd(), TAG_OUT), (srv.stderr_fd(), TAG_ERR)];
-        let ready = match mux.poll(&fds, PollTimeout::Millis(POLL_MS)) {
+        let writes = [(srv.stdin_pending_fd(), TAG_IN)];
+        let ready = match mux.poll_rw(&fds, &writes, PollTimeout::Millis(POLL_MS)) {
             Ok(r) => r,
             Err(_) => bail(srv, "mux.poll"),
         };
         for r in &ready {
             match r.tag {
+                TAG_IN => {
+                    if srv.flush().is_err() {
+                        bail(srv, "flush");
+                    }
+                }
                 // Drain + discard: a server that fills its stderr pipe BLOCKS,
                 // presenting as ambush mysteriously going quiet.
                 TAG_ERR => {
@@ -625,12 +632,18 @@ fn await_exit(srv: &mut Server, mux: &mut Mux, clock: &mut Clock) -> ExitStatus 
             bail(srv, "ambush did not exit after the disconnect");
         }
         let fds = [(srv.stdout_fd(), TAG_OUT), (srv.stderr_fd(), TAG_ERR)];
-        let ready = match mux.poll(&fds, PollTimeout::Millis(POLL_MS)) {
+        let writes = [(srv.stdin_pending_fd(), TAG_IN)];
+        let ready = match mux.poll_rw(&fds, &writes, PollTimeout::Millis(POLL_MS)) {
             Ok(r) => r,
             Err(_) => bail(srv, "mux.poll"),
         };
         for r in &ready {
             match r.tag {
+                TAG_IN => {
+                    if srv.flush().is_err() {
+                        bail(srv, "flush");
+                    }
+                }
                 TAG_ERR => {
                     if r.readable {
                         let _ = srv.drain_stderr();

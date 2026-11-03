@@ -56,7 +56,10 @@
 #define GETATTRS   6
 #define WALKS      7
 #define FAULTS     11
-#define STAT_COUNT 12
+#define BACKLOG    12
+#define STAT_COUNT 13
+// One read each at the request bound (lengths[] in main).
+#define BOUND_BUFFER 6u
 
 static T_LOOM_RING_STORAGE(ENTRIES) g_store;
 static T_LOOM_RING_STORAGE(ENTRIES) g_store2;
@@ -134,7 +137,7 @@ static uint64_t soon(void) {
 }
 
 // Sleeps up to ms on the notify pipe: after the fixture's 'R', nothing arrives
-// there until the probe asks for the 'Z'.
+// there until the probe asks for a 'Z' or an 'e'.
 static void nap(long ms) {
     struct pollfd p = { .fd = NOTIFY, .events = POLLIN, .revents = 0 };
     (void)t_poll(&p, 1, ms);
@@ -470,19 +473,21 @@ static void hostile_peers(struct t_loom_fid *sf, struct t_loom_fid *data) {
     say("a service that never accepts");
     t = hostile_target("unaccepted");
     stats(sf, base);
-    deadline = t_loom_now(g_cur) + 200000000ull;
+    CHECK(base[BACKLOG] == 0, "a service's backlog starts empty", base[BACKLOG]);
+    deadline = t_loom_now(g_cur) + 1000000000ull;
     rc = t_loom_connect(t, 1, deadline, &op);
     CHECK(rc == 0, "submit a CONNECT nobody accepts", rc);
+    stats_until(sf, BACKLOG, 1, v);
     res = 0;
     none = NULL;
     AWAIT(t_loom_connect_done(op, &res, &none), "the unaccepted CONNECT");
     CHECK(res == -E_TIMEDOUT && !none, "the deadline ends the unaccepted CONNECT", res);
+    t_loom_target_drop(t);
+    t = hostile_target("unaccepted-drop");
     rc = t_loom_connect(t, 0, 0, &op);
     CHECK(rc == 0, "submit a CONNECT nobody accepts", rc);
-    nap(20);
+    stats_until(sf, BACKLOG, 2, v);
     t_loom_op_drop(op);
-    stats(sf, v);
-    CHECK(v[ACCEPTED] == base[ACCEPTED], "the server accepted nothing", v[ACCEPTED]);
     t_loom_target_drop(t);
 
     say("a peer that holds a walk or an open");
@@ -545,7 +550,7 @@ static void cq_full(void) {
 
 // A stream keeps delivering while another scope stalls and is cancelled, and that
 // cancel needs no room in a full CQ.
-static void independent_scopes(struct t_loom_fid *sf, struct t_loom_target *t) {
+static void independent_scopes(struct t_loom_fid *sf, struct t_loom_target *t, struct t_loom_pool *two) {
     uint32_t base[STAT_COUNT], v[STAT_COUNT];
     struct t_loom_op *op;
     int rc;
@@ -559,12 +564,15 @@ static void independent_scopes(struct t_loom_fid *sf, struct t_loom_target *t) {
     struct t_loom_scope *media = connect(t);
     struct t_loom_fid *shots = walk(media, "stream", 0);
     open_as(shots, 0, 0);
-    struct t_loom_op *st = stream(shots, pool);
+    struct t_loom_op *st = stream(shots, two);
+    // Both of the pool's leases stay held, so the stream stays live across the cancel.
     size_t got = 0, len;
     struct t_ring_payload *p = shot(st);
     const unsigned char *pb = t_loom_payload_bytes(p, &len);
     got = append(got, pb, len);
-    give_back(p, "return a lease");
+    struct t_ring_payload *q = shot(st);
+    pb = t_loom_payload_bytes(q, &len);
+    got = append(got, pb, len);
     struct t_loom_scope *stalled = connect(t);
     struct t_loom_fid *held = walk(stalled, "stall", 0);
     open_as(held, 0, 0);
@@ -572,15 +580,22 @@ static void independent_scopes(struct t_loom_fid *sf, struct t_loom_target *t) {
     rc = t_loom_read(held, range(4, 0, PAGE), 0, 0, 0, &op);
     CHECK(rc == 0, "submit a READ the server holds", rc);
     stats_until(sf, STALLED, base[STALLED] + 1, v);
-    p = shot(st);
-    pb = t_loom_payload_bytes(p, &len);
-    got = append(got, pb, len);
-    give_back(p, "a stream delivers while a sibling scope stalls");
     t_loom_op_drop(op);
     t_loom_fid_drop(held);
     t_loom_scope_drop(stalled);
     stats_until(sf, ENDED, base[ENDED] + 1, v);
     CHECK(v[ENDED] == base[ENDED] + 1, "only the stalled scope's session ended", v[ENDED]);
+    // The positive control: this session still answers after its sibling's cancel.
+    rc = t_loom_walk(media, "data", name_len("data"), 1, soon(), &op);
+    CHECK(rc == 0, "a WALK beside the cancel", rc);
+    int32_t beside = 0;
+    struct t_loom_fid *leaf = NULL;
+    AWAIT(t_loom_walk_done(op, &beside, &leaf), "the WALK beside the cancel");
+    CHECK(beside == 0 && leaf, "a scope beside the cancel still answers", beside);
+    t_loom_op_drop(op);
+    t_loom_fid_drop(leaf);
+    give_back(p, "a stream's lease, returned after the cancel");
+    give_back(q, "its second lease");
     // drain() fills g_got from its start, so the two shots above go first.
     static unsigned char first[2 * SHOT];
     CHECK(got <= sizeof(first), "two shots fit their copy", got);
@@ -605,9 +620,18 @@ static void independent_scopes(struct t_loom_fid *sf, struct t_loom_target *t) {
     stats_until(sf, STALLED, base[STALLED] + 1, v);
     st = stream(shots, pool);
     cq_full();
+    // A stats read cannot run with the CQ full, so the fixture is asked to say.
+    long n = t_write(CONTROL, "E", 1);
+    CHECK(n == 1, "ask the fixture for the next session's end", n);
     t_loom_op_drop(op);
     t_loom_fid_drop(held);
     t_loom_scope_drop(stalled);
+    struct pollfd ended = { .fd = NOTIFY, .events = POLLIN, .revents = 0 };
+    n = t_poll(&ended, 1, 5000);
+    CHECK(n == 1, "a full CQ holds up no session's end", n);
+    char answer = 0;
+    n = t_read(NOTIFY, &answer, 1);
+    CHECK(n == 1 && answer == 'e', "the fixture says the session ended", n);
     // Long enough for an engine that posted the cancel's terminal past a full CQ.
     nap(100);
     CHECK(t_loom_backlog(g_cur) == CQ_ENTRIES, "a cancel posts nothing past a full CQ", t_loom_backlog(g_cur));
@@ -620,7 +644,10 @@ static void independent_scopes(struct t_loom_fid *sf, struct t_loom_target *t) {
     t_loom_pool_drop(pool);
 }
 
-// The bounds an honest program can reach, each refused at its own gate.
+// The bounds an honest program can reach. These gates are the adapter's: it refuses
+// before the kernel is asked, and the kernel's answers to the same overlap and the
+// same count are pinned by loom_private_pool_prepare's and
+// loom_private_operation_prepare's fixtures (kernel/test/test_loom.c).
 static void quotas(struct t_loom_fid *sf, struct t_loom_target *t, struct t_loom_service_pool_member pool_a) {
     uint32_t base[STAT_COUNT], v[STAT_COUNT];
     int rc;
@@ -631,29 +658,28 @@ static void quotas(struct t_loom_fid *sf, struct t_loom_target *t, struct t_loom
     rc = t_loom_pool(g_cur, many, POOL_MEMBERS + 1, &pool);
     CHECK(rc == -E_INVAL && !pool, "a pool of more than the most members", rc);
     rc = t_loom_pool(g_cur, &pool_a, 1, &pool);
-    CHECK(rc == -E_BUSY && !pool, "a pool over a member a live pool holds", rc);
+    CHECK(rc == -E_INVAL && !pool, "a pool over a member a live pool holds", rc);
 
     say("the bound on requests in flight");
     struct t_loom_scope *s = connect(t);
     struct t_loom_fid *held = walk(s, "stall", 0);
     open_as(held, 0, 0);
     stats(sf, base);
-    static struct t_loom_op *reads[2 * CQ_ENTRIES + 1];
-    unsigned n = 0;
-    for (;;) {
-        rc = t_loom_read(held, range(4, n * 16u, 16), 0, 0, 0, &reads[n]);
-        if (rc != 0) {
-            CHECK(rc == -E_NOSPC, "the first read past the bound refuses at submit", rc);
-            break;
+    // A buffer holds one fixed operation at a time, so each read takes its own, and
+    // a refusal returns the entry it booked: exactly the bound's reads fit.
+    static struct t_loom_op *reads[CQ_ENTRIES];
+    struct t_loom_op *no = NULL;
+    for (unsigned i = 0; i < CQ_ENTRIES; i++) {
+        rc = t_loom_read(held, range(BOUND_BUFFER + i, 0, 16), 0, 0, 0, &reads[i]);
+        CHECK(rc == 0, "a read under the bound", rc);
+        if (i == 0) {
+            rc = t_loom_read(held, range(BOUND_BUFFER, 16, 16), 0, 0, 0, &no);
+            CHECK(rc == -E_BUSY, "a buffer holds one fixed operation", rc);
         }
-        n++;
-        CHECK(n <= 2 * CQ_ENTRIES, "requests in flight are bounded", n);
     }
-    t_putstr("loom-c-probe: ");
-    put_dec((long)n);
-    t_putstr(" reads in flight\n");
-    CHECK(n >= CQ_ENTRIES - 1, "the bound admits a full CQ's requests", n);
-    for (unsigned i = 0; i < n; i++) t_loom_op_drop(reads[i]);
+    rc = t_loom_read(held, range(BOUND_BUFFER, 16, 16), 0, 0, 0, &no);
+    CHECK(rc == -E_NOSPC, "the first read past the bound refuses at submit", rc);
+    for (unsigned i = 0; i < CQ_ENTRIES; i++) t_loom_op_drop(reads[i]);
     t_loom_fid_drop(held);
     t_loom_scope_drop(s);
     stats_until(sf, ENDED, base[ENDED] + 1, v);
@@ -664,9 +690,10 @@ static int run(void) {
     long n = t_read(NOTIFY, &b, 1);
     CHECK(n == 1 && b == 'R', "the fixture has posted its service", n);
     g_kernel = t_loom_kernel_native();
-    static const size_t lengths[6] = { PAGE, PAGE, PAGE, PAGE, PAGE, PAGE };
-    // 0: fixed data and sink I/O; 1: pool A; 2: stats; 3: pool B; 4: stalled reads.
-    int rc = T_LOOM_RING_SETUP(&g_store, &g_kernel, ENTRIES, lengths, 6, &g_ring);
+    // 0: fixed data and sink I/O; 1: pool A; 2: stats; 3: pool B; 4: stalled reads;
+    // 5: pool D; 6..9: a read each at the request bound.
+    static const size_t lengths[10] = { PAGE, PAGE, PAGE, PAGE, PAGE, PAGE, PAGE, PAGE, PAGE, PAGE };
+    int rc = T_LOOM_RING_SETUP(&g_store, &g_kernel, ENTRIES, lengths, 10, &g_ring);
     if (rc == -E_OPNOTSUPP) {
         say("default image: setup refuses -EOPNOTSUPP");
         return PASS_DEFAULT;
@@ -881,7 +908,7 @@ static int run(void) {
           "a Tclunk for each live scope's dropped fid, and no other", v[CLUNKS]);
 
     hostile_peers(sf, data);
-    independent_scopes(sf, t);
+    independent_scopes(sf, t, pool_a);
     quotas(sf, t, range(1, 0, SHOT));
 
     say("closing a ring with leases held");

@@ -24,7 +24,7 @@ hazards: []
 abis: []
 design: []
 created: 2026-08-03
-updated: 2026-10-29
+updated: 2026-11-03
 ---
 ## Purpose
 
@@ -126,6 +126,17 @@ None. Every type here is single-threaded by construction and holds no lock, no
 atomic and no interior mutability; `Client` methods take `&mut self` and the
 borrow checker serializes them. The host owns the event loop.
 
+**Stdin never blocks the caller.** A pipe holds 4 KiB, so a full-document `didChange`
+needs many of them, and a server that stops reading would stop the editor. `Server`
+sets stdin non-blocking and queues what does not fit in an outbox. `send` means queued,
+not delivered. While bytes wait, `stdin_pending_fd` names the fd a host asks
+`Mux::poll_rw` about, and `flush` moves them on. The outbox refuses at 8 MiB with
+`NoSpace`, unless nothing waits ahead of the message, so one large document always
+goes; a host treats the refusal as a dead server. `close_stdin` with bytes queued waits
+for `flush` to finish them. `wait` drops them, since nothing can flush during a blocking
+wait. A hard write error drops stdin and the outbox together, so a dead pipe cannot keep
+waking the poll. `parley-probe` runs a server that never reads and a 64 KiB round trip.
+
 `transport::Mux` is the only thing that blocks: it rebuilds its `PollSet` on
 every `poll` call from the caller-supplied `(fd, tag)` set, so a restarted or
 closed server can never leave a stale fd registered. The set is a handful of
@@ -159,6 +170,13 @@ Parse recursion is bounded at `MAX_DEPTH` = 128 via an explicit `enter()`
 counter, so an endlessly-nested array or object cannot exhaust the stack. The
 depth is not decremented on error paths, which is correct because an error
 aborts the whole parse.
+
+A server may close stderr and keep serving. A pipe's read end with no bytes and no
+writer polls `POLLHUP` alone, and stays ready for as long as it is polled, so
+`Server::drain_stderr` closes its handle at EOF: `stderr_fd` then reads `-1` and
+`Mux::poll` skips it. A host calls it on `hup` as well as on `readable`, because a
+hangup's read is the only thing that finds that EOF. A read error leaves the handle
+open; only EOF is final.
 
 ## Performance
 
@@ -204,7 +222,8 @@ probes exist to close that gap against a real peer.
   tests; the probe spawns `parley-echo` as a persistent child, frame-sends a
   request, polls, pumps, decodes, and asserts the round-trip. This proves the
   *pipe machinery*, not any protocol — `parley-echo` returns bytes and speaks
-  neither LSP nor DAP.
+  neither LSP nor DAP. A second run of the echo closes fd 2 first: stderr has to
+  leave the poll set, the next 50 ms poll has to sleep, and the echo has to answer.
 
 - **`lsp-probe` — the live gopls round-trip.** It spawns the real
   `/goroot/bin/gopls` over piped stdio **exactly as `lsp_host` does** (bare

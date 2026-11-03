@@ -15,7 +15,7 @@ hazards: []
 abis: [abi-halcyon-palette]
 design: []
 created: 2026-08-03
-updated: 2026-10-29
+updated: 2026-11-03
 area: userspace
 ---
 ## Purpose
@@ -415,10 +415,9 @@ twice.
   intact. This layer is where such text enters, so it is the natural place to
   sanitize even though the omission is shared with the renderer. Task #130.
 
-- **A server that closes its stderr while it runs would spin the poll.** The
-  steady-state handlers ignore stderr's EOF, and a closed pipe polls readable
-  for good; gopls, clangd and Ambush keep fd 2 open, so it is latent. The exit
-  goodbye already drops stderr at EOF. Queued: OPEN-BUGS 2026-10-28T11:42Z.
+- **The hosts' stderr `hup` arm has no witness of its own.** `parley-probe` proves the
+  rule in its own loop, so reverting the arm in `Lsp`, `Dap` or `lsp-probe` stays
+  green. `parley-echo close-stderr` under a real host would close it.
 - **gopls can still orphan a `go` that is not nora's doing.** Its imports refresh,
   scheduled thirty seconds or more after the view is created, runs `go list -m`
   that gopls's shutdown does not wait for; and a disconnect that lands while

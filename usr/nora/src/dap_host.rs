@@ -101,6 +101,7 @@ const POLL_RETRY_NAP: Duration = Duration::from_millis(5);
 /// take 3/4 so all four sources share one poll(2).
 pub const TAG_DAP_OUT: Tag = 3;
 pub const TAG_DAP_ERR: Tag = 4;
+pub const TAG_DAP_IN: Tag = 7;
 
 /// Where the session is in the launch + run cycle.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -264,6 +265,14 @@ impl Dap {
         ]
     }
 
+    /// Ambush's stdin while bytes wait behind it, to ask the poll for room.
+    pub fn write_fds(&self) -> Vec<(i32, Tag)> {
+        if self.dead {
+            return Vec::new();
+        }
+        alloc::vec![(self.srv.stdin_pending_fd(), TAG_DAP_IN)]
+    }
+
     pub fn is_dead(&self) -> bool {
         self.dead
     }
@@ -287,8 +296,14 @@ impl Dap {
     /// editor should repaint. Mirrors `Lsp::on_ready`.
     pub fn on_ready(&mut self, r: &Ready, ed: &mut Editor) -> bool {
         match r.tag {
+            TAG_DAP_IN => {
+                if self.srv.flush().is_err() {
+                    self.reap();
+                }
+                false
+            }
             TAG_DAP_ERR => {
-                if r.readable {
+                if r.readable || r.hup {
                     let _ = self.srv.drain_stderr();
                 }
                 false
@@ -1032,7 +1047,7 @@ impl Dap {
             // A poll error cannot be a note's EINTR: poll does not EINTR a native
             // Proc (kernel notes.c, proc_caught_note_eintr_ready). Whatever it
             // is, nap and poll again; the grace and the stall count bound it.
-            let ready = mux.poll(&self.poll_fds(), PollTimeout::Millis(ms)).ok();
+            let ready = mux.poll_rw(&self.poll_fds(), &self.write_fds(), PollTimeout::Millis(ms)).ok();
             if ready.is_none() {
                 let _ = time::sleep(POLL_RETRY_NAP);
             }
