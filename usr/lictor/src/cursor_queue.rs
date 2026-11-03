@@ -14,9 +14,6 @@ impl Queue {
     pub fn poison(&mut self) {
         self.failed = true;
     }
-    pub fn failed(&self) -> bool {
-        self.failed
-    }
     pub fn begin(&mut self) -> Result<u16, ()> {
         if !self.idle() {
             return Err(());

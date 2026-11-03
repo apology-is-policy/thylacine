@@ -1,4 +1,5 @@
 pub use crate::gpu_api::{HostRing, FenceVindication, FenceTag, FencedErr};
+use crate::gpu_api::{retirement_hold, ChainReach, Hold, Retired};
 // The virtio-gpu backend shared during the Lictor migration (Tapestry G-3; TAPESTRY.md
 // section 18). A port of the audited G-1 gpud device machinery (itself the
 // P4-L probe's command layer over the netdev VirtioNetPci PCI transport),
@@ -64,11 +65,6 @@ const VIRTIO_GPU_F_EDID_BIT_LO: u32 = 1 << 1;
 const VIRTIO_GPU_F_RESOURCE_UUID_BIT_LO: u32 = 1 << 2;
 const VIRTIO_GPU_F_RESOURCE_BLOB_BIT_LO: u32 = 1 << 3;
 const VIRTIO_GPU_F_CONTEXT_INIT_BIT_LO: u32 = 1 << 4;
-
-// ISR status (section 4.1.4.5): bit 0 = a virtqueue raised the IRQ; reading
-// the byte clears it.
-const ISR_QUEUE: u8 = 1 << 0;
-
 
 // virtio_pci_common_cfg field offsets (section 4.1.4.3).
 const CCFG_DEVICE_FEATURE_SELECT: u64 = 0x00;
@@ -954,6 +950,10 @@ struct Controlq {
     /// Which ctx each poisoned slot belonged to, so its late retire can
     /// vindicate that ctx (round-3 F2).
     fslot_poison_ctx: [u32; FENCED_SLOTS],
+    /// What each occupied or poisoned slot's chain can reach. Beside the tag,
+    /// not in it: the tag crosses to the compositor and is taken at abandon,
+    /// and this must survive that, because an abandoned chain still reaches.
+    fslot_reach: [ChainReach; FENCED_SLOTS],
     /// Contexts whose abandoned chain the device later retired: proof the
     /// host is finished with them, so the seam may un-poison.
     vindicated: alloc::vec::Vec<FenceVindication>,
@@ -2213,6 +2213,7 @@ impl Gpu {
                 fslots: [None; FENCED_SLOTS],
                 fslot_since: [None; FENCED_SLOTS],
                 fslot_poisoned: [false; FENCED_SLOTS],
+                fslot_reach: [ChainReach::default(); FENCED_SLOTS],
                 fslot_poison_ring: [0; FENCED_SLOTS],
                 fslot_poison_ctx: [0; FENCED_SLOTS],
                 vindicated: alloc::vec::Vec::new(),
@@ -4085,11 +4086,13 @@ impl Gpu {
         slot: usize,
         req_len: u32,
         (wire, fence_id): (u64, u64),
+        reach: ChainReach,
         ctx_pub: u32,
         readback: bool,
         comp: bool,
         ring_idx: u8,
     ) -> Result<u64, FencedErr> {
+        self.ctrl.fslot_reach[slot] = reach;
         self.ctrl
             .submit_fenced(
                 slot,
@@ -4149,6 +4152,7 @@ impl Gpu {
             slot,
             GPU_CTRL_HDR_LEN + 8 + stream.len() as u32,
             ids,
+            ChainReach { ctx: ctx_id, res: 0 },
             ctx_pub,
             false,
             false,
@@ -4294,6 +4298,7 @@ impl Gpu {
             slot,
             GPU_CTRL_HDR_LEN + 48,
             ids,
+            ChainReach { ctx: ctx_id, res: res_id },
             ctx_pub,
             !to_host,
             false,
@@ -4328,6 +4333,7 @@ impl Gpu {
             slot,
             GPU_CTRL_HDR_LEN + 48,
             ids,
+            ChainReach { ctx: ctx_id, res: res_id },
             ctx_pub,
             true,
             true,
@@ -4678,11 +4684,27 @@ impl Gpu {
         core::mem::take(&mut self.retired_resources)
     }
 
-    /// Device completion proof for trusted takeover and backing retirement.
-    /// An abandoned fence is still device work until a late used entry retires
-    /// it. Counting only the public in-flight counter would lose that case.
+    /// Device completion proof for trusted takeover. An abandoned fence is still
+    /// device work until a late used entry retires it. Counting only the public
+    /// in-flight counter would lose that case.
     pub fn all_work_retired(&self) -> bool {
         self.cursor.queue.idle() && self.controlq_retired()
+    }
+
+    /// What stands between a retirement of `object` and the device: only the
+    /// chains that can reach it, plus the synchronous work every object waits
+    /// for. `holds` is the ledger's context-to-resource relation. A cursor
+    /// chain touches only a cursor plane, so it holds nothing here.
+    pub fn retirement_hold(&self, object: Retired, holds: impl Fn(u32, u32) -> bool) -> Hold {
+        let c = &self.ctrl;
+        retirement_hold(
+            object,
+            c.dead,
+            c.sync_pending || c.sync2_pending,
+            (0..FENCED_SLOTS).filter(|&i| c.fslots[i].is_some()).map(|i| c.fslot_reach[i]),
+            (0..FENCED_SLOTS).filter(|&i| c.fslot_poisoned[i]).map(|i| c.fslot_reach[i]),
+            holds,
+        )
     }
 
     /// The control queue's share of `all_work_retired`, which is all that
@@ -4737,12 +4759,6 @@ impl Gpu {
     /// command's outcome is unknown (GPU-DESIGN 4.5.15).
     pub fn stalls(&self) -> u32 {
         self.ctrl.stalls
-    }
-
-    /// Quiescence that can never come back: a latched engine, or a cursor
-    /// queue poisoned until device reset. `all_work_retired` stays false.
-    pub fn quiescence_unreachable(&self) -> bool {
-        self.ctrl.dead || self.cursor.queue.failed()
     }
 }
 

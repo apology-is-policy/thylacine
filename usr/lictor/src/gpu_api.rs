@@ -264,9 +264,18 @@ impl Request {
     /// Gives back something the device may still read or write, so it runs
     /// only once every outstanding chain has retired.
     pub fn retires(&self) -> bool {
-        matches!(self, Self::DetachBacking { .. } | Self::ResourceUnref { .. }
-            | Self::CtxDestroy { .. } | Self::CtxDetachResource { .. }
-            | Self::RetireHost3dRing { .. } | Self::DropHost3dRing { .. })
+        self.retired_object().is_some()
+    }
+    /// What a retirement gives back, and so which chains it must wait for.
+    pub fn retired_object(&self) -> Option<Retired> {
+        match *self {
+            Self::DetachBacking { resource_id } | Self::ResourceUnref { resource_id }
+            | Self::RetireHost3dRing { resource_id } | Self::DropHost3dRing { resource_id } =>
+                Some(Retired::Resource(resource_id)),
+            Self::CtxDestroy { ctx_id } | Self::CtxDetachResource { ctx_id, .. } =>
+                Some(Retired::Context(ctx_id)),
+            _ => None,
+        }
     }
     /// Seat traffic, served while ordinary GPU work is parked.
     pub fn seat(&self) -> bool {
@@ -274,15 +283,68 @@ impl Request {
             | Self::SeatState | Self::SeatQuiesced { .. })
     }
 }
+/// What a retirement gives back (GPU-DESIGN 4.5.15).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Retired { Resource(u32), Context(u32) }
+/// How far one fenced chain can reach: virgl and Venus resolve a stream's ids
+/// through its context's table, and a fenced transfer names one resource.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ChainReach {
+    /// The device context the chain rode; 0 only for a context-less transfer.
+    pub ctx: u32,
+    /// The resource a fenced transfer names; 0 for a stream.
+    pub res: u32,
+}
+impl ChainReach {
+    /// `holds(ctx, res)`: whether a stream on `ctx` can name `res`.
+    fn reaches(self, object: Retired, holds: &impl Fn(u32, u32) -> bool) -> bool {
+        match object {
+            Retired::Context(ctx) => self.ctx == ctx,
+            Retired::Resource(res) if self.res != 0 => self.res == res,
+            Retired::Resource(res) => holds(self.ctx, res),
+        }
+    }
+}
+/// What stands between a retirement and its object.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Hold {
+    /// Nothing the device runs can reach it.
+    Clear,
+    /// Work that ends within `PARK_BOUND_MS` either way: it retires, or the
+    /// abandonment bound turns it into a poisoned chain or a dead engine.
+    Parks,
+    /// Only what may never end: a poisoned chain on the object, a dead engine.
+    Refused,
+}
+/// A poisoned chain counts for less than one in flight, because the park is
+/// bounded and the chain in flight may yet retire; either way the poison is
+/// still there when the park ends, and the retirement is refused then.
+pub fn retirement_hold(
+    object: Retired,
+    dead: bool,
+    sync_pending: bool,
+    mut in_flight: impl Iterator<Item = ChainReach>,
+    mut poisoned: impl Iterator<Item = ChainReach>,
+    holds: impl Fn(u32, u32) -> bool,
+) -> Hold {
+    if dead {
+        Hold::Refused
+    } else if sync_pending || in_flight.any(|c| c.reaches(object, &holds)) {
+        Hold::Parks
+    } else if poisoned.any(|c| c.reaches(object, &holds)) {
+        Hold::Refused
+    } else {
+        Hold::Clear
+    }
+}
 /// Whether the broker runs `request` now or leaves it parked. A park must end:
-/// a seat episode ends, and in-flight chains retire. Quiescence that can never
-/// come (a dead engine, a cursor queue poisoned until reset) admits a
-/// retirement at once, and one parked `PARK_BOUND_MS` is admitted whatever
-/// the cause; either way `Device::execute` refuses it, keeping every pin, and
-/// the caller degrades instead of waiting forever on a reply.
-pub fn admit(request: &Request, phase: u32, quiescent: bool, unreachable: bool, parked_ms: u64) -> bool {
+/// a seat episode ends, and in-flight chains retire. A retirement nothing can
+/// clear is admitted at once, and one parked `PARK_BOUND_MS` is admitted
+/// whatever the cause; either way `Device::execute` refuses it, keeping every
+/// pin, and the caller degrades instead of waiting forever on a reply.
+pub fn admit(request: &Request, phase: u32, hold: Hold, parked_ms: u64) -> bool {
     request.seat()
-        || (phase == 0 && (!request.retires() || quiescent || unreachable || parked_ms >= PARK_BOUND_MS))
+        || (phase == 0 && (!request.retires() || hold != Hold::Parks || parked_ms >= PARK_BOUND_MS))
 }
 /// The longest a retirement waits for quiescence before it is refused: the
 /// bound every fenced chain already carries (backend gpu.rs asserts the two
@@ -533,26 +595,98 @@ mod admission_tests {
         for r in seat() { assert!(r.seat() && !r.retires(), "{r:?}"); }
     }
     #[test]
-    fn a_retirement_on_unreachable_quiescence_runs_to_its_refusal() {
-        // Parked, it would wait for a quiescence a dead engine (or a cursor
-        // queue poisoned until reset) never reaches, and the compositor
-        // blocks on the reply for good.
-        for r in retirements() { assert!(admit(&r, 0, false, true, 0), "{r:?} parked on unreachable quiescence"); }
+    fn a_retirement_nothing_can_clear_runs_to_its_refusal() {
+        // Parked, it would wait on what may never end, and the compositor
+        // blocks on the reply for as long as the bound.
+        for r in retirements() { assert!(admit(&r, 0, Hold::Refused, 0), "{r:?} parked on what may never end"); }
     }
     #[test]
-    fn a_retirement_waits_for_in_flight_chains_on_a_live_engine() {
+    fn a_retirement_waits_for_a_chain_in_flight_on_a_live_engine() {
         for r in retirements() {
-            assert!(!admit(&r, 0, false, false, 0), "{r:?} ran before the device quiesced");
-            assert!(admit(&r, 0, true, false, 0), "{r:?} parked on a quiescent device");
+            assert!(!admit(&r, 0, Hold::Parks, 0), "{r:?} ran before its chains retired");
+            assert!(admit(&r, 0, Hold::Clear, 0), "{r:?} parked with nothing in its way");
         }
     }
     #[test]
     fn a_retirement_parked_to_the_bound_runs_to_its_refusal() {
-        // A chain the device never retires (a poisoned fenced slot) is not
-        // unreachable by construction, so only the clock can end that park.
         for r in retirements() {
-            assert!(!admit(&r, 0, false, false, PARK_BOUND_MS - 1), "{r:?} ran before the bound");
-            assert!(admit(&r, 0, false, false, PARK_BOUND_MS), "{r:?} still parked at the bound");
+            assert!(!admit(&r, 0, Hold::Parks, PARK_BOUND_MS - 1), "{r:?} ran before the bound");
+            assert!(admit(&r, 0, Hold::Parks, PARK_BOUND_MS), "{r:?} still parked at the bound");
+        }
+    }
+    #[test]
+    fn each_retirement_names_its_object_and_nothing_else_retires() {
+        for (r, want) in [
+            (Request::DetachBacking { resource_id: 7 }, Retired::Resource(7)),
+            (Request::ResourceUnref { resource_id: 7 }, Retired::Resource(7)),
+            (Request::RetireHost3dRing { resource_id: 7 }, Retired::Resource(7)),
+            (Request::DropHost3dRing { resource_id: 7 }, Retired::Resource(7)),
+            (Request::CtxDestroy { ctx_id: 3 }, Retired::Context(3)),
+            // The link it removes is the context's: only its chains can use it.
+            (Request::CtxDetachResource { ctx_id: 3, resource_id: 7 }, Retired::Context(3)),
+        ] {
+            assert_eq!(r.retired_object(), Some(want), "{r:?}");
+        }
+        for r in ordinary().into_iter().chain(seat()) {
+            assert_eq!(r.retired_object(), None, "{r:?}");
+        }
+    }
+    /// Chain `C` on context 3, which holds resource 7 and nothing else.
+    fn hold(object: Retired, in_flight: &[ChainReach], poisoned: &[ChainReach]) -> Hold {
+        retirement_hold(object, false, false, in_flight.iter().copied(), poisoned.iter().copied(),
+            |ctx, res| (ctx, res) == (3, 7))
+    }
+    const STREAM: ChainReach = ChainReach { ctx: 3, res: 0 };
+    #[test]
+    fn a_stream_in_flight_parks_only_what_its_context_can_reach() {
+        assert_eq!(hold(Retired::Resource(7), &[STREAM], &[]), Hold::Parks);
+        assert_eq!(hold(Retired::Context(3), &[STREAM], &[]), Hold::Parks);
+        assert_eq!(hold(Retired::Resource(8), &[STREAM], &[]), Hold::Clear, "not attached to it");
+        assert_eq!(hold(Retired::Context(4), &[STREAM], &[]), Hold::Clear, "another context");
+    }
+    #[test]
+    fn a_poisoned_stream_refuses_only_what_its_context_can_reach() {
+        assert_eq!(hold(Retired::Resource(7), &[], &[STREAM]), Hold::Refused);
+        assert_eq!(hold(Retired::Context(3), &[], &[STREAM]), Hold::Refused);
+        assert_eq!(hold(Retired::Resource(8), &[], &[STREAM]), Hold::Clear, "another client's surface");
+        assert_eq!(hold(Retired::Context(4), &[], &[STREAM]), Hold::Clear, "another client's context");
+    }
+    #[test]
+    fn a_transfer_holds_the_one_resource_it_names_and_its_context() {
+        let xfer = ChainReach { ctx: 3, res: 9 };
+        for (slots, want) in [((&[xfer][..], &[][..]), Hold::Parks), ((&[][..], &[xfer][..]), Hold::Refused)] {
+            let (in_flight, poisoned) = slots;
+            assert_eq!(hold(Retired::Resource(9), in_flight, poisoned), want, "named, though unattached");
+            assert_eq!(hold(Retired::Context(3), in_flight, poisoned), want, "its context");
+            assert_eq!(hold(Retired::Resource(7), in_flight, poisoned), Hold::Clear,
+                "its context holds this, but a transfer names only the one");
+        }
+    }
+    #[test]
+    fn a_transfer_with_no_context_is_reached_by_name_alone() {
+        let xfer = ChainReach { ctx: 0, res: 9 };
+        assert_eq!(hold(Retired::Resource(9), &[xfer], &[]), Hold::Parks);
+        assert_eq!(hold(Retired::Resource(7), &[xfer], &[]), Hold::Clear);
+        assert_eq!(hold(Retired::Context(3), &[xfer], &[]), Hold::Clear);
+    }
+    #[test]
+    fn a_chain_in_flight_parks_ahead_of_a_poisoned_one_on_the_same_object() {
+        assert_eq!(hold(Retired::Resource(7), &[STREAM], &[STREAM]), Hold::Parks);
+    }
+    #[test]
+    fn a_chain_in_flight_elsewhere_does_not_soften_a_refusal() {
+        let elsewhere = ChainReach { ctx: 4, res: 0 };
+        assert_eq!(hold(Retired::Resource(7), &[elsewhere], &[STREAM]), Hold::Refused);
+    }
+    #[test]
+    fn the_device_wide_work_holds_every_object_and_a_dead_engine_refuses_every_one() {
+        let held = |dead, sync, object| retirement_hold(object, dead, sync,
+            core::iter::empty(), core::iter::empty(), |_, _| false);
+        for object in [Retired::Resource(8), Retired::Context(4)] {
+            assert_eq!(held(false, false, object), Hold::Clear);
+            assert_eq!(held(false, true, object), Hold::Parks);
+            assert_eq!(held(true, false, object), Hold::Refused);
+            assert_eq!(held(true, true, object), Hold::Refused, "death outranks the sync chain");
         }
     }
     #[test]
@@ -561,9 +695,9 @@ mod admission_tests {
         // ordinary admission stays closed for the trusted path's whole span.
         for phase in [1, 2, 3, 4] {
             for r in retirements().into_iter().chain(ordinary()) {
-                for (quiescent, unreachable) in [(false, false), (true, false), (false, true), (true, true)] {
+                for held in [Hold::Clear, Hold::Parks, Hold::Refused] {
                     for parked in [0, PARK_BOUND_MS, u64::MAX] {
-                        assert!(!admit(&r, phase, quiescent, unreachable, parked), "{r:?} ran in phase {phase}");
+                        assert!(!admit(&r, phase, held, parked), "{r:?} ran in phase {phase}");
                     }
                 }
             }
@@ -607,11 +741,11 @@ mod admission_tests {
         }
     }
     #[test]
-    fn seat_traffic_and_ordinary_work_run_regardless_of_quiescence() {
-        for (quiescent, unreachable) in [(false, false), (true, false), (false, true), (true, true)] {
-            for r in ordinary() { assert!(admit(&r, 0, quiescent, unreachable, 0), "{r:?}"); }
+    fn seat_traffic_and_ordinary_work_run_whatever_the_hold() {
+        for held in [Hold::Clear, Hold::Parks, Hold::Refused] {
+            for r in ordinary() { assert!(admit(&r, 0, held, 0), "{r:?}"); }
             for phase in [0, 1, 2, 3, 4] {
-                for r in seat() { assert!(admit(&r, phase, quiescent, unreachable, 0), "{r:?} in phase {phase}"); }
+                for r in seat() { assert!(admit(&r, phase, held, 0), "{r:?} in phase {phase}"); }
             }
         }
     }

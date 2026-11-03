@@ -11,6 +11,11 @@
 # 15 s is half the broker's 30 s park bound: a destroy under it cannot have sat
 # out even one park.
 #
+# A fast, unrefused surface is also what a broker that scoped nothing at all
+# would show, so the holder's OWN retirement is the positive control: same slot,
+# same boot, and it must be refused, at once, for the poison. A broker refusing
+# on any poison fails the surface leg; one refusing on none fails this one.
+#
 # Runs ON the GL host: a ctx needs a virgl device. env: WARP_REPO (default
 # ~/projects/thylacine), WARP_WORK (default ~/warp).
 
@@ -50,6 +55,7 @@ proc pr_surfaces {tag} {
     lc_send "ls --color=never --beacon=never /dev/tapestry/surface; echo $tag"
     set timeout 60
     expect {
+        -ex {lictor: retirement refused} { lc_fail "a retirement was refused beside this surface ($tag)" }
         -re "\n$tag" {}
         -re {EXTINCTION:} { lc_extinction_fail "kernel extinction listing surfaces ($tag)" }
         timeout { lc_fail "the surface listing never ended ($tag, 60s)" }
@@ -85,6 +91,7 @@ proc pr_destroy {leg sid} {
     lc_send "echo destroy > /dev/tapestry/surface/$sid/ctl; echo destroy-returned-$leg"
     set timeout 600
     expect {
+        -ex {lictor: retirement refused} { lc_fail "$leg: this surface's destroy met a refused retirement" }
         -re "\ndestroy-returned-$leg" {}
         -re {EXTINCTION:} { lc_extinction_fail "kernel extinction during the $leg destroy" }
         timeout { lc_fail "$leg: the destroy did not return within 600 s" }
@@ -115,6 +122,39 @@ set sid [pr_create poisoned]
 set poisoned_ms [pr_destroy poisoned $sid]
 lc_step "POISON-RETIRE poisoned-ms=$poisoned_ms (surface $sid, one poisoned slot, another client's)"
 
+if {$poisoned_ms > $bound_ms} {
+    lc_fail "POISON-RETIRE RED: one poisoned slot stopped the compositor for $poisoned_ms ms on a surface close (control $control_ms ms, bound $bound_ms ms)"
+}
+
+# The positive control. The destroy's three retiring requests are all this slot's
+# own, so a broker that parked them would take 90 s, and one that ran them would
+# say nothing here.
+lc_send "echo go > /tmp/poison-go"
+set timeout 120
+set refused 0
+set own_ms -1
+expect {
+    -ex {lictor: retirement refused while a poisoned chain can reach its object} {
+        set refused 1
+        if {$own_ms < 0} { exp_continue }
+    }
+    -ex {lictor: retirement refused on a non-quiescent engine} {
+        lc_fail "own: the holder's retirement was refused for the engine, not for its poison"
+    }
+    -re {warp-prove: POISON-HOLD OWN-RETIRE ms=([0-9]+)} {
+        set own_ms $expect_out(1,string)
+        if {!$refused} { exp_continue }
+    }
+    -re {warp-prove: FAIL --[^\n]*} { lc_fail "poison-hold: $expect_out(0,string)" }
+    -re {EXTINCTION:} { lc_extinction_fail "kernel extinction during the holder's own retirement" }
+    timeout { lc_fail "own: within 120 s: refused=$refused own_ms=$own_ms (a holder's own retirement that ran, or parked)" }
+    eof { lc_fail "unexpected EOF during the holder's own retirement" }
+}
+lc_step "POISON-RETIRE own-ms=$own_ms (the holder's own BO, refused for its poison)"
+if {$own_ms > $bound_ms} {
+    lc_fail "own: the holder's refused retirement took $own_ms ms, so it parked instead of refusing at once"
+}
+
 # The slot must have stayed poisoned throughout: poison-hold fails if it healed.
 set timeout [expr {$hold_s + 120}]
 expect {
@@ -125,9 +165,6 @@ expect {
     eof { lc_fail "unexpected EOF during the hold" }
 }
 
-if {$poisoned_ms > $bound_ms} {
-    lc_fail "POISON-RETIRE RED: one poisoned slot stopped the compositor for $poisoned_ms ms on a surface close (control $control_ms ms, bound $bound_ms ms)"
-}
-lc_pass "warp-poison-retire: a surface closed in $poisoned_ms ms beside another client's poisoned slot (control $control_ms ms)"
+lc_pass "warp-poison-retire: a surface closed in $poisoned_ms ms beside another client's poisoned slot (control $control_ms ms), and the holder's own retirement was refused in $own_ms ms"
 lc_quit
 exit 0

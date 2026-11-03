@@ -65,8 +65,7 @@ impl Driver for Lictor {
                     // episode: it recovers to NORMAL, and an error reply here
                     // would make the compositor give up on a display that is
                     // about to come back.
-                    admit(req, self.seat.phase, self.device.gpu.all_work_retired(),
-                        self.device.gpu.quiescence_unreachable(), conn.parked_ms())
+                    admit(req, self.seat.phase, self.device.retirement_hold(req), conn.parked_ms())
                 });
                 if !runnable {
                     #[cfg(feature = "test-mode")]

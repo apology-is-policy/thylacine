@@ -3000,8 +3000,10 @@ fn poisoned_ctx(root: i64, nop: &[u8]) -> u32 {
     ctx
 }
 
-/// Hold a poisoned slot for `argv[2]` seconds, then let it heal and say so.
-/// Nothing here judges the retirement a second client makes meanwhile.
+/// Hold a poisoned slot until `/tmp/poison-go` appears (at most `argv[2]`
+/// seconds), retire one of this ctx's own BOs, then let the slot heal and say so.
+/// Nothing here judges the retirement a second client makes meanwhile; the
+/// scenario judges this one against the broker's own refusal line.
 fn poison_hold() -> i64 {
     let secs: u64 = libthyla_rs::env::args()
         .get_str(2)
@@ -3014,7 +3016,40 @@ fn poison_hold() -> i64 {
     let nop = [cmd0(VIRGL_CCMD_CLEAR, 0, 0).to_le_bytes()].concat();
     let ctx = poisoned_ctx(root, &nop);
     t_putstr(&format!("warp-prove: POISON-HOLD READY ctx {} for {} s\n", ctx, secs));
-    let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_secs(secs));
+    let t0 = libthyla_rs::time::Instant::now();
+    loop {
+        let go = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/tmp/poison-go".as_ptr(), 14, T_OREAD) };
+        if go >= 0 {
+            unsafe { t_close(go) };
+            break;
+        }
+        if t0.elapsed().as_secs() >= secs {
+            fail("poison-hold: never told to retire its own BO");
+        }
+        let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(200));
+    }
+    let bo = match parse_u32_prefix(&open_read_string(root, &format!("ctx/{}/bo/new", ctx))) {
+        Some(v) => v,
+        None => fail("poison-hold: bo/new"),
+    };
+    let bo_ctl = format!("ctx/{}/bo/{}/ctl", ctx, bo);
+    if !write_ctl(root, &bo_ctl, &smallest_bo_create()) {
+        fail("poison-hold: create3d on the poisoned ctx");
+    }
+    let leaked = |c: &str| {
+        parse_field(c, "leaked-count").unwrap_or_else(|| fail("poison-hold: no leaked-count"))
+    };
+    let before = leaked(&open_read_string(root, &format!("ctx/{}/ctl", ctx)));
+    let t1 = libthyla_rs::time::Instant::now();
+    if !write_ctl(root, &bo_ctl, "destroy") {
+        fail("poison-hold: destroy its own BO");
+    }
+    let ms = t1.elapsed().as_millis();
+    let after = leaked(&open_read_string(root, &format!("ctx/{}/ctl", ctx)));
+    if after != before + 1 {
+        fail("poison-hold: its own BO was not leak-parked, so the slot did not count");
+    }
+    t_putstr(&format!("warp-prove: POISON-HOLD OWN-RETIRE ms={}\n", ms));
     let c = open_read_string(root, &format!("ctx/{}/ctl", ctx));
     if parse_field(&c, "poisoned") != Some(1) {
         fail("poison-hold: the slot healed during the hold, so the timing beside it proves nothing");
