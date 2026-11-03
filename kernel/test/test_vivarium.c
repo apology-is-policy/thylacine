@@ -6023,6 +6023,16 @@ void test_vivarium_fd_is_slow_cached(void) {
     TEST_ASSERT(file_is_slow_for_test(p, (u64)chr), "still slow");
     TEST_EXPECT_EQ(g_intr_stat_calls, 1, "learned once");
 
+    // A byte connection stats as a socket (ARCH 8.8.3): netd's data file, devsrv's
+    // open connection.
+    g_intr_stat_mode  = T_S_IFSOCK | 0666u;
+    g_intr_stat_calls = 0;
+    hidx_t sock = intr_install(p);
+    TEST_ASSERT(sock >= 0, "install a socket file");
+    TEST_ASSERT(file_is_slow_for_test(p, (u64)sock), "a socket file is slow");
+    TEST_ASSERT(file_is_slow_for_test(p, (u64)sock), "still slow");
+    TEST_EXPECT_EQ(g_intr_stat_calls, 1, "learned once");
+
     // A failing stat: not slow, NOT cached -- the next call asks again and
     // learns the truth once the stat succeeds.
     g_intr_stat_fail  = 1;
@@ -6247,4 +6257,42 @@ void test_vivarium_close_keeps_a_reserved_row(void) {
     TEST_EXPECT_EQ(reaped, pid, "wait_pid returned the child");
     TEST_EXPECT_EQ(status, 0,
         "a reserved number: close keeps its row, bind is EBADF; a free one's close drops it");
+}
+
+// ARCH 8.8.3, signal(7)'s restart list. A positive list: a call nobody thought about
+// answers EINTR, which POSIX allows, rather than re-running with stale arguments.
+void test_vivarium_call_restartable(void) {
+    u64 args[6] = { 0, 0, 0, 0, 0, 0 };
+    static const u64 restarts[] = {
+        VIV_LINUX_ACCEPT, VIV_LINUX_ACCEPT4, VIV_LINUX_CONNECT, VIV_LINUX_RECVFROM,
+        VIV_LINUX_RECVMSG, VIV_LINUX_SENDTO, VIV_LINUX_SENDMSG, VIV_LINUX_WAIT4,
+        VIV_LINUX_READ, VIV_LINUX_READV, VIV_LINUX_WRITE, VIV_LINUX_WRITEV,
+        VIV_LINUX_PREAD64, VIV_LINUX_PWRITE64, VIV_LINUX_IOCTL,
+    };
+    for (u32 i = 0; i < sizeof(restarts) / sizeof(restarts[0]); i++)
+        TEST_ASSERT(vivarium_call_restartable(restarts[i], args), "on the list: restarts");
+
+    static const u64 never[] = {
+        VIV_LINUX_PPOLL, VIV_LINUX_PSELECT6, VIV_LINUX_NANOSLEEP,
+        VIV_LINUX_CLOCK_NANOSLEEP, VIV_LINUX_RT_SIGSUSPEND, VIV_LINUX_RT_SIGTIMEDWAIT,
+        VIV_LINUX_CLOSE, 0xfffffu,
+    };
+    for (u32 i = 0; i < sizeof(never) / sizeof(never[0]); i++)
+        TEST_ASSERT(!vivarium_call_restartable(never[i], args), "never restarts");
+
+    TEST_ASSERT(vivarium_call_restartable(VIV_LINUX_FUTEX, args),
+                "a futex wait with no timeout re-issues as it stands");
+    args[3] = 0x1000u;
+    TEST_ASSERT(!vivarium_call_restartable(VIV_LINUX_FUTEX, args),
+                "a timed one would owe a restart block with what time is left");
+    args[3] = 0;
+
+    args[1] = VIV_F_SETLKW;
+    TEST_ASSERT(vivarium_call_restartable(VIV_LINUX_FCNTL, args), "F_SETLKW waits");
+    args[1] = VIV_F_OFD_SETLKW;
+    TEST_ASSERT(vivarium_call_restartable(VIV_LINUX_FCNTL, args), "F_OFD_SETLKW waits");
+    args[1] = VIV_F_GETFD;
+    TEST_ASSERT(!vivarium_call_restartable(VIV_LINUX_FCNTL, args), "F_GETFD does not");
+
+    TEST_ASSERT(!vivarium_call_restartable(VIV_LINUX_READ, NULL), "no arguments, no answer");
 }

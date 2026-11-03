@@ -30,9 +30,10 @@ nothing. Nothing unwound a wait for a real handler either.
   arch/aarch64/bits/syscall.h.in  __NR_note_dispose 139. After a musl re-vendor, extend
       0001's awk filter: m["note_dispose"]="139";
 
-Witnesses: pouch-hello-signals `dfl-read-dies`, `dfl-term-dies`, `intr-noresart`,
-`intr-restart`, `chld-dfl-quiet`, `ign-quiet`, `fork-handler`, `pause-waits`,
-`nanosleep-intr`, `accept-intr`, `recv-intr`, `empty-poll-sleeps`.
+Witnesses: pouch-hello-signals `dfl`, `dfl-reset`, `dfl-after-handler`, `exec-dfl`,
+`intr-norestart`, `intr-restart`, `signal-restart`, `quiet`, `pause`, `nanosleep`,
+`wait-norestart`, `wait-restart`, `fork-read`, `empty-poll`; pouch-hello-sockets `accept`
+and `recv`; pouch-hello-net `accept-eintr`, `accept-restart`, `connect`.
 
 --- a/arch/aarch64/bits/syscall.h.in
 +++ b/arch/aarch64/bits/syscall.h.in

@@ -227,6 +227,67 @@ static int test_accept_note(int restart, unsigned short port)
 	return bad;
 }
 
+/* The child blocks in recv on an established connection, which a note may interrupt
+ * because netd's data file stats as a socket. Mode 0 sees EINTR and the next recv takes
+ * the byte, so the flushed read lost nothing. Mode 1's one recv is re-issued across the
+ * flush. */
+static int test_recv_note(int restart, unsigned short port)
+{
+	struct sockaddr_in sa;
+	memset(&sa, 0, sizeof(sa));
+	sa.sin_family = AF_INET;
+	sa.sin_addr.s_addr = htonl(0x7f000001u);
+	sa.sin_port = htons(port);
+	int ls = socket(AF_INET, SOCK_STREAM, 0);
+	CHECK(ls >= 0, "recv-note socket");
+	CHECK(bind(ls, (struct sockaddr *)&sa, sizeof(sa)) == 0, "recv-note bind");
+	CHECK(listen(ls, 1) == 0, "recv-note listen");
+	int said[2];
+	CHECK(pipe(said) == 0, "recv-note pipe");
+	fflush(stdout);
+	pid_t kid = fork();
+	CHECK(kid >= 0, "recv-note fork");
+	if (kid == 0) {
+		g_intr_ack = restart ? said[1] : -1;
+		if (intr_catch(restart ? SA_RESTART : 0) != 0) _exit(70);
+		int a = accept(ls, NULL, NULL);
+		if (a < 0) _exit(71);
+		(void)write(said[1], "A", 1);
+		char b = 0;
+		ssize_t r = recv(a, &b, 1, 0);
+		if (!restart) {
+			if (!(r == -1 && errno == EINTR && g_intr_caught >= 1)) _exit(72);
+			(void)write(said[1], "E", 1);
+			r = recv(a, &b, 1, 0);
+		}
+		_exit(r == 1 && b == 'C' && g_intr_caught >= 1 ? 0 : 73);
+	}
+	const char *what = restart ? "recv-restart" : "recv-eintr";
+	int c = socket(AF_INET, SOCK_STREAM, 0);
+	if (c < 0 || connect(c, (struct sockaddr *)&sa, sizeof(sa)) != 0) {
+		printf("pouch-hello-net: FAIL recv-note connect (errno=%d)\n", errno);
+		return intr_fail(kid, what);
+	}
+	struct pollfd pf = { said[0], POLLIN, 0 };
+	char got = 0;
+	if (poll(&pf, 1, INTR_DEADLINE_MS) != 1 || read(said[0], &got, 1) != 1 || got != 'A') {
+		return intr_fail(kid, "recv-note accept");
+	}
+	if (intr_post_until_byte(kid, said[0], intr_now_ms() + INTR_DEADLINE_MS) != 0) {
+		return intr_fail(kid, what);
+	}
+	if (write(c, "C", 1) != 1) {
+		printf("pouch-hello-net: FAIL recv-note write (errno=%d)\n", errno);
+		return intr_fail(kid, what);
+	}
+	int bad = intr_reap(kid, what);
+	close(c);
+	close(ls);
+	close(said[0]);
+	close(said[1]);
+	return bad;
+}
+
 /* The child's connect waits on a SYN nothing answers: 10.0.2.77 is on the link and no
  * one holds it, so netd has it in SynSent until CONNECT_TIMEOUT_MS. A note ends the
  * wait with EINTR. The retry must wait on that same request, and a second dial would
@@ -469,6 +530,10 @@ int main(void)
 	printf("pouch-hello-net: accept reads EINTR, and the next accept takes the connection\n");
 	if (test_accept_note(1, 7703) != 0) return 1;
 	printf("pouch-hello-net: SA_RESTART re-issues accept across the flush\n");
+	if (test_recv_note(0, 7704) != 0) return 1;
+	printf("pouch-hello-net: recv reads EINTR, and the next recv takes the byte\n");
+	if (test_recv_note(1, 7705) != 0) return 1;
+	printf("pouch-hello-net: SA_RESTART re-issues recv across the flush\n");
 	if (test_connect_note() != 0) return 1;
 	printf("pouch-hello-net: connect reads EINTR, and the retry waits on the same request\n");
 
