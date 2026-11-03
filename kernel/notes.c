@@ -1853,16 +1853,18 @@ static void notes_call_rewind(struct exception_context *ctx, const struct Thread
 
 // ARCH 8.8.3: the kind of wait `t` is entering. UNWINDS exactly when every
 // gate of thread_caught_note_unwinds that cannot change during the wait passes:
-// the caller opted in (caught_ok), the call is on signal(7)'s list, the Proc is
-// EINTR-ready, and no handler, exit close or kthread join holds the thread.
-// What is left is per family -- the mask, the queued note, the claim -- and the
-// walk re-checks the mask itself.
+// the caller opted in (caught_ok), the call is on signal(7)'s list, and no
+// handler, exit close or kthread join holds the thread. What is left can change:
+// per family, the mask, the queued note and the claim, which the walk re-checks;
+// and whether a table governs the Proc, since a peer's first row can come while
+// the wait stands. Until one does the walk designates nobody and the wait's own
+// re-read refuses, so the wait rides the note out.
 u8 thread_caught_wait_kind(const struct Thread *t, bool caught_ok) {
     if (!caught_ok || !t->note_interruptible || t->in_handler ||
         t->exit_close_active || t->kthread_join_active)
         return CAUGHT_WAIT_HOLDS;
     struct Proc *p = t->proc;
-    if (!p || p == kproc() || !proc_caught_note_eintr_ready(p))
+    if (!p || p == kproc())
         return CAUGHT_WAIT_HOLDS;
     return CAUGHT_WAIT_UNWINDS;
 }

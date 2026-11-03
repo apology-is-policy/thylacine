@@ -3184,8 +3184,9 @@ void test_rendez_native_tail_past_sak(void) {
 // judged, and then a row changes what that note means. A post wakes nobody for this,
 // because the post is over: the re-read owes the wake, or the wait ends only if
 // something else ends it. Queued fatal, queued caught and direct fatal: each has its
-// own wake to forget.
-enum { RR_FATAL, RR_CAUGHT, RR_DIRECT };
+// own wake to forget. The last leg posts after the row: a wait entered before the
+// Proc's first row is an unwinding wait from that row on.
+enum { RR_FATAL, RR_CAUGHT, RR_DIRECT, RR_LATER };
 static volatile u32  g_rr_run;
 static volatile int  g_rr_rc;
 static volatile bool g_rr_release;
@@ -3229,6 +3230,8 @@ static void rr_leg(int leg, int want) {
     if (parked) {
         if (leg == RR_DIRECT) {
             posted = proc_note_thread(par, tid, NOTE_NAME_USR1, NULL);
+        } else if (leg == RR_LATER) {
+            posted = 0;
         } else {
             irq_state_t s = proc_table_lock_acquire();
             posted = notes_post(par, NOTE_NAME_USR1, 0u, NULL, true);
@@ -3242,9 +3245,15 @@ static void rr_leg(int leg, int want) {
 
     s64 row = -1;
     if (rode_out) {
-        row = leg == RR_CAUGHT
+        row = leg == RR_CAUGHT || leg == RR_LATER
             ? sys_note_dispose_for_proc(par, NOTE_NAME_USR1, NOTE_DISP_CAUGHT, 0)
             : sys_note_dispose_for_proc(par, NOTE_NAME_USR2, NOTE_DISP_IGNORE, 0);
+        if (leg == RR_LATER) {
+            irq_state_t s = proc_table_lock_acquire();
+            posted = notes_post(par, NOTE_NAME_USR1, 0u, NULL, true);
+            proc_caught_note_wake(par);
+            proc_table_lock_release(s);
+        }
         u64 dl = timer_now_ns() + TEST_YIELD_BUDGET_NS;
         while (g_rr_run < 2u && timer_now_ns() < dl) sched();
     }
@@ -3278,4 +3287,5 @@ void test_rendez_reread_wakes_a_sleeper(void) {
     rr_leg(RR_FATAL, SLEEP_INTR);
     rr_leg(RR_CAUGHT, SLEEP_NOTEINTR);
     rr_leg(RR_DIRECT, SLEEP_INTR);
+    rr_leg(RR_LATER, SLEEP_NOTEINTR);
 }

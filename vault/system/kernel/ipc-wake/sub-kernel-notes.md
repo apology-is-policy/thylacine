@@ -526,7 +526,10 @@ the wait's kind (`Thread.caught_wait`: none, unwinds, holds) under the thread's
 `wait_lock` before anything else (`sleep_caught_wait_enter`), and restore the
 outer kind on the way out, since a stop park nests a wait inside a wait.
 `thread_caught_wait_kind` answers "unwinds" exactly when every gate of
-`thread_caught_note_unwinds` that cannot change during the wait passes. A
+`thread_caught_note_unwinds` that cannot change during the wait passes. Whether a
+table governs the Proc can change, since a peer's first row can come while the
+wait stands, so the kind does not read it: the walk designates nobody until one
+does, and from then on it finds that wait. A
 designation the wait cannot honour -- every family when it holds, a masked one
 when it unwinds -- is handed off before the thread blocks
 (`notes_handoff_target`): the wait lock is dropped, the families leave the

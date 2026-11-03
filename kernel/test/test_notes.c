@@ -1248,7 +1248,13 @@ void test_notes_caught_note_claim_once(void) {
     TEST_ASSERT(p != NULL, "proc_alloc succeeded");
     p->state     = PROC_STATE_ALIVE;
     p->phenotype = PHENO_LINUX;
-    notes_set_handler(p, 0x1000u);
+    struct viv_sigtab *tab = (struct viv_sigtab *)kzalloc(sizeof(struct viv_sigtab), 0);
+    TEST_ASSERT(tab != NULL, "sigtab alloc");
+    p->sigtab = tab;                    // freed by proc_free
+    const struct viv_ksigaction hand = { .handler = 0x1000, .flags = 0, .restorer = 0x2000,
+                                         .mask = 0 };
+    TEST_ASSERT(viv_sigtab_set(tab, VIV_SIGNOTE_INTERRUPT, &hand), "catch interrupt");
+    TEST_ASSERT(viv_sigtab_set(tab, VIV_SIGNOTE_CHILD_EXIT, &hand), "catch child_exit");
 
     static struct Thread a, b, c;       // BSS-zeroed, reset each run
     a.proc = b.proc = c.proc = p;
@@ -2733,7 +2739,13 @@ void test_notes_family_past_the_first_byte(void) {
     TEST_ASSERT(p != NULL, "proc_alloc succeeded");
     p->state     = PROC_STATE_ALIVE;
     p->phenotype = PHENO_LINUX;
-    notes_set_handler(p, 0x1000u);
+    struct viv_sigtab *tab = (struct viv_sigtab *)kzalloc(sizeof(struct viv_sigtab), 0);
+    TEST_ASSERT(tab != NULL, "sigtab alloc");
+    p->sigtab = tab;                    // freed by proc_free
+    const struct viv_ksigaction hand = { .handler = 0x1000, .flags = 0, .restorer = 0x2000,
+                                         .mask = 0 };
+    TEST_ASSERT(viv_sigtab_set(tab, VIV_SIGNOTE_USR1, &hand), "catch usr1");
+    TEST_ASSERT(viv_sigtab_set(tab, VIV_SIGNOTE_USR2, &hand), "catch usr2");
 
     static struct Thread a, b;          // BSS-zeroed, reset each run
     a.proc = b.proc = p;

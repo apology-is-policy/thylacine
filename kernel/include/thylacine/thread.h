@@ -43,8 +43,9 @@ _Static_assert(THREAD_STATE_INVALID == 0,
                "(P2-A audit R4 F46 close)");
 
 // Thread.caught_wait (ARCH 8.8.3). NONE: not in a wait, so the thread reaches
-// an EL0-return tail soon. UNWINDS: in a wait a caught note unwinds. HOLDS: in
-// a wait that rides a caught note out, which the posting walk never designates.
+// an EL0-return tail soon. UNWINDS: in a wait a caught note unwinds, from the
+// moment a table governs the Proc. HOLDS: in a wait that rides a caught note out,
+// which the posting walk never designates.
 enum caught_wait {
     CAUGHT_WAIT_NONE    = 0,
     CAUGHT_WAIT_UNWINDS = 1,

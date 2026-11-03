@@ -312,7 +312,8 @@ static void test_caught_wake_holder(struct Proc *p, int tid) {
         irq_state_t ws = spin_lock_irqsave(&t->wait_lock);
         struct Rendez *r = t->rendez_blocked_on;
         if (r && r != &t->debug_rendez &&
-            __atomic_load_n(&t->caught_wait, __ATOMIC_RELAXED) == CAUGHT_WAIT_HOLDS)
+            (__atomic_load_n(&t->caught_wait, __ATOMIC_RELAXED) == CAUGHT_WAIT_HOLDS ||
+             !notes_table_governs(p)))
             wakeup(r);
         spin_unlock_irqrestore(&t->wait_lock, ws);
     }

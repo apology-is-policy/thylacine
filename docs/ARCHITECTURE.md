@@ -1742,7 +1742,9 @@ as a handler.
 was judged by the old row. The write discards it if the row now ignores it. If the
 row now terminates, it arms the latch and rouses the waits, from the queue and the
 per-thread words alike. If the row is now caught, it arms the caught latch and
-walks the Proc. `SYS_NOTIFY(0)` resets live rows to default and does the same. This
+walks the Proc. A wait entered before the Proc's first row is in that walk: a wait's
+kind does not read whether a table governs, because a peer's first row can come
+while the wait stands. `SYS_NOTIFY(0)` resets live rows to default and does the same. This
 closes `seam-queue-note-fatal-after-post-wakes-nobody`: a note stranded behind a
 wait that rode it out now ends the wait.
 

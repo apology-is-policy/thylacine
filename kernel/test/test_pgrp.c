@@ -317,7 +317,7 @@ void test_tty_terminate_class_gate(void) {
     t->note_mask = saved_mask;
 
     // Registering a handler flips the disposition to CATCH: no terminate,
-    // both latches cleared. Unregistering does NOT re-arm (LS-5 contract).
+    // both latches cleared. Unregistering flips it back, and arms again.
     notes_set_handler(p, 0x100000u);
     spin_lock(&p->notes->lock);
     tname = notes_terminate_note_name_locked(p, NULL);
@@ -327,16 +327,14 @@ void test_tty_terminate_class_gate(void) {
     TEST_ASSERT((flags & (PROC_FLAG_TTY_TERMINATE_PENDING |
                           PROC_FLAG_INTR_TERMINATE_PENDING)) == 0,
                 "handler registration did not clear the latches");
-    // Unregistering splits the two surfaces (the LS-5 contract): the LATCH
-    // (the lock-free wake hint) is NOT re-armed -- but the TRUTH function
-    // reports the still-queued note again, because the unregistering thread
-    // reaches its own EL0-return tail right after the syscall, where the
-    // re-evaluation legitimately terminates it (nothing drained the note).
+    // ARCH 8.8.3: the write re-reads what is pending, so the latch says what the
+    // queue says, for its own family alone, and a peer riding the note out is woken.
     notes_set_handler(p, 0u);
     flags = __atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE);
-    TEST_ASSERT((flags & (PROC_FLAG_TTY_TERMINATE_PENDING |
-                          PROC_FLAG_INTR_TERMINATE_PENDING)) == 0,
-                "unregister re-armed the latch");
+    TEST_ASSERT((flags & PROC_FLAG_TTY_TERMINATE_PENDING) != 0,
+                "unregister left the queued note's latch unarmed");
+    TEST_ASSERT((flags & PROC_FLAG_INTR_TERMINATE_PENDING) == 0,
+                "unregister armed another family's latch");
     spin_lock(&p->notes->lock);
     tname = notes_terminate_note_name_locked(p, NULL);
     spin_unlock(&p->notes->lock);
