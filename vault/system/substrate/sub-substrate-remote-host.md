@@ -13,7 +13,7 @@ hazards: []
 abis: []
 design: ["docs/GPU-HOST-SETUP.md", "docs/GPU-DESIGN.md"]
 created: 2026-09-21
-updated: 2026-10-29
+updated: 2026-11-03
 ---
 ## Purpose
 
@@ -137,6 +137,12 @@ there (2026-09-21, virgl=1 ctxinit=1, first attempt).
 Not an audit surface. The 09-21 failure is the one to keep in mind: the sync
 VERIFIED everything it shipped, and what broke was a file it did not know the
 consumer read.
+
+`poison-retire` is red by design until the broker's retirement rule is scoped
+(OPEN-BUGS 2026-11-03T11:53Z): `warp-prove poison-hold` keeps one fenced slot
+poisoned while the scenario times a surface destroy from another client, with an
+unpoisoned control leg one variable away. A ctx needs virgl, so it runs on a GL
+host only.
 
 ## Seams
 

@@ -305,6 +305,12 @@ pub extern "C" fn rs_main() -> i64 {
         return 0;
     }
 
+    // A ctx kept alive with one poisoned fenced slot, so that a second client's
+    // retirement can be timed against it (tools/warp/warp-poison-retire.exp).
+    if libthyla_rs::env::args().get_str(1) == Some("poison-hold") {
+        return poison_hold();
+    }
+
     // V-3a: the coherent-ring gate. Needs NO virgl (the ring is coherent
     // shmem + a doorbell), so it runs on the local 2D device.
     if libthyla_rs::env::args().get_str(1) == Some("ring") {
@@ -2924,7 +2930,18 @@ fn prove_two_clients() {
 /// `warp-abandon` forces the transition the 30 s clock would otherwise
 /// make. Shortening the clock instead would have made this a race against
 /// wall time -- the flake shape the harness exists to remove.
-fn prove_poisoned_path(root: i64) {
+/// One page is the minimum the seam accepts, and it is what makes the COUNT
+/// cap (not the byte cap) the binding one in the poisoned churn.
+fn smallest_bo_create() -> String {
+    format!(
+        "create3d {} {} {} 1 1 1 1 0 0 0 {}",
+        PIPE_TEXTURE_2D, VIRGL_FORMAT_B8G8R8A8_UNORM, VIRGL_BIND_RENDER_TARGET, 4096
+    )
+}
+
+/// Mint a ctx and wedge it: hold on, one submit, abandon. Every step is asserted,
+/// and the hold is left on, so the slot stays poisoned until `warp-hold off`.
+fn poisoned_ctx(root: i64, nop: &[u8]) -> u32 {
     // The levers live on the WARP ctl, not the tapestry one -- a warp
     // client has no path to the tapestry tree. #178: they act only on the
     // CALLER'S ctx, so the ctx must exist first; a lever write with no ctx
@@ -2941,13 +2958,7 @@ fn prove_poisoned_path(root: i64) {
         Some(v) => v,
         None => fail("poisoned-path bo/new"),
     };
-    // One page is the minimum the seam accepts, and it is what makes the
-    // COUNT cap (not the byte cap) the binding one below.
-    let small = format!(
-        "create3d {} {} {} 1 1 1 1 0 0 0 {}",
-        PIPE_TEXTURE_2D, VIRGL_FORMAT_B8G8R8A8_UNORM, VIRGL_BIND_RENDER_TARGET, 4096
-    );
-    if !write_ctl(root, &format!("ctx/{}/bo/{}/ctl", ctx, bo), &small) {
+    if !write_ctl(root, &format!("ctx/{}/bo/{}/ctl", ctx, bo), &smallest_bo_create()) {
         fail("poisoned-path create3d");
     }
     let submit_path = format!("ctx/{}/submit", ctx);
@@ -2955,7 +2966,6 @@ fn prove_poisoned_path(root: i64) {
     if fd < 0 {
         fail("poisoned-path submit open");
     }
-    let nop = [cmd0(VIRGL_CCMD_CLEAR, 0, 0).to_le_bytes()].concat();
     let _ = unsafe { t_write(fd, nop.as_ptr(), nop.len()) };
     unsafe { t_close(fd) };
 
@@ -2987,6 +2997,46 @@ fn prove_poisoned_path(root: i64) {
         Some(1) => {}
         _ => fail("ctx not poisoned after abandon"),
     }
+    ctx
+}
+
+/// Hold a poisoned slot for `argv[2]` seconds, then let it heal and say so.
+/// Nothing here judges the retirement a second client makes meanwhile.
+fn poison_hold() -> i32 {
+    let secs: u64 = libthyla_rs::env::args()
+        .get_str(2)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| fail("poison-hold <seconds>"));
+    let root = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/srv/warp".as_ptr(), 9, T_OREAD) };
+    if root < 0 {
+        fail("poison-hold: open /srv/warp");
+    }
+    let nop = [cmd0(VIRGL_CCMD_CLEAR, 0, 0).to_le_bytes()].concat();
+    let ctx = poisoned_ctx(root, &nop);
+    t_putstr(&format!("warp-prove: POISON-HOLD READY ctx {} for {} s\n", ctx, secs));
+    let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_secs(secs));
+    let c = open_read_string(root, &format!("ctx/{}/ctl", ctx));
+    if parse_field(&c, "poisoned") != Some(1) {
+        fail("poison-hold: the slot healed during the hold, so the timing beside it proves nothing");
+    }
+    if !write_ctl(root, "ctl", "warp-hold off") {
+        fail("poison-hold: warp-hold off");
+    }
+    for _ in 0..400 {
+        let c = open_read_string(root, &format!("ctx/{}/ctl", ctx));
+        if parse_field(&c, "poisoned") == Some(0) {
+            t_putstr("warp-prove: POISON-HOLD RELEASED\n");
+            return 0;
+        }
+    }
+    fail("poison-hold: the poison never cleared after the hold released")
+}
+
+fn prove_poisoned_path(root: i64) {
+    let nop = [cmd0(VIRGL_CCMD_CLEAR, 0, 0).to_le_bytes()].concat();
+    let ctx = poisoned_ctx(root, &nop);
+    let submit_path = format!("ctx/{}/submit", ctx);
+    let small = smallest_bo_create();
 
     // R5-F2: poison is TERMINAL to the client. Submit must refuse rather
     // than let the stream be re-armed over backings the device may still

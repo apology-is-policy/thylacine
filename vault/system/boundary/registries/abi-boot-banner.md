@@ -78,6 +78,7 @@ mirrors:
   - "tools/test-smp-classify.sh (the classifier's own fixtures — both literals)"
   - "tools/testdata/smp-classify/real-pass-harness.log (a classifier input fixture)"
   - "tools/warp/composed-screen.exp"
+  - "tools/warp/warp-poison-retire.exp (EXTINCTION: only)"
   - "tools/interactive/ls-gfx-dosbox.exp"
   - "tools/interactive/ls-gfx-dosbox-conf.exp"
   - "tools/interactive/ls-gfx-dosbox-duke3d.exp"

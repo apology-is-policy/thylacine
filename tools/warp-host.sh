@@ -16,6 +16,7 @@
 #   tools/warp-host.sh composed-stall  # GPU-DESIGN 4.5.15: GPU composition survives a stall met by its health step (GL leg, test-latch-dead armed)
 #   tools/warp-host.sh composed-stall-verdict <log>  # just the verdict (no boot)
 #   tools/warp-host.sh reject    # #240: is a REJECTED command stream observable in-guest?
+#   tools/warp-host.sh poison-retire  # does a poisoned slot stop the compositor when another client's surface retires?
 #   tools/warp-host.sh readback  # Warp-C C-6 gate: the compositor readback arm is fenced + deferred under a deep queue (+ the F2b measurement)
 #   tools/warp-host.sh p1b       # GPU-DESIGN 4.5.4: does ctx_attach permit a cross-context blit? (host-side, no guest)
 #   tools/warp-host.sh p2        # GPU-DESIGN 4.5.4: does the blit observe the client's FINISHED frame? (host-side)
@@ -1234,6 +1235,18 @@ quarry-bench)
     if grep -q "MISMATCH\|mode-witness ABSENT" "$out"; then
         echo "WARNING: at least one leg did not run at the resolution it was given."
         echo "         Treat the fps column as unattributed until that is explained."
+    fi
+    ;;
+poison-retire)
+    out="$REPO_ROOT/build/warp-poison-retire.log"
+    ssh "$HOST" "cd $RREPO && ${RENV}expect tools/warp/warp-poison-retire.exp" | tee "$out" || true
+    echo "== poison-retire verdict =="
+    grep -E 'POISON-RETIRE|retirement refused' "$out" || true
+    if grep -q "LS-CI PASS: warp-poison-retire" "$out"; then
+        echo "POISON-RETIRE: VERIFIED"
+    else
+        echo "POISON-RETIRE: UNVERIFIED (the scenario's own pass line is missing -- read $out)"
+        exit 1
     fi
     ;;
 quarry-wedge)
