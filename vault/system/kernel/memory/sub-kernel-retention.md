@@ -83,8 +83,8 @@ No audit round has run on this note's tests: they change no kernel behaviour.
 
 The queued backend command, CPU composition borrow and display or GPU pin of the
 design's section 6 have no kernel type: each reaches the kernel as a DMA handle or a
-shared-in mapping held by [[sub-kernel-loom]]'s neighbours in userspace, lictor and
-tapestryd. Section 12 says which, and what it has not yet read. The account, voucher
+shared-in mapping held by a userspace service, lictor or tapestryd. Section 12 says
+which, and what it has not yet read. The account, voucher
 and pressure ABI layouts are not reserved, and no syscall number is taken.
 
 ## Caveats

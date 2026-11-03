@@ -13,7 +13,11 @@
 //   6. graceful shutdown (close stdin -> the echo EOFs -> blocking reap, no
 //      zombie);
 //   7. a server that closes stderr and keeps serving: stderr leaves the poll set
-//      at its EOF, the next poll sleeps, and the server still answers.
+//      at its EOF, the next poll sleeps, and the server still answers;
+//   8. a server that stops reading: send returns with the message queued, a full
+//      pipe does not wake the poll, and the outbox refuses at its bound;
+//   9. a message many pipes long: it moves on each writable wake and comes back
+//      whole, and a close with bytes still queued delivers them first.
 //
 // A pure-userspace probe: the kernel is byte-unchanged. joey spawns + reaps it
 // and gates the boot on exit 0 (the "parley-probe: PASS" marker is for the
@@ -29,8 +33,10 @@ static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::Th
 
 use alloc::string::ToString;
 use alloc::vec::Vec;
+use libthyla_rs::err::{Error, Result};
 use libthyla_rs::poll::PollTimeout;
 use libthyla_rs::process::Command;
+use libthyla_rs::service_worker::{Control, ServiceWorker};
 use libthyla_rs::{t_exits, t_putstr};
 use parley::json::Value;
 use parley::jsonrpc::{self, Incoming};
@@ -45,6 +51,13 @@ fn fail(msg: &str) -> ! {
 // stdout/stderr the same way.)
 const TAG_OUT: u32 = 1;
 const TAG_ERR: u32 = 2;
+const TAG_IN: u32 = 3;
+
+// Many pipes long: a pipe holds 4 KiB.
+const BIG: usize = 64 * 1024;
+
+// A send that blocks on a stopped reader would hang the boot with no line at all.
+const BLOCKED_MS: u32 = 20_000;
 
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
@@ -157,6 +170,8 @@ pub extern "C" fn rs_main() -> i64 {
     }
 
     closed_stderr(&mut mux, &req, sent.as_bytes());
+    stopped_reader(&mut mux);
+    large_message(&mut mux);
 
     t_putstr("parley-probe: PASS\n");
     0
@@ -226,5 +241,153 @@ fn closed_stderr(mux: &mut Mux, req: &Value, sent: &[u8]) {
     match srv.wait() {
         Ok(st) if st.success() => {}
         _ => fail("parley-probe: FAIL -- reap (close-stderr)\n"),
+    }
+}
+
+fn big_request(id: i64) -> Value {
+    let mut json = Vec::with_capacity(BIG + 16);
+    json.extend_from_slice(br#"{"pad":""#);
+    json.resize(json.len() + BIG, b'a');
+    json.extend_from_slice(br#""}"#);
+    match Value::parse(&json) {
+        Ok(params) => jsonrpc::request(id, "pad", params),
+        Err(_) => fail("parley-probe: FAIL -- big params parse\n"),
+    }
+}
+
+fn blocked_watchdog(_: &(), control: &Control) -> Result<()> {
+    control.ready()?;
+    let stop = [(control.stop_fd(), 0)];
+    match Mux::new().poll(&stop, PollTimeout::Millis(BLOCKED_MS)) {
+        Ok(r) if !r.is_empty() => Ok(()),
+        _ => fail("parley-probe: FAIL -- a send blocked on a server that stopped reading\n"),
+    }
+}
+
+fn stopped_reader(mux: &mut Mux) {
+    let mut dog = match ServiceWorker::new((), blocked_watchdog) {
+        Ok(d) => d,
+        Err(_) => fail("parley-probe: FAIL -- the watchdog thread\n"),
+    };
+    let mut cmd = Command::new("/bin/parley-echo");
+    cmd.arg("stop-reading");
+    let mut srv = match Server::spawn(&mut cmd) {
+        Ok(s) => s,
+        Err(_) => fail("parley-probe: FAIL -- Server::spawn(stop-reading)\n"),
+    };
+    let req = big_request(8);
+    if srv.send(&req).is_err() {
+        fail("parley-probe: FAIL -- send (stopped reader)\n");
+    }
+    if srv.stdin_pending_fd() < 0 {
+        fail("parley-probe: FAIL -- a stopped reader left nothing queued\n");
+    }
+    let reads = [(srv.stdout_fd(), TAG_OUT), (srv.stderr_fd(), TAG_ERR)];
+    let writes = [(srv.stdin_pending_fd(), TAG_IN)];
+    match mux.poll_rw(&reads, &writes, PollTimeout::Millis(50)) {
+        Ok(r) if r.is_empty() => {}
+        _ => fail("parley-probe: FAIL -- a full pipe wakes the poll\n"),
+    }
+    let mut sends: u32 = 0;
+    loop {
+        match srv.send(&req) {
+            Ok(()) => {}
+            Err(Error::NoSpace) => break,
+            Err(_) => fail("parley-probe: FAIL -- send past the first (stopped reader)\n"),
+        }
+        sends += 1;
+        if sends > 200 {
+            fail("parley-probe: FAIL -- the outbox has no bound\n");
+        }
+    }
+    if srv.kill().is_err() || srv.wait().is_err() {
+        fail("parley-probe: FAIL -- reap (stopped reader)\n");
+    }
+    if dog.shutdown().is_err() {
+        fail("parley-probe: FAIL -- the watchdog's end\n");
+    }
+}
+
+// One framed reply, flushing and draining on the way. This is the shape of Nora's
+// loop, so a transport that needs anything more from its host fails here.
+fn serve_until_frame(srv: &mut Server, mux: &mut Mux) -> Vec<u8> {
+    let mut spins: u32 = 0;
+    loop {
+        spins += 1;
+        if spins > 10_000 {
+            fail("parley-probe: FAIL -- no frame after 10000 polls (large message)\n");
+        }
+        let reads = [(srv.stdout_fd(), TAG_OUT), (srv.stderr_fd(), TAG_ERR)];
+        let writes = [(srv.stdin_pending_fd(), TAG_IN)];
+        let ready = match mux.poll_rw(&reads, &writes, PollTimeout::Millis(2000)) {
+            Ok(r) => r,
+            Err(_) => fail("parley-probe: FAIL -- mux.poll_rw\n"),
+        };
+        if ready.is_empty() {
+            fail("parley-probe: FAIL -- poll timed out (large message)\n");
+        }
+        for r in &ready {
+            match r.tag {
+                TAG_IN => {
+                    if srv.flush().is_err() {
+                        fail("parley-probe: FAIL -- flush\n");
+                    }
+                }
+                TAG_ERR => {
+                    if r.readable || r.hup {
+                        let _ = srv.drain_stderr();
+                    }
+                }
+                _ => {
+                    if !r.readable {
+                        fail("parley-probe: FAIL -- stdout hung up before the frame\n");
+                    }
+                    if !matches!(srv.pump(), Ok(false)) {
+                        fail("parley-probe: FAIL -- pump (large message)\n");
+                    }
+                    match srv.next_frame() {
+                        Ok(Some(body)) => return body,
+                        Ok(None) => {}
+                        Err(_) => fail("parley-probe: FAIL -- frame decode (large message)\n"),
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn large_message(mux: &mut Mux) {
+    let mut cmd = Command::new("/bin/parley-echo");
+    let mut srv = match Server::spawn(&mut cmd) {
+        Ok(s) => s,
+        Err(_) => fail("parley-probe: FAIL -- Server::spawn(large message)\n"),
+    };
+    let req = big_request(9);
+    let sent = req.to_string();
+    if srv.send(&req).is_err() {
+        fail("parley-probe: FAIL -- send (large message)\n");
+    }
+    if srv.stdin_pending_fd() < 0 {
+        fail("parley-probe: FAIL -- a message many pipes long left nothing queued\n");
+    }
+    if serve_until_frame(&mut srv, mux) != sent.as_bytes() {
+        fail("parley-probe: FAIL -- a large message came back changed\n");
+    }
+    if srv.stdin_pending_fd() >= 0 {
+        fail("parley-probe: FAIL -- the outbox did not drain\n");
+    }
+    if srv.send(&req).is_err() {
+        fail("parley-probe: FAIL -- second send (large message)\n");
+    }
+    if srv.stdin_pending_fd() < 0 {
+        fail("parley-probe: FAIL -- the second message left nothing queued\n");
+    }
+    srv.close_stdin();
+    if serve_until_frame(&mut srv, mux) != sent.as_bytes() {
+        fail("parley-probe: FAIL -- a close lost the bytes queued behind it\n");
+    }
+    match srv.wait() {
+        Ok(st) if st.success() => {}
+        _ => fail("parley-probe: FAIL -- reap (large message)\n"),
     }
 }

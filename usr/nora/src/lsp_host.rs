@@ -191,6 +191,7 @@ pub const TAG_LSP_ERR: Tag = 2;
 // 3, 4 are TAG_DAP_OUT / TAG_DAP_ERR (dap_host.rs, the 8f debugger).
 /// #55c: the editor's note queue (tty:winch — the console resize signal).
 pub const TAG_NOTES: Tag = 5;
+pub const TAG_LSP_IN: Tag = 6;
 
 /// A live language-server session.
 ///
@@ -295,6 +296,14 @@ impl Lsp {
         ]
     }
 
+    /// The server's stdin while bytes wait behind it, to ask the poll for room.
+    pub fn write_fds(&self) -> Vec<(i32, Tag)> {
+        if self.dead {
+            return Vec::new();
+        }
+        alloc::vec![(self.srv.stdin_pending_fd(), TAG_LSP_IN)]
+    }
+
     pub fn is_dead(&self) -> bool {
         self.dead
     }
@@ -324,6 +333,12 @@ impl Lsp {
     /// editor should repaint.
     pub fn on_ready(&mut self, r: &Ready, ed: &mut Editor) -> bool {
         match r.tag {
+            TAG_LSP_IN => {
+                if self.srv.flush().is_err() {
+                    self.reap();
+                }
+                false
+            }
             TAG_LSP_ERR => {
                 // Drain and discard: a chatty server must not fill its stderr
                 // pipe and block, nor scribble the alt-screen. A hangup with no
@@ -696,6 +711,8 @@ impl Lsp {
         self.srv.close_stdin();
         let mut naps = ms_left(since, END_GRACE) / NAP_MS;
         loop {
+            // A close may be waiting on queued bytes, and nothing else polls here.
+            let _ = self.srv.flush();
             match self.srv.try_wait() {
                 Ok(Some(_)) => {
                     self.dead = true;
@@ -733,7 +750,8 @@ impl Lsp {
             } else {
                 let err_fd = if err_open { self.srv.stderr_fd() } else { -1 };
                 let fds = [(self.srv.stdout_fd(), TAG_LSP_OUT), (err_fd, TAG_LSP_ERR)];
-                mux.poll(&fds, PollTimeout::Millis(ms)).ok()
+                let writes = [(self.srv.stdin_pending_fd(), TAG_LSP_IN)];
+                mux.poll_rw(&fds, &writes, PollTimeout::Millis(ms)).ok()
             };
             let now = since.elapsed();
             if now == last {
@@ -756,7 +774,10 @@ impl Lsp {
                 continue;
             };
             for r in &ready {
-                if r.tag == TAG_LSP_ERR {
+                if r.tag == TAG_LSP_IN {
+                    // A hard error drops stdin and the queue: the fd leaves the set.
+                    let _ = self.srv.flush();
+                } else if r.tag == TAG_LSP_ERR {
                     // A hung-up pipe stays ready: stop asking.
                     err_open = matches!(self.srv.drain_stderr(), Ok(false));
                 } else if r.tag == TAG_LSP_OUT && self.goodbye_output(&mut answered) {

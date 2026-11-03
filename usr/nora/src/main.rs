@@ -52,8 +52,8 @@ use nora::view;
 
 mod dap_host;
 mod lsp_host;
-use dap_host::{Dap, TAG_DAP_ERR, TAG_DAP_OUT};
-use lsp_host::{Lsp, TAG_LSP_ERR, TAG_LSP_OUT, TAG_NOTES, TAG_STDIN};
+use dap_host::{Dap, TAG_DAP_ERR, TAG_DAP_IN, TAG_DAP_OUT};
+use lsp_host::{Lsp, TAG_LSP_ERR, TAG_LSP_IN, TAG_LSP_OUT, TAG_NOTES, TAG_STDIN};
 
 #[global_allocator]
 static GLOBAL_ALLOCATOR: ThylaAlloc = ThylaAlloc;
@@ -310,12 +310,12 @@ fn run(
                         }
                     }
                 }
-                TAG_LSP_OUT | TAG_LSP_ERR => {
+                TAG_LSP_OUT | TAG_LSP_ERR | TAG_LSP_IN => {
                     if let Some(l) = lsp.as_mut() {
                         dirty |= l.on_ready(&r, ed);
                     }
                 }
-                TAG_DAP_OUT | TAG_DAP_ERR => {
+                TAG_DAP_OUT | TAG_DAP_ERR | TAG_DAP_IN => {
                     if let Some(d) = dap.as_mut() {
                         dirty |= d.on_ready(&r, ed);
                     }
@@ -451,14 +451,17 @@ fn poll_all(
     // fd 0 is unpollable; the ready sibling gives accurate wakes so notes/LSP/DAP
     // can multiplex against real keystrokes instead of a parked read).
     let mut fds: Vec<(i32, Tag)> = alloc::vec![(stdin_fd, TAG_STDIN)];
+    let mut writes: Vec<(i32, Tag)> = Vec::new();
     if let Some(nfd) = notes_fd {
         fds.push((nfd, TAG_NOTES)); // #55c: tty:winch
     }
     if let Some(l) = lsp {
         fds.extend(l.poll_fds());
+        writes.extend(l.write_fds());
     }
     if let Some(d) = dap {
         fds.extend(d.poll_fds());
+        writes.extend(d.write_fds());
     }
     // An ending debug session must wake the loop at its deadline even if
     // nothing arrives.
@@ -466,7 +469,7 @@ fn poll_all(
         Some(ms) => PollTimeout::Millis(ms),
         None => PollTimeout::Block,
     };
-    mux.poll(&fds, timeout).ok()
+    mux.poll_rw(&fds, &writes, timeout).ok()
 }
 
 /// Act on a debugger command. `:debug` (re)starts a session; the rest need a

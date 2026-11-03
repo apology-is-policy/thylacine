@@ -69,7 +69,8 @@ exercise is [[sub-loom-native-adapter]], the kernel service they run against is
   stage from one stopped earlier.
 - **Exit codes.** The fixture exits 76 when it saw zero sessions (the default
   image, where private setup is refused), 77 when it saw at least one, every
-  session ended and no violation, else 1. On the default image's -EOPNOTSUPP
+  session ended and no violation, 2 when a session outlived its probe past the
+  settle, else 1. On the default image's -EOPNOTSUPP
   setup refusal `loom-native-probe` exits 78, `loom-c-probe` 74 and
   `loom-death-probe` 72; with every leg passed on the qualification image, 79, 75
   and 73.
@@ -91,8 +92,9 @@ probe, all released; the default image expects none.
 Past the NA-4d legs, each adapter probe drives the AS-3 list against the hostile
 services: a hold at each handshake and setup stage, ended by a deadline once and
 otherwise by a drop, after turns show the operation still pending; a garbled, wrong or torn reply at the handshake and at a
-READ; a service that never accepts; a stream staying live while a sibling scope
-stalls and is cancelled; a cancel with the CQ full, whose session ends while the CQ
+READ; a service that never accepts; a stream parked with both its pool's leases held
+while a sibling scope stalls and is cancelled, after which a WALK shows its session
+still answers and the stream finishes; a cancel with the CQ full, whose session ends while the CQ
 is still full and which posts nothing past it; and the pool and request bounds an
 honest program can reach. Those bounds are the adapters' own gates, reached before
 the kernel is asked: a pool over a live member answers `-EINVAL`, a second fixed
@@ -128,8 +130,9 @@ empties whether or not the ask was read first.
 ## Data structures
 
 The fixture is `no_std` over lib/ninep's codecs: a fixed node table, a
-per-session fid map, per-fid `stream` cursors, and the `stats` counters. Nothing
-is allocated after setup. The kernel test holds the two probe blobs in
+per-session fid map, per-fid `stream` cursors, and the `stats` counters. Each round
+allocates its poll set, control sampled last so that a pass seeing a session's hang-up
+also sees any 'E' written before it. The kernel test holds the two probe blobs in
 `alloc_pages` of an order sized from the ELF, and the registry and pipe
 descriptors on its own stack frame.
 
@@ -162,7 +165,7 @@ test checks the fixture status before the probe status).
 ## Performance
 
 Not a performance surface. The fixture serves one program's connections; the
-kernel test runs two boots, one per probe.
+kernel test runs one per probe, three in all, in one boot.
 
 ## Prosecution
 

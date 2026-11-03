@@ -8,8 +8,8 @@
 // notify pipe. It posts "fixture" in the registry, writes 'R' to fd 2, and
 // serves every connection until fd 1 reaches EOF. Every session must then end
 // within SETTLE_NS: the probe has exited, so its rings are closed. A 'Q' read
-// from fd 1 asks for one 'Z' on fd 2 once no session is left. Nothing else is
-// ever written there: a probe sleeps by polling fd 2 while it stays empty.
+// from fd 1 asks for one 'Z' on fd 2 once no session is left. Fd 2 carries only
+// what a probe has asked for: a probe sleeps by polling it while it stays empty.
 //
 // Strict: each message below is one the kernel's client never sends, and it
 // counts a violation. Most answer Rlerror: anything before Tversion, a second
@@ -681,13 +681,15 @@ fn run() -> i64 {
         for l in &listeners {
             fds.push(TPollFd { fd: *l as i32, events: T_POLLIN, revents: 0 });
         }
-        let control = fds.len();
-        if settle.is_none() {
-            fds.push(TPollFd { fd: CONTROL as i32, events: T_POLLIN, revents: 0 });
-        }
         let base = fds.len();
         for c in &conns {
             fds.push(TPollFd { fd: c.fd as i32, events: T_POLLIN, revents: 0 });
+        }
+        // A pass samples in order. Control goes last, so a pass that sees a session's
+        // hang-up also sees any 'E' written before that hang-up; it is handled first.
+        let control = fds.len();
+        if settle.is_none() {
+            fds.push(TPollFd { fd: CONTROL as i32, events: T_POLLIN, revents: 0 });
         }
         let timeout = if settle.is_some() { 100 } else { -1 };
         let rc = unsafe { t_poll(fds.as_mut_ptr(), fds.len(), timeout) };

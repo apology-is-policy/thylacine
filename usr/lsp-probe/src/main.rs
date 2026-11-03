@@ -277,6 +277,7 @@ const EXIT_NAP_MS: u64 = 5;
 
 const TAG_OUT: Tag = 1;
 const TAG_ERR: Tag = 2;
+const TAG_IN: Tag = 3;
 
 /// Bail with a tagged reason. Deliberately does NOT reap the server: exiting
 /// closes our pipe fds, the server sees stdin EOF and leaves, and a probe
@@ -472,13 +473,19 @@ fn run_session(spec: &ProbeSpec) {
         }
 
         let fds = [(srv.stdout_fd(), TAG_OUT), (srv.stderr_fd(), TAG_ERR)];
-        let ready = match mux.poll(&fds, PollTimeout::Millis(POLL_MS)) {
+        let writes = [(srv.stdin_pending_fd(), TAG_IN)];
+        let ready = match mux.poll_rw(&fds, &writes, PollTimeout::Millis(POLL_MS)) {
             Ok(r) => r,
             Err(_) => fail(spec, "mux.poll"),
         };
 
         for r in &ready {
             match r.tag {
+                TAG_IN => {
+                    if srv.flush().is_err() {
+                        fail(spec, "flush");
+                    }
+                }
                 // Drain and discard. A chatty server that fills its stderr pipe
                 // BLOCKS -- which would present as the server mysteriously
                 // going quiet, not as an error. clangd is markedly chattier
@@ -759,11 +766,17 @@ fn goodbye(spec: &ProbeSpec, cl: &mut lsp::Client, srv: &mut Server, mux: &mut M
         // A hung-up pipe stays ready, so stderr leaves the set at EOF.
         let err_fd = if err_open { srv.stderr_fd() } else { -1 };
         let fds = [(srv.stdout_fd(), TAG_OUT), (err_fd, TAG_ERR)];
-        let ready = match mux.poll(&fds, PollTimeout::Millis(POLL_MS)) {
+        let writes = [(srv.stdin_pending_fd(), TAG_IN)];
+        let ready = match mux.poll_rw(&fds, &writes, PollTimeout::Millis(POLL_MS)) {
             Ok(r) => r,
             Err(_) => end_failed(spec, srv, "mux.poll (goodbye)"),
         };
         for r in &ready {
+            if r.tag == TAG_IN {
+                // A hard error drops stdin and the queue: the fd leaves the set.
+                let _ = srv.flush();
+                continue;
+            }
             if r.tag == TAG_ERR {
                 err_open = matches!(srv.drain_stderr(), Ok(false));
                 continue;

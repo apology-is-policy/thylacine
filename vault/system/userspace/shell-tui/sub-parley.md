@@ -126,6 +126,17 @@ None. Every type here is single-threaded by construction and holds no lock, no
 atomic and no interior mutability; `Client` methods take `&mut self` and the
 borrow checker serializes them. The host owns the event loop.
 
+**Stdin never blocks the caller.** A pipe holds 4 KiB, so a full-document `didChange`
+needs many of them, and a server that stops reading would stop the editor. `Server`
+sets stdin non-blocking and queues what does not fit in an outbox. `send` means queued,
+not delivered. While bytes wait, `stdin_pending_fd` names the fd a host asks
+`Mux::poll_rw` about, and `flush` moves them on. The outbox refuses at 8 MiB with
+`NoSpace`, unless nothing waits ahead of the message, so one large document always
+goes; a host treats the refusal as a dead server. `close_stdin` with bytes queued waits
+for `flush` to finish them. `wait` drops them, since nothing can flush during a blocking
+wait. A hard write error drops stdin and the outbox together, so a dead pipe cannot keep
+waking the poll. `parley-probe` runs a server that never reads and a 64 KiB round trip.
+
 `transport::Mux` is the only thing that blocks: it rebuilds its `PollSet` on
 every `poll` call from the caller-supplied `(fd, tag)` set, so a restarted or
 closed server can never leave a stale fd registered. The set is a handful of

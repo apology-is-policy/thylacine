@@ -395,6 +395,9 @@ fn reap(ring: &ServiceRing, child: &Child) -> R<i32> {
         if rc != 0 {
             return Ok(status);
         }
+        if ring.now() >= until {
+            let _ = child.kill();
+        }
         check!(ring.now() < until, "a victim ends although its server is silent", child.pid());
         let _ = libthyla_rs::time::sleep(Duration::from_millis(5));
     }

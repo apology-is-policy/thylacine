@@ -18,12 +18,14 @@
 
 use crate::frame::{self, Decoder, FrameError};
 use crate::json::Value;
+use alloc::collections::VecDeque;
 use alloc::string::ToString;
 use alloc::vec::Vec;
 use libthyla_rs::err::{Error, Result};
 use libthyla_rs::io::{Read, Write};
 use libthyla_rs::poll::{PollEvents, PollSet, PollTimeout};
 use libthyla_rs::process::{Child, Command, ExitStatus, Stdio};
+use libthyla_rs::t_set_nonblock;
 
 /// Bytes drained from a child's stdout per [`Server::pump`]. One `read(2)` per
 /// readable report -- the poll re-arms while bytes remain buffered, so a second
@@ -34,15 +36,28 @@ const READ_CHUNK: usize = 16 * 1024;
 /// [`Server::drain_stderr`].
 const STDERR_CHUNK: usize = 4 * 1024;
 
+/// Bytes a server may have waiting behind its stdin. A healthy server drains far
+/// faster than an editor sends, so reaching this means it has stopped reading, and
+/// [`Server::send`] refuses with `NoSpace` rather than grow without bound. One
+/// message larger than this still goes when nothing waits ahead of it.
+const OUTBOX_MAX: usize = 8 * 1024 * 1024;
+
 /// A persistent language/debug server: a spawned child with piped stdin (we
 /// write `Content-Length`-framed requests), piped stdout (framed responses,
 /// streamed through a [`Decoder`]), and piped stderr (drained + discarded so a
 /// chatty server can neither scribble the editor's alt-screen nor wedge on a
 /// full stderr pipe).
+///
+/// Stdin never blocks the caller: a pipe holds 4 KiB, and a server that has
+/// stopped reading must not stop the editor. What does not fit waits in the
+/// outbox; while it does, [`stdin_pending_fd`](Self::stdin_pending_fd) names the
+/// fd to ask [`Mux::poll_rw`] about, and [`flush`](Self::flush) moves it on.
 pub struct Server {
     child: Child,
     dec: Decoder,
     rbuf: Vec<u8>,
+    outbox: VecDeque<u8>,
+    close_when_flushed: bool,
 }
 
 impl Server {
@@ -51,8 +66,20 @@ impl Server {
     /// for the child's lifetime.
     pub fn spawn(cmd: &mut Command) -> Result<Server> {
         cmd.stdin(Stdio::Piped).stdout(Stdio::Piped).stderr(Stdio::Piped);
-        let child = cmd.spawn()?;
-        Ok(Server { child, dec: Decoder::new(), rbuf: alloc::vec![0u8; READ_CHUNK] })
+        let mut child = cmd.spawn()?;
+        let fd = child.stdin.as_ref().map(|f| f.as_raw_fd()).unwrap_or(-1);
+        if unsafe { t_set_nonblock(fd as i64, true) } != 0 {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(Error::Io);
+        }
+        Ok(Server {
+            child,
+            dec: Decoder::new(),
+            rbuf: alloc::vec![0u8; READ_CHUNK],
+            outbox: VecDeque::new(),
+            close_when_flushed: false,
+        })
     }
 
     /// The child's pid.
@@ -72,12 +99,66 @@ impl Server {
         self.child.stderr.as_ref().map(|f| f.as_raw_fd()).unwrap_or(-1)
     }
 
-    /// Serialize `msg` (compact JSON), frame it (`Content-Length`), and write
-    /// the whole message to the child's stdin. `BrokenPipe` if stdin is closed.
+    /// The child's stdin fd while bytes wait behind it (ask [`Mux::poll_rw`] for
+    /// it to become writable, then [`flush`](Self::flush)), or `-1` when none do.
+    pub fn stdin_pending_fd(&self) -> i32 {
+        if self.outbox.is_empty() {
+            return -1;
+        }
+        self.child.stdin.as_ref().map(|f| f.as_raw_fd()).unwrap_or(-1)
+    }
+
+    /// Serialize `msg` (compact JSON), frame it (`Content-Length`), queue it, and
+    /// write what the pipe will take now. `Ok` means queued, not delivered.
+    /// `BrokenPipe` if stdin is closed or closing, `NoSpace` if the server has
+    /// stopped reading and the outbox is full.
     pub fn send(&mut self, msg: &Value) -> Result<()> {
+        if self.child.stdin.is_none() || self.close_when_flushed {
+            return Err(Error::BrokenPipe);
+        }
         let wire = frame::encode(msg.to_string().as_bytes());
-        let stdin = self.child.stdin.as_mut().ok_or(Error::BrokenPipe)?;
-        stdin.write_all(&wire)
+        if !self.outbox.is_empty() && self.outbox.len() + wire.len() > OUTBOX_MAX {
+            return Err(Error::NoSpace);
+        }
+        self.outbox.extend(wire.iter());
+        self.flush()
+    }
+
+    /// Write what the pipe will take of the outbox, without blocking. Bytes the
+    /// pipe has no room for stay queued and this is `Ok`. Any other failure means
+    /// nobody will read them: the outbox and stdin both go, so the poll set cannot
+    /// keep waking for a dead pipe, and the error is the caller's to act on.
+    pub fn flush(&mut self) -> Result<()> {
+        if let Some(stdin) = self.child.stdin.as_mut() {
+            while !self.outbox.is_empty() {
+                let (head, _) = self.outbox.as_slices();
+                match stdin.write(head) {
+                    Ok(n) if n > 0 => {
+                        self.outbox.drain(..n);
+                    }
+                    Err(Error::WouldBlock) => return Ok(()),
+                    Ok(_) => {
+                        self.abandon_stdin();
+                        return Err(Error::BrokenPipe);
+                    }
+                    Err(e) => {
+                        self.abandon_stdin();
+                        return Err(e);
+                    }
+                }
+            }
+        }
+        if self.close_when_flushed {
+            self.child.stdin = None;
+            self.close_when_flushed = false;
+        }
+        Ok(())
+    }
+
+    fn abandon_stdin(&mut self) {
+        self.child.stdin = None;
+        self.outbox.clear();
+        self.close_when_flushed = false;
     }
 
     /// Read the bytes currently ready on stdout into the decoder (one `read(2)`).
@@ -125,9 +206,15 @@ impl Server {
     }
 
     /// Close the child's stdin so it observes EOF -- the graceful-shutdown
-    /// signal for a well-behaved server. Pair with [`wait`](Self::wait).
+    /// signal for a well-behaved server. With bytes still queued the close waits
+    /// for [`flush`](Self::flush) to finish them, so a final message is not lost
+    /// to a momentarily full pipe. Pair with [`wait`](Self::wait).
     pub fn close_stdin(&mut self) {
-        self.child.stdin = None;
+        if self.outbox.is_empty() {
+            self.child.stdin = None;
+        } else {
+            self.close_when_flushed = true;
+        }
     }
 
     /// Reap the child if it has already exited (non-blocking). Do not hot-loop
@@ -138,8 +225,10 @@ impl Server {
 
     /// Block until the child exits and reap it. Pair with
     /// [`close_stdin`](Self::close_stdin) or [`kill`](Self::kill) so it is not a
-    /// hang.
+    /// hang. Nothing can flush during a blocking wait, so stdin closes here and
+    /// any bytes still queued are dropped.
     pub fn wait(&mut self) -> Result<ExitStatus> {
+        self.abandon_stdin();
         self.child.wait()
     }
 
@@ -161,6 +250,7 @@ pub type Tag = u32;
 pub struct Ready {
     pub tag: Tag,
     pub readable: bool,
+    pub writable: bool,
     /// The peer hung up or errored (EOF / `POLLERR` / `POLLNVAL`) -- drain any
     /// final readable bytes, then treat the source as dead.
     pub hup: bool,
@@ -191,18 +281,37 @@ impl Mux {
     /// [`Ready`] per fd the kernel flagged, tagged for the caller to dispatch.
     /// An all-negative `fds` returns empty without blocking.
     pub fn poll(&mut self, fds: &[(i32, Tag)], timeout: PollTimeout) -> Result<Vec<Ready>> {
+        self.poll_rw(fds, &[], timeout)
+    }
+
+    /// [`poll`](Self::poll), also waking when an entry of `writes` can take bytes:
+    /// each server's [`Server::stdin_pending_fd`], with its own tag. A negative fd
+    /// is skipped in either list.
+    pub fn poll_rw(
+        &mut self,
+        reads: &[(i32, Tag)],
+        writes: &[(i32, Tag)],
+        timeout: PollTimeout,
+    ) -> Result<Vec<Ready>> {
         self.poll.clear();
-        for &(fd, _) in fds {
+        for &(fd, _) in reads {
             if fd >= 0 {
                 self.poll.add_raw(fd, PollEvents::READ);
             }
         }
+        for &(fd, _) in writes {
+            if fd >= 0 {
+                self.poll.add_raw(fd, PollEvents::WRITE);
+            }
+        }
         let mut out = Vec::new();
         for ev in self.poll.poll(timeout)? {
-            if let Some(&(_, tag)) = fds.iter().find(|&&(fd, _)| fd == ev.fd) {
+            let entry = reads.iter().chain(writes.iter()).find(|&&(fd, _)| fd == ev.fd);
+            if let Some(&(_, tag)) = entry {
                 out.push(Ready {
                     tag,
                     readable: ev.is_readable(),
+                    writable: ev.is_writable(),
                     hup: ev.is_hup() || ev.is_err(),
                 });
             }

@@ -20,7 +20,7 @@ use alloc::format;
 use alloc::vec::Vec;
 use core::future::Future;
 use core::time::Duration;
-use libthyla_rs::loom::native::{Fid, Payload, PoolMember, Scope, Shot, Stream, Target};
+use libthyla_rs::loom::native::{Fid, Payload, Pool, PoolMember, Scope, Shot, Stream, Target};
 use libthyla_rs::loom::{ServiceRing, ThylaKernel};
 use libthyla_rs::{t_poll, t_putstr, t_read, t_write, TPollFd, T_POLLIN};
 
@@ -441,7 +441,7 @@ fn cq_full(ring: &ServiceRing) -> R<()> {
 
 // A stream keeps delivering while another scope stalls and is cancelled, and that
 // cancel needs no room in a full CQ.
-fn independent_scopes(ring: &ServiceRing, target: &Target<K>, st: &Fid<K>) -> R<()> {
+fn independent_scopes(ring: &ServiceRing, target: &Target<K>, st: &Fid<K>, two: &Pool<K>) -> R<()> {
     let members: Vec<PoolMember> = (0..8).map(|i| range(5, i * SHOT, SHOT)).collect();
     let pool = ok!(ring.pool(&members), "pool D");
 
@@ -449,25 +449,30 @@ fn independent_scopes(ring: &ServiceRing, target: &Target<K>, st: &Fid<K>) -> R<
     let media = connect(ring, target)?;
     let shots = walk(ring, &media, b"stream")?;
     open(ring, &shots, 0)?;
-    let mut stream = ok!(shots.stream(&pool, 0, SHOT as u32, true, None), "a multishot stream");
+    let mut stream = ok!(shots.stream(two, 0, SHOT as u32, true, None), "a multishot stream");
     let mut got = Vec::new();
+    // Both of the pool's leases stay held, so the stream stays live across the cancel.
     let p = shot(ring, &mut stream)?;
     got.extend_from_slice(p.bytes());
-    returned!(p, "return a lease");
+    let q = shot(ring, &mut stream)?;
+    got.extend_from_slice(q.bytes());
     let stalled = connect(ring, target)?;
     let held = walk(ring, &stalled, b"stall")?;
     open(ring, &held, 0)?;
     let base = stats(ring, st)?;
     let rd = ok!(held.read(range(4, 0, PAGE), 0, None), "submit a READ the server holds");
     stats_until(ring, st, STALLED, base[STALLED] + 1)?;
-    let p = shot(ring, &mut stream)?;
-    got.extend_from_slice(p.bytes());
-    returned!(p, "a stream delivers while a sibling scope stalls");
     drop(rd);
     drop(held);
     drop(stalled);
     let v = stats_until(ring, st, ENDED, base[ENDED] + 1)?;
     check!(v[ENDED] == base[ENDED] + 1, "only the stalled scope's session ended", v[ENDED]);
+    // The positive control: this session still answers after its sibling's cancel.
+    let beside = ok!(media.walk(b"data", soon(ring)), "a WALK beside the cancel");
+    let leaf = done!(ring, beside, "a scope beside the cancel still answers");
+    drop(leaf);
+    returned!(p, "a stream's lease, returned after the cancel");
+    returned!(q, "its second lease");
     got.extend_from_slice(&drain(ring, &mut stream, false)?);
     check!(got.len() == STREAM_LEN && matches(&got, 0), "the stream lost no shot to its sibling", got.len());
     drop(stream);
@@ -734,7 +739,7 @@ fn run() -> R<i64> {
            "a Tclunk for each live scope's dropped fid, and no other", v[CLUNKS]);
 
     hostile_peers(&ring, &stats_fid, &data)?;
-    independent_scopes(&ring, &target, &stats_fid)?;
+    independent_scopes(&ring, &target, &stats_fid, &pool_a)?;
     quotas(&ring, &target, &stats_fid, range(1, 0, SHOT))?;
 
     say("closing a ring with leases held");
