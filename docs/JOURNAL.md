@@ -22,6 +22,50 @@ needed the operator.
 
 
 ---
+## 2026-11-03 -- a watching ledger written while the mac was queued (corona)
+
+The mac queue ran behind aux and main for the whole of this stretch, so nothing in it has
+booted. What it covers: a first guest run for vote 49, on the Pi, which needed no mac cores
+once the image had synced, and two chunks of memory accounts, written and syntax-checked.
+
+**Vote 49, first guest run green at f6c70aab1.** On the Pi under KVM with virgl: "a surface
+closed in 421 ms beside another client's poisoned slot (control 728 ms), and the holder's own
+retirement was refused in 40 ms" (work/nov03-v49/poison-v49-1.log:9592). The first sync died
+with "Connection closed by remote host". The convenient reading was the Pi's own reset, which
+is still unexplained (OPEN-BUGS 16:15:03Z), so it was measured: vmstat showed traffic stop,
+the Pi's sshd and tar were alive two minutes later and its boot time had not moved. That is
+a tunnel drop. Both ways are still owed, so the two bugs stay open.
+
+**A figure that reads too well.** That boot also held two real stalls, and the lag line said
+0 and 1 ms past the deadline. All three such lines in 1206 saved logs read 0 or 1. A figure
+that never varies is either a very good clock or one that starts late. The hypothesis is that
+`say!` blocks on QEMU's lock before `stall()` starts it. Swapping the two lines decides it:
+still 0 to 1 ms would mean a lost wake, to be hunted under I-9. Enqueued with vote 50's GPU
+round. Not confirmed.
+
+**MM-1a (c532285b1).** Every pool block and DMA block now names who paid. The design choice
+that shaped the rest: charges land under `as->lock` in a fault, and section 6 forbids account
+locks there, so a settled charge is relaxed atomics up an immutable parent chain. A block
+holds a reference to its sponsor, which gives section 4's orphan rule without a list. My own
+review before any run caught a refund past zero still deducting from the parents while my test
+expected two underflows; it now counts once and stops. The dossier gate refused the first commit
+silently behind `tail` and `git log` caught it, the second time this stretch.
+
+**MM-1b (eddf33973).** The reserved number gets its arm: the query on the caller's own account,
+and nothing else behind it. Choices made without a vote, each stated in section 14 and the
+commit: `/proc/<pid>/account` takes `sched`'s stricter posture, since section 13 said only "the
+/proc gates"; a stale incarnation is `-EINVAL`, since the registry has no `ESTALE`; a part-written
+record on `-EFAULT` follows `uaccess_copy_out`'s contract rather than scrubbing. Until sessions
+have children every Proc's account is the root, so a sandbox with no `/ctl` can read machine
+totals through this call and through nothing else it could reach before. That went on the audit
+row and in OPEN-BUGS. The correction to `abi-memory-account`'s rt_sigreturn sentence is one the
+move to 140 should have made.
+
+Not done: any boot of either, their mutants, the fixture re-boots, AS-4c, vote 50. An audit of
+MM-1a and MM-1b was started while the queue held, reading only. MM-1c needs the operator's vote
+on how control reaches a descendant, researched in the memory file and not yet asked, because a
+blocking question is forbidden while a lease of mine is queued.
+
 ## 2026-11-03 -- AS-3a closes, and the fixture counted the wrong limit (corona)
 
 The parley outbox set ran for the first time, on the env tree at f6c70aab1 under the mac
