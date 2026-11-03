@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/EXEC-LOAD-DESIGN.md", "docs/ARCHITECTURE.md", "docs/LINEAGE.md"]
 created: 2026-08-03
-updated: 2026-10-29
+updated: 2026-11-03
 ---
 ## Purpose
 
@@ -73,7 +73,13 @@ resolve, before the load) — and threads it to `exec_load_body`. The spawn
 wrapper `exec_setup_from_spoor` passes `p->phenotype` (the spawn thunk stamped
 it before EL0); `execve` passes a value decided into a local and never reads
 `nsp->phenotype` (see Mechanism). The resolver has a phenotype-reporting twin:
-`exec_resolve_from_namespace_ex` reports, via an optional `*pheno_out`, whether
+`exec_resolve_from_namespace_ex` reports why it failed through an optional `*errp`: the
+walk's reason (`ENOENT` only for a miss, ERRORS.md ER-2), `EACCES` for a file the mount or
+the Dev will not execute, a failing stat's errno, and `EINVAL` for an empty or oversized
+image, `sys_execve_core`'s disposition while the registry has no `T_E_NOEXEC`. `execve`
+and `SYS_SPAWN_FULL_ARGV` return it; the four older spawn calls pass NULL and keep their
+flat `-1`, and the PT_INTERP resolve reports through the loader's own message. It reports,
+via an optional `*pheno_out`, whether
 the resolution walk crossed an `MPHENO_LINUX` mount (`/viv/bin`) — the
 by-location half of the decision. Only `SYS_SPAWN_FULL_ARGV` passes non-NULL;
 the plain `exec_resolve_from_namespace` passes NULL.

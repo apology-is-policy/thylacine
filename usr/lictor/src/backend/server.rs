@@ -130,21 +130,29 @@ impl Conn {
                 let mut path = self.fid(a.fid)?.path;
                 if self.fid(a.fid)?.open { return Err(()); }
                 let mut walked = Vec::new();
+                let mut missed = false;
                 for name in &a.names[..a.nwname as usize] {
-                    path = match (path, *name) {
-                        (0, b"ctl") => 1, (0, b"rings") => 2,
-                        (_, b".") => path, (2, b"..") => 0,
-                        (2, name) => {
-                            // A name that is no live ring is a miss, not a bad request:
-                            // the kernel reports a walk's answer as it stands (ERRORS.md ER-2).
-                            let live = core::str::from_utf8(name).ok().and_then(|s| s.parse::<u32>().ok())
-                                .filter(|id| device.ring(*id).is_some());
-                            let Some(id) = live else { return Ok(Some(p9::build_rlerror(out, tag, p9::E_NOENT)?)); };
-                            RING_BASE + id as u64
-                        }
-                        _ => return Ok(Some(p9::build_rlerror(out, tag, p9::E_NOENT)?)),
+                    let next = match (path, *name) {
+                        (0, b"ctl") => Some(1), (0, b"rings") => Some(2),
+                        (_, b".") => Some(path), (0, b"..") | (2, b"..") => Some(0),
+                        (2, name) => core::str::from_utf8(name).ok().and_then(|s| s.parse::<u32>().ok())
+                            .filter(|id| device.ring(*id).is_some())
+                            .map(|id| RING_BASE + id as u64),
+                        _ => None,
                     };
+                    let Some(next) = next else { missed = true; break; };
+                    path = next;
                     walked.push(qid(path));
+                }
+                // A miss is no bad request. On the first name it is an Rlerror, which the
+                // kernel reads as absent (ERRORS.md ER-2); on a later one a short Rwalk. Neither
+                // binds newfid.
+                if missed {
+                    return Ok(Some(if walked.is_empty() {
+                        p9::build_rlerror(out, tag, p9::E_NOENT)?
+                    } else {
+                        p9::build_rwalk(out, tag, &walked)?
+                    }));
                 }
                 if a.fid == a.newfid { self.fids.iter_mut().find(|f| f.id == a.fid).ok_or(())?.path = path; }
                 else { self.install(a.newfid, path)?; }

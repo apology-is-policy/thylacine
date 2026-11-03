@@ -3042,7 +3042,10 @@ void test_dev9p_cached_open(void) {
                 "walk_attrs FROM a fidless Spoor rejected (NOFID guard)");
     int co_why = 0;
     TEST_ASSERT(dev_walk(co, NULL, names, 1, &co_why) == NULL, "and through the wrapper");
-    TEST_EXPECT_EQ(co_why, T_E_BADF, "a walk from a fidless Spoor is no miss");
+    TEST_EXPECT_EQ(co_why, T_E_INVAL, "a walk from a fidless Spoor is no miss");
+    TEST_ASSERT(dev_walk_attrs(co, NULL, names, lens, 1, sts, &co_why) == NULL,
+                "and the fused one");
+    TEST_EXPECT_EQ(co_why, T_E_INVAL, "and neither is that");
 
     // Close: wire-free (no Tclunk) + the budget released.
     g_clunk_seen = 0;
@@ -4717,6 +4720,27 @@ void test_dev9p_walk_reports_the_reason(void) {
         TEST_EXPECT_EQ(fwhy, cases[i].want, cases[i].what);
         TEST_ASSERT(control, "control: the next walk goes through");
         TEST_EXPECT_EQ(owhy, 0, "control: and has no reason");
+    }
+}
+
+// A server's ENOSYS to the base op is no missing translator. The fused op's ENOSYS is
+// its latch, so only the plain walk meets this.
+void test_dev9p_walk_enosys_reads_eio(void) {
+    static const u32 ecodes[] = { 38, 95 };
+    const char *name = "etc";
+    for (unsigned i = 0; i < sizeof ecodes / sizeof ecodes[0]; i++) {
+        struct Spoor *root = make_open_client_and_root();
+        TEST_ASSERT(root != NULL, "client + root");
+        struct Spoor *nc = spoor_clone(root);
+        TEST_ASSERT(nc != NULL, "clone");
+        g_walk_lerror_ecode = ecodes[i];
+        int why = -1;
+        struct Walkqid *w = dev_walk(root, nc, &name, 1, &why);
+        bool failed = w == NULL;
+        if (w) { walkqid_free(w); spoor_clunk(nc); } else { nc->aux = NULL; spoor_unref(nc); }
+        teardown(root);
+        TEST_ASSERT(failed, "the walk failed");
+        TEST_EXPECT_EQ(why, T_E_IO, "the server is broken: EIO");
     }
 }
 

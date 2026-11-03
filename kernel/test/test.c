@@ -3223,6 +3223,8 @@ struct test_case g_tests[] = {
     { "stalk.union_walk_failure",      test_stalk_union_walk_failure,      false, NULL },
     { "stalk.walk_failure_on_the_rewalk", test_stalk_walk_failure_on_the_rewalk, false, NULL },
     { "stalk.spawn_reports_the_walk_reason", test_stalk_spawn_reports_the_walk_reason, false, NULL },
+    { "stalk.fused_failure_keeps_the_x_gate", test_stalk_fused_failure_keeps_the_x_gate, false, NULL },
+    { "dev9p.walk_enosys_reads_eio", test_dev9p_walk_enosys_reads_eio, false, NULL },
     { "stalk.open_create_leaf_rows",   test_stalk_open_create_leaf_rows,   false, NULL },
     { "stalk.open_create_containment_and_denials", test_stalk_open_create_containment_and_denials, false, NULL },
     { NULL, NULL, false, NULL },          // sentinel

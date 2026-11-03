@@ -940,8 +940,13 @@ static struct Spoor *stalk_union_child(struct Proc *p, struct Spoor *union_base,
         // UM-8 F8: a member that fails to cross (a dead 9P session, a transient
         // clone OOM) is SKIPPED -- matching the readdir merge and Plan 9's union
         // skip-on-error -- NOT a hard failure of the whole walk, which hid a
-        // name held by a LATER member behind an earlier member's fault.
-        if (!leaf)                             continue;
+        // name held by a LATER member behind an earlier member's fault. With no
+        // other member holding the name, though, "absent" is not known: the tree's
+        // other cross failure says the same (stalk_union_create_member).
+        if (!leaf) {
+            failed = union_walk_failure(failed, T_E_IO);
+            continue;
+        }
         // #66/I-33: the crossed member leaf takes the MOUNT-POINT's namespace
         // name (union_base's, e.g. "/bin"), NOT the member source's internal
         // name -- so the child nc, cloned from leaf, inherits it and the
@@ -955,6 +960,7 @@ static struct Spoor *stalk_union_child(struct Proc *p, struct Spoor *union_base,
         if (leaf->dev && leaf->dev->perm_enforced) {
             struct t_stat st;
             int sr = spoor_stat_native(leaf, &st);
+            if (sr != 0) failed = union_walk_failure(failed, stalk_err_code(sr));
             if (sr != 0 || perm_check(p, &st, PERM_X) != 0) {
                 spoor_clunk(leaf); continue;
             }
@@ -1013,7 +1019,10 @@ struct Spoor *stalk_union_member_holding(struct Proc *p, struct Spoor *point,
     for (int k = 0; k < nsrc && !hit; k++) {
         // Cross the EXACT snapshot source (never a re-derived index -- F4).
         struct Spoor *mroot = stalk_cross_src(p, srcs[k], sflags[k], NULL);
-        if (!mroot)                            continue;   // F8: cross-fail -> skip
+        if (!mroot) {                                      // F8: cross-fail -> skip
+            failed = union_walk_failure(failed, T_E_IO);
+            continue;
+        }
         // #66/I-33: the crossed member takes the MOUNT-POINT's namespace name.
         spoor_path_transplant(mroot, point);
         if (!(mroot->qid.type & QTDIR)) { spoor_clunk(mroot); continue; }
@@ -1022,8 +1031,9 @@ struct Spoor *stalk_union_member_holding(struct Proc *p, struct Spoor *point,
         // authority.
         if (mroot->dev && mroot->dev->perm_enforced) {
             struct t_stat st;
-            if (spoor_stat_native(mroot, &st) != 0 ||
-                perm_check(p, &st, PERM_X) != 0) { spoor_clunk(mroot); continue; }
+            int sr = spoor_stat_native(mroot, &st);
+            if (sr != 0) failed = union_walk_failure(failed, stalk_err_code(sr));
+            if (sr != 0 || perm_check(p, &st, PERM_X) != 0) { spoor_clunk(mroot); continue; }
         }
         if (!mroot->dev || !mroot->dev->walk) { spoor_clunk(mroot); continue; }
         // Existence probe: walk `leafname` in this member. Cleanup mirrors the
@@ -1580,11 +1590,19 @@ restart:
                 goto per_component;
             }
             if (!w) {
-                // Failed at the FIRST component (dev9p Rlerror / transport /
-                // OOM): nothing bound, nc untouched (contract). The base was
-                // X-checked above, so the answer is correctly ordered -- the same
-                // disposition as the per-component loop's walk-NULL arm.
+                // Failed with nothing bound, nc untouched (contract). A miss is at
+                // the first component and a server's other errnos may be at any of
+                // them: Stratum answers a mid-run EIO with an Rlerror for the whole
+                // op. Only the base was X-checked, so with more than one name a
+                // reason could answer past a directory this caller cannot search,
+                // and tell it that a name exists. Take the run one component at a
+                // time, whose X-checks come first; each step that gets through
+                // shortens the run, so this ends.
                 if (nc) { nc->aux = NULL; spoor_unref(nc); }
+                if (why && why != T_E_NOENT && nrun > 1) {
+                    i = ends[0];
+                    goto per_component;
+                }
                 err = why ? why : T_E_NOENT;
                 goto fail;
             }

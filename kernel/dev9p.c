@@ -751,12 +751,18 @@ static struct Spoor *dev9p_attach_spec(const char *spec) {
     return NULL;
 }
 
+// A server's ENOSYS or EOPNOTSUPP to the base op says the server is broken, not that
+// the kernel is missing a call: a Linux guest's T2 row reads ENOSYS as its own decline.
+static int dev9p_walk_reason(int rc) {
+    return (rc == -T_E_NOSYS || rc == -T_E_OPNOTSUPP) ? -T_E_IO : rc;
+}
+
 static struct Walkqid *dev9p_walk(struct Spoor *c, struct Spoor *nc,
                                     const char **name, int nname) {
     struct dev9p_priv *src_priv = priv_of(c);
     if (!src_priv) { dev_walk_failed(-T_E_IO); return NULL; }
     if (src_priv->fid == P9_NOFID) {              // fidless (cached-open) Spoor
-        dev_walk_failed(-T_E_BADF);
+        dev_walk_failed(-T_E_INVAL);
         return NULL;
     }
     if (nname < 0 || nname > (int)P9_MAX_WALK) { dev_walk_failed(-T_E_INVAL); return NULL; }
@@ -788,7 +794,7 @@ static struct Walkqid *dev9p_walk(struct Spoor *c, struct Spoor *nc,
         rc = p9_client_walk(src_priv->client, src_priv->fid, new_fid,
                               0, NULL, NULL, &nwqid, qids);
         if (rc != 0) {
-            dev_walk_failed(rc);
+            dev_walk_failed(dev9p_walk_reason(rc));
             walkqid_free(w);
             return NULL;
         }
@@ -812,7 +818,7 @@ static struct Walkqid *dev9p_walk(struct Spoor *c, struct Spoor *nc,
                               (u16)nname, (const u8 *const *)name,
                               lens, &nwqid, qids);
         if (rc != 0) {
-            dev_walk_failed(rc);
+            dev_walk_failed(dev9p_walk_reason(rc));
             walkqid_free(w);
             return NULL;
         }
@@ -1009,7 +1015,7 @@ static struct Walkqid *dev9p_walk_attrs(struct Spoor *c, struct Spoor *nc,
     struct dev9p_priv *src_priv = priv_of(c);
     if (!src_priv) { dev_walk_failed(-T_E_IO); return NULL; }
     if (src_priv->fid == P9_NOFID) {              // fidless (cached-open) Spoor
-        dev_walk_failed(-T_E_BADF);
+        dev_walk_failed(-T_E_INVAL);
         return NULL;
     }
     if (nname <= 0 || nname > (int)P9_MAX_WALK || !name || !name_lens || !sts) {

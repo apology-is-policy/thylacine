@@ -464,7 +464,7 @@ errno almost always already exists at the failure source — it is only
 | Operation | Failure | Returns |
 |---|---|---|
 | `SYS_OPEN` / `SYS_WALK_OPEN` | component not found | `-T_E_NOENT` (2) |
-| `SYS_OPEN` / `SYS_WALK_OPEN` / `SYS_WALK_CREATE` / `SYS_SPAWN_FULL_ARGV` / `execve` | a walk failed for any other reason (the server's errno, a dead session, an OOM) | that errno by value; `-1` or one out of range reads `-T_E_IO` (5) |
+| `SYS_OPEN` / `SYS_WALK_OPEN` / `SYS_WALK_CREATE` / `SYS_SPAWN_FULL_ARGV` / `execve` | a walk failed for any other reason: the server's errno, a dead session or a malformed reply (`EIO`), an OOM (`ENOMEM`), the session's fids running out (`EMFILE`), a walk from an open fid or with bad arguments (`EINVAL`) | that errno by value; `-1` or one out of range reads `-T_E_IO` (5), as does a server's `ENOSYS` or `EOPNOTSUPP` to the base walk |
 | `SYS_OPEN` / X-search | `perm_check` denial | `-T_E_ACCES` (13) |
 | `SYS_WALK_CREATE` | target already exists | `-T_E_EXIST` (17) |
 | `SYS_WALK_CREATE` | missing parent component | `-T_E_NOENT` (2) |
