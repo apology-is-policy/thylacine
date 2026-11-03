@@ -525,8 +525,8 @@ struct Proc {
     // #65 (invariant I-32): per-Proc resource-floor counters. A DoS bound,
     // NOT a privilege axis -- they cap a non-TCB Proc's resource use so a
     // fork/thread/memory bomb hits a clean limit instead of stressing the
-    // allocator toward the box-killing cliff. `thread_count` (above) is the
-    // third counter.
+    // allocator toward the box-killing cliff. `live_threads`, admitted against
+    // `thread_budget`, is the third counter.
     //
     // page_count -- moved to AddrSpace.page_count at LINEAGE L-1 (it counts the
     //   ADDRESS SPACE's pages, so sharing an address space must mean sharing one
