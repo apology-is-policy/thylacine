@@ -4,7 +4,7 @@ type: chg
 title: "Pouch's SIGPIPE default is a row that ignores"
 date: 2026-11-03
 arc: arc-phase6-pouch
-commits: []
+commits: ["a1381a1d7"]
 touched:
   - sub-pouch-signal
 established: [dec-2026-11-03-sigpipe-row]
