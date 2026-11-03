@@ -18,7 +18,6 @@
 #include "magazines.h"
 
 #include "../arch/arm64/kaslr.h"
-#include "../arch/arm64/mmu.h"          // mmu_pagemap_directmap (#808)
 #include "../arch/arm64/sections.h"     // _saved_dtb_ptr
 #include "../arch/arm64/uart.h"
 
@@ -31,7 +30,6 @@
 static u64 g_total_pages;
 static u64 g_initial_free_pages;
 // #808: page-table pages the boot-time direct-map page-map consumed.
-static u64 g_directmap_table_pages;
 // Buddy zone bounds (post-cap), retained for diagnostics + the #808 sweep test.
 static paddr_t g_zone_base;
 static paddr_t g_zone_end;
@@ -50,9 +48,8 @@ static paddr_t g_zone_end;
 // ABSOLUTE: l1_directmap[1..8] = PA [1 GiB, 9 GiB). They coincide only when
 // mem_base == 1 GiB (QEMU virt). If a future board reports mem_base != 1 GiB,
 // this relative cap would permit PAs above the absolute 9 GiB ceiling, which
-// the direct map cannot reach (the original F3 fault). mmu_pagemap_directmap's
-// own gib>8 skip is already absolute-correct, so the boot pass stays safe;
-// only this cap is the loose end. At Lazarus board bringup, express the cap as
+// the direct map cannot reach (the original F3 fault). At Lazarus board
+// bringup, express the cap as
 // the absolute ceiling -- min(mem_base + 8 GiB, 9 GiB) -- or widen the direct
 // map. (Pre-existing; surfaced by the #808 audit F2.)
 
@@ -236,20 +233,6 @@ bool phys_init(void) {
     g_zone_base          = zone_base;
     g_zone_end           = zone_end;
 
-    // 8. #808: page-map the buddy direct map to L3 granularity now. We are
-    //    single-CPU and IRQ-masked (boot_main has not yet run `msr daifclr,
-    //    #2`), the buddy is live (it allocates the L2/L3 tables), and the
-    //    first thread_create is still ahead -- the exact window where the
-    //    block->table demotes are safe by construction. Afterwards the
-    //    runtime kstack-guard path (mmu_set_no_access_range) only flips
-    //    already-present L3 leaves, so it never does a break-before-make:
-    //    the #806 same-CPU IRQ-during-BBM race AND its cross-CPU sibling are
-    //    eliminated for the buddy zone. The table cost is the free-page
-    //    delta (boot-banner diagnostic via phys_directmap_table_pages).
-    u64 free_before_pagemap = g_zone0.total_free_pages;
-    mmu_pagemap_directmap(zone_base, zone_end);
-    g_directmap_table_pages = free_before_pagemap - g_zone0.total_free_pages;
-
     return true;
 }
 
@@ -267,10 +250,6 @@ u64 phys_free_pages(void) {
 
 u64 phys_reserved_pages(void) {
     return g_total_pages - g_initial_free_pages;
-}
-
-u64 phys_directmap_table_pages(void) {
-    return g_directmap_table_pages;
 }
 
 #ifdef KERNEL_TESTS

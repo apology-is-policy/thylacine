@@ -1,12 +1,11 @@
-// The kernel stack range and the stack cache (thread.c, mmu.c), and the
-// direct-map guard toggles (mmu.c).
+// The kernel stack range and the stack cache (thread.c, mmu.c).
 //
 // Every thread here is created and freed without ever being dispatched (the
 // test-only pattern thread_free documents), so its stack is touched only by
 // the allocator and by the test itself.
 //
 // mmu_kva_readable_for_test asks AT S1E1R. Hardware may answer that from the
-// TLB, and that is what lets the warm-entry tests below see a stale entry;
+// TLB, and that is what lets the warm-entry test below see a stale entry;
 // QEMU's TCG answers AT by walking the tables, so there every probe here
 // reads the PTE alone.
 //
@@ -49,13 +48,9 @@
 //     Each step of making a stack, refused in turn: the create fails clean, with
 //     no slot and no page left behind, and the next one works.
 //
-//   directmap.tlbi_operand_masks_the_ttl_hint
-//     The by-VA invalidate operand for a direct-map page carries VA[55:12] in
-//     bits [43:0] and nothing above, against a value worked out by hand.
-//
-//   directmap.guard_toggle_invalidates_a_warm_entry
-//     A page whose translation this CPU has just used stops translating as soon
-//     as the toggle returns, and translates again after the restore.
+//   thread.kstack_tlbi_operand_masks_the_ttl_hint
+//     The by-VA invalidate operand for a stack page carries VA[55:12] in bits
+//     [43:0] and nothing above, against a value worked out by hand.
 //
 //   thread.kstack_create_free_cost
 //     Reports the cost of a create+free cycle from the cache and from the
@@ -362,8 +357,18 @@ void test_thread_kstack_tables_grow_and_stay(void) {
     u32 slots = thread_kstack_slots_in_use();
     u32 pages = thread_kstack_pages_in_use();
     bool gone = true;
-    for (u32 i = 0; i < n; i++)
+    void *lowest = n ? base[0] : NULL;
+    for (u32 i = 0; i < n; i++) {
         gone = gone && kstack_gone(base[i]);
+        if ((uintptr_t)base[i] < (uintptr_t)lowest) lowest = base[i];
+    }
+
+    // Lowest first, or the tables would follow the history and not the peak.
+    struct Thread *next = thread_create(kproc(), kstack_never_runs);
+    TEST_ASSERT(next != NULL, "thread_create failed");
+    bool low = (uintptr_t)next->kstack_base <= (uintptr_t)lowest;
+    thread_free(next);
+    (void)thread_kstack_cache_drain();
 
     TEST_EXPECT_EQ(n, KST_N, "every thread was created");
     TEST_ASSERT(crossed, "their stacks span more than one L3 table");
@@ -372,6 +377,7 @@ void test_thread_kstack_tables_grow_and_stay(void) {
     TEST_ASSERT(gone, "freed, none of them translates");
     TEST_ASSERT(slots <= slots0, "and every slot came back");
     TEST_ASSERT(pages <= pages0, "and every page");
+    TEST_ASSERT(low, "and the next stack takes the lowest slot free");
     TEST_EXPECT_EQ(mmu_kstack_tables_for_test(), peak, "while the tables stay");
 }
 
@@ -407,46 +413,16 @@ void test_thread_kstack_refused_step_leaks_nothing(void) {
     TEST_ASSERT(works, "and the next create works");
 }
 
-void test_directmap_tlbi_operand_masks_the_ttl_hint(void) {
-    // PA 1 GiB sits at VA 0xFFFF_0000_4000_0000 in the direct map. VA[55:12]
-    // is 0xFF in [43:36] (VA[55:48], all ones in TTBR1) over 0x0_0004_0000 in
-    // [35:0] (VA[47:12]). An unmasked shift would also set bits [51:44], of
-    // which [47:44] are the TTL hint.
-    TEST_EXPECT_EQ(mmu_directmap_tlbi_operand_for_test(0x40000000ull), 0xFF000040000ull,
-        "the invalidate operand for PA 1 GiB is VA[55:12] and nothing above bit 43");
-    // And the top of the 8 GiB direct map: VA 0xFFFF_0002_3FFF_F000.
-    TEST_EXPECT_EQ(mmu_directmap_tlbi_operand_for_test(0x23FFFF000ull), 0xFF00023FFFFull,
-        "the invalidate operand for the last direct-map page is VA[55:12] and nothing above bit 43");
-}
-
-void test_directmap_guard_toggle_invalidates_a_warm_entry(void) {
-    struct page *pg = alloc_pages(THREAD_KSTACK_TOTAL_ORDER, 0);
-    TEST_ASSERT(pg != NULL, "alloc_pages failed");
-    paddr_t pa = page_to_pa(pg);
-    const volatile u64 *w = (const volatile u64 *)pa_to_kva(pa);
-    const u32 stride = PAGE_SIZE / 8u;
-
-    // IRQs masked from the loads to the last probe: one CPU, and nothing
-    // scheduled to evict the entries the loads put in its TLB.
-    bool warm = true, closed = true, reopened = true;
-    irq_state_t s = spin_lock_irqsave(NULL);
-    for (u32 i = 0; i < THREAD_KSTACK_GUARD_PAGES; i++) {
-        (void)w[i * stride];
-        warm = warm && mmu_kva_readable_for_test((const void *)&w[i * stride]);
-    }
-    bool set = mmu_set_no_access_range(pa, THREAD_KSTACK_GUARD_PAGES);
-    for (u32 i = 0; i < THREAD_KSTACK_GUARD_PAGES; i++)
-        closed = closed && !mmu_kva_readable_for_test((const void *)&w[i * stride]);
-    bool restored = mmu_restore_normal_range(pa, THREAD_KSTACK_GUARD_PAGES);
-    for (u32 i = 0; i < THREAD_KSTACK_GUARD_PAGES; i++)
-        reopened = reopened && mmu_kva_readable_for_test((const void *)&w[i * stride]);
-    spin_unlock_irqrestore(NULL, s);
-    free_pages(pg, THREAD_KSTACK_TOTAL_ORDER);
-
-    TEST_ASSERT(warm, "the block's pages translate before the toggle");
-    TEST_ASSERT(set && restored, "both guard toggles succeed");
-    TEST_ASSERT(closed, "a guard page this CPU has just read stops translating when the toggle returns");
-    TEST_ASSERT(reopened, "and translates again when the restore returns");
+void test_thread_kstack_tlbi_operand_masks_the_ttl_hint(void) {
+    // The first stack page at VA 0xFFFF_9000_0000_4000. VA[55:12] is 0xFF in
+    // [43:36] (VA[55:48], all ones in TTBR1) over 0x9_0000_0004 in [35:0]
+    // (VA[47:12]). An unmasked shift would also set bits [51:44], of which
+    // [47:44] are the TTL hint.
+    TEST_EXPECT_EQ(mmu_kernel_tlbi_operand_for_test(0xFFFF900000004000ull), 0xFF900000004ull,
+        "the invalidate operand for a stack page is VA[55:12] and nothing above bit 43");
+    // And the last page of the range: VA 0xFFFF_9003_FFFF_F000.
+    TEST_EXPECT_EQ(mmu_kernel_tlbi_operand_for_test(0xFFFF9003FFFFF000ull), 0xFF9003FFFFFull,
+        "the invalidate operand for the range's last page is VA[55:12] and nothing above bit 43");
 }
 
 #define KSC_WARM 256u

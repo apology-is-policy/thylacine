@@ -299,87 +299,7 @@ bool mmu_kstack_map(u64 va, const paddr_t *pa, unsigned n);
 void mmu_kstack_unmap(u64 va, paddr_t *pa, unsigned n);
 
 #ifdef KERNEL_TESTS
-// P3-Bca: per-thread kstack guard pages — direct map flavor.
-//
-// `mmu_set_no_access(pa)` makes the 4 KiB page at PA unreadable +
-// unwritable + unexecutable IN THE KERNEL DIRECT MAP (TTBR1, base
-// 0xFFFF_0000_0000_0000). A kstack overflow (which accesses
-// `pa_to_kva(pa)` via the SP register) triggers a permission/translation
-// fault that the exception handler reports as a stack-overflow
-// extinction.
-//
-// Implementation requires demoting the relevant `l1_directmap[gib]`
-// entry from a 1 GiB block to a 512×2MiB-block L2, then demoting the
-// relevant L2 entry from a 2 MiB block to a 4-KiB-page L3. Both demotes
-// allocate fresh tables from buddy. Demotes are idempotent: subsequent
-// calls hitting the same GiB / 2 MiB block reuse the existing L2 / L3.
-//
-// `mmu_restore_normal(pa)` restores the page to RW + XN in the direct
-// map (PTE_KERN_RW), before the pages go back to the buddy.
-//
-// Each flip is followed by a by-VA invalidate of the flipped page on every
-// CPU (`tlbi vaae1is`), never a whole-TLB flush: only the direct-map leaf
-// changed, and every other address space's entries stay cached.
-//
-// SMP-safe without a lock (RW-1 F2): #808 (mmu_pagemap_directmap)
-// pre-demotes the entire buddy zone to L3 at boot, so every runtime call
-// here finds an already-present L3 and performs only a distinct-index leaf
-// flip on the shared global tables -- never a block->table BBM. Each kstack
-// PA lies in [zone_base, zone_end) (fully covered by the pagemap loop), and
-// concurrent flips of distinct 8-byte-aligned slots are single-copy-atomic,
-// each with its own broadcast invalidate. Multi-thread Procs (stratumd) do
-// drive concurrent thread_create -> these calls from multiple CPUs; no
-// mmu_lock is needed and none exists.
-//
-// Returns false on OOM (L2 / L3 table allocation failed) or if the PA
-// is outside the direct-map range (PA < 1 GiB or PA >= 9 GiB at v1.0).
-bool mmu_set_no_access(paddr_t pa);
-bool mmu_restore_normal(paddr_t pa);
-#endif // KERNEL_TESTS
-
-// Batched variants for callers protecting / unprotecting a contiguous
-// run of pages within a single 2 MiB L2 block (the common case for
-// per-thread guard regions: 4 pages ≪ 1 block). Operates on
-// `[pa, pa + n_pages * PAGE_SIZE)`. One `dsb` pair around the batch of
-// per-page invalidates.
-//
-// Constraints:
-//   - pa must be 4 KiB aligned.
-//   - n_pages > 0 and the range must lie within a single 2 MiB block
-//     (i.e., (pa + n_pages * PAGE_SIZE - 1) >> 21 == pa >> 21).
-//   - PA range is in the direct map (1 GiB ≤ PA < 9 GiB at v1.0).
-//
-// Returns false on alignment / range / OOM violations.
-bool mmu_set_no_access_range(paddr_t pa, unsigned n_pages);
-bool mmu_restore_normal_range(paddr_t pa, unsigned n_pages);
-
-// #808: page-map the entire buddy direct map to L3 granularity at boot.
-//
-// Demotes every 2 MiB block of [base, end) within the direct-map range
-// (l1_directmap[1..8] = PA [1 GiB, 9 GiB)) to a page-grain L3 table, by
-// driving the same directmap_walk_to_l3 demote the runtime kstack-guard path
-// uses. After this, mmu_set_no_access_range / mmu_restore_normal_range only
-// flip already-present L3 leaf entries -- no runtime block->table
-// break-before-make ever occurs, which eliminates the #806 same-CPU
-// IRQ-during-BBM race AND its cross-CPU sibling for the buddy zone by
-// construction.
-//
-// MUST be called exactly once, single-CPU, with IRQs masked, AFTER the buddy
-// allocator is live (it allocates the L2 / L3 tables) and BEFORE the first
-// thread_create. phys_init is the call site (it owns the buddy <-> direct-map
-// coupling -- the same place as the 8 GiB direct-map reach cap). Extincts on
-// OOM (cannot establish the invariant otherwise).
-//
-// `base`..`end` are the buddy zone bounds, already capped at the direct map's
-// 8 GiB reach by phys.c. Blocks outside [1 GiB, 9 GiB) are skipped.
-void mmu_pagemap_directmap(paddr_t base, paddr_t end);
-
-#ifdef KERNEL_TESTS
-// #808 diagnostic: true iff the 2 MiB direct-map block containing `pa` is
-// demoted to a page-grain L3 table (both the L1 and the covering L2 entry
-// are table descriptors). When true, the runtime kstack-guard poke takes the
-// fast path with no block->table break-before-make. Non-mutating. False for
-// PAs outside the direct-map range. Used by the boot-pass regression test.
+// Whether the 2 MiB of the direct map holding `pa` is page-mapped (mmu.c).
 bool mmu_directmap_is_pagemapped(paddr_t pa);
 #endif // KERNEL_TESTS
 
@@ -588,8 +508,7 @@ long mmu_cross_proc_write(paddr_t pgtable_root, u64 vaddr, const void *src, long
 // The in-kernel tests' reach into mmu.c (.claude/rules/kernel-code.md,
 // "Cross-file declarations"): hooks compiled only with the tests, and
 // functions that are static in a production build (VISIBLE_IF_KERNEL_TESTS).
-u64 mmu_directmap_tlbi_operand_for_test(paddr_t pa);
-u64 mmu_guard_toggles_for_test(void);
+u64 mmu_kernel_tlbi_operand_for_test(u64 va);
 u64 mmu_kstack_changes_for_test(void);   // maps + unmaps
 u32 mmu_kstack_tables_for_test(void);    // L3 tables made so far
 bool mmu_kva_readable_for_test(const void *kva);

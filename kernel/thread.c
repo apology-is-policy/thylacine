@@ -34,9 +34,7 @@
 #include "../mm/phys.h"
 #include "../mm/slub.h"
 
-// P2-Dc: 32 KiB total allocation per thread = 4 stack pages + 4 guard
-// pages. order=3 = 8 pages from buddy. The guard pages are marked
-// no-access via mmu_set_no_access so a stack-overflow access faults.
+// A stack's span: 4 pages of guard with nothing behind them under 4 pages of stack.
 _Static_assert(THREAD_KSTACK_PAGES * PAGE_SIZE == THREAD_KSTACK_SIZE,
                "THREAD_KSTACK_PAGES must back THREAD_KSTACK_SIZE bytes");
 _Static_assert(THREAD_KSTACK_GUARD_PAGES * PAGE_SIZE == THREAD_KSTACK_GUARD_SIZE,
@@ -289,6 +287,7 @@ static void *kstack_new(void) {
         struct page *pg = kstack_step_refused(got + 1u) ? NULL : alloc_pages(0, 0);
         if (!pg) goto fail;
         pa[got] = page_to_pa(pg);
+        kstack_pages_counted(1);
     }
     u64 va = kstack_step_refused(THREAD_KSTACK_PAGES + 1u) ? 0 : kstack_slot_take();
     if (!va) goto fail;
@@ -297,10 +296,12 @@ static void *kstack_new(void) {
         kstack_slot_put(va);
         goto fail;
     }
-    kstack_pages_counted((int)THREAD_KSTACK_PAGES);
     return (void *)(uintptr_t)va;
 fail:
-    while (got != 0) free_pages(pa_to_page(pa[--got]), 0);
+    while (got != 0) {
+        free_pages(pa_to_page(pa[--got]), 0);
+        kstack_pages_counted(-1);
+    }
     return NULL;
 }
 

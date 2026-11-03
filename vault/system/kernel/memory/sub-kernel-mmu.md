@@ -32,7 +32,6 @@ Grouped by what they are for, since the file is long:
 |---|---|
 | bring-up | `mmu_enable`, `mmu_program_this_cpu`, `mmu_retire_ttbr0_identity` |
 | kernel views | `mmu_map_mmio`, `pa_to_kva` / `kva_to_pa` (in `page.h`) |
-| guard pages | `mmu_set_no_access_range`, `mmu_restore_normal_range` (the single-page forms are the tests'), `mmu_pagemap_directmap` |
 | kernel stack range | `mmu_kstack_map`, `mmu_kstack_unmap` |
 | per-Proc tables | `proc_pgtable_create` / `_destroy`, `mmu_install_user_pte[_attr](as, exempt, ..)` (1 on an identical leaf), `mmu_replace_user_pte_attr` (the COW break's in-place leaf replace), `mmu_user_pte_admits` (the fault path's resolved-by-a-peer probe), `mmu_uninstall_user_range(as, ..)` (returns the leaves cleared) and `_keep_tables` (the fork's clear) -- the tables charged and reclaimed since B-1a' (below) |
 | self-modification | `mmu_patch_text`, `arch_icache_sync_range` |
@@ -124,25 +123,14 @@ physical line, since the caches are physically tagged.
 read or write its memory without a fault-in. The write refuses a read-only leaf,
 so a debugger writes data and never text.
 
-**The guard-page path and the race it does not have.** Making a kernel stack's
-lower pages inaccessible requires demoting a large block mapping down to page
-granularity — a break-before-make sequence, and doing that at runtime while
-another CPU walks the same tables is the kind of race that produces impossible
-symptoms. It is closed **by construction**: at boot, the entire allocator zone
-is pre-demoted to page granularity in one single-CPU pass. Every runtime call
-then finds page-grain tables already present and does nothing but flip one leaf
-entry. Concurrent flips of distinct entries are single-copy-atomic and each
-carries its own broadcast invalidate, so no lock is needed and none exists.
-That invalidate is by address -- one `tlbi vaae1is` per flipped page, its
-operand masked to VA[55:12] so a kernel address puts nothing in the FEAT_TTL
-level hint -- never a whole-TLB flush: only the direct-map leaf changed, and
-every other address space's cached entries stay. Flips are rare as well: the
-thread layer keeps freed stacks with their guard in place and reuses them
-([[sub-kernel-thread]]), so a guard is set when a block leaves the buddy and
-restored when it goes back.
-
-That is worth stating as a pattern: **the race was removed by making the
-dangerous transition impossible at runtime, not by locking it.**
+**Nothing writes a direct-map leaf at runtime.** A kernel stack's guard once had to be
+whole pages of the direct map, which meant demoting large blocks, a break-before-make
+while a peer walks the same tables. #808 closed that by page-mapping the whole allocator
+zone at boot, at a cost of 0.2% of RAM and all of the direct map's TLB reach. Stacks now
+live in a range of their own, so neither the toggles nor the page map has a reason to
+exist. Since 2026-11-03 the zone keeps the blocks `build_page_tables` gave it, and only
+the image's 8 MiB, which carries the image's own permissions, is page-mapped
+(`directmap.stays_in_blocks`). The race went with the transition it needed.
 
 **Unmapping and the invalidate.** Clearing a user PTE is not enough; the stale
 translation must be flushed. The range clear (`mmu_uninstall_user_range`)
@@ -299,8 +287,8 @@ The extinctions are for conditions that mean an assumption has already failed:
 a translation fault while patching text, a writable and executable leaf at any
 encoder, an executable mapping on a non-cacheable
 index or an out-of-range MAIR index at the user encoder, vmalloc exhaustion, and the
-allocation failure during boot page-mapping — that last one extincts because the
-invariant it establishes cannot be established later.
+a kernel stack range address outside its range, and a kernel stack unmap of a page
+not mapped.
 
 Unmapping is idempotent by design: an already-clear entry, or a missing
 sub-table, both return success. There is nothing to undo.
@@ -321,8 +309,9 @@ On any change here: that no PTE constructor can produce writable-and-executable
 (add an assert with each new composite, and build every leaf through an
 encoder -- a leaf composed by hand skips the W^X check); that the patcher's scratch stays execute-never and the canonical stays
 read-only, with instruction-cache maintenance between the write and any fetch;
-that the boot pre-demote still covers the whole allocator zone, since the
-lock-free guard path depends on it entirely; that every user-PTE clear keeps its
+that nothing starts writing a direct-map leaf at runtime, which would need the
+break-before-make safety #808 once gave, and that a kernel stack unmap's invalidate
+completes before its pages or slot go back; that every user-PTE clear keeps its
 broadcast invalidate; that table teardown continues to free only table pages and
 to zero them; and that cross-Proc write keeps refusing read-only leaves.
 
@@ -343,8 +332,8 @@ Two more, both about arguments rather than code:
 
 - The leaf check holds by convention: a descriptor composed by hand
   (`pa | attrs` stored straight into a table) does not pass through it. Three
-  did until vote 22 -- the direct map's 1 GiB blocks, the kernel GiB's 2 MiB
-  blocks and the demote's 2 MiB blocks, all from clean composites -- and now
+  did until vote 22 -- the direct map's 1 GiB blocks and the kernel GiB's 2 MiB
+  blocks, from clean composites -- and now
   call `make_block_pte_l1` / `make_block_pte_l2`. Nothing but review stops a
   fourth.
 - The direct map reaches 8 GiB. More physical memory than that needs the map
@@ -579,7 +568,7 @@ P1-C built the tables and the W^X encoding; P1-H added the branch-target
 guarding on kernel text; P3-Bb added the direct map and vmalloc; P3-Bca the
 guard pages; P3-Bda the identity retirement; P3-Bcb/Db the per-Proc trees;
 P3-Dc the user install; P6 hardening #2 the unmap-plus-invalidate that closed
-the corruption bug; #808 the boot pre-demote; W1.5 the patcher; the debug
+the corruption bug; #808 the boot pre-demote, retired by thread-model C10; W1.5 the patcher; the debug
 surface added cross-Proc access; I-42 the JIT's outward generalization of the
 alias trick.
 
@@ -618,10 +607,9 @@ descriptor, and every composite with and without its execute-never bits.
 `tools/test-fault.sh`'s four `wxe_install_*` variants, one per encoder
 (`kernel`, `block`, `gib`, `user`), have that encoder build a writable and
 executable leaf, and pass only on its extinction body. `alternatives.*` covers the patcher (every patchable site applied, and the
-patched instructions computing correctly). The guard pages and the direct map
-are proven by boot: a stack overflow is caught and named, and the boot
-page-map's diagnostic accessor is asserted. The multi-boot SMP gate is the
-durable witness for the lock-free leaf-flip argument.
+patched instructions computing correctly). The guards and the direct map are
+proven by boot: a stack overflow is caught and named, and the zone is asserted to
+stay in blocks. `test_kstack.c` covers the kernel stack range.
 
 ## Referenced by
 
