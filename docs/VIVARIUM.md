@@ -488,8 +488,9 @@ this exact translation in userspace); errno is already POSIX-aligned by `ERRORS.
   `ucontext` frame on the user stack + `rt_sigreturn`. This is the audit-bearing
   piece; it composes with notes (I-19) and the EL0-return-tail delivery checkpoint
   that already exists for note delivery and for the I-39 debug stop.
-- **Tier 2 (v1.x)**: full `sigprocmask`/`sigaltstack`/`SA_RESTART`/queued
-  `siginfo` fidelity. (`tgkill` fidelity landed at thread-model C4; §6.22.)
+- **Tier 2 (v1.x)**: full `sigprocmask`/`sigaltstack`/queued
+  `siginfo` fidelity. (`tgkill` fidelity landed at thread-model C4, `SA_RESTART` at
+  item 11c; §6.22.)
 
 **CORRECTION to Tier 1, 2026-07-30 (V-6 entry; user-voted).** The clause *"restores
 `pstate`/`pc` from user memory at `rt_sigreturn`"* described Linux's mechanism, not
@@ -2576,24 +2577,24 @@ all. A `connect` that a signal interrupts leaves the socket `CONNECTING`, and a
 blocking retry waits on the dial already made rather than dialing again, as
 Linux's `SS_CONNECTING` does. A failed dial leaves it `FRESH`, and a timed-out one
 reports `ETIMEDOUT` as netd does, not `ECONNREFUSED`.
-Where the restart-vs-`EINTR` decision is made is the pouch/unmodified split:
-- **Pouch guest** (our patched musl): the kernel returns `-EINTR` and delivers
-  the frame; musl's cancellation/`__eintr_valid_flag` machinery honours
-  `SA_RESTART` in *userspace* — `SA_RESTART` re-issues the syscall, else the
-  caller observes `EINTR`. This is the v1.0 path and it fully closes the
-  interactive-shell case (item 8): an interactive read's SIGINT handler is
-  typically not `SA_RESTART`, so the line is discarded and the prompt reprints.
-- **Unmodified Vivarium guest** (libc not ours to patch): a real Linux kernel
-  performs the `SA_RESTART` restart itself — rewinding `pc` by 4 and restoring
-  the original `x0` so the `svc` re-executes — because the guest libc expects it.
-  Thylacine does **not** rewind `pc` at v1.0; the `Thread` snapshot keeps the
-  interrupted regs, so the machinery *could*, but the restart-continuation is the
-  `restart_syscall` (128) ENOSYS row above. So an unmodified guest that installs
-  an `SA_RESTART` handler over a blocking syscall observes a spurious `EINTR`
-  rather than a transparent restart — a named DEGRADED-tier fidelity gap (§9),
-  costing correctness only for a guest that both runs unmodified *and* relies on
-  kernel-side restart, never authority. Kernel-side `SA_RESTART` is the natural
-  Tier-2 lift when an unmodified guest needs it.
+**The kernel restarts (operator vote 19, 2026-11-03; ARCH §8.8.3).** This section
+used to split the decision, and the half it gave to Pouch's musl did not exist:
+musl has no re-issue loop. `SA_RESTART` only sets `__eintr_valid_flag`, which
+`__timedwait` reads to filter a futex `EINTR` when no non-restart handler was ever
+installed. A Pouch program gets no frame either, being a native Proc. So every
+guest that relied on a restart saw `EINTR`, including anything that installed its
+handler with musl's or glibc's `signal()`, which set the flag by default.
+
+A delivery now does what a Linux kernel does. For a call restartable under
+signal(7), whose wait unwound, whose note's row carries `SA_RESTART`, the tail
+rewinds `pc` by 4 and restores the original `x0` before it builds the frame. The
+frame's `uc_mcontext.pc` then names the `svc`, and `rt_sigreturn` re-executes it. An
+interactive read's `SIGINT` handler is typically not `SA_RESTART`, so the read
+still returns `EINTR`, the line is discarded and the prompt reprints (item 8). A
+handler reads the rewound context in its frame, but cannot change it: `rt_sigreturn`
+restores from the kernel's save. `restart_syscall`
+(128) stays `ENOSYS`: Linux uses it only for the time-bounded calls, which here
+return `EINTR` under any flag, as signal(7) lists them when a handler ran.
 
 **AS BUILT (V-6c).** The frame is `siginfo_t` (128) + `ucontext_t` (4560) =
 4688 bytes, plus a 16-byte `{fp, lr}` frame record above it so a backtrace from
@@ -2643,8 +2644,8 @@ pins that a BLOCKED signal is *deferred* rather than lost: the handler must not
 run while SIGPIPE is masked, and must run at the `rt_sigprocmask` that unblocks
 it.
 
-**What Tier 2 still owes**, unchanged from §5.4: queued `siginfo`, `SA_RESTART`
-(a restartable syscall needs the EINTR plumbing LS-8 defers) and `SA_ONSTACK`.
+**What Tier 2 still owes**, from §5.4: queued `siginfo` and `SA_ONSTACK`.
+(`SA_RESTART` landed at item 11c.)
 Thylacine's `in_handler` blocks *all* delivery for the duration where Linux
 blocks only the delivered signal plus `sa_mask` — a stated imprecision in the
 conservative direction. **The MASK a handler runs under is Linux's since
@@ -3294,8 +3295,7 @@ what was left into `rem` when `rem` is not NULL: the deadline minus now, which
 is positive, or the expiry would have won. A `rem` that faults makes the call
 EFAULT, as Linux's copy-out does, and an absolute sleep writes no `rem`. Both
 rows are on signal(7)'s never-restarted list ("sleep interfaces ... always fail
-with EINTR"), so the vivarium's lack of a kernel-side `SA_RESTART` (§6.22) costs
-them nothing.
+with EINTR"), so the kernel's `SA_RESTART` (§6.22) never re-issues them.
 
 A stop parks inside the wait and resumes against the same deadline, which is
 what Linux's restart after a stop does. Death before the deadline ends the
