@@ -401,10 +401,28 @@ carry an existing reference to its release outside a lock and hold nothing new.
 | Syscall and fault temporaries | JIT sync, `weft_share` registration gap, `freq->burrow` | across a lock gap in one call | nothing | none; inside a live claim, never escaping |
 
 The kernel has no type for section 6's queued backend command, CPU composition
-borrow or display/GPU pin. Each reaches the kernel as one of the rows above, a DMA
-handle or a shared-in mapping held by a driver or service. Which one, and whether a
-fence outlives it, is a userspace question not yet read: `usr/virtio-gpu` and
-`usr/tapestryd`. MM-0 stays open on this row until they are.
+borrow or display/GPU pin. Each reaches it as a row above, held by a service. The
+production driver is `usr/lictor`; `usr/virtio-gpu` is a probe.
+
+- Display/GPU pin: lictor's `Pin` (`backend/import.rs`) is a DMA handle from
+  SYS_SEAT_IMPORT, so it survives its owner's exit. It goes on a successful detach,
+  a proven unref, an attach proven to have left nothing, or at `Device` drop after a
+  GPU reset. `Device::execute` refuses a retirement on a busy engine and keeps the
+  pins: this is section 6's "a last-client-unmap does not release a backend fence
+  pin", today, with no account behind it.
+- Queued backend command: a BO's retirement waits on `fences_in_flight`, deferring to
+  `warp_pump_retires`. Abandoned work poisons the context, and the backing parks in
+  `warp_park_leaked` until vindicated. A surface's own retirement in `release_gen`,
+  `retire` and `free_screen` issues its detach and unref, discards both results and
+  closes its handle, relying on lictor's pin; nothing retries a refusal there.
+- CPU composition borrow: tapestryd's header says presents and composition close
+  inside one dispatch, which would make it section 6's borrower inside a live claim.
+  That is read from its comment and not yet traced.
+- Displaced generation: parked by tapestryd while it is still scanned out.
+
+Not yet read, so these rows stay provisional: lictor's RPC client, its
+`drain_condemned` and `gl_evict_res`, tapestryd's `reconcile` and `wring_destroy`,
+and whether a queued request in lictor's park can block tapestryd.
 
 ### Allocation classes
 
@@ -418,9 +436,11 @@ Raw `alloc_pages`, outside the pool:
 
 | Site | Induced by | Proposed class |
 | --- | --- | --- |
-| `dma_create_body`, weave | Tapestry per client surface, and its screen | ordinary, voucher-funded; the screen from the operating budget, section 5 |
-| `dma_create_body`, GPU BO | Tapestry per client or renderer | ordinary, voucher-funded |
-| `dma_create_body`, plain | drivers' queues and buffers; virtio-gpu also its framebuffer | open: section 7 requires each call site read first; a framebuffer is not a virtqueue |
+| `dma_create_body`, weave | Tapestry: each surface's create, reweave and resume, and each screen; a mode preflight, closed at once | ordinary, voucher-funded; a screen from the operating budget, section 5 |
+| `dma_create_body`, GPU BO | Tapestry: client BOs and guest-blob rings; two probes | ordinary, voucher-funded; a probe from the operating budget |
+| `dma_create_body`, plain: rings, event and packet pools | lictor, netd, nocturned, stratumd's virtio-blk (`bdev_thylacine.c`), at start-up; sizes fixed | critical device, each driver's operating account; no client can grow them |
+| `dma_create_body`, plain: lictor framebuffer | one per screen, w x h x 4 | display operating budget, section 5 |
+| `dma_create_body`, plain: lictor cursor | first cursor request, once, fixed size | display operating budget |
 | `kstack_alloc` | every thread; bounded per Proc | metadata, requesting account; a thread that cannot pay is refused at create |
 | `proc_pgtable_create` | every address space, one L0 page | metadata, requesting account |
 | `mm/slub.c` slabs and large allocations | everything | metadata; existing bounds, then charged membership records, section 3 |

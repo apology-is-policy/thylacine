@@ -82,10 +82,10 @@ No audit round has run on this note's tests: they change no kernel behaviour.
 ## Seams
 
 The queued backend command, CPU composition borrow and display or GPU pin of the
-design's section 6 have no kernel type. Each reaches the kernel as a DMA handle or a
-shared-in mapping held by a driver or service, and which one is unread in
-`usr/virtio-gpu` and `usr/tapestryd`. The account, voucher and pressure ABI layouts are
-not reserved, and no syscall number is taken.
+design's section 6 have no kernel type: each reaches the kernel as a DMA handle or a
+shared-in mapping held by [[sub-kernel-loom]]'s neighbours in userspace, lictor and
+tapestryd. Section 12 says which, and what it has not yet read. The account, voucher
+and pressure ABI layouts are not reserved, and no syscall number is taken.
 
 ## Caveats
 
