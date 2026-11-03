@@ -129,3 +129,5 @@ if {$poisoned_ms > $bound_ms} {
     lc_fail "POISON-RETIRE RED: one poisoned slot stopped the compositor for $poisoned_ms ms on a surface close (control $control_ms ms, bound $bound_ms ms)"
 }
 lc_pass "warp-poison-retire: a surface closed in $poisoned_ms ms beside another client's poisoned slot (control $control_ms ms)"
+lc_quit
+exit 0
