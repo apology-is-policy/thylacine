@@ -10,4 +10,5 @@ name = "loom-fixture"
 path = "src/main.rs"
 
 [dependencies]
+libhalcyon = { path = "../lib/libhalcyon" }
 libthyla-rs = { path = "../lib/libthyla-rs" }

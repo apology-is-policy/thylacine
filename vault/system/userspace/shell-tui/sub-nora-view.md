@@ -93,7 +93,9 @@ the same warning appears at both exported functions.
 (one focused pane fills the area), the dashboard split (sidebar and console
 tiles around a narrowed editor), and full width. All three converge on
 `render_editor`, which is the entire pre-dashboard renderer unchanged — so the
-dashboard was added by narrowing a rectangle, not by rewriting the drawing.
+dashboard was added by narrowing a rectangle, not by rewriting the drawing. The
+`[Space]` menu over a selection keeps Visual's accent, since the selection is still
+what it acts on.
 
 Within `render_editor` the overlays are ordered by who owns the cursor. The
 completion popup, the which-key menu and the two pickers each *return* their own

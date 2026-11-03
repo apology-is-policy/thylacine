@@ -16,6 +16,7 @@ mirrors:
   - "tools/interactive/ls-halcyon-clipboard-pty-capacity.exp"
   - "tools/interactive/ls-halcyon-clipboard.exp"
   - "tools/interactive/ls-halcyon-clipboard-async.exp"
+  - "tools/interactive/ls-nora-stopped-copy.exp"
   - "tools/interactive/ls-halcyon-pointer.exp"
   - "tools/interactive/ls-halcyon-session-media.exp"
   - "tools/interactive/ls-graphical-sak.exp"
@@ -535,6 +536,11 @@ Halcyon interaction status and substrate interactive dossier.
 
 The opt-in `ls-halcyon-clipboard-async` scenario fails on `EXTINCTION:` during boot
 and at each of its probe runs. It is a new mirror of the unchanged prefix.
+
+### Stopped-server consumer (November 3)
+
+The opt-in `ls-nora-stopped-copy` scenario fails on `EXTINCTION:` during its probe's
+run. It is a new mirror of the unchanged prefix.
 
 ### Existing PTY-envelope consumer (October 4)
 

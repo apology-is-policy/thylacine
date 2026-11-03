@@ -1059,6 +1059,7 @@ dependencies = [
 name = "loom-fixture"
 version = "0.1.0"
 dependencies = [
+ "libhalcyon",
  "libthyla-rs",
 ]
 

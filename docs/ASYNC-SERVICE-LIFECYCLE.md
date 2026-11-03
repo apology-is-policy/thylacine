@@ -381,7 +381,14 @@ The client's rules, each from a rule above it:
 - AS-4d: Nora. The pure engine raises Copy and Paste, its host resolves them. Space
   y and Space p reach the shared clipboard, plain y and p stay local, and several
   selections join with LF. Mode reports follow its editing mode. A paste is one undo
-  transaction. One scenario proves a server stopped mid-copy does not stop typing.
+  transaction. One scenario proves a server stopped mid-copy does not stop typing:
+  `ls-nora-stopped-copy`, a real Nora on a pts its probe owns, against loom-fixture.
+  The fixture's `hold-copy` service takes a copy's first write and then answers nothing
+  on that connection, so the client's deadline and the ring's close are all that can
+  end it. Typed text must reach the file while the copy is still parked, which is read
+  in that order rather than off a clock. The client must then give up and say so,
+  typing must go on, and the editor must leave with a second copy parked. The same keys
+  run first against the service that answers, as the control.
 - AS-4e: ut over the C adapter, closing HI-2's witness on both clients. A paste
   lands in the command buffer and does not submit.
 - AS-4f: the rest of AS-4's list: paste after edit, tab, focus and session change;

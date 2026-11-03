@@ -20,6 +20,7 @@ code:
   - tools/interactive/ls-halcyon-session-instrument.exp
   - tools/interactive/ls-halcyon-clipboard.exp
   - tools/interactive/ls-halcyon-clipboard-async.exp
+  - tools/interactive/ls-nora-stopped-copy.exp
   - tools/interactive/ls-halcyon-session-media.exp
   - tools/interactive/ls-halcyon-session-dosbox.exp
   - tools/interactive/pci-net-load.exp
@@ -95,6 +96,14 @@ private-async kernel as well: its header has the bake and the boot. One boot run
 probe once per submission of the client's run, held before the submission and after it,
 with physical Ctrl+Alt+F10 at each. See [[sub-interaction-native]] for what a run checks.
 It skips without the image, and it has not yet run.
+
+`ls-nora-stopped-copy` needs the private-async kernel on the CI image and posts through
+`imperium post`. Its probe hosts a real Nora on a pts of its own against
+[[sub-loom-fixture]], since ut cannot give a child an environment and the session's service
+cannot be stopped. The same keys run first against the service that answers. Then the server
+stops mid-copy, and typed text must reach the file before the client's deadline ends the
+session. The client must then give up and say so, typing must go on, and Nora must leave with
+a second copy held. It skips without the image, and it has not yet run.
 
 ## Full native service capacity witness
 
