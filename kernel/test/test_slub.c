@@ -23,7 +23,7 @@
 void test_slub_kmem_smoke(void) {
     static void *smalls[KMEM_SMOKE_SMALL_N];
 
-    u64 baseline = phys_free_pages();
+    u64 baseline = test_free_pages_settled();
 
     // Many kmalloc(8) — exercises slab-fill across multiple slab
     // pages. 1500 / 512 = 2.93 slab pages allocated and drained.
@@ -103,7 +103,7 @@ void test_slub_kmalloc_overflow_guard(void) {
 // at create (pre-fix it built a cache with objects_per_slab == 0 whose
 // first alloc NULL-deref'd the empty freelist).
 void test_slub_cache_destroy_guards(void) {
-    u64 baseline = phys_free_pages();
+    u64 baseline = test_free_pages_settled();
 
     // F-S1: a fresh cache; one partial slab; live-count tracks exactly.
     struct kmem_cache *c = kmem_cache_create("guard-typed", 48, 8, 0);
@@ -149,7 +149,7 @@ void test_slub_cache_destroy_guards(void) {
 // Test runs in <50 ms on QEMU virt; well within the 10-s test
 // timeout.
 void test_slub_leak_10k(void) {
-    u64 baseline = phys_free_pages();
+    u64 baseline = test_free_pages_settled();
 
     for (unsigned i = 0; i < 10000; i++) {
         void *p = kmalloc(64, 0);
