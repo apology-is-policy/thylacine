@@ -112,6 +112,7 @@ void test_rendez_caught_note_tail_discards_and_releases(void);
 void test_rendez_restart_undone_on_refused_frame(void);
 void test_rendez_tail_discards_dead_note(void);
 void test_rendez_native_tail_past_sak(void);
+void test_rendez_tail_settles_an_unwound_call(void);
 void test_rendez_reread_wakes_a_sleeper(void);
 void test_rendez_tail_parks_for_the_stop_it_applies(void);
 void test_rendez_caught_note_release_wakes_peer(void);

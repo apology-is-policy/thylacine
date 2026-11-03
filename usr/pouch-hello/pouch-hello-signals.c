@@ -640,6 +640,28 @@ static int leg_child(const char *mode) {
         n = read(LEG_DATA, &b, 1);
         return n == 1 && b == 'D' ? 0 : 78;
     }
+    if (!strcmp(mode, "fork-mask")) {
+        // The child starts with the caller's mask: its own note waits for it to unblock.
+        sigset_t s, old;
+        if (leg_catch(SIGUSR1, leg_handler, 0) != 0) return 60;
+        sigemptyset(&s);
+        sigaddset(&s, SIGUSR1);
+        if (sigprocmask(SIG_BLOCK, &s, &old) != 0) return 60;
+        pid_t kid = leg_native_fork();
+        if (kid < 0) return 60;
+        if (kid == 0) {
+            if (kill(getpid(), SIGUSR1) != 0) _exit(71);
+            if (g_leg_caught != 0) _exit(72);
+            if (sigprocmask(SIG_SETMASK, &old, NULL) != 0) _exit(73);
+            _exit(g_leg_caught == 1 ? 0 : 74);
+        }
+        int st = 0;
+        if (waitpid(kid, &st, 0) != kid) return 75;
+        if (!WIFEXITED(st) || WEXITSTATUS(st) != 0) return 90 + (WEXITSTATUS(st) & 15);
+        leg_ready();
+        n = read(LEG_DATA, &b, 1);
+        return n == 1 && b == 'D' ? 0 : 78;
+    }
     return 59;
 }
 
@@ -765,6 +787,7 @@ static int test_blocked(void) {
         { .mode = "wait-restart",      .sig = SIGUSR1 },
         // The table and the handler cross a fork.
         { .mode = "fork-read",         .data = 1 },
+        { .mode = "fork-mask",         .data = 1 },
         // A handler that longjmp'd out never told the kernel it was done, and a fatal
         // note with a default row must still end the program, not spin its waits.
         { .mode = "escape",            .sig = SIGINT,  .dies = SIGINT  },

@@ -510,6 +510,8 @@ struct test_case g_tests[] = {
     { "rendez.restart_undone_on_refused_frame", test_rendez_restart_undone_on_refused_frame, false, NULL },
     { "rendez.tail_discards_dead_note", test_rendez_tail_discards_dead_note, false, NULL },
     { "rendez.native_tail_past_sak", test_rendez_native_tail_past_sak, false, NULL },
+    { "rendez.tail_settles_an_unwound_call",
+                                       test_rendez_tail_settles_an_unwound_call, false, NULL },
     { "rendez.reread_wakes_a_sleeper", test_rendez_reread_wakes_a_sleeper, false, NULL },
     { "rendez.tail_parks_for_the_stop_it_applies", test_rendez_tail_parks_for_the_stop_it_applies, false, NULL },
     { "rendez.caught_note_release_wakes_peer", test_rendez_caught_note_release_wakes_peer, false, NULL },
