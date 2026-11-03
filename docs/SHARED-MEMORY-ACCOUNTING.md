@@ -405,24 +405,50 @@ borrow or display/GPU pin. Each reaches it as a row above, held by a service. Th
 production driver is `usr/lictor`; `usr/virtio-gpu` is a probe.
 
 - Display/GPU pin: lictor's `Pin` (`backend/import.rs`) is a DMA handle from
-  SYS_SEAT_IMPORT, so it survives its owner's exit. It goes on a successful detach,
-  a proven unref, an attach proven to have left nothing, or at `Device` drop after a
-  GPU reset. `Device::execute` refuses a retirement on a busy engine and keeps the
-  pins: this is section 6's "a last-client-unmap does not release a backend fence
-  pin", today, with no account behind it.
+  SYS_SEAT_IMPORT, so it survives its owner's exit, and `allowance_handle_alloc`
+  charges nobody for it. It goes on a successful detach, a proven unref that `reap`
+  sees retired, an attach proven to have left nothing, or at `Device` drop after a
+  GPU reset. Two cases have no way out short of that drop: an UNREF `drain_condemned`
+  finds refused on a live engine, which it forgets on the reading that a second
+  UNREF of a freed id is harmless, and an unref past the condemned list's overflow,
+  which answers Ok and records nothing. This is section 6's "a last-client-unmap does
+  not release a backend fence pin", today, with no account behind it.
+- Retirement against a busy engine: `gpu_api::admit` parks it first, in the
+  connection's one `pending` slot, until every chain has retired, quiescence becomes
+  unreachable, or `PARK_BOUND_MS` (30 s, per request). `Device::execute` then refuses
+  it on a non-quiescent engine and keeps the pins.
 - Queued backend command: a BO's retirement waits on `fences_in_flight`, deferring to
   `warp_pump_retires`. Abandoned work poisons the context, and the backing parks in
   `warp_park_leaked` until vindicated. A surface's own retirement in `release_gen`,
   `retire` and `free_screen` issues its detach and unref, discards both results and
   closes its handle, relying on lictor's pin; nothing retries a refusal there.
-- CPU composition borrow: tapestryd's header says presents and composition close
-  inside one dispatch, which would make it section 6's borrower inside a live claim.
-  That is read from its comment and not yet traced.
+  `gl_evict_res` unbinds a display binding and frees nothing itself. `wring_destroy`
+  takes the slot and unshares, then a host3d ring goes through `retire_host3d_ring`,
+  a guest ring through `resource_unref`, unmap and close. Lictor's pin outlives both
+  until `reap`.
+- Client gone: `retire_conn` calls `retire`. `reconcile` has no client-gone test and
+  releases backing only by retiring a surface with a wedged event queue. Its
+  `storage_sync` offers a suspend, and only to a hidden, unbound surface.
+- CPU composition borrow: the source is tapestryd's own mapping of the weave it
+  created or of a GL BO's backing, read synchronously on its main thread, in a present
+  and also in repaint, the menu card and readback. Its own `retire` runs from the same
+  loop, so it cannot land in a read, and it unmaps and closes last. A client's exit
+  or unmap can land mid-read on another CPU, and tapestryd's mapping keeps the pages
+  (I-7's rule, not separately traced here). So it is section 6's borrower inside a
+  live claim, and that claim is tapestryd's.
 - Displaced generation: parked by tapestryd while it is still scanned out.
 
-Not yet read, so these rows stay provisional: lictor's RPC client, its
-`drain_condemned` and `gl_evict_res`, tapestryd's `reconcile` and `wring_destroy`,
-and whether a queued request in lictor's park can block tapestryd.
+The RPC to lictor blocks with no deadline: `Client::call` reads its reply on a plain
+fd, and the kernel clears the connection's deadline after the handshake. A caller
+keeps what it holds across the call: `attach_backing` holds one of Weft's 64 share
+slots, and `release_gen` its mapping and DMA handle. A retirement in lictor's park
+therefore stops tapestryd's main thread, which is GPU-DESIGN 4.5.15's stated price
+during a stall. The seat worker has its own client and seat requests are always
+admitted, so SAK is not behind it. An abandoned fence raises that price with no bound
+on its count: OPEN-BUGS 2026-11-03T11:53Z.
+
+Not yet traced here: the kernel half of the mapping-count rule for the CPU borrow, and
+`wbo_retire`'s RPCs.
 
 ### Allocation classes
 
@@ -447,7 +473,7 @@ Raw `alloc_pages`, outside the pool:
 | `file_demand_page_cluster` stage | a file fault; freed before return, falls back to one page on failure | transient ordinary; must never draw on the reserve |
 | `virtio_virtqueue_create`, `random.c` pull page | kernel virtio-rng at boot | boot account, critical |
 | `gic_its.c` tables, `kpage_alloc` | ITS bring-up | boot account, critical |
-| `mmu.c` L2 and L3 demotions | kernel direct-map splits | boot account, critical; read whether a user-driven path reaches them |
+| `mmu.c` L2 and L3 demotions | boot's `mmu_pagemap_directmap`. A thread's kstack guards reach the same walker from a user spawn, but the boot pass has already made every zone entry a table, so the walker returns early and allocates nothing. No other caller found. | boot account, critical |
 
 HOSTMEM (`burrow_create_hostmem`) is a PCI BAR extent and allocates no RAM: its own
 class, section 7.
