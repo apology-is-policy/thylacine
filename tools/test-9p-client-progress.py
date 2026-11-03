@@ -7,7 +7,7 @@ from pathlib import Path
 import argparse,importlib.util,os,shlex,subprocess,tempfile,re
 ROOT=Path(__file__).resolve().parent.parent
 spec=importlib.util.spec_from_file_location('host_sanitizer_cc',ROOT/'tools/host-sanitizer-cc.py');sanitizer_cc=importlib.util.module_from_spec(spec);spec.loader.exec_module(sanitizer_cc)
-NAMES=['map_error','client_copy','client_owner','client_register','client_unregister','client_mark_dead_locked','client_send_progress_signal','client_orphan_fid_locked','ownerless_dispatch_locked','client_apply_reply_locked','demux_frame_locked','p9_client_submit_async','p9_client_progress_bind','p9_client_progress_abort','p9_client_progress_step','p9_client_init_storage','p9_client_init','p9_client_init_preallocated','p9_client_destroy','p9_client_handshake','client_max_read_count','client_await_tag_locked','p9_client_read']
+NAMES=['client_lock','client_unlock','map_error','client_copy','client_owner','client_register','client_unregister','client_mark_dead_locked','client_send_progress_signal','client_orphan_fid_locked','ownerless_dispatch_locked','client_apply_reply_locked','demux_frame_locked','p9_client_submit_async','p9_client_progress_bind','p9_client_progress_abort','p9_client_progress_step','p9_client_init_storage','p9_client_init','p9_client_init_preallocated','p9_client_destroy','p9_client_handshake','client_max_read_count','client_await_tag_locked','p9_client_read']
 MUTANTS=[
  ('provided-cap','send_cap < msize','false','short provided TX refused'),
  ('provided-rx','recv_cap < msize','false','short provided RX refused'),

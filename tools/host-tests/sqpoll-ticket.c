@@ -17,6 +17,8 @@ static spin_lock_t g_proc_table_lock=PTHREAD_MUTEX_INITIALIZER;
 static _Thread_local bool locked;
 static irq_state_t spin_lock_irqsave(spin_lock_t *l) { pthread_mutex_lock(l); locked=true; return 0; }
 static void spin_unlock_irqrestore(spin_lock_t *l,irq_state_t s) { (void)s; locked=false; pthread_mutex_unlock(l); }
+static irq_state_t proc_table_lock_acquire(void) { return spin_lock_irqsave(&g_proc_table_lock); }
+static void proc_table_lock_release(irq_state_t s) { spin_unlock_irqrestore(&g_proc_table_lock,s); }
 static struct Proc *table[4];
 static struct Proc *kproc(void) { return table[0]; }
 static int proc_for_each_walk(struct Proc *root,int (*cb)(struct Proc *,void *),void *arg) {
