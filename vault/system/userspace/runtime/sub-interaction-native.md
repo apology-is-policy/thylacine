@@ -128,7 +128,7 @@ paste allocates its text once, and a parked write copies its record.
 
 ## Prosecution
 
-Host tests (`tests.rs`, 26) drive the adapter against [[sub-loom-native-adapter]]'s
+Host tests (`tests.rs`, 28) drive the adapter against [[sub-loom-native-adapter]]'s
 simulated kernel and a scripted server speaking real HIN1 records. Every wait goes
 through one poll loop, as a host's does, and the loop asserts that only its own poll
 reached the kernel. The sweep `a_server_that_stops_at_any_operation_...` stops the

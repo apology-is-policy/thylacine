@@ -362,8 +362,9 @@ The client's rules, each from a rule above it:
 - Tokens and clipboard bytes are never logged. The locator is not authority.
 
 **Adoption order.**
-- AS-4a: `Ring::poll_fd`, and its C twin when ut needs it. The host test drives a
-  simulated ring and a poll loop with no blocking call.
+- AS-4a: `Ring::poll_fd`. The host test drives a simulated ring and a poll loop with
+  no blocking call. ut is Rust, so it needs no C twin; the Pouch browser's C-facing
+  API is its own later item.
 - AS-4b: the client, tested against a scripted server speaking real HIN1 records:
   every operation against a server that stops at each step, and one that dies. Then
   its native adapter.
@@ -396,7 +397,7 @@ The client's rules, each from a rule above it:
   in that order rather than off a clock. The client must then give up and say so,
   typing must go on, and the editor must leave with a second copy parked. The same keys
   run first against the service that answers, as the control.
-- AS-4e: ut over the C adapter, closing HI-2's witness on both clients. A paste
-  lands in the command buffer and does not submit.
+- AS-4e: ut over the native adapter, the same client Nora uses, closing HI-2's
+  witness on both clients. A paste lands in the command buffer and does not submit.
 - AS-4f: the rest of AS-4's list: paste after edit, tab, focus and session change;
   the unknown commit; several sessions; rendering and input latency; logout.

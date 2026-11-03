@@ -299,6 +299,29 @@ fn a_service_the_registry_does_not_hold_is_refused_at_the_start() {
 }
 
 #[test]
+fn a_connect_that_fails_ends_the_job_at_once_and_the_next_one_connects() {
+    let (sim, server, mut host) = fixture();
+    // The name resolved when the host started, and the service has gone since.
+    sim.s().services.clear();
+    let start = host.now();
+    assert_eq!(copy(&sim, &mut host, TEXT), Event::CopyFailed(Why::Lost));
+    assert_eq!(host.now(), start, "it did not wait for the handshake's deadline");
+    assert_eq!(server.0.borrow().connects, 0);
+    sim.s().services.push(b"clip".to_vec());
+    assert_eq!(copy(&sim, &mut host, TEXT), Event::Copied { generation: 1 });
+    assert_eq!(server.0.borrow().connects, 1);
+}
+
+#[test]
+fn a_connect_a_closed_ring_refuses_ends_the_job_at_once() {
+    let (sim, _server, mut host) = fixture();
+    sim.close_under();
+    let now = host.now();
+    host.copy(TEXT.to_vec(), now).unwrap();
+    assert_eq!(host.take_event(), Some(Event::CopyFailed(Why::Lost)));
+}
+
+#[test]
 fn a_copy_and_a_paste_round_trip_through_one_poll_loop() {
     let (sim, server, mut host) = fixture();
     assert_eq!(copy(&sim, &mut host, TEXT), Event::Copied { generation: 1 });
@@ -555,7 +578,9 @@ fn an_errno_on_a_commits_reply_is_no_answer_and_leaves_it_unknown() {
     let (sim, server, mut host) = fixture();
     assert_eq!(copy(&sim, &mut host, TEXT), Event::Copied { generation: 1 });
     server.0.borrow_mut().fail_reply = Some((Operation::CommitCopy, -2));
+    let start = host.now();
     assert_eq!(copy(&sim, &mut host, b"two"), Event::CopyUnknown);
+    assert_eq!(host.now(), start, "the errno did not wait for a deadline");
     assert_eq!(server.0.borrow().generation, 2, "the commit did land");
     assert_eq!(paste(&sim, &mut host), Event::Pasted(b"two".to_vec()));
 }
