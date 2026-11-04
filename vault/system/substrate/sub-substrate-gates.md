@@ -449,7 +449,8 @@ comment. `test-rust.sh` runs every workspace crate's lib tests on the host --
 read from `rustc -vV`, the crate list from `cargo metadata` so a new crate is
 picked up without an edit -- and puts each crate in ONE of five buckets: PASS,
 FAIL, NO-LIB (bin-only: every probe, smoke and bench), NO-HOST (links
-`libthyla-rs` unconditionally, whose `_start` asm is ELF-only), NO-TESTS. Only
+`libthyla-rs` unconditionally: a Mach-O host cannot assemble its `_start`, and an
+ELF host refuses its panic handler beside std's in the harness), NO-TESTS. Only
 FAIL fails. The five exist because a two-way split was red on its first run: the
 first draft called all 93 bin-only crates FAIL.
 
