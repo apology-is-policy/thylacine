@@ -22,6 +22,16 @@ needed the operator.
 
 
 ---
+## 2026-11-04 -- the bounds multiply: asking the stack (corona)
+
+While round 5 read, I measured the braceless `if` I had just added, on a private Pi copy: a fresh process per run, bisecting the least stack. 1.33 KiB a level, so about 6000 levels fit in 8 MiB. The dossier already had the rule I broke: a new nesting construct must reach a bound. The same table showed the older problem. Each bound holds per parser and they multiply: 10047 KiB for a 90 KB line that is inside every count. Every comment argued against a 256 KiB stack that B-1b had made 8 MiB. Round 5 arrived at both findings on its own, with the same fix, from disassembled frames. It also derived a 7 KB line, which I have not run.
+
+The fix asks the address. A count cannot see a frame's size, and that was the old mistake restated. The first mutant table showed the check in `eval_block` and `eval_statement` were not separately witnessed: a `x = 1` statement met `eval_expr`'s check first, so removing both stayed green. Each check now has a line only it stops. `parse_pow`'s own check could never fire first, so it is gone. `walk`'s could not be tested at all, and it became a worklist instead, which also stops holding directories open. My first witness for the guest was wrong as well: a script starting with `$(` is a command word, parsed lazily, so its parse needed under the floor. `let` parses at once.
+
+Round 5's other haul is the reason to keep doing this: `if ($ok)` then `rm x` ran rm unguarded after the first line's error, Alt-Backspace put Nora in Normal mode because of my own round 4 fix, and `$1` has never lexed, though the design documents it.
+
+What "fixed" covers: host tests on a private copy, and 13 mutant rows red for the stack and count checks. Round 5's own fixes have not been run red. Nothing here has booted, and u-6-test's flow 10 is the guest's first word on whether AT_STACK_BASE and real frames agree.
+
 ## 2026-11-04 -- a free slot's stranded tests, and an audit that read my scenario better than I wrote it (corona)
 
 The mac queue left a free hour, so the next item was the 72 tests the host script reports stranded. A private copy of libthyla-rs with every syscall answering ENOSYS built libutopia's 69 at once: 66 passed, 3 failed. Each failure was documented syntax that does not parse on the join: `in (a b)`, `1 << 4`. A census of every example in UTOPIA-SHELL-DESIGN found more, `((1 + (2 * 3)))`, `if (c) cmd`, `echo $f(1)`, `~ $v pat`, and a reserved word as a value, which is why 7.3's own example failed at `on`. Those tests had never compiled on any machine. Fixed on corona/ut-lang at 7d991b826, which also makes them run from now on: hello-rs's and capacity-probe's guest `.text` came out byte-identical, so the `svc!()` macro changes nothing in an image. Corvus's split was not: same size, functions reordered, and test-corvus-sessions.py read its bounds from main.rs and would have crashed; found by reading it, not by a red.
