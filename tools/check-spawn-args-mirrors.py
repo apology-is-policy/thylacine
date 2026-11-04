@@ -81,6 +81,8 @@ EXT_TAILS = [
     ("sys_spawn_ext_env", [("libt", "t_sys_spawn_ext_env", "c"),
                            ("libthyla-rs", "TSpawnExtEnv", "rust"),
                            ("pouch-env", "pouch_spawn_ext_env", "patch")]),
+    ("sys_spawn_ext_account", [("libt", "t_sys_spawn_ext_account", "c"),
+                               ("libthyla-rs", "TSpawnExtAccount", "rust")]),
 ]
 # Tail mirrors that live outside the MIRRORS files: pouch's env tail comes in its
 # own patch, after the one that mirrors the record.

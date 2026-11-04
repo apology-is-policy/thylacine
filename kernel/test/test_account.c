@@ -11,6 +11,7 @@
 
 #include <thylacine/burrow.h>
 #include <thylacine/dma_handle.h>
+#include <thylacine/handle.h>
 #include <thylacine/image.h>
 #include <thylacine/memaccount.h>
 #include <thylacine/page.h>
@@ -449,6 +450,283 @@ static s64 account_call(u64 handle, u64 op, u64 va, u64 size) {
     return (s64)ctx.regs[0];
 }
 
+// Section 13: each account pays META, here a page on its parent's chain and in the pool, for
+// as long as anything holds it.
+void test_account_child_costs_its_parent_meta(void) {
+    struct MemoryAccount *parent = account_child(account_root());
+    TEST_ASSERT(parent != NULL, "a parent");
+    u64 root0 = meta_of(account_root());
+    u32 pool0 = capacity_pool_charged();
+
+    struct MemoryAccount *c = account_child(parent);
+    TEST_ASSERT(c != NULL, "a child");
+    TEST_EXPECT_EQ(meta_of(parent), 1u, "the child costs its parent a page");
+    TEST_EXPECT_EQ(meta_of(account_root()), root0 + 1u, "and the chain above it");
+    TEST_EXPECT_EQ(capacity_pool_charged(), pool0 + 1u, "and the pool that page");
+    TEST_EXPECT_EQ(meta_of(c), 0u, "and itself nothing");
+
+    struct MemoryAccount *g = account_child(c);
+    TEST_ASSERT(g != NULL, "a grandchild");
+    TEST_EXPECT_EQ(meta_of(c), 1u, "its parent pays");
+    TEST_EXPECT_EQ(meta_of(parent), 2u, "and the grandparent's total covers it");
+    account_unref(g);
+    TEST_EXPECT_EQ(meta_of(c), 0u, "its last reference refunds its parent");
+    TEST_EXPECT_EQ(meta_of(parent), 1u, "up the chain");
+    account_unref(c);
+    TEST_EXPECT_EQ(meta_of(parent), 0u, "the child's last reference too");
+    TEST_EXPECT_EQ(meta_of(account_root()), root0, "the root is back");
+    TEST_EXPECT_EQ(capacity_pool_charged(), pool0, "and so is the pool");
+
+    // The bound on breadth is the pool's, so a full pool refuses and charges nothing.
+    (void)image_cache_evict_idle_for_test();
+    u32 room = capacity_pool_pages() - capacity_pool_charged();
+    capacity_pool_park_for_test(room);
+    struct MemoryAccount *refused = account_child_as(parent, false);
+    u64 meta_refused = meta_of(parent);
+    struct MemoryAccount *exempt = account_child_as(parent, true);
+    u64 meta_exempt = meta_of(parent);
+    capacity_pool_unpark_for_test(room);
+    if (exempt) account_unref(exempt);
+    TEST_ASSERT(refused == NULL, "a full pool refuses an ordinary payer");
+    TEST_EXPECT_EQ(meta_refused, 0u, "and charges nothing");
+    TEST_ASSERT(exempt != NULL, "control: the TCB is counted, never refused");
+    TEST_EXPECT_EQ(meta_exempt, 1u, "so it does land");
+    TEST_EXPECT_EQ(meta_of(parent), 0u, "and comes back");
+    account_unref(parent);
+}
+
+static void limits_read(const struct MemoryAccount *a, u64 out[ACCOUNT_CLASSES]) {
+    struct account_query q;
+    account_query_fill(a, &q);
+    for (unsigned cls = 0; cls < ACCOUNT_CLASSES; cls++) out[cls] = q.c[cls].limit;
+}
+
+static void limits_clear(u64 lim[ACCOUNT_CLASSES]) {
+    for (unsigned cls = 0; cls < ACCOUNT_CLASSES; cls++) lim[cls] = ACCOUNT_LIMIT_NONE;
+}
+
+// Section 4: vector-atomic, and never above an ancestor.
+void test_account_limits_change_whole_or_not_at_all(void) {
+    const u64 pool = (u64)capacity_pool_pages() << PAGE_SHIFT;
+    const u64 page = PAGE_SIZE;
+    struct MemoryAccount *parent = account_child(account_root());
+    struct MemoryAccount *child = parent ? account_child(parent) : NULL;
+    TEST_ASSERT(parent && child, "two accounts");
+    u64 lim[ACCOUNT_CLASSES], got[ACCOUNT_CLASSES];
+
+    limits_read(child, got);
+    TEST_EXPECT_EQ(got[CLASS_ALLOC], pool, "an unset RAM class reads as the pool");
+    TEST_EXPECT_EQ(got[CLASS_DEVICE], ~0ull, "and an unset device class as none");
+
+    limits_clear(lim);
+    lim[CLASS_ALLOC] = 16u * page;
+    TEST_EXPECT_EQ(account_set_limits(parent, lim), 0, "a parent's ceiling");
+
+    // A good class beside a bad one: the first in the vector would land if this were two
+    // writes, so the bad one is the later class.
+    limits_clear(lim);
+    lim[CLASS_RETAIN] = 8u * page;
+    lim[CLASS_META] = pool + page;
+    TEST_EXPECT_EQ(account_set_limits(child, lim), -1, "above the pool, which is the root's ceiling");
+    limits_read(child, got);
+    TEST_EXPECT_EQ(got[CLASS_RETAIN], pool, "and the good class beside it did not change");
+    limits_clear(lim);
+    lim[CLASS_RETAIN] = 8u * page;
+    lim[CLASS_ALLOC] = 32u * page;
+    TEST_EXPECT_EQ(account_set_limits(child, lim), -1, "above the parent's ceiling");
+    limits_read(child, got);
+    TEST_EXPECT_EQ(got[CLASS_RETAIN], pool, "nor beside this one");
+    TEST_EXPECT_EQ(got[CLASS_ALLOC], pool, "nor the bad one");
+
+    lim[CLASS_ALLOC] = 16u * page;
+    TEST_EXPECT_EQ(account_set_limits(child, lim), 0, "control: at the ceiling is within it");
+    limits_read(child, got);
+    TEST_EXPECT_EQ(got[CLASS_ALLOC], 16u * page, "the class lands");
+    TEST_EXPECT_EQ(got[CLASS_RETAIN], 8u * page, "with the one beside it");
+    TEST_EXPECT_EQ(got[CLASS_META], pool, "and an unset one stays the default");
+
+    // Bytes round down to whole pages: a ceiling that rounds up would pass its own check.
+    lim[CLASS_ALLOC] = 2u * page + 1u;
+    TEST_EXPECT_EQ(account_set_limits(child, lim), 0, "not a whole number of pages");
+    limits_read(child, got);
+    TEST_EXPECT_EQ(got[CLASS_ALLOC], 2u * page, "rounds down");
+
+    // Lowering an ancestor leaves a descendant above it, and raising that descendant is
+    // then refused, at the ceiling that is left.
+    limits_clear(lim);
+    lim[CLASS_ALLOC] = page;
+    TEST_EXPECT_EQ(account_set_limits(parent, lim), 0, "a parent lowered past its child");
+    limits_read(child, got);
+    TEST_EXPECT_EQ(got[CLASS_ALLOC], 2u * page, "the child keeps its own figure");
+    limits_clear(lim);
+    lim[CLASS_ALLOC] = 3u * page;
+    TEST_EXPECT_EQ(account_set_limits(child, lim), -1, "and cannot be raised past the parent");
+
+    // Every level is asked, not only the nearest: the grandparent's is the tight one here.
+    limits_clear(lim);
+    TEST_EXPECT_EQ(account_set_limits(parent, lim), 0, "the parent's ceiling comes off");
+    struct MemoryAccount *leaf = account_child(child);
+    TEST_ASSERT(leaf != NULL, "a third level");
+    lim[CLASS_ALLOC] = 3u * page;
+    TEST_EXPECT_EQ(account_set_limits(child, lim), 0, "a ceiling one level up");
+    limits_clear(lim);
+    lim[CLASS_ALLOC] = 2u * page;
+    TEST_EXPECT_EQ(account_set_limits(parent, lim), 0, "a tighter one two levels up");
+    limits_clear(lim);
+    lim[CLASS_ALLOC] = 3u * page;
+    TEST_EXPECT_EQ(account_set_limits(leaf, lim), -1, "the leaf answers to the one two up");
+    account_unref(leaf);
+
+    // ACCOUNT_LIMIT_NONE takes the account's own ceiling off, whatever is above it.
+    limits_clear(lim);
+    TEST_EXPECT_EQ(account_set_limits(child, lim), 0, "none is always allowed");
+    limits_read(child, got);
+    TEST_EXPECT_EQ(got[CLASS_ALLOC], pool, "and reads as the default again");
+    account_unref(child);
+    account_unref(parent);
+}
+
+void test_account_limit_bounds_the_room(void) {
+    const u64 page = PAGE_SIZE;
+    struct MemoryAccount *parent = account_child(account_root());
+    struct MemoryAccount *child = parent ? account_child(parent) : NULL;
+    struct MemoryAccount *sibling = parent ? account_child(parent) : NULL;
+    TEST_ASSERT(parent && child && sibling, "three accounts");
+    u64 lim[ACCOUNT_CLASSES];
+    struct account_query own, above, tighter, over, other;
+
+    // Each reading is taken with its charge on and judged after all of them are off.
+    limits_clear(lim);
+    lim[CLASS_ALLOC] = 8u * page;
+    int rc_child = account_set_limits(child, lim);
+    account_charge(child, CLASS_ALLOC, 3);
+    account_query_fill(child, &own);
+
+    limits_clear(lim);
+    lim[CLASS_ALLOC] = 6u * page;
+    int rc_parent = account_set_limits(parent, lim);
+    account_query_fill(child, &above);
+    account_charge(sibling, CLASS_ALLOC, 2);
+    account_query_fill(child, &tighter);
+
+    // Below what is in use: allowed, it takes nothing back, and the room stops at zero.
+    limits_clear(lim);
+    lim[CLASS_ALLOC] = 2u * page;
+    int rc_over = account_set_limits(parent, lim);
+    account_query_fill(child, &over);
+
+    // Another class is the tight one now.
+    limits_clear(lim);
+    int rc_off = account_set_limits(parent, lim);
+    lim[CLASS_META] = page;
+    int rc_meta = account_set_limits(child, lim);
+    account_query_fill(child, &other);
+
+    account_refund(sibling, CLASS_ALLOC, 2);
+    account_refund(child, CLASS_ALLOC, 3);
+    account_unref(sibling);
+    account_unref(child);
+    account_unref(parent);
+
+    TEST_EXPECT_EQ(rc_child, 0, "the child's ceiling");
+    TEST_EXPECT_EQ(rc_parent, 0, "the parent's");
+    TEST_EXPECT_EQ(rc_over, 0, "lowering below use is allowed");
+    TEST_EXPECT_EQ(rc_off, 0, "off again");
+    TEST_EXPECT_EQ(rc_meta, 0, "and META's");
+    TEST_EXPECT_EQ(own.headroom, 5u * page, "an account's own ceiling bounds its room");
+    TEST_EXPECT_EQ(own.limiting, (u32)CLASS_ALLOC, "and names the class");
+    TEST_EXPECT_EQ(above.headroom, 3u * page, "a parent's ceiling bounds it too");
+    TEST_EXPECT_EQ(tighter.headroom, page, "and a sibling's use reaches it through the parent");
+    TEST_EXPECT_EQ(over.headroom, 0ull, "over its limit the room is none");
+    TEST_EXPECT_EQ(over.c[CLASS_ALLOC].used, 3u * page, "and what is in use stays");
+    TEST_EXPECT_EQ(other.headroom, page, "META's ceiling is the tightest room");
+    TEST_EXPECT_EQ(other.limiting, (u32)CLASS_META, "and is named");
+}
+
+// A control handle holds one reference, has no dup, closes on exec and at the Proc's end.
+void test_account_handle_is_the_control(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "a Proc");
+    struct MemoryAccount *a = account_child(account_root());
+    TEST_ASSERT(a != NULL, "an account");
+    account_ref(a);     // this test's, so the count can be read once the handle has gone
+    hidx_t h = handle_alloc_cloexec(p, KOBJ_ACCOUNT, RIGHT_READ | RIGHT_WRITE, a, true);
+    TEST_ASSERT(h >= 0, "a handle takes over the creator's reference");
+    TEST_EXPECT_EQ(__atomic_load_n(&a->refs, __ATOMIC_RELAXED), 2u, "the handle and this test");
+
+    struct Handle hh;
+    TEST_EXPECT_EQ(handle_get(p, h, &hh), 0, "a lookup");
+    TEST_EXPECT_EQ((int)hh.kind, (int)KOBJ_ACCOUNT, "finds the kind");
+    TEST_ASSERT(hh.obj == a, "and the account");
+    TEST_EXPECT_EQ(__atomic_load_n(&a->refs, __ATOMIC_RELAXED), 3u, "and holds it for the borrow");
+    handle_put(&hh);
+    TEST_EXPECT_EQ(__atomic_load_n(&a->refs, __ATOMIC_RELAXED), 2u, "the put gives that back");
+
+    TEST_EXPECT_EQ((int)handle_dup(p, h, RIGHT_READ), -1, "the kind has no dup");
+    TEST_EXPECT_EQ(__atomic_load_n(&a->refs, __ATOMIC_RELAXED), 2u, "and a refused one holds nothing");
+
+    TEST_EXPECT_EQ(handle_get_cloexec(p, h), 1, "made close-on-exec");
+    TEST_EXPECT_EQ(handle_close_on_exec(p), 1, "so an exec closes it");
+    TEST_EXPECT_EQ(handle_get(p, h, &hh), -1, "it is gone");
+    TEST_EXPECT_EQ(__atomic_load_n(&a->refs, __ATOMIC_RELAXED), 1u, "and let go of the account");
+
+    // The end of the Proc: the last handle it holds lets go the same way.
+    account_ref(a);
+    h = handle_alloc_cloexec(p, KOBJ_ACCOUNT, RIGHT_READ | RIGHT_WRITE, a, false);
+    TEST_ASSERT(h >= 0, "a second handle");
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+    TEST_EXPECT_EQ(__atomic_load_n(&a->refs, __ATOMIC_RELAXED), 1u, "a Proc's end closes it");
+    account_unref(a);
+}
+
+static volatile hidx_t g_fc_account, g_fc_control;
+static volatile int g_fc_got_account, g_fc_got_control;
+static volatile int g_fc_status;
+
+static void fc_grandchild(void *arg) {
+    (void)arg;
+    struct Proc *me = current_thread()->proc;
+    struct Handle hh;
+    g_fc_got_account = handle_get(me, g_fc_account, &hh);
+    if (g_fc_got_account == 0) handle_put(&hh);
+    g_fc_got_control = handle_get(me, g_fc_control, &hh);
+    if (g_fc_got_control == 0) handle_put(&hh);
+    exits("ok");
+}
+
+static void fc_child(void *arg) {
+    (void)arg;
+    struct Proc *me = current_thread()->proc;
+    struct MemoryAccount *a = account_child(me->account);
+    if (!a) exits("account");
+    g_fc_account = handle_alloc_cloexec(me, KOBJ_ACCOUNT, RIGHT_READ | RIGHT_WRITE, a, false);
+    if (g_fc_account < 0) exits("handle");
+    // A transferable kind in the same table, so a copy that copies nothing cannot pass.
+    g_fc_control = handle_alloc(me, KOBJ_PROCESS, RIGHT_READ, NULL);
+    if (g_fc_control < 0) exits("control");
+    int pid = rfork(RFPROC, fc_grandchild, NULL);
+    if (pid <= 0) exits("rfork");
+    int status = -1;
+    if (wait_pid(&status) != pid) exits("wait");
+    g_fc_status = status;
+    exits("ok");
+}
+
+// Section 13: fork does not copy the kind, so control cannot leave the Proc that holds it.
+void test_account_fork_does_not_copy_the_handle(void) {
+    g_fc_got_account = g_fc_got_control = -99;
+    g_fc_status = -1;
+    int pid = rfork(RFPROC, fc_child, NULL);
+    TEST_ASSERT(pid > 0, "rfork");
+    int status = -1;
+    TEST_EXPECT_EQ(wait_pid(&status), pid, "wait_pid");
+    TEST_EXPECT_EQ(status, 0, "the child exited cleanly");
+    TEST_EXPECT_EQ(g_fc_status, 0, "and so did the grandchild");
+    TEST_EXPECT_EQ(g_fc_got_control, 0, "control: a transferable handle is copied");
+    TEST_EXPECT_EQ(g_fc_got_account, -1, "an account's is not");
+}
+
 // What needs a record in user memory is capacity-probe's, from EL0. A test thread has none,
 // and that is the control here: a kernel address passes every gate before the range check,
 // so each refusal below is one variable away from reaching it.
@@ -466,12 +744,20 @@ void test_account_syscall_refuses_by_name(void) {
     TEST_EXPECT_EQ(account_call(self, 0, va, size), (s64)-T_E_INVAL, "zero is no operation");
     TEST_EXPECT_EQ(account_call(self, ALLOCATE_FUNDED + 1u, va, size), (s64)-T_E_INVAL,
                    "nor is one past the last");
-    for (op = ACCOUNT_CHILD; op <= ALLOCATE_FUNDED; op++) {
+    for (op = VOUCHER_CREATE; op <= ALLOCATE_FUNDED; op++) {
         TEST_EXPECT_EQ(account_call(self, op, va, size), (s64)-T_E_OPNOTSUPP,
                        "an operation with no code behind it says so");
     }
+    TEST_EXPECT_EQ(account_call(self, ACCOUNT_CHILD, va, sizeof(struct account_child_rec)),
+                   (s64)-T_E_FAULT, "control: a child's record stops at the range check too");
+    TEST_EXPECT_EQ(account_call(self, ACCOUNT_CHILD, va, size), (s64)-T_E_INVAL,
+                   "each operation has its own record size");
+    TEST_EXPECT_EQ(account_call(self, ACCOUNT_SET_LIMITS, va, sizeof(struct account_limits_rec)),
+                   (s64)-T_E_PERM, "nobody adjusts their own account");
+    TEST_EXPECT_EQ(account_call(self, ACCOUNT_SET_LIMITS, va, size), (s64)-T_E_INVAL,
+                   "and the record's shape comes before that");
     TEST_EXPECT_EQ(account_call(3, ACCOUNT_QUERY, va, size), (s64)-T_E_BADF,
-                   "a handle names nothing until KOBJ_ACCOUNT exists");
+                   "a number naming no account is no handle");
     TEST_EXPECT_EQ(account_call(0xffffffffull, ACCOUNT_QUERY, va, size), (s64)-T_E_BADF,
                    "the self selector is sign-extended, compared at full width");
     TEST_EXPECT_EQ(account_call(self, ACCOUNT_QUERY, va, size - 1u), (s64)-T_E_INVAL,

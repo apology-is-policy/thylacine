@@ -421,10 +421,14 @@ static inline long t_torpor_wake(unsigned int *addr_va, unsigned int count) {
 // environment as NUL-terminated "NAME=VALUE" records (ARCH 9.7), after the cwd
 // and thread tails whose bits are set.
 #define T_SPAWN_EXT_ENV                (1u << 2)
+// T_SPAWN_EXT_ACCOUNT: a struct t_sys_spawn_ext_account names the memory account the
+// child is born under, by a control handle of the spawner's, after every lower tail
+// whose bit is set.
+#define T_SPAWN_EXT_ACCOUNT            (1u << 3)
 // Every bit the kernel knows (mirror SPAWN_EXT_FLAGS_ALL); a bit outside it is
 // refused with -1. tools/check-spawn-args-mirrors.py holds the members and this
 // mask to the kernel's.
-#define T_SPAWN_EXT_FLAGS_ALL          (T_SPAWN_EXT_CWD | T_SPAWN_EXT_THREADS | T_SPAWN_EXT_ENV)
+#define T_SPAWN_EXT_FLAGS_ALL          (T_SPAWN_EXT_CWD | T_SPAWN_EXT_THREADS | T_SPAWN_EXT_ENV | T_SPAWN_EXT_ACCOUNT)
 
 // SYS_SPAWN_FULL_ARGV bounds — must mirror SYS_SPAWN_ARGV_MAX +
 // SYS_SPAWN_ARGV_DATA_MAX in kernel/include/thylacine/syscall.h.
@@ -570,6 +574,15 @@ _Static_assert(__builtin_offsetof(struct t_sys_spawn_ext_env, env_len) == 8,
                "t_sys_spawn_ext_env.env_len at ABI offset 8");
 _Static_assert(__builtin_offsetof(struct t_sys_spawn_ext_env, env_flags) == 12,
                "t_sys_spawn_ext_env.env_flags at ABI offset 12");
+
+// The T_SPAWN_EXT_ACCOUNT tail (mirror struct sys_spawn_ext_account;
+// tools/check-spawn-args-mirrors.py compares them).
+struct t_sys_spawn_ext_account {
+    unsigned int account_h;      // 0 -- the spawner's control handle
+    unsigned int account_flags;  // 4 -- must be 0
+};
+_Static_assert(sizeof(struct t_sys_spawn_ext_account) == 8,
+               "t_sys_spawn_ext_account ABI: 8 bytes");
 
 // Menagerie step 5: T_SPAWN_ALLOWANCE_SET (mirror SPAWN_ALLOWANCE_SET) + the
 // hardware-allowance descriptor (mirror struct t_allowance_desc). A C caller

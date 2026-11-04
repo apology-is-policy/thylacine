@@ -4,6 +4,7 @@
 #include <thylacine/extinction.h>
 #include <thylacine/page.h>
 #include <thylacine/proc.h>
+#include <thylacine/spinlock.h>
 #include <thylacine/thread.h>
 
 #include "../mm/phys.h"
@@ -13,12 +14,23 @@ static u64 g_account_unpaired;
 // Sponsored pages outside the capacity pool, which is what separates the two totals.
 static u64 g_account_unpooled;
 static struct kmem_cache *g_account_cache;
+// Section 6's tree lock. A leaf: nothing is allocated, sleeps or takes another lock inside.
+static spin_lock_t g_account_tree_lock = SPIN_LOCK_INIT;
+
+// What an account costs its parent, as a thread's slot costs a whole page: a Proc holding
+// a table of handles to empty accounts is a bound on the pool and not a hole in it.
+#define ACCOUNT_META_PAGES 1u
+
+_Static_assert(ACCOUNT_CLASSES == 4, "the static accounts name every class's limit");
+#define ACCOUNT_LIMITS_UNSET \
+    { ACCOUNT_LIMIT_NONE, ACCOUNT_LIMIT_NONE, ACCOUNT_LIMIT_NONE, ACCOUNT_LIMIT_NONE }
 
 static struct MemoryAccount g_account_root = {
     .incarnation = 1,
     .parent = NULL,
     .refs = 1,
     .depth = 0,
+    .limit = ACCOUNT_LIMITS_UNSET,
 };
 
 static struct MemoryAccount g_account_system_cache = {
@@ -26,6 +38,7 @@ static struct MemoryAccount g_account_system_cache = {
     .parent = &g_account_root,
     .refs = 1,
     .depth = 1,
+    .limit = ACCOUNT_LIMITS_UNSET,
 };
 
 struct MemoryAccount *account_root(void) { return &g_account_root; }
@@ -43,23 +56,39 @@ void account_init(void) {
     if (!g_account_cache) extinction("kmem_cache_create(memory_account) returned NULL");
 }
 
-#ifdef KERNEL_TESTS
 // 1 and 2 are the two static accounts. The counter is 64 bits and only ever rises, so
 // no account in a boot's life shares an incarnation with one that came before it.
 static u64 g_account_incarnation = 3;
 
-struct MemoryAccount *account_child(struct MemoryAccount *parent) {
+// A payer exempt from the pool's refusal, as in thread_new, is counted and never refused.
+static bool account_payer_exempt(void) {
+    struct Thread *t = current_thread();
+    return t && t->proc && proc_resource_exempt(t->proc);
+}
+
+VISIBLE_IF_KERNEL_TESTS
+struct MemoryAccount *account_child_as(struct MemoryAccount *parent, bool exempt) {
     if (parent->depth + 1u >= ACCOUNT_MAX_DEPTH) return NULL;
+    if (!capacity_charge(ACCOUNT_META_PAGES, exempt)) return NULL;
     struct MemoryAccount *a = kmem_cache_alloc(g_account_cache, KP_ZERO);
-    if (!a) return NULL;
+    if (!a) {
+        capacity_uncharge(ACCOUNT_META_PAGES);
+        return NULL;
+    }
     a->incarnation = __atomic_fetch_add(&g_account_incarnation, 1u, __ATOMIC_RELAXED);
     a->parent = parent;
     a->refs = 1;
     a->depth = parent->depth + 1u;
+    for (unsigned cls = 0; cls < ACCOUNT_CLASSES; cls++)
+        a->limit[cls] = ACCOUNT_LIMIT_NONE;
     account_ref(parent);
+    account_charge(parent, CLASS_META, ACCOUNT_META_PAGES);
     return a;
 }
-#endif
+
+struct MemoryAccount *account_child(struct MemoryAccount *parent) {
+    return account_child_as(parent, account_payer_exempt());
+}
 
 void account_ref(struct MemoryAccount *a) {
     if (__atomic_fetch_add(&a->refs, 1u, __ATOMIC_RELAXED) == 0u)
@@ -67,7 +96,8 @@ void account_ref(struct MemoryAccount *a) {
 }
 
 // A loop, so a chain of last references costs no stack. The static two start with a
-// reference nothing drops, so neither reaches the free.
+// reference nothing drops, so neither reaches the free. A last reference can be a block's,
+// so this runs wherever free_pages does, and the slab's lock and the pool's are leaves there.
 void account_unref(struct MemoryAccount *a) {
     while (a) {
         u32 was = __atomic_fetch_sub(&a->refs, 1u, __ATOMIC_ACQ_REL);
@@ -79,6 +109,8 @@ void account_unref(struct MemoryAccount *a) {
                 __atomic_fetch_add(&g_account_unpaired, 1u, __ATOMIC_RELAXED);
         }
         kmem_cache_free(g_account_cache, a);
+        capacity_uncharge(ACCOUNT_META_PAGES);
+        account_refund(parent, CLASS_META, ACCOUNT_META_PAGES);
         a = parent;
     }
 }
@@ -107,10 +139,40 @@ u64 account_used(const struct MemoryAccount *a, unsigned cls) {
 }
 
 // Section 4's unconfined default: a RAM class may reach the pool, and nothing bounds
-// device storage here. An account has no limits of its own until something sets them.
+// device storage here.
 static u64 class_limit_bytes(unsigned cls) {
     if (cls == CLASS_DEVICE) return ~0ull;
     return (u64)capacity_pool_pages() << PAGE_SHIFT;
+}
+
+// The caller holds the tree lock.
+static u64 own_limit(const struct MemoryAccount *a, unsigned cls) {
+    return a->limit[cls] == ACCOUNT_LIMIT_NONE ? class_limit_bytes(cls) : a->limit[cls];
+}
+
+// Every class against every ancestor under one hold, so an ancestor lowered at the same
+// moment is ordered with this: before it, this answer sees the lowered ceiling, and after
+// it, the lowering leaves a child above its parent, which the chain's room covers.
+int account_set_limits(struct MemoryAccount *a, const u64 limit[ACCOUNT_CLASSES]) {
+    u64 want[ACCOUNT_CLASSES];
+    for (unsigned cls = 0; cls < ACCOUNT_CLASSES; cls++) {
+        want[cls] = limit[cls] == ACCOUNT_LIMIT_NONE ? ACCOUNT_LIMIT_NONE
+                                                     : limit[cls] & ~(u64)(PAGE_SIZE - 1u);
+    }
+    irq_state_t s = spin_lock_irqsave(&g_account_tree_lock);
+    for (unsigned cls = 0; cls < ACCOUNT_CLASSES; cls++) {
+        if (want[cls] == ACCOUNT_LIMIT_NONE) continue;
+        for (const struct MemoryAccount *up = a->parent; up; up = up->parent) {
+            if (want[cls] > own_limit(up, cls)) {
+                spin_unlock_irqrestore(&g_account_tree_lock, s);
+                return -1;
+            }
+        }
+    }
+    for (unsigned cls = 0; cls < ACCOUNT_CLASSES; cls++)
+        a->limit[cls] = want[cls];
+    spin_unlock_irqrestore(&g_account_tree_lock, s);
+    return 0;
 }
 
 // Field by field: the tree has no memset for the compiler to call on a large aggregate.
@@ -126,16 +188,17 @@ void account_query_fill(const struct MemoryAccount *a, struct account_query *q) 
     q->reclaim_target = 0u;
     q->retained_after_exit = 0u;
     q->awaiting_device = 0u;
+    irq_state_t s = spin_lock_irqsave(&g_account_tree_lock);
     for (unsigned cls = 0; cls < ACCOUNT_CLASSES; cls++) {
         q->c[cls].used = account_used(a, cls) << PAGE_SHIFT;
         q->c[cls].reserved = 0u;
-        q->c[cls].limit = class_limit_bytes(cls);
+        q->c[cls].limit = own_limit(a, cls);
     }
 
     u64 tightest = ~0ull;
     for (const struct MemoryAccount *up = a; up; up = up->parent) {
         for (unsigned cls = 0; cls < ACCOUNT_CLASSES; cls++) {
-            u64 limit = class_limit_bytes(cls);
+            u64 limit = own_limit(up, cls);
             u64 used = account_used(up, cls) << PAGE_SHIFT;
             u64 room = limit > used ? limit - used : 0;
             if (room < tightest) {
@@ -144,6 +207,7 @@ void account_query_fill(const struct MemoryAccount *a, struct account_query *q) 
             }
         }
     }
+    spin_unlock_irqrestore(&g_account_tree_lock, s);
 
     u64 pool = (u64)capacity_pool_pages() << PAGE_SHIFT;
     u64 charged = (u64)capacity_pool_charged() << PAGE_SHIFT;

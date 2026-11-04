@@ -1,7 +1,7 @@
-// The memory account ABI, docs/SHARED-MEMORY-ACCOUNTING.md section 13. MM-1 serves the
-// query on the caller's own account; the other operations answer -T_E_OPNOTSUPP until
-// their code exists. tools/test-account-abi.py holds this header, libt's and
-// libthyla-rs's to one frozen byte record.
+// The memory account ABI, docs/SHARED-MEMORY-ACCOUNTING.md section 13. MM-1 serves the query,
+// a child and a child's limits; the voucher operations answer -T_E_OPNOTSUPP until their
+// code exists. tools/test-account-abi.py holds this header, libt's and libthyla-rs's to one
+// frozen byte record.
 #ifndef THYLACINE_ACCOUNT_H
 #define THYLACINE_ACCOUNT_H
 
@@ -11,6 +11,9 @@
 
 // In place of a handle, the caller's own account. No handle is negative.
 #define ACCOUNT_SELF (-1)
+
+// No ceiling of the account's own: section 4's default for the class bounds it.
+#define ACCOUNT_LIMIT_NONE (~0ull)
 
 enum {
     ACCOUNT_QUERY = 1,
@@ -76,6 +79,20 @@ struct account_query {
     struct account_class c[ACCOUNT_CLASSES];
 };
 
+// ACCOUNT_CHILD: `h.incarnation` is the account being subdivided. The call returns the new
+// account's control handle and `created` carries its incarnation.
+struct account_child_rec {
+    struct account_rec_hdr h;
+    u64 created;
+};
+
+// ACCOUNT_SET_LIMITS: the whole vector, in bytes, rounded down to pages. Every class changes
+// or none does. ACCOUNT_LIMIT_NONE takes the account's own ceiling off that class.
+struct account_limits_rec {
+    struct account_rec_hdr h;
+    u64 limit[ACCOUNT_CLASSES];
+};
+
 struct account_outcome {
     u64 request_id;
     u32 cls;
@@ -99,6 +116,12 @@ _Static_assert(__builtin_offsetof(struct account_query, headroom) == 40,
 _Static_assert(__builtin_offsetof(struct account_query, awaiting_device) == 64,
                "account_query ABI: awaiting_device@64");
 _Static_assert(__builtin_offsetof(struct account_query, c) == 72, "account_query ABI: c@72");
+_Static_assert(sizeof(struct account_child_rec) == 32, "account_child_rec ABI: 32 bytes");
+_Static_assert(__builtin_offsetof(struct account_child_rec, created) == 24,
+               "account_child_rec ABI: created@24");
+_Static_assert(sizeof(struct account_limits_rec) == 56, "account_limits_rec ABI: 56 bytes");
+_Static_assert(__builtin_offsetof(struct account_limits_rec, limit) == 24,
+               "account_limits_rec ABI: limit@24");
 _Static_assert(sizeof(struct account_outcome) == 40, "account_outcome ABI: 40 bytes");
 _Static_assert(__builtin_offsetof(struct account_outcome, reason) == 12,
                "account_outcome ABI: reason@12");

@@ -14,6 +14,8 @@
 // MM-1 adds SYS_ACCOUNT's query on the caller's own account: its header checks and its
 // copies can only be crossed from here. Other Procs are charged to the same account
 // while this runs, so a figure is asserted only where they cannot move it past the test.
+// A child account's are this Proc's alone, so those figures are exact. The spawn tail runs
+// this program again as `account-child`, which checks from inside what its birth gave it.
 
 #![no_std]
 #![no_main]
@@ -25,13 +27,17 @@ static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::Th
 
 use core::ptr::{read_volatile, write_volatile};
 use libthyla_rs::account::{
-    AccountQuery, ACCOUNT_CHILD, ACCOUNT_NORMAL, ACCOUNT_QUERY, ACCOUNT_SELF, ACCOUNT_VERSION,
-    ALLOCATE_FUNDED, CLASS_ALLOC, CLASS_DEVICE, CLASS_META,
+    AccountChildRec, AccountLimitsRec, AccountQuery, ACCOUNT_CHILD, ACCOUNT_CLASSES,
+    ACCOUNT_LIMIT_NONE, ACCOUNT_NORMAL, ACCOUNT_QUERY, ACCOUNT_SELF, ACCOUNT_SET_LIMITS,
+    ACCOUNT_VERSION, ALLOCATE_FUNDED, CLASS_ALLOC, CLASS_DEVICE, CLASS_META, CLASS_RETAIN,
+    VOUCHER_CREATE,
 };
 use libthyla_rs::{
-    t_account, t_account_query, t_burrow_attach, t_burrow_detach, t_burrow_protect,
-    t_burrow_reserve, t_close, t_getpid, t_open, t_putstr, t_read, T_BURROW_PROT_READ,
-    T_BURROW_PROT_WRITE, T_OREAD, T_WALK_OPEN_FROM_ROOT,
+    t_account, t_account_child, t_account_query, t_account_query_of, t_account_set_limits,
+    t_burrow_attach, t_burrow_detach, t_burrow_protect, t_burrow_reserve, t_close, t_getpid,
+    t_open, t_pipe, t_putstr, t_read, t_spawn_full_argv, t_wait_pid_for, TSpawnArgs,
+    TSpawnExtAccount, T_BURROW_PROT_READ, T_BURROW_PROT_WRITE, T_OREAD, T_SPAWN_EXT_ACCOUNT,
+    T_WALK_OPEN_FROM_ROOT,
 };
 
 const PAGE: u64 = 4096;
@@ -42,9 +48,11 @@ const RW: u64 = T_BURROW_PROT_READ | T_BURROW_PROT_WRITE;
 const PATTERN: u64 = 0xCAFE_F00D_0000_0000;
 
 // The registry's values, docs/ERRORS.md.
+const EPERM: i64 = 1;
 const EBADF: i64 = 9;
 const EFAULT: i64 = 14;
 const EINVAL: i64 = 22;
+const ENOSPC: i64 = 28;
 const EOPNOTSUPP: i64 = 95;
 
 const RECORD: u64 = core::mem::size_of::<AccountQuery>() as u64;
@@ -304,7 +312,7 @@ fn account_legs() -> i64 {
         (
             "account-op-unbuilt",
             SELF,
-            ACCOUNT_CHILD as u64,
+            VOUCHER_CREATE as u64,
             RECORD,
             EOPNOTSUPP,
         ),
@@ -437,11 +445,394 @@ fn account_legs() -> i64 {
         return fail("account-proc-limit");
     }
     ok("account-proc-file");
+    account_control_legs(pool)
+}
+
+#[repr(C)]
+struct AccountSpawn {
+    base: TSpawnArgs,
+    tail: TSpawnExtAccount,
+}
+
+fn push_num(out: &mut alloc::vec::Vec<u8>, mut n: u64) {
+    let mut digits = [0u8; 20];
+    let mut i = digits.len();
+    loop {
+        i -= 1;
+        digits[i] = b'0' + (n % 10) as u8;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    out.extend_from_slice(&digits[i..]);
+    out.push(0);
+}
+
+fn parse_num(s: &[u8]) -> Option<u64> {
+    let mut n = 0u64;
+    if s.is_empty() {
+        return None;
+    }
+    for &c in s {
+        if !c.is_ascii_digit() {
+            return None;
+        }
+        n = n.checked_mul(10)?.checked_add((c - b'0') as u64)?;
+    }
+    Some(n)
+}
+
+// This program again, under `handle`, told the handle's number and what it should be born
+// under. Returns the pid or a negated errno. Raw, since a refusal's errno is the point.
+fn spawn_under(handle: u32, flags: u32, told_handle: u64, told_incarnation: u64) -> i64 {
+    const NAME: &[u8] = b"capacity-probe";
+    let mut argv = alloc::vec::Vec::new();
+    argv.extend_from_slice(b"capacity-probe\0account-child\0");
+    push_num(&mut argv, told_handle);
+    push_num(&mut argv, told_incarnation);
+    // SAFETY: every field of TSpawnArgs is an integer, and zero is each one's default.
+    let mut rec: AccountSpawn = unsafe { core::mem::zeroed() };
+    rec.base.name_va = NAME.as_ptr() as u64;
+    rec.base.name_len = NAME.len() as u32;
+    rec.base.argv_data_va = argv.as_ptr() as u64;
+    rec.base.argv_data_len = argv.len() as u32;
+    rec.base.argc = 4;
+    rec.base.ext_flags = T_SPAWN_EXT_ACCOUNT;
+    rec.tail = TSpawnExtAccount {
+        account_h: handle,
+        account_flags: flags,
+    };
+    // SAFETY: the pointer is the whole record's and argv and NAME outlive the call.
+    unsafe { t_spawn_full_argv(&rec as *const AccountSpawn as *const TSpawnArgs) }
+}
+
+// A child account's control from EL0: what the kernel suite cannot reach is the record, the
+// handle number and the spawn tail. Zero when every leg holds. `pool` is section 4's default.
+fn account_control_legs(pool: u64) -> i64 {
+    let mut own = AccountQuery::default();
+    let rc = t_account_query(&mut own);
+    if rc != 0 {
+        return fail_rc("account-own", rc, 0);
+    }
+    let mut made = 0u64;
+    let h = t_account_child(ACCOUNT_SELF, 0, &mut made);
+    if h < 0 {
+        return fail_rc("account-child", h, 0);
+    }
+    let hi = h as i32;
+    if made <= own.h.incarnation {
+        return fail_num("account-child-incarnation", made, own.h.incarnation);
+    }
+    let mut q = AccountQuery::default();
+    let rc = t_account_query_of(hi, made, &mut q);
+    if rc != 0 {
+        return fail_rc("account-child-query", rc, 0);
+    }
+    if q.h.incarnation != made
+        || q.c[CLASS_ALLOC as usize].used != 0
+        || q.c[CLASS_META as usize].used != 0
+    {
+        return fail("account-child-starts-empty");
+    }
+    if q.c[CLASS_ALLOC as usize].limit != pool || q.c[CLASS_DEVICE as usize].limit != u64::MAX {
+        return fail_num(
+            "account-child-default-limit",
+            q.c[CLASS_ALLOC as usize].limit,
+            pool,
+        );
+    }
+    ok("account-child");
+
+    // A handle names one account: "whatever I am" is only the self selector's to say.
+    for (leg, expected) in [
+        ("account-handle-unnamed", 0),
+        ("account-handle-stale", made + 1),
+    ] {
+        let rc = t_account_query_of(hi, expected, &mut q);
+        if rc != -EINVAL {
+            return fail_rc(leg, rc, EINVAL);
+        }
+    }
+    let rc = t_account_query_of(ACCOUNT_SELF, made, &mut q);
+    if rc != -EINVAL {
+        return fail_rc("account-self-named-wrong", rc, EINVAL);
+    }
+    ok("account-expected-incarnation");
+
+    let mut lim = [ACCOUNT_LIMIT_NONE; ACCOUNT_CLASSES];
+    let rc = t_account_set_limits(ACCOUNT_SELF, 0, &lim);
+    if rc != -EPERM {
+        return fail_rc("account-set-own", rc, EPERM);
+    }
+    lim[CLASS_ALLOC as usize] = 64 * MIB;
+    let rc = t_account_set_limits(hi, made, &lim);
+    if rc != 0 {
+        return fail_rc("account-set-child", rc, 0);
+    }
+    let rc = t_account_query_of(hi, made, &mut q);
+    if rc != 0 || q.c[CLASS_ALLOC as usize].limit != 64 * MIB {
+        return fail_num(
+            "account-set-reads-back",
+            q.c[CLASS_ALLOC as usize].limit,
+            64 * MIB,
+        );
+    }
+    // A good class beside one past the pool, which is the root's ceiling: neither lands.
+    lim[CLASS_RETAIN as usize] = MIB;
+    lim[CLASS_META as usize] = pool + PAGE;
+    let rc = t_account_set_limits(hi, made, &lim);
+    if rc != -EPERM {
+        return fail_rc("account-set-past-the-pool", rc, EPERM);
+    }
+    let rc = t_account_query_of(hi, made, &mut q);
+    if rc != 0 || q.c[CLASS_RETAIN as usize].limit != pool {
+        return fail_num(
+            "account-set-all-or-nothing",
+            q.c[CLASS_RETAIN as usize].limit,
+            pool,
+        );
+    }
+    lim = [ACCOUNT_LIMIT_NONE; ACCOUNT_CLASSES];
+    lim[CLASS_ALLOC as usize] = PAGE + 1;
+    let rc = t_account_set_limits(hi, made, &lim);
+    if rc != 0 {
+        return fail_rc("account-set-unaligned", rc, 0);
+    }
+    let rc = t_account_query_of(hi, made, &mut q);
+    if rc != 0 || q.c[CLASS_ALLOC as usize].limit != PAGE {
+        return fail_num(
+            "account-set-rounds-down",
+            q.c[CLASS_ALLOC as usize].limit,
+            PAGE,
+        );
+    }
+    // Each operation's record, one size away.
+    let mut r = AccountLimitsRec::default();
+    r.h.version = ACCOUNT_VERSION;
+    r.h.size = core::mem::size_of::<AccountLimitsRec>() as u32 - 8;
+    r.h.incarnation = made;
+    let rc = unsafe {
+        t_account(
+            h,
+            ACCOUNT_SET_LIMITS as u64,
+            &mut r as *mut AccountLimitsRec as *mut u8,
+            core::mem::size_of::<AccountLimitsRec>() as u64 - 8,
+        )
+    };
+    if rc != -EINVAL {
+        return fail_rc("account-set-short", rc, EINVAL);
+    }
+    let mut r = AccountChildRec::default();
+    r.h.version = ACCOUNT_VERSION;
+    r.h.size = core::mem::size_of::<AccountChildRec>() as u32;
+    r.h.flags = 1;
+    let rc = unsafe {
+        t_account(
+            SELF,
+            ACCOUNT_CHILD as u64,
+            &mut r as *mut AccountChildRec as *mut u8,
+            core::mem::size_of::<AccountChildRec>() as u64,
+        )
+    };
+    if rc != -EINVAL {
+        return fail_rc("account-child-flags", rc, EINVAL);
+    }
+    ok("account-limits");
+
+    // Subdivision: a child under a child pays its parent, and hands the page back.
+    let mut below = 0u64;
+    let g = t_account_child(hi, made, &mut below);
+    if g < 0 {
+        return fail_rc("account-grandchild", g, 0);
+    }
+    let rc = t_account_query_of(hi, made, &mut q);
+    if rc != 0 || q.c[CLASS_META as usize].used != PAGE {
+        return fail_num(
+            "account-child-pays-its-parent",
+            q.c[CLASS_META as usize].used,
+            PAGE,
+        );
+    }
+    if unsafe { t_close(g) } != 0 {
+        return fail("account-grandchild-close");
+    }
+    let rc = t_account_query_of(hi, made, &mut q);
+    if rc != 0 || q.c[CLASS_META as usize].used != 0 {
+        return fail_num("account-close-refunds", q.c[CLASS_META as usize].used, 0);
+    }
+    ok("account-subdivision");
+
+    // Sixteen levels: the root's and fifteen below it, and this account is at some depth
+    // of those. Nothing assumes which, only that the refusal comes and is the right one.
+    let mut chain = alloc::vec::Vec::new();
+    let mut parent = (hi, made);
+    let stop = loop {
+        let mut next = 0u64;
+        let c = t_account_child(parent.0, parent.1, &mut next);
+        if c < 0 {
+            break c;
+        }
+        chain.push(c);
+        parent = (c as i32, next);
+        if chain.len() > 16 {
+            return fail("account-depth-unbounded");
+        }
+    };
+    if stop != -ENOSPC || chain.is_empty() {
+        return fail_rc("account-depth", stop, ENOSPC);
+    }
+    while let Some(c) = chain.pop() {
+        if unsafe { t_close(c) } != 0 {
+            return fail("account-depth-close");
+        }
+    }
+    ok("account-depth");
+
+    // Any other kind of handle names no account, for any operation and for the spawn.
+    let (pr, pw) = unsafe { t_pipe() };
+    if pr < 0 || pw < 0 {
+        return fail("account-pipe");
+    }
+    let rc = t_account_query_of(pr as i32, made, &mut q);
+    if rc != -EBADF {
+        return fail_rc("account-other-kind-query", rc, EBADF);
+    }
+    let mut unused = 0u64;
+    let rc = t_account_child(pr as i32, made, &mut unused);
+    if rc != -EBADF {
+        return fail_rc("account-other-kind-child", rc, EBADF);
+    }
+    let rc = t_account_set_limits(pr as i32, made, &lim);
+    if rc != -EBADF {
+        return fail_rc("account-other-kind-limits", rc, EBADF);
+    }
+    let rc = spawn_under(pr as u32, 0, h as u64, made);
+    if rc != -EBADF {
+        return fail_rc("account-spawn-other-kind", rc, EBADF);
+    }
+    let _ = unsafe { t_close(pr) };
+    let _ = unsafe { t_close(pw) };
+    let rc = spawn_under(1000, 0, h as u64, made);
+    if rc != -EBADF {
+        return fail_rc("account-spawn-no-handle", rc, EBADF);
+    }
+    let rc = spawn_under(h as u32, 1, h as u64, made);
+    if rc != -1 {
+        return fail_rc("account-spawn-flags", rc, 1);
+    }
+    ok("account-refuses-other-kinds");
+
+    // The control, one variable from those: the same spawn with a live handle.
+    let pid = spawn_under(h as u32, 0, h as u64, made);
+    if pid <= 0 {
+        return fail_rc("account-spawn", pid, 0);
+    }
+    let mut status = -1i32;
+    let reaped = unsafe { t_wait_pid_for(pid as i32, 0, &mut status) };
+    if reaped != pid || status != 0 {
+        return fail_num("account-spawn-child-saw", status as u32 as u64, 0);
+    }
+    let rc = t_account_query_of(hi, made, &mut q);
+    if rc != 0 || q.c[CLASS_META as usize].used != 0 {
+        return fail_num("account-spawn-refunds", q.c[CLASS_META as usize].used, 0);
+    }
+    ok("account-spawn-under");
+
+    // A record that cannot be written is the last thing the call finds, and leaves nothing
+    // behind: the next child takes the number that one would have held, once closed.
+    let ro = unsafe { t_burrow_reserve(PAGE, RW, 0) };
+    if ro <= 0 {
+        return fail("account-child-ro-reserve");
+    }
+    let ro = ro as u64;
+    let mut seed = AccountChildRec::default();
+    seed.h.version = ACCOUNT_VERSION;
+    seed.h.size = core::mem::size_of::<AccountChildRec>() as u32;
+    unsafe { core::ptr::write(ro as *mut AccountChildRec, seed) };
+    if unsafe { t_burrow_protect(ro, PAGE, R, 0) } != 0 {
+        return fail("account-child-ro-protect");
+    }
+    let free_before = {
+        let probe = t_account_child(ACCOUNT_SELF, 0, &mut unused);
+        if probe < 0 {
+            return fail_rc("account-child-ro-probe", probe, 0);
+        }
+        let _ = unsafe { t_close(probe) };
+        probe
+    };
+    let rc = unsafe {
+        t_account(
+            SELF,
+            ACCOUNT_CHILD as u64,
+            ro as *mut u8,
+            core::mem::size_of::<AccountChildRec>() as u64,
+        )
+    };
+    if rc != -EFAULT {
+        return fail_rc("account-child-ro-record", rc, EFAULT);
+    }
+    let after = t_account_child(ACCOUNT_SELF, 0, &mut unused);
+    if after != free_before {
+        return fail_num(
+            "account-child-ro-leaves-no-handle",
+            after as u64,
+            free_before as u64,
+        );
+    }
+    let _ = unsafe { t_close(after) };
+    if unsafe { t_burrow_detach(ro, PAGE) } != 0 {
+        return fail("account-child-ro-detach");
+    }
+    ok("account-child-record-memory");
+
+    if unsafe { t_close(h) } != 0 {
+        return fail("account-close");
+    }
+    let rc = t_account_query_of(hi, made, &mut q);
+    if rc != -EBADF {
+        return fail_rc("account-closed", rc, EBADF);
+    }
+    ok("account-close");
+    0
+}
+
+// `capacity-probe account-child <parent's handle number> <incarnation>`, spawned above. The
+// exit status names what was wrong.
+fn account_child_mode(told_handle: u64, told_incarnation: u64) -> i64 {
+    let mut q = AccountQuery::default();
+    if t_account_query(&mut q) != 0 {
+        return 2;
+    }
+    if q.h.incarnation != told_incarnation {
+        return 3;
+    }
+    if q.c[CLASS_META as usize].used == 0 {
+        return 4; // its own thread is charged to it
+    }
+    // No handle crosses a Proc boundary, so the number names nothing here.
+    let mut o = AccountQuery::default();
+    if t_account_query_of(told_handle as i32, told_incarnation, &mut o) != -EBADF {
+        return 5;
+    }
+    // Nobody adjusts their own account.
+    if t_account_set_limits(ACCOUNT_SELF, 0, &[ACCOUNT_LIMIT_NONE; ACCOUNT_CLASSES]) != -EPERM {
+        return 6;
+    }
     0
 }
 
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
+    let mut args = libthyla_rs::env::args();
+    if args.nth(1) == Some(&b"account-child"[..]) {
+        let handle = args.next().and_then(parse_num);
+        let incarnation = args.next().and_then(parse_num);
+        return match (handle, incarnation) {
+            (Some(h), Some(i)) => account_child_mode(h, i),
+            _ => 7,
+        };
+    }
     unsafe {
         // The census is read once before the baseline is taken, so the pages
         // this probe's own stack needs for a read are resident already and

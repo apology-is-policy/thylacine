@@ -46,6 +46,7 @@
 #include <thylacine/handle.h>
 #include <thylacine/irqfwd.h>
 #include <thylacine/loom.h>
+#include <thylacine/memaccount.h>
 #include <thylacine/mmio_handle.h>
 #include <thylacine/pci_handle.h>
 #include <thylacine/proc.h>
@@ -228,6 +229,11 @@ static int handle_release_obj(enum kobj_kind kind, void *obj) {
         // lifetime) + frees the (bus,dev,fn) exclusivity slot.
         kobj_pci_unref((struct KObj_PCI *)obj);
         break;
+    case KOBJ_ACCOUNT:
+        // MM-1c: the control handle holds one reference. Its last close changes no limit
+        // and frees nothing a Proc or a block still holds (section 4's orphan rule).
+        account_unref((struct MemoryAccount *)obj);
+        break;
     default:
         extinction("handle_release_obj: out-of-enum kobj_kind (memory corruption?)");
     }
@@ -301,6 +307,10 @@ static void handle_acquire_obj(enum kobj_kind kind, void *obj) {
         // underflow the get/put refcount and free the claim early), exactly like
         // KOBJ_LOOM (both name ref-counted objects).
         kobj_pci_ref((struct KObj_PCI *)obj);
+        break;
+    case KOBJ_ACCOUNT:
+        // Non-dup-able like KOBJ_LOOM, and handle_get holds a reference the same way.
+        account_ref((struct MemoryAccount *)obj);
         break;
     default:
         extinction("handle_acquire_obj: out-of-enum kobj_kind (memory corruption?)");

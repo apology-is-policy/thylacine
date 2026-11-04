@@ -3274,7 +3274,13 @@ _Static_assert(__builtin_popcount(SPAWN_PERM_ALL) ==
 // Ungated: the spawner could write the same variables into its own /env before
 // spawning.
 #define SPAWN_EXT_ENV                (1u << 2)
-#define SPAWN_EXT_FLAGS_ALL          (SPAWN_EXT_CWD | SPAWN_EXT_THREADS | SPAWN_EXT_ENV)
+// SPAWN_EXT_ACCOUNT: a struct sys_spawn_ext_account names the memory account the child
+// is born under, by a KOBJ_ACCOUNT handle of the spawner's own (not a live one of that
+// kind: -T_E_BADF). No gate: the handle is the authority, and it only ever names a
+// descendant of the spawner's account, so the child's budget can only be narrower.
+// docs/SHARED-MEMORY-ACCOUNTING.md section 13.
+#define SPAWN_EXT_ACCOUNT            (1u << 3)
+#define SPAWN_EXT_FLAGS_ALL          (SPAWN_EXT_CWD | SPAWN_EXT_THREADS | SPAWN_EXT_ENV | SPAWN_EXT_ACCOUNT)
 
 // SYS_SPAWN_FULL_ARGV hardware-allowance descriptor (Menagerie build-arc step
 // 5). The warden fills this in user memory and points sys_spawn_args.
@@ -4166,6 +4172,21 @@ _Static_assert(__builtin_offsetof(struct sys_spawn_ext_env, env_len) == 8,
 _Static_assert(__builtin_offsetof(struct sys_spawn_ext_env, env_flags) == 12,
                "sys_spawn_ext_env.env_flags at ABI offset 12");
 
+// The SPAWN_EXT_ACCOUNT tail, after every lower tail whose bit is set, else directly
+// after the record.
+struct sys_spawn_ext_account {
+    u32 account_h;      // the spawner's KOBJ_ACCOUNT handle
+    u32 account_flags;  // must be 0 -> else -1, the unknown-bits rule
+};
+_Static_assert(sizeof(struct sys_spawn_ext_account) == 8,
+               "struct sys_spawn_ext_account is a SYS_SPAWN_FULL_ARGV ABI type -- "
+               "8 bytes, no implicit padding; tools/check-spawn-args-mirrors.py "
+               "compares its mirrors with it.");
+_Static_assert(__builtin_offsetof(struct sys_spawn_ext_account, account_h) == 0,
+               "sys_spawn_ext_account.account_h at ABI offset 0");
+_Static_assert(__builtin_offsetof(struct sys_spawn_ext_account, account_flags) == 4,
+               "sys_spawn_ext_account.account_flags at ABI offset 4");
+
 struct exception_context;
 
 // Dispatch entry called from arch/arm64/exception.c::exception_sync_lower_el
@@ -4309,6 +4330,7 @@ int sys_spawn_full_argv_cwd_for_proc(struct Proc *p,
         const struct spawn_allowance *want_allowance,
         u32 req_budget, u32 pheno_flags, u32 debug_flags,
         const char *cwd, u32 cwd_len, u32 req_threads);
+struct MemoryAccount;
 int sys_spawn_full_argv_env_for_proc(struct Proc *p,
         const char *name, size_t name_len,
         const char *argv_data, u32 argv_data_len, u32 argc,
@@ -4319,7 +4341,8 @@ int sys_spawn_full_argv_env_for_proc(struct Proc *p,
         const struct spawn_allowance *want_allowance,
         u32 req_budget, u32 pheno_flags, u32 debug_flags,
         const char *cwd, u32 cwd_len, u32 req_threads,
-        bool env_set, const char *env_block, u32 env_len);
+        bool env_set, const char *env_block, u32 env_len,
+        struct MemoryAccount *account);
 int sys_spawn_full_argv_debug_for_proc(struct Proc *p,
         const char *name, size_t name_len,
         const char *argv_data, u32 argv_data_len, u32 argc,
