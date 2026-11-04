@@ -68,7 +68,7 @@ bands, so a CPU-bound INTERACTIVE thread starves NORMAL — bounded in
 practice because the realized INTERACTIVE set is narrow and mostly
 blocked (see Caveats).
 
-`sched_mark_interactive` is the only promoter: sticky, one-way
+`sched_mark_interactive` is the only promoter of a thread that already exists: sticky, one-way
 `NORMAL -> INTERACTIVE`, USER threads only (`proc->as != NULL` since the
 L-1 address-space extraction — the test was `pgtable_root != 0`, and the
 root now lives one indirection further out, so **the in-kernel test runner
@@ -77,6 +77,16 @@ and it never touches an IDLE thread. Its callers each apply their own trust gate
 (`kobj_irq_wait_timed`, `pci_irq_wait`) are implicitly `CAP_HW_CREATE`-gated by
 needing an IRQ kobj, and the console reads (`cons_input_read`,
 `cons_drain_read`) gate on the trusted console session.
+
+The compositor warden designates is the third leg, and the only one that is not
+trusted. `apply_spawn_perms` marks the child's first thread when
+`proc_set_seat_client` took, and the role leaves `PROC_FLAG_SEAT_CLIENT` on the Proc,
+which `thread_new` reads so the seat coordinator's thread is born INTERACTIVE. A
+never-placed thread has no run tree to disagree with, which is why `thread_new` may
+write the band directly. An rfork child's flags start at 0, so a fork is NORMAL.
+Without this a compositor round trip spent nearly all its time queued behind NORMAL
+hogs while Lictor, its server, was already INTERACTIVE through `pci_irq_wait`
+(`dec-2026-11-04-compositor-band`).
 
 **The sort.** Each band is a doubly-linked list kept ascending by `vd_t`,
 so the head is the minimum. Ties insert *after* equal keys — FIFO within
@@ -458,7 +468,8 @@ secondary mis-init. It is kept as a loud failure rather than deleted.
   back). Swapping either direction is a starvation bug.
 - **Band promotion stays narrow.** `sched_mark_interactive` has no
   demotion path, so every new caller permanently widens the set that can
-  starve NORMAL. Each caller owes its own trust gate.
+  starve NORMAL. Each caller owes its own trust gate. The seat client's is
+  who designates it: warden, through a parent-gated spawn bit.
 - **`sched_activate_addrspace` has exactly one correct caller.** It is not
   a general "make this address space current" primitive: it is sound only
   where the thread is about to `eret` without a switch. A second caller

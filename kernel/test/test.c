@@ -452,6 +452,8 @@ struct test_case g_tests[] = {
     { "scheduler.select_target_cpu_homogeneous_is_prev",
                                        test_sched_select_target_cpu_homogeneous_is_prev, false, NULL },
     { "scheduler.pinned_wake_goes_home", test_scheduler_pinned_wake_goes_home, false, NULL },
+    { "scheduler.seat_client_takes_interactive",
+                                       test_scheduler_seat_client_takes_interactive, false, NULL },
     { "scheduler.ready_on_cross_cpu_enqueue",
                                        test_sched_ready_on_cross_cpu_enqueue, false, NULL },
     { "scheduler.cpu_surplus_for_kick",

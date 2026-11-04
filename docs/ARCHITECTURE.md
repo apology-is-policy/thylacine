@@ -1245,7 +1245,12 @@ console leg gates on the trusted console session -- the OWNER shell + the
 console-ATTACHED login/corvus -- NOT an arbitrary foreground program that inherits
 `/dev/cons` as stdin (which, since `/dev/cons` has no per-open capability gate and
 PTY is unbuilt, would otherwise let unprivileged EL0 code self-promote above
-NORMAL and starve it; the wake-preemption audit F1). The full "anything
+NORMAL and starve it; the wake-preemption audit F1). A third leg is Halcyon's own:
+every thread of the compositor warden designates at spawn (`proc_set_seat_client`) is
+INTERACTIVE, the first when it takes the role and each later one from its creation; a
+fork of it is not (operator vote 64, 2026-11-04). That role is explicitly untrusted, so
+this leg's gate is who designates, not what the compositor is, and a compositor that
+spins starves NORMAL on the CPUs its threads occupy, at most two. The full "anything
 from a controlling tty" rule + a dynamic boost-on-wake / demote-on-quantum
 classifier (Plan 9) are the EEVDF-lift refinement; the controlling-tty inference
 lands with the PTY work (Phase 8). The **no-cross-band-aging** caveat above is

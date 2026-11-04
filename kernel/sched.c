@@ -1010,7 +1010,8 @@ void ready(struct Thread *t) {
 // Caveat (ARCH 8.3 "no aging across bands at v1.0"): a CPU-bound INTERACTIVE
 // thread starves NORMAL. Bounded in practice -- the realized INTERACTIVE set is
 // mostly-blocked + trusted (CAP_HW_CREATE drivers + the console-owner/attached
-// session: the shell + login/corvus -- NOT an arbitrary console-stdin reader);
+// session: the shell + login/corvus -- NOT an arbitrary console-stdin reader), plus
+// the compositor warden designates, which is mostly blocked and NOT trusted (8.3);
 // the general CPU-DoS bound is the per-Proc quota (#65).
 void sched_mark_interactive(struct Thread *t) {
     if (!t) return;

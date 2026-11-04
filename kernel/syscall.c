@@ -10194,7 +10194,10 @@ void apply_spawn_perms(struct Proc *p, u32 perm_flags) {
     // with SEAT_STATUS, and lictor admits a compositor only by the designated
     // pid and stripes, so a roleless child serves nothing.
     if (perm_flags & SPAWN_PERM_SEAT_SERVICE) (void)proc_set_seat_service(p);
-    if (perm_flags & SPAWN_PERM_SEAT_CLIENT) (void)proc_set_seat_client(p);
+    // The thunks run this on the child's first thread, which existed before the role
+    // did. thread_new gives the Proc's later threads the band from the role.
+    if ((perm_flags & SPAWN_PERM_SEAT_CLIENT) && proc_set_seat_client(p) == 0)
+        sched_mark_interactive(current_thread());
 
     if (perm_flags & SPAWN_PERM_MAY_POST_SERVICE) {
         proc_mark_may_post_service(p);
