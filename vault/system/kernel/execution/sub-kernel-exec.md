@@ -124,7 +124,8 @@ resolve, and so does one whose segments the mapper would refuse: those read a pi
 
 A refused Vma is not the file's doing: `burrow_map_in` asks `vma_args_ok` first, so a NULL
 past it is the slab's and travels as `-T_E_NOMEM`. A good program whose interpreter is
-itself no image also reads `ENOEXEC`, the one knowing exception, where Linux has `ELIBBAD`.
+itself no image reads `T_E_LIBBAD`, Linux's `ELIBBAD`: `execve.interpreter_says_why`. A
+malformed `PT_INTERP` is the program's own fault and stays `ENOEXEC`.
 `execve.load_refuses_nomem_at_the_pool_edge` parks the pool full and loads.
 
 That is worth stating as a shape rather than a fact, because it is the better

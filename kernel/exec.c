@@ -1429,6 +1429,7 @@ static int exec_load_body(struct AddrSpace *as, bool exempt, struct Proc *nsp,
     struct elf_image img;
     int r = elf_load(hdr, exe_size, &img);
     int interp_err = (int)T_E_NOEXEC;   // why a PT_INTERP that did not resolve is refused
+    int no_image = (int)T_E_NOEXEC;     // what refusing the image reads: past the rewrite, its interpreter's
 
     // DISTRO D-4: PT_INTERP -> the interpreter. `elf_load` already reports the
     // segment as ELF_LOAD_HAS_INTERP, which was once only a refusal; this
@@ -1484,6 +1485,8 @@ static int exec_load_body(struct AddrSpace *as, bool exempt, struct Proc *nsp,
                 struct Spoor *ispoor =
                     exec_resolve_interp(nsp, interp, ilen, &isize, &interp_err);
                 if (!ispoor) {
+                    // It resolved and is no image, so the program is not the one at fault.
+                    if (interp_err == (int)T_E_NOEXEC) interp_err = (int)T_E_LIBBAD;
                     exec_report_fail("PT_INTERP names an interpreter this "
                                      "namespace cannot execute -- refusing", 0);
                 } else {
@@ -1499,7 +1502,7 @@ static int exec_load_body(struct AddrSpace *as, bool exempt, struct Proc *nsp,
                     } else {
                         // The resolver's reason means nothing on a success, and a
                         // refusal from here on is the interpreter's own.
-                        interp_err = (int)T_E_NOEXEC;
+                        interp_err = no_image = (int)T_E_LIBBAD;
                         // Committed. From here the image being loaded is the
                         // INTERPRETER; `exe` is reassigned and the caller's own
                         // Spoor is left exactly as it was (it still owns that
@@ -1515,7 +1518,7 @@ static int exec_load_body(struct AddrSpace *as, bool exempt, struct Proc *nsp,
 
                         kfree(hdr);
                         hdr = exec_read_header(exe, &hdr_got, &hdr_err);
-                        if (!hdr)              return hdr_err;
+                        if (!hdr)              return hdr_err == -(int)T_E_NOEXEC ? -no_image : hdr_err;
                         r = elf_load(hdr, exe_size, &img);
                     }
                 }
@@ -1559,7 +1562,7 @@ static int exec_load_body(struct AddrSpace *as, bool exempt, struct Proc *nsp,
         // nothing at all.
         exec_report_fail("elf_load refused this binary -- negated ELF_LOAD code",
                          (u64)(-r));
-        return r == ELF_LOAD_HAS_INTERP ? -interp_err : -(int)T_E_NOEXEC;
+        return r == ELF_LOAD_HAS_INTERP ? -interp_err : -no_image;
     }
 
     // 2. Map each PT_LOAD. Non-writable segments (R+X text, R-only rodata --
@@ -1575,7 +1578,7 @@ static int exec_load_body(struct AddrSpace *as, bool exempt, struct Proc *nsp,
         if (seg_geometry(seg, &g) != 0) {
             exec_report_fail("degenerate PT_LOAD (memsz 0 or wrapping end) "
                              "at vaddr", seg->vaddr);
-            return -(int)T_E_NOEXEC;
+            return -no_image;
         }
 
         // #149: refuse a segment whose first page is ALREADY mapped. Two
@@ -1593,7 +1596,7 @@ static int exec_load_body(struct AddrSpace *as, bool exempt, struct Proc *nsp,
         if (vma_lookup_in(as, g.floor) != NULL) {
             exec_report_fail("PT_LOAD shares a page with an earlier segment "
                              "(I-12 forbids the W+X union) at vaddr", seg->vaddr);
-            return -(int)T_E_NOEXEC;
+            return -no_image;
         }
 
         // file_shareable iff PF_R AND NOT PF_W (R+X text, R-only rodata -- #45 /
@@ -1630,7 +1633,7 @@ static int exec_load_body(struct AddrSpace *as, bool exempt, struct Proc *nsp,
             // travels as -T_E_NOMEM (B-1a' audit F15), and a read that failed as
             // its own reason. A plain -1 is the image's doing: a segment over
             // another, or a file shorter than its headers say.
-            return rc == -1 ? -(int)T_E_NOEXEC : rc;
+            return rc == -1 ? -no_image : rc;
         }
     }
 
@@ -1639,7 +1642,7 @@ static int exec_load_body(struct AddrSpace *as, bool exempt, struct Proc *nsp,
     //    segment's VA; AT_VDSO_CLOCK into the RO clock page).
     int src = exec_map_user_stack(as, exempt);
     // The target was clean, so only the image's own segments can be in the way.
-    if (src != 0)                              return src == -T_E_NOMEM ? src : -(int)T_E_NOEXEC;
+    if (src != 0)                              return src == -T_E_NOMEM ? src : -no_image;
     u64 vdso_va = exec_map_vdso(as, exempt);   // best-effort; 0 -> no AT_VDSO_CLOCK
     *entry_out = img.entry;
     int ferr   = -1;

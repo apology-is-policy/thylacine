@@ -1584,8 +1584,29 @@ void test_execve_interpreter_says_why(void) {
     if (dq) {
         spoor_clunk(dq);
         size = nx_dynamic(dyn);
-        TEST_EXPECT_EQ(nx_load(self, size, "prog", 4, NULL, 0, 0), -(int)T_E_NOEXEC,
+        TEST_EXPECT_EQ(nx_load(self, size, "prog", 4, NULL, 0, 0), -(int)T_E_LIBBAD,
                        "an interpreter that is itself dynamic is no image for this job");
+    }
+
+    // An interpreter that resolves and is no image. A shell runs ENOEXEC as a script, and
+    // this program is not at fault. The fixtures are the phenotype bundle's, so these legs
+    // are conditional too, and a sabotage for each proves it ran.
+    static const char notelf[] = "/vivarium/pheno/rootfs/pheno-notelf";
+    struct Spoor *nq = exec_resolve_interp(self, notelf, sizeof(notelf) - 1u, &dsz, &derr);
+    if (nq) {
+        spoor_clunk(nq);
+        size = nx_dynamic(notelf);
+        TEST_EXPECT_EQ(nx_load(self, size, "prog", 4, NULL, 0, 0), -(int)T_E_LIBBAD,
+                       "an interpreter that is text");
+    }
+    static const char empty[] = "/vivarium/pheno/rootfs/pheno-empty";
+    derr = 0;
+    struct Spoor *eq = exec_resolve_interp(self, empty, sizeof(empty) - 1u, &dsz, &derr);
+    if (eq) spoor_clunk(eq);
+    if (derr == (int)T_E_NOEXEC) {
+        size = nx_dynamic(empty);
+        TEST_EXPECT_EQ(nx_load(self, size, "prog", 4, NULL, 0, 0), -(int)T_E_LIBBAD,
+                       "an interpreter that is empty");
     }
 }
 

@@ -3065,7 +3065,7 @@ pub unsafe fn t_weft_unshare(share_id: u64) -> i64 {
 // intact and the value is a real -errno.
 //
 // Notable errors: -T_E_NOENT / -T_E_ACCES (the path did not resolve),
-// -T_E_NOEXEC (not a runnable image).
+// -T_E_NOEXEC (not a runnable image), -T_E_LIBBAD (its interpreter is not).
 //
 // The environment is NOT passed: it is the per-Proc /env device, which survives
 // exec on its own.

@@ -974,7 +974,8 @@ enum {
     // strings region; pouch's musl _start exposes argv to main).
     //
     // Returns the child's pid on success (positive), a -T_E_* on failure, the walk's
-    // own reason and -T_E_NOEXEC for a file that is no image among them:
+    // own reason, -T_E_NOEXEC for a file that is no image and -T_E_LIBBAD for an
+    // interpreter that is none among them:
     //   - req_va outside the user-VA bound / unmapped at struct-copy time
     //   - any field outside its documented bounds (name_len, argv_data_len,
     //     argc, fd_count, perm_flags, cap_mask — same as the legacy
@@ -2104,6 +2105,7 @@ enum {
     // error is a real -errno:
     //   -T_E_NOENT / -T_E_ACCES / -T_E_NOTDIR ...  the path did not resolve
     //   -T_E_NOEXEC   resolved, but not a runnable image
+    //   -T_E_LIBBAD   a good program whose interpreter is not a runnable image
     //   -T_E_NOMEM    out of memory building the new image
     //   -T_E_FAULT    a user pointer was unreadable
     //   -T_E_INVAL    an argument was out of bounds
