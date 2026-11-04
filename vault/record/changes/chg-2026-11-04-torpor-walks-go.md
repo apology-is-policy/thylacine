@@ -4,7 +4,7 @@ type: chg
 title: "The two torpor walks and the bucket-lock die check go"
 date: 2026-11-04
 arc: arc-phase6-pouch
-commits: []
+commits: [3e2adf489]
 touched:
   - sub-kernel-torpor
   - sub-kernel-death
