@@ -75,7 +75,7 @@ _Static_assert(VIV_LINUX_RT_SIGQUEUEINFO == SYS_POSTNOTE_TID,
 // rt_sigprocmask (135), rt_sigpending (136) and rt_sigtimedwait (137) meet NO
 // native number on this tree: main holds them for READLINK, LSTAT and FILE_LOCK,
 // and syscall.native_gap_unassigned pins that they are empty here. Each is
-// consumed before the native switch regardless (TIER2, ENOSYS, TIER2), and
+// consumed before the native switch regardless (TIER2 all three), and
 // vivarium.rejects_are_deliberate pins each verdict by name.
 // SYS_SRV_REGISTRY_NEW at 134 (vote 13) lifted the ceiling over the signal
 // family's 129..134, and the assert above, then keyed to kill, stopped the

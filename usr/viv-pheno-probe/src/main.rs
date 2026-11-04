@@ -2564,8 +2564,9 @@ unsafe fn run_linux() -> ! {
         svc6(NR_PPOLL, pfd.as_mut_ptr() as u64, 65, ts_zero.as_ptr() as u64, 0, 8, 0) == -22,
         b"L98\n"
     );
-    // A sigmask asks for an ATOMIC mask swap, which is ppoll's entire reason to
-    // exist over poll() and has no counterpart here. Declined, never approximated.
+    // A mask with a zero timeout changes nothing about the answer. What the mask
+    // does is L359 on; a size is only looked at beside a mask, as Linux's
+    // set_user_sigmask has it.
     let sigmask: [u64; 1] = [0];
     leg!(
         rep,
@@ -2577,7 +2578,10 @@ unsafe fn run_linux() -> ! {
             sigmask.as_ptr() as u64,
             8,
             0
-        ) == -ENOSYS,
+        ) == 1
+            && svc6(NR_PPOLL, pfd.as_mut_ptr() as u64, 1, ts_zero.as_ptr() as u64,
+                    sigmask.as_ptr() as u64, 4, 0) == -22
+            && svc6(NR_PPOLL, pfd.as_mut_ptr() as u64, 1, ts_zero.as_ptr() as u64, 0, 4, 0) == 1,
         b"L99\n"
     );
     // A malformed timespec is Linux's own EINVAL, not ours.
@@ -2810,9 +2814,14 @@ unsafe fn run_linux() -> ! {
         b"L130\n"
     );
 
-    // A sigmask declines for ppoll's reason -- the atomic mask swap has no
-    // counterpart. Note the sixth argument is a POINTER TO A PAIR, not a mask.
-    let sigpair: [u64; 2] = [0, 8];
+    // The sixth argument is a POINTER TO A PAIR, not a mask. A pair holding no mask
+    // is no mask, whatever its size says; a pair holding one wants the size right.
+    rdset = [0; 16];
+    rdset[(rep as usize) / 64] = 1u64 << ((rep as usize) % 64);
+    let sigword: u64 = 0;
+    let sigpair: [u64; 2] = [0, 4];
+    let sigreal: [u64; 2] = [&sigword as *const u64 as u64, 8];
+    let sigshort: [u64; 2] = [&sigword as *const u64 as u64, 4];
     leg!(
         rep,
         svc6(
@@ -2823,7 +2832,11 @@ unsafe fn run_linux() -> ! {
             0,
             ts0.as_ptr() as u64,
             sigpair.as_ptr() as u64,
-        ) == -ENOSYS,
+        ) == 1
+            && svc6(NR_PSELECT6, (rep + 1) as u64, rdset.as_mut_ptr() as u64, 0, 0,
+                    ts0.as_ptr() as u64, sigreal.as_ptr() as u64) == 1
+            && svc6(NR_PSELECT6, (rep + 1) as u64, rdset.as_mut_ptr() as u64, 0, 0,
+                    ts0.as_ptr() as u64, sigshort.as_ptr() as u64) == -22,
         b"L131\n"
     );
 
@@ -5791,11 +5804,332 @@ unsafe fn run_linux() -> ! {
             nw_n = put_bytes(&mut nw_mk, nw_n, b"\n");
         }
     }
+    leg!(rep, nw_n == 0, &nw_mk[..nw_n]);
+
+    // --- L359-L368: ppoll's and pselect6's mask, and rt_sigpending ------------
+    //
+    // Operator vote 28. A mask in for one call that can also end some other way.
+    //   L359: a held note a ppoll's mask opens ends the ppoll with EINTR. The handler
+    //         runs under the call's mask, sa_mask and its own bit; its frame reads the
+    //         caller's mask, which is back at its return, so the next note stays held.
+    //   L360: a ready fd beside that note answers ready and runs no handler. The
+    //         caller's mask is back, and the note is still pending: rt_sigpending
+    //         shows it, and rt_sigtimedwait takes it.
+    //   L361: a deadline restores too, and the next note stays held.
+    //   L362-L364: the same three for pselect6, whose sets come home on the ready one.
+    //   L365: the forms with no fds take a mask as well.
+    //   L366: the refusals.
+    //   L367: rt_sigpending names what is held, and only that.
+    //   L368: a child asleep in each form is ended by a post, handled or not. A held note
+    //         whose row terminates ends it at once when the mask opens it. One whose
+    //         default is ignore is not an EINTR: the wait goes on, to its deadline.
+    const NV_POLLIN: i16 = 1;
+    #[inline(always)]
+    unsafe fn nv_mask() -> u64 {
+        let mut m = 0u64;
+        let _ = svc4(NR_RT_SIGPROCMASK, 0, 0, &mut m as *mut u64 as u64, 8);
+        m
+    }
+    #[inline(always)]
+    unsafe fn nv_pending() -> u64 {
+        let mut m = !0u64;
+        let r = svc3(NR_RT_SIGPENDING, &mut m as *mut u64 as u64, 8, 0);
+        if r == 0 { m } else { !0u64 }
+    }
+    const NR_RT_SIGPENDING: u64 = 136;
+    let mut nv_mk = [0u8; 200];
+    let mut nv_n = 0usize;
+    let mut nv_pipe: [i32; 2] = [-1, -1];
+    let nv_piped = svc3(NR_PIPE2, nv_pipe.as_mut_ptr() as u64, 0, 0) == 0;
+    ksa = [nw_addr, SA_RESTORER | SA_SIGINFO, restorer_addr(), nw_term];
+    let nv_h1 = svc4(NR_RT_SIGACTION, SIGUSR1, &ksa as *const u64 as u64, 0, 8) == 0;
+    leg!(rep, nv_piped && nv_h1 && nv_mask() == nw_held && nv_pending() == 0, b"L359 setup\n");
+    let nv_rd = nv_pipe[0];
+    let nv_two_s: [i64; 2] = [2, 0];
+    let nv_short: [i64; 2] = [0, 30_000_000];
+    let nv_zero: [i64; 2] = [0, 0];
+    let nv_open = nw_usr2;
+    let nv_byte = b"x";
+
+    // The two calls, one variable apart from each other: which one, and its deadline.
+    // The answer and, for pselect6, whether the read set came home holding the fd.
+    #[inline(always)]
+    unsafe fn nv_wait(pselect: bool, fd: i32, ts: *const i64, mask: *const u64) -> (i64, bool) {
+        if pselect {
+            let mut rd = [0u64; 16];
+            rd[(fd as usize) / 64] = 1u64 << ((fd as usize) % 64);
+            let pair: [u64; 2] = [mask as u64, 8];
+            let r = svc6(NR_PSELECT6, (fd + 1) as u64, rd.as_mut_ptr() as u64, 0, 0, ts as u64,
+                         pair.as_ptr() as u64);
+            (r, rd[(fd as usize) / 64] & (1u64 << ((fd as usize) % 64)) != 0)
+        } else {
+            let mut one = NvPollFd { fd, events: NV_POLLIN, revents: 0 };
+            let r = svc6(NR_PPOLL, &mut one as *mut NvPollFd as u64, 1, ts as u64, mask as u64, 8, 0);
+            (r, one.revents & NV_POLLIN != 0)
+        }
+    }
+    #[repr(C)]
+    struct NvPollFd { fd: i32, events: i16, revents: i16 }
+
+    for (pselect, m_note, m_ready, m_dead) in
+        [(false, b"L359", b"L360", b"L361"), (true, b"L362", b"L363", b"L364")]
+    {
+        // The note the call's mask opens: EINTR, the handler, the mask back.
+        let r0 = svc3(NR_TKILL, kf_tid as u64, SIGUSR1, 0);
+        let before = nw_runs();
+        let (r1, _) = nv_wait(pselect, nv_rd, nv_two_s.as_ptr(), &nv_open);
+        let runs = nw_runs();
+        let inn = core::ptr::read_volatile(&raw const NW_MASK_IN);
+        let uc = core::ptr::read_volatile(&raw const NW_UC_MASK);
+        let back = nv_mask();
+        let r2 = svc3(NR_TKILL, kf_tid as u64, SIGUSR1, 0);
+        let held = nw_runs() == runs;
+        let taken = svc4(NR_RT_SIGTIMEDWAIT, &nw_usr1 as *const u64 as u64, 0, nv_zero.as_ptr() as u64, 8);
+        if !(r0 == 0 && r1 == NW_EINTR && runs == before + 1
+            && inn == (nw_usr2 | nw_term | nw_usr1) && uc == nw_held
+            && back == nw_held && r2 == 0 && held && taken == SIGUSR1 as i64)
+            && nv_n == 0
+        {
+            nv_n = put_bytes(&mut nv_mk, 0, m_note);
+            nv_n = put_bytes(&mut nv_mk, nv_n, b" r=");
+            nv_n = put_dec(&mut nv_mk, nv_n, r1);
+            nv_n = put_bytes(&mut nv_mk, nv_n, b" runs=");
+            nv_n = put_dec(&mut nv_mk, nv_n, (runs - before) as i64);
+            nv_n = put_bytes(&mut nv_mk, nv_n, b" in=");
+            nv_n = put_dec(&mut nv_mk, nv_n, inn as i64);
+            nv_n = put_bytes(&mut nv_mk, nv_n, b" uc=");
+            nv_n = put_dec(&mut nv_mk, nv_n, uc as i64);
+            nv_n = put_bytes(&mut nv_mk, nv_n, b" back=");
+            nv_n = put_dec(&mut nv_mk, nv_n, back as i64);
+            nv_n = put_bytes(&mut nv_mk, nv_n, b" taken=");
+            nv_n = put_dec(&mut nv_mk, nv_n, taken);
+            nv_n = put_bytes(&mut nv_mk, nv_n, b"\n");
+        }
+
+        // A ready fd first: no handler, the mask back, the note still there.
+        let w = svc3(NR_WRITE, nv_pipe[1] as u64, nv_byte.as_ptr() as u64, 1);
+        let r0 = svc3(NR_TKILL, kf_tid as u64, SIGUSR1, 0);
+        let before = nw_runs();
+        let (r1, ready) = nv_wait(pselect, nv_rd, nv_two_s.as_ptr(), &nv_open);
+        let runs = nw_runs();
+        let back = nv_mask();
+        let pend = nv_pending();
+        let taken = svc4(NR_RT_SIGTIMEDWAIT, &nw_usr1 as *const u64 as u64, 0, nv_zero.as_ptr() as u64, 8);
+        let pend2 = nv_pending();
+        let mut drain = [0u8; 1];
+        let d = svc3(NR_READ, nv_rd as u64, drain.as_mut_ptr() as u64, 1);
+        if !(w == 1 && r0 == 0 && r1 == 1 && ready && runs == before && back == nw_held
+            && pend == nw_usr1 && taken == SIGUSR1 as i64 && pend2 == 0 && d == 1)
+            && nv_n == 0
+        {
+            nv_n = put_bytes(&mut nv_mk, 0, m_ready);
+            nv_n = put_bytes(&mut nv_mk, nv_n, b" r=");
+            nv_n = put_dec(&mut nv_mk, nv_n, r1);
+            nv_n = put_bytes(&mut nv_mk, nv_n, b" runs=");
+            nv_n = put_dec(&mut nv_mk, nv_n, (runs - before) as i64);
+            nv_n = put_bytes(&mut nv_mk, nv_n, b" back=");
+            nv_n = put_dec(&mut nv_mk, nv_n, back as i64);
+            nv_n = put_bytes(&mut nv_mk, nv_n, b" pend=");
+            nv_n = put_dec(&mut nv_mk, nv_n, pend as i64);
+            nv_n = put_bytes(&mut nv_mk, nv_n, b"/");
+            nv_n = put_dec(&mut nv_mk, nv_n, pend2 as i64);
+            nv_n = put_bytes(&mut nv_mk, nv_n, b"\n");
+        }
+
+        // The deadline, with nothing to open it for: the mask back, and it works.
+        let t0 = mono_ns();
+        let (r1, _) = nv_wait(pselect, nv_rd, nv_short.as_ptr(), &nv_open);
+        let spent = mono_ns() - t0;
+        let back = nv_mask();
+        let before = nw_runs();
+        let r2 = svc3(NR_TKILL, kf_tid as u64, SIGUSR1, 0);
+        let runs = nw_runs();
+        let taken = svc4(NR_RT_SIGTIMEDWAIT, &nw_usr1 as *const u64 as u64, 0, nv_zero.as_ptr() as u64, 8);
+        if !(r1 == 0 && spent >= 25_000_000 && back == nw_held && r2 == 0 && runs == before
+            && taken == SIGUSR1 as i64)
+            && nv_n == 0
+        {
+            nv_n = put_bytes(&mut nv_mk, 0, m_dead);
+            nv_n = put_bytes(&mut nv_mk, nv_n, b" r=");
+            nv_n = put_dec(&mut nv_mk, nv_n, r1);
+            nv_n = put_bytes(&mut nv_mk, nv_n, b" back=");
+            nv_n = put_dec(&mut nv_mk, nv_n, back as i64);
+            nv_n = put_bytes(&mut nv_mk, nv_n, b"\n");
+        }
+    }
+    leg!(rep, nv_n == 0, &nv_mk[..nv_n]);
+
+    // No fds. ppoll's and pselect6's sleep are two paths through the kernel, and both
+    // hold the mask: the note ends each, and a sleep with nothing to end it restores.
+    let nv_pair: [u64; 2] = [&nv_open as *const u64 as u64, 8];
+    let mut nv_bad = 0u32;
+    for pselect in [false, true] {
+        let sleep = |ts: *const i64| -> i64 {
+            if pselect {
+                svc6(NR_PSELECT6, 0, 0, 0, 0, ts as u64, nv_pair.as_ptr() as u64)
+            } else {
+                svc6(NR_PPOLL, 0, 0, ts as u64, &nv_open as *const u64 as u64, 8, 0)
+            }
+        };
+        let r0 = svc3(NR_TKILL, kf_tid as u64, SIGUSR1, 0);
+        let before = nw_runs();
+        let r1 = sleep(nv_two_s.as_ptr());
+        if !(r0 == 0 && r1 == NW_EINTR && nw_runs() == before + 1 && nv_mask() == nw_held) {
+            nv_bad |= 1 << (pselect as u32);
+        }
+        let r2 = sleep(nv_short.as_ptr());
+        if !(r2 == 0 && nv_mask() == nw_held) {
+            nv_bad |= 4 << (pselect as u32);
+        }
+    }
+    let mut nv_mk2 = [0u8; 40];
+    let mut nv_n2 = 0usize;
+    if nv_bad != 0 {
+        nv_n2 = put_bytes(&mut nv_mk2, 0, b"L365 bad=");
+        nv_n2 = put_dec(&mut nv_mk2, nv_n2, nv_bad as i64);
+        nv_n2 = put_bytes(&mut nv_mk2, nv_n2, b"\n");
+    }
+    leg!(rep, nv_n2 == 0, &nv_mk2[..nv_n2]);
+
+    // No refusal leaves a mask in place: L366's last term.
+    let nv_badaddr: [u64; 2] = [8, 8];
+    let nv_nomask: [u64; 2] = [0, 4];
+    let nv_shortlen: [u64; 2] = [&nv_open as *const u64 as u64, 4];
+    let mut nv_sel = [0u64; 16];
+    nv_sel[(nv_rd as usize) / 64] = 1u64 << ((nv_rd as usize) % 64);
+    let mut nv_one = NvPollFd { fd: nv_rd, events: NV_POLLIN, revents: 0 };
+    let nv_ppoll_addr = &mut nv_one as *mut NvPollFd as u64;
+    let nv_sel_addr = nv_sel.as_mut_ptr() as u64;
+    let nv_tsz = nv_zero.as_ptr() as u64;
+    let nv_refused = svc6(NR_PPOLL, nv_ppoll_addr, 1, nv_tsz, &nv_open as *const u64 as u64, 4, 0) == NEG_EINVAL
+        && svc6(NR_PPOLL, nv_ppoll_addr, 1, nv_tsz, &nv_open as *const u64 as u64, 16, 0) == NEG_EINVAL
+        && svc6(NR_PPOLL, nv_ppoll_addr, 1, nv_tsz, 8, 8, 0) == NW_EFAULT
+        && svc6(NR_PPOLL, 0, 0, nv_tsz, 8, 8, 0) == NW_EFAULT
+        && svc6(NR_PPOLL, nv_ppoll_addr, 1, nv_tsz, 0, 4, 0) == 0
+        && svc6(NR_PSELECT6, (nv_rd + 1) as u64, nv_sel_addr, 0, 0, nv_tsz, nv_shortlen.as_ptr() as u64) == NEG_EINVAL
+        && svc6(NR_PSELECT6, (nv_rd + 1) as u64, nv_sel_addr, 0, 0, nv_tsz, nv_badaddr.as_ptr() as u64) == NW_EFAULT
+        && svc6(NR_PSELECT6, (nv_rd + 1) as u64, nv_sel_addr, 0, 0, nv_tsz, 8) == NW_EFAULT
+        && svc6(NR_PSELECT6, (nv_rd + 1) as u64, nv_sel_addr, 0, 0, nv_tsz, nv_nomask.as_ptr() as u64) == 0;
+    leg!(rep, nv_refused && nv_mask() == nw_held, b"L366\n");
+
+    // Held by the mask, by thread or by process, each shows. A note nothing holds does
+    // not wait to be seen: it has run.
+    let nv_pid = svc3(NR_GETPID, 0, 0, 0);
+    let nv_empty = nv_pending();
+    let _ = svc3(NR_TKILL, kf_tid as u64, SIGUSR1, 0);
+    let nv_p1 = nv_pending();
+    let _ = svc3(NR_KILL, nv_pid as u64, SIGUSR2, 0);
+    let nv_p2 = nv_pending();
+    let nv_t1 = svc4(NR_RT_SIGTIMEDWAIT, &nw_usr1 as *const u64 as u64, 0, nv_tsz, 8);
+    let nv_p3 = nv_pending();
+    let nv_t2 = svc4(NR_RT_SIGTIMEDWAIT, &nw_usr2 as *const u64 as u64, 0, nv_tsz, 8);
+    let nv_p4 = nv_pending();
+    let nv_before = nw_runs();
+    let _ = svc4(NR_RT_SIGPROCMASK, NT_SIG_SETMASK, &nw_usr2 as *const u64 as u64, 0, 8);
+    let _ = svc3(NR_TKILL, kf_tid as u64, SIGUSR1, 0);
+    let nv_p5 = nv_pending();
+    let nv_ran = nw_runs() == nv_before + 1;
+    let _ = svc4(NR_RT_SIGPROCMASK, NT_SIG_SETMASK, &nw_held as *const u64 as u64, 0, 8);
+    let mut nv_word = 0u64;
+    let nv_shape = svc3(NR_RT_SIGPENDING, &mut nv_word as *mut u64 as u64, 4, 0) == NEG_EINVAL
+        && svc3(NR_RT_SIGPENDING, &mut nv_word as *mut u64 as u64, 16, 0) == NEG_EINVAL
+        && svc3(NR_RT_SIGPENDING, 8, 8, 0) == NW_EFAULT;
+    nv_n2 = 0;
+    if !(nv_empty == 0 && nv_p1 == nw_usr1 && nv_p2 == nw_held && nv_t1 == SIGUSR1 as i64
+        && nv_p3 == nw_usr2 && nv_t2 == SIGUSR2 as i64 && nv_p4 == 0 && nv_p5 == 0 && nv_ran && nv_shape)
+    {
+        nv_n2 = put_bytes(&mut nv_mk2, 0, b"L367 ");
+        nv_n2 = put_dec(&mut nv_mk2, nv_n2, nv_p1 as i64);
+        nv_n2 = put_bytes(&mut nv_mk2, nv_n2, b"/");
+        nv_n2 = put_dec(&mut nv_mk2, nv_n2, nv_p2 as i64);
+        nv_n2 = put_bytes(&mut nv_mk2, nv_n2, b"/");
+        nv_n2 = put_dec(&mut nv_mk2, nv_n2, nv_p3 as i64);
+        nv_n2 = put_bytes(&mut nv_mk2, nv_n2, b"/");
+        nv_n2 = put_dec(&mut nv_mk2, nv_n2, nv_p5 as i64);
+        nv_n2 = put_bytes(&mut nv_mk2, nv_n2, b"\n");
+    }
+    leg!(rep, nv_n2 == 0, &nv_mk2[..nv_n2]);
+
+    // Modes: 0 ppoll, 1 pselect6, 2 ppoll with no fds: a post ends each, and the handler
+    // ran. 3: the same with no handler, and the post ends the child. 4: a note already
+    // held, whose row terminates, which the mask opens: the wait never starts. 5: one whose
+    // default is ignore, which only the tail can drop: the timed wait goes on to its
+    // deadline, and reads no EINTR.
+    nv_n = 0;
+    for mode in 0..6u32 {
+        let mut rp: [i32; 2] = [-1, -1];
+        if svc3(NR_PIPE2, rp.as_mut_ptr() as u64, 0, 0) != 0 {
+            nv_n = put_bytes(&mut nv_mk, 0, b"L368 pipe\n");
+            break;
+        }
+        let kid = svc6(NR_CLONE, SIGCHLD, 0, 0, 0, 0, 0);
+        if kid == 0 {
+            if mode == 3 || mode == 4 {
+                ksa = [SIG_DFL, 0, 0, 0];
+                let _ = svc4(NR_RT_SIGACTION, SIGUSR1, &ksa as *const u64 as u64, 0, 8);
+            }
+            let r = b"R";
+            let _ = svc3(NR_WRITE, rp[1] as u64, r.as_ptr() as u64, 1);
+            let runs = nw_runs();
+            let me = svc3(NR_GETTID, 0, 0, 0);
+            if mode == 5 {
+                let chld = 1u64 << (SIGCHLD - 1);
+                let more = nw_held | chld;
+                ksa = [SIG_DFL, 0, 0, 0];
+                let _ = svc4(NR_RT_SIGACTION, SIGCHLD, &ksa as *const u64 as u64, 0, 8);
+                let _ = svc4(NR_RT_SIGPROCMASK, NT_SIG_SETMASK, &more as *const u64 as u64, 0, 8);
+                let _ = svc3(NR_TKILL, me as u64, SIGCHLD, 0);
+                if nv_pending() != chld {
+                    linux_exit(75)
+                }
+                let t0 = mono_ns();
+                let (got, _) = nv_wait(false, nv_rd, nv_short.as_ptr(), &nw_none);
+                let spent = mono_ns() - t0;
+                linux_exit(if got == 0 && spent >= 25_000_000 && nv_mask() == more && nv_pending() == 0
+                    { 0 } else { 73 })
+            }
+            if mode == 4 {
+                let _ = svc3(NR_TKILL, me as u64, SIGUSR1, 0);
+            }
+            let got = match mode {
+                1 => nv_wait(true, nv_rd, core::ptr::null(), &nw_none).0,
+                2 => svc6(NR_PPOLL, 0, 0, 0, &nw_none as *const u64 as u64, 8, 0),
+                _ => nv_wait(false, nv_rd, core::ptr::null(), &nw_none).0,
+            };
+            linux_exit(if mode < 3 && got == NW_EINTR && nw_runs() == runs + 1 && nv_mask() == nw_held
+                { 0 } else { 74 })
+        }
+        let _ = svc3(NR_CLOSE, rp[1] as u64, 0, 0);
+        let mut one = [0u8; 1];
+        let _ = svc3(NR_READ, rp[0] as u64, one.as_mut_ptr() as u64, 1);
+        let _ = svc3(NR_CLOSE, rp[0] as u64, 0, 0);
+        let settle: [i64; 2] = [0, 100_000_000];
+        let _ = svc4(NR_PPOLL, 0, 0, settle.as_ptr() as u64, 0);
+        let posted = if mode >= 4 { 0 } else if kid > 0 { svc3(NR_KILL, kid as u64, SIGUSR1, 0) } else { 1 };
+        let ws = if kid > 0 { reap_or_kill(kid) } else { None };
+        let good = posted == 0 && match (mode, ws) {
+            (3, Some(w)) | (4, Some(w)) => (w & 0x7f) == SIGUSR1 as i32,
+            (_, Some(w)) => w == 0,
+            _ => false,
+        };
+        if !good && nv_n == 0 {
+            nv_n = put_bytes(&mut nv_mk, 0, b"L368 mode=");
+            nv_n = put_dec(&mut nv_mk, nv_n, mode as i64);
+            nv_n = put_bytes(&mut nv_mk, nv_n, b" fork=");
+            nv_n = put_dec(&mut nv_mk, nv_n, kid);
+            nv_n = put_bytes(&mut nv_mk, nv_n, b" ws=");
+            nv_n = put_dec(&mut nv_mk, nv_n, ws.map_or(-1, |w| w as i64));
+            nv_n = put_bytes(&mut nv_mk, nv_n, b"\n");
+        }
+    }
+    let _ = svc3(NR_CLOSE, nv_pipe[0] as u64, 0, 0);
+    let _ = svc3(NR_CLOSE, nv_pipe[1] as u64, 0, 0);
+    leg!(rep, nv_n == 0, &nv_mk[..nv_n]);
+
     ksa = [SIG_DFL, 0, 0, 0];
     let _ = svc4(NR_RT_SIGACTION, SIGUSR1, &ksa as *const u64 as u64, 0, 8);
     let _ = svc4(NR_RT_SIGACTION, SIGUSR2, &ksa as *const u64 as u64, 0, 8);
     let _ = svc4(NR_RT_SIGPROCMASK, NT_SIG_SETMASK, &nw_oldmask as *const u64 as u64, 0, 8);
-    leg!(rep, nw_n == 0, &nw_mk[..nw_n]);
 
     // --- the verdict, which is also the write leg ---------------------------
     // Linux write(64) puts these bytes in the file; joey reads them from its

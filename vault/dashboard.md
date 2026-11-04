@@ -125,6 +125,7 @@ Generated — do not edit between the markers (`quaestor render`).
 
 ## Recent changes
 
+- 2026-11-04 [[chg-2026-11-04-poll-mask]] — ppoll's and pselect's mask, and sigpending, on SYS_NOTE_WAIT
 - 2026-11-03 [[chg-2026-11-03-c8a-torpor]] — torpor keyed on the address space, a lock per bucket, oldest first, and no wake under the lock
 - 2026-11-03 [[chg-2026-11-03-c8b-timer-bases]] — Per-CPU timer bases: a wake takes no timer lock
 - 2026-11-03 [[chg-2026-11-03-item-11c-close]] — Item 11c close: rounds 1 to 3, the sweep, three leases
@@ -132,5 +133,4 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-11-03 [[chg-2026-11-03-note-wait]] — sigsuspend, sigtimedwait, sa_mask, SA_RESETHAND: the kernel owns the mask
 - 2026-11-03 [[chg-2026-11-03-sigpipe-row]] — Pouch's SIGPIPE default is a row that ignores
 - 2026-11-03 [[chg-2026-11-03-torpor-locked-load]] — A wait's load under its lock cannot sleep, whatever a peer's MAP_FIXED did
-- 2026-11-02 [[chg-2026-11-02-f3-what-it-is]] — What review finding F-3 is, read from main's code
 <!-- generated:end -->

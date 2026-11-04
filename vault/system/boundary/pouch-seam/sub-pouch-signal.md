@@ -14,7 +14,7 @@ validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/POUCH-DESIGN.md", "docs/PTY-DESIGN.md"]
 created: 2026-08-01
-updated: 2026-11-03
+updated: 2026-11-04
 ---
 ## Purpose
 
@@ -114,6 +114,19 @@ row, and reads the taken note's name back through `__pouch_note_to_sig`, the dis
 table. Upstream's `EINTR` loop stays, because `sigwait` may not read `EINTR`, but a retry
 waits only for what is left of the timeout: a steady note would otherwise keep the timeout
 from passing. `si_code` is `SI_KERNEL` with a zero union, as on a Linux guest's row.
+
+**`ppoll`, `pselect` and `sigpending` (operator vote 28, [[dec-2026-11-04-poll-mask]]).**
+`poll`'s body is the hidden `__pouch_poll(fds, n, ms, mask)`, and `select`'s is
+`__pouch_select`, so a socket's translation and a negative fd's compaction hold with a mask
+as well. `__pouch_poll_wait` is the one call: `SYS_poll` with no mask, `SYS_NOTE_WAIT`'s poll
+form with one. `sigpending` reads the pending form, and `__pouch_take_to_sigset` is the way
+back from its take word, one signal per tty row.
+
+`select` had two defects of its own beside this. A failed call went through `__syscall_ret`
+twice, and the second read `syscall_cp`'s -1 as the native error, so every failed `select` read
+`EIO` and an interrupted one never read `EINTR`. A closed fd was a `POLLNVAL` no set counted, so
+`select` answered 0 at once, which reads as a timeout; it is `EBADF` now, with the sets as they
+were, as on the kernel's Linux row.
 
 **Every handler gets the `SA_SIGINFO` arguments.** A handler installed with `SA_SIGINFO`
 used to find the dispatcher's own `x1` and `x2` in its arguments, so reading `si_signo` read
@@ -296,11 +309,10 @@ run) ·
   `sigwait` on it blocked never returns, because the note is dropped at its post (POSIX has it
   pending). A real handler or a Linux guest has the POSIX behaviour.
 - `siglongjmp` out of a handler restores the mask and leaves `in_handler` set, as above.
-- `sigaltstack` / `sigpending` / `sigqueue` are sentinels; no real-time signals. An
+- `sigaltstack` / `sigqueue` are sentinels; no real-time signals. An
   `SA_SIGINFO` handler's `siginfo_t` names the signal, with `SI_KERNEL` and a zero union,
   and its `ucontext_t *` is NULL (the fd-shaped `SYS_NOTE_OPEN` path carries the arg and
   the sender).
-- `pselect` and `ppoll` ignore their sigmask (OPEN-BUGS).
 - `raise()` does not coalesce — two raises deliver twice.
 - The note-name literals are duplicated between `kernel/notes.c` and
   `_pouch_signal.c` with no shared header.
@@ -316,4 +328,5 @@ C7 (2026-10-29, operator vote: 0065, a new thread starts with its creator's
 mask; the kernel half is `SYS_THREAD_SPAWN` inheriting `note_mask`) → item 11c
 (2026-11-03, votes 18 to 20: 0069, the kernel's table, restart and interruptible opens)
 → [[chg-2026-11-03-note-wait]] (vote 24: 0071, the kernel owns the mask, `sigsuspend`,
-`sigtimedwait`, `sa_mask` and `SA_RESETHAND`).
+`sigtimedwait`, `sa_mask` and `SA_RESETHAND`) → [[chg-2026-11-04-poll-mask]] (vote 28: the
+masks of `ppoll` and `pselect`, `sigpending`, and `select`'s two defects).

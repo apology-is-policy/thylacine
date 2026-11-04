@@ -12,7 +12,7 @@ hazards: []
 abis: [abi-note-names]
 design: ["docs/ARCHITECTURE.md", "docs/ERRORS.md"]
 created: 2026-08-03
-updated: 2026-11-03
+updated: 2026-11-04
 ---
 ## Purpose
 
@@ -820,6 +820,19 @@ outside the word unwinds, after a last look for a take. `notes_wait_untake` puts
 after a copy-out fault: unconsume, re-arm terminate, and the wakes (N-2). A take word's bits
 16..20 name single rows of the tty family; `notes_take_for_sigset` is the Linux row's
 spelling.
+
+`notes_wait_mask_begin` and `notes_wait_mask_end` hold a mask for a call that can also end
+some other way (operator vote 28, [[dec-2026-11-04-poll-mask]]). Begin differs from a suspend's
+front in one thing: a caught note goes on to the poll, whose pass reads the latch only after
+finding nothing ready, so a ready fd answers first. A note only the tail can act on arms
+nothing a poll reads, so begin marks an unwind and answers `EINTR`, with `NOHAND` even for a
+timed call, since no time has gone. End is Linux's `restore_saved_sigmask_unless`: any answer
+but `EINTR` puts the mask back and clears both marks at once, so no handler runs for a note
+only the call's mask let in. In a handler neither does anything, and that is the stated
+imprecision a suspend has. `notes_wait_pending` reads the own word and the queue against
+`notes_interrupted_mask`, or against everything in a handler, and takes nothing. The snare
+family is left out of its answer, which is a take word. `notes_sigset_for_take` is the Linux
+row's way back.
 
 ### The handler-time mask is Linux's, and it is passed on (phenotype)
 

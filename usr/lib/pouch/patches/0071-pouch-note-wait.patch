@@ -32,13 +32,26 @@ sigsuspend, a copy of it here is wrong in a handler and after one. So the copy g
       sigwait may not read EINTR, but a retry waits only for what is left of the timeout: a
       steady note would otherwise keep the timeout from passing. sigwait, sigwaitinfo and
       sigpause sit on these unchanged.
+  src/select/poll.c             Operator vote 28. poll's body moves to the hidden __pouch_poll,
+      which takes a mask, and __pouch_poll_wait is the one call: SYS_poll with no mask,
+      SYS_NOTE_WAIT's poll form with one, so that the swap and the wait are one step.
+  src/select/ppoll.c            The mask goes through, where it was ignored.
+  src/select/select.c           The same split, as __pouch_select. A failed call went through
+      __syscall_ret twice, and the second one read syscall_cp's -1 as the native error and
+      turned it into EIO, so every failed select read EIO and an interrupted one never read
+      EINTR. A closed fd in a set is EBADF for the whole call, with the sets as they were: it
+      was a POLLNVAL no set counted, so select answered 0 at once, as a timeout does.
+  src/select/pselect.c          The mask goes through, where it was ignored.
+  src/signal/sigpending.c       SYS_NOTE_WAIT's pending form, and __pouch_take_to_sigset, so a
+      tty signal shows as itself. It called the SYS_rt_sigpending sentinel, which read ENOSYS.
   src/signal/sigsetjmp_tail.c   Through pthread_sigmask. It called the SYS_rt_sigprocmask
       sentinel, so sigsetjmp saved nothing and siglongjmp restored nothing.
   arch/aarch64/bits/syscall.h.in  __NR_note_wait 141. After a musl re-vendor, extend 0001's
       awk filter: m["note_wait"]="141";
 
 Witnesses: pouch-hello-signals `suspend-*`, `sigpause`, `sa-mask`, `nodefer`, `one-shot`,
-`one-shot-row`, `handler-mask`, `setjmp-mask`, `pipe-*`, `siginfo`, `take-*`.
+`one-shot-row`, `handler-mask`, `setjmp-mask`, `pipe-*`, `siginfo`, `take-*`, `ppoll-*`,
+`pselect-*`, `sigpending`, `select-eintr`, `select-badfd`.
 
 --- a/arch/aarch64/bits/syscall.h.in
 +++ b/arch/aarch64/bits/syscall.h.in
@@ -123,7 +136,16 @@ Witnesses: pouch-hello-signals `suspend-*`, `sigpause`, `sa-mask`, `nodefer`, `o
   *   - SIGABRT not in the supported set (sigaction(SIGABRT) returns
   *     EINVAL). abort() does not raise it: 0011-pouch-abort.patch makes
   *     abort() one `brk #0xab06`, which the kernel ends as the fault note
-@@ -121,22 +128,41 @@
+@@ -87,6 +94,8 @@
+ #include <signal.h>
+ #include <stdint.h>
+ #include <features.h>
++#include <poll.h>
++#include <sys/select.h>
+ 
+ /* Mirror NOTE_BIT_* from kernel/include/thylacine/notes.h. The kernel
+  * header isn't pulled into the pouch build (pouch is built against its
+@@ -121,22 +130,43 @@
  #define POUCH_NOTE_DISP_IGNORE   1u
  #define POUCH_NOTE_DISP_CAUGHT   2u
  #define POUCH_NOTE_DISP_RESTART  1u
@@ -135,6 +157,8 @@ Witnesses: pouch-hello-signals `suspend-*`, `sigpause`, `sa-mask`, `nodefer`, `o
 + * notes share one mask bit (kernel syscall.h). */
 +#define POUCH_NOTE_WAIT_SUSPEND  0u
 +#define POUCH_NOTE_WAIT_TAKE     1u
++#define POUCH_NOTE_WAIT_POLL     2u
++#define POUCH_NOTE_WAIT_PENDING  3u
 +#define POUCH_NOTE_TAKE_TTY_WINCH (1ull << 16)
 +#define POUCH_NOTE_TAKE_TTY_SUSP  (1ull << 17)
 +#define POUCH_NOTE_TAKE_TTY_CONT  (1ull << 18)
@@ -170,7 +194,7 @@ Witnesses: pouch-hello-signals `suspend-*`, `sigpause`, `sa-mask`, `nodefer`, `o
  
  /* Translate POSIX signum -> note name string. Writes the static-storage
   * canonical name to *out on success. Returns 0 on the supported set
-@@ -145,6 +171,12 @@
+@@ -145,6 +175,12 @@
   * family), -1 on unsupported. */
  hidden int __pouch_sig_to_note(int sig, const char **out);
  
@@ -183,7 +207,7 @@ Witnesses: pouch-hello-signals `suspend-*`, `sigpause`, `sa-mask`, `nodefer`, `o
  /* The snare a fault signal names, for a process ending itself with it:
   * SIGSEGV -> "snare:segv", SIGBUS -> "snare:bus", SIGILL -> "snare:ill",
   * SIGFPE -> "snare:fpe"; NULL for every other signal. Posted to the caller
-@@ -156,8 +188,9 @@
+@@ -156,8 +192,9 @@
   * that installs a real handler; the kernel calls this at EL0-return tail
   * when a caught note is dispatched.
   * Plan-9-style ABI: x0 = pointer to 16-byte note name on user stack;
@@ -195,7 +219,7 @@ Witnesses: pouch-hello-signals `suspend-*`, `sigpause`, `sa-mask`, `nodefer`, `o
  
  /* Bounded name compare: the kernel pushes exactly POUCH_NOTE_NAME_MAX
   * (= 16) bytes onto the user stack, NUL-padded. Returns 1 if `name`'s
-@@ -171,6 +204,11 @@
+@@ -171,8 +208,25 @@
   * undefined-behaviour or silently ignored). */
  hidden uint64_t __pouch_sigset_to_note(const sigset_t *s);
  
@@ -204,9 +228,23 @@ Witnesses: pouch-hello-signals `suspend-*`, `sigpause`, `sa-mask`, `nodefer`, `o
 + * a SIGHUP. */
 +hidden uint64_t __pouch_sigset_to_take(const sigset_t *s);
 +
++/* The other way, for sigpending: each tty row names its one signal. */
++hidden void __pouch_take_to_sigset(uint64_t t, sigset_t *out);
++
  /* Reverse: NOTE_BIT_* mask -> POSIX sigset_t. The result is a synthetic
   * sigset that callers see when reading the "old" mask. */
  hidden void __pouch_note_to_sigset(uint64_t m, sigset_t *out);
+ 
++/* poll and select with a mask in for the one call, for ppoll and pselect. A NULL mask is
++ * plain poll and select. __pouch_poll_wait is the call itself, over pollfds that are
++ * already the kernel's. Each answers as syscall_cp does: -1 with errno set. */
++hidden int __pouch_poll_wait(struct pollfd *k, nfds_t n, int ms, const sigset_t *mask);
++hidden int __pouch_poll(struct pollfd *fds, nfds_t n, int ms, const sigset_t *mask);
++hidden int __pouch_select(int n, fd_set *restrict rfds, fd_set *restrict wfds,
++                          fd_set *restrict efds, struct timeval *restrict tv,
++                          const sigset_t *restrict mask);
++
+ #endif
 --- a/src/signal/_pouch_signal.c
 +++ b/src/signal/_pouch_signal.c
 @@ -2,10 +2,9 @@
@@ -237,7 +275,7 @@ Witnesses: pouch-hello-signals `suspend-*`, `sigpause`, `sa-mask`, `nodefer`, `o
  hidden int __pouch_note_name_eq(const char *name, const char *literal)
  {
      /* The kernel zero-pads the 16-byte name buffer (struct Note.name) on
-@@ -120,6 +125,17 @@
+@@ -120,6 +125,27 @@
      return m;
  }
  
@@ -252,10 +290,20 @@ Witnesses: pouch-hello-signals `suspend-*`, `sigpause`, `sa-mask`, `nodefer`, `o
 +    return t;
 +}
 +
++hidden void __pouch_take_to_sigset(uint64_t t, sigset_t *out)
++{
++    __pouch_note_to_sigset(t & ~(uint64_t)POUCH_NOTE_BIT_TTY, out);
++    if (t & POUCH_NOTE_TAKE_TTY_QUIT)  sigaddset(out, SIGQUIT);
++    if (t & POUCH_NOTE_TAKE_TTY_SUSP)  sigaddset(out, SIGTSTP);
++    if (t & POUCH_NOTE_TAKE_TTY_CONT)  sigaddset(out, SIGCONT);
++    if (t & POUCH_NOTE_TAKE_TTY_WINCH) sigaddset(out, SIGWINCH);
++    if (t & POUCH_NOTE_TAKE_TTY_HUP)   sigaddset(out, SIGHUP);
++}
++
  hidden void __pouch_note_to_sigset(uint64_t m, sigset_t *out)
  {
      sigemptyset(out);
-@@ -138,43 +154,41 @@
+@@ -138,43 +164,41 @@
      }
  }
  
@@ -331,7 +379,7 @@ Witnesses: pouch-hello-signals `suspend-*`, `sigpause`, `sa-mask`, `nodefer`, `o
  
      if (sig < 0) {
          /* Unknown note name (kernel only delivers supported names; this
-@@ -186,11 +200,22 @@
+@@ -186,11 +210,22 @@
  
      void (*h)(int) = __pouch_sigtab[sig].sa_handler;
  
@@ -355,7 +403,7 @@ Witnesses: pouch-hello-signals `suspend-*`, `sigpause`, `sa-mask`, `nodefer`, `o
           *   SIGKILL: terminate (NDFLT; though this branch is unreachable
           *            because the kernel handles kill before delivery)
           *
-@@ -217,7 +242,7 @@
+@@ -217,7 +252,7 @@
           *   SIGCHLD / SIGWINCH / SIGCONT: NCONT. The kernel agrees these
           *       default to ignore, so NDFLT would be equivalent -- NCONT is
           *       kept because a no-op should not need the kernel's table. */
@@ -364,7 +412,7 @@ Witnesses: pouch-hello-signals `suspend-*`, `sigpause`, `sa-mask`, `nodefer`, `o
              __syscall(SYS_noted, POUCH_SYS_NOTED_NCONT);
          } else {
              long r = __syscall(SYS_noted, POUCH_SYS_NOTED_NDFLT);
-@@ -235,29 +260,32 @@
+@@ -235,29 +270,32 @@
          for (;;);     /* unreachable */
      }
  
@@ -610,6 +658,21 @@ Witnesses: pouch-hello-signals `suspend-*`, `sigpause`, `sa-mask`, `nodefer`, `o
 +	if (si) __pouch_siginfo_fill(si, sig);
 +	return sig;
  }
+--- a/src/signal/sigpending.c
++++ b/src/signal/sigpending.c
+@@ -1,7 +1,11 @@
+ #include <signal.h>
+ #include "syscall.h"
++#include "_pouch_signal.h"
+ 
+ int sigpending(sigset_t *set)
+ {
+-	return syscall(SYS_rt_sigpending, set, _NSIG/8);
++	long held = __syscall(SYS_note_wait, POUCH_NOTE_WAIT_PENDING, 0L, 0L, 0L);
++	if (held < 0) return __syscall_ret(held);
++	__pouch_take_to_sigset((uint64_t)held, set);
++	return 0;
+ }
 --- a/src/thread/pthread_sigmask.c
 +++ b/src/thread/pthread_sigmask.c
 @@ -2,16 +2,15 @@
@@ -676,3 +739,198 @@ Witnesses: pouch-hello-signals `suspend-*`, `sigpause`, `sa-mask`, `nodefer`, `o
  	}
  
  	if (old) __pouch_note_to_sigset(cur, old);
+--- a/src/select/poll.c
++++ b/src/select/poll.c
+@@ -69,17 +69,32 @@
+ #include <stddef.h>
+ #include "syscall.h"
+ #include "_pouch_socket.h"
++#include "_pouch_signal.h"
+ 
+ /* Mirrors kernel/include/thylacine/proc.h PROC_HANDLE_MAX. The kernel
+  * already rejects nfds > 64 at sys_poll_for_proc; we mirror to bound
+  * the stack allocation. */
+ #define POUCH_POLL_NFDS_MAX 64u
+ 
++/* A mask means SYS_NOTE_WAIT's poll form: the swap and the wait are one step, which is
++ * what ppoll is for (ARCHITECTURE 8.8.3). */
++hidden int __pouch_poll_wait(struct pollfd *k, nfds_t n, int ms, const sigset_t *mask)
++{
++	if (!mask) return syscall_cp(SYS_poll, k, n, ms);
++	return syscall_cp(SYS_note_wait, POUCH_NOTE_WAIT_POLL, __pouch_sigset_to_note(mask), k,
++		ms < 0 ? -1LL : ms * 1000000LL, n);
++}
++
+ int poll(struct pollfd *fds, nfds_t n, int timeout)
+ {
++	return __pouch_poll(fds, n, timeout, 0);
++}
++
++hidden int __pouch_poll(struct pollfd *fds, nfds_t n, int timeout, const sigset_t *mask)
++{
+ 	/* Zero fds: the kernel sleeps for the timeout. */
+ 	if (n == 0) {
+-		return syscall_cp(SYS_poll, 0, 0, timeout);
++		return __pouch_poll_wait(0, 0, timeout, mask);
+ 	}
+ 	if (!fds) {
+ 		errno = EFAULT;
+@@ -107,7 +122,7 @@
+ 		}
+ 	}
+ 	if (!needs_slow) {
+-		return syscall_cp(SYS_poll, fds, n, timeout);
++		return __pouch_poll_wait(fds, n, timeout, mask);
+ 	}
+ 
+ 	/* Compact the active (fd >= 0) entries into kfds, translating tagged
+@@ -153,10 +168,10 @@
+ 
+ 	if (nk == 0) {
+ 		/* Every entry was a POSIX-ignored negative fd: the n == 0 case. */
+-		return syscall_cp(SYS_poll, 0, 0, timeout);
++		return __pouch_poll_wait(0, 0, timeout, mask);
+ 	}
+ 
+-	int r = syscall_cp(SYS_poll, kfds, nk, timeout);
++	int r = __pouch_poll_wait(kfds, nk, timeout, mask);
+ 
+ 	/* Map revents back (fd left untouched so the caller still sees its
+ 	 * original tagged identifiers). Ignored fd < 0 entries already read
+--- a/src/select/ppoll.c
++++ b/src/select/ppoll.c
+@@ -1,4 +1,4 @@
+-/* pouch: ppoll routed through SYS_POLL (= 29).
++/* pouch: ppoll, on poll's own path.
+  *
+  * Thylacine's poll uses int timeout_ms (Linux poll(2) shape); ppoll's
+  * timespec gets folded to ms here. The conversion ROUNDS UP — POSIX
+@@ -6,23 +6,22 @@
+  * bug; firing later is permitted) but a sub-ms positive timeout that
+  * truncates to zero would degenerate into a non-blocking probe.
+  *
+- * The sigset_t argument is IGNORED at v1.0 — Thylacine does not yet
+- * deliver signals atomically with poll. The race window between sigmask
+- * unblock and a SYS_POLL park is the same hazard ppoll exists to
+- * eliminate; v1.0 callers that depend on the atomic-sigmask semantics
+- * must use a thread-level signal model instead. See docs/POUCH-DESIGN.md
+- * sub-chunk 13 (pouch-signals) for the planned re-enable path.
++ * The mask goes in for the one call, and the swap and the wait are one step
++ * (__pouch_poll_wait). Any answer but EINTR has the caller's mask back before it
++ * returns, so a note only the mask let in stays pending and no handler runs beside
++ * a ready fd. EINTR has the handler run under the mask, and its return puts the
++ * caller's back (ARCHITECTURE 8.8.3).
+  */
+ #define _BSD_SOURCE
+ #include <poll.h>
+ #include <signal.h>
+ #include <errno.h>
+ #include "syscall.h"
++#include "_pouch_signal.h"
+ 
+ int ppoll(struct pollfd *fds, nfds_t n, const struct timespec *to,
+           const sigset_t *mask)
+ {
+-	(void)mask;
+ 	int timeout_ms;
+ 	if (!to) {
+ 		timeout_ms = -1;
+@@ -39,9 +38,9 @@
+ 		if (ms > 0x7fffffffLL) ms = 0x7fffffffLL;
+ 		timeout_ms = (int)ms;
+ 	}
+-	/* Through poll(), not SYS_poll: poll() is where a pouch socket fd is
++	/* Through poll's body, not SYS_poll: it is where a pouch socket fd is
+ 	 * translated to its kernel poll target and a negative fd is dropped. Raw,
+ 	 * a tagged fd reaches the kernel as 0x4000000N, answers POLLNVAL, counts
+ 	 * as ready and busy-spins the caller. */
+-	return poll(fds, n, timeout_ms);
++	return __pouch_poll(fds, n, timeout_ms, mask);
+ }
+--- a/src/select/pselect.c
++++ b/src/select/pselect.c
+@@ -1,10 +1,8 @@
+-/* pouch: pselect routed through select (and thus SYS_POLL).
++/* pouch: pselect, on select's own path.
+  *
+- * Same caveats as ppoll: the sigset_t argument is IGNORED at v1.0 —
+- * Thylacine does not yet deliver signals atomically with poll. The
+- * timespec gets folded to a timeval; sub-µs precision is unobservable
+- * because the kernel's poll deadline is millisecond-grained anyway.
+- * See pselect.c's comment in src/select/select.c for the full
++ * The mask does as ppoll's does. The timespec gets folded to a timeval;
++ * sub-µs precision is unobservable because the kernel's poll deadline is
++ * millisecond-grained anyway. See src/select/select.c for the full
+  * translation contract.
+  */
+ #include <sys/select.h>
+@@ -13,13 +11,13 @@
+ #include <stdint.h>
+ #include <errno.h>
+ #include "syscall.h"
++#include "_pouch_signal.h"
+ 
+ int pselect(int n, fd_set *restrict rfds, fd_set *restrict wfds,
+             fd_set *restrict efds, const struct timespec *restrict ts,
+             const sigset_t *restrict mask)
+ {
+-	(void)mask;
+-	if (!ts) return select(n, rfds, wfds, efds, NULL);
++	if (!ts) return __pouch_select(n, rfds, wfds, efds, NULL, mask);
+ 	if (ts->tv_sec < 0 || ts->tv_nsec < 0 ||
+ 	    ts->tv_nsec >= 1000000000L) {
+ 		return __syscall_ret(-EINVAL);
+@@ -34,5 +32,5 @@
+ 		if (tv.tv_sec < 0x7fffffffL) tv.tv_sec += 1;
+ 		tv.tv_usec -= 1000000L;
+ 	}
+-	return select(n, rfds, wfds, efds, &tv);
++	return __pouch_select(n, rfds, wfds, efds, &tv, mask);
+ }
+--- a/src/select/select.c
++++ b/src/select/select.c
+@@ -26,6 +26,7 @@
+ #include <stdint.h>
+ #include <errno.h>
+ #include "syscall.h"
++#include "_pouch_signal.h"
+ 
+ /* The kernel ceiling on nfds (PROC_HANDLE_MAX). See
+  * kernel/include/thylacine/poll.h. */
+@@ -34,6 +35,13 @@
+ int select(int n, fd_set *restrict rfds, fd_set *restrict wfds,
+            fd_set *restrict efds, struct timeval *restrict tv)
+ {
++	return __pouch_select(n, rfds, wfds, efds, tv, 0);
++}
++
++hidden int __pouch_select(int n, fd_set *restrict rfds, fd_set *restrict wfds,
++                          fd_set *restrict efds, struct timeval *restrict tv,
++                          const sigset_t *restrict mask)
++{
+ 	if (n < 0 || n > FD_SETSIZE) return __syscall_ret(-EINVAL);
+ 
+ 	int timeout_ms;
+@@ -80,12 +88,19 @@
+ 	if (npfd == 0) {
+ 		/* POSIX: select(n, NULL, NULL, NULL, tv) sleeps for tv then
+ 		 * returns 0. */
+-		return syscall_cp(SYS_poll, 0, 0, timeout_ms);
++		return __pouch_poll_wait(0, 0, timeout_ms, mask);
+ 	}
+ 
+-	int rc = syscall_cp(SYS_poll, pfds, (unsigned long)npfd, timeout_ms);
+-	if (rc < 0) return __syscall_ret(rc);
++	/* -1 with errno already set: a second __syscall_ret would read it as a code. */
++	int rc = __pouch_poll_wait(pfds, (nfds_t)npfd, timeout_ms, mask);
++	if (rc < 0) return rc;
+ 
++	/* POLLNVAL anywhere fails the whole call, with the sets as they were: select has no
++	 * per-fd error, and a hit it did not count would read as a timeout. */
++	for (int i = 0; i < npfd; i++) {
++		if (pfds[i].revents & POLLNVAL) return __syscall_ret(-EBADF);
++	}
++
+ 	if (rfds) FD_ZERO(rfds);
+ 	if (wfds) FD_ZERO(wfds);
+ 	if (efds) FD_ZERO(efds);

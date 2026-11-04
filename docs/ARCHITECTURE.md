@@ -953,7 +953,7 @@ The `RFNOTEG` rfork bit (already reserved in `proc.h`) selects share-vs-copy of 
 | 48 | `SYS_NOTE_MASK` | `new_mask`, `old_mask_out_va` | 0 / -EINVAL |
 | 138 | `SYS_POSTNOTE_TID` | `tid`, `name_va`, `name_len` | 0 / -EINVAL / -EFAULT / -ESRCH / -EAGAIN; a fault snare does not return |
 | 139 | `SYS_NOTE_DISPOSE` | `name_va`, `name_len`, `disposition` (0 = default, 1 = ignore, 2 = caught), `flags` (1 = restart, 2 = reset at delivery, 4 = no defer, bits 16..31 the handler's `sa_mask`) | 0 / -EINVAL / -EFAULT / -ENOMEM — write the calling Proc's row for a note (§8.8.3). `kill` has no row. `flags` is for a caught row only. A caught row needs a registered handler or an open notes fd |
-| 141 | `SYS_NOTE_WAIT` | `how` (0 = suspend, 1 = take), `set`, `rec_va`, `timeout_ns` | 0 / -EINTR / -EAGAIN / -EINVAL / -EFAULT — wait for a note under a mask of the call's own, or take one with no handler (§8.8.3) |
+| 141 | `SYS_NOTE_WAIT` | `how` (0 = suspend, 1 = take, 2 = poll, 3 = pending), `set`, `rec_va` (poll: the `pollfd *`), `timeout_ns`, `nfds` (poll only) | 0, a ready count or a take word / -EINTR / -EAGAIN / -EINVAL / -EFAULT — wait for a note or a poll under a mask of the call's own, take a note with no handler, or read what is held (§8.8.3) |
 
 **`SYS_POSTNOTE` permission gate at v1.0**: caller must be the target's parent OR `pid == self_pid`. **A-4b (IDENTITY-DESIGN §9.8) generalizes cross-process kill** via `write "kill"`/`"killgrp"` to `/proc/<pid>/ctl`, two-axis-authorized (owner-rwx on the ctl file OR `CAP_HOSTOWNER` OR the new elevation-only `CAP_KILL`); `SYS_POSTNOTE` stays the parent/self fast path. The general `/proc/<pid>/note`-file form (posting *arbitrary* notes by namespace write-rights on the Spoor) remains the later composition (§7.6.8 [OPEN Q 7.6.A]).
 
@@ -2019,8 +2019,9 @@ owns the mask, and Pouch keeps no copy of it. `in_handler` still holds every not
 the handler's duration, on both paths: there is no nesting, so `sa_mask` and
 `SA_NODEFER` change what a handler reads and passes on, and not what can interrupt it.
 
-`SYS_NOTE_WAIT` (141) has two forms, and `rt_sigsuspend` and `rt_sigtimedwait` sit on
-the same two cores.
+`SYS_NOTE_WAIT` (141) has four forms, and `rt_sigsuspend`, `rt_sigtimedwait`, the masks
+of `ppoll` and `pselect6`, and `rt_sigpending` sit on the same cores (operator vote 28,
+2026-11-04; `dec-2026-11-04-poll-mask`).
 - **`NOTE_WAIT_SUSPEND`** stores the caller's mask in the saved slot, sets the call's
   mask and sleeps, with no window between them. `NOTE_WF_MASK_HELD` in
   `Thread.note_wait_flags` says the real mask sits in the saved slot until the handler's
@@ -2045,6 +2046,22 @@ the same two cores.
   looks. A copy-out fault re-queues the note and re-arms what the take drained. A caught
   note outside the word unwinds the call, after a last look for a take; an untimed one is
   re-issued if no handler ran. Timeout 0 polls and a deadline answers `-EAGAIN`.
+- **`NOTE_WAIT_POLL`** is `poll` with a mask in for the one call: `set` the mask, `rec_va`
+  the `pollfd` array, `x4` its length, and zero fds sleep for the timeout. It differs from
+  a suspend because it can end some other way. A caught note goes on to the poll, whose
+  pass reads the latch only after finding nothing ready, so a ready fd answers first, as
+  Linux's `do_poll` has it. A note only the tail can act on arms nothing a poll reads, so
+  the call answers `-EINTR` at once and is re-issued after the tail takes the note, with
+  no time gone, even when it is timed. Any answer but `-EINTR` puts the caller's mask back
+  before the tail, Linux's `restore_saved_sigmask_unless`, so a note only the mask let in
+  stays pending and no handler runs beside a ready fd. `-EINTR` leaves it for the handler's
+  return or the tail. In a handler the call leaves the masks alone and no note can run: a
+  stated imprecision, the same as a suspend's. The array is read before the mask goes in,
+  so a call that was going to fault has changed nothing.
+- **`NOTE_WAIT_PENDING`** answers a take word of what is queued for this thread and held,
+  its own direct notes and the queue, by row in the tty family. It reads the interrupted
+  mask, not a wait's. In a handler every note is held, so it reads all of them. It takes
+  nothing.
 
 ### 8.9 Open design questions
 

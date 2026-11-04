@@ -2617,6 +2617,8 @@ static inline long t_note_dispose(const char *name, unsigned long name_len,
 #define T_SYS_NOTE_WAIT 141
 #define T_NOTE_WAIT_SUSPEND 0ul
 #define T_NOTE_WAIT_TAKE 1ul
+#define T_NOTE_WAIT_POLL 2ul
+#define T_NOTE_WAIT_PENDING 3ul
 #define T_NOTE_TAKE_TTY_WINCH (1ul << 16)
 #define T_NOTE_TAKE_TTY_SUSP  (1ul << 17)
 #define T_NOTE_TAKE_TTY_CONT  (1ul << 18)

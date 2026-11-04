@@ -817,6 +817,8 @@ pub const T_NOTE_DISP_MASK_SHIFT: u32 = 16;
 // at a time (kernel syscall.h). The other families are 1 << T_NOTE_BIT_*.
 pub const T_NOTE_WAIT_SUSPEND: u64 = 0;
 pub const T_NOTE_WAIT_TAKE: u64    = 1;
+pub const T_NOTE_WAIT_POLL: u64    = 2;
+pub const T_NOTE_WAIT_PENDING: u64 = 3;
 pub const T_NOTE_TAKE_TTY_WINCH: u64 = 1 << 16;
 pub const T_NOTE_TAKE_TTY_SUSP: u64  = 1 << 17;
 pub const T_NOTE_TAKE_TTY_CONT: u64  = 1 << 18;

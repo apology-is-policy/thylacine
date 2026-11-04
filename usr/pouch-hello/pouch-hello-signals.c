@@ -62,7 +62,7 @@
 //   pouch-hello-signals: death usr1 reads WIFSIGNALED SIGUSR1  (and usr2)
 //   pouch-hello-signals: kill errnos read ESRCH and EPERM
 //   pouch-hello-signals: blocked <leg> ok  (x18 legs; see test_blocked)
-//   pouch-hello-signals: note-wait ok: 25 legs  (see test_note_wait)
+//   pouch-hello-signals: note-wait ok: 45 legs  (see test_note_wait)
 //   pouch-hello-signals: a poll or select over no fds sleeps for its timeout
 //   POUCH_CENSUS_SIGNALS (pouch-census.h; joey matches it)
 //
@@ -70,6 +70,7 @@
 // "exit 0" or non-zero exit status.
 
 #undef NDEBUG
+#define _GNU_SOURCE
 #include "pouch-census.h"
 #include <assert.h>
 #include <signal.h>
@@ -622,8 +623,152 @@ static int nw_done(void) {
     return n == 1 && b == 'D' ? 0 : 78;
 }
 
+// ppoll and pselect, one variable apart: which one. *ready says the fd came home set.
+static int nw_wait_fd(int sel, int fd, const struct timespec *ts, const sigset_t *mask, int *ready) {
+    int rc;
+    if (sel) {
+        fd_set r;
+        FD_ZERO(&r);
+        FD_SET(fd, &r);
+        rc = pselect(fd + 1, &r, NULL, NULL, ts, mask);
+        *ready = rc > 0 && FD_ISSET(fd, &r);
+    } else {
+        struct pollfd pf = { fd, POLLIN, 0 };
+        rc = ppoll(&pf, 1, ts, mask);
+        *ready = rc > 0 && (pf.revents & POLLIN) != 0;
+    }
+    return rc;
+}
+
+// The mask in a ppoll or pselect (operator vote 28, ARCH 8.8.3). The wait's mask opens
+// SIGUSR1 and holds SIGUSR2; the caller holds both.
+static int nw_mask_leg(int sel, const char *what) {
+    sigset_t none = nw_set(0, 0), usr1 = nw_set(SIGUSR1, 0), usr2 = nw_set(SIGUSR2, 0), pend;
+    const struct timespec two = { 2, 0 }, shortly = { 0, 30000000 }, zero = { 0, 0 };
+    int p[2], ready = 0, rc;
+    if (pipe(p) != 0) return 60;
+    if (nw_catch(SIGUSR1, nw_handler, 0, SIGTERM) != 0) return 60;
+
+    // A note the mask opens ends the call with EINTR. The handler runs under the call's
+    // mask, sa_mask and its own bit, and its return has the caller's mask back: the next
+    // note stays held.
+    if (!strcmp(what, "note")) {
+        nw_block(SIGUSR1, SIGUSR2);
+        raise(SIGUSR1);
+        errno = 0;
+        rc = nw_wait_fd(sel, p[0], &two, &usr2, &ready);
+        if (rc != -1 || errno != EINTR) return 144;
+        if (g_nw_runs != 1) return 145;
+        if (sigismember(&g_nw_seen, SIGUSR2) != 1 || sigismember(&g_nw_seen, SIGUSR1) != 1 ||
+            sigismember(&g_nw_seen, SIGTERM) != 1) return 146;
+        if (!nw_masked(SIGUSR1) || !nw_masked(SIGUSR2) || nw_masked(SIGTERM)) return 147;
+        raise(SIGUSR1);
+        if (g_nw_runs != 1 || sigtimedwait(&usr1, NULL, &zero) != SIGUSR1) return 148;
+        return nw_done();
+    }
+    // A ready fd answers first: no handler, the caller's mask back, the note still there.
+    if (!strcmp(what, "ready")) {
+        char c = 'x';
+        nw_block(SIGUSR1, SIGUSR2);
+        if (write(p[1], &c, 1) != 1) return 60;
+        raise(SIGUSR1);
+        rc = nw_wait_fd(sel, p[0], &two, &usr2, &ready);
+        if (rc != 1 || !ready) return 149;
+        if (g_nw_runs != 0 || !nw_masked(SIGUSR1)) return 150;
+        if (sigpending(&pend) != 0 || sigismember(&pend, SIGUSR1) != 1) return 151;
+        if (sigtimedwait(&usr1, NULL, &zero) != SIGUSR1 || g_nw_runs != 0) return 152;
+        return nw_done();
+    }
+    // The deadline restores it too, and the next note stays held.
+    if (!strcmp(what, "timeout")) {
+        nw_block(SIGUSR1, SIGUSR2);
+        long long t0 = leg_now_ms();
+        rc = nw_wait_fd(sel, p[0], &shortly, &usr2, &ready);
+        long long spent = leg_now_ms() - t0;
+        if (rc != 0 || spent < 25) return 153;
+        if (!nw_masked(SIGUSR1)) return 154;
+        raise(SIGUSR1);
+        if (g_nw_runs != 0 || sigtimedwait(&usr1, NULL, &zero) != SIGUSR1) return 155;
+        // A deadline writes the array home too, or a stale revents reads as an answer.
+        struct pollfd stale = { p[0], POLLIN, POLLOUT };
+        if (ppoll(&stale, 1, &zero, &usr2) != 0 || stale.revents != 0) return 176;
+        return nw_done();
+    }
+    // The driver's post reaches a call that is asleep.
+    if (!strcmp(what, "asleep")) {
+        nw_block(SIGUSR1, 0);
+        leg_ready();
+        errno = 0;
+        rc = nw_wait_fd(sel, p[0], NULL, &none, &ready);
+        return rc == -1 && errno == EINTR && g_nw_runs >= 1 && nw_masked(SIGUSR1) ? 0 : 156;
+    }
+    if (!strcmp(what, "dies")) {
+        nw_block(SIGTERM, 0);
+        leg_ready();
+        (void)nw_wait_fd(sel, p[0], NULL, &none, &ready);
+        return 157;
+    }
+    // A negative fd sends poll down the path that copies the array, and with nothing else
+    // it is the path that sleeps. The mask goes down both.
+    if (!strcmp(what, "slow")) {
+        struct pollfd two_fds[2] = { { -1, POLLIN, 0 }, { p[0], POLLIN, 0 } };
+        nw_block(SIGUSR1, SIGUSR2);
+        raise(SIGUSR1);
+        errno = 0;
+        if (ppoll(two_fds, 2, &two, &usr2) != -1 || errno != EINTR || g_nw_runs != 1) return 177;
+        raise(SIGUSR1);
+        errno = 0;
+        if (ppoll(two_fds, 1, &two, &usr2) != -1 || errno != EINTR || g_nw_runs != 2) return 178;
+        return nw_done();
+    }
+    // With no fds the kernel takes another path, and the mask holds on it.
+    if (!strcmp(what, "nofds")) {
+        nw_block(SIGUSR1, SIGUSR2);
+        raise(SIGUSR1);
+        errno = 0;
+        rc = sel ? pselect(0, NULL, NULL, NULL, &two, &usr2) : ppoll(NULL, 0, &two, &usr2);
+        if (rc != -1 || errno != EINTR || g_nw_runs != 1 || !nw_masked(SIGUSR1)) return 158;
+        rc = sel ? pselect(0, NULL, NULL, NULL, &shortly, &usr2) : ppoll(NULL, 0, &shortly, &usr2);
+        if (rc != 0 || !nw_masked(SIGUSR1)) return 159;
+        return nw_done();
+    }
+    // Held already, with a row that terminates: the wait never starts, and no latch would
+    // have ended it.
+    if (!strcmp(what, "tail")) {
+        pid_t kid = leg_native_fork();
+        if (kid < 0) return 60;
+        if (kid == 0) {
+            nw_block(SIGTERM, 0);
+            raise(SIGTERM);
+            (void)nw_wait_fd(sel, p[0], &two, &none, &ready);
+            _exit(71);
+        }
+        int st = 0;
+        if (waitpid(kid, &st, 0) != kid) return 75;
+        if (!WIFSIGNALED(st) || WTERMSIG(st) != SIGTERM) return 160;
+        return nw_done();
+    }
+    // Held already, with a default that ignores: the tail drops it and the timed call goes
+    // on, and no EINTR says it ever ended.
+    if (!strcmp(what, "quiet")) {
+        nw_block(SIGCHLD, 0);
+        raise(SIGCHLD);
+        if (sigpending(&pend) != 0 || sigismember(&pend, SIGCHLD) != 1) return 161;
+        long long t0 = leg_now_ms();
+        rc = nw_wait_fd(sel, p[0], &shortly, &none, &ready);
+        long long spent = leg_now_ms() - t0;
+        if (rc != 0 || spent < 25) return 162;
+        if (sigpending(&pend) != 0 || sigismember(&pend, SIGCHLD) == 1) return 163;
+        if (!nw_masked(SIGCHLD)) return 164;
+        return nw_done();
+    }
+    return 59;
+}
+
 // CHILD: one leg. Exit 0 is the leg's claim holding; a code above 99 names what failed.
 static int nw_child(const char *mode) {
+    if (!strncmp(mode, "ppoll-", 6)) return nw_mask_leg(0, mode + 6);
+    if (!strncmp(mode, "pselect-", 8)) return nw_mask_leg(1, mode + 8);
     sigset_t none = nw_set(0, 0), usr1 = nw_set(SIGUSR1, 0), usr2 = nw_set(SIGUSR2, 0);
     siginfo_t si;
     int got = 0;
@@ -900,6 +1045,56 @@ static int nw_child(const char *mode) {
         int e = errno;
         long long spent = leg_now_ms() - t0;
         return rc == -1 && e == EAGAIN && g_leg_caught >= 1 && spent >= 1400 ? 0 : 141;
+    }
+    // Held by the mask, by thread or by process, each shows. Taken, it is gone.
+    if (!strcmp(mode, "sigpending")) {
+        sigset_t pend;
+        if (nw_catch(SIGUSR1, nw_handler, 0, 0) != 0) return 60;
+        if (nw_catch(SIGUSR2, nw_other, 0, 0) != 0) return 60;
+        nw_block(SIGUSR1, SIGUSR2);
+        if (sigpending(&pend) != 0 || sigismember(&pend, SIGUSR1) == 1 ||
+            sigismember(&pend, SIGUSR2) == 1) return 165;
+        raise(SIGUSR1);
+        if (sigpending(&pend) != 0 || sigismember(&pend, SIGUSR1) != 1 ||
+            sigismember(&pend, SIGUSR2) == 1) return 166;
+        kill(getpid(), SIGUSR2);
+        if (sigpending(&pend) != 0 || sigismember(&pend, SIGUSR1) != 1 ||
+            sigismember(&pend, SIGUSR2) != 1) return 167;
+        if (sigwait(&usr1, &got) != 0 || got != SIGUSR1) return 168;
+        if (sigpending(&pend) != 0 || sigismember(&pend, SIGUSR1) == 1 ||
+            sigismember(&pend, SIGUSR2) != 1) return 169;
+        if (sigwait(&usr2, &got) != 0 || got != SIGUSR2) return 170;
+        if (sigpending(&pend) != 0 || sigismember(&pend, SIGUSR2) == 1) return 171;
+        if (g_nw_runs != 0 || g_nw_other != 0) return 172;
+        return nw_done();
+    }
+    // A plain select's EINTR survives its own conversion, and it has no mask to confuse it.
+    if (!strcmp(mode, "select-eintr")) {
+        int p[2];
+        fd_set r;
+        if (pipe(p) != 0 || nw_catch(SIGUSR1, nw_handler, 0, 0) != 0) return 60;
+        FD_ZERO(&r);
+        FD_SET(p[0], &r);
+        leg_ready();
+        errno = 0;
+        int rc = select(p[0] + 1, &r, NULL, NULL, NULL);
+        return rc == -1 && errno == EINTR && g_nw_runs >= 1 ? 0 : 173;
+    }
+    // A closed fd in a set is the whole call's error, and the sets stay as they were. A
+    // select that read POLLNVAL as nothing ready answered 0 at once, as a timeout does.
+    if (!strcmp(mode, "select-badfd")) {
+        int p[2];
+        fd_set r;
+        struct timeval left = { 2, 0 };
+        if (pipe(p) != 0) return 60;
+        close(p[0]);
+        FD_ZERO(&r);
+        FD_SET(p[0], &r);
+        errno = 0;
+        int rc = select(p[0] + 1, &r, NULL, NULL, &left);
+        if (rc != -1 || errno != EBADF) return 174;
+        if (!FD_ISSET(p[0], &r)) return 175;
+        return nw_done();
     }
     return 59;
 }
@@ -1239,6 +1434,26 @@ static int test_note_wait(void) {
         { .mode = "take-badts",      .data = 1 },
         { .mode = "take-bystander",  .sig = SIGUSR1, .ack = 1, .then = SIGUSR2 },
         { .mode = "take-remaining",  .sig = SIGUSR1, .repost = 1 },
+        { .mode = "ppoll-note",      .data = 1 },
+        { .mode = "pselect-note",    .data = 1 },
+        { .mode = "ppoll-ready",     .data = 1 },
+        { .mode = "pselect-ready",   .data = 1 },
+        { .mode = "ppoll-timeout",   .data = 1 },
+        { .mode = "pselect-timeout", .data = 1 },
+        { .mode = "ppoll-asleep",    .sig = SIGUSR1 },
+        { .mode = "pselect-asleep",  .sig = SIGUSR1 },
+        { .mode = "ppoll-dies",      .sig = SIGTERM, .dies = SIGTERM },
+        { .mode = "pselect-dies",    .sig = SIGTERM, .dies = SIGTERM },
+        { .mode = "ppoll-slow",      .data = 1 },
+        { .mode = "ppoll-nofds",     .data = 1 },
+        { .mode = "pselect-nofds",   .data = 1 },
+        { .mode = "ppoll-tail",      .data = 1 },
+        { .mode = "pselect-tail",    .data = 1 },
+        { .mode = "ppoll-quiet",     .data = 1 },
+        { .mode = "pselect-quiet",   .data = 1 },
+        { .mode = "sigpending",      .data = 1 },
+        { .mode = "select-eintr",    .sig = SIGUSR1 },
+        { .mode = "select-badfd",    .data = 1 },
     };
     // One line for the lot: joey's reap-first capture holds a pipe's ring, and a wide
     // failure has to fit in it to say why.
