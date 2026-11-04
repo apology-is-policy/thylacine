@@ -26,8 +26,10 @@
 #                first draft did) would have made this target permanently red and
 #                therefore useless.
 #   NO-HOST   -- it CANNOT be host-tested: it depends on `libthyla-rs`
-#                unconditionally, whose `_start` inline asm cannot assemble for
-#                the host (`.type _start, %function` is ELF, not Mach-O).
+#                unconditionally. On a Mach-O host its `_start` inline asm cannot
+#                assemble (`.type _start, %function` is ELF); on an ELF host that
+#                assembles, and its `#[panic_handler]` collides with std's in the
+#                test harness (E0152).
 #   NO-TESTS  -- it host-builds fine and runs no test.
 #
 # STRANDED cuts across all five, and it is the figure that matters most. It is
@@ -252,9 +254,9 @@ for crate in "${crates[@]}"; do
         continue
     fi
 
-    # The host-impossible signature: libthyla-rs's ELF-only `_start` asm, or a
-    # cargo refusal to build it for this target at all.
-    if grep -qE '\.type _start, %function|could not compile `libthyla-rs`' "$log"; then
+    # The host-impossible signatures: libthyla-rs's ELF-only `_start` asm, a cargo
+    # refusal to build it for this target at all, or its panic handler against std's.
+    if grep -qE '\.type _start, %function|could not compile `libthyla-rs`|the lang item is first defined in crate `libthyla_rs`' "$log"; then
         nohost+=("$crate")
     else
         fail+=("$crate")

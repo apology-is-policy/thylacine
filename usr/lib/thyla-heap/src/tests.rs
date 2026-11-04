@@ -43,9 +43,13 @@ const ARENA: usize = 1 << 30;
 
 impl Mock {
     fn new() -> &'static Mock {
-        let layout = std::alloc::Layout::from_size_align(ARENA, MIB).unwrap();
-        let arena = unsafe { std::alloc::alloc_zeroed(layout) } as usize;
-        assert!(arena != 0);
+        // Over-asked and rounded, not aligned in the layout: at the allocator's own alignment
+        // calloc maps it and a test pays only for what it touches, while past that alignment
+        // std zeroes all of it, and each test leaks one. The placements assume a MiB boundary.
+        let layout = std::alloc::Layout::from_size_align(ARENA + MIB, 16).unwrap();
+        let raw = unsafe { std::alloc::alloc_zeroed(layout) } as usize;
+        assert!(raw != 0);
+        let arena = (raw + MIB - 1) & !(MIB - 1);
         Box::leak(Box::new(Mock {
             arena,
             maps: Mutex::new(Vec::new()),
