@@ -128,12 +128,12 @@ Generated — do not edit between the markers (`quaestor render`).
 
 ## Recent changes
 
+- 2026-11-04 [[chg-2026-11-04-walk-errno-close]] — The walk errno close: rounds 1 and 2, the first boots, 32 sabotages
 - 2026-11-03 [[chg-2026-11-03-item-11c-close]] — Item 11c close: rounds 1 to 3, the sweep, three leases
 - 2026-11-03 [[chg-2026-11-03-item-11c]] — A per-note table for native programs, SA_RESTART in the kernel, and an open a note can interrupt
+- 2026-11-03 [[chg-2026-11-03-walk-errno]] — A failed walk says why: only a miss reads ENOENT
 - 2026-11-02 [[chg-2026-11-02-f3-what-it-is]] — What review finding F-3 is, read from main's code
 - 2026-11-02 [[chg-2026-11-02-join-planted-cleanup]] — The F1 test's cleanup ran on an early failure, three planted points
 - 2026-11-02 [[chg-2026-11-02-thread-model-c4]] — Thread-model C4: a note aimed at one thread
 - 2026-11-02 [[chg-2026-11-02-thread-overhaul-position]] — The thread-model overhaul's position: C7 was not its last chunk
-- 2026-11-02 [[chg-2026-11-02-usr-notes]] — SIGUSR1 and SIGUSR2 become notes, and every family word outgrows its byte
-- 2026-10-29 [[chg-2026-10-29-aux-corona-join]] — The corona join: aux-3 carries env-a and env-c, and every deferring lock is taken through its helper
 <!-- generated:end -->

@@ -288,6 +288,29 @@ static bool g_fix_open_intr;
 static u32  g_fix_intr_closes;
 static bool g_fix_close_intr;
 
+// A walk of this name under this parent (0: any) fails as a server's Rlerror does,
+// with this reason, and learns nothing about the name. Reason 0 is a NULL with no reason
+// given, as dev9p's short reply is. Skip counts matching walks let through first.
+static const char *g_fix_walk_err_name;
+static u64         g_fix_walk_err_parent;
+static int         g_fix_walk_err_rc;
+static int         g_fix_walk_err_skip;
+static u64         g_fix_stat_err_qid;
+static u64         g_fix_walk_err2_parent;
+static int         g_fix_walk_err2_rc;
+
+static bool fix_walk_refused(u64 parent, const char *name) {
+    if (!g_fix_walk_err_name || !fix_streq(name, g_fix_walk_err_name)) return false;
+    if (g_fix_walk_err2_parent && g_fix_walk_err2_parent == parent) {
+        dev_walk_failed(g_fix_walk_err2_rc);
+        return true;
+    }
+    if (g_fix_walk_err_parent && g_fix_walk_err_parent != parent)      return false;
+    if (g_fix_walk_err_skip > 0) { g_fix_walk_err_skip--; return false; }
+    if (g_fix_walk_err_rc) dev_walk_failed(g_fix_walk_err_rc);
+    return true;
+}
+
 static struct Walkqid *fix_walk(struct Spoor *c, struct Spoor *nc,
                                 const char **name, int nname) {
     g_fix_intr_walks++;
@@ -301,6 +324,7 @@ static struct Walkqid *fix_walk(struct Spoor *c, struct Spoor *nc,
     // dev9p (round-1 F1's inverse: a double LOOSER than production).
     if (c->flag & COPEN) return NULL;
     if (nname > 0) g_fix_walk_calls++;   // real steps only (0-walk = clone)
+    if (nname > 0 && fix_walk_refused(c->qid.path, name[0])) return NULL;
     struct Walkqid *wq = walkqid_alloc(nname > 0 ? nname : 1);
     if (!wq) return NULL;
 
@@ -354,6 +378,7 @@ static int g_fix_stat_calls;
 
 static int fix_stat_native(struct Spoor *c, struct t_stat *out) {
     if (!c || !out) return -1;
+    if (g_fix_stat_err_qid && c->qid.path == g_fix_stat_err_qid) return -T_E_IO;
     g_fix_stat_calls++;
     return fix_stat_qid(c->qid.path, out);
 }
@@ -388,6 +413,7 @@ static struct Walkqid *fix_walk_attrs(struct Spoor *c, struct Spoor *nc,
         if (l == 0 || l > SYS_WALK_OPEN_NAME_MAX) break;
         for (size_t k = 0; k < l; k++) nb[k] = names[i][k];
         nb[l] = '\0';
+        if (fix_walk_refused(cur, nb)) { walkqid_free(wq); return NULL; }
         struct Qid next;
         if (!fix_walk_one(cur, nb, &next)) break;
         if (fix_stat_qid(next.path, &sts[n]) != 0) break;
@@ -5127,3 +5153,326 @@ void test_stalk_dir_landed_name(void) {
     TEST_ASSERT(r_al == 0 && landed_eq(alias, 7, "/a/deep"),
                 "the name may overwrite the path it was resolved from (chdir's reuse)");
 }
+
+// ER-2: a walk that fails for a reason other than a missing name says so, in the fused
+// arm and the per-component arm, and in the query form, which has no nc to carry it.
+static void walk_reason_set(const char *name, u64 parent, int rc, int skip) {
+    g_fix_walk_err_name   = name;
+    g_fix_walk_err_parent = parent;
+    g_fix_walk_err_rc     = rc;
+    g_fix_walk_err_skip   = skip;
+}
+
+static void walk_reason_clear(void) {
+    walk_reason_set(NULL, 0, 0, 0);
+    g_fix_walk_err2_parent = 0;
+    g_fix_walk_err2_rc     = 0;
+}
+
+#define WALK_REASONS 7u
+static void walk_reason_case(struct Spoor *root) {
+    // The NULL with no reason follows a real one: the reason is the call's, not the thread's.
+    static const struct { int rc; int want; const char *what; } cases[WALK_REASONS] = {
+        { -T_E_IO,    T_E_IO,    "an integrity EIO reads EIO, not absent" },
+        { 0,          T_E_NOENT, "a NULL with no reason is a miss, after one that had one" },
+        { -116,       116,       "ESTALE crosses, by value" },
+        { -T_E_ACCES, T_E_ACCES, "a server's EACCES crosses" },
+        { -T_E_NOENT, T_E_NOENT, "a server's ENOENT is a miss" },
+        { -1,         T_E_IO,    "-1 never reads as errno 1" },
+        { -5000,      T_E_IO,    "an errno out of range reads EIO" },
+    };
+    struct Proc p; mkproc_system(&p);
+    int first[WALK_REASONS], deep[WALK_REASONS], queried[WALK_REASONS];
+    bool resolved = false;
+    u64 live_before = spoor_total_allocated() - spoor_total_freed();
+    for (u32 i = 0; i < WALK_REASONS; i++) {
+        int err = 0;
+        walk_reason_set("a", 0, cases[i].rc, 0);
+        struct Spoor *q = stalk_err(&p, root, "a/b", 3, STALK_WALK, 0, &err);
+        if (q) { resolved = true; spoor_clunk(q); }
+        first[i] = err;
+
+        struct t_stat st;
+        err = 0;
+        if (stalk_stat(&p, root, "a", 1, 0, &st, &err) == 0) resolved = true;
+        queried[i] = err;
+
+        err = 0;
+        walk_reason_set("b", 0, cases[i].rc, 0);
+        q = stalk_err(&p, root, "a/b", 3, STALK_WALK, 0, &err);
+        if (q) { resolved = true; spoor_clunk(q); }
+        deep[i] = err;
+    }
+    // One name at a time: a failed run of two re-walks through the plain wrapper, which clears
+    // the slot on its own, and that would hide a fused wrapper that does not.
+    struct t_stat one_st;
+    int one_failed = 0, one_missed = 0;
+    walk_reason_set("a", 0, -T_E_IO, 0);
+    if (stalk_stat(&p, root, "a", 1, 0, &one_st, &one_failed) == 0) resolved = true;
+    walk_reason_set("a", 0, 0, 0);
+    if (stalk_stat(&p, root, "a", 1, 0, &one_st, &one_missed) == 0) resolved = true;
+    walk_reason_clear();
+    int cerr = 0;
+    struct Spoor *c = stalk_err(&p, root, "a/b", 3, STALK_WALK, 0, &cerr);
+    bool control = c && c->qid.path == 2u;
+    if (c) spoor_clunk(c);
+    u64 live_after = spoor_total_allocated() - spoor_total_freed();
+    spoor_unref(root);
+
+    TEST_ASSERT(control, "control: with no failure a/b resolves");
+    TEST_ASSERT(!resolved, "no failed walk resolved");
+    TEST_EXPECT_EQ(live_after, live_before, "no failed walk leaks a Spoor");
+    TEST_EXPECT_EQ(one_failed, T_E_IO, "control: a one-name query keeps its reason");
+    TEST_EXPECT_EQ(one_missed, T_E_NOENT, "the next one's miss has no reason left over");
+    for (u32 i = 0; i < WALK_REASONS; i++) {
+        TEST_EXPECT_EQ(first[i], cases[i].want, cases[i].what);
+        TEST_EXPECT_EQ(queried[i], cases[i].want, cases[i].what);
+        TEST_EXPECT_EQ(deep[i], cases[i].want, cases[i].what);
+    }
+}
+
+void test_stalk_walk_failure_keeps_its_errno(void) {
+    walk_reason_case(fix_root());
+    walk_reason_case(fix_root_nowa());
+}
+
+// What the reason is for: a lookup that could not answer must not create the file.
+void test_stalk_create_refuses_on_a_failed_walk(void) {
+    fixmade_reset();
+    struct Proc *p = ocp_proc("/");
+    TEST_ASSERT(p != NULL, "proc + territory");
+
+    // Nor through a union whose members could not be asked.
+    struct Spoor *uroot = p->territory->root_spoor;
+    struct Spoor *um1 = stalk(p, uroot, "um1",  3, STALK_WALK,  0);
+    struct Spoor *um2 = stalk(p, uroot, "um2",  3, STALK_WALK,  0);
+    struct Spoor *pt  = stalk(p, uroot, "umpt", 4, STALK_MOUNT, 0);
+    TEST_ASSERT(um1 && um2 && pt, "resolve um1 + um2 + umpt");
+    TEST_EXPECT_EQ(mount(p->territory, um1, pt, MBEFORE),          0, "um1 MBEFORE");
+    TEST_EXPECT_EQ(mount(p->territory, um2, pt, MAFTER | MCREATE), 0, "um2 MAFTER|MCREATE");
+    g_fix_walk0_fail = true;
+    s64 u_refused = sys_open_create_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT, "/umpt/wf", 8,
+                                                   1 /*OWRITE*/, 0644);
+    g_fix_walk0_fail = false;
+    int u_calls = g_fix_create_calls;
+    spoor_clunk(um1);
+    spoor_clunk(um2);
+    spoor_clunk(pt);
+    TEST_EXPECT_EQ(u_calls, 0, "a union with no member to ask created nothing");
+    TEST_EXPECT_EQ(u_refused, (s64)-T_E_IO, "and says why");
+
+    walk_reason_set("wf", 0, -T_E_IO, 0);
+    s64 refused = sys_open_create_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT, "/a/wf", 5,
+                                                 1 /*OWRITE*/, 0644);
+    int calls_refused = g_fix_create_calls;
+    walk_reason_clear();
+    s64 made = sys_open_create_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT, "/a/wf", 5,
+                                              1 /*OWRITE*/, 0644);
+    int calls_made = g_fix_create_calls;
+    ocp_teardown(p);
+
+    TEST_EXPECT_EQ(refused, (s64)-T_E_IO, "the create reports the walk's reason");
+    TEST_EXPECT_EQ(calls_refused, 0, "and created nothing");
+    TEST_ASSERT(made >= 0, "control: a real miss creates");
+    TEST_EXPECT_EQ(calls_made, 1, "control: through the Dev");
+}
+
+// A union keeps Plan 9's skip: a member that cannot answer does not hide a name another
+// member holds. But with no other member holding it, "absent" is not known.
+void test_stalk_union_walk_failure(void) {
+    struct Proc p;
+    struct Spoor *root = cross_setup(&p);
+    TEST_ASSERT(root != NULL && p.territory != NULL, "cross_setup");
+    struct Spoor *um1 = stalk(&p, root, "um1",  3, STALK_WALK,  0);
+    struct Spoor *um2 = stalk(&p, root, "um2",  3, STALK_WALK,  0);
+    struct Spoor *pt  = stalk(&p, root, "umpt", 4, STALK_MOUNT, 0);
+    TEST_ASSERT(um1 && um2 && pt, "resolve um1 + um2 + umpt");
+    TEST_EXPECT_EQ(mount(p.territory, um1, pt, MBEFORE), 0, "mount um1 MBEFORE umpt");
+    TEST_EXPECT_EQ(mount(p.territory, um2, pt, MAFTER),  0, "mount um2 MAFTER umpt");
+
+    int e_skip = 0, e_first = 0, e_second = 0, e_named = 0, e_plain = 0, e_mixed = 0;
+    int h_fail = 0, h_plain = 0, h_held = 0, h_named = 0, h_mixed = 0;
+    int e_dead = 0, h_dead = 0, e_nostat = 0, h_nostat = 0, e_stat_held = 0;
+
+    walk_reason_set("shared", 22, -T_E_IO, 0);
+    struct Spoor *skip = stalk_err(&p, root, "umpt/shared", 11, STALK_OPEN, 0, &e_skip);
+    u64 skip_qid = skip ? skip->qid.path : 0u;
+    if (skip) spoor_clunk(skip);
+    int h_skip = 0;
+    struct Spoor *m0 = stalk_union_member_holding(&p, pt, "shared", &h_skip);
+    u64 m0_qid = m0 ? m0->qid.path : 0u;
+    if (m0) spoor_clunk(m0);
+
+    walk_reason_set("only1", 22, -T_E_IO, 0);
+    struct Spoor *q1 = stalk_err(&p, root, "umpt/only1", 10, STALK_OPEN, 0, &e_first);
+    struct Spoor *m1 = stalk_union_member_holding(&p, pt, "only1", &h_fail);
+
+    walk_reason_set("nosuch", 25, -T_E_IO, 0);
+    struct Spoor *q2 = stalk_err(&p, root, "umpt/nosuch", 11, STALK_OPEN, 0, &e_second);
+
+    walk_reason_set("nosuch", 22, -T_E_NOENT, 0);
+    struct Spoor *q3 = stalk_err(&p, root, "umpt/nosuch", 11, STALK_OPEN, 0, &e_named);
+    struct Spoor *m4 = stalk_union_member_holding(&p, pt, "nosuch", &h_named);
+
+    g_fix_walk_err2_parent = 25;
+    g_fix_walk_err2_rc     = -T_E_IO;
+    struct Spoor *q5 = stalk_err(&p, root, "umpt/nosuch", 11, STALK_OPEN, 0, &e_mixed);
+    struct Spoor *m5 = stalk_union_member_holding(&p, pt, "nosuch", &h_mixed);
+
+    walk_reason_clear();
+    g_fix_walk0_fail = true;
+    struct Spoor *q6 = stalk_err(&p, root, "umpt/nosuch", 11, STALK_OPEN, 0, &e_dead);
+    struct Spoor *m6 = stalk_union_member_holding(&p, pt, "nosuch", &h_dead);
+    g_fix_walk0_fail = false;
+
+    g_fix_stat_err_qid = 22;
+    struct Spoor *q7 = stalk_err(&p, root, "umpt/nosuch", 11, STALK_OPEN, 0, &e_nostat);
+    struct Spoor *m7 = stalk_union_member_holding(&p, pt, "nosuch", &h_nostat);
+    struct Spoor *held_past = stalk_err(&p, root, "umpt/shared", 11, STALK_OPEN, 0, &e_stat_held);
+    u64 past_qid = held_past ? held_past->qid.path : 0u;
+    if (held_past) spoor_clunk(held_past);
+    g_fix_stat_err_qid = 0;
+
+    walk_reason_set("shared", 22, -T_E_IO, 0);
+    bool dedup_failed = stalk_union_has_child(&p, um1, "shared", 6);
+    walk_reason_clear();
+    bool dedup_held   = stalk_union_has_child(&p, um1, "shared", 6);
+    bool dedup_missed = stalk_union_has_child(&p, um1, "nosuch", 6);
+
+    struct Spoor *q4 = stalk_err(&p, root, "umpt/nosuch", 11, STALK_OPEN, 0, &e_plain);
+    struct Spoor *m2 = stalk_union_member_holding(&p, pt, "nosuch", &h_plain);
+    struct Spoor *m3 = stalk_union_member_holding(&p, pt, "only1", &h_held);
+    bool held = m3 != NULL;
+    if (m3) spoor_clunk(m3);
+
+    bool none = !q1 && !q2 && !q3 && !q4 && !q5 && !q6 && !q7 &&
+                !m1 && !m2 && !m4 && !m5 && !m6 && !m7;
+    territory_unref(p.territory);
+    spoor_clunk(um1);
+    spoor_clunk(um2);
+    spoor_clunk(pt);
+    spoor_unref(root);
+
+    TEST_EXPECT_EQ(skip_qid, (u64)26, "um1 cannot say: um2's shared wins");
+    TEST_EXPECT_EQ(e_skip, 0, "and that is no error");
+    TEST_ASSERT(m0_qid != 0, "the member holding a leaf: a later member still answers");
+    TEST_EXPECT_EQ(h_skip, 0, "and that is no error either");
+    TEST_ASSERT(none, "a name no member could produce resolves to nothing");
+    TEST_ASSERT(!dedup_failed, "a member that cannot answer hides no later member's entry");
+    TEST_ASSERT(dedup_held, "control: a member that holds the name shadows it");
+    TEST_ASSERT(!dedup_missed, "control: a member that misses it does not");
+    TEST_EXPECT_EQ(e_first, T_E_IO, "the first member failed, no other holds it: EIO");
+    TEST_EXPECT_EQ(e_second, T_E_IO, "a miss, then a failure: EIO");
+    TEST_EXPECT_EQ(e_named, T_E_NOENT, "a member's own ENOENT is a miss");
+    TEST_EXPECT_EQ(h_named, 0, "and leaves the caller nothing to report");
+    TEST_EXPECT_EQ(e_mixed, T_E_IO, "a member's ENOENT does not hide the next one's EIO");
+    TEST_EXPECT_EQ(h_mixed, T_E_IO, "the member holding a leaf: the same");
+    TEST_EXPECT_EQ(e_dead, T_E_IO, "no member could be crossed: not absent");
+    TEST_EXPECT_EQ(h_dead, T_E_IO, "the member holding a leaf: the same");
+    TEST_EXPECT_EQ(e_nostat, T_E_IO, "a member whose stat failed, no other holds it: EIO");
+    TEST_EXPECT_EQ(h_nostat, T_E_IO, "the member holding a leaf: the same");
+    TEST_EXPECT_EQ(past_qid, (u64)26, "and a later member holding it still answers");
+    TEST_EXPECT_EQ(e_stat_held, 0, "with no error");
+    TEST_EXPECT_EQ(e_plain, T_E_NOENT, "control: an all-miss is ENOENT");
+    TEST_EXPECT_EQ(h_fail, T_E_IO, "the member holding a leaf: the same");
+    TEST_EXPECT_EQ(h_plain, 0, "control: no member holds it, no failure");
+    TEST_ASSERT(held, "control: a member holds only1");
+    TEST_EXPECT_EQ(h_held, 0, "control: and no failure");
+}
+
+// A fused run that failed with a reason never reported its components, so none was
+// X-checked: the answer waits for the per-component gate, and a caller with no search
+// on nox reads EACCES, as it does for a miss, not the state of a name under nox.
+void test_stalk_fused_failure_keeps_the_x_gate(void) {
+    struct Proc p; mkproc_system(&p);
+    struct Spoor *root = fix_root();
+    int e_gated = 0, e_plain = 0;
+    int calls = g_fix_walkattrs_calls;
+    walk_reason_set("sekret", 0, -T_E_IO, 0);
+    struct Spoor *g = stalk_err(&p, root, "nox/sekret", 10, STALK_WALK, 0, &e_gated);
+    int fused = g_fix_walkattrs_calls - calls;
+    walk_reason_clear();
+    struct Spoor *c = stalk_err(&p, root, "nox/sekret", 10, STALK_WALK, 0, &e_plain);
+    if (g) spoor_clunk(g);
+    if (c) spoor_clunk(c);
+    spoor_unref(root);
+    TEST_ASSERT(fused >= 1, "the run went through the fused walk");
+    TEST_ASSERT(g == NULL && c == NULL, "neither resolved");
+    TEST_EXPECT_EQ(e_plain, T_E_ACCES, "control: no search on nox");
+    TEST_EXPECT_EQ(e_gated, T_E_ACCES, "a failure past it says no more than that");
+}
+
+// A spawn is a walk: it reports the walk's reason, and only a miss reads ENOENT. A
+// file the walk found and the loader cannot use is no miss either.
+static int spawn_reason(struct Proc *p, const char *path, size_t len) {
+    return sys_spawn_full_argv_debug_for_proc(p, path, len, NULL, 0u, 0u, NULL, 0u,
+                                              CAP_NONE, 0u, false, 0u, 0u, NULL, 0u,
+                                              NULL, 0u, 0u, 0u);
+}
+
+void test_stalk_spawn_reports_the_walk_reason(void) {
+    fixmade_reset();
+    struct Proc *p = ocp_proc("/");
+    TEST_ASSERT(p != NULL, "proc + territory");
+    walk_reason_set("wf", 0, -T_E_IO, 0);
+    int refused = spawn_reason(p, "/a/wf", 5);
+    walk_reason_set("wf", 0, -116, 0);
+    int stale = spawn_reason(p, "/a/wf", 5);
+    walk_reason_clear();
+    int missed = spawn_reason(p, "/a/wf", 5);
+    int denied = spawn_reason(p, "/nox/sekret", 11);
+    int unreadable = spawn_reason(p, "/xfile", 6);   // the fixture Dev has no read op
+    ocp_teardown(p);
+    TEST_EXPECT_EQ(refused, -T_E_IO, "a binary's walk failed: EIO, not absent");
+    TEST_EXPECT_EQ(stale, -116, "the server's own errno, by value");
+    TEST_EXPECT_EQ(missed, -T_E_NOENT, "control: a real miss reads ENOENT");
+    TEST_EXPECT_EQ(denied, -T_E_ACCES, "the X-search denied it: EACCES, not absent");
+    TEST_EXPECT_EQ(unreadable, -T_E_ACCES, "a Dev with no read: EACCES");
+}
+
+// The fused run went through and the re-walk to its split or its link did not.
+void test_stalk_walk_failure_on_the_rewalk(void) {
+    struct Proc p;
+    struct Spoor *root = cross_setup(&p);
+    TEST_ASSERT(root != NULL && p.territory != NULL, "cross_setup");
+    int calls = g_fix_walkattrs_calls;
+    int e_link = 0, e_split = 0;
+
+    walk_reason_set("deep", 0, -T_E_IO, 1);
+    struct Spoor *l = stalk_err(&p, root, "a/deep/lnleaf", 13, STALK_WALK, 0, &e_link);
+    int link_calls = g_fix_walkattrs_calls - calls;
+    walk_reason_clear();
+    int e_lc = 0;
+    struct Spoor *lc = stalk_err(&p, root, "a/deep/lnleaf", 13, STALK_WALK, 0, &e_lc);
+    u64 link_qid = lc ? lc->qid.path : 0u;
+    if (lc) spoor_clunk(lc);
+
+    struct Spoor *um1 = stalk(&p, root, "um1",    3, STALK_WALK,  0);
+    struct Spoor *pt  = stalk(&p, root, "a/deep", 6, STALK_MOUNT, 0);
+    int mounted = (um1 && pt) ? mount(p.territory, um1, pt, MBEFORE) : -1;
+    calls = g_fix_walkattrs_calls;
+    walk_reason_set("deep", 0, -T_E_IO, 1);
+    struct Spoor *s = stalk_err(&p, root, "a/deep/only1", 12, STALK_WALK, 0, &e_split);
+    int split_calls = g_fix_walkattrs_calls - calls;
+    walk_reason_clear();
+    int e_sc = 0;
+    struct Spoor *sc = stalk_err(&p, root, "a/deep/only1", 12, STALK_WALK, 0, &e_sc);
+    u64 split_qid = sc ? sc->qid.path : 0u;
+    if (sc) spoor_clunk(sc);
+
+    bool none = !l && !s;
+    territory_unref(p.territory);
+    if (um1) spoor_clunk(um1);
+    if (pt) spoor_clunk(pt);
+    spoor_unref(root);
+
+    TEST_ASSERT(none, "neither resolved");
+    TEST_ASSERT(link_calls >= 2, "the link's run walked, then re-walked to its parent");
+    TEST_EXPECT_EQ(e_link, T_E_IO, "the re-walk to the link's parent keeps its reason");
+    TEST_EXPECT_EQ(link_qid, (u64)4, "control: the link resolves");
+    TEST_EXPECT_EQ(mounted, 0, "mount um1 over a/deep");
+    TEST_ASSERT(split_calls >= 2, "the mount's run walked, then re-walked to the mount");
+    TEST_EXPECT_EQ(e_split, T_E_IO, "the re-walk to the mount keeps its reason");
+    TEST_EXPECT_EQ(split_qid, (u64)24, "control: the mount's name resolves");
+}
+
