@@ -11,7 +11,7 @@ on-demand by `quaestor closed sub-kernel-stalk`). Paste or
 transclude into a prosecutor prompt as the closed-findings preamble.
 
 <!-- generated:begin -->
-17 closed findings on [[sub-kernel-stalk]] — do NOT re-report
+19 closed findings on [[sub-kernel-stalk]] — do NOT re-report
 these in a future round (open/deferred findings are NOT listed
 here; see the seam inbox):
 
@@ -29,6 +29,8 @@ here; see the seam inbox):
 - [[fnd-stalk2-r1-f3]] [P3] Cross-mount `..` returns to the mount point, not Plan 9's mh parent (documented) — Documented as the deliberate v1.x deferral (STALK-DESIGN §4.3): the
 - [[fnd-stube2-r1-f1]] [P0] Kernel-stack info leak: the max-length walk name was never NUL-terminated (fixed) — Fixed: the scratch widened to `SYS_WALK_OPEN_NAME_MAX + 1` and the NUL
 - [[fnd-stube2-r1-f6]] [P3] The comment that made the NUL terminator look optional (fixed) — Fixed: rewritten to state that the terminator is required and why.
+- [[fnd-thread-11c-r3-f1]] [P3] The walk hold's commit said a union skip sat below the flag, and one is only on neither list (fixed)
+- [[fnd-thread-11c-r3-f3]] [P3] The clear after the open had no witness (fixed)
 - [[fnd-walk-errno-r1-f1]] [P2] A union member that could not be asked read as absent (fixed)
 - [[fnd-walk-errno-r1-f2]] [P3] A fused run's reason answered past a directory never X-checked (fixed)
 - [[fnd-walk-errno-r2-f1]] [P3] The union readdir dedup reads a member that could not answer as not holding the name (documented)

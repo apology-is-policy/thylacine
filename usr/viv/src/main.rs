@@ -476,8 +476,8 @@ fn reap_diorama(dio_pid: i64, ctl_fd: i64) {
 fn run(bundle: &str, stdio_born: bool, notes: Option<&Notes>) -> Result<i64, String> {
     // --- the manifest ------------------------------------------------------
     let cfg_path = format!("{}/config.json", bundle);
-    let cfg =
-        read_file_bounded(&cfg_path, CONFIG_MAX).ok_or_else(|| format!("read {}", cfg_path))?;
+    let cfg = read_file_bounded(&cfg_path, CONFIG_MAX)
+        .ok_or_else(|| format!("cannot read bundle manifest {}", cfg_path))?;
     let doc = json::parse(&cfg).map_err(|e| format!("parse {}: {}", cfg_path, e))?;
     let m = extract_manifest(&doc).map_err(|e| e.to_string())?;
 

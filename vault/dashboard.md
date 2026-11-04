@@ -41,7 +41,7 @@ Generated — do not edit between the markers (`quaestor render`).
 | [[arc-vivarium]] | active | 2 |
 | [[arc-weft]] | active | 4 |
 
-## Open seams: 83
+## Open seams: 82
 
 - [[seam-220-netd-listener-poll]] (sub-netd-server)
 - [[seam-240-lo-redial]] (sub-netd-server)
@@ -103,16 +103,15 @@ Generated — do not edit between the markers (`quaestor render`).
 - [[seam-pouch-select-fd-bound]] (sub-pouch-net)
 - [[seam-pouch-sendmsg]] (sub-pouch-net)
 - [[seam-pouch-sigmask-per-thread]] (sub-pouch-signal)
-- [[seam-pouch-sigtstp-ignore]] (sub-pouch-signal, sub-pouch-tty)
 - [[seam-pouch-sock-single-user]] (sub-pouch-net)
 - [[seam-proc-find-no-refcount]] (sub-kernel-proc)
 - [[seam-proc-name-torn-read]] (sub-kernel-devproc, sub-kernel-devctl, sub-kernel-proc)
 - [[seam-proxy-coord-eof]] (sub-stratum-session)
-- [[seam-queue-note-fatal-after-post-wakes-nobody]] (sub-kernel-notes)
 - [[seam-rfnameg-shared-territory]] (sub-kernel-territory)
 - [[seam-rfork-flags-unimplemented]] (sub-kernel-proc)
 - [[seam-runq-rbtree]] (sub-kernel-sched)
 - [[seam-sak-revoke-note]] (sub-kernel-proc)
+- [[seam-self-managing-handler-no-restart]] (sub-kernel-notes)
 - [[seam-slub-debug-mode]] (sub-kernel-mm-slub)
 - [[seam-sparse-mpidr]] (sub-kernel-sched-smp)
 - [[seam-srv-9p-connect-unit]] (sub-kernel-devsrv)
@@ -129,6 +128,7 @@ Generated — do not edit between the markers (`quaestor render`).
 
 ## Recent changes
 
+- 2026-11-03 [[chg-2026-11-03-item-11c-close]] — Item 11c close: rounds 1 to 3, the sweep, three leases
 - 2026-11-03 [[chg-2026-11-03-item-11c]] — A per-note table for native programs, SA_RESTART in the kernel, and an open a note can interrupt
 - 2026-11-03 [[chg-2026-11-03-walk-errno]] — A failed walk says why: only a miss reads ENOENT
 - 2026-11-02 [[chg-2026-11-02-f3-what-it-is]] — What review finding F-3 is, read from main's code
@@ -136,5 +136,4 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-11-02 [[chg-2026-11-02-thread-model-c4]] — Thread-model C4: a note aimed at one thread
 - 2026-11-02 [[chg-2026-11-02-thread-overhaul-position]] — The thread-model overhaul's position: C7 was not its last chunk
 - 2026-11-02 [[chg-2026-11-02-usr-notes]] — SIGUSR1 and SIGUSR2 become notes, and every family word outgrows its byte
-- 2026-10-29 [[chg-2026-10-29-aux-corona-join]] — The corona join: aux-3 carries env-a and env-c, and every deferring lock is taken through its helper
 <!-- generated:end -->

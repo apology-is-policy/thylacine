@@ -2971,3 +2971,22 @@ Vote 15: a separate chunk straight after C4, and the signoff for `docs/ERRORS.md
   is aux's reading of that hold as a narrow gate, not a vote: vote 17 named C4. The merge to main owes the rest.
 - **Still open, owned.** `seam-queue-note-fatal-after-post-wakes-nobody`, which item 11c decides. At the merge to main:
   proc_flags bits 22 and 23 and the family word widths, as main was told on call 0276.
+
+## Item 11c: a native note table and a kernel that restarts — 2026-11-03
+
+- **The chunk** (operator votes 18, 19, 20; `dec-2026-11-03-note-dispose-table`, `-restart-in-kernel`, `-open-ointr`).
+  `SYS_NOTE_DISPOSE` = 139 gives a native Proc the per-note table. Pouch's constructor stops registering a catch-all
+  handler, so a `SIG_DFL` program dies on ^C in its wait and stops on ^Z. The kernel re-issues a call for `SA_RESTART`, on a
+  per-thread mark set when the wait really unwound. `SYS_WALK_OPEN_OINTR` marks the one open that waits for a peer.
+- **Audits.** Rounds 1 to 3 on Fable 5.1, each on a frozen copy: 0/0/1/4, 0/0/1/2, 0/0/0/3. Details in the closed list.
+- **Runs on a2930f8bf.** The sweep red on its own lines. Lease 2: P01-P06, R01, W1-W4 and G10 red at their named witnesses;
+  final suite rc 0, census signals, sockets and net; `pty-4`, `pty-susp-pouch`, `item10-ctrlc` PASS. Lease 3, on an image
+  with the Alpine bundles: `viv-run`, `r5f9-ash`, `viv-console-ctrlc` PASS; G06, G07, G11, K60 red at their named witnesses.
+- **Void in lease 2, and why it says so.** G06, G07, G11 and K60 never booted there: the lean build stopped `tools/test.sh`, and
+  the script copied the previous boot log as theirs. md5 proved it. Across 410 boot logs of every lease the only other copy is C4's
+  first G1, which its landing lease re-ran for real. Every lease script now reports NO BOOT.
+- **SMP subset:** ran on d0afb5937, 2026-11-04 01:40-02:41Z: `default-smp4` and `ubsan-smp4`, 10 PASS each, 0 corruption, 0 other. The same lease's suite is 2192/0 with the Alpine gates live, for the first time on this chunk's clean images (L-6c PASS); git, clade and netperf still skip, for want of a bundle or a host server. Vote 17 named C4, so this is aux's reading of the
+  hold as a narrow gate, not a vote. **Did not run:** the full SMP matrix, `tools/test-fault.sh`, the interactive fleet and
+  `tools/check-production.sh` beyond what `tools/test.sh` does first. All owed at the merge to main, under the operator's hold.
+- **Still open, owned.** `seam-self-managing-handler-no-restart`; a longjmp out of a Pouch handler (OPEN-BUGS); a missing
+  bundle read as a regression by two scenarios (OPEN-BUGS). The rfork tear and clone copy have no deterministic test.

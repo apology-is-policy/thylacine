@@ -2,12 +2,13 @@
 id: seam-pouch-sigtstp-ignore
 type: seam
 title: "SIG_DFL `SIGTSTP` is IGNORE, not STOP"
-status: open
+status: closed
+closed-by: chg-2026-11-03-item-11c-close
 surface: [sub-pouch-signal, sub-pouch-tty]
 opened-by: chg-2026-07-18-pty3
 tracker: "PTY-3"
 created: 2026-08-01
-updated: 2026-08-01
+updated: 2026-11-03
 ---
 ## Owed
 
@@ -31,3 +32,7 @@ A kernel `NDFLT`-stop arm for `tty:susp` -- `NDFLT` applies the note's
 TRUE default, which for the suspend class is stop, not terminate. That
 is an ABI-semantics change on the audited notes surface and needs
 signoff; it is deferred alongside the `SYS_POSTNOTE` pgrp arm.
+
+## Closed
+
+Closed by item 11c. A Pouch program with no handler has none, so the kernel takes `tty:susp`'s default. Witness that ran: `pty-susp-pouch`, the only scenario that stops a Pouch program in a pts foreground group, which proves the stop by the program's ticks and not by the shell's report. Green on a2930f8bf, lease 2.
