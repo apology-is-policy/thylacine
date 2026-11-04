@@ -22,7 +22,7 @@ design:
   - "docs/VIVARIUM.md"
   - "docs/LINEAGE.md"
 created: 2026-08-03
-updated: 2026-11-03
+updated: 2026-11-04
 ---
 ## Session registry factory
 
@@ -565,13 +565,16 @@ load-bearing:
   that can post services must not be able to confer the console-trust used for
   hostowner elevation — that would collapse [[inv-i27]] — so only a
   console-attached process grants it.
-- **`MAY_POST_SERVICE` and `CONSOLE_OWNER` are holder-delegable: console-attached
-  OR an existing `MAY_POST_SERVICE` holder** (the A-5b one-hop delegation). This
-  is what lets init — the console root — confer `MAY_POST_SERVICE` on
-  `/sbin/login`, which, now a holder, re-confers it on the per-user proxy and
-  confers `CONSOLE_OWNER` on the session shell, none of the later links being
-  console-attached. It is the same one-hop shape the I-32 raise authority takes,
-  applied to a different bit.
+- **`MAY_POST_SERVICE` is holder-delegable: console-attached OR an existing
+  holder** (the A-5b one-hop delegation). This is what lets init — the console
+  root — confer it on `/sbin/login`, which, now a holder, re-confers it on the
+  per-user proxy, neither later link being console-attached. It is the same
+  one-hop shape the I-32 raise authority takes, applied to a different bit.
+- **`CONSOLE_OWNER` takes console-attached OR the session factory**
+  (`PROC_FLAG_SESSION_REGISTRY`, which joey gives only login). A console owner's
+  every thread reads `/dev/cons` into INTERACTIVE with no ration, and
+  `MAY_POST_SERVICE` is held by OS servers and a session's own compositor.
+  Login's session shell is the tree's one grant.
 - **`SESSION_HANGUP` takes the same holder-delegable one-hop shape** (arm-6,
   IDENTITY-DESIGN 9.9.1), and its `apply_spawn_perms` arm is the only one in the
   family that does two steps: `proc_setsid(child)` — the child becomes a fresh
@@ -1341,8 +1344,8 @@ threshold so small transfers never pay the extra handle lookup.
   the two placements are not interchangeable.** The grant check must run before
   the argument copy-in so a refusal has no user-memory dependency to probe; the
   stamp must run in the child's thunk before `exec_setup`, so no user-mode
-  instruction of the child precedes it. A delegable bit (`MAY_POST_SERVICE`,
-  `CONSOLE_OWNER`) widens the trust chain by one hop; `CONSOLE_TRUSTED` never
+  instruction of the child precedes it. A delegable bit (`MAY_POST_SERVICE`)
+  widens the trust chain by one hop; `CONSOLE_TRUSTED` never
   delegates, because a service-poster conferring console-trust would breach
   [[inv-i27]]. The tail `extinction` in `apply_spawn_perms` is the proof the two
   sites agree.
@@ -1544,8 +1547,8 @@ gate metadata authority (#47), the `T_WSTAT_SIZE` content/metadata split, the
 from docs/reference/73: the two-site security split (`spawn_perm_grant_check` at
 the entry before the user-VA read, `apply_spawn_perms` in the child thunk before
 `exec_setup`, closing the SMP mark-after-spawn race), the per-bit rules
-(`CONSOLE_TRUSTED` never-delegable I-27, `MAY_POST_SERVICE`/`CONSOLE_OWNER`
-holder-delegable one-hop), and the I-2 non-propagation (perm bits are spawn-time,
+(`CONSOLE_TRUSTED` never-delegable I-27, `MAY_POST_SERVICE` holder-delegable
+one-hop, `CONSOLE_OWNER` from the session factory), and the I-2 non-propagation (perm bits are spawn-time,
 not `cap_mask`).
 
 [[chg-2026-09-06-positioned-io-absorb]] folds the SYS_PREAD/PWRITE syscall-layer

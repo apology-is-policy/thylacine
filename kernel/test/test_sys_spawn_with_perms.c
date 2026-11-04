@@ -272,14 +272,18 @@ void test_sys_spawn_with_perms_console_owner_grant_gate(void) {
     TEST_EXPECT_EQ(spawn_perm_grant_check(holder, SPAWN_PERM_CONSOLE_OWNER), -1,
         "non-attached non-holder cannot grant CONSOLE_OWNER");
 
-    // A MAY_POST_SERVICE holder (trusted /sbin/login) confers CONSOLE_OWNER --
-    // gated identically to MAY_POST_SERVICE.
+    // Posting a service names no shell: OS servers hold that bit.
     proc_mark_may_post_service(holder);
+    TEST_EXPECT_EQ(spawn_perm_grant_check(holder, SPAWN_PERM_CONSOLE_OWNER), -1,
+        "a MAY_POST_SERVICE holder does not confer CONSOLE_OWNER");
+
+    // The session factory (trusted /sbin/login) does.
+    proc_mark_session_registry(holder);
     TEST_EXPECT_EQ(spawn_perm_grant_check(holder, SPAWN_PERM_CONSOLE_OWNER), 0,
-        "a MAY_POST_SERVICE holder confers CONSOLE_OWNER (LS-5 trusted login)");
+        "the session factory confers CONSOLE_OWNER (LS-5 trusted login)");
     TEST_EXPECT_EQ(spawn_perm_grant_check(holder,
         SPAWN_PERM_MAY_POST_SERVICE | SPAWN_PERM_CONSOLE_OWNER), 0,
-        "the holder confers MAY_POST_SERVICE + CONSOLE_OWNER together");
+        "the factory confers MAY_POST_SERVICE + CONSOLE_OWNER together");
 
     // CONSOLE_OWNER never unlocks CONSOLE_TRUSTED for a mere holder (I-27): the
     // SAK/elevation anchor stays console-attach-only.
@@ -287,13 +291,13 @@ void test_sys_spawn_with_perms_console_owner_grant_gate(void) {
         SPAWN_PERM_CONSOLE_OWNER | SPAWN_PERM_CONSOLE_TRUSTED), -1,
         "CONSOLE_OWNER does not unlock CONSOLE_TRUSTED for a holder (I-27)");
 
-    // The same holder as the compositor warden designates (ARCH 8.3): it confers nothing,
-    // including the bit that would let a child confer the rest.
+    // The same holder as the compositor warden designates (ARCH 8.3): it confers nothing.
+    // It keeps the factory's role here, so only the designation can be what refuses.
     __atomic_fetch_or(&holder->proc_flags, PROC_FLAG_SEAT_CLIENT, __ATOMIC_RELEASE);
     TEST_EXPECT_EQ(spawn_perm_grant_check(holder, SPAWN_PERM_CONSOLE_OWNER), -1,
         "a designated compositor does not confer CONSOLE_OWNER");
     TEST_EXPECT_EQ(spawn_perm_grant_check(holder, SPAWN_PERM_MAY_POST_SERVICE), -1,
-        "nor MAY_POST_SERVICE, which could confer it a hop later");
+        "nor MAY_POST_SERVICE");
     TEST_EXPECT_EQ(spawn_perm_grant_check(holder, 0u), 0,
         "and a spawn asking for nothing is still allowed");
 
