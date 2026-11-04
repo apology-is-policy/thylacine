@@ -150,9 +150,10 @@ pub enum ParseErrorKind {
     /// Input nesting exceeded the parser's recursion bound -- either the
     /// `()`/`{}` bracket nesting within one token stream (subshells, brace
     /// blocks, control-flow bodies, arith groups) or the `$(...)` command-
-    /// substitution re-lex depth. A graceful error rather than overflowing
-    /// the 256 KiB EL0 stack into a guard-page snare:segv (which would kill
-    /// the shell Proc -> logout). See PARSE_MAX_NESTING / PARSE_MAX_RELEX.
+    /// substitution re-lex depth, or the stack itself when those multiply. A
+    /// graceful error rather than overflowing the EL0 stack into a guard-page
+    /// snare:segv (which would kill the shell Proc -> logout). See
+    /// PARSE_MAX_NESTING / PARSE_MAX_RELEX and `crate::stack`.
     RecursionLimit,
 }
 

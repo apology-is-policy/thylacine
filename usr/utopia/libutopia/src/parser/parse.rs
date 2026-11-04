@@ -62,12 +62,14 @@ pub fn parse(source: &str) -> ParseResult<Script> {
 /// Maximum `()`/`{}`/`(( ))` bracket-nesting depth accepted within a single
 /// token stream. Subshells, brace blocks, control-flow bodies, and arith
 /// groups each recurse one level per opener; without a bound, deeply nested
-/// input (`((((...))))`, `{{{...}}}`, `if{if{...}}`) overflows the 256 KiB EL0
+/// input (`((((...))))`, `{{{...}}}`, `if{if{...}}`) overflows the EL0
 /// stack into a guard-page snare:segv -> shell death (scripture 8.1). 64 is
 /// far beyond any real script's nesting (the deepest realistic nesting is a
 /// handful of levels). The `$(...)` command-substitution re-lex vector is
 /// bounded separately in `parse_subscript` (it crosses a re-tokenize boundary
-/// this single-stream pass cannot see).
+/// this single-stream pass cannot see). The same number bounds the statements
+/// one statement can sit inside, in `parse_statement`: in `if (a) if (b) x` the
+/// brackets have closed before the body starts, so this pass counts nothing.
 const PARSE_MAX_NESTING: i32 = 64;
 
 /// Reject a token stream whose `()`/`{}`/`(( ))` nesting exceeds
@@ -115,6 +117,7 @@ struct Parser {
     heredoc_bodies: VecDeque<Vec<DqPart>>,
     /// `source.len()` -- used as the Eof point-span fallback.
     source_len: usize,
+    enclosing_statements: i32,
 }
 
 impl Parser {
@@ -130,6 +133,7 @@ impl Parser {
             pos: 0,
             heredoc_bodies: bodies,
             source_len,
+            enclosing_statements: 0,
         }
     }
 
@@ -337,6 +341,19 @@ impl Parser {
     // -----------------------------------------------------------------
 
     fn parse_statement(&mut self) -> ParseResult<Statement> {
+        if self.enclosing_statements > PARSE_MAX_NESTING || crate::stack::exhausted() {
+            return Err(ParseError {
+                kind: ParseErrorKind::RecursionLimit,
+                span: self.current_span(),
+            });
+        }
+        self.enclosing_statements += 1;
+        let statement = self.parse_statement_inner();
+        self.enclosing_statements -= 1;
+        statement
+    }
+
+    fn parse_statement_inner(&mut self) -> ParseResult<Statement> {
         match self.peek_kind() {
             Some(TokenKind::If) => self.parse_if(),
             Some(TokenKind::For) => self.parse_for(),
@@ -907,9 +924,19 @@ impl Parser {
     // -----------------------------------------------------------------
 
     fn collect_paren_tokens(&mut self) -> ParseResult<Vec<Token>> {
-        self.expect_kind(TokenKind::LParen, "`(`")?;
         let mut depth: i32 = 1;
         let mut collected = Vec::new();
+        if matches!(self.peek_kind(), Some(TokenKind::DoubleLParen)) {
+            // `if (($a == b) && ($c == d))`: this paren and a group, opened at once.
+            let open = self.advance();
+            collected.push(Token::new(
+                TokenKind::LParen,
+                Span::new(open.span.start + 1, open.span.end),
+            ));
+            depth = 2;
+        } else {
+            self.expect_kind(TokenKind::LParen, "`(`")?;
+        }
         while !self.at_eof() {
             let tok = self.peek_token().expect("at_eof check above");
             match &tok.kind {
@@ -932,6 +959,9 @@ impl Parser {
                 TokenKind::DoubleRParen => {
                     depth -= 2;
                     if depth == 0 {
+                        // Closes the group opened with this paren as well.
+                        let close = Span::new(tok.span.start, tok.span.start + 1);
+                        collected.push(Token::new(TokenKind::RParen, close));
                         self.pos += 1;
                         return Ok(collected);
                     }
@@ -973,7 +1003,8 @@ impl Parser {
                     | TokenKind::PipeTolerate
                     | TokenKind::AndAnd
                     | TokenKind::OrOr
-                    | TokenKind::Ampersand => break,
+                    | TokenKind::Ampersand
+                    | TokenKind::RParen => break,
                     _ => {}
                 }
             }
@@ -1002,7 +1033,7 @@ impl Parser {
     // -----------------------------------------------------------------
 
     /// A block or, as in rc, one statement. At the end of the input it still asks for the
-    /// block, so an interactive `if (c)` waits for its next line.
+    /// block, which the line editor reads as a statement wanting its next line.
     fn parse_if_body(&mut self) -> ParseResult<(Vec<Statement>, usize)> {
         if matches!(
             self.peek_kind(),
@@ -2412,19 +2443,6 @@ mod tests {
         }
     }
 
-    /// UT-PARSE-3's fix, generalized -- and its other half: a `))` that MEANS
-    /// arithmetic stays one token.
-    ///
-    /// The single-case test below would pass for a fix that special-cased
-    /// exactly `(a; (b; c))`, so this nests three deep as well -- `)))` lexes
-    /// as DoubleRParen + RParen, a different shape from `))` -- and pairs it
-    /// with arithmetic in the positions where a lexer-mode fix would go wrong.
-    ///
-    /// The OPENING side is deliberately not symmetric, and this test is where
-    /// that gets recorded: `((` is the arithmetic opener, so `((a; b); c)` is
-    /// read as arithmetic and fails on `a`, exactly as it does in sh. The
-    /// remedy there is the same as sh's -- a space, `( (a; b); c)` -- and it is
-    /// asserted below so that behaviour is pinned rather than merely current.
     #[test]
     fn an_index_touching_its_variable_is_part_of_the_word() {
         let words = |src: &str| {
@@ -2519,6 +2537,19 @@ mod tests {
         ));
     }
 
+    /// UT-PARSE-3's fix, generalized -- and its other half: a `))` that MEANS
+    /// arithmetic stays one token.
+    ///
+    /// The single-case test below would pass for a fix that special-cased
+    /// exactly `(a; (b; c))`, so this nests three deep as well -- each `)` closes
+    /// its own `(` -- and pairs it
+    /// with arithmetic in the positions where a lexer-mode fix would go wrong.
+    ///
+    /// The OPENING side is deliberately not symmetric, and this test is where
+    /// that gets recorded: `((` is the arithmetic opener, so `((a; b); c)` is
+    /// read as arithmetic and fails on `a`, exactly as it does in sh. The
+    /// remedy there is the same as sh's -- a space, `( (a; b); c)` -- and it is
+    /// asserted below so that behaviour is pinned rather than merely current.
     #[test]
     fn adjacent_closing_parens_split_but_arithmetic_does_not() {
         let subshell = |src: &str| {
@@ -2910,5 +2941,126 @@ mod tests {
             ParseErrorKind::InvalidStatement => {}
             other => panic!("expected InvalidStatement, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn statements_with_no_brackets_count_as_nesting() {
+        let chain = |n: usize| "if (a) ".repeat(n) + "x\n";
+        assert!(parse(&chain(64)).is_ok());
+        for n in [65, 100_000] {
+            assert_eq!(
+                parse(&chain(n)).map(|_| ()).map_err(|e| e.kind),
+                Err(ParseErrorKind::RecursionLimit)
+            );
+        }
+        assert_eq!(
+            parse(&("if(a)".repeat(100_000) + "b\n")).map(|_| ()).map_err(|e| e.kind),
+            Err(ParseErrorKind::RecursionLimit)
+        );
+        // A brace and a bare level draw on one count.
+        let mixed = |bare: usize| {
+            "if (a) { ".repeat(32) + &"if (a) ".repeat(bare) + "x" + &" }".repeat(32) + "\n"
+        };
+        assert!(parse(&mixed(32)).is_ok());
+        assert_eq!(
+            parse(&mixed(33)).map(|_| ()).map_err(|e| e.kind),
+            Err(ParseErrorKind::RecursionLimit)
+        );
+    }
+
+    #[test]
+    fn the_bounds_together_stop_at_the_stack() {
+        // Every count here is inside its bound, and their product needs more than this stack.
+        fn level(inner: &str) -> String {
+            "(( ".to_string()
+                + &("- ".repeat(250) + "( ").repeat(60)
+                + inner
+                + &" )".repeat(60)
+                + " ))"
+        }
+        let line = level(&("$( ".to_string() + &level("1") + " )")) + "\n";
+        let got = crate::stack::on_stack_of(2 * 1024 * 1024, move || {
+            parse(&line).map(|_| ()).map_err(|e| e.kind)
+        });
+        assert_eq!(got, Err(ParseErrorKind::RecursionLimit));
+        // The control: at the same stack the check stays out of the way of nesting at its bound.
+        let fits = "{ ".repeat(64) + "x" + &" }".repeat(64) + "\n";
+        assert_eq!(
+            crate::stack::on_stack_of(2 * 1024 * 1024, move || parse(&fits).map(|_| ())
+                .map_err(|e| e.kind)),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn each_cycle_of_the_parser_asks_the_stack() {
+        // Each line recurses through one check and is inside every count.
+        let lines = [
+            "{ ".repeat(64) + "x" + &" }".repeat(64) + "\n",
+            "((".to_string() + &"- ".repeat(254) + "1))\n",
+            "let x = ".to_string() + &"case a { b => ".repeat(60) + "c" + &" }".repeat(60) + "\n",
+        ];
+        for line in lines {
+            let got = crate::stack::on_stack_of(16 * 1024 * 1024, move || {
+                assert!(parse(&line).is_ok(), "the control: {line}");
+                crate::stack::allow_below_here(64 * 1024);
+                parse(&line).map(|_| ()).map_err(|e| e.kind)
+            });
+            assert_eq!(got, Err(ParseErrorKind::RecursionLimit));
+        }
+    }
+
+    #[test]
+    fn a_condition_opens_a_group_with_its_paren() {
+        for s in [
+            "if (($a == b) && ($c == d)) x\n",
+            "if (($a == b)) x\n",
+            "while (($a == b) || ($c == d)) { x }\n",
+            "if (a) { x } else if (($a == b)) { y }\n",
+        ] {
+            assert!(parse(s).is_ok(), "{s}");
+        }
+    }
+
+    #[test]
+    fn a_value_ends_at_its_subshell_paren() {
+        for s in ["(x = 1)\n", "(let x = 1)\n", "(return 3)\n", "(if (c) x = 1)\n", "(x = (a b))\n"] {
+            assert!(parse(s).is_ok(), "{s}");
+        }
+        assert!(parse("x = 1)\n").is_err());
+    }
+
+    #[test]
+    fn an_operator_chain_is_bounded_though_it_takes_no_stack_to_parse() {
+        let chain = |n: usize| "((".to_string() + &"1 + ".repeat(n) + "1))\n";
+        assert!(parse(&chain(256)).is_ok());
+        for n in [257, 300_000] {
+            assert_eq!(
+                parse(&chain(n)).map(|_| ()).map_err(|e| e.kind),
+                Err(ParseErrorKind::RecursionLimit)
+            );
+        }
+    }
+
+    #[test]
+    fn a_reserved_word_is_no_arithmetic() {
+        assert_eq!(
+            parse("(( in == in ))\n").map(|_| ()).map_err(|e| e.kind),
+            Err(ParseErrorKind::InvalidArithLiteral)
+        );
+        assert!(parse("if (in == in) x\n").is_ok());
+    }
+
+    #[test]
+    fn arithmetic_opens_two_groups_at_once() {
+        for s in [
+            "((((1 + 2) * 3) + 4))\n",
+            "x = ((((1 + 2) * 3) + 4))\n",
+            "(((((1 + 2)) * 3)))\n",
+        ] {
+            assert!(parse(s).is_ok(), "{s}");
+        }
+        // Outside arithmetic a group of groups is still a group of groups.
+        assert!(parse("( (a) ; (b) )\n").is_ok());
     }
 }

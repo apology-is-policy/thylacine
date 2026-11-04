@@ -45,13 +45,12 @@
 //     The regex semantics itself is opaque at v1.0 (open
 //     question #5 answer).
 //
-//   - Arithmetic blocks `(( expr ))` are NOT entered as a separate
-//     lex mode at U-5a. `((` and `))` emit as DoubleLParen /
-//     DoubleRParen, and the body lexes under normal command rules.
-//     The parser at U-5c will re-interpret the resulting token
+//   - Arithmetic blocks `(( expr ))` are not a separate lex mode. `((`
+//     and `))` emit as DoubleLParen / DoubleRParen, and most of the body
+//     lexes under normal command rules; the parser re-interprets the
 //     stream in arithmetic context (where `+`, `*`, etc. become
-//     operators). This is a soft trade -- it keeps U-5a tight at
-//     the cost of slightly awkward parser logic at U-5c.
+//     operators). The scanner only tracks which parens are open, so that
+//     inside `((` the forms `<<`, `<(`, `>(` and `((` read as arithmetic.
 //
 // === Span discipline ===
 //

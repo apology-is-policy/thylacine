@@ -78,7 +78,7 @@ pub enum EvalErrorKind {
     Internal(&'static str),
     /// Eval-stack recursion exceeded `EVAL_MAX_DEPTH` (function calls,
     /// command-substitution nesting, source/eval). A graceful error per
-    /// scripture 8.1 instead of a 256 KiB EL0 stack overflow -> snare:segv
+    /// scripture 8.1 instead of an EL0 stack overflow -> snare:segv
     /// -> shell death (`fn f { f }`, a self-`source`, an `eval`-bomb).
     RecursionLimit,
 }

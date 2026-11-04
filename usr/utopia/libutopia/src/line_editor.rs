@@ -288,6 +288,18 @@ pub fn balance(s: &str) -> BalanceState {
 // alignment property. Most real prompts are >= 2 columns ("> " is
 // the minimum disciplined Pale Fire prompt).
 
+/// `if (c)` and `else` balance and still want what follows, as in rc. Submitting one
+/// reports an error and then runs that next line on its own, unguarded.
+fn wants_next_line(buffer: &str) -> bool {
+    matches!(
+        crate::parser::parse(buffer),
+        Err(crate::parser::ParseError {
+            kind: crate::parser::ParseErrorKind::UnexpectedEof { .. },
+            ..
+        })
+    )
+}
+
 fn continuation_prefix(prompt_width: usize) -> alloc::string::String {
     let mut s = alloc::string::String::new();
     if prompt_width >= 2 {
@@ -2217,7 +2229,7 @@ impl LineEditor {
         // continuations re-inserted, which is the opposite of the
         // separation of concerns scripted in UTOPIA-SHELL-DESIGN.md.
         let st = balance(&self.buffer);
-        if st.awaits_continuation() {
+        if st.awaits_continuation() || wants_next_line(&self.buffer) {
             return self.do_insert('\n');
         }
         // Balanced: submit. The caller moves the terminal past the edited
@@ -2831,6 +2843,18 @@ mod tests {
         assert_eq!(r, EditorAction::Redraw);
         assert_eq!(le.buffer(), "{\n");
         assert_eq!(le.cursor(), 2);
+    }
+
+    #[test]
+    fn enter_on_a_statement_that_wants_its_next_line_waits_for_it() {
+        let mut le = LineEditor::new();
+        feed(&mut le, b"if ($ok)");
+        assert_eq!(le.feed_byte(b'\r'), EditorAction::Redraw);
+        feed(&mut le, b"rm x");
+        assert_eq!(le.feed_byte(b'\r'), EditorAction::Accept(String::from("if ($ok)\nrm x")));
+        // A syntax error is not that, and goes through to be reported.
+        feed(&mut le, b"if )");
+        assert!(matches!(le.feed_byte(b'\r'), EditorAction::Accept(_)));
     }
 
     #[test]

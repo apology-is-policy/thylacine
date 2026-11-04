@@ -45,6 +45,7 @@ pub mod line_editor;
 pub mod palette;
 pub mod parser;
 pub mod path;
+mod stack;
 
 pub mod eval;
 #[cfg(feature = "backend")]

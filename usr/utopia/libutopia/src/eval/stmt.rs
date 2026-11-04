@@ -157,7 +157,7 @@ use super::builtin;
 use super::console;
 use super::env::Env;
 use super::error::{EvalError, EvalErrorKind, EvalResult};
-use super::expr::{eval_expr, eval_pattern};
+use super::expr::{eval_expr, pattern_matches};
 use super::glob;
 use super::jobs::status_of_packed;
 use super::pathname;
@@ -191,7 +191,7 @@ pub fn eval_script(env: &mut Env, script: &Script) -> EvalResult<StatementFlow> 
 pub fn eval_block(env: &mut Env, stmts: &[Statement]) -> EvalResult<StatementFlow> {
     // Bound eval-stack recursion (scripture 8.1). Function calls, `source`, and
     // `eval` all re-enter through eval_block; without a cap, `fn f { f }`, a
-    // self-`source`, or an `eval`-bomb overflows the 256 KiB EL0 stack into a
+    // self-`source`, or an `eval`-bomb overflows the EL0 stack into a
     // guard-page snare:segv -> shell death. Command substitution adds its own
     // bound at run_command_substitution_script (it routes through eval_pipeline,
     // not eval_block). An empty block cannot recurse -> skip the accounting
@@ -236,6 +236,10 @@ fn eval_block_inner(env: &mut Env, stmts: &[Statement]) -> EvalResult<StatementF
 
 /// Evaluate a single statement. Per-StatementKind dispatch.
 pub fn eval_statement(env: &mut Env, stmt: &Statement) -> EvalResult<StatementFlow> {
+    // A case arm's statement reaches here again with no block in between.
+    if crate::stack::exhausted() {
+        return Err(EvalError::new(EvalErrorKind::RecursionLimit, stmt.span));
+    }
     match &stmt.kind {
         StatementKind::Pipeline(p) => eval_pipeline(env, p),
         StatementKind::Let(let_stmt) => eval_let(env, let_stmt),
@@ -1949,7 +1953,7 @@ pub(crate) fn run_command_substitution_script(
     }
     // Bound command-substitution recursion (scripture 8.1): a nested `$(...)`
     // in an element's words re-enters here via evaluate_argv, so without a cap
-    // `$($($(...)))` overflows the 256 KiB EL0 stack into a guard-page
+    // `$($($(...)))` overflows the EL0 stack into a guard-page
     // snare:segv. Shares Env's eval-depth counter with eval_block so the bound
     // holds across mixed function/source/subst nesting. eval_recursion_leave
     // runs on every return path (the inner fn's `?`/early returns all unwind
@@ -2327,8 +2331,7 @@ fn eval_case_stmt(env: &mut Env, stmt: &CaseStmt) -> EvalResult<StatementFlow> {
     let scrutinee_str = scrutinee.as_scalar();
     for arm in &stmt.arms {
         for pat in &arm.patterns {
-            let pat_str = eval_pattern(env, pat)?;
-            if glob::matches(&pat_str, &scrutinee_str) {
+            if pattern_matches(env, pat, &scrutinee_str)? {
                 return eval_statement(env, &arm.body);
             }
         }
@@ -3225,5 +3228,51 @@ mod tests {
         ]);
         let v = eval_word(&env, &w).unwrap();
         assert_eq!(v.0, alloc::vec![String::from("a~b")]);
+    }
+
+    #[test]
+    fn a_level_and_a_statement_stop_at_the_stack() {
+        crate::stack::on_stack_of(8 * 1024 * 1024, || {
+            // Declaring a function evaluates no expression, which has a check of its own.
+            let script = crate::parser::parse("fn f { x }\n").expect("parses");
+            let mut env = Env::new();
+            // The control: with the room to, the block runs.
+            assert!(eval_block(&mut env, &script.statements).is_ok());
+            crate::stack::stop_here();
+            assert!(env.eval_recursion_enter(), "a new level is refused");
+            let got = eval_statement(&mut env, &script.statements[0]).map(|_| ());
+            assert!(matches!(got.map_err(|e| e.kind), Err(EvalErrorKind::RecursionLimit)));
+        });
+    }
+
+    #[test]
+    fn a_list_of_patterns_is_any_of_them() {
+        let mut env = Env::new();
+        let run = |env: &mut Env, src: &str| {
+            let s = crate::parser::parse(src).expect("parses");
+            eval_block(env, &s.statements).expect("runs");
+        };
+        run(&mut env, "pats = ('*.c' '*.h')\nnone = ()\n");
+        run(&mut env, "if (~ foo.c $pats) a = 1\n");
+        assert_eq!(env.get("a").as_scalar(), "1");
+        run(&mut env, "if (foo.h matches $pats) b = 1\n");
+        assert_eq!(env.get("b").as_scalar(), "1");
+        run(&mut env, "case foo.h {\n$pats => c = 1\n}\n");
+        assert_eq!(env.get("c").as_scalar(), "1");
+        run(&mut env, "d = 0\nif (~ foo.rs $pats) d = 1\nif (~ '' $none) d = 1\n");
+        assert_eq!(env.get("d").as_scalar(), "0");
+    }
+
+    #[test]
+    fn the_positionals_read_by_their_names() {
+        let mut env = Env::new();
+        env.let_set("1", Value::scalar(String::from("one")));
+        env.let_set("*", Value::list(alloc::vec![String::from("one"), String::from("two")]));
+        let s = crate::parser::parse("a = $1\nb = $*\nc = $#*\nd = \"$1:$*\"\n").expect("parses");
+        eval_block(&mut env, &s.statements).expect("runs");
+        assert_eq!(env.get("a").as_scalar(), "one");
+        assert_eq!(env.get("b").0.len(), 2);
+        assert_eq!(env.get("c").as_scalar(), "2");
+        assert_eq!(env.get("d").as_scalar(), "one:one two");
     }
 }

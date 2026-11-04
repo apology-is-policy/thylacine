@@ -105,6 +105,8 @@ struct Lexer<'a> {
     expect_regex_after: bool,
     /// The parentheses still open, innermost last.
     opens: Vec<Opener>,
+    /// How many of `opens` are `Two`, read at every `<` and `(`.
+    twos_open: usize,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -133,11 +135,12 @@ impl<'a> Lexer<'a> {
             pending_heredocs: Vec::new(),
             expect_regex_after: false,
             opens: Vec::new(),
+            twos_open: 0,
         }
     }
 
     fn in_arithmetic(&self) -> bool {
-        self.opens.contains(&Opener::Two)
+        self.twos_open > 0
     }
 
     /// A closer with nothing open keeps the longest form, so a stray `))` still reads
@@ -147,11 +150,13 @@ impl<'a> Lexer<'a> {
         match self.opens.last().copied() {
             Some(Opener::Two) if double => {
                 self.opens.pop();
+                self.twos_open -= 1;
                 self.emit_single(TokenKind::DoubleRParen, 2)
             }
             Some(Opener::Two) => {
                 // `((a) b)`: the pair opened two groups after all.
                 self.opens.pop();
+                self.twos_open -= 1;
                 self.opens.push(Opener::One);
                 self.emit_single(TokenKind::RParen, 1)
             }
@@ -239,8 +244,10 @@ impl<'a> Lexer<'a> {
             b'<' => self.scan_less(),
             b'>' => self.scan_greater(),
             b'(' => match self.peek_byte_at(1) {
-                Some(b'(') => {
+                // Inside arithmetic `((` is two groups: `((((1 + 2) * 3) + 4))`.
+                Some(b'(') if !self.in_arithmetic() => {
                     self.opens.push(Opener::Two);
+                    self.twos_open += 1;
                     self.emit_single(TokenKind::DoubleLParen, 2)
                 }
                 _ => {
@@ -563,7 +570,11 @@ impl<'a> Lexer<'a> {
             Some(b'#') => {
                 self.pos += 2; // consume $#
                 let name_start = self.pos;
-                self.scan_var_name();
+                if self.peek_byte_at(0) == Some(b'*') {
+                    self.pos += 1;
+                } else {
+                    self.scan_var_name();
+                }
                 if self.pos == name_start {
                     return Err(ParseError {
                         kind: ParseErrorKind::EmptyVarLenName,
@@ -606,10 +617,18 @@ impl<'a> Lexer<'a> {
                 self.tokens.push(Token::new(TokenKind::Subst(body), span));
                 Ok(())
             }
-            Some(b) if is_var_name_start_byte(b) => {
+            Some(b) if is_var_name_start_byte(b) || b.is_ascii_digit() || b == b'*' => {
                 self.pos += 1; // consume $
                 let name_start = self.pos;
-                self.scan_var_name();
+                if b == b'*' {
+                    self.pos += 1;
+                } else if b.is_ascii_digit() {
+                    while self.peek_byte_at(0).is_some_and(|d| d.is_ascii_digit()) {
+                        self.pos += 1;
+                    }
+                } else {
+                    self.scan_var_name();
+                }
                 let name = String::from(&self.source[name_start..self.pos]);
                 let span = Span::new(start, self.pos);
                 self.tokens.push(Token::new(TokenKind::Var(name), span));
@@ -1183,8 +1202,12 @@ fn scan_dollar_in_slice(
         Some(b'#') => {
             let name_start = p + 2;
             let mut q = name_start;
-            while q < bytes.len() && is_var_name_byte(bytes[q]) {
+            if bytes.get(q) == Some(&b'*') {
                 q += 1;
+            } else {
+                while q < bytes.len() && is_var_name_byte(bytes[q]) {
+                    q += 1;
+                }
             }
             if q == name_start {
                 return Err(ParseError {
@@ -1210,11 +1233,19 @@ fn scan_dollar_in_slice(
             let cmd_body = String::from(&body[inner_start..close]);
             Ok((Some(DqPart::Subst(cmd_body)), (close + 1) - p))
         }
-        Some(b) if is_var_name_start_byte(b) => {
+        Some(b) if is_var_name_start_byte(b) || b.is_ascii_digit() || b == b'*' => {
             let name_start = p + 1;
             let mut q = name_start;
-            while q < bytes.len() && is_var_name_byte(bytes[q]) {
+            if b == b'*' {
                 q += 1;
+            } else if b.is_ascii_digit() {
+                while bytes.get(q).is_some_and(|d| d.is_ascii_digit()) {
+                    q += 1;
+                }
+            } else {
+                while q < bytes.len() && is_var_name_byte(bytes[q]) {
+                    q += 1;
+                }
             }
             let name = String::from(&body[name_start..q]);
             Ok((Some(DqPart::Var(name)), q - p))

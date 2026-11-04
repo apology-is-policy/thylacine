@@ -3897,6 +3897,7 @@ pub(crate) fn rt_raw_args() -> (usize, *const *const u8) {
 const AT_NULL_TAG: usize = 0;
 const AT_HWCAP_TAG: usize = 16; // standard SysV AT_HWCAP (CF-4 A)
 const AT_VDSO_CLOCK_TAG: usize = 0x5654;
+const AT_STACK_BASE_TAG: usize = 0x5342;
 const VDSO_CLOCK_MAGIC: u64 = 0x5644534f4c4b3031; // "VDSOLK01"
 const VDSO_CLOCK_VERSION: u64 = 1;
 
@@ -3915,10 +3916,18 @@ struct VdsoClock {
 // thread sharing the address space observes it).
 static RT_VDSO_CLOCK: AtomicPtr<VdsoClock> = AtomicPtr::new(core::ptr::null_mut());
 
+static RT_STACK_BASE: AtomicUsize = AtomicUsize::new(0);
+
+/// The lowest usable address of the initial thread's stack, as exec mapped it, or 0 where
+/// no exec said so (a host test). A peer thread runs on another stack.
+pub fn stack_base() -> usize {
+    RT_STACK_BASE.load(Ordering::Acquire)
+}
+
 // Walk the auxv (after argv + envp on the initial stack -- the _start frame
 // gives argc + &argv[0]) once, servicing every tag we care about: AT_VDSO_CLOCK
-// (validate magic/version/freq and cache the page) and AT_HWCAP (publish
-// FEAT_LSE to the outline-atomics helpers). One walk, because the auxv is short
+// (validate magic/version/freq and cache the page), AT_HWCAP (publish
+// FEAT_LSE to the outline-atomics helpers) and AT_STACK_BASE. One walk, because the auxv is short
 // and a second pass would cost another cache-cold stride for no benefit.
 unsafe fn capture_auxv(argc: usize, argv: *const *const u8) {
     if argv.is_null() {
@@ -3949,6 +3958,7 @@ unsafe fn capture_auxv(argc: usize, argv: *const *const u8) {
                 }
             }
             AT_HWCAP_TAG => publish_have_lse_atomics(*a.add(1)),
+            AT_STACK_BASE_TAG => RT_STACK_BASE.store(*a.add(1), Ordering::Release),
             _ => {}
         }
         a = a.add(2);

@@ -94,6 +94,9 @@ use super::value::Value;
 /// to the AST; side effects are limited to errors raised through
 /// `EvalResult`.
 pub fn eval_expr(env: &Env, expr: &Expr) -> EvalResult<Value> {
+    if crate::stack::exhausted() {
+        return Err(EvalError::new(EvalErrorKind::RecursionLimit, expr.span));
+    }
     match &expr.kind {
         // === Atoms ===
         ExprKind::Word(s) => Ok(Value::scalar(unescape(s))),
@@ -459,9 +462,9 @@ fn eval_match(
     let lv = eval_expr(env, l)?;
     match op {
         MatchOp::Glob => {
-            let pat = eval_pattern(env, r)?;
             let input = lv.as_scalar();
-            Ok(Value::scalar(if glob::matches(&pat, &input) { "1" } else { "0" }))
+            let hit = pattern_matches(env, r, &input)?;
+            Ok(Value::scalar(if hit { "1" } else { "0" }))
         }
         MatchOp::In => {
             let rv = eval_expr(env, r)?;
@@ -477,8 +480,8 @@ fn eval_match(
                 ));
             };
             for pattern in patterns {
-                let pat = eval_pattern(env, pattern)?;
-                if lv.0.iter().any(|el| glob::matches(&pat, el)) {
+                let pats = pattern_value(env, pattern)?;
+                if lv.0.iter().any(|el| pats.0.iter().any(|p| glob::matches(p, el))) {
                     return Ok(Value::scalar("1"));
                 }
             }
@@ -496,8 +499,11 @@ fn eval_match(
 /// next character (`a\*` matches only `a*`); every other part is a value,
 /// whose backslashes are made literal and whose glob metas stay live -- what
 /// patterns have always done with a quoted string or a variable.
-pub(super) fn eval_pattern(env: &Env, expr: &Expr) -> EvalResult<String> {
-    Ok(pattern_value(env, expr)?.as_scalar())
+///
+/// A list stands for one pattern per element, any of which will do, and an empty
+/// list matches nothing.
+pub(super) fn pattern_matches(env: &Env, expr: &Expr, subject: &str) -> EvalResult<bool> {
+    Ok(pattern_value(env, expr)?.0.iter().any(|p| glob::matches(p, subject)))
 }
 
 fn pattern_value(env: &Env, expr: &Expr) -> EvalResult<Value> {
@@ -533,8 +539,7 @@ fn eval_case(
     let scrutinee_str = scrutinee.as_scalar();
     for arm in &case_expr.arms {
         for pat in &arm.patterns {
-            let pat_str = eval_pattern(env, pat)?;
-            if glob::matches(&pat_str, &scrutinee_str) {
+            if pattern_matches(env, pat, &scrutinee_str)? {
                 return eval_expr(env, &arm.value);
             }
         }
@@ -902,5 +907,37 @@ mod tests {
         let v = eval_str(&env, "$\"args", ExprContext::Value).unwrap();
         assert_eq!(v.0.len(), 1);
         assert_eq!(v.0[0], "a b c d");
+    }
+
+    #[test]
+    fn arithmetic_opens_two_groups_at_once() {
+        let env = Env::new();
+        let v = eval_str(&env, "((((1 + 2) * 3) + 4))", ExprContext::Value).unwrap();
+        assert_eq!(v.as_scalar(), "13");
+    }
+
+    #[test]
+    fn a_deep_expression_stops_at_the_stack() {
+        crate::stack::on_stack_of(512 * 1024 * 1024, || {
+            let s = "((".to_string()
+                + &("- ".repeat(250) + "( ").repeat(60)
+                + "1"
+                + &" )".repeat(60)
+                + "))";
+            let toks = tokenize(&s).expect("lexes");
+            let body: Vec<crate::parser::token::Token> = toks
+                .into_iter()
+                .filter(|t| !matches!(t.kind, crate::parser::token::TokenKind::Eof))
+                .collect();
+            let expr = parse_expr_tokens(body, s.len(), ExprContext::Value).expect("parses");
+            let env = Env::new();
+            // The control: with the room to, the same expression has a value.
+            assert_eq!(eval_expr(&env, &expr).unwrap().as_scalar(), "1");
+            crate::stack::allow_below_here(1024 * 1024);
+            let got = eval_expr(&env, &expr).map(|_| ()).map_err(|e| e.kind);
+            assert!(matches!(got, Err(EvalErrorKind::RecursionLimit)));
+            // It can still drop what it parsed, from here.
+            drop(expr);
+        });
     }
 }

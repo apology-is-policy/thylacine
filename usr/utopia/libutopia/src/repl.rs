@@ -1412,13 +1412,12 @@ mod tests {
     #[test]
     fn console_apply_default_is_inert_without_a_forwarded_fd() {
         // #94-B-b: a fd-less `ut` (the bare-spawn boot check, or any host test)
-        // never received a consctl fd. console_apply_default MUST report false
-        // WITHOUT touching the SVC -- the `None` arm returns before any t_write
-        // -- so the shell silently runs in whatever mode it started in (no
-        // panic, no false `ut: consctl ok` witness). A freshly-built Repl has
-        // no consctl fd (set_consctl_fd is the only path to a `Some`). The
-        // `Some(fd)` write path is exercised by the boot-log E2E witness (a host
-        // test cannot drive the SVC).
+        // never received a consctl fd. console_apply_default MUST report false,
+        // so the shell silently runs in whatever mode it started in (no panic,
+        // no false `ut: consctl ok` witness). A freshly-built Repl has no consctl
+        // fd (set_consctl_fd is the only path to a `Some`). The `None` arm returns
+        // before any t_write, which this test cannot see: under the host stubs a
+        // t_write fails too. The `Some(fd)` path is the boot-log E2E witness's.
         let repl = Repl::new();
         assert!(!repl.console_apply_default());
     }
@@ -1502,9 +1501,7 @@ mod tests {
     // the prompt is `λ <cwd> ⊢ ` -- each segment in the RESOLVED ink it was
     // given, none of the Bonfire roles; without them the legacy shape stands
     // byte for byte (no lambda, the Bonfire path and glyph escapes).
-    // NOTE: libutopia's unit tests cannot compile for a host target today
-    // (memory bug_libutopia_tests_cannot_compile); the wiring's live witness
-    // is ls-halcyon-session-instrument's prompt leg.
+    // The wiring's live witness is ls-halcyon-session-instrument's prompt leg.
     #[test]
     fn prompt_takes_the_lambda_shape_with_the_session_inks() {
         let mut repl = Repl::new();

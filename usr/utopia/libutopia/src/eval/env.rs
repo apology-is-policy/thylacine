@@ -225,7 +225,7 @@ pub struct Env {
     /// command-substitution frames currently live. Bounded by
     /// `EVAL_MAX_DEPTH` so a runaway recursion (`fn f { f }`, a self-
     /// `source`, an `eval`-bomb, or executed `$($($(...)))` nesting) yields a
-    /// graceful `RecursionLimit` error instead of overflowing the 256 KiB
+    /// graceful `RecursionLimit` error instead of overflowing the
     /// EL0 stack into a guard-page `snare:segv` (scripture 8.1). A `Cell`
     /// because the `&Env` command-substitution path must inc/dec it.
     eval_depth: Cell<u32>,
@@ -258,10 +258,10 @@ fn default_aliases() -> BTreeMap<String, Vec<String>> {
 }
 
 /// Maximum eval-stack recursion depth (function calls / command-substitution
-/// nesting / source / eval). Conservative against the 256 KiB EL0 stack: the
-/// heaviest eval frame (a command-substitution level) burns a few KiB, so 64
-/// nested levels stays well under the stack while sitting far beyond any real
+/// nesting / source / eval). The heaviest eval frame (a command-substitution
+/// level) burns a few KiB, and 64 nested levels sits far beyond any real
 /// script's nesting (the deepest realistic recursion is a handful of levels).
+/// An expression between two levels can be deep, so `crate::stack` also bounds it.
 pub(crate) const EVAL_MAX_DEPTH: u32 = 64;
 
 impl Env {
@@ -309,7 +309,7 @@ impl Env {
     /// `eval_recursion_leave` on every exit path (success and error).
     pub(crate) fn eval_recursion_enter(&self) -> bool {
         let d = self.eval_depth.get();
-        if d >= EVAL_MAX_DEPTH {
+        if d >= EVAL_MAX_DEPTH || crate::stack::exhausted() {
             return true;
         }
         self.eval_depth.set(d + 1);

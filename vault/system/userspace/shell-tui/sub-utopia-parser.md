@@ -2,7 +2,7 @@
 id: sub-utopia-parser
 type: sub
 parent: moc-userspace-shell-tui
-title: "The ut parser — an rc-shape grammar, three recursion bounds, and the tests that could not compile until they found six defects"
+title: "The ut parser — an rc-shape grammar, recursion bounds that multiply, and the tests that could not compile until they found six defects"
 code:
   - usr/utopia/libutopia/src/parser/mod.rs
   - usr/utopia/libutopia/src/parser/lexer.rs
@@ -12,6 +12,7 @@ code:
   - usr/utopia/libutopia/src/parser/ast.rs
   - usr/utopia/libutopia/src/parser/error.rs
   - usr/utopia/libutopia/src/parser/span.rs
+  - usr/utopia/libutopia/src/stack.rs
 audit: none
 guarded-by: []
 validated-by: [prose, gate-interactive]
@@ -21,7 +22,7 @@ abis: []
 design:
   - "docs/UTOPIA-SHELL-DESIGN.md sections 5-9"
 created: 2026-08-03
-updated: 2026-09-23
+updated: 2026-11-04
 ---
 ## Purpose
 
@@ -105,8 +106,9 @@ first-in-first-out. A regex literal is recognized only through a one-shot flag s
 when the match operator is emitted. And the scanner keeps a stack of the parentheses
 still open, each `(` or `((`: a closer belongs to its opener, so `)))` closing `((`
 and `(` is `)` then `))`, `))` closing two `(` is two `)`, and no depth count in the
-parser ever sees one token closing two things. Inside an open `((`, `<<` is the shift
-and `<(` and `>(` are a comparison before a group.
+parser ever sees one token closing two things. Inside an open `((`, `<<` is the shift,
+`<(` and `>(` are a comparison before a group, and `((` is two groups, since arithmetic
+has no command for it to open: `((((1 + 2) * 3) + 4))` needs that.
 
 ### UTF-8 correctness is structural, not checked
 
@@ -125,16 +127,18 @@ That keeps the outer grammar simple, and it has one consequence that returns in
 Caveats: **the sub-script's spans are offsets into the body, not into the
 line.**
 
-### The one real hazard is stack depth, and it has three shapes
+### The one real hazard is stack depth, and it has five shapes
 
 A recursive-descent parser in a `no_std` program has no stack guard of its own;
 overflowing the EL0 stack is a guard-page fault, which terminates the shell.
-Three separate bounds exist because the recursion has three shapes and **no
+Separate bounds exist because the recursion has five shapes and **no
 single counter sees all of them**:
 
 | bound | value | what it catches | why the others miss it |
 |---|---:|---|---|
 | bracket nesting | 64 | `(((…`, `{{{…` | a flat pre-pass over the token stream, run before any recursion starts |
+| operator chain | 256 | `1 + 1 + 1 …` | a loop per level, so it takes no stack to parse, but it builds a tree as deep as it is long, which eval and drop recurse over |
+| statement nesting | 64 | `if (a) if (b) …` | a condition's brackets have closed before its body starts, so the pre-pass sees nothing; counted in `parse_statement`, with a brace level drawing on the same count |
 | operator recursion | 256 | `a**b**c**…`, `!!!!…` | right-associative and prefix chains are not brackets, so the pre-pass counts nothing |
 | re-lex depth | 32 | `$($($(…)))` | a whole substitution is *one token* in the outer stream, so the pre-pass sees depth 1 |
 
@@ -149,6 +153,28 @@ overlap. The re-lex counter is a process-global atomic, justified by the shell
 parsing one line at a time and argued to fail safe under a hypothetical
 concurrent parse (it would trip earlier, never later), and it is decremented on
 both the success and error paths so a top-level parse always restores it.
+
+### The bounds multiply, so the stack is asked too (2026-11-04)
+
+Each row above is one parser's count, and the rows compose: a group starts a new
+expression parser with a new operator count, and a substitution starts a new token
+stream with a new bracket count. Measured on a host build at the guest's opt-level, 60
+groups of 250 prefix operators take 3.35 MiB to parse, so two substitutions, each inside
+every bound, took 10047 KiB against exec's 8 MiB stack, on a 90 KB line. (The comments
+that said "well under the 256 KiB EL0 stack" had been stale since B-1b raised it to
+8 MiB, and were never checked against a product.)
+
+`stack::exhausted` compares the current address with `AT_STACK_BASE`, read by
+libthyla-rs from the auxv, plus a 512 KiB reserve, and answers before a level starts. It
+sits in `parse_statement`, `parse_expr_tokens` and `parse_unary` (every level of a `**`
+chain passes through the last), and those cut every cycle of the parser's recursion: a
+census by name over the call graph reports what remains as name collisions and pairs
+bounded by construction. Each check has a line that only it stops. Only an
+address can read a frame's real size, which belongs to the compiler. A stack it does not
+know, such as a peer thread's, reads as not exhausted; the counts above still hold there.
+The refusal is the same `RecursionLimit`. `u-6-test`'s flow 10 is the witness at boot, on
+the real auxv and the real frames, and a missing check there ends the probe at the guard
+page and joey fails the boot.
 
 ## Data structures
 
@@ -222,11 +248,17 @@ Nothing here is on a hot path — it runs once per line typed.
 
 ## Prosecution
 
-- **A new nesting construct must reach one of the three bounds.** Add a grammar
+- **A new nesting construct must reach one of the bounds.** Add a grammar
   form that recurses and ask which counter sees it: does it pass through a
   counted bracket, is it an operator chain that needs the depth field, or is it
-  a re-entrant parse that needs the re-lex counter? The second bound exists
-  because that question was once answered wrong.
+  a re-entrant parse that needs the re-lex counter? The operator bound exists
+  because that question was once answered wrong, and the statement bound because
+  it was answered wrong again, by the braceless `if`.
+- **A statement that wants its next line says so with `UnexpectedEof`.** The line editor's
+  Enter continues on it, so `if (c)` then Enter waits. Without that, the second line of
+  `if ($ok)` / `rm x` ran unguarded after the first line's parse error.
+- **A new cycle must pass a stack check.** A bound keeps one shape reasonable, and only
+  the check holds the product.
 - **A new bracket-like token pair must join the pre-pass's match arms**, or the
   pre-pass silently stops being complete.
 - **A new advance must move by a whole character**, or use the length helper.
@@ -255,7 +287,7 @@ Nothing here is on a hot path — it runs once per line typed.
   evaluator tests, once they ran, failed on `in (a b)` and `1 << 4`, and a census of
   every example in UTOPIA-SHELL-DESIGN found the rest: `((1 << 4))` and `((16 >> 2))`
   (6.13; the parser's shift level was a pass-through), `if ($v in (a b))` (7.3; the
-  right side took one value and `))` closed both), `((1 + (2 * 3)))`, `if (c) cmd`
+  right side took one value and `))` closed both), `((1 + (2 * 3)))`, `((((1 + 2) * 3) + 4))`, `if (c) cmd`
   with no braces (7.3 and 7.4, as in rc), `echo $f(1)` and `echo $f(2 3)` in a command
   word (6.3 and 6.9; folded into a `VarAt` token), `~ $v pat...` (7.4), and a reserved
   word as a value (`x = on`, `(in out)`, `$x == if`). A census covers syntax only. The

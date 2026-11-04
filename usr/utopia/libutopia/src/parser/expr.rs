@@ -116,6 +116,12 @@ pub fn parse_expr_tokens(
             span: Span::point(source_len),
         });
     }
+    if crate::stack::exhausted() {
+        return Err(ParseError {
+            kind: ParseErrorKind::RecursionLimit,
+            span: Span::point(source_len),
+        });
+    }
     let mut p = ExprParser::new(tokens, source_len, ctx);
     let expr = p.parse_top()?;
     if !p.at_end() {
@@ -141,16 +147,23 @@ struct ExprParser {
     /// but the right-associative `**` chain (`parse_pow` self-recursion) and the
     /// prefix `!`/`-`/`~` chain (`parse_unary` self-recursion) are NOT bracket
     /// tokens, so a line of e.g. 2000 `!` (`if (!!!...x) {}`) would otherwise
-    /// drive that many frames past the 256 KiB EL0 stack into a guard-page
+    /// drive that many frames toward a guard-page
     /// `snare:segv` -> shell death (scripture 8.1). Bounded by EXPR_MAX_DEPTH
     /// (RW-9 round-2 F1; the bracket-only check_token_nesting missed this).
     depth: u32,
+    /// Binary operators joined so far. See EXPR_MAX_CHAIN.
+    chained: u32,
 }
 
+/// Maximum binary operators in one expression parser. `1 + 1 + ...` takes no stack to
+/// parse, since each level is a loop, and it builds a tree as deep as it is long, which
+/// whatever walks or drops it then recurses over.
+const EXPR_MAX_CHAIN: u32 = 256;
+
 /// Maximum operator-recursion depth (combined `parse_pow` + `parse_unary`
-/// frames). Each frame is a few hundred bytes; 256 keeps the deepest chain
-/// well under the 256 KiB EL0 stack while sitting far beyond any real
-/// expression's operator nesting.
+/// frames). Each frame is a few hundred bytes; 256 sits far beyond any real
+/// expression's operator nesting. The count is per expression parser and a group
+/// starts a new one, so `crate::stack` is what bounds their product.
 const EXPR_MAX_DEPTH: u32 = 256;
 
 impl ExprParser {
@@ -166,11 +179,23 @@ impl ExprParser {
             source_len,
             ctx,
             depth: 0,
+            chained: 0,
         }
     }
 
     fn at_end(&self) -> bool {
         self.pos >= self.tokens.len()
+    }
+
+    fn chain(&mut self, op: BinOp, left: Expr, right: Expr) -> ParseResult<Expr> {
+        self.chained += 1;
+        if self.chained > EXPR_MAX_CHAIN {
+            return Err(ParseError {
+                kind: ParseErrorKind::RecursionLimit,
+                span: self.current_span(),
+            });
+        }
+        Ok(bin(op, left, right))
     }
 
     fn peek(&self) -> Option<&Token> {
@@ -591,7 +616,7 @@ impl ExprParser {
                     self.pos += 1;
                     self.maybe_retokenize_at_pos();
                     let right = self.parse_and()?;
-                    left = bin(BinOp::Or, left, right);
+                    left = self.chain(BinOp::Or, left, right)?;
                 }
                 _ => break,
             }
@@ -607,7 +632,7 @@ impl ExprParser {
                     self.pos += 1;
                     self.maybe_retokenize_at_pos();
                     let right = self.parse_bit_or()?;
-                    left = bin(BinOp::And, left, right);
+                    left = self.chain(BinOp::And, left, right)?;
                 }
                 _ => break,
             }
@@ -631,7 +656,7 @@ impl ExprParser {
                     self.pos += 1;
                     self.maybe_retokenize_at_pos();
                     let right = self.parse_bit_xor()?;
-                    left = bin(BinOp::BitOr, left, right);
+                    left = self.chain(BinOp::BitOr, left, right)?;
                 }
                 _ => break,
             }
@@ -652,7 +677,7 @@ impl ExprParser {
                     self.pos += 1;
                     self.maybe_retokenize_at_pos();
                     let right = self.parse_bit_and()?;
-                    left = bin(BinOp::BitXor, left, right);
+                    left = self.chain(BinOp::BitXor, left, right)?;
                 }
                 _ => break,
             }
@@ -671,7 +696,7 @@ impl ExprParser {
                     self.pos += 1;
                     self.maybe_retokenize_at_pos();
                     let right = self.parse_eq()?;
-                    left = bin(BinOp::BitAnd, left, right);
+                    left = self.chain(BinOp::BitAnd, left, right)?;
                 }
                 _ => break,
             }
@@ -725,7 +750,7 @@ impl ExprParser {
             self.pos += 1;
             self.maybe_retokenize_at_pos();
             let right = self.parse_shift()?;
-            left = bin(op, left, right);
+            left = self.chain(op, left, right)?;
         }
         Ok(left)
     }
@@ -744,7 +769,7 @@ impl ExprParser {
             self.pos += 1;
             self.maybe_retokenize_at_pos();
             let right = self.parse_add()?;
-            left = bin(op, left, right);
+            left = self.chain(op, left, right)?;
         }
         Ok(left)
     }
@@ -763,7 +788,7 @@ impl ExprParser {
             self.pos += 1;
             self.maybe_retokenize_at_pos();
             let right = self.parse_mul()?;
-            left = bin(op, left, right);
+            left = self.chain(op, left, right)?;
         }
         Ok(left)
     }
@@ -783,7 +808,7 @@ impl ExprParser {
             self.pos += 1;
             self.maybe_retokenize_at_pos();
             let right = self.parse_pow()?;
-            left = bin(op, left, right);
+            left = self.chain(op, left, right)?;
         }
         Ok(left)
     }
@@ -791,7 +816,8 @@ impl ExprParser {
     fn parse_pow(&mut self) -> ParseResult<Expr> {
         // Operator-recursion bound (RW-9 round-2 F1): `2**2**...**2` recurses
         // here per `**`. Guard before the work; balance the decrement on every
-        // return path via the inner-fn split (mirrors eval_block).
+        // return path via the inner-fn split (mirrors eval_block). The stack check
+        // is parse_unary's, which every level of this chain passes through.
         if self.depth >= EXPR_MAX_DEPTH {
             return Err(ParseError {
                 kind: ParseErrorKind::RecursionLimit,
@@ -831,7 +857,7 @@ impl ExprParser {
         // chain recurses here per operator. Same guard + inner-fn split as
         // parse_pow; the shared `self.depth` bounds the combined pow+unary
         // nesting (they call each other), so one cap covers both vectors.
-        if self.depth >= EXPR_MAX_DEPTH {
+        if self.depth >= EXPR_MAX_DEPTH || crate::stack::exhausted() {
             return Err(ParseError {
                 kind: ParseErrorKind::RecursionLimit,
                 span: self.current_span(),
@@ -1064,6 +1090,12 @@ impl ExprParser {
                 });
             }
             _ => {}
+        }
+        if self.ctx == ExprContext::Arith && TokenKind::reserved_word_text(&tok.kind).is_some() {
+            return Err(ParseError {
+                kind: ParseErrorKind::InvalidArithLiteral,
+                span: tok.span,
+            });
         }
         self.parse_value_atom()
     }
@@ -1490,8 +1522,7 @@ fn retokenize_arith_word(text: &str, base_start: usize) -> Option<Vec<Token>> {
 /// substitution re-tokenizes + re-parses its body -- a full lex+parse stack
 /// frame per `$(` -- which the single-stream `check_token_nesting` pass cannot
 /// see (a `$(...)` is one Subst token in the outer stream). 32 nested
-/// substitutions is far beyond any real script and well under the 256 KiB EL0
-/// stack at the heavier re-lex frame cost.
+/// substitutions is far beyond any real script.
 const PARSE_MAX_RELEX: u32 = 32;
 
 /// Live `$(...)` re-lex recursion depth. A process-global counter because
