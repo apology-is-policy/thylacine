@@ -2990,3 +2990,33 @@ Vote 15: a separate chunk straight after C4, and the signoff for `docs/ERRORS.md
   `tools/check-production.sh` beyond what `tools/test.sh` does first. All owed at the merge to main, under the operator's hold.
 - **Still open, owned.** `seam-self-managing-handler-no-restart`; a longjmp out of a Pouch handler (OPEN-BUGS); a missing
   bundle read as a regression by two scenarios (OPEN-BUGS). The rfork tear and clone copy have no deterministic test.
+
+## The walk errno: only a miss reads ENOENT — 2026-11-04
+
+- **The chunk** (operator vote 23, the signoff for ER-2's walk half; `dec-2026-11-03-walk-errno`). dev9p records a failed walk's
+  reason with `dev_walk_failed`, in `Thread.walk_errno`; `dev_walk` and `dev_walk_attrs` clear the slot, call the vtable and hand
+  it back. A Stratum integrity `EIO` on a lookup no longer says the file is absent. Open-or-create refuses. A union keeps Plan 9's
+  skip, but with no other member holding the name "absent" is not known. execve and `SYS_SPAWN_FULL_ARGV` say why; a Linux chdir
+  stops flattening; Pouch's `posix_spawnp` search stops on a non-miss.
+- **Audits.** Rounds 1 and 2 on Fable 5.1, each on a frozen copy: 0/0/1/4, 0/0/0/1. Details in the closed list.
+- **First boots.** Two stopped on stale pins of the flat -1: `spawn_cwd.image_joins_child_cwd` (`5d0028b85`) and joey's spawn-cwd
+  probe (`b8c8116c5`). The second cost a lease because my search after the first filtered on variable names. A boot stops at its
+  first red, so before a first boot the pin search takes no name filter, over kernel tests and joey.
+- **Runs on b8c8116c5.** Suite rc 0, 2201 tests. Pouch's spawn leg and the Linux phenotype leg pass. The watch for userspace reading a
+  failed walk as absent printed one line, `xproc-child: EACCES on the TCB service ok`, which is that probe's expected answer. 27 of
+  29 kernel sabotages red at their named lines, in a suite narrowed to 230 tests whose own control passed. G01 red at `viv-pheno-probe`
+  L351. P01, the patch mutated and baked, red at `posix_spawn(miss)`. Regreen ELF == green ELF, suite 2201/0.
+- **Green, each read.** E07: `stalk_union_child` is static and its one caller reads the reason only on a NULL, so nothing can see the
+  difference; E08, its public twin, went red. E11: a test gap, a failed run of two names re-walks through the plain wrapper, which
+  clears the slot and hid the fused one. `6ca029353` adds two one-name queries in a row. Lease 2, 10:30:54Z to 10:34:12Z, on 6ca029353: suite rc 0, 2201 tests, with the new check in; E11 red at `stalk.walk_failure_keeps_its_errno`, "the next one's miss has no reason left over".
+- **Void as a guest witness.** G02 went red in the kernel tests, E19's witnesses, so joey never reached its guest line.
+- **No test turns these red:** `SYS_WALK_OPEN`'s return, execve's return, dev9p's no-priv, bad-args, walkqid and attrs alloc, fid
+  exhaustion and new_priv alloc arms, the `: -T_E_IO` half of the fused arm, exec_resolve's stat and empty-image arms, the nrun and
+  NOENT clauses (RPC count only), lictor's Twalk, Pouch's `default: return errno`, and E07's guard.
+- **SMP subset did not run on this chunk.** Its one new piece of state is a per-thread slot. C8a carries this code and runs the subset
+  by vote 27. **Did not run:** the full SMP matrix, `tools/test-fault.sh`, the interactive fleet and `tools/check-production.sh` beyond
+  what `tools/test.sh` does first. All owed at the merge to main, under the operator's hold.
+- **At the merge.** Main's `optional_absent` already reads only `-2` as absent, so a walk that fails for another reason will fail the
+  boot instead of skipping a present program. That has not run: it needs this chunk on main's tree.
+- **Still open, owned.** `T_E_NOEXEC`, signed off by vote 26, its own chunk; a 9P server answering ENOENT past its first name poisons
+  a dentry (OPEN-BUGS); the older spawn fronts keep a flat -1, which ER-3 owns.
