@@ -11,9 +11,22 @@ itself a decision to hand back: whether you yield or roll straight into the next
 chunk is governed by the 600k line in §"When to recommend `/compact`", and the
 default under granted autonomy is to **keep going**. What follows is owed at
 every checkpoint either way — including the ones you run straight through, where
-it is the only thing keeping the tree pickup-ready. Do these three WITHOUT BEING
+it is the only thing keeping the tree pickup-ready. Do these four WITHOUT BEING
 ASKED. They exist because the user cannot see what you can see, and the cost of
 them guessing is real.
+
+**The fourth is the map (operator, 2026-11-04): say where you are on the arc.**
+The operator reads each agent's arc as a transit line on the switchboard's screen
+5, to see where things stand without asking. `roadmap_post` (or `yip roadmap post`)
+states the arc when it starts or changes shape: its name, its description, and
+every station from start to end, each with a description, with detours marked.
+Post the whole road; twelve points are drawn and a longer line folds around your
+position by itself. `roadmap_at` (or `yip roadmap at`) moves the marker on reaching
+a station, with a one-line note on what is happening there. At a resting point
+where you have not moved, call it anyway: an empty station argument keeps the
+marker and moves the time, and the map shows that time, turning amber at six hours
+and red at a day. A map that is out of date is worse than none, because the reader
+trusts it. Finish an arc with `done`, and post the next one.
 
 **1. Account for every attached shell, monitor, and background task.**
 
