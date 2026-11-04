@@ -973,7 +973,8 @@ enum {
     // (exec_build_init_stack lays out argc / argv[] / envp[] / auxv +
     // strings region; pouch's musl _start exposes argv to main).
     //
-    // Returns the child's pid on success (positive), -1 on any failure:
+    // Returns the child's pid on success (positive), a -T_E_* on failure, the walk's
+    // own reason and -T_E_NOEXEC for a file that is no image among them:
     //   - req_va outside the user-VA bound / unmapped at struct-copy time
     //   - any field outside its documented bounds (name_len, argv_data_len,
     //     argc, fd_count, perm_flags, cap_mask — same as the legacy
@@ -2102,21 +2103,14 @@ enum {
     // On FAILURE the caller's address space is COMPLETELY untouched and the
     // error is a real -errno:
     //   -T_E_NOENT / -T_E_ACCES / -T_E_NOTDIR ...  the path did not resolve
-    //   -T_E_NOEXEC   resolved, but not a loadable static ELF for this machine
+    //   -T_E_NOEXEC   resolved, but not a runnable image
     //   -T_E_NOMEM    out of memory building the new image
     //   -T_E_FAULT    a user pointer was unreadable
     //   -T_E_INVAL    an argument was out of bounds
-    //   -T_E_AGAIN    the Proc has more than one live thread (see below)
     //
-    // v1.0 LIMIT -- multi-threaded callers are REFUSED with -T_E_AGAIN rather
-    // than half-served. POSIX says exec terminates every thread but the caller;
-    // doing that needs a "terminate THESE threads" primitive, and the only one
-    // the tree has (proc_group_terminate) is Proc-wide and set-once-never-cleared
-    // by design (I-24), so exempting the execer from it would permanently
-    // break a LATER kill of the same Proc. The real primitive is its own chunk
-    // on the death lineage (LINEAGE.md section 7, L-2b). Nothing in the arc is
-    // blocked by this: a vfork child, a fork child and a shell are all
-    // single-threaded when they exec.
+    // A thread that loses the claim to a peer's execve, or finds the Proc dying,
+    // does not come back: it dies with the others. The caller's peers die with
+    // the old image (ARCH 7.9.1), so no thread count refuses this call.
     SYS_EXECVE = 104,
 
     // SYS_RFORK(flags, child_sp, child_tls)

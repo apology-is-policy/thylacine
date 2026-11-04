@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/ARCHITECTURE.md"]
 created: 2026-08-03
-updated: 2026-10-27
+updated: 2026-11-04
 ---
 ## Purpose
 
@@ -811,3 +811,5 @@ read-only aliases. Ordinary registered I/O buffers must never receive this tag;
 they keep existing clone semantics. No user mapping flag or permission ceiling
 is added. Native split/clone tests and two intended source mutations distinguish
 private omission from accidentally omitting ordinary lazy buffers.
+
+`vma_args_ok` holds `vma_alloc`'s argument checks, so a caller can ask first and read a later NULL as the slab's refusal. `burrow_map_in` does.

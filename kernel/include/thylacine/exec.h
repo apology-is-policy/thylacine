@@ -488,10 +488,13 @@ int exec_load_into(struct AddrSpace *as, bool exempt, struct Proc *nsp,
 // dead kernel rather than a failed exec. It is also the only place the
 // `--argv0` claim can be discriminated at all -- nothing in a container can
 // produce a vector whose argv[0] differs from the path it resolved.
+// *err_out (OPTIONAL) says why on NULL, as a T_E_* code: E2BIG for the bound, NOMEM
+// for a refused allocation, EINVAL for a block no syscall entry would pass.
 char *exec_interp_argv(const char *interp, u32 interp_len,
                        const char *path, u32 path_len,
                        const char *argv_data, u32 argv_data_len, u32 argc,
-                       u32 *out_len, u32 *out_argc);
+                       u32 *out_len, u32 *out_argc, int *err_out);
+void exec_interp_argv_refuse_for_test(bool on);
 #endif // KERNEL_TESTS
 
 // exec_resolve_from_namespace (#58 / REVENANT R-4) -- resolve `name` in `p`'s

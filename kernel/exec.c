@@ -1067,7 +1067,10 @@ static int map_eager_from_file(struct AddrSpace *as, bool exempt, struct Spoor *
             size_t dst_off = g.lead + got;
             u8 *slot_kva = (u8 *)burrow_lazy_slot_kva(b, dst_off / PAGE_SIZE);
             // L-7 F4: past the populate, so these three owe the charge back.
-            if (!slot_kva) return lazy_populate_unwind(as, b, nfile);
+            if (!slot_kva) {
+                (void)lazy_populate_unwind(as, b, nfile);
+                return -(int)T_E_IO;   // the kernel's own run, not the file's doing
+            }
             size_t in_page = dst_off % PAGE_SIZE;
             size_t want    = (size_t)PAGE_SIZE - in_page;
             if (want > seg->filesz - got) want = (size_t)(seg->filesz - got);
@@ -1140,7 +1143,7 @@ static void *exec_read_header(struct Spoor *exe, size_t *got_out, int *err_out) 
     *err_out = -(int)T_E_NOMEM;
     void *hdr = kmalloc(EXEC_ELF_HEADER_MAX, 0);
     if (!hdr)                                  return NULL;
-    *err_out = -1;
+    *err_out = -(int)T_E_IO;
     if (((uintptr_t)hdr & 0x7) != 0)           { kfree(hdr); return NULL; }  // 8-align the Ehdr cast
 
     u8 *dst = (u8 *)hdr;
@@ -1209,10 +1212,16 @@ static void *exec_read_header(struct Spoor *exe, size_t *got_out, int *err_out) 
 // *out_len / *out_argc set, or NULL if it does not fit the argv bounds or the
 // allocation fails. Pure: touches no Proc and no address space.
 VISIBLE_IF_KERNEL_TESTS
+#ifdef KERNEL_TESTS
+static bool g_interp_argv_refuse_for_test;
+void exec_interp_argv_refuse_for_test(bool on) { g_interp_argv_refuse_for_test = on; }
+#endif
+
 char *exec_interp_argv(const char *interp, u32 interp_len,
                        const char *path, u32 path_len,
                        const char *argv_data, u32 argv_data_len, u32 argc,
-                       u32 *out_len, u32 *out_argc) {
+                       u32 *out_len, u32 *out_argc, int *err_out) {
+    if (err_out) *err_out = (int)T_E_INVAL;
     static const char OPT_ARGV0[] = "--argv0";   // 7 + NUL
     static const char OPT_END[]   = "--";        // 2 + NUL
 
@@ -1279,10 +1288,22 @@ char *exec_interp_argv(const char *interp, u32 interp_len,
             + (u64)tail_len;
     u64 n   = (u64)(argc > 0 ? argc - 1 : 0) + 5;   // + interp, --argv0, a0,
                                                     //   --, path
-    if (len > EXEC_ARGV_DATA_MAX || n > EXEC_ARGV_MAX) return NULL;
+    if (len > EXEC_ARGV_DATA_MAX || n > EXEC_ARGV_MAX) {
+        if (err_out) *err_out = (int)T_E_2BIG;
+        return NULL;
+    }
 
     char *blob = kmalloc((size_t)len, 0);
-    if (!blob) return NULL;
+#ifdef KERNEL_TESTS
+    if (blob && g_interp_argv_refuse_for_test) {
+        kfree(blob);
+        blob = NULL;
+    }
+#endif
+    if (!blob) {
+        if (err_out) *err_out = (int)T_E_NOMEM;
+        return NULL;
+    }
 
     u32 w = 0;
     for (u32 i = 0; i < interp_len; i++) blob[w++] = interp[i];
@@ -1321,11 +1342,13 @@ static int exec_load_body(struct AddrSpace *as, bool exempt, struct Proc *nsp,
                           u64 *entry_out, u64 *sp_out,
                           struct Spoor **interp_out, char **rw_argv_out);
 
-// The look a full spawn takes in the parent, which can still answer. The child's own
-// load decides: a file can change after this. A dynamic image passes, since its
-// interpreter is the child's load to resolve.
+// The look a full spawn takes in the parent, which can still answer. It reads the
+// header and parses it, and nothing past that: an image with PT_INTERP passes, since
+// its interpreter is the child's load to resolve, and so does one whose segments the
+// mapper would refuse. For those the spawn reads a pid and the child exits. The
+// child's own load decides: a file can change after this.
 int exec_image_check(struct Spoor *exe, size_t exe_size) {
-    if (!exe || !exe->dev || !exe->dev->read) return -1;
+    if (!exe || !exe->dev || !exe->dev->read) return -(int)T_E_ACCES;
     size_t got = 0;
     int err = 0;
     void *hdr = exec_read_header(exe, &got, &err);
@@ -1333,7 +1356,7 @@ int exec_image_check(struct Spoor *exe, size_t exe_size) {
     struct elf_image img;
     int r = elf_load(hdr, exe_size, &img);
     kfree(hdr);
-    if (r == ELF_LOAD_OK || r == ELF_LOAD_HAS_INTERP || r == ELF_LOAD_HAS_DYNAMIC) return 0;
+    if (r == ELF_LOAD_OK || r == ELF_LOAD_HAS_INTERP) return 0;
     return -(int)T_E_NOEXEC;
 }
 
@@ -1468,13 +1491,15 @@ static int exec_load_body(struct AddrSpace *as, bool exempt, struct Proc *nsp,
                     char *nargv = exec_interp_argv(interp, (u32)ilen,
                                                    prog_name, prog_name_len,
                                                    argv_data, argv_data_len, argc,
-                                                   &nlen, &nargc);
+                                                   &nlen, &nargc, &interp_err);
                     if (!nargv) {
                         spoor_clunk(ispoor);
-                        interp_err = (int)T_E_2BIG;
-                        exec_report_fail("PT_INTERP rewrite does not fit the argv "
-                                         "bound -- refusing", (u64)argv_data_len);
+                        exec_report_fail("PT_INTERP rewrite refused -- not built",
+                                         (u64)argv_data_len);
                     } else {
+                        // The resolver's reason means nothing on a success, and a
+                        // refusal from here on is the interpreter's own.
+                        interp_err = (int)T_E_NOEXEC;
                         // Committed. From here the image being loaded is the
                         // INTERPRETER; `exe` is reassigned and the caller's own
                         // Spoor is left exactly as it was (it still owns that

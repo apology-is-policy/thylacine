@@ -9164,8 +9164,8 @@ static int sys_bump_inherit_fds(struct Proc *p, const u32 *fds, u32 fd_count,
 // failure.
 // *errp (OPTIONAL) is why, as a T_E_* code: the walk's own reason (ENOENT only for a
 // miss, ERRORS.md ER-2), EACCES for a file the mount or the Dev will not execute, a
-// failing stat's errno, and EINVAL for an empty or oversized image, sys_execve_core's
-// disposition while the registry has no T_E_NOEXEC.
+// failing stat's errno, and ENOEXEC for an empty or oversized image. It means nothing on
+// a success, where it holds whatever was last written.
 // _ex variant (VIVARIUM section 13): reports, via *pheno_out (OPTIONAL), whether
 // the binary's resolution crossed an MPHENO_LINUX mount -- the /viv/bin subtree
 // phenotype channel. The plain exec_resolve_from_namespace wrapper below passes

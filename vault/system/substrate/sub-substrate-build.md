@@ -29,7 +29,7 @@ locks: []
 abis: []
 design: ["docs/TOOLING.md"]
 created: 2026-08-01
-updated: 2026-10-29
+updated: 2026-11-04
 ---
 ## Purpose
 
@@ -651,3 +651,5 @@ or when an entry has no definition its pattern parses (so a definition it
 cannot read fails instead of escaping). `test_devcap_clearance_audio_graph`
 ran zero times for 51 days that way; the check fails the tree just before its
 registration (a3144a8c5^) on exactly that test.
+
+The pheno bundle supplies `pheno-notelf` and `pheno-empty`, 0755, for viv-pheno-probe's L369 and L370.

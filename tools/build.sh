@@ -1371,10 +1371,14 @@ VIVEOF
         # An empty writable file the probe fills through Linux write(64) and
         # then reads back: a write proven by its return value proves only the
         # renumber; proven by the bytes coming back it proves the data path.
-        # (It cannot CREATE one -- O_CREAT is deliberately not translatable,
-        # VIVARIUM section 6.20 correction 1 -- so the bundle supplies it.)
+        # The bundle supplies it, so that the leg proves the write and not whether this
+        # principal may create in the root.
         : > "$hb/rootfs/pheno-scratch"
         chmod 0666 "$hb/rootfs/pheno-scratch"
+        # L369, L370: files that may run and are no image.
+        printf 'echo hi\n' > "$hb/rootfs/pheno-notelf"
+        : > "$hb/rootfs/pheno-empty"
+        chmod 0755 "$hb/rootfs/pheno-notelf" "$hb/rootfs/pheno-empty"
         for leaf in null zero full random urandom tty; do
             : > "$hb/rootfs/dev/$leaf"
             chmod 0666 "$hb/rootfs/dev/$leaf"

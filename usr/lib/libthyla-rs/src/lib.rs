@@ -3065,8 +3065,7 @@ pub unsafe fn t_weft_unshare(share_id: u64) -> i64 {
 // intact and the value is a real -errno.
 //
 // Notable errors: -T_E_NOENT / -T_E_ACCES (the path did not resolve),
-// -T_E_NOEXEC (not a runnable image), -T_E_AGAIN (this Proc has more than one live thread,
-// which v1.0 refuses rather than half-serves).
+// -T_E_NOEXEC (not a runnable image).
 //
 // The environment is NOT passed: it is the per-Proc /env device, which survives
 // exec on its own.
@@ -3505,7 +3504,7 @@ pub unsafe fn t_wstat(fd: i64, valid: u32, mode: u32, uid: u32, gid: u32) -> i64
 // t_spawn_full_argv — combined-spawn primitive with argv pass-through.
 // Subsumes every earlier SYS_SPAWN_* surface. Reads the calling Proc's
 // 80-byte `TSpawnArgs` struct at `req_va` and rfork-execs a fresh child.
-// Returns the child's pid (positive) on success, -1 on any rejection
+// Returns the child's pid (positive) on success, a -T_E_* on any rejection
 // (see SYS_SPAWN_FULL_ARGV kernel header for the full list).
 //
 // Backs t::process::Command::spawn (U-2d).

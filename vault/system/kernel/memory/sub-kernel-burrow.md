@@ -9,7 +9,7 @@ guarded-by: [inv-i7, inv-i32, inv-i44]
 validated-by: [spec-burrow, spec-cow, spec-capacity, gate-smp]
 locks: [lock-burrow]
 created: 2026-08-02
-updated: 2026-10-27
+updated: 2026-11-04
 ---
 ## Purpose
 
@@ -826,3 +826,5 @@ Nothing new is asserted by the claim: the five AS-R9 witnesses it added --
 `unmap_interior_start_refused` -- are already described above, each beside the
 arm of the repair it pins. What changes is that churn in that file now flags THIS
 dossier, which is the point of ownership.
+
+`burrow_map_in` answers `-T_E_NOMEM` for a Vma the slab refused and for the VMA cap, and `-1` for an argument the caller got wrong or an overlap. Exec reads that `-1` as the image's fault, and a shell runs a file at fault as a script.

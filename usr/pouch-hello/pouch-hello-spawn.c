@@ -119,25 +119,6 @@ int main(int argc, char **argv) {
 	miss_rc = posix_spawnp(&miss_pid, "no-such-walk-errno", NULL, NULL, missargv, environ);
 	if (miss_rc != ENOENT) return fail("posix_spawnp(miss)", miss_rc);
 
-	// === a file that resolves and may run, and is no image: ENOEXEC, through a spawn
-	//     and through an exec that comes back. Text, and then nothing at all. ===
-	static const char *const noimg_path[2] = { "/tmp/pouch-spawn-notelf", "/tmp/pouch-spawn-empty" };
-	static const char *const noimg_body[2] = { "echo hi\n", "" };
-	for (int i = 0; i < 2; i++) {
-		int nfd = open(noimg_path[i], O_WRONLY | O_CREAT | O_TRUNC, 0755);
-		if (nfd < 0) return fail("noimg create", errno);
-		size_t want = strlen(noimg_body[i]);
-		if (write(nfd, noimg_body[i], want) != (ssize_t)want) return fail("noimg write", errno);
-		(void)close(nfd);
-		int s_rc = posix_spawn(&miss_pid, noimg_path[i], NULL, NULL, missargv, environ);
-		if (s_rc != ENOEXEC) return fail("posix_spawn(noimg)", s_rc);
-		errno = 0;
-		(void)execv(noimg_path[i], missargv);
-		int x_errno = errno;
-		(void)unlink(noimg_path[i]);
-		if (x_errno != ENOEXEC) return fail("execv(noimg)", x_errno);
-	}
-
 	// === test 1: pipe2(O_CLOEXEC) + posix_spawn("ok") redirecting the child's
 	//     stdout into the pipe; capture + reap; expect WEXITSTATUS 0 ===
 	int p[2];

@@ -128,6 +128,16 @@ static inline void vma_set_prot_max(struct Vma *v, u32 prot) {
 // slub_init; before any vma_alloc.
 void vma_init(void);
 
+// Whether vma_alloc's arguments are ones it can take, so that a NULL from it after a
+// yes is the slab's refusal and no fault of the caller's.
+struct Burrow;
+bool vma_args_ok(u64 vaddr_start, u64 vaddr_end, u32 prot,
+                 const struct Burrow *burrow, u64 burrow_offset);
+
+#ifdef KERNEL_TESTS
+void vma_refuse_alloc_for_test(bool on);
+#endif
+
 // Allocate a fresh Vma descriptor. Initializes magic + the passed
 // fields; next/prev set to NULL (caller's responsibility to insert
 // into the per-Proc list via vma_insert). Refcounts the BURROW via

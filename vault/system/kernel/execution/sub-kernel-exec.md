@@ -117,10 +117,14 @@ which `sys_execve_core` reads as `EINVAL`. `exec_setup_from_spoor` stays flat fo
 spawn thunks, which have already handed back a pid.
 
 So `SYS_SPAWN_FULL_ARGV` takes its look before the rfork: `exec_image_check` reads the
-header and asks `elf_load`, at the cost of one header read per spawn. A dynamic image
-passes, since its interpreter is the child's load to resolve, and that child reads a pid
-and exit 1 if the interpreter is missing. The child's load still decides: a file can
-change after the look.
+header and asks `elf_load`, at the cost of one header read per spawn. That is all it
+covers. An image with PT_INTERP passes, since its interpreter is the child's load to
+resolve, and so does one whose segments the mapper would refuse: those read a pid and exit
+1. The child's load still decides: a file can change after the look.
+
+A refused Vma is not the file's doing: `burrow_map_in` asks `vma_args_ok` first, so a NULL
+past it is the slab's and travels as `-T_E_NOMEM`. A good program whose interpreter is
+itself no image also reads `ENOEXEC`, the one knowing exception, where Linux has `ELIBBAD`.
 `execve.load_refuses_nomem_at_the_pool_edge` parks the pool full and loads.
 
 That is worth stating as a shape rather than a fact, because it is the better

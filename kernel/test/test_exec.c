@@ -1509,6 +1509,9 @@ void test_execve_image_check_answers_for_the_parent(void) {
     ((struct Elf64_Phdr *)(g_elf_blob + sizeof(struct Elf64_Ehdr)))[1].p_type = PT_INTERP;
     int dynamic = nx_check(size);
     size = nx_good();
+    ((struct Elf64_Phdr *)(g_elf_blob + sizeof(struct Elf64_Ehdr)))[1].p_type = PT_DYNAMIC;
+    int fixed_dynamic = nx_check(size);
+    size = nx_good();
     g_blob_read_fail_rc = -(long)T_E_IO;
     g_blob_read_fail_from = 0;
     int unread = nx_check(size);
@@ -1518,7 +1521,8 @@ void test_execve_image_check_answers_for_the_parent(void) {
     TEST_EXPECT_EQ(text, -(int)T_E_NOEXEC, "a page of text");
     TEST_EXPECT_EQ(script, -(int)T_E_NOEXEC, "a few bytes of text");
     TEST_EXPECT_EQ(machine, -(int)T_E_NOEXEC, "another machine's ELF");
-    TEST_EXPECT_EQ(dynamic, 0, "a dynamic image is the child's load to judge");
+    TEST_EXPECT_EQ(dynamic, 0, "an interpreter is the child's load to resolve");
+    TEST_EXPECT_EQ(fixed_dynamic, -(int)T_E_NOEXEC, "an ET_EXEC with PT_DYNAMIC has no load to go to");
     TEST_EXPECT_EQ(unread, -(int)T_E_IO, "a failed read says nothing about the file");
 }
 
@@ -1562,6 +1566,53 @@ void test_execve_interpreter_says_why(void) {
     TEST_EXPECT_EQ(nameless, -(int)T_E_NOEXEC, "an entry with no name for the program");
     TEST_EXPECT_EQ(no_namespace, -(int)T_E_NOEXEC, "no namespace to resolve it in");
     TEST_EXPECT_EQ(no_room, -(int)T_E_2BIG, "a rewritten argv that does not fit: E2BIG");
+
+    // The rewrite refused for want of memory, which is no reason to split the argv.
+    size = nx_dynamic("/bin/hello");
+    exec_interp_argv_refuse_for_test(true);
+    int no_block = nx_load(self, size, "prog", 4, NULL, 0, 0);
+    exec_interp_argv_refuse_for_test(false);
+    TEST_EXPECT_EQ(no_block, -(int)T_E_NOMEM, "a rewrite with no memory for its block: ENOMEM");
+
+    // An interpreter that resolves and is itself dynamic: the resolver's last word on
+    // a success must not be what the load answers. This image has one if the sysroot
+    // has a libc.so; the sabotage that drops the reset proves the leg ran on it.
+    static const char dyn[] = "/bin/pouch-hello-dlopen";
+    size_t dsz = 0;
+    int derr = 0;
+    struct Spoor *dq = exec_resolve_interp(self, dyn, sizeof(dyn) - 1u, &dsz, &derr);
+    if (dq) {
+        spoor_clunk(dq);
+        size = nx_dynamic(dyn);
+        TEST_EXPECT_EQ(nx_load(self, size, "prog", 4, NULL, 0, 0), -(int)T_E_NOEXEC,
+                       "an interpreter that is itself dynamic is no image for this job");
+    }
+}
+
+// A refused Vma is the kernel's shortage and no fault of the file's, and a shell runs
+// a file at fault as a script. The argument checks stay the caller's.
+void test_execve_load_says_nomem_on_a_refused_vma(void) {
+    struct Proc *self = current_thread()->proc;
+    size_t size = nx_good();
+    TEST_EXPECT_EQ(nx_load(self, size, "prog", 4, NULL, 0, 0), 0, "CONTROL: the image loads");
+    vma_refuse_alloc_for_test(true);
+    int refused = nx_load(self, size, "prog", 4, NULL, 0, 0);
+    vma_refuse_alloc_for_test(false);
+    TEST_EXPECT_EQ(refused, -(int)T_E_NOMEM, "no Vma for a segment: ENOMEM, never ENOEXEC");
+
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    struct Burrow *b = burrow_create_anon(PAGE_SIZE, false);
+    TEST_ASSERT(b != NULL, "burrow_create_anon");
+    u64 va = 0x10000000ull;
+    TEST_EXPECT_EQ(burrow_map(p, b, va, PAGE_SIZE, VMA_PROT_READ | VMA_PROT_WRITE | VMA_PROT_EXEC), -1,
+                   "W+X is the caller's doing, whatever the slab holds");
+    vma_refuse_alloc_for_test(true);
+    int map_refused = burrow_map(p, b, va, PAGE_SIZE, VMA_PROT_READ);
+    vma_refuse_alloc_for_test(false);
+    TEST_EXPECT_EQ(map_refused, -(int)T_E_NOMEM, "a map the slab refused says so");
+    burrow_unref(b);
+    proc_free(p);
 }
 
 // =============================================================================
@@ -1580,7 +1631,7 @@ void test_execve_interpreter_says_why(void) {
 // The reject path: an ELF carrying PT_INTERP makes elf_load return
 // ELF_LOAD_HAS_INTERP, and when the interp names a Linux loader (brand_contains
 // "ld-musl") elf_brand_hint answers LINUX_LIKELY, so exec_load_body's native
-// arm calls exec_say and fails the load. The behaviour (dynamic binary -> -1)
+// arm calls exec_say and fails the load. The behaviour (dynamic binary refused)
 // is worth a regression on its own; running exec_say is the #244-class value --
 // a diagnostic whose only prior witness was that it compiled.
 //
@@ -1624,7 +1675,7 @@ void test_exec_native_rejects_dynamic_linux(void) {
     // assertion means exec_say did not fault.
     TEST_EXPECT_EQ(exec_load_into(nas, false, NULL, exe, size, NULL, 0, NULL, 0, 0, NULL, 0, 0,
                                   &entry, &sp),
-                   -1, "a dynamic Linux binary is refused by a native exec");
+                   -(int)T_E_NOEXEC, "a dynamic Linux binary is refused by a native exec");
     // Nothing was published into the address space.
     TEST_EXPECT_EQ((u64)nas->vma_count, 0ull, "no segment mapped on the reject");
 
@@ -1688,10 +1739,10 @@ void test_exec_load_failure_leaves_phenotype(void) {
     spoor_clunk(exe);
     drop_proc(p);
 
-    TEST_EXPECT_EQ(rc_native, -1,
+    TEST_EXPECT_EQ(rc_native, -(int)T_E_NOEXEC,
         "a nameless PT_INTERP load refuses (the rewrite needs the program's own name)");
     TEST_EXPECT_EQ(vmas, 0ull, "no segment mapped on the refusal");
-    TEST_EXPECT_EQ(rc_linux, -1, "and refuses the same way whatever the field reads");
+    TEST_EXPECT_EQ(rc_linux, -(int)T_E_NOEXEC, "and refuses the same way whatever the field reads");
     TEST_ASSERT(after_native == PHENO_NATIVE,
         "Leg B: a FAILED load leaves a NATIVE field NATIVE");
     TEST_ASSERT(after_linux == PHENO_LINUX,
@@ -1840,7 +1891,7 @@ void test_exec_interp_dispatch_every_phenotype(void) {
         "B-1d: a native Proc's load of a PT_INTERP binary loads the interpreter");
     TEST_ASSERT(entry_ns != 0, "the loaded image has an entry (the interpreter's)");
     TEST_ASSERT(vmas_ns > 0, "the interpreter's segments were mapped");
-    TEST_EXPECT_EQ(rc_nons, -1,
+    TEST_EXPECT_EQ(rc_nons, -(int)T_E_NOEXEC,
         "CONTROL: with no namespace the rewrite is disabled and the binary refuses");
     TEST_EXPECT_EQ(vmas_nons, 0ull, "no segment mapped on the refusal");
     TEST_ASSERT(field == PHENO_NATIVE,
@@ -2004,7 +2055,7 @@ void test_exec_interp_argv_shape(void) {
         static const char argv[] = "ls\0-l";             // argc 2
         char *b = exec_interp_argv(INTERP, sizeof(INTERP) - 1,
                                    "/bin/busybox", 12,
-                                   argv, sizeof(argv), 2, &len, &n);
+                                   argv, sizeof(argv), 2, &len, &n, NULL);
         TEST_ASSERT(b != NULL, "the rewrite builds");
         static const char *want[] = { INTERP, "--argv0", "ls", "--",
                                       "/bin/busybox", "-l" };
@@ -2019,7 +2070,7 @@ void test_exec_interp_argv_shape(void) {
     {
         static const char argv[] = "sh\0-c\0echo hi";     // argc 3
         char *b = exec_interp_argv(INTERP, sizeof(INTERP) - 1, "/bin/sh", 7,
-                                   argv, sizeof(argv), 3, &len, &n);
+                                   argv, sizeof(argv), 3, &len, &n, NULL);
         TEST_ASSERT(b != NULL, "the rewrite builds");
         u32 nuls = 0;
         for (u32 i = 0; i < len; i++) if (b[i] == '\0') nuls++;
@@ -2034,7 +2085,7 @@ void test_exec_interp_argv_shape(void) {
     // argv[0] and sees argc == 1 -- the DISTRO.md section 3.2 ledger row.
     {
         char *b = exec_interp_argv(INTERP, sizeof(INTERP) - 1, "/bin/true", 9,
-                                   NULL, 0, 0, &len, &n);
+                                   NULL, 0, 0, &len, &n, NULL);
         TEST_ASSERT(b != NULL, "the rewrite builds with no argv at all");
         static const char *want[] = { INTERP, "--argv0", "", "--", "/bin/true" };
         TEST_EXPECT_EQ(argv_blob_differs_at(b, len, want, 5), -1,
@@ -2053,7 +2104,7 @@ void test_exec_interp_argv_shape(void) {
         big[sizeof(big) - 1] = '\0';
         TEST_EXPECT_EQ((u64)(uintptr_t)exec_interp_argv(
                            INTERP, sizeof(INTERP) - 1, "/bin/x", 6,
-                           big, sizeof(big), 1, &len, &n), 0ull,
+                           big, sizeof(big), 1, &len, &n, NULL), 0ull,
             "an argv block at the ceiling REFUSES the rewrite");
     }
     {
@@ -2062,7 +2113,7 @@ void test_exec_interp_argv_shape(void) {
         for (u32 i = 0; i < sizeof(many); i++) many[i] = '\0';
         TEST_EXPECT_EQ((u64)(uintptr_t)exec_interp_argv(
                            INTERP, sizeof(INTERP) - 1, "/bin/x", 6,
-                           many, sizeof(many), EXEC_ARGV_MAX, &len, &n), 0ull,
+                           many, sizeof(many), EXEC_ARGV_MAX, &len, &n, NULL), 0ull,
             "an argc at the ceiling REFUSES the rewrite");
     }
 
@@ -2073,7 +2124,7 @@ void test_exec_interp_argv_shape(void) {
         static const char bad[] = { 'l', 's' };          // no NUL anywhere
         TEST_EXPECT_EQ((u64)(uintptr_t)exec_interp_argv(
                            INTERP, sizeof(INTERP) - 1, "/bin/ls", 7,
-                           bad, sizeof(bad), 1, &len, &n), 0ull,
+                           bad, sizeof(bad), 1, &len, &n, NULL), 0ull,
             "an unterminated argv[0] REFUSES the rewrite");
     }
     {
@@ -2083,7 +2134,7 @@ void test_exec_interp_argv_shape(void) {
         static const char bad[] = { 'l', 's', '\0', '-', 'l' };   // no final NUL
         TEST_EXPECT_EQ((u64)(uintptr_t)exec_interp_argv(
                            INTERP, sizeof(INTERP) - 1, "/bin/ls", 7,
-                           bad, sizeof(bad), 2, &len, &n), 0ull,
+                           bad, sizeof(bad), 2, &len, &n, NULL), 0ull,
             "an argv block not ending in a NUL REFUSES the rewrite");
     }
 
@@ -2096,26 +2147,26 @@ void test_exec_interp_argv_shape(void) {
         // argc that OVERSTATES the block.
         TEST_EXPECT_EQ((u64)(uintptr_t)exec_interp_argv(
                            INTERP, sizeof(INTERP) - 1, "/bin/ls", 7,
-                           argv, sizeof(argv), 3, &len, &n), 0ull,
+                           argv, sizeof(argv), 3, &len, &n, NULL), 0ull,
             "argc disagreeing with the block's NUL count REFUSES");
         // an embedded NUL in the PATH would split one slot into two.
         TEST_EXPECT_EQ((u64)(uintptr_t)exec_interp_argv(
                            INTERP, sizeof(INTERP) - 1, "/bin\0ls", 7,
-                           argv, sizeof(argv), 2, &len, &n), 0ull,
+                           argv, sizeof(argv), 2, &len, &n, NULL), 0ull,
             "an embedded NUL in the path REFUSES");
         // ...and in the interpreter.
         TEST_EXPECT_EQ((u64)(uintptr_t)exec_interp_argv(
                            "/lib\0ld", 7, "/bin/ls", 7,
-                           argv, sizeof(argv), 2, &len, &n), 0ull,
+                           argv, sizeof(argv), 2, &len, &n, NULL), 0ull,
             "an embedded NUL in the interpreter REFUSES");
         // A zero-length path would have the ldso open("").
         TEST_EXPECT_EQ((u64)(uintptr_t)exec_interp_argv(
                            INTERP, sizeof(INTERP) - 1, "", 0,
-                           argv, sizeof(argv), 2, &len, &n), 0ull,
+                           argv, sizeof(argv), 2, &len, &n, NULL), 0ull,
             "an empty program path REFUSES");
         TEST_EXPECT_EQ((u64)(uintptr_t)exec_interp_argv(
                            "", 0, "/bin/ls", 7,
-                           argv, sizeof(argv), 2, &len, &n), 0ull,
+                           argv, sizeof(argv), 2, &len, &n, NULL), 0ull,
             "an empty interpreter path REFUSES");
     }
 }
