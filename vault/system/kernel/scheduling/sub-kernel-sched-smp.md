@@ -9,7 +9,7 @@ guarded-by: [inv-i21, inv-i18, inv-i8, inv-i9, inv-i48]
 validated-by: [spec-sched-alpha, spec-sched-oncpu, spec-sched-tickless, spec-sched-rebalance, spec-sched-ctxsw, spec-thread-reap, gate-smp]
 locks: [lock-runq]
 created: 2026-08-01
-updated: 2026-10-29
+updated: 2026-11-04
 ---
 ## Purpose
 
@@ -33,7 +33,8 @@ between two steps of a sequence that reads, in source, like a single act.
   but "wait". The only inter-CPU edge that guards context reuse is the
   RELEASE-clear paired with an ACQUIRE-load.
 - A CPU-pinned Thread (`cpu_pinned`) never migrates. Every per-CPU idle
-  and `kthread` are pinned.
+  and `kthread` are pinned. A wake reads `last_cpu` for its home and not the
+  waker's CPU, which is what `ready()` hands `select_target_cpu`.
 - An idle CPU announces itself (`idle_in_wfi`) **before** it parks, so a
   peer that places work either sees the announcement and kicks it, or the
   IPI it sends lands pending and the WFI exits on it. This is
