@@ -231,6 +231,8 @@ void test_proc_job_stop_owner_algebra(void);
 void test_proc_job_stop_park_report_cont_live(void);
 void test_proc_job_stop_recycle(void);
 void test_proc_job_stop_preserves_torpor_wait(void);
+void test_proc_group_death_wakes_a_torpor_waiter(void);
+void test_proc_group_death_before_a_torpor_wait(void);
 void test_proc_job_stop_orphan_rule(void);
 void test_proc_dying_takes_no_stop(void);
 void test_proc_exec_reset_dispositions(void);      // #243 (main)

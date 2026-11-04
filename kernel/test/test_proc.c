@@ -2083,6 +2083,73 @@ void test_proc_job_stop_preserves_torpor_wait(void) {
     TEST_EXPECT_EQ(st, 0, "clean exit after stop/cont/wake");
 }
 
+// A death reaches a futex waiter that is asleep.
+void test_proc_group_death_wakes_a_torpor_waiter(void) {
+    __atomic_store_n(&g_tsp_done, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_tsp_proc, (struct Proc *)NULL, __ATOMIC_RELEASE);
+    g_tsp_rc = (s64)-999;
+
+    int pid = rfork(RFPROC, tsp_sleeper_thunk, NULL);
+    TEST_ASSERT(pid > 0, "rfork torpor sleeper failed");
+    struct Proc *c;
+    TEST_YIELD_UNTIL((c = __atomic_load_n(&g_tsp_proc,
+                                          __ATOMIC_ACQUIRE)) != NULL);
+    struct Thread *th = js_sole_thread(c);
+    TEST_ASSERT(th != NULL, "the child has a thread");
+
+    bool asleep = false;
+    for (int i = 0; i < 2000000 && !asleep; i++) {
+        irq_state_t ws = spin_lock_irqsave(&th->wait_lock);
+        asleep = th->rendez_blocked_on != NULL;
+        spin_unlock_irqrestore(&th->wait_lock, ws);
+        if (!asleep) sched();
+    }
+    TEST_ASSERT(asleep, "the child sleeps in its torpor wait");
+    TEST_EXPECT_EQ(g_tsp_done, 1u, "CONTROL: the wait has not returned");
+
+    {
+        irq_state_t s = proc_table_lock_acquire();
+        proc_group_terminate(c, NOTE_SIG_KILL, "fail");
+        proc_table_lock_release(s);
+    }
+    TEST_YIELD_UNTIL(__atomic_load_n(&g_tsp_done, __ATOMIC_ACQUIRE) >= 2u);
+    TEST_EXPECT_EQ(g_tsp_rc, (s64)TORPOR_OK, "the death unwound the wait");
+
+    int st = -42;
+    TEST_EXPECT_EQ(wait_pid_for(pid, 0, &st), pid, "reap the sleeper");
+}
+
+// A death published before the wait reaches its sleep: tsleep's register-then-observe
+// is what keeps the waiter out of it.
+static void tdb_thunk(void *arg) {
+    (void)arg;
+    struct Proc *self = current_thread()->proc;
+    s64 va = sys_burrow_attach_for_proc(self, PAGE_SIZE);
+    if (va <= 0) exits("burrow_attach failed");
+    {
+        irq_state_t s = proc_table_lock_acquire();
+        proc_group_terminate(self, NOTE_SIG_KILL, "fail");
+        proc_table_lock_release(s);
+    }
+    __atomic_store_n(&g_tsp_done, 1u, __ATOMIC_RELEASE);
+    // Value 0 == expected 0, so this registers. A pass reads TORPOR_OK, which no
+    // earlier gate of the wait answers.
+    g_tsp_rc = sys_torpor_wait_for_proc(self, (u64)va, 0, 60ll * 1000000ll);
+    __atomic_store_n(&g_tsp_done, 2u, __ATOMIC_RELEASE);
+    exits("ok");
+}
+
+void test_proc_group_death_before_a_torpor_wait(void) {
+    __atomic_store_n(&g_tsp_done, 0u, __ATOMIC_RELEASE);
+    g_tsp_rc = (s64)-999;
+    int pid = rfork(RFPROC, tdb_thunk, NULL);
+    TEST_ASSERT(pid > 0, "rfork failed");
+    TEST_YIELD_UNTIL(__atomic_load_n(&g_tsp_done, __ATOMIC_ACQUIRE) >= 2u);
+    TEST_EXPECT_EQ(g_tsp_rc, (s64)TORPOR_OK, "the wait did not sleep through the death");
+    int st = -42;
+    TEST_EXPECT_EQ(wait_pid_for(pid, 0, &st), pid, "reap the waiter");
+}
+
 // The POSIX orphan rules, both halves (2.4.3):
 //   (a) the TSTP-side stop-suppression -- an uncaught susp on an ORPHANED
 //       group (no ALIVE same-session out-of-group parent of any member) is
