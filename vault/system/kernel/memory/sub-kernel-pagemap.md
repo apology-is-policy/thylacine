@@ -497,7 +497,8 @@ every resident page staying at its index: Plan 9's `ibrk` growing a segment's
 map, for ARCH 6.5's merge ([[sub-kernel-burrow]]'s `burrow_lazy_extend`). The
 new representation is always the one `pagemap_init` would pick for `count`,
 because a clone inits its mirror at the source's count and must find the same
-shape there. An inline leaf is reallocated larger (uncharged, as init's is). An
+shape there. Its nodes are `node_sponsor`'s, as a fault's are, and whoever is
+growing the map's when that is unset. An inline leaf is reallocated larger (uncharged, as init's is). An
 inline map that turns radix moves its pages into a fresh leaf under a chain of
 nodes at entry 0 when any page is resident (the leaf's refcount is its
 occupancy, each interior's is 1), and only takes the new depth when none is. A

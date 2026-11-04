@@ -12,7 +12,10 @@
 # them all is what a change to any of those sources needs.
 #
 # Modes come from each checker's own argparse: --mutants and --sanitize are
-# passed when it takes them, --logs always gets a fresh directory. A checker's
+# passed when it takes them, --logs always gets a fresh directory, and so does
+# a positional `output`; a positional `musl` is the tree build.sh applied the
+# Pouch series to (THYLA_POUCH_MUSL overrides it; missing is FAIL, never a pass).
+# -E -s and not -I, since a checker imports its sibling (pouch_seam). A checker's
 # exit status is its verdict; exit 3 is a sanitizer-tooling stop
 # (tools/host-sanitizer-cc.py), reported as TOOLING and still a failure here.
 #
@@ -44,8 +47,11 @@ for n in "${names[@]}"; do
     grep -qE "['\"]--logs['\"]" "$f" && args+=(--logs "$logs/$n")
     grep -qE "['\"]--mutants['\"]" "$f" && args+=(--mutants)
     grep -qE "['\"]--sanitize['\"]" "$f" && args+=(--sanitize)
+    positional=()
+    grep -qE "add_argument\(['\"]musl['\"]" "$f" && positional+=("${THYLA_POUCH_MUSL:-$REPO_ROOT/build/pouch/musl-src}")
+    grep -qE "add_argument\(['\"]output['\"]" "$f" && positional+=("$logs/$n.work")
     t0=$(date -u +%s)
-    python3 -I "$f" ${args[@]+"${args[@]}"} > "$logs/$n.out" 2>&1
+    python3 -E -s "$f" ${args[@]+"${args[@]}"} ${positional[@]+"${positional[@]}"} > "$logs/$n.out" 2>&1
     rc=$?
     secs=$(( $(date -u +%s) - t0 ))
     if [[ $rc -eq 0 ]]; then verdict=PASS

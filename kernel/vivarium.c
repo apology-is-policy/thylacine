@@ -57,8 +57,8 @@ _Static_assert(VIV_LINUX_SETGID > VIV_NATIVE_CEILING,
 // confers nothing. A row arriving at 140 owes this paragraph again.
 _Static_assert(SYS_ACCOUNT == 140,
                "revisit setpriority / ACCOUNT collision on renumber");
-// rt_sigreturn (139) meets no native number on this tree, and syscall.native_gap_
-// unassigned pins that. syscall.c intercepts it for a Linux Proc before the native
+// rt_sigreturn (139) meets no native number on this tree, and
+// syscall.native_holes_unassigned pins that. syscall.c intercepts it for a Linux Proc before the native
 // switch regardless.
 // SYS_POSTNOTE_TID at 138 (vote 2026-11-02) lifted the ceiling over 135..138.
 // Linux rt_sigqueueinfo (138) collides with it. The row is VIV_ENOSYS, so a Linux

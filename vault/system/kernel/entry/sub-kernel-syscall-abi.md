@@ -426,7 +426,7 @@ Measured on this tree, not incremented: **125** live numbers, the span runs to
 134 with holes at 26, 30, 43 and 127..133, the native switch (now
 `syscall_native_switch`) has exactly 125 arms, and both set differences are
 empty. The 127..133 hole is deliberate and pinned
-(`syscall.native_gap_unassigned`, which counts each of the seven into the
+(`syscall.native_holes_unassigned`, then named `native_gap_unassigned`,, which counts each of the seven into the
 native switch's unknown arm through `syscall_unknown_count()` rather than
 trusting the -1 many handlers also return): those numbers belong to other
 branches.
@@ -451,7 +451,7 @@ goes through that arm's cascade. A fourth argument to `SYS_POSTNOTE` was not an 
 x3 is unzeroed for old callers. `SYS__NATIVE_TOP` is 139 and `VIV_NATIVE_CEILING` 138.
 Measured on this tree: **128** live numbers, the span runs to 138 with holes at 26, 30,
 43, 129..133 and 135..137, `syscall_native_switch` has exactly 128 arms, and both set
-differences are empty. `syscall.native_gap_unassigned` counts the eight holes above 128.
+differences are empty. `syscall.native_holes_unassigned`, then named `native_gap_unassigned`, counts the eight holes above 128.
 libt has `t_postnote_tid`, libthyla-rs the same name.
 
 **Merge of main (2026-10-21).** corona/async-memory merged main `cba52ec9f`, so
@@ -461,7 +461,7 @@ is 135 and `VIV_NATIVE_CEILING` 134. Measured on the merged tree, not added up:
 **127** live numbers, the span runs to 134 with holes at 26, 30, 43 and
 129..133, `syscall_native_switch` has exactly 127 arms, and both set
 differences are empty. The deliberate hole is now 129..133 (b3's numbers), and
-`syscall.native_gap_unassigned` counts those five.
+`syscall.native_holes_unassigned`, then named `native_gap_unassigned`, counts those five.
 
 
 **The join with main (2026-11-03).** Both lines' appends meet: 129-133 and 135-137 from main, 134 and 138 from this line. Measured on the merged tree, not added up: **136** live numbers, the span runs 0-138 with holes 26, 30 and 43; `SYS__NATIVE_TOP` is 139 and `VIV_NATIVE_CEILING` 138. `syscall.native_holes_unassigned` counts the three holes through the unknown arm, which answers ENOSYS (vote 2026-10-22) and still counts them.

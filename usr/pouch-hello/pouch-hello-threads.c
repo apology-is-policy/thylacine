@@ -63,7 +63,7 @@
 //
 // mask: a new thread starts with its creator's signal mask (POSIX). The kernel
 // starts the thread with the mask pthread_create blocked across the spawn, and
-// the thread's start restores its creator's own (patch 0065). A thread made while
+// the thread's start restores its creator's own (patch 0066). A thread made while
 // main blocks SIGINT reads SIGINT blocked; the control, one variable away, is a
 // thread made while SIGINT is open, which reads it open. Both read the mask through
 // pthread_sigmask, which answers from the thread's shadow, so two more legs reach

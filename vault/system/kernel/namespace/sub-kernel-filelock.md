@@ -46,7 +46,7 @@ per (Proc, file), and which file each names.
   - `-T_E_INVAL`: an unknown op bit, type 3, `_TEST|_UN`, `_TEST|_WAIT`, or a
     range whose end would reach 2^64 (`len` 0 means "to EOF"). A server's table
     holds the end in a u64, and Stratum refuses more.
-  - `-T_E_BADF`: not a Spoor; a navigation-only (`T_OPATH`) descriptor; a
+  - `-T_E_BADF`: a descriptor wider than an index (ERRORS.md principle 6, read at full width); not a Spoor; a navigation-only (`T_OPATH`) descriptor; a
     read lock without read rights; a write lock without write rights.
   - `-T_E_NOLCK`: the Dev serves no locks; the server answers ERROR, GRACE or
     a status 9P does not define; or the Proc's table is full

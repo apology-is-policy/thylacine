@@ -1246,6 +1246,7 @@ struct test_case g_tests[] = {
     { "account.ledger_reconciles_with_the_pool", test_account_ledger_reconciles_with_the_pool, false, NULL },
     { "account.blocks_that_exist_are_the_ledger", test_account_blocks_that_exist_are_the_ledger, false, NULL },
     { "account.wrong_order_release_is_counted", test_account_wrong_order_release_is_counted, false, NULL },
+    { "account.grown_node_has_the_maps_sponsor", test_account_grown_node_has_the_maps_sponsor, false, NULL },
     { "account.query_reports_bytes_up_the_chain", test_account_query_reports_bytes_up_the_chain, false, NULL },
     { "account.child_costs_its_parent_meta", test_account_child_costs_its_parent_meta, false, NULL },
     { "account.limits_change_whole_or_not_at_all", test_account_limits_change_whole_or_not_at_all, false, NULL },

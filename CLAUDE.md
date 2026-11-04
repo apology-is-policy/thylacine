@@ -142,7 +142,7 @@ One line each. The authoritative text, with the full enforcement cells, is `ARCH
 | I-32 | Resource floor: pages/VMAs per ADDRESS SPACE (cap on the AddrSpace), threads/children per Proc; fail clean, never extinct | ARCH 28 + prose + tests |
 | I-33 | Namespace name retention is non-load-bearing (resolver never reads `->path`) | prose + tests |
 | I-34 | Driver authority bound to its warden-granted allowance (MMIO/IRQ/DMA/PCI); never widened; revoked on unbind | `allowance.tla` + tests |
-| I-35 | Mandate attenuation + revocation -- RESERVED | planned `mandate.tla` |
+| I-35 | Mandate attenuation + revocation -- initial policy core; kernel half pending | `mandate.tla` (initial) |
 | I-36 | File-backed demand-paged exec soundness (the 7 conditions) | prose + R-5 audit + tests |
 | I-37 | Weft capability network dataplane integrity | `weft.tla` + `weft_readiness.tla` |
 | I-38 | Larder cache coherence under close-to-open | `fs_cache.tla` |

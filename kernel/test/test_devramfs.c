@@ -944,10 +944,7 @@ void test_devramfs_readdir_type_byte(void) {
     TEST_EXPECT_EQ(qid_type_to_dtype(QTFILE), (u8)8, "a file is DT_REG");
     TEST_EXPECT_EQ(qid_type_to_dtype(QTAPPEND | QTEXCL), (u8)8, "an append-only file is DT_REG");
     TEST_EXPECT_EQ(qid_type_to_dtype(QTSYMLINK), (u8)10, "a link is DT_LNK");
-    if (devramfs_entry_count() < 2) {
-        uart_puts("    [skip] devramfs.readdir_type_byte: no initrd, so the Dev's type bytes were not read\n");
-        return;
-    }
+    TEST_ASSERT(devramfs_entry_count() >= 2, "the boot initrd is bound");
 
     struct Spoor *root = devramfs.attach("");
     TEST_ASSERT(root != NULL, "attach root");

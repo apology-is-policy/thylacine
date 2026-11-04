@@ -13,6 +13,7 @@ typedef uint64_t u64;typedef int hidx_t;typedef unsigned rights_t;
 #define T_E_BADF 9
 #define T_E_INVAL 22
 #define T_E_ACCES 13
+#define T_E_BUSY 16
 enum kobj_kind {KOBJ_INVALID,KOBJ_PROCESS,KOBJ_SRV};
 struct Object {atomic_int refs;};
 struct Handle {int magic;enum kobj_kind kind;rights_t rights;void *obj;};

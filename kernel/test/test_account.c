@@ -15,6 +15,7 @@
 #include <thylacine/image.h>
 #include <thylacine/memaccount.h>
 #include <thylacine/page.h>
+#include <thylacine/pagemap.h>
 #include <thylacine/proc.h>
 #include <thylacine/sched.h>
 #include <thylacine/syscall.h>
@@ -368,6 +369,36 @@ void test_account_wrong_order_release_is_counted(void) {
     TEST_EXPECT_EQ(charged, 4u, "the control: four pages charged");
     TEST_EXPECT_EQ(counted, 1u, "the wrong order is counted");
     TEST_EXPECT_EQ(left, 0u, "and what was charged is what comes back");
+}
+
+// Growth allocates nodes as a fault does: the map's sponsor pays when it has one, as a file
+// map does, and whoever is growing it otherwise.
+void test_account_grown_node_has_the_maps_sponsor(void) {
+    struct MemoryAccount *a = account_child(account_root());
+    TEST_ASSERT(a != NULL, "an account");
+    spin_lock_t lk = SPIN_LOCK_INIT;
+    struct page *pg = alloc_user_pages(0, KP_ZERO, true);
+    TEST_ASSERT(pg != NULL, "a page");
+    struct pagemap pm;
+    TEST_EXPECT_EQ(pagemap_init(&pm, 4), 0, "an inline map");
+    pm.node_sponsor = a;
+    TEST_EXPECT_EQ(pagemap_install(&pm, &lk, 0, pg, NULL, true, NULL), 0, "a resident page");
+    TEST_EXPECT_EQ(pagemap_grow(&pm, &lk, 40, NULL, true), 0, "inline to radix");
+    TEST_EXPECT_EQ(pm.nodes, 1u, "one node");
+    u64 charged = alloc_of(a);
+    bool named = pa_to_page(kva_to_pa(pm.root))->holder.sponsor == a;
+
+    struct page *taken = NULL;
+    struct page *fr[PAGEMAP_MAX_DEPTH];
+    u32 nf = 0;
+    (void)pagemap_take_next(&pm, &lk, 0, 40, NULL, &taken, fr, &nf);
+    for (u32 k = 0; k < nf; k++) free_pages(fr[k], 0);
+    if (taken) free_pages(taken, 0);
+    pagemap_destroy(&pm, NULL, NULL);
+    TEST_EXPECT_EQ(alloc_of(a), 0u, "and it comes back with the node");
+    account_unref(a);
+    TEST_EXPECT_EQ(charged, 1u, "the map's sponsor pays for the node");
+    TEST_ASSERT(named, "and the node's head page names it");
 }
 
 void test_account_query_reports_bytes_up_the_chain(void) {

@@ -1,4 +1,4 @@
-pouch boundary-line patch 0068 - SIGUSR1 and SIGUSR2 are the `usr1` and `usr2` notes.
+pouch boundary-line patch 0069 - SIGUSR1 and SIGUSR2 are the `usr1` and `usr2` notes.
 
 Operator vote 15 (2026-11-02). The kernel has both notes now (NOTE_BIT_USR1 = 8,
 NOTE_BIT_USR2 = 9, default terminate, a death recorded as the signal; docs/ERRORS.md

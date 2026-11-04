@@ -923,7 +923,7 @@ DOSBOXCONF
     # ERRORS.md principle 6: a syscall argument that does not fit is refused,
     # never cast down. Fatal, self-testing, sub-second.
     echo "==> argument width check (ERRORS.md principle 6)"
-    python3 "$REPO_ROOT/tools/check-arg-width.py" "$REPO_ROOT/kernel/syscall.c" \
+    python3 "$REPO_ROOT/tools/check-arg-width.py" "$REPO_ROOT/kernel/syscall.c" "$REPO_ROOT/kernel/filelock.c" \
         || { echo "==> argument width check FAILED -- a raw syscall argument is" >&2
              echo "    narrowed with no full-width check first" >&2
              exit 1; }
