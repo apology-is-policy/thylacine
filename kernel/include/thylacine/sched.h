@@ -258,8 +258,8 @@ void sched_mark_interactive(struct Thread *t);
 #ifdef KERNEL_TESTS
 // HMP foundation (ARCH §8.4.3): the placement POLICY. Choose the CPU whose
 // run tree `t` should be enqueued on, given the CPU it last ran on / the
-// CPU waking it (prev_cpu). v1.0 homogeneous body returns prev_cpu (CPU-
-// pinned threads ALWAYS return prev_cpu — idles/kthread never migrate). On a
+// CPU waking it (prev_cpu). v1.0 homogeneous body returns prev_cpu; a CPU-
+// pinned thread returns last_cpu, its home, as idles/kthread never migrate. On a
 // DECLARED-heterogeneous topology it biases a high-util ("misfit") task to a
 // higher-capacity CPU. Pure-ish (reads only per-CPU capacity + topology
 // flag + t->util/cpu_pinned); the core decision is the testable pure

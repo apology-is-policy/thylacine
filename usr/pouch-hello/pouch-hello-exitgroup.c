@@ -15,7 +15,7 @@
 //
 // Two worker modes deliberately exercise BOTH kernel wake paths:
 //   - worker_cond: blocks in pthread_cond_wait  -> a torpor (futex) sleeper,
-//                  woken by proc_group_terminate's torpor_wake_all_for_proc.
+//                  woken by proc_group_terminate's per-thread rendez wake.
 //   - worker_spin: busy-loops in userspace       -> a peer running on another
 //                  core, brought down by the reschedule-IPI kick
 //                  (smp_resched_others) + the new IRQ-from-EL0 die-check.

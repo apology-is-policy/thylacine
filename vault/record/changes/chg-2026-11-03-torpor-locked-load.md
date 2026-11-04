@@ -4,7 +4,7 @@ type: chg
 title: "A wait's load under its lock cannot sleep, whatever a peer's MAP_FIXED did"
 date: 2026-11-03
 arc: arc-phase6-pouch
-commits: []
+commits: [4494357a1]
 touched:
   - sub-kernel-torpor
   - sub-kernel-fault

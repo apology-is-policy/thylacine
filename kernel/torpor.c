@@ -32,7 +32,6 @@
 #include <thylacine/torpor.h>
 
 #include <thylacine/extinction.h>
-#include <thylacine/notes.h>    // LS-5c: thread_die_pending (the widened #811 predicate)
 #include <thylacine/proc.h>
 #include <thylacine/rendez.h>
 #include <thylacine/spinlock.h>
@@ -48,7 +47,6 @@
 // the "lifetime" note in WAIT below).
 struct torpor_waiter {
     struct Rendez         rendez;       // private rendez for the sleep
-    struct Proc          *proc;         // whose death and stop walks reach it
     struct AddrSpace     *as;           // key component 1
     u64                   user_va;      // address being waited on (k2)
     struct torpor_waiter *next;         // bucket chain, or a waker's batch
@@ -86,9 +84,56 @@ static inline struct torpor_bucket *torpor_bucket_of(const struct AddrSpace *as,
 // tsleep condition: woken iff `waiter->awoken != 0`. Called by tsleep
 // under `waiter->rendez.lock`, and every waker sets it under that lock, so
 // the read is exact: a waiter that resumes reads what a wake's mark wrote.
+#ifdef KERNEL_TESTS
+// Test hook: the cond, having read the mark, waits under the rendez's lock until a wake
+// has come to mark this waiter, then a little longer. That is the window between a
+// waiter's read and its registering, and a mark that takes the lock cannot land in it.
+// One use per arming. Masked and holding the lock, so a wake on another CPU ends it.
+#define TORPOR_COND_STALL_BUDGET_NS 1000000000ull
+#define TORPOR_COND_STALL_GRACE_NS  5000000ull
+static volatile bool g_torpor_cond_stall, g_torpor_cond_stalled;
+static volatile bool g_torpor_mark_tried, g_torpor_cond_saw_try, g_torpor_cond_saw_mark;
+void torpor_stall_cond_for_test(void) {
+    g_torpor_cond_stalled = false;
+    g_torpor_mark_tried = false;
+    g_torpor_cond_saw_try = false;
+    g_torpor_cond_saw_mark = false;
+    __atomic_store_n(&g_torpor_cond_stall, true, __ATOMIC_RELEASE);
+}
+bool torpor_cond_stalled_for_test(void) {
+    return __atomic_load_n(&g_torpor_cond_stalled, __ATOMIC_ACQUIRE);
+}
+bool torpor_cond_saw_try_for_test(void) {
+    return __atomic_load_n(&g_torpor_cond_saw_try, __ATOMIC_ACQUIRE);
+}
+bool torpor_cond_saw_mark_for_test(void) {
+    return __atomic_load_n(&g_torpor_cond_saw_mark, __ATOMIC_ACQUIRE);
+}
+static void torpor_cond_stall_point(const struct torpor_waiter *w) {
+    if (!__atomic_load_n(&g_torpor_cond_stall, __ATOMIC_ACQUIRE)) return;
+    if (!__atomic_exchange_n(&g_torpor_cond_stall, false, __ATOMIC_ACQ_REL)) return;
+    __atomic_store_n(&g_torpor_cond_stalled, true, __ATOMIC_RELEASE);
+    u64 dl = timer_now_ns() + TORPOR_COND_STALL_BUDGET_NS;
+    while (!__atomic_load_n(&g_torpor_mark_tried, __ATOMIC_ACQUIRE) && timer_now_ns() < dl)
+        __asm__ __volatile__("yield" ::: "memory");
+    bool tried = __atomic_load_n(&g_torpor_mark_tried, __ATOMIC_ACQUIRE);
+    if (tried) {
+        dl = timer_now_ns() + TORPOR_COND_STALL_GRACE_NS;
+        while (timer_now_ns() < dl) __asm__ __volatile__("yield" ::: "memory");
+    }
+    __atomic_store_n(&g_torpor_cond_saw_mark,
+                     __atomic_load_n(&w->awoken, __ATOMIC_ACQUIRE) != 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_torpor_cond_saw_try, tried, __ATOMIC_RELEASE);
+}
+#endif
+
 static int torpor_cond_awoken(void *arg) {
     const struct torpor_waiter *w = (const struct torpor_waiter *)arg;
-    return (int)w->awoken;
+    int awoken = (int)w->awoken;
+#ifdef KERNEL_TESTS
+    torpor_cond_stall_point(w);
+#endif
+    return awoken;
 }
 
 static void torpor_append_locked(struct torpor_bucket *b, struct torpor_waiter *w) {
@@ -117,6 +162,9 @@ static void torpor_unlink_locked(struct torpor_bucket *b, struct torpor_waiter *
 // release is also what delivers the mark to a waiter a stop has parked, on its
 // re-read (PTY-4e R2): this replaces the wakeup() that used to carry it.
 static bool torpor_mark_awoken(struct torpor_waiter *w) {
+#ifdef KERNEL_TESTS
+    __atomic_store_n(&g_torpor_mark_tried, true, __ATOMIC_RELEASE);
+#endif
     irq_state_t s = spin_lock_irqsave(&w->rendez.lock);
     bool asleep = w->rendez.waiter != NULL;
     w->awoken = 1;
@@ -206,7 +254,6 @@ s64 sys_torpor_wait_for_proc(struct Proc *p, u64 addr_va, u32 expected,
     // the key stays this record's for its whole life.
     struct torpor_waiter w;
     rendez_init(&w.rendez);
-    w.proc      = p;
     w.as        = p->as;
     w.user_va   = addr_va;
     w.next      = NULL;
@@ -288,32 +335,8 @@ s64 sys_torpor_wait_for_proc(struct Proc *p, u64 addr_va, u32 expected,
     // walk sees it.
     torpor_append_locked(b, &w);
 
-    // SYS_EXIT_GROUP / kill cross-thread shootdown lost-wakeup close (I-24).
-    // Re-check the death predicate AFTER registering, UNDER the bucket's lock --
-    // a lock proc_group_terminate's torpor_wake_all walk takes on its way through
-    // every bucket, this one included. This
-    // makes the wake airtight against the register-vs-walk race:
-    //   - if we registered BEFORE the wake-all walk, the walk finds us +
-    //     wakes us (awoken=1) -> tsleep returns immediately;
-    //   - if we register AFTER the walk (it missed us), then the flag-set
-    //     happened-before the walk, the walk released this lock, and we
-    //     acquired it to register -- so this acquire-load observes the set
-    //     flag here and we do NOT sleep.
-    // Either way a group-terminating Proc's futex sleeper does not sleep
-    // through the exit; it returns + dies at its EL0-return die-check.
-    //
-    // LS-5c (ARCH 8.8.2): widened to thread_die_pending (group-exit death OR
-    // a pending terminate-disposition `interrupt`). For the interrupt leg
-    // this early-exit is conservative-prompt, not the I-9 closure -- the
-    // interrupt waker (proc_interrupt_terminate_wake) takes no bucket's
-    // lock; its register-after-walk race is closed one layer down by
-    // tsleep's own register-then-observe under wait_lock (the torpor waiter's
-    // stack rendez is reachable via rendez_blocked_on for the wake itself).
-    if (thread_die_pending(current_thread())) {
-        torpor_unlink_locked(b, &w);
-        spin_unlock(&b->lock);
-        return TORPOR_OK;
-    }
+    // A death or a stop published up to here is tsleep's to see, in its register-then-observe
+    // under wait_lock (ARCH 8.8.1). The bucket's lock has no part in it.
 
     // Compute the tsleep deadline on the timer_now_ns timebase. < 0
     // timeout maps to `deadline_ns = 0` (the "no deadline" sentinel
@@ -404,6 +427,11 @@ void torpor_stall_wakes_for_test(bool on) {
 bool torpor_wake_stalled_for_test(void) {
     return __atomic_load_n(&g_torpor_stalled, __ATOMIC_ACQUIRE);
 }
+bool torpor_test_release_hooks(void) {
+    bool cond = __atomic_exchange_n(&g_torpor_cond_stall, false, __ATOMIC_ACQ_REL);
+    bool wake = __atomic_exchange_n(&g_torpor_stall, false, __ATOMIC_ACQ_REL);
+    return cond || wake;
+}
 static void torpor_wake_stall_point(void) {
     if (!__atomic_load_n(&g_torpor_stall, __ATOMIC_ACQUIRE)) return;
     __atomic_store_n(&g_torpor_stalled, true, __ATOMIC_RELEASE);
@@ -475,50 +503,4 @@ s64 sys_torpor_wake_for_proc(struct Proc *p, u64 addr_va, u32 count) {
     }
     spin_preempt_dec();
     return (s64)woken;
-}
-
-// SYS_EXIT_GROUP / cross-Proc kill cross-thread shootdown (ARCH §7.9.1, I-24).
-// Wake EVERY torpor waiter owned by `p`, regardless of the address waited on,
-// so each returns from sys_torpor_wait_for_proc to its EL0-return die-check.
-// Called by proc_group_terminate AFTER it sets p->group_exit_msg. Walks all
-// buckets, one lock at a time -- the group-exit path is rare + not address-keyed
-// (unlike the per-address WAKE). The register-after-this-walk lost-wakeup is closed
-// by the post-register group_exit_msg check in sys_torpor_wait_for_proc, under the
-// same bucket's lock. The waiter stays linked, and the lock held across wakeup() is
-// what keeps its record alive: it must take that lock to leave. A rare walk may hold
-// one bucket across an on_cpu spin, which WAKE, the hot path, does not.
-void torpor_wake_all_for_proc(struct Proc *p) {
-    if (!p) return;
-    for (u32 idx = 0; idx < TORPOR_HASH_BUCKETS; idx++) {
-        struct torpor_bucket *b = &torpor_buckets[idx];
-        spin_lock(&b->lock);
-        for (struct torpor_waiter *w = b->head; w != NULL; w = w->next) {
-            if (w->proc != p) continue;
-            if (w->awoken)    continue;
-            (void)torpor_mark_awoken(w);
-            (void)wakeup(&w->rendez);
-        }
-        spin_unlock(&b->lock);
-    }
-}
-
-// The STOP cascade's non-completing wake (contract in torpor.h). Identical
-// walk + lock discipline to the death variant above -- the ONLY difference
-// is that `awoken` stays clear, so the woken thread's tsleep re-loop finds
-// torpor_cond_awoken false, takes the 8c-2 stop detour, and parks with the
-// wait preserved. wakeup() re-validates r->waiter under r->lock, so a waiter
-// already woken (or mid-transition) is a safe no-op; the stack waiter is
-// pinned by its bucket link (unlinked only after its own tsleep returns).
-void torpor_stop_wake_all_for_proc(struct Proc *p) {
-    if (!p) return;
-    for (u32 idx = 0; idx < TORPOR_HASH_BUCKETS; idx++) {
-        struct torpor_bucket *b = &torpor_buckets[idx];
-        spin_lock(&b->lock);
-        for (struct torpor_waiter *w = b->head; w != NULL; w = w->next) {
-            if (w->proc != p) continue;
-            if (w->awoken)    continue;
-            (void)wakeup(&w->rendez);
-        }
-        spin_unlock(&b->lock);
-    }
 }
