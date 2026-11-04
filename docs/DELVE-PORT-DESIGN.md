@@ -733,7 +733,8 @@ attaches to a multi-M Go target, halts it, and inspects it.
 pending on the caller's Proc, park on the caller's own `debug_rendez` until the
 stop clears, then re-loop to re-check the ORIGINAL wait condition (the syscall
 re-blocks in place; no unwind, no restart). `kernel/proc.c`
-`proc_debug_stop_deliver` gained a sleeper-wake walk (`torpor_wake_all_for_proc`
+`proc_debug_stop_deliver` gained a sleeper-wake walk (`torpor_wake_all_for_proc`,
+since gone: PTY-4e made it non-completing and thread-model C8a removed it,
 + the per-peer `wait_lock` rendez wake -- `proc_group_terminate`'s death-wake
 cascade, arming the detour instead of the die). `proc_debug_stop_sleeper_park` is
 the nested park; the `r != &debug_rendez` gate prevents recursion; `SLEEP_INTR`

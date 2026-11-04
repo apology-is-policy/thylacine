@@ -506,8 +506,8 @@ Acyclicity rests on one asymmetry: only the **owner** writes
 therefore read-only, and no path takes a rendez lock and then reaches for
 the table lock.
 
-Double-wake is idempotent — `torpor_wake_all` and the rendez walk can both
-target the same waiter, and the second `wakeup()` no-ops on `waiter == NULL`.
+Double-wake is idempotent — a futex WAKE and the rendez walk can both target
+the same waiter, and the second `wakeup()` no-ops on `waiter == NULL`.
 
 ## Invariants enforced
 
