@@ -353,9 +353,16 @@ The client's rules, each from a rule above it:
   a reply's read is no answer, and on a commit's reply it leaves the outcome unknown.
   A refusal that may have poisoned the fid, or that came part way through a record,
   ends the connection, or every later request would be refused for ever.
-- **Only Bind retries,** on Gone or Busy, as the blocking qualification client
-  does, but on `next_deadline`, never by sleeping. A nomination the host has not
-  published yet looks like that.
+- **Bind retries,** on Gone or Busy, as the blocking qualification client does, but
+  on `next_deadline`, never by sleeping. A nomination the host has not published yet
+  looks like that.
+- **A job with nothing answered re-runs once.** If a copy before its Commit, or any
+  paste, loses its connection before that connection has answered it anything, it
+  starts again from its first stage on a fresh connection, once. A Get changes nothing,
+  so running it again is safe. SAK closes an idle connection and nothing tells the
+  client until its next use, so without this the first key after a trusted-path
+  episode would fail. A second loss, or a loss after any answer, is reported as before.
+  Operator vote 60, November 4.
 - **A commit is never retried.** A connection lost after CommitCopy was sent is
   reported as an unknown outcome. The user can make a new copy, and the client does
   not guess (HALCYON-INTERACTION 8).

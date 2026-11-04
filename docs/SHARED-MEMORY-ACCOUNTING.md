@@ -548,11 +548,38 @@ reaches no account operation and is charged without one. The kernel's `thylacine
 `tools/test-account-abi.py`. Records for the operations other than the query come with
 those operations, and the version and size fields are what lets them.
 
+**A child account's control stays with the Proc that made it.** Operator vote 58,
+November 4. Any Proc may `ACCOUNT_CHILD` its own account through the self selector and
+receives a `KOBJ_ACCOUNT` in its own handle table. The kind is non-transferable, like
+Loom, and fork does not copy it. The Proc names that handle in a new `SPAWN_EXT_ACCOUNT`
+tail on spawn's record, and the new Proc is born under that account. A Proc's account is
+set only at birth and never changes. `ACCOUNT_SET_LIMITS` needs the handle, so nobody
+adjusts their own account. Login makes the session's child and holds its control, and
+joey makes the resident services'. Each level subdivides what it has, so authority only
+narrows, and no handle crosses a Proc boundary. Genode's quota trading has this shape:
+budget flows down the parent chain, with no ambient id. Each account pays META, and a
+Proc's breadth is bounded by `PROC_HANDLE_MAX` while its handles hold them; depth is
+section 6's sixteen.
+
+If the creator exits, the limits it set stay and nobody can change them. Halcyon settings
+that adjust a session go through login, or wait for a transfer path. Two other routes
+lost. Adding the kind to spawn's descriptor array moves it to the transferable side of
+I-4 and I-5, widens fork's copy unless it is special-cased, and changes what
+`specs/handles.tla`'s partition means. Waiting for `handle_transfer_via_9p` would hold
+MM-2 behind a large path nobody has built.
+
+**A sandbox reads its own chain.** Operator vote 59, November 4. The query reports the
+caller's account and what bounds it from above. Until sessions have child accounts that
+chain is the root, so a Proc with no `/ctl` reads machine totals, and other sessions'
+allocations and thread creations show as steps. It reaches no address, lock or per-key
+data. Giving sessions children narrows this to the session's. No capability gates the
+query and its figures are not coarsened, because a program should be able to ask its
+budget rather than find it by allocating until refused. A sandbox that should see less
+is given its own child, and then sees only itself.
+
 Not settled here: whether `ALLOCATE_FUNDED` returns a `KOBJ_DMA`, a Burrow or either by
-class; whether a map needs its own operation or `burrow_share_into`'s callers charge
-inside it, section 4's MAP_ACCOUNTED (MM-2); and how a session owner's control handle
-reaches a descendant, since transfer is unavailable and spawn's descriptor inheritance
-has not been read for a new kind (MM-1).
+class; and whether a map needs its own operation or `burrow_share_into`'s callers charge
+inside it, section 4's MAP_ACCOUNTED (MM-2).
 
 ## 14. MM-1 as built
 
