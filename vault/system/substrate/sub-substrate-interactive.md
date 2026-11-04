@@ -22,6 +22,7 @@ code:
   - tools/interactive/ls-halcyon-clipboard-async.exp
   - tools/interactive/ls-nora-stopped-copy.exp
   - tools/interactive/ls-ut-paste.exp
+  - tools/interactive/ls-halcyon-paste-flow.exp
   - tools/interactive/ls-halcyon-session-media.exp
   - tools/interactive/ls-halcyon-session-dosbox.exp
   - tools/interactive/pci-net-load.exp
@@ -59,7 +60,7 @@ locks: []
 abis: []
 design: ["docs/LIFE-SUPPORT.md"]
 created: 2026-08-01
-updated: 2026-11-03
+updated: 2026-11-04
 ---
 ## Purpose
 
@@ -101,7 +102,12 @@ It skips without the image, and it has not yet run.
 `ls-ut-paste` needs the same bake and posting. Its probe hosts a real ut on a pts against
 [[sub-loom-fixture]]: the key puts text in the line and nothing runs until Enter, a line too
 long or with a tab refuses aloud, and with the server stopped at the paste, typing runs and
-Enter or Ctrl-C ends the fetch at once. Not yet booted.
+Enter or Ctrl-C ends the fetch at once.
+
+`ls-halcyon-paste-flow` needs the qualification session bake with the private ring, and
+no posting. It types into a real Nora and a real ut in the session's tiles, and the
+probe's `--paste-flow` verbs read the result over a blocking connection and from the
+files. It reads the mode chip off the status bar line to know Nora has bound.
 
 `ls-nora-stopped-copy` needs the private-async kernel on the CI image and posts through
 `imperium post`. Its probe hosts a real Nora on a pts of its own against
@@ -109,7 +115,7 @@ Enter or Ctrl-C ends the fetch at once. Not yet booted.
 cannot be stopped. The same keys run first against the service that answers. Then the server
 stops mid-copy, and typed text must reach the file before the client's deadline ends the
 session. The client must then give up and say so, typing must go on, and Nora must leave with
-a second copy held. It skips without the image, and it has not yet run.
+a second copy held. It skips without the image.
 
 ## Full native service capacity witness
 

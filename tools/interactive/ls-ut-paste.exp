@@ -2,7 +2,7 @@
 # The paste key in a real ut (ASYNC-SERVICE-LIFECYCLE, AS-4e). The probe hosts the shell
 # on a pts of its own against loom-fixture's interaction node over the private ring,
 # since ut cannot give a child an environment and the session's service cannot be
-# stopped. The real session's half is ls-halcyon-clipboard.exp's kind of run, owed.
+# stopped. The real session's half is ls-halcyon-paste-flow.
 #
 # Image and boot:
 #   tools/build.sh kernel --config ci --set PRIVATE_ASYNC_QUAL=y
