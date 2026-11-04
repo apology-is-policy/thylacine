@@ -105,8 +105,14 @@ run_driver() {
     done
 }
 
+# macOS scans each new executable once, one at a time: measured with a trivial binary, 2 ms for
+# the same binary, 159 ms for a fresh copy, 4.4 s with 27 at once and 9.4 s for fresh links, all
+# before its first instruction. Every leg links fresh binaries, and a stall that long eats a
+# fixture's own run timeout, so more drivers at once buy nothing and turn the gate red.
+jobs_max=8
 pids=()
 for name in "${drivers[@]}"; do
+    while [[ "$(jobs -rp | wc -l)" -ge "$jobs_max" ]]; do sleep 0.2; done
     run_driver "$name" > "$OUT/$name.result" 2>&1 &
     pids+=("$!")
 done

@@ -8725,8 +8725,14 @@ host_boundary_check() {
     if [[ "${1:-}" == --musl ]]; then musl="$2"; shift 2; fi
     (( $# )) || { echo "==> host boundary check: no checker named for $root" >&2; return 1; }
     rm -rf "$root"; mkdir -p "$root"
+    # macOS scans each new executable once, one at a time: measured with a trivial binary, 2 ms for
+    # the same binary, 159 ms for a fresh copy, 4.4 s with 27 at once and 9.4 s for fresh links, all
+    # before its first instruction. Every leg links fresh binaries, and a stall that long eats a
+    # fixture's own run timeout, so more drivers at once buy nothing and turn the gate red.
+    local jobs_max=8
     local name i usage args rc=0 pids=() names=()
     for name in "$@"; do
+        while [[ "$(jobs -rp | wc -l)" -ge "$jobs_max" ]]; do sleep 0.2; done
         # The two conventions the tree's checkers use, told apart by the driver's own
         # usage: a --logs directory, or a positional output and a compiler.
         usage="$(COLUMNS=10000 python3 "$REPO_ROOT/tools/test-$name.py" --help | head -n 1)"
