@@ -129,6 +129,9 @@ pub const E_PROTO: u32 = 71;
 pub const E_NOSYS: u32 = 38;
 pub const E_TIMEDOUT: u32 = 110; // POSIX ETIMEDOUT (a connect that got no SYN-ACK)
 pub const E_CONNREFUSED: u32 = 111; // POSIX ECONNREFUSED (a connect RST/reset)
+/// ESTALE: the file a fid named has died. A client reads this one by value: the kernel reads a
+/// server's `E_BADF` as EIO, which a client cannot tell from a lost link (docs/ERRORS.md).
+pub const E_STALE: u32 = 116;
 
 // =============================================================================
 // Qid -- in-memory shape of the 13-byte wire qid.

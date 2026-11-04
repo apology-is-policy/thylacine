@@ -274,6 +274,10 @@ it. Only the server side landed; the client side (T-builders + R-parsers) is a
 mechanical mirror deferred until a native program needs to make *outgoing* 9P
 calls.
 
+Its `E_*` errnos are what a server answers in `Rlerror`. `E_STALE` is the one to use when
+a client must tell a dead handle from a lost link, since the kernel reads `E_BADF` as `EIO`
+(vote 66).
+
 It is a crate of its own, `usr/lib/ninep`, which libthyla-rs re-exports as
 `libthyla_rs::ninep`, so no caller names it differently. libthyla-rs cannot be
 built for the host (its `_start` is ELF assembly), so a test inside it would run

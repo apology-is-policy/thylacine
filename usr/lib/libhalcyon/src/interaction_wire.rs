@@ -79,13 +79,13 @@ pub enum Failure {
     Denied = 1,
     Gone = 2,
     TooLarge = 7,
-    BadHandle = 9,
     Conflict = 11,
     NoMemory = 12,
     Busy = 16,
     Invalid = 22,
     Unsupported = 95,
     Timeout = 110,
+    BadHandle = 116,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

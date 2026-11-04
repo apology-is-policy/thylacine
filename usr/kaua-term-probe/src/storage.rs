@@ -120,7 +120,7 @@ fn run_inner() -> Result {
     a.handle_storage(&hide).map_err(|_| "suspend")?;
     check(!a.is_drawable(), "suspend retained client mapping")?;
     check(geometry(&oldw) < 0, "dormant old geometry accepted")?;
-    check(raw_present(&oldp) == -9, "dormant old present not EBADF")?;
+    check(raw_present(&oldp) == -116, "dormant old present not ESTALE")?;
     pane(&r, al, "focus")?;
     let show = offer(&r, &mut a, 2)?;
     a.handle_storage(&show).map_err(|_| "resume")?;
@@ -129,7 +129,7 @@ fn run_inner() -> Result {
         "resume published before paint",
     )?;
     check(
-        geometry(&oldw) < 0 && raw_present(&oldp) == -9,
+        geometry(&oldw) < 0 && raw_present(&oldp) == -116,
         "old generation revived",
     )?;
     check(

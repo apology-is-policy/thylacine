@@ -1254,6 +1254,7 @@ void test_allowance_clone_inherit(void);
 void test_allowance_free_null_tolerant(void);
 void test_allowance_pci_membership(void);
 void test_allowance_pci_claim_handler_gate(void);
+void test_allowance_pci_irq_create_refuses_by_name(void);
 void test_allowance_confer_within_parent(void);
 void test_allowance_revoke_on_group_terminate(void);
 void test_allowance_narrowed_proc_cannot_spawn(void);

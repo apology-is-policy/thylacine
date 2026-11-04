@@ -2099,6 +2099,11 @@ sleep that a caught note ended, with what was left, and through
 shell's s64 straight into `x0`, so 101 and 115 never reach the native
 `SYS_JIT_CREATE` and `SYS_PCI_IRQ_CREATE` arms for a Linux caller.
 
+`SYS_PCI_IRQ_CREATE`'s two permission refusals, no `CAP_HW_CREATE` and a function outside the
+caller's allowance, are `-EACCES`; they were `-T_E_PERM`, the flat -1 ERRORS forbids a handler.
+`sys_burrow_map_file_for_proc` translates the same value from the file-map cores for its native
+caller, and the Linux phenotype's arms keep EPERM.
+
 ## A `kill` note forces a final close already under way (2026-10-07)
 
 `SYS_POSTNOTE`'s kill cascade (`postnote_kill_cascade_locked`) terminates the

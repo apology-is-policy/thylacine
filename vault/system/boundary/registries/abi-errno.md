@@ -58,7 +58,7 @@ anywhere.
 | 107 | `T_E_NOTCONN` | ENOTCONN | `getpeername()`/`shutdown()` on an entry still FRESH |
 | 110 | `T_E_TIMEDOUT` | ETIMEDOUT | a `tsleep`/`torpor_wait` deadline elapsed |
 | 111 | `T_E_CONNREFUSED` | ECONNREFUSED | netd rejected the dial, or the data open failed after connect |
-| 116 | `T_E_STALE` | ESTALE | the descriptor's file has died on its server (Stratum kills an unlinked file's fids and reuses the number), or a loose cached open's re-walk no longer reaches its file (renamed, unlinked or replaced since the open): `SYS_FILE_LOCK`, and `SYS_WSTAT` on such an open |
+| 116 | `T_E_STALE` | ESTALE | the descriptor's file has died on its server (Stratum kills an unlinked file's fids and reuses the number), or a loose cached open's re-walk no longer reaches its file (renamed, unlinked or replaced since the open): `SYS_FILE_LOCK`, and `SYS_WSTAT` on such an open; also a server's answer for its own dead handle when its client must tell that from a lost link: `tapestryd`'s present on a dormant pixel generation and HIN1's `BadHandle` (vote 66) |
 | 125 | `T_E_CANCELED` | ECANCELED | a Loom chain op cancelled by a failed predecessor |
 
 The **socket family** (24 remapped to EMFILE for the socket table, and 88/93/97/98/103/106/107/111) was appended at VIVARIUM V-5, its values read directly from `third_party/musl/arch/generic/bits/errno.h` because a Linux guest's libc compares against exactly those numbers — collapsing them to `EINVAL` would make a guest retry a connection that can never succeed. `INTR` (4), `2BIG` (7), `CHILD` (10) and `NOTTY` (25) each landed under the same append-under-ratified-scripture precedent the `-1` and change-protocol sections describe.

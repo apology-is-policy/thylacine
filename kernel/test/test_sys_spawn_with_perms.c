@@ -287,6 +287,16 @@ void test_sys_spawn_with_perms_console_owner_grant_gate(void) {
         SPAWN_PERM_CONSOLE_OWNER | SPAWN_PERM_CONSOLE_TRUSTED), -1,
         "CONSOLE_OWNER does not unlock CONSOLE_TRUSTED for a holder (I-27)");
 
+    // The same holder as the compositor warden designates (ARCH 8.3): it confers nothing,
+    // including the bit that would let a child confer the rest.
+    __atomic_fetch_or(&holder->proc_flags, PROC_FLAG_SEAT_CLIENT, __ATOMIC_RELEASE);
+    TEST_EXPECT_EQ(spawn_perm_grant_check(holder, SPAWN_PERM_CONSOLE_OWNER), -1,
+        "a designated compositor does not confer CONSOLE_OWNER");
+    TEST_EXPECT_EQ(spawn_perm_grant_check(holder, SPAWN_PERM_MAY_POST_SERVICE), -1,
+        "nor MAY_POST_SERVICE, which could confer it a hop later");
+    TEST_EXPECT_EQ(spawn_perm_grant_check(holder, 0u), 0,
+        "and a spawn asking for nothing is still allowed");
+
     holder->state = PROC_STATE_ZOMBIE;
     proc_free(holder);
 

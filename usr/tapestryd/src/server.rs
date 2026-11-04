@@ -18294,7 +18294,7 @@ impl Conn {
             },
             FK_PRESENT => {
                 if !comp.surf(n).is_some_and(|s| s.weave.is_some() && s.storage.admits(f.pixel_gen)) {
-                    return self.err(tag, p9::E_BADF);
+                    return self.err(tag, p9::E_STALE);
                 }
                 let repainting = comp.surf(n).is_some_and(|s| s.storage.enabled()
                     && s.storage.phase() == tapestryd::storage::Phase::Repainting);
