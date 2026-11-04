@@ -631,6 +631,7 @@ void test_torpor_wake_takes_the_oldest(void);
 void test_torpor_key_is_the_address_space(void);
 void test_torpor_wake_counts_only_a_sleeper(void);
 void test_torpor_record_outlives_the_wake(void);
+void test_torpor_mark_takes_the_rendez_lock(void);
 void test_torpor_word_replaced_under_the_wait(void);
 void test_loom_create_geometry(void);
 void test_loom_private_owner_lifecycle(void);

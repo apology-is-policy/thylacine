@@ -86,9 +86,55 @@ static inline struct torpor_bucket *torpor_bucket_of(const struct AddrSpace *as,
 // tsleep condition: woken iff `waiter->awoken != 0`. Called by tsleep
 // under `waiter->rendez.lock`, and every waker sets it under that lock, so
 // the read is exact: a waiter that resumes reads what a wake's mark wrote.
+#ifdef KERNEL_TESTS
+// Test hook: the cond, having read the mark, waits under the rendez's lock until a wake
+// has come to mark this waiter, then a little longer. That is the window between a
+// waiter's read and its registering, and a mark that takes the lock cannot land in it.
+// One use per arming. Masked and holding the lock, so a wake on another CPU ends it.
+#define TORPOR_COND_STALL_BUDGET_NS 1000000000ull
+#define TORPOR_COND_STALL_GRACE_NS  5000000ull
+static volatile bool g_torpor_cond_stall, g_torpor_cond_stalled;
+static volatile bool g_torpor_mark_tried, g_torpor_cond_saw_try, g_torpor_cond_saw_mark;
+void torpor_stall_cond_for_test(void) {
+    g_torpor_cond_stalled = false;
+    g_torpor_mark_tried = false;
+    g_torpor_cond_saw_try = false;
+    g_torpor_cond_saw_mark = false;
+    __atomic_store_n(&g_torpor_cond_stall, true, __ATOMIC_RELEASE);
+}
+bool torpor_cond_stalled_for_test(void) {
+    return __atomic_load_n(&g_torpor_cond_stalled, __ATOMIC_ACQUIRE);
+}
+bool torpor_cond_saw_try_for_test(void) {
+    return __atomic_load_n(&g_torpor_cond_saw_try, __ATOMIC_ACQUIRE);
+}
+bool torpor_cond_saw_mark_for_test(void) {
+    return __atomic_load_n(&g_torpor_cond_saw_mark, __ATOMIC_ACQUIRE);
+}
+static void torpor_cond_stall_point(const struct torpor_waiter *w) {
+    if (!__atomic_exchange_n(&g_torpor_cond_stall, false, __ATOMIC_ACQ_REL)) return;
+    __atomic_store_n(&g_torpor_cond_stalled, true, __ATOMIC_RELEASE);
+    u64 dl = timer_now_ns() + TORPOR_COND_STALL_BUDGET_NS;
+    while (!__atomic_load_n(&g_torpor_mark_tried, __ATOMIC_ACQUIRE) && timer_now_ns() < dl)
+        __asm__ __volatile__("yield" ::: "memory");
+    bool tried = __atomic_load_n(&g_torpor_mark_tried, __ATOMIC_ACQUIRE);
+    if (tried) {
+        dl = timer_now_ns() + TORPOR_COND_STALL_GRACE_NS;
+        while (timer_now_ns() < dl) __asm__ __volatile__("yield" ::: "memory");
+    }
+    __atomic_store_n(&g_torpor_cond_saw_mark,
+                     __atomic_load_n(&w->awoken, __ATOMIC_ACQUIRE) != 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_torpor_cond_saw_try, tried, __ATOMIC_RELEASE);
+}
+#endif
+
 static int torpor_cond_awoken(void *arg) {
     const struct torpor_waiter *w = (const struct torpor_waiter *)arg;
-    return (int)w->awoken;
+    int awoken = (int)w->awoken;
+#ifdef KERNEL_TESTS
+    torpor_cond_stall_point(w);
+#endif
+    return awoken;
 }
 
 static void torpor_append_locked(struct torpor_bucket *b, struct torpor_waiter *w) {
@@ -117,6 +163,9 @@ static void torpor_unlink_locked(struct torpor_bucket *b, struct torpor_waiter *
 // release is also what delivers the mark to a waiter a stop has parked, on its
 // re-read (PTY-4e R2): this replaces the wakeup() that used to carry it.
 static bool torpor_mark_awoken(struct torpor_waiter *w) {
+#ifdef KERNEL_TESTS
+    __atomic_store_n(&g_torpor_mark_tried, true, __ATOMIC_RELEASE);
+#endif
     irq_state_t s = spin_lock_irqsave(&w->rendez.lock);
     bool asleep = w->rendez.waiter != NULL;
     w->awoken = 1;

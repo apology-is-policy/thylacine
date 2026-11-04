@@ -1227,6 +1227,7 @@ struct test_case g_tests[] = {
     { "torpor.key_is_the_address_space",       test_torpor_key_is_the_address_space,       false, NULL },
     { "torpor.wake_counts_only_a_sleeper",     test_torpor_wake_counts_only_a_sleeper,     false, NULL },
     { "torpor.record_outlives_the_wake",       test_torpor_record_outlives_the_wake,       false, NULL },
+    { "torpor.mark_takes_the_rendez_lock",     test_torpor_mark_takes_the_rendez_lock, false, NULL },
     { "torpor.word_replaced_under_the_wait",   test_torpor_word_replaced_under_the_wait,   false, NULL },
     { "loom.create_geometry",            test_loom_create_geometry,            false, NULL },
     { "loom.private_buffers",            test_loom_private_buffers,            false, NULL },

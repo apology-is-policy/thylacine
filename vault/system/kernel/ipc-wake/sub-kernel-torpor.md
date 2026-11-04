@@ -9,7 +9,7 @@ guarded-by: [inv-i9, inv-i24]
 validated-by: [spec-torpor, spec-tsleep, gate-smp]
 locks: [lock-torpor, lock-rendez, lock-wait, lock-timerwait]
 created: 2026-08-01
-updated: 2026-11-03
+updated: 2026-11-04
 ---
 ## Purpose
 
@@ -212,6 +212,10 @@ the sleep plus the tsleep machinery.
 - The caught arm must stay after tsleep's cond test, and WAKE must count
   only a waiter its mark found asleep: either change returns
   `-EINTR` for a wake the walk counted, and the futex loses it.
+- A mark must take the rendez's lock. The waiter holds it from reading the cond through
+  registering, and a mark landing between finds nobody asleep, so the wake counts nothing
+  and the waiter sleeps on a mark it has missed. Regression:
+  `torpor.mark_takes_the_rendez_lock`, whose stall sits in that window.
 - A wake's batch reaches records past the lock. `wake_held` set under the lock, the waiter's
   wait for its clear, and `next` read before the clear are one mechanism; none is optional.
 - The mark sets `awoken` under the rendez's lock. A later `wakeup` used to carry it to a waiter

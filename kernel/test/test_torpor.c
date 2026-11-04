@@ -841,6 +841,71 @@ void test_torpor_record_outlives_the_wake(void) {
     TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree empty after cleanup");
 }
 
+// A mark lands under the rendez's lock. A waiter holds that lock from reading its cond
+// through registering on the rendez, so a mark comes before the read, which sees it, or
+// after the registering, and finds it asleep. A mark outside the lock can land between:
+// it finds nobody asleep, so the wake counts nothing and wakes nothing, and the waiter
+// sleeps on a mark it has already missed (I-9).
+//
+// The waiter runs here and stops in that window, masked and under the lock. So the wake
+// comes from a peer.
+static volatile s64  g_tqc_woken;
+static volatile bool g_tqc_exited;
+static struct Proc  *g_tqc_proc;
+
+static void tqc_entry(void) {
+    u64 dl = timer_now_ns() + TEST_YIELD_BUDGET_NS;
+    while (!torpor_cond_stalled_for_test() && timer_now_ns() < dl)
+        __asm__ __volatile__("yield" ::: "memory");
+    g_tqc_woken = sys_torpor_wake_for_proc(g_tqc_proc, g_tq_va, 1);
+    test_thread_park_terminal(&g_tqc_exited);
+}
+
+void test_torpor_mark_takes_the_rendez_lock(void) {
+    if (!test_requires(smp_cpu_count() >= 2, "thylacine.smp", 0, true, "one CPU is online"))
+        return;
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree must be empty at test entry");
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+    s64 r = sys_burrow_attach_for_proc(p, PAGE_SIZE);
+    if (r <= 0) test_proc_free_drained(p);
+    TEST_ASSERT(r > 0, "burrow_attach failed");
+    // Past a yield budget, so a stranded waiter reads as not finished, and short enough
+    // that it then leaves on its own deadline: a wake can no longer find it.
+    tq_reset((u64)r, 3ll * 1000000ll);
+    g_tqc_proc = p; g_tqc_woken = (s64)-999; g_tqc_exited = false;
+
+    torpor_stall_cond_for_test();
+    struct Thread *w = thread_create(p, tqc_entry);
+    if (w) {
+        unsigned peer = (smp_cpu_idx_self() + 1u) % smp_cpu_count();
+        ready_on(peer, w);
+        (void)gic_send_ipi(peer, IPI_RESCHED);
+    }
+    g_tq_t[0] = thread_create(p, tq_entry);
+    if (g_tq_t[0]) ready(g_tq_t[0]);
+    bool finished = tq_finished(0);
+
+    u64 dl = timer_now_ns() + TEST_YIELD_BUDGET_NS;
+    while (g_tqc_woken == (s64)-999 && timer_now_ns() < dl) sched();
+    s64 woken = g_tqc_woken, rc = g_tq_rc[0];
+
+    dl = timer_now_ns() + 4000000000ull;
+    while (!tq_done(0) && timer_now_ns() < dl) sched();
+    if (w) test_thread_join_last(p, &g_tqc_exited);
+    if (g_tq_t[0]) test_thread_join_last(p, &g_tq_exited[0]);
+    test_proc_free_drained(p);
+
+    TEST_ASSERT(w != NULL && g_tq_t[0] != NULL, "thread_create failed");
+    TEST_ASSERT(torpor_cond_stalled_for_test(), "CONTROL: the waiter stopped in the window");
+    TEST_ASSERT(torpor_cond_saw_try_for_test(), "CONTROL: the wake came to mark it there");
+    TEST_ASSERT(!torpor_cond_saw_mark_for_test(), "no mark landed in the window");
+    TEST_EXPECT_EQ(woken, (s64)1, "the wake counted the waiter");
+    TEST_ASSERT(finished, "and its wait ended");
+    TEST_EXPECT_EQ(rc, (s64)TORPOR_OK, "as a wake");
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree empty after cleanup");
+}
+
 // A peer's MAP_FIXED over the word, between the wait's first load and its lock. The load
 // under the lock misses on a file page it may not wait for. The wait comes back as if
 // spuriously, having read nothing, and the next call faults the word in. A read under

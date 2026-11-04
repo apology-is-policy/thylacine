@@ -191,6 +191,10 @@ void torpor_after_prefault_for_test(void (*fn)(void *), void *arg);
 u64  torpor_held_spins_for_test(void);
 void torpor_stall_wakes_for_test(bool on);
 bool torpor_wake_stalled_for_test(void);
+void torpor_stall_cond_for_test(void);
+bool torpor_cond_stalled_for_test(void);
+bool torpor_cond_saw_try_for_test(void);
+bool torpor_cond_saw_mark_for_test(void);
 #endif
 
 #endif // THYLACINE_TORPOR_H
