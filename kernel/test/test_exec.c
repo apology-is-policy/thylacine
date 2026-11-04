@@ -1444,6 +1444,11 @@ void test_execve_load_says_a_file_is_no_image(void) {
     // stat said more than the file holds, so the read of a segment comes up short.
     int short_read = nx_load(NULL, size, NULL, 0, NULL, 0, 0);
 
+    size = nx_good();
+    ((struct Elf64_Phdr *)(g_elf_blob + sizeof(struct Elf64_Ehdr)))[1].p_vaddr =
+        EXEC_USER_STACK_TOP - PAGE_SIZE;
+    int over_stack = nx_load(NULL, size, NULL, 0, NULL, 0, 0);
+
     TEST_EXPECT_EQ(good, 0, "control: the good image loads");
     TEST_EXPECT_EQ(again, 0, "control: and again, after the empty one");
     TEST_EXPECT_EQ(empty, -(int)T_E_NOEXEC, "an empty file");
@@ -1453,6 +1458,7 @@ void test_execve_load_says_a_file_is_no_image(void) {
     TEST_EXPECT_EQ(machine, -(int)T_E_NOEXEC, "another machine's ELF");
     TEST_EXPECT_EQ(truncated, -(int)T_E_NOEXEC, "headers that promise more than the file");
     TEST_EXPECT_EQ(short_read, -(int)T_E_NOEXEC, "a segment's read that comes up short");
+    TEST_EXPECT_EQ(over_stack, -(int)T_E_NOEXEC, "a segment where the stack goes");
 }
 
 // A shell reads ENOEXEC as "run it as a script", so a read that failed must say so.
@@ -1471,8 +1477,20 @@ void test_execve_load_keeps_a_read_failure(void) {
     int segment = nx_load(NULL, size, NULL, 0, NULL, 0, 0);
     g_blob_read_fail_rc = 0;
     int control = nx_load(NULL, size, NULL, 0, NULL, 0, 0);
+    // Text with a page of bss cannot be shared, so the other eager arm reads it.
+    size = nx_good();
+    struct Elf64_Phdr *text = (struct Elf64_Phdr *)(g_elf_blob + sizeof(struct Elf64_Ehdr));
+    text[0].p_filesz = 0x800;
+    text[0].p_memsz  = 0x2000;
+    int text_control = nx_load(NULL, size, NULL, 0, NULL, 0, 0);
+    g_blob_read_fail_rc = -(long)T_E_IO;
+    g_blob_read_fail_from = (s64)PAGE_SIZE;
+    int text_segment = nx_load(NULL, size, NULL, 0, NULL, 0, 0);
+    g_blob_read_fail_rc = 0;
 
     TEST_EXPECT_EQ(control, 0, "control: with reads working it loads");
+    TEST_EXPECT_EQ(text_control, 0, "control: so does the eager text");
+    TEST_EXPECT_EQ(text_segment, -(int)T_E_IO, "eager text's read failed");
     TEST_EXPECT_EQ(header, -(int)T_E_IO, "the header's read failed");
     TEST_EXPECT_EQ(reason, -(int)T_E_AGAIN, "its own reason, not a blanket EIO");
     TEST_EXPECT_EQ(flat, -(int)T_E_IO, "a Dev's flat -1 is an EIO");
