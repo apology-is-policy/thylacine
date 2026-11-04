@@ -838,10 +838,15 @@ loop.
 
 Two lanes, because the server takes one outstanding request per fid: control carries
 Hello, Bind and Mode, transfer carries one copy or paste. A mode report therefore
-passes a parked Get. Mode reports coalesce: one in flight, the latest behind it. Only
-Bind retries, on Gone or Busy, 8 times 20 ms apart, as a deadline. Reconnects back off
+passes a parked Get. Mode reports coalesce: one in flight, the latest behind it. Bind
+retries, on Gone or Busy, 8 times 20 ms apart, as a deadline. Reconnects back off
 from 250 ms to 8 s and stop after 8 tries until the host asks for something, so a
 process refused its binding does not hammer the server.
+
+A job still waiting on its first answer goes again, once, if the bound connection it was
+using is lost (vote 60). A SAK closes an idle connection and nothing says so until its next
+use, and a Get changes nothing, so the first key after a trusted-path episode works.
+`reruns` counts these, since a job that recovers reports nothing.
 
 A commit is never retried. Once its record has been handed to the transport, a lost
 connection or a missed deadline reports `CopyUnknown`; a refusal the server chose is

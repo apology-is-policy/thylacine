@@ -399,7 +399,8 @@ The client's rules, each from a rule above it:
   acceptance for option A, now on the private ring). Console output parks during the
   episode, so the first of those cannot be read off a line. It rests on the seat path
   retiring every application connection before its ACK, and the witness is that a
-  private connection bound at the SAK fails at its next use. This is also the first
+  private connection bound at the SAK does not serve its next use. That use may recover
+  on a fresh connection, and the client's count of re-runs says it had to. This is also the first
   boot of a private CONNECT against halcyond, so it pins the peer rule: the server
   samples `t_srv_peer` on a connection the kernel stamped from the ring's captured
   identity.
