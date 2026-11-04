@@ -11,6 +11,7 @@ static void spin_lock_init(spin_lock_t *l) { l->held=0; }
 static void spin_lock(spin_lock_t *l) { if(l->held)abort();l->held=1; }
 static void spin_unlock(spin_lock_t *l) { if(!l->held)abort();l->held=0; }
 #include <thylacine/9p_client.h>
+#define PRINCIPAL_INVALID 0u /* proc.h, which this fixture stands in for */
 #define CLIENT_UNLOCK_RET(c, rc) do {client_unlock(c);return(rc);}while(0)
 // Host doubles of the kernel allocator and panic, with external linkage: the
 // real 9p_session.c grows its tag table through kmalloc (KP_ZERO honoured) and
@@ -39,6 +40,7 @@ void poll_defer_exit(void) { }
 void poll_wake_deferred(struct poll_deferred *d) { (void)d; }
 void poll_deferred_await(struct poll_deferred *d) { (void)d; }
 int wakeup(struct Rendez *r) { (void)r; return 0; }
+void larder_forget_all(struct larder *l) { (void)l; }
 static void uart_puts(const char *s) { (void)s; }
 static void uart_putdec(u64 n) { (void)n; }
 static int client_run(struct p9_client *c,size_t n,struct p9_dispatch_result *r) {

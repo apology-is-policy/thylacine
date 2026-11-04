@@ -14,10 +14,12 @@ typedef uint64_t u64;typedef int hidx_t;typedef unsigned rights_t;
 #define T_E_INVAL 22
 #define T_E_ACCES 13
 #define T_E_BUSY 16
+#define HANDLE_RESERVED 88
+#define HANDLE_DUP_TO_BUSY (-2)
 enum kobj_kind {KOBJ_INVALID,KOBJ_PROCESS,KOBJ_SRV};
 struct Object {atomic_int refs;};
 struct Handle {int magic;enum kobj_kind kind;rights_t rights;void *obj;};
-struct HandleTable {pthread_mutex_t lock;struct Handle slots[1024];bool flags[1024];};
+struct HandleTable {pthread_mutex_t lock;struct Handle slots[1024];bool flags[1024];unsigned installs;};
 struct Proc {struct HandleTable table;};
 static struct Proc proc;static struct Object objects[2];
 static u64 g_handle_allocated,g_handle_freed;
@@ -34,6 +36,8 @@ static atomic_int g_lock_hook_calls;
 static void lock_owners_on_close(struct HandleTable *t,enum kobj_kind k,void *o){assert(!locked && t==&proc.table && k==KOBJ_PROCESS);assert(atomic_load(&((struct Object*)o)->refs)>0);atomic_fetch_add(&g_lock_hook_calls,1);} /* outside the lock, before the release */
 static void handle_fd_count(enum kobj_kind k,void *o){assert(locked && k==KOBJ_PROCESS && o);}
 static int handle_fd_drop(struct HandleTable *t,enum kobj_kind k,void *o,bool heard){assert(!locked && t==&proc.table && k==KOBJ_PROCESS && o && !heard);return 0;} /* a replace hands the answer to no program */
+static void table_lock(struct HandleTable *t){spin_lock(&t->lock);}
+static int handle_release_owner(enum kobj_kind k,void *o){return handle_release_obj(k,o);}
 #include "target-under-test.c"
 static void install(int fd,int object){spin_lock(&proc.table.lock);assert(!proc.table.slots[fd].magic);proc.table.slots[fd]=(struct Handle){HANDLE_MAGIC,KOBJ_PROCESS,4,&objects[object]};handle_acquire_obj(KOBJ_PROCESS,&objects[object]);spin_unlock(&proc.table.lock);}
 static void remove_slot(int fd){spin_lock(&proc.table.lock);struct Handle h=proc.table.slots[fd];proc.table.slots[fd].magic=0;spin_unlock(&proc.table.lock);if(h.magic)handle_release_obj(h.kind,h.obj);}
@@ -45,6 +49,11 @@ int main(void){
  assert(atomic_load(&objects[0].refs)==2 && atomic_load(&objects[1].refs)==0);
  assert(g_handle_allocated==1 && g_handle_freed==1 && atomic_load(&g_lock_hook_calls)==1);
  assert(handle_dup_to_checked(&proc,1,2,false)==2 && !proc.table.flags[2]);
+ { /* a number a call holds: refused by name, nothing taken, and the wrapper keeps the name */
+   int r0=atomic_load(&objects[0].refs);proc.table.slots[3].magic=HANDLE_RESERVED;
+   assert(handle_dup_to_checked(&proc,1,3,false)==-T_E_BUSY && proc.table.slots[3].magic==HANDLE_RESERVED);
+   assert(handle_dup_to(&proc,1,3,false)==HANDLE_DUP_TO_BUSY && atomic_load(&objects[0].refs)==r0);
+   proc.table.slots[3].magic=0;assert(handle_dup_to(&proc,9,8,false)==-1 && atomic_load(&objects[0].refs)==r0);}
  assert(atomic_load(&objects[0].refs)==2); // same object replacement balanced
  assert(handle_dup_to_checked(&proc,1,3,true)==3 && proc.table.flags[3]);
  assert(g_handle_allocated-g_handle_freed==1);
