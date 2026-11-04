@@ -39,7 +39,7 @@ abis: [abi-loom-service, abi-loom-ring]
 design:
   - "docs/ASYNC-SERVICE-ABI.md \"Native Rust client cores (October 12)\""
 created: 2026-10-12
-updated: 2026-10-13
+updated: 2026-11-03
 ---
 ## Purpose
 
@@ -62,6 +62,11 @@ the task loop; only their tests use them, so `lib.rs` still allows dead code
 outside test builds.
 
 ## Contract
+
+The crate is `no_std` in every build but its own tests and the dev-only `sim` feature,
+which makes the native adapter's simulated kernel public so that a crate driving the
+adapter can test against it ([[sub-loom-native-adapter]]). Resolver 2 keeps a dev-only
+feature out of `cargo build`.
 
 - **The public surface is `service_abi` and the adapter, `native`.** The mirror
   moved here from libthyla-rs, which re-exports both as `loom::service_abi` and

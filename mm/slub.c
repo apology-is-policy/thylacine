@@ -171,7 +171,7 @@ static void slab_init_freelist(struct kmem_cache *c, struct page *slab) {
         prev = obj;
     }
     slab->slab_freelist = prev;     // = first object
-    slab->slab_cache    = c;
+    slab->holder.slab_cache = c;
     slab->flags         = PG_SLAB;
     slab->refcount      = 0;        // inuse
 }
@@ -188,7 +188,7 @@ static struct page *slab_new(struct kmem_cache *c) {
 // Drain an empty slab back to the buddy.
 static void slab_drain(struct kmem_cache *c, struct page *slab) {
     slab->slab_freelist = NULL;
-    slab->slab_cache    = NULL;
+    slab->holder.slab_cache = NULL;
     slab->flags         = 0;
     slab->refcount      = 0;
     c->slabs_active--;
@@ -277,7 +277,7 @@ void kmem_cache_free(struct kmem_cache *c, void *obj) {
     // P3-Bb: obj is a kernel direct-map VA; convert to PA via kva_to_pa
     // before walking the page-frame database.
     struct page *slab = pa_to_page(kva_to_pa(obj));
-    if (!(slab->flags & PG_SLAB) || slab->slab_cache != c) {
+    if (!(slab->flags & PG_SLAB) || slab->holder.slab_cache != c) {
         extinction("kmem_cache_free: object not from this cache");
     }
     irq_state_t s = spin_lock_irqsave(&c->lock);
@@ -466,7 +466,7 @@ void kfree(void *p) {
         // base + N * actual_size. An interior pointer (kfree(p +
         // offset)) would dereference the wrong slab metadata at
         // kmem_cache_free's check or corrupt the freelist on push.
-        struct kmem_cache *c = page->slab_cache;
+        struct kmem_cache *c = page->holder.slab_cache;
         if (!c) {
             extinction("kfree: PG_SLAB page has no slab_cache");
         }

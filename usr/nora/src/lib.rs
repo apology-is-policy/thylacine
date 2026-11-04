@@ -29,6 +29,8 @@ pub mod wrap;
 pub use debug::{DebugView, GoroutineRow, StackRow, VarRow};
 pub use vartree::VarNode;
 pub use diag::{Diagnostics, LineDiag, Severity};
-pub use editor::{Candidate, DapRequest, DashPane, Editor, LspRequest, Mode, Request};
+pub use editor::{
+    Candidate, ClipboardRequest, DapRequest, DashPane, Editor, LspRequest, Mode, Request,
+};
 pub use syntax::{HlClass, HlSpan, Lang};
 pub use text::TextBuffer;

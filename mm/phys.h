@@ -95,6 +95,10 @@ u32  capacity_reserve_pages(void);  // the TCB reserve
 // then allocated like alloc_pages, then tagged PG_USER so free_pages returns
 // the charge. NULL, with nothing charged, when the pool or the buddy refuses.
 struct page *alloc_user_pages(unsigned order, unsigned flags, bool exempt);
+// The same with the account named: alloc_user_pages charges the caller's own.
+struct MemoryAccount;
+struct page *alloc_user_pages_for(struct MemoryAccount *sponsor, unsigned order,
+                                  unsigned flags, bool exempt);
 
 // The kernel memory a user Proc's existence costs that is not a user page (a
 // thread's kernel stack and slot, ARCH 7.3.5): charged to the same pool, with
@@ -123,6 +127,9 @@ void capacity_pool_unpark_for_test(u32 npages);
 // The runner releases whatever a test left parked, after every test, and
 // reddens a test that passed while leaking it; answers the pages released.
 u32 capacity_pool_unpark_all_for_test(void);
+// The pages of every block whose head carries `flag`: the blocks that exist, as
+// against what any counter says of them.
+u64 phys_block_pages_for_test(u32 flag);
 #endif // KERNEL_TESTS
 
 // Public allocation API per ARCHITECTURE.md §6.3.

@@ -7,6 +7,7 @@ code:
   - usr/nora/src/main.rs
   - usr/nora/src/lsp_host.rs
   - usr/nora/src/dap_host.rs
+  - usr/nora/src/clip_host.rs
 audit: light
 guarded-by: []
 validated-by: [prose, gate-interactive]
@@ -113,13 +114,20 @@ round blocks no longer than that session's deadline, and every wake checks the
 deadline. A debugger that never answers is still killed on time, without a
 general tick.
 
+A write to a server never blocks the loop. Each server's stdin is nonblocking and
+holds what the pipe would not take in parley's outbox ([[sub-parley]]). While bytes
+wait there, the round's set asks for that descriptor's write readiness, and the wake
+flushes more of them. A pipe holds 4 KiB, so this is the ordinary path for any large
+`didChange`, not only for a server that has stopped reading.
+
 ### Neither child may outlive the editor
 
 Both hosts carry a dead flag and a reaper that kills and waits once. A failed
 write to a child reaps it on the spot: the session is then dropped and never
-polled again, so it is the last chance to collect the child. The reason is stated
-rather than assumed — an orphaned language server holds the workspace, and an
-orphaned debugger holds its debuggee along with its stop.
+polled again, so it is the last chance to collect the child. A server that has
+stopped reading fails the same way once its outbox would pass 8 MiB. The reason is
+stated rather than assumed — an orphaned language server holds the workspace, and
+an orphaned debugger holds its debuggee along with its stop.
 
 The language server ends itself too. At exit nora sends LSP `shutdown`, waits
 for its answer, then sends `exit` and closes stdin, and once the server has
@@ -258,6 +266,20 @@ the Invariants section otherwise reads as "no kernel surface at all":
   Ambush stitch. At a user breakpoint the kernel rows are the debug-trap path; a
   goroutine blocked in a syscall shows its block path. Selecting a kernel frame
   reports `kernel frame: <name> (no source)` because kernel DWARF is deferred.
+
+**The session clipboard (`clip_host`).** `Clip::start` is None without
+`HALCYON_INTERACTION` or the private ring, and the shared-clipboard keys then say so:
+nothing else is tried. Otherwise the ring's descriptor joins the one poll with
+`TAG_CLIP` and the client's `next_deadline` bounds its sleep, beside an ending debug
+session's. Because the timeout can now be the clipboard's, `poll_all` also says whether
+it was the debugger's: `Dap::on_deadline` reads a timed-out poll as its grace being
+spent, and would otherwise kill a session early. `drive_clipboard` runs at the loop's
+tail and once before it, for type-ahead: it reports a changed mode, starts what a key
+asked, and pumps only when the ring woke the poll or a deadline has passed. Events
+become status text, and a paste reaches `Editor::paste_text` with the buffer that asked,
+kept only once the client has taken the request: a second one refused as busy must not
+redirect the one out. Nothing here blocks.
+See [[sub-interaction-native]].
 
 ## Data structures
 
@@ -423,9 +445,9 @@ twice.
   that gopls's shutdown does not wait for; and a disconnect that lands while
   `initialized` still runs `go env` lets gopls exit around it. Both are gopls-side.
   Queued: OPEN-BUGS 2026-10-28T12:22Z (two entries).
-- **A write to a server blocks.** A full-document sync to a server that has
-  stopped reading blocks the loop once the pipe is full, against NORA-IDE-UX
-  section 6. Queued: OPEN-BUGS 2026-10-28T11:43Z.
+- **A wedged server's reap has no witness under a real host.** `parley-probe` proves
+  the outbox's bound in its own loop. Reaching 8 MiB under `Lsp` or `Dap`, and the
+  reap that follows, has not been driven.
 
 ## Provenance
 

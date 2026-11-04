@@ -1,8 +1,7 @@
 //! The native adapter against a simulated kernel (sim.rs).
-mod sim;
 use crate::native::{POLLERR, PoolMember, Ring, Shot};
-use sim::{
-    ABORTING, EACCES, EBADF, EBUSY, ECANCELED, EINTR, EINVAL, EIO, ENOENT, ENOSPC, ENOTDIR,
+use crate::sim::{
+    ABORTING, EACCES, EBADF, EBUSY, ECANCELED, EINTR, EINVAL, EIO, ENOENT, ENOMEM, ENOSPC, ENOTDIR,
     ETIMEDOUT, RETIRED, Sim, SimKernel, SlotKind,
 };
 use std::future::Future;
@@ -42,6 +41,46 @@ fn setup_registers_every_buffer_and_drop_detaches_every_region() {
 }
 
 #[test]
+fn poll_fd_names_the_ring_until_it_closes_and_a_turn_at_now_never_sleeps() {
+    let sim = Sim::new();
+    let r = ring(&sim, 8, &[4096]);
+    assert_eq!(r.poll_fd(), 7);
+    // Nothing is due, so a sleeping turn would be seen as a poll.
+    sim.s().hold = true;
+    for _ in 0..3 {
+        assert_eq!(r.turn(Some(r.now())), Ok(0));
+    }
+    assert!(sim.s().polls.is_empty());
+    r.close();
+    assert_eq!(r.poll_fd(), -1);
+}
+
+#[test]
+fn a_turn_at_now_learns_a_close_a_host_poll_would_otherwise_report_for_ever() {
+    for latch in [false, true] {
+        let sim = Sim::new();
+        let r = ring(&sim, 8, &[4096]);
+        if latch {
+            sim.latch_under();
+        } else {
+            sim.close_under();
+        }
+        assert_eq!(r.turn(Some(r.now())), Err(ECANCELED as i32), "latch {latch}");
+        assert_eq!(r.poll_fd(), -1, "latch {latch}");
+        assert!(sim.s().polls.is_empty(), "latch {latch}");
+    }
+}
+
+#[test]
+fn a_failed_ring_closes_its_descriptor_so_it_leaves_the_poll_set() {
+    let sim = Sim::new();
+    let r = ring(&sim, 8, &[4096]);
+    sim.s().enter_errno = Some(EINVAL);
+    assert_eq!(r.turn(Some(r.now())), Err(EIO as i32));
+    assert_eq!(r.poll_fd(), -1);
+}
+
+#[test]
 fn a_refused_attach_detaches_what_was_attached() {
     let sim = Sim::new();
     sim.s().attach_fail_at = Some(2);
@@ -66,10 +105,20 @@ fn connect_walk_open_write_then_read_round_trips() {
 }
 
 #[test]
+fn a_target_of_a_name_nobody_posted_is_refused_at_once() {
+    let sim = Sim::new();
+    let r = ring(&sim, 8, &[4096]);
+    assert_eq!(r.target(5, b"absent").err(), Some(ENOENT as i32));
+    assert_eq!(sim.live_slots(), 0);
+}
+
+#[test]
 fn a_failed_connect_reaps_its_scope() {
     let sim = Sim::new();
     let r = ring(&sim, 8, &[4096]);
-    let target = r.target(5, b"absent").unwrap();
+    let target = r.target(5, b"clip").unwrap();
+    // The name was resolved at TARGET. A service gone since then fails at CONNECT.
+    sim.s().services.clear();
     assert_eq!(
         run(&r, target.connect(None).unwrap()).err(),
         Some(ENOENT as i32)
@@ -673,6 +722,33 @@ fn an_exhausted_slot_table_reaps_before_it_refuses() {
     drop(spare.pop());
     let fid = run(&r, scope.walk(b"f", None).unwrap());
     assert!(fid.is_ok(), "the walk took the reaped slot");
+}
+
+#[test]
+fn a_reservation_out_of_memory_reaps_before_it_refuses() {
+    let sim = Sim::new();
+    file(&sim, "f", b"x");
+    let r = ring(&sim, 8, &[4096]);
+    let target = r.target(5, b"clip").unwrap();
+    let scope = run(&r, target.connect(None).unwrap()).unwrap();
+    drop(r.target(5, b"clip").unwrap());
+    sim.s().reserve_out_of_memory = true;
+    let fid = run(&r, scope.walk(b"f", None).unwrap());
+    assert!(fid.is_ok());
+    assert!(!sim.s().reserve_out_of_memory, "the reap let it through");
+}
+
+#[test]
+fn a_reservation_out_of_memory_with_nothing_to_reap_is_refused() {
+    let sim = Sim::new();
+    file(&sim, "f", b"x");
+    let r = ring(&sim, 8, &[4096]);
+    let target = r.target(5, b"clip").unwrap();
+    let scope = run(&r, target.connect(None).unwrap()).unwrap();
+    sim.s().reserve_out_of_memory = true;
+    assert_eq!(scope.walk(b"f", None).err(), Some(ENOMEM as i32));
+    sim.s().reserve_out_of_memory = false;
+    assert!(run(&r, scope.walk(b"f", None).unwrap()).is_ok());
 }
 
 fn scope_retired_in_kernel(sim: &Sim) -> bool {
@@ -1535,7 +1611,7 @@ fn a_read_result_keeps_the_storage_until_it_drops() {
 fn admission_follows_the_kernels_order() {
     use crate::ring_records::{OP_CLUNK, OP_READ, OP_WALK, Submission};
     use crate::service_abi::{SQE_BUFFER_SELECT, SlotRef, Snapshot};
-    use sim::{ABORTING, READY, RESERVED, RETIRED, Slot};
+    use crate::sim::{ABORTING, READY, RESERVED, RETIRED, Slot};
     let mut buf = *b"a/bxname";
     let fixture = |buf: &mut [u8; 8]| {
         let sim = Sim::new();

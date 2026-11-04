@@ -3,7 +3,7 @@
 //! and the native adapter that drives a private ring with them.
 // The tests run with std, as the cores' original test binaries did; every other
 // build, the guest's included, compiles them no_std.
-#![cfg_attr(not(test), no_std)]
+#![cfg_attr(not(any(test, feature = "sim")), no_std)]
 // The adapter does not compose every core (the futures over fixed I/O, the task
 // loop and the retirement executor); those are reached only by the tests.
 #![cfg_attr(not(test), allow(dead_code))]
@@ -23,6 +23,10 @@ mod retirement_executor;
 mod ring_payload;
 mod ring_records;
 mod task_loop;
+
+#[cfg(any(test, feature = "sim"))]
+#[path = "tests/native/sim.rs"]
+pub mod sim;
 
 #[cfg(test)]
 mod tests;

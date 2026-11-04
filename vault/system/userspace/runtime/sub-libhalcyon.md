@@ -7,6 +7,8 @@ code:
   - usr/lib/libhalcyon/src/interaction_events.rs
   - usr/lib/libhalcyon/src/seat_control.rs
   - usr/lib/libhalcyon/src/interaction_control.rs
+  - usr/lib/libhalcyon/src/interaction_client.rs
+  - usr/lib/libhalcyon/src/interaction_client_tests.rs
   - usr/lib/libhalcyon/src/lib.rs
   - usr/lib/libhalcyon/src/cursor.rs
   - usr/lib/libhalcyon/src/interaction_wire.rs
@@ -825,6 +827,56 @@ says why) rather than guessing a profile and building the wrong tree.
 read `/lib/halcyon.rc`, a system path. The five usage lines and the tour's code
 span now say `~/lib/halcyon...`; code comments keep the notation. Found by the
 Operator's Manual chunk, which writes `~/` for the same reason.
+
+## `interaction_client` -- the HIN1 client with no I/O (AS-4b, 2026-11-03)
+
+`interaction_client::Client` is the protocol a UI host needs and no transport. An
+adapter asks `next_step` what to start (connect, write, read, close) and reports
+what happened. The host asks `next_deadline` to bound its poll and takes `Event`s.
+Nothing in it can block, so a stopped server costs a deadline and never a frozen
+loop.
+
+Two lanes, because the server takes one outstanding request per fid: control carries
+Hello, Bind and Mode, transfer carries one copy or paste. A mode report therefore
+passes a parked Get. Mode reports coalesce: one in flight, the latest behind it. Bind
+retries, on Gone or Busy, 8 times 20 ms apart, as a deadline. Reconnects back off
+from 250 ms to 8 s and stop after 8 tries until the host asks for something, so a
+process refused its binding does not hammer the server.
+
+A job still waiting on its first answer goes again, once, if the bound connection it was
+using is lost (vote 60). A SAK closes an idle connection and nothing says so until its next
+use, and a Get changes nothing, so the first key after a trusted-path episode works.
+`reruns` counts these, since a job that recovers reports nothing.
+
+A commit is never retried. Once its record has been handed to the transport, a lost
+connection or a missed deadline reports `CopyUnknown`; a refusal the server chose is
+a definite `CopyFailed`. A paste is delivered whole and checked as text, or not at
+all. A failed job's open transfer is released first, since it holds one of the
+session's slots until it expires. `cancel` closes the connection, because only that is
+sure to end a request the server has stopped answering.
+
+The tests run real HIN1 records against a scripted server
+(`interaction_client_tests.rs`). Its native adapter is [[sub-interaction-native]]. The
+guest witnesses are separate chunks (ASYNC-SERVICE-LIFECYCLE, "AS-4 adoption design").
+
+**What a refusal means depends on where it came.** The server answers a request on the
+write that finishes its record, so success there means the request ran. An errno on a
+reply's read is therefore no answer, whatever its value: it ends the connection, and on a
+commit's reply the outcome is unknown. On the write, a value in the HIN1 table is a refusal.
+A record the server could not take poisons its fid until the fid closes
+(`usr/halcyond/src/apprecord.rs`), and the values that does it are also what a whole request
+can be refused with, so `Invalid`, `TooLarge`, `NoMemory` and `Unsupported` end the connection
+rather than be guessed at, as does any refusal part way through a record. Otherwise every
+later request on that fid would be refused for ever. A mode report refused that way is not
+sent again until the host reports anew, or a server that always refuses it would be
+connected to for ever. A `Denied` bind is asked again on the reconnect schedule, since a seat
+away for a trusted episode answers it and comes back on its own, and the schedule bounds what
+a real denial costs. Only the host asking restores the schedule: being bound is not having
+come back, and a server that binds and then fails the report it was bound for would otherwise
+be connected to for ever. No exchange outlives the job lifetime, however steadily its reply
+trickles, and a request parked on its write, where the real server parks one, is held to the
+same deadlines as one parked on its reply; a commit parked there may have landed, so it is
+unknown.
 
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)

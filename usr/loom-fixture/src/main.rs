@@ -5,7 +5,11 @@
 //
 // fd 0 is the walk-only root of a registry the kernel test made for this run,
 // fd 1 the read end of the probe's control pipe, and fd 2 the write end of the
-// notify pipe. It posts "fixture" in the registry, writes 'R' to fd 2, and
+// notify pipe. With --srv NAME the registry is /srv itself, for a probe in a session:
+// a walk-only handle does not transfer, so the fixture opens it, and a user scope may
+// post two services (SRV_CAP_SCOPE_SLOTS), so it posts "fixture" and NAME, the one
+// its probe parks on, "hold-copy" or "hold-paste". Otherwise it posts "fixture" and
+// the hostile services below. It writes 'R' to fd 2, and
 // serves every connection until fd 1 reaches EOF. Every session must then end
 // within SETTLE_NS: the probe has exited, so its rings are closed. A 'Q' read
 // from fd 1 asks for one 'Z' on fd 2 once no session is left. Fd 2 carries only
@@ -37,6 +41,15 @@
 // An 'E' on the control pipe asks for an 'e' on the notify pipe at the next session
 // end, for a probe whose full CQ rules out a stats read.
 //
+// dir/interaction speaks enough of HIN1 to serve one clipboard, for a real client
+// (AS-4d, kaua-term-probe --stopped-nora). It holds no authority and checks no scope:
+// that is halcyond's. `hold-copy` is the same service stopped mid-copy: it takes a
+// copy's first write, and from the read for its reply on it answers nothing more on
+// that connection, whichever fid asks, until the client ends the session. An 'H' on
+// the control pipe asks for an 'h' on the notify pipe at the next such stop.
+// `hold-paste` stops at a paste's first request on that request's own write, where
+// halcyond parks one (AS-4e, --ut-paste).
+//
 // Exit 76: no session was accepted (the default image). 77: at least one
 // session, every one ended, no violation. 1: a violation or a setup failure.
 // 2: a session outlived the probe.
@@ -49,16 +62,18 @@ extern crate alloc;
 use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::vec::Vec;
+use libhalcyon::interaction_body::{Request, Response};
+use libhalcyon::interaction_wire::{self as hin1, Header};
 use libthyla_rs::ninep as p9;
 use libthyla_rs::{
-    t_close, t_poll, t_putstr, t_read, t_srv_accept, t_walk_create, t_write, TPollFd, T_OREAD,
-    T_POLLERR, T_POLLHUP, T_POLLIN, T_POLLNVAL,
+    env, t_close, t_open, t_poll, t_putstr, t_read, t_srv_accept, t_walk_create, t_write, TPollFd,
+    T_OPATH, T_OREAD, T_POLLERR, T_POLLHUP, T_POLLIN, T_POLLNVAL, T_WALK_OPEN_FROM_ROOT,
 };
 
 #[global_allocator]
 static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
 
-const REGISTRY: i64 = 0;
+const INHERITED_REGISTRY: i64 = 0;
 const CONTROL: i64 = 1;
 const NOTIFY: i64 = 2;
 const NAME: &[u8] = b"fixture";
@@ -75,6 +90,7 @@ const STATS: u64 = 5;
 const STREAM: u64 = 6;
 const DIR: u64 = 7;
 const LEAF: u64 = 8;
+const INTERACTION: u64 = 9;
 const ROOT_NODES: [(&[u8], u64); 6] = [
     (b"data", DATA),
     (b"dir", DIR),
@@ -83,7 +99,7 @@ const ROOT_NODES: [(&[u8], u64); 6] = [
     (b"stats", STATS),
     (b"stream", STREAM),
 ];
-const DIR_NODES: [(&[u8], u64); 1] = [(b"leaf", LEAF)];
+const DIR_NODES: [(&[u8], u64); 2] = [(b"interaction", INTERACTION), (b"leaf", LEAF)];
 
 const DATA_LEN: u64 = 3 * 4096 + 1000;
 // Shorter than a page, so a WALK that reached `data` instead reads longer.
@@ -123,6 +139,8 @@ enum Fault {
     Hangup,
 }
 
+const HOLD_COPY: &[u8] = b"hold-copy";
+const HOLD_PASTE: &[u8] = b"hold-paste";
 const HOSTILE: [(&[u8], u8, Fault); 12] = [
     (b"hold-version", p9::P9_TVERSION, Fault::Hold),
     (b"hold-attach", p9::P9_TATTACH, Fault::Hold),
@@ -167,7 +185,7 @@ fn children(node: u64) -> &'static [(&'static [u8], u64)] {
 fn mode_of(node: u64) -> u32 {
     match node {
         ROOT | DIR => 0o040555,
-        SINK => 0o100666,
+        SINK | INTERACTION => 0o100666,
         _ => 0o100444,
     }
 }
@@ -186,6 +204,25 @@ struct Fid {
     // Tgetattrs not yet spent by a WALK with a name or an LOPEN.
     stats: u32,
     cursor: u64,
+    // The HIN1 record being written, the reply to the last one, and whether that
+    // reply is withheld.
+    record: Vec<u8>,
+    reply: Vec<u8>,
+    held: bool,
+}
+
+impl Fid {
+    fn at(node: u64) -> Self {
+        Fid {
+            node,
+            open: None,
+            stats: 0,
+            cursor: 0,
+            record: Vec::new(),
+            reply: Vec::new(),
+            held: false,
+        }
+    }
 }
 
 struct Conn {
@@ -197,13 +234,27 @@ struct Conn {
     stalled: Vec<u16>,
     // The message type and the fault still to come.
     fault: Option<(u8, Fault)>,
+    holds_copy: bool,
+    holds_paste: bool,
+    stopped: bool,
 }
 
 struct Server {
     count: [u32; STAT_COUNT],
     sink: Vec<u8>,
     out: Vec<u8>,
-    unaccepted: [i64; UNACCEPTED.len()],
+    unaccepted: Vec<i64>,
+    clipboard: Vec<u8>,
+    copying: Vec<u8>,
+    generation: u64,
+    hold_asked: bool,
+}
+
+struct Listener {
+    fd: i64,
+    fault: Option<(u8, Fault)>,
+    holds_copy: bool,
+    holds_paste: bool,
 }
 
 enum Reply {
@@ -277,6 +328,9 @@ impl Server {
     // send is built first, so a torn, garbled or wrong one differs from it only
     // where it means to.
     fn dispatch(&mut self, c: &mut Conn, frame: &[u8], h: p9::Header) -> Reply {
+        if c.stopped {
+            return Reply::Held;
+        }
         let fault = match c.fault {
             Some((mtype, fault)) if mtype == h.mtype => {
                 c.fault = None;
@@ -373,7 +427,7 @@ impl Server {
         if c.fids.contains_key(&a.fid) {
             return self.refuse(tag, p9::E_BADF, "Tattach to a fid in use");
         }
-        c.fids.insert(a.fid, Fid { node: ROOT, open: None, stats: 0, cursor: 0 });
+        c.fids.insert(a.fid, Fid::at(ROOT));
         Self::built(p9::build_rattach(&mut self.out, tag, &qid_of(ROOT)))
     }
 
@@ -450,7 +504,7 @@ impl Server {
             return self.lerror(tag, p9::E_NOENT);
         }
         if qids.len() == a.nwname as usize {
-            c.fids.insert(a.newfid, Fid { node: at, open: None, stats: 0, cursor: 0 });
+            c.fids.insert(a.newfid, Fid::at(at));
         }
         Self::built(p9::build_rwalk(&mut self.out, tag, &qids))
     }
@@ -501,6 +555,8 @@ impl Server {
                 c.stalled.push(tag);
                 return Reply::Held;
             }
+            INTERACTION if f.held => return self.stop(c),
+            INTERACTION => bytes.extend_from_slice(&f.reply),
             STATS => {
                 self.count[BACKLOG] = self.backlog();
                 for v in self.count.iter() {
@@ -542,6 +598,9 @@ impl Server {
         if f.open.is_none() || f.open == Some(0) {
             return self.refuse(tag, p9::E_BADF, "Twrite of a fid not opened for writing");
         }
+        if f.node == INTERACTION {
+            return self.interaction_write(c, a.fid, a.offset, a.data, tag);
+        }
         if f.node != SINK {
             return self.refuse(tag, E_ACCES, "Twrite to a read-only node");
         }
@@ -554,6 +613,98 @@ impl Server {
         }
         self.sink[a.offset as usize..end as usize].copy_from_slice(a.data);
         Self::built(p9::build_rwrite(&mut self.out, tag, a.data.len() as u32))
+    }
+
+    // A record may arrive in several writes. Its reply waits for the fid's next read.
+    fn interaction_write(
+        &mut self,
+        c: &mut Conn,
+        fid: u32,
+        offset: u64,
+        data: &[u8],
+        tag: u16,
+    ) -> Reply {
+        let (holds_copy, holds_paste) = (c.holds_copy, c.holds_paste);
+        let Some(f) = c.fids.get_mut(&fid) else { return Reply::Fatal };
+        if offset == 0 {
+            f.record.clear();
+        }
+        if offset != f.record.len() as u64 {
+            return self.refuse(tag, p9::E_INVAL, "a HIN1 record written out of order");
+        }
+        f.record.extend_from_slice(data);
+        if f.record.len() >= hin1::HEADER_BYTES {
+            let Ok(h) = Header::decode(&f.record[..hin1::HEADER_BYTES]) else {
+                return self.refuse(tag, p9::E_INVAL, "a malformed HIN1 header");
+            };
+            if f.record.len() == h.length {
+                let Some((reply, held)) = self.interaction(holds_copy, holds_paste, &f.record) else {
+                    return self.refuse(tag, p9::E_INVAL, "a malformed HIN1 record");
+                };
+                f.reply = reply;
+                f.held = held;
+                if held && holds_paste {
+                    return self.stop(c);
+                }
+            }
+        }
+        Self::built(p9::build_rwrite(&mut self.out, tag, data.len() as u32))
+    }
+
+    fn stop(&mut self, c: &mut Conn) -> Reply {
+        self.count[STALLED] += 1;
+        c.stopped = true;
+        say("stopped with a request unanswered");
+        if self.hold_asked {
+            self.hold_asked = false;
+            if unsafe { t_write(NOTIFY, b"h".as_ptr(), 1) } != 1 {
+                say("the probe left before its answer");
+            }
+        }
+        Reply::Held
+    }
+
+    fn interaction(&mut self, holds_copy: bool, holds_paste: bool, record: &[u8]) -> Option<(Vec<u8>, bool)> {
+        const GET: u64 = 1;
+        const COPY: u64 = 2;
+        let (id, request) = Request::decode(record).ok()?;
+        let mut held = false;
+        let response = match request {
+            Request::Hello => Response::Hello { session: 1 },
+            Request::Bind { .. } => Response::Bound { controller: 1 },
+            Request::Mode { .. } => Response::Mode,
+            Request::Get { .. } => {
+                held = holds_paste;
+                Response::Clipboard {
+                    transfer: GET,
+                    generation: self.generation,
+                    length: self.clipboard.len() as u32,
+                }
+            }
+            Request::Read { offset, count, .. } => {
+                let from = (offset as usize).min(self.clipboard.len());
+                let to = from.saturating_add(count as usize).min(self.clipboard.len());
+                Response::Read { offset, data: &self.clipboard[from..to] }
+            }
+            Request::Begin { length, .. } => {
+                self.copying = alloc::vec![0; length as usize];
+                Response::Begun { transfer: COPY }
+            }
+            Request::Write { offset, data, .. } => {
+                held = holds_copy;
+                let at = offset as usize;
+                self.copying.get_mut(at..at + data.len())?.copy_from_slice(data);
+                Response::Written { count: data.len() as u32 }
+            }
+            Request::Commit { .. } => {
+                self.clipboard = core::mem::take(&mut self.copying);
+                self.generation += 1;
+                Response::Committed { generation: self.generation }
+            }
+            Request::Cancel { .. } => Response::Cancelled,
+            Request::Unbind { .. } => Response::Unbound,
+        };
+        Some((response.encode(id).ok()?, held))
     }
 
     fn clunk(&mut self, c: &mut Conn, frame: &[u8], tag: u16) -> Reply {
@@ -625,42 +776,74 @@ impl Server {
     }
 }
 
-fn post(name: &[u8]) -> Option<i64> {
-    let fd = unsafe { t_walk_create(REGISTRY, name.as_ptr(), name.len(), T_OREAD, 0) };
+fn post(registry: i64, name: &[u8]) -> Option<i64> {
+    let fd = unsafe { t_walk_create(registry, name.as_ptr(), name.len(), T_OREAD, 0) };
     if fd < 0 {
-        say(&format!("FAIL: post a service ({})", fd));
+        let shown = core::str::from_utf8(name).unwrap_or("a service");
+        say(&format!("FAIL: post {} ({})", shown, fd));
         return None;
     }
     Some(fd)
 }
 
 fn run() -> i64 {
-    // Index 0 serves the correct protocol; each later one its HOSTILE row.
-    let mut listeners: Vec<i64> = Vec::with_capacity(1 + HOSTILE.len());
-    let Some(fd) = post(NAME) else { return 1 };
-    listeners.push(fd);
-    for (name, _, _) in HOSTILE.iter() {
-        let Some(fd) = post(name) else { return 1 };
-        listeners.push(fd);
-    }
+    let in_session = env::args().nth(1) == Some(b"--srv".as_slice());
+    let registry = if in_session {
+        let path = b"/srv";
+        let fd = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, path.as_ptr(), path.len(), T_OPATH) };
+        if fd < 0 {
+            say(&format!("FAIL: open the registry ({})", fd));
+            return 1;
+        }
+        fd
+    } else {
+        INHERITED_REGISTRY
+    };
+    let mut listeners: Vec<Listener> = Vec::with_capacity(1 + HOSTILE.len());
+    let Some(fd) = post(registry, NAME) else { return 1 };
+    listeners.push(Listener { fd, fault: None, holds_copy: false, holds_paste: false });
     // Held open and never polled for accept, so a CONNECT waits in the backlog.
-    let mut unaccepted = [0i64; UNACCEPTED.len()];
-    for (fd, name) in unaccepted.iter_mut().zip(UNACCEPTED.iter()) {
-        let Some(l) = post(name) else { return 1 };
-        *fd = l;
+    let mut unaccepted = Vec::new();
+    if in_session {
+        let hold = env::args().nth(2).unwrap_or_default();
+        let (holds_copy, holds_paste) = (hold == HOLD_COPY, hold == HOLD_PASTE);
+        if !holds_copy && !holds_paste {
+            say("FAIL: --srv takes hold-copy or hold-paste");
+            return 1;
+        }
+        let Some(fd) = post(registry, hold) else { return 1 };
+        listeners.push(Listener { fd, fault: None, holds_copy, holds_paste });
+    } else {
+        for (name, mtype, fault) in HOSTILE.iter() {
+            let Some(fd) = post(registry, name) else { return 1 };
+            listeners.push(Listener { fd, fault: Some((*mtype, *fault)), holds_copy: false, holds_paste: false });
+        }
+        for name in UNACCEPTED.iter() {
+            let Some(fd) = post(registry, name) else { return 1 };
+            unaccepted.push(fd);
+        }
     }
     if unsafe { t_write(NOTIFY, b"R".as_ptr(), 1) } != 1 {
         say("FAIL: notify the probe");
         return 1;
     }
-    let mut s = Server { count: [0; STAT_COUNT], sink: Vec::new(), out: Vec::new(), unaccepted };
+    let mut s = Server {
+        count: [0; STAT_COUNT],
+        sink: Vec::new(),
+        out: Vec::new(),
+        unaccepted,
+        clipboard: Vec::new(),
+        copying: Vec::new(),
+        generation: 0,
+        hold_asked: false,
+    };
     let mut conns: Vec<Conn> = Vec::new();
     let mut settle: Option<u64> = None;
-    let (mut asked, mut answered) = (false, false);
+    let mut asked = false;
     let mut end_at: Option<u32> = None;
     loop {
-        if asked && !answered && conns.is_empty() {
-            answered = true;
+        if asked && conns.is_empty() {
+            asked = false;
             // A probe that stopped waiting has exited and closed the pipe's
             // read end (the runtime masks the pipe note): it failed already.
             let rc = unsafe { t_write(NOTIFY, b"Z".as_ptr(), 1) };
@@ -679,7 +862,7 @@ fn run() -> i64 {
         }
         let mut fds = Vec::with_capacity(conns.len() + listeners.len() + 1);
         for l in &listeners {
-            fds.push(TPollFd { fd: *l as i32, events: T_POLLIN, revents: 0 });
+            fds.push(TPollFd { fd: l.fd as i32, events: T_POLLIN, revents: 0 });
         }
         let base = fds.len();
         for c in &conns {
@@ -708,6 +891,7 @@ fn run() -> i64 {
                 settle = Some(now() + SETTLE_NS);
             }
             asked |= b[..n as usize].contains(&b'Q');
+            s.hold_asked |= b[..n as usize].contains(&b'H');
             if b[..n as usize].contains(&b'E') {
                 end_at = Some(s.count[ENDED] + 1);
             }
@@ -737,7 +921,7 @@ fn run() -> i64 {
         }
         for (i, l) in listeners.iter().enumerate() {
             if fds[i].revents & T_POLLIN != 0 {
-                let fd = unsafe { t_srv_accept(*l) };
+                let fd = unsafe { t_srv_accept(l.fd) };
                 if fd < 0 {
                     say(&format!("FAIL: accept ({})", fd));
                     return 1;
@@ -750,7 +934,10 @@ fn run() -> i64 {
                     msize: MSIZE,
                     fids: BTreeMap::new(),
                     stalled: Vec::new(),
-                    fault: if i == 0 { None } else { Some((HOSTILE[i - 1].1, HOSTILE[i - 1].2)) },
+                    fault: l.fault,
+                    holds_copy: l.holds_copy,
+                    holds_paste: l.holds_paste,
+                    stopped: false,
                 });
             } else if fds[i].revents != 0 {
                 say(&format!("FAIL: a listener polled {:#x}", fds[i].revents));
@@ -759,7 +946,7 @@ fn run() -> i64 {
         }
     }
     for l in &listeners {
-        unsafe { t_close(*l) };
+        unsafe { t_close(l.fd) };
     }
     for l in &s.unaccepted {
         unsafe { t_close(*l) };

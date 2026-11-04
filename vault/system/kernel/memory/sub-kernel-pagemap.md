@@ -201,6 +201,12 @@ code slot, once filled, holds its page until the region is destroyed --
 which is what lets `SYS_ICACHE_SYNC` read a slot and use its page after
 dropping `v->lock`.
 
+`node_sponsor` (MM-1, 2026-11-03) names who pays for a map's nodes when it is not whoever
+faulted them. `burrow_create_file` sets it to the system cache, so a shared image's nodes
+are not charged to its first faulter and cannot keep that account alive after a logout:
+[[sub-kernel-accounts]]. Everything else leaves it NULL. The clone's pool is always the
+caller's, and a file map is never cloned.
+
 ## Data structures
 
 `struct pagemap` is 32 bytes on AArch64 and embedded in `struct Burrow` as

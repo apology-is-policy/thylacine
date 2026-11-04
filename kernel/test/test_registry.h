@@ -408,6 +408,7 @@ void test_demand_page_no_vma(void);
 void test_demand_page_permission_denied(void);
 void test_demand_page_lifecycle_round_trip(void);
 void test_demand_page_file_smoke(void);
+void test_demand_page_file_nodes_are_the_system_caches(void);
 void test_demand_page_file_pagein_not_note_interruptible(void);
 void test_demand_page_file_pages_charge_the_holder(void);
 void test_demand_page_idle_image_reclaimed_under_pressure(void);
@@ -613,6 +614,20 @@ void test_mm0_today_alias_charges_each_mapping(void);
 void test_mm0_today_partial_map_retains_the_whole(void);
 void test_mm0_today_orphan_pin_charges_no_proc(void);
 void test_mm0_today_dma_bypasses_the_pool(void);
+void test_account_rounded_block_charges_its_whole_order(void);
+void test_account_orphan_stays_charged_until_its_last_page(void);
+void test_account_refused_allocation_leaves_the_ledger(void);
+void test_account_depth_stops_at_sixteen(void);
+void test_account_incarnation_never_repeats(void);
+void test_account_refund_past_zero_is_counted(void);
+void test_account_fork_keeps_the_account(void);
+void test_account_dma_charges_whole_blocks_outside_the_pool(void);
+void test_account_thread_charges_meta_to_its_payer(void);
+void test_account_ledger_reconciles_with_the_pool(void);
+void test_account_blocks_that_exist_are_the_ledger(void);
+void test_account_wrong_order_release_is_counted(void);
+void test_account_query_reports_bytes_up_the_chain(void);
+void test_account_syscall_refuses_by_name(void);
 void test_vma_range_is_mapped(void);                     // B-1b
 void test_mmap_eager_copy_charge_pairing(void);   // #197
 void test_torpor_wait_rejects_bad_args(void);
@@ -854,6 +869,7 @@ void test_devproc_walk_to_status_file(void);
 void test_devproc_walk_dotdot_to_root(void);
 void test_devproc_read_status_format(void);
 void test_devproc_imperium_read_gated(void);   // IM-2: /proc/<pid>/imperium gate
+void test_devproc_account_read_gated(void);    // MM-1: /proc/<pid>/account gate
 void test_devproc_read_imperium_format(void);  // IM-2: /proc/<pid>/imperium line
 void test_proc_cpu_ns_accounting(void);     // prowl-1: name + run_ns substrate
 void test_sched_prowl_counters(void);       // prowl-3a: per-thread sched counters + per-CPU idle_ns
@@ -1585,6 +1601,7 @@ void test_9p_session_attach_handshake(void);
 void test_9p_session_walk_round_trip(void);
 void test_9p_session_walk_fid_full_no_latch(void);
 void test_9p_session_flush_headroom_grows_table(void);
+void test_9p_session_reserved_tags_cap_the_table(void);
 void test_9p_session_sync_owner_index(void);
 void test_9p_session_clunk_retract_after_peer_fill(void);
 void test_9p_session_flushed_walk_late_reply_binds(void);

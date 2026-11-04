@@ -22,7 +22,7 @@ whoever allocated it has gone. This note says what is true of that today, so the
 memory accounts in `docs/SHARED-MEMORY-ACCOUNTING.md` have a measured starting point
 and every behaviour they change is changed on purpose.
 
-There are no accounts yet. The accounting design is approved and not implemented.
+The accounts now exist and only watch: [[sub-kernel-accounts]]. Everything below is still what decides.
 
 ## Contract
 

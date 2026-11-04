@@ -837,6 +837,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "interaction-native"
+version = "0.1.0"
+dependencies = [
+ "libhalcyon",
+ "loom-client",
+]
+
+[[package]]
 name = "irq-bench"
 version = "0.1.0"
 dependencies = [
@@ -886,11 +894,13 @@ name = "kaua-term-probe"
 version = "0.1.0"
 dependencies = [
  "inlinewire",
+ "interaction-native",
  "kaua-term",
  "libhalcyon",
  "libtapestry",
  "libthyla-rs",
  "ptyhold",
+ "vt",
 ]
 
 [[package]]
@@ -1050,6 +1060,7 @@ dependencies = [
 name = "loom-fixture"
 version = "0.1.0"
 dependencies = [
+ "libhalcyon",
  "libthyla-rs",
 ]
 
@@ -1234,9 +1245,12 @@ dependencies = [
 name = "nora"
 version = "0.1.0"
 dependencies = [
+ "interaction-native",
  "kaua",
+ "libhalcyon",
  "libthyla-rs",
  "parley",
+ "vt",
 ]
 
 [[package]]
@@ -2149,6 +2163,7 @@ checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 name = "utopia-shell"
 version = "0.1.0"
 dependencies = [
+ "interaction-native",
  "libhalcyon",
  "libthyla-rs",
  "libutopia",

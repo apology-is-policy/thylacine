@@ -50,8 +50,10 @@ use nora::editor::{DapRequest, Editor, Mode, Request};
 use nora::theme;
 use nora::view;
 
+mod clip_host;
 mod dap_host;
 mod lsp_host;
+use clip_host::{Clip, TAG_CLIP};
 use dap_host::{Dap, TAG_DAP_ERR, TAG_DAP_IN, TAG_DAP_OUT};
 use lsp_host::{Lsp, TAG_LSP_ERR, TAG_LSP_IN, TAG_LSP_OUT, TAG_NOTES, TAG_STDIN};
 
@@ -167,8 +169,19 @@ pub extern "C" fn rs_main() -> i64 {
     // No debug session until the user runs `:debug` (8e-3e). It spawns Ambush
     // then; a buffer that never debugs pays nothing.
     let mut dap: Option<Dap> = None;
+    // Without a session endpoint or the private ring this is None, and the shared
+    // clipboard keys say so. Local registers are unaffected and no other path is tried.
+    let mut clip = Clip::start();
 
-    let code = run(&mut term, &mut src, &mut ed, &mut lsp, &mut dap, notes.as_ref());
+    let code = run(
+        &mut term,
+        &mut src,
+        &mut ed,
+        &mut lsp,
+        &mut dap,
+        &mut clip,
+        notes.as_ref(),
+    );
     // Neither child may outlive the editor: an orphaned gopls holds the
     // workspace, and an orphaned Ambush holds its debuggee (and the ptrace
     // stop). Compose #68 close-at-exit.
@@ -200,6 +213,7 @@ fn run(
     ed: &mut Editor,
     lsp: &mut Option<Lsp>,
     dap: &mut Option<Dap>,
+    clip: &mut Option<Clip>,
     notes: Option<&libthyla_rs::notes::Notes>,
 ) -> i32 {
     if let Err(e) = redraw(term, ed) {
@@ -231,6 +245,7 @@ fn run(
             t_putstr("nora: EXIT path=quit code=0\n");
             return 0;
         }
+        dirty |= drive_clipboard(clip, false, ed);
         if dirty {
             if let Err(e) = redraw(term, ed) {
                 t_putstr(&format!("nora: EXIT path=redraw-preloop code=1 err={:?}\n", e));
@@ -245,14 +260,22 @@ fn run(
             return 0;
         }
         // ONE poll(2) over fd 0 and any live server pipes -- gopls (8e-2),
-        // Ambush (8e-3e), and the note queue (#55c: tty:winch). A keystroke, a
-        // diagnostic, a debugger stop, and a console resize all wake the loop
-        // identically -- there is no tick, so a message nothing polls for never
-        // repaints.
-        let ready = match poll_all(src.poll_fd(), &mut mux, lsp.as_ref(), dap.as_ref(), notes.map(|n| {
-            use libthyla_rs::poll::AsFd;
-            n.as_raw_fd()
-        })) {
+        // Ambush (8e-3e), the note queue (#55c: tty:winch) and the clipboard's
+        // ring. A keystroke, a diagnostic, a debugger stop, a console resize and a
+        // copy's reply all wake the loop identically -- there is no tick, so a
+        // message nothing polls for never repaints.
+        let polled = poll_all(
+            src.poll_fd(),
+            &mut mux,
+            lsp.as_ref(),
+            dap.as_ref(),
+            clip.as_ref(),
+            notes.map(|n| {
+                use libthyla_rs::poll::AsFd;
+                n.as_raw_fd()
+            }),
+        );
+        let (ready, debug_deadline) = match polled {
             Some(r) => r,
             // fd 0 gone (no console) -> exit cleanly rather than spin.
             None => {
@@ -262,9 +285,10 @@ fn run(
         };
         let mut dirty = false;
         let mut saved = false;
-        // Nothing ready means the poll waited out its timeout, which is only
-        // ever an ending debug session's deadline.
-        let timed_out = ready.is_empty();
+        // Nothing ready means the poll waited out its timeout, and only when that
+        // was the debug session's does it say anything about the debug session.
+        let timed_out = ready.is_empty() && debug_deadline;
+        let mut clip_woke = false;
         for r in ready {
             match r.tag {
                 TAG_STDIN => {
@@ -320,6 +344,7 @@ fn run(
                         dirty |= d.on_ready(&r, ed);
                     }
                 }
+                TAG_CLIP => clip_woke = true,
                 // Unknown tag: the fd set is ours, so this cannot happen --
                 // ignore rather than assume.
                 _ => {}
@@ -387,6 +412,7 @@ fn run(
                 }
             }
         }
+        dirty |= drive_clipboard(clip, clip_woke, ed);
         if dirty {
             if let Err(e) = redraw(term, ed) {
                 t_putstr(&format!("nora: EXIT path=redraw2 code=1 err={:?}\n", e));
@@ -444,8 +470,9 @@ fn poll_all(
     mux: &mut Mux,
     lsp: Option<&Lsp>,
     dap: Option<&Dap>,
+    clip: Option<&Clip>,
     notes_fd: Option<i32>,
-) -> Option<Vec<Ready>> {
+) -> Option<(Vec<Ready>, bool)> {
     // stdin_fd = src.poll_fd(): the pts `/dev/pts/<n>ready` sibling on a hosted
     // tile, or fd 0 on the console (F2 -- the pts data fd is POLLIN-always, so
     // fd 0 is unpollable; the ready sibling gives accurate wakes so notes/LSP/DAP
@@ -463,13 +490,39 @@ fn poll_all(
         fds.extend(d.poll_fds());
         writes.extend(d.write_fds());
     }
+    if let Some(c) = clip {
+        fds.extend(c.poll_fd());
+    }
     // An ending debug session must wake the loop at its deadline even if
-    // nothing arrives.
-    let timeout = match dap.and_then(|d| d.deadline_ms()) {
+    // nothing arrives, and so must what the clipboard client owes.
+    let debug = dap.and_then(|d| d.deadline_ms());
+    let owed = clip.and_then(|c| c.deadline_ms());
+    let timeout = match debug.into_iter().chain(owed).min() {
         Some(ms) => PollTimeout::Millis(ms),
         None => PollTimeout::Block,
     };
-    mux.poll_rw(&fds, &writes, timeout).ok()
+    let debug_deadline = debug.is_some_and(|ms| owed.is_none_or(|o| ms <= o));
+    let ready = mux.poll_rw(&fds, &writes, timeout).ok()?;
+    Some((ready, debug_deadline))
+}
+
+/// What keys asked of the clipboard, then whatever its ring has ready. Returns true
+/// when the editor should repaint.
+fn drive_clipboard(clip: &mut Option<Clip>, woke: bool, ed: &mut Editor) -> bool {
+    let request = ed.take_clipboard_request();
+    let Some(c) = clip.as_mut() else {
+        if request.is_none() {
+            return false;
+        }
+        ed.set_status(String::from("no session clipboard here"));
+        return true;
+    };
+    c.report_mode(ed);
+    let asked = request.is_some();
+    if let Some(request) = request {
+        c.request(request, ed);
+    }
+    c.service(woke, ed) || asked
 }
 
 /// Act on a debugger command. `:debug` (re)starts a session; the rest need a

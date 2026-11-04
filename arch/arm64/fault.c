@@ -20,6 +20,7 @@
 #include <thylacine/dev.h>           // REVENANT R-2: struct Dev (spoor->dev->read) for the FILE fault arm
 #include <thylacine/dma_handle.h>    // WEAVE-SKEIN: kobj_dma_pa_at for the DMA fault arm
 #include <thylacine/extinction.h>
+#include <thylacine/memaccount.h>
 #include <thylacine/page.h>
 #include <thylacine/proc.h>
 #include <thylacine/notes.h>      // thread_die_pending: a page-in failed by a death
@@ -970,7 +971,8 @@ static enum fault_result file_demand_page_single(struct Proc *p,
                                                struct file_fault_req *freq) {
     enum fault_result r;
 
-    struct page *newpg = alloc_user_pages(0, KP_ZERO, proc_resource_exempt(p));
+    struct page *newpg = alloc_user_pages_for(account_system_cache(), 0, KP_ZERO,
+                                              proc_resource_exempt(p));
     if (!newpg) {
         r = FAULT_UNHANDLED_USER;        // OOM / pool refusal -> graceful per-Proc terminate
         goto out;
@@ -1210,7 +1212,8 @@ static enum fault_result file_demand_page_cluster(struct Proc *p,
     for (size_t i = 0; i < ncluster; i++) clpages[i] = NULL;
     bool alloc_ok = true;
     for (size_t i = 0; i < ncluster; i++) {
-        struct page *pg = alloc_user_pages(0, 0, proc_resource_exempt(p));  // fully memcpy'd below; no KP_ZERO
+        struct page *pg = alloc_user_pages_for(account_system_cache(), 0, 0,
+                                               proc_resource_exempt(p));  // fully memcpy'd below; no KP_ZERO
         if (!pg) { alloc_ok = false; break; }
         void *pkva = pa_to_kva(page_to_pa(pg));
         copy_page_words(pkva, sbuf + i * PAGE_SIZE);

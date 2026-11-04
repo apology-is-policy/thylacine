@@ -954,6 +954,7 @@ The `RFNOTEG` rfork bit (already reserved in `proc.h`) selects share-vs-copy of 
 | 47 | `SYS_POSTNOTE` | `pid`, `name_va`, `name_len` | 0 / -EINVAL / -EFAULT / -EACCES / -ESRCH / -EAGAIN; a self-post of a fault snare does not return |
 | 48 | `SYS_NOTE_MASK` | `new_mask`, `old_mask_out_va` | 0 / -EINVAL |
 | 138 | `SYS_POSTNOTE_TID` | `tid`, `name_va`, `name_len` | 0 / -EINVAL / -EFAULT / -ESRCH / -EAGAIN; a fault snare does not return |
+| 140 | `SYS_ACCOUNT` | `handle`, `op`, `rec_va`, `rec_size` | 0 / -EINVAL / -EOPNOTSUPP / -EBADF / -EFAULT; the contract is SHARED-MEMORY-ACCOUNTING 13, and only the query on the caller's own account is built |
 
 **`SYS_POSTNOTE` permission gate at v1.0**: caller must be the target's parent OR `pid == self_pid`. **A-4b (IDENTITY-DESIGN §9.8) generalizes cross-process kill** via `write "kill"`/`"killgrp"` to `/proc/<pid>/ctl`, two-axis-authorized (owner-rwx on the ctl file OR `CAP_HOSTOWNER` OR the new elevation-only `CAP_KILL`); `SYS_POSTNOTE` stays the parent/self fast path. The general `/proc/<pid>/note`-file form (posting *arbitrary* notes by namespace write-rights on the Spoor) remains the later composition (§7.6.8 [OPEN Q 7.6.A]).
 

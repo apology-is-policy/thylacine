@@ -31,8 +31,8 @@
 /// renderer (the Aurora fbcon) drew the ls staircase. The editor's own output
 /// is ONLCR-proof either way: its explicit `\r`+CSI redraws pass through
 /// untouched, and its deliberate `\n`s WANT the implied carriage return.
-/// This is BOTH the mode `Repl::console_apply_default` establishes at startup
-/// AND the mode ut restores after a raw child -- one vocabulary, no drift.
+/// This is the mode `Repl::console_apply_default` establishes at startup, the mode
+/// each prompt is drawn under, and what a console session's raw child is followed by.
 pub(crate) const PROMPT_MODE: &[u8] = b"-icanon -echo +isig -icrnl +onlcr";
 
 /// Full-raw line discipline for a TUI child: like `PROMPT_MODE` but ISIG is
@@ -49,8 +49,9 @@ pub(crate) const RAW_MODE: &[u8] = b"-icanon -echo -isig -icrnl -onlcr";
 /// or line-oriented child expects (canonical line assembly, kernel echo,
 /// ISIG signal cooking, CR/NL translation both ways; byte-identical to the
 /// ptyfs cooked default, PTY-2b). The real-shell discipline: raw is the LINE
-/// EDITOR's mode, cooked is the CHILD's -- bash/readline restore the tty to
-/// cooked around every foreground job and re-raw it at the next prompt. Only
+/// EDITOR's mode, cooked is the CHILD's -- readline gives the tty back when a
+/// line is accepted, before anything is parsed or spawned, and takes it again at
+/// the next prompt. Only
 /// the jc path uses this (the console session never hands children the
 /// console input, so its children see no discipline at all).
 pub(crate) const CHILD_MODE: &[u8] = b"+icanon +echo +isig +icrnl +onlcr";

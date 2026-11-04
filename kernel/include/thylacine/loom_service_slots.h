@@ -8,13 +8,18 @@ struct loom_service_slot {
     u64 incarnation;
     u32 kind, phase, pins;
 };
+struct loom_service_operation;
 struct loom_slot_table {
     u64 next_incarnation;
     struct loom_service_slot slots[LOOM_SERVICE_SLOT_COUNT];
     bool closing;
+    // A FID slot's zeroed, charged page for its CLUNK, from RESERVE until the CLUNK
+    // takes it or the slot goes, so memory never refuses that CLUNK (ASYNC-SERVICE-
+    // LIFECYCLE, vote 51). Ll guards it; this ledger never reads or frees it.
+    struct loom_service_operation *clunk_storage[LOOM_SERVICE_SLOT_COUNT];
 };
 _Static_assert(sizeof(struct loom_service_slot) == 24, "service slot identity ledger");
-_Static_assert(sizeof(struct loom_slot_table) == 1552, "shared slot table ledger");
+_Static_assert(sizeof(struct loom_slot_table) == 2064, "shared slot table ledger");
 // Zero once with its owning ring. Every call holds that ring's lock; usercopy
 // may run unlocked between reserve and publish/rollback calls, while
 // PROVISIONAL consumes the slot. No allocation/callbacks. These phases are

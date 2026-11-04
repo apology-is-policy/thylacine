@@ -122,7 +122,7 @@ composes its owner-or-hostowner gate with the seal in `devproc_extract_authorize
 mem and regs walks refuse reads (writes are control, NOTRACE's); `kstack` and `wait` ask
 too and sit outside the set. `name`, the exe's basename, is ledger (`status`, `sched`,
 `/ctl/procs`), as Linux keeps a non-dumpable process's comm public. `devproc_owner_or_hostowner`
-keeps its old meaning with NO seal and gates `sched`, `imperium` and, since
+keeps its old meaning with NO seal and gates `sched`, `imperium`, `account` and, since
 2026-10-06, the `cpu_ns` line of `status`; the rest of `status` is ungated. `cmdline` renders no argv yet, and its place in the set seals argv only if
 argv comes from a per-Proc kernel copy, as `environ` does: argv read off the stack would
 read through a vfork child sharing that stack under its own, unsealed Proc, unless
@@ -742,6 +742,16 @@ Read under `g_proc_table_lock`, as `exit:` is; `term_sig` is written before
 the ZOMBIE transition under the same lock ([[sub-kernel-death]]). Witness:
 `devproc.zombie_status_signal` (a `snare:abort` zombie shows `signal:  6`; an
 `exit(1)` zombie, one variable away, shows none).
+
+## `account` (2026-11-03; MM-1b)
+
+`/proc/<pid>/account` is the text view of SYS_ACCOUNT's query, for the shell and
+diagnostics, rendered from the same fill ([[sub-kernel-accounts]]). It takes `sched`'s
+posture: 0400, owner or `CAP_HOSTOWNER` at the read site, and it reads through a dump seal
+because it is telemetry and not the image. `format_account` runs under
+`g_proc_table_lock`, which keeps the Proc and so its account reference alive, and the fill
+takes no lock. `PQS_ACCOUNT` takes the file's place in all four of the registries a
+readable file needs. Nothing may parse the text to decide policy.
 
 ## Data structures
 

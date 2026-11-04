@@ -21,3 +21,5 @@ libutopia   = { path = "../libutopia" }
 # writer (`libhalcyon::theme::prompt_roles`), so the two cannot drift; the
 # binary reads /env and hands libutopia the resolved inks (the layering).
 libhalcyon  = { path = "../../lib/libhalcyon" }
+# The paste key's fetch: the client Nora uses, over a private ring.
+interaction-native = { path = "../../lib/interaction-native" }

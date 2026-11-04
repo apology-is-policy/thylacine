@@ -56,19 +56,16 @@ void test_syscall_dispatch_unknown(void) {
         "SYS_GETPID with bit 32 set is an unknown number");
 }
 
-// 129..133 and 135..137 hold no native syscall on this tree: they belong to
-// numbers main assigned first, with SYS_SRV_REGISTRY_NEW at 134 (vote 13) and
-// SYS_POSTNOTE_TID at 138 above them (127 and 128 are JIT_CREATE_SEALED and
-// ICACHE_SYNC_SPACE). vivarium.c's collision argument for the Linux signal rows
-// there rests on those gaps being EMPTY, so they are pinned here -- by the
-// unknown arm's own counter, not by the -1 it answers: many native handlers
-// refuse zeroed arguments with that same -1, so a handler landing in the gap
-// could pass a value check. A native number assigned in it fails this test;
-// the fix is a per-number collision assert for each vivarium row at that
-// number, and then this pin moves. The suite runs before init, so the only
-// unknown calls in flight are the ones tests make.
+// 26, 30, 43 and 139 hold no native syscall on this tree, with SYS_ACCOUNT at 140
+// above the last. vivarium.c's collision argument for the Linux row at 139 rests on
+// that one being EMPTY, so the holes are pinned here -- by the unknown arm's own
+// counter, not by the answer: a handler landing in one could refuse zeroed arguments
+// the same way. A native number assigned in one fails this test; the fix is a
+// per-number collision assert for each vivarium row at that number, and then this pin
+// moves. The suite runs before init, so the only unknown calls in flight are the ones
+// tests make.
 void test_syscall_native_holes_unassigned(void) {
-    static const u64 holes[] = { 26, 30, 43 };
+    static const u64 holes[] = { 26, 30, 43, 139 };
     for (u64 k = 0; k < sizeof(holes) / sizeof(holes[0]); k++) {
         struct exception_context hc;
         for (int i = 0; i < 31; i++) hc.regs[i] = 0;
@@ -103,6 +100,15 @@ void test_syscall_native_holes_unassigned(void) {
         "138 is SYS_POSTNOTE_TID: it never reaches the unknown arm");
     TEST_EXPECT_EQ((s64)ctx.regs[0], (s64)-T_E_INVAL,
         "138 is SYS_POSTNOTE_TID: an empty name is its own refusal");
+
+    for (int i = 0; i < 31; i++) ctx.regs[i] = 0;
+    ctx.regs[8] = SYS_ACCOUNT;
+    before = syscall_unknown_count();
+    TEST_SYSCALL_DISPATCH(&ctx);
+    TEST_EXPECT_EQ(syscall_unknown_count() - before, 0ull,
+        "140 is SYS_ACCOUNT: it never reaches the unknown arm");
+    TEST_EXPECT_EQ((s64)ctx.regs[0], (s64)-T_E_INVAL,
+        "140 is SYS_ACCOUNT: operation 0 is its own refusal");
 }
 
 void test_syscall_dispatch_puts_smoke(void) {

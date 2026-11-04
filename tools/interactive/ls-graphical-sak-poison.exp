@@ -1,0 +1,134 @@
+#!/usr/bin/expect -f
+# ls-graphical-sak-poison -- a client's poisoned fence must not deny the
+# graphical SAK (OPEN-BUGS 2026-11-03T13:28Z, I-27).
+#
+# Lictor's takeover waits in phase 1 for every chain to retire before it shows
+# anything. warp-prove poison-hold keeps one fenced slot poisoned, as a client
+# whose chain outlived the abandonment bound does. The chord must still bring up
+# the trusted screen. A kernel that fails the episode at its quiesce deadline
+# with the scanout still normal has changed nothing on the glass, so a fake
+# prompt under the user's hands would stay there. Control: the same chord and
+# the same empty episode with no poison, one variable away.
+#
+# Needs a ctx, so a virgl device, and the session compositor. From the remote
+# repo: THYLACINE_GPU_DEV=virtio-gpu-gl-pci THYLACINE_DISPLAY=egl-headless
+# THYLACINE_EGL_VNC_SOCKET=/tmp/sak-vnc.sock LS_CI_JOBS=1
+# tools/test-interactive.sh ls-graphical-sak-poison
+set ::env(THYLACINE_ACCEL) [expr {[info exists ::env(LS_CI_GFX_ACCEL)] ? $::env(LS_CI_GFX_ACCEL) : "hvf"}]
+set ::env(THYLACINE_SERIAL_SAK) 0
+source [file join [file dirname [info script]] lib.exp]
+if {![info exists ::env(THYLACINE_GPU_DEV)] || ![string match virtio-gpu-gl* $::env(THYLACINE_GPU_DEV)]} {
+    puts "\nLS-CI SKIP: this scenario needs a warp ctx, so a virgl device (THYLACINE_GPU_DEV=virtio-gpu-gl-pci)"
+    exit 77
+}
+set repo $lc_repo
+set qmp [lc_qmp_sock]
+
+proc key {chord} {
+    global repo qmp
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -k $chord} e]} { lc_fail $e }
+    after 700
+}
+proc type {text} {
+    global repo qmp
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp $text} e]} { lc_fail $e }
+}
+proc witness {stage} {
+    type "caps-probe --seat-$stage\n"
+    global timeout
+    set timeout 30
+    expect {
+        -ex "seat-probe: PASS $stage (endpoint denied; GPU denied; DAC verified)" { lc_pass "seat $stage authority" }
+        -ex "seat-probe: FAIL" { lc_fail "guest authority witness failed ($stage)" }
+        -re {EXTINCTION:} { lc_extinction_fail "seat $stage" }
+        timeout { lc_fail "no authority witness ($stage)" }
+        eof { lc_fail "EOF ($stage)" }
+    }
+}
+# One chord and one Return, as an empty episode; the takeover must show first.
+proc episode {leg} {
+    global timeout
+    set t0 [clock milliseconds]
+    key "ctrl+alt+f10"
+    set timeout 20
+    expect {
+        -ex "lictor: trusted scanout active" {
+            lc_step "SAK-POISON $leg takeover-ms=[expr {[clock milliseconds] - $t0}]"
+        }
+        -ex "lictor: kernel closed trusted seat (scanout normal)" {
+            lc_fail "SAK-POISON RED ($leg): the episode failed at its deadline with nothing on the glass"
+        }
+        -re {EXTINCTION:} { lc_extinction_fail "takeover ($leg)" }
+        timeout { lc_fail "$leg: no takeover and no failure within 20 s of the chord" }
+        eof { lc_fail "EOF at the takeover ($leg)" }
+    }
+    after 1000
+    key "ret"
+    set timeout 30
+    expect {
+        -ex "corvus: imperium: SAK with nothing pending" { lc_step "$leg: the empty episode ended" }
+        -ex "lictor: kernel closed trusted seat (scanout private)" {
+            lc_fail "$leg: the episode failed instead of ending"
+        }
+        -re {EXTINCTION:} { lc_extinction_fail "the end of the episode ($leg)" }
+        timeout { lc_fail "$leg: the episode did not end within 30 s" }
+    }
+    after 1500
+}
+lc_boot
+set timeout $lc_boot_timeout
+expect {
+    -ex "Thylacine login: " {}
+    -re {EXTINCTION:} { lc_extinction_fail "boot" }
+    timeout { lc_fail "no login" }
+    eof { lc_fail "EOF before login" }
+}
+lc_raw_send "michael\r" "login user"
+expect {
+    -ex "password: " {}
+    timeout { lc_fail "no password prompt" }
+    eof { lc_fail "EOF before password" }
+}
+lc_raw_send "correct-horse-battery-staple-v1\r" "login password"
+expect {
+    -ex "login: session compositor (halcyond) spawned" {}
+    -ex "Thylacine textual shell" {
+        puts "\nLS-CI SKIP: default (ut) image -- this scenario drives the session\
+ compositor. Bake with: THYLACINE_HALCYON_SESSION=1 THYLACINE_HALCYON_PROFILE=instrument tools/build.sh kernel --config ci"
+        lc_quit
+        exit 77
+    }
+    timeout { lc_fail "no graphical session" }
+    eof { lc_fail "EOF at session start" }
+}
+set timeout 60
+expect {
+    -re {halcyond: status bar [^\r\n]*running false panes 2} {}
+    -re {EXTINCTION:} { lc_extinction_fail "session" }
+    timeout { lc_fail "welcome and shell did not become ready" }
+}
+after 1500
+key "meta_l+f"
+witness baseline
+
+episode control
+witness control
+
+# The READY line goes to the pane, so the serial witness is the broker's own.
+type "warp-prove poison-hold 240 &\n"
+set timeout 60
+expect {
+    -re {gpu fence [0-9]+ released \(test-mode abandon\) -- slot [0-9]+ retired, ctx [0-9]+ poisoned} {
+        lc_step "a client holds one poisoned fenced slot"
+    }
+    -re {EXTINCTION:} { lc_extinction_fail "arming the poison" }
+    timeout { lc_fail "no slot was poisoned within 60 s of poison-hold" }
+    eof { lc_fail "EOF arming the poison" }
+}
+after 1000
+
+episode poisoned
+witness poisoned
+lc_pass "graphical SAK: the trusted screen came up beside another client's poisoned slot"
+lc_quit
+exit 0

@@ -55,7 +55,8 @@
 //   - Tab completion via pluggable CompletionSource -> U-4d
 //   - vi mode -> v1.x (UTOPIA-SHELL-DESIGN section 11.2)
 //   - Modifier-key recognition (Ctrl-arrow, Alt-x) -> v1.x
-//   - Bracketed-paste mode -> v1.x
+//   - Bracketed-paste mode -> v1.x (the paste key fetches instead: a pts carries
+//     no clipboard byte)
 //   - Grapheme-cluster cursor + display width -> v1.x
 //     (v1.0 treats one char as one column; emoji + combining marks
 //     render visually inconsistent but the buffer stays valid UTF-8)
@@ -120,6 +121,21 @@ pub enum EditorAction {
         selected: usize,
         unlisted: usize,
     },
+    /// The paste key. Nothing here holds the clipboard: the main loop fetches it
+    /// and hands the text to `paste_text`, whenever it arrives.
+    PasteWanted,
+}
+
+/// Why fetched text did not land. A paste lands whole or not at all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PasteRefused {
+    /// The line would pass its length limit.
+    TooLong,
+    /// A control character other than a line feed, or a tab: `render` counts one
+    /// column per character, and a typed Tab never reaches the buffer either.
+    Unprintable,
+    /// The allocator would not give the line room for it.
+    NoMemory,
 }
 
 // =============================================================================
@@ -548,6 +564,8 @@ enum Action {
     KillPrevWord,
     /// Yank -- insert kill_buffer at cursor.
     Yank,
+    /// Alt-P: ask for the session clipboard. Yank stays local.
+    PasteClipboard,
     /// History navigation -- recognized at U-4a, no-op until U-4c lands.
     HistoryPrev,
     HistoryNext,
@@ -891,6 +909,29 @@ impl LineEditor {
             LineEditorMode::Search { match_index, .. } => *match_index,
             _ => None,
         }
+    }
+
+    /// Fetched clipboard text, into the edit in progress at the cursor. It is not
+    /// typing: nothing here submits, and a line feed stays in the buffer. `render`
+    /// echoes the buffer as it is, so a control character would reach the terminal.
+    pub fn paste_text(&mut self, text: &str) -> Result<(), PasteRefused> {
+        if text.chars().any(|c| c != '\n' && c.is_control()) {
+            return Err(PasteRefused::Unprintable);
+        }
+        if self.is_searching() {
+            self.do_search_cancel();
+        }
+        self.mode = LineEditorMode::Normal;
+        if self.buffer.len() + text.len() > MAX_BUFFER_LEN {
+            return Err(PasteRefused::TooLong);
+        }
+        if self.buffer.try_reserve(text.len()).is_err() {
+            return Err(PasteRefused::NoMemory);
+        }
+        self.buffer.insert_str(self.cursor, text);
+        self.cursor += text.len();
+        self.desired_col = None;
+        Ok(())
     }
 
     /// Process one byte of input. Returns the EditorAction the main
@@ -1349,6 +1390,10 @@ impl LineEditor {
                 // abandoned; the second begins a fresh sequence).
                 Action::Ignore
             }
+            b'p' => {
+                self.parser = ParserState::Ground;
+                Action::PasteClipboard
+            }
             _ => {
                 // Unknown ESC <byte> -- abort the sequence. v1.x can
                 // add Alt-key bindings (ESC <letter>) here.
@@ -1538,6 +1583,7 @@ impl LineEditor {
             Action::KillToStart => self.do_kill_to_start(),
             Action::KillPrevWord => self.do_kill_prev_word(),
             Action::Yank => self.do_yank(),
+            Action::PasteClipboard => EditorAction::PasteWanted,
             Action::HistoryPrev => self.do_history_prev(),
             Action::HistoryNext => self.do_history_next(),
             Action::Accept => self.do_accept(),
@@ -2393,6 +2439,98 @@ mod tests {
         // CSI 4 ~ = End
         le.feed_bytes(b"\x1b[4~");
         assert_eq!(le.cursor(), 3);
+    }
+
+    #[test]
+    fn the_paste_key_asks_and_changes_nothing() {
+        let mut le = LineEditor::new();
+        feed(&mut le, b"ab");
+        assert_eq!(feed(&mut le, b"\x1bp").last(), Some(&EditorAction::PasteWanted));
+        assert_eq!((le.buffer(), le.cursor()), ("ab", 2));
+        assert_eq!(le.feed_byte(b'c'), EditorAction::Redraw, "the parser came back to ground");
+        assert_eq!(le.buffer(), "abc");
+    }
+    #[test]
+    fn only_alt_p_asks_and_ctrl_y_stays_local() {
+        let mut le = LineEditor::new();
+        for key in [&b"\x1bq"[..], b"\x1bP", b"p", b"\x19"] {
+            assert!(!feed(&mut le, key).contains(&EditorAction::PasteWanted), "{key:?}");
+        }
+    }
+    #[test]
+    fn pasted_text_lands_at_the_cursor_and_moves_it() {
+        let mut le = LineEditor::new();
+        feed(&mut le, b"ad\x02");
+        assert_eq!(le.cursor(), 1);
+        le.paste_text("b\u{e9}c").unwrap();
+        assert_eq!((le.buffer(), le.cursor()), ("ab\u{e9}cd", 5));
+    }
+    #[test]
+    fn a_pasted_line_feed_stays_in_the_buffer_and_nothing_submits() {
+        let mut le = LineEditor::new();
+        le.paste_text("echo one\necho two\n").unwrap();
+        assert_eq!(le.buffer(), "echo one\necho two\n");
+        assert_eq!(le.history().len(), 0);
+        assert!(matches!(le.feed_byte(b'\r'), EditorAction::Accept(_)), "Enter still submits it");
+    }
+    #[test]
+    fn a_paste_fits_to_the_last_byte_and_one_more_refuses_whole() {
+        let mut le = LineEditor::new();
+        feed(&mut le, b"ab");
+        let fits = "x".repeat(MAX_BUFFER_LEN - 2);
+        assert_eq!(le.paste_text(&alloc::format!("{fits}y")), Err(PasteRefused::TooLong));
+        assert_eq!((le.buffer(), le.cursor()), ("ab", 2), "refused whole");
+        le.paste_text(&fits).unwrap();
+        assert_eq!(le.buffer().len(), MAX_BUFFER_LEN);
+    }
+    #[test]
+    fn a_control_character_refuses_the_whole_paste() {
+        for bad in ["a\x1b[2Jb", "a\rb", "a\tb", "a\x7fb", "a\u{9b}2Jb", "a\0b"] {
+            let mut le = LineEditor::new();
+            feed(&mut le, b"keep");
+            assert_eq!(le.paste_text(bad), Err(PasteRefused::Unprintable), "{bad:?}");
+            assert_eq!((le.buffer(), le.cursor()), ("keep", 4), "{bad:?}");
+        }
+    }
+    #[test]
+    fn a_paste_ends_a_search_and_lands_in_the_edit_it_left() {
+        let mut le = LineEditor::new();
+        le.push_history("old line".into());
+        feed(&mut le, b"mine\x12ol");
+        assert!(le.is_searching());
+        le.paste_text("!").unwrap();
+        assert!(!le.is_searching());
+        assert_eq!(le.buffer(), "mine!");
+    }
+    #[test]
+    fn a_paste_leaves_a_menu_with_its_selection_kept() {
+        let mut le = LineEditor::new();
+        le.mode = LineEditorMode::Menu {
+            candidates: alloc::vec!["alpha".into(), "beta".into()],
+            selected: 0,
+            anchor: 0,
+            unlisted: 0,
+        };
+        le.buffer.push_str("alpha");
+        le.cursor = 5;
+        le.paste_text(" x").unwrap();
+        assert!(matches!(le.mode, LineEditorMode::Normal));
+        assert_eq!(le.buffer(), "alpha x");
+    }
+    #[test]
+    fn a_paste_forgets_the_column_up_and_down_were_keeping() {
+        let mut le = LineEditor::new();
+        le.desired_col = Some(3);
+        le.paste_text("x").unwrap();
+        assert_eq!(le.desired_col, None);
+    }
+    #[test]
+    fn the_paste_key_leaves_a_search_as_any_unfamiliar_key_does() {
+        let mut le = LineEditor::new();
+        le.push_history("old line".into());
+        feed(&mut le, b"\x12ol");
+        feed(&mut le, b"\x1bp");
+        assert!(!le.is_searching());
     }
 
     #[test]

@@ -404,7 +404,12 @@ fn reap(ring: &ServiceRing, child: &Child) -> R<i32> {
 // the kernel suite that is the test runner, whose next reap-any collects the stray in
 // place of its own child, and every later wait is then one behind.
 fn bury(ring: &ServiceRing, child: &Child) {
-    let _ = child.kill();
+    // The suite's root is bare ramfs, with no /proc for Child::kill to write.
+    let rc = unsafe { t_postnote(child.pid() as i64, b"kill".as_ptr(), 4) };
+    if rc != 0 {
+        say(&format!("a victim's kill was refused ({})", rc));
+        return;
+    }
     let until = ring.now() + WAIT_NS;
     loop {
         let mut status = 0i32;

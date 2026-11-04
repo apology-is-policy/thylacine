@@ -1,0 +1,25 @@
+# interaction-native -- the HIN1 client's native adapter: one private Loom ring,
+# one CONNECT scope and a fid per lane (ASYNC-SERVICE-LIFECYCLE, "AS-4 adoption
+# design"). no_std and generic over the kernel, so the host tests it against
+# loom-client's simulated kernel; libthyla-rs supplies the real one to a program.
+[package]
+name = "interaction-native"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lib]
+name = "interaction_native"
+path = "src/lib.rs"
+
+[features]
+# The client half of the SAK scenario. It adds a module and changes nothing in Host.
+qualification = []
+
+[dependencies]
+libhalcyon = { path = "../libhalcyon" }
+loom-client = { path = "../loom-client" }
+
+[dev-dependencies]
+loom-client = { path = "../loom-client", features = ["sim"] }

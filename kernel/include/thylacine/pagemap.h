@@ -78,6 +78,10 @@ struct pagemap {
     u32      nodes;      // node pages currently allocated (radix only)
     size_t   resident;   // non-NULL slots
     void    *root;       // inline: struct page *[count]; radix: the root node or NULL
+    // Who pays for the nodes when it is not whoever faulted them: a shared file names the
+    // system cache, as its data pages do. Set once before the map is reachable; a static
+    // account, so it holds no reference. NULL is the faulter.
+    struct MemoryAccount *node_sponsor;
 };
 
 // Set up an empty map for `count` slots. The inline representation allocates

@@ -10,7 +10,7 @@ validated-by: [gate-smp]
 locks: [lock-proc-table]
 design: ["docs/ARCHITECTURE.md", "docs/IDENTITY-DESIGN.md", "docs/LINEAGE.md"]
 created: 2026-08-01
-updated: 2026-11-02
+updated: 2026-11-03
 ---
 ## Session posting ownership
 
@@ -536,6 +536,8 @@ walk, and a budget there could only turn the number into a silent floor. The
 per-Proc `proc_kstack_peak` it calls DOES take a budget -- see
 [[sub-kernel-thread]] for why the scan's cost is inverted and why that made it
 a masked-window lever.
+
+**The account (MM-1).** Every Proc holds a reference to one memory account from `proc_init_fields` to `proc_free`. `rfork_internal` replaces the default with the parent's, so a fork resets nothing, and nothing changes it after that: [[sub-kernel-accounts]].
 
 ## Data structures
 

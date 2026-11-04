@@ -22,7 +22,10 @@ mod application;
 mod apprecord;
 #[path = "../../halcyond/src/servicepool.rs"]
 mod servicepool;
+mod clipboard_async;
 mod clipboard_client;
+mod stopped_nora;
+mod ut_paste;
 mod admission_deadline;
 mod observer;
 mod admission;
@@ -185,6 +188,8 @@ pub extern "C" fn rs_main() -> i64 {
         if arg == b"--readiness" { return readiness::run(); }
         if arg == b"--storage" { return storage::run(); }
         if arg == b"--clipboard" { return clipboard_client::run(); }
+        if arg == b"--stopped-nora" { return stopped_nora::run(); }
+        if arg == b"--ut-paste" { return ut_paste::run(); }
         if arg == b"--service-capacity" { return service::capacity(); }
         if arg == b"--service-capacity-excess" { return service::capacity_excess(); }
         if arg == b"--service" { return service::run(); }

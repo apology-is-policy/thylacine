@@ -1289,6 +1289,19 @@ impl Vt {
         }
     }
 
+    /// Whether `row` of the visible grid shows `word` in adjacent cells. A painter's
+    /// bytes need not spell what it leaves on the screen: it sends no cell the last
+    /// frame already had.
+    pub fn row_holds(&self, row: usize, word: &str) -> bool {
+        let len = word.chars().count();
+        if row >= self.rows || len == 0 {
+            return false;
+        }
+        self.cells[row * self.cols..(row + 1) * self.cols]
+            .windows(len)
+            .any(|cells| cells.iter().map(|c| c.ch).eq(word.chars()))
+    }
+
     /// DECCKM (?1): application cursor-key mode. When set, the kaua-term's key
     /// re-encoder emits SS3 (`ESC O A`) for the arrows/Home/End instead of CSI
     /// (`ESC [ A`) -- what full-screen apps (vim, less) expect.
@@ -2501,6 +2514,20 @@ fn xterm256(pal: &Palette, n: u8) -> u32 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_row_holds_a_word_only_in_adjacent_cells() {
+        use super::*;
+        let mut vt = Vt::new(10, 2);
+        vt.feed(b"\x1b[2;1Hcopi\x1b[2;6Hd");
+        assert!(!vt.row_holds(1, "copied"), "a hole in it");
+        vt.feed(b"\x1b[2;5He");
+        assert!(vt.row_holds(1, "copied"));
+        assert!(!vt.row_holds(0, "copied"), "another row");
+        assert!(!vt.row_holds(2, "copied"), "past the grid");
+        assert!(!vt.row_holds(1, ""), "no word");
+        assert!(!vt.row_holds(1, "copied and more"), "wider than the row");
+    }
+
     /// I-7: `set_palette` remaps every cell and the pen by the old
     /// palette's entries and leaves every other colour alone.
     #[test]

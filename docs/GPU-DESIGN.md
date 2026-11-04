@@ -2582,14 +2582,14 @@ block the serve loop, and seat input with it. Neither was taken.
 - **DEAD at `FENCE_ABANDON_MS` without a retirement.** A stall that lasts the
   fenced lane's own abandonment bound (30 s) means a dead device. The latch is
   then the old one: permanent, with every fenced slot released as abandoned.
-- **Retirements park while stalled.** `all_work_retired` is false during a
-  stall, because the chain is outstanding, so the broker parks a retirement.
+- **Retirements park while stalled.** The stalled chain is synchronous work, which
+  holds every retirement (`Gpu::retirement_hold`), so the broker parks one.
   The park ends in one of three ways:
   - revival, after which the retirement runs;
-  - death, after which `quiescence_unreachable` admits it and `execute`
-    refuses it with its pins kept;
+  - death, after which it is admitted at once and `execute` refuses it with its
+    pins kept;
   - the 30 s park bound.
-  A stall is not unreachable quiescence. It is the one non-quiescent state
+  A stall is not a poisoned chain. It is the one non-quiescent state
   that comes back by itself. A seat episode whose restoration meets a stall
   fails at once, so its grant is cancelled. The seat's return to normal then
   waits for the stall: it rebinds once the engine revives, or goes back
@@ -2631,6 +2631,32 @@ retirement parks, and tapestryd's proxy reads its reply with no deadline, so
 the compositor's own loop blocks on it until the engine revives, dies, or the
 30 s park bound is reached. That cost is the price of keeping every pin until
 the device has retired the chain.
+
+**A retirement waits only on what can reach its object** (operator vote 49,
+2026-11-03). `DetachBacking` and `ResourceUnref` wait for chains on a context
+holding the resource and for chains naming it directly. `CtxDetachResource` and
+`CtxDestroy` wait for that context's chains. All of them also wait for the
+device-wide sync work, and a dead engine refuses them. A cursor chain touches only a
+cursor plane, so the cursor queue holds no retirement, and a poisoned cursor queue
+on a live engine costs a surface nothing. A context holds what is attached to it and
+any host blob minted under it, attached or not. A poisoned slot may never
+end, so a retirement that only a poisoned holder blocks is refused at once. One
+that a chain in flight blocks still parks, within the bound, which keeps the barrier
+for the short case. Another client's poison then costs a surface nothing.
+
+The global rule this replaces was measured on the GL host: after one abandoned
+fence on an unrelated client's context, a plain new surface met a refused retirement
+and the next listing of `/dev/tapestry/surface` had not ended after 60 s
+(`tools/warp/warp-poison-retire.exp`). A 30 s draw starts it, with no privilege.
+
+It is sound because virgl and Venus resolve stream resource ids through per-context
+tables, and a transfer naming a context looks up again in that context's table. So a
+chain reaches only what its context holds. The order of detaching holds: after
+`CtxDetachResource`, no new chain of that context can name the resource. Host
+behaviour here is I-45's trusted half. Refusing on any poison, globally, was the
+smaller change and was not taken: a refused pin is not retried and has no charge
+behind it, so a client could leak pins at full speed. Scoped, the only pins refused
+are the poisoned holder's own.
 
 **A stall takes no composition verdict.** The composition health tick
 (§4.5.12) fails closed: a failed step latches GPU composition OFF, sticky. A

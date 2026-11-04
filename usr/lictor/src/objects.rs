@@ -14,7 +14,7 @@ pub enum Kind { Resource, Context }
 pub enum Error { Invalid, Missing, Busy, Full, WrongOwner }
 
 #[derive(Clone, Copy)]
-struct Object { owner: u64, id: u32, kind: Kind, retiring: bool, serial: u64 }
+struct Object { owner: u64, id: u32, kind: Kind, retiring: bool, serial: u64, born_in: u32 }
 #[derive(Clone, Copy)]
 struct Attachment { owner: u64, ctx: u32, res: u32 }
 
@@ -35,8 +35,21 @@ impl Objects {
         if self.entries.len() == MAX_OBJECTS { return Err(Error::Full); }
         let serial = self.next_serial.checked_add(1).ok_or(Error::Full)?;
         self.next_serial = serial;
-        self.entries.push(Object { owner, id, kind, retiring: false, serial });
+        self.entries.push(Object { owner, id, kind, retiring: false, serial, born_in: 0 });
         Ok(())
+    }
+    /// A host blob is minted under a context, with or without a later attach.
+    pub fn reserve_in(&mut self, owner: u64, id: u32, ctx: u32) -> Result<(), Error> {
+        self.reserve(owner, id, Kind::Resource)?;
+        self.entries.last_mut().unwrap().born_in = ctx;
+        Ok(())
+    }
+    /// Whether a stream on `ctx` can reach `res`. Asked of retiring objects too:
+    /// the link outlives the retirement until the device has dropped it. Only a
+    /// resource is ever born in a context, so `born_in` needs no kind beside it.
+    pub fn holds(&self, ctx: u32, res: u32) -> bool {
+        ctx != 0 && (self.attachments.iter().any(|a| a.ctx == ctx && a.res == res)
+            || self.entries.iter().any(|o| o.id == res && o.born_in == ctx))
     }
     pub fn check(&self, owner: u64, id: u32, kind: Kind) -> Result<(), Error> {
         if !Self::valid_id(id) { return Err(Error::Invalid); }
@@ -143,6 +156,59 @@ mod tests {
         let current = o.retire(1, 2, Kind::Resource).unwrap();
         assert_eq!(o.retired(ticket), Err(Error::Missing));
         o.retired(current).unwrap();
+    }
+    #[test]
+    fn a_context_holds_what_is_attached_to_it_until_the_device_detaches_it() {
+        let mut o = Objects::default();
+        o.reserve(1, 3, Kind::Context).unwrap();
+        o.reserve(1, 4, Kind::Context).unwrap();
+        o.reserve(1, 7, Kind::Resource).unwrap();
+        assert!(!o.holds(3, 7), "not attached yet");
+        o.attach(1, 3, 7).unwrap();
+        assert!(o.holds(3, 7));
+        assert!(!o.holds(4, 7), "another context");
+        let ticket = o.retire(1, 7, Kind::Resource).unwrap();
+        assert!(o.holds(3, 7), "retiring a resource does not end the link");
+        assert_eq!(o.retired(ticket), Err(Error::Busy));
+        o.detached(1, 3, 7).unwrap();
+        assert!(!o.holds(3, 7));
+    }
+    #[test]
+    fn a_context_holds_its_attachments_until_its_destroy_completes() {
+        let mut o = Objects::default();
+        o.reserve(1, 3, Kind::Context).unwrap();
+        o.reserve(1, 7, Kind::Resource).unwrap();
+        o.attach(1, 3, 7).unwrap();
+        o.retire(1, 3, Kind::Context).unwrap();
+        assert!(o.holds(3, 7), "a destroy not yet answered proves nothing");
+        o.context_destroyed(1, 3).unwrap();
+        assert!(!o.holds(3, 7));
+    }
+    #[test]
+    fn a_blob_is_held_by_the_context_it_was_minted_under_with_no_attach() {
+        let mut o = Objects::default();
+        o.reserve(1, 3, Kind::Context).unwrap();
+        o.reserve_in(1, 7, 3).unwrap();
+        assert!(o.holds(3, 7));
+        assert!(!o.holds(4, 7));
+        o.retire(1, 7, Kind::Resource).unwrap();
+        assert!(o.holds(3, 7), "still, while it retires");
+        assert_eq!(o.reserve_in(1, 7, 3), Err(Error::Busy));
+    }
+    #[test]
+    fn no_chain_with_no_context_holds_anything() {
+        let mut o = Objects::default();
+        o.reserve(1, 7, Kind::Resource).unwrap();
+        assert!(!o.holds(0, 7), "a plain resource's unset birth context is not context 0");
+    }
+    #[test]
+    fn a_context_id_and_a_resource_id_with_the_same_number_are_not_confused() {
+        let mut o = Objects::default();
+        o.reserve(1, 7, Kind::Context).unwrap();
+        o.reserve(1, 3, Kind::Context).unwrap();
+        assert!(!o.holds(3, 7), "7 here is a context");
+        o.reserve_in(1, 7, 3).unwrap();
+        assert!(o.holds(3, 7));
     }
     #[test]
     fn object_budget_is_global_and_zero_owner_is_invalid() {

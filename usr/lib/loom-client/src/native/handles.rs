@@ -4,7 +4,7 @@
 extern crate alloc;
 use super::{
     Inner, Kernel, Result, Route, StreamState, errno,
-    kernel::{Backend, EINVAL, EIO, ENOSPC, SlotEntry, SlotKind, SlotState, ZERO_REF},
+    kernel::{Backend, EINVAL, EIO, ENOMEM, ENOSPC, SlotEntry, SlotKind, SlotState, ZERO_REF},
 };
 use crate::{
     fixed_requests::{BookRequest, Error as DriverError, ReadCompletion, ReadRequest, WriteRequest},
@@ -43,10 +43,11 @@ pub(crate) fn clunk_sqe(fid: SlotRef) -> Submission {
 fn minted(r: SlotRef) -> bool {
     r.slot < 64 && r.reserved == 0 && r.incarnation != 0
 }
-/// A SCOPE or FID reservation. Exhaustion first retries the slots awaiting REAP.
+/// A SCOPE or FID reservation. Exhaustion, of slots or of what a FID is charged for its
+/// CLUNK, first retries the slots awaiting REAP, each of which still holds its charge.
 fn reserve<K: Kernel>(inner: &Inner<K>, kind: u32, scope: SlotRef) -> Result<SlotRef> {
     match inner.shared().reserve(kind, scope) {
-        Err(e) if e == -ENOSPC => {
+        Err(e) if e == -ENOSPC || e == -ENOMEM => {
             inner.shared().reap_pass();
             inner.shared().reserve(kind, scope)
         }

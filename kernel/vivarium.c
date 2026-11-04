@@ -44,12 +44,22 @@ _Static_assert(VIV_NATIVE_CEILING == SYS__NATIVE_TOP - 1,
                "bump the constant to match the new top and re-run that check.");
 
 // Every row that discharges its collision re-check by the ceiling argument
-// rather than by a per-number one. The lowest such number is rt_sigreturn (139);
+// rather than by a per-number one. The lowest such number is setgid (144);
 // execve (221) is the newest. If the ceiling ever rises past one of these, the
 // build stops and the reader is forced back to the argument instead of inheriting
 // a claim that has quietly become false.
-_Static_assert(VIV_LINUX_RT_SIGRETURN > VIV_NATIVE_CEILING,
-               "the signal family above rt_sigqueueinfo argues by the ceiling");
+_Static_assert(VIV_LINUX_SETGID > VIV_NATIVE_CEILING,
+               "the rows above rt_sigreturn argue by the ceiling");
+// SYS_ACCOUNT at 140 (votes 47 and 48) lifted the ceiling over rt_sigreturn and
+// setpriority. setpriority has no row, so a Linux Proc takes ENOSYS before the native
+// switch, never reaches an account operation, and has its allocations charged without
+// one. A native program mis-declared as Linux loses the call and reads ENOSYS, which
+// confers nothing. A row arriving at 140 owes this paragraph again.
+_Static_assert(SYS_ACCOUNT == 140,
+               "revisit setpriority / ACCOUNT collision on renumber");
+// rt_sigreturn (139) meets no native number on this tree, and syscall.native_gap_
+// unassigned pins that. syscall.c intercepts it for a Linux Proc before the native
+// switch regardless.
 // SYS_POSTNOTE_TID at 138 (vote 2026-11-02) lifted the ceiling over 135..138.
 // Linux rt_sigqueueinfo (138) collides with it. The row is VIV_ENOSYS, so a Linux
 // Proc never reaches the post (tgkill is how it names a thread). A native program

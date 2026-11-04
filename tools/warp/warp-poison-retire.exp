@@ -1,0 +1,170 @@
+#!/usr/bin/expect -f
+# warp-poison-retire -- one client's poisoned fence must not stop the compositor
+# when a surface that client has nothing to do with retires.
+#
+# warp-prove poison-hold keeps a ctx alive with one fenced slot poisoned. A
+# second client, this shell, then creates and destroys a surface, and the
+# scenario times the destroy. tapestryd serves everything on one thread, so
+# the destroy's wall clock is how long nothing else was served. Control: the
+# same create and destroy before any poison, one variable away.
+#
+# 15 s is half the broker's 30 s park bound: a destroy under it cannot have sat
+# out even one park.
+#
+# A fast, unrefused surface is also what a broker that scoped nothing at all
+# would show, so the holder's OWN retirement is the positive control: same slot,
+# same boot, and it must be refused, at once, for the poison. A broker refusing
+# on any poison fails the surface leg; one refusing on none fails this one.
+#
+# Runs ON the GL host: a ctx needs a virgl device. env: WARP_REPO (default
+# ~/projects/thylacine), WARP_WORK (default ~/warp).
+
+set repo [expr {[info exists ::env(WARP_REPO)] ? $::env(WARP_REPO) : "$::env(HOME)/projects/thylacine"}]
+set work [expr {[info exists ::env(WARP_WORK)] ? $::env(WARP_WORK) : "$::env(HOME)/warp"}]
+
+if {![info exists ::env(THYLACINE_ACCEL)]} { set ::env(THYLACINE_ACCEL) tcg }
+set ::env(THYLACINE_NOSTORM) 1
+set ::env(THYLACINE_NO_QMP) 1
+set ::env(THYLACINE_NO_SHARE) 1
+set ::env(THYLACINE_GPU_DEV) virtio-gpu-gl-pci
+set ::env(THYLACINE_DISPLAY) egl-headless
+if {![info exists ::env(LS_CI_BOOT_TIMEOUT)] || $::env(LS_CI_BOOT_TIMEOUT) < 900} {
+    set ::env(LS_CI_BOOT_TIMEOUT) 900
+}
+
+source $repo/tools/interactive/lib.exp
+lc_require_image {shell}
+
+file mkdir $work
+file delete -force $work/pool-poison.img $work/disk-poison.img
+exec cp --sparse=always $repo/build/fixtures/pool.img $work/pool-poison.img
+exec cp $repo/build/disk.img $work/disk-poison.img
+set ::env(THYLACINE_POOL_IMG) $work/pool-poison.img
+set ::env(THYLACINE_DISK_IMG) $work/disk-poison.img
+
+set bound_ms 15000
+# Long enough to see a whole stop: nine retiring requests at 30 s each, on a
+# composed screen, and the hold must outlast them to be the cause throughout.
+set hold_s 420
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+
+proc pr_surfaces {tag} {
+    global timeout
+    lc_send "ls --color=never --beacon=never /dev/tapestry/surface; echo $tag"
+    set timeout 60
+    expect {
+        -ex {lictor: retirement refused} { lc_fail "a retirement was refused beside this surface ($tag)" }
+        -re "\n$tag" {}
+        -re {EXTINCTION:} { lc_extinction_fail "kernel extinction listing surfaces ($tag)" }
+        timeout { lc_fail "the surface listing never ended ($tag, 60s)" }
+        eof { lc_fail "unexpected EOF listing surfaces ($tag)" }
+    }
+    set buf $expect_out(buffer)
+    regsub -all {\x1b\[[0-9;?]*[A-Za-z]} $buf "" buf
+    set ids {}
+    foreach line [split [string map [list "\r" "\n"] $buf] "\n"] {
+        if {[regexp {^\s*([0-9]+)/?\s*$} $line -> n]} { lappend ids $n }
+    }
+    return $ids
+}
+
+proc pr_create {leg} {
+    set before [pr_surfaces surfaces-before-$leg]
+    lc_send "echo 'create 640 480' > /dev/tapestry/surface/new"
+    set after [pr_surfaces surfaces-after-$leg]
+    set made {}
+    foreach n $after {
+        if {[lsearch -exact $before $n] < 0} { lappend made $n }
+    }
+    if {[llength $made] != 1} {
+        lc_fail "$leg: the create made [llength $made] new surfaces (before: $before; after: $after), want exactly one"
+    }
+    return [lindex $made 0]
+}
+
+# The destroy's wall clock in ms; bounded far past nine parks.
+proc pr_destroy {leg sid} {
+    global timeout
+    set t0 [clock milliseconds]
+    lc_send "echo destroy > /dev/tapestry/surface/$sid/ctl; echo destroy-returned-$leg"
+    set timeout 600
+    expect {
+        -ex {lictor: retirement refused} { lc_fail "$leg: this surface's destroy met a refused retirement" }
+        -re "\ndestroy-returned-$leg" {}
+        -re {EXTINCTION:} { lc_extinction_fail "kernel extinction during the $leg destroy" }
+        timeout { lc_fail "$leg: the destroy did not return within 600 s" }
+        eof { lc_fail "unexpected EOF during the $leg destroy" }
+    }
+    return [expr {[clock milliseconds] - $t0}]
+}
+
+set sid [pr_create control]
+set control_ms [pr_destroy control $sid]
+lc_step "POISON-RETIRE control-ms=$control_ms (surface $sid, no poison)"
+if {$control_ms > $bound_ms} {
+    lc_fail "control: a destroy with no poison took $control_ms ms, so the poisoned leg's number would mean nothing"
+}
+
+lc_send "warp-prove poison-hold $hold_s &"
+set timeout 60
+expect {
+    -re {warp-prove: POISON-HOLD READY ctx [0-9]+} { lc_step "a ctx holds one poisoned fenced slot" }
+    -re {warp-prove: FAIL --[^\n]*} { lc_fail "poison-hold: $expect_out(0,string)" }
+    -re {EXTINCTION:} { lc_extinction_fail "kernel extinction arming the poison" }
+    timeout { lc_fail "poison-hold never said READY (60s)" }
+    eof { lc_fail "unexpected EOF arming the poison" }
+}
+
+# The create must not sit under the park either, or the timing below starts late.
+set sid [pr_create poisoned]
+set poisoned_ms [pr_destroy poisoned $sid]
+lc_step "POISON-RETIRE poisoned-ms=$poisoned_ms (surface $sid, one poisoned slot, another client's)"
+
+if {$poisoned_ms > $bound_ms} {
+    lc_fail "POISON-RETIRE RED: one poisoned slot stopped the compositor for $poisoned_ms ms on a surface close (control $control_ms ms, bound $bound_ms ms)"
+}
+
+# The positive control. The destroy's three retiring requests are all this slot's
+# own, so a broker that parked them would take 90 s, and one that ran them would
+# say nothing here.
+lc_send "echo go > /tmp/poison-go"
+set timeout 120
+set refused 0
+set own_ms -1
+expect {
+    -ex {lictor: retirement refused while a poisoned chain can reach its object} {
+        set refused 1
+        if {$own_ms < 0} { exp_continue }
+    }
+    -ex {lictor: retirement refused on a non-quiescent engine} {
+        lc_fail "own: the holder's retirement was refused for the engine, not for its poison"
+    }
+    -re {warp-prove: POISON-HOLD OWN-RETIRE ms=([0-9]+)} {
+        set own_ms $expect_out(1,string)
+        if {!$refused} { exp_continue }
+    }
+    -re {warp-prove: FAIL --[^\n]*} { lc_fail "poison-hold: $expect_out(0,string)" }
+    -re {EXTINCTION:} { lc_extinction_fail "kernel extinction during the holder's own retirement" }
+    timeout { lc_fail "own: within 120 s: refused=$refused own_ms=$own_ms (a holder's own retirement that ran, or parked)" }
+    eof { lc_fail "unexpected EOF during the holder's own retirement" }
+}
+lc_step "POISON-RETIRE own-ms=$own_ms (the holder's own BO, refused for its poison)"
+if {$own_ms > $bound_ms} {
+    lc_fail "own: the holder's refused retirement took $own_ms ms, so it parked instead of refusing at once"
+}
+
+# The slot must have stayed poisoned throughout: poison-hold fails if it healed.
+set timeout [expr {$hold_s + 120}]
+expect {
+    -ex {warp-prove: POISON-HOLD RELEASED} { lc_step "the hold ended with the slot still poisoned, then healed" }
+    -re {warp-prove: FAIL --[^\n]*} { lc_fail "poison-hold: $expect_out(0,string)" }
+    -re {EXTINCTION:} { lc_extinction_fail "kernel extinction during the hold" }
+    timeout { lc_fail "poison-hold never released within [expr {$hold_s + 120}] s" }
+    eof { lc_fail "unexpected EOF during the hold" }
+}
+
+lc_pass "warp-poison-retire: a surface closed in $poisoned_ms ms beside another client's poisoned slot (control $control_ms ms), and the holder's own retirement was refused in $own_ms ms"
+lc_quit
+exit 0

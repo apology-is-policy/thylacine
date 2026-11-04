@@ -1079,6 +1079,11 @@ struct Proc {
     // (specs/poll_owed.tla): chained on the lock holder's table_owed, begun
     // and finished by its proc_table_lock_release. Under g_proc_table_lock.
     struct poll_owed   child_owed;
+
+    // Section 4's account: never NULL once the Proc exists, and it never changes,
+    // so a fork or a spawn cannot reset what a tree of Procs has used. Holds a
+    // reference, released at proc_free.
+    struct MemoryAccount *account;
 };
 
 #define BIRTH_HOLD_NONE    0u
@@ -1433,9 +1438,9 @@ _Static_assert(__builtin_popcount(PROC_FLAGS_ALL) ==
 // message prose carries only each field's landing RATIONALE. Absolute offsets
 // were deliberately stripped from that prose -- duplicating the number in a
 // comment is what made it go stale here in the first place.
-_Static_assert(sizeof(struct Proc) == 512,
- "struct Proc size: M8 appended the creation mask (umask u32, padded to the "
- "next 8-byte boundary): 504 -> 512. Before that: "
+_Static_assert(sizeof(struct Proc) == 520,
+ "struct Proc size: MM-1 appended account (a pointer) after M8's creation mask "
+ "(umask u32, padded to the next 8-byte boundary): 504 -> 520. Before that: "
  "the poll hook chunk appended child_owed (a 32-byte "
  "struct poll_owed): 472 -> 504. Before that: "
  "thread-model C5 appended exec_task (a pointer) + "

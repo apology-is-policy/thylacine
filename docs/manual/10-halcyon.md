@@ -189,6 +189,17 @@ Application mode reporting is not connected yet. Nora continues to show its
 own mode inside its tile; the system chip cannot currently display Nora's
 Insert, Normal, Visual or Command state. The chip adds no clipboard actions.
 
+### Paste into a shell
+
+Press Alt-P at a shell prompt. The text on the session clipboard lands in the line
+at the cursor, and nothing runs until you press Enter. Pasted lines stay together,
+so Enter runs them all.
+
+The shell pastes all of the text or none of it. It says why above the prompt when
+the line would pass its 64 KiB limit, or when the text has a tab or control
+character. Pressing Enter or Ctrl-C before the text arrives cancels the paste.
+Ctrl-Y still brings back the last text you cut in that shell.
+
 ### Open a menu on an object
 
 Programs that write Beacon mark some of what they print as objects: a file

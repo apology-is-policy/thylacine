@@ -278,6 +278,21 @@ phase, paste after edit/tab/focus/session change, unknown-commit outcome, multip
 sessions, rendering/input latency and logout. Keep nondefault until whole-arc
 requirements pass. Do not claim generic remote-mount cancellation or Mycelium
 migration; the shared protocol library can adopt Mycelium separately later.
+Operator votes 44-46, November 3: AS-4 comes before MM-1 to MM-4. Nora adopts first,
+over `libhalcyon`'s client on the native adapter, and ut follows, HI-2's witness
+closing on both. SAK at every phase is witnessed by a qualification mode in
+kaua-term-probe stepped by a scenario, so a red names its phase, plus one Nora
+scenario.
+Operator vote 51, November 3: a private CLUNK is never refused for memory. What it needs
+is reserved when the fid is created, so the premise of vote 11, that the kernel admits
+every request the book admits, holds for it. Vote 11 stands as written: an adapter
+whose CLUNK is refused fails the ring loudly. Without this, a program at its page budget
+lost its private ring to a background CLUNK. Built November 3, not yet booted: a FID's
+RESERVE charges and allocates the one page its CLUNK will run on, so that RESERVE is
+where the budget refuses, with nothing yet at the server. A CLUNK that never started
+gives the page back to its FID, and a FID that goes without one frees it. Both adapters
+try the slots awaiting REAP before a reservation answers -ENOMEM, as they do for -ENOSPC,
+since each of those still holds its page.
 
 Review conclusion: this is the recommended single design. It costs a native
 9P progress refactor, but avoids permanently assigning clipboard availability
@@ -293,3 +308,126 @@ retire while prior payload leases remain owned by the ring's pool and consumer;
 retirement is not permission to reuse those payloads. SAK acknowledgement still
 requires ending actual local clipboard users. Kernel retirement never forges a
 consumer return. This choice does not activate private mode or alter MM order.
+
+## AS-4 adoption design (November 3)
+
+Votes 44-46 set the order and the witnesses; this section sets the shape. Nothing
+here is implemented. Private activation stays compile-time and off by default until
+the whole arc passes.
+
+**The host's loop stays one poll.** A UI host already sleeps in one `poll(2)` over
+its input, its server pipes and its note queue, with no tick. The adapter adds the
+ring's descriptor (`Ring::poll_fd`) and the client adds the earliest deadline it
+owes (`next_deadline`). The host puts the first in its poll set and bounds the
+sleep by the second, then calls `pump`, which runs `Ring::turn` with a deadline of
+now and polls what that woke. `pump` never sleeps. A turn at a past deadline issues
+no poll, so it asks about the ring with an ENTER that submits nothing, which also
+sees a reused descriptor number. Once the ring has closed, a failure included,
+`poll_fd` reports that and the host drops it, since a number closed under it answers
+POLLNVAL or POLLHUP for ever and polling it would spin. Nothing waits on a scope's
+retirement. Closing aborts the scope, the terminals of what was in flight are poll
+events, and its slot is reaped on a later pump. One pump runs a bounded number of
+passes, so a server answering as fast as it is asked cannot hold the host's input; the
+ring announces whatever is left. A host may not call `Ring::block_on`.
+
+**`libhalcyon::interaction_client`.** The protocol has no I/O, as HALCYON-INTERACTION
+7 requires of the shared library: a future Mycelium adapter keeps its behaviour,
+ownership and errors. An adapter connects, moves bytes and reports what happened;
+the client decides what comes next, what each deadline is and what the host is told.
+The native adapter owns one private ring, one CONNECT scope and two fids on the same
+route: a control fid for Hello, Bind and Mode, and a transfer fid for one copy or
+paste. The server allows one outstanding request per fid, so that split is what lets
+a mode report pass a parked Get. Giving up on a request the server has stopped
+answering closes the connection, since only that is sure to end it, and closing the
+ring ends the whole private connection whatever the server is doing. That is the
+property this arc exists for, so nothing takes a blocking path around it.
+
+The client's rules, each from a rule above it:
+- **Mode reports coalesce.** One in flight, the latest waits, older values are
+  dropped, sequences only grow. A mode report grants nothing. A report lost with its
+  connection is not resent as it was: a new binding is told the latest mode, under the
+  next sequence. A report refused as a record is not sent again until the host reports
+  anew, or a server that always refuses it would be connected to for ever.
+- **A refusal is read where the server gives it.** The server answers a request on the
+  write that finishes its record, so success there means the request ran. An errno on
+  a reply's read is no answer, and on a commit's reply it leaves the outcome unknown.
+  A refusal that may have poisoned the fid, or that came part way through a record,
+  ends the connection, or every later request would be refused for ever.
+- **Bind retries,** on Gone or Busy, as the blocking qualification client does, but
+  on `next_deadline`, never by sleeping. A nomination the host has not published yet
+  looks like that.
+- **A job with nothing answered re-runs once.** If a copy before its Commit, or any
+  paste, loses its connection before that connection has answered it anything, it
+  starts again from its first stage on a fresh connection, once. A Get changes nothing,
+  so running it again is safe. SAK closes an idle connection and nothing tells the
+  client until its next use, so without this the first key after a trusted-path
+  episode would fail. A second loss, or a loss after any answer, is reported as before.
+  Operator vote 60, November 4.
+- **A commit is never retried.** A connection lost after CommitCopy was sent is
+  reported as an unknown outcome. The user can make a new copy, and the client does
+  not guess (HALCYON-INTERACTION 8).
+- **Every operation has a deadline** inside the server's own limits (2 s for an
+  unbound handshake, 30 s of inactivity and 120 s in all for a transfer). Past it
+  the client drops the scope and reports a timeout. The next use reconnects and
+  binds afresh, and old transfer and request ids mean nothing on the new connection.
+- **A paste reaches the host whole or not at all.** Hello's limits are checked
+  before allocating. The bytes are checked as UTF-8 text once complete. The host
+  then reserves room for all of it before any mutation, so a refusal leaves its
+  buffer intact.
+- **No endpoint is not an error state.** Without `HALCYON_INTERACTION` the client
+  reports unavailable, local registers carry on, and no other path is tried.
+- Tokens and clipboard bytes are never logged. The locator is not authority.
+
+**Adoption order.**
+- AS-4a: `Ring::poll_fd`. The host test drives a simulated ring and a poll loop with
+  no blocking call. ut is Rust, so it needs no C twin; the Pouch browser's C-facing
+  API is its own later item.
+- AS-4b: the client, tested against a scripted server speaking real HIN1 records:
+  every operation against a server that stops at each step, and one that dies. Then
+  its native adapter.
+- AS-4c: the kaua-term-probe qualification mode over the async client, stepped by a
+  scenario, so a red names its phase. SAK lands at each of connect, each walk, open,
+  Hello, Bind, Mode, Get, Read, Begin, Write and Commit: at every submission the run
+  makes, with the operation still queued and with it in flight or its completion
+  unrouted. The steps are a wrapper around the ring's `Kernel` in the probe, which
+  holds its thread once at a numbered ENTER, so `Host` carries no test hook and what is
+  qualified is what ships. A number names one phase, and a host test pins that table.
+  A real halcyond cannot be held mid-reply, so a request parked at a stopped server
+  stays the host sweep's and NA-4d's fixture's to cover.
+  Each needs: trusted input only after the cancellation, nothing conferred, no stale
+  bytes after recovery, and the committed clipboard value intact (SEAT-REVIEW's
+  acceptance for option A, now on the private ring). Console output parks during the
+  episode, so the first of those cannot be read off a line. It rests on the seat path
+  retiring every application connection before its ACK, and the witness is that a
+  private connection bound at the SAK does not serve its next use. That use may recover
+  on a fresh connection, and the client's count of re-runs says it had to. This is also the first
+  boot of a private CONNECT against halcyond, so it pins the peer rule: the server
+  samples `t_srv_peer` on a connection the kernel stamped from the ring's captured
+  identity.
+- AS-4d: Nora. The pure engine raises Copy and Paste, its host resolves them. Space
+  y and Space p reach the shared clipboard, plain y and p stay local, and several
+  selections join with LF, and CRLF and CR export as LF. Mode reports follow its
+  editing mode. A paste is one undo transaction, and lands in the buffer that asked or
+  nowhere: the request carries an id never reused, and arriving under another buffer it
+  says so and changes nothing, as an empty one does. A second clipboard key in one burst
+  says the first is still out. One scenario proves a server stopped mid-copy does not stop typing:
+  `ls-nora-stopped-copy`, a real Nora on a pts its probe owns, against loom-fixture.
+  The fixture's `hold-copy` service takes a copy's first write and then answers nothing
+  on that connection, so the client's deadline and the ring's close are all that can
+  end it. Typed text must reach the file while the copy is still parked, which is read
+  in that order rather than off a clock. The client must then give up and say so,
+  typing must go on, and the editor must leave with a second copy parked. The same keys
+  run first against the service that answers, as the control.
+- AS-4e: ut over the native adapter, the same client Nora uses, closing HI-2's
+  witness on both clients. A paste lands in the command buffer and does not submit.
+  Operator vote 52, November 3: one key in ut's line editor starts it, beside Ctrl-Y,
+  which stays local. It carries no content: ut fetches the clipboard over its own
+  private ring, so no clipboard byte crosses the pts and a forged key grants nothing,
+  because the server still admits. A paste over the line's 64 KiB limit refuses whole,
+  visibly. HI-3 makes transcript NOR's Space p send the same key. The key is Alt-P. One
+  ring per paste, since a shell sits at its prompt for days and cannot pump while a
+  foreground command runs, and an accepted line ends the fetch before it runs. A tab or control character also refuses whole: the line
+  echoes as it is and counts one column per character. Written and host-tested, the
+  fixture half in `ls-ut-paste`; not yet booted, and the real session's half is owed.
+- AS-4f: the rest of AS-4's list: paste after edit, tab, focus and session change;
+  the unknown commit; several sessions; rendering and input latency; logout.

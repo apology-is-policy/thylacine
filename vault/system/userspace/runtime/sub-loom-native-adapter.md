@@ -25,7 +25,7 @@ abis: [abi-loom-service, abi-loom-ring]
 design:
   - "docs/ASYNC-SERVICE-ABI.md \"Native adapter (October 12)\""
 created: 2026-10-12
-updated: 2026-10-21
+updated: 2026-11-03
 ---
 ## Purpose
 
@@ -44,7 +44,7 @@ The C twin (NA-4c) is libt's `thyla/loom_client/adapter.h`. It composes the C
 cores ([[sub-libt-loom-client]]) the same way, over `struct t_loom_kernel`, a
 table of the same raw calls; `t_loom_kernel_native()` (`native_kernel.c`) fills
 it with libt's system-call stubs. Its host tests run the Rust tests' 69
-scenarios, one for one, and eight of the C interface's own, against a C port
+scenarios as of NA-4c, one for one, and eight of the C interface's own, against a C port
 of the simulated kernel. Where the
 two differ, the sections below say which side they describe.
 
@@ -63,7 +63,12 @@ two differ, the sections below say which side they describe.
 - **Handles.** `Target` (a service name in a registry), `Scope` (one connection:
   a fresh 9P session), `Fid`, `Pool`, `Stream`, `Payload`. Operations are
   futures: `Connect`, `Walk`, `Open`, `Read`, `Write`, and `Stream::next`.
-  `Ring::turn` drives the ring once; `Ring::block_on` runs one future.
+  `Ring::turn` drives the ring once; `Ring::block_on` runs one future. A UI host
+  that keeps its own poll loop adds `Ring::poll_fd` to it instead and calls `turn`
+  with a past deadline ([[sub-interaction-native]]). `poll_fd` is -1 once the ring has
+  closed, a failure included, and the host must honour that: a number closed under it
+  answers POLLNVAL or POLLHUP for ever, so polling it would spin. The C twin has no
+  `poll_fd` yet.
 - **Cancellation is scope-wide.** Dropping an unfinished future or stream aborts
   its whole scope, siblings included; `Scope::abort` does it explicitly. The
   kernel has no narrower cancel (ASYNC-SERVICE-LIFECYCLE section 7).
@@ -150,6 +155,9 @@ two differ, the sections below say which side they describe.
   reading would kill a ring on the legal deadline race. The scope's `reason` is
   set only atomically with a state that is not READY (`loom_service_control.c`),
   so a -ECANCELED CLUNK never coincides with a ready scope -- no false red.
+  For memory the premise holds by operator vote 51: the kernel pays for a FID's CLUNK at
+  that FID's RESERVE ([[sub-kernel-loom]]), so what the budget refuses is the RESERVE,
+  an ordinary `Err` from the walk that names no book entry, and neither adapter changed.
 
 ## Mechanism
 
@@ -177,7 +185,7 @@ two differ, the sections below say which side they describe.
 - **Slots.** A scope's fids pin it, so `reap_pass` repeats while a pass frees
   a slot. `Shared` tracks every target, scope and fid the adapter minted:
   Live, Clunk (a dropped fid, clunked when the SQ has room), Clunking, Reap
-  (REAP retried each turn, and before a reservation answers -ENOSPC). Pools are
+  (REAP retried each turn, and before a reservation answers -ENOSPC or -ENOMEM, since a slot awaiting REAP still holds the CLUNK page a FID is charged at RESERVE). Pools are
   the cores' and are reaped through `destroy_pool`.
 - **Retirement.** `retire` closes admission and aborts every scope. `retired()`
   holds once every SQE pushed has had its terminal CQE taken (`Shared`'s
@@ -194,6 +202,9 @@ two differ, the sections below say which side they describe.
   ledger (`Pool::refuse`; a record naming a member a live payload still reads
   fails the ring) and RETURNed at once, so REAP can free the pool; a RETURN that finds the descriptor gone
   forgets it as any REGISTER does, and the turn answers -ECANCELED.
+- **A turn at a past deadline** issues no poll, and a poll is how a close is otherwise
+  learnt. It issues an ENTER that submits nothing, which answers -ECANCELED or -EBADF
+  without sleeping, and sees a reused descriptor number as a poll cannot.
 - **Teardown.** `close` (and dropping the `Ring`) aborts every scope and closes
   the descriptor. `Shared` detaches the mapping, then the buffers, when its last
   owner goes: after the CQ reader and every payload lease.
@@ -251,11 +262,16 @@ reaches a terminal or the ring closes.
 ## Performance
 
 One ENTER per submission and per turn that routed completions; one poll per
-idle turn. Lookups scan at most 64 slots or `cq_entries` cells. Nothing on the
+idle turn, or one empty ENTER when the turn's deadline has passed. Lookups scan at most 64 slots or `cq_entries` cells. Nothing on the
 completion path allocates.
 
 ## Prosecution
 
+- **The simulated kernel is also a dev-only feature,** `sim`, so that a crate driving
+  this adapter can test against it ([[sub-interaction-native]]). For that it has a
+  `Service` trait for a protocol the flat file tree cannot speak, directories through
+  slashes in file names, `hold_after` (stop after N answers) and `step_on_enter` (the
+  server runs inside ENTER, as a peer CPU may).
 - **The simulated kernel** (`tests/native/sim.rs`) ports the private SQE shape
   check and models ENTER, poll, REGISTER and close as the kernel's frontend,
   decode and loom.c define them; each test names the behaviour it pins. It

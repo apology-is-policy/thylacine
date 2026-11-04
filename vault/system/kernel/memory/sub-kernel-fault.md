@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/ARCHITECTURE.md", "docs/EXEC-LOAD-DESIGN.md"]
 created: 2026-08-03
-updated: 2026-10-27
+updated: 2026-11-03
 ---
 ## Purpose
 
@@ -85,6 +85,8 @@ invalid→valid requires no flush (ARM ARM B2.7.1). The demand-page path never
 overwrites a *valid* leaf: `mmu_install_user_pte` refuses a mismatching install
 over one (the COW break does its own uninstall-first dance instead), so the fast
 path issues no TLBI at all.
+
+**Who pays (MM-1).** A file page is charged to the static system cache account on both the single and the cluster path, through `alloc_user_pages_for`, so a shared binary is not whoever faulted it first. Other fault pages charge the faulting Proc's account: [[sub-kernel-accounts]].
 
 ## Data structures
 

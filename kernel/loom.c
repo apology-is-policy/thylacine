@@ -23,6 +23,7 @@
 #include <thylacine/loom_service_targets.h>
 #include <thylacine/loom_service_nodes.h>
 #include <thylacine/loom_service_fids.h>
+#include <thylacine/loom_service_operation.h>
 #include <thylacine/9p_client.h>
 #include <thylacine/9p_session.h>
 #include <thylacine/9p_wire.h>     // WEFT_DIR_* (the Tweftio direction)
@@ -530,7 +531,7 @@ struct Loom *loom_create_private_why(struct Proc *p, u32 sq, u32 cq, bool receip
     // attributes its ring's slab descriptor for as long as ring mappings live.
     _Static_assert(sizeof(struct Loom) > 2048, "private Loom metadata uses buddy kmalloc");
     _Static_assert(sizeof(struct Burrow) <= PAGE_SIZE, "descriptor page attribution bounds object");
-    // Reserve an entire buddy page for the 1552-byte identity ledger. Charging
+    // Reserve an entire buddy page for the 2064-byte identity ledger. Charging
     // that physical page avoids pretending shared slab occupancy is exact.
     // No allocator work under as->lock; unwind frees storage BEFORE its refund.
     _Static_assert(sizeof(struct loom_slot_table) <= PAGE_SIZE, "slot ledger page");
@@ -704,6 +705,11 @@ static void loom_private_targets_destroy(struct Loom *l) {
 static void loom_private_nodes_destroy(struct Loom *l) {
     if (!l->service_nodes || !l->service_slots)
         extinction("private Loom lost node storage");
+    // No operation retains a page here: each holds a Loom reference.
+    for (u32 i = 0; i < LOOM_SERVICE_SLOT_COUNT; ++i) {
+        loom_private_clunk_storage_free(l, l->service_slots->clunk_storage[i]);
+        l->service_slots->clunk_storage[i] = NULL;
+    }
     const u32 kinds[2] = { LOOM_SERVICE_FID, LOOM_SERVICE_SCOPE };
     for (u32 pass = 0; pass < 2; ++pass) {
         for (u32 i = 0; i < LOOM_SERVICE_SLOT_COUNT; ++i) {
@@ -1548,12 +1554,21 @@ int loom_private_pool_reap(struct Loom *l, struct loom_service_ref ref) {
     return loom_private_pool_remove(l,ref,false);
 }
 
+// A removal has just validated ref under this Ll hold. A page out with a prepared
+// CLUNK is not here: that operation frees it, seeing the slot gone.
+static struct loom_service_operation *loom_private_clunk_storage_take(struct Loom *l,
+                                                                      struct loom_service_ref ref) {
+    struct loom_service_operation *storage = l->service_slots->clunk_storage[ref.slot];
+    l->service_slots->clunk_storage[ref.slot] = NULL;
+    return storage;
+}
+
 // SCOPE/FID reserve transactions use an immutable, already-copied ABI record.
 // The syscall owns a Loom reference and a stable creator image across prepare,
 // copyout and publish/rollback. No user pointer or Proc escapes. The same ring
 // lock protects both ledgers and the close/parent-abort publication check.
-// This only reserves metadata: it grants no protocol authority, creates no
-// client and cannot reap a node that has entered the protocol state machine.
+// This reserves metadata and, for a FID, its CLUNK's page: it grants no protocol
+// authority, creates no client and cannot reap a node in the protocol state machine.
 int loom_private_node_prepare(struct Loom *l, struct Proc *p,
                               const struct loom_service_reserve *in,
                               struct loom_service_ref *out) {
@@ -1564,11 +1579,26 @@ int loom_private_node_prepare(struct Loom *l, struct Proc *p,
     if (in->size != sizeof(*in) || in->version != LOOM_SERVICE_ABI_VERSION ||
         in->flags || in->reserved || in->result.slot || in->result.reserved ||
         in->result.incarnation) return -T_E_INVAL;
+    struct loom_service_ref ref;
     spin_lock(&l->lock);
     int rc = l->service_closing ? -T_E_CANCELED :
         loom_service_node_prepare(l->service_slots, l->service_nodes,
-                                  in->kind, in->scope, out);
+                                  in->kind, in->scope, &ref);
     spin_unlock(&l->lock);
+    if (rc) return rc;
+    // Vote 51: what this FID's CLUNK needs is paid for now, while refusing costs the
+    // program one reservation. The PROVISIONAL slot is the caller's alone until publish.
+    struct loom_service_operation *storage = in->kind == LOOM_SERVICE_FID ?
+        loom_private_clunk_storage_new(l, proc_resource_exempt(p)) : NULL;
+    spin_lock(&l->lock);
+    if (storage) l->service_slots->clunk_storage[ref.slot] = storage;
+    else if (in->kind == LOOM_SERVICE_FID) {
+        rc = -T_E_NOMEM;
+        if (loom_service_node_rollback(l->service_slots, l->service_nodes, ref))
+            extinction("FID reservation lost its provisional slot");
+    }
+    spin_unlock(&l->lock);
+    if (!rc) *out = ref;
     return rc;
 }
 int loom_private_node_publish(struct Loom *l, struct loom_service_ref ref) {
@@ -1583,21 +1613,27 @@ int loom_private_node_rollback(struct Loom *l, struct loom_service_ref ref) {
     if (!l || l->magic != LOOM_MAGIC || !loom_is_private(l)) return -T_E_INVAL;
     spin_lock(&l->lock);
     int rc = loom_service_node_rollback(l->service_slots, l->service_nodes, ref);
+    struct loom_service_operation *storage = rc ? NULL : loom_private_clunk_storage_take(l, ref);
     spin_unlock(&l->lock);
+    loom_private_clunk_storage_free(l, storage);
     return rc;
 }
 int loom_private_node_reap_unused(struct Loom *l, struct loom_service_ref ref) {
     if (!l || l->magic != LOOM_MAGIC || !loom_is_private(l)) return -T_E_INVAL;
     spin_lock(&l->lock);
     int rc = loom_service_node_reap_unused(l->service_slots, l->service_nodes, ref);
+    struct loom_service_operation *storage = rc ? NULL : loom_private_clunk_storage_take(l, ref);
     spin_unlock(&l->lock);
+    loom_private_clunk_storage_free(l, storage);
     return rc;
 }
 int loom_private_fid_reap(struct Loom *l, struct loom_service_ref ref) {
     if (!l || l->magic != LOOM_MAGIC || !loom_is_private(l)) return -T_E_INVAL;
     spin_lock(&l->lock);
     int rc = loom_fid_reap_retired(l->service_slots, l->service_nodes, ref);
+    struct loom_service_operation *storage = rc ? NULL : loom_private_clunk_storage_take(l, ref);
     spin_unlock(&l->lock);
+    loom_private_clunk_storage_free(l, storage);
     return rc;
 }
 

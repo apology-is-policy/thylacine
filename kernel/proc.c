@@ -25,6 +25,7 @@
 #include <thylacine/env.h>
 #include <thylacine/errno.h>
 #include <thylacine/extinction.h>
+#include <thylacine/memaccount.h>
 #include <thylacine/handle.h>
 #include <thylacine/mmio_handle.h>
 #include <thylacine/notes.h>
@@ -209,6 +210,10 @@ u32 proc_default_page_budget(void);
 // entry; this only sets the non-zero-default values.
 static void proc_init_fields(struct Proc *p, int pid) {
     p->magic = PROC_MAGIC;
+    // rfork_internal overwrites it with the parent's; a Proc with neither is the boot
+    // account's, never a null sponsor.
+    p->account = account_root();
+    account_ref(p->account);
     spin_lock_init(&p->srv_post_lock);
     p->pid   = pid;
     // PTY-1a: a parentless Proc is its own session + group leader (sid =
@@ -936,6 +941,7 @@ void proc_free(struct Proc *p) {
     // (The address space was released above, before handle_table_free -- see
     // the P3-Da comment there for why that ordering, and addrspace.h for why
     // dropping the page table needs no TLB maintenance.)
+    account_unref(p->account);
     kmem_cache_free(g_proc_cache, p);
     // R5-H F79: atomic counter bump.
     __atomic_fetch_add(&g_proc_destroyed, 1u, __ATOMIC_RELAXED);
@@ -1818,6 +1824,10 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
     // a raise from the build root down to cc1. A raise is a spawn-time decision
     // (sys_spawn_args.page_budget, authority-gated); rfork alone never widens it.
     child->page_budget    = parent->page_budget;
+    // The same aggregate account, so a fork resets nothing (section 4).
+    account_unref(child->account);
+    child->account = parent->account;
+    account_ref(child->account);
     // The thread budget likewise (ARCH 7.3.5): a Go program a build driver
     // spawned keeps the budget the driver was given.
     child->thread_budget  = __atomic_load_n(&parent->thread_budget, __ATOMIC_RELAXED);

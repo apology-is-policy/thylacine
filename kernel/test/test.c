@@ -29,6 +29,7 @@
 #include <thylacine/spinlock.h>     // #109: preempt-mask across the terminal-park handshake
 #include "../../mm/magazines.h"  // test_free_pages_settled
 #include "../../mm/phys.h"   // the pool park a failing test leaves behind
+#include <thylacine/memaccount.h>   // the ledger reddens a test that breaks its pairing
 #include <thylacine/poll.h>         // the snapshot bound's test knob, released per test
 #include <thylacine/notes.h>        // test_caught: the interrupt post
 #include <thylacine/proc.h>         // test_dying: a fresh Proc, freed as a ZOMBIE
@@ -915,6 +916,7 @@ struct test_case g_tests[] = {
                                        test_demand_page_lifecycle_round_trip,
                                                                            false, NULL },
     { "demand_page.file_smoke",        test_demand_page_file_smoke,        false, NULL },
+    { "demand_page.file_nodes_are_the_system_caches", test_demand_page_file_nodes_are_the_system_caches, false, NULL },
     { "demand_page.file_pagein_not_note_interruptible", test_demand_page_file_pagein_not_note_interruptible, false, NULL },
     { "demand_page.file_pages_charge_the_holder",
                                        test_demand_page_file_pages_charge_the_holder,
@@ -1232,6 +1234,20 @@ struct test_case g_tests[] = {
     { "mm0.today_partial_map_retains_the_whole", test_mm0_today_partial_map_retains_the_whole, false, NULL },
     { "mm0.today_orphan_pin_charges_no_proc", test_mm0_today_orphan_pin_charges_no_proc, false, NULL },
     { "mm0.today_dma_bypasses_the_pool", test_mm0_today_dma_bypasses_the_pool, false, NULL },
+    { "account.rounded_block_charges_its_whole_order", test_account_rounded_block_charges_its_whole_order, false, NULL },
+    { "account.orphan_stays_charged_until_its_last_page", test_account_orphan_stays_charged_until_its_last_page, false, NULL },
+    { "account.refused_allocation_leaves_the_ledger", test_account_refused_allocation_leaves_the_ledger, false, NULL },
+    { "account.depth_stops_at_sixteen", test_account_depth_stops_at_sixteen, false, NULL },
+    { "account.incarnation_never_repeats", test_account_incarnation_never_repeats, false, NULL },
+    { "account.refund_past_zero_is_counted", test_account_refund_past_zero_is_counted, false, NULL },
+    { "account.fork_keeps_the_account", test_account_fork_keeps_the_account, false, NULL },
+    { "account.dma_charges_whole_blocks_outside_the_pool", test_account_dma_charges_whole_blocks_outside_the_pool, false, NULL },
+    { "account.thread_charges_meta_to_its_payer", test_account_thread_charges_meta_to_its_payer, false, NULL },
+    { "account.ledger_reconciles_with_the_pool", test_account_ledger_reconciles_with_the_pool, false, NULL },
+    { "account.blocks_that_exist_are_the_ledger", test_account_blocks_that_exist_are_the_ledger, false, NULL },
+    { "account.wrong_order_release_is_counted", test_account_wrong_order_release_is_counted, false, NULL },
+    { "account.query_reports_bytes_up_the_chain", test_account_query_reports_bytes_up_the_chain, false, NULL },
+    { "account.syscall_refuses_by_name", test_account_syscall_refuses_by_name, false, NULL },
     { "vma.range_is_mapped",              test_vma_range_is_mapped,              false, NULL },
     { "pagemap.grow_keeps_every_page",    test_pagemap_grow_keeps_every_page,    false, NULL },
     { "anon_merge.adjacent_reserves_share_one_mapping", test_anon_merge_adjacent_reserves_share_one_mapping, false, NULL },
@@ -1491,6 +1507,7 @@ struct test_case g_tests[] = {
     { "devproc.walk_dotdot_to_root",   test_devproc_walk_dotdot_to_root,   false, NULL },
     { "devproc.read_status_format",    test_devproc_read_status_format,    false, NULL },
     { "devproc.imperium_read_gated",   test_devproc_imperium_read_gated,   false, NULL },
+    { "devproc.account_read_gated",    test_devproc_account_read_gated,    false, NULL },
     { "devproc.read_imperium_format",  test_devproc_read_imperium_format,  false, NULL },
     { "proc.cpu_ns_accounting",        test_proc_cpu_ns_accounting,        false, NULL },
     { "scheduler.prowl_counters",      test_sched_prowl_counters,          false, NULL },
@@ -2218,6 +2235,8 @@ struct test_case g_tests[] = {
     { "9p_session.walk_fid_full_no_latch", test_9p_session_walk_fid_full_no_latch, false, NULL },
     { "9p_session.flush_headroom_grows_table",
                                        test_9p_session_flush_headroom_grows_table, false, NULL },
+    { "9p_session.reserved_tags_cap_the_table",
+                                       test_9p_session_reserved_tags_cap_the_table, false, NULL },
     { "9p_session.sync_owner_index",   test_9p_session_sync_owner_index,   false, NULL },
     { "9p_session.clunk_retract_after_peer_fill",
                                        test_9p_session_clunk_retract_after_peer_fill, false, NULL },
@@ -3499,6 +3518,8 @@ bool test_strong_entropy(void) {
     return false;
 }
 
+#define TEST_STRAY_WAIT_NS 2000000000ull
+
 void test_run_all(void) {
     // Legacy console transition tests require the serial recovery posture.
     // Select it explicitly for the fixture; the real boot policy is restored
@@ -3511,6 +3532,11 @@ void test_run_all(void) {
     skipped_count = 0;
     proc_wait_timeout_total = 0;
     __atomic_store_n(&g_test_proc_wait_timeouts, 0u, __ATOMIC_RELEASE);
+
+    // A child alive before any test ran is nobody's stray, and waiting on it after
+    // every test would only cost the bound each time.
+    int stray_probe = -1;
+    bool standing_child = wait_pid_for(-1, WAIT_WNOHANG, &stray_probe) == 0;
 
     for (int i = 0; g_tests[i].fn != NULL; i++) {
         current_test = &g_tests[i];
@@ -3570,6 +3596,15 @@ void test_run_all(void) {
             uart_puts(") ");
             if (!current_test->failed)
                 test_fail("test left global console state armed (see LEAKED-STATE)");
+        }
+
+        // A charge and its return no longer pair. Nothing else would say so, because at
+        // MM-1 no decision reads this ledger.
+        if (account_unpaired() != 0u) {
+            uart_puts("ACCOUNT-UNPAIRED ");
+            if (!current_test->failed)
+                test_fail("a ledger pairing broke (see ACCOUNT-UNPAIRED)");
+            account_unpaired_rewind_for_test(0u);
         }
 
         // The user pool's test park is the seventh piece of that state. A
@@ -3642,6 +3677,37 @@ void test_run_all(void) {
             uart_puts(") ");
             if (!current_test->failed)
                 test_fail("test left a fabricated Proc linked (see LEAKED-PROC)");
+        }
+
+        // And a real child: one a failing assert walked past, or an orphan this
+        // thread adopted. Its next reap-any takes that child in place of its own, so
+        // every later wait is one behind and the reds land far from the cause. A
+        // dying one gets a moment to finish; one that stays alive is reported once.
+        u32 strays = 0;
+        bool stray_alive = false;
+        u64 stray_deadline = timer_now_ns() + TEST_STRAY_WAIT_NS;
+        for (;;) {
+            int stray_status = -1;
+            int rc = wait_pid_for(-1, WAIT_WNOHANG, &stray_status);
+            if (rc > 0) {
+                strays++;
+                continue;
+            }
+            if (rc < 0 || standing_child) break;
+            if (timer_now_ns() >= stray_deadline) {
+                stray_alive = standing_child = true;
+                break;
+            }
+            sched();
+        }
+        if (strays != 0 || stray_alive) {
+            uart_puts("STRAY-CHILD(");
+            uart_putdec(strays);
+            uart_puts(" reaped");
+            if (stray_alive) uart_puts(", one alive");
+            uart_puts(") ");
+            if (!current_test->failed)
+                test_fail("test left a child behind (see STRAY-CHILD)");
         }
 
         // #134: a bounded wait inside a CHILD PROC's entry thunk cannot fail the

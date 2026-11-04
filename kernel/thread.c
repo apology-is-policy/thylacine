@@ -20,6 +20,7 @@
 
 #include <thylacine/context.h>
 #include <thylacine/extinction.h>
+#include <thylacine/memaccount.h>
 #include <thylacine/page.h>
 #include <thylacine/proc.h>
 #include <thylacine/sched.h>
@@ -489,6 +490,13 @@ struct Thread *thread_create_bootcpu_idle(void (*entry)(void), void *stack_top) 
 _Static_assert(sizeof(struct Thread) <= PAGE_SIZE, "a thread's slot is charged as one page");
 _Static_assert(THREAD_POOL_PAGES <= 255, "Thread.pool_pages is a u8");
 
+static void thread_pool_return(u32 pool, struct MemoryAccount *sponsor) {
+    if (!pool) return;
+    capacity_uncharge(pool);
+    account_refund(sponsor, CLASS_META, pool);
+    account_unref(sponsor);
+}
+
 // A new thread of `proc` whose kernel memory `payer` is charged for, with the
 // fields every create shares set: the tid, the pool charge, the slot and the
 // stack, in that order, each undone if a later one fails. NULL when the id
@@ -503,10 +511,15 @@ static struct Thread *thread_new(struct Proc *proc, struct Proc *payer) {
 
     u32 pool = (payer == kproc()) ? 0u : THREAD_POOL_PAGES;
     if (pool && !capacity_charge(pool, proc_resource_exempt(payer))) return NULL;
+    struct MemoryAccount *sponsor = pool ? payer->account : NULL;
+    if (sponsor) {
+        account_ref(sponsor);
+        account_charge(sponsor, CLASS_META, pool);
+    }
 
     struct Thread *t = kmem_cache_alloc(g_thread_cache, KP_ZERO);
     if (!t) {
-        if (pool) capacity_uncharge(pool);
+        thread_pool_return(pool, sponsor);
         return NULL;
     }
 
@@ -515,7 +528,7 @@ static struct Thread *thread_new(struct Proc *proc, struct Proc *payer) {
     void *kalloc_base = kstack_alloc();
     if (!kalloc_base) {
         kmem_cache_free(g_thread_cache, t);
-        if (pool) capacity_uncharge(pool);
+        thread_pool_return(pool, sponsor);
         return NULL;
     }
 
@@ -535,6 +548,7 @@ static struct Thread *thread_new(struct Proc *proc, struct Proc *payer) {
     t->band        = SCHED_BAND_NORMAL;
     t->slice_remaining = THREAD_DEFAULT_SLICE_TICKS;
     t->pool_pages  = (u8)pool;
+    t->pool_sponsor = sponsor;
     return t;
 }
 
@@ -784,10 +798,11 @@ static void thread_release(struct Thread *t, bool unlink);
 // The last step of every free. Nothing can reach t any more.
 static void thread_destroy(struct Thread *t) {
     u32 pool = t->pool_pages;
+    struct MemoryAccount *sponsor = t->pool_sponsor;
     if (t->kstack_base)
         kstack_free(t->kstack_base);
     kmem_cache_free(g_thread_cache, t);
-    if (pool) capacity_uncharge(pool);
+    thread_pool_return(pool, sponsor);
     __atomic_fetch_add(&g_thread_destroyed, 1u, __ATOMIC_RELAXED);
 }
 
@@ -812,8 +827,10 @@ void thread_reap_dead(struct Thread *t) {
     // it then reads must hold nothing of the child's. The memory follows a
     // moment later; the reserve covers that slack (one thread per CPU).
     u32 pool = t->pool_pages;
+    struct MemoryAccount *sponsor = t->pool_sponsor;
     t->pool_pages = 0;
-    if (pool) capacity_uncharge(pool);
+    t->pool_sponsor = NULL;
+    thread_pool_return(pool, sponsor);
     irq_state_t s = proc_threads_lock(p);
     p->reaped_run_ns += __atomic_load_n(&t->run_ns, __ATOMIC_RELAXED);
     if (used > p->reaped_kstack_peak) {

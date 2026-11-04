@@ -6,7 +6,7 @@ use libhalcyon::{
     interaction_wire::{Header, Mode, Operation, MAX_RECORD},
 };
 use libthyla_rs::{fs::File, handle::Rights, *};
-type Result<T> = core::result::Result<T, &'static str>;
+pub(crate) type Result<T> = core::result::Result<T, &'static str>;
 struct Client {
     _root: File,
     file: File,
@@ -176,6 +176,29 @@ impl Client {
 fn payload() -> Vec<u8> {
     (0..20000).map(|i| b'a' + (i % 26) as u8).collect()
 }
+/// The clipboard's value as this path reads it, in a connection of its own.
+pub(crate) fn current() -> Result<Vec<u8>> {
+    let mut c = Client::connect()?;
+    c.call(Request::Mode {
+        scope: c.scope,
+        sequence: 1,
+        mode: Mode::Normal,
+        readonly: false,
+        label: "clipboard qualification",
+    })?;
+    let (transfer, _, length) = c.get()?;
+    let mut bytes = Vec::new();
+    while bytes.len() < length {
+        let part = c.read(transfer, bytes.len(), 9000)?;
+        if part.is_empty() {
+            return Err("early snapshot EOF");
+        }
+        bytes.extend_from_slice(&part);
+    }
+    c.call(Request::Cancel { transfer })?;
+    c.call(Request::Unbind { scope: c.scope })?;
+    Ok(bytes)
+}
 fn test(mode: &str) -> Result<()> {
     if !matches!(mode, "copy" | "read" | "hold" | "park") {
         return Err("mode");
@@ -292,7 +315,12 @@ fn test(mode: &str) -> Result<()> {
 pub fn run() -> i64 {
     let arg = env::args().nth(2).unwrap_or(b"copy");
     let mode = core::str::from_utf8(arg).unwrap_or("invalid");
-    match test(mode) {
+    let result = if mode.starts_with("async") {
+        crate::clipboard_async::test(mode)
+    } else {
+        test(mode)
+    };
+    match result {
         Ok(()) => {
             t_putstr(&::alloc::format!("clipboard-probe: {} PASS\n", mode));
             0

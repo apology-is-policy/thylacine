@@ -60,8 +60,54 @@ static void operation_put(struct Loom *l,struct loom_service_ref s,
     loom_private_close_changed(l);
     loom_unref(l); // retained creator image and Loom are last
 }
-int loom_private_operation_prepare(struct Loom *l,struct loom_service_ref scope,
-    u64 user_data,u64 deadline,u64 now,struct loom_service_operation **out) {
+struct loom_service_operation *loom_private_clunk_storage_new(struct Loom *l,bool exempt) {
+    bool fault=operation_fault_take();
+    spin_lock(&l->service_as->lock);
+    bool charged=addrspace_charge_pages(l->service_as,1,exempt);
+    spin_unlock(&l->service_as->lock);
+    if (!charged) return NULL;
+    struct loom_service_operation *op=fault ? NULL : kmalloc(PAGE_SIZE,KP_ZERO);
+    if (!op) operation_refund(l);
+    return op;
+}
+void loom_private_clunk_storage_free(struct Loom *l,struct loom_service_operation *op) {
+    if (!op) return;
+    kfree(op);
+    operation_refund(l);
+}
+static int operation_reserved_locked(struct Loom *l,struct loom_service_ref fid,
+                                     struct loom_service_operation **out) {
+    if (fid.reserved || !fid.incarnation || fid.slot>=LOOM_SERVICE_SLOT_COUNT) return -T_E_NOENT;
+    struct loom_service_slot *s=&l->service_slots->slots[fid.slot];
+    if (s->incarnation!=fid.incarnation || s->kind!=LOOM_SERVICE_FID || s->phase!=LSLOT_LIVE)
+        return -T_E_NOENT;
+    *out=l->service_slots->clunk_storage[fid.slot];
+    return *out ? 0 : -T_E_BUSY;
+}
+// A CLUNK that never started leaves its FID as it was, so the page goes back for the
+// next one. Zeroed here because every page a slot holds is zero. A FID can leave with
+// its page out, by an unused reap at any time or a walked reap once its scope retired,
+// and the slot may hold another FID by then. An incarnation is never reused, so only
+// the exact one gets the page back; otherwise it is this operation's to free.
+static void operation_storage_release(struct Loom *l,struct loom_service_operation *op) {
+    struct loom_service_ref home=op->storage_home;
+    if (home.incarnation) {
+        u8 *bytes=(u8 *)op;
+        for (size_t i=0;i<sizeof(*op);++i) bytes[i]=0;
+        spin_lock(&l->lock);
+        struct loom_service_slot *s=&l->service_slots->slots[home.slot];
+        bool back=s->incarnation==home.incarnation;
+        if (back && l->service_slots->clunk_storage[home.slot])
+            extinction("a FID held two CLUNK reservations");
+        if (back) l->service_slots->clunk_storage[home.slot]=op;
+        spin_unlock(&l->lock);
+        if (back) return;
+    }
+    loom_private_clunk_storage_free(l,op);
+}
+static int operation_prepare(struct Loom *l,struct loom_service_ref scope,
+    const struct loom_service_ref *fid,u64 user_data,u64 deadline,u64 now,
+    struct loom_service_operation **out) {
     bool fault=operation_fault_take();
     if (!l || l->magic!=LOOM_MAGIC || !loom_is_private(l) || !out) return -T_E_INVAL;
     if (deadline && deadline<=now) return -T_E_TIMEDOUT;
@@ -73,24 +119,33 @@ int loom_private_operation_prepare(struct Loom *l,struct loom_service_ref scope,
     if (rc) return rc;
     loom_ref(l);
     struct loom_request_ref request;
+    struct loom_service_operation *op=NULL;
     spin_lock(&l->lock);
     rc=operation_scope_ready(l,scope,p);
+    if (!rc && fid) rc=operation_reserved_locked(l,*fid,&op);
     if (!rc) rc=loom_request_prepare(&l->service_requests,l->service_slots,
               l->service_nodes,scope,user_data,deadline,now,&request);
     if (!rc && loom_request_hold_owner(&l->service_requests,request))
         extinction("operation cannot hold fresh prepared owner");
+    if (!rc && fid) l->service_slots->clunk_storage[fid->slot]=NULL;
     spin_unlock(&l->lock);
     if (rc) { operation_put(l,scope,p); return rc; }
-    spin_lock(&l->service_as->lock);
-    bool charged=addrspace_charge_pages(l->service_as,1,
-                       identity.access.principal_id==PRINCIPAL_SYSTEM);
-    spin_unlock(&l->service_as->lock);
-    if (!charged) { rc=-T_E_NOMEM; goto fail_reservation; }
-    // Request a full page, not sizeof(*op): exact buddy storage charge even
-    // when operation metadata would otherwise fit a shared slab class.
-    struct loom_service_operation *op=fault ? NULL : kmalloc(PAGE_SIZE,KP_ZERO);
-    if (!op) { rc=-T_E_NOMEM; goto fail_charge; }
+    if (!fid) {
+        spin_lock(&l->service_as->lock);
+        bool charged=addrspace_charge_pages(l->service_as,1,
+                           identity.access.principal_id==PRINCIPAL_SYSTEM);
+        spin_unlock(&l->service_as->lock);
+        if (!charged) { rc=-T_E_NOMEM; goto fail_reservation; }
+        // Request a full page, not sizeof(*op): exact buddy storage charge even
+        // when operation metadata would otherwise fit a shared slab class.
+        op=fault ? NULL : kmalloc(PAGE_SIZE,KP_ZERO);
+        if (!op) { rc=-T_E_NOMEM; goto fail_charge; }
+    }
     op->owner=l; op->protocol=p; op->request=request; op->scope=scope;
+    if (fid) op->storage_home=*fid;
+#ifdef KERNEL_TESTS
+    loom_private_close_boundary_for_test(l,6); // between the two Ll holds
+#endif
     // Keep the fresh creator/image snapshot, never CONNECT or worker authority.
     const u8 *src=(const u8 *)&identity.access;
     u8 *dst=(u8 *)&op->program.identity;
@@ -98,7 +153,7 @@ int loom_private_operation_prepare(struct Loom *l,struct loom_service_ref scope,
     spin_lock(&l->lock);
     rc=operation_scope_ready(l,scope,p);
     spin_unlock(&l->lock);
-    if (rc) { kfree(op); goto fail_charge; }
+    if (rc) { operation_storage_release(l,op); goto fail_reservation; }
     *out=op;
     return 0;
 fail_charge:
@@ -107,6 +162,15 @@ fail_reservation:
     operation_unreserve(l,request);
     operation_put(l,scope,p);
     return rc;
+}
+int loom_private_operation_prepare(struct Loom *l,struct loom_service_ref scope,
+    u64 user_data,u64 deadline,u64 now,struct loom_service_operation **out) {
+    return operation_prepare(l,scope,NULL,user_data,deadline,now,out);
+}
+int loom_private_operation_prepare_clunk(struct Loom *l,struct loom_service_ref scope,
+    struct loom_service_ref fid,u64 user_data,u64 deadline,u64 now,
+    struct loom_service_operation **out) {
+    return operation_prepare(l,scope,&fid,user_data,deadline,now,out);
 }
 int loom_private_operation_release_unused(struct loom_service_operation *op) {
     if (!op || !op->owner || !op->protocol) return -T_E_INVAL;
@@ -123,8 +187,7 @@ int loom_private_operation_release_unused(struct loom_service_operation *op) {
         op->phase==LRPC_NEW && !op->next && !op->prev && !op->submitted && !op->fid_claim && !op->source_borrow && !op->fixed.owner && !op->pool_stream && !op->fixed_dropping;
     spin_unlock(&l->lock);
     if (!unused) return -T_E_BUSY;
-    kfree(op);
-    operation_refund(l);
+    operation_storage_release(l,op);
     operation_unreserve(l,request);
     operation_put(l,scope,p);
     return 0;

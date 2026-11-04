@@ -65,21 +65,21 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**716 owned · 39 unowned · 755 files (94% owned) · ~9931 unswept lines.**
+**727 owned · 39 unowned · 766 files (94% owned) · ~10016 unswept lines.**
 
-Excluded as harness and counted here rather than dropped: **93 files, ~46772 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
+Excluded as harness and counted here rather than dropped: **96 files, ~48147 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
 | area | owned | unowned | unswept lines |
 |---|---:|---:|---:|
-| usr/warp-prove | 0 | 1 | 4349 |
+| usr/warp-prove | 0 | 1 | 4434 |
 | usr/pouch-hello | 24 | 14 | 1751 |
 | usr/ports | 19 | 5 | 1691 |
-| kernel | 193 | 10 | 1239 |
+| kernel | 196 | 10 | 1239 |
 | usr/gl-sdl-prove | 0 | 1 | 262 |
-| usr/libthyla-rs | 35 | 1 | 196 |
+| usr/libthyla-rs | 36 | 1 | 196 |
 | arch | 41 | 2 | 146 |
 | usr/susp-mask-child | 0 | 1 | 139 |
-| usr/lib | 124 | 1 | 72 |
+| usr/lib | 129 | 1 | 72 |
 | usr/bus-probe-child | 0 | 1 | 63 |
 | usr/tapestryd | 11 | 2 | 23 |
 | mm | 8 | 0 | 0 |
@@ -109,14 +109,14 @@ Excluded as harness and counted here rather than dropped: **93 files, ~46772 lin
 | usr/netdev-driver | 1 | 0 | 0 |
 | usr/nocturne-vol | 1 | 0 | 0 |
 | usr/nocturned | 3 | 0 | 0 |
-| usr/nora | 13 | 0 | 0 |
+| usr/nora | 14 | 0 | 0 |
 | usr/protect-guard-child | 1 | 0 | 0 |
 | usr/prowl | 3 | 0 | 0 |
 | usr/ptyfs | 2 | 0 | 0 |
 | usr/ptyhost | 1 | 0 | 0 |
 | usr/quarry | 1 | 0 | 0 |
 | usr/sntp | 1 | 0 | 0 |
-| usr/utopia | 30 | 0 | 0 |
+| usr/utopia | 31 | 0 | 0 |
 | usr/view | 2 | 0 | 0 |
 | usr/virtio-blk-rw | 1 | 0 | 0 |
 | usr/virtio-gpu | 1 | 0 | 0 |
@@ -131,7 +131,7 @@ Excluded as harness and counted here rather than dropped: **93 files, ~46772 lin
 
 | file | lines |
 |---|---:|
-| usr/warp-prove/src/main.rs | 4349 |
+| usr/warp-prove/src/main.rs | 4434 |
 | usr/ports/gnumake/config.h | 1357 |
 | usr/pouch-hello/pouch-hello-net.c | 293 |
 | kernel/include/thylacine/spinlock.h | 287 |

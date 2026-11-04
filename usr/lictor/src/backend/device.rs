@@ -90,6 +90,9 @@ impl Device {
     fn reserve(&mut self, id: u32, kind: Kind) -> Result<(), Error> {
         self.objects.reserve(self.owner, id, kind).map_err(|_| Error::BadField)
     }
+    fn reserve_in(&mut self, id: u32, ctx: u32) -> Result<(), Error> {
+        self.objects.reserve_in(self.owner, id, ctx).map_err(|_| Error::BadField)
+    }
     /// A failed command left nothing on the device when no stall began
     /// across it and the engine lives: refused before staging, or refused by
     /// the device. Only then may its bookkeeping be undone (GPU-DESIGN 4.5.15).
@@ -201,18 +204,32 @@ impl Device {
             self.test_latch_targets.push(resource_id);
         }
     }
-    /// A retirement runs only once all device work has really retired
-    /// (abandoned/poisoned chains do not qualify); the server parks it until
-    /// then, and one admitted without it (`gpu_api::admit`: quiescence
-    /// unreachable, or the park bound) is refused here before any ledger
+    /// What stands between `request` and its object, for a retirement: the
+    /// device's chains that can reach that object, and no others.
+    pub fn retirement_hold(&self, request: &Request) -> Hold {
+        match request.retired_object() {
+            Some(object) => self.gpu.retirement_hold(object, |ctx, res| self.objects.holds(ctx, res)),
+            None => Hold::Clear,
+        }
+    }
+    /// A retirement runs only once every chain that can reach its object has
+    /// really retired (an abandoned chain does not qualify); the server parks
+    /// it until then, and one admitted without it (`gpu_api::admit`: a hold
+    /// nothing can clear, or the park bound) is refused here before any ledger
     /// change, so no `retiring` entry is left that `reap` could never finish.
     pub fn execute(&mut self, connection: i64, request: Request) -> Result<Vec<u8>, Error> {
-        if request.retires() && !self.gpu.all_work_retired() {
+        let hold = self.retirement_hold(&request);
+        if hold != Hold::Clear {
             self.refused_retirements += 1;
             if self.refused_retirements.is_power_of_two() {
+                let why = if hold == Hold::Parks || self.gpu.engine_dead() {
+                    "on a non-quiescent engine"
+                } else {
+                    "while a poisoned chain can reach its object"
+                };
                 crate::backend::diagnostic(&alloc::format!(
-                    "lictor: retirement refused on a non-quiescent engine (pins kept; {} so far)\n",
-                    self.refused_retirements));
+                    "lictor: retirement refused {} (pins kept; {} so far)\n",
+                    why, self.refused_retirements));
             }
             return Err(Error::Hardware);
         }
@@ -309,7 +326,7 @@ impl Device {
             Request::CreateHost3dBlob { resource_id, ctx_id, blob_flags, len, blob_id } => {
                 self.check(ctx_id, Kind::Context)?;
                 if len == 0 || len as u64 > 64 * 1024 * 1024 { return Err(Error::BadField); }
-                self.reserve(resource_id, Kind::Resource)?;
+                self.reserve_in(resource_id, ctx_id)?;
                 let stalls = self.gpu.stalls();
                 let result = self.gpu.create_host3d_blob(resource_id, ctx_id, blob_flags, len, blob_id);
                 if result.is_err() { self.unreserve(resource_id, Kind::Resource, stalls); }
@@ -324,7 +341,7 @@ impl Device {
             Request::MintHost3dRing { res_id, ctx_id, len, blob_id } => {
                 self.check(ctx_id, Kind::Context)?;
                 if len == 0 || len > 1024 * 1024 { return Err(Error::BadField); }
-                self.reserve(res_id, Kind::Resource)?;
+                self.reserve_in(res_id, ctx_id)?;
                 let stalls = self.gpu.stalls();
                 let result = self.gpu.mint_host3d_ring(res_id, ctx_id, len, blob_id);
                 if result.is_err() { self.unreserve(res_id, Kind::Resource, stalls); }
@@ -447,7 +464,7 @@ impl Device {
             Request::CreatePresentable { res_id, ctx_id, len, blob_id } => {
                 self.check(ctx_id, Kind::Context)?;
                 if len == 0 || len as u64 > 64 * 1024 * 1024 { return Err(Error::BadField); }
-                self.reserve(res_id, Kind::Resource)?;
+                self.reserve_in(res_id, ctx_id)?;
                 let stalls = self.gpu.stalls();
                 let result = self.gpu.create_presentable(res_id, ctx_id, len, blob_id);
                 if result.is_err() { self.unreserve(res_id, Kind::Resource, stalls); }
@@ -456,12 +473,14 @@ impl Device {
             Request::CtxAttachResourceProbe { ctx_id, resource_id } => {
                 self.check(resource_id, Kind::Resource)?;
                 self.check(ctx_id, Kind::Context)?;
+                // Linked before the device answers, as CtxAttachResource is:
+                // a retirement reads this ledger for what a chain can reach,
+                // so a link the device holds must never be missing from it.
+                self.objects.attach(self.owner, ctx_id, resource_id).map_err(|_| Error::BadField)?;
                 let stalls = self.gpu.stalls();
                 let result = self.gpu.ctx_attach_resource_probe(ctx_id, resource_id);
-                // A stalled attach may still link the resource, and an unref
-                // must then wait for the detach like any linked one.
-                if matches!(result, Ok(0x1100)) || self.gpu.stalls() != stalls {
-                    self.objects.attach(self.owner, ctx_id, resource_id).map_err(|_| Error::BadField)?;
+                if !matches!(result, Ok(0x1100)) && self.left_nothing(stalls) {
+                    let _ = self.objects.detached(self.owner, ctx_id, resource_id);
                 }
                 result.put(&mut out);
             }

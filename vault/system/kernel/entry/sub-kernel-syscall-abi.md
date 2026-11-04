@@ -13,11 +13,14 @@ code:
   - usr/lib/libt/src/start.S
   - usr/lib/libthyla-rs/src/lib.rs
   - usr/lib/libthyla-rs/src/pty_interaction.rs
+  - kernel/include/thylacine/account.h
+  - usr/lib/libt/include/thyla/account.h
+  - usr/lib/libthyla-rs/src/account.rs
 audit: hard
 guarded-by: [inv-i5, inv-i13, inv-i32]
 validated-by: [prose, gate-smp, gate-interactive]
 locks: []
-abis: [abi-t-stat, abi-handle-rights, abi-errno, abi-pty-interaction]
+abis: [abi-t-stat, abi-handle-rights, abi-errno, abi-pty-interaction, abi-memory-account]
 design:
   - "docs/ARCHITECTURE.md section 13"
 created: 2026-08-03
@@ -428,6 +431,17 @@ native switch's unknown arm through `syscall_unknown_count()` rather than
 trusting the -1 many handlers also return): those numbers belong to other
 branches.
 
+**Private Loom register records (2026-11-03).** `sys_loom_register_private` copies a record
+of up to 64 bytes onto the stack, so REAP, ABORT, QUERY and RETURN are not refused for
+memory; only TARGET and POOL allocate.
+
+**The memory account call (2026-11-03, operator votes 47 and 48).**
+`SYS_ACCOUNT` = 140: handle or `ACCOUNT_SELF`, operation, record pointer, record size.
+Reserved at MM-0 as a number and a layout; MM-1b gave it an arm, which serves the query
+on the caller's own account ([[abi-memory-account]]). `SYS__NATIVE_TOP` is 141
+and `VIV_NATIVE_CEILING` 140. The live count below does not move. [[abi-memory-account]]
+holds the records.
+
 **Thread-directed notes (2026-11-02, operator vote 14).** `SYS_POSTNOTE_TID` = 138:
 tid, name pointer, name length. Tid 0 is the calling thread, and the call reaches the
 caller's own Proc only, so it grants nothing a post to self does not. A name a program
@@ -699,6 +713,8 @@ page budget refuses an over-cap request "never clamped — a silent clamp would
 hand back a budget the caller did not ask for and hide the misconfiguration".
 
 The CSPRNG read clamps. See Caveats.
+
+**The accounts behind `SYS_ACCOUNT` (MM-1).** `kernel/account.c` now holds the account tree and its ledger, which [[sub-kernel-accounts]] owns in substance. The call is live for `ACCOUNT_QUERY` on `ACCOUNT_SELF`, and the wrappers are `t_account` in libt and `t_account` and `t_account_query` in libthyla-rs.
 
 ## Data structures
 

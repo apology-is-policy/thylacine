@@ -43,13 +43,15 @@ use alloc::vec::Vec;
 use libthyla_rs::alloc::ThylaAlloc;
 use libthyla_rs::env;
 use libthyla_rs::io::{self, Read};
-use libthyla_rs::poll::{AsFd, PollEvents, PollSet, PollTimeout};
+use libthyla_rs::poll::{AsFd, PollEvents, PollSet};
 use libthyla_rs::{
     t_close, t_mount, t_open, t_putstr, t_walk_create, t_walk_open, T_MREPL, T_OPATH, T_OREAD,
     T_WALK_CREATE_DMDIR, T_WALK_OPEN_FROM_ROOT,
 };
 use libutopia::repl::Repl;
 use libutopia::{ansi, palette, GLYPH};
+
+mod clip_host;
 
 #[global_allocator]
 static GLOBAL_ALLOCATOR: ThylaAlloc = ThylaAlloc;
@@ -534,6 +536,8 @@ pub extern "C" fn rs_main() -> i64 {
     let poll_in_fd = repl.poll_in_fd().unwrap_or(cons_fd);
     let mut notes_fd = repl.notes_fd();
     let mut poll = PollSet::new();
+    let mut clip = clip_host::Clip::new();
+    let mut clip_fd = None;
     poll.add_raw(poll_in_fd, PollEvents::READ);
     if let Some(nfd) = notes_fd {
         poll.add_raw(nfd, PollEvents::READ);
@@ -544,7 +548,8 @@ pub extern "C" fn rs_main() -> i64 {
         let mut cons_ready = false;
         let mut notes_ready = false;
         let mut notes_dead = false;
-        match poll.poll(PollTimeout::Block) {
+        let mut clip_ready = false;
+        match poll.poll(clip.poll_timeout()) {
             Ok(results) => {
                 for ev in results {
                     if ev.fd == poll_in_fd {
@@ -565,6 +570,8 @@ pub extern "C" fn rs_main() -> i64 {
                             // loop -- notes then degrade to sync-point delivery.
                             notes_dead = true;
                         }
+                    } else if Some(ev.fd) == clip_fd {
+                        clip_ready = true;
                     }
                 }
             }
@@ -599,10 +606,16 @@ pub extern "C" fn rs_main() -> i64 {
             }
         }
         if cons_ready {
-            match io::stdin().read(&mut buf) {
+            // Under job control what follows an Enter is the command's, so a read never
+            // goes past the key it needs. A console session's children read no console.
+            let wanted = if repl.job_control() { 1 } else { buf.len() };
+            match io::stdin().read(&mut buf[..wanted]) {
                 Ok(0) | Err(_) => break repl.exit_code(),
                 Ok(n) => {
-                    if let Some(code) = repl.feed(&buf[..n], &mut out) {
+                    let ended = repl.feed_announcing(&buf[..n], &mut out, &mut || {
+                        clip.line_accepted()
+                    });
+                    if let Some(code) = ended {
                         break code;
                     }
                     // H-2 F10: a completed command cycle drew a fresh prompt
@@ -624,7 +637,18 @@ pub extern "C" fn rs_main() -> i64 {
                 }
             }
         }
+        clip.service(clip_ready, &mut repl, &mut out);
+        if clip.poll_fd() != clip_fd {
+            if let Some(fd) = clip_fd {
+                poll.remove_raw(fd);
+            }
+            clip_fd = clip.poll_fd();
+            if let Some(fd) = clip_fd {
+                poll.add_raw(fd, PollEvents::READ);
+            }
+        }
     };
 
+    repl.leave_terminal();
     exit_code as i64
 }

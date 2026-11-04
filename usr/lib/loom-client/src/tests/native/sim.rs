@@ -26,6 +26,7 @@ pub const EBADF: i64 = -9;
 pub const EBUSY: i64 = -16;
 pub const EINVAL: i64 = -22;
 pub const ENOENT: i64 = -2;
+pub const ENOMEM: i64 = -12;
 pub const ENOSPC: i64 = -28;
 pub const ENOTDIR: i64 = -20;
 pub const EISDIR: i64 = -21;
@@ -115,8 +116,23 @@ struct Ring {
     sq_head: u32,
     cq_tail: u32,
 }
+/// A service that answers READ and WRITE itself, for a protocol the flat file
+/// tree cannot speak. None keeps the operation running: the server has not replied.
+pub trait Service {
+    fn connected(&mut self, _scope: usize) {}
+    fn write(&mut self, scope: usize, fid: usize, offset: u64, bytes: &[u8]) -> Option<i64>;
+    fn read(&mut self, scope: usize, fid: usize, offset: u64, out: &mut [u8]) -> Option<i64>;
+}
 pub struct State {
     pub clock: u64,
+    /// Answers READ and WRITE instead of `files`, whose names still route WALKs.
+    pub service: Option<Box<dyn Service>>,
+    /// Answer this many more operations, then behave as held.
+    pub hold_after: Option<u32>,
+    /// Run the server inside ENTER too, as a peer CPU may.
+    pub step_on_enter: bool,
+    /// What the session negotiated, which bounds each READ and WRITE of a `service`.
+    pub msize: Option<usize>,
     regions: HashMap<usize, Region>,
     pub attach_fail_at: Option<usize>,
     attaches: usize,
@@ -167,6 +183,8 @@ pub struct State {
     pub poll_answer: Option<i64>,
     /// The next RETURN answers this instead of releasing its member.
     pub refuse_return: Option<i64>,
+    /// A reservation answers ENOMEM until a slot is reaped.
+    pub reserve_out_of_memory: bool,
     /// ENTER refuses the next CLUNK with this errno.
     pub refuse_clunk: Option<i64>,
     /// Setup answers this errno, mapping nothing.
@@ -195,6 +213,10 @@ impl Sim {
     pub fn new() -> Self {
         Sim(Rc::new(RefCell::new(State {
             clock: 1_000_000_000,
+            service: None,
+            hold_after: None,
+            step_on_enter: false,
+            msize: None,
             regions: HashMap::new(),
             attach_fail_at: None,
             attaches: 0,
@@ -230,6 +252,7 @@ impl Sim {
             enter_errno: None,
             poll_answer: None,
             refuse_return: None,
+            reserve_out_of_memory: false,
             refuse_clunk: None,
             setup_errno: None,
             setup_unmapped: false,
@@ -557,15 +580,27 @@ impl State {
         if !self.hold {
             let n = self.ops.len();
             for _ in 0..n {
+                if self.hold_after == Some(0) {
+                    self.hold = true;
+                    break;
+                }
                 let op = self.ops.pop_front().unwrap();
                 if let Some(op) = self.answer(op) {
                     self.ops.push_back(op);
+                } else if let Some(left) = self.hold_after.as_mut() {
+                    *left -= 1;
                 }
             }
         }
         self.settle();
         self.flush();
     }
+    /// loom_service_wire.c: a count is cut to what one message of the session can carry.
+    fn io_count(&self, len: u32, overhead: usize) -> usize {
+        let len = len as usize;
+        self.msize.map_or(len, |msize| len.min(msize - overhead))
+    }
+
     fn buffer(&self, index: u32, at: u64, len: u32) -> Option<*mut u8> {
         let &(va, n) = self.buffers.get(index as usize)?;
         if at.checked_add(len as u64)? > n as u64 {
@@ -585,6 +620,9 @@ impl State {
                 let scope = self.slots[op.scope].as_mut().unwrap();
                 if self.services.contains(&name) {
                     scope.state = READY;
+                    if let Some(service) = self.service.as_mut() {
+                        service.connected(op.scope);
+                    }
                     op.scope as i64
                 } else {
                     scope.state = RETIRED;
@@ -592,17 +630,24 @@ impl State {
                 }
             }
             OpKind::Walk { dest, name } => {
-                if file.is_some() && !name.is_empty() {
-                    ENOTDIR
-                } else if name.is_empty() || self.files.contains_key(name) {
+                // A file's name may hold slashes; each prefix of one is a directory.
+                let child = match &file {
+                    Some(dir) => [dir.as_slice(), b"/", name].concat(),
+                    None => name.clone(),
+                };
+                let is_dir = |n: &[u8]| {
+                    self.files
+                        .keys()
+                        .any(|k| k.len() > n.len() && k[n.len()] == b'/' && k.starts_with(n))
+                };
+                let found = self.files.contains_key(&child) || is_dir(&child);
+                if name.is_empty() || found {
                     let d = self.slots[*dest].as_mut().unwrap();
                     d.state = READY;
-                    d.name = if name.is_empty() {
-                        file
-                    } else {
-                        Some(name.clone())
-                    };
+                    d.name = if name.is_empty() { file } else { Some(child) };
                     *dest as i64
+                } else if file.as_ref().is_some_and(|f| !is_dir(f)) {
+                    ENOTDIR
                 } else {
                     ENOENT
                 }
@@ -614,6 +659,26 @@ impl State {
             }
             // The root is the service's only directory: a byte READ of it fails.
             OpKind::Read { .. } if file.is_none() => EISDIR,
+            OpKind::Read { buf, at, len } if self.service.is_some() => {
+                let dst = self.buffer(*buf, *at, *len).unwrap();
+                let count = self.io_count(*len, 11);
+                let out = unsafe { std::slice::from_raw_parts_mut(dst, count) };
+                let service = self.service.as_mut().unwrap();
+                match service.read(op.scope, op.source, op.offset, out) {
+                    Some(rc) => rc,
+                    None => return Some(op),
+                }
+            }
+            OpKind::Write { buf, at, len } if self.service.is_some() => {
+                let src = self.buffer(*buf, *at, *len).unwrap();
+                let count = self.io_count(*len, 23);
+                let bytes = unsafe { std::slice::from_raw_parts(src, count) };
+                let service = self.service.as_mut().unwrap();
+                match service.write(op.scope, op.source, op.offset, bytes) {
+                    Some(rc) => rc,
+                    None => return Some(op),
+                }
+            }
             OpKind::Read { buf, at, len } => {
                 let data = self
                     .files
@@ -771,7 +836,7 @@ impl State {
         0
     }
     /// ENTER's admission of one SQE and nothing else: 0 admits it.
-    pub fn admit_one(&mut self, s: Submission) -> i64 {
+    pub(crate) fn admit_one(&mut self, s: Submission) -> i64 {
         self.admit(s)
     }
     /// A registered buffer over `b`, which must outlive every admission.
@@ -1136,6 +1201,10 @@ unsafe impl Kernel for SimKernel {
                 if name.iter().any(|&b| b == 0 || b == b'/') {
                     return EINVAL;
                 }
+                // srv_capture_post: the name is resolved here, not at CONNECT.
+                if !s.services.contains(&name) {
+                    return ENOENT;
+                }
                 let Some(r) = s.mint(Slot {
                     kind: SlotKind::Target,
                     inc: 0,
@@ -1187,6 +1256,9 @@ unsafe impl Kernel for SimKernel {
                     }
                     _ => return EINVAL,
                 };
+                if s.reserve_out_of_memory {
+                    return ENOMEM;
+                }
                 let Some(r) = s.mint(slot) else { return ENOSPC };
                 if rec.kind == 2 {
                     s.slots[r.slot as usize].as_mut().unwrap().scope = r.slot as usize;
@@ -1229,6 +1301,7 @@ unsafe impl Kernel for SimKernel {
                 s.slots[i] = None;
                 s.pools.remove(&i);
                 s.reaps.push(i);
+                s.reserve_out_of_memory = false;
                 0
             }
             7 => {
@@ -1362,6 +1435,9 @@ unsafe impl Kernel for SimKernel {
                     }
                 }
             }
+        }
+        if s.step_on_enter {
+            s.step();
         }
         consumed
     }

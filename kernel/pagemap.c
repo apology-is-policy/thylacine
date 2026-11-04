@@ -6,6 +6,7 @@
 
 #include <thylacine/addrspace.h>
 #include <thylacine/extinction.h>
+#include <thylacine/memaccount.h>
 #include <thylacine/page.h>
 
 #include "../mm/phys.h"
@@ -25,8 +26,9 @@ static inline struct page *node_page(void *kva) {
     return pa_to_page(kva_to_pa(kva));
 }
 
-static struct page *node_alloc(bool exempt) {
-    struct page *pg = alloc_user_pages(0, KP_ZERO, exempt);
+static struct page *node_alloc(struct MemoryAccount *sponsor, bool exempt) {
+    if (!sponsor) sponsor = account_current();
+    struct page *pg = alloc_user_pages_for(sponsor, 0, KP_ZERO, exempt);
     if (pg) pg->refcount = 0;
     return pg;
 }
@@ -52,6 +54,7 @@ int pagemap_init(struct pagemap *pm, size_t count) {
     if (!pm)        return -1;
     if (count == 0) return -1;
     pm->count = 0; pm->depth = 0; pm->nodes = 0; pm->resident = 0; pm->root = NULL;
+    pm->node_sponsor = NULL;
 
     if (count <= PAGEMAP_INLINE_MAX) {
         void *leaf = kmalloc(count * sizeof(struct page *), KP_ZERO);
@@ -178,7 +181,7 @@ int pagemap_install(struct pagemap *pm, spin_lock_t *lock, size_t idx,
         if (as && !addrspace_charge_pages(as, need, exempt)) goto fail;
         u32 got = 0;
         while (got < need) {
-            struct page *np = node_alloc(exempt);
+            struct page *np = node_alloc(pm->node_sponsor, exempt);
             if (!np) break;
             pool[pool_n++] = np;
             got++;
@@ -408,7 +411,7 @@ bool pagemap_swap(struct pagemap *pm, spin_lock_t *lock, size_t idx,
 u32 pagemap_pool_alloc(struct page **pool, u32 n, bool exempt) {
     u32 got = 0;
     for (; got < n; got++) {
-        pool[got] = node_alloc(exempt);
+        pool[got] = node_alloc(NULL, exempt);
         if (!pool[got]) break;
     }
     return got;

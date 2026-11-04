@@ -14,7 +14,7 @@ hazards: []
 abis: []
 design: ["docs/AURORA.md", "docs/HALCYON.md section 13.4", "docs/HALCYON.md section 14.3", "docs/KAUA-TERM.md", "docs/UTOPIA-VISUAL.md section 1", "docs/AURORA-CONFIG.md"]
 created: 2026-09-05
-updated: 2026-09-28
+updated: 2026-11-03
 ---
 ## Purpose
 
@@ -73,6 +73,12 @@ must answer (the CPR report, a DECRQM mode report), which the main loop writes i
 wire exactly as a real terminal would; `settings_req` holds `key value` lines
 pushed through the in-band config channel. The pixel side -- atlas blit,
 damage-to-present -- stays entirely with each consumer; vt never sees a pixel.
+
+`row_holds(row, word)` asks whether a row of the visible grid shows a word in adjacent
+cells. A painter's bytes need not spell what it leaves on the screen, since kaua sends no
+cell the last frame already had, so a harness watching a full-screen program reads this
+rather than the bytes (`kaua-term-probe --stopped-nora`; a Nora host test renders the
+frames that tear).
 
 ## Mechanism
 

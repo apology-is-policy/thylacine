@@ -2591,6 +2591,19 @@ static inline long t_pivot_root(long new_root_fd) {
     return x0;
 }
 
+// The memory account call, with thyla/account.h's records; rec carries the record both
+// ways. A long handle, so T_ACCOUNT_SELF arrives sign-extended. 0 or a negated errno.
+#define T_SYS_ACCOUNT 140
+static inline long t_account(long handle, unsigned long op, void *rec, unsigned long rec_size) {
+    register long x0 __asm__("x0") = handle;
+    register long x1 __asm__("x1") = (long)op;
+    register long x2 __asm__("x2") = (long)rec;
+    register long x3 __asm__("x3") = (long)rec_size;
+    register long x8 __asm__("x8") = T_SYS_ACCOUNT;
+    __asm__ volatile ("svc #0" : "+r"(x0) : "r"(x1), "r"(x2), "r"(x3), "r"(x8) : "memory", "cc");
+    return x0;
+}
+
 // Post a note at one thread of the caller's own Proc; tid 0 is the caller.
 #define T_SYS_POSTNOTE_TID 138
 static inline long t_postnote_tid(long tid, const char *name, unsigned long name_len) {

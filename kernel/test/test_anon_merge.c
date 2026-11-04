@@ -151,7 +151,7 @@ static bool bias_is(const struct Vma *v, u64 va0) {
 static void put_free(struct page *pg, void *ctx) { (void)ctx; free_pages(pg, 0); }
 
 void test_pagemap_grow_keeps_every_page(void) {
-    u64 free_before = phys_free_pages();
+    u64 free_before = test_free_pages_settled();
     struct verdict vd = { NULL };
     spin_lock_t lk = SPIN_LOCK_INIT;
     struct page *pg[4] = { NULL, NULL, NULL, NULL };
@@ -237,7 +237,7 @@ void test_pagemap_grow_keeps_every_page(void) {
     }
 
     TEST_ASSERT(vd.why == NULL, vd.why);
-    TEST_EXPECT_EQ(phys_free_pages(), free_before, "phys free back to baseline");
+    TEST_EXPECT_EQ(test_free_pages_settled(), free_before, "phys free back to baseline");
 }
 
 // =============================================================================
@@ -274,7 +274,7 @@ void test_anon_merge_adjacent_reserves_share_one_mapping(void) {
 }
 
 void test_anon_merge_growth_crosses_every_shape(void) {
-    u64 free_before = phys_free_pages();
+    u64 free_before = test_free_pages_settled();
     struct Proc *p = mk();
     TEST_ASSERT(p != NULL, "proc_alloc");
     struct verdict vd = { NULL };
@@ -302,7 +302,7 @@ void test_anon_merge_growth_crosses_every_shape(void) {
 
     drop(p);
     TEST_ASSERT(vd.why == NULL, vd.why);
-    TEST_EXPECT_EQ(phys_free_pages(), free_before, "phys free back to baseline");
+    TEST_EXPECT_EQ(test_free_pages_settled(), free_before, "phys free back to baseline");
 }
 
 void test_anon_merge_hole_refill_joins_the_pieces(void) {
@@ -473,7 +473,7 @@ void test_anon_merge_refused_growth_falls_back(void) {
 }
 
 void test_anon_merge_fork_clones_the_merged_burrow(void) {
-    u64 free_before = phys_free_pages();
+    u64 free_before = test_free_pages_settled();
     struct Proc *p = mk();
     TEST_ASSERT(p != NULL, "proc_alloc");
     struct verdict vd = { NULL };
@@ -498,7 +498,7 @@ void test_anon_merge_fork_clones_the_merged_burrow(void) {
 
     drop(p);
     TEST_ASSERT(vd.why == NULL, vd.why);
-    TEST_EXPECT_EQ(phys_free_pages(), free_before, "phys free back to baseline");
+    TEST_EXPECT_EQ(test_free_pages_settled(), free_before, "phys free back to baseline");
 }
 
 void test_anon_merge_unmap_releases_lazy_slots(void) {

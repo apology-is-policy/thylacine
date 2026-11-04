@@ -98,7 +98,7 @@ static const char *loom_request_owner_fixture(void) {
     struct Loom *l = NULL;
     struct loom_service_ref scope = {0};
     struct loom_request_ref ref = {0};
-    u64 goal = loom_private_retired();
+    u64 goal = lp_settled();
     u32 base = p ? p->as->page_count : 0;
 #define RO(c,m) do { if (!(c)) { error=m;goto done; } } while (0)
     RO(p && p->as,"request owner creator");
@@ -184,6 +184,7 @@ void test_loom_private_requests(void) {
 
 void test_loom_private_node_owner(void) {
     struct Proc *p = test_proc_make();
+    (void)lp_settled();
     struct Loom *l = p ? loom_create_private(p,2,2,true) : NULL;
     u64 goal = loom_private_retired() + (l ? 1 : 0);
     const char *error = !l ? "node owner allocation" : loom_node_owner_fixture(l,p);
@@ -229,7 +230,7 @@ static const char *loom_slot_owner_fixture(void) {
     struct Proc *p = test_proc_make();
     struct Loom *l = NULL;
     struct loom_service_ref ref = {0};
-    u64 goal = loom_private_retired();
+    u64 goal = lp_settled();
     bool pinned = false;
 #define SO_CHECK(c, msg) do { if (!(c)) { error = msg; goto done; } } while (0)
     SO_CHECK(p && p->as, "slot owner creator allocated");
@@ -372,7 +373,7 @@ static const char *loom_private_buffers_fixture(void) {
     struct Proc *p = test_proc_make(), *q = test_proc_make();
     struct Loom *l = NULL;
     struct loom_service_ref pool = {0};
-    u64 goal = loom_private_retired();
+    u64 goal = lp_settled();
     u64 va = 0, ring_va = 0;
     u32 ring_size = 0, base = 0;
 #define PB_CHECK(c,msg) do { if (!(c)) { error = msg; goto done; } } while (0)
@@ -501,7 +502,7 @@ static const char *loom_private_pool_pins_fixture(void) {
     struct Proc *p = test_proc_make();
     struct Loom *l = NULL;
     struct loom_service_ref pool = {0}, again = {0};
-    u64 goal = loom_private_retired(), va = 0;
+    u64 goal = lp_settled(), va = 0;
     u32 baseline = 0;
     struct loom_service_pool_create in;
     for (u32 i = 0; i < sizeof(in); ++i) ((u8 *)&in)[i] = 0;
@@ -608,7 +609,7 @@ static const char *loom_private_fixed_fixture(void) {
     struct loom_service_pool_create in;
     for (u32 i=0; i<sizeof(in); ++i) ((u8 *)&in)[i]=0;
     in.size=sizeof(in);in.version=1;in.count=1;
-    u64 goal=loom_private_retired(), va=0;
+    u64 goal=lp_settled(), va=0;
     u32 baseline=0;
 #define FX_CHECK(c,msg) do { if (!(c)) { error=msg; goto done; } } while (0)
     FX_CHECK(p,"fixed creator allocated");baseline=p->as->page_count;
@@ -1394,7 +1395,7 @@ void test_loom_sq_release_after_index(void) {
 static bool sq_private_refill_run(bool bad_index, struct sq_refill_obs *o) {
     struct Proc *p = test_proc_make();
     if (!p) return false;
-    u64 goal = loom_private_retired();
+    u64 goal = lp_settled();
     struct Loom *l = loom_create_private(p, 1, 2, false);
     if (!l) { test_proc_drop(p); return false; }
     ++goal;
@@ -2380,7 +2381,7 @@ static const char *loom_targets_fixture(void) {
     struct loom_service_ref ref = {0}, stale = {0}, provisional = {0};
     const struct SrvServiceTarget *borrow = NULL;
     bool pinned = false, owner_dropped = false;
-    u64 goal = loom_private_retired(), destroyed = srv_registry_total_destroyed();
+    u64 goal = lp_settled(), destroyed = srv_registry_total_destroyed();
     u32 base = 0;
     struct loom_service_target in;
     for (u32 i = 0; i < sizeof(in); ++i) ((u8 *)&in)[i] = 0;
@@ -3060,7 +3061,8 @@ static const char *loom_control_cases(struct Loom *l,struct Proc *creator,
                "control delivered storage is not a pending operation");
             CT(!loom_engine_put(l,scope,held),"control returns entry pin");held=NULL;
             u64 freed=srvconn_total_freed();
-            CT(!loom_engine_collect(l,scope) && srvconn_total_freed()==freed && creator->as->page_count==pages,
+            // One page stays: the child holds it for its CLUNK until the reap below.
+            CT(!loom_engine_collect(l,scope) && srvconn_total_freed()==freed && creator->as->page_count==pages+1,
                "control local protocol refund leaves server endpoint alive");
             CT(!control_native_query(l,creator,scope,&out) && out.state==LOOM_SERVICE_RETIRED &&
                out.reason==-T_E_CANCELED && out.status_flags==3,"control diagnostics survive physical collection");
@@ -3229,6 +3231,19 @@ done:
 
 
 // Real private protocol/storage owner. No general RPC submission is enabled.
+static struct loom_service_ref op_gap_scope;
+static void loom_op_gap_hook(struct Loom *l,u32 stage) {
+    if(stage!=6)return;
+    spin_lock(&l->lock);l->service_nodes->nodes[op_gap_scope.slot].state=LOOM_SERVICE_ABORTING;spin_unlock(&l->lock);
+}
+static u32 loom_slots_in_use(struct Loom *l) {
+    u32 used=0;
+    spin_lock(&l->lock);
+    for(u32 i=0;i<LOOM_SERVICE_SLOT_COUNT;++i)
+        if(l->service_slots->slots[i].phase!=LSLOT_FREE)++used;
+    spin_unlock(&l->lock);
+    return used;
+}
 static const char *loom_operation_storage_case(struct Loom *l,struct Proc *creator,
     struct Proc *poster,struct SrvRegistry *reg,struct loom_service_ref target,bool bulk,bool frontend) {
     const char *error=NULL;
@@ -3323,6 +3338,104 @@ static const char *loom_operation_storage_case(struct Loom *l,struct Proc *creat
     OS(creator->as->page_count==baseline && l->service_requests.occupied==1 &&
        !l->service_engine->entries[scope.slot].pins,
        "operation storage exact page refund and pin return");
+    // A FID's RESERVE pays for its CLUNK. At the budget, or with the allocator
+    // refusing, the RESERVE refuses and leaves no charge and no slot behind.
+    u32 in_use=loom_slots_in_use(l);
+    reserve.kind=LOOM_SERVICE_FID;reserve.scope=scope;
+    spin_lock(&creator->as->lock);creator->as->page_budget=baseline;spin_unlock(&creator->as->lock);
+    int refused=loom_private_node_prepare(l,creator,&reserve,&child);
+    spin_lock(&creator->as->lock);creator->as->page_budget=old_budget;spin_unlock(&creator->as->lock);
+    OS(refused==-T_E_NOMEM && !child.incarnation && creator->as->page_count==baseline &&
+       loom_slots_in_use(l)==in_use,"a FID RESERVE at the budget refuses and leaves nothing");
+    loom_private_operation_fault_arm_for_test();
+    OS(loom_private_node_prepare(l,creator,&reserve,&child)==-T_E_NOMEM && !child.incarnation &&
+       !loom_private_operation_fault_pending_for_test() && creator->as->page_count==baseline &&
+       loom_slots_in_use(l)==in_use,"a FID RESERVE the allocator refuses refunds and leaves nothing");
+    // Control one variable away: a SCOPE has no CLUNK, so the same budget passes it.
+    spin_lock(&creator->as->lock);creator->as->page_budget=baseline;spin_unlock(&creator->as->lock);
+    struct loom_service_reserve bare={.size=sizeof(bare),.version=1,.kind=LOOM_SERVICE_SCOPE};
+    struct loom_service_ref uncharged={0};
+    refused=loom_private_node_prepare(l,creator,&bare,&uncharged);
+    spin_lock(&creator->as->lock);creator->as->page_budget=old_budget;spin_unlock(&creator->as->lock);
+    OS(!refused && creator->as->page_count==baseline && !loom_private_node_rollback(l,uncharged),
+       "a SCOPE reservation costs no page at the same budget");
+    OS(!loom_private_node_prepare(l,creator,&bare,&uncharged) && creator->as->page_count==baseline &&
+       !l->service_slots->clunk_storage[uncharged.slot] && !loom_private_node_rollback(l,uncharged),
+       "a SCOPE reservation holds no page with room in the budget");
+    OS(!loom_private_node_prepare(l,creator,&reserve,&child) && creator->as->page_count==baseline+1 &&
+       l->service_slots->clunk_storage[child.slot],"a FID RESERVE charges and holds one page");
+    OS(!loom_private_node_rollback(l,child) && creator->as->page_count==baseline &&
+       !l->service_slots->clunk_storage[child.slot],"a FID rollback frees and refunds the page");
+    OS(!loom_private_node_prepare(l,creator,&reserve,&child) && !loom_private_node_publish(l,child) &&
+       !loom_private_node_reap_unused(l,child) && creator->as->page_count==baseline &&
+       !l->service_slots->clunk_storage[child.slot],"an unused FID's reap frees and refunds the page");
+    OS(!loom_private_node_prepare(l,creator,&reserve,&child) &&
+       loom_private_operation_prepare_clunk(l,scope,child,917,0,0,&other)==-T_E_NOENT && !other &&
+       l->service_slots->clunk_storage[child.slot] && !loom_private_node_rollback(l,child) &&
+       creator->as->page_count==baseline,"a FID not yet published has no CLUNK");
+    // A CLUNK takes that page: at the budget, with the allocator refusing, no page moves.
+    OS(!loom_private_node_prepare(l,creator,&reserve,&child) && !loom_private_node_publish(l,child),
+       "a FID for the CLUNK legs");
+    struct loom_service_operation *paid=l->service_slots->clunk_storage[child.slot];
+    spin_lock(&creator->as->lock);creator->as->page_budget=baseline+1;spin_unlock(&creator->as->lock);
+    loom_private_operation_fault_arm_for_test();
+    OS(!loom_private_operation_prepare_clunk(l,scope,child,909,0,0,&third) && third==paid &&
+       !loom_private_operation_fault_pending_for_test() && creator->as->page_count==baseline+1 &&
+       !l->service_slots->clunk_storage[child.slot] && l->service_requests.occupied==2,
+       "a CLUNK at the budget under an allocation fault takes the FID's own page");
+    // Control one variable away: the same budget refuses an ordinary request.
+    OS(loom_private_operation_prepare(l,scope,910,0,0,&other)==-T_E_NOMEM && !other &&
+       creator->as->page_count==baseline+1,"an ordinary request at that budget refuses");
+    OS(loom_private_operation_prepare_clunk(l,scope,child,911,0,0,&other)==-T_E_BUSY && !other &&
+       l->service_requests.occupied==2,"a second CLUNK with the page out answers -EBUSY");
+    OS(loom_private_operation_prepare_clunk(l,scope,scope,912,0,0,&other)==-T_E_NOENT && !other,
+       "a scope is no FID");
+    struct loom_service_ref stale=child;++stale.incarnation;
+    OS(loom_private_operation_prepare_clunk(l,scope,stale,913,0,0,&other)==-T_E_NOENT && !other,
+       "a stale FID identity holds no page");
+    OS(!loom_private_operation_release_unused(third),"a CLUNK that never started is released");third=NULL;
+    bool blank=true;
+    for(size_t i=0;i<sizeof(*paid);++i)if(((const u8 *)paid)[i])blank=false;
+    OS(l->service_slots->clunk_storage[child.slot]==paid && blank &&
+       creator->as->page_count==baseline+1 && l->service_requests.occupied==1,
+       "its page goes back to the FID, zeroed, still charged once");
+    spin_lock(&creator->as->lock);creator->as->page_budget=old_budget;spin_unlock(&creator->as->lock);
+    // An abort between prepare's two holds: the recheck refuses, a CLUNK's page goes
+    // back and an ordinary request's page is freed. The hook clears before any exit.
+    op_gap_scope=scope;
+    loom_private_close_hook_for_test(loom_op_gap_hook);
+    int raced=loom_private_operation_prepare_clunk(l,scope,child,915,0,0,&third);
+    loom_private_close_hook_for_test(NULL);
+    spin_lock(&l->lock);l->service_nodes->nodes[scope.slot].state=LOOM_SERVICE_READY;spin_unlock(&l->lock);
+    OS(raced==-T_E_CANCELED && !third && l->service_slots->clunk_storage[child.slot]==paid &&
+       creator->as->page_count==baseline+1 && l->service_requests.occupied==1,
+       "an abort between the holds returns a CLUNK's page to its FID");
+    loom_private_close_hook_for_test(loom_op_gap_hook);
+    raced=loom_private_operation_prepare(l,scope,916,0,0,&other);
+    loom_private_close_hook_for_test(NULL);
+    spin_lock(&l->lock);l->service_nodes->nodes[scope.slot].state=LOOM_SERVICE_READY;spin_unlock(&l->lock);
+    OS(raced==-T_E_CANCELED && !other && creator->as->page_count==baseline+1 &&
+       l->service_requests.occupied==1,"an abort between the holds frees an ordinary request's page");
+    OS(!loom_private_operation_prepare_clunk(l,scope,child,914,0,0,&third) && third==paid,
+       "the FID's next CLUNK finds it");
+    // The FID leaves with its page out, and the next reservation takes the same slot.
+    // Only the exact incarnation gets the page back: the operation frees and refunds
+    // it, once, and the new FID keeps its own.
+    u32 same_slot=child.slot;
+    OS(!loom_private_node_reap_unused(l,child) && creator->as->page_count==baseline+1,
+       "a FID reaped with its page out frees nothing itself");
+    child=(struct loom_service_ref){0};
+    OS(!loom_private_node_prepare(l,creator,&reserve,&child) && !loom_private_node_publish(l,child) &&
+       child.slot==same_slot && creator->as->page_count==baseline+2,
+       "the next FID takes that slot with a page of its own");
+    struct loom_service_operation *fresh=l->service_slots->clunk_storage[same_slot];
+    OS(fresh && fresh!=paid,"the two FIDs hold different pages");
+    OS(!loom_private_operation_release_unused(third) && l->service_slots->clunk_storage[same_slot]==fresh &&
+       creator->as->page_count==baseline+1,
+       "the operation frees and refunds a page whose FID has gone");third=NULL;
+    OS(!loom_private_node_reap_unused(l,child) && creator->as->page_count==baseline,
+       "the new FID's reap refunds its own page");
+    child=(struct loom_service_ref){0};
     OS(!loom_private_operation_prepare(l,scope,906,0,0,&op) && op->request.identity!=old.identity,
        "operation storage burns identity before slot reuse");
     reserve.kind=LOOM_SERVICE_FID;reserve.scope=scope;
@@ -3337,9 +3450,9 @@ static const char *loom_operation_storage_case(struct Loom *l,struct Proc *creat
        "root source borrow retains actual attached mapping");
     loom_handle_closed(l);
     OS(loom_close_wait_state(l,LCLOSE_PARKED),"operation storage close parks on physical owner");
-    OS(creator->as->page_count==baseline+1 && l->service_requests.records[op->request.index].owners==1 &&
+    OS(creator->as->page_count==baseline+2 && l->service_requests.records[op->request.index].owners==1 &&
        l->service_engine->entries[scope.slot].pins==1,
-       "operation storage close retains actual storage and owner");
+       "operation storage close retains actual storage, the child's CLUNK page and owner");
     spin_lock(&l->lock);
     int put=loom_fid_put(l->service_slots,l->service_nodes,scope);
     if(!put)root_borrow=false;
@@ -3730,6 +3843,7 @@ static const char *loom_native_operations_case(struct Loom *l,struct Proc *creat
     for(u32 i=0;i<sizeof(peer);++i)((u8 *)&peer)[i]=0;
     peer.creator=creator;peer.stop=(fault>=9 && fault<=14)?fault-8:0;
     struct loom_service_reserve reserve={.size=sizeof(reserve),.version=1,.kind=LOOM_SERVICE_SCOPE};
+    u32 budget_kept=0;bool budget_held=false;
 #define NO(c,m) do{if(!(c)){error=m;goto done;}}while(0)
     NO(!loom_private_node_prepare(l,creator,&reserve,&scope) && !loom_private_node_publish(l,scope),
        "native operation scope reservation");
@@ -3876,7 +3990,26 @@ static const char *loom_native_operations_case(struct Loom *l,struct Proc *creat
     struct loom_service_control child_control={.size=sizeof(child_control),.version=1,.object=child};
     NO(loom_private_service_reap(l,creator,&child_control)==-T_E_BUSY,"native open FID refuses REAP before CLUNK");
     // Hold TCLUNK at the peer: while the CLUNK runs, REAP refuses the FID and
-    // QUERY, which reads LIVE slots only, does not see it.
+    // QUERY, which reads LIVE slots only, does not see it. It runs at the page budget:
+    // the budget refuses an ordinary request, and the CLUNK goes on its FID's own page.
+    struct loom_service_ref unwalked={0};
+    NO(!loom_private_node_prepare(l,creator,&reserve,&unwalked) && !loom_private_node_publish(l,unwalked),
+       "a FID no WALK has bound");
+    struct loom_service_operation *unwalked_page=l->service_slots->clunk_storage[unwalked.slot];
+    u32 clunk_pages=creator->as->page_count;
+    spin_lock(&creator->as->lock);
+    budget_kept=creator->as->page_budget;creator->as->page_budget=clunk_pages;
+    spin_unlock(&creator->as->lock);
+    budget_held=true;
+    NO(loom_native_submit(l,creator,(struct loom_sqe){.opcode=LOOM_OP_READ,
+       .handle_idx=child.slot,.len=5,.user_data=109,._resv1={64,child.incarnation,0,0}}) &&
+       loom_native_completion(l,server,&peer,109,-T_E_NOMEM) && peer.seen==12 &&
+       creator->as->page_count==clunk_pages,"at the page budget an ordinary request is refused -ENOMEM");
+    NO(loom_native_submit(l,creator,(struct loom_sqe){.opcode=LOOM_OP_CLUNK,
+       .handle_idx=unwalked.slot,.user_data=110,._resv1={0,unwalked.incarnation,0,0}}) &&
+       loom_native_completion(l,server,&peer,110,-T_E_NOENT) && unwalked_page &&
+       l->service_slots->clunk_storage[unwalked.slot]==unwalked_page && peer.seen==12 &&
+       creator->as->page_count==clunk_pages,"a CLUNK its publish refuses gives its page back");
     peer.stop=13;
     NO(loom_native_submit(l,creator,(struct loom_sqe){.opcode=LOOM_OP_CLUNK,
        .handle_idx=child.slot,.user_data=105,._resv1={0,child.incarnation,0,0}}),
@@ -3897,9 +4030,15 @@ static const char *loom_native_operations_case(struct Loom *l,struct Proc *creat
     NO(query_mid==-T_E_NOENT,"native QUERY of a FID whose CLUNK is in flight answers -ENOENT");
     NO(peer.seen==13 && !peer.used && !l->service_fixed_count && l->service_requests.occupied==1,
        "native exact wire sequence frees general request and fixed owners");
+    NO(creator->as->page_count==clunk_pages-1,"a finished CLUNK refunds its FID's page once");
+    spin_lock(&creator->as->lock);creator->as->page_budget=budget_kept;spin_unlock(&creator->as->lock);
+    budget_held=false;
     NO(!loom_private_service_reap(l,creator,&child_control) &&
-       loom_private_service_reap(l,creator,&child_control)==-T_E_NOENT,
-       "native clunked FID reaps once while its ring lives");
+       loom_private_service_reap(l,creator,&child_control)==-T_E_NOENT &&
+       creator->as->page_count==clunk_pages-1,
+       "native clunked FID reaps once while its ring lives, with no page left to refund");
+    NO(!loom_private_node_reap_unused(l,unwalked) && creator->as->page_count==clunk_pages-2,
+       "the FID no WALK bound refunds its page");
     // A walked FID that is never clunked: its scope's abort ends the session, the
     // FID reaps once the scope has retired, and the scope reaps after it.
     struct loom_service_ref orphan={0};
@@ -3910,6 +4049,7 @@ static const char *loom_native_operations_case(struct Loom *l,struct Proc *creat
        .handle_idx=scope.slot,.offset=orphan.slot,.len=4,.user_data=108,
        ._resv1={0,scope.incarnation,orphan.incarnation,0}}) &&
        loom_native_completion(l,server,&peer,108,(s32)orphan.slot),"native second WALK completion");
+    NO(l->service_slots->clunk_storage[orphan.slot],"a walked FID keeps its page for its CLUNK");
     struct loom_service_control orphan_control={.size=sizeof(orphan_control),.version=1,.object=orphan};
     struct loom_service_control scope_control={.size=sizeof(scope_control),.version=1,.object=scope};
     NO(loom_private_service_reap(l,creator,&orphan_control)==-T_E_BUSY,
@@ -3926,6 +4066,7 @@ static const char *loom_native_operations_case(struct Loom *l,struct Proc *creat
         struct loom_service_snapshot after;
         NO(!reaped && !control_native_query(l,creator,scope,&after) && after.state==LOOM_SERVICE_RETIRED,
            "native walked FID reaps once its aborted scope retires");
+        NO(!l->service_slots->clunk_storage[orphan.slot],"a never-clunked FID's reap frees its page");
         do {
             reaped=loom_private_service_reap(l,creator,&scope_control);
             if(reaped!=-T_E_BUSY)break;
@@ -3937,6 +4078,9 @@ static const char *loom_native_operations_case(struct Loom *l,struct Proc *creat
     NO(!loom_private_register_buffers(l,creator,NULL,0),"native unregister after physical retirement");
     NO(!sys_burrow_detach_for_proc(creator,va,PAGE_SIZE),"native payload mapping release");va=0;
 done:
+    if(budget_held) {
+        spin_lock(&creator->as->lock);creator->as->page_budget=budget_kept;spin_unlock(&creator->as->lock);
+    }
     if(held)(void)loom_engine_put(l,scope,held);
     loom_handle_closed(l);
     if(!loom_close_wait_state(l,LCLOSE_DONE) && !error)error="native operation close timeout";
@@ -4077,7 +4221,7 @@ static const char *loom_protocol_fixture(u32 kind) {
     struct Loom *l = NULL;
     struct loom_service_protocol *prepared = NULL;
     struct loom_service_ref refs[2] = {{0},{0}};
-    u64 goal = loom_private_retired();
+    u64 goal = lp_settled();
     u32 base = p ? p->as->page_count : 0;
     u32 old_budget = p ? p->as->page_budget : 0;
     bool owner_dropped = false, creator_linked = false;
@@ -4202,6 +4346,27 @@ static const char *loom_protocol_fixture(u32 kind) {
             PO(p->as->page_count==owner_pages && srv_backlog_depth(svc)==0,
                "protocol failure refunds complete charge without admission");
         }
+        // A ring admitting more than a chunk's worth pays for every tag up front, and an
+        // allocation failure there refunds it all. The admit bound is only read here.
+        u32 admit_kept=l->service_requests.admit;
+        u32 wide=expected+(u32)burrow_backing_pages(P9_TAG_CHUNKS*sizeof(struct p9_tag_chunk *))+
+                 (u32)burrow_backing_pages(sizeof(struct p9_tag_chunk));
+        l->service_requests.admit=P9_TAG_CHUNK+1u;
+        loom_private_protocol_fault_arm_for_test(4);
+        int widened=loom_private_protocol_prepare(l,refs[n],1000,1,&prepared);
+        ++freed;
+        bool wide_refused=widened==-T_E_NOMEM && !prepared && !loom_private_protocol_fault_pending_for_test() &&
+                          srvconn_total_freed()==freed && p->as->page_count==owner_pages;
+        widened=wide_refused?loom_private_protocol_prepare(l,refs[n],1000,1,&prepared):-T_E_IO;
+        l->service_requests.admit=admit_kept;
+        PO(wide_refused,"a failed tag reservation refunds the whole charge");
+        PO(!widened && prepared && prepared->charged_pages==wide && p->as->page_count==owner_pages+wide &&
+           prepared->client.session.n_chunks==2 && prepared->client.session.tag_limit==2u*P9_TAG_CHUNK,
+           "a ring admitting more than a chunk pays for its tags and caps the table");
+        PO(!loom_private_protocol_release_unused(prepared) && p->as->page_count==owner_pages,
+           "releasing the unused protocol refunds its tags");
+        prepared=NULL;++freed;
+        PO(srvconn_total_freed()==freed,"the unused wide protocol frees its endpoint");
         spin_lock(&p->as->lock);p->as->page_budget=owner_pages;spin_unlock(&p->as->lock);
         int limited=loom_private_protocol_prepare(l,refs[n],0,0,&prepared);
         spin_lock(&p->as->lock);p->as->page_budget=old_budget;spin_unlock(&p->as->lock);
@@ -4222,6 +4387,8 @@ static const char *loom_protocol_fixture(u32 kind) {
            "preparation publishes no backlog or protocol bytes");
         PO(prepared->charged_pages==expected && p->as->page_count==owner_pages+expected,
            "entire owner and msize storage charge precedes allocation");
+        PO(prepared->client.session.n_chunks==1 && prepared->client.session.tag_limit==P9_TAG_CHUNK,
+           "a ring within one chunk's tags has a table that cannot grow");
         PO(prepared->client.progress==&prepared->progress &&
            prepared->client.out_buf_cap==msize && !prepared->client.out_buf_owned &&
            prepared->client.transport.recv_buf==prepared->recv_storage &&

@@ -85,6 +85,7 @@ pub mod net;
 pub use ninep;
 pub mod notes;
 pub mod poll;
+pub mod account;
 pub mod pty_interaction;
 pub use pty_interaction::*;
 pub mod pty_observer;
@@ -170,6 +171,8 @@ pub const T_SYS_NOTIFY: u64           = 45;
 pub const T_SYS_NOTED: u64            = 46;
 pub const T_SYS_POSTNOTE: u64         = 47;
 pub const T_SYS_POSTNOTE_TID: u64     = 138;
+// The memory account call, with `account`'s records.
+pub const T_SYS_ACCOUNT: u64          = 140;
 pub const T_SYS_NOTE_MASK: u64        = 48;
 
 // P5-mount-syscall + P5-chroot-syscall + P6-16c-pivot_root: namespace
@@ -2342,6 +2345,44 @@ pub unsafe fn t_srv_peer(connection_handle: i64, out: *mut TSrvPeerInfo) -> i64 
         options(nostack)
     );
     x0
+}
+
+/// The memory account call, docs/SHARED-MEMORY-ACCOUNTING.md section 13. `rec` carries
+/// the record both ways. Returns 0 or a negated errno.
+///
+/// # Safety
+/// `rec` must be valid for `rec_size` bytes of reads and writes.
+#[inline(always)]
+pub unsafe fn t_account(handle: i64, op: u64, rec: *mut u8, rec_size: u64) -> i64 {
+    let mut x0: i64 = handle;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") op,
+        in("x2") rec as u64,
+        in("x3") rec_size,
+        in("x8") T_SYS_ACCOUNT,
+        options(nostack)
+    );
+    x0
+}
+
+/// Reads the caller's own account into `q`. Returns 0 or a negated errno.
+pub fn t_account_query(q: &mut account::AccountQuery) -> i64 {
+    let size = core::mem::size_of::<account::AccountQuery>();
+    *q = account::AccountQuery::default();
+    q.h.version = account::ACCOUNT_VERSION;
+    q.h.size = size as u32;
+    let rec = q as *mut account::AccountQuery as *mut u8;
+    // SAFETY: rec is the whole of an exclusively borrowed record of that size.
+    unsafe {
+        t_account(
+            account::ACCOUNT_SELF as i64,
+            account::ACCOUNT_QUERY as u64,
+            rec,
+            size as u64,
+        )
+    }
 }
 
 // =============================================================================

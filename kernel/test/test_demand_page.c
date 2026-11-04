@@ -46,6 +46,7 @@
 
 #include <thylacine/dev.h>           // REVENANT R-2: struct Dev for the stub backing Dev
 #include <thylacine/extinction.h>
+#include <thylacine/memaccount.h>
 #include <thylacine/notes.h>          // groupstatus r1 P3-2: a latch revoked mid-read
 #include <thylacine/page.h>
 #include <thylacine/proc.h>
@@ -548,6 +549,8 @@ void test_demand_page_file_smoke(void) {
     // The slot is now resident; the PTE points at it; the PTE is R+X (W^X).
     struct page *slotpg = burrow_file_slot_for_test(v, 0);
     TEST_ASSERT(slotpg != NULL, "slot 0 resident after fault");
+    TEST_ASSERT(slotpg->holder.sponsor == account_system_cache(),
+        "a file page is the system cache's, not the first faulter's (the single path)");
     u64 pte = walk_to_l3_entry(p->as->pgtable_root, USER_VA);
     TEST_ASSERT(pte != 0, "L3 PTE installed after FILE demand-page");
     TEST_EXPECT_EQ(pte & 0x0000FFFFFFFFF000ull, page_to_pa(slotpg),
@@ -568,6 +571,38 @@ void test_demand_page_file_smoke(void) {
     r = userland_demand_page(p, &fi);
     TEST_EXPECT_EQ(r, FAULT_HANDLED, "second fault to resident page resolves");
     TEST_EXPECT_EQ(g_rev_read_calls, 1, "fast-hit must NOT re-read (still 1)");
+
+    drop_proc(p);
+    burrow_unref(v);
+}
+
+// A map past the inline size has node pages, and they outlive the first faulter just as
+// the data pages do, so they are not that faulter's to pay for either.
+void test_demand_page_file_nodes_are_the_system_caches(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+
+    g_rev_read_fail  = false;
+    g_rev_read_chunk = 0;
+    g_rev_read_calls = 0;
+
+    struct Spoor *s = spoor_alloc(&g_rev_test_dev);
+    TEST_ASSERT(s != NULL, "spoor_alloc");
+    const u64 size = (PAGEMAP_INLINE_MAX + 8u) * PAGE_SIZE;
+    struct Burrow *v = burrow_create_file(s, 0, size);
+    TEST_ASSERT(v != NULL, "burrow_create_file");
+    TEST_ASSERT(v->pm.depth > 0, "the premise: a radix map");
+    int rc = burrow_map(p, v, USER_VA, size, VMA_PROT_RX);
+    TEST_EXPECT_EQ(rc, 0, "burrow_map RX");
+
+    struct fault_info fi;
+    make_fi(&fi, USER_VA + 0x40, /*is_write=*/false, /*is_instr=*/true);
+    TEST_EXPECT_EQ(userland_demand_page(p, &fi), FAULT_HANDLED, "a fault installs a page");
+    TEST_ASSERT(v->pm.nodes > 0, "and so a node");
+    const struct page *node = pa_to_page(kva_to_pa(v->pm.root));
+    TEST_ASSERT(node->flags & PG_SPONSORED, "the node is on the ledger");
+    TEST_ASSERT(node->holder.sponsor == account_system_cache(),
+        "and it is the system cache's, not the first faulter's");
 
     drop_proc(p);
     burrow_unref(v);
@@ -856,6 +891,8 @@ void test_protect_file_pagein_racing_protect_bails_cluster(void) {
     TEST_EXPECT_EQ(walk_to_l3_entry(p->as->pgtable_root, USER_VA), 0ull,
         "NO PTE on the none page");
     TEST_ASSERT(burrow_file_slot_for_test(v, 0) != NULL, "slot 0 adopted (the cluster is kept)");
+    TEST_ASSERT(burrow_file_slot_for_test(v, 0)->holder.sponsor == account_system_cache(),
+        "a file page is the system cache's, not the first faulter's (the cluster path)");
     TEST_ASSERT(burrow_file_slot_for_test(v, 1) != NULL, "slot 1 adopted too");
     struct Vma *vma = vma_lookup(p, USER_VA);
     TEST_ASSERT(vma != NULL && vma->prot == 0, "page 0's piece reads none");

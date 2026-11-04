@@ -227,10 +227,16 @@ slot; EINVAL describes a missing current thread/process. Linux kill (129) is a
 Vivarium TIER2 row, consumed before native dispatch. The metadata does not
 protect against concurrent close/reuse. See [[sub-kernel-syscall-abi]].
 
+## SYS_ACCOUNT (2026-11-03, MM-1)
+
+140 is SYS_ACCOUNT ([[abi-memory-account]]), whose arm serves the query on the caller's
+own account. The empty 139 reaches the unknown arm, and `syscall.native_holes_unassigned`
+pins that, with 140 as a control that does not.
+
 ## Trusted-seat and nonblocking entries
 
 Native calls 121/122/123 are TRUSTED_SEAT, SEAT_IMPORT and SET_NONBLOCK;
-the native ceiling is now 138 (POSTNOTE_TID; [[sub-kernel-vivarium]]). [[abi-trusted-seat]] and [[abi-native-nonblock]] pin
+the native ceiling is now 140 (the reserved ACCOUNT; [[sub-kernel-vivarium]]). [[abi-trusted-seat]] and [[abi-native-nonblock]] pin
 the mirrors. TRUSTED_SEAT snapshots the bounded 544-byte envelope before taking
 the process lock, scrubs temporary key material and validates copyout. SEAT_IMPORT
 checks the bound service, owned live peer connection and DMA allowance before
@@ -1807,8 +1813,9 @@ The SETUP handler sends PRIVATE_SERVICE or SERVICE_BUFFERS to
 `sys_loom_setup_held_for_proc`, and returns a refusal's negative errno. The legacy path
 returns the errnos of LOOM.md 8.2a (operator vote 7, 2026-10-13; it answered -1
 before). REGISTER ops 2..9 go to `sys_loom_register_private`, which
-copies the op's fixed-size record once into kmalloc'd memory, and results return
-through `loom_record_copyout_user`. HANDLES on a private ring is -EOPNOTSUPP.
+copies the op's fixed-size record once, onto the stack for up to 64 bytes and into
+kmalloc'd memory for TARGET and POOL, and results return through
+`loom_record_copyout_user`. HANDLES on a private ring is -EOPNOTSUPP.
 BUFFERS and ENTER branch on `loom_is_private`. Both held setups hand the handler its own
 ring reference, kept across the params copyout; a copyout fault on either ring
 kind passes it to `sys_loom_setup_rollback`, which closes the descriptor and

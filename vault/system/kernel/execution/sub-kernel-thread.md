@@ -9,7 +9,7 @@ guarded-by: [inv-i21, inv-i31, inv-i32, inv-i44, inv-i48]
 validated-by: [gate-smp, spec-thread-reap]
 locks: [lock-proc-threads, lock-proc-table]
 created: 2026-08-01
-updated: 2026-11-02
+updated: 2026-11-03
 ---
 ## Purpose
 
@@ -218,6 +218,8 @@ their locks); re-check RUNNING as a loud backstop (a peer transitioning `t`
 here should now be impossible, so extinct rather than free-under-run); then
 **spin on `on_cpu`**. Only then unlink and hand the stack to `kstack_free`,
 which caches it or restores its guard and frees it.
+
+**The account (MM-1).** `pool_pages` are charged to the payer's account as `CLASS_META`, and `pool_sponsor` keeps who paid, with a reference, until the same two sites that return the pool: `thread_reap_dead` and `thread_destroy`. [[sub-kernel-accounts]].
 
 ## Data structures
 

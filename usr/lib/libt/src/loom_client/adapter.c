@@ -4,7 +4,7 @@
 #include <thyla/poll.h>
 #include <stdatomic.h>
 
-enum { E_NOENT = 2, E_INTR = 4, E_IO = 5, E_BADF = 9, E_BUSY = 16, E_INVAL = 22, E_NOSPC = 28,
+enum { E_NOENT = 2, E_INTR = 4, E_IO = 5, E_BADF = 9, E_NOMEM = 12, E_BUSY = 16, E_INVAL = 22, E_NOSPC = 28,
        E_CANCELED = 125 };
 enum { PAGE = 4096, NAME_CELL = 256, MAX_REG_BUFFERS = 64 };
 enum { R_OPEN = 1, R_RETIRING, R_CLOSED, R_FAILED };
@@ -857,11 +857,12 @@ void t_loom_pool_drop(struct t_loom_pool *h) {
 
 // ---- Submissions.
 
-// A SCOPE or FID reservation. Exhaustion first retries the slots awaiting REAP.
+// A SCOPE or FID reservation. Exhaustion, of slots or of what a FID is charged for its
+// CLUNK, first retries the slots awaiting REAP, each of which still holds its charge.
 static int reserve(struct t_loom_ring *r, uint32_t kind, struct t_loom_service_ref scope,
                    struct t_loom_service_ref *out) {
     int rc = reserve_once(r, kind, scope, out);
-    if (rc != -E_NOSPC) return rc;
+    if (rc != -E_NOSPC && rc != -E_NOMEM) return rc;
     reap_pass(r);
     return reserve_once(r, kind, scope, out);
 }

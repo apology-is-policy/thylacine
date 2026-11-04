@@ -127,10 +127,26 @@ rather than assumed absent (closing audit r1 F6 / self S1, which only `close()`
 had witnessed). `asked` is sticky, so there is no race: `Z` is sent once `conns`
 empties whether or not the ask was read first.
 
+**The interaction node (AS-4d).** `dir/interaction` speaks enough HIN1 to serve one
+clipboard, so that a real client can run against a server that can be stopped. The
+session's own service cannot be: typing goes through it. With `--srv NAME` the fixture
+posts in /srv itself. It opens /srv because a walk-only handle does not transfer, and it
+posts only `fixture` and NAME, because a user scope may post two services
+(`SRV_CAP_SCOPE_SLOTS`). NAME is the one its probe parks on. `hold-paste` stops at a
+paste's first request on that request's own Twrite, where halcyond parks one, for
+`kaua-term-probe --ut-paste`. `hold-copy`
+takes a copy's first write, and from the read for that write's reply it answers nothing
+more on that connection, whichever fid asks, so the session ends only when the client
+ends it. An 'H' on the control pipe asks for an 'h' on the notify pipe at the next such
+stop, and each 'Q' asks for its own 'Z'. The node checks no scope and holds no authority,
+which stay [[sub-halcyond]]'s. `kaua-term-probe --stopped-nora` drives it, by way of
+`ls-nora-stopped-copy`, which has not yet run.
+
 ## Data structures
 
-The fixture is `no_std` over lib/ninep's codecs: a fixed node table, a
-per-session fid map, per-fid `stream` cursors, and the `stats` counters. Each round
+The fixture is `no_std` over lib/ninep's codecs and libhalcyon's HIN1 bodies: a fixed
+node table, a per-session fid map, per-fid `stream` cursors and HIN1 records, one
+clipboard, and the `stats` counters. Each round
 allocates its poll set, control sampled last so that a pass seeing a session's hang-up
 also sees any 'E' written before it. The kernel test holds the two probe blobs in
 `alloc_pages` of an order sized from the ELF, and the registry and pipe

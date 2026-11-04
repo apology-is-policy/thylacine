@@ -171,6 +171,9 @@ pub struct Env {
     /// pre-PTY-4 behavior -- job control keys on the successful dance, never
     /// on a heuristic.
     pub job_control: Option<JobControlState>,
+    /// An accepted line is running under job control: the terminal is what its
+    /// commands read, from the Accept to the next prompt, across every gap between them.
+    pub line_running: bool,
     /// Nesting depth of `try { ... }` blocks. While > 0, implicit-
     /// fail is suppressed regardless of `interactive` -- the
     /// enclosing try will pick up the failure via its post-body
@@ -279,6 +282,7 @@ impl Env {
             stdio_inherit: false,
             consctl_fd: None, // #94-B-b: set by Repl::set_consctl_fd if forwarded
             job_control: None, // PTY-4b: set by Repl::init_pts_session on a pts
+            line_running: false,
             implicit_fail_suppressed: 0,
             trace_depth: 0,
             pending_exit: None,

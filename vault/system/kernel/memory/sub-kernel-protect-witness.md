@@ -35,6 +35,12 @@ Since B-1a' (2026-09-23) the dossier also owns `/capacity-probe`, the EL0 half
 of the capacity contract; its in-kernel half, `kernel/test/test_capacity.c`,
 is [[sub-kernel-pagemap]]'s.
 
+/capacity-probe's last legs, since MM-1b (2026-11-03), are SYS_ACCOUNT's query from EL0: the record's
+header checks and its copies, including a read-only page that gets through the header and
+is stopped on the way out, which is what the kernel suite cannot reach from a thread with
+no user memory. The account is shared with every other Proc while it runs, so a figure is
+asserted only where they cannot move it past the test ([[sub-kernel-accounts]]).
+
 ## Contract
 
 `kernel/test/test_protect.c` registers nineteen tests in `kernel/test/test.c`'s

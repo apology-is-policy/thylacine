@@ -39,6 +39,10 @@
 //                uniform-priority BASELINE the future priority system must beat.
 //   affinity  -- FORWARD SEAM (affinity): pinned cross-CPU ping-pong. Today pinning
 //                is not enforced -> the natural-placement baseline.
+//   faults    -- touch fresh pages, give them back          -> ns per page, min and p50
+//                the charge and refund path, on the commit under test and its parent.
+//                `cpubench faults 1 P S &` several times: one address space each, all
+//                released at the same S-second boundary of the clock.
 //
 // PRIORITY / AFFINITY PLUG POINT (user-directed 2026-06-22 -- "build with that in
 // mind, easily pluggable later"): per-worker PRIO/AFFINITY are applied through ONE
@@ -97,6 +101,7 @@ const KIND_HOG: u32 = 3; // cpu_work bursts until G_STOP -- background saturatin
 const KIND_WAKESTORM: u32 = 4; // G_ROUNDS x sleep(G_SLEEP_US), record wake overshoot.
 const KIND_PIPELINE: u32 = 5; // stage worker: wait my turn, hand to next, until G_STOP.
 const KIND_CONTEND: u32 = 6; // G_ROUNDS x { lock G_MUTEX; tiny; unlock }, count acquisitions.
+const KIND_FAULTS: u32 = 7; // FAULT_ROUNDS x { touch G_INNER_ITERS fresh pages; decommit them }.
 
 static G_KIND: AtomicU32 = AtomicU32::new(KIND_CPU);
 static G_INNER_ITERS: AtomicU64 = AtomicU64::new(0);
@@ -175,6 +180,11 @@ static OPS_DONE: [AtomicU64; MAX_WORKERS] = {
     [Z; MAX_WORKERS]
 }; // per-worker op count (yield mode: sleeps completed).
 
+const FAULT_ROUNDS: usize = 64;
+const PAGE_BYTES: u64 = 4096;
+static FAULT_MIN_NS: [AtomicU64; MAX_WORKERS] = [const { AtomicU64::new(0) }; MAX_WORKERS];
+static FAULT_P50_NS: [AtomicU64; MAX_WORKERS] = [const { AtomicU64::new(0) }; MAX_WORKERS];
+
 // A start barrier so spawned workers begin CONCURRENTLY (else a small unit lets
 // worker 0 finish before worker N is even spawned -> a serialized "scale").
 static G_START: AtomicU32 = AtomicU32::new(0);
@@ -225,6 +235,7 @@ extern "C" fn worker_entry(idx: u64) {
         KIND_WAKESTORM => worker_wakestorm(i),
         KIND_PIPELINE => worker_pipeline(i),
         KIND_CONTEND => worker_contend(i),
+        KIND_FAULTS => worker_faults(i),
         _ => worker_cpu(i),
     }
     WORK_NS[i].store(t0.elapsed().as_nanos() as u64, Ordering::SeqCst);
@@ -245,6 +256,33 @@ fn worker_cpu(i: usize) {
     }
     OPS_DONE[i].store(rounds.wrapping_mul(inner), Ordering::SeqCst);
     SINK.fetch_xor(acc, Ordering::Relaxed);
+}
+
+/// Faults worker: its own lazy region, every page faulted in and decommitted once per
+/// round. A worker that could not finish leaves OPS_DONE at 0, which the mode reports.
+fn worker_faults(i: usize) {
+    let pages = G_INNER_ITERS.load(Ordering::Acquire);
+    let bytes = pages * PAGE_BYTES;
+    let base = unsafe { libthyla_rs::t_burrow_attach_lazy(bytes) };
+    if base <= 0 {
+        return;
+    }
+    let base = base as u64;
+    let mut ns = [0u64; FAULT_ROUNDS];
+    for round in ns.iter_mut() {
+        let t0 = Instant::now();
+        for p in 0..pages {
+            unsafe { core::ptr::write_volatile((base + p * PAGE_BYTES) as *mut u8, 1) };
+        }
+        if unsafe { libthyla_rs::t_burrow_decommit(base, bytes) } != 0 {
+            return;
+        }
+        *round = t0.elapsed().as_nanos() as u64 / pages;
+    }
+    ns.sort_unstable();
+    FAULT_MIN_NS[i].store(ns[0], Ordering::SeqCst);
+    FAULT_P50_NS[i].store(ns[FAULT_ROUNDS / 2], Ordering::SeqCst);
+    OPS_DONE[i].store(pages * FAULT_ROUNDS as u64, Ordering::SeqCst);
 }
 
 /// Yield worker: G_ROUNDS x { a small cpu_work burst; sleep(G_SLEEP_US) }. The
@@ -805,6 +843,52 @@ fn mode_scale(pool: &StackPool, n: usize, work: u64) -> u64 {
         hi / 1_000_000
     ));
     eff
+}
+
+/// faults -- N threads of one address space through the fault and decommit paths. With
+/// `align_s`, the batch waits for that boundary of the clock, so copies started together
+/// from a shell run together. Data only: the verdict is a comparison between two kernels.
+fn mode_faults(pool: &StackPool, n: usize, pages: u64, align_s: u64) {
+    G_KIND.store(KIND_FAULTS, Ordering::SeqCst);
+    G_INNER_ITERS.store(pages, Ordering::SeqCst);
+    if !spawn_batch(pool, n) {
+        t_putstr("faults: FAIL (spawn)\n");
+        return;
+    }
+    if align_s > 0 {
+        let period = align_s * 1_000_000_000;
+        let _ = time::sleep(Duration::from_nanos(period - time::monotonic_ns() % period));
+    }
+    let at_ms = time::monotonic_ns() / 1_000_000;
+    let t0 = Instant::now();
+    release_batch();
+    if !join_batch(n) {
+        t_putstr("faults: FAIL (join timeout)\n");
+        return;
+    }
+    let wall = t0.elapsed().as_nanos() as u64;
+    let (mut min, mut p50, mut done) = (u64::MAX, 0u64, 0u64);
+    for i in 0..n {
+        let ops = OPS_DONE[i].load(Ordering::SeqCst);
+        if ops == 0 {
+            t_putstr("faults: FAIL (a worker could not finish)\n");
+            return;
+        }
+        done += ops;
+        min = min.min(FAULT_MIN_NS[i].load(Ordering::SeqCst));
+        p50 = p50.max(FAULT_P50_NS[i].load(Ordering::SeqCst));
+    }
+    t_putstr(&format!(
+        "faults: workers={} pages={} rounds={} min_ns={} worst_p50_ns={} wall_ms={} pages_per_s={} at_ms={}\n",
+        n,
+        pages,
+        FAULT_ROUNDS,
+        min,
+        p50,
+        wall / 1_000_000,
+        done * 1_000_000_000 / wall.max(1),
+        at_ms
+    ));
 }
 
 /// yield -- N long-running threads that periodically sleep (the sleep forces a
@@ -1493,6 +1577,17 @@ pub extern "C" fn rs_main() -> i64 {
         }
         Some("atomics") => {
             mode_atomics(p3.unwrap_or(2_000_000));
+        }
+        Some("faults") => {
+            let pages = p3.unwrap_or(4096).max(1);
+            let align_s = args
+                .get_str(4)
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(0);
+            if !pool.ensure(n) {
+                fail("stack pool (faults)");
+            }
+            mode_faults(&pool, n, pages, align_s);
         }
         Some("mixed") => {
             let iters = p3.unwrap_or(500);

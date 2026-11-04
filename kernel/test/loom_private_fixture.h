@@ -48,6 +48,16 @@ static bool lp_wait(u64 target) {
     return loom_private_retired() >= target;
 }
 
+// A red fixture's ring can retire after its test has ended, since a failed connect
+// leaves that ring to the retirer. A goal read before then is already met, so the
+// next fixture's wait passes early and the off-by-one carries into every fixture
+// after it. Wait for the rings alive now to go, bounded, and only then read.
+static u64 lp_settled(void) {
+    u64 deadline = timer_now_ns() + 5000000000ull;
+    while (loom_private_retired() < loom_private_created() && timer_now_ns() < deadline) sched();
+    return loom_private_retired();
+}
+
 // The cross-thread watch control's helper: it frees the one object handed to it,
 // exactly once, then parks terminally for the joiner.
 static void *volatile g_lp_cross_obj;
@@ -86,7 +96,7 @@ static const char *loom_private_fixture(void) {
     hidx_t fd = -1, rd = -1, wr = -1;
     u64 mapped_va = 0;
     u32 mapped_len = 0;
-    u64 goal = loom_private_retired();
+    u64 goal = lp_settled();
 
     LP_CHECK(p, "private creator allocated");
     u32 initial = p->as->page_count;

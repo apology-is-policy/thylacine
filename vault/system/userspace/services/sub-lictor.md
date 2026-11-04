@@ -127,17 +127,27 @@ Pins survive ambiguous device completion and deferred retirement. Context links
 must be gone and device retirement acknowledged before IDs or backing are freed.
 
 A retirement (detach or unref of a resource, destroy of a context, detach of a
-context's resource, retire or drop of a host ring) runs only once every
-outstanding chain has really retired; until then the loop leaves it parked
-(`gpu_api::admit`, asked of each pending request). A park must end: an episode
-ends, in-flight chains retire, and a stalled engine revives or dies (below), but
-some quiescence never comes back. A dead engine and a cursor queue poisoned
-until device reset (`Gpu::quiescence_unreachable`) admit a retirement at once; a chain the device
-may never retire (a poisoned fenced slot) is bounded by the clock instead, so a
-retirement parked `PARK_BOUND_MS` (30 s, asserted equal to the fenced
-abandonment bound) is admitted whatever the cause. Either way `Device::execute`
-refuses it before any ledger change, says so (at the 1st, 2nd, 4th, ... refusal),
+context's resource, retire or drop of a host ring) runs only once every chain that
+can reach its object has really retired (GPU-DESIGN 4.5.15, vote 49). Each pending
+request asks `Device::retirement_hold`. For a resource the answer reads every stream
+on a context holding it (`Objects::holds`: attached, or a host blob minted under
+that context) and every fenced transfer naming it. For a context, or a detach from
+one, it reads that context's chains, transfers included. Each slot's `fslot_reach`
+records what its chain can reach and survives abandonment, because an abandoned
+chain still can. Device-wide synchronous work holds every retirement, and a dead
+engine refuses every one. The cursor queue holds none: its chains touch only a
+cursor plane. The hold has three values (`gpu_api::Hold`): `Clear` runs, `Parks`
+waits, `Refused` is admitted at once. A park must end: an episode ends, in-flight
+chains retire or are abandoned, and a stalled engine revives or dies (below). A
+poisoned chain may never end, so what only it holds is `Refused`, and any retirement
+parked `PARK_BOUND_MS` (30 s, asserted equal to the fenced abandonment bound) is
+admitted whatever the cause. Either way `Device::execute`
+refuses it before any ledger change, says so (at the 1st, 2nd, 4th, ... refusal, with
+the cause: a non-quiescent engine, or a poisoned chain that can reach the object),
 and the compositor degrades instead of blocking on a reply that never comes.
+Another client's poison reaches nothing of this one's, so it refuses and parks nothing
+here (`tools/warp/warp-poison-retire.exp`). Scoping relies on the host resolving a
+stream's ids through its context's table (I-45's trusted half).
 The pins themselves stay because nothing frees one without a device
 completion: a refused detach keeps its backing, and `reap` releases an unref's
 pin only once the device journal reports it, which a dead engine never does.

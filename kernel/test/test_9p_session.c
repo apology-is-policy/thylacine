@@ -2116,6 +2116,45 @@ void test_9p_session_flush_headroom_grows_table(void) {
     TEST_ASSERT(cflen < 0, "control: capped at the share, the Tflush finds no tag");
 }
 
+// A session whose owner reserved its tags up front never grows again: past them, with
+// the op share wide open, there is no tag and no new chunk. One variable away, the same
+// fill on an unreserved table grows it, so the fill does reach the point that allocates.
+void test_9p_session_reserved_tags_cap_the_table(void) {
+    const u32 tags = P9_TAG_CHUNK + 1u;
+    const u32 cap  = 2u * P9_TAG_CHUNK;
+    struct p9_session s;
+    TEST_EXPECT_EQ(drive_session_open(&s, 0), 0, "open");
+    int reserved = p9_session_reserve_tags(&s, tags);
+    u32 chunks = s.n_chunks, limit = s.tag_limit;
+    s.ops_max = cap + 1u;
+    u16 first = P9_NOTAG;
+    u32 held = fill_op_share(&s, cap, &first);
+    bool none = !p9_session_has_free_tag(&s);
+    u32 after = s.n_chunks;
+    bool too_many = p9_session_reserve_tags(&s, P9_TAG_LIMIT + 1u) != 0;
+    p9_session_destroy(&s);
+
+    struct p9_session c;
+    TEST_EXPECT_EQ(drive_session_open(&c, 0), 0, "open (control)");
+    c.ops_max = cap + 1u;
+    u16 cfirst = P9_NOTAG;
+    u32 cheld = fill_op_share(&c, cap, &cfirst);
+    bool cfree = p9_session_has_free_tag(&c);
+    u32 cafter = c.n_chunks;
+    p9_session_destroy(&c);
+
+    TEST_EXPECT_EQ(reserved, 0, "the reservation succeeds");
+    TEST_EXPECT_EQ((u64)chunks, 2ull, "one tag past a chunk allocates one more");
+    TEST_EXPECT_EQ((u64)limit, (u64)cap, "and caps the table at what it allocated");
+    TEST_EXPECT_EQ((u64)held, (u64)cap, "every reserved tag is usable");
+    TEST_ASSERT(none, "past them there is no tag");
+    TEST_EXPECT_EQ((u64)after, 2ull, "and no new chunk");
+    TEST_ASSERT(too_many, "a reservation past the tag space refuses");
+    TEST_EXPECT_EQ((u64)cheld, (u64)cap, "control: the fill");
+    TEST_ASSERT(cfree, "control: an unreserved table has another tag");
+    TEST_EXPECT_EQ((u64)cafter, 3ull, "control: on a chunk it grew for it");
+}
+
 // The reader handoff walks only the entries a sync waiter owns, skipping every
 // chunk whose count of them is zero. An undercount hides a waiter -- the role
 // is never handed to it -- so the walk must find a sync owner in a grown chunk,

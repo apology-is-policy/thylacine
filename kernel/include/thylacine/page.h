@@ -39,7 +39,8 @@ struct kmem_cache;
 // 50% size growth from P1-D (16 MiB → 24 MiB) over the alternative
 // of overlaying with a union — clarity of access and absence of
 // "is this field meaningful?" footguns matter more than ~8 MiB of
-// BSS at v1.0.
+// BSS at v1.0. holder is the one overlay: its flags say which member it
+// is, and a block is never both.
 struct page {
     struct page *next;          // free list next (NULL if not on a list)
     struct page *prev;          // free list prev
@@ -77,7 +78,12 @@ struct page {
     // per-Burrow lock could serialise the break's decide. See cow.h.
     u32 cow_share;
     void *slab_freelist;        // SLUB: head of free objects in this slab
-    struct kmem_cache *slab_cache; // SLUB: cache backref (NULL when not a slab)
+    // Which of these a block holds is the head page's flags: PG_SLAB or PG_SPONSORED,
+    // never both, because a slab comes from alloc_pages and is never sponsored.
+    union {
+        struct kmem_cache *slab_cache;   // SLUB: cache backref, under PG_SLAB
+        struct MemoryAccount *sponsor;   // the account charged, under PG_SPONSORED
+    } holder;
 };
 
 // Pin struct page size at compile time (P1-I audit F35). The struct
@@ -97,6 +103,9 @@ _Static_assert(sizeof(struct page) == 48,
 #define PG_USER       (1u << 4) // B-1a': allocated by alloc_user_pages and counted in the
                                 // user pool; free_pages clears it and returns the charge
                                 // (mm/phys.h). On the block's HEAD page, like the rest.
+#define PG_SPONSORED  (1u << 5) // MM-1: holder.sponsor names the account charged for the
+                                // block; free_pages refunds it. Independent of PG_USER,
+                                // since DMA backing is charged and is outside the pool.
 
 // Allocation flags (caller-passed to alloc_pages / kpage_alloc).
 //

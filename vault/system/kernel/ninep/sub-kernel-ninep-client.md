@@ -52,6 +52,9 @@ pins the reset.
 
 ## Purpose
 
+A client whose owner must not allocate later, a private Loom session, calls
+`p9_session_reserve_tags` before use, so asking for a tag never grows the table.
+
 The kernel's 9P2000.L client: consolidates the wire codec, the session state
 machine, and the transport byte-pipes into one op-per-function API
 (`p9_client_*`), and is the single object a dev9p mount hands to EVERY Proc

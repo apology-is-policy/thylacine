@@ -58,7 +58,7 @@ use libthyla_rs::t_putstr;
 use crate::ansi;
 use crate::completion::ShellCompletionSource;
 use crate::eval::{builtin, deliver_pending_notes, eval_source, Env, Value};
-use crate::line_editor::{EditorAction, LineEditor};
+use crate::line_editor::{EditorAction, LineEditor, PasteRefused};
 use crate::palette::{PromptRoles, Role};
 
 /// H-1c: render an exit code decimal into a stack buffer (no_std, no alloc
@@ -114,6 +114,11 @@ pub struct Repl {
     /// tier per prompt -- a renderer swap resets the kernel tier, and a
     /// stale `/env/BEACON` would defeat that reset for every child.
     prompt_cycles: u64,
+    /// The paste key was pressed in the edit in progress. The binary owns the ring.
+    paste_wanted: bool,
+    /// Moves when an edit ends (accept, cancel, an interrupt). A paste asked for in
+    /// one edit must never land in another.
+    edit: u64,
     /// #115a: the cached `/bin` external-command scan (the #58 exec namespace,
     /// static for the session). Merged with the live builtins / aliases / funcs
     /// to form the Tab-completion command index. Empty until `install_completion`.
@@ -164,6 +169,8 @@ impl Repl {
             env,
             editor: LineEditor::new(),
             prompt_cycles: 0,
+            paste_wanted: false,
+            edit: 0,
             bin_commands: Vec::new(),
             completion_installed: false,
             history_path: None,
@@ -337,6 +344,17 @@ impl Repl {
             // -- defining it once removes the drift hazard).
             Some(fd) => crate::eval::console::set_mode(fd, crate::eval::console::PROMPT_MODE),
             None => false,
+        }
+    }
+
+    pub fn job_control(&self) -> bool {
+        self.env.job_control.is_some()
+    }
+
+    /// A shell that leaves gives the terminal back as a command's, to whatever runs next.
+    pub fn leave_terminal(&self) {
+        if let (Some(_), Some(fd)) = (&self.env.job_control, self.env.consctl_fd) {
+            crate::eval::console::set_mode(fd, crate::eval::console::CHILD_MODE);
         }
     }
 
@@ -696,6 +714,51 @@ impl Repl {
         self.prompt_cycles
     }
 
+    fn end_edit(&mut self) {
+        self.edit = self.edit.wrapping_add(1);
+        self.paste_wanted = false;
+    }
+
+    /// Whether the paste key was pressed since the last ask, and is still wanted.
+    pub fn take_paste_wanted(&mut self) -> bool {
+        core::mem::take(&mut self.paste_wanted)
+    }
+
+    /// Which edit is in progress: unchanged means the prompt is the one the user
+    /// asked from.
+    pub fn edit(&self) -> u64 {
+        self.edit
+    }
+
+    /// Fetched clipboard bytes, into the edit in progress, or a refusal above it.
+    pub fn paste(&mut self, bytes: &[u8], out: &mut dyn IoWrite) {
+        if bytes.is_empty() {
+            self.notice("clipboard: it is empty, nothing pasted", out);
+            return;
+        }
+        let refused = match core::str::from_utf8(bytes) {
+            Ok(text) => self.editor.paste_text(text).err(),
+            Err(_) => Some(PasteRefused::Unprintable),
+        };
+        match refused {
+            None => self.emit_prompt(out),
+            Some(PasteRefused::TooLong) => self.notice("clipboard: too long for this line, nothing pasted", out),
+            Some(PasteRefused::Unprintable) => self.notice("clipboard: a tab or control character, nothing pasted", out),
+            Some(PasteRefused::NoMemory) => self.notice("clipboard: no memory for the paste, nothing pasted", out),
+        }
+    }
+
+    /// One line above the prompt, for a refusal the user is owed.
+    pub fn notice(&mut self, line: &str, out: &mut dyn IoWrite) {
+        let clear = self.editor.clear_menu();
+        let _ = out.write_all(clear.as_bytes());
+        let _ = out.write_all(b"\r\n");
+        let _ = out.write_all(line.as_bytes());
+        let _ = out.write_all(b"\r\n");
+        self.editor.reset_render_position();
+        self.emit_prompt(out);
+    }
+
     /// Emit the current prompt + buffer to `out`. Call once before the first
     /// `feed` to draw the initial prompt.
     pub fn draw_prompt(&mut self, out: &mut dyn IoWrite) {
@@ -795,6 +858,17 @@ impl Repl {
     /// same terminate signal and stops calling `feed`. A normal return
     /// (`None`) means "read more input".
     pub fn feed(&mut self, input: &[u8], out: &mut dyn IoWrite) -> Option<i32> {
+        self.feed_announcing(input, out, &mut || {})
+    }
+
+    /// `feed`, calling `accepted` when a line is accepted and before it runs: a foreground
+    /// command keeps the binary's loop from turning, however long it takes.
+    pub fn feed_announcing(
+        &mut self,
+        input: &[u8],
+        out: &mut dyn IoWrite,
+        accepted: &mut dyn FnMut(),
+    ) -> Option<i32> {
         for action in self.editor.feed_bytes(input) {
             // D4: the editor draws the completion-menu strip below its block
             // and knows where it is. Any action that leaves the menu erases it
@@ -814,7 +888,17 @@ impl Repl {
                 EditorAction::Redraw => {
                     self.emit_prompt(out);
                 }
+                EditorAction::PasteWanted => {
+                    self.paste_wanted = true;
+                    self.emit_prompt(out);
+                }
                 EditorAction::Accept(line) => {
+                    self.end_edit();
+                    // Before anything else this line does. A spawn takes a while, and
+                    // what is typed during it belongs to the command: left raw, its
+                    // Enter would stay a bare CR, which no line reader ever ends on.
+                    self.set_line_running(true);
+                    accepted();
                     // The user pressed Enter; move the terminal past the
                     // edited line before any eval output or the next prompt.
                     let _ = out.write_all(b"\r\n");
@@ -865,6 +949,10 @@ impl Repl {
                     // command held the loop. An idle interrupt drained here is
                     // discarded (benign at a sync point) -- the bool is ignored.
                     self.deliver_notes();
+                    // A handler's `exit`, or a hangup with none, raised in that drain.
+                    if let Some(code) = self.env.exit_requested() {
+                        return Some(code);
+                    }
                     // H-1c: the command's completion mark + the output zone
                     // close, then the NEXT prompt zone opens around the fresh
                     // prompt. Job-reap lines + note output above land inside
@@ -876,6 +964,7 @@ impl Repl {
                     self.zone_open(out, beacon::sink::Zone::Prompt);
                     self.cwd_report(out);
                     self.prog_report(out);
+                    self.set_line_running(false);
                     self.emit_prompt(out);
                     // H-2 F10: one completed cycle -- the caller's cue to
                     // re-check the renderer tier before this fresh prompt
@@ -885,6 +974,7 @@ impl Repl {
                 EditorAction::Cancel => {
                     // Ctrl-C: discard the edit, fresh prompt. The editor has
                     // already reset its buffer.
+                    self.end_edit();
                     let _ = out.write_all(b"\r\n");
                     self.emit_prompt(out);
                 }
@@ -969,6 +1059,23 @@ impl Repl {
             self.env.let_set(name, Value::scalar(a.clone()));
         }
         self.env.let_set("*", Value::list(args.to_vec()));
+    }
+
+    /// Only job control hands the terminal over: a console session's children see no
+    /// discipline, so its mode never moves here.
+    fn set_line_running(&mut self, running: bool) {
+        if self.env.job_control.is_none() {
+            return;
+        }
+        self.env.line_running = running;
+        if let Some(fd) = self.env.consctl_fd {
+            let mode = if running {
+                crate::eval::console::CHILD_MODE
+            } else {
+                crate::eval::console::PROMPT_MODE
+            };
+            crate::eval::console::set_mode(fd, mode);
+        }
     }
 
     fn emit_prompt(&mut self, out: &mut dyn IoWrite) {
@@ -1119,8 +1226,12 @@ impl Repl {
         for line in &lines {
             self.env.emit_line(line); // PTY-4b: the session terminal, not the UART
         }
+        // A handler may run a job, and a job writes its own modes once it is running.
+        self.set_line_running(true);
         let interrupted = crate::eval::stmt::dispatch_notes(&mut self.env, &notes);
+        self.set_line_running(false);
         if interrupted {
+            self.end_edit();
             self.editor.reset();
         }
         // The leading `\r\n` + any notification moved the cursor to a fresh

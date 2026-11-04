@@ -2656,6 +2656,20 @@ enum {
     // switch (vivarium.c).
     SYS_POSTNOTE_TID = 138,
 
+    // SYS_ACCOUNT(handle, op, rec_va, rec_size), with thylacine/account.h's records
+    // (SHARED-MEMORY-ACCOUNTING.md section 13, operator votes 47 and 48). Serves
+    // ACCOUNT_QUERY on ACCOUNT_SELF, which must arrive sign-extended. Returns 0, or:
+    //   -T_E_INVAL      op names no operation; rec_size, version, size, flags or pad
+    //                   is wrong; incarnation is neither 0 nor the account's
+    //   -T_E_OPNOTSUPP  an operation with no code behind it yet
+    //   -T_E_BADF       a handle other than ACCOUNT_SELF: no KOBJ_ACCOUNT exists yet
+    //   -T_E_FAULT      the record is not readable and writable memory of the caller,
+    //                   in which case any part of it may have been written
+    //
+    // Linux's 140 is setpriority, which has no row, so a Linux Proc takes ENOSYS before
+    // the native switch (vivarium.c).
+    SYS_ACCOUNT = 140,
+
     // NOT A SYSCALL. One past the highest assigned number, so that
     // VIV_NATIVE_CEILING can be pinned to a value the compiler recomputes
     // rather than to a symbol a person must remember to re-point.

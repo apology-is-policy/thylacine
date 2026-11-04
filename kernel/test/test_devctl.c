@@ -328,13 +328,15 @@ void test_devctl_read_memory_format(void) {
     struct Spoor *c = open_ctl_leaf("memory");
     TEST_ASSERT(c != NULL, "open /ctl/memory");
 
-    char buf[256];
-    long got = devctl.read(c, buf, 256, 0);
+    char buf[512];
+    long got = devctl.read(c, buf, 512, 0);
     TEST_ASSERT(got > 0, "memory read positive");
     TEST_ASSERT(contains(buf, (size_t)got, "total:"),    "has total:");
     TEST_ASSERT(contains(buf, (size_t)got, "free:"),     "has free:");
     TEST_ASSERT(contains(buf, (size_t)got, "reserved:"), "has reserved:");
     TEST_ASSERT(contains(buf, (size_t)got, "pages"),     "uses page units");
+    TEST_ASSERT(contains(buf, (size_t)got, "ledger:"),   "has ledger:");
+    TEST_ASSERT(contains(buf, (size_t)got, "unpaired: 0\n"), "no pairing has broken");
 
     spoor_clunk(c);
 }

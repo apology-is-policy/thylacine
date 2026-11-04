@@ -134,6 +134,11 @@ image and boot structures. `reserve` is the share kept for the kernel and its
 services. `pool` is the rest, the pages every user process may hold together.
 `charged` is what they hold now. The headroom is `pool` minus `charged`.
 
+`ledger` is the same pages as the memory accounts count them, and it reads the same as
+`charged` unless pages are being allocated or freed at that moment. `unpaired` counts the
+times an account's charges and refunds failed to match, and it should stay at 0. Accounts
+limit nothing yet, so neither figure changes what a process may hold.
+
 ### Judge the headroom
 
 A process's `budget` defaults to the pool, so the pool's headroom is the limit
@@ -187,8 +192,13 @@ allocations reuse them.
 `/ctl/procs` is one snapshot taken under the process-table lock, and it stops
 when its buffer of 4 KiB fills, at some fifty to sixty processes; `ps` and
 `prowl` show what they received. `/ctl/procs`, `/ctl/memory` and `/proc/<pid>/status` are readable by
-every process. `/proc/<pid>/sched` is readable by the process's owner and by
-holders of `CAP_HOSTOWNER`.
+every process. `/proc/<pid>/sched` and `/proc/<pid>/account` are readable by the process's
+owner and by holders of `CAP_HOSTOWNER`.
+
+`/proc/<pid>/account` shows the memory account the process is charged to, in bytes: each
+class's use and limit, the room left and the class that is tightest. Until sessions have
+accounts of their own, every process shares one account, so it shows the whole machine.
+It is for reading: a program that needs these figures asks the kernel with `SYS_ACCOUNT`.
 
 A listing of `/proc` is generated from the process table as it is read, in
 increasing ID order, with no snapshot kept between reads: each read continues

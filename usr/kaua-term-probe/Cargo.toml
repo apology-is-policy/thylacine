@@ -18,4 +18,6 @@ kaua-term = { path = "../kaua-term" }
 ptyhold = { path = "../lib/ptyhold" }
 inlinewire = { path = "../lib/inlinewire" }
 libhalcyon = { path = "../lib/libhalcyon" }
+interaction-native = { path = "../lib/interaction-native", features = ["qualification"] }
 libtapestry = { path = "../lib/libtapestry" }
+vt = { path = "../lib/vt" }

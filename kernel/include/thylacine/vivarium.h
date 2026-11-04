@@ -634,7 +634,11 @@ enum {
 // number: a VIV_ENOSYS row consumed before the native switch, which now argues
 // its number on its own (vivarium.c). The lowest row still argued by the
 // ceiling is rt_sigreturn (139).
-#define VIV_NATIVE_CEILING 138
+//
+// SYS_ACCOUNT reserves 140 (operator votes 47 and 48), and the ceiling rises over
+// rt_sigreturn and setpriority, each with its own per-number argument in vivarium.c.
+// The lowest row still argued by the ceiling is setgid (144).
+#define VIV_NATIVE_CEILING 140
 
 // -----------------------------------------------------------------------------
 // TIER 2 — translators (V-2b).

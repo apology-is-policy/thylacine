@@ -123,6 +123,8 @@ struct sim {
     /* The next RETURN answers this instead of releasing its member. */
     int has_refuse_return;
     int64_t refuse_return;
+    /* A reservation answers ENOMEM until a slot is reaped. */
+    int reserve_out_of_memory;
     /* ENTER refuses the next CLUNK with this errno. */
     int has_refuse_clunk;
     int64_t refuse_clunk;

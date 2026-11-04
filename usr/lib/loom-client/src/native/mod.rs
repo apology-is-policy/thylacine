@@ -255,6 +255,12 @@ impl<K: Kernel> Ring<K> {
     pub fn backlog(&self) -> usize {
         self.inner.sq.cq_backlog() as usize
     }
+    /// The descriptor a host adds to its own poll set, POLLIN meaning a turn has
+    /// work. -1 once the ring has closed, a failure included, and a host must honour
+    /// that: a number closed under it answers POLLNVAL or POLLHUP for ever.
+    pub fn poll_fd(&self) -> i32 {
+        self.inner.shared.fd()
+    }
     /// Name a strict 9P service posted in the registry `registry_fd` (from
     /// open("/srv", O_PATH)). Synchronous: the kernel checks the name now and
     /// the service when a scope connects.
@@ -518,6 +524,9 @@ impl<K: Kernel> Inner<K> {
         self.check()?;
         let mut source = RingWait { inner: self };
         if deadline.is_some_and(|d| source.now() >= d) {
+            // No poll runs, and a poll is how a close would be learnt. An ENTER with
+            // nothing to submit asks without sleeping, and sees a reused number too.
+            self.enter();
             return Ok(());
         }
         let ticket = source.arm()?;

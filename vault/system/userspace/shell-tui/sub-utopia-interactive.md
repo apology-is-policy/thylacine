@@ -6,6 +6,7 @@ parent: moc-userspace-shell-tui
 code:
   - usr/utopia/libutopia/src/line_editor.rs
   - usr/utopia/libutopia/src/repl.rs
+  - usr/utopia/shell/src/clip_host.rs
   - usr/utopia/libutopia/src/completion.rs
   - usr/utopia/libutopia/src/palette.rs
   - usr/utopia/libutopia/src/ansi.rs
@@ -21,7 +22,7 @@ hazards: []
 abis: []
 design: []
 created: 2026-08-03
-updated: 2026-09-25
+updated: 2026-11-03
 area: userspace
 ---
 ## Graphical elevation banner
@@ -128,7 +129,7 @@ from discarding bytes intended for the trusted corvus episode.
 
 
 **The byte pipeline.** `ParserState` is a four-state machine — `Ground`, `Escape`,
-`Csi`, `Utf8`. Ground maps C0 controls to emacs bindings (`Ctrl-A/E/B/F/K/U/W/Y/D`,
+`Csi`, `Utf8`. Alt-P (`ESC p`) yields `EditorAction::PasteWanted`; it changes nothing and holds no clipboard (AS-4e, vote 52). `Repl` keeps the wish and an edit counter, and `usr/utopia/shell/src/clip_host.rs` opens one private ring per paste, reads `HALCYON_INTERACTION` then, and drops the ring when the answer comes or the edit ends. `Repl::feed_announcing` tells the binary a line was accepted before it runs, so a foreground command never holds a ring its loop cannot pump. `LineEditor::paste_text` lands text at the cursor whole or not at all: past `MAX_BUFFER_LEN`, with a tab or control character (`render` echoes the buffer as it is), or without memory for it, it refuses and `Repl::notice` says so above the prompt. A line feed stays in the buffer and nothing submits. Witness: `ls-ut-paste`, written and not yet booted. Ground maps C0 controls to emacs bindings (`Ctrl-A/E/B/F/K/U/W/Y/D`,
 `Ctrl-C`, `Ctrl-L`, `Ctrl-R`, Tab) and enters `Escape` on ESC or `Utf8` on a
 multi-byte leading byte. CSI collects up to four numeric parameters and dispatches
 on the final byte (arrows, Home/End, Delete via `CSI 3~`). A stray ESC aborts to
@@ -369,6 +370,24 @@ clobbering the pts ctl. Either way the *same* `console_apply_default` writes the
 *same* `PROMPT_MODE` vocabulary, defined once in `eval::console` and shared with
 the foreground-child restore, so the two cannot drift apart.
 
+**Who the terminal belongs to.** Under job control the pts is the line editor's at a
+prompt and the command's from the moment a line is accepted. `set_line_running` writes
+`CHILD_MODE` first thing in the Accept arm, before the announcement and before anything
+is parsed or spawned, and `PROMPT_MODE` just before the next prompt is drawn. The gaps
+between one line's commands stay cooked: `mode_after_child` is what every finished child
+is followed by, so a child that left the terminal strange is corrected on either side. A
+mode write does not reinterpret bytes already in the ring, so an Enter typed while the
+pts is still raw stays a bare CR, and a line reader waits on a line that has ended. A
+note handler at an idle prompt gets the same window around it, so a job writes no mode
+of its own once it is running. A console session never moves the mode.
+
+Under job control the loop reads one byte per read: what follows an Enter is the
+command's, and bytes a shell has already read cannot be given back. A shell that leaves
+writes `CHILD_MODE` (`leave_terminal`), so a nested one such as Imperium's hands its
+parent's next command a cooked terminal. A pts read that ends on a line limit is a
+known gap: a canonical read is not yet bounded to one line, and the line limit is 256
+bytes (OPEN-BUGS 2026-11-03T23:41:33Z).
+
 **The loop** polls fd 0 and the note fd together. A note wake is serviced first —
 a finished background job prints `[N]+ Done`, an idle `Ctrl-C` cancels the line —
 and a simultaneous keystroke repaints over the notification. A note fd that errors
@@ -570,7 +589,7 @@ not.
   width-budget middle-ellipsis truncation are unbuilt.
 - **Multi-line history entries are not persisted** — an embedded newline would
   split into separate entries on reload, so such lines are skipped.
-- **vi mode, bracketed paste, and modifier-key recognition** (Ctrl-arrow, Alt-x)
+- **vi mode, bracketed paste, and modifier-key recognition** (Ctrl-arrow, Alt-x other than Alt-P)
   are unbuilt.
 
 ## Caveats

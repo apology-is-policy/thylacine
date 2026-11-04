@@ -153,7 +153,8 @@ operations are ACCOUNT_QUERY, ACCOUNT_CHILD, ACCOUNT_SET_LIMITS,
 ACCOUNT_WATCH, VOUCHER_CREATE and ALLOCATE_FUNDED/MAP_ACCOUNTED. These names do
 not allocate syscall numbers. The ABI may multiplex account control on a new
 object operation, but must not reuse a retired number or overload hardware
-rights. Reserve the concrete layout and C/Rust mirrors at MM-0.
+rights. Reserve the concrete layout and C/Rust mirrors at MM-0. The operator chose
+the shape on November 3: section 13.
 
 Query/watch exposes separate used, reserved, limit and pressure-generation fields
 per class in bytes, with checked page rounding internally. Every mutating request
@@ -485,3 +486,166 @@ refused, so a client holds and pays for the whole object. Only an owner's own DM
 map, placed inside the burrow window, can be cut down to one page while retaining
 every page; outside the window a hardware map detaches whole. The charge today is
 none in either case, which is the defect the retention unit closes.
+
+## 13. The voted interface
+
+Operator votes 47 and 48, November 3. Section 4's proposal stands except where this
+says otherwise.
+
+**One operation on a typed handle.** `SYS_ACCOUNT(handle, op, rec_va, rec_size)` is
+one syscall number, taken when the layout below is reserved in code. It works on a
+`KOBJ_ACCOUNT` handle or a self selector for the caller's own account, so an
+application needs no handle to query or to be charged. A file tree was the other
+candidate, and Plan 9's idiom. It lost because a path can name an account, which
+section 4 forbids, and because all-or-nothing limit changes and structured outcomes
+would become parsing, with the allocation path still needing a binary call.
+
+A read-only `/proc/<pid>/account` gives the shell and diagnostics a text view, under
+the /proc gates. It confers no authority, and nothing may parse it to decide policy.
+
+**Pressure through poll.** `poll` on the handle replaces section 4's ACCOUNT_WATCH.
+Section 8's rule, read the snapshot after registering interest, is then poll's own.
+
+**A voucher is bound to one connection.** There is no voucher handle. The client
+calls `VOUCHER_CREATE` naming its end of a /srv connection and receives a
+non-repeating 64-bit id, which it sends in band on the service's protocol. The server
+calls `ALLOCATE_FUNDED` naming its own end, and the kernel checks that the two ends
+pair and the id has funds left. The id alone grants nothing, the server cannot pass it
+on, and connection death returns what is unspent, as section 5 requires. Handles
+cannot move between Procs today (`handle_transfer_via_9p` is named in comments and not
+built), and this needs no such path. Genode's session funding has the same shape:
+quota travels with the session.
+
+The layout, to be pinned with `_Static_assert` and mirrored in libthyla-rs:
+
+```c
+struct account_rec_hdr { u32 version; u32 size; u32 flags; u32 pad; u64 incarnation; };
+enum { ACCOUNT_QUERY=1, ACCOUNT_CHILD=2, ACCOUNT_SET_LIMITS=3,
+       VOUCHER_CREATE=4, VOUCHER_CLOSE=5, ALLOCATE_FUNDED=6 };
+enum { CLASS_ALLOC=0, CLASS_RETAIN=1, CLASS_META=2, CLASS_DEVICE=3, ACCOUNT_CLASSES=4 };
+struct account_class { u64 used, reserved, limit; };
+struct account_query {
+    struct account_rec_hdr h;
+    u64 generation; u32 level; u32 limiting;
+    u64 headroom, reclaim_target, retained_after_exit, awaiting_device;
+    struct account_class c[ACCOUNT_CLASSES];
+};
+struct account_outcome { u64 request_id; u32 cls; u32 reason; u64 requested, available, limiting_account; };
+```
+
+`flags` is zero and `incarnation` is the expected account or object, with 0 for self.
+Amounts cross the boundary in bytes, with checked page rounding inside, per section 4.
+`ACCOUNT_SET_LIMITS` carries the whole class vector, so all-or-nothing is the record's
+shape. `reason` takes section 9's nine values, 1 to 9 in that section's order, so a
+record never filled in names none. `level` is 0 NORMAL, 1 WARNING and 2 CRITICAL, and
+`limiting` is the class that is tightest. The self selector is -1, since no handle is
+negative.
+
+`SYS_ACCOUNT` is 140, reserved at MM-0 and given its dispatch arm at MM-1. Linux's 140 is
+setpriority, which has no row, so a Linux Proc takes ENOSYS before the native switch,
+reaches no account operation and is charged without one. The kernel's `thylacine/account.h`, libt's
+`thyla/account.h` and libthyla-rs's `account` are held to one byte record by
+`tools/test-account-abi.py`. Records for the operations other than the query come with
+those operations, and the version and size fields are what lets them.
+
+**A child account's control stays with the Proc that made it.** Operator vote 58,
+November 4. Any Proc may `ACCOUNT_CHILD` its own account through the self selector and
+receives a `KOBJ_ACCOUNT` in its own handle table. The kind is non-transferable, like
+Loom, and fork does not copy it. The Proc names that handle in a new `SPAWN_EXT_ACCOUNT`
+tail on spawn's record, and the new Proc is born under that account. A Proc's account is
+set only at birth and never changes. `ACCOUNT_SET_LIMITS` needs the handle, so nobody
+adjusts their own account. Login makes the session's child and holds its control, and
+joey makes the resident services'. Each level subdivides what it has, so authority only
+narrows, and no handle crosses a Proc boundary. Genode's quota trading has this shape:
+budget flows down the parent chain, with no ambient id. Each account pays META, and a
+Proc's breadth is bounded by `PROC_HANDLE_MAX` while its handles hold them; depth is
+section 6's sixteen.
+
+If the creator exits, the limits it set stay and nobody can change them. Halcyon settings
+that adjust a session go through login, or wait for a transfer path. Two other routes
+lost. Adding the kind to spawn's descriptor array moves it to the transferable side of
+I-4 and I-5, widens fork's copy unless it is special-cased, and changes what
+`specs/handles.tla`'s partition means. Waiting for `handle_transfer_via_9p` would hold
+MM-2 behind a large path nobody has built.
+
+**A sandbox reads its own chain.** Operator vote 59, November 4. The query reports the
+caller's account and what bounds it from above. Until sessions have child accounts that
+chain is the root, so a Proc with no `/ctl` reads machine totals, and other sessions'
+allocations and thread creations show as steps. It reaches no address, lock or per-key
+data. Giving sessions children narrows this to the session's. No capability gates the
+query and its figures are not coarsened, because a program should be able to ask its
+budget rather than find it by allocating until refused. A sandbox that should see less
+is given its own child, and then sees only itself.
+
+Not settled here: whether `ALLOCATE_FUNDED` returns a `KOBJ_DMA`, a Burrow or either by
+class; and whether a map needs its own operation or `burrow_share_into`'s callers charge
+inside it, section 4's MAP_ACCOUNTED (MM-2).
+
+## 14. MM-1 as built
+
+Section 10's first step: durable accounts and an exact physical ledger, watching only.
+The 128 MiB limit and the capacity pool decide everything they decided before.
+
+**Written, not yet booted:** the account tree, every Proc's account, a sponsor on every
+pool block and DMA block, thread pool pages as `CLASS_META`, and a test that the ledger
+equals the pool to the page across every allocation since boot.
+
+**The ledger takes no lock.** Section 6's transaction lock is for reservations, and its
+rule is that no account lock is taken under Burrow, VMA or driver locks. An allocation
+lands under `as->lock` in a fault, so a physical charge is a walk of relaxed atomics up
+an immutable parent chain. MM-2 keeps that for the settled charge and adds the lock for
+the reservation before it. A shadow counter can be read a moment out of step with the
+pool; nothing decides on it yet, and MM-2 must not decide on a raw read of it.
+
+**A sponsor rides the block's head page,** in a union with `slab_cache`, so `struct page`
+stays 48 bytes. `free_pages` is the one way off, as it is for the pool. Each block holds
+a reference to its account, which is what makes section 4's orphan rule true without
+any list of orphans.
+
+**The requesting account pays,** which is the current thread's Proc's. File pages and the
+map nodes that index them take a static system cache account on both fault paths, section
+3's rule. A thread's pool pages
+are charged to its payer and remembered on the thread, because its reaper runs in another
+context.
+
+**A broken pairing does not stop the kernel,** because at this stage nothing depends on
+the ledger. It is counted, and the test runner reddens the test it happened under. That
+changes when a decision first reads the ledger.
+
+**The query is the whole of the call, also not yet booted.** `ACCOUNT_QUERY` on the self
+selector is served. Any other handle is `-EBADF`, since `KOBJ_ACCOUNT` does not exist,
+and the other operations are `-EOPNOTSUPP`. A stale incarnation is `-EINVAL`, because the
+error registry has no `ESTALE` and this is not worth a change to it.
+
+`used` is the account's and its descendants', in bytes. Nothing charges `CLASS_RETAIN`
+or `CLASS_DEVICE` yet. An account has no limits of its own until MM-1c, so `limit` is
+section 4's default: the pool for a RAM class, and all ones for device storage, which
+has no budget yet. `headroom` is the least of each class's room at each level up the
+chain and the pool's own room, floored at zero, and `limiting` names the class of the
+chain's tightest room even when the pool is tighter still, because the pool is no class.
+`generation`, `level` and the three reclaim figures are zero, as no pressure machinery
+exists. The header is read once and the whole record then written, so a peer thread
+cannot steer a check, and a fault on the way out may leave a part-written record, which
+`-EFAULT` tells the caller not to trust.
+
+**`/proc/<pid>/account` takes `sched`'s posture:** 0400, owner or `CAP_HOSTOWNER`, and it
+reads through a dump seal. Section 13 says only "the /proc gates". What a session holds
+is another user's business once sessions have accounts, so the stricter of the two
+postures was chosen, and it can be relaxed without breaking anything. It renders the same
+fill the call returns. `/ctl/memory` gains `ledger:` and `unpaired:`.
+
+**A wrong order is visible.** The ledger refunds the block's own order and the pool the
+caller's, on purpose: if both took the caller's, a block freed at the wrong order would
+leave them equal. It is also counted in `unpaired`, with a refund past zero and an account
+dying charged. Section 10's reconciliation walks the frames in a test, so the ledger is
+held to the blocks that exist and not only to the other counter.
+
+**`headroom` can read low.** `CLASS_ALLOC` counts DMA blocks outside the pool, and its limit
+is the pool, so a class's room can reach zero while the pool has room and allocations
+succeed. That is honest for a figure that decides nothing. MM-2 must not admit on it as it
+stands, and critical device DMA stays outside the pool even after section 7's routing.
+
+**Until sessions have children, every Proc's account is the root,** so a query shows
+machine totals. `/ctl/memory` already shows them to every process, but a sandboxed Proc
+whose namespace has no `/ctl` learns them only through this call. MM-1c ends that for a
+session and leaves a sandbox seeing its session's totals.

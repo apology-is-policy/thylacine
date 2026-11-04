@@ -103,6 +103,26 @@ pub extern "C" fn rs_main() -> i64 {
         }
     }
 
+    // 5a. The paste key's wish ends with its edit, on the console's path where one read
+    //     can hold the key and the Enter; and an empty clipboard says so.
+    {
+        let mut repl = Repl::new();
+        let mut sink: Vec<u8> = Vec::new();
+        let _ = repl.feed(b"\x1bp", &mut sink);
+        if !repl.take_paste_wanted() {
+            return fail("the paste key asked for nothing");
+        }
+        let _ = repl.feed(b"\x1bp\n", &mut sink);
+        if repl.take_paste_wanted() {
+            return fail("a paste key in the same read as Enter still fetched");
+        }
+        sink.clear();
+        repl.paste(b"", &mut sink);
+        if !sink.windows(8).any(|w| w == b"is empty") {
+            return fail("an empty clipboard said nothing");
+        }
+    }
+
     // 6. A printable keystroke produces a Redraw; the loop renders to the sink.
     {
         let mut repl = Repl::new();

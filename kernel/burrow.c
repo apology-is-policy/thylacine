@@ -49,6 +49,7 @@
 #include <thylacine/addrspace.h>     // LINEAGE L-4a: addrspace_charge_pages for the populate charge
 #include <thylacine/cow.h>           // LINEAGE L-4b: the per-page COW share count
 #include <thylacine/extinction.h>
+#include <thylacine/memaccount.h>
 #include <thylacine/mmio_handle.h>   // P4-Ic1: kobj_mmio_ref/unref for MMIO Burrows
 #include <thylacine/dma_handle.h>    // P4-Ic5b1b: kobj_dma_ref/unref for DMA Burrows
 #include <thylacine/pci_handle.h>    // V-2: kobj_pci_ref/unref for HOSTMEM Burrows
@@ -373,6 +374,7 @@ struct Burrow *burrow_create_file(struct Spoor *spoor, u64 file_offset, size_t l
         kmem_cache_free(g_vmo_cache, v);
         return NULL;     // no ref taken: caller still owns `spoor`
     }
+    v->pm.node_sponsor = account_system_cache();
 
     v->magic         = VMO_MAGIC;
     v->type          = BURROW_TYPE_FILE;

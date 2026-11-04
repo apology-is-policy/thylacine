@@ -691,6 +691,7 @@ static int64_t k_reg(void *v, int32_t fd, uint32_t op, void *arg, uint32_t nargs
         } else {
             return SIM_EINVAL;
         }
+        if (s->reserve_out_of_memory) return SIM_ENOMEM;
         if (!mint(s, slot, &rec->result)) return SIM_ENOSPC;
         if (slot.kind == SIM_SCOPE) s->slots[rec->result.slot].scope = rec->result.slot;
         return 0;
@@ -718,6 +719,7 @@ static int64_t k_reg(void *v, int32_t fd, uint32_t op, void *arg, uint32_t nargs
         s->pool_members[i] = 0;
         assert(s->nreaps < 256);
         s->reaps[s->nreaps++] = i;
+        s->reserve_out_of_memory = 0;
         return 0;
     }
     case T_LOOM_REGISTER_SERVICE_POOL: {

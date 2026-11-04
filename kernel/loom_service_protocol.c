@@ -110,6 +110,17 @@ int loom_private_protocol_prepare(struct Loom *l, struct loom_service_ref target
     }
     u32 pages = (u32)burrow_backing_pages(sizeof(struct loom_service_protocol)) +
                 2u * (u32)burrow_backing_pages(msize);
+    // The READY scan asks for a tag under Ll, where nothing may allocate, so the table
+    // never grows after this. A request on the wire holds one tag and the ring admits
+    // this many requests, so each tag is paid for here. Most rings need no chunk at all.
+    _Static_assert(sizeof(struct p9_tag_chunk) > SLUB_MAX_OBJECT_SIZE, "a chunk uses buddy kmalloc");
+    _Static_assert(P9_TAG_CHUNKS * sizeof(struct p9_tag_chunk *) > SLUB_MAX_OBJECT_SIZE,
+                   "the directory uses buddy kmalloc");
+    u32 tags = l->service_requests.admit;
+    u32 chunks = (tags + P9_TAG_CHUNK - 1u) / P9_TAG_CHUNK;
+    if (chunks > 1u)
+        pages += (u32)burrow_backing_pages(P9_TAG_CHUNKS * sizeof(struct p9_tag_chunk *)) +
+                 (chunks - 1u) * (u32)burrow_backing_pages(sizeof(struct p9_tag_chunk));
     struct AddrSpace *as = l->service_as;
     spin_lock(&as->lock);
     bool charged = addrspace_charge_pages(as, pages,
@@ -137,6 +148,7 @@ int loom_private_protocol_prepare(struct Loom *l, struct loom_service_ref target
     rc = p9_client_init_preallocated(&p->client, 0, msize, unused,
                                      p->recv_storage, msize, p->send_storage, msize);
     if (rc) { rc = -T_E_INVAL; goto fail; }
+    if (fault == 4 || p9_session_reserve_tags(&p->client.session, tags)) { rc = -T_E_NOMEM; goto fail; }
     rc = p9_client_progress_bind(&p->client, &p->progress,
              p9_srvconn_progress_ops(p->admission.conn), identity.access.principal_id, deadline);
     if (rc) { rc = -T_E_INVAL; goto fail; }

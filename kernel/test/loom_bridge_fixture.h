@@ -126,7 +126,7 @@ static const char *loom_bridge_fixture_run(void) {
     struct loom_params out;
     hidx_t fd = -1;
     s64 buf_va = 0;
-    u64 goal = loom_private_retired();
+    u64 goal = lp_settled();
     u32 base = p ? p->as->page_count : 0;
 #define BQ(cond, msg) do { if (!(cond)) { error = msg; goto done; } } while (0)
     BQ(p && q && poster, "bridge procs");
@@ -472,7 +472,7 @@ static const char *loom_private_setup_identity_fixture_run(void) {
     hidx_t rd = -1, wr = -1;
     int pipe_rc = sys_pipe_for_proc(p, &rd, &wr);
     u32 base = p->as->page_count;
-    u64 goal = loom_private_retired();
+    u64 goal = lp_settled();
     int rc = pipe_rc ? -1 : loom_private_setup_held_for_proc(p, 2, LOOM_SETUP_PRIVATE_SERVICE,
                                                              &kp, &fd, &l);
     hidx_t dup = -1;

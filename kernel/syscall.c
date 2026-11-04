@@ -33,6 +33,7 @@
 #include <thylacine/pci_irq.h>
 #include <thylacine/loom.h>
 #include <thylacine/loom_service_syscall.h>
+#include <thylacine/memaccount.h>
 #include <thylacine/mmio_handle.h>
 #include <thylacine/notes.h>
 #include <thylacine/page.h>
@@ -8898,7 +8899,9 @@ static s64 sys_loom_register_private(struct Proc *p, hidx_t loom_fd, u32 op,
     struct Handle lh;
     if (handle_get(p, loom_fd, &lh) != 0)            return -T_E_BADF;
     if (lh.kind != KOBJ_LOOM)                        { handle_put(&lh); return -T_E_BADF; }
-    u8 *record = kmalloc(size, KP_ZERO);
+    // REAP, ABORT, QUERY and RETURN fit here, so memory cannot refuse what lets go of it.
+    u64 small[8];
+    u8 *record = size <= sizeof(small) ? (u8 *)small : kmalloc(size, KP_ZERO);
     if (!record)                                     { handle_put(&lh); return -T_E_NOMEM; }
     int rc = 0;
     for (u32 i = 0; i < size && !rc; i++)
@@ -8908,7 +8911,7 @@ static s64 sys_loom_register_private(struct Proc *p, hidx_t loom_fd, u32 op,
         rc = loom_private_register_record((struct Loom *)lh.obj, p, op, record,
                                           loom_record_copyout_user, &ctx);
     }
-    kfree(record);
+    if (record != (u8 *)small) kfree(record);
     handle_put(&lh);
     return rc;
 }
@@ -12318,6 +12321,31 @@ static s64 sys_srv_peer_handler(u64 conn_h_raw, u64 out_va) {
             return -1;
         }
     }
+    return 0;
+}
+
+// The header is read once and the whole record then replaced, so a peer thread
+// rewriting it during the call can change only what its own thread reads back.
+static s64 sys_account_handler(u64 handle_raw, u64 op, u64 rec_va, u64 rec_size) {
+    struct Thread *t = current_thread();
+    if (!t || !t->proc)                                return -(s64)T_E_INVAL;
+    if (op < ACCOUNT_QUERY || op > ALLOCATE_FUNDED)    return -(s64)T_E_INVAL;
+    if (op != ACCOUNT_QUERY)                           return -(s64)T_E_OPNOTSUPP;
+    if ((s64)handle_raw != ACCOUNT_SELF)               return -(s64)T_E_BADF;
+    if (rec_size != sizeof(struct account_query))      return -(s64)T_E_INVAL;
+    if (!sys_validate_user_buf(rec_va, rec_size))      return -(s64)T_E_FAULT;
+
+    struct account_rec_hdr h;
+    if (uaccess_copy_in(&h, rec_va, sizeof(h)) != 0)   return -(s64)T_E_FAULT;
+    if (h.version != ACCOUNT_VERSION || h.size != rec_size || h.flags != 0u || h.pad != 0u)
+        return -(s64)T_E_INVAL;
+    const struct MemoryAccount *a = t->proc->account;
+    if (h.incarnation != 0u && h.incarnation != a->incarnation)
+        return -(s64)T_E_INVAL;
+
+    struct account_query q;
+    account_query_fill(a, &q);
+    if (uaccess_copy_out(rec_va, &q, sizeof(q)) != 0)  return -(s64)T_E_FAULT;
     return 0;
 }
 
@@ -18069,6 +18097,11 @@ static void syscall_native_switch(struct exception_context *ctx) {
     case SYS_NOTE_MASK:
         ctx->regs[0] = (u64)sys_note_mask_handler(ctx->regs[0],
                                                     ctx->regs[1]);
+        return;
+
+    case SYS_ACCOUNT:
+        ctx->regs[0] = (u64)sys_account_handler(ctx->regs[0], ctx->regs[1],
+                                                ctx->regs[2], ctx->regs[3]);
         return;
 
     default:

@@ -1119,6 +1119,7 @@ fn mode_color(mode: &Mode) -> Color {
         | Mode::DebugMenu
         | Mode::BufferPicker { .. }
         | Mode::FilePicker { .. } => theme::active().ember,
+        Mode::VisualMenu => mode_color(&Mode::Visual),
         // Completion overlays Insert; keeping the accent means the cursor does
         // not change colour under the user just because a popup opened.
         Mode::Insert | Mode::Completion { .. } => theme::active().green,
@@ -1263,6 +1264,51 @@ ccc", false);
         render(&ed, area(), &mut b);
         // line 0 has "1 one"; rows 1.. (text rows) are '~'.
         assert_eq!(sym(&b, 0, 1), '~');
+    }
+
+    /// What the terminal is sent to go from `last` to `frame`.
+    fn painted(frame: &Buffer, last: &Buffer) -> alloc::vec::Vec<u8> {
+        let mut bytes = alloc::vec::Vec::new();
+        kaua::encode::render_cells(&mut bytes, frame.diff(last), &mut None, &mut None);
+        bytes
+    }
+
+    // A cell the last frame already had is not sent again, so the bytes of a status
+    // word can have a cursor move inside them. stopped_nora in usr/kaua-term-probe reads
+    // the status row of a vt::Vt for this reason.
+    #[test]
+    fn a_status_word_is_on_the_screen_where_its_bytes_are_torn() {
+        for (file, status, word) in [
+            (
+                "/home/michael/stopped-nora-control.txt",
+                "copied to the clipboard",
+                "copied",
+            ),
+            (
+                "/home/michael/stopped-nora.txt",
+                "clipboard: copy failed: no answer in time",
+                "answer",
+            ),
+        ] {
+            let area = Rect::new(0, 0, 80, 24);
+            let mut ed = Editor::new(Some(file.into()), "", false);
+            let mut vt = vt::Vt::new(80, 24);
+            let mut before = Buffer::empty(area);
+            render(&ed, area, &mut before);
+            vt.feed(&painted(&before, &Buffer::empty(area)));
+            assert!(vt.row_holds(23, "NOR"), "the chip is on the row read");
+
+            ed.set_status(status.into());
+            let mut after = Buffer::empty(area);
+            render(&ed, area, &mut after);
+            let bytes = painted(&after, &before);
+            vt.feed(&bytes);
+            assert!(
+                !bytes.windows(word.len()).any(|w| w == word.as_bytes()),
+                "the word reached the wire whole, so this frame shows nothing"
+            );
+            assert!(vt.row_holds(23, word), "{} is not on the screen", word);
+        }
     }
 
     #[test]
