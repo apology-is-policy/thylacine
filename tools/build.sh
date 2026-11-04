@@ -8725,9 +8725,16 @@ host_boundary_check() {
     if [[ "${1:-}" == --musl ]]; then musl="$2"; shift 2; fi
     (( $# )) || { echo "==> host boundary check: no checker named for $root" >&2; return 1; }
     rm -rf "$root"; mkdir -p "$root"
-    local name i rc=0 pids=() names=()
+    local name i usage args rc=0 pids=() names=()
     for name in "$@"; do
-        if [[ -n "$musl" ]]; then
+        # The two conventions the tree's checkers use, told apart by the driver's own
+        # usage: a --logs directory, or a positional output and a compiler.
+        usage="$(COLUMNS=10000 python3 "$REPO_ROOT/tools/test-$name.py" --help | head -n 1)"
+        if [[ " $usage " == *" --logs "* ]]; then
+            args=(--logs "$root/$name")
+            [[ "$usage" == *"--sanitize"* ]] && args+=(--sanitize)
+            python3 "$REPO_ROOT/tools/test-$name.py" "${args[@]}" > "$root/$name.log" 2>&1 &
+        elif [[ -n "$musl" ]]; then
             python3 "$REPO_ROOT/tools/test-$name.py" "$musl" "$root/$name" \
                 --cc "$LLVM_PREFIX/bin/clang" > "$root/$name.log" 2>&1 &
         else
