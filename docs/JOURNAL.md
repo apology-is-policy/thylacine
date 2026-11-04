@@ -22,6 +22,26 @@ needed the operator.
 
 
 ---
+## 2026-11-04 -- the join's mutants and the Pi, and a wrong reading of why a scenario went red (corona)
+
+The join now has its 26 guest mutants on HVF and its shell scenarios on the Pi under KVM. It is at 7f492f623, local and not pushed: the default image's suite, the clipboard and session scenarios, one mutant row and vote 66's boot are still owed.
+
+**The mutants.** Baseline 2331/2331 at 73514e89a. All 26 went red and the rebuild came back byte-identical. The harness labelled three "NOT DISCRIMINATED", which is its word for a missed prediction. I read those boot logs before believing either reading: in `qb` and `wl` a kernel test fired first, so the guest line I had predicted could never print, and `dm0` failed `devproc.stat_native_ctl_owner` on a message I had guessed wrong. Fixing the predictions turned up a second fault. `dm0` still read as a miss against its own log, because the judge stripped `ACCOUNT-UNPAIRED` but not `LEAKED-PROC(n)`, the runner's prefix on that very line, and so saw no verdict. Re-judged on the real logs with a control row pointed at another row's log: three hits, one miss, as they should be.
+
+**Two questions from the last entry are answered.** `SYS_PCI_IRQ_CREATE` answered a flat `-T_E_PERM` on both permission refusals, which reads as "-1" in a main that moved its flat answers to names. Both are `EACCES` now, 73514e89a, mutants `pc` and `pa` red. `sys_mmap_file_for_proc`'s `EPERM` is not the same defect: its one native caller translates at `kernel/syscall.c:7713`, and the Linux arms keep it on purpose.
+
+**A prosecutor's fix is a hypothesis.** Merge audit r3 closed 0 P0, 0 P1, 2 P2, 1 P3. F2 said a designated compositor could confer `CONSOLE_OWNER`, whose every thread reads `/dev/cons` into INTERACTIVE with no ration, past the two-thread bound ARCH 8.3 holds it to. Its fix was to refuse that one permission. That leaves `MAY_POST_SERVICE`, which the child can use to confer `CONSOLE_OWNER` a hop later. `spawn_perm_grant_check` now refuses every permission from a designated compositor, f6d5dfc13. The row `sc` that should turn this red is written and has not run. Any other holder of `MAY_POST_SERVICE` can still do it: OPEN-BUGS, P3.
+
+**F1 needed the operator.** Vote 16's fold reads a server's `EBADF` as `EIO`, and two things on my side read that value: `tapestryd`'s dormant present, asserted by `kaua-term-probe`, and HIN1's `BadHandle`. Vote 66 keeps the fold and moves both to `ESTALE`, 7f492f623. Host tests only so far: `tapestry-storage.exp` was predicted red on the join and I never booted that red, so its mutant is the first real evidence and it is still owed.
+
+**My first Pi fleet set no accel, and I read the result wrong.** `ls-7` went red at 190 s while the others passed. `test-interactive`'s default is TCG; a scenario that pins `hvf` is mapped to KVM on the Pi, and `ls-7` is the one that pins nothing. So one row ran on a different machine from its neighbours, and the row told me nothing about the guest until I noticed that. KVM passed in 175 s. TCG went red at 409 and 408 s with the guest still printing and no login, which is what proves the host here: on this Pi 400, TCG does not reach login in 400 s. KVM boots do not spread: `ls-8c` took 170, 170, 170, 171 and 170 s.
+
+**A wait is a claim about when the thing happens.** `pts-probe` went red at 38 s and again at 132 s with the command budget raised to 120. Its marker prints late in joey's boot, so it needs the boot's budget and not a command's. c423a5441, passing in 163 s.
+
+**A count I gave the operator was wrong.** I said 24 scenarios green with `pts-probe` among them. By the fleet logs it is 25: 21 first-time in the second pass, `ls-3b`, `ls-3c` and `ls-8c` from the first, and `pts-probe` after its fix. `ls-3b`'s and `ls-3c`'s accel was not printed in the first pass, but 176 and 168 s is not a TCG time here. Skipped for a missing host artifact: `service-readiness-failure`, `spawn-mount-probe`, `ls-libs`.
+
+**What "fixed" covers.** The PCI errno, F2 and F3 are booted only as far as 73514e89a: f6d5dfc13's code, c423a5441 on HVF and 7f492f623 have not run on HVF. The Pi's image was dc641e7f3. Still UNEXPLAINED and enqueued from the band measurements: one 69 ms all-input pass and a p99.9 of 23.4 ms in one with-band set.
+
 ## 2026-11-04 -- the join boots, after an audit that stopped its first build (corona)
 
 The join of `corona/async-memory` and `main` had never been built when its second audit round finished. It is now at 89f37c495: first real build rc 0, kernel suite 2330/2330 on HVF, host boundary gate green twice (27 checkers, 174 legs, 166 and 167 s). Nothing is pushed. The 24 guest mutants, the default image's suite, the scenarios and audit round 3 are still owed.

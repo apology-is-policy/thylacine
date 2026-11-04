@@ -37,7 +37,7 @@ hazards: []
 abis: [abi-halcyon-palette]
 design: ["docs/HALCYON.md section 13", "docs/HALCYON-VISUAL.md", "docs/HALCYON-INSTRUMENT.md"]
 created: 2026-09-05
-updated: 2026-11-03
+updated: 2026-11-04
 ---
 ## Ordered ownership codec and journal
 
@@ -858,6 +858,10 @@ sure to end a request the server has stopped answering.
 The tests run real HIN1 records against a scripted server
 (`interaction_client_tests.rs`). Its native adapter is [[sub-interaction-native]]. The
 guest witnesses are separate chunks (ASYNC-SERVICE-LIFECYCLE, "AS-4 adoption design").
+
+**`BadHandle` is `ESTALE` (116)** (operator vote 2026-11-04 (66)). It was `EBADF`, but the
+kernel reads a server's `EBADF` as `EIO`, which is no value in the table, so a refusal that
+named a dead fid would have read as a lost link. `failure()` no longer reads 9.
 
 **What a refusal means depends on where it came.** The server answers a request on the
 write that finishes its record, so success there means the request ran. An errno on a
