@@ -2559,7 +2559,8 @@ enum {
     // free index at or above it (dup, F_DUPFD). Validate Proc, flags and the
     // source's full-width bound (EBADF). Exact form: the target's bound
     // (EBADF), distinct indices (EINVAL), then under the table lock a
-    // non-live source (EBADF) and a forbidden alias kind (EACCES). Lowest
+    // non-live source (EBADF), a forbidden alias kind (EACCES) and a target
+    // that is another call's reserved number (EBUSY, as Linux's dup2). Lowest
     // form, all under the lock: a non-live source (EBADF, so a closed fd
     // outranks a bad floor), the floor's bound (EINVAL), a forbidden alias
     // kind (EACCES), no free index at or above the floor (EMFILE).

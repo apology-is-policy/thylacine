@@ -231,8 +231,6 @@ void test_devpci_readdir(void) {
     TEST_ASSERT(strict, "root cookies strictly increase");
     TEST_ASSERT(all_dirs, "every root entry is a directory");
     TEST_ASSERT(all_dt_dir, "every root entry's type byte is DT_DIR (4)");
-    if (count == 0)
-        uart_puts("    [skip] devpci.readdir: no PCI function, so no type byte was read\n");
 
     if (!test_requires(count > 0, "thylacine.virtio-pci-rng", 0, false,
                        "no virtio PCI function enumerates")) {

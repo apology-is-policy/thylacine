@@ -584,7 +584,8 @@ int handle_dup_posix_checked(struct Proc *p, hidx_t h, hidx_t min_idx,
 #define HANDLE_DUP_TO_BUSY (-2)
 hidx_t handle_dup_to(struct Proc *p, hidx_t old, hidx_t new_h, bool cloexec);
 // Same atomic operation with checked errno results. Source/alias failures
-// are decided under the table lock, never re-queried after failure.
+// are decided under the table lock, never re-queried after failure. A target
+// that is another call's reservation answers -T_E_BUSY.
 int handle_dup_to_checked(struct Proc *p, hidx_t old, hidx_t new_h, bool cloexec);
 
 // #151: read / write a slot's close-on-exec flag. Returns 0 or 1 (get) and 0

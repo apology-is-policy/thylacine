@@ -529,7 +529,7 @@ int pagemap_grow(struct pagemap *pm, spin_lock_t *lock, size_t count,
     if (need) {
         if (as && !addrspace_charge_pages(as, need, exempt)) return -1;
         for (u32 i = 0; i < need; i++) {
-            pool[i] = node_alloc(exempt);
+            pool[i] = node_alloc(pm->node_sponsor, exempt);
             if (pool[i]) continue;
             for (u32 k = 0; k < i; k++) free_pages(pool[k], 0);
             if (as) addrspace_uncharge_pages(as, need);

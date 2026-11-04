@@ -386,7 +386,7 @@ int handle_lock_owner_get(struct Proc *p, struct Spoor *c, bool mint,
         if (ir != 0) return ir;
     }
 
-    spin_lock(&t->lock);
+    table_lock(t);
     struct lock_owner_ent *e = lock_owner_find_locked(t, c);
     if (e) {
         e->users++;
@@ -404,7 +404,7 @@ int handle_lock_owner_get(struct Proc *p, struct Spoor *c, bool mint,
 
     struct Spoor *drop = NULL;
     int rc = 0;
-    spin_lock(&t->lock);
+    table_lock(t);
     e = lock_owner_find_locked(t, c);
     if (e) {
         e->users++;
@@ -433,7 +433,7 @@ void handle_lock_owner_put(struct Proc *p, struct Spoor *owner, bool granted) {
     if (!owner) return;
     struct HandleTable *t = proc_handles_or_extinct(p);
     struct Spoor *drop = NULL;
-    spin_lock(&t->lock);
+    table_lock(t);
     // An entry is only ever removed with users == 0, so it is still here.
     for (u32 i = 0; i < t->nlockowners; i++) {
         struct lock_owner_ent *e = &t->lockowners[i];
@@ -452,7 +452,7 @@ void handle_lock_owner_put(struct Proc *p, struct Spoor *owner, bool granted) {
 void handle_lock_owner_retire(struct Proc *p, struct Spoor *owner) {
     if (!owner) return;
     struct HandleTable *t = proc_handles_or_extinct(p);
-    spin_lock(&t->lock);
+    table_lock(t);
     for (u32 i = 0; i < t->nlockowners; i++) {
         struct lock_owner_ent *e = &t->lockowners[i];
         if (e->spoor != owner) continue;
@@ -473,7 +473,7 @@ static int lock_sync_table(struct HandleTable *t, struct Spoor *owner, u32 how) 
     if (!d || !d->lock_sync || !d->lock_same_file) return 0;
     for (int i = 0; i < PROC_HANDLE_MAX; i++) {
         struct Spoor *sp = NULL;
-        spin_lock(&t->lock);
+        table_lock(t);
         struct Handle *h = &t->slots[i];
         if (h->magic == HANDLE_MAGIC && h->kind == KOBJ_SPOOR && h->obj) {
             struct Spoor *c = (struct Spoor *)h->obj;
@@ -506,7 +506,7 @@ int handle_lock_sync_file(struct Proc *p, struct Spoor *owner, u32 how) {
 
 u32 handle_lock_owner_count(struct Proc *p) {
     struct HandleTable *t = proc_handles_or_extinct(p);
-    spin_lock(&t->lock);
+    table_lock(t);
     u32 n = t->nlockowners;
     spin_unlock(&t->lock);
     return n;
@@ -540,7 +540,7 @@ static void lock_owners_on_close(struct HandleTable *t, enum kobj_kind kind,
     // keeps them until the Proc's next close of the file or its exit.
     struct Dev *cd = c->dev;
     if (cd && cd->lock_ident) {
-        spin_lock(&t->lock);
+        table_lock(t);
         bool candidate = lock_owner_find_locked(t, c) != NULL;
         spin_unlock(&t->lock);
         if (!candidate) return;
@@ -548,7 +548,7 @@ static void lock_owners_on_close(struct HandleTable *t, enum kobj_kind kind,
     }
 
     struct Spoor *owner = NULL;
-    spin_lock(&t->lock);
+    table_lock(t);
     struct lock_owner_ent *e = lock_owner_find_locked(t, c);
     if (e) {
         e->users++;
@@ -566,7 +566,7 @@ static void lock_owners_on_close(struct HandleTable *t, enum kobj_kind kind,
     (void)d->lock(owner, SYS_FILE_LOCK_UN, 0, 0, NULL);
 
     struct Spoor *drop = NULL;
-    spin_lock(&t->lock);
+    table_lock(t);
     for (u32 i = 0; i < t->nlockowners; i++) {
         if (t->lockowners[i].spoor != owner) continue;
         if (--t->lockowners[i].users == 0)
@@ -1073,7 +1073,7 @@ int handle_endow_spoor(struct Proc *p, hidx_t h, struct Spoor **out,
     if (!p || p->magic != PROC_MAGIC || !p->handles) return -1;
     if (h < 0 || h >= PROC_HANDLE_MAX) return -1;
     struct HandleTable *t = p->handles;
-    spin_lock(&t->lock);
+    table_lock(t);
     struct Handle *slot = &t->slots[h];
     if (slot->magic != HANDLE_MAGIC || slot->kind != KOBJ_SPOOR) {
         spin_unlock(&t->lock);
@@ -1382,7 +1382,7 @@ int handle_dup_to_checked(struct Proc *p, hidx_t old, hidx_t new_h, bool cloexec
     // Taking the slot would let that call's install overwrite this dup.
     if (t->slots[new_h].magic == HANDLE_RESERVED) {
         spin_unlock(&t->lock);
-        return HANDLE_DUP_TO_BUSY;
+        return -T_E_BUSY;
     }
 
     enum kobj_kind kind   = src->kind;
@@ -1427,9 +1427,11 @@ int handle_dup_to_checked(struct Proc *p, hidx_t old, hidx_t new_h, bool cloexec
     return new_h;
 }
 
-// Preserve the historical flat-error contract for existing Vivarium callers.
+// Preserve the historical flat-error contract for existing Vivarium callers, with the
+// one refusal they answer differently kept apart.
 hidx_t handle_dup_to(struct Proc *p, hidx_t old, hidx_t new_h, bool cloexec) {
     int ret = handle_dup_to_checked(p, old, new_h, cloexec);
+    if (ret == -T_E_BUSY) return HANDLE_DUP_TO_BUSY;
     return ret < 0 ? -1 : (hidx_t)ret;
 }
 
@@ -1533,7 +1535,7 @@ int handle_get_status(struct Proc *p, hidx_t h, struct handle_status *out) {
     struct HandleTable *t = proc_handles_or_extinct(p);
     if (h < 0 || h >= PROC_HANDLE_MAX) return -1;
 
-    spin_lock(&t->lock);
+    table_lock(t);
     if (t->slots[h].magic != HANDLE_MAGIC) {
         spin_unlock(&t->lock);
         return -1;

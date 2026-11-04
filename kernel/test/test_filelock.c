@@ -407,6 +407,8 @@ static void refusals_body(struct lk_fix *f, int rw, int ro, int wo, int opath,
                    "a handle of another kind is EBADF");
     TEST_EXPECT_EQ(sys_file_lock_handler((u64)1 << 20, U, 0, 0, 0), -(s64)T_E_BADF,
                    "an index past the table is EBADF");
+    TEST_EXPECT_EQ(sys_file_lock_handler(((u64)1 << 32) + (u64)f->fd[rw], W, 0, 1, 0),
+                   -(s64)T_E_BADF, "a wide descriptor does not name its low word");
     TEST_EXPECT_EQ(g_lk_calls, calls, "no EBADF reached the Dev");
     TEST_EXPECT_EQ(lk_call(f, nolock, U, 0, 0), -(s64)T_E_NOLCK,
                    "a Dev with no lock slots is ENOLCK");

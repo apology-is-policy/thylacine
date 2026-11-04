@@ -497,7 +497,8 @@ the fork copy's destination check all want magic 0. It is not live: get,
 close, replace, the flag setters, close-on-exec, the fork copy's source walk
 and `handle_table_count` all want `HANDLE_MAGIC`. `handle_dup_to` onto a
 reserved number returns `HANDLE_DUP_TO_BUSY`, which the phenotype's dup3
-answers EBUSY (Linux's own answer). So a failed call publishes nothing, and
+answers EBUSY (Linux's own answer), and `handle_dup_to_checked`, the native
+call's, answers `-T_E_BUSY` itself. So a failed call publishes nothing, and
 its unwind touches only a number no other thread could see.
 `handle_table_free` has no reserved arm: a reservation lives inside one
 syscall of a live thread. The table is freed only when no live thread remains

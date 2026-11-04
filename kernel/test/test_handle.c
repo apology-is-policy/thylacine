@@ -773,6 +773,7 @@ void test_handles_reservation(void) {
     hidx_t r2     = handle_reserve(p, r);
     hidx_t dpos   = handle_dup_posix(p, src, r, false);
     hidx_t dto    = handle_dup_to(p, src, r, false);
+    s64    dto_sys = sys_handle_dup_to_for_test(p, (u64)src, (u64)r, 0);
     bool   still_after_scans = handle_is_reserved(p, r);
 
     // (3) The fork copy and close-on-exec pass it by. A live slot carries the
@@ -840,6 +841,7 @@ void test_handles_reservation(void) {
     TEST_EXPECT_EQ((int)r2, 3, "a second reservation skips it");
     TEST_EXPECT_EQ((int)dpos, 4, "a dup from min skips it");
     TEST_EXPECT_EQ((int)dto, (int)HANDLE_DUP_TO_BUSY, "dup3 onto it is BUSY");
+    TEST_EXPECT_EQ(dto_sys, -(s64)T_E_BUSY, "and the native call answers the same errno");
     TEST_ASSERT(still_after_scans, "and it is still reserved");
     TEST_ASSERT(copy_rc >= 0, "the fork copy ran");
     TEST_ASSERT(!child_r, "the fork copy does not carry a reservation");

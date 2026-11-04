@@ -160,6 +160,7 @@ s64 sys_file_lock_handler(u64 fd_raw, u64 op, u64 start, u64 len, u64 out_va) {
     if (!test && type == SYS_FILE_LOCK_RD) need = RIGHT_READ;
     if (!test && type == SYS_FILE_LOCK_WR) need = RIGHT_WRITE;
 
+    if (fd_raw > 0x7fffffffull)            return -(s64)T_E_BADF;
     hidx_t fd = (hidx_t)fd_raw;
     struct Handle h;
     if (handle_get(p, fd, &h) < 0)         return -(s64)T_E_BADF;

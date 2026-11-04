@@ -706,7 +706,7 @@ total wake (I-9); `alloc_tag`/`clear_outstanding` + the
 - A partial walk (`nwqid < nwname`) succeeds at this layer with the elements it
   got, and the caller reads the short count (`co_bind` and the resolver's pounce
   decide what it means).
-- `p9_client_lock` and `p9_client_getlock` carry `client_id` from their caller (operator vote 38).
+- `p9_client_lock` and `p9_client_getlock` carry `client_id` from their caller (operator vote 38). Like every other synchronous operation they refuse a progress client with `-P9_E_INVAL`.
 - A live owner whose reply beat its Rflush left no abandoned op: its mark clears at that
   reply, so the Rflush forgets nothing (audit round 4, leg
   `9p_client.note_flush_live_mutator_keeps_larder`). A death in the flush wait forgets at

@@ -2582,6 +2582,7 @@ int p9_client_lock(struct p9_client *c, u32 fid, u8 type, u32 flags,
     if (!c || !status) return -P9_E_INVAL;
     if (c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
     client_lock(c);
+    if (c->progress) CLIENT_UNLOCK_RET(c, -P9_E_INVAL);
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
     int te = client_await_tag_locked(c);
@@ -2606,6 +2607,7 @@ int p9_client_getlock(struct p9_client *c, u32 fid, u8 type,
     if (!c || !out) return -P9_E_INVAL;
     if (c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
     client_lock(c);
+    if (c->progress) CLIENT_UNLOCK_RET(c, -P9_E_INVAL);
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
     int te = client_await_tag_locked(c);

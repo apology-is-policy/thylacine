@@ -626,6 +626,7 @@ void test_account_thread_charges_meta_to_its_payer(void);
 void test_account_ledger_reconciles_with_the_pool(void);
 void test_account_blocks_that_exist_are_the_ledger(void);
 void test_account_wrong_order_release_is_counted(void);
+void test_account_grown_node_has_the_maps_sponsor(void);
 void test_account_query_reports_bytes_up_the_chain(void);
 void test_account_syscall_refuses_by_name(void);
 void test_vma_range_is_mapped(void);                     // B-1b
