@@ -1257,6 +1257,7 @@ struct test_case g_tests[] = {
     { "account.child_costs_its_parent_meta", test_account_child_costs_its_parent_meta, false, NULL },
     { "account.limits_change_whole_or_not_at_all", test_account_limits_change_whole_or_not_at_all, false, NULL },
     { "account.limit_bounds_the_room", test_account_limit_bounds_the_room, false, NULL },
+    { "account.query_stops_at_the_nearest_limit", test_account_query_stops_at_the_nearest_limit, false, NULL },
     { "account.handle_is_the_control", test_account_handle_is_the_control, false, NULL },
     { "account.fork_does_not_copy_the_handle", test_account_fork_does_not_copy_the_handle, false, NULL },
     { "account.syscall_refuses_by_name", test_account_syscall_refuses_by_name, false, NULL },

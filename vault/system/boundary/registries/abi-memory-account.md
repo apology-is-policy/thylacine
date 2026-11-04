@@ -28,7 +28,9 @@ that is not memory the caller may read, and for QUERY and CHILD write, after whi
 it may have been written; `-EINVAL` for a wrong version, size, flags or pad, or an incarnation that is
 not the account's, where 0 is taken only with the self selector.
 
-QUERY returns 0 and replaces the record. CHILD returns the new handle, close-on-exec, with
+QUERY returns 0 and replaces the record. Its `headroom` reads each class up to the class's
+nearest limit and no further, and the pool only for a RAM class that met none, so it can
+overstate the room; `limiting` names the class of the tightest of those. CHILD returns the new handle, close-on-exec, with
 rights read and write, and replaces the record: the header's incarnation is the parent's and
 `created` the child's. It answers `-ENOSPC` at depth 16, `-ENOMEM` with no pool or memory,
 `-EMFILE` with a full table, and `-EFAULT` having closed the handle when the record cannot be

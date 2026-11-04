@@ -130,7 +130,7 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-11-04 [[chg-2026-11-04-mm1c-audit-r1]] — MM-1c audit r1's close
 - 2026-11-04 [[chg-2026-11-04-mm1c]] — MM-1c: account control, spawn tail, session and services accounts
 - 2026-11-04 [[chg-2026-11-04-pinned-wake]] — A pinned thread's wake goes to its home CPU, not the waker's
+- 2026-11-04 [[chg-2026-11-04-query-stops-at-its-limit]] — The account query stops at the nearest limit
 - 2026-11-03 [[chg-2026-11-03-b3h-first-boots]] — B-3h's first boots: two wrong tests, a survivor, a budget
 - 2026-11-03 [[chg-2026-11-03-fid-pays-for-clunk]] — A FID pays for its CLUNK at RESERVE
-- 2026-11-03 [[chg-2026-11-03-memory-account-number]] — The memory account call moves to 140
 <!-- generated:end -->

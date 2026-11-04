@@ -152,7 +152,7 @@ static u64 own_limit(const struct MemoryAccount *a, unsigned cls) {
 
 // Every class against every ancestor under one hold, so an ancestor lowered at the same
 // moment is ordered with this: before it, this answer sees the lowered ceiling, and after
-// it, the lowering leaves a child above its parent, which the chain's room covers.
+// it, the lowering leaves a child above its parent, so a refusal has to read every ancestor.
 int account_set_limits(struct MemoryAccount *a, const u64 limit[ACCOUNT_CLASSES]) {
     u64 want[ACCOUNT_CLASSES];
     for (unsigned cls = 0; cls < ACCOUNT_CLASSES; cls++) {
@@ -195,24 +195,36 @@ void account_query_fill(const struct MemoryAccount *a, struct account_query *q) 
         q->c[cls].limit = own_limit(a, cls);
     }
 
+    // Each class reads up to its nearest limit and no further, so an account with limits of
+    // its own sees its own figures and not the machine's; the figure can then overstate the
+    // room, and a refusal is what tells the truth. A level this crosses has no limit, so it
+    // has the default ceiling and counts no more than the level above it: the level this
+    // stops at is the tightest of them.
     u64 tightest = ~0ull;
-    for (const struct MemoryAccount *up = a; up; up = up->parent) {
-        for (unsigned cls = 0; cls < ACCOUNT_CLASSES; cls++) {
-            u64 limit = own_limit(up, cls);
-            u64 used = account_used(up, cls) << PAGE_SHIFT;
-            u64 room = limit > used ? limit - used : 0;
-            if (room < tightest) {
-                tightest = room;
-                q->limiting = cls;
-            }
+    bool reads_pool = false;
+    for (unsigned cls = 0; cls < ACCOUNT_CLASSES; cls++) {
+        const struct MemoryAccount *up = a;
+        while (up->limit[cls] == ACCOUNT_LIMIT_NONE && up->parent)
+            up = up->parent;
+        u64 limit = own_limit(up, cls);
+        u64 used = account_used(up, cls) << PAGE_SHIFT;
+        u64 room = limit > used ? limit - used : 0;
+        if (room < tightest) {
+            tightest = room;
+            q->limiting = cls;
         }
+        // Device storage has no pool, so leaving it open reads nothing of the machine's RAM.
+        if (up->limit[cls] == ACCOUNT_LIMIT_NONE && cls != CLASS_DEVICE) reads_pool = true;
     }
     spin_unlock_irqrestore(&g_account_tree_lock, s);
 
-    u64 pool = (u64)capacity_pool_pages() << PAGE_SHIFT;
-    u64 charged = (u64)capacity_pool_charged() << PAGE_SHIFT;
-    u64 pool_room = pool > charged ? pool - charged : 0;
-    q->headroom = pool_room < tightest ? pool_room : tightest;
+    q->headroom = tightest;
+    if (reads_pool) {
+        u64 pool = (u64)capacity_pool_pages() << PAGE_SHIFT;
+        u64 charged = (u64)capacity_pool_charged() << PAGE_SHIFT;
+        u64 pool_room = pool > charged ? pool - charged : 0;
+        if (pool_room < tightest) q->headroom = pool_room;
+    }
 }
 
 u64 account_unpaired(void) {

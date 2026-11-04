@@ -639,6 +639,24 @@ fn account_control_legs(pool: u64) -> i64 {
             pool,
         );
     }
+    // The pool is the highest limit there is, and the machine has charged some of it, so only
+    // an account reading its own figures can show all of it. One class left open still reads
+    // the machine, and device storage is not such a class.
+    lim = [ACCOUNT_LIMIT_NONE; ACCOUNT_CLASSES];
+    lim[CLASS_ALLOC as usize] = pool;
+    let rc = t_account_set_limits(hi, made, &lim);
+    let rq = t_account_query_of(hi, made, &mut q);
+    if rc != 0 || rq != 0 || q.headroom >= pool {
+        return fail_num("account-open-class-reads-the-pool", q.headroom, pool);
+    }
+    lim[CLASS_RETAIN as usize] = pool;
+    lim[CLASS_META as usize] = pool;
+    let rc = t_account_set_limits(hi, made, &lim);
+    let rq = t_account_query_of(hi, made, &mut q);
+    if rc != 0 || rq != 0 || q.headroom != pool {
+        return fail_num("account-limited-reads-itself", q.headroom, pool);
+    }
+
     lim = [ACCOUNT_LIMIT_NONE; ACCOUNT_CLASSES];
     lim[CLASS_ALLOC as usize] = PAGE + 1;
     let rc = t_account_set_limits(hi, made, &lim);

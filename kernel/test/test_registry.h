@@ -634,6 +634,7 @@ void test_account_query_reports_bytes_up_the_chain(void);
 void test_account_child_costs_its_parent_meta(void);
 void test_account_limits_change_whole_or_not_at_all(void);
 void test_account_limit_bounds_the_room(void);
+void test_account_query_stops_at_the_nearest_limit(void);
 void test_account_handle_is_the_control(void);
 void test_account_fork_does_not_copy_the_handle(void);
 void test_account_syscall_refuses_by_name(void);

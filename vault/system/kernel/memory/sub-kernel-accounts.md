@@ -138,12 +138,15 @@ caller can hold, which MM-1c makes a production path.
 3. `kstack_alloc`, `proc_pgtable_create` and slabs are not sponsored. The thread's stack
    is in the ledger through its pool pages; the rest are section 12's metadata rows.
 
-4. `headroom` still reads the pool, so what the rest of the machine holds shows in any
-   account's query, a sandbox's included. Vote 59 takes that narrowing as enough, with what
-   a diorama Proc reaches still to be measured.
+4. `headroom` reads each class up to its nearest limit, and the pool only for a RAM class that
+   met none (vote 65). No account has a limit today, so what the rest of the machine holds
+   shows in every query. An account with a limit in each RAM class sees only itself, and then
+   its room can exceed what its ancestors or the pool have left. What a diorama Proc reaches
+   is still to be measured (vote 59).
 5. If an account's creator exits, nobody can change its limits. They stay as they are.
 6. `headroom` can read low: `CLASS_ALLOC` counts DMA blocks outside the pool, against a limit
-   that is the pool. MM-2 must not admit on it as it stands.
+   that is the pool. And high, by caveat 4. MM-2 must not admit on it, and its refusal has to
+   read every ancestor and the pool.
 7. A DMA create that fails part way releases sponsors through `dma_free_blocks`, with no test
    or injection reaching that unwind. MM-2 routes DMA through the pool, which makes it
    injectable.
@@ -151,4 +154,4 @@ caller can hold, which MM-1c makes a production path.
 ## Provenance
 
 MM-1a and MM-1b, operator votes 47 and 48 for the interface they serve. Written while the
-mac was queued, on top of an unbooted AS-4. MM-1c, votes 58 and 59.
+mac was queued, on top of an unbooted AS-4. MM-1c, votes 58, 59 and 65.
