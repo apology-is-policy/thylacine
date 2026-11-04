@@ -620,9 +620,11 @@ const _: () = assert!(core::mem::offset_of!(TSpawnExtEnv, env_flags) == 12);
 pub struct TSpawnExtAccount {
     pub account_h:     u32, // 0 — the spawner's control handle
     pub account_flags: u32, // 4 — must be 0
+    pub incarnation:   u64, // 8 — the account's
 }
-const _: () = assert!(core::mem::size_of::<TSpawnExtAccount>() == 8);
+const _: () = assert!(core::mem::size_of::<TSpawnExtAccount>() == 16);
 const _: () = assert!(core::mem::offset_of!(TSpawnExtAccount, account_flags) == 4);
+const _: () = assert!(core::mem::offset_of!(TSpawnExtAccount, incarnation) == 8);
 
 // VIVARIUM V-1b: pheno_flags bits (mirror SPAWN_PHENO_* in the kernel header).
 pub const T_SPAWN_PHENO_LINUX: u32 = 1 << 0;

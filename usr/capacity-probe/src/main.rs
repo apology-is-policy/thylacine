@@ -32,12 +32,13 @@ use libthyla_rs::account::{
     ACCOUNT_VERSION, ALLOCATE_FUNDED, CLASS_ALLOC, CLASS_DEVICE, CLASS_META, CLASS_RETAIN,
     VOUCHER_CREATE,
 };
+use libthyla_rs::process::Command;
 use libthyla_rs::{
     t_account, t_account_child, t_account_query, t_account_query_of, t_account_set_limits,
     t_burrow_attach, t_burrow_detach, t_burrow_protect, t_burrow_reserve, t_close, t_execve,
-    t_getpid, t_open, t_pipe, t_putstr, t_read, t_spawn_full_argv, t_wait_pid_for, TSpawnArgs,
-    TSpawnExtAccount, T_BURROW_PROT_READ, T_BURROW_PROT_WRITE, T_OREAD, T_SPAWN_EXT_ACCOUNT,
-    T_WALK_OPEN_FROM_ROOT,
+    t_getpid, t_handle_flags_get, t_handle_flags_set, t_open, t_pipe, t_putstr, t_read,
+    t_spawn_full_argv, t_wait_pid_for, TSpawnArgs, TSpawnExtAccount, T_BURROW_PROT_READ,
+    T_BURROW_PROT_WRITE, T_OREAD, T_SPAWN_EXT_ACCOUNT, T_WALK_OPEN_FROM_ROOT,
 };
 
 const PAGE: u64 = 4096;
@@ -48,8 +49,8 @@ const RW: u64 = T_BURROW_PROT_READ | T_BURROW_PROT_WRITE;
 const PATTERN: u64 = 0xCAFE_F00D_0000_0000;
 
 // The registry's values, docs/ERRORS.md.
-const EPERM: i64 = 1;
 const EBADF: i64 = 9;
+const EACCES: i64 = 13;
 const EFAULT: i64 = 14;
 const EINVAL: i64 = 22;
 const ENOSPC: i64 = 28;
@@ -485,7 +486,13 @@ fn parse_num(s: &[u8]) -> Option<u64> {
 
 // This program again, under `handle`, told the handle's number and what it should be born
 // under. Returns the pid or a negated errno. Raw, since a refusal's errno is the point.
-fn spawn_under(handle: u32, flags: u32, told_handle: u64, told_incarnation: u64) -> i64 {
+fn spawn_under(
+    handle: u32,
+    flags: u32,
+    expected: u64,
+    told_handle: u64,
+    told_incarnation: u64,
+) -> i64 {
     const NAME: &[u8] = b"capacity-probe";
     let mut argv = alloc::vec::Vec::new();
     argv.extend_from_slice(b"capacity-probe\0account-child\0");
@@ -502,9 +509,28 @@ fn spawn_under(handle: u32, flags: u32, told_handle: u64, told_incarnation: u64)
     rec.tail = TSpawnExtAccount {
         account_h: handle,
         account_flags: flags,
+        incarnation: expected,
     };
     // SAFETY: the pointer is the whole record's and argv and NAME outlive the call.
     unsafe { t_spawn_full_argv(&rec as *const AccountSpawn as *const TSpawnArgs) }
+}
+
+// A child holding `fd` as its descriptor 0, which does nothing and exits.
+fn spawn_holding(fd: u32) -> i64 {
+    const NAME: &[u8] = b"capacity-probe";
+    const ARGV: &[u8] = b"capacity-probe\0account-noop\0";
+    let fds = [fd];
+    // SAFETY: every field of TSpawnArgs is an integer, and zero is each one's default.
+    let mut rec: TSpawnArgs = unsafe { core::mem::zeroed() };
+    rec.name_va = NAME.as_ptr() as u64;
+    rec.name_len = NAME.len() as u32;
+    rec.argv_data_va = ARGV.as_ptr() as u64;
+    rec.argv_data_len = ARGV.len() as u32;
+    rec.argc = 2;
+    rec.fd_list_va = fds.as_ptr() as u64;
+    rec.fd_count = 1;
+    // SAFETY: the pointer is the record's and everything it names outlives the call.
+    unsafe { t_spawn_full_argv(&rec as *const TSpawnArgs) }
 }
 
 fn spawn_mode(mode: &[u8]) -> i64 {
@@ -538,6 +564,9 @@ fn account_control_legs(pool: u64) -> i64 {
         return fail_rc("account-child", h, 0);
     }
     let hi = h as i32;
+    if unsafe { t_handle_flags_get(h) } != 1 {
+        return fail("account-child-cloexec");
+    }
     if made <= own.h.incarnation {
         return fail_num("account-child-incarnation", made, own.h.incarnation);
     }
@@ -579,8 +608,8 @@ fn account_control_legs(pool: u64) -> i64 {
 
     let mut lim = [ACCOUNT_LIMIT_NONE; ACCOUNT_CLASSES];
     let rc = t_account_set_limits(ACCOUNT_SELF, 0, &lim);
-    if rc != -EPERM {
-        return fail_rc("account-set-own", rc, EPERM);
+    if rc != -EACCES {
+        return fail_rc("account-set-own", rc, EACCES);
     }
     lim[CLASS_ALLOC as usize] = 64 * MIB;
     let rc = t_account_set_limits(hi, made, &lim);
@@ -599,8 +628,8 @@ fn account_control_legs(pool: u64) -> i64 {
     lim[CLASS_RETAIN as usize] = MIB;
     lim[CLASS_META as usize] = pool + PAGE;
     let rc = t_account_set_limits(hi, made, &lim);
-    if rc != -EPERM {
-        return fail_rc("account-set-past-the-pool", rc, EPERM);
+    if rc != -EACCES {
+        return fail_rc("account-set-past-the-pool", rc, EACCES);
     }
     let rc = t_account_query_of(hi, made, &mut q);
     if rc != 0 || q.c[CLASS_RETAIN as usize].limit != pool {
@@ -724,24 +753,47 @@ fn account_control_legs(pool: u64) -> i64 {
     if rc != -EBADF {
         return fail_rc("account-other-kind-limits", rc, EBADF);
     }
-    let rc = spawn_under(pr as u32, 0, h as u64, made);
+    let rc = spawn_under(pr as u32, 0, made, h as u64, made);
     if rc != -EBADF {
         return fail_rc("account-spawn-other-kind", rc, EBADF);
     }
+    // Spawn's descriptor array takes the pipe and refuses the account.
+    let pid = spawn_holding(pr as u32);
+    if pid <= 0 {
+        return fail_rc("account-fd-control", pid, 0);
+    }
+    let mut status = -1i32;
+    let reaped = unsafe { t_wait_pid_for(pid as i32, 0, &mut status) };
+    if reaped != pid || status != 0 {
+        return fail_num("account-fd-control-exit", status as u32 as u64, 0);
+    }
+    let rc = spawn_holding(h as u32);
+    if rc != -1 {
+        return fail_rc("account-fd-refused", rc, 1);
+    }
     let _ = unsafe { t_close(pr) };
     let _ = unsafe { t_close(pw) };
-    let rc = spawn_under(1000, 0, h as u64, made);
+    let rc = spawn_under(1000, 0, made, h as u64, made);
     if rc != -EBADF {
         return fail_rc("account-spawn-no-handle", rc, EBADF);
     }
-    let rc = spawn_under(h as u32, 1, h as u64, made);
+    let rc = spawn_under(h as u32, 1, made, h as u64, made);
     if rc != -1 {
         return fail_rc("account-spawn-flags", rc, 1);
+    }
+    for (leg, expected) in [
+        ("account-spawn-unnamed", 0),
+        ("account-spawn-stale", made + 1),
+    ] {
+        let rc = spawn_under(h as u32, 0, expected, h as u64, made);
+        if rc != -EINVAL {
+            return fail_rc(leg, rc, EINVAL);
+        }
     }
     ok("account-refuses-other-kinds");
 
     // The control, one variable from those: the same spawn with a live handle.
-    let pid = spawn_under(h as u32, 0, h as u64, made);
+    let pid = spawn_under(h as u32, 0, made, h as u64, made);
     if pid <= 0 {
         return fail_rc("account-spawn", pid, 0);
     }
@@ -755,6 +807,24 @@ fn account_control_legs(pool: u64) -> i64 {
         return fail_num("account-spawn-refunds", q.c[CLASS_META as usize].used, 0);
     }
     ok("account-spawn-under");
+
+    // Behind a cwd tail and an env tail, where only the sum of the lower tails finds it.
+    let mut cmd = Command::new("/bin/capacity-probe");
+    cmd.arg("account-child")
+        .arg(alloc::format!("{}", h))
+        .arg(alloc::format!("{}", made))
+        .current_dir("/")
+        .env_clear()
+        .env("CAPACITY_PROBE_LEG", "tails")
+        .account(h as u32, made);
+    let Ok(mut child) = cmd.spawn() else {
+        return fail("account-tails-spawn");
+    };
+    match child.wait() {
+        Ok(status) if status.success() => {}
+        _ => return fail("account-tails-child"),
+    }
+    ok("account-tails");
 
     // An exec closes the control. The child's status names what it saw.
     let pid = spawn_mode(b"account-exec");
@@ -845,13 +915,14 @@ fn account_child_mode(told_handle: u64, told_incarnation: u64) -> i64 {
         return 5;
     }
     // Nobody adjusts their own account.
-    if t_account_set_limits(ACCOUNT_SELF, 0, &[ACCOUNT_LIMIT_NONE; ACCOUNT_CLASSES]) != -EPERM {
+    if t_account_set_limits(ACCOUNT_SELF, 0, &[ACCOUNT_LIMIT_NONE; ACCOUNT_CLASSES]) != -EACCES {
         return 6;
     }
     0
 }
 
-// `capacity-probe account-exec`: a handle that works, then an exec told its number.
+// `capacity-probe account-exec`: a handle that works, its flag cleared, then an exec told its
+// number. An exec closes control whatever the flag says.
 fn account_exec_mode() -> i64 {
     let mut made = 0u64;
     let h = t_account_child(ACCOUNT_SELF, 0, &mut made);
@@ -861,6 +932,9 @@ fn account_exec_mode() -> i64 {
     let mut q = AccountQuery::default();
     if t_account_query_of(h as i32, made, &mut q) != 0 {
         return 9;
+    }
+    if unsafe { t_handle_flags_set(h, 0) } != 0 || unsafe { t_handle_flags_get(h) } != 0 {
+        return 13;
     }
     let mut argv = alloc::vec::Vec::new();
     argv.extend_from_slice(b"capacity-probe\0account-after-exec\0");
@@ -883,6 +957,9 @@ fn account_after_exec_mode(handle: u64, incarnation: u64) -> i64 {
 pub extern "C" fn rs_main() -> i64 {
     let mut args = libthyla_rs::env::args();
     let mode = args.nth(1);
+    if mode == Some(&b"account-noop"[..]) {
+        return 0;
+    }
     if mode == Some(&b"account-exec"[..]) {
         return account_exec_mode();
     }

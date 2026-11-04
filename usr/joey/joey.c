@@ -115,7 +115,8 @@ static long joey_spawn_service(const char *name, size_t name_len,
             .ext_flags  = T_SPAWN_EXT_ACCOUNT,
             .cap_mask   = cap_mask,
         },
-        .acct = { .account_h = (unsigned int)g_services_account },
+        .acct = { .account_h = (unsigned int)g_services_account,
+                  .incarnation = g_services_incarnation },
     };
     return t_spawn_full_argv(&rec.a);
 }
@@ -6618,7 +6619,16 @@ static int joey_service_is_on_its_account(long pid) {
         t_putstr("joey: a service is not on the services account FAILED\n");
         return -1;
     }
-    t_putstr("joey: services account witnessed on a running service\n");
+    return 0;
+}
+
+// Each daemon joey has recorded so far. A dropped tail on any one spawn leaves only that
+// service behind.
+static int joey_services_are_on_their_account(void) {
+    for (unsigned int i = 0; i < g_joey_daemon_count; i++) {
+        if (joey_service_is_on_its_account(g_joey_daemons[i].pid) != 0) return -1;
+    }
+    t_putstr("joey: services account witnessed on its running services\n");
     return 0;
 }
 #endif
@@ -7715,7 +7725,7 @@ int main(void) {
         // whose manifest declares `caps = ["csprng"]` (tapestryd, which mints
         // the one-shot placement claims). I-2: a child holds at most its
         // parent's caps, so the warden must hold the bit to pass it down.
-        struct t_sys_spawn_args wreq = {
+        struct joey_service_record wrec = { .a = {
             .name_va       = (unsigned long)wd_name,
             .argv_data_va  = (unsigned long)wd_argv,
             .name_len      = sizeof(wd_name) - 1,
@@ -7723,12 +7733,18 @@ int main(void) {
             .argc          = wd_argc,
             .cap_mask      = T_CAP_HW_CREATE | T_CAP_CSPRNG_READ,
             .perm_flags    = T_SPAWN_PERM_MAY_POST_SERVICE | T_SPAWN_PERM_SEAT_MANAGER,
-        };
-        long wd_pid = t_spawn_full_argv(&wreq);
+            .ext_flags     = T_SPAWN_EXT_ACCOUNT,
+        }, .acct = { .account_h = (unsigned int)g_services_account,
+                     .incarnation = g_services_incarnation } };
+        long wd_pid = g_services_account < 0 ? -1 : t_spawn_full_argv(&wrec.a);
         if (wd_pid <= 0) {
             t_putstr("joey: t_spawn(\"warden\") FAILED\n");
             return 1;
         }
+#if THYLA_BOOT_PROBES
+        // The drivers it binds outlive it and are born under what it was born under.
+        if (joey_service_is_on_its_account(wd_pid) != 0) return 1;
+#endif
         int wd_status = -1;
         long wd_reaped = t_wait_pid_for((int)wd_pid, 0, &wd_status);
         if (wd_reaped != wd_pid || wd_status != 0) {
@@ -8207,7 +8223,8 @@ int main(void) {
             // `reason="snare:abort"` user-fault line (F1 wasn't, mallocng
             // still asserts -- but cleanly, NOT as kernel extinction).
             .cap_mask      = T_CAP_HW_CREATE | T_CAP_CSPRNG_READ,
-        }, .acct = { .account_h = (unsigned int)g_services_account } };
+        }, .acct = { .account_h = (unsigned int)g_services_account,
+                     .incarnation = g_services_incarnation } };
 
         // Install a pipe whose write-end becomes stratumd's fd 1 + fd 2
         // (both stdout and stderr). Joey reads from the rd-end to capture
@@ -11592,9 +11609,6 @@ int main(void) {
             return 1;
         }
         joey_daemon_record(ptyfs_pid, "ptyfs");   // #80
-#if THYLA_BOOT_PROBES
-        if (joey_service_is_on_its_account(ptyfs_pid) != 0) return 1;
-#endif
         // Bounded liveness connect (the connect_corvus idiom): wait for ptyfs to
         // post /srv/ptyfs. Its selftest runs BEFORE the post, so a connect
         // success also confirms the selftest passed -- a real gate for an
@@ -11738,6 +11752,9 @@ int main(void) {
                 return 1;
             }
             joey_daemon_record(dio_pid, "diorama");   // #80
+#if THYLA_BOOT_PROBES
+            if (joey_services_are_on_their_account() != 0) return 1;
+#endif
             // Bounded liveness connect (the ptyfs/corvus idiom): its selftest
             // runs BEFORE the post, so a successful connect also gates a silent
             // selftest failure.
@@ -12934,6 +12951,9 @@ int main(void) {
                     return 1;
                 }
                 joey_daemon_record(aur_pid, rlabel);   // #80
+#if THYLA_BOOT_PROBES
+                if (joey_services_are_on_their_account() != 0) return 1;
+#endif
                 const char *spawned[] = {
                     "joey: ", rlabel, " spawned pid=", itoa_dec(aur_pid, dbuf, sizeof(dbuf)),
                     " (the console renderer; the gate's scanout owner)\n",

@@ -859,7 +859,7 @@ unsafe fn bind_home(
     pid: u32,
     gid: u32,
     supp: &[u32],
-    session_account: u32,
+    session_account: (u32, u64),
 ) -> Option<HomeSession> {
     let user_str = core::str::from_utf8(user).ok()?;
 
@@ -879,7 +879,7 @@ unsafe fn bind_home(
     // boot-log diagnostics; stdin/stdout inherit login's.
     let mut cmd = Command::new("/bin/stratumd"); // #58: post-pivot /bin bind
     cmd.identity(pid, gid, supp)
-        .account(session_account)
+        .account(session_account.0, session_account.1)
         // T_CAP_TCB_DIAL (U): the proxy dials the SYSTEM coordinator at
         // COORD_FS_PATH, a TCB byte service. It runs as the USER (below), so
         // identity cannot admit it -- only this capability can, and the user's
@@ -1307,7 +1307,7 @@ pub extern "C" fn rs_main() -> i64 {
         let _ = unsafe { t_close(conn) };
         return 1;
     }
-    let session_account = session_account as u32;
+    let session_account = (session_account as u32, session_incarnation);
 
     // A-5b: bind the user's encrypted home at /home/<user> BEFORE spawning the
     // shell, so the shell inherits the mount (the kernel deep-copies the mount
@@ -1348,7 +1348,7 @@ pub extern "C" fn rs_main() -> i64 {
         let mut push_cmd = Command::new("/bin/aurora-push");
         push_cmd
             .identity(pid, gid, &supp)
-            .account(session_account)
+            .account(session_account.0, session_account.1)
             .caps(0)
             .stdin(Stdio::Inherit)
             .stdout(Stdio::Inherit)
@@ -1386,7 +1386,7 @@ pub extern "C" fn rs_main() -> i64 {
     let mut shell_cmd = Command::new(SHELL);
     shell_cmd
         .identity(pid, gid, &supp)
-        .account(session_account)
+        .account(session_account.0, session_account.1)
         .caps(SHELL_CAPS)
         // CONSOLE_OWNER: the shell receives Ctrl-C (LS-5). SESSION_HANGUP
         // (arm-6): the shell is the login session leader -- on its exit (logout)
@@ -1431,7 +1431,7 @@ pub extern "C" fn rs_main() -> i64 {
         let mut hal = Command::new("/bin/halcyond");
         hal.arg("--session")
             .identity(pid, gid, &supp)
-            .account(session_account)
+            .account(session_account.0, session_account.1)
             .caps(SHELL_CAPS)
             // SESSION_HANGUP (arm-6): halcyond is the graphical login session
             // leader ("its exit IS logout"), so it takes the same session

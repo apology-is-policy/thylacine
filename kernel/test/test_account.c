@@ -694,12 +694,27 @@ void test_account_handle_is_the_control(void) {
     TEST_EXPECT_EQ(__atomic_load_n(&a->refs, __ATOMIC_RELAXED), 2u, "the put gives that back");
 
     TEST_EXPECT_EQ((int)handle_dup(p, h, RIGHT_READ), -1, "the kind has no dup");
+    TEST_EXPECT_EQ(handle_dup_posix_checked(p, h, 0, false), -T_E_ACCES, "nor a lowest-free one");
+    TEST_EXPECT_EQ(handle_dup_to_checked(p, h, 40, false), -T_E_ACCES, "nor one onto a chosen slot");
+    hidx_t other = handle_alloc(p, KOBJ_PROCESS, RIGHT_READ, NULL);
+    TEST_ASSERT(other >= 0, "a transferable kind beside it");
+    TEST_EXPECT_EQ(handle_dup_to_checked(p, other, 40, false), 40, "control: that kind dups onto the slot");
+    TEST_ASSERT(handle_dup_posix_checked(p, other, 0, false) >= 0, "control: and to the lowest free");
     TEST_EXPECT_EQ(__atomic_load_n(&a->refs, __ATOMIC_RELAXED), 2u, "and a refused one holds nothing");
 
     TEST_EXPECT_EQ(handle_get_cloexec(p, h), 1, "made close-on-exec");
     TEST_EXPECT_EQ(handle_close_on_exec(p), 1, "so an exec closes it");
     TEST_EXPECT_EQ(handle_get(p, h, &hh), -1, "it is gone");
     TEST_EXPECT_EQ(__atomic_load_n(&a->refs, __ATOMIC_RELAXED), 1u, "and let go of the account");
+
+    // Userspace clearing the flag keeps nothing past an exec.
+    account_ref(a);
+    h = handle_alloc_cloexec(p, KOBJ_ACCOUNT, RIGHT_READ | RIGHT_WRITE, a, false);
+    TEST_ASSERT(h >= 0, "a handle with the flag clear");
+    TEST_EXPECT_EQ(handle_get_cloexec(p, h), 0, "reads clear");
+    TEST_EXPECT_EQ(handle_close_on_exec(p), 1, "an exec closes it anyway");
+    TEST_EXPECT_EQ(handle_get(p, h, &hh), -1, "it is gone too");
+    TEST_EXPECT_EQ(__atomic_load_n(&a->refs, __ATOMIC_RELAXED), 1u, "and let go of the account too");
 
     // The end of the Proc: the last handle it holds lets go the same way.
     account_ref(a);
@@ -711,51 +726,33 @@ void test_account_handle_is_the_control(void) {
     account_unref(a);
 }
 
-static volatile hidx_t g_fc_account, g_fc_control;
-static volatile int g_fc_got_account, g_fc_got_control;
-static volatile int g_fc_status;
-
-static void fc_grandchild(void *arg) {
-    (void)arg;
-    struct Proc *me = current_thread()->proc;
-    struct Handle hh;
-    g_fc_got_account = handle_get(me, g_fc_account, &hh);
-    if (g_fc_got_account == 0) handle_put(&hh);
-    g_fc_got_control = handle_get(me, g_fc_control, &hh);
-    if (g_fc_got_control == 0) handle_put(&hh);
-    exits("ok");
-}
-
-static void fc_child(void *arg) {
-    (void)arg;
-    struct Proc *me = current_thread()->proc;
-    struct MemoryAccount *a = account_child(me->account);
-    if (!a) exits("account");
-    g_fc_account = handle_alloc_cloexec(me, KOBJ_ACCOUNT, RIGHT_READ | RIGHT_WRITE, a, false);
-    if (g_fc_account < 0) exits("handle");
-    // A transferable kind in the same table, so a copy that copies nothing cannot pass.
-    g_fc_control = handle_alloc(me, KOBJ_PROCESS, RIGHT_READ, NULL);
-    if (g_fc_control < 0) exits("control");
-    int pid = rfork(RFPROC, fc_grandchild, NULL);
-    if (pid <= 0) exits("rfork");
-    int status = -1;
-    if (wait_pid(&status) != pid) exits("wait");
-    g_fc_status = status;
-    exits("ok");
-}
-
-// Section 13: fork does not copy the kind, so control cannot leave the Proc that holds it.
+// Section 13: a fork's table copy does not take the kind, so control cannot leave the Proc
+// that holds it. handle_table_copy_into is that copy; an entry-shape rfork makes none.
 void test_account_fork_does_not_copy_the_handle(void) {
-    g_fc_got_account = g_fc_got_control = -99;
-    g_fc_status = -1;
-    int pid = rfork(RFPROC, fc_child, NULL);
-    TEST_ASSERT(pid > 0, "rfork");
-    int status = -1;
-    TEST_EXPECT_EQ(wait_pid(&status), pid, "wait_pid");
-    TEST_EXPECT_EQ(status, 0, "the child exited cleanly");
-    TEST_EXPECT_EQ(g_fc_status, 0, "and so did the grandchild");
-    TEST_EXPECT_EQ(g_fc_got_control, 0, "control: a transferable handle is copied");
-    TEST_EXPECT_EQ(g_fc_got_account, -1, "an account's is not");
+    struct Proc *parent = proc_alloc();
+    struct Proc *child = proc_alloc();
+    struct MemoryAccount *a = account_child(account_root());
+    hidx_t acct = -1, control = -1;
+    int copied = -1, got_account = -99, got_control = -99;
+    if (parent && child && a) {
+        acct = handle_alloc_cloexec(parent, KOBJ_ACCOUNT, RIGHT_READ | RIGHT_WRITE, a, false);
+        // A transferable kind in the same table, so a copy that copies nothing cannot pass.
+        control = handle_alloc(parent, KOBJ_PROCESS, RIGHT_READ, NULL);
+        copied = handle_table_copy_into(child, parent);
+        struct Handle hh;
+        got_control = handle_get(child, control, &hh);
+        if (got_control == 0) handle_put(&hh);
+        got_account = handle_get(child, acct, &hh);
+        if (got_account == 0) handle_put(&hh);
+    }
+    if (child) { child->state = PROC_STATE_ZOMBIE; proc_free(child); }
+    if (parent) { parent->state = PROC_STATE_ZOMBIE; proc_free(parent); }
+    if (a && acct < 0) account_unref(a);
+    TEST_ASSERT(parent && child && a, "the fixture");
+    TEST_ASSERT(acct >= 0 && control >= 0, "both handles");
+    TEST_EXPECT_EQ(copied, 1, "one slot copied");
+    TEST_EXPECT_EQ(got_control, 0, "control: a transferable handle is copied");
+    TEST_EXPECT_EQ(got_account, -1, "an account's is not");
 }
 
 // What needs a record in user memory is capacity-probe's, from EL0. A test thread has none,
@@ -784,7 +781,7 @@ void test_account_syscall_refuses_by_name(void) {
     TEST_EXPECT_EQ(account_call(self, ACCOUNT_CHILD, va, size), (s64)-T_E_INVAL,
                    "each operation has its own record size");
     TEST_EXPECT_EQ(account_call(self, ACCOUNT_SET_LIMITS, va, sizeof(struct account_limits_rec)),
-                   (s64)-T_E_PERM, "nobody adjusts their own account");
+                   (s64)-T_E_ACCES, "nobody adjusts their own account");
     TEST_EXPECT_EQ(account_call(self, ACCOUNT_SET_LIMITS, va, size), (s64)-T_E_INVAL,
                    "and the record's shape comes before that");
     TEST_EXPECT_EQ(account_call(3, ACCOUNT_QUERY, va, size), (s64)-T_E_BADF,

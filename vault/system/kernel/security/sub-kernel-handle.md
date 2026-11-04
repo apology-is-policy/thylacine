@@ -271,7 +271,7 @@ property rather than a runtime check.** Every `kobj_kind` except
 | `HW` | MMIO, IRQ, DMA, Interrupt, PCI | pinned to the claiming Proc — a driver cannot leak its device |
 | `SRV` | Srv | pinned to the opening Proc, so the kernel-stamped peer identity behind it is unforgeable |
 | `LOOM` | Loom | pinned to the Proc whose address space holds the ring |
-| `ACCOUNT` | Account | pinned to the Proc that made it: control of a memory account never reaches a Proc charged to it ([[sub-kernel-accounts]]) |
+| `ACCOUNT` | Account | pinned to the Proc that made it: no handle route carries control of a memory account to a Proc charged to it, and an exec closes it whatever its flag says (a holder a charged Proc may debug can still be driven: section 13 of SHARED-MEMORY-ACCOUNTING, MM-2's to seal) ([[sub-kernel-accounts]]) |
 
 Eleven `_Static_assert`s pin this: ten pairwise-disjointness checks plus one
 **completeness** check that the union covers every kind but `KOBJ_INVALID`.

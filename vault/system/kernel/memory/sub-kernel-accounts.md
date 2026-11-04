@@ -41,7 +41,8 @@ section 14 is the as-built statement; sections 3 and 4 are the design it serves.
 - `account_query_fill` reports bytes and decides nothing. `SYS_ACCOUNT`'s query and
   `/proc/<pid>/account` both render it, so they differ only by when they read.
 - An account's control is a `KOBJ_ACCOUNT` handle in the Proc that made it, and it goes
-  nowhere else ([[sub-kernel-handle]]). `SET_LIMITS` needs it, so nobody adjusts the
+  nowhere else ([[sub-kernel-handle]]), and an exec closes it whatever its flag says. A spawn
+  tail names the handle and the incarnation. `SET_LIMITS` needs it, so nobody adjusts the
   account they are charged to.
 - `account_set_limits` replaces every class or none, and refuses a figure above any
   ancestor's. A limit decides nothing until MM-2.

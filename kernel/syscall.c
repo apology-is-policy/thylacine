@@ -10388,7 +10388,8 @@ static s64 sys_spawn_with_perms_handler(u64 name_va, u64 name_len_raw,
 //     [1, SYS_OPEN_PATH_MAX]). SPAWN_EXT_ENV's tail names the child's whole
 //     environment (env_flags 0, env_len <= SYS_SPAWN_ENV_DATA_MAX, every record
 //     NAME=VALUE with a name /env accepts). SPAWN_EXT_ACCOUNT's names the child's
-//     account by a KOBJ_ACCOUNT handle of the caller's (account_flags 0).
+//     account by a KOBJ_ACCOUNT handle of the caller's and that account's incarnation
+//     (account_flags 0).
 
 // A-1a: identity bundle threaded from the spawn handler/entry into the
 // child via spawn_full_argv_args. `set` mirrors SPAWN_IDENTITY_SET; when
@@ -11513,6 +11514,11 @@ static s64 sys_spawn_full_argv_handler(u64 req_va) {
         } else if (acct_hh.kind != KOBJ_ACCOUNT) {
             handle_put(&acct_hh);
             acct_err = -(s64)T_E_BADF;
+        } else if (((struct MemoryAccount *)acct_hh.obj)->incarnation != acct_ext.incarnation) {
+            // Section 4's rule as sys_account_op applies it: a number closed and reused
+            // cannot steer a child at an account the caller did not mean.
+            handle_put(&acct_hh);
+            acct_err = -(s64)T_E_INVAL;
         } else {
             account = (struct MemoryAccount *)acct_hh.obj;
         }
@@ -12398,7 +12404,7 @@ static s64 sys_account_op(struct Proc *p, struct MemoryAccount *a, bool self, u6
         if (uaccess_copy_in(limit, rec_va + __builtin_offsetof(struct account_limits_rec, limit),
                             sizeof(limit)) != 0)
             return -(s64)T_E_FAULT;
-        return account_set_limits(a, limit) == 0 ? 0 : -(s64)T_E_PERM;
+        return account_set_limits(a, limit) == 0 ? 0 : -(s64)T_E_ACCES;
     }
 
     // ACCOUNT_CHILD. Its incarnation is read before the handle exists: from then on a peer
@@ -12443,7 +12449,7 @@ static s64 sys_account_handler(u64 handle_raw, u64 op, u64 rec_va, u64 rec_size)
     // call. The handle is the authority on any other, and no Proc holds its own: nobody
     // adjusts their own account (section 13).
     if ((s64)handle_raw == ACCOUNT_SELF) {
-        if (op == ACCOUNT_SET_LIMITS)                  return -(s64)T_E_PERM;
+        if (op == ACCOUNT_SET_LIMITS)                  return -(s64)T_E_ACCES;
         return sys_account_op(p, p->account, true, op, rec_va, rec_size);
     }
     struct Handle hh;

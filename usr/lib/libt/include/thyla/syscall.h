@@ -580,9 +580,10 @@ _Static_assert(__builtin_offsetof(struct t_sys_spawn_ext_env, env_flags) == 12,
 struct t_sys_spawn_ext_account {
     unsigned int account_h;      // 0 -- the spawner's control handle
     unsigned int account_flags;  // 4 -- must be 0
+    unsigned long incarnation;   // 8 -- the account's
 };
-_Static_assert(sizeof(struct t_sys_spawn_ext_account) == 8,
-               "t_sys_spawn_ext_account ABI: 8 bytes");
+_Static_assert(sizeof(struct t_sys_spawn_ext_account) == 16,
+               "t_sys_spawn_ext_account ABI: 16 bytes");
 
 // Menagerie step 5: T_SPAWN_ALLOWANCE_SET (mirror SPAWN_ALLOWANCE_SET) + the
 // hardware-allowance descriptor (mirror struct t_allowance_desc). A C caller

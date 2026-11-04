@@ -22,18 +22,20 @@ is `docs/SHARED-MEMORY-ACCOUNTING.md` sections 13 and 14. `SYS_ACCOUNT` is 140. 
 selector is -1, sign-extended to the register. Version is 1. Amounts are bytes.
 
 The checks run in this order: `-EINVAL` for an operation outside 1 to 6; `-EOPNOTSUPP` for
-4 to 6; `-EINVAL` for a `rec_size` other than the operation's record; `-EPERM` for SET_LIMITS
+4 to 6; `-EINVAL` for a `rec_size` other than the operation's record; `-EACCES` for SET_LIMITS
 on the self selector; `-EBADF` for a handle that is not a `KOBJ_ACCOUNT`; `-EFAULT` for a record
-that is not the caller's readable and writable memory, after which any part of it may have
-been written; `-EINVAL` for a wrong version, size, flags or pad, or an incarnation that is
+that is not memory the caller may read, and for QUERY and CHILD write, after which any part of
+it may have been written; `-EINVAL` for a wrong version, size, flags or pad, or an incarnation that is
 not the account's, where 0 is taken only with the self selector.
 
 QUERY returns 0 and replaces the record. CHILD returns the new handle, close-on-exec, with
 rights read and write, and replaces the record: the header's incarnation is the parent's and
 `created` the child's. It answers `-ENOSPC` at depth 16, `-ENOMEM` with no pool or memory,
 `-EMFILE` with a full table, and `-EFAULT` having closed the handle when the record cannot be
-written. SET_LIMITS returns 0 having replaced every limit, or `-EPERM` with none replaced when
-one is above an ancestor's. A limit is rounded down to a page, and `ACCOUNT_LIMIT_NONE`, all
+written. An exec closes the handle whatever its flag says. SET_LIMITS returns 0 having replaced
+every limit, or `-EACCES` with none replaced when one is above an ancestor's. The
+`SPAWN_EXT_ACCOUNT` tail is 16 bytes: the handle, flags that must be 0, and the account's
+incarnation, `-EBADF` and `-EINVAL` as for an operation, and never 0. A limit is rounded down to a page, and `ACCOUNT_LIMIT_NONE`, all
 ones, clears it.
 
 Operations: QUERY 1, CHILD 2, SET_LIMITS 3, VOUCHER_CREATE 4, VOUCHER_CLOSE 5,

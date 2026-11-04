@@ -296,7 +296,7 @@ pub struct Command {
     env: Option<EnvPlan>,
     // The memory account the child is born under (the T_SPAWN_EXT_ACCOUNT tail): a
     // control handle of this Proc's; None is this Proc's own account.
-    account: Option<u32>,
+    account: Option<(u32, u64)>,
 }
 
 // What the caller asked of the child's environment: start from nothing (after
@@ -314,7 +314,7 @@ struct EnvPlan {
 #[repr(C)]
 struct SpawnRecord {
     base:  TSpawnArgs,
-    tails: [u64; 5],
+    tails: [u64; 6],
     used:  usize,
 }
 const _: () = assert!(core::mem::offset_of!(SpawnRecord, tails) == 104);
@@ -322,7 +322,7 @@ const _: () = assert!(
     core::mem::size_of::<TSpawnExtCwd>()
         + core::mem::size_of::<TSpawnExtEnv>()
         + core::mem::size_of::<TSpawnExtAccount>()
-        <= 5 * 8
+        <= 6 * 8
 );
 
 impl SpawnRecord {
@@ -498,8 +498,8 @@ impl Command {
     /// names, rather than this Proc's own. The kernel refuses anything else with
     /// `EBADF`, so a bad handle fails `spawn` and no child exists.
     #[inline]
-    pub fn account(&mut self, handle: u32) -> &mut Command {
-        self.account = Some(handle);
+    pub fn account(&mut self, handle: u32, incarnation: u64) -> &mut Command {
+        self.account = Some((handle, incarnation));
         self
     }
 
@@ -683,7 +683,7 @@ impl Command {
         // The record travels with its tails: `record` owns them, and `dir`
         // (borrowed from self.cwd) and env_buf outlive the call; the kernel
         // copies both before it returns.
-        let mut record = SpawnRecord { base: args_record, tails: [0; 5], used: 0 };
+        let mut record = SpawnRecord { base: args_record, tails: [0; 6], used: 0 };
         if let Some(dir) = self.cwd.as_ref() {
             record.push(TSpawnExtCwd {
                 cwd_va: dir.as_ptr() as u64,
@@ -698,8 +698,8 @@ impl Command {
                 env_flags: 0,
             });
         }
-        if let Some(h) = self.account {
-            record.push(TSpawnExtAccount { account_h: h, account_flags: 0 });
+        if let Some((h, incarnation)) = self.account {
+            record.push(TSpawnExtAccount { account_h: h, account_flags: 0, incarnation });
         }
         // The pointer is the whole record's, so it covers the tails the kernel
         // reads past the base.

@@ -647,17 +647,23 @@ stands, and critical device DMA stays outside the pool even after section 7's ro
 booted (votes 58 and 59).** `ACCOUNT_CHILD`, on the self selector or a handle, subdivides
 that account and returns a `KOBJ_ACCOUNT` handle. No handle crosses a Proc boundary: the
 kind is its own non-transferable partition, so it has no dup, fork does not copy it and
-spawn's descriptor array refuses it. A `SPAWN_EXT_ACCOUNT` tail names the handle so the
-child is born under the account, and gives the child no control of it. `ACCOUNT_SET_LIMITS`
-needs the handle and refuses the self selector with `-EPERM`, so nobody adjusts the account
-they are charged to. If the creator exits, the limits stay as they are and nobody can change
+spawn's descriptor array refuses it, and an exec closes it whatever its flag says. A
+`SPAWN_EXT_ACCOUNT` tail names the handle and the account's incarnation, as an operation's
+record does, so the child is born under the account the caller meant, and gives the child no
+control of it. `ACCOUNT_SET_LIMITS` needs the handle and refuses the self selector with
+`-EACCES`, so nobody adjusts the account they are charged to through any handle. A debugger is
+the one other way to reach a holder, since the owner axis compares capabilities and cannot see
+a handle: a program that spawns a same-principal child under an account should know that child
+can stop it and drive it. Login and joey run as the system principal, out of the session's
+reach. MM-2, when limits begin to refuse, must seal any other holder. If the creator exits, the limits stay as they are and nobody can change
 them; a Halcyon setting that adjusts a session goes through login or waits for a transfer
 path.
 
 **Login makes the session's account before it binds the home,** and a failure refuses the
 login. The home proxy, `aurora-push`, the shell and `halcyond` are born under it. Joey makes
 the resident services' account before its probes, and a failure is fatal. Corvus, `stratumd`,
-ptyfs, diorama and the console renderer are born under that one.
+ptyfs, diorama, the console renderer and the warden are born under that one, and so is
+everything the warden binds: Lictor, tapestryd, netd and the other drivers.
 
 **An account costs its parent one page of `CLASS_META` and the pool one page,** as a thread's
 slot costs a whole page, so a table of handles to empty accounts is a bound on the pool and
@@ -669,7 +675,7 @@ the handle and returns `-EFAULT`. The call returns the handle, and `created` in 
 the child's incarnation.
 
 **Limits change whole or not at all, and decide nothing yet.** Each is rounded down to a page.
-A limit above any ancestor's ceiling is `-EPERM`, every class against every ancestor under
+A limit above any ancestor's ceiling is `-EACCES`, every class against every ancestor under
 one hold of the tree lock, before any is written. Lowering one below current use is allowed,
 and a child above a lowered parent keeps its figure, because the chain's room bounds it.
 `ACCOUNT_LIMIT_NONE`, all ones, clears one. A limit shows in the query's `limit`, `headroom`

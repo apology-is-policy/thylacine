@@ -1581,14 +1581,17 @@ int handle_close_on_exec(struct Proc *p) {
     table_lock(t);
     for (u32 w = 0; w < HANDLE_CLOEXEC_WORDS; w++) {
         pending[w]    = t->cloexec[w];
-        // A private ring never survives the image it was admitted against, so
-        // it closes on exec whether or not userspace marked it close-on-exec.
+        // A private ring never survives the image it was admitted against, and
+        // control of a memory account never passes to an image that does not know
+        // it has it, so each closes on exec whether or not userspace left it marked.
         // Folded into the same snapshot rather than closed separately, so it
         // inherits the clear-first property above verbatim.
         for (u32 b = 0; b < 64 && w * 64 + b < PROC_HANDLE_MAX; b++) {
             struct Handle *slot = &t->slots[w * 64 + b];
-            if (slot->magic == HANDLE_MAGIC && slot->kind == KOBJ_LOOM &&
-                loom_is_private((struct Loom *)slot->obj)) pending[w] |= 1ull << b;
+            if (slot->magic == HANDLE_MAGIC &&
+                (slot->kind == KOBJ_ACCOUNT ||
+                 (slot->kind == KOBJ_LOOM && loom_is_private((struct Loom *)slot->obj))))
+                pending[w] |= 1ull << b;
         }
         t->cloexec[w] = 0;
     }

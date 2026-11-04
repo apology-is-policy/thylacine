@@ -300,8 +300,9 @@
 // keeps working.
 // ---------------------------------------------------------------------------
 
-// Too many open files -- the per-Proc socket table (VIV_SOCK_MAX) is full, or
-// no handle slot at or above a SYS_HANDLE_DUP_LOWEST floor is free (B-3b).
+// Too many open files -- the per-Proc socket table (VIV_SOCK_MAX) is full, no
+// handle slot at or above a SYS_HANDLE_DUP_LOWEST floor is free (B-3b), or
+// SYS_ACCOUNT's CHILD has no slot for its new handle.
 // POSIX: EMFILE.
 #define T_E_MFILE      24
 

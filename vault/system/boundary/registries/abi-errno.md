@@ -40,7 +40,7 @@ anywhere.
 | 20 | `T_E_NOTDIR` | ENOTDIR | X-search on a non-directory component — precedes the X-check, so 0755 and 0644 answer alike; distinct from `NOENT` ("safe to create") |
 | 21 | `T_E_ISDIR` | EISDIR | write/create names a directory — the 9P server, or `SYS_OPEN_CREATE`'s lexical leaf rows |
 | 22 | `T_E_INVAL` | EINVAL | structurally malformed argument |
-| 24 | `T_E_MFILE` | EMFILE | a per-Proc table is full (the socket table `VIV_SOCK_MAX`); no free handle at or above a dup floor (HANDLE_DUP_TO's DUP_LOWEST, F_DUPFD) |
+| 24 | `T_E_MFILE` | EMFILE | a per-Proc table is full (the socket table `VIV_SOCK_MAX`); no free handle at or above a dup floor (HANDLE_DUP_TO's DUP_LOWEST, F_DUPFD); no slot for SYS_ACCOUNT CHILD's handle |
 | 25 | `T_E_NOTTY` | ENOTTY | a `TC*`/`TIOC*` op on a non-tty fd; `isatty()` reads it via a failed `TIOCGWINSZ` |
 | 28 | `T_E_NOSPC` | ENOSPC | bounded terminal interaction binding pool or identifier capacity exhausted; a memory account's child past the tree's depth |
 | 32 | `T_E_PIPE` | EPIPE | write to a closed read end |
