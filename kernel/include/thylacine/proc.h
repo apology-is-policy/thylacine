@@ -1277,10 +1277,12 @@ static inline u32 phenotype_decide(bool crossed_pheno, bool territory_linux) {
 // sub-field (then 11..17) and the pipe latch (18); PROC_FLAGS_ALL's assert
 // below makes any alias a compile error.
 #define PROC_FLAG_SESSION_HANGUP    (1u << 19)
-// Boot-only graphical seat manager designation; not propagated through rfork.
 // Warden's designation of the normal compositor took, so this Proc's threads are
-// INTERACTIVE (ARCH 8.3). One-way; not propagated by rfork (no proc_flag is).
+// INTERACTIVE up to SEAT_CLIENT_BAND_THREADS live at once (ARCH 8.3). One-way; not
+// propagated by rfork (no proc_flag is).
 #define PROC_FLAG_SEAT_CLIENT       (1u << 24)
+#define SEAT_CLIENT_BAND_THREADS    2
+// Boot-only graphical seat manager designation; not propagated through rfork.
 #define PROC_FLAG_SEAT_MANAGER       (1u << 20)
 _Static_assert((PROC_FLAG_SEAT_MANAGER & (PROC_FLAG_TERM_TERMINATE_PENDING |
     PROC_FLAG_SESSION_HANGUP | PROC_FLAG_PIPE_TERMINATE_PENDING)) == 0,
@@ -1410,7 +1412,8 @@ bool proc_may_create_srv_registry(const struct Proc *p);
      PROC_FLAG_TTY_TERMINATE_PENDING | PROC_FLAG_CONSOLE_RENDERER | \
      PROC_FLAG_MAY_RAISE_PAGE_BUDGET | PROC_FLAG_TERM_TERMINATE_PENDING | \
      PROC_FLAG_PIPE_TERMINATE_PENDING | PROC_FLAG_SESSION_HANGUP | \
-     PROC_FLAG_SEAT_MANAGER | PROC_FLAG_DEBUG_TAINTED | PROC_FLAG_TEST_FIXTURE | \
+     PROC_FLAG_SEAT_MANAGER | PROC_FLAG_SEAT_CLIENT | PROC_FLAG_DEBUG_TAINTED | \
+     PROC_FLAG_TEST_FIXTURE | \
      PROC_FLAG_EXIT_CLOSE_FORCED | PROC_FLAG_EXIT_CLOSING | PROC_FLAG_MAIN_TID | \
      PROC_FLAG_MAY_RAISE_THREAD_BUDGET | PROC_FLAG_SESSION_REGISTRY | \
      PROC_FLAG_USR1_TERMINATE_PENDING | PROC_FLAG_USR2_TERMINATE_PENDING)
@@ -1428,6 +1431,7 @@ _Static_assert(__builtin_popcount(PROC_FLAGS_ALL) ==
     __builtin_popcount(PROC_FLAG_USR2_TERMINATE_PENDING) +
     __builtin_popcount(PROC_FLAG_PIPE_TERMINATE_PENDING) +
     __builtin_popcount(PROC_FLAG_SESSION_HANGUP) + __builtin_popcount(PROC_FLAG_SEAT_MANAGER) +
+    __builtin_popcount(PROC_FLAG_SEAT_CLIENT) +
     __builtin_popcount(PROC_FLAG_DEBUG_TAINTED) + __builtin_popcount(PROC_FLAG_TEST_FIXTURE) +
     __builtin_popcount(PROC_FLAG_EXIT_CLOSE_FORCED) + __builtin_popcount(PROC_FLAG_EXIT_CLOSING) +
     __builtin_popcount(PROC_FLAG_MAIN_TID) +

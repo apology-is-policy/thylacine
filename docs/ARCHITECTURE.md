@@ -1246,11 +1246,14 @@ console-ATTACHED login/corvus -- NOT an arbitrary foreground program that inheri
 `/dev/cons` as stdin (which, since `/dev/cons` has no per-open capability gate and
 PTY is unbuilt, would otherwise let unprivileged EL0 code self-promote above
 NORMAL and starve it; the wake-preemption audit F1). A third leg is Halcyon's own:
-every thread of the compositor warden designates at spawn (`proc_set_seat_client`) is
-INTERACTIVE, the first when it takes the role and each later one from its creation; a
-fork of it is not (operator vote 64, 2026-11-04). That role is explicitly untrusted, so
-this leg's gate is who designates, not what the compositor is, and a compositor that
-spins starves NORMAL on the CPUs its threads occupy, at most two. The full "anything
+the compositor warden designates at spawn (`proc_set_seat_client`) has at most two live
+threads INTERACTIVE, the first when it takes the role and a later one when it joins with
+fewer than two live, under the lock it joins under; any others stay NORMAL, and a fork of
+it is not INTERACTIVE at all (operator vote 64, 2026-11-04). That role is explicitly
+untrusted and free to make threads, so the kernel holds the bound the vote accepted, and
+this leg's gate is who designates, not what the compositor is. One spinning thread
+alternates with a NORMAL peer on its CPU, since pick runs before requeue; two on one CPU
+starve NORMAL there, which an idle peer can steal from, and at `-smp 1` everywhere. The full "anything
 from a controlling tty" rule + a dynamic boost-on-wake / demote-on-quantum
 classifier (Plan 9) are the EEVDF-lift refinement; the controlling-tty inference
 lands with the PTY work (Phase 8). The **no-cross-band-aging** caveat above is
@@ -1326,7 +1329,8 @@ not a law, and made HMP a cross-cutting retrofit).
 
 - **`select_target_cpu(task, prev_cpu)`** — chooses the target CPU's run tree when
   a thread becomes runnable. v1.0 homogeneous body returns the current/prev CPU
-  (the existing behavior, preserved). HMP bodies bias by capacity (§8.4.4).
+  (the existing behavior, preserved), except that a pinned thread returns `last_cpu`,
+  its home, since the waker's CPU may not be it. HMP bodies bias by capacity (§8.4.4).
 - **`balance()`** — the load-rebalancing abstraction. v1.0 implements it as
   **pull-only work-stealing**: an idle CPU pulls one *non-pinned* runnable thread
   from a peer (round-robin-from-rotating-start; steal frequency is bounded only

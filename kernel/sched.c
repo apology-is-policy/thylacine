@@ -909,6 +909,11 @@ void ready_on(unsigned target_cpu, struct Thread *t) {
     // target. select_target_cpu already guards this; belt for any other caller.
     if (target_cpu >= DTB_MAX_CPUS || !g_cpu_sched[target_cpu].initialized)
         target_cpu = self;
+    // A pinned thread that has run lives where it ran (ARCH 8.4.2).
+    if (t->cpu_pinned && t->nsched != 0 && target_cpu != t->last_cpu)
+        extinction("ready_on: a pinned thread placed off its home");
+    // Read while t cannot run: past the unlock below it may already be gone.
+    bool pinned = t->cpu_pinned;
 
     // The target CPU's run-tree lock (IRQs already masked above; cross-CPU
     // contention against work-stealing peers / a peer's own sched).
@@ -921,7 +926,7 @@ void ready_on(unsigned target_cpu, struct Thread *t) {
     // virtual time"): a thread carries the vd_t from its last yield on whatever
     // CPU it last ran on. Each CPU's vd_counter is an independent clock; a
     // cross-CPU wake (a wakeup() / timer-tick on a CPU other than where t last
-    // ran -- select_target_cpu returns the waker's CPU at v1.0) would otherwise
+    // ran -- select_target_cpu returns the waker's CPU unless t is pinned) would otherwise
     // enqueue t with a STALE key minted by a foreign clock. A high stale key
     // from a fast clock onto a slow-clock CPU tails t behind every fresh
     // yielder -> starvation bounded only by the inter-CPU counter gap (an I-17
@@ -964,9 +969,12 @@ void ready_on(unsigned target_cpu, struct Thread *t) {
         // is the CORRECTNESS half + is NOT gated by g_sched_notify_enabled (so a
         // busy target reschedules at its next tick even when the wake-IPI is
         // suppressed during tests). sched_notify_cpu is the PROMPTNESS half: a
-        // gated IPI that traps the target in NOW rather than at the next tick.
+        // gated IPI that traps the target in NOW rather than at the next tick. A pinned
+        // thread can run nowhere else, and a parked secondary has no tick in the test
+        // phase, so for one the IPI is correctness and is not gated.
         need_resched_set(target_cpu);
-        sched_notify_cpu(target_cpu);
+        if (pinned) (void)gic_send_ipi(target_cpu, IPI_RESCHED);
+        else sched_notify_cpu(target_cpu);
     }
 }
 
@@ -1011,8 +1019,10 @@ void ready(struct Thread *t) {
 // thread starves NORMAL. Bounded in practice -- the realized INTERACTIVE set is
 // mostly-blocked + trusted (CAP_HW_CREATE drivers + the console-owner/attached
 // session: the shell + login/corvus -- NOT an arbitrary console-stdin reader), plus
-// the compositor warden designates, which is mostly blocked and NOT trusted (8.3);
-// the general CPU-DoS bound is the per-Proc quota (#65).
+// the compositor warden designates, which is mostly blocked and NOT trusted, so at most
+// SEAT_CLIENT_BAND_THREADS of its threads hold the band (8.3). The per-Proc quota (#65)
+// bounds threads and pages, not CPU. Pick runs before requeue, so one spinning INTERACTIVE
+// thread alternates with a NORMAL peer on its CPU; two on one CPU starve NORMAL there.
 void sched_mark_interactive(struct Thread *t) {
     if (!t) return;
     if (t->magic != THREAD_MAGIC) return;

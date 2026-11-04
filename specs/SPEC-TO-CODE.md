@@ -659,7 +659,8 @@ small (<200 distinct) but every bug class reaches its violation in ≤ 6 steps
 | `SendIO(t, fid)` — rename | Send `Trename(fid, dfid, name)` on tag `t` (mutation-shaped; fid-exclusive — server-side identity moves) | `kernel/9p_session.c::p9_session_send_rename` (uses `p9_build_trename`). Send-time precondition: fid + dfid bound + no other in-flight op on fid. Dispatcher: Rrename is body-empty header validation. **Landed at P5-wire-mutation.** |
 | `SendClunk(t, fid)` — async | `p9_client_clunk_async` (FID-LIFECYCLE): the fire-and-forget Tclunk. The SPEC IS UNCHANGED for the clean model -- SendClunk already unbinds at send + holds the tag until `ReceiveOp(t)` frees it, and the spec never modeled a blocking submitter; `ReceiveOp` on a clunk tag IS the ownerless drain (who drains is below the abstraction; impl: a later op's elected reader via the #845 dispatch arm -> `clear_outstanding`). NEW buggy action `BuggyAsyncClunkLeakReceive` (+ `9p_client_buggy_async_clunk_tag_leak.cfg`): the ownerless Rclunk consumed off the wire WITHOUT freeing the tag -- a permanently burned `outstanding[]` slot; caught by `TagAndOpAccounting`. The impl's monotonic never-reused fid allocator makes the spec's finite-FidIds reuse traces a SUPERSET of the impl's. |
 | `SendIO(t, fid)` — weft | Send `Tweft(fid)` on tag `t` (Weft-6; read-shaped — queries the flow's stable share_id + ring geometry; idempotent on the netd side; concurrent ops permitted) | `kernel/9p_session.c::p9_session_send_weft` (uses `p9_build_tweft`). Send-time precondition: fid bound. Dispatcher: the `op->kind == P9_TWEFT` arm populates `out->weft_geom` by value (no rmsg alias) via `p9_parse_rweft`; no fid-table mutation. `kernel/9p_client.c::p9_client_weft` copies the geom out. **Landed at Weft-6a-1.** This composes the existing `SendIO`/`ReceiveOp` tag-and-fid machinery (no `9p_client.tla` change; the buggy cfgs re-ran green). |
-| `SendIO(t, fid)` — other families | `Tlock` / `Tsync` / `Treflink` / `Tfallocate` / `Tfadvise` / xattr family on tag `t` for `fid` | Wire builders deferred to P5-wire-lock / -xattr / -stratum-ext; session-side dispatch handlers extend `p9_session_dispatch_rmsg` at each landing. |
+| `SendIO(t, fid)` — lock / getlock | `Tlock` / `Tgetlock` on tag `t` for `fid` (read-shaped; B-3h) | `kernel/9p_session.c::p9_session_send_lock` / `p9_session_send_getlock`, driven by `kernel/9p_client.c::p9_client_lock` / `p9_client_getlock` |
+| `SendIO(t, fid)` — other families | `Tsync` / `Treflink` / `Tfallocate` / `Tfadvise` / xattr family on tag `t` for `fid` | Wire builders deferred to P5-wire-lock / -xattr / -stratum-ext; session-side dispatch handlers extend `p9_session_dispatch_rmsg` at each landing. |
 | `SendWalk(t, src, new)` | Send `Twalk(fid=src, newfid=new, n_names=N)` on tag `t` | `kernel/9p_session.c::p9_session_send_walk` (uses `p9_build_twalk`). Send-time precondition: src bound, new not bound, new ≠ root, no other in-flight op on new. **Landed at P5-session.** |
 | `SendClunk(t, fid)` | Send `Tclunk(fid)` on tag `t`; Send-time unbind | `kernel/9p_session.c::p9_session_send_clunk` (uses `p9_build_tclunk`). Send-time-unbinds fid from `bound_fids` BEFORE storing the outstanding entry. Send-time precondition: fid bound, fid ≠ root, no other in-flight op on fid. **Landed at P5-session.** |
 | `ReceiveOp(t)` | Receive `Rmsg.tag == t`; apply mutation per stored op kind | `kernel/9p_session.c::p9_session_dispatch_rmsg` (uses `p9_peek_header` + per-type `p9_parse_*`). Tag-indexed lookup pairs Rmsg with the correct outstanding op; Rlerror handled as a generic error response without fid mutation; type-mismatch rejected. **Landed at P5-session.** |
@@ -1733,6 +1734,14 @@ peek) is a model *stutter* (no state change), trivially within the envelope.
 
 Pre-commit gate: `sched_alpha.cfg` + `sched_alpha_3cpu.cfg` clean on any
 change to the on_cpu protocol, the pinned-idle dispatch, or `try_steal`.
+
+**Model gaps, named (merge audit r2, 2026-11-04).** `IsPinned(t) == t \in CPUs`: the only
+pinned threads here are idles, and idles never sleep, so no pinned thread is ever Placed.
+The boot thread and pinned kthreads do sleep, so this model's green never covered a pinned
+thread's wake (`select_target_cpu` returning its `last_cpu`; test
+`scheduler.pinned_wake_goes_home`). And no scheduler model has bands (`scheduler.tla` has
+none, `sched_oncpu.tla` says it is band-agnostic), so I-8's liveness cfgs say nothing about
+any leg of ARCH 8.3. Both rest on prose and tests.
 
 ## allowance.tla — Menagerie build-arc 2 (the hardware allowance; spec-first re-enabled, model-first)
 

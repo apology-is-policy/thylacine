@@ -8730,7 +8730,7 @@ host_boundary_check() {
         # The two conventions the tree's checkers use, told apart by the driver's own
         # usage: a --logs directory, or a positional output and a compiler.
         usage="$(COLUMNS=10000 python3 "$REPO_ROOT/tools/test-$name.py" --help | head -n 1)"
-        if [[ " $usage " == *" --logs "* ]]; then
+        if [[ "$usage" == *"--logs "* ]]; then
             args=(--logs "$root/$name")
             [[ "$usage" == *"--sanitize"* ]] && args+=(--sanitize)
             python3 "$REPO_ROOT/tools/test-$name.py" "${args[@]}" > "$root/$name.log" 2>&1 &

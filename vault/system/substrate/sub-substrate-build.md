@@ -421,9 +421,10 @@ passes a mock and answers EIO on the device. All eight were run by nothing until
 date, so a renumbered mirror could drift with every build green.
 `host_boundary_check` runs named drivers in parallel, each into a fresh
 `build/host-boundaries/<set>/<name>`, and stops the build with the failing
-log's tail: the native three (handle target replacement, the descriptor
-handlers, the handle query) before any target except `clean`, and the Pouch
-adapters in `build_sysroot`, step 2b, on the musl tree just patched.
+log's tail: the native set before any target except `clean`, and the Pouch
+adapters in `build_sysroot`, step 2b, on the musl tree just patched. The drivers
+follow two conventions, told apart by each one's own usage: a positional output
+and `--cc`, or `--logs` (and `--sanitize` when it has it), required or not.
 `host_boundary_sets` derives both sets as the gate below does, from
 `tools/host-tests/*.c`, a driver whose usage names a musl tree being Pouch's:
 a test with no driver stops the build, and an empty set is refused, where the
@@ -431,7 +432,9 @@ two hand lists it replaced (round 1 F4) would have let a new checker join no
 build. `tools/test-host-boundaries.sh` runs every checker clean and under each
 mutant it declares (50 legs in 35 s when it landed), deriving the set the same way
 and the mutants from each driver's `--help`; a checker that declares no mutant
-fails it. A planted `VIV_NATIVE_CEILING` 132 stops the build at the check,
+fails it. A `--logs` driver runs its own `--mutants` as one leg, and one with no
+mutant flag must run them every time: it prints a PASS line per case, the control
+included, so a clean log with fewer than two fails it. A planted `VIV_NATIVE_CEILING` 132 stops the build at the check,
 naming the pin. Moving patch 0057's getppid number stops it there too, since
 the native handle-query checker pins that line; the Pouch call site's red is a
 kill.c body only `test-pouch-kill-probe.py` reads (2026-10-19: step 2b refused,

@@ -126,11 +126,11 @@ Generated — do not edit between the markers (`quaestor render`).
 ## Recent changes
 
 - 2026-11-04 [[chg-2026-11-04-compositor-band]] — The designated compositor's threads are INTERACTIVE
+- 2026-11-04 [[chg-2026-11-04-merge-audit-r2]] — Merge audit r2's close on the join
 - 2026-11-04 [[chg-2026-11-04-mm1c]] — MM-1c: account control, spawn tail, session and services accounts
 - 2026-11-04 [[chg-2026-11-04-pinned-wake]] — A pinned thread's wake goes to its home CPU, not the waker's
 - 2026-11-03 [[chg-2026-11-03-b3h-first-boots]] — B-3h's first boots: two wrong tests, a survivor, a budget
 - 2026-11-03 [[chg-2026-11-03-fid-pays-for-clunk]] — A FID pays for its CLUNK at RESERVE
 - 2026-11-03 [[chg-2026-11-03-memory-account-number]] — The memory account call moves to 140
 - 2026-11-03 [[chg-2026-11-03-memory-account-query]] — SYS_ACCOUNT answers its query on the caller's own account
-- 2026-11-03 [[chg-2026-11-03-memory-account-reservation]] — Reserve the memory account call and its records
 <!-- generated:end -->
