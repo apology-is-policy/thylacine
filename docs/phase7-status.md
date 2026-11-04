@@ -2985,7 +2985,7 @@ Vote 15: a separate chunk straight after C4, and the signoff for `docs/ERRORS.md
 - **Void in lease 2, and why it says so.** G06, G07, G11 and K60 never booted there: the lean build stopped `tools/test.sh`, and
   the script copied the previous boot log as theirs. md5 proved it. Across 410 boot logs of every lease the only other copy is C4's
   first G1, which its landing lease re-ran for real. Every lease script now reports NO BOOT.
-- **SMP subset:** ran on d0afb5937, 2026-11-04 01:40-02:41Z: `default-smp4` and `ubsan-smp4`, 10 PASS each, 0 corruption, 0 other. The same lease's suite is 2192/0 with the Alpine gates live for the first time since they were written (L-6c PASS); git, clade and netperf still skip, for want of a bundle or a host server. Vote 17 named C4, so this is aux's reading of the
+- **SMP subset:** ran on d0afb5937, 2026-11-04 01:40-02:41Z: `default-smp4` and `ubsan-smp4`, 10 PASS each, 0 corruption, 0 other. The same lease's suite is 2192/0 with the Alpine gates live, for the first time on this chunk's clean images (L-6c PASS); git, clade and netperf still skip, for want of a bundle or a host server. Vote 17 named C4, so this is aux's reading of the
   hold as a narrow gate, not a vote. **Did not run:** the full SMP matrix, `tools/test-fault.sh`, the interactive fleet and
   `tools/check-production.sh` beyond what `tools/test.sh` does first. All owed at the merge to main, under the operator's hold.
 - **Still open, owned.** `seam-self-managing-handler-no-restart`; a longjmp out of a Pouch handler (OPEN-BUGS); a missing
