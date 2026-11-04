@@ -2851,6 +2851,7 @@ struct test_case g_tests[] = {
     { "poll.caught_note_ends_a_noise_driven_poll", test_poll_caught_note_ends_a_noise_driven_poll, false, NULL },
     { "poll.caught_note_ends_pause",         test_poll_caught_note_ends_pause,         false, NULL },
     { "thread.kstack_watermark_follows_the_frontier", test_thread_kstack_watermark_follows_the_frontier, false, NULL },
+    { "thread.kstack_fault_off_the_range_is_no_overflow", test_thread_kstack_fault_off_the_range_is_no_overflow, false, NULL },
     { "poll.noise_keeps_it_looping", test_poll_noise_keeps_it_looping, false, NULL },
     { "poll.noise_keeps_the_deadline", test_poll_noise_keeps_the_deadline, false, NULL },
     { "poll.null_obj_spoor_pollnval",           test_poll_null_obj_spoor_pollnval,           false, NULL },

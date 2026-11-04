@@ -16,7 +16,9 @@
 
 #include "test.h"
 
+#include "../../arch/arm64/exception.h"
 #include "../../arch/arm64/uaccess.h"
+#include "../../mm/phys.h"
 
 #include <thylacine/types.h>
 
@@ -103,6 +105,44 @@ void test_uaccess_load_u8_unmapped_user_va_returns_minus1(void) {
     rc = uaccess_load_u8(0x40000000ull, &out);
     TEST_EXPECT_EQ(rc, (s64)-1,
         "uaccess_load_u8 on a second unmapped VA must also return -1");
+}
+
+// The vector calls a frame an overflow only inside the stack range (bit 44) and in a
+// slot's guard half (bit 14 clear). Any other stack has bit 14 as it falls, as the boot
+// and idle stacks do, and a fault taken on one is an ordinary fault.
+static volatile s64 g_tkf_rc;
+static volatile u64 g_tkf_frame;
+static u8           g_tkf_out;
+
+static void tkf_body(void) {
+    g_tkf_frame = (u64)(uintptr_t)__builtin_frame_address(0);
+    g_tkf_rc = uaccess_load_u8(0x10000000ull, &g_tkf_out);
+}
+
+void test_thread_kstack_fault_off_the_range_is_no_overflow(void) {
+    // Order 4 starts on a 64 KiB boundary, so its first 16 KiB have bit 14 clear.
+    struct page *pg = alloc_pages(4, 0);
+    TEST_ASSERT(pg != NULL, "alloc_pages");
+    u64 base = (u64)(uintptr_t)pa_to_kva(page_to_pa(pg));
+    u64 sp = base + 16u * 1024u - 16u;
+    void (*fn)(void) = tkf_body;
+    g_tkf_rc = 0;
+    g_tkf_frame = 0;
+    __asm__ __volatile__("mov x19, sp\n"
+                         "mov sp, %0\n"
+                         "blr %1\n"
+                         "mov sp, x19\n"
+                         :
+                         : "r" (sp), "r" (fn)
+                         : "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10",
+                           "x11", "x12", "x13", "x14", "x15", "x16", "x17", "x18", "x19", "x30",
+                           "memory", "cc");
+    u64 frame = g_tkf_frame;
+    free_pages(pg, 4);
+    TEST_ASSERT(frame > base && frame < sp, "CONTROL: the body ran on the stack it was given");
+    TEST_ASSERT((frame & (1ull << KSTACK_RANGE_TAG_BIT)) == 0, "CONTROL: that stack is off the range");
+    TEST_ASSERT((frame & (1ull << KSTACK_USABLE_BIT)) == 0, "CONTROL: and has bit 14 clear");
+    TEST_EXPECT_EQ(g_tkf_rc, (s64)-1, "the fault was taken and fixed up as any other");
 }
 
 // CF-3 A: the bulk copy primitives' negative path. kproc's TTBR0 has no
