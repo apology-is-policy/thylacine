@@ -5203,6 +5203,14 @@ static void walk_reason_case(struct Spoor *root) {
         if (q) { resolved = true; spoor_clunk(q); }
         deep[i] = err;
     }
+    // One name at a time: a failed run of two re-walks through the plain wrapper, which clears
+    // the slot on its own, and that would hide a fused wrapper that does not.
+    struct t_stat one_st;
+    int one_failed = 0, one_missed = 0;
+    walk_reason_set("a", 0, -T_E_IO, 0);
+    if (stalk_stat(&p, root, "a", 1, 0, &one_st, &one_failed) == 0) resolved = true;
+    walk_reason_set("a", 0, 0, 0);
+    if (stalk_stat(&p, root, "a", 1, 0, &one_st, &one_missed) == 0) resolved = true;
     walk_reason_clear();
     int cerr = 0;
     struct Spoor *c = stalk_err(&p, root, "a/b", 3, STALK_WALK, 0, &cerr);
@@ -5214,6 +5222,8 @@ static void walk_reason_case(struct Spoor *root) {
     TEST_ASSERT(control, "control: with no failure a/b resolves");
     TEST_ASSERT(!resolved, "no failed walk resolved");
     TEST_EXPECT_EQ(live_after, live_before, "no failed walk leaks a Spoor");
+    TEST_EXPECT_EQ(one_failed, T_E_IO, "control: a one-name query keeps its reason");
+    TEST_EXPECT_EQ(one_missed, T_E_NOENT, "the next one's miss has no reason left over");
     for (u32 i = 0; i < WALK_REASONS; i++) {
         TEST_EXPECT_EQ(first[i], cases[i].want, cases[i].what);
         TEST_EXPECT_EQ(queried[i], cases[i].want, cases[i].what);
