@@ -14,7 +14,10 @@
 
 #include "test.h"
 
+#include "../../arch/arm64/exception.h"
+
 #include <thylacine/allowance.h>
+#include <thylacine/errno.h>
 #include <thylacine/handle.h>
 #include <thylacine/pci_handle.h>   // kobj_pci_resolve_bdf (the PCI gate leg)
 #include <thylacine/notes.h>
@@ -22,6 +25,7 @@
 #include <thylacine/types.h>
 #include <thylacine/virtio.h>       // VIRTIO_DEVICE_ID_RNG
 #include <thylacine/syscall.h>
+#include <thylacine/thread.h>
 
 // Mirror the test_handle.c proc make/drop: proc_alloc gives a fresh Proc with
 // an empty handle table + a NULL (broad) allowance; test_proc_drop ZOMBIEs +
@@ -311,6 +315,62 @@ void test_allowance_pci_claim_handler_gate(void) {
     proc_revoke_allowance(me);
     allowance_free(me);
     TEST_ASSERT(me->allowance == NULL, "kproc restored broad");
+}
+
+static s64 pci_irq_create_call(u64 handle, u64 mode) {
+    struct exception_context ctx;
+    for (int i = 0; i < 31; i++) ctx.regs[i] = 0;
+    ctx.regs[0] = handle;
+    ctx.regs[1] = mode;
+    ctx.regs[8] = SYS_PCI_IRQ_CREATE;
+    TEST_SYSCALL_DISPATCH(&ctx);
+    return (s64)ctx.regs[0];
+}
+
+static s64 g_pci_irq_no_cap_rc;
+
+static void pci_irq_no_cap_thunk(void *arg) {
+    (void)arg;
+    g_pci_irq_no_cap_rc = pci_irq_create_call(PROC_HANDLE_MAX - 1u, 0);
+    exits("ok");
+}
+
+// -T_E_PERM is -1, which reads as the flat sentinel: EIO through Pouch and Error::Io in
+// libthyla-rs. Mode 0 is refused past both gates, so each refusal here is one variable away
+// from reaching it.
+void test_allowance_pci_irq_create_refuses_by_name(void) {
+    u8 rb, rd, rf;
+    if (!test_requires(kobj_pci_resolve_bdf(VIRTIO_DEVICE_ID_RNG, 0, &rb, &rd, &rf) == 0,
+                       "thylacine.virtio-pci-rng", 0, true,
+                       "no PCI function carries its DeviceID"))
+        return;
+
+    struct Proc *me = kproc();
+    TEST_ASSERT(me != NULL && me->allowance == NULL, "kproc broad");
+    s64 h = sys_pci_claim_handler(VIRTIO_DEVICE_ID_RNG, 0);
+    TEST_ASSERT(h >= 0, "the rng's function");
+
+    s64 past_gates = pci_irq_create_call((u64)h, 0);
+    s64 no_handle = pci_irq_create_call(PROC_HANDLE_MAX - 1u, 0);
+
+    u32 other[1] = { PCI_BDF_PACK(rb, rd, (u8)(rf ^ 1)) };
+    TEST_ASSERT(proc_confer_allowance(me, NULL, 0, NULL, 0, 0, other, 1) == 0, "narrow to other fn");
+    s64 narrowed = pci_irq_create_call((u64)h, 0);
+    handle_close(me, (hidx_t)h);
+    proc_revoke_allowance(me);
+    allowance_free(me);
+    TEST_ASSERT(me->allowance == NULL, "kproc restored broad");
+
+    g_pci_irq_no_cap_rc = 0;
+    int pid = rfork(RFPROC, pci_irq_no_cap_thunk, NULL);
+    TEST_ASSERT(pid > 0, "a child with no capabilities");
+    int status = -42;
+    TEST_EXPECT_EQ(wait_pid(&status), pid, "reaped");
+
+    TEST_EXPECT_EQ(past_gates, -(s64)T_E_INVAL, "both gates passed, mode 0 is what refuses");
+    TEST_EXPECT_EQ(no_handle, -(s64)T_E_BADF, "the capability passed, the handle is what refuses");
+    TEST_EXPECT_EQ(narrowed, -(s64)T_E_ACCES, "outside the allowance: EACCES");
+    TEST_EXPECT_EQ(g_pci_irq_no_cap_rc, -(s64)T_E_ACCES, "no capability: EACCES");
 }
 
 void test_allowance_confer_within_parent(void) {

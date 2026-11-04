@@ -1376,7 +1376,7 @@ static s64 sys_pci_irq_create_handler(u64 hraw, u64 mode, u64 ordinal) {
     if (!t || !t->proc || hraw >= PROC_HANDLE_MAX || mode > 0xffffffffull || ordinal > 0xffffffffull)
         return -T_E_INVAL;
     struct Proc *p = t->proc;
-    if (!(__atomic_load_n(&p->caps, __ATOMIC_ACQUIRE) & CAP_HW_CREATE)) return -T_E_PERM;
+    if (!(__atomic_load_n(&p->caps, __ATOMIC_ACQUIRE) & CAP_HW_CREATE)) return -T_E_ACCES;
     struct Handle hh;
     if (handle_get(p, (hidx_t)hraw, &hh) < 0) return -T_E_BADF;
     if (hh.kind != KOBJ_PCI || !(hh.rights & RIGHT_WRITE)) {
@@ -1384,7 +1384,7 @@ static s64 sys_pci_irq_create_handler(u64 hraw, u64 mode, u64 ordinal) {
     }
     struct KObj_PCI *pci = hh.obj;
     if (!allowance_permits(p, HW_RES_PCI, PCI_BDF_PACK(pci->bus, pci->dev, pci->fn), 0)) {
-        handle_put(&hh); return -T_E_PERM;
+        handle_put(&hh); return -T_E_ACCES;
     }
     int error;
     struct KObj_IRQ *irq = pci_irq_create(pci, (u32)mode, (u32)ordinal, &error);

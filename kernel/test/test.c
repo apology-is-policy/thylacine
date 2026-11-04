@@ -1914,6 +1914,7 @@ struct test_case g_tests[] = {
     { "allowance.free_null_tolerant",       test_allowance_free_null_tolerant,       false, NULL },
     { "allowance.pci_membership",           test_allowance_pci_membership,           false, NULL },
     { "allowance.pci_claim_handler_gate",   test_allowance_pci_claim_handler_gate,   false, NULL },
+    { "allowance.pci_irq_create_refuses_by_name", test_allowance_pci_irq_create_refuses_by_name, false, NULL },
     { "allowance.confer_within_parent",     test_allowance_confer_within_parent,     false, NULL },
     { "allowance.revoke_on_group_terminate", test_allowance_revoke_on_group_terminate, false, NULL },
     { "allowance.narrowed_proc_cannot_spawn", test_allowance_narrowed_proc_cannot_spawn, false, NULL },
