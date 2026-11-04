@@ -178,7 +178,7 @@ pub enum TokenKind {
     GreaterGreater,
     /// `$x(N)` or `$x(M N)` in a command word, folded by the parser. The lexer
     /// never emits it.
-    VarAt(alloc::boxed::Box<super::ast::Expr>),
+    VarAt(alloc::rc::Rc<super::ast::Expr>),
     /// `<<` inside `(( ))`. Anywhere else it starts a heredoc.
     ShiftLeft,
 

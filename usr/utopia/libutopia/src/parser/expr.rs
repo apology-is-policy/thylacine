@@ -78,7 +78,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use super::ast::{
-    BinOp, CaseExpr, CaseExprArm, Expr, ExprContext, ExprKind, MatchOp, Script, UnOp,
+    BinOp, CaseExpr, CaseExprArm, Expr, ExprContext, ExprKind, MatchOp, Operand, Script, UnOp,
 };
 use core::sync::atomic::{AtomicU32, Ordering};
 
@@ -151,14 +151,7 @@ struct ExprParser {
     /// `snare:segv` -> shell death (scripture 8.1). Bounded by EXPR_MAX_DEPTH
     /// (RW-9 round-2 F1; the bracket-only check_token_nesting missed this).
     depth: u32,
-    /// Binary operators joined so far. See EXPR_MAX_CHAIN.
-    chained: u32,
 }
-
-/// Maximum binary operators in one expression parser. `1 + 1 + ...` takes no stack to
-/// parse, since each level is a loop, and it builds a tree as deep as it is long, which
-/// whatever walks or drops it then recurses over.
-const EXPR_MAX_CHAIN: u32 = 256;
 
 /// Maximum operator-recursion depth (combined `parse_pow` + `parse_unary`
 /// frames). Each frame is a few hundred bytes; 256 sits far beyond any real
@@ -179,23 +172,11 @@ impl ExprParser {
             source_len,
             ctx,
             depth: 0,
-            chained: 0,
         }
     }
 
     fn at_end(&self) -> bool {
         self.pos >= self.tokens.len()
-    }
-
-    fn chain(&mut self, op: BinOp, left: Expr, right: Expr) -> ParseResult<Expr> {
-        self.chained += 1;
-        if self.chained > EXPR_MAX_CHAIN {
-            return Err(ParseError {
-                kind: ParseErrorKind::RecursionLimit,
-                span: self.current_span(),
-            });
-        }
-        Ok(bin(op, left, right))
     }
 
     fn peek(&self) -> Option<&Token> {
@@ -616,7 +597,7 @@ impl ExprParser {
                     self.pos += 1;
                     self.maybe_retokenize_at_pos();
                     let right = self.parse_and()?;
-                    left = self.chain(BinOp::Or, left, right)?;
+                    left = bin(BinOp::Or, left, right);
                 }
                 _ => break,
             }
@@ -632,7 +613,7 @@ impl ExprParser {
                     self.pos += 1;
                     self.maybe_retokenize_at_pos();
                     let right = self.parse_bit_or()?;
-                    left = self.chain(BinOp::And, left, right)?;
+                    left = bin(BinOp::And, left, right);
                 }
                 _ => break,
             }
@@ -656,7 +637,7 @@ impl ExprParser {
                     self.pos += 1;
                     self.maybe_retokenize_at_pos();
                     let right = self.parse_bit_xor()?;
-                    left = self.chain(BinOp::BitOr, left, right)?;
+                    left = bin(BinOp::BitOr, left, right);
                 }
                 _ => break,
             }
@@ -677,7 +658,7 @@ impl ExprParser {
                     self.pos += 1;
                     self.maybe_retokenize_at_pos();
                     let right = self.parse_bit_and()?;
-                    left = self.chain(BinOp::BitXor, left, right)?;
+                    left = bin(BinOp::BitXor, left, right);
                 }
                 _ => break,
             }
@@ -696,7 +677,7 @@ impl ExprParser {
                     self.pos += 1;
                     self.maybe_retokenize_at_pos();
                     let right = self.parse_eq()?;
-                    left = self.chain(BinOp::BitAnd, left, right)?;
+                    left = bin(BinOp::BitAnd, left, right);
                 }
                 _ => break,
             }
@@ -750,7 +731,7 @@ impl ExprParser {
             self.pos += 1;
             self.maybe_retokenize_at_pos();
             let right = self.parse_shift()?;
-            left = self.chain(op, left, right)?;
+            left = bin(op, left, right);
         }
         Ok(left)
     }
@@ -769,7 +750,7 @@ impl ExprParser {
             self.pos += 1;
             self.maybe_retokenize_at_pos();
             let right = self.parse_add()?;
-            left = self.chain(op, left, right)?;
+            left = bin(op, left, right);
         }
         Ok(left)
     }
@@ -788,7 +769,7 @@ impl ExprParser {
             self.pos += 1;
             self.maybe_retokenize_at_pos();
             let right = self.parse_mul()?;
-            left = self.chain(op, left, right)?;
+            left = bin(op, left, right);
         }
         Ok(left)
     }
@@ -808,7 +789,7 @@ impl ExprParser {
             self.pos += 1;
             self.maybe_retokenize_at_pos();
             let right = self.parse_pow()?;
-            left = self.chain(op, left, right)?;
+            left = bin(op, left, right);
         }
         Ok(left)
     }
@@ -884,7 +865,7 @@ impl ExprParser {
             let operand = self.parse_unary()?;
             let span = Span::new(tok.span.start, operand.span.end);
             return Ok(Expr {
-                kind: ExprKind::UnOp(op, Box::new(operand)),
+                kind: ExprKind::UnOp(op, Operand::new(operand)),
                 span,
             });
         }
@@ -1371,7 +1352,7 @@ enum EqOrMatch {
 fn bin(op: BinOp, left: Expr, right: Expr) -> Expr {
     let span = Span::new(left.span.start, right.span.end);
     Expr {
-        kind: ExprKind::BinOp(op, Box::new(left), Box::new(right)),
+        kind: ExprKind::BinOp(op, Operand::new(left), Operand::new(right)),
         span,
     }
 }
@@ -1379,7 +1360,7 @@ fn bin(op: BinOp, left: Expr, right: Expr) -> Expr {
 fn match_expr(op: MatchOp, left: Expr, right: Expr) -> Expr {
     let span = Span::new(left.span.start, right.span.end);
     Expr {
-        kind: ExprKind::Match(op, Box::new(left), Box::new(right)),
+        kind: ExprKind::Match(op, Operand::new(left), Operand::new(right)),
         span,
     }
 }

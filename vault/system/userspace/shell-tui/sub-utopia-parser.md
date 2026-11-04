@@ -127,22 +127,21 @@ That keeps the outer grammar simple, and it has one consequence that returns in
 Caveats: **the sub-script's spans are offsets into the body, not into the
 line.**
 
-### The one real hazard is stack depth, and it has five shapes
+### The one real hazard is stack depth, and it has four shapes
 
 A recursive-descent parser in a `no_std` program has no stack guard of its own;
 overflowing the EL0 stack is a guard-page fault, which terminates the shell.
-Separate bounds exist because the recursion has five shapes and **no
+Separate bounds exist because the recursion has four shapes and **no
 single counter sees all of them**:
 
 | bound | value | what it catches | why the others miss it |
 |---|---:|---|---|
 | bracket nesting | 64 | `(((…`, `{{{…` | a flat pre-pass over the token stream, run before any recursion starts |
-| operator chain | 256 | `1 + 1 + 1 …` | a loop per level, so it takes no stack to parse, but it builds a tree as deep as it is long, which eval and drop recurse over |
 | statement nesting | 64 | `if (a) if (b) …` | a condition's brackets have closed before its body starts, so the pre-pass sees nothing; counted in `parse_statement`, with a brace level drawing on the same count |
 | operator recursion | 256 | `a**b**c**…`, `!!!!…` | right-associative and prefix chains are not brackets, so the pre-pass counts nothing |
 | re-lex depth | 32 | `$($($(…)))` | a whole substitution is *one token* in the outer stream, so the pre-pass sees depth 1 |
 
-The middle row is the interesting one, because it was added after the fact: the
+The operator row is the interesting one, because it was added after the fact: the
 bracket pre-pass shipped first, and an audit round found that a chain of
 exponentiation operators recurses with no bracket to count. The comment
 introducing the fix names that history rather than just the constant.
@@ -165,7 +164,7 @@ that said "well under the 256 KiB EL0 stack" had been stale since B-1b raised it
 8 MiB, and were never checked against a product.)
 
 `stack::exhausted` compares the current address with `AT_STACK_BASE`, read by
-libthyla-rs from the auxv, plus a 512 KiB reserve, and answers before a level starts. It
+libthyla-rs from the auxv, plus a 1 MiB reserve, and answers before a level starts. It
 sits in `parse_statement`, `parse_expr_tokens` and `parse_unary` (every level of a `**`
 chain passes through the last), and those cut every cycle of the parser's recursion: a
 census by name over the call graph reports what remains as name collisions and pairs
@@ -175,6 +174,31 @@ know, such as a peer thread's, reads as not exhausted; the counts above still ho
 The refusal is the same `RecursionLimit`. `u-6-test`'s flow 10 is the witness at boot, on
 the real auxv and the real frames, and a missing check there ends the probe at the guard
 page and joey fails the boot.
+
+### A tree outlives its parse, so what walks it has to fit too
+
+The check bounds the stack the parser uses, and the compiler writes two more recursions
+over the same tree, neither of them in the source for a census to find. Both crashed at
+8 MiB on a line the parser had accepted (measured on a host build at the guest's
+opt-level, 2026-11-05):
+
+- **Clone** took more stack than the parse: 14 MiB for a tree parsed within 8. Declaring a
+  function copied its body, and so did calling it, so a 48 KB `fn` overflowed the moment it
+  was declared. No AST type is `Clone` now. A function and a note handler are `Rc`s shared
+  with the tree, and a command word's folded `VarAt` token holds an `Rc` of its index,
+  since tokens are cloned.
+- **Drop** costs about 32 bytes a level, and `1 + 1 + ...` costs the parser none, so its depth
+  is the line's length and not the stack's. Per-parser counts could not bound that:
+  a group starts a new parser, and ten substitutions of 60 groups of 250 operators overflowed
+  on drop. `Operand`, the child of `BinOp`, `UnOp` and `Match`, drops with a worklist.
+  Levels of any other kind were paid for in parser stack, at a tenth or less of it in drop.
+
+That leaves a drop's recursion bounded by the statements and substitutions, and the largest
+measured is 32 substitutions of 62 `a && {`, at 511 KiB. It can happen with only the reserve
+free, when a function is declared again from deep in an evaluation, so the reserve is 1 MiB,
+and the largest frame in the guest's `ut` is 4144 bytes. Only the guest's frames answer this,
+since a debug build's are several times larger: `u-6-test`'s flow 11 drops those trees where
+the check first fires.
 
 ## Data structures
 
@@ -259,6 +283,9 @@ Nothing here is on a hot path — it runs once per line typed.
   `if ($ok)` / `rm x` ran unguarded after the first line's parse error.
 - **A new cycle must pass a stack check.** A bound keeps one shape reasonable, and only
   the check holds the product.
+- **A tree is walked by code nobody wrote.** A census by name cannot see `Drop` or a derived
+  `Clone`. A new child that costs the parser no stack belongs in an `Operand`, and a type
+  in the tree stays out of `Clone`.
 - **A new bracket-like token pair must join the pre-pass's match arms**, or the
   pre-pass silently stops being complete.
 - **A new advance must move by a whole character**, or use the length helper.

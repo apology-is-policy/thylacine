@@ -45,6 +45,7 @@
 // covers the whole construct including delimiters.
 
 use alloc::boxed::Box;
+use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -61,7 +62,7 @@ use super::token::{DqPart, Token};
 /// The `statements` vector holds the statements in source order.
 /// Empty scripts (zero statements) are valid; the evaluator treats
 /// them as no-ops.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct Script {
     pub statements: Vec<Statement>,
     pub span: Span,
@@ -71,13 +72,13 @@ pub struct Script {
 // Statement
 // ---------------------------------------------------------------------
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct Statement {
     pub kind: StatementKind,
     pub span: Span,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub enum StatementKind {
     /// A pipeline (one or more commands joined by `|` or `?|`,
     /// optionally backgrounded with `&`).
@@ -89,7 +90,7 @@ pub enum StatementKind {
     /// `while (cond) { body }`
     While(Box<WhileStmt>),
     /// `fn name { body }` or `fn name args { body }`
-    FnDecl(Box<FnDecl>),
+    FnDecl(Rc<FnDecl>),
     /// `let name = value`
     Let(Box<LetStmt>),
     /// `name = value` (bare assignment; no `let`)
@@ -148,14 +149,14 @@ pub enum StatementKind {
 /// Per scripture section 10.5: `&` backgrounds the WHOLE pipeline,
 /// not just the rightmost command. The parser sets `background: true`
 /// when it consumes a trailing `Ampersand` token after the pipeline.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct Pipeline {
     pub elements: Vec<PipelineElement>,
     pub background: bool,
     pub span: Span,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct PipelineElement {
     pub command: Command,
     /// `?|` preceded this element's command? (i.e., this command's
@@ -181,7 +182,7 @@ pub enum AndOrOp {
 /// A first pipeline followed by one or more `(op, pipeline)`
 /// continuations. Left-associative: each `op` gates its pipeline on the
 /// $status left by whatever ran most recently.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct AndOrList {
     pub first: Pipeline,
     pub rest: Vec<(AndOrOp, Pipeline)>,
@@ -192,7 +193,7 @@ pub struct AndOrList {
 // Command
 // ---------------------------------------------------------------------
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct Command {
     pub kind: CommandKind,
     /// Redirects in source order. Per scripture, redirects can
@@ -206,7 +207,7 @@ pub struct Command {
     pub span: Span,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub enum CommandKind {
     /// A simple command: argv as a sequence of Words.
     Simple(SimpleCommand),
@@ -314,7 +315,7 @@ pub enum RedirectKind {
 // Control flow
 // ---------------------------------------------------------------------
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct IfStmt {
     /// Condition expression -- `Expr` (U-5c lifted from `Vec<Token>`).
     pub cond: Expr,
@@ -327,7 +328,7 @@ pub struct IfStmt {
     pub span: Span,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct ForStmt {
     /// The loop variable name (bare identifier from `for (NAME in ...)`).
     pub var_name: String,
@@ -338,7 +339,7 @@ pub struct ForStmt {
     pub span: Span,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct WhileStmt {
     /// Condition expression -- `Expr` (U-5c lifted).
     pub cond: Expr,
@@ -346,7 +347,7 @@ pub struct WhileStmt {
     pub span: Span,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct FnDecl {
     pub name: String,
     /// Optional positional argument names per scripture section 5.5
@@ -361,7 +362,7 @@ pub struct FnDecl {
 // Assignment
 // ---------------------------------------------------------------------
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct LetStmt {
     pub name: String,
     /// Value expression -- `Expr` (U-5c lifted).
@@ -369,7 +370,7 @@ pub struct LetStmt {
     pub span: Span,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct AssignStmt {
     pub name: String,
     /// Value expression -- `Expr` (U-5c lifted).
@@ -384,7 +385,7 @@ pub struct AssignStmt {
 /// `case $x { pat => body ... }` -- the statement form. Each arm's
 /// body is one Statement; users wrap multi-statement bodies in a
 /// brace block.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct CaseStmt {
     /// The scrutinee: the value being matched. Parsed as a
     /// `Value`-context Expr -- typically a Var, SingleQuoted, or
@@ -397,7 +398,7 @@ pub struct CaseStmt {
 /// One arm of a statement-form `case`. Multi-pattern arms are
 /// permitted (scripture 7.1: "Multi-pattern per branch
 /// (space-separated)").
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct CaseArm {
     /// One or more patterns separated by whitespace. Each pattern is
     /// parsed as a `Value`-context Expr -- typically a Word with
@@ -414,7 +415,7 @@ pub struct CaseArm {
 /// `try { body } catch { catch }` (scripture 7.7). `catch` is
 /// required; the parser emits `UnexpectedToken { expected: "`catch`" }`
 /// if absent.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct TryStmt {
     pub body: Vec<Statement>,
     pub catch: Vec<Statement>,
@@ -422,7 +423,7 @@ pub struct TryStmt {
 }
 
 /// `trace { body }` (scripture 7.8).
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct TraceStmt {
     pub body: Vec<Statement>,
     pub span: Span,
@@ -432,17 +433,17 @@ pub struct TraceStmt {
 /// is parsed as a `Value`-context Expr so that `'snare:int'`,
 /// `"snare:int"`, and bare `snare:int` all work; the evaluator
 /// resolves to a string at registration time.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct OnNoteStmt {
     pub note_name: Expr,
-    pub body: Vec<Statement>,
+    pub body: Rc<Vec<Statement>>,
     pub span: Span,
 }
 
 /// `mask note <name> { body }` (scripture 9.5 + 10.8). Same shape
 /// as `OnNote`; the evaluator masks delivery of the named note
 /// class while the body runs.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct MaskNoteStmt {
     pub note_name: Expr,
     pub body: Vec<Statement>,
@@ -453,14 +454,14 @@ pub struct MaskNoteStmt {
 /// (scripture 7.2). Distinct from `CaseStmt` because each arm
 /// produces a single VALUE (Expr), not a Statement. Lives in
 /// `ExprKind::Case` so the AST has ONE canonical expression shape.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct CaseExpr {
     pub scrutinee: Box<Expr>,
     pub arms: Vec<CaseExprArm>,
     pub span: Span,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct CaseExprArm {
     pub patterns: Vec<Expr>,
     /// The arm value: a `Value`-context Expr.
@@ -483,7 +484,7 @@ pub struct CaseExprArm {
 /// the last. For a single-atom expression (e.g., `Var($x)`), the
 /// span is exactly the atom's span. For a binary operation
 /// (`a + b`), the span covers `a`, the operator, and `b`.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct Expr {
     pub kind: ExprKind,
     pub span: Span,
@@ -508,7 +509,7 @@ pub struct Expr {
 ///   (scripture 6.9).
 /// - `Subst/Backtick/ProcSubIn/ProcSubOut` -- substitutions; body
 ///   eagerly parsed as a sub-Script at U-5c.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub enum ExprKind {
     // === Atoms (single-token-ish) ===
     /// Bare word; an unquoted argv-like value. Glob meta chars
@@ -561,14 +562,14 @@ pub enum ExprKind {
     /// `a OP b` -- binary operator. Arithmetic context exercises
     /// the full set; conditional context uses comparison and
     /// logical only.
-    BinOp(BinOp, Box<Expr>, Box<Expr>),
+    BinOp(BinOp, Operand, Operand),
     /// `OP a` -- unary operator (`- ~ !`).
-    UnOp(UnOp, Box<Expr>),
+    UnOp(UnOp, Operand),
     /// `a matches glob`, `a in list`, `a =~ /regex/` -- match
     /// operators (scripture 7.3). Right-hand side carries the
     /// glob pattern (Word/DoubleQuoted/SingleQuoted), the list
     /// (Var/List), or the regex literal.
-    Match(MatchOp, Box<Expr>, Box<Expr>),
+    Match(MatchOp, Operand, Operand),
 
     // === Pattern matching as expression (U-5d) ===
     /// `case $x { pat => value ... }` -- the expression form
@@ -576,6 +577,50 @@ pub enum ExprKind {
     /// case expression's value. Distinct from `StatementKind::Case`
     /// because each arm produces a single Expr (not a Statement).
     Case(Box<CaseExpr>),
+}
+
+/// An operator's operand. `1 + 1 + ...` costs the parser no stack and `- - ...` less than
+/// its tree does, so dropping one by recursion could need more stack than parsing it had.
+#[derive(Debug, Eq, PartialEq)]
+pub struct Operand(Box<Expr>);
+
+impl Operand {
+    pub fn new(expr: Expr) -> Self {
+        Self(Box::new(expr))
+    }
+
+    /// Moves an operator out to `pending`, leaving a leaf with nothing to recurse over.
+    fn detach(&mut self, pending: &mut Vec<Expr>) {
+        if matches!(self.0.kind, ExprKind::BinOp(..) | ExprKind::UnOp(..) | ExprKind::Match(..)) {
+            let leaf = Expr { kind: ExprKind::Integer(0), span: self.0.span };
+            pending.push(core::mem::replace(&mut *self.0, leaf));
+        }
+    }
+}
+
+impl core::ops::Deref for Operand {
+    type Target = Expr;
+
+    fn deref(&self) -> &Expr {
+        &self.0
+    }
+}
+
+impl Drop for Operand {
+    fn drop(&mut self) {
+        let mut pending = Vec::new();
+        self.detach(&mut pending);
+        while let Some(mut expr) = pending.pop() {
+            match &mut expr.kind {
+                ExprKind::BinOp(_, l, r) | ExprKind::Match(_, l, r) => {
+                    l.detach(&mut pending);
+                    r.detach(&mut pending);
+                }
+                ExprKind::UnOp(_, operand) => operand.detach(&mut pending),
+                _ => {}
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -28,6 +28,7 @@
 //   8. Repl::run_script                         (positionals, exit, cwd sync)
 //   9. adopt_kernel_cwd -> glob -> cd           (a shell spawned away from /)
 //  10. Repl::run_script on input past the stack  (an error, and the shell lives)
+//  11. the largest trees at the end of the stack  (dropped, declared, called)
 //
 // joey gates the boot on this binary's status==0.
 
@@ -80,6 +81,10 @@ pub extern "C" fn rs_main() -> i64 {
     }
 
     if let Err(rc) = flow_script_past_the_stack() {
+        return rc;
+    }
+
+    if let Err(rc) = flow_trees_at_the_stack_end() {
         return rc;
     }
 
@@ -487,6 +492,66 @@ fn flow_script_past_the_stack() -> Result<(), i64> {
         return fail("flow 10: substitution did not work after the refusal");
     }
     t_putstr("u-6-test: input past the stack refused, and the shell lives\n");
+    Ok(())
+}
+
+/// Runs `f` where the stack check first fires.
+#[inline(never)]
+fn at_the_reserve(f: &mut dyn FnMut()) {
+    let pad = [0u8; 1024];
+    core::hint::black_box(&pad);
+    if libutopia::stack::exhausted() {
+        f();
+    } else {
+        at_the_reserve(f);
+    }
+    core::hint::black_box(&pad);
+}
+
+// Flow 11 -- the shell can get rid of the largest tree a line can build from the lowest point a
+// line can reach, as it does when a function is declared again down there. Host tests
+// cannot say so: only these frames are the ones that have to fit. A chain costs the parser
+// no stack at all, and each `a && {` costs the most to drop for what it cost to parse. A deep
+// body is declared and called too, which copied the tree when it was a copy.
+fn flow_trees_at_the_stack_end() -> Result<(), i64> {
+    let streams = |level: &dyn Fn(&str) -> String, n: usize| {
+        let mut s = String::from("1");
+        for _ in 0..n {
+            s = level(&s);
+        }
+        String::from("x = ") + &s + "\n"
+    };
+    let andor = |inner: &str| {
+        String::from("$(") + &"a && { ".repeat(62) + "x = " + inner + &" }".repeat(62) + ")"
+    };
+    let run = |inner: &str| {
+        let opened = (String::from("- ").repeat(250) + "( ").repeat(16);
+        String::from("$( (( ") + &opened + inner + &" )".repeat(16) + " )) )"
+    };
+    let lines = [
+        String::from("((") + &"1 + ".repeat(100_000) + "1))\n",
+        streams(&andor, 32),
+        streams(&run, 4),
+    ];
+    for line in lines {
+        let mut tree = match libutopia::parser::parse(&line) {
+            Ok(tree) => Some(tree),
+            Err(_) => return fail("flow 11: the control did not parse"),
+        };
+        at_the_reserve(&mut || drop(tree.take()));
+    }
+    let script = String::from("fn d { ") + &streams(&run, 4) + " }\nd\n";
+    let mut repl = Repl::new();
+    // What the body does is not the question: it has to survive being declared and called.
+    let _ = repl.run_script("/body.ut", &[], &script);
+    if !repl.env().fn_defined("d") {
+        return fail("flow 11: the function was not declared");
+    }
+    let mut sink: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    if repl.feed(b"let ok = $(echo recovered)\n", &mut sink).is_some() {
+        return fail("flow 11: the next line ended the session");
+    }
+    t_putstr("u-6-test: the largest trees drop at the end of the stack\n");
     Ok(())
 }
 

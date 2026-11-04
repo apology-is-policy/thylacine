@@ -5,8 +5,9 @@
 //! their recursion also asks the stack.
 
 /// Left free below a check: the deepest call chain that meets no further check, a builtin's
-/// included.
-const RESERVE: usize = 512 * 1024;
+/// included, and the drop of a function's old body from there. The deepest body a line can
+/// build took 511 KiB to drop at the guest's opt-level.
+const RESERVE: usize = 1024 * 1024;
 
 #[cfg(test)]
 extern crate std;
@@ -39,7 +40,7 @@ fn here() -> usize {
 /// True within `RESERVE` of the initial stack's low end. Anywhere else is false: a peer
 /// thread's stack, and every address when no stack is known, since then the base is 0.
 #[inline(never)]
-pub(crate) fn exhausted() -> bool {
+pub fn exhausted() -> bool {
     here().wrapping_sub(base()) < RESERVE
 }
 
@@ -58,6 +59,20 @@ pub(crate) fn on_stack_of<T: Send + 'static>(
         .expect("a test thread")
         .join()
         .expect("the test thread finished")
+}
+
+/// Runs `f` where the check first fires, so with no more than the reserve below it.
+#[cfg(test)]
+#[inline(never)]
+pub(crate) fn at_the_reserve(f: impl FnOnce()) {
+    let pad = [0u8; 1024];
+    core::hint::black_box(&pad);
+    if exhausted() {
+        f();
+    } else {
+        at_the_reserve(f);
+    }
+    core::hint::black_box(&pad);
 }
 
 /// From here on the check fires `bytes` below this frame.

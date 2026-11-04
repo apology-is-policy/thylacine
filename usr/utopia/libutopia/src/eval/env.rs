@@ -58,6 +58,7 @@
 // pre-populate the env with named values for expression eval.
 
 use alloc::collections::BTreeMap;
+use alloc::rc::Rc;
 use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
@@ -95,12 +96,12 @@ pub struct Env {
     scopes: Vec<BTreeMap<String, Value>>,
     /// Function definitions, name -> AST. Per scripture 5.5,
     /// function defs are globally scoped.
-    fns: BTreeMap<String, FnDecl>,
+    fns: BTreeMap<String, Rc<FnDecl>>,
     /// `on note 'name' { body }` handler registry (scripture 9.5 +
     /// 10.7). The body is invoked synchronously at the next main-loop
     /// sync point after the named note arrives -- `deliver_pending_notes`
     /// (U-7c) drains the queue and fires the matching body.
-    note_handlers: BTreeMap<String, Vec<Statement>>,
+    note_handlers: BTreeMap<String, Rc<Vec<Statement>>>,
     /// $status -- exit code of the last command. Initialized to 0
     /// at construction. A `Cell` so a command substitution (the first
     /// side-effecting expression atom -- it spawns a child + captures
@@ -424,12 +425,12 @@ impl Env {
 
     /// Register a function definition. Scripture 5.5 -- globally
     /// scoped, overwrites any prior definition with the same name.
-    pub fn fn_set(&mut self, decl: FnDecl) {
+    pub fn fn_set(&mut self, decl: Rc<FnDecl>) {
         self.fns.insert(decl.name.clone(), decl);
     }
 
     /// Look up a function definition by name.
-    pub fn fn_get(&self, name: &str) -> Option<&FnDecl> {
+    pub fn fn_get(&self, name: &str) -> Option<&Rc<FnDecl>> {
         self.fns.get(name)
     }
 
@@ -453,12 +454,12 @@ impl Env {
     /// Register a `on note 'name' { body }` handler. Last registration
     /// wins (rc convention). At U-6b only registration is wired;
     /// runtime delivery wires at U-7.
-    pub fn note_handler_set<S: Into<String>>(&mut self, name: S, body: Vec<Statement>) {
+    pub fn note_handler_set<S: Into<String>>(&mut self, name: S, body: Rc<Vec<Statement>>) {
         self.note_handlers.insert(name.into(), body);
     }
 
     /// Look up a handler by note name.
-    pub fn note_handler_get(&self, name: &str) -> Option<&Vec<Statement>> {
+    pub fn note_handler_get(&self, name: &str) -> Option<&Rc<Vec<Statement>>> {
         self.note_handlers.get(name)
     }
 

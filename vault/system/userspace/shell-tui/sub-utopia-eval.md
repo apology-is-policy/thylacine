@@ -444,6 +444,8 @@ ask `crate::stack` ([[sub-utopia-parser]] has the check) and answer `RecursionLi
 `eval_statement` needs its own because a case arm's statement reaches it again with no
 block in between. A glob's walk is a worklist since the same day: a long pattern over a
 deep tree costs heap, and no open directory waits on a descent.
+A function's body and a note handler are `Rc`s shared with the tree, since copying one
+recurses with no check at all.
 
 ## Data structures
 

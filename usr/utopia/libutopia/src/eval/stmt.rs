@@ -130,6 +130,7 @@
 //     boundary likewise normalizes to `Normal` (no enclosing loop
 //     to consume them).
 
+use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write as _;
@@ -1295,8 +1296,8 @@ fn eval_command(env: &mut Env, cmd: &Command) -> EvalResult<StatementFlow> {
             }
             // argv[0] is already alias-expanded (evaluate_argv folds it in for
             // every command position). Resolution order (scripture 9.1): fn ->
-            // builtin -> external. Look up argv[0] in fns first; clone the
-            // FnDecl so we don't hold an Env borrow across mutation.
+            // builtin -> external. Look up argv[0] in fns first; hold the
+            // FnDecl's own count so no Env borrow crosses a mutation.
             if let Some(decl) = env.fn_get(&argv[0]).cloned() {
                 return invoke_function(env, &decl, &argv);
             }
@@ -2235,8 +2236,8 @@ fn succeed_unless_substituted(env: &Env, before: u64) {
     }
 }
 
-fn eval_fn_decl(env: &mut Env, decl: &FnDecl) -> EvalResult<StatementFlow> {
-    env.fn_set(decl.clone());
+fn eval_fn_decl(env: &mut Env, decl: &Rc<FnDecl>) -> EvalResult<StatementFlow> {
+    env.fn_set(Rc::clone(decl));
     env.status_set(0);
     Ok(StatementFlow::Normal)
 }
@@ -2409,7 +2410,7 @@ fn eval_on_note(env: &mut Env, stmt: &OnNoteStmt) -> EvalResult<StatementFlow> {
     if let Some(c) = note_class_for_name(&name) {
         env.note_mask_remove(c);
     }
-    env.note_handler_set(name, stmt.body.clone());
+    env.note_handler_set(name, Rc::clone(&stmt.body));
     env.status_set(0);
     Ok(StatementFlow::Normal)
 }
@@ -3264,15 +3265,26 @@ mod tests {
     }
 
     #[test]
+    fn a_body_is_shared_and_never_copied() {
+        let script = crate::parser::parse("fn d { x = 1 }\non note 'n' { y = 2 }\n").expect("parses");
+        let mut env = Env::new();
+        eval_block(&mut env, &script.statements).expect("runs");
+        let StatementKind::FnDecl(decl) = &script.statements[0].kind else { panic!() };
+        assert!(Rc::ptr_eq(decl, env.fn_get("d").expect("declared")));
+        let StatementKind::OnNote(on) = &script.statements[1].kind else { panic!() };
+        assert!(Rc::ptr_eq(&on.body, env.note_handler_get("n").expect("registered")));
+    }
+
+    #[test]
     fn the_positionals_read_by_their_names() {
         let mut env = Env::new();
         env.let_set("1", Value::scalar(String::from("one")));
         env.let_set("*", Value::list(alloc::vec![String::from("one"), String::from("two")]));
-        let s = crate::parser::parse("a = $1\nb = $*\nc = $#*\nd = \"$1:$*\"\n").expect("parses");
+        let s = crate::parser::parse("a = $1\nb = $*\nc = $#*\nd = \"$1:$*:$#*\"\n").expect("parses");
         eval_block(&mut env, &s.statements).expect("runs");
         assert_eq!(env.get("a").as_scalar(), "one");
         assert_eq!(env.get("b").0.len(), 2);
         assert_eq!(env.get("c").as_scalar(), "2");
-        assert_eq!(env.get("d").as_scalar(), "one:one two");
+        assert_eq!(env.get("d").as_scalar(), "one:one two:2");
     }
 }

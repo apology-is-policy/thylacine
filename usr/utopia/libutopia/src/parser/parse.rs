@@ -38,6 +38,7 @@
 
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
+use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -779,7 +780,7 @@ impl Parser {
         tokens.extend(inner);
         tokens.push(close);
         let expr = parse_expr_tokens(tokens, self.source_len, ExprContext::Value)?;
-        Ok(Token::new(TokenKind::VarAt(Box::new(expr)), span))
+        Ok(Token::new(TokenKind::VarAt(Rc::new(expr)), span))
     }
 
     fn parse_redirect(&mut self) -> ParseResult<Redirect> {
@@ -1203,7 +1204,7 @@ impl Parser {
         let close = self.expect_kind(TokenKind::RBrace, "`}`")?;
         let span = Span::new(fn_tok.span.start, close.span.end);
         Ok(Statement {
-            kind: StatementKind::FnDecl(Box::new(FnDecl {
+            kind: StatementKind::FnDecl(Rc::new(FnDecl {
                 name,
                 args,
                 body,
@@ -1523,7 +1524,7 @@ impl Parser {
         Ok(Statement {
             kind: StatementKind::OnNote(Box::new(OnNoteStmt {
                 note_name,
-                body,
+                body: Rc::new(body),
                 span,
             })),
             span,
@@ -3031,15 +3032,37 @@ mod tests {
     }
 
     #[test]
-    fn an_operator_chain_is_bounded_though_it_takes_no_stack_to_parse() {
-        let chain = |n: usize| "((".to_string() + &"1 + ".repeat(n) + "1))\n";
-        assert!(parse(&chain(256)).is_ok());
-        for n in [257, 300_000] {
-            assert_eq!(
-                parse(&chain(n)).map(|_| ()).map_err(|e| e.kind),
-                Err(ParseErrorKind::RecursionLimit)
-            );
+    fn an_operator_chain_takes_no_stack_to_parse_or_drop() {
+        let chains = [
+            "((".to_string() + &"1 + ".repeat(100_000) + "1))\n",
+            "if (a".to_string() + &" matches a".repeat(100_000) + ") x\n",
+        ];
+        for source in chains {
+            crate::stack::on_stack_of(2 * 1024 * 1024, move || {
+                let tree = parse(&source).expect("parses");
+                crate::stack::at_the_reserve(move || drop(tree));
+            });
         }
+    }
+
+    fn nest(n: usize, level: &dyn Fn(&str) -> String) -> String {
+        let mut s = "1".to_string();
+        for _ in 0..n {
+            s = level(&s);
+        }
+        "x = ".to_string() + &s + "\n"
+    }
+
+    #[test]
+    fn a_run_of_operators_drops_within_the_reserve() {
+        let run = |inner: &str| {
+            "$( (( ".to_string() + &("- ".repeat(250) + "( ").repeat(16) + inner + &" )".repeat(16) + " )) )"
+        };
+        let source = nest(2, &run);
+        crate::stack::on_stack_of(64 * 1024 * 1024, move || {
+            let tree = parse(&source).expect("parses");
+            crate::stack::at_the_reserve(move || drop(tree));
+        });
     }
 
     #[test]

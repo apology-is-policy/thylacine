@@ -125,6 +125,7 @@ Generated — do not edit between the markers (`quaestor render`).
 
 ## Recent changes
 
+- 2026-11-05 [[chg-2026-11-05-ut-tree-walks]] — A parsed tree is shared, not copied, and its operators drop without recursing
 - 2026-11-04 [[chg-2026-11-04-compositor-band]] — The designated compositor's threads are INTERACTIVE
 - 2026-11-04 [[chg-2026-11-04-console-owner-gate]] — Only the session factory names a console owner
 - 2026-11-04 [[chg-2026-11-04-dormant-answers-estale]] — A dormant present and HIN1's BadHandle answer ESTALE
@@ -132,5 +133,4 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-11-04 [[chg-2026-11-04-merge-audit-r3]] — Merge audit r3's close
 - 2026-11-04 [[chg-2026-11-04-pinned-wake]] — A pinned thread's wake goes to its home CPU, not the waker's
 - 2026-11-04 [[chg-2026-11-04-ut-language]] — The shell's documented forms parse, and its stranded tests run
-- 2026-11-04 [[chg-2026-11-04-ut-stack]] — The shell asks the stack, and left-nested arithmetic parses
 <!-- generated:end -->
