@@ -22,6 +22,54 @@ needed the operator.
 
 
 ---
+## 2026-11-04 (aux, Opus 5.5 1M) -- C8a lands; a bug on main since June; a sabotage of mine that lied
+
+**What landed.** Thread-model C8a, `0e77da090..3e2adf489`. Futex waits keyed on the address space, a lock per
+bucket, oldest first, no wake under the lock, no walks. Green 2212 twice on one ELF. SMP subset 20 of 20 boots passed, 0 corruption. The full
+matrix did NOT run (11-02 hold) and is owed at the merge.
+
+**The hang.** First boot of the narrowed suite: every test passes, the stack report prints, `ticks:` never does,
+about 2 boots in 3 on one ELF (25521e384d2c8ea9). My first instrument never applied: its anchor matched the
+declaration too, so the "instrumented" boot was a plain one, and it accidentally showed the nondeterminism. My
+first sampler looked before QEMU had started, so its "passed" lines were false. My first reading of the samples,
+"nobody runs the boot thread", was wrong: sample 1 had `boot_main` on CPU 1 in `timer_busy_wait_ticks`. Root
+cause: `select_target_cpu` answered `prev_cpu` for a pinned thread, and `ready()` passes the waker's CPU. A
+secondary has no tick in that phase. On main since #864, 2026-06-05. Main and corona were told before the landing;
+corona carries `e8b0515ee` as a copy. Which wake moved it was never named. The runner's new check says none has
+since, 2212 tests a boot.
+
+**K06, the green I had said would be a finding.** Removing the rendez lock from the mark stayed green, 61 of 61.
+So nothing saw a lost wake between a waiter's read and its registering, an I-9 hole in coverage, not in the code.
+`torpor.mark_takes_the_rendez_lock` stops a waiter in that window. Round 2 then showed the model was blind too: it
+read and registered in one step, and a split alone would still have been green, since `NoLostWake` read a mark as
+a wake. Hence `MarkedSleeperIsHeld`.
+
+**K08, which lied.** Vote 22: the walks go if K08, K09 and K10 stay green, and a red keeps them. K08 went red. My
+sabotage had inverted the compare, so it skipped the dying Proc AND fabricated a completed wake for every other
+Proc's waiters. I first took joey's marker `L31gzL` for random; it names the leg, and decoded it read a futex wait
+with no waker returning 0. I did not substitute a corrected test and act on it, because the operator's rule said a
+red keeps them. I told the operator what had happened, and vote 29 made the corrected sabotage decide. The reading
+was clean: V08a and V09a green through joey, and the controls that remove the other path too red at
+`proc.group_death_wakes_a_torpor_waiter`, `proc.group_death_before_a_torpor_wait` and
+`proc.job_stop_preserves_torpor_wait`. Those tests are new: nothing deterministic had killed a futex waiter before,
+so K08's prediction could not have been read on the kernel suite alone.
+
+**Wedges are not reds at a test.** K04 and the old K15 ended in a 300 s timeout at their target test, not on its
+named line. K04's is the real use-after-free it plants. K15's was a test that could not reach its own assert, and
+round 2's F2 fixed that: V15b now fails by name.
+
+**Round 2's other find.** The pinned fix stranded a thread pinned to a parked secondary in the test phase, because
+the wake IPI was gated. No test had hit it, since every peer-pinned thread spins. Fixed and witnessed (V16).
+
+**Decisions the operator made here.** Votes 29 to 32: the corrected K08 decides; no lazy FP restore, about 16 ns
+per resume, corrected from my 25 by C9's review, as that piece included an ISB; the subset also at C8a's final tip
+and at C9; `T_E_LIBBAD` = 80. And a Yip fix while waiting, `aux/resource-notices`, not merged or installed.
+
+**Round 3.** Round 2 had not seen the walks' removal or `ready_on`'s guard, which the audit rule counts as invasive, so a third round ran before the landing: 0/0/0/3, all stale text. After `3e2adf489` the tree changed only in text and one comment.
+
+**Not done.** The full matrix and the other gates owed at the merge. Which wake moved the boot thread. Whether the
+walks' removal costs anything on a real death storm was not measured; the reasoning is that it can only remove work.
+
 ## 2026-11-04 (aux, Opus 5.5 1M) -- the walk errno boots; two stale pins; the switchboard's lag
 
 **State at this entry: the walk errno has run and lands with this entry. Suite 2201 tests, 0 failed. No SMP subset, no full matrix: see below. Yip's map is on its `master`, merged by the operator as PR 3.**

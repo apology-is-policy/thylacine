@@ -126,12 +126,12 @@ Generated — do not edit between the markers (`quaestor render`).
 
 ## Recent changes
 
+- 2026-11-04 [[chg-2026-11-04-c8a-r2]] — Torpor keyed on the space: round 2's fixes, and a model that can see K06
+- 2026-11-04 [[chg-2026-11-04-c8a-r3]] — Torpor keyed on the space: round 3's wording
+- 2026-11-04 [[chg-2026-11-04-pinned-wake]] — A pinned thread's wake goes to its home CPU, not the waker's
+- 2026-11-04 [[chg-2026-11-04-torpor-walks-go]] — The two torpor walks and the bucket-lock die check go
 - 2026-11-04 [[chg-2026-11-04-walk-errno-close]] — The walk errno close: rounds 1 and 2, the first boots, 32 sabotages
 - 2026-11-03 [[chg-2026-11-03-c10a-kstack-range]] — Each thread's kernel stack in a range of its own, its guard costing no memory; the 0x200 vector reads SP
 - 2026-11-03 [[chg-2026-11-03-c10b-directmap-blocks]] — The direct map keeps its blocks: the guard toggles and the boot page map are gone
-- 2026-11-03 [[chg-2026-11-03-c8a-torpor]] — torpor keyed on the address space, a lock per bucket, oldest first, and no wake under the lock
-- 2026-11-03 [[chg-2026-11-03-item-11c-close]] — Item 11c close: rounds 1 to 3, the sweep, three leases
-- 2026-11-03 [[chg-2026-11-03-item-11c]] — A per-note table for native programs, SA_RESTART in the kernel, and an open a note can interrupt
-- 2026-11-03 [[chg-2026-11-03-torpor-locked-load]] — A wait's load under its lock cannot sleep, whatever a peer's MAP_FIXED did
-- 2026-11-03 [[chg-2026-11-03-walk-errno]] — A failed walk says why: only a miss reads ENOENT
+- 2026-11-03 [[chg-2026-11-03-c8a-r1]] — Torpor keyed on the space: round 1's fixes
 <!-- generated:end -->
