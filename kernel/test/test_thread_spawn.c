@@ -1851,7 +1851,7 @@ void test_thread_kernel_memory_charged_to_the_pool(void) {
     TEST_ASSERT(g_tkc_made, "a user Proc beside the exempt child");
     TEST_EXPECT_EQ(status, 0, "child exited cleanly");
     const u32 T = THREAD_POOL_PAGES;
-    TEST_EXPECT_EQ(T, 9u, "a stack block of eight pages and a slot of one");
+    TEST_EXPECT_EQ(T, 5u, "a stack of four pages and a slot of one");
     TEST_EXPECT_EQ(g_tkc_user, T, "a user Proc's kernel-entry thread costs the pool its stack and slot");
     TEST_EXPECT_EQ(g_tkc_pages_user, T, "and keeps the count it returns");
     TEST_EXPECT_EQ(g_tkc_alloc_user, 2u * T, "a user thread costs the same");

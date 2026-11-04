@@ -525,8 +525,8 @@ struct Proc {
     // #65 (invariant I-32): per-Proc resource-floor counters. A DoS bound,
     // NOT a privilege axis -- they cap a non-TCB Proc's resource use so a
     // fork/thread/memory bomb hits a clean limit instead of stressing the
-    // allocator toward the box-killing cliff. `thread_count` (above) is the
-    // third counter.
+    // allocator toward the box-killing cliff. `live_threads`, admitted against
+    // `thread_budget`, is the third counter.
     //
     // page_count -- moved to AddrSpace.page_count at LINEAGE L-1 (it counts the
     //   ADDRESS SPACE's pages, so sharing an address space must mean sharing one
@@ -964,7 +964,7 @@ struct Proc {
 
     // SQPOLL kernel threads this Proc has MINTED (SYS_LOOM_SETUP with
     // LOOM_SETUP_SQPOLL). They run under kproc (immortal, TCB-exempt), so
-    // nothing counted them -- and each pins a 32 KiB kernel stack, so the
+    // nothing counted them -- and each pins a kernel stack and its slot, so the
     // handle table was the only bound and the fid-lift audit (F1) showed a
     // non-TCB Proc could mint 4x its own thread cap's worth of unswappable
     // kstacks. They are this Proc's workers in every meaningful sense, so

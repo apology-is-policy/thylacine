@@ -151,26 +151,14 @@ _Static_assert(DTB_MAX_CPUS == 8u,
 
 extern struct secondary_stack g_secondary_boot_stacks[DTB_MAX_CPUS - 1];
 
-// Per-CPU stack buffer — RESERVED (P5-el1h-kernel).
-//
-// The kernel runs uniformly at EL1h (ARCHITECTURE.md §12.1, invariant
-// I-21): SPSel=1 always, sp = SP_EL1 = the running thread's own kernel
-// stack, and an exception builds its register frame on that same
-// per-thread stack. There is NO separate live per-CPU exception stack.
-//
-// This buffer is retained — but currently unused at runtime — as the
-// pre-allocated per-CPU landing pad for a FUTURE dedicated
-// stack-overflow / SError handler stack. Under the uniform-EL1h model
-// a kernel-stack overflow into the guard page faults recursively
-// (KERNEL_ENTRY builds the frame on the same overflowing stack); a
-// vector-side check (the 0x200 slot inspecting SP against the guard)
-// could switch to this buffer to recover cleanly. That hardening item
-// is deferred; the buffer is kept so it lands without a layout change.
-//
-// 4 KiB per CPU × DTB_MAX_CPUS (8) = 32 KiB BSS. Indexed by cpu_idx
-// (0 = boot, 1..N-1 = secondaries). The layout is asserted by test_smp.
-#define EXCEPTION_STACK_SIZE  4096u
-extern char g_exception_stacks[DTB_MAX_CPUS][EXCEPTION_STACK_SIZE];
+// What the frame of a thread stack's overflow is built on, and what the dying
+// CPU runs on from there (vectors.S el1h_sync). One per CPU, so two CPUs can die
+// at once, each in the shape of a boot stack: a guard page build_page_tables
+// leaves unmapped, under as much stack as the dump has always had. vectors.S
+// finds a CPU's slot with the literals below.
+_Static_assert(SECONDARY_STACK_SLOT_SIZE == 5u * 4096u,
+               "vectors.S el1h_sync_overflow multiplies by 5 and shifts by 12");
+extern struct secondary_stack g_overflow_stacks[DTB_MAX_CPUS];
 
 // SMP redesign (ARCH §8.4.2): cpu0's dedicated idle stack -- a `struct
 // secondary_stack` (leading guard page + usable), symmetric with each secondary's

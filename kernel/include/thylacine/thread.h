@@ -70,9 +70,9 @@ struct Thread {
     // cpu_switch_context call saves into it.
     struct Context     ctx;
 
-    // Kernel stack. 16 KiB usable (THREAD_KSTACK_SIZE) + 16 KiB guard,
-    // allocated as one 32 KiB order-3 chunk via alloc_pages; the bottom
-    // THREAD_KSTACK_GUARD_PAGES are mapped no-access. kstack_base is the
+    // Kernel stack. 32 KiB of the stack range (mmu.h): the low 16 KiB are never
+    // mapped and the high 16 KiB (THREAD_KSTACK_SIZE) are four pages, which may
+    // sit anywhere in RAM, so kva_to_pa means nothing here. kstack_base is the
     // LOW address (guard base); ctx.sp is set to kstack_base +
     // THREAD_KSTACK_TOTAL_SIZE (the top) on thread_create and grows down
     // through the 16 KiB usable region, faulting into the guard on overflow.
@@ -84,10 +84,9 @@ struct Thread {
     // cpu_switch_context on a host-stalled secondary -> buddy-LIFO recycle of
     // the slot+kstack -> the stalled CPU's late register-save corrupts the
     // recycled thread's ctx.sp -> wild SP faults in its own guard). Fixed by
-    // the on_cpu gate in thread_free (DEBUGGING-PLAYBOOK 6.12). Separately,
-    // a dedicated per-CPU exception/IRQ stack is still NOT implemented (a
-    // kernel IRQ builds its frame on the interrupted thread's own kstack);
-    // that is unrelated to #788 and remains a documented future hardening.
+    // the on_cpu gate in thread_free (DEBUGGING-PLAYBOOK 6.12). A kernel IRQ
+    // builds its frame on the interrupted thread's own kstack; only a frame
+    // that would land in the guard goes elsewhere (vectors.S el1h_sync).
     void              *kstack_base;
     size_t             kstack_size;
 
@@ -720,23 +719,29 @@ _Static_assert(__builtin_offsetof(struct Thread, magic) == 0,
 // Default kernel stack size per thread. 4 pages × 4 KiB = 16 KiB.
 // Matches ARCHITECTURE.md §7.3 (THREAD_STACK_SIZE = 16 KiB).
 //
-// P2-Dc adds a 4-page (16 KiB) guard region BELOW the kstack. Total
-// allocation per thread is 8 pages = 32 KiB at order=3 from buddy.
-// The guard pages are no-access in the kernel direct map (P3-Bca) — a
-// stack-overflow access faults, the exception handler reports it, and
-// extinction("kstack overflow") fires.
+// A 16 KiB guard BELOW the kstack, the same size though it costs nothing: it is
+// address space in the kernel stack range (mmu.h), with no memory behind it. A
+// span twice the stack's size, aligned to itself, is what lets vectors.S tell a
+// guard address from a stack address by one bit; and no frame the compiler lays
+// out jumps a guard that large.
 #define THREAD_KSTACK_SIZE         (16 * 1024)
 #define THREAD_KSTACK_GUARD_SIZE   (16 * 1024)
 #define THREAD_KSTACK_TOTAL_SIZE   (THREAD_KSTACK_SIZE + THREAD_KSTACK_GUARD_SIZE)
-#define THREAD_KSTACK_TOTAL_ORDER  3                  // 8 pages = 32 KiB
-#define THREAD_KSTACK_GUARD_PAGES  4                  // bottom 4 pages
+#define THREAD_KSTACK_PAGES        4u                 // what backs the usable half
+#define THREAD_KSTACK_GUARD_PAGES  4u                 // the guard's span, unbacked
+
+#ifdef KERNEL_TESTS
+// A block as large as a stack's whole span, for fixtures that fake a stack in the
+// direct map.
+#define THREAD_KSTACK_TOTAL_ORDER  3
+#endif
 
 // What a user Proc's thread costs the user pool (mm/phys.h, ARCH 7.3.5): the
-// stack block plus one page for its slot. kproc's threads cost it nothing.
-#define THREAD_POOL_PAGES          ((1u << THREAD_KSTACK_TOTAL_ORDER) + 1u)
+// stack's pages plus one page for its slot. kproc's threads cost it nothing.
+#define THREAD_POOL_PAGES          (THREAD_KSTACK_PAGES + 1u)
 
-// Freed stacks kept with their guard still no-access, for the next create:
-// 1 MiB of the TCB reserve (phys.h) at most.
+// Freed stacks kept mapped, for the next create: 512 KiB of the TCB reserve
+// (phys.h) at most.
 #define THREAD_KSTACK_CACHE_MAX    32
 
 // The kernel-stack WATERMARK (ARCH 8.12).
@@ -768,6 +773,12 @@ u32  thread_kstack_used(const struct Thread *t, u32 *budget_words);
 // buddy (answers how many it released).
 u32  thread_kstack_cache_count(void);
 u32  thread_kstack_cache_drain(void);
+u32  thread_kstack_slots_in_use(void);   // the range's slots taken, cached stacks included
+u32  thread_kstack_pages_in_use(void);   // pages mapped in the range
+// Makes one step of the next new stack's making fail: 1 to THREAD_KSTACK_PAGES a
+// page, +1 the slot, +2 the map. Pending reads it back, 0 once it has fired.
+void thread_kstack_refuse_step(u32 step);
+u32  thread_kstack_refuse_pending(void);
 #endif // KERNEL_TESTS
 
 // "current thread" is held in TPIDR_EL1, the per-CPU OS-use register.

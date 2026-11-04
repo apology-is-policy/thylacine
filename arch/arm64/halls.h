@@ -52,6 +52,11 @@ void halls_dump(const struct exception_context *ctx);
 const struct exception_context *halls_enter_frame(const struct exception_context *ctx);
 void halls_leave_frame(const struct exception_context *prev);
 
+// The SP the dump names and reads up from, when the frame in the slot is not on the
+// stack worth reading: an overflow's frame sits on the overflow stack, and what
+// overflowed is the thread's. Only for a CPU about to extinct: nothing clears it.
+void halls_anchor_stack(u64 sp);
+
 #ifdef KERNEL_TESTS
 // The current per-CPU live exception frame (NULL if none). For tests.
 const struct exception_context *halls_current_frame(void);
@@ -61,7 +66,7 @@ const struct exception_context *halls_current_frame(void);
 // `prev_fp` (the kernel stack grows down, so caller frames sit at higher
 // addresses -- the chain is strictly increasing), and within [lo, hi). The
 // strict-increase kills cycles; [lo, hi) + a caller-side depth cap bound the
-// walk; reading a sane-but-unmapped fp still faults but trips HX-I1.
+// walk; the walk also asks whether a sane fp translates before reading it.
 bool halls_fp_is_sane(u64 fp, u64 prev_fp, u64 lo, u64 hi);
 
 // HX-I4 (pure; exposed for tests): true iff the per-CPU slot `frame` is a
@@ -71,6 +76,10 @@ bool halls_fp_is_sane(u64 fp, u64 prev_fp, u64 lo, u64 hi);
 // at a freed/other-thread stack (gap huge or negative) and is rejected, so a
 // stale slot never produces a fabricated dump nor suppresses capture-current.
 bool halls_frame_is_live(u64 frame, u64 cur_sp);
+
+// How many of the hexdump's bytes from `ksp` translate, in whole dump lines: the dump
+// stops at the first line with nothing behind it.
+u32 halls_stack_dump_extent(u64 ksp);
 #endif // KERNEL_TESTS
 
 // Translate a runtime code address to its link-time address by removing the

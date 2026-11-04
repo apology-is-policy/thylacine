@@ -3039,3 +3039,17 @@ on `3e2adf489`.
 
 **Did not run:** the full SMP matrix, under the 11-02 hold. It stays owed at the merge to main, with
 `tools/test-fault.sh`, the interactive fleet and `tools/check-production.sh`.
+
+## C10: each kernel stack in a range of its own — 2026-11-04
+
+A thread's kernel stack now sits in a range of its own: 32 KiB of address, the low 16 KiB never mapped, the high 16 KiB four pages from anywhere in RAM. The guard costs no memory, so a thread costs the pool 5 pages where it cost 9. The EL1 sync vector tests the frame's address, so an overflow reaches a per-CPU stack and says so rather than spinning. The direct map keeps its blocks: the guard toggles and #808's page map are gone. ARCH now describes the thread model as built (`0da38e604`, `e8b3529af`).
+
+Audit: round 1 Fable 5.1, 0/0/1/7. F7 is deferred to OPEN-BUGS and F8 is stated; the rest are fixed.
+
+Tests: the full suite is green at 2217 on `d0a545836`, twice, one ELF, with joey and the guest legs. Fault variants 8 of 8: `kstack_overflow`, `kstack_overflow_frame`, `kstack_overflow_irq`, `kstack_overflow_peer`, `kstack_dump_at_top`, `overflow_stack_guard`, `secondary_stack_guard`, `bootcpu_idle_guard`. Sabotages, 20: 16 red on their named line or variant; K02 and K15 red, not on the line they name (below); K10 and C01 green, as each predicted.
+
+Measured on those boots, on a shared Mac: 128 threads hold 512 stack pages and 1 new table, buddy down 568 pages; create and free 1183 ns cached and 1951 ns new (1100 and 1695 on the earlier boot). C2's figures were 924-1018 and 1417-1570 on another tree, so these are not a measured change.
+
+**Not settled:** K02 skips the TLB invalidate. It went red under HVF at `thread.kstack_cache_keeps_the_guard`, as `thread_free of a thread still owing hook walks`, which reads as a stale stack mapping writing over a page reused for a thread slot; that cause is read, not shown. K15 went red at the map's own guard. So `thread.kstack_release_invalidates_a_warm_entry` and `thread.kstack_cache_is_bounded` have not been seen red on their own lines, and K10 has no witness at all. C8b's lease runs K02 and K15 alone at those tests, and adds a test for K10.
+
+**Did not run:** the full SMP matrix, under the 11-02 hold. It stays owed at the merge to main, with the rest of `tools/test-fault.sh`, the interactive fleet and `tools/check-production.sh`. C10 ran no SMP subset: votes 27 and 31 name C8a, C8b and C9, and C8b's runs on top of this.

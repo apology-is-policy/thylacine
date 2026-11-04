@@ -22,6 +22,20 @@ needed the operator.
 
 
 ---
+## 2026-11-04 (aux, Opus 5.5 1M) -- C10 lands; a lease lost to a check I skipped
+
+**What landed.** Thread-model C10, `0a5d6e513..d0a545836`. Each kernel stack in a range of its own, the guard unbacked, 9 pool pages a thread down to 5, an overflow caught at the vector, the direct map in blocks, ARCH rewritten as built. Green 2217 twice on one ELF (c325d47d77cedf6f), 8 of 8 fault variants. The full matrix did NOT run (11-02 hold) and is owed at the merge.
+
+**The lost lease.** First boot, 3d37ff5c9, 17:15Z: bake fine, kernel suite 2215 of 2216. The red was `thread.kernel_memory_charged_to_the_pool` pinning `THREAD_POOL_PAGES` at 9. C10 makes it 5, so the code was right and the test stale. It was my miss. My own note says a pin grep goes before every lease, and I skipped it for C10, reasoning that no return value had changed. A constant had, and the old number was there to grep for. A kernel-test extinction ends the boot, so joey and the guests did not run, the Mac went to the queue, and the second lease started at 20:18Z, 3 hours later. The pin grep now covers constants and old prose, and I ran it properly before the second lease: nothing else.
+
+**Three sabotages that did not read as written.** K02 skips the TLB invalidate and went red at an earlier test than it names, under an extinction about hook walks. It reads as a stale stack mapping writing over a page now holding a thread slot, which is the corruption the sabotage plants, though I did not show that. K15 hit the map's own guard, which round 1's F2 added, one word off my prediction. Neither is a red on the named test, so neither test has been seen to work. K10 removes the vector's tag-bit test and stayed green, as its WANT line said it would, which also means nothing witnesses that line. All three are owed at C8b's lease and the status doc says so.
+
+**A wrong claim I committed.** While waiting I fixed `exec_map_segment`'s flat -1 on `aux-3-noexec`, with a commit message and an OPEN-BUGS line saying `exec_setup` flattens the answer, so no witness was possible. The tool output on my screen said `return rc`. Reading it properly, a witness was easy: `exec.setup_says_nomem_on_a_refused_vma`, sabotage N26. I amended the unpushed commit and corrected the bug line.
+
+**Decisions the operator made here.** The Yip test-script fix goes straight to its default branch (master `8a1659b`).
+
+**Not done.** The full matrix and the gates owed at the merge. K02's, K15's and K10's readings. F7 stays deferred in OPEN-BUGS.
+
 ## 2026-11-04 (aux, Opus 5.5 1M) -- C8a lands; a bug on main since June; a sabotage of mine that lied
 
 **What landed.** Thread-model C8a, `0e77da090..3e2adf489`. Futex waits keyed on the address space, a lock per

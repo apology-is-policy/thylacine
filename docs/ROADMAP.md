@@ -268,7 +268,7 @@ None. This is the foundation phase.
 
 **Process and thread**:
 - `kernel/proc.c`: `Proc` struct. `rfork(flags)` creates new processes/threads per `ARCHITECTURE.md §7.4`. `exits()` terminates. `wait()` reaps children.
-- `kernel/thread.c`: `Thread` struct, per-thread kernel stack, `errstr` buffer, `TPIDR_EL0` save/restore.
+- `kernel/thread.c`: `Thread` struct, per-thread kernel stack, `TPIDR_EL0` save/restore.
 - `arch/arm64/context.c`: `savectx()`, `restorectx()`, `swtch()`. Full ARM64 GPR + PC + SP + PSTATE + TPIDR_EL0 save/restore.
 - `arch/arm64/elf.c`: ELF loader. Validates ARM64 + EL0 + PT_LOAD; rejects RWX segments per W^X invariant.
 

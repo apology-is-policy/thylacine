@@ -71,18 +71,9 @@ u64 g_pac_keys[8];
 __attribute__((aligned(4096)))
 struct secondary_stack g_secondary_boot_stacks[DTB_MAX_CPUS - 1];
 
-// Per-CPU stack buffer — RESERVED. See smp.h for rationale.
-// 8 CPUs × 4 KiB = 32 KiB BSS. 16-byte aligned for AAPCS64 SP.
-//
-// P5-el1h-kernel: the kernel runs uniformly at EL1h and builds every
-// exception frame on the interrupted thread's own kernel stack, so this
-// buffer is NOT the live exception stack. It is retained as the
-// pre-allocated per-CPU landing pad for the future dedicated
-// stack-overflow / SError handler stack (a vector-side SP_EL0 check
-// would switch to it). Until that hardening item lands the buffer is
-// unused at runtime; the layout is still asserted by test_smp.
-__attribute__((aligned(16)))
-char g_exception_stacks[DTB_MAX_CPUS][EXCEPTION_STACK_SIZE];
+// smp.h. Page-aligned like the slots above, for the same reason.
+__attribute__((aligned(4096)))
+struct secondary_stack g_overflow_stacks[DTB_MAX_CPUS];
 
 // SMP redesign (deep-smp-review, ARCH 8.4.2): cpu0's idle thread runs on this
 // dedicated BSS stack -- a `struct secondary_stack` EXACTLY like the secondaries'
