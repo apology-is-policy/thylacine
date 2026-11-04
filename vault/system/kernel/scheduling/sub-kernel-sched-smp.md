@@ -34,7 +34,10 @@ between two steps of a sequence that reads, in source, like a single act.
   RELEASE-clear paired with an ACQUIRE-load.
 - A CPU-pinned Thread (`cpu_pinned`) never migrates. Every per-CPU idle
   and `kthread` are pinned. A wake reads `last_cpu` for its home and not the
-  waker's CPU, which is what `ready()` hands `select_target_cpu`.
+  waker's CPU, which is what `ready()` hands `select_target_cpu`. `ready_on`
+  extincts on a pinned thread placed off the CPU it last ran on, and sends its wake
+  IPI past the gate that keeps parked secondaries quiet in the test phase, since an
+  idle peer cannot steal it and a parked secondary has no tick to find it.
 - An idle CPU announces itself (`idle_in_wfi`) **before** it parks, so a
   peer that places work either sees the announcement and kicks it, or the
   IPI it sends lands pending and the WFI exits on it. This is

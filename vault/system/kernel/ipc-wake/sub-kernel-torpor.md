@@ -176,7 +176,8 @@ lock to leave, and both walks are rare. WAKE, the hot path, does not ([[fnd-torp
 
 ## Invariants enforced
 
-- [[inv-i9]] specialized to wait-on-address — modelled by [[spec-torpor]], with the lock
+- [[inv-i9]] specialized to wait-on-address — modelled by [[spec-torpor]], the rendez's
+  lock from the cond through registering included (`MarkedSleeperIsHeld`), with the lock
   acquire/release pairing argument in `torpor.h`, covering (a)
   WAKE-before-WAIT (the load sees the store, no sleep), (b)
   WAIT-before-WAKE (registered before the walk), (c) timeout-vs-WAKE

@@ -875,14 +875,14 @@ void test_torpor_mark_takes_the_rendez_lock(void) {
     tq_reset((u64)r, 3ll * 1000000ll);
     g_tqc_proc = p; g_tqc_woken = (s64)-999; g_tqc_exited = false;
 
-    torpor_stall_cond_for_test();
     struct Thread *w = thread_create(p, tqc_entry);
+    g_tq_t[0] = thread_create(p, tq_entry);
+    if (w && g_tq_t[0]) torpor_stall_cond_for_test();
     if (w) {
         unsigned peer = (smp_cpu_idx_self() + 1u) % smp_cpu_count();
         ready_on(peer, w);
         (void)gic_send_ipi(peer, IPI_RESCHED);
     }
-    g_tq_t[0] = thread_create(p, tq_entry);
     if (g_tq_t[0]) ready(g_tq_t[0]);
     bool finished = tq_finished(0);
 

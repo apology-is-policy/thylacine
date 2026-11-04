@@ -112,6 +112,7 @@ bool torpor_cond_saw_mark_for_test(void) {
     return __atomic_load_n(&g_torpor_cond_saw_mark, __ATOMIC_ACQUIRE);
 }
 static void torpor_cond_stall_point(const struct torpor_waiter *w) {
+    if (!__atomic_load_n(&g_torpor_cond_stall, __ATOMIC_ACQUIRE)) return;
     if (!__atomic_exchange_n(&g_torpor_cond_stall, false, __ATOMIC_ACQ_REL)) return;
     __atomic_store_n(&g_torpor_cond_stalled, true, __ATOMIC_RELEASE);
     u64 dl = timer_now_ns() + TORPOR_COND_STALL_BUDGET_NS;
@@ -452,6 +453,11 @@ void torpor_stall_wakes_for_test(bool on) {
 }
 bool torpor_wake_stalled_for_test(void) {
     return __atomic_load_n(&g_torpor_stalled, __ATOMIC_ACQUIRE);
+}
+bool torpor_test_release_hooks(void) {
+    bool cond = __atomic_exchange_n(&g_torpor_cond_stall, false, __ATOMIC_ACQ_REL);
+    bool wake = __atomic_exchange_n(&g_torpor_stall, false, __ATOMIC_ACQ_REL);
+    return cond || wake;
 }
 static void torpor_wake_stall_point(void) {
     if (!__atomic_load_n(&g_torpor_stall, __ATOMIC_ACQUIRE)) return;

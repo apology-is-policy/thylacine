@@ -2132,8 +2132,9 @@ static void tdb_thunk(void *arg) {
         proc_table_lock_release(s);
     }
     __atomic_store_n(&g_tsp_done, 1u, __ATOMIC_RELEASE);
-    // Value 0 == expected 0, so this registers. A pass reads TORPOR_OK, which no
-    // earlier gate of the wait answers.
+    // A resident demand-zero word equal to what is expected, so this registers. What
+    // tells is the time: sleeping through the death takes the 60 s deadline against the
+    // caller's 2 s budget. TORPOR_OK alone proves nothing, as the earlier gates answer it.
     g_tsp_rc = sys_torpor_wait_for_proc(self, (u64)va, 0, 60ll * 1000000ll);
     __atomic_store_n(&g_tsp_done, 2u, __ATOMIC_RELEASE);
     exits("ok");

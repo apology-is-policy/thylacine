@@ -195,6 +195,7 @@ void torpor_stall_cond_for_test(void);
 bool torpor_cond_stalled_for_test(void);
 bool torpor_cond_saw_try_for_test(void);
 bool torpor_cond_saw_mark_for_test(void);
+bool torpor_test_release_hooks(void);
 #endif
 
 #endif // THYLACINE_TORPOR_H

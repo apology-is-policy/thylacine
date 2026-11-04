@@ -30,6 +30,7 @@
 #include <thylacine/sched.h>   // DEBUG (#857): sched_dump_runnable on any test failure
 #include <thylacine/spinlock.h>     // #109: preempt-mask across the terminal-park handshake
 #include "../../mm/phys.h"   // the pool park a failing test leaves behind
+#include <thylacine/torpor.h>       // a stall a failing test left armed
 #include <thylacine/poll.h>         // the snapshot bound's test knob, released per test
 #include <thylacine/notes.h>        // test_caught: the interrupt post
 #include <thylacine/proc.h>         // test_dying: a fresh Proc, freed as a ZOMBIE
@@ -451,6 +452,7 @@ struct test_case g_tests[] = {
     { "scheduler.select_target_cpu_homogeneous_is_prev",
                                        test_sched_select_target_cpu_homogeneous_is_prev, false, NULL },
     { "scheduler.pinned_wake_goes_home", test_scheduler_pinned_wake_goes_home, false, NULL },
+    { "scheduler.pinned_sleeper_on_a_peer_wakes", test_scheduler_pinned_sleeper_on_a_peer_wakes, false, NULL },
     { "scheduler.ready_on_cross_cpu_enqueue",
                                        test_sched_ready_on_cross_cpu_enqueue, false, NULL },
     { "scheduler.cpu_surplus_for_kick",
@@ -3257,6 +3259,7 @@ static unsigned passed_count, failed_count, total_count, soft_warn_count, skippe
 // #134: child-Proc wait expiries observed across the whole run. Deliberately
 // NOT attributed to a test (see the runner loop); it fails the suite instead.
 static unsigned proc_wait_timeout_total;
+static bool boot_thread_moved;
 
 void test_fail(const char *msg) {
     if (current_test) {
@@ -3506,6 +3509,12 @@ void test_run_all(void) {
                 test_fail("test left a poll test knob set (see POLL-KNOB)");
         }
 
+        if (torpor_test_release_hooks()) {
+            uart_puts("TORPOR-KNOB ");
+            if (!current_test->failed)
+                test_fail("test left a torpor stall armed (see TORPOR-KNOB)");
+        }
+
         // And the dev9p readiness fixture: a test that fails before its
         // teardown leaves the fixture's client, file, hooks and poller thread
         // up, and the next setup must not re-initialise a client the poll
@@ -3576,10 +3585,15 @@ void test_run_all(void) {
         }
 
         // The boot thread is pinned. A test that moves it voids every later test's
-        // reading of "this CPU", and in the end hangs the boot's tick wait.
-        if (smp_cpu_idx_self() != 0 && !current_test->failed) {
-            current_test->failed = true;
-            current_test->fail_msg = "the boot thread ended this test off CPU 0";
+        // reading of "this CPU", and in the end hangs the boot's tick wait. Nothing moves
+        // it back, so only the first test to return off CPU 0 answers for it.
+        if (smp_cpu_idx_self() != 0 && !boot_thread_moved) {
+            boot_thread_moved = true;
+            uart_puts("OFF-CPU0 ");
+            if (!current_test->failed) {
+                current_test->failed = true;
+                current_test->fail_msg = "the boot thread ended this test off CPU 0";
+            }
         }
 
         if (current_test->failed) {
