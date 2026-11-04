@@ -1824,6 +1824,7 @@ fn eval_value_token(env: &Env, tok: &Token) -> EvalResult<Value> {
             let v = env.get(name);
             Ok(Value::scalar(v.joined(" ")))
         }
+        TokenKind::VarAt(expr) => super::expr::eval_expr(env, expr),
         // Bare-word context: a command substitution's output is split on
         // whitespace into a list (rc's default $ifs -- scripture 6.3 +
         // 6.6). `$(echo a b)` is two words; `for f in $(ls)` iterates.
@@ -3125,6 +3126,27 @@ mod tests {
         let mut env = Env::new();
         env.assign("home", Value::scalar("/home/susan"));
         env
+    }
+
+    #[test]
+    fn an_index_in_a_command_word_is_its_element_or_slice() {
+        use crate::parser::ast::{CommandKind, StatementKind};
+        let mut env = Env::new();
+        env.let_set(
+            "f",
+            Value::list(alloc::vec![String::from("a"), String::from("b"), String::from("c")]),
+        );
+        let script = crate::parser::parse("echo $f(1) $f(2 3) x^$f(1)").unwrap();
+        let StatementKind::Pipeline(p) = &script.statements[0].kind else {
+            panic!("not a pipeline")
+        };
+        let CommandKind::Simple(c) = &p.elements[0].command.kind else {
+            panic!("not a simple command")
+        };
+        let got: Vec<Vec<String>> = c.words.iter().map(|w| eval_word(&env, w).unwrap().0).collect();
+        assert_eq!(got[1], alloc::vec![String::from("a")]);
+        assert_eq!(got[2], alloc::vec![String::from("b"), String::from("c")]);
+        assert_eq!(got[3], alloc::vec![String::from("xa")]);
     }
 
     #[test]

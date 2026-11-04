@@ -469,6 +469,21 @@ fn eval_match(
             let hit = rv.0.iter().any(|el| el == &needle);
             Ok(Value::scalar(if hit { "1" } else { "0" }))
         }
+        MatchOp::Tilde => {
+            let ExprKind::List(patterns) = &r.kind else {
+                return Err(EvalError::new(
+                    EvalErrorKind::Internal("`~` without a pattern list"),
+                    r.span,
+                ));
+            };
+            for pattern in patterns {
+                let pat = eval_pattern(env, pattern)?;
+                if lv.0.iter().any(|el| glob::matches(&pat, el)) {
+                    return Ok(Value::scalar("1"));
+                }
+            }
+            Ok(Value::scalar("0"))
+        }
         MatchOp::Regex => Err(EvalError::new(
             EvalErrorKind::NotImplemented("regex match (=~)"),
             outer.span,
@@ -775,8 +790,65 @@ mod tests {
     #[test]
     fn shift_in_range() {
         let env = Env::new();
-        let v = eval_str(&env, "1 << 4", ExprContext::Arith).unwrap();
-        assert_eq!(v.as_scalar(), "16");
+        for (src, want) in [
+            ("((1 << 4))", "16"),
+            ("((16 >> 2))", "4"),
+            // Tighter than a comparison, looser than addition.
+            ("((1 + 1 << 2 + 1))", "16"),
+            ("((1 << 2 < 5))", "1"),
+            ("((1 << (2 < 5)))", "2"),
+        ] {
+            let v = eval_str(&env, src, ExprContext::Value).unwrap();
+            assert_eq!(v.as_scalar(), want, "{src}");
+        }
+    }
+
+    #[test]
+    fn shift_out_of_range() {
+        let env = Env::new();
+        for src in ["((1 << 64))", "((1 >> 64))", "((1 << (0 - 1)))"] {
+            let e = eval_str(&env, src, ExprContext::Value).unwrap_err();
+            assert!(matches!(e.kind, EvalErrorKind::InvalidShift(_)), "{src}");
+        }
+    }
+
+    #[test]
+    fn a_comparison_before_a_group_is_not_a_process_substitution() {
+        let env = Env::new();
+        let v = eval_str(&env, "((1 <(2 + 3)))", ExprContext::Value).unwrap();
+        assert_eq!(v.as_scalar(), "1");
+        let v = eval_str(&env, "((1 >(2 + 3)))", ExprContext::Value).unwrap();
+        assert_eq!(v.as_scalar(), "0");
+    }
+
+    #[test]
+    fn rc_tilde_matches_any_element_against_any_pattern() {
+        let mut env = Env::new();
+        env.let_set("v", Value::scalar("foo.c"));
+        env.let_set("l", Value::list(alloc::vec!["a".to_string(), "b.h".to_string()]));
+        for (src, want) in [
+            ("~ $v *.h *.c", "1"),
+            ("~ $v foo.c", "1"),
+            ("~ $v *.h bar", "0"),
+            ("!~ $v *.h", "1"),
+            ("~ $l *.h", "1"),
+            ("~ $l c d", "0"),
+        ] {
+            let v = eval_str(&env, src, ExprContext::Cond).unwrap();
+            assert_eq!(v.as_scalar(), want, "{src}");
+        }
+    }
+
+    #[test]
+    fn match_in_a_variable_list() {
+        let mut env = Env::new();
+        env.let_set("v", Value::scalar("b"));
+        env.let_set("list", Value::list(alloc::vec!["a".to_string(), "b".to_string()]));
+        let v = eval_str(&env, "$v in $list", ExprContext::Cond).unwrap();
+        assert_eq!(v.as_scalar(), "1");
+        env.let_set("v", Value::scalar("c"));
+        let v = eval_str(&env, "$v in $list", ExprContext::Cond).unwrap();
+        assert_eq!(v.as_scalar(), "0");
     }
 
     // case-as-expression is parsed in Value context (per U-5d).

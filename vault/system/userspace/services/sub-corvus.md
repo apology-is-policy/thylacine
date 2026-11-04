@@ -7,6 +7,7 @@ code:
   - usr/corvus/src/main.rs
   - usr/corvus/src/provincia.rs
   - usr/corvus/src/sessions.rs
+  - usr/corvus/src/lib.rs
   - tools/test-corvus-sessions.py
   - usr/corvus/Cargo.toml
 audit: hard
@@ -525,6 +526,11 @@ separate transport constraint; multiple AUTH records do not implement Tflush.
 AUTH attempts are bounded only by the cost of Argon2id itself.
 
 ## Caveats
+
+- **The session table is the crate's library half (2026-11-04).** `sessions.rs` and the
+  three bounds it holds moved behind `src/lib.rs`, so `tools/test-rust.sh` runs its tests,
+  which no gate had compiled. The server stays the binary, and its dependencies sit
+  behind `backend`. The guest's text is the same size with functions in a different order.
 
 - **The justification for the single global session names a kernel cap
   that no longer exists** (task #148, **still open, re-measured

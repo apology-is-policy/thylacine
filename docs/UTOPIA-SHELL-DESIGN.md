@@ -351,7 +351,7 @@ if ($var =~ /^foo/) echo starts-with-foo
 
 - `matches` — glob match.
 - `in` — set membership against a list.
-- `=~` — regex match. Delimited by `/`.
+- `=~` — regex match. Delimited by `/`. It parses, and the evaluator refuses it as not implemented: the tree has no regex engine yet.
 
 ### 7.4 The legacy `~` operator
 

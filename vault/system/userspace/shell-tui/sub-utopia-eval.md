@@ -581,6 +581,13 @@ one.
 
 ## Caveats
 
+- **The `backend` half's tests run (2026-11-04).** `expr`, `stmt`, `env` and `repl` hold
+  69 tests that no machine had compiled. They run in `tools/test-rust.sh`'s `host-test`
+  pass, against libthyla-rs's ENOSYS stubs, so a pass there means the test took no real
+  syscall. Three failed on their first run, and each stood for documented syntax that did
+  not parse ([[sub-utopia-parser]]). The evaluator gained rc's `~`, any element against any
+  pattern, and an index in a command word.
+
 - **OPEN, the operator's vote (2026-09-23): a QUOTED glob meta in a `case` arm
   or a `matches` is still a wildcard.** `case $x { '*' => ... }` matches every
   `$x`, and so do `"*"` and a variable holding `*`: a pattern's evaluated parts

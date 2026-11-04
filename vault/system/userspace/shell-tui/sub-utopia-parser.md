@@ -99,10 +99,14 @@ escape at three positions, doubled and trailing backslashes, a continuation,
 multi-byte characters -- so no value changed, and only globs and patterns see the
 difference. The matcher's half is [[sub-utopia-eval]].
 
-Two pieces of state make the scanner not quite context-free, both queued rather
-than backtracked: heredoc bodies are collected at the *next newline* after the
-tag that requested them, drained first-in-first-out; and a regex literal is
-recognized only through a one-shot flag set when the match operator is emitted.
+Three pieces of state make the scanner not quite context-free. Heredoc bodies are
+collected at the *next newline* after the tag that requested them, drained
+first-in-first-out. A regex literal is recognized only through a one-shot flag set
+when the match operator is emitted. And the scanner keeps a stack of the parentheses
+still open, each `(` or `((`: a closer belongs to its opener, so `)))` closing `((`
+and `(` is `)` then `))`, `))` closing two `(` is two `)`, and no depth count in the
+parser ever sees one token closing two things. Inside an open `((`, `<<` is the shift
+and `<(` and `>(` are a comparison before a group.
 
 ### UTF-8 correctness is structural, not checked
 
@@ -247,6 +251,17 @@ Nothing here is on a hot path — it runs once per line typed.
 
 ## Caveats
 
+- **FIXED 2026-11-04: the shell's documented forms that did not parse.** The stranded
+  evaluator tests, once they ran, failed on `in (a b)` and `1 << 4`, and a census of
+  every example in UTOPIA-SHELL-DESIGN found the rest: `((1 << 4))` and `((16 >> 2))`
+  (6.13; the parser's shift level was a pass-through), `if ($v in (a b))` (7.3; the
+  right side took one value and `))` closed both), `((1 + (2 * 3)))`, `if (c) cmd`
+  with no braces (7.3 and 7.4, as in rc), `echo $f(1)` and `echo $f(2 3)` in a command
+  word (6.3 and 6.9; folded into a `VarAt` token), `~ $v pat...` (7.4), and a reserved
+  word as a value (`x = on`, `(in out)`, `$x == if`). A census covers syntax only. The
+  census's own script is not kept, because the doc holds trees and placeholders it
+  cannot tell from code.
+
 - **FIXED 2026-09-23: a backslash-escaped glob character no longer globs.**
   `scan_word` turned `\*` into a bare `*` inside `Word(text)`, so eval could not
   tell it from a wildcard: by reading `evaluate_argv`, `rm \*` removed every file
@@ -360,7 +375,11 @@ Nothing here is on a hot path — it runs once per line typed.
   a backtick after it OPENS THE NEXT substitution -- which is also why both
   forms are not accepted: `` `{a}`{b} `` would be ambiguous.
 
-- **`))` is split at the parse site, not lexed in context** (UT-PARSE-3, fixed
+- **SUPERSEDED 2026-11-04: closers now follow their openers in the lexer.** The
+  parse-site split below fixed subshells only, and fourteen depth counts in the
+  expression and statement parsers kept the bug: `if ($v in (a b))` and
+  `((1 + (2 * 3)))` did not parse. `split_double_rparen` is gone. The record:
+  **`))` is split at the parse site, not lexed in context** (UT-PARSE-3, fixed
   2026-09-22). The lexer is context-free and emits `DoubleRParen` for any `))`,
   which is right for `$(( ))` and wrong for `(a; (b; c))`, where two subshells
   close with nothing between them. `Parser::split_double_rparen` rewrites that

@@ -65,7 +65,7 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**727 owned · 39 unowned · 766 files (94% owned) · ~10016 unswept lines.**
+**728 owned · 39 unowned · 767 files (94% owned) · ~10016 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **96 files, ~48147 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
@@ -85,7 +85,7 @@ Excluded as harness and counted here rather than dropped: **96 files, ~48147 lin
 | mm | 8 | 0 | 0 |
 | usr/aurora | 5 | 0 | 0 |
 | usr/coreutils | 67 | 0 | 0 |
-| usr/corvus | 3 | 0 | 0 |
+| usr/corvus | 4 | 0 | 0 |
 | usr/curl | 3 | 0 | 0 |
 | usr/diorama | 2 | 0 | 0 |
 | usr/gallery | 2 | 0 | 0 |

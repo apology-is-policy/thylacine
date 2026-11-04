@@ -10166,7 +10166,7 @@ int spawn_perm_grant_check(struct Proc *p, u32 perm_flags) {
             && !proc_may_raise_thread_budget(p))                   return -1;
     // arm-6: SESSION_HANGUP takes the MAY_POST_SERVICE one-hop shape (a
     // console-attached granter OR a holder of the post-service bit) -- login's
-    // session-management authority, the same gate CONSOLE_OWNER uses. The
+    // session-management authority. The
     // hangup terminates only same-session members (a Proc's own descendants),
     // so it confers no cross-authority reach; the gate just scopes WHO may set
     // up a self-reclaiming session to the login-shaped callers that need it.

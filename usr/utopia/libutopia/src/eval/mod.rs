@@ -75,9 +75,9 @@ pub mod value;
 // `expr` is gated not for a syscall of its own -- it makes none -- but because
 // expansion genuinely reaches into command substitution and the environment
 // (`stmt`, `env`): `$(...)` runs a pipeline. That is real coupling in the
-// shell's design, not an accident of imports, so separating it is a restructure
-// of the evaluator and its 29 tests stay stranded until that chunk. (Its use of
-// `glob` is the pure matcher only, which is no longer a coupling.)
+// shell's design, not an accident of imports, so its tests run in the crate's
+// `host-test` pass instead. (Its use of `glob` is the pure matcher only, which
+// is no longer a coupling.)
 #[cfg(feature = "backend")]
 pub mod expr;
 

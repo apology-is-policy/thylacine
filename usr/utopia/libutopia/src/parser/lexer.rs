@@ -60,6 +60,13 @@
 //    one-shot flag when emitting EqualTilde; the next opening
 //    `/` is scanned as a Regex literal (with `\/` -> `/` escape).
 //
+// 9. Parentheses: `((` is the arithmetic opener and `(` is any other, and a
+//    closer belongs to its opener. `)))` closing `((` and `(` is `)` then `))`,
+//    and `))` closing two `(` is two `)`, so the parser's depth counts never see
+//    one token closing two things. Inside an open `((`, `<<` is the shift and
+//    `<(` and `>(` are a comparison before a group: a heredoc and a process
+//    substitution mean nothing in arithmetic.
+//
 // === Span discipline ===
 //
 // Every emitted Token carries a Span covering its source bytes.
@@ -96,6 +103,14 @@ struct Lexer<'a> {
     /// Set by emitting EqualTilde; consumed by the next opening `/`
     /// to lex a Regex literal. Per scripture section 7.3.
     expect_regex_after: bool,
+    /// The parentheses still open, innermost last.
+    opens: Vec<Opener>,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Opener {
+    One,
+    Two,
 }
 
 #[derive(Clone)]
@@ -117,6 +132,35 @@ impl<'a> Lexer<'a> {
             tokens: Vec::new(),
             pending_heredocs: Vec::new(),
             expect_regex_after: false,
+            opens: Vec::new(),
+        }
+    }
+
+    fn in_arithmetic(&self) -> bool {
+        self.opens.contains(&Opener::Two)
+    }
+
+    /// A closer with nothing open keeps the longest form, so a stray `))` still reads
+    /// as what it spells in a diagnostic.
+    fn scan_closer(&mut self) -> ParseResult<()> {
+        let double = self.peek_byte_at(1) == Some(b')');
+        match self.opens.last().copied() {
+            Some(Opener::Two) if double => {
+                self.opens.pop();
+                self.emit_single(TokenKind::DoubleRParen, 2)
+            }
+            Some(Opener::Two) => {
+                // `((a) b)`: the pair opened two groups after all.
+                self.opens.pop();
+                self.opens.push(Opener::One);
+                self.emit_single(TokenKind::RParen, 1)
+            }
+            Some(Opener::One) => {
+                self.opens.pop();
+                self.emit_single(TokenKind::RParen, 1)
+            }
+            None if double => self.emit_single(TokenKind::DoubleRParen, 2),
+            None => self.emit_single(TokenKind::RParen, 1),
         }
     }
 
@@ -195,13 +239,16 @@ impl<'a> Lexer<'a> {
             b'<' => self.scan_less(),
             b'>' => self.scan_greater(),
             b'(' => match self.peek_byte_at(1) {
-                Some(b'(') => self.emit_single(TokenKind::DoubleLParen, 2),
-                _ => self.emit_single(TokenKind::LParen, 1),
+                Some(b'(') => {
+                    self.opens.push(Opener::Two);
+                    self.emit_single(TokenKind::DoubleLParen, 2)
+                }
+                _ => {
+                    self.opens.push(Opener::One);
+                    self.emit_single(TokenKind::LParen, 1)
+                }
             },
-            b')' => match self.peek_byte_at(1) {
-                Some(b')') => self.emit_single(TokenKind::DoubleRParen, 2),
-                _ => self.emit_single(TokenKind::RParen, 1),
-            },
+            b')' => self.scan_closer(),
             b'{' => self.emit_single(TokenKind::LBrace, 1),
             b'}' => self.emit_single(TokenKind::RBrace, 1),
             b'^' => self.emit_single(TokenKind::Caret, 1),
@@ -625,9 +672,11 @@ impl<'a> Lexer<'a> {
 
     fn scan_less(&mut self) -> ParseResult<()> {
         let start = self.pos;
+        let arithmetic = self.in_arithmetic();
         match self.peek_byte_at(1) {
             Some(b'=') => self.emit_single(TokenKind::LessEqual, 2),
-            Some(b'(') => self.scan_proc_sub_in(start),
+            Some(b'(') if !arithmetic => self.scan_proc_sub_in(start),
+            Some(b'<') if arithmetic => self.emit_single(TokenKind::ShiftLeft, 2),
             Some(b'<') => self.scan_heredoc_start(start),
             _ => self.emit_single(TokenKind::Less, 1),
         }
@@ -746,7 +795,7 @@ impl<'a> Lexer<'a> {
         match self.peek_byte_at(1) {
             Some(b'=') => self.emit_single(TokenKind::GreaterEqual, 2),
             Some(b'>') => self.emit_single(TokenKind::GreaterGreater, 2),
-            Some(b'(') => {
+            Some(b'(') if !self.in_arithmetic() => {
                 self.pos += 2; // consume >(
                 let body_start = self.pos;
                 let close = find_balanced_paren_close(self.source, body_start).ok_or_else(

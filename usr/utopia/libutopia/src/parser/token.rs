@@ -175,11 +175,13 @@ pub enum TokenKind {
     // === Redirects =========================================================
     Less,            // <
     Greater,         // >
-    /// `>>`. (`<<` is consumed as HeredocStart if a valid tag
-    /// follows; otherwise it's a lex error at U-5a -- the
-    /// shift-left arithmetic case is deferred to U-5c when arith
-    /// mode lands.)
+    /// `>>`, an append redirect or, inside `(( ))`, the right shift.
     GreaterGreater,
+    /// `$x(N)` or `$x(M N)` in a command word, folded by the parser. The lexer
+    /// never emits it.
+    VarAt(alloc::boxed::Box<super::ast::Expr>),
+    /// `<<` inside `(( ))`. Anywhere else it starts a heredoc.
+    ShiftLeft,
 
     // === Comparison / assignment ===========================================
     Equal,         // =

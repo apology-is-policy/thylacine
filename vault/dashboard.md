@@ -131,6 +131,6 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-11-04 [[chg-2026-11-04-merge-audit-r2]] — Merge audit r2's close on the join
 - 2026-11-04 [[chg-2026-11-04-merge-audit-r3]] — Merge audit r3's close
 - 2026-11-04 [[chg-2026-11-04-pinned-wake]] — A pinned thread's wake goes to its home CPU, not the waker's
+- 2026-11-04 [[chg-2026-11-04-ut-language]] — The shell's documented forms parse, and its stranded tests run
 - 2026-11-03 [[chg-2026-11-03-b3h-first-boots]] — B-3h's first boots: two wrong tests, a survivor, a budget
-- 2026-11-03 [[chg-2026-11-03-fid-pays-for-clunk]] — A FID pays for its CLUNK at RESERVE
 <!-- generated:end -->

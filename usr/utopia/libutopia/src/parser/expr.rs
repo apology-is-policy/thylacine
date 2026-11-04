@@ -480,7 +480,10 @@ impl ExprParser {
                 ExprKind::ProcSubOut(Box::new(sub))
             }
             TokenKind::Regex(s) => ExprKind::Regex(s),
-            _ => unreachable!("is_value_token_kind gates the dispatch above"),
+            other => ExprKind::Word(String::from(
+                TokenKind::reserved_word_text(&other)
+                    .expect("is_value_token_kind gates the dispatch above"),
+            )),
         };
         // span is already tok.span for non-VarIndex atoms.
         // (VarIndex returns early via finish_var_index.)
@@ -556,9 +559,7 @@ impl ExprParser {
     //   5.  `&`
     //   6.  `== !=`, `matches`, `in`, `=~`
     //   7.  `< <= > >=`
-    //   8.  `<< >>`   (only when separated; `<<` raw triggers heredoc
-    //                  at lex time, so the arith form requires
-    //                  whitespace or precise lex tokens.)
+    //   8.  `<< >>`   (inside `(( ))`, which is where `<<` is not a heredoc)
     //   9.  `+ -`
     //   10. `* / %`
     //   11. `**`        (right-associative)
@@ -694,7 +695,12 @@ impl ExprParser {
             let Some(op) = op else { break };
             self.pos += 1;
             self.maybe_retokenize_at_pos();
-            let right = self.parse_rel()?;
+            let right = match op {
+                EqOrMatch::In if matches!(self.peek_kind(), Some(TokenKind::LParen)) => {
+                    self.parse_list_literal()?
+                }
+                _ => self.parse_rel()?,
+            };
             left = match op {
                 EqOrMatch::Eq => bin(BinOp::Eq, left, right),
                 EqOrMatch::Ne => bin(BinOp::Ne, left, right),
@@ -725,19 +731,22 @@ impl ExprParser {
     }
 
     fn parse_shift(&mut self) -> ParseResult<Expr> {
-        // Shifts are arith-only and require the lexer to emit
-        // distinct shift tokens; at U-5a the lexer doesn't have a
-        // shift token (`<<` would be heredoc-start). We accept
-        // `<<` / `>>` only when they appear as separate Less+Less
-        // (parsed by the parent caller before reaching this level).
-        // For v1.0 the practical result is: shifts in arith are
-        // expressed via lex-friendly forms only. The level is
-        // present in the precedence chain to leave structural
-        // room for a v1.x arith-mode lexer.
         if self.ctx != ExprContext::Arith {
             return self.parse_add();
         }
-        self.parse_add()
+        let mut left = self.parse_add()?;
+        loop {
+            let op = match self.peek_kind() {
+                Some(TokenKind::ShiftLeft) => BinOp::Shl,
+                Some(TokenKind::GreaterGreater) => BinOp::Shr,
+                _ => break,
+            };
+            self.pos += 1;
+            self.maybe_retokenize_at_pos();
+            let right = self.parse_add()?;
+            left = bin(op, left, right);
+        }
+        Ok(left)
     }
 
     fn parse_add(&mut self) -> ParseResult<Expr> {
@@ -856,7 +865,35 @@ impl ExprParser {
         self.parse_primary()
     }
 
+    fn parse_tilde_match(&mut self) -> ParseResult<Expr> {
+        let tilde = self.advance();
+        let subject = self.parse_concat_chain()?;
+        let mut patterns = Vec::new();
+        while self.peek().is_some_and(|t| is_value_token_kind(&t.kind)) {
+            patterns.push(self.parse_concat_chain()?);
+        }
+        let Some(last) = patterns.last() else {
+            return Err(ParseError {
+                kind: ParseErrorKind::UnexpectedTokenInExpr {
+                    expected: "`~` pattern",
+                },
+                span: self.current_span(),
+            });
+        };
+        let span = Span::new(subject.span.start, last.span.end);
+        let list = Expr {
+            kind: ExprKind::List(patterns),
+            span,
+        };
+        let mut matched = match_expr(MatchOp::Tilde, subject, list);
+        matched.span = Span::new(tilde.span.start, span.end);
+        Ok(matched)
+    }
+
     fn parse_primary(&mut self) -> ParseResult<Expr> {
+        if self.ctx == ExprContext::Cond && matches!(self.peek_kind(), Some(TokenKind::Tilde)) {
+            return self.parse_tilde_match();
+        }
         // Case-as-expression (scripture 7.2): the `case $x { pat =>
         // value ... }` form. Recognized as a primary in every
         // context so the AST has ONE canonical expression shape; the
@@ -1316,6 +1353,7 @@ fn match_expr(op: MatchOp, left: Expr, right: Expr) -> Expr {
 }
 
 fn is_value_token_kind(k: &TokenKind) -> bool {
+    // A value is never command-word position, so a reserved word is its own text here.
     matches!(
         k,
         TokenKind::Word(_)
@@ -1329,7 +1367,7 @@ fn is_value_token_kind(k: &TokenKind) -> bool {
             | TokenKind::ProcSubIn(_)
             | TokenKind::ProcSubOut(_)
             | TokenKind::Regex(_)
-    )
+    ) || TokenKind::reserved_word_text(k).is_some()
 }
 
 fn parse_int(s: &str) -> Option<i64> {
@@ -1913,6 +1951,61 @@ mod tests {
             ExprKind::Match(MatchOp::In, _, _) => {}
             other => panic!("got {:?}", other),
         }
+    }
+
+    #[test]
+    fn cond_in_a_written_list() {
+        let e = expr_ok("$x in (a b c)", ExprContext::Cond);
+        match &e.kind {
+            ExprKind::Match(MatchOp::In, _, r) => {
+                assert!(matches!(&r.kind, ExprKind::List(items) if items.len() == 3));
+            }
+            other => panic!("got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn a_closed_group_in_a_condition_is_still_a_group() {
+        let e = expr_ok("($x == a)", ExprContext::Cond);
+        assert!(matches!(e.kind, ExprKind::BinOp(BinOp::Eq, _, _)));
+        let e = expr_ok("$x == a && ($y in (b c))", ExprContext::Cond);
+        assert!(matches!(e.kind, ExprKind::BinOp(BinOp::And, _, _)));
+    }
+
+    #[test]
+    fn rc_tilde_takes_a_subject_and_patterns() {
+        let e = expr_ok("~ $v foo *.c", ExprContext::Cond);
+        match &e.kind {
+            ExprKind::Match(MatchOp::Tilde, _, r) => {
+                assert!(matches!(&r.kind, ExprKind::List(items) if items.len() == 2));
+            }
+            other => panic!("got {:?}", other),
+        }
+        let e = expr_ok("!~ $v foo", ExprContext::Cond);
+        assert!(matches!(e.kind, ExprKind::UnOp(UnOp::Not, _)));
+        let e = expr_ok("~ $v foo && $w == bar", ExprContext::Cond);
+        assert!(matches!(e.kind, ExprKind::BinOp(BinOp::And, _, _)));
+        let err = parse_expr_tokens(
+            tokenize("~ $v").unwrap().into_iter().filter(|t| !matches!(t.kind, TokenKind::Eof)).collect(),
+            4,
+            ExprContext::Cond,
+        )
+        .unwrap_err();
+        assert!(matches!(err.kind, ParseErrorKind::UnexpectedTokenInExpr { .. }));
+    }
+
+    #[test]
+    fn a_reserved_word_is_a_word_in_a_value() {
+        for src in ["on", "in", "if", "else", "for"] {
+            let e = expr_ok(src, ExprContext::Value);
+            assert!(matches!(&e.kind, ExprKind::Word(w) if w == src), "{src}");
+        }
+        let e = expr_ok("(in if on)", ExprContext::Value);
+        assert!(matches!(&e.kind, ExprKind::List(items) if items.len() == 3));
+        let e = expr_ok("$x == on", ExprContext::Cond);
+        assert!(matches!(e.kind, ExprKind::BinOp(BinOp::Eq, _, _)));
+        let e = expr_ok("a^in", ExprContext::Value);
+        assert!(matches!(e.kind, ExprKind::Concat(_)));
     }
 
     #[test]

@@ -1356,8 +1356,9 @@ pub extern "C" fn rs_main() -> i64 {
     // (SPAWN_IDENTITY_SET) but NOT CAP_SET_IDENTITY. It inherits the /home/<user>
     // bind established above. LS-5 (P1): confer CONSOLE_OWNER so the kernel makes
     // `ut` the g_console_owner -- the Proc that receives the `interrupt` note on
-    // Ctrl-C. login holds MAY_POST_SERVICE (from joey), which is the gate for
-    // CONSOLE_OWNER; the owner bit never confers console-attach (I-27 untouched).
+    // Ctrl-C. login holds the session factory's role (SESSION_REGISTRY, from joey),
+    // which is the gate for CONSOLE_OWNER; the owner bit never confers console-attach
+    // (I-27 untouched).
     let mut shell_cmd = Command::new(SHELL);
     shell_cmd
         .identity(pid, gid, &supp)

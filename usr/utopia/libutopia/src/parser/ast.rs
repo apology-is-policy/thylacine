@@ -620,6 +620,8 @@ pub enum MatchOp {
     In,
     /// `=~` -- regex match (scripture 7.3); evaluator wiring at U-5d.
     Regex,
+    /// rc's `~ subject pattern...` (scripture 7.4): any element against any pattern.
+    Tilde,
 }
 
 // ---------------------------------------------------------------------

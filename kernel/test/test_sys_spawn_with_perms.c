@@ -255,10 +255,9 @@ void test_sys_spawn_with_perms_console_trusted_not_delegable(void) {
         "console-attached grants both bits");
 }
 
-// LS-5 (P1 console owner): SPAWN_PERM_CONSOLE_OWNER is gated the SAME way as
-// MAY_POST_SERVICE (a console-attached granter OR a Proc that already holds
-// MAY_POST_SERVICE), so trusted /sbin/login -- holding the bit from joey --
-// confers console ownership on the session shell. But it is NOT a back door to
+// LS-5 (P1 console owner): SPAWN_PERM_CONSOLE_OWNER takes a console-attached
+// granter OR the session factory's role, so trusted /sbin/login -- holding the role
+// from joey -- confers console ownership on the session shell. But it is NOT a back door to
 // CONSOLE_TRUSTED: a mere holder still cannot grant console-trust (I-27).
 void test_sys_spawn_with_perms_console_owner_grant_gate(void) {
     drain_zombies();

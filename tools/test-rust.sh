@@ -71,8 +71,13 @@ HOST_TRIPLE="$(rustc -vV | awk '/^host:/ {print $2}')"
 # passes, matched by name. This table decides only what RUNS -- the stranded
 # count is derived regardless -- so a crate missing from it shows up as
 # stranded, never as quietly passing.
+#
+# libutopia's second pass runs the shell's evaluator and REPL against libthyla-rs's
+# `host-test` stubs, where every syscall answers ENOSYS. The stubs are aarch64
+# instructions, so another host skips that pass and reports its tests stranded.
 FEATURE_PASSES=(
     "cornucopia:scale"
+    "libutopia:host-test"
 )
 
 # The crates to try. With no arguments: every workspace member, read from the
@@ -210,6 +215,7 @@ for crate in "${crates[@]}"; do
         for entry in "${FEATURE_PASSES[@]}"; do
             (( ok )) || break
             [[ "${entry%%:*}" == "$crate" ]] || continue
+            [[ "${entry#*:}" != host-test || "$HOST_TRIPLE" == aarch64-* ]] || continue
             flog="$logdir/$crate.features.log"
             frc=0
             cargo_test "$crate" "$flog" --features "${entry#*:}" || frc=$?
