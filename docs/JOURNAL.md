@@ -22,6 +22,54 @@ needed the operator.
 
 
 ---
+## 2026-11-04 -- a mutant that passed, and a regression that was not one (corona)
+
+Two leases at the tip, 00:04Z to 01:40Z and from 03:08Z. Round 3's fixes, compiled and
+never run until now, held: default suite 2198/2198 at 90e41cb75
+(work/nov03-as4/r3/c-suite.boot.log), ls-ut-paste and ls-nora-stopped-copy green on the
+first attempt, AS-4c green with its 79 SAK lines identical to the previous boot's,
+ls-gpu-dead green. One-byte reads were the expected casualty and did not break anything.
+
+Eight of the nine both-ways mutants went red as named (r3/mutants-1.log). R2-F1's claim
+that a byte match cannot pass is now observed, not argued: drain-bytes failed with "the
+answered copy did not land". The ninth is the useful one.
+
+**gap-prompt, three boots to believe.** It leaves the terminal raw for a line's second
+command. On the first boot it went red, but one leg late, under "no new fetch after the
+last". The transcript's tail, `UT-PASTE-NINE..P`, showed why: `head` copies what it reads
+as it reads it, so the word went through `tr` to the terminal while `head` still waited
+for a line. The next key went to `head`. The leg meant to catch this had passed. That was
+a word matching on a broken terminal, so f1a20e603 made the word carry its `\r\n`.
+
+The next boot passed outright, rc 0, with the stricter word. Had I stopped at the first
+boot's red I would have called it discriminating. The reading: keys sent on the tick the
+first word appears can beat the shell's mode write, get translated while the terminal is
+still cooked, and arrive as a real line. 42cb1a9ad waits before that Enter, which cannot
+redden correct code since the terminal stays cooked throughout. Two more boots went red by
+name and the real code stayed green (r3/stepE output). The reading is supported, not
+watched: no boot traced the race itself. Also caught: my own mutant harness overwrote the
+first boot's transcript with the second's, so f1a20e603's message quotes bytes its cited
+file no longer holds. It keeps every run now.
+
+**A 70% regression that was not.** The first comparison of the fault path against the
+commit before MM-1a read +72% with one thread, on five sets. That was hard to believe:
+one thread has nothing to contend with and the diff is a few atomics. The fifth set of the
+tip's run, four spaces, read 2040 ns, the old kernel's exact figure. Reversed order and
+twelve sets gave one thread +7.2%, four threads of one space +10.8%, four spaces +4.1%
+(work/nov03-mm1/before2.log, after2.log). What had moved the first run was an episode:
+tens of seconds where faults cost up to double, on both kernels, at different times, with
+tapestryd's passes stretching to 1558 ms. That is bimodal and unexplained, and it is
+enqueued, not waved at (OPEN-BUGS 04:05:37Z). The Pi's A72, with no LSE, is the machine that
+decides whether the ledger is cheap enough; this says only that an M2 under HVF does not
+need finer locking at four CPUs.
+
+Also from the bench's first attempt: ut refuses `a & b &`, enqueued; and my pattern took a
+partial chunk of a line, which the memory index warns about by name.
+
+Still open at this entry: MM-1's 24 mutants, in stretches. No push yet.
+
+
+---
 ## 2026-11-03 -- the first real boots, and a shell bug the paste test found by accident (corona)
 
 The lease came at 22:06Z after about two hours in the queue, with a stack of work that

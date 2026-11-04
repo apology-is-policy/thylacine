@@ -318,8 +318,8 @@ fn stopped(fixture: &mut Fixture) -> Result {
     // reads no further than its Enter. A line feed, since what is already in the ring
     // when the terminal turns cooked keeps its bare CR. The second `head` gets an Enter
     // typed well after the first has gone: the gap between them stays cooked, so it is a
-    // line feed wherever it lands, but one typed as the word shows can beat a mode write
-    // that came too soon, and be translated before the write and never know.
+    // line feed wherever it lands. Typed as the word shows, it could beat a mode write
+    // that wrongly made the gap raw, and the leg would pass on the fault it is here for.
     ut.keys(b"head -n 1 | tr a-z A-Z; head -n 1 | tr a-z A-Z\rut-paste-eight\n")?;
     ut.sees(EIGHT_RAN, "a line typed for the command went to the shell")?;
     pause(SETTLE_MS)?;
