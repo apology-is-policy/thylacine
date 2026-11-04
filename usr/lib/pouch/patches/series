@@ -185,5 +185,7 @@
 0068-pouch-usr-notes.patch
 # 0069 (operator votes 18, 19 and 20): the kernel's note table, and the calls a note can interrupt.
 0069-pouch-note-table.patch
+# 0070 (operator vote 23): a failed spawn says why; only a miss reads ENOENT.
+0070-pouch-spawn-errno.patch
 # 0071 (operator vote 24): the kernel owns the mask; sigsuspend, sigtimedwait, sa_mask and SA_RESETHAND.
 0071-pouch-note-wait.patch

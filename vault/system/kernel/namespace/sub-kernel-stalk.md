@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/STALK-DESIGN.md", "docs/POUNCE-DESIGN.md", "docs/FID-LIFECYCLE-DESIGN.md", "docs/DISTRO.md", "docs/VIVARIUM.md"]
 created: 2026-08-01
-updated: 2026-10-06
+updated: 2026-11-03
 ---
 ## Purpose
 
@@ -267,9 +267,14 @@ per member in declared order, and returns the **first hit**:
   (a dead 9P session, a transient clone OOM — UM-8 F8), is not a directory,
   denies X-search, or simply lacks the component is **skipped**, not an error —
   unlike a lone directory, where an X denial is `EACCES`. Only exhausting all
-  members is a miss (`ENOENT`); `*errp` is set only on a clone OOM. This is the
-  correction for the bug where an earlier member's fault hid a name a later
-  member held.
+  members is a miss (`ENOENT`), unless a member could not say: a failed cross or
+  X-stat, or a walk whose reason is not `ENOENT`. Then "absent" is not known, and
+  `*errp` carries the first such reason when no member holds the name
+  (`union_walk_failure`); it is also set on a clone OOM. The skip is the correction
+  for the bug where an earlier member's fault hid a name a later member held, and
+  the reason keeps a lookup that could not answer from creating the file in an
+  `MCREATE` member (`stalk.union_walk_failure`,
+  `stalk.create_refuses_on_a_failed_walk`).
 - **First-hit wins**, in declared order, mirroring the readdir dedup —
   `stalk_union_has_child` is the name-presence probe that merge uses (no perm
   check, no symlink follow, because dedup is about presence, not access).
@@ -627,6 +632,13 @@ returning each walked component's full attributes. Then:
   root. A full BIND walk's leaf is exempt (the quarry/descent machinery
   owns it). A prefix re-walk that no longer matches (racing
   unlink/rename) fails `T_E_NOENT`, as a sequential racer would.
+- **A failed run**: NULL with a reason other than a miss, on a run of more than one
+  name, is taken one component at a time, whose X-checks come first. A server may
+  answer a failure past its first name with an Rlerror for the whole op, as Stratum
+  does for a mid-run EIO, and only the base was checked, so the reason would otherwise
+  tell a caller with no search on `secret` that `secret/x` exists
+  (`stalk.fused_failure_keeps_the_x_gate`). A miss with a run of one is reported as it
+  stands.
 - **Partial, no split**: the miss at component k is real; report NOENT
   only after `sts[k-1]` passes the X-check (the invariant's last
   obligation).
@@ -687,9 +699,8 @@ unpublished quarry. `stalk_err` returns its positive magnitude to SYS_OPEN;
 unknown/non-9P errors remain EIO. Resource admission errors no longer collapse
 into transport failure. [[sub-kernel-ninep-dev9p]] owns the per-open record.
 
-**Only the final open may unwind for a caught note.** A failed walk returns NULL, which
-reads as `ENOENT`, so a note that unwound a walk's 9P wait would report a file that
-exists as absent, and a connect or an accept would fail for it. `stalk_core` wraps
+**Only the final open may unwind for a caught note.** A walk that a note unwound has no
+answer about the name, and a connect or an accept would fail for it. `stalk_core` wraps
 `stalk_resolve`: it saves the thread's `note_interruptible` and clears it for the
 resolution, the final `dev->open` alone runs with the saved value, and the wrapper
 restores it on the way out. The walk rides the note out, as a Linux path lookup does, and
@@ -777,8 +788,9 @@ The X-search is open-time-only: perms are snapshotted at resolve time;
 ## Error paths
 
 `stalk_err` writes exactly one cause per NULL return: `T_E_NOENT` (walk
-miss — dev9p NULL, devramfs `nqid != 1`, partial-run miss, split re-walk
-race), `T_E_ACCES` (any X-search or final R/W `perm_check` denial),
+miss — a NULL with no reason, a server's `ENOENT`, devramfs `nqid != 1`, partial-run
+miss, split re-walk race), a failed walk's own reason through `dev_walk`, by value
+(ERRORS.md ER-2: only a miss reads `ENOENT`), `T_E_ACCES` (any X-search or final R/W `perm_check` denial),
 `T_E_INVAL` (unknown amode, NULL start/path, over-long component, trail /
 logical-depth overflow, Dev without walk/open, a NUL-bearing symlink target),
 `T_E_LOOP` (D-1: the symlink follow budget of 40 exhausted, or `O_NOFOLLOW`
@@ -786,10 +798,13 @@ meeting a final symlink under `STALK_OPEN`), a propagated stat errno
 via `err_code` (magnitude of `[-4095,-2]`; `-1` and out-of-range collapse
 to `T_E_IO` — never errno 1), or `T_E_IO` (OOM, cross failure, transport).
 `stalk_stat` additionally returns `-1` with `*errp` on a NULL `out`.
-The walk-NULL arm deliberately reports NOENT for the rare deep failures
-(session-dead, OOM) too: the kernel's own `perm_check` is the ACCES
-authority, so a walk NULL is never a masked permission denial (ER-2 — a
-walk-vtable errno out-param — is the in-flight refinement; see Seams).
+The kernel's own `perm_check` is the ACCES authority for what the resolver gates; a
+server's own `EACCES` crosses by value like any other reason. `clone_walk_zero` and
+`stalk_union_has_child` call the vtable raw on purpose: a cross failure has its
+caller's disposition, and the readdir merge's presence probe reports nothing. A member
+that cannot answer that probe reads as not holding the name, so the later entry is still
+listed: a name may show twice in a listing, and is never lost to a member that could not
+say. No create or unlink follows from it; both ask `stalk_union_member_holding`.
 
 ## Performance
 

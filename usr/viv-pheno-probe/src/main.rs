@@ -129,6 +129,7 @@ const NR_PSELECT6: u64 = 72;
 // BYTE, from `arch/aarch64/bits/signal.h`.
 const NR_CLONE: u64 = 220;
 const NR_EXECVE: u64 = 221;
+const NR_CHDIR: u64 = 49;
 // Reaping (LINEAGE L-6b). The option bits are musl's `include/sys/wait.h`;
 // WEXITED is carried because it is the COLLISION (Linux 4 == Thylacine's
 // WAIT_CONTINUED), not because a correct caller sends it to wait4.
@@ -582,6 +583,7 @@ const NEG_EACCES: i64 = -13;
 // LINEAGE L-6a: execve's failing shapes. ENOENT is the positive statement that
 // the argv walk got as far as the resolve; EFAULT is the fault-close.
 const NEG_ENOENT: i64 = -2;
+const NEG_ENOTDIR: i64 = -20;
 const NEG_EFAULT: i64 = -14;
 const NEG_ECHILD: i64 = -10;
 
@@ -5200,6 +5202,14 @@ unsafe fn run_linux() -> ! {
         let _ = svc4(NR_RT_SIGPROCMASK, NT_SIG_SETMASK, &kf_oldmask as *const u64 as u64, 0, 8);
     }
     leg!(rep, kn == 0, &kc_mk[..kn]);
+
+    // --- L350-L351: chdir answers what the resolver found ----------------------
+    //
+    // A file is not a missing directory, and this reads apart from the miss only
+    // while the Linux row passes the native errno through.
+    let cd_miss = b"/nonexistent-l6a\0";
+    leg!(rep, svc3(NR_CHDIR, cd_miss.as_ptr() as u64, 0, 0) == NEG_ENOENT, b"L350\n");
+    leg!(rep, svc3(NR_CHDIR, SELF_PATH.as_ptr() as u64, 0, 0) == NEG_ENOTDIR, b"L351\n");
 
     // --- L344-L345: SIGUSR1 and SIGUSR2 have a note each ----------------------
     //
