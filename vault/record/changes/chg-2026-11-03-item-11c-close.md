@@ -4,7 +4,7 @@ type: chg
 title: "Item 11c close: rounds 1 to 3, the sweep, three leases"
 date: 2026-11-03
 arc: arc-phase6-pouch
-commits: ["a2930f8bf"]
+commits: ["a2930f8bf", "d3683153d", "d0afb5937"]
 touched:
   - sub-kernel-notes
   - sub-pouch-signal

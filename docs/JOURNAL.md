@@ -85,6 +85,10 @@ Then G06 and G07 went red in 33 seconds, where a boot takes two minutes, with W3
 
 **Exactly what is verified at this entry.** On a2930f8bf: the suite, the guest legs, the sweep and the sabotages above, one boot each. NOT verified: the SMP subset, queued, and the push waits for it; the full SMP matrix, `tools/test-fault.sh`, the interactive fleet and check-production, all owed at the merge under the operator's hold. The rfork tear and clone copy have no deterministic test. stratumd and janusd retrying EINTR is a census, read and not run. The "LS-5 twin" clause of test (d) is void.
 
+**Lease 4, 2026-11-04 01:40-02:41Z on d0afb5937, which is a2930f8bf plus records and the harness fix.** Bake rc 0 with the bundles staged. Suite rc 0, 2192/0, L-6c ALPINE SHELL GATE PASS: the first clean boot with those gates live. Before lease 3 the reap tree's cache had no minirootfs, so they skipped on every image, a coverage hole none of this chunk's green lines said out loud. `default-smp4` and `ubsan-smp4` 10 PASS each, 0 corruption, 0 other. The red "NOT verified: the SMP subset" above is now discharged. Everything else in that paragraph stands.
+
+**One more thing the void reds taught.** A sabotage has to build before it can go red. `lean-sab-check.py` (aux-gate, not in the tree) compiles each queued sabotage, syntax-only, both configs. Its control reproduced K60's old failure, an extern and a type error, and passed the `if (0 && ...)` form. Its first run found 8 more that would have stopped at the build, on tables written after I knew the lesson: C10 K02, K07; C8b X02; sigsuspend K16, K19, G01, G02, G04. Fixed in the tables, none of it has run yet. Also corrected: my OPEN-BUGS line said viv-run failed at `viv run`. It never did, and I had not run it. Its fault was a PASS on the console half alone.
+
 **Decisions that were the operator's:** votes 18, 19 and 20 of project_aux_votes_1021. The SMP subset here is aux's reading of the hold, not a vote.
 
 ## 2026-11-02 (aux, Opus 5.5 1M) -- SIGUSR1 and SIGUSR2 become notes, and every family word outgrows its byte
