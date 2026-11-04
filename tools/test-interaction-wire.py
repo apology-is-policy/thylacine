@@ -22,7 +22,7 @@ CHECK(HIN_GET_CLIPBOARD == 4 && HIN_READ_CLIPBOARD == 5 && HIN_BEGIN_COPY == 6);
 CHECK(HIN_WRITE_COPY == 7 && HIN_COMMIT_COPY == 8 && HIN_CANCEL == 9 && HIN_UNBIND_CONTROLLER == 10);
 CHECK(HIN_INS == 1 && HIN_NOR == 2 && HIN_VIS == 3 && HIN_CMD == 4 && HIN_APP == 5);
 CHECK(HIN_DENIED == 1 && HIN_GONE == 2 && HIN_TOO_LARGE == 7);
-CHECK(HIN_BAD_HANDLE == 9 && HIN_CONFLICT == 11 && HIN_NO_MEMORY == 12);
+CHECK(HIN_BAD_HANDLE == 116 && HIN_CONFLICT == 11 && HIN_NO_MEMORY == 12);
 CHECK(HIN_BUSY == 16 && HIN_INVALID == 22 && HIN_UNSUPPORTED == 95 && HIN_TIMEOUT == 110);
 int main(void) {
     return fwrite(hin_hello_fixture, 1, sizeof hin_hello_fixture, stdout) == HIN_HEADER_BYTES ? 0 : 1;

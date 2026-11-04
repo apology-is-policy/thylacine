@@ -40,6 +40,8 @@ Native observations:
   parked reads, then because a second fid cannot reclaim a consume-once share.
   Both failures retained; corrected fixtures use SQPOLL and raw original mapping.
   Geometry refusal does not promise EBADF; present does. No product fix needed.
+  (Since operator vote 2026-11-04 (66) the present answers ESTALE, because the
+  kernel reads a server's EBADF as EIO.)
 
 Remaining before full qualification:
 - Legacy media/manual graphical regression passed71.60s. Inline View, pane/zoom

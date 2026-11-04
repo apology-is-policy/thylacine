@@ -1085,7 +1085,7 @@ fn a_refusal_that_spoils_the_fid_ends_the_connection_and_the_next_job_works() {
 fn a_badhandle_on_a_job_ends_the_connection_and_the_next_job_works() {
     let mut s = Server::new();
     let mut c = bound(&mut s, 0);
-    s.refuse = vec![(Operation::GetClipboard, -9)];
+    s.refuse = vec![(Operation::GetClipboard, -116)];
     c.paste(0).unwrap();
     drive(&mut c, &mut s, 0);
     assert_eq!(
@@ -1096,6 +1096,31 @@ fn a_badhandle_on_a_job_ends_the_connection_and_the_next_job_works() {
     c.paste(SEC).unwrap();
     drive(&mut c, &mut s, SEC);
     assert!(matches!(c.take_event(), Some(Event::Pasted(_))));
+}
+
+#[test]
+fn the_table_reads_every_failure_by_its_own_value() {
+    for f in [
+        Failure::Denied,
+        Failure::Gone,
+        Failure::TooLarge,
+        Failure::Conflict,
+        Failure::NoMemory,
+        Failure::Busy,
+        Failure::Invalid,
+        Failure::Unsupported,
+        Failure::Timeout,
+        Failure::BadHandle,
+    ] {
+        assert_eq!(failure(-(f as u32 as i32)), Some(f));
+    }
+}
+
+#[test]
+fn a_server_ebadf_is_no_answer_because_the_kernel_reads_it_as_eio() {
+    assert_eq!(failure(-116), Some(Failure::BadHandle));
+    assert_eq!(failure(-9), None);
+    assert_eq!(failure(-5), None);
 }
 
 #[test]
