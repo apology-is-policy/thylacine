@@ -26,6 +26,7 @@
 #define NW_CHILD   NW_BIT(NOTE_BIT_CHILD_EXIT)
 #define NW_EINTR   (-(s64)T_E_INTR)
 #define NW_POLL_OFF (-2)
+#define NW_TERM    NW_BIT(NOTE_BIT_TERM)
 
 static struct Proc *nw_proc(bool handler) {
     struct Proc *p = proc_alloc();
@@ -247,6 +248,7 @@ static bool          g_nw_take_form, g_nw_in_handler, g_nw_discard_first;
 static s32           g_nw_poll_ms;
 static s64           g_nw_poll_result;
 static bool          g_nw_poll_answers;
+static bool          g_nw_stop_at_the_tail;
 static volatile s64  g_nw_begun;
 static struct Note   g_nw_note;
 static volatile int  g_nw_direct;
@@ -286,6 +288,12 @@ static void nw_entry(void) {
         t->note_mask  = 0;
     }
     if (g_nw_discard_first) (void)notes_discard_name(t->proc, NOTE_NAME_USR1);
+    if (g_nw_stop_at_the_tail) {
+        t->note_mask = 0;
+        t->note_wait_flags = 0;
+        g_nw_done = 1u;
+        test_thread_park_terminal(&g_nw_exited);
+    }
 
     struct exception_context ctx;
     for (size_t k = 0; k < sizeof(ctx); k++) ((u8 *)&ctx)[k] = 0;
@@ -318,6 +326,7 @@ static void nw_reset(u64 old, u64 set, bool take_form, s64 timeout) {
     g_nw_old = old; g_nw_set = set; g_nw_timeout = timeout;
     g_nw_take_form = take_form; g_nw_in_handler = false; g_nw_discard_first = false;
     g_nw_poll_ms = NW_POLL_OFF; g_nw_poll_result = 0; g_nw_poll_answers = false;
+    g_nw_stop_at_the_tail = false;
     g_nw_begun = 0x7fffffff;
     g_nw_direct = -3;
     g_nw_sp = 0x10000000u;
@@ -785,8 +794,9 @@ void test_notewait_dispose_row_carries_mask(void) {
 }
 
 // A poll that answers without a note: the mask is back before the tail, so a note only the
-// call's mask let in runs no handler and stays queued. A ready fd answers first, because
-// the caught note's latch is the poll's to read after a pass finds nothing.
+// call's mask let in runs no handler and stays queued. The answer here is handed in, so this
+// is the restore and not the order: that a ready fd answers first is poll.c's, and only
+// the guest legs run it (pouch-hello-signals ppoll-ready, viv-pheno-probe L360).
 void test_notewait_poll_ready_keeps_the_note(void) {
     TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree must be empty at test entry");
     struct Proc *p = nw_proc(true);
@@ -885,6 +895,100 @@ void test_notewait_poll_tail_note_goes_to_the_tail(void) {
     TEST_EXPECT_EQ((u64)g_nw_x0, 0x77ull, "with its first argument");
     TEST_EXPECT_EQ(left, 0u, "the note is gone");
     TEST_EXPECT_EQ((u64)g_nw_mask_after, NW_CHILD, "the thread's mask is back");
+}
+
+// A fatal note the call's mask lets in, posted while the poll sleeps. The poll core answers
+// the death wake with 0, and the mask must stay: the tail ends the Proc under it. Restored,
+// the note would wait behind the caller's mask and an untimed poll would read a timeout.
+// The harness stops short of the tail, which would end this test's thread.
+void test_notewait_poll_death_wake_keeps_the_mask(void) {
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree must be empty at test entry");
+    struct Proc *p = nw_proc(false);
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    TEST_EXPECT_EQ(sys_note_dispose_for_proc(p, NOTE_NAME_TERM, NOTE_DISP_DEFAULT, 0), 0ll,
+                   "a table governs");
+    nw_reset(NW_TERM, 0, false, -1);
+    g_nw_poll_ms = -1;
+    g_nw_stop_at_the_tail = true;
+    struct nw_run r;
+    bool started = nw_start(&r, p);
+    bool blocked = started && nw_until_blocked(&r);
+    bool posted  = false;
+    if (blocked) {
+        posted = notes_post(p, NOTE_NAME_TERM, 0u, NULL, true) == 0;
+        proc_interrupt_terminate_wake(p);
+    }
+    bool done = blocked && nw_until_done();
+    u32 left = nw_queued(p);
+    nw_finish(&r);
+
+    TEST_ASSERT(started && blocked, "the wait stands before any note");
+    TEST_ASSERT(posted && done, "the death wake ends it");
+    TEST_EXPECT_EQ(g_nw_rc, 0ll, "the poll core's answer to a death wake");
+    TEST_EXPECT_EQ((u64)g_nw_mask_during, 0ull, "still the call's mask");
+    TEST_EXPECT_EQ((u32)g_nw_flags_during, NOTE_WF_MASK_HELD | NOTE_WF_NOHAND, "held for the tail");
+    TEST_EXPECT_EQ(left, 1u, "and the note is the tail's");
+}
+
+// Each answer, one variable from the others, with a fatal note the call's mask admits.
+void test_notewait_mask_end_reads_the_answer(void) {
+    struct Proc *p = nw_proc(false);
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    TEST_EXPECT_EQ(sys_note_dispose_for_proc(p, NOTE_NAME_TERM, NOTE_DISP_DEFAULT, 0), 0ll,
+                   "a table governs");
+    nw_fake_on(p);
+
+    #define NW_HOLD() do { g_nw_fake.note_saved_mask = NW_TERM; g_nw_fake.note_mask = 0; \
+                           g_nw_fake.note_wait_flags = NOTE_WF_MASK_HELD; } while (0)
+    NW_HOLD();
+    notes_wait_mask_end(&g_nw_fake, 0);
+    u64 quiet_zero = g_nw_fake.note_mask;
+    TEST_EXPECT_EQ(notes_post(p, NOTE_NAME_TERM, 0u, NULL, true), 0, "term");
+    NW_HOLD();
+    notes_wait_mask_end(&g_nw_fake, 0);
+    u64 dying_zero = g_nw_fake.note_mask;
+    NW_HOLD();
+    notes_wait_mask_end(&g_nw_fake, 1);
+    u64 dying_ready = g_nw_fake.note_mask;
+    NW_HOLD();
+    notes_wait_mask_end(&g_nw_fake, -(s64)T_E_FAULT);
+    u64 dying_fault = g_nw_fake.note_mask;
+    NW_HOLD();
+    notes_wait_mask_end(&g_nw_fake, -(s64)T_E_INTR);
+    u64 dying_eintr = g_nw_fake.note_mask;
+    #undef NW_HOLD
+    g_nw_fake.note_wait_flags = 0;
+    g_nw_fake.proc = NULL;
+    nw_free(p);
+
+    TEST_EXPECT_EQ(quiet_zero, NW_TERM, "control: a deadline with nothing fatal restores");
+    TEST_EXPECT_EQ(dying_zero, 0ull, "a death wake's 0 keeps the call's mask");
+    TEST_EXPECT_EQ(dying_ready, NW_TERM, "a ready count restores: the fds win");
+    TEST_EXPECT_EQ(dying_fault, NW_TERM, "so does a write-back's fault");
+    TEST_EXPECT_EQ(dying_eintr, 0ull, "EINTR keeps it");
+}
+
+// With no table the tail leaves a note whose default ignores queued, so going to the tail
+// for it would re-issue the call for ever. The call waits, under its mask, and answers.
+void test_notewait_poll_no_table_has_no_tail_note(void) {
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree must be empty at test entry");
+    struct Proc *p = nw_proc(false);
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    TEST_EXPECT_EQ(notes_post(p, NOTE_NAME_TTY_WINCH, 0u, NULL, true), 0, "posted");
+    nw_reset(NW_BIT(NOTE_BIT_TTY), 0, false, -1);
+    g_nw_poll_ms = 1;
+    struct nw_run r;
+    bool started = nw_start(&r, p);
+    bool done = started && nw_until_done();
+    u32 left = nw_queued(p);
+    nw_finish(&r);
+
+    TEST_ASSERT(started && done, "the sleep ended by itself");
+    TEST_EXPECT_EQ((s64)g_nw_begun, 0ll, "not sent to a tail that would not take it");
+    TEST_EXPECT_EQ(g_nw_rc, 0ll, "0 at the deadline");
+    TEST_EXPECT_EQ((u64)g_nw_elr, 0x8000ull, "no re-issue");
+    TEST_EXPECT_EQ((u64)g_nw_mask_after, NW_BIT(NOTE_BIT_TTY), "the thread's mask is back");
+    TEST_EXPECT_EQ(left, 1u, "the note stays");
 }
 
 // In a handler the saved slot holds the mask the handler returns to, and no note can run

@@ -13568,9 +13568,12 @@ static s64 viv_poll_translated(struct Proc *p, struct pollfd *kfds, u64 nfds,
                              : sys_resolve_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT,
                                                           path, plen, 0u /* OREAD */,
                                                           &sp, &r);
-                if (rc == -(s64)T_E_NOMEM) {
+                if (rc == -(s64)T_E_NOMEM || rc == -(s64)T_E_INTR) {
                     // V-5d F6: a SHORTAGE fails the whole call, as Linux's poll
                     // and select do (ENOMEM), rather than posing as a broken fd.
+                    // So does a caught note that ended the open's wait: nothing is
+                    // wrong with the socket, and the caller is owed its EINTR. A
+                    // POLLNVAL here tells an event loop to close a live connection.
                     result = rc;
                     goto out;
                 }

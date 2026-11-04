@@ -2598,7 +2598,11 @@ enum {
     //   0 at the deadline. With either answer the caller's mask is back before it returns
     //   and no handler has run for a note only the call's mask let in. A caught note that
     //   ends the wait runs its handler under the call's mask, and -T_E_INTR, with no
-    //   restart under NOTE_DISP_RESTART, as poll's. x4 is read by this form alone.
+    //   restart under NOTE_DISP_RESTART, as poll's. A fatal note the call's mask lets in
+    //   ends the Proc under that mask. In a handler no note can end the call, only a ready
+    //   fd or its deadline. A Proc no table governs gets the mask and the wait, and no note
+    //   ends it but a fatal one. A self-managing Proc's EINTR says a note is on its fd.
+    //   x4 is read by this form alone.
     //
     // NOTE_WAIT_PENDING: x1, x2 and x3 = 0. POSIX sigpending: answers a take word naming
     //   what is queued for this thread and its mask holds. In a handler, every note is

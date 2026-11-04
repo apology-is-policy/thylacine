@@ -826,10 +826,15 @@ some other way (operator vote 28, [[dec-2026-11-04-poll-mask]]). Begin differs f
 front in one thing: a caught note goes on to the poll, whose pass reads the latch only after
 finding nothing ready, so a ready fd answers first. A note only the tail can act on arms
 nothing a poll reads, so begin marks an unwind and answers `EINTR`, with `NOHAND` even for a
-timed call, since no time has gone. End is Linux's `restore_saved_sigmask_unless`: any answer
-but `EINTR` puts the mask back and clears both marks at once, so no handler runs for a note
-only the call's mask let in. In a handler neither does anything, and that is the stated
-imprecision a suspend has. `notes_wait_pending` reads the own word and the queue against
+timed call, since no time has gone. Begin leaves that out for a Proc no table governs, whose
+tail would leave a default-ignored note queued and re-issue for ever
+([[fnd-note-wait-r2-f3]]). End is Linux's `restore_saved_sigmask_unless`: an answer that is no
+note's doing puts the mask back and clears both marks at once, so no handler runs for a note
+only the call's mask let in. `EINTR` keeps it, and so does the 0 the poll core gives a death
+wake: restored, the fatal note would wait behind the caller's mask and an untimed poll would
+read a timeout ([[fnd-note-wait-r2-f1]]). In a handler neither does anything, so no note can
+end the call: a coarser imprecision than a suspend's ([[fnd-note-wait-r2-f4]]).
+`notes_wait_pending` reads the own word and the queue against
 `notes_interrupted_mask`, or against everything in a handler, and takes nothing. The snare
 family is left out of its answer, which is a take word. `notes_sigset_for_take` is the Linux
 row's way back.

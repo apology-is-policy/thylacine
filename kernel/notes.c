@@ -2895,10 +2895,11 @@ s64 notes_wait_suspend(struct Thread *t, u64 mask) {
 
 // ppoll's and pselect's mask. It differs from sigsuspend's in what can end the call. A
 // caught note goes on to the poll: its latch is armed and the poll reads it after a pass
-// finds nothing ready, so a ready fd answers first, as Linux's do_poll has it. A note
-// only the tail can act on arms nothing a poll reads, so the call goes to the tail at
-// once, and with no time gone a re-issue loses none, whatever the timeout. In a handler
-// no other handler can run and the saved slot is in use, so the mask has nothing to do.
+// finds nothing ready, so a ready fd answers first, as Linux's do_poll has it. Any other
+// note queued now is the tail's alone, so the call goes to the tail at once, and with no
+// time gone a re-issue loses none, whatever the timeout. In a handler no other handler
+// can run and the saved slot is in use, so the mask has nothing to do, and no note can
+// end the call: only a ready fd or its deadline can.
 s64 notes_wait_mask_begin(struct Thread *t, u64 mask, bool forever) {
     if (t->in_handler) return 0;
 
@@ -2908,8 +2909,9 @@ s64 notes_wait_mask_begin(struct Thread *t, u64 mask, bool forever) {
     t->note_mask        = mask;
 
     struct Proc *p = t->proc;
-    // A self-managing Proc's fd holds its notes, and no tail will take them.
-    if (!p || !p->notes || proc_is_self_managing_notes(p)) return 0;
+    // A self-managing Proc's fd holds its notes, and no tail will take them. With no table
+    // the tail leaves a note whose default ignores queued, so a re-issue would find it again.
+    if (!p || !p->notes || !notes_table_governs(p) || proc_is_self_managing_notes(p)) return 0;
     struct Note candidate;
     int direct;
     spin_lock(&p->notes->lock);
@@ -2923,9 +2925,14 @@ s64 notes_wait_mask_begin(struct Thread *t, u64 mask, bool forever) {
 }
 
 // Linux's restore_saved_sigmask_unless: what the call answered with is not a note's doing,
-// so the tail must not run a handler the caller's own mask holds.
+// so the tail must not run a handler the caller's own mask holds. Two answers are a note's:
+// EINTR, and the 0 the poll core gives a death wake, since it expects the tail to end the
+// Proc. Restoring there would hide the fatal note the call's mask let in behind the
+// caller's, and an untimed poll would read a timeout. A ready count wins over a fatal note,
+// as in Linux: the caller gets its fds, and the note waits behind its mask.
 void notes_wait_mask_end(struct Thread *t, s64 result) {
-    if (result == -(s64)T_E_INTR || !(t->note_wait_flags & NOTE_WF_MASK_HELD)) return;
+    if (!(t->note_wait_flags & NOTE_WF_MASK_HELD)) return;
+    if (result == -(s64)T_E_INTR || (result == 0 && thread_die_pending(t))) return;
     t->note_mask        = t->note_saved_mask;
     t->note_wait_flags &= (u8)~(NOTE_WF_MASK_HELD | NOTE_WF_NOHAND);
 }

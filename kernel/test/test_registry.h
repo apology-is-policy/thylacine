@@ -808,6 +808,9 @@ void test_notewait_handler_mask_enter_and_restore(void); // one way in, one way 
 void test_notewait_dispose_row_carries_mask(void); // the flags word's row
 void test_notewait_poll_ready_keeps_the_note(void); // a ready fd answers first
 void test_notewait_poll_deadline_restores(void); // the mask is back at 0
+void test_notewait_poll_death_wake_keeps_the_mask(void);
+void test_notewait_mask_end_reads_the_answer(void);
+void test_notewait_poll_no_table_has_no_tail_note(void);
 void test_notewait_poll_note_ends_the_wait(void); // the call's mask until the tail
 void test_notewait_poll_tail_note_goes_to_the_tail(void); // no time lost
 void test_notewait_poll_in_a_handler(void); // the masks stay

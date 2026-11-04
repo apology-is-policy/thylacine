@@ -2050,14 +2050,23 @@ of `ppoll` and `pselect6`, and `rt_sigpending` sit on the same cores (operator v
   the `pollfd` array, `x4` its length, and zero fds sleep for the timeout. It differs from
   a suspend because it can end some other way. A caught note goes on to the poll, whose
   pass reads the latch only after finding nothing ready, so a ready fd answers first, as
-  Linux's `do_poll` has it. A note only the tail can act on arms nothing a poll reads, so
-  the call answers `-EINTR` at once and is re-issued after the tail takes the note, with
-  no time gone, even when it is timed. Any answer but `-EINTR` puts the caller's mask back
-  before the tail, Linux's `restore_saved_sigmask_unless`, so a note only the mask let in
-  stays pending and no handler runs beside a ready fd. `-EINTR` leaves it for the handler's
-  return or the tail. In a handler the call leaves the masks alone and no note can run: a
-  stated imprecision, the same as a suspend's. The array is read before the mask goes in,
-  so a call that was going to fault has changed nothing.
+  Linux's `do_poll` has it. Any other note queued when the call starts is the tail's alone,
+  so the call answers `-EINTR` at once and is re-issued after the tail takes the note, with
+  no time gone, even when it is timed. An answer that is no note's doing puts the caller's
+  mask back before the tail, Linux's `restore_saved_sigmask_unless`, so a note only the mask
+  let in stays pending and no handler runs beside a ready fd. Two answers are a note's and
+  keep the mask for the handler's return or the tail: `-EINTR`, and the 0 the poll core gives
+  a death wake, so a fatal note the mask let in ends the Proc under it. A ready count wins
+  over a fatal note, as in Linux. A note that interrupts a socket's readiness open is the
+  call's `-EINTR`, not a `POLLNVAL`. The array is read before the mask goes in, so a call
+  that was going to fault has changed nothing.
+
+  In a handler the call leaves the masks alone and no note can end it, only a ready fd or
+  its deadline. That is a stated imprecision, and a coarser one than a suspend's, which ends
+  at a note its mask admits. A Proc no table governs gets the mask and the wait, where a
+  suspend is refused, since the wait has other ends; no note ends it but a fatal one. A
+  default-ignored or stop note posted during a masked poll does not end it, where Linux
+  would restart the call: it waits for the tail after the poll ends.
 - **`NOTE_WAIT_PENDING`** answers a take word of what is queued for this thread and held,
   its own direct notes and the queue, by row in the tty family. It reads the interrupted
   mask, not a wait's. In a handler every note is held, so it reads all of them. It takes

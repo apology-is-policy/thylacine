@@ -6126,6 +6126,39 @@ unsafe fn run_linux() -> ! {
     let _ = svc3(NR_CLOSE, nv_pipe[1] as u64, 0, 0);
     leg!(rep, nv_n == 0, &nv_mk[..nv_n]);
 
+    // L371: a socket's first poll opens its readiness file, one RPC to netd, with the note
+    // the mask opened already pending. The note may end that open's wait, and the socket is
+    // not at fault: the call owes EINTR, never POLLNVAL or EBADF. Two listeners, because
+    // the readiness file is cached after a first poll.
+    nv_n = 0;
+    for (sel, port) in [(false, 0xA0u8), (true, 0xA1u8)] {
+        let s = svc3(NR_SOCKET, AF_INET, SOCK_STREAM, 0);
+        // sin_port = 7840 and 7841, in network order: past the other listeners'.
+        let sa: [u8; 16] = [AF_INET as u8, 0, 0x1E, port, 127, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0];
+        if s < 0 || svc3(NR_BIND, s as u64, sa.as_ptr() as u64, sa.len() as u64) != 0
+            || svc3(NR_LISTEN, s as u64, 1, 0) != 0
+        {
+            nv_n = put_bytes(&mut nv_mk, 0, b"L371 setup\n");
+            break;
+        }
+        let r0 = svc3(NR_TKILL, kf_tid as u64, SIGUSR1, 0);
+        let before = nw_runs();
+        let (r1, _) = nv_wait(sel, s as i32, nv_two_s.as_ptr(), &nv_open);
+        let runs = nw_runs();
+        let back = nv_mask();
+        let _ = svc3(NR_CLOSE, s as u64, 0, 0);
+        if !(r0 == 0 && r1 == NW_EINTR && runs == before + 1 && back == nw_held) && nv_n == 0 {
+            nv_n = put_bytes(&mut nv_mk, 0, b"L371 sel=");
+            nv_n = put_dec(&mut nv_mk, nv_n, sel as i64);
+            nv_n = put_bytes(&mut nv_mk, nv_n, b" r=");
+            nv_n = put_dec(&mut nv_mk, nv_n, r1);
+            nv_n = put_bytes(&mut nv_mk, nv_n, b" runs=");
+            nv_n = put_dec(&mut nv_mk, nv_n, (runs - before) as i64);
+            nv_n = put_bytes(&mut nv_mk, nv_n, b"\n");
+        }
+    }
+    leg!(rep, nv_n == 0, &nv_mk[..nv_n]);
+
     ksa = [SIG_DFL, 0, 0, 0];
     let _ = svc4(NR_RT_SIGACTION, SIGUSR1, &ksa as *const u64 as u64, 0, 8);
     let _ = svc4(NR_RT_SIGACTION, SIGUSR2, &ksa as *const u64 as u64, 0, 8);
