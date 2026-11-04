@@ -3020,3 +3020,22 @@ Vote 15: a separate chunk straight after C4, and the signoff for `docs/ERRORS.md
   boot instead of skipping a present program. That has not run: it needs this chunk on main's tree.
 - **Still open, owned.** `T_E_NOEXEC`, signed off by vote 26, its own chunk; a 9P server answering ENOENT past its first name poisons
   a dentry (OPEN-BUGS); the older spawn fronts keep a flat -1, which ER-3 owns.
+
+## C8a: torpor keyed on the space, a lock per bucket, oldest first — 2026-11-04
+
+A futex is now keyed on `(AddrSpace, va)`, with a lock per bucket, oldest first, and no wake under the
+bucket's lock. The two kernel walks and the die check under the bucket's lock are gone: a death or a stop
+reaches a waiter through `rendez_blocked_on`, as any sleep (operator votes 22 and 29). A pinned thread's
+wake now goes to its home CPU rather than the waker's (`chg-2026-11-04-pinned-wake`), a bug on main since
+#864. `specs/torpor.tla` models the wake and the record's lifetime, with the rendez lock's hold as two steps.
+
+Audit: round 1 Fable 5.1, 0/1/2/2; round 2 Fable 5.1, 0/0/2/5; round 3 Fable 5.1 on the walks' removal and the `ready_on` guard, 0/0/0/3. All fixed.
+
+Tests: the full suite is green at 2212 on `3e2adf489`, twice, one ELF, with joey and the guest legs. Sabotages:
+16 on `e8b0515ee`, 10 on `9059174e3`, 3 on `3e2adf489`, each read at its target. TLC: `torpor.cfg` 533,564
+distinct states and `torpor_broadcast.cfg` 880,388 clean, seven buggy cfgs each failing on its own invariant;
+`death_wake` and `debug_stop` re-run. SMP subset (`default-smp4 ubsan-smp4`, 20 boots, votes 27 and 31): 20 of 20 boots passed, 0 corruption
+on `3e2adf489`.
+
+**Did not run:** the full SMP matrix, under the 11-02 hold. It stays owed at the merge to main, with
+`tools/test-fault.sh`, the interactive fleet and `tools/check-production.sh`.

@@ -4,7 +4,7 @@ type: chg
 title: "torpor keyed on the address space, a lock per bucket, oldest first, and no wake under the lock"
 date: 2026-11-03
 arc: arc-phase6-pouch
-commits: []
+commits: [0e77da090]
 touched:
   - sub-kernel-torpor
 established: []

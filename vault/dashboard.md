@@ -125,12 +125,12 @@ Generated — do not edit between the markers (`quaestor render`).
 
 ## Recent changes
 
+- 2026-11-04 [[chg-2026-11-04-c8a-r2]] — Torpor keyed on the space: round 2's fixes, and a model that can see K06
+- 2026-11-04 [[chg-2026-11-04-c8a-r3]] — Torpor keyed on the space: round 3's wording
+- 2026-11-04 [[chg-2026-11-04-pinned-wake]] — A pinned thread's wake goes to its home CPU, not the waker's
 - 2026-11-04 [[chg-2026-11-04-poll-mask]] — ppoll's and pselect's mask, and sigpending, on SYS_NOTE_WAIT
+- 2026-11-04 [[chg-2026-11-04-torpor-walks-go]] — The two torpor walks and the bucket-lock die check go
 - 2026-11-04 [[chg-2026-11-04-walk-errno-close]] — The walk errno close: rounds 1 and 2, the first boots, 32 sabotages
+- 2026-11-03 [[chg-2026-11-03-c8a-r1]] — Torpor keyed on the space: round 1's fixes
 - 2026-11-03 [[chg-2026-11-03-c8a-torpor]] — torpor keyed on the address space, a lock per bucket, oldest first, and no wake under the lock
-- 2026-11-03 [[chg-2026-11-03-c8b-timer-bases]] — Per-CPU timer bases: a wake takes no timer lock
-- 2026-11-03 [[chg-2026-11-03-item-11c-close]] — Item 11c close: rounds 1 to 3, the sweep, three leases
-- 2026-11-03 [[chg-2026-11-03-item-11c]] — A per-note table for native programs, SA_RESTART in the kernel, and an open a note can interrupt
-- 2026-11-03 [[chg-2026-11-03-note-wait]] — sigsuspend, sigtimedwait, sa_mask, SA_RESETHAND: the kernel owns the mask
-- 2026-11-03 [[chg-2026-11-03-sigpipe-row]] — Pouch's SIGPIPE default is a row that ignores
 <!-- generated:end -->

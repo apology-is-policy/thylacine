@@ -325,6 +325,10 @@ u64 timer_wallclock_offset_ns_now(void) {
 }
 
 void timer_busy_wait_ticks(u64 n) {
+    // g_ticks is cpu0's, and before smp_enable_secondary_preemption a secondary has
+    // no tick of its own to end its WFI, so off cpu0 this waits for ever.
+    if (smp_cpu_idx_self() != 0)
+        extinction("timer_busy_wait_ticks off the boot CPU");
     u64 target = g_ticks + n;
     while (g_ticks < target) {
         __asm__ __volatile__("wfi" ::: "memory");

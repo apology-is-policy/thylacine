@@ -383,7 +383,7 @@ idle-cancel moves wholly to LS-8; LS-5 delivers the foreground-command interrupt
   client's `client_self_dying` (a Ctrl-C'd coreutil blocked in a 9P RPC takes
   the audited #845 Tflush unwind). The WAKE (`proc_interrupt_terminate_wake`,
   internally latch-gated, caller holds g_proc_table_lock) is the #811 death
-  walk verbatim minus `torpor_wake_all_for_proc` (torpor waiters are
+  walk verbatim minus `torpor_wake_all_for_proc`, which thread-model C8a has since removed from the death walk too (torpor waiters are
   reachable via `rendez_blocked_on`; tsleep's widened check closes the
   register-after-walk race), with the broadcast `smp_resched_others` replaced by
   a kick of each of the Proc's threads running on another CPU (`IPI_RESCHED` to
