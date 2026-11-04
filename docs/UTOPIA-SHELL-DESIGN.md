@@ -602,7 +602,7 @@ Line discipline returns EOF on the input fd. If the input buffer is empty, the s
 long_running_command &
 ```
 
-Spawns the command; the shell prints `[N] PID` where N is the jobspec; adds the child's notes fd to the poll set; continues the prompt. When the child exits, the shell prints `[N]+ Done <cmd>`. **As-built (through LS-8c):** the notification is reported ASYNCHRONOUSLY while the user is idle at the prompt -- LS-8a made `/dev/cons` pollable, and the LS-8c multi-fd loop (`usr/utopia/shell/src/main.rs`) polls cons + the shell's note fd together, so the child's `child_exit` note wakes the idle loop and `Repl::on_notes_ready` reaps + prints the `[N]+ Done` line the instant the job exits (bash-style immediate, not the fish-style lazy "at next prompt cycle" the U-7a interim used while cons had no `.poll` hook).
+`&` ends its statement as `;` does, so another may follow on the line: `a & b &` runs both in the background. Spawns the command; the shell prints `[N] PID` where N is the jobspec; adds the child's notes fd to the poll set; continues the prompt. When the child exits, the shell prints `[N]+ Done <cmd>`. **As-built (through LS-8c):** the notification is reported ASYNCHRONOUSLY while the user is idle at the prompt -- LS-8a made `/dev/cons` pollable, and the LS-8c multi-fd loop (`usr/utopia/shell/src/main.rs`) polls cons + the shell's note fd together, so the child's `child_exit` note wakes the idle loop and `Repl::on_notes_ready` reaps + prints the `[N]+ Done` line the instant the job exits (bash-style immediate, not the fish-style lazy "at next prompt cycle" the U-7a interim used while cons had no `.poll` hook).
 
 ### 10.6 Job control builtins
 

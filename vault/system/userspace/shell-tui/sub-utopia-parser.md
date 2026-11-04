@@ -157,6 +157,9 @@ both the success and error paths so a top-level parse always restores it.
 - **`DqPart`** — the pieces of an interpolated string, so a double-quoted run
   keeps its literal and substituted segments distinct instead of being
   re-scanned later.
+- **`&` ends its statement,** as `;` does. `parse_pipeline` takes it as the suffix, and
+  all three statement lists accept a statement that ended in it with nothing after, so
+  `a & b &` is two background statements.
 - **The AST** — a `Script` of `Statement`s; a statement is a pipeline, a
   short-circuit AND-OR list (`p && q || r`, scripture 8.6 — a `first` pipeline
   plus a `Vec<(AndOrOp, Pipeline)>`, built only when a connector is present so a

@@ -278,6 +278,17 @@ impl Parser {
             .insert(self.pos + 1, Token::new(TokenKind::RParen, Span::new(mid, span.end)));
     }
 
+    /// A statement that ended in `&` needs no separator after it: `&` ends the
+    /// statement as `;` does, so another may follow on the line.
+    fn at_statement_end(&self) -> bool {
+        self.at_statement_terminator()
+            || (self.pos > 0
+                && matches!(
+                    self.tokens.get(self.pos - 1).map(|t| &t.kind),
+                    Some(TokenKind::Ampersand)
+                ))
+    }
+
     fn at_statement_terminator(&self) -> bool {
         matches!(
             self.peek_kind(),
@@ -332,7 +343,7 @@ impl Parser {
             let stmt = self.parse_statement()?;
             // After a statement, require a terminator (or EOF) so we
             // catch dangling tokens early.
-            if !self.at_statement_terminator() {
+            if !self.at_statement_end() {
                 return Err(ParseError {
                     kind: ParseErrorKind::UnexpectedToken {
                         expected: "`;`, newline, or end of input",
@@ -847,7 +858,7 @@ impl Parser {
                 _ => {}
             }
             let stmt = self.parse_statement()?;
-            if !self.at_statement_terminator() {
+            if !self.at_statement_end() {
                 return Err(ParseError {
                     kind: ParseErrorKind::UnexpectedToken {
                         expected: "`;`, newline, or `}`",
@@ -889,7 +900,7 @@ impl Parser {
             if ends_on_rparen {
                 self.split_double_rparen();
             }
-            if !self.at_statement_terminator() {
+            if !self.at_statement_end() {
                 return Err(ParseError {
                     kind: ParseErrorKind::UnexpectedToken {
                         expected: "`;`, newline, or `)`",
@@ -1838,6 +1849,31 @@ mod tests {
             }
             _ => panic!(),
         }
+    }
+
+    #[test]
+    fn ampersand_ends_its_statement() {
+        let backgrounds = |src: &str| -> Vec<bool> {
+            parse_ok(src)
+                .statements
+                .iter()
+                .map(|s| match &s.kind {
+                    StatementKind::Pipeline(p) => p.background,
+                    _ => panic!("{src}"),
+                })
+                .collect()
+        };
+        assert_eq!(backgrounds("a & b"), [true, false]);
+        assert_eq!(backgrounds("a & b &"), [true, true]);
+        assert_eq!(backgrounds("a; b & c"), [false, true, false]);
+        assert_eq!(backgrounds("a &\nb"), [true, false]);
+        // Each statement list, one variable from a word that may not follow.
+        assert!(parse("(a) b").is_err());
+        assert!(parse("{ (a) b }").is_err());
+        assert!(parse("( (a) b )").is_err());
+        assert!(parse("(a) & b").is_ok());
+        assert!(parse("{ (a) & b }").is_ok());
+        assert!(parse("( (a) & b )").is_ok());
     }
 
     #[test]
