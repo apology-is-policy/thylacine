@@ -16,10 +16,10 @@
 # driver exits 0, which each driver does only after asserting that its mutant
 # was refused.
 #
-# A driver taking --logs is the other convention: --sanitize when it has it, and its
-# own --mutants runs every mutant in one leg. One with neither --mutant nor --mutants
-# must run them every time, which it says by saying PASS for them; the leg's log is
-# read for that.
+# A driver taking --logs is the other convention, required or not: --sanitize when it
+# has it, and its own --mutants runs every mutant in one leg. One with neither --mutant
+# nor --mutants must run them every time. It prints one PASS line per case, the control
+# included, so fewer than two means it ran none.
 #
 # Drivers whose usage names a `musl` argument get the series-applied musl tree
 # that `tools/build.sh sysroot` (or any full build) leaves at
@@ -56,7 +56,7 @@ run_driver() {
     local name="$1" drv="$REPO_ROOT/tools/test-$1.py" usage mutants leg rc
     local pre=()
     usage="$(COLUMNS=10000 python3 "$drv" --help | head -n 1)"
-    if [[ " $usage " == *" --logs "* ]]; then
+    if [[ "$usage" == *"--logs "* ]]; then
         local base=(--logs "$OUT/$name/clean")
         [[ "$usage" == *"--sanitize"* ]] && base+=(--sanitize)
         mkdir -p "$OUT/$name"
@@ -68,8 +68,14 @@ run_driver() {
             rc=0
             python3 "$drv" "${base[@]}" --mutants > "$OUT/$name/mutants.log" 2>&1 || rc=$?
             if [[ $rc -eq 0 ]]; then echo "PASS $name mutants"; else echo "FAIL $name mutants: exit $rc (log: $OUT/$name/mutants.log)"; fi
-        elif ! /usr/bin/grep -qi 'mutant' "$OUT/$name/clean.log"; then
-            echo "FAIL $name: declares no mutants and ran none, so nothing proves it can refuse"
+        else
+            local cases
+            cases="$(/usr/bin/grep -c '^PASS ' "$OUT/$name/clean.log" || true)"
+            if [[ "$cases" -lt 2 ]]; then
+                echo "FAIL $name: declares no mutants and ran none, so nothing proves it can refuse"
+            else
+                echo "PASS $name mutants, in its clean leg: $cases cases"
+            fi
         fi
         return
     fi

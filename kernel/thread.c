@@ -97,6 +97,12 @@ static int thread_id_for(struct Proc *proc, bool exempt) {
 void thread_link_into_proc_locked(struct Thread *t, struct Proc *p) {
     ASSERT_TL_HELD(p);
     if (t->state == THREAD_EXITING) extinction("thread_link: linking an EXITING thread");
+    // The compositor's leg of ARCH 8.3 and its bound. The role is untrusted and free to
+    // make threads, so the band is rationed where each joins, under the lock, before it
+    // can be placed: two joining at once cannot both read room for one.
+    if ((__atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE) & PROC_FLAG_SEAT_CLIENT) &&
+        p->live_threads < SEAT_CLIENT_BAND_THREADS)
+        t->band = SCHED_BAND_INTERACTIVE;
     t->prev_in_proc = NULL;
     t->next_in_proc = p->threads;
     if (p->threads) p->threads->prev_in_proc = t;
@@ -545,9 +551,7 @@ static struct Thread *thread_new(struct Proc *proc, struct Proc *payer) {
     t->kstack_base = kalloc_base;          // P2-Dc: lowest page (guard)
     t->kstack_size = THREAD_KSTACK_TOTAL_SIZE;
     t->weight      = 1;
-    // No run tree or peer can see this thread yet, so its band has nothing to disagree with.
-    t->band        = (__atomic_load_n(&proc->proc_flags, __ATOMIC_ACQUIRE) & PROC_FLAG_SEAT_CLIENT)
-                         ? SCHED_BAND_INTERACTIVE : SCHED_BAND_NORMAL;
+    t->band        = SCHED_BAND_NORMAL;
     t->slice_remaining = THREAD_DEFAULT_SLICE_TICKS;
     t->pool_pages  = (u8)pool;
     t->pool_sponsor = sponsor;

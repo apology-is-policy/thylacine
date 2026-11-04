@@ -10195,7 +10195,7 @@ void apply_spawn_perms(struct Proc *p, u32 perm_flags) {
     // pid and stripes, so a roleless child serves nothing.
     if (perm_flags & SPAWN_PERM_SEAT_SERVICE) (void)proc_set_seat_service(p);
     // The thunks run this on the child's first thread, which existed before the role
-    // did. thread_new gives the Proc's later threads the band from the role.
+    // did. thread_link_into_proc_locked rations the band among the later ones.
     if ((perm_flags & SPAWN_PERM_SEAT_CLIENT) && proc_set_seat_client(p) == 0)
         sched_mark_interactive(current_thread());
 

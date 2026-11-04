@@ -740,7 +740,8 @@ static void pw_waker(void) {
     g_pw_waker_cpu = smp_cpu_idx_self();
     g_pw_go = true;
     (void)wakeup(&g_pw_rendez);
-    while (!g_pw_stop) __asm__ __volatile__("yield" ::: "memory");
+    // sched(), not a spin: a boot thread placed here has to run for the test to read it.
+    while (!g_pw_stop) sched();
     (void)spin_lock_irqsave(NULL);   // thread_kthread_retire's contract: masked to sched()
     thread_kthread_retire();
     sched();
@@ -771,14 +772,61 @@ void test_scheduler_pinned_wake_goes_home(void) {
     TEST_ASSERT(gone, "the waker retired");
 }
 
+// scheduler.pinned_sleeper_on_a_peer_wakes
+//
+// A thread pinned to a peer sleeps there, and a wake from here reaches it. The peer is
+// parked in this phase with no tick and the wake IPI is gated off, which is sound for a
+// thread an idle CPU can steal, and strands one that can run nowhere else.
+static struct Rendez g_pp_rendez;
+static volatile bool g_pp_asleep;
+static volatile bool g_pp_go;
+static volatile bool g_pp_woke;
+static volatile u32  g_pp_cpu;
+
+static int pp_cond(void *arg) {
+    (void)arg;
+    g_pp_asleep = true;
+    return g_pp_go;
+}
+
+static void pp_sleeper(void) {
+    (void)sleep(&g_pp_rendez, pp_cond, NULL);
+    g_pp_cpu = smp_cpu_idx_self();
+    g_pp_woke = true;
+    (void)spin_lock_irqsave(NULL);   // thread_kthread_retire's contract: masked to sched()
+    thread_kthread_retire();
+    sched();
+}
+
+void test_scheduler_pinned_sleeper_on_a_peer_wakes(void) {
+    if (!test_requires(smp_cpu_count() >= 2, "thylacine.smp", 0, true, "one CPU is online"))
+        return;
+    unsigned peer = (smp_cpu_idx_self() + 1u) % smp_cpu_count();
+    rendez_init(&g_pp_rendez);
+    g_pp_asleep = false; g_pp_go = false; g_pp_woke = false;
+    g_pp_cpu = smp_cpu_idx_self();
+    struct Thread *s = thread_create(kproc(), pp_sleeper);
+    TEST_ASSERT(s != NULL, "thread_create failed");
+    s->cpu_pinned = true;
+    ready_on(peer, s);
+    (void)gic_send_ipi(peer, IPI_RESCHED);
+    TEST_YIELD_UNTIL(g_pp_asleep && s->state == THREAD_SLEEPING);
+    g_pp_go = true;
+    (void)wakeup(&g_pp_rendez);
+    TEST_YIELD_UNTIL(g_pp_woke);
+    TEST_EXPECT_EQ(g_pp_cpu, (u32)peer, "it woke on the peer it is pinned to");
+    TEST_YIELD_UNTIL(s->state == THREAD_EXITING);
+    thread_free(s);
+}
+
 // scheduler.seat_client_takes_interactive
 //
 // The designation as a spawn thunk makes it, on the child's own first thread: that
-// thread and the Proc's later ones become INTERACTIVE. Only a designation that took
-// does it, and a fork of the compositor is not the compositor.
+// thread and the Proc's next one become INTERACTIVE, and no more than two live at once.
+// Only a designation that took does it, and a fork of the compositor is not the compositor.
 #define SCB_UNSEEN 0xffu
 static struct {
-    volatile u32 before, first, later, grand;
+    volatile u32 before, first, later, third, again, denied, grand;
     volatile int grand_pid;
 } g_scb;
 
@@ -795,10 +843,11 @@ static void scb_child(void *arg) {
     apply_spawn_perms(self->proc, SPAWN_PERM_SEAT_CLIENT);
     g_scb.first = self->band;
     struct Thread *later = thread_create(self->proc, sched_test_thread_a);
-    if (later) {
-        g_scb.later = later->band;
-        thread_free(later);
-    }
+    struct Thread *third = thread_create(self->proc, sched_test_thread_a);
+    if (later) { g_scb.later = later->band; thread_free(later); }
+    if (third) { g_scb.third = third->band; thread_free(third); }
+    struct Thread *again = thread_create(self->proc, sched_test_thread_a);
+    if (again) { g_scb.again = again->band; thread_free(again); }
     int gpid = rfork(RFPROC, scb_grand, NULL);
     g_scb.grand_pid = gpid;
     if (gpid > 0) {
@@ -808,11 +857,20 @@ static void scb_child(void *arg) {
     exits("ok");
 }
 
+// One variable from scb_child's first: the same mark with the role already held.
+static void scb_denied(void *arg) {
+    (void)arg;
+    apply_spawn_perms(current_thread()->proc, SPAWN_PERM_SEAT_CLIENT);
+    g_scb.denied = current_thread()->band;
+    exits("ok");
+}
+
 void test_scheduler_seat_client_takes_interactive(void) {
     u32 runner = SCB_UNSEEN, held = SCB_UNSEEN, refused = SCB_UNSEEN;
     bool bound = false, taken = false, rebound = false;
-    int pid = -1, reaped = -2, st = -1;
-    g_scb.before = g_scb.first = g_scb.later = g_scb.grand = SCB_UNSEEN;
+    int pid = -1, reaped = -2, st = -1, denied_pid = -1, denied_reaped = -2;
+    g_scb.before = g_scb.first = g_scb.later = g_scb.third = SCB_UNSEEN;
+    g_scb.again = g_scb.denied = g_scb.grand = SCB_UNSEEN;
     g_scb.grand_pid = 0;
 
     proc_test_seat_reset();
@@ -832,6 +890,8 @@ void test_scheduler_seat_client_takes_interactive(void) {
         struct Thread *o = thread_create(other, sched_test_thread_a);
         if (h) { held = h->band; thread_free(h); }
         if (o) { refused = o->band; thread_free(o); }
+        denied_pid = rfork_with_caps(RFPROC, scb_denied, NULL, CAP_NONE);
+        denied_reaped = denied_pid > 0 ? wait_pid_for(denied_pid, 0, &st) : -1;
 
         proc_test_seat_reset();
         rebound = proc_set_seat_service(service) == 0;
@@ -849,10 +909,14 @@ void test_scheduler_seat_client_takes_interactive(void) {
     TEST_EXPECT_EQ(runner, (u32)SCHED_BAND_NORMAL, "the kernel thread that spawned it stays NORMAL");
     TEST_EXPECT_EQ(held, (u32)SCHED_BAND_INTERACTIVE, "a designated Proc's new thread is INTERACTIVE");
     TEST_EXPECT_EQ(refused, (u32)SCHED_BAND_NORMAL, "a refused designation gives no band");
+    TEST_ASSERT(denied_pid > 0 && denied_reaped == denied_pid, "the refused child spawned and was reaped");
+    TEST_EXPECT_EQ(g_scb.denied, (u32)SCHED_BAND_NORMAL, "a refused designation leaves the child's own thread NORMAL");
     TEST_ASSERT(pid > 0 && reaped == pid, "the child spawned and was reaped");
     TEST_EXPECT_EQ(g_scb.before, (u32)SCHED_BAND_NORMAL, "CONTROL: the child starts NORMAL");
     TEST_EXPECT_EQ(g_scb.first, (u32)SCHED_BAND_INTERACTIVE, "the designated child's first thread is INTERACTIVE");
     TEST_EXPECT_EQ(g_scb.later, (u32)SCHED_BAND_INTERACTIVE, "and so is the thread it makes next");
+    TEST_EXPECT_EQ(g_scb.third, (u32)SCHED_BAND_NORMAL, "a third live thread is NORMAL");
+    TEST_EXPECT_EQ(g_scb.again, (u32)SCHED_BAND_INTERACTIVE, "the bound counts live threads, so room comes back");
     TEST_ASSERT(g_scb.grand_pid > 0, "the child's own rfork succeeded");
     TEST_EXPECT_EQ(g_scb.grand, (u32)SCHED_BAND_NORMAL, "a fork of the compositor is NORMAL");
 }
