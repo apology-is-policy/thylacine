@@ -859,6 +859,7 @@ fn mode_faults(pool: &StackPool, n: usize, pages: u64, align_s: u64) {
         let period = align_s * 1_000_000_000;
         let _ = time::sleep(Duration::from_nanos(period - time::monotonic_ns() % period));
     }
+    let at_ms = time::monotonic_ns() / 1_000_000;
     let t0 = Instant::now();
     release_batch();
     if !join_batch(n) {
@@ -878,14 +879,15 @@ fn mode_faults(pool: &StackPool, n: usize, pages: u64, align_s: u64) {
         p50 = p50.max(FAULT_P50_NS[i].load(Ordering::SeqCst));
     }
     t_putstr(&format!(
-        "faults: workers={} pages={} rounds={} min_ns={} worst_p50_ns={} wall_ms={} pages_per_s={}\n",
+        "faults: workers={} pages={} rounds={} min_ns={} worst_p50_ns={} wall_ms={} pages_per_s={} at_ms={}\n",
         n,
         pages,
         FAULT_ROUNDS,
         min,
         p50,
         wall / 1_000_000,
-        done * 1_000_000_000 / wall.max(1)
+        done * 1_000_000_000 / wall.max(1),
+        at_ms
     ));
 }
 
