@@ -691,6 +691,109 @@ fn a_write_lost_before_the_commit_is_a_plain_failure() {
     drive(&mut c, &mut s, 0);
     assert_eq!(c.take_event(), Some(Event::CopyFailed(Why::Lost)));
     assert_eq!(s.operations(Operation::CommitCopy), 0);
+    assert_eq!(c.reruns(), 0, "the Get was answered");
+}
+
+#[test]
+fn a_paste_nothing_answered_goes_again_on_a_fresh_connection() {
+    let mut s = Server::new();
+    s.clipboard = text(10);
+    let mut c = bound(&mut s, 0);
+    s.cut = Some(Operation::GetClipboard);
+    c.paste(0).unwrap();
+    assert_eq!(drive(&mut c, &mut s, 0), vec!["close"]);
+    assert_eq!(c.take_event(), None, "the host hears nothing of it");
+    let at = c.next_deadline().unwrap();
+    assert_eq!(drive(&mut c, &mut s, at), vec!["connect"]);
+    assert_eq!(c.take_event(), Some(Event::Pasted(text(10))));
+    assert_eq!(c.reruns(), 1);
+    assert!(c.is_bound());
+}
+
+#[test]
+fn a_copy_nothing_answered_goes_again_and_commits_once() {
+    let mut s = Server::new();
+    let mut c = bound(&mut s, 0);
+    s.cut = Some(Operation::GetClipboard);
+    c.copy(text(10), 0).unwrap();
+    drive(&mut c, &mut s, 0);
+    assert_eq!(c.take_event(), None);
+    let at = c.next_deadline().unwrap();
+    drive(&mut c, &mut s, at);
+    assert!(matches!(c.take_event(), Some(Event::Copied { .. })));
+    assert_eq!(s.operations(Operation::CommitCopy), 1);
+    assert_eq!(s.clipboard, text(10));
+    assert_eq!(c.reruns(), 1);
+}
+
+#[test]
+fn a_second_loss_is_reported_and_the_next_job_has_its_own_chance() {
+    let mut s = Server::new();
+    s.clipboard = text(10);
+    let mut c = bound(&mut s, 0);
+    s.cut = Some(Operation::GetClipboard);
+    c.paste(0).unwrap();
+    drive(&mut c, &mut s, 0);
+    assert_eq!(c.take_event(), None);
+    s.cut = Some(Operation::GetClipboard);
+    let at = c.next_deadline().unwrap();
+    drive(&mut c, &mut s, at);
+    assert_eq!(c.take_event(), Some(Event::PasteFailed(Why::Lost)));
+    assert_eq!(c.reruns(), 1);
+
+    let at = c.next_deadline().unwrap();
+    drive(&mut c, &mut s, at);
+    assert!(c.is_bound());
+    s.cut = Some(Operation::GetClipboard);
+    c.paste(at).unwrap();
+    drive(&mut c, &mut s, at);
+    assert_eq!(c.take_event(), None);
+    let at = c.next_deadline().unwrap();
+    drive(&mut c, &mut s, at);
+    assert_eq!(c.take_event(), Some(Event::Pasted(text(10))));
+    assert_eq!(c.reruns(), 2);
+
+    s.cut = Some(Operation::GetClipboard);
+    c.copy(text(4), at).unwrap();
+    drive(&mut c, &mut s, at);
+    assert_eq!(c.take_event(), None, "a copy has its own chance too");
+    let at = c.next_deadline().unwrap();
+    drive(&mut c, &mut s, at);
+    assert!(matches!(c.take_event(), Some(Event::Copied { .. })));
+    assert_eq!(c.reruns(), 3);
+}
+
+#[test]
+fn only_a_lost_bound_connection_runs_a_job_again() {
+    // Never formed.
+    let mut s = Server::new();
+    s.refuse_connect = true;
+    let mut c = Client::new();
+    c.paste(0).unwrap();
+    drive(&mut c, &mut s, 0);
+    assert_eq!(c.take_event(), Some(Event::PasteFailed(Why::Lost)));
+    assert_eq!(c.reruns(), 0);
+
+    // Past its deadline: a server that does not answer gets no second request.
+    let mut s = Server::new();
+    let mut c = bound(&mut s, 0);
+    s.hold = Some(Operation::GetClipboard);
+    c.paste(0).unwrap();
+    drive(&mut c, &mut s, 0);
+    let at = c.next_deadline().unwrap();
+    drive(&mut c, &mut s, at);
+    assert_eq!(c.take_event(), Some(Event::PasteFailed(Why::TimedOut)));
+    assert_eq!(c.reruns(), 0);
+
+    // Given up on by the host.
+    let mut s = Server::new();
+    let mut c = bound(&mut s, 0);
+    s.hold = Some(Operation::GetClipboard);
+    c.paste(0).unwrap();
+    drive(&mut c, &mut s, 0);
+    c.cancel();
+    assert_eq!(c.take_event(), Some(Event::PasteFailed(Why::Cancelled)));
+    assert_eq!(c.reruns(), 0);
 }
 
 #[test]
@@ -946,6 +1049,13 @@ fn an_errno_on_any_other_reply_ends_the_connection_too() {
         match op {
             // The bytes were whole, so they are the host's however the release went.
             Operation::Cancel => assert!(matches!(c.take_event(), Some(Event::Pasted(_)))),
+            // Nothing was answered yet, so the job goes again.
+            Operation::GetClipboard => {
+                assert_eq!(c.take_event(), None);
+                let at = c.next_deadline().unwrap();
+                drive(&mut c, &mut s, at);
+                assert_eq!(c.take_event(), Some(Event::Pasted(text(10))));
+            }
             _ => assert_eq!(c.take_event(), Some(Event::PasteFailed(Why::Lost)), "{op:?}"),
         }
         assert_eq!(s.closes, 1, "{op:?}");

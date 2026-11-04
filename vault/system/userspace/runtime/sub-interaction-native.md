@@ -87,8 +87,9 @@ SQE goes through ENTER, so the numbers cover every operation with no list of pha
 go stale. `run` reports a mode, copies, then reads back through whatever connection is
 left. What a copy reported bounds what the read may find: `Copied` the new text,
 `CopyFailed` the old, `CopyUnknown` either, and with nothing held only `Copied` will do. A
-connection that had formed when the hold began must fail at its next use, unless the
-client has already seen it go, and the value is read again after recovery, because the
+connection that had formed when the hold began must not serve its next use, unless the
+client has already seen it go: that use may recover, but `Host::reruns` has to say it needed
+a fresh connection. The value is read again after recovery, because the
 first read may have finished before the SAK landed. `kaua-term-probe --clipboard async-sak` supplies
 the system calls and `ls-halcyon-clipboard-async` the key presses.
 
@@ -118,7 +119,7 @@ apart, which the client relies on to decide between an answer and a lost connect
 | A write refused at submission with -EBUSY | Parked. |
 | Any other refusal at submission, -ENOSPC included | `failed(lane, -EIO)`. -EIO is outside the table of HIN1 failures, so the client sees a lost connection, never a refusal. |
 | A completion's negative result | Passed to `failed` as it stands. On the write that finishes a record, a value in the table is the server's refusal. On a reply's read, or outside the table, it loses the connection. |
-| The ring closed or failed | Every future fails, `poll_fd` is None, and the next use reports `Lost`. The ring is not rebuilt. |
+| The ring closed or failed | Every future fails and `poll_fd` is None. The next use goes again as any lost job does, a backoff later, finds no fresh connection and reports `Lost`. The ring is not rebuilt. |
 
 ## Performance
 
@@ -171,10 +172,13 @@ spun on POLLHUP. See [[sub-loom-native-adapter]].
    run. A host test cannot prove them, since the sim is a model of the kernel and the
    server is a script.
 2. **The death of an idle connection is learnt at its next use.** Nothing is in flight
-   then, so nothing tells the client. If that use is a copy or paste, that job reports
-   `Lost` and the one after it reconnects; a mode report heals the link without a
-   visible failure. SAK closes the control connection, so this is the ordinary case after
-   a trusted-path episode. AS-4f's list has to judge whether it is acceptable.
+   then, so nothing tells the client. A copy or paste whose first request is lost on a bound
+   connection goes again, once, on a fresh one, and reports nothing (operator vote 60); a
+   second loss reports `Lost`. A mode report heals the link without a visible failure. SAK
+   closes the control connection, so this is the ordinary case after a trusted-path
+   episode. `Client::reruns` counts these, since a job that recovers leaves no other sign.
+   A refusal the server chose is an answer and does not go again, and neither does a job
+   past its deadline.
 3. **A closed or failed ring is not rebuilt.** Both mean something broke the adapter's
    contract, such as another thread closing the descriptor. The host keeps its local
    registers from then on.

@@ -542,9 +542,13 @@ fn a_ring_closed_under_the_host_is_a_lost_connection_and_no_spin() {
     let now = host.now();
     host.pump(now);
     assert_eq!(host.poll_fd(), None);
-    // Nothing was in flight to tell the client, so it hears at its next use.
+    // Nothing was in flight to tell the client, so it hears at its next use. The job
+    // goes again, and a closed ring has no fresh connection to give it.
     host.copy(TEXT.to_vec(), now).unwrap();
+    assert_eq!(host.take_event(), None);
+    host.pump(host.next_deadline().expect("the second try is owed"));
     assert_eq!(host.take_event(), Some(Event::CopyFailed(Why::Lost)));
+    assert_eq!(host.reruns(), 1);
 }
 
 #[test]
@@ -555,6 +559,8 @@ fn a_ring_that_fails_loses_the_connection_rather_than_refusing_the_request() {
     sim.s().enter_errno = Some(-22);
     let now = host.now();
     host.paste(now).unwrap();
+    assert_eq!(host.take_event(), None);
+    host.pump(host.next_deadline().expect("the second try is owed"));
     assert_eq!(host.take_event(), Some(Event::PasteFailed(Why::Lost)));
     assert_eq!(host.poll_fd(), None, "a failure closes the descriptor");
 }

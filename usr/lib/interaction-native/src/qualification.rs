@@ -276,12 +276,15 @@ pub fn run<K: Kernel + 'static>(
 
     // Number 1 is the CONNECT itself, which may reach the server after the episode. Past
     // it the connection had formed when the SAK came, and a client that has not noticed
-    // has not used it since. It must fail now.
+    // has not used it since. It must not serve this read: a paste may recover on a fresh
+    // connection, but it has to have needed one.
     if run.progress.held_at.get() > 1 && !run.down_after {
-        if run.paste()?.is_ok() {
-            return Err("the connection survived the SAK");
+        let reruns = run.host.reruns();
+        match run.paste()? {
+            Ok(_) if run.host.reruns() == reruns => return Err("the connection survived the SAK"),
+            Ok(_) => {}
+            Err(_) => run.lost += 1,
         }
-        run.lost += 1;
     }
     // The read above may have finished before the SAK landed, so it says nothing about
     // what recovery finds.

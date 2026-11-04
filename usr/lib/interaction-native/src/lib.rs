@@ -165,6 +165,11 @@ impl<K: Kernel + 'static> Host<K> {
         self.client.next_deadline()
     }
 
+    /// Jobs that went again on a fresh connection; see `Client::reruns`.
+    pub fn reruns(&self) -> u32 {
+        self.client.reruns()
+    }
+
     pub fn is_bound(&self) -> bool {
         self.client.is_bound()
     }

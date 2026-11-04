@@ -185,6 +185,8 @@ pub struct Client {
     retries: u32,
     backoff: u64,
     events: VecDeque<Event>,
+    rerun_spent: bool,
+    reruns: u32,
 }
 
 fn index(lane: Lane) -> usize {
@@ -215,6 +217,8 @@ impl Client {
             retries: RECONNECT_ATTEMPTS,
             backoff: RECONNECT_MIN_NS,
             events: VecDeque::new(),
+            rerun_spent: false,
+            reruns: 0,
         }
     }
 
@@ -224,6 +228,12 @@ impl Client {
 
     pub fn take_event(&mut self) -> Option<Event> {
         self.events.pop_front()
+    }
+
+    /// Jobs that have gone again on a fresh connection, ever. A job that recovers
+    /// reports no failure, so this is the only sign its connection died.
+    pub fn reruns(&self) -> u32 {
+        self.reruns
     }
 
     /// The latest value is what reaches the server. Older ones are dropped.
@@ -263,6 +273,7 @@ impl Client {
             text,
             stage: CopyStage::Get,
         });
+        self.rerun_spent = false;
         self.job_expires = now.saturating_add(LIFETIME_NS);
         self.want_link(now);
         Ok(())
@@ -273,6 +284,7 @@ impl Client {
             return Err(Refusal::Busy);
         }
         self.job = Some(Job::Paste(PasteStage::Get));
+        self.rerun_spent = false;
         self.job_expires = now.saturating_add(LIFETIME_NS);
         self.want_link(now);
         Ok(())
@@ -566,9 +578,27 @@ impl Client {
     /// The connection ends here. What was in flight goes with it, and the job, if
     /// any, learns its fate now rather than at a reply that will not come.
     fn lose_link(&mut self, why: Why) {
+        let was_bound = matches!(self.link, Link::Bound);
         self.lanes = [None, None];
         self.scope = None;
         self.reported = None;
+        // A SAK closes an idle connection and nothing says so until its next use. A Get
+        // changes nothing, so a job still waiting on its first answer goes again, once.
+        // A connection that was never bound served nobody, and the schedule decides those.
+        let unanswered = matches!(
+            self.job,
+            Some(Job::Paste(PasteStage::Get))
+                | Some(Job::Copy {
+                    stage: CopyStage::Get,
+                    ..
+                })
+        );
+        if matches!(why, Why::Lost) && was_bound && unanswered && !self.rerun_spent {
+            self.rerun_spent = true;
+            self.reruns += 1;
+            self.link = Link::Closing;
+            return;
+        }
         match self.job.take() {
             Some(Job::Copy {
                 stage: CopyStage::Commit { handed: true, .. },
