@@ -7,7 +7,7 @@ guards: [sub-kernel-death, sub-kernel-torpor, sub-pouch-process, sub-pouch-signa
 validated-by: [spec-death-wake, gate-smp]
 strength: spec
 created: 2026-08-01
-updated: 2026-08-01
+updated: 2026-11-04
 ---
 ## Statement
 
@@ -40,12 +40,12 @@ Zircon convergent; the seL4 synchronous stall was rejected):
   committer's own count under the same lock.
 - **Total**: every Thread dies at its own EL0-return die-check
   (`el0_return_die_check`, on both the sync and IRQ-from-EL0 tails), and
-  the three delivery vehicles guarantee it gets there — the #811 universal
-  death-wake for rendez sleepers, `torpor_wake_all_for_proc` for futex
-  sleepers ([[sub-kernel-torpor]] — whose post-register die-pending
-  re-check under the bucket's lock closes the register-after-walk race on
-  the futex leg), and a broadcast `smp_resched_others` (with the
-  periodic tick as the floor) for peers running at EL0.
+  two delivery vehicles guarantee it gets there — the #811 universal
+  death-wake for every rendez sleeper, a futex waiter on its private rendez
+  among them ([[sub-kernel-torpor]]), with `tsleep`'s register-then-observe
+  under [[lock-wait]] closing the race with a waiter not yet asleep, and a
+  broadcast `smp_resched_others` (with the periodic tick as the floor) for
+  peers running at EL0. See [[chg-2026-11-04-torpor-walks-go]].
 
 The status a terminating Proc reaps with is read from the recorded
 `group_exit_msg`, not from the last Thread's own exit — which is what makes

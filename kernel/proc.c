@@ -3480,10 +3480,8 @@ bool proc_caught_note_pending(const struct Proc *p) {
 // serialization -- with wait_lock HELD ACROSS wakeup (Option A) so a torpor
 // waiter's stack rendez cannot be popped out from under the waker.
 //
-// Deliberate deltas from the death template (see the proc.h contract):
-// no torpor_wake_all_for_proc (torpor waiters are reachable through
-// rendez_blocked_on, and tsleep's widened register-then-observe closes the
-// register-after-walk race) and a kick of each thread running elsewhere in
+// Deliberate delta from the death template (see the proc.h contract):
+// a kick of each thread running elsewhere in
 // place of smp_resched_others. Since #964 the IRQ-from-EL0 tail carries the
 // notes leg, so IPI_RESCHED makes a thread spinning at EL0 take the interrupt
 // at once rather than at its next tick; only the CPUs running a thread of `p`
@@ -5229,9 +5227,8 @@ static _Alignas(16) const u8 g_fp_zero_area[FP_AREA_SIZE];
 // AFTER the publish: a thread that registers after the walk re-observes the
 // death in its post-register check (register-then-observe; I-9).
 //
-// First every futex (torpor) sleeper; a torpor bucket's lock is strictly below
-// threads_lock. Then EVERY thread blocked in a sleep()/tsleep() Rendez sleep,
-// so it returns *_INTR -- which closed the 7.9.1 residual where an indefinite
+// EVERY thread blocked in a sleep()/tsleep() Rendez sleep, a futex (torpor) waiter
+// on its private rendez among them, so it returns *_INTR -- which closed the 7.9.1 residual where an indefinite
 // poll(-1) / pipe / devnotes_read sleeper was never woken and its Proc never
 // reaped (the #809-audit F1 hang). The only record of "Thread T sleeps on
 // Rendez R" is t->rendez_blocked_on, read under T's wait_lock -- the SAME lock
@@ -5244,7 +5241,6 @@ static _Alignas(16) const u8 g_fp_zero_area[FP_AREA_SIZE];
 // rendez_blocked_on.
 static void proc_death_wake_locked(struct Proc *p) {
     ASSERT_TL_HELD(p);
-    torpor_wake_all_for_proc(p);
     for (struct Thread *peer = p->threads; peer; peer = peer->next_in_proc) {
         irq_state_t ws = spin_lock_irqsave(&peer->wait_lock);
         struct Rendez *r = peer->rendez_blocked_on;
@@ -6115,13 +6111,11 @@ int proc_stop_sleeper_park(struct Thread *t) {
 // flag under its wait_lock, and DETOURS to park on its own debug_rendez
 // (8c-2 stop-of-a-sleeper, DEBUG-FS-DESIGN 5c.2 -- the multi-thread-Go-target
 // fix: an idle futex-parked M never reaches the EL0-return tail on its own).
-// This is proc_group_terminate's death-wake cascade's SHAPE, with ONE
-// deliberate difference (#19): the NON-COMPLETING torpor_stop_wake_all_for_proc
-// for the futex (torpor) waiters -- the death walk's completing wake fabricates
-// TORPOR_OK, which a SURVIVING stopped Proc observes at resume (a time::sleep
-// job "finishes" the instant fg resumes it); the stop wake preserves the wait
-// (the woken sleeper reparks + re-registers its original deadline). Then the
-// per-peer wait_lock rendez wake for every other blocking sleep, verbatim. The caller's RELEASE
+// This is proc_group_terminate's death-wake cascade: the per-peer wait_lock rendez
+// wake for every blocking sleep, a futex (torpor) waiter among them. It sets no
+// futex mark, so that waiter's cond stays false and it reparks with its wait and its
+// original deadline (#19: a completed wait here made a time::sleep job "finish" the
+// instant fg resumed it). The caller's RELEASE
 // store of its stop flag happens-before each wake AND before each peer's
 // wait_lock acquire here, so the woken sleeper's ACQUIRE-read of the flag
 // under its wait_lock observes the stop -- no stop-wake is lost between the
@@ -6132,27 +6126,15 @@ int proc_stop_sleeper_park(struct Thread *t) {
 // the park waits on (a resume or group death ends it, and each wakes it
 // itself), so the wake could only be absorbed, with the cost the latch walk's
 // skip describes (proc_interrupt_terminate_wake). wakeup() re-validates
-// r->waiter under r->lock, so a peer already woken (or by torpor_wake_all) is
+// r->waiter under r->lock, so a peer already woken is
 // a safe no-op; wait_lock held across wakeup pins a torpor waiter's stack
 // rendez. LOCK CONTRACT: caller holds p->threads_lock (pins p->threads); order
-// threads_lock -> wait_lock -> (wakeup: r->lock); a torpor bucket's lock strictly below
-// threads_lock. The EL0-running-peer IPI kick
+// threads_lock -> wait_lock -> (wakeup: r->lock). The EL0-running-peer IPI kick
 // is SEPARATE (smp_resched_others below) -- it is group-GLOBAL (a broadcast to
 // every online CPU), so a fan-out over N members issues it ONCE after the walk
 // (audit F2), not per-member.
 static void proc_stop_wake_sleepers_locked(struct Proc *p) {
     ASSERT_TL_HELD(p);
-    // PTY-4e (#19): the NON-COMPLETING torpor wake. The death cascade's
-    // torpor_wake_all_for_proc fabricates a completed wait (awoken=1) --
-    // immaterial for a dying Proc, but a STOPPED one SURVIVES: the fabricated
-    // TORPOR_OK rode back to EL0 at resume and made every torpor-timed wait
-    // (time::sleep -> /bin/sleep) "finish" instead of continuing -- the
-    // resumed job exited, fg returned Done, and a second ^Z found no job (the
-    // #19 hang). The non-completing wake leaves `awoken` clear, so the woken
-    // waiter's tsleep re-loop takes the 8c-2 stop detour and parks with the
-    // wait PRESERVED -- on resume it re-registers with its original deadline
-    // (parks-and-reparks; the Linux SIGSTOP-over-futex_wait restart shape).
-    torpor_stop_wake_all_for_proc(p);
     for (struct Thread *peer = p->threads; peer; peer = peer->next_in_proc) {
         irq_state_t ws = spin_lock_irqsave(&peer->wait_lock);
         struct Rendez *r = peer->rendez_blocked_on;
@@ -6380,7 +6362,7 @@ static void proc_birth_hold_orphan_rule_locked(struct Proc *p) {
 // (job_stop_req), per-owner set/clear (StopCompatI39 / BUGGY_DOUBLE_STOP).
 // All helpers run under g_proc_table_lock (the fan-outs take it; the
 // notes_post_pgrp precedent covers every nested edge: q->lock for the posts,
-// a torpor bucket's lock + wait_lock -> r->lock for the cascade, the poll-waiter list
+// wait_lock -> r->lock for the cascade, the poll-waiter list
 // for the parent wake).
 // =============================================================================
 

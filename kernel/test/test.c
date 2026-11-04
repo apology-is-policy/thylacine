@@ -16,6 +16,8 @@
 
 #include "test.h"
 
+#include <thylacine/smp.h>
+
 #include "../../arch/arm64/uart.h"
 
 #include <thylacine/cons.h>         // #130-R2 F2: the leaked-global-state backstop
@@ -28,6 +30,7 @@
 #include <thylacine/sched.h>   // DEBUG (#857): sched_dump_runnable on any test failure
 #include <thylacine/spinlock.h>     // #109: preempt-mask across the terminal-park handshake
 #include "../../mm/phys.h"   // the pool park a failing test leaves behind
+#include <thylacine/torpor.h>       // a stall a failing test left armed
 #include <thylacine/poll.h>         // the snapshot bound's test knob, released per test
 #include <thylacine/notes.h>        // test_caught: the interrupt post
 #include <thylacine/proc.h>         // test_dying: a fresh Proc, freed as a ZOMBIE
@@ -448,6 +451,8 @@ struct test_case g_tests[] = {
                                        test_sched_place_by_capacity_synthetic_dtb, false, NULL },
     { "scheduler.select_target_cpu_homogeneous_is_prev",
                                        test_sched_select_target_cpu_homogeneous_is_prev, false, NULL },
+    { "scheduler.pinned_wake_goes_home", test_scheduler_pinned_wake_goes_home, false, NULL },
+    { "scheduler.pinned_sleeper_on_a_peer_wakes", test_scheduler_pinned_sleeper_on_a_peer_wakes, false, NULL },
     { "scheduler.ready_on_cross_cpu_enqueue",
                                        test_sched_ready_on_cross_cpu_enqueue, false, NULL },
     { "scheduler.cpu_surplus_for_kick",
@@ -644,6 +649,10 @@ struct test_case g_tests[] = {
     { "proc.job_stop_park_report_cont_live",
                                        test_proc_job_stop_park_report_cont_live, false, NULL },
     { "proc.job_stop_recycle",         test_proc_job_stop_recycle,         false, NULL },
+    { "proc.group_death_wakes_a_torpor_waiter",
+                                       test_proc_group_death_wakes_a_torpor_waiter, false, NULL },
+    { "proc.group_death_before_a_torpor_wait",
+                                       test_proc_group_death_before_a_torpor_wait, false, NULL },
     { "proc.job_stop_preserves_torpor_wait",
                                        test_proc_job_stop_preserves_torpor_wait, false, NULL },
     { "proc.job_stop_orphan_rule",     test_proc_job_stop_orphan_rule,     false, NULL },
@@ -1234,6 +1243,7 @@ struct test_case g_tests[] = {
     { "torpor.key_is_the_address_space",       test_torpor_key_is_the_address_space,       false, NULL },
     { "torpor.wake_counts_only_a_sleeper",     test_torpor_wake_counts_only_a_sleeper,     false, NULL },
     { "torpor.record_outlives_the_wake",       test_torpor_record_outlives_the_wake,       false, NULL },
+    { "torpor.mark_takes_the_rendez_lock",     test_torpor_mark_takes_the_rendez_lock, false, NULL },
     { "torpor.word_replaced_under_the_wait",   test_torpor_word_replaced_under_the_wait,   false, NULL },
     { "loom.create_geometry",            test_loom_create_geometry,            false, NULL },
     { "loom.private_buffers",            test_loom_private_buffers,            false, NULL },
@@ -3259,6 +3269,7 @@ static unsigned passed_count, failed_count, total_count, soft_warn_count, skippe
 // #134: child-Proc wait expiries observed across the whole run. Deliberately
 // NOT attributed to a test (see the runner loop); it fails the suite instead.
 static unsigned proc_wait_timeout_total;
+static bool boot_thread_moved;
 
 void test_fail(const char *msg) {
     if (current_test) {
@@ -3508,6 +3519,12 @@ void test_run_all(void) {
                 test_fail("test left a poll test knob set (see POLL-KNOB)");
         }
 
+        if (torpor_test_release_hooks()) {
+            uart_puts("TORPOR-KNOB ");
+            if (!current_test->failed)
+                test_fail("test left a torpor stall armed (see TORPOR-KNOB)");
+        }
+
         // And the dev9p readiness fixture: a test that fails before its
         // teardown leaves the fixture's client, file, hooks and poller thread
         // up, and the next setup must not re-initialise a client the poll
@@ -3575,6 +3592,18 @@ void test_run_all(void) {
                       "condition] ");
             __atomic_store_n(&g_test_proc_wait_timeouts, 0u, __ATOMIC_RELEASE);
             proc_wait_timeout_total++;
+        }
+
+        // The boot thread is pinned. A test that moves it voids every later test's
+        // reading of "this CPU", and in the end hangs the boot's tick wait. Nothing moves
+        // it back, so only the first test to return off CPU 0 answers for it.
+        if (smp_cpu_idx_self() != 0 && !boot_thread_moved) {
+            boot_thread_moved = true;
+            uart_puts("OFF-CPU0 ");
+            if (!current_test->failed) {
+                current_test->failed = true;
+                current_test->fail_msg = "the boot thread ended this test off CPU 0";
+            }
         }
 
         if (current_test->failed) {
