@@ -1251,7 +1251,8 @@ threads INTERACTIVE, the first when it takes the role and a later one when it jo
 fewer than two live, under the lock it joins under; any others stay NORMAL, and a fork of
 it is not INTERACTIVE at all (operator vote 64, 2026-11-04). That role is explicitly
 untrusted and free to make threads, so the kernel holds the bound the vote accepted, and
-this leg's gate is who designates, not what the compositor is. One spinning thread
+this leg's gate is who designates, not what the compositor is. It confers no spawn permission
+either, or a child made console owner would reach the console leg, which has no ration. One spinning thread
 alternates with a NORMAL peer on its CPU, since pick runs before requeue; two on one CPU
 starve NORMAL there, which an idle peer can steal from, and at `-smp 1` everywhere. The full "anything
 from a controlling tty" rule + a dynamic boost-on-wake / demote-on-quantum
