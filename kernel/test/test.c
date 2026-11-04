@@ -16,6 +16,8 @@
 
 #include "test.h"
 
+#include <thylacine/smp.h>
+
 #include "../../arch/arm64/uart.h"
 
 #include <thylacine/cons.h>         // #130-R2 F2: the leaked-global-state backstop
@@ -448,6 +450,7 @@ struct test_case g_tests[] = {
                                        test_sched_place_by_capacity_synthetic_dtb, false, NULL },
     { "scheduler.select_target_cpu_homogeneous_is_prev",
                                        test_sched_select_target_cpu_homogeneous_is_prev, false, NULL },
+    { "scheduler.pinned_wake_goes_home", test_scheduler_pinned_wake_goes_home, false, NULL },
     { "scheduler.ready_on_cross_cpu_enqueue",
                                        test_sched_ready_on_cross_cpu_enqueue, false, NULL },
     { "scheduler.cpu_surplus_for_kick",
@@ -3565,6 +3568,13 @@ void test_run_all(void) {
                       "condition] ");
             __atomic_store_n(&g_test_proc_wait_timeouts, 0u, __ATOMIC_RELEASE);
             proc_wait_timeout_total++;
+        }
+
+        // The boot thread is pinned. A test that moves it voids every later test's
+        // reading of "this CPU", and in the end hangs the boot's tick wait.
+        if (smp_cpu_idx_self() != 0 && !current_test->failed) {
+            current_test->failed = true;
+            current_test->fail_msg = "the boot thread ended this test off CPU 0";
         }
 
         if (current_test->failed) {
