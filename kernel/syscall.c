@@ -3198,7 +3198,8 @@ static s64 sys_walk_open_handler(u64 spoor_fd_raw, u64 name_va,
     // with new_priv (fid_owned=true); on failure it clunks the fid + frees
     // the Walkqid carrier itself.
     const char *names[1] = { name_scratch };
-    struct Walkqid *w = src->dev->walk(src, nc, names, 1);
+    int why = 0;
+    struct Walkqid *w = dev_walk(src, nc, names, 1, &why);
     // #844: src's last use is the walk above; release the borrow now. nc
     // carries the walk result (its own ref) through the rest of the handler,
     // so the post-walk exits clunk nc (unchanged), not src.
@@ -3212,7 +3213,7 @@ static s64 sys_walk_open_handler(u64 spoor_fd_raw, u64 name_va,
         // the Walkqid before returning NULL).
         nc->aux = NULL;
         spoor_unref(nc);
-        return -T_E_NOENT;   // errno-rollout (ER-1): walk-miss -> NotFound
+        return -(s64)(why ? why : T_E_NOENT);   // ER-1, ER-2: only a miss reads NotFound
     }
     // F4 close (P5-stratumd-stub-bringup audit): the Dev `walk` vtable
     // is documented as permissive ("Either reuses nc OR ignores it and
@@ -4448,7 +4449,8 @@ static s64 spoor_create_install(struct Proc *p, struct Spoor *src,
     struct Spoor *nc = spoor_clone(src);
     if (!nc)                                          { spoor_clunk(src); return -T_E_NOMEM; }
 
-    struct Walkqid *w = src->dev->walk(src, nc, NULL, 0);
+    int why = 0;
+    struct Walkqid *w = dev_walk(src, nc, NULL, 0, &why);
     // #844: src's last use is the clone-walk above; release the borrow now.
     // nc carries its own ref through create + the rest of the handler.
     spoor_clunk(src);
@@ -4465,8 +4467,8 @@ static s64 spoor_create_install(struct Proc *p, struct Spoor *src,
         // the not-a-directory half precise wants a qid.type gate on the parent
         // -- the single-hop twin of the #79 stalk gate -- which is a resolution
         // change, not an errno one, and is tracked with #81 rather than
-        // smuggled into this rollout.
-        return -T_E_IO;
+        // smuggled into this rollout. A Dev that knows why says so (ER-2).
+        return -(s64)(why ? why : T_E_IO);
     }
     // Defense-in-depth: the reuse-nc contract (same rationale as
     // SYS_WALK_OPEN's F4 close). A clone-walk returns nqid==0, so we do NOT
@@ -9160,6 +9162,10 @@ static int sys_bump_inherit_fds(struct Proc *p, const u32 *fds, u32 fd_count,
 // stat'd size). Runs in the parent's context (its Territory), like Unix exec.
 // Returns the pinned Spoor (caller spoor_clunks) + *size_out, or NULL on any
 // failure.
+// *errp (OPTIONAL) is why, as a T_E_* code: the walk's own reason (ENOENT only for a
+// miss, ERRORS.md ER-2), EACCES for a file the mount or the Dev will not execute, a
+// failing stat's errno, and EINVAL for an empty or oversized image, sys_execve_core's
+// disposition while the registry has no T_E_NOEXEC.
 // _ex variant (VIVARIUM section 13): reports, via *pheno_out (OPTIONAL), whether
 // the binary's resolution crossed an MPHENO_LINUX mount -- the /viv/bin subtree
 // phenotype channel. The plain exec_resolve_from_namespace wrapper below passes
@@ -9167,7 +9173,10 @@ static int sys_bump_inherit_fds(struct Proc *p, const u32 *fds, u32 fd_count,
 // SYS_SPAWN_FULL_ARGV path (the sole fresh-phenotype declarer, ARCH I-43) reads it.
 static struct Spoor *exec_resolve_from_namespace_ex(struct Proc *p, const char *name,
                                                     size_t name_len, size_t *size_out,
-                                                    bool *pheno_out) {
+                                                    bool *pheno_out, int *errp) {
+    int unasked;
+    if (!errp) errp = &unasked;
+    *errp = T_E_INVAL;
     if (pheno_out) *pheno_out = false;
     if (!p || !name || !size_out)                  return NULL;
     *size_out = 0;
@@ -9177,7 +9186,7 @@ static struct Spoor *exec_resolve_from_namespace_ex(struct Proc *p, const char *
     // absolute name resolves from it directly; a relative name is cwd-joined
     // (territory_join_cwd) into an absolute path first -- exactly SYS_OPEN.
     struct Spoor *start = territory_root_ref(p->territory);
-    if (!start)                                    return NULL;
+    if (!start)                                    { *errp = T_E_NOENT; return NULL; }
 
     char joined[SYS_OPEN_PATH_MAX + 1];
     const char *rpath = name;
@@ -9194,10 +9203,12 @@ static struct Spoor *exec_resolve_from_namespace_ex(struct Proc *p, const char *
     // MPHENO_LINUX mount (the /viv/bin subtree). Written to *pheno_out only on the
     // successful return below, so a failed walk leaves the caller's init (native).
     bool crossed_pheno = false;
+    *errp = T_E_NOENT;
     struct Spoor *quarry = stalk_exec(p, start, rpath, rlen, STALK_OPEN,
-                                      3u /* OEXEC */, NULL, &crossed_pheno);
+                                      3u /* OEXEC */, errp, &crossed_pheno);
     spoor_clunk(start);   // borrowed by stalk; release the ref we took
     if (!quarry)                                   return NULL;
+    *errp = T_E_ACCES;
     if (!quarry->dev || !quarry->dev->read)        { spoor_clunk(quarry); return NULL; }
 
     // #217: MNOEXEC refuses exec as well as the R+X map, because a mount that
@@ -9213,8 +9224,13 @@ static struct Spoor *exec_resolve_from_namespace_ex(struct Proc *p, const char *
     // anymore; only its identity is pinned). A truncated file surfaces later as
     // a short read in exec_setup_from_spoor -> clean exec failure, no partial map.
     struct t_stat st;
-    if (spoor_stat_native(quarry, &st) != 0)       { spoor_clunk(quarry); return NULL; }
-    if (st.size == 0 || (u64)st.size > EXEC_FILE_MAX) { spoor_clunk(quarry); return NULL; }
+    int sr = spoor_stat_native(quarry, &st);
+    if (sr != 0) { *errp = stalk_err_code(sr); spoor_clunk(quarry); return NULL; }
+    if (st.size == 0 || (u64)st.size > EXEC_FILE_MAX) {
+        *errp = T_E_INVAL;
+        spoor_clunk(quarry);
+        return NULL;
+    }
 
     *size_out = (size_t)st.size;
     if (pheno_out) *pheno_out = crossed_pheno;   // section 13: reported on success only
@@ -9225,7 +9241,7 @@ static struct Spoor *exec_resolve_from_namespace_ex(struct Proc *p, const char *
 // not declare a fresh phenotype (they inherit it via rfork) call this.
 struct Spoor *exec_resolve_from_namespace(struct Proc *p, const char *name,
                                           size_t name_len, size_t *size_out) {
-    return exec_resolve_from_namespace_ex(p, name, name_len, size_out, NULL);
+    return exec_resolve_from_namespace_ex(p, name, name_len, size_out, NULL, NULL);
 }
 
 // Kernel-side body: takes a kernel-resident NUL-terminated name and the
@@ -9254,7 +9270,7 @@ int sys_spawn_for_proc(struct Proc *p, const char *name, size_t name_len) {
     // inside a declared Territory is Linux by the clone it inherits.
     bool exe_pheno_linux = false;
     struct Spoor *exe = exec_resolve_from_namespace_ex(p, name, name_len, &exe_size,
-                                                       &exe_pheno_linux);
+                                                       &exe_pheno_linux, NULL);
     if (!exe)                                          return -1;
 
     struct spawn_args *sa = kmalloc(sizeof(*sa), KP_ZERO);
@@ -9446,7 +9462,7 @@ int sys_spawn_with_fds_for_proc(struct Proc *p, const char *name, size_t name_le
     // inside a declared Territory is Linux by the clone it inherits.
     bool exe_pheno_linux = false;
     struct Spoor *exe = exec_resolve_from_namespace_ex(p, name, name_len, &exe_size,
-                                                       &exe_pheno_linux);
+                                                       &exe_pheno_linux, NULL);
     if (!exe) {
         sys_spawn_unbump_fds(bumped, fd_count);
         return -1;
@@ -9508,7 +9524,7 @@ int sys_spawn_with_caps_for_proc(struct Proc *p, const char *name, size_t name_l
     // inside a declared Territory is Linux by the clone it inherits.
     bool exe_pheno_linux = false;
     struct Spoor *exe = exec_resolve_from_namespace_ex(p, name, name_len, &exe_size,
-                                                       &exe_pheno_linux);
+                                                       &exe_pheno_linux, NULL);
     if (!exe)                                          return -1;
 
     struct spawn_args *sa = kmalloc(sizeof(*sa), KP_ZERO);
@@ -9607,7 +9623,7 @@ static int sys_spawn_full_with_perms_for_proc(struct Proc *p,
     // inside a declared Territory is Linux by the clone it inherits.
     bool exe_pheno_linux = false;
     struct Spoor *exe = exec_resolve_from_namespace_ex(p, name, name_len, &exe_size,
-                                                       &exe_pheno_linux);
+                                                       &exe_pheno_linux, NULL);
     if (!exe) {
         sys_spawn_unbump_fds(bumped, fd_count);
         return -1;
@@ -10341,20 +10357,23 @@ static int sys_spawn_full_argv_with_perms_for_proc(
     size_t exe_size = 0;
     bool exe_pheno_linux = false;
     struct Spoor *exe = NULL;
+    int exe_err = 0;
     if (cwd && name[0] != '/') {
         char *jbuf = kmalloc(SYS_OPEN_PATH_MAX + 1u, 0);
         int jl = jbuf ? cwd_join(cwd, name, (u64)name_len, jbuf, SYS_OPEN_PATH_MAX + 1u) : -1;
         if (jl > 0)
             exe = exec_resolve_from_namespace_ex(p, jbuf, (size_t)jl,
-                                                 &exe_size, &exe_pheno_linux);
+                                                 &exe_size, &exe_pheno_linux, &exe_err);
+        else
+            exe_err = jbuf ? T_E_INVAL : T_E_NOMEM;
         if (jbuf) kfree(jbuf);
     } else {
         exe = exec_resolve_from_namespace_ex(p, name, name_len,
-                                             &exe_size, &exe_pheno_linux);
+                                             &exe_size, &exe_pheno_linux, &exe_err);
     }
     if (!exe) {
         sys_spawn_unbump_fds(bumped, fd_count);
-        return -1;
+        return -exe_err;
     }
 
     // Kernel-side argv copy. Lifetime: owned by the spawn_args struct
@@ -11193,8 +11212,9 @@ static s64 sys_execve_core(struct exception_context *ctx,
     // ABI intact (review F1 Leg B). The loader and the signal reset both take
     // the decided value as a parameter (Legs C and A).
     bool crossed_pheno = false;
+    int exe_err = 0;
     struct Spoor *exe = exec_resolve_from_namespace_ex(p, path, (size_t)path_len,
-                                                       &exe_size, &crossed_pheno);
+                                                       &exe_size, &crossed_pheno, &exe_err);
     if (!exe) {
         // NOTE: argv_kbuf and env_kbuf are the CALLER's -- every front end frees
         // its own blobs on every path. The pre-L-6a body freed it here, when the
@@ -11202,9 +11222,7 @@ static s64 sys_execve_core(struct exception_context *ctx,
         // across the split made it a double free, which is not a leak but a heap
         // corruption that surfaces in an unrelated allocation later. Do not
         // re-add them.
-        // stalk's failure reason is not plumbed out yet (ER-x); ENOENT is the
-        // honest majority answer and matches what SYS_OPEN reports today.
-        return -(s64)T_E_NOENT;
+        return -(s64)exe_err;
     }
 
     // 3. Build the new image in a DETACHED address space. Nothing below this
@@ -13580,9 +13598,7 @@ static s64 viv_poll_translated(struct Proc *p, struct pollfd *kfds, u64 nfds,
                     // is the POSIX answer for an fd that cannot be polled, and it
                     // is per-pollfd: one broken socket must not fail the call for
                     // the fds beside it (pselect6 then turns it into a whole-call
-                    // EBADF, select's own contract). A dev walk that failed for want
-                    // of memory lands here too: stalk reports every dev walk miss
-                    // as T_E_NOENT.
+                    // EBADF, select's own contract).
                     kfds[i].fd = -1;
                     continue;
                 }
@@ -15944,15 +15960,7 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         u32 path_len = 0;
         s64 m = viv_measure_user_path(args[0], &path_len);
         if (m != 0)                                  return m;
-        s64 rc = sys_chdir_handler(args[0], (u64)path_len, 0, 0);
-        // sys_chdir_handler collapses every failure (target missing, not a
-        // directory, no search permission) to a bare -1. Passing that through
-        // would read as EPERM at the libc -- a code chdir never returns on
-        // Linux -- so map it to ENOENT, the dominant and least-wrong cause.
-        // The collapse of ENOTDIR/EACCES into ENOENT is a fidelity gap tracked
-        // for when a richer native chdir errno path exists; the SUCCESS path
-        // (the only one milestone A exercises) is exact.
-        return (rc == 0) ? 0 : -(s64)T_E_NOENT;
+        return sys_chdir_handler(args[0], (u64)path_len, 0, 0);
     }
 
     case VIV_LINUX_FCHMODAT: {

@@ -15,7 +15,7 @@ hazards: [haz-shared-stream-desync]
 abis: []
 design: [docs/LARDER-DESIGN.md, docs/FID-LIFECYCLE-DESIGN.md, docs/POUNCE-DESIGN.md]
 created: 2026-07-31
-updated: 2026-10-29
+updated: 2026-11-03
 ---
 ## Purpose
 
@@ -534,7 +534,14 @@ deliberately not owned here — the resolver post-scans.
 Real-errno propagation on read/write/fsync/getattr (#3/Area-F) and on
 rename/unlink (#80). A chown/chgrp on a caped session answers `-1` before
 the wire (sys_wstat's generic refusal, like its other refusals). `dev9p_create`'s errno record + accessor (#99).
-NULL/`-1` per the Dev convention elsewhere. `walk_attrs` returns the
+NULL/`-1` per the Dev convention elsewhere. A failed walk records its reason with
+`dev_walk_failed` ([[sub-kernel-dev]]): the server's errno by value, except that its
+`ENOSYS` or `EOPNOTSUPP` to the base op reads `EIO` (a broken server, not a missing
+call: a Linux guest's T2 row reads `ENOSYS` as its own decline; the fused op's two are
+its latch and never get here); `EIO` for no priv or an over-count; `EINVAL` for a walk
+from an open fid or bad arguments; `ENOMEM`; `EMFILE` for fid exhaustion. A short Rwalk
+stays a miss: it is how 9P says a later name is missing. Only `ENOENT` installs a
+negative dentry. `walk_attrs` returns the
 distinct `DEV_WALK_ATTRS_UNSUPPORTED` sentinel for the capability miss (NOT
 a walk failure — nothing about the path was learned).
 

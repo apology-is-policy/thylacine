@@ -19,7 +19,7 @@ validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/POUCH-DESIGN.md", "docs/LLVM-DESIGN.md"]
 created: 2026-08-01
-updated: 2026-10-28
+updated: 2026-11-03
 ---
 ## Identity — the calls that could not report failure (A-6)
 
@@ -291,18 +291,19 @@ slot count, because many opens can target the same bounded slot.
 
 ## Error paths
 
-`ENOENT` for every refusal of the spawn record (name not resolvable /
-bad ELF / OOM / a listed fd not a Spoor — collapsed at v1.0); `E2BIG`
-for argv overflow; `EMFILE` for fd-list overflow and for pipe failure.
-A refused env tail returns the kernel's errno as it is: `EINVAL` for a record
+A failed spawn returns the kernel's errno as it is: the walk's reason for the binary, with
+`ENOENT` only for a real miss (ERRORS.md ER-2). `posix_spawnp`'s `PATH` search goes on past
+`ENOENT`, `ENOTDIR` and `EACCES`, as upstream's `__execvpe` does, and any other failure is its
+answer. `E2BIG` for argv overflow; `EMFILE` for fd-list overflow and for pipe failure.
+A refused env tail returns the kernel's errno as it is too: `EINVAL` for a record
 with no `=`, an empty name, a name of 64 bytes or more, or a `/` in a name;
 `E2BIG` for a value past 4096 bytes or a 65th name; `EFAULT`; `ENOMEM`. Pouch
 refuses a block past 32 KiB with `E2BIG` before the call. These are the
 kernel's negative T_E values, which docs/ERRORS.md defines as the Linux
 errnos: a `_Static_assert` pins this libc's `E2BIG`, `ENOMEM`, `EFAULT` and
 `EINVAL` to the Linux numbers, and `tools/check-spawn-args-mirrors.py` holds
-the kernel's four `T_E_*` to the same ones. Only the record's flat `-1` still
-collapses to `ENOENT`;
+the kernel's four `T_E_*` to the same ones. A flat `-1`, a refusal the kernel has no code for
+(a listed fd not a Spoor, an unknown flag), reads `EIO`;
 `ECHILD` for every wait failure. A failed assertion or `abort()` is not an
 error return: the program dies of `snare:abort` and its parent reads
 `SIGABRT`. `MAP_FAILED` + `ENOSYS` for the refused
