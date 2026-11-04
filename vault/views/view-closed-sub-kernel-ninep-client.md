@@ -13,7 +13,7 @@ Replaces: `memory/audit_{841,845,349,375_spill,5253,8c3,90}_closed_list.md`
 for this surface.
 
 <!-- generated:begin -->
-35 closed findings on [[sub-kernel-ninep-client]] — do NOT re-report
+36 closed findings on [[sub-kernel-ninep-client]] — do NOT re-report
 these in a future round (open/deferred findings are NOT listed
 here; see the seam inbox):
 
@@ -52,4 +52,5 @@ here; see the seam inbox):
 - [[fnd-aux-corona-join-r1-f2]] [P3] check-lock-helpers missed multi-line calls, aliases, the _raw variants and client locks in other files (fixed)
 - [[fnd-aux-corona-join-r2-f2]] [P3] check-lock-helpers missed a client lock through a header member, parenthesised, or in a header (fixed)
 - [[fnd-b1-r1-f3]] [P3] p9_client_init did not explicitly zero the loose/cacheable/wga latches (fixed) — Fixed: the three flags explicitly zeroed in `p9_client_init` — init
+- [[fnd-thread-11c-r1-f2]] [P3] A server Rlerror(EINTR) that beat the flush re-issued the call (fixed)
 <!-- generated:end -->
