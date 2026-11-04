@@ -122,7 +122,7 @@ python3 -I tools/test-magazines.py --mutants --logs <dir>
 # (tools/build.sh sysroot). Red-checked 2026-10-19: a planted
 # VIV_NATIVE_CEILING 132 fails the build at the check, and a sabotaged kill.c
 # in a musl copy fails exactly the three kill-probe legs that read it.
-tools/test-host-boundaries.sh       # every checker beside tools/host-tests/*.c
+tools/test-host-boundaries.sh       # every checker beside tools/host-tests/*.c, 8 at once
 
 # Warp-6 V-0 (the Venus gate). `warp-host.sh venus` boots the remote GL host
 # TWICE -- once with `venus=on,blob=on,hostmem=256M` and once WITHOUT -- and

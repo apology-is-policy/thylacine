@@ -419,7 +419,8 @@ decoder without the flat -1 row is refused). Upstream musl's decoder reads -1
 as EPERM, and Pouch's reads it as EIO, so a wrapper that hands the seam -EPERM
 passes a mock and answers EIO on the device. All eight were run by nothing until this
 date, so a renumbered mirror could drift with every build green.
-`host_boundary_check` runs named drivers in parallel, each into a fresh
+`host_boundary_check` runs named drivers in parallel, 8 at once because macOS scans
+each new executable serially and a longer queue eats a fixture's run timeout, each into a fresh
 `build/host-boundaries/<set>/<name>`, and stops the build with the failing
 log's tail: the native set before any target except `clean`, and the Pouch
 adapters in `build_sysroot`, step 2b, on the musl tree just patched. The drivers

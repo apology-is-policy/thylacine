@@ -73,10 +73,12 @@ def main():
             r=subprocess.run([str(exe),a.iters],capture_output=True,text=True,timeout=600,env=env)
             out=r.stdout+r.stderr;(a.logs/(name+'.log')).write_text(out)
             races=out.count('WARNING: ThreadSanitizer: data race');summary=[l for l in out.splitlines() if l.startswith('summary ')]
-            assert summary,(name,'no summary: the run did not finish',r.returncode)
+            # A mutant's race can corrupt the list and crash the run before its summary; the
+            # report is what the leg asks for. A control has no such excuse.
+            assert summary or (must_race and races),(name,'no summary: the run did not finish',r.returncode)
             if must_race:
                 assert races and r.returncode in (TSAN_EXIT,3),(name,'expected a race report',r.returncode,summary)
-                print(f'PASS {name}: {races} race report(s); {summary[0]}',flush=True)
+                print(f'PASS {name}: {races} race report(s); {summary[0] if summary else "the race crashed it first"}',flush=True)
             else:
                 assert r.returncode==0 and not races and 'ThreadSanitizer' not in out,(name,r.returncode,races,summary)
                 print(f'PASS {name}: no race; {summary[0]}',flush=True)
