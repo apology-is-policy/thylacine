@@ -450,6 +450,7 @@ static const struct viv_reject g_viv_rejects[] = {
     { VIV_LINUX_RT_SIGPROCMASK, VIV_TIER2 },  // V-6b: vivarium_sigprocmask_decide
     { VIV_LINUX_RT_SIGSUSPEND,   VIV_TIER2 }, // vote 24: notes_wait_suspend
     { VIV_LINUX_RT_SIGTIMEDWAIT, VIV_TIER2 }, // vote 24: notes_wait_take
+    { VIV_LINUX_RT_SIGPENDING,   VIV_TIER2 }, // vote 28: notes_wait_pending
     // The only signal rows that are an AUTHORITY question rather than a
     // disposition one: they name another Proc, so they reuse SYS_POSTNOTE's own
     // gate verbatim -- the caller, or a child it spawned; the gate Pouch's kill
@@ -463,16 +464,12 @@ static const struct viv_reject g_viv_rejects[] = {
     // "not yet":
     //   sigaltstack   — an alternate signal stack is only meaningful once
     //                   delivery honours SA_ONSTACK, which it does not.
-    //   rt_sigpending — Thylacine's queue is per-Proc and consumed exactly once
-    //                   (I-19 N-2); "pending but undelivered" is not a state it
-    //                   distinguishes.
     //   rt_sigqueueinfo — queued siginfo, which notes do not carry (a note has a
     //                   16-byte name and one u32 arg).
     //   restart_syscall — the continuation of a restart block, and no call here
     //                   owes one: a timed call the kernel would have to resume
     //                   reports EINTR instead.
     { VIV_LINUX_SIGALTSTACK,     VIV_ENOSYS },
-    { VIV_LINUX_RT_SIGPENDING,   VIV_ENOSYS },
     { VIV_LINUX_RT_SIGQUEUEINFO, VIV_ENOSYS },
     { VIV_LINUX_RESTART_SYSCALL, VIV_ENOSYS },
 
@@ -2978,15 +2975,13 @@ bool vivarium_timespec_to_ms(s64 sec, s64 nsec, s32 *out_ms, s32 *out_err) {
     return true;
 }
 
-bool vivarium_ppoll_decide(u64 nfds, u64 sigmask_va, s32 *out_err) {
+bool vivarium_ppoll_decide(u64 nfds, u64 sigmask_va, u64 sigsetsize, s32 *out_err) {
     if (!out_err) return false;
     *out_err = 0;
 
-    // The atomic mask swap has no counterpart -- see the header. Checked FIRST
-    // so a caller using ppoll for its signal semantics learns that is the
-    // unserved part, rather than being told its nfds is wrong.
-    if (sigmask_va != 0) {
-        *out_err = (s32)T_E_NOSYS;
+    // Linux's set_user_sigmask: a size is only looked at beside a mask.
+    if (sigmask_va != 0 && sigsetsize != sizeof(u64)) {
+        *out_err = (s32)T_E_INVAL;
         return false;
     }
 
@@ -3025,18 +3020,10 @@ static void viv_fdset_set_bit(u8 *set, u32 fd) {
     set[fd >> 3] |= (u8)(1u << (fd & 7u));
 }
 
-bool vivarium_pselect6_decide(u64 nfds_raw, u64 sigmask_va, u32 *out_nfds,
-                              s32 *out_err) {
+bool vivarium_pselect6_decide(u64 nfds_raw, u32 *out_nfds, s32 *out_err) {
     if (!out_nfds || !out_err) return false;
     *out_err  = 0;
     *out_nfds = 0;
-
-    // Checked first, exactly as in ppoll: a caller reaching for pselect6's
-    // signal semantics should learn THAT is the unserved part.
-    if (sigmask_va != 0) {
-        *out_err = (s32)T_E_NOSYS;
-        return false;
-    }
 
     // Linux's own check, and it must be signed AND 32-bit: nfds is an `int`, so
     // only the low word is significant. A caller may leave x0 sign-extended

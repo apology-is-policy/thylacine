@@ -806,6 +806,13 @@ void test_notewait_take_unwinds_for_another_note(void); // a handler owed ends t
 void test_notewait_take_before_unwinding(void); // taken, not interrupted
 void test_notewait_handler_mask_enter_and_restore(void); // one way in, one way out
 void test_notewait_dispose_row_carries_mask(void); // the flags word's row
+void test_notewait_poll_ready_keeps_the_note(void); // a ready fd answers first
+void test_notewait_poll_deadline_restores(void); // the mask is back at 0
+void test_notewait_poll_note_ends_the_wait(void); // the call's mask until the tail
+void test_notewait_poll_tail_note_goes_to_the_tail(void); // no time lost
+void test_notewait_poll_in_a_handler(void); // the masks stay
+void test_notewait_pending_reads_what_is_held(void); // sigpending's word
+void test_notewait_pending_sigset_names_the_row(void); // the word as a sigset
 void test_notewait_syscall_refusals(void); // the call's edges
 void test_vivarium_timespec_to_ns(void); // rt_sigtimedwait's timeout
 void test_notes_self_managing_flag(void);

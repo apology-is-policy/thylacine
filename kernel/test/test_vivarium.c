@@ -394,7 +394,7 @@ void test_vivarium_rejects_are_deliberate(void) {
     TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_RT_SIGPROCMASK, args, &out),
                    (int)VIV_TIER2, "rt_sigprocmask (135) is a TIER2 row");
     TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_RT_SIGPENDING, args, &out),
-                   (int)VIV_ENOSYS, "rt_sigpending (136) is an ENOSYS row");
+                   (int)VIV_TIER2, "rt_sigpending (136) is a TIER2 row");
     TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_RT_SIGTIMEDWAIT, args, &out),
                    (int)VIV_TIER2, "rt_sigtimedwait (137) is a TIER2 row");
     TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_RT_SIGQUEUEINFO, args, &out),
@@ -3020,48 +3020,44 @@ void test_vivarium_timespec_to_ms(void) {
     TEST_ASSERT(!vivarium_timespec_to_ms(0, 0, &ms, NULL), "NULL out_err refused");
 }
 
-// V-5c: the ppoll argument domain. Two of the three refusals are ENOSYS rather
-// than EINVAL, and that distinction is the point -- the arguments are valid
-// Linux, and it is this kernel that cannot serve them.
+// V-5c: the ppoll argument domain.
 void test_vivarium_ppoll_decide(void) {
     s32 err = -1;
 
-    TEST_ASSERT(vivarium_ppoll_decide(1, 0, &err), "one fd, no sigmask, is served");
+    TEST_ASSERT(vivarium_ppoll_decide(1, 0, 0, &err), "one fd, no sigmask, is served");
     TEST_ASSERT(err == 0, "with no error");
-    TEST_ASSERT(vivarium_ppoll_decide(POLL_MAX_NFDS, 0, &err),
+    TEST_ASSERT(vivarium_ppoll_decide(POLL_MAX_NFDS, 0, 0, &err),
                 "exactly POLL_MAX_NFDS fds is served -- the bound is inclusive");
 
-    // ppoll's whole reason to exist over poll() is the ATOMIC mask swap. There
-    // is no way to do that here, and doing it approximately would re-open the
-    // race the caller chose ppoll to close.
+    // A size is only looked at beside a mask, as Linux's set_user_sigmask.
     err = -1;
-    TEST_ASSERT(!vivarium_ppoll_decide(1, 0x40000000, &err), "a sigmask is refused");
-    TEST_ASSERT(err == T_E_NOSYS,
-                "as ENOSYS -- the shape is unserved, the argument is not wrong");
+    TEST_ASSERT(vivarium_ppoll_decide(1, 0x40000000, 8, &err), "a sigmask is served");
+    TEST_ASSERT(err == 0, "with no error");
+    err = -1;
+    TEST_ASSERT(!vivarium_ppoll_decide(1, 0x40000000, 4, &err), "a mask of another size is refused");
+    TEST_ASSERT(err == T_E_INVAL, "as EINVAL");
+    err = -1;
+    TEST_ASSERT(vivarium_ppoll_decide(1, 0, 4, &err), "with no mask the size is not read");
 
     // nfds == 0 is Linux's timed sleep, and it is SERVED -- it was refused until
     // V-5c-2. SYS_POLL still rejects nfds == 0 (deliberately), so the decision
     // this asserts is that the domain check must LET IT THROUGH for the caller
     // to route to sys_poll_sleep_for rather than reject it here.
     err = -1;
-    TEST_ASSERT(vivarium_ppoll_decide(0, 0, &err), "nfds == 0 is served -- a sleep");
+    TEST_ASSERT(vivarium_ppoll_decide(0, 0, 0, &err), "nfds == 0 is served -- a sleep");
     TEST_ASSERT(err == 0, "with no error");
 
     // This one IS a bad value: the native cap is a real bound a caller must
     // respect, so it gets the POSIX code for a bad argument.
     err = -1;
-    TEST_ASSERT(!vivarium_ppoll_decide(POLL_MAX_NFDS + 1, 0, &err),
+    TEST_ASSERT(!vivarium_ppoll_decide(POLL_MAX_NFDS + 1, 0, 0, &err),
                 "over the native cap is refused");
     TEST_ASSERT(err == T_E_INVAL, "as EINVAL -- a real out-of-range argument");
 
-    // Checked in the order a caller can act on: someone using ppoll FOR its
-    // signal semantics must learn that is the unserved part.
     err = -1;
-    TEST_ASSERT(!vivarium_ppoll_decide(0, 0x40000000, &err),
-                "a sigmask is refused even on the sleep shape");
-    TEST_ASSERT(err == T_E_NOSYS, "reporting the sigmask, which is checked first");
+    TEST_ASSERT(vivarium_ppoll_decide(0, 0x40000000, 8, &err), "a sigmask is served on the sleep shape");
 
-    TEST_ASSERT(!vivarium_ppoll_decide(1, 0, NULL), "NULL out_err is refused");
+    TEST_ASSERT(!vivarium_ppoll_decide(1, 0, 0, NULL), "NULL out_err is refused");
 }
 
 // V-5c-2: the pselect6 argument domain + the nfds clamp.
@@ -3069,27 +3065,21 @@ void test_vivarium_pselect6_decide(void) {
     s32 err = -1;
     u32 n   = 99;
 
-    TEST_ASSERT(vivarium_pselect6_decide(8, 0, &n, &err), "8 fds, no sigmask, served");
+    TEST_ASSERT(vivarium_pselect6_decide(8, &n, &err), "8 fds, no sigmask, served");
     TEST_ASSERT(err == 0 && n == 8, "nfds passes through untouched");
 
-    TEST_ASSERT(vivarium_pselect6_decide(0, 0, &n, &err), "nfds == 0 is served");
+    TEST_ASSERT(vivarium_pselect6_decide(0, &n, &err), "nfds == 0 is served");
     TEST_ASSERT(n == 0, "as zero -- the caller routes it to the sleep");
-
-    // Same refusal as ppoll's, same reason, same code.
-    err = -1;
-    TEST_ASSERT(!vivarium_pselect6_decide(8, 0x40000000, &n, &err),
-                "a sigmask pair pointer is refused");
-    TEST_ASSERT(err == T_E_NOSYS, "as ENOSYS -- unserved shape, not a bad value");
 
     // nfds is an int, so negative is reachable and IS a bad value.
     err = -1;
-    TEST_ASSERT(!vivarium_pselect6_decide((u64)(s64)-1, 0, &n, &err),
+    TEST_ASSERT(!vivarium_pselect6_decide((u64)(s64)-1, &n, &err),
                 "negative nfds refused (sign-extended -- what musl passes)");
     // V-5d F3. The SAME -1 left merely ZERO-extended, which a different libc or
     // a hand-rolled wrapper may produce. Before the truncation this read as
     // 4294967295 -- positive, therefore CLAMPED to PROC_HANDLE_MAX and served,
     // so select(-1, ...) worked on one toolchain and was EINVAL on another.
-    TEST_ASSERT(!vivarium_pselect6_decide(0x00000000FFFFFFFFull, 0, &n, &err),
+    TEST_ASSERT(!vivarium_pselect6_decide(0x00000000FFFFFFFFull, &n, &err),
                 "negative nfds refused (zero-extended -- the same -1)");
     TEST_EXPECT_EQ(err, (s32)T_E_INVAL, "and it is EINVAL, not a clamp");
     TEST_ASSERT(err == T_E_INVAL, "as EINVAL");
@@ -3098,7 +3088,7 @@ void test_vivarium_pselect6_decide(void) {
     // error. A bit above the fd table names an fd that cannot exist, so Linux
     // simply does not scan it -- and neither do we.
     err = -1;
-    TEST_ASSERT(vivarium_pselect6_decide(100000, 0, &n, &err),
+    TEST_ASSERT(vivarium_pselect6_decide(100000, &n, &err),
                 "an absurd nfds is CLAMPED, not refused -- Linux does not error here");
     TEST_ASSERT(n == PROC_HANDLE_MAX, "clamped to the fd table, not to FD_SETSIZE");
     TEST_ASSERT(err == 0, "with no error");
@@ -3106,11 +3096,11 @@ void test_vivarium_pselect6_decide(void) {
     // The clamp is at PROC_HANDLE_MAX, and the value below it must survive: this
     // is the assertion that would have caught pouch's F-a, where the bound was
     // copied as 64 and the kernel later moved it.
-    TEST_ASSERT(vivarium_pselect6_decide(200, 0, &n, &err) && n == 200,
+    TEST_ASSERT(vivarium_pselect6_decide(200, &n, &err) && n == 200,
                 "fd 199 is a perfectly ordinary handle -- 64 is NOT the ceiling");
 
-    TEST_ASSERT(!vivarium_pselect6_decide(1, 0, NULL, &err), "NULL out_nfds refused");
-    TEST_ASSERT(!vivarium_pselect6_decide(1, 0, &n, NULL),   "NULL out_err refused");
+    TEST_ASSERT(!vivarium_pselect6_decide(1, NULL, &err), "NULL out_nfds refused");
+    TEST_ASSERT(!vivarium_pselect6_decide(1, &n, NULL),   "NULL out_err refused");
 }
 
 // V-5c-2: FDS_BYTES -- how much of an fd_set covers the low nfds bits.

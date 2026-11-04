@@ -13682,10 +13682,22 @@ static bool viv_timeout_from_timespec(u64 tmo_va, s32 *out_ms, s32 *out_err) {
     return vivarium_timespec_to_ms(ts.tv_sec, ts.tv_nsec, out_ms, out_err);
 }
 
+// A wait's own mask, read and put in place right before the wait, with everything that
+// could still refuse the call behind it (ARCH 8.8.3). 0 to go on. notes_wait_mask_end
+// follows the wait, and does nothing if no mask went in.
+static s64 viv_wait_mask_begin(u64 set_va, s32 timeout_ms) {
+    if (set_va == 0) return 0;
+    u64 want = 0;
+    if (!sys_validate_user_buf(set_va, sizeof(u64)) || viv_load_u64(set_va, &want) != 0)
+        return -(s64)T_E_FAULT;
+    return notes_wait_mask_begin(current_thread(), viv_sigset_to_notemask(want, &g_viv_notebits),
+                                 timeout_ms < 0);
+}
+
 static s64 viv_ppoll(struct Proc *p, u64 fds_va, u64 nfds, u64 tmo_va,
-                     u64 sigmask_va) {
+                     u64 sigmask_va, u64 sigsetsize) {
     s32 err = 0;
-    if (!vivarium_ppoll_decide(nfds, sigmask_va, &err)) return -(s64)err;
+    if (!vivarium_ppoll_decide(nfds, sigmask_va, sigsetsize, &err)) return -(s64)err;
 
     s32 timeout_ms = -1;
     if (!viv_timeout_from_timespec(tmo_va, &timeout_ms, &err)) return -(s64)err;
@@ -13693,7 +13705,13 @@ static s64 viv_ppoll(struct Proc *p, u64 fds_va, u64 nfds, u64 tmo_va,
     // nfds == 0 is Linux's "sleep for the timeout". The native poll rejects it
     // (deliberately -- see sys_poll_sleep_for), so it routes to the sleep rather
     // than declining as it did before V-5c-2.
-    if (nfds == 0) return sys_poll_sleep_for(timeout_ms);
+    if (nfds == 0) {
+        s64 slept = viv_wait_mask_begin(sigmask_va, timeout_ms);
+        if (slept != 0) return slept;
+        slept = sys_poll_sleep_for(timeout_ms);
+        notes_wait_mask_end(current_thread(), slept);
+        return slept;
+    }
 
     u64 buf_bytes = nfds * sizeof(struct pollfd);
     if (!sys_validate_user_buf(fds_va, buf_bytes))      return -(s64)T_E_FAULT;
@@ -13704,7 +13722,10 @@ static s64 viv_ppoll(struct Proc *p, u64 fds_va, u64 nfds, u64 tmo_va,
         if (uaccess_load_u8(fds_va + i, &kbytes[i]) != 0) return -(s64)T_E_FAULT;
     }
 
-    s64 result = viv_poll_translated(p, kfds, nfds, timeout_ms);
+    s64 result = viv_wait_mask_begin(sigmask_va, timeout_ms);
+    if (result != 0) return result;
+    result = viv_poll_translated(p, kfds, nfds, timeout_ms);
+    notes_wait_mask_end(current_thread(), result);
 
     if (result < 0) return result;
     if (poll_writeback_revents(fds_va, kfds, nfds) != 0) return -(s64)T_E_FAULT;
@@ -13723,15 +13744,24 @@ static s64 viv_ppoll(struct Proc *p, u64 fds_va, u64 nfds, u64 tmo_va,
 // THE SIXTH ARGUMENT IS A POINTER TO A PAIR, not a mask. aarch64 caps a syscall
 // at six registers and pselect6 needs seven things, so Linux packs the last two
 // into `struct { const sigset_t *ss; size_t ss_len; }` and passes its address.
-// A NULL sixth argument is unambiguously "no signal mask"; anything non-NULL is
-// declined without being dereferenced, since a non-NULL pair holding a NULL ss
-// is a distinction we do not need to make in order to say no.
+// A NULL sixth argument and a pair holding a NULL ss both mean no mask, and only a
+// mask has its size looked at (Linux's set_user_sigmask).
 static s64 viv_pselect6(struct Proc *p, u64 nfds_arg, u64 rd_va, u64 wr_va,
                         u64 ex_va, u64 tmo_va, u64 sigmask_va) {
     s32 err   = 0;
     u32 nfds  = 0;
-    if (!vivarium_pselect6_decide(nfds_arg, sigmask_va, &nfds, &err))
+    if (!vivarium_pselect6_decide(nfds_arg, &nfds, &err))
         return -(s64)err;
+
+    u64 set_va = 0;
+    if (sigmask_va != 0) {
+        u64 ss_len = 0;
+        if (!sys_validate_user_buf(sigmask_va, 2u * sizeof(u64)) ||
+            viv_load_u64(sigmask_va, &set_va) != 0 ||
+            viv_load_u64(sigmask_va + sizeof(u64), &ss_len) != 0)
+            return -(s64)T_E_FAULT;
+        if (set_va != 0 && ss_len != sizeof(u64)) return -(s64)T_E_INVAL;
+    }
 
     s32 timeout_ms = -1;
     if (!viv_timeout_from_timespec(tmo_va, &timeout_ms, &err)) return -(s64)err;
@@ -13762,12 +13792,16 @@ static s64 viv_pselect6(struct Proc *p, u64 nfds_arg, u64 rd_va, u64 wr_va,
                                    POLL_MAX_NFDS, &count, &err))
         return -(s64)err;
 
+    s64 begun = viv_wait_mask_begin(set_va, timeout_ms);
+    if (begun != 0) return begun;
+
     u32 bits = 0;
     if (count == 0) {
         // No fd contributes: `select(0, NULL, NULL, NULL, &tv)`, the classic
         // portable sleep, and equally `select(n, ...)` with every set empty.
         // Nothing to poll -- but there is still something to write back.
         s64 slept = sys_poll_sleep_for(timeout_ms);
+        notes_wait_mask_end(current_thread(), slept);
         if (slept < 0) return slept;
 
         // Linux writes the sets back on this path too: it copies FDS_BYTES(n)
@@ -13782,6 +13816,7 @@ static s64 viv_pselect6(struct Proc *p, u64 nfds_arg, u64 rd_va, u64 wr_va,
         }
     } else {
         s64 result = viv_poll_translated(p, kfds, count, timeout_ms);
+        notes_wait_mask_end(current_thread(), result);
         if (result < 0) return result;
 
         if (!vivarium_pollfds_to_fdset(kfds, count, rd_va ? rd : NULL,
@@ -14850,13 +14885,50 @@ static s64 sys_note_dispose_handler(u64 name_va, u64 name_len_raw, u64 dispositi
     return sys_note_dispose_for_proc(t->proc, buf, disposition, flags);
 }
 
+// poll's copies, around the mask's window. The array is read before the mask goes in, so
+// a call that was going to fault has changed nothing.
+static s64 sys_note_wait_poll(struct Thread *t, u64 mask, u64 fds_va, s64 timeout_ns,
+                              u64 nfds) {
+    if (nfds > POLL_MAX_NFDS) return -(s64)T_E_INVAL;
+    u64 buf_bytes = nfds * sizeof(struct pollfd);
+    struct pollfd kfds[POLL_MAX_NFDS];
+    if (nfds != 0) {
+        if (!sys_validate_user_buf(fds_va, buf_bytes)) return -(s64)T_E_FAULT;
+        u8 *kbytes = (u8 *)kfds;
+        for (u64 i = 0; i < buf_bytes; i++) {
+            if (uaccess_load_u8(fds_va + i, &kbytes[i]) != 0) return -(s64)T_E_FAULT;
+        }
+    }
+
+    s32 timeout_ms = -1;
+    if (timeout_ns >= 0) {
+        u64 ms = (u64)timeout_ns / 1000000u + ((u64)timeout_ns % 1000000u != 0u);
+        timeout_ms = ms > 0x7fffffffu ? 0x7fffffff : (s32)ms;
+    }
+
+    t->note_interruptible = true;       // as native_note_class has SYS_POLL
+    s64 begun = notes_wait_mask_begin(t, mask, timeout_ns < 0);
+    if (begun != 0) return begun;
+    s64 result = nfds != 0 ? sys_poll_for_proc(t->proc, kfds, nfds, timeout_ms)
+                           : sys_poll_sleep_for(timeout_ms);
+    notes_wait_mask_end(t, result);
+    if (result < 0 || nfds == 0) return result;
+    if (poll_writeback_revents(fds_va, kfds, nfds) != 0) return -(s64)T_E_FAULT;
+    return result;
+}
+
 // ARCH 8.8.3; the form's rules are on the number (syscall.h).
 VISIBLE_IF_KERNEL_TESTS
-s64 sys_note_wait_handler(u64 how, u64 set, u64 rec_va, u64 timeout_raw) {
+s64 sys_note_wait_handler(u64 how, u64 set, u64 rec_va, u64 timeout_raw, u64 nfds_raw) {
     struct Thread *t = current_thread();
     if (!t || !t->proc) return -(s64)T_E_INVAL;
     s64 timeout_ns = (s64)timeout_raw;
 
+    if (how == NOTE_WAIT_POLL) return sys_note_wait_poll(t, set, rec_va, timeout_ns, nfds_raw);
+    if (how == NOTE_WAIT_PENDING) {
+        if (set != 0 || rec_va != 0 || timeout_raw != 0) return -(s64)T_E_INVAL;
+        return (s64)notes_wait_pending(t);
+    }
     if (how == NOTE_WAIT_SUSPEND) {
         if (rec_va != 0 || timeout_ns >= 0) return -(s64)T_E_INVAL;
         return notes_wait_suspend(t, set);
@@ -15748,6 +15820,16 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
                                   viv_sigset_to_notemask(want, &g_viv_notebits));
     }
 
+    case VIV_LINUX_RT_SIGPENDING: {
+        // rt_sigpending(set, sigsetsize): x0, x1. Linux takes a smaller size and copies
+        // that much. This row wants the whole word, as its neighbours do, and no libc
+        // passes less.
+        if (args[1] != sizeof(u64)) return -(s64)T_E_INVAL;
+        if (!sys_validate_user_buf(args[0], sizeof(u64))) return -(s64)T_E_FAULT;
+        u64 pending = notes_sigset_for_take(notes_wait_pending(current_thread()));
+        return viv_store_u64(args[0], pending) != 0 ? -(s64)T_E_FAULT : 0;
+    }
+
     case VIV_LINUX_RT_SIGTIMEDWAIT: {
         // rt_sigtimedwait(set, info, timeout, sigsetsize): x0..x3.
         if (args[3] != sizeof(u64)) return -(s64)T_E_INVAL;
@@ -15809,10 +15891,9 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         return viv_sock_recvmsg(p, args[0], args[1], args[2]);
 
     case VIV_LINUX_PPOLL:
-        // ppoll(fds, nfds, tmo_p, sigmask, sigsetsize): x0..x4. sigsetsize is
-        // read only via the sigmask decline, which needs no size -- Linux itself
-        // skips that check when the mask is NULL.
-        return viv_ppoll(p, args[0], args[1], args[2], args[3]);
+        // ppoll(fds, nfds, tmo_p, sigmask, sigsetsize): x0..x4. Linux skips the size
+        // check when the mask is NULL, and so does the decide.
+        return viv_ppoll(p, args[0], args[1], args[2], args[3], args[4]);
 
     case VIV_LINUX_PSELECT6:
         // pselect6(nfds, rd, wr, ex, tmo, sigmask_and_size): x0..x5 -- the one
@@ -17639,7 +17720,8 @@ static void syscall_native_switch(struct exception_context *ctx) {
 
     case SYS_NOTE_WAIT:
         ctx->regs[0] = (u64)sys_note_wait_handler(ctx->regs[0], ctx->regs[1],
-                                                  ctx->regs[2], ctx->regs[3]);
+                                                  ctx->regs[2], ctx->regs[3],
+                                                  ctx->regs[4]);
         return;
 
     case SYS_NOTE_MASK:

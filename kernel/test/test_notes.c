@@ -1499,8 +1499,8 @@ void test_notes_fstat_reports_chr(void) {
 // note AT GENERATION, exactly as Linux does -- and reports SUCCESS, because on
 // Linux `kill()` to a process ignoring the signal succeeds.
 //
-// The queue is directly observable here, which no in-guest leg can manage (a
-// Linux guest has no notes fd and rt_sigpending is ENOSYS). The guest-side
+// The queue is directly observable here, which an in-guest leg can see only through
+// rt_sigpending, for what the thread holds. The guest-side
 // generator DOES exist since V-6c -- fd 0 is a reader-less pipe write end, so
 // viv-pheno-probe raises SIGPIPE at will; its L205-L216 legs drive the
 // install-time twin of this hook (notes_discard_name) through rt_sigaction.

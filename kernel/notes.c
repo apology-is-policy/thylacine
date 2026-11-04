@@ -2729,6 +2729,15 @@ u64 notes_take_for_sigset(u64 set) {
     return take;
 }
 
+u64 notes_sigset_for_take(u64 take) {
+    u64 set = 0;
+    for (u64 sig = 1; sig <= 64u; sig++) {
+        const char *name = viv_signote_note_name(viv_signal_note(sig));
+        if (name && (notes_take_bit(name) & take)) set |= 1ull << (sig - 1u);
+    }
+    return set;
+}
+
 // The thread's own word first, as the tail takes them, then the oldest queued. The
 // mask says nothing: a taker blocks what it waits for. A bit a discard took between
 // the read and the consume is gone, and the queue may still hold one.
@@ -2882,6 +2891,67 @@ s64 notes_wait_suspend(struct Thread *t, u64 mask) {
     rendez_init(&r);
     (void)tsleep_noteintr(&r, notes_wait_never, NULL, 0u);
     return -(s64)T_E_INTR;
+}
+
+// ppoll's and pselect's mask. It differs from sigsuspend's in what can end the call. A
+// caught note goes on to the poll: its latch is armed and the poll reads it after a pass
+// finds nothing ready, so a ready fd answers first, as Linux's do_poll has it. A note
+// only the tail can act on arms nothing a poll reads, so the call goes to the tail at
+// once, and with no time gone a re-issue loses none, whatever the timeout. In a handler
+// no other handler can run and the saved slot is in use, so the mask has nothing to do.
+s64 notes_wait_mask_begin(struct Thread *t, u64 mask, bool forever) {
+    if (t->in_handler) return 0;
+
+    t->note_saved_mask  = t->note_mask;
+    t->note_wait_flags |= NOTE_WF_MASK_HELD;
+    if (forever) t->note_wait_flags |= NOTE_WF_NOHAND;
+    t->note_mask        = mask;
+
+    struct Proc *p = t->proc;
+    // A self-managing Proc's fd holds its notes, and no tail will take them.
+    if (!p || !p->notes || proc_is_self_managing_notes(p)) return 0;
+    struct Note candidate;
+    int direct;
+    spin_lock(&p->notes->lock);
+    int queued = notes_tail_candidate_locked(p, t, &candidate, &direct);
+    bool caught = queued && notes_proc_has_live_handler(p, candidate.name);
+    spin_unlock(&p->notes->lock);
+    if (!queued || caught) return 0;
+    t->note_wait_flags  |= NOTE_WF_NOHAND;
+    t->note_call_unwound = true;
+    return -(s64)T_E_INTR;
+}
+
+// Linux's restore_saved_sigmask_unless: what the call answered with is not a note's doing,
+// so the tail must not run a handler the caller's own mask holds.
+void notes_wait_mask_end(struct Thread *t, s64 result) {
+    if (result == -(s64)T_E_INTR || !(t->note_wait_flags & NOTE_WF_MASK_HELD)) return;
+    t->note_mask        = t->note_saved_mask;
+    t->note_wait_flags &= (u8)~(NOTE_WF_MASK_HELD | NOTE_WF_NOHAND);
+}
+
+u64 notes_wait_pending(struct Thread *t) {
+    struct Proc *p = t->proc;
+    if (!p || !p->notes) return 0;
+    struct NoteQueue *q = p->notes;
+    u64 held = t->in_handler ? ~0ull : notes_interrupted_mask(t);
+    u64 word = 0;
+    spin_lock(&q->lock);
+    u32 own = (u32)__atomic_load_n(&t->note_direct, __ATOMIC_ACQUIRE);
+    for (; own; own &= own - 1u) {
+        int d = __builtin_ctz(own);
+        const char *name = notes_direct_name((u32)d);
+        if (name && (held & (1ull << (u32)d))) word |= notes_take_bit(name);
+    }
+    u32 idx = q->head;
+    for (u32 n = 0; n < q->count; n++) {
+        int bit = notes_name_to_bit(q->ring[idx].name);
+        if (bit >= 0 && (held & (1ull << (u32)bit))) word |= notes_take_bit(q->ring[idx].name);
+        idx = (idx + 1) % NOTE_RING_SLOTS;
+    }
+    spin_unlock(&q->lock);
+    // A take word cannot name the snare family, whose notes are the fault's to deliver.
+    return word & ~(1ull << NOTE_BIT_SNARE);
 }
 
 s64 notes_wait_take(struct Thread *t, u64 take, s64 timeout_ns, struct Note *out,

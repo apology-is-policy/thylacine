@@ -2591,6 +2591,19 @@ enum {
     //   and runs no handler for it. POSIX has the caller block the set first: a note it
     //   left unmasked may reach a handler or its default on another thread. Answers 0.
     //
+    // NOTE_WAIT_POLL: x1 = the mask for the call, as SYS_NOTE_MASK; x2 = a struct pollfd *;
+    //   x3 = the timeout in ns, < 0 for none, 0 not to wait, rounded up to the poll's ms;
+    //   x4 = nfds, up to POLL_MAX_NFDS, 0 to sleep for the timeout. POSIX ppoll and
+    //   pselect, with no window between the mask and the wait. Answers the ready count,
+    //   0 at the deadline. With either answer the caller's mask is back before it returns
+    //   and no handler has run for a note only the call's mask let in. A caught note that
+    //   ends the wait runs its handler under the call's mask, and -T_E_INTR, with no
+    //   restart under NOTE_DISP_RESTART, as poll's. x4 is read by this form alone.
+    //
+    // NOTE_WAIT_PENDING: x1, x2 and x3 = 0. POSIX sigpending: answers a take word naming
+    //   what is queued for this thread and its mask holds. In a handler, every note is
+    //   held.
+    //
     // A take word: 1 << NOTE_BIT_* names a family; NOTE_TAKE_TTY_* name one row of the
     // tty family, whose rows share a mask bit, so that waiting for a winch does not eat
     // a hangup. `kill` and the snare family cannot be named.
@@ -2600,8 +2613,10 @@ enum {
     //   -T_E_AGAIN  the timeout passed (NOTE_WAIT_TAKE)
     //   -T_E_INVAL  a form or word this does not name; rec_va or a timeout on a suspend;
     //               NOTE_WAIT_SUSPEND in a Proc no table governs, where no note could
-    //               end the wait
-    //   -T_E_FAULT  rec_va outside the user-VA bound / unmapped; the note stays queued
+    //               end the wait; nfds over the bound; an argument NOTE_WAIT_PENDING
+    //               does not take
+    //   -T_E_FAULT  rec_va outside the user-VA bound / unmapped; the note stays queued.
+    //               The pollfd array likewise
     //
     // Explicitly 141: 140 is SYS_ACCOUNT on corona/async-memory, reserved there. Linux's
     // 141 is getpriority, which has no row (vivarium.c).
@@ -3480,6 +3495,8 @@ _Static_assert(__builtin_offsetof(struct t_kernel_regs, tpidr_el0) == 104, "t_ke
 // SYS_NOTE_WAIT's forms, and a take word's rows of the tty family.
 #define NOTE_WAIT_SUSPEND    0u
 #define NOTE_WAIT_TAKE       1u
+#define NOTE_WAIT_POLL       2u
+#define NOTE_WAIT_PENDING    3u
 #define NOTE_TAKE_TTY_WINCH  (1ull << 16)
 #define NOTE_TAKE_TTY_SUSP   (1ull << 17)
 #define NOTE_TAKE_TTY_CONT   (1ull << 18)
@@ -4184,7 +4201,7 @@ s64 sys_postnote_cross_for_test(struct Proc *caller, int target_pid,
                                 const char *name);
 s64 sys_postnote_self_for_test(struct Proc *caller, const char *name);
 s64 sys_postnote_tid_for_test(struct Proc *caller, int tid, const char *name);
-s64 sys_note_wait_handler(u64 how, u64 set, u64 rec_va, u64 timeout_raw);
+s64 sys_note_wait_handler(u64 how, u64 set, u64 rec_va, u64 timeout_raw, u64 nfds_raw);
 s64 sys_note_dispose_for_proc(struct Proc *p, const char *name, u64 disposition,
                               u64 flags);
 s64 sys_pread_for_proc(struct Proc *p, hidx_t h, u8 *kbuf, u64 len, s64 off);
