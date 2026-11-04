@@ -1712,7 +1712,7 @@ the spec's own F1 (ownerless reservation reclaim the impl never had — the
 
 | Spec action | Code site | Invariant pinned |
 |---|---|---|
-| `FastSwitch(c, p)` | `arch/arm64/asid.c::asid_check_and_switch` generation-match fast path — lockless `xchg` publish into `active_asids[cpu]` | `NoActiveAlias`: the publish makes the ASID visible to a concurrent rollover BEFORE the TTBR0 write |
+| `FastSwitch(c, p)` | `arch/arm64/asid.c::asid_check_and_switch` generation-match fast path — lockless `xchg` publish into `active_asids[cpu]` | `NoActiveAlias`: the publish makes the ASID visible to a concurrent rollover BEFORE the switch writes or keeps TTBR0 |
 | `SlowSwitch(c, p)` | `asid.c::new_context` under `g_asid_lock` — claim a free ASID or roll the generation (reset bitmap; preserve each CPU's active ASID into `reserved_asids[cpu]`; set per-CPU `flush_pending`) | `ActiveClaimed` + rollover preserves active/reserved (a running CPU is never yanked) |
 | `Deschedule(c)` | the context switch away from a Proc (the per-CPU active slot becomes reclaimable only via the rollover's reserve pass) | — |
 | `CacheTranslation(c)` | (hardware TLB fill; no code site) — cleared by the `flush_pending` local `tlbi` consumed at the next switch | `NoStaleTLB`: no CPU runs on a translation cached under a previous generation's aliasing |

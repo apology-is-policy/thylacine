@@ -89,6 +89,7 @@ static void sc_piece_call(void) {
     __asm__ __volatile__("" ::: "memory");
 }
 
+// fp_restore_area ends in an ISB: V state itself costs this figure less the isb piece's.
 static void sc_piece_fp(void) {
     fp_save_area(g_sc_area);
     fp_restore_area(g_sc_area);
