@@ -76,6 +76,7 @@ Generated from note fields — do not edit between the markers
 | [[seam-hwcap-boot-cpu-only]] | open | sub-kernel-boot-sequence, sub-kernel-alternatives | chg-2026-08-02-boot-sweep |  |
 | [[seam-kaslr-link-va-unchecked]] | open | sub-kernel-kaslr, sub-kernel-boot-entry | chg-2026-08-02-boot-sweep | task #24 |
 | [[seam-kobj-handle-release]] | open | sub-stratum-bdev | chg-2026-08-02-stratum-sweep |  |
+| [[seam-kstack-va-predictable]] | open | sub-kernel-thread | fnd-c10-r1-f7 | OPEN-BUGS 2026-11-03T13:06Z |
 | [[seam-larder-cacheable-proxy]] | open | sub-kernel-larder, sub-kernel-ninep-dev9p | chg-2026-07-09-larder-l1e |  |
 | [[seam-larder-lazy-array-robustness]] | open | sub-kernel-larder | fnd-25-r1-f1 |  |
 | [[seam-larder-loom-bypass]] | open | sub-kernel-larder | fnd-l1f-r1-f2 |  |
