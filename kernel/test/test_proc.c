@@ -946,9 +946,8 @@ void test_proc_group_terminate_smoke(void) {
     TEST_ASSERT(p->group_exit_msg == NULL,
         "a fresh Proc must not be group-terminating (KP_ZERO -> NULL)");
 
-    // First group-terminate publishes the msg. Also exercises the empty-bucket
-    // torpor_wake_all_for_proc + the empty p->threads cascade walk +
-    // smp_resched_others -- all safe no-ops here (no torpor waiters, no peers).
+    // First group-terminate publishes the msg. Also exercises the empty p->threads
+    // cascade walk + smp_resched_others -- safe no-ops here (no peers).
     // #811: proc_group_terminate's contract requires g_proc_table_lock held
     // (the cascade walks p->threads, which races thread_free). p has no threads
     // so the walk is empty, but hold the lock so the test models the contract.
@@ -1992,13 +1991,12 @@ void test_proc_job_stop_recycle(void) {
 }
 
 // PTY-4e #19 ROOT FIX: a job stop must PRESERVE a torpor-timed wait, never
-// complete it. The stop cascade formerly reused the DEATH cascade's
-// torpor_wake_all_for_proc, which fabricates a completed wait (awoken=1) --
+// complete it. The stop cascade formerly fabricated a completed wait (awoken=1) --
 // immaterial for a dying Proc, but a STOPPED one survives: the fabricated
 // TORPOR_OK rode back to EL0 at resume, so a time::sleep-based job (e.g.
 // /bin/sleep) "finished" the moment fg resumed it, fg returned Done, and a
 // second ^Z found no job (the live re-stop hang). The fix
-// (torpor_stop_wake_all_for_proc) wakes WITHOUT completing: the woken
+// wakes WITHOUT completing: the woken
 // waiter's tsleep re-loop takes the 8c-2 stop detour, parks, and on resume
 // re-registers with its original deadline. This test pins the whole shape:
 // a child blocked in a 60 s torpor wait is stopped (parks, wait intact),

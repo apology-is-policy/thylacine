@@ -1261,7 +1261,7 @@ Replaces the `futex.tla` the 2026-05-23 suspension dropped; the overhaul's plan 
 | `WaitLink` | `sys_torpor_wait_for_proc`: the under-lock load, `torpor_append_locked` |
 | `SleepRead`, `SleepCommit` | `tsleep_noteintr` on the waiter's rendez with `torpor_cond_awoken`: the rendez's lock from the cond through registering |
 | `Deadline`, `CaughtNote` | `timerwait_tick`; tsleep's caught arm, which asks the cond first |
-| `Stop`, `Resume` | `torpor_stop_wake_all_for_proc` and the stop detour: on no rendez, still linked |
+| `Stop`, `Resume` | `proc_stop_wake_sleepers_locked`'s rendez wake and the stop detour: on no rendez, still linked |
 | `Unlink`, `Leave` | the bucket lock's second hold in WAIT, then the wait for `wake_held` |
 | `WakeMark` | `sys_torpor_wake_for_proc`'s walk with `torpor_mark_awoken` |
 | `WakeUnlock`, `WakeDeliver` | the lock's release, then `wakeup` and the clear of `wake_held` |
@@ -1273,8 +1273,7 @@ Replaces the `futex.tla` the 2026-05-23 suspension dropped; the overhaul's plan 
 | `MarkedSleeperIsHeld` | the mark takes the rendez's lock; `torpor.mark_takes_the_rendez_lock` stops a waiter in that window |
 
 Buggy cfgs: `no_wait`, `lifo`, `count_any`, `eintr_any`, `unlocked_check`, `stop_at_mark`, `unlocked_mark`, each
-with the invariant it breaks in the module's header. What it does not model: the death walk, which
-holds the lock across wakeup, so its record cannot leave; two buckets, since a lock per bucket
+with the invariant it breaks in the module's header. What it does not model: two buckets, since a lock per bucket
 changes nothing a single bucket's order depends on; and the hash. A stop or a caught note that
 wakes a waiter before a mark reaches it lands in the code as an uncounted OK, which the model
 reaches only through `Deadline`: the same state and the same count.

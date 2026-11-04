@@ -10,7 +10,7 @@ validated-by: [spec-death-wake, gate-smp]
 locks: [lock-proc-table]
 design: ["docs/ARCHITECTURE.md", "docs/LINEAGE.md"]
 created: 2026-08-01
-updated: 2026-10-29
+updated: 2026-11-04
 ---
 ## Session registry retirement
 
@@ -75,9 +75,9 @@ that michael can abdicate/log out and cora can log in afterward.
    "killgrp the driver" revoke-then-terminate atomically, so an in-flight
    `SYS_*_CREATE` observes `revoked` at its commit re-check.
 2. CAS `group_exit_msg` (RELEASE, first msg wins).
-3. Wake, in two passes: `torpor_wake_all_for_proc` for futex sleepers, then
-   the **#811 universal death-wake** — walk `p->threads`, take each peer's
-   `wait_lock`, read `rendez_blocked_on`, `wakeup()` it.
+3. Wake: the **#811 universal death-wake** — walk `p->threads`, take each peer's
+   `wait_lock`, read `rendez_blocked_on`, `wakeup()` it. A futex sleeper is reached
+   this way too, on its private rendez.
 4. `smp_resched_others()` so a peer running at EL0 on another CPU traps to
    its IRQ-from-EL0 die-check without waiting for a tick. The periodic
    timer is the floor if the IPI is missed.
@@ -619,9 +619,7 @@ What a change **must** re-establish:
   kill, an `exit_group`, a hangup or `EXITKILL` never force. A forced exit's
   parent can read the file before the closer's write lands: the I-38 window
   the second kill buys.
-- The interrupt-terminate wake deliberately omits both
-  `torpor_wake_all_for_proc` and `smp_resched_others` — the former because
-  torpor waiters are reachable via `rendez_blocked_on` anyway, the latter
+- The interrupt-terminate wake deliberately omits `smp_resched_others`,
   because the IRQ-from-EL0 tail evaluates only `group_exit_msg`, so an IPI
   cannot accelerate an interrupt-death. The no-IPI shape is also what lets
   the unit test drive the real waker on the single-CPU harness.
