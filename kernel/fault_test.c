@@ -135,11 +135,12 @@ static void provoke_bti_fault(void) {
 
 // ---------------------------------------------------------------------------
 // kstack_overflow — recurse on a thread_create'd kstack until SP runs
-// off the bottom of the 16 KiB usable region into the 16 KiB guard.
-// The guard pages are mapped no-access (P2-Dc); the next memory access
-// raises a data abort with FAR inside the guard region. The exception
-// handler's addr_is_stack_guard() recognizes the FAR is inside the
-// current thread's kstack guard and emits "kernel stack overflow".
+// off the bottom of the 16 KiB usable region into the 16 KiB guard, which is
+// unmapped address space. The next store raises a data abort with SP in the
+// guard, and the 0x200 vector, reading that SP, takes the frame to the CPU's
+// overflow stack. The gate requires the body that path alone prints: a stack
+// whose slot below happens to be mapped would otherwise pass by descending into
+// it, without the vector having done anything.
 //
 // Each recursion frame allocates a 1 KiB volatile array; ~16 frames
 // chew through the 16 KiB usable stack and SP drops into the guard.
@@ -190,6 +191,112 @@ static void provoke_kstack_overflow(void) {
 #endif
 
 // ---------------------------------------------------------------------------
+// The shapes recursing into the guard does not reach. Each thread moves its own SP,
+// and never returns from it:
+//   kstack_overflow_frame -- SP 16 bytes above the stack's bottom, then a read of the
+//     guard. SP is still in the stack and the frame is not, so the test must read the
+//     frame's address; and x0, held inside SP for three instructions, must come back.
+//   kstack_overflow_irq -- the same SP, IRQs on, in wfi. The IRQ slot makes no SP test:
+//     the first store of its frame faults, and the sync slot takes that.
+//   kstack_overflow_peer -- the first shape on a secondary, on its own overflow stack.
+//   kstack_dump_at_top -- SP 16 bytes under the stack's top, then a read of the guard.
+//     The frame fits, so the fault handler reports it, and the dump starts one line
+//     from the next slot's guard: the shape of any extinction taken from a syscall.
+// ---------------------------------------------------------------------------
+
+#if defined(THYLACINE_FAULT_TEST_kstack_overflow_frame) || \
+    defined(THYLACINE_FAULT_TEST_kstack_overflow_irq) || \
+    defined(THYLACINE_FAULT_TEST_kstack_overflow_peer)
+#define FAULT_TEST_KSTACK_X0 0x5a17c0de5a17c0deull      // test-fault.sh requires this value
+#endif
+
+#if defined(THYLACINE_FAULT_TEST_kstack_overflow_frame) || \
+    defined(THYLACINE_FAULT_TEST_kstack_overflow_peer)
+__attribute__((noreturn))
+static void kstack_frame_entry(void) {
+    u64 bottom = (u64)(uintptr_t)current_thread()->kstack_base + THREAD_KSTACK_GUARD_SIZE;
+    uart_puts("  fault-test: a frame straddling the guard...\n");
+    __asm__ __volatile__("mov sp, %0\n\t"
+                         "mov x0, %1\n\t"
+                         "ldr x1, [%2]\n\t"
+                         : : "r"(bottom + 16u), "r"(FAULT_TEST_KSTACK_X0), "r"(bottom - 4096u)
+                         : "x0", "x1", "memory");
+    __builtin_unreachable();
+}
+#endif
+
+#ifdef THYLACINE_FAULT_TEST_kstack_overflow_irq
+__attribute__((noreturn))
+static void kstack_irq_entry(void) {
+    u64 bottom = (u64)(uintptr_t)current_thread()->kstack_base + THREAD_KSTACK_GUARD_SIZE;
+    uart_puts("  fault-test: an IRQ with no room for its frame...\n");
+    // Masked until x0 is set, so the frame the dump reads holds the value.
+    __asm__ __volatile__("msr daifset, #2\n\t"
+                         "mov sp, %0\n\t"
+                         "mov x0, %1\n\t"
+                         "msr daifclr, #2\n\t"
+                         "1:\n\t"
+                         "wfi\n\t"
+                         "b 1b\n\t"
+                         : : "r"(bottom + 16u), "r"(FAULT_TEST_KSTACK_X0)
+                         : "x0", "memory");
+    __builtin_unreachable();
+}
+#endif
+
+#ifdef THYLACINE_FAULT_TEST_kstack_dump_at_top
+__attribute__((noreturn))
+static void kstack_at_top_entry(void) {
+    u64 base = (u64)(uintptr_t)current_thread()->kstack_base;
+    uart_puts("  fault-test: a fault with the stack just begun...\n");
+    __asm__ __volatile__("mov sp, %0\n\t"
+                         "ldr x1, [%1]\n\t"
+                         : : "r"(base + THREAD_KSTACK_TOTAL_SIZE - 16u), "r"(base)
+                         : "x1", "memory");
+    __builtin_unreachable();
+}
+#endif
+
+#if defined(THYLACINE_FAULT_TEST_kstack_overflow_frame) || \
+    defined(THYLACINE_FAULT_TEST_kstack_overflow_irq) || \
+    defined(THYLACINE_FAULT_TEST_kstack_dump_at_top)
+static void provoke_kstack_shape(void (*entry)(void)) {
+    struct Thread *t = thread_create(kproc(), entry);
+    if (!t) {
+        uart_puts("FAIL: thread_create returned NULL\n");
+        return;
+    }
+    thread_switch(t);
+    uart_puts("FAIL: thread_switch returned (the thread did not fault)\n");
+}
+#endif
+
+#ifdef THYLACINE_FAULT_TEST_kstack_overflow_peer
+#include <thylacine/smp.h>
+#include "../arch/arm64/timer.h"
+
+static void provoke_kstack_overflow_peer(void) {
+    if (smp_cpu_count() < 2u || smp_cpu_idx_self() != 0u) {
+        uart_puts("FAIL: kstack_overflow_peer needs cpu 1 free, from cpu 0\n");
+        return;
+    }
+    // The peers are parked, as in provoke_extinction_peer_chatter.
+    sched_set_notify_enabled(true);
+    struct Thread *t = thread_create(kproc(), kstack_frame_entry);
+    if (!t) {
+        uart_puts("FAIL: thread_create returned NULL\n");
+        return;
+    }
+    t->cpu_pinned = true;
+    ready_on(1u, t);
+    u64 t0 = timer_now_ns();
+    while (timer_now_ns() - t0 < 5000ull * 1000ull * 1000ull)
+        __asm__ __volatile__("yield" ::: "memory");
+    uart_puts("FAIL: the thread on cpu 1 did not extinct\n");
+}
+#endif
+
+// ---------------------------------------------------------------------------
 // secondary_stack_guard — write into a secondary CPU's boot-stack guard
 // page. P5-secondary-stack-guard maps the leading page of every
 // g_secondary_boot_stacks slot no-access (build_page_tables, mmu.c); the
@@ -212,6 +319,24 @@ static void provoke_secondary_stack_guard(void) {
     // Launder the pointer through inline asm so clang cannot prove the
     // store targets a known BSS object and elide it.
     volatile char *g = (volatile char *)&g_secondary_boot_stacks[0].guard[0];
+    __asm__ __volatile__("" : "+r"(g));
+    *g = (char)0xA5;
+}
+#endif
+
+// ---------------------------------------------------------------------------
+// overflow_stack_guard — write into an overflow stack's guard page (smp.h),
+// mapped no-access by build_page_tables. The dump that runs on one has this below
+// it, and a stack the gate never saw fault is a guess.
+// ---------------------------------------------------------------------------
+
+#ifdef THYLACINE_FAULT_TEST_overflow_stack_guard
+#include <thylacine/smp.h>
+
+__attribute__((noinline))
+__attribute__((no_stack_protector))
+static void provoke_overflow_stack_guard(void) {
+    volatile char *g = (volatile char *)&g_overflow_stacks[1].guard[0];
     __asm__ __volatile__("" : "+r"(g));
     *g = (char)0xA5;
 }
@@ -424,10 +549,22 @@ void fault_test_run(void) {
     uart_puts("FAIL: provoke_bti_fault returned (BTI did not fire)\n");
 #elif defined(THYLACINE_FAULT_TEST_kstack_overflow)
     provoke_kstack_overflow();
+#elif defined(THYLACINE_FAULT_TEST_kstack_overflow_frame)
+    provoke_kstack_shape(kstack_frame_entry);
+#elif defined(THYLACINE_FAULT_TEST_kstack_overflow_irq)
+    provoke_kstack_shape(kstack_irq_entry);
+#elif defined(THYLACINE_FAULT_TEST_kstack_overflow_peer)
+    provoke_kstack_overflow_peer();
+#elif defined(THYLACINE_FAULT_TEST_kstack_dump_at_top)
+    provoke_kstack_shape(kstack_at_top_entry);
 #elif defined(THYLACINE_FAULT_TEST_secondary_stack_guard)
     uart_puts("  fault-test: invoking secondary_stack_guard...\n");
     provoke_secondary_stack_guard();
     uart_puts("FAIL: provoke_secondary_stack_guard returned (guard did not fire)\n");
+#elif defined(THYLACINE_FAULT_TEST_overflow_stack_guard)
+    uart_puts("  fault-test: invoking overflow_stack_guard...\n");
+    provoke_overflow_stack_guard();
+    uart_puts("FAIL: provoke_overflow_stack_guard returned (guard did not fire)\n");
 #elif defined(THYLACINE_FAULT_TEST_bootcpu_idle_guard)
     uart_puts("  fault-test: invoking bootcpu_idle_guard...\n");
     provoke_bootcpu_idle_guard();

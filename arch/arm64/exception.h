@@ -18,6 +18,13 @@
 // the same value in `sub sp, sp, #EXCEPTION_CTX_SIZE`.
 #define EXCEPTION_CTX_SIZE   288
 
+// What vectors.S reads a kernel SP with. The first bit is set in every address
+// of the kernel stack range and in no other address a kernel SP holds; the
+// second is set in a stack's usable half and clear in its guard, a stack's span
+// being aligned to itself. exception.c pins both against the ranges they test.
+#define KSTACK_RANGE_TAG_BIT  44
+#define KSTACK_USABLE_BIT     14
+
 #ifndef __ASSEMBLER__
 
 #include <thylacine/types.h>
@@ -102,6 +109,12 @@ void exception_sync_depth_reset_this_cpu(void);
 // unrecoverable path ends in.
 extern char _exception_vectors[];
 void _torpor(void) __attribute__((noreturn));
+
+// vectors.S found SP in a thread stack's guard and built this frame on the CPU's
+// overflow stack. overflowed_frame is where the frame would have gone.
+__attribute__((noreturn))
+void exception_kstack_overflow(struct exception_context *ctx, u64 overflowed_frame,
+                               u64 x0_at_entry);
 
 #endif // __ASSEMBLER__
 

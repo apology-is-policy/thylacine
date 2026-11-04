@@ -934,6 +934,8 @@ struct test_case g_tests[] = {
                                        test_demand_page_file_read_error_dying_is_death, false, NULL },
     { "demand_page.file_miss_refuses_exiting_thread",
                                        test_demand_page_file_miss_refuses_exiting_thread, false, NULL },
+    { "demand_page.file_miss_under_a_lock_refuses",
+                                       test_demand_page_file_miss_under_a_lock_refuses, false, NULL },
     { "demand_page.file_read_revoked_latch_is_dying",
                                        test_demand_page_file_read_revoked_latch_is_dying, false, NULL },
     { "demand_page.file_multi_page",   test_demand_page_file_multi_page,   false, NULL },
@@ -1219,6 +1221,11 @@ struct test_case g_tests[] = {
     { "torpor.wait_wake_handoff",              test_torpor_wait_wake_handoff,              false, NULL },
     { "torpor.wake_two_waiters_count_bound",   test_torpor_wake_two_waiters_count_bound,   false, NULL },
     { "torpor.caught_note_ends_wait",          test_torpor_caught_note_ends_wait,          false, NULL },
+    { "torpor.wake_takes_the_oldest",          test_torpor_wake_takes_the_oldest,          false, NULL },
+    { "torpor.key_is_the_address_space",       test_torpor_key_is_the_address_space,       false, NULL },
+    { "torpor.wake_counts_only_a_sleeper",     test_torpor_wake_counts_only_a_sleeper,     false, NULL },
+    { "torpor.record_outlives_the_wake",       test_torpor_record_outlives_the_wake,       false, NULL },
+    { "torpor.word_replaced_under_the_wait",   test_torpor_word_replaced_under_the_wait,   false, NULL },
     { "loom.create_geometry",            test_loom_create_geometry,            false, NULL },
     { "loom.private_buffers",            test_loom_private_buffers,            false, NULL },
     { "loom.private_pool_pins",          test_loom_private_pool_pins,          false, NULL },
@@ -1332,12 +1339,17 @@ struct test_case g_tests[] = {
     { "proc.exec_claim_refused_drops_the_new_image", test_proc_exec_claim_refused_drops_the_new_image, false, NULL },
     { "proc.exec_claim_kills_a_thread_readied_after_it", test_proc_exec_claim_kills_a_thread_readied_after_it, false, NULL },
     { "proc.exec_claim_wakes_a_vfork_parent", test_proc_exec_claim_wakes_a_vfork_parent, false, NULL },
-    { "thread.kstack_cache_reuses_without_guard_toggle", test_thread_kstack_cache_reuses_without_guard_toggle, false, NULL },
+    { "thread.kstack_cache_reuses_without_a_remap", test_thread_kstack_cache_reuses_without_a_remap, false, NULL },
     { "thread.kstack_cache_keeps_the_guard",     test_thread_kstack_cache_keeps_the_guard,     false, NULL },
     { "thread.kstack_recycled_stack_is_fully_poisoned", test_thread_kstack_recycled_stack_is_fully_poisoned, false, NULL },
     { "thread.kstack_cache_is_bounded",          test_thread_kstack_cache_is_bounded,          false, NULL },
-    { "directmap.tlbi_operand_masks_the_ttl_hint", test_directmap_tlbi_operand_masks_the_ttl_hint, false, NULL },
-    { "directmap.guard_toggle_invalidates_a_warm_entry", test_directmap_guard_toggle_invalidates_a_warm_entry, false, NULL },
+    { "thread.kstack_tlbi_operand_masks_the_ttl_hint", test_thread_kstack_tlbi_operand_masks_the_ttl_hint, false, NULL },
+    { "thread.kstack_lives_in_its_range",        test_thread_kstack_lives_in_its_range,        false, NULL },
+    { "thread.kstack_costs_its_four_pages",      test_thread_kstack_costs_its_four_pages,      false, NULL },
+    { "thread.kstack_release_invalidates_a_warm_entry", test_thread_kstack_release_invalidates_a_warm_entry, false, NULL },
+    { "thread.kstack_tables_grow_and_stay",      test_thread_kstack_tables_grow_and_stay,      false, NULL },
+    { "thread.kstack_refused_step_leaks_nothing", test_thread_kstack_refused_step_leaks_nothing, false, NULL },
+    { "thread.kstack_dump_stops_at_the_top",     test_thread_kstack_dump_stops_at_the_top,     false, NULL },
     { "thread.kstack_create_free_cost",          test_thread_kstack_create_free_cost,          false, NULL },
     { "proc.wait_pid_concurrent_waiters_both_reap", test_proc_wait_pid_concurrent_waiters_both_reap, false, NULL },
     { "notes.queue_alloc_free_smoke",          test_notes_queue_alloc_free_smoke,          false, NULL },
@@ -1416,7 +1428,7 @@ struct test_case g_tests[] = {
                                        test_directmap_alloc_through_directmap,
                                                                            false, NULL },
     { "directmap.vmalloc_mmio_smoke",  test_directmap_vmalloc_mmio_smoke,  false, NULL },
-    { "directmap.pagemapped_808",      test_directmap_pagemapped_808,      false, NULL },
+    { "directmap.stays_in_blocks",     test_directmap_stays_in_blocks,     false, NULL },
     { "elf.parse_minimal_ok",          test_elf_parse_minimal_ok,          false, NULL },
     { "elf.parse_multi_segment_ok",    test_elf_parse_multi_segment_ok,    false, NULL },
     { "elf.header_rejection",          test_elf_header_rejection,          false, NULL },
@@ -3377,11 +3389,21 @@ bool test_strong_entropy(void) {
     return false;
 }
 
+// Boot's kthreads are still queued when the suite starts, since nothing has
+// switched yet, and a test's first line may assert an empty run tree. Letting
+// them run here keeps that premise from depending on which test came first. A
+// thread that never sleeps is left for that assertion to name.
+static void test_drain_run_tree(void) {
+    for (unsigned i = 0; i < 4096u && sched_runnable_count() != 0u; i++)
+        sched();
+}
+
 void test_run_all(void) {
     // Legacy console transition tests require the serial recovery posture.
     // Select it explicitly for the fixture; the real boot policy is restored
     // before userspace and tested independently by graphical E2E.
     int serial_posture = proc_test_serial_sak(1);
+    test_drain_run_tree();
     passed_count = 0;
     failed_count = 0;
     total_count  = 0;

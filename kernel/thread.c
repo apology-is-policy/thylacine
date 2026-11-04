@@ -34,11 +34,9 @@
 #include "../mm/phys.h"
 #include "../mm/slub.h"
 
-// P2-Dc: 32 KiB total allocation per thread = 4 stack pages + 4 guard
-// pages. order=3 = 8 pages from buddy. The guard pages are marked
-// no-access via mmu_set_no_access so a stack-overflow access faults.
-_Static_assert((1u << THREAD_KSTACK_TOTAL_ORDER) * PAGE_SIZE == THREAD_KSTACK_TOTAL_SIZE,
-               "THREAD_KSTACK_TOTAL_ORDER must produce THREAD_KSTACK_TOTAL_SIZE bytes");
+// A stack's span: 4 pages of guard with nothing behind them under 4 pages of stack.
+_Static_assert(THREAD_KSTACK_PAGES * PAGE_SIZE == THREAD_KSTACK_SIZE,
+               "THREAD_KSTACK_PAGES must back THREAD_KSTACK_SIZE bytes");
 _Static_assert(THREAD_KSTACK_GUARD_PAGES * PAGE_SIZE == THREAD_KSTACK_GUARD_SIZE,
                "THREAD_KSTACK_GUARD_PAGES * PAGE_SIZE must equal THREAD_KSTACK_GUARD_SIZE");
 
@@ -195,80 +193,164 @@ static void kstack_poison(void *base) {
         *p++ = THREAD_KSTACK_POISON;
 }
 
-// The kernel stack cache. A block's guard is made no-access once, when
-// it leaves the buddy, and stays that way while the block waits here between
-// threads, so a create that finds one pays no guard toggle and no TLB
-// invalidate, and a free that finds room pays none either. At most
-// THREAD_KSTACK_CACHE_MAX blocks; past that a freed stack goes back to the
-// buddy. LIFO, so the block reused is the one written most recently. A leaf
-// lock: nothing is taken under it.
-static spin_lock_t g_kstack_cache_lock = SPIN_LOCK_INIT;
+// The kernel stack range's slots. One word per L3 table's worth of stacks, so a
+// word's first bit and the table it needs are the same question. Lowest first, so
+// the tables in use follow the peak number of stacks and not the history.
+#define KSTACK_SLOT_WORD_BITS 64u
+#define KSTACK_SLOT_WORDS     ((u32)(KSTACK_RANGE_SIZE >> 21))
+_Static_assert((1u << 21) / THREAD_KSTACK_TOTAL_SIZE == KSTACK_SLOT_WORD_BITS,
+               "a slot word covers exactly one L3 table's stacks");
+_Static_assert((KSTACK_RANGE_BASE & (THREAD_KSTACK_TOTAL_SIZE - 1u)) == 0,
+               "every slot is aligned to its own size, which vectors.S's one-bit test needs");
+_Static_assert(KSTACK_RANGE_SIZE / THREAD_KSTACK_TOTAL_SIZE >=
+               DIRECTMAP_USABLE_RAM_MAX / THREAD_KSTACK_SIZE,
+               "RAM runs out before slots do, so the range refuses no thread the pool admits");
+
+// A leaf: guards the cache and the slot map. Nothing is taken under it. A scan of
+// the map runs under it with IRQs off, 64 KiB at the very worst, and only when
+// nearly every slot in the machine is taken.
+static spin_lock_t g_kstack_lock = SPIN_LOCK_INIT;
+static u64         g_kstack_slots[KSTACK_SLOT_WORDS];  // a set bit is a slot in use
+static u32         g_kstack_slot_hint;                 // no word below it has a clear bit
+
+// The stack cache. A freed stack waits here mapped, so a create that finds one and
+// a free that finds room touch no page table and invalidate nothing. At most
+// THREAD_KSTACK_CACHE_MAX; past that a freed stack is unmapped and its pages and
+// slot go back. LIFO, so the stack reused is the one written most recently.
 static void       *g_kstack_cache[THREAD_KSTACK_CACHE_MAX];
 static u32         g_kstack_cache_n;
 
+#ifdef KERNEL_TESTS
+static u32 g_kstack_pages_for_test;      // pages behind the range now
+static u32 g_kstack_refuse_step;         // the step of kstack_new to refuse, once
+#endif
+
+static bool kstack_step_refused(u32 step) {
+#ifdef KERNEL_TESTS
+    if (__atomic_load_n(&g_kstack_refuse_step, __ATOMIC_RELAXED) == step) {
+        __atomic_store_n(&g_kstack_refuse_step, 0u, __ATOMIC_RELAXED);
+        return true;
+    }
+#endif
+    (void)step;
+    return false;
+}
+
 static void *kstack_cache_pop(void) {
     void *base = NULL;
-    irq_state_t s = spin_lock_irqsave(&g_kstack_cache_lock);
+    irq_state_t s = spin_lock_irqsave(&g_kstack_lock);
     if (g_kstack_cache_n != 0)
         base = g_kstack_cache[--g_kstack_cache_n];
-    spin_unlock_irqrestore(&g_kstack_cache_lock, s);
+    spin_unlock_irqrestore(&g_kstack_lock, s);
     return base;
 }
 
-// A kernel stack for a new thread: the cached block freed last, else a fresh
-// block with its guard made no-access. Either way the whole usable region is
-// poisoned before it is handed out. That resets the watermark, and it is the
-// only thing that keeps a dead thread's frames from being readable on the next
-// thread's stack: a reused block is never zeroed. NULL on OOM.
+static u64 kstack_slot_take(void) {
+    u64 va = 0;
+    irq_state_t s = spin_lock_irqsave(&g_kstack_lock);
+    for (u32 w = g_kstack_slot_hint; w < KSTACK_SLOT_WORDS; w++) {
+        if (g_kstack_slots[w] == ~0ull) continue;
+        u32 bit = (u32)__builtin_ctzll(~g_kstack_slots[w]);
+        g_kstack_slots[w] |= 1ull << bit;
+        g_kstack_slot_hint = w;
+        va = KSTACK_RANGE_BASE +
+             ((u64)w * KSTACK_SLOT_WORD_BITS + bit) * THREAD_KSTACK_TOTAL_SIZE;
+        break;
+    }
+    spin_unlock_irqrestore(&g_kstack_lock, s);
+    return va;
+}
+
+static void kstack_slot_put(u64 va) {
+    u64 i = (va - KSTACK_RANGE_BASE) / THREAD_KSTACK_TOTAL_SIZE;
+    u32 w = (u32)(i / KSTACK_SLOT_WORD_BITS);
+    u64 bit = 1ull << (i % KSTACK_SLOT_WORD_BITS);
+    irq_state_t s = spin_lock_irqsave(&g_kstack_lock);
+    if (!(g_kstack_slots[w] & bit))
+        extinction_with_addr("kstack slot freed twice", (uintptr_t)va);
+    g_kstack_slots[w] &= ~bit;
+    if (w < g_kstack_slot_hint) g_kstack_slot_hint = w;
+    spin_unlock_irqrestore(&g_kstack_lock, s);
+}
+
+static void kstack_pages_counted(int delta) {
+#ifdef KERNEL_TESTS
+    __atomic_add_fetch(&g_kstack_pages_for_test, (u32)delta, __ATOMIC_RELAXED);
+#endif
+    (void)delta;
+}
+
+// A slot and four pages, mapped. No KP_ZERO: the poison covers them whole. The
+// pages need not be contiguous, so a fragmented buddy refuses no thread. NULL on
+// OOM, with everything given back.
+static void *kstack_new(void) {
+    paddr_t pa[THREAD_KSTACK_PAGES];
+    u32 got = 0;
+    for (; got < THREAD_KSTACK_PAGES; got++) {
+        struct page *pg = kstack_step_refused(got + 1u) ? NULL : alloc_pages(0, 0);
+        if (!pg) goto fail;
+        pa[got] = page_to_pa(pg);
+        kstack_pages_counted(1);
+    }
+    u64 va = kstack_step_refused(THREAD_KSTACK_PAGES + 1u) ? 0 : kstack_slot_take();
+    if (!va) goto fail;
+    if (kstack_step_refused(THREAD_KSTACK_PAGES + 2u) ||
+        !mmu_kstack_map(va + THREAD_KSTACK_GUARD_SIZE, pa, THREAD_KSTACK_PAGES)) {
+        kstack_slot_put(va);
+        goto fail;
+    }
+    return (void *)(uintptr_t)va;
+fail:
+    while (got != 0) {
+        free_pages(pa_to_page(pa[--got]), 0);
+        kstack_pages_counted(-1);
+    }
+    return NULL;
+}
+
+// A kernel stack for a new thread: the cached one freed last, else a new one.
+// Either way the whole usable region is poisoned before it is handed out. That
+// resets the watermark, and it is the only thing that keeps a dead thread's
+// frames from being readable on the next thread's stack: a reused stack is never
+// zeroed. NULL on OOM.
 static void *kstack_alloc(void) {
     void *base = kstack_cache_pop();
-    if (!base) {
-        // No KP_ZERO: nothing reads the guard, and the poison covers the usable
-        // region whole.
-        struct page *pg = alloc_pages(THREAD_KSTACK_TOTAL_ORDER, 0);
-        if (!pg) return NULL;
-        paddr_t pa = page_to_pa(pg);
-        // The block is 32-KiB-aligned, so its guard pages share one L3 (one
-        // 2 MiB region): one call, one batch of invalidates.
-        if (!mmu_set_no_access_range(pa, THREAD_KSTACK_GUARD_PAGES)) {
-            free_pages(pg, THREAD_KSTACK_TOTAL_ORDER);
-            return NULL;
-        }
-        base = pa_to_kva(pa);
-    }
-    kstack_poison(base);
+    if (!base) base = kstack_new();
+    if (base) kstack_poison(base);
     return base;
 }
 
-// Back to the buddy. The guard pages become normal RW first: whoever is handed
-// these pages next, for any purpose, expects to be able to use them, so a
-// guard that cannot be restored is never freed.
+// Its pages and its slot go back only after no CPU can translate it: the slot's
+// next owner maps other pages there, and these go to whoever asks next.
 static void kstack_release(void *base) {
-    paddr_t pa = kva_to_pa(base);
-    if (!mmu_restore_normal_range(pa, THREAD_KSTACK_GUARD_PAGES))
-        extinction("kstack_release: a kernel stack's guard could not be restored");
-    free_pages(pa_to_page(pa), THREAD_KSTACK_TOTAL_ORDER);
+    u64 va = (u64)(uintptr_t)base;
+    paddr_t pa[THREAD_KSTACK_PAGES];
+    mmu_kstack_unmap(va + THREAD_KSTACK_GUARD_SIZE, pa, THREAD_KSTACK_PAGES);
+    for (u32 i = 0; i < THREAD_KSTACK_PAGES; i++)
+        free_pages(pa_to_page(pa[i]), 0);
+    kstack_pages_counted(-(int)THREAD_KSTACK_PAGES);
+    kstack_slot_put(va);
 }
 
-// A dead thread's stack: cached with its guard intact while there is room,
-// released otherwise. The caller has seen the thread's last switch-out
-// complete (on_cpu clear), so nothing executes on the block any more.
+// A dead thread's stack: cached, still mapped, while there is room, released
+// otherwise. The caller has seen the thread's last switch-out complete (on_cpu
+// clear), so nothing executes on it any more.
 static void kstack_free(void *base) {
-    irq_state_t s = spin_lock_irqsave(&g_kstack_cache_lock);
+    irq_state_t s = spin_lock_irqsave(&g_kstack_lock);
     if (g_kstack_cache_n < THREAD_KSTACK_CACHE_MAX) {
         g_kstack_cache[g_kstack_cache_n++] = base;
         base = NULL;
     }
-    spin_unlock_irqrestore(&g_kstack_cache_lock, s);
+    spin_unlock_irqrestore(&g_kstack_lock, s);
     if (base)
         kstack_release(base);
 }
 
 #ifdef KERNEL_TESTS
 u32 thread_kstack_cache_count(void) {
-    irq_state_t s = spin_lock_irqsave(&g_kstack_cache_lock);
+    irq_state_t s = spin_lock_irqsave(&g_kstack_lock);
     u32 n = g_kstack_cache_n;
-    spin_unlock_irqrestore(&g_kstack_cache_lock, s);
+    spin_unlock_irqrestore(&g_kstack_lock, s);
     return n;
 }
 
@@ -277,6 +359,27 @@ u32 thread_kstack_cache_drain(void) {
     for (void *base; (base = kstack_cache_pop()) != NULL; n++)
         kstack_release(base);
     return n;
+}
+
+u32 thread_kstack_slots_in_use(void) {
+    u32 n = 0;
+    irq_state_t s = spin_lock_irqsave(&g_kstack_lock);
+    for (u32 w = 0; w < KSTACK_SLOT_WORDS; w++)
+        n += (u32)__builtin_popcountll(g_kstack_slots[w]);
+    spin_unlock_irqrestore(&g_kstack_lock, s);
+    return n;
+}
+
+u32 thread_kstack_pages_in_use(void) {
+    return __atomic_load_n(&g_kstack_pages_for_test, __ATOMIC_RELAXED);
+}
+
+void thread_kstack_refuse_step(u32 step) {
+    __atomic_store_n(&g_kstack_refuse_step, step, __ATOMIC_RELAXED);
+}
+
+u32 thread_kstack_refuse_pending(void) {
+    return __atomic_load_n(&g_kstack_refuse_step, __ATOMIC_RELAXED);
 }
 #endif // KERNEL_TESTS
 
@@ -510,8 +613,7 @@ static struct Thread *thread_new(struct Proc *proc, struct Proc *payer) {
         return NULL;
     }
 
-    // P2-Dc / P3-Bca: the guard pages below the stack are no-access in the
-    // direct map; kstack_alloc hands the block out guarded and poisoned.
+    // kstack_alloc hands the stack out mapped and poisoned.
     void *kalloc_base = kstack_alloc();
     if (!kalloc_base) {
         kmem_cache_free(g_thread_cache, t);
@@ -544,26 +646,13 @@ static struct Thread *thread_new(struct Proc *proc, struct Proc *payer) {
 // `arg` is parked in ctx.x20; for no-arg entries pass NULL and the entry
 // just ignores x0 (caller-saved).
 //
-// P2-Dc: kstack layout — 8 pages total (32 KiB) at order=3.
+// A stack's span, low to high:
 //
-//   page 0 (lowest)  ┐
-//   page 1           │  guard region (16 KiB no-access)
-//   page 2           │
-//   page 3           ┘
-//   page 4           ┐
-//   page 5           │  usable kstack (16 KiB RW)
-//   page 6           │
-//   page 7 (highest) ┘  ctx.sp starts at top of page 7
+//   [base, base + 16 KiB)   the guard: address space with nothing behind it
+//   [base + 16 KiB, top)    usable: four pages; ctx.sp starts at the top
 //
-// Stack grows DOWN. An overflow past page 4 hits the guard at page 3,
-// where the L3 PTE is invalid in the kernel direct map (P3-Bca) →
-// permission/translation fault → exception handler reports stack-
-// overflow extinction.
-//
-// P3-Bca: kstack VAs are kernel direct-map KVAs (pa_to_kva of the
-// alloc'd PA). Pre-P3-Bca they were PA-as-VA via TTBR0 identity; P3-Bd
-// retires TTBR0 identity entirely so the direct-map form is the durable
-// one. The PA is recovered via kva_to_pa for free + guard restore.
+// It grows DOWN, and the vector catches a frame that would land in the guard
+// (vectors.S el1h_sync).
 static struct Thread *thread_create_internal(struct Proc *proc,
                                              struct Proc *payer,
                                              void *entry_void,

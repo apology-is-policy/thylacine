@@ -1251,11 +1251,32 @@ cfgs run with `-deadlock`; the `Done` self-loop keeps the legitimate
 terminal state from tripping the deadlock check (the lost-wake stuck state
 is PRE-terminal, so it is still caught). See ARCH §23.5.1 + I-9.
 
-## futex.tla — DROPPED (2026-05-23 spec-to-code suspension)
+## torpor.tla — the wake and the record's lifetime (thread-model C8)
 
-Never written. The `torpor` wait-on-address primitive (Phase 6) is
-prose-validated (`kernel/torpor.c` + `torpor.h` reasoning + the focused
-audit); `death_wake.tla` covers the death-wake interaction (I-9 generalized).
+Replaces the `futex.tla` the 2026-05-23 suspension dropped; the overhaul's plan names it.
+`death_wake.tla` still covers the death-wake interaction (I-9 generalized).
+
+| Spec | Code |
+|---|---|
+| `WaitLink` | `sys_torpor_wait_for_proc`: the under-lock load, `torpor_append_locked` |
+| `Sleep`, `Reeval` | `tsleep_noteintr` on the waiter's rendez with `torpor_cond_awoken`: the cond first |
+| `Deadline`, `CaughtNote` | `timerwait_tick`; tsleep's caught arm, which asks the cond first |
+| `Stop`, `Resume` | `torpor_stop_wake_all_for_proc` and the stop detour: on no rendez, still linked |
+| `Unlink`, `Leave` | the bucket lock's second hold in WAIT, then the wait for `wake_held` |
+| `WakeMark` | `sys_torpor_wake_for_proc`'s walk with `torpor_mark_awoken` |
+| `WakeUnlock`, `WakeDeliver` | the lock's release, then `wakeup` and the clear of `wake_held` |
+| `NoUseAfterFree` | `wake_held`; a record's frame outlives the batch |
+| `CountHonest` | `torpor_mark_awoken`'s answer is the count; tsleep's cond-first order |
+| `OldestFirst` | the tail append and the walk from the head |
+| `NoStranded` | the walk goes on past a mark that did not count |
+| `NoLostWake` | the compare and the link are one hold |
+
+Buggy cfgs: `no_wait`, `lifo`, `count_any`, `eintr_any`, `unlocked_check`, `stop_at_mark`, each
+with the invariant it breaks in the module's header. What it does not model: the death walk, which
+holds the lock across wakeup, so its record cannot leave; two buckets, since a lock per bucket
+changes nothing a single bucket's order depends on; and the hash. A stop or a caught note that
+wakes a waiter before a mark reaches it lands in the code as an uncounted OK, which the model
+reaches only through `Deadline`: the same state and the same count.
 
 ## notes.tla — DROPPED (2026-05-23 spec-to-code suspension)
 

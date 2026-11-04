@@ -41,7 +41,7 @@ Generated — do not edit between the markers (`quaestor render`).
 | [[arc-vivarium]] | active | 2 |
 | [[arc-weft]] | active | 4 |
 
-## Open seams: 82
+## Open seams: 80
 
 - [[seam-220-netd-listener-poll]] (sub-netd-server)
 - [[seam-240-lo-redial]] (sub-netd-server)
@@ -121,19 +121,17 @@ Generated — do not edit between the markers (`quaestor render`).
 - [[seam-tickless-bare-metal]] (sub-kernel-sched-smp)
 - [[seam-timerwait-sharding]] (sub-kernel-rendez)
 - [[seam-torpor-cross-proc]] (sub-kernel-torpor)
-- [[seam-torpor-lock-wake-spin]] (sub-kernel-torpor)
-- [[seam-torpor-reclaim-uaccess]] (sub-kernel-torpor)
 - [[seam-viv-tier2-frame]] (sub-kernel-syscall-abi, sub-kernel-vivarium)
 - [[seam-warp-prove-unowned]] (sub-tapestryd)
 
 ## Recent changes
 
 - 2026-11-04 [[chg-2026-11-04-walk-errno-close]] — The walk errno close: rounds 1 and 2, the first boots, 32 sabotages
+- 2026-11-03 [[chg-2026-11-03-c10a-kstack-range]] — Each thread's kernel stack in a range of its own, its guard costing no memory; the 0x200 vector reads SP
+- 2026-11-03 [[chg-2026-11-03-c10b-directmap-blocks]] — The direct map keeps its blocks: the guard toggles and the boot page map are gone
+- 2026-11-03 [[chg-2026-11-03-c8a-torpor]] — torpor keyed on the address space, a lock per bucket, oldest first, and no wake under the lock
 - 2026-11-03 [[chg-2026-11-03-item-11c-close]] — Item 11c close: rounds 1 to 3, the sweep, three leases
 - 2026-11-03 [[chg-2026-11-03-item-11c]] — A per-note table for native programs, SA_RESTART in the kernel, and an open a note can interrupt
+- 2026-11-03 [[chg-2026-11-03-torpor-locked-load]] — A wait's load under its lock cannot sleep, whatever a peer's MAP_FIXED did
 - 2026-11-03 [[chg-2026-11-03-walk-errno]] — A failed walk says why: only a miss reads ENOENT
-- 2026-11-02 [[chg-2026-11-02-f3-what-it-is]] — What review finding F-3 is, read from main's code
-- 2026-11-02 [[chg-2026-11-02-join-planted-cleanup]] — The F1 test's cleanup ran on an early failure, three planted points
-- 2026-11-02 [[chg-2026-11-02-thread-model-c4]] — Thread-model C4: a note aimed at one thread
-- 2026-11-02 [[chg-2026-11-02-thread-overhaul-position]] — The thread-model overhaul's position: C7 was not its last chunk
 <!-- generated:end -->

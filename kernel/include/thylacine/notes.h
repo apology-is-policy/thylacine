@@ -712,7 +712,7 @@ int notes_noted_default(struct exception_context *ctx, struct Thread *t);
 // (a masked thread defers: it neither unwinds nor terminates until it
 // unmasks). LOCK-FREE (atomic loads + the owner-read note_mask): callable
 // from sleep/tsleep's register-then-observe under wait_lock/r->lock, from
-// torpor's post-register check under torpor_lock, and from the 9P client's
+// torpor's post-register check under its bucket's lock, and from the 9P client's
 // reader-unwind decision. Replaces every direct group_exit_msg load at
 // those sites.
 bool thread_die_pending(struct Thread *t);

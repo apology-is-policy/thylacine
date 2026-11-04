@@ -7,8 +7,10 @@
 //   HX-I1  a fault DURING the dump trips the per-CPU guard and bails to
 //          _torpor (the recursive extinction sees the guard set and returns).
 //   HX-I2  the fp-chain walk is depth-capped + sanity-gated; a wild x29
-//          cannot spin or read unboundedly (a single bad read still faults,
-//          but that is caught by HX-I1).
+//          cannot spin or read unboundedly. The walk and the hexdump also ask
+//          whether an address translates before they read it: a thread's stack
+//          ends at the next slot's unmapped guard, and a fault here would cost
+//          the reports extinction prints after the dump (HX-I1 still catches it).
 //   HX-I4  the per-CPU live-frame slot is trusted only when it is a PLAUSIBLE
 //          live frame on the current stack (see halls_dump) -- a frame
 //          stranded by a since-exited Proc (whose kstack has been freed +
@@ -51,6 +53,7 @@
 //     HX-I4 catches.
 static const struct exception_context *g_halls_frame[DTB_MAX_CPUS];
 static u8 g_halls_in_dump[DTB_MAX_CPUS];
+static u64 g_halls_anchor[DTB_MAX_CPUS];   // halls_anchor_stack: 0 reads the frame's own stack
 
 // A live exception frame sits just above the current SP (KERNEL_ENTRY built it
 // at a higher address; the dump descended a few call frames below it). The
@@ -82,6 +85,10 @@ const struct exception_context *halls_enter_frame(const struct exception_context
 
 void halls_leave_frame(const struct exception_context *prev) {
     g_halls_frame[halls_cpu()] = prev;
+}
+
+void halls_anchor_stack(u64 sp) {
+    g_halls_anchor[halls_cpu()] = sp;
 }
 
 #ifdef KERNEL_TESTS
@@ -157,6 +164,15 @@ static u64 halls_strip_pac(u64 addr) {
 // peek targets is the fix there.
 static u64 halls_peek(u64 addr) {
     return *(volatile u64 *)(uintptr_t)addr;
+}
+
+// AT never faults, and the dying CPU has IRQs masked, so nothing can take PAR_EL1
+// between the two.
+static bool halls_translates(u64 addr) {
+    u64 par;
+    __asm__ __volatile__("at s1e1r, %1\n\tisb\n\tmrs %0, par_el1"
+                         : "=r"(par) : "r"(addr) : "memory");
+    return (par & 1ull) == 0;
 }
 
 // HX-2: minimal-width hex (no leading zeros) for the symbol offset --
@@ -300,6 +316,7 @@ static void halls_backtrace(const struct exception_context *ctx, u64 koff, bool 
     u64 prev = 0;
     for (unsigned i = 0; i < HALLS_BT_MAX; i++) {
         if (!halls_fp_is_sane(fp, prev, lo, hi)) break;
+        if (!halls_translates(fp) || !halls_translates(fp + 8)) break;
         u64 ra = halls_peek(fp + 8);
         uart_puts("HALLS:   #");
         uart_putdec((u64)(i + 1));
@@ -355,13 +372,25 @@ unsigned halls_walk_kernel_frames(u64 pc, u64 start_fp, u64 lo, u64 hi,
     return n;
 }
 
+// How much of the dump from `ksp` can be read. The outermost frame of a thread sits
+// at the top of its stack, so for any extinction taken from a syscall the dump starts
+// within a line or two of the next slot's guard.
+VISIBLE_IF_KERNEL_TESTS
+u32 halls_stack_dump_extent(u64 ksp) {
+    u32 n = 0;
+    while (n < HALLS_STACK_DUMP_BYTES && halls_translates(ksp + n) && halls_translates(ksp + n + 8))
+        n += 16;
+    return n;
+}
+
 static void halls_stack_hexdump(u64 ksp) {
+    u32 extent = halls_stack_dump_extent(ksp);
     uart_puts("HALLS: stack @");
     uart_puthex64(ksp);
     uart_puts(" (");
-    uart_putdec((u64)HALLS_STACK_DUMP_BYTES);
+    uart_putdec((u64)extent);
     uart_puts(" bytes, ascending):\n");
-    for (u64 a = ksp; a < ksp + HALLS_STACK_DUMP_BYTES; a += 16) {
+    for (u64 a = ksp; a < ksp + extent; a += 16) {
         uart_puts("HALLS:   ");
         uart_puthex64(a);
         uart_puts(": ");
@@ -474,7 +503,9 @@ void halls_dump(const struct exception_context *ctx) {
         // #EXCEPTION_CTX_SIZE` then `mov x0, sp`, so the interrupted kernel SP
         // is ctx + the frame size. (For an EL0 source, ctx->sp holds SP_EL0;
         // the kernel SP at entry is still ctx + size -- the thread's kstack.)
-        u64 ksp = (u64)(uintptr_t)ctx + (u64)EXCEPTION_CTX_SIZE;
+        // A frame the vector took to the overflow stack names the stack it left.
+        u64 ksp = g_halls_anchor[c] ? g_halls_anchor[c]
+                                    : (u64)(uintptr_t)ctx + (u64)EXCEPTION_CTX_SIZE;
         halls_emit(ctx, ksp, /*have_gp_regs=*/true, /*from_exception=*/true);
     } else {
         // Bare extinction (or a rejected stale slot): no live exception frame.

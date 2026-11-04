@@ -9,7 +9,7 @@ guarded-by: [inv-i21, inv-i31, inv-i32, inv-i44, inv-i48]
 validated-by: [gate-smp, spec-thread-reap]
 locks: [lock-proc-threads, lock-proc-table]
 created: 2026-08-01
-updated: 2026-10-29
+updated: 2026-11-03
 ---
 ## Purpose
 
@@ -94,31 +94,48 @@ at EL0, which is a per-Proc termination, not a kernel problem.
 
 ## Mechanism
 
-**Stack geometry.** One order-3 (32 KiB) buddy allocation per thread, split
-in half: the low 16 KiB is a guard region marked no-access in the kernel
-direct map (`mmu_set_no_access_range`), the high 16 KiB is the usable stack
-with `ctx.sp` starting at its top edge. `kstack_base` names the **low**
-address (the guard base), so `free_pages` and the guard restore both work
-from it. Overflow past the usable region lands in the guard and faults.
+**Stack geometry.** A stack is 32 KiB of the kernel stack range
+([[sub-kernel-mmu]]), a span aligned to its own size. The low 16 KiB are the guard:
+address space with no PTE and no memory behind it. The high 16 KiB are four order-0
+pages, contiguous only in that address space, with `ctx.sp` starting at the top.
+`kstack_base` names the **low** address. `kva_to_pa` means nothing on a stack address,
+so the release reads the pages back from the PTEs. A frame bound for the guard is
+caught at the 0x200 vector ([[sub-kernel-exception]]), which is why the span is twice
+the stack and aligned to itself: one bit tells the halves apart.
 
-The 32 KiB allocation is 32 KiB-aligned, so all four guard pages fall inside
-one 2 MiB block: one L3 (pre-demoted at boot, #808) and one batch of by-VA
-invalidates ([[sub-kernel-mmu]]).
+**Slots.** `g_kstack_slots` holds a bit per span and a `u64` per L3 table's worth of
+stacks (64), taken lowest first under `g_kstack_lock`, so the tables in use follow the
+peak number of stacks and not the history. `g_kstack_slot_hint` is the lowest word that
+can have a clear bit. 16 GiB of address space is 512 Ki slots and the direct map's 8 GiB
+can back no more than that, so the range never refuses a thread the pool admits (a
+`_Static_assert` pins it). `kstack_new` takes the pages, then the slot, then the mapping,
+and each failure gives back what was taken (`thread.kstack_refused_step_leaks_nothing`).
+A put of a clear bit extincts (`kstack slot freed twice`), as a map over a valid leaf does
+([[sub-kernel-mmu]]). Either takes a double free, which nothing reaches, so neither has a
+witness.
 
-**The stack cache.** A freed stack does not go straight back to the buddy.
-`kstack_free` pushes it on a bounded LIFO (`THREAD_KSTACK_CACHE_MAX`, 32
-blocks, 1 MiB of the TCB reserve, charged to nobody: the pool charge belongs
-to a thread, not a block) with its guard still no-access, and
-`kstack_alloc` pops the most recent block before it asks the buddy. Past the
-bound a freed stack is released -- guard restored, `free_pages` -- as before.
-So a create that finds a block, and a free that finds room, write no PTE and
-invalidate nothing, where every create and every free used to flush every
-CPU's whole TLB. Whatever its source, a block is poisoned whole before it is
-handed out. That resets the watermark, and it is the only scrub a reused block
-gets, so it is also what keeps a dead thread's frames off the next thread's
-stack. The stack is not zero-filled: the guard is never read and the poison
-covers the usable region. `thread_kstack_cache_drain` releases every cached
-block; only tests call it, since the cache is a fixed slice of the reserve.
+**What the guard rests on.** A frame that moved SP past the guard in one step would land in
+the slot below, where the vector's test sees a healthy stack. `-fstack-clash-protection`
+probes every move of a page or more: measured 2026-11-03, all 79 prologues in the kernel's
+objects that move SP by 4 KiB or more store to the stack before going on.
+`-Wframe-larger-than=8192` fails the build on a frame over half a stack, with UBSan's frames
+too. It found four, all tests holding a `struct p9_session` on the stack, and those are
+statics now.
+A thread's stack is no longer followed by mapped memory, so anything reading upward past
+its top now faults; the crash dump asks first ([[sub-kernel-halls]]).
+
+**The stack cache.** A freed stack does not go straight back. `kstack_free` pushes it on
+a bounded LIFO (`THREAD_KSTACK_CACHE_MAX`, 32 stacks, 512 KiB of the TCB reserve, charged
+to nobody: the pool charge belongs to a thread, not a stack) still mapped, and
+`kstack_alloc` pops the most recent before it makes a new one. Past the bound a freed
+stack is released: unmapped, with a by-VA invalidate per page on every CPU, and only
+then do its pages and its slot go back, since the slot's next owner maps other pages
+there. So a create that finds a stack, and a free that finds room, write no PTE and
+invalidate nothing. Whatever its source, a stack is poisoned whole before it is handed
+out. That resets the watermark, and it is the only scrub a reused stack gets, so it is
+also what keeps a dead thread's frames off the next thread's stack.
+`thread_kstack_cache_drain` releases every cached stack; only tests call it, since the
+cache is a fixed slice of the reserve.
 
 **First-switch-in.** There is no "initial save". Each constructor lays out
 `ctx` so `cpu_switch_context`'s `ret` lands at a trampoline: `ctx.lr` is the
@@ -428,12 +445,15 @@ space at a boot idle's create.
 
 Thread creation is a pool charge (an atomic add; under pressure the Image
 cache's reclaim first, [[sub-kernel-mm-phys]]), one SLUB alloc + a stack from the cache (a leaf lock, a
-pop, the 16 KiB poison) or, on a miss, one order-3 buddy alloc + four leaf
-PTE writes + four by-VA invalidates + the poison. A free is a push, or past
-the bound the miss in reverse. Measured on the Mac under HVF (`--config ci`,
-the suite's `thread.kstack_create_free_cost`), a create+free cycle costs
-924-1018 ns from the cache and 1417-1570 ns from the buddy, against 2802 ns
-before C2. `thread_free`'s `on_cpu` spin is bounded by a single in-flight
+pop, the 16 KiB poison) or, on a miss, four order-0 allocs + a slot + four leaf
+PTE writes + a `dsb` (invalid to valid invalidates nothing) + the poison. A free is a
+push, or past the bound four PTE clears + four by-VA invalidates + four frees + the
+slot. A thread's kernel memory is five pages, against nine before the range. Measured
+on the Mac under HVF (`--config ci`, the suite's `thread.kstack_create_free_cost`),
+BEFORE the range: a create+free cycle cost 924-1018 ns from the cache and 1417-1570 ns
+from the buddy, against 2802 ns before C2. The suite prints this and
+`thread.kstack_costs_its_four_pages` on every run; the range's own figures are owed
+its first boot. `thread_free`'s `on_cpu` spin is bounded by a single in-flight
 switch (the peer always resumes and clears it) and cannot deadlock because
 `thread_free` is always called lock-free;
 `g_thread_free_oncpu_waits` counts how often it actually had to wait, which
