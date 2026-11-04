@@ -4,7 +4,7 @@ type: chg
 title: "A failed walk says why: only a miss reads ENOENT"
 date: 2026-11-03
 arc: arc-phase6-pouch
-commits: ["6a4a276c9", "f4495467b"]
+commits: ["6a4a276c9", "f4495467b", "10e66bef7", "b1c122d74", "5d0028b85", "b8c8116c5", "6ca029353"]
 touched:
   - sub-kernel-stalk
   - sub-kernel-dev
