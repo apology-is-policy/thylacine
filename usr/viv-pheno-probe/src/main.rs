@@ -3792,6 +3792,28 @@ unsafe fn run_linux() -> ! {
         b"L164\n"
     );
 
+    // L369-L370: operator vote 26. A file that resolves and may run, and is no image,
+    // reads ENOEXEC: text, and then nothing at all. ENOENT would mean the create failed
+    // and EACCES that its x bit did not take, so the errno says which.
+    {
+        const NR_UNLINKAT: u64 = 35;
+        const O_CREAT_TRUNC: u64 = 0o100 | 0o1000;
+        const NEG_ENOEXEC: i64 = -8;
+        for (path, body, mark) in [
+            (&b"/pheno-notelf\0"[..], &b"echo hi\n"[..], &b"L369\n"[..]),
+            (&b"/pheno-empty\0"[..], &b""[..], &b"L370\n"[..]),
+        ] {
+            let f = svc4(NR_OPENAT, AT_FDCWD, path.as_ptr() as u64, O_WRONLY | O_CREAT_TRUNC, 0o755);
+            leg!(rep, f >= 0, mark);
+            leg!(rep, svc3(NR_WRITE, f as u64, body.as_ptr() as u64, body.len() as u64)
+                == body.len() as i64, mark);
+            leg!(rep, svc3(NR_CLOSE, f as u64, 0, 0) == 0, mark);
+            let r = svc3(NR_EXECVE, path.as_ptr() as u64, argv_ok.as_ptr() as u64, 0);
+            let _ = svc4(NR_UNLINKAT, AT_FDCWD, path.as_ptr() as u64, 0, 0);
+            leg!(rep, r == NEG_ENOEXEC, mark);
+        }
+    }
+
     // A NULL argv is argc == 0, the Shape-A frame. Linux itself tolerates it
     // (with a warning since 5.18), and the blob builder must produce no blob at
     // all rather than a zero-length one -- the core rejects `argc == 0` paired

@@ -19,7 +19,7 @@ validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/POUCH-DESIGN.md", "docs/LLVM-DESIGN.md"]
 created: 2026-08-01
-updated: 2026-11-03
+updated: 2026-11-04
 ---
 ## Identity — the calls that could not report failure (A-6)
 
@@ -292,7 +292,8 @@ slot count, because many opens can target the same bounded slot.
 ## Error paths
 
 A failed spawn returns the kernel's errno as it is: the walk's reason for the binary, with
-`ENOENT` only for a real miss (ERRORS.md ER-2). `posix_spawnp`'s `PATH` search goes on past
+`ENOENT` only for a real miss (ERRORS.md ER-2), and `ENOEXEC` for a file that is no image
+(operator vote 26). `posix_spawnp`'s `PATH` search goes on past
 `ENOENT`, `ENOTDIR` and `EACCES`, as upstream's `__execvpe` does, and any other failure is its
 answer. `E2BIG` for argv overflow; `EMFILE` for fd-list overflow and for pipe failure.
 A refused env tail returns the kernel's errno as it is too: `EINVAL` for a record

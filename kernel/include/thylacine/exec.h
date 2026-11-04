@@ -504,6 +504,16 @@ char *exec_interp_argv(const char *interp, u32 interp_len,
 // Declared here because DISTRO D-4 made exec.c a caller: the interpreter path
 // resolves through exactly the same gate the program did, so there is one
 // answer to "what is executable from this namespace" and not two.
+// exec_resolve_interp -- the same, saying why in *errp on NULL: the walk's reason, as
+// exec_resolve_from_namespace_ex has it. For a PT_INTERP, whose program's phenotype governs.
+struct Spoor *exec_resolve_interp(struct Proc *p, const char *name, size_t name_len,
+                                  size_t *size_out, int *errp);
+
+// exec_image_check -- is this a file a child could load? 0 if so; -T_E_NOEXEC if it is
+// not an image; a failed read's -errno or -T_E_NOMEM, which say nothing about the file.
+// BORROWS exe. A dynamic image passes: its interpreter is the load's to resolve.
+int exec_image_check(struct Spoor *exe, size_t exe_size);
+
 struct Spoor *exec_resolve_from_namespace(struct Proc *p, const char *name,
                                           size_t name_len, size_t *size_out);
 

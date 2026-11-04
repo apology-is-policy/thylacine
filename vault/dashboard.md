@@ -128,6 +128,7 @@ Generated — do not edit between the markers (`quaestor render`).
 
 ## Recent changes
 
+- 2026-11-04 [[chg-2026-11-04-noexec]] — T_E_NOEXEC: execve and the full spawn say a file is no image
 - 2026-11-03 [[chg-2026-11-03-item-11c-close]] — Item 11c close: rounds 1 to 3, the sweep, three leases
 - 2026-11-03 [[chg-2026-11-03-item-11c]] — A per-note table for native programs, SA_RESTART in the kernel, and an open a note can interrupt
 - 2026-11-03 [[chg-2026-11-03-walk-errno]] — A failed walk says why: only a miss reads ENOENT
@@ -135,5 +136,4 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-11-02 [[chg-2026-11-02-join-planted-cleanup]] — The F1 test's cleanup ran on an early failure, three planted points
 - 2026-11-02 [[chg-2026-11-02-thread-model-c4]] — Thread-model C4: a note aimed at one thread
 - 2026-11-02 [[chg-2026-11-02-thread-overhaul-position]] — The thread-model overhaul's position: C7 was not its last chunk
-- 2026-11-02 [[chg-2026-11-02-usr-notes]] — SIGUSR1 and SIGUSR2 become notes, and every family word outgrows its byte
 <!-- generated:end -->

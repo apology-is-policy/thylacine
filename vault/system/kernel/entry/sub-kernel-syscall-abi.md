@@ -21,7 +21,7 @@ abis: [abi-t-stat, abi-handle-rights, abi-errno, abi-pty-interaction]
 design:
   - "docs/ARCHITECTURE.md section 13"
 created: 2026-08-03
-updated: 2026-11-02
+updated: 2026-11-04
 ---
 ## Session registry factory ABI
 
@@ -291,6 +291,10 @@ a negative errno. The errno registry deliberately keeps `T_E_PERM` at 1 so that
 returning syscall can never distinguish "permission denied" from "generic
 failure", and the header says so, steering POSIX-EPERM contours to
 `T_E_ACCES` instead.
+
+`T_E_NOEXEC` is 8, POSIX's `ENOEXEC`, since operator vote 26: a file that resolved and may run
+and is not something this kernel can load. It is never the answer for a read that failed
+([[sub-kernel-exec]]).
 
 ## Mechanism
 

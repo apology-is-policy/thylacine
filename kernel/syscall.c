@@ -9227,7 +9227,7 @@ static struct Spoor *exec_resolve_from_namespace_ex(struct Proc *p, const char *
     int sr = spoor_stat_native(quarry, &st);
     if (sr != 0) { *errp = stalk_err_code(sr); spoor_clunk(quarry); return NULL; }
     if (st.size == 0 || (u64)st.size > EXEC_FILE_MAX) {
-        *errp = T_E_INVAL;
+        *errp = T_E_NOEXEC;
         spoor_clunk(quarry);
         return NULL;
     }
@@ -9242,6 +9242,11 @@ static struct Spoor *exec_resolve_from_namespace_ex(struct Proc *p, const char *
 struct Spoor *exec_resolve_from_namespace(struct Proc *p, const char *name,
                                           size_t name_len, size_t *size_out) {
     return exec_resolve_from_namespace_ex(p, name, name_len, size_out, NULL, NULL);
+}
+
+struct Spoor *exec_resolve_interp(struct Proc *p, const char *name, size_t name_len,
+                                  size_t *size_out, int *errp) {
+    return exec_resolve_from_namespace_ex(p, name, name_len, size_out, NULL, errp);
 }
 
 // Kernel-side body: takes a kernel-resident NUL-terminated name and the
@@ -10376,6 +10381,15 @@ static int sys_spawn_full_argv_with_perms_for_proc(
         return -exe_err;
     }
 
+    // Past the rfork a load's failure is a pid and an exit status, and this call has no
+    // way left to say what the file is.
+    int image_rc = exec_image_check(exe, exe_size);
+    if (image_rc != 0) {
+        spoor_clunk(exe);
+        sys_spawn_unbump_fds(bumped, fd_count);
+        return image_rc;
+    }
+
     // Kernel-side argv copy. Lifetime: owned by the spawn_args struct
     // until the thunk's exec_setup_from_spoor consumes it. Free-on-error
     // paths handle every interleaving below.
@@ -11253,15 +11267,11 @@ static s64 sys_execve_core(struct exception_context *ctx,
         // detached.
         addrspace_unref(nas);
         spoor_clunk(exe);
-        // DEGRADED, deliberately: POSIX says ENOEXEC here, and the errno
-        // registry has no T_E_NOEXEC. docs/ERRORS.md is ABI-bearing and its
-        // additions need signoff, so this reports EINVAL and the gap is tracked
-        // rather than closed by fiat -- the same disposition T_E_SPIPE (#106)
-        // carries. It matters at L-6: a shell reads ENOEXEC as "run it as a
-        // script", so until the code exists a shell cannot make that
-        // distinction. A refused allocation is NOT that case: it travels up
-        // as -T_E_NOMEM and is reported as such (B-1a' audit F15).
-        return rc == -T_E_NOMEM ? -(s64)T_E_NOMEM : -(s64)T_E_INVAL;
+        // The loader says why. A shell reads ENOEXEC as "run it as a script", so
+        // the loader answers it for the file alone, and a refused allocation or a
+        // failed read travels as itself. -1 is an argument the checks above should
+        // have refused, or a frame that would not build.
+        return rc == -1 ? -(s64)T_E_INVAL : (s64)rc;
     }
 
     // 3b. Take the Proc (ARCH 7.3.3, LINEAGE L-2b): every other thread dies, and

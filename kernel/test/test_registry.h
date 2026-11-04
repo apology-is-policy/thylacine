@@ -469,6 +469,10 @@ void test_execve_load_into_rejects_dirty(void);
 void test_execve_load_refuses_nomem_at_the_pool_edge(void);
 void test_execve_load_refuses_nomem_on_the_frame(void);
 void test_execve_failed_load_leaves_target_drainable(void);
+void test_execve_load_says_a_file_is_no_image(void);
+void test_execve_load_keeps_a_read_failure(void);
+void test_execve_image_check_answers_for_the_parent(void);
+void test_execve_interpreter_says_why(void);
 void test_exec_native_rejects_dynamic_linux(void);
 void test_exec_load_failure_leaves_phenotype(void);    // Design D Leg B
 void test_exec_reset_follows_decided_phenotype(void);  // Design D Leg A (+ audit F1 leg)

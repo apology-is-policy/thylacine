@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/EXEC-LOAD-DESIGN.md", "docs/ARCHITECTURE.md", "docs/LINEAGE.md"]
 created: 2026-08-03
-updated: 2026-11-03
+updated: 2026-11-04
 ---
 ## Purpose
 
@@ -75,10 +75,10 @@ it before EL0); `execve` passes a value decided into a local and never reads
 `nsp->phenotype` (see Mechanism). The resolver has a phenotype-reporting twin:
 `exec_resolve_from_namespace_ex` reports why it failed through an optional `*errp`: the
 walk's reason (`ENOENT` only for a miss, ERRORS.md ER-2), `EACCES` for a file the mount or
-the Dev will not execute, a failing stat's errno, and `EINVAL` for an empty or oversized
-image, `sys_execve_core`'s disposition while the registry has no `T_E_NOEXEC`. `execve`
-and `SYS_SPAWN_FULL_ARGV` return it; the four older spawn calls pass NULL and keep their
-flat `-1`, and the PT_INTERP resolve reports through the loader's own message. It reports,
+the Dev will not execute, a failing stat's errno, and `ENOEXEC` for an empty or oversized
+image. `execve` and `SYS_SPAWN_FULL_ARGV` return it; the four older spawn calls pass NULL
+and keep their flat `-1`. The PT_INTERP resolve goes through `exec_resolve_interp`, so a
+missing interpreter reads the walk's reason, as execve(2) has it. It reports,
 via an optional `*pheno_out`, whether
 the resolution walk crossed an `MPHENO_LINUX` mount (`/viv/bin`) — the
 by-location half of the decision. Only `SYS_SPAWN_FULL_ARGV` passes non-NULL;
@@ -104,9 +104,23 @@ succeeded.
 F15). Both segment mappers return it from their allocation arms -- a creator
 that returned NULL, a refused `burrow_lazy_populate`, a refused VMA -- and
 `exec_setup_argv_body`'s segment loop and `exec_load_body`'s PT_LOAD arm pass
-it up unchanged; every other failure is still `-1`, which `sys_execve_core`
-reports as EINVAL (the tracked ENOEXEC gap). Before this a Proc that ran out
-of pool during exec was told its binary was malformed.
+it up unchanged. Before this a Proc that ran out of pool during exec was told its
+binary was malformed.
+
+**What the load says (operator vote 26, [[dec-2026-11-04-noexec]]).** `-T_E_NOEXEC` is the
+file's fault: empty or over `EXEC_FILE_MAX`, a header `elf_load` refuses, a degenerate
+segment or two sharing a page, a segment over another or over the stack, a file shorter
+than its headers say. A read that FAILED travels as `stalk_err_code` has it, because a
+shell reads `ENOEXEC` as "run this as a script" and a binary must not become a script on
+an `EIO`. `-1` is left for the caller's own bad block and a frame that would not build,
+which `sys_execve_core` reads as `EINVAL`. `exec_setup_from_spoor` stays flat for the
+spawn thunks, which have already handed back a pid.
+
+So `SYS_SPAWN_FULL_ARGV` takes its look before the rfork: `exec_image_check` reads the
+header and asks `elf_load`, at the cost of one header read per spawn. A dynamic image
+passes, since its interpreter is the child's load to resolve, and that child reads a pid
+and exit 1 if the interpreter is missing. The child's load still decides: a file can
+change after the look.
 `execve.load_refuses_nomem_at_the_pool_edge` parks the pool full and loads.
 
 That is worth stating as a shape rather than a fact, because it is the better

@@ -22,7 +22,7 @@ design:
   - "docs/VIVARIUM.md"
   - "docs/LINEAGE.md"
 created: 2026-08-03
-updated: 2026-11-03
+updated: 2026-11-04
 ---
 ## Session registry factory
 
@@ -1177,11 +1177,6 @@ threshold so small transfers never pay the extra handle lookup.
   case today — every native symbol the table can emit has an arm, and a
   compile-time assertion pins the native/Linux boundary constant — but the
   guarantee is a census, not a mechanism.
-- **execve cannot say "not executable".** POSIX's `ENOEXEC` has no entry in the
-  errno registry, so a load failure reports `EINVAL`. The registry is ABI-bearing
-  and additions need signoff, so the gap is tracked rather than closed by fiat.
-  It matters at the shell: `ENOEXEC` is how a shell learns to re-run a file as a
-  script, and until the code exists a shell cannot make that distinction.
 - **The environment's bounds answer a different error code than argv's, on
   purpose.** Over-long environment data answers `E2BIG` — a caller acts on the
   difference, since it says the request was well-formed and splitting will work —

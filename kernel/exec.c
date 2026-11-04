@@ -36,6 +36,7 @@
 #include <thylacine/dev.h>      // REVENANT R-4: exe->dev->read for the file-backed path
 #include <thylacine/spoor.h>    // REVENANT R-4: spoor_ref / spoor_clunk
 #include <thylacine/path.h>     // prowl-1: exe->path->s -- the process name source
+#include <thylacine/stalk.h>    // stalk_err_code: a failed read's reason
 #include <thylacine/image.h>    // REVENANT R-4: image_lookup_or_create (shared text)
 
 #include "../arch/arm64/uart.h" // VIVARIUM 12.1 rule 4: the brand-mismatch diagnostic
@@ -1073,7 +1074,10 @@ static int map_eager_from_file(struct AddrSpace *as, bool exempt, struct Spoor *
             long n = exe->dev->read(exe, slot_kva + in_page, (long)want,
                                     (s64)(seg->file_offset + got));
             // #811-interruptible / I/O error -- the reachable one, on a real 9P read
-            if (n < 0)  return lazy_populate_unwind(as, b, nfile);
+            if (n < 0) {
+                (void)lazy_populate_unwind(as, b, nfile);
+                return -stalk_err_code((int)n);
+            }
             if (n == 0) break;                             // short read (caught below)
             got += (size_t)n;
         }
@@ -1088,7 +1092,10 @@ static int map_eager_from_file(struct AddrSpace *as, bool exempt, struct Spoor *
         while (got < seg->filesz) {
             long n = exe->dev->read(exe, kva + got, (long)(seg->filesz - got),
                                     (s64)(seg->file_offset + got));
-            if (n < 0)  { burrow_unref(b); return -1; }   // #811-interruptible / I/O error
+            if (n < 0) {                                   // #811-interruptible / I/O error
+                burrow_unref(b);
+                return -stalk_err_code((int)n);
+            }
             if (n == 0) break;                             // short read (caught below)
             got += (size_t)n;
         }
@@ -1125,13 +1132,15 @@ static int map_eager_from_file(struct AddrSpace *as, bool exempt, struct Spoor *
 
 // Read the ELF header + program-header table from the pinned executable into a
 // kmalloc'd buffer, bounded so elf_load (which derefs the ehdr + ph[]) never
-// reads past it. Returns the buffer (caller kfree) + *got_out, or NULL on any
-// failure. elf_load re-validates everything against the real file size; this is
+// reads past it. Returns the buffer (caller kfree) + *got_out, or NULL with *err_out
+// saying why. elf_load re-validates everything against the real file size; this is
 // purely the OOB-deref guard for handing it a header-only buffer.
-static void *exec_read_header(struct Spoor *exe, size_t *got_out) {
+static void *exec_read_header(struct Spoor *exe, size_t *got_out, int *err_out) {
     *got_out = 0;
+    *err_out = -(int)T_E_NOMEM;
     void *hdr = kmalloc(EXEC_ELF_HEADER_MAX, 0);
     if (!hdr)                                  return NULL;
+    *err_out = -1;
     if (((uintptr_t)hdr & 0x7) != 0)           { kfree(hdr); return NULL; }  // 8-align the Ehdr cast
 
     u8 *dst = (u8 *)hdr;
@@ -1139,7 +1148,11 @@ static void *exec_read_header(struct Spoor *exe, size_t *got_out) {
     while (got < EXEC_ELF_HEADER_MAX) {
         long n = exe->dev->read(exe, dst + got, (long)(EXEC_ELF_HEADER_MAX - got),
                                 (s64)got);
-        if (n < 0) { kfree(hdr); return NULL; }   // #811-interruptible / I/O error
+        if (n < 0) {                              // #811-interruptible / I/O error
+            kfree(hdr);
+            *err_out = -stalk_err_code((int)n);
+            return NULL;
+        }
         if (n == 0) break;                        // EOF (a header smaller than the cap)
         got += (size_t)n;
     }
@@ -1150,6 +1163,7 @@ static void *exec_read_header(struct Spoor *exe, size_t *got_out) {
     // span below mirrors it. Overflow-safe: got <= EXEC_ELF_HEADER_MAX (16 KiB)
     // and phnum is a u16, so span <= 65535*56 fits a u64 with no wrap, and the
     // phoff > got check runs before the subtraction.
+    *err_out = -(int)T_E_NOEXEC;
     if (got < sizeof(struct Elf64_Ehdr))       { kfree(hdr); return NULL; }
     const struct Elf64_Ehdr *eh = (const struct Elf64_Ehdr *)hdr;
     if (eh->e_phentsize != sizeof(struct Elf64_Phdr)) { kfree(hdr); return NULL; }
@@ -1307,6 +1321,22 @@ static int exec_load_body(struct AddrSpace *as, bool exempt, struct Proc *nsp,
                           u64 *entry_out, u64 *sp_out,
                           struct Spoor **interp_out, char **rw_argv_out);
 
+// The look a full spawn takes in the parent, which can still answer. The child's own
+// load decides: a file can change after this. A dynamic image passes, since its
+// interpreter is the child's load to resolve.
+int exec_image_check(struct Spoor *exe, size_t exe_size) {
+    if (!exe || !exe->dev || !exe->dev->read) return -1;
+    size_t got = 0;
+    int err = 0;
+    void *hdr = exec_read_header(exe, &got, &err);
+    if (!hdr) return err;
+    struct elf_image img;
+    int r = elf_load(hdr, exe_size, &img);
+    kfree(hdr);
+    if (r == ELF_LOAD_OK || r == ELF_LOAD_HAS_INTERP || r == ELF_LOAD_HAS_DYNAMIC) return 0;
+    return -(int)T_E_NOEXEC;
+}
+
 int exec_load_into(struct AddrSpace *as, bool exempt, struct Proc *nsp,
                    struct Spoor *exe, size_t exe_size,
                    const char *prog_name, u32 prog_name_len,
@@ -1346,7 +1376,7 @@ static int exec_load_body(struct AddrSpace *as, bool exempt, struct Proc *nsp,
     if (!as || !exe || !entry_out || !sp_out)  return -1;
     if (as->vmas != NULL)                      return -1;     // clean target only
     if (!exe->dev || !exe->dev->read)          return -1;
-    if (exe_size == 0 || exe_size > EXEC_FILE_MAX) return -1;
+    if (exe_size == 0 || exe_size > EXEC_FILE_MAX) return -(int)T_E_NOEXEC;
 
     // argv invariants (defense-in-depth; the syscall body already checked them,
     // but the contract is owned here too -- this entry is exported).
@@ -1370,10 +1400,12 @@ static int exec_load_body(struct AddrSpace *as, bool exempt, struct Proc *nsp,
     // 1. Read + parse ONLY the ELF header + phdrs (a few KB), not the whole
     //    binary. elf_load validates segment extents against the real file size.
     size_t hdr_got = 0;
-    void *hdr = exec_read_header(exe, &hdr_got);
-    if (!hdr)                                  return -1;
+    int hdr_err = 0;
+    void *hdr = exec_read_header(exe, &hdr_got, &hdr_err);
+    if (!hdr)                                  return hdr_err;
     struct elf_image img;
     int r = elf_load(hdr, exe_size, &img);
+    int interp_err = (int)T_E_NOEXEC;   // why a PT_INTERP that did not resolve is refused
 
     // DISTRO D-4: PT_INTERP -> the interpreter. `elf_load` already reports the
     // segment as ELF_LOAD_HAS_INTERP, which was once only a refusal; this
@@ -1427,7 +1459,7 @@ static int exec_load_body(struct AddrSpace *as, bool exempt, struct Proc *nsp,
                 // native and break every dynamic Linux binary.
                 size_t isize = 0;
                 struct Spoor *ispoor =
-                    exec_resolve_from_namespace(nsp, interp, ilen, &isize);
+                    exec_resolve_interp(nsp, interp, ilen, &isize, &interp_err);
                 if (!ispoor) {
                     exec_report_fail("PT_INTERP names an interpreter this "
                                      "namespace cannot execute -- refusing", 0);
@@ -1439,6 +1471,7 @@ static int exec_load_body(struct AddrSpace *as, bool exempt, struct Proc *nsp,
                                                    &nlen, &nargc);
                     if (!nargv) {
                         spoor_clunk(ispoor);
+                        interp_err = (int)T_E_2BIG;
                         exec_report_fail("PT_INTERP rewrite does not fit the argv "
                                          "bound -- refusing", (u64)argv_data_len);
                     } else {
@@ -1456,8 +1489,8 @@ static int exec_load_body(struct AddrSpace *as, bool exempt, struct Proc *nsp,
                         argc           = nargc;
 
                         kfree(hdr);
-                        hdr = exec_read_header(exe, &hdr_got);
-                        if (!hdr)              return -1;
+                        hdr = exec_read_header(exe, &hdr_got, &hdr_err);
+                        if (!hdr)              return hdr_err;
                         r = elf_load(hdr, exe_size, &img);
                     }
                 }
@@ -1501,7 +1534,7 @@ static int exec_load_body(struct AddrSpace *as, bool exempt, struct Proc *nsp,
         // nothing at all.
         exec_report_fail("elf_load refused this binary -- negated ELF_LOAD code",
                          (u64)(-r));
-        return -1;
+        return r == ELF_LOAD_HAS_INTERP ? -interp_err : -(int)T_E_NOEXEC;
     }
 
     // 2. Map each PT_LOAD. Non-writable segments (R+X text, R-only rodata --
@@ -1517,7 +1550,7 @@ static int exec_load_body(struct AddrSpace *as, bool exempt, struct Proc *nsp,
         if (seg_geometry(seg, &g) != 0) {
             exec_report_fail("degenerate PT_LOAD (memsz 0 or wrapping end) "
                              "at vaddr", seg->vaddr);
-            return -1;
+            return -(int)T_E_NOEXEC;
         }
 
         // #149: refuse a segment whose first page is ALREADY mapped. Two
@@ -1535,7 +1568,7 @@ static int exec_load_body(struct AddrSpace *as, bool exempt, struct Proc *nsp,
         if (vma_lookup_in(as, g.floor) != NULL) {
             exec_report_fail("PT_LOAD shares a page with an earlier segment "
                              "(I-12 forbids the W+X union) at vaddr", seg->vaddr);
-            return -1;
+            return -(int)T_E_NOEXEC;
         }
 
         // file_shareable iff PF_R AND NOT PF_W (R+X text, R-only rodata -- #45 /
@@ -1569,10 +1602,10 @@ static int exec_load_body(struct AddrSpace *as, bool exempt, struct Proc *nsp,
                                  : "eager PT_LOAD map failed at vaddr",
                              seg->vaddr);
             // Partial -> the caller disposes the target. A refused allocation
-            // travels as -T_E_NOMEM (B-1a' audit F15: the pool's refusal used
-            // to surface as EINVAL, a malformed binary's code); anything else
-            // is -1.
-            return rc == -T_E_NOMEM ? rc : -1;
+            // travels as -T_E_NOMEM (B-1a' audit F15), and a read that failed as
+            // its own reason. A plain -1 is the image's doing: a segment over
+            // another, or a file shorter than its headers say.
+            return rc == -1 ? -(int)T_E_NOEXEC : rc;
         }
     }
 
@@ -1580,7 +1613,8 @@ static int exec_load_body(struct AddrSpace *as, bool exempt, struct Proc *nsp,
     //    img metadata, not the file -- AT_PHDR resolves into the first mapped
     //    segment's VA; AT_VDSO_CLOCK into the RO clock page).
     int src = exec_map_user_stack(as, exempt);
-    if (src != 0)                              return src == -T_E_NOMEM ? src : -1;
+    // The target was clean, so only the image's own segments can be in the way.
+    if (src != 0)                              return src == -T_E_NOMEM ? src : -(int)T_E_NOEXEC;
     u64 vdso_va = exec_map_vdso(as, exempt);   // best-effort; 0 -> no AT_VDSO_CLOCK
     *entry_out = img.entry;
     int ferr   = -1;

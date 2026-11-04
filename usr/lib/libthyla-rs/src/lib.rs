@@ -3065,8 +3065,7 @@ pub unsafe fn t_weft_unshare(share_id: u64) -> i64 {
 // intact and the value is a real -errno.
 //
 // Notable errors: -T_E_NOENT / -T_E_ACCES (the path did not resolve),
-// -T_E_INVAL (not a loadable static ELF -- POSIX would say ENOEXEC; see the
-// SYS_EXECVE ABI note), -T_E_AGAIN (this Proc has more than one live thread,
+// -T_E_NOEXEC (not a runnable image), -T_E_AGAIN (this Proc has more than one live thread,
 // which v1.0 refuses rather than half-serves).
 //
 // The environment is NOT passed: it is the per-Proc /env device, which survives
