@@ -4684,11 +4684,14 @@ impl Gpu {
         core::mem::take(&mut self.retired_resources)
     }
 
-    /// Device completion proof for trusted takeover. An abandoned fence is still
-    /// device work until a late used entry retires it. Counting only the public
-    /// in-flight counter would lose that case.
-    pub fn all_work_retired(&self) -> bool {
-        self.cursor.queue.idle() && self.controlq_retired()
+    /// What trusted takeover asks of the device. A fenced chain need not have
+    /// retired, in flight or poisoned: it reaches only resources attached to its
+    /// context, the trusted image is never attached to one, and only the broker
+    /// binds scanouts (TRUSTED-PATH, vote 50). Waiting for it would let any client
+    /// holding one deny the SAK. The cursor queue is another matter, since a late
+    /// cursor chain could put a plane over the trusted scene.
+    pub fn takeover_clear(&self) -> bool {
+        self.cursor.queue.idle() && self.synchronous_clear()
     }
 
     /// What stands between a retirement of `object` and the device: only the
@@ -4707,13 +4710,12 @@ impl Gpu {
         )
     }
 
-    /// The control queue's share of `all_work_retired`, which is all that
-    /// rebinding a normal scanout needs: a late cursor chain can touch only a
-    /// cursor plane, and a busy cursor queue keeps every later takeover out.
-    pub fn controlq_retired(&self) -> bool {
+    /// All that rebinding a normal scanout needs. A late cursor chain can touch
+    /// only a cursor plane, and a busy cursor queue keeps every later takeover
+    /// out. A fenced chain could equally have been running with that frame on the
+    /// glass before the episode, so rebinding adds nothing for it to reach.
+    pub fn synchronous_clear(&self) -> bool {
         !self.ctrl.dead && !self.ctrl.sync_pending && !self.ctrl.sync2_pending
-            && self.ctrl.fslots.iter().all(Option::is_none)
-            && self.ctrl.fslot_poisoned.iter().all(|poisoned| !poisoned)
     }
 
     /// Disable every advertised output before selecting trusted scanout 0.
@@ -4721,7 +4723,7 @@ impl Gpu {
     /// is hidden with proven queue retirement before any trusted pixels appear.
     /// A new backend must prove exclusion of its own overlays/writeback planes.
     pub fn exclude_all_outputs(&mut self) -> Result<(), Error> {
-        if !self.all_work_retired() { return Err(Error::Hardware); }
+        if !self.takeover_clear() { return Err(Error::Hardware); }
         let (cfg, len) = self.pci.region(PciRegion::Device).ok_or(Error::Hardware)?;
         if len < 12 { return Err(Error::Hardware); }
         let outputs = unsafe { r32(cfg + 8) };

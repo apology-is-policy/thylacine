@@ -58,6 +58,9 @@ proc episode {leg} {
         -ex "lictor: kernel closed trusted seat (scanout normal)" {
             lc_fail "SAK-POISON RED ($leg): the episode failed at its deadline with nothing on the glass"
         }
+        -re {lictor: seat failed: [^\r\n]*[\r\n]} {
+            lc_fail "SAK-POISON RED ($leg): the seat refused the takeover: $expect_out(0,string)"
+        }
         -re {EXTINCTION:} { lc_extinction_fail "takeover ($leg)" }
         timeout { lc_fail "$leg: no takeover and no failure within 20 s of the chord" }
         eof { lc_fail "EOF at the takeover ($leg)" }

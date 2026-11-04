@@ -2594,10 +2594,18 @@ block the serve loop, and seat input with it. Neither was taken.
   fails at once, so its grant is cancelled. The seat's return to normal then
   waits for the stall: it rebinds once the engine revives, or goes back
   without its display once the engine dies (TRUSTED-PATH §7, vote 30).
-- **Restoring a scanout needs only the control queue's quiescence.** A late
-  cursor chain can touch only a cursor plane, and a cursor queue that is not
-  idle already keeps any later takeover out. So a poisoned cursor queue on a
-  live engine does not cost the display.
+- **Restoring a scanout needs only synchronous quiescence.** A late cursor chain
+  can touch only a cursor plane, and a cursor queue that is not idle already keeps
+  any later takeover out. A client's fenced chain, in flight or poisoned, could
+  equally have been running with that frame on the glass before the episode, so
+  rebinding adds nothing for it to reach. Neither costs the display. (Vote 50: a
+  chain that had to retire first would strand the trusted scene behind a client's
+  poison, since this refusal repeats every pass.)
+- **Takeover waits for no fenced chain.** `Gpu::takeover_clear` asks that the cursor
+  queue is idle and no synchronous chain is outstanding. A fenced chain cannot reach
+  the trusted image: `Objects::valid_id` refuses a trusted id on every named route,
+  a ctx-0 transfer included, the trusted resource is never attached to a context, and
+  only the broker binds scanouts (TRUSTED-PATH, vote 50).
 - **An unknown outcome keeps what it named.** A stalled command may have
   executed, so every guest resource it named stays referenced:
   - a stalled ATTACH keeps its pins, as `Device::attach` already does for any
@@ -2620,7 +2628,7 @@ block the serve loop, and seat input with it. Neither was taken.
   read as a device refusal and cost 3D for the boot.
 - **The cursor queue follows the same two stages.** A missed deadline leaves
   its chain outstanding, so the queue is not idle: cursor commands are refused
-  and `all_work_retired` is false. The completion pump retires the chain when
+  and `takeover_clear` is false. The completion pump retires the chain when
   its used entry arrives, with the validation an on-time completion gets, and a
   malformed entry still poisons the queue. A chain outstanding for
   `FENCE_ABANDON_MS` poisons it permanently, as before.

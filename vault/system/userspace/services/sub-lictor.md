@@ -291,9 +291,13 @@ compositor never sees an error for a display that is about to return.
 Restoration is owed from the moment a takeover begins (`Seat.displaced`, set
 before `exclude_all_outputs`), not only once it completes: a takeover that
 fails part-way may already have disabled outputs or bound the trusted image.
-`Device::restore` needs only the control queue's quiescence
-(`Gpu::controlq_retired`), so a cursor queue poisoned on a live engine does not
-cost the display. A restore refused by a stalled engine is retried every
+`Device::restore` needs only synchronous quiescence
+(`Gpu::synchronous_clear`), so neither a cursor queue poisoned on a live engine
+nor a client's poisoned chain costs the display. Takeover itself asks that and an
+idle cursor queue (`Gpu::takeover_clear`, vote 50): a fenced chain, in flight or
+poisoned, cannot reach the trusted image, whose id `Objects::valid_id` refuses on
+every named route and which is never attached to a context, so a client holding
+one does not deny the SAK. A restore refused by a stalled engine is retried every
 pass until the engine revives or dies. Restoration stays owed until the
 kernel acknowledges RESTORED: when the kernel refuses it (a grantee that
 exited before the commit), the seat fails and rebinds again before it

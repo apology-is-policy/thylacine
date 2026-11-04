@@ -178,8 +178,9 @@ trusted image; it need not have retired. A chain reaches only resources attached
 its context, the trusted image is never attached to a context, and only the broker
 binds scanouts. Waiting for every chain would let any client that keeps one in flight
 deny the SAK, with no trusted screen and no notice, while a fake prompt stays on the
-glass. Not yet built: `Seat::step` still returns before any trusted paint while a chain
-is unretired, and that denial, read in code, is to be reproduced before the change.
+glass. So takeover asks only that the cursor queue is idle and no synchronous chain is
+outstanding (`Gpu::takeover_clear`), and restoring asks only the second
+(`Gpu::synchronous_clear`). A stalled engine still holds the SAK off.
 
 **As built:** the serial episode gates UART output to the attached trusted
 process. The QEMU graphical backend uses Lictor as the boot-trusted physical

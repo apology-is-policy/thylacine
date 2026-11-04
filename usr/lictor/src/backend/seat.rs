@@ -117,7 +117,7 @@ impl Seat {
             1 => {
                 for input in inputs.iter_mut() { input.events.clear(); }
                 device.reap();
-                if !device.gpu.all_work_retired() { return; }
+                if !device.gpu.takeover_clear() { return; }
                 if !self.active() {
                     self.model = Model { notice: b"Preparing the trusted path.".to_vec(), ..Model::default() };
                     if screen.paint(&mut device.gpu, &self.model, 0, None).is_err() {

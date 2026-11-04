@@ -144,10 +144,11 @@ impl Device {
     /// Used only after kernel END. Ordinary admission remains closed while a
     /// complete previous normal frame is rebound and flushed. The compositor
     /// must also observe the changed seat epoch and repaint after it resumes.
-    /// Only the control queue need be quiet (GPU-DESIGN 4.5.15), so a cursor
-    /// queue poisoned on a live engine does not cost the display.
+    /// Only synchronous work holds it (GPU-DESIGN 4.5.15), so neither a cursor
+    /// queue poisoned on a live engine nor a client's poisoned chain costs the
+    /// display.
     pub fn restore(&mut self) -> Result<(), Error> {
-        if !self.gpu.controlq_retired() { return Err(Error::Hardware); }
+        if !self.gpu.synchronous_clear() { return Err(Error::Hardware); }
         match self.presentation {
             Presentation::None => self.gpu.set_scanout(0, 0, 0),
             Presentation::Image { resource, width, height } => {

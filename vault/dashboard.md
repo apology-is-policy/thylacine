@@ -127,10 +127,10 @@ Generated — do not edit between the markers (`quaestor render`).
 
 - 2026-11-04 [[chg-2026-11-04-compositor-band]] — The designated compositor's threads are INTERACTIVE
 - 2026-11-04 [[chg-2026-11-04-pinned-wake]] — A pinned thread's wake goes to its home CPU, not the waker's
+- 2026-11-04 [[chg-2026-11-04-seat-takeover-fenced]] — Trusted takeover and restore wait for no fenced chain
 - 2026-11-03 [[chg-2026-11-03-b3h-first-boots]] — B-3h's first boots: two wrong tests, a survivor, a budget
 - 2026-11-03 [[chg-2026-11-03-fid-pays-for-clunk]] — A FID pays for its CLUNK at RESERVE
 - 2026-11-03 [[chg-2026-11-03-memory-account-number]] — The memory account call moves to 140
 - 2026-11-03 [[chg-2026-11-03-memory-account-query]] — SYS_ACCOUNT answers its query on the caller's own account
 - 2026-11-03 [[chg-2026-11-03-memory-account-reservation]] — Reserve the memory account call and its records
-- 2026-11-03 [[chg-2026-11-03-seat-session-start]] — A chord at session start is a wait: the seat's P3s, a member that may owe, and a needle checker
 <!-- generated:end -->
