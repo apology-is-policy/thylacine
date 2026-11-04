@@ -732,11 +732,10 @@ proc lc_extinction_fail {msg} {
     lc_fail $msg
 }
 
-# Wait for an EXACT string, with extinction / timeout / eof as hard failures.
-# `phase` is a label for the failure message. Uses the command timeout.
 # A bounded wait. `expect -timeout N {arms}` reads the block as one literal pattern and
 # matches nothing, and tools/check-expect-forms.py refuses it. The arms run in the caller's
-# frame. A `return` in one leaves only this proc, so an arm sets a flag instead.
+# frame. A `return` in one leaves only this proc, and a `break` or `continue` in one is an
+# error, so an arm sets a flag instead.
 proc lc_within {seconds arms} {
     global timeout
     set saved $timeout
@@ -746,6 +745,8 @@ proc lc_within {seconds arms} {
     return -options $options $result
 }
 
+# Wait for an EXACT string, with extinction / timeout / eof as hard failures.
+# `phase` is a label for the failure message. Uses the command timeout.
 proc lc_expect {pat phase} {
     global lc_cmd_timeout timeout
     set timeout $lc_cmd_timeout

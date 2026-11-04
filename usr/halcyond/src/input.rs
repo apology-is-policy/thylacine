@@ -109,7 +109,8 @@ const MOD_ALT: u16 = 1 << 2;
 /// shift; `keymap.rs::resolve`), so a char/control key passes through as
 /// `Char(rune)` with only Alt left to say. The kaua-term's `encode_char` then
 /// emits UTF-8, byte-identical to the console `key_bytes` rune arm above, and an
-/// ESC before it for Alt. A rune-less nav
+/// ESC before it for Alt on a printable rune. ESC before anything else reads back
+/// as Escape alone, which a modal application takes as a mode change. A rune-less nav
 /// key (arrows / Home / End / page / Del / Ins -- the same evdev table as
 /// `key_bytes`) maps to its `KeyCode`, so the kaua-term re-encodes it honoring
 /// DECCKM (the app-cursor fidelity the raw-byte console path cannot carry).
@@ -119,7 +120,7 @@ pub fn map_key(code: u16, rune: u32, mods: u16, value: u32) -> Option<KeyEvent> 
     }
     if rune != 0 {
         let key = KeyCode::Char(char::from_u32(rune)?);
-        return Some(if mods & MOD_ALT != 0 {
+        return Some(if mods & MOD_ALT != 0 && (0x20..=0x7e).contains(&rune) {
             KeyEvent::with(key, Mods::ALT)
         } else {
             KeyEvent::new(key)
@@ -345,6 +346,20 @@ mod tests {
         assert_eq!(p(4 | 1), Some(KeyEvent::with(KeyCode::Char('p'), Mods::ALT)));
         assert_eq!(map_key(25, 0x70, 4, 0), None);
         assert_eq!(map_key(103, 0, 4, 1), Some(KeyEvent::new(KeyCode::Up)));
+    }
+
+    #[test]
+    fn alt_on_a_rune_kaua_would_read_as_escape_is_the_plain_key() {
+        // Backspace, Enter, Tab, Ctrl-Alt-A, Delete and a rune past ASCII: ESC before any of
+        // them comes back from the tile's parser as Esc, and Nora would leave Insert.
+        for rune in [0x08, 0x0d, 0x09, 0x01, 0x7f, 0xe9] {
+            let plain = Some(KeyEvent::new(KeyCode::Char(char::from_u32(rune).unwrap())));
+            assert_eq!(map_key(14, rune, 4, 1), plain, "rune {rune:#x}");
+        }
+        for rune in [0x20, 0x7e] {
+            let alt = Some(KeyEvent::with(KeyCode::Char(char::from_u32(rune).unwrap()), Mods::ALT));
+            assert_eq!(map_key(57, rune, 4, 1), alt, "rune {rune:#x}");
+        }
     }
 
     #[test]

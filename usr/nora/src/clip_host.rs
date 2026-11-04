@@ -1,7 +1,8 @@
 //! The session clipboard and mode report over a private ring: the binary's half of
 //! the shared clipboard, as `lsp_host` is of the language server. The engine raises
 //! requests and takes text. What crosses the ring, and every deadline, is the client's
-//! (ASYNC-SERVICE-LIFECYCLE, AS-4d), and nothing here can block.
+//! (ASYNC-SERVICE-LIFECYCLE, AS-4d), and nothing here waits on the server. An answer's line
+//! to the console parks, as any console write does, for the length of a trusted episode.
 use alloc::string::String;
 use interaction_native::{parse_locator, Host};
 use libhalcyon::interaction_client::{Event, Refusal, Why};
@@ -139,8 +140,13 @@ impl Clip {
                         });
                     }
                     // The client reports only the paste it was asked for.
-                    (Ok(_), None) => {}
-                    (Err(_), _) => ed.set_status(String::from("clipboard: that was not text")),
+                    (Ok(_), None) => {
+                        t_putstr("nora: clipboard paste not applied\n");
+                    }
+                    (Err(_), _) => {
+                        t_putstr("nora: clipboard paste failed: not text\n");
+                        ed.set_status(String::from("clipboard: that was not text"));
+                    }
                 },
                 Event::PasteFailed(reason) => {
                     let _ = self.paste_askers.answered();
