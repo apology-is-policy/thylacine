@@ -4981,7 +4981,7 @@ static int probe_spawn_cwd(void) {
     int stayed = al == 1 && after[0] == '/';
     (void)t_chdir(saved, (unsigned long)sl);
 
-    if (!a_ok || !p_ok || unreaped || hz >= 0 || pb <= 0 || pc != -1 || r_nf != -2 || r_nd != -20 || r_em != -22 ||
+    if (!a_ok || !p_ok || unreaped || hz >= 0 || pb <= 0 || pc != -2 || r_nf != -2 || r_nd != -20 || r_em != -22 ||
         r_fl != -1 || r_bit != -1 || !stayed) {
         t_putstr("joey: spawn-cwd probe FAILED abs=");
         t_putstr(itoa_dec(pa, nb, sizeof(nb)));
@@ -4998,7 +4998,7 @@ static int probe_spawn_cwd(void) {
         t_putstr(hz >= 0 ? "yes" : "no");
         t_putstr(" rel-no-tail=");
         t_putstr(itoa_dec(pc, nb, sizeof(nb)));
-        t_putstr(" (want -1) nope=");
+        t_putstr(" (want -2) nope=");
         t_putstr(itoa_dec(r_nf, nb, sizeof(nb)));
         t_putstr(" (want -2) file=");
         t_putstr(itoa_dec(r_nd, nb, sizeof(nb)));

@@ -22,7 +22,7 @@ design:
   - "docs/VIVARIUM.md"
   - "docs/LINEAGE.md"
 created: 2026-08-03
-updated: 2026-11-02
+updated: 2026-11-03
 ---
 ## Session registry factory
 
@@ -526,9 +526,9 @@ It answers each refusal's errno: `T_E_NOENT` for a missing component,
 `T_E_NOTDIR` for a target that is not a directory, `T_E_ACCES` for a refused
 search (the walk's or the final X check's), `T_E_INVAL` for an empty, over-long
 or NUL-bearing path or a name the walk cannot name back, and a failing stat's
-or re-walk's own errno (`T_E_IO` when it carries none). A Dev's walk carries no
-errno, so a 9P walk that fails for any reason -- a dead session, a caught note
-that interrupts it -- answers `T_E_NOENT`, as for `SYS_OPEN`. `SYS_CHDIR` passes
+or re-walk's own errno (`T_E_IO` when it carries none). A walk's own reason crosses
+as it does for `SYS_OPEN`, and only a miss reads `T_E_NOENT` (ERRORS.md ER-2).
+`SYS_CHDIR` passes
 it through, with `T_E_FAULT` for a bad buffer
 and `T_E_NOMEM` for the store; until then it answered every failure the bare -1
 that pouch and Go read as `EPERM` (ERRORS.md's binding rule). The landed name
