@@ -516,8 +516,10 @@ unsigned select_target_cpu(struct Thread *t, unsigned prev_cpu) {
     if (!t) return prev_cpu;
     // CPU-pinned threads (every per-CPU idle + kthread) NEVER migrate -- their
     // home CPU is fixed (ARCH §8.4.2 / sched_alpha.tla IdleStaysHome). This is
-    // the placement-side companion to try_steal's cpu_pinned skip.
-    if (t->cpu_pinned) return prev_cpu;
+    // the placement-side companion to try_steal's cpu_pinned skip. prev_cpu is the
+    // WAKER's, so it says nothing about where this thread lives: last_cpu is its
+    // home, by induction from the KP_ZERO 0 of a thread that has never been placed.
+    if (t->cpu_pinned) return __atomic_load_n(&t->last_cpu, __ATOMIC_RELAXED);
     // Push-complete placement (TI-4b): in production, prefer an IDLE CPU for a
     // waking thread -- place it where it runs NOW + IPI that CPU, instead of
     // enqueuing locally + best-effort-kicking one peer to PULL (the pull-with-
@@ -907,6 +909,11 @@ void ready_on(unsigned target_cpu, struct Thread *t) {
     // target. select_target_cpu already guards this; belt for any other caller.
     if (target_cpu >= DTB_MAX_CPUS || !g_cpu_sched[target_cpu].initialized)
         target_cpu = self;
+    // A pinned thread that has run lives where it ran (ARCH 8.4.2).
+    if (t->cpu_pinned && t->nsched != 0 && target_cpu != t->last_cpu)
+        extinction("ready_on: a pinned thread placed off its home");
+    // Read while t cannot run: past the unlock below it may already be gone.
+    bool pinned = t->cpu_pinned;
 
     // The target CPU's run-tree lock (IRQs already masked above; cross-CPU
     // contention against work-stealing peers / a peer's own sched).
@@ -919,7 +926,7 @@ void ready_on(unsigned target_cpu, struct Thread *t) {
     // virtual time"): a thread carries the vd_t from its last yield on whatever
     // CPU it last ran on. Each CPU's vd_counter is an independent clock; a
     // cross-CPU wake (a wakeup() / timer-tick on a CPU other than where t last
-    // ran -- select_target_cpu returns the waker's CPU at v1.0) would otherwise
+    // ran -- select_target_cpu returns the waker's CPU unless t is pinned) would otherwise
     // enqueue t with a STALE key minted by a foreign clock. A high stale key
     // from a fast clock onto a slow-clock CPU tails t behind every fresh
     // yielder -> starvation bounded only by the inter-CPU counter gap (an I-17
@@ -962,9 +969,12 @@ void ready_on(unsigned target_cpu, struct Thread *t) {
         // is the CORRECTNESS half + is NOT gated by g_sched_notify_enabled (so a
         // busy target reschedules at its next tick even when the wake-IPI is
         // suppressed during tests). sched_notify_cpu is the PROMPTNESS half: a
-        // gated IPI that traps the target in NOW rather than at the next tick.
+        // gated IPI that traps the target in NOW rather than at the next tick. A pinned
+        // thread can run nowhere else, and a parked secondary has no tick in the test
+        // phase, so for one the IPI is correctness and is not gated.
         need_resched_set(target_cpu);
-        sched_notify_cpu(target_cpu);
+        if (pinned) (void)gic_send_ipi(target_cpu, IPI_RESCHED);
+        else sched_notify_cpu(target_cpu);
     }
 }
 
@@ -2986,12 +2996,12 @@ int wakeup(struct Rendez *r) {
     // r->lock alone, off the global lock, so a wakeup racing a context
     // switch cannot stall every CPU's timerwait_tick.
     //
-    // LOAD-BEARING (PTY-4e R2): the UNCONDITIONAL r->lock acquire — even on
-    // the no-waiter path — is the only ordering chain that delivers a torpor
-    // poster's `w->awoken = 1` (written before this call) to a STOP-PARKED
-    // waiter's resumed tsleep re-loop, whose cond read pairs with THIS
-    // release. A lockless `r->waiter == NULL` fast path here would sever
-    // that chain and reintroduce a lost-wake on the #19 preserved-wait path.
+    // LOAD-BEARING (PTY-4e R2): the UNCONDITIONAL r->lock acquire, even on the
+    // no-waiter path, is what delivers a poster's cond write (made before this
+    // call, under no lock of r's) to a STOP-PARKED waiter's resumed re-loop,
+    // whose cond read pairs with THIS release. A lockless `r->waiter == NULL`
+    // fast path here would sever that chain and lose a wake on a preserved wait.
+    // torpor's mark takes r->lock itself, so it does not ride on this.
     irq_state_t s = spin_lock_irqsave(&g_timerwait.lock);
     spin_lock(&r->lock);
 

@@ -708,9 +708,114 @@ void test_sched_select_target_cpu_homogeneous_is_prev(void) {
     // A CPU-pinned thread never migrates regardless of topology/util.
     t->cpu_pinned = true;
     TEST_EXPECT_EQ(select_target_cpu(t, 0), 0u,
-        "a cpu_pinned thread stays on its prev CPU");
+        "a cpu_pinned thread stays on its home CPU");
+    if (n > 1) {
+        TEST_EXPECT_EQ(select_target_cpu(t, n - 1u), 0u,
+            "a waker's CPU is not a cpu_pinned thread's home");
+    }
 
     thread_free(t);
+}
+
+// scheduler.pinned_wake_goes_home
+//
+// The boot thread sleeps and a thread on a peer wakes it. It resumes where it lives.
+// A secondary has no tick in this phase, so a boot thread placed there hangs the tick
+// wait that ends the suite.
+static struct Rendez g_pw_rendez;
+static volatile bool g_pw_asleep;
+static volatile bool g_pw_go;
+static volatile u32  g_pw_waker_cpu;
+static volatile bool g_pw_stop;
+
+static int pw_cond(void *arg) {
+    (void)arg;
+    g_pw_asleep = true;
+    return g_pw_go;
+}
+
+static void pw_waker(void) {
+    while (!g_pw_asleep) __asm__ __volatile__("yield" ::: "memory");
+    g_pw_waker_cpu = smp_cpu_idx_self();
+    g_pw_go = true;
+    (void)wakeup(&g_pw_rendez);
+    // sched(), not a spin: a boot thread placed here has to run for the test to read it.
+    while (!g_pw_stop) sched();
+    (void)spin_lock_irqsave(NULL);   // thread_kthread_retire's contract: masked to sched()
+    thread_kthread_retire();
+    sched();
+}
+
+void test_scheduler_pinned_wake_goes_home(void) {
+    if (!test_requires(smp_cpu_count() >= 2, "thylacine.smp", 0, true, "one CPU is online"))
+        return;
+    unsigned home = smp_cpu_idx_self();
+    TEST_ASSERT(current_thread()->cpu_pinned, "the fixture is the pinned boot thread");
+    rendez_init(&g_pw_rendez);
+    g_pw_asleep = false; g_pw_go = false; g_pw_stop = false;
+    g_pw_waker_cpu = home;
+    struct Thread *w = thread_create(kproc(), pw_waker);
+    TEST_ASSERT(w != NULL, "thread_create failed");
+    unsigned peer = (home + 1u) % smp_cpu_count();
+    w->cpu_pinned = true;
+    ready_on(peer, w);
+    (void)gic_send_ipi(peer, IPI_RESCHED);
+    (void)sleep(&g_pw_rendez, pw_cond, NULL);
+    unsigned here = smp_cpu_idx_self();
+    g_pw_stop = true;
+    TEST_YIELD_UNTIL(w->state == THREAD_EXITING);
+    bool gone = w->state == THREAD_EXITING;
+    if (gone) thread_free(w);
+    TEST_EXPECT_EQ(g_pw_waker_cpu, (u32)peer, "CONTROL: the wake came from the peer");
+    TEST_EXPECT_EQ((u32)here, (u32)home, "the boot thread resumes on its home CPU");
+    TEST_ASSERT(gone, "the waker retired");
+}
+
+// scheduler.pinned_sleeper_on_a_peer_wakes
+//
+// A thread pinned to a peer sleeps there, and a wake from here reaches it. The peer is
+// parked in this phase with no tick and the wake IPI is gated off, which is sound for a
+// thread an idle CPU can steal, and strands one that can run nowhere else.
+static struct Rendez g_pp_rendez;
+static volatile bool g_pp_asleep;
+static volatile bool g_pp_go;
+static volatile bool g_pp_woke;
+static volatile u32  g_pp_cpu;
+
+static int pp_cond(void *arg) {
+    (void)arg;
+    g_pp_asleep = true;
+    return g_pp_go;
+}
+
+static void pp_sleeper(void) {
+    (void)sleep(&g_pp_rendez, pp_cond, NULL);
+    g_pp_cpu = smp_cpu_idx_self();
+    g_pp_woke = true;
+    (void)spin_lock_irqsave(NULL);   // thread_kthread_retire's contract: masked to sched()
+    thread_kthread_retire();
+    sched();
+}
+
+void test_scheduler_pinned_sleeper_on_a_peer_wakes(void) {
+    if (!test_requires(smp_cpu_count() >= 2, "thylacine.smp", 0, true, "one CPU is online"))
+        return;
+    unsigned peer = (smp_cpu_idx_self() + 1u) % smp_cpu_count();
+    rendez_init(&g_pp_rendez);
+    g_pp_asleep = false; g_pp_go = false; g_pp_woke = false;
+    g_pp_cpu = smp_cpu_idx_self();
+    struct Thread *s = thread_create(kproc(), pp_sleeper);
+    TEST_ASSERT(s != NULL, "thread_create failed");
+    s->cpu_pinned = true;
+    ready_on(peer, s);
+    (void)gic_send_ipi(peer, IPI_RESCHED);
+    TEST_YIELD_UNTIL(g_pp_asleep && s->state == THREAD_SLEEPING);
+    g_pp_go = true;
+    (void)wakeup(&g_pp_rendez);
+    TEST_YIELD_UNTIL(g_pp_woke);
+    TEST_EXPECT_EQ(g_pp_cpu, (u32)peer, "it woke on the peer it is pinned to");
+    TEST_YIELD_UNTIL(s->state == THREAD_EXITING);
+    thread_free(s);
 }
 
 // scheduler.ready_on_cross_cpu_enqueue

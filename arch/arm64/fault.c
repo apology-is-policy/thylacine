@@ -394,6 +394,7 @@ struct file_fault_req {
     u64            page_va;      // page-aligned fault VA (the PTE target)
     size_t         slot;         // page index within the Burrow's pagemap
     bool           exec;         // mapping is executable -> I-cache sync the page-in
+    bool           no_page_in;   // in: the faulter holds a counted lock, so a miss refuses
 };
 
 // Locked core. Caller validated p and holds p->vma_lock across the whole
@@ -571,6 +572,10 @@ static enum fault_result demand_page_locked(struct Proc *p,
         // does. Refused before the pin, so nothing is left to unref.
         struct Thread *ft = current_thread();
         if (ft && ft->state != THREAD_RUNNING) return FAULT_UNHANDLED_USER;
+        // Nor may a kernel access that holds a counted lock wait for the read:
+        // sched() refuses it, and EL0 can land a load there with a MAP_FIXED that
+        // beats it. The access takes its uaccess fixup, and its caller decides.
+        if (freq->no_page_in) return FAULT_UNHANDLED_USER;
         // Miss: pin the Burrow across the lockless read (so freq->burrow cannot
         // be freed/ABA'd while we sleep -- the VMA holds a mapping ref so the
         // Burrow is alive NOW, making burrow_ref safe). file_demand_page_slow
@@ -1324,6 +1329,8 @@ static enum fault_result demand_page_one(struct Proc *p,
     // (the blocking dev->read cannot run under a spinlock -- the I-36 condition-5
     // death-interruptible page-in).
     struct file_fault_req freq = {0};
+    struct Thread *ft = current_thread();
+    freq.no_page_in = ft && ft->preempt_count != 0u;   // before as->lock adds to it
     spin_lock(&p->as->lock);
     enum fault_result r = demand_page_locked(p, fi, &freq);
     spin_unlock(&p->as->lock);

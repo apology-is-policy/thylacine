@@ -185,7 +185,7 @@ pub const T_SYS_PIVOT_ROOT: u64       = 53;
 // P6-pouch-wait-addr (sub-chunk 8) + P6-pouch-threads (sub-chunk 9a):
 // wait-on-address + kernel-level thread spawn/exit. Futex-style
 // no-lost-wakeup primitive (the lock-acquire serializing event takes
-// the kernel `torpor_lock`); thread spawn shares pgtable_root + ASID
+// the kernel's bucket lock); thread spawn shares pgtable_root + ASID
 // + handle table with the calling Proc. Backs t::torpor + t::thread
 // (U-2g) and the pouch boundary-line patches.
 pub const T_SYS_TORPOR_WAIT: u64      = 39;
@@ -1979,7 +1979,7 @@ pub unsafe fn t_attach_9p_srv(srv_fd: i64, aname: *const u8, aname_len: usize,
 
 // t_torpor_wait — futex-style wait-on-address.
 //   addr_va    user-VA pointer to a 4-byte-aligned u32 (the futex word)
-//   expected   compared under the kernel `torpor_lock` -- mismatch =>
+//   expected   compared under the kernel's bucket lock -- mismatch =>
 //              return 0 immediately (value already changed)
 //   timeout_us see T_TORPOR_TIMEOUT_INDEFINITE / T_TORPOR_MAX_TIMEOUT_US
 //

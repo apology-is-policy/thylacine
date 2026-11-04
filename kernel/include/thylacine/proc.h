@@ -2071,17 +2071,16 @@ void thread_exit_self(void);
 // Does NOT wait for peers; the LAST Thread out reaps the Proc -> ZOMBIE with
 // `msg` (NULL -> "killed"). Idempotent (CAS the flag; first msg wins).
 //
-// Mechanism: (1) CAS p->group_exit_msg = msg; (2) torpor_wake_all_for_proc(p)
-// so already-sleeping futex peers return; (3) the #811 universal death-wake
+// Mechanism: (1) CAS p->group_exit_msg = msg; (2) the #811 universal death-wake
 // (ARCH 8.8.1): walk p->threads, per-peer wait_lock -> rendez_blocked_on ->
-// wakeup, so EVERY rendez sleeper returns *_INTR and dies at its EL0-return
-// die-check; (4) smp_resched_others() so a peer running in userspace on
+// wakeup, so EVERY rendez sleeper, a futex waiter among them, returns *_INTR and
+// dies at its EL0-return die-check; (3) smp_resched_others() so a peer running in userspace on
 // another CPU traps + hits its IRQ-from-EL0 die-check (the periodic timer is
 // the floor if the IPI is missed).
 //
 // LOCK CONTRACT (#811, C3): the caller MUST hold g_proc_table_lock and no
 // threads_lock. The claim, the stashes and the p->threads walk run inside
-// p->threads_lock, taken here; the walk then takes torpor_lock + per-peer
+// p->threads_lock, taken here; the walk then takes per-peer
 // wait_lock + (via wakeup) rendez/timerwait locks, all below it in the order.
 //
 // gcpark-b: `sig` is the POSIX signal the termination records (notes.h
@@ -2178,10 +2177,8 @@ void el0_return_die_check(void);
 //
 // proc_debug_stop_deliver: request every thread of `p` park at its next EL0-
 // return checkpoint. Sets p->debug_stop_req (RELEASE), then (8c-2) WAKES every
-// sleeping peer (the NON-COMPLETING torpor_stop_wake_all_for_proc [#19: the
-// death walk's completing wake fabricates TORPOR_OK, which a surviving stopped
-// Proc observes at resume; the stop wake preserves the wait] + the per-peer
-// wait_lock rendez wake) so a thread blocked in an indefinite syscall
+// sleeping peer (the per-peer wait_lock rendez wake, which sets no futex mark, so a
+// futex waiter keeps its wait [#19]) so a thread blocked in an indefinite syscall
 // sleep returns, re-observes the flag, and DETOURS to park on its debug_rendez
 // (proc_stop_sleeper_park), then smp_resched_others() so a peer RUNNING at
 // EL0 on another CPU traps to its tail (the periodic tick is the floor). A thread
@@ -2471,7 +2468,7 @@ void        proc_table_lock_release(irq_state_t s);
 void proc_wake_or_owe(struct poll_owed *o);
 
 // p->threads_lock (thread-model C3, ARCH 7.3.1). Order: g_proc_table_lock ->
-// threads_lock -> {t->wait_lock, torpor_lock}. Never two threads_locks on one
+// threads_lock -> t->wait_lock. Never two threads_locks on one
 // CPU: cross-Proc work holds g_proc_table_lock and takes each Proc's lock in
 // turn. Under KERNEL_TESTS a per-CPU slot names the held lock -- a second
 // acquire extincts, and ASSERT_TL_HELD(p) extincts unless this CPU holds p's.
@@ -3124,9 +3121,7 @@ bool proc_intr_terminate_pending(const struct Proc *p);
 // The body is the #811 universal death-wake template: per-peer wait_lock ->
 // rendez_blocked_on -> wakeup, lock order threads_lock -> wait_lock ->
 // (wakeup: g_timerwait.lock -> r->lock). Deliberately NO
-// torpor_wake_all_for_proc (a torpor waiter's stack rendez is reachable via
-// rendez_blocked_on, and tsleep's widened register-then-observe closes the
-// register-after-walk race) and NO smp_resched_others (the IRQ-from-EL0
+// smp_resched_others (the IRQ-from-EL0
 // tail evaluates only group_exit_msg, so an IPI cannot accelerate a RUNNING
 // thread's interrupt-death -- it reaches its next sync-from-EL0 tail
 // regardless; the never-syscalling spinner gap is tracked as task #964).

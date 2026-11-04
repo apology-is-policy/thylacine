@@ -697,8 +697,8 @@ enum {
     //
     // SYS_TORPOR_WAIT(addr_va, expected, timeout_us) → 0 / -errno
     //   x0 = addr_va      user-VA pointer to a 4-byte aligned u32 word
-    //   x1 = expected     compare against *addr_va under the kernel
-    //                     `torpor_lock`; if they don't match, return 0
+    //   x1 = expected     compare against *addr_va under the kernel's
+    //                     bucket lock; if they don't match, return 0
     //                     immediately (fast path — userspace re-evaluates)
     //   x2 = timeout_us   s64 — < 0 = block indefinitely; >= 0 = block
     //                     at most this many microseconds (TORPOR_MAX_TIMEOUT_US
@@ -714,10 +714,9 @@ enum {
     //                     permission-denied at load
     //   -ETIMEDOUT (-110) timeout lapsed with no wake
     //
-    // No-lost-wakeup proof (CLAUDE.md "Spec-to-code suspended" —
-    // validated by reasoning, not specs/futex.tla): the consumer
-    // atomically (under torpor_lock) loads *addr_va and registers
-    // before sleeping; the producer's WAKE takes the same torpor_lock
+    // No-lost-wakeup proof (specs/torpor.tla): the consumer
+    // atomically (under its bucket's lock) loads *addr_va and registers
+    // before sleeping; the producer's WAKE takes the same lock
     // to walk. Lock-acquire/release pairing handles all interleavings —
     // either WAKE-unlock precedes WAIT-lock (consumer sees the
     // producer's store, returns 0 without sleep), or WAIT-lock precedes

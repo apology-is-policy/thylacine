@@ -41,7 +41,7 @@ Generated — do not edit between the markers (`quaestor render`).
 | [[arc-vivarium]] | active | 2 |
 | [[arc-weft]] | active | 4 |
 
-## Open seams: 82
+## Open seams: 80
 
 - [[seam-220-netd-listener-poll]] (sub-netd-server)
 - [[seam-240-lo-redial]] (sub-netd-server)
@@ -121,19 +121,17 @@ Generated — do not edit between the markers (`quaestor render`).
 - [[seam-tickless-bare-metal]] (sub-kernel-sched-smp)
 - [[seam-timerwait-sharding]] (sub-kernel-rendez)
 - [[seam-torpor-cross-proc]] (sub-kernel-torpor)
-- [[seam-torpor-lock-wake-spin]] (sub-kernel-torpor)
-- [[seam-torpor-reclaim-uaccess]] (sub-kernel-torpor)
 - [[seam-viv-tier2-frame]] (sub-kernel-syscall-abi, sub-kernel-vivarium)
 - [[seam-warp-prove-unowned]] (sub-tapestryd)
 
 ## Recent changes
 
+- 2026-11-04 [[chg-2026-11-04-c8a-r2]] — Torpor keyed on the space: round 2's fixes, and a model that can see K06
+- 2026-11-04 [[chg-2026-11-04-c8a-r3]] — Torpor keyed on the space: round 3's wording
 - 2026-11-04 [[chg-2026-11-04-libbad]] — T_E_LIBBAD: an interpreter at fault says so
 - 2026-11-04 [[chg-2026-11-04-noexec-r1]] — T_E_NOEXEC: round 1's fixes
 - 2026-11-04 [[chg-2026-11-04-noexec]] — T_E_NOEXEC: execve and the full spawn say a file is no image
+- 2026-11-04 [[chg-2026-11-04-pinned-wake]] — A pinned thread's wake goes to its home CPU, not the waker's
+- 2026-11-04 [[chg-2026-11-04-torpor-walks-go]] — The two torpor walks and the bucket-lock die check go
 - 2026-11-04 [[chg-2026-11-04-walk-errno-close]] — The walk errno close: rounds 1 and 2, the first boots, 32 sabotages
-- 2026-11-03 [[chg-2026-11-03-item-11c-close]] — Item 11c close: rounds 1 to 3, the sweep, three leases
-- 2026-11-03 [[chg-2026-11-03-item-11c]] — A per-note table for native programs, SA_RESTART in the kernel, and an open a note can interrupt
-- 2026-11-03 [[chg-2026-11-03-walk-errno]] — A failed walk says why: only a miss reads ENOENT
-- 2026-11-02 [[chg-2026-11-02-f3-what-it-is]] — What review finding F-3 is, read from main's code
 <!-- generated:end -->
