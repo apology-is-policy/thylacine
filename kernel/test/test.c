@@ -968,6 +968,7 @@ struct test_case g_tests[] = {
     { "vdso.maps_ro_read",             test_vdso_maps_ro_read,             false, NULL },
     { "vdso.maps_ro_write_faults",     test_vdso_maps_ro_write_faults,     false, NULL },
     { "exec.setup_smoke",              test_exec_setup_smoke,              false, NULL },
+    { "exec.setup_says_nomem_on_a_refused_vma", test_exec_setup_says_nomem_on_a_refused_vma, false, NULL },
     { "exec.interp_argv_shape",        test_exec_interp_argv_shape,        false, NULL },
     { "exec.from_spoor_rodata_dispatch", test_exec_from_spoor_rodata_dispatch, false, NULL },
     // #149: a non-page-aligned PT_LOAD vaddr. One test per obligation, so no

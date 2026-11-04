@@ -1636,6 +1636,28 @@ void test_execve_load_says_nomem_on_a_refused_vma(void) {
     proc_free(p);
 }
 
+// The boot blob's path says the same. Its first Vma is a segment's, so that map meets the
+// refusal.
+void test_exec_setup_says_nomem_on_a_refused_vma(void) {
+    u32 flags[1] = { PF_R | PF_X };
+    size_t size = build_elf(flags, 1, /*filesz=*/0);
+    u64 entry = 0, sp = 0;
+
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    vma_refuse_alloc_for_test(true);
+    int refused = exec_setup(p, g_elf_blob, size, &entry, &sp);
+    vma_refuse_alloc_for_test(false);
+    drop_proc(p);
+    TEST_EXPECT_EQ(refused, -(int)T_E_NOMEM, "no Vma for a segment: ENOMEM, not the flat -1");
+
+    struct Proc *q = make_proc();
+    TEST_ASSERT(q != NULL, "proc_alloc");
+    int ok = exec_setup(q, g_elf_blob, size, &entry, &sp);
+    drop_proc(q);
+    TEST_EXPECT_EQ(ok, 0, "CONTROL: with the slab open, the same image loads");
+}
+
 // =============================================================================
 // A native exec of a dynamic Linux binary is refused, AND its diagnostic runs
 // =============================================================================
