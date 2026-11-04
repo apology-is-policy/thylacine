@@ -22,6 +22,16 @@ needed the operator.
 
 
 ---
+## 2026-11-04 -- a free slot's stranded tests, and an audit that read my scenario better than I wrote it (corona)
+
+The mac queue left a free hour, so the next item was the 72 tests the host script reports stranded. A private copy of libthyla-rs with every syscall answering ENOSYS built libutopia's 69 at once: 66 passed, 3 failed. Each failure was documented syntax that does not parse on the join: `in (a b)`, `1 << 4`. A census of every example in UTOPIA-SHELL-DESIGN found more, `((1 + (2 * 3)))`, `if (c) cmd`, `echo $f(1)`, `~ $v pat`, and a reserved word as a value, which is why 7.3's own example failed at `on`. Those tests had never compiled on any machine. Fixed on corona/ut-lang at 7d991b826, which also makes them run from now on: hello-rs's and capacity-probe's guest `.text` came out byte-identical, so the `svc!()` macro changes nothing in an image. Corvus's split was not: same size, functions reordered, and test-corvus-sessions.py read its bounds from main.rs and would have crashed; found by reading it, not by a red.
+
+Audit round 4 then came back on AS-4f with three independent reasons it could never pass, and I had written the reason in the first. `expect -timeout N {arms}` arms nothing. lib.exp says so in a comment, and bug_72 says so in memory, and my own working notes told me to use exactly that form. A run both ways took one minute: the braced form reached none of its arms. What makes this class bad is that a settle written that way works, so nothing looks wrong. The other two: a mode chip that follows no application, which the manual says outright, and a pane count a stack does not raise. Fixing the first alone would have given a green with no leg asserted.
+
+Checking the scenario's keys found the real one. Alt-P has never reached ut in a real session: map_key dropped Alt, so the tile got a `p`, and the manual's sentence was false. ls-ut-paste was green past it because it writes ESC p to its own pts. A fixture that enters below the layer it tests. Fixed at 0de73cee0.
+
+What "fixed" covers: everything here is host-tested. A scripted guest runs the scenario's Tcl and syncs through a clean pass and eleven faults, each red with its own reason, and that says nothing about the guest. No image has run any of it. `=~` and 11.1's `palette` stay undecided and enqueued. The syncs before typing into a new tile are still a three-second guess. A census of examples proves they parse, not that they mean what the doc says.
+
 ## 2026-11-04 -- the join's mutants and the Pi, and a wrong reading of why a scenario went red (corona)
 
 The join now has its 26 guest mutants on HVF and its shell scenarios on the Pi under KVM. It is at 7f492f623, local and not pushed: the default image's suite, the clipboard and session scenarios, one mutant row and vote 66's boot are still owed.
