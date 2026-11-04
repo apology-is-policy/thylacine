@@ -103,8 +103,8 @@ static void descriptors(void) {
          -E_BADF, "walk_open");
     PAIR(t_fd_devclass(file), t_fd_devclass(file | W), -E_BADF, "fd_devclass");
     PAIR(t_fsync(wr, 0), t_fsync(wr | W, 0), -E_BADF, "fsync");
-    // These three still answer a dead descriptor with the flat -1 (ERRORS.md ER-3).
-    PAIR(t_fstat(file, &g_st), t_fstat(file | W, &g_st), -1, "fstat");
+    PAIR(t_fstat(file, &g_st), t_fstat(file | W, &g_st), -E_BADF, "fstat");
+    // These still answer a dead descriptor with the flat -1 (ERRORS.md ER-3).
     PAIR(t_fd2path(file, (char *)g_buf, sizeof g_buf), t_fd2path(file | W, (char *)g_buf, sizeof g_buf),
          -1, "fd2path");
     PAIR(t_readdir(dir, g_buf, sizeof g_buf), t_readdir(dir | W, g_buf, sizeof g_buf), -1, "readdir");
@@ -131,7 +131,7 @@ static void descriptors(void) {
 
     // wstat: every field that does not fit is refused before the descriptor is
     // looked up. A closed descriptor keeps the narrow call from changing any
-    // file: it passes the width check and stops at the lookup's -1.
+    // file: it passes the width check and stops at the lookup.
     long dead = t_dup(file, T_RIGHT_READ);
     CHECK(dead >= 0, "dup for wstat", dead);
     CHECK(t_close(dead) == 0, "close for wstat", dead);
