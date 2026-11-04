@@ -623,8 +623,7 @@ the ledger. It is counted, and the test runner reddens the test it happened unde
 changes when a decision first reads the ledger.
 
 **`ACCOUNT_QUERY` takes the self selector or a `KOBJ_ACCOUNT` handle.** Any other handle is
-`-EBADF`, and the voucher operations are `-EOPNOTSUPP`. A stale incarnation is `-EINVAL`,
-because the error registry has no `ESTALE` and this is not worth a change to it.
+`-EBADF`, and the voucher operations are `-EOPNOTSUPP`. A stale incarnation is `-EINVAL`.
 
 `used` is the account's and its descendants', in bytes. Nothing charges `CLASS_RETAIN`
 or `CLASS_DEVICE` yet. An account with no limit set reads section 4's default: the pool
