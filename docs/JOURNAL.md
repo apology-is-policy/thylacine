@@ -40,7 +40,7 @@ The join now has its 26 guest mutants on HVF and its shell scenarios on the Pi u
 
 **A count I gave the operator was wrong.** I said 24 scenarios green with `pts-probe` among them. By the fleet logs it is 25: 21 first-time in the second pass, `ls-3b`, `ls-3c` and `ls-8c` from the first, and `pts-probe` after its fix. `ls-3b`'s and `ls-3c`'s accel was not printed in the first pass, but 176 and 168 s is not a TCG time here. Skipped for a missing host artifact: `service-readiness-failure`, `spawn-mount-probe`, `ls-libs`.
 
-**What "fixed" covers.** The PCI errno, F2 and F3 are booted only as far as 73514e89a: f6d5dfc13's code, c423a5441 on HVF and 7f492f623 have not run on HVF. The Pi's image was dc641e7f3. Still UNEXPLAINED and enqueued from the band measurements: one 69 ms all-input pass and a p99.9 of 23.4 ms in one with-band set.
+**What "fixed" covers.** The PCI errno has booted, at 73514e89a. F2 and F3 (f6d5dfc13), `pts-probe`'s wait on HVF (c423a5441) and vote 66 (7f492f623) have not booted. The Pi's image was dc641e7f3, older than all of them. Still UNEXPLAINED and enqueued from the band measurements: one 69 ms all-input pass and a p99.9 of 23.4 ms in one with-band set.
 
 ## 2026-11-04 -- the join boots, after an audit that stopped its first build (corona)
 
