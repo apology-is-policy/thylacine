@@ -22,7 +22,7 @@ defense-in-depth only — relying on it to swallow a terminating signal
 would be the bug.
 
 <!-- generated:begin -->
-11 closed findings on [[sub-pouch-signal]] — do NOT re-report
+14 closed findings on [[sub-pouch-signal]] — do NOT re-report
 these in a future round (open/deferred findings are NOT listed
 here; see the seam inbox):
 
@@ -37,4 +37,7 @@ here; see the seam inbox):
 - [[fnd-signals13b-r1-f10]] [P3] __restore_rt fell off the end of .text if SYS_NOTED ever returned (fixed)
 - [[fnd-signals13b-r1-f11]] [P3] sigaction accepted SIG_ERR as a handler (fixed)
 - [[fnd-signals13b-r1-f2]] [P1] A multi-thread Proc's SIG_DFL bootstrap wedged forever after the kernel refused NDFLT (fixed)
+- [[fnd-thread-11c-r1-f1]] [P2] A caught row outlived its taker across a fork, and the note stranded (fixed)
+- [[fnd-thread-11c-r1-f3]] [P3] A handler that longjmps out left a Pouch program spinning on -1 (fixed)
+- [[fnd-thread-11c-r1-f5]] [P3] A Pouch program with no handler filled its ring with dead notes (fixed)
 <!-- generated:end -->
