@@ -116,11 +116,13 @@ python3 -I tools/test-magazines.py --mutants --logs <dir>
 # both sets as this gate does), and this gate adds each
 # checker's mutant legs, which prove it still refuses its defect. The checkers
 # and their mutants are derived (tools/host-tests/*.c, each driver's --help),
-# and a checker that declares no mutant fails. Needs build/pouch/musl-src
+# and a checker that declares no mutant fails. A driver taking --logs is told
+# apart by its usage: --sanitize when it has it, its --mutants as one leg, or,
+# with no such flag, the mutants it runs every time, read from its log. Needs build/pouch/musl-src
 # (tools/build.sh sysroot). Red-checked 2026-10-19: a planted
 # VIV_NATIVE_CEILING 132 fails the build at the check, and a sabotaged kill.c
 # in a musl copy fails exactly the three kill-probe legs that read it.
-tools/test-host-boundaries.sh       # 8 checkers, 50 legs, 35 s measured
+tools/test-host-boundaries.sh       # every checker beside tools/host-tests/*.c
 
 # Warp-6 V-0 (the Venus gate). `warp-host.sh venus` boots the remote GL host
 # TWICE -- once with `venus=on,blob=on,hostmem=256M` and once WITHOUT -- and
