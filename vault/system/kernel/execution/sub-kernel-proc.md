@@ -53,7 +53,9 @@ instead reads 0022, not the parent's 0077.
 The kernel binds one boot-designated hardware service, one normal compositor
 and Corvus to a generation-bearing seat. Manager/service/client spawn roles are
 not inherited. Only service and Corvus may operate the trusted endpoint; the
-normal designation admits broker connections but no trusted operations. Binding
+normal designation admits broker connections but no trusted operations; when it takes
+it also leaves `PROC_FLAG_SEAT_CLIENT`, which puts that Proc's threads in INTERACTIVE
+([[sub-kernel-sched]]). Binding
 the service sets NODUMP and NOTRACE before userspace runs. (Since 2026-09-24 those two
 bits are no longer near-synonyms: NOTRACE forbids CONTROL and NODUMP forbids
 EXTRACTION, gating every `/proc/<pid>` file that hands out something the Proc holds

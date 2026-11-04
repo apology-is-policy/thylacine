@@ -77,6 +77,8 @@ void test_sched_capacity_normalize_synthetic_dtb(void);
 void test_sched_place_by_capacity_synthetic_dtb(void);
 void test_sched_select_target_cpu_homogeneous_is_prev(void);
 void test_sched_ready_on_cross_cpu_enqueue(void);
+void test_scheduler_pinned_wake_goes_home(void);
+void test_scheduler_seat_client_takes_interactive(void);
 void test_sched_cpu_surplus_for_kick(void);
 void test_sched_yield_fast_path_no_work(void);
 void test_sched_yield_dispatches_queued_work(void);

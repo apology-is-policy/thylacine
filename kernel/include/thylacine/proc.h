@@ -1278,6 +1278,9 @@ static inline u32 phenotype_decide(bool crossed_pheno, bool territory_linux) {
 // below makes any alias a compile error.
 #define PROC_FLAG_SESSION_HANGUP    (1u << 19)
 // Boot-only graphical seat manager designation; not propagated through rfork.
+// Warden's designation of the normal compositor took, so this Proc's threads are
+// INTERACTIVE (ARCH 8.3). One-way; not propagated by rfork (no proc_flag is).
+#define PROC_FLAG_SEAT_CLIENT       (1u << 24)
 #define PROC_FLAG_SEAT_MANAGER       (1u << 20)
 _Static_assert((PROC_FLAG_SEAT_MANAGER & (PROC_FLAG_TERM_TERMINATE_PENDING |
     PROC_FLAG_SESSION_HANGUP | PROC_FLAG_PIPE_TERMINATE_PENDING)) == 0,

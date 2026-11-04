@@ -54,7 +54,11 @@ stack block and its slot: `THREAD_POOL_PAGES` = 9, eight stack pages and the
 slot charged as a whole page though the slab packs two (both pinned by
 `_Static_assert`). `thread_new` is the one place every create takes, in order,
 the tid, the pool charge (`capacity_charge`, [[sub-kernel-mm-phys]]), the slot
-and the stack, undoing each on a later failure. The charge falls on a
+and the stack, undoing each on a later failure. It also picks the band: NORMAL, or
+INTERACTIVE in the Proc warden designated as the compositor ([[sub-kernel-sched]]),
+the one band written outside `sched_mark_interactive`, which is safe because nothing
+can see the thread yet. A kthread charged to the compositor lives in kproc and stays
+NORMAL. The charge falls on a
 *payer*: the Proc itself for every constructor but
 `thread_create_kthread_for(owner, ...)`, whose thread lives in kproc and is
 charged to `owner` (the SQPOLL poller and a private ring's executor,

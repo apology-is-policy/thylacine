@@ -516,8 +516,10 @@ unsigned select_target_cpu(struct Thread *t, unsigned prev_cpu) {
     if (!t) return prev_cpu;
     // CPU-pinned threads (every per-CPU idle + kthread) NEVER migrate -- their
     // home CPU is fixed (ARCH §8.4.2 / sched_alpha.tla IdleStaysHome). This is
-    // the placement-side companion to try_steal's cpu_pinned skip.
-    if (t->cpu_pinned) return prev_cpu;
+    // the placement-side companion to try_steal's cpu_pinned skip. prev_cpu is the
+    // WAKER's, so it says nothing about where this thread lives: last_cpu is its
+    // home, by induction from the KP_ZERO 0 of a thread that has never been placed.
+    if (t->cpu_pinned) return __atomic_load_n(&t->last_cpu, __ATOMIC_RELAXED);
     // Push-complete placement (TI-4b): in production, prefer an IDLE CPU for a
     // waking thread -- place it where it runs NOW + IPI that CPU, instead of
     // enqueuing locally + best-effort-kicking one peer to PULL (the pull-with-
@@ -1008,7 +1010,8 @@ void ready(struct Thread *t) {
 // Caveat (ARCH 8.3 "no aging across bands at v1.0"): a CPU-bound INTERACTIVE
 // thread starves NORMAL. Bounded in practice -- the realized INTERACTIVE set is
 // mostly-blocked + trusted (CAP_HW_CREATE drivers + the console-owner/attached
-// session: the shell + login/corvus -- NOT an arbitrary console-stdin reader);
+// session: the shell + login/corvus -- NOT an arbitrary console-stdin reader), plus
+// the compositor warden designates, which is mostly blocked and NOT trusted (8.3);
 // the general CPU-DoS bound is the per-Proc quota (#65).
 void sched_mark_interactive(struct Thread *t) {
     if (!t) return;

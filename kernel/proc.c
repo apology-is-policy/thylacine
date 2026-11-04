@@ -3042,11 +3042,13 @@ int proc_set_seat_service(struct Proc *p) {
 
 // Warden designates the normal compositor at spawn. It remains untrusted:
 // this role only admits broker requests, never physical input or private frames.
+// Its one other effect is the band (ARCH 8.3), so only a designation that took sets it.
 int proc_set_seat_client(struct Proc *p) {
     irq_state_t lock = proc_table_lock_acquire();
     int rc = -1;
     if (p && g_seat.service && !g_seat.client && g_seat.phase == SEAT_NORMAL) {
         g_seat.client = p;
+        __atomic_fetch_or(&p->proc_flags, PROC_FLAG_SEAT_CLIENT, __ATOMIC_RELEASE);
         rc = 0;
     }
     proc_table_lock_release(lock);

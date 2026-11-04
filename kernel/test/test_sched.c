@@ -30,8 +30,10 @@
 #include <thylacine/irqfwd.h>   // the software fire source: a DETERMINISTIC pending IRQ
 #include <thylacine/proc.h>
 #include <thylacine/sched.h>
+#include <thylacine/seat.h>
 #include <thylacine/smp.h>
 #include <thylacine/spinlock.h>
+#include <thylacine/syscall.h>
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
@@ -707,9 +709,152 @@ void test_sched_select_target_cpu_homogeneous_is_prev(void) {
     // A CPU-pinned thread never migrates regardless of topology/util.
     t->cpu_pinned = true;
     TEST_EXPECT_EQ(select_target_cpu(t, 0), 0u,
-        "a cpu_pinned thread stays on its prev CPU");
+        "a cpu_pinned thread stays on its home CPU");
+    if (n > 1) {
+        TEST_EXPECT_EQ(select_target_cpu(t, n - 1u), 0u,
+            "a waker's CPU is not a cpu_pinned thread's home");
+    }
 
     thread_free(t);
+}
+
+// scheduler.pinned_wake_goes_home
+//
+// The boot thread sleeps and a thread on a peer wakes it. It resumes where it lives.
+// A secondary has no tick in this phase, so a boot thread placed there hangs the tick
+// wait that ends the suite.
+static struct Rendez g_pw_rendez;
+static volatile bool g_pw_asleep;
+static volatile bool g_pw_go;
+static volatile u32  g_pw_waker_cpu;
+static volatile bool g_pw_stop;
+
+static int pw_cond(void *arg) {
+    (void)arg;
+    g_pw_asleep = true;
+    return g_pw_go;
+}
+
+static void pw_waker(void) {
+    while (!g_pw_asleep) __asm__ __volatile__("yield" ::: "memory");
+    g_pw_waker_cpu = smp_cpu_idx_self();
+    g_pw_go = true;
+    (void)wakeup(&g_pw_rendez);
+    while (!g_pw_stop) __asm__ __volatile__("yield" ::: "memory");
+    (void)spin_lock_irqsave(NULL);   // thread_kthread_retire's contract: masked to sched()
+    thread_kthread_retire();
+    sched();
+}
+
+void test_scheduler_pinned_wake_goes_home(void) {
+    if (!test_requires(smp_cpu_count() >= 2, "thylacine.smp", 0, true, "one CPU is online"))
+        return;
+    unsigned home = smp_cpu_idx_self();
+    TEST_ASSERT(current_thread()->cpu_pinned, "the fixture is the pinned boot thread");
+    rendez_init(&g_pw_rendez);
+    g_pw_asleep = false; g_pw_go = false; g_pw_stop = false;
+    g_pw_waker_cpu = home;
+    struct Thread *w = thread_create(kproc(), pw_waker);
+    TEST_ASSERT(w != NULL, "thread_create failed");
+    unsigned peer = (home + 1u) % smp_cpu_count();
+    w->cpu_pinned = true;
+    ready_on(peer, w);
+    (void)gic_send_ipi(peer, IPI_RESCHED);
+    (void)sleep(&g_pw_rendez, pw_cond, NULL);
+    unsigned here = smp_cpu_idx_self();
+    g_pw_stop = true;
+    TEST_YIELD_UNTIL(w->state == THREAD_EXITING);
+    bool gone = w->state == THREAD_EXITING;
+    if (gone) thread_free(w);
+    TEST_EXPECT_EQ(g_pw_waker_cpu, (u32)peer, "CONTROL: the wake came from the peer");
+    TEST_EXPECT_EQ((u32)here, (u32)home, "the boot thread resumes on its home CPU");
+    TEST_ASSERT(gone, "the waker retired");
+}
+
+// scheduler.seat_client_takes_interactive
+//
+// The designation as a spawn thunk makes it, on the child's own first thread: that
+// thread and the Proc's later ones become INTERACTIVE. Only a designation that took
+// does it, and a fork of the compositor is not the compositor.
+#define SCB_UNSEEN 0xffu
+static struct {
+    volatile u32 before, first, later, grand;
+    volatile int grand_pid;
+} g_scb;
+
+static void scb_grand(void *arg) {
+    (void)arg;
+    g_scb.grand = current_thread()->band;
+    exits("ok");
+}
+
+static void scb_child(void *arg) {
+    (void)arg;
+    struct Thread *self = current_thread();
+    g_scb.before = self->band;
+    apply_spawn_perms(self->proc, SPAWN_PERM_SEAT_CLIENT);
+    g_scb.first = self->band;
+    struct Thread *later = thread_create(self->proc, sched_test_thread_a);
+    if (later) {
+        g_scb.later = later->band;
+        thread_free(later);
+    }
+    int gpid = rfork(RFPROC, scb_grand, NULL);
+    g_scb.grand_pid = gpid;
+    if (gpid > 0) {
+        int st = -1;
+        (void)wait_pid_for(gpid, 0, &st);
+    }
+    exits("ok");
+}
+
+void test_scheduler_seat_client_takes_interactive(void) {
+    u32 runner = SCB_UNSEEN, held = SCB_UNSEEN, refused = SCB_UNSEEN;
+    bool bound = false, taken = false, rebound = false;
+    int pid = -1, reaped = -2, st = -1;
+    g_scb.before = g_scb.first = g_scb.later = g_scb.grand = SCB_UNSEEN;
+    g_scb.grand_pid = 0;
+
+    proc_test_seat_reset();
+    struct Proc *service = proc_alloc();
+    struct Proc *holder = proc_alloc();
+    struct Proc *other = proc_alloc();
+    if (service && holder && other) {
+        service->state = PROC_STATE_ALIVE;
+        holder->state = PROC_STATE_ALIVE;
+        other->state = PROC_STATE_ALIVE;
+        bound = proc_set_seat_service(service) == 0;
+        apply_spawn_perms(holder, SPAWN_PERM_SEAT_CLIENT);
+        taken = (holder->proc_flags & PROC_FLAG_SEAT_CLIENT) != 0;
+        apply_spawn_perms(other, SPAWN_PERM_SEAT_CLIENT);
+        runner = current_thread()->band;
+        struct Thread *h = thread_create(holder, sched_test_thread_a);
+        struct Thread *o = thread_create(other, sched_test_thread_a);
+        if (h) { held = h->band; thread_free(h); }
+        if (o) { refused = o->band; thread_free(o); }
+
+        proc_test_seat_reset();
+        rebound = proc_set_seat_service(service) == 0;
+        pid = rfork_with_caps(RFPROC, scb_child, NULL, CAP_NONE);
+        reaped = pid > 0 ? wait_pid_for(pid, 0, &st) : -1;
+    }
+    proc_test_seat_reset();
+    if (service) { service->state = PROC_STATE_ZOMBIE; proc_free(service); }
+    if (holder)  { holder->state = PROC_STATE_ZOMBIE;  proc_free(holder); }
+    if (other)   { other->state = PROC_STATE_ZOMBIE;   proc_free(other); }
+
+    TEST_ASSERT(service && holder && other, "the fixture's Procs");
+    TEST_ASSERT(bound && rebound, "the seat service is bound before each designation");
+    TEST_ASSERT(taken, "the first designation took");
+    TEST_EXPECT_EQ(runner, (u32)SCHED_BAND_NORMAL, "the kernel thread that spawned it stays NORMAL");
+    TEST_EXPECT_EQ(held, (u32)SCHED_BAND_INTERACTIVE, "a designated Proc's new thread is INTERACTIVE");
+    TEST_EXPECT_EQ(refused, (u32)SCHED_BAND_NORMAL, "a refused designation gives no band");
+    TEST_ASSERT(pid > 0 && reaped == pid, "the child spawned and was reaped");
+    TEST_EXPECT_EQ(g_scb.before, (u32)SCHED_BAND_NORMAL, "CONTROL: the child starts NORMAL");
+    TEST_EXPECT_EQ(g_scb.first, (u32)SCHED_BAND_INTERACTIVE, "the designated child's first thread is INTERACTIVE");
+    TEST_EXPECT_EQ(g_scb.later, (u32)SCHED_BAND_INTERACTIVE, "and so is the thread it makes next");
+    TEST_ASSERT(g_scb.grand_pid > 0, "the child's own rfork succeeded");
+    TEST_EXPECT_EQ(g_scb.grand, (u32)SCHED_BAND_NORMAL, "a fork of the compositor is NORMAL");
 }
 
 // scheduler.ready_on_cross_cpu_enqueue

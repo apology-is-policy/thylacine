@@ -545,7 +545,9 @@ static struct Thread *thread_new(struct Proc *proc, struct Proc *payer) {
     t->kstack_base = kalloc_base;          // P2-Dc: lowest page (guard)
     t->kstack_size = THREAD_KSTACK_TOTAL_SIZE;
     t->weight      = 1;
-    t->band        = SCHED_BAND_NORMAL;
+    // No run tree or peer can see this thread yet, so its band has nothing to disagree with.
+    t->band        = (__atomic_load_n(&proc->proc_flags, __ATOMIC_ACQUIRE) & PROC_FLAG_SEAT_CLIENT)
+                         ? SCHED_BAND_INTERACTIVE : SCHED_BAND_NORMAL;
     t->slice_remaining = THREAD_DEFAULT_SLICE_TICKS;
     t->pool_pages  = (u8)pool;
     t->pool_sponsor = sponsor;
