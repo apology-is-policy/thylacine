@@ -107,7 +107,12 @@ Enter or Ctrl-C ends the fetch at once.
 `ls-halcyon-paste-flow` needs the qualification session bake with the private ring, and
 no posting. It types into a real Nora and a real ut in the session's tiles, and the
 probe's `--paste-flow` verbs read the result over a blocking connection and from the
-files. It reads the mode chip off the status bar line to know Nora has bound.
+files. Nora's alt-screen line, its `nora: clipboard` lines and its exit line are the
+syncs: the mode chip does not follow an application yet.
+
+A bounded wait with a braced block goes through `lc_within`. `expect -timeout N {arms}`
+reads the block as one pattern and arms nothing, so it waits out its time and returns,
+whatever arrived. `tools/check-expect-forms.py` refuses that form on every build.
 
 `ls-nora-stopped-copy` needs the private-async kernel on the CI image and posts through
 `imperium post`. Its probe hosts a real Nora on a pts of its own against

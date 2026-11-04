@@ -6,7 +6,9 @@ use alloc::string::String;
 use interaction_native::{parse_locator, Host};
 use libhalcyon::interaction_client::{Event, Refusal, Why};
 use libhalcyon::interaction_wire::Mode;
-use libthyla_rs::{env, loom::ThylaKernel, t_close, t_open, T_OPATH, T_WALK_OPEN_FROM_ROOT};
+use libthyla_rs::{
+    env, loom::ThylaKernel, t_close, t_open, t_putstr, T_OPATH, T_WALK_OPEN_FROM_ROOT,
+};
 use nora::editor::{ClipboardRequest, Editor, PasteAskers};
 use parley::transport::Tag;
 
@@ -111,11 +113,18 @@ impl Clip {
         while let Some(event) = self.host.take_event() {
             told = true;
             match event {
-                Event::Copied { .. } => ed.set_status(String::from("copied to the clipboard")),
-                Event::CopyUnknown => ed.set_status(String::from(
-                    "clipboard: the copy may or may not have landed",
-                )),
+                Event::Copied { .. } => {
+                    t_putstr("nora: clipboard copied\n");
+                    ed.set_status(String::from("copied to the clipboard"))
+                }
+                Event::CopyUnknown => {
+                    t_putstr("nora: clipboard copy unknown\n");
+                    ed.set_status(String::from(
+                        "clipboard: the copy may or may not have landed",
+                    ))
+                }
                 Event::CopyFailed(reason) => {
+                    t_putstr(&alloc::format!("nora: clipboard copy failed: {}\n", why(reason)));
                     ed.set_status(alloc::format!("clipboard: copy failed: {}", why(reason)))
                 }
                 Event::Pasted(bytes) => match (
@@ -123,7 +132,11 @@ impl Clip {
                     self.paste_askers.answered(),
                 ) {
                     (Ok(text), Some(into)) => {
-                        ed.paste_text(into, text);
+                        t_putstr(if ed.paste_text(into, text) {
+                            "nora: clipboard pasted\n"
+                        } else {
+                            "nora: clipboard paste not applied\n"
+                        });
                     }
                     // The client reports only the paste it was asked for.
                     (Ok(_), None) => {}
@@ -131,6 +144,7 @@ impl Clip {
                 },
                 Event::PasteFailed(reason) => {
                     let _ = self.paste_askers.answered();
+                    t_putstr(&alloc::format!("nora: clipboard paste failed: {}\n", why(reason)));
                     ed.set_status(alloc::format!("clipboard: paste failed: {}", why(reason)))
                 }
                 // A mode report grants nothing, and the editor is not owed a word about it.

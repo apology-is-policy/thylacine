@@ -125,6 +125,7 @@ Generated — do not edit between the markers (`quaestor render`).
 
 ## Recent changes
 
+- 2026-11-04 [[chg-2026-11-04-as4-r4]] — AS-4 audit round 4: the paste flow's waits arm, and Alt reaches a tile
 - 2026-11-04 [[chg-2026-11-04-compositor-band]] — The designated compositor's threads are INTERACTIVE
 - 2026-11-04 [[chg-2026-11-04-dormant-answers-estale]] — A dormant present and HIN1's BadHandle answer ESTALE
 - 2026-11-04 [[chg-2026-11-04-merge-audit-r2]] — Merge audit r2's close on the join
@@ -132,5 +133,4 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-11-04 [[chg-2026-11-04-paste-flow]] — AS-4f: the paste flow in a real session
 - 2026-11-04 [[chg-2026-11-04-pinned-wake]] — A pinned thread's wake goes to its home CPU, not the waker's
 - 2026-11-03 [[chg-2026-11-03-b3h-first-boots]] — B-3h's first boots: two wrong tests, a survivor, a budget
-- 2026-11-03 [[chg-2026-11-03-fid-pays-for-clunk]] — A FID pays for its CLUNK at RESERVE
 <!-- generated:end -->

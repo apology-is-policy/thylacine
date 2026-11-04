@@ -267,6 +267,8 @@ the Invariants section otherwise reads as "no kernel surface at all":
   goroutine blocked in a syscall shows its block path. Selecting a kernel frame
   reports `kernel frame: <name> (no source)` because kernel DWARF is deferred.
 
+Each clipboard answer also prints one line to the debug console, `nora: clipboard pasted`, `copied`, or the failure with its reason, never the text. That is a scenario's only positive sync for a paste, since typing `:` while one is in flight loses it.
+
 **The session clipboard (`clip_host`).** `Clip::start` is None without
 `HALCYON_INTERACTION` or the private ring, and the shared-clipboard keys then say so:
 nothing else is tried. Otherwise the ring's descriptor joins the one poll with
