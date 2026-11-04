@@ -714,7 +714,7 @@ struct Proc {
 ### 7.3 Thread
 
 A `Thread` owns:
-- A saved register context (`struct Context`: the callee-saved registers, `SP`, the resume `PC`, `TPIDR_EL0`, `TTBR0_EL1` and the FP/SIMD registers).
+- A saved register context (`struct Context`: the callee-saved registers, `SP`, the resume `PC`, `TPIDR_EL0`, `TTBR0_EL1` and, for a thread that can reach EL0, the FP/SIMD registers: a thread on ASID 0 runs on the kernel's TTBR0 and holds none, and neither side of a switch touches them for it).
 - A kernel stack (`THREAD_STACK_SIZE = 16 KiB` default, four pages, over a 16 KiB guard of unmapped address space in the kernel stack range).
 - A note mask (`note_mask`, POSIX's signal mask, per thread).
 - Its EEVDF data (`vd_t`, `band`).

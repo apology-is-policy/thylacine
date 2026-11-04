@@ -125,6 +125,7 @@ Generated — do not edit between the markers (`quaestor render`).
 
 ## Recent changes
 
+- 2026-11-04 [[chg-2026-11-04-c9-switch]] — Thread-model C9: the switch decides from TTBR0
 - 2026-11-04 [[chg-2026-11-04-walk-errno-close]] — The walk errno close: rounds 1 and 2, the first boots, 32 sabotages
 - 2026-11-03 [[chg-2026-11-03-c10a-kstack-range]] — Each thread's kernel stack in a range of its own, its guard costing no memory; the 0x200 vector reads SP
 - 2026-11-03 [[chg-2026-11-03-c10b-directmap-blocks]] — The direct map keeps its blocks: the guard toggles and the boot page map are gone
@@ -132,5 +133,4 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-11-03 [[chg-2026-11-03-c8b-timer-bases]] — Per-CPU timer bases: a wake takes no timer lock
 - 2026-11-03 [[chg-2026-11-03-item-11c-close]] — Item 11c close: rounds 1 to 3, the sweep, three leases
 - 2026-11-03 [[chg-2026-11-03-item-11c]] — A per-note table for native programs, SA_RESTART in the kernel, and an open a note can interrupt
-- 2026-11-03 [[chg-2026-11-03-torpor-locked-load]] — A wait's load under its lock cannot sleep, whatever a peer's MAP_FIXED did
 <!-- generated:end -->

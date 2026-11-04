@@ -11,6 +11,7 @@
 #include "../../arch/arm64/uart.h"
 
 #include <thylacine/context.h>
+#include <thylacine/extinction.h>
 #include <thylacine/proc.h>
 #include <thylacine/sched.h>
 #include <thylacine/smp.h>
@@ -30,11 +31,58 @@ static void sc_direct_peer(void) {
     for (;;) thread_switch(g_sc_main);
 }
 
+// A timed pair: the first times itself across its rounds and goes home.
+static struct Thread *g_sc_first;
+static struct Thread *g_sc_second;
+static u64            g_sc_pair_best;
+
+static void sc_pair_first(void) {
+    u64 best = ~0ull;
+    for (u32 r = 0; r < SC_ROUNDS; r++) {
+        u64 t0 = timer_now_ns();
+        for (u32 i = 0; i < SC_SWITCHES; i++)
+            thread_switch(g_sc_second);
+        u64 dt = timer_now_ns() - t0;
+        if (dt < best) best = dt;
+    }
+    g_sc_pair_best = best;
+    for (;;) thread_switch(g_sc_main);
+}
+
+static void sc_pair_second(void) {
+    for (;;) thread_switch(g_sc_first);
+}
+
+// One direct switch between threads of these two Procs, in ns.
+static u64 sc_pair(struct Proc *first, struct Proc *second) {
+    g_sc_first = thread_create(first, sc_pair_first);
+    g_sc_second = thread_create(second, sc_pair_second);
+    if (!g_sc_first || !g_sc_second) extinction("switch-cost: thread_create failed");
+    g_sc_pair_best = 0;
+    thread_switch(g_sc_first);
+    thread_free(g_sc_first);
+    thread_free(g_sc_second);
+    return g_sc_pair_best / (2u * SC_SWITCHES);
+}
+
 static void sc_sched_peer(void) {
     while (!g_sc_stop) sched();
     (void)spin_lock_irqsave(NULL);   // thread_kthread_retire's contract: masked to sched()
     thread_kthread_retire();
     sched();
+}
+
+static void sc_piece_ttbr0_read(void) {
+    u64 v;
+    __asm__ __volatile__("mrs %0, ttbr0_el1" : "=r"(v));
+    (void)v;
+}
+
+static void sc_piece_fpcr(void) {
+    u64 v;
+    __asm__ __volatile__("mrs %0, S3_3_C4_C4_0\n\t"
+                         "msr S3_3_C4_C4_0, %0"
+                         : "=&r"(v) : : "memory");
 }
 
 static void sc_piece_call(void) {
@@ -118,8 +166,24 @@ void test_context_switch_cost(void) {
     thread_free(p);
     TEST_ASSERT(taken != 0, "the two threads never switched, so there is no figure");
 
+    // By what the switch has to do. Kernel threads: no V. One space: no TTBR0 write.
+    struct Proc *sp = proc_alloc();
+    struct Proc *sq = proc_alloc();
+    TEST_ASSERT(sp != NULL && sq != NULL, "proc_alloc failed");
+    u64 same_space = sc_pair(sp, sp);
+    u64 cross_space = sc_pair(sp, sq);
+    u64 with_kernel = sc_pair(sp, kproc());
+    proc_free(sq);
+    proc_free(sp);
+
     uart_puts("    switch-cost: ");
     sc_report("direct", direct / (2u * SC_SWITCHES));
+    uart_puts(", ");
+    sc_report("same-space", same_space);
+    uart_puts(", ");
+    sc_report("cross-space", cross_space);
+    uart_puts(", ");
+    sc_report("with-kernel", with_kernel);
     uart_puts(", ");
     sc_report("sched", whole / taken);
     uart_puts(" (n=");
@@ -128,6 +192,10 @@ void test_context_switch_cost(void) {
     sc_report("fp-pair", sc_best_ns(sc_piece_fp));
     uart_puts(", ");
     sc_report("ttbr0+isb", sc_best_ns(sc_piece_ttbr0));
+    uart_puts(", ");
+    sc_report("ttbr0-read", sc_best_ns(sc_piece_ttbr0_read));
+    uart_puts(", ");
+    sc_report("fpcr-rw", sc_best_ns(sc_piece_fpcr));
     uart_puts(", ");
     sc_report("isb", sc_best_ns(sc_piece_isb));
     uart_puts(", ");

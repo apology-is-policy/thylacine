@@ -1055,7 +1055,11 @@ static struct AddrSpace *g_cpu_space[DTB_MAX_CPUS];
 
 // The DSB is the switch's half of the store-buffering argument: a
 // sched_sync_space that misses this store read its record after its own DSB,
-// so the invalidation it published completed before this CPU's eret.
+// so the invalidation it published completed before this CPU's eret. It stays
+// on a switch that keeps the space, where the record does not change, because
+// it is also what completes prev's cache maintenance before prev can run on
+// another CPU: EL0's DC CVAU; preempted; stolen; DSB ISH there says nothing of
+// the DC here.
 static void sched_record_space(struct AddrSpace *as) {
     unsigned cpu = smp_cpu_idx_self();
     if (cpu < DTB_MAX_CPUS)
@@ -1133,6 +1137,9 @@ u64 sched_sync_space(const struct AddrSpace *as) {
 // B-2e2: it also records the space this CPU is about to run (NULL for a kernel
 // thread), for SYS_ICACHE_SYNC_SPACE, and every caller passes through here
 // before next can fetch an EL0 instruction.
+_Static_assert(ASID_TTBR0_SHIFT == 48 && ASID_USER_FIRST != 0,
+               "context.S reads a TTBR0 whose top 16 bits are zero as a kernel thread's");
+
 void sched_install_asid_ttbr0(struct Thread *next) {
     struct Proc *p = next->proc;
     struct AddrSpace *as = p ? p->as : NULL;
