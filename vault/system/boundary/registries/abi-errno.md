@@ -10,7 +10,7 @@ mirrors:
   - "usr/lib/libthyla-rs/src/err.rs: enum Error + From<i32> + as_errno + Display"
   - "usr/lib/pouch/patches/0001-pouch-syscall-seam.patch: __syscall_ret (range contract, not a value list)"
 created: 2026-08-02
-updated: 2026-11-02
+updated: 2026-11-04
 ---
 ## The surface
 
@@ -42,7 +42,7 @@ anywhere.
 | 22 | `T_E_INVAL` | EINVAL | structurally malformed argument |
 | 24 | `T_E_MFILE` | EMFILE | a per-Proc table is full (the socket table `VIV_SOCK_MAX`); no free handle at or above a dup floor (HANDLE_DUP_TO's DUP_LOWEST, F_DUPFD) |
 | 25 | `T_E_NOTTY` | ENOTTY | a `TC*`/`TIOC*` op on a non-tty fd; `isatty()` reads it via a failed `TIOCGWINSZ` |
-| 28 | `T_E_NOSPC` | ENOSPC | bounded terminal interaction binding pool or identifier capacity exhausted |
+| 28 | `T_E_NOSPC` | ENOSPC | bounded terminal interaction binding pool or identifier capacity exhausted; a memory account's child past the tree's depth |
 | 32 | `T_E_PIPE` | EPIPE | write to a closed read end |
 | 34 | `T_E_RANGE` | ERANGE | in-range for the type, past an implementation limit |
 | 37 | `T_E_NOLCK` | ENOLCK | `SYS_FILE_LOCK`: the Dev serves no locks, the server refuses (Rlock ERROR/GRACE/undefined status, a Tlock/Tgetlock Rlerror ENOSYS), or the Proc's lock-owner table is full (I-32) |

@@ -18,6 +18,7 @@ mirrors:
   - "tools/interactive/ls-halcyon-clipboard-async.exp"
   - "tools/interactive/ls-nora-stopped-copy.exp"
   - "tools/interactive/ls-ut-paste.exp"
+  - "tools/interactive/ls-session-account.exp"
   - "tools/interactive/ls-halcyon-pointer.exp"
   - "tools/interactive/ls-halcyon-session-media.exp"
   - "tools/interactive/ls-graphical-sak.exp"
@@ -111,7 +112,7 @@ literal-mentions:
   - "tools/interactive/go8d.exp (a prose note)"
   - "tools/check-console-lines.py (exempts the base line by its text; a reword only drops the exemption, and the check then fails)"
 created: 2026-08-01
-updated: 2026-11-03
+updated: 2026-11-04
 ---
 ## The surface
 
@@ -550,6 +551,11 @@ run. It is a new mirror of the unchanged prefix.
 
 The opt-in `ls-ut-paste` scenario fails on `EXTINCTION:` during its probe's run. It is a
 new mirror of the unchanged prefix.
+
+### Session-account consumer (November 4)
+
+The `ls-session-account` scenario fails on `EXTINCTION:` while it reads an account. It
+is a new mirror of the unchanged prefix.
 
 ### Existing PTY-envelope consumer (October 4)
 

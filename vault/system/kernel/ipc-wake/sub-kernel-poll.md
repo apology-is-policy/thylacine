@@ -9,7 +9,7 @@ guarded-by: [inv-i9]
 validated-by: [spec-poll, spec-poll-walk, spec-poll-owed, spec-poll-defer, spec-tsleep, gate-smp]
 locks: [lock-poll-list, lock-rendez, lock-wait, lock-timerwait]
 created: 2026-08-01
-updated: 2026-11-02
+updated: 2026-11-04
 ---
 ## Purpose
 
@@ -104,7 +104,7 @@ client's lock are deferred past it (Concurrency below).
   `POLLNVAL`, never always-ready (a buggy caller must not spin on fake
   readiness); `KOBJ_SRV` dispatches through `srv_handle_poll` (magic
   discriminates listener vs connection); every other kobj kind ⇒
-  `POLLNVAL`. No `RIGHT_READ`/`RIGHT_WRITE` gate — polling asks about
+  `POLLNVAL`, `KOBJ_ACCOUNT` among them until MM-3 gives it pressure to report. No `RIGHT_READ`/`RIGHT_WRITE` gate — polling asks about
   readiness, not access, and POSIX permits polling a write-only fd.
 - The `Dev.poll` vtable op: `dev->poll(spoor, events, pw)` returns
   current revents and, iff `pw != NULL`, registers it — **atomically

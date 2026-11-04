@@ -22,7 +22,7 @@ design:
   - "docs/VIVARIUM.md"
   - "docs/LINEAGE.md"
 created: 2026-08-03
-updated: 2026-11-03
+updated: 2026-11-04
 ---
 ## Session registry factory
 
@@ -786,6 +786,14 @@ sees freed); the
 `sys_spawn_full_argv.validate_req` leg for the new bit; joey's
 `probe_spawn_env` ([[sub-stratum-boot]]) drives the real ABI, the tail after
 each earlier tail included.
+
+When `ext_flags` carries `SPAWN_EXT_ACCOUNT`, the handler reads the 8-byte
+`sys_spawn_ext_account` tail after the lower tails whose bits are set: an unreadable tail is
+`T_E_FAULT`, a nonzero `account_flags` -1 (the unknown-bits rule). It resolves the handle last,
+just before the entry, as `T_E_BADF` when it is absent or another kind, and holds it across
+the entry, so the child is born under that account and receives no handle to it. The tail
+carries the account and no authority beyond naming one the caller already controls
+([[sub-kernel-accounts]]).
 
 ### The identity cape: one admission rule per word, a stamp before publication, two inners (2026-09-23)
 

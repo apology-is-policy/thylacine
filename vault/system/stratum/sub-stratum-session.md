@@ -15,7 +15,7 @@ locks: []
 abis: []
 design: ["docs/IDENTITY-DESIGN.md section 9.9", "docs/CORVUS-DESIGN.md"]
 created: 2026-08-02
-updated: 2026-10-02
+updated: 2026-11-04
 ---
 ## Resident cancellation route (October 2)
 
@@ -326,6 +326,12 @@ any fork). The session shell `ut` is
 deliberately left unsealed -- see the census at `CAP_TCB_DIAL` in `caps.h`.
 
 ## login degrades to the console shell when the compositor cannot start (2026-09-07)
+
+**The session has a memory account of its own (MM-1c, vote 58).** Login makes it with
+`t_account_child` before it binds the home, and a failure refuses the login. Login holds its
+control and stays alive for the session. The home proxy, `aurora-push`, the shell and
+`halcyond` are born under it with `Command::account`, so a session's memory is counted
+separately from the machine's and from the next login's ([[sub-kernel-accounts]]).
 
 [[seam-login-halcyond-fallback]] is now **closed**. A session-lever image
 (`/lib/halcyon/session == "on"`) booted console-mode was a real lock-out:

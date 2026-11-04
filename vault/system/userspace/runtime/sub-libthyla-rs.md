@@ -50,7 +50,7 @@ design:
   - "docs/UTOPIA-SHELL-DESIGN.md section 15"
   - "docs/ARCHITECTURE.md section 3.5"
 created: 2026-08-03
-updated: 2026-11-03
+updated: 2026-11-04
 ---
 ## Dedicated service owner (October 2)
 
@@ -424,6 +424,12 @@ None crossing a boundary; every ABI record belongs to
   instruction words as their in-memory bytes, which is the instruction stream
   only on a little-endian target, and a const assertion says so. `destroy`
   reports the kernel's answer; `Drop` makes the same call and discards it.
+
+- `Command::account(handle)` -- the memory account the child is born under, a handle from
+  `t_account_child`, sent as the `T_SPAWN_EXT_ACCOUNT` tail. `spawn` packs every tail with one
+  `SpawnRecord`, in bit order. Without the call, the child is on the caller's account.
+  `t_account_child` and `t_account_set_limits` are the two control calls, and `t_account_query_of`
+  reads an account through its handle ([[abi-memory-account]]).
 
 ## Concurrency
 

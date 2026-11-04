@@ -311,9 +311,10 @@
 // a failed TIOCGWINSZ) as "not a tty". POSIX: ENOTTY.
 #define T_E_NOTTY      25
 
-// No space left. Kernel-originated for two causes: a mount into a Territory
-// whose mount table is at its cap (SYS_MOUNT; operator vote 2026-10-19), and a
-// fixed interaction pool or identifier space exhausted (HI-1). A server's ENOSPC
+// No space left. Kernel-originated for three causes: a mount into a Territory
+// whose mount table is at its cap (SYS_MOUNT; operator vote 2026-10-19), a
+// fixed interaction pool or identifier space exhausted (HI-1), and a memory
+// account's child past the tree's depth (ACCOUNT_CHILD). A server's ENOSPC
 // (a full pool) crosses by value, as it always has.
 // POSIX: ENOSPC.
 #define T_E_NOSPC      28

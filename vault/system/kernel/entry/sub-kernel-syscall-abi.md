@@ -24,7 +24,7 @@ abis: [abi-t-stat, abi-handle-rights, abi-errno, abi-pty-interaction, abi-memory
 design:
   - "docs/ARCHITECTURE.md section 13"
 created: 2026-08-03
-updated: 2026-11-03
+updated: 2026-11-04
 ---
 ## Session registry factory ABI
 
@@ -277,6 +277,14 @@ fork and pouch do not send it yet: the fork is shared by every tree, and a
 kernel without bit 2 refuses the bit, so it waits until every tree carries
 the kernel half. What the tail does is [[sub-kernel-syscall-dispatch]]'s and
 [[sub-kernel-content]]'s (ARCH 9.7).
+
+`SPAWN_EXT_ACCOUNT` (bit 3, 2026-11-04, operator vote 58) announces a `struct
+sys_spawn_ext_account` after the cwd, thread and environment tails whose bits are set, else
+at +104: `account_h` (u32, a `KOBJ_ACCOUNT` handle in the caller's table) and `account_flags`
+(u32, must be 0), 8 bytes. Mirrors: libt `T_SPAWN_EXT_ACCOUNT` + `struct
+t_sys_spawn_ext_account`, libthyla-rs `T_SPAWN_EXT_ACCOUNT` + `TSpawnExtAccount`, sent by
+`Command::account`; joey builds the record by hand. What the tail does is
+[[sub-kernel-syscall-dispatch]]'s.
 
 **`T_CAP_TCB_DIAL` (U, 2026-09-23).** Bit 14 joins the `T_CAP_*` mirror set in
 both userspace copies -- `usr/lib/libthyla-rs/src/lib.rs` and

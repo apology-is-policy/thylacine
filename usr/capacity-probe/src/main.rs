@@ -34,8 +34,8 @@ use libthyla_rs::account::{
 };
 use libthyla_rs::{
     t_account, t_account_child, t_account_query, t_account_query_of, t_account_set_limits,
-    t_burrow_attach, t_burrow_detach, t_burrow_protect, t_burrow_reserve, t_close, t_getpid,
-    t_open, t_pipe, t_putstr, t_read, t_spawn_full_argv, t_wait_pid_for, TSpawnArgs,
+    t_burrow_attach, t_burrow_detach, t_burrow_protect, t_burrow_reserve, t_close, t_execve,
+    t_getpid, t_open, t_pipe, t_putstr, t_read, t_spawn_full_argv, t_wait_pid_for, TSpawnArgs,
     TSpawnExtAccount, T_BURROW_PROT_READ, T_BURROW_PROT_WRITE, T_OREAD, T_SPAWN_EXT_ACCOUNT,
     T_WALK_OPEN_FROM_ROOT,
 };
@@ -507,6 +507,23 @@ fn spawn_under(handle: u32, flags: u32, told_handle: u64, told_incarnation: u64)
     unsafe { t_spawn_full_argv(&rec as *const AccountSpawn as *const TSpawnArgs) }
 }
 
+fn spawn_mode(mode: &[u8]) -> i64 {
+    const NAME: &[u8] = b"capacity-probe";
+    let mut argv = alloc::vec::Vec::new();
+    argv.extend_from_slice(b"capacity-probe\0");
+    argv.extend_from_slice(mode);
+    argv.push(0);
+    // SAFETY: every field of TSpawnArgs is an integer, and zero is each one's default.
+    let mut rec: TSpawnArgs = unsafe { core::mem::zeroed() };
+    rec.name_va = NAME.as_ptr() as u64;
+    rec.name_len = NAME.len() as u32;
+    rec.argv_data_va = argv.as_ptr() as u64;
+    rec.argv_data_len = argv.len() as u32;
+    rec.argc = 2;
+    // SAFETY: the pointer is the record's and argv and NAME outlive the call.
+    unsafe { t_spawn_full_argv(&rec as *const TSpawnArgs) }
+}
+
 // A child account's control from EL0: what the kernel suite cannot reach is the record, the
 // handle number and the spawn tail. Zero when every leg holds. `pool` is section 4's default.
 fn account_control_legs(pool: u64) -> i64 {
@@ -739,6 +756,18 @@ fn account_control_legs(pool: u64) -> i64 {
     }
     ok("account-spawn-under");
 
+    // An exec closes the control. The child's status names what it saw.
+    let pid = spawn_mode(b"account-exec");
+    if pid <= 0 {
+        return fail_rc("account-exec-spawn", pid, 0);
+    }
+    let mut status = -1i32;
+    let reaped = unsafe { t_wait_pid_for(pid as i32, 0, &mut status) };
+    if reaped != pid || status != 0 {
+        return fail_num("account-exec-closes", status as u32 as u64, 0);
+    }
+    ok("account-exec-closes");
+
     // A record that cannot be written is the last thing the call finds, and leaves nothing
     // behind: the next child takes the number that one would have held, once closed.
     let ro = unsafe { t_burrow_reserve(PAGE, RW, 0) };
@@ -822,10 +851,50 @@ fn account_child_mode(told_handle: u64, told_incarnation: u64) -> i64 {
     0
 }
 
+// `capacity-probe account-exec`: a handle that works, then an exec told its number.
+fn account_exec_mode() -> i64 {
+    let mut made = 0u64;
+    let h = t_account_child(ACCOUNT_SELF, 0, &mut made);
+    if h < 0 {
+        return 8;
+    }
+    let mut q = AccountQuery::default();
+    if t_account_query_of(h as i32, made, &mut q) != 0 {
+        return 9;
+    }
+    let mut argv = alloc::vec::Vec::new();
+    argv.extend_from_slice(b"capacity-probe\0account-after-exec\0");
+    push_num(&mut argv, h as u64);
+    push_num(&mut argv, made);
+    let _ = unsafe { t_execve(b"/bin/capacity-probe", &argv, 4) };
+    10
+}
+
+// `capacity-probe account-after-exec <handle number> <incarnation>`: the number names nothing.
+fn account_after_exec_mode(handle: u64, incarnation: u64) -> i64 {
+    let mut q = AccountQuery::default();
+    if t_account_query_of(handle as i32, incarnation, &mut q) != -EBADF {
+        return 11;
+    }
+    0
+}
+
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
     let mut args = libthyla_rs::env::args();
-    if args.nth(1) == Some(&b"account-child"[..]) {
+    let mode = args.nth(1);
+    if mode == Some(&b"account-exec"[..]) {
+        return account_exec_mode();
+    }
+    if mode == Some(&b"account-after-exec"[..]) {
+        let handle = args.next().and_then(parse_num);
+        let incarnation = args.next().and_then(parse_num);
+        return match (handle, incarnation) {
+            (Some(h), Some(i)) => account_after_exec_mode(h, i),
+            _ => 12,
+        };
+    }
+    if mode == Some(&b"account-child"[..]) {
         let handle = args.next().and_then(parse_num);
         let incarnation = args.next().and_then(parse_num);
         return match (handle, incarnation) {

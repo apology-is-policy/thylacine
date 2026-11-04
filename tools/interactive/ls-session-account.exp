@@ -1,0 +1,43 @@
+#!/usr/bin/expect -f
+# A session is charged to an account of its own, and the next login's is another.
+set ::env(THYLACINE_ACCEL) hvf
+
+source [file join [file dirname [info script]] lib.exp]
+
+# 1 is the root and 2 the system cache, so a shell left on either reads 1 or 2 here.
+proc session_account {leg} {
+    lc_send "cat /proc/self/account; echo account-$leg-end"
+    set timeout 30
+    set inc ""
+    set used ""
+    expect {
+        -re {incarnation: (\d+)\r?\n} { set inc $expect_out(1,string) }
+        -re {EXTINCTION:} { lc_extinction_fail "extinction reading the account ($leg)" }
+        timeout           { lc_fail "no incarnation line in /proc/self/account ($leg)" }
+        eof               { lc_fail "qemu exited reading the account ($leg)" }
+    }
+    expect {
+        -re {alloc: used (\d+) } { set used $expect_out(1,string) }
+        -re {EXTINCTION:} { lc_extinction_fail "extinction reading the account ($leg)" }
+        timeout           { lc_fail "no alloc line in /proc/self/account ($leg)" }
+        eof               { lc_fail "qemu exited reading the account ($leg)" }
+    }
+    lc_expect "account-$leg-end" "the end of the account ($leg)"
+    if {$inc <= 2} { lc_fail "$leg: the shell's account is static, incarnation $inc" }
+    if {$used == 0} { lc_fail "$leg: account $inc holds nothing while its shell runs" }
+    lc_step "$leg: account $inc, alloc $used bytes"
+    return $inc
+}
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+set first [session_account first]
+
+lc_send "exit"
+lc_login michael correct-horse-battery-staple-v1
+set second [session_account second]
+
+if {$second <= $first} { lc_fail "the second login's account $second is not newer than $first" }
+lc_pass "two logins, accounts $first and $second"
+lc_quit
+exit 0

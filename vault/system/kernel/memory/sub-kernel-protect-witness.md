@@ -19,7 +19,7 @@ hazards: []
 abis: []
 design: ["docs/ARCHITECTURE.md"]
 created: 2026-09-23
-updated: 2026-10-19
+updated: 2026-11-04
 ---
 ## Purpose
 
@@ -39,7 +39,9 @@ is [[sub-kernel-pagemap]]'s.
 header checks and its copies, including a read-only page that gets through the header and
 is stopped on the way out, which is what the kernel suite cannot reach from a thread with
 no user memory. The account is shared with every other Proc while it runs, so a figure is
-asserted only where they cannot move it past the test ([[sub-kernel-accounts]]).
+asserted only where they cannot move it past the test ([[sub-kernel-accounts]]). Since MM-1c
+`account_control_legs` adds CHILD and SET_LIMITS from EL0, and spawns `capacity-probe
+account-child` under a new account, whose exit status names the fault.
 
 ## Contract
 
