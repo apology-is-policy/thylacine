@@ -579,6 +579,7 @@ void per_cpu_main(int cpu_idx) {
             if (!gic_enable_irq(TIMER_INTID_EL1_VIRT))
                 extinction("per_cpu_main: gic_enable_irq(timer PPI) failed");
             timer_arm_this_cpu();
+            sched_mark_tick_armed();
             timer_armed = true;
         }
         // Tickless idle (NO_HZ_IDLE; TI-2): once this secondary's timer PPI is

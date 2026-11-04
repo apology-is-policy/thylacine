@@ -2082,7 +2082,7 @@ void thread_exit_self(void);
 // LOCK CONTRACT (#811, C3): the caller MUST hold g_proc_table_lock and no
 // threads_lock. The claim, the stashes and the p->threads walk run inside
 // p->threads_lock, taken here; the walk then takes the torpor bucket locks + per-peer
-// wait_lock + (via wakeup) rendez/timerwait locks, all below it in the order.
+// wait_lock + (via wakeup) rendez lock, all below it in the order.
 //
 // gcpark-b: `sig` is the POSIX signal the termination records (notes.h
 // NOTE_SIG_*; 0 = none): every production caller is a kill-class termination
@@ -3123,7 +3123,7 @@ bool proc_intr_terminate_pending(const struct Proc *p);
 // g_proc_table_lock, or is a thread of p -- and holds no threads_lock.
 // The body is the #811 universal death-wake template: per-peer wait_lock ->
 // rendez_blocked_on -> wakeup, lock order threads_lock -> wait_lock ->
-// (wakeup: g_timerwait.lock -> r->lock). Deliberately NO
+// (wakeup: r->lock). Deliberately NO
 // torpor_wake_all_for_proc (a torpor waiter's stack rendez is reachable via
 // rendez_blocked_on, and tsleep's widened register-then-observe closes the
 // register-after-walk race) and NO smp_resched_others (the IRQ-from-EL0

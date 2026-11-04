@@ -365,7 +365,7 @@ the 9P send waiter -- sleep on a cond that reads the ROLE, not `ready`;
 a spurious wake re-sleeps them with `ready` still set, and a deduped
 walk would then skip the only wake the next release gives them. The full
 chain: object lock → list lock → (the wake enters the wait chain:
-`g_timerwait` → rendez → runq). Unregister takes ONLY the list lock —
+rendez → runq). Unregister takes ONLY the list lock —
 that asymmetry is what lets the sweep run without deadlocking against
 a producer holding the object lock. **Every list op takes the lock
 IRQSAVE** (audit round 4 F3, pre-existing): no IRQ handler enters the

@@ -41,7 +41,7 @@ Generated — do not edit between the markers (`quaestor render`).
 | [[arc-vivarium]] | active | 2 |
 | [[arc-weft]] | active | 4 |
 
-## Open seams: 80
+## Open seams: 79
 
 - [[seam-220-netd-listener-poll]] (sub-netd-server)
 - [[seam-240-lo-redial]] (sub-netd-server)
@@ -119,7 +119,6 @@ Generated — do not edit between the markers (`quaestor render`).
 - [[seam-stratum-notify-peercred]] (sub-stratum-session, sub-stratum-server)
 - [[seam-tapestry-battery-unowned]] (sub-tapestryd)
 - [[seam-tickless-bare-metal]] (sub-kernel-sched-smp)
-- [[seam-timerwait-sharding]] (sub-kernel-rendez)
 - [[seam-torpor-cross-proc]] (sub-kernel-torpor)
 - [[seam-viv-tier2-frame]] (sub-kernel-syscall-abi, sub-kernel-vivarium)
 - [[seam-warp-prove-unowned]] (sub-tapestryd)
@@ -130,8 +129,8 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-11-03 [[chg-2026-11-03-c10a-kstack-range]] — Each thread's kernel stack in a range of its own, its guard costing no memory; the 0x200 vector reads SP
 - 2026-11-03 [[chg-2026-11-03-c10b-directmap-blocks]] — The direct map keeps its blocks: the guard toggles and the boot page map are gone
 - 2026-11-03 [[chg-2026-11-03-c8a-torpor]] — torpor keyed on the address space, a lock per bucket, oldest first, and no wake under the lock
+- 2026-11-03 [[chg-2026-11-03-c8b-timer-bases]] — Per-CPU timer bases: a wake takes no timer lock
 - 2026-11-03 [[chg-2026-11-03-item-11c-close]] — Item 11c close: rounds 1 to 3, the sweep, three leases
 - 2026-11-03 [[chg-2026-11-03-item-11c]] — A per-note table for native programs, SA_RESTART in the kernel, and an open a note can interrupt
 - 2026-11-03 [[chg-2026-11-03-torpor-locked-load]] — A wait's load under its lock cannot sleep, whatever a peer's MAP_FIXED did
-- 2026-11-03 [[chg-2026-11-03-walk-errno]] — A failed walk says why: only a miss reads ENOENT
 <!-- generated:end -->

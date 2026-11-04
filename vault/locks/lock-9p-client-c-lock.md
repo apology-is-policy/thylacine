@@ -20,9 +20,8 @@ updated: 2026-10-07
   must retry a send after a drop retries from a private spill copy; the sole
   post-drop `out_buf` re-read anywhere is the NOTAG handshake, sound only
   because that client is still private (`p9_attached_create`).
-- **Order** (the poll object→list→timerwait→rendez chain, acyclic):
-  `c->lock` → `send_waiters_list.lock` → `g_timerwait.lock` → per-waiter
-  rendez lock. Peer lock notes land at the registry pass; until then this
+- **Order** (the poll object→list→rendez chain, acyclic):
+  `c->lock` → `send_waiters_list.lock` → per-waiter rendez lock. Peer lock notes land at the registry pass; until then this
   prose is the order's home for the client surface.
 - **The transport's locks nest under it.** A send under `c->lock` takes the
   transport's own lock: the pipe's ring lock (the frame-atomic pipe send) or

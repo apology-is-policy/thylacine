@@ -3936,7 +3936,7 @@ executor_exiting:
     if (loom_is_private(l)) loom_private_close_changed(l);
     // Hand the joiner its wake INSIDE the masked window, after BOTH stores, so
     // the release it pairs with has already published state==EXITING. wakeup()
-    // takes g_timerwait -> sqpoll_join->lock -> cpu_sched and we hold none of
+    // takes sqpoll_join->lock -> cpu_sched and we hold none of
     // them, so the documented order holds; it is explicitly IRQ-context-safe.
     // Waking BEFORE sched() is sound on SMP for the same reason the old spin
     // join was: a peer CPU that picks the joiner immediately lands in

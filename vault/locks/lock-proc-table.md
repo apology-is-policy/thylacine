@@ -23,8 +23,8 @@ console kthread.
 lock, after none. The full chain:
 
 ```
-g_proc_table_lock -> p->threads_lock -> wait_lock -> g_timerwait.lock -> r->lock -> cs->lock
-g_proc_table_lock -> p->threads_lock -> a torpor bucket's lock -> g_timerwait.lock -> r->lock
+g_proc_table_lock -> p->threads_lock -> wait_lock -> a timer base's lock -> r->lock -> cs->lock
+g_proc_table_lock -> p->threads_lock -> a torpor bucket's lock -> r->lock
 g_proc_table_lock -> allowance->lock          (the I-34 revoke)
 g_proc_table_lock -> q->lock                  (a note post)
 g_proc_table_lock -> poll_waiter_list -> rendez

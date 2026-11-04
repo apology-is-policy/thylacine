@@ -4,7 +4,7 @@ type: lock
 title: "poll_waiter_list.lock — the per-object hook list"
 kind: spin (irqsave since 2026-09-21)
 guards: "the doubly-linked poll_waiter hook chain (hooks and walk bookmarks), each hook's list backpointer, the producer-side ready-flag writes during one batch of a wake walk, and each deferred record's chain field"
-orders-before: [lock-timerwait, lock-rendez]
+orders-before: [lock-rendez]
 created: 2026-08-01
 updated: 2026-10-28
 ---
@@ -20,8 +20,8 @@ chain)**. The register path holds the object's lock when it calls
 install-and-sample one atomic step (the register-then-observe of
 [[spec-poll]]). The wake path runs AFTER the producer released the
 object lock, walks under the list lock, sets each `ready` then
-`wakeup(pw->rendez)` — the wakeup enters [[lock-timerwait]] →
-[[lock-rendez]] while the list lock is still held.
+`wakeup(pw->rendez)` — the wakeup enters [[lock-rendez]] while the list
+lock is still held.
 
 **Unregister takes ONLY this lock.** That asymmetry is load-bearing:
 the poll sweep runs with no object lock, so it can never deadlock
