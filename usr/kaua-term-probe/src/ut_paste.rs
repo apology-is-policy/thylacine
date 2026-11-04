@@ -48,7 +48,9 @@ const WORDS: [&[u8]; 16] = [
     b"ut-paste-three",
     b"UT-PASTE-SEVEN",
     b"UT-PASTE-EIGHT",
-    b"UT-PASTE-NINE",
+    // With its line ending: `head` copies what it reads as it reads it, so on a raw
+    // terminal the word alone goes by while `head` is still waiting for a line.
+    b"UT-PASTE-NINE\r\n",
 ];
 const LONGEST_WORD: usize = 29;
 const PASTE_KEY: &[u8] = b"\x1bp";
