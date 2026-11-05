@@ -71,7 +71,7 @@ fn seat_probe(stage: &str) -> i64 {
     let elevated = match stage {
         "--seat-baseline" | "--seat-restored" | "--seat-denied" | "--seat-cancelled"
         | "--seat-control" | "--seat-poisoned" | "--seat-chain" | "--seat-readback"
-        | "--seat-pointer" | "--seat-answered" => false,
+        | "--seat-pointer" | "--seat-answered" | "--seat-framed" => false,
         "--seat-elevated" => true,
         _ => return 2,
     };

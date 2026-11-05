@@ -58,6 +58,8 @@ pub enum SeatShot {
     RefuseBind,
     /// A readback stands ahead of the takeover's commands for longer than their bound.
     BehindReadback,
+    /// A controlq stall on the episode's first frame; the device retires it.
+    StallInFrame,
     /// A cursor stall inside exclusion, held until the seat restores.
     CursorStall,
     /// The same cursor stall, held past the abandonment bound.
@@ -196,10 +198,11 @@ impl Device {
     #[cfg(feature = "test-mode")]
     pub fn test_latch_seat_shot(&mut self) -> Option<SeatShot> {
         let shot = match self.test_seat_shots {
-            8 => SeatShot::StallAfterExclusion,
-            7 => SeatShot::HoldAfterExclusion,
-            6 => SeatShot::RefuseBind,
-            5 => SeatShot::BehindReadback,
+            9 => SeatShot::StallAfterExclusion,
+            8 => SeatShot::HoldAfterExclusion,
+            7 => SeatShot::RefuseBind,
+            6 => SeatShot::BehindReadback,
+            5 => SeatShot::StallInFrame,
             4 => SeatShot::CursorStall,
             3 => SeatShot::CursorAbandon,
             2 => SeatShot::RefuseRestored,
@@ -603,7 +606,7 @@ impl Device {
             }
             Request::TestArmLatch => {
                 #[cfg(feature = "test-mode")] {
-                    self.test_latch_shots = 2; self.test_seat_shots = 8; self.test_stall_shots = 3;
+                    self.test_latch_shots = 2; self.test_seat_shots = 9; self.test_stall_shots = 3;
                     ().put(&mut out);
                 }
                 #[cfg(not(feature = "test-mode"))] { return Err(Error::BadField); }

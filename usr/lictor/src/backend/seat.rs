@@ -44,6 +44,8 @@ pub struct Seat {
     /// A held stall ends when the kernel closes the episode it held up.
     #[cfg(feature = "test-mode")]
     test_release_on_failure: bool,
+    #[cfg(feature = "test-mode")]
+    test_stall_frame: bool,
     /// The generation whose shot is taken: a takeover that starts over after a
     /// stall is the same takeover.
     #[cfg(feature = "test-mode")]
@@ -160,6 +162,7 @@ impl Seat {
                         if shot == Some(SeatShot::BehindReadback) { device.gpu.test_behind_readback(); }
                         self.test_refuse_restored |= shot == Some(SeatShot::RefuseRestored);
                         self.test_release_on_failure |= shot == Some(SeatShot::HoldAfterExclusion);
+                        self.test_stall_frame |= shot == Some(SeatShot::StallInFrame);
                     }
                     // A takeover that fails part-way may already have disabled
                     // outputs or bound the trusted image.
@@ -189,6 +192,8 @@ impl Seat {
                     let model = match Model::decode(&m.data[..m.length as usize]) {
                         Ok(model) => model, Err(_) => { self.fail("frame decode"); return; }
                     };
+                    #[cfg(feature = "test-mode")]
+                    if core::mem::take(&mut self.test_stall_frame) { device.gpu.test_latch_now(false); }
                     // The frame stays owed, so the next pass paints it again. Corvus
                     // reads no key until it is visible, and bounds that wait.
                     if screen.paint(&mut device.gpu, &model, m.code as usize, None).is_err() {
