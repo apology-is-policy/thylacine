@@ -137,7 +137,10 @@ if {[lindex $s1 0] != [lindex $s0 0]} {
 }
 
 catch {send -- "\001x"}
-expect { eof {} timeout {} }
+expect {
+    eof {}
+    timeout {}
+}
 lc_vm_kill
 puts "WARP-BENCH PASS"
 exit 0

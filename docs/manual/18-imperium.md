@@ -50,6 +50,10 @@ The supported request operands are:
 | `kill` | `CAP_KILL` | Send signals across identity boundaries. |
 | `post` | `CAP_POST_SERVICE` | Publish services for other processes. |
 
+`dac` applies to what already exists. It lets an elevated shell change existing
+files on the system pool, but no user can create a file or directory there,
+elevated or not.
+
 With no operands, the tool requests the full Imperium level. Naming operands
 restricts the request to that subset. The dialog shows the actual grant and its
 term; eligibility alone does not confer authority. Nested Imperium shells are

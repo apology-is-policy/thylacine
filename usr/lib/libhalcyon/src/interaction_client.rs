@@ -575,8 +575,9 @@ impl Client {
         }
     }
 
-    /// The connection ends here. What was in flight goes with it, and the job, if
-    /// any, learns its fate now rather than at a reply that will not come.
+    /// The connection ends here. What was in flight goes with it. The job, if any,
+    /// runs once more when nothing had answered it (vote 60), and otherwise learns its
+    /// fate now rather than at a reply that will not come.
     fn lose_link(&mut self, why: Why) {
         let was_bound = matches!(self.link, Link::Bound);
         self.lanes = [None, None];

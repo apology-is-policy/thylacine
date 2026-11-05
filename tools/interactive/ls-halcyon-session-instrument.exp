@@ -369,7 +369,7 @@ set tour ""
 set tour_deadline [expr {[clock milliseconds] + 15000}]
 while {[catch {exec grep -a {session tile leaf=.* /bin/halcyon welcome} $transcript} tour]} {
     if {[clock milliseconds] >= $tour_deadline} { lc_fail "no welcome tile spawn line" }
-    expect -timeout 1 {
+    lc_within 1 {
         -re {.+} {}
         eof { lc_fail "EOF waiting for the welcome tile" }
         timeout {}
@@ -387,7 +387,7 @@ while {[clock milliseconds] < $geometry_deadline} {
         set geometry_ready 1
         break
     }
-    expect -timeout 1 {
+    lc_within 1 {
         -re {.+} {}
         eof { lc_fail "EOF waiting for settled prompt geometry" }
         timeout {}

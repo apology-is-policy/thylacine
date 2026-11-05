@@ -100,20 +100,30 @@ fn seat_probe(stage: &str) -> i64 {
         t_putstr("seat-probe: FAIL ordinary process claimed GPU\n");
         return 1;
     }
-    // Separate paths keep a stale successful create from masquerading as a
-    // permission denial. /home is SYSTEM-owned and not writable by michael.
+    // Elevation overrides rwx and is not a session end (IDENTITY-DESIGN 9.7 M7):
+    // a create on system's mount is refused at every stage, and only an elevated
+    // caller may open system's file for write. The open writes nothing.
     let path = alloc::format!("/home/graphical-sak-{}", &stage[7..]);
-    match fs::create_dir(&path) {
-        Ok(()) if elevated => {
-            if fs::remove_dir(&path).is_err() {
-                t_putstr("seat-probe: FAIL cleanup\n"); return 1;
-            }
-        }
-        Err(Error::PermissionDenied) if !elevated => {},
-        _ => { t_putstr("seat-probe: FAIL DAC authority mismatch\n"); return 1; }
+    let create = fs::create_dir(&path);
+    if create != Err(Error::PermissionDenied) {
+        return seat_mismatch("create on system's mount", create);
+    }
+    let write = fs::OpenOptions::new().write(true).open("/thylacine-version").map(|_| ());
+    let as_granted = if elevated { write.is_ok() } else { write == Err(Error::PermissionDenied) };
+    if !as_granted {
+        return seat_mismatch("write to system's file", write);
     }
     // One write: the kernel keeps a single console write whole, and any other
     // process's line can land between two, which breaks a scenario's needle.
     t_putstr(&alloc::format!("seat-probe: PASS {} (endpoint denied; GPU denied; DAC verified)\n", &stage[7..]));
     0
+}
+
+fn seat_mismatch(leg: &str, seen: Result<(), libthyla_rs::err::Error>) -> i64 {
+    let line = match seen {
+        Ok(()) => alloc::format!("seat-probe: FAIL {}: admitted\n", leg),
+        Err(e) => alloc::format!("seat-probe: FAIL {}: {}\n", leg, e),
+    };
+    t_putstr(&line);
+    1
 }

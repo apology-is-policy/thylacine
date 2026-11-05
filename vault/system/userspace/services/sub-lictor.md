@@ -490,7 +490,11 @@ landings still need integration verification before this branch is merged.
 [[sub-warden]] supplies boot grants, [[sub-tapestryd]] supplies normal rendering,
 [[sub-corvus]] supplies policy and semantic frames. [[abi-trusted-seat]] and
 [[abi-native-nonblock]] pin the native boundaries. `caps-probe --seat-*` is an
-ordinary guest test client, never a source of trusted authority.
+ordinary guest test client, never a source of trusted authority. Its DAC witness
+is two legs, because a create alone cannot tell the gates apart: elevation
+overrides rwx and is not a session end (IDENTITY-DESIGN 9.7 M7), so the probe's
+create on system's mount is refused at every stage, and only its open of
+`/thylacine-version` for write changes with the grant.
 
 ## Caveats
 

@@ -29,7 +29,8 @@
 #     episode, so no line can show the order inside it. session_seat.rs retires every
 #     application connection before it sends its ACK, and the kernel takes no trusted
 #     input before that ACK. What this adds is that a private connection is among those
-#     retired: a connection bound at the hold must fail at its next use.
+#     retired: a connection bound at the hold is gone at its next use. A paste with
+#     nothing answered yet runs once more on a new one (vote 60).
 #   - Nothing conferred: the trusted episode ends with nothing pending.
 #   - No stale bytes after recovery, and the committed value intact: the value read
 #     through a new connection is what the copy's reported outcome promises, and the
