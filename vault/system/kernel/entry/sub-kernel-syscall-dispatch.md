@@ -1113,6 +1113,10 @@ file. Both also record `note_call_x0` and `note_restartable`, which the return t
 reads and clears, for the kernel's re-issue under `SA_RESTART`. Clearing it at the one exit is what keeps a wait
 outside that syscall -- a page-in at EL0, the next syscall's own waits -- from
 inheriting its interruptibility ([[dec-2026-09-29-caught-signal-slow-calls]]).
+Most classed handlers never clear the flag themselves. `notes.native_class` witnesses
+the clear through the real wrapper: it presets the flag, dispatches `SYS_GETPID` and
+reads the flag cleared. As its control, the handler called alone leaves the flag set.
+No table governs the harness's Proc, so the classifier cannot overwrite the preset.
 
 ### The body runs with interrupts ON (ARCH 8.12)
 

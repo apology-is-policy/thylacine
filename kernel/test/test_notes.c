@@ -4717,6 +4717,29 @@ static void nt_class_expect_op(struct Thread *t, struct Proc *p, u64 nr, u64 op,
     TEST_EXPECT_EQ(t->note_restartable, restart, "may it re-issue");
 }
 
+// ARCH 8.8.3: the dispatcher's one exit clears the flag whatever the handler
+// left, and most classed handlers never clear it, so without the exit the next
+// call's waits (a close's among them) would unwind for a caught note.
+static void nt_dispatch_exit_clears(void) {
+    struct Thread *t = current_thread();
+    // CONTROL: no table governs the harness's Proc, so the classifier never runs
+    // and the flag preset here survives into the handler.
+    TEST_ASSERT(t && t->proc && !notes_table_governs(t->proc),
+                "the harness's Proc is governed by no note table");
+    t->note_interruptible = true;       // as a classed handler returns it
+    (void)sys_getpid_handler(0, 0, 0, 0);
+    bool handler_left = t->note_interruptible;
+    struct exception_context ctx;
+    for (size_t k = 0; k < sizeof(ctx); k++) ((u8 *)&ctx)[k] = 0;
+    ctx.regs[8] = SYS_GETPID;
+    t->note_interruptible = true;
+    TEST_SYSCALL_DISPATCH(&ctx);
+    bool exit_left = t->note_interruptible;
+    t->note_interruptible = false;
+    TEST_EXPECT_EQ(handler_left, true, "CONTROL: SYS_GETPID's handler leaves the flag as it found it");
+    TEST_EXPECT_EQ(exit_left, false, "the dispatcher's exit clears the call's interruptibility");
+}
+
 void test_notes_native_class(void) {
     static struct Thread th;
     th.magic = THREAD_MAGIC;
@@ -4753,4 +4776,6 @@ void test_notes_native_class(void) {
     th.note_restartable   = false;
     th.proc = NULL;
     nt_free(p);
+
+    nt_dispatch_exit_clears();
 }

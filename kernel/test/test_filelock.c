@@ -644,8 +644,6 @@ static void wait_body(struct lk_fix *f, int a) {
     TEST_SYSCALL_DISPATCH(&ctx);
     TEST_EXPECT_EQ((s64)ctx.regs[0], (s64)0, "a waiting lock is granted after three refusals");
     TEST_EXPECT_EQ(g_lk_calls - calls, 4u, "in four attempts");
-    TEST_EXPECT_EQ(current_thread()->note_interruptible, false,
-                   "the call's interruptibility ends with it");
     g_lk_agains = 1;
     calls = g_lk_calls;
     TEST_EXPECT_EQ(lk_call(f, a, SYS_FILE_LOCK_WR | SYS_FILE_LOCK_PROC, 0, 10),

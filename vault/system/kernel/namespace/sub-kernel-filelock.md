@@ -400,6 +400,16 @@ legs check the take ran interruptible and the close work did not.
 The cancelled run is resent with nothing latched, while the server's own EINTR has
 latched and dropped it.
 
+Round 3 (Fable 5.1: 0 P0, 0 P1, 0 P2, 2 P3) found the close-work posture sound. Its F1:
+`filelock.wait`'s assert that the flag ends with the call could not fail. No table
+governs the harness's Proc, so the classifier never set the flag in the first place.
+The assert is gone, and `notes.native_class` now witnesses the dispatcher's exit clear
+([[sub-kernel-syscall-dispatch]]). Its F2, a re-check unlock refused for a reason other
+than a cancellation, is under Caveats. The reviewer suggested removing the entry when it
+is alone. That would clunk the clone and drop every lock the entry holds, including one
+a peer thread took on another range after the close. A lock silently lost is worse than
+one held until the Proc exits.
+
 ## Seams
 
 None open. Pouch `fcntl`, `flock` and the libthyla-rs and libt mirrors landed
@@ -411,6 +421,13 @@ native or Pouch wait since the aux join brought item 11c (2026-11-05). Go's
 
 - `_WAIT` is a poll (1 to 64 ms), not a wakeup: 9P2000.L has no lock
   callback.
+- A Proc take's re-check unlock can be refused for a reason other than a
+  cancellation. The reachable case is the client running out of memory for
+  the reply buffer: it frees the tag and the session stays live. The granted
+  entry is then kept, and the lock stays on the server until the Proc closes
+  a descriptor of the file again or exits. Tracked (OPEN-BUGS 2026-11-05, the
+  join's round 3 F2). The fix is an owed unlock that the session's closer
+  retries, as Linux's lock clients retry a failed unlock asynchronously.
 
 ## History
 
@@ -418,7 +435,7 @@ Boosty B-3h2 (commits d1853e821, c95ef3916, b693e2729 on branch b3h; close
 commit in [[chg-2026-10-29-b3h2-file-locks]]). Scripture 87ecc8153. B-3h3 and
 B-3h4: [[chg-2026-11-02-b3h3-b3h4-cached-locks-pouch]]. Audit round 3:
 [[chg-2026-11-02-b3h-audit-r3-fixes]]. The aux join (operator vote 34) and its
-round-1 fixes: branch aux-3-join2, 2026-11-05. Stratum's half (POSIX range records,
+audit rounds 1-3: branch aux-3-join2, 2026-11-05. Stratum's half (POSIX range records,
 the zero-name clone of an open fid, ENOLCK caps) lands as one Stratum commit
 after the B-3h audit.
 
