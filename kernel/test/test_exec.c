@@ -1633,7 +1633,7 @@ void test_execve_load_says_nomem_on_a_refused_vma(void) {
     vma_refuse_alloc_for_test(false);
     TEST_EXPECT_EQ(map_refused, -(int)T_E_NOMEM, "a map the slab refused says so");
     burrow_unref(b);
-    proc_free(p);
+    drop_proc(p);
 }
 
 // The boot blob's path says the same. Its first Vma is a segment's, so that map meets the
