@@ -32,7 +32,7 @@ pub struct Seat {
     model: Model,
     /// When this generation's takeover first reached the device, and how many fenced
     /// chains stood on it then: what the takeover line reports.
-    takeover_began: Option<(u64, usize, libthyla_rs::time::Instant)>,
+    takeover_began: Option<(u64, u32, libthyla_rs::time::Instant)>,
     failed_since: Option<libthyla_rs::time::Instant>,
     /// A takeover began, so normal output may not be showing: owed a restore
     /// until the device completes one or its engine dies.
@@ -209,7 +209,7 @@ impl Seat {
                 device.reap();
                 if !device.gpu.takeover_clear() { return; }
                 if !self.active() {
-                    if self.takeover_began.map_or(true, |(generation, ..)| generation != self.generation) {
+                    if self.takeover_began.is_none_or(|(generation, ..)| generation != self.generation) {
                         self.takeover_began = Some((self.generation, device.gpu.fenced_in_flight(),
                                                     libthyla_rs::time::Instant::now()));
                     }
