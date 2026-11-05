@@ -132,6 +132,32 @@ void test_notewait_take_word(void) {
                 "every signal at once reads as a word SYS_NOTE_WAIT would take");
 }
 
+// The caught twin: a stale latch would unwind every later wait for nothing.
+static void nw_take_drains_caught(void) {
+    struct Proc *p = nw_proc(true);
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    nw_fake_on(p);
+    g_nw_fake.note_mask = NW_USR1;
+    struct Note n;
+    int d = 0;
+    s64 row = sys_note_dispose_for_proc(p, NOTE_NAME_USR1, NOTE_DISP_CAUGHT, 0);
+    int posted = notes_post(p, NOTE_NAME_USR1, 0u, NULL, true);
+    bool armed = proc_caught_note_pending(p);
+    s64 r = notes_wait_take(&g_nw_fake, NW_USR1, 0, &n, &d);
+    bool drained = !proc_caught_note_pending(p);
+    notes_wait_untake(&g_nw_fake, d, &n);
+    bool rearmed = proc_caught_note_pending(p);
+    g_nw_fake.proc = NULL;
+    nw_free(p);
+
+    TEST_EXPECT_EQ(row, 0ll, "usr1 caught");
+    TEST_EXPECT_EQ(posted, 0, "post usr1");
+    TEST_ASSERT(armed, "the post armed the caught latch: the fixture has something to drain");
+    TEST_EXPECT_EQ(r, 0ll, "taken");
+    TEST_ASSERT(drained, "the last usr1 gone, its caught latch is gone");
+    TEST_ASSERT(rearmed, "put back, a caught note stays armed");
+}
+
 // The pop drains what the post armed, as a read of the fd does; a note the caller could
 // not hand over goes back at the head with both latches. N-2: taken exactly once.
 void test_notewait_take_drains_and_untake_rearms(void) {
@@ -176,6 +202,7 @@ void test_notewait_take_drains_and_untake_rearms(void) {
     TEST_ASSERT(rearmed, "put back, a default that ends the Proc stays armed");
     TEST_EXPECT_EQ(back, 2u, "both notes queued");
     TEST_ASSERT(at_head, "and it is next, as it was");
+    nw_take_drains_caught();
 }
 
 // A thread's own note comes before a shared one of its family, as at the tail. Put back,
@@ -237,7 +264,7 @@ void test_notewait_take_leaves_a_kill(void) {
 static volatile u32  g_nw_done;
 static volatile bool g_nw_exited;
 static volatile s64  g_nw_rc;
-static volatile u64  g_nw_mask_during, g_nw_mask_after, g_nw_elr, g_nw_x0;
+static volatile u64  g_nw_mask_during, g_nw_mask_after, g_nw_elr, g_nw_x0, g_nw_saved_during;
 static volatile u8   g_nw_flags_during, g_nw_flags_after;
 static volatile bool g_nw_unwound;
 static u64           g_nw_old, g_nw_set;
@@ -249,6 +276,8 @@ static s32           g_nw_poll_ms;
 static s64           g_nw_poll_result;
 static bool          g_nw_poll_answers;
 static bool          g_nw_stop_at_the_tail;
+static bool          g_nw_via_handler;
+static u64           g_nw_h_rec, g_nw_h_timeout;
 static volatile s64  g_nw_begun;
 static struct Note   g_nw_note;
 static volatile int  g_nw_direct;
@@ -265,7 +294,9 @@ static void nw_entry(void) {
         t->note_saved_mask = NW_CHILD;
     }
     s64 rc;
-    if (g_nw_poll_ms != NW_POLL_OFF) {
+    if (g_nw_via_handler) {
+        rc = sys_note_wait_handler(NOTE_WAIT_SUSPEND, g_nw_set, g_nw_h_rec, g_nw_h_timeout, 0);
+    } else if (g_nw_poll_ms != NW_POLL_OFF) {
         t->note_interruptible = true;
         rc = notes_wait_mask_begin(t, g_nw_set, g_nw_poll_ms < 0);
         g_nw_begun = rc;
@@ -281,6 +312,7 @@ static void nw_entry(void) {
     g_nw_rc           = rc;
     g_nw_direct       = d;
     g_nw_mask_during  = t->note_mask;
+    g_nw_saved_during = t->note_saved_mask;
     g_nw_flags_during = t->note_wait_flags;
     g_nw_unwound      = t->note_call_unwound;
     if (g_nw_in_handler) {
@@ -321,12 +353,13 @@ struct nw_run {
 
 static void nw_reset(u64 old, u64 set, bool take_form, s64 timeout) {
     g_nw_done = 0; g_nw_exited = false; g_nw_rc = 0x7fffffff;
-    g_nw_mask_during = g_nw_mask_after = 0; g_nw_elr = g_nw_x0 = 0;
+    g_nw_mask_during = g_nw_mask_after = g_nw_saved_during = 0; g_nw_elr = g_nw_x0 = 0;
     g_nw_flags_during = g_nw_flags_after = 0xffu; g_nw_unwound = false;
     g_nw_old = old; g_nw_set = set; g_nw_timeout = timeout;
     g_nw_take_form = take_form; g_nw_in_handler = false; g_nw_discard_first = false;
     g_nw_poll_ms = NW_POLL_OFF; g_nw_poll_result = 0; g_nw_poll_answers = false;
     g_nw_stop_at_the_tail = false;
+    g_nw_via_handler = false; g_nw_h_rec = 0; g_nw_h_timeout = 0;
     g_nw_begun = 0x7fffffff;
     g_nw_direct = -3;
     g_nw_sp = 0x10000000u;
@@ -678,8 +711,9 @@ void test_notewait_take_unwinds_for_another_note(void) {
     TEST_EXPECT_EQ((u64)g_nw_elr, 0x8000ull, "the handler is still owed");
 }
 
-// A caught note the word does name, left unmasked. It may unwind the wait, and the look
-// after the unwind still takes it: Linux dequeues before it reports EINTR.
+// A caught note the word does name, left unmasked: taken, not interrupted, as Linux dequeues
+// before it reports EINTR. The post's own list wake ends this wait, so the top look takes it.
+// The look after an unwind needs another CPU between a post's enqueue and its wake.
 void test_notewait_take_before_unwinding(void) {
     TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree must be empty at test entry");
     struct Proc *p = nw_proc(true);
@@ -1009,6 +1043,8 @@ void test_notewait_poll_in_a_handler(void) {
     TEST_EXPECT_EQ(g_nw_rc, 0ll, "0 at the deadline");
     TEST_EXPECT_EQ((u64)g_nw_mask_during, NW_USR1, "the handler's mask is untouched");
     TEST_EXPECT_EQ((u32)g_nw_flags_during, 0u, "and nothing is held");
+    // The call's end puts back whatever its start saved, so only the slot can tell.
+    TEST_EXPECT_EQ((u64)g_nw_saved_during, NW_CHILD, "the mask the handler returns to is untouched");
 }
 
 // What sigpending reads: queued and held, by row where the row is known; the thread's own
@@ -1024,9 +1060,10 @@ void test_notewait_pending_reads_what_is_held(void) {
     TEST_EXPECT_EQ(notes_post(p, NOTE_NAME_USR2, 0u, NULL, true), 0, "usr2");
     TEST_EXPECT_EQ(notes_post(p, NOTE_NAME_TTY_WINCH, 0u, NULL, true), 0, "winch");
     u64 held = notes_wait_pending(&g_nw_fake);
-    __atomic_store_n(&g_nw_fake.note_direct, (u16)NW_USR2, __ATOMIC_RELEASE);
+    // Term is on the thread's word and not in the queue, so only that word can report it.
+    __atomic_store_n(&g_nw_fake.note_direct, (u16)NW_BIT(NOTE_BIT_TERM), __ATOMIC_RELEASE);
     u64 unheld_own = notes_wait_pending(&g_nw_fake);
-    g_nw_fake.note_mask |= NW_USR2;
+    g_nw_fake.note_mask |= NW_BIT(NOTE_BIT_TERM);
     u64 held_own = notes_wait_pending(&g_nw_fake);
     __atomic_store_n(&g_nw_fake.note_direct, (u16)0, __ATOMIC_RELEASE);
     g_nw_fake.note_mask = 0;
@@ -1045,7 +1082,8 @@ void test_notewait_pending_reads_what_is_held(void) {
     TEST_EXPECT_EQ(empty, 0ull, "nothing queued reads nothing");
     TEST_EXPECT_EQ(held, NW_USR1 | NOTE_TAKE_TTY_WINCH, "held notes, by row: usr2 is not held");
     TEST_EXPECT_EQ(unheld_own, NW_USR1 | NOTE_TAKE_TTY_WINCH, "an own bit the mask lets through");
-    TEST_EXPECT_EQ(held_own, NW_USR1 | NW_USR2 | NOTE_TAKE_TTY_WINCH, "an own bit the mask holds");
+    TEST_EXPECT_EQ(held_own, NW_USR1 | NW_BIT(NOTE_BIT_TERM) | NOTE_TAKE_TTY_WINCH,
+                   "an own bit the mask holds");
     TEST_EXPECT_EQ(none, 0ull, "a clear mask holds nothing");
     TEST_EXPECT_EQ(in_handler, NW_USR1 | NW_USR2 | NOTE_TAKE_TTY_WINCH, "a handler holds all of it");
     TEST_EXPECT_EQ(call_mask, NW_USR1, "a wait's own mask is not the thread's");
@@ -1062,7 +1100,30 @@ void test_notewait_pending_sigset_names_the_row(void) {
     TEST_EXPECT_EQ(notes_sigset_for_take(0), 0ull, "nothing is nothing");
 }
 
+// SUSPEND through the syscall, where the call could go on: a table governs, so its own gate
+// does not answer for the syscall's, and a queued note means the wait does not sleep.
+static s64 nw_suspend_via_handler(u64 rec, u64 timeout) {
+    struct Proc *p = nw_proc(false);
+    if (!p) return 0x7fffffff;
+    (void)sys_note_dispose_for_proc(p, NOTE_NAME_CHILD_EXIT, NOTE_DISP_DEFAULT, 0);
+    (void)notes_post(p, NOTE_NAME_CHILD_EXIT, 0u, NULL, true);
+    nw_reset(NW_CHILD, 0, false, -1);
+    g_nw_via_handler = true;
+    g_nw_h_rec = rec;
+    g_nw_h_timeout = timeout;
+    struct nw_run r;
+    bool done = nw_start(&r, p) && nw_until_done();
+    nw_finish(&r);
+    return done ? g_nw_rc : 0x7ffffffell;
+}
+
 void test_notewait_syscall_refusals(void) {
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree must be empty at test entry");
+    TEST_EXPECT_EQ(nw_suspend_via_handler(0, (u64)-1ll), NW_EINTR, "with neither, the call goes on");
+    TEST_EXPECT_EQ(nw_suspend_via_handler(0x1000u, (u64)-1ll), -(s64)T_E_INVAL,
+                   "a suspend has no record, on a Proc with a table");
+    TEST_EXPECT_EQ(nw_suspend_via_handler(0, 0u), -(s64)T_E_INVAL,
+                   "and no timeout, on a Proc with a table");
     TEST_EXPECT_EQ(sys_note_wait_handler(4u, 0, 0, (u64)-1ll, 0), -(s64)T_E_INVAL, "no fifth form");
     TEST_EXPECT_EQ(sys_note_wait_handler(NOTE_WAIT_SUSPEND, 0, 0x1000u, (u64)-1ll, 0), -(s64)T_E_INVAL,
                    "a suspend has no record");

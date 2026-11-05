@@ -6169,6 +6169,55 @@ unsafe fn run_linux() -> ! {
     }
     leg!(rep, nv_n == 0, &nv_mk[..nv_n]);
 
+    // L372: a note only the call's mask holds, arriving during a sleep with no fds. The
+    // caller's mask is back before the tail, so the handler runs at this return: the read
+    // of the count after the svc makes no other way into the kernel. A post that came
+    // too near the deadline says nothing, so the child's stamp lets the parent tell.
+    nv_n = 0;
+    for sel in [false, true] {
+        let mut rp: [i32; 2] = [-1, -1];
+        if svc3(NR_PIPE2, rp.as_mut_ptr() as u64, 0, 0) != 0 {
+            nv_n = put_bytes(&mut nv_mk, 0, b"L372 pipe\n");
+            break;
+        }
+        let kid = svc6(NR_CLONE, SIGCHLD, 0, 0, 0, 0, 0);
+        if kid == 0 {
+            let nv_second: [i64; 2] = [1, 0];
+            let nv_hold: [u64; 2] = [&nw_held as *const u64 as u64, 8];
+            let _ = svc4(NR_RT_SIGPROCMASK, NT_SIG_SETMASK, &nw_none as *const u64 as u64, 0, 8);
+            let runs = nw_runs();
+            let stamp = mono_ns().to_ne_bytes();
+            let _ = svc3(NR_WRITE, rp[1] as u64, stamp.as_ptr() as u64, 8);
+            let got = if sel {
+                svc6(NR_PSELECT6, 0, 0, 0, 0, nv_second.as_ptr() as u64, nv_hold.as_ptr() as u64)
+            } else {
+                svc6(NR_PPOLL, 0, 0, nv_second.as_ptr() as u64, nv_hold[0], 8, 0)
+            };
+            let after = nw_runs();
+            linux_exit(if got == 0 && after == runs + 1 && nv_mask() == nw_none { 0 } else { 76 })
+        }
+        let _ = svc3(NR_CLOSE, rp[1] as u64, 0, 0);
+        let mut stamp = [0u8; 8];
+        let _ = svc3(NR_READ, rp[0] as u64, stamp.as_mut_ptr() as u64, 8);
+        let _ = svc3(NR_CLOSE, rp[0] as u64, 0, 0);
+        let settle: [i64; 2] = [0, 100_000_000];
+        let _ = svc4(NR_PPOLL, 0, 0, settle.as_ptr() as u64, 0);
+        let posted = if kid > 0 { svc3(NR_KILL, kid as u64, SIGUSR1, 0) } else { 1 };
+        let spent = mono_ns().wrapping_sub(u64::from_ne_bytes(stamp));
+        let ws = if kid > 0 { reap_or_kill(kid) } else { None };
+        let good = posted == 0 && (ws == Some(0) || spent > 800_000_000);
+        if !good && nv_n == 0 {
+            nv_n = put_bytes(&mut nv_mk, 0, b"L372 sel=");
+            nv_n = put_dec(&mut nv_mk, nv_n, sel as i64);
+            nv_n = put_bytes(&mut nv_mk, nv_n, b" fork=");
+            nv_n = put_dec(&mut nv_mk, nv_n, kid);
+            nv_n = put_bytes(&mut nv_mk, nv_n, b" ws=");
+            nv_n = put_dec(&mut nv_mk, nv_n, ws.map_or(-1, |w| w as i64));
+            nv_n = put_bytes(&mut nv_mk, nv_n, b"\n");
+        }
+    }
+    leg!(rep, nv_n == 0, &nv_mk[..nv_n]);
+
     ksa = [SIG_DFL, 0, 0, 0];
     let _ = svc4(NR_RT_SIGACTION, SIGUSR1, &ksa as *const u64 as u64, 0, 8);
     let _ = svc4(NR_RT_SIGACTION, SIGUSR2, &ksa as *const u64 as u64, 0, 8);
