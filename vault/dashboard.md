@@ -127,10 +127,10 @@ Generated — do not edit between the markers (`quaestor render`).
 
 - 2026-11-05 [[chg-2026-11-05-as4-r6-join]] — AS-4 audit round 6, the join's half
 - 2026-11-05 [[chg-2026-11-05-as4-r6-shell]] — AS-4 audit round 6, the shell's half
+- 2026-11-05 [[chg-2026-11-05-as4-r7-join]] — AS-4 audit round 7, the join's half
 - 2026-11-05 [[chg-2026-11-05-as4-r7-shell]] — AS-4 audit round 7, the shell's half
 - 2026-11-05 [[chg-2026-11-05-ut-tree-walks]] — A parsed tree is shared, not copied, and its operators drop without recursing
 - 2026-11-04 [[chg-2026-11-04-as4-r4]] — AS-4 audit round 4: the paste flow's waits arm, and Alt reaches a tile
 - 2026-11-04 [[chg-2026-11-04-as4-r5]] — AS-4 audit round 5, the join's half: Alt only on a printable rune
 - 2026-11-04 [[chg-2026-11-04-compositor-band]] — The designated compositor's threads are INTERACTIVE
-- 2026-11-04 [[chg-2026-11-04-console-owner-gate]] — Only the session factory names a console owner
 <!-- generated:end -->

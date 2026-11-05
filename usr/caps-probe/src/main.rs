@@ -69,7 +69,8 @@ fn seat_probe(stage: &str) -> i64 {
     use libthyla_rs::{fs, err::Error};
     use lictor::endpoint as seat;
     let elevated = match stage {
-        "--seat-baseline" | "--seat-restored" | "--seat-denied" | "--seat-cancelled" => false,
+        "--seat-baseline" | "--seat-restored" | "--seat-denied" | "--seat-cancelled"
+        | "--seat-control" | "--seat-poisoned" => false,
         "--seat-elevated" => true,
         _ => return 2,
     };
