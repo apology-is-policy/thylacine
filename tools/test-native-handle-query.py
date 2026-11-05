@@ -5,7 +5,8 @@ The output must be new. This does not emulate handle locking or Vivarium;
 run the native guest witness and Linux collision witness for those boundaries.
 A mutant must be refused: ceiling moves VIV_NATIVE_CEILING in the text the pins
 read, append drops the handler's APPEND bit from the code the test runs, and
-mirror moves libthyla-rs's NOTE_WAIT in the text the mirror check reads.
+mirror moves NOTE_WAIT in libthyla-rs and in Pouch's 0072, in the text the
+mirror check reads.
 """
 if not __debug__:raise SystemExit(__file__+': run without -O or PYTHONOPTIMIZE: its verdicts are asserts')
 import argparse
@@ -96,25 +97,41 @@ for m in re.finditer(r'^\s*SYS_([A-Z0-9_]+)\s*=\s*(\d+)\s*,',
                      (r / 'kernel/include/thylacine/syscall.h').read_text(), re.M):
     assert m.group(1) not in kernel_numbers, m.group(1)
     kernel_numbers[m.group(1)] = int(m.group(2))
-POUCH_ALIASES = {'PREAD64': 'PREAD', 'PWRITE64': 'PWRITE', 'EXIT': 'EXITS',
+POUCH_ALIASES = {'PREAD64': 'PREAD', 'PWRITE64': 'PWRITE', 'EXIT': 'EXITS', 'SCHED_YIELD': 'YIELD',
                  'MMAP': 'BURROW_ATTACH_LAZY', 'MUNMAP': 'BURROW_DETACH'}
 pouch_patches = sorted((r / 'usr/lib/pouch/patches').glob('*.patch'))
+pouch_text = {patch: patch.read_text() for patch in pouch_patches}
 libt = (r / 'usr/lib/libt/include/thyla/syscall.h').read_text()
 rust = (r / 'usr/lib/libthyla-rs/src/lib.rs').read_text()
 if a.mutant == 'mirror':
     rust, n = re.subn(r'^(pub const T_SYS_NOTE_WAIT:\s*u64\s*=\s*)141;', r'\g<1>142;', rust, flags=re.M)
     assert n == 1
+    wait_patch = r / 'usr/lib/pouch/patches/0072-pouch-note-wait.patch'
+    pouch_text[wait_patch], n = re.subn(r'^(\+#define __NR_note_wait\s+)141\b', r'\g<1>142',
+                                        pouch_text[wait_patch], flags=re.M)
+    assert n == 1
+# Every Pouch define of a syscall number is read, or is an ENOSYS stub (0xFFFF):
+# a line in a form the read misses (a trailing comment once hid 30) fails here.
+pouch_numbers, pouch_unread = [], []
+for patch in pouch_patches:
+    for line in pouch_text[patch].splitlines():
+        if not re.match(r'\+#define\s+(?:__NR_|SYS_)', line):
+            continue
+        m = re.match(r'\+#define\s+(?:__NR_|SYS_)(?:thyla_)?([a-z0-9_]+)\s+(\d+)\b', line)
+        if m:
+            pouch_numbers.append((POUCH_ALIASES.get(m.group(1).upper(), m.group(1).upper()), int(m.group(2))))
+        elif not re.match(r'\+#define\s+\S+\s+0xFFFF\b', line):
+            pouch_unread.append((patch.name, line))
+assert not pouch_unread, pouch_unread
 mirrors = {
     'libt': [(m.group(1), int(m.group(2)))
              for pattern in (r'^\s*T_SYS_([A-Z0-9_]+)\s*=\s*(\d+)\s*,', r'^#define T_SYS_([A-Z0-9_]+)\s+(\d+)\s*$')
              for m in re.finditer(pattern, libt, re.M)],
     'libthyla-rs': [(m.group(1), int(m.group(2))) for m in re.finditer(
         r'^pub const T_SYS_([A-Z0-9_]+):\s*u64\s*=\s*(\d+)\s*;', rust, re.M)],
-    'pouch': [(POUCH_ALIASES.get(m.group(1).upper(), m.group(1).upper()), int(m.group(2)))
-              for patch in pouch_patches for m in re.finditer(
-        r'^\+#define\s+(?:__NR_|SYS_)(?:thyla_)?([a-z0-9_]+)\s+(\d+)\s*$', patch.read_text(), re.M)],
+    'pouch': pouch_numbers,
 }
-floor = {'libt': 100, 'libthyla-rs': 120, 'pouch': 50}
+floor = {'libt': 100, 'libthyla-rs': 120, 'pouch': 80}
 region = {'POSTNOTE_TID', 'NOTE_DISPOSE', 'NOTE_WAIT'}
 drift = []
 for mirror, pairs in mirrors.items():
@@ -123,7 +140,7 @@ for mirror, pairs in mirrors.items():
     drift += [(mirror, name, number, kernel_numbers.get(name))
               for name, number in pairs if kernel_numbers.get(name) != number]
 if a.mutant == 'mirror':
-    assert drift == [('libthyla-rs', 'NOTE_WAIT', 142, 141)], drift
+    assert drift == [('libthyla-rs', 'NOTE_WAIT', 142, 141), ('pouch', 'NOTE_WAIT', 142, 141)], drift
     print('PASS mirror mutant refused by the mirror check')
     raise SystemExit(0)
 assert not drift, drift

@@ -212,7 +212,9 @@ C/kernel, C/libt and Rust mirror this contract. A focused check
 (`tools/test-native-handle-query.py`) holds every syscall number libt,
 libthyla-rs and Pouch's patches name to the kernel enum, by name, with a floor
 per mirror and the 138..141 region required in each, so a search that read
-nothing fails; its `mirror` mutant moves one Rust number. It also pins the native
+nothing fails. Every Pouch define of a syscall number must be read or be an
+ENOSYS stub (0xFFFF), so a form the read misses fails too. Its `mirror` mutant
+moves NOTE_WAIT in Rust and in Pouch's 0072. It also pins the native
 ceiling and the phenotype's collision asserts. build.sh runs it before every
 target and `tools/test-host-boundaries.sh` runs its mutants. The numbers are
 derived; other mirrored values (flag words, records) have their own checkers or

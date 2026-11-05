@@ -207,6 +207,15 @@ s64 sys_file_lock_handler(u64 fd_raw, u64 op, u64 start, u64 len, u64 out_va) {
         if (backoff < FILE_LOCK_BACKOFF_MAX_NS) backoff *= 2;
     }
 
+    // The take has its answer, and what follows is a close's work: the unlock a
+    // descriptor closed mid-call left owed, and the twin's last close. A close is
+    // never interruptible (SYS_CLOSE is unclassed). Here a claim this call still
+    // holds would unwind each wait at once, and the Tflush after it can cancel
+    // the unlock on the server, leaving the lock held for the Proc's life while
+    // the caller reads EBADF. Killable only from here; the mark stays as the loop
+    // left it, for the restart.
+    t->note_interruptible = false;
+
     if (rc == 0 && proc_owner && !test && type != SYS_FILE_LOCK_UN &&
         !file_lock_fd_names(p, fd, c)) {
         (void)file_lock_once(p, c, SYS_FILE_LOCK_UN, true, start, len, NULL);

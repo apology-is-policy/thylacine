@@ -384,6 +384,18 @@ Its controls are one variable away each: the same EINTR with no mark goes ahead,
 does the mark with another failure, and a close goes on to the last open and unlocks.
 Two legs hold the unlock: an open-file unlock past a cancelled flush, and the
 re-check's unlock after a mid-call close, whose flush the fake cancels.
+
+Round 2 (Fable 5.1, F1, P2) found that the re-check's unlock could still be
+cancelled. The take's wait can leave a claim held after its reply beat its
+Tflush. Every later wait of the call then unwinds at once, the Tflush follows, and a
+pool that has the Tlock(UNLCK) still queued cancels it. The re-check discarded that
+EINTR and kept the granted entry, so the lock stayed on the server for the Proc's
+life. Now everything after the wait loop runs with `note_interruptible` cleared,
+as a close does: the re-check's unlock, its walk, and the open-file twin's
+`fd_close`. Those waits are killable only, so the sibling runs land and the unlock
+applies. The mark stays as the loop left it, for the restart. The fake records
+`note_interruptible` at each take, unlock, release sync and `fd_close`, and the
+legs check the take ran interruptible and the close work did not.
 `dev9p.lock_cancelled_flush_says_eintr` now also fsyncs after each leg (round 1 F3).
 The cancelled run is resent with nothing latched, while the server's own EINTR has
 latched and dropped it.
