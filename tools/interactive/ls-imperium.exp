@@ -13,10 +13,11 @@
 #   (1b) THE CWD: imperium passes the sub-shell no --home, so the kernel cwd it
 #       inherited is its only source for $cwd -- which a relative cd and a
 #       relative glob read. Both must resolve against /home/michael, not "/".
-#   (2) THE CAP WORKS: michael cannot create in SYSTEM-owned /home (arm 0 shows
-#       the plain shell DENIED), but under imperium CAP_DAC_OVERRIDE bypasses the
-#       parent-write check, so `mkdir /home/<x>` + a `touch` inside it succeed --
-#       witnessed by `ls` listing the file. One variable away: imperium on/off.
+#   (2) THE CAP WORKS: michael cannot write SYSTEM-owned /thylacine-version (arm 0
+#       shows the plain shell DENIED), but under imperium CAP_DAC_OVERRIDE bypasses
+#       the write check, so a `touch` of it succeeds. One variable away: imperium
+#       on/off. A create on system's mount stays DENIED even then: elevation
+#       overrides rwx and is not a session end (IDENTITY-DESIGN 9.7 M7).
 #   (3) A BACKGROUND JOB, then ABDICATE: `sleep 314159 &` (its pid captured from
 #       ut's `[N] pid` line), then `abdicate` -> `imperium: relinquished` -> in
 #       the plain shell the fasces is gone (`imperium --list` -> not elevated),
@@ -82,13 +83,15 @@ proc expect_tool_line {want phase} {
 lc_boot
 lc_login michael correct-horse-battery-staple-v1
 
-# ---- (0) baseline: the plain shell is DENIED the SYSTEM-owned /home write ----
-# mkdir prints `mkdir: <path>: permission denied` on failure (silent on success),
-# so the DENIAL is witnessed by its message. If this ever succeeds silently, the
-# DAC boundary moved and arm (2)'s discrimination is void.
+# ---- (0) baseline: the plain shell is DENIED what is SYSTEM's -------------------
+# mkdir and touch name the path in their refusal (silent on success), so the
+# DENIAL is witnessed by its message. If this ever succeeds silently, the DAC
+# boundary moved and arm (2)'s discrimination is void.
 lc_send "mkdir /home/im-e2e-dac"
-lc_expect "im-e2e-dac: permission denied" "the plain shell cannot write SYSTEM-owned /home (0)"
-lc_pass "IM-5(0): baseline -- michael cannot create in /home without imperium"
+lc_expect "im-e2e-dac: permission denied" "the plain shell cannot create in SYSTEM-owned /home (0)"
+lc_send "touch /thylacine-version"
+lc_expect "'/thylacine-version': permission denied" "the plain shell cannot write SYSTEM-owned /thylacine-version (0)"
+lc_pass "IM-5(0): baseline -- michael cannot create in /home or write /thylacine-version without imperium"
 # Arm (1b)'s fixture: a directory under michael's home, where the login shell is.
 lc_send "mkdir -p imcwd-dir"
 
@@ -129,11 +132,13 @@ lc_expect "imcwd2:/home/michael/imcwd-dir:" "a relative cd resolves against the 
 lc_pass "IM-5(1b): the elevated sub-shell starts in the caller's directory -- \$cwd, a relative glob, a relative cd"
 
 # ---- (2) THE CAP WORKS under imperium --------------------------------------
-# Same path arm (0) was DENIED; under CAP_DAC_OVERRIDE the create succeeds, and a
-# touch inside it (also a SYSTEM-owned-dir write) succeeds -- ls lists the marker.
-lc_send "mkdir /home/im-e2e-dac; touch /home/im-e2e-dac/DACWORKS; ls /home/im-e2e-dac"
-lc_expect "DACWORKS" "CAP_DAC_OVERRIDE lets the elevated shell write SYSTEM-owned /home (2)"
-lc_pass "IM-5(2): an op DENIED to the plain shell SUCCEEDS under imperium"
+# The file arm (0) was DENIED; under CAP_DAC_OVERRIDE the touch succeeds. && makes
+# the marker the touch's own status, and a whole line cannot be the typed one.
+lc_send "touch /thylacine-version && echo DACWORKS"
+lc_expect_re {\nDACWORKS\r?\r?\n} "CAP_DAC_OVERRIDE lets the elevated shell write SYSTEM-owned /thylacine-version (2)"
+lc_send "mkdir /home/im-e2e-elevated"
+lc_expect "im-e2e-elevated: permission denied" "a create on system's mount stays DENIED under imperium, M7 (2)"
+lc_pass "IM-5(2): an op DENIED to the plain shell SUCCEEDS under imperium, and a create does not"
 
 # ---- (3) a background job, then ABDICATE + the scope teardown --------------
 set jobpid ""
@@ -149,8 +154,8 @@ lc_send "abdicate"
 lc_expect "imperium: relinquished" "abdicate -> the tool's parent resumes (3)"
 lc_send "imperium --list"
 lc_expect "not currently elevated" "after abdicate the shell is plain again (3)"
-lc_send "mkdir /home/im-e2e-after"
-lc_expect "im-e2e-after: permission denied" "after abdicate the /home write is DENIED again (3)"
+lc_send "touch /thylacine-version"
+lc_expect "'/thylacine-version': permission denied" "after abdicate the write is DENIED again (3)"
 # The scope teardown (I-25) killed the sub-shell's child: its pid is gone from ps.
 # A surviving pid FAILS (loud); the marker guarantees ps finished before we judge.
 lc_send "ps; echo PS-SCAN-DONE-im5"
