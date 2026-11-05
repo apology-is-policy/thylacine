@@ -4534,6 +4534,7 @@ void test_notes_table_exec(void) {
 static void nt_settle_ctx(struct exception_context *ctx) {
     for (size_t k = 0; k < sizeof(*ctx); k++) ((u8 *)ctx)[k] = 0;
     ctx->elr     = 0x8000u;
+    ctx->sp      = 0x10000000u;
     ctx->regs[0] = (u64)-(s64)T_E_INTR;
 }
 
@@ -4579,6 +4580,12 @@ void test_notes_restart_settle(void) {
     th.note_wait_flags = NOTE_WF_NOHAND;
     nt_settle_expect(&th, &ctx, true, 0u);
     th.note_wait_flags = 0;
+
+    // A stack the tail refuses: it takes nothing, so a re-issue would find the same note.
+    nt_settle_ctx(&ctx);
+    ctx.sp = 0u;
+    th.note_call_unwound = true; th.note_restartable = true;
+    nt_settle_expect(&th, &ctx, false, eintr);
 
     // A 9P call that lost its flush returns its reply with the mark set.
     nt_settle_ctx(&ctx);
