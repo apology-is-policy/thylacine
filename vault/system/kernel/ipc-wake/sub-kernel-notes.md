@@ -12,7 +12,7 @@ hazards: []
 abis: [abi-note-names]
 design: ["docs/ARCHITECTURE.md", "docs/ERRORS.md"]
 created: 2026-08-03
-updated: 2026-11-04
+updated: 2026-11-05
 ---
 ## Purpose
 
@@ -276,7 +276,7 @@ Operator votes 18, 19 and 20 ([[dec-2026-11-03-note-dispose-table]], ARCH 8.8.3)
 a note does is read from one per-note table, `struct viv_sigtab`, for the Linux
 phenotype and for a native Proc alike. `SYS_NOTE_DISPOSE` (139) writes a native row:
 default, ignore or caught, with a restart flag on a caught one. The first call sets
-`PROC_FLAG_NOTE_TABLE` (bit 24), and the table governs until the next exec. A native
+`PROC_FLAG_NOTE_TABLE` (bit 25), and the table governs until the next exec. A native
 fork copies the flag, the table and `handler_va`, as Plan 9's `sysrfork` copies
 `p->notify`; exec clears all three. `notes_table_governs` is the one spelling of the
 question, and every disposition reader asks it, never the phenotype. `SYS_NOTIFY` with

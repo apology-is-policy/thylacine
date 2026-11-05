@@ -1393,8 +1393,9 @@ bool proc_may_create_srv_registry(const struct Proc *p);
 // ARCH 8.8.3: this native Proc's dispositions are its note table's, from its first
 // SYS_NOTE_DISPOSE until its next exec. A Linux Proc's always are, so the bit is
 // never asked of one: notes_table_governs is the one spelling. Crosses rfork
-// explicitly, because proc_flags otherwise never do.
-#define PROC_FLAG_NOTE_TABLE         (1u << 24)
+// explicitly, because proc_flags otherwise never do. Bit 25: SEAT_CLIENT took 24
+// first, and PROC_FLAGS_ALL's disjointness assert caught the join.
+#define PROC_FLAG_NOTE_TABLE         (1u << 25)
 
 // The terminate-CLASS latch set (interrupt + tty:quit/hup + pipe). Used by the
 // whole-class clears -- handler registration, the self-managing mark, the

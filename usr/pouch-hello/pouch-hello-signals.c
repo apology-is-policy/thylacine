@@ -1793,7 +1793,7 @@ int main(int argc, char **argv) {
     if (term_death != 0) return 14;
     if (usr_death != 0) return 18;
     if (errnos != 0) return 16;
-    if (probe != 0) return 17;
+    if (probe != 0) return 22;
 
     printf("%s\n", POUCH_CENSUS_SIGNALS);
     fflush(stdout);

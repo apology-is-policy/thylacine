@@ -188,7 +188,7 @@ void test_9p_session_version_handshake(void) {
 }
 
 void test_9p_session_attach_handshake(void) {
-    struct p9_session s;
+    static struct p9_session s;      // under the 8192-byte frame bound
     p9_session_init(&s, /*root_fid=*/0, 8192);
 
     // Drive Tversion + Rversion.
@@ -740,7 +740,7 @@ void test_9p_session_flush_owner_waits_keeps_fid_live(void) {
 }
 
 void test_9p_session_clunk_round_trip(void) {
-    struct p9_session s;
+    static struct p9_session s;      // under the 8192-byte frame bound
     drive_session_open(&s, /*root_fid=*/0);
     // Walk + bind fid 7.
     int len = p9_session_send_walk(&s, g_buf, sizeof(g_buf), 0, 7, 1, g_wnames, g_wlens);
@@ -2122,7 +2122,7 @@ void test_9p_session_flush_headroom_grows_table(void) {
 void test_9p_session_reserved_tags_cap_the_table(void) {
     const u32 tags = P9_TAG_CHUNK + 1u;
     const u32 cap  = 2u * P9_TAG_CHUNK;
-    struct p9_session s;
+    static struct p9_session s;      // under the 8192-byte frame bound
     TEST_EXPECT_EQ(drive_session_open(&s, 0), 0, "open");
     int reserved = p9_session_reserve_tags(&s, tags);
     u32 chunks = s.n_chunks, limit = s.tag_limit;
