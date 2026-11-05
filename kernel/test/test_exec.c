@@ -1653,9 +1653,14 @@ void test_execve_policy_refusal_says_eacces(void) {
     ph[1].p_flags = PF_R | PF_W;
     int nx_stack = nx_load(NULL, size, NULL, 0, NULL, 0, 0);
     int nx_stack_look = nx_check(size);
-    ph[1].p_flags = PF_R | PF_W | PF_X;
+    ph[1].p_flags = PF_R | PF_X;
     int x_stack = nx_load(NULL, size, NULL, 0, NULL, 0, 0);
     int x_stack_look = nx_check(size);
+    // What a linker's -z execstack writes. The type-blind W^X check takes it first, so this
+    // is a different refusal with the same answer.
+    ph[1].p_flags = PF_R | PF_W | PF_X;
+    int rwx_stack = nx_load(NULL, size, NULL, 0, NULL, 0, 0);
+    int rwx_stack_look = nx_check(size);
 
     size = nx_dynamic("/bin/exec-wx");
     int interp_wx = nx_load(current_thread()->proc, size, "prog", 4, NULL, 0, 0);
@@ -1666,6 +1671,8 @@ void test_execve_policy_refusal_says_eacces(void) {
     TEST_EXPECT_EQ(nx_stack_look, 0, "CONTROL: and passes the parent's look");
     TEST_EXPECT_EQ(x_stack, -(int)T_E_ACCES, "an executable stack: EACCES");
     TEST_EXPECT_EQ(x_stack_look, -(int)T_E_ACCES, "the parent's look, an executable stack: EACCES");
+    TEST_EXPECT_EQ(rwx_stack, -(int)T_E_ACCES, "a linker's executable stack: EACCES");
+    TEST_EXPECT_EQ(rwx_stack_look, -(int)T_E_ACCES, "the parent's look, a linker's executable stack: EACCES");
     TEST_EXPECT_EQ(interp_wx, -(int)T_E_ACCES, "an interpreter the rule refuses: EACCES");
 }
 
