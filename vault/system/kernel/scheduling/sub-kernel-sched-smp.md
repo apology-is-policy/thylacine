@@ -34,7 +34,10 @@ between two steps of a sequence that reads, in source, like a single act.
   RELEASE-clear paired with an ACQUIRE-load.
 - A CPU-pinned Thread (`cpu_pinned`) never migrates. Every per-CPU idle
   and `kthread` are pinned. A wake reads `last_cpu` for its home and not the
-  waker's CPU, which is what `ready()` hands `select_target_cpu`.
+  waker's CPU, which is what `ready()` hands `select_target_cpu`. `ready_on`
+  extincts on a pinned thread placed off the CPU it last ran on, and sends its wake
+  IPI past the gate that keeps parked secondaries quiet in the test phase, since an
+  idle peer cannot steal it and a parked secondary has no tick to find it.
 - An idle CPU announces itself (`idle_in_wfi`) **before** it parks, so a
   peer that places work either sees the announcement and kicks it, or the
   IPI it sends lands pending and the WFI exits on it. This is
@@ -52,7 +55,14 @@ between two steps of a sequence that reads, in source, like a single act.
    harmless).
 2. `cs->prev_to_clear_on_cpu = prev` and `cs->pending_release_lock = &cs->lock`
    — two handoffs parked in the *CPU's* slot, not the thread's.
-3. `cpu_switch_context(&prev->ctx, &next->ctx)`.
+3. `cpu_switch_context(&prev->ctx, &next->ctx)`. It reads two things from TTBR0
+   and no flag. A zero ASID field (top 16 bits) means a kernel thread, which holds
+   no V state: prev's side skips the save, next's side skips the load, and the
+   registers go on holding the last EL0 thread's values, already in its Context,
+   until the next EL0 thread's load replaces all of them. An equal value means one
+   space: the MSR is skipped. One ISB closes every path. `sched_record_space`'s DSB
+   stays even when the record does not change, because it also completes prev's
+   cache maintenance before prev can run on another CPU.
 4. Whoever resumes on this CPU — either a thread returning from its own
    `sched()`, or a fresh thread arriving at `thread_trampoline` (or, for a
    user thread's first switch-in, `thread_user_trampoline` in the vector
@@ -287,7 +297,7 @@ re-entrancy guard is recorded here and nowhere in a Mechanism section
 | `g_cpu_alive[]` | `per_cpu_main` finished — the signal `smp_init` waits on |
 | `g_secondary_boot_stacks[]` | 7 × (4 KiB guard + 16 KiB usable), page-aligned |
 | `g_bootcpu_idle_stack` | the same shape, for cpu0's idle (#867) |
-| `g_exception_stacks[]` | RESERVED — unused at runtime under uniform EL1h |
+| `g_overflow_stacks[]` | 8 of the same shape: what a thread stack's overflow frame and the dump run on ([[sub-kernel-exception]]) |
 | `g_pac_keys[8]` | derived once by the primary, applied by every CPU |
 | `g_ipi_resched_count[]` | per-CPU IPI receive counter (observability) |
 | `g_secondary_preempt_enabled` | the #810 production gate |
@@ -384,6 +394,11 @@ a half-initialized CPU that reaches the idle loop is worse than no CPU.
   the placement IPI on a bare-volatile flag a peer can read stale-FALSE
   reintroduces up-to-backstop placement latency — the exact class #363
   closed. The comment at the site forbids it in words for this reason.
+- **An idle CPU covers its own timer base and no other.** Every other base
+  has its own CPU ([[sub-kernel-rendez]]). A secondary marks `tick_armed`
+  (`sched_mark_tick_armed`, right after `timer_arm_this_cpu` in `per_cpu_main`);
+  until then its sleepers link on cpu0's base and kick cpu0, so no deadline
+  sits on a base with no tick.
 - **The park's ordering is fixed**: announce, then `sched()`, then the
   re-check loop, then arm, then WFI. Any reordering breaks either the
   register-then-observe or the #363 guard.
@@ -408,10 +423,8 @@ a half-initialized CPU that reaches the idle loop is worse than no CPU.
 
 ## Caveats
 
-- `g_exception_stacks` is allocated and asserted but **unused at
-  runtime**: under uniform EL1h every exception frame is built on the
-  interrupted thread's own kernel stack. It is a pre-allocated landing
-  pad for a future dedicated overflow/SError stack.
+- Only the frame of a thread stack's overflow leaves that thread's stack: every other
+  exception frame is built on the interrupted thread's own kernel stack.
 - A spurious IPI is harmless by design — the handler is a counter bump —
   which is what lets every `idle_in_wfi` read be a relaxed hint.
 - The steal-invariant asserts in `pick_next` and `try_steal` are not

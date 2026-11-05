@@ -17,8 +17,8 @@ of the wait chain:
 
 Its whole job is to make two critical sections mutually exclusive:
 
-- **The sleeper's**, in `sleep`/`tsleep`: register on the Rendez (and the
-  timer-wait list), transition to SLEEPING, then re-check the death and
+- **The sleeper's**, in `sleep`/`tsleep`: register on the Rendez (and a
+  timer base), transition to SLEEPING, then re-check the death and
   terminate predicates.
 - **The waker's**, in the group-terminate cascade: read this Thread's
   `rendez_blocked_on` and `wakeup()` the Rendez it names.
@@ -56,13 +56,13 @@ Acyclicity rests on a single fact: **only the owning Thread ever writes
   `BUGGY_OBSERVE_BEFORE_REGISTER` in [[spec-death-wake]] — the
   non-reaping hang.
 - **A hit must undo the FULL registration.** Rendez waiter, backref, and
-  in `tsleep` the timer-wait link. Leaving the link strands an entry a
-  later tick will wake into a thread that is no longer sleeping.
+  in `tsleep` the timer entry. Leaving the entry would let `tsleep` return
+  with one linked, and the extinction at its exit says so.
 - **Nothing below this lock may take `lock-proc-table`.** The cascade
   holds the table lock and then this one; the reverse edge would close
   the cycle. `wait_pid_for` drops the table lock before it sleeps for this
   reason.
 - **The stop detour re-acquires in order.** It drops all held locks,
   parks on the thread's own `debug_rendez`, and re-takes
-  `wait_lock` → (`g_timerwait.lock`) → `r->lock` on resume. A shortcut
+  `wait_lock` → (a timer base's lock) → `r->lock` on resume. A shortcut
   that keeps one held across the park inverts the order.

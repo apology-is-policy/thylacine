@@ -71,7 +71,7 @@ void timer_arm_this_cpu(void);
 
 // Tickless idle (NO_HZ_IDLE; docs/TICKLESS-IDLE.md, #299). Arm THIS CPU's
 // banked virtual timer as a ONE-SHOT firing at absolute counter value
-// `target_cnt` (a CNTVCT timestamp -- e.g. a g_timerwait sleep_deadline, or
+// `target_cnt` (a CNTVCT timestamp -- e.g. a timer base's sleep_deadline, or
 // timer_ns_to_counter(deadline_ns)). Reads CNTVCT, writes the clamped reload,
 // leaves CNTV_CTL at ENABLE. When the shot fires, timer_irq_handler re-arms
 // the periodic g_reload exactly as for any tick -- correct the moment the CPU

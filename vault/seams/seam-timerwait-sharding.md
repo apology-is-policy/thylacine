@@ -2,7 +2,8 @@
 id: seam-timerwait-sharding
 type: seam
 title: "One global lock and list for every deadlined sleeper"
-status: open
+status: closed
+closed-by: chg-2026-11-03-c8b-timer-bases
 surface: [sub-kernel-rendez]
 opened-by: chg-2026-05-17-p5-tsleep
 tracker: "documented future optimization"

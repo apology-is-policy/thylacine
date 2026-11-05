@@ -351,11 +351,11 @@ void test_vivarium_rejects_are_deliberate(void) {
                    (int)VIV_ENOSYS,
                    "sigaltstack stays ENOSYS -- load-bearing for the 6.23 escape detector");
     // rt_sigsuspend (133) shares its number with the native SYS_UMASK (M8); its
-    // ENOSYS row is what keeps a Linux Proc's call from reaching the mask
-    // (vivarium.c's per-number pin names this test).
+    // TIER2 row (vote 24) is consumed before the native switch, which keeps a Linux
+    // Proc's call from reaching the mask (vivarium.c's per-number pin names this test).
     TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_RT_SIGSUSPEND, args, &out),
-                   (int)VIV_ENOSYS,
-                   "rt_sigsuspend stays ENOSYS -- consumed before native 133, SYS_UMASK");
+                   (int)VIV_TIER2,
+                   "rt_sigsuspend stays T2 -- consumed before native 133, SYS_UMASK");
     // rt_sigaction (134) sits at the number held for corona's
     // SYS_SRV_REGISTRY_NEW; rt_sigprocmask (135) and rt_sigpending (136) share
     // theirs with SYS_READLINK and SYS_LSTAT (vote 2026-10-20). Each row is
@@ -368,13 +368,14 @@ void test_vivarium_rejects_are_deliberate(void) {
                    (int)VIV_TIER2,
                    "rt_sigprocmask stays T2 -- consumed before native 135, SYS_READLINK");
     TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_RT_SIGPENDING, args, &out),
-                   (int)VIV_ENOSYS,
-                   "rt_sigpending stays ENOSYS -- consumed before native 136, SYS_LSTAT");
+                   (int)VIV_TIER2,
+                   "rt_sigpending stays T2 -- consumed before native 136, SYS_LSTAT");
     // rt_sigtimedwait (137) shares its number with SYS_FILE_LOCK (votes 34-35);
-    // its ENOSYS row keeps a Linux Proc's call from taking a lock.
+    // its TIER2 row (vote 24), consumed before the native switch, keeps a Linux
+    // Proc's call from taking a lock.
     TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_RT_SIGTIMEDWAIT, args, &out),
-                   (int)VIV_ENOSYS,
-                   "rt_sigtimedwait stays ENOSYS -- consumed before native 137, SYS_FILE_LOCK");
+                   (int)VIV_TIER2,
+                   "rt_sigtimedwait stays T2 -- consumed before native 137, SYS_FILE_LOCK");
 
     // VIVARIUM 6.29: the sleep rows. Until them both FORWARDed to ENOSYS, and
     // musl's sleep() and usleep() returned at once.
@@ -431,9 +432,9 @@ void test_vivarium_rejects_are_deliberate(void) {
     TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_RT_SIGPROCMASK, args, &out),
                    (int)VIV_TIER2, "rt_sigprocmask (135) is a TIER2 row");
     TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_RT_SIGPENDING, args, &out),
-                   (int)VIV_ENOSYS, "rt_sigpending (136) is an ENOSYS row");
+                   (int)VIV_TIER2, "rt_sigpending (136) is a TIER2 row");
     TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_RT_SIGTIMEDWAIT, args, &out),
-                   (int)VIV_ENOSYS, "rt_sigtimedwait (137) is an ENOSYS row");
+                   (int)VIV_TIER2, "rt_sigtimedwait (137) is a TIER2 row");
     TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_RT_SIGQUEUEINFO, args, &out),
                    (int)VIV_ENOSYS, "rt_sigqueueinfo (138) is an ENOSYS row");
 
@@ -456,7 +457,7 @@ void test_vivarium_rejects_are_deliberate(void) {
     TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_TGKILL, args, &out),
                    (int)VIV_TIER2, "tgkill (131) is a TIER2 row (vivarium_kill_decide)");
     TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_RT_SIGSUSPEND, args, &out),
-                   (int)VIV_ENOSYS, "rt_sigsuspend (133) is an ENOSYS row");
+                   (int)VIV_TIER2, "rt_sigsuspend (133) is a TIER2 row (notes_wait_suspend)");
 }
 
 void test_vivarium_unknown_forwards(void) {
@@ -3152,48 +3153,44 @@ void test_vivarium_timespec_to_ms(void) {
     TEST_ASSERT(!vivarium_timespec_to_ms(0, 0, &ms, NULL), "NULL out_err refused");
 }
 
-// V-5c: the ppoll argument domain. Two of the three refusals are ENOSYS rather
-// than EINVAL, and that distinction is the point -- the arguments are valid
-// Linux, and it is this kernel that cannot serve them.
+// V-5c: the ppoll argument domain.
 void test_vivarium_ppoll_decide(void) {
     s32 err = -1;
 
-    TEST_ASSERT(vivarium_ppoll_decide(1, 0, &err), "one fd, no sigmask, is served");
+    TEST_ASSERT(vivarium_ppoll_decide(1, 0, 0, &err), "one fd, no sigmask, is served");
     TEST_ASSERT(err == 0, "with no error");
-    TEST_ASSERT(vivarium_ppoll_decide(POLL_MAX_NFDS, 0, &err),
+    TEST_ASSERT(vivarium_ppoll_decide(POLL_MAX_NFDS, 0, 0, &err),
                 "exactly POLL_MAX_NFDS fds is served -- the bound is inclusive");
 
-    // ppoll's whole reason to exist over poll() is the ATOMIC mask swap. There
-    // is no way to do that here, and doing it approximately would re-open the
-    // race the caller chose ppoll to close.
+    // A size is only looked at beside a mask, as Linux's set_user_sigmask.
     err = -1;
-    TEST_ASSERT(!vivarium_ppoll_decide(1, 0x40000000, &err), "a sigmask is refused");
-    TEST_ASSERT(err == T_E_NOSYS,
-                "as ENOSYS -- the shape is unserved, the argument is not wrong");
+    TEST_ASSERT(vivarium_ppoll_decide(1, 0x40000000, 8, &err), "a sigmask is served");
+    TEST_ASSERT(err == 0, "with no error");
+    err = -1;
+    TEST_ASSERT(!vivarium_ppoll_decide(1, 0x40000000, 4, &err), "a mask of another size is refused");
+    TEST_ASSERT(err == T_E_INVAL, "as EINVAL");
+    err = -1;
+    TEST_ASSERT(vivarium_ppoll_decide(1, 0, 4, &err), "with no mask the size is not read");
 
     // nfds == 0 is Linux's timed sleep, and it is SERVED -- it was refused until
     // V-5c-2. SYS_POLL still rejects nfds == 0 (deliberately), so the decision
     // this asserts is that the domain check must LET IT THROUGH for the caller
     // to route to sys_poll_sleep_for rather than reject it here.
     err = -1;
-    TEST_ASSERT(vivarium_ppoll_decide(0, 0, &err), "nfds == 0 is served -- a sleep");
+    TEST_ASSERT(vivarium_ppoll_decide(0, 0, 0, &err), "nfds == 0 is served -- a sleep");
     TEST_ASSERT(err == 0, "with no error");
 
     // This one IS a bad value: the native cap is a real bound a caller must
     // respect, so it gets the POSIX code for a bad argument.
     err = -1;
-    TEST_ASSERT(!vivarium_ppoll_decide(POLL_MAX_NFDS + 1, 0, &err),
+    TEST_ASSERT(!vivarium_ppoll_decide(POLL_MAX_NFDS + 1, 0, 0, &err),
                 "over the native cap is refused");
     TEST_ASSERT(err == T_E_INVAL, "as EINVAL -- a real out-of-range argument");
 
-    // Checked in the order a caller can act on: someone using ppoll FOR its
-    // signal semantics must learn that is the unserved part.
     err = -1;
-    TEST_ASSERT(!vivarium_ppoll_decide(0, 0x40000000, &err),
-                "a sigmask is refused even on the sleep shape");
-    TEST_ASSERT(err == T_E_NOSYS, "reporting the sigmask, which is checked first");
+    TEST_ASSERT(vivarium_ppoll_decide(0, 0x40000000, 8, &err), "a sigmask is served on the sleep shape");
 
-    TEST_ASSERT(!vivarium_ppoll_decide(1, 0, NULL), "NULL out_err is refused");
+    TEST_ASSERT(!vivarium_ppoll_decide(1, 0, 0, NULL), "NULL out_err is refused");
 }
 
 // V-5c-2: the pselect6 argument domain + the nfds clamp.
@@ -3201,27 +3198,21 @@ void test_vivarium_pselect6_decide(void) {
     s32 err = -1;
     u32 n   = 99;
 
-    TEST_ASSERT(vivarium_pselect6_decide(8, 0, &n, &err), "8 fds, no sigmask, served");
+    TEST_ASSERT(vivarium_pselect6_decide(8, &n, &err), "8 fds, no sigmask, served");
     TEST_ASSERT(err == 0 && n == 8, "nfds passes through untouched");
 
-    TEST_ASSERT(vivarium_pselect6_decide(0, 0, &n, &err), "nfds == 0 is served");
+    TEST_ASSERT(vivarium_pselect6_decide(0, &n, &err), "nfds == 0 is served");
     TEST_ASSERT(n == 0, "as zero -- the caller routes it to the sleep");
-
-    // Same refusal as ppoll's, same reason, same code.
-    err = -1;
-    TEST_ASSERT(!vivarium_pselect6_decide(8, 0x40000000, &n, &err),
-                "a sigmask pair pointer is refused");
-    TEST_ASSERT(err == T_E_NOSYS, "as ENOSYS -- unserved shape, not a bad value");
 
     // nfds is an int, so negative is reachable and IS a bad value.
     err = -1;
-    TEST_ASSERT(!vivarium_pselect6_decide((u64)(s64)-1, 0, &n, &err),
+    TEST_ASSERT(!vivarium_pselect6_decide((u64)(s64)-1, &n, &err),
                 "negative nfds refused (sign-extended -- what musl passes)");
     // V-5d F3. The SAME -1 left merely ZERO-extended, which a different libc or
     // a hand-rolled wrapper may produce. Before the truncation this read as
     // 4294967295 -- positive, therefore CLAMPED to PROC_HANDLE_MAX and served,
     // so select(-1, ...) worked on one toolchain and was EINVAL on another.
-    TEST_ASSERT(!vivarium_pselect6_decide(0x00000000FFFFFFFFull, 0, &n, &err),
+    TEST_ASSERT(!vivarium_pselect6_decide(0x00000000FFFFFFFFull, &n, &err),
                 "negative nfds refused (zero-extended -- the same -1)");
     TEST_EXPECT_EQ(err, (s32)T_E_INVAL, "and it is EINVAL, not a clamp");
     TEST_ASSERT(err == T_E_INVAL, "as EINVAL");
@@ -3230,7 +3221,7 @@ void test_vivarium_pselect6_decide(void) {
     // error. A bit above the fd table names an fd that cannot exist, so Linux
     // simply does not scan it -- and neither do we.
     err = -1;
-    TEST_ASSERT(vivarium_pselect6_decide(100000, 0, &n, &err),
+    TEST_ASSERT(vivarium_pselect6_decide(100000, &n, &err),
                 "an absurd nfds is CLAMPED, not refused -- Linux does not error here");
     TEST_ASSERT(n == PROC_HANDLE_MAX, "clamped to the fd table, not to FD_SETSIZE");
     TEST_ASSERT(err == 0, "with no error");
@@ -3238,11 +3229,11 @@ void test_vivarium_pselect6_decide(void) {
     // The clamp is at PROC_HANDLE_MAX, and the value below it must survive: this
     // is the assertion that would have caught pouch's F-a, where the bound was
     // copied as 64 and the kernel later moved it.
-    TEST_ASSERT(vivarium_pselect6_decide(200, 0, &n, &err) && n == 200,
+    TEST_ASSERT(vivarium_pselect6_decide(200, &n, &err) && n == 200,
                 "fd 199 is a perfectly ordinary handle -- 64 is NOT the ceiling");
 
-    TEST_ASSERT(!vivarium_pselect6_decide(1, 0, NULL, &err), "NULL out_nfds refused");
-    TEST_ASSERT(!vivarium_pselect6_decide(1, 0, &n, NULL),   "NULL out_err refused");
+    TEST_ASSERT(!vivarium_pselect6_decide(1, NULL, &err), "NULL out_nfds refused");
+    TEST_ASSERT(!vivarium_pselect6_decide(1, &n, NULL),   "NULL out_err refused");
 }
 
 // V-5c-2: FDS_BYTES -- how much of an fd_set covers the low nfds bits.
@@ -6194,8 +6185,8 @@ void test_vivarium_fd_is_slow_cached(void) {
     // A real pipe: devpipe's stat says S_IFIFO.
     hidx_t rd = -1, wr = -1;
     TEST_EXPECT_EQ(sys_pipe_for_proc(p, &rd, &wr), 0, "pipe");
-    TEST_ASSERT(viv_fd_is_slow_for_test(p, (u64)rd), "a pipe's read end is slow");
-    TEST_ASSERT(viv_fd_is_slow_for_test(p, (u64)wr), "a pipe's write end is slow");
+    TEST_ASSERT(file_is_slow_for_test(p, (u64)rd), "a pipe's read end is slow");
+    TEST_ASSERT(file_is_slow_for_test(p, (u64)wr), "a pipe's write end is slow");
 
     // A regular file: stat once, cached, never again.
     g_intr_stat_fail  = 0;
@@ -6203,8 +6194,8 @@ void test_vivarium_fd_is_slow_cached(void) {
     g_intr_stat_calls = 0;
     hidx_t reg = intr_install(p);
     TEST_ASSERT(reg >= 0, "install a regular file");
-    TEST_ASSERT(!viv_fd_is_slow_for_test(p, (u64)reg), "a regular file is not slow");
-    TEST_ASSERT(!viv_fd_is_slow_for_test(p, (u64)reg), "still not slow");
+    TEST_ASSERT(!file_is_slow_for_test(p, (u64)reg), "a regular file is not slow");
+    TEST_ASSERT(!file_is_slow_for_test(p, (u64)reg), "still not slow");
     TEST_EXPECT_EQ(g_intr_stat_calls, 1, "the type was learned once and cached");
 
     // A character device (a pts, the console): slow, and cached the same way.
@@ -6212,8 +6203,18 @@ void test_vivarium_fd_is_slow_cached(void) {
     g_intr_stat_calls = 0;
     hidx_t chr = intr_install(p);
     TEST_ASSERT(chr >= 0, "install a character device");
-    TEST_ASSERT(viv_fd_is_slow_for_test(p, (u64)chr), "a character device is slow");
-    TEST_ASSERT(viv_fd_is_slow_for_test(p, (u64)chr), "still slow");
+    TEST_ASSERT(file_is_slow_for_test(p, (u64)chr), "a character device is slow");
+    TEST_ASSERT(file_is_slow_for_test(p, (u64)chr), "still slow");
+    TEST_EXPECT_EQ(g_intr_stat_calls, 1, "learned once");
+
+    // A byte connection stats as a socket (ARCH 8.8.3): netd's data file, devsrv's
+    // open connection.
+    g_intr_stat_mode  = T_S_IFSOCK | 0666u;
+    g_intr_stat_calls = 0;
+    hidx_t sock = intr_install(p);
+    TEST_ASSERT(sock >= 0, "install a socket file");
+    TEST_ASSERT(file_is_slow_for_test(p, (u64)sock), "a socket file is slow");
+    TEST_ASSERT(file_is_slow_for_test(p, (u64)sock), "still slow");
     TEST_EXPECT_EQ(g_intr_stat_calls, 1, "learned once");
 
     // A failing stat: not slow, NOT cached -- the next call asks again and
@@ -6223,18 +6224,18 @@ void test_vivarium_fd_is_slow_cached(void) {
     g_intr_stat_calls = 0;
     hidx_t flaky = intr_install(p);
     TEST_ASSERT(flaky >= 0, "install a file whose stat fails");
-    TEST_ASSERT(!viv_fd_is_slow_for_test(p, (u64)flaky), "a failed stat answers not slow");
-    TEST_ASSERT(!viv_fd_is_slow_for_test(p, (u64)flaky), "and again");
+    TEST_ASSERT(!file_is_slow_for_test(p, (u64)flaky), "a failed stat answers not slow");
+    TEST_ASSERT(!file_is_slow_for_test(p, (u64)flaky), "and again");
     TEST_EXPECT_EQ(g_intr_stat_calls, 2, "a failure is not cached");
     g_intr_stat_fail = 0;
-    TEST_ASSERT(viv_fd_is_slow_for_test(p, (u64)flaky),
+    TEST_ASSERT(file_is_slow_for_test(p, (u64)flaky),
                 "once the stat succeeds, the device is slow");
     TEST_EXPECT_EQ(g_intr_stat_calls, 3, "and the answer is now cached");
-    TEST_ASSERT(viv_fd_is_slow_for_test(p, (u64)flaky), "cached slow");
+    TEST_ASSERT(file_is_slow_for_test(p, (u64)flaky), "cached slow");
     TEST_EXPECT_EQ(g_intr_stat_calls, 3, "no further stat");
 
-    TEST_ASSERT(!viv_fd_is_slow_for_test(p, 60u), "a closed fd is not slow");
-    TEST_ASSERT(!viv_fd_is_slow_for_test(p, ~0ull), "a garbage fd is not slow");
+    TEST_ASSERT(!file_is_slow_for_test(p, 60u), "a closed fd is not slow");
+    TEST_ASSERT(!file_is_slow_for_test(p, ~0ull), "a garbage fd is not slow");
 
     // A socket is slow because it has a socktab row, whatever its Dev's stat
     // says, and the row is asked before any handle lookup: fd 41 has a row
@@ -6245,8 +6246,8 @@ void test_vivarium_fd_is_slow_cached(void) {
     TEST_ASSERT(viv_socktab_claim(st, 41, VIV_NET_TCP, 3, VIV_SOCK_CONNECTED, NULL),
                 "claim a socket row for fd 41");
     __atomic_store_n(&p->socktab, st, __ATOMIC_RELEASE);
-    TEST_ASSERT(viv_fd_is_slow_for_test(p, 41u), "a socket (a socktab row) is slow");
-    TEST_ASSERT(!viv_fd_is_slow_for_test(p, 42u), "a neighbour with no row and no handle is not");
+    TEST_ASSERT(file_is_slow_for_test(p, 41u), "a socket (a socktab row) is slow");
+    TEST_ASSERT(!file_is_slow_for_test(p, 42u), "a neighbour with no row and no handle is not");
 
     p->state = PROC_STATE_ZOMBIE;
     proc_free(p);
@@ -6440,4 +6441,42 @@ void test_vivarium_close_keeps_a_reserved_row(void) {
     TEST_EXPECT_EQ(reaped, pid, "wait_pid returned the child");
     TEST_EXPECT_EQ(status, 0,
         "a reserved number: close keeps its row, bind is EBADF; a free one's close drops it");
+}
+
+// ARCH 8.8.3, signal(7)'s restart list. A positive list: a call nobody thought about
+// answers EINTR, which POSIX allows, rather than re-running with stale arguments.
+void test_vivarium_call_restartable(void) {
+    u64 args[6] = { 0, 0, 0, 0, 0, 0 };
+    static const u64 restarts[] = {
+        VIV_LINUX_ACCEPT, VIV_LINUX_ACCEPT4, VIV_LINUX_CONNECT, VIV_LINUX_RECVFROM,
+        VIV_LINUX_RECVMSG, VIV_LINUX_SENDTO, VIV_LINUX_SENDMSG, VIV_LINUX_WAIT4,
+        VIV_LINUX_READ, VIV_LINUX_READV, VIV_LINUX_WRITE, VIV_LINUX_WRITEV,
+        VIV_LINUX_PREAD64, VIV_LINUX_PWRITE64, VIV_LINUX_IOCTL,
+    };
+    for (u32 i = 0; i < sizeof(restarts) / sizeof(restarts[0]); i++)
+        TEST_ASSERT(vivarium_call_restartable(restarts[i], args), "on the list: restarts");
+
+    static const u64 never[] = {
+        VIV_LINUX_PPOLL, VIV_LINUX_PSELECT6, VIV_LINUX_NANOSLEEP,
+        VIV_LINUX_CLOCK_NANOSLEEP, VIV_LINUX_RT_SIGSUSPEND, VIV_LINUX_RT_SIGTIMEDWAIT,
+        VIV_LINUX_CLOSE, 0xfffffu,
+    };
+    for (u32 i = 0; i < sizeof(never) / sizeof(never[0]); i++)
+        TEST_ASSERT(!vivarium_call_restartable(never[i], args), "never restarts");
+
+    TEST_ASSERT(vivarium_call_restartable(VIV_LINUX_FUTEX, args),
+                "a futex wait with no timeout re-issues as it stands");
+    args[3] = 0x1000u;
+    TEST_ASSERT(!vivarium_call_restartable(VIV_LINUX_FUTEX, args),
+                "a timed one would owe a restart block with what time is left");
+    args[3] = 0;
+
+    args[1] = VIV_F_SETLKW;
+    TEST_ASSERT(vivarium_call_restartable(VIV_LINUX_FCNTL, args), "F_SETLKW waits");
+    args[1] = VIV_F_OFD_SETLKW;
+    TEST_ASSERT(vivarium_call_restartable(VIV_LINUX_FCNTL, args), "F_OFD_SETLKW waits");
+    args[1] = VIV_F_GETFD;
+    TEST_ASSERT(!vivarium_call_restartable(VIV_LINUX_FCNTL, args), "F_GETFD does not");
+
+    TEST_ASSERT(!vivarium_call_restartable(VIV_LINUX_READ, NULL), "no arguments, no answer");
 }

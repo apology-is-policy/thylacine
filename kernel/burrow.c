@@ -1146,11 +1146,13 @@ int burrow_map_in(struct AddrSpace *as, bool exempt, struct Burrow *v,
         "USER_VA_TOP must equal mmu_install_user_pte's (vaddr >> 47) bound");
     if (vaddr + length > USER_VA_TOP) return -1;
 
-    // Delegate constraint validation (W+X reject, prot value) to vma_alloc.
-    // It returns NULL on any constraint violation OR on SLUB OOM, and
-    // takes burrow_acquire_mapping internally on success.
+    // The constraints (W+X reject, prot value) are the caller's doing. A NULL past
+    // them is the slab's, a resource refusal the caller may report as one, and exec
+    // must: its -1 says the image is at fault, and a shell runs that as a script.
+    // vma_alloc takes burrow_acquire_mapping internally on success.
+    if (!vma_args_ok(vaddr, vaddr + length, prot, v, /*offset=*/0)) return -1;
     struct Vma *vma = vma_alloc(vaddr, vaddr + length, prot, v, /*offset=*/0);
-    if (!vma) return -1;
+    if (!vma) return -(int)T_E_NOMEM;
 
     // vma_insert refuses an overlap (-1) or the VMA cap (-T_E_NOMEM: a resource
     // refusal the caller may report as one, B-1a' audit F18). Either way the

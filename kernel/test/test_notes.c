@@ -697,13 +697,14 @@ void test_notes_intr_latch_lifecycle(void) {
     TEST_ASSERT(!proc_intr_terminate_pending(p),
                 "handler-bearing Proc never arms");
 
-    // (d) Unregistering does not retro-arm; the NEXT post re-evaluates.
+    // (d) Unregistering re-reads what is queued (ARCH 8.8.3): the two interrupts
+    // posted past the handler have no handler now, and a wait must not ride them out.
     notes_set_handler(p, 0u);
-    TEST_ASSERT(!proc_intr_terminate_pending(p),
-                "unregister does not retro-arm");
+    TEST_ASSERT(proc_intr_terminate_pending(p),
+                "unregister arms from the queue");
     TEST_EXPECT_EQ(notes_post(p, "interrupt", 0u, NULL, true), 0, "post 3");
     TEST_ASSERT(proc_intr_terminate_pending(p),
-                "post after unregister re-arms");
+                "the latch stands across another post");
 
     // (e) Drain-clear: three interrupts queued; the latch survives popping
     // the first two and clears on the LAST.
@@ -1247,7 +1248,13 @@ void test_notes_caught_note_claim_once(void) {
     TEST_ASSERT(p != NULL, "proc_alloc succeeded");
     p->state     = PROC_STATE_ALIVE;
     p->phenotype = PHENO_LINUX;
-    notes_set_handler(p, 0x1000u);
+    struct viv_sigtab *tab = (struct viv_sigtab *)kzalloc(sizeof(struct viv_sigtab), 0);
+    TEST_ASSERT(tab != NULL, "sigtab alloc");
+    p->sigtab = tab;                    // freed by proc_free
+    const struct viv_ksigaction hand = { .handler = 0x1000, .flags = 0, .restorer = 0x2000,
+                                         .mask = 0 };
+    TEST_ASSERT(viv_sigtab_set(tab, VIV_SIGNOTE_INTERRUPT, &hand), "catch interrupt");
+    TEST_ASSERT(viv_sigtab_set(tab, VIV_SIGNOTE_CHILD_EXIT, &hand), "catch child_exit");
 
     static struct Thread a, b, c;       // BSS-zeroed, reset each run
     a.proc = b.proc = c.proc = p;
@@ -1492,8 +1499,8 @@ void test_notes_fstat_reports_chr(void) {
 // note AT GENERATION, exactly as Linux does -- and reports SUCCESS, because on
 // Linux `kill()` to a process ignoring the signal succeeds.
 //
-// The queue is directly observable here, which no in-guest leg can manage (a
-// Linux guest has no notes fd and rt_sigpending is ENOSYS). The guest-side
+// The queue is directly observable here, which an in-guest leg can see only through
+// rt_sigpending, for what the thread holds. The guest-side
 // generator DOES exist since V-6c -- fd 0 is a reader-less pipe write end, so
 // viv-pheno-probe raises SIGPIPE at will; its L205-L216 legs drive the
 // install-time twin of this hook (notes_discard_name) through rt_sigaction.
@@ -2732,7 +2739,13 @@ void test_notes_family_past_the_first_byte(void) {
     TEST_ASSERT(p != NULL, "proc_alloc succeeded");
     p->state     = PROC_STATE_ALIVE;
     p->phenotype = PHENO_LINUX;
-    notes_set_handler(p, 0x1000u);
+    struct viv_sigtab *tab = (struct viv_sigtab *)kzalloc(sizeof(struct viv_sigtab), 0);
+    TEST_ASSERT(tab != NULL, "sigtab alloc");
+    p->sigtab = tab;                    // freed by proc_free
+    const struct viv_ksigaction hand = { .handler = 0x1000, .flags = 0, .restorer = 0x2000,
+                                         .mask = 0 };
+    TEST_ASSERT(viv_sigtab_set(tab, VIV_SIGNOTE_USR1, &hand), "catch usr1");
+    TEST_ASSERT(viv_sigtab_set(tab, VIV_SIGNOTE_USR2, &hand), "catch usr2");
 
     static struct Thread a, b;          // BSS-zeroed, reset each run
     a.proc = b.proc = p;
@@ -3822,14 +3835,12 @@ void test_notes_class_scans_read_phenotype_sigtab(void) {
 }
 
 // -----------------------------------------------------------------------------
-// notes.phenotype_sigreturn_restores_mask -- the mask half of a phenotype
-// sigreturn (Linux restores uc_sigmask; here the kernel-side note_saved_mask
-// the Linux delivery path wrote beside the registers), and its NATIVE control:
-// a native noted leaves the mask exactly as the handler left it (the as-built
-// rule; the field is not written for it). Both legs use the SAME thread
-// contents, so an unconditional restore fails the control and a missing
-// restore fails the phenotype leg. vivarium.handler_mask covers the value the
-// delivery path stores; the probe's L237-L244 cover the wiring end to end.
+// notes.phenotype_sigreturn_restores_mask -- the mask half of a sigreturn (Linux
+// restores uc_sigmask; here the kernel-side note_saved_mask the delivery wrote beside
+// the registers), on both phenotypes: operator vote 24 ended the native rule that a
+// mask changed inside a handler stayed changed. A missing restore fails either leg.
+// vivarium.handler_mask covers the value the delivery path stores; the probe's
+// L237-L244 cover the wiring end to end.
 // -----------------------------------------------------------------------------
 void test_notes_phenotype_sigreturn_restores_mask(void) {
     struct Proc *m = proc_alloc();
@@ -3860,7 +3871,7 @@ void test_notes_phenotype_sigreturn_restores_mask(void) {
     bool a_left    = !th.in_handler;
     u64  a_elr     = ctx.elr;
 
-    // ---- LEG B: NATIVE, same contents -- the mask is left alone. -------
+    // ---- LEG B: NATIVE, same contents -- the restore puts PRE back. -----
     m->phenotype = PHENO_NATIVE;
     th.in_handler      = true;
     th.note_saved_mask = PRE;
@@ -3885,7 +3896,7 @@ void test_notes_phenotype_sigreturn_restores_mask(void) {
     TEST_ASSERT(a_mask == PRE, "A: PHENO_LINUX sigreturn restores the PRE-handler mask");
     TEST_EXPECT_EQ(b_rc, 0, "B: the native restore succeeds");
     TEST_ASSERT(b_left, "B: the handler is left");
-    TEST_ASSERT(b_mask == HAND, "B: a NATIVE noted leaves the mask as the handler left it (control)");
+    TEST_ASSERT(b_mask == PRE, "B: a NATIVE noted restores the PRE-handler mask too");
     TEST_EXPECT_EQ(c_rc, -1, "C: not in a handler -> refused");
     TEST_ASSERT(c_mask == HAND, "C: a refused restore touches nothing");
 }
@@ -4221,4 +4232,503 @@ void test_notes_self_death_snare(void) {
     TEST_ASSERT(notes_self_death_snare("snare:segvx") == NULL, "nor is a longer name");
     TEST_ASSERT(notes_self_death_snare(NOTE_NAME_TERM) == NULL, "an ordinary note is not a death");
     TEST_ASSERT(notes_self_death_snare(NULL) == NULL, "NULL is refused");
+}
+
+// ---------------------------------------------------------------------------
+// The note table (ARCH 8.8.3)
+// ---------------------------------------------------------------------------
+
+static const u64 NT_HANDLER = 0x1000u;   // never entered: nothing here returns to EL0
+
+static struct Proc *nt_proc(u64 handler) {
+    struct Proc *p = proc_alloc();
+    if (!p) return NULL;
+    p->state = PROC_STATE_ALIVE;
+    if (handler) notes_set_handler(p, handler);
+    return p;
+}
+
+static void nt_free(struct Proc *p) {
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+}
+
+static void nt_drain(struct Proc *p) {
+    struct Note got;
+    spin_lock(&p->notes->lock);
+    while (notes_dequeue_for_fd_locked(p, NULL, &got)) { }
+    spin_unlock(&p->notes->lock);
+}
+
+static u32 nt_queued(struct Proc *p) {
+    spin_lock(&p->notes->lock);
+    u32 n = p->notes->count;
+    spin_unlock(&p->notes->lock);
+    return n;
+}
+
+static bool nt_latch(const struct Proc *p, u32 flag) {
+    return (__atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE) & flag) != 0;
+}
+
+// Every refusal is one argument away from a call this test goes on to accept, so
+// none is answered by a gate in front of the one it names.
+void test_notes_table_refusals(void) {
+    struct Proc *p = nt_proc(NT_HANDLER);
+    TEST_ASSERT(p != NULL, "proc_alloc");
+
+    s64 r_kill   = sys_note_dispose_for_proc(p, NOTE_NAME_KILL, NOTE_DISP_IGNORE, 0);
+    s64 r_name   = sys_note_dispose_for_proc(p, "nosuch", NOTE_DISP_IGNORE, 0);
+    s64 r_sak    = sys_note_dispose_for_proc(p, NOTE_NAME_SAK, NOTE_DISP_IGNORE, 0);
+    s64 r_disp   = sys_note_dispose_for_proc(p, NOTE_NAME_USR1, 3u, 0);
+    s64 r_flags  = sys_note_dispose_for_proc(p, NOTE_NAME_USR1, NOTE_DISP_CAUGHT, 8u);
+    s64 r_ignfl  = sys_note_dispose_for_proc(p, NOTE_NAME_USR1, NOTE_DISP_IGNORE,
+                                             NOTE_DISP_RESTART);
+    s64 r_dflfl  = sys_note_dispose_for_proc(p, NOTE_NAME_USR1, NOTE_DISP_DEFAULT,
+                                             NOTE_DISP_RESTART);
+    notes_set_handler(p, 0u);
+    s64 r_nohand = sys_note_dispose_for_proc(p, NOTE_NAME_USR1, NOTE_DISP_CAUGHT, 0);
+
+    TEST_EXPECT_EQ(r_kill, -(s64)T_E_INVAL, "kill has no disposition");
+    TEST_EXPECT_EQ(r_name, -(s64)T_E_INVAL, "a name no table knows");
+    TEST_EXPECT_EQ(r_sak, -(s64)T_E_INVAL, "the trusted path has no row");
+    TEST_EXPECT_EQ(r_disp, -(s64)T_E_INVAL, "a disposition past caught");
+    TEST_EXPECT_EQ(r_flags, -(s64)T_E_INVAL, "an unknown flag");
+    TEST_EXPECT_EQ(r_ignfl, -(s64)T_E_INVAL, "restart on an ignored row");
+    TEST_EXPECT_EQ(r_dflfl, -(s64)T_E_INVAL, "restart on a default row");
+    TEST_EXPECT_EQ(r_nohand, -(s64)T_E_INVAL, "a caught row with nothing to enter");
+    TEST_ASSERT(!notes_table_governs(p), "a refusal does not make the table govern");
+    TEST_ASSERT(p->sigtab == NULL, "a refusal allocates no table");
+
+    notes_set_handler(p, NT_HANDLER);
+    TEST_EXPECT_EQ(sys_note_dispose_for_proc(p, NOTE_NAME_USR1, NOTE_DISP_CAUGHT,
+                                             NOTE_DISP_RESTART), 0,
+                   "caught, restarting, with a handler");
+    TEST_ASSERT(notes_table_governs(p), "a written row governs");
+    TEST_ASSERT(p->sigtab != NULL, "the row has its table");
+    struct viv_ksigaction row;
+    TEST_ASSERT(viv_sigtab_note_handler(p->sigtab, VIV_SIGNOTE_USR1, &row), "the row is live");
+    TEST_EXPECT_EQ(row.handler, VIV_NATIVE_CAUGHT, "as the token, never an address");
+    TEST_EXPECT_EQ(row.flags, (u64)VIV_SA_RESTART, "and asks for the restart");
+    TEST_EXPECT_EQ(sys_note_dispose_for_proc(p, NOTE_NAME_TERM, NOTE_DISP_IGNORE, 0), 0,
+                   "the argument the flag refusals differ by");
+    TEST_EXPECT_EQ(sys_note_dispose_for_proc(p, NOTE_NAME_TERM, NOTE_DISP_DEFAULT, 0), 0,
+                   "and default takes no flag either");
+    nt_free(p);
+
+    p = nt_proc(0u);
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    TEST_EXPECT_EQ(sys_note_dispose_for_proc(p, NOTE_NAME_USR1, NOTE_DISP_DEFAULT, 0), 0,
+                   "default on a Proc with no table");
+    TEST_ASSERT(p->sigtab == NULL, "needs none: a missing table reads as default");
+    TEST_ASSERT(notes_table_governs(p), "but it has spoken");
+    nt_free(p);
+
+    p = nt_proc(0u);
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    TEST_EXPECT_EQ(sys_note_dispose_for_proc(p, NOTE_NAME_USR1, NOTE_DISP_IGNORE, 0), 0,
+                   "ignoring needs no handler");
+    proc_mark_self_managing_notes(p);
+    TEST_EXPECT_EQ(sys_note_dispose_for_proc(p, NOTE_NAME_USR2, NOTE_DISP_CAUGHT, 0), 0,
+                   "nor does a caught row whose reader is an fd");
+    nt_free(p);
+}
+
+// One family from the low word and one from the high, since the two are held apart
+// by a bit index past 7 (ARCH 8.8.3; the usr1 chunk).
+static void nt_rows_govern_one(const char *name, enum viv_signote sn, u32 latch) {
+    struct Proc *p = nt_proc(NT_HANDLER);
+    TEST_ASSERT(p != NULL, "proc_alloc");
+
+    TEST_EXPECT_EQ(notes_post(p, name, 0u, NULL, true), 0, "no table: post");
+    TEST_ASSERT(proc_caught_note_pending(p), "no table: the handler is a catch-all");
+    TEST_ASSERT(!nt_latch(p, latch), "no table: no terminate latch");
+    TEST_ASSERT(!notes_direct_is_fatal(p, name), "no table: a direct note is not fatal");
+    nt_drain(p);
+
+    TEST_EXPECT_EQ(sys_note_dispose_for_proc(p, NOTE_NAME_TERM, NOTE_DISP_CAUGHT, 0), 0,
+                   "another note's row makes the table govern");
+    TEST_ASSERT(notes_table_governs(p), "governs");
+
+    TEST_EXPECT_EQ(notes_post(p, name, 0u, NULL, true), 0, "default row: post");
+    TEST_ASSERT(nt_latch(p, latch), "default row: the handler is not this note's");
+    TEST_ASSERT(!proc_caught_note_pending(p), "default row: nothing caught");
+    TEST_ASSERT(notes_direct_is_fatal(p, name), "default row: a direct note is fatal");
+    TEST_ASSERT(!notes_direct_ignored(p, name), "default row: and not ignored");
+    nt_drain(p);
+    TEST_ASSERT(!nt_latch(p, latch), "default row: drained");
+
+    TEST_EXPECT_EQ(sys_note_dispose_for_proc(p, name, NOTE_DISP_CAUGHT, 0), 0, "caught row");
+    TEST_EXPECT_EQ(notes_post(p, name, 0u, NULL, true), 0, "caught row: post");
+    TEST_ASSERT(proc_caught_note_pending(p), "caught row: caught");
+    TEST_ASSERT(!nt_latch(p, latch), "caught row: no terminate latch");
+    TEST_ASSERT(!notes_direct_is_fatal(p, name), "caught row: a direct note is not fatal");
+    TEST_ASSERT(!notes_direct_ignored(p, name), "caught row: nor ignored");
+    nt_drain(p);
+    TEST_ASSERT(!proc_caught_note_pending(p), "caught row: drained");
+
+    TEST_EXPECT_EQ(sys_note_dispose_for_proc(p, name, NOTE_DISP_IGNORE, 0), 0, "ignored row");
+    TEST_ASSERT(viv_sigtab_note_ignored(p->sigtab, sn), "the ignored row is this note's");
+    TEST_EXPECT_EQ(notes_post(p, name, 0u, NULL, true), 0, "ignored row: the post succeeds");
+    TEST_EXPECT_EQ(nt_queued(p), 0u, "ignored row: and drops the note");
+    TEST_ASSERT(notes_direct_ignored(p, name), "ignored row: a direct note is ignored");
+    TEST_ASSERT(!notes_direct_is_fatal(p, name), "ignored row: and not fatal");
+    TEST_ASSERT(!nt_latch(p, latch), "ignored row: no terminate latch");
+    TEST_ASSERT(!proc_caught_note_pending(p), "ignored row: nothing caught");
+    nt_free(p);
+}
+
+void test_notes_table_rows_govern(void) {
+    nt_rows_govern_one(NOTE_NAME_INTERRUPT, VIV_SIGNOTE_INTERRUPT,
+                       PROC_FLAG_INTR_TERMINATE_PENDING);
+    nt_rows_govern_one(NOTE_NAME_USR1, VIV_SIGNOTE_USR1, PROC_FLAG_USR1_TERMINATE_PENDING);
+}
+
+// A caught row outlives what it was written against: a fork carries the row and
+// leaves the notes fd's mark behind, and a peer's SYS_NOTIFY(0) can cross a dispose.
+// With nobody to take the note the row reads as the default, or SIGTERM and ^C could
+// not end the Proc. The handler is stored directly: SYS_NOTIFY(0) takes the rows back.
+void test_notes_table_token_needs_a_taker(void) {
+    struct Proc *p = nt_proc(NT_HANDLER);
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    TEST_EXPECT_EQ(sys_note_dispose_for_proc(p, NOTE_NAME_INTERRUPT, NOTE_DISP_CAUGHT, 0), 0,
+                   "the row, with a handler to write it against");
+
+    TEST_EXPECT_EQ(notes_post(p, NOTE_NAME_INTERRUPT, 0u, NULL, true), 0, "handler: post");
+    TEST_ASSERT(proc_caught_note_pending(p), "handler: caught");
+    TEST_ASSERT(!nt_latch(p, PROC_FLAG_INTR_TERMINATE_PENDING), "handler: no terminate latch");
+    TEST_ASSERT(!notes_direct_is_fatal(p, NOTE_NAME_INTERRUPT), "handler: not fatal");
+    TEST_ASSERT(!notes_proc_default_applies(p, NOTE_NAME_INTERRUPT), "handler: no default");
+    nt_drain(p);
+
+    __atomic_store_n(&p->handler_va, 0ull, __ATOMIC_RELEASE);
+    TEST_EXPECT_EQ(notes_post(p, NOTE_NAME_INTERRUPT, 0u, NULL, true), 0, "no taker: post");
+    TEST_ASSERT(nt_latch(p, PROC_FLAG_INTR_TERMINATE_PENDING), "no taker: the default terminates");
+    TEST_ASSERT(!proc_caught_note_pending(p), "no taker: nothing caught");
+    TEST_ASSERT(notes_direct_is_fatal(p, NOTE_NAME_INTERRUPT), "no taker: a direct note is fatal");
+    TEST_ASSERT(notes_proc_default_applies(p, NOTE_NAME_INTERRUPT), "no taker: the default applies");
+
+    // Opening the notes fd gives the row a taker, so what is queued is judged again.
+    notes_mark_self_managing(p);
+    TEST_ASSERT(proc_caught_note_pending(p), "the open: the queued note reads as caught");
+    TEST_ASSERT(!nt_latch(p, PROC_FLAG_INTR_TERMINATE_PENDING), "the open: no terminate latch");
+    nt_drain(p);
+
+    TEST_EXPECT_EQ(notes_post(p, NOTE_NAME_INTERRUPT, 0u, NULL, true), 0, "fd reader: post");
+    TEST_ASSERT(proc_caught_note_pending(p), "fd reader: the row may unwind its wait");
+    TEST_ASSERT(!nt_latch(p, PROC_FLAG_INTR_TERMINATE_PENDING), "fd reader: no terminate latch");
+    TEST_ASSERT(!notes_direct_is_fatal(p, NOTE_NAME_INTERRUPT), "fd reader: not fatal");
+    nt_drain(p);
+    nt_free(p);
+
+    // A guest's row is an address, and that address may have the token's value.
+    struct Proc *g = nt_proc(0);
+    TEST_ASSERT(g != NULL, "proc_alloc");
+    g->phenotype = PHENO_LINUX;
+    g->sigtab = (struct viv_sigtab *)kzalloc(sizeof(struct viv_sigtab), 0);
+    TEST_ASSERT(g->sigtab != NULL, "the guest's table");
+    const struct viv_ksigaction act = { .handler = VIV_NATIVE_CAUGHT, .flags = 0,
+                                        .restorer = 0, .mask = 0 };
+    (void)viv_sigtab_set(g->sigtab, VIV_SIGNOTE_INTERRUPT, &act);
+    TEST_EXPECT_EQ(notes_post(g, NOTE_NAME_INTERRUPT, 0u, NULL, true), 0, "guest: post");
+    TEST_ASSERT(proc_caught_note_pending(g), "guest: caught, with no handler_va");
+    TEST_ASSERT(!nt_latch(g, PROC_FLAG_INTR_TERMINATE_PENDING), "guest: no terminate latch");
+    nt_drain(g);
+    nt_free(g);
+}
+
+void test_notes_table_reread(void) {
+    struct viv_ksigaction row;
+
+    // A table arriving over a queued note re-judges it, both ways and back.
+    struct Proc *p = nt_proc(NT_HANDLER);
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    TEST_EXPECT_EQ(notes_post(p, NOTE_NAME_USR1, 0u, NULL, true), 0, "post usr1");
+    TEST_ASSERT(proc_caught_note_pending(p), "the catch-all caught it");
+    TEST_ASSERT(!nt_latch(p, PROC_FLAG_USR1_TERMINATE_PENDING), "and armed no terminate");
+    TEST_EXPECT_EQ(sys_note_dispose_for_proc(p, NOTE_NAME_USR2, NOTE_DISP_IGNORE, 0), 0,
+                   "a row for another note");
+    TEST_ASSERT(notes_table_governs(p), "the table governs");
+    TEST_ASSERT(nt_latch(p, PROC_FLAG_USR1_TERMINATE_PENDING),
+                "usr1's row is default now, so it terminates");
+    TEST_ASSERT(!proc_caught_note_pending(p), "and is no longer caught");
+    TEST_EXPECT_EQ(nt_queued(p), 1u, "the note stays");
+    TEST_EXPECT_EQ(sys_note_dispose_for_proc(p, NOTE_NAME_USR1, NOTE_DISP_CAUGHT, 0), 0,
+                   "usr1 caught");
+    TEST_ASSERT(!nt_latch(p, PROC_FLAG_USR1_TERMINATE_PENDING), "a handler disarms the latch");
+    TEST_ASSERT(proc_caught_note_pending(p), "and catches what is queued");
+    TEST_EXPECT_EQ(sys_note_dispose_for_proc(p, NOTE_NAME_USR1, NOTE_DISP_IGNORE, 0), 0,
+                   "usr1 ignored");
+    TEST_EXPECT_EQ(nt_queued(p), 0u, "ignoring discards what is pending");
+    TEST_ASSERT(!nt_latch(p, PROC_FLAG_USR1_TERMINATE_PENDING), "no latch");
+    TEST_ASSERT(!proc_caught_note_pending(p), "nothing caught");
+    nt_free(p);
+
+    // SYS_NOTIFY(0): a caught row has nothing left to enter. An ignored row was
+    // never a handler.
+    p = nt_proc(NT_HANDLER);
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    TEST_EXPECT_EQ(sys_note_dispose_for_proc(p, NOTE_NAME_USR2, NOTE_DISP_IGNORE, 0), 0,
+                   "usr2 ignored");
+    TEST_EXPECT_EQ(sys_note_dispose_for_proc(p, NOTE_NAME_INTERRUPT, NOTE_DISP_CAUGHT, 0), 0,
+                   "interrupt caught");
+    TEST_EXPECT_EQ(notes_post(p, NOTE_NAME_INTERRUPT, 0u, NULL, true), 0, "post interrupt");
+    TEST_ASSERT(proc_caught_note_pending(p), "caught");
+    notes_set_handler(p, 0u);
+    TEST_ASSERT(!viv_sigtab_note_handler(p->sigtab, VIV_SIGNOTE_INTERRUPT, &row),
+                "the caught row went back to default");
+    TEST_ASSERT(viv_sigtab_note_ignored(p->sigtab, VIV_SIGNOTE_USR2), "the ignored row stayed");
+    TEST_ASSERT(proc_intr_terminate_pending(p), "the queued note terminates now");
+    TEST_ASSERT(!proc_caught_note_pending(p), "and is not caught");
+    nt_free(p);
+
+    // A self-managing reader takes child_exit from its fd, so a default row whose
+    // default is to ignore cannot throw it away; only asking to ignore does. The
+    // second Proc is that reader's control, one flag away.
+    p = nt_proc(0u);
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    proc_mark_self_managing_notes(p);
+    TEST_EXPECT_EQ(notes_post(p, NOTE_NAME_CHILD_EXIT, 0u, NULL, true), 0, "post child_exit");
+    TEST_EXPECT_EQ(nt_queued(p), 1u, "queued");
+    TEST_ASSERT(proc_caught_note_pending(p), "an fd reader with no table: the latch stands for its poll to read");
+    TEST_EXPECT_EQ(sys_note_dispose_for_proc(p, NOTE_NAME_CHILD_EXIT, NOTE_DISP_DEFAULT, 0), 0,
+                   "default");
+    TEST_EXPECT_EQ(nt_queued(p), 1u, "the fd reader keeps it");
+    TEST_ASSERT(!proc_caught_note_pending(p), "and a table's default row catches nothing");
+    TEST_EXPECT_EQ(sys_note_dispose_for_proc(p, NOTE_NAME_CHILD_EXIT, NOTE_DISP_IGNORE, 0), 0,
+                   "ignore");
+    TEST_EXPECT_EQ(nt_queued(p), 0u, "asked to, it goes");
+    nt_free(p);
+
+    p = nt_proc(0u);
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    TEST_EXPECT_EQ(notes_post(p, NOTE_NAME_CHILD_EXIT, 0u, NULL, true), 0, "post child_exit");
+    TEST_EXPECT_EQ(nt_queued(p), 1u, "queued");
+    TEST_EXPECT_EQ(sys_note_dispose_for_proc(p, NOTE_NAME_CHILD_EXIT, NOTE_DISP_DEFAULT, 0), 0,
+                   "default");
+    TEST_EXPECT_EQ(nt_queued(p), 0u, "with no fd reader, nothing would ever consume it");
+    nt_free(p);
+}
+
+// The commit of the phenotype comes before the reset in exec, and the hook writes
+// neither: the Linux leg stores it first, as proc_exec_replace does.
+static void nt_exec_one(u32 pheno) {
+    static struct Thread th;
+    th.magic = THREAD_MAGIC;
+    struct viv_ksigaction row;
+
+    struct Proc *p = nt_proc(NT_HANDLER);
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    th.proc = p;
+    TEST_EXPECT_EQ(sys_note_dispose_for_proc(p, NOTE_NAME_USR1, NOTE_DISP_IGNORE, 0), 0,
+                   "usr1 ignored");
+    TEST_EXPECT_EQ(sys_note_dispose_for_proc(p, NOTE_NAME_INTERRUPT, NOTE_DISP_CAUGHT, 0), 0,
+                   "interrupt caught");
+    TEST_EXPECT_EQ(notes_post(p, NOTE_NAME_INTERRUPT, 0u, NULL, true), 0, "post interrupt");
+    TEST_ASSERT(proc_caught_note_pending(p), "precondition: the interrupt is caught");
+    TEST_ASSERT(!proc_intr_terminate_pending(p), "precondition: and armed no terminate");
+    TEST_ASSERT(viv_sigtab_note_ignored(p->sigtab, VIV_SIGNOTE_USR1),
+                "precondition: an ignored row");
+    TEST_ASSERT(viv_sigtab_note_handler(p->sigtab, VIV_SIGNOTE_INTERRUPT, &row),
+                "precondition: a caught row");
+
+    p->phenotype = pheno;
+    proc_exec_drop_image_state_for_test(p, &th, pheno);
+
+    TEST_ASSERT(p->handler_va == 0, "the handler was an address in the old image");
+    TEST_ASSERT(!nt_latch(p, PROC_FLAG_NOTE_TABLE), "the flag is the image's");
+    TEST_ASSERT(!viv_sigtab_note_handler(p->sigtab, VIV_SIGNOTE_INTERRUPT, &row),
+                "the token cannot reach a Linux sigframe");
+    TEST_ASSERT(proc_intr_terminate_pending(p), "the queued interrupt is the default's now");
+    TEST_ASSERT(!proc_caught_note_pending(p), "and nobody's to catch");
+    if (pheno == PHENO_LINUX) {
+        TEST_ASSERT(notes_table_governs(p), "a Linux image's table governs by phenotype");
+        TEST_ASSERT(viv_sigtab_note_ignored(p->sigtab, VIV_SIGNOTE_USR1),
+                    "and POSIX keeps the ignored row");
+        TEST_EXPECT_EQ(notes_post(p, NOTE_NAME_USR1, 0u, NULL, true), 0, "post usr1");
+        TEST_EXPECT_EQ(nt_queued(p), 1u, "it is dropped, leaving the interrupt alone");
+    } else {
+        TEST_ASSERT(!notes_table_governs(p), "a native image has said nothing");
+        TEST_ASSERT(!viv_sigtab_note_ignored(p->sigtab, VIV_SIGNOTE_USR1),
+                    "and Plan 9 clears every row");
+    }
+    th.proc = NULL;
+    nt_free(p);
+}
+
+void test_notes_table_exec(void) {
+    nt_exec_one(PHENO_NATIVE);
+    nt_exec_one(PHENO_LINUX);
+}
+
+static void nt_settle_ctx(struct exception_context *ctx) {
+    for (size_t k = 0; k < sizeof(*ctx); k++) ((u8 *)ctx)[k] = 0;
+    ctx->elr     = 0x8000u;
+    ctx->sp      = 0x10000000u;
+    ctx->regs[0] = (u64)-(s64)T_E_INTR;
+}
+
+// ctx as the call left it, or as the rewind makes it, with the mark gone either way.
+static void nt_settle_expect(struct Thread *t, struct exception_context *ctx, bool rewinds,
+                             u64 x0_kept) {
+    notes_call_settle(ctx, t);
+    TEST_EXPECT_EQ(ctx->elr, rewinds ? 0x7ffcull : 0x8000ull, "the pc");
+    TEST_EXPECT_EQ(ctx->regs[0], rewinds ? 0x77ull : x0_kept, "x0");
+    TEST_ASSERT(!t->note_call_unwound, "the mark is the call's, and the call is over");
+}
+
+// No handler ran, so the settle is the whole restart. Each arm is one variable from
+// the first, which rewinds.
+void test_notes_restart_settle(void) {
+    static struct Thread th;
+    struct exception_context ctx;
+    const u64 eintr = (u64)-(s64)T_E_INTR;
+    th.magic = THREAD_MAGIC;
+    th.note_call_x0 = 0x77u;
+
+    struct Proc *p = nt_proc(0u);
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    th.proc = p;
+
+    nt_settle_ctx(&ctx);
+    th.note_call_unwound = true; th.note_restartable = true;
+    nt_settle_expect(&th, &ctx, true, 0u);
+
+    // Anything can put -4 in x0: an Rlerror(4) from a server is an error to report.
+    nt_settle_ctx(&ctx);
+    th.note_call_unwound = false; th.note_restartable = true;
+    nt_settle_expect(&th, &ctx, false, eintr);
+
+    nt_settle_ctx(&ctx);
+    th.note_call_unwound = true; th.note_restartable = false;
+    nt_settle_expect(&th, &ctx, false, eintr);
+
+    // sigsuspend under NOHAND: not on signal(7)'s list, and re-issued all the same when
+    // no handler ran, as Linux's ERESTARTNOHAND.
+    nt_settle_ctx(&ctx);
+    th.note_call_unwound = true; th.note_restartable = false;
+    th.note_wait_flags = NOTE_WF_NOHAND;
+    nt_settle_expect(&th, &ctx, true, 0u);
+    th.note_wait_flags = 0;
+
+    // A stack the tail refuses: it takes nothing, so a re-issue would find the same note.
+    nt_settle_ctx(&ctx);
+    ctx.sp = 0u;
+    th.note_call_unwound = true; th.note_restartable = true;
+    nt_settle_expect(&th, &ctx, false, eintr);
+
+    // A 9P call that lost its flush returns its reply with the mark set.
+    nt_settle_ctx(&ctx);
+    ctx.regs[0] = 5u;
+    th.note_call_unwound = true; th.note_restartable = true;
+    nt_settle_expect(&th, &ctx, false, 5u);
+
+    th.proc = NULL;
+    nt_free(p);
+
+    // A self-managing reader asked for EINTR: it wakes to read its fd.
+    p = nt_proc(0u);
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    th.proc = p;
+    proc_mark_self_managing_notes(p);
+    nt_settle_ctx(&ctx);
+    th.note_call_unwound = true; th.note_restartable = true;
+    nt_settle_expect(&th, &ctx, false, eintr);
+    th.proc = NULL;
+    nt_free(p);
+
+    // A caught note still pending is what the call must answer for. Masked, it is no
+    // reason to fail the call, so the same state rewinds.
+    p = nt_proc(NT_HANDLER);
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    th.proc = p;
+    TEST_EXPECT_EQ(sys_note_dispose_for_proc(p, NOTE_NAME_USR1, NOTE_DISP_CAUGHT,
+                                             NOTE_DISP_RESTART), 0, "usr1 caught");
+    TEST_EXPECT_EQ(notes_post(p, NOTE_NAME_USR1, 0u, NULL, true), 0, "post usr1");
+    nt_settle_ctx(&ctx);
+    th.note_call_unwound = true; th.note_restartable = true;
+    nt_settle_expect(&th, &ctx, false, eintr);
+    th.note_mask = 1u << NOTE_BIT_USR1;
+    nt_settle_ctx(&ctx);
+    th.note_call_unwound = true; th.note_restartable = true;
+    nt_settle_expect(&th, &ctx, true, 0u);
+    th.note_mask = 0u;
+    th.proc = NULL;
+    nt_free(p);
+}
+
+// The mark is set where the wait unwinds, for a table's caught note, and the call's
+// own class is what lets it.
+void test_notes_unwind_sets_the_mark(void) {
+    static struct Thread th;
+    th.magic = THREAD_MAGIC;
+    th.note_interruptible = true;
+    th.note_call_unwound = false;
+
+    struct Proc *p = nt_proc(NT_HANDLER);
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    th.proc = p;
+    TEST_EXPECT_EQ(notes_post(p, NOTE_NAME_USR1, 0u, NULL, true), 0, "post usr1");
+    TEST_ASSERT(proc_caught_note_pending(p), "the catch-all's note is armed");
+    TEST_ASSERT(!thread_caught_note_unwinds(&th), "no table: Plan 9's catch-all rides it out");
+    TEST_ASSERT(!th.note_call_unwound, "no table: no mark");
+
+    TEST_EXPECT_EQ(sys_note_dispose_for_proc(p, NOTE_NAME_USR1, NOTE_DISP_CAUGHT, 0), 0,
+                   "usr1 caught");
+    th.note_interruptible = false;
+    TEST_ASSERT(!thread_caught_note_unwinds(&th), "a call off the list rides it out");
+    TEST_ASSERT(!th.note_call_unwound, "and leaves no mark");
+    th.note_interruptible = true;
+    TEST_ASSERT(thread_caught_note_unwinds(&th), "a listed wait unwinds");
+    TEST_ASSERT(th.note_call_unwound, "and marks the call");
+    notes_release_claims_for_test(&th);
+    th.note_call_unwound = false;
+    th.note_interruptible = false;
+    th.proc = NULL;
+    nt_free(p);
+}
+
+static void nt_class_expect(struct Thread *t, struct Proc *p, u64 nr, u64 x0, u64 x2, u64 x3,
+                            bool intr, bool restart) {
+    struct exception_context ctx;
+    for (size_t k = 0; k < sizeof(ctx); k++) ((u8 *)&ctx)[k] = 0;
+    ctx.regs[0] = x0;
+    ctx.regs[2] = x2;
+    ctx.regs[3] = x3;
+    ctx.regs[8] = nr;
+    t->note_interruptible = !intr;      // so an arm that wrote nothing cannot pass
+    t->note_restartable   = !restart;
+    native_note_class_for_test(t, p, &ctx);
+    TEST_EXPECT_EQ(t->note_interruptible, intr, "may a caught note interrupt it");
+    TEST_EXPECT_EQ(t->note_restartable, restart, "may it re-issue");
+}
+
+void test_notes_native_class(void) {
+    static struct Thread th;
+    th.magic = THREAD_MAGIC;
+    struct Proc *p = nt_proc(NT_HANDLER);
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    th.proc = p;
+    hidx_t rd = -1, wr = -1;
+    TEST_EXPECT_EQ(sys_pipe_for_proc(p, &rd, &wr), 0, "pipe");
+
+    nt_class_expect(&th, p, SYS_WAIT_PID, 0, 0, 0, true, true);
+    nt_class_expect(&th, p, SYS_SRV_ACCEPT, 0, 0, 0, true, true);
+    nt_class_expect(&th, p, SYS_TORPOR_WAIT, 0, (u64)-1LL, 0, true, true);
+    nt_class_expect(&th, p, SYS_TORPOR_WAIT, 0, 0, 0, true, false);
+    nt_class_expect(&th, p, SYS_TORPOR_WAIT, 0, 1000u, 0, true, false);
+    nt_class_expect(&th, p, SYS_POLL, 0, 0, 0, true, false);
+    nt_class_expect(&th, p, SYS_OPEN, 0, 0, SYS_WALK_OPEN_OINTR | 2u, true, true);
+    nt_class_expect(&th, p, SYS_OPEN, 0, 0, 2u, false, false);
+    nt_class_expect(&th, p, SYS_READ, (u64)rd, 0, 0, true, true);
+    nt_class_expect(&th, p, SYS_WRITE, (u64)wr, 0, 0, true, true);
+    nt_class_expect(&th, p, SYS_PREAD, (u64)rd, 0, 0, true, true);
+    nt_class_expect(&th, p, SYS_PWRITE, (u64)wr, 0, 0, true, true);
+    nt_class_expect(&th, p, SYS_READ, 60u, 0, 0, false, false);
+    nt_class_expect(&th, p, SYS_CLOSE, (u64)rd, 0, 0, false, false);
+
+    th.note_interruptible = false;
+    th.note_restartable   = false;
+    th.proc = NULL;
+    nt_free(p);
 }

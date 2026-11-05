@@ -529,8 +529,8 @@ struct Proc {
     // #65 (invariant I-32): per-Proc resource-floor counters. A DoS bound,
     // NOT a privilege axis -- they cap a non-TCB Proc's resource use so a
     // fork/thread/memory bomb hits a clean limit instead of stressing the
-    // allocator toward the box-killing cliff. `thread_count` (above) is the
-    // third counter.
+    // allocator toward the box-killing cliff. `live_threads`, admitted against
+    // `thread_budget`, is the third counter.
     //
     // page_count -- moved to AddrSpace.page_count at LINEAGE L-1 (it counts the
     //   ADDRESS SPACE's pages, so sharing an address space must mean sharing one
@@ -967,7 +967,7 @@ struct Proc {
 
     // SQPOLL kernel threads this Proc has MINTED (SYS_LOOM_SETUP with
     // LOOM_SETUP_SQPOLL). They run under kproc (immortal, TCB-exempt), so
-    // nothing counted them -- and each pins a 32 KiB kernel stack, so the
+    // nothing counted them -- and each pins a kernel stack and its slot, so the
     // handle table was the only bound and the fid-lift audit (F1) showed a
     // non-TCB Proc could mint 4x its own thread cap's worth of unswappable
     // kstacks. They are this Proc's workers in every meaningful sense, so
@@ -1390,6 +1390,12 @@ _Static_assert((PROC_FLAG_EXIT_CLOSING & (PROC_FLAG_NODUMP | PROC_FLAG_NOTRACE |
 void proc_mark_session_registry(struct Proc *p);
 bool proc_may_create_srv_registry(const struct Proc *p);
 
+// ARCH 8.8.3: this native Proc's dispositions are its note table's, from its first
+// SYS_NOTE_DISPOSE until its next exec. A Linux Proc's always are, so the bit is
+// never asked of one: notes_table_governs is the one spelling. Crosses rfork
+// explicitly, because proc_flags otherwise never do.
+#define PROC_FLAG_NOTE_TABLE         (1u << 24)
+
 // The terminate-CLASS latch set (interrupt + tty:quit/hup + pipe). Used by the
 // whole-class clears -- handler registration, the self-managing mark, the
 // lock-free wake gate -- which suppress/observe EVERY terminate family at once.
@@ -1417,7 +1423,8 @@ bool proc_may_create_srv_registry(const struct Proc *p);
      PROC_FLAG_TEST_FIXTURE | \
      PROC_FLAG_EXIT_CLOSE_FORCED | PROC_FLAG_EXIT_CLOSING | PROC_FLAG_MAIN_TID | \
      PROC_FLAG_MAY_RAISE_THREAD_BUDGET | PROC_FLAG_SESSION_REGISTRY | \
-     PROC_FLAG_USR1_TERMINATE_PENDING | PROC_FLAG_USR2_TERMINATE_PENDING)
+     PROC_FLAG_USR1_TERMINATE_PENDING | PROC_FLAG_USR2_TERMINATE_PENDING | \
+     PROC_FLAG_NOTE_TABLE)
 _Static_assert(__builtin_popcount(PROC_FLAGS_ALL) ==
     __builtin_popcount(PROC_FLAG_NODUMP) + __builtin_popcount(PROC_FLAG_NOTRACE) +
     __builtin_popcount(PROC_FLAG_MLOCKED) + __builtin_popcount(PROC_FLAG_CONSOLE_ATTACHED) +
@@ -1437,7 +1444,8 @@ _Static_assert(__builtin_popcount(PROC_FLAGS_ALL) ==
     __builtin_popcount(PROC_FLAG_EXIT_CLOSE_FORCED) + __builtin_popcount(PROC_FLAG_EXIT_CLOSING) +
     __builtin_popcount(PROC_FLAG_MAIN_TID) +
     __builtin_popcount(PROC_FLAG_MAY_RAISE_THREAD_BUDGET) +
-    __builtin_popcount(PROC_FLAG_SESSION_REGISTRY),
+    __builtin_popcount(PROC_FLAG_SESSION_REGISTRY) +
+    __builtin_popcount(PROC_FLAG_NOTE_TABLE),
     "two proc_flags bits alias");
 
 // LINEAGE L-1 re-based EVERY offset below: extracting struct AddrSpace removed
@@ -2113,18 +2121,17 @@ void thread_exit_self(void);
 // Does NOT wait for peers; the LAST Thread out reaps the Proc -> ZOMBIE with
 // `msg` (NULL -> "killed"). Idempotent (CAS the flag; first msg wins).
 //
-// Mechanism: (1) CAS p->group_exit_msg = msg; (2) torpor_wake_all_for_proc(p)
-// so already-sleeping futex peers return; (3) the #811 universal death-wake
+// Mechanism: (1) CAS p->group_exit_msg = msg; (2) the #811 universal death-wake
 // (ARCH 8.8.1): walk p->threads, per-peer wait_lock -> rendez_blocked_on ->
-// wakeup, so EVERY rendez sleeper returns *_INTR and dies at its EL0-return
-// die-check; (4) smp_resched_others() so a peer running in userspace on
+// wakeup, so EVERY rendez sleeper, a futex waiter among them, returns *_INTR and
+// dies at its EL0-return die-check; (3) smp_resched_others() so a peer running in userspace on
 // another CPU traps + hits its IRQ-from-EL0 die-check (the periodic timer is
 // the floor if the IPI is missed).
 //
 // LOCK CONTRACT (#811, C3): the caller MUST hold g_proc_table_lock and no
 // threads_lock. The claim, the stashes and the p->threads walk run inside
-// p->threads_lock, taken here; the walk then takes torpor_lock + per-peer
-// wait_lock + (via wakeup) rendez/timerwait locks, all below it in the order.
+// p->threads_lock, taken here; the walk then takes per-peer
+// wait_lock + (via wakeup) rendez lock, all below it in the order.
 //
 // gcpark-b: `sig` is the POSIX signal the termination records (notes.h
 // NOTE_SIG_*; 0 = none): every production caller is a kill-class termination
@@ -2220,10 +2227,8 @@ void el0_return_die_check(void);
 //
 // proc_debug_stop_deliver: request every thread of `p` park at its next EL0-
 // return checkpoint. Sets p->debug_stop_req (RELEASE), then (8c-2) WAKES every
-// sleeping peer (the NON-COMPLETING torpor_stop_wake_all_for_proc [#19: the
-// death walk's completing wake fabricates TORPOR_OK, which a surviving stopped
-// Proc observes at resume; the stop wake preserves the wait] + the per-peer
-// wait_lock rendez wake) so a thread blocked in an indefinite syscall
+// sleeping peer (the per-peer wait_lock rendez wake, which sets no futex mark, so a
+// futex waiter keeps its wait [#19]) so a thread blocked in an indefinite syscall
 // sleep returns, re-observes the flag, and DETOURS to park on its debug_rendez
 // (proc_stop_sleeper_park), then smp_resched_others() so a peer RUNNING at
 // EL0 on another CPU traps to its tail (the periodic tick is the floor). A thread
@@ -2513,7 +2518,7 @@ void        proc_table_lock_release(irq_state_t s);
 void proc_wake_or_owe(struct poll_owed *o);
 
 // p->threads_lock (thread-model C3, ARCH 7.3.1). Order: g_proc_table_lock ->
-// threads_lock -> {t->wait_lock, torpor_lock}. Never two threads_locks on one
+// threads_lock -> t->wait_lock. Never two threads_locks on one
 // CPU: cross-Proc work holds g_proc_table_lock and takes each Proc's lock in
 // turn. Under KERNEL_TESTS a per-CPU slot names the held lock -- a second
 // acquire extincts, and ASSERT_TL_HELD(p) extincts unless this CPU holds p's.
@@ -3165,10 +3170,8 @@ bool proc_intr_terminate_pending(const struct Proc *p);
 // g_proc_table_lock, or is a thread of p -- and holds no threads_lock.
 // The body is the #811 universal death-wake template: per-peer wait_lock ->
 // rendez_blocked_on -> wakeup, lock order threads_lock -> wait_lock ->
-// (wakeup: g_timerwait.lock -> r->lock). Deliberately NO
-// torpor_wake_all_for_proc (a torpor waiter's stack rendez is reachable via
-// rendez_blocked_on, and tsleep's widened register-then-observe closes the
-// register-after-walk race) and NO smp_resched_others (the IRQ-from-EL0
+// (wakeup: r->lock). Deliberately NO
+// smp_resched_others (the IRQ-from-EL0
 // tail evaluates only group_exit_msg, so an IPI cannot accelerate a RUNNING
 // thread's interrupt-death -- it reaches its next sync-from-EL0 tail
 // regardless; the never-syscalling spinner gap is tracked as task #964).

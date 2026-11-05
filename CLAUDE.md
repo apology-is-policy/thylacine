@@ -246,6 +246,7 @@ At every resting point, whether or not you yield (full text in `docs/agent/SESSI
 1. **Account for every shell, monitor and background task** -- kill finished ones by PID, name any left running and why, or say "nothing running".
 2. **Keep the handoff already written**, not offered -- so the user can compact at any moment. If the state is not compactable, name the one blocker.
 3. **Say what is next** -- one `Next` action and one `Ahead` line to the arc's close.
+4. **Say where you are on the arc** -- `roadmap_at` (yip; `yip roadmap at` if the tool is not loaded) moves your marker. Do it on reaching a station and at every resting point, even if you have not moved, because the map shows how long ago you last said so. When an arc starts or changes shape, `roadmap_post` it: its name and description, and all its stations from start to end, each with a description, detours included. The operator reads this on the switchboard (screen 5) instead of asking.
 
 ### The run journal
 

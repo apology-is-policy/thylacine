@@ -130,6 +130,11 @@ set(THYLACINE_TARGET_TRIPLE "aarch64-none-elf"
 #                                    no +bti needed). NOPs on ARMv8.0; active
 #                                    where start.S sets SCTLR_EL1.BT0
 #                                    (runtime-gated on FEAT_BTI).
+#   -Wframe-larger-than=8192       — half a thread stack. The stack's guard is
+#                                    16 KiB of unmapped address space, so a frame
+#                                    that large could step over it if a probe were
+#                                    ever missing, and one that fits still leaves a
+#                                    thread little for the calls under it.
 #   -Werror=shorten-64-to-32       — an implicit u64 -> u32 narrowing fails the
 #                                    build (an explicit cast still compiles).
 #                                    The device number is u64 end to end and
@@ -171,6 +176,7 @@ set(THYLACINE_KERNEL_C_FLAGS
     "-fno-omit-frame-pointer"
     "-fstack-protector-strong"
     "SHELL:-Xclang -fstack-clash-protection"
+    "-Wframe-larger-than=8192"
     "-mbranch-protection=pac-ret+bti"
     "-Wall"
     "-Wextra"

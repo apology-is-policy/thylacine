@@ -205,8 +205,10 @@ pub const T_SYS_NOTIFY: u64           = 45;
 pub const T_SYS_NOTED: u64            = 46;
 pub const T_SYS_POSTNOTE: u64         = 47;
 pub const T_SYS_POSTNOTE_TID: u64     = 138;
+pub const T_SYS_NOTE_DISPOSE: u64     = 139;
 // The memory account call, with `account`'s records.
 pub const T_SYS_ACCOUNT: u64          = 140;
+pub const T_SYS_NOTE_WAIT: u64        = 141;
 pub const T_SYS_NOTE_MASK: u64        = 48;
 
 // P5-mount-syscall + P5-chroot-syscall + P6-16c-pivot_root: namespace
@@ -221,7 +223,7 @@ pub const T_SYS_PIVOT_ROOT: u64       = 53;
 // P6-pouch-wait-addr (sub-chunk 8) + P6-pouch-threads (sub-chunk 9a):
 // wait-on-address + kernel-level thread spawn/exit. Futex-style
 // no-lost-wakeup primitive (the lock-acquire serializing event takes
-// the kernel `torpor_lock`); thread spawn shares pgtable_root + ASID
+// the kernel's bucket lock); thread spawn shares pgtable_root + ASID
 // + handle table with the calling Proc. Backs t::torpor + t::thread
 // (U-2g) and the pouch boundary-line patches.
 pub const T_SYS_TORPOR_WAIT: u64      = 39;
@@ -458,6 +460,9 @@ pub const T_OPATH: u32                = 0x80;
 // atomic at the server, the lockfile primitive). The other omode-taking
 // syscalls reject the bit. Mirrors SYS_WALK_OPEN_OEXCL.
 pub const T_OEXCL: u32                = 0x1000;
+// A caught note may interrupt this open's wait for a peer. SYS_OPEN only; every
+// other open refuses the bit. Mirrors SYS_WALK_OPEN_OINTR.
+pub const T_OINTR: u32                = 0x2000;
 
 // SYS_WALK_CREATE perm: low 9 bits = POSIX mode; DMDIR selects a directory.
 // Must mirror SYS_WALK_CREATE_PERM_VALID / SYS_WALK_CREATE_DMDIR in the kernel.
@@ -513,6 +518,7 @@ pub const T_S_IFCHR: u32              = 0o020000;
 // stat of a link reports the TARGET's type, so a caller that sees this asked
 // not to follow (T_ONOFOLLOW + T_OPATH, then fstat).
 pub const T_S_IFLNK: u32              = 0o120000;
+pub const T_S_IFSOCK: u32             = 0o140000;
 
 // SYS_SPAWN_FULL_ARGV bounds — must mirror SYS_SPAWN_ARGV_MAX +
 // SYS_SPAWN_ARGV_DATA_MAX in kernel/include/thylacine/syscall.h.
@@ -839,6 +845,28 @@ pub type TPathId = u32;
 // is bounded to NOTE_NAME_MAX-1 = 15 bytes; SYS_POSTNOTE rejects shorter
 // non-printable + empty names.
 pub const T_NOTE_NAME_MAX: usize  = 16;
+
+// SYS_NOTE_DISPOSE dispositions and flags (kernel syscall.h). A caught row's
+// flags word holds the handler's sa_mask, in note bits, from T_NOTE_DISP_MASK_SHIFT.
+pub const T_NOTE_DISP_DEFAULT: u64 = 0;
+pub const T_NOTE_DISP_IGNORE: u64  = 1;
+pub const T_NOTE_DISP_CAUGHT: u64  = 2;
+pub const T_NOTE_DISP_RESTART: u64 = 1;
+pub const T_NOTE_DISP_RESETHAND: u64 = 2;
+pub const T_NOTE_DISP_NODEFER: u64 = 4;
+pub const T_NOTE_DISP_MASK_SHIFT: u32 = 16;
+
+// SYS_NOTE_WAIT's forms, and the rows of the tty family a take word can name one
+// at a time (kernel syscall.h). The other families are 1 << T_NOTE_BIT_*.
+pub const T_NOTE_WAIT_SUSPEND: u64 = 0;
+pub const T_NOTE_WAIT_TAKE: u64    = 1;
+pub const T_NOTE_WAIT_POLL: u64    = 2;
+pub const T_NOTE_WAIT_PENDING: u64 = 3;
+pub const T_NOTE_TAKE_TTY_WINCH: u64 = 1 << 16;
+pub const T_NOTE_TAKE_TTY_SUSP: u64  = 1 << 17;
+pub const T_NOTE_TAKE_TTY_CONT: u64  = 1 << 18;
+pub const T_NOTE_TAKE_TTY_QUIT: u64  = 1 << 19;
+pub const T_NOTE_TAKE_TTY_HUP: u64   = 1 << 20;
 
 // NOTE_BIT_* — bit position of each supported note in the per-Thread
 // note_mask. Bit set = defer delivery of that note. Per-Thread, NOT
@@ -1782,6 +1810,58 @@ pub unsafe fn t_postnote_tid(tid: i64, name_va: *const u8, name_len: usize) -> i
     x0
 }
 
+// t_note_dispose -- write the calling Proc's row for one note. The first call
+// makes the table govern the Proc until its next exec: a note whose row is
+// default gets the kernel's default and never reaches the handler.
+//
+// Returns 0, or:
+// -T_E_INVAL a name with no row (a name the kernel does not know, `kill`), an
+//            unknown disposition or flag, a flag on a row that is not caught,
+//            or a caught row with neither a handler nor a notes fd to take it.
+// -T_E_NOMEM the table could not be allocated.
+//
+// Safety: `name_va` must point to `name_len` readable bytes in user-VA memory.
+#[inline(always)]
+pub unsafe fn t_note_dispose(name_va: *const u8, name_len: usize, disposition: u64, flags: u64) -> i64 {
+    let mut x0: i64 = name_va as i64;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") name_len as u64,
+        in("x2") disposition,
+        in("x3") flags,
+        in("x8") T_SYS_NOTE_DISPOSE,
+        options(nostack)
+    );
+    x0
+}
+
+// t_note_wait — wait for a note under a mask of the call's own
+// (T_NOTE_WAIT_SUSPEND: `set` the mask, `record` null, `timeout_ns` < 0), or take
+// one with no handler (T_NOTE_WAIT_TAKE: `set` a take word, `record` a TNoteRecord
+// or null, `timeout_ns` < 0 for none and 0 to poll).
+//
+// Returns 0 on a take. -T_E_INTR when a caught note outside the wait's set ran its
+// handler or is about to; -T_E_AGAIN when the timeout passed; -T_E_INVAL for a form
+// or word it does not name; -T_E_FAULT for a bad `record`, and the note stays queued.
+//
+// Safety: `record` is either null OR points to a writable TNoteRecord in user-VA
+// memory.
+#[inline(always)]
+pub unsafe fn t_note_wait(how: u64, set: u64, record: *mut TNoteRecord, timeout_ns: i64) -> i64 {
+    let mut x0: i64 = how as i64;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") set,
+        in("x2") record as u64,
+        in("x3") timeout_ns,
+        in("x8") T_SYS_NOTE_WAIT,
+        options(nostack)
+    );
+    x0
+}
+
 // t_note_mask — swap the calling Thread's note_mask. `new_mask` is the
 // new mask (bit set = defer that note); if `old_mask_out_va` is
 // non-null, the previous mask is written there. Bits outside
@@ -1993,7 +2073,7 @@ pub unsafe fn t_attach_9p_srv(srv_fd: i64, aname: *const u8, aname_len: usize,
 
 // t_torpor_wait — futex-style wait-on-address.
 //   addr_va    user-VA pointer to a 4-byte-aligned u32 (the futex word)
-//   expected   compared under the kernel `torpor_lock` -- mismatch =>
+//   expected   compared under the kernel's bucket lock -- mismatch =>
 //              return 0 immediately (value already changed)
 //   timeout_us see T_TORPOR_TIMEOUT_INDEFINITE / T_TORPOR_MAX_TIMEOUT_US
 //
@@ -3116,10 +3196,9 @@ pub unsafe fn t_weft_unshare(share_id: u64) -> i64 {
 // the only way it returns is by FAILING, and then the caller is completely
 // intact and the value is a real -errno.
 //
-// Notable errors: -T_E_NOENT / -T_E_ACCES (the path did not resolve),
-// -T_E_INVAL (not a loadable static ELF -- POSIX would say ENOEXEC; see the
-// SYS_EXECVE ABI note), -T_E_AGAIN (this Proc has more than one live thread,
-// which v1.0 refuses rather than half-serves).
+// Notable errors: -T_E_NOENT / -T_E_ACCES (the path did not resolve, or I-12 or the NX rule
+// refuses the image),
+// -T_E_NOEXEC (not a runnable image), -T_E_LIBBAD (its interpreter is not).
 //
 // The environment is NOT passed: it is the per-Proc /env device, which survives
 // exec on its own.
@@ -3584,7 +3663,7 @@ pub unsafe fn t_wstat_times(fd: i64, valid: u32, times_va: u64) -> i64 {
 // t_spawn_full_argv — combined-spawn primitive with argv pass-through.
 // Subsumes every earlier SYS_SPAWN_* surface. Reads the calling Proc's
 // 80-byte `TSpawnArgs` struct at `req_va` and rfork-execs a fresh child.
-// Returns the child's pid (positive) on success, -1 on any rejection
+// Returns the child's pid (positive) on success, a -T_E_* on any rejection
 // (see SYS_SPAWN_FULL_ARGV kernel header for the full list).
 //
 // Backs t::process::Command::spawn (U-2d).

@@ -67,6 +67,21 @@ struct t_file_lock; // <thylacine/syscall.h>; SYS_FILE_LOCK's TEST answer
 extern struct Walkqid dev_walk_attrs_unsupported;
 #define DEV_WALK_ATTRS_UNSUPPORTED (&dev_walk_attrs_unsupported)
 
+// Why a walk failed. Dev.walk and Dev.walk_attrs answer NULL with no errno of their
+// own, so a Dev with a reason other than "no such name" records it with
+// dev_walk_failed(-errno) just before that NULL, and a caller that reports errnos goes
+// through dev_walk or dev_walk_attrs, whose *why is the reason as a T_E_* code, or 0 for
+// a plain miss (ERRORS.md ER-2). The reason is read as the Dev returns, ahead of any
+// cleanup that could walk again.
+struct Spoor;
+struct t_stat;
+void dev_walk_failed(int rc);
+struct Walkqid *dev_walk(struct Spoor *c, struct Spoor *nc, const char **name, int nname,
+                         int *why);
+struct Walkqid *dev_walk_attrs(struct Spoor *c, struct Spoor *nc, const char **names,
+                               const size_t *name_lens, int nname, struct t_stat *sts,
+                               int *why);
+
 // The Plan 9 Dev vtable. ARCH §9.2 verbatim with C99 const additions on
 // input strings (read-only inputs that were `char *` in 9front; we
 // preserve the original typing for buffer params + `void *`/`u8 *` for
@@ -164,7 +179,8 @@ struct Dev {
     //                              ignores it and returns a fresh Spoor
     //                              inside the Walkqid. Walkqid->nqid
     //                              tells the caller how many components
-    //                              succeeded.
+    //                              succeeded. NULL with no dev_walk_failed
+    //                              reads as "no such name".
     //   stat(c, dp, n) — write 9P stat to dp[0:n]; returns bytes
     //                    written or -1 on failure.
     //   stat_native(c, out) — Thylacine-native fstat surface (P6-pouch-
@@ -237,7 +253,7 @@ struct Dev {
     //     no fid binds on either end (dev9p sends newfid=P9_NOFID), and
     //     w->spoor == NULL always. The 1-RPC stat.
     //   - NULL return: the walk failed at the FIRST component (or transport /
-    //     OOM). Nothing bound; nc untouched.
+    //     OOM), with its reason in dev_walk_failed. Nothing bound; nc untouched.
     struct Walkqid *(*walk_attrs)(struct Spoor *c, struct Spoor *nc,
                                   const char **names, const size_t *name_lens,
                                   int nname, struct t_stat *sts);

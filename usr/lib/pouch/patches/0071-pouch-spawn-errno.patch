@@ -1,0 +1,54 @@
+pouch boundary-line patch 0071 - a failed spawn says why.
+
+Operator vote 23 (2026-11-03); ERRORS.md ER-2: only a miss reads ENOENT.
+
+SYS_SPAWN_FULL_ARGV now answers the walk's reason, so a Stratum EIO on the binary reaches
+posix_spawn by value, with the code this file already passed through for the env tail. The
+flat -1 that is left is a refusal with no code, which reads EIO, the boundary line's rendering
+of it everywhere else; it used to read ENOENT, the cause a -1 most often meant.
+
+posix_spawnp's PATH search went on past every failure and ended in ENOENT. It now goes on past
+ENOENT, ENOTDIR and EACCES, as upstream's __execvpe does, and any other failure is the answer.
+
+--- a/src/process/posix_spawn.c
++++ b/src/process/posix_spawn.c
+@@ -281,13 +281,10 @@
+ 
+ 	long r = __syscall1(SYS_thyla_spawn_full_argv, (long)(uintptr_t)&rec);
+ 	if (r < 0) {
+-		/* Kernel flat -1: name not resolvable / bad ELF / OOM / a listed fd
+-		 * not KOBJ_SPOOR. ENOENT is the dominant + clearest posix_spawn
+-		 * failure (binary not found); the exact cause is collapsed at v1.0.
+-		 * The env tail's refusals carry their errno instead (E2BIG, EINVAL,
+-		 * EFAULT, ENOMEM): an environment the kernel will not hold is not a
+-		 * missing binary. */
+-		ec = (r < -1) ? (int)-r : ENOENT;
++		/* The kernel's own errno, ENOENT only for a real miss (ERRORS.md ER-2).
++		 * A flat -1 is a refusal the kernel has no code for: a listed fd that
++		 * is not KOBJ_SPOOR, an unknown flag. It says nothing about the file. */
++		ec = (r < -1) ? (int)-r : EIO;
+ 	} else {
+ 		if (res) *res = (pid_t)r;
+ 		ec = 0;
+--- a/src/process/posix_spawnp.c
++++ b/src/process/posix_spawnp.c
+@@ -42,7 +42,18 @@
+ 		}
+ 		if (access(buf, X_OK) == 0)
+ 			return posix_spawn(res, buf, fa, attr, argv, envp);
+-		if (errno == EACCES) seen_eacces = 1;
++		/* The search goes on past a miss, as upstream's __execvpe does. Any
++		 * other failure is an answer, and reading it as a miss would hide it. */
++		switch (errno) {
++		case EACCES:
++			seen_eacces = 1;
++			break;
++		case ENOENT:
++		case ENOTDIR:
++			break;
++		default:
++			return errno;
++		}
+ 	next:
+ 		if (!colon) break;
+ 		p = colon + 1;

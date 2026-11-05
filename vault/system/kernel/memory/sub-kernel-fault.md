@@ -173,6 +173,15 @@ revisit it, since a refused store loses the joiner's wake
 ([[seam-exiting-tails-never-sleep]]). Regression:
 `demand_page.file_miss_refuses_exiting_thread`.
 
+**Nothing holding a counted lock sleeps here either.** `sched()` extincts on a held
+plain spinlock, and a kernel load under a lock can reach the FILE miss whatever its
+caller pre-faulted: a peer's `MAP_FIXED` can replace the mapping in between, which is
+how `torpor_wait`'s load under its bucket lock got there. So `demand_page_one` samples
+`preempt_count` before `as->lock` adds to it, and the miss refuses before it pins. The
+access takes its uaccess fixup and its caller decides. An EL0 fault holds no lock, so
+this never fires for one. A future arm that sleeps must honour the same flag. Regression:
+`demand_page.file_miss_under_a_lock_refuses`.
+
 ## Invariants enforced
 
 [[inv-i12]] — every install passes `vma->prot` through unchanged. The

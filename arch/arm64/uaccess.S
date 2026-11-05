@@ -143,7 +143,7 @@ uaccess_store_u8_fault:
 
 // uaccess_load_u32 — read a single 32-bit word from a user VA. Added
 // at P6-pouch-wait-addr for SYS_TORPOR_WAIT's futex-word compare: the
-// kernel reads *user_va (the user's atomic-int) under torpor_lock and
+// kernel reads *user_va (the user's atomic-int) under the bucket lock and
 // compares it against the caller's `expected`.
 //
 // AArch64 ABI: x0 = user VA, x1 = u32 *out (kernel-direct-map pointer).
@@ -157,8 +157,8 @@ uaccess_store_u8_fault:
 //
 // Implementation mirrors uaccess_load_u8: one `ldr w2, [x0]` is the
 // fault point; the fixup-table entry maps it to the `.L` fault label.
-// Plain LDR (not LDAR) — a PARKING consumer's torpor_lock acquire pairs
-// with the producer's torpor_lock release on its preceding WAKE to
+// Plain LDR (not LDAR) — a PARKING consumer's bucket-lock acquire pairs
+// with the producer's bucket-lock release on its preceding WAKE to
 // provide the memory ordering. Standard Linux-futex discipline. (The
 // lock-free mismatch path — torpor.c's pre-lock compare — deliberately
 // gets only this load's single-copy-atomicity; see torpor.h.)
@@ -197,7 +197,7 @@ uaccess_load_u32_fault:
 // honest by validating alignment in the C caller).
 //
 // Plain STR (not STLR) — the producer-side store; the consumer's later
-// load runs under torpor_lock whose acquire pairs with the lock-release
+// load runs under the bucket lock, whose acquire pairs with the lock-release
 // following this store. Mirrors uaccess_load_u32's discipline.
 .global uaccess_store_u32
 .type uaccess_store_u32, @function

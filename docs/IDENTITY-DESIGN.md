@@ -836,7 +836,7 @@ user can neither reach nor race into the exempt set.
 `sys_burrow_attach_for_proc`, under `vma_lock`, after the page count is known,
 before `burrow_create_anon` (and the matching uncharge in
 `sys_burrow_detach_for_proc` on a successful unmap). Thread —
-`sys_thread_spawn_handler`, reading `thread_count` under `g_proc_table_lock`.
+`proc_thread_admit`, against `thread_budget` under `p->threads_lock`.
 Child — `rfork_internal` (the *single* Proc-creation chokepoint — every
 `SYS_SPAWN_*` variant routes through it, so none escapes), reading `child_count`
 under `g_proc_table_lock`; the counter is `++`/`--` at `proc_link_child` /

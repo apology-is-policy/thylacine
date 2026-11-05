@@ -138,6 +138,12 @@ void test_exec_ns_noexec_mount_denied(void) {
     struct Spoor *during = (mrc == 0)
         ? exec_resolve_from_namespace(t->proc, "/bin/hello", 10, &denied_size)
         : NULL;
+    // A spawn refused there says why.
+    int spawn_rc = (mrc == 0 && !during)
+        ? sys_spawn_full_argv_debug_for_proc(t->proc, "/bin/hello", 10, NULL, 0u, 0u, NULL, 0u,
+                                             CAP_NONE, 0u, false, 0u, 0u, NULL, 0u,
+                                             NULL, 0u, 0u, 0u)
+        : -T_E_ACCES;
     if (mrc == 0) (void)unmount(t->proc->territory, mp);
     size_t after_size = 0;
     struct Spoor *after = exec_resolve_from_namespace(t->proc, "/bin/hello", 10, &after_size);
@@ -147,6 +153,7 @@ void test_exec_ns_noexec_mount_denied(void) {
         "DENY: exec resolution refuses a binary on an MNOEXEC device instance "
         "-- a noexec mount that still permits exec is not noexec");
     TEST_ASSERT(denied_size == 0, "size_out stays 0 on the noexec deny");
+    TEST_EXPECT_EQ(spawn_rc, -T_E_ACCES, "a spawn from a noexec mount reads EACCES");
     TEST_ASSERT(after != NULL,
         "CONTROL: the SAME resolve succeeds again once the mount is gone "
         "(so the deny came from MNOEXEC, not from a broken /bin/hello)");

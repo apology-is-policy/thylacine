@@ -489,10 +489,13 @@ int exec_load_into(struct AddrSpace *as, bool exempt, struct Proc *nsp,
 // dead kernel rather than a failed exec. It is also the only place the
 // `--argv0` claim can be discriminated at all -- nothing in a container can
 // produce a vector whose argv[0] differs from the path it resolved.
+// *err_out (OPTIONAL) says why on NULL, as a T_E_* code: E2BIG for the bound, NOMEM
+// for a refused allocation, EINVAL for a block no syscall entry would pass.
 char *exec_interp_argv(const char *interp, u32 interp_len,
                        const char *path, u32 path_len,
                        const char *argv_data, u32 argv_data_len, u32 argc,
-                       u32 *out_len, u32 *out_argc);
+                       u32 *out_len, u32 *out_argc, int *err_out);
+void exec_interp_argv_refuse_for_test(bool on);
 #endif // KERNEL_TESTS
 
 // exec_resolve_from_namespace (#58 / REVENANT R-4) -- resolve `name` in `p`'s
@@ -505,6 +508,17 @@ char *exec_interp_argv(const char *interp, u32 interp_len,
 // Declared here because DISTRO D-4 made exec.c a caller: the interpreter path
 // resolves through exactly the same gate the program did, so there is one
 // answer to "what is executable from this namespace" and not two.
+// exec_resolve_interp -- the same, saying why in *errp on NULL: the walk's reason, as
+// exec_resolve_from_namespace_ex has it. For a PT_INTERP, whose program's phenotype governs.
+struct Spoor *exec_resolve_interp(struct Proc *p, const char *name, size_t name_len,
+                                  size_t *size_out, int *errp);
+
+// exec_image_check -- is this a file a child could load? 0 if so, including an image with a
+// PT_INTERP, whose interpreter is the load's to resolve. -T_E_NOEXEC if it is not an image;
+// -T_E_ACCES if it may not run: no reader, or I-12 or the NX rule refuses it; a failed read's
+// -errno or -T_E_NOMEM, which say nothing about the file. BORROWS exe.
+int exec_image_check(struct Spoor *exe, size_t exe_size);
+
 struct Spoor *exec_resolve_from_namespace(struct Proc *p, const char *name,
                                           size_t name_len, size_t *size_out);
 

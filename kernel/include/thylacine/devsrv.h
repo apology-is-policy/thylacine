@@ -503,6 +503,10 @@ s64 devsrv_open_errno(struct Spoor *c);
 // lock. A concurrent accept returns NULL; the identity pin blocks rebind until
 // the first call unwinds, including tombstone and interrupted-sleep paths.
 struct SrvConn *srv_accept_blocking(struct SrvService *svc, u64 poster_stripes);
+// As above, and a caught note ends the wait: NULL with *noted set, nothing taken
+// (SYS_SRV_ACCEPT, ARCH 8.8.3). *noted is the caller's to initialize.
+struct SrvConn *srv_accept_interruptible(struct SrvService *svc, u64 poster_stripes,
+                                         bool *noted);
 
 // devsrv_make_conn_spoor — wrap an accepted SrvConn in a devsrv connection
 // Spoor (dc='s', pre-opened). The Spoor's read/write route to the SrvConn

@@ -1056,7 +1056,8 @@ returned Done + restored the terminal, and the second `^Z` -- correctly --
 found no foreground job (the KDBG chain: `set_fg(job)` -> `cont` -> instant
 `set_fg(own)` restore -> `tstp fg=own would=0`). The fix is two-layer:
 **(a) kernel** -- the stop cascade now calls the non-completing
-`torpor_stop_wake_all_for_proc` (wakes the rendez, leaves `awoken` clear),
+`torpor_stop_wake_all_for_proc` (wakes the rendez, leaves `awoken` clear;
+thread-model C8a removed that walk, and the per-peer rendez wake does the same),
 so the woken waiter's tsleep re-loop takes the 8c-2 stop detour, parks with
 the wait PRESERVED, and on resume re-registers with its original deadline
 (the parks-and-reparks contract made total over torpor -- the Linux

@@ -12,7 +12,7 @@ hazards: []
 abis: [abi-note-names]
 design: ["docs/ARCHITECTURE.md", "docs/ERRORS.md"]
 created: 2026-08-03
-updated: 2026-11-02
+updated: 2026-11-04
 ---
 ## Purpose
 
@@ -58,7 +58,9 @@ Three paths, **one queue**:
 
 The third path is not a third *queue* — it is a second **frame shape** over the
 same one queue, and it sits *above* the native handler branch in the deliverer
-for a specific reason recorded below.
+for a specific reason recorded below. Since item 11c the table it reads is not the
+phenotype's alone: `SYS_NOTE_DISPOSE` writes it for a native Proc, and the tail then
+enters `handler_va` for a caught row and takes the default for every other.
 
 **Eight** families of note name (this count has lagged its table three times --
 four against five rows until 2026-08-16, five against six after `pipe`, and
@@ -71,7 +73,7 @@ four against five rows until 2026-08-16, five against six after `pipe`, and
 | `usr1`, `usr2` | anyone | terminate (unless the Proc reads its own notes); SIGUSR1's and SIGUSR2's since 2026-11-02 |
 | `kill` | anyone | terminate, **uncatchable** |
 | `pipe` | kernel | terminate (SIGPIPE's default; a reader-less write posts it) |
-| `child_exit` | kernel | nothing — queue for the fd reader |
+| `child_exit` | kernel | nothing — queue for the fd reader; where a table governs, discarded at the tail |
 | `tty:*` | **kernel only**, catchable | quit/hup terminate; susp stops; winch/cont informational |
 | `sak` | **kernel only** (the trusted path, I-27) | nothing — catchable, ignored by default, so the TCB is never ended by it |
 | `snare:*` | **kernel only** | terminate — and not deliverable at all today |
@@ -258,14 +260,99 @@ turns on — is answered by the native registration address, which is **0 for
 every phenotyped Proc**, because a Linux guest never calls the native register
 syscall. Its handler lives in the per-Proc signal table instead. So the
 "someone will catch this, do not treat it as uncaught" exemption never applied
-to a phenotyped Proc, and the helper now consults the signal table when the
-native address is zero and the phenotype is Linux.
+to a phenotyped Proc, and the helper now consults the table whenever one governs
+(`notes_table_governs`: the Linux phenotype, or a native Proc's first
+`SYS_NOTE_DISPOSE`).
 
 Left unfixed that was a **hang, not a fidelity gap**: the latch makes every
 unmasked thread's sleep return interrupted at once, and while the delivery
 success path drains the latch and self-corrects, the frame-push failure arms do
 not. Worth keeping as a shape — *a fidelity gap in an exemption check becomes a
 liveness bug when the thing being exempted is a latch.*
+
+### A table governs a native Proc too (item 11c, 2026-11-03)
+
+Operator votes 18, 19 and 20 ([[dec-2026-11-03-note-dispose-table]], ARCH 8.8.3). What
+a note does is read from one per-note table, `struct viv_sigtab`, for the Linux
+phenotype and for a native Proc alike. `SYS_NOTE_DISPOSE` (139) writes a native row:
+default, ignore or caught, with a restart flag on a caught one. The first call sets
+`PROC_FLAG_NOTE_TABLE` (bit 24), and the table governs until the next exec. A native
+fork copies the flag, the table and `handler_va`, as Plan 9's `sysrfork` copies
+`p->notify`; exec clears all three. `notes_table_governs` is the one spelling of the
+question, and every disposition reader asks it, never the phenotype. `SYS_NOTIFY` with
+no table keeps Plan 9's shape: the handler catches every note and no wait unwinds.
+
+A default row needs no table, so a governed Proc may have `sigtab` NULL, and every note
+then takes its default. A Pouch image's constructor writes SIGPIPE's ignore row, which
+allocates the table, and `child_exit`'s default row, which does not, so the Proc is governed
+either way ([[sub-pouch-signal]]) and the tail discards a dead child's note. With no table and no handler that note waits for a notes fd nobody opened, and
+twelve of the sixteen slots fill before such notes coalesce.
+
+**A native row holds a token, and a token needs a taker.** The caught value is
+`VIV_NATIVE_CAUGHT`, never an address, and exec resets a live row whichever phenotype
+comes next, so a native row cannot reach a sigframe as a handler. `SYS_NOTE_DISPOSE`
+refuses a caught row with neither a handler nor a notes fd, but that gate binds only at
+the write: a fork carries the row and leaves the notes fd's mark behind, and a peer's
+`SYS_NOTIFY(0)` can cross a dispose that passed it. So `notes_row_has_taker` asks again,
+in `notes_proc_has_live_handler` and on the tail's row, and a stale token takes the
+discard, terminate and stop arms as a default row does. A note under one otherwise has
+no consumer, and SIGTERM and ^C cannot end the Proc. A guest's row is an address,
+whatever its value. rfork reads the flag once, for the clone and the publication, and
+the handler after it, so a child that takes a row also takes what it was written against.
+
+**A disposition write re-reads what is pending** (`notes_disposition_reread`, from
+`viv_sigaction_settled`, `notes_set_handler`, `notes_handler_resets` and the end of
+`proc_exec_drop_image_state`). A note posted before the write was judged by the old row.
+Under `q->lock` the re-read walks the queue and sets both latches to what the rows now
+say; with the lock dropped it runs the terminate wake, the caught wake and
+`proc_note_direct_rouse`. That closes [[seam-queue-note-fatal-after-post-wakes-nobody]]:
+a note a wait rode out now ends the wait when its row turns fatal. Exec commits
+`p->phenotype` before the drop, and the drop's test hook does not, so a test stores it.
+
+**Which native calls a note may unwind** is `native_note_class` (syscall.c). It runs
+only where a table governs and there is a handler or a notes fd, so a program that only
+ignores SIGPIPE pays no stat per open file.
+
+| call | unwinds | restarts |
+|---|---|---|
+| `READ`, `WRITE`, `PREAD`, `PWRITE` on a slow file (`file_is_slow`: fifo, char device, socket) | yes | yes |
+| `WAIT_PID`, `SRV_ACCEPT` | yes | yes |
+| `TORPOR_WAIT` | yes | only with no deadline (`regs[2] < 0`) |
+| `POLL` | yes | no |
+| `OPEN` with `SYS_WALK_OPEN_OINTR` | yes | yes |
+
+Vote 20's bit is how an open that waits for a peer says so: Pouch's `accept` and
+`connect` set it on the one open that does, and a regular open stays uninterruptible.
+The bit covers the open's wait and not the walk to it, and so does the flag a Linux
+dial sets: [[sub-kernel-stalk]] holds `note_interruptible` clear through the walk and
+gives it back only around the final `dev->open`, because a failed walk has no errno to
+carry `EINTR` and would read as `ENOENT`.
+A self-managing Proc writes a caught row to let a note interrupt a listed wait; the note
+stays for the fd, and with no row nothing unwinds.
+
+**The kernel re-issues a restartable call (vote 19), for Pouch and for Linux guests.**
+Musl re-issues nothing, and the claim that it did was false. The dispatcher records
+`note_call_x0` and `note_restartable` at entry: Linux's from the positive list
+`vivarium_call_restartable`, a native's from the table above. `thread_caught_note_unwinds`
+sets the per-thread mark `note_call_unwound` when a wait really unwinds, and
+`notes_call_restarts` asks the mark, the class and `regs[0] == -T_E_INTR`, never the
+register alone: a server's `Rlerror(EINTR)` is an error to report, so `client_run`
+clears the mark when a flush wait ends on the op's own reply. `notes_call_rewind` moves
+`elr` back over the `svc` and restores `x0` before any frame or save exists, so a
+handler's return re-issues the call. Linux delivery rewinds ahead of the frame and undoes
+it if the copy-out or the consume fails; native delivery rewinds once the name is pushed.
+A tail that delivers nothing (the row turned default or ignore while the wait unwound)
+runs `notes_call_settle`, which rewinds unless a caught note is still pending for this
+thread, since a handler then answers for the call. Every path clears the mark. This
+closes the DEGRADED row of VIVARIUM 6.22.
+
+**A fatal note does not wait out a handler.** The tail's `in_handler` guard sits above
+the delivery body and now scans for a terminating note first
+(`notes_terminate_note_name_locked`, which reads the mask), so a default-row fatal note
+ends the Proc from inside a handler, as on Linux. It also has to: a native handler that
+`longjmp`s out never reaches `SYS_NOTED`, `thread_note_handler_escaped` stays Linux-only
+because a native runtime may run its handler on another stack, and with the latch armed
+every wait would return at once for as long as the Proc spun.
 
 ### A caught note interrupts a blocked peer's wait (item 11)
 
@@ -332,9 +419,9 @@ regular file's `read()` and every page-in ride a caught note out, and the
 handler runs at the call's return tail. Before this, both 9P waits (the RPC
 wait and the elected reader's receive) unwound for any caught note, so a
 `SIGCHLD` handler failed those calls with `EINTR` and a file page-in with
-`SIGBUS`. Death is untouched: `thread_die_pending` never reads the flag, and
-no native syscall sets it, so natives stay where `proc_caught_note_eintr_ready`
-already put them ([[dec-2026-09-29-caught-signal-slow-calls]]).
+`SIGBUS`. Death is untouched: `thread_die_pending` never reads the flag
+([[dec-2026-09-29-caught-signal-slow-calls]]). A native call sets it from
+`native_note_class` (above).
 
 **Every kernel wait a listed call reaches opts in (2026-10-05).** The flag is
 necessary, not sufficient: the wait must opt in too, and until
@@ -346,7 +433,7 @@ un-opted receive), the console's read and write waits ([[sub-kernel-cons]]),
 `ppoll`/`pselect6`'s park and its timeout-only sleep, which is musl's `pause()`
 ([[sub-kernel-poll]]), `wait4` (`WAIT_PID_NOTEINTR`, [[sub-kernel-proc]]) and
 `futex` (`TORPOR_ERR_EINTR`, [[sub-kernel-torpor]]). One predicate decides,
-`thread_caught_note_unwinds`: a Linux phenotype (`proc_caught_note_eintr_ready`)
+`thread_caught_note_unwinds`: a table governs (`proc_caught_note_eintr_ready`)
 and the claim won (`thread_caught_note_claim`, which re-runs the deliverable test
 above). A 9P reader is not excepted: it unwinds at any byte of a frame, the client
 keeping the partial frame (ARCH 8.8.1.1; until 2026-10-06 a reader mid-frame was,
@@ -359,10 +446,8 @@ until its EL0-return tail, so a second wait in the same call would unwind at
 once and spin. Three waits a listed call reaches stay out, each for a reason
 (ARCH 8.8.3): the 9P send side (an unwind drains nothing, so the retry spins),
 `poll`'s settle (bounded by the server's answer or the fail-safe), and the notes
-fd's read (its data is the queued note, so a post readies it). Linux restarts
-`wait4`, a pipe and `futex` under `SA_RESTART`; the kernel restarts nothing, so
-a guest that relies on the restart sees `EINTR` — the documented DEGRADED gap
-(VIVARIUM 6.22).
+fd's read (its data is the queued note, so a post readies it). Under `SA_RESTART`
+the kernel re-issues what signal(7) restarts (above).
 
 **The claim ends at the tail, not at the drain (VIV-EINTR round-2 F1, P1).** The
 first version cleared a claim with its family's last drain, on the argument that
@@ -448,7 +533,10 @@ the wait's kind (`Thread.caught_wait`: none, unwinds, holds) under the thread's
 `wait_lock` before anything else (`sleep_caught_wait_enter`), and restore the
 outer kind on the way out, since a stop park nests a wait inside a wait.
 `thread_caught_wait_kind` answers "unwinds" exactly when every gate of
-`thread_caught_note_unwinds` that cannot change during the wait passes. A
+`thread_caught_note_unwinds` that cannot change during the wait passes. Whether a
+table governs the Proc can change, since a peer's first row can come while the
+wait stands, so the kind does not read it: the walk designates nobody until one
+does, and from then on it finds that wait. A
 designation the wait cannot honour -- every family when it holds, a masked one
 when it unwinds -- is handed off before the thread blocks
 (`notes_handoff_target`): the wait lock is dropped, the families leave the
@@ -689,6 +777,71 @@ single `note_saved_*` slot; contained (guest-self-corruption, per-Thread,
 kill-immune) and exotic (no v1.0 target does signal-driven cross-stack
 switching), documented in VIVARIUM 6.23's DEGRADED row and tracked for v1.x.
 
+### One mask restore at a handler's return, and the two waits (vote 24, 2026-11-03)
+
+[[dec-2026-11-03-note-wait]], ARCH 8.8.3. Every delivery goes through
+`notes_handler_mask_enter`, and `notes_noted_restore` puts `note_saved_mask` back with no
+question about the phenotype. The native arm's running mask is the interrupted mask, the
+row's `sa_mask`, and the note's own family unless `NOTE_DISP_NODEFER`. A native delivery
+with no table adds nothing, and still saves. A native handler reads the row's flags in
+`x2`. The old rule that a native handler's mask survives its return had no dependents:
+Pouch, the debug child and joey's smoke change no mask in a handler, and Go's runtime has
+no `noted`.
+
+`Thread.note_wait_flags` (where `_pad_in_handler` was, so the size stays 1792):
+`NOTE_WF_MASK_HELD` says this call runs under its own mask, and the thread's own sits in
+`note_saved_mask` until the handler's return or the call's tail. `notes_interrupted_mask`
+reads through it, so a frame's `uc_sigmask` reads the caller's mask and never the wait's.
+`NOTE_WF_NOHAND` is Linux's `ERESTARTNOHAND`: re-issue the call if it unwound and no handler
+ran. The call sets it itself and not its class, because `native_note_class` runs only for
+a Proc with a table and either a handler or a fd, and a call with neither must still
+re-issue after its tail. A tail that refuses the sp takes nothing, so the settle does not
+re-issue there. It sets `note_interruptible` the same way: a peer can install the
+first handler while the wait stands, and the wait has no other end. At the tail's end, in order: settle, restore if held, clear the
+byte, release claims. The settle rewinds on `note_restartable || NOHAND`; the handler arm's
+`SA_RESTART` rewind stays on `note_restartable` alone, so a `sigsuspend` under `SA_RESTART`
+still answers `EINTR`.
+
+`NOTE_DISP_RESETHAND`'s row store moved under `q->lock` on both paths, and the disposition
+is re-read after the unlock, so two threads cannot both read caught. `SYS_NOTE_DISPOSE` and
+`rt_sigaction` store their rows under the same lock (`viv_sigtab_store`), so the reset cannot
+land on a row a peer wrote after the tail read it.
+
+`notes_wait_suspend`: refuses a Proc no table governs. In a handler it leaves the masks
+alone (the saved slot is in use) and waits on the queue hook for a note `~mask` admits and a
+handler would take, then answers `EINTR`; the note runs at the outer handler's return. Otherwise it stores the mask,
+peeks `notes_tail_candidate_locked` (a default stop or ignore queued under the old mask
+needs the tail, and no latch wakes for it) and marks an unwind if one is there, not for a
+self-managing Proc, whose fd holds its notes; then `tsleep_noteintr` forever. A pending
+caught note reads the latch at register-then-observe.
+
+`notes_wait_take`, on `notes_wait_on_queue`: hook on `q->poll_list` registered before it
+looks, the thread's own word first (`notes_tail_consume_locked`), then FIFO with the pop and
+both drains. `proc_note_thread` adds a queue wake for a direct note, which only the latch
+used to reach. A kill-only queue answers `EINTR`, as `devnotes_read`'s R3-F1. A caught note
+outside the word unwinds, after a last look for a take. `notes_wait_untake` puts a note back
+after a copy-out fault: unconsume, re-arm terminate, and the wakes (N-2). A take word's bits
+16..20 name single rows of the tty family; `notes_take_for_sigset` is the Linux row's
+spelling.
+
+`notes_wait_mask_begin` and `notes_wait_mask_end` hold a mask for a call that can also end
+some other way (operator vote 28, [[dec-2026-11-04-poll-mask]]). Begin differs from a suspend's
+front in one thing: a caught note goes on to the poll, whose pass reads the latch only after
+finding nothing ready, so a ready fd answers first. A note only the tail can act on arms
+nothing a poll reads, so begin marks an unwind and answers `EINTR`, with `NOHAND` even for a
+timed call, since no time has gone. Begin leaves that out for a Proc no table governs, whose
+tail would leave a default-ignored note queued and re-issue for ever
+([[fnd-note-wait-r2-f3]]). End is Linux's `restore_saved_sigmask_unless`: an answer that is no
+note's doing puts the mask back and clears both marks at once, so no handler runs for a note
+only the call's mask let in. `EINTR` keeps it, and so does the 0 the poll core gives a death
+wake: restored, the fatal note would wait behind the caller's mask and an untimed poll would
+read a timeout ([[fnd-note-wait-r2-f1]]). In a handler neither does anything, so no note can
+end the call: a coarser imprecision than a suspend's ([[fnd-note-wait-r2-f4]]).
+`notes_wait_pending` reads the own word and the queue against
+`notes_interrupted_mask`, or against everything in a handler, and takes nothing. The snare
+family is left out of its answer, which is a take word. `notes_sigset_for_take` is the Linux
+row's way back.
+
 ### The handler-time mask is Linux's, and it is passed on (phenotype)
 
 For a PHENO_LINUX handler, delivery sets the running mask the Linux way: the
@@ -873,9 +1026,12 @@ records no signal).
   every test on a family below bit 8 stays green. The fields' fit is asserted in
   `notes.c`; a cast is not, so `notes.family_past_the_first_byte` and
   `rendez.caught_note_family_past_the_first_byte` drive `usr2` through every path.
-- **A native or Pouch thread's blocked wait rides a direct note out**, as it does a
-  queued caught one, so `pthread_kill` reaches a blocked Pouch worker only when its
-  call ends. That is item 11c, its own chunk (operator vote 16).
+- **A self-managing Proc with a registered handler never gets its row's restart.**
+  The tail's table branch is skipped for it, so the row's flags stay 0 and the settle
+  refuses it: it sees `EINTR`, which POSIX allows. No in-tree program does both.
+  OPEN-BUGS.
+- **A native exec drops an ignored row**, where POSIX keeps it
+  ([[seam-native-exec-drops-sig-ign]]).
 - Per-kind masking within the `tty:` and `snare:` families is one bit each today.
 - `snare:*` is defined, prefix-gated, and **not deliverable**: fault termination
   calls the exit path directly rather than posting (since gcpark-b,
@@ -1028,6 +1184,14 @@ reads `EINTR` there while the caller's own `ppoll`s run their full time; a block
 caller's self-directed note waits through an open peer; with no handler, `tgkill` at a
 blocked peer ends the group with `SIGTERM`), and pouch-hello-threads' `kill-worker`,
 `kill-masked`, `raise-masked`, `kill-blocked` and `kill-answers`.
+
+Item 11c: `notes.table_refusals`, `.table_rows_govern`, `.table_token_needs_a_taker`,
+`.table_reread`, `.table_exec`, `.restart_settle`, `.unwind_sets_the_mark`, `.native_class`;
+`rendez.restart_undone_on_refused_frame`, `.tail_discards_dead_note`,
+`.native_tail_past_sak`, `.reread_wakes_a_sleeper`; `vivarium.call_restartable`;
+`9p_client.note_flush_server_eintr_stands`. On the device: pouch-hello-signals' blocked
+legs, pouch-hello-sockets' `accept` and `recv`, pouch-hello-net's `accept-eintr`,
+`accept-restart`, `connect` and the TCP `recv` legs, viv-pheno-probe L346-L349.
 
 ## Referenced by
 

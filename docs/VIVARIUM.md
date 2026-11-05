@@ -488,8 +488,9 @@ this exact translation in userspace); errno is already POSIX-aligned by `ERRORS.
   `ucontext` frame on the user stack + `rt_sigreturn`. This is the audit-bearing
   piece; it composes with notes (I-19) and the EL0-return-tail delivery checkpoint
   that already exists for note delivery and for the I-39 debug stop.
-- **Tier 2 (v1.x)**: full `sigprocmask`/`sigaltstack`/`SA_RESTART`/queued
-  `siginfo` fidelity. (`tgkill` fidelity landed at thread-model C4; §6.22.)
+- **Tier 2 (v1.x)**: full `sigprocmask`/`sigaltstack`/queued
+  `siginfo` fidelity. (`tgkill` fidelity landed at thread-model C4, `SA_RESTART` at
+  item 11c; §6.22.)
 
 **CORRECTION to Tier 1, 2026-07-30 (V-6 entry; user-voted).** The clause *"restores
 `pstate`/`pc` from user memory at `rt_sigreturn`"* described Linux's mechanism, not
@@ -2557,11 +2558,25 @@ default), and the signal chunk's S-2 gave it its own note, `term`
   ends the caller with that death, as a fault or Pouch's `abort()` would.
 - **`rt_sigreturn` (139)** is the phenotyped spelling of `SYS_NOTED(NCONT)`.
 
-`sigaltstack` (132), `rt_sigsuspend` (133), `rt_sigpending` (136),
-`rt_sigtimedwait` (137), `rt_sigqueueinfo` (138) and `restart_syscall` (128) are
-explicit `ENOSYS` rows (132 and 133 share their numbers with the native
-`SYS_GETPPID` and `SYS_UMASK`, and the rows are consumed before the native
-switch) — Tier 2, and recorded rather than defaulted, per the
+- **`rt_sigsuspend` (133)** and **`rt_sigtimedwait` (137)** sit on `SYS_NOTE_WAIT`'s two
+  cores (operator vote 24, ARCH §8.8.3). A `sigsetsize` other than 8 is `EINVAL`. The first
+  answers `EINTR` once a handler has run, and the frame's `uc_sigmask` reads the caller's
+  mask, not the wait's. The second answers the signal, with `si_code` `SI_KERNEL` and a
+  zero union in the `siginfo`, as a frame's, and `EAGAIN` at its timeout.
+- **`ppoll`'s fourth argument and `pselect6`'s sixth** put a mask in for the one call
+  (operator vote 28, ARCH §8.8.3). A ready fd answers first, with the caller's mask back
+  and a note only the mask let in still pending. `EINTR` has the handler run under the
+  call's mask. `ppoll`'s `sigsetsize` and the `ss_len` in `pselect6`'s `{ss, ss_len}` pair
+  are looked at only beside a mask, as in Linux's `set_user_sigmask`: other than 8 is
+  `EINVAL`, and a pair holding NULL is no mask whatever its length.
+- **`rt_sigpending` (136)** stores what is queued for this thread and held, in
+  `SYS_NOTE_WAIT`'s pending core, read back through the signal each row means.
+
+`sigaltstack` (132), `rt_sigqueueinfo` (138) and
+`restart_syscall` (128) are explicit `ENOSYS` rows (132 shares its number with the native
+`SYS_GETPPID`, and 133, 136 and 137 above share theirs with `SYS_UMASK`, `SYS_LSTAT` and
+`SYS_FILE_LOCK`; every one of these rows is consumed before the native switch) — Tier 2,
+and recorded rather than defaulted, per the
 file's standard that a number never considered and one considered-and-rejected
 are different facts. `SIGALRM` has no note to carry it;
 `SIGABRT` has no note: a self-directed one (`raise`, which is `tkill` to self)
@@ -2595,24 +2610,24 @@ all. A `connect` that a signal interrupts leaves the socket `CONNECTING`, and a
 blocking retry waits on the dial already made rather than dialing again, as
 Linux's `SS_CONNECTING` does. A failed dial leaves it `FRESH`, and a timed-out one
 reports `ETIMEDOUT` as netd does, not `ECONNREFUSED`.
-Where the restart-vs-`EINTR` decision is made is the pouch/unmodified split:
-- **Pouch guest** (our patched musl): the kernel returns `-EINTR` and delivers
-  the frame; musl's cancellation/`__eintr_valid_flag` machinery honours
-  `SA_RESTART` in *userspace* — `SA_RESTART` re-issues the syscall, else the
-  caller observes `EINTR`. This is the v1.0 path and it fully closes the
-  interactive-shell case (item 8): an interactive read's SIGINT handler is
-  typically not `SA_RESTART`, so the line is discarded and the prompt reprints.
-- **Unmodified Vivarium guest** (libc not ours to patch): a real Linux kernel
-  performs the `SA_RESTART` restart itself — rewinding `pc` by 4 and restoring
-  the original `x0` so the `svc` re-executes — because the guest libc expects it.
-  Thylacine does **not** rewind `pc` at v1.0; the `Thread` snapshot keeps the
-  interrupted regs, so the machinery *could*, but the restart-continuation is the
-  `restart_syscall` (128) ENOSYS row above. So an unmodified guest that installs
-  an `SA_RESTART` handler over a blocking syscall observes a spurious `EINTR`
-  rather than a transparent restart — a named DEGRADED-tier fidelity gap (§9),
-  costing correctness only for a guest that both runs unmodified *and* relies on
-  kernel-side restart, never authority. Kernel-side `SA_RESTART` is the natural
-  Tier-2 lift when an unmodified guest needs it.
+**The kernel restarts (operator vote 19, 2026-11-03; ARCH §8.8.3).** This section
+used to split the decision, and the half it gave to Pouch's musl did not exist:
+musl has no re-issue loop. `SA_RESTART` only sets `__eintr_valid_flag`, which
+`__timedwait` reads to filter a futex `EINTR` when no non-restart handler was ever
+installed. A Pouch program gets no frame either, being a native Proc. So every
+guest that relied on a restart saw `EINTR`, including anything that installed its
+handler with musl's or glibc's `signal()`, which set the flag by default.
+
+A delivery now does what a Linux kernel does. For a call restartable under
+signal(7), whose wait unwound, whose note's row carries `SA_RESTART`, the tail
+rewinds `pc` by 4 and restores the original `x0` before it builds the frame. The
+frame's `uc_mcontext.pc` then names the `svc`, and `rt_sigreturn` re-executes it. An
+interactive read's `SIGINT` handler is typically not `SA_RESTART`, so the read
+still returns `EINTR`, the line is discarded and the prompt reprints (item 8). A
+handler reads the rewound context in its frame, but cannot change it: `rt_sigreturn`
+restores from the kernel's save. `restart_syscall`
+(128) stays `ENOSYS`: Linux uses it only for the time-bounded calls, which here
+return `EINTR` under any flag, as signal(7) lists them when a handler ran.
 
 **AS BUILT (V-6c).** The frame is `siginfo_t` (128) + `ucontext_t` (4560) =
 4688 bytes, plus a 16-byte `{fp, lr}` frame record above it so a backtrace from
@@ -2662,8 +2677,8 @@ pins that a BLOCKED signal is *deferred* rather than lost: the handler must not
 run while SIGPIPE is masked, and must run at the `rt_sigprocmask` that unblocks
 it.
 
-**What Tier 2 still owes**, unchanged from §5.4: queued `siginfo`, `SA_RESTART`
-(a restartable syscall needs the EINTR plumbing LS-8 defers) and `SA_ONSTACK`.
+**What Tier 2 still owes**, from §5.4: queued `siginfo` and `SA_ONSTACK`.
+(`SA_RESTART` landed at item 11c.)
 Thylacine's `in_handler` blocks *all* delivery for the duration where Linux
 blocks only the delivered signal plus `sa_mask` — a stated imprecision in the
 conservative direction. **The MASK a handler runs under is Linux's since
@@ -2671,8 +2686,8 @@ conservative direction. **The MASK a handler runs under is Linux's since
 sig (omitted under `SA_NODEFER`, which is therefore honoured for the mask), and
 `rt_sigreturn` restores the pre-handler mask from the kernel-side save — so a
 handler's own `rt_sigprocmask` does not outlive it, and an `execve`/`fork()`
-from inside a handler passes on what Linux passes on. The guard above is what
-still differs, and it only defers — except at a fault: an instruction in a
+from inside a handler passes on what Linux passes on. The native path has run the
+same restore since operator vote 24 (ARCH §8.8.3). The guard above is what still differs, and it only defers — except at a fault: an instruction in a
 handler that faults while a SIG_DFL terminating signal is pending ends the
 process there with that signal (ARCH §7.6.4), which is what Linux's send-time
 group exit for a fatal default signal would already have done.
@@ -3319,8 +3334,7 @@ what was left into `rem` when `rem` is not NULL: the deadline minus now, which
 is positive, or the expiry would have won. A `rem` that faults makes the call
 EFAULT, as Linux's copy-out does, and an absolute sleep writes no `rem`. Both
 rows are on signal(7)'s never-restarted list ("sleep interfaces ... always fail
-with EINTR"), so the vivarium's lack of a kernel-side `SA_RESTART` (§6.22) costs
-them nothing.
+with EINTR"), so the kernel's `SA_RESTART` (§6.22) never re-issues them.
 
 A stop parks inside the wait and resumes against the same deadline, which is
 what Linux's restart after a stop does. Death before the deadline ends the
@@ -3745,8 +3759,9 @@ degradation; anything that changes what the guest can *reach* is not, and is OUT
 | **A `ppoll` over a socket costs a netd round trip, even at timeout 0** (§5.5.4; #98 closed at NP-4c) | Readiness lives in netd, so each pass asks it -- a snapshot netd answers at once -- and the verdict waits for the answer: a zero timeout returns netd's real verdict without sleeping, and a caller's timeout is never touched. A netd that does not answer within 1 s is reported not ready and counted (the gates require zero). Since NP-5 a socket's `ready` file is opened on its first poll and held until the socket closes, so later polls skip the walk, the open and the clunk |
 | **A polled socket holds a netd fid until it closes** (§5.5.4, NP-5) | The cached `ready` Spoor is an open fid at netd, and netd's fid table is per 9P connection (`MAX_FIDS`) while every Proc on the box reaches `/net` over the one kernel session joey mounts. A socket costs its `ctl` or `data` fid (one, however many fds and forked Procs share it) and, once polled, one `ready` fid per Proc polling it (its dups share one); netd sizes the table at four fids per connection slot (`MAX_FIDS = MAX_SLOTS * 4`, raised from 32 by NP-5), so the slot table runs out first while at most two Procs poll each socket. The table is a pool for the whole box, not a per-client quota: one Proc holding many `/net` files can still fill it (queued). If the fid table does fill, netd refuses the walk, and stalk reports every failed device walk as `ENOENT` (queued), so a poll marks that socket `POLLNVAL` rather than failing the call `ENOMEM` |
 | **A nonblocking `connect` or `accept` still blocks** (§5.5.5, NP-5c) | netd's `nonblock` verb governs the `data` read alone. A TCP `connect()` waits for ESTABLISHED, because netd defers the `data` open until then, where Linux answers `EINPROGRESS` and reports completion as `POLLOUT`; an `accept()` on a nonblocking listener waits for a call where Linux answers `EAGAIN`. An event loop therefore stalls its thread on each dial. Serving both needs a connecting state in the socket table and a deferred open the poll path completes (queued) |
-| **`ppoll` with a `sigmask` is refused** (§5.5.4, V-5c) | The atomic mask swap is ppoll's entire reason to exist over `poll()`, and doing it non-atomically would re-open the exact race the caller chose ppoll to close. `ENOSYS` rather than an approximation. musl's `poll()` passes NULL, so the common path is unaffected; only a program using ppoll *for its signal semantics* is |
-| **`pselect6` with a `sigmask` is refused** (§5.5.4, V-5c-2) | Same reason as `ppoll`'s, and note the sixth argument is a POINTER to `{ss, ss_len}` — aarch64 caps a syscall at six registers — so a non-NULL pair is declined without being dereferenced. A NULL sixth argument is unambiguously "no mask", which is the common path |
+| **`rt_sigpending` wants a size of 8** (§6.22, vote 28) | Linux takes a smaller size and copies that much. This row refuses it, as its neighbours do, and no libc passes less |
+| **~~`ppoll` with a `sigmask` is refused~~** (§5.5.4, V-5c; lifted by operator vote 28, 2026-11-04) | It was refused because doing the swap non-atomically would re-open the race the caller chose ppoll to close. `SYS_NOTE_WAIT`'s core does it atomically. It was: `ENOSYS` rather than an approximation; only a program using ppoll *for its signal semantics* was |
+| **~~`pselect6` with a `sigmask` is refused~~** (§5.5.4, V-5c-2; lifted by operator vote 28, 2026-11-04) | Same reason as `ppoll`'s. The sixth argument is a POINTER to `{ss, ss_len}`, since aarch64 caps a syscall at six registers, and it is now read. It was: a non-NULL pair declined without being dereferenced |
 | **A set `exceptfds` bit is refused** (§5.5.4, V-5c-2) | Native poll has no `POLLPRI`: the requestable set is `(POLLIN\|POLLOUT)`, full stop. Dropping the bit silently — what pouch's userspace `select` does (task #99 F-b) — turns a *pure* `exceptfds` wait into an infinite block rather than an error, and mapping it to `POLLIN` would report ordinary data as an exception. A NULL or all-zero `exceptfds` is not a request and passes through |
 | **More than 64 CONTRIBUTING fds is refused** (§5.5.4, V-5c-2) | `POLL_MAX_NFDS` bounds the pollfd ARRAY. Note this is a bound on the *count*, not on fd *values*: a `select` over fds 200 and 201 is two pollfds and is fine. (pouch's `select` caps the wrong axis and returns `EBADF` for any fd ≥ 64 — task #99 F-a) |
 | **An `nfds` above the fd table is CLAMPED, not refused** (§5.5.4, V-5c-2) | Which is Linux's own `if (n > max_fds) n = max_fds`. A bit above the table names an fd that cannot exist, so it is simply not scanned. A bit *below* the clamp naming no open handle still becomes `POLLNVAL` → `EBADF`, which is also Linux |

@@ -23,14 +23,14 @@ console kthread.
 lock, after none. The full chain:
 
 ```
-g_proc_table_lock -> p->threads_lock -> wait_lock -> g_timerwait.lock -> r->lock -> cs->lock
-g_proc_table_lock -> p->threads_lock -> torpor_lock -> g_timerwait.lock -> r->lock
+g_proc_table_lock -> p->threads_lock -> wait_lock -> a timer base's lock -> r->lock -> cs->lock
+g_proc_table_lock -> p->threads_lock -> a torpor bucket's lock -> r->lock
 g_proc_table_lock -> allowance->lock          (the I-34 revoke)
 g_proc_table_lock -> q->lock                  (a note post)
 g_proc_table_lock -> poll_waiter_list -> rendez
 ```
 
-`torpor_lock` and `wait_lock` never nest (torpor drops its own before
+A torpor bucket's lock and `wait_lock` never nest (torpor drops its own before
 `tsleep`). `smp_resched_others` and the IPI handler take no locks. The
 reverse edge `rendez->lock -> g_proc_table_lock` is **forbidden** and since
 #344 no path takes it: the old single-waiter `wait_pid_cond` read the
@@ -52,7 +52,7 @@ otherwise-locked sequence drop it explicitly and re-take: the #68/#926 close
 window (`unlock → proc_close_handles_at_exit → relock → recount-assert`) and
 the clear-child-tid handoff, which runs *after* the release because
 `uaccess_store_u32` may demand-page (`vma_lock` + buddy) and `torpor_wake`
-takes `torpor_lock` — neither of which composes with this lock.
+takes a torpor bucket's lock — neither of which composes with this lock.
 
 **The threads moved out (thread-model C3, 2026-10-22).** A Proc's thread
 list, its counts, every `THREAD_EXITING` commit and the per-Proc walks are

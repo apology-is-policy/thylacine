@@ -419,12 +419,6 @@ void boot_main(void) {
     uart_putdec((reserved * PAGE_SIZE) / 1024UL);
     uart_puts(" KiB reserved (kernel + struct_page + DTB)\n");
 
-    // #808: the buddy direct map is page-mapped (L3) from boot, so no runtime
-    // mmu_set_no_access_range demote does a block->table break-before-make.
-    uart_puts("  directmap: page-mapped to L3 (");
-    uart_putdec((phys_directmap_table_pages() * PAGE_SIZE) / 1024UL);
-    uart_puts(" KiB tables; no runtime BBM -- #808)\n");
-
     // P3-Bda: relocate the DTB blob from its original PA (where QEMU
     // placed it; reachable only via TTBR0 identity) to a buddy-allocated
     // buffer in the kernel direct map. After this call, all DTB walks
@@ -689,7 +683,7 @@ void boot_main(void) {
 
     // P3-Bda: retire the TTBR0 identity map. By now, all secondaries
     // have completed their secondary_entry trampoline (which uses
-    // TTBR0 identity for stack until SP_EL0 is re-anchored to high
+    // TTBR0 identity for stack until SP_EL1 is re-anchored to high
     // VA post-mmu_program_this_cpu). After this call, any low-VA
     // dereference (PA-as-VA-via-TTBR0 idiom) faults at the L2 invalid
     // entry. All known callers were migrated:
@@ -698,8 +692,8 @@ void boot_main(void) {
     //   - kstack → direct-map (P3-Bca kernel/thread.c).
     //   - struct_pages → direct-map (P3-Bda mm/phys.c::phys_init).
     //   - DTB → buffer in direct map (P3-Bda dtb_relocate_to_buffer).
-    //   - boot stack SP_EL0 → high VA (P3-Bda start.S step 8.6).
-    //   - secondary boot stack SP_EL0 → high VA (P3-Bda start.S
+    //   - boot stack SP_EL1 → high VA (P3-Bda start.S step 8.6).
+    //   - secondary boot stack SP_EL1 → high VA (P3-Bda start.S
     //     secondary_entry post-mmu_program_this_cpu).
     //
     // Boot-CPU TTBR0_EL1 still points at l0_ttbr0 (now with empty L2s);
