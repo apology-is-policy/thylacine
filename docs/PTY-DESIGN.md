@@ -332,9 +332,10 @@ hard no-leak guarantee, per-pts). **A fresh pts is FULL COOKED**
 (`TIO_DEFAULT` = ICANON|ECHO|ISIG|ICRNL|ONLCR — the Linux fresh-pts posture;
 the "CONS_ICANON-default" above realized as the cooked set; the kernel
 console's ISIG-only boot word is a console posture, not the pts one). Ring-full
-policy: the cooked flush + the echo DROP on full (tty input overrun / the
-best-effort echo — the cons reference posture); the raw input + the output
-path back-pressure via a short count (the 2a contract). `h_write` raises the
+policy: the echo DROPS on full (the best-effort echo — the cons reference
+posture); the raw input, the output path and a cooked flush back-pressure via a
+short count (the 2a contract), a flush whole or not at all, its newline
+re-offered (the console's #129). `h_write` raises the
 collected classes AFTER the ring work (the syscall stays out of the pure cook,
 so the selftest asserts classes directly). The selftest carries the full
 cooked truth table (ICRNL+flush+echo+ONLCR, assembly-holds, erase + empty-line

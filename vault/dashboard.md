@@ -130,7 +130,7 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-11-05 [[chg-2026-11-05-as4-r7-join]] — AS-4 audit round 7, the join's half
 - 2026-11-05 [[chg-2026-11-05-as4-r7-shell-corrected]] — AS-4 round 7's shell chg, corrected
 - 2026-11-05 [[chg-2026-11-05-as4-r7-shell]] — AS-4 audit round 7, the shell's half
+- 2026-11-05 [[chg-2026-11-05-cooked-flush-refused]] — ptyfs: a cooked line that does not fit is refused whole
 - 2026-11-05 [[chg-2026-11-05-cooked-lines]] — ptyfs: a cooked read ends at its line, a control byte echoes as a caret
 - 2026-11-05 [[chg-2026-11-05-slab-refuses]] — A slab shortfall refuses: the four panic caches go
-- 2026-11-05 [[chg-2026-11-05-ut-tree-walks]] — A parsed tree is shared, not copied, and its operators drop without recursing
 <!-- generated:end -->

@@ -125,6 +125,8 @@ const TIO_DEFAULT: u32 = TIO_ICANON | TIO_ECHO | TIO_ISIG | TIO_ICRNL | TIO_ONLC
 /// empty ring. Overflow drops the byte un-echoed (the cons contract); NL always
 /// flushes what is assembled, so a longer line runs truncated.
 const LINE_MAX: usize = RING_CAP - 1;
+// A flush goes whole or not at all, so a line longer than the ring holds could never go.
+const _: () = assert!(LINE_MAX < RING_CAP);
 
 /// The cooked signal classes collected per master write, as a 3-bit SET
 /// (bit `class-1`: INT->b0, QUIT->b1, TSTP->b2). A set, not an array: it
@@ -350,19 +352,15 @@ struct Pts {
     /// #95: bytes this pts DROPPED, per site. A dropped input byte truncates a
     /// command that then runs anyway -- #95 saw `sleep 30` arrive as `sleep 3`
     /// -- and until now every one of these sites discarded `ring_push`'s return
-    /// value, so the loss left nothing behind to find. `drop_flush` is the one
-    /// that would carry COMMAND bytes (the cooked line into m2s); `drop_line` is
-    /// assembly overflow past LINE_MAX; `drop_echo` is the deliberate
-    /// best-effort echo drop toward the master (documented at `echo`), counted
-    /// separately precisely so it can never be mistaken for the other two.
-    /// `drop_modeflush` is the fourth site (the ccb597b8 round, F2): a ctl
-    /// write clearing ICANON delivers the pending line into m2s, and what a
-    /// full m2s cannot take is a real drop with ITS OWN counter -- folded into
-    /// `drop_flush` it would falsify that counter's meaning (a short cooked
-    /// flush loses the tail AND the newline, so the line never runs; a short
-    /// mode-flush loses the tail and the terminator then arrives raw, so the
-    /// truncated command RUNS -- #95's exact shape).
-    drop_flush: u32,
+    /// value, so the loss left nothing behind to find. `drop_line` is assembly
+    /// overflow past LINE_MAX; `drop_echo` is the deliberate best-effort echo
+    /// drop toward the master (documented at `echo`), counted separately
+    /// precisely so it can never be mistaken for the others. `drop_modeflush`
+    /// is the site that carries COMMAND bytes: a ctl write clearing ICANON
+    /// delivers the pending line into m2s, there is no writer to refuse, and
+    /// what a full m2s cannot take is a real drop (a short mode-flush loses the
+    /// tail and the terminator then arrives raw, so the truncated command RUNS
+    /// -- #95's exact shape). A cooked flush cannot drop: it is refused whole.
     drop_line: u32,
     drop_echo: u32,
     drop_modeflush: u32,
@@ -435,7 +433,6 @@ impl Ptys {
             sig_set: 0,
             winsz_cols: 0,
             winsz_rows: 0,
-            drop_flush: 0,
             drop_line: 0,
             drop_echo: 0,
             drop_modeflush: 0,
@@ -578,13 +575,11 @@ impl Ptys {
     /// (erase / line assembly / NL flush, the line INCLUDING its newline) ->
     /// raw (pty.tla CookData). Echo goes toward the master via echo().
     ///
-    /// Returns the count of input bytes CONSUMED (the Rwrite count). Cooked
-    /// (ICANON) consumes everything offered: an assembled byte past LINE_MAX
-    /// drops un-echoed (tty input overrun, the cons contract), and a line
-    /// flush into a full m2s drops the tail (the slave has RING_CAP unread --
-    /// a wedged reader; the console reference drops likewise). Raw
-    /// back-pressures instead: a full m2s stops consumption and returns the
-    /// short count (the 2a contract, unchanged).
+    /// Returns the count of input bytes CONSUMED (the Rwrite count). An assembled
+    /// byte past LINE_MAX drops un-echoed (tty input overrun, the cons contract).
+    /// Otherwise a full m2s stops consumption and returns the short count, and
+    /// the writer re-offers: raw at the byte, cooked at the newline of a line
+    /// that does not fit whole (the console's #129 rule).
     fn master_write(&mut self, n: u32, data: &[u8]) -> usize {
         let p = match self.slot_mut(n) {
             Some(p) => p,
@@ -637,25 +632,19 @@ impl Ptys {
                         }
                     }
                 } else if b == CH_NL {
-                    // NL: the line INCLUDING its newline flushes to the slave
-                    // (drop-on-full -- see above); echo the NL (ONLCR-aware).
-                    // #95: THE site that would carry command bytes. Both pushes
-                    // are genuine SHORT pushes, and both returns used to be
-                    // discarded -- so a truncated command left no trace at all.
-                    // Note what a short push here actually loses: the TAIL of
-                    // the line first and then the newline, so the shell would
-                    // never execute the line. That is why this site alone does
-                    // not explain #95's shape (interior byte lost, terminator
-                    // delivered, command ran) -- the counter is here to say
-                    // whether it is involved at all, not because it is assumed.
+                    // NL: the line INCLUDING its newline flushes to the slave;
+                    // echo the NL (ONLCR-aware). A flush that does not fit is
+                    // refused and changes nothing, so the line stays assembled,
+                    // and what the screen shows is still what the reader will
+                    // get. A short flush lost the tail and the newline, and the
+                    // head ran on into the next line, which the echo had shown
+                    // apart from it.
                     let len = p.line_len;
-                    let took = Ptys::ring_push(&mut p.m2s, &p.line[..len]);
-                    if took < len {
-                        note_drop(&mut p.drop_flush, (len - took) as u32, "cooked flush (m2s full)");
+                    if RING_CAP.saturating_sub(p.m2s.len()) < len + 1 {
+                        break;
                     }
-                    if Ptys::ring_push(&mut p.m2s, &[CH_NL]) == 0 {
-                        note_drop(&mut p.drop_flush, 1, "cooked flush newline (m2s full)");
-                    }
+                    let _ = Ptys::ring_push(&mut p.m2s, &p.line[..len]);
+                    let _ = Ptys::ring_push(&mut p.m2s, &[CH_NL]);
                     p.line_len = 0;
                     Ptys::echo(p, CH_NL);
                 } else if p.line_len < LINE_MAX {
@@ -711,11 +700,11 @@ impl Ptys {
     /// raises the set members via the pts-scoped SYS_TTY_SIGNAL AFTER the ring
     /// work (the syscall stays out of the pure cook, so the selftest asserts
     /// the set directly -- its local pts has no kernel entry to signal).
-    /// #95: this pts's (flush, line, echo, modeflush) drop counts. Selftest-only.
-    fn drops(&mut self, n: u32) -> (u32, u32, u32, u32) {
+    /// #95: this pts's (line, echo, modeflush) drop counts. Selftest-only.
+    fn drops(&mut self, n: u32) -> (u32, u32, u32) {
         match self.slot_mut(n) {
-            Some(p) => (p.drop_flush, p.drop_line, p.drop_echo, p.drop_modeflush),
-            None => (0, 0, 0, 0),
+            Some(p) => (p.drop_line, p.drop_echo, p.drop_modeflush),
+            None => (0, 0, 0),
         }
     }
 
@@ -2402,11 +2391,11 @@ pub fn selftest() -> Result<(), &'static str> {
         // future zero reading meaningless. And it must NOT have reported: the
         // arm gate exists so the selftest's deliberate drop cannot cry wolf, nor
         // spend the one-shot latch that a real drop needs.
-        let (df, dl, de, dm) = ptys.drops(n);
+        let (dl, de, dm) = ptys.drops(n);
         if dl != 1 {
             return Err("overflow-not-counted");
         }
-        if df != 0 || de != 0 || dm != 0 {
+        if de != 0 || dm != 0 {
             return Err("overflow-miscounted");
         }
         if drop_reported() {
@@ -2486,6 +2475,96 @@ pub fn selftest() -> Result<(), &'static str> {
         match ptys.slave_read(n, &mut sink) {
             RecvOutcome::Data(2) if &sink[..2] == b"\t\n" => {}
             _ => return Err("caret-line"),
+        }
+    }
+
+    // (12) A line that does not fit whole is refused whole: nothing moves, nothing
+    // echoes, and the writer re-offers the newline once the reader has made room.
+    {
+        let c = ptys.mint().ok_or("refuse-mint")? as u32;
+        ptys.open_inc(c, true);
+        ptys.open_inc(c, false);
+        let mut sink = alloc::vec![0u8; RING_CAP + 8];
+        // Room for four, and the line wants five.
+        ptys.set_tio(c, 0);
+        if ptys.master_write(c, &alloc::vec![b'.'; RING_CAP - 4]) != RING_CAP - 4 {
+            return Err("refuse-fill");
+        }
+        ptys.set_tio(c, TIO_DEFAULT);
+        if ptys.master_write(c, b"abcd\n") != 4 {
+            return Err("refuse-short-count");
+        }
+        match ptys.master_read(c, &mut sink) {
+            RecvOutcome::Data(4) if &sink[..4] == b"abcd" => {}
+            _ => return Err("refuse-echoed-the-newline"),
+        }
+        if ptys.master_write(c, b"\n") != 0 || ptys.master_write(c, b"\r") != 0 {
+            return Err("refuse-reoffer-consumed");
+        }
+        match ptys.master_read(c, &mut sink) {
+            RecvOutcome::WouldBlock => {}
+            _ => return Err("refuse-reoffer-echoed"),
+        }
+        // Room for exactly the line, and it goes.
+        match ptys.slave_read(c, &mut sink[..1]) {
+            RecvOutcome::Data(1) => {}
+            _ => return Err("refuse-make-room"),
+        }
+        if ptys.master_write(c, b"\r") != 1 {
+            return Err("refuse-exact-fit");
+        }
+        match ptys.master_read(c, &mut sink) {
+            RecvOutcome::Data(2) if &sink[..2] == b"\r\n" => {}
+            _ => return Err("refuse-newline-echo"),
+        }
+        match ptys.slave_read(c, &mut sink) {
+            RecvOutcome::Data(k) if k == RING_CAP && &sink[k - 5..k] == b"abcd\n" => {}
+            _ => return Err("refuse-line-not-whole"),
+        }
+        // The longest line fits an empty ring, so no line waits for ever.
+        if ptys.master_write(c, &alloc::vec![b'L'; LINE_MAX]) != LINE_MAX {
+            return Err("refuse-longest-line");
+        }
+        let _ = ptys.master_read(c, &mut sink);
+        if ptys.master_write(c, b"\n") != 1 {
+            return Err("refuse-longest-line-newline");
+        }
+        let _ = ptys.master_read(c, &mut sink);
+        match ptys.slave_read(c, &mut sink) {
+            RecvOutcome::Data(k) if k == RING_CAP && sink[k - 1] == b'\n' => {}
+            _ => return Err("refuse-longest-line-read"),
+        }
+        // A reader that never comes does not hold ^C up: it discards the held line.
+        ptys.set_tio(c, 0);
+        if ptys.master_write(c, &alloc::vec![b'.'; RING_CAP]) != RING_CAP {
+            return Err("refuse-fill2");
+        }
+        ptys.set_tio(c, TIO_DEFAULT);
+        if ptys.master_write(c, b"zz\n") != 2 {
+            return Err("refuse-held-line");
+        }
+        if ptys.master_write(c, &[CH_INTR]) != 1 || ptys.take_sigs(c) != sig_class_bit(T_TTY_SIG_INT) {
+            return Err("refuse-intr");
+        }
+        match ptys.slave_read(c, &mut sink) {
+            RecvOutcome::Data(k) if k == RING_CAP => {}
+            _ => return Err("refuse-drain2"),
+        }
+        if ptys.master_write(c, b"\n") != 1 {
+            return Err("refuse-empty-line");
+        }
+        match ptys.slave_read(c, &mut sink) {
+            RecvOutcome::Data(1) if sink[0] == b'\n' => {}
+            _ => return Err("refuse-intr-kept-the-line"),
+        }
+        if ptys.drops(c) != (0, 0, 0) {
+            return Err("refuse-counted-as-a-drop");
+        }
+        let _ = ptys.open_dec(c, true);
+        let _ = ptys.open_dec(c, false);
+        ptys.ref_path(make_pts(c, FK_SLAVE));
+        if ptys.unref_path(make_pts(c, FK_SLAVE)) != Some(0) {
+            return Err("refuse-free");
         }
     }
 
@@ -2590,7 +2669,7 @@ pub fn selftest() -> Result<(), &'static str> {
         RecvOutcome::Data(2) => {} // drain the "yy" echo
         _ => return Err("modeflush-echo2"),
     }
-    let (_, _, _, dm0) = ptys.drops(n);
+    let (_, _, dm0) = ptys.drops(n);
     if ptys.ctl_apply(n, b"-icanon").is_err() {
         return Err("modeflush-apply-raw");
     }
@@ -2598,7 +2677,7 @@ pub fn selftest() -> Result<(), &'static str> {
         RecvOutcome::Data(2) if &buf[..2] == b"yy" => {} // delivered, no NL
         _ => return Err("modeflush-raw-delivered"),
     }
-    let (_, _, _, dm1) = ptys.drops(n);
+    let (_, _, dm1) = ptys.drops(n);
     if dm1 != dm0 {
         return Err("modeflush-counted-a-drop"); // it fit; nothing was lost
     }
@@ -2659,7 +2738,7 @@ pub fn selftest() -> Result<(), &'static str> {
     if ptys.master_write(n, b"ab") != 2 {
         return Err("isigflush-type"); // "ab" pending in line[], echo "ab" left in s2m
     }
-    let (df0, dl0, de0, dm0) = ptys.drops(n);
+    let (dl0, de0, dm0) = ptys.drops(n);
     if ptys.master_write(n, &[CH_INTR]) != 1 {
         return Err("isigflush-intr");
     }
@@ -2674,16 +2753,20 @@ pub fn selftest() -> Result<(), &'static str> {
     if ptys.master_write(n, b"cd\n") != 3 {
         return Err("isigflush-type2");
     }
+    // The committed line survived the discard; the pending "ab" did not.
     match ptys.slave_read(n, &mut buf) {
-        // The committed line survived the discard; the pending "ab" did not.
-        RecvOutcome::Data(5) if &buf[..5] == b"x\ncd\n" => {}
-        _ => return Err("isigflush-not-discarded-or-m2s-flushed"),
+        RecvOutcome::Data(2) if &buf[..2] == b"x\n" => {}
+        _ => return Err("isigflush-m2s-flushed"),
+    }
+    match ptys.slave_read(n, &mut buf) {
+        RecvOutcome::Data(3) if &buf[..3] == b"cd\n" => {}
+        _ => return Err("isigflush-not-discarded"),
     }
     match ptys.master_read(n, &mut buf) {
         RecvOutcome::Data(4) if &buf[..4] == b"cd\r\n" => {}
         _ => return Err("isigflush-echo2"),
     }
-    if ptys.drops(n) != (df0, dl0, de0, dm0) {
+    if ptys.drops(n) != (dl0, de0, dm0) {
         return Err("isigflush-counted"); // a disposition, never a drop
     }
     // The control: ISIG clear, same bytes, nothing lost.
@@ -2701,7 +2784,7 @@ pub fn selftest() -> Result<(), &'static str> {
         return Err("isigflush-ctl-byte");
     }
     match ptys.master_read(n, &mut buf) {
-        RecvOutcome::Data(1) if buf[0] == CH_INTR => {} // echoed as an ordinary byte
+        RecvOutcome::Data(2) if &buf[..2] == b"^C" => {} // echoed as any control byte
         _ => return Err("isigflush-ctl-byte-echo"),
     }
     if ptys.master_write(n, b"cd\n") != 3 {
@@ -2772,13 +2855,13 @@ pub fn selftest() -> Result<(), &'static str> {
         if ptys.master_write(c, b"yy") != 2 {
             return Err("modeflush-full-type"); // assembled in line[], not in the ring
         }
-        let (df0, dl0, de0, dm0) = ptys.drops(c);
+        let (dl0, de0, dm0) = ptys.drops(c);
         ptys.set_tio(c, 0); // canonical->raw: deliver "yy" into a full ring
-        let (df1, dl1, de1, dm1) = ptys.drops(c);
+        let (dl1, de1, dm1) = ptys.drops(c);
         if dm1 != dm0 + 2 {
             return Err("modeflush-drop-not-counted");
         }
-        if df1 != df0 || dl1 != dl0 || de1 != de0 {
+        if dl1 != dl0 || de1 != de0 {
             return Err("modeflush-drop-miscounted");
         }
         if drop_reported() {
