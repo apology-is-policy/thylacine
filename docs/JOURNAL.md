@@ -22,6 +22,20 @@ needed the operator.
 
 
 ---
+## 2026-11-05 -- the walks nobody wrote, and a probe that could not pass (corona)
+
+Round 5's fixes had never been run red, so I ran them: 15 rows, 14 red at once (`stk/mut5.py`). The green one was `$#*` in double quotes, untested, and is pinned now. Then the owed probe of round 5's 7 KB shape: the old tree overflows and the new one refuses, and 300000 operators overflow the old tree in drop, which P3-5 had only reasoned.
+
+**The wrong turn was believing that closed it.** Round 5's chain bound was per expression parser and a group starts a new parser. Measuring what walks a parsed tree, rather than what parses it, found two recursions the compiler writes and a census by name cannot see. Clone took 14 MiB for a tree parsed within 8, on every function declaration and call: a 48 KB `fn` crashed when declared. Drop overflowed on ten substitutions of chains with no evaluation at all. be20b392e removes Clone from the tree, so the compiler proves no copy is left, shares bodies by Rc, and drops an operator's child with a worklist, which made the chain bound pointless, so it went. 370 runs at 8 MiB, none crashed; 10 rows red.
+
+**A test of mine passed for a reason that had nothing to do with it.** The deepest-tree host test overflowed filtered and passed in a serial run of the whole suite. Halving the earlier tests named the one on a 16 MiB stack, consistent with glibc reusing that cached stack for an 8 MiB request. The overflow was real, in a debug build whose frames are several times the guest's, so that claim moved to flow 11, on the guest's frames.
+
+**Round 6 (Opus on Opus, read-only) returned a P0 I would have met at boot:** flow 10 asked for Display text from an errstr holding a Debug form, so no outcome could pass and every probe image would have failed. Also a positional read the caller's arguments, `(( 1 + ))` waited forever for a line that could not help, and `$#*` could not be submitted at the prompt; those two last were regressions and gaps from my own round 5 work. And it showed a reason I wrote was false: no statement runs beneath an expression, so no tree is dropped at the reserve. 1 P0 + 3 P2 + 9 P3, all fixed at 0fc0adf94 and 052f72500. A row for a second mapping stayed green because it was dead code, and that code went. One finding's test row was wrong for its own reason: `*` is the operator inside arithmetic, on the old tree too (checked on the old binary).
+
+**I reset the Pi.** Mutant cross-unbounded removes the bound it tests, and I ran it with no memory limit on 4 GB + 2 GB zram: uptime 0 at 00:05:20Z, mutated file left in the copy. Those rows run under `ulimit -v` now. Whether memory exhaustion also explains the unknown reset at 16:15:03Z is a lead only, in OPEN-BUGS.
+
+**The mac came free at 23:04Z** and the join's owed runs started at 3da8b3b53. Default suite 2331/2331, and ls-ut-paste and ls-nora-stopped-copy pass. **ls-graphical-sak-states, -recover and ls-graphical-sak are red, UNEXPLAINED:** `seat-probe: FAIL DAC authority mismatch` after Corvus issued the grant, on a probe that does not print which error it got. That is next, and the push waits on it.
+
 ## 2026-11-04 -- the bounds multiply: asking the stack (corona)
 
 While round 5 read, I measured the braceless `if` I had just added, on a private Pi copy: a fresh process per run, bisecting the least stack. 1.33 KiB a level, so about 6000 levels fit in 8 MiB. The dossier already had the rule I broke: a new nesting construct must reach a bound. The same table showed the older problem. Each bound holds per parser and they multiply: 10047 KiB for a 90 KB line that is inside every count. Every comment argued against a 256 KiB stack that B-1b had made 8 MiB. Round 5 arrived at both findings on its own, with the same fix, from disassembled frames. It also derived a 7 KB line, which I have not run.
