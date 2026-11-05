@@ -171,6 +171,7 @@ pub const T_SYS_NOTED: u64            = 46;
 pub const T_SYS_POSTNOTE: u64         = 47;
 pub const T_SYS_POSTNOTE_TID: u64     = 138;
 pub const T_SYS_NOTE_DISPOSE: u64     = 139;
+pub const T_SYS_NOTE_WAIT: u64        = 141;
 pub const T_SYS_NOTE_MASK: u64        = 48;
 
 // P5-mount-syscall + P5-chroot-syscall + P6-16c-pivot_root: namespace
@@ -802,11 +803,27 @@ pub type TPathId = u32;
 // non-printable + empty names.
 pub const T_NOTE_NAME_MAX: usize  = 16;
 
-// SYS_NOTE_DISPOSE dispositions and flag (kernel syscall.h).
+// SYS_NOTE_DISPOSE dispositions and flags (kernel syscall.h). A caught row's
+// flags word holds the handler's sa_mask, in note bits, from T_NOTE_DISP_MASK_SHIFT.
 pub const T_NOTE_DISP_DEFAULT: u64 = 0;
 pub const T_NOTE_DISP_IGNORE: u64  = 1;
 pub const T_NOTE_DISP_CAUGHT: u64  = 2;
 pub const T_NOTE_DISP_RESTART: u64 = 1;
+pub const T_NOTE_DISP_RESETHAND: u64 = 2;
+pub const T_NOTE_DISP_NODEFER: u64 = 4;
+pub const T_NOTE_DISP_MASK_SHIFT: u32 = 16;
+
+// SYS_NOTE_WAIT's forms, and the rows of the tty family a take word can name one
+// at a time (kernel syscall.h). The other families are 1 << T_NOTE_BIT_*.
+pub const T_NOTE_WAIT_SUSPEND: u64 = 0;
+pub const T_NOTE_WAIT_TAKE: u64    = 1;
+pub const T_NOTE_WAIT_POLL: u64    = 2;
+pub const T_NOTE_WAIT_PENDING: u64 = 3;
+pub const T_NOTE_TAKE_TTY_WINCH: u64 = 1 << 16;
+pub const T_NOTE_TAKE_TTY_SUSP: u64  = 1 << 17;
+pub const T_NOTE_TAKE_TTY_CONT: u64  = 1 << 18;
+pub const T_NOTE_TAKE_TTY_QUIT: u64  = 1 << 19;
+pub const T_NOTE_TAKE_TTY_HUP: u64   = 1 << 20;
 
 // NOTE_BIT_* — bit position of each supported note in the per-Thread
 // note_mask. Bit set = defer delivery of that note. Per-Thread, NOT
@@ -1771,6 +1788,32 @@ pub unsafe fn t_note_dispose(name_va: *const u8, name_len: usize, disposition: u
         in("x2") disposition,
         in("x3") flags,
         in("x8") T_SYS_NOTE_DISPOSE,
+        options(nostack)
+    );
+    x0
+}
+
+// t_note_wait — wait for a note under a mask of the call's own
+// (T_NOTE_WAIT_SUSPEND: `set` the mask, `record` null, `timeout_ns` < 0), or take
+// one with no handler (T_NOTE_WAIT_TAKE: `set` a take word, `record` a TNoteRecord
+// or null, `timeout_ns` < 0 for none and 0 to poll).
+//
+// Returns 0 on a take. -T_E_INTR when a caught note outside the wait's set ran its
+// handler or is about to; -T_E_AGAIN when the timeout passed; -T_E_INVAL for a form
+// or word it does not name; -T_E_FAULT for a bad `record`, and the note stays queued.
+//
+// Safety: `record` is either null OR points to a writable TNoteRecord in user-VA
+// memory.
+#[inline(always)]
+pub unsafe fn t_note_wait(how: u64, set: u64, record: *mut TNoteRecord, timeout_ns: i64) -> i64 {
+    let mut x0: i64 = how as i64;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") set,
+        in("x2") record as u64,
+        in("x3") timeout_ns,
+        in("x8") T_SYS_NOTE_WAIT,
         options(nostack)
     );
     x0

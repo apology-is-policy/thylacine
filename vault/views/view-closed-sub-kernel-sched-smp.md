@@ -24,7 +24,7 @@ Read it WITH the verified-sound sets in [[adt-ti4-r1]] and
   understates a mechanism reads as permission to relax it.
 
 <!-- generated:begin -->
-9 closed findings on [[sub-kernel-sched-smp]] — do NOT re-report
+13 closed findings on [[sub-kernel-sched-smp]] — do NOT re-report
 these in a future round (open/deferred findings are NOT listed
 here; see the seam inbox):
 
@@ -35,6 +35,10 @@ here; see the seam inbox):
 - [[fnd-c8a-r2-f3]] [P3] The runner's off-CPU check could redden the wrong test (fixed) — An `OFF-CPU0` marker prints either way, and only the first test to return off CPU 0 answers for it.
 - [[fnd-c8a-r2-f4]] [P3] A pinned thread's home is a dispatch stamp with no guard (fixed) — `ready_on` extincts on a pinned thread that has run being placed off its `last_cpu`, and the comments the fix made false are corrected.
 - [[fnd-c8a-r2-f5]] [P3] In the test phase the fix strands a pinned sleeper homed on a parked secondary (fixed) — The IPI is not gated for a pinned thread, for which it is correctness and not promptness.
+- [[fnd-c9-r1-f1]] [P3] The decision record reads the fp-pair figure as V state's cost, and a third of it is an ISB (fixed) — `chg-2026-11-04-c9-r1` carries the figures, since a decision's body is append-only, and the instrument says so where the piece is defined. The decision stands: its correctness argument did not depend on the size.
+- [[fnd-c9-r1-f2]] [P3] Sabotage S07's red depended on where the link put a page table (fixed) — The mask is now the ASID's top byte, zero for the first 255 spaces, so user threads read as kernel threads every time.
+- [[fnd-c9-r1-f3]] [P3] `sched_record_space`'s DSB is unconditional by a comment alone (fixed) — The Scheduler row's prosecution list names it unconditional by contract.
+- [[fnd-c9-r1-f4]] [P3] I-31 and its spec mapping name a TTBR0 write that may not happen (fixed) — Both say the switch writes or keeps it.
 - [[fnd-ti4-r1-f1]] [P3] The surplus test's baseline assertion assumes no NORMAL kthread is queued at test entry (documented) — Documented, not fixed. It is **shared with every sibling `sched.*`
 - [[fnd-ti4-r1-f2]] [P3] The ready() -> read-head window in the surplus test is preemptible (documented) — Documented, not fixed. The pattern is identical to the established one in
 <!-- generated:end -->

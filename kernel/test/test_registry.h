@@ -62,9 +62,13 @@ void test_alternatives_atomics_correct(void);
 void test_context_create_destroy(void);
 void test_context_round_trip(void);
 void test_context_switch_irq_safe(void);
+void test_context_switch_cost(void);
 void test_fp_cpacr_enabled(void);
 void test_fp_round_trip_v_regs_fpsr_fpcr(void);
 void test_fp_note_area_round_trip(void);
+void test_fp_kernel_thread_holds_no_v(void);
+void test_fp_user_v_survives_a_kernel_thread(void);
+void test_context_ttbr0_follows_next(void);
 void test_sched_dispatch_smoke(void);
 void test_sched_runnable_count(void);
 void test_sched_run_counts_match_trees(void);
@@ -802,6 +806,38 @@ void test_notes_stop_dequeue_picks_its_own_note(void);  // the class-blind pop
 void test_notes_class_scans_read_phenotype_sigtab(void); // c8ab2744 F1
 void test_notes_discard_name_purges_pending(void);      // the install-time SIG_IGN discard
 void test_notes_phenotype_sigreturn_restores_mask(void); // the mask half of sigreturn
+void test_notewait_take_names_its_rows(void); // a tty row, a family, and order
+void test_notewait_take_word(void); // what a take word may name
+void test_notewait_take_drains_and_untake_rearms(void); // N-2 across a taker's fault
+void test_notewait_take_own_word_first(void); // a thread's own note first
+void test_notewait_take_leaves_a_kill(void); // a kill is the tail's
+void test_notewait_suspend_frame_fails_mask_back(void); // the wait's mask, and the tail's restore
+void test_notewait_suspend_note_gone_reissues(void); // no handler ran: re-issued
+void test_notewait_suspend_held_note_ends_it(void); // the race sigsuspend closes
+void test_notewait_suspend_tail_note_goes_to_the_tail(void); // a note only the tail acts on
+void test_notewait_suspend_refused(void); // no table, nothing to end it
+void test_notewait_suspend_handler_installed_late(void); // no handler when the wait began
+void test_notewait_suspend_bad_sp_keeps_eintr(void); // the tail refuses it: no re-issue
+void test_notewait_suspend_in_a_handler(void); // no nesting: the wait ends, the note waits
+void test_notewait_take_sleeps_until_posted(void); // the queue's hook wakes a masked taker
+void test_notewait_take_wakes_for_its_word(void); // so does a note at the thread
+void test_notewait_take_times_out(void); // EAGAIN at the deadline
+void test_notewait_take_unwinds_for_another_note(void); // a handler owed ends the wait
+void test_notewait_take_before_unwinding(void); // taken, not interrupted
+void test_notewait_handler_mask_enter_and_restore(void); // one way in, one way out
+void test_notewait_dispose_row_carries_mask(void); // the flags word's row
+void test_notewait_poll_ready_keeps_the_note(void); // a ready fd answers first
+void test_notewait_poll_deadline_restores(void); // the mask is back at 0
+void test_notewait_poll_death_wake_keeps_the_mask(void);
+void test_notewait_mask_end_reads_the_answer(void);
+void test_notewait_poll_no_table_has_no_tail_note(void);
+void test_notewait_poll_note_ends_the_wait(void); // the call's mask until the tail
+void test_notewait_poll_tail_note_goes_to_the_tail(void); // no time lost
+void test_notewait_poll_in_a_handler(void); // the masks stay
+void test_notewait_pending_reads_what_is_held(void); // sigpending's word
+void test_notewait_pending_sigset_names_the_row(void); // the word as a sigset
+void test_notewait_syscall_refusals(void); // the call's edges
+void test_vivarium_timespec_to_ns(void); // rt_sigtimedwait's timeout
 void test_notes_self_managing_flag(void);
 void test_notes_intr_latch_lifecycle(void);
 void test_notes_fault_dying_latch_live_note_exits(void);

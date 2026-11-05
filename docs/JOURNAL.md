@@ -22,6 +22,42 @@ needed the operator.
 
 
 ---
+## 2026-11-05 (aux, Opus 5.5 1M) -- Sigsuspend lands; six witnesses that could not fail
+
+**What landed.** `SYS_NOTE_WAIT` and one mask restore for both phenotypes, `107bb2d8e..982d66e93`. Green 2257/2257 twice on one ELF (`0e08156c900b25de`) with the guest legs. The full matrix did NOT run (11-02 hold), no subset was voted for this chunk, and the gates listed in `docs/phase7-status.md` are owed at the merge.
+
+**The first boot.** 2256/2257, `notes.restart_settle`, three times `the pc`. I had given `notes_call_settle` a guard against an sp the tail refuses, and this older test's zeroed context has an sp of 0. So its three arms that expect a rewind went red, and its others had been passing for the wrong reason since `087d56d79`. I had read the new test file in full and grepped for changed return values; neither looks at what an old fixture's context holds when a function it calls gains a guard. Fixed at `ea0d92b15`, and the rule is in the design note.
+
+**The run that mattered.** 83 sabotages. Six could not go red on what I had written. K13's fixture had no caught note. K23 asked the boot thread, whose Proc has no table, so a later gate answered the same EINVAL. K31 read the mask after the call's end had restored it. K35's own-bit note was also in the queue, and only a guest caught it. G16 and G17 removed the end of the no-fds form, but the tail restores too, so with no note arriving nothing could tell. These were all greens that looked like witnesses. I had also predicted some of them wrongly: I wrote that L365 would catch G16. New leg L372 turned both red at `ws=19456`, the child's exit 76, and each kernel test now fails on its own message.
+
+**What has no witness.** K17 needs another CPU between a post's enqueue and its wake. G22 needs the flush to beat netd's reply, and it did not here; round 2 said that might be so. They are stated, not proved.
+
+**A smaller slip.** The lease's `note_wait=0` was its own grep, still looking for `25 legs` after I went to 45. I read the boot log, not the count, and it is fixed in the short lease. And one stamp in the design note was estimated, 06:59Z for 06:57Z, the fourth this run; corrected from `date -u`.
+
+**A class found while waiting.** The poll spurious-0 entry in OPEN-BUGS is wider than poll: `notes_set_handler` clears the latch, so any wait whose death arm answers on the footing that the thread dies can hand that answer to a thread that lives, and `kernel/cons.c`'s console read would read EOF. Read, not run, and not built here. One of its two shapes changes behaviour, so it waits for a vote.
+
+**Specs.** `tail_order` and `caught_target` ran on the final tip. `specs/check-tail-order.sh` prints FAIL on its two temporal cfgs because the 2.19 jar on this machine does not name the property; each cfg has one property, and they read rc 13 at their pinned counts by hand. `caught_target`: clean at 613245, 807792 and 434763, and the 15 buggy cfgs each violate, at one worker. Their temporal messages name no property on this jar either, so each is read by rc and the cfg. `caught_target_3t` did not run: it has never finished on this host.
+
+**Decisions the operator made here.** Votes 24, 25 and 28, and the signoff for the syscall number. What was wrong in my witnesses and what replaced them I decided.
+
+**Not done.** The full matrix and the gates owed at the merge. The interactive scenarios ran on `ea0d92b15`, not `982d66e93`, which changes only tests, one probe leg and a comment. Round 2's not-read list is in the status doc.
+
+## 2026-11-05 (aux, Opus 5.5 1M) -- C9 lands; a bug on main since May; two things I had written wrong
+
+**What landed.** Thread-model C9, `addcee94f..5c31d1867`. The switch decides from TTBR0: no V state for a kernel thread, no MSR for an equal value, one ISB. Green 2225/2225 twice on one ELF (f18ea53403c62d3a). SMP subset 20 of 20 boots passed. The full matrix did NOT run (11-02 hold) and is owed at the merge.
+
+**The bug.** The first full boot was red on four new tests, for two separate reasons. `context.ttbr0_follows_next` said a kernel thread's hardware TTBR0 did not match its Context, which should be impossible: the asm loads one from the other. The disassembly answered it. `mmu_kernel_ttbr0_pa` was `ldrb`, `adrp l0_ttbr0`, `csel`: clang had shrunk a static written once with a link-time address to a was-it-set byte, and recomputed the address at the reader's PC, a high VA. So since `fd400476b` every kernel thread but the boot thread has run on ASID 0xffff with a root made of VA bits. Main's tree build has the same code. `kaslr.c:36-47` documents this exact trap and is volatile. A low-VA touch on a kernel thread was an address-size fault; a speculative walk could read a junk PA as a table and fill the TLB under an ASID the allocator can hand out, which I read and did not reproduce. Round 1 had reasoned about kernel threads on ASID 0, a state nothing had ever run in, so round 2 re-derived what a real ASID 0 changes and found nothing that leaned on the junk.
+
+**The other three reds were mine.** `fp_load_regs` named V clobbers, so its epilogue restored d8-d15 over what it had just loaded. The old test loaded inline in the function that switched, so its epilogue ran late, and my refactor moved it to before the read. I read that off the same disassembly. Two causes behind one reading: fixing either alone would have left red.
+
+**G02, predicted green.** I wrote that no test could show the ISB missing here. It went red: `go-threads` lost its message to 154 NUL bytes and the boot ended. It costs about 16 ns of a switch and stays, now with a witness.
+
+**What I had written wrong.** The C8b entry below says `TEST_EXPECT_EQ` carries on after a failure. It returns from its function, and X08 showed several reds because its asserts sit in a helper; I built a reading rule on the wrong cause. And my lease scripts counted the runner's `[test] yield-waits` line as a test, so the records' 2212, 2217 and 2222 were 2211, 2216 and 2221. `docs/phase7-status.md` is corrected and the counter is fixed in the two leases still to come; these older journal entries stand as written. I also stamped a bug's enqueue time by estimate, 04:50Z, and corrected it to 04:39Z from the file's mtime, the third such slip this run.
+
+**Decisions the operator made here.** Votes 30 and 31, before this run: no lazy FP, and the subset at C9. FPCR's skip I decided on the figure.
+
+**Not done.** The full matrix and the gates owed at the merge. No figures on a real CPU. The speculative TLB fill on the old root was never reproduced, so its risk is a reading. The trampoline's few unmasked instructions stay open in the FP fixture, to a false red only.
+
 ## 2026-11-05 (aux, Opus 5.5 1M) -- C8b lands; C10's three readings close
 
 **What landed.** Thread-model C8b, `0905ba39d..b89afb330`, plus a C10 witness `2d4c38abe`. Per-CPU timer bases, a wake takes no timer lock, the sleeper unlinks itself, operator vote 21. Green 2222 twice on one ELF (cf2261a6bae7dc17). SMP subset 20 of 20 boots passed, 0 corruption. The full matrix did NOT run (11-02 hold) and is owed at the merge.

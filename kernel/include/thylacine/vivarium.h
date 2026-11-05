@@ -582,7 +582,10 @@ enum {
 // SYS_NOTE_DISPOSE lands at 139 (operator vote 18, 2026-11-03), the ceiling rises
 // over rt_sigreturn, and it has its per-number argument in vivarium.c. The lowest
 // row still argued by the ceiling is setgid (144).
-#define VIV_NATIVE_CEILING 139
+//
+// SYS_NOTE_WAIT lands at 141 (operator vote 24, 2026-11-03), over getpriority, which
+// has no row; the same argument, in vivarium.c. 140 waits for SYS_ACCOUNT.
+#define VIV_NATIVE_CEILING 141
 
 // -----------------------------------------------------------------------------
 // TIER 2 — translators (V-2b).
@@ -1997,21 +2000,17 @@ bool vivarium_parse_conn_n(const char *buf, u32 len, u32 *out_n);
 // Returns false with *out_err = EINVAL for a malformed timespec (a negative
 // field, or tv_nsec >= 1e9), matching Linux's own validation.
 bool vivarium_timespec_to_ms(s64 sec, s64 nsec, s32 *out_ms, s32 *out_err);
+// The same validation, for a wait counted in nanoseconds. Saturates.
+bool vivarium_timespec_to_ns(s64 sec, s64 nsec, s64 *out_ns, s32 *out_err);
 
 // Decide whether a ppoll() is inside the translatable domain. PURE.
 //
-// THE ARGUMENT DOMAIN, and note that both declines below are shapes rather than
-// bad values -- ENOSYS, not EINVAL, because the arguments are perfectly valid
-// Linux and it is this kernel that cannot serve them:
+// A mask beside a size other than sigset_t's is EINVAL, as Linux's set_user_sigmask,
+// which looks at the size only when there is a mask. The mask itself goes in at the
+// shell, with no window before the wait (ARCH 8.8.3, operator vote 28).
 //
-//   * sigmask != NULL -- ppoll's WHOLE REASON TO EXIST over poll() is that it
-//     swaps the signal mask ATOMICALLY with the wait. Thylacine has no way to
-//     do that, and doing it non-atomically re-opens exactly the race the caller
-//     chose ppoll to close. Honouring it approximately would be the silent
-//     mistranslation this tier exists to prevent. (musl's poll() passes NULL,
-//     so the common path is unaffected.)
-// nfds > POLL_MAX_NFDS is EINVAL rather than ENOSYS: that IS a bad value, and
-// the native cap is the real bound a caller must respect.
+// nfds > POLL_MAX_NFDS is EINVAL: that IS a bad value, and the native cap is the
+// real bound a caller must respect.
 //
 // nfds == 0 IS SERVED, and it did not used to be. Linux reads it as "sleep for
 // the timeout", and V-5c-1 declined it because native SYS_POLL rejects nfds == 0
@@ -2021,7 +2020,7 @@ bool vivarium_timespec_to_ms(s64 sec, s64 nsec, s32 *out_ms, s32 *out_err);
 // what poll's own slow path parks on. V-5c-2 needed it anyway for
 // `select(0, NULL, NULL, NULL, &tv)`, the classic portable sleep, so both
 // zero-fd forms now route to `viv_timed_sleep` and neither declines.
-bool vivarium_ppoll_decide(u64 nfds, u64 sigmask_va, s32 *out_err);
+bool vivarium_ppoll_decide(u64 nfds, u64 sigmask_va, u64 sigsetsize, s32 *out_err);
 
 // -----------------------------------------------------------------------------
 // pselect6 (V-5c-2) -- the fd_set reshape.
@@ -2071,13 +2070,10 @@ bool vivarium_ppoll_decide(u64 nfds, u64 sigmask_va, s32 *out_err);
 // `nfds` arrives as a signed Linux `int` widened to 64 bits, so the negative
 // case is real and must be checked as signed.
 //
-//   * sigmask != NULL -- declines for EXACTLY ppoll's reason (the atomic mask
-//     swap has no counterpart), and note that pselect6 packs it indirectly: the
-//     6th argument is a POINTER to {const sigset_t *ss; size_t ss_len;} because
-//     aarch64 caps a syscall at 6 registers. So a NULL 6th argument and a
-//     non-NULL pointer to a NULL ss are different things; only the former is
-//     unambiguously "no mask", and the latter is declined rather than peeked at.
 //   * nfds < 0 -- EINVAL, Linux's own check.
+//
+// The mask is the shell's: the 6th argument is a POINTER to
+// {const sigset_t *ss; size_t ss_len;}, and reading it takes uaccess.
 //
 // CLAMPING IS LINUX'S BEHAVIOUR, NOT A SHORTCUT. `core_sys_select` does
 // `if (n > max_fds) n = max_fds;` -- bits above the fd table are simply not
@@ -2086,8 +2082,7 @@ bool vivarium_ppoll_decide(u64 nfds, u64 sigmask_va, s32 *out_err);
 // a process whose table happens to be that size. A bit set above the clamp names
 // an fd that cannot exist, so ignoring it loses nothing; a bit set BELOW it that
 // names no open handle still becomes POLLNVAL -> EBADF, which is also Linux.
-bool vivarium_pselect6_decide(u64 nfds_raw, u64 sigmask_va, u32 *out_nfds,
-                              s32 *out_err);
+bool vivarium_pselect6_decide(u64 nfds_raw, u32 *out_nfds, s32 *out_err);
 
 // How many bytes of an fd_set cover the low `nfds` bits, rounded up to the
 // 8-byte granule Linux uses (FDS_BYTES: FDS_LONGS(nr) * sizeof(long)). PURE.

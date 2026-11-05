@@ -3705,11 +3705,12 @@ int proc_note_thread(struct Proc *p, int tid, const char *name, struct Proc *sen
         proc_threads_unlock(p, s);
         return -(int)T_E_SRCH;
     }
-    bool to_queue = false;
+    bool to_queue = false, on_word = false;
     if (p->state == PROC_STATE_ALIVE && x->state != THREAD_EXITING) {
         to_queue = proc_is_self_managing_notes(p);
         if (!to_queue && !notes_direct_ignored(p, name)) {
             __atomic_or_fetch(&x->note_direct, (u16)(1u << (u32)bit), __ATOMIC_RELEASE);
+            on_word = true;
             // Masked or not. The owner writes its mask with no lock and no fence, so
             // a read here can see the old mask while the owner, having unmasked,
             // reads a word without this bit, and each misses the other. The reader's
@@ -3725,6 +3726,9 @@ int proc_note_thread(struct Proc *p, int tid, const char *name, struct Proc *sen
         }
     }
     proc_threads_unlock(p, s);
+    // A taker in SYS_NOTE_WAIT blocked the family, so nothing above woke it. After the
+    // bit: it hooks the queue's list before it reads the word.
+    if (on_word) proc_wake_or_owe(&p->notes->owed);
     if (!to_queue) return 0;
 
     // A self-managing Proc reads its notes from an fd, which has no per-thread

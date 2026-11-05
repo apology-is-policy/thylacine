@@ -56,9 +56,18 @@ static u64 g_asid_cur_idx;          // round-robin search hint
 // contribute nothing to flush_context. active_asids publishes "this CPU is
 // running this context_id" (0 == none); reserved_asids preserves a CPU's ASID
 // across a rollover; flush_pending owes a local TLB flush after a rollover.
-static u64  g_active_asids[DTB_MAX_CPUS];
-static u64  g_reserved_asids[DTB_MAX_CPUS];
-static bool g_flush_pending[DTB_MAX_CPUS];
+//
+// A test build has one slot past the real CPUs. A resolve runs the named slot's owed
+// flush on the caller's TLB and marks it paid, so test_asid.c's made-up Procs must not
+// go in a slot a CPU runs on, and with every CPU online no other slot is free.
+#ifdef KERNEL_TESTS
+#define ASID_SLOTS (DTB_MAX_CPUS + 1u)
+#else
+#define ASID_SLOTS DTB_MAX_CPUS
+#endif
+static u64  g_active_asids[ASID_SLOTS];
+static u64  g_reserved_asids[ASID_SLOTS];
+static bool g_flush_pending[ASID_SLOTS];
 
 static u64  g_asid_rollovers;       // diagnostic
 static bool g_asid_initialized;
@@ -121,7 +130,7 @@ static inline void asid_local_tlb_flush(void) {
 // to the new generation and report a hit (so new_context keeps the same ASID).
 static bool check_update_reserved(u64 old_cid, u64 new_cid) {
     bool hit = false;
-    for (unsigned i = 0; i < DTB_MAX_CPUS; i++) {
+    for (unsigned i = 0; i < ASID_SLOTS; i++) {
         if (g_reserved_asids[i] != 0 && g_reserved_asids[i] == old_cid) {
             hit = true;
             g_reserved_asids[i] = new_cid;
@@ -139,7 +148,7 @@ static bool check_update_reserved(u64 old_cid, u64 new_cid) {
 // honored), which is the spec's ~fpend guard realized in hardware.
 static void flush_context(void) {
     map_clear_all();
-    for (unsigned i = 0; i < DTB_MAX_CPUS; i++) {
+    for (unsigned i = 0; i < ASID_SLOTS; i++) {
         u64 a = __atomic_exchange_n(&g_active_asids[i], 0, __ATOMIC_RELAXED);
         if (a == 0) a = g_reserved_asids[i];   // preserve across back-to-back rollovers
         g_reserved_asids[i] = a;
@@ -211,7 +220,7 @@ void asid_init(void) {
     __atomic_store_n(&g_asid_generation, g_asid_gen_unit, __ATOMIC_RELAXED);
 
     map_clear_all();
-    for (unsigned i = 0; i < DTB_MAX_CPUS; i++) {
+    for (unsigned i = 0; i < ASID_SLOTS; i++) {
         g_active_asids[i]   = 0;
         g_reserved_asids[i] = 0;
         g_flush_pending[i]  = false;
@@ -223,12 +232,12 @@ void asid_init(void) {
 
 u64 asid_resolve(u64 *context_id, unsigned cpu) {
     if (!g_asid_initialized) extinction("asid_resolve before asid_init");
-    // The per-CPU arrays are [DTB_MAX_CPUS]; an out-of-range cpu would corrupt
+    // The per-CPU arrays are [ASID_SLOTS]; an out-of-range cpu would corrupt
     // adjacent BSS. The production caller passes smp_cpu_idx_self(); this
     // fail-fast mirrors ipi_resched_handler's bound guard (RW-1 audit F3). The
     // systemic dense-Aff0 < DTB_MAX_CPUS assumption shared by the whole
     // scheduler is tracked separately (the DTB MPIDR->logical-index map).
-    ASSERT_OR_DIE(cpu < DTB_MAX_CPUS, "asid_resolve: cpu index out of range");
+    ASSERT_OR_DIE(cpu < ASID_SLOTS, "asid_resolve: cpu index out of range");
 
     u64 cid        = __atomic_load_n(context_id, __ATOMIC_RELAXED);
     u64 old_active = __atomic_load_n(&g_active_asids[cpu], __ATOMIC_RELAXED);
@@ -271,5 +280,14 @@ u64 asid_generation_now(void) {
 
 u64 asid_rollover_count(void) {
     return __atomic_load_n(&g_asid_rollovers, __ATOMIC_RELAXED);
+}
+
+unsigned asid_fixture_slot(void) { return DTB_MAX_CPUS; }
+
+bool asid_flush_owed(unsigned cpu) {
+    irq_state_t s = spin_lock_irqsave(&g_asid_lock);
+    bool owed = g_flush_pending[cpu];
+    spin_unlock_irqrestore(&g_asid_lock, s);
+    return owed;
 }
 #endif // KERNEL_TESTS

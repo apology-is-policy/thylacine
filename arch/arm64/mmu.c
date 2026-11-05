@@ -224,7 +224,12 @@ static u32 g_vmalloc_next_idx;
 // P3-Bdb: PA of l0_ttbr0 captured at build_page_tables. Used as the
 // "kernel-only" TTBR0 root for kproc threads. Captured pre-MMU when
 // PC = load PA so `(uintptr_t)l0_ttbr0` resolves to load PA via PIC.
-static paddr_t g_l0_ttbr0_pa;
+//
+// `volatile` is load-bearing, as for kaslr.c's g_kernel_pa_start: clang sees one
+// store of one link-time constant, shrinks this to a "was it set?" byte, and
+// answers a read by computing the address again at the reader's PC, which after
+// the long branch is a high VA. In a TTBR0 that reads as ASID 0xffff.
+static volatile paddr_t g_l0_ttbr0_pa;
 
 paddr_t mmu_kernel_ttbr0_pa(void) {
     return g_l0_ttbr0_pa;

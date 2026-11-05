@@ -3031,7 +3031,7 @@ wake now goes to its home CPU rather than the waker's (`chg-2026-11-04-pinned-wa
 
 Audit: round 1 Fable 5.1, 0/1/2/2; round 2 Fable 5.1, 0/0/2/5; round 3 Fable 5.1 on the walks' removal and the `ready_on` guard, 0/0/0/3. All fixed.
 
-Tests: the full suite is green at 2212 on `3e2adf489`, twice, one ELF, with joey and the guest legs. Sabotages:
+Tests: the full suite is green at 2211 on `3e2adf489`, twice, one ELF, with joey and the guest legs. Sabotages:
 16 on `e8b0515ee`, 10 on `9059174e3`, 3 on `3e2adf489`, each read at its target. TLC: `torpor.cfg` 533,564
 distinct states and `torpor_broadcast.cfg` 880,388 clean, seven buggy cfgs each failing on its own invariant;
 `death_wake` and `debug_stop` re-run. SMP subset (`default-smp4 ubsan-smp4`, 20 boots, votes 27 and 31): 20 of 20 boots passed, 0 corruption
@@ -3046,7 +3046,7 @@ A thread's kernel stack now sits in a range of its own: 32 KiB of address, the l
 
 Audit: round 1 Fable 5.1, 0/0/1/7. F7 is deferred to OPEN-BUGS and F8 is stated; the rest are fixed.
 
-Tests: the full suite is green at 2217 on `d0a545836`, twice, one ELF, with joey and the guest legs. Fault variants 8 of 8: `kstack_overflow`, `kstack_overflow_frame`, `kstack_overflow_irq`, `kstack_overflow_peer`, `kstack_dump_at_top`, `overflow_stack_guard`, `secondary_stack_guard`, `bootcpu_idle_guard`. Sabotages, 20: 16 red on their named line or variant; K02 and K15 red, not on the line they name (below); K10 and C01 green, as each predicted.
+Tests: the full suite is green at 2216 on `d0a545836`, twice, one ELF, with joey and the guest legs. Fault variants 8 of 8: `kstack_overflow`, `kstack_overflow_frame`, `kstack_overflow_irq`, `kstack_overflow_peer`, `kstack_dump_at_top`, `overflow_stack_guard`, `secondary_stack_guard`, `bootcpu_idle_guard`. Sabotages, 20: 16 red on their named line or variant; K02 and K15 red, not on the line they name (below); K10 and C01 green, as each predicted.
 
 Measured on those boots, on a shared Mac: 128 threads hold 512 stack pages and 1 new table, buddy down 568 pages; create and free 1183 ns cached and 1951 ns new (1100 and 1695 on the earlier boot). C2's figures were 924-1018 and 1417-1570 on another tree, so these are not a measured change.
 
@@ -3060,8 +3060,30 @@ The one global list of timed sleepers is gone. A thread in `tsleep` links on its
 
 Audit: round 1 Fable 5.1, 0/0/0/4, all fixed.
 
-Tests: the full suite is green at 2222 on `2d4c38abe`, twice, one ELF, with joey and the guest legs. Sabotages, 13: X01 to X04 and X06 to X11 red at their target, X05 the hang at `timerbase.wake_takes_no_timer_lock` it predicts, M01 and M02 green as predicted, since only `tsleep_buggy_clear_first.cfg` and `tsleep_buggy_unlink_early.cfg` can reach those windows. X08 goes red from the test's entry, because it strands state across earlier tests; "off the tail" fired among the rest. SMP subset (`default-smp4 ubsan-smp4`, 20 boots, vote 27): 20 of 20 boots passed, 0 corruption on `2d4c38abe`.
+Tests: the full suite is green at 2221 on `2d4c38abe`, twice, one ELF, with joey and the guest legs. Sabotages, 13: X01 to X04 and X06 to X11 red at their target, X05 the hang at `timerbase.wake_takes_no_timer_lock` it predicts, M01 and M02 green as predicted, since only `tsleep_buggy_clear_first.cfg` and `tsleep_buggy_unlink_early.cfg` can reach those windows. X08 goes red from the test's entry, because it strands state across earlier tests; "off the tail" fired among the rest. SMP subset (`default-smp4 ubsan-smp4`, 20 boots, vote 27): 20 of 20 boots passed, 0 corruption on `2d4c38abe`.
 
 C10's owed readings, settled here: K02 and K15 each go red alone at the line they name, K10 ends the boot at its new test, and each test passes alone with no sabotage (`chg-2026-11-05-c10-owed-readings`).
 
 **Did not run:** the full SMP matrix, under the 11-02 hold. It stays owed at the merge to main, with the rest of `tools/test-fault.sh`, the interactive fleet and `tools/check-production.sh`.
+
+## C9: the switch decides from TTBR0, and kernel threads get the real root — 2026-11-05
+
+`cpu_switch_context` reads TTBR0 and nothing else: a zero ASID field is a kernel thread, which saves and loads no V state; an equal value writes no MSR; one ISB on every path. Lazy FP restore is not built (operator vote 30), and neither is FPCR's msr skip (`chg-2026-11-05-c9-readings`).
+
+The first full boot found a bug on main since P3-Bdb (`fd400476b`, 2026-05-06): `mmu_kernel_ttbr0_pa` returned a high VA, because clang shrank `g_l0_ttbr0_pa` to a byte and recomputed the address at its caller's PC. Every kernel thread but the boot thread ran on ASID 0xffff with a root made of VA bits. `volatile`, as `kaslr.c` already has for the same reason (`chg-2026-11-05-kernel-root-pa`). Main and corona were told.
+
+Audit: round 1 Fable 5.1, 0/0/0/5; round 2 Fable 5.1 on what a real ASID 0 changes, 0/0/0/4. All fixed.
+
+Tests: the full suite is green at 2225 on `5c31d1867`, twice, one ELF, with joey and the guest legs. Sabotages, 13: S01 to S11 red at their target, G01 green with same-space up 4 ns as predicted, G02 predicted green and red, read in `chg-2026-11-05-c9-readings`. TLC: `sched_ctxsw` and `asid` clean, six buggy cfgs each failing on its own invariant. SMP subset (`default-smp4 ubsan-smp4`, 20 boots, vote 31): 20 of 20 boots passed on `5c31d1867`.
+
+**Did not run:** the full SMP matrix, under the 11-02 hold. It stays owed at the merge to main, with `tools/test-fault.sh`, the interactive fleet and `tools/check-production.sh`. No figures were taken on a real CPU.
+
+## Sigsuspend, sigtimedwait, the mask for one call — 2026-11-05
+
+Votes 24, 25 and 28. `SYS_NOTE_WAIT` = 141, with forms SUSPEND, TAKE, POLL and PENDING. One mask restore at handler return, for both phenotypes. Pouch's own copy of the mask is gone. `sa_mask`, `SA_NODEFER` and `SA_RESETHAND` are carried in the row. `ppoll`, `pselect` and `sigpending` work on the same mechanism with no new number. Pouch's SIGPIPE default is a row that ignores, not a mask bit (`dec-2026-11-03-sigpipe-row`). Two Pouch `select` bugs found on the way are fixed: every failed `select` read EIO, and a closed fd read as a timeout.
+
+Audit: round 1 Fable 5.1, 0/0/0/7; round 2 Fable 5.1, 0/1/2/2. All fixed.
+
+Tests: the full suite is green at 2257 on `982d66e93`, twice, one ELF (`0e08156c900b25de`), with joey and the guest legs, `note-wait ok: 45 legs`. 83 sabotages on `ea0d92b15` and the seven whose witnesses changed on `982d66e93`, read one by one in `chg-2026-11-05-sigsuspend-readings`. No witness: K17 and G22. `pty-4`, `pty-susp-pouch`, `item10-ctrlc`, `viv-console-ctrlc` and `r5f9-ash` passed on `ea0d92b15`; `982d66e93` changes only tests, one probe leg and a comment, so they were not run again. Specs on the final tip: `tail_order` and `caught_target`, read in the same note.
+
+**Did not run:** the full SMP matrix, under the 11-02 hold, and no SMP subset was voted for this chunk. It stays owed at the merge to main, with `tools/test-fault.sh`, the interactive fleet and `tools/check-production.sh`. Round 2 did not read `vivarium_build_sigframe`, the probe's restorer, `pouch_sock_poll_fd`'s lazy open, dosbox-x's select sites or `el0_stop_park`, and read `client_wait`, `do_reader_recv_frame`, `client_flush_wait` and `proc_note_direct_rouse` at gate level only. Its Linux semantics came from its memory, not a source.

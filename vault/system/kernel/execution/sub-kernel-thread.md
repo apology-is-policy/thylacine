@@ -9,7 +9,7 @@ guarded-by: [inv-i21, inv-i31, inv-i32, inv-i44, inv-i48]
 validated-by: [gate-smp, spec-thread-reap]
 locks: [lock-proc-threads, lock-proc-table]
 created: 2026-08-01
-updated: 2026-11-03
+updated: 2026-11-04
 ---
 ## Purpose
 
@@ -148,6 +148,9 @@ the switch-in loads (below). `ctx.ttbr0` is baked to the
 ASID is not known until switch time; the context-switch pre-hook installs
 the real value. Baking the kernel root means a hypothetical missing-pre-hook
 path faults *safely* instead of aliasing ASID 0 onto a user page table.
+That zero ASID field is also how the switch reads a kernel thread: it saves and
+loads no V state for one, so a kproc thread's Context never holds any, and a
+thread of a Proc has its V state loaded before it can reach EL0.
 
 ### The two EL0 shapes build a frame; the fork restores one
 

@@ -235,9 +235,10 @@ struct Thread {
     //                later unmask). Before the thread is linked its creator
     //                writes it (rfork_internal, both spawn arms; the link's lock
     //                release orders that store); after, ONLY the owner writes
-    //                it: SYS_NOTE_MASK, the phenotype rt_sigprocmask row, the
-    //                Linux delivery store, the sigreturn restore -- never inside
-    //                a sleep/tsleep/torpor (thread_die_pending relies on this).
+    //                it: SYS_NOTE_MASK, the phenotype rt_sigprocmask row, SYS_NOTE_WAIT
+    //                before its wait, a delivery's store, SYS_NOTED's restore, the
+    //                tail's -- never inside a sleep/tsleep/torpor (thread_die_pending
+    //                relies on this).
     //
     // `in_handler` — true while an async note handler is RUNNING on this
     //                Thread (between the EL0-return-tail dispatch and the
@@ -275,7 +276,10 @@ struct Thread {
     // Set at create, before anything can free the thread; returned once, by
     // thread_destroy. Carved from in_handler's pad -- no size change.
     u8                 pool_pages;
-    u8                 _pad_in_handler;      // explicit 2-byte alignment
+    // NOTE_WF_* (notes.h), for the call in hand: SYS_NOTE_WAIT and the phenotype's
+    // rt_sigsuspend and rt_sigtimedwait set them, and the EL0-return tail ends them.
+    // Owner-only; KP_ZERO; a fork, being a call of its own, never sees them set.
+    u8                 note_wait_flags;
     // ARCH 7.6.4: the note families posted at this thread by name (tkill,
     // tgkill, pthread_kill, raise). No other thread can take them, whatever its
     // mask. A poster sets a bit holding the Proc's threads_lock; the owner's
@@ -287,14 +291,14 @@ struct Thread {
     u64                note_saved_sp_el0;
     u64                note_saved_elr;
     u64                note_saved_spsr;
-    // The PRE-handler note_mask, saved by the phenotype delivery path beside
-    // the register block and restored by the phenotype's rt_sigreturn -- the
-    // kernel-side twin of the frame's uc_sigmask (the frame is written for
-    // reading; this is what the restore reads). Meaningful only while
-    // in_handler is true AND the delivery was the Linux path; the native
-    // path neither writes nor restores it (a native handler's mask change
-    // persists past noted). Part of the handler-execution snapshot a fork
-    // from inside a handler copies to the child.
+    // The mask to put back (ARCH 8.8.3). While in_handler: the mask the interrupted
+    // code ran under, which every delivery writes beside the register block and
+    // SYS_NOTED's restore reads, on both phenotypes -- the kernel-side twin of a Linux
+    // frame's uc_sigmask (the frame is written for reading). While NOTE_WF_MASK_HELD:
+    // the mask a wait of SYS_NOTE_WAIT replaced, which its handler's return or its
+    // tail puts back. Never both: such a wait holds the slot only outside a handler.
+    // Part of the handler-execution snapshot a fork from inside a handler copies to
+    // the child.
     u64                note_saved_mask;
     // SYS_NOTED(NDFLT) needs to know the note name to apply the default
     // action (`exits(name)` for the v1.0 supported set). Captured at

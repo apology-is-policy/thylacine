@@ -2535,7 +2535,8 @@ enum {
     //   x0 = name_va     as SYS_POSTNOTE
     //   x1 = name_len    as SYS_POSTNOTE
     //   x2 = disposition NOTE_DISP_DEFAULT, _IGNORE or _CAUGHT
-    //   x3 = flags       0, or NOTE_DISP_RESTART on a caught row
+    //   x3 = flags       on a caught row, any of NOTE_DISP_RESTART, _RESETHAND,
+    //                    _NODEFER, and NOTE_DISP_MASK(m); otherwise 0
     //
     // From the first call until the next exec the table governs this Proc:
     //   - a note whose row is default takes the kernel's default and never reaches
@@ -2548,17 +2549,78 @@ enum {
     // kernel never restarts for it. The write re-reads what is already pending, so
     // a note stranded behind a wait is judged by the new row.
     //
+    // A handler a row caught runs with the thread's mask, plus NOTE_DISP_MASK's notes,
+    // plus the note's own family unless NOTE_DISP_NODEFER; SYS_NOTED puts the mask back
+    // whatever the handler did to it. No note reaches a thread in a handler in any case,
+    // so this is the mask the handler reads and what a fork or thread it makes inherits.
+    // Under NOTE_DISP_RESETHAND the row goes back to the default as the handler is
+    // entered. The handler receives the row's flags in x2.
+    //
     // Returns 0 on success, else a negative errno:
     //   -T_E_INVAL  as SYS_POSTNOTE's name rules; a name with no row (`sak`, any
     //               snare), and `kill`; a disposition or flag this does not name;
-    //               NOTE_DISP_RESTART on a row that is not caught; a caught row
-    //               with no handler and no notes fd to take it
+    //               a mask bit no note has; any flag on a row that is not caught; a
+    //               caught row with no handler and no notes fd to take it
     //   -T_E_FAULT  name_va outside the user-VA bound / unmapped
     //   -T_E_NOMEM  no memory for the table
     //
     // Explicitly 139, the next free number. Linux's 139 is rt_sigreturn, which
     // viv_linux_dispatch intercepts before the table (vivarium.c).
     SYS_NOTE_DISPOSE = 139,
+
+    // SYS_NOTE_WAIT(how, set, rec_va, timeout_ns): wait for a note under a mask of the
+    // call's own, or take one with no handler (ARCH 8.8.3; operator vote 24,
+    // 2026-11-03). POSIX sigsuspend and sigtimedwait, with no window between the mask
+    // and the wait.
+    //
+    // NOTE_WAIT_SUSPEND: x1 = the mask for the wait, as SYS_NOTE_MASK; x2 = 0; x3 < 0.
+    //   Waits until a caught note's handler has run, under that mask plus the row's,
+    //   and answers -T_E_INTR, under NOTE_DISP_RESTART as well. The handler's return
+    //   puts the caller's mask back. A note no handler takes leaves the wait standing,
+    //   so a stop and a cont do not end it. In a handler no other handler can run: the
+    //   call waits until a note the mask admits is queued and answers -T_E_INTR, and
+    //   that note runs when the handler returns.
+    //
+    // NOTE_WAIT_TAKE: x1 = a take word; x2 = a struct note_record *, or 0; x3 = the
+    //   timeout in ns, < 0 for none, 0 to poll. Takes the note the word names, the
+    //   caller's thread-directed ones first and then the oldest queued, masked or not,
+    //   and runs no handler for it. POSIX has the caller block the set first: a note it
+    //   left unmasked may reach a handler or its default on another thread. Answers 0.
+    //
+    // NOTE_WAIT_POLL: x1 = the mask for the call, as SYS_NOTE_MASK; x2 = a struct pollfd *;
+    //   x3 = the timeout in ns, < 0 for none, 0 not to wait, rounded up to the poll's ms;
+    //   x4 = nfds, up to POLL_MAX_NFDS, 0 to sleep for the timeout. POSIX ppoll and
+    //   pselect, with no window between the mask and the wait. Answers the ready count,
+    //   0 at the deadline. With either answer the caller's mask is back before it returns
+    //   and no handler has run for a note only the call's mask let in. A caught note that
+    //   ends the wait runs its handler under the call's mask, and -T_E_INTR, with no
+    //   restart under NOTE_DISP_RESTART, as poll's. A fatal note the call's mask lets in
+    //   ends the Proc under that mask. In a handler no note can end the call, only a ready
+    //   fd or its deadline. A Proc no table governs gets the mask and the wait, and no note
+    //   ends it but a fatal one. A self-managing Proc's EINTR says a note is on its fd.
+    //   x4 is read by this form alone.
+    //
+    // NOTE_WAIT_PENDING: x1, x2 and x3 = 0. POSIX sigpending: answers a take word naming
+    //   what is queued for this thread and its mask holds. In a handler, every note is
+    //   held.
+    //
+    // A take word: 1 << NOTE_BIT_* names a family; NOTE_TAKE_TTY_* name one row of the
+    // tty family, whose rows share a mask bit, so that waiting for a winch does not eat
+    // a hangup. `kill` and the snare family cannot be named.
+    //
+    // Returns a negative errno otherwise:
+    //   -T_E_INTR   a caught note outside the wait's set ran its handler, or is about to
+    //   -T_E_AGAIN  the timeout passed (NOTE_WAIT_TAKE)
+    //   -T_E_INVAL  a form or word this does not name; rec_va or a timeout on a suspend;
+    //               NOTE_WAIT_SUSPEND in a Proc no table governs, where no note could
+    //               end the wait; nfds over the bound; an argument NOTE_WAIT_PENDING
+    //               does not take
+    //   -T_E_FAULT  rec_va outside the user-VA bound / unmapped; the note stays queued.
+    //               The pollfd array likewise
+    //
+    // Explicitly 141: 140 is SYS_ACCOUNT on corona/async-memory, reserved there. Linux's
+    // 141 is getpriority, which has no row (vivarium.c).
+    SYS_NOTE_WAIT = 141,
 
     // NOT A SYSCALL. One past the highest assigned number, so that
     // VIV_NATIVE_CEILING can be pinned to a value the compiler recomputes
@@ -3418,11 +3480,28 @@ _Static_assert(__builtin_offsetof(struct t_kernel_regs, tpidr_el0) == 104, "t_ke
 // is how the kernel knows a read of it may wait for a peer (ARCH 8.8.3).
 #define T_S_IFSOCK  0140000u
 
-// SYS_NOTE_DISPOSE's disposition and flag (ARCH 8.8.3).
-#define NOTE_DISP_DEFAULT 0u
-#define NOTE_DISP_IGNORE  1u
-#define NOTE_DISP_CAUGHT  2u
-#define NOTE_DISP_RESTART 1u
+// SYS_NOTE_DISPOSE's dispositions and flags (ARCH 8.8.3). The row's mask rides in the
+// flags word, so no register is read that a caller with no mask left unset.
+#define NOTE_DISP_DEFAULT    0u
+#define NOTE_DISP_IGNORE     1u
+#define NOTE_DISP_CAUGHT     2u
+#define NOTE_DISP_RESTART    1u
+#define NOTE_DISP_RESETHAND  2u
+#define NOTE_DISP_NODEFER    4u
+#define NOTE_DISP_FLAGS      (NOTE_DISP_RESTART | NOTE_DISP_RESETHAND | NOTE_DISP_NODEFER)
+#define NOTE_DISP_MASK_SHIFT 16u
+#define NOTE_DISP_MASK(m)    ((u64)(m) << NOTE_DISP_MASK_SHIFT)
+
+// SYS_NOTE_WAIT's forms, and a take word's rows of the tty family.
+#define NOTE_WAIT_SUSPEND    0u
+#define NOTE_WAIT_TAKE       1u
+#define NOTE_WAIT_POLL       2u
+#define NOTE_WAIT_PENDING    3u
+#define NOTE_TAKE_TTY_WINCH  (1ull << 16)
+#define NOTE_TAKE_TTY_SUSP   (1ull << 17)
+#define NOTE_TAKE_TTY_CONT   (1ull << 18)
+#define NOTE_TAKE_TTY_QUIT   (1ull << 19)
+#define NOTE_TAKE_TTY_HUP    (1ull << 20)
 
 // SYS_WSTAT valid-mask bits (A-2a; IDENTITY-DESIGN.md §9.5). Which of the
 // (mode, uid, gid, size) register arguments the kernel applies. Chosen to
@@ -4122,6 +4201,7 @@ s64 sys_postnote_cross_for_test(struct Proc *caller, int target_pid,
                                 const char *name);
 s64 sys_postnote_self_for_test(struct Proc *caller, const char *name);
 s64 sys_postnote_tid_for_test(struct Proc *caller, int tid, const char *name);
+s64 sys_note_wait_handler(u64 how, u64 set, u64 rec_va, u64 timeout_raw, u64 nfds_raw);
 s64 sys_note_dispose_for_proc(struct Proc *p, const char *name, u64 disposition,
                               u64 flags);
 s64 sys_pread_for_proc(struct Proc *p, hidx_t h, u8 *kbuf, u64 len, s64 off);

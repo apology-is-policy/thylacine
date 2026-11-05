@@ -656,8 +656,8 @@ static int pouch_smoke_core(const char *name, size_t name_len,
         return -1;
     }
     // The size of the pipe's ring, which is what a reap-first child's output is
-    // bounded by: pouch-hello-signals prints 2.3 KiB (measured 2026-11-03, after its
-    // blocked legs) and the marker "<bin>: exit 0" comes last, so it must land inside
+    // bounded by: pouch-hello-signals prints 2385 B (measured 2026-11-05, after its
+    // note-wait legs) and the marker "<bin>: exit 0" comes last, so it must land inside
     // the window. A shorter one reads "expected marker absent" for a child that
     // exited cleanly.
     int status = -1;

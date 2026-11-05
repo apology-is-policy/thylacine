@@ -28,30 +28,36 @@
 // P3-Bdb: ttbr0 swap. Each Thread's Context carries the TTBR0_EL1 value
 // (ASID<<48 | pgtable_root_PA) appropriate for the Thread's Proc.
 // cpu_switch_context saves the live TTBR0_EL1 into prev (atomic with the
-// other register saves) and loads next's TTBR0 into the live CPU. An ISB
-// after MSR TTBR0_EL1 makes the change visible to subsequent fetches.
+// other register saves) and writes next's value only if it differs: two threads
+// of one space hold the same value, and writing it changes nothing. The ISB at
+// the end of the switch synchronizes the write; nothing between the MSR and that
+// ISB reaches a TTBR0 address, because the Contexts are kernel memory (TTBR1).
 // No TLB invalidate is needed here: rolling ASIDs (RW-1, ARCH §6.2.1; the
 // sched.c pre-switch hook composes next's current-generation ASID into
 // ctx.ttbr0) tag user-mappings so cross-Proc entries don't collide. ASID
 // recycling is made safe by the allocator's generation-rollover broadcast
 // flush, not by this path. Kernel mappings (TTBR1, global) are unaffected.
 //
-// P4-Ic5-FP: eager save/restore of FP/SIMD state. Q0..Q31 + FPSR + FPCR
-// saved into prev and loaded from next every context switch. The kernel
-// is compiled with -mgeneral-regs-only so kernel C code doesn't touch
-// V registers; what we save here is whatever EL0 left in V regs at its
-// most recent EL→EL1 transition (preserved across kernel-mode execution
-// because the kernel never clobbers V regs). CPACR_EL1.FPEN must be
-// 0b11 before this code runs — fp_enable_this_cpu (context.h inline) is
-// called from boot_main + per_cpu_main to set it before any context
-// switch.
+// P4-Ic5-FP: Q0..Q31 + FPSR + FPCR saved from prev and loaded into next, for
+// every thread that can reach EL0. The kernel is compiled with
+// -mgeneral-regs-only so kernel C code doesn't touch V registers; what we save
+// here is whatever EL0 left in V regs at its most recent EL→EL1 transition
+// (preserved across kernel-mode execution because the kernel never clobbers V
+// regs). CPACR_EL1.FPEN must be 0b11 before this code runs — fp_enable_this_cpu
+// (context.h inline) is called from boot_main + per_cpu_main to set it before
+// any context switch.
 //
-// Why eager not lazy: simpler. Lazy needs per-CPU "current FP owner"
-// tracking + CPACR_EL1.FPEN trap-and-allocate machinery; eager saves
-// 528 bytes per thread inline and always does the round-trip. At v1.0
-// thread counts (< 100 alive at once) the RSS impact is < 100 KiB total.
-// Phase 5+ may switch to lazy if profiling shows the save/restore cost
-// matters.
+// A thread on ASID 0 runs on the kernel's TTBR0 and has no EL0 to return to, so
+// it holds no V state: neither side of a switch touches V for it. While one
+// runs, the registers still hold the last EL0 thread's values, already in that
+// thread's Context; the next EL0 thread's load replaces all of them. ASID 0 is
+// never handed out (ASID_USER_FIRST; sched.c pins this), and the value read here
+// is the hardware's, so no flag can disagree with it.
+//
+// Why no owner tracking and no trap: a thread that resumes on a CPU no other EL0
+// thread used since would skip its load, 25 ns on the Mac. That needs every
+// writer of a Context's V state to invalidate the owner, and a miss hands one
+// thread another's registers.
 
 // Enable FP/SIMD feature for the assembler in this TU. The kernel
 // toolchain is compiled with -mgeneral-regs-only so the C-side doesn't
@@ -91,9 +97,15 @@ cpu_switch_context:
     mrs     x9, tpidr_el0
     str     x9, [x0, #104]
 
-    // P3-Bdb: save current TTBR0_EL1 into prev->ctx.ttbr0.
-    mrs     x9, ttbr0_el1
-    str     x9, [x0, #112]
+    // P3-Bdb: save current TTBR0_EL1 into prev->ctx.ttbr0. x12 keeps it for
+    // the two decisions below: whether prev holds V state, and whether next's
+    // value needs writing.
+    mrs     x12, ttbr0_el1
+    str     x12, [x0, #112]
+
+    // ASID 0: prev is a kernel thread, with no V state to save.
+    tst     x12, #0xffff000000000000
+    b.eq    1f
 
     // P4-Ic5-FP: save V0..V31 + FPSR + FPCR into prev's fp region.
     // x9 := &prev->fp_v[0] (offset 128 from prev base). STP (SIMD&FP)
@@ -124,6 +136,7 @@ cpu_switch_context:
     mrs     x11, S3_3_C4_C4_0       // FPCR
     str     w10, [x0, #640]
     str     w11, [x0, #644]
+1:
 
     // ----- Load next (x1) -----
 
@@ -141,13 +154,19 @@ cpu_switch_context:
     msr     tpidr_el0, x9
 
     // P3-Bdb: load next's TTBR0_EL1. Encoded as (ASID<<48) | pgtable_root.
-    // ISB serializes the TTBR0 change so subsequent translations / TLB
+    // The ISB below serializes the change so subsequent translations / TLB
     // walks see the new value. No TLB invalidate needed: ASID tags user
     // mappings in the TLB; cross-Proc TLB entries don't collide. Kernel
     // mappings via TTBR1 are global and unaffected.
-    ldr     x9, [x1, #112]
-    msr     ttbr0_el1, x9
-    isb
+    ldr     x13, [x1, #112]
+    cmp     x13, x12
+    b.eq    2f
+    msr     ttbr0_el1, x13
+2:
+
+    // ASID 0: next is a kernel thread, with no V state to load.
+    tst     x13, #0xffff000000000000
+    b.eq    3f
 
     // P4-Ic5-FP: load V0..V31 + FPSR + FPCR from next's fp region.
     add     x9, x1, #128
@@ -171,15 +190,15 @@ cpu_switch_context:
     ldr     w11, [x1, #644]
     msr     S3_3_C4_C4_1, x10       // FPSR
     msr     S3_3_C4_C4_0, x11       // FPCR
-    // R12-FP audit close (F167 P3): isb after FPCR write so subsequent
-    // FP instructions observe the new rounding-mode / trap-enable bits.
-    // ARM ARM D8.7.5: "Direct writes to FPCR can be synchronized using
-    // an ISB instruction." Without ISB, post-switch FP instructions
-    // (in-kernel: none today; out-to-EL0 via eret: context-synchronizing
-    // by D7.1.3 K11.2.1 so unaffected) could observe stale FPCR until
-    // the next context-synchronizing event. Forward-defense for Phase 5+
-    // in-kernel FP usage (NEON memcpy variants, NEON checksums, AES
-    // intrinsics) — would otherwise produce subtle wrong-rounding bugs.
+3:
+    // One ISB for the whole switch, on every path. It synchronizes the TTBR0
+    // write, and the FPCR write (R12-FP audit close F167 P3; ARM ARM D8.7.5:
+    // "Direct writes to FPCR can be synchronized using an ISB instruction";
+    // eret also would, but a thread resuming in the kernel may uaccess first).
+    // It also orders the first touch of a stack a peer mapped: next's SP came
+    // from next's Context, so the stack access carries an address dependency on
+    // that load, and this ISB is the second reason, not the only one. A switch
+    // that wrote neither register keeps it for that reason.
     isb
 
     ret

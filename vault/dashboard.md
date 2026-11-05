@@ -127,11 +127,11 @@ Generated — do not edit between the markers (`quaestor render`).
 ## Recent changes
 
 - 2026-11-05 [[chg-2026-11-05-c10-owed-readings]] — C10's owed readings: a witness for the vector's tag-bit test, and two sabotages read alone
+- 2026-11-05 [[chg-2026-11-05-c9-r2]] — The switch decides from TTBR0: round 2's fixes, in the tests' fixtures
+- 2026-11-05 [[chg-2026-11-05-c9-readings]] — C9's readings: what the ISB is worth, the FPCR skip not built, and two corrections
+- 2026-11-05 [[chg-2026-11-05-kernel-root-pa]] — A kernel thread's TTBR0 is the kernel's root at last, not a high VA
+- 2026-11-05 [[chg-2026-11-05-sigsuspend-readings]] — Sigsuspend's readings: a fixture the guard voided, six witnesses that could not fail, and two with none
 - 2026-11-04 [[chg-2026-11-04-c10-r1]] — Each kernel stack in a range of its own: round 1's fixes
 - 2026-11-04 [[chg-2026-11-04-c8a-r2]] — Torpor keyed on the space: round 2's fixes, and a model that can see K06
 - 2026-11-04 [[chg-2026-11-04-c8a-r3]] — Torpor keyed on the space: round 3's wording
-- 2026-11-04 [[chg-2026-11-04-libbad]] — T_E_LIBBAD: an interpreter at fault says so
-- 2026-11-04 [[chg-2026-11-04-noexec-r1]] — T_E_NOEXEC: round 1's fixes
-- 2026-11-04 [[chg-2026-11-04-noexec]] — T_E_NOEXEC: execve and the full spawn say a file is no image
-- 2026-11-04 [[chg-2026-11-04-pinned-wake]] — A pinned thread's wake goes to its home CPU, not the waker's
 <!-- generated:end -->

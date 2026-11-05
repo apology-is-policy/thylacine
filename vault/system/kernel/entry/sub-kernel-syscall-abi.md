@@ -256,6 +256,24 @@ an omode bit `SYS_OPEN` alone admits, outside `SYS_WALK_OPEN_OMODE_VALID`, and i
 before a Dev sees it. `T_S_IFSOCK` 0140000 is the stat type of a socket's data or listen
 file. `SYS_POLL` admits `nfds` 0. libt and libthyla-rs have `t_note_dispose` and `T_OINTR`. Pouch's `0069` carries `__NR_note_dispose`.
 
+**The note waits (2026-11-03, operator vote 24; 2026-11-04, vote 28).** `SYS_NOTE_WAIT` = 141:
+`how` (`NOTE_WAIT_SUSPEND` 0, `NOTE_WAIT_TAKE` 1, `NOTE_WAIT_POLL` 2, `NOTE_WAIT_PENDING` 3),
+`set`, `rec_va`, `timeout_ns`, and `x4` = `nfds`, read by the poll form alone. The poll form's
+`set` is a mask, `rec_va` a `pollfd *` and zero `nfds` sleeps. It answers the ready count. The
+pending form wants the other three zero and answers a take word. A suspend's set
+is a mask, with `rec_va` 0 and a negative timeout or EINVAL. A take's is a word: `1 <<
+NOTE_BIT_*` for a family, `NOTE_TAKE_TTY_WINCH`, `_SUSP`, `_CONT`, `_QUIT`, `_HUP` in bits
+16..20 for one row of the tty family; `kill` and the snares are EINVAL. `rec_va` is a
+`struct note_record *` or 0, and a timeout of 0 polls. The call answers 0, or `-EINTR`,
+`-EAGAIN`, `-EINVAL`, `-EFAULT` (the note stays queued). `SYS_NOTE_DISPOSE`'s flags word
+gained `NOTE_DISP_RESETHAND` 2, `NOTE_DISP_NODEFER` 4 and `NOTE_DISP_MASK(m)` in bits 16..31,
+without a fifth register, since the refusal of unknown bits already made the word
+extensible. A native handler's `x2` is the row's flags. `SYS__NATIVE_TOP` is 142 and
+`VIV_NATIVE_CEILING` 141. 140 is `SYS_ACCOUNT` on corona/async-memory and stays unknown on
+this tree until that merges, pinned by `syscall.native_gap_unassigned`; 142 and 143 are the
+last below the ceiling assert on `setgid` (144). libt and libthyla-rs have `t_note_wait`.
+Pouch's `0071` carries `__NR_note_wait`.
+
 **Merge of main (2026-10-21).** corona/async-memory merged main `cba52ec9f`, so
 the three appends above meet: `SYS_JIT_CREATE_SEALED` = 127,
 `SYS_ICACHE_SYNC_SPACE` = 128, `SYS_SRV_REGISTRY_NEW` = 134; `SYS__NATIVE_TOP`

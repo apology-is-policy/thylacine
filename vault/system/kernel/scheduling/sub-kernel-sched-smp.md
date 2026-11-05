@@ -55,7 +55,14 @@ between two steps of a sequence that reads, in source, like a single act.
    harmless).
 2. `cs->prev_to_clear_on_cpu = prev` and `cs->pending_release_lock = &cs->lock`
    — two handoffs parked in the *CPU's* slot, not the thread's.
-3. `cpu_switch_context(&prev->ctx, &next->ctx)`.
+3. `cpu_switch_context(&prev->ctx, &next->ctx)`. It reads two things from TTBR0
+   and no flag. A zero ASID field (top 16 bits) means a kernel thread, which holds
+   no V state: prev's side skips the save, next's side skips the load, and the
+   registers go on holding the last EL0 thread's values, already in its Context,
+   until the next EL0 thread's load replaces all of them. An equal value means one
+   space: the MSR is skipped. One ISB closes every path. `sched_record_space`'s DSB
+   stays even when the record does not change, because it also completes prev's
+   cache maintenance before prev can run on another CPU.
 4. Whoever resumes on this CPU — either a thread returning from its own
    `sched()`, or a fresh thread arriving at `thread_trampoline` (or, for a
    user thread's first switch-in, `thread_user_trampoline` in the vector

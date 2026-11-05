@@ -9,9 +9,10 @@
 // generation (the rollover test forces one) and leave per-CPU active slots
 // dirty, but that is benign: the real switch path re-publishes its CPU's slot
 // on the next switch, and the rolling model tolerates generation churn (a
-// stale-generation Proc simply re-news). The `cpu` arg is passed explicitly
-// (not smp_cpu_idx_self()), so the tests drive chosen logical-CPU slots
-// deterministically regardless of which physical CPU the test thread runs on.
+// stale-generation Proc simply re-news). CPU 0 is the runner's own slot. The other
+// slot is asid_fixture_slot(), which no CPU runs on: a resolve for a real peer's slot
+// from here would run that CPU's owed flush on this CPU's TLB, mark it paid, and
+// lose what its slot reserves.
 //
 //   asid.width_valid        asid_bits() is 8 or 16; the generation is non-zero.
 //   asid.resolve_reuse      re-resolving a Proc's context_id returns the same
@@ -55,7 +56,7 @@ void test_asid_distinct_active(void) {
 
     u64 cidA = 0, cidB = 0;
     u64 aA = asid_resolve(&cidA, 0);   // Proc A active on CPU 0
-    u64 aB = asid_resolve(&cidB, 1);   // Proc B active on CPU 1
+    u64 aB = asid_resolve(&cidB, asid_fixture_slot());   // Proc B active elsewhere
     TEST_ASSERT(aA >= ASID_USER_FIRST && aA <= asid_max, "A ASID out of range");
     TEST_ASSERT(aB >= ASID_USER_FIRST && aB <= asid_max, "B ASID out of range");
     TEST_ASSERT(aA != aB,
@@ -71,17 +72,21 @@ void test_asid_rollover_preserves(void) {
 
     u64 rolls_before = asid_rollover_count();
 
-    // Fill the generation from CPU 1 with a stream of fresh, transient Procs:
-    // each c = 0 claims the next free ASID, and overwriting CPU 1's active slot
-    // leaves the prior ASID claimed-but-not-active, so the bitmap fills. After
-    // at most asid_max claims a rollover fires.
+    // Fill the generation from the other slot with a stream of fresh, transient Procs:
+    // each c = 0 claims the next free ASID, and overwriting that slot leaves the prior
+    // ASID claimed-but-not-active, so the bitmap fills. After at most asid_max claims a
+    // rollover fires.
     u64 cap = asid_max + 4u;
     for (u64 i = 0; i < cap && asid_rollover_count() == rolls_before; i++) {
         u64 c = 0;
-        (void)asid_resolve(&c, 1);
+        (void)asid_resolve(&c, asid_fixture_slot());
     }
     TEST_ASSERT(asid_rollover_count() > rolls_before,
         "filling the ASID space did not force a rollover");
+
+    // A rollover owes every CPU a flush, and only a resolve on that CPU may pay it.
+    TEST_ASSERT(asid_flush_owed(1), "the fill paid a real CPU's owed flush");
+    TEST_ASSERT(!asid_flush_owed(asid_fixture_slot()), "the fill did not pay its own slot's");
 
     // NOSTEAL (I-31): Proc A was active on CPU 0 across the rollover, so the
     // rollover reserved its ASID. Re-resolving A returns the SAME ASID value --
