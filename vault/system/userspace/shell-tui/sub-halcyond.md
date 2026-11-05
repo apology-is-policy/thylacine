@@ -1538,6 +1538,12 @@ presents are a recorded optimization.
 
 ## Caveats
 
+- **FIXED 2026-11-04: Alt reached no tile.** `map_key` took no modifiers, so Alt-P arrived as a plain `p` and ut's paste key could not be pressed on any real session. `ls-ut-paste` was green past it because it writes `ESC p` to its own pts. Alt now stays on a rune, and kaua-term sends the ESC. A rune-less nav key still drops it.
+  Alt stays only on a printable ASCII rune (audit round 5): ESC before a control byte reads
+  back from a tile's parser as Escape alone, and Nora would leave Insert on Alt-Backspace.
+  `[` and `O` are out too (round 6): ESC before either opens a sequence, and the next key is
+  eaten as its parameter.
+
 - `GlyphSource::regen()` must be the ONLY eviction: cache, table and pages move
   together; the executor's gen check is the belt.
 - The layout cache keys (width, sheet.gen, atlas gen) by block id; the open

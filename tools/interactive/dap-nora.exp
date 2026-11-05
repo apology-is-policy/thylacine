@@ -199,7 +199,10 @@ lc_pass "dap-nora teardown: :kill, :debug over a live session and :q! each ended
 
 lc_step "quit qemu (Ctrl-A x)"
 catch { send "\001x" }
-expect { eof {} timeout {} }
+expect {
+    eof {}
+    timeout {}
+}
 lc_vm_kill
 lc_pass "LS-CI dap-nora: nora in-editor :debug verified (stop at main.parkLoop; three teardowns through ambush)"
 exit 0

@@ -22,6 +22,40 @@ needed the operator.
 
 
 ---
+## 2026-11-05 -- the walks nobody wrote, and a probe that could not pass (corona)
+
+Round 5's fixes had never been run red, so I ran them: 15 rows, 14 red at once (`stk/mut5.py`). The green one was `$#*` in double quotes, untested, and is pinned now. Then the owed probe of round 5's 7 KB shape: the old tree overflows and the new one refuses, and 300000 operators overflow the old tree in drop, which P3-5 had only reasoned.
+
+**The wrong turn was believing that closed it.** Round 5's chain bound was per expression parser and a group starts a new parser. Measuring what walks a parsed tree, rather than what parses it, found two recursions the compiler writes and a census by name cannot see. Clone took 14 MiB for a tree parsed within 8, on every function declaration and call: a 48 KB `fn` crashed when declared. Drop overflowed on ten substitutions of chains with no evaluation at all. be20b392e removes Clone from the tree, so the compiler proves no copy is left, shares bodies by Rc, and drops an operator's child with a worklist, which made the chain bound pointless, so it went. 370 runs at 8 MiB, none crashed; 10 rows red.
+
+**A test of mine passed for a reason that had nothing to do with it.** The deepest-tree host test overflowed filtered and passed in a serial run of the whole suite. Halving the earlier tests named the one on a 16 MiB stack, consistent with glibc reusing that cached stack for an 8 MiB request. The overflow was real, in a debug build whose frames are several times the guest's, so that claim moved to flow 11, on the guest's frames.
+
+**Round 6 (Opus on Opus, read-only) returned a P0 I would have met at boot:** flow 10 asked for Display text from an errstr holding a Debug form, so no outcome could pass and every probe image would have failed. Also a positional read the caller's arguments, `(( 1 + ))` waited forever for a line that could not help, and `$#*` could not be submitted at the prompt; those two last were regressions and gaps from my own round 5 work. And it showed a reason I wrote was false: no statement runs beneath an expression, so no tree is dropped at the reserve. 1 P0 + 3 P2 + 9 P3, all fixed at 0fc0adf94 and 052f72500. A row for a second mapping stayed green because it was dead code, and that code went. One finding's test row was wrong for its own reason: `*` is the operator inside arithmetic, on the old tree too (checked on the old binary).
+
+**I reset the Pi.** Mutant cross-unbounded removes the bound it tests, and I ran it with no memory limit on 4 GB + 2 GB zram: uptime 0 at 00:05:20Z, mutated file left in the copy. Those rows run under `ulimit -v` now. Whether memory exhaustion also explains the unknown reset at 16:15:03Z is a lead only, in OPEN-BUGS.
+
+**The mac came free at 23:04Z** and the join's owed runs started at 3da8b3b53. Default suite 2331/2331, and ls-ut-paste and ls-nora-stopped-copy pass. **ls-graphical-sak-states, -recover and ls-graphical-sak are red, UNEXPLAINED:** `seat-probe: FAIL DAC authority mismatch` after Corvus issued the grant, on a probe that does not print which error it got. That is next, and the push waits on it.
+
+## 2026-11-04 -- the bounds multiply: asking the stack (corona)
+
+While round 5 read, I measured the braceless `if` I had just added, on a private Pi copy: a fresh process per run, bisecting the least stack. 1.33 KiB a level, so about 6000 levels fit in 8 MiB. The dossier already had the rule I broke: a new nesting construct must reach a bound. The same table showed the older problem. Each bound holds per parser and they multiply: 10047 KiB for a 90 KB line that is inside every count. Every comment argued against a 256 KiB stack that B-1b had made 8 MiB. Round 5 arrived at both findings on its own, with the same fix, from disassembled frames. It also derived a 7 KB line, which I have not run.
+
+The fix asks the address. A count cannot see a frame's size, and that was the old mistake restated. The first mutant table showed the check in `eval_block` and `eval_statement` were not separately witnessed: a `x = 1` statement met `eval_expr`'s check first, so removing both stayed green. Each check now has a line only it stops. `parse_pow`'s own check could never fire first, so it is gone. `walk`'s could not be tested at all, and it became a worklist instead, which also stops holding directories open. My first witness for the guest was wrong as well: a script starting with `$(` is a command word, parsed lazily, so its parse needed under the floor. `let` parses at once.
+
+Round 5's other haul is the reason to keep doing this: `if ($ok)` then `rm x` ran rm unguarded after the first line's error, Alt-Backspace put Nora in Normal mode because of my own round 4 fix, and `$1` has never lexed, though the design documents it.
+
+What "fixed" covers: host tests on a private copy, and 13 mutant rows red for the stack and count checks. Round 5's own fixes have not been run red. Nothing here has booted, and u-6-test's flow 10 is the guest's first word on whether AT_STACK_BASE and real frames agree.
+
+## 2026-11-04 -- a free slot's stranded tests, and an audit that read my scenario better than I wrote it (corona)
+
+The mac queue left a free hour, so the next item was the 72 tests the host script reports stranded. A private copy of libthyla-rs with every syscall answering ENOSYS built libutopia's 69 at once: 66 passed, 3 failed. Each failure was documented syntax that does not parse on the join: `in (a b)`, `1 << 4`. A census of every example in UTOPIA-SHELL-DESIGN found more, `((1 + (2 * 3)))`, `if (c) cmd`, `echo $f(1)`, `~ $v pat`, and a reserved word as a value, which is why 7.3's own example failed at `on`. Those tests had never compiled on any machine. Fixed on corona/ut-lang at 7d991b826, which also makes them run from now on: hello-rs's and capacity-probe's guest `.text` came out byte-identical, so the `svc!()` macro changes nothing in an image. Corvus's split was not: same size, functions reordered, and test-corvus-sessions.py read its bounds from main.rs and would have crashed; found by reading it, not by a red.
+
+Audit round 4 then came back on AS-4f with three independent reasons it could never pass, and I had written the reason in the first. `expect -timeout N {arms}` arms nothing. lib.exp says so in a comment, and bug_72 says so in memory, and my own working notes told me to use exactly that form. A run both ways took one minute: the braced form reached none of its arms. What makes this class bad is that a settle written that way works, so nothing looks wrong. The other two: a mode chip that follows no application, which the manual says outright, and a pane count a stack does not raise. Fixing the first alone would have given a green with no leg asserted.
+
+Checking the scenario's keys found the real one. Alt-P has never reached ut in a real session: map_key dropped Alt, so the tile got a `p`, and the manual's sentence was false. ls-ut-paste was green past it because it writes ESC p to its own pts. A fixture that enters below the layer it tests. Fixed at 0de73cee0.
+
+What "fixed" covers: everything here is host-tested. A scripted guest runs the scenario's Tcl and syncs through a clean pass and eleven faults, each red with its own reason, and that says nothing about the guest. No image has run any of it. `=~` and 11.1's `palette` stay undecided and enqueued. The syncs before typing into a new tile are still a three-second guess. A census of examples proves they parse, not that they mean what the doc says.
+
 ## 2026-11-04 -- the join's mutants and the Pi, and a wrong reading of why a scenario went red (corona)
 
 The join now has its 26 guest mutants on HVF and its shell scenarios on the Pi under KVM. It is at 7f492f623, local and not pushed: the default image's suite, the clipboard and session scenarios, one mutant row and vote 66's boot are still owed.
@@ -40,7 +74,7 @@ The join now has its 26 guest mutants on HVF and its shell scenarios on the Pi u
 
 **A count I gave the operator was wrong.** I said 24 scenarios green with `pts-probe` among them. By the fleet logs it is 25: 21 first-time in the second pass, `ls-3b`, `ls-3c` and `ls-8c` from the first, and `pts-probe` after its fix. `ls-3b`'s and `ls-3c`'s accel was not printed in the first pass, but 176 and 168 s is not a TCG time here. Skipped for a missing host artifact: `service-readiness-failure`, `spawn-mount-probe`, `ls-libs`.
 
-**What "fixed" covers.** The PCI errno, F2 and F3 are booted only as far as 73514e89a: f6d5dfc13's code, c423a5441 on HVF and 7f492f623 have not run on HVF. The Pi's image was dc641e7f3. Still UNEXPLAINED and enqueued from the band measurements: one 69 ms all-input pass and a p99.9 of 23.4 ms in one with-band set.
+**What "fixed" covers.** The PCI errno has booted, at 73514e89a. F2 and F3 (f6d5dfc13), `pts-probe`'s wait on HVF (c423a5441) and vote 66 (7f492f623) have not booted. The Pi's image was dc641e7f3, older than all of them. Still UNEXPLAINED and enqueued from the band measurements: one 69 ms all-input pass and a p99.9 of 23.4 ms in one with-band set.
 
 ## 2026-11-04 -- the join boots, after an audit that stopped its first build (corona)
 

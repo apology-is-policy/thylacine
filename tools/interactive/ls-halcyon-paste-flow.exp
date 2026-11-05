@@ -1,0 +1,342 @@
+#!/usr/bin/expect -f
+# Copy and paste through the real session's clipboard, in a real Nora and a real ut over
+# their private rings, while the user edits, changes tab and focus, takes a trusted
+# episode and logs out (ASYNC-SERVICE-LIFECYCLE, AS-4f; HALCYON-INTERACTION 9 and 12).
+#
+# Image and boot:
+#   THYLACINE_INTERACTION_QUALIFICATION=1 THYLACINE_HALCYON_SESSION=1 \
+#     THYLACINE_HALCYON_PROFILE=instrument tools/build.sh kernel --config ci --set PRIVATE_ASYNC_QUAL=y
+#   THYLACINE_INTERACTION_QUALIFICATION=1 THYLACINE_BUILD_DIR=build/kernel-private-async-qual \
+#     tools/test-interactive.sh ls-halcyon-paste-flow
+#
+# What the run must show (usr/kaua-term-probe/src/paste_flow.rs is the other path):
+#   - Paste after an edit lands beside it, and one `u` takes back all of a two-line paste.
+#   - A copy from Nora is read by another process, after Nora has left.
+#   - A paste works after the editor's tile was hidden in a stack and shown again.
+#   - A foreground process in an unfocused tile is refused the clipboard, and the same
+#     process in a focused tile is not. The paste works after focus left and came back.
+#   - A paste into ut lands in the line and nothing runs until Enter, two lines included.
+#     A paste with a tab refuses whole and leaves the line empty. The key comes through
+#     the compositor, which ls-ut-paste's own pts does not.
+#   - A paste works after a trusted episode over an idle editor. That the episode retired
+#     the connection is ls-halcyon-clipboard-async's to show, and this leg passes either
+#     way. With retirement and no re-run it reds.
+#   - Logout clears the value: neither another user's next session nor the same user's
+#     later one can read it. Session by session, since one seat holds one live session.
+#
+# Not here: rendering and input latency under a paste. A commit's unknown outcome is
+# ls-halcyon-clipboard-async's, and a stopped server's is ls-nora-stopped-copy's and
+# ls-ut-paste's, since the session's real service cannot be stopped.
+set ::env(THYLACINE_ACCEL) [expr {[info exists ::env(LS_CI_GFX_ACCEL)] ? $::env(LS_CI_GFX_ACCEL) : "hvf"}]
+source [file join [file dirname [info script]] lib.exp]
+set repo $lc_repo
+set qmp [lc_qmp_sock]
+
+# The guest prints throughout, so a wait still reads what it prints.
+proc settle {seconds} {
+    lc_within $seconds {
+        -ex "PASTE-FLOW-NEVER-PRINTED" {}
+        -re {EXTINCTION:} { lc_extinction_fail "paste flow" }
+        timeout {}
+        eof { lc_fail "EOF in the paste flow" }
+    }
+}
+proc key {chord} {
+    global repo qmp
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -k $chord} e]} { lc_fail $e }
+    settle 1
+}
+proc type {text} {
+    global repo qmp
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp $text} e]} { lc_fail $e }
+}
+proc capture {name} {
+    global repo qmp
+    settle 1
+    set out $repo/build/session-media-$name.png
+    if {[catch {exec $repo/tools/screendump.sh -s $qmp $out} e]} { lc_fail $e }
+    lc_step "captured $out"
+}
+# One verb of the probe, and its verdict, by the leg it names.
+proc flow {args} {
+    type "kaua-term-probe --paste-flow [join $args { }]\n"
+    verdict [lindex $args 1]
+}
+proc verdict {leg} {
+    global lc_cmd_timeout
+    lc_within $lc_cmd_timeout {
+        -ex "paste-flow: $leg PASS" { lc_step "$leg passed" }
+        -ex "paste-flow: UNAVAILABLE" {
+            puts "\nLS-CI SKIP: no private ring in this kernel -- see this scenario's header for the bake"
+            lc_quit
+            exit 77
+        }
+        -re "paste-flow: FAIL $leg -- (\[^\r\n\]+)\[\r\n\]" { lc_fail "$leg: $expect_out(1,string)" }
+        -re {EXTINCTION:} { lc_extinction_fail $leg }
+        timeout { lc_fail "$leg: no verdict" }
+        eof { lc_fail "EOF at $leg" }
+    }
+}
+proc nothing_yet {leg seconds} {
+    lc_within $seconds {
+        -ex "paste-flow: $leg PASS" { lc_fail "$leg ran before Enter" }
+        -re {EXTINCTION:} { lc_extinction_fail $leg }
+        timeout { lc_step "$leg did not run in $seconds s" }
+        eof { lc_fail "EOF at $leg" }
+    }
+}
+# A new tile, by a chord that makes one. The shell needs a moment before it takes keys.
+proc new_shell {chord why} {
+    global lc_cmd_timeout
+    key $chord
+    lc_within $lc_cmd_timeout {
+        -re {halcyond: session tile leaf=[0-9]+ spawned pid=[0-9]+[^\r\n]*/bin/ut} { lc_step "a new shell: $why" }
+        -re {tapestryd: chord new-tile refused[^\r\n]*} { lc_fail "the new tile was refused: $why" }
+        -re {EXTINCTION:} { lc_extinction_fail $why }
+        timeout { lc_fail "no new shell: $why" }
+        eof { lc_fail "EOF waiting for a new shell: $why" }
+    }
+    settle 3
+}
+proc nora {name} {
+    global lc_cmd_timeout
+    type "nora ~/$name\n"
+    lc_within $lc_cmd_timeout {
+        -re {halcyond: session tile leaf=[0-9]+ screenmode -> AltScreen} { lc_step "Nora holds its tile: $name" }
+        -re {nora: EXIT path=[a-z]+[^\r\n]*} { lc_fail "Nora left before it held its tile: $name" }
+        -re {EXTINCTION:} { lc_extinction_fail "opening $name" }
+        timeout { lc_fail "Nora never took its tile: $name" }
+        eof { lc_fail "EOF opening $name" }
+    }
+    settle 1
+}
+# Text at the end of the line and back to Normal.
+proc append_text {text} {
+    type "A$text"
+    settle 1
+    key "esc"
+}
+# Not `screenmode -> Normal`: a dropped alt-screen leave would never say that, and a crash
+# can (s7-nora-probe.exp).
+proc leave {} {
+    global lc_cmd_timeout
+    type ":wq\n"
+    lc_within $lc_cmd_timeout {
+        -ex "nora: EXIT path=quit code=0" { lc_step "Nora left" }
+        -re {nora: EXIT path=[a-z]+[^\r\n]*} { lc_fail "Nora left another way: $expect_out(0,string)" }
+        -re {EXTINCTION:} { lc_extinction_fail "leaving Nora" }
+        timeout { lc_fail "Nora did not leave" }
+        eof { lc_fail "EOF leaving Nora" }
+    }
+    settle 1
+}
+proc space_p {} {
+    global lc_cmd_timeout
+    type " p"
+    lc_within $lc_cmd_timeout {
+        -ex "nora: clipboard pasted" { lc_step "the paste landed" }
+        -ex "nora: clipboard paste not applied" { lc_fail "the paste came back and was not applied" }
+        -re {nora: clipboard paste failed: ([^\r\n]+)[\r\n]} { lc_fail "the paste failed: $expect_out(1,string)" }
+        -re {EXTINCTION:} { lc_extinction_fail "pasting" }
+        timeout { lc_fail "no answer to the paste" }
+        eof { lc_fail "EOF pasting" }
+    }
+}
+proc space_y {} {
+    global lc_cmd_timeout
+    type " y"
+    lc_within $lc_cmd_timeout {
+        -ex "nora: clipboard copied" { lc_step "the copy landed" }
+        -re {nora: clipboard copy [^\r\n]+[\r\n]} { lc_fail "the copy did not land: $expect_out(0,string)" }
+        -re {EXTINCTION:} { lc_extinction_fail "copying" }
+        timeout { lc_fail "no answer to the copy" }
+        eof { lc_fail "EOF copying" }
+    }
+}
+proc login_to_session {user password} {
+    global lc_boot_timeout
+    lc_within $lc_boot_timeout {
+        -ex "Thylacine login: " {}
+        -re {EXTINCTION:} { lc_extinction_fail "login prompt" }
+        timeout { lc_fail "no login prompt for $user" }
+        eof { lc_fail "EOF before login" }
+    }
+    lc_raw_send "$user\r" "login user"
+    lc_within 60 {
+        -ex "password: " {}
+        timeout { lc_fail "no password prompt for $user" }
+        eof { lc_fail "EOF before password" }
+    }
+    lc_raw_send "$password\r" "login password"
+    lc_within 60 {
+        -ex "login: session compositor (halcyond) spawned" {}
+        -ex "Thylacine textual shell" {
+            puts "\nLS-CI SKIP: default (ut) image -- this scenario drives the session\
+ compositor. See this scenario's header for the bake"
+            lc_quit
+            exit 77
+        }
+        -re {EXTINCTION:} { lc_extinction_fail "session start" }
+        timeout { lc_fail "no graphical session for $user" }
+        eof { lc_fail "EOF at session start" }
+    }
+    lc_within 60 {
+        -re {halcyond: status bar [^\r\n]*running false panes 2} {}
+        -re {EXTINCTION:} { lc_extinction_fail "session start" }
+        timeout { lc_fail "welcome and shell did not become ready for $user" }
+        eof { lc_fail "EOF before the shell" }
+    }
+    settle 2
+}
+proc logout {} {
+    for {set i 0} {$i < 8} {incr i} {
+        key "meta_l+shift+q"
+        set out 0
+        lc_within 4 {
+            -re {halcyond: session logout \(code (\d+)\)} {
+                if {$expect_out(1,string) ne "0"} { lc_fail "logout code $expect_out(1,string)" }
+                set out 1
+            }
+            -re {EXTINCTION:} { lc_extinction_fail "logout" }
+            timeout {}
+            eof { lc_fail "EOF during logout" }
+        }
+        if {$out} {
+            lc_within 45 {
+                -ex "login: logout: home proxy reaped" { lc_step "the session is gone" }
+                -re {EXTINCTION:} { lc_extinction_fail "logout" }
+                timeout { lc_fail "the home proxy was not reaped" }
+                eof { lc_fail "EOF after logout" }
+            }
+            return
+        }
+    }
+    lc_fail "closing every tile did not log the session out"
+}
+
+lc_boot
+if {![info exists ::env(THYLACINE_INTERACTION_QUALIFICATION)] || $::env(THYLACINE_INTERACTION_QUALIFICATION) ne "1"} {
+    puts "\nLS-CI SKIP: requires explicit THYLACINE_INTERACTION_QUALIFICATION=1 build"
+    lc_quit
+    exit 77
+}
+login_to_session michael correct-horse-battery-staple-v1
+flow ring ring
+
+# Paste after an edit, and one undo for a two-line paste.
+flow put a-put CLIPONE
+nora flow-a.txt
+append_text FIRST
+space_p
+capture paste-flow-nora
+leave
+flow has a-has flow-a.txt FIRST:1 CLIPONE:1
+
+flow put b-put {'LINEONE%nLINETWO'}
+nora flow-b.txt
+append_text SECOND
+space_p
+type "u"
+settle 1
+leave
+flow has b-has flow-b.txt SECOND:1 LINEONE:0 LINETWO:0
+nora flow-c.txt
+append_text THIRD
+space_p
+leave
+flow has c-has flow-c.txt THIRD:1 LINEONE:1 LINETWO:1
+
+# A copy from Nora, read by another process once Nora has gone.
+nora flow-d.txt
+append_text WORDS
+type "0vllll"
+settle 1
+space_y
+leave
+flow same d-same WORDS
+
+# Hidden in a stack and shown again. A second tile takes the focus and the clipboard.
+nora flow-e.txt
+append_text TABBED
+new_shell "meta_l+n" "in the editor's stack"
+flow put e-put CLIPTAB
+key "meta_l+tab"
+settle 2
+space_p
+leave
+flow has e-has flow-e.txt TABBED:1 CLIPTAB:1
+
+# Focus. The tile beside this one is focused, so it may read, and then it is not.
+new_shell "meta_l+h" "beside this one"
+flow put f-put CLIPFOCUS
+type "sleep 1; kaua-term-probe --paste-flow refused f-control\n"
+lc_within $lc_cmd_timeout {
+    -ex "paste-flow: FAIL f-control -- the read was admitted" { lc_step "a focused tile's foreground process reads" }
+    -ex "paste-flow: f-control PASS" { lc_fail "a focused tile's foreground process was refused" }
+    -re {paste-flow: FAIL f-control -- ([^\r\n]+)[\r\n]} { lc_fail "f-control: $expect_out(1,string)" }
+    timeout { lc_fail "f-control: no verdict" }
+    eof { lc_fail "EOF at f-control" }
+}
+type "sleep 5; kaua-term-probe --paste-flow refused f-back\n"
+settle 1
+key "meta_l+left"
+verdict f-back
+nora flow-f.txt
+append_text FOCUSED
+key "meta_l+right"
+settle 1
+key "meta_l+left"
+settle 1
+space_p
+leave
+flow has f-has flow-f.txt FOCUSED:1 CLIPFOCUS:1
+
+# Into ut. Each pasted line is a command that names its own leg, so it shows when it runs.
+flow put u-put {'kaua-term-probe --paste-flow mark u-ran'}
+key "alt+p"
+nothing_yet u-ran 3
+key "ret"
+verdict u-ran
+flow put v-put {'kaua-term-probe --paste-flow mark v-one%nkaua-term-probe --paste-flow mark v-two'}
+key "alt+p"
+nothing_yet v-one 3
+key "ret"
+verdict v-one
+verdict v-two
+flow put w-put {'has%ttab'}
+key "alt+p"
+settle 2
+capture paste-flow-ut-refused
+flow mark w-clean
+
+# A trusted episode over an idle editor, and nothing tells it.
+flow put s-put CLIPSAK
+nora flow-s.txt
+append_text SAKED
+key "ctrl+alt+f10"
+key "ret"
+lc_expect "corvus: imperium: SAK with nothing pending" "a trusted episode over an idle editor"
+settle 3
+space_p
+leave
+flow has s-has flow-s.txt SAKED:1 CLIPSAK:1
+flow same s-same CLIPSAK
+
+# Session by session.
+logout
+login_to_session cora kora
+flow empty x-empty
+flow put x-put CORASCOPE
+flow same x-same CORASCOPE
+logout
+login_to_session michael correct-horse-battery-staple-v1
+flow empty y-empty
+logout
+lc_within 45 {
+    -ex "Thylacine login: " {}
+    timeout { lc_fail "the login prompt did not return" }
+    eof { lc_fail "EOF at the last login prompt" }
+}
+lc_pass "paste flow: after edit, tab, focus and a trusted episode, into both clients, and logout clears it"
+lc_quit
+exit 0

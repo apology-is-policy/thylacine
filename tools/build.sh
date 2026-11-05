@@ -920,6 +920,13 @@ DOSBOXCONF
         || { echo "==> console line check FAILED -- see tools/check-console-lines.py" >&2
              exit 1; }
 
+    # expect takes -timeout beside a braced block as one pattern, so no arm fires.
+    echo "==> expect form check (a bounded wait arms its arms)"
+    python3 "$REPO_ROOT/tools/check-expect-forms.py" --self-test \
+        && python3 "$REPO_ROOT/tools/check-expect-forms.py" --root "$REPO_ROOT" \
+        || { echo "==> expect form check FAILED -- see tools/check-expect-forms.py" >&2
+             exit 1; }
+
     # ERRORS.md principle 6: a syscall argument that does not fit is refused,
     # never cast down. Fatal, self-testing, sub-second.
     echo "==> argument width check (ERRORS.md principle 6)"
