@@ -50,7 +50,7 @@ moves the pid onto the execer ([[sub-kernel-proc]]): the one time a thread's
 tid changes. Its old tid is retired, never reused.
 
 **Cost** (ARCH 7.3.5). A thread of any Proc but kproc costs the user pool its
-stack block and its slot: `THREAD_POOL_PAGES` = 9, eight stack pages and the
+stack block and its slot: `THREAD_POOL_PAGES` = 5, four stack pages and the
 slot charged as a whole page though the slab packs two (both pinned by
 `_Static_assert`). `thread_new` is the one place every create takes, in order,
 the tid, the pool charge (`capacity_charge`, [[sub-kernel-mm-phys]]), the slot
