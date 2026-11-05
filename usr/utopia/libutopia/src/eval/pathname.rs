@@ -59,57 +59,53 @@ pub fn expand(env: &Env, pattern: &str) -> Vec<String> {
     out
 }
 
-/// Walk one pattern segment against the directory named by `dir_display`,
-/// recursing into matching subdirectories for the non-final segments and
-/// pushing matched paths for the final one. Recursion depth is bounded by
-/// the segment count (each call consumes one segment), independent of the
-/// tree's depth -- there is no unbounded descent.
-fn walk(
-    cwd: &str,
-    leading_slash: bool,
-    dir_display: &str,
-    segs: &[String],
-    out: &mut Vec<String>,
-) {
-    let seg = match segs.first() {
-        Some(s) => s.as_str(),
-        None => return,
-    };
-    let last = segs.len() == 1;
-    let dir_fs = resolve_fs(cwd, dir_display, leading_slash);
-    let rd = match fs::read_dir(dir_fs.as_str()) {
-        Ok(rd) => rd,
-        // An unreadable directory (missing, not a dir, mount with no
-        // readdir) contributes no matches -- nullglob for this branch.
-        Err(_) => return,
-    };
-    // A leading-dot name matches only a segment that itself begins with a
-    // literal `.` (POSIX). `.`/`..` are not emitted by any Dev's readdir, so
-    // this rule does not need to special-case them.
-    let seg_dot = leading_dot(seg);
-    for entry in rd {
-        let entry = match entry {
-            Ok(e) => e,
-            // A mid-stream readdir error stops this directory; keep what we
-            // already collected.
-            Err(_) => break,
+/// Match the pattern's segments down the tree from `start`: a matching subdirectory
+/// waits its turn for the next segment, and a final segment's matches are pushed. The
+/// caller sorts, so the order of the walk is free. Each directory is read and closed
+/// before the next, and a waiting one costs heap: neither a long pattern nor a deep tree
+/// holds stack or open directories.
+fn walk(cwd: &str, leading_slash: bool, start: &str, segs: &[String], out: &mut Vec<String>) {
+    if segs.is_empty() {
+        return;
+    }
+    let mut waiting: Vec<(String, usize)> = alloc::vec![(String::from(start), 0)];
+    while let Some((dir_display, at)) = waiting.pop() {
+        let seg = segs[at].as_str();
+        let last = at + 1 == segs.len();
+        let dir_fs = resolve_fs(cwd, &dir_display, leading_slash);
+        let rd = match fs::read_dir(dir_fs.as_str()) {
+            Ok(rd) => rd,
+            // An unreadable directory (missing, not a dir, mount with no
+            // readdir) contributes no matches -- nullglob for this branch.
+            Err(_) => continue,
         };
-        let is_dir = entry.is_dir();
-        let name = entry.into_file_name();
-        if name.as_bytes().first() == Some(&b'.') && !seg_dot {
-            continue;
+        // A leading-dot name matches only a segment that itself begins with a
+        // literal `.` (POSIX). `.`/`..` are not emitted by any Dev's readdir, so
+        // this rule does not need to special-case them.
+        let seg_dot = leading_dot(seg);
+        for entry in rd {
+            let entry = match entry {
+                Ok(e) => e,
+                // A mid-stream readdir error stops this directory; keep what we
+                // already collected.
+                Err(_) => break,
+            };
+            let is_dir = entry.is_dir();
+            let name = entry.into_file_name();
+            if name.as_bytes().first() == Some(&b'.') && !seg_dot {
+                continue;
+            }
+            if !matches(seg, &name) {
+                continue;
+            }
+            if last {
+                out.push(join_display(&dir_display, &name));
+            } else if is_dir {
+                waiting.push((join_display(&dir_display, &name), at + 1));
+            }
+            // else: a non-final segment matched a non-directory -- cannot
+            // descend, so this candidate yields nothing.
         }
-        if !matches(seg, &name) {
-            continue;
-        }
-        if last {
-            out.push(join_display(dir_display, &name));
-        } else if is_dir {
-            let child = join_display(dir_display, &name);
-            walk(cwd, leading_slash, &child, &segs[1..], out);
-        }
-        // else: a non-final segment matched a non-directory -- cannot
-        // descend, so this candidate yields nothing.
     }
 }
 

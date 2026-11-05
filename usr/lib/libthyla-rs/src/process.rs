@@ -429,13 +429,13 @@ impl Command {
     /// A-5b (#827b): grant the child the given `SPAWN_PERM_*` bits (OR of
     /// `T_SPAWN_PERM_MAY_POST_SERVICE` / `T_SPAWN_PERM_CONSOLE_TRUSTED` /
     /// `T_SPAWN_PERM_CONSOLE_OWNER`). The kernel gates each bit at spawn
-    /// (`spawn_perm_grant_check`): granting `MAY_POST_SERVICE` (and, LS-5,
-    /// `CONSOLE_OWNER`) requires the caller be console-attached OR already hold
-    /// `MAY_POST_SERVICE` (the one-hop delegation); `CONSOLE_TRUSTED` is
-    /// console-attach-only. A bit the caller may not confer fails the spawn.
-    /// Default 0. `/sbin/login` (holding `MAY_POST_SERVICE` from joey) confers
-    /// `MAY_POST_SERVICE` on the per-user proxy stratumd and `CONSOLE_OWNER` on
-    /// the session shell `ut`.
+    /// (`spawn_perm_grant_check`): granting `MAY_POST_SERVICE` requires the caller
+    /// be console-attached OR already hold it (the one-hop delegation);
+    /// `CONSOLE_OWNER` (LS-5) requires console-attached OR the session factory's
+    /// `SESSION_REGISTRY`; `CONSOLE_TRUSTED` is console-attach-only. A bit the
+    /// caller may not confer fails the spawn. Default 0. `/sbin/login` (holding both
+    /// from joey) confers `MAY_POST_SERVICE` on the per-user proxy stratumd and
+    /// `CONSOLE_OWNER` on the session shell `ut`.
     #[inline]
     pub fn perm(&mut self, perm_flags: u64) -> &mut Command {
         self.perm_flags = perm_flags;

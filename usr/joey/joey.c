@@ -3507,7 +3507,8 @@ static int do_corvus_bringup(long storage_dup_fd) {
 // service-posting grant-root (console-attached in do_login_e2e; a persistent
 // MAY_POST_SERVICE holder in the post-relinquish getty loop -- see joey_thunk).
 // login is NOT granted CONSOLE_TRUSTED, so I-27 (only corvus is console-attached
-// during a session) is untouched.
+// during a session) is untouched. SESSION_REGISTRY is the session factory's role,
+// which is also what lets login name the session shell as console owner.
 #define LOGIN_PERMS ((unsigned int)(T_SPAWN_PERM_MAY_POST_SERVICE | T_SPAWN_PERM_SESSION_REGISTRY))
 
 #if THYLA_BOOT_PROBES  /* #61: login + recover boot-test E2E helpers */

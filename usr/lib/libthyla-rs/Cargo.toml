@@ -15,6 +15,9 @@ path = "src/lib.rs"
 [features]
 # Explicit native qualification image only; never enabled by default.
 poll-worker-test = []
+# A crate's tests on a development machine: every syscall answers ENOSYS. The
+# guest target refuses it at compile time.
+host-test = []
 
 [dependencies]
 thyla-heap = { path = "../thyla-heap" }

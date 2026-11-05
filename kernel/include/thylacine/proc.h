@@ -1384,7 +1384,8 @@ _Static_assert((PROC_FLAG_EXIT_CLOSING & (PROC_FLAG_NODUMP | PROC_FLAG_NOTRACE |
     "the final-close mark must not overlap another flag");
 
 // The Proc may mint a fresh service registry for its login session
-// (SYS_SRV_REGISTRY_NEW); set once by proc_mark_session_registry.
+// (SYS_SRV_REGISTRY_NEW) and name its console owner (SPAWN_PERM_CONSOLE_OWNER); set
+// once by proc_mark_session_registry.
 #define PROC_FLAG_SESSION_REGISTRY   (1u << 14)
 void proc_mark_session_registry(struct Proc *p);
 bool proc_may_create_srv_registry(const struct Proc *p);

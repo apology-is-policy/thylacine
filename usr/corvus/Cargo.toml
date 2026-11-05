@@ -5,17 +5,27 @@ edition.workspace = true
 publish.workspace = true
 license.workspace = true
 
+# The session table is the host-testable half; the server is the binary.
+[features]
+default = ["backend"]
+backend = ["dep:lictor", "dep:libthyla-rs", "dep:linked_list_allocator", "dep:rand_core"]
+
+[lib]
+name = "corvus"
+path = "src/lib.rs"
+
 [[bin]]
 name = "corvus"
 path = "src/main.rs"
+required-features = ["backend"]
 
 [dependencies]
-lictor = { path = "../lictor", default-features = false, features = ["guest"] }
+lictor = { path = "../lictor", default-features = false, features = ["guest"], optional = true }
 # libthyla-rs provides _start + #[panic_handler] + SVC wrappers. corvus
 # uses t_putstr (banner) + t_mlockall + t_set_dumpable + t_set_traceable
 # + t_getrandom + t_explicit_bzero (the P5-corvus-syscalls hardening
 # surface) + t_pipe/t_read/t_write/t_close (Spoor server I/O).
-libthyla-rs = { path = "../lib/libthyla-rs" }
+libthyla-rs = { path = "../lib/libthyla-rs", optional = true }
 
 # Heap allocator -- required by Argon2id's working-memory matrix (inside
 # corvus-crypto). linked_list_allocator is the no_std-standard. We back it
@@ -24,7 +34,7 @@ libthyla-rs = { path = "../lib/libthyla-rs" }
 # preset = 1 GiB) is a future tuning move that requires re-sizing the BSS
 # buffer. `use_spin` enables the LockedHeap wrapper (Heap + spinning_top
 # mutex), required for the #[global_allocator] static.
-linked_list_allocator = { version = "0.10", default-features = false, features = ["use_spin"] }
+linked_list_allocator = { version = "0.10", default-features = false, features = ["use_spin"], optional = true }
 
 # corvus-crypto -- the shared crypto core (A-5c-b): the CRVS wrap layout +
 # Argon2id KDF + AEGIS-256 AEAD + the hybrid keypair + the DEK envelope + the
@@ -38,4 +48,4 @@ corvus-crypto = { path = "../lib/corvus-crypto" }
 # rand_core 0.6 -- the RNG trait corvus-crypto's keypair/wrap functions take.
 # corvus implements it over the kernel CSPRNG (`t_getrandom`) as `ThylaRng`
 # and passes it in; default-features off so no `getrandom` backend is pulled.
-rand_core = { version = "0.6", default-features = false }
+rand_core = { version = "0.6", default-features = false, optional = true }

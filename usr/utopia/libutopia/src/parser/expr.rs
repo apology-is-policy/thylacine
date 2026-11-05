@@ -78,7 +78,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use super::ast::{
-    BinOp, CaseExpr, CaseExprArm, Expr, ExprContext, ExprKind, MatchOp, Script, UnOp,
+    BinOp, CaseExpr, CaseExprArm, Expr, ExprContext, ExprKind, MatchOp, Operand, Script, UnOp,
 };
 use core::sync::atomic::{AtomicU32, Ordering};
 
@@ -116,8 +116,14 @@ pub fn parse_expr_tokens(
             span: Span::point(source_len),
         });
     }
+    if crate::stack::exhausted() {
+        return Err(ParseError {
+            kind: ParseErrorKind::RecursionLimit,
+            span: Span::point(source_len),
+        });
+    }
     let mut p = ExprParser::new(tokens, source_len, ctx);
-    let expr = p.parse_top()?;
+    let expr = p.parse_top().map_err(ended_inside)?;
     if !p.at_end() {
         return Err(ParseError {
             kind: ParseErrorKind::TrailingTokensInExpr,
@@ -125,6 +131,19 @@ pub fn parse_expr_tokens(
         });
     }
     Ok(expr)
+}
+
+/// A parse that ran out inside a closed group or a substitution, where no further line can
+/// supply what it wanted.
+fn ended_inside(e: ParseError) -> ParseError {
+    let kind = match e.kind {
+        ParseErrorKind::UnexpectedEof { expected } => ParseErrorKind::UnexpectedEndOfExpr { expected },
+        ParseErrorKind::UnterminatedHeredoc { .. } => {
+            ParseErrorKind::UnexpectedEndOfExpr { expected: "the heredoc's closing line" }
+        }
+        other => other,
+    };
+    ParseError { kind, span: e.span }
 }
 
 // ---------------------------------------------------------------------
@@ -141,16 +160,16 @@ struct ExprParser {
     /// but the right-associative `**` chain (`parse_pow` self-recursion) and the
     /// prefix `!`/`-`/`~` chain (`parse_unary` self-recursion) are NOT bracket
     /// tokens, so a line of e.g. 2000 `!` (`if (!!!...x) {}`) would otherwise
-    /// drive that many frames past the 256 KiB EL0 stack into a guard-page
+    /// drive that many frames toward a guard-page
     /// `snare:segv` -> shell death (scripture 8.1). Bounded by EXPR_MAX_DEPTH
     /// (RW-9 round-2 F1; the bracket-only check_token_nesting missed this).
     depth: u32,
 }
 
 /// Maximum operator-recursion depth (combined `parse_pow` + `parse_unary`
-/// frames). Each frame is a few hundred bytes; 256 keeps the deepest chain
-/// well under the 256 KiB EL0 stack while sitting far beyond any real
-/// expression's operator nesting.
+/// frames). Each frame is a few hundred bytes; 256 sits far beyond any real
+/// expression's operator nesting. The count is per expression parser and a group
+/// starts a new one, so `crate::stack` is what bounds their product.
 const EXPR_MAX_DEPTH: u32 = 256;
 
 impl ExprParser {
@@ -227,6 +246,13 @@ impl ExprParser {
         // Explicit list `(a b c)` -- accept only if it's the entire
         // expression (the only top-level item).
         if let Some(TokenKind::LParen) = self.peek_kind() {
+            // Inside arithmetic the lexer gives `((` as two parens, and a list holds no
+            // group, so here they can only be inline arithmetic.
+            if let (Some(a), Some(b)) = (self.peek(), self.tokens.get(self.pos + 1)) {
+                if b.kind == TokenKind::LParen && a.span.end == b.span.start {
+                    return self.parse_group(ExprContext::Arith);
+                }
+            }
             // Look ahead: does this paren wrap the whole expression?
             // We treat ANY top-level `(` in value/return position as
             // a list literal per scripture 6.3 + U-5b lock #9.
@@ -314,6 +340,58 @@ impl ExprParser {
     // -----------------------------------------------------------------
     // Inline `(( ... ))` arith in non-arith context.
     // -----------------------------------------------------------------
+
+    /// `( expr )`. A `((` here opens this group and one more inside it.
+    fn parse_group(&mut self, ctx: ExprContext) -> ParseResult<Expr> {
+        let open = self.advance();
+        let mut body: Vec<Token> = Vec::new();
+        let mut depth: i32 = 1;
+        if matches!(open.kind, TokenKind::DoubleLParen) {
+            let inner = Span::new(open.span.start + 1, open.span.end);
+            body.push(Token::new(TokenKind::LParen, inner));
+            depth = 2;
+        }
+        while !self.at_end() {
+            let t = self.peek().expect("at_end above");
+            match &t.kind {
+                TokenKind::LParen => depth += 1,
+                TokenKind::DoubleLParen => depth += 2,
+                TokenKind::RParen => {
+                    depth -= 1;
+                    if depth == 0 {
+                        let close = self.advance();
+                        return self.finish_group(body, ctx, open.span.start, close.span.end);
+                    }
+                }
+                TokenKind::DoubleRParen => {
+                    depth -= 2;
+                    if depth == 0 {
+                        let close = self.advance();
+                        let inner = Span::new(close.span.start, close.span.start + 1);
+                        body.push(Token::new(TokenKind::RParen, inner));
+                        return self.finish_group(body, ctx, open.span.start, close.span.end);
+                    }
+                    if depth < 0 {
+                        return Err(ParseError {
+                            kind: ParseErrorKind::UnexpectedToken { expected: "`)`" },
+                            span: t.span,
+                        });
+                    }
+                }
+                _ => {}
+            }
+            body.push(self.advance());
+        }
+        Err(ParseError {
+            kind: ParseErrorKind::UnexpectedEof { expected: "`)`" },
+            span: self.eof_span(),
+        })
+    }
+
+    fn finish_group(&self, body: Vec<Token>, ctx: ExprContext, start: usize, end: usize) -> ParseResult<Expr> {
+        let inner = parse_expr_tokens(body, self.source_len, ctx)?;
+        Ok(Expr { kind: inner.kind, span: Span::new(start, end) })
+    }
 
     fn parse_inline_arith(&mut self) -> ParseResult<Expr> {
         let open = self.advance(); // DoubleLParen
@@ -480,7 +558,10 @@ impl ExprParser {
                 ExprKind::ProcSubOut(Box::new(sub))
             }
             TokenKind::Regex(s) => ExprKind::Regex(s),
-            _ => unreachable!("is_value_token_kind gates the dispatch above"),
+            other => ExprKind::Word(String::from(
+                TokenKind::reserved_word_text(&other)
+                    .expect("is_value_token_kind gates the dispatch above"),
+            )),
         };
         // span is already tok.span for non-VarIndex atoms.
         // (VarIndex returns early via finish_var_index.)
@@ -556,9 +637,7 @@ impl ExprParser {
     //   5.  `&`
     //   6.  `== !=`, `matches`, `in`, `=~`
     //   7.  `< <= > >=`
-    //   8.  `<< >>`   (only when separated; `<<` raw triggers heredoc
-    //                  at lex time, so the arith form requires
-    //                  whitespace or precise lex tokens.)
+    //   8.  `<< >>`   (inside `(( ))`, which is where `<<` is not a heredoc)
     //   9.  `+ -`
     //   10. `* / %`
     //   11. `**`        (right-associative)
@@ -694,7 +773,12 @@ impl ExprParser {
             let Some(op) = op else { break };
             self.pos += 1;
             self.maybe_retokenize_at_pos();
-            let right = self.parse_rel()?;
+            let right = match op {
+                EqOrMatch::In if matches!(self.peek_kind(), Some(TokenKind::LParen)) => {
+                    self.parse_list_literal()?
+                }
+                _ => self.parse_rel()?,
+            };
             left = match op {
                 EqOrMatch::Eq => bin(BinOp::Eq, left, right),
                 EqOrMatch::Ne => bin(BinOp::Ne, left, right),
@@ -725,19 +809,22 @@ impl ExprParser {
     }
 
     fn parse_shift(&mut self) -> ParseResult<Expr> {
-        // Shifts are arith-only and require the lexer to emit
-        // distinct shift tokens; at U-5a the lexer doesn't have a
-        // shift token (`<<` would be heredoc-start). We accept
-        // `<<` / `>>` only when they appear as separate Less+Less
-        // (parsed by the parent caller before reaching this level).
-        // For v1.0 the practical result is: shifts in arith are
-        // expressed via lex-friendly forms only. The level is
-        // present in the precedence chain to leave structural
-        // room for a v1.x arith-mode lexer.
         if self.ctx != ExprContext::Arith {
             return self.parse_add();
         }
-        self.parse_add()
+        let mut left = self.parse_add()?;
+        loop {
+            let op = match self.peek_kind() {
+                Some(TokenKind::ShiftLeft) => BinOp::Shl,
+                Some(TokenKind::GreaterGreater) => BinOp::Shr,
+                _ => break,
+            };
+            self.pos += 1;
+            self.maybe_retokenize_at_pos();
+            let right = self.parse_add()?;
+            left = bin(op, left, right);
+        }
+        Ok(left)
     }
 
     fn parse_add(&mut self) -> ParseResult<Expr> {
@@ -782,7 +869,8 @@ impl ExprParser {
     fn parse_pow(&mut self) -> ParseResult<Expr> {
         // Operator-recursion bound (RW-9 round-2 F1): `2**2**...**2` recurses
         // here per `**`. Guard before the work; balance the decrement on every
-        // return path via the inner-fn split (mirrors eval_block).
+        // return path via the inner-fn split (mirrors eval_block). The stack check
+        // is parse_unary's, which every level of this chain passes through.
         if self.depth >= EXPR_MAX_DEPTH {
             return Err(ParseError {
                 kind: ParseErrorKind::RecursionLimit,
@@ -822,7 +910,7 @@ impl ExprParser {
         // chain recurses here per operator. Same guard + inner-fn split as
         // parse_pow; the shared `self.depth` bounds the combined pow+unary
         // nesting (they call each other), so one cap covers both vectors.
-        if self.depth >= EXPR_MAX_DEPTH {
+        if self.depth >= EXPR_MAX_DEPTH || crate::stack::exhausted() {
             return Err(ParseError {
                 kind: ParseErrorKind::RecursionLimit,
                 span: self.current_span(),
@@ -849,14 +937,42 @@ impl ExprParser {
             let operand = self.parse_unary()?;
             let span = Span::new(tok.span.start, operand.span.end);
             return Ok(Expr {
-                kind: ExprKind::UnOp(op, Box::new(operand)),
+                kind: ExprKind::UnOp(op, Operand::new(operand)),
                 span,
             });
         }
         self.parse_primary()
     }
 
+    fn parse_tilde_match(&mut self) -> ParseResult<Expr> {
+        let tilde = self.advance();
+        let subject = self.parse_concat_chain()?;
+        let mut patterns = Vec::new();
+        while self.peek().is_some_and(|t| is_value_token_kind(&t.kind)) {
+            patterns.push(self.parse_concat_chain()?);
+        }
+        let Some(last) = patterns.last() else {
+            return Err(ParseError {
+                kind: ParseErrorKind::UnexpectedTokenInExpr {
+                    expected: "`~` pattern",
+                },
+                span: self.current_span(),
+            });
+        };
+        let span = Span::new(subject.span.start, last.span.end);
+        let list = Expr {
+            kind: ExprKind::List(patterns),
+            span,
+        };
+        let mut matched = match_expr(MatchOp::Tilde, subject, list);
+        matched.span = Span::new(tilde.span.start, span.end);
+        Ok(matched)
+    }
+
     fn parse_primary(&mut self) -> ParseResult<Expr> {
+        if self.ctx == ExprContext::Cond && matches!(self.peek_kind(), Some(TokenKind::Tilde)) {
+            return self.parse_tilde_match();
+        }
         // Case-as-expression (scripture 7.2): the `case $x { pat =>
         // value ... }` form. Recognized as a primary in every
         // context so the AST has ONE canonical expression shape; the
@@ -864,126 +980,11 @@ impl ExprParser {
         if matches!(self.peek_kind(), Some(TokenKind::Case)) {
             return self.parse_case_expr();
         }
-        // Parenthesized sub-expression `( expr )` -- valid in all
-        // operator contexts.
-        if let Some(TokenKind::LParen) = self.peek_kind() {
-            // In arith context, `(...)` is grouping; in non-arith,
-            // the value-top path already dispatched to list literal.
-            // Here in arith: collect tokens, parse_expr_tokens
-            // recursively.
-            if self.ctx == ExprContext::Arith {
-                let open = self.advance();
-                let mut body: Vec<Token> = Vec::new();
-                let mut depth: i32 = 1;
-                while !self.at_end() {
-                    let t = self.peek().expect("at_end above");
-                    match &t.kind {
-                        TokenKind::LParen => depth += 1,
-                        TokenKind::DoubleLParen => depth += 2,
-                        TokenKind::RParen => {
-                            depth -= 1;
-                            if depth == 0 {
-                                let close = self.advance();
-                                let inner = parse_expr_tokens(
-                                    body,
-                                    self.source_len,
-                                    ExprContext::Arith,
-                                )?;
-                                return Ok(Expr {
-                                    kind: inner.kind,
-                                    span: Span::new(open.span.start, close.span.end),
-                                });
-                            }
-                        }
-                        TokenKind::DoubleRParen => {
-                            depth -= 2;
-                            if depth == 0 {
-                                let close = self.advance();
-                                let inner = parse_expr_tokens(
-                                    body,
-                                    self.source_len,
-                                    ExprContext::Arith,
-                                )?;
-                                return Ok(Expr {
-                                    kind: inner.kind,
-                                    span: Span::new(open.span.start, close.span.end),
-                                });
-                            }
-                            if depth < 0 {
-                                return Err(ParseError {
-                                    kind: ParseErrorKind::UnexpectedToken {
-                                        expected: "`)`",
-                                    },
-                                    span: t.span,
-                                });
-                            }
-                        }
-                        _ => {}
-                    }
-                    body.push(self.advance());
-                }
-                return Err(ParseError {
-                    kind: ParseErrorKind::UnexpectedEof { expected: "`)`" },
-                    span: self.eof_span(),
-                });
-            }
-            // In cond context, `(...)` is grouping.
-            if self.ctx == ExprContext::Cond {
-                let open = self.advance();
-                let mut body: Vec<Token> = Vec::new();
-                let mut depth: i32 = 1;
-                while !self.at_end() {
-                    let t = self.peek().expect("at_end above");
-                    match &t.kind {
-                        TokenKind::LParen => depth += 1,
-                        TokenKind::DoubleLParen => depth += 2,
-                        TokenKind::RParen => {
-                            depth -= 1;
-                            if depth == 0 {
-                                let close = self.advance();
-                                let inner = parse_expr_tokens(
-                                    body,
-                                    self.source_len,
-                                    ExprContext::Cond,
-                                )?;
-                                return Ok(Expr {
-                                    kind: inner.kind,
-                                    span: Span::new(open.span.start, close.span.end),
-                                });
-                            }
-                        }
-                        TokenKind::DoubleRParen => {
-                            depth -= 2;
-                            if depth == 0 {
-                                let close = self.advance();
-                                let inner = parse_expr_tokens(
-                                    body,
-                                    self.source_len,
-                                    ExprContext::Cond,
-                                )?;
-                                return Ok(Expr {
-                                    kind: inner.kind,
-                                    span: Span::new(open.span.start, close.span.end),
-                                });
-                            }
-                            if depth < 0 {
-                                return Err(ParseError {
-                                    kind: ParseErrorKind::UnexpectedToken {
-                                        expected: "`)`",
-                                    },
-                                    span: t.span,
-                                });
-                            }
-                        }
-                        _ => {}
-                    }
-                    body.push(self.advance());
-                }
-                return Err(ParseError {
-                    kind: ParseErrorKind::UnexpectedEof { expected: "`)`" },
-                    span: self.eof_span(),
-                });
-            }
+        // In arith and cond, `(...)` is grouping; a value's list went to the value-top path.
+        if matches!(self.peek_kind(), Some(TokenKind::LParen | TokenKind::DoubleLParen))
+            && matches!(self.ctx, ExprContext::Arith | ExprContext::Cond)
+        {
+            return self.parse_group(self.ctx);
         }
         // Atom dispatch.
         let tok = match self.peek() {
@@ -1012,7 +1013,11 @@ impl ExprParser {
                 // Try retokenizing: if the Word splits cleanly into
                 // digit-runs + arith-operator chars, parse the
                 // resulting micro-stream.
-                if let Some(micro) = retokenize_arith_word(s, tok.span.start) {
+                // A word that splits into only itself is no number, such as one past i64.
+                let split = retokenize_arith_word(s, tok.span.start).filter(|micro| {
+                    !matches!(micro.as_slice(), [Token { kind: TokenKind::Word(w), .. }] if w == s)
+                });
+                if let Some(micro) = split {
                     // Re-parse the micro stream as a complete arith
                     // expression using a fresh ExprParser.
                     let sub = parse_expr_tokens(micro, self.source_len, ExprContext::Arith)?;
@@ -1027,6 +1032,12 @@ impl ExprParser {
                 });
             }
             _ => {}
+        }
+        if self.ctx == ExprContext::Arith && TokenKind::reserved_word_text(&tok.kind).is_some() {
+            return Err(ParseError {
+                kind: ParseErrorKind::InvalidArithLiteral,
+                span: tok.span,
+            });
         }
         self.parse_value_atom()
     }
@@ -1302,7 +1313,7 @@ enum EqOrMatch {
 fn bin(op: BinOp, left: Expr, right: Expr) -> Expr {
     let span = Span::new(left.span.start, right.span.end);
     Expr {
-        kind: ExprKind::BinOp(op, Box::new(left), Box::new(right)),
+        kind: ExprKind::BinOp(op, Operand::new(left), Operand::new(right)),
         span,
     }
 }
@@ -1310,12 +1321,13 @@ fn bin(op: BinOp, left: Expr, right: Expr) -> Expr {
 fn match_expr(op: MatchOp, left: Expr, right: Expr) -> Expr {
     let span = Span::new(left.span.start, right.span.end);
     Expr {
-        kind: ExprKind::Match(op, Box::new(left), Box::new(right)),
+        kind: ExprKind::Match(op, Operand::new(left), Operand::new(right)),
         span,
     }
 }
 
 fn is_value_token_kind(k: &TokenKind) -> bool {
+    // A value is never command-word position, so a reserved word is its own text here.
     matches!(
         k,
         TokenKind::Word(_)
@@ -1329,7 +1341,7 @@ fn is_value_token_kind(k: &TokenKind) -> bool {
             | TokenKind::ProcSubIn(_)
             | TokenKind::ProcSubOut(_)
             | TokenKind::Regex(_)
-    )
+    ) || TokenKind::reserved_word_text(k).is_some()
 }
 
 fn parse_int(s: &str) -> Option<i64> {
@@ -1452,8 +1464,7 @@ fn retokenize_arith_word(text: &str, base_start: usize) -> Option<Vec<Token>> {
 /// substitution re-tokenizes + re-parses its body -- a full lex+parse stack
 /// frame per `$(` -- which the single-stream `check_token_nesting` pass cannot
 /// see (a `$(...)` is one Subst token in the outer stream). 32 nested
-/// substitutions is far beyond any real script and well under the 256 KiB EL0
-/// stack at the heavier re-lex frame cost.
+/// substitutions is far beyond any real script.
 const PARSE_MAX_RELEX: u32 = 32;
 
 /// Live `$(...)` re-lex recursion depth. A process-global counter because
@@ -1913,6 +1924,61 @@ mod tests {
             ExprKind::Match(MatchOp::In, _, _) => {}
             other => panic!("got {:?}", other),
         }
+    }
+
+    #[test]
+    fn cond_in_a_written_list() {
+        let e = expr_ok("$x in (a b c)", ExprContext::Cond);
+        match &e.kind {
+            ExprKind::Match(MatchOp::In, _, r) => {
+                assert!(matches!(&r.kind, ExprKind::List(items) if items.len() == 3));
+            }
+            other => panic!("got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn a_closed_group_in_a_condition_is_still_a_group() {
+        let e = expr_ok("($x == a)", ExprContext::Cond);
+        assert!(matches!(e.kind, ExprKind::BinOp(BinOp::Eq, _, _)));
+        let e = expr_ok("$x == a && ($y in (b c))", ExprContext::Cond);
+        assert!(matches!(e.kind, ExprKind::BinOp(BinOp::And, _, _)));
+    }
+
+    #[test]
+    fn rc_tilde_takes_a_subject_and_patterns() {
+        let e = expr_ok("~ $v foo *.c", ExprContext::Cond);
+        match &e.kind {
+            ExprKind::Match(MatchOp::Tilde, _, r) => {
+                assert!(matches!(&r.kind, ExprKind::List(items) if items.len() == 2));
+            }
+            other => panic!("got {:?}", other),
+        }
+        let e = expr_ok("!~ $v foo", ExprContext::Cond);
+        assert!(matches!(e.kind, ExprKind::UnOp(UnOp::Not, _)));
+        let e = expr_ok("~ $v foo && $w == bar", ExprContext::Cond);
+        assert!(matches!(e.kind, ExprKind::BinOp(BinOp::And, _, _)));
+        let err = parse_expr_tokens(
+            tokenize("~ $v").unwrap().into_iter().filter(|t| !matches!(t.kind, TokenKind::Eof)).collect(),
+            4,
+            ExprContext::Cond,
+        )
+        .unwrap_err();
+        assert!(matches!(err.kind, ParseErrorKind::UnexpectedTokenInExpr { .. }));
+    }
+
+    #[test]
+    fn a_reserved_word_is_a_word_in_a_value() {
+        for src in ["on", "in", "if", "else", "for"] {
+            let e = expr_ok(src, ExprContext::Value);
+            assert!(matches!(&e.kind, ExprKind::Word(w) if w == src), "{src}");
+        }
+        let e = expr_ok("(in if on)", ExprContext::Value);
+        assert!(matches!(&e.kind, ExprKind::List(items) if items.len() == 3));
+        let e = expr_ok("$x == on", ExprContext::Cond);
+        assert!(matches!(e.kind, ExprKind::BinOp(BinOp::Eq, _, _)));
+        let e = expr_ok("a^in", ExprContext::Value);
+        assert!(matches!(e.kind, ExprKind::Concat(_)));
     }
 
     #[test]

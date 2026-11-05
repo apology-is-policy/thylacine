@@ -10109,8 +10109,9 @@ int sys_spawn_full_for_proc(struct Proc *p, const char *name, size_t name_len,
 // one-hop delegation (joey, console-attached, spawns /sbin/login WITH the bit;
 // login confers it on a per-user --role client proxy that posts /srv/home-<user>
 // in the session's private per-territory /srv). SPAWN_PERM_CONSOLE_OWNER (LS-5)
-// is gated the SAME way as MAY_POST_SERVICE (console-attached OR a MAY_POST_SERVICE
-// holder) so trusted /sbin/login confers console ownership on the session shell;
+// takes a console-attached granter OR the session factory
+// (PROC_FLAG_SESSION_REGISTRY), so trusted /sbin/login confers console ownership on
+// the session shell and no other service poster can;
 // it is strictly distinct from CONSOLE_TRUSTED (the owner bit never confers attach,
 // so I-27 is untouched -- see the SPAWN_PERM_CONSOLE_OWNER comment in syscall.h).
 // Every bit is rfork-non-propagating: a perm_flags spawn-time decision, not a
@@ -10122,9 +10123,7 @@ int sys_spawn_full_for_proc(struct Proc *p, const char *name, size_t name_len,
 VISIBLE_IF_KERNEL_TESTS
 int spawn_perm_grant_check(struct Proc *p, u32 perm_flags) {
     if (perm_flags & ~SPAWN_PERM_ALL)                              return -1;
-    // The designated compositor is untrusted and confers nothing. Its MAY_POST_SERVICE lets
-    // it post: carried one hop, it would make a console owner, whose every thread reads
-    // /dev/cons into INTERACTIVE with no ration, past the bound ARCH 8.3 holds it to.
+    // The designated compositor is untrusted and confers nothing, whatever it holds.
     if (perm_flags &&
         (__atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE) & PROC_FLAG_SEAT_CLIENT))
         return -1;
@@ -10138,9 +10137,11 @@ int spawn_perm_grant_check(struct Proc *p, u32 perm_flags) {
     if ((perm_flags & SPAWN_PERM_MAY_POST_SERVICE)
             && !proc_is_console_attached(p)
             && !proc_may_post_service(p))                          return -1;
+    // A console owner's every thread reads /dev/cons into INTERACTIVE with no ration, and
+    // MAY_POST_SERVICE is held by OS servers and a session's own compositor.
     if ((perm_flags & SPAWN_PERM_CONSOLE_OWNER)
             && !proc_is_console_attached(p)
-            && !proc_may_post_service(p))                          return -1;
+            && !proc_may_create_srv_registry(p))                   return -1;
     // G-4: CONSOLE_RENDERER is gated NARROW (console-attach-only, the
     // CONSOLE_TRUSTED shape -- the pair reads all console output + injects
     // input, so only the boot trust anchor designates it) AND single-holder
@@ -10165,7 +10166,7 @@ int spawn_perm_grant_check(struct Proc *p, u32 perm_flags) {
             && !proc_may_raise_thread_budget(p))                   return -1;
     // arm-6: SESSION_HANGUP takes the MAY_POST_SERVICE one-hop shape (a
     // console-attached granter OR a holder of the post-service bit) -- login's
-    // session-management authority, the same gate CONSOLE_OWNER uses. The
+    // session-management authority. The
     // hangup terminates only same-session members (a Proc's own descendants),
     // so it confers no cross-authority reach; the gate just scopes WHO may set
     // up a self-reclaiming session to the login-shaped callers that need it.

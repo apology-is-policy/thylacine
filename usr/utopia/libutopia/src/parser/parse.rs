@@ -38,6 +38,7 @@
 
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
+use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -62,12 +63,14 @@ pub fn parse(source: &str) -> ParseResult<Script> {
 /// Maximum `()`/`{}`/`(( ))` bracket-nesting depth accepted within a single
 /// token stream. Subshells, brace blocks, control-flow bodies, and arith
 /// groups each recurse one level per opener; without a bound, deeply nested
-/// input (`((((...))))`, `{{{...}}}`, `if{if{...}}`) overflows the 256 KiB EL0
+/// input (`((((...))))`, `{{{...}}}`, `if{if{...}}`) overflows the EL0
 /// stack into a guard-page snare:segv -> shell death (scripture 8.1). 64 is
 /// far beyond any real script's nesting (the deepest realistic nesting is a
 /// handful of levels). The `$(...)` command-substitution re-lex vector is
 /// bounded separately in `parse_subscript` (it crosses a re-tokenize boundary
-/// this single-stream pass cannot see).
+/// this single-stream pass cannot see). The same number bounds the statements
+/// one statement can sit inside, in `parse_statement`: in `if (a) if (b) x` the
+/// brackets have closed before the body starts, so this pass counts nothing.
 const PARSE_MAX_NESTING: i32 = 64;
 
 /// Reject a token stream whose `()`/`{}`/`(( ))` nesting exceeds
@@ -115,6 +118,7 @@ struct Parser {
     heredoc_bodies: VecDeque<Vec<DqPart>>,
     /// `source.len()` -- used as the Eof point-span fallback.
     source_len: usize,
+    enclosing_statements: i32,
 }
 
 impl Parser {
@@ -130,6 +134,7 @@ impl Parser {
             pos: 0,
             heredoc_bodies: bodies,
             source_len,
+            enclosing_statements: 0,
         }
     }
 
@@ -237,10 +242,9 @@ impl Parser {
     /// and `cmd < in` name an argument and a file, and a shell that refuses
     /// them has made sixteen words unusable as filenames.
     ///
-    /// Done in the parser rather than with a lexer mode for the same reason as
-    /// [`Self::split_double_rparen`]: the lexer is context-free and a mode has
-    /// to be right everywhere, while a demotion only has to be right where a
-    /// word is already what the grammar asks for. The rewrite keeps the
+    /// Done in the parser rather than with a lexer mode: a mode has to be right
+    /// everywhere, while a demotion only has to be right where a word is already
+    /// what the grammar asks for. The rewrite keeps the
     /// original span, so diagnostics still point at the source text, and the
     /// result is an ordinary `TokenKind::Word` -- so nothing downstream, in
     /// the expression parser or the evaluator, needs to know this happened.
@@ -252,30 +256,15 @@ impl Parser {
         self.tokens[self.pos] = Token::new(TokenKind::Word(String::from(text)), span);
     }
 
-    /// Split a `))` token in place into two `)`, when the parser is somewhere
-    /// that wants a single one.
-    ///
-    /// The lexer is context-free and emits `DoubleRParen` for any `))`, which
-    /// is right for `$(( ))` and wrong for a nested subshell -- `(a; (b; c))`
-    /// closes two subshells with no space between them, and arrived as one
-    /// arithmetic token that matched nothing. Splitting at the parse site is
-    /// the standard answer (Rust's own parser does it for `>>` closing two
-    /// generic lists) and is strictly safer than a lexer mode: it changes the
-    /// stream only where a single `)` is already what the grammar asks for,
-    /// so an arithmetic `))` -- consumed by `parse_arith_command`'s own depth
-    /// accounting before this is ever reached -- is untouched.
-    ///
-    /// The two halves carry the two halves of the original span, so a
-    /// diagnostic still points at the right column.
-    fn split_double_rparen(&mut self) {
-        if !matches!(self.peek_kind(), Some(TokenKind::DoubleRParen)) {
-            return;
-        }
-        let span = self.tokens[self.pos].span;
-        let mid = span.start + 1;
-        self.tokens[self.pos] = Token::new(TokenKind::RParen, Span::new(span.start, mid));
-        self.tokens
-            .insert(self.pos + 1, Token::new(TokenKind::RParen, Span::new(mid, span.end)));
+    /// A statement that ended in `&` needs no separator after it: `&` ends the
+    /// statement as `;` does, so another may follow on the line.
+    fn at_statement_end(&self) -> bool {
+        self.at_statement_terminator()
+            || (self.pos > 0
+                && matches!(
+                    self.tokens.get(self.pos - 1).map(|t| &t.kind),
+                    Some(TokenKind::Ampersand)
+                ))
     }
 
     fn at_statement_terminator(&self) -> bool {
@@ -332,7 +321,7 @@ impl Parser {
             let stmt = self.parse_statement()?;
             // After a statement, require a terminator (or EOF) so we
             // catch dangling tokens early.
-            if !self.at_statement_terminator() {
+            if !self.at_statement_end() {
                 return Err(ParseError {
                     kind: ParseErrorKind::UnexpectedToken {
                         expected: "`;`, newline, or end of input",
@@ -353,6 +342,19 @@ impl Parser {
     // -----------------------------------------------------------------
 
     fn parse_statement(&mut self) -> ParseResult<Statement> {
+        if self.enclosing_statements > PARSE_MAX_NESTING || crate::stack::exhausted() {
+            return Err(ParseError {
+                kind: ParseErrorKind::RecursionLimit,
+                span: self.current_span(),
+            });
+        }
+        self.enclosing_statements += 1;
+        let statement = self.parse_statement_inner();
+        self.enclosing_statements -= 1;
+        statement
+    }
+
+    fn parse_statement_inner(&mut self) -> ParseResult<Statement> {
         match self.peek_kind() {
             Some(TokenKind::If) => self.parse_if(),
             Some(TokenKind::For) => self.parse_for(),
@@ -399,15 +401,20 @@ impl Parser {
         // AND-OR list (scripture 8.6): pipeline (( && | || ) pipeline)*.
         // A lone pipeline stays a Pipeline statement (unchanged shape); an
         // AndOr node is built only when at least one connector is present.
-        let mut rest = Vec::new();
+        let mut rest: Vec<(AndOrOp, Pipeline)> = Vec::new();
         loop {
+            // `&` ended the statement, so a connector here has nothing on its left.
+            if rest.last().map_or(first.background, |(_, p)| p.background) {
+                break;
+            }
             let op = match self.peek_kind() {
                 Some(TokenKind::AndAnd) => AndOrOp::And,
                 Some(TokenKind::OrOr) => AndOrOp::Or,
                 _ => break,
             };
             self.pos += 1;
-            self.skip_newlines_only(); // allow a line break after `&&` / `||`
+            self.skip_to_next_line();
+            self.need_more_after_connector()?;
             rest.push((op, self.parse_pipeline()?));
         }
         if rest.is_empty() {
@@ -430,6 +437,17 @@ impl Parser {
         }
     }
 
+    /// The end of input after a connector is no empty element: the next line can finish it.
+    fn need_more_after_connector(&self) -> ParseResult<()> {
+        if self.at_eof() {
+            return Err(ParseError {
+                kind: ParseErrorKind::UnexpectedEof { expected: "a command" },
+                span: self.current_span(),
+            });
+        }
+        Ok(())
+    }
+
     fn parse_pipeline(&mut self) -> ParseResult<Pipeline> {
         let start = self.current_span().start;
         let mut elements = Vec::new();
@@ -439,7 +457,8 @@ impl Parser {
             match self.peek_kind() {
                 Some(TokenKind::Pipe) => {
                     self.pos += 1;
-                    self.skip_newlines_only();
+                    self.skip_to_next_line();
+                    self.need_more_after_connector()?;
                     let next = self.parse_pipeline_element()?;
                     elements.push(next);
                 }
@@ -450,7 +469,8 @@ impl Parser {
                         last.tolerate_failure = true;
                     }
                     self.pos += 1;
-                    self.skip_newlines_only();
+                    self.skip_to_next_line();
+                    self.need_more_after_connector()?;
                     let next = self.parse_pipeline_element()?;
                     elements.push(next);
                 }
@@ -479,6 +499,13 @@ impl Parser {
     /// separators).
     fn skip_newlines_only(&mut self) {
         while matches!(self.peek_kind(), Some(TokenKind::Newline)) {
+            self.pos += 1;
+        }
+    }
+
+    /// Line breaks after a connector, and the body of a heredoc opened on its line.
+    fn skip_to_next_line(&mut self) {
+        while matches!(self.peek_kind(), Some(TokenKind::Newline | TokenKind::HeredocBody(_))) {
             self.pos += 1;
         }
     }
@@ -677,6 +704,7 @@ impl Parser {
     fn parse_word(&mut self) -> ParseResult<Word> {
         let first = self.advance();
         debug_assert!(is_value_token(&first.kind) || matches!(first.kind, TokenKind::Equal));
+        let first = self.fold_index(first)?;
         // Assemble a maximal span-adjacent word. Two joining rules, both
         // requiring zero whitespace between the joined tokens:
         //   (a) a `~` fuses span-adjacent value tokens into ONE word, so
@@ -719,7 +747,7 @@ impl Parser {
             if adjacent && is_value && (has_tilde || is_tilde || has_equal) {
                 let value = self.advance();
                 has_tilde |= matches!(value.kind, TokenKind::Tilde);
-                parts.push(value);
+                parts.push(self.fold_index(value)?);
                 continue;
             }
             // (a') absorb a span-adjacent `=` itself -- the literal joining
@@ -743,7 +771,7 @@ impl Parser {
                 self.pos += 1; // past the Caret
                 let value = self.advance();
                 has_tilde |= matches!(value.kind, TokenKind::Tilde);
-                parts.push(value);
+                parts.push(self.fold_index(value)?);
                 continue;
             }
             break;
@@ -753,6 +781,27 @@ impl Parser {
         } else {
             Ok(Word::Concat(parts))
         }
+    }
+
+    /// `$x(N)` and `$x(M N)` in a command word are one value, and the expression parser
+    /// owns their grammar. Only a `(` touching the variable belongs to it.
+    fn fold_index(&mut self, tok: Token) -> ParseResult<Token> {
+        let open = match (&tok.kind, self.peek_token()) {
+            (TokenKind::Var(_), Some(t))
+                if matches!(t.kind, TokenKind::LParen) && t.span.start == tok.span.end =>
+            {
+                t.clone()
+            }
+            _ => return Ok(tok),
+        };
+        let inner = self.collect_paren_tokens()?;
+        let close = Token::new(TokenKind::RParen, self.tokens[self.pos - 1].span);
+        let span = Span::new(tok.span.start, close.span.end);
+        let mut tokens = alloc::vec![tok, open];
+        tokens.extend(inner);
+        tokens.push(close);
+        let expr = parse_expr_tokens(tokens, self.source_len, ExprContext::Value)?;
+        Ok(Token::new(TokenKind::VarAt(Rc::new(expr)), span))
     }
 
     fn parse_redirect(&mut self) -> ParseResult<Redirect> {
@@ -847,7 +896,7 @@ impl Parser {
                 _ => {}
             }
             let stmt = self.parse_statement()?;
-            if !self.at_statement_terminator() {
+            if !self.at_statement_end() {
                 return Err(ParseError {
                     kind: ParseErrorKind::UnexpectedToken {
                         expected: "`;`, newline, or `}`",
@@ -867,13 +916,8 @@ impl Parser {
         end_token: TokenKind,
     ) -> ParseResult<Vec<Statement>> {
         let mut stmts = Vec::new();
-        let ends_on_rparen =
-            core::mem::discriminant(&end_token) == core::mem::discriminant(&TokenKind::RParen);
         loop {
             self.skip_separators();
-            if ends_on_rparen {
-                self.split_double_rparen();
-            }
             match self.peek_kind() {
                 Some(k) if core::mem::discriminant(k) == core::mem::discriminant(&end_token) => {
                     break
@@ -882,14 +926,7 @@ impl Parser {
                 _ => {}
             }
             let stmt = self.parse_statement()?;
-            // Before JUDGING the terminator, not only before looking for the
-            // end token: `(a; (b; c))` reaches this point with the inner
-            // subshell's `c` parsed and `))` current, and a `)` is exactly the
-            // terminator this is about to ask for.
-            if ends_on_rparen {
-                self.split_double_rparen();
-            }
-            if !self.at_statement_terminator() {
+            if !self.at_statement_end() {
                 return Err(ParseError {
                     kind: ParseErrorKind::UnexpectedToken {
                         expected: "`;`, newline, or `)`",
@@ -909,9 +946,19 @@ impl Parser {
     // -----------------------------------------------------------------
 
     fn collect_paren_tokens(&mut self) -> ParseResult<Vec<Token>> {
-        self.expect_kind(TokenKind::LParen, "`(`")?;
         let mut depth: i32 = 1;
         let mut collected = Vec::new();
+        if matches!(self.peek_kind(), Some(TokenKind::DoubleLParen)) {
+            // `if (($a == b) && ($c == d))`: this paren and a group, opened at once.
+            let open = self.advance();
+            collected.push(Token::new(
+                TokenKind::LParen,
+                Span::new(open.span.start + 1, open.span.end),
+            ));
+            depth = 2;
+        } else {
+            self.expect_kind(TokenKind::LParen, "`(`")?;
+        }
         while !self.at_eof() {
             let tok = self.peek_token().expect("at_eof check above");
             match &tok.kind {
@@ -934,6 +981,9 @@ impl Parser {
                 TokenKind::DoubleRParen => {
                     depth -= 2;
                     if depth == 0 {
+                        // Closes the group opened with this paren as well.
+                        let close = Span::new(tok.span.start, tok.span.start + 1);
+                        collected.push(Token::new(TokenKind::RParen, close));
                         self.pos += 1;
                         return Ok(collected);
                     }
@@ -975,7 +1025,8 @@ impl Parser {
                     | TokenKind::PipeTolerate
                     | TokenKind::AndAnd
                     | TokenKind::OrOr
-                    | TokenKind::Ampersand => break,
+                    | TokenKind::Ampersand
+                    | TokenKind::RParen => break,
                     _ => {}
                 }
             }
@@ -1003,14 +1054,29 @@ impl Parser {
     // Control-flow: if / for / while / fn
     // -----------------------------------------------------------------
 
+    /// A block or, as in rc, one statement. At the end of the input it still asks for the
+    /// block, which the line editor reads as a statement wanting its next line.
+    fn parse_if_body(&mut self) -> ParseResult<(Vec<Statement>, usize)> {
+        if matches!(
+            self.peek_kind(),
+            Some(TokenKind::LBrace) | Some(TokenKind::Eof) | None
+        ) {
+            self.expect_kind(TokenKind::LBrace, "`{`")?;
+            let body = self.parse_block_statements()?;
+            let end = self.expect_kind(TokenKind::RBrace, "`}`")?.span.end;
+            return Ok((body, end));
+        }
+        let stmt = self.parse_statement()?;
+        let end = stmt.span.end;
+        Ok((alloc::vec![stmt], end))
+    }
+
     fn parse_if(&mut self) -> ParseResult<Statement> {
         let if_tok = self.advance(); // If
         let cond_tokens = self.collect_paren_tokens()?;
         let cond = parse_expr_tokens(cond_tokens, self.source_len, ExprContext::Cond)?;
         self.skip_newlines_only();
-        self.expect_kind(TokenKind::LBrace, "`{`")?;
-        let then_branch = self.parse_block_statements()?;
-        let mut last_end = self.expect_kind(TokenKind::RBrace, "`}`")?.span.end;
+        let (then_branch, mut last_end) = self.parse_if_body()?;
         let mut elif_branches: Vec<(Expr, Vec<Statement>)> = Vec::new();
         let mut else_branch = None;
         // Handle `else if ...` / `else { ... }` chain.
@@ -1037,9 +1103,8 @@ impl Parser {
                 let elif_cond =
                     parse_expr_tokens(elif_tokens, self.source_len, ExprContext::Cond)?;
                 self.skip_newlines_only();
-                self.expect_kind(TokenKind::LBrace, "`{`")?;
-                let elif_body = self.parse_block_statements()?;
-                last_end = self.expect_kind(TokenKind::RBrace, "`}`")?.span.end;
+                let (elif_body, elif_end) = self.parse_if_body()?;
+                last_end = elif_end;
                 elif_branches.push((elif_cond, elif_body));
                 continue;
             }
@@ -1160,7 +1225,7 @@ impl Parser {
         let close = self.expect_kind(TokenKind::RBrace, "`}`")?;
         let span = Span::new(fn_tok.span.start, close.span.end);
         Ok(Statement {
-            kind: StatementKind::FnDecl(Box::new(FnDecl {
+            kind: StatementKind::FnDecl(Rc::new(FnDecl {
                 name,
                 args,
                 body,
@@ -1431,6 +1496,12 @@ impl Parser {
         // Allow `} \n catch` across a newline; catch is REQUIRED per
         // the U-5d locked decision (scripture 7.7 always pairs them).
         self.skip_newlines_only();
+        if self.at_eof() {
+            return Err(ParseError {
+                kind: ParseErrorKind::UnexpectedEof { expected: "`catch`" },
+                span: self.current_span(),
+            });
+        }
         if !matches!(self.peek_kind(), Some(TokenKind::Catch)) {
             return Err(ParseError {
                 kind: ParseErrorKind::UnexpectedToken {
@@ -1480,7 +1551,7 @@ impl Parser {
         Ok(Statement {
             kind: StatementKind::OnNote(Box::new(OnNoteStmt {
                 note_name,
-                body,
+                body: Rc::new(body),
                 span,
             })),
             span,
@@ -1557,6 +1628,7 @@ fn is_value_token(k: &TokenKind) -> bool {
             | TokenKind::Var(_)
             | TokenKind::VarLen(_)
             | TokenKind::VarNoSplit(_)
+            | TokenKind::VarAt(_)
             | TokenKind::Subst(_)
             | TokenKind::Backtick(_)
             | TokenKind::ProcSubIn(_)
@@ -1838,6 +1910,35 @@ mod tests {
             }
             _ => panic!(),
         }
+    }
+
+    #[test]
+    fn ampersand_ends_its_statement() {
+        let backgrounds = |src: &str| -> Vec<bool> {
+            parse_ok(src)
+                .statements
+                .iter()
+                .map(|s| match &s.kind {
+                    StatementKind::Pipeline(p) => p.background,
+                    _ => panic!("{src}"),
+                })
+                .collect()
+        };
+        assert_eq!(backgrounds("a & b"), [true, false]);
+        assert_eq!(backgrounds("a & b &"), [true, true]);
+        assert_eq!(backgrounds("a; b & c"), [false, true, false]);
+        assert_eq!(backgrounds("a &\nb"), [true, false]);
+        // Nothing is left for a connector to join.
+        assert!(parse("a & && b").is_err());
+        assert!(parse("a & || b").is_err());
+        assert!(parse("a && b & && c").is_err());
+        // Each statement list, one variable from a word that may not follow.
+        assert!(parse("(a) b").is_err());
+        assert!(parse("{ (a) b }").is_err());
+        assert!(parse("( (a) b )").is_err());
+        assert!(parse("(a) & b").is_ok());
+        assert!(parse("{ (a) & b }").is_ok());
+        assert!(parse("( (a) & b )").is_ok());
     }
 
     #[test]
@@ -2370,12 +2471,106 @@ mod tests {
         }
     }
 
-    /// UT-PARSE-3's fix, generalized -- and its other half: the split must not
-    /// touch a `))` that MEANS arithmetic.
+    #[test]
+    fn an_index_touching_its_variable_is_part_of_the_word() {
+        let words = |src: &str| {
+            let s = parse_ok(src);
+            let StatementKind::Pipeline(p) = &s.statements[0].kind else {
+                panic!("{src} is not a pipeline")
+            };
+            let CommandKind::Simple(c) = &p.elements[0].command.kind else {
+                panic!("{src} is not a simple command")
+            };
+            c.words.clone()
+        };
+        let w = words("echo $f(1) $f(2 3) x^$f(1) $f");
+        assert_eq!(w.len(), 5);
+        let at = |t: &Token, shape: fn(&ExprKind) -> bool| {
+            matches!(&t.kind, TokenKind::VarAt(e) if shape(&e.kind))
+        };
+        assert!(matches!(&w[1], Word::Single(t) if at(t, |k| matches!(k, ExprKind::VarIndex(..)))));
+        assert!(matches!(&w[2], Word::Single(t) if at(t, |k| matches!(k, ExprKind::VarSlice(..)))));
+        assert!(matches!(&w[3], Word::Concat(p) if at(&p[1], |k| matches!(k, ExprKind::VarIndex(..)))));
+        assert!(matches!(&w[4], Word::Single(t) if matches!(t.kind, TokenKind::Var(_))));
+        // A space leaves the group where it was: outside the word, and refused.
+        assert!(matches!(parse_err("echo $f (1)"), ParseErrorKind::UnexpectedToken { .. }));
+    }
+
+    #[test]
+    fn a_list_closes_beside_the_condition_that_holds_it() {
+        for src in [
+            "if ($v in (a b)) { x }",
+            "if ($v in (a b) ) { x }",
+            "if ( $v in (a) ) { x }",
+            "while ($v in (a b)) { x }",
+            "if ( ($v in (a b)) && ($w matches c) ) { x }",
+            "if (!($v in (a b))) { x }",
+            "if ($v == a && $w in (a b)) { x }",
+        ] {
+            parse_ok(src);
+        }
+    }
+
+    #[test]
+    fn arithmetic_closes_beside_a_group_inside_it() {
+        for src in [
+            "x = ((1 + 2))",
+            "x = ((1 + (2 * 3)))",
+            "x = (((1 + 2) * 3))",
+            "x = ((1 + (2 * (3 + 4))))",
+            "x = ((1 << 4))",
+            "x = ((16 >> 2))",
+            "x = ((1<<4))",
+            "x = (($y << (1 + 1)))",
+            "x = ((1 <(2 + 3)))",
+            "((1 << 4))",
+        ] {
+            parse_ok(src);
+        }
+    }
+
+    #[test]
+    fn a_heredoc_and_a_redirect_are_themselves_again_after_arithmetic() {
+        let s = parse_ok("((1 << 4)); cat <<EOF\nbody\nEOF\n");
+        assert_eq!(s.statements.len(), 2);
+        let s = parse_ok("((16 >> 2)); echo a >> f\n");
+        assert_eq!(s.statements.len(), 2);
+    }
+
+    #[test]
+    fn an_if_takes_one_statement_or_a_block() {
+        let then_len = |src: &str| {
+            let s = parse_ok(src);
+            let StatementKind::If(i) = &s.statements[0].kind else {
+                panic!("{src} is not an if")
+            };
+            i.then_branch.len()
+        };
+        assert_eq!(then_len("if ($v matches *.c) echo C\n"), 1);
+        assert_eq!(then_len("if ($v in (yes y)) echo enabled\n"), 1);
+        assert_eq!(then_len("if ($v == a)\n  echo A\n"), 1);
+        assert_eq!(then_len("if ($v == a) { echo A; echo B }\n"), 2);
+        // Only the one statement belongs to the if.
+        assert_eq!(parse_ok("if ($v == a) echo A; echo B\n").statements.len(), 2);
+        let s = parse_ok("if ($a == b) { c } else if ($d == e) f\nelse { g }\n");
+        let StatementKind::If(i) = &s.statements[0].kind else {
+            panic!("not an if")
+        };
+        assert_eq!(i.elif_branches.len(), 1);
+        assert!(i.else_branch.is_some());
+        // The next line may still hold it.
+        assert!(matches!(
+            parse_err("if ($v == a)"),
+            ParseErrorKind::UnexpectedEof { .. }
+        ));
+    }
+
+    /// UT-PARSE-3's fix, generalized -- and its other half: a `))` that MEANS
+    /// arithmetic stays one token.
     ///
     /// The single-case test below would pass for a fix that special-cased
-    /// exactly `(a; (b; c))`, so this nests three deep as well -- `)))` lexes
-    /// as DoubleRParen + RParen, a different shape from `))` -- and pairs it
+    /// exactly `(a; (b; c))`, so this nests three deep as well -- each `)` closes
+    /// its own `(` -- and pairs it
     /// with arithmetic in the positions where a lexer-mode fix would go wrong.
     ///
     /// The OPENING side is deliberately not symmetric, and this test is where
@@ -2774,5 +2969,224 @@ mod tests {
             ParseErrorKind::InvalidStatement => {}
             other => panic!("expected InvalidStatement, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn statements_with_no_brackets_count_as_nesting() {
+        let chain = |n: usize| "if (a) ".repeat(n) + "x\n";
+        assert!(parse(&chain(64)).is_ok());
+        for n in [65, 100_000] {
+            assert_eq!(
+                parse(&chain(n)).map(|_| ()).map_err(|e| e.kind),
+                Err(ParseErrorKind::RecursionLimit)
+            );
+        }
+        assert_eq!(
+            parse(&("if(a)".repeat(100_000) + "b\n")).map(|_| ()).map_err(|e| e.kind),
+            Err(ParseErrorKind::RecursionLimit)
+        );
+        // A brace and a bare level draw on one count.
+        let mixed = |bare: usize| {
+            "if (a) { ".repeat(32) + &"if (a) ".repeat(bare) + "x" + &" }".repeat(32) + "\n"
+        };
+        assert!(parse(&mixed(32)).is_ok());
+        assert_eq!(
+            parse(&mixed(33)).map(|_| ()).map_err(|e| e.kind),
+            Err(ParseErrorKind::RecursionLimit)
+        );
+    }
+
+    #[test]
+    fn the_bounds_together_stop_at_the_stack() {
+        // Every count here is inside its bound, and their product needs more than this stack.
+        fn level(inner: &str) -> String {
+            "(( ".to_string()
+                + &("- ".repeat(250) + "( ").repeat(60)
+                + inner
+                + &" )".repeat(60)
+                + " ))"
+        }
+        let line = level(&("$( ".to_string() + &level("1") + " )")) + "\n";
+        let got = crate::stack::on_stack_of(2 * 1024 * 1024, move || {
+            parse(&line).map(|_| ()).map_err(|e| e.kind)
+        });
+        assert_eq!(got, Err(ParseErrorKind::RecursionLimit));
+        // The control: at the same stack the check stays out of the way of nesting at its bound.
+        let fits = "{ ".repeat(64) + "x" + &" }".repeat(64) + "\n";
+        assert_eq!(
+            crate::stack::on_stack_of(2 * 1024 * 1024, move || parse(&fits).map(|_| ())
+                .map_err(|e| e.kind)),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn each_cycle_of_the_parser_asks_the_stack() {
+        // Each line recurses through one check and is inside every count.
+        let lines = [
+            "{ ".repeat(64) + "x" + &" }".repeat(64) + "\n",
+            "((".to_string() + &"- ".repeat(254) + "1))\n",
+            "let x = ".to_string() + &"case a { b => ".repeat(60) + "c" + &" }".repeat(60) + "\n",
+        ];
+        for line in lines {
+            let got = crate::stack::on_stack_of(16 * 1024 * 1024, move || {
+                assert!(parse(&line).is_ok(), "the control: {line}");
+                crate::stack::allow_below_here(64 * 1024);
+                parse(&line).map(|_| ()).map_err(|e| e.kind)
+            });
+            assert_eq!(got, Err(ParseErrorKind::RecursionLimit));
+        }
+    }
+
+    #[test]
+    fn a_condition_opens_a_group_with_its_paren() {
+        for s in [
+            "if (($a == b) && ($c == d)) x\n",
+            "if (($a == b)) x\n",
+            "while (($a == b) || ($c == d)) { x }\n",
+            "if (a) { x } else if (($a == b)) { y }\n",
+        ] {
+            assert!(parse(s).is_ok(), "{s}");
+        }
+    }
+
+    #[test]
+    fn a_value_ends_at_its_subshell_paren() {
+        for s in ["(x = 1)\n", "(let x = 1)\n", "(return 3)\n", "(if (c) x = 1)\n", "(x = (a b))\n"] {
+            assert!(parse(s).is_ok(), "{s}");
+        }
+        assert!(parse("x = 1)\n").is_err());
+    }
+
+    #[test]
+    fn an_operator_chain_takes_no_stack_to_parse_or_drop() {
+        let chains = [
+            "((".to_string() + &"1 + ".repeat(100_000) + "1))\n",
+            "if (a".to_string() + &" matches a".repeat(100_000) + ") x\n",
+        ];
+        for source in chains {
+            crate::stack::on_stack_of(2 * 1024 * 1024, move || {
+                let tree = parse(&source).expect("parses");
+                crate::stack::at_the_reserve(move || drop(tree));
+            });
+        }
+    }
+
+    fn nest(n: usize, level: &dyn Fn(&str) -> String) -> String {
+        let mut s = "1".to_string();
+        for _ in 0..n {
+            s = level(&s);
+        }
+        "x = ".to_string() + &s + "\n"
+    }
+
+    #[test]
+    fn a_run_of_operators_drops_within_the_reserve() {
+        let run = |inner: &str| {
+            "$( (( ".to_string() + &("- ".repeat(250) + "( ").repeat(16) + inner + &" )".repeat(16) + " )) )"
+        };
+        let source = nest(2, &run);
+        crate::stack::on_stack_of(64 * 1024 * 1024, move || {
+            let tree = parse(&source).expect("parses");
+            crate::stack::at_the_reserve(move || drop(tree));
+        });
+    }
+
+    #[test]
+    fn a_digit_run_past_i64_is_no_number() {
+        for src in ["(( 99999999999999999999 ))\n", "x = (( 1 + 99999999999999999999 ))\n"] {
+            assert_eq!(parse_err(src), ParseErrorKind::InvalidArithLiteral, "{src}");
+        }
+    }
+
+    #[test]
+    fn a_group_can_open_at_a_later_paren_too() {
+        for s in [
+            "if ($a && (($b) || $c)) x\n",
+            "if ($x && ((a))) y\n",
+            "while ($a == b || (($c) && ($d))) { y }\n",
+            "(( case $x { a => (( 1 )) ; b => 2 } ))\n",
+            "(( case $x { a => ((((1 + 2) * 3))) ; b => 2 } ))\n",
+        ] {
+            assert!(parse(s).is_ok(), "{s}: {:?}", parse_err(s));
+        }
+        // Apart, they are a list holding a group, as they always were.
+        assert!(parse("(( case $x { a => ( ( 1 ) ) ; b => 2 } ))\n").is_err());
+    }
+
+    #[test]
+    fn the_end_of_input_inside_a_closed_group_is_not_the_end_of_the_input() {
+        for src in [
+            "(( 1 + ))",
+            "(( - ))",
+            "let y = (( $x * ))",
+            "echo $x(1 +)",
+            "if (a == ) { x }",
+            "if (!) x",
+            "if (~) x",
+            "while ($x ==) { y }",
+            "if (a) { x } else if (b ==) { y }",
+            "let x = case",
+            "x = case $y",
+            "let x = $(if (a))",
+            "x = `{fn f}",
+            "x = $(a |)",
+            "x = $(a &&)",
+            "x = $(cat <<EOF)",
+        ] {
+            assert!(parse(src).is_err(), "{src}");
+            assert!(!matches!(parse_err(src), ParseErrorKind::UnexpectedEof { .. }), "{src}: {:?}", parse_err(src));
+        }
+    }
+
+    #[test]
+    fn a_connector_goes_on_past_a_heredoc_body() {
+        for op in ["&&", "||", "|", "?|"] {
+            let src = alloc::format!("cat <<EOF {op}\nbody\nEOF\nwc\n");
+            assert_eq!(parse(&src).expect(&src).statements.len(), 1, "{src}");
+            let src = alloc::format!("cat <<EOF {op}\nbody\nEOF\n");
+            assert!(matches!(parse_err(&src), ParseErrorKind::UnexpectedEof { .. }), "{src}");
+        }
+    }
+
+    #[test]
+    fn a_try_at_the_end_of_input_wants_its_catch() {
+        assert!(matches!(parse_err("try { a }"), ParseErrorKind::UnexpectedEof { .. }));
+        assert!(matches!(parse_err("try { a }\n"), ParseErrorKind::UnexpectedEof { .. }));
+        assert!(matches!(parse_err("try { a } x"), ParseErrorKind::UnexpectedToken { .. }));
+        assert!(parse("try { a }\ncatch { b }\n").is_ok());
+    }
+
+    #[test]
+    fn a_connector_at_the_end_of_input_wants_what_follows() {
+        for src in ["a &&", "a ||", "a |", "a ?|", "a &&\n", "a |\n\n"] {
+            assert!(matches!(parse_err(src), ParseErrorKind::UnexpectedEof { .. }), "{src}: {:?}", parse_err(src));
+        }
+        // With no command on its other side the pipe is simply wrong.
+        for src in ["a | ; b", "{ a | }", "a && ; b"] {
+            assert!(!matches!(parse_err(src), ParseErrorKind::UnexpectedEof { .. }), "{src}: {:?}", parse_err(src));
+        }
+    }
+
+    #[test]
+    fn a_reserved_word_is_no_arithmetic() {
+        assert_eq!(
+            parse("(( in == in ))\n").map(|_| ()).map_err(|e| e.kind),
+            Err(ParseErrorKind::InvalidArithLiteral)
+        );
+        assert!(parse("if (in == in) x\n").is_ok());
+    }
+
+    #[test]
+    fn arithmetic_opens_two_groups_at_once() {
+        for s in [
+            "((((1 + 2) * 3) + 4))\n",
+            "x = ((((1 + 2) * 3) + 4))\n",
+            "(((((1 + 2)) * 3)))\n",
+        ] {
+            assert!(parse(s).is_ok(), "{s}");
+        }
+        // Outside arithmetic a group of groups is still a group of groups.
+        assert!(parse("( (a) ; (b) )\n").is_ok());
     }
 }

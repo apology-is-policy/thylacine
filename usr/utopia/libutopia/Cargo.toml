@@ -22,6 +22,10 @@ path = "src/lib.rs"
 [features]
 default = ["backend"]
 backend = ["dep:libthyla-rs"]
+# The syscall half's tests on a host, against libthyla-rs's ENOSYS stubs. Those
+# tests hold the evaluator's and the REPL's logic and need no real syscall, and
+# tools/test-rust.sh runs them in a second pass.
+host-test = ["backend", "libthyla-rs/host-test"]
 
 [dependencies]
 # libutopia is the application-helpers layer for the Utopia surface

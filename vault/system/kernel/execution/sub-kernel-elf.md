@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/ARCHITECTURE.md", "docs/VIVARIUM.md", "docs/DISTRO.md"]
 created: 2026-08-03
-updated: 2026-09-24
+updated: 2026-11-04
 ---
 ## Purpose
 
@@ -255,7 +255,8 @@ the libc reads for something else. Exec writes the pair on every image
 fixed -- [[sub-kernel-exec]]); Pouch's `pthread_getattr_np` derives the main
 thread's stack from them (patch 0045, [[sub-pouch-thread]]), and the
 `pouch-hello-threads` prover pins the answer against the `stack` row of
-`/proc/<pid>/maps`.
+`/proc/<pid>/maps`. libthyla-rs reads the base as well, as `stack_base()`, and the shell's
+recursion check uses it ([[sub-utopia-parser]]).
 
 ## Referenced by
 

@@ -897,6 +897,16 @@ be one 4 KiB staging buffer per round trip.
 
 ## Caveats
 
+- **libthyla-rs's `host-test` feature (2026-11-04).** Every stub's instruction goes through
+  `svc!()` or `svc_noreturn!()`. With the feature, a call answers ENOSYS and a call that
+  cannot return stops the test; `_start`, the rfork trampoline and the panic handler are
+  compiled out. A build for the guest target with the feature is a compile error. Without
+  it the expansion is the old literal: hello-rs's and capacity-probe's guest `.text` are
+  byte-identical to the tree before.
+
+- **`stack_base()` (2026-11-04).** libthyla-rs's auxv walk also keeps `AT_STACK_BASE`, for
+  the shell's recursion check ([[sub-utopia-parser]]). 0 where no exec said so.
+
 - **The CSPRNG read is the one call that silently caps, and four documents say
   otherwise.** An oversize request is clamped to the 4 KiB scratch bound and
   returns 4096; it is not refused. The header states the bound as a precondition

@@ -1032,9 +1032,10 @@ impl Repl {
         // A `#!` spawn passes no `--home`, so nothing else seeds `$cwd`.
         self.adopt_kernel_cwd();
         self.bind_positionals(arg0, args);
+        self.env.errstr_mark();
         if let Err(e) = eval_source(&mut self.env, src) {
             let mut msg = String::from("ut: ");
-            if self.env.errstr().is_empty() {
+            if !self.env.errstr_is_fresh() {
                 let _ = core::fmt::write(&mut FmtSink(&mut msg), format_args!("{:?}", e.kind));
             } else {
                 msg.push_str(self.env.errstr());
@@ -1089,12 +1090,13 @@ impl Repl {
     /// detail lives in `$errstr` (eval_source records parse failures there);
     /// the StatementFlow result is irrelevant at the top level.
     fn run_line(&mut self, line: &str, out: &mut dyn IoWrite) {
+        self.env.errstr_mark();
         if let Err(e) = eval_source(&mut self.env, line) {
-            // Prefer the rich `$errstr` (set by eval_source on a parse error,
-            // and by many evaluator error paths); fall back to the error
-            // kind so a diagnostic always reaches the user.
+            // Prefer the rich `$errstr` when this error wrote it (eval_source on a
+            // parse error, and many evaluator paths); what an earlier error left there
+            // is not this one's message.
             let mut msg = String::from("ut: ");
-            if self.env.errstr().is_empty() {
+            if !self.env.errstr_is_fresh() {
                 let _ = core::fmt::write(&mut FmtSink(&mut msg), format_args!("{:?}", e.kind));
             } else {
                 msg.push_str(self.env.errstr());
@@ -1403,6 +1405,21 @@ mod tests {
     }
 
     #[test]
+    fn an_error_prints_its_own_text_and_no_older_text() {
+        let (_, _, sink) = drive(&[b"nosuchcommand; (( 1 / 0 ))\n"]);
+        let seen = alloc::string::String::from_utf8_lossy(&sink);
+        assert!(seen.contains("DivByZero"), "{seen}");
+        assert!(!seen.contains("spawn failed"), "{seen}");
+    }
+
+    #[test]
+    fn a_parse_error_prints_what_it_wrote() {
+        let (_, _, sink) = drive(&[b"(( 1 + ))\n"]);
+        let seen = alloc::string::String::from_utf8_lossy(&sink);
+        assert!(seen.contains("parse error: unexpected end of expression"), "{seen}");
+    }
+
+    #[test]
     fn accepts_and_evaluates_assignment() {
         let (repl, exit, _) = drive(&[b"let greeting = hello\n"]);
         assert_eq!(exit, None);
@@ -1412,13 +1429,12 @@ mod tests {
     #[test]
     fn console_apply_default_is_inert_without_a_forwarded_fd() {
         // #94-B-b: a fd-less `ut` (the bare-spawn boot check, or any host test)
-        // never received a consctl fd. console_apply_default MUST report false
-        // WITHOUT touching the SVC -- the `None` arm returns before any t_write
-        // -- so the shell silently runs in whatever mode it started in (no
-        // panic, no false `ut: consctl ok` witness). A freshly-built Repl has
-        // no consctl fd (set_consctl_fd is the only path to a `Some`). The
-        // `Some(fd)` write path is exercised by the boot-log E2E witness (a host
-        // test cannot drive the SVC).
+        // never received a consctl fd. console_apply_default MUST report false,
+        // so the shell silently runs in whatever mode it started in (no panic,
+        // no false `ut: consctl ok` witness). A freshly-built Repl has no consctl
+        // fd (set_consctl_fd is the only path to a `Some`). The `None` arm returns
+        // before any t_write, which this test cannot see: under the host stubs a
+        // t_write fails too. The `Some(fd)` path is the boot-log E2E witness's.
         let repl = Repl::new();
         assert!(!repl.console_apply_default());
     }
@@ -1502,9 +1518,7 @@ mod tests {
     // the prompt is `λ <cwd> ⊢ ` -- each segment in the RESOLVED ink it was
     // given, none of the Bonfire roles; without them the legacy shape stands
     // byte for byte (no lambda, the Bonfire path and glyph escapes).
-    // NOTE: libutopia's unit tests cannot compile for a host target today
-    // (memory bug_libutopia_tests_cannot_compile); the wiring's live witness
-    // is ls-halcyon-session-instrument's prompt leg.
+    // The wiring's live witness is ls-halcyon-session-instrument's prompt leg.
     #[test]
     fn prompt_takes_the_lambda_shape_with_the_session_inks() {
         let mut repl = Repl::new();

@@ -27,6 +27,8 @@
 //   7. Repl::feed parse-error survival + subst  (interactive recovery, 8.9)
 //   8. Repl::run_script                         (positionals, exit, cwd sync)
 //   9. adopt_kernel_cwd -> glob -> cd           (a shell spawned away from /)
+//  10. Repl::run_script on input past the stack  (an error, and the shell lives)
+//  11. the largest trees at the end of the stack  (dropped, declared, called)
 //
 // joey gates the boot on this binary's status==0.
 
@@ -75,6 +77,14 @@ pub extern "C" fn rs_main() -> i64 {
         return rc;
     }
     if let Err(rc) = flow_adopt_kernel_cwd() {
+        return rc;
+    }
+
+    if let Err(rc) = flow_script_past_the_stack() {
+        return rc;
+    }
+
+    if let Err(rc) = flow_trees_at_the_stack_end() {
         return rc;
     }
 
@@ -227,10 +237,7 @@ fn flow_tilde_expand() -> Result<(), i64> {
 // the positional parameters (the names "0"/"1"/"2"/"*") at the script's global
 // scope, switches to script mode (fail-fast, scripture 8.9), and returns the
 // exit code (an explicit `exit N` wins). The positionals are bound for parity
-// with invoke_function; the `$N` / `$*` *reference* syntax is a separate Utopia
-// language item (the lexer's var-name-start is [a-zA-Z_], so a digit cannot
-// start a `$`-reference today -- functions use named args, not `$1`), tracked
-// as a follow-up. The shebang FS-peek half is covered by host unit tests
+// with invoke_function, and read as `$N`, `$*` and `$#*`. The shebang FS-peek half is covered by host unit tests
 // (parse_shebang_line) + the interactive `./script.ut` E2E; here we prove the
 // script-mode evaluator path runs in QEMU.
 fn flow_script_mode() -> Result<(), i64> {
@@ -251,6 +258,11 @@ fn flow_script_mode() -> Result<(), i64> {
         || repl.env().get("2").as_scalar() != "bar"
     {
         return fail("flow 8: run_script did not bind $0/$1/$2 positionals");
+    }
+    let mut r1 = Repl::new();
+    let rc = r1.run_script("/s.ut", &[String::from("foo"), String::from("bar")], "let a = $2\nlet n = $#*\n");
+    if rc != 0 || r1.env().get("a").as_scalar() != "bar" || r1.env().get("n").as_scalar() != "2" {
+        return fail("flow 8: a script did not read $2 and $#*");
     }
     // A script that runs statements + completes with status 0 returns 0.
     let mut r2 = Repl::new();
@@ -434,6 +446,118 @@ fn flow_repl_recovery() -> Result<(), i64> {
         return fail("flow 7: substitution did not work after a parse error");
     }
     t_putstr("u-6-test: REPL error-survival + subst OK\n");
+    Ok(())
+}
+
+// Flow 10 -- every count in this script is inside its bound, and their product is more than
+// exec's stack holds: substitutions, each with its own expression parsers, each group a new one.
+// Without the check on the stack itself, the guard page ends this probe and joey fails the boot.
+fn flow_script_past_the_stack() -> Result<(), i64> {
+    let probe = 0u8;
+    let here = core::hint::black_box(&probe) as *const u8 as usize;
+    let base = libthyla_rs::stack_base();
+    if base == 0 || here <= base {
+        return fail("flow 10: the auxv's stack base is not below this frame");
+    }
+    // `let` parses its value at once, where a command word's substitution would wait.
+    let mut script = String::from("1");
+    // About three times what the host's frames need, so a smaller guest frame cannot let it
+    // parse. The refusal comes long before the outermost levels are reached.
+    for _ in 0..24 {
+        let mut level = String::from("(( ");
+        for _ in 0..16 {
+            level.push_str(&"- ".repeat(250));
+            level.push_str("( ");
+        }
+        level.push_str(&script);
+        level.push_str(&" )".repeat(16));
+        level.push_str(" ))");
+        script = String::from("$( ");
+        script.push_str(&level);
+        script.push_str(" )");
+    }
+    script.insert_str(0, "let deep = ");
+    script.push('\n');
+    let mut repl = Repl::new();
+    let code = repl.run_script("/deep.ut", &[], &script);
+    if code == 0 {
+        return fail("flow 10: the script was accepted");
+    }
+    if !repl.env().errstr().contains("nesting too deep") {
+        let msg = alloc::format!("flow 10: the refusal was not about depth: {}", repl.env().errstr());
+        return fail(&msg);
+    }
+    let mut sink: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    if repl.feed(b"let ok = $(echo recovered)\n", &mut sink).is_some() {
+        return fail("flow 10: the next line ended the session");
+    }
+    if repl.env().get("ok").as_scalar() != "recovered" {
+        return fail("flow 10: substitution did not work after the refusal");
+    }
+    t_putstr("u-6-test: input past the stack refused, and the shell lives\n");
+    Ok(())
+}
+
+/// Runs `f` where the stack check first fires.
+#[inline(never)]
+fn at_the_reserve(f: &mut dyn FnMut()) {
+    let pad = [0u8; 1024];
+    core::hint::black_box(&pad);
+    if libutopia::stack::exhausted() {
+        f();
+    } else {
+        at_the_reserve(f);
+    }
+    core::hint::black_box(&pad);
+}
+
+// Flow 11 -- large trees drop in what the check leaves free, which is more than any drop has
+// to do, since no statement runs beneath an expression. Host tests cannot say so: only these
+// frames are the ones that have to fit. A chain costs the parser no stack at all, and each
+// `a && {` costs a lot to drop for what it cost to parse. A deep body is declared and called
+// too, which copied the tree when it was a copy.
+fn flow_trees_at_the_stack_end() -> Result<(), i64> {
+    let streams = |level: &dyn Fn(&str) -> String, n: usize| {
+        let mut s = String::from("1");
+        for _ in 0..n {
+            s = level(&s);
+        }
+        String::from("x = ") + &s + "\n"
+    };
+    let andor = |inner: &str| {
+        String::from("$(") + &"a && { ".repeat(62) + "x = " + inner + &" }".repeat(62) + ")"
+    };
+    let run = |inner: &str| {
+        let opened = (String::from("- ").repeat(250) + "( ").repeat(16);
+        String::from("$( (( ") + &opened + inner + &" )".repeat(16) + " )) )"
+    };
+    let lines = [
+        String::from("((") + &"1 + ".repeat(100_000) + "1))\n",
+        streams(&andor, 32),
+        streams(&run, 4),
+    ];
+    for (i, line) in lines.iter().enumerate() {
+        let mut tree = match libutopia::parser::parse(line) {
+            Ok(tree) => Some(tree),
+            Err(e) => {
+                let msg = alloc::format!("flow 11: line {i} did not parse: {e}");
+                return fail(&msg);
+            }
+        };
+        at_the_reserve(&mut || drop(tree.take()));
+    }
+    let script = String::from("fn d { ") + &streams(&run, 4) + " }\nd\n";
+    let mut repl = Repl::new();
+    // What the body does is not the question: it has to survive being declared and called.
+    let _ = repl.run_script("/body.ut", &[], &script);
+    if !repl.env().fn_defined("d") {
+        return fail("flow 11: the function was not declared");
+    }
+    let mut sink: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    if repl.feed(b"let ok = $(echo recovered)\n", &mut sink).is_some() {
+        return fail("flow 11: the next line ended the session");
+    }
+    t_putstr("u-6-test: the largest trees drop at the end of the stack\n");
     Ok(())
 }
 
