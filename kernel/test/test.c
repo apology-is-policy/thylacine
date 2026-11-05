@@ -1028,6 +1028,7 @@ struct test_case g_tests[] = {
                                        test_execve_interpreter_says_why,
                                                                            false, NULL },
     { "execve.load_says_nomem_on_a_refused_vma", test_execve_load_says_nomem_on_a_refused_vma, false, NULL },
+    { "execve.policy_refusal_says_eacces", test_execve_policy_refusal_says_eacces, false, NULL },
     { "exec.native_rejects_dynamic_linux",
                                        test_exec_native_rejects_dynamic_linux,
                                                                            false, NULL },

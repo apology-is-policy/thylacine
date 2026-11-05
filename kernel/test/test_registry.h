@@ -487,6 +487,7 @@ void test_execve_load_keeps_a_read_failure(void);
 void test_execve_image_check_answers_for_the_parent(void);
 void test_execve_interpreter_says_why(void);
 void test_execve_load_says_nomem_on_a_refused_vma(void);
+void test_execve_policy_refusal_says_eacces(void);
 void test_exec_setup_says_nomem_on_a_refused_vma(void);
 void test_exec_native_rejects_dynamic_linux(void);
 void test_exec_load_failure_leaves_phenotype(void);    // Design D Leg B

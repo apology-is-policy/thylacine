@@ -1624,14 +1624,49 @@ void test_execve_load_says_nomem_on_a_refused_vma(void) {
     struct Burrow *b = burrow_create_anon(PAGE_SIZE, false);
     TEST_ASSERT(b != NULL, "burrow_create_anon");
     u64 va = 0x10000000ull;
-    TEST_EXPECT_EQ(burrow_map(p, b, va, PAGE_SIZE, VMA_PROT_READ | VMA_PROT_WRITE | VMA_PROT_EXEC), -1,
-                   "W+X is the caller's doing, whatever the slab holds");
+    u32 wx = VMA_PROT_READ | VMA_PROT_WRITE | VMA_PROT_EXEC;
+    int wx_open = burrow_map(p, b, va, PAGE_SIZE, wx);
     vma_refuse_alloc_for_test(true);
+    int wx_refusing = burrow_map(p, b, va, PAGE_SIZE, wx);
     int map_refused = burrow_map(p, b, va, PAGE_SIZE, VMA_PROT_READ);
     vma_refuse_alloc_for_test(false);
-    TEST_EXPECT_EQ(map_refused, -(int)T_E_NOMEM, "a map the slab refused says so");
     burrow_unref(b);
     drop_proc(p);
+    TEST_EXPECT_EQ(wx_open, -1, "W+X is the caller's doing");
+    TEST_EXPECT_EQ(wx_refusing, -1, "W+X is the caller's doing, with the slab refusing too");
+    TEST_EXPECT_EQ(map_refused, -(int)T_E_NOMEM, "a map the slab refused says so");
+}
+
+// A well-formed image the kernel refuses by policy may not run, which is not the same as being
+// no image. Each leg is one field from a control that loads, and the program's and the
+// interpreter's read alike.
+void test_execve_policy_refusal_says_eacces(void) {
+    struct Elf64_Phdr *ph = (struct Elf64_Phdr *)(g_elf_blob + sizeof(struct Elf64_Ehdr));
+
+    size_t size = nx_good();
+    ph[1].p_flags = PF_R | PF_W | PF_X;
+    int wx = nx_load(NULL, size, NULL, 0, NULL, 0, 0);
+    int wx_look = nx_check(size);
+
+    size = nx_good();
+    ph[1].p_type = PT_GNU_STACK;
+    ph[1].p_flags = PF_R | PF_W;
+    int nx_stack = nx_load(NULL, size, NULL, 0, NULL, 0, 0);
+    int nx_stack_look = nx_check(size);
+    ph[1].p_flags = PF_R | PF_W | PF_X;
+    int x_stack = nx_load(NULL, size, NULL, 0, NULL, 0, 0);
+    int x_stack_look = nx_check(size);
+
+    size = nx_dynamic("/bin/exec-wx");
+    int interp_wx = nx_load(current_thread()->proc, size, "prog", 4, NULL, 0, 0);
+
+    TEST_EXPECT_EQ(wx, -(int)T_E_ACCES, "a W+X segment: EACCES");
+    TEST_EXPECT_EQ(wx_look, -(int)T_E_ACCES, "the parent's look, a W+X segment: EACCES");
+    TEST_EXPECT_EQ(nx_stack, 0, "CONTROL: a stack that does not execute loads");
+    TEST_EXPECT_EQ(nx_stack_look, 0, "CONTROL: and passes the parent's look");
+    TEST_EXPECT_EQ(x_stack, -(int)T_E_ACCES, "an executable stack: EACCES");
+    TEST_EXPECT_EQ(x_stack_look, -(int)T_E_ACCES, "the parent's look, an executable stack: EACCES");
+    TEST_EXPECT_EQ(interp_wx, -(int)T_E_ACCES, "an interpreter the rule refuses: EACCES");
 }
 
 // The boot blob's path says the same. Its first Vma is a segment's, so that map meets the

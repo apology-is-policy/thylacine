@@ -508,6 +508,18 @@ PY
     chmod 0755 "$1"
 }
 
+# A well-formed header I-12 refuses: one PT_LOAD, writable and executable.
+elf_wx() {   # <out>
+    python3 - "$1" <<'PY'
+import struct, sys
+ident = b'\x7fELF\x02\x01\x01' + bytes(9)
+ehdr = ident + struct.pack('<HHIQQQIHHHHHH', 2, 183, 1, 0x400078, 64, 0, 0, 64, 56, 1, 0, 0, 0)
+phdr = struct.pack('<IIQQQQQQ', 1, 7, 0, 0x400000, 0x400000, 120, 120, 0x1000)
+open(sys.argv[1], 'wb').write(ehdr + phdr)
+PY
+    chmod 0755 "$1"
+}
+
 build_ramfs() {
     local ramfs_src="$BUILD_DIR/ramfs-src"
     local ramfs_out="$BUILD_DIR/ramfs.cpio"
@@ -573,6 +585,7 @@ EOF
     printf 'echo hi\n' > "$ramfs_bin/exec-notelf"
     : > "$ramfs_bin/exec-empty"
     chmod 0755 "$ramfs_bin/exec-notelf" "$ramfs_bin/exec-empty"
+    elf_wx "$ramfs_bin/exec-wx"
     # U-6e-a: the `source` builtin's read fixture (/u-builtin-test sources
     # this and asserts the assignment + fn registration persist into the
     # caller's Env).
@@ -1399,6 +1412,8 @@ VIVEOF
         chmod 0755 "$hb/rootfs/pheno-notelf" "$hb/rootfs/pheno-empty"
         # L373: a program that is fine, and whose interpreter is one of those.
         elf_with_interp "$hb/rootfs/pheno-badinterp" /pheno-notelf
+        # L374: an image I-12 refuses, which is no reason to run it as a script.
+        elf_wx "$hb/rootfs/pheno-wx"
         for leaf in null zero full random urandom tty; do
             : > "$hb/rootfs/dev/$leaf"
             chmod 0666 "$hb/rootfs/dev/$leaf"

@@ -316,8 +316,8 @@ static size_t seg_file_pages(const struct seg_geom *g, u64 filesz) {
 //      (held by the VMA) keeps the BURROW alive until proc_free's
 //      vma_drain.
 //
-// Returns 0 on success, -1 on failure (alignment violation, SLUB OOM,
-// vma_insert overlap).
+// Returns 0 on success, -T_E_NOMEM for a Vma the slab refused, -1 otherwise (an
+// alignment violation, a vma_insert overlap).
 static int exec_map_segment(struct AddrSpace *as, bool exempt, const void *blob,
                             const struct elf_load_segment *seg) {
     // #149: map from the page-aligned FLOOR of vaddr, carrying the intra-page
@@ -1348,6 +1348,12 @@ static int exec_load_body(struct AddrSpace *as, bool exempt, struct Proc *nsp,
 // its interpreter is the child's load to resolve, and so does one whose segments the
 // mapper would refuse. For those the spawn reads a pid and the child exits. The
 // child's own load decides: a file can change after this.
+// I-12 and the NX rule refuse an image that is well formed and would run elsewhere: it
+// may not run, which is not the same as being no image, and a shell runs ENOEXEC as a script.
+static bool exec_refused_by_policy(int r) {
+    return r == ELF_LOAD_RWX_REJECTED || r == ELF_LOAD_EXEC_STACK;
+}
+
 int exec_image_check(struct Spoor *exe, size_t exe_size) {
     if (!exe || !exe->dev || !exe->dev->read) return -(int)T_E_ACCES;
     size_t got = 0;
@@ -1358,7 +1364,7 @@ int exec_image_check(struct Spoor *exe, size_t exe_size) {
     int r = elf_load(hdr, exe_size, &img);
     kfree(hdr);
     if (r == ELF_LOAD_OK || r == ELF_LOAD_HAS_INTERP) return 0;
-    return -(int)T_E_NOEXEC;
+    return exec_refused_by_policy(r) ? -(int)T_E_ACCES : -(int)T_E_NOEXEC;
 }
 
 int exec_load_into(struct AddrSpace *as, bool exempt, struct Proc *nsp,
@@ -1563,6 +1569,7 @@ static int exec_load_body(struct AddrSpace *as, bool exempt, struct Proc *nsp,
         // nothing at all.
         exec_report_fail("elf_load refused this binary -- negated ELF_LOAD code",
                          (u64)(-r));
+        if (exec_refused_by_policy(r)) return -(int)T_E_ACCES;
         return r == ELF_LOAD_HAS_INTERP ? -interp_err : -no_image;
     }
 

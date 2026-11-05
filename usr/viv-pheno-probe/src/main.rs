@@ -3841,6 +3841,9 @@ unsafe fn run_linux() -> ! {
         const NEG_ELIBBAD: i64 = -80;
         leg!(rep, svc3(NR_EXECVE, b"/pheno-badinterp\0".as_ptr() as u64, argv_ok.as_ptr() as u64, 0)
             == NEG_ELIBBAD, b"L373\n");
+        // L374: operator vote 33. A W+X image may not run: not a script's reading.
+        leg!(rep, svc3(NR_EXECVE, b"/pheno-wx\0".as_ptr() as u64, argv_ok.as_ptr() as u64, 0)
+            == NEG_EACCES, b"L374\n");
     }
 
     // A NULL argv is argc == 0, the Shape-A frame. Linux itself tolerates it

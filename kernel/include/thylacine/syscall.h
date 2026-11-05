@@ -973,8 +973,9 @@ enum {
     // strings region; pouch's musl _start exposes argv to main).
     //
     // Returns the child's pid on success (positive), a -T_E_* on failure, the walk's
-    // own reason, -T_E_NOEXEC for a file that is no image and -T_E_LIBBAD for an
-    // interpreter that is none among them:
+    // own reason, -T_E_NOEXEC for a file that is no image and -T_E_ACCES for one I-12 or
+    // the NX rule refuses among them. An interpreter is the child's to load, so one that
+    // is missing or no image reads a pid and a child that exits. The failures:
     //   - req_va outside the user-VA bound / unmapped at struct-copy time
     //   - any field outside its documented bounds (name_len, argv_data_len,
     //     argc, fd_count, perm_flags, cap_mask — same as the legacy

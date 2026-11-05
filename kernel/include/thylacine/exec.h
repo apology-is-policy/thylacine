@@ -512,9 +512,10 @@ void exec_interp_argv_refuse_for_test(bool on);
 struct Spoor *exec_resolve_interp(struct Proc *p, const char *name, size_t name_len,
                                   size_t *size_out, int *errp);
 
-// exec_image_check -- is this a file a child could load? 0 if so; -T_E_NOEXEC if it is
-// not an image; a failed read's -errno or -T_E_NOMEM, which say nothing about the file.
-// BORROWS exe. A dynamic image passes: its interpreter is the load's to resolve.
+// exec_image_check -- is this a file a child could load? 0 if so, including an image with a
+// PT_INTERP, whose interpreter is the load's to resolve. -T_E_NOEXEC if it is not an image;
+// -T_E_ACCES if it may not run: no reader, or I-12 or the NX rule refuses it; a failed read's
+// -errno or -T_E_NOMEM, which say nothing about the file. BORROWS exe.
 int exec_image_check(struct Spoor *exe, size_t exe_size);
 
 struct Spoor *exec_resolve_from_namespace(struct Proc *p, const char *name,
