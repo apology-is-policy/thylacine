@@ -22,6 +22,25 @@ needed the operator.
 
 
 ---
+## 2026-11-05 (corona): round 3 compiles at last, the Pi's boot limit was a crash dump, and the SAK fails behind a deep queue
+
+Stamped 2026-11-05T19:09:13Z. Nothing pushed. Tips: corona/vote50 616e8cf35, corona/i32 138896e56, corona/mm1c 732342b63, corona/main-merge 829c8cfac.
+
+**Round 3 had never compiled.** Its first build on the Pi failed twice in lictor: a second `fenced_in_flight` beside the one Gpu already had, and a tuple field of the wrong width (fixed 3fda3bf33). It then booted green on HVF: ls-graphical-sak-dead's twelve lever shots and ls-graphical-keys-overrun, suite 2331/2331. By hand, an unsigned `may_have_dropped` reds `a_device_past_what_was_published_had_nothing_left`.
+
+**corona/i32's mutants are all in.** The last 13 kernel and ptyfs rows discriminated in env at 138896e56, 17:32-18:44Z. Two first refused to compile: their edit left `canonical` unused under -Werror, and the harness reported it as NOT-RUN, not as red. With the earlier nine and ptyfs's host rows, every row has run.
+
+**What V3D said about vote 50.** With round 3's chains= line, a chord behind one client chain came up with chains=1 and took_ms 266-273, with no stall. So the trusted paint does wait behind a client's work on the host FIFO, and the fix's gate is what lets it through. Behind `chain-hold 120 deep`, all six chords failed at the kernel's 5 s deadline with the session's glass unchanged (ls-q1-backlog, one-off). That is the backlog vote's premise, now measured: an unprivileged client with a deep enough queue makes the SAK fail on this backend (OPEN-BUGS, vote Q1). Keys typed behind a client are lost even with the 64-deep ring: 6 of 9 lines whole on the first V3D run, 4 of 7 on round 3's image. Lictor drains the ring once per serve pass, a 500 ms stall holds a pass for about 600 ms, and at the test's 30 ms a character 64 events fill in that time. A person's pace is safe by arithmetic, which ls-q2-person is measuring. The fix is a design fork: an input thread, as plan9port's `_ioproc`, Xorg's input thread and Mutter's since GNOME 40 all do (vote Q2, sources in the draft).
+
+**The chain scenario was wrong about QEMU.** Its pointer leg required the cursor lane to stall behind a readback. On virgl a move is refused by the engine's stall, never its own lane's, since QEMU runs the cursor queue apart from GL work. Corrected leg written and run against the scripted guest, 31 rows, not yet in the tree (the Pi line reads it).
+
+**The no-login was a crash dump.** Stamped boots on the Pi reached login 178-184 s after the runner started, against a 180 s limit. A line-count watcher showed where: about 150 s went to printing go-threads' deliberate Go runtime throw, 300 goroutine stacks, some 440 KB, echoed whole by joey. GOTRACEBACK cannot shorten a runtime throw (the fork's runtime1.go). Joey now echoes only the 2048 bytes its check reads (829c8cfac, unbooted). Why that dump prints at about 3 KB/s is UNEXPLAINED; an experiment timing expect's own consumption of it is written and runs when the Pi is idle. My earlier guess at the link drop was wrong, as the journal's last entry half-suspected: the run's output went to a file, not the ssh pipe.
+
+**My own mistakes.** A bare `cd` moved the session's directory once, restored at once. A watcher I wrote looked for `.attempt1.log`, which exists only after a failure, so the first login times were never taken. The pace lever's first commit lacked `import os`; a fake QMP socket caught it before any run.
+
+**Decisions from the operator:** none. The vote batch grew: Q1 and Q2 now carry V3D numbers and Q2 an input-thread option.
+
+---
 ## 2026-11-05 (corona): the Pi disagrees with an audit, and an old leak surfaces
 
 Stamped 2026-11-05T16:24:06Z. Nothing here landed or was pushed. Tips: corona/vote50 b635d937a, corona/i32 138896e56, corona/mm1c 73602685b, GitHub b2d9c274a.
