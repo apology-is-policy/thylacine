@@ -12,6 +12,7 @@ code:
   - usr/lictor/src/backend/gpu.rs
   - usr/lictor/src/backend/gpu/cursor.rs
   - usr/lictor/src/cursor_queue.rs
+  - usr/lictor/src/eventq.rs
   - usr/lictor/src/backend/import.rs
   - usr/lictor/src/backend/input.rs
   - usr/lictor/src/backend/mod.rs
@@ -38,6 +39,8 @@ code:
   - usr/lictor/examples/render-preview.rs
   - tools/bake-lictor.py
   - tools/interactive/ls-graphical-sak.exp
+  - tools/interactive/ls-graphical-keys-overrun.exp
+  - tools/interactive/ls-graphical-keys-behind.exp
   - tools/interactive/ls-graphical-sak-states.exp
   - tools/interactive/ls-graphical-sak-recover.exp
   - tools/interactive/ls-graphical-sak-dead.exp
@@ -248,7 +251,19 @@ Physical Ctrl-Alt-F10 (with Ctrl-Alt-Delete retained for compatibility)
 starts a kernel generation (the kernel scans the chord; [[abi-trusted-seat]]). Normal hardware requests
 park while the service waits out the synchronous work and the cursor queue, excludes every advertised
 scanout and selects private, non-shareable trusted backing. Held keys and buttons
-must be released before Corvus can receive input. Operation 65 admits only
+must be released before Corvus can receive input, and the kernel refuses RESTORED
+while its own table shows a key down. Both read the device's reports, and a device
+with no room for a report drops it whole and tells nobody, so a release can go
+missing behind a serve loop stopped in a synchronous wait. The device cannot be asked
+what is down. So the eventq is as deep as QEMU offers and one page holds (`eventq.rs`,
+64 against 16 before), and when a drain finds less than a report's worth free, every
+key this side holds is released through the normal path, to the kernel and the
+compositor alike. Only the device consumes between recycles, so that count is the
+least it had since the last drain. A key still down loses one press; a release that
+never came would park the seat on every chord until that key was pressed again. This
+recovers the seat, not the keystrokes: a report the device dropped is gone
+(`ls-graphical-keys-overrun`, and `ls-graphical-keys-behind` for a real client's
+queue). Operation 65 admits only
 standard normal pointer shapes, scale and position from the authenticated
 compositor. Private cursor DMA never enters the normal object ledger. Before
 trusted scanout every cursor plane receives a transparent image followed by a

@@ -17,6 +17,7 @@ pub mod limits;
 pub mod quiescence;
 pub mod fence;
 pub mod cursor_queue;
+pub mod eventq;
 #[cfg(feature = "backend")]
 pub mod backend;
 pub mod gpu_api;

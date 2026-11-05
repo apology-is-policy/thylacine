@@ -52,6 +52,8 @@ impl Driver for Lictor {
         let mut witnessed_park = 0;
         loop {
             self.seat.input(&mut self.inputs);
+            #[cfg(feature = "test-mode")]
+            if core::mem::take(&mut self.seat.test_blind) { self.device.test_blind_loop(); }
             self.device.reap();
             self.seat.step(&mut self.device, &mut self.screen, &mut self.inputs);
             for conn in &mut conns {

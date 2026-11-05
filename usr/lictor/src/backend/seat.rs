@@ -50,7 +50,13 @@ pub struct Seat {
     /// stall is the same takeover.
     #[cfg(feature = "test-mode")]
     test_shot_generation: Option<u64>,
+    /// The key that stops the serve loop was pressed; the armed lever decides.
+    #[cfg(feature = "test-mode")]
+    pub test_blind: bool,
 }
+/// The key that stops the serve loop under the armed lever: F8.
+#[cfg(feature = "test-mode")]
+const TEST_BLIND_KEY: u16 = 66;
 /// How long the failure notice stays up before normal output returns.
 const FAILURE_NOTICE_MS: u128 = 1500;
 impl Seat {
@@ -63,34 +69,22 @@ impl Seat {
         let mut lost = false;
         for input in inputs.iter_mut() {
             let mut events: Vec<RawInputEvent> = Vec::new();
-            input.device.drain(|event| events.push(event));
-            for event in events {
-                if event.etype == EV_KEY && (event.code as usize) < input.held.len() {
-                    input.held[event.code as usize] = event.value != 0;
+            let overran = input.device.drain(|event| events.push(event));
+            for event in events { self.deliver(input, event, &mut lost); }
+            // A release may be among what the device dropped, and it cannot be asked
+            // what is down. A release of a key still down costs one press. A release that
+            // never comes parks the seat: this side withholds its ACK and the kernel its
+            // restore, on every chord until that key is pressed again.
+            if overran {
+                let mut released = 0;
+                for code in 0..input.held.len() {
+                    if input.held[code] {
+                        self.deliver(input, RawInputEvent { etype: EV_KEY, code: code as u16, value: 0 }, &mut lost);
+                        released += 1;
+                    }
                 }
-                if input.keyboard && event.etype == EV_KEY && event.code < 256 {
-                    self.mods.update(event.code, event.value != 0);
-                    let mut m = ep::Message::default();
-                    m.code = event.code as u32; m.value = event.value;
-                    if event.value == 1 {
-                        if let Some(ch) = char::from_u32(keymap::resolve(event.code, self.mods.mask())) {
-                            if ch != '\0' { m.length = ch.encode_utf8(&mut m.data[..4]).len() as u32; }
-                        }
-                    }
-                    if ep::call(ep::INPUT, &mut m).is_err() { self.phase = 4; lost = true; }
-                    else { self.adopt(&m); }
-                }
-                if self.phase == 0 && self.withheld {
-                    if !core::mem::replace(&mut self.withheld_said, true) {
-                        super::diagnostic("lictor: input withheld from the compositor (display lost in a trusted episode)\n");
-                    }
-                } else if self.phase == 0 {
-                    if input.events.len() < 256 { input.events.push((event.etype, event.code, event.value)); }
-                    else {
-                        // Losing a release could stick a key. Drop the batch
-                        // and report SYN_DROPPED, which forces an input reset.
-                        input.events.clear(); input.events.push((0, 3, 0));
-                    }
+                if released != 0 {
+                    super::diagnostic(&alloc::format!("lictor: input ring overran, {} held keys released\n", released));
                 }
             }
         }
@@ -100,6 +94,37 @@ impl Seat {
             for input in inputs {
                 input.events.clear();
                 if lost && !self.withheld { input.events.push((0, 3, 0)); }
+            }
+        }
+    }
+    fn deliver(&mut self, input: &mut Input, event: RawInputEvent, lost: &mut bool) {
+        #[cfg(feature = "test-mode")]
+        if event.etype == EV_KEY && event.code == TEST_BLIND_KEY && event.value == 1 { self.test_blind = true; }
+        if event.etype == EV_KEY && (event.code as usize) < input.held.len() {
+            input.held[event.code as usize] = event.value != 0;
+        }
+        if input.keyboard && event.etype == EV_KEY && event.code < 256 {
+            self.mods.update(event.code, event.value != 0);
+            let mut m = ep::Message::default();
+            m.code = event.code as u32; m.value = event.value;
+            if event.value == 1 {
+                if let Some(ch) = char::from_u32(keymap::resolve(event.code, self.mods.mask())) {
+                    if ch != '\0' { m.length = ch.encode_utf8(&mut m.data[..4]).len() as u32; }
+                }
+            }
+            if ep::call(ep::INPUT, &mut m).is_err() { self.phase = 4; *lost = true; }
+            else { self.adopt(&m); }
+        }
+        if self.phase == 0 && self.withheld {
+            if !core::mem::replace(&mut self.withheld_said, true) {
+                super::diagnostic("lictor: input withheld from the compositor (display lost in a trusted episode)\n");
+            }
+        } else if self.phase == 0 {
+            if input.events.len() < 256 { input.events.push((event.etype, event.code, event.value)); }
+            else {
+                // Losing a release could stick a key. Drop the batch
+                // and report SYN_DROPPED, which forces an input reset.
+                input.events.clear(); input.events.push((0, 3, 0));
             }
         }
     }

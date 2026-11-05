@@ -19,6 +19,8 @@ struct Backing { resource: u32, _pin: Pin }
 const TEST_LATCH_SIZE: (u32, u32) = (97, 89);
 #[cfg(feature = "test-mode")]
 const TEST_LATCH_TARGETS: usize = 16;
+#[cfg(feature = "test-mode")]
+const TEST_BLIND_MS: u64 = 5000;
 struct Retiring { resource: u32, ticket: Retirement, done: bool }
 pub struct Device {
     // Drop order matters: reset the GPU before releasing any imported pins.
@@ -42,6 +44,8 @@ pub struct Device {
     /// Seat shots left, one per trusted takeover (`test_latch_seat_shot`).
     #[cfg(feature = "test-mode")]
     test_seat_shots: u8,
+    #[cfg(feature = "test-mode")]
+    test_blind_armed: bool,
     /// Stall shots left for the compositor to aim (`Request::TestStallNext`).
     #[cfg(feature = "test-mode")]
     test_stall_shots: u8,
@@ -79,6 +83,7 @@ impl Device {
             refused_retirements: 0,
             #[cfg(feature = "test-mode")] test_latch_shots: 0,
             #[cfg(feature = "test-mode")] test_seat_shots: 0,
+            #[cfg(feature = "test-mode")] test_blind_armed: false,
             #[cfg(feature = "test-mode")] test_stall_shots: 0,
             #[cfg(feature = "test-mode")] test_latch_targets: Vec::new(),
             #[cfg(feature = "test-mode")] test_latch_fired: Vec::new() })
@@ -192,6 +197,15 @@ impl Device {
             }
             _ => {}
         }
+    }
+    /// The same lever's input half: stops the serve loop as a synchronous wait stops
+    /// it, with the rings undrained, and asks the device for nothing.
+    #[cfg(feature = "test-mode")]
+    pub fn test_blind_loop(&self) {
+        if !self.test_blind_armed { return; }
+        super::diagnostic("lictor: serve loop stopped (INJECTED by test-latch-dead)\n");
+        let _ = libthyla_rs::time::sleep(core::time::Duration::from_millis(TEST_BLIND_MS));
+        super::diagnostic("lictor: serve loop resumed\n");
     }
     /// The same lever's seat half, one shot per trusted takeover in this
     /// order, so one boot walks every way an episode's return can go wrong.
@@ -607,6 +621,7 @@ impl Device {
             Request::TestArmLatch => {
                 #[cfg(feature = "test-mode")] {
                     self.test_latch_shots = 2; self.test_seat_shots = 9; self.test_stall_shots = 3;
+                    self.test_blind_armed = true;
                     ().put(&mut out);
                 }
                 #[cfg(not(feature = "test-mode"))] { return Err(Error::BadField); }
