@@ -32,7 +32,7 @@ use libthyla_rs::account::{
     ACCOUNT_VERSION, ALLOCATE_FUNDED, CLASS_ALLOC, CLASS_DEVICE, CLASS_META, CLASS_RETAIN,
     VOUCHER_CREATE,
 };
-use libthyla_rs::process::Command;
+use libthyla_rs::process::{Command, Stdio};
 use libthyla_rs::{
     t_account, t_account_child, t_account_query, t_account_query_of, t_account_set_limits,
     t_burrow_attach, t_burrow_detach, t_burrow_protect, t_burrow_reserve, t_close, t_execve,
@@ -826,11 +826,15 @@ fn account_control_legs(pool: u64) -> i64 {
     }
     ok("account-spawn-under");
 
-    // Behind a cwd tail and an env tail, where only the sum of the lower tails finds it.
+    // Behind a cwd tail and an env tail, where only the sum of the lower tails finds it. Joey
+    // starts this program with no stdio, so a Command has nothing to inherit: it pipes all three.
     let mut cmd = Command::new("/bin/capacity-probe");
     cmd.arg("account-child")
         .arg(alloc::format!("{}", h))
         .arg(alloc::format!("{}", made))
+        .stdin(Stdio::Piped)
+        .stdout(Stdio::Piped)
+        .stderr(Stdio::Piped)
         .current_dir("/")
         .env_clear()
         .env("CAPACITY_PROBE_LEG", "tails")
