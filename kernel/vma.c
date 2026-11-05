@@ -43,7 +43,7 @@ void vma_init(void) {
     g_vma_cache = kmem_cache_create("vma",
                                     sizeof(struct Vma),
                                     8,
-                                    KMEM_CACHE_PANIC_ON_FAIL);
+                                    0);
     if (!g_vma_cache) extinction("kmem_cache_create(vma) returned NULL");
 }
 

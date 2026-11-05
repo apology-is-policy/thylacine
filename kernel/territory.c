@@ -364,12 +364,12 @@ void territory_init(void) {
     g_pgrp_cache = kmem_cache_create("territory",
                                      sizeof(struct Territory),
                                      8,
-                                     KMEM_CACHE_PANIC_ON_FAIL);
+                                     0);
     if (!g_pgrp_cache) {
         extinction("kmem_cache_create(territory) returned NULL");
     }
-    // No KMEM_CACHE_PANIC_ON_FAIL: a mount whose entry cannot be allocated is
-    // refused (ENOMEM), and a spawn whose copy cannot be is too.
+    // A mount whose entry cannot be allocated is refused (ENOMEM), and a spawn
+    // whose copy cannot be is too.
     g_mount_cache = kmem_cache_create("territory_mount", sizeof(struct PgrpMount), 8, 0);
     g_mhead_cache = kmem_cache_create("territory_mhead", sizeof(struct PgrpMhead), 8, 0);
     if (!g_mount_cache || !g_mhead_cache) {

@@ -254,7 +254,7 @@ void proc_init(void) {
     g_proc_cache = kmem_cache_create("proc",
                                      sizeof(struct Proc),
                                      8,
-                                     KMEM_CACHE_PANIC_ON_FAIL);
+                                     0);
     if (!g_proc_cache) {
         extinction("kmem_cache_create(proc) returned NULL");
     }

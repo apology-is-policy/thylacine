@@ -28,6 +28,9 @@
 #include <thylacine/extinction.h>
 #include <thylacine/page.h>
 #include <thylacine/spinlock.h>
+#ifdef KERNEL_TESTS
+#include <thylacine/thread.h>
+#endif
 #include <thylacine/types.h>
 
 // ---------------------------------------------------------------------------
@@ -231,17 +234,46 @@ static void *cache_alloc_locked(struct kmem_cache *c) {
     return obj;
 }
 
+#ifdef KERNEL_TESTS
+static const char    *g_refuse_name;
+static struct Thread *g_refuse_thread;
+static u32            g_refuse_skip;
+static bool           g_refuse_fired;
+
+void kmem_cache_test_refuse(const char *name, u32 skip) {
+    g_refuse_thread = current_thread();
+    g_refuse_skip = skip;
+    g_refuse_fired = false;
+    __atomic_store_n(&g_refuse_name, name, __ATOMIC_RELEASE);
+}
+
+bool kmem_cache_test_refused(void) {
+    __atomic_store_n(&g_refuse_name, NULL, __ATOMIC_RELEASE);
+    return g_refuse_fired;
+}
+
+static bool refuse_this(const struct kmem_cache *c) {
+    const char *name = __atomic_load_n(&g_refuse_name, __ATOMIC_ACQUIRE);
+    if (!name || current_thread() != g_refuse_thread) return false;
+    const char *a = name, *b = c->name;
+    while (*a && *a == *b) { a++; b++; }
+    if (*a != *b) return false;
+    if (g_refuse_skip) { g_refuse_skip--; return false; }
+    g_refuse_fired = true;
+    __atomic_store_n(&g_refuse_name, NULL, __ATOMIC_RELEASE);
+    return true;
+}
+#endif
+
 void *kmem_cache_alloc(struct kmem_cache *c, unsigned flags) {
+#ifdef KERNEL_TESTS
+    if (refuse_this(c)) return NULL;
+#endif
     irq_state_t s = spin_lock_irqsave(&c->lock);
     void *obj = cache_alloc_locked(c);
     spin_unlock_irqrestore(&c->lock, s);
 
-    if (!obj) {
-        if (c->flags & KMEM_CACHE_PANIC_ON_FAIL) {
-            extinction("kmem_cache_alloc: out of memory");
-        }
-        return NULL;
-    }
+    if (!obj) return NULL;
 
     if (flags & KP_ZERO) {
         u8 *q = (u8 *)obj;

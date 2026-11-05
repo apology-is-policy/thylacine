@@ -339,7 +339,7 @@ void thread_init(void) {
     g_thread_cache = kmem_cache_create("thread",
                                        sizeof(struct Thread),
                                        _Alignof(struct Thread),
-                                       KMEM_CACHE_PANIC_ON_FAIL);
+                                       0);
     if (!g_thread_cache) extinction("kmem_cache_create(thread) returned NULL");
 
     g_kthread = kmem_cache_alloc(g_thread_cache, KP_ZERO);
