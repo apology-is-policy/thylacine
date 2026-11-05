@@ -24,13 +24,11 @@
 bool phys_init(void);
 
 // Diagnostic accessors used by the boot banner.
+#define DIRECTMAP_USABLE_RAM_MAX (8ull << 30)   // what the direct map reaches: 8 GiB
+
 u64 phys_total_pages(void);     // total pages in the zone
 u64 phys_free_pages(void);      // currently free pages (across all orders)
 u64 phys_reserved_pages(void);  // total - free, computed at init
-
-// #808: page table pages consumed by the boot-time direct-map page-map
-// (mmu_pagemap_directmap, driven from phys_init). Boot-banner diagnostic.
-u64 phys_directmap_table_pages(void);
 
 #ifdef KERNEL_TESTS
 // Buddy zone bounds [base, end) after the direct-map 8 GiB-reach cap.
@@ -72,11 +70,15 @@ void phys_zone_bounds(paddr_t *base, paddr_t *end);
 // TCB's measured ceiling with headroom: the Larder caches at most 128 MiB
 // (LARDER_PAGE_ENTRIES), the DMA envelope 64 MiB, the slabs, the L0 root (one
 // per address space -- the child axis), kproc's kernel stacks plus at most
-// THREAD_KSTACK_CACHE_MAX stacks cached between threads (1 MiB), DMA buffers
-// (the warden's allowance, I-34), the direct map's tables. A user Proc's
-// thread is NOT reserve memory: its kernel stack and slot are charged to the
-// pool (THREAD_POOL_PAGES, capacity_charge), so a thread bomb runs into the
-// pool's bound, never the reserve's (ARCH 7.3.5). Nor is the Image cache
+// THREAD_KSTACK_CACHE_MAX stacks cached between threads (512 KiB), DMA buffers
+// (the warden's allowance, I-34), the kernel stack range's L3 tables. A user
+// Proc's thread is NOT reserve memory: its kernel stack and slot are charged to
+// the pool (THREAD_POOL_PAGES, capacity_charge), so a thread bomb runs into the
+// pool's bound, never the reserve's (ARCH 7.3.5). What it leaves behind is one
+// table per 64 stacks, and a table is never freed, so the tables are bounded by
+// pool / (64 * THREAD_POOL_PAGES) pages, 1/320 of the pool, and stay until
+// reboot. The direct map asks the reserve for nothing: its tables are in the
+// image. Nor is the Image cache
 // reserve memory: a cached file's pages are user pages,
 // charged to the pool like every other, and they are what the pool reclaims
 // under pressure -- an idle image (cached, mapped by no one) is stripped of

@@ -41,7 +41,7 @@ as atomic. That is why the redesign is gated by a *second* model
   cross-thread `pending_release_lock` handoff, work-stealing, the pinned
   in-tree idle, the tickless idle park, and secondary bring-up.
 - [[sub-kernel-rendez]] — the wait/wake primitive: the single-waiter
-  Rendez, `sleep`/`tsleep`/`wakeup`, the global timer-wait list, and the
+  Rendez, `sleep`/`tsleep`/`wakeup`, the per-CPU timer bases, and the
   death and stop detours that every blocking site inherits.
 
 ## Cross-cutting

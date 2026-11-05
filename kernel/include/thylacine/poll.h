@@ -64,7 +64,7 @@
 //   `poll_waiter_list_unregister(pw)` takes ONLY the list lock — no
 //   object lock — and is O(1): the list is doubly linked, so a poller's
 //   re-arm costs it nothing per hook of anyone else's. Lock order globally:
-//     object → list → g_timerwait → rendez → cpu_sched
+//     object → list → rendez → cpu_sched
 //   The list lock is taken IRQSAVE by every operation (register,
 //   unregister, wake, empty). No IRQ handler enters it, but it nests
 //   under object locks that IRQ handlers DO take (`g_cons.lock` and
@@ -74,7 +74,7 @@
 //   an IRQ spinning on the object lock another CPU holds while it spins
 //   on this list lock (B-0 audit round 4 F3; until then this lock was
 //   plain). The wake's inner `wakeup(pw->rendez)` takes
-//   `g_timerwait.lock` (irqsave) then the `rendez.lock` then the per-CPU
+//   the `rendez.lock` (irqsave) then the per-CPU
 //   `cs->lock` (in ready()). Unregister takes only list, so no
 //   inversion. The hook stores a back-pointer `pw->list` set at register
 //   time so the kernel-side unregister sweep knows which list each hook

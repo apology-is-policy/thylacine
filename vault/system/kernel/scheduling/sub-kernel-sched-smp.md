@@ -290,7 +290,7 @@ re-entrancy guard is recorded here and nowhere in a Mechanism section
 | `g_cpu_alive[]` | `per_cpu_main` finished — the signal `smp_init` waits on |
 | `g_secondary_boot_stacks[]` | 7 × (4 KiB guard + 16 KiB usable), page-aligned |
 | `g_bootcpu_idle_stack` | the same shape, for cpu0's idle (#867) |
-| `g_exception_stacks[]` | RESERVED — unused at runtime under uniform EL1h |
+| `g_overflow_stacks[]` | 8 of the same shape: what a thread stack's overflow frame and the dump run on ([[sub-kernel-exception]]) |
 | `g_pac_keys[8]` | derived once by the primary, applied by every CPU |
 | `g_ipi_resched_count[]` | per-CPU IPI receive counter (observability) |
 | `g_secondary_preempt_enabled` | the #810 production gate |
@@ -387,6 +387,11 @@ a half-initialized CPU that reaches the idle loop is worse than no CPU.
   the placement IPI on a bare-volatile flag a peer can read stale-FALSE
   reintroduces up-to-backstop placement latency — the exact class #363
   closed. The comment at the site forbids it in words for this reason.
+- **An idle CPU covers its own timer base and no other.** Every other base
+  has its own CPU ([[sub-kernel-rendez]]). A secondary marks `tick_armed`
+  (`sched_mark_tick_armed`, right after `timer_arm_this_cpu` in `per_cpu_main`);
+  until then its sleepers link on cpu0's base and kick cpu0, so no deadline
+  sits on a base with no tick.
 - **The park's ordering is fixed**: announce, then `sched()`, then the
   re-check loop, then arm, then WFI. Any reordering breaks either the
   register-then-observe or the #363 guard.
@@ -411,10 +416,8 @@ a half-initialized CPU that reaches the idle loop is worse than no CPU.
 
 ## Caveats
 
-- `g_exception_stacks` is allocated and asserted but **unused at
-  runtime**: under uniform EL1h every exception frame is built on the
-  interrupted thread's own kernel stack. It is a pre-allocated landing
-  pad for a future dedicated overflow/SError stack.
+- Only the frame of a thread stack's overflow leaves that thread's stack: every other
+  exception frame is built on the interrupted thread's own kernel stack.
 - A spurious IPI is harmless by design — the handler is a counter bump —
   which is what lets every `idle_in_wfi` read be a relaxed hint.
 - The steal-invariant asserts in `pick_next` and `try_steal` are not

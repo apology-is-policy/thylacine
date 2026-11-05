@@ -176,10 +176,11 @@ static u64 sym_to_pa(const void *sym) {
 
 // Returns the "kernel stack overflow" extinction message NAMING the guard
 // region that contains `addr`, or NULL if `addr` is in no active guard.
-// Three flavors: the boot CPU's _boot_stack guard (start.S), the per-secondary
-// boot-stack guards (P5-secondary-stack-guard), and the current thread's
-// per-thread kstack guard (P3-Bca; lower THREAD_KSTACK_GUARD_SIZE mapped
-// no-access in the kernel direct map). F4 (SMP soundness sweep, 2026-05-31):
+// Four flavors: the boot CPU's _boot_stack guard (start.S), the per-secondary
+// boot-stack guards (P5-secondary-stack-guard), the overflow stacks' guards, and
+// the current thread's guard in the stack range, reached here only by a stray
+// pointer: a thread whose SP is in its guard never gets this far (vectors.S
+// el1h_sync). F4 (SMP soundness sweep, 2026-05-31):
 // the message NAMES the flavor so a fault is never misattributed -- a
 // secondary's (or current-thread's) wild-SP fault must not read as a
 // "_boot_stack" overflow, which is exactly what left the F-B early-boot
@@ -217,7 +218,14 @@ static const char *stack_guard_overflow_msg(u64 addr) {
             return "kernel stack overflow (bootcpu-idle guard)";
     }
 
-    // Current thread's per-thread kstack guard (direct-map KVA).
+    // The overflow stacks' guard pages: what the dump running on one overran.
+    for (unsigned c = 0; c < DTB_MAX_CPUS; c++) {
+        u64 og_va = (u64)(uintptr_t)&g_overflow_stacks[c].guard[0];
+        if (addr >= og_va && addr < og_va + SECONDARY_STACK_GUARD_SIZE)
+            return "kernel stack overflow (overflow-stack guard)";
+    }
+
+    // Current thread's guard, in the stack range.
     struct Thread *t = current_thread();
     if (t && t->magic == THREAD_MAGIC && t->kstack_base) {
         u64 b = (u64)(uintptr_t)t->kstack_base;

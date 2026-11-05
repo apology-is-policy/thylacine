@@ -6,10 +6,8 @@
 // initial Thread; exits transitions Proc to ZOMBIE; wait_pid reaps
 // zombie children.
 //
-// At v1.0 P2-D, only RFPROC is supported in rfork — territory, fd
-// table, address space, credentials, etc. land in subsequent P2 sub-
-// chunks. Multi-thread Procs and the Linux clone() flag translation
-// land at Phase 5+ with the syscall surface.
+// rfork takes RFPROC or RFPROC|RFMEM (ARCH 7.4). A thread is not an rfork:
+// see SYS_THREAD_SPAWN and vivarium's clone arms.
 //
 // Bootstrap order (kernel/main.c calls in this order):
 //   1. slub_init      — kmem_cache_create can allocate now
@@ -5237,7 +5235,7 @@ static _Alignas(16) const u8 g_fp_zero_area[FP_AREA_SIZE];
 // cannot be popped from under the waker. A RUNNING thread reads NULL and is
 // skipped (it reaches its own die-check); wakeup re-validates r->waiter under
 // r->lock, so one already woken is a no-op. Order: threads_lock -> wait_lock ->
-// (wakeup: g_timerwait.lock -> r->lock); only the owner writes
+// (wakeup: r->lock); only the owner writes
 // rendez_blocked_on.
 static void proc_death_wake_locked(struct Proc *p) {
     ASSERT_TL_HELD(p);
@@ -6281,7 +6279,7 @@ void proc_debug_resume(struct Proc *p) {
     // wait_lock is held across wakeup (Option A, ARCH 8.8.1): it pins the peer so
     // its debug_rendez cannot be resumed + reused under the waker. Lock order
     // g_proc_table_lock (caller-held) -> threads_lock -> wait_lock -> (wakeup)
-    // g_timerwait.lock -> r->lock; acyclic (only the owner WRITES
+    // r->lock; acyclic (only the owner WRITES
     // rendez_blocked_on).
     for (struct Thread *peer = p->threads; peer; peer = peer->next_in_proc) {
         irq_state_t ws = spin_lock_irqsave(&peer->wait_lock);

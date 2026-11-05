@@ -206,7 +206,7 @@ nothing.
 Lock order (verified acyclic, documented at the file head):
 `g_dev9p_poll_lock → c->lock` (the arm submit; the collector's flush),
 `g_dev9p_poll_lock → poll_list lock` (the collector's empty-check),
-`poll_list lock → g_timerwait → rendez → cpu_sched` (a walk's wakes, OUTSIDE
+`poll_list lock → rendez → cpu_sched` (a walk's wakes, OUTSIDE
 g_lock), `c->lock → rendez` (a completion's wake — leaf). No completion takes
 g_lock, so the edge from g_lock to c->lock cannot close a cycle. The registry
 lock is never held across a wakeup, a pump, a snapshot submit or an unref.

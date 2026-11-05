@@ -15,7 +15,7 @@ through `proc_threads_lock` / `proc_threads_unlock`, which mask IRQs first. It
 nests under [[lock-proc-table]] and above the wait/wake locks:
 
 ```
-g_proc_table_lock -> p->threads_lock -> wait_lock -> g_timerwait.lock -> r->lock -> cs->lock
+g_proc_table_lock -> p->threads_lock -> wait_lock -> a timer base's lock -> r->lock -> cs->lock
 p->threads_lock -> a torpor bucket's lock
 ```
 

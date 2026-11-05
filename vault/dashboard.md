@@ -79,6 +79,7 @@ Generated — do not edit between the markers (`quaestor render`).
 - [[seam-hwcap-boot-cpu-only]] (sub-kernel-boot-sequence, sub-kernel-alternatives)
 - [[seam-kaslr-link-va-unchecked]] (sub-kernel-kaslr, sub-kernel-boot-entry)
 - [[seam-kobj-handle-release]] (sub-stratum-bdev)
+- [[seam-kstack-va-predictable]] (sub-kernel-thread)
 - [[seam-larder-cacheable-proxy]] (sub-kernel-larder, sub-kernel-ninep-dev9p)
 - [[seam-larder-lazy-array-robustness]] (sub-kernel-larder)
 - [[seam-larder-loom-bypass]] (sub-kernel-larder)
@@ -119,19 +120,18 @@ Generated — do not edit between the markers (`quaestor render`).
 - [[seam-stratum-notify-peercred]] (sub-stratum-session, sub-stratum-server)
 - [[seam-tapestry-battery-unowned]] (sub-tapestryd)
 - [[seam-tickless-bare-metal]] (sub-kernel-sched-smp)
-- [[seam-timerwait-sharding]] (sub-kernel-rendez)
 - [[seam-torpor-cross-proc]] (sub-kernel-torpor)
 - [[seam-viv-tier2-frame]] (sub-kernel-syscall-abi, sub-kernel-vivarium)
 - [[seam-warp-prove-unowned]] (sub-tapestryd)
 
 ## Recent changes
 
+- 2026-11-05 [[chg-2026-11-05-c10-owed-readings]] — C10's owed readings: a witness for the vector's tag-bit test, and two sabotages read alone
+- 2026-11-04 [[chg-2026-11-04-c10-r1]] — Each kernel stack in a range of its own: round 1's fixes
 - 2026-11-04 [[chg-2026-11-04-c8a-r2]] — Torpor keyed on the space: round 2's fixes, and a model that can see K06
 - 2026-11-04 [[chg-2026-11-04-c8a-r3]] — Torpor keyed on the space: round 3's wording
 - 2026-11-04 [[chg-2026-11-04-libbad]] — T_E_LIBBAD: an interpreter at fault says so
 - 2026-11-04 [[chg-2026-11-04-noexec-r1]] — T_E_NOEXEC: round 1's fixes
 - 2026-11-04 [[chg-2026-11-04-noexec]] — T_E_NOEXEC: execve and the full spawn say a file is no image
 - 2026-11-04 [[chg-2026-11-04-pinned-wake]] — A pinned thread's wake goes to its home CPU, not the waker's
-- 2026-11-04 [[chg-2026-11-04-torpor-walks-go]] — The two torpor walks and the bucket-lock die check go
-- 2026-11-04 [[chg-2026-11-04-walk-errno-close]] — The walk errno close: rounds 1 and 2, the first boots, 32 sabotages
 <!-- generated:end -->

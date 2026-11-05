@@ -525,8 +525,8 @@ struct Proc {
     // #65 (invariant I-32): per-Proc resource-floor counters. A DoS bound,
     // NOT a privilege axis -- they cap a non-TCB Proc's resource use so a
     // fork/thread/memory bomb hits a clean limit instead of stressing the
-    // allocator toward the box-killing cliff. `thread_count` (above) is the
-    // third counter.
+    // allocator toward the box-killing cliff. `live_threads`, admitted against
+    // `thread_budget`, is the third counter.
     //
     // page_count -- moved to AddrSpace.page_count at LINEAGE L-1 (it counts the
     //   ADDRESS SPACE's pages, so sharing an address space must mean sharing one
@@ -964,7 +964,7 @@ struct Proc {
 
     // SQPOLL kernel threads this Proc has MINTED (SYS_LOOM_SETUP with
     // LOOM_SETUP_SQPOLL). They run under kproc (immortal, TCB-exempt), so
-    // nothing counted them -- and each pins a 32 KiB kernel stack, so the
+    // nothing counted them -- and each pins a kernel stack and its slot, so the
     // handle table was the only bound and the fid-lift audit (F1) showed a
     // non-TCB Proc could mint 4x its own thread cap's worth of unswappable
     // kstacks. They are this Proc's workers in every meaningful sense, so
@@ -2081,7 +2081,7 @@ void thread_exit_self(void);
 // LOCK CONTRACT (#811, C3): the caller MUST hold g_proc_table_lock and no
 // threads_lock. The claim, the stashes and the p->threads walk run inside
 // p->threads_lock, taken here; the walk then takes per-peer
-// wait_lock + (via wakeup) rendez/timerwait locks, all below it in the order.
+// wait_lock + (via wakeup) rendez lock, all below it in the order.
 //
 // gcpark-b: `sig` is the POSIX signal the termination records (notes.h
 // NOTE_SIG_*; 0 = none): every production caller is a kill-class termination
@@ -3120,7 +3120,7 @@ bool proc_intr_terminate_pending(const struct Proc *p);
 // g_proc_table_lock, or is a thread of p -- and holds no threads_lock.
 // The body is the #811 universal death-wake template: per-peer wait_lock ->
 // rendez_blocked_on -> wakeup, lock order threads_lock -> wait_lock ->
-// (wakeup: g_timerwait.lock -> r->lock). Deliberately NO
+// (wakeup: r->lock). Deliberately NO
 // smp_resched_others (the IRQ-from-EL0
 // tail evaluates only group_exit_msg, so an IPI cannot accelerate a RUNNING
 // thread's interrupt-death -- it reaches its next sync-from-EL0 tail

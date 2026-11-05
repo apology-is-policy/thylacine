@@ -36,6 +36,7 @@ Generated from note fields — do not edit between the markers
 | [[seam-queue-note-fatal-after-post-wakes-nobody]] | closed | sub-kernel-notes | fnd-thread-c4-r2-f1 | OPEN-BUGS 2026-11-02T11:37Z; owned by item 11c |
 | [[seam-scripture-invariant-mirror-drift]] | closed | inv-i32 | chg-2026-08-16-i32-scope-correction | unfiled -- yip to main 2026-08-16 |
 | [[seam-srv-registry-lifecycle]] | closed | sub-kernel-devsrv | chg-2026-05-19-srv-birth |  |
+| [[seam-timerwait-sharding]] | closed | sub-kernel-rendez | chg-2026-05-17-p5-tsleep | documented future optimization |
 | [[seam-torpor-lock-wake-spin]] | closed | sub-kernel-torpor | chg-2026-05-23-torpor | torpor-8 audit F2 (P2, documented) |
 | [[seam-torpor-reclaim-uaccess]] | closed | sub-kernel-torpor | chg-2026-07-04-torpor-lockfree | REVENANT R-5 F1 close; REVENANT section 9 |
 | [[seam-union-mount-walk]] | closed | sub-kernel-territory, sub-kernel-stalk | chg-2026-05-13-p5-attach-mount | unfiled |
@@ -76,6 +77,7 @@ Generated from note fields — do not edit between the markers
 | [[seam-hwcap-boot-cpu-only]] | open | sub-kernel-boot-sequence, sub-kernel-alternatives | chg-2026-08-02-boot-sweep |  |
 | [[seam-kaslr-link-va-unchecked]] | open | sub-kernel-kaslr, sub-kernel-boot-entry | chg-2026-08-02-boot-sweep | task #24 |
 | [[seam-kobj-handle-release]] | open | sub-stratum-bdev | chg-2026-08-02-stratum-sweep |  |
+| [[seam-kstack-va-predictable]] | open | sub-kernel-thread | fnd-c10-r1-f7 | OPEN-BUGS 2026-11-03T13:06Z |
 | [[seam-larder-cacheable-proxy]] | open | sub-kernel-larder, sub-kernel-ninep-dev9p | chg-2026-07-09-larder-l1e |  |
 | [[seam-larder-lazy-array-robustness]] | open | sub-kernel-larder | fnd-25-r1-f1 |  |
 | [[seam-larder-loom-bypass]] | open | sub-kernel-larder | fnd-l1f-r1-f2 |  |
@@ -116,7 +118,6 @@ Generated from note fields — do not edit between the markers
 | [[seam-stratum-notify-peercred]] | open | sub-stratum-session, sub-stratum-server | chg-2026-08-02-stratum-sweep |  |
 | [[seam-tapestry-battery-unowned]] | open | sub-tapestryd | chg-2026-09-02-h4b1-claim | H-4b-1 placement-claim doc pass, 2026-09-02 |
 | [[seam-tickless-bare-metal]] | open | sub-kernel-sched-smp | chg-2026-06-22-ti4-work-conservation | owed at Lazarus / RPi |
-| [[seam-timerwait-sharding]] | open | sub-kernel-rendez | chg-2026-05-17-p5-tsleep | documented future optimization |
 | [[seam-torpor-cross-proc]] | open | sub-kernel-torpor | chg-2026-05-23-torpor | POUCH-DESIGN section 7, Tier-2 burrows |
 | [[seam-viv-tier2-frame]] | open | sub-kernel-syscall-abi, sub-kernel-vivarium | chg-2026-09-22-arch81-scripture | ARCH 8.1 prerequisite |
 | [[seam-warp-prove-unowned]] | open | sub-tapestryd | chg-2026-08-19-v3a-ring | V-3a coherent-ring doc pass, 2026-08-19 |
