@@ -22,6 +22,53 @@ needed the operator.
 
 
 ---
+## 2026-11-05 -- vote 50 passes its witness and fails its audit (corona)
+
+Vote 50 says a client's chain must not deny the graphical SAK. I wrote the fix at
+935a44c10 and ran it both ways on the Pi, KVM and virgl: `SAK-POISON RED` at
+91060a580, green at 7365a656f (work/nov03-mm1/v50/). Then audit round 1, Opus on
+Opus, read from code: 0 P0, 2 P1, 3 P2, 2 P3, all open, whole report in
+audit_vote50_closed_list.md. Its premise holds: no guest route attaches the trusted
+image or binds a scanout. Its property does not.
+
+- **What my green could not see.** warp-abandon poisons a slot with nothing left on
+  the device, so nothing sat ahead of the paint. A real chain does sit ahead of it.
+  The paint is a fenced synchronous chain with a 500 ms deadline and no retry, and a
+  stall there fails the episode. The old gate drained any backlog under 5 s first, so
+  by the auditor's reading backlogs of about 0.6 to 5 s are now worse than before the
+  fix. Read, not yet run.
+- **A poisoned cursor queue (F2)** denies the SAK until reboot. Read, not booted.
+- **A storm that showed less than I hoped.** No bake was available (aux holds the mac
+  for its mutants), so I sent 40 chords over `warp-prove readback` on the image already
+  on the Pi, 07:40 to 07:44Z. No red. That is not evidence against F1: no chord landed
+  in a stall, and the throwaway took no reading of where each chord fell. The same log
+  does show synchronous commands missing the 500 ms deadline behind the client's draws
+  three times, retiring 241, 247 and 311 ms late, which is F1's premise on this host.
+- **A comment I copied without looking.** The poison scenario said warp-prove's READY
+  line goes to the pane. The green run's log has it on the serial at line 9938. I had
+  repeated that in the new client and built a witness around a broker line every 30 s.
+  Both are corrected at 04aaa7b3a. `takeover-ms` was also going through lc_step, which
+  writes only a steps file, so no run so far recorded it.
+
+The real witness is written, not booted: `warp-prove chain-hold` keeps the C-6 gate's
+queue on the device, and ls-graphical-sak-chain sends the chord just after that queue
+refills (be77c789e, 04aaa7b3a). The reading to test: red at the tip, green with Lictor's
+old gate, one variable away. Vote 50 stays off the join until the fix is voted, built
+and re-audited.
+
+MM-1c's first boot also went red, at 272baf26a: 2338/2338 kernel tests, then
+`capacity-probe: FAIL account-tails-spawn`. My first guess, the /bin path, had nothing
+behind it: debug-probe spawns from /bin at the same stage. The difference that does
+stand up is stdio. Joey starts capacity-probe with an empty fd list, the Command in
+that leg inherits 0 to 2 by default, and the kernel refuses to endow slots that name
+nothing. debug-probe pipes all three, and the passing raw-record control sends no fd
+list at all. d7150d2cd pipes them. That is a reading until its boot, which waits for
+the mac.
+
+No operator decision in this stretch. Three questions wait until I have no lease queued:
+whether a stall in the trusted paint counts as failure, whether seat commands must stay
+fenced, and what a cursor lane that never retires should do.
+
 ## 2026-11-05 -- the shell branch lands, and four scenarios that had not run (corona)
 
 ut-lang reached the join after its first boots, on the mac between 03:33Z and 06:43Z. **Default suite 2331/2331, and u-6-test's flows 10 and 11 pass on their first boot.** Each went red for its own reason: stack_base reading 0 fails flow 10's refusal, a recursive Operand drop and a 256 KiB reserve each end flow 11 with a segv at the guard page. The console-owner gate's three rows discriminate and the rebuild is byte-identical. ls-5's new Ctrl-C leg through recursion passes, and removing the call's poll times out at HOLO-RECUR after leg (D) passed.
