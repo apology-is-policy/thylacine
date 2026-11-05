@@ -84,6 +84,10 @@ chain, on `deferred_free_next`, of Burrows whose last mapping went, for
 its detach's errno; and `vma_drain_in` hands `burrow_free_deferred` its whole
 chain in one call (the function walks `deferred_free_next` itself since B-1a').
 
+`vma_shape_ok` answers the rejections below without allocating, so a caller can
+tell a refused shape from a slab shortfall, `vma_alloc`'s other NULL. `burrow_map_in`
+does.
+
 **Five rejections at `vma_alloc`**, and the order they are written in is not
 the order they matter in:
 

@@ -266,11 +266,13 @@ static bool refuse_this(const struct kmem_cache *c) {
 #endif
 
 void *kmem_cache_alloc(struct kmem_cache *c, unsigned flags) {
-#ifdef KERNEL_TESTS
-    if (refuse_this(c)) return NULL;
-#endif
     irq_state_t s = spin_lock_irqsave(&c->lock);
-    void *obj = cache_alloc_locked(c);
+    void *obj = NULL;
+#ifdef KERNEL_TESTS
+    // Beside the real allocation, so a refusal takes the same way out as a shortfall.
+    if (!refuse_this(c))
+#endif
+        obj = cache_alloc_locked(c);
     spin_unlock_irqrestore(&c->lock, s);
 
     if (!obj) return NULL;

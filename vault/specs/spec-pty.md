@@ -70,11 +70,11 @@ simply **does not happen**. That is back-pressure, and it is exactly what
 `master_write`'s *raw* arm does — `ring_push` returning 0 breaks the loop
 without consuming, so the short `Rwrite` makes the writer retry.
 
-The *cooked* arm does the opposite, deliberately. A byte past `LINE_MAX`
-is consumed and dropped un-echoed; a line flush into a full `m2s`
-discards the tail. `echo()` drops on a full `s2m` unconditionally, where
-the model guards `ECHO => s2m < CAP`. Those are the classic tty-overrun
-semantics, the kernel console does the same, and the code says so
+The *cooked* arm back-pressures too, at the newline of a line that does not
+fit whole, which is the model's `m2s < CAP` taken a line at a time. Two sites do
+not: a byte past `LINE_MAX` is consumed and dropped un-echoed, and an echo drops
+on a full `s2m`, where the model guards `ECHO => s2m < CAP`. Those are the classic
+tty-overrun semantics, the kernel console does the same, and the code says so
 plainly in the docstring of the very function the map points at.
 
 So the model proves conservation for one of the two arms and is silent

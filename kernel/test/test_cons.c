@@ -313,10 +313,10 @@ void test_cons_read_ends_at_its_line(void) {
     cons_test_set_termios(CONS_ICANON);
     cons_feed_text("one\ntwo\n");
     long first_n = cons_drain(first, (long)sizeof(first));
-    long second_n = cons_drain(second, (long)sizeof(second));
+    long second_n = (cons_test_rx_count() > 0u) ? cons_drain(second, (long)sizeof(second)) : -1;
     cons_feed_text("abc\n");
     long head_n = cons_drain(head, 2);
-    long tail_n = cons_drain(tail, (long)sizeof(tail));
+    long tail_n = (cons_test_rx_count() > 0u) ? cons_drain(tail, (long)sizeof(tail)) : -1;
     cons_test_set_termios(0u);
     cons_feed_text("a\nb");
     long whole_n = cons_drain(whole, (long)sizeof(whole));
@@ -1963,7 +1963,7 @@ void test_cons_cook_isig_discards_pending_line(void) {
     cons_rx_input((u8)'\n', false);
     u32  c_cnt = cons_test_rx_count();
     long c_n   = (c_cnt > 0u) ? cons_drain(c_buf, (long)sizeof(c_buf)) : -1;
-    long c2_n  = (c_cnt > 0u) ? cons_drain(&c_buf[2], (long)sizeof(c_buf) - 2) : -1;
+    long c2_n  = (cons_test_rx_count() > 0u) ? cons_drain(&c_buf[2], (long)sizeof(c_buf) - 2) : -1;
 
     // ---- TEAR DOWN, then ASSERT. ------------------------------------------
     cons_settle_mgr();

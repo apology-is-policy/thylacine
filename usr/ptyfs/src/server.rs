@@ -100,8 +100,7 @@ const SRV_MSIZE_USIZE: usize = SRV_MSIZE as usize;
 /// Per-direction byte-ring capacity (m2s / s2m). A pts is a terminal, not a bulk
 /// pipe: 4 KiB each way is the classic tty buffer size. A full ring back-pressures
 /// via a short Rwrite (the writer retries) -- no byte is dropped -- EXCEPT the
-/// cooked-input flush + the echo, which drop on full (tty input overrun / the
-/// best-effort echo; the kernel cons drop-on-full posture -- see master_write).
+/// echo, which drops on full (best-effort; the kernel cons posture -- see echo_unit).
 const RING_CAP: usize = 4096;
 
 // =============================================================================
@@ -354,8 +353,8 @@ struct Pts {
     /// -- and until now every one of these sites discarded `ring_push`'s return
     /// value, so the loss left nothing behind to find. `drop_line` is assembly
     /// overflow past LINE_MAX; `drop_echo` is the deliberate best-effort echo
-    /// drop toward the master (documented at `echo`), counted separately
-    /// precisely so it can never be mistaken for the others. `drop_modeflush`
+    /// drop toward the master (documented at `echo_unit`), counted and never
+    /// reported, since no input is lost. `drop_modeflush`
     /// is the site that carries COMMAND bytes: a ctl write clearing ICANON
     /// delivers the pending line into m2s, there is no writer to refuse, and
     /// what a full m2s cannot take is a real drop (a short mode-flush loses the
@@ -391,7 +390,7 @@ fn drop_reported() -> bool {
 }
 
 /// Record `n` dropped bytes at `site` and, once per process, say so out loud.
-/// The site NAME is the decisive datum: the three sites have entirely different
+/// The site NAME is the decisive datum: the sites have entirely different
 /// causes, and a report that only said "a byte was lost" would leave the next
 /// occurrence as unexplained as #95 itself.
 fn note_drop(site: &mut u32, n: u32, what: &str) {
@@ -519,8 +518,7 @@ impl Ptys {
     }
 
     /// Push bytes onto a ring up to RING_CAP; returns the count accepted (a short
-    /// push is back-pressure at the raw/output writers; the cooked-input flush +
-    /// the echo treat a short push as a DROP -- see master_write / echo).
+    /// push is back-pressure at the raw/output writers).
     fn ring_push(ring: &mut VecDeque<u8>, data: &[u8]) -> usize {
         let room = RING_CAP.saturating_sub(ring.len());
         let k = room.min(data.len());
@@ -528,12 +526,6 @@ impl Ptys {
         k
     }
 
-    /// The single echo chokepoint (PTY-2b): EVERY echo staging passes here,
-    /// gated on ECHO -- the LS-8b ECHO-off hard no-leak guarantee, per-pts:
-    /// clear means NOTHING reaches the master, cooked erase/redraw included
-    /// (the password mask). An echoed byte rides the OUTPUT transform (ONLCR;
-    /// echo IS output, the Linux model) into s2m, drop-on-full (echo is
-    /// best-effort -- a keystroke echo cannot back-pressure the writer).
     /// Whether a byte of a canonical line echoes as ^X (N_TTY's ECHOCTL). Written
     /// raw, an arrow key would move the cursor and Alt-] would leave a terminal
     /// emulator in an OSC.
@@ -543,28 +535,38 @@ impl Ptys {
 
     fn echo_line_byte(p: &mut Pts, b: u8) {
         if Ptys::echoes_as_caret(b) {
-            Ptys::echo(p, b'^');
-            Ptys::echo(p, b ^ 0x40);
+            Ptys::echo_unit(p, &[b'^', b ^ 0x40]);
         } else {
             Ptys::echo(p, b);
         }
     }
 
-    fn echo(p: &mut Pts, b: u8) {
+    /// The single echo chokepoint (PTY-2b): EVERY echo staging passes here,
+    /// gated on ECHO -- the LS-8b ECHO-off hard no-leak guarantee, per-pts:
+    /// clear means NOTHING reaches the master, cooked erase/redraw included
+    /// (the password mask). A unit goes into s2m whole or not at all, since half
+    /// a caret or half an erase shows a line the reader will not get, and it
+    /// drops on full (echo is best-effort -- a keystroke echo cannot back-pressure
+    /// the writer). A drop is counted and not reported: only echo was lost, and a
+    /// report here would spend the one-shot that a lost input byte needs.
+    fn echo_unit(p: &mut Pts, unit: &[u8]) {
         if p.tio & TIO_ECHO == 0 {
             return;
         }
-        // #95: the drop is deliberate here, but it is still a drop -- count it,
-        // under its OWN name, so it can never be confused with the two m2s sites
-        // that carry real input.
-        let want = if b == CH_NL && p.tio & TIO_ONLCR != 0 { 2 } else { 1 };
-        let took = if want == 2 {
-            Ptys::ring_push(&mut p.s2m, b"\r\n")
+        if RING_CAP.saturating_sub(p.s2m.len()) < unit.len() {
+            p.drop_echo = p.drop_echo.saturating_add(unit.len() as u32);
+            return;
+        }
+        let _ = Ptys::ring_push(&mut p.s2m, unit);
+    }
+
+    /// An echoed byte rides the OUTPUT transform (ONLCR; echo IS output, the
+    /// Linux model).
+    fn echo(p: &mut Pts, b: u8) {
+        if b == CH_NL && p.tio & TIO_ONLCR != 0 {
+            Ptys::echo_unit(p, b"\r\n");
         } else {
-            Ptys::ring_push(&mut p.s2m, &[b])
-        };
-        if took < want {
-            note_drop(&mut p.drop_echo, (want - took) as u32, "echo (s2m full)");
+            Ptys::echo_unit(p, &[b]);
         }
     }
 
@@ -579,14 +581,18 @@ impl Ptys {
     /// byte past LINE_MAX drops un-echoed (tty input overrun, the cons contract).
     /// Otherwise a full m2s stops consumption and returns the short count, and
     /// the writer re-offers: raw at the byte, cooked at the newline of a line
-    /// that does not fit whole (the console's #129 rule).
+    /// that does not fit whole (the console's #129 rule). Only a signal byte
+    /// reads past a held byte: it must not wait on a reader that may never come,
+    /// and it discards what was typed before it and not yet delivered, as it
+    /// discards a pending line.
     fn master_write(&mut self, n: u32, data: &[u8]) -> usize {
         let p = match self.slot_mut(n) {
             Some(p) => p,
             None => return 0,
         };
         let mut consumed = 0usize;
-        for &raw in data {
+        let mut held = false;
+        for (at, &raw) in data.iter().enumerate() {
             let mut b = raw;
             // 1. ICRNL: CR -> NL on input.
             if b == CH_CR && p.tio & TIO_ICRNL != 0 {
@@ -613,9 +619,13 @@ impl Ptys {
                     if p.tio & TIO_ICANON != 0 {
                         p.line_len = 0;
                     }
-                    consumed += 1;
+                    held = false;
+                    consumed = at + 1;
                     continue;
                 }
+            }
+            if held {
+                continue;
             }
             if p.tio & TIO_ICANON != 0 {
                 // 3. ICANON line assembly.
@@ -624,12 +634,12 @@ impl Ptys {
                     // column it took.
                     if p.line_len > 0 {
                         p.line_len -= 1;
-                        let columns = if Ptys::echoes_as_caret(p.line[p.line_len]) { 2 } else { 1 };
-                        for _ in 0..columns {
-                            Ptys::echo(p, CH_BS);
-                            Ptys::echo(p, b' ');
-                            Ptys::echo(p, CH_BS);
-                        }
+                        let erase: &[u8] = if Ptys::echoes_as_caret(p.line[p.line_len]) {
+                            b"\x08 \x08\x08 \x08"
+                        } else {
+                            b"\x08 \x08"
+                        };
+                        Ptys::echo_unit(p, erase);
                     }
                 } else if b == CH_NL {
                     // NL: the line INCLUDING its newline flushes to the slave;
@@ -641,7 +651,8 @@ impl Ptys {
                     // apart from it.
                     let len = p.line_len;
                     if RING_CAP.saturating_sub(p.m2s.len()) < len + 1 {
-                        break;
+                        held = true;
+                        continue;
                     }
                     let _ = Ptys::ring_push(&mut p.m2s, &p.line[..len]);
                     let _ = Ptys::ring_push(&mut p.m2s, &[CH_NL]);
@@ -657,15 +668,16 @@ impl Ptys {
                     // truncated-command shape and was previously silent.
                     note_drop(&mut p.drop_line, 1, "line assembly (past LINE_MAX)");
                 }
-                consumed += 1;
+                consumed = at + 1;
             } else {
                 // 4. Raw: straight to the slave; back-pressure on full (the
                 //    byte is NOT consumed -- the writer retries).
                 if Ptys::ring_push(&mut p.m2s, &[b]) == 0 {
-                    break;
+                    held = true;
+                    continue;
                 }
                 Ptys::echo(p, b);
-                consumed += 1;
+                consumed = at + 1;
             }
         }
         consumed
@@ -2557,8 +2569,75 @@ pub fn selftest() -> Result<(), &'static str> {
             RecvOutcome::Data(1) if sink[0] == b'\n' => {}
             _ => return Err("refuse-intr-kept-the-line"),
         }
+        // A signal byte behind the refused newline, in the same write, is not held up.
+        // It discards the line and what came between, and what follows it cooks.
+        let _ = ptys.master_read(c, &mut sink);
+        ptys.set_tio(c, 0);
+        if ptys.master_write(c, &alloc::vec![b'.'; RING_CAP]) != RING_CAP {
+            return Err("refuse-fill3");
+        }
+        ptys.set_tio(c, TIO_DEFAULT);
+        if ptys.master_write(c, b"x\n") != 1 {
+            return Err("refuse-behind-control");
+        }
+        if ptys.master_write(c, &[b'\n', b'w', CH_INTR, b'y']) != 4
+            || ptys.take_sigs(c) != sig_class_bit(T_TTY_SIG_INT)
+        {
+            return Err("refuse-signal-held-up");
+        }
+        match ptys.slave_read(c, &mut sink) {
+            RecvOutcome::Data(k) if k == RING_CAP => {}
+            _ => return Err("refuse-drain3"),
+        }
+        if ptys.master_write(c, b"\n") != 1 {
+            return Err("refuse-after-signal");
+        }
+        match ptys.slave_read(c, &mut sink) {
+            RecvOutcome::Data(2) if &sink[..2] == b"y\n" => {}
+            _ => return Err("refuse-signal-kept-the-line"),
+        }
+        // The same behind a raw byte the ring cannot take.
+        let _ = ptys.master_read(c, &mut sink);
+        ptys.set_tio(c, TIO_ISIG);
+        if ptys.master_write(c, &alloc::vec![b'.'; RING_CAP]) != RING_CAP {
+            return Err("refuse-fill4");
+        }
+        if ptys.master_write(c, b"q") != 0 {
+            return Err("raw-behind-control");
+        }
+        if ptys.master_write(c, &[b'q', CH_INTR]) != 2
+            || ptys.take_sigs(c) != sig_class_bit(T_TTY_SIG_INT)
+        {
+            return Err("raw-signal-held-up");
+        }
+        match ptys.slave_read(c, &mut sink) {
+            RecvOutcome::Data(k) if k == RING_CAP => {}
+            _ => return Err("raw-drain"),
+        }
+        ptys.set_tio(c, TIO_DEFAULT);
         if ptys.drops(c) != (0, 0, 0) {
             return Err("refuse-counted-as-a-drop");
+        }
+        // An echo goes whole or not at all, and a lost echo spends no report.
+        if ptys.slave_write(c, &alloc::vec![b'.'; RING_CAP - 1]) != RING_CAP - 1 {
+            return Err("echo-fill");
+        }
+        DROP_REPORT_ARMED.store(true, Ordering::Relaxed);
+        let caret_taken = ptys.master_write(c, &[0x1b]);
+        let erase_taken = ptys.master_write(c, &[CH_DEL]);
+        DROP_REPORT_ARMED.store(false, Ordering::Relaxed);
+        if caret_taken != 1 || erase_taken != 1 {
+            return Err("echo-full-consumed");
+        }
+        if drop_reported() {
+            return Err("echo-spent-the-report");
+        }
+        if ptys.drops(c) != (0, 8, 0) {
+            return Err("echo-unit-count");
+        }
+        match ptys.master_read(c, &mut sink) {
+            RecvOutcome::Data(k) if k == RING_CAP - 1 => {}
+            _ => return Err("echo-unit-torn"),
         }
         let _ = ptys.open_dec(c, true);
         let _ = ptys.open_dec(c, false);

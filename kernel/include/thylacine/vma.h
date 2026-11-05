@@ -144,6 +144,8 @@ void vma_init(void);
 // Returns NULL on any constraint violation (without partial allocation).
 struct Vma *vma_alloc(u64 vaddr_start, u64 vaddr_end, u32 prot,
                      struct Burrow *burrow, u64 burrow_offset);
+bool vma_shape_ok(u64 vaddr_start, u64 vaddr_end, u32 prot,
+                  const struct Burrow *burrow, u64 burrow_offset);
 
 // Allocate a guard VMA — a reserved address range with NO backing
 // BURROW and prot == 0. It exists purely to occupy address space:

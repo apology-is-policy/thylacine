@@ -100,7 +100,9 @@ that returned NULL, a refused `burrow_lazy_populate`, a refused VMA -- and
 `exec_setup_argv_body`'s segment loop and `exec_load_body`'s PT_LOAD arm pass
 it up unchanged; every other failure is still `-1`, which `sys_execve_core`
 reports as EINVAL (the tracked ENOEXEC gap). Before this a Proc that ran out
-of pool during exec was told its binary was malformed.
+of pool during exec was told its binary was malformed. A slab shortfall on a
+segment's, the stack's or its guard's Vma reads the same since 2026-11-05, and
+`exec.vma_refused_says_enomem` walks each. The vDSO stays best-effort.
 `execve.load_refuses_nomem_at_the_pool_edge` parks the pool full and loads.
 
 That is worth stating as a shape rather than a fact, because it is the better

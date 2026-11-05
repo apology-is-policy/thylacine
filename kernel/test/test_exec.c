@@ -356,6 +356,33 @@ void test_exec_from_spoor_aliased_window_distinct(void) {
     spoor_clunk(exe);
 }
 
+// A shortfall on any mapping exec makes reads ENOMEM, never a malformed binary's -1,
+// which sys_execve would report as EINVAL. The vDSO is best-effort: a refusal there
+// costs the page, and exec goes on.
+void test_exec_vma_refused_says_enomem(void) {
+    u32 flags[2] = { PF_R | PF_X, PF_R | PF_W };
+    size_t size = build_elf(flags, 2, /*filesz=*/0x100);
+    u32 refused = 0, best_effort = 0;
+    for (u32 skip = 0; skip < 16; skip++) {
+        struct Proc *p = make_proc();
+        TEST_ASSERT(p != NULL, "proc_alloc");
+        u64 entry = 0, sp = 0;
+        kmem_cache_test_refuse("vma", skip);
+        int rc = exec_setup(p, g_elf_blob, size, &entry, &sp);
+        bool fired = kmem_cache_test_refused();
+        drop_proc(p);
+        if (!fired) {
+            TEST_EXPECT_EQ(rc, 0, "exec runs through once every Vma has been asked for");
+            break;
+        }
+        if (rc == 0) { best_effort++; continue; }
+        refused++;
+        TEST_EXPECT_EQ(rc, -(int)T_E_NOMEM, "a refused Vma says ENOMEM");
+    }
+    TEST_EXPECT_EQ(refused, 4u, "two segments, the stack and its guard each asked for one");
+    TEST_ASSERT(best_effort <= 1u, "only the vDSO may refuse and exec go on");
+}
+
 void test_exec_setup_smoke(void) {
     struct Proc *p = make_proc();
     TEST_ASSERT(p != NULL, "proc_alloc");

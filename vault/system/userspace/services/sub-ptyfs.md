@@ -84,7 +84,7 @@ Input (a master write — the emulator's keystrokes), in order:
    echoed. The set (rather than a queue) dedups repeats and cannot
    overflow, so a distinct class can never be lost behind a same-class
    run — the G-3-era F2 fix.
-3. **ICANON** — erase pops the last unflushed byte and echoes `\b \b`;
+3. **ICANON** — erase pops the last unflushed byte and echoes `\b \b` per column;
    NL flushes the line *including its newline*; anything else assembles.
 4. **raw** — straight into `m2s`.
 
@@ -103,8 +103,8 @@ the selftest assert classes on a local pts with no kernel registration.
 the five flags, and `winsize <cols> <rows>` (decimal, canonical,
 ≤ 65535). **Two passes** — everything validates before anything applies,
 so one malformed token rejects the whole write with the mode unchanged
-(the tcsetattr-atomic posture). A flag change resets the assembly line
-(TCSAFLUSH). A winsize write raises `tty:winch` **only if the size
+(the tcsetattr-atomic posture). A flag change keeps the assembly line:
+the same line continues. A winsize write raises `tty:winch` **only if the size
 actually changed** — the Linux `TIOCSWINSZ` behaviour.
 
 A ctl write that *clears* `ICANON` is the one exception to "a flag change
@@ -305,7 +305,7 @@ the POSIX value is the 9P ecode.
 
 Terminal-scale, and deliberately so: 4 KiB per direction, a 32 KiB
 negotiated msize matching the kernel client's proposal so a full data
-frame crosses in one op, a 256-byte canonical line. Reads are
+frame crosses in one op, a 4095-byte canonical line. Reads are
 one-`t_read`-per-serviced-event with a partial frame waiting for the
 next readable event. `read_ready` keeps a parked read allocation-free.
 The global FRAME coalescing that a compositor needs has no analogue here
@@ -341,17 +341,21 @@ The global FRAME coalescing that a compositor needs has no analogue here
   newline (`kaua-term` and `ptyhost` wait out a count of 0 for 200 ms, then
   drop the rest of that buffer). This is the kernel console's `#129` rule.
   `LINE_MAX` plus the newline fits an empty ring, so no line waits for ever
-  behind a reader that reads. `^C` is not held up: it discards a held line.
+  behind a reader that reads. A signal byte is not held up, even behind the
+  refused newline in one write: it discards what was typed before it and not
+  yet delivered, in raw mode too.
   Until 2026-11-05 a short flush lost the tail and the newline, so the head ran
   on into the next line, though the echo had shown them apart.
 - **Two sites still drop.** A byte past `LINE_MAX` is consumed and discarded
-  un-echoed; `echo()` drops on full unconditionally. Both are the classic
+  un-echoed; an echo unit drops on full, whole, so half a caret or half an
+  erase never shows, and it is counted but not reported. Both are the classic
   tty-overrun semantic that the kernel console reference also carries. They
   matter because the model does not cover them — see [[spec-pty]] and task #48.
 
   **Since `#95` (`c0c76977`) each site is counted**: `drop_line` (assembly
   overflow past `LINE_MAX`), `drop_echo` (the deliberate best-effort echo,
-  counted separately so it can never be mistaken for the others), and — since
+  counted separately so it can never be mistaken for the others, and never
+  reported, since no input is lost), and — since
   the `ccb597b8` round (F2) — `drop_modeflush` (a ctl write clearing `ICANON`
   pushing the pending line into a full `m2s` as raw, via `deliver_partial_line`).
   A mode write has no writer to refuse, so that one is a real drop, and it

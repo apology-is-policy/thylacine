@@ -51,24 +51,43 @@ void vma_init(void) {
 // alloc / free
 // =============================================================================
 
-struct Vma *vma_alloc(u64 vaddr_start, u64 vaddr_end, u32 prot,
-                     struct Burrow *burrow, u64 burrow_offset) {
-    if (!g_vma_cache) extinction("vma_alloc before vma_init");
-    if (!burrow)         return NULL;
+// Whether a mapping of this shape may exist at all. A refusal here is the caller's
+// error. vma_alloc's other NULL is a shortfall, and a caller reporting the difference
+// asks this first.
+bool vma_shape_ok(u64 vaddr_start, u64 vaddr_end, u32 prot,
+                  const struct Burrow *burrow, u64 burrow_offset) {
+    if (!burrow)         return false;
 
-    if (vaddr_start >= vaddr_end) return NULL;
-    if (vaddr_start & (PAGE_SIZE - 1)) return NULL;
-    if (vaddr_end   & (PAGE_SIZE - 1)) return NULL;
+    if (vaddr_start >= vaddr_end) return false;
+    if (vaddr_start & (PAGE_SIZE - 1)) return false;
+    if (vaddr_end   & (PAGE_SIZE - 1)) return false;
 
     // W^X policy: reject W+X at the VMA layer too. This mirrors the
     // PTE-construction-time invariant + the ELF loader's rejection.
     // ARCH §28 I-12.
-    if ((prot & VMA_PROT_WRITE) && (prot & VMA_PROT_EXEC)) return NULL;
+    if ((prot & VMA_PROT_WRITE) && (prot & VMA_PROT_EXEC)) return false;
 
     // RW-1 C-F3: reject write-without-read. AArch64 has no write-only AP, so a
     // W-only prot would map RW (readable) -- a rights/PTE mismatch the MMIO/DMA
     // syscalls already guard. Reject it here so the VMA prot matches the PTE.
-    if ((prot & VMA_PROT_WRITE) && !(prot & VMA_PROT_READ)) return NULL;
+    if ((prot & VMA_PROT_WRITE) && !(prot & VMA_PROT_READ)) return false;
+
+    // B-1a' audit F3: the mapping must lie inside the Burrow. A VMA past the
+    // Burrow's end would name slots its pagemap does not have, and the range
+    // release walks the mapping's own slot bound -- refused here, at the one
+    // constructor, rather than defended in every walker. Written so neither
+    // term can overflow.
+    u64 span = (u64)burrow->page_count << PAGE_SHIFT;
+    if (burrow_offset > span)                          return false;
+    if (vaddr_end - vaddr_start > span - burrow_offset) return false;
+
+    return true;
+}
+
+struct Vma *vma_alloc(u64 vaddr_start, u64 vaddr_end, u32 prot,
+                     struct Burrow *burrow, u64 burrow_offset) {
+    if (!g_vma_cache) extinction("vma_alloc before vma_init");
+    if (!vma_shape_ok(vaddr_start, vaddr_end, prot, burrow, burrow_offset)) return NULL;
 
     // B-2b: execute-only exists only over a code Burrow (a sealed region,
     // SYS_JIT_CREATE_SEALED). Any other X-without-R -- a Linux PROT_EXEC mmap
@@ -78,15 +97,6 @@ struct Vma *vma_alloc(u64 vaddr_start, u64 vaddr_end, u32 prot,
     if ((prot & VMA_PROT_EXEC) && !(prot & VMA_PROT_READ) &&
         burrow->type != BURROW_TYPE_CODE)
         prot |= VMA_PROT_READ;
-
-    // B-1a' audit F3: the mapping must lie inside the Burrow. A VMA past the
-    // Burrow's end would name slots its pagemap does not have, and the range
-    // release walks the mapping's own slot bound -- refused here, at the one
-    // constructor, rather than defended in every walker. Written so neither
-    // term can overflow.
-    u64 span = (u64)burrow->page_count << PAGE_SHIFT;
-    if (burrow_offset > span)                          return NULL;
-    if (vaddr_end - vaddr_start > span - burrow_offset) return NULL;
 
     struct Vma *v = kmem_cache_alloc(g_vma_cache, KP_ZERO);
     if (!v) return NULL;

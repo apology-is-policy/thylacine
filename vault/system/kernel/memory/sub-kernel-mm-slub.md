@@ -42,6 +42,8 @@ structs; requests above `SLUB_MAX_OBJECT_SIZE` (2048) bypass to
   proc, vma and territory caches panicked until 2026-11-05. `slab_refusal.*`
   injects the shortfall one allocation at a time, on the calling thread only
   (`kmem_cache_test_refuse`, tests build), and asserts each unwind leaves nothing.
+  The lever sits beside the real allocation, so a refusal leaves by the path a
+  shortfall takes. A thread's fork shape, with a copied handle table, is not driven.
 - `kmem_cache_destroy(c)` (tests build only) — **caller-quiesce contract** (RW-1 F-S2:
   no concurrent alloc/free on any CPU; the live-count read and the
   drain run without `c->lock`). A cache holding ANY live object

@@ -1146,11 +1146,12 @@ int burrow_map_in(struct AddrSpace *as, bool exempt, struct Burrow *v,
         "USER_VA_TOP must equal mmu_install_user_pte's (vaddr >> 47) bound");
     if (vaddr + length > USER_VA_TOP) return -1;
 
-    // Delegate constraint validation (W+X reject, prot value) to vma_alloc.
-    // It returns NULL on any constraint violation OR on SLUB OOM, and
+    // The shape first, so that vma_alloc's NULL can only be a shortfall: exec reports
+    // a refused mapping as a malformed binary and a shortage as ENOMEM. vma_alloc
     // takes burrow_acquire_mapping internally on success.
+    if (!vma_shape_ok(vaddr, vaddr + length, prot, v, /*offset=*/0)) return -1;
     struct Vma *vma = vma_alloc(vaddr, vaddr + length, prot, v, /*offset=*/0);
-    if (!vma) return -1;
+    if (!vma) return -(int)T_E_NOMEM;
 
     // vma_insert refuses an overlap (-1) or the VMA cap (-T_E_NOMEM: a resource
     // refusal the caller may report as one, B-1a' audit F18). Either way the

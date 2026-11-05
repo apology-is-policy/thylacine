@@ -405,7 +405,8 @@ static int exec_map_segment(struct AddrSpace *as, bool exempt, const void *blob,
     u32 prot = vma_prot_for_elf(seg->flags);
     int rc = burrow_map_in(as, exempt, burrow, g.floor, g.size, prot);
     if (rc != 0) {
-        return lazy_populate_unwind(as, burrow, nfile);   // nfile == 0 on the eager path
+        (void)lazy_populate_unwind(as, burrow, nfile);    // nfile == 0 on the eager path
+        return rc == -(int)T_E_NOMEM ? rc : -1;           // a refused VMA (F18)
     }
 
     // Drop the caller-held handle. mapping_count=1 (from vma_alloc)
