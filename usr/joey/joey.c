@@ -541,6 +541,30 @@ static int smoke_drain(long rd, unsigned char *acc, size_t acc_cap,
     }
 }
 
+// smoke_drain_head -- smoke_drain, echoing only the first echo_cap bytes, for a child
+// whose EXPECTED failure prints far more than the check reads: a Go runtime throw dumps
+// every goroutine whatever GOTRACEBACK says, and the boot log pays for each byte.
+// *unechoed counts what was read and not echoed.
+static int smoke_drain_head(long rd, unsigned char *acc, size_t acc_cap,
+                            size_t *acc_len, size_t echo_cap, size_t *unechoed) {
+    size_t echoed = 0;
+    *acc_len = 0;
+    *unechoed = 0;
+    for (;;) {
+        unsigned char buf[256];
+        long n = t_read(rd, buf, sizeof(buf));
+        if (n < 0) return -1;
+        if (n == 0) return 0;
+        size_t show = (size_t)n;
+        if (show > echo_cap - echoed) show = echo_cap - echoed;
+        if (show) (void)t_puts((const char *)buf, show);
+        echoed += show;
+        *unechoed += (size_t)n - show;
+        for (long i = 0; i < n && *acc_len < acc_cap; i++)
+            acc[(*acc_len)++] = buf[i];
+    }
+}
+
 // PROBE_REAP_MAX_SEC -- the bound on how long joey waits for a boot probe to
 // exit before it force-kills it and moves on. Generous versus any probe's real
 // runtime (the pouch hellos and nocturne-probe all finish in a second or two,
@@ -5452,9 +5476,10 @@ static int probe_spawn_env(void) {
 // One run of go-threads (300 goroutines locked to 300 Ms at once) as a user,
 // who is not exempt from the thread budget: `budget` 0 inherits joey's, else
 // a SPAWN_EXT_THREADS tail sets it. Drained to EOF first (EOF is the child's
-// exit), since a Go fatal error can print past the pipe's ring. Returns 0 with
-// *status and whether the output named a refused thread create, -1 if the run
-// could not be made or reaped.
+// exit), since a Go fatal error can print past the pipe's ring. A budgeted run is
+// meant to die in a runtime throw, whose dump of 300 goroutines is about 440 KB, so
+// only what the check reads is echoed. Returns 0 with *status and whether the output
+// named a refused thread create, -1 if the run could not be made or reaped.
 static int go_threads_run(unsigned int budget, int *status, int *refused) {
     long rd = -1, wr = -1;
     if (t_pipe(&rd, &wr) < 0) return -1;
@@ -5483,10 +5508,17 @@ static int go_threads_run(unsigned int budget, int *status, int *refused) {
         return -1;
     }
     unsigned char acc[2048];
-    size_t len = 0;
-    int drained = smoke_drain(rd, acc, sizeof(acc), &len);
+    size_t len = 0, unechoed = 0;
+    int drained = smoke_drain_head(rd, acc, sizeof(acc), &len,
+                                   budget ? sizeof(acc) : (size_t)-1, &unechoed);
     (void)t_close(rd);
     long reaped = reap_bounded(pid, status, PROBE_REAP_MAX_SEC);
+    if (unechoed) {
+        char nb[24];
+        t_putstr("\njoey: go-threads: ");
+        t_putstr(itoa_dec((long)unechoed, nb, sizeof(nb)));
+        t_putstr(" more bytes of the budgeted run's output not echoed\n");
+    }
     if (drained < 0 || reaped != pid) return -1;
     static const char needle[] = "failed to create new OS thread";
     *refused = mem_contains(acc, len, needle, sizeof(needle) - 1);
