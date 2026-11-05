@@ -193,10 +193,11 @@ opt-level, 2026-11-05):
   on drop. `Operand`, the child of `BinOp`, `UnOp` and `Match`, drops with a worklist.
   A level of any other kind needs a bracket or a re-lex.
 
-What a drop still recurses over is bounded by brackets, statements and re-lexes, and it does
-not have to fit in the reserve: no statement runs beneath an expression, so a function's old
-body is dropped with most of the stack free. The reserve is 1 MiB, and the largest frame in
-the guest's `ut` is 4144 bytes. Flow 11 in `u-6-test` asks for more than a drop needs, and drops
+What a drop still recurses over is bounded by brackets, statements and re-lexes. A tree parsed
+at some depth drops there on less stack than its parse took. A function's old body was parsed
+elsewhere, and a statement can reach the reserve through nested calls and case arms, so that
+drop can run in the reserve itself. The reserve is 1 MiB, and the largest frame in the guest's
+`ut` is 4144 bytes. Flow 11 in `u-6-test` asks for more than a drop needs, and drops
 large trees where the check first fires, on the guest's frames, for which a debug build's
 several times larger frames cannot stand in.
 

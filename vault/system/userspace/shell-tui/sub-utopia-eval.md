@@ -521,7 +521,9 @@ recursion is a message and a prompt rather than a dead shell.
 Not a measured surface. One deliberate cost control: the loop interrupt poll is
 strided (every 128 iterations) so a hot pure-eval loop does not pay a `try_read`
 syscall per turn, bounding Ctrl-C latency to a handful of iterations instead of
-one.
+one. A function call polls on the same stride, because a body recursing through `try` takes exponential time with no loop in it.
+
+`Env` marks the count of writes to `$errstr` as each statement begins. The REPL prints `$errstr` only if it was written since that mark, so an error that wrote nothing prints its own kind and not an earlier statement's text.
 
 ## Prosecution
 

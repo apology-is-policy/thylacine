@@ -413,7 +413,7 @@ impl Parser {
                 _ => break,
             };
             self.pos += 1;
-            self.skip_newlines_only(); // allow a line break after `&&` / `||`
+            self.skip_to_next_line();
             self.need_more_after_connector()?;
             rest.push((op, self.parse_pipeline()?));
         }
@@ -457,7 +457,7 @@ impl Parser {
             match self.peek_kind() {
                 Some(TokenKind::Pipe) => {
                     self.pos += 1;
-                    self.skip_newlines_only();
+                    self.skip_to_next_line();
                     self.need_more_after_connector()?;
                     let next = self.parse_pipeline_element()?;
                     elements.push(next);
@@ -469,7 +469,7 @@ impl Parser {
                         last.tolerate_failure = true;
                     }
                     self.pos += 1;
-                    self.skip_newlines_only();
+                    self.skip_to_next_line();
                     self.need_more_after_connector()?;
                     let next = self.parse_pipeline_element()?;
                     elements.push(next);
@@ -499,6 +499,13 @@ impl Parser {
     /// separators).
     fn skip_newlines_only(&mut self) {
         while matches!(self.peek_kind(), Some(TokenKind::Newline)) {
+            self.pos += 1;
+        }
+    }
+
+    /// Line breaks after a connector, and the body of a heredoc opened on its line.
+    fn skip_to_next_line(&mut self) {
+        while matches!(self.peek_kind(), Some(TokenKind::Newline | TokenKind::HeredocBody(_))) {
             self.pos += 1;
         }
     }
@@ -1489,6 +1496,12 @@ impl Parser {
         // Allow `} \n catch` across a newline; catch is REQUIRED per
         // the U-5d locked decision (scripture 7.7 always pairs them).
         self.skip_newlines_only();
+        if self.at_eof() {
+            return Err(ParseError {
+                kind: ParseErrorKind::UnexpectedEof { expected: "`catch`" },
+                span: self.current_span(),
+            });
+        }
         if !matches!(self.peek_kind(), Some(TokenKind::Catch)) {
             return Err(ParseError {
                 kind: ParseErrorKind::UnexpectedToken {
@@ -3124,6 +3137,24 @@ mod tests {
             assert!(parse(src).is_err(), "{src}");
             assert!(!matches!(parse_err(src), ParseErrorKind::UnexpectedEof { .. }), "{src}: {:?}", parse_err(src));
         }
+    }
+
+    #[test]
+    fn a_connector_goes_on_past_a_heredoc_body() {
+        for op in ["&&", "||", "|", "?|"] {
+            let src = alloc::format!("cat <<EOF {op}\nbody\nEOF\nwc\n");
+            assert_eq!(parse(&src).expect(&src).statements.len(), 1, "{src}");
+            let src = alloc::format!("cat <<EOF {op}\nbody\nEOF\n");
+            assert!(matches!(parse_err(&src), ParseErrorKind::UnexpectedEof { .. }), "{src}");
+        }
+    }
+
+    #[test]
+    fn a_try_at_the_end_of_input_wants_its_catch() {
+        assert!(matches!(parse_err("try { a }"), ParseErrorKind::UnexpectedEof { .. }));
+        assert!(matches!(parse_err("try { a }\n"), ParseErrorKind::UnexpectedEof { .. }));
+        assert!(matches!(parse_err("try { a } x"), ParseErrorKind::UnexpectedToken { .. }));
+        assert!(parse("try { a }\ncatch { b }\n").is_ok());
     }
 
     #[test]

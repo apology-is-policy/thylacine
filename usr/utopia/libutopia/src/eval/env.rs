@@ -125,8 +125,12 @@ pub struct Env {
     /// $errstr -- last command's error string (rc tradition;
     /// scripture 8.5). Initialized to "".
     errstr: String,
-    /// Writes to `errstr` so far, so an error can tell whether the text is its own.
+    /// Writes to `errstr`, and that count when the statement running now began, so an error
+    /// can tell whether the text is its own.
     errstr_writes: u64,
+    errstr_mark: u64,
+    /// Function calls so far, for the strided interrupt poll.
+    calls: u32,
     /// $cwd -- current working directory. Initialized to "/" until
     /// the first cd or until the caller sets it (ut sets it from the
     /// kernel at startup: `Repl::adopt_kernel_cwd`).
@@ -281,6 +285,8 @@ impl Env {
             substitutions: Cell::new(0),
             errstr: String::new(),
             errstr_writes: 0,
+            errstr_mark: 0,
+            calls: 0,
             cwd: "/".to_string(),
             interactive: false,
             stdio_inherit: false,
@@ -587,8 +593,18 @@ impl Env {
         self.errstr_writes += 1;
     }
 
-    pub fn errstr_stamp(&self) -> u64 {
-        self.errstr_writes
+    pub fn errstr_mark(&mut self) {
+        self.errstr_mark = self.errstr_writes;
+    }
+
+    /// Whether `errstr` was written since the last mark.
+    pub fn errstr_is_fresh(&self) -> bool {
+        self.errstr_writes != self.errstr_mark
+    }
+
+    pub(crate) fn count_call(&mut self) -> u32 {
+        self.calls = self.calls.wrapping_add(1);
+        self.calls
     }
 
     pub fn cwd(&self) -> &str {

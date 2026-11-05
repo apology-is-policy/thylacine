@@ -237,6 +237,7 @@ fn eval_block_inner(env: &mut Env, stmts: &[Statement]) -> EvalResult<StatementF
 
 /// Evaluate a single statement. Per-StatementKind dispatch.
 pub fn eval_statement(env: &mut Env, stmt: &Statement) -> EvalResult<StatementFlow> {
+    env.errstr_mark();
     // A case arm's statement reaches here again with no block in between.
     if crate::stack::exhausted() {
         return Err(EvalError::new(EvalErrorKind::RecursionLimit, stmt.span));
@@ -1340,6 +1341,10 @@ fn invoke_function(
     decl: &FnDecl,
     argv: &[String],
 ) -> EvalResult<StatementFlow> {
+    // Recursion through `try` can take exponential time with no loop to poll from.
+    if env.count_call() % LOOP_INTERRUPT_STRIDE == 0 && poll_loop_interrupt(env) {
+        return Ok(StatementFlow::Return);
+    }
     env.push_scope();
     // $0 = function name (argv[0]).
     env.let_set("0", Value::scalar(argv[0].clone()));
@@ -3293,13 +3298,37 @@ mod tests {
     #[test]
     fn a_later_error_prints_its_own_kind() {
         let mut env = Env::new();
-        let stamp = env.errstr_stamp();
+        env.errstr_mark();
         env.errstr_set("spawn failed");
-        assert_ne!(env.errstr_stamp(), stamp);
-        let stamp = env.errstr_stamp();
+        assert!(env.errstr_is_fresh());
         let s = crate::parser::parse("(( 1 / 0 ))\n").expect("parses");
         assert!(eval_block(&mut env, &s.statements).is_err());
-        assert_eq!(env.errstr_stamp(), stamp, "nothing set errstr, so its text is not this error's");
+        assert!(!env.errstr_is_fresh(), "nothing set errstr, so its text is not this error's");
+    }
+
+    #[test]
+    fn a_later_statement_on_the_line_prints_its_own_kind() {
+        let mut env = Env::new();
+        env.interactive = true;
+        env.errstr_mark();
+        let s = crate::parser::parse("nosuchcommand; (( 1 / 0 ))\n").expect("parses");
+        assert!(eval_block(&mut env, &s.statements).is_err());
+        assert!(env.errstr().contains("spawn failed"), "{}", env.errstr());
+        assert!(!env.errstr_is_fresh(), "the failed spawn's text is not the division's");
+    }
+
+    #[test]
+    fn a_call_polls_for_the_interrupt() {
+        let mut env = Env::new();
+        let s = crate::parser::parse("fn f { }\n").expect("parses");
+        eval_block(&mut env, &s.statements).expect("declares");
+        let f = env.fn_get("f").expect("declared").clone();
+        env.set_interrupt();
+        let argv = [String::from("f")];
+        let stopped = (0..LOOP_INTERRUPT_STRIDE)
+            .filter(|_| matches!(invoke_function(&mut env, &f, &argv), Ok(StatementFlow::Return)))
+            .count();
+        assert_eq!(stopped, 1);
     }
 
     #[test]

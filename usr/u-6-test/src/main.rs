@@ -461,7 +461,9 @@ fn flow_script_past_the_stack() -> Result<(), i64> {
     }
     // `let` parses its value at once, where a command word's substitution would wait.
     let mut script = String::from("1");
-    for _ in 0..12 {
+    // About three times what the host's frames need, so a smaller guest frame cannot let it
+    // parse. The refusal comes long before the outermost levels are reached.
+    for _ in 0..24 {
         let mut level = String::from("(( ");
         for _ in 0..16 {
             level.push_str(&"- ".repeat(250));
@@ -482,7 +484,8 @@ fn flow_script_past_the_stack() -> Result<(), i64> {
         return fail("flow 10: the script was accepted");
     }
     if !repl.env().errstr().contains("nesting too deep") {
-        return fail("flow 10: the refusal was not about depth");
+        let msg = alloc::format!("flow 10: the refusal was not about depth: {}", repl.env().errstr());
+        return fail(&msg);
     }
     let mut sink: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
     if repl.feed(b"let ok = $(echo recovered)\n", &mut sink).is_some() {
@@ -533,10 +536,13 @@ fn flow_trees_at_the_stack_end() -> Result<(), i64> {
         streams(&andor, 32),
         streams(&run, 4),
     ];
-    for line in lines {
-        let mut tree = match libutopia::parser::parse(&line) {
+    for (i, line) in lines.iter().enumerate() {
+        let mut tree = match libutopia::parser::parse(line) {
             Ok(tree) => Some(tree),
-            Err(_) => return fail("flow 11: the control did not parse"),
+            Err(e) => {
+                let msg = alloc::format!("flow 11: line {i} did not parse: {e}");
+                return fail(&msg);
+            }
         };
         at_the_reserve(&mut || drop(tree.take()));
     }

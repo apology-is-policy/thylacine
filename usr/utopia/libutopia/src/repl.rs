@@ -1032,10 +1032,10 @@ impl Repl {
         // A `#!` spawn passes no `--home`, so nothing else seeds `$cwd`.
         self.adopt_kernel_cwd();
         self.bind_positionals(arg0, args);
-        let stamp = self.env.errstr_stamp();
+        self.env.errstr_mark();
         if let Err(e) = eval_source(&mut self.env, src) {
             let mut msg = String::from("ut: ");
-            if self.env.errstr_stamp() == stamp {
+            if !self.env.errstr_is_fresh() {
                 let _ = core::fmt::write(&mut FmtSink(&mut msg), format_args!("{:?}", e.kind));
             } else {
                 msg.push_str(self.env.errstr());
@@ -1090,13 +1090,13 @@ impl Repl {
     /// detail lives in `$errstr` (eval_source records parse failures there);
     /// the StatementFlow result is irrelevant at the top level.
     fn run_line(&mut self, line: &str, out: &mut dyn IoWrite) {
-        let stamp = self.env.errstr_stamp();
+        self.env.errstr_mark();
         if let Err(e) = eval_source(&mut self.env, line) {
             // Prefer the rich `$errstr` when this error wrote it (eval_source on a
             // parse error, and many evaluator paths); what an earlier error left there
             // is not this one's message.
             let mut msg = String::from("ut: ");
-            if self.env.errstr_stamp() == stamp {
+            if !self.env.errstr_is_fresh() {
                 let _ = core::fmt::write(&mut FmtSink(&mut msg), format_args!("{:?}", e.kind));
             } else {
                 msg.push_str(self.env.errstr());
@@ -1402,6 +1402,21 @@ mod tests {
         let mut psink: Vec<u8> = Vec::new();
         let _ = plain.feed(b"let x = 1\n", &mut psink);
         assert!(!String::from_utf8_lossy(&psink).contains("k=cmd"), "plain tier: no mark");
+    }
+
+    #[test]
+    fn an_error_prints_its_own_text_and_no_older_text() {
+        let (_, _, sink) = drive(&[b"nosuchcommand; (( 1 / 0 ))\n"]);
+        let seen = alloc::string::String::from_utf8_lossy(&sink);
+        assert!(seen.contains("DivByZero"), "{seen}");
+        assert!(!seen.contains("spawn failed"), "{seen}");
+    }
+
+    #[test]
+    fn a_parse_error_prints_what_it_wrote() {
+        let (_, _, sink) = drive(&[b"(( 1 + ))\n"]);
+        let seen = alloc::string::String::from_utf8_lossy(&sink);
+        assert!(seen.contains("parse error: unexpected end of expression"), "{seen}");
     }
 
     #[test]

@@ -296,10 +296,29 @@ pub fn balance(s: &str) -> BalanceState {
 /// reports an error and then runs that next line on its own, unguarded.
 fn wants_next_line(buffer: &str) -> bool {
     use crate::parser::ParseErrorKind::{UnexpectedEof, UnterminatedHeredoc};
-    matches!(
-        crate::parser::parse(buffer).map_err(|e| e.kind),
-        Err(UnexpectedEof { .. } | UnterminatedHeredoc { .. })
-    )
+    let st = balance(&without_heredoc_bodies(buffer));
+    match crate::parser::parse(buffer) {
+        Err(e) => {
+            matches!(e.kind, UnexpectedEof { .. } | UnterminatedHeredoc { .. })
+                || st.awaits_continuation()
+        }
+        // The lexer and the parser have all they want, and they read a comment or a quote
+        // inside a substitution where `balance` does not. `[` and a trailing `\` are this
+        // editor's own rules, with no token to say so (UTOPIA-SHELL-DESIGN 5.3).
+        Ok(_) => st.bracket_depth > 0 || st.trailing_unescaped_backslash,
+    }
+}
+
+/// A heredoc's body is text: no quote or bracket in it opens anything.
+fn without_heredoc_bodies(buffer: &str) -> alloc::string::String {
+    let mut code = alloc::string::String::new();
+    let mut at = 0;
+    for body in crate::parser::lexer::heredoc_bodies(buffer) {
+        code.push_str(&buffer[at..body.start]);
+        at = body.end;
+    }
+    code.push_str(&buffer[at..]);
+    code
 }
 
 fn continuation_prefix(prompt_width: usize) -> alloc::string::String {
@@ -2230,8 +2249,7 @@ impl LineEditor {
         // require the parser to maintain a separate "raw buffer" with
         // continuations re-inserted, which is the opposite of the
         // separation of concerns scripted in UTOPIA-SHELL-DESIGN.md.
-        let st = balance(&self.buffer);
-        if st.awaits_continuation() || wants_next_line(&self.buffer) {
+        if wants_next_line(&self.buffer) {
             return self.do_insert('\n');
         }
         // Balanced: submit. The caller moves the terminal past the edited
@@ -2866,6 +2884,53 @@ mod tests {
             feed(&mut le, line.as_bytes());
             assert!(matches!(le.feed_byte(b'\r'), EditorAction::Accept(_)), "{line}");
         }
+    }
+
+    #[test]
+    fn a_heredoc_body_opens_nothing() {
+        for lines in [
+            &["cat <<EOF", "it's", "EOF"][..],
+            &["cat <<EOF", "say \"hi", "EOF"],
+            &["cat <<EOF", "f() {", "EOF"],
+            &["cat <<EOF", "a[", "EOF"],
+            &["cat <<EOF", "$(", "EOF"],
+            &["cat <<\"EOF\"", "(((", "ends in a slash \\", "EOF"],
+            &["cat <<EOF &&", "it's", "EOF", "echo '", "'"],
+            &["cat <<EOF &&", "text", "EOF", "echo ok"],
+            &["cat <<EOF |", "it's", "EOF", "wc"],
+        ] {
+            let mut le = LineEditor::new();
+            let (last, waits) = lines.split_last().unwrap();
+            for line in waits {
+                feed(&mut le, line.as_bytes());
+                assert_eq!(le.feed_byte(b'\r'), EditorAction::Redraw, "{lines:?}: {line}");
+            }
+            feed(&mut le, last.as_bytes());
+            assert!(matches!(le.feed_byte(b'\r'), EditorAction::Accept(_)), "{lines:?}");
+        }
+    }
+
+    #[test]
+    fn what_the_lexer_closes_is_closed() {
+        for line in ["echo $(a # )", r#"echo "$(echo "'")""#, "if ($x =~ /(/) { y }"] {
+            let mut le = LineEditor::new();
+            feed(&mut le, line.as_bytes());
+            assert!(matches!(le.feed_byte(b'\r'), EditorAction::Accept(_)), "{line}");
+        }
+        for line in ["echo [", "echo a\\", "echo '", "echo \"", "if (a) {", "echo $("] {
+            let mut le = LineEditor::new();
+            feed(&mut le, line.as_bytes());
+            assert_eq!(le.feed_byte(b'\r'), EditorAction::Redraw, "{line}");
+        }
+    }
+
+    #[test]
+    fn enter_waits_for_a_catch() {
+        let mut le = LineEditor::new();
+        feed(&mut le, b"try { a }");
+        assert_eq!(le.feed_byte(b'\r'), EditorAction::Redraw);
+        feed(&mut le, b"catch { b }");
+        assert!(matches!(le.feed_byte(b'\r'), EditorAction::Accept(_)));
     }
 
     #[test]

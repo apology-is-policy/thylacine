@@ -146,8 +146,13 @@ counters are signed, and `is_balanced` treats negative depth as balanced — a s
 `}` submits and lets the parser produce a real error, which is the natural shell
 experience. The tracker is deliberately *not* a tokenizer; [[sub-utopia-parser]]
 is authoritative, and this only has to decide "more input?". It does know `$#name` and
-`$"name`, which it would otherwise read as a comment and a quote. A balanced buffer still
-waits when the parser says more input would finish it: `if (c)`, `a &&`, `cat <<EOF`.
+`$"name`, which it would otherwise read as a comment and a quote. A heredoc's finished body
+is removed before the walk, since no quote or bracket in it opens anything. The parser then
+decides: if it says more input would finish the line (`if (c)`, `a &&`, `cat <<EOF`,
+`try { a }`), Enter waits. If it accepts the line, only `[` and a trailing `\` still wait,
+because they are this editor's own rules, and whatever else the walk finds open is its own
+misreading of a comment or a quote inside a substitution. If it refuses the line, the walk
+decides, so an unclosed quote waits; a refused line the walk misreads waits too, until Ctrl-C.
 
 **Rendering.** Single-line is `\r` + erase-to-end-of-line + prompt + buffer, then
 `\r` and a cursor-right to `prompt_width + visible_columns_before_cursor`.

@@ -90,6 +90,13 @@ pub fn tokenize(source: &str) -> ParseResult<Vec<Token>> {
     Ok(lex.tokens)
 }
 
+/// Where the heredoc bodies that found their terminator lie, as far as `source` lexes.
+pub fn heredoc_bodies(source: &str) -> Vec<Span> {
+    let mut lex = Lexer::new(source);
+    let _ = lex.run();
+    lex.heredoc_bodies
+}
+
 // ---------------------------------------------------------------------
 // Lexer state
 // ---------------------------------------------------------------------
@@ -100,6 +107,7 @@ struct Lexer<'a> {
     pos: usize,
     tokens: Vec<Token>,
     pending_heredocs: Vec<HeredocSpec>,
+    heredoc_bodies: Vec<Span>,
     /// Set by emitting EqualTilde; consumed by the next opening `/`
     /// to lex a Regex literal. Per scripture section 7.3.
     expect_regex_after: bool,
@@ -133,6 +141,7 @@ impl<'a> Lexer<'a> {
             pos: 0,
             tokens: Vec::new(),
             pending_heredocs: Vec::new(),
+            heredoc_bodies: Vec::new(),
             expect_regex_after: false,
             opens: Vec::new(),
             twos_open: 0,
@@ -352,6 +361,7 @@ impl<'a> Lexer<'a> {
             }
             if line == spec.tag.as_str() {
                 // Terminator. Body is [body_start, line_start).
+                self.heredoc_bodies.push(Span::new(body_start, line_start));
                 let body_bytes = &self.source[body_start..line_start];
                 let parts = if spec.interp {
                     parse_dq_or_heredoc_body(body_bytes, body_start)?

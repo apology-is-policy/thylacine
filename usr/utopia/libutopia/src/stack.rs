@@ -5,8 +5,9 @@
 //! their recursion also asks the stack.
 
 /// Left free below a check: the deepest call chain that meets no further check, a builtin's
-/// included. A drop of a tree does not run this low, as no statement runs beneath an
-/// expression, and the largest drop measured would still fit here.
+/// included, and the drop of a tree. A statement can run this low through nested calls and
+/// case arms, and one that replaces a function drops the old body here. The largest drop
+/// measured fits, and flow 11 of u-6-test runs it here on the guest.
 const RESERVE: usize = 1024 * 1024;
 
 #[cfg(test)]
