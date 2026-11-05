@@ -125,6 +125,7 @@ Generated — do not edit between the markers (`quaestor render`).
 
 ## Recent changes
 
+- 2026-11-05 [[chg-2026-11-05-as4-r6-shell]] — AS-4 audit round 6, the shell's half
 - 2026-11-05 [[chg-2026-11-05-ut-tree-walks]] — A parsed tree is shared, not copied, and its operators drop without recursing
 - 2026-11-04 [[chg-2026-11-04-compositor-band]] — The designated compositor's threads are INTERACTIVE
 - 2026-11-04 [[chg-2026-11-04-console-owner-gate]] — Only the session factory names a console owner
@@ -132,5 +133,4 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-11-04 [[chg-2026-11-04-merge-audit-r2]] — Merge audit r2's close on the join
 - 2026-11-04 [[chg-2026-11-04-merge-audit-r3]] — Merge audit r3's close
 - 2026-11-04 [[chg-2026-11-04-pinned-wake]] — A pinned thread's wake goes to its home CPU, not the waker's
-- 2026-11-04 [[chg-2026-11-04-ut-language]] — The shell's documented forms parse, and its stranded tests run
 <!-- generated:end -->

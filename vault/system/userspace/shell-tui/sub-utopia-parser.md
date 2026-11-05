@@ -191,14 +191,14 @@ opt-level, 2026-11-05):
   is the line's length and not the stack's. Per-parser counts could not bound that:
   a group starts a new parser, and ten substitutions of 60 groups of 250 operators overflowed
   on drop. `Operand`, the child of `BinOp`, `UnOp` and `Match`, drops with a worklist.
-  Levels of any other kind were paid for in parser stack, at a tenth or less of it in drop.
+  A level of any other kind needs a bracket or a re-lex.
 
-That leaves a drop's recursion bounded by the statements and substitutions, and the largest
-measured is 32 substitutions of 62 `a && {`, at 511 KiB. It can happen with only the reserve
-free, when a function is declared again from deep in an evaluation, so the reserve is 1 MiB,
-and the largest frame in the guest's `ut` is 4144 bytes. Only the guest's frames answer this,
-since a debug build's are several times larger: `u-6-test`'s flow 11 drops those trees where
-the check first fires.
+What a drop still recurses over is bounded by brackets, statements and re-lexes, and it does
+not have to fit in the reserve: no statement runs beneath an expression, so a function's old
+body is dropped with most of the stack free. The reserve is 1 MiB, and the largest frame in
+the guest's `ut` is 4144 bytes. Flow 11 in `u-6-test` asks for more than a drop needs, and drops
+large trees where the check first fires, on the guest's frames, for which a debug build's
+several times larger frames cannot stand in.
 
 ## Data structures
 
@@ -280,7 +280,10 @@ Nothing here is on a hot path — it runs once per line typed.
   it was answered wrong again, by the braceless `if`.
 - **A statement that wants its next line says so with `UnexpectedEof`.** The line editor's
   Enter continues on it, so `if (c)` then Enter waits. Without that, the second line of
-  `if ($ok)` / `rm x` ran unguarded after the first line's parse error.
+  `if ($ok)` / `rm x` ran unguarded after the first line's parse error. A connector at the end
+  of the input says the same, and an unterminated heredoc reads the same to the editor.
+  Inside a closed group or a substitution the same shortfall is `UnexpectedEndOfExpr`, which
+  submits and reports: `(( 1 + ))` can wait for no line.
 - **A new cycle must pass a stack check.** A bound keeps one shape reasonable, and only
   the check holds the product.
 - **A tree is walked by code nobody wrote.** A census by name cannot see `Drop` or a derived
@@ -381,8 +384,8 @@ Nothing here is on a hot path — it runs once per line typed.
   could break the REPL's line-continuation is FALSE: `line_editor` decides
   submission with its own `balance(buffer)` tracker (*"intentionally
   lightweight; the U-5 parser is authoritative"*), and nothing outside
-  `parser/` consumes `UnexpectedEof` at all. Its blast radius is the diagnostic
-  a truncated script file prints.
+  `parser/` consumed `UnexpectedEof` at all. Its blast radius was the diagnostic
+  a truncated script file prints. Since 2026-11-04 the editor does read it.
 
 - **Running out of input says so** (UT-PARSE-4, fixed 2026-09-22).
   `expect_kind`'s `UnexpectedEof` arm keyed on `peek_kind() == None` and was

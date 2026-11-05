@@ -1032,9 +1032,10 @@ impl Repl {
         // A `#!` spawn passes no `--home`, so nothing else seeds `$cwd`.
         self.adopt_kernel_cwd();
         self.bind_positionals(arg0, args);
+        let stamp = self.env.errstr_stamp();
         if let Err(e) = eval_source(&mut self.env, src) {
             let mut msg = String::from("ut: ");
-            if self.env.errstr().is_empty() {
+            if self.env.errstr_stamp() == stamp {
                 let _ = core::fmt::write(&mut FmtSink(&mut msg), format_args!("{:?}", e.kind));
             } else {
                 msg.push_str(self.env.errstr());
@@ -1089,12 +1090,13 @@ impl Repl {
     /// detail lives in `$errstr` (eval_source records parse failures there);
     /// the StatementFlow result is irrelevant at the top level.
     fn run_line(&mut self, line: &str, out: &mut dyn IoWrite) {
+        let stamp = self.env.errstr_stamp();
         if let Err(e) = eval_source(&mut self.env, line) {
-            // Prefer the rich `$errstr` (set by eval_source on a parse error,
-            // and by many evaluator error paths); fall back to the error
-            // kind so a diagnostic always reaches the user.
+            // Prefer the rich `$errstr` when this error wrote it (eval_source on a
+            // parse error, and many evaluator paths); what an earlier error left there
+            // is not this one's message.
             let mut msg = String::from("ut: ");
-            if self.env.errstr().is_empty() {
+            if self.env.errstr_stamp() == stamp {
                 let _ = core::fmt::write(&mut FmtSink(&mut msg), format_args!("{:?}", e.kind));
             } else {
                 msg.push_str(self.env.errstr());

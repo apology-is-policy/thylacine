@@ -83,6 +83,7 @@ use core::fmt::Write as _;
 use crate::parser::ast::{BinOp, Expr, ExprKind, MatchOp, UnOp};
 use crate::parser::lexer::unescape;
 use crate::parser::token::DqPart;
+use crate::parser::Span;
 
 use super::env::Env;
 use super::error::{EvalError, EvalErrorKind, EvalResult};
@@ -263,6 +264,7 @@ fn concat_with(
     let mut acc: Vec<String> = part(env, &parts[0])?.0;
     for p in &parts[1..] {
         let next = part(env, p)?.0;
+        check_cross_product(&acc, &next, p.span)?;
         // Cross-product
         let mut new_acc = Vec::with_capacity(acc.len() * next.len());
         for a in &acc {
@@ -502,6 +504,21 @@ fn eval_match(
 ///
 /// A list stands for one pattern per element, any of which will do, and an empty
 /// list matches nothing.
+/// Most bytes a `^` may build, with a `String`'s own size counted for each element. A dozen
+/// short lists multiply past any machine, and running out of memory ends whoever touches
+/// the next page, not necessarily this shell.
+const CROSS_PRODUCT_MAX_BYTES: u128 = 64 * 1024 * 1024;
+
+pub(super) fn check_cross_product(left: &[String], right: &[String], span: Span) -> EvalResult<()> {
+    let bytes = |list: &[String]| list.iter().map(|s| s.len() as u128).sum::<u128>();
+    let (l, r) = (left.len() as u128, right.len() as u128);
+    let element = core::mem::size_of::<String>() as u128;
+    if bytes(left) * r + bytes(right) * l + element * l * r > CROSS_PRODUCT_MAX_BYTES {
+        return Err(EvalError::new(EvalErrorKind::ListTooLong, span));
+    }
+    Ok(())
+}
+
 pub(super) fn pattern_matches(env: &Env, expr: &Expr, subject: &str) -> EvalResult<bool> {
     Ok(pattern_value(env, expr)?.0.iter().any(|p| glob::matches(p, subject)))
 }

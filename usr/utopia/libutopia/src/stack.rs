@@ -5,8 +5,8 @@
 //! their recursion also asks the stack.
 
 /// Left free below a check: the deepest call chain that meets no further check, a builtin's
-/// included, and the drop of a function's old body from there. The deepest body a line can
-/// build took 511 KiB to drop at the guest's opt-level.
+/// included. A drop of a tree does not run this low, as no statement runs beneath an
+/// expression, and the largest drop measured would still fit here.
 const RESERVE: usize = 1024 * 1024;
 
 #[cfg(test)]

@@ -248,6 +248,10 @@ pub fn balance(s: &str) -> BalanceState {
             '\\' => escaped = true,
             '{' => st.brace_depth += 1,
             '}' => st.brace_depth -= 1,
+            // `$#name` and `$"name` are forms of a variable: no comment, no quote.
+            '$' if matches!(chars.clone().next(), Some('#' | '"')) => {
+                chars.next();
+            }
             '(' => st.paren_depth += 1,
             ')' => st.paren_depth -= 1,
             '[' => st.bracket_depth += 1,
@@ -291,12 +295,10 @@ pub fn balance(s: &str) -> BalanceState {
 /// `if (c)` and `else` balance and still want what follows, as in rc. Submitting one
 /// reports an error and then runs that next line on its own, unguarded.
 fn wants_next_line(buffer: &str) -> bool {
+    use crate::parser::ParseErrorKind::{UnexpectedEof, UnterminatedHeredoc};
     matches!(
-        crate::parser::parse(buffer),
-        Err(crate::parser::ParseError {
-            kind: crate::parser::ParseErrorKind::UnexpectedEof { .. },
-            ..
-        })
+        crate::parser::parse(buffer).map_err(|e| e.kind),
+        Err(UnexpectedEof { .. } | UnterminatedHeredoc { .. })
     )
 }
 
@@ -2855,6 +2857,44 @@ mod tests {
         // A syntax error is not that, and goes through to be reported.
         feed(&mut le, b"if )");
         assert!(matches!(le.feed_byte(b'\r'), EditorAction::Accept(_)));
+    }
+
+    #[test]
+    fn enter_reports_what_no_further_line_can_finish() {
+        for line in ["(( 1 + ))", "if (a == ) { x }", "let x = case", "x = $(if (a))", "echo $x(1 +)", "x = $(cat <<EOF)"] {
+            let mut le = LineEditor::new();
+            feed(&mut le, line.as_bytes());
+            assert!(matches!(le.feed_byte(b'\r'), EditorAction::Accept(_)), "{line}");
+        }
+    }
+
+    #[test]
+    fn enter_waits_on_a_connector_and_a_heredoc() {
+        for (first, second) in [("check &&", "rm x"), ("a ||", "b"), ("a |", "b"), ("cat <<EOF", "text\nEOF")] {
+            let mut le = LineEditor::new();
+            feed(&mut le, first.as_bytes());
+            assert_eq!(le.feed_byte(b'\r'), EditorAction::Redraw, "{first}");
+            for line in second.split('\n') {
+                feed(&mut le, line.as_bytes());
+                let got = le.feed_byte(b'\r');
+                if line == second.split('\n').last().unwrap() {
+                    assert!(matches!(got, EditorAction::Accept(_)), "{first}: {line}: {got:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_variable_form_is_no_comment_and_no_quote() {
+        for line in ["if ($#* > 0) { echo hi }", "let p = (( $#files - 1 ))", "fn f { echo $#* }", "echo $\"args"] {
+            assert!(!balance(line).awaits_continuation(), "{line}");
+            let mut le = LineEditor::new();
+            feed(&mut le, line.as_bytes());
+            assert!(matches!(le.feed_byte(b'\r'), EditorAction::Accept(_)), "{line}");
+        }
+        // A comment and a quote still are.
+        assert!(balance("echo \"$a").awaits_continuation());
+        assert!(!balance("echo a # (").awaits_continuation());
     }
 
     #[test]

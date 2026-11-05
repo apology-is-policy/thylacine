@@ -508,11 +508,11 @@ fn at_the_reserve(f: &mut dyn FnMut()) {
     core::hint::black_box(&pad);
 }
 
-// Flow 11 -- the shell can get rid of the largest tree a line can build from the lowest point a
-// line can reach, as it does when a function is declared again down there. Host tests
-// cannot say so: only these frames are the ones that have to fit. A chain costs the parser
-// no stack at all, and each `a && {` costs the most to drop for what it cost to parse. A deep
-// body is declared and called too, which copied the tree when it was a copy.
+// Flow 11 -- large trees drop in what the check leaves free, which is more than any drop has
+// to do, since no statement runs beneath an expression. Host tests cannot say so: only these
+// frames are the ones that have to fit. A chain costs the parser no stack at all, and each
+// `a && {` costs a lot to drop for what it cost to parse. A deep body is declared and called
+// too, which copied the tree when it was a copy.
 fn flow_trees_at_the_stack_end() -> Result<(), i64> {
     let streams = |level: &dyn Fn(&str) -> String, n: usize| {
         let mut s = String::from("1");

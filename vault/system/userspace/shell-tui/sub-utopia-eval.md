@@ -445,7 +445,10 @@ ask `crate::stack` ([[sub-utopia-parser]] has the check) and answer `RecursionLi
 block in between. A glob's walk is a worklist since the same day: a long pattern over a
 deep tree costs heap, and no open directory waits on a descent.
 A function's body and a note handler are `Rc`s shared with the tree, since copying one
-recurses with no check at all.
+recurses with no check at all. A positional reads only the innermost frame a call bound `*`
+in, so a body given fewer arguments than its caller reads empty, not the caller's. A `^`
+stops at 64 MiB of product with `ListTooLong`: running out of memory ends whoever touches the
+next page.
 
 ## Data structures
 

@@ -123,7 +123,7 @@ pub fn parse_expr_tokens(
         });
     }
     let mut p = ExprParser::new(tokens, source_len, ctx);
-    let expr = p.parse_top()?;
+    let expr = p.parse_top().map_err(ended_inside)?;
     if !p.at_end() {
         return Err(ParseError {
             kind: ParseErrorKind::TrailingTokensInExpr,
@@ -131,6 +131,19 @@ pub fn parse_expr_tokens(
         });
     }
     Ok(expr)
+}
+
+/// A parse that ran out inside a closed group or a substitution, where no further line can
+/// supply what it wanted.
+fn ended_inside(e: ParseError) -> ParseError {
+    let kind = match e.kind {
+        ParseErrorKind::UnexpectedEof { expected } => ParseErrorKind::UnexpectedEndOfExpr { expected },
+        ParseErrorKind::UnterminatedHeredoc { .. } => {
+            ParseErrorKind::UnexpectedEndOfExpr { expected: "the heredoc's closing line" }
+        }
+        other => other,
+    };
+    ParseError { kind, span: e.span }
 }
 
 // ---------------------------------------------------------------------
@@ -233,6 +246,13 @@ impl ExprParser {
         // Explicit list `(a b c)` -- accept only if it's the entire
         // expression (the only top-level item).
         if let Some(TokenKind::LParen) = self.peek_kind() {
+            // Inside arithmetic the lexer gives `((` as two parens, and a list holds no
+            // group, so here they can only be inline arithmetic.
+            if let (Some(a), Some(b)) = (self.peek(), self.tokens.get(self.pos + 1)) {
+                if b.kind == TokenKind::LParen && a.span.end == b.span.start {
+                    return self.parse_group(ExprContext::Arith);
+                }
+            }
             // Look ahead: does this paren wrap the whole expression?
             // We treat ANY top-level `(` in value/return position as
             // a list literal per scripture 6.3 + U-5b lock #9.
@@ -320,6 +340,58 @@ impl ExprParser {
     // -----------------------------------------------------------------
     // Inline `(( ... ))` arith in non-arith context.
     // -----------------------------------------------------------------
+
+    /// `( expr )`. A `((` here opens this group and one more inside it.
+    fn parse_group(&mut self, ctx: ExprContext) -> ParseResult<Expr> {
+        let open = self.advance();
+        let mut body: Vec<Token> = Vec::new();
+        let mut depth: i32 = 1;
+        if matches!(open.kind, TokenKind::DoubleLParen) {
+            let inner = Span::new(open.span.start + 1, open.span.end);
+            body.push(Token::new(TokenKind::LParen, inner));
+            depth = 2;
+        }
+        while !self.at_end() {
+            let t = self.peek().expect("at_end above");
+            match &t.kind {
+                TokenKind::LParen => depth += 1,
+                TokenKind::DoubleLParen => depth += 2,
+                TokenKind::RParen => {
+                    depth -= 1;
+                    if depth == 0 {
+                        let close = self.advance();
+                        return self.finish_group(body, ctx, open.span.start, close.span.end);
+                    }
+                }
+                TokenKind::DoubleRParen => {
+                    depth -= 2;
+                    if depth == 0 {
+                        let close = self.advance();
+                        let inner = Span::new(close.span.start, close.span.start + 1);
+                        body.push(Token::new(TokenKind::RParen, inner));
+                        return self.finish_group(body, ctx, open.span.start, close.span.end);
+                    }
+                    if depth < 0 {
+                        return Err(ParseError {
+                            kind: ParseErrorKind::UnexpectedToken { expected: "`)`" },
+                            span: t.span,
+                        });
+                    }
+                }
+                _ => {}
+            }
+            body.push(self.advance());
+        }
+        Err(ParseError {
+            kind: ParseErrorKind::UnexpectedEof { expected: "`)`" },
+            span: self.eof_span(),
+        })
+    }
+
+    fn finish_group(&self, body: Vec<Token>, ctx: ExprContext, start: usize, end: usize) -> ParseResult<Expr> {
+        let inner = parse_expr_tokens(body, self.source_len, ctx)?;
+        Ok(Expr { kind: inner.kind, span: Span::new(start, end) })
+    }
 
     fn parse_inline_arith(&mut self) -> ParseResult<Expr> {
         let open = self.advance(); // DoubleLParen
@@ -908,126 +980,11 @@ impl ExprParser {
         if matches!(self.peek_kind(), Some(TokenKind::Case)) {
             return self.parse_case_expr();
         }
-        // Parenthesized sub-expression `( expr )` -- valid in all
-        // operator contexts.
-        if let Some(TokenKind::LParen) = self.peek_kind() {
-            // In arith context, `(...)` is grouping; in non-arith,
-            // the value-top path already dispatched to list literal.
-            // Here in arith: collect tokens, parse_expr_tokens
-            // recursively.
-            if self.ctx == ExprContext::Arith {
-                let open = self.advance();
-                let mut body: Vec<Token> = Vec::new();
-                let mut depth: i32 = 1;
-                while !self.at_end() {
-                    let t = self.peek().expect("at_end above");
-                    match &t.kind {
-                        TokenKind::LParen => depth += 1,
-                        TokenKind::DoubleLParen => depth += 2,
-                        TokenKind::RParen => {
-                            depth -= 1;
-                            if depth == 0 {
-                                let close = self.advance();
-                                let inner = parse_expr_tokens(
-                                    body,
-                                    self.source_len,
-                                    ExprContext::Arith,
-                                )?;
-                                return Ok(Expr {
-                                    kind: inner.kind,
-                                    span: Span::new(open.span.start, close.span.end),
-                                });
-                            }
-                        }
-                        TokenKind::DoubleRParen => {
-                            depth -= 2;
-                            if depth == 0 {
-                                let close = self.advance();
-                                let inner = parse_expr_tokens(
-                                    body,
-                                    self.source_len,
-                                    ExprContext::Arith,
-                                )?;
-                                return Ok(Expr {
-                                    kind: inner.kind,
-                                    span: Span::new(open.span.start, close.span.end),
-                                });
-                            }
-                            if depth < 0 {
-                                return Err(ParseError {
-                                    kind: ParseErrorKind::UnexpectedToken {
-                                        expected: "`)`",
-                                    },
-                                    span: t.span,
-                                });
-                            }
-                        }
-                        _ => {}
-                    }
-                    body.push(self.advance());
-                }
-                return Err(ParseError {
-                    kind: ParseErrorKind::UnexpectedEof { expected: "`)`" },
-                    span: self.eof_span(),
-                });
-            }
-            // In cond context, `(...)` is grouping.
-            if self.ctx == ExprContext::Cond {
-                let open = self.advance();
-                let mut body: Vec<Token> = Vec::new();
-                let mut depth: i32 = 1;
-                while !self.at_end() {
-                    let t = self.peek().expect("at_end above");
-                    match &t.kind {
-                        TokenKind::LParen => depth += 1,
-                        TokenKind::DoubleLParen => depth += 2,
-                        TokenKind::RParen => {
-                            depth -= 1;
-                            if depth == 0 {
-                                let close = self.advance();
-                                let inner = parse_expr_tokens(
-                                    body,
-                                    self.source_len,
-                                    ExprContext::Cond,
-                                )?;
-                                return Ok(Expr {
-                                    kind: inner.kind,
-                                    span: Span::new(open.span.start, close.span.end),
-                                });
-                            }
-                        }
-                        TokenKind::DoubleRParen => {
-                            depth -= 2;
-                            if depth == 0 {
-                                let close = self.advance();
-                                let inner = parse_expr_tokens(
-                                    body,
-                                    self.source_len,
-                                    ExprContext::Cond,
-                                )?;
-                                return Ok(Expr {
-                                    kind: inner.kind,
-                                    span: Span::new(open.span.start, close.span.end),
-                                });
-                            }
-                            if depth < 0 {
-                                return Err(ParseError {
-                                    kind: ParseErrorKind::UnexpectedToken {
-                                        expected: "`)`",
-                                    },
-                                    span: t.span,
-                                });
-                            }
-                        }
-                        _ => {}
-                    }
-                    body.push(self.advance());
-                }
-                return Err(ParseError {
-                    kind: ParseErrorKind::UnexpectedEof { expected: "`)`" },
-                    span: self.eof_span(),
-                });
-            }
+        // In arith and cond, `(...)` is grouping; a value's list went to the value-top path.
+        if matches!(self.peek_kind(), Some(TokenKind::LParen | TokenKind::DoubleLParen))
+            && matches!(self.ctx, ExprContext::Arith | ExprContext::Cond)
+        {
+            return self.parse_group(self.ctx);
         }
         // Atom dispatch.
         let tok = match self.peek() {
@@ -1056,7 +1013,11 @@ impl ExprParser {
                 // Try retokenizing: if the Word splits cleanly into
                 // digit-runs + arith-operator chars, parse the
                 // resulting micro-stream.
-                if let Some(micro) = retokenize_arith_word(s, tok.span.start) {
+                // A word that splits into only itself is no number, such as one past i64.
+                let split = retokenize_arith_word(s, tok.span.start).filter(|micro| {
+                    !matches!(micro.as_slice(), [Token { kind: TokenKind::Word(w), .. }] if w == s)
+                });
+                if let Some(micro) = split {
                     // Re-parse the micro stream as a complete arith
                     // expression using a fresh ExprParser.
                     let sub = parse_expr_tokens(micro, self.source_len, ExprContext::Arith)?;

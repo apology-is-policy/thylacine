@@ -125,6 +125,8 @@ pub struct Env {
     /// $errstr -- last command's error string (rc tradition;
     /// scripture 8.5). Initialized to "".
     errstr: String,
+    /// Writes to `errstr` so far, so an error can tell whether the text is its own.
+    errstr_writes: u64,
     /// $cwd -- current working directory. Initialized to "/" until
     /// the first cd or until the caller sets it (ut sets it from the
     /// kernel at startup: `Repl::adopt_kernel_cwd`).
@@ -278,6 +280,7 @@ impl Env {
             status: Cell::new(0),
             substitutions: Cell::new(0),
             errstr: String::new(),
+            errstr_writes: 0,
             cwd: "/".to_string(),
             interactive: false,
             stdio_inherit: false,
@@ -363,6 +366,9 @@ impl Env {
         if let Some(v) = self.special_get(name) {
             return v;
         }
+        if let Some(frame) = self.positional_frame(name) {
+            return frame.get(name).cloned().unwrap_or_else(Value::empty);
+        }
         for frame in self.scopes.iter().rev() {
             if let Some(v) = frame.get(name) {
                 return v.clone();
@@ -375,7 +381,19 @@ impl Env {
     /// `get(name).is_empty()` because an explicitly-set empty value
     /// is "defined" in scripture's sense.
     pub fn defined(&self, name: &str) -> bool {
+        if let Some(frame) = self.positional_frame(name) {
+            return frame.contains_key(name);
+        }
         self.scopes.iter().rev().any(|frame| frame.contains_key(name))
+    }
+
+    /// Where a positional is read from: the innermost frame a call bound `*` in. A body given
+    /// fewer arguments than its caller must not read the caller's.
+    fn positional_frame(&self, name: &str) -> Option<&BTreeMap<String, Value>> {
+        if name.is_empty() || !name.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        self.scopes.iter().rev().find(|frame| frame.contains_key("*"))
     }
 
     /// `let name = value` -- create a binding in the TOPMOST frame
@@ -566,6 +584,11 @@ impl Env {
 
     pub fn errstr_set<S: Into<String>>(&mut self, s: S) {
         self.errstr = s.into();
+        self.errstr_writes += 1;
+    }
+
+    pub fn errstr_stamp(&self) -> u64 {
+        self.errstr_writes
     }
 
     pub fn cwd(&self) -> &str {

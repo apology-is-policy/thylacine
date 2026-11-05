@@ -1793,6 +1793,7 @@ fn eval_word(env: &Env, word: &Word) -> EvalResult<Value> {
             };
             for tok in &toks[1..] {
                 let next = eval_value_token(env, tok)?;
+                super::expr::check_cross_product(&acc.0, &next.0, tok.span)?;
                 let mut new_acc = Vec::with_capacity(acc.len() * next.len());
                 for a in &acc.0 {
                     for b in &next.0 {
@@ -3042,12 +3043,10 @@ pub(crate) fn eval_source_as_command(env: &mut Env, src: &str) -> EvalResult<Sta
 fn parse_source(env: &mut Env, src: &str) -> EvalResult<Script> {
     use crate::parser::parse;
     parse(src).map_err(|e| {
-        // ParseErrorKind has no Display impl; use Debug to keep
-        // the diagnostic readable in $errstr. EvalError::Internal
-        // takes a &'static str, so the user-facing detail goes via
-        // errstr; the static tag identifies the source.
+        // EvalError::Internal takes a &'static str, so the user-facing
+        // detail goes via errstr; the static tag identifies the source.
         let mut msg = String::new();
-        let _ = write!(&mut msg, "parse error: {:?}", e.kind);
+        let _ = write!(&mut msg, "parse error: {}", e);
         env.errstr_set(msg);
         EvalError::new(EvalErrorKind::Internal("parse failed"), e.span)
     })
@@ -3262,6 +3261,63 @@ mod tests {
         assert_eq!(env.get("c").as_scalar(), "1");
         run(&mut env, "d = 0\nif (~ foo.rs $pats) d = 1\nif (~ '' $none) d = 1\n");
         assert_eq!(env.get("d").as_scalar(), "0");
+    }
+
+    #[test]
+    fn a_refused_line_says_why() {
+        crate::stack::on_stack_of(2 * 1024 * 1024, || {
+            let mut env = Env::new();
+            crate::stack::stop_here();
+            assert!(eval_source(&mut env, "{ x }\n").is_err());
+            assert_eq!(env.errstr(), "parse error: input nesting too deep (recursion limit exceeded)");
+        });
+    }
+
+    #[test]
+    fn a_body_reads_its_own_positionals_and_no_others() {
+        let mut env = Env::new();
+        env.let_set("1", Value::scalar(String::from("script-1")));
+        env.let_set("2", Value::scalar(String::from("script-2")));
+        env.let_set("*", Value::list(alloc::vec![String::from("script-1"), String::from("script-2")]));
+        let src = "fn g { a = $1; b = $2; c = $#*; d = $3 }\nfn f { g only }\nf x y z\n";
+        let s = crate::parser::parse(src).expect("parses");
+        eval_block(&mut env, &s.statements).expect("runs");
+        assert_eq!(env.get("a").as_scalar(), "only");
+        assert!(env.get("b").is_empty(), "the caller's $2 leaked: {:?}", env.get("b"));
+        assert_eq!(env.get("c").as_scalar(), "1");
+        assert!(env.get("d").is_empty());
+        assert_eq!(env.get("2").as_scalar(), "script-2");
+        assert!(env.defined("2"));
+    }
+
+    #[test]
+    fn a_later_error_prints_its_own_kind() {
+        let mut env = Env::new();
+        let stamp = env.errstr_stamp();
+        env.errstr_set("spawn failed");
+        assert_ne!(env.errstr_stamp(), stamp);
+        let stamp = env.errstr_stamp();
+        let s = crate::parser::parse("(( 1 / 0 ))\n").expect("parses");
+        assert!(eval_block(&mut env, &s.statements).is_err());
+        assert_eq!(env.errstr_stamp(), stamp, "nothing set errstr, so its text is not this error's");
+    }
+
+    #[test]
+    fn a_concatenation_past_any_real_list_is_an_error() {
+        let mut env = Env::new();
+        let s = crate::parser::parse("l = (1 2 3 4 5 6 7 8 9 0)\n").expect("parses");
+        eval_block(&mut env, &s.statements).expect("runs");
+        for line in [
+            "x = $l^$l^$l^$l^$l^$l^$l^$l^$l^$l\n",
+            "echo $l^$l^$l^$l^$l^$l^$l^$l^$l^$l\n",
+        ] {
+            let s = crate::parser::parse(line).expect("parses");
+            let e = eval_block(&mut env, &s.statements).expect_err(line);
+            assert_eq!(e.kind, EvalErrorKind::ListTooLong);
+        }
+        let s = crate::parser::parse("y = $l^$l^$l\n").expect("parses");
+        eval_block(&mut env, &s.statements).expect("runs");
+        assert_eq!(env.get("y").0.len(), 1000);
     }
 
     #[test]

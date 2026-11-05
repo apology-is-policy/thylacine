@@ -77,6 +77,9 @@ pub enum ParseErrorKind {
     /// The token stream ended mid-construct (after an `if (`, after
     /// `let`, etc.). `expected` describes what was being parsed.
     UnexpectedEof { expected: &'static str },
+    /// The same inside a closed group or a substitution, where no further line can supply
+    /// it: only `UnexpectedEof` tells the line editor to wait for more.
+    UnexpectedEndOfExpr { expected: &'static str },
     /// A bare identifier was required (after `let`, after `fn`, as
     /// the loop variable in `for (NAME in ...)`) but the token was
     /// something else (a keyword, an operator, a quoted string, ...).
@@ -193,6 +196,9 @@ impl fmt::Display for ParseError {
             }
             ParseErrorKind::UnexpectedEof { expected } => {
                 write!(f, "unexpected end of input; expected {}", expected)
+            }
+            ParseErrorKind::UnexpectedEndOfExpr { expected } => {
+                write!(f, "unexpected end of expression; expected {}", expected)
             }
             ParseErrorKind::ExpectedIdent => f.write_str("expected an identifier"),
             ParseErrorKind::EmptyPipelineElement => {

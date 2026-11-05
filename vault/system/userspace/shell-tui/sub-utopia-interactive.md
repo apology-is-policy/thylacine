@@ -145,7 +145,9 @@ trailing backslash is stripped before the newline (the rc/sh continuation). Dept
 counters are signed, and `is_balanced` treats negative depth as balanced — a stray
 `}` submits and lets the parser produce a real error, which is the natural shell
 experience. The tracker is deliberately *not* a tokenizer; [[sub-utopia-parser]]
-is authoritative, and this only has to decide "more input?".
+is authoritative, and this only has to decide "more input?". It does know `$#name` and
+`$"name`, which it would otherwise read as a comment and a quote. A balanced buffer still
+waits when the parser says more input would finish it: `if (c)`, `a &&`, `cat <<EOF`.
 
 **Rendering.** Single-line is `\r` + erase-to-end-of-line + prompt + buffer, then
 `\r` and a cursor-right to `prompt_width + visible_columns_before_cursor`.

@@ -414,6 +414,7 @@ impl Parser {
             };
             self.pos += 1;
             self.skip_newlines_only(); // allow a line break after `&&` / `||`
+            self.need_more_after_connector()?;
             rest.push((op, self.parse_pipeline()?));
         }
         if rest.is_empty() {
@@ -436,6 +437,17 @@ impl Parser {
         }
     }
 
+    /// The end of input after a connector is no empty element: the next line can finish it.
+    fn need_more_after_connector(&self) -> ParseResult<()> {
+        if self.at_eof() {
+            return Err(ParseError {
+                kind: ParseErrorKind::UnexpectedEof { expected: "a command" },
+                span: self.current_span(),
+            });
+        }
+        Ok(())
+    }
+
     fn parse_pipeline(&mut self) -> ParseResult<Pipeline> {
         let start = self.current_span().start;
         let mut elements = Vec::new();
@@ -446,6 +458,7 @@ impl Parser {
                 Some(TokenKind::Pipe) => {
                     self.pos += 1;
                     self.skip_newlines_only();
+                    self.need_more_after_connector()?;
                     let next = self.parse_pipeline_element()?;
                     elements.push(next);
                 }
@@ -457,6 +470,7 @@ impl Parser {
                     }
                     self.pos += 1;
                     self.skip_newlines_only();
+                    self.need_more_after_connector()?;
                     let next = self.parse_pipeline_element()?;
                     elements.push(next);
                 }
@@ -3063,6 +3077,64 @@ mod tests {
             let tree = parse(&source).expect("parses");
             crate::stack::at_the_reserve(move || drop(tree));
         });
+    }
+
+    #[test]
+    fn a_digit_run_past_i64_is_no_number() {
+        for src in ["(( 99999999999999999999 ))\n", "x = (( 1 + 99999999999999999999 ))\n"] {
+            assert_eq!(parse_err(src), ParseErrorKind::InvalidArithLiteral, "{src}");
+        }
+    }
+
+    #[test]
+    fn a_group_can_open_at_a_later_paren_too() {
+        for s in [
+            "if ($a && (($b) || $c)) x\n",
+            "if ($x && ((a))) y\n",
+            "while ($a == b || (($c) && ($d))) { y }\n",
+            "(( case $x { a => (( 1 )) ; b => 2 } ))\n",
+            "(( case $x { a => ((((1 + 2) * 3))) ; b => 2 } ))\n",
+        ] {
+            assert!(parse(s).is_ok(), "{s}: {:?}", parse_err(s));
+        }
+        // Apart, they are a list holding a group, as they always were.
+        assert!(parse("(( case $x { a => ( ( 1 ) ) ; b => 2 } ))\n").is_err());
+    }
+
+    #[test]
+    fn the_end_of_input_inside_a_closed_group_is_not_the_end_of_the_input() {
+        for src in [
+            "(( 1 + ))",
+            "(( - ))",
+            "let y = (( $x * ))",
+            "echo $x(1 +)",
+            "if (a == ) { x }",
+            "if (!) x",
+            "if (~) x",
+            "while ($x ==) { y }",
+            "if (a) { x } else if (b ==) { y }",
+            "let x = case",
+            "x = case $y",
+            "let x = $(if (a))",
+            "x = `{fn f}",
+            "x = $(a |)",
+            "x = $(a &&)",
+            "x = $(cat <<EOF)",
+        ] {
+            assert!(parse(src).is_err(), "{src}");
+            assert!(!matches!(parse_err(src), ParseErrorKind::UnexpectedEof { .. }), "{src}: {:?}", parse_err(src));
+        }
+    }
+
+    #[test]
+    fn a_connector_at_the_end_of_input_wants_what_follows() {
+        for src in ["a &&", "a ||", "a |", "a ?|", "a &&\n", "a |\n\n"] {
+            assert!(matches!(parse_err(src), ParseErrorKind::UnexpectedEof { .. }), "{src}: {:?}", parse_err(src));
+        }
+        // With no command on its other side the pipe is simply wrong.
+        for src in ["a | ; b", "{ a | }", "a && ; b"] {
+            assert!(!matches!(parse_err(src), ParseErrorKind::UnexpectedEof { .. }), "{src}: {:?}", parse_err(src));
+        }
     }
 
     #[test]
