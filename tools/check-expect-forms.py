@@ -1,12 +1,19 @@
 #!/usr/bin/env python3
-"""A scenario's bounded wait must not put a flag beside a single block of arms.
+"""A scenario's wait must give expect its arms in a form expect reads as arms.
 
-`expect -timeout N {arms}` has a flag and one more argument, so expect reads the
-block as one literal pattern with no action. No arm is armed: the wait runs out and
-returns, and no failure arm in it can fire. Only a bare `expect {arms}` is read as
-arms. This has happened twice: lib.exp's lc_fail_detail, and every wait in
-ls-halcyon-paste-flow.exp. lc_within is the form. `expect -timeout N -re {a} {b}` and
-`expect -timeout N {a} {b}` are arms, and fine.
+expect takes a single argument as a list of arms only when a newline comes before its
+first word, and only when it is the sole argument. Anything else is one literal pattern
+with no action: no arm is armed, the wait runs out and returns, and no failure arm in it
+can fire. Run on expect 5.45, each of these fired nothing:
+
+    expect -timeout N {arms}          a flag, and any flag: -i, -notransfer, -nocase
+    expect { -ex "a" {} timeout {} }  on one line
+    lc_within N { -ex "a" {} }        the same, since it passes its block on
+
+This has happened twice: lib.exp's lc_fail_detail, and every wait in
+ls-halcyon-paste-flow.exp. lc_within with its arms on their own lines is the form.
+`expect -timeout N -re {a} {b}`, `expect -timeout N {a} {b}`, `expect -timeout N "a"` and
+`expect {a}` are not blocks of arms, and fine.
 
 Run with no arguments to check the tree (rc 1 on a hit) or --self-test for the
 checker's own controls. --root DIR checks another tree.
@@ -17,9 +24,10 @@ import re
 import sys
 
 # A command word: the start of a line, or after `;`, `{` or `[`.
-COMMAND = re.compile(r"(?:^|[;{\[])[ \t]*expect(?=[ \t\\])", re.M)
-# Flags of the command itself, each with its value. A pattern's own flags come after.
+COMMAND = re.compile(r"(?:^|[;{\[])[ \t]*(expect|lc_within)(?=[ \t\\])", re.M)
+# Flags of the command itself. A pattern's own flags, such as -re, end this list.
 TAKES_VALUE = {"-timeout", "-i"}
+ALONE = {"-nocase", "-notransfer", "-indices", "-nobrace"}
 
 
 def line_of(text, at):
@@ -75,18 +83,32 @@ def words(text, at):
     return out
 
 
-def dead(args):
+def holds_arms(block):
+    """Whether a braced word is meant as arms and not as one pattern."""
+    inner = block[1:-1]
+    return "\n" in inner or re.search(r"[ \t]\{", inner) is not None
+
+
+def dead(args, within=False):
     flagged = False
-    i = 0
+    i = 1 if within else 0
     while i < len(args):
-        if args[i] == "-brace":
-            return False
-        if args[i] in TAKES_VALUE:
+        if args[i] in TAKES_VALUE or args[i].startswith("-timeo"):
             flagged = True
             i += 2
+        elif args[i] in ALONE:
+            flagged = True
+            i += 1
         else:
             break
-    return flagged and len(args) - i == 1
+    if len(args) - i != 1:
+        return False
+    word = args[i]
+    if word.startswith("{"):
+        if not flagged and re.match(r"\{[ \t]*\n", word):
+            return False
+        return holds_arms(word)
+    return flagged and word[0] in "$["
 
 
 def findings(text):
@@ -95,7 +117,7 @@ def findings(text):
         begin = text.rfind("\n", 0, m.start() + 1) + 1
         if text[begin : m.end()].lstrip().startswith("#"):
             continue
-        if dead(words(text, m.end())):
+        if dead(words(text, m.end()), m.group(1) == "lc_within"):
             hits.append(line_of(text, m.end()))
     return hits
 
@@ -112,6 +134,14 @@ def self_test():
         'expect -timeout [expr {$t + 1}] {\n    -ex "a" {}\n}\n',
         'expect -timeout 5 \\\n    {\n    -ex "a" {}\n}\n',
         'expect -timeout 5 $arms\n',
+        'expect { -ex "a" {} timeout {} }\n',
+        'expect { eof {} timeout {} }\n',
+        'catch { expect { eof {} } }\n',
+        'lc_within 5 { -ex "a" {} timeout {} }\n',
+        'expect -notransfer -timeout 5 {\n    -ex "a" {}\n}\n',
+        'expect -timeout 5 -nocase {\n    -ex "a" {}\n}\n',
+        'expect -timeo 5 {\n    -ex "a" {}\n}\n',
+        'expect { # a comment\n    -ex "a" {}\n}\n',
     ]
     good = [
         'expect -timeout 5 -re {a} {puts b} timeout {}\n',
@@ -125,6 +155,14 @@ def self_test():
         'expect -brace -timeout 5 {\n    -ex "a" {}\n}\n',
         'puts "expect -timeout 5 {a}"\n',
         'expect_before -timeout 5 {a}\n',
+        'expect -timeout 5 "login:"\n',
+        'expect -timeout 5 {login:}\n',
+        'expect {login: x}\n',
+        'expect {  \n    -ex "a" {}\n}\n',
+        'expect -re {a b}\n',
+        'expect $arms\n',
+        'lc_within 5 {\n    timeout {}\n}\n',
+        'proc lc_within {n arms} {\n}\n',
     ]
     ok = True
     for t in bad:
@@ -152,7 +190,7 @@ def main():
     bad = 0
     for f in files:
         for line in findings(f.read_text(errors="replace")):
-            print(f"{f}:{line}: expect with a flag and one block matches nothing; use lc_within")
+            print(f"{f}:{line}: expect reads this block as one pattern, so nothing in it is armed; put the arms on their own lines, with lc_within for a limit")
             bad += 1
     return 1 if bad else 0
 

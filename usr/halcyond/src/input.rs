@@ -97,6 +97,12 @@ pub fn key_bytes(code: u16, value: u32, rune: u32, out: &mut Vec<u8>) {
     out.extend_from_slice(seq);
 }
 
+/// Whether a parser reads ESC before this rune as Alt on it. `[` and `O` open a CSI and an SS3
+/// there, so the app sees nothing and the next key is eaten as their parameter.
+fn alt_reads_back(rune: u32) -> bool {
+    (0x20..=0x7e).contains(&rune) && rune != 0x5b && rune != 0x4f
+}
+
 /// The tapestry event's Alt bit (keymap.rs MOD_ALT).
 const MOD_ALT: u16 = 1 << 2;
 
@@ -120,7 +126,7 @@ pub fn map_key(code: u16, rune: u32, mods: u16, value: u32) -> Option<KeyEvent> 
     }
     if rune != 0 {
         let key = KeyCode::Char(char::from_u32(rune)?);
-        return Some(if mods & MOD_ALT != 0 && (0x20..=0x7e).contains(&rune) {
+        return Some(if mods & MOD_ALT != 0 && alt_reads_back(rune) {
             KeyEvent::with(key, Mods::ALT)
         } else {
             KeyEvent::new(key)
@@ -352,11 +358,12 @@ mod tests {
     fn alt_on_a_rune_kaua_would_read_as_escape_is_the_plain_key() {
         // Backspace, Enter, Tab, Ctrl-Alt-A, Delete and a rune past ASCII: ESC before any of
         // them comes back from the tile's parser as Esc, and Nora would leave Insert.
-        for rune in [0x08, 0x0d, 0x09, 0x01, 0x7f, 0xe9] {
+        // ESC [ and ESC O open a sequence, which eats the next key.
+        for rune in [0x08, 0x0d, 0x09, 0x01, 0x7f, 0xe9, 0x5b, 0x4f] {
             let plain = Some(KeyEvent::new(KeyCode::Char(char::from_u32(rune).unwrap())));
             assert_eq!(map_key(14, rune, 4, 1), plain, "rune {rune:#x}");
         }
-        for rune in [0x20, 0x7e] {
+        for rune in [0x20, 0x7e, 0x5a, 0x5c, 0x4e, 0x50] {
             let alt = Some(KeyEvent::with(KeyCode::Char(char::from_u32(rune).unwrap()), Mods::ALT));
             assert_eq!(map_key(57, rune, 4, 1), alt, "rune {rune:#x}");
         }
