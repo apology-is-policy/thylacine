@@ -2315,7 +2315,7 @@ pub fn run(home: Option<String>) -> i64 {
                                 if let Some(req) = t.normal_input(&e, &rules, &sheet, &mut gs) {
                                     menu_req = Some((leaf, req));
                                 }
-                            } else if let Some(kev) = map_key(e.code, e.rune, e.value) {
+                            } else if let Some(kev) = map_key(e.code, e.rune, e.mods, e.value) {
                                 wire_out.clear();
                                 encode_input(&Input::Key(kev), &mut wire_out);
                                 t.queue_key(&wire_out);

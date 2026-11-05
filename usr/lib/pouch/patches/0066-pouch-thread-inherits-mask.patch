@@ -1,4 +1,4 @@
-pouch boundary-line patch 0065 - a new thread starts with its creator's signal mask (thread-model C7, operator vote 2026-10-29).
+pouch boundary-line patch 0066 - a new thread starts with its creator's signal mask (thread-model C7, operator vote 2026-10-29).
 
 POSIX: "The signal mask of the new thread shall be inherited from the
 creating thread." musl's pthread_create blocks every application signal

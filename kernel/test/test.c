@@ -452,6 +452,7 @@ struct test_case g_tests[] = {
     { "scheduler.select_target_cpu_homogeneous_is_prev",
                                        test_sched_select_target_cpu_homogeneous_is_prev, false, NULL },
     { "scheduler.pinned_wake_goes_home", test_scheduler_pinned_wake_goes_home, false, NULL },
+    { "scheduler.pinned_sleeper_on_a_peer_wakes", test_scheduler_pinned_sleeper_on_a_peer_wakes, false, NULL },
     { "scheduler.seat_client_takes_interactive",
                                        test_scheduler_seat_client_takes_interactive, false, NULL },
     { "scheduler.ready_on_cross_cpu_enqueue",
@@ -1913,6 +1914,7 @@ struct test_case g_tests[] = {
     { "allowance.free_null_tolerant",       test_allowance_free_null_tolerant,       false, NULL },
     { "allowance.pci_membership",           test_allowance_pci_membership,           false, NULL },
     { "allowance.pci_claim_handler_gate",   test_allowance_pci_claim_handler_gate,   false, NULL },
+    { "allowance.pci_irq_create_refuses_by_name", test_allowance_pci_irq_create_refuses_by_name, false, NULL },
     { "allowance.confer_within_parent",     test_allowance_confer_within_parent,     false, NULL },
     { "allowance.revoke_on_group_terminate", test_allowance_revoke_on_group_terminate, false, NULL },
     { "allowance.narrowed_proc_cannot_spawn", test_allowance_narrowed_proc_cannot_spawn, false, NULL },
@@ -3390,6 +3392,7 @@ static unsigned passed_count, failed_count, total_count, soft_warn_count, skippe
 // #134: child-Proc wait expiries observed across the whole run. Deliberately
 // NOT attributed to a test (see the runner loop); it fails the suite instead.
 static unsigned proc_wait_timeout_total;
+static bool boot_thread_moved;
 
 void test_fail(const char *msg) {
     if (current_test) {
@@ -3746,10 +3749,15 @@ void test_run_all(void) {
         }
 
         // The boot thread is pinned. A test that moves it voids every later test's
-        // reading of "this CPU", and in the end hangs the boot's tick wait.
-        if (smp_cpu_idx_self() != 0 && !current_test->failed) {
-            current_test->failed = true;
-            current_test->fail_msg = "the boot thread ended this test off CPU 0";
+        // reading of "this CPU", and in the end hangs the boot's tick wait. Nothing moves
+        // it back, so only the first test to return off CPU 0 answers for it.
+        if (smp_cpu_idx_self() != 0 && !boot_thread_moved) {
+            boot_thread_moved = true;
+            uart_puts("OFF-CPU0 ");
+            if (!current_test->failed) {
+                current_test->failed = true;
+                current_test->fail_msg = "the boot thread ended this test off CPU 0";
+            }
         }
 
         if (current_test->failed) {

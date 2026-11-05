@@ -1376,7 +1376,7 @@ static s64 sys_pci_irq_create_handler(u64 hraw, u64 mode, u64 ordinal) {
     if (!t || !t->proc || hraw >= PROC_HANDLE_MAX || mode > 0xffffffffull || ordinal > 0xffffffffull)
         return -T_E_INVAL;
     struct Proc *p = t->proc;
-    if (!(__atomic_load_n(&p->caps, __ATOMIC_ACQUIRE) & CAP_HW_CREATE)) return -T_E_PERM;
+    if (!(__atomic_load_n(&p->caps, __ATOMIC_ACQUIRE) & CAP_HW_CREATE)) return -T_E_ACCES;
     struct Handle hh;
     if (handle_get(p, (hidx_t)hraw, &hh) < 0) return -T_E_BADF;
     if (hh.kind != KOBJ_PCI || !(hh.rights & RIGHT_WRITE)) {
@@ -1384,7 +1384,7 @@ static s64 sys_pci_irq_create_handler(u64 hraw, u64 mode, u64 ordinal) {
     }
     struct KObj_PCI *pci = hh.obj;
     if (!allowance_permits(p, HW_RES_PCI, PCI_BDF_PACK(pci->bus, pci->dev, pci->fn), 0)) {
-        handle_put(&hh); return -T_E_PERM;
+        handle_put(&hh); return -T_E_ACCES;
     }
     int error;
     struct KObj_IRQ *irq = pci_irq_create(pci, (u32)mode, (u32)ordinal, &error);
@@ -2078,7 +2078,6 @@ static s64 sys_pwrite_handler(u64 hraw, u64 buf_va, u64 len, u64 off_raw) {
 }
 
 #ifdef KERNEL_TESTS
-#ifdef KERNEL_TESTS
 s64 sys_pread_for_test(struct Proc *p, u64 h, u64 buf_va, u64 len, u64 off) {
     return sys_pread_in(p, h, buf_va, len, off);
 }
@@ -2088,7 +2087,6 @@ s64 sys_pwrite_for_test(struct Proc *p, u64 h, u64 buf_va, u64 len, u64 off) {
     return sys_pwrite_in(p, h, buf_va, len, off);
 }
 #endif // KERNEL_TESTS
-#endif
 
 // =============================================================================
 // SYS_CLOSE / SYS_DUP — handle table operations (P5-fd-syscalls).
@@ -9094,7 +9092,6 @@ static s64 sys_handle_dup_to_handler(u64 old, u64 target, u64 flags) {
 }
 
 #ifdef KERNEL_TESTS
-#ifdef KERNEL_TESTS
 s64 sys_handle_flags_get_for_test(struct Proc *p, u64 h) {
     return sys_handle_flags_get_in(p, h);
 }
@@ -9109,7 +9106,6 @@ s64 sys_handle_dup_to_for_test(struct Proc *p, u64 old, u64 target, u64 flags) {
     return sys_handle_dup_to_in(p, old, target, flags);
 }
 #endif // KERNEL_TESTS
-#endif
 
 static s64 sys_dup_handler(u64 hraw, u64 new_rights_raw) {
     struct Thread *t = current_thread();
@@ -10126,6 +10122,12 @@ int sys_spawn_full_for_proc(struct Proc *p, const char *name, size_t name_len,
 VISIBLE_IF_KERNEL_TESTS
 int spawn_perm_grant_check(struct Proc *p, u32 perm_flags) {
     if (perm_flags & ~SPAWN_PERM_ALL)                              return -1;
+    // The designated compositor is untrusted and confers nothing. Its MAY_POST_SERVICE lets
+    // it post: carried one hop, it would make a console owner, whose every thread reads
+    // /dev/cons into INTERACTIVE with no ration, past the bound ARCH 8.3 holds it to.
+    if (perm_flags &&
+        (__atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE) & PROC_FLAG_SEAT_CLIENT))
+        return -1;
     if ((perm_flags & SPAWN_PERM_SESSION_REGISTRY) &&
         !proc_may_create_srv_registry(p)) return -1;
     if ((perm_flags & SPAWN_PERM_SEAT_MANAGER) && !proc_is_console_attached(p)) return -1;
@@ -10195,7 +10197,7 @@ void apply_spawn_perms(struct Proc *p, u32 perm_flags) {
     // pid and stripes, so a roleless child serves nothing.
     if (perm_flags & SPAWN_PERM_SEAT_SERVICE) (void)proc_set_seat_service(p);
     // The thunks run this on the child's first thread, which existed before the role
-    // did. thread_new gives the Proc's later threads the band from the role.
+    // did. thread_link_into_proc_locked rations the band among the later ones.
     if ((perm_flags & SPAWN_PERM_SEAT_CLIENT) && proc_set_seat_client(p) == 0)
         sched_mark_interactive(current_thread());
 

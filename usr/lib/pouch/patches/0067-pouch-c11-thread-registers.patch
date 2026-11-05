@@ -1,4 +1,4 @@
-pouch boundary-line patch 0066 - a C11 thread registers its clear_child_tid and tid as a pthread does (thread-model C7).
+pouch boundary-line patch 0067 - a C11 thread registers its clear_child_tid and tid as a pthread does (thread-model C7).
 
 0004 replaced musl's clone -- which set CLONE_CHILD_CLEARTID on
 &__thread_list_lock for every new thread -- with SYS_THREAD_SPAWN, and

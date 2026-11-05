@@ -27,7 +27,11 @@ set ::env(THYLACINE_DISPLAY) console
 source [file join [file dirname [info script]] lib.exp]
 
 lc_boot
+# Joey prints this late in its boot, so the wait is the boot's budget and not a command's.
+set cmd_budget $lc_cmd_timeout
+set lc_cmd_timeout $lc_boot_timeout
 lc_expect "/srv/tapestry absent" "pts-probe no GPU stack, so no aurora to answer a CPR"
+set lc_cmd_timeout $cmd_budget
 lc_login michael correct-horse-battery-staple-v1
 
 lc_send "ptyhost"

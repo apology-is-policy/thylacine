@@ -94,8 +94,12 @@ connection-wide accounting and application admission remain broker obligations.
 
 Failures use existing 9P Rlerror values, never a successful empty HIN1 response:
 Denied=EPERM(1), Gone/invalidated generation=ENOENT(2), TooLarge=E2BIG(7),
-BadHandle=EBADF(9), Conflict=EAGAIN(11), NoMemory=ENOMEM(12), Busy=EBUSY(16),
-Invalid=EINVAL(22), Unsupported=EOPNOTSUPP(95), Timeout=ETIMEDOUT(110).
+Conflict=EAGAIN(11), NoMemory=ENOMEM(12), Busy=EBUSY(16),
+Invalid=EINVAL(22), Unsupported=EOPNOTSUPP(95), Timeout=ETIMEDOUT(110),
+BadHandle=ESTALE(116).
+BadHandle was EBADF(9) until operator vote 2026-11-04 (66): the kernel reads a
+server's EBADF as EIO (docs/ERRORS.md), and EIO is a lost link to a client, so a
+refusal naming a dead fid could not be told from one.
 `interaction_wire::Failure` and the C enum mirror these existing registry values.
 Unknown transport errors are preserved as transport failures. Framing budget
 exhaustion maps to Busy, malformed offset/body to Invalid; transfer timeout and

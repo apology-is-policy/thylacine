@@ -18,6 +18,7 @@ mirrors:
   - "tools/interactive/ls-halcyon-clipboard-async.exp"
   - "tools/interactive/ls-nora-stopped-copy.exp"
   - "tools/interactive/ls-ut-paste.exp"
+  - "tools/interactive/ls-halcyon-paste-flow.exp"
   - "tools/interactive/ls-halcyon-pointer.exp"
   - "tools/interactive/ls-halcyon-session-media.exp"
   - "tools/interactive/ls-graphical-sak.exp"
@@ -545,6 +546,11 @@ and at each of its probe runs. It is a new mirror of the unchanged prefix.
 
 The opt-in `ls-nora-stopped-copy` scenario fails on `EXTINCTION:` during its probe's
 run. It is a new mirror of the unchanged prefix.
+
+### Paste-flow consumer (November 4)
+
+The opt-in `ls-halcyon-paste-flow` scenario fails on `EXTINCTION:` at every step of its
+session. It is a new mirror of the unchanged prefix.
 
 ### Paste-key consumer (November 3)
 

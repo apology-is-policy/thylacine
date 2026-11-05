@@ -136,7 +136,7 @@ below are the v1.0 set; additions append (no renumbering).
 | `T_E_ISCONN`    | 106   | `EISCONN`    | Already connected: a second `connect()` on a connected socket |
 | `T_E_NOTCONN`   | 107   | `ENOTCONN`   | Not connected: `getpeername()` / `shutdown()` on a socket that never connected |
 | `T_E_TIMEDOUT`  | 110   | `ETIMEDOUT`  | Operation timed out |
-| `T_E_STALE`     | 116   | `ESTALE`     | Stale file handle: the file a fid named has died (Stratum answers it for an unlinked file's fid), or a fidless cached open's re-walk no longer reaches the same `qid.path` and generation, so `SYS_FILE_LOCK` or `SYS_WSTAT` cannot name its file (B-3h). Signed off with PX-22 (operator vote 2026-10-18 (28)); a server's ESTALE crosses by value |
+| `T_E_STALE`     | 116   | `ESTALE`     | Stale file handle: the file a fid named has died (Stratum answers it for an unlinked file's fid), or a fidless cached open's re-walk no longer reaches the same `qid.path` and generation, so `SYS_FILE_LOCK` or `SYS_WSTAT` cannot name its file (B-3h). Also what a server answers for its own dead handle when its client must tell that from a lost link: `tapestryd`'s present on a dormant pixel generation and HIN1's `BadHandle` (operator vote 2026-11-04 (66)). Signed off with PX-22 (operator vote 2026-10-18 (28)); a server's ESTALE crosses by value |
 | `T_E_CONNREFUSED` | 111 | `ECONNREFUSED` | Connection refused: netd rejected the dial, or the data open failed after the connect verb was accepted |
 | `T_E_CANCELED`  | 125   | `ECANCELED`  | Operation canceled (Loom LINK-chain cancel: a CQE for a linked SQE dropped when an earlier link failed) |
 
@@ -483,7 +483,11 @@ errno almost always already exists at the failure source — it is only
   server errno still crosses as itself. Plan 9 and Linux's v9fs pass a
   server's error through unchanged; this rule is Thylacine's own. No kernel
   or library code reads a server's `EBADF`; the closer's bounded retry of a
-  close job's `EIO` now covers it as well.
+  close job's `EIO` now covers it as well. A server whose client must tell a
+  dead handle from a lost link answers `ESTALE`, which crosses by value:
+  `tapestryd`'s present on a dormant pixel generation and HIN1's `BadHandle`
+  (operator vote 2026-11-04 (66)). `tapestryd`'s other `EBADF` answers stay
+  and read `EIO`.
 - **Backward-compatible**: native `libthyla-rs`/`libt` callers test `r < 0`
   — a `-2`/`-17` is still `< 0`, so no native consumer regresses; pouch
   and Go observe the *correct* POSIX errno instead of `EIO`/`EPERM`.

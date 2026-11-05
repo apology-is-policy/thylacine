@@ -81,9 +81,13 @@ needing an IRQ kobj, and the console reads (`cons_input_read`,
 The compositor warden designates is the third leg, and the only one that is not
 trusted. `apply_spawn_perms` marks the child's first thread when
 `proc_set_seat_client` took, and the role leaves `PROC_FLAG_SEAT_CLIENT` on the Proc,
-which `thread_new` reads so the seat coordinator's thread is born INTERACTIVE. A
-never-placed thread has no run tree to disagree with, which is why `thread_new` may
-write the band directly. An rfork child's flags start at 0, so a fork is NORMAL.
+which `thread_link_into_proc_locked` reads so the seat coordinator's thread joins
+INTERACTIVE. The role is untrusted and free to make threads, so the kernel holds the
+bound the vote accepted: a thread takes the band only when it joins with fewer than
+`SEAT_CLIENT_BAND_THREADS` (2) live, under the lock it joins under, so two joining at
+once cannot both read room for one. A never-placed thread has no run tree to disagree
+with, which is why the link may write the band directly. An rfork child's flags start
+at 0, so a fork is NORMAL.
 Without this a compositor round trip spent nearly all its time queued behind NORMAL
 hogs while Lictor, its server, was already INTERACTIVE through `pci_irq_wait`
 (`dec-2026-11-04-compositor-band`).

@@ -199,6 +199,66 @@ pub(crate) fn current() -> Result<Vec<u8>> {
     c.call(Request::Unbind { scope: c.scope })?;
     Ok(bytes)
 }
+/// Replace the clipboard with `text`, in a connection of its own.
+pub(crate) fn publish(text: &[u8]) -> Result<()> {
+    let mut c = Client::connect()?;
+    let (old, generation, _) = c.get()?;
+    c.call(Request::Cancel { transfer: old })?;
+    let id = c.next;
+    let b = c.call(Request::Begin {
+        scope: c.scope,
+        length: text.len() as u32,
+    })?;
+    let Response::Begun { transfer } =
+        Response::decode(&b, Operation::BeginCopy, id).map_err(|_| "begin reply")?
+    else {
+        return Err("begin body");
+    };
+    for (i, part) in text.chunks(16384).enumerate() {
+        c.call(Request::Write {
+            transfer,
+            offset: (i * 16384) as u32,
+            data: part,
+        })?;
+    }
+    let id = c.next;
+    let b = c.call(Request::Commit {
+        scope: c.scope,
+        transfer,
+        expected: generation,
+    })?;
+    if Response::decode(&b, Operation::CommitCopy, id).map_err(|_| "commit reply")?
+        != (Response::Committed {
+            generation: generation + 1,
+        })
+    {
+        return Err("commit generation");
+    }
+    c.call(Request::Unbind { scope: c.scope })?;
+    Ok(())
+}
+
+/// Bind, then ask for the clipboard. The outer result is the bind's. The inner one is
+/// the read, its errno kept so that a refusal can be told from a failure.
+pub(crate) fn read_errno() -> Result<core::result::Result<Vec<u8>, i64>> {
+    let mut c = Client::connect()?;
+    let (transfer, length) = match c.get() {
+        Ok((transfer, _, length)) => (transfer, length),
+        Err(_) => return Ok(Err(c.last_errno)),
+    };
+    let mut bytes = Vec::new();
+    while bytes.len() < length {
+        let part = c.read(transfer, bytes.len(), 9000)?;
+        if part.is_empty() {
+            return Err("early snapshot EOF");
+        }
+        bytes.extend_from_slice(&part);
+    }
+    c.call(Request::Cancel { transfer })?;
+    c.call(Request::Unbind { scope: c.scope })?;
+    Ok(Ok(bytes))
+}
+
 fn test(mode: &str) -> Result<()> {
     if !matches!(mode, "copy" | "read" | "hold" | "park") {
         return Err("mode");

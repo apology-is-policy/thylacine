@@ -36,9 +36,9 @@ static const uint8_t hin_hello_fixture[HIN_HEADER_BYTES] = {
     0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01
 };
 enum hin_failure {
-    HIN_DENIED=1, HIN_GONE=2, HIN_TOO_LARGE=7, HIN_BAD_HANDLE=9,
+    HIN_DENIED=1, HIN_GONE=2, HIN_TOO_LARGE=7,
     HIN_CONFLICT=11, HIN_NO_MEMORY=12, HIN_BUSY=16, HIN_INVALID=22,
-    HIN_UNSUPPORTED=95, HIN_TIMEOUT=110
+    HIN_UNSUPPORTED=95, HIN_TIMEOUT=110, HIN_BAD_HANDLE=116
 };
 
 /* Body-relative offsets; Scope is session/controller/context/epoch. */

@@ -12,7 +12,7 @@ hazards: [haz-driver-panic-dos]
 abis: []
 design: ["docs/TAPESTRY.md", "docs/AURORA-CONFIG.md"]
 created: 2026-08-02
-updated: 2026-11-03
+updated: 2026-11-04
 ---
 ## Cooperative hidden storage (October 4)
 
@@ -36,6 +36,12 @@ passes; hidden output survives reveal and resize. The matrix has50individualPASS
 Its boot coverage does not qualify graphical workloads, Pi or minimum displays;
 real Halcyon failed-reveal capture and application activation remain open. Evidence and limitations:
 docs/HALCYON-INTERACTION-STATUS.md, work/oct4-hidden-storage/self-review.md.
+
+A present on a fid of a dormant or retired pixel generation answers `ESTALE`
+(operator vote 2026-11-04 (66)), so a client can tell it from a lost link: the
+kernel reads a server's `EBADF` as `EIO`. `kaua-term-probe`'s storage checks read
+the value. The other `EBADF` answers, a fid that names nothing here, stay and
+read `EIO`.
 
 ## Ordered ownership journal
 

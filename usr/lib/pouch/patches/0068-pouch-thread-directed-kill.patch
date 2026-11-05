@@ -1,4 +1,4 @@
-pouch boundary-line patch 0067 - pthread_kill and raise name one thread.
+pouch boundary-line patch 0068 - pthread_kill and raise name one thread.
 
 Thread-model C4, operator votes 5 (2026-10-21) and 14 (2026-11-02). musl's
 pthread_kill calls SYS_tkill, whose number here is the 0xFFFF sentinel (0001),
