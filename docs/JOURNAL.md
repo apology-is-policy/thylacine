@@ -22,6 +22,24 @@ needed the operator.
 
 
 ---
+## 2026-11-05 (corona): the Pi disagrees with an audit, and an old leak surfaces
+
+Stamped 2026-11-05T16:24:06Z. Nothing here landed or was pushed. Tips: corona/vote50 b635d937a, corona/i32 138896e56, corona/mm1c 73602685b, GitHub b2d9c274a.
+
+**corona/i32's mutants.** Nine of ten kernel rows discriminated on the mac in env at 138896e56, 15:04-16:00Z, each by the message written before the run. The tenth, `pl`, never ran: the harness refused it because a Rust mutant leaves the kernel's bytes unchanged. That guard is mine and it was wrong for a userspace row, so it now applies only to C rows. ptyfs's host rows on the Pi: all 22 red (20 by name, 1 at compile, 1 read), control green, about a minute. The harness's `mutants rc=0` line was also wrong: `$?` was read after `$(date)`, so it reports date's status. Read the verdict lines, not that one.
+
+**What the Pi measured for vote 50, and what it refutes.** Audit round 1 predicted that a client's draws in flight would fail a chord at the tip, and rated it a P0 if so. I built the retry for that, and a no-retry image to show it red. On V3D at e92f2fcea, `ls-graphical-sak-chain` took 6 chords each on the no-retry, old-gate and fix images: 18 chords, no takeover stall in any, the glass correct every time (ground 75%). Every run ended INCONCLUSIVE, because I had made a stall the verdict. So the predicted red did not reproduce. The compositor's own sync steps did stall, 13 to 15 times a run. Why the chord does not stall is NOT settled: either the queue is drained when the chord lands or the trusted paint is not behind the client's FIFO. `takeover-ms` could not tell them apart, because it has a floor of about 996 ms from the `after 700` inside `key`, so all 18 read alike. The takeover line now reports chains= and took_ms=, which can; chain's verdict moves to chains on the device at the chord; the old gate must read chains=0. The old image's poison leg was red at its deadline, as predicted.
+
+**The retry stays, for now, on a lever.** The real client does not reach it, so the first paint's stall gets shot 2 and leg P. Whether the backlog vote's premise holds on this backend is the next measurement: `chain-hold deep` and work/nov03-mm1/v50/ls-q1-backlog.exp, written, not run.
+
+**Audit round 3 (Opus on Opus, e92f2fcea): 1 P1, 2 P2, 11 P3.** F1 is inherited and not fixed: a key typed through a verdict panel reaches the requester (OPEN-BUGS 2026-11-05T16:24:06Z's neighbour, draft vote Q0). A requester sets the deadline, the prompt gets what is left, any key dismisses the timeout panel, and the rest of the secret goes to the focused surface. Traced across Corvus, Lictor, the kernel and tapestryd, not run. F2 was also my own self-audit: a report dropped during a drain went undetected. F3: leg F stayed green with the retry's `return` deleted. Closed at dd33c909e and b635d937a, not compiled, not booted. F6 closed with a stated reason.
+
+**My own mistakes this stretch.** The END arm I added to `episode` sat ahead of Corvus's line and discarded it. The scripted guest found it in a minute, 12 rows red; both now share one alternation, the rule I had just written into a header. An unquoted heredoc ran a backtick in an OPEN-BUGS entry; caught from the shell's error line and repaired. The roadmap note said 21 of 21 for the ptyfs rows and it was 22 by the three kinds above: corrected the same minute.
+
+**The Pi's link, measured.** My Pi line ended early at 16:07Z with ssh errors, and the monitor stopped reading at 16:05:15Z. It looked like the owned reset. It is not: `uptime -s` is unchanged, and `eth0: Link is Down` at 16:05:16Z, back at 16:16:10Z, flapping to at least 16:19:44Z, throttled=0x0. A physical link, so the operator's cable or switch. The poison run in that window reported `no login` at the 180 s boot limit, stopped at `jc-probe: leg maskstop`, with the VM alive and the relay reporting no stall. UNEXPLAINED, not confirmed against the link: earlier runs fit a boot of roughly 150 s by subtraction, not measured. The rerun on the same image logs login time.
+
+**Decisions from the operator:** none. Votes wait for no lease of mine queued or held; the batch is drafted in memory (design_vote_batch_1105.md).
+
 ## 2026-11-05 -- the first boots: MM-1c holds, and the scenarios were wrong twice where the fix was not (corona)
 
 The mac came at 11:36Z, after four and a half hours in the queue. Lease 1 ran MM-1c's boot, then vote 50's images.
