@@ -4,7 +4,7 @@ type: chg
 title: "sigsuspend, sigtimedwait, sa_mask, SA_RESETHAND: the kernel owns the mask"
 date: 2026-11-03
 arc: arc-phase6-pouch
-commits: ["107bb2d8e", "99e35300a", "057b24967", "087d56d79"]
+commits: ["107bb2d8e", "99e35300a", "057b24967", "087d56d79", "a1381a1d7", "2656ca35b", "ea0d92b15"]
 touched:
   - sub-kernel-notes
   - sub-kernel-vivarium

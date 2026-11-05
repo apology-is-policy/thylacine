@@ -4,7 +4,7 @@ type: chg
 title: "ppoll's and pselect's mask, and sigpending, on SYS_NOTE_WAIT"
 date: 2026-11-04
 arc: arc-phase6-pouch
-commits: ["94cf380fd"]
+commits: ["94cf380fd", "994735ddf", "a03d9b4fd", "982d66e93"]
 touched:
   - sub-kernel-notes
   - sub-kernel-vivarium

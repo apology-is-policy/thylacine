@@ -22,6 +22,26 @@ needed the operator.
 
 
 ---
+## 2026-11-05 (aux, Opus 5.5 1M) -- Sigsuspend lands; six witnesses that could not fail
+
+**What landed.** `SYS_NOTE_WAIT` and one mask restore for both phenotypes, `107bb2d8e..982d66e93`. Green 2257/2257 twice on one ELF (`0e08156c900b25de`) with the guest legs. The full matrix did NOT run (11-02 hold), no subset was voted for this chunk, and the gates listed in `docs/phase7-status.md` are owed at the merge.
+
+**The first boot.** 2256/2257, `notes.restart_settle`, three times `the pc`. I had given `notes_call_settle` a guard against an sp the tail refuses, and this older test's zeroed context has an sp of 0. So its three arms that expect a rewind went red, and its others had been passing for the wrong reason since `087d56d79`. I had read the new test file in full and grepped for changed return values; neither looks at what an old fixture's context holds when a function it calls gains a guard. Fixed at `ea0d92b15`, and the rule is in the design note.
+
+**The run that mattered.** 83 sabotages. Six could not go red on what I had written. K13's fixture had no caught note. K23 asked the boot thread, whose Proc has no table, so a later gate answered the same EINVAL. K31 read the mask after the call's end had restored it. K35's own-bit note was also in the queue, and only a guest caught it. G16 and G17 removed the end of the no-fds form, but the tail restores too, so with no note arriving nothing could tell. These were all greens that looked like witnesses. I had also predicted some of them wrongly: I wrote that L365 would catch G16. New leg L372 turned both red at `ws=19456`, the child's exit 76, and each kernel test now fails on its own message.
+
+**What has no witness.** K17 needs another CPU between a post's enqueue and its wake. G22 needs the flush to beat netd's reply, and it did not here; round 2 said that might be so. They are stated, not proved.
+
+**A smaller slip.** The lease's `note_wait=0` was its own grep, still looking for `25 legs` after I went to 45. I read the boot log, not the count, and it is fixed in the short lease. And one stamp in the design note was estimated, 06:59Z for 06:57Z, the fourth this run; corrected from `date -u`.
+
+**A class found while waiting.** The poll spurious-0 entry in OPEN-BUGS is wider than poll: `notes_set_handler` clears the latch, so any wait whose death arm answers on the footing that the thread dies can hand that answer to a thread that lives, and `kernel/cons.c`'s console read would read EOF. Read, not run, and not built here. One of its two shapes changes behaviour, so it waits for a vote.
+
+**Specs.** `tail_order` and `caught_target` ran on the final tip. `specs/check-tail-order.sh` prints FAIL on its two temporal cfgs because the 2.19 jar on this machine does not name the property; each cfg has one property, and they read rc 13 at their pinned counts by hand. `caught_target`: clean at 613245, 807792 and 434763, and the 15 buggy cfgs each violate, at one worker. Their temporal messages name no property on this jar either, so each is read by rc and the cfg. `caught_target_3t` did not run: it has never finished on this host.
+
+**Decisions the operator made here.** Votes 24, 25 and 28, and the signoff for the syscall number. What was wrong in my witnesses and what replaced them I decided.
+
+**Not done.** The full matrix and the gates owed at the merge. The interactive scenarios ran on `ea0d92b15`, not `982d66e93`, which changes only tests, one probe leg and a comment. Round 2's not-read list is in the status doc.
+
 ## 2026-11-05 (aux, Opus 5.5 1M) -- C9 lands; a bug on main since May; two things I had written wrong
 
 **What landed.** Thread-model C9, `addcee94f..5c31d1867`. The switch decides from TTBR0: no V state for a kernel thread, no MSR for an equal value, one ISB. Green 2225/2225 twice on one ELF (f18ea53403c62d3a). SMP subset 20 of 20 boots passed. The full matrix did NOT run (11-02 hold) and is owed at the merge.

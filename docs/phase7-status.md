@@ -3077,3 +3077,13 @@ Audit: round 1 Fable 5.1, 0/0/0/5; round 2 Fable 5.1 on what a real ASID 0 chang
 Tests: the full suite is green at 2225 on `5c31d1867`, twice, one ELF, with joey and the guest legs. Sabotages, 13: S01 to S11 red at their target, G01 green with same-space up 4 ns as predicted, G02 predicted green and red, read in `chg-2026-11-05-c9-readings`. TLC: `sched_ctxsw` and `asid` clean, six buggy cfgs each failing on its own invariant. SMP subset (`default-smp4 ubsan-smp4`, 20 boots, vote 31): 20 of 20 boots passed on `5c31d1867`.
 
 **Did not run:** the full SMP matrix, under the 11-02 hold. It stays owed at the merge to main, with `tools/test-fault.sh`, the interactive fleet and `tools/check-production.sh`. No figures were taken on a real CPU.
+
+## Sigsuspend, sigtimedwait, the mask for one call — 2026-11-05
+
+Votes 24, 25 and 28. `SYS_NOTE_WAIT` = 141, with forms SUSPEND, TAKE, POLL and PENDING. One mask restore at handler return, for both phenotypes. Pouch's own copy of the mask is gone. `sa_mask`, `SA_NODEFER` and `SA_RESETHAND` are carried in the row. `ppoll`, `pselect` and `sigpending` work on the same mechanism with no new number. Pouch's SIGPIPE default is a row that ignores, not a mask bit (`dec-2026-11-03-sigpipe-row`). Two Pouch `select` bugs found on the way are fixed: every failed `select` read EIO, and a closed fd read as a timeout.
+
+Audit: round 1 Fable 5.1, 0/0/0/7; round 2 Fable 5.1, 0/1/2/2. All fixed.
+
+Tests: the full suite is green at 2257 on `982d66e93`, twice, one ELF (`0e08156c900b25de`), with joey and the guest legs, `note-wait ok: 45 legs`. 83 sabotages on `ea0d92b15` and the seven whose witnesses changed on `982d66e93`, read one by one in `chg-2026-11-05-sigsuspend-readings`. No witness: K17 and G22. `pty-4`, `pty-susp-pouch`, `item10-ctrlc`, `viv-console-ctrlc` and `r5f9-ash` passed on `ea0d92b15`; `982d66e93` changes only tests, one probe leg and a comment, so they were not run again. Specs on the final tip: `tail_order` and `caught_target`, read in the same note.
+
+**Did not run:** the full SMP matrix, under the 11-02 hold, and no SMP subset was voted for this chunk. It stays owed at the merge to main, with `tools/test-fault.sh`, the interactive fleet and `tools/check-production.sh`. Round 2 did not read `vivarium_build_sigframe`, the probe's restorer, `pouch_sock_poll_fd`'s lazy open, dosbox-x's select sites or `el0_stop_park`, and read `client_wait`, `do_reader_recv_frame`, `client_flush_wait` and `proc_note_direct_rouse` at gate level only. Its Linux semantics came from its memory, not a source.
