@@ -52,6 +52,7 @@
 #include <thylacine/spoor.h>
 #include <thylacine/srvconn.h>
 #include <thylacine/syscall.h>
+#include <thylacine/thread.h>
 #include <thylacine/types.h>
 #include <thylacine/burrow.h>
 #include <thylacine/visibility.h>
@@ -468,7 +469,13 @@ void handle_lock_owner_retire(struct Proc *p, struct Spoor *owner) {
 // file opened after the walk passed its slot was opened during the event that
 // asked for it: a cached open minted before a take's grant keeps its snapshot
 // under the lock (ARCH 9.6.11).
-static int lock_sync_table(struct HandleTable *t, struct Spoor *owner, u32 how) {
+//
+// A lock call's release (stop_cancelled) ends at a flush a caught note cancelled,
+// the mark still set: one more RPC answered in time would clear it (client_run),
+// and the call's EINTR would be one no restart follows. A close goes on to every
+// open: it cannot be refused, and gives the lock up next.
+static int lock_sync_table(struct HandleTable *t, struct Spoor *owner, u32 how,
+                           bool stop_cancelled) {
     struct Dev *d = owner->dev;
     if (!d || !d->lock_sync || !d->lock_same_file) return 0;
     for (int i = 0; i < PROC_HANDLE_MAX; i++) {
@@ -494,6 +501,9 @@ static int lock_sync_table(struct HandleTable *t, struct Spoor *owner, u32 how) 
             // descriptor's own sync first.
             if (rc != 0 && rc != -T_E_STALE && how == DEV_LOCK_SYNC_ACQUIRE)
                 return rc;
+            struct Thread *self = current_thread();
+            if (stop_cancelled && rc == -T_E_INTR && self && self->note_call_unwound)
+                return rc;
         }
     }
     return 0;
@@ -501,7 +511,7 @@ static int lock_sync_table(struct HandleTable *t, struct Spoor *owner, u32 how) 
 
 int handle_lock_sync_file(struct Proc *p, struct Spoor *owner, u32 how) {
     if (!owner) return 0;
-    return lock_sync_table(proc_handles_or_extinct(p), owner, how);
+    return lock_sync_table(proc_handles_or_extinct(p), owner, how, /*stop_cancelled=*/true);
 }
 
 u32 handle_lock_owner_count(struct Proc *p) {
@@ -560,7 +570,7 @@ static void lock_owners_on_close(struct HandleTable *t, enum kobj_kind kind,
 
     struct Dev *d = owner->dev;
     if (d->lock_sync) (void)d->lock_sync(c, DEV_LOCK_SYNC_RELEASE);
-    (void)lock_sync_table(t, owner, DEV_LOCK_SYNC_RELEASE);
+    (void)lock_sync_table(t, owner, DEV_LOCK_SYNC_RELEASE, /*stop_cancelled=*/false);
     // A refusal (a dying thread cannot send) still removes the entry below, and
     // its clunk releases every lock the fid held.
     (void)d->lock(owner, SYS_FILE_LOCK_UN, 0, 0, NULL);
@@ -590,7 +600,7 @@ static int handle_fd_drop(struct HandleTable *t, enum kobj_kind kind, void *obj,
     struct Dev *d = c->dev;
     if (!d || !d->fd_close) return 0;
     if (d->lock_held && d->lock_held(c))
-        (void)lock_sync_table(t, c, DEV_LOCK_SYNC_RELEASE);
+        (void)lock_sync_table(t, c, DEV_LOCK_SYNC_RELEASE, /*stop_cancelled=*/false);
     return d->fd_close(c, heard);
 }
 
@@ -633,7 +643,8 @@ void handle_table_free(struct HandleTable *t) {
     // hands its run and its clunk to a closer, and the owner's clunk must not
     // overtake it.
     for (u32 j = 0; j < t->nlockowners; j++)
-        lock_sync_table(t, t->lockowners[j].spoor, DEV_LOCK_SYNC_RELEASE);
+        lock_sync_table(t, t->lockowners[j].spoor, DEV_LOCK_SYNC_RELEASE,
+                        /*stop_cancelled=*/false);
     for (int i = 0; i < PROC_HANDLE_MAX; i++) {
         if (t->slots[i].magic == HANDLE_MAGIC) {
             (void)handle_fd_drop(t, t->slots[i].kind, t->slots[i].obj, /*heard=*/false);

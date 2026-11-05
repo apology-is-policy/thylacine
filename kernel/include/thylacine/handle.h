@@ -649,7 +649,9 @@ void handle_lock_owner_retire(struct Proc *p, struct Spoor *owner);
 
 // Run Dev.lock_sync(how) on every Spoor in p's table that names owner's file.
 // May sleep; takes no lock across a sync. A release runs on every one and
-// answers 0; an acquire stops at the first failure and answers it.
+// answers 0, unless a caught note cancelled one's flush: it stops there and
+// answers -T_E_INTR, the mark still set. An acquire stops at the first failure
+// and answers it.
 int handle_lock_sync_file(struct Proc *p, struct Spoor *owner, u32 how);
 
 // Diagnostics: p's live lock-owner entries.

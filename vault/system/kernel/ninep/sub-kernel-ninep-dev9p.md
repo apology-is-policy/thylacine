@@ -128,8 +128,12 @@ dev9p serves the five lock slots of [[sub-kernel-dev]] for
   test lands nothing. A flush a caught note cancelled answers `-T_E_INTR` and
   sends nothing: the run stays staged, and under `SA_RESTART` the call runs again
   (`dev9p.lock_cancelled_flush_says_eintr`, with a server's own EINTR and a mark
-  with nothing staged as its controls). A flush that fails otherwise still sends
-  the request, and the error latches for the next write or fsync.
+  with nothing staged as its controls; an fsync after each leg resends the
+  cancelled run with nothing latched). A flush that fails otherwise still sends
+  the request, and the error latches for the next write or fsync. The same
+  `-T_E_INTR` from `dev9p_lock_sync` stops a lock call's flush of the file's other
+  opens ([[sub-kernel-filelock]]); `P9_E_INTR == T_E_INTR` is asserted where the
+  value crosses.
 - `dev9p_lock_owner(c)` mints a second owner on `c`'s file: a zero-name
   Twalk clone of `c`'s fid into a fresh fid (Stratum admits the clone of an
   open fid). A clone that fails answers ESTALE or EINTR as they are and otherwise

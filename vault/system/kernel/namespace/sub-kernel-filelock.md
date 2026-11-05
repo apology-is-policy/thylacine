@@ -65,9 +65,10 @@ per (Proc, file), and which file each names.
   ends with `-T_E_INTR` for a caught note, and under `SA_RESTART` the kernel asks
   again from the start, since an attempt is refused or never applied before its
   wait can unwind. A set-lock whose pre-lock flush a caught note cancelled
-  answers `-T_E_INTR` before the server is asked anything
-  ([[sub-kernel-ninep-dev9p]]). A kill ends any wait. An unlock or a test never
-  waits.
+  answers `-T_E_INTR` before the server is asked anything, whether that flush
+  was of the descriptor it names ([[sub-kernel-ninep-dev9p]]) or of another
+  open of the file the Proc holds: the run stays staged, and the restart lands
+  it. A kill ends any wait. An unlock or a test never waits.
 - **Tests.** `_TEST` changes nothing. It writes a `struct t_file_lock`
   (32 bytes): the conflicting lock's type, start and length, or `_UN` with the
   asked range. `pid` is always -1, because an owner here is a fid, not a
@@ -94,7 +95,11 @@ woken) between attempts.
 `file_lock_once` for the FILE owner first lands every staged write of the file
 that the Proc can reach, for any set-lock, as the PROC owner does, and is then one
 `c->dev->lock(c, ...)`, which lands `c`'s own: its descriptor may have left the
-table. For the PROC owner it:
+table. A flush a caught note cancelled ends the call there with `-T_E_INTR`.
+`handle_lock_sync_file` stops at that flush, the call's mark still set: one more
+RPC answered in time would clear it (`client_run`), and the `-T_E_INTR` would then
+be one no restart follows. The close paths walk the same table to the end, since a
+close cannot be refused and gives the lock up next. For the PROC owner it:
 1. Gets the entry with `handle_lock_owner_get(p, c, mint = take)`. That makes
    `c` learn its file's identity first (`Dev.lock_ident`) and adopts or mints
    the entry.
@@ -103,7 +108,8 @@ table. For the PROC owner it:
 3. For any set-lock (an unlock, a take, a conversion), first lands every staged
    write of the file that the Proc can reach
    (`handle_lock_sync_file(..., DEV_LOCK_SYNC_RELEASE)`). A conversion gives up its
-   write lock and admits readers. A test lands nothing.
+   write lock and admits readers. A test lands nothing. A flush a caught note
+   cancelled ends the call with `-T_E_INTR`, the entry put back unspent.
 4. Locks through the owner.
 5. If the owner's fid answers `-T_E_STALE` on the first try, retires the
    entry and asks again once. The entry's file has died: Stratum kills an
@@ -354,17 +360,37 @@ A dying thread cannot send. If it holds the last reference, `Dev.close` follows 
 and hands the run and the fid to a closer, the well-tested path. With another holder,
 `dev9p_fd_close` queues a job that flushes and then unlocks now.
 
+## A sibling's cancelled flush (the aux join's audit round 1, 2026-11-05)
+
+The join made a waiting take interruptible on the native side too, and taught
+`dev9p_lock` to answer EINTR when a caught note cancelled its own descriptor's flush.
+Round 1 (Fable 5.1, F1, P3) found the other descriptors left out: `file_lock_once`
+discarded the release sync's result, and `lock_sync_table` reported failures only for
+an acquire. So a flush of another open of the file, cancelled by a caught note, was
+dropped; the Tlock went out with the mark set and, answered before its Tflush, was
+granted while those bytes sat unlanded. Linux's NFS client gives up a set-lock whose
+sync fails (`do_setlk` after `nfs_sync_mapping`). Now `handle_lock_sync_file` stops at
+the cancelled flush and both arms return `-T_E_INTR`, so the restart lands every run.
+Only the lock call stops early: the close paths pass `stop_cancelled = false`.
+
+Leg `filelock.cancelled_flush_ends_call` drives both owners through three opens of one
+file with the fake Dev's release sync failing on the middle one. It checks the EINTR,
+the mark kept, no take sent and no slot spent, and the flushes stopping at that open.
+Its controls are one variable away each: the same EINTR with no mark goes ahead, as
+does the mark with another failure, and a close goes on to the last open and unlocks.
+`dev9p.lock_cancelled_flush_says_eintr` now also fsyncs after each leg (round 1 F3).
+The cancelled run is resent with nothing latched, while the server's own EINTR has
+latched and dropped it.
+
 ## Seams
 
 None open. Pouch `fcntl`, `flock` and the libthyla-rs and libt mirrors landed
-with B-3h4 ([[sub-pouch-fs]], [[sub-kernel-syscall-abi]]). A caught note does not
-end a native or Pouch wait until item 11c (Caveats). Go's `cmd/go` file lock is
-still a no-op on Thylacine (OPEN-BUGS 2026-11-02).
+with B-3h4 ([[sub-pouch-fs]], [[sub-kernel-syscall-abi]]). A caught note ends a
+native or Pouch wait since the aux join brought item 11c (2026-11-05). Go's
+`cmd/go` file lock is still a no-op on Thylacine (OPEN-BUGS 2026-11-02).
 
 ## Caveats
 
-- A native caller's wait ends only on grant or kill until item 11c lands
-  (ARCH 9.6.11).
 - `_WAIT` is a poll (1 to 64 ms), not a wakeup: 9P2000.L has no lock
   callback.
 
@@ -373,7 +399,8 @@ still a no-op on Thylacine (OPEN-BUGS 2026-11-02).
 Boosty B-3h2 (commits d1853e821, c95ef3916, b693e2729 on branch b3h; close
 commit in [[chg-2026-10-29-b3h2-file-locks]]). Scripture 87ecc8153. B-3h3 and
 B-3h4: [[chg-2026-11-02-b3h3-b3h4-cached-locks-pouch]]. Audit round 3:
-[[chg-2026-11-02-b3h-audit-r3-fixes]]. Stratum's half (POSIX range records,
+[[chg-2026-11-02-b3h-audit-r3-fixes]]. The aux join (operator vote 34) and its
+round-1 fixes: branch aux-3-join2, 2026-11-05. Stratum's half (POSIX range records,
 the zero-name clone of an open fid, ENOLCK caps) lands as one Stratum commit
 after the B-3h audit.
 

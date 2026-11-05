@@ -446,6 +446,8 @@ static int wb_write_run(struct p9_client *cl, u32 fid, u64 off, u32 total,
 // the op's own reply stood, so a server that answers Rlerror(EINTR) itself reaches
 // here as the same value with no mark, note or none: that is the server failing the
 // write, and it latches.
+_Static_assert(P9_E_INTR == T_E_INTR,
+               "a cancelled flush crosses Dev.lock_sync as -T_E_INTR (handle.c, dev.h)");
 static bool wb_note_cancelled(int err) {
     struct Thread *t = current_thread();
     return err == -P9_E_INTR && t && t->note_call_unwound;

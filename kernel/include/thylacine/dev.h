@@ -423,7 +423,10 @@ struct Dev {
     //     under the handle-table spinlock: it must not block. It may answer by
     //     what the two Spoors already know of their files.
     //   lock_sync(c, how) -- DEV_LOCK_SYNC_RELEASE: land c's staged writes
-    //     before a set-lock on its file, by any open of it in the Proc. DEV_LOCK_SYNC_ACQUIRE: from now
+    //     before a set-lock on its file, by any open of it in the Proc;
+    //     -T_E_INTR, the thread's note_call_unwound still set, when a caught
+    //     note cancelled the flush (the run stays staged; a lock call then
+    //     answers EINTR). DEV_LOCK_SYNC_ACQUIRE: from now
     //     on c reads what the server holds (dev9p: a cached open leaves its
     //     snapshot); asked before a take on c's file, and a failure refuses
     //     the take.

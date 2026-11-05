@@ -56,6 +56,9 @@ static u32            g_lk_acq_last_seq;
 static struct Spoor  *g_lk_acquired[8];
 static struct Spoor  *g_lk_acq_fail;       // .lock_sync(ACQUIRE) on this Spoor fails
 static int            g_lk_acq_fail_rc;
+static struct Spoor  *g_lk_rel_fail;       // .lock_sync(RELEASE) on this Spoor fails
+static int            g_lk_rel_fail_rc;
+static bool           g_lk_rel_fail_mark;  // and leaves the caller's call unwound
 static u32            g_lk_take_seq;       // seq of the last take that reached .lock
 static hidx_t         g_lk_close_fd = -1;  // close this fd inside the next .lock
 static u8             g_lk_owner_tag;      // aux of a minted owner
@@ -89,6 +92,9 @@ static void lk_reset(void) {
     for (u32 i = 0; i < 8; i++) g_lk_acquired[i] = NULL;
     g_lk_acq_fail = NULL;
     g_lk_acq_fail_rc = 0;
+    g_lk_rel_fail = NULL;
+    g_lk_rel_fail_rc = 0;
+    g_lk_rel_fail_mark = false;
     g_lk_close_fd = -1;
     g_lk_stale = NULL;
     g_lk_stale_path = 0;
@@ -233,7 +239,10 @@ static int lk_sync(struct Spoor *c, u32 how) {
     if (g_lk_sync_n < 8) g_lk_synced[g_lk_sync_n] = c;
     g_lk_sync_n++;
     g_lk_sync_last_seq = g_lk_seq;
-    return 0;
+    if (c != g_lk_rel_fail) return 0;
+    // dev9p's cancelled flush: a caught note unwound the Twrite's wait.
+    if (g_lk_rel_fail_mark) current_thread()->note_call_unwound = true;
+    return g_lk_rel_fail_rc;
 }
 
 static bool lk_held(struct Spoor *c) {
@@ -1034,6 +1043,115 @@ void test_filelock_acquire_syncs(void) {
     if (a >= 0 && b >= 0 && o >= 0 && o2 >= 0) acquire_syncs_body(&f, a, b, o, o2);
     else test_fail("filelock: fixture allocation failed");
     lk_teardown(&f, 8);
+}
+
+// -----------------------------------------------------------------------------
+// A set-lock's flush of the file's other opens, cancelled by a caught note.
+// -----------------------------------------------------------------------------
+
+struct lk_cancel_seen {
+    s64  rc;
+    u32  calls, acqs;
+    bool synced_e, mark;
+    u32  entries;
+};
+
+// One set-lock through a, with b's release sync failing as the knobs say. The
+// mark is read and cleared here, before anything asserts.
+static struct lk_cancel_seen lk_cancel_call(struct lk_fix *f, int a, int b, int e,
+                                            u64 op, int rc, bool mark) {
+    struct lk_cancel_seen w;
+    struct Thread *t = current_thread();
+    lk_sync_reset();
+    lk_acq_reset();
+    u32 calls0 = g_lk_calls;
+    g_lk_rel_fail      = f->sp[b];
+    g_lk_rel_fail_rc   = rc;
+    g_lk_rel_fail_mark = mark;
+    w.rc       = lk_call(f, a, op, 0, 4);
+    w.mark     = t->note_call_unwound;
+    t->note_call_unwound = false;
+    g_lk_rel_fail = NULL;
+    g_lk_rel_fail_mark = false;
+    w.calls    = g_lk_calls - calls0;
+    w.acqs     = g_lk_acq_n;
+    w.synced_e = lk_synced(f->sp[e]);
+    w.entries  = handle_lock_owner_count(f->p);
+    return w;
+}
+
+// A set-lock lands every open's staged writes first (ARCH 9.6.11). When a caught
+// note cancels one of those flushes the call answers EINTR before the server is
+// asked anything, the mark still set for the restart, and a Proc take spends no
+// slot. One variable away each: the same EINTR with no mark is a failure the open
+// latches, and the lock goes ahead; the mark with another failure goes ahead too;
+// a close, which cannot be refused, goes on to every open and gives the lock up.
+static void cancelled_release_body(struct lk_fix *f, int a, int b, int e) {
+    const u64 W = SYS_FILE_LOCK_WR, U = SYS_FILE_LOCK_UN, P = SYS_FILE_LOCK_PROC;
+    TEST_ASSERT(f->fd[a] < f->fd[b] && f->fd[b] < f->fd[e],
+                "fixture: a, b, e sit in that order in the table");
+    struct lk_cancel_seen w;
+
+    w = lk_cancel_call(f, a, b, e, W, -T_E_INTR, true);
+    TEST_EXPECT_EQ(w.rc, -(s64)T_E_INTR, "an open-file take whose flush of b a note cancelled is EINTR");
+    TEST_ASSERT(w.mark, "with the mark still set: nothing after the flush cleared it");
+    TEST_EXPECT_EQ(w.calls, 0u, "and no lock reached the server");
+    TEST_EXPECT_EQ(w.acqs, 0u, "nor did the take ask any open to read the server");
+    TEST_ASSERT(!w.synced_e, "the flushes stopped at b");
+
+    u32 entries = handle_lock_owner_count(f->p);
+    w = lk_cancel_call(f, a, b, e, W | P, -T_E_INTR, true);
+    TEST_EXPECT_EQ(w.rc, -(s64)T_E_INTR, "a Proc take whose flush of b a note cancelled is EINTR");
+    TEST_ASSERT(w.mark, "with the mark still set");
+    TEST_EXPECT_EQ(w.calls, 0u, "and no lock reached the server");
+    TEST_EXPECT_EQ(w.entries, entries, "and it spent no slot");
+
+    w = lk_cancel_call(f, a, b, e, W, -T_E_INTR, false);
+    TEST_EXPECT_EQ(w.rc, (s64)0, "CONTROL: the same EINTR with no mark is no cancellation");
+    TEST_EXPECT_EQ(w.calls, 1u, "CONTROL: the take reached the server");
+    TEST_ASSERT(w.synced_e, "CONTROL: after every open's flush");
+    TEST_EXPECT_EQ(lk_call(f, a, U, 0, 4), (s64)0, "its unlock");
+
+    w = lk_cancel_call(f, a, b, e, W, -T_E_IO, true);
+    TEST_EXPECT_EQ(w.rc, (s64)0, "CONTROL: the mark with another failure refuses nothing");
+    TEST_EXPECT_EQ(w.calls, 1u, "CONTROL: the take reached the server");
+    TEST_ASSERT(w.synced_e, "CONTROL: after every open's flush");
+    TEST_EXPECT_EQ(lk_call(f, a, U, 0, 4), (s64)0, "its unlock");
+
+    // The close: the Proc's lock on the file drops at b's close, after every
+    // open's flush, a's cancelled one included.
+    TEST_EXPECT_EQ(lk_call(f, a, W | P, 0, 4), (s64)0, "the Proc locks the file through a");
+    struct Thread *t = current_thread();
+    lk_sync_reset();
+    u32 un0 = g_lk_un_seq;
+    g_lk_rel_fail      = f->sp[a];
+    g_lk_rel_fail_rc   = -T_E_INTR;
+    g_lk_rel_fail_mark = true;
+    lk_close_fd(f, b);
+    t->note_call_unwound = false;
+    g_lk_rel_fail = NULL;
+    g_lk_rel_fail_mark = false;
+    TEST_ASSERT(lk_synced(f->sp[a]), "CONTROL: a close flushes a, whose flush a note cancels");
+    TEST_ASSERT(lk_synced(f->sp[e]), "CONTROL: and goes on to e");
+    TEST_ASSERT(g_lk_un_seq != un0 && g_lk_sync_last_seq < g_lk_un_seq,
+                "CONTROL: then unlocks the file");
+    TEST_EXPECT_EQ(handle_lock_owner_count(f->p), entries, "CONTROL: and drops the entry");
+}
+
+void test_filelock_cancelled_flush_ends_call(void) {
+    struct lk_fix f;
+    lk_fix_init(&f);
+    struct Thread *t = current_thread();
+    TEST_ASSERT(!t->note_call_unwound, "a test thread's call has no mark");
+    int a = lk_open(&f, &g_lk_dev, 9, RW);
+    int b = lk_open(&f, &g_lk_dev, 9, RW);
+    int e = lk_open(&f, &g_lk_dev, 9, RW);
+    if (a >= 0 && b >= 0 && e >= 0) cancelled_release_body(&f, a, b, e);
+    else test_fail("filelock: fixture allocation failed");
+    g_lk_rel_fail = NULL;
+    g_lk_rel_fail_mark = false;
+    t->note_call_unwound = false;
+    lk_teardown(&f, 9);
 }
 
 // -----------------------------------------------------------------------------

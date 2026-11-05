@@ -70,6 +70,10 @@ because the handle table already has the right lifetime and sharing.
   file. A dead entry is never found again.
 - `lock_sync_table` walks slot by slot: a cached open minted after the walk passed
   its slot and before a take's grant keeps its snapshot under the lock (ARCH 9.6.11).
+  A lock call's release (`handle_lock_sync_file`, `stop_cancelled`) stops at a flush
+  a caught note cancelled and answers `-T_E_INTR` with the call's mark still set,
+  since one more answered RPC would clear it; the close paths walk to the end
+  ([[sub-kernel-filelock]]).
 - `lock_owners_on_close` runs after a descriptor leaves the table and before
   its object is released, from `handle_close`'s report path,
   `handle_replace` and `handle_dup_to`. A navigation-only descriptor is no open

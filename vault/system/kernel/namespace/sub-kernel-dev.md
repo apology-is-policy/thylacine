@@ -25,7 +25,9 @@ Five slots serve [[sub-kernel-filelock]] (ARCH 9.6.11):
   the same Dev.
 - `lock_sync(c, DEV_LOCK_SYNC_RELEASE)` lands `c`'s staged writes, for any open
   of the file in the Proc, before a
-  release.
+  release. A flush a caught note cancelled answers `-T_E_INTR` with the thread's
+  `note_call_unwound` still set and the run staged, and a lock call then answers
+  EINTR ([[sub-kernel-filelock]]).
 - `lock_ident(c)` learns once which file `c` names, and can answer ESTALE.
 - `wstat_bind(c)` readies `c` before SYS_WSTAT reads the stat its policy judges,
   so that stat is the file's own rather than its state at open. A failure refuses

@@ -209,11 +209,14 @@ the register convention, the argument records copied across, and the bounds
 every one of them is checked against.
 
 C/kernel, C/libt and Rust mirror this contract. A focused check
-(`tools/test-native-handle-query.py`) pins the numbers appended since B-3b in
-every mirror that carries them, the native ceiling and the phenotype's
-collision asserts; build.sh runs it before every target and
-`tools/test-host-boundaries.sh` runs its mutants. This is not a claim that
-every mirror has an automated check.
+(`tools/test-native-handle-query.py`) holds every syscall number libt,
+libthyla-rs and Pouch's patches name to the kernel enum, by name, with a floor
+per mirror and the 138..141 region required in each, so a search that read
+nothing fails; its `mirror` mutant moves one Rust number. It also pins the native
+ceiling and the phenotype's collision asserts. build.sh runs it before every
+target and `tools/test-host-boundaries.sh` runs its mutants. The numbers are
+derived; other mirrored values (flag words, records) have their own checkers or
+none.
 
 ## Contract
 
@@ -438,8 +441,9 @@ memory; only TARGET and POOL allocate.
 **The memory account call (2026-11-03, operator votes 47 and 48).**
 `SYS_ACCOUNT` = 140: handle or `ACCOUNT_SELF`, operation, record pointer, record size.
 Reserved at MM-0 as a number and a layout; MM-1b gave it an arm, which serves the query
-on the caller's own account ([[abi-memory-account]]). `SYS__NATIVE_TOP` is 141
-and `VIV_NATIVE_CEILING` 140. The live count below does not move. [[abi-memory-account]]
+on the caller's own account ([[abi-memory-account]]). On corona's tree `SYS__NATIVE_TOP`
+was 141 and `VIV_NATIVE_CEILING` 140; the aux join made them 142 and 141 (the note waits,
+below). The live count below does not move. [[abi-memory-account]]
 holds the records.
 
 **Thread-directed notes (2026-11-02, operator vote 14).** `SYS_POSTNOTE_TID` = 138:
@@ -463,7 +467,7 @@ first call governs the Proc until its next exec ([[sub-kernel-notes]]). Linux's 
 `SYS__NATIVE_TOP` is 140 and `VIV_NATIVE_CEILING` 139. `SYS_WALK_OPEN_OINTR` (0x2000) is
 an omode bit `SYS_OPEN` alone admits, outside `SYS_WALK_OPEN_OMODE_VALID`, and is stripped
 before a Dev sees it. `T_S_IFSOCK` 0140000 is the stat type of a socket's data or listen
-file. `SYS_POLL` admits `nfds` 0. libt and libthyla-rs have `t_note_dispose` and `T_OINTR`. Pouch's `0069` carries `__NR_note_dispose`.
+file. `SYS_POLL` admits `nfds` 0. libt and libthyla-rs have `t_note_dispose` and `T_OINTR`. Pouch's `0070` carries `__NR_note_dispose`.
 
 **The note waits (2026-11-03, operator vote 24; 2026-11-04, vote 28).** `SYS_NOTE_WAIT` = 141:
 `how` (`NOTE_WAIT_SUSPEND` 0, `NOTE_WAIT_TAKE` 1, `NOTE_WAIT_POLL` 2, `NOTE_WAIT_PENDING` 3),
@@ -478,10 +482,9 @@ NOTE_BIT_*` for a family, `NOTE_TAKE_TTY_WINCH`, `_SUSP`, `_CONT`, `_QUIT`, `_HU
 gained `NOTE_DISP_RESETHAND` 2, `NOTE_DISP_NODEFER` 4 and `NOTE_DISP_MASK(m)` in bits 16..31,
 without a fifth register, since the refusal of unknown bits already made the word
 extensible. A native handler's `x2` is the row's flags. `SYS__NATIVE_TOP` is 142 and
-`VIV_NATIVE_CEILING` 141. 140 is `SYS_ACCOUNT` on corona/async-memory and stays unknown on
-this tree until that merges, pinned by `syscall.native_gap_unassigned`; 142 and 143 are the
-last below the ceiling assert on `setgid` (144). libt and libthyla-rs have `t_note_wait`.
-Pouch's `0071` carries `__NR_note_wait`.
+`VIV_NATIVE_CEILING` 141. 140 is `SYS_ACCOUNT` since the aux join brought corona/async-memory
+(2026-11-05); 142 and 143 are the last below the ceiling assert on `setgid` (144). libt and
+libthyla-rs have `t_note_wait`. Pouch's `0072` carries `__NR_note_wait`.
 
 **Merge of main (2026-10-21).** corona/async-memory merged main `cba52ec9f`, so
 the three appends above meet: `SYS_JIT_CREATE_SEALED` = 127,

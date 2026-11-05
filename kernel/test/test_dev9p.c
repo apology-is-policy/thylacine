@@ -5727,14 +5727,17 @@ void test_dev9p_lock_wire_and_status(void) {
 }
 
 // A set-lock lands the staged run first. A caught note that cancelled that flush
-// cancelled the call: EINTR, and no Tlock. One variable away each: the same EINTR
-// with no mark is the server failing the write, which latches, and the lock goes
-// ahead; the mark with nothing staged sends no Twrite, and the lock goes ahead.
+// cancelled the call: EINTR, no Tlock, and the run still staged with nothing
+// latched, so an fsync resends it. One variable away each: the same EINTR with no
+// mark is the server failing the write, which latches and drops the run, and the
+// lock goes ahead; the mark with nothing staged sends no Twrite, and the lock goes
+// ahead.
 static void lk_cancelled_flush_leg(bool mark, bool staged, long *rc, u32 *twrites,
-                                   u32 *tlocks) {
+                                   u32 *tlocks, long *retry_rc, u32 *retry_twrites) {
     struct Spoor *root = NULL;
     struct Spoor *f = wb_make_created(&root);
     *rc = 1; *twrites = 0xffffffffu; *tlocks = 0xffffffffu;
+    *retry_rc = 1; *retry_twrites = 0xffffffffu;
     u8 *chunk = wb_scratch();
     if (!f || !chunk) { if (f) (void)d9_close(f); if (root) wb_test_end(root); return; }
     for (u32 i = 0; i < 256; i++) chunk[i] = wb_pat(i);
@@ -5749,6 +5752,8 @@ static void lk_cancelled_flush_leg(bool mark, bool staged, long *rc, u32 *twrite
     g_twrite_fail_ecode = 0;
     *twrites = g_twrite_seen;
     *tlocks  = g_tlock_seen;
+    *retry_rc = (long)dev9p.fsync(f, 0);
+    *retry_twrites = g_twrite_seen - *twrites;
     if (*rc == 0) (void)dev9p.lock(f, SYS_FILE_LOCK_UN, 0, 0, NULL);
     lock_wire_reset();
     (void)d9_close(f);
@@ -5758,20 +5763,26 @@ static void lk_cancelled_flush_leg(bool mark, bool staged, long *rc, u32 *twrite
 void test_dev9p_lock_cancelled_flush_says_eintr(void) {
     struct Thread *t = current_thread();
     TEST_ASSERT(t != NULL && !t->note_call_unwound, "a test thread's call has no mark");
-    long rc0, rc1, rc2;
-    u32 w0, l0, w1, l1, w2, l2;
-    lk_cancelled_flush_leg(true, true, &rc0, &w0, &l0);
-    lk_cancelled_flush_leg(false, true, &rc1, &w1, &l1);
-    lk_cancelled_flush_leg(true, false, &rc2, &w2, &l2);
+    long rc0, rc1, rc2, f0, f1, f2;
+    u32 w0, l0, w1, l1, w2, l2, fw0, fw1, fw2;
+    lk_cancelled_flush_leg(true, true, &rc0, &w0, &l0, &f0, &fw0);
+    lk_cancelled_flush_leg(false, true, &rc1, &w1, &l1, &f1, &fw1);
+    lk_cancelled_flush_leg(true, false, &rc2, &w2, &l2, &f2, &fw2);
     TEST_EXPECT_EQ((s64)rc0, -(s64)T_E_INTR, "a set-lock whose flush a note cancelled is EINTR");
     TEST_EXPECT_EQ(w0, 1u, "its Twrite went out and was cancelled");
     TEST_EXPECT_EQ(l0, 0u, "and no Tlock followed");
+    TEST_EXPECT_EQ((s64)f0, 0ll, "the run stayed staged and nothing latched: an fsync succeeds");
+    TEST_EXPECT_EQ(fw0, 1u, "and resends it");
     TEST_EXPECT_EQ((s64)rc1, 0ll, "CONTROL: the server's own EINTR is no cancellation");
     TEST_EXPECT_EQ(w1, 1u, "CONTROL: the Twrite went out");
     TEST_EXPECT_EQ(l1, 1u, "CONTROL: and the lock went ahead");
+    TEST_EXPECT_EQ((s64)f1, -(s64)T_E_INTR, "CONTROL: the server's EINTR latched: the fsync reports it");
+    TEST_EXPECT_EQ(fw1, 0u, "CONTROL: and the run was dropped: nothing resent");
     TEST_EXPECT_EQ((s64)rc2, 0ll, "CONTROL: with nothing staged the mark alone refuses nothing");
     TEST_EXPECT_EQ(w2, 0u, "CONTROL: no Twrite");
     TEST_EXPECT_EQ(l2, 1u, "CONTROL: one Tlock");
+    TEST_EXPECT_EQ((s64)f2, 0ll, "CONTROL: nothing staged: the fsync has nothing to report");
+    TEST_EXPECT_EQ(fw2, 0u, "CONTROL: nor to send");
 }
 
 // A server keying owners by proc_id and client_id sees one owner on a fid: every

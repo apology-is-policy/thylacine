@@ -1093,6 +1093,7 @@ struct test_case g_tests[] = {
     { "filelock.stale_entry_retired", test_filelock_stale_entry_retired, false, NULL },
     { "filelock.reused_number", test_filelock_reused_number, false, NULL },
     { "filelock.acquire_syncs", test_filelock_acquire_syncs, false, NULL },
+    { "filelock.cancelled_flush_ends_call", test_filelock_cancelled_flush_ends_call, false, NULL },
     { "filelock.last_descriptor_closes", test_filelock_last_descriptor_closes, false, NULL },
     { "filelock.endowment_is_a_descriptor", test_filelock_endowment_is_a_descriptor, false, NULL },
     { "syscall.dispatch_puts_smoke",   test_syscall_dispatch_puts_smoke,   false, NULL },

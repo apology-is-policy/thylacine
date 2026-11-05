@@ -2343,6 +2343,7 @@ void test_filelock_fork_exec_dup_teardown(void);
 void test_filelock_stale_entry_retired(void);
 void test_filelock_reused_number(void);
 void test_filelock_acquire_syncs(void);
+void test_filelock_cancelled_flush_ends_call(void);
 void test_filelock_last_descriptor_closes(void);
 void test_filelock_endowment_is_a_descriptor(void);
 void test_pagemap_grow_keeps_every_page(void);

@@ -69,9 +69,13 @@ static int file_lock_once(struct Proc *p, struct Spoor *c, u32 type,
     if (!proc_owner) {
         // A set-lock gives up what it replaces, and every open's staged writes
         // land first, as Linux's NFS client syncs the whole mapping. c's own land
-        // in its lock call: its descriptor may have left the table.
-        if (!test)
-            (void)handle_lock_sync_file(p, c, DEV_LOCK_SYNC_RELEASE);
+        // in its lock call: its descriptor may have left the table. A flush a
+        // caught note cancelled cancels the call, as in that lock call; any other
+        // failure is latched for its open to report.
+        if (!test) {
+            int rr = handle_lock_sync_file(p, c, DEV_LOCK_SYNC_RELEASE);
+            if (rr != 0) return rr;
+        }
         if (take) {
             int sr = file_lock_acquire_sync(p, c, c);
             if (sr != 0) return sr;
@@ -97,9 +101,15 @@ static int file_lock_once(struct Proc *p, struct Spoor *c, u32 type,
             return rc;
         }
         // A set-lock gives up what it replaces: an unlock its range, a
-        // conversion its old type. Every open's staged writes land first.
-        if (!test)
-            (void)handle_lock_sync_file(p, owner, DEV_LOCK_SYNC_RELEASE);
+        // conversion its old type. Every open's staged writes land first, and
+        // a flush a caught note cancelled cancels the call.
+        if (!test) {
+            int rr = handle_lock_sync_file(p, owner, DEV_LOCK_SYNC_RELEASE);
+            if (rr != 0) {
+                handle_lock_owner_put(p, owner, false);
+                return rr;
+            }
+        }
         if (take) {
             int sr = file_lock_acquire_sync(p, c, owner);
             if (sr != 0) {
