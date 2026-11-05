@@ -22,6 +22,14 @@ needed the operator.
 
 
 ---
+## 2026-11-05 -- the shell branch lands, and four scenarios that had not run (corona)
+
+ut-lang reached the join after its first boots, on the mac between 03:33Z and 06:43Z. **Default suite 2331/2331, and u-6-test's flows 10 and 11 pass on their first boot.** Each went red for its own reason: stack_base reading 0 fails flow 10's refusal, a recursive Operand drop and a 256 KiB reserve each end flow 11 with a segv at the guard page. The console-owner gate's three rows discriminate and the rebuild is byte-identical. ls-5's new Ctrl-C leg through recursion passes, and removing the call's poll times out at HOLO-RECUR after leg (D) passed.
+
+**My regression run reported less than it looked like.** Seventeen scenarios on the merged tree, rc=0 except one, and three of those greens were skips: ls-ut-paste and ls-nora-stopped-copy need the private-ring image, which my driver did not bake, and viv-console-ctrlc needs an Alpine bundle. The shell's own paste scenario would have landed unrun had I read only the return codes. `r5f9-ash` read FAIL for the same missing bundle where its neighbour skips, so it skips now. With Alpine in env's build cache and the private-ring image, all four ran and pass. Host checks on the Pi before this: libutopia and the whole tree, 137 crates.
+
+**Vote 50's bug reproduced on the Pi** under KVM with virgl, on ut-stack's session image: the control leg passes, then `SAK-POISON RED (poisoned): the episode failed at its deadline with nothing on the glass`. The fix's own green run is next. `poison-retire` refused that image at its shell gate, which is no result either way: my note had carried the step from a different image.
+
 ## 2026-11-05 -- three reds that were the witness's own, and a test that could not fail (corona)
 
 **The three SAK reds were my witness, not the kernel.** ls-graphical-sak-states, -recover and plain ls-graphical-sak failed on 3da8b3b53 at `seat-probe: FAIL DAC authority mismatch`, on a probe that did not print what it saw. Reading the code gave a hypothesis: main's M7 (IDENTITY-DESIGN 9.7, operator vote 2026-10-18) lets an elevated user change existing objects on system's mount but not create there, and the probe's elevated leg created. M7 is not in 1227710c2, the last green tree, and is in 3da8b3b53. I rewrote the witness at 007f5b19e as two legs that print what they saw: a create on system's mount is refused at every stage, and an open of `/thylacine-version` for write follows the grant.
