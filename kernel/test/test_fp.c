@@ -38,6 +38,7 @@
 #include "test.h"
 
 #include "../../arch/arm64/asid.h"
+#include "../../arch/arm64/mmu.h"
 
 #include <thylacine/context.h>      // #96: FP_AREA_SIZE, fp_save_area/restore
 #include <thylacine/extinction.h>
@@ -71,7 +72,9 @@ static struct Thread *g_fp_owner;
 static struct Thread *g_fp_other;
 
 // Loads V0..V31, then FPSR and FPCR, from a sentinel-shaped buffer. Offsets match
-// cpu_switch_context's, Q0+Q1 at +0 through Q30+Q31 at +480.
+// cpu_switch_context's, Q0+Q1 at +0 through Q30+Q31 at +480. The registers are this
+// function's result, so it names no clobbers: naming v8-v15 has the compiler restore
+// d8-d15 on the way out, over what was just loaded. Its callers hold nothing in V.
 __attribute__((target("+fp+simd")))
 static void fp_load_regs(const u8 *src) {
     __asm__ __volatile__(
@@ -93,10 +96,6 @@ static void fp_load_regs(const u8 *src) {
         "ldp q28, q29, [%0, #448]\n"
         "ldp q30, q31, [%0, #480]\n"
         : : "r"(src)
-        : "v0","v1","v2","v3","v4","v5","v6","v7",
-          "v8","v9","v10","v11","v12","v13","v14","v15",
-          "v16","v17","v18","v19","v20","v21","v22","v23",
-          "v24","v25","v26","v27","v28","v29","v30","v31"
     );
     u64 fpcr = *(const u32 *)&src[32 * 16];
     u64 fpsr = *(const u32 *)&src[32 * 16 + 4];
@@ -340,6 +339,13 @@ static void tf_entry(void *arg) {
 }
 
 void test_context_ttbr0_follows_next(void) {
+    // The boot CPU's boot thread has run on the real root since before the long branch,
+    // so this reads the value new kernel threads are given against the hardware's.
+    u64 here;
+    __asm__ __volatile__("mrs %0, ttbr0_el1" : "=r"(here));
+    TEST_EXPECT_EQ((u64)mmu_kernel_ttbr0_pa(), here, "a new kernel thread is given another root");
+    TEST_EXPECT_EQ(here >> ASID_TTBR0_SHIFT, 0ull, "the kernel's root is on an ASID");
+
     struct Proc *p = proc_alloc();
     struct Proc *q = proc_alloc();
     TEST_ASSERT(p != NULL && q != NULL, "proc_alloc failed");

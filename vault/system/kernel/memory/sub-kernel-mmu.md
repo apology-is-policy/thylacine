@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/ARCHITECTURE.md", "docs/PORTABILITY.md"]
 created: 2026-08-03
-updated: 2026-11-03
+updated: 2026-11-05
 ---
 ## Purpose
 
@@ -53,6 +53,13 @@ moved to vmalloc, the device tree to a direct-map buffer, the stacks to the
 direct map. Retiring it means a stray "use a physical address as a virtual one"
 bug faults loudly instead of quietly working. The root tables stay valid with
 their second level emptied, so the register never points at physical zero.
+
+A kernel thread runs on that emptied root, on ASID 0, and the switch reads ASID 0
+as "this thread holds no V state". The root's address was captured before the MMU
+came on, and it is `volatile` for the reason `kaslr.c`'s image bounds are: clang
+sees one store of one link-time constant, shrinks it to a was-it-set byte, and
+answers a read by computing the address again at the reader's PC, which by then is
+a high VA.
 
 **The permission encoding is the invariant.** Composite constants —
 `PTE_KERN_TEXT` (read-only, executable at EL1), `PTE_KERN_RO` and `PTE_KERN_RW`
