@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/ARCHITECTURE.md section 9.6.11"]
 created: 2026-10-29
-updated: 2026-11-02
+updated: 2026-11-05
 ---
 ## Purpose
 
@@ -59,10 +59,15 @@ per (Proc, file), and which file each names.
   off from 1 ms to 64 ms, doubling each time. The server cannot report when a
   conflicting lock goes, so the cap bounds both the latency after a release
   and the RPC rate of a long wait.
-- **Waits.** A wait for a take is note-interruptible (ARCH 8.8.3: F_SETLKW is
-  on signal(7)'s list). It ends with `-T_E_INTR` for a caught note where the
-  caller's waits are interruptible: Linux phenotype today, natives once item
-  11c lands. A kill ends any wait. An unlock or a test never waits.
+- **Waits.** A wait for a take is note-interruptible and restartable (ARCH
+  8.8.3: F_SETLKW is on signal(7)'s list): the vivarium class marks a Linux
+  call, and `native_note_class` a native one whose table can catch a note. It
+  ends with `-T_E_INTR` for a caught note, and under `SA_RESTART` the kernel asks
+  again from the start, since an attempt is refused or never applied before its
+  wait can unwind. A set-lock whose pre-lock flush a caught note cancelled
+  answers `-T_E_INTR` before the server is asked anything
+  ([[sub-kernel-ninep-dev9p]]). A kill ends any wait. An unlock or a test never
+  waits.
 - **Tests.** `_TEST` changes nothing. It writes a `struct t_file_lock`
   (32 bytes): the conflicting lock's type, start and length, or `_UN` with the
   asked range. `pid` is always -1, because an owner here is a fid, not a
@@ -80,8 +85,9 @@ per (Proc, file), and which file each names.
 ## Mechanism
 
 `sys_file_lock_handler` validates the call. It takes the handle, refuses
-`CWALKONLY`, and refuses a Dev with no `.lock`. It sets `note_interruptible`
-for a waiting take, then loops on `file_lock_once`, with
+`CWALKONLY`, and refuses a Dev with no `.lock`. A waiting take arrives marked
+interruptible and restartable by the dispatcher's class; the handler loops on
+`file_lock_once`, with
 `file_lock_backoff` (a `tsleep_noteintr` on a private Rendez that is never
 woken) between attempts.
 

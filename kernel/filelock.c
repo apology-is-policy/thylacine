@@ -180,10 +180,9 @@ s64 sys_file_lock_handler(u64 fd_raw, u64 op, u64 start, u64 len, u64 out_va) {
         return -(s64)T_E_NOLCK;
     }
 
-    // ARCH 8.8.3: F_SETLKW is on signal(7)'s list, so the WAIT of a lock to
-    // take is interruptible (syscall_dispatch clears the flag on the way out).
-    // An unlock and a test never wait, and stay uninterruptible.
-    if (wait && type != SYS_FILE_LOCK_UN) t->note_interruptible = true;
+    // ARCH 8.8.3: F_SETLKW is on signal(7)'s list. native_note_class makes the
+    // WAIT of a lock to take interruptible and restartable, for a Proc whose table
+    // can catch a note; an unlock and a test never wait.
 
     struct t_file_lock ans = { 0 };
     u64 backoff = FILE_LOCK_BACKOFF_MIN_NS;

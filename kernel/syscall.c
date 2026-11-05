@@ -17590,6 +17590,14 @@ static void native_note_class(struct Thread *t, struct Proc *p,
     case SYS_OPEN:
         intr = restart = (ctx->regs[3] & SYS_WALK_OPEN_OINTR) != 0;
         break;
+    case SYS_FILE_LOCK:
+        // F_SETLKW: a take that waits for the holder (filelock.c). An unlock and a
+        // test never wait. Each attempt is refused or never applied before it can
+        // unwind, so a restart asks again from the start, as Linux's does.
+        intr = restart = (ctx->regs[1] & SYS_FILE_LOCK_WAIT) != 0 &&
+                         (ctx->regs[1] & SYS_FILE_LOCK_TEST) == 0 &&
+                         (ctx->regs[1] & SYS_FILE_LOCK_TYPE_MASK) != SYS_FILE_LOCK_UN;
+        break;
     default:
         break;
     }

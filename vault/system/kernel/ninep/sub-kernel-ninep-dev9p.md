@@ -15,7 +15,7 @@ hazards: [haz-shared-stream-desync]
 abis: []
 design: [docs/LARDER-DESIGN.md, docs/FID-LIFECYCLE-DESIGN.md, docs/POUNCE-DESIGN.md]
 created: 2026-07-31
-updated: 2026-11-03
+updated: 2026-11-05
 ---
 ## The fid a cached open keeps, and locks on it (B-3h3, 2026-11-02)
 
@@ -125,8 +125,11 @@ dev9p serves the five lock slots of [[sub-kernel-dev]] for
   every open's run first (ARCH 9.6.11).
 - Every set-lock first lands `c`'s write-behind run (`dev9p_lock_sync`): an
   unlock gives its range up, and a conversion to a read lock admits readers. A
-  test lands nothing. A flush that fails still sends the request, and the error
-  latches for the next write or fsync.
+  test lands nothing. A flush a caught note cancelled answers `-T_E_INTR` and
+  sends nothing: the run stays staged, and under `SA_RESTART` the call runs again
+  (`dev9p.lock_cancelled_flush_says_eintr`, with a server's own EINTR and a mark
+  with nothing staged as its controls). A flush that fails otherwise still sends
+  the request, and the error latches for the next write or fsync.
 - `dev9p_lock_owner(c)` mints a second owner on `c`'s file: a zero-name
   Twalk clone of `c`'s fid into a fresh fid (Stratum admits the clone of an
   open fid). A clone that fails answers ESTALE or EINTR as they are and otherwise

@@ -2841,6 +2841,8 @@ struct test_case g_tests[] = {
     { "dev9p.remote_format_ns",        test_dev9p_remote_format_ns,        false, NULL },
     { "dev9p.origin_format_ns",        test_dev9p_origin_format_ns,        false, NULL },
     { "dev9p.lock_wire_and_status",    test_dev9p_lock_wire_and_status,    false, NULL },
+    { "dev9p.lock_cancelled_flush_says_eintr",
+                                       test_dev9p_lock_cancelled_flush_says_eintr, false, NULL },
     { "dev9p.lock_one_name_on_a_fid",  test_dev9p_lock_one_name_on_a_fid,  false, NULL },
     { "dev9p.lock_caped_names_nothing", test_dev9p_lock_caped_names_nothing, false, NULL },
     { "dev9p.lock_grant_drops_larder", test_dev9p_lock_grant_drops_larder, false, NULL },

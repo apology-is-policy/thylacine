@@ -5726,6 +5726,54 @@ void test_dev9p_lock_wire_and_status(void) {
     teardown(root);
 }
 
+// A set-lock lands the staged run first. A caught note that cancelled that flush
+// cancelled the call: EINTR, and no Tlock. One variable away each: the same EINTR
+// with no mark is the server failing the write, which latches, and the lock goes
+// ahead; the mark with nothing staged sends no Twrite, and the lock goes ahead.
+static void lk_cancelled_flush_leg(bool mark, bool staged, long *rc, u32 *twrites,
+                                   u32 *tlocks) {
+    struct Spoor *root = NULL;
+    struct Spoor *f = wb_make_created(&root);
+    *rc = 1; *twrites = 0xffffffffu; *tlocks = 0xffffffffu;
+    u8 *chunk = wb_scratch();
+    if (!f || !chunk) { if (f) (void)d9_close(f); if (root) wb_test_end(root); return; }
+    for (u32 i = 0; i < 256; i++) chunk[i] = wb_pat(i);
+    struct Thread *t = current_thread();
+    wb_wire_reset();
+    lock_wire_reset();
+    if (staged) (void)dev9p.write(f, chunk, 256, 0);
+    g_twrite_fail_ecode = P9_E_INTR;
+    t->note_call_unwound = mark;
+    *rc = (long)dev9p.lock(f, SYS_FILE_LOCK_WR, 0, 0, NULL);
+    t->note_call_unwound = false;
+    g_twrite_fail_ecode = 0;
+    *twrites = g_twrite_seen;
+    *tlocks  = g_tlock_seen;
+    if (*rc == 0) (void)dev9p.lock(f, SYS_FILE_LOCK_UN, 0, 0, NULL);
+    lock_wire_reset();
+    (void)d9_close(f);
+    wb_test_end(root);
+}
+
+void test_dev9p_lock_cancelled_flush_says_eintr(void) {
+    struct Thread *t = current_thread();
+    TEST_ASSERT(t != NULL && !t->note_call_unwound, "a test thread's call has no mark");
+    long rc0, rc1, rc2;
+    u32 w0, l0, w1, l1, w2, l2;
+    lk_cancelled_flush_leg(true, true, &rc0, &w0, &l0);
+    lk_cancelled_flush_leg(false, true, &rc1, &w1, &l1);
+    lk_cancelled_flush_leg(true, false, &rc2, &w2, &l2);
+    TEST_EXPECT_EQ((s64)rc0, -(s64)T_E_INTR, "a set-lock whose flush a note cancelled is EINTR");
+    TEST_EXPECT_EQ(w0, 1u, "its Twrite went out and was cancelled");
+    TEST_EXPECT_EQ(l0, 0u, "and no Tlock followed");
+    TEST_EXPECT_EQ((s64)rc1, 0ll, "CONTROL: the server's own EINTR is no cancellation");
+    TEST_EXPECT_EQ(w1, 1u, "CONTROL: the Twrite went out");
+    TEST_EXPECT_EQ(l1, 1u, "CONTROL: and the lock went ahead");
+    TEST_EXPECT_EQ((s64)rc2, 0ll, "CONTROL: with nothing staged the mark alone refuses nothing");
+    TEST_EXPECT_EQ(w2, 0u, "CONTROL: no Twrite");
+    TEST_EXPECT_EQ(l2, 1u, "CONTROL: one Tlock");
+}
+
 // A server keying owners by proc_id and client_id sees one owner on a fid: every
 // request names what the fid's latest take named, whoever sends it. A last close's
 // unlock has no caller to ask. The closer's is p9_closer.dying_last_close_with_holder.

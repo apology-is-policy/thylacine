@@ -2828,8 +2828,12 @@ static int dev9p_lock(struct Spoor *c, u32 type, u64 start, u64 len,
 
     // Every set-lock lands c's staged writes first: an unlock gives its range
     // up, and a write lock converted to a read lock admits readers. Linux's NFS
-    // client flushes before any setlk, for the same reason.
-    (void)dev9p_lock_sync(c, DEV_LOCK_SYNC_RELEASE);
+    // client flushes before any setlk, for the same reason. A caught note that
+    // cancelled that flush cancels the call before the server is asked anything;
+    // the run stays staged, and under SA_RESTART the call runs again. Any other
+    // failure is latched for the next write or close to report, and the lock
+    // goes ahead.
+    if (wb_note_cancelled(dev9p_lock_sync(c, DEV_LOCK_SYNC_RELEASE))) return -T_E_INTR;
 
     u32  who = type == SYS_FILE_LOCK_UN ? lock_named(p) : lock_taker(p);
     char cid[LOCK_CLIENT_ID_MAX];

@@ -2404,6 +2404,7 @@ void test_dev9p_create_mode_on_the_wire(void);
 void test_dev9p_create_group_from_parent(void);
 void test_dev9p_client_init_clears_ends(void);
 void test_dev9p_lock_wire_and_status(void);
+void test_dev9p_lock_cancelled_flush_says_eintr(void);
 void test_dev9p_lock_one_name_on_a_fid(void);
 void test_dev9p_lock_caped_names_nothing(void);
 void test_dev9p_lock_grant_drops_larder(void);

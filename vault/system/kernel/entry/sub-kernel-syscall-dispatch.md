@@ -22,7 +22,7 @@ design:
   - "docs/VIVARIUM.md"
   - "docs/LINEAGE.md"
 created: 2026-08-03
-updated: 2026-11-04
+updated: 2026-11-05
 ---
 ## Session registry factory
 
@@ -1106,7 +1106,8 @@ that identity refusal is observable from Thylacine at all
 The single exit also clears the thread's `note_interruptible`, which the
 vivarium dispatcher sets for a Linux call on signal(7)'s list
 ([[sub-kernel-vivarium]]) and `native_note_class` sets for a native call on the same
-list where a table governs ([[sub-kernel-notes]]). The class is asked only with a handler
+list where a table governs ([[sub-kernel-notes]]), `SYS_FILE_LOCK`'s waiting take (F_SETLKW)
+among them. The class is asked only with a handler
 or a notes fd present, so a program that only ignores SIGPIPE pays no stat per open
 file. Both also record `note_call_x0` and `note_restartable`, which the return tail
 reads and clears, for the kernel's re-issue under `SA_RESTART`. Clearing it at the one exit is what keeps a wait

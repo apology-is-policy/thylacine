@@ -4703,6 +4703,20 @@ static void nt_class_expect(struct Thread *t, struct Proc *p, u64 nr, u64 x0, u6
     TEST_EXPECT_EQ(t->note_restartable, restart, "may it re-issue");
 }
 
+// SYS_FILE_LOCK's class lives in its op word, x1.
+static void nt_class_expect_op(struct Thread *t, struct Proc *p, u64 nr, u64 op,
+                               bool intr, bool restart) {
+    struct exception_context ctx;
+    for (size_t k = 0; k < sizeof(ctx); k++) ((u8 *)&ctx)[k] = 0;
+    ctx.regs[1] = op;
+    ctx.regs[8] = nr;
+    t->note_interruptible = !intr;
+    t->note_restartable   = !restart;
+    native_note_class_for_test(t, p, &ctx);
+    TEST_EXPECT_EQ(t->note_interruptible, intr, "may a caught note interrupt it");
+    TEST_EXPECT_EQ(t->note_restartable, restart, "may it re-issue");
+}
+
 void test_notes_native_class(void) {
     static struct Thread th;
     th.magic = THREAD_MAGIC;
@@ -4726,6 +4740,14 @@ void test_notes_native_class(void) {
     nt_class_expect(&th, p, SYS_PWRITE, (u64)wr, 0, 0, true, true);
     nt_class_expect(&th, p, SYS_READ, 60u, 0, 0, false, false);
     nt_class_expect(&th, p, SYS_CLOSE, (u64)rd, 0, 0, false, false);
+    // F_SETLKW is on signal(7)'s list; F_SETLK, an unlock and F_GETLK are not.
+    nt_class_expect_op(&th, p, SYS_FILE_LOCK, SYS_FILE_LOCK_WR | SYS_FILE_LOCK_WAIT, true, true);
+    nt_class_expect_op(&th, p, SYS_FILE_LOCK,
+                       SYS_FILE_LOCK_RD | SYS_FILE_LOCK_WAIT | SYS_FILE_LOCK_PROC, true, true);
+    nt_class_expect_op(&th, p, SYS_FILE_LOCK, SYS_FILE_LOCK_WR, false, false);
+    nt_class_expect_op(&th, p, SYS_FILE_LOCK, SYS_FILE_LOCK_UN | SYS_FILE_LOCK_WAIT, false, false);
+    nt_class_expect_op(&th, p, SYS_FILE_LOCK,
+                       SYS_FILE_LOCK_WR | SYS_FILE_LOCK_WAIT | SYS_FILE_LOCK_TEST, false, false);
 
     th.note_interruptible = false;
     th.note_restartable   = false;
