@@ -548,13 +548,21 @@ bt
 print main.Sentinel
 EOF
     # Stage D's abandoned-launch leg: `ambush dap-selftest /bin/ambush-child
-    # /bin/ambush-notelf` launches this first. It is executable, so the spawn makes
-    # a child, and not an ELF image, so that child dies in its exec before it runs;
-    # the failed launch must reap it. The mode is set rather than left to the
-    # umask: without X the spawn is refused before any child exists, and the leg
-    # fails saying so.
-    printf 'not an ELF image\n' > "$ramfs_bin/ambush-notelf"
-    chmod 0755 "$ramfs_bin/ambush-notelf"
+    # /bin/ambush-nointerp` launches this first. A full spawn reads a file's header in
+    # the parent and refuses one that is no image, so this is a header it passes: only
+    # a PT_INTERP, naming nothing. The spawn makes a child, and that child dies in its
+    # load before it runs; the failed launch must reap it. The mode is set rather than
+    # left to the umask: without X the spawn is refused before any child exists, and
+    # the leg fails saying so.
+    python3 - "$ramfs_bin/ambush-nointerp" <<'PY'
+import struct, sys
+interp = b'/nonexistent/ld.so\0'
+ident = b'\x7fELF\x02\x01\x01' + bytes(9)
+ehdr = ident + struct.pack('<HHIQQQIHHHHHH', 2, 183, 1, 0x400000, 64, 0, 0, 64, 56, 1, 0, 0, 0)
+phdr = struct.pack('<IIQQQQQQ', 3, 4, 64 + 56, 0, 0, len(interp), len(interp), 1)
+open(sys.argv[1], 'wb').write(ehdr + phdr + interp)
+PY
+    chmod 0755 "$ramfs_bin/ambush-nointerp"
     # U-6e-a: the `source` builtin's read fixture (/u-builtin-test sources
     # this and asserts the assignment + fn registration persist into the
     # caller's Env).

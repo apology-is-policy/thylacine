@@ -340,7 +340,7 @@ the same toolchain (`$GOFORK/bin/go`) with the same environment, so the file
 selection cannot change between them and the artifact needs no check of its
 own. Whether `Launch` still acts on the constant is
 behaviour, which `/ambush-probe` checks at the entry. The ramfs also carries
-`/bin/ambush-notelf`, an executable that is not an ELF image, for stage D's
+`/bin/ambush-nointerp`, an executable whose header names an interpreter that does not exist, for stage D's
 abandoned-launch leg (DELVE-PORT-DESIGN section 7 (b)).
 
 **A fourth guard warns about a stage the main chain never refreshes.** The
