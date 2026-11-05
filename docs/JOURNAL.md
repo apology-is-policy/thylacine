@@ -22,6 +22,16 @@ needed the operator.
 
 
 ---
+## 2026-11-05 (aux, Opus 5.5 1M) -- C8b lands; C10's three readings close
+
+**What landed.** Thread-model C8b, `0905ba39d..b89afb330`, plus a C10 witness `2d4c38abe`. Per-CPU timer bases, a wake takes no timer lock, the sleeper unlinks itself, operator vote 21. Green 2222 twice on one ELF (cf2261a6bae7dc17). SMP subset 20 of 20 boots passed, 0 corruption. The full matrix did NOT run (11-02 hold) and is owed at the merge.
+
+**C10's readings.** K02 alone: "stops translating", so HVF does witness the TLB invalidate, and round 1's F3(e) needs no Pi leg. K15 alone: "translates nowhere". K10's new test ends the boot at "caught at the vector", at a direct-map frame with bit 14 clear. Each had a control green first, which is the point of running a test alone: it could have failed alone for its own reasons.
+
+**A misreading I nearly made.** X08's `FAIL:` line named "the base is empty after the last owner left", not the line I predicted, and I took that to mean "off the tail" had passed under the sabotage. It had not. `TEST_EXPECT_EQ` carries on after a failure and the runner prints only the last message, so a test's `FAIL:` line names its last red. The `runnable-dump` lines in the boot log name every one. X08 was red from the test's entry, so the line fired, without proving it discriminates by itself.
+
+**Not done.** The full matrix and the gates owed at the merge. M01 and M02 have no runtime witness: their windows need a peer in a place no test can hold it, and the buggy cfgs are their witness.
+
 ## 2026-11-04 (aux, Opus 5.5 1M) -- C10 lands; a lease lost to a check I skipped
 
 **What landed.** Thread-model C10, `0a5d6e513..d0a545836`. Each kernel stack in a range of its own, the guard unbacked, 9 pool pages a thread down to 5, an overflow caught at the vector, the direct map in blocks, ARCH rewritten as built. Green 2217 twice on one ELF (c325d47d77cedf6f), 8 of 8 fault variants. The full matrix did NOT run (11-02 hold) and is owed at the merge.

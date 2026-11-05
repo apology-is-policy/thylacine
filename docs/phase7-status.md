@@ -3053,3 +3053,15 @@ Measured on those boots, on a shared Mac: 128 threads hold 512 stack pages and 1
 **Not settled:** K02 skips the TLB invalidate. It went red under HVF at `thread.kstack_cache_keeps_the_guard`, as `thread_free of a thread still owing hook walks`, which reads as a stale stack mapping writing over a page reused for a thread slot; that cause is read, not shown. K15 went red at the map's own guard. So `thread.kstack_release_invalidates_a_warm_entry` and `thread.kstack_cache_is_bounded` have not been seen red on their own lines, and K10 has no witness at all. C8b's lease runs K02 and K15 alone at those tests, and adds a test for K10.
 
 **Did not run:** the full SMP matrix, under the 11-02 hold. It stays owed at the merge to main, with the rest of `tools/test-fault.sh`, the interactive fleet and `tools/check-production.sh`. C10 ran no SMP subset: votes 27 and 31 name C8a, C8b and C9, and C8b's runs on top of this.
+
+## C8b: per-CPU timer bases, and a wake takes no timer lock — 2026-11-05
+
+The one global list of timed sleepers is gone. A thread in `tsleep` links on its current CPU's sorted base, and the sleeper unlinks itself on every way out. `wakeup` and the death and note wakers take no timer lock, and a CPU's tick expires its own base's head, reading the earliest deadline with no lock until one is due. A secondary with no tick yet links on cpu0's base. Operator vote 21 chose this design; `specs/tsleep.tla` is restated to match, with `NoStaleTimerEntry` restated.
+
+Audit: round 1 Fable 5.1, 0/0/0/4, all fixed.
+
+Tests: the full suite is green at 2222 on `2d4c38abe`, twice, one ELF, with joey and the guest legs. Sabotages, 13: X01 to X04 and X06 to X11 red at their target, X05 the hang at `timerbase.wake_takes_no_timer_lock` it predicts, M01 and M02 green as predicted, since only `tsleep_buggy_clear_first.cfg` and `tsleep_buggy_unlink_early.cfg` can reach those windows. X08 goes red from the test's entry, because it strands state across earlier tests; "off the tail" fired among the rest. SMP subset (`default-smp4 ubsan-smp4`, 20 boots, vote 27): 20 of 20 boots passed, 0 corruption on `2d4c38abe`.
+
+C10's owed readings, settled here: K02 and K15 each go red alone at the line they name, K10 ends the boot at its new test, and each test passes alone with no sabotage (`chg-2026-11-05-c10-owed-readings`).
+
+**Did not run:** the full SMP matrix, under the 11-02 hold. It stays owed at the merge to main, with the rest of `tools/test-fault.sh`, the interactive fleet and `tools/check-production.sh`.
