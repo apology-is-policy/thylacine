@@ -4,7 +4,7 @@ type: chg
 title: "Thread-model C9: the switch decides from TTBR0"
 date: 2026-11-04
 arc: arc-phase6-pouch
-commits: []
+commits: [addcee94f, 370a5b5ea, 22aeb1aaa, f6b6b9d1e, 3ea459c7d]
 touched:
   - sub-kernel-sched-smp
   - sub-kernel-thread

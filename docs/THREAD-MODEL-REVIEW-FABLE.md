@@ -880,6 +880,8 @@ construction.
   Gate: `torpor.tla`; torpor tests + a fairness witness; the go-build
   osyield/futex floor re-measured.
 - **C9 -- switch fast paths** (E-4, E-5): same-AS skip. (Lazy FP restore, listed here at first, is not built: operator vote 30, about 16 ns per resume under HVF against a way to hand one thread another's registers; `dec-2026-11-04-switch-from-ttbr0`, with the figure corrected in `chg-2026-11-04-c9-r1`.)
+  FPCR's msr skip is not built either: 4 ns for a read and a write together under HVF, on a
+  switch of 48, and the ISB stays regardless (`chg-2026-11-05-c9-readings`).
   Gate: cpubench; the FP
   note-delivery tests; SMP gate.
 - **C10 -- scripture**: ARCH 7.3/7.4/7.9/23.4, IDENTITY 3.8, DEBUG-FS 5c.7,

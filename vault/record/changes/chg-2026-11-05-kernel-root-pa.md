@@ -4,7 +4,7 @@ type: chg
 title: "A kernel thread's TTBR0 is the kernel's root at last, not a high VA"
 date: 2026-11-05
 arc: arc-phase6-pouch
-commits: []
+commits: [64f75eba9]
 touched:
   - sub-kernel-mmu
 established: []
