@@ -19,8 +19,11 @@
 # The readback leg is the same chord with a transfer of the busy target always in
 # flight, and it proves only that the seat comes through that: the wide wait can drain
 # the queue before the chord is seen. The pointer leg moves the pointer behind that
-# transfer: its lane must stall and come back, and tapestryd must retry the update it
-# was refused.
+# transfer, and tapestryd must retry an update it was refused and have it taken again.
+# QEMU runs the cursor queue apart from the GL work a client queued, so on virgl a move
+# is refused by the engine's stall rather than its own lane's: the lane's own stall is
+# reported, and required to come back when it happens. The dead scenario's lever drives
+# that lane on every boot.
 #
 # Each client ends before a witness types, because keys typed behind its queue can
 # be lost.
@@ -279,7 +282,7 @@ set revived 0
 set accepted 0
 set ended 0
 set timeout 1
-for {set i 0} {$i < 40 && !($stalled && $refused)} {incr i} {
+for {set i 0} {$i < 40 && !$refused} {incr i} {
     pointer [expr {2000 + $i * 500}] 8000
     expect {
         -re {cursor queue (abandoned|failed)} { lc_fail "pointer: the cursor queue did not survive a client's readback" }
@@ -293,9 +296,8 @@ for {set i 0} {$i < 40 && !($stalled && $refused)} {incr i} {
         eof { lc_fail "EOF at the pointer" }
     }
 }
-if {!$stalled} { lc_fail "SAK-CHAIN RED (pointer): no pointer motion stalled behind the client's readback: its wait took the wide bound, or the host's loop stayed free" }
-if {!$refused} { lc_fail "SAK-CHAIN RED (pointer): the cursor lane stalled and tapestryd was never refused" }
-lc_pass "SAK-CHAIN pointer: the lane stalled behind a readback and the update was refused"
+if {!$refused} { lc_fail "SAK-CHAIN INCONCLUSIVE (pointer): no pointer update behind the client's readback was refused (lane stalled=$stalled)" }
+lc_pass "SAK-CHAIN pointer: an update behind a readback was refused (lane stalled=$stalled)"
 # A client's end may have come already, so the update owed after it is sent when both
 # are known.
 set timeout 60
@@ -314,7 +316,7 @@ while {!($ended && $accepted)} {
     eof { lc_fail "EOF at the pointer's revival" }
     }
 }
-if {!$revived} { lc_fail "pointer: the update was accepted, but lictor never said the lane revived" }
+if {$stalled && !$revived} { lc_fail "pointer: the update was accepted, but lictor never said the stalled lane revived" }
 after 1500
 witness pointer
 lc_pass "graphical SAK: the trusted screen came up behind another client's draws in flight"
