@@ -174,8 +174,8 @@ void test_context_switch_cost(void) {
     u64 same_space = sc_pair(sp, sp);
     u64 cross_space = sc_pair(sp, sq);
     u64 with_kernel = sc_pair(sp, kproc());
-    proc_free(sq);
-    proc_free(sp);
+    test_proc_free_drained(sq);
+    test_proc_free_drained(sp);
 
     uart_puts("    switch-cost: ");
     sc_report("direct", direct / (2u * SC_SWITCHES));

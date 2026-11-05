@@ -242,8 +242,8 @@ void test_fp_round_trip_v_regs_fpsr_fpcr(void) {
     TEST_ASSERT(fp_bytes_equal(g_fp_verify, g_fp_sentinel),
         "V, FPCR or FPSR did not survive a switch to a thread of another space");
 
-    proc_free(q);
-    proc_free(p);
+    test_proc_free_drained(q);
+    test_proc_free_drained(p);
 }
 
 // Two kernel threads. The first's values are still live in the second, and neither
@@ -315,7 +315,7 @@ void test_fp_user_v_survives_a_kernel_thread(void) {
         "the kernel thread's switch out saved the clobber");
     thread_free(g_fp_owner);
     thread_free(g_fp_other);
-    proc_free(p);
+    test_proc_free_drained(p);
 }
 
 // A hop for each case the switch decides on. Each thread records what the hardware
@@ -363,8 +363,8 @@ void test_context_ttbr0_follows_next(void) {
     TEST_ASSERT((g_tf_live[0] >> ASID_TTBR0_SHIFT) != 0, "a thread on a space runs on ASID 0");
     TEST_EXPECT_EQ(g_tf_live[3] >> ASID_TTBR0_SHIFT, 0ull, "a kernel thread runs on an ASID");
     for (u32 i = 0; i < TF_HOPS; i++) thread_free(g_tf_thread[i]);
-    proc_free(q);
-    proc_free(p);
+    test_proc_free_drained(q);
+    test_proc_free_drained(p);
 }
 
 // ---------------------------------------------------------------------------

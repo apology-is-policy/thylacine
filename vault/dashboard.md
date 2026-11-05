@@ -134,6 +134,4 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-11-04 [[chg-2026-11-04-c9-switch]] — Thread-model C9: the switch decides from TTBR0
 - 2026-11-04 [[chg-2026-11-04-pinned-wake]] — A pinned thread's wake goes to its home CPU, not the waker's
 - 2026-11-04 [[chg-2026-11-04-torpor-walks-go]] — The two torpor walks and the bucket-lock die check go
-- 2026-11-04 [[chg-2026-11-04-walk-errno-close]] — The walk errno close: rounds 1 and 2, the first boots, 32 sabotages
-- 2026-11-03 [[chg-2026-11-03-c10a-kstack-range]] — Each thread's kernel stack in a range of its own, its guard costing no memory; the 0x200 vector reads SP
 <!-- generated:end -->
