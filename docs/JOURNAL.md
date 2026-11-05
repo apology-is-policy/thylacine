@@ -22,6 +22,28 @@ needed the operator.
 
 
 ---
+## 2026-11-05: vote 50's second audit: the fix holds, its witnesses did not
+
+Nothing here has booted. The join on GitHub is still `b2d9c274a`; this all sits on corona/vote50 at `b92dcbc0e`, local and bundled.
+
+Audit round 2 read `c01753f2c`, Opus on Opus, 113 tool uses, read only: 0 P0, 1 P1, 7 P2, 6 P3. I checked every quoted line. The retry, the bound, the abandon and heal and the pointer retry all hold by reading. The witnesses did not:
+
+- **The client could not have run.** `warp-prove chain-hold` failed on EAGAIN (`main.rs:1597-1601`), and its own one-second queue makes a compositor step miss 500 ms, which makes the broker answer EAGAIN (`gpu.rs:4060-4063`). So the reproduction I had built and queued for the mac would have reported "the client failed" at the tip, the old gate and the fix alike. A lease would have told me nothing.
+- **A failed episode read as a pass.** Corvus prints "SAK with nothing pending" for a seat that failed too (`corvus/src/main.rs:3829`, `:4031`), and expect tries arms in list order, so the token beat the failure line in the buffer. The failure notice has the same ground colour, so the glass check agreed.
+- **Nothing proved a stall at the chord.** This is the 40-chord storm's trap again, one layer up.
+
+**The wrong turn it caught in scripture:** I had written a client-aimable denial into SEAT-REVIEW's availability paragraph, the one ending "the substantive policy choice approved on October 2". October 2 approved stalled session brokers. r1 had warned me that this stretched it, and I repeated it in the commit and in my vote draft anyway. The clause is out, and the denial is now written as an open vote wherever it is stated.
+
+**One finding of my own while fixing it,** read, not measured: a stall cannot be required of every chord. A chord seen while the compositor's own step is draining the queue paints on an empty FIFO, because the client's writes were refused meanwhile. So the chain leg takes up to six chords and reads none-stalled as inconclusive. The first boot will say whether that is even the right shape.
+
+**A scripted serial earned its keep again.** `work/nov03-mm1/v50/fake/`, 85 rows, each fault with the reason it must red with. It found a real scenario bug before any lease: lines from three processes in separate arms let a later line swallow the client's END. It is now one alternation, the lesson in `feedback_expect_cross_process_markers`, which I had not applied. It also caught my own harness racing on a shared capture path.
+
+**Fixed, in `7c5da8dec` and `b92dcbc0e`:** the client retries EAGAIN and counts it; failure arms come first; lictor says when a takeover meets a stall; new levers and legs reach each arm (a device's answer, a wait behind a readback, a stalled frame, a cursor chain past the abandonment bound); a pointer leg behind a real readback; stale scripture. Host tests pass on `7c5da8dec` (lictor 65, tapestryd 122). The last commit, leg F, got guest clippy only. `tools/test-rust.sh` ran on the Pi at `c01753f2c`, one commit earlier: 2854 tests, 32 crates, 0 failing, and it reports 72 stranded, 69 in libutopia and 3 in corvus, which it does not count as passing.
+
+**What "fixed" does not cover:** nothing has run on a guest. Two findings stay open, and neither is a regression of this fix. The ordinary command's wide wait behind a readback (r2 F8) goes to the operator with the backlog past five seconds, in `design_vote50_r1.md`. Keys lost behind a blocked serve loop (r2 F4) are newly enqueued. Round 2 closed dirty, so round 3 is owed after the boots.
+
+Next: `q-lease1.sh d7150d2cd b92dcbc0e` when the mac comes, then three images on the Pi, 13 mutants, the vote, round 3.
+
 ## 2026-11-05 -- vote 50 passes its witness and fails its audit (corona)
 
 Vote 50 says a client's chain must not deny the graphical SAK. I wrote the fix at
