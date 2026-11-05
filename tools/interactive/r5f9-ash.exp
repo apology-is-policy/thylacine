@@ -15,6 +15,14 @@
 
 source [file join [file dirname [info script]] lib.exp]
 
+set repo $lc_repo
+set ash_bundle "$repo/build/vivarium/alpine-ash/config.json"
+if {![file exists $ash_bundle]} {
+    puts "LS-CI SKIP: no alpine-ash bundle staged at $ash_bundle -- build.sh stages\
+          it when the Alpine minirootfs + busybox apk are in build/cache/"
+    exit 77
+}
+
 proc r5_prompt {phase secs} {
     global timeout
     set timeout $secs
