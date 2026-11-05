@@ -681,7 +681,7 @@ void boot_main(void) {
 
     // P3-Bda: retire the TTBR0 identity map. By now, all secondaries
     // have completed their secondary_entry trampoline (which uses
-    // TTBR0 identity for stack until SP_EL0 is re-anchored to high
+    // TTBR0 identity for stack until SP_EL1 is re-anchored to high
     // VA post-mmu_program_this_cpu). After this call, any low-VA
     // dereference (PA-as-VA-via-TTBR0 idiom) faults at the L2 invalid
     // entry. All known callers were migrated:
@@ -690,8 +690,8 @@ void boot_main(void) {
     //   - kstack → direct-map (P3-Bca kernel/thread.c).
     //   - struct_pages → direct-map (P3-Bda mm/phys.c::phys_init).
     //   - DTB → buffer in direct map (P3-Bda dtb_relocate_to_buffer).
-    //   - boot stack SP_EL0 → high VA (P3-Bda start.S step 8.6).
-    //   - secondary boot stack SP_EL0 → high VA (P3-Bda start.S
+    //   - boot stack SP_EL1 → high VA (P3-Bda start.S step 8.6).
+    //   - secondary boot stack SP_EL1 → high VA (P3-Bda start.S
     //     secondary_entry post-mmu_program_this_cpu).
     //
     // Boot-CPU TTBR0_EL1 still points at l0_ttbr0 (now with empty L2s);

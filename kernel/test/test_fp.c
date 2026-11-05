@@ -43,6 +43,7 @@
 #include <thylacine/context.h>      // #96: FP_AREA_SIZE, fp_save_area/restore
 #include <thylacine/extinction.h>
 #include <thylacine/proc.h>
+#include <thylacine/spinlock.h>
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
@@ -74,7 +75,8 @@ static struct Thread *g_fp_other;
 // Loads V0..V31, then FPSR and FPCR, from a sentinel-shaped buffer. Offsets match
 // cpu_switch_context's, Q0+Q1 at +0 through Q30+Q31 at +480. The registers are this
 // function's result, so it names no clobbers: naming v8-v15 has the compiler restore
-// d8-d15 on the way out, over what was just loaded. Its callers hold nothing in V.
+// d8-d15 on the way out, over what was just loaded. Its callers hold nothing in V. One
+// statement, so no compiled code of this V-enabled function runs inside the load.
 __attribute__((target("+fp+simd")))
 static void fp_load_regs(const u8 *src) {
     __asm__ __volatile__(
@@ -95,15 +97,12 @@ static void fp_load_regs(const u8 *src) {
         "ldp q26, q27, [%0, #416]\n"
         "ldp q28, q29, [%0, #448]\n"
         "ldp q30, q31, [%0, #480]\n"
-        : : "r"(src)
-    );
-    u64 fpcr = *(const u32 *)&src[32 * 16];
-    u64 fpsr = *(const u32 *)&src[32 * 16 + 4];
-    __asm__ __volatile__(
-        "msr S3_3_C4_C4_1, %0\n"  // FPSR
-        "msr S3_3_C4_C4_0, %1\n"  // FPCR
+        "ldr w9,  [%0, #512]\n"
+        "ldr w10, [%0, #516]\n"
+        "msr S3_3_C4_C4_1, x10\n"  // FPSR
+        "msr S3_3_C4_C4_0, x9\n"   // FPCR
         "isb\n"
-        : : "r"(fpsr), "r"(fpcr)
+        : : "r"(src) : "x9", "x10"
     );
 }
 
@@ -127,13 +126,12 @@ static void fp_read_regs(u8 *dst) {
         "stp q26, q27, [%0, #416]\n"
         "stp q28, q29, [%0, #448]\n"
         "stp q30, q31, [%0, #480]\n"
-        : : "r"(dst) : "memory"
+        "mrs x9, S3_3_C4_C4_0\n"   // FPCR
+        "mrs x10, S3_3_C4_C4_1\n"  // FPSR
+        "str w9,  [%0, #512]\n"
+        "str w10, [%0, #516]\n"
+        : : "r"(dst) : "x9", "x10", "memory"
     );
-    u64 fpsr, fpcr;
-    __asm__ __volatile__("mrs %0, S3_3_C4_C4_1" : "=r"(fpsr));
-    __asm__ __volatile__("mrs %0, S3_3_C4_C4_0" : "=r"(fpcr));
-    *(u32 *)&dst[32 * 16]     = (u32)fpcr;
-    *(u32 *)&dst[32 * 16 + 4] = (u32)fpsr;
 }
 
 // V_k bytes = (k * 17 + j + salt) & 0xff, so a swapped pair or a wrong offset
@@ -167,8 +165,12 @@ static bool fp_context_untouched(const struct Thread *t) {
     return t->ctx.fpcr == 0 && t->ctx.fpsr == 0;
 }
 
-// The second thread of a round trip: what it saw on arrival, then a clobber.
+// The second thread of a round trip: what it saw on arrival, then a clobber. Masked for
+// good, here and in the two kernel threads below: as a kernel thread, a preempting
+// thread on a space would load its own V, and this would read that. The trampoline
+// unmasks before this runs, so a few instructions stay open, and only to a false red.
 static void fp_other_entry(void) {
+    (void)spin_lock_irqsave(NULL);
     for (;;) {
         fp_read_regs(g_fp_seen_live);
         fp_load_regs(g_fp_clobber);
@@ -248,12 +250,14 @@ void test_fp_round_trip_v_regs_fpsr_fpcr(void) {
 // Two kernel threads. The first's values are still live in the second, and neither
 // Context was written.
 static void fp_kernel_second(void) {
+    (void)spin_lock_irqsave(NULL);
     fp_read_regs(g_fp_seen_live);
     g_fp_test_state++;
     for (;;) thread_switch(g_fp_owner);
 }
 
 static void fp_kernel_first(void) {
+    (void)spin_lock_irqsave(NULL);
     fp_load_regs(g_fp_sentinel);
     g_fp_test_state++;
     thread_switch(g_fp_other);
