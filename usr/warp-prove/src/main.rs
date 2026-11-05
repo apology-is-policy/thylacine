@@ -3935,9 +3935,9 @@ fn rb_upload_triangles(warp: i64, ctx: u32, vbo: u32, vbo_va: u64) {
     let _ = rb_wait_signaled(warp, ctx, before, 1, libthyla_rs::time::Instant::now(), "vbo-upload");
 }
 
-/// Keep `CHAIN_HOLD_DEPTH` heavy submits on the device for `argv[2]` seconds. The
-/// broker's warp-watch line witnesses the queue on the serial: this client's own
-/// output goes to its pane.
+/// Keep `CHAIN_HOLD_DEPTH` heavy submits on the device for `argv[2]` seconds, and
+/// say when the first full queue has turned over and refilled, read from the
+/// broker's own fence count.
 fn chain_hold() -> i64 {
     let secs: u64 = libthyla_rs::env::args()
         .get_str(2)
@@ -3958,10 +3958,11 @@ fn chain_hold() -> i64 {
     let _ = rb_wait_signaled(warp, ctx, before, 1, libthyla_rs::time::Instant::now(), "chain-hold prime");
     let base = ctx_field(warp, ctx, "fence-signaled");
     let mut sent = 0u64;
+    let mut said = false;
     let t0 = libthyla_rs::time::Instant::now();
-    t_putstr(&format!("warp-prove: CHAIN-HOLD ctx {} for {} s\n", ctx, secs));
     while t0.elapsed().as_secs() < secs {
-        if sent - (ctx_field(warp, ctx, "fence-signaled") - base) < CHAIN_HOLD_DEPTH {
+        let retired = ctx_field(warp, ctx, "fence-signaled") - base;
+        if sent - retired < CHAIN_HOLD_DEPTH {
             let mut st: Vec<u32> = Vec::new();
             fb_state_stream(&mut st, 1);
             for k in 0..RB_DRAWS_PER_SUBMIT {
@@ -3970,6 +3971,16 @@ fn chain_hold() -> i64 {
             submit_stream(warp, ctx, &st, "chain-hold");
             sent += 1;
         } else {
+            if !said && retired >= CHAIN_HOLD_DEPTH {
+                said = true;
+                t_putstr(&format!(
+                    "warp-prove: CHAIN-HOLD DEEP ctx {} sent {} retired {} after {} ms\n",
+                    ctx,
+                    sent,
+                    retired,
+                    t0.elapsed().as_millis()
+                ));
+            }
             let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(5));
         }
     }

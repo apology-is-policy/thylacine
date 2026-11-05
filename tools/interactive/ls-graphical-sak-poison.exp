@@ -117,7 +117,6 @@ witness baseline
 episode control
 witness control
 
-# The READY line goes to the pane, so the serial witness is the broker's own.
 type "warp-prove poison-hold 240 &\n"
 set timeout 60
 expect {

@@ -7,8 +7,8 @@
 # ahead of anything the trusted seat submits after the chord, so this is the
 # case a poisoned slot with nothing on the device cannot show. The chord must
 # still bring up the trusted screen. Control: the same chord and the same empty
-# episode with no client, one variable away. The queue's witness is the broker's
-# warp-watch line, which names the fences still in flight.
+# episode with no client, one variable away. The queue's witness is the client's
+# own line, read from the broker's fence count just after the queue refilled.
 #
 # Needs a ctx, so a virgl device, and the session compositor. From the remote
 # repo: THYLACINE_GPU_DEV=virtio-gpu-gl-pci THYLACINE_DISPLAY=egl-headless
@@ -53,7 +53,7 @@ proc episode {leg} {
     set timeout 20
     expect {
         -ex "lictor: trusted scanout active" {
-            lc_step "SAK-CHAIN $leg takeover-ms=[expr {[clock milliseconds] - $t0}]"
+            lc_pass "SAK-CHAIN $leg takeover-ms=[expr {[clock milliseconds] - $t0}]"
         }
         -ex "lictor: kernel closed trusted seat (scanout normal)" {
             lc_fail "SAK-CHAIN RED ($leg): the episode failed at its deadline with nothing on the glass"
@@ -118,13 +118,14 @@ episode control
 witness control
 
 type "warp-prove chain-hold 150 &\n"
-set timeout 100
+set timeout 60
 expect {
-    -re {warp-watch pass=[0-9]+ [^\r\n]* inflight=([2-9]) } {
-        lc_step "a client has draws in flight: inflight=$expect_out(1,string)"
+    -re {warp-prove: CHAIN-HOLD DEEP ctx [0-9]+ sent [0-9]+ retired [0-9]+ after [0-9]+ ms} {
+        lc_pass "SAK-CHAIN client: $expect_out(0,string)"
     }
+    -re {warp-prove: FAIL[^\r\n]*[\r\n]} { lc_fail "the client failed: $expect_out(0,string)" }
     -re {EXTINCTION:} { lc_extinction_fail "starting the client" }
-    timeout { lc_fail "the broker named no draws in flight within 100 s of chain-hold" }
+    timeout { lc_fail "the client reported no full queue within 60 s of chain-hold" }
     eof { lc_fail "EOF starting the client" }
 }
 
