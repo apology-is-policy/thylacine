@@ -6,14 +6,18 @@ first word, and only when it is the sole argument. Anything else is one literal 
 with no action: no arm is armed, the wait runs out and returns, and no failure arm in it
 can fire. Run on expect 5.45, each of these fired nothing:
 
-    expect -timeout N {arms}          a flag, and any flag: -i, -notransfer, -nocase
-    expect { -ex "a" {} timeout {} }  on one line
+    expect -timeout N {arms}          a flag, and any flag: -i, -nocase, -iread, --, -notr
+    expect { -ex "a" {} timeout {} }  on one line, and { -re foo }, { timeout exit }
     lc_within N { -ex "a" {} }        the same, since it passes its block on
+    expect_before -i $id {arms}       expect_before and expect_after go by the same rule
 
 This has happened twice: lib.exp's lc_fail_detail, and every wait in
 ls-halcyon-paste-flow.exp. lc_within with its arms on their own lines is the form.
 `expect -timeout N -re {a} {b}`, `expect -timeout N {a} {b}`, `expect -timeout N "a"` and
-`expect {a}` are not blocks of arms, and fine.
+`expect {a}` are not blocks of arms, and fine. A variable or a command after a flag is a
+hit, because its contents cannot be read from here: `expect -timeout N "$pat"` says it is
+one pattern. The same wait through `uplevel N` or `eval` is a hit too, because `eval`
+strips a level of braces and this reads none of it: write it directly.
 
 Run with no arguments to check the tree (rc 1 on a hit) or --self-test for the
 checker's own controls. --root DIR checks another tree.
@@ -24,10 +28,11 @@ import re
 import sys
 
 # A command word: the start of a line, or after `;`, `{` or `[`.
-COMMAND = re.compile(r"(?:^|[;{\[])[ \t]*(expect|lc_within)(?=[ \t\\])", re.M)
-# Flags of the command itself. A pattern's own flags, such as -re, end this list.
-TAKES_VALUE = {"-timeout", "-i"}
-ALONE = {"-nocase", "-notransfer", "-indices", "-nobrace"}
+COMMAND = re.compile(r"(?:^|[;{\[])[ \t]*(expect_before|expect_after|expect|lc_within)(?=[ \t\\])", re.M)
+INDIRECT = re.compile(r"(?:^|[;{\[])[ \t]*(?:uplevel[ \t]+#?\d+|eval)[ \t]+(?:expect|lc_within)\b", re.M)
+# These end the command's own flags. -brace is an error on expect 5.45, so it is no quiet wait.
+NOT_A_FLAG = {"-re", "-ex", "-gl", "-brace"}
+ARM_WORDS = {"timeout", "eof", "default", "full_buffer", "null"}
 
 
 def line_of(text, at):
@@ -86,21 +91,19 @@ def words(text, at):
 def holds_arms(block):
     """Whether a braced word is meant as arms and not as one pattern."""
     inner = block[1:-1]
-    return "\n" in inner or re.search(r"[ \t]\{", inner) is not None
+    if "\n" in inner or re.search(r"[ \t]\{", inner) is not None:
+        return True
+    parts = inner.split()
+    return len(parts) > 1 and (parts[0].startswith("-") or parts[0] in ARM_WORDS)
 
 
 def dead(args, within=False):
     flagged = False
     i = 1 if within else 0
-    while i < len(args):
-        if args[i] in TAKES_VALUE or args[i].startswith("-timeo"):
-            flagged = True
-            i += 2
-        elif args[i] in ALONE:
-            flagged = True
-            i += 1
-        else:
-            break
+    while i < len(args) and args[i].startswith("-") and args[i] not in NOT_A_FLAG:
+        flagged = True
+        takes_value = args[i] == "-i" or (len(args[i]) > 2 and "-timeout".startswith(args[i]))
+        i += 2 if takes_value else 1
     if len(args) - i != 1:
         return False
     word = args[i]
@@ -118,6 +121,10 @@ def findings(text):
         if text[begin : m.end()].lstrip().startswith("#"):
             continue
         if dead(words(text, m.end()), m.group(1) == "lc_within"):
+            hits.append(line_of(text, m.end()))
+    for m in INDIRECT.finditer(text):
+        begin = text.rfind("\n", 0, m.start() + 1) + 1
+        if not text[begin : m.end()].lstrip().startswith("#"):
             hits.append(line_of(text, m.end()))
     return hits
 
@@ -142,6 +149,20 @@ def self_test():
         'expect -timeout 5 -nocase {\n    -ex "a" {}\n}\n',
         'expect -timeo 5 {\n    -ex "a" {}\n}\n',
         'expect { # a comment\n    -ex "a" {}\n}\n',
+        'expect -iread {\n    -ex "a" {}\n}\n',
+        'expect -timestamp {\n    -ex "a" {}\n}\n',
+        'expect -notr {\n    -ex "a" {}\n}\n',
+        'expect -noc {\n    -ex "a" {}\n}\n',
+        'expect -ind {\n    -ex "a" {}\n}\n',
+        'expect -- {\n    -ex "a" {}\n}\n',
+        'expect -time 5 {\n    -ex "a" {}\n}\n',
+        'expect { -re foo }\n',
+        'expect { timeout exit }\n',
+        'expect_before { -ex "a" {} timeout {} }\n',
+        'expect_before -i $id {\n    -ex "a" {}\n}\n',
+        'expect_after -i $id {\n    -ex "a" {}\n}\n',
+        'uplevel 1 expect {\n    -ex "a" {}\n}\n',
+        'eval expect {{\n    -ex "a" {}\n}}\n',
     ]
     good = [
         'expect -timeout 5 -re {a} {puts b} timeout {}\n',
@@ -163,6 +184,10 @@ def self_test():
         'expect $arms\n',
         'lc_within 5 {\n    timeout {}\n}\n',
         'proc lc_within {n arms} {\n}\n',
+        'expect_before {\n    -ex "a" {}\n}\n',
+        'expect -timeout 5 "$pat"\n',
+        'uplevel 1 [list expect $arms]\n',
+        'expect {timeout}\n',
     ]
     ok = True
     for t in bad:
