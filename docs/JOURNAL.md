@@ -22,6 +22,24 @@ needed the operator.
 
 
 ---
+## 2026-11-05 -- three reds that were the witness's own, and a test that could not fail (corona)
+
+**The three SAK reds were my witness, not the kernel.** ls-graphical-sak-states, -recover and plain ls-graphical-sak failed on 3da8b3b53 at `seat-probe: FAIL DAC authority mismatch`, on a probe that did not print what it saw. Reading the code gave a hypothesis: main's M7 (IDENTITY-DESIGN 9.7, operator vote 2026-10-18) lets an elevated user change existing objects on system's mount but not create there, and the probe's elevated leg created. M7 is not in 1227710c2, the last green tree, and is in 3da8b3b53. I rewrote the witness at 007f5b19e as two legs that print what they saw: a create on system's mount is refused at every stage, and an open of `/thylacine-version` for write follows the grant.
+
+The proof ran at 01a5c90e3 on HVF, 02:41Z to 03:14Z. All three scenarios pass. A grant with no dac reads `seat-probe: FAIL write to system's file: permission denied`. M7 bypassed for uid 1000 reads `seat-probe: FAIL create on system's mount: admitted`, which is the proof of what refused the old witness. ls-imperium had the same elevated create and had never run on an M7 tree: it passes rewritten with im1-sak-lever, im3-lex-curiata and interaction-seat, goes red at DACWORKS with no dac, and goes red at `im-e2e-elevated` with M7 bypassed. Main's tree at 26f738f5a still holds both old witnesses, so I told main. A grep of the fleet found no other scenario creating under elevation; that is a search of the text, not a run.
+
+**Round 7 (Opus on Opus, read-only): 0 P0, 0 P1, 1 P2, 9 P3.** The P2 came from my round 6 fix: waiting on an open heredoc exposed the editor's bracket walk reading a body as shell, so a body holding `it's` could never submit. Bodies are removed first, using spans the lexer records.
+
+**The mutants found two errors of mine that the review had not.** A row in `a_heredoc_body_opens_nothing` expected a complete command to wait for another line; it meant a connector. The first test of the call's interrupt poll could not fail: the mutant with the poll removed stayed green. I wrote that `eval_block` stops on a pending interrupt, and that was wrong too. It only checks after a statement; the stop is `eval_command`'s check marked SA-1, which I found comparing the loop's path with the call's, after the commit. Lint R3 refused the correction in place, so `chg-2026-11-05-as4-r7-shell-corrected` supersedes it. The new test counts the call that stops, and ls-5 gains a Ctrl-C leg through the real note queue, which has not booted. At that commit: libutopia 450 and 538 pass, 12 mutants over 18 test rows all red.
+
+**Composite shapes for the drop** did not beat the 511 KiB already in flow 11. The largest, 431 KiB, is 60 nested `if` around a 60-level `case` value in each of 32 substitutions.
+
+**Whole-tree host tests on the Pi:** `tools/test-rust.sh` rc=0, 137 crates, on ut-stack 35577cda2, MM-1c 2c82f9d26 and vote 50 7365a656f; the account ABI oracle and spawn mirrors pass on MM-1c. Before those runs the Pi had 4.0 GB free against 2.3 GB of output per tree, so I removed two of my own build outputs; 9.7 GB free after the last.
+
+**The Pi's reset timeline, from my memory test.** Free 22 MB at 00:02:12Z, swap 1937 of 2048 MB at 00:02:52Z, link closed about 00:03:02Z, boot 00:04:39Z. The board's 60 s hardware watchdog is a lead for this and for the earlier reset at 16:15:03Z, not a proven cause, and the panic_on_oom setting is off. An allocation at 10:33:27 the same day met the oom-killer with no reset. pi-watch missed this reset because it compared boot time only after a dropped stream, while the Pi was still down, then reconnected without looking; it now compares before every stream.
+
+**Not yet run:** the default suite on the join's tip, which gates the push; flows 10 and 11's first boot and their reds; ls-5's new leg both ways. Nothing is pushed.
+
 ## 2026-11-05 -- the walks nobody wrote, and a probe that could not pass (corona)
 
 Round 5's fixes had never been run red, so I ran them: 15 rows, 14 red at once (`stk/mut5.py`). The green one was `$#*` in double quotes, untested, and is pinned now. Then the owed probe of round 5's 7 KB shape: the old tree overflows and the new one refuses, and 300000 operators overflow the old tree in drop, which P3-5 had only reasoned.
