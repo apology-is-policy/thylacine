@@ -22,6 +22,20 @@ needed the operator.
 
 
 ---
+## 2026-11-05 -- while the mac waits: a lost release parks the seat, and three smaller things (corona)
+
+The mac stayed with aux's 83 sabotages, so this stretch is reading and writing. Nothing in it has booted.
+
+**The key-loss item got worse on reading.** Audit r2's F4 read as lost keys. usr/lictor/src/backend/seat.rs waits on `released` before its ACK, and kernel/proc.c refuses SEAT_RESTORED while its own `g_seat.held[]` shows a key down. So one release the device drops fails every later chord at its deadline, and normal output cannot return, until that key is pressed again. QEMU's hw/input/virtio-input.c, read today, confirms the queue of 64 and that a report with no room is dropped whole with no notice. Fix at corona/vote50 49637bc4c: eventq 16 to 64, and a drain with under 8 free releases every held key through the normal path. It recovers the seat, not the keystrokes. A thread would keep those too; `ls-graphical-keys-behind` decides whether one is owed. It may read no loss at all on this stack: when QEMU's main loop blocks in a readback it is not injecting keys either, which is reasoning, not measurement.
+
+**The slab's panics.** corona/i32: thread, proc, vma and territory carried KMEM_CACHE_PANIC_ON_FAIL against I-32. Every caller read handles NULL, so the flag only kept those unwinds from running. `slab_refusal.*` runs them by injected refusal.
+
+**ptyfs a, b, c** on the same branch: a cooked read ends at its line, a control byte echoes as a caret, LINE_MAX 4095.
+
+**Wrong turns.** A python step failed and the rest of that shell line ran, so 34c88bd3d landed with its chg's placeholder text. It was local and unpushed: soft reset, filled, recommitted as ee9d2e38a. Join script steps with `&&`. ba890e481's message says the kernel console has both cooked shapes; I wrote that before reading the console, and reading it afterwards covered only its canonical arm. The same reading found the kernel fixed #129 (a flush into a full ring refuses whole) where ptyfs still drops the tail, which my LINE_MAX raise makes easier to reach: enqueued, top of OPEN-BUGS. The 72 stranded tests in test-rust's report were vote 50's old base; the join has had the fix since 7d991b826.
+
+**Open:** every fix here awaits its boot.
+
 ## 2026-11-05: vote 50's second audit: the fix holds, its witnesses did not
 
 Nothing here has booted. The join on GitHub is still `b2d9c274a`; this all sits on corona/vote50 at `b92dcbc0e`, local and bundled.
