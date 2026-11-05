@@ -52,6 +52,8 @@ pub struct Device {
 pub enum SeatShot {
     /// A controlq stall between exclusion and bind; the device retires it.
     StallAfterExclusion,
+    /// The same stall with its retirement withheld past the kernel's deadline.
+    HoldAfterExclusion,
     /// A cursor stall inside exclusion, held until the seat restores.
     CursorStall,
     /// The kernel's RESTORED refused after a completed restore.
@@ -188,7 +190,8 @@ impl Device {
     #[cfg(feature = "test-mode")]
     pub fn test_latch_seat_shot(&mut self) -> Option<SeatShot> {
         let shot = match self.test_seat_shots {
-            4 => SeatShot::StallAfterExclusion,
+            5 => SeatShot::StallAfterExclusion,
+            4 => SeatShot::HoldAfterExclusion,
             3 => SeatShot::CursorStall,
             2 => SeatShot::RefuseRestored,
             1 => SeatShot::StallHeld,
@@ -591,7 +594,7 @@ impl Device {
             }
             Request::TestArmLatch => {
                 #[cfg(feature = "test-mode")] {
-                    self.test_latch_shots = 2; self.test_seat_shots = 4; self.test_stall_shots = 3;
+                    self.test_latch_shots = 2; self.test_seat_shots = 5; self.test_stall_shots = 3;
                     ().put(&mut out);
                 }
                 #[cfg(not(feature = "test-mode"))] { return Err(Error::BadField); }

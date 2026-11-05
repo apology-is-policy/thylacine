@@ -57,7 +57,7 @@ hazards: [haz-driver-panic-dos]
 abis: [abi-trusted-seat, abi-native-nonblock]
 design: ["docs/GRAPHICAL-SAK-OWNERSHIP.md", "docs/GRAPHICAL-SAK-PORTABILITY.md", "docs/HALCYON-TRUSTED-EPISODE.md"]
 created: 2026-09-18
-updated: 2026-11-03
+updated: 2026-11-05
 ---
 ## Clipboard cancellation progress boundary
 
@@ -296,9 +296,15 @@ fails part-way may already have disabled outputs or bound the trusted image.
 nor a client's poisoned chain costs the display. Takeover itself asks that and an
 idle cursor queue (`Gpu::takeover_clear`, vote 50): a fenced chain, in flight or
 poisoned, cannot reach the trusted image, whose id `Objects::valid_id` refuses on
-every named route and which is never attached to a context, so a client holding
-one does not deny the SAK. A restore refused by a stalled engine is retried every
-pass until the engine revives or dies. Restoration stays owed until the
+every named route and which is never attached to a context, so a client's poison
+does not deny the SAK. Its backlog can: the paint is fenced, so it retires behind
+what the host has queued. A takeover that meets a stall starts over when the engine
+revives (`Gpu::stall_pending`), under the kernel's five-second deadline; while the seat
+is not normal no wait takes the abandonment bound (`Gpu::seat_bound`). A serving
+`cursor_command` stalls at `SUBMIT_DEADLINE_MS` and never widens. A chain past
+`FENCE_ABANDON_MS` is abandoned rather than poisoned: a well-formed late retirement
+frees the lane (`cursor_queue::Queue::abandon`). A restore refused by a stalled engine
+is retried every pass until the engine revives or dies. Restoration stays owed until the
 kernel acknowledges RESTORED: when the kernel refuses it (a grantee that
 exited before the commit), the seat fails and rebinds again before it
 returns. `Seat.active` names the generation whose trusted scanout is up, so

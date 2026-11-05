@@ -172,15 +172,23 @@ All planes, cursors, outputs, capture paths, DMA access and pending submissions
 are part of the exclusion proof. A simple-framebuffer node or CPU mapping alone
 is insufficient evidence. Backends must pass conformance tests before enablement.
 
-**A client's GPU work does not hold the trusted scene back** (operator vote 50,
-2026-11-03). In that proof, a pending submission must be shown unable to reach the
-trusted image; it need not have retired. A chain reaches only resources attached to
-its context, the trusted image is never attached to a context, and only the broker
-binds scanouts. Waiting for every chain would let any client that keeps one in flight
-deny the SAK, with no trusted screen and no notice, while a fake prompt stays on the
-glass. So takeover asks only that the cursor queue is idle and no synchronous chain is
-outstanding (`Gpu::takeover_clear`), and restoring asks only the second
-(`Gpu::synchronous_clear`). A stalled engine still holds the SAK off.
+**A client's GPU work cannot reach the trusted scene, so takeover does not wait for it
+to retire** (operator vote 50, 2026-11-03). In that proof, a pending submission must be
+shown unable to reach the trusted image; it need not have retired. `Objects::valid_id`
+refuses a trusted id on every named route, a ctx-0 transfer included, the trusted image
+is never attached to a context, and only the broker binds scanouts. Waiting for every
+chain would let any client whose chain never retires deny the SAK, with no trusted
+screen and no notice, while a fake prompt stays on the glass. So takeover asks only that
+the cursor queue is idle and no synchronous chain is outstanding
+(`Gpu::takeover_clear`), and restoring asks only the second
+(`Gpu::synchronous_clear`).
+
+That settles a client's poison, not its backlog. The trusted paint is itself fenced, so
+on the host's one FIFO it runs behind whatever is already queued there. It can stall,
+and a stall is no answer from the device: the takeover starts over when the engine
+revives, under the kernel's deadline. A backlog delays the SAK. One longer than that
+deadline, or a host loop held that long, fails the episode with nothing changed on the
+glass, the stalled-participant case of `HALCYON-INTERACTION-SEAT-REVIEW.md`.
 
 **As built:** the serial episode gates UART output to the attached trusted
 process. The QEMU graphical backend uses Lictor as the boot-trusted physical

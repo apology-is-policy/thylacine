@@ -45,6 +45,22 @@ proc witness {stage} {
         eof { lc_fail "EOF ($stage)" }
     }
 }
+# How much of the glass is the trusted screen's ground. Lictor's line says what it
+# asked the device for; this reads what reached the glass.
+proc ground {name} {
+    global repo qmp
+    after 1000
+    set out [file join $repo build sak-chain-$name.png]
+    if {[info exists ::env(THYLACINE_EGL_VNC_SOCKET)]} {
+        if {[catch {exec python3 $repo/tools/interactive/vnc_capture.py $::env(THYLACINE_EGL_VNC_SOCKET) $out} e]} { lc_fail $e }
+    } else {
+        if {[catch {exec $repo/tools/screendump.sh -s $qmp $out} e]} { lc_fail $e }
+    }
+    if {[catch {exec python3 $repo/tools/interactive/sak_glass.py $repo/usr/lictor/src/render.rs $out} r]} { lc_fail $r }
+    if {![regexp {^ground ([0-9]+)\n(.*)$} $r -> pct top]} { lc_fail "an unread capture: $r" }
+    lc_pass "SAK-CHAIN glass $name ground=$pct% $top"
+    return $pct
+}
 # One chord and one Return, as an empty episode; the takeover must show first.
 proc episode {leg} {
     global timeout
@@ -65,7 +81,7 @@ proc episode {leg} {
         timeout { lc_fail "$leg: no takeover and no failure within 20 s of the chord" }
         eof { lc_fail "EOF at the takeover ($leg)" }
     }
-    after 1000
+    if {[ground $leg] < 30} { lc_fail "SAK-CHAIN RED ($leg): lictor said the scanout is up, and the glass is not the trusted screen" }
     key "ret"
     set timeout 30
     expect {
@@ -113,6 +129,7 @@ expect {
 after 1500
 key "meta_l+f"
 witness baseline
+if {[ground workspace] > 5} { lc_fail "the workspace reads as the trusted screen, so the glass check tells nothing" }
 
 episode control
 witness control

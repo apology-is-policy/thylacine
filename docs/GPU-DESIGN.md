@@ -2590,7 +2590,10 @@ block the serve loop, and seat input with it. Neither was taken.
     pins kept;
   - the 30 s park bound.
   A stall is not a poisoned chain. It is the one non-quiescent state
-  that comes back by itself. A seat episode whose restoration meets a stall
+  that comes back by itself. A takeover that meets a stall starts over when the
+  engine revives, under the kernel's deadline: nothing it did can have been answered,
+  and everything it repeats is idempotent (TRUSTED-PATH, vote 50's audit). A seat
+  episode whose restoration meets a stall
   fails at once, so its grant is cancelled. The seat's return to normal then
   waits for the stall: it rebinds once the engine revives, or goes back
   without its display once the engine dies (TRUSTED-PATH §7, vote 30).
@@ -2605,7 +2608,21 @@ block the serve loop, and seat input with it. Neither was taken.
   queue is idle and no synchronous chain is outstanding. A fenced chain cannot reach
   the trusted image: `Objects::valid_id` refuses a trusted id on every named route,
   a ctx-0 transfer included, the trusted resource is never attached to a context, and
-  only the broker binds scanouts (TRUSTED-PATH, vote 50).
+  only the broker binds scanouts (TRUSTED-PATH, vote 50). The trusted paint still
+  retires behind what the host has queued, since a synchronous chain is fenced, so a
+  client's backlog delays a takeover: measured on V3D, a synchronous command behind
+  the C-6 gate's queue took 741 to 811 ms.
+- **No wait in a trusted episode takes the abandonment bound.** `Gpu::seat_bound` is
+  set while the kernel's seat is not normal, and `wait_widens` then keeps a synchronous
+  command at `SUBMIT_DEADLINE_MS` behind a readback. Waiting 30 s there would stop the
+  serve loop under the seat with the kernel's deadline running.
+- **The cursor lane stalls and comes back.** A serving `cursor_command` never widens:
+  it stalls at `SUBMIT_DEADLINE_MS`, so a client's readback cannot hold the serve loop
+  through a pointer motion. A chain that outlives `FENCE_ABANDON_MS` is abandoned, not
+  poisoned: `Queue::idle` stays false, so takeover stays out, and a well-formed late
+  retirement frees the lane. Only a malformed entry or an engine failure poisons it,
+  until device reset. The broker retries a refused pointer update
+  (`CURSOR_RETRY_MS`) rather than latching it.
 - **An unknown outcome keeps what it named.** A stalled command may have
   executed, so every guest resource it named stays referenced:
   - a stalled ATTACH keeps its pins, as `Device::attach` already does for any

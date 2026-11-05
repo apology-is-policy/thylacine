@@ -41,6 +41,13 @@ pub struct Seat {
     withheld_said: bool,
     #[cfg(feature = "test-mode")]
     test_refuse_restored: bool,
+    /// A held stall ends when the kernel closes the episode it held up.
+    #[cfg(feature = "test-mode")]
+    test_release_on_failure: bool,
+    /// The generation whose shot is taken: a takeover that starts over after a
+    /// stall is the same takeover.
+    #[cfg(feature = "test-mode")]
+    test_shot_generation: Option<u64>,
 }
 /// How long the failure notice stays up before normal output returns.
 const FAILURE_NOTICE_MS: u128 = 1500;
@@ -111,6 +118,7 @@ impl Seat {
         if ep::call(ep::STATUS, &mut m).is_err() { self.fail("status"); return; }
         self.adopt(&m);
         self.quiescence.observe(self.generation, self.phase);
+        device.gpu.seat_bound(self.phase != 0);
         let released = inputs.iter().all(|i| i.held.iter().all(|held| !held));
         match self.phase {
             0 => {},
@@ -120,16 +128,27 @@ impl Seat {
                 if !device.gpu.takeover_clear() { return; }
                 if !self.active() {
                     self.model = Model { notice: b"Preparing the trusted path.".to_vec(), ..Model::default() };
+                    // A stall here is other work ahead of ours on the device, not
+                    // an answer from it: the chain retires, the engine revives and
+                    // the next pass starts over. The kernel's deadline bounds that.
                     if screen.paint(&mut device.gpu, &self.model, 0, None).is_err() {
-                        self.fail("private scanout activation"); return;
+                        if !device.gpu.stall_pending() { self.fail("private scanout activation"); }
+                        return;
                     }
                     #[cfg(feature = "test-mode")]
-                    let shot = device.test_latch_seat_shot();
+                    let shot = if self.test_shot_generation == Some(self.generation) {
+                        None
+                    } else {
+                        self.test_shot_generation = Some(self.generation);
+                        device.test_latch_seat_shot()
+                    };
                     #[cfg(feature = "test-mode")]
                     {
                         screen.test_stall_after_exclusion = shot == Some(SeatShot::StallAfterExclusion);
+                        screen.test_hold_after_exclusion = shot == Some(SeatShot::HoldAfterExclusion);
                         device.gpu.test_cursor_stall_next(shot == Some(SeatShot::CursorStall));
-                        self.test_refuse_restored = shot == Some(SeatShot::RefuseRestored);
+                        self.test_refuse_restored |= shot == Some(SeatShot::RefuseRestored);
+                        self.test_release_on_failure |= shot == Some(SeatShot::HoldAfterExclusion);
                     }
                     // A takeover that fails part-way may already have disabled
                     // outputs or bound the trusted image.
@@ -137,7 +156,10 @@ impl Seat {
                     let activated = screen.activate(&mut device.gpu);
                     #[cfg(feature = "test-mode")]
                     device.gpu.test_cursor_stall_next(false);
-                    if activated.is_err() { self.fail("private scanout activation"); return; }
+                    if activated.is_err() {
+                        if !device.gpu.stall_pending() { self.fail("private scanout activation"); }
+                        return;
+                    }
                     self.active = Some(self.generation); self.sequence = 0; self.masked = 0;
                     super::diagnostic(&alloc::format!("lictor: trusted scanout active generation={}\n", self.generation));
                     #[cfg(feature = "test-mode")]
@@ -200,6 +222,8 @@ impl Seat {
                     }
                     libthyla_rs::time::Instant::now()
                 });
+                #[cfg(feature = "test-mode")]
+                if core::mem::take(&mut self.test_release_on_failure) { device.gpu.test_stall_release(); }
                 if !released || (self.active() && since.elapsed().as_millis() < FAILURE_NOTICE_MS) { return; }
                 if self.displaced || self.active.is_some() {
                     if device.gpu.engine_dead() {

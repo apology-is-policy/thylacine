@@ -108,7 +108,8 @@ Lictor accepts that control during quiescence while keeping normal GPU/input
 requests excluded. Neither loop waits synchronously for an application reply.
 
 **Availability consequence:** a live but stalled renderer or Tapestry may prevent
-SAK from opening. At the existing five-second deadline, the episode fails with
+SAK from opening, and on a backend with one host FIFO so may a client's queued GPU
+work (`TRUSTED-PATH.md`). At the existing five-second deadline, the episode fails with
 no grant, then follows the existing safe display restoration path. There is no
 new forced process kill, bypass, infinite wait or silent downgrade. Keyboard
 and scanout exclusion begins immediately; secret input starts only after the

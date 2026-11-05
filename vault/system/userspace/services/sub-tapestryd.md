@@ -12,7 +12,7 @@ hazards: [haz-driver-panic-dos]
 abis: []
 design: ["docs/TAPESTRY.md", "docs/AURORA-CONFIG.md"]
 created: 2026-08-02
-updated: 2026-11-04
+updated: 2026-11-05
 ---
 ## Cooperative hidden storage (October 4)
 
@@ -3096,7 +3096,9 @@ frame boundary, then sends changed shape/scale/position through Lictor. It never
 paints over a stale CPU mirror of accelerated content or restores saved pointer
 background pixels. Preferences live in surface incarnations and vanish with
 them. A seat generation change invalidates the last-sent pointer state because
-Lictor hid it during the trusted episode. The portable cursor raster lives in
+Lictor hid it during the trusted episode. A refused update is retried after
+`CURSOR_RETRY_MS`, never latched: a cursor stall behind a client's readback comes
+back by itself. The portable cursor raster lives in
 [[sub-libhalcyon]]; VirtIO queue ownership and exclusion live in [[sub-lictor]].
 
 HI-0 runtime checkpoint (2026-09-24): `ls-halcyon-pointer` passes on QEMU/KVM

@@ -79,6 +79,11 @@ released. Holding the attention keys for more than five seconds is the usual
 cause. The pending request is cancelled and must be issued again. The key prompt
 is never moved into an ordinary terminal.
 
+If another program has more than five seconds of graphics work queued, the trusted
+display may not appear at all: the screen stays as it was and no authority is
+conferred. A screen that did not change after the attention keys is not the trusted
+path, so do not type a key into anything on it. Press the attention keys again.
+
 If the graphics device stops responding during an episode, the display cannot
 return for the rest of the boot. The trusted dialog, or whatever the screen last
 showed, may stay frozen. Keys typed after that go nowhere. They never reach the
