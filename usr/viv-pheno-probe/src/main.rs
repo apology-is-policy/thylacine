@@ -3835,6 +3835,12 @@ unsafe fn run_linux() -> ! {
             == NEG_ENOEXEC, b"L369\n");
         leg!(rep, svc3(NR_EXECVE, b"/pheno-empty\0".as_ptr() as u64, argv_ok.as_ptr() as u64, 0)
             == NEG_ENOEXEC, b"L370\n");
+        // L373: operator vote 32. The program is fine and its interpreter is no image, so
+        // a shell must not take the program for a script. Only the bundle's file gives
+        // this answer: a loader that never reached the interpreter reads something else.
+        const NEG_ELIBBAD: i64 = -80;
+        leg!(rep, svc3(NR_EXECVE, b"/pheno-badinterp\0".as_ptr() as u64, argv_ok.as_ptr() as u64, 0)
+            == NEG_ELIBBAD, b"L373\n");
     }
 
     // A NULL argv is argc == 0, the Shape-A frame. Linux itself tolerates it

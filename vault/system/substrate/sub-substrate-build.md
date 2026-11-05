@@ -653,3 +653,4 @@ ran zero times for 51 days that way; the check fails the tree just before its
 registration (a3144a8c5^) on exactly that test.
 
 The pheno bundle supplies `pheno-notelf` and `pheno-empty`, 0755, for viv-pheno-probe's L369 and L370.
+`pheno-badinterp` is a one-`PT_INTERP` header naming `/pheno-notelf`, for L373. The ramfs carries `/bin/exec-notelf` and `/bin/exec-empty` for `execve.interpreter_says_why`: the kernel tests run before the bundle is mounted, so a bundle file cannot serve them.

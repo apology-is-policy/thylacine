@@ -1589,25 +1589,23 @@ void test_execve_interpreter_says_why(void) {
     }
 
     // An interpreter that resolves and is no image. A shell runs ENOEXEC as a script, and
-    // this program is not at fault. The fixtures are the phenotype bundle's, so these legs
-    // are conditional too, and a sabotage for each proves it ran.
-    static const char notelf[] = "/vivarium/pheno/rootfs/pheno-notelf";
+    // this program is not at fault.
+    static const char notelf[] = "/bin/exec-notelf";
     struct Spoor *nq = exec_resolve_interp(self, notelf, sizeof(notelf) - 1u, &dsz, &derr);
-    if (nq) {
-        spoor_clunk(nq);
-        size = nx_dynamic(notelf);
-        TEST_EXPECT_EQ(nx_load(self, size, "prog", 4, NULL, 0, 0), -(int)T_E_LIBBAD,
-                       "an interpreter that is text");
-    }
-    static const char empty[] = "/vivarium/pheno/rootfs/pheno-empty";
+    TEST_ASSERT(nq != NULL, "CONTROL: a text file resolves");
+    spoor_clunk(nq);
+    size = nx_dynamic(notelf);
+    TEST_EXPECT_EQ(nx_load(self, size, "prog", 4, NULL, 0, 0), -(int)T_E_LIBBAD,
+                   "an interpreter that is text");
+
+    static const char empty[] = "/bin/exec-empty";
     derr = 0;
     struct Spoor *eq = exec_resolve_interp(self, empty, sizeof(empty) - 1u, &dsz, &derr);
-    if (eq) spoor_clunk(eq);
-    if (derr == (int)T_E_NOEXEC) {
-        size = nx_dynamic(empty);
-        TEST_EXPECT_EQ(nx_load(self, size, "prog", 4, NULL, 0, 0), -(int)T_E_LIBBAD,
-                       "an interpreter that is empty");
-    }
+    TEST_ASSERT(eq == NULL, "CONTROL: an empty file stops at its resolve");
+    TEST_EXPECT_EQ(derr, (int)T_E_NOEXEC, "an empty file: the resolver says no image");
+    size = nx_dynamic(empty);
+    TEST_EXPECT_EQ(nx_load(self, size, "prog", 4, NULL, 0, 0), -(int)T_E_LIBBAD,
+                   "an interpreter that is empty");
 }
 
 // A refused Vma is the kernel's shortage and no fault of the file's, and a shell runs
