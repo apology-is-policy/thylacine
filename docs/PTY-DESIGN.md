@@ -323,8 +323,9 @@ is PTY-2b.
 assembly line + the collected-signal set folded into `Pts` (`tio`/`line`/
 `sigs`); the input cook (`master_write`: ICRNL → ISIG [the standard
 VINTR/VQUIT/VSUSP trio → `SYS_TTY_SIGNAL` INT/QUIT/TSTP, consumed, never a
-byte, never echoed] → ICANON [erase `\b \b`, NL flushes the line WITH its
-newline; overflow past `LINE_MAX`=256 drops un-echoed] → raw); the output cook
+byte, never echoed] → ICANON [erase `\b \b` per column, NL flushes the line WITH
+its newline; a control byte echoes as `^X`; overflow past `LINE_MAX`=4095 (N_TTY's)
+drops un-echoed; a read ends at its line] → raw); the output cook
 (`slave_write`: ONLCR, pair-atomic back-pressure); the single `echo()`
 chokepoint (echo rides the output transform toward the master; ECHO-off is the
 hard no-leak guarantee, per-pts). **A fresh pts is FULL COOKED**

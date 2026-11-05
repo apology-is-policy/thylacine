@@ -121,9 +121,10 @@ const TIO_ONLCR: u32 = 0x10;
 /// cooked is the POSIX expectation. The 2c ctl flips any flag per-pts.
 const TIO_DEFAULT: u32 = TIO_ICANON | TIO_ECHO | TIO_ISIG | TIO_ICRNL | TIO_ONLCR;
 
-/// ICANON line-assembly bound (the kernel CONS_LINE_MAX). Overflow drops the
-/// byte un-echoed (the cons contract); NL always flushes what is assembled.
-const LINE_MAX: usize = 256;
+/// ICANON line-assembly bound, as N_TTY's: a whole line and its newline fit an
+/// empty ring. Overflow drops the byte un-echoed (the cons contract); NL always
+/// flushes what is assembled, so a longer line runs truncated.
+const LINE_MAX: usize = RING_CAP - 1;
 
 /// The cooked signal classes collected per master write, as a 3-bit SET
 /// (bit `class-1`: INT->b0, QUIT->b1, TSTP->b2). A set, not an array: it
@@ -536,6 +537,22 @@ impl Ptys {
     /// (the password mask). An echoed byte rides the OUTPUT transform (ONLCR;
     /// echo IS output, the Linux model) into s2m, drop-on-full (echo is
     /// best-effort -- a keystroke echo cannot back-pressure the writer).
+    /// Whether a byte of a canonical line echoes as ^X (N_TTY's ECHOCTL). Written
+    /// raw, an arrow key would move the cursor and Alt-] would leave a terminal
+    /// emulator in an OSC.
+    fn echoes_as_caret(b: u8) -> bool {
+        b < 0x20 && b != b'\t'
+    }
+
+    fn echo_line_byte(p: &mut Pts, b: u8) {
+        if Ptys::echoes_as_caret(b) {
+            Ptys::echo(p, b'^');
+            Ptys::echo(p, b ^ 0x40);
+        } else {
+            Ptys::echo(p, b);
+        }
+    }
+
     fn echo(p: &mut Pts, b: u8) {
         if p.tio & TIO_ECHO == 0 {
             return;
@@ -608,12 +625,16 @@ impl Ptys {
             if p.tio & TIO_ICANON != 0 {
                 // 3. ICANON line assembly.
                 if b == CH_DEL || b == CH_BS {
-                    // Erase: drop the last unflushed byte; echo "\b \b".
+                    // Erase: drop the last unflushed byte; echo "\b \b" per
+                    // column it took.
                     if p.line_len > 0 {
                         p.line_len -= 1;
-                        Ptys::echo(p, CH_BS);
-                        Ptys::echo(p, b' ');
-                        Ptys::echo(p, CH_BS);
+                        let columns = if Ptys::echoes_as_caret(p.line[p.line_len]) { 2 } else { 1 };
+                        for _ in 0..columns {
+                            Ptys::echo(p, CH_BS);
+                            Ptys::echo(p, b' ');
+                            Ptys::echo(p, CH_BS);
+                        }
                     }
                 } else if b == CH_NL {
                     // NL: the line INCLUDING its newline flushes to the slave
@@ -640,7 +661,7 @@ impl Ptys {
                 } else if p.line_len < LINE_MAX {
                     p.line[p.line_len] = b;
                     p.line_len += 1;
-                    Ptys::echo(p, b);
+                    Ptys::echo_line_byte(p, b);
                 } else {
                     // Overflow -- dropped, NOT echoed (the cons contract). #95:
                     // counted, because "Enter still delivers what fits" IS the
@@ -868,11 +889,21 @@ impl Ptys {
         Ok(winch)
     }
 
-    /// Drain up to buf.len() bytes toward the slave (from m2s). Empty + master
-    /// closed -> Eof; empty + master open -> WouldBlock.
+    /// Drain up to buf.len() bytes toward the slave (from m2s). A canonical read
+    /// ends at its line, so a reader that takes one line leaves the next for
+    /// whoever reads after it. Empty + master closed -> Eof; empty + master open
+    /// -> WouldBlock.
     fn slave_read(&mut self, n: u32, buf: &mut [u8]) -> RecvOutcome {
         match self.slot_mut(n) {
-            Some(p) => Ptys::ring_drain(&mut p.m2s, buf, p.n_master),
+            Some(p) => {
+                let line = if p.tio & TIO_ICANON != 0 {
+                    p.m2s.iter().position(|&b| b == CH_NL).map(|at| at + 1)
+                } else {
+                    None
+                };
+                let want = line.map_or(buf.len(), |line| line.min(buf.len()));
+                Ptys::ring_drain(&mut p.m2s, &mut buf[..want], p.n_master)
+            }
             None => RecvOutcome::Eof,
         }
     }
@@ -2380,6 +2411,81 @@ pub fn selftest() -> Result<(), &'static str> {
         }
         if drop_reported() {
             return Err("overflow-reported-too-early");
+        }
+    }
+
+    // (10) A canonical read ends at its line; a raw read does not.
+    {
+        let mut sink = [0u8; 32];
+        if ptys.master_write(n, b"one\ntwo\n") != 8 {
+            return Err("lines-write");
+        }
+        let _ = ptys.master_read(n, &mut sink); // their echo
+        match ptys.slave_read(n, &mut sink) {
+            RecvOutcome::Data(4) if &sink[..4] == b"one\n" => {}
+            _ => return Err("line-first"),
+        }
+        match ptys.slave_read(n, &mut sink) {
+            RecvOutcome::Data(4) if &sink[..4] == b"two\n" => {}
+            _ => return Err("line-second"),
+        }
+        // Shorter than the line: the rest stays for the next read.
+        if ptys.master_write(n, b"abc\n") != 4 {
+            return Err("line-short-write");
+        }
+        let _ = ptys.master_read(n, &mut sink);
+        match ptys.slave_read(n, &mut sink[..2]) {
+            RecvOutcome::Data(2) if &sink[..2] == b"ab" => {}
+            _ => return Err("line-short-head"),
+        }
+        match ptys.slave_read(n, &mut sink) {
+            RecvOutcome::Data(2) if &sink[..2] == b"c\n" => {}
+            _ => return Err("line-short-tail"),
+        }
+        ptys.set_tio(n, TIO_DEFAULT & !TIO_ICANON);
+        if ptys.master_write(n, b"a\nb\n") != 4 {
+            return Err("raw-lines-write");
+        }
+        let _ = ptys.master_read(n, &mut sink);
+        match ptys.slave_read(n, &mut sink) {
+            RecvOutcome::Data(4) => {}
+            _ => return Err("raw-read-stops-at-a-line"),
+        }
+        ptys.set_tio(n, TIO_DEFAULT);
+    }
+
+    // (11) A control byte in a canonical line echoes as ^X and erases as two
+    // columns; a tab stays a tab.
+    {
+        let mut sink = [0u8; 32];
+        if ptys.master_write(n, &[0x1b]) != 1 {
+            return Err("caret-write");
+        }
+        match ptys.master_read(n, &mut sink) {
+            RecvOutcome::Data(2) if &sink[..2] == b"^[" => {}
+            _ => return Err("caret-echo"),
+        }
+        if ptys.master_write(n, &[CH_DEL]) != 1 {
+            return Err("caret-erase-write");
+        }
+        match ptys.master_read(n, &mut sink) {
+            RecvOutcome::Data(6) if &sink[..6] == b"\x08 \x08\x08 \x08" => {}
+            _ => return Err("caret-erase-echo"),
+        }
+        if ptys.master_write(n, b"\t") != 1 {
+            return Err("tab-write");
+        }
+        match ptys.master_read(n, &mut sink) {
+            RecvOutcome::Data(1) if sink[0] == b'\t' => {}
+            _ => return Err("tab-echo"),
+        }
+        if ptys.master_write(n, b"\n") != 1 {
+            return Err("caret-nl");
+        }
+        let _ = ptys.master_read(n, &mut sink);
+        match ptys.slave_read(n, &mut sink) {
+            RecvOutcome::Data(2) if &sink[..2] == b"\t\n" => {}
+            _ => return Err("caret-line"),
         }
     }
 

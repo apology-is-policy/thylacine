@@ -70,6 +70,12 @@ the slave binding with the same registry; a ctl open registers nothing.
 set as `consctl`. A fresh pts is **full cooked** — the Linux fresh-pts
 posture, unlike the boot console, which comes up ISIG-only.
 
+A canonical read ends at its line, so `head -n 1; next` leaves the second
+line for `next`, and a control byte in a canonical line echoes as `^X`, so an
+arrow key in a cooked window neither moves the cursor nor puts a terminal
+emulator in an OSC. The line bound is N_TTY's, 4095 bytes, so a line and its
+newline fit an empty ring; a longer one still runs truncated.
+
 Input (a master write — the emulator's keystrokes), in order:
 
 1. **ICRNL** — CR folds to NL.
