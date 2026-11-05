@@ -39,6 +39,7 @@ mirrors:
   - "tools/interactive/im3-lex-curiata.exp"
   - "tools/interactive/ls-bghome-stall.exp"
   - "tools/interactive/ls-imperium.exp"
+  - "tools/interactive/viv-run.exp"
   - "tools/interactive/haul-post.exp"
   - "tools/interactive/haul-cape.exp"
   - "tools/interactive/haul-links.exp"
