@@ -2063,6 +2063,7 @@ void test_poll_caught_note_ends_a_noise_driven_poll(void);
 void test_poll_caught_note_ends_pause(void);
 void test_poll_stop_parks_a_noise_driven_poll(void);
 void test_thread_kstack_watermark_follows_the_frontier(void);
+void test_thread_kstack_fault_off_the_range_is_no_overflow(void);
 void test_poll_noise_keeps_it_looping(void);
 void test_poll_noise_keeps_the_deadline(void);
 void test_poll_null_obj_spoor_pollnval(void);

@@ -964,7 +964,7 @@ struct Proc {
 
     // SQPOLL kernel threads this Proc has MINTED (SYS_LOOM_SETUP with
     // LOOM_SETUP_SQPOLL). They run under kproc (immortal, TCB-exempt), so
-    // nothing counted them -- and each pins a 32 KiB kernel stack, so the
+    // nothing counted them -- and each pins a kernel stack and its slot, so the
     // handle table was the only bound and the fid-lift audit (F1) showed a
     // non-TCB Proc could mint 4x its own thread cap's worth of unswappable
     // kstacks. They are this Proc's workers in every meaningful sense, so

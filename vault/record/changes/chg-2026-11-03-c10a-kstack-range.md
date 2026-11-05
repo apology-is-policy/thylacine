@@ -4,7 +4,7 @@ type: chg
 title: "Each thread's kernel stack in a range of its own, its guard costing no memory; the 0x200 vector reads SP"
 date: 2026-11-03
 arc: arc-phase6-pouch
-commits: []
+commits: [0a5d6e513, d0a545836]
 touched:
   - sub-kernel-thread
   - sub-kernel-mmu

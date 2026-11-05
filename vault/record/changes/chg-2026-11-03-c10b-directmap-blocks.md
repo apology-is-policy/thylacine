@@ -4,7 +4,7 @@ type: chg
 title: "The direct map keeps its blocks: the guard toggles and the boot page map are gone"
 date: 2026-11-03
 arc: arc-phase6-pouch
-commits: []
+commits: [210df5af1]
 touched:
   - sub-kernel-mmu
 established: []
