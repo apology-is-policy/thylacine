@@ -359,9 +359,8 @@ impl InputDev {
     }
 
     /// Drain every pending eventq record, invoking `f` per record; recycle
-    /// each descriptor back to the device. Bounded by the ring size per call
-    /// (a device cannot outrun the recycle within one drain pass). Answers whether
-    /// the device may have dropped a report since the last drain.
+    /// each descriptor back to the device. Bounded by the ring size per call.
+    /// Answers whether the device may have dropped a report since the last drain.
     pub fn drain(&mut self, mut f: impl FnMut(RawInputEvent)) -> bool {
         let used_va = self.dma_va + USED_OFF;
         let avail_va = self.dma_va + AVAIL_OFF;
@@ -387,9 +386,8 @@ impl InputDev {
                 );
             }
         }
-        let overran = eventq::may_have_dropped(self.avail_idx, cur_used);
         if cur_used == self.last_used_idx {
-            return overran;
+            return eventq::may_have_dropped(self.avail_idx, cur_used);
         }
         // VIRTIO 1.2 2.7.13.2: order the used.idx observation before the
         // used.ring / event-pool reads (the P4-K phantom-EV_SYN lesson).
@@ -436,6 +434,8 @@ impl InputDev {
             dsb_sy();
             // No notify: virtio-input's eventq has no notify-on-RX semantic.
         }
-        overran
+        // The device kept consuming through this whole pass on what it had at entry, so
+        // what that left it is known only now.
+        eventq::may_have_dropped(entry_avail, unsafe { r16(used_va + 2) })
     }
 }

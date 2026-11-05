@@ -65,6 +65,8 @@ The service acknowledgement covers all of the following, with a bounded deadline
    this from documented completion semantics, not a sleep or successful submit.
 4. Route only admitted physical input to the episode. Drop pre-entry events and
    require the attention chord to be released before accepting secret keystrokes.
+   A device that cannot say what is down may count a release it had to assume after
+   its report ring overran, provided the chord's keys produce no input to the episode.
    USB enumeration, controller queues and HID decoding on this path are TCB.
 
 A GPU command fence may prove command completion without proving physical scanout.

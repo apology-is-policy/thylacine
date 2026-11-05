@@ -64,6 +64,10 @@ pub enum SeatShot {
     BehindReadback,
     /// A controlq stall on the episode's first frame; the device retires it.
     StallInFrame,
+    /// The device refuses the episode's first frame: an answer, so the episode fails.
+    RefuseFrame,
+    /// The ordinary return's restore waits with keys left in the ring.
+    HoldRestore,
     /// A cursor stall inside exclusion, held until the seat restores.
     CursorStall,
     /// The same cursor stall, held past the abandonment bound.
@@ -212,11 +216,13 @@ impl Device {
     #[cfg(feature = "test-mode")]
     pub fn test_latch_seat_shot(&mut self) -> Option<SeatShot> {
         let shot = match self.test_seat_shots {
-            9 => SeatShot::StallAfterExclusion,
-            8 => SeatShot::HoldAfterExclusion,
-            7 => SeatShot::RefuseBind,
-            6 => SeatShot::BehindReadback,
-            5 => SeatShot::StallInFrame,
+            11 => SeatShot::StallAfterExclusion,
+            10 => SeatShot::HoldAfterExclusion,
+            9 => SeatShot::RefuseBind,
+            8 => SeatShot::BehindReadback,
+            7 => SeatShot::StallInFrame,
+            6 => SeatShot::RefuseFrame,
+            5 => SeatShot::HoldRestore,
             4 => SeatShot::CursorStall,
             3 => SeatShot::CursorAbandon,
             2 => SeatShot::RefuseRestored,
@@ -620,7 +626,7 @@ impl Device {
             }
             Request::TestArmLatch => {
                 #[cfg(feature = "test-mode")] {
-                    self.test_latch_shots = 2; self.test_seat_shots = 9; self.test_stall_shots = 3;
+                    self.test_latch_shots = 2; self.test_seat_shots = 11; self.test_stall_shots = 3;
                     self.test_blind_armed = true;
                     ().put(&mut out);
                 }

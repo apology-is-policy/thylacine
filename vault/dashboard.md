@@ -130,7 +130,7 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-11-05 [[chg-2026-11-05-input-ring-overrun]] — A release the input ring dropped no longer parks the seat
 - 2026-11-05 [[chg-2026-11-05-seat-takeover-stall]] — A takeover that meets a stall starts over; no wide wait in an episode; the cursor lane comes back
 - 2026-11-05 [[chg-2026-11-05-seat-takeover-witness]] — Vote 50 round 2: the takeover's stall says so, a client that survives its own load, a witness for each arm
+- 2026-11-05 [[chg-2026-11-05-vote50-r3]] — Vote 50 round 3: the drop test past the publish, a frame's witness, keys at a trusted screen
 - 2026-11-04 [[chg-2026-11-04-as4-r4]] — AS-4 audit round 4: the paste flow's waits arm, and Alt reaches a tile
 - 2026-11-04 [[chg-2026-11-04-as4-r5]] — AS-4 audit round 5, the join's half: Alt only on a printable rune
-- 2026-11-04 [[chg-2026-11-04-compositor-band]] — The designated compositor's threads are INTERACTIVE
 <!-- generated:end -->

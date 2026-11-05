@@ -357,12 +357,15 @@ impl Gpu {
                 core::ptr::write_bytes(BASE as *mut u8, 0, IMAGE_BYTES);
             }
             dsb_sy();
+            // A stalled upload can still land, so the host's copy is unknown from here
+            // until one is answered.
+            self.cursor.image = None;
+            self.cursor.uploaded = false;
             let stalls = self.ctrl.stalls;
             if self.transfer(RESOURCE, 0, 0, 0, 64, 64).is_err() {
                 self.cursor_step_failed(stalls);
                 return Err(Error::Hardware);
             }
-            self.cursor.image = None;
             self.cursor.uploaded = true;
         }
         self.cursor_command(output, RESOURCE, 0, 0, (0, 0), true)?;

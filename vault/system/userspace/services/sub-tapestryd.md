@@ -2038,7 +2038,7 @@ X,Y` speaks for the crossing off a track.
 the recycle and BEFORE the nothing-new early return, because the device can
 only deliver into descriptors this driver has published and it has not yet
 consumed: `avail_idx - cur_used` is exactly what the transport had to work with
-while the serve loop was away, and `QUEUE_SIZE` is 16. At zero it had none, and
+while the serve loop was away, and the ring is as deep as `eventq::depth` chose. At zero it had none, and
 an event it could not place did not arrive -- a guest-side fact that holds
 whatever the transport chooses to do with such an event.
 
@@ -2046,7 +2046,7 @@ whatever the transport chooses to do with such an event.
 stating plainly: the input devices are POLL-MODE and are NOT in the pollfd set,
 so nothing about an arriving event wakes the serve loop. The drain interval IS
 the pass period -- bounded by the frame tick, so <= ~67 ms at `IDLE_HZ` -- and a
-HELD pass is therefore the only condition under which a 16-deep eventq can run
+HELD pass is therefore the only condition under which the eventq can run
 out of descriptors between drains. `serve pass took N ms` names such a pass.
 
 **Calibration (the control that makes a future firing mean something).** On a

@@ -4763,6 +4763,11 @@ impl Gpu {
         self.cursor.queue.idle() && self.synchronous_clear()
     }
 
+    /// Fenced chains on the device now, poisoned ones excepted.
+    pub fn fenced_in_flight(&self) -> usize {
+        self.ctrl.fenced_in_flight() as usize
+    }
+
     /// What stands between a retirement of `object` and the device: only the
     /// chains that can reach it, plus the synchronous work every object waits
     /// for. `holds` is the ledger's context-to-resource relation. A cursor

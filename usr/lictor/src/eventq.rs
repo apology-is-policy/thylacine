@@ -16,11 +16,12 @@ pub fn depth(offered: u16) -> Option<u16> {
     Some(offered.min(DEPTH_MAX))
 }
 
-/// Whether a report may have been dropped since the last recycle. Only the device
-/// consumes between recycles, so what is free at the next drain is the least it had in
-/// all that time.
+/// Whether a report may have been dropped while the device had only `published` to work
+/// with. Take `used` after the descriptors recycled since then are published: the device
+/// moves it, it never goes back, and a drop at any moment before that read leaves it at
+/// least this close. A device already into the new descriptors reads as past `published`.
 pub fn may_have_dropped(published: u16, used: u16) -> bool {
-    published.wrapping_sub(used) < REPORT_MAX
+    (published.wrapping_sub(used) as i16) < REPORT_MAX as i16
 }
 
 #[cfg(test)]
@@ -44,6 +45,13 @@ mod tests {
         assert!(!may_have_dropped(64, 56));
         assert!(may_have_dropped(64, 57));
         assert!(may_have_dropped(64, 64));
+    }
+
+    #[test]
+    fn a_device_past_what_was_published_had_nothing_left() {
+        assert!(may_have_dropped(64, 65));
+        assert!(may_have_dropped(64, 128));
+        assert!(may_have_dropped(2, 65534u16.wrapping_add(10)));
     }
 
     #[test]

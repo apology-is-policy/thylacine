@@ -58,8 +58,15 @@ proc ground {name} {
     if {[catch {exec python3 $repo/tools/interactive/vnc_capture.py $::env(THYLACINE_EGL_VNC_SOCKET) $out} e]} { lc_fail $e }
     if {[catch {exec python3 $repo/tools/interactive/sak_glass.py $repo/usr/lictor/src/render.rs $out} r]} { lc_fail $r }
     if {![regexp {^ground ([0-9]+)\n(.*)$} $r -> pct top]} { lc_fail "an unread capture: $r" }
+    set ::glass_top [lindex [split $top :] 0]
     lc_pass "SAK-POISON glass $name ground=$pct% $top"
     return $pct
+}
+# The workspace back on the glass: not the trusted ground, and not a dark output or a
+# frozen frame either, which read as no ground too.
+proc back {name} {
+    if {[ground $name] > 5} { lc_fail "$name: the workspace did not come back after the episode" }
+    if {$::glass_top ne $::workspace_top} { lc_fail "$name: the glass's main colour is $::glass_top, the workspace's is $::workspace_top" }
 }
 # One chord and one Return, as an empty episode; the takeover must show first, and
 # then the episode must end by itself. Corvus prints its end line for a seat that
@@ -109,7 +116,7 @@ proc episode {leg} {
         eof { lc_fail "EOF at the end of the episode ($leg)" }
     }
     after 1500
-    set timeout 0
+    set timeout 1
     expect {
         -re {lictor: seat failed: [^\r\n]*[\r\n]} {
             lc_fail "$leg: the seat failed as the episode ended: $expect_out(0,string)"
@@ -158,10 +165,11 @@ after 1500
 key "meta_l+f"
 witness baseline
 if {[ground workspace] > 5} { lc_fail "the workspace reads as the trusted screen, so the glass check tells nothing" }
+set ::workspace_top $::glass_top
 
 if {[episode control] != 0} { lc_fail "a takeover with no client met a stall, so this control tells nothing" }
 witness control
-if {[ground restored] > 5} { lc_fail "the workspace did not come back after the control episode" }
+back restored
 
 type "warp-prove poison-hold 240 &\n"
 set timeout 60
@@ -177,6 +185,7 @@ after 1000
 
 episode poisoned
 witness poisoned
+back poisoned-restored
 lc_pass "graphical SAK: the trusted screen came up beside another client's poisoned slot"
 lc_quit
 exit 0

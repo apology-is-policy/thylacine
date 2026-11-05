@@ -258,12 +258,21 @@ missing behind a serve loop stopped in a synchronous wait. The device cannot be 
 what is down. So the eventq is as deep as QEMU offers and one page holds (`eventq.rs`,
 64 against 16 before), and when a drain finds less than a report's worth free, every
 key this side holds is released through the normal path, to the kernel and the
-compositor alike. Only the device consumes between recycles, so that count is the
-least it had since the last drain. A key still down loses one press; a release that
+compositor alike. That count is taken after the recycle is published, against what
+was offered before it: the device moves it, it never goes back, and a drop at any
+moment before the read leaves it at least that close, so it can overstate a drop and
+never miss one. A key still down loses one press, and reads as released to both gates,
+so after an overrun the chord can be physically down when ACK goes out; Delete and F10
+have no rune, so nothing reaches Corvus from them. A release that
 never came would park the seat on every chord until that key was pressed again. This
 recovers the seat, not the keystrokes: a report the device dropped is gone
 (`ls-graphical-keys-overrun`, and `ls-graphical-keys-behind` for a real client's
-queue). Operation 65 admits only
+queue). Whatever is still in the rings as the seat returns was pressed at a trusted
+screen: it reaches the kernel and `held`, not the compositor, and the seat says how
+much it kept back (`ls-graphical-sak-dead` leg H). A paint in phase 2 retries after a
+stall and fails the episode on an answer, and in neither case does VISIBLE go out for
+it (legs F and G). The takeover line reports how many fenced chains stood on the device
+when the takeover reached it and how long it took. Operation 65 admits only
 standard normal pointer shapes, scale and position from the authenticated
 compositor. Private cursor DMA never enters the normal object ledger. Before
 trusted scanout every cursor plane receives a transparent image followed by a

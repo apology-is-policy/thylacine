@@ -3516,6 +3516,10 @@ const RB_TRIS: usize = 6;
 /// The heavy submits `chain-hold` keeps on the device: the C-6 gate's queue, about
 /// a second of V3D.
 const CHAIN_HOLD_DEPTH: u64 = 4;
+/// `chain-hold deep`: every fenced slot a ctx has, each draw instanced, so the queue
+/// outlasts the kernel's five-second deadline on V3D and each submit still fits a Twrite.
+const CHAIN_HOLD_DEEP_DEPTH: u64 = 8;
+const CHAIN_HOLD_DEEP_INSTANCES: u32 = 5;
 /// The draw-state object handles (surfaces 1 and 2 are the clear legs').
 const RB_H_VS: u32 = 10;
 const RB_H_FS: u32 = 11;
@@ -3825,6 +3829,10 @@ fn draw_state_stream(st: &mut Vec<u32>, vbo_res: u32, w: u32, h: u32) {
 /// (SET_CONSTANT_BUFFER stage FS index 0, 4 floats), then DRAW_VBO of 3
 /// vertices, TRIANGLES.
 fn draw_stream(st: &mut Vec<u32>, r: f32, g: f32, b: f32) {
+    draw_stream_instanced(st, r, g, b, 1);
+}
+
+fn draw_stream_instanced(st: &mut Vec<u32>, r: f32, g: f32, b: f32, instances: u32) {
     st.push(cmd0(VIRGL_CCMD_SET_CONSTANT_BUFFER, 0, 6));
     st.push(VIRGL_SHADER_FRAGMENT);
     st.push(0); // index
@@ -3837,7 +3845,7 @@ fn draw_stream(st: &mut Vec<u32>, r: f32, g: f32, b: f32) {
     st.push((RB_TRIS * 3) as u32); // count
     st.push(MESA_PRIM_TRIANGLES);
     st.push(0); // indexed
-    st.push(1); // instance count
+    st.push(instances); // instance count
     st.push(0); // index bias
     st.push(0); // start instance
     st.push(0); // primitive restart
@@ -3962,8 +3970,14 @@ fn chain_hold() -> i64 {
     let secs: u64 = libthyla_rs::env::args()
         .get_str(2)
         .and_then(|s| s.parse().ok())
-        .unwrap_or_else(|| fail("chain-hold <seconds> [readback]"));
-    let readback = libthyla_rs::env::args().get_str(3) == Some("readback");
+        .unwrap_or_else(|| fail("chain-hold <seconds> [readback|deep]"));
+    let mode = libthyla_rs::env::args().get_str(3);
+    let readback = mode == Some("readback");
+    let (depth, instances) = if mode == Some("deep") {
+        (CHAIN_HOLD_DEEP_DEPTH, CHAIN_HOLD_DEEP_INSTANCES)
+    } else {
+        (CHAIN_HOLD_DEPTH, 1)
+    };
     let warp = warp_connect("chain-hold");
     let ctx = mint_ctx(warp, "chain-hold");
     let (bo, res, _) = mint_bo_wh(warp, ctx, RB_W, RB_H, VIRGL_RESOURCE_Y_0_TOP, "chain-hold target");
@@ -3991,11 +4005,11 @@ fn chain_hold() -> i64 {
         if read_at.is_some_and(|at| retired > at) {
             read_at = None;
         }
-        if sent - retired < CHAIN_HOLD_DEPTH {
+        if sent - retired < depth {
             let mut st: Vec<u32> = Vec::new();
             fb_state_stream(&mut st, 1);
             for k in 0..RB_DRAWS_PER_SUBMIT {
-                draw_stream(&mut st, 0.0, 1.0, rb_clear_color(k, RB_DRAWS_PER_SUBMIT));
+                draw_stream_instanced(&mut st, 0.0, 1.0, rb_clear_color(k, RB_DRAWS_PER_SUBMIT), instances);
             }
             let bytes: Vec<u8> = st.iter().flat_map(|d| d.to_le_bytes()).collect();
             if write_unless_behind(warp, &submit, &bytes) {
@@ -4013,7 +4027,7 @@ fn chain_hold() -> i64 {
                 let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(5));
             }
         } else {
-            if !said && retired >= CHAIN_HOLD_DEPTH {
+            if !said && retired >= depth {
                 said = true;
                 t_putstr(&format!(
                     "warp-prove: CHAIN-HOLD DEEP ctx {} sent {} retired {} refused {} after {} ms\n",
