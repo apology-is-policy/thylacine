@@ -451,8 +451,16 @@ discarded (the kernel console's TX ring carries kernel diagnostics no signal
 character may eat; a pts's s2m carries the job's last output the shell is
 about to read). Plan 9's `devcons` has no such flush — this is a POSIX-shape
 choice, made because both ldiscs already model termios and every consumer of
-a pts is a POSIX program. Tests: `cons.cook_isig_discards_pending_line` (kernel)
-and ptyfs selftest leg (e4) pin it in each ldisc.
+a pts is a POSIX program. Behind a terminator the ring refused, in one write, the
+signal does not wait for a reader that may never come: that line is still the
+pending assembly, and what the write held between them was never committed, so
+they share the disposition (ptyfs, and the console's feed). Raw mode has no
+assembly and no such disposition: a signal behind a byte the ring cannot take
+waits its turn, because counting past that byte would leave a hole in the stream
+the reader cannot see (`CookData`, `SignalXorByte`; Linux's `n_tty` keeps it in
+order too). Alone, it goes. Tests: `cons.cook_isig_discards_pending_line` and
+`cons.feed_intr_behind_refused_line` (kernel) and ptyfs selftest leg (e4) and
+step 12 pin it in each ldisc.
 
 *As-built (PTY-2d)*: the teardown legs. Drain-then-EOF was structural since 2a
 (`ring_drain` serves Data while non-empty regardless of the peer's closure;

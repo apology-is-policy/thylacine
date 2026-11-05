@@ -99,8 +99,9 @@ const SRV_MSIZE_USIZE: usize = SRV_MSIZE as usize;
 
 /// Per-direction byte-ring capacity (m2s / s2m). A pts is a terminal, not a bulk
 /// pipe: 4 KiB each way is the classic tty buffer size. A full ring back-pressures
-/// via a short Rwrite (the writer retries) -- no byte is dropped -- EXCEPT the
-/// echo, which drops on full (best-effort; the kernel cons posture -- see echo_unit).
+/// via a short Rwrite (the writer retries). Two exceptions, both counted: the echo
+/// (best-effort; the kernel cons posture -- see echo_unit), and a mode write's flush,
+/// which has no writer to refuse (deliver_partial_line).
 const RING_CAP: usize = 4096;
 
 // =============================================================================
@@ -616,6 +617,8 @@ impl Ptys {
                     // The old mode-write reset masked this: type-ahead + ^C
                     // was thrown away by the shell's re-arm by accident, and
                     // delivery made `rm -rf x` + ^C arrive as pre-typed input.
+                    // A refused newline's line is still that assembly, and what
+                    // this write held behind it was never committed.
                     if p.tio & TIO_ICANON != 0 {
                         p.line_len = 0;
                     }
@@ -671,10 +674,12 @@ impl Ptys {
                 consumed = at + 1;
             } else {
                 // 4. Raw: straight to the slave; back-pressure on full (the
-                //    byte is NOT consumed -- the writer retries).
+                //    byte is NOT consumed -- the writer retries). A signal behind
+                //    it waits its turn: there is no assembly for it to discard,
+                //    and counting past this byte would leave a hole in the stream
+                //    the reader cannot see (pty.tla's CookData + SignalXorByte).
                 if Ptys::ring_push(&mut p.m2s, &[b]) == 0 {
-                    held = true;
-                    continue;
+                    break;
                 }
                 Ptys::echo(p, b);
                 consumed = at + 1;
@@ -2580,6 +2585,14 @@ pub fn selftest() -> Result<(), &'static str> {
         if ptys.master_write(c, b"x\n") != 1 {
             return Err("refuse-behind-control");
         }
+        if ptys.master_write(c, &[b'\n', CH_INTR]) != 2
+            || ptys.take_sigs(c) != sig_class_bit(T_TTY_SIG_INT)
+        {
+            return Err("refuse-signal-last");
+        }
+        if ptys.master_write(c, b"x\n") != 1 {
+            return Err("refuse-behind-control2");
+        }
         if ptys.master_write(c, &[b'\n', b'w', CH_INTR, b'y']) != 4
             || ptys.take_sigs(c) != sig_class_bit(T_TTY_SIG_INT)
         {
@@ -2596,23 +2609,39 @@ pub fn selftest() -> Result<(), &'static str> {
             RecvOutcome::Data(2) if &sink[..2] == b"y\n" => {}
             _ => return Err("refuse-signal-kept-the-line"),
         }
-        // The same behind a raw byte the ring cannot take.
+        // Behind a raw byte the ring cannot take, a signal waits its turn: counting past
+        // that byte would leave a hole in the stream. Alone, it goes.
         let _ = ptys.master_read(c, &mut sink);
         ptys.set_tio(c, TIO_ISIG);
         if ptys.master_write(c, &alloc::vec![b'.'; RING_CAP]) != RING_CAP {
             return Err("refuse-fill4");
         }
-        if ptys.master_write(c, b"q") != 0 {
-            return Err("raw-behind-control");
+        if ptys.master_write(c, &[b'q', CH_INTR]) != 0 || ptys.take_sigs(c) != 0 {
+            return Err("raw-signal-past-a-held-byte");
         }
-        if ptys.master_write(c, &[b'q', CH_INTR]) != 2
+        if ptys.master_write(c, &[CH_INTR]) != 1 || ptys.take_sigs(c) != sig_class_bit(T_TTY_SIG_INT) {
+            return Err("raw-signal-alone-held-up");
+        }
+        match ptys.slave_read(c, &mut sink[..1]) {
+            RecvOutcome::Data(1) => {}
+            _ => return Err("raw-make-room"),
+        }
+        // Room for one: the byte and the signal behind it go, and the count stops at the next.
+        if ptys.master_write(c, &[b'q', CH_INTR, b'r']) != 2
             || ptys.take_sigs(c) != sig_class_bit(T_TTY_SIG_INT)
         {
-            return Err("raw-signal-held-up");
+            return Err("raw-count-at-the-held-byte");
         }
         match ptys.slave_read(c, &mut sink) {
-            RecvOutcome::Data(k) if k == RING_CAP => {}
+            RecvOutcome::Data(k) if k == RING_CAP && sink[k - 1] == b'q' => {}
             _ => return Err("raw-drain"),
+        }
+        if ptys.master_write(c, b"r") != 1 {
+            return Err("raw-reoffer");
+        }
+        match ptys.slave_read(c, &mut sink) {
+            RecvOutcome::Data(1) if sink[0] == b'r' => {}
+            _ => return Err("raw-hole-in-the-stream"),
         }
         ptys.set_tio(c, TIO_DEFAULT);
         if ptys.drops(c) != (0, 0, 0) {

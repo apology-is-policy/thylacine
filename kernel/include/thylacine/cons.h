@@ -84,7 +84,8 @@ struct poll_waiter;   // <thylacine/poll.h> -- the cons_poll hook parameter
 // pushes nothing is ALWAYS accepted, which is load-bearing for two of them:
 // a BREAK (the A-4c-2 SAK) and a cooked Ctrl-C must never be blocked by a full
 // ring, or a wedged reader could suppress the I-27 trusted-path trigger and the
-// interrupt that would unwedge it. A byte past CONS_LINE_MAX is still a DROP
+// interrupt that would unwedge it (a feed's cooked Ctrl-C behind a refused
+// terminator included; see cons_feed_write). A byte past CONS_LINE_MAX is still a DROP
 // (returns true): the line buffer is a fixed bound, so back-pressuring there
 // would wedge on a user who simply never presses Enter.
 bool cons_rx_input(u8 byte, bool is_break);

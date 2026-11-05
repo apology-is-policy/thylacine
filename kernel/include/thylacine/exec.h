@@ -317,8 +317,8 @@ _Static_assert(((EXEC_INIT_STRUCTURED(0, 0) + 15ull) & ~15ull)
 //     dispose of the Proc (proc_free with state=ZOMBIE) on any
 //     non-zero return.
 //
-// Returns 0 on success; -1 on any failure (ELF parse error, alignment
-// violation, VMA SLUB OOM, page allocation OOM).
+// Returns 0 on success; -T_E_NOMEM for a refused allocation; -1 on any other
+// failure (ELF parse error, alignment violation).
 //
 // `*entry_out`: ELF e_entry (the EL0 entry PC). Caller writes to
 //               ELR_EL1 before the eret to EL0.
@@ -348,8 +348,8 @@ int exec_setup(struct Proc *p, const void *blob, size_t blob_size,
 //       by SYS_SPAWN_ARGV_MAX (512). Caller's invariant: argv_data has
 //       exactly `argc` NUL terminators.
 //
-// Returns 0 on success; -1 on any failure (ELF parse error, alignment
-// violation, VMA SLUB OOM, page allocation OOM, argv invariant
+// Returns 0 on success; -T_E_NOMEM for a refused allocation; -1 on any other
+// failure (ELF parse error, alignment violation, argv invariant
 // violation). The argv_data buffer is read-only from this function's
 // perspective; the caller retains ownership and is responsible for
 // freeing it after this returns.

@@ -315,8 +315,8 @@ static size_t seg_file_pages(const struct seg_geom *g, u64 filesz) {
 //      (held by the VMA) keeps the BURROW alive until proc_free's
 //      vma_drain.
 //
-// Returns 0 on success, -1 on failure (alignment violation, SLUB OOM,
-// vma_insert overlap).
+// Returns 0 on success, -T_E_NOMEM for a refused allocation, -1 otherwise
+// (alignment violation, vma_insert overlap).
 static int exec_map_segment(struct AddrSpace *as, bool exempt, const void *blob,
                             const struct elf_load_segment *seg) {
     // #149: map from the page-aligned FLOOR of vaddr, carrying the intra-page
@@ -1129,10 +1129,11 @@ static int map_eager_from_file(struct AddrSpace *as, bool exempt, struct Spoor *
 // reads past it. Returns the buffer (caller kfree) + *got_out, or NULL on any
 // failure. elf_load re-validates everything against the real file size; this is
 // purely the OOB-deref guard for handing it a header-only buffer.
-static void *exec_read_header(struct Spoor *exe, size_t *got_out) {
+static void *exec_read_header(struct Spoor *exe, size_t *got_out, int *err_out) {
     *got_out = 0;
+    *err_out = -1;
     void *hdr = kmalloc(EXEC_ELF_HEADER_MAX, 0);
-    if (!hdr)                                  return NULL;
+    if (!hdr) { *err_out = -T_E_NOMEM;         return NULL; }
     if (((uintptr_t)hdr & 0x7) != 0)           { kfree(hdr); return NULL; }  // 8-align the Ehdr cast
 
     u8 *dst = (u8 *)hdr;
@@ -1371,8 +1372,9 @@ static int exec_load_body(struct AddrSpace *as, bool exempt, struct Proc *nsp,
     // 1. Read + parse ONLY the ELF header + phdrs (a few KB), not the whole
     //    binary. elf_load validates segment extents against the real file size.
     size_t hdr_got = 0;
-    void *hdr = exec_read_header(exe, &hdr_got);
-    if (!hdr)                                  return -1;
+    int hdr_err = -1;
+    void *hdr = exec_read_header(exe, &hdr_got, &hdr_err);
+    if (!hdr)                                  return hdr_err;
     struct elf_image img;
     int r = elf_load(hdr, exe_size, &img);
 
@@ -1457,8 +1459,8 @@ static int exec_load_body(struct AddrSpace *as, bool exempt, struct Proc *nsp,
                         argc           = nargc;
 
                         kfree(hdr);
-                        hdr = exec_read_header(exe, &hdr_got);
-                        if (!hdr)              return -1;
+                        hdr = exec_read_header(exe, &hdr_got, &hdr_err);
+                        if (!hdr)              return hdr_err;
                         r = elf_load(hdr, exe_size, &img);
                     }
                 }

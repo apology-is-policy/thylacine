@@ -107,8 +107,8 @@ so one malformed token rejects the whole write with the mode unchanged
 the same line continues. A winsize write raises `tty:winch` **only if the size
 actually changed** — the Linux `TIOCSWINSZ` behaviour.
 
-A ctl write that *clears* `ICANON` is the one exception to "a flag change
-resets the assembly": it delivers the pending canonical line to the slave
+A ctl write that *clears* `ICANON` is the one exception to "the same line
+continues": it delivers the pending canonical line to the slave
 as raw bytes (`deliver_partial_line`) rather than discarding it, because
 discarding it dropped the head of a type-ahead line between a job's last
 output and the shell's prompt-mode re-arm — "mode writes deliver, never
@@ -342,15 +342,19 @@ The global FRAME coalescing that a compositor needs has no analogue here
   drop the rest of that buffer). This is the kernel console's `#129` rule.
   `LINE_MAX` plus the newline fits an empty ring, so no line waits for ever
   behind a reader that reads. A signal byte is not held up, even behind the
-  refused newline in one write: it discards what was typed before it and not
-  yet delivered, in raw mode too.
+  refused newline in one write: it discards that line and whatever the write
+  held between them, none of it committed, as an erase would and not counted.
+  Raw mode has no assembly: a signal behind a byte the ring cannot take waits
+  its turn, since counting past that byte would leave a hole in the stream the
+  reader cannot see. Alone, it goes.
   Until 2026-11-05 a short flush lost the tail and the newline, so the head ran
   on into the next line, though the echo had shown them apart.
-- **Two sites still drop.** A byte past `LINE_MAX` is consumed and discarded
+- **Three sites still drop.** A byte past `LINE_MAX` is consumed and discarded
   un-echoed; an echo unit drops on full, whole, so half a caret or half an
-  erase never shows, and it is counted but not reported. Both are the classic
-  tty-overrun semantic that the kernel console reference also carries. They
-  matter because the model does not cover them — see [[spec-pty]] and task #48.
+  erase never shows, and it is counted but not reported; a mode write's flush
+  truncates into a full ring. The first two are the classic tty-overrun semantic
+  that the kernel console reference also carries. They matter because the model
+  does not cover them — see [[spec-pty]] and task #48.
 
   **Since `#95` (`c0c76977`) each site is counted**: `drop_line` (assembly
   overflow past `LINE_MAX`), `drop_echo` (the deliberate best-effort echo,

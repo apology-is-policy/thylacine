@@ -536,6 +536,14 @@ unchanged and backend-independent. Its one hard property is [[inv-i27]]'s: the
 line-condition parameter is **hardwired false**, so no feed byte sequence can
 synthesize the attention key.
 
+A full ring refuses the feed with a short count, and the renderer re-offers what
+it holds. A cooked Ctrl-C behind a refused terminator in one write is still
+honored (`cons.feed_intr_behind_refused_line`): it takes that line and what the
+write held between them, so a reader that never comes cannot hold it up. A raw
+one waits its turn, since consuming past a refused byte would leave a hole in the
+stream, and a renderer whose held bytes never drain holds it for as long as they
+wait.
+
 A fresh drain open starts a fresh **epoch**, discarding the previous holder's
 bytes so a new renderer never paints a dead one's tail.
 

@@ -729,6 +729,47 @@ void test_cons_feed_write_short_on_full(void) {
     cons_settle_mgr();
 }
 
+// #129's rule for a lone Ctrl-C holds for one behind a refused terminator in one
+// write: it is not held up, and it takes the line with it. A raw one waits its turn.
+void test_cons_feed_intr_behind_refused_line(void) {
+    static const u8 cooked[] = { 'x', '\n', 'w', 0x03u, 'y' };
+    static const u8 raw[] = { 'q', 0x03u };
+    static const u8 lone[] = { 0x03u };
+    static u8 sink[1024];
+
+    cons_test_reset();
+    cons_test_mgr_hold(true);
+    while (cons_rx_input((u8)0xAAu, false)) { }
+    cons_test_set_termios(CONS_ICANON | CONS_ISIG);
+    long cooked_took = cons_feed_write(cooked, (long)sizeof(cooked));
+    bool cooked_intr = cons_test_intr_pending();
+    cons_test_mgr_hold(false);
+    long full = cons_drain(sink, (long)sizeof(sink));
+    (void)cons_rx_input((u8)'\n', false);
+    long line = (cons_test_rx_count() > 0u) ? cons_drain(sink, (long)sizeof(sink)) : -1;
+    u8 first = sink[0];
+
+    cons_test_reset();
+    cons_test_mgr_hold(true);
+    while (cons_rx_input((u8)0xAAu, false)) { }
+    long raw_took = cons_feed_write(raw, (long)sizeof(raw));
+    bool raw_intr = cons_test_intr_pending();
+    long lone_took = cons_feed_write(lone, (long)sizeof(lone));
+    bool lone_intr = cons_test_intr_pending();
+    cons_test_mgr_hold(false);
+    cons_settle_mgr();
+
+    TEST_EXPECT_EQ(cooked_took, 5L, "the Ctrl-C behind the refused line is not held up");
+    TEST_ASSERT(cooked_intr, "the Ctrl-C behind the refused line raised its note");
+    TEST_EXPECT_EQ(full, 512L, "the committed lines stand");
+    TEST_EXPECT_EQ(line, 2L, "it took the line with it, and what followed it cooks");
+    TEST_EXPECT_EQ((long)first, (long)'y', "what followed it is the line");
+    TEST_EXPECT_EQ(raw_took, 0L, "a raw Ctrl-C waits its turn behind a refused byte");
+    TEST_ASSERT(!raw_intr, "a raw Ctrl-C behind a refused byte raises nothing yet");
+    TEST_EXPECT_EQ(lone_took, 1L, "alone, a raw Ctrl-C goes");
+    TEST_ASSERT(lone_intr, "alone, a raw Ctrl-C raises its note");
+}
+
 // #95/#129: the input counters must actually COUNT, per site.
 //
 // A counter that can never fire is worse than no counter: a future zero reading

@@ -71,8 +71,10 @@ simply **does not happen**. That is back-pressure, and it is exactly what
 without consuming, so the short `Rwrite` makes the writer retry.
 
 The *cooked* arm back-pressures too, at the newline of a line that does not
-fit whole, which is the model's `m2s < CAP` taken a line at a time. Two sites do
-not: a byte past `LINE_MAX` is consumed and dropped un-echoed, and an echo drops
+fit whole, which is the model's `m2s < CAP` taken a line at a time, unless a
+signal follows it in the same write: that line is the assembly a signal discards,
+which sits above the model. A raw signal behind a refused byte waits, so the raw
+arm stays the model's. Two sites do not back-pressure: a byte past `LINE_MAX` is consumed and dropped un-echoed, and an echo drops
 on a full `s2m`, where the model guards `ECHO => s2m < CAP`. Those are the classic
 tty-overrun semantics, the kernel console does the same, and the code says so
 plainly in the docstring of the very function the map points at.

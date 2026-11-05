@@ -1462,6 +1462,24 @@ bool cons_rx_input(u8 byte, bool is_break) {
     return cons_rx_accept(byte, is_break, /*feed=*/false);
 }
 
+// The ISIG arm for a Ctrl-C a feed holds behind a refused terminator (see
+// cons_feed_write). The mode is read under the lock that discards the line, so a
+// mode write racing this orders wholly before or after it. False: it is not a
+// signal here, and nothing changed.
+static bool cons_feed_intr_past_refusal(void) {
+    bool raised = false;
+    irq_state_t s = spin_lock_irqsave(&g_cons.lock);
+    u32 tio = cons_termios_load();
+    if (!cons_episode_active_load() && (tio & CONS_ICANON) && (tio & CONS_ISIG)) {
+        cons_intr_store(true);
+        g_cons.line_len = 0u;
+        raised = true;
+    }
+    spin_unlock_irqrestore(&g_cons.lock, s);
+    if (raised) wakeup(&g_cons_mgr_rendez);
+    return raised;
+}
+
 // (The reader's data cond is cons_data_or_vacate, with the episode block: it
 // runs under the Rendez lock, NOT g_cons.lock, so its count read is a RELAXED
 // atomic -- the cons_count_* rationale; the Rendez lock provides the
@@ -2625,6 +2643,13 @@ short cons_drain_poll(short events, struct poll_waiter *pw) {
 // path into the RX ring during the prompt is exactly the spoof the episode
 // exists to exclude. A loop that finds one opening stops short (the renderer
 // retries and is refused).
+//
+// #129's rule for a lone Ctrl-C holds for one behind a refused terminator in the
+// same write, or a renderer that keeps re-offering the terminator never reaches
+// it: a reader that never comes must not hold it up. The refused line is still the
+// pending assembly and goes with it; what the write held between them was never
+// committed. Raw mode has no assembly, and consuming past a refused byte would
+// leave a hole in the stream, so there it waits its turn.
 long cons_feed_write(const void *buf, long n) {
     if (!buf || n < 0) return -1;
     if (cons_episode_active_load()) return -1;
@@ -2633,7 +2658,11 @@ long cons_feed_write(const void *buf, long n) {
     for (; i < n; i++) {
         if (cons_episode_active_load()) break;
         cons_test_window();
-        if (!cons_rx_accept(bytes[i], /*is_break=*/false, /*feed=*/true)) break;
+        if (cons_rx_accept(bytes[i], /*is_break=*/false, /*feed=*/true)) continue;
+        long at = i + 1;
+        while (at < n && bytes[at] != 0x03u) at++;
+        if (at == n || !cons_feed_intr_past_refusal()) break;
+        i = at;
     }
     return i;
 }
