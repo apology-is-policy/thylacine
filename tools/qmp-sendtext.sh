@@ -49,7 +49,7 @@ shift $((OPTIND - 1))
 [[ $# -eq 1 ]] || { echo "usage: qmp-sendtext.sh [-s SOCK] [-k|-p] TEXT|CHORD|PTR" >&2; exit 2; }
 
 exec python3 - "$sock" "$mode" "$1" <<'PYEOF'
-import json, socket, sys, time
+import json, os, socket, sys, time
 
 sock_path, mode, text = sys.argv[1], sys.argv[2], sys.argv[3]
 
