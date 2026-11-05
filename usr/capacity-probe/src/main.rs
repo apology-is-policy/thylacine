@@ -835,8 +835,14 @@ fn account_control_legs(pool: u64) -> i64 {
         .env_clear()
         .env("CAPACITY_PROBE_LEG", "tails")
         .account(h as u32, made);
-    let Ok(mut child) = cmd.spawn() else {
-        return fail("account-tails-spawn");
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            t_putstr(&alloc::format!(
+                "capacity-probe: FAIL account-tails-spawn: {e}\n"
+            ));
+            return 1;
+        }
     };
     match child.wait() {
         Ok(status) if status.success() => {}
