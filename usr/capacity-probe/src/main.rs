@@ -832,10 +832,11 @@ fn account_control_legs(pool: u64) -> i64 {
     cmd.arg("account-child")
         .arg(alloc::format!("{}", h))
         .arg(alloc::format!("{}", made))
+        .arg("tails")
         .stdin(Stdio::Piped)
         .stdout(Stdio::Piped)
         .stderr(Stdio::Piped)
-        .current_dir("/")
+        .current_dir("/bin")
         .env_clear()
         .env("CAPACITY_PROBE_LEG", "tails")
         .account(h as u32, made);
@@ -850,7 +851,10 @@ fn account_control_legs(pool: u64) -> i64 {
     };
     match child.wait() {
         Ok(status) if status.success() => {}
-        _ => return fail("account-tails-child"),
+        Ok(status) => {
+            return fail_num("account-tails-child", status.code().unwrap_or(-1) as u64, 0)
+        }
+        Err(_) => return fail("account-tails-wait"),
     }
     ok("account-tails");
 
@@ -924,9 +928,18 @@ fn account_control_legs(pool: u64) -> i64 {
     0
 }
 
-// `capacity-probe account-child <parent's handle number> <incarnation>`, spawned above. The
-// exit status names what was wrong.
-fn account_child_mode(told_handle: u64, told_incarnation: u64) -> i64 {
+// `capacity-probe account-child <parent's handle number> <incarnation> [tails]`, spawned
+// above. The exit status names what was wrong. `tails`: it came through a Command, whose cwd
+// and environment records sit below the account's, and they have to have arrived too.
+fn account_child_mode(told_handle: u64, told_incarnation: u64, tails: bool) -> i64 {
+    if tails {
+        if libthyla_rs::env::var("CAPACITY_PROBE_LEG").as_deref() != Some("tails") {
+            return 8;
+        }
+        if libthyla_rs::env::current_dir().ok().as_deref() != Some("/bin") {
+            return 9;
+        }
+    }
     let mut q = AccountQuery::default();
     if t_account_query(&mut q) != 0 {
         return 2;
@@ -1002,8 +1015,9 @@ pub extern "C" fn rs_main() -> i64 {
     if mode == Some(&b"account-child"[..]) {
         let handle = args.next().and_then(parse_num);
         let incarnation = args.next().and_then(parse_num);
+        let tails = args.next().is_some();
         return match (handle, incarnation) {
-            (Some(h), Some(i)) => account_child_mode(h, i),
+            (Some(h), Some(i)) => account_child_mode(h, i, tails),
             _ => 7,
         };
     }

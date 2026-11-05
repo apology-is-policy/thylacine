@@ -138,7 +138,8 @@ caller can hold, which MM-1c makes a production path.
 3. `kstack_alloc`, `proc_pgtable_create` and slabs are not sponsored. The thread's stack
    is in the ledger through its pool pages; the rest are section 12's metadata rows.
 
-4. `headroom` reads each class up to its nearest limit, and the pool only for a RAM class that
+4. A class's `limit` reads its nearest limit, the account's own or an ancestor's, and `headroom`
+   reads each class up to that limit, and the pool only for a RAM class that
    met none (vote 65). No account has a limit today, so what the rest of the machine holds
    shows in every query. An account with a limit in each RAM class sees only itself, and then
    its room can exceed what its ancestors or the pool have left. What a diorama Proc reaches

@@ -567,7 +567,7 @@ void test_account_limits_change_whole_or_not_at_all(void) {
     TEST_EXPECT_EQ(account_set_limits(child, lim), -1, "above the parent's ceiling");
     limits_read(child, got);
     TEST_EXPECT_EQ(got[CLASS_RETAIN], pool, "nor beside this one");
-    TEST_EXPECT_EQ(got[CLASS_ALLOC], pool, "nor the bad one");
+    TEST_EXPECT_EQ(got[CLASS_ALLOC], 16u * page, "nor the bad one, which reads the parent's");
 
     lim[CLASS_ALLOC] = 16u * page;
     TEST_EXPECT_EQ(account_set_limits(child, lim), 0, "control: at the ceiling is within it");
@@ -612,7 +612,7 @@ void test_account_limits_change_whole_or_not_at_all(void) {
     limits_clear(lim);
     TEST_EXPECT_EQ(account_set_limits(child, lim), 0, "none is always allowed");
     limits_read(child, got);
-    TEST_EXPECT_EQ(got[CLASS_ALLOC], pool, "and reads as the default again");
+    TEST_EXPECT_EQ(got[CLASS_ALLOC], 2u * page, "and it reads the one above it again");
     account_unref(child);
     account_unref(parent);
 }
@@ -701,7 +701,7 @@ void test_account_query_stops_at_the_nearest_limit(void) {
     struct MemoryAccount *uncle = account_child(account_root());
     TEST_ASSERT(parent && limited && open && sibling && uncle, "five accounts");
     u64 lim[ACCOUNT_CLASSES];
-    struct account_query lim_full, open_full, lim_pool, open_pool, one_class, at_parent, at_root;
+    struct account_query lim_full, open_full, lim_pool, open_pool, one_class, other_class, at_parent, at_root;
 
     // Each reading is taken with its charge on and judged after all of them are off.
     limits_ram(lim, 8u * page);
@@ -732,12 +732,22 @@ void test_account_query_stops_at_the_nearest_limit(void) {
     account_query_fill(limited, &one_class);
     capacity_pool_unpark_for_test(extra);
 
-    // The nearest limit can be an ancestor's, and the root is nearly full above it.
+    // Nor on the ledger: the classes left open still read up to the root.
+    fake = pool_pages - meta_of(account_root()) - 1u;
+    account_charge(uncle, CLASS_META, fake);
+    account_query_fill(limited, &other_class);
+    account_refund(uncle, CLASS_META, fake);
+
+    // The nearest limit can be an ancestor's, with the pool nearly gone and the root nearly
+    // full above it, and neither shows below that limit.
     limits_ram(lim, 64u * page);
     int rc_parent = account_set_limits(parent, lim);
+    u32 nearly = (u32)(pool_pages - capacity_pool_charged()) - 1u;
+    capacity_pool_park_for_test(nearly);
+    account_query_fill(open, &at_parent);
+    capacity_pool_unpark_for_test(nearly);
     fake = pool_pages - alloc_of(account_root()) - 1u;
     account_charge(uncle, CLASS_ALLOC, fake);
-    account_query_fill(open, &at_parent);
     account_query_fill(uncle, &at_root);
     account_refund(uncle, CLASS_ALLOC, fake);
     u64 parent_alloc = alloc_of(parent);
@@ -763,10 +773,15 @@ void test_account_query_stops_at_the_nearest_limit(void) {
     TEST_EXPECT_EQ(lim_pool.headroom, ceiling - 3u * page, "the pool does not reach it");
     TEST_EXPECT_EQ(open_pool.headroom, pool_room, "with no limit of its own, the pool does");
     TEST_EXPECT_EQ(one_class.headroom, pool_room, "nor does a limit in one class stop the others");
+    TEST_EXPECT_EQ(other_class.headroom, page, "a limit in one class stops that class only");
+    TEST_EXPECT_EQ(other_class.limiting, (u32)CLASS_META, "and the open class is named");
 
     u64 most = parent_alloc > parent_meta ? parent_alloc : parent_meta;
     TEST_EXPECT_EQ(at_parent.headroom, (64u - most) * page, "it stops at an ancestor's limit");
+    TEST_EXPECT_EQ(at_parent.c[CLASS_ALLOC].limit, 64u * page, "a class with no limit reads the nearest one");
+    TEST_EXPECT_EQ(lim_full.c[CLASS_ALLOC].limit, 8u * page, "and its own when it has one");
     TEST_EXPECT_EQ(at_root.headroom, page, "and the root above that limit was nearly full");
+    TEST_EXPECT_EQ(at_root.c[CLASS_ALLOC].limit, pool_pages << PAGE_SHIFT, "with none on the way, the pool");
 }
 
 // A control handle holds one reference, has no dup, closes on exec and at the Proc's end.

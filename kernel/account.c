@@ -189,11 +189,6 @@ void account_query_fill(const struct MemoryAccount *a, struct account_query *q) 
     q->retained_after_exit = 0u;
     q->awaiting_device = 0u;
     irq_state_t s = spin_lock_irqsave(&g_account_tree_lock);
-    for (unsigned cls = 0; cls < ACCOUNT_CLASSES; cls++) {
-        q->c[cls].used = account_used(a, cls) << PAGE_SHIFT;
-        q->c[cls].reserved = 0u;
-        q->c[cls].limit = own_limit(a, cls);
-    }
 
     // Each class reads up to its nearest limit and no further, so an account with limits of
     // its own sees its own figures and not the machine's; the figure can then overstate the
@@ -209,6 +204,9 @@ void account_query_fill(const struct MemoryAccount *a, struct account_query *q) 
         u64 limit = own_limit(up, cls);
         u64 used = account_used(up, cls) << PAGE_SHIFT;
         u64 room = limit > used ? limit - used : 0;
+        q->c[cls].used = account_used(a, cls) << PAGE_SHIFT;
+        q->c[cls].reserved = 0u;
+        q->c[cls].limit = limit;
         if (room < tightest) {
             tightest = room;
             q->limiting = cls;

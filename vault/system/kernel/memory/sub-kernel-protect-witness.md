@@ -40,7 +40,7 @@ header checks and its copies, including a read-only page that gets through the h
 is stopped on the way out, which is what the kernel suite cannot reach from a thread with
 no user memory. The account is shared with every other Proc while it runs, so a figure is
 asserted only where they cannot move it past the test ([[sub-kernel-accounts]]). Since MM-1c
-`account_control_legs` adds CHILD and SET_LIMITS from EL0, and spawns `capacity-probe
+The tails leg's child also checks the environment and cwd its spawn named, and the parent prints what it reports. `account_control_legs` adds CHILD and SET_LIMITS from EL0, and spawns `capacity-probe
 account-child` under a new account, whose exit status names the fault.
 
 ## Contract

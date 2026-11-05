@@ -626,8 +626,9 @@ changes when a decision first reads the ledger.
 `-EBADF`, and the voucher operations are `-EOPNOTSUPP`. A stale incarnation is `-EINVAL`.
 
 `used` is the account's and its descendants', in bytes. Nothing charges `CLASS_RETAIN`
-or `CLASS_DEVICE` yet. An account with no limit set reads section 4's default: the pool
-for a RAM class, and all ones for device storage, which has no budget yet. `headroom` is the
+or `CLASS_DEVICE` yet. `limit` is a class's nearest limit, the account's own or an
+ancestor's, which is what bounds it. A class that meets none reads section 4's default: the
+pool for a RAM class, and all ones for device storage, which has no budget yet. `headroom` is the
 least of each class's room at its nearest limit, or at the root when it meets none, and the
 pool's own room when a RAM class met none, floored at zero. `limiting` names the class of the
 tightest of those rooms even when the pool is tighter still, because the pool is no class.
