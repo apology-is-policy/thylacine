@@ -78,7 +78,7 @@ Section §25.4 enumerates the audit-trigger surfaces. Every change to a file or 
 ### 2.2 Key abstractions
 
 - **Process (`Proc`)**: unit of isolation. Has a private territory, address space, credential set, handle table, and one or more threads.
-- **Thread**: register context + kernel stack + signal mask + per-thread `errstr`. Multiple threads share a process's address space, territory, fd table, and handle table unless explicitly cloned via `rfork`.
+- **Thread**: register context + kernel stack + note mask. The threads of a process share its address space, territory and handle table by being in one Proc.
 - **Territory (`Territory`)**: a process's view of the resource tree. Composed via `bind` and `mount`.
 - **Spoor**: the kernel object representing an open resource (file, device, synthetic node). Carries `qid`, `dev` pointer, offset, mode. The fundamental currency of the kernel; `read` / `write` / `walk` / `clunk` operate on Spoors.
 - **Dev**: the vtable every kernel device implements (`attach`, `walk`, `stat`, `open`, `create`, `read`, `write`, `close`, `remove`, `wstat`, etc.). All kernel devices implement this interface; userspace devices implement it remotely via 9P.
@@ -372,7 +372,7 @@ None at Gate 3. KASLR seed entropy source on bare metal Pi 5+ is a Phase post-v1
 **Goals**:
 - 48-bit virtual addressing with split TTBR0 (user) / TTBR1 (kernel).
 - 4 KiB pages with 2 MiB block mappings for kernel large-page mappings.
-- Demand-zero paging for anonymous mappings (BUILD item per IDENTITY-DESIGN.md §8.4). Copy-on-write for `rfork(RFPROC)` is a **designed seam** — no address-space-sharing caller exists at v1.0 (`RFMEM` extincts); it activates when a `fork`-style caller lands. *(Reconciled 2026-05-28.)*
+- Demand-zero paging for anonymous mappings (BUILD item per IDENTITY-DESIGN.md §8.4). Copy-on-write for `rfork(RFPROC)` is built (LINEAGE L-4, L-5; I-44, `cow.tla`).
 - SOTA physical frame allocator: buddy + per-CPU magazines (illumos kmem-style), so the hot path takes no shared lock.
 - SOTA kernel object allocator: SLUB-style (Linux's modern default), better cache locality and lower overhead than slab.
 - W^X enforced as page-table invariant.
@@ -397,7 +397,8 @@ None at Gate 3. KASLR seed entropy source on bare metal Pi 5+ is a Phase post-v1
 
 Kernel VA breakdown:
   0xFFFF_0000_0000_0000 – 0xFFFF_7FFF_FFFF_FFFF   Direct map (linear phys)
-  0xFFFF_8000_0000_0000 – 0xFFFF_9FFF_FFFF_FFFF   Vmalloc / kmap
+  0xFFFF_8000_0000_0000 – 0xFFFF_8FFF_FFFF_FFFF   Vmalloc / kmap
+  0xFFFF_9000_0000_0000 – 0xFFFF_9FFF_FFFF_FFFF   Kernel stacks (the first 16 GiB in use)
   0xFFFF_A000_0000_0000 – 0xFFFF_BFFF_FFFF_FFFF   Kernel modules + KASLR
   0xFFFF_C000_0000_0000 – 0xFFFF_FFFF_FFFF_FFFF   Per-CPU + percpu data
 ```
@@ -517,7 +518,7 @@ struct vma {
 
 **Page fault handler** (`arch/arm64/fault.c`):
 - Demand-zero-pages anonymous mappings on first touch — **BUILT as the overcommit model (2026-06-23): a dedicated `SYS_BURROW_ATTACH_LAZY` syscall reserves the VA + a sparse `BURROW_TYPE_ANON_LAZY` Burrow and demand-zero-fills + charges each page on first touch; `SYS_BURROW_DECOMMIT` releases pages back. See "The overcommit model" below.** The eager `burrow_create_anon` backing stays for kernel-internal copy-target callers (exec data segments, DMA buffers, the Weft rings) that need pages present at create; the unconditional migration of every `SYS_BURROW_ATTACH` to demand-zero is a recorded follow-up. **That follow-up is TAKEN for the exec half at LINEAGE L-4a (user-voted 2026-08-02; landed)**: exec's stack + every NON-EXECUTABLE segment moved to `burrow_create_anon_lazy` (pre-populating only the `ceil(filesz/PAGE_SIZE)` leading slots; the stack, only the run its argv/auxv frame occupies at the top), because a COW break is per-page and eager anon owns one indivisible buddy block. The gate is NOT-executable rather than writable because the demand-zero arm does no I-cache maintenance (#107's hazard); W^X makes that a superset of writable, so nothing COW must break is left out. **This put exec-image pages on the I-32 page axis** -- `burrow_map_in` charges only the VMA axis, so they were uncharged while eager -- which makes `page_count` track true RSS across exec and makes stack growth failable (gracefully, per Proc) — see the §25.4 "Process creation" row's *L-4 AS-DESIGNED* clause. **DMA buffers and the Weft rings stay eager permanently**, and for a different reason than "pages present at create": they need *physical contiguity* (a device DMAs into a PA range; a Weft ring is registered whole). Exec's segments never needed contiguity — they had it only because `burrow_create_anon` was the one anon constructor when they were written.
-- COW on first write to a shared page is a **designed seam, not yet built** — no caller exists (`rfork` `RFMEM` extincts, so no address space is shared at v1.0). Activates when a `fork`-style sharing caller lands. (IDENTITY-DESIGN.md §8.4 SEAM.)
+- COW on first write to a page a fork shares is built (LINEAGE L-4, L-5; I-44, `cow.tla`): the writer takes a private copy, and read-only file-backed text is shared outright and never copied. `RFMEM` shares a whole address space instead (LINEAGE L-3).
 - Translates BURROW-backed faults to BURROW page lookups.
 - Panics on kernel faults outside the direct map / vmalloc / fixmap regions (a kernel page fault is a bug, not a recoverable condition).
 
@@ -670,11 +671,10 @@ This direction is consistent with Thylacine's existing commitments: handles.tla 
 ### 7.1 Goals and non-goals
 
 **Goals**:
-- Plan 9-style `rfork` as the universal process/thread creation primitive.
+- Plan 9-style `rfork` to copy a running process, narrowed to two shapes. A thread and a spawned program each have a call of their own (7.4).
 - Threads are first-class siblings within a Proc (Plan 9 9Front model). PID = Proc identity; TID = thread within Proc.
 - POSIX `pthread_t`, `pid_t` semantics provided by musl translation, mapping cleanly to Thylacine internal.
 - Plan 9 notes as the internal asynchronous-message model. POSIX signals provided by translation (musl).
-- Per-thread `errstr` buffer (Plan 9 idiom).
 - Thread-local storage via ARM64 `TPIDR_EL0`.
 
 **Non-goals at v1.0**:
@@ -714,32 +714,14 @@ struct Proc {
 ### 7.3 Thread
 
 A `Thread` owns:
-- A register context (GPRs, PC, SP, PSTATE — saved/restored on context switch).
-- A kernel stack (`THREAD_STACK_SIZE = 16 KiB` default, with a guard page).
-- A signal mask (note mask, more precisely — Plan 9 idiom).
-- A per-thread `errstr` buffer (`struct errstr { char buf[ERRMAX]; }`).
-- The `TPIDR_EL0` register value (TLS pointer; set on context switch).
-- Run state: `RUNNING`, `RUNNABLE`, `SLEEPING`, `STOPPED`, `EXITING`.
-- Parent `Proc *` pointer.
+- A saved register context (`struct Context`: the callee-saved registers, `SP`, the resume `PC`, `TPIDR_EL0`, `TTBR0_EL1` and the FP/SIMD registers).
+- A kernel stack (`THREAD_STACK_SIZE = 16 KiB` default, four pages, over a 16 KiB guard of unmapped address space in the kernel stack range).
+- A note mask (`note_mask`, POSIX's signal mask, per thread).
+- Its EEVDF data (`vd_t`, `band`).
+- A run state: `THREAD_RUNNING`, `THREAD_RUNNABLE`, `THREAD_SLEEPING` or `THREAD_EXITING`. A stopped thread has no state of its own: it sleeps, parked at its EL0-return tail (`el0_return_stop_check`).
+- A `Proc *` pointer.
 
-```c
-struct Thread {
-    int            tid;
-    struct Proc   *proc;
-    struct Context ctx;       /* arch-specific saved registers */
-    void          *kstack;
-    unsigned       state;
-    struct EventQueue events;  /* wait/wake for sleep / wakeup */
-    struct ErrStr  errstr;
-    uintptr_t      tpidr_el0;
-    /* EEVDF data */
-    int64_t        virtual_eligible;
-    int64_t        virtual_deadline;
-    int            band;       /* INTERACTIVE | NORMAL | IDLE */
-    int            cpu;        /* current or last CPU */
-    /* ... */
-};
-```
+The layout is `kernel/include/thylacine/thread.h`; the reasoning is in the `sub-kernel-thread` dossier.
 
 ### 7.3.1 The thread list and its lock (thread-model C3, 2026-10-21)
 
@@ -796,7 +778,7 @@ Validated by `specs/thread_reap.tla`'s C6 additions (spec-first by operator vote
 
 ### 7.3.5 What a thread costs (thread-model C6)
 
-A user process's thread is charged to the user pool (`mm/phys.h`): its kernel stack block (eight pages, the guard included) and one page for its slot, `THREAD_POOL_PAGES` = 9 pages (36 KiB). Until C6 kernel stacks came out of the TCB reserve, so threads under the per-process cap still drew on memory the kernel had set aside for itself; the pool's bound now covers threads as it covers user pages (operator vote 4, 2026-10-21). Linux likewise charges a task's kernel stack and `task_struct` to its memory cgroup (`memcg_charge_kernel_stack`, `SLAB_ACCOUNT`).
+A user process's thread is charged to the user pool (`mm/phys.h`): its kernel stack's four pages (the guard is address space and costs nothing) and one page for its slot, `THREAD_POOL_PAGES` = 5 pages (20 KiB). Until C6 kernel stacks came out of the TCB reserve, so threads under the per-process cap still drew on memory the kernel had set aside for itself; the pool's bound now covers threads as it covers user pages (operator vote 4, 2026-10-21). Linux likewise charges a task's kernel stack and `task_struct` to its memory cgroup (`memcg_charge_kernel_stack`, `SLAB_ACCOUNT`).
 
 - **Who pays.** The charge is taken at create, after the tid and before anything is allocated, from the process the thread works for: its own, or, for a kernel thread that works for a user process (a Loom's SQPOLL poller), that process (`thread_create_kthread_for`). An exempt process (the TCB, I-32) is counted and never refused, as for its user pages. kproc's own threads cost the pool nothing: they are the reserve's, as are the C2 cache's idle stacks (at most `THREAD_KSTACK_CACHE_MAX`).
 - **Refused.** A refused charge fails the create with nothing allocated: ENOMEM from a thread spawn or a clone, -1 from `rfork` and from a SQPOLL setup. As for a user page, the pool first reclaims idle image pages before it refuses.
@@ -807,29 +789,30 @@ A user process's thread is charged to the user pool (`mm/phys.h`): its kernel st
 
 The pool is a counter, not a modelled protocol: `specs/thread_reap.tla` does not model it. Validated by tests that read the pool across each kind of create and free and at the pool's edge, and by the C6 audit round.
 
-### 7.4 `rfork` — process/thread creation
+### 7.4 Creating threads and processes
 
-`rfork(flags)` is the universal primitive. Flags control which resources are shared vs. cloned:
+Three calls create something that runs. Plan 9's `rfork`, with its full set of sharing flags, was the original plan for all of them. What was built keeps `rfork` for one job, copying a running process, and gives threads and spawned programs calls of their own.
 
-| Flag | Meaning |
-|---|---|
-| `RFPROC` | Create a new Proc (always required for "create"). |
-| `RFMEM` | Share address space (creates a thread within current Proc, not a new Proc). |
-| `RFNAMEG` | Share territory (default for threads; clone for processes). |
-| `RFFDG` | Share file descriptor table (default for threads). |
-| `RFCRED` | Share credentials. |
-| `RFNOTEG` | Share note queue (default for threads). |
-| `RFNOWAIT` | Don't add to parent's children list (orphan from creation). |
-| `RFREND` | Share rendezvous space. |
-| `RFENVG` | Share environment. |
+**A thread: `SYS_THREAD_SPAWN`.** `SYS_THREAD_SPAWN(entry_va, sp_va, arg, tls_va, ptid_va)` adds a Thread to the caller's own Proc and returns its tid. `SYS_THREAD_EXIT` ends the calling thread. The new thread starts at `entry_va` on a stack the caller allocated. It shares the address space, handle table, Territory and note table because it is in the same Proc, not because a flag asked for it. The one piece of user state it inherits from its creator is the note mask (7.6.2). Each spawn is admitted against the Proc's thread budget (7.3.5).
 
-Examples:
-- POSIX `fork()`: `rfork(RFPROC | RFFDG | RFENVG)` — new Proc, copy-on-write address space, clone fd table.
-- POSIX `pthread_create()`: `rfork(RFPROC | RFMEM | RFNAMEG | RFFDG | RFCRED | RFNOTEG)` — new thread within existing Proc.
-- Plan 9 container: `rfork(RFPROC | RFNAMEG)` — new Proc, fresh territory, copy-on-write address space.
-- Capability reduction: `rfork(0)` (no resource flags) — no creation; just reduces capabilities of the calling process. Used for sandboxing.
+A Linux guest's `clone` with musl's pthread word, exactly `0x007D0F00`, takes the same road: a Thread in the caller's Proc that resumes at the caller's trap frame with x0 = 0, on the stack it named, with `CLONE_SETTLS`, `CLONE_PARENT_SETTID` and `CLONE_CHILD_CLEARTID` honoured.
 
-The musl port's `clone()` syscall translates Linux `CLONE_*` flags into `rfork()` flags; the translation is straightforward and well-defined.
+**A program: `SYS_SPAWN_*`.** The spawn family (`SYS_SPAWN`, `SYS_SPAWN_WITH_FDS`, `SYS_SPAWN_WITH_CAPS`, `SYS_SPAWN_FULL`, `SYS_SPAWN_WITH_PERMS`, `SYS_SPAWN_FULL_ARGV`) creates a Proc that starts a named binary. The child's handle table starts empty and holds only the descriptors the call's fd list names. Its capabilities are the spawner's, narrowed by the call's mask where the call has one. Native programs use this, and so does Pouch's `posix_spawn`.
+
+**A copy of a running process: `SYS_RFORK`.** `SYS_RFORK(flags, child_sp, child_tls)` creates a new Proc that resumes at the instruction after the `svc`. It returns twice: the child's pid in the caller, 0 in the child. Two flag words are accepted:
+
+| `flags` | Shape | Address space | The caller | `child_sp` |
+|---|---|---|---|---|
+| `RFPROC` | fork | a copy-on-write clone (LINEAGE L-4, L-5; I-44) | keeps running | 0 means the caller's SP, on the child's own copy |
+| `RFPROC \| RFMEM` | vfork | shared (LINEAGE L-3) | suspended until the child execs or dies | mandatory, and may not be the caller's own |
+
+Any other word reads `-T_E_INVAL`, as does a nonzero `child_sp` that is unaligned or outside the user range. A `child_tls` of 0 inherits the caller's `TPIDR_EL0`. `-T_E_AGAIN` means the child could not be created: the I-32 child cap, a narrowed hardware allowance, or no memory. `RFPROC | RFMEM` is a new Proc in a shared space, with a pid of its own. It is never a thread.
+
+Under either shape the child inherits identity, capabilities minus every elevation-only bit (I-2), phenotype, hardware allowance, environment, session and process group, and a clone of the Territory. Its handle table is a copy at the same slot indices, with a hole where a descriptor may not be aliased: hardware (I-5), a `/srv` connection, a Loom ring.
+
+**The flags that are not accepted.** `proc.h` also defines `RFNAMEG`, `RFFDG`, `RFCRED`, `RFNOTEG`, `RFNOWAIT`, `RFREND` and `RFENVG`. They are reserved. Each would share a different per-Proc structure, and each has to arrive with its own reasoning. Their polarity is not Plan 9's: here a set bit means share, uniformly, where Plan 9 reads `RFFDG` and `RFNAMEG` as "give me a copy". There is no `rfork(0)`: capabilities shrink when a child is created, and nothing on this path narrows the caller in place.
+
+**Who calls what.** Native threads and Pouch's `pthread_create` use `SYS_THREAD_SPAWN`. Pouch declines `fork` (POUCH-DESIGN 8.3) and offers `posix_spawn`. A Linux guest's `clone` is admitted on three exact words, and any other is declined: the thread word above; `SIGCHLD` alone, which is musl's `fork` and becomes `RFPROC`; and `CLONE_VM | CLONE_VFORK | SIGCHLD`, which is musl's `posix_spawn` and becomes `RFPROC | RFMEM`, or a fork if its stack is null.
 
 ### 7.5 Thread-local storage
 
@@ -1061,37 +1044,30 @@ Capabilities can only be reduced via `rfork`, never elevated — with two sancti
 
 Default at process creation: empty set. Drivers receive `CAP_HW_HANDLE` from kernel at startup; they immediately drop after retrieving their handles.
 
-### 7.8 `errstr` and error reporting
+### 7.8 Error reporting
 
-Every thread has a per-thread `errstr` buffer (Plan 9 idiom). System calls returning failure also set this buffer with a textual description:
+A system call that fails returns a negative `T_E_*` value from the Thylacine-wide errno registry, or -1 on the native calls that have not been given one. `docs/ERRORS.md` is the binding table, and holds the translation policy at the Pouch and Linux boundaries.
 
-```c
-errstr("territory cycle: cannot bind /a/b onto /a (would create loop)");
-return -1;
-```
-
-The user retrieves it via `errstr(buf, sz)` syscall. POSIX errno is provided by musl's translation: each Plan 9 errstr maps to an errno (`-EEXIST`, `-EINVAL`, etc.).
-
-This is richer than POSIX errno alone and is preserved as a Plan 9 idiom worth keeping. errstr text is also logged at `/ctl/log/errstr/<pid>` for debugging.
+Plan 9's `errstr`, a per-thread text buffer beside the number, was the plan for this section and was never built. No Thread carries one, no syscall reads one, and there is no `/ctl/log/errstr`.
 
 ### 7.9 Process exit and wait
 
-`exits(msg)` terminates the calling process. `msg` is a text status string ("ok" for clean exit, anything else for failure). Goes into `Proc->exit_status`; parent retrieves via `wait()`.
+`SYS_EXITS(status)` and `SYS_EXIT_GROUP(status)` end the calling process. The low byte of `status` becomes `Proc->exit_status` verbatim. `exit_msg`, the Plan 9 string shown in `/proc`, follows it: "ok" for 0, "fail" otherwise. A death by note records `term_sig` as well.
 
-`wait(*WaitMsg)` blocks until a child exits; returns child's PID + exit_status. If multiple children exit, they're queued; `wait` returns oldest first. POSIX `waitpid` translates straightforwardly.
+A thread that exits with live peers starts a group termination (7.9.1) and leaves. The last thread out does the rest:
+1. Withdraws the process's `/srv` and `cap` registrations.
+2. Closes its handle table, at exit and not at reap, so a peer reading the dying process's pipe sees EOF at once.
+3. Releases its Weft shares.
+4. Under the process table lock, clears any role it held (trusted login, seat, console renderer, init), tears down a legate scope it rooted and hangs up a session it led.
+5. Runs the two orphan rules: POSIX 2.4.3 for a newly orphaned process group with stopped members, and the birth hold's for a child still held.
+6. Re-parents its children to init, or to kproc if init is gone.
+7. Records `exit_msg`, `exit_status` and `term_sig`, becomes `ZOMBIE`, and wakes its parent's waiters.
 
-When a process exits:
-1. All threads stopped.
-2. All open Spoors clunked.
-3. All handles closed.
-4. Address space torn down.
-5. Territory dropped.
-6. Children re-parented to PID 1 (init).
-7. Notes drained.
-8. Parent notified (synthetic note-equivalent if waiting).
-9. `Proc` structure freed via slab cache.
+Each thread is freed by the resume path of its last switch-out (7.3.2, I-48). The rest goes when the parent reaps: `proc_free` drops the address space and the Territory, and frees the `Proc`.
 
-Spec: `notes.tla` covers the exit-during-note-delivery race (note arrives just as process is exiting; handler is no longer valid).
+`SYS_WAIT_PID(want_pid, flags, status_out_va)` selects by `want_pid`: -1 for any child, a positive pid, 0 for the caller's process group, or less than -1 for group `-want_pid`. It returns the reaped pid, 0 under `WNOHANG` when nothing has happened yet, or -1 when no child matches. When several children have exited it takes the first its scan meets, and the children list runs newest first, so exit order is not preserved. An exit outranks a continue, and a continue outranks a stop; reporting a stop or a continue reaps nothing. The status is the raw `exit_status` unless the caller passes `WAIT_UNTRACED`, `WAIT_CONTINUED` or `WAIT_PACKED`, which ask for the Linux `wait(2)` word; `docs/ERRORS.md` "The wait status" is the binding table. A caught note can end a Linux guest's `wait4` (7.6).
+
+Specs: `death_wake.tla` (I-24) and `thread_reap.tla` (I-48).
 
 ### 7.9.1 Group termination — `exit_group`, `kill`, and cross-thread shootdown
 
@@ -1133,7 +1109,7 @@ None at Gate 3.
 
 ### 7.11 Summary
 
-Plan 9 `rfork` semantics; threads as siblings in a Proc; notes as the internal signal model; coarse capabilities; per-thread `errstr`. Linux semantics provided by musl + thin kernel shim; no kernel design contortion to accommodate POSIX.
+Plan 9 `rfork` narrowed to fork and vfork; threads as siblings in a Proc, created by a call of their own; notes as the internal signal model; coarse capabilities. Linux semantics provided by musl + thin kernel shim; no kernel design contortion to accommodate POSIX.
 
 ---
 
@@ -2317,8 +2293,9 @@ LOWER bound on the true worst case, so the one observation that would matter is
 a boot whose measured peak EXCEEDS the static bound -- which would prove the
 graph missed an edge. That observation is now taken on every boot rather than
 by hand, which is the only form in which it would ever be taken at all (#245).
-The guard pages remain the safety net under both numbers: an overflow faults
-into a no-access page and extincts, it does not corrupt a neighbour.
+The guard remains the safety net under both numbers: a frame bound for its
+unmapped address space is caught at the vector and extincts on the CPU's overflow
+stack, it does not corrupt a neighbour.
 
 #### Two things that are load-bearing only in prose, and get instruments here
 
@@ -2435,7 +2412,7 @@ Each process has a private territory — a tree of mount points mapping names to
 
 These three operations, composed, express containers, overlay filesystems, per-process views, chroot, and capability restriction — without additional kernel machinery.
 
-**Territory inheritance at `rfork`**: by default (no `RFNAMEG`), the child gets a private copy of the parent's territory. Modifications to the child don't affect parent. With `RFNAMEG`, parent and child share the territory (typical for thread creation).
+**Territory inheritance**: a new Proc, by `rfork` or by spawn, gets a private copy of its parent's territory. Modifications to the child don't affect parent. The threads of one Proc share its territory by being in it. `RFNAMEG`, which would let two Procs share one, is reserved (7.4).
 
 **Territory data structure** (`kernel/territory.c`):
 
@@ -2731,8 +2708,8 @@ The mount lifecycle composes naturally with existing refcounting:
 - **Caller can close the attach_9p fd** after `mount` — the mount table holds the ref. Caller can also keep the fd to do ad-hoc 9P walks on the same session without going through the namespace.
 - **`unmount(target_path)`** removes the mount-table entry; drops the Spoor ref.
 - **When the Spoor's refcount hits 0**, its dev9p vtable's close path destroys the `p9_client` (which closes the transport).
-- **`rfork(RFNAMEG=0)`** shares the Territory → shares the mount table → all Spoors keep their existing refs.
-- **`rfork(RFNAMEG=1)`** clones the Territory → clones the mount table → bumps each mount Spoor's refcount. Procs in the new Territory see the same backing clients but can mount/unmount independently.
+- **A thread** shares its Proc's Territory → shares the mount table → all Spoors keep their existing refs.
+- **A new Proc** clones the Territory → clones the mount table → bumps each mount Spoor's refcount. Procs in the new Territory see the same backing clients but can mount/unmount independently.
 - **Territory destruction** releases each mount entry, decrementing Spoor refs.
 
 Mount-lifecycle invariants extend `specs/territory.tla` (the existing bind / cycle-freedom / isolation spec) with:
@@ -3219,9 +3196,11 @@ The syscall interface is Plan 9-heritage, not POSIX. The syscall table is small 
 | `attach_9p(transport_fd, aname, n_uname) → spoor_fd` | Wrap a byte-pipe Spoor in a kernel 9P client; return a Spoor representing the 9P tree's root (§9.6) |
 | `mount(source_spoor_fd, target_path, flags) → 0` | Graft a Spoor's tree at `target_path`. Source can be any Spoor — `dev9p`-backed from `attach_9p`, kernel-Dev-backed, or a sub-tree (§9.6) |
 | `unmount(target_path)` | Remove a mount entry; release the Spoor ref |
-| `rfork(flags)` | Create process/thread |
+| `thread_spawn(entry, sp, arg, tls, ptid)` | Create a thread in this process (§7.4) |
+| `spawn(name, ...)` | Create a process running a named binary (§7.4) |
+| `rfork(flags, child_sp, child_tls)` | Copy this process: fork or vfork (§7.4) |
 | `exec(name, argv)` | Replace process image |
-| `exits(msg)` | Terminate process |
+| `exits(status)` | Terminate process |
 | `wait(waitmsg)` | Wait for child |
 | `sleep(ms)` | Sleep milliseconds |
 | `burrow_attach(length) → vaddr` | Attach an anonymous Burrow of `length` bytes (page-rounded) into the caller's address space at a kernel-chosen address; RW, demand-zero. The v1.0 native memory primitive — the substrate for `libt`'s and pouch's `malloc` (§6.5, Tier 1). `brk` and Linux-shaped / file-backed `mmap` are not provided. |
@@ -3239,7 +3218,6 @@ The syscall interface is Plan 9-heritage, not POSIX. The syscall table is small 
 | `nsec()` | Nanosecond clock |
 | `getpid()` | Process ID |
 | `gettid()` | Thread ID |
-| `errstr(buf, n)` | Read per-thread errstr |
 
 ### 11.2b Corvus hardening syscalls (v1.0, per CORVUS-DESIGN.md §4.1.1)
 
@@ -3341,7 +3319,7 @@ Out at v1.0: `epoll_*`, `inotify_*`, `io_uring_*`, `bpf`, `perf_event_open`, `pt
 
 ### 11.6 Syscall ABI
 
-ARM64: x0-x7 carry up to 8 args; x8 carries the syscall number; `SVC #0` traps. Return value in x0; second return (e.g., for `pipe`) in x1. Errors signaled by negative x0 with errno in `errstr` (Plan 9 style); musl translates to negative-errno return.
+ARM64: x0-x7 carry up to 8 args; x8 carries the syscall number; `SVC #0` traps. Return value in x0; second return (e.g., for `pipe`) in x1. Errors are signaled by a negative x0 (§7.8).
 
 The kernel uses a monotonic syscall number territory. **CORRECTION (VIVARIUM R-1, 2026-07-23): an earlier revision of this paragraph claimed "Linux syscall numbers don't overlap (kernel has its own numbering)" — that is FALSE as-built.** Thylacine's numbers run `0..100` and Linux aarch64's run `0..~460`; they occupy the same low range and collide densely (Thylacine `SYS_WEFT_SHARE = 81` vs Linux `sync = 81`, etc.). `svc #0` + `x8` therefore CANNOT by itself tell the kernel which ABI the caller speaks. The Linux shim's "separate entry path" is consequently NOT a number-range split but a **per-Proc phenotype** consulted at syscall entry and set at exec from the ELF brand — the FreeBSD-`sysentvec` / illumos-LX mechanism, which every system that runs unmodified foreign binaries uses. See `docs/VIVARIUM.md` §1.2 + §5 (DESIGN; the architectural fork is open pending signoff).
 
@@ -3875,9 +3853,9 @@ musl libc's `arch/aarch64/` is adapted to emit Thylacine syscalls. Most of musl 
 Specific changes:
 - `arch/aarch64/syscall_arch.h` — Thylacine syscall numbers.
 - `arch/aarch64/pthread_arch.h` — TPIDR_EL0 TLS.
-- `src/thread/aarch64/` — pthread_create maps to `rfork(RFPROC | RFMEM | ...)`.
+- `src/thread/` — `pthread_create` maps to `SYS_THREAD_SPAWN`, and the mutexes and condition variables to torpor (§23.4; patch 0004).
 - `src/signal/` — POSIX signal API maps to notes (§16.4).
-- `src/process/` — fork/clone map to rfork.
+- `src/process/` — `fork` is declined (POUCH-DESIGN 8.3); `posix_spawn` maps to `SYS_SPAWN_FULL_ARGV`.
 
 The musl port is a v1.0 deliverable (Phase 5).
 
@@ -3902,8 +3880,8 @@ long handle_linux_syscall(int nr, ...) {
 
 Each `linux_*` function translates Linux semantics to Thylacine native:
 - `linux_openat(dirfd, path, flags)` → resolves dirfd-relative path → `open(resolved_path, translate_flags(flags))`.
-- `linux_clone(flags, ...)` → translates `CLONE_*` to `RF*` and calls `rfork`.
-- `linux_futex(uaddr, op, val, ...)` → maps to Thylacine internal wait/wake on a virtual address (covered in `futex.tla`).
+- `linux_clone(flags, ...)` → admits three exact words (§7.4): a pthread word becomes a Thread in the caller's Proc, and the fork and vfork words go to `rfork`.
+- `linux_futex(uaddr, op, val, ...)` → maps to torpor, Thylacine's wait/wake on a virtual address (§23.4).
 
 **Coverage**: top ~50 Linux ARM64 syscalls (per §11.5). Programs that use only this subset run unchanged. glibc-dynamic binaries are best-effort (the dynamic linker path `/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1` would need to exist; we provide a best-effort shim).
 
@@ -4038,7 +4016,7 @@ The evolution *strengthens* the original claim: the kernel grows **no graphics-s
 - **Layout + control + introspection**: **9P** — `tapestryd` serves the `/dev/tapestry` tree (uniform containers; per-pane `ctl` / `mode` / `role` / `geometry` / `tag` / `surface` / `input`); `halcyon.rc` is a shell script writing those files (TAPESTRY.md §15).
 - **Scanout**: a userspace **virtio-gpu** driver (the deferred scanout half: `CREATE_2D` / `ATTACH_BACKING` / `SET_SCANOUT` / `TRANSFER_TO_HOST_2D` / `RESOURCE_FLUSH`).
 - **Input**: **virtio-input** (QEMU) / USB-HID (bare metal, a Lazarus arc) -> `tapestryd` -> the per-pane `input` 9P stream; a reserved Super/Hyper modifier is the compositor-control layer, intercepted above the focused surface's own input (TAPESTRY.md §14).
-- **Processes**: `rfork` / `exec` / `pipe` / `wait` — Halcyon spawns commands into panes.
+- **Processes**: `spawn` / `pipe` / `wait` — Halcyon spawns commands into panes.
 - **Notes**: resize (`winch`), `interrupt` (Ctrl-C).
 
 **Approved trusted-path refinement (2026-09-18).** Normal composition retains
@@ -4707,7 +4685,7 @@ Per `VISION.md §13`. The set of surfaces that must exist for Utopia to feel rea
 
 **Shell**:
 - `ut` — Thylacine's native Rust shell. Plan 9-rc-shaped with refinements (fd-notes job control, `?`+try/catch error model, double-quote interpolation, `case` block, Thylacine-extension builtins like `bind`/`mount`/`cap`/`note`). Built on `libthyla-rs`, no Pouch. Binding design: `docs/UTOPIA-SHELL-DESIGN.md`.
-- The shell consumes: `rfork`/`exec`/`wait`, `pipe`/`dup3`, file redirection, note delivery for Ctrl-C, `$path`-equivalent search, job control via fd-notes + poll().
+- The shell consumes: `spawn`/`wait`, `pipe`/`dup3`, file redirection, note delivery for Ctrl-C, `$path`-equivalent search, job control via fd-notes + poll().
 - Bash via Pouch is deferred — not part of Phase 7 Utopia v1. Users who need bash install it themselves via the Pouch path before Phase 8 (Linux compat) lands it as a ROADMAP §9 deliverable.
 
 **Coreutils** — native Rust on libthyla-rs, sub-chunked under U-9..N (binding design: `docs/UTOPIA-SHELL-DESIGN.md §19`). 9base-shaped feature scope, uutils-coreutils-shaped Linux flag compatibility where helpful without bloating. Initial set sized to pass the Utopia bring-up integration test (`docs/UTOPIA-SHELL-DESIGN.md §18`):
@@ -4829,18 +4807,13 @@ One `poll_list` per connection serves both endpoints and all four readiness edge
 
 ### 23.4 Threading — `pthread` and `futex`
 
-**`pthread`**: musl's pthread maps onto `rfork(RFPROC | RFMEM | RFFDG | RFNAMEG | RFCRED | RFNOTEG)`. Thread-local storage uses `TPIDR_EL0` — saved/restored on context switch.
+**`pthread`**: Pouch's pthread layer (patch 0004) maps `pthread_create` onto `SYS_THREAD_SPAWN` and a thread's exit onto `SYS_THREAD_EXIT`. Every POSIX thread is a Thread in one Proc (§7.4). Thread-local storage uses `TPIDR_EL0`, saved and restored on context switch.
 
-**`futex`**: load-bearing primitive under all of musl's mutexes, condition variables, and semaphores. Without it, threading is broken under contention.
+**torpor**: the native wait-on-address, and the load-bearing primitive under Pouch's mutexes, condition variables and semaphores. `SYS_TORPOR_WAIT(addr_va, expected, timeout_us)` sleeps if the 32-bit word at `addr_va` equals `expected`. `SYS_TORPOR_WAKE(addr_va, count)` wakes up to `count` waiters, oldest first, and returns how many it woke.
 
-`futex` syscall semantics supported at Phase 5:
-- `FUTEX_WAIT`: sleep if `*addr == val`.
-- `FUTEX_WAKE`: wake N waiters on `addr`.
-- `FUTEX_WAIT_BITSET` / `FUTEX_WAKE_BITSET`: needed by musl's condvar.
-- `FUTEX_REQUEUE`: condvar broadcast efficiency.
-- `FUTEX_CMP_REQUEUE`: same with extra check.
+**`futex`**: a Linux guest's `futex` is translated onto torpor. `FUTEX_WAIT`, `FUTEX_WAKE` and `FUTEX_REQUEUE` are served, with `FUTEX_PRIVATE_FLAG` and `FUTEX_CLOCK_REALTIME` stripped. `FUTEX_REQUEUE` wakes on the first address instead of moving waiters to the second: `FUTEX_WAIT` tolerates spurious wakes by contract, so a woken waiter re-checks its word and contends on the real lock. The cost is a bounded herd on `pthread_cond_broadcast`. `FUTEX_WAIT_BITSET`, `FUTEX_CMP_REQUEUE`, `FUTEX_WAKE_OP` and the PI ops answer `ENOSYS`.
 
-Implementation: a kernel hash table keyed by physical address (so futexes work across `mmap`-shared regions). Each bucket has a wait queue. `FUTEX_WAIT` checks `*addr == val` then atomically sleeps on the bucket. `FUTEX_WAKE` wakes N waiters from the bucket.
+Implementation (`kernel/torpor.c`): 256 buckets, each a lock and a list on its own cache line, hashed on `(AddrSpace*, VA)`, with waiters oldest first. The key is the address space and not the physical page, so Procs sharing a space (`RFMEM`) wake each other, and two Procs that map one Burrow into different spaces do not meet on it. A wait loads the word once with no lock and returns at once on a mismatch, which is most calls. Otherwise it takes the bucket's lock, reloads the word, and registers under that lock before it sleeps.
 
 `futex` is an audit-trigger surface. The wait/wake atomicity invariant is subtle. As-built (`torpor`, Phase 6) it is prose-validated per the 2026-05-23 spec-to-code suspension — no `futex.tla` module was written; the reasoning lives in `kernel/torpor.c` + `torpor.h` + the focused audit, and `death_wake.tla` covers the death-wake interaction.
 
@@ -5573,7 +5546,6 @@ These are the project's promises. Every one has a spec or a runtime check or a c
 | EEVDF | Earliest Eligible Virtual Deadline First scheduler |
 | EBR | Epoch-Based Reclamation (used in `burrow.tla`) |
 | EL0/EL1/EL2/EL3 | ARM64 Exception Levels |
-| `errstr` | Plan 9's per-thread error string |
 | GIC | Generic Interrupt Controller (ARM) |
 | Halcyon | Thylacine's graphical scroll-buffer shell |
 | Handle | Typed unforgeable token referencing a kernel object |

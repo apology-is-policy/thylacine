@@ -558,7 +558,7 @@ void test_pipe_compose_with_spoor_transport(void) {
     TEST_EXPECT_EQ(p9_transport_init(&t, ops, recv_buf, sizeof(recv_buf)), 0,
         "transport init");
 
-    struct p9_session s;
+    static struct p9_session s;
     TEST_EXPECT_EQ(p9_session_init(&s, /*root_fid=*/1, /*msize=*/4096), 0,
         "session init");
 

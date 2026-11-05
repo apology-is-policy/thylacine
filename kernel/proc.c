@@ -6,10 +6,8 @@
 // initial Thread; exits transitions Proc to ZOMBIE; wait_pid reaps
 // zombie children.
 //
-// At v1.0 P2-D, only RFPROC is supported in rfork — territory, fd
-// table, address space, credentials, etc. land in subsequent P2 sub-
-// chunks. Multi-thread Procs and the Linux clone() flag translation
-// land at Phase 5+ with the syscall surface.
+// rfork takes RFPROC or RFPROC|RFMEM (ARCH 7.4). A thread is not an rfork:
+// see SYS_THREAD_SPAWN and vivarium's clone arms.
 //
 // Bootstrap order (kernel/main.c calls in this order):
 //   1. slub_init      — kmem_cache_create can allocate now

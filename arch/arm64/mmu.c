@@ -161,6 +161,17 @@ static u64 l3_vmalloc[ENTRIES_PER_TABLE]   __attribute__((aligned(PAGE_SIZE)));
 // l2_vmalloc[1]->l3_vmalloc2 the VA-contiguous second 2 MiB.
 static u64 l3_vmalloc2[ENTRIES_PER_TABLE]  __attribute__((aligned(PAGE_SIZE)));
 
+// The kernel stack range (mmu.h): l0_ttbr1[KSTACK_L0_INDEX] -> l1_kstack ->
+// l2_kstack, every entry down to here set at boot, so no path adds to a table a
+// peer may be walking except at the L3 level, invalid to valid.
+#define KSTACK_L0_INDEX 288u
+_Static_assert(((KSTACK_RANGE_BASE >> 39) & 0x1ffu) == KSTACK_L0_INDEX,
+               "the range's L0 slot, which vmalloc's 256 and the image's 320 do not share");
+_Static_assert((KSTACK_RANGE_BASE & ((1ull << 39) - 1u)) == 0, "the range starts its L1 table");
+_Static_assert(KSTACK_L2_TABLES <= ENTRIES_PER_TABLE, "one L1 table holds them");
+static u64 l1_kstack[ENTRIES_PER_TABLE]                  __attribute__((aligned(PAGE_SIZE)));
+static u64 l2_kstack[KSTACK_L2_TABLES][ENTRIES_PER_TABLE] __attribute__((aligned(PAGE_SIZE)));
+
 // Total MMIO vmalloc capacity in 4-KiB pages -- the bump allocator's bound.
 #define VMALLOC_MMIO_ENTRIES  (2u * ENTRIES_PER_TABLE)
 
@@ -478,6 +489,16 @@ static void build_page_tables(u64 slide) {
             u32 ig_idx = (u32)((ig_pa - kernel_2mib_pa) >> PAGE_SHIFT);
             l3_kernel[ig_idx] = 0;
         }
+
+        // The overflow stacks' guards (smp.h), bounds-checked the same way.
+        for (unsigned c = 0; c < DTB_MAX_CPUS; c++) {
+            u64 og_pa = (u64)(uintptr_t)&g_overflow_stacks[c].guard[0];
+            if (og_pa < kernel_2mib_pa ||
+                ((og_pa - kernel_2mib_pa) >> PAGE_SHIFT) >=
+                    (u64)(ENTRIES_PER_TABLE * KERNEL_L3_TABLES))
+                extinction("g_overflow_stacks guard outside the kernel 8 MiB L3 region");
+            l3_kernel[(og_pa - kernel_2mib_pa) >> PAGE_SHIFT] = 0;
+        }
     }
 
     // TTBR0: link the two kernel L3 tables into the identity map (so the
@@ -639,6 +660,13 @@ static void build_page_tables(u64 slide) {
                     l3_directmap_kernel[ig_idx] = 0;
                 }
 
+                // The overflow stacks' guards: the l3_kernel pass above checked
+                // the same bounds.
+                for (unsigned c = 0; c < DTB_MAX_CPUS; c++) {
+                    u64 og_pa = (u64)(uintptr_t)&g_overflow_stacks[c].guard[0];
+                    l3_directmap_kernel[(og_pa - kernel_2mib_pa) >> PAGE_SHIFT] = 0;
+                }
+
                 // Wire the kernel-image 8 MiB → l3_directmap_kernel's
                 // KERNEL_L3_TABLES L3 tables (consecutive L2 entries).
                 // kernel_l2_idx derives from the fixed KERNEL_LOAD_PA, so
@@ -678,6 +706,13 @@ static void build_page_tables(u64 slide) {
         l2_vmalloc[1] = make_table_pte(l3_vmalloc2);
         // l3 entries left zero — populated by mmu_map_mmio post-boot.
         g_vmalloc_next_idx = 0;
+    }
+
+    // The kernel stack range: the L3 tables come with the first stack in each.
+    {
+        l0_ttbr1[KSTACK_L0_INDEX] = make_table_pte(l1_kstack);
+        for (u32 i = 0; i < KSTACK_L2_TABLES; i++)
+            l1_kstack[i] = make_table_pte(l2_kstack[i]);
     }
 }
 
@@ -1080,33 +1115,6 @@ void mmu_patch_text(void *dst, const void *src, u32 n) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// P3-Bca: per-thread kstack guard pages — operate on the kernel direct map.
-//
-// Bulk RAM is mapped in the direct map (0xFFFF_0000_*) via 1 GiB block
-// descriptors at L1 (`l1_directmap[1..8]`), with the kernel-image GiB
-// already demoted to L2 → L3 by build_page_tables (P3-Bb-hardening).
-// To make a 4 KiB page no-access in the direct map we walk the L1
-// entry, demote it to L2 (allocating a fresh L2 from buddy if it's
-// still a 1 GiB block), demote the relevant L2 entry to L3 (allocating
-// a fresh L3 if it's still a 2 MiB block), then invalidate the L3
-// entry for the target page.
-//
-// Pre-P3-Bca, this code operated on TTBR0's identity map. P3-Bca's
-// kstacks live at direct-map KVAs (high VA in TTBR1), so the guard
-// must be enforced at that translation. P3-Bd will retire TTBR0
-// identity entirely.
-//
-// SMP-safety (RW-1 F2): the block->table demote below (the only BBM step
-// here) is reached ONLY at boot, single-CPU. At runtime #808
-// (mmu_pagemap_directmap) has already demoted the whole buddy zone to L3,
-// so the kstack-guard path finds a present L3 and does only a distinct-
-// index leaf flip -- no runtime demote, no block->table BBM. Multi-thread
-// Procs drive concurrent thread_create, but those concurrent calls only
-// flip distinct leaves (single-copy-atomic, each with its own broadcast
-// tlbi), so no global mmu_lock is needed and none exists.
-// ---------------------------------------------------------------------------
-
 #include <thylacine/page.h>
 
 #include "../../mm/phys.h"
@@ -1119,171 +1127,20 @@ static inline u64 make_table_pte_pa(paddr_t pa) {
     return pa | PTE_VALID | PTE_TYPE_TABLE;
 }
 
-// Walk l1_directmap to obtain the L2 KVA covering `pa`. Demotes the
-// 1 GiB block to a 512 × 2-MiB-block L2 if needed (allocating a fresh
-// L2 from buddy). Returns NULL if `pa` is outside the direct-map
-// range (PA < 1 GiB or PA >= 9 GiB at v1.0) or on OOM.
-//
-// Idempotent: subsequent calls within the same GiB return the same L2.
-static u64 *directmap_walk_to_l2(paddr_t pa) {
-    u32 gib = (u32)(pa >> BLOCK_SHIFT_L1);
-    if (gib < 1 || gib > 8) return NULL;     // outside direct map
-
-    u64 entry = l1_directmap[gib];
-    if (!(entry & PTE_VALID)) return NULL;
-
-    if (entry & PTE_TYPE_TABLE) {
-        // Already demoted (e.g., the kernel-image GiB was demoted to
-        // l2_directmap_kernel by build_page_tables). The PA in the
-        // entry IS the L2 table's PA; convert via direct-map KVA.
-        paddr_t l2_pa = entry & ~0xFFFull;
-        return (u64 *)pa_to_kva(l2_pa);
-    }
-
-    // Demote the 1 GiB block to a fresh L2. The L2 holds 512 × 2-MiB
-    // R/W + XN blocks reproducing the source 1 GiB block's coverage.
-    struct page *l2_pg = alloc_pages(0, KP_ZERO);
-    if (!l2_pg) return NULL;
-    paddr_t l2_pa = page_to_pa(l2_pg);
-    u64 *l2 = (u64 *)pa_to_kva(l2_pa);
-
-    paddr_t gib_pa = (paddr_t)gib << BLOCK_SHIFT_L1;
-    for (u32 i = 0; i < ENTRIES_PER_TABLE; i++) {
-        paddr_t block_pa = gib_pa + ((paddr_t)i << BLOCK_SHIFT_L2);
-        l2[i] = make_block_pte_l2(block_pa, PTE_KERN_RW_BLOCK);
-    }
-
-    // Break-before-make on the L1 entry. Per ARM ARM B2.7.1, changing
-    // a block descriptor to a table descriptor (or vice versa) requires
-    // BBM: write 0, TLB-flush, write the new descriptor.
-    //
-    // #806 root cause: between the `= 0` (break) and the `= make_table_pte`
-    // (make) this entire 1 GiB of the direct map is UNMAPPED, and the window
-    // spans a tlbi + dsb_ish (microseconds, waits for inner-shareable
-    // completion). An IRQ taken in this window runs the handler on the boot
-    // CPU; arch_fault_handle (and the scheduler) dereference current_thread()
-    // -- a slab object reached via its DIRECT-MAP KVA. When current_thread's
-    // PA falls in this demoted GiB, that read faults (translation), and the
-    // fault handler re-dereferences the same wild pointer -> the recursive
-    // kernel fault that masqueraded for a year as "rfork_stress boot-stack
-    // overflow". Mask IRQs across the window so no handler on THIS CPU can
-    // observe the transient unmap. NULL lock = bare DAIF mask (spinlock.h).
-    //
-    // SCOPE: the per-CPU mask closes the SAME-CPU IRQ-in-window race -- the
-    // proven #806 root cause. It does NOT by itself close the CROSS-CPU hazard
-    // (a peer CPU dereferencing a direct-map PA inside the GiB this CPU is
-    // transiently unmapping faults identically; a per-CPU mask cannot prevent
-    // it). #808 closes BOTH races for the buddy zone BY CONSTRUCTION:
-    // mmu_pagemap_directmap (called from phys_init -- single-CPU, IRQ-masked,
-    // pre-thread_create) demotes EVERY 2 MiB block of l1_directmap[1..8] to L3
-    // at boot, so at runtime mmu_set_no_access_range always finds an already-
-    // demoted L3 and this block->table BBM never fires for a kstack-guard poke.
-    // This window + its IRQ-mask therefore remain only as belt-and-suspenders
-    // for a hypothetical demote OUTSIDE the pre-mapped zone (none exists at
-    // v1.0). The rejected non-BBM OA-preserving alternative would need
-    // FEAT_BBM level 2 (absent on ARMv8.0, e.g. the RPi 400) to be portable.
-    // See mmu_pagemap_directmap below + 03-mmu.md "Direct-map demote".
-    irq_state_t s = spin_lock_irqsave(NULL);
-    l1_directmap[gib] = 0;
-    dsb_ishst();
-    tlbi_vmalle1is();
-    dsb_ish();
-    isb();
-
-    l1_directmap[gib] = make_table_pte_pa(l2_pa);
-    dsb_ishst();
-    isb();
-    spin_unlock_irqrestore(NULL, s);
-
-    return l2;
-}
-
-// Walk to the L3 KVA covering `pa`. Demotes the 2-MiB-block L2 entry to
-// a fresh L3 if needed. Returns NULL on OOM or outside-direct-map.
-//
-// Idempotent: subsequent calls within the same 2 MiB return the same L3.
-static u64 *directmap_walk_to_l3(paddr_t pa) {
-    u64 *l2 = directmap_walk_to_l2(pa);
-    if (!l2) return NULL;
-
-    u32 l2_idx = (u32)((pa >> BLOCK_SHIFT_L2) & 0x1ff);
-    u64 entry = l2[l2_idx];
-    if (!(entry & PTE_VALID)) return NULL;
-
-    if (entry & PTE_TYPE_TABLE) {
-        paddr_t l3_pa = entry & ~0xFFFull;
-        return (u64 *)pa_to_kva(l3_pa);
-    }
-
-    // Demote the 2 MiB block to a fresh L3.
-    struct page *l3_pg = alloc_pages(0, KP_ZERO);
-    if (!l3_pg) return NULL;
-    paddr_t l3_pa = page_to_pa(l3_pg);
-    u64 *l3 = (u64 *)pa_to_kva(l3_pa);
-
-    paddr_t block_pa = pa & ~(BLOCK_SIZE_L2 - 1);
-    for (u32 i = 0; i < ENTRIES_PER_TABLE; i++) {
-        paddr_t page_pa = block_pa + ((paddr_t)i << PAGE_SHIFT);
-        l3[i] = make_page_pte_l3(page_pa, PTE_KERN_RW);
-    }
-
-    // BBM on the L2 entry. Same #806 hazard as directmap_walk_to_l2's L1 BBM
-    // (the `= 0` transiently unmaps this 2 MiB block across a tlbi + dsb_ish;
-    // an IRQ whose handler derefs a current_thread() / slab object with a PA in
-    // this block faults -> recursive kernel fault). This L2 window is the one
-    // the captured #806 dump hit (ESR DFSC=0x06, an L2 translation fault,
-    // during thread_create -> mmu_set_no_access_range in rfork_stress). Mask
-    // IRQs across it. Per #808 (mmu_pagemap_directmap) this demote runs at boot
-    // for the whole buddy zone, so at runtime the kstack-guard path finds the
-    // L3 already present and never reaches this BBM; the mask is belt-and-
-    // suspenders. See directmap_walk_to_l2's SCOPE note + 03-mmu.md.
-    irq_state_t s = spin_lock_irqsave(NULL);
-    l2[l2_idx] = 0;
-    dsb_ishst();
-    tlbi_vmalle1is();
-    dsb_ish();
-    isb();
-
-    l2[l2_idx] = make_table_pte_pa(l3_pa);
-    dsb_ishst();
-    isb();
-    spin_unlock_irqrestore(NULL, s);
-
-    return l3;
-}
-
-// A guard toggle changes direct-map leaves and nothing else, so each page is
-// invalidated by its VA (all ASIDs, inner-shareable) rather than by
-// `tlbi vmalle1is`, which drops every address space's entries on every CPU.
-// The operand is VA[55:12] in bits [43:0] with every bit above zero: a TTBR1
-// VA shifted right by 12 carries ones into [47:44], the FEAT_TTL level hint,
-// and a wrong hint lets the invalidate miss the entry.
-static inline u64 directmap_tlbi_operand(paddr_t pa) {
-    u64 va = (u64)(uintptr_t)pa_to_kva(pa);
+// The operand of an invalidate by VA of one kernel page: VA[55:12] in bits [43:0]
+// with every bit above zero. A TTBR1 VA shifted right by 12 carries ones into
+// [47:44], the FEAT_TTL level hint, and a wrong hint lets the invalidate miss the
+// entry.
+static inline u64 kernel_tlbi_operand(u64 va) {
     return (va >> 12) & ((1ull << 44) - 1);
 }
 
-static void directmap_tlbi_pages(paddr_t pa, unsigned n_pages) {
-    dsb_ishst();
-    for (unsigned i = 0; i < n_pages; i++)
-        __asm__ __volatile__("tlbi vaae1is, %0"
-                             :: "r" (directmap_tlbi_operand(pa + (paddr_t)i * PAGE_SIZE))
-                             : "memory");
-    dsb_ish();
-    isb();
-}
-
 #ifdef KERNEL_TESTS
-// Test hooks: the invalidate operand for a page, the count of kstack guard
-// toggles (the two range calls below), and whether a privileged read of `kva`
-// translates right now -- AT S1E1R with PAR_EL1.F as the fault bit, IRQs
+// Test hooks: the invalidate operand for a page, and whether a privileged read of
+// `kva` translates right now -- AT S1E1R with PAR_EL1.F as the fault bit, IRQs
 // masked across the pair so no handler can replace PAR_EL1 between them.
-u64 mmu_directmap_tlbi_operand_for_test(paddr_t pa) {
-    return directmap_tlbi_operand(pa);
-}
-static u64 g_guard_toggles_for_test;
-u64 mmu_guard_toggles_for_test(void) {
-    return __atomic_load_n(&g_guard_toggles_for_test, __ATOMIC_RELAXED);
+u64 mmu_kernel_tlbi_operand_for_test(u64 va) {
+    return kernel_tlbi_operand(va);
 }
 bool mmu_kva_readable_for_test(const void *kva) {
     u64 par;
@@ -1298,148 +1155,116 @@ bool mmu_kva_readable_for_test(const void *kva) {
 }
 #endif
 
+// =============================================================================
+// The kernel stack range (mmu.h).
+// =============================================================================
+//
+// A table, once made, stays. A stack is 1/64 of one, so the most a burst of
+// threads can leave behind is 1/256 of the pages those stacks held; freeing one
+// would mean invalidating walk caches for a table a peer may be about to fill.
+// Linux's vmalloc keeps its page tables for the same reason. They come out of the
+// reserve (mm/phys.h), bounded by the pool's own bound on threads.
+//
+// Mapping is invalid to valid, so it invalidates nothing (a translation fault is
+// never cached). The new stack's first user may be a peer, and it got there
+// through a publish that the dsb below is ordered before.
+
+static spin_lock_t g_kstack_table_lock = SPIN_LOCK_INIT;   // a leaf
 #ifdef KERNEL_TESTS
-bool mmu_set_no_access(paddr_t pa) {
-    if (pa & (PAGE_SIZE - 1)) return false;
+static u64 g_kstack_changes_for_test;
+static u32 g_kstack_tables_for_test;
+u64 mmu_kstack_changes_for_test(void) {
+    return __atomic_load_n(&g_kstack_changes_for_test, __ATOMIC_RELAXED);
+}
+u32 mmu_kstack_tables_for_test(void) {
+    return __atomic_load_n(&g_kstack_tables_for_test, __ATOMIC_RELAXED);
+}
+#endif
 
-    u64 *l3 = directmap_walk_to_l3(pa);
-    if (!l3) return false;
-
-    u32 idx = (u32)((pa >> PAGE_SHIFT) & 0x1ff);
-    l3[idx] = 0;
-    directmap_tlbi_pages(pa, 1);
-    return true;
+static u64 *kstack_l2_entry(u64 va) {
+    u64 off = va - KSTACK_RANGE_BASE;
+    if (va < KSTACK_RANGE_BASE || off >= KSTACK_RANGE_SIZE)
+        extinction_with_addr("an address outside the kernel stack range", (uintptr_t)va);
+    return &l2_kstack[off >> 30][(off >> BLOCK_SHIFT_L2) & (ENTRIES_PER_TABLE - 1u)];
 }
 
-bool mmu_restore_normal(paddr_t pa) {
-    if (pa & (PAGE_SIZE - 1)) return false;
-
-    u64 *l3 = directmap_walk_to_l3(pa);
-    if (!l3) return false;
-
-    u32 idx = (u32)((pa >> PAGE_SHIFT) & 0x1ff);
-    l3[idx] = make_page_pte_l3(pa, PTE_KERN_RW);
-    directmap_tlbi_pages(pa, 1);
-    return true;
+static u64 *kstack_table_of(u64 l2e) {
+    return (u64 *)pa_to_kva((paddr_t)(l2e & 0x0000FFFFFFFFF000ull));
 }
-#endif // KERNEL_TESTS
 
-bool mmu_set_no_access_range(paddr_t pa, unsigned n_pages) {
-    if (pa & (PAGE_SIZE - 1)) return false;
-    if (n_pages == 0)         return false;
-    paddr_t end = pa + (paddr_t)n_pages * PAGE_SIZE;
-    if (end <= pa)            return false;       // overflow
-    // Range must lie within a single 2 MiB block (one L3 covers exactly
-    // one 2 MiB region). Multi-block ranges would need either looping
-    // over L3s or batched API; not needed at v1.0 (kstack guards are
-    // 16 KiB ≪ 2 MiB).
-    if ((pa >> BLOCK_SHIFT_L2) != ((end - 1) >> BLOCK_SHIFT_L2)) return false;
+static u64 *kstack_l3_make(u64 va) {
+    u64 *slot = kstack_l2_entry(va);
+    u64 e = __atomic_load_n(slot, __ATOMIC_ACQUIRE);
+    if (e) return kstack_table_of(e);
 
-    u64 *l3 = directmap_walk_to_l3(pa);
-    if (!l3) return false;
+    struct page *pg = alloc_pages(0, KP_ZERO);
+    if (!pg) return NULL;
+    paddr_t pa = page_to_pa(pg);
+    dsb_ishst();    // a walker that finds the table finds it zeroed
 
-    for (unsigned i = 0; i < n_pages; i++) {
-        u32 idx = (u32)(((pa >> PAGE_SHIFT) + i) & 0x1ff);
-        l3[idx] = 0;
+    irq_state_t s = spin_lock_irqsave(&g_kstack_table_lock);
+    e = *slot;
+    if (!e) {
+        e = make_table_pte_pa(pa);
+        __atomic_store_n(slot, e, __ATOMIC_RELEASE);
+        dsb_ishst();
+        pg = NULL;
+#ifdef KERNEL_TESTS
+        __atomic_add_fetch(&g_kstack_tables_for_test, 1u, __ATOMIC_RELAXED);
+#endif
     }
-    directmap_tlbi_pages(pa, n_pages);
+    spin_unlock_irqrestore(&g_kstack_table_lock, s);
+    if (pg) free_pages(pg, 0);      // a peer's creator got there first
+    return kstack_table_of(e);
+}
+
+bool mmu_kstack_map(u64 va, const paddr_t *pa, unsigned n) {
+    u64 *l3 = kstack_l3_make(va);
+    if (!l3) return false;
+    u32 idx = (u32)((va >> PAGE_SHIFT) & (ENTRIES_PER_TABLE - 1u));
+    for (unsigned i = 0; i < n; i++) {
+        if (__atomic_load_n(&l3[idx + i], __ATOMIC_RELAXED) & PTE_VALID)
+            extinction_with_addr("kstack map over a page already mapped",
+                                 (uintptr_t)(va + (u64)i * PAGE_SIZE));
+        __atomic_store_n(&l3[idx + i], make_page_pte_l3(pa[i], PTE_KERN_RW), __ATOMIC_RELAXED);
+    }
+    dsb_ishst();
+    isb();
 #ifdef KERNEL_TESTS
-    __atomic_add_fetch(&g_guard_toggles_for_test, 1, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&g_kstack_changes_for_test, 1u, __ATOMIC_RELAXED);
 #endif
     return true;
 }
 
-bool mmu_restore_normal_range(paddr_t pa, unsigned n_pages) {
-    if (pa & (PAGE_SIZE - 1)) return false;
-    if (n_pages == 0)         return false;
-    paddr_t end = pa + (paddr_t)n_pages * PAGE_SIZE;
-    if (end <= pa)            return false;
-    if ((pa >> BLOCK_SHIFT_L2) != ((end - 1) >> BLOCK_SHIFT_L2)) return false;
-
-    u64 *l3 = directmap_walk_to_l3(pa);
-    if (!l3) return false;
-
-    for (unsigned i = 0; i < n_pages; i++) {
-        paddr_t page_pa = pa + (paddr_t)i * PAGE_SIZE;
-        u32 idx = (u32)((page_pa >> PAGE_SHIFT) & 0x1ff);
-        l3[idx] = make_page_pte_l3(page_pa, PTE_KERN_RW);
+void mmu_kstack_unmap(u64 va, paddr_t *pa, unsigned n) {
+    u64 e = __atomic_load_n(kstack_l2_entry(va), __ATOMIC_ACQUIRE);
+    if (!e) extinction_with_addr("kstack unmap with no table", (uintptr_t)va);
+    u64 *l3 = kstack_table_of(e);
+    u32 idx = (u32)((va >> PAGE_SHIFT) & (ENTRIES_PER_TABLE - 1u));
+    for (unsigned i = 0; i < n; i++) {
+        u64 pte = __atomic_load_n(&l3[idx + i], __ATOMIC_RELAXED);
+        if (!(pte & PTE_VALID))
+            extinction_with_addr("kstack unmap of a page that is not mapped", (uintptr_t)va);
+        pa[i] = (paddr_t)(pte & 0x0000FFFFFFFFF000ull);
+        __atomic_store_n(&l3[idx + i], 0ull, __ATOMIC_RELAXED);
     }
-    directmap_tlbi_pages(pa, n_pages);
+    dsb_ishst();
+    for (unsigned i = 0; i < n; i++)
+        __asm__ __volatile__("tlbi vaae1is, %0"
+                             :: "r" (kernel_tlbi_operand(va + (u64)i * PAGE_SIZE))
+                             : "memory");
+    dsb_ish();
+    isb();
 #ifdef KERNEL_TESTS
-    __atomic_add_fetch(&g_guard_toggles_for_test, 1, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&g_kstack_changes_for_test, 1u, __ATOMIC_RELAXED);
 #endif
-    return true;
-}
-
-// =============================================================================
-// #808: boot-time page-map of the buddy direct map (eliminate runtime BBM).
-// =============================================================================
-//
-// build_page_tables leaves l1_directmap[2..8] as 1 GiB blocks and the
-// non-kernel 2 MiB blocks of the kernel GiB as 2 MiB blocks. The FIRST
-// mmu_set_no_access_range on a kstack guard inside such a block forces a
-// runtime break-before-make (directmap_walk_to_l2's L1->L2 demote and/or
-// directmap_walk_to_l3's L2->L3 demote), which transiently unmaps a live
-// 1 GiB / 2 MiB span of the direct map. That window is the #806 root cause
-// (a same-CPU IRQ in it derefs a direct-map slab object and faults) AND has
-// a cross-CPU sibling (a peer derefs a direct-map PA in the span; a per-CPU
-// IRQ mask cannot prevent it).
-//
-// mmu_pagemap_directmap forces every 2 MiB block of the buddy zone through
-// directmap_walk_to_l3 ONCE at boot (from phys_init): single-CPU, IRQs
-// masked at PSTATE (boot_main has not yet run `msr daifclr, #2`), and before
-// the first thread_create. Those BBMs are safe by construction -- no
-// concurrent CPU, no IRQ handler can observe the unmap, and the running code
-// + boot stack live in the kernel-image 2 MiB blocks (already L3, never
-// re-BBM'd). Afterwards EVERY l1_directmap[1..8] entry is a table descriptor
-// and EVERY 2 MiB block within is an L3 table, so the runtime
-// mmu_set_no_access_range / mmu_restore_normal_range path hits the already-
-// demoted fast path (a plain L3 leaf flip) and NEVER does a block->table BBM.
-// Both the #806 same-CPU race and its cross-CPU sibling are thereby gone for
-// the buddy zone BY CONSTRUCTION.
-//
-// This is the Linux-arm64 move: page-map the linear map (no block mappings)
-// so per-page linear-map permission changes (rodata_full / DEBUG_PAGEALLOC /
-// KFENCE) never need a runtime block split. The rejected non-BBM
-// OA-preserving alternative would need FEAT_BBM level 2 (ARMv8.4+), absent on
-// the RPi 400 (Cortex-A72 / ARMv8.0) -> not portable.
-//
-// Cost: one L3 table (4 KiB) per 2 MiB block + one L2 table per demoted GiB
-// ~= RAM / 512 ~= 0.2% of managed RAM (4 MiB per 2 GiB; 16 MiB at the
-// DIRECTMAP_USABLE_RAM_MAX 8 GiB cap). The lost 1 GiB / 2 MiB block TLB reach
-// is a bare-metal (Lazarus) perf concern only; free on QEMU TCG at v1.0.
-//
-// `base`..`end` are the buddy zone bounds (phys.c, already capped at the
-// direct map's 8 GiB reach). Blocks outside [1 GiB, 9 GiB) are skipped
-// (directmap_walk_to_l3 rejects them). An in-range OOM is fatal -- we cannot
-// establish the no-runtime-BBM invariant -- but is effectively impossible
-// right after buddy init when nearly all RAM is free.
-void mmu_pagemap_directmap(paddr_t base, paddr_t end) {
-    for (paddr_t pa = base & ~(BLOCK_SIZE_L2 - 1); pa < end;
-         pa += BLOCK_SIZE_L2) {
-        u32 gib = (u32)(pa >> BLOCK_SHIFT_L1);
-        if (gib < 1 || gib > 8) continue;          // outside the direct map
-        // NULL here is either alloc OOM or -- for an in-range block -- an
-        // unexpectedly-invalid L1/L2 entry (a hole in the direct map the pass
-        // assumes is fully mapped: a structural bug, not OOM). Both are fatal
-        // (the no-runtime-BBM invariant cannot be established); neither is
-        // reachable at v1.0 (gib 1 fully populated by build_page_tables, gib
-        // 2..8 get fully-valid L2s on demote, ~all RAM free here).
-        if (!directmap_walk_to_l3(pa)) {
-            extinction("mmu_pagemap_directmap: cannot page-map an in-range "
-                       "buddy block (#808: OOM or an unmapped direct-map block)");
-        }
-    }
 }
 
 #ifdef KERNEL_TESTS
-// #808 diagnostic / regression-test helper. Reports whether the 2 MiB block
-// containing `pa` is demoted to L3 page granularity in the direct map --
-// i.e. l1_directmap[gib] is a table descriptor AND the covering L2 entry is
-// a table descriptor. When true, a kstack-guard poke (mmu_set_no_access_range
-// -> directmap_walk_to_l3) takes the already-demoted fast path and does NO
-// block->table break-before-make. NON-mutating (unlike directmap_walk_to_*,
-// which would demote). Returns false for PAs outside the direct map.
+// Whether the 2 MiB of the direct map holding `pa` is page-mapped: l1_directmap[gib]
+// and the covering L2 entry are both table descriptors. False for PAs outside the
+// direct map. Nothing writes a direct-map leaf at runtime, so this is true only of
+// the image's 8 MiB, and everything else keeps the blocks build_page_tables gave it.
 bool mmu_directmap_is_pagemapped(paddr_t pa) {
     u32 gib = (u32)(pa >> BLOCK_SHIFT_L1);
     if (gib < 1 || gib > 8) return false;

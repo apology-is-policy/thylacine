@@ -41,7 +41,7 @@ Generated — do not edit between the markers (`quaestor render`).
 | [[arc-vivarium]] | active | 2 |
 | [[arc-weft]] | active | 4 |
 
-## Open seams: 79
+## Open seams: 80
 
 - [[seam-220-netd-listener-poll]] (sub-netd-server)
 - [[seam-240-lo-redial]] (sub-netd-server)
@@ -79,6 +79,7 @@ Generated — do not edit between the markers (`quaestor render`).
 - [[seam-hwcap-boot-cpu-only]] (sub-kernel-boot-sequence, sub-kernel-alternatives)
 - [[seam-kaslr-link-va-unchecked]] (sub-kernel-kaslr, sub-kernel-boot-entry)
 - [[seam-kobj-handle-release]] (sub-stratum-bdev)
+- [[seam-kstack-va-predictable]] (sub-kernel-thread)
 - [[seam-larder-cacheable-proxy]] (sub-kernel-larder, sub-kernel-ninep-dev9p)
 - [[seam-larder-lazy-array-robustness]] (sub-kernel-larder)
 - [[seam-larder-loom-bypass]] (sub-kernel-larder)
@@ -125,12 +126,12 @@ Generated — do not edit between the markers (`quaestor render`).
 
 ## Recent changes
 
+- 2026-11-05 [[chg-2026-11-05-c10-owed-readings]] — C10's owed readings: a witness for the vector's tag-bit test, and two sabotages read alone
+- 2026-11-04 [[chg-2026-11-04-c10-r1]] — Each kernel stack in a range of its own: round 1's fixes
 - 2026-11-04 [[chg-2026-11-04-c8a-r2]] — Torpor keyed on the space: round 2's fixes, and a model that can see K06
 - 2026-11-04 [[chg-2026-11-04-c8a-r3]] — Torpor keyed on the space: round 3's wording
 - 2026-11-04 [[chg-2026-11-04-pinned-wake]] — A pinned thread's wake goes to its home CPU, not the waker's
 - 2026-11-04 [[chg-2026-11-04-poll-mask]] — ppoll's and pselect's mask, and sigpending, on SYS_NOTE_WAIT
 - 2026-11-04 [[chg-2026-11-04-torpor-walks-go]] — The two torpor walks and the bucket-lock die check go
 - 2026-11-04 [[chg-2026-11-04-walk-errno-close]] — The walk errno close: rounds 1 and 2, the first boots, 32 sabotages
-- 2026-11-03 [[chg-2026-11-03-c8a-r1]] — Torpor keyed on the space: round 1's fixes
-- 2026-11-03 [[chg-2026-11-03-c8a-torpor]] — torpor keyed on the address space, a lock per bucket, oldest first, and no wake under the lock
 <!-- generated:end -->
