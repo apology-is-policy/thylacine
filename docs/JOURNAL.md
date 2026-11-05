@@ -34,9 +34,9 @@ The proof ran at 01a5c90e3 on HVF, 02:41Z to 03:14Z. All three scenarios pass. A
 
 **Composite shapes for the drop** did not beat the 511 KiB already in flow 11. The largest, 431 KiB, is 60 nested `if` around a 60-level `case` value in each of 32 substitutions.
 
-**Whole-tree host tests on the Pi:** `tools/test-rust.sh` rc=0, 137 crates, on ut-stack 35577cda2, MM-1c 2c82f9d26 and vote 50 7365a656f; the account ABI oracle and spawn mirrors pass on MM-1c. Before those runs the Pi had 4.0 GB free against 2.3 GB of output per tree, so I removed two of my own build outputs; 9.7 GB free after the last.
+**Whole-tree host tests on the Pi:** `tools/test-rust.sh` rc=0, 137 crates, on ut-stack 35577cda2, MM-1c 2c82f9d26 and vote 50 7365a656f; the account ABI oracle and spawn mirrors pass on MM-1c. Before those runs the Pi had about 4 GiB free against 2.3 GiB of output per tree, so I removed two of my own build outputs; 9.3 GiB free after the last.
 
-**The Pi's reset timeline, from my memory test.** Free 22 MB at 00:02:12Z, swap 1937 of 2048 MB at 00:02:52Z, link closed about 00:03:02Z, boot 00:04:39Z. The board's 60 s hardware watchdog is a lead for this and for the earlier reset at 16:15:03Z, not a proven cause, and the panic_on_oom setting is off. An allocation at 10:33:27 the same day met the oom-killer with no reset. pi-watch missed this reset because it compared boot time only after a dropped stream, while the Pi was still down, then reconnected without looking; it now compares before every stream.
+**The Pi's reset timeline, from my memory test.** Free 22 MB at 00:02:12Z, swap 1937 of 2048 MB at 00:02:52Z, link closed about 00:03:02Z, boot 00:04:39Z. The board's 60 s hardware watchdog is a lead for this and for the reset at 16:15:03Z on 11-03, not a proven cause, and panic_on_oom is 0. An allocation at 10:33:27 on 11-04 met the oom-killer with no reset. pi-watch missed this reset because it compared boot time only after a dropped stream, while the Pi was still down, then reconnected without looking; it now compares before every stream.
 
 **Not yet run:** the default suite on the join's tip, which gates the push; flows 10 and 11's first boot and their reds; ls-5's new leg both ways. Nothing is pushed.
 
