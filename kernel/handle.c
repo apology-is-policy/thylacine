@@ -470,10 +470,10 @@ void handle_lock_owner_retire(struct Proc *p, struct Spoor *owner) {
 // asked for it: a cached open minted before a take's grant keeps its snapshot
 // under the lock (ARCH 9.6.11).
 //
-// A lock call's release (stop_cancelled) ends at a flush a caught note cancelled,
-// the mark still set: one more RPC answered in time would clear it (client_run),
-// and the call's EINTR would be one no restart follows. A close goes on to every
-// open: it cannot be refused, and gives the lock up next.
+// A take's release (stop_cancelled) ends at a flush a caught note cancelled, the
+// mark still set: one more RPC answered in time would clear it (client_run), and
+// the call's EINTR would be one no restart follows. A close or an unlock goes on to
+// every open: it is not to be refused, and gives the lock up next.
 static int lock_sync_table(struct HandleTable *t, struct Spoor *owner, u32 how,
                            bool stop_cancelled) {
     struct Dev *d = owner->dev;
@@ -509,9 +509,10 @@ static int lock_sync_table(struct HandleTable *t, struct Spoor *owner, u32 how,
     return 0;
 }
 
-int handle_lock_sync_file(struct Proc *p, struct Spoor *owner, u32 how) {
+int handle_lock_sync_file(struct Proc *p, struct Spoor *owner, u32 how,
+                          bool stop_cancelled) {
     if (!owner) return 0;
-    return lock_sync_table(proc_handles_or_extinct(p), owner, how, /*stop_cancelled=*/true);
+    return lock_sync_table(proc_handles_or_extinct(p), owner, how, stop_cancelled);
 }
 
 u32 handle_lock_owner_count(struct Proc *p) {

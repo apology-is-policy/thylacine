@@ -59,6 +59,7 @@ static int            g_lk_acq_fail_rc;
 static struct Spoor  *g_lk_rel_fail;       // .lock_sync(RELEASE) on this Spoor fails
 static int            g_lk_rel_fail_rc;
 static bool           g_lk_rel_fail_mark;  // and leaves the caller's call unwound
+static struct Spoor  *g_lk_rel_fail_armed; // becomes g_lk_rel_fail at the mid-call close
 static u32            g_lk_take_seq;       // seq of the last take that reached .lock
 static hidx_t         g_lk_close_fd = -1;  // close this fd inside the next .lock
 static u8             g_lk_owner_tag;      // aux of a minted owner
@@ -95,6 +96,7 @@ static void lk_reset(void) {
     g_lk_rel_fail = NULL;
     g_lk_rel_fail_rc = 0;
     g_lk_rel_fail_mark = false;
+    g_lk_rel_fail_armed = NULL;
     g_lk_close_fd = -1;
     g_lk_stale = NULL;
     g_lk_stale_path = 0;
@@ -149,6 +151,10 @@ static int lk_lock(struct Spoor *c, u32 type, u64 start, u64 len,
         hidx_t fd = g_lk_close_fd;
         g_lk_close_fd = -1;
         handle_close(current_thread()->proc, fd);
+        if (g_lk_rel_fail_armed) {
+            g_lk_rel_fail = g_lk_rel_fail_armed;
+            g_lk_rel_fail_armed = NULL;
+        }
     }
     // A fid of a file that has died (the server answers ESTALE; its records
     // went with the file).
@@ -1136,6 +1142,32 @@ static void cancelled_release_body(struct lk_fix *f, int a, int b, int e) {
     TEST_ASSERT(g_lk_un_seq != un0 && g_lk_sync_last_seq < g_lk_un_seq,
                 "CONTROL: then unlocks the file");
     TEST_EXPECT_EQ(handle_lock_owner_count(f->p), entries, "CONTROL: and drops the entry");
+
+    // An unlock is never refused: it goes on past a flush a note cancelled.
+    TEST_EXPECT_EQ(lk_call(f, a, W, 0, 4), (s64)0, "an open-file take through a");
+    w = lk_cancel_call(f, a, e, e, U, -T_E_INTR, true);
+    TEST_EXPECT_EQ(w.rc, (s64)0, "its unlock goes ahead past a flush a note cancelled");
+    TEST_ASSERT(w.mark, "fixture: that flush was cancelled");
+    TEST_EXPECT_EQ(w.calls, 1u, "the unlock reached the server");
+    TEST_EXPECT_EQ(lk_held_on(9), 0u, "and nothing is held");
+
+    // A Proc take whose descriptor closed mid-call unlocks its range before the
+    // EBADF. That unlock is no take: a flush a note cancels on its way does not
+    // stop it.
+    lk_sync_reset();
+    g_lk_close_fd       = f->fd[a];
+    g_lk_rel_fail_armed = f->sp[e];
+    g_lk_rel_fail_rc    = -T_E_INTR;
+    g_lk_rel_fail_mark  = true;
+    s64 rr = lk_call(f, a, W | P, 0, 4);
+    f->fd[a] = -1;   // the fake closed it
+    bool cancelled = lk_synced(f->sp[e]) && t->note_call_unwound;
+    t->note_call_unwound = false;
+    g_lk_rel_fail = g_lk_rel_fail_armed = NULL;
+    g_lk_rel_fail_mark = false;
+    TEST_EXPECT_EQ(rr, -(s64)T_E_BADF, "a Proc take whose descriptor closed mid-call is EBADF");
+    TEST_ASSERT(cancelled, "fixture: the re-check's flush of e was cancelled");
+    TEST_EXPECT_EQ(lk_held_on(9), 0u, "and its unlock went out past the cancelled flush");
 }
 
 void test_filelock_cancelled_flush_ends_call(void) {

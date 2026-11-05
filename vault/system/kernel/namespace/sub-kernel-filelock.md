@@ -95,11 +95,12 @@ woken) between attempts.
 `file_lock_once` for the FILE owner first lands every staged write of the file
 that the Proc can reach, for any set-lock, as the PROC owner does, and is then one
 `c->dev->lock(c, ...)`, which lands `c`'s own: its descriptor may have left the
-table. A flush a caught note cancelled ends the call there with `-T_E_INTR`.
+table. A flush a caught note cancelled ends a take there with `-T_E_INTR`.
 `handle_lock_sync_file` stops at that flush, the call's mark still set: one more
 RPC answered in time would clear it (`client_run`), and the `-T_E_INTR` would then
-be one no restart follows. The close paths walk the same table to the end, since a
-close cannot be refused and gives the lock up next. For the PROC owner it:
+be one no restart follows. An unlock (the post-grant re-check's among them) and the
+close paths walk the same table to the end: nothing may refuse them, and they give
+the lock up next. For the PROC owner it:
 1. Gets the entry with `handle_lock_owner_get(p, c, mint = take)`. That makes
    `c` learn its file's identity first (`Dev.lock_ident`) and adopts or mints
    the entry.
@@ -109,7 +110,8 @@ close cannot be refused and gives the lock up next. For the PROC owner it:
    write of the file that the Proc can reach
    (`handle_lock_sync_file(..., DEV_LOCK_SYNC_RELEASE)`). A conversion gives up its
    write lock and admits readers. A test lands nothing. A flush a caught note
-   cancelled ends the call with `-T_E_INTR`, the entry put back unspent.
+   cancelled ends a take or a conversion with `-T_E_INTR`, the entry put back
+   unspent; an unlock goes on.
 4. Locks through the owner.
 5. If the owner's fid answers `-T_E_STALE` on the first try, retires the
    entry and asks again once. The entry's file has died: Stratum kills an
@@ -371,13 +373,17 @@ dropped; the Tlock went out with the mark set and, answered before its Tflush, w
 granted while those bytes sat unlanded. Linux's NFS client gives up a set-lock whose
 sync fails (`do_setlk` after `nfs_sync_mapping`). Now `handle_lock_sync_file` stops at
 the cancelled flush and both arms return `-T_E_INTR`, so the restart lands every run.
-Only the lock call stops early: the close paths pass `stop_cancelled = false`.
+Only a take stops early. An unlock goes on, since nothing may refuse it; the
+re-check of a Proc take whose descriptor closed mid-call sends one inside a take's
+call, where a note can cancel a flush. The close paths pass `stop_cancelled = false`.
 
 Leg `filelock.cancelled_flush_ends_call` drives both owners through three opens of one
 file with the fake Dev's release sync failing on the middle one. It checks the EINTR,
 the mark kept, no take sent and no slot spent, and the flushes stopping at that open.
 Its controls are one variable away each: the same EINTR with no mark goes ahead, as
 does the mark with another failure, and a close goes on to the last open and unlocks.
+Two legs hold the unlock: an open-file unlock past a cancelled flush, and the
+re-check's unlock after a mid-call close, whose flush the fake cancels.
 `dev9p.lock_cancelled_flush_says_eintr` now also fsyncs after each leg (round 1 F3).
 The cancelled run is resent with nothing latched, while the server's own EINTR has
 latched and dropped it.
