@@ -140,18 +140,18 @@ after 1500
 key "ret"
 set timeout 30
 set ended 0
-set restored 0
+set rejoined 0
 expect {
     -re {lictor: seat failed: [^\r\n]*[\r\n]} { lc_fail "KEYS-OVERRUN RED: the episode failed after the takeover: $expect_out(0,string)" }
     -re {lictor: kernel closed trusted seat \(scanout [a-z]+\)} {
         lc_fail "KEYS-OVERRUN RED: the episode failed at its deadline: $expect_out(0,string)"
     }
-    -re {corvus: imperium: SAK with nothing pending|lictor: normal scanout restored generation=[0-9]+} {
-        if {[string match corvus* $expect_out(0,string)]} { set ended 1 } else { set restored 1 }
-        if {!($ended && $restored)} { exp_continue }
+    -re {corvus: imperium: SAK with nothing pending|halcyond: seat link rejoined generation=[0-9]+} {
+        if {[string match corvus* $expect_out(0,string)]} { set ended 1 } else { set rejoined 1 }
+        if {!($ended && $rejoined)} { exp_continue }
     }
     -re {EXTINCTION:} { lc_extinction_fail "the end of the episode" }
-    timeout { lc_fail "KEYS-OVERRUN RED: the episode did not return within 30 s (ended=$ended restored=$restored)" }
+    timeout { lc_fail "KEYS-OVERRUN RED: the episode did not return within 30 s (ended=$ended rejoined=$rejoined)" }
     eof { lc_fail "EOF at the end of the episode" }
 }
 after 1500

@@ -46,6 +46,10 @@ pub struct Seat {
     test_release_on_failure: bool,
     #[cfg(feature = "test-mode")]
     test_stall_frame: bool,
+    /// What the frame's shot did. This process says nothing in an open episode
+    /// (`diagnostic`), so it says so afterwards.
+    #[cfg(feature = "test-mode")]
+    test_frame_stalled: Option<bool>,
     /// The generation whose shot is taken: a takeover that starts over after a
     /// stall is the same takeover.
     #[cfg(feature = "test-mode")]
@@ -155,6 +159,13 @@ impl Seat {
         let mut m = ep::Message::default();
         if ep::call(ep::STATUS, &mut m).is_err() { self.fail("status"); return; }
         self.adopt(&m);
+        #[cfg(feature = "test-mode")]
+        if self.phase != 2 {
+            if let Some(stalled) = self.test_frame_stalled.take() {
+                super::diagnostic(&alloc::format!(
+                    "lictor: frame stall shot: stalled={} generation={}\n", stalled as u8, self.generation));
+            }
+        }
         self.quiescence.observe(self.generation, self.phase);
         device.gpu.seat_bound(self.phase != 0);
         let released = inputs.iter().all(|i| i.held.iter().all(|held| !held));
@@ -218,7 +229,9 @@ impl Seat {
                         Ok(model) => model, Err(_) => { self.fail("frame decode"); return; }
                     };
                     #[cfg(feature = "test-mode")]
-                    if core::mem::take(&mut self.test_stall_frame) { device.gpu.test_latch_now(false); }
+                    if core::mem::take(&mut self.test_stall_frame) {
+                        self.test_frame_stalled = Some(device.gpu.test_latch_now(false));
+                    }
                     // The frame stays owed, so the next pass paints it again. Corvus
                     // reads no key until it is visible, and bounds that wait.
                     if screen.paint(&mut device.gpu, &model, m.code as usize, None).is_err() {
