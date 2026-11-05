@@ -58,6 +58,7 @@
 // pre-populate the env with named values for expression eval.
 
 use alloc::collections::BTreeMap;
+use alloc::rc::Rc;
 use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
@@ -95,12 +96,12 @@ pub struct Env {
     scopes: Vec<BTreeMap<String, Value>>,
     /// Function definitions, name -> AST. Per scripture 5.5,
     /// function defs are globally scoped.
-    fns: BTreeMap<String, FnDecl>,
+    fns: BTreeMap<String, Rc<FnDecl>>,
     /// `on note 'name' { body }` handler registry (scripture 9.5 +
     /// 10.7). The body is invoked synchronously at the next main-loop
     /// sync point after the named note arrives -- `deliver_pending_notes`
     /// (U-7c) drains the queue and fires the matching body.
-    note_handlers: BTreeMap<String, Vec<Statement>>,
+    note_handlers: BTreeMap<String, Rc<Vec<Statement>>>,
     /// $status -- exit code of the last command. Initialized to 0
     /// at construction. A `Cell` so a command substitution (the first
     /// side-effecting expression atom -- it spawns a child + captures
@@ -124,6 +125,12 @@ pub struct Env {
     /// $errstr -- last command's error string (rc tradition;
     /// scripture 8.5). Initialized to "".
     errstr: String,
+    /// Writes to `errstr`, and that count when the statement running now began, so an error
+    /// can tell whether the text is its own.
+    errstr_writes: u64,
+    errstr_mark: u64,
+    /// Function calls so far, for the strided interrupt poll.
+    calls: u32,
     /// $cwd -- current working directory. Initialized to "/" until
     /// the first cd or until the caller sets it (ut sets it from the
     /// kernel at startup: `Repl::adopt_kernel_cwd`).
@@ -225,7 +232,7 @@ pub struct Env {
     /// command-substitution frames currently live. Bounded by
     /// `EVAL_MAX_DEPTH` so a runaway recursion (`fn f { f }`, a self-
     /// `source`, an `eval`-bomb, or executed `$($($(...)))` nesting) yields a
-    /// graceful `RecursionLimit` error instead of overflowing the 256 KiB
+    /// graceful `RecursionLimit` error instead of overflowing the
     /// EL0 stack into a guard-page `snare:segv` (scripture 8.1). A `Cell`
     /// because the `&Env` command-substitution path must inc/dec it.
     eval_depth: Cell<u32>,
@@ -258,10 +265,10 @@ fn default_aliases() -> BTreeMap<String, Vec<String>> {
 }
 
 /// Maximum eval-stack recursion depth (function calls / command-substitution
-/// nesting / source / eval). Conservative against the 256 KiB EL0 stack: the
-/// heaviest eval frame (a command-substitution level) burns a few KiB, so 64
-/// nested levels stays well under the stack while sitting far beyond any real
+/// nesting / source / eval). The heaviest eval frame (a command-substitution
+/// level) burns a few KiB, and 64 nested levels sits far beyond any real
 /// script's nesting (the deepest realistic recursion is a handful of levels).
+/// An expression between two levels can be deep, so `crate::stack` also bounds it.
 pub(crate) const EVAL_MAX_DEPTH: u32 = 64;
 
 impl Env {
@@ -277,6 +284,9 @@ impl Env {
             status: Cell::new(0),
             substitutions: Cell::new(0),
             errstr: String::new(),
+            errstr_writes: 0,
+            errstr_mark: 0,
+            calls: 0,
             cwd: "/".to_string(),
             interactive: false,
             stdio_inherit: false,
@@ -309,7 +319,7 @@ impl Env {
     /// `eval_recursion_leave` on every exit path (success and error).
     pub(crate) fn eval_recursion_enter(&self) -> bool {
         let d = self.eval_depth.get();
-        if d >= EVAL_MAX_DEPTH {
+        if d >= EVAL_MAX_DEPTH || crate::stack::exhausted() {
             return true;
         }
         self.eval_depth.set(d + 1);
@@ -362,6 +372,9 @@ impl Env {
         if let Some(v) = self.special_get(name) {
             return v;
         }
+        if let Some(frame) = self.positional_frame(name) {
+            return frame.get(name).cloned().unwrap_or_else(Value::empty);
+        }
         for frame in self.scopes.iter().rev() {
             if let Some(v) = frame.get(name) {
                 return v.clone();
@@ -374,7 +387,19 @@ impl Env {
     /// `get(name).is_empty()` because an explicitly-set empty value
     /// is "defined" in scripture's sense.
     pub fn defined(&self, name: &str) -> bool {
+        if let Some(frame) = self.positional_frame(name) {
+            return frame.contains_key(name);
+        }
         self.scopes.iter().rev().any(|frame| frame.contains_key(name))
+    }
+
+    /// Where a positional is read from: the innermost frame a call bound `*` in. A body given
+    /// fewer arguments than its caller must not read the caller's.
+    fn positional_frame(&self, name: &str) -> Option<&BTreeMap<String, Value>> {
+        if name.is_empty() || !name.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        self.scopes.iter().rev().find(|frame| frame.contains_key("*"))
     }
 
     /// `let name = value` -- create a binding in the TOPMOST frame
@@ -424,12 +449,12 @@ impl Env {
 
     /// Register a function definition. Scripture 5.5 -- globally
     /// scoped, overwrites any prior definition with the same name.
-    pub fn fn_set(&mut self, decl: FnDecl) {
+    pub fn fn_set(&mut self, decl: Rc<FnDecl>) {
         self.fns.insert(decl.name.clone(), decl);
     }
 
     /// Look up a function definition by name.
-    pub fn fn_get(&self, name: &str) -> Option<&FnDecl> {
+    pub fn fn_get(&self, name: &str) -> Option<&Rc<FnDecl>> {
         self.fns.get(name)
     }
 
@@ -453,12 +478,12 @@ impl Env {
     /// Register a `on note 'name' { body }` handler. Last registration
     /// wins (rc convention). At U-6b only registration is wired;
     /// runtime delivery wires at U-7.
-    pub fn note_handler_set<S: Into<String>>(&mut self, name: S, body: Vec<Statement>) {
+    pub fn note_handler_set<S: Into<String>>(&mut self, name: S, body: Rc<Vec<Statement>>) {
         self.note_handlers.insert(name.into(), body);
     }
 
     /// Look up a handler by note name.
-    pub fn note_handler_get(&self, name: &str) -> Option<&Vec<Statement>> {
+    pub fn note_handler_get(&self, name: &str) -> Option<&Rc<Vec<Statement>>> {
         self.note_handlers.get(name)
     }
 
@@ -565,6 +590,21 @@ impl Env {
 
     pub fn errstr_set<S: Into<String>>(&mut self, s: S) {
         self.errstr = s.into();
+        self.errstr_writes += 1;
+    }
+
+    pub fn errstr_mark(&mut self) {
+        self.errstr_mark = self.errstr_writes;
+    }
+
+    /// Whether `errstr` was written since the last mark.
+    pub fn errstr_is_fresh(&self) -> bool {
+        self.errstr_writes != self.errstr_mark
+    }
+
+    pub(crate) fn count_call(&mut self) -> u32 {
+        self.calls = self.calls.wrapping_add(1);
+        self.calls
     }
 
     pub fn cwd(&self) -> &str {

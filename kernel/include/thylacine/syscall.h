@@ -3026,12 +3026,12 @@ _Static_assert(__builtin_offsetof(struct t_pci_info, shm)         == 208, "t_pci
 // the human hits Ctrl-C on /dev/cons. This is console-*owner* ("who receives
 // Ctrl-C"), strictly DISTINCT from console-*attach* (PROC_FLAG_CONSOLE_ATTACHED
 // / SPAWN_PERM_CONSOLE_TRUSTED, the SAK + hostowner-elevation gate, I-27): the
-// owner bit NEVER confers attach, so I-27 is untouched. Gated like
-// MAY_POST_SERVICE (a console-attached granter OR a Proc that already holds
-// MAY_POST_SERVICE), so trusted /sbin/login -- holding MAY_POST_SERVICE from
-// joey -- confers it on the session shell `ut`. NOT a cap (rfork does not
-// propagate it); the child becomes the owner but, lacking MAY_POST_SERVICE,
-// cannot itself re-designate the owner.
+// owner bit NEVER confers attach, so I-27 is untouched. Gated to a
+// console-attached granter OR the session factory (PROC_FLAG_SESSION_REGISTRY),
+// so trusted /sbin/login -- holding that role from joey -- confers it on the
+// session shell `ut`, and no other service poster can. NOT a cap (rfork does not
+// propagate it); the child becomes the owner but, lacking the role, cannot
+// itself re-designate the owner.
 #define SPAWN_PERM_CONSOLE_OWNER     (1u << 2)
 // SPAWN_PERM_CONSOLE_RENDERER (G-4; TAPESTRY.md section 18.12 R2-F6) records
 // the spawned child as the bound console RENDERER (g_console_renderer) -- the

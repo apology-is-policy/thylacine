@@ -355,8 +355,8 @@ static inline long t_torpor_wake(unsigned int *addr_va, unsigned int count) {
 #define T_SPAWN_PERM_CONSOLE_TRUSTED   (1u << 1)
 // T_SPAWN_PERM_CONSOLE_OWNER (LS-5) records the spawned child as the console
 // OWNER -- the Proc that receives the `interrupt` note on Ctrl-C. Distinct from
-// CONSOLE_TRUSTED (it never confers console-attach, I-27); gated like
-// MAY_POST_SERVICE so trusted /sbin/login confers it on the session shell.
+// CONSOLE_TRUSTED (it never confers console-attach, I-27); gated to the session
+// factory, so trusted /sbin/login confers it on the session shell.
 #define T_SPAWN_PERM_CONSOLE_OWNER     (1u << 2)
 // T_SPAWN_PERM_CONSOLE_RENDERER (G-4) records the spawned child as the bound
 // console RENDERER (Aurora) -- the single Proc allowed to open the

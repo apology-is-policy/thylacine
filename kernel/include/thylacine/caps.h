@@ -267,7 +267,7 @@ typedef u64 caps_t;
 //     set), so cover admits every program in every tile.
 //   - login's session shell (main.rs:1341), CONSOLE_OWNER | SESSION_HANGUP -- **NO,
 //     deliberately UNSEALED.** Neither bit is onward-conferrable by `ut` (conferring
-//     CONSOLE_OWNER requires MAY_POST_SERVICE, which `ut` does not hold), and a
+//     CONSOLE_OWNER takes the session factory's role, which `ut` does not hold), and a
 //     same-principal peer can ALREADY end the session by killing `ut`, since I-26's
 //     owner axis is unconditional. Sealing it would make the user's own shell
 //     undebuggable and buy no authority. What a puppeteer would actually gain there is

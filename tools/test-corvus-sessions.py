@@ -3,7 +3,7 @@
 from pathlib import Path
 import re, subprocess, tempfile
 root = Path(__file__).resolve().parent.parent
-main = (root/'usr/corvus/src/main.rs').read_text()
+main = (root/'usr/corvus/src/lib.rs').read_text()
 crypto = (root/'usr/lib/corvus-crypto/src/lib.rs').read_text()
 constants = ''
 for name in ('MAX_CONNS', 'MAX_USER_LEN', 'TOKEN_LEN'):

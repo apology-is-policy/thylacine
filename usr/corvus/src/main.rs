@@ -97,6 +97,7 @@ extern crate alloc;
 // + the DEK envelope + the BIP-39 codec + the recovery/passphrase wraps) lives
 // in the shared corvus-crypto lib (A-5c-b) so the host corvus-mint and corvus
 // produce byte-identical wraps. corvus supplies the RNG (ThylaRng) + the heap.
+use corvus::{sessions, MAX_CONNS, MAX_USER_LEN, TOKEN_LEN};
 use corvus_crypto::*;
 
 // 9P2000.L server-side codec. Lifted from corvus's private `p9` module
@@ -1892,10 +1893,8 @@ const STATUS_INTERNAL_ERROR: u8 = 6;
 const STATUS_TIMEOUT: u8 = 7;
 const STATUS_BUSY: u8 = 8;
 
-const TOKEN_LEN: usize = 33;
 const TOKEN_ENTROPY_BYTES: usize = 16;
 
-const MAX_USER_LEN: usize = 32;
 const MAX_PASS_LEN: usize = 256;
 
 const MAX_DATASET_LEN: usize = 64;
@@ -1937,7 +1936,6 @@ const MAX_RESPONSE_FRAME: usize = RESP_HDR_LEN + ENVELOPE_LEN;
 
 // D7: separate immutable AUTH records, bounded by the existing connection
 // limit. The server loop is single-threaded; no selected-session global exists.
-mod sessions;
 static mut SESSIONS: sessions::Sessions = sessions::Sessions::new();
 
 unsafe fn session_token_matches(token: &[u8]) -> bool {
@@ -5212,8 +5210,6 @@ unsafe fn service_conn(conn: &mut Conn) -> Result<bool, ()> {
 // =============================================================================
 // Server loop.
 // =============================================================================
-
-const MAX_CONNS: usize = 8;
 
 // The poll set is [listener, the notes fd] + per-conn.
 const POLL_FIXED: usize = 2;

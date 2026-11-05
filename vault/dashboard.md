@@ -126,11 +126,11 @@ Generated — do not edit between the markers (`quaestor render`).
 ## Recent changes
 
 - 2026-11-05 [[chg-2026-11-05-as4-r6-join]] — AS-4 audit round 6, the join's half
+- 2026-11-05 [[chg-2026-11-05-as4-r6-shell]] — AS-4 audit round 6, the shell's half
 - 2026-11-05 [[chg-2026-11-05-as4-r7-join]] — AS-4 audit round 7, the join's half
+- 2026-11-05 [[chg-2026-11-05-as4-r7-shell-corrected]] — AS-4 round 7's shell chg, corrected
+- 2026-11-05 [[chg-2026-11-05-as4-r7-shell]] — AS-4 audit round 7, the shell's half
 - 2026-11-05 [[chg-2026-11-05-input-ring-overrun]] — A release the input ring dropped no longer parks the seat
 - 2026-11-05 [[chg-2026-11-05-seat-takeover-stall]] — A takeover that meets a stall starts over; no wide wait in an episode; the cursor lane comes back
 - 2026-11-05 [[chg-2026-11-05-seat-takeover-witness]] — Vote 50 round 2: the takeover's stall says so, a client that survives its own load, a witness for each arm
-- 2026-11-05 [[chg-2026-11-05-vote50-r3]] — Vote 50 round 3: the drop test past the publish, a frame's witness, keys at a trusted screen
-- 2026-11-04 [[chg-2026-11-04-as4-r4]] — AS-4 audit round 4: the paste flow's waits arm, and Alt reaches a tile
-- 2026-11-04 [[chg-2026-11-04-as4-r5]] — AS-4 audit round 5, the join's half: Alt only on a printable rune
 <!-- generated:end -->

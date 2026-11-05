@@ -96,6 +96,18 @@ lc_send "echo holo-loop | tr a-z A-Z"
 lc_expect "HOLO-LOOP" "runaway pure-eval loop interrupted by Ctrl-C (RW-9 R2-F3)"
 lc_pass "LS-5(D): a runaway shell-eval loop dies on Ctrl-C"
 
+# (E) The same with no loop to poll from. Recursion through `try` runs for an
+# exponential time, because each failure at the depth limit retries in `catch`.
+# Only the poll at a function call reads the queued `interrupt`.
+lc_send "fn burn { try { burn } catch { burn } }"
+lc_send "burn"
+sleep 3
+lc_ctrlc
+sleep 1
+lc_send "echo holo-recur | tr a-z A-Z"
+lc_expect "HOLO-RECUR" "recursion through try interrupted by Ctrl-C"
+lc_pass "LS-5(E): recursion through try dies on Ctrl-C"
+
 lc_quit
-lc_pass "LS-CI ls-5: fresh-prompt(F1+R3-F1) + blocked(LS-5c) + flooding(LS-5b/c) + runaway-loop(R2-F3) all verified"
+lc_pass "LS-CI ls-5: fresh-prompt(F1+R3-F1) + blocked(LS-5c) + flooding(LS-5b/c) + runaway-loop(R2-F3) + recursion-through-try all verified"
 exit 0

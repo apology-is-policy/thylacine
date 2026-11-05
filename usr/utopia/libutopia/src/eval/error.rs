@@ -78,9 +78,11 @@ pub enum EvalErrorKind {
     Internal(&'static str),
     /// Eval-stack recursion exceeded `EVAL_MAX_DEPTH` (function calls,
     /// command-substitution nesting, source/eval). A graceful error per
-    /// scripture 8.1 instead of a 256 KiB EL0 stack overflow -> snare:segv
+    /// scripture 8.1 instead of an EL0 stack overflow -> snare:segv
     /// -> shell death (`fn f { f }`, a self-`source`, an `eval`-bomb).
     RecursionLimit,
+    /// A `^` whose cross product passes `expr::CROSS_PRODUCT_MAX_BYTES`.
+    ListTooLong,
 }
 
 pub type EvalResult<T> = Result<T, EvalError>;
@@ -111,6 +113,7 @@ impl fmt::Display for EvalErrorKind {
             }
             EvalErrorKind::Internal(msg) => write!(f, "internal evaluator error: {}", msg),
             EvalErrorKind::RecursionLimit => f.write_str("recursion limit exceeded"),
+            EvalErrorKind::ListTooLong => f.write_str("concatenation builds too long a list"),
         }
     }
 }

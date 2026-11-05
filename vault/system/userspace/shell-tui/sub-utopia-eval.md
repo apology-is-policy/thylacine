@@ -28,7 +28,7 @@ abis: []
 design:
   - "docs/UTOPIA-SHELL-DESIGN.md sections 5-10"
 created: 2026-08-03
-updated: 2026-10-29
+updated: 2026-11-04
 ---
 ## October 1 spawn and foreground recheck
 
@@ -428,7 +428,7 @@ their glob metas: a quoted `'*'` in a `case` arm is still a wildcard (Caveats).
 
 ### The recursion bound is ONE counter with two entry points
 
-`EVAL_MAX_DEPTH` (64) bounds the eval stack the way the parser's three counters
+`EVAL_MAX_DEPTH` (64) bounds the eval stack the way the parser's counters
 bound the parse stack — but here a single counter is the deliberate choice, and
 the reason is written at both charge sites: *"Shares Env's eval-depth counter
 with eval_block so the bound holds across mixed function/source/subst nesting."*
@@ -436,6 +436,19 @@ A shell mixes its recursion shapes in one expression (`fn f { echo $(f) }`
 recurses through a function call, a substitution and a block on each turn), so
 per-shape counters would each stay under their own bound while the stack
 overflowed anyway. See Prosecution for what that buys and what it costs.
+
+What the counter cannot see is the expression between two levels. The parser allows one
+60 groups of 250 operators deep, and evaluating it takes 6575 KiB in the measured host
+build, against 8 MiB. So `eval_expr`, `eval_statement` and the counter's own entry also
+ask `crate::stack` ([[sub-utopia-parser]] has the check) and answer `RecursionLimit`.
+`eval_statement` needs its own because a case arm's statement reaches it again with no
+block in between. A glob's walk is a worklist since the same day: a long pattern over a
+deep tree costs heap, and no open directory waits on a descent.
+A function's body and a note handler are `Rc`s shared with the tree, since copying one
+recurses with no check at all. A positional reads only the innermost frame a call bound `*`
+in, so a body given fewer arguments than its caller reads empty, not the caller's. A `^`
+stops at 64 MiB of product with `ListTooLong`: running out of memory ends whoever touches the
+next page.
 
 ## Data structures
 
@@ -508,7 +521,9 @@ recursion is a message and a prompt rather than a dead shell.
 Not a measured surface. One deliberate cost control: the loop interrupt poll is
 strided (every 128 iterations) so a hot pure-eval loop does not pay a `try_read`
 syscall per turn, bounding Ctrl-C latency to a handful of iterations instead of
-one.
+one. A function call polls on the same stride, because a body recursing through `try` takes exponential time with no loop in it.
+
+`Env` marks the count of writes to `$errstr` as each statement begins. The REPL prints `$errstr` only if it was written since that mark, so an error that wrote nothing prints its own kind and not an earlier statement's text.
 
 ## Prosecution
 
@@ -580,6 +595,13 @@ one.
   `docs/UT-NORA-ERGONOMICS.md`.
 
 ## Caveats
+
+- **The `backend` half's tests run (2026-11-04).** `expr`, `stmt`, `env` and `repl` hold
+  69 tests that no machine had compiled. They run in `tools/test-rust.sh`'s `host-test`
+  pass, against libthyla-rs's ENOSYS stubs, so a pass there means the test took no real
+  syscall. Three failed on their first run, and each stood for documented syntax that did
+  not parse ([[sub-utopia-parser]]). The evaluator gained rc's `~`, any element against any
+  pattern, and an index in a command word.
 
 - **OPEN, the operator's vote (2026-09-23): a QUOTED glob meta in a `case` arm
   or a `matches` is still a wildcard.** `case $x { '*' => ... }` matches every

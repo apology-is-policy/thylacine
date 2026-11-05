@@ -319,9 +319,8 @@ Two doors to one gate is a smell worth naming rather than hiding, but it mirrors
 a pairing already in the tree: `PROC_FLAG_CONSOLE_ATTACHED` (a stamped role) and
 `CAP_HOSTOWNER` (an elevated authority) coexist for the same reason. Retiring
 the flag in favour of the cap was the rejected alternative: it would touch
-joey's spawn of corvus/ptyfs, login's home proxy and its one-hop delegation, and
-the `CONSOLE_OWNER` gate that keys off the flag — a wide blast radius on a
-security-critical path for a tidiness win.
+joey's spawn of corvus/ptyfs and login's home proxy and its one-hop delegation —
+a wide blast radius on a security-critical path for a tidiness win.
 
 **THE SLOT BOUND SHIPS WITH THE CAPABILITY, and a corrected fact is why.** I
 argued (yip 0086 turn 3) that a name-allowlist was unnecessary because

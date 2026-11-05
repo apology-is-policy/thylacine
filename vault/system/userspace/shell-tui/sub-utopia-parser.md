@@ -2,7 +2,7 @@
 id: sub-utopia-parser
 type: sub
 parent: moc-userspace-shell-tui
-title: "The ut parser — an rc-shape grammar, three recursion bounds, and the tests that could not compile until they found six defects"
+title: "The ut parser — an rc-shape grammar, recursion bounds that multiply, and the tests that could not compile until they found six defects"
 code:
   - usr/utopia/libutopia/src/parser/mod.rs
   - usr/utopia/libutopia/src/parser/lexer.rs
@@ -12,6 +12,7 @@ code:
   - usr/utopia/libutopia/src/parser/ast.rs
   - usr/utopia/libutopia/src/parser/error.rs
   - usr/utopia/libutopia/src/parser/span.rs
+  - usr/utopia/libutopia/src/stack.rs
 audit: none
 guarded-by: []
 validated-by: [prose, gate-interactive]
@@ -21,7 +22,7 @@ abis: []
 design:
   - "docs/UTOPIA-SHELL-DESIGN.md sections 5-9"
 created: 2026-08-03
-updated: 2026-09-23
+updated: 2026-11-04
 ---
 ## Purpose
 
@@ -99,10 +100,15 @@ escape at three positions, doubled and trailing backslashes, a continuation,
 multi-byte characters -- so no value changed, and only globs and patterns see the
 difference. The matcher's half is [[sub-utopia-eval]].
 
-Two pieces of state make the scanner not quite context-free, both queued rather
-than backtracked: heredoc bodies are collected at the *next newline* after the
-tag that requested them, drained first-in-first-out; and a regex literal is
-recognized only through a one-shot flag set when the match operator is emitted.
+Three pieces of state make the scanner not quite context-free. Heredoc bodies are
+collected at the *next newline* after the tag that requested them, drained
+first-in-first-out. A regex literal is recognized only through a one-shot flag set
+when the match operator is emitted. And the scanner keeps a stack of the parentheses
+still open, each `(` or `((`: a closer belongs to its opener, so `)))` closing `((`
+and `(` is `)` then `))`, `))` closing two `(` is two `)`, and no depth count in the
+parser ever sees one token closing two things. Inside an open `((`, `<<` is the shift,
+`<(` and `>(` are a comparison before a group, and `((` is two groups, since arithmetic
+has no command for it to open: `((((1 + 2) * 3) + 4))` needs that.
 
 ### UTF-8 correctness is structural, not checked
 
@@ -121,20 +127,21 @@ That keeps the outer grammar simple, and it has one consequence that returns in
 Caveats: **the sub-script's spans are offsets into the body, not into the
 line.**
 
-### The one real hazard is stack depth, and it has three shapes
+### The one real hazard is stack depth, and it has four shapes
 
 A recursive-descent parser in a `no_std` program has no stack guard of its own;
 overflowing the EL0 stack is a guard-page fault, which terminates the shell.
-Three separate bounds exist because the recursion has three shapes and **no
+Separate bounds exist because the recursion has four shapes and **no
 single counter sees all of them**:
 
 | bound | value | what it catches | why the others miss it |
 |---|---:|---|---|
 | bracket nesting | 64 | `(((…`, `{{{…` | a flat pre-pass over the token stream, run before any recursion starts |
+| statement nesting | 64 | `if (a) if (b) …` | a condition's brackets have closed before its body starts, so the pre-pass sees nothing; counted in `parse_statement`, with a brace level drawing on the same count |
 | operator recursion | 256 | `a**b**c**…`, `!!!!…` | right-associative and prefix chains are not brackets, so the pre-pass counts nothing |
 | re-lex depth | 32 | `$($($(…)))` | a whole substitution is *one token* in the outer stream, so the pre-pass sees depth 1 |
 
-The middle row is the interesting one, because it was added after the fact: the
+The operator row is the interesting one, because it was added after the fact: the
 bracket pre-pass shipped first, and an audit round found that a chain of
 exponentiation operators recurses with no bracket to count. The comment
 introducing the fix names that history rather than just the constant.
@@ -145,6 +152,54 @@ overlap. The re-lex counter is a process-global atomic, justified by the shell
 parsing one line at a time and argued to fail safe under a hypothetical
 concurrent parse (it would trip earlier, never later), and it is decremented on
 both the success and error paths so a top-level parse always restores it.
+
+### The bounds multiply, so the stack is asked too (2026-11-04)
+
+Each row above is one parser's count, and the rows compose: a group starts a new
+expression parser with a new operator count, and a substitution starts a new token
+stream with a new bracket count. Measured on a host build at the guest's opt-level, 60
+groups of 250 prefix operators take 3.35 MiB to parse, so two substitutions, each inside
+every bound, took 10047 KiB against exec's 8 MiB stack, on a 90 KB line. (The comments
+that said "well under the 256 KiB EL0 stack" had been stale since B-1b raised it to
+8 MiB, and were never checked against a product.)
+
+`stack::exhausted` compares the current address with `AT_STACK_BASE`, read by
+libthyla-rs from the auxv, plus a 1 MiB reserve, and answers before a level starts. It
+sits in `parse_statement`, `parse_expr_tokens` and `parse_unary` (every level of a `**`
+chain passes through the last), and those cut every cycle of the parser's recursion: a
+census by name over the call graph reports what remains as name collisions and pairs
+bounded by construction. Each check has a line that only it stops. Only an
+address can read a frame's real size, which belongs to the compiler. A stack it does not
+know, such as a peer thread's, reads as not exhausted; the counts above still hold there.
+The refusal is the same `RecursionLimit`. `u-6-test`'s flow 10 is the witness at boot, on
+the real auxv and the real frames, and a missing check there ends the probe at the guard
+page and joey fails the boot.
+
+### A tree outlives its parse, so what walks it has to fit too
+
+The check bounds the stack the parser uses, and the compiler writes two more recursions
+over the same tree, neither of them in the source for a census to find. Both crashed at
+8 MiB on a line the parser had accepted (measured on a host build at the guest's
+opt-level, 2026-11-05):
+
+- **Clone** took more stack than the parse: 14 MiB for a tree parsed within 8. Declaring a
+  function copied its body, and so did calling it, so a 48 KB `fn` overflowed the moment it
+  was declared. No AST type is `Clone` now. A function and a note handler are `Rc`s shared
+  with the tree, and a command word's folded `VarAt` token holds an `Rc` of its index,
+  since tokens are cloned.
+- **Drop** costs about 32 bytes a level, and `1 + 1 + ...` costs the parser none, so its depth
+  is the line's length and not the stack's. Per-parser counts could not bound that:
+  a group starts a new parser, and ten substitutions of 60 groups of 250 operators overflowed
+  on drop. `Operand`, the child of `BinOp`, `UnOp` and `Match`, drops with a worklist.
+  A level of any other kind needs a bracket or a re-lex.
+
+What a drop still recurses over is bounded by brackets, statements and re-lexes. A tree parsed
+at some depth drops there on less stack than its parse took. A function's old body was parsed
+elsewhere, and a statement can reach the reserve through nested calls and case arms, so that
+drop can run in the reserve itself. The reserve is 1 MiB, and the largest frame in the guest's
+`ut` is 4144 bytes. Flow 11 in `u-6-test` asks for more than a drop needs, and drops
+large trees where the check first fires, on the guest's frames, for which a debug build's
+several times larger frames cannot stand in.
 
 ## Data structures
 
@@ -157,6 +212,9 @@ both the success and error paths so a top-level parse always restores it.
 - **`DqPart`** — the pieces of an interpolated string, so a double-quoted run
   keeps its literal and substituted segments distinct instead of being
   re-scanned later.
+- **`&` ends its statement,** as `;` does. `parse_pipeline` takes it as the suffix, and
+  all three statement lists accept a statement that ended in it with nothing after, so
+  `a & b &` is two background statements.
 - **The AST** — a `Script` of `Statement`s; a statement is a pipeline, a
   short-circuit AND-OR list (`p && q || r`, scripture 8.6 — a `first` pipeline
   plus a `Vec<(AndOrOp, Pipeline)>`, built only when a connector is present so a
@@ -215,11 +273,23 @@ Nothing here is on a hot path — it runs once per line typed.
 
 ## Prosecution
 
-- **A new nesting construct must reach one of the three bounds.** Add a grammar
+- **A new nesting construct must reach one of the bounds.** Add a grammar
   form that recurses and ask which counter sees it: does it pass through a
   counted bracket, is it an operator chain that needs the depth field, or is it
-  a re-entrant parse that needs the re-lex counter? The second bound exists
-  because that question was once answered wrong.
+  a re-entrant parse that needs the re-lex counter? The operator bound exists
+  because that question was once answered wrong, and the statement bound because
+  it was answered wrong again, by the braceless `if`.
+- **A statement that wants its next line says so with `UnexpectedEof`.** The line editor's
+  Enter continues on it, so `if (c)` then Enter waits. Without that, the second line of
+  `if ($ok)` / `rm x` ran unguarded after the first line's parse error. A connector at the end
+  of the input says the same, and an unterminated heredoc reads the same to the editor.
+  Inside a closed group or a substitution the same shortfall is `UnexpectedEndOfExpr`, which
+  submits and reports: `(( 1 + ))` can wait for no line.
+- **A new cycle must pass a stack check.** A bound keeps one shape reasonable, and only
+  the check holds the product.
+- **A tree is walked by code nobody wrote.** A census by name cannot see `Drop` or a derived
+  `Clone`. A new child that costs the parser no stack belongs in an `Operand`, and a type
+  in the tree stays out of `Clone`.
 - **A new bracket-like token pair must join the pre-pass's match arms**, or the
   pre-pass silently stops being complete.
 - **A new advance must move by a whole character**, or use the length helper.
@@ -243,6 +313,17 @@ Nothing here is on a hot path — it runs once per line typed.
   surface than most shells offer, and correspondingly more to keep working.
 
 ## Caveats
+
+- **FIXED 2026-11-04: the shell's documented forms that did not parse.** The stranded
+  evaluator tests, once they ran, failed on `in (a b)` and `1 << 4`, and a census of
+  every example in UTOPIA-SHELL-DESIGN found the rest: `((1 << 4))` and `((16 >> 2))`
+  (6.13; the parser's shift level was a pass-through), `if ($v in (a b))` (7.3; the
+  right side took one value and `))` closed both), `((1 + (2 * 3)))`, `((((1 + 2) * 3) + 4))`, `if (c) cmd`
+  with no braces (7.3 and 7.4, as in rc), `echo $f(1)` and `echo $f(2 3)` in a command
+  word (6.3 and 6.9; folded into a `VarAt` token), `~ $v pat...` (7.4), and a reserved
+  word as a value (`x = on`, `(in out)`, `$x == if`). A census covers syntax only. The
+  census's own script is not kept, because the doc holds trees and placeholders it
+  cannot tell from code.
 
 - **FIXED 2026-09-23: a backslash-escaped glob character no longer globs.**
   `scan_word` turned `\*` into a bare `*` inside `Word(text)`, so eval could not
@@ -304,8 +385,8 @@ Nothing here is on a hot path — it runs once per line typed.
   could break the REPL's line-continuation is FALSE: `line_editor` decides
   submission with its own `balance(buffer)` tracker (*"intentionally
   lightweight; the U-5 parser is authoritative"*), and nothing outside
-  `parser/` consumes `UnexpectedEof` at all. Its blast radius is the diagnostic
-  a truncated script file prints.
+  `parser/` consumed `UnexpectedEof` at all. Its blast radius was the diagnostic
+  a truncated script file prints. Since 2026-11-04 the editor does read it.
 
 - **Running out of input says so** (UT-PARSE-4, fixed 2026-09-22).
   `expect_kind`'s `UnexpectedEof` arm keyed on `peek_kind() == None` and was
@@ -357,7 +438,11 @@ Nothing here is on a hot path — it runs once per line typed.
   a backtick after it OPENS THE NEXT substitution -- which is also why both
   forms are not accepted: `` `{a}`{b} `` would be ambiguous.
 
-- **`))` is split at the parse site, not lexed in context** (UT-PARSE-3, fixed
+- **SUPERSEDED 2026-11-04: closers now follow their openers in the lexer.** The
+  parse-site split below fixed subshells only, and fourteen depth counts in the
+  expression and statement parsers kept the bug: `if ($v in (a b))` and
+  `((1 + (2 * 3)))` did not parse. `split_double_rparen` is gone. The record:
+  **`))` is split at the parse site, not lexed in context** (UT-PARSE-3, fixed
   2026-09-22). The lexer is context-free and emits `DoubleRParen` for any `))`,
   which is right for `$(( ))` and wrong for `(a; (b; c))`, where two subshells
   close with nothing between them. `Parser::split_double_rparen` rewrites that

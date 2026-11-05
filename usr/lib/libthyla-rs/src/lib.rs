@@ -25,7 +25,41 @@
 
 #![no_std]
 
-use core::arch::{asm, global_asm};
+#[cfg(all(feature = "host-test", target_os = "none"))]
+compile_error!("host-test answers every syscall with ENOSYS; it is for a development machine");
+
+// The syscall instruction. `host-test` builds a crate's tests for a development machine,
+// where `svc` would be that machine's own syscall, so there every call answers ENOSYS and
+// a call that cannot return stops the test.
+#[cfg(not(feature = "host-test"))]
+macro_rules! svc {
+    () => {
+        "svc #0"
+    };
+}
+#[cfg(not(feature = "host-test"))]
+macro_rules! svc_noreturn {
+    () => {
+        "svc #0"
+    };
+}
+#[cfg(feature = "host-test")]
+macro_rules! svc {
+    () => {
+        "mov x0, #-38"
+    };
+}
+#[cfg(feature = "host-test")]
+macro_rules! svc_noreturn {
+    () => {
+        "brk #1"
+    };
+}
+
+use core::arch::asm;
+#[cfg(not(feature = "host-test"))]
+use core::arch::global_asm;
+#[cfg(not(feature = "host-test"))]
 use core::panic::PanicInfo;
 
 // =============================================================================
@@ -323,7 +357,7 @@ pub const T_SYS_SET_NONBLOCK: u64 = 123;
 /// readiness; a successful write can be short. No authority is added.
 pub unsafe fn t_set_nonblock(fd: i64, on: bool) -> i64 {
     let mut result = fd;
-    asm!("svc #0", inlateout("x0") result, in("x1") on as u64,
+    asm!(svc!(), inlateout("x0") result, in("x1") on as u64,
          in("x8") T_SYS_SET_NONBLOCK, options(nostack));
     result
 }
@@ -732,7 +766,7 @@ pub const T_SPAWN_PERM_MAY_POST_SERVICE: u64 = 1 << 0;
 pub const T_SPAWN_PERM_CONSOLE_TRUSTED: u64 = 1 << 1;
 // LS-5: records the spawned child as the console OWNER -- the Proc that receives
 // the `interrupt` note on Ctrl-C. Distinct from CONSOLE_TRUSTED (never confers
-// console-attach, I-27); gated like MAY_POST_SERVICE, so trusted /sbin/login
+// console-attach, I-27); gated on the session factory's role, so trusted /sbin/login
 // confers it on the session shell `ut`.
 pub const T_SPAWN_PERM_CONSOLE_OWNER: u64 = 1 << 2;
 // arm-6 (IDENTITY-DESIGN §9.9.1): make the child a NEW session leader + arm the
@@ -938,7 +972,7 @@ pub const T_PROT_EXEC: u32  = 1 << 2;
 #[inline(always)]
 pub unsafe fn t_exits(status: i64) -> ! {
     asm!(
-        "svc #0",
+        svc_noreturn!(),
         in("x0") status,
         in("x8") T_SYS_EXITS,
         options(noreturn, nostack)
@@ -955,7 +989,7 @@ pub unsafe fn t_exits(status: i64) -> ! {
 #[inline(always)]
 pub unsafe fn t_exit_group(status: i64) -> ! {
     asm!(
-        "svc #0",
+        svc_noreturn!(),
         in("x0") status,
         in("x8") T_SYS_EXIT_GROUP,
         options(noreturn, nostack)
@@ -972,7 +1006,7 @@ pub unsafe fn t_exit_group(status: i64) -> ! {
 pub unsafe fn t_puts(buf: *const u8, len: usize) -> i64 {
     let mut x0: i64 = buf as i64;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x1") len as u64,
         in("x8") T_SYS_PUTS,
@@ -1001,7 +1035,7 @@ pub fn t_putstr(s: &str) -> i64 {
 pub unsafe fn t_mmio_create(pa: u64, size: u64, rights: u32) -> i64 {
     let mut x0: i64 = pa as i64;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x1") size,
         in("x2") rights as u64,
@@ -1022,7 +1056,7 @@ pub unsafe fn t_mmio_create(pa: u64, size: u64, rights: u32) -> i64 {
 pub unsafe fn t_mmio_map(handle: i64, vaddr: u64, prot: u32) -> i64 {
     let mut x0: i64 = handle;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x1") vaddr,
         in("x2") prot as u64,
@@ -1158,7 +1192,7 @@ const _: () = assert!(core::mem::size_of::<TPciIrqInfo>() == 48);
 // Private register shaper shared by the named PCI endpoint wrappers.
 unsafe fn pci_irq_call(nr: u64, h: i64, a1: u64, a2: u64) -> i64 {
     let mut x0 = h;
-    asm!("svc #0", inlateout("x0") x0, in("x1") a1, in("x2") a2,
+    asm!(svc!(), inlateout("x0") x0, in("x1") a1, in("x2") a2,
         in("x8") nr, options(nostack));
     x0
 }
@@ -1195,7 +1229,7 @@ pub const T_PCI_WINDOW_MAX: usize = 8;
 /// `out` must address `capacity` writable records.
 pub unsafe fn t_pci_windows(h: i64, out: *mut TPciWindow, capacity: u64) -> i64 {
     let mut x0 = h;
-    asm!("svc #0", inlateout("x0") x0, in("x1") out, in("x2") capacity,
+    asm!(svc!(), inlateout("x0") x0, in("x1") out, in("x2") capacity,
         in("x8") T_SYS_PCI_WINDOWS, options(nostack));
     x0
 }
@@ -1206,7 +1240,7 @@ pub unsafe fn t_pci_windows(h: i64, out: *mut TPciWindow, capacity: u64) -> i64 
 pub unsafe fn t_pci_map_window(h: i64, va: u64, bar: u64, prot: u32,
                                offset: u64, length: u64) -> i64 {
     let mut x0 = h;
-    asm!("svc #0", inlateout("x0") x0, in("x1") va, in("x2") bar,
+    asm!(svc!(), inlateout("x0") x0, in("x1") va, in("x2") bar,
         in("x3") prot as u64, in("x4") offset, in("x5") length,
         in("x8") T_SYS_PCI_MAP_WINDOW, options(nostack));
     x0
@@ -1226,7 +1260,7 @@ pub unsafe fn t_pci_map_window(h: i64, va: u64, bar: u64, prot: u32,
 pub unsafe fn t_pci_claim(virtio_device_id: u64) -> i64 {
     let mut x0: i64 = virtio_device_id as i64;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x8") T_SYS_PCI_CLAIM,
         options(nostack)
@@ -1244,7 +1278,7 @@ pub unsafe fn t_pci_claim(virtio_device_id: u64) -> i64 {
 pub unsafe fn t_pci_map_bar(handle: i64, vaddr: u64, bar_index: u64, prot: u32) -> i64 {
     let mut x0: i64 = handle;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x1") vaddr,
         in("x2") bar_index,
@@ -1274,7 +1308,7 @@ pub unsafe fn t_burrow_from_hostmem(
 ) -> i64 {
     let mut x0: i64 = handle;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x1") shmid,
         in("x2") offset,
@@ -1301,7 +1335,7 @@ pub unsafe fn t_burrow_from_hostmem(
 pub unsafe fn t_hostmem_refcount(va: u64, len: u64) -> i64 {
     let mut x0: i64 = va as i64;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x1") len,
         in("x8") T_SYS_HOSTMEM_REFCOUNT,
@@ -1319,7 +1353,7 @@ pub unsafe fn t_hostmem_refcount(va: u64, len: u64) -> i64 {
 pub unsafe fn t_pci_info(handle: i64, out: *mut TPciInfo) -> i64 {
     let mut x0: i64 = handle;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x1") out as u64,
         in("x8") T_SYS_PCI_INFO,
@@ -1337,7 +1371,7 @@ pub unsafe fn t_pci_info(handle: i64, out: *mut TPciInfo) -> i64 {
 pub unsafe fn t_irq_create(intid: u32, rights: u32) -> i64 {
     let mut x0: i64 = intid as i64;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x1") rights as u64,
         in("x8") T_SYS_IRQ_CREATE,
@@ -1362,7 +1396,7 @@ pub unsafe fn t_irq_create(intid: u32, rights: u32) -> i64 {
 pub unsafe fn t_irq_wait(handle: i64) -> i64 {
     let mut x0: i64 = handle;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x1") 0u64,
         in("x8") T_SYS_IRQ_WAIT,
@@ -1381,7 +1415,7 @@ pub unsafe fn t_irq_wait(handle: i64) -> i64 {
 pub unsafe fn t_irq_wait_timeout(handle: i64, timeout_ns: u64) -> i64 {
     let mut x0: i64 = handle;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x1") timeout_ns,
         in("x8") T_SYS_IRQ_WAIT,
@@ -1403,7 +1437,7 @@ pub unsafe fn t_irq_wait_timeout(handle: i64, timeout_ns: u64) -> i64 {
 pub unsafe fn t_dma_create(size: u64, rights: u32) -> i64 {
     let mut x0: i64 = size as i64;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x1") rights as u64,
         in("x8") T_SYS_DMA_CREATE,
@@ -1425,7 +1459,7 @@ pub unsafe fn t_dma_create(size: u64, rights: u32) -> i64 {
 pub unsafe fn t_dma_create_weave(size: u64, rights: u32) -> i64 {
     let mut x0: i64 = size as i64;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x1") rights as u64,
         in("x8") T_SYS_DMA_CREATE_WEAVE,
@@ -1447,7 +1481,7 @@ pub unsafe fn t_dma_create_weave(size: u64, rights: u32) -> i64 {
 pub unsafe fn t_dma_create_gpu_bo(size: u64, rights: u32) -> i64 {
     let mut x0: i64 = size as i64;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x1") rights as u64,
         in("x8") T_SYS_DMA_CREATE_GPU_BO,
@@ -1479,7 +1513,7 @@ pub unsafe fn t_dma_create_gpu_bo(size: u64, rights: u32) -> i64 {
 pub unsafe fn t_dma_map(handle: i64, vaddr: u64, prot: u32) -> i64 {
     let mut x0: i64 = handle;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x1") vaddr,
         in("x2") prot as u64,
@@ -1539,7 +1573,7 @@ const _: () = assert!(core::mem::offset_of!(TDmaSeg, len) == 8);
 pub unsafe fn t_dma_segments(handle: i64, out: &mut [TDmaSeg]) -> i64 {
     let mut x0: i64 = handle;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x1") out.as_mut_ptr() as u64,
         in("x2") out.len() as u64,
@@ -1570,7 +1604,7 @@ pub unsafe fn t_pipe() -> (i64, i64) {
     let mut x0: i64;
     let mut x1: i64;
     asm!(
-        "svc #0",
+        svc!(),
         out("x0") x0,
         out("x1") x1,
         in("x8") T_SYS_PIPE,
@@ -1584,7 +1618,7 @@ pub unsafe fn t_pipe() -> (i64, i64) {
 #[inline(always)]
 pub unsafe fn t_dup(oldfd: i64, rights: u32) -> i64 {
     let mut result = oldfd;
-    asm!("svc #0", inlateout("x0") result, in("x1") rights as u64,
+    asm!(svc!(), inlateout("x0") result, in("x1") rights as u64,
          in("x8") T_SYS_DUP, options(nostack));
     result
 }
@@ -1604,7 +1638,7 @@ pub unsafe fn t_dup(oldfd: i64, rights: u32) -> i64 {
 pub unsafe fn t_read(fd: i64, buf: *mut u8, len: usize) -> i64 {
     let mut x0: i64 = fd;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x1") buf as u64,
         in("x2") len as u64,
@@ -1625,7 +1659,7 @@ pub unsafe fn t_read(fd: i64, buf: *mut u8, len: usize) -> i64 {
 pub unsafe fn t_write(fd: i64, buf: *const u8, len: usize) -> i64 {
     let mut x0: i64 = fd;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x1") buf as u64,
         in("x2") len as u64,
@@ -1666,7 +1700,7 @@ pub struct TPollFd {
 pub unsafe fn t_poll(fds: *mut TPollFd, nfds: usize, timeout_ms: i32) -> i64 {
     let mut x0: i64 = fds as i64;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x1") nfds as u64,
         in("x2") timeout_ms as i64 as u64,
@@ -1688,7 +1722,7 @@ pub unsafe fn t_poll(fds: *mut TPollFd, nfds: usize, timeout_ms: i32) -> i64 {
 pub unsafe fn t_note_open() -> i64 {
     let mut x0: i64;
     asm!(
-        "svc #0",
+        svc!(),
         lateout("x0") x0,
         in("x8") T_SYS_NOTE_OPEN,
         options(nostack)
@@ -1715,7 +1749,7 @@ pub unsafe fn t_note_open() -> i64 {
 pub unsafe fn t_postnote(pid: i64, name_va: *const u8, name_len: usize) -> i64 {
     let mut x0: i64 = pid;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x1") name_va as u64,
         in("x2") name_len as u64,
@@ -1738,7 +1772,7 @@ pub unsafe fn t_postnote(pid: i64, name_va: *const u8, name_len: usize) -> i64 {
 pub unsafe fn t_postnote_tid(tid: i64, name_va: *const u8, name_len: usize) -> i64 {
     let mut x0: i64 = tid;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x1") name_va as u64,
         in("x2") name_len as u64,
@@ -1762,7 +1796,7 @@ pub unsafe fn t_postnote_tid(tid: i64, name_va: *const u8, name_len: usize) -> i
 pub unsafe fn t_note_mask(new_mask: u64, old_mask_out_va: *mut u64) -> i64 {
     let mut x0: i64 = new_mask as i64;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x1") old_mask_out_va as u64,
         in("x8") T_SYS_NOTE_MASK,
@@ -1803,7 +1837,7 @@ pub unsafe fn t_mount(path: *const u8, path_len: usize,
                       source_spoor_fd: i64, flags: u32) -> i64 {
     let mut x0: i64 = path as i64;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x1") path_len as u64,
         in("x2") source_spoor_fd,
@@ -1823,7 +1857,7 @@ pub unsafe fn t_mount(path: *const u8, path_len: usize,
 pub unsafe fn t_unmount(path: *const u8, path_len: usize) -> i64 {
     let mut x0: i64 = path as i64;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x1") path_len as u64,
         in("x8") T_SYS_UNMOUNT,
@@ -1844,7 +1878,7 @@ pub unsafe fn t_unmount(path: *const u8, path_len: usize) -> i64 {
 pub unsafe fn t_chroot(spoor_fd: i64) -> i64 {
     let mut x0: i64 = spoor_fd;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x8") T_SYS_CHROOT,
         options(nostack)
@@ -1866,7 +1900,7 @@ pub unsafe fn t_chroot(spoor_fd: i64) -> i64 {
 pub unsafe fn t_pivot_root(new_root_fd: i64) -> i64 {
     let mut x0: i64 = new_root_fd;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x8") T_SYS_PIVOT_ROOT,
         options(nostack)
@@ -1890,7 +1924,7 @@ pub unsafe fn t_attach_9p(tx_fd: i64, rx_fd: i64, aname: *const u8, aname_len: u
                           n_uname: u64, flags: u64) -> i64 {
     let mut x0: i64 = tx_fd;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x1") rx_fd as u64,
         in("x2") aname as u64,
@@ -1945,7 +1979,7 @@ pub unsafe fn t_attach_9p_srv(srv_fd: i64, aname: *const u8, aname_len: usize,
                               n_uname: u64, flags: u64) -> i64 {
     let mut x0: i64 = srv_fd;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x1") aname as u64,
         in("x2") aname_len as u64,
@@ -1976,7 +2010,7 @@ pub unsafe fn t_attach_9p_srv(srv_fd: i64, aname: *const u8, aname_len: usize,
 pub unsafe fn t_torpor_wait(addr_va: *const u32, expected: u32, timeout_us: i64) -> i64 {
     let mut x0: i64 = addr_va as i64;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x1") expected as u64,
         in("x2") timeout_us as u64,
@@ -1999,7 +2033,7 @@ pub unsafe fn t_torpor_wait(addr_va: *const u32, expected: u32, timeout_us: i64)
 pub unsafe fn t_torpor_wake(addr_va: *const u32, count: u32) -> i64 {
     let mut x0: i64 = addr_va as i64;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x1") count as u64,
         in("x8") T_SYS_TORPOR_WAKE,
@@ -2036,7 +2070,7 @@ pub unsafe fn t_thread_spawn(entry_va: u64, sp_va: u64, arg: u64, tls_va: u64,
                             ptid_va: u64) -> i64 {
     let mut x0: i64 = entry_va as i64;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x1") sp_va,
         in("x2") arg,
@@ -2061,7 +2095,7 @@ pub unsafe fn t_thread_spawn(entry_va: u64, sp_va: u64, arg: u64, tls_va: u64,
 pub unsafe fn t_set_tid_address(tidptr: *mut u32) -> i64 {
     let mut x0: i64 = tidptr as i64;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x8") T_SYS_SET_TID_ADDRESS,
         options(nostack)
@@ -2077,7 +2111,7 @@ pub unsafe fn t_set_tid_address(tidptr: *mut u32) -> i64 {
 #[inline(always)]
 pub unsafe fn t_thread_exit() -> ! {
     asm!(
-        "svc #0",
+        svc_noreturn!(),
         in("x8") T_SYS_THREAD_EXIT,
         options(nostack, noreturn)
     );
@@ -2091,7 +2125,7 @@ pub unsafe fn t_thread_exit() -> ! {
 pub unsafe fn t_close(fd: i64) -> i64 {
     let mut x0: i64 = fd;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x8") T_SYS_CLOSE,
         options(nostack)
@@ -2119,7 +2153,7 @@ pub unsafe fn t_close(fd: i64) -> i64 {
 pub unsafe fn t_mlockall(flags: u64) -> i64 {
     let mut x0: i64 = flags as i64;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x8") T_SYS_MLOCKALL,
         options(nostack)
@@ -2154,7 +2188,7 @@ pub unsafe fn t_mlockall(flags: u64) -> i64 {
 pub unsafe fn t_set_dumpable(dumpable: u64) -> i64 {
     let mut x0: i64 = dumpable as i64;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x8") T_SYS_SET_DUMPABLE,
         options(nostack)
@@ -2173,7 +2207,7 @@ pub unsafe fn t_set_dumpable(dumpable: u64) -> i64 {
 pub unsafe fn t_set_traceable(traceable: u64) -> i64 {
     let mut x0: i64 = traceable as i64;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x8") T_SYS_SET_TRACEABLE,
         options(nostack)
@@ -2197,7 +2231,7 @@ pub unsafe fn t_set_traceable(traceable: u64) -> i64 {
 pub unsafe fn t_explicit_bzero(buf: *mut u8, len: usize) -> i64 {
     let mut x0: i64 = buf as i64;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x1") len as u64,
         in("x8") T_SYS_EXPLICIT_BZERO,
@@ -2227,7 +2261,7 @@ pub unsafe fn t_explicit_bzero(buf: *mut u8, len: usize) -> i64 {
 pub unsafe fn t_getrandom(buf: *mut u8, len: usize, flags: u64) -> i64 {
     let mut x0: i64 = buf as i64;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x1") len as u64,
         in("x2") flags,
@@ -2303,7 +2337,7 @@ pub const T_SRV_PEER_FLAG_CONSOLE_OWNER: u32 = 1 << 1;
 pub unsafe fn t_srv_accept(service_handle: i64) -> i64 {
     let mut x0: i64 = service_handle;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x8") T_SYS_SRV_ACCEPT,
         options(nostack)
@@ -2338,7 +2372,7 @@ pub unsafe fn t_srv_accept(service_handle: i64) -> i64 {
 pub unsafe fn t_srv_peer(connection_handle: i64, out: *mut TSrvPeerInfo) -> i64 {
     let mut x0: i64 = connection_handle;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x1") out as u64,
         in("x8") T_SYS_SRV_PEER,
@@ -2356,7 +2390,7 @@ pub unsafe fn t_srv_peer(connection_handle: i64, out: *mut TSrvPeerInfo) -> i64 
 pub unsafe fn t_account(handle: i64, op: u64, rec: *mut u8, rec_size: u64) -> i64 {
     let mut x0: i64 = handle;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x1") op,
         in("x2") rec as u64,
@@ -2415,7 +2449,7 @@ pub unsafe fn t_spawn_with_perms(name: *const u8, name_len: usize,
                                  cap_mask: u64, perm_flags: u64) -> i64 {
     let mut x0: i64 = name as i64;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x1") name_len as u64,
         in("x2") fds as u64,
@@ -2444,7 +2478,7 @@ pub unsafe fn t_spawn_with_perms(name: *const u8, name_len: usize,
 pub unsafe fn t_cap_grant(cap_mask: u64, target_stripes: u64) -> i64 {
     let mut x0: i64 = cap_mask as i64;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x1") target_stripes,
         in("x8") T_SYS_CAP_GRANT,
@@ -2462,7 +2496,7 @@ pub unsafe fn t_cap_grant(cap_mask: u64, target_stripes: u64) -> i64 {
 pub unsafe fn t_cap_use(cap_mask: u64) -> i64 {
     let mut x0: i64 = cap_mask as i64;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x8") T_SYS_CAP_USE,
         options(nostack)
@@ -2487,7 +2521,7 @@ pub unsafe fn t_cap_grant_clearance(
 ) -> i64 {
     let mut x0: i64 = cap_mask as i64;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x1") target_stripes,
         in("x2") valid_for_ns,
@@ -2520,7 +2554,7 @@ pub unsafe fn t_cap_grant_imperium(
 ) -> i64 {
     let mut x0: i64 = cap_mask as i64;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x1") target_stripes,
         in("x2") valid_for_ns,
@@ -2551,7 +2585,7 @@ pub unsafe fn t_cap_grant_imperium(
 pub unsafe fn t_burrow_attach(length: u64) -> i64 {
     let mut x0: i64 = length as i64;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x8") T_SYS_BURROW_ATTACH,
         options(nostack)
@@ -2581,7 +2615,7 @@ pub unsafe fn t_burrow_attach(length: u64) -> i64 {
 pub unsafe fn t_burrow_detach(vaddr: u64, length: u64) -> i64 {
     let mut x0: i64 = vaddr as i64;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x1") length,
         in("x8") T_SYS_BURROW_DETACH,
@@ -2608,7 +2642,7 @@ pub unsafe fn t_burrow_detach(vaddr: u64, length: u64) -> i64 {
 pub unsafe fn t_burrow_attach_lazy(length: u64) -> i64 {
     let mut x0: i64 = length as i64;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         // CL-4: the dispatch also accepts the Linux 6-arg anon-mmap shape
         // (length in x1 when x0 == 0), so x1 must not be left holding whatever
@@ -2632,7 +2666,7 @@ pub unsafe fn t_burrow_attach_lazy(length: u64) -> i64 {
 pub unsafe fn t_burrow_decommit(vaddr: u64, length: u64) -> i64 {
     let mut x0: i64 = vaddr as i64;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x1") length,
         in("x8") T_SYS_BURROW_DECOMMIT,
@@ -2654,7 +2688,7 @@ pub unsafe fn t_burrow_decommit(vaddr: u64, length: u64) -> i64 {
 pub unsafe fn t_burrow_reserve(length: u64, prot: u64, align_log2: u64) -> i64 {
     let mut x0: i64 = length as i64;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x1") prot,
         in("x2") align_log2,
@@ -2676,7 +2710,7 @@ pub unsafe fn t_burrow_reserve(length: u64, prot: u64, align_log2: u64) -> i64 {
 pub unsafe fn t_burrow_protect(vaddr: u64, length: u64, prot: u64, flags: u64) -> i64 {
     let mut x0: i64 = vaddr as i64;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x1") length,
         in("x2") prot,
@@ -2695,7 +2729,7 @@ pub unsafe fn t_burrow_protect(vaddr: u64, length: u64, prot: u64, flags: u64) -
 pub unsafe fn t_loom_setup(entries: u64, params_va: u64) -> i64 {
     let mut x0: i64 = entries as i64;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x1") params_va,
         in("x8") T_SYS_LOOM_SETUP,
@@ -2712,7 +2746,7 @@ pub unsafe fn t_loom_setup(entries: u64, params_va: u64) -> i64 {
 pub unsafe fn t_loom_register(loom_fd: u64, op: u64, arg_va: u64, nargs: u64) -> i64 {
     let mut x0: i64 = loom_fd as i64;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x1") op,
         in("x2") arg_va,
@@ -2732,7 +2766,7 @@ pub unsafe fn t_loom_register(loom_fd: u64, op: u64, arg_va: u64, nargs: u64) ->
 pub unsafe fn t_loom_enter(loom_fd: u64, to_submit: u64, min_complete: u64, flags: u64) -> i64 {
     let mut x0: i64 = loom_fd as i64;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x1") to_submit,
         in("x2") min_complete,
@@ -2763,7 +2797,7 @@ pub unsafe fn t_loom_enter(loom_fd: u64, to_submit: u64, min_complete: u64, flag
 pub unsafe fn t_walk_open(spoor_fd: i64, name: *const u8, name_len: usize, omode: u32) -> i64 {
     let mut x0: i64 = spoor_fd;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x1") name as u64,
         in("x2") name_len as u64,
@@ -2784,7 +2818,7 @@ pub unsafe fn t_walk_open(spoor_fd: i64, name: *const u8, name_len: usize, omode
 pub unsafe fn t_open(start_fd: i64, path: *const u8, path_len: usize, omode: u32) -> i64 {
     let mut x0: i64 = start_fd;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x1") path as u64,
         in("x2") path_len as u64,
@@ -2801,7 +2835,7 @@ pub unsafe fn t_open(start_fd: i64, path: *const u8, path_len: usize, omode: u32
 pub unsafe fn t_chdir(path: *const u8, path_len: usize) -> i64 {
     let mut x0: i64 = path as i64;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x1") path_len as u64,
         in("x8") T_SYS_CHDIR,
@@ -2817,7 +2851,7 @@ pub unsafe fn t_chdir(path: *const u8, path_len: usize) -> i64 {
 pub unsafe fn t_getcwd(buf: *mut u8, buf_len: usize) -> i64 {
     let mut x0: i64 = buf as i64;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x1") buf_len as u64,
         in("x8") T_SYS_GETCWD,
@@ -2837,7 +2871,7 @@ pub unsafe fn t_getcwd(buf: *mut u8, buf_len: usize) -> i64 {
 pub unsafe fn t_fd2path(fd: i32, buf: *mut u8, buf_len: usize) -> i64 {
     let mut x0: i64 = fd as i64;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x1") buf as u64,
         in("x2") buf_len as u64,
@@ -2860,7 +2894,7 @@ pub unsafe fn t_fd2path(fd: i32, buf: *mut u8, buf_len: usize) -> i64 {
 pub unsafe fn t_fd_devclass(fd: i32) -> i64 {
     let mut x0: i64 = fd as i64;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x8") T_SYS_FD_DEVCLASS,
         options(nostack)
@@ -2886,14 +2920,14 @@ pub fn stdout_is_terminal() -> bool {
 #[inline(always)]
 pub unsafe fn t_getpid() -> i64 {
     let mut x0: i64 = 0;
-    asm!("svc #0", inlateout("x0") x0, in("x8") T_SYS_GETPID, options(nostack));
+    asm!(svc!(), inlateout("x0") x0, in("x8") T_SYS_GETPID, options(nostack));
     x0
 }
 
 #[inline(always)]
 pub unsafe fn t_getuid() -> i64 {
     let mut x0: i64 = 0;
-    asm!("svc #0", inlateout("x0") x0, in("x8") T_SYS_GETUID, options(nostack));
+    asm!(svc!(), inlateout("x0") x0, in("x8") T_SYS_GETUID, options(nostack));
     x0
 }
 
@@ -2905,14 +2939,14 @@ pub unsafe fn t_getuid() -> i64 {
 #[inline(always)]
 pub unsafe fn t_setsid() -> i64 {
     let mut x0: i64 = 0;
-    asm!("svc #0", inlateout("x0") x0, in("x8") T_SYS_SETSID, options(nostack));
+    asm!(svc!(), inlateout("x0") x0, in("x8") T_SYS_SETSID, options(nostack));
     x0
 }
 
 #[inline(always)]
 pub unsafe fn t_setpgid(pid: i64, pgid: i64) -> i64 {
     let mut x0: i64 = pid;
-    asm!("svc #0", inlateout("x0") x0, in("x1") pgid, in("x8") T_SYS_SETPGID,
+    asm!(svc!(), inlateout("x0") x0, in("x1") pgid, in("x8") T_SYS_SETPGID,
          options(nostack));
     x0
 }
@@ -2920,21 +2954,21 @@ pub unsafe fn t_setpgid(pid: i64, pgid: i64) -> i64 {
 #[inline(always)]
 pub unsafe fn t_getpgid(pid: i64) -> i64 {
     let mut x0: i64 = pid;
-    asm!("svc #0", inlateout("x0") x0, in("x8") T_SYS_GETPGID, options(nostack));
+    asm!(svc!(), inlateout("x0") x0, in("x8") T_SYS_GETPGID, options(nostack));
     x0
 }
 
 #[inline(always)]
 pub unsafe fn t_getsid(pid: i64) -> i64 {
     let mut x0: i64 = pid;
-    asm!("svc #0", inlateout("x0") x0, in("x8") T_SYS_GETSID, options(nostack));
+    asm!(svc!(), inlateout("x0") x0, in("x8") T_SYS_GETSID, options(nostack));
     x0
 }
 
 #[inline(always)]
 pub unsafe fn t_getgid() -> i64 {
     let mut x0: i64 = 0;
-    asm!("svc #0", inlateout("x0") x0, in("x8") T_SYS_GETGID, options(nostack));
+    asm!(svc!(), inlateout("x0") x0, in("x8") T_SYS_GETGID, options(nostack));
     x0
 }
 
@@ -2945,7 +2979,7 @@ pub unsafe fn t_getgid() -> i64 {
 #[inline(always)]
 pub unsafe fn t_pty_register(op: u64, a1: u64, a2: u64, a3: u64) -> i64 {
     let mut x0: i64 = op as i64;
-    asm!("svc #0", inlateout("x0") x0, in("x1") a1, in("x2") a2, in("x3") a3,
+    asm!(svc!(), inlateout("x0") x0, in("x1") a1, in("x2") a2, in("x3") a3,
          in("x8") T_SYS_PTY_REGISTER, options(nostack));
     x0
 }
@@ -2956,7 +2990,7 @@ pub unsafe fn t_pty_register(op: u64, a1: u64, a2: u64, a3: u64) -> i64 {
 #[inline(always)]
 pub unsafe fn t_tty_signal(pts_id: u64, sig_class: u64) -> i64 {
     let mut x0: i64 = pts_id as i64;
-    asm!("svc #0", inlateout("x0") x0, in("x1") sig_class,
+    asm!(svc!(), inlateout("x0") x0, in("x1") sig_class,
          in("x8") T_SYS_TTY_SIGNAL, options(nostack));
     x0
 }
@@ -2966,7 +3000,7 @@ pub unsafe fn t_tty_signal(pts_id: u64, sig_class: u64) -> i64 {
 #[inline(always)]
 pub unsafe fn t_tty_acquire(slave_fd: i64) -> i64 {
     let mut x0: i64 = slave_fd;
-    asm!("svc #0", inlateout("x0") x0, in("x8") T_SYS_TTY_ACQUIRE,
+    asm!(svc!(), inlateout("x0") x0, in("x8") T_SYS_TTY_ACQUIRE,
          options(nostack));
     x0
 }
@@ -2975,7 +3009,7 @@ pub unsafe fn t_tty_acquire(slave_fd: i64) -> i64 {
 #[inline(always)]
 pub unsafe fn t_tty_set_fg(fd: i64, pgid: u64) -> i64 {
     let mut x0: i64 = fd;
-    asm!("svc #0", inlateout("x0") x0, in("x1") pgid,
+    asm!(svc!(), inlateout("x0") x0, in("x1") pgid,
          in("x8") T_SYS_TTY_SET_FG, options(nostack));
     x0
 }
@@ -2983,7 +3017,7 @@ pub unsafe fn t_tty_set_fg(fd: i64, pgid: u64) -> i64 {
 #[inline(always)]
 pub unsafe fn t_tty_get_fg(fd: i64) -> i64 {
     let mut x0: i64 = fd;
-    asm!("svc #0", inlateout("x0") x0, in("x8") T_SYS_TTY_GET_FG,
+    asm!(svc!(), inlateout("x0") x0, in("x8") T_SYS_TTY_GET_FG,
          options(nostack));
     x0
 }
@@ -2994,7 +3028,7 @@ pub unsafe fn t_tty_get_fg(fd: i64) -> i64 {
 #[inline(always)]
 pub unsafe fn t_tty_cont(fd: i64, pgid: u64) -> i64 {
     let mut x0: i64 = fd;
-    asm!("svc #0", inlateout("x0") x0, in("x1") pgid,
+    asm!(svc!(), inlateout("x0") x0, in("x1") pgid,
          in("x8") T_SYS_TTY_CONT, options(nostack));
     x0
 }
@@ -3007,7 +3041,7 @@ pub unsafe fn t_tty_cont(fd: i64, pgid: u64) -> i64 {
 pub unsafe fn t_clock_gettime(clk_id: u64, ts_va: u64) -> i64 {
     let mut x0: i64 = clk_id as i64;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x1") ts_va,
         in("x8") T_SYS_CLOCK_GETTIME,
@@ -3025,7 +3059,7 @@ pub unsafe fn t_clock_gettime(clk_id: u64, ts_va: u64) -> i64 {
 pub unsafe fn t_clock_settime(clk_id: u64, ts_va: u64) -> i64 {
     let mut x0: i64 = clk_id as i64;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x1") ts_va,
         in("x8") T_SYS_CLOCK_SETTIME,
@@ -3042,7 +3076,7 @@ pub unsafe fn t_clock_settime(clk_id: u64, ts_va: u64) -> i64 {
 pub unsafe fn t_weft_share(ring_va: u64, ring_size: u64) -> i64 {
     let mut x0: i64 = ring_va as i64;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x1") ring_size,
         in("x8") T_SYS_WEFT_SHARE,
@@ -3061,7 +3095,7 @@ pub unsafe fn t_weft_share(ring_va: u64, ring_size: u64) -> i64 {
 pub unsafe fn t_weft_unshare(share_id: u64) -> i64 {
     let mut x0: i64 = share_id as i64;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x8") T_SYS_WEFT_UNSHARE,
         options(nostack)
@@ -3093,7 +3127,7 @@ pub unsafe fn t_weft_unshare(share_id: u64) -> i64 {
 pub unsafe fn t_execve(path: &[u8], argv_data: &[u8], argc: u64) -> i64 {
     let mut x0: i64 = path.as_ptr() as i64;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x1") path.len() as u64,
         in("x2") argv_data.as_ptr() as u64,
@@ -3114,7 +3148,7 @@ pub unsafe fn t_execve(path: &[u8], argv_data: &[u8], argc: u64) -> i64 {
 pub unsafe fn t_weft_map(data_fd: u64, hint_va: u64) -> i64 {
     let mut x0: i64 = data_fd as i64;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x1") hint_va,
         in("x8") T_SYS_WEFT_MAP,
@@ -3135,7 +3169,7 @@ pub unsafe fn t_walk_create(parent_fd: i64, name: *const u8, name_len: usize,
                             omode: u32, perm: u32) -> i64 {
     let mut x0: i64 = parent_fd;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x1") name as u64,
         in("x2") name_len as u64,
@@ -3161,7 +3195,7 @@ pub unsafe fn t_open_create(start_fd: i64, path: *const u8, path_len: usize,
                             omode: u32, perm: u32) -> i64 {
     let mut x0: i64 = start_fd;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x1") path as u64,
         in("x2") path_len as u64,
@@ -3183,7 +3217,7 @@ pub unsafe fn t_open_create(start_fd: i64, path: *const u8, path_len: usize,
 pub unsafe fn t_console_open() -> i64 {
     let mut x0: i64;
     asm!(
-        "svc #0",
+        svc!(),
         lateout("x0") x0,
         in("x8") T_SYS_CONSOLE_OPEN,
         options(nostack)
@@ -3198,7 +3232,7 @@ pub unsafe fn t_console_open() -> i64 {
 pub unsafe fn t_console_episode(op: u64) -> i64 {
     let mut x0: i64 = op as i64;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x8") T_SYS_CONSOLE_EPISODE,
         options(nostack)
@@ -3212,7 +3246,7 @@ pub unsafe fn t_console_episode(op: u64) -> i64 {
 pub unsafe fn t_fsync(fd: i64, datasync: u32) -> i64 {
     let mut x0: i64 = fd;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x1") datasync as u64,
         in("x8") T_SYS_FSYNC,
@@ -3230,7 +3264,7 @@ pub unsafe fn t_fsync(fd: i64, datasync: u32) -> i64 {
 pub unsafe fn t_readdir(fd: i64, buf: *mut u8, buf_len: usize) -> i64 {
     let mut x0: i64 = fd;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x1") buf as u64,
         in("x2") buf_len as u64,
@@ -3250,7 +3284,7 @@ pub unsafe fn t_rename(olddir_fd: i64, oldname: *const u8, oldname_len: usize,
                        newdir_fd: i64, newname: *const u8, newname_len: usize) -> i64 {
     let mut x0: i64 = olddir_fd;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x1") oldname as u64,
         in("x2") oldname_len as u64,
@@ -3271,7 +3305,7 @@ pub unsafe fn t_rename(olddir_fd: i64, oldname: *const u8, oldname_len: usize,
 pub unsafe fn t_unlink(parent_fd: i64, name: *const u8, name_len: usize, flags: u32) -> i64 {
     let mut x0: i64 = parent_fd;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x1") name as u64,
         in("x2") name_len as u64,
@@ -3291,7 +3325,7 @@ pub unsafe fn t_unlink(parent_fd: i64, name: *const u8, name_len: usize, flags: 
 pub unsafe fn t_lseek(spoor_fd: i64, offset: i64, whence: u32) -> i64 {
     let mut x0: i64 = spoor_fd;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x1") offset,
         in("x2") whence as u64,
@@ -3310,7 +3344,7 @@ pub unsafe fn t_lseek(spoor_fd: i64, offset: i64, whence: u32) -> i64 {
 pub unsafe fn t_pread(spoor_fd: i64, buf: *mut u8, len: usize, off: i64) -> i64 {
     let mut x0: i64 = spoor_fd;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x1") buf as u64,
         in("x2") len as u64,
@@ -3328,7 +3362,7 @@ pub unsafe fn t_pread(spoor_fd: i64, buf: *mut u8, len: usize, off: i64) -> i64 
 pub unsafe fn t_pwrite(spoor_fd: i64, buf: *const u8, len: usize, off: i64) -> i64 {
     let mut x0: i64 = spoor_fd;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x1") buf as u64,
         in("x2") len as u64,
@@ -3351,7 +3385,7 @@ pub unsafe fn t_pwrite(spoor_fd: i64, buf: *const u8, len: usize, off: i64) -> i
 pub unsafe fn t_jit_create(length: u64, out_va: u64) -> i64 {
     let mut x0: i64;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") length => x0,
         in("x1") out_va,
         in("x8") T_SYS_JIT_CREATE,
@@ -3374,7 +3408,7 @@ pub unsafe fn t_jit_create(length: u64, out_va: u64) -> i64 {
 pub unsafe fn t_jit_create_sealed(src_va: u64, length: u64, out_va: u64) -> i64 {
     let mut x0: i64;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") src_va => x0,
         in("x1") length,
         in("x2") out_va,
@@ -3394,7 +3428,7 @@ pub unsafe fn t_jit_create_sealed(src_va: u64, length: u64, out_va: u64) -> i64 
 pub unsafe fn t_jit_destroy(writer_va: u64) -> i64 {
     let mut x0: i64;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") writer_va => x0,
         in("x8") T_SYS_JIT_DESTROY,
         options(nostack)
@@ -3413,7 +3447,7 @@ pub unsafe fn t_jit_destroy(writer_va: u64) -> i64 {
 pub unsafe fn t_icache_sync(vaddr: u64, length: u64) -> i64 {
     let mut x0: i64;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") vaddr => x0,
         in("x1") length,
         in("x8") T_SYS_ICACHE_SYNC,
@@ -3431,7 +3465,7 @@ pub fn t_icache_sync_space() -> i64 {
     let mut x0: i64;
     unsafe {
         asm!(
-            "svc #0",
+            svc!(),
             lateout("x0") x0,
             in("x8") T_SYS_ICACHE_SYNC_SPACE,
             options(nostack)
@@ -3448,7 +3482,7 @@ pub fn t_yield() -> i64 {
     let mut x0: i64;
     unsafe {
         asm!(
-            "svc #0",
+            svc!(),
             lateout("x0") x0,
             in("x8") T_SYS_YIELD,
             options(nostack)
@@ -3469,7 +3503,7 @@ pub fn t_yield() -> i64 {
 pub unsafe fn t_stat_path(path: *const u8, path_len: usize, stat_va: *mut u8) -> i64 {
     let mut x0: i64 = path as i64;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x1") path_len as u64,
         in("x2") stat_va as u64,
@@ -3490,7 +3524,7 @@ pub unsafe fn t_stat_path(path: *const u8, path_len: usize, stat_va: *mut u8) ->
 pub unsafe fn t_fstat(spoor_fd: i64, stat_va: *mut u8) -> i64 {
     let mut x0: i64 = spoor_fd;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x1") stat_va as u64,
         in("x8") T_SYS_FSTAT,
@@ -3510,7 +3544,7 @@ pub unsafe fn t_fstat(spoor_fd: i64, stat_va: *mut u8) -> i64 {
 pub unsafe fn t_wstat(fd: i64, valid: u32, mode: u32, uid: u32, gid: u32) -> i64 {
     let mut x0: i64 = fd;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x1") valid as u64,
         in("x2") mode as u64,
@@ -3533,7 +3567,7 @@ pub unsafe fn t_wstat(fd: i64, valid: u32, mode: u32, uid: u32, gid: u32) -> i64
 pub unsafe fn t_wstat_times(fd: i64, valid: u32, times_va: u64) -> i64 {
     let mut x0: i64 = fd;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x1") valid as u64,
         in("x2") 0u64,
@@ -3558,7 +3592,7 @@ pub unsafe fn t_wstat_times(fd: i64, valid: u32, times_va: u64) -> i64 {
 pub unsafe fn t_spawn_full_argv(req_va: *const TSpawnArgs) -> i64 {
     let mut x0: i64 = req_va as i64;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x8") T_SYS_SPAWN_FULL_ARGV,
         options(nostack)
@@ -3602,7 +3636,7 @@ pub const T_WAIT_STATUS_CONTINUED: i32 = 0xffff;
 pub unsafe fn t_wait_pid_for(want_pid: i32, flags: i32, status_out: *mut i32) -> i64 {
     let mut x0: i64 = want_pid as i64;
     asm!(
-        "svc #0",
+        svc!(),
         inlateout("x0") x0,
         in("x1") flags as i64,
         in("x2") status_out as i64,
@@ -3678,6 +3712,7 @@ pub fn virtio_rmb() {
 // ENTRY(_start) in usr/scripts/aarch64-userspace.ld keeps _start as a
 // liveness root, so the linker pulls this symbol from libthyla-rs.rlib
 // even though no Rust code references it directly.
+#[cfg(not(feature = "host-test"))]
 global_asm!(
     ".section .text._start, \"ax\"",
     ".globl _start",
@@ -3733,6 +3768,7 @@ global_asm!(
 //
 // Returns the child's pid to the parent, or a negative errno. Never returns
 // in the child.
+#[cfg(not(feature = "host-test"))]
 global_asm!(
     ".section .text.__thyla_rfork_spawn, \"ax\"",
     ".globl __thyla_rfork_spawn",
@@ -3806,6 +3842,19 @@ extern "C" {
     fn rs_main() -> i64;
 }
 
+// What the program and the assembly above provide in a real image.
+#[cfg(feature = "host-test")]
+mod host_test_symbols {
+    #[no_mangle]
+    extern "C" fn rs_main() -> i64 {
+        -38
+    }
+    #[no_mangle]
+    extern "C" fn __thyla_rfork_spawn() -> i64 {
+        -38
+    }
+}
+
 #[no_mangle]
 unsafe extern "C" fn __libthyla_rt_start(argc: usize, argv: *const *const u8) -> i64 {
     RT_ARGC.store(argc, Ordering::Release);
@@ -3848,6 +3897,7 @@ pub(crate) fn rt_raw_args() -> (usize, *const *const u8) {
 const AT_NULL_TAG: usize = 0;
 const AT_HWCAP_TAG: usize = 16; // standard SysV AT_HWCAP (CF-4 A)
 const AT_VDSO_CLOCK_TAG: usize = 0x5654;
+const AT_STACK_BASE_TAG: usize = 0x5342;
 const VDSO_CLOCK_MAGIC: u64 = 0x5644534f4c4b3031; // "VDSOLK01"
 const VDSO_CLOCK_VERSION: u64 = 1;
 
@@ -3866,10 +3916,18 @@ struct VdsoClock {
 // thread sharing the address space observes it).
 static RT_VDSO_CLOCK: AtomicPtr<VdsoClock> = AtomicPtr::new(core::ptr::null_mut());
 
+static RT_STACK_BASE: AtomicUsize = AtomicUsize::new(0);
+
+/// The lowest usable address of the initial thread's stack, as exec mapped it, or 0 where
+/// no exec said so (a host test). A peer thread runs on another stack.
+pub fn stack_base() -> usize {
+    RT_STACK_BASE.load(Ordering::Acquire)
+}
+
 // Walk the auxv (after argv + envp on the initial stack -- the _start frame
 // gives argc + &argv[0]) once, servicing every tag we care about: AT_VDSO_CLOCK
-// (validate magic/version/freq and cache the page) and AT_HWCAP (publish
-// FEAT_LSE to the outline-atomics helpers). One walk, because the auxv is short
+// (validate magic/version/freq and cache the page), AT_HWCAP (publish
+// FEAT_LSE to the outline-atomics helpers) and AT_STACK_BASE. One walk, because the auxv is short
 // and a second pass would cost another cache-cold stride for no benefit.
 unsafe fn capture_auxv(argc: usize, argv: *const *const u8) {
     if argv.is_null() {
@@ -3900,6 +3958,7 @@ unsafe fn capture_auxv(argc: usize, argv: *const *const u8) {
                 }
             }
             AT_HWCAP_TAG => publish_have_lse_atomics(*a.add(1)),
+            AT_STACK_BASE_TAG => RT_STACK_BASE.store(*a.add(1), Ordering::Release),
             _ => {}
         }
         a = a.add(2);
@@ -4052,6 +4111,7 @@ pub(crate) fn vdso_now_pair_ns() -> Option<(u64, u64)> {
 // Required by no_std. v1.0 P4-Ic4 response: SYS_EXITS(1). Phase 5+ can
 // add a richer panic path (panic message → t_puts) via a Cargo feature
 // flag once the runtime crate matures.
+#[cfg(not(feature = "host-test"))]
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
     unsafe { t_exits(1) }
@@ -4126,7 +4186,7 @@ const _: () = assert!(core::mem::size_of::<SrvRoute>() == 40);
 #[inline(always)]
 pub unsafe fn t_srv_registry_new(source: i64, routes: *const SrvRoute, count: usize, flags: u64) -> i64 {
     let mut x0 = source;
-    asm!("svc #0", inlateout("x0") x0, in("x1") routes, in("x2") count,
+    asm!(svc!(), inlateout("x0") x0, in("x1") routes, in("x2") count,
          in("x3") flags, in("x8") T_SYS_SRV_REGISTRY_NEW, options(nostack));
     x0
 }
@@ -4143,7 +4203,7 @@ pub const T_HANDLE_STATUS_NONBLOCK: u64 = 0x400;
 pub const T_HANDLE_STATUS_APPEND: u64 = 0x800;
 pub unsafe fn t_handle_flags_get(fd: i64) -> i64 {
     let mut x0 = fd;
-    asm!("svc #0", inout("x0") x0, in("x8") T_SYS_HANDLE_FLAGS_GET,
+    asm!(svc!(), inout("x0") x0, in("x8") T_SYS_HANDLE_FLAGS_GET,
          options(nostack));
     x0
 }
@@ -4152,14 +4212,14 @@ pub const T_SYS_HANDLE_DUP_TO: u64 = 131;
 /// Set caller-local descriptor flags. Returns raw native negative errno.
 pub unsafe fn t_handle_flags_set(fd: i64, flags: u64) -> i64 {
     let mut x0 = fd as u64;
-    asm!("svc #0", inout("x0") x0, in("x1") flags,
+    asm!(svc!(), inout("x0") x0, in("x1") flags,
          in("x8") T_SYS_HANDLE_FLAGS_SET, options(nostack));
     x0 as i64
 }
 /// Atomically replace a distinct caller-local target; preserve source rights.
 pub unsafe fn t_handle_dup_to(source: i64, target: i64, flags: u64) -> i64 {
     let mut x0 = source as u64;
-    asm!("svc #0", inout("x0") x0, in("x1") target as u64, in("x2") flags,
+    asm!(svc!(), inout("x0") x0, in("x1") target as u64, in("x2") flags,
          in("x8") T_SYS_HANDLE_DUP_TO, options(nostack));
     x0 as i64
 }
@@ -4169,7 +4229,7 @@ pub const T_SYS_GETPPID: u64 = 132;
 #[inline(always)]
 pub unsafe fn t_getppid() -> i64 {
     let mut x0: i64 = 0;
-    asm!("svc #0", inlateout("x0") x0, in("x8") T_SYS_GETPPID, options(nostack));
+    asm!(svc!(), inlateout("x0") x0, in("x8") T_SYS_GETPPID, options(nostack));
     x0
 }
 pub const T_SYS_UMASK: u64 = 133;
@@ -4178,7 +4238,7 @@ pub const T_SYS_UMASK: u64 = 133;
 #[inline(always)]
 pub unsafe fn t_umask(mask: u64) -> i64 {
     let mut x0 = mask;
-    asm!("svc #0", inout("x0") x0, in("x8") T_SYS_UMASK, options(nostack));
+    asm!(svc!(), inout("x0") x0, in("x8") T_SYS_UMASK, options(nostack));
     x0 as i64
 }
 pub const T_SYS_FILE_LOCK: u64 = 137;
@@ -4213,7 +4273,7 @@ const _: () = assert!(core::mem::offset_of!(TFileLock, pid) == 24);
 pub unsafe fn t_file_lock(fd: i64, op: u64, start: u64, len: u64,
                           out: *mut TFileLock) -> i64 {
     let mut x0 = fd as u64;
-    asm!("svc #0", inout("x0") x0, in("x1") op, in("x2") start, in("x3") len,
+    asm!(svc!(), inout("x0") x0, in("x1") op, in("x2") start, in("x3") len,
          in("x4") out, in("x8") T_SYS_FILE_LOCK, options(nostack));
     x0 as i64
 }

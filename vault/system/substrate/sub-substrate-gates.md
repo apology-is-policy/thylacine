@@ -466,6 +466,13 @@ the category.** Derived per crate, a PASS crate strands whatever
 NO-LIB crate strands every test it declares (aurora's, inside a `no_main`
 binary), and a NO-HOST crate strands all of its own.
 
+`libutopia:host-test` is the second pass that ran its last 69 and found three real
+defects on its first run (2026-11-04): it builds against libthyla-rs's `host-test`
+feature, where every syscall answers ENOSYS and one that cannot return stops the test,
+and the guest target refuses that feature at compile time. Those stubs are aarch64
+instructions, so another host skips the pass and reports the tests stranded. Corvus's
+3 run from its new library half, the session table. Nothing is stranded at this point.
+
 **The declared count is anchored at the start of a line**, because a `#[test]`
 that a comment mentions is not a test -- libhalcyon's `theme.rs` has one, and the
 unanchored count called it stranded.
