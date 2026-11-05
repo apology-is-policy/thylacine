@@ -25,6 +25,7 @@ mirrors:
   - "tools/interactive/ls-graphical-sak-states.exp"
   - "tools/interactive/ls-graphical-sak-recover.exp"
   - "tools/interactive/ls-graphical-sak-poison.exp"
+  - "tools/interactive/ls-graphical-sak-chain.exp"
   - "tools/interactive/ls-graphical-sak-start.exp"
   - "tools/interactive/ls-graphical-sak-refused.exp"
   - "tools/interactive/ls-graphical-sak-unread.exp"

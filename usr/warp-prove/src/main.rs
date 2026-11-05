@@ -311,6 +311,12 @@ pub extern "C" fn rs_main() -> i64 {
         return poison_hold();
     }
 
+    // A client rendering without pause, with a backlog on the device at any moment
+    // (tools/interactive/ls-graphical-sak-chain.exp).
+    if libthyla_rs::env::args().get_str(1) == Some("chain-hold") {
+        return chain_hold();
+    }
+
     // V-3a: the coherent-ring gate. Needs NO virgl (the ring is coherent
     // shmem + a doorbell), so it runs on the local 2D device.
     if libthyla_rs::env::args().get_str(1) == Some("ring") {
@@ -3507,6 +3513,9 @@ const RB_DRAWS_PER_SUBMIT: usize = 300;
 /// half the Twrites -- the send phase is the leg's exposure to another
 /// client's present landing while the queue is deep (see `constructed`).
 const RB_TRIS: usize = 6;
+/// The heavy submits `chain-hold` keeps on the device: the C-6 gate's queue, about
+/// a second of V3D.
+const CHAIN_HOLD_DEPTH: u64 = 4;
 /// The draw-state object handles (surfaces 1 and 2 are the clear legs').
 const RB_H_VS: u32 = 10;
 const RB_H_FS: u32 = 11;
@@ -3904,6 +3913,69 @@ fn rb_wait_signaled(
     }
 }
 
+/// RB_TRIS full-screen triangles per draw (the same clip-space triangle RB_TRIS
+/// times): RB_TRIS x the fill per DRAW_VBO at the same stream size, so the queue
+/// is deep enough that the stall remaining when the readback is issued -- after
+/// the ~130-290 ms the eight 24 KiB Twrites themselves take -- clears the DEEP
+/// floor with margin (run 5: a 415 ms queue left 88 ms once).
+fn rb_upload_triangles(warp: i64, ctx: u32, vbo: u32, vbo_va: u64) {
+    let tri: [f32; 12] = [-1.0, -1.0, 0.0, 1.0, 3.0, -1.0, 0.0, 1.0, -1.0, 3.0, 0.0, 1.0];
+    for t in 0..RB_TRIS {
+        for (i, v) in tri.iter().enumerate() {
+            unsafe {
+                core::ptr::write_volatile((vbo_va + ((t * 12 + i) as u64) * 4) as *mut u32, v.to_bits())
+            };
+        }
+    }
+    let before = ctx_field(warp, ctx, "fence-signaled");
+    let up = format!("transfer_to 0 0 0 0 {} 1 1 0 0 0", RB_TRIS * 48);
+    if !write_ctl(warp, &format!("ctx/{}/bo/{}/ctl", ctx, vbo), &up) {
+        rb_incomplete("instrument:vbo-upload");
+    }
+    let _ = rb_wait_signaled(warp, ctx, before, 1, libthyla_rs::time::Instant::now(), "vbo-upload");
+}
+
+/// Keep `CHAIN_HOLD_DEPTH` heavy submits on the device for `argv[2]` seconds. The
+/// broker's warp-watch line witnesses the queue on the serial: this client's own
+/// output goes to its pane.
+fn chain_hold() -> i64 {
+    let secs: u64 = libthyla_rs::env::args()
+        .get_str(2)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| fail("chain-hold <seconds>"));
+    let warp = warp_connect("chain-hold");
+    let ctx = mint_ctx(warp, "chain-hold");
+    let (_, res, _) = mint_bo_wh(warp, ctx, RB_W, RB_H, VIRGL_RESOURCE_Y_0_TOP, "chain-hold target");
+    let (vbo, vbo_res, vbo_va) = mint_buffer_bo(warp, ctx, "chain-hold vbo");
+    rb_upload_triangles(warp, ctx, vbo, vbo_va);
+    let before = ctx_field(warp, ctx, "fence-signaled");
+    let mut prime: Vec<u32> = Vec::new();
+    subctx_preamble(&mut prime);
+    clear_stream(&mut prime, res, 1, 1.0, 0.0, 0.0);
+    draw_state_stream(&mut prime, vbo_res, RB_W, RB_H);
+    submit_stream(warp, ctx, &prime, "chain-hold prime");
+    guard_not_poisoned(warp, "chain-hold prime");
+    let _ = rb_wait_signaled(warp, ctx, before, 1, libthyla_rs::time::Instant::now(), "chain-hold prime");
+    let base = ctx_field(warp, ctx, "fence-signaled");
+    let mut sent = 0u64;
+    let t0 = libthyla_rs::time::Instant::now();
+    t_putstr(&format!("warp-prove: CHAIN-HOLD ctx {} for {} s\n", ctx, secs));
+    while t0.elapsed().as_secs() < secs {
+        if sent - (ctx_field(warp, ctx, "fence-signaled") - base) < CHAIN_HOLD_DEPTH {
+            let mut st: Vec<u32> = Vec::new();
+            fb_state_stream(&mut st, 1);
+            for k in 0..RB_DRAWS_PER_SUBMIT {
+                draw_stream(&mut st, 0.0, 1.0, rb_clear_color(k, RB_DRAWS_PER_SUBMIT));
+            }
+            submit_stream(warp, ctx, &st, "chain-hold");
+            sent += 1;
+        } else {
+            let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(5));
+        }
+    }
+    0
+}
+
 fn observe_readback() {
     use tapestry::Surface;
     t_putstr("warp-prove: C6-READBACK starting (the compositor readback arm under a deep queue)\n");
@@ -3936,28 +4008,7 @@ fn observe_readback() {
     // The vertex buffer: one clip-space full-screen triangle, uploaded
     // through the fenced transfer verb (the C0-F1 leg's buffer shape).
     let (vbo, vbo_res, vbo_va) = mint_buffer_bo(warp, ctx, "readback vbo");
-    {
-        // RB_TRIS full-screen triangles per draw (the same clip-space
-        // triangle RB_TRIS times): RB_TRIS x the fill per DRAW_VBO at the
-        // same stream size, so the queue is deep enough that the stall
-        // remaining when the readback is issued -- after the ~130-290 ms
-        // the eight 24 KiB Twrites themselves take -- clears the DEEP floor
-        // with margin (run 5: a 415 ms queue left 88 ms once).
-        let tri: [f32; 12] = [-1.0, -1.0, 0.0, 1.0, 3.0, -1.0, 0.0, 1.0, -1.0, 3.0, 0.0, 1.0];
-        for t in 0..RB_TRIS {
-            for (i, v) in tri.iter().enumerate() {
-                unsafe {
-                    core::ptr::write_volatile((vbo_va + ((t * 12 + i) as u64) * 4) as *mut u32, v.to_bits())
-                };
-            }
-        }
-        let before = ctx_field(warp, ctx, "fence-signaled");
-        let up = format!("transfer_to 0 0 0 0 {} 1 1 0 0 0", RB_TRIS * 48);
-        if !write_ctl(warp, &format!("ctx/{}/bo/{}/ctl", ctx, vbo), &up) {
-            rb_incomplete("instrument:vbo-upload");
-        }
-        let _ = rb_wait_signaled(warp, ctx, before, 1, libthyla_rs::time::Instant::now(), "vbo-upload");
-    }
+    rb_upload_triangles(warp, ctx, vbo, vbo_va);
     let tap = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/srv/tapestry".as_ptr(), 13, T_OREAD) };
     if tap < 0 {
         rb_incomplete("instrument:tapestry-ctl");
