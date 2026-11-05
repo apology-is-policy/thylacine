@@ -126,11 +126,11 @@ Generated — do not edit between the markers (`quaestor render`).
 ## Recent changes
 
 - 2026-11-05 [[chg-2026-11-05-as4-r6-join]] — AS-4 audit round 6, the join's half
+- 2026-11-05 [[chg-2026-11-05-as4-r7-join]] — AS-4 audit round 7, the join's half
 - 2026-11-04 [[chg-2026-11-04-as4-r4]] — AS-4 audit round 4: the paste flow's waits arm, and Alt reaches a tile
 - 2026-11-04 [[chg-2026-11-04-as4-r5]] — AS-4 audit round 5, the join's half: Alt only on a printable rune
 - 2026-11-04 [[chg-2026-11-04-compositor-band]] — The designated compositor's threads are INTERACTIVE
 - 2026-11-04 [[chg-2026-11-04-dormant-answers-estale]] — A dormant present and HIN1's BadHandle answer ESTALE
 - 2026-11-04 [[chg-2026-11-04-merge-audit-r2]] — Merge audit r2's close on the join
 - 2026-11-04 [[chg-2026-11-04-merge-audit-r3]] — Merge audit r3's close
-- 2026-11-04 [[chg-2026-11-04-mm1c-audit-r1]] — MM-1c audit r1's close
 <!-- generated:end -->
