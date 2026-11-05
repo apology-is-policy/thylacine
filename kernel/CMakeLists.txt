@@ -162,6 +162,7 @@ set(KERNEL_TEST_SRCS
     test/test_hwdebug.c
     test/test_alternatives.c
     test/test_context.c
+    test/test_switch_cost.c
     test/test_fp.c
     test/test_sched.c
     test/test_note_wait.c

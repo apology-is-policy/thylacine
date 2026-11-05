@@ -82,7 +82,7 @@ void test_uaccess_fixup_lookup_unknown_returns_zero(void) {
 void test_uaccess_load_u8_unmapped_user_va_returns_minus1(void) {
     // The test runs in kproc context; kproc's TTBR0 = l0_ttbr0 has
     // an empty user half post-P3-Bda. uaccess_load_u8 issues an ldrb
-    // against the supplied VA — translation fault at L0, FAR = the
+    // against the supplied VA — translation fault at L2, FAR = the
     // VA, ELR = uaccess_load_u8_op. exception_sync_curr_el detects
     // FAR < USER_VA_TOP + fixup table hit, calls userland_demand_page
     // (which fails because kproc has no VMA covering 0x10000000),

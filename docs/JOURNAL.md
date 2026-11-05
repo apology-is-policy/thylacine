@@ -22,6 +22,22 @@ needed the operator.
 
 
 ---
+## 2026-11-05 (aux, Opus 5.5 1M) -- C9 lands; a bug on main since May; two things I had written wrong
+
+**What landed.** Thread-model C9, `addcee94f..5c31d1867`. The switch decides from TTBR0: no V state for a kernel thread, no MSR for an equal value, one ISB. Green 2225/2225 twice on one ELF (f18ea53403c62d3a). SMP subset 20 of 20 boots passed. The full matrix did NOT run (11-02 hold) and is owed at the merge.
+
+**The bug.** The first full boot was red on four new tests, for two separate reasons. `context.ttbr0_follows_next` said a kernel thread's hardware TTBR0 did not match its Context, which should be impossible: the asm loads one from the other. The disassembly answered it. `mmu_kernel_ttbr0_pa` was `ldrb`, `adrp l0_ttbr0`, `csel`: clang had shrunk a static written once with a link-time address to a was-it-set byte, and recomputed the address at the reader's PC, a high VA. So since `fd400476b` every kernel thread but the boot thread has run on ASID 0xffff with a root made of VA bits. Main's tree build has the same code. `kaslr.c:36-47` documents this exact trap and is volatile. A low-VA touch on a kernel thread was an address-size fault; a speculative walk could read a junk PA as a table and fill the TLB under an ASID the allocator can hand out, which I read and did not reproduce. Round 1 had reasoned about kernel threads on ASID 0, a state nothing had ever run in, so round 2 re-derived what a real ASID 0 changes and found nothing that leaned on the junk.
+
+**The other three reds were mine.** `fp_load_regs` named V clobbers, so its epilogue restored d8-d15 over what it had just loaded. The old test loaded inline in the function that switched, so its epilogue ran late, and my refactor moved it to before the read. I read that off the same disassembly. Two causes behind one reading: fixing either alone would have left red.
+
+**G02, predicted green.** I wrote that no test could show the ISB missing here. It went red: `go-threads` lost its message to 154 NUL bytes and the boot ended. It costs about 16 ns of a switch and stays, now with a witness.
+
+**What I had written wrong.** The C8b entry below says `TEST_EXPECT_EQ` carries on after a failure. It returns from its function, and X08 showed several reds because its asserts sit in a helper; I built a reading rule on the wrong cause. And my lease scripts counted the runner's `[test] yield-waits` line as a test, so the records' 2212, 2217 and 2222 were 2211, 2216 and 2221. `docs/phase7-status.md` is corrected and the counter is fixed in the two leases still to come; these older journal entries stand as written. I also stamped a bug's enqueue time by estimate, 04:50Z, and corrected it to 04:39Z from the file's mtime, the third such slip this run.
+
+**Decisions the operator made here.** Votes 30 and 31, before this run: no lazy FP, and the subset at C9. FPCR's skip I decided on the figure.
+
+**Not done.** The full matrix and the gates owed at the merge. No figures on a real CPU. The speculative TLB fill on the old root was never reproduced, so its risk is a reading. The trampoline's few unmasked instructions stay open in the FP fixture, to a false red only.
+
 ## 2026-11-05 (aux, Opus 5.5 1M) -- C8b lands; C10's three readings close
 
 **What landed.** Thread-model C8b, `0905ba39d..b89afb330`, plus a C10 witness `2d4c38abe`. Per-CPU timer bases, a wake takes no timer lock, the sleeper unlinks itself, operator vote 21. Green 2222 twice on one ELF (cf2261a6bae7dc17). SMP subset 20 of 20 boots passed, 0 corruption. The full matrix did NOT run (11-02 hold) and is owed at the merge.
