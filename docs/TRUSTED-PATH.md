@@ -187,8 +187,16 @@ That settles a client's poison, not its backlog. The trusted paint is itself fen
 on the host's one FIFO it runs behind whatever is already queued there. It can stall,
 and a stall is no answer from the device: the takeover starts over when the engine
 revives, under the kernel's deadline. A backlog delays the SAK. One longer than that
-deadline, or a host loop held that long, fails the episode with nothing changed on the
-glass, the stalled-participant case of `HALCYON-INTERACTION-SEAT-REVIEW.md`.
+deadline, or a host loop held that long, fails the episode with no trusted screen shown:
+the outputs stay as they were, or dark if the hold came after exclusion. That is not the
+stalled-participant case `HALCYON-INTERACTION-SEAT-REVIEW.md` approved, since an
+unprivileged client causes it, and what it should do is an open operator vote.
+
+Before a chord is seen there is a wider gap, in the same vote. With the seat normal, a
+synchronous command behind a client's readback waits up to `FENCE_ABANDON_MS`
+(`Controlq::wait_widens`) and Lictor's serve loop stops for it, so a chord goes unseen
+for as long as that client queued, and keys typed in that time can be lost. At 30 s the
+engine dies for the boot.
 
 **As built:** the serial episode gates UART output to the attached trusted
 process. The QEMU graphical backend uses Lictor as the boot-trusted physical

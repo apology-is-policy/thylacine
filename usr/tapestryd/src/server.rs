@@ -10033,6 +10033,9 @@ impl Comp {
                 }
             }
             Err(_) => {
+                // A stalled command's outcome is unknown, so the plane may hold this
+                // state or the last: only an accepted update says which.
+                self.cursor_sent = None;
                 if self.cursor_refused.is_none() {
                     say!("tapestryd: pointer backend refused an update; retrying");
                 }

@@ -246,7 +246,7 @@ the stall shots.
 
 Physical Ctrl-Alt-F10 (with Ctrl-Alt-Delete retained for compatibility)
 starts a kernel generation (the kernel scans the chord; [[abi-trusted-seat]]). Normal hardware requests
-park while the service drains all outstanding work, excludes every advertised
+park while the service waits out the synchronous work and the cursor queue, excludes every advertised
 scanout and selects private, non-shareable trusted backing. Held keys and buttons
 must be released before Corvus can receive input. Operation 65 admits only
 standard normal pointer shapes, scale and position from the authenticated
@@ -258,15 +258,16 @@ misses its deadline stalls the lane, exactly as the controlq stalls:
 - the queue is not idle, so cursor commands are refused and quiescence waits;
 - the completion pump retires the chain late (`cursor_settle`), with the same
   validation an on-time chain gets;
-- a malformed entry, or a chain outstanding for 30 s, fails the queue.
+- a malformed entry fails the queue, and a chain outstanding for 30 s abandons it
+  until that chain retires.
 A controlq step on the plane that stalled (the image upload, the plane's
 one-time create and attach) is not the lane's failure, since the controlq's own
 stall holds quiescence. A stalled create or attach is taken as done, because
-repeating it would collide with what it made. A failed cursor queue retains its
-backing until GPU reset and prevents trusted acknowledgement.
-Cursor waits share controlq's sticky allowance for an outstanding GPU readback;
-the two queues share the device loop, so a delayed readback is not itself proof
-of a dead cursor queue. Input latency under that load remains a runtime gate.
+repeating it would collide with what it made. A failed or abandoned cursor queue
+prevents trusted acknowledgement, and a failed one retains its backing until GPU
+reset. The two queues share the device loop, so a client's readback can delay a
+cursor chain, which stalls at its ordinary bound rather than hold the serve loop.
+Input latency under that load remains a runtime gate.
 See `docs/HALCYON-INTERACTION.md` section 14.
 
 Corvus sends bounded semantic frames containing identity, exact capabilities,
@@ -299,8 +300,12 @@ poisoned, cannot reach the trusted image, whose id `Objects::valid_id` refuses o
 every named route and which is never attached to a context, so a client's poison
 does not deny the SAK. Its backlog can: the paint is fenced, so it retires behind
 what the host has queued. A takeover that meets a stall starts over when the engine
-revives (`Gpu::stall_pending`), under the kernel's five-second deadline; while the seat
-is not normal no wait takes the abandonment bound (`Gpu::seat_bound`). A serving
+revives (`Gpu::stall_pending`), under the kernel's five-second deadline, and says so; a
+device's answer fails it at once. A frame paint that meets a stall stays owed and the
+next pass paints it again. While the seat is not normal no wait takes the abandonment
+bound (`Gpu::seat_bound`). With the seat normal, a command behind a client's readback
+still does, so one transfer can stop this loop for as long as that client queued; that
+is an open operator vote (`docs/TRUSTED-PATH.md`). A serving
 `cursor_command` stalls at `SUBMIT_DEADLINE_MS` and never widens. A chain past
 `FENCE_ABANDON_MS` is abandoned rather than poisoned: a well-formed late retirement
 frees the lane (`cursor_queue::Queue::abandon`). A restore refused by a stalled engine

@@ -3935,17 +3935,38 @@ fn rb_upload_triangles(warp: i64, ctx: u32, vbo: u32, vbo_va: u64) {
     let _ = rb_wait_signaled(warp, ctx, before, 1, libthyla_rs::time::Instant::now(), "vbo-upload");
 }
 
+/// Write one whole command to a warp file, and say whether the broker took it. EAGAIN
+/// is the broker's stall (GPU-DESIGN 4.5.15), which ends by itself, and a client
+/// keeping a queue full causes it; anything else fails this program.
+fn write_unless_behind(root: i64, path: &str, bytes: &[u8]) -> bool {
+    let fd = unsafe { t_open(root, path.as_ptr(), path.len(), T_OWRITE) };
+    if fd < 0 {
+        fail(&format!("chain-hold: open {}", path));
+    }
+    let n = unsafe { t_write(fd, bytes.as_ptr(), bytes.len()) };
+    unsafe { t_close(fd) };
+    if n == -11 {
+        return false;
+    }
+    if n != bytes.len() as i64 {
+        fail(&format!("chain-hold: {} refused ({})", path, n));
+    }
+    true
+}
+
 /// Keep `CHAIN_HOLD_DEPTH` heavy submits on the device for `argv[2]` seconds, and
 /// say when the first full queue has turned over and refilled, read from the
-/// broker's own fence count.
+/// broker's own fence count. With `readback` as `argv[3]`, one transfer of the busy
+/// target also stays in flight at the tail.
 fn chain_hold() -> i64 {
     let secs: u64 = libthyla_rs::env::args()
         .get_str(2)
         .and_then(|s| s.parse().ok())
-        .unwrap_or_else(|| fail("chain-hold <seconds>"));
+        .unwrap_or_else(|| fail("chain-hold <seconds> [readback]"));
+    let readback = libthyla_rs::env::args().get_str(3) == Some("readback");
     let warp = warp_connect("chain-hold");
     let ctx = mint_ctx(warp, "chain-hold");
-    let (_, res, _) = mint_bo_wh(warp, ctx, RB_W, RB_H, VIRGL_RESOURCE_Y_0_TOP, "chain-hold target");
+    let (bo, res, _) = mint_bo_wh(warp, ctx, RB_W, RB_H, VIRGL_RESOURCE_Y_0_TOP, "chain-hold target");
     let (vbo, vbo_res, vbo_va) = mint_buffer_bo(warp, ctx, "chain-hold vbo");
     rb_upload_triangles(warp, ctx, vbo, vbo_va);
     let before = ctx_field(warp, ctx, "fence-signaled");
@@ -3957,33 +3978,62 @@ fn chain_hold() -> i64 {
     guard_not_poisoned(warp, "chain-hold prime");
     let _ = rb_wait_signaled(warp, ctx, before, 1, libthyla_rs::time::Instant::now(), "chain-hold prime");
     let base = ctx_field(warp, ctx, "fence-signaled");
+    let submit = format!("ctx/{}/submit", ctx);
+    let bo_ctl = format!("ctx/{}/bo/{}/ctl", ctx, bo);
+    let xfer = format!("transfer_from 0 0 0 0 {} {} 1 0 0 0", RB_W, RB_H);
     let mut sent = 0u64;
+    let mut refused = 0u64;
+    let mut read_at: Option<u64> = None;
     let mut said = false;
     let t0 = libthyla_rs::time::Instant::now();
     while t0.elapsed().as_secs() < secs {
         let retired = ctx_field(warp, ctx, "fence-signaled") - base;
+        if read_at.is_some_and(|at| retired > at) {
+            read_at = None;
+        }
         if sent - retired < CHAIN_HOLD_DEPTH {
             let mut st: Vec<u32> = Vec::new();
             fb_state_stream(&mut st, 1);
             for k in 0..RB_DRAWS_PER_SUBMIT {
                 draw_stream(&mut st, 0.0, 1.0, rb_clear_color(k, RB_DRAWS_PER_SUBMIT));
             }
-            submit_stream(warp, ctx, &st, "chain-hold");
-            sent += 1;
+            let bytes: Vec<u8> = st.iter().flat_map(|d| d.to_le_bytes()).collect();
+            if write_unless_behind(warp, &submit, &bytes) {
+                sent += 1;
+            } else {
+                refused += 1;
+                let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(5));
+            }
+        } else if readback && read_at.is_none() {
+            if write_unless_behind(warp, &bo_ctl, xfer.as_bytes()) {
+                read_at = Some(sent);
+                sent += 1;
+            } else {
+                refused += 1;
+                let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(5));
+            }
         } else {
             if !said && retired >= CHAIN_HOLD_DEPTH {
                 said = true;
                 t_putstr(&format!(
-                    "warp-prove: CHAIN-HOLD DEEP ctx {} sent {} retired {} after {} ms\n",
+                    "warp-prove: CHAIN-HOLD DEEP ctx {} sent {} retired {} refused {} after {} ms\n",
                     ctx,
                     sent,
                     retired,
+                    refused,
                     t0.elapsed().as_millis()
                 ));
             }
             let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(5));
         }
     }
+    t_putstr(&format!(
+        "warp-prove: CHAIN-HOLD END ctx {} sent {} refused {} after {} ms\n",
+        ctx,
+        sent,
+        refused,
+        t0.elapsed().as_millis()
+    ));
     0
 }
 

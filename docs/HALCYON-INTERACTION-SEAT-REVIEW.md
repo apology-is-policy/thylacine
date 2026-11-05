@@ -108,13 +108,18 @@ Lictor accepts that control during quiescence while keeping normal GPU/input
 requests excluded. Neither loop waits synchronously for an application reply.
 
 **Availability consequence:** a live but stalled renderer or Tapestry may prevent
-SAK from opening, and on a backend with one host FIFO so may a client's queued GPU
-work (`TRUSTED-PATH.md`). At the existing five-second deadline, the episode fails with
+SAK from opening. At the existing five-second deadline, the episode fails with
 no grant, then follows the existing safe display restoration path. There is no
 new forced process kill, bypass, infinite wait or silent downgrade. Keyboard
 and scanout exclusion begins immediately; secret input starts only after the
 aggregate acknowledgement. This adds a normal-session responsiveness dependency
 to SAK and is the substantive policy choice approved on October 2.
+
+**Not covered by that approval:** on a backend with one host FIFO, an unprivileged
+client's queued GPU work can also prevent SAK from opening, and scanout exclusion
+then does not begin at once either, since the trusted paint comes first
+(`TRUSTED-PATH.md`). October 2 approved stalled session brokers, not this. What it
+should do is an open operator vote.
 
 The broker already holds its session's clipboard; this acknowledgement is a
 cleanup obligation of that existing trusted implementation, not a new claim

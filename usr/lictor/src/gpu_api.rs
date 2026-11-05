@@ -350,9 +350,10 @@ pub fn admit(request: &Request, phase: u32, hold: Hold, parked_ms: u64) -> bool 
 /// bound every fenced chain already carries (backend gpu.rs asserts the two
 /// equal), past which the device's own abandonment has given up on it too.
 pub const PARK_BOUND_MS: u64 = 30_000;
-/// What a stalled engine (or cursor lane) becomes at a completion pump
-/// (GPU-DESIGN 4.5.15): a chain that has retired revives it however late,
-/// and one still outstanding at the abandonment bound kills it.
+/// What a stalled engine or cursor lane becomes at a completion pump
+/// (GPU-DESIGN 4.5.15): a chain that has retired revives it however late. One
+/// still outstanding at the abandonment bound kills an engine, and abandons a
+/// cursor lane until that chain retires.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Stall { Holding, Revived, Dead }
 pub fn stall_verdict(outstanding: bool, stalled_ms: u64) -> Stall {

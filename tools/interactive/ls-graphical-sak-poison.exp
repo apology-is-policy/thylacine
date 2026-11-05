@@ -2,8 +2,8 @@
 # ls-graphical-sak-poison -- a client's poisoned fence must not deny the
 # graphical SAK (OPEN-BUGS 2026-11-03T13:28Z, I-27).
 #
-# Lictor's takeover waits in phase 1 for every chain to retire before it shows
-# anything. warp-prove poison-hold keeps one fenced slot poisoned, as a client
+# Lictor's takeover does not wait for a fenced chain to retire, because none can
+# reach the trusted image (vote 50). warp-prove poison-hold keeps one fenced slot poisoned, as a client
 # whose chain outlived the abandonment bound does. The chord must still bring up
 # the trusted screen. A kernel that fails the episode at its quiesce deadline
 # with the scanout still normal has changed nothing on the glass, so a fake
@@ -19,6 +19,10 @@ set ::env(THYLACINE_SERIAL_SAK) 0
 source [file join [file dirname [info script]] lib.exp]
 if {![info exists ::env(THYLACINE_GPU_DEV)] || ![string match virtio-gpu-gl* $::env(THYLACINE_GPU_DEV)]} {
     puts "\nLS-CI SKIP: this scenario needs a warp ctx, so a virgl device (THYLACINE_GPU_DEV=virtio-gpu-gl-pci)"
+    exit 77
+}
+if {![info exists ::env(THYLACINE_EGL_VNC_SOCKET)]} {
+    puts "\nLS-CI SKIP: this scenario reads the glass through egl-headless's VNC socket (THYLACINE_EGL_VNC_SOCKET)"
     exit 77
 }
 set repo $lc_repo
@@ -48,34 +52,39 @@ proc witness {stage} {
 # How much of the glass is the trusted screen's ground. Lictor's line says what it
 # asked the device for; this reads what reached the glass.
 proc ground {name} {
-    global repo qmp
+    global repo
     after 1000
     set out [file join $repo build sak-poison-$name.png]
-    if {[info exists ::env(THYLACINE_EGL_VNC_SOCKET)]} {
-        if {[catch {exec python3 $repo/tools/interactive/vnc_capture.py $::env(THYLACINE_EGL_VNC_SOCKET) $out} e]} { lc_fail $e }
-    } else {
-        if {[catch {exec $repo/tools/screendump.sh -s $qmp $out} e]} { lc_fail $e }
-    }
+    if {[catch {exec python3 $repo/tools/interactive/vnc_capture.py $::env(THYLACINE_EGL_VNC_SOCKET) $out} e]} { lc_fail $e }
     if {[catch {exec python3 $repo/tools/interactive/sak_glass.py $repo/usr/lictor/src/render.rs $out} r]} { lc_fail $r }
     if {![regexp {^ground ([0-9]+)\n(.*)$} $r -> pct top]} { lc_fail "an unread capture: $r" }
     lc_pass "SAK-POISON glass $name ground=$pct% $top"
     return $pct
 }
-# One chord and one Return, as an empty episode; the takeover must show first.
+# One chord and one Return, as an empty episode; the takeover must show first, and
+# then the episode must end by itself. Corvus prints its end line for a seat that
+# failed too, and expect tries arms in list order over everything buffered during the
+# capture, so each failure arm comes before the line it would otherwise lose to.
+# Returns how many times the takeover met a stall.
 proc episode {leg} {
     global timeout
     set t0 [clock milliseconds]
     key "ctrl+alt+f10"
     set timeout 20
+    set stalls 0
     expect {
-        -ex "lictor: trusted scanout active" {
-            lc_step "SAK-POISON $leg takeover-ms=[expr {[clock milliseconds] - $t0}]"
-        }
-        -ex "lictor: kernel closed trusted seat (scanout normal)" {
-            lc_fail "SAK-POISON RED ($leg): the episode failed at its deadline with nothing on the glass"
-        }
         -re {lictor: seat failed: [^\r\n]*[\r\n]} {
             lc_fail "SAK-POISON RED ($leg): the seat refused the takeover: $expect_out(0,string)"
+        }
+        -re {lictor: kernel closed trusted seat \(scanout [a-z]+\)} {
+            lc_fail "SAK-POISON RED ($leg): the episode failed at its deadline: $expect_out(0,string)"
+        }
+        -re {lictor: takeover met a stall, starting over generation=[0-9]+} {
+            incr stalls
+            exp_continue
+        }
+        -ex "lictor: trusted scanout active" {
+            lc_pass "SAK-POISON $leg takeover-ms=[expr {[clock milliseconds] - $t0}] stalls=$stalls"
         }
         -re {EXTINCTION:} { lc_extinction_fail "takeover ($leg)" }
         timeout { lc_fail "$leg: no takeover and no failure within 20 s of the chord" }
@@ -85,14 +94,33 @@ proc episode {leg} {
     key "ret"
     set timeout 30
     expect {
-        -ex "corvus: imperium: SAK with nothing pending" { lc_step "$leg: the empty episode ended" }
-        -ex "lictor: kernel closed trusted seat (scanout private)" {
-            lc_fail "$leg: the episode failed instead of ending"
+        -re {lictor: seat failed: [^\r\n]*[\r\n]} {
+            lc_fail "$leg: the episode failed after the takeover: $expect_out(0,string)"
         }
+        -re {lictor: kernel closed trusted seat \(scanout [a-z]+\)} {
+            lc_fail "$leg: the episode failed instead of ending: $expect_out(0,string)"
+        }
+        -ex "lictor: trusted seat recovered; nothing was conferred" {
+            lc_fail "$leg: the seat recovered from a failure instead of ending the episode"
+        }
+        -ex "corvus: imperium: SAK with nothing pending" { lc_step "$leg: the empty episode ended" }
         -re {EXTINCTION:} { lc_extinction_fail "the end of the episode ($leg)" }
         timeout { lc_fail "$leg: the episode did not end within 30 s" }
+        eof { lc_fail "EOF at the end of the episode ($leg)" }
     }
     after 1500
+    set timeout 0
+    expect {
+        -re {lictor: seat failed: [^\r\n]*[\r\n]} {
+            lc_fail "$leg: the seat failed as the episode ended: $expect_out(0,string)"
+        }
+        -re {lictor: kernel closed trusted seat \(scanout [a-z]+\)} {
+            lc_fail "$leg: the kernel closed the seat as the episode ended: $expect_out(0,string)"
+        }
+        -re {EXTINCTION:} { lc_extinction_fail "after the episode ($leg)" }
+        timeout {}
+    }
+    return $stalls
 }
 lc_boot
 set timeout $lc_boot_timeout
@@ -131,8 +159,9 @@ key "meta_l+f"
 witness baseline
 if {[ground workspace] > 5} { lc_fail "the workspace reads as the trusted screen, so the glass check tells nothing" }
 
-episode control
+if {[episode control] != 0} { lc_fail "a takeover with no client met a stall, so this control tells nothing" }
 witness control
+if {[ground restored] > 5} { lc_fail "the workspace did not come back after the control episode" }
 
 type "warp-prove poison-hold 240 &\n"
 set timeout 60

@@ -54,6 +54,9 @@ pub struct Screen {
     /// part-way, at the kernel's deadline.
     #[cfg(feature = "test-mode")]
     pub test_hold_after_exclusion: bool,
+    /// The device refuses the trusted bind: an answer, so the takeover fails at once.
+    #[cfg(feature = "test-mode")]
+    pub test_refuse_bind: bool,
     // Once attached these pins survive every error. The owning service must
     // reset/drop Gpu before dropping Screen, including on an unwinding exit.
     _backing: Vec<Dma>,
@@ -88,7 +91,8 @@ impl Screen {
         }
         Ok(Self { width, height, pixels, active: false, raster, _backing: backing,
             #[cfg(feature = "test-mode")] test_stall_after_exclusion: false,
-            #[cfg(feature = "test-mode")] test_hold_after_exclusion: false })
+            #[cfg(feature = "test-mode")] test_hold_after_exclusion: false,
+            #[cfg(feature = "test-mode")] test_refuse_bind: false })
     }
     pub fn paint(&mut self, gpu: &mut Gpu, model: &Model, masked: usize,
                  backdrop: Option<&[u32]>) -> Result<(), Error> {
@@ -108,9 +112,16 @@ impl Screen {
         let stall = core::mem::take(&mut self.test_stall_after_exclusion);
         #[cfg(feature = "test-mode")]
         let hold = core::mem::take(&mut self.test_hold_after_exclusion);
+        #[cfg(feature = "test-mode")]
+        let refuse = core::mem::take(&mut self.test_refuse_bind);
         gpu.exclude_all_outputs()?;
         #[cfg(feature = "test-mode")]
         if stall || hold { gpu.test_latch_now(hold); }
+        #[cfg(feature = "test-mode")]
+        if refuse {
+            super::diagnostic("lictor: trusted bind refused (INJECTED by test-latch-dead)\n");
+            return Err(Error::Hardware);
+        }
         gpu.set_scanout(RESOURCE, self.width, self.height)?;
         gpu.flush(RESOURCE, 0, 0, self.width, self.height)?;
         self.active = true;

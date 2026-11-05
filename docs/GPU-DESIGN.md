@@ -2591,9 +2591,10 @@ block the serve loop, and seat input with it. Neither was taken.
   - the 30 s park bound.
   A stall is not a poisoned chain. It is the one non-quiescent state
   that comes back by itself. A takeover that meets a stall starts over when the
-  engine revives, under the kernel's deadline: nothing it did can have been answered,
-  and everything it repeats is idempotent (TRUSTED-PATH, vote 50's audit). A seat
-  episode whose restoration meets a stall
+  engine revives, under the kernel's deadline: the command it stalled on has no answer
+  yet, and everything it repeats is idempotent (TRUSTED-PATH, vote 50's audit). A frame
+  paint that meets one stays owed: the next pass paints it again, and Corvus reads no
+  key until it is visible. A seat episode whose restoration meets a stall
   fails at once, so its grant is cancelled. The seat's return to normal then
   waits for the stall: it rebinds once the engine revives, or goes back
   without its display once the engine dies (TRUSTED-PATH §7, vote 30).
@@ -2610,19 +2611,26 @@ block the serve loop, and seat input with it. Neither was taken.
   a ctx-0 transfer included, the trusted resource is never attached to a context, and
   only the broker binds scanouts (TRUSTED-PATH, vote 50). The trusted paint still
   retires behind what the host has queued, since a synchronous chain is fenced, so a
-  client's backlog delays a takeover: measured on V3D, a synchronous command behind
-  the C-6 gate's queue took 741 to 811 ms.
+  client's backlog delays a takeover: on V3D, behind the C-6 gate's queue, synchronous
+  commands retired 241 to 311 ms after their 500 ms deadline.
 - **No wait in a trusted episode takes the abandonment bound.** `Gpu::seat_bound` is
   set while the kernel's seat is not normal, and `wait_widens` then keeps a synchronous
   command at `SUBMIT_DEADLINE_MS` behind a readback. Waiting 30 s there would stop the
   serve loop under the seat with the kernel's deadline running.
+- **Outside an episode an ordinary synchronous command still widens behind a readback**
+  (`Controlq::wait_widens`). One transfer from any client stops the serve loop for as
+  long as that client queued, so a chord goes unseen and keys can be lost, and at 30 s
+  the engine dies. The rule predates the recoverable stall (vote 29), and the C-6 gate's
+  DEADLINE arm relies on it. Whether to narrow it is an open operator vote, with what a
+  backlog past the seat's deadline should do (TRUSTED-PATH).
 - **The cursor lane stalls and comes back.** A serving `cursor_command` never widens:
   it stalls at `SUBMIT_DEADLINE_MS`, so a client's readback cannot hold the serve loop
   through a pointer motion. A chain that outlives `FENCE_ABANDON_MS` is abandoned, not
   poisoned: `Queue::idle` stays false, so takeover stays out, and a well-formed late
-  retirement frees the lane. Only a malformed entry or an engine failure poisons it,
-  until device reset. The broker retries a refused pointer update
-  (`CURSOR_RETRY_MS`) rather than latching it.
+  retirement frees the lane. A malformed entry, an unsolicited one, or a step of the
+  plane's own that the device refused poisons it, until device reset. Tapestry retries a
+  refused pointer update (`CURSOR_RETRY_MS`) rather than latching it, and forgets what it
+  last sent, since a stalled command's outcome is unknown.
 - **An unknown outcome keeps what it named.** A stalled command may have
   executed, so every guest resource it named stays referenced:
   - a stalled ATTACH keeps its pins, as `Device::attach` already does for any
@@ -2648,7 +2656,7 @@ block the serve loop, and seat input with it. Neither was taken.
   and `takeover_clear` is false. The completion pump retires the chain when
   its used entry arrives, with the validation an on-time completion gets, and a
   malformed entry still poisons the queue. A chain outstanding for
-  `FENCE_ABANDON_MS` poisons it permanently, as before.
+  `FENCE_ABANDON_MS` abandons the queue until that chain retires.
 
 **What a stall costs tapestryd.** During a stall, every request tapestryd makes
 other than a retirement fails at once, and the present path skips frames. A

@@ -3098,7 +3098,8 @@ background pixels. Preferences live in surface incarnations and vanish with
 them. A seat generation change invalidates the last-sent pointer state because
 Lictor hid it during the trusted episode. A refused update is retried after
 `CURSOR_RETRY_MS`, never latched: a cursor stall behind a client's readback comes
-back by itself. The portable cursor raster lives in
+back by itself. A refusal also forgets the last-sent state, since a stalled command's
+outcome is unknown. The portable cursor raster lives in
 [[sub-libhalcyon]]; VirtIO queue ownership and exclusion live in [[sub-lictor]].
 
 HI-0 runtime checkpoint (2026-09-24): `ls-halcyon-pointer` passes on QEMU/KVM

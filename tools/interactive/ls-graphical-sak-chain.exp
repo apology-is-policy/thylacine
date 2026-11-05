@@ -1,14 +1,25 @@
 #!/usr/bin/expect -f
 # ls-graphical-sak-chain -- a client's draws in flight must not deny the
-# graphical SAK (I-27; vote 50's audit, round 1, F1).
+# graphical SAK (I-27; vote 50's audit, rounds 1 and 2).
 #
 # warp-prove chain-hold keeps about a second of full-screen draws on the device,
 # as a client rendering without pause does. Those draws sit on the host's FIFO
 # ahead of anything the trusted seat submits after the chord, so this is the
 # case a poisoned slot with nothing on the device cannot show. The chord must
 # still bring up the trusted screen. Control: the same chord and the same empty
-# episode with no client, one variable away. The queue's witness is the client's
-# own line, read from the broker's fence count just after the queue refilled.
+# episode with no client, one variable away.
+#
+# A green needs a takeover that met a stall: lictor's own line, forbidden in the
+# control. A chord that lands while the compositor's own synchronous step drains the
+# queue paints on an empty FIFO and tests nothing, so this takes chords until one has
+# met a stall, and a run in which none did is inconclusive, not a pass.
+#
+# The readback leg is the same chord with a transfer of the busy target always in
+# flight. The pointer leg moves the pointer behind that transfer: its lane must stall
+# and come back, and tapestryd must retry the update it was refused.
+#
+# Each client ends before a witness types, because keys typed behind its queue can
+# be lost.
 #
 # Needs a ctx, so a virgl device, and the session compositor. From the remote
 # repo: THYLACINE_GPU_DEV=virtio-gpu-gl-pci THYLACINE_DISPLAY=egl-headless
@@ -19,6 +30,10 @@ set ::env(THYLACINE_SERIAL_SAK) 0
 source [file join [file dirname [info script]] lib.exp]
 if {![info exists ::env(THYLACINE_GPU_DEV)] || ![string match virtio-gpu-gl* $::env(THYLACINE_GPU_DEV)]} {
     puts "\nLS-CI SKIP: this scenario needs a warp ctx, so a virgl device (THYLACINE_GPU_DEV=virtio-gpu-gl-pci)"
+    exit 77
+}
+if {![info exists ::env(THYLACINE_EGL_VNC_SOCKET)]} {
+    puts "\nLS-CI SKIP: this scenario reads the glass through egl-headless's VNC socket (THYLACINE_EGL_VNC_SOCKET)"
     exit 77
 }
 set repo $lc_repo
@@ -48,34 +63,39 @@ proc witness {stage} {
 # How much of the glass is the trusted screen's ground. Lictor's line says what it
 # asked the device for; this reads what reached the glass.
 proc ground {name} {
-    global repo qmp
+    global repo
     after 1000
     set out [file join $repo build sak-chain-$name.png]
-    if {[info exists ::env(THYLACINE_EGL_VNC_SOCKET)]} {
-        if {[catch {exec python3 $repo/tools/interactive/vnc_capture.py $::env(THYLACINE_EGL_VNC_SOCKET) $out} e]} { lc_fail $e }
-    } else {
-        if {[catch {exec $repo/tools/screendump.sh -s $qmp $out} e]} { lc_fail $e }
-    }
+    if {[catch {exec python3 $repo/tools/interactive/vnc_capture.py $::env(THYLACINE_EGL_VNC_SOCKET) $out} e]} { lc_fail $e }
     if {[catch {exec python3 $repo/tools/interactive/sak_glass.py $repo/usr/lictor/src/render.rs $out} r]} { lc_fail $r }
     if {![regexp {^ground ([0-9]+)\n(.*)$} $r -> pct top]} { lc_fail "an unread capture: $r" }
     lc_pass "SAK-CHAIN glass $name ground=$pct% $top"
     return $pct
 }
-# One chord and one Return, as an empty episode; the takeover must show first.
+# One chord and one Return, as an empty episode; the takeover must show first, and
+# then the episode must end by itself. Corvus prints its end line for a seat that
+# failed too, and expect tries arms in list order over everything buffered during the
+# capture, so each failure arm comes before the line it would otherwise lose to.
+# Returns how many times the takeover met a stall.
 proc episode {leg} {
     global timeout
     set t0 [clock milliseconds]
     key "ctrl+alt+f10"
     set timeout 20
+    set stalls 0
     expect {
-        -ex "lictor: trusted scanout active" {
-            lc_pass "SAK-CHAIN $leg takeover-ms=[expr {[clock milliseconds] - $t0}]"
-        }
-        -ex "lictor: kernel closed trusted seat (scanout normal)" {
-            lc_fail "SAK-CHAIN RED ($leg): the episode failed at its deadline with nothing on the glass"
-        }
         -re {lictor: seat failed: [^\r\n]*[\r\n]} {
             lc_fail "SAK-CHAIN RED ($leg): the seat refused the takeover: $expect_out(0,string)"
+        }
+        -re {lictor: kernel closed trusted seat \(scanout [a-z]+\)} {
+            lc_fail "SAK-CHAIN RED ($leg): the episode failed at its deadline: $expect_out(0,string)"
+        }
+        -re {lictor: takeover met a stall, starting over generation=[0-9]+} {
+            incr stalls
+            exp_continue
+        }
+        -ex "lictor: trusted scanout active" {
+            lc_pass "SAK-CHAIN $leg takeover-ms=[expr {[clock milliseconds] - $t0}] stalls=$stalls"
         }
         -re {EXTINCTION:} { lc_extinction_fail "takeover ($leg)" }
         timeout { lc_fail "$leg: no takeover and no failure within 20 s of the chord" }
@@ -85,14 +105,62 @@ proc episode {leg} {
     key "ret"
     set timeout 30
     expect {
-        -ex "corvus: imperium: SAK with nothing pending" { lc_step "$leg: the empty episode ended" }
-        -ex "lictor: kernel closed trusted seat (scanout private)" {
-            lc_fail "$leg: the episode failed instead of ending"
+        -re {lictor: seat failed: [^\r\n]*[\r\n]} {
+            lc_fail "$leg: the episode failed after the takeover: $expect_out(0,string)"
         }
+        -re {lictor: kernel closed trusted seat \(scanout [a-z]+\)} {
+            lc_fail "$leg: the episode failed instead of ending: $expect_out(0,string)"
+        }
+        -ex "lictor: trusted seat recovered; nothing was conferred" {
+            lc_fail "$leg: the seat recovered from a failure instead of ending the episode"
+        }
+        -ex "corvus: imperium: SAK with nothing pending" { lc_step "$leg: the empty episode ended" }
         -re {EXTINCTION:} { lc_extinction_fail "the end of the episode ($leg)" }
         timeout { lc_fail "$leg: the episode did not end within 30 s" }
+        eof { lc_fail "EOF at the end of the episode ($leg)" }
     }
     after 1500
+    set timeout 0
+    expect {
+        -re {lictor: seat failed: [^\r\n]*[\r\n]} {
+            lc_fail "$leg: the seat failed as the episode ended: $expect_out(0,string)"
+        }
+        -re {lictor: kernel closed trusted seat \(scanout [a-z]+\)} {
+            lc_fail "$leg: the kernel closed the seat as the episode ended: $expect_out(0,string)"
+        }
+        -re {EXTINCTION:} { lc_extinction_fail "after the episode ($leg)" }
+        timeout {}
+    }
+    return $stalls
+}
+proc pointer {x y} {
+    global repo qmp
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -p "abs $x $y"} e]} { lc_fail $e }
+}
+proc client {args} {
+    global timeout
+    type "warp-prove chain-hold $args &\n"
+    set timeout 60
+    expect {
+        -re {warp-prove: CHAIN-HOLD DEEP ctx [0-9]+ sent [0-9]+ retired [0-9]+ refused [0-9]+ after [0-9]+ ms} {
+            lc_pass "SAK-CHAIN client: $expect_out(0,string)"
+        }
+        -re {warp-prove: FAIL[^\r\n]*[\r\n]} { lc_fail "the client failed: $expect_out(0,string)" }
+        -re {EXTINCTION:} { lc_extinction_fail "starting the client" }
+        timeout { lc_fail "the client reported no full queue within 60 s of chain-hold" }
+        eof { lc_fail "EOF starting the client" }
+    }
+}
+proc client_end {} {
+    global timeout
+    set timeout 120
+    expect {
+        -re {warp-prove: CHAIN-HOLD END [^\r\n]*[\r\n]} { lc_pass "SAK-CHAIN client: $expect_out(0,string)" }
+        -re {warp-prove: FAIL[^\r\n]*[\r\n]} { lc_fail "the client failed: $expect_out(0,string)" }
+        -re {EXTINCTION:} { lc_extinction_fail "ending the client" }
+        timeout { lc_fail "the client did not end within 120 s" }
+        eof { lc_fail "EOF ending the client" }
+    }
 }
 lc_boot
 set timeout $lc_boot_timeout
@@ -131,23 +199,76 @@ key "meta_l+f"
 witness baseline
 if {[ground workspace] > 5} { lc_fail "the workspace reads as the trusted screen, so the glass check tells nothing" }
 
-episode control
+if {[episode control] != 0} { lc_fail "a takeover with no client met a stall, so this control tells nothing" }
 witness control
+if {[ground restored] > 5} { lc_fail "the workspace did not come back after the control episode" }
 
-type "warp-prove chain-hold 150 &\n"
+client 45
+set met 0
+for {set i 1} {$i <= 6 && !$met} {incr i} {
+    if {[episode chain$i] > 0} { set met 1 }
+}
+client_end
+if {!$met} { lc_fail "SAK-CHAIN INCONCLUSIVE: none of the chords behind the client's draws met a stall" }
+witness chain
+
+client 12 readback
+episode readback
+client_end
+witness readback
+
+client 20 readback
+set stalled 0
+set refused 0
+set timeout 1
+for {set i 0} {$i < 40 && !($stalled && $refused)} {incr i} {
+    pointer [expr {2000 + $i * 500}] 8000
+    expect {
+        -re {lictor: cursor chain missed its [0-9]+ ms deadline} {
+            set stalled 1
+            exp_continue
+        }
+        -ex "tapestryd: pointer backend refused an update; retrying" {
+            set refused 1
+            exp_continue
+        }
+        -re {cursor queue (abandoned|failed)} { lc_fail "pointer: the cursor queue did not survive a client's readback" }
+        -re {warp-prove: FAIL[^\r\n]*[\r\n]} { lc_fail "the client failed: $expect_out(0,string)" }
+        -re {EXTINCTION:} { lc_extinction_fail "the pointer behind a readback" }
+        timeout {}
+        eof { lc_fail "EOF at the pointer" }
+    }
+}
+if {!$stalled} { lc_fail "SAK-CHAIN RED (pointer): no pointer motion stalled behind the client's readback: its wait took the wide bound, or the host's loop stayed free" }
+if {!$refused} { lc_fail "SAK-CHAIN RED (pointer): the cursor lane stalled and tapestryd was never refused" }
+lc_pass "SAK-CHAIN pointer: the lane stalled behind a readback and the update was refused"
+# These lines come from three processes in no fixed order, so one alternation: the
+# earliest in the buffer wins, and no line is lost to a later one that matched first.
+set revived 0
+set accepted 0
+set ended 0
 set timeout 60
 expect {
-    -re {warp-prove: CHAIN-HOLD DEEP ctx [0-9]+ sent [0-9]+ retired [0-9]+ after [0-9]+ ms} {
-        lc_pass "SAK-CHAIN client: $expect_out(0,string)"
-    }
+    -re {cursor queue (abandoned|failed)} { lc_fail "pointer: the cursor queue did not survive a client's readback" }
     -re {warp-prove: FAIL[^\r\n]*[\r\n]} { lc_fail "the client failed: $expect_out(0,string)" }
-    -re {EXTINCTION:} { lc_extinction_fail "starting the client" }
-    timeout { lc_fail "the client reported no full queue within 60 s of chain-hold" }
-    eof { lc_fail "EOF starting the client" }
+    -re {EXTINCTION:} { lc_extinction_fail "the pointer's revival" }
+    -re {cursor queue revived|tapestryd: pointer backend accepted an update again|warp-prove: CHAIN-HOLD END [^\r\n]*[\r\n]} {
+        set hit $expect_out(0,string)
+        if {[string match "*revived*" $hit]} { set revived 1 }
+        if {[string match "*accepted*" $hit]} { set accepted 1 }
+        if {[string match "*CHAIN-HOLD END*" $hit]} {
+            set ended 1
+            lc_pass "SAK-CHAIN client: $hit"
+            if {!$accepted} { pointer 9000 9000 }
+        }
+        if {!($ended && $accepted)} { exp_continue }
+    }
+    timeout { lc_fail "pointer: within 60 s: revived=$revived accepted=$accepted ended=$ended" }
+    eof { lc_fail "EOF at the pointer's revival" }
 }
-
-episode chain
-witness chain
+if {!$revived} { lc_fail "pointer: the update was accepted, but lictor never said the lane revived" }
+after 1500
+witness pointer
 lc_pass "graphical SAK: the trusted screen came up behind another client's draws in flight"
 lc_quit
 exit 0

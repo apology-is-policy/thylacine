@@ -21,8 +21,8 @@ pub(super) struct Plane {
     image: Option<(Shape, u16)>,
     visible: bool,
     /// The outstanding chain missed its deadline (GPU-DESIGN 4.5.15): the
-    /// completion pump retires it late, or poisons the lane at
-    /// FENCE_ABANDON_MS.
+    /// completion pump retires it late, or abandons the lane at
+    /// FENCE_ABANDON_MS until it does.
     stalled: Option<Instant>,
     /// The next cursor command misses its deadline at once, and its
     /// retirement is held until released (the test-latch-dead lever).
@@ -30,6 +30,9 @@ pub(super) struct Plane {
     test_stall_next: bool,
     #[cfg(feature = "test-mode")]
     test_hold: bool,
+    /// The hold outlasts the seat's restore and ends at the abandonment bound.
+    #[cfg(feature = "test-mode")]
+    test_abandon: bool,
 }
 impl Plane {
     pub(super) fn new(notify: u64) -> Self {
@@ -48,6 +51,8 @@ impl Plane {
             test_stall_next: false,
             #[cfg(feature = "test-mode")]
             test_hold: false,
+            #[cfg(feature = "test-mode")]
+            test_abandon: false,
         }
     }
 }
@@ -158,7 +163,7 @@ impl Gpu {
             }
             if missed {
                 self.cursor.queue.abandon();
-                say!("lictor: cursor chain never retired in {} ms -- cursor queue dead", deadline_ms);
+                say!("lictor: cursor chain never retired in {} ms -- cursor queue abandoned until it retires", deadline_ms);
                 return Err(Error::Hardware);
             }
             if self.ctrl.service_completions(1_000_000).is_err() {
@@ -219,7 +224,12 @@ impl Gpu {
             None if crate::gpu_api::stall_verdict(true, ms) == crate::gpu_api::Stall::Dead => {
                 self.cursor.stalled = None;
                 self.cursor.queue.abandon();
-                say!("lictor: cursor chain never retired in {} ms -- cursor queue dead", ms);
+                say!("lictor: cursor chain never retired in {} ms -- cursor queue abandoned until it retires", ms);
+                #[cfg(feature = "test-mode")]
+                if core::mem::take(&mut self.cursor.test_abandon) {
+                    self.cursor.test_hold = false;
+                    say!("lictor: cursor chain retirement released (test-latch-dead)");
+                }
             }
             None => {}
         }
@@ -301,6 +311,8 @@ impl Gpu {
             // transfer() verifies the echoed controlq fence before returning.
             let stalls = self.ctrl.stalls;
             if self.transfer(RESOURCE, 0, 0, 0, 64, 64).is_err() {
+                // A stalled upload can still land, so nothing says what the host holds.
+                self.cursor.uploaded = false;
                 self.cursor_step_failed(stalls);
                 return Err(Error::Hardware);
             }
@@ -314,6 +326,11 @@ impl Gpu {
 
     /// Arm (or disarm) the lever's cursor stall for the next cursor command.
     #[cfg(feature = "test-mode")]
+    pub fn test_cursor_abandon_next(&mut self) {
+        self.cursor.test_abandon = true;
+    }
+
+    #[cfg(feature = "test-mode")]
     pub fn test_cursor_stall_next(&mut self, on: bool) {
         self.cursor.test_stall_next = on;
     }
@@ -322,6 +339,9 @@ impl Gpu {
     /// retires the chain late, the way a slow device does.
     #[cfg(feature = "test-mode")]
     pub fn test_cursor_release(&mut self) {
+        if self.cursor.test_abandon {
+            return;
+        }
         if core::mem::take(&mut self.cursor.test_hold) {
             say!("lictor: cursor chain retirement released (test-latch-dead)");
         }

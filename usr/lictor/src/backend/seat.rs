@@ -113,6 +113,17 @@ impl Seat {
         let _ = ep::call(ep::FAIL, &mut m);
         super::diagnostic(&alloc::format!("lictor: seat failed: {} generation={}\n", why, self.generation));
     }
+    // A stall is other work ahead of ours on the device, not an answer from it: the
+    // chain retires, the engine revives and the next pass starts over. The kernel's
+    // deadline bounds that.
+    fn takeover_refused(&mut self, device: &Device) {
+        if device.gpu.stall_pending() {
+            super::diagnostic(&alloc::format!(
+                "lictor: takeover met a stall, starting over generation={}\n", self.generation));
+        } else {
+            self.fail("private scanout activation");
+        }
+    }
     pub fn step(&mut self, device: &mut Device, screen: &mut Screen, inputs: &mut [Input]) {
         let mut m = ep::Message::default();
         if ep::call(ep::STATUS, &mut m).is_err() { self.fail("status"); return; }
@@ -128,11 +139,8 @@ impl Seat {
                 if !device.gpu.takeover_clear() { return; }
                 if !self.active() {
                     self.model = Model { notice: b"Preparing the trusted path.".to_vec(), ..Model::default() };
-                    // A stall here is other work ahead of ours on the device, not
-                    // an answer from it: the chain retires, the engine revives and
-                    // the next pass starts over. The kernel's deadline bounds that.
                     if screen.paint(&mut device.gpu, &self.model, 0, None).is_err() {
-                        if !device.gpu.stall_pending() { self.fail("private scanout activation"); }
+                        self.takeover_refused(device);
                         return;
                     }
                     #[cfg(feature = "test-mode")]
@@ -146,7 +154,10 @@ impl Seat {
                     {
                         screen.test_stall_after_exclusion = shot == Some(SeatShot::StallAfterExclusion);
                         screen.test_hold_after_exclusion = shot == Some(SeatShot::HoldAfterExclusion);
-                        device.gpu.test_cursor_stall_next(shot == Some(SeatShot::CursorStall));
+                        screen.test_refuse_bind = shot == Some(SeatShot::RefuseBind);
+                        device.gpu.test_cursor_stall_next(matches!(shot, Some(SeatShot::CursorStall | SeatShot::CursorAbandon)));
+                        if shot == Some(SeatShot::CursorAbandon) { device.gpu.test_cursor_abandon_next(); }
+                        if shot == Some(SeatShot::BehindReadback) { device.gpu.test_behind_readback(); }
                         self.test_refuse_restored |= shot == Some(SeatShot::RefuseRestored);
                         self.test_release_on_failure |= shot == Some(SeatShot::HoldAfterExclusion);
                     }
@@ -157,7 +168,7 @@ impl Seat {
                     #[cfg(feature = "test-mode")]
                     device.gpu.test_cursor_stall_next(false);
                     if activated.is_err() {
-                        if !device.gpu.stall_pending() { self.fail("private scanout activation"); }
+                        self.takeover_refused(device);
                         return;
                     }
                     self.active = Some(self.generation); self.sequence = 0; self.masked = 0;
@@ -178,8 +189,11 @@ impl Seat {
                     let model = match Model::decode(&m.data[..m.length as usize]) {
                         Ok(model) => model, Err(_) => { self.fail("frame decode"); return; }
                     };
+                    // The frame stays owed, so the next pass paints it again. Corvus
+                    // reads no key until it is visible, and bounds that wait.
                     if screen.paint(&mut device.gpu, &model, m.code as usize, None).is_err() {
-                        self.fail("private frame paint"); return;
+                        if !device.gpu.stall_pending() { self.fail("private frame paint"); }
+                        return;
                     }
                     if ep::call(ep::VISIBLE, &mut m).is_err() { self.fail("visibility acknowledgement"); return; }
                     self.model = model; self.sequence = m.sequence; self.masked = m.code;

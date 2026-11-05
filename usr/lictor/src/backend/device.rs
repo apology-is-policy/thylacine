@@ -54,8 +54,14 @@ pub enum SeatShot {
     StallAfterExclusion,
     /// The same stall with its retirement withheld past the kernel's deadline.
     HoldAfterExclusion,
+    /// The device refuses the trusted bind: an answer, so the takeover fails at once.
+    RefuseBind,
+    /// A readback stands ahead of the takeover's commands for longer than their bound.
+    BehindReadback,
     /// A cursor stall inside exclusion, held until the seat restores.
     CursorStall,
+    /// The same cursor stall, held past the abandonment bound.
+    CursorAbandon,
     /// The kernel's RESTORED refused after a completed restore.
     RefuseRestored,
     /// A controlq stall under the trusted scanout whose retirement is
@@ -190,9 +196,12 @@ impl Device {
     #[cfg(feature = "test-mode")]
     pub fn test_latch_seat_shot(&mut self) -> Option<SeatShot> {
         let shot = match self.test_seat_shots {
-            5 => SeatShot::StallAfterExclusion,
-            4 => SeatShot::HoldAfterExclusion,
-            3 => SeatShot::CursorStall,
+            8 => SeatShot::StallAfterExclusion,
+            7 => SeatShot::HoldAfterExclusion,
+            6 => SeatShot::RefuseBind,
+            5 => SeatShot::BehindReadback,
+            4 => SeatShot::CursorStall,
+            3 => SeatShot::CursorAbandon,
             2 => SeatShot::RefuseRestored,
             1 => SeatShot::StallHeld,
             _ => return None,
@@ -594,7 +603,7 @@ impl Device {
             }
             Request::TestArmLatch => {
                 #[cfg(feature = "test-mode")] {
-                    self.test_latch_shots = 2; self.test_seat_shots = 5; self.test_stall_shots = 3;
+                    self.test_latch_shots = 2; self.test_seat_shots = 8; self.test_stall_shots = 3;
                     ().put(&mut out);
                 }
                 #[cfg(not(feature = "test-mode"))] { return Err(Error::BadField); }
