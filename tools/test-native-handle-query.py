@@ -55,7 +55,7 @@ checks = {
         r'\+#define SYS_thyla_lstat\s+136\b'],
     'usr/lib/pouch/patches/0065-pouch-file-locks.patch': [
         r'\+#define SYS_thyla_file_lock\s+137\b'],
-    'kernel/include/thylacine/vivarium.h': [r'#define VIV_NATIVE_CEILING\s+140\b'],
+    'kernel/include/thylacine/vivarium.h': [r'#define VIV_NATIVE_CEILING\s+141\b'],
     'kernel/vivarium.c': [
         r'VIV_LINUX_KILL == SYS_HANDLE_FLAGS_GET',
         r'\{ VIV_LINUX_KILL,\s+VIV_TIER2 \}',
@@ -66,19 +66,22 @@ checks = {
         r'VIV_LINUX_RT_SIGPENDING == SYS_LSTAT',
         r'VIV_LINUX_RT_SIGACTION == SYS_SRV_REGISTRY_NEW',
         r'VIV_LINUX_RT_SIGTIMEDWAIT == SYS_FILE_LOCK',
-        r'VIV_LINUX_RT_SIGQUEUEINFO == SYS_POSTNOTE_TID'],
+        r'VIV_LINUX_RT_SIGQUEUEINFO == SYS_POSTNOTE_TID',
+        r'VIV_LINUX_RT_SIGRETURN == SYS_NOTE_DISPOSE',
+        r'_Static_assert\(SYS_ACCOUNT == 140,',
+        r'_Static_assert\(SYS_NOTE_WAIT == 141,'],
 }
 failed = []
 for name, patterns in checks.items():
     source = (r / name).read_text()
     if a.mutant == 'ceiling' and name.endswith('vivarium.h'):
-        source, n = re.subn(r'(#define VIV_NATIVE_CEILING\s+)140\b', r'\g<1>139', source)
+        source, n = re.subn(r'(#define VIV_NATIVE_CEILING\s+)141\b', r'\g<1>140', source)
         assert n == 1
     for pattern in patterns:
         if len(re.findall(pattern, source)) != 1:
             failed.append((name, pattern))
 if a.mutant == 'ceiling':
-    assert failed == [('kernel/include/thylacine/vivarium.h', r'#define VIV_NATIVE_CEILING\s+140\b')], failed
+    assert failed == [('kernel/include/thylacine/vivarium.h', r'#define VIV_NATIVE_CEILING\s+141\b')], failed
     print('PASS ceiling mutant refused by the pin')
     raise SystemExit(0)
 assert not failed, failed
