@@ -1612,6 +1612,8 @@ struct test_case g_tests[] = {
     { "cons.ring_full_refuses",        test_cons_ring_full_refuses,        false, NULL },
     { "cons.rx_can_accept_boundary",   test_cons_rx_can_accept_boundary,   false, NULL },
     { "cons.full_line_fits_ring",      test_cons_full_line_fits_ring,      false, NULL },
+    { "cons.read_ends_at_its_line",    test_cons_read_ends_at_its_line,    false, NULL },
+    { "cons.control_byte_echoes_as_caret", test_cons_control_byte_echoes_as_caret, false, NULL },
     { "cons.full_ring_never_blocks_sak", test_cons_full_ring_never_blocks_sak, false, NULL },
     { "cons.feed_write_short_on_full", test_cons_feed_write_short_on_full, false, NULL },
     { "cons.refused_byte_is_not_echoed", test_cons_refused_byte_is_not_echoed, false, NULL },

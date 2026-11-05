@@ -166,6 +166,12 @@ Cooking order matters and is fixed: carriage-return translation happens
 *first*, so that Enter-as-CR both terminates a canonical line and echoes as a
 newline; then signal generation; then canonical assembly or the raw path.
 
+A canonical read ends at its line: a reader taking one line leaves the next in
+the ring for whoever reads after it, and a read shorter than the line leaves the
+rest. A raw read takes what is there. A control byte in a canonical line echoes
+as `^X`, as N_TTY's ECHOCTL does, and erases as two columns; a tab echoes as
+itself, raw echo is unchanged, and the line holds the byte itself.
+
 **Echo-off is a hard guarantee**: when the flag is clear, no input byte reaches
 console output on *any* path — not the raw path, not the canonical path, and
 not the erase redraw. That is the password mask, and it is why the erase

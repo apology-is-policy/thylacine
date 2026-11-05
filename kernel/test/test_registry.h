@@ -981,6 +981,8 @@ void test_cons_ring_fill_drain(void);
 void test_cons_ring_full_refuses(void);
 void test_cons_rx_can_accept_boundary(void);
 void test_cons_full_line_fits_ring(void);
+void test_cons_read_ends_at_its_line(void);
+void test_cons_control_byte_echoes_as_caret(void);
 void test_cons_full_ring_never_blocks_sak(void);
 void test_cons_feed_write_short_on_full(void);
 void test_cons_refused_byte_is_not_echoed(void);
