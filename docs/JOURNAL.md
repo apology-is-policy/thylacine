@@ -22,6 +22,18 @@ needed the operator.
 
 
 ---
+## 2026-11-05 -- the first boots: MM-1c holds, and the scenarios were wrong twice where the fix was not (corona)
+
+The mac came at 11:36Z, after four and a half hours in the queue. Lease 1 ran MM-1c's boot, then vote 50's images.
+
+**MM-1c passed its first boot.** d7150d2cd: default suite 2338/2338, ls-session-account, ls-imperium and interaction-seat all green (work/nov03-mm1/m1c/q.log, 11:42-11:49Z). That closes the capacity-probe red from this morning, the probe piping its child's stdio. Audit r2 then read it on Opus: 0 P0, 0 P1, 1 P2, 2 P3. The P2 was mine: vote 65 says a sandbox whose child has a limit sees "never the pool or its ancestors", `headroom` obeyed, and the record's `limit` did not. A class with no limit read the pool even below a limited parent. 73602685b makes `limit` the nearest limit per class; the vote's text decided it, so no new vote. Two clauses of the vote had no reading that could fail, and now have them. The re-boot at 13:06-13:17Z is green the same way. Its mutants, now 26, still have not run, so "holds" covers the positive direction only.
+
+**Vote 50's first boot on HVF went red twice, and both reds were my scenarios.** Leg F waited for the frame stall's lines inside an open episode, and `backend::diagnostic` returns without printing in phase 2, so they cannot exist. The fail-probe's typing ended the episode 30.9 s in, which a key can only do once the frame is visible, so the fix had done its job in silence. The overrun scenario waited for `lictor: normal scanout restored`, which only the failed arm prints. Both false premises were also in my fake guest, which passed them 109 rows out of 109, because I had copied its lines from the Rust's print statements without the gate in front of them. e92f2fcea: the leg ends the episode with a key, whose arrival is the witness, and lictor says afterwards whether the stall was real. The rerun read `lictor: frame stall shot: stalled=1 generation=7`, ls-graphical-sak-dead green at 13:35:54Z and ls-graphical-keys-overrun green at 13:37:30Z with `input ring overran, 2 held keys released`. The lesson went into the mock's memory: a mock copies what upstream does, not what its source file contains.
+
+**corona/i32's second audit found my first audit's fix was wrong in raw mode.** r1's F2 read past a held byte in both modes. In raw mode that counts a byte the ring refused, so `sleep 30^C\r` with room for seven read `sleep 3\r`, uncounted, at every ut prompt: #95's own signature. 138896e56 stops at that byte again, as pty.tla's CookData and Linux's n_tty both do (read this time, not recalled). The console's feed had the cooked twin, and worse, since a renderer re-offers what it holds and never drops it. That half is fixed. The raw half joins the serial console's paused RX for one vote, now with 8250, tty_buffer and n_tty read: Linux handles BREAK and SAK in the ISR and drains the FIFO whatever the flip buffer holds, and leaves ^C in order behind a full buffer. r2's trace found no second boot-killing test, and my own trace of the exec and clone tests agreed. Unbooted.
+
+**What this does not cover.** Vote 50 has not run on V3D, where the failure was first seen: the Pi is queued behind main, and q-pi-v50.sh's seven scenarios decide whether the fix does what HVF cannot show. Vote 50's mutants, its audit r3 and the vote batch follow. corona/i32 has not booted at all. Nothing here is on GitHub since b2d9c274a.
+
 ## 2026-11-05 -- corona/i32 meets a host run and an audit, and neither was kind (corona)
 
 Still no mac: aux's lease was renewed past 11:30Z and I am first behind it. So the branch got the checks that need no mac, and every one of them found something a boot would have died on.
