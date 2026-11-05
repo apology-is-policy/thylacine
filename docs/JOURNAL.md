@@ -22,6 +22,25 @@ needed the operator.
 
 
 ---
+## 2026-11-05 -- corona/i32 meets a host run and an audit, and neither was kind (corona)
+
+Still no mac: aux's lease was renewed past 11:30Z and I am first behind it. So the branch got the checks that need no mac, and every one of them found something a boot would have died on.
+
+**The branch's own commit was wrong twice, and the Pi said so in seconds.** ptyfs's selftest has only ever run at boot, and a FAIL stops the boot. A throwaway crate on the Pi links usr/ptyfs/src/server.rs against libthyla-rs's `host-test` and calls `selftest()`. First run: `isigflush-not-discarded-or-m2s-flushed`, then after a fix `isigflush-ctl-byte-echo`. Both were battery steps I had left stale in ba890e481, the read that took two lines at once and the raw echo of a control byte. i32's boot would have failed on either, after waiting hours for the lease. work/nov03-mm1/ptyh/pty-mut.py now runs 20 mutants on that host: the control passes and all 20 turn red.
+
+**ptyfs's #129 shape, fixed as the console fixed it.** A newline whose line did not fit whole lost the tail and the newline, and the head ran into the next line, though the echo had shown them apart. 36739f959 refuses it whole and the writer re-offers. `pty.tla`'s `CookData` already requires ring room, so the code moved to the model. PTY-DESIGN, ARCHITECTURE and AUDIT-TRIGGERS all said the flush drops as "the cons posture", a posture the console left at #129. I changed that binding text on the side branch, and the operator hears it before it lands.
+
+**A claim checked after writing it.** ba890e481's message said the console has both cooked shapes, and the last entry recorded that as unread. Read now: `cons_input_read` drained past a newline, `cons_echo_stage` echoed control bytes raw. True, so 74314d8f6 fixes both. A census of kernel/test found one test reading two lines at once, and it reads them apart now.
+
+**The audit's P0 was a test that could never pass.** Round 1, 74314d8f6, Opus on Opus, read-only. `slab_refusal.clone` used writable eager mappings, and clone_one_vma refuses those before it asks for a Vma, which test_cow pins. Its first assert fails, the suite goes red, and kernel/main.c:895 extincts: every boot of the branch would have died, and the commit message's ".clone: refused on either mapping" described something that never ran. A clang syntax check cannot see that. I wrote it without tracing the fixture through the function it tests.
+
+**Two more were regressions of mine.** F2: a `^C` behind a refused newline in one write used to raise at once; 36739f959 held it and the writer then dropped it, while my own chg said "`^C` is not held up". That sentence was true only for a later write, and battery step 12 wrote it separately, so a broken system passed. Only a signal byte now reads past a held byte. F3: since ee9d2e38a a slab-refused Vma reached burrow_map_in's -1, so exec reported EINVAL, a malformed binary's code, which B-1a' F15 had closed. `vma_shape_ok` separates the two.
+
+**Inherited, and open.** F4: on the serial console a paused RX leaves `^C` and BREAK unread in the FIFO, arch/arm64/uart.c:526, and uart_rx_pump's only production caller is cons_input_read. An ordinary foreground child reads no console, so 256 bytes of type-ahead and a child that never reads leave the serial SAK dead while it runs. The #129 F7 closure "bounded and reader-driven" assumed a reader. test_cons_full_ring_never_blocks_sak proves the unit, not the path. It needs a vote; the draft is in design_vote50_r1.md, and the heritage in it is from memory.
+
+**What "fixed" covers.** 28372119e closes round 1: 1 P0, 3 P2, 4 P3, F4 open. ptyfs: host selftest and mutants only. Kernel: gcc syntax over 268 files and clang under the kernel's warning flags, nothing built or booted, six new mutant rows unrun. The closing line of the audit said TLC on pty.tla is owed: q-i32.sh runs it. Round 2 is running on the close state, since a P0 makes it dirty. Suite expected at 2340.
+
+---
 ## 2026-11-05 -- while the mac waits: a lost release parks the seat, and three smaller things (corona)
 
 The mac stayed with aux's 83 sabotages, so this stretch is reading and writing. Nothing in it has booted.
