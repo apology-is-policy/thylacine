@@ -191,6 +191,12 @@ false still refuses), `dev9p.open_create_refuses_non_end`,
 creator holds CAP_DAC_OVERRIDE, so only M7 can refuse, and each refusal sits
 beside an admitted control one variable away.
 
+A create whose parent descriptor names a file answers ENOTDIR before any RPC,
+whatever the file's mode: `spoor_create_install` tests the parent's QTDIR before
+the W|X check and the clone-walk (#81). `dev9p.create_into_a_file_is_enotdir`
+witnesses it with the session root's QTDIR cleared, beside the same create from
+the directory, which reaches the wire.
+
 F-5 ([[dec-2026-10-19-create-group-from-parent]]): the gid a create carries is
 the parent directory's, which `spoor_create_install` reads from the parent's
 stat ([[sub-kernel-syscall-dispatch]]); `dev9p_create` still replaces it with

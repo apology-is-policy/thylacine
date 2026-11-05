@@ -1332,7 +1332,7 @@ static struct Walkqid *dev9p_walk_attrs(struct Spoor *c, struct Spoor *nc,
         // Rlerror: a miss at the first component, or a one-name walk's failure.
         // Nothing was bound (the session layer binds new_fid only on a FULL
         // walk); nc untouched.
-        dev_walk_failed(rc != 0 ? rc : -T_E_IO);
+        dev_walk_failed(rc);
         kfree(attrs);
         walkqid_free(w);
         return NULL;

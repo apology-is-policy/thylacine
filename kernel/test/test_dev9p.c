@@ -5099,6 +5099,49 @@ void test_dev9p_create_admits_session_ends(void) {
     TEST_EXPECT_EQ((u64)seen, 0ull, "nothing reached the wire");
 }
 
+// #81: a create whose parent descriptor names a file answers ENOTDIR before any
+// RPC, whatever the file's mode (spoor_create_install's type gate runs before
+// the W|X check and the clone-walk). The base is the session root with QTDIR
+// cleared, the type a descriptor naming a file carries.
+static s64 notdir_create(bool file_base, u32 *seen) {
+    *seen = 0xBADu;
+    struct Spoor *root = make_open_client_and_root();
+    if (!root) return 0x7BAD;
+    hidx_t base = -1;
+    struct Proc *p = oc9_proc(root, &base);
+    if (!p) { teardown(root); return 0x7BAE; }
+    p9_client_set_ends(&g_client, M7_CREATOR, PRINCIPAL_INVALID);
+    struct Spoor *bs = NULL;
+    u8 was = 0;
+    struct Handle h;
+    if (handle_get(p, base, &h) == 0) {
+        bs = (struct Spoor *)h.obj;
+        was = bs->qid.type;
+        if (file_base) bs->qid.type = (u8)(was & ~QTDIR);
+        handle_put(&h);
+    }
+    g_tlcreate_seen  = 0;
+    g_twalk_enoent_n = 1;
+    s64 r = bs ? sys_walk_create_kname_for_proc(p, (u64)base, "nd81file", 8, 1 /*OWRITE*/, 0644)
+               : 0x7BAF;
+    g_twalk_enoent_n = 0;
+    *seen = g_tlcreate_seen;
+    if (bs) bs->qid.type = was;     // still held by p's table
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+    teardown(root);
+    return r;
+}
+
+void test_dev9p_create_into_a_file_is_enotdir(void) {
+    u32 seen = 0;
+    TEST_ASSERT(notdir_create(false, &seen) >= 0, "control: the directory base creates");
+    TEST_EXPECT_EQ((u64)seen, 1ull, "control: its create reached the wire");
+    TEST_EXPECT_EQ((u64)notdir_create(true, &seen), (u64)(s64)-T_E_NOTDIR,
+                   "a create whose parent descriptor names a file: ENOTDIR");
+    TEST_EXPECT_EQ((u64)seen, 0ull, "nothing reached the wire");
+}
+
 void test_dev9p_create_refuses_invalid_principal(void) {
     u32 seen = 0;
     TEST_ASSERT(m7_create(M7_CREATOR, PRINCIPAL_INVALID, M7_CREATOR, true, NULL, &seen) >= 0,

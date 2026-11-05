@@ -2397,6 +2397,7 @@ void test_dev9p_wstat_times_permission(void);
 void test_dev9p_wstat_spoor_private(void);
 void test_dev9p_wstat_errnos(void);
 void test_dev9p_create_admits_session_ends(void);
+void test_dev9p_create_into_a_file_is_enotdir(void);
 void test_dev9p_create_refuses_invalid_principal(void);
 void test_dev9p_create_refusal_keeps_eexist(void);
 void test_dev9p_create_refusal_without_rwx_enforcement(void);

@@ -2832,6 +2832,7 @@ struct test_case g_tests[] = {
     { "dev9p.path_create_refuses_dmsrvcape", test_dev9p_path_create_refuses_dmsrvcape, false, NULL },
     { "dev9p.walk_create_refuses_dmsrv_bits", test_dev9p_walk_create_refuses_dmsrv_bits, false, NULL },
     { "dev9p.create_admits_session_ends", test_dev9p_create_admits_session_ends, false, NULL },
+    { "dev9p.create_into_a_file_is_enotdir", test_dev9p_create_into_a_file_is_enotdir, false, NULL },
     { "dev9p.create_refuses_invalid_principal", test_dev9p_create_refuses_invalid_principal, false, NULL },
     { "dev9p.create_refusal_keeps_eexist", test_dev9p_create_refusal_keeps_eexist, false, NULL },
     { "dev9p.create_refusal_without_rwx", test_dev9p_create_refusal_without_rwx_enforcement, false, NULL },
