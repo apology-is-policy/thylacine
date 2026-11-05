@@ -56,6 +56,8 @@ pub struct Device {
 pub enum SeatShot {
     /// A controlq stall between exclusion and bind; the device retires it.
     StallAfterExclusion,
+    /// A controlq stall on the takeover's first paint; the device retires it.
+    StallInPaint,
     /// The same stall with its retirement withheld past the kernel's deadline.
     HoldAfterExclusion,
     /// The device refuses the trusted bind: an answer, so the takeover fails at once.
@@ -216,7 +218,8 @@ impl Device {
     #[cfg(feature = "test-mode")]
     pub fn test_latch_seat_shot(&mut self) -> Option<SeatShot> {
         let shot = match self.test_seat_shots {
-            11 => SeatShot::StallAfterExclusion,
+            12 => SeatShot::StallAfterExclusion,
+            11 => SeatShot::StallInPaint,
             10 => SeatShot::HoldAfterExclusion,
             9 => SeatShot::RefuseBind,
             8 => SeatShot::BehindReadback,
@@ -626,7 +629,7 @@ impl Device {
             }
             Request::TestArmLatch => {
                 #[cfg(feature = "test-mode")] {
-                    self.test_latch_shots = 2; self.test_seat_shots = 11; self.test_stall_shots = 3;
+                    self.test_latch_shots = 2; self.test_seat_shots = 12; self.test_stall_shots = 3;
                     self.test_blind_armed = true;
                     ().put(&mut out);
                 }

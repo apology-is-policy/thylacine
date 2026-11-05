@@ -65,6 +65,9 @@ pub struct Seat {
     /// stall is the same takeover.
     #[cfg(feature = "test-mode")]
     test_shot_generation: Option<u64>,
+    /// Taken before the first paint, which it may stall, and acted on after it.
+    #[cfg(feature = "test-mode")]
+    test_shot_due: Option<SeatShot>,
     /// The key that stops the serve loop was pressed; the armed lever decides.
     #[cfg(feature = "test-mode")]
     pub test_blind: bool,
@@ -211,17 +214,18 @@ impl Seat {
                                                     libthyla_rs::time::Instant::now()));
                     }
                     self.model = Model { notice: b"Preparing the trusted path.".to_vec(), ..Model::default() };
+                    #[cfg(feature = "test-mode")]
+                    if self.test_shot_generation != Some(self.generation) {
+                        self.test_shot_generation = Some(self.generation);
+                        self.test_shot_due = device.test_latch_seat_shot();
+                        if self.test_shot_due == Some(SeatShot::StallInPaint) { device.gpu.test_latch_now(false); }
+                    }
                     if screen.paint(&mut device.gpu, &self.model, 0, None).is_err() {
                         self.takeover_refused(device);
                         return;
                     }
                     #[cfg(feature = "test-mode")]
-                    let shot = if self.test_shot_generation == Some(self.generation) {
-                        None
-                    } else {
-                        self.test_shot_generation = Some(self.generation);
-                        device.test_latch_seat_shot()
-                    };
+                    let shot = self.test_shot_due.take();
                     #[cfg(feature = "test-mode")]
                     {
                         screen.test_stall_after_exclusion = shot == Some(SeatShot::StallAfterExclusion);
