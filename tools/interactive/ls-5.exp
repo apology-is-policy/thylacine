@@ -97,7 +97,7 @@ lc_expect "HOLO-LOOP" "runaway pure-eval loop interrupted by Ctrl-C (RW-9 R2-F3)
 lc_pass "LS-5(D): a runaway shell-eval loop dies on Ctrl-C"
 
 # (E) The same with no loop to poll from. Recursion through `try` runs for an
-# exponential time, because each failure at the stack's limit retries in `catch`.
+# exponential time, because each failure at the depth limit retries in `catch`.
 # Only the poll at a function call reads the queued `interrupt`.
 lc_send "fn burn { try { burn } catch { burn } }"
 lc_send "burn"
