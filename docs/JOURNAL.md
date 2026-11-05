@@ -22,6 +22,22 @@ needed the operator.
 
 
 ---
+## 2026-11-05 (aux, Opus 5.5 1M) -- ENOEXEC lands; two legs that had never run, and a round I nearly skipped
+
+**What landed.** `T_E_NOEXEC`, `T_E_LIBBAD`, and `T_E_ACCES` for an image refused by policy: `640c4ab2b..c32114c7c`. Green 2264/2264 twice on one ELF (`7099c273c971a61a`) with the guest legs. This is the last chunk on the thread-model arc's list. The full matrix did NOT run (11-02 hold), no subset was voted for this chunk, and the gates listed in `docs/phase7-status.md` are owed at the merge.
+
+**The first boot.** 2263 of 2263, then joey stopped at ambush-probe's stage D. `/bin/ambush-notelf` needed a child that dies in its load, and the new look refuses that file before any child exists. It was the feature working. My pin grep looked for EINVAL and for constants, and a fixture that relies on a file reaching a child mentions neither.
+
+**Two greens.** N24 and N25 removed what turns an interpreter's ENOEXEC into ELIBBAD, and the suite stayed green. I had written the legs as conditional on the phenotype bundle, and the comment said a sabotage for each would prove it ran. The kernel tests run before the bundle is mounted, so they had never run. The change record says the same thing, wrongly, and stands as written because `chg-2026-11-05-noexec-readings` corrects it. The fixtures are in the ramfs now, and the legs are unconditional. Also: nothing had turned L370 red, because `pouch-hello-fs` catches its sabotage first, and no guest had ever read ELIBBAD. N27, N28 and L373 close those.
+
+**A third green.** N31, on my own new test. I wrote an executable stack as RWE, and the W^X check takes that before the arm I named. `kernel/test/test_elf.c` says so in a comment I had not read. Both forms read EACCES, so nothing was wrong in the kernel, but the arm had no witness until `c32114c7c`.
+
+**The round I nearly skipped.** I was gathering the landing's facts when I read round 1's header again: frozen at `796492e86`. T_E_LIBBAD, the blob path's fix and round 1's own fixes all came after that, on `kernel/exec.c`, an audit-trigger surface. I had been treating the chunk as audited because a round had closed. I ran round 2 on exactly that code, and it found F1: a W+X image or an executable stack read ENOEXEC, so ash and dash would re-run a good binary as a script. The row's enumeration did not include them, but `exec_load_body` treated every refusal alike, and I had read it as doing the right thing. Fixing that changes `docs/ERRORS.md`, so it went to the operator as vote 33, and they chose EACCES. The report's POSIX citation was not quite right, which I checked against the source: the text it paraphrased is about a file that is not regular. POSIX's ENOEXEC wording, "has an unrecognized format", does support the vote.
+
+**Decisions the operator made here.** Votes 26, 32, 33, and in the same batch: aux-3 reaches main through corona's join (34); the poll false-0 class gets the commit-the-death shape (35); longjmp out of a Pouch handler gets a registration flag (36). The last two are later chunks. Which witnesses to change I decided.
+
+**Not done.** The full matrix and the gates owed at the merge. No interactive scenario ran, so no shell has been watched on these answers, and what ash and dash do is from memory. The full spawn still reads a pid for a missing interpreter, and that is enqueued. `kernel/joey.c`'s sign has no witness. A dynamic program with W+X segments still passes the kernel, because `elf_load` stops at its `PT_INTERP`, and what its interpreter does with them was not tested.
+
 ## 2026-11-05 (aux, Opus 5.5 1M) -- Sigsuspend lands; six witnesses that could not fail
 
 **What landed.** `SYS_NOTE_WAIT` and one mask restore for both phenotypes, `107bb2d8e..982d66e93`. Green 2257/2257 twice on one ELF (`0e08156c900b25de`) with the guest legs. The full matrix did NOT run (11-02 hold), no subset was voted for this chunk, and the gates listed in `docs/phase7-status.md` are owed at the merge.

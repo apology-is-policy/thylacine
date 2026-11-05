@@ -4,7 +4,7 @@ type: chg
 title: "T_E_LIBBAD: an interpreter at fault says so"
 date: 2026-11-04
 arc: arc-phase6-pouch
-commits: []
+commits: [d16cc271d]
 touched:
   - sub-kernel-exec
 established:

@@ -4,7 +4,7 @@ type: chg
 title: "T_E_NOEXEC: round 2's fixes, and an image refused by policy reads EACCES"
 date: 2026-11-05
 arc: arc-phase6-pouch
-commits: []
+commits: [bb179781d, c32114c7c]
 touched:
   - sub-kernel-exec
   - sub-substrate-build

@@ -3087,3 +3087,15 @@ Audit: round 1 Fable 5.1, 0/0/0/7; round 2 Fable 5.1, 0/1/2/2. All fixed.
 Tests: the full suite is green at 2257 on `982d66e93`, twice, one ELF (`0e08156c900b25de`), with joey and the guest legs, `note-wait ok: 45 legs`. 83 sabotages on `ea0d92b15` and the seven whose witnesses changed on `982d66e93`, read one by one in `chg-2026-11-05-sigsuspend-readings`. No witness: K17 and G22. `pty-4`, `pty-susp-pouch`, `item10-ctrlc`, `viv-console-ctrlc` and `r5f9-ash` passed on `ea0d92b15`; `982d66e93` changes only tests, one probe leg and a comment, so they were not run again. Specs on the final tip: `tail_order` and `caught_target`, read in the same note.
 
 **Did not run:** the full SMP matrix, under the 11-02 hold, and no SMP subset was voted for this chunk. It stays owed at the merge to main, with `tools/test-fault.sh`, the interactive fleet and `tools/check-production.sh`. Round 2 did not read `vivarium_build_sigframe`, the probe's restorer, `pouch_sock_poll_fd`'s lazy open, dosbox-x's select sites or `el0_stop_park`, and read `client_wait`, `do_reader_recv_frame`, `client_flush_wait` and `proc_note_direct_rouse` at gate level only. Its Linux semantics came from its memory, not a source.
+
+## ENOEXEC and ELIBBAD: exec says whose fault it is — 2026-11-05
+
+Votes 26, 32 and 33. `execve` and `SYS_SPAWN_FULL_ARGV` answer `T_E_NOEXEC` for a file that is no image, where they read EINVAL. `execve` answers `T_E_LIBBAD` (80) for a good program whose interpreter is no image. An image with a W+X segment or an executable stack reads `T_E_ACCES`, because a shell re-runs an ENOEXEC file as a script (`dec-2026-11-05-policy-refusal`). A refused allocation and a failed read keep their own names. The full spawn reads the header in the parent, through `exec_image_check`, so it can answer before the rfork.
+
+Audit: round 1 Fable 5.1 at `796492e86`, 0/4/1/5; round 2 Fable 5.1 at `7f7fab418`, on what round 1 never read, 0/0/1/4. All fixed.
+
+Tests: the full suite is green at 2264 on `c32114c7c`, twice, one ELF (`7099c273c971a61a`), with joey and the guest legs. 35 sabotages across four leases, read one by one in `chg-2026-11-05-noexec-readings`. Three stayed green, and each showed a leg that had not reached its code; each now goes red. No witness: `kernel/joey.c`'s printed sign, which needs an init that fails to load. `check-burrow.sh` clean; no spec models exec's answers.
+
+**Still reads a pid:** the full spawn cannot report a missing interpreter, an interpreter that is no image, or a segment refused while mapping. The child dies in its load and the parent sees exit 1. The four older spawn calls keep their flat -1 (ER-3).
+
+**Did not run:** the full SMP matrix, under the 11-02 hold, and no SMP subset was voted for this chunk. It stays owed at the merge to main, with `tools/test-fault.sh`, the interactive fleet and `tools/check-production.sh`. No interactive scenario ran on this chunk, so no shell has been watched taking any of these answers. Round 2 did not read `usr/ambush`, `usr/ut`, `usr/joey`, the Go fork's decode of 80 or devramfs on an empty file, and read busybox and dash from memory.

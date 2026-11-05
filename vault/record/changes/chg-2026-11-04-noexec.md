@@ -4,7 +4,7 @@ type: chg
 title: "T_E_NOEXEC: execve and the full spawn say a file is no image"
 date: 2026-11-04
 arc: arc-phase6-pouch
-commits: []
+commits: [640c4ab2b, 55474ba08]
 touched:
   - sub-kernel-exec
   - sub-kernel-syscall-dispatch

@@ -4,7 +4,7 @@ type: chg
 title: "T_E_NOEXEC: round 1's fixes"
 date: 2026-11-04
 arc: arc-phase6-pouch
-commits: []
+commits: [6101a641e, 977165998, 2de9b08a5]
 touched:
   - sub-kernel-exec
   - sub-kernel-burrow
