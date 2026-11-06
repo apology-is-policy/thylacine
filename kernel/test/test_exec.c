@@ -1557,10 +1557,12 @@ void test_execve_interpreter_says_why(void) {
     int no_namespace = nx_load(NULL, size, "prog", 4, NULL, 0, 0);
 
     size = nx_dynamic("/bin/hello");
-    static char s_big[SYS_SPAWN_ARGV_DATA_MAX];
+    char *s_big = kmalloc(SYS_SPAWN_ARGV_DATA_MAX, 0);   // not a static: the image's L3 window
+    TEST_ASSERT(s_big != NULL, "kmalloc the ceiling-sized argv");
     for (u32 i = 0; i + 1u < SYS_SPAWN_ARGV_DATA_MAX; i++) s_big[i] = 'a';
     s_big[SYS_SPAWN_ARGV_DATA_MAX - 1u] = '\0';
     int no_room = nx_load(self, size, "prog", 4, s_big, SYS_SPAWN_ARGV_DATA_MAX, 1u);
+    kfree(s_big);
 
     TEST_EXPECT_EQ(missing, -(int)T_E_NOENT, "an interpreter that is not there: ENOENT");
     TEST_EXPECT_EQ(nameless, -(int)T_E_NOEXEC, "an entry with no name for the program");
@@ -2182,13 +2184,15 @@ void test_exec_interp_argv_shape(void) {
     // failed exec -- a silently shortened vector would run the program with
     // arguments it never received.
     {
-        static char big[EXEC_ARGV_DATA_MAX];
-        for (u32 i = 0; i < sizeof(big) - 1; i++) big[i] = 'x';
-        big[sizeof(big) - 1] = '\0';
-        TEST_EXPECT_EQ((u64)(uintptr_t)exec_interp_argv(
+        char *big = kmalloc(EXEC_ARGV_DATA_MAX, 0);   // not a static: the image's L3 window
+        TEST_ASSERT(big != NULL, "kmalloc the ceiling-sized argv block");
+        for (u32 i = 0; i < EXEC_ARGV_DATA_MAX - 1; i++) big[i] = 'x';
+        big[EXEC_ARGV_DATA_MAX - 1] = '\0';
+        u64 rw = (u64)(uintptr_t)exec_interp_argv(
                            INTERP, sizeof(INTERP) - 1, "/bin/x", 6,
-                           big, sizeof(big), 1, &len, &n, NULL), 0ull,
-            "an argv block at the ceiling REFUSES the rewrite");
+                           big, EXEC_ARGV_DATA_MAX, 1, &len, &n, NULL);
+        kfree(big);
+        TEST_EXPECT_EQ(rw, 0ull, "an argv block at the ceiling REFUSES the rewrite");
     }
     {
         // The COUNT ceiling, independently: one NUL per slot, argc at the max.
