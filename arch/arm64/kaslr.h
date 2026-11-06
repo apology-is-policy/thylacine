@@ -3,7 +3,7 @@
 // Per ARCHITECTURE.md §5.3 + §6.2 + §24 + invariant I-16. The kernel is
 // linked at a fixed high VA (KASLR_LINK_VA = 0xFFFFA00000080000) inside
 // TTBR1's "kernel modules + KASLR" region (0xFFFF_A000_*). At boot, the
-// kernel chooses a random offset (page-block-aligned, bounded < 1 GiB),
+// kernel chooses a random offset (8 MiB-aligned, non-zero, < 16 GiB),
 // applies any R_AARCH64_RELATIVE entries in the embedded .rela.dyn
 // section, builds a TTBR1 mapping at KASLR_LINK_VA + offset, then
 // long-branches to the runtime VA.
@@ -37,8 +37,9 @@
 // 2^39 - 0x80000 = ~512 GiB headroom before bit 39 carries; we stay
 // well clear at 16 GiB max.
 //
-// Mask preserves bits 33..23 = 11 bits = 2048 distinct 8 MiB-aligned
-// offsets in [0, 16 GiB). Conservative compared to ARCH §6.2's
+// Mask preserves bits 33..23 = 11 bits = 2048 masked 8 MiB-aligned
+// values in [0, 16 GiB); kaslr_init moves a zero draw to the first step,
+// so 2047 distinct slides. Conservative compared to ARCH §6.2's
 // allowable 32 TiB range, but a comfortable balance of entropy and
 // table-builder simplicity (single L0 entry, dynamic L1/L2 indices).
 //

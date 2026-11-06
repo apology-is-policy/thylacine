@@ -11,7 +11,7 @@
  *   linked into the TTBR1 high half per ARCH §6.2 ("Kernel modules +
  *   KASLR" region 0xFFFF_A000_*). PIE relocations (R_AARCH64_RELATIVE
  *   entries in .rela.dyn) let the boot stub slide the runtime VA by a
- *   randomized 2 MiB-aligned offset, applied via the slide computed
+ *   randomized 8 MiB-aligned offset, applied via the slide computed
  *   in arch/arm64/kaslr.c. The boot stub runs at LMA initially (TTBR0
  *   identity-maps the low 4 GiB), applies relocations, sets up TTBR1
  *   to map the randomized high VA range to LMA, then long-branches
@@ -146,7 +146,7 @@ SECTIONS
      * -z norelro -z nopack-relative-relocs, because lld still wants
      * the dynamic-section family resident. They're tiny (a few hundred
      * bytes total) and live in the loaded image; mmu.c's L3 mapping
-     * for the kernel's 2 MiB block covers them transparently. */
+     * of the kernel's 8 MiB region covers them transparently. */
     .dynamic   : ALIGN(8) { *(.dynamic) }
     .dynsym    : ALIGN(8) { *(.dynsym) }
     .dynstr    : ALIGN(8) { *(.dynstr) }
