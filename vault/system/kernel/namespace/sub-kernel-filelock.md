@@ -410,6 +410,10 @@ is alone. That would clunk the clone and drop every lock the entry holds, includ
 a peer thread took on another range after the close. A lock silently lost is worse than
 one held until the Proc exits.
 
+Booted at the join's lease 2 (87a56ff3c): each of the fix sabotages J13-J25 went red at
+its own leg, on the suite narrowed to `filelock.`, `dev9p.` and `notes.native_class`
+(aux-gate join2/sabs2.py; [[chg-2026-11-06-aux-join2]]).
+
 ## Seams
 
 None open. Pouch `fcntl`, `flock` and the libthyla-rs and libt mirrors landed

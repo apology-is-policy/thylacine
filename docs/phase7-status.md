@@ -3308,3 +3308,13 @@ Tests: the full suite is green at 2264 on `c32114c7c`, twice, one ELF (`7099c273
 **Still reads a pid:** the full spawn cannot report a missing interpreter, an interpreter that is no image, or a segment refused while mapping. The child dies in its load and the parent sees exit 1. The four older spawn calls keep their flat -1 (ER-3).
 
 **Did not run:** the full SMP matrix, under the 11-02 hold, and no SMP subset was voted for this chunk. It stays owed at the merge to main, with `tools/test-fault.sh`, the interactive fleet and `tools/check-production.sh`. No interactive scenario ran on this chunk, so no shell has been watched taking any of these answers. Round 2 did not read `usr/ambush`, `usr/ut`, `usr/joey`, the Go fork's decode of 80 or devramfs on an empty file, and read busybox and dash from memory.
+
+## The aux join: aux-3 reaches main through corona's branch -- 2026-11-06
+
+Vote 34. aux-3-join2 merges aux-3 (the thread-model arc through ENOEXEC) into corona/async-memory at 9e0c6b87e (f48e20df4). The merge made the native side's waiting take interruptible, and audit found what that woke up in B-3h. A set-lock now stops at a cancelled flush of another open of the file, but only for a take. Everything after the wait loop (the re-check's unlock, the open-file twin's close) runs uninterruptible, as a close does. The mirrors of the renumbered syscalls are held to the kernel enum by a derived check.
+
+Audit: Fable 5.1 each round: r1 0/0/0/3 at f5fe6d8e4, r2 0/0/1/2 at f81f1f217, r3 0/0/0/2 at 6d8af1673 (clean). All fixed except r3 F2, tracked: a re-check unlock refused for a reason other than a cancellation keeps its entry.
+
+Tests: green 2421 plus guest legs on b441f5c35. 37 sabotages on the join (lease 1, f5fe6d8e4: 36 red, E07 the recorded equivalent) and 13 on the fixes (lease 2, 87a56ff3c: all red). test-fault 23/23; viv-run and r5f9-ash PASS. The full SMP matrix (vote 37): N=10, 0 corruption across default-smp1/4/8 and ubsan-smp4/8. The UBSan kernel first overflowed its 8 MiB L3 window; four test statics moved to the heap (b441f5c35).
+
+**Did not run:** the rest of the interactive fleet. No spec models the lock path. Record: `chg-2026-11-06-aux-join2`.

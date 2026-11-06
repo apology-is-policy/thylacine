@@ -22,6 +22,34 @@ needed the operator.
 
 
 ---
+## 2026-11-06 (aux): the thread-model arc meets corona's branch, and three audit rounds on what the merge woke up
+
+Stamped 2026-11-06T05:27:53Z. Branch aux-3-join2 at b441f5c35 (records on top), off corona/async-memory 9e0c6b87e. Pushed to GitHub with this entry; Codeberg is best-effort. The landing on main waits for the operator (vote 34).
+
+**Why a join.** Operator vote 34: aux-3, carrying the thread-model overhaul through ENOEXEC (f70130a56), reaches main through corona's join, not by a merge of its own. The merge is f48e20df4. To compile it, NOTE_TABLE moved to bit 25 and three session tests were brought under the frame bound (5b571b098). Two behaviours met for the first time: corona's interruptible native waits and B-3h's file locks. Since 672708939, F_SETLKW restarts under SA_RESTART, and a pre-lock flush a caught note cancelled answers EINTR. The native host checker pins ceiling 141 and the three numbers above 138 that collided (f5fe6d8e4).
+
+**Lease 1, f5fe6d8e4.** Green 2420 plus guest legs. 36 of 37 sabotages from both parents went red at their wants. J08 failed an earlier line of its own test, and OW:G02 failed at the kernel tests before its guest line, as it did on walkerr. E07 stayed green: it is the equivalent mutant the walkerr landing recorded (`stalk_union_child` is static, and its one caller reads the reason only on NULL). Re-checked on the join tip. Regreen ELF == green (43a93a8861d9b96c).
+
+**Round 1 (Fable 5.1, 0/0/0/3).** A set-lock lands the staged writes of every open of the file before it asks the server. A flush of another open, cancelled by a caught note, was dropped (on main since B-3h), so the Tlock could be granted over unlanded bytes. The release sync now stops at it for a take (d9898e61c). The mirrors of the renumbered syscalls in libt, libthyla-rs and the Pouch patches were pinned by nothing: a derived check now holds every mirrored number to the kernel enum by name. The cancelled-flush witness now fsyncs, so it can tell a staged run from a latched one.
+
+**My own wrong turn, caught before round 2.** d9898e61c stopped unlocks too. The post-grant re-check (a Proc take whose descriptor was closed mid-call gives its range back) runs an unlock inside a take's call. Stopped, it left the range locked: the very leak the re-check exists to prevent. f81f1f217 stops only a take.
+
+**Round 2 (Fable 5.1, 0/0/1/2).** The P2 was the leak I had suspected but not shown. A caught note that lands in the take's Tlock wait leaves the claim held when the Rlock beats the Tflush. Every later wait of the call then unwinds at once, so the re-check's Tlock(UNLCK) could be cancelled on the server. The Proc then kept the lock for its whole life, while it was told EBADF (on main since B-3h). Now everything after the wait loop runs uninterruptible, as a close does (6d8af1673). The reviewer also offered retiring the entry instead. I did not take it: it drops a peer thread's take in flight and leaves the unlock-side I-38 window open. The Pouch half of the new mirror check skipped 30 commented defines; a census now fails on any define it cannot read. 6d8af1673's message calls that P2 "F2". It is F1.
+
+**Round 3 (Fable 5.1, 0/0/0/2), clean.** F1: nothing would go red if the dispatcher's exit clear of `note_interruptible` were deleted. The reviewer took `filelock.wait`'s assert to be its witness until 6d8af1673. It never was: no note table governs the harness's Proc, so the classifier never set the flag. It was vacuous from B-3h2 (d1853e821). `notes.native_class` now presets the flag and dispatches SYS_GETPID through the real wrapper; its control is the handler alone, which leaves the flag set (87a56ff3c, sabotage J25). F2 is tracked, not fixed. If a re-check unlock is refused for a reason other than a cancellation (the client's reply-buffer OOM), the granted entry stays. The suggested fix, dropping the entry when alone, would clunk the clone and silently release a lock a peer thread took on another range after the close. The fix is an owed unlock the session's closer retries (OPEN-BUGS 22:17:18Z).
+
+**Lease 2, b441f5c35 (records on top).** <green count + guests; narrow control; J13-J25 each red at its want or not; regreen ELF; test-fault; viv-run; r5f9-ash; the full SMP matrix (operator vote 37, this join only): VERDICT ...>.
+
+**Also this run.** The thread chapter (https://claude.ai/artifact/3urv5e4gm8ANpRVF24aNK5), written at the operator's request. Reading it against the code found six stale places in ARCHITECTURE and sub-kernel-thread (6d2c65f84).
+
+**Did not run.** The interactive fleet beyond viv-run and r5f9-ash, the two scenarios the merge conflicted in. No spec models the lock path or the dispatcher's exit clear. The sabotages ran on 87a56ff3c, not b441f5c35, which changes only four other tests' buffers.
+
+**Left open, all in OPEN-BUGS.** The test kernel lives 320 KiB under its window. ARCHITECTURE 6.2 still says a 4 MiB window and 12 bits of entropy, where the code has used 8 MiB and 11 bits since 94409d56f; correcting it needs the operator's signoff. Round 3's F2, the owed unlock. The post-join tidy (aux-3-tidy 7e0d3ffdd) is unbooted.
+
+**Decisions from the operator:** vote 34 (this route to main), 37 (the full SMP matrix, for this join only). Pending: the landing on main.
+
+---
+
 ## 2026-11-05 (corona): round 3 compiles at last, the Pi's boot limit was a crash dump, and the SAK fails behind a deep queue
 
 Stamped 2026-11-05T19:09:13Z. Nothing pushed. Tips: corona/vote50 616e8cf35, corona/i32 138896e56, corona/mm1c 732342b63, corona/main-merge 829c8cfac.
