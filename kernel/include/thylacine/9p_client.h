@@ -430,6 +430,7 @@ struct p9_client {
     // Diagnostics.
     u32                  total_ops;
     u32                  total_errors;
+    u32                  unlock_resends;   // p9_client_unlock's sends after an unsent one
 };
 
 // Stamp the identity cape on a client no other thread can reach yet: the
@@ -652,6 +653,12 @@ int  p9_client_fsync(struct p9_client *c, u32 fid, u32 datasync);
 int  p9_client_lock(struct p9_client *c, u32 fid, u8 type, u32 flags,
                     u64 start, u64 length, const u8 *client, u16 client_len,
                     u8 *status);
+// An unlock is never lost for want of memory: a Tlock UNLCK that never reached
+// the wire is sent again until the server answers it, or a death, a dead
+// session or an unbound fid has the server drop the fid's locks anyway.
+// Killable only. Otherwise p9_client_lock's contract.
+int  p9_client_unlock(struct p9_client *c, u32 fid, u64 start, u64 length,
+                      const u8 *client, u16 client_len, u8 *status);
 int  p9_client_getlock(struct p9_client *c, u32 fid, u8 type,
                        u64 start, u64 length, const u8 *client, u16 client_len,
                        struct p9_getlock *out);

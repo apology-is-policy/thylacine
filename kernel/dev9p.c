@@ -2519,6 +2519,16 @@ static u16 lock_client_id(u32 who, char out[LOCK_CLIENT_ID_MAX]) {
     return n;
 }
 
+// Give up every lock the open's fid holds, naming what its latest take named.
+// Never lost for want of memory: p9_client_unlock sends it until it is answered.
+static int lock_release_all(struct dev9p_priv *p) {
+    u8   status = P9_LOCK_ERROR;
+    char cid[LOCK_CLIENT_ID_MAX];
+    u16  cid_len = lock_client_id(lock_named(p), cid);
+    return p9_client_unlock(p->client, lock_fid(p), 0, 0, (const u8 *)cid, cid_len,
+                            &status);
+}
+
 // The flush a release owes when its thread may not wait, queued alone on the
 // session's closer, and for a last close that leaves c alive the unlock after
 // it. The job holds c, so c's fid stays bound until it has run.
@@ -2559,13 +2569,8 @@ static int dev9p_lock_flush_job_run(struct p9_close_job *job,
     }
     if (rc != 0 && p9_client_fid_held(p->client, p->fid))
         p9_close_job_lost(p->fid, rc);
-    if (__atomic_exchange_n(&p->lock_granted, false, __ATOMIC_SEQ_CST)) {
-        u8   status = P9_LOCK_ERROR;
-        char cid[LOCK_CLIENT_ID_MAX];
-        u16  cid_len = lock_client_id(lock_named(p), cid);
-        (void)p9_client_lock(p->client, lock_fid(p), P9_LOCK_TYPE_UNLCK, 0, 0, 0,
-                             (const u8 *)cid, cid_len, &status);
-    }
+    if (__atomic_exchange_n(&p->lock_granted, false, __ATOMIC_SEQ_CST))
+        (void)lock_release_all(p);
     return rc;
 }
 
@@ -2769,11 +2774,7 @@ static int dev9p_fd_close(struct Spoor *c, bool heard) {
 
     bool granted = __atomic_exchange_n(&p->lock_granted, false, __ATOMIC_SEQ_CST);
     if (granted && close_may_wait()) {
-        u8   status = P9_LOCK_ERROR;
-        char cid[LOCK_CLIENT_ID_MAX];
-        u16  cid_len = lock_client_id(lock_named(p), cid);
-        int  lr = p9_client_lock(p->client, lock_fid(p), P9_LOCK_TYPE_UNLCK, 0, 0, 0,
-                                 (const u8 *)cid, cid_len, &status);
+        int lr = lock_release_all(p);
         granted = lr == -P9_E_INTR || !close_may_wait();   // cut short: still owed
     }
     if (!staged && !granted) return rc;
@@ -2837,12 +2838,17 @@ static int dev9p_lock(struct Spoor *c, u32 type, u64 start, u64 len,
     // goes ahead.
     if (wb_note_cancelled(dev9p_lock_sync(c, DEV_LOCK_SYNC_RELEASE))) return -T_E_INTR;
 
+    // An unlock is never lost for want of memory (p9_client_unlock): a lock
+    // call's own, a close's, and the one a lock call owes when its descriptor
+    // was closed during the call (filelock.c), which nothing else would send.
     u32  who = type == SYS_FILE_LOCK_UN ? lock_named(p) : lock_taker(p);
     char cid[LOCK_CLIENT_ID_MAX];
     u16  cid_len = lock_client_id(who, cid);
     u8 status = P9_LOCK_ERROR;
-    int rc = p9_client_lock(p->client, fid, (u8)type, 0, start, len,
-                            (const u8 *)cid, cid_len, &status);
+    int rc = type == SYS_FILE_LOCK_UN
+        ? p9_client_unlock(p->client, fid, start, len, (const u8 *)cid, cid_len, &status)
+        : p9_client_lock(p->client, fid, (u8)type, 0, start, len,
+                         (const u8 *)cid, cid_len, &status);
     if (rc != 0) {
         // A death abandons the take with its outcome unknown, and the server may
         // have granted it. An extra unlock costs a round trip. EINTR is flush(5)'s

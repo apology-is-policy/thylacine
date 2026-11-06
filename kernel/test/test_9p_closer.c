@@ -29,6 +29,7 @@
 #include <thylacine/sched.h>
 #include <thylacine/spinlock.h>
 #include <thylacine/spoor.h>
+#include <thylacine/syscall.h>     // SYS_FILE_LOCK_*
 #include <thylacine/thread.h>
 
 #include "../../arch/arm64/uart.h"
@@ -1923,4 +1924,309 @@ void test_p9_closer_orphan_oom_on_dead_session_quiet(void) {
     spoor_clunk(root);
     p9_attached_unref(a);
     p9_mq_loopback_destroy(&g_mq_a);
+}
+
+// =============================================================================
+// An unlock is never lost for want of memory. A Tlock UNLCK whose reply buffer
+// cannot be allocated never reaches the wire, and on a live session nothing
+// would release the range before the fid's clunk: the aux join's audit round 3
+// F2, where the unlock a lock call owes when its descriptor was closed during
+// the call kept the Proc's lock for its life while the call answered EBADF.
+// p9_client_unlock sends it again until the server answers. The reply buffer is
+// kmalloc(recv_cap), so a recv_cap past any order the buddy allocator serves
+// makes every send fail until it is put back. Three senders: a lock call's
+// unlock (dev9p.lock, the re-check's path), a last close's (dev9p.fd_close),
+// and a closer's, for a close on a thread a death has reached.
+// =============================================================================
+
+#define UO_STARVED ((size_t)1 << 40)
+
+struct uo {
+    struct p9_attached *a;
+    struct Spoor       *root;
+    struct Spoor       *f;
+    u32                 fid;
+    size_t              cap0;
+};
+
+static bool uo_open(struct uo *u) {
+    g_rec_a = (struct srv_rec){0};
+    if (p9_mq_loopback_init(&g_mq_a, rec_responder, &g_rec_a) != 0) return false;
+    u->a = closer_session(p9_mq_loopback_ops_for(&g_mq_a));
+    if (!u->a) { p9_mq_loopback_destroy(&g_mq_a); return false; }
+    u->root = p9_attached_root_spoor(u->a);
+    if (u->root) {
+        // The attach syscall's stamp, which the closer's hand-off needs.
+        struct dev9p_priv *rp = (struct dev9p_priv *)u->root->aux;
+        rp->attached_owner = u->a;
+        p9_attached_ref(u->a);
+        u->f = spoor_clone(u->root);
+    }
+    if (u->f) {
+        const char *name = "victim";
+        struct Walkqid *w = dev9p.walk(u->root, u->f, &name, 1);
+        if (w) {
+            walkqid_free(w);
+            u->fid = ((struct dev9p_priv *)u->f->aux)->fid;
+        } else {
+            spoor_clunk(u->f);
+            u->f = NULL;
+        }
+    }
+    u->cap0 = u->a->client->recv_cap;
+    return u->root && u->f;
+}
+
+// Not called while a sender may still run: a test whose sender never returned
+// leaves its session behind rather than free what that sender reads.
+static void uo_end(struct uo *u) {
+    if (!u->a) return;
+    if (u->f) spoor_clunk(u->f);
+    if (u->root) spoor_clunk(u->root);
+    p9_attached_unref(u->a);                     // the construction reference, last
+    p9_mq_loopback_destroy(&g_mq_a);
+}
+
+static void uo_set_cap(struct p9_client *c, size_t cap) {
+    spin_lock(&c->lock);
+    c->recv_cap = cap;
+    spin_unlock(&c->lock);
+}
+
+static u32 uo_resends(struct p9_client *c) {
+    spin_lock(&c->lock);
+    u32 n = c->unlock_resends;
+    spin_unlock(&c->lock);
+    return n;
+}
+
+static u32 uo_nlock(void) { return __atomic_load_n(&g_rec_a.nlock, __ATOMIC_ACQUIRE); }
+
+// A take the server grants, so that the open holds a lock its close must give up.
+static int uo_take(struct uo *u) {
+    return dev9p.lock(u->f, SYS_FILE_LOCK_WR, 0, 0, NULL);
+}
+
+static struct Spoor  *g_uo_spoor;
+static volatile int   g_uo_rc;
+static volatile bool  g_uo_done;
+static volatile bool  g_uo_exited;
+static volatile bool  g_uo_close;               // fd_close instead of an unlock
+
+static void uo_entry(void) {
+    g_uo_rc = g_uo_close ? dev9p.fd_close(g_uo_spoor, /*heard=*/true)
+                         : dev9p.lock(g_uo_spoor, SYS_FILE_LOCK_UN, 0, 0, NULL);
+    __atomic_store_n(&g_uo_done, true, __ATOMIC_RELEASE);
+    test_kthread_park_terminal(&g_uo_exited);
+}
+
+// The sender runs on a kernel thread while every send is refused. It must still
+// be waiting after two sends were refused, with nothing on the wire; once the
+// buffer can be had, it sends, and the server sees one UNLCK.
+struct uo_out {
+    bool thread, waited, joined;
+    u32  nlock_starved, nlock_end, resends;
+    u8   type_end;
+    int  rc;
+};
+
+static void uo_starve_and_feed(struct uo *u, bool close, u32 nlock0, struct uo_out *o) {
+    struct p9_client *c = u->a->client;
+    g_uo_spoor  = u->f;
+    g_uo_rc     = 1;
+    g_uo_done   = false;
+    g_uo_exited = false;
+    g_uo_close  = close;
+    u32 r0 = uo_resends(c);
+    uo_set_cap(c, UO_STARVED);
+    struct Thread *t = thread_create(kproc(), uo_entry);
+    o->thread = t != NULL;
+    if (t) {
+        ready(t);
+        TEST_YIELD_UNTIL_SOFT(uo_resends(c) >= r0 + 2 ||
+                              __atomic_load_n(&g_uo_done, __ATOMIC_ACQUIRE));
+    }
+    o->nlock_starved = uo_nlock() - nlock0;
+    o->waited = t && uo_resends(c) >= r0 + 2 &&
+                !__atomic_load_n(&g_uo_done, __ATOMIC_ACQUIRE);
+    uo_set_cap(c, u->cap0);
+    if (t) {
+        TEST_YIELD_UNTIL_SOFT(__atomic_load_n(&g_uo_done, __ATOMIC_ACQUIRE));
+        if (__atomic_load_n(&g_uo_done, __ATOMIC_ACQUIRE)) {
+            test_kthread_join_free(t, &g_uo_exited);
+            o->joined = true;
+        }
+    }
+    o->nlock_end = uo_nlock() - nlock0;
+    o->type_end  = g_rec_a.lock_type;
+    o->resends   = uo_resends(c) - r0;
+    o->rc        = g_uo_rc;
+}
+
+void test_p9_closer_unlock_waits_out_a_reply_oom(void) {
+    struct uo u = {0};
+    bool opened = uo_open(&u);
+    int  prc = 1;
+    u32  ctl_nlock = 0;
+    bool ctl_bound = false;
+    struct uo_out o = {0};
+    if (opened) {
+        // CONTROL: the starvation reaches the wire's send. A plain Tlock UNLCK
+        // fails without the server seeing it, and the fid stays bound.
+        struct p9_client *c = u.a->client;
+        uo_set_cap(c, UO_STARVED);
+        u8 st = P9_LOCK_ERROR;
+        prc = p9_client_lock(c, u.fid, P9_LOCK_TYPE_UNLCK, 0, 0, 0, NULL, 0, &st);
+        uo_set_cap(c, u.cap0);
+        ctl_nlock = uo_nlock();
+        ctl_bound = p9_session_fid_bound(&c->session, u.fid);
+
+        uo_starve_and_feed(&u, /*close=*/false, uo_nlock(), &o);
+    }
+    if (!o.thread || o.joined) uo_end(&u);
+
+    TEST_ASSERT(opened, "a walked file on its own session");
+    TEST_EXPECT_EQ((u64)(s64)prc, (u64)(s64)-P9_E_IO,
+                   "CONTROL: an unlock with no reply buffer fails");
+    TEST_EXPECT_EQ(ctl_nlock, 0u, "CONTROL: and never reaches the server");
+    TEST_ASSERT(ctl_bound, "CONTROL: the fid stays bound, so the server holds its locks");
+    TEST_ASSERT(o.thread, "a kernel thread");
+    TEST_ASSERT(o.waited, "dev9p's unlock waits, sending again, while no buffer can be had");
+    TEST_ASSERT(o.joined, "and returns once it can be had");
+    TEST_EXPECT_EQ(o.nlock_starved, 0u, "nothing reached the server meanwhile");
+    TEST_EXPECT_EQ((u64)(s64)o.rc, 0, "then the unlock is answered");
+    TEST_EXPECT_EQ(o.nlock_end, 1u, "one Tlock reached the server");
+    TEST_EXPECT_EQ((u32)o.type_end, (u32)P9_LOCK_TYPE_UNLCK, "and it unlocks");
+}
+
+void test_p9_closer_close_unlock_waits_out_a_reply_oom(void) {
+    struct uo u = {0};
+    bool opened = uo_open(&u);
+    int  trc = 1;
+    bool held = false, held_after = true;
+    struct uo_out o = {0};
+    if (opened) {
+        trc = uo_take(&u);
+        held = dev9p.lock_held(u.f);
+        uo_starve_and_feed(&u, /*close=*/true, uo_nlock(), &o);
+        held_after = dev9p.lock_held(u.f);
+    }
+    if (!o.thread || o.joined) uo_end(&u);
+
+    TEST_ASSERT(opened, "a walked file on its own session");
+    TEST_EXPECT_EQ((u64)(s64)trc, 0, "the take is granted");
+    TEST_ASSERT(held, "CONTROL: the open holds a lock its close must give up");
+    TEST_ASSERT(o.thread, "a kernel thread");
+    TEST_ASSERT(o.waited, "the last close waits, sending again, while no buffer can be had");
+    TEST_ASSERT(o.joined, "and returns once it can be had");
+    TEST_EXPECT_EQ(o.nlock_starved, 0u, "nothing reached the server meanwhile");
+    TEST_EXPECT_EQ((u64)(s64)o.rc, 0, "then the close returns");
+    TEST_EXPECT_EQ(o.nlock_end, 1u, "one Tlock reached the server");
+    TEST_EXPECT_EQ((u32)o.type_end, (u32)P9_LOCK_TYPE_UNLCK, "and it unlocks");
+    TEST_ASSERT(!held_after, "the open holds nothing after its close");
+}
+
+// A death reaches the closing thread, and another reference keeps the open
+// alive: its close hands the unlock to a closer, whose send is refused the same
+// way. The closer waits too; it is a thread no death reaches.
+static struct test_dying g_uo_dying;
+static volatile int      g_uo_dying_rc;
+
+static void uo_dying_close(void *arg) {
+    g_uo_dying_rc = dev9p.fd_close((struct Spoor *)arg, /*heard=*/false);
+}
+
+void test_p9_closer_closer_unlock_waits_out_a_reply_oom(void) {
+    TEST_ASSERT(closer_quiet(), "the pool is quiet at entry");
+    struct p9_closer_stats base = closer_now();
+    struct uo u = {0};
+    bool opened = uo_open(&u);
+    int  trc = 1;
+    bool started = false, waited = false, quiet = false;
+    u32  r0 = 0, nlock0 = 0, nlock_starved = 0, nlock_end = 0;
+    u8   type_end = 0;
+    struct p9_closer_stats st = base;
+    if (opened) {
+        struct p9_client *c = u.a->client;
+        trc = uo_take(&u);
+        nlock0 = uo_nlock();
+        r0 = uo_resends(c);
+        spoor_ref(u.f);                          // the reference that keeps it alive
+        g_uo_dying_rc = 1;
+        uo_set_cap(c, UO_STARVED);
+        started = test_dying_start(&g_uo_dying, uo_dying_close, u.f, /*dead_now=*/true);
+        if (started) {
+            TEST_YIELD_UNTIL_SOFT(test_dying_done(&g_uo_dying));
+            TEST_YIELD_UNTIL_SOFT(uo_resends(c) >= r0 + 2);
+        }
+        nlock_starved = uo_nlock() - nlock0;
+        waited = started && test_dying_done(&g_uo_dying) && uo_resends(c) >= r0 + 2;
+        uo_set_cap(c, u.cap0);
+        if (started) {
+            TEST_YIELD_UNTIL_SOFT(uo_nlock() > nlock0);
+            TEST_YIELD_UNTIL_SOFT(closer_quiet());
+            test_dying_reap(&g_uo_dying);
+        }
+        quiet = closer_quiet();
+        nlock_end = uo_nlock() - nlock0;
+        type_end  = g_rec_a.lock_type;
+        st = closer_now();
+        spoor_clunk(u.f);                        // the extra reference
+    }
+    uo_end(&u);
+
+    TEST_ASSERT(opened, "a walked file on its own session");
+    TEST_EXPECT_EQ((u64)(s64)trc, 0, "the take is granted");
+    TEST_ASSERT(started, "a dying thread");
+    TEST_EXPECT_EQ((u64)(s64)g_uo_dying_rc, 0, "its close returns at once");
+    TEST_ASSERT(waited, "the closer waits, sending again, while no buffer can be had");
+    TEST_EXPECT_EQ(nlock_starved, 0u, "nothing reached the server meanwhile");
+    TEST_EXPECT_EQ(nlock_end, 1u, "then the closer's Tlock reached the server");
+    TEST_EXPECT_EQ((u32)type_end, (u32)P9_LOCK_TYPE_UNLCK, "and it unlocks");
+    TEST_EXPECT_EQ(st.jobs, base.jobs + 1, "one close job ran");
+    TEST_ASSERT(quiet, "the pool is quiet again");
+}
+
+// The wait ends when the session dies, with no buffer ever had: the server drops
+// the fid's locks with the session, and nothing could send the unlock now.
+void test_p9_closer_unlock_ends_when_its_session_dies(void) {
+    struct uo u = {0};
+    bool opened = uo_open(&u);
+    bool thread = false, waited = false, returned = false;
+    u32  nlock_end = 1;
+    int  rc = 1;
+    if (opened) {
+        struct p9_client *c = u.a->client;
+        g_uo_spoor  = u.f;
+        g_uo_rc     = 1;
+        g_uo_done   = false;
+        g_uo_exited = false;
+        g_uo_close  = false;
+        u32 r0 = uo_resends(c);
+        uo_set_cap(c, UO_STARVED);
+        struct Thread *t = thread_create(kproc(), uo_entry);
+        thread = t != NULL;
+        if (t) {
+            ready(t);
+            TEST_YIELD_UNTIL_SOFT(uo_resends(c) >= r0 + 2 ||
+                                  __atomic_load_n(&g_uo_done, __ATOMIC_ACQUIRE));
+            waited = uo_resends(c) >= r0 + 2 &&
+                     !__atomic_load_n(&g_uo_done, __ATOMIC_ACQUIRE);
+            p9_client_mark_devgone(c);
+            TEST_YIELD_UNTIL_SOFT(__atomic_load_n(&g_uo_done, __ATOMIC_ACQUIRE));
+            returned = __atomic_load_n(&g_uo_done, __ATOMIC_ACQUIRE);
+            if (returned) test_kthread_join_free(t, &g_uo_exited);
+        }
+        rc        = g_uo_rc;
+        nlock_end = uo_nlock();
+        uo_set_cap(c, u.cap0);
+    }
+    if (!thread || returned) uo_end(&u);
+
+    TEST_ASSERT(opened, "a walked file on its own session");
+    TEST_ASSERT(thread, "a kernel thread");
+    TEST_ASSERT(waited, "CONTROL: the unlock is waiting, sending again, when the session dies");
+    TEST_ASSERT(returned, "the session's death ends the wait");
+    TEST_EXPECT_EQ((u64)(s64)rc, (u64)(s64)-T_E_IO, "the unlock answers EIO");
+    TEST_EXPECT_EQ(nlock_end, 0u, "nothing reached the server");
 }

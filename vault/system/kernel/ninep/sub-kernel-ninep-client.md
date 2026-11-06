@@ -33,6 +33,24 @@ empty client id. Stratum keys its owner on the fid and ignores both. An Rlerror
 maps through `map_error`, which folds a server EBADF to `-P9_E_IO`. The
 callers are [[sub-kernel-ninep-dev9p]]'s lock slots.
 
+**An unlock is never lost for want of memory (2026-11-06, the aux join's round 3
+F2).** `p9_client_unlock(c, fid, start, length, client, client_len, &status)` sends
+a Tlock UNLCK. When its frame never reached the wire, it builds and sends it again
+after a backoff (1 ms doubling to 64 ms) on a private Rendez that is never woken, in
+a plain `tsleep`: no note ends the wait, only a death. Never reaching the wire means
+`client_run_ex` took the tag back, because the reply buffer (`kmalloc(recv_cap)`) or
+the spill of the frame could not be allocated. Such a take-back sets its `*unsent`.
+`client_run` is the same call with no flag. The server holds the range, and on a live
+session nothing else would release it before the fid's clunk. The loop stops at any
+answer, an Rlerror among them, which is returned as `p9_client_lock` returns it. It
+also stops at a dead session or an unbound fid, either of which drops the fid's locks
+on the server, and at a death, whose exit clunks the fid. A server's own EIO is an
+answer, so it is never resent. `unlock_resends` counts the sends after an unsent one.
+Legs, in [[sub-kernel-ninep-attach]]'s file: `p9_closer.unlock_waits_out_a_reply_oom`,
+`close_unlock_waits_out_a_reply_oom` and `closer_unlock_waits_out_a_reply_oom`. Each
+starves the reply buffer by raising `recv_cap` past any order the buddy allocator
+serves.
+
 ## The session's create ends (2026-10-19, B-3e M7)
 
 `struct p9_client` gains `client_end` and `server_end`, two principals

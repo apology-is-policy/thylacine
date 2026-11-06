@@ -18,6 +18,7 @@
 #include <thylacine/spinlock.h>
 #include <thylacine/thread.h>
 
+#include "../arch/arm64/timer.h"  // timer_now_ns: an unsent unlock's backoff
 #include "../arch/arm64/uart.h"   // #210: the bounded ownerless-frame log
 #include <thylacine/types.h>
 
@@ -1212,9 +1213,11 @@ static void client_abandon_forgets_locked(struct p9_client *c, u16 tag) {
 // elected-reader wait, dispatch the reply, surface the result in *out. c->lock
 // HELD on entry + exit. Returns 0 / -P9_E_IO / -<server errno>. On a death-
 // interrupt the Thread is unwinding to its EL0-return die-check; the return is
-// immaterial (it never re-enters EL0).
-static int client_run(struct p9_client *c, size_t built_len,
-                      struct p9_dispatch_result *out) {
+// immaterial (it never re-enters EL0). *unsent, when asked, is set when the
+// frame never reached the wire and its tag was taken back: the server never saw
+// the op, and the session may still be live.
+static int client_run_ex(struct p9_client *c, size_t built_len,
+                         struct p9_dispatch_result *out, bool *unsent) {
     u32 size; u8 type; u16 tag;
     if (p9_peek_header(c->out_buf, built_len, &size, &type, &tag) < 0) {
         // Unreachable by construction (session_send_* built the frame), but a
@@ -1272,6 +1275,7 @@ static int client_run(struct p9_client *c, size_t built_len,
         // frame will never be sent -- reclaim it (never-sent => I-10-safe), or
         // such OOMs use up the shared session's op share. A
         // Tclunk is taken back whole, as at CLIENT_SEND_NEVER below.
+        if (unsent) *unsent = true;
         return client_take_back_unsent_locked(c, (u16)tag, type);
     }
 
@@ -1297,6 +1301,7 @@ static int client_run(struct p9_client *c, size_t built_len,
         // which a read must never surface for a spill-OOM.
         client_unregister(c, tag, &rpc);
         kfree(rpc.reply_buf);
+        if (unsent) *unsent = true;
         return client_take_back_unsent_locked(c, (u16)tag, type);
     }
     if (sfr < 0) {
@@ -1438,6 +1443,11 @@ static int client_run(struct p9_client *c, size_t built_len,
     client_unregister(c, tag, &rpc);
     kfree(rpc.reply_buf);
     return -P9_E_IO;
+}
+
+static int client_run(struct p9_client *c, size_t built_len,
+                      struct p9_dispatch_result *out) {
+    return client_run_ex(c, built_len, out, NULL);
 }
 
 // =============================================================================
@@ -2603,6 +2613,63 @@ int p9_client_lock(struct p9_client *c, u32 fid, u8 type, u32 flags,
     *status = r.lock_status;
     client_unlock(c);
     return 0;
+}
+
+// The wait between sends of an unlock that never left: 1 ms, doubling to 64 ms.
+#define CLIENT_UNLOCK_BACKOFF_MIN_NS   1000000ull
+#define CLIENT_UNLOCK_BACKOFF_MAX_NS  64000000ull
+
+static int client_unlock_never(void *arg) { (void)arg; return 0; }
+
+// A Tlock UNLCK that never reached the wire (its reply buffer, or the spill of
+// its frame, could not be allocated) leaves the server holding the range, and
+// on a live session nothing else releases it before the fid's clunk. So it is
+// built and sent again, after a wait no note ends, until the server answers it.
+// It stops at a death, whose exit clunks the fid; at a dead session or an
+// unbound fid, either of which drops the fid's locks on the server; and at any
+// answer, an Rlerror among them, which is returned as p9_client_lock returns
+// it.
+int p9_client_unlock(struct p9_client *c, u32 fid, u64 start, u64 length,
+                     const u8 *client, u16 client_len, u8 *status) {
+    if (!c || !status) return -P9_E_INVAL;
+    if (c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
+    u64 backoff = CLIENT_UNLOCK_BACKOFF_MIN_NS;
+    for (;;) {
+        client_lock(c);
+        if (c->progress) CLIENT_UNLOCK_RET(c, -P9_E_INVAL);
+        if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
+        if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
+        int te = client_await_tag_locked(c);
+        if (te != 0) CLIENT_UNLOCK_RET(c, te);
+        int len = p9_session_send_lock(&c->session, c->out_buf, c->out_buf_cap,
+                                       fid, P9_LOCK_TYPE_UNLCK, 0, start, length,
+                                       client, client_len);
+        if (len < 0) CLIENT_UNLOCK_RET(c, -P9_E_IO);
+        struct p9_dispatch_result r;
+        bool unsent = false;
+        int e = client_run_ex(c, (size_t)len, &r, &unsent);
+        c->total_ops++;
+        if (e == 0) {
+            *status = r.lock_status;
+            client_unlock(c);
+            return 0;
+        }
+        c->total_errors++;
+        // A dead or closed session and an unbound fid end the next pass, at the
+        // checks above or at the build.
+        if (!unsent || client_self_dying()) CLIENT_UNLOCK_RET(c, e);
+        c->unlock_resends++;
+        client_unlock(c);
+
+        struct Rendez rz;
+        rendez_init(&rz);
+        u64 now = timer_now_ns();
+        u64 dl  = now + backoff;
+        if (dl < now) dl = (u64)-1ll;
+        if (dl == 0)  dl = 1;          // 0 is tsleep's "no deadline"
+        if (tsleep(&rz, client_unlock_never, NULL, dl) == TSLEEP_INTR) return e;
+        if (backoff < CLIENT_UNLOCK_BACKOFF_MAX_NS) backoff *= 2;
+    }
 }
 
 // Tgetlock: would a lock on `fid` be granted? *out is the server's answer.

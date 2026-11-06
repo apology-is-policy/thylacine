@@ -113,6 +113,13 @@ dev9p serves the five lock slots of [[sub-kernel-dev]] for
 - A grant drops the qid's Larder attributes and pages. The invalidates log
   the qid, so a fill in flight from before the grant is dropped rather than
   installed after it.
+- Every unlock goes through `p9_client_unlock` ([[sub-kernel-ninep-client]]), so
+  none is lost for want of memory: `dev9p_lock`'s unlock (a lock call's own, a
+  close's through the Proc owner, and the one a lock call owes when its descriptor
+  was closed during the call), and `lock_release_all`, the whole-file unlock of the
+  last close and of the closer's job. Before 2026-11-06 a reply buffer that could
+  not be allocated answered `-T_E_IO` with the range still held (the aux join's
+  round 3 F2).
 - `dev9p_fd_close`, the last descriptor's close (`Dev.fd_close`), flushes the
   open's run, then exchanges `lock_granted` (sticky until then) and, if it was set,
   sends a whole-file unlock and waits for it. `dev9p_close`, the last reference,

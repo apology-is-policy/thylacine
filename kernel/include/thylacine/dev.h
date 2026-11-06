@@ -411,7 +411,10 @@ struct Dev {
     //   lock(c, type, start, len, test) -- act as the owner c names: take
     //     (SYS_FILE_LOCK_RD / _WR) or drop (_UN) the range on c's own fid, or,
     //     with `test` non-NULL, ask without changing anything and fill *test.
-    //     Never waits: a conflict is -T_E_AGAIN, and the caller retries. A
+    //     Never waits on a conflict: it is -T_E_AGAIN, and the caller retries.
+    //     An unlock is never lost for want of memory: one that could not be
+    //     sent is sent again, after a wait only a death ends, until the server
+    //     answers it or drops the owner's locks anyway (a dead session). A
     //     granted take leaves c reading what the server holds (lock-to-unlock
     //     consistency); every set-lock sends only after c's staged writes land,
     //     since an unlock and a conversion each give something up.

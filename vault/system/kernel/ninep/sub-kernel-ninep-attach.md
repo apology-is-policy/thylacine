@@ -502,7 +502,15 @@ input.)
 ## Tests
 
 `kernel/test/test_9p_closer.c` (`p9_closer.*`, 2026-09-29, each seen red by a
-sabotage): `dying_close_delivers_tclunk` (a dying thread drops a walked
+sabotage). The unlock legs (2026-11-06, [[sub-kernel-ninep-client]]'s
+`p9_client_unlock`): `unlock_waits_out_a_reply_oom`,
+`close_unlock_waits_out_a_reply_oom` and `closer_unlock_waits_out_a_reply_oom`. Each
+starves the reply buffer by raising `recv_cap` past any buddy order. The control in the
+first: `p9_client_lock`'s unlock fails, never reaches the server, and the fid stays
+bound. In each, the sender is still waiting after two refused sends, with nothing on the
+wire. Once `recv_cap` is put back, exactly one UNLCK reaches the server. The senders are
+dev9p's unlock on a kernel thread, a last close on a kernel thread, and a closer's job
+for a close on a dying thread whose open another reference keeps alive. The older legs: `dying_close_delivers_tclunk` (a dying thread drops a walked
 Spoor's last reference over an owned session, and a closer sends the
 Tclunk), `stalled_session_holds_one_closer` (a server that stops answering
 holds one closer while a spare sends another session's Tclunk; its death

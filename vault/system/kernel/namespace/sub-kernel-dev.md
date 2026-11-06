@@ -18,7 +18,10 @@ updated: 2026-11-03
 
 Five slots serve [[sub-kernel-filelock]] (ARCH 9.6.11):
 - `lock(c, type, start, len, test)` acts as the open file `c` and never
-  waits. A conflict is `-T_E_AGAIN`.
+  waits on a conflict: a conflict is `-T_E_AGAIN`. An unlock is never lost
+  for want of memory. One that could not be sent is sent again, after a wait
+  only a death ends, until the server answers it or drops the owner's locks
+  anyway (2026-11-06).
 - `lock_owner(c, &err)` mints an unpublished Spoor naming the same file
   through its own fid: the Proc owner.
 - `lock_same_file(a, b)` is non-blocking. It is asked only of two Spoors of
