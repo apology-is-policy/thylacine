@@ -210,8 +210,16 @@ the lane and the takeover completes; at `FENCE_ABANDON_MS` the lane is abandoned
 wait ends, and the kernel's deadline fails the chord, with the abandonment on the log.
 An abandoned or failed lane holds the takeover past anything the control queue does, so
 it renews nothing, and Lictor says that the lane holds the takeover.
-The lane still comes back on its late retirement (vote 50). That residue needs a host
-loop held 30 s, the same hold that kills the engine on the control queue.
+The lane still comes back on its late retirement (vote 50). The two waits can run in
+series, since the paint and the activation each wait for an idle lane, and each is
+bounded 30 s from its own stall, so the second could still stand at the kernel's limit
+with the engine alive and nothing on the glass. Every wait is bounded from the chord as
+well (operator vote 80, 2026-11-09): at 33 s a control stall still standing kills the
+engine and a cursor stall abandons the lane, and the kernel's limit fails the chord 2 s
+later. A chord ends in the trusted screen, a dead engine, or a failure on the log. The
+cost falls on a takeover that waited past 33 s across two waits, whose second stall dies
+younger than 30 s. Windows' secure desktop takes the same line through its GPU timeout:
+the trusted path waits on client work only to a fixed bound from the request.
 
 Before a chord is seen the gap is the serve loop's. A synchronous command waits at most
 `SUBMIT_DEADLINE_MS`, a client's readback ahead of it or not (operator vote 72), so a

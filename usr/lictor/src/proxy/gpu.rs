@@ -284,6 +284,10 @@ impl Gpu {
         self.invoke::<()>(Request::TestArmLatch).is_ok()
     }
     #[cfg(feature = "test-mode")]
+    pub fn test_arm_chained(&mut self) -> bool {
+        self.invoke::<()>(Request::TestArmChained).is_ok()
+    }
+    #[cfg(feature = "test-mode")]
     pub fn test_stall_next(&mut self) -> bool {
         self.invoke(Request::TestStallNext).unwrap_or(false)
     }

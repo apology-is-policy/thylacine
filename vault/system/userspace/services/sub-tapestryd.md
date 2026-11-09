@@ -1017,7 +1017,11 @@ says `test-latch-dead armed` only once the broker has accepted it, and
 `tools/interactive/ls-gpu-dead.exp` asks that state, then watches the compositor survive a
 dead engine -- the retirement refused, the ctl still answered
 ([[sub-lictor]]). The same arming lets tapestryd aim one stall at a
-composition health step (below). The battery and its expect
+composition health step (below). `thylacine.test-latch-chained` arms the
+broker the same way (`Request::TestArmChained`) to make each of the next two
+trusted takeovers wait on the device twice in series, and tapestryd says
+`test-latch-chained armed` on the console once the broker accepts it
+(`tools/interactive/ls-graphical-sak-chained.exp`). The battery and its expect
 scenario (`usr/tapestry-battery/src`, `tools/interactive/ls-gfx-panes.exp`)
 are UNOWNED -- their reference lives in `docs/reference/139-tapestryd.md`
 (the gate paragraph); the coverage sweep is

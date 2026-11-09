@@ -128,7 +128,7 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-11-09 [[chg-2026-11-09-panels-enter-or-esc]] — Trusted panels close on Enter or Esc; the key prompt runs on its own clock (vote 70)
 - 2026-11-09 [[chg-2026-11-09-sak-renew]] — A takeover behind a GPU backlog renews the kernel's quiesce deadline (vote 71)
 - 2026-11-09 [[chg-2026-11-09-serial-side-queue]] — The serial console reads every byte; what the ring refuses waits in a side queue (vote 73)
+- 2026-11-09 [[chg-2026-11-09-takeover-bound]] — Every wait a takeover makes is bounded from the chord (vote 80)
 - 2026-11-09 [[chg-2026-11-09-trusted-audit-close]] — The trusted-path batch audit close: renewal behind a live engine, serial verdicts wait, the episode tail (votes 70-73)
 - 2026-11-09 [[chg-2026-11-09-trusted-round2]] — The trusted-path round 2: the cursor lane renews, renewal at first sight, the readback judge
-- 2026-11-09 [[chg-2026-11-09-trusted-round3]] — The trusted-path round 3: an abandoned lane renews nothing, leg X asserts the stop, an unjudged deadline is not a pass
 <!-- generated:end -->

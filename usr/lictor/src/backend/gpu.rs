@@ -908,6 +908,9 @@ struct Controlq {
     /// (GPU-DESIGN 4.5.15): every submission is refused until it does, and
     /// one outstanding FENCE_ABANDON_MS latches `dead`.
     stalled: Option<Instant>,
+    /// The chord, while a trusted takeover waits on the device: a stall still
+    /// standing TAKEOVER_BOUND_MS after it latches `dead` (vote 80).
+    takeover_from: Option<Instant>,
     /// Stalls begun, monotone: compared across one command, it says whether
     /// that command's outcome is unknown.
     stalls: u32,
@@ -1381,11 +1384,13 @@ impl Controlq {
 
     /// A stall ends one of two ways (GPU-DESIGN 4.5.15): the drain above
     /// retired the outstanding chain through the ordinary path (revival), or
-    /// it has been outstanding FENCE_ABANDON_MS (death, permanent).
+    /// it has been outstanding FENCE_ABANDON_MS, or a takeover has waited on it
+    /// TAKEOVER_BOUND_MS from the chord (death, permanent).
     fn settle_stall(&mut self) {
         let Some(t0) = self.stalled else { return };
         let ms = t0.elapsed().as_millis() as u64;
-        match crate::gpu_api::stall_verdict(self.sync_pending || self.sync2_pending, ms) {
+        let chord_ms = self.takeover_ms();
+        match crate::gpu_api::stall_verdict(self.sync_pending || self.sync2_pending, ms, chord_ms) {
             crate::gpu_api::Stall::Revived => {
                 self.stalled = None;
                 say!("lictor: gpu synchronous chain retired {} ms after its deadline -- engine revived", ms);
@@ -1394,10 +1399,20 @@ impl Controlq {
                 self.stalled = None;
                 self.latched = Some((Instant::now(), self.used_seen));
                 self.dead = true;
-                say!("lictor: gpu engine stalled {} ms without a retirement -- engine dead", ms);
+                if ms < FENCE_ABANDON_MS {
+                    say!("lictor: gpu engine stalled {} ms without a retirement, the takeover {} ms from its chord -- engine dead at the takeover's bound",
+                         ms, chord_ms.unwrap_or(0));
+                } else {
+                    say!("lictor: gpu engine stalled {} ms without a retirement -- engine dead", ms);
+                }
             }
             crate::gpu_api::Stall::Holding => {}
         }
+    }
+
+    /// How long ago the chord was, while a takeover waits on the device.
+    fn takeover_ms(&self) -> Option<u64> {
+        self.takeover_from.map(|t| t.elapsed().as_millis() as u64)
     }
 
     fn stall(&mut self) {
@@ -2197,6 +2212,7 @@ impl Gpu {
                 sync_slowest_ms: 0,
                 latched: None,
                 stalled: None,
+                takeover_from: None,
                 stalls: 0,
                 serving: false,
                 #[cfg(feature = "test-mode")]
@@ -4719,6 +4735,10 @@ impl Gpu {
     /// FENCE_ABANDON_MS, a dead engine; the lane's in a retirement or, at the same
     /// bound, its abandonment, which ends the wait. An abandoned or failed lane holds
     /// the takeover past anything the control queue does, so nothing is renewed then.
+    ///
+    /// Two waits can run in series, the lane's and then the queue's or the other way
+    /// round, each bounded from its own stall, so both are bounded from the chord too
+    /// (`bound_takeover`, vote 80): every chord ends inside the kernel's limit.
     pub fn takeover_waiting(&self) -> bool {
         !self.ctrl.dead
             && (self.cursor_stalled()
@@ -4731,6 +4751,13 @@ impl Gpu {
     pub fn enable_retirement_journal(&mut self) { self.collect_retirements = true; }
     pub fn take_retired_resources(&mut self) -> alloc::vec::Vec<u32> {
         core::mem::take(&mut self.retired_resources)
+    }
+
+    /// The chord of the takeover now waiting on the device, or None once it is up or
+    /// gone. A stall still standing TAKEOVER_BOUND_MS after it ends as its own bound
+    /// would end it: the engine dies, or the cursor lane is abandoned.
+    pub fn bound_takeover(&mut self, chord: Option<Instant>) {
+        self.ctrl.takeover_from = chord;
     }
 
     /// What trusted takeover asks of the device. A fenced chain need not have

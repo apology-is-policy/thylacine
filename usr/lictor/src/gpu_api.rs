@@ -246,6 +246,9 @@ pub enum Request {
     /// retires, then reports its deadline missed (a stall the next pump
     /// revives).
     TestStallNext,
+    /// Test lever: the next two trusted takeovers each wait twice in series, the
+    /// second wait outlasting the takeover's bound from the chord (vote 80).
+    TestArmChained,
     FencedHeld,
     TestFencedFree,
     CompSlotState,
@@ -368,10 +371,20 @@ pub fn renew_due(last: Option<(u64, u64)>, generation: u64) -> bool {
         _ => true,
     }
 }
-pub fn stall_verdict(outstanding: bool, stalled_ms: u64) -> Stall {
+/// How long a takeover waits on the device, counted from the chord (vote 80). A wait
+/// behind the cursor lane and then one behind the control queue each have their own
+/// abandonment bound and may run in series, so the takeover's own bound ends both
+/// inside the kernel's SEAT_QUIESCE_LIMIT_NS (35 s): a control stall still standing
+/// kills the engine, and a cursor stall abandons the lane.
+pub const TAKEOVER_BOUND_MS: u64 = 33_000;
+// A stall begun at the chord dies of its own bound first: only a second wait in series
+// meets this one.
+const _: () = assert!(PARK_BOUND_MS < TAKEOVER_BOUND_MS);
+/// `takeover_ms` is how long ago the chord was, while a takeover waits on the device.
+pub fn stall_verdict(outstanding: bool, stalled_ms: u64, takeover_ms: Option<u64>) -> Stall {
     if !outstanding {
         Stall::Revived
-    } else if stalled_ms >= PARK_BOUND_MS {
+    } else if stalled_ms >= PARK_BOUND_MS || takeover_ms.is_some_and(|ms| ms >= TAKEOVER_BOUND_MS) {
         Stall::Dead
     } else {
         Stall::Holding
@@ -470,6 +483,7 @@ impl Wire for Request {
             Self::TestAbandonedTotal => { 54u16.put(out); },
             Self::TestArmLatch => { 67u16.put(out); },
             Self::TestStallNext => { 68u16.put(out); },
+            Self::TestArmChained => { 69u16.put(out); },
             Self::FencedHeld => { 55u16.put(out); },
             Self::TestFencedFree => { 56u16.put(out); },
             Self::CompSlotState => { 57u16.put(out); },
@@ -543,6 +557,7 @@ impl Wire for Request {
             54 => Self::TestAbandonedTotal,
             67 => Self::TestArmLatch,
             68 => Self::TestStallNext,
+            69 => Self::TestArmChained,
             55 => Self::FencedHeld,
             56 => Self::TestFencedFree,
             57 => Self::CompSlotState,
@@ -595,7 +610,7 @@ mod admission_tests {
         vec![Request::Info, Request::Submit3dSync { ctx_id: 1, stream: Vec::new() },
             Request::CtxCreate { ctx_id: 1, debug_name: Vec::new() },
             Request::Flush { resource_id: 1, x: 0, y: 0, w: 1, h: 1 }, Request::EngineDead,
-            Request::TestArmLatch, Request::TestStallNext]
+            Request::TestArmLatch, Request::TestStallNext, Request::TestArmChained]
     }
     fn seat() -> Vec<Request> {
         vec![Request::InputInfo { index: 0 }, Request::InputDrain { index: 0 }, Request::SeatState,
@@ -721,15 +736,37 @@ mod admission_tests {
         // The device proved it is done with the buffers; the clock's verdict
         // is only for a chain that never comes back.
         for ms in [0, PARK_BOUND_MS - 1, PARK_BOUND_MS, u64::MAX] {
-            assert_eq!(stall_verdict(false, ms), Stall::Revived, "retired at {ms} ms");
+            for chord in [None, Some(0), Some(TAKEOVER_BOUND_MS), Some(u64::MAX)] {
+                assert_eq!(stall_verdict(false, ms, chord), Stall::Revived, "retired at {ms} ms, chord {chord:?}");
+            }
         }
     }
     #[test]
     fn an_outstanding_chain_holds_the_stall_until_the_bound_then_dies() {
-        assert_eq!(stall_verdict(true, 0), Stall::Holding);
-        assert_eq!(stall_verdict(true, PARK_BOUND_MS - 1), Stall::Holding);
-        assert_eq!(stall_verdict(true, PARK_BOUND_MS), Stall::Dead);
-        assert_eq!(stall_verdict(true, u64::MAX), Stall::Dead);
+        assert_eq!(stall_verdict(true, 0, None), Stall::Holding);
+        assert_eq!(stall_verdict(true, PARK_BOUND_MS - 1, None), Stall::Holding);
+        assert_eq!(stall_verdict(true, PARK_BOUND_MS, None), Stall::Dead);
+        assert_eq!(stall_verdict(true, u64::MAX, None), Stall::Dead);
+        assert_eq!(stall_verdict(true, PARK_BOUND_MS, Some(0)), Stall::Dead, "a takeover never lengthens a stall");
+    }
+    #[test]
+    fn a_takeover_wait_ends_at_the_bound_from_the_chord_however_young_the_stall() {
+        // Vote 80: the second of two waits in series began late in the chord's limit.
+        assert_eq!(stall_verdict(true, 0, Some(TAKEOVER_BOUND_MS - 1)), Stall::Holding);
+        assert_eq!(stall_verdict(true, 0, Some(TAKEOVER_BOUND_MS)), Stall::Dead);
+        assert_eq!(stall_verdict(true, PARK_BOUND_MS - 1, Some(TAKEOVER_BOUND_MS - 1)), Stall::Holding);
+        assert_eq!(stall_verdict(true, 0, Some(u64::MAX)), Stall::Dead);
+    }
+    #[test]
+    fn the_takeover_bound_falls_inside_the_kernels_limit() {
+        let header = include_str!("../../../kernel/include/thylacine/seat.h");
+        let line = header.lines().find(|l| l.starts_with("#define SEAT_QUIESCE_LIMIT_NS "))
+            .expect("seat.h defines SEAT_QUIESCE_LIMIT_NS");
+        let ns: u64 = line.split_whitespace().nth(2).unwrap().trim_end_matches("ull").parse().unwrap();
+        let limit_ms = ns / 1_000_000;
+        // Past the bound, a renewal a second old still covers one more pump before the
+        // kernel's limit fails the chord.
+        assert!(TAKEOVER_BOUND_MS + RENEW_EVERY_MS < limit_ms, "bound {TAKEOVER_BOUND_MS} ms, limit {limit_ms} ms");
     }
     #[test]
     fn a_hold_first_seen_renews_at_once_then_once_a_second() {
@@ -791,6 +828,15 @@ mod cursor_wire_tests {
         assert_eq!(bytes, [1, 0, 67, 0]);
         let mut r = Reader::new(&bytes).unwrap();
         assert!(matches!(Request::get(&mut r).unwrap(), Request::TestArmLatch));
+        r.finish().unwrap();
+    }
+    #[test]
+    fn the_chained_lever_has_its_own_opcode() {
+        let mut bytes = Vec::new();
+        Request::TestArmChained.put(&mut bytes);
+        assert_eq!(bytes, [1, 0, 69, 0]);
+        let mut r = Reader::new(&bytes).unwrap();
+        assert!(matches!(Request::get(&mut r).unwrap(), Request::TestArmChained));
         r.finish().unwrap();
     }
     #[test]

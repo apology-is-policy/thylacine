@@ -34,6 +34,7 @@ mirrors:
   - "tools/interactive/ls-graphical-sak-unread.exp"
   - "tools/interactive/ls-gpu-dead.exp (EXTINCTION: only -- the dead-engine witness)"
   - "tools/interactive/ls-graphical-sak-dead.exp (EXTINCTION: only -- the dead-engine seat witness)"
+  - "tools/interactive/ls-graphical-sak-chained.exp (EXTINCTION: only -- two takeover waits in series, ended by the bound from the chord)"
   - "tools/interactive/ls-graphical-sak-soak.exp (EXTINCTION: only -- the seat's return, cycled)"
   - "tools/interactive/git-shell.exp"
   - "tools/interactive/ls-halcyon-session-dosbox.exp"

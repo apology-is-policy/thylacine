@@ -299,6 +299,13 @@ fn declared_scale() -> Option<u16> {
 fn latch_dead_declared() -> bool {
     bootarg_declared(b"thylacine.test-latch-dead")
 }
+/// Test lever: `thylacine.test-latch-chained` has lictor make each of the next two
+/// trusted takeovers wait twice in series, the second wait outlasting the takeover's
+/// bound from the chord (vote 80).
+#[cfg(feature = "test-mode")]
+fn latch_chained_declared() -> bool {
+    bootarg_declared(b"thylacine.test-latch-chained")
+}
 /// Test lever: `thylacine.test-seat-start`, which halcyond also reads, refuses the
 /// boot's first seat reservation, so the client's retry is reached on every run.
 #[cfg(feature = "test-mode")]
@@ -450,6 +457,14 @@ impl Driver for Tapestryd {
                 say!("tapestryd: test-latch-dead armed (the engine stalls when a 97x89 surface retires, at the compositor ctx create, at one blit-convention attempt, and at one health step once GPU composition runs)");
             } else {
                 say!("tapestryd: test-latch-dead arm REFUSED by the broker");
+            }
+        }
+        #[cfg(feature = "test-mode")]
+        if latch_chained_declared() {
+            if self.comp.gpu.test_arm_chained() {
+                say!("tapestryd: test-latch-chained armed (the next two trusted takeovers each wait twice in series)");
+            } else {
+                say!("tapestryd: test-latch-chained arm REFUSED by the broker");
             }
         }
 

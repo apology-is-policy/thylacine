@@ -209,7 +209,8 @@ impl Gpu {
     }
 
     /// The completion pump's half of a cursor stall: a late retirement revives
-    /// the lane, one outstanding FENCE_ABANDON_MS abandons it, and a retirement
+    /// the lane, one outstanding FENCE_ABANDON_MS, or while a takeover has waited
+    /// TAKEOVER_BOUND_MS from its chord (vote 80), abandons it, and a retirement
     /// after that still revives it.
     pub(super) fn cursor_settle(&mut self) {
         if self.cursor.queue.abandoned() {
@@ -239,10 +240,15 @@ impl Gpu {
                 self.cursor.stalled = None;
                 say!("lictor: cursor queue failed; backing retained, trusted takeover unavailable");
             }
-            None if crate::gpu_api::stall_verdict(true, ms) == crate::gpu_api::Stall::Dead => {
+            None if crate::gpu_api::stall_verdict(true, ms, self.ctrl.takeover_ms()) == crate::gpu_api::Stall::Dead => {
                 self.cursor.stalled = None;
                 self.cursor.queue.abandon();
-                say!("lictor: cursor chain never retired in {} ms -- cursor queue abandoned until it retires", ms);
+                if ms < FENCE_ABANDON_MS {
+                    say!("lictor: cursor chain never retired in {} ms, the takeover {} ms from its chord -- cursor queue abandoned at the takeover's bound until it retires",
+                         ms, self.ctrl.takeover_ms().unwrap_or(0));
+                } else {
+                    say!("lictor: cursor chain never retired in {} ms -- cursor queue abandoned until it retires", ms);
+                }
                 #[cfg(feature = "test-mode")]
                 if core::mem::take(&mut self.cursor.test_abandon) {
                     self.cursor.test_abandon_release = Some(Instant::now());
