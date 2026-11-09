@@ -456,7 +456,8 @@ enum {
     // P5-poll-a: SYS_POLL(fds_va, nfds, timeout_ms) → ready-fd count / -1
     //   x0 = fds_va        user-VA pointer to a `struct pollfd[nfds]` array
     //                      (8 B each; layout pinned by <thylacine/poll.h>)
-    //   x1 = nfds          1..PROC_HANDLE_MAX = 64
+    //   x1 = nfds          0..PROC_HANDLE_MAX = 64. 0 sleeps for the timeout, and
+    //                      x0 is not read: a caught note ends it with -T_E_INTR.
     //   x2 = timeout_ms    s32: <0 = block indefinitely, 0 = non-blocking,
     //                           >0 = block at most this many milliseconds
     // The multi-fd wait primitive (ARCH §23.3; specs/poll.tla). Parks the
@@ -466,7 +467,7 @@ enum {
     // per pollfd; a partial write fault scrubs already-written bytes.
     //
     // Returns -1 on:
-    //   - nfds == 0 or > PROC_HANDLE_MAX
+    //   - nfds > PROC_HANDLE_MAX
     //   - fds_va outside the user-VA bound (or fds_va == 0 with nfds > 0)
     //   - a partial-write fault on the revents writeback
     //
@@ -701,8 +702,8 @@ enum {
     //
     // SYS_TORPOR_WAIT(addr_va, expected, timeout_us) → 0 / -errno
     //   x0 = addr_va      user-VA pointer to a 4-byte aligned u32 word
-    //   x1 = expected     compare against *addr_va under the kernel
-    //                     `torpor_lock`; if they don't match, return 0
+    //   x1 = expected     compare against *addr_va under the kernel's
+    //                     bucket lock; if they don't match, return 0
     //                     immediately (fast path — userspace re-evaluates)
     //   x2 = timeout_us   s64 — < 0 = block indefinitely; >= 0 = block
     //                     at most this many microseconds (TORPOR_MAX_TIMEOUT_US
@@ -718,10 +719,9 @@ enum {
     //                     permission-denied at load
     //   -ETIMEDOUT (-110) timeout lapsed with no wake
     //
-    // No-lost-wakeup proof (CLAUDE.md "Spec-to-code suspended" —
-    // validated by reasoning, not specs/futex.tla): the consumer
-    // atomically (under torpor_lock) loads *addr_va and registers
-    // before sleeping; the producer's WAKE takes the same torpor_lock
+    // No-lost-wakeup proof (specs/torpor.tla): the consumer
+    // atomically (under its bucket's lock) loads *addr_va and registers
+    // before sleeping; the producer's WAKE takes the same lock
     // to walk. Lock-acquire/release pairing handles all interleavings —
     // either WAKE-unlock precedes WAIT-lock (consumer sees the
     // producer's store, returns 0 without sleep), or WAIT-lock precedes
@@ -985,7 +985,10 @@ enum {
     // (exec_build_init_stack lays out argc / argv[] / envp[] / auxv +
     // strings region; pouch's musl _start exposes argv to main).
     //
-    // Returns the child's pid on success (positive), -1 on any failure:
+    // Returns the child's pid on success (positive), a -T_E_* on failure, the walk's
+    // own reason, -T_E_NOEXEC for a file that is no image and -T_E_ACCES for one I-12 or
+    // the NX rule refuses among them. An interpreter is the child's to load, so one that
+    // is missing or no image reads a pid and a child that exits. The failures:
     //   - req_va outside the user-VA bound / unmapped at struct-copy time
     //   - any field outside its documented bounds (name_len, argv_data_len,
     //     argc, fd_count, perm_flags, cap_mask — same as the legacy
@@ -2145,21 +2148,15 @@ enum {
     // On FAILURE the caller's address space is COMPLETELY untouched and the
     // error is a real -errno:
     //   -T_E_NOENT / -T_E_ACCES / -T_E_NOTDIR ...  the path did not resolve
-    //   -T_E_NOEXEC   resolved, but not a loadable static ELF for this machine
+    //   -T_E_NOEXEC   resolved, but not a runnable image
+    //   -T_E_LIBBAD   a good program whose interpreter is not a runnable image
     //   -T_E_NOMEM    out of memory building the new image
     //   -T_E_FAULT    a user pointer was unreadable
     //   -T_E_INVAL    an argument was out of bounds
-    //   -T_E_AGAIN    the Proc has more than one live thread (see below)
     //
-    // v1.0 LIMIT -- multi-threaded callers are REFUSED with -T_E_AGAIN rather
-    // than half-served. POSIX says exec terminates every thread but the caller;
-    // doing that needs a "terminate THESE threads" primitive, and the only one
-    // the tree has (proc_group_terminate) is Proc-wide and set-once-never-cleared
-    // by design (I-24), so exempting the execer from it would permanently
-    // break a LATER kill of the same Proc. The real primitive is its own chunk
-    // on the death lineage (LINEAGE.md section 7, L-2b). Nothing in the arc is
-    // blocked by this: a vfork child, a fork child and a shell are all
-    // single-threaded when they exec.
+    // A thread that loses the claim to a peer's execve, or finds the Proc dying,
+    // does not come back: it dies with the others. The caller's peers die with
+    // the old image (ARCH 7.9.1), so no thread count refuses this call.
     SYS_EXECVE = 104,
 
     // SYS_RFORK(flags, child_sp, child_tls)
@@ -2657,6 +2654,44 @@ enum {
     // switch (vivarium.c).
     SYS_POSTNOTE_TID = 138,
 
+    // SYS_NOTE_DISPOSE(name_va, name_len, disposition, flags): write this Proc's
+    // row for one note in its table (ARCH 8.8.3; operator vote 18, 2026-11-03).
+    //   x0 = name_va     as SYS_POSTNOTE
+    //   x1 = name_len    as SYS_POSTNOTE
+    //   x2 = disposition NOTE_DISP_DEFAULT, _IGNORE or _CAUGHT
+    //   x3 = flags       on a caught row, any of NOTE_DISP_RESTART, _RESETHAND,
+    //                    _NODEFER, and NOTE_DISP_MASK(m); otherwise 0
+    //
+    // From the first call until the next exec the table governs this Proc:
+    //   - a note whose row is default takes the kernel's default and never reaches
+    //     the handler;
+    //   - an ignored note is dropped at the post, and one already pending goes now;
+    //   - a caught note runs handler_va, and interrupts a wait on signal(7)'s list.
+    // Under NOTE_DISP_RESTART the kernel re-issues a restartable call the note
+    // interrupted. A Proc reading its notes from an fd writes a caught row to let
+    // the note interrupt a listed wait; the note stays queued for the fd, and the
+    // kernel never restarts for it. The write re-reads what is already pending, so
+    // a note stranded behind a wait is judged by the new row.
+    //
+    // A handler a row caught runs with the thread's mask, plus NOTE_DISP_MASK's notes,
+    // plus the note's own family unless NOTE_DISP_NODEFER; SYS_NOTED puts the mask back
+    // whatever the handler did to it. No note reaches a thread in a handler in any case,
+    // so this is the mask the handler reads and what a fork or thread it makes inherits.
+    // Under NOTE_DISP_RESETHAND the row goes back to the default as the handler is
+    // entered. The handler receives the row's flags in x2.
+    //
+    // Returns 0 on success, else a negative errno:
+    //   -T_E_INVAL  as SYS_POSTNOTE's name rules; a name with no row (`sak`, any
+    //               snare), and `kill`; a disposition or flag this does not name;
+    //               a mask bit no note has; any flag on a row that is not caught; a
+    //               caught row with no handler and no notes fd to take it
+    //   -T_E_FAULT  name_va outside the user-VA bound / unmapped
+    //   -T_E_NOMEM  no memory for the table
+    //
+    // Explicitly 139, the next free number. Linux's 139 is rt_sigreturn, which
+    // viv_linux_dispatch intercepts before the table (vivarium.c).
+    SYS_NOTE_DISPOSE = 139,
+
     // SYS_ACCOUNT(handle, op, rec_va, rec_size), with thylacine/account.h's records
     // (SHARED-MEMORY-ACCOUNTING.md section 13, operator votes 47 and 48). Serves
     // ACCOUNT_QUERY on ACCOUNT_SELF, which must arrive sign-extended. Returns 0, or:
@@ -2670,6 +2705,60 @@ enum {
     // Linux's 140 is setpriority, which has no row, so a Linux Proc takes ENOSYS before
     // the native switch (vivarium.c).
     SYS_ACCOUNT = 140,
+
+    // SYS_NOTE_WAIT(how, set, rec_va, timeout_ns): wait for a note under a mask of the
+    // call's own, or take one with no handler (ARCH 8.8.3; operator vote 24,
+    // 2026-11-03). POSIX sigsuspend and sigtimedwait, with no window between the mask
+    // and the wait.
+    //
+    // NOTE_WAIT_SUSPEND: x1 = the mask for the wait, as SYS_NOTE_MASK; x2 = 0; x3 < 0.
+    //   Waits until a caught note's handler has run, under that mask plus the row's,
+    //   and answers -T_E_INTR, under NOTE_DISP_RESTART as well. The handler's return
+    //   puts the caller's mask back. A note no handler takes leaves the wait standing,
+    //   so a stop and a cont do not end it. In a handler no other handler can run: the
+    //   call waits until a note the mask admits is queued and answers -T_E_INTR, and
+    //   that note runs when the handler returns.
+    //
+    // NOTE_WAIT_TAKE: x1 = a take word; x2 = a struct note_record *, or 0; x3 = the
+    //   timeout in ns, < 0 for none, 0 to poll. Takes the note the word names, the
+    //   caller's thread-directed ones first and then the oldest queued, masked or not,
+    //   and runs no handler for it. POSIX has the caller block the set first: a note it
+    //   left unmasked may reach a handler or its default on another thread. Answers 0.
+    //
+    // NOTE_WAIT_POLL: x1 = the mask for the call, as SYS_NOTE_MASK; x2 = a struct pollfd *;
+    //   x3 = the timeout in ns, < 0 for none, 0 not to wait, rounded up to the poll's ms;
+    //   x4 = nfds, up to POLL_MAX_NFDS, 0 to sleep for the timeout. POSIX ppoll and
+    //   pselect, with no window between the mask and the wait. Answers the ready count,
+    //   0 at the deadline. With either answer the caller's mask is back before it returns
+    //   and no handler has run for a note only the call's mask let in. A caught note that
+    //   ends the wait runs its handler under the call's mask, and -T_E_INTR, with no
+    //   restart under NOTE_DISP_RESTART, as poll's. A fatal note the call's mask lets in
+    //   ends the Proc under that mask. In a handler no note can end the call, only a ready
+    //   fd or its deadline. A Proc no table governs gets the mask and the wait, and no note
+    //   ends it but a fatal one. A self-managing Proc's EINTR says a note is on its fd.
+    //   x4 is read by this form alone.
+    //
+    // NOTE_WAIT_PENDING: x1, x2 and x3 = 0. POSIX sigpending: answers a take word naming
+    //   what is queued for this thread and its mask holds. In a handler, every note is
+    //   held.
+    //
+    // A take word: 1 << NOTE_BIT_* names a family; NOTE_TAKE_TTY_* name one row of the
+    // tty family, whose rows share a mask bit, so that waiting for a winch does not eat
+    // a hangup. `kill` and the snare family cannot be named.
+    //
+    // Returns a negative errno otherwise:
+    //   -T_E_INTR   a caught note outside the wait's set ran its handler, or is about to
+    //   -T_E_AGAIN  the timeout passed (NOTE_WAIT_TAKE)
+    //   -T_E_INVAL  a form or word this does not name; rec_va or a timeout on a suspend;
+    //               NOTE_WAIT_SUSPEND in a Proc no table governs, where no note could
+    //               end the wait; nfds over the bound; an argument NOTE_WAIT_PENDING
+    //               does not take
+    //   -T_E_FAULT  rec_va outside the user-VA bound / unmapped; the note stays queued.
+    //               The pollfd array likewise
+    //
+    // Explicitly 141, the next free number after SYS_ACCOUNT. Linux's 141 is
+    // getpriority, which has no row (vivarium.c).
+    SYS_NOTE_WAIT = 141,
 
     // NOT A SYSCALL. One past the highest assigned number, so that
     // VIV_NATIVE_CEILING can be pinned to a value the compiler recomputes
@@ -3588,6 +3677,32 @@ _Static_assert(__builtin_offsetof(struct t_kernel_regs, tpidr_el0) == 104, "t_ke
 // P9_QTSYMLINK bit when the server's Tgetattr mode does not already carry it;
 // the value must stay POSIX S_IFLNK (0120000).
 #define T_S_IFLNK   0120000u
+// A socket's data or listen file, for a Dev that serves one (netd). Fstat's type
+// is how the kernel knows a read of it may wait for a peer (ARCH 8.8.3).
+#define T_S_IFSOCK  0140000u
+
+// SYS_NOTE_DISPOSE's dispositions and flags (ARCH 8.8.3). The row's mask rides in the
+// flags word, so no register is read that a caller with no mask left unset.
+#define NOTE_DISP_DEFAULT    0u
+#define NOTE_DISP_IGNORE     1u
+#define NOTE_DISP_CAUGHT     2u
+#define NOTE_DISP_RESTART    1u
+#define NOTE_DISP_RESETHAND  2u
+#define NOTE_DISP_NODEFER    4u
+#define NOTE_DISP_FLAGS      (NOTE_DISP_RESTART | NOTE_DISP_RESETHAND | NOTE_DISP_NODEFER)
+#define NOTE_DISP_MASK_SHIFT 16u
+#define NOTE_DISP_MASK(m)    ((u64)(m) << NOTE_DISP_MASK_SHIFT)
+
+// SYS_NOTE_WAIT's forms, and a take word's rows of the tty family.
+#define NOTE_WAIT_SUSPEND    0u
+#define NOTE_WAIT_TAKE       1u
+#define NOTE_WAIT_POLL       2u
+#define NOTE_WAIT_PENDING    3u
+#define NOTE_TAKE_TTY_WINCH  (1ull << 16)
+#define NOTE_TAKE_TTY_SUSP   (1ull << 17)
+#define NOTE_TAKE_TTY_CONT   (1ull << 18)
+#define NOTE_TAKE_TTY_QUIT   (1ull << 19)
+#define NOTE_TAKE_TTY_HUP    (1ull << 20)
 
 // SYS_WSTAT valid-mask bits (A-2a; IDENTITY-DESIGN.md §9.5). Which of the
 // (mode, uid, gid, size, times) arguments the kernel applies. Chosen to
@@ -3758,6 +3873,13 @@ _Static_assert(__builtin_offsetof(struct t_kernel_regs, tpidr_el0) == 104, "t_ke
 // O_PATH handle IS (and is a valid SYS_CHROOT target). When set, the
 // access bits are ignored (the handle carries no byte-I/O open).
 #define SYS_WALK_OPEN_OPATH        0x80u
+// ARCH 8.8.3 (operator vote 20, 2026-11-03): this open's wait for the peer is one a
+// caught note may interrupt, returning -T_E_INTR, and SA_RESTART may re-issue it.
+// Pouch sets it on the one open that waits for a peer (accept's listen, connect's
+// data). SYS_OPEN only, and only on a Proc whose table governs; stripped before
+// anything sees it. Outside SYS_WALK_OPEN_OMODE_VALID, so every other open refuses
+// it. A regular open stays uninterruptible.
+#define SYS_WALK_OPEN_OINTR        0x2000u
 // D-1 (DISTRO.md section 4.3): do NOT follow a symlink at the path's FINAL
 // component -- the Linux O_NOFOLLOW / lstat-shape resolution flag. Consumed by
 // SYS_OPEN (threaded into the resolver as STALK_NOFOLLOW; the bit is STRIPPED
@@ -3802,6 +3924,8 @@ _Static_assert(__builtin_offsetof(struct t_kernel_regs, tpidr_el0) == 104, "t_ke
 _Static_assert(SYS_WALK_OPEN_OAPPEND == 0x40u &&
                (SYS_WALK_OPEN_OMODE_VALID & SYS_WALK_OPEN_OAPPEND) != 0,
                "SYS_WALK_OPEN_OAPPEND must be a bit inside SYS_WALK_OPEN_OMODE_VALID");
+_Static_assert((SYS_WALK_OPEN_OMODE_VALID & SYS_WALK_OPEN_OINTR) == 0,
+               "only SYS_OPEN's handler admits SYS_WALK_OPEN_OINTR");
 // #50 (VIVARIUM.md section 6.24): the EXCLUSIVE-create modifier, at the value
 // the comment above pre-reserved for it. Meaningful ONLY to SYS_OPEN_CREATE
 // (create-first, once; an existing leaf answers -T_E_EEXIST -- atomic at the
@@ -4290,6 +4414,9 @@ s64 sys_postnote_cross_for_test(struct Proc *caller, int target_pid,
                                 const char *name);
 s64 sys_postnote_self_for_test(struct Proc *caller, const char *name);
 s64 sys_postnote_tid_for_test(struct Proc *caller, int tid, const char *name);
+s64 sys_note_wait_handler(u64 how, u64 set, u64 rec_va, u64 timeout_raw, u64 nfds_raw);
+s64 sys_note_dispose_for_proc(struct Proc *p, const char *name, u64 disposition,
+                              u64 flags);
 s64 sys_pread_for_proc(struct Proc *p, hidx_t h, u8 *kbuf, u64 len, s64 off);
 s64 sys_pty_register_for_proc(struct Proc *p, u64 op, u64 a1, u64 a2, u64 a3);
 s64 sys_pwrite_for_proc(struct Proc *p, hidx_t h, const u8 *kbuf, u64 len,
@@ -4385,7 +4512,10 @@ u64 viv_dirent64_encode_run(const u8 *src, u64 src_len,
 s64 viv_dup3_for_test(struct Proc *p, u64 oldfd, u64 newfd, u64 flags);
 s64 viv_dup_for_test(struct Proc *p, u64 fd);
 s64 viv_fcntl_for_test(struct Proc *p, u64 fd, u64 cmd, u64 arg);
-bool viv_fd_is_slow_for_test(struct Proc *p, u64 fd);
+bool file_is_slow_for_test(struct Proc *p, u64 fd);
+struct Thread;
+void native_note_class_for_test(struct Thread *t, struct Proc *p,
+                                const struct exception_context *ctx);
 s64 viv_getdents64_for_test(struct Proc *p, u64 fd, u64 dirp, u64 count);
 s64 viv_getsockopt_for_test(struct Proc *p, u64 fd, u64 level, u64 optname,
                             u64 optval_va, u64 optlen_va);

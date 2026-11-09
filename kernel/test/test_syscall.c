@@ -56,16 +56,17 @@ void test_syscall_dispatch_unknown(void) {
         "SYS_GETPID with bit 32 set is an unknown number");
 }
 
-// 26, 30, 43 and 139 hold no native syscall on this tree, with SYS_ACCOUNT at 140
-// above the last. vivarium.c's collision argument for the Linux row at 139 rests on
-// that one being EMPTY, so the holes are pinned here -- by the unknown arm's own
+// 26, 30 and 43 hold no native syscall on this tree, and 129..141 are all assigned,
+// with SYS_NOTE_DISPOSE at 139 under its own collision assert in vivarium.c. A
+// native number assigned in a hole needs that argument too, so the holes are pinned
+// here -- by the unknown arm's own
 // counter, not by the answer: a handler landing in one could refuse zeroed arguments
 // the same way. A native number assigned in one fails this test; the fix is a
 // per-number collision assert for each vivarium row at that number, and then this pin
 // moves. The suite runs before init, so the only unknown calls in flight are the ones
 // tests make.
 void test_syscall_native_holes_unassigned(void) {
-    static const u64 holes[] = { 26, 30, 43, 139 };
+    static const u64 holes[] = { 26, 30, 43 };
     for (u64 k = 0; k < sizeof(holes) / sizeof(holes[0]); k++) {
         struct exception_context hc;
         for (int i = 0; i < 31; i++) hc.regs[i] = 0;
@@ -109,6 +110,24 @@ void test_syscall_native_holes_unassigned(void) {
         "140 is SYS_ACCOUNT: it never reaches the unknown arm");
     TEST_EXPECT_EQ((s64)ctx.regs[0], (s64)-T_E_INVAL,
         "140 is SYS_ACCOUNT: operation 0 is its own refusal");
+
+    for (int i = 0; i < 31; i++) ctx.regs[i] = 0;
+    ctx.regs[8] = SYS_NOTE_DISPOSE;
+    before = syscall_unknown_count();
+    TEST_SYSCALL_DISPATCH(&ctx);
+    TEST_EXPECT_EQ(syscall_unknown_count() - before, 0ull,
+        "139 is SYS_NOTE_DISPOSE: it never reaches the unknown arm");
+    TEST_EXPECT_EQ((s64)ctx.regs[0], (s64)-T_E_INVAL,
+        "139 is SYS_NOTE_DISPOSE: an empty name is its own refusal");
+
+    for (int i = 0; i < 31; i++) ctx.regs[i] = 0;
+    ctx.regs[8] = SYS_NOTE_WAIT;
+    before = syscall_unknown_count();
+    TEST_SYSCALL_DISPATCH(&ctx);
+    TEST_EXPECT_EQ(syscall_unknown_count() - before, 0ull,
+        "141 is SYS_NOTE_WAIT: it never reaches the unknown arm");
+    TEST_EXPECT_EQ((s64)ctx.regs[0], (s64)-T_E_INVAL,
+        "141 is SYS_NOTE_WAIT: a suspend with a timeout is its own refusal");
 }
 
 void test_syscall_dispatch_puts_smoke(void) {

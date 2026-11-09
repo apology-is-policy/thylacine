@@ -15,7 +15,7 @@ hazards: [haz-shared-stream-desync]
 abis: []
 design: [docs/LARDER-DESIGN.md, docs/FID-LIFECYCLE-DESIGN.md, docs/POUNCE-DESIGN.md]
 created: 2026-07-31
-updated: 2026-11-02
+updated: 2026-11-05
 ---
 ## The fid a cached open keeps, and locks on it (B-3h3, 2026-11-02)
 
@@ -125,8 +125,15 @@ dev9p serves the five lock slots of [[sub-kernel-dev]] for
   every open's run first (ARCH 9.6.11).
 - Every set-lock first lands `c`'s write-behind run (`dev9p_lock_sync`): an
   unlock gives its range up, and a conversion to a read lock admits readers. A
-  test lands nothing. A flush that fails still sends the request, and the error
-  latches for the next write or fsync.
+  test lands nothing. A flush a caught note cancelled answers `-T_E_INTR` and
+  sends nothing: the run stays staged, and under `SA_RESTART` the call runs again
+  (`dev9p.lock_cancelled_flush_says_eintr`, with a server's own EINTR and a mark
+  with nothing staged as its controls; an fsync after each leg resends the
+  cancelled run with nothing latched). A flush that fails otherwise still sends
+  the request, and the error latches for the next write or fsync. The same
+  `-T_E_INTR` from `dev9p_lock_sync` stops a lock call's flush of the file's other
+  opens ([[sub-kernel-filelock]]); `P9_E_INTR == T_E_INTR` is asserted where the
+  value crosses.
 - `dev9p_lock_owner(c)` mints a second owner on `c`'s file: a zero-name
   Twalk clone of `c`'s fid into a fresh fid (Stratum admits the clone of an
   open fid). A clone that fails answers ESTALE or EINTR as they are and otherwise
@@ -278,12 +285,14 @@ under `wb_lock` ([[lock-dev9p-wb-priv]]).
    or the last close sends it; a close whose own flush is interrupted hands
    the run to the closer and returns 0. Until then the `EINTR` latched and the
    run was dropped, so every later write, fsync and close on the file
-   returned `EINTR`. The cancellation is told by the note's claim
-   (`wb_note_cancelled`: every caught-note unwind takes one and holds it to
-   the EL0-return tail); a server's own Rlerror(EINTR), with no claim, latches
-   like any failure and the last close reports it (B-2b audit F1). Witnesses
-   `dev9p.wb_interrupted_flush_keeps_run` (the claim held) and its control
-   `dev9p.wb_server_eintr_latches` (none).
+   returned `EINTR`. The cancellation is told by the call's mark
+   (`wb_note_cancelled`, `note_call_unwound`: every caught-note unwind sets it,
+   a thread-directed note's too, which takes no claim, and it holds to the
+   EL0-return tail); a server's own Rlerror(EINTR) has no mark, since `client_run`
+   takes it back when the op's own reply stands, so it latches like any failure and
+   the last close reports it (B-2b audit F1, item 11c r2 F1). Witnesses
+   `dev9p.wb_interrupted_flush_keeps_run` (the mark held) and its control
+   `dev9p.wb_server_eintr_latches` (no mark, with a claim and without).
    **`dev9p_close` never flushes** (B-3h audit round 3, 2026-11-02): the last
    reference can fall on any thread, an image-cache eviction or a Loom reap, so
    the flush lives in `dev9p_fd_close` on the closing thread. That one flushes
@@ -730,7 +739,14 @@ rename/unlink (#80), and on wstat (G12): a chown/chgrp on a caped session
 answers EACCES before the wire, a loose cached open that cannot reach its file
 ESTALE, and a flush or
 Tsetattr failure the wire's errno. `dev9p_create`'s errno record + accessor (#99).
-NULL/`-1` per the Dev convention elsewhere. `walk_attrs` returns the
+NULL/`-1` per the Dev convention elsewhere. A failed walk records its reason with
+`dev_walk_failed` ([[sub-kernel-dev]]): the server's errno by value, except that its
+`ENOSYS` or `EOPNOTSUPP` to the base op reads `EIO` (a broken server, not a missing
+call: a Linux guest's T2 row reads `ENOSYS` as its own decline; the fused op's two are
+its latch and never get here); `EIO` for no priv or an over-count; `EINVAL` for a walk
+from an open fid or bad arguments; `ENOMEM`; `EMFILE` for fid exhaustion. A short Rwalk
+stays a miss: it is how 9P says a later name is missing. Only `ENOENT` installs a
+negative dentry. `walk_attrs` returns the
 distinct `DEV_WALK_ATTRS_UNSUPPORTED` sentinel for the capability miss (NOT
 a walk failure — nothing about the path was learned).
 

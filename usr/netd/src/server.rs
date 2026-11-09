@@ -210,9 +210,13 @@ const P9_VERSION_9P2000_L: &[u8] = b"9P2000.L";
 // clone/ctl/data is the intended "anyone with /net dials" semantics.
 const S_IFDIR: u32 = 0o040000;
 const S_IFREG: u32 = 0o100000;
+const S_IFSOCK: u32 = 0o140000;
 const DIR_MODE: u32 = S_IFDIR | 0o555;
 const FILE_RW: u32 = S_IFREG | 0o666;
 const FILE_RO: u32 = S_IFREG | 0o444;
+// The kernel reads a socket's file type to learn a read or write here may wait
+// on a peer, so a caught note may unwind it (ARCHITECTURE 8.8.3).
+const SOCK_RW: u32 = S_IFSOCK | 0o666;
 
 /// Tgetattr request-mask: size. ninep exports MODE/NLINK/UID/GID; STATX_SIZE is
 /// 0x200 (Linux v9fs), filled so a stat reports a file's length.
@@ -6388,7 +6392,11 @@ impl Conn {
                     // writes it), so it MUST be writable, else the kernel's A-3
                     // dev9p perm_check denies the W and the open fails before the
                     // Tlopen ever reaches h_lopen (the #239 live-accept break).
-                    FK_CTL | FK_DATA | FK_LISTEN => FILE_RW,
+                    // It stays a plain file: accept reads the connection number
+                    // from this fid, and a note unwinding that read would lose
+                    // the connection it names.
+                    FK_CTL | FK_LISTEN => FILE_RW,
+                    FK_DATA => SOCK_RW,
                     _ => FILE_RO,
                 },
                 _ => FILE_RO, // stats + summary

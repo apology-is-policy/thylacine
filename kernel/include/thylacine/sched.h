@@ -21,6 +21,7 @@
 #ifndef THYLACINE_SCHED_H
 #define THYLACINE_SCHED_H
 
+#include <thylacine/spinlock.h>
 #include <thylacine/types.h>
 
 struct Thread;
@@ -127,13 +128,19 @@ void sched_install_bootcpu_idle(struct Thread *t);
 bool sched_idle_in_wfi(unsigned cpu_idx);
 
 // Tickless idle (NO_HZ_IDLE; docs/TICKLESS-IDLE.md TI-1, #299). The earliest
-// pending deadline (absolute CNTVCT counter value) across all deadlined tsleep
-// sleepers, or 0 if none. The idle loop (TI-2) arms its one-shot to
+// pending deadline (absolute CNTVCT counter value) on this CPU's timer base, or 0
+// if none. The idle loop (TI-2) arms its one-shot to
 // min(this, now + TICKLESS_IDLE_BACKSTOP) before WFI so a genuinely-idle CPU
-// takes no 1 kHz ticks yet still wakes for the next real deadline. O(n)
-// min-scan under g_timerwait.lock (irqsave; a leaf acquisition). At TI-1 no
-// production path calls this -- it lands with its consumer at TI-2.
+// takes no 1 kHz ticks yet still wakes for the next real deadline. One load.
 u64 timerwait_earliest_deadline(void);
+
+// The base a sleeper on this CPU would link on: head to tail into out (at most cap),
+// its stored tail and earliest. The count, or ~0u on a broken back link.
+unsigned timer_base_walk_for_test(struct Thread **out, unsigned cap,
+                                  struct Thread **tail, u64 *earliest);
+// That base's lock, IRQs masked, for a test that must show a path does not take it.
+irq_state_t timer_base_lock_for_test(void);
+void timer_base_unlock_for_test(irq_state_t s);
 #endif // KERNEL_TESTS
 
 // Tickless idle re-poll backstop (NO_HZ_IDLE; docs/TICKLESS-IDLE.md TI-4e, #299).
@@ -173,6 +180,8 @@ u64 tickless_target_cnt(u64 now_cnt, u64 earliest_deadline, u64 backstop_cnt);
 // just WFIs on IPI -- the byte-identical pre-preempt behavior). The I-9 arm-race
 // holds because idle_in_wfi is set BEFORE the arm + WFI (register-then-observe;
 // specs/sched_tickless.tla). See ARCH 8.6.
+// This secondary's tick is armed: its timed waits can use its own timer base.
+void sched_mark_tick_armed(void);
 void sched_idle_park(bool tickless);
 
 // P3-G: notify-idle-peer toggle. Off (default) during in-kernel tests so

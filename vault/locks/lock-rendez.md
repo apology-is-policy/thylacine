@@ -30,10 +30,9 @@ consumer's `cond`, and the lock cannot help it.
 ## Held across
 
 - The `on_cpu` spin in `wake_rendez_waiter` and the `ready()` that
-  follows — deliberately, and deliberately **without**
-  [[lock-timerwait]], which `wakeup` releases the moment its unlink is
-  done. Keeping the global lock across a spin that waits for a peer's
-  context switch would let one wakeup stall every CPU's tick.
+  follows. `wakeup` holds this lock alone; only the tick's wake runs
+  under [[lock-timerwait]] too, and it filters `on_cpu` first, so no spin
+  stalls a tick.
 - Never across `sched()`. The sleeper drops it (and `wait_lock`) before
   yielding.
 

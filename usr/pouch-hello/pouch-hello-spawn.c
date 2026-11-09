@@ -112,6 +112,14 @@ int main(int argc, char **argv) {
 	if (dup2(1, 201) != 201) return fail("dup2 onto a free target", 0);
 	close(201);
 
+	// === test 0: a real miss reads ENOENT, through both spawn calls.
+	pid_t miss_pid = 0;
+	char *const missargv[] = { "miss", NULL };
+	int miss_rc = posix_spawn(&miss_pid, "/no-such-walk-errno", NULL, NULL, missargv, environ);
+	if (miss_rc != ENOENT) return fail("posix_spawn(miss)", miss_rc);
+	miss_rc = posix_spawnp(&miss_pid, "no-such-walk-errno", NULL, NULL, missargv, environ);
+	if (miss_rc != ENOENT) return fail("posix_spawnp(miss)", miss_rc);
+
 	// === test 1: pipe2(O_CLOEXEC) + posix_spawn("ok") redirecting the child's
 	//     stdout into the pipe; capture + reap; expect WEXITSTATUS 0 ===
 	int p[2];

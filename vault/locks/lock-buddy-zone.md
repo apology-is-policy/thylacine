@@ -22,7 +22,7 @@ chains may end on it:
 - [[lock-kmem-cache]] → zone (slab_new / slab_drain)
 - `vma_lock` → zone (demand paging; the documented tree-wide edge)
 - the Larder leaf → zone (page-buffer frees)
-- `torpor_lock` → `vma_lock` → zone (the rare decommit-window
+- a torpor bucket's lock → `vma_lock` → zone (the rare decommit-window
   re-fault only — [[sub-kernel-torpor]])
 
 ## Held across

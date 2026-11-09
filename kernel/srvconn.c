@@ -1011,7 +1011,13 @@ long srvconn_server_send_blocking(struct SrvConn *cn, const u8 *buf, long n) {
         // here is not lost (specs/tsleep.tla register-then-observe).
         // deadline 0 = indefinite (the kernel client is the guaranteed
         // drainer; see the function header on deadlock-freedom).
-        int ts = tsleep(&ch->wrendez, chan_cond_writable, ch, 0u);
+        // ARCH 8.8.3: a call's own wait. note_interruptible is false in every
+        // kernel pump, so they ride a note out.
+        int ts = tsleep_noteintr(&ch->wrendez, chan_cond_writable, ch, 0u);
+        if (ts == TSLEEP_NOTEINTR) {
+            ret = (done > 0) ? done : -(long)T_E_INTR;
+            break;
+        }
         if (ts == TSLEEP_TIMEDOUT) {          // unreachable with deadline 0; defense in depth
             // #348 audit F4: a future non-zero server deadline here would need a
             // caller-visible `server_timed_out` signal (analog to client_timed_
@@ -1082,7 +1088,11 @@ long srvconn_client_send_blocking(struct SrvConn *cn, const u8 *buf, long n) {
         // Ring full -> park until the server drains c2s (wakes wrendez)
         // or teardown latches eof. Same register-then-observe as the s2c
         // twin (specs/tsleep.tla).
-        int ts = tsleep(&ch->wrendez, chan_cond_writable, ch, 0u);
+        int ts = tsleep_noteintr(&ch->wrendez, chan_cond_writable, ch, 0u);
+        if (ts == TSLEEP_NOTEINTR) {          // ARCH 8.8.3
+            ret = (done > 0) ? done : -(long)T_E_INTR;
+            break;
+        }
         if (ts == TSLEEP_TIMEDOUT) {          // unreachable with deadline 0
             ret = (done > 0) ? done : -1;
             break;
@@ -1165,7 +1175,11 @@ long srvconn_server_recv_blocking(struct SrvConn *cn, u8 *buf, long n) {
         // tsleep with deadline=0 — block indefinitely. wake fires from
         // srvconn_client_send's chan_produce (data arrived) or
         // srvconn_teardown's eof latch on c2s (peer closed).
-        int ts = tsleep(&ch->rendez, chan_cond_readable, ch, 0u);
+        int ts = tsleep_noteintr(&ch->rendez, chan_cond_readable, ch, 0u);
+        if (ts == TSLEEP_NOTEINTR) {          // ARCH 8.8.3
+            ret = -(long)T_E_INTR;
+            break;
+        }
         if (ts == TSLEEP_TIMEDOUT) {
             ret = -1;                         // Unreachable with deadline=0; defense in depth.
             break;

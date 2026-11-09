@@ -2939,3 +2939,427 @@ void test_rendez_caught_note_ends_wait4(void) {
     TEST_EXPECT_EQ(ctl.rc, -1L, "control: the native wait ends when its last child is gone");
     TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree empty after cleanup");
 }
+
+// rendez.restart_undone_on_refused_frame (ARCH 8.8.3). A restarting handler rewinds
+// the call before its frame is built, so that the frame names the svc. A frame the
+// copy-out then refuses leaves the note queued and armed, and a rewind that stayed
+// would re-issue into a wait that unwinds again, with no handler ever run and no
+// return to the program. Mapped by nothing, the stack below passes every gate in
+// front of the copy-out; the NOTE_NAME_MAX stack of c3_tail stops at the first, ahead
+// of the rewind, and would prove nothing.
+static volatile u32  g_ru_run;
+static volatile int  g_ru_rc;
+static volatile u64  g_ru_elr, g_ru_x0;
+static volatile bool g_ru_marked, g_ru_mark_after;
+static volatile u32  g_ru_left;
+static volatile bool g_ru_release;
+static volatile bool g_ru_exited;
+static struct Rendez g_ru_rendez;
+
+static int ru_cond(void *arg) { (void)arg; return g_ru_release ? 1 : 0; }
+
+static void ru_entry(void) {
+    struct Thread *t = current_thread();
+    t->note_interruptible = true;
+    t->note_restartable   = true;
+    t->note_call_x0       = 0x77u;
+    t->note_call_unwound  = false;
+    g_ru_run++;
+    g_ru_rc = sleep_noteintr(&g_ru_rendez, ru_cond, NULL);
+    t->note_interruptible = false;
+    g_ru_marked = t->note_call_unwound;
+
+    struct exception_context ctx;
+    for (size_t k = 0; k < sizeof(ctx); k++) ((u8 *)&ctx)[k] = 0;
+    ctx.sp      = 0x10000000u;
+    ctx.elr     = 0x8000u;
+    ctx.regs[0] = (u64)-(s64)T_E_INTR;
+    irq_state_t s = spin_lock_irqsave(NULL);   // the tail runs masked (#713)
+    notes_deliver_at_el0_return(&ctx);
+    spin_unlock_irqrestore(NULL, s);
+    g_ru_elr = ctx.elr;
+    g_ru_x0  = ctx.regs[0];
+    g_ru_mark_after = t->note_call_unwound;
+    spin_lock(&t->proc->notes->lock);
+    g_ru_left = t->proc->notes->count;
+    spin_unlock(&t->proc->notes->lock);
+    g_ru_run++;
+    test_thread_park_terminal(&g_ru_exited);
+}
+
+void test_rendez_restart_undone_on_refused_frame(void) {
+    static const struct viv_ksigaction hand_restart = {
+        .handler = 0x4000u, .flags = VIV_SA_RESTART, .restorer = 0, .mask = 0 };
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree must be empty at test entry");
+    struct Proc *par = cw_linux_proc();
+    TEST_ASSERT(par != NULL, "parent alloc");
+    bool set = viv_sigtab_set(par->sigtab, VIV_SIGNOTE_INTERRUPT, &hand_restart);
+    g_ru_run = 0; g_ru_rc = 0x7fffffff; g_ru_left = 0xffffffffu;
+    g_ru_marked = false; g_ru_mark_after = true; g_ru_elr = 0; g_ru_x0 = 0;
+    g_ru_release = false; g_ru_exited = false;
+    rendez_init(&g_ru_rendez);
+    struct Thread *t = set ? thread_create(par, ru_entry) : NULL;
+
+    bool parked = false;
+    if (t) {
+        int tid = t->tid;
+        ready(t);
+        u64 dl = timer_now_ns() + TEST_YIELD_BUDGET_NS;
+        while (!(parked = g_ru_run == 1u && test_thread_sleeping(par, tid)) &&
+               timer_now_ns() < dl)
+            sched();
+    }
+    bool posted = false;
+    if (parked) {
+        irq_state_t s = proc_table_lock_acquire();
+        posted = notes_post(par, NOTE_NAME_INTERRUPT, 0u, NULL, true) == 0;
+        proc_caught_note_wake(par);
+        proc_table_lock_release(s);
+    }
+    u64 dl = timer_now_ns() + TEST_YIELD_BUDGET_NS;
+    while (posted && g_ru_run < 2u && timer_now_ns() < dl) sched();
+    int  rc = g_ru_rc;
+    bool ran_tail = g_ru_run >= 2u;
+
+    bool joined = (t == NULL);
+    if (t) {
+        if (g_ru_run < 2u) { g_ru_release = true; (void)wakeup(&g_ru_rendez); }
+        dl = timer_now_ns() + TEST_YIELD_BUDGET_NS;
+        while (g_ru_run < 2u && timer_now_ns() < dl) sched();
+        if (g_ru_run >= 2u) {
+            test_thread_join_last(par, &g_ru_exited);
+            joined = test_proc_threads_freed(par);
+        }
+    }
+    TEST_ASSERT(joined, "the sleeper returned and was joined");
+    test_proc_free_drained(par);
+
+    TEST_ASSERT(set, "the restarting handler row was written");
+    TEST_ASSERT(parked, "the sleeper parked in an interruptible wait");
+    TEST_ASSERT(posted, "the interrupt was posted");
+    TEST_ASSERT(ran_tail, "the note woke it and it ran its tail");
+    TEST_EXPECT_EQ(rc, SLEEP_NOTEINTR, "the caught interrupt unwinds the wait");
+    TEST_ASSERT(g_ru_marked, "the unwind marked the call");
+    TEST_EXPECT_EQ(g_ru_left, 1u, "no frame was built, so the note stays queued");
+    TEST_EXPECT_EQ(g_ru_elr, 0x8000ull, "the rewind was undone: the pc is past the svc");
+    TEST_EXPECT_EQ(g_ru_x0, (u64)-(s64)T_E_INTR, "and x0 is what the call answered");
+    TEST_ASSERT(!g_ru_mark_after, "the call is over, so its mark is gone");
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree empty after cleanup");
+}
+
+// rendez.tail_discards_dead_note (ARCH 8.8.3): a thread runs its tail with a
+// child_exit queued. With a table governing, the default reads as ignore and the note
+// goes, whether the row says default, the table was never allocated (Pouch's
+// constructor), or a caught row has nobody to take it. With no table and no handler
+// the note stays for the fd path: nothing has said this Proc does not read one.
+static volatile u32  g_dd_left;
+static volatile bool g_dd_ran;
+static volatile bool g_dd_exited;
+
+static void dd_entry(void) {
+    struct Thread *t = current_thread();
+    c3_tail();
+    spin_lock(&t->proc->notes->lock);
+    g_dd_left = t->proc->notes->count;
+    spin_unlock(&t->proc->notes->lock);
+    g_dd_ran = true;
+    test_thread_park_terminal(&g_dd_exited);
+}
+
+#define DD_NO_TABLE      0
+#define DD_DEFAULT_ROW   1
+#define DD_STALE_TOKEN   2
+
+static void dd_leg(int shape, u32 want_left, const char *why) {
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree must be empty at leg entry");
+    struct Proc *par = proc_alloc();
+    TEST_ASSERT(par != NULL, "parent alloc");
+    par->state = PROC_STATE_ALIVE;
+    s64 row = 0;
+    if (shape == DD_DEFAULT_ROW)
+        row = sys_note_dispose_for_proc(par, NOTE_NAME_CHILD_EXIT, NOTE_DISP_DEFAULT, 0);
+    if (shape == DD_STALE_TOKEN) {
+        notes_set_handler(par, 0x4000u);
+        row = sys_note_dispose_for_proc(par, NOTE_NAME_CHILD_EXIT, NOTE_DISP_CAUGHT, 0);
+        __atomic_store_n(&par->handler_va, 0ull, __ATOMIC_RELEASE);
+    }
+    int post = notes_post(par, NOTE_NAME_CHILD_EXIT, 0u, NULL, true);
+    u32 queued = par->notes->count;
+    g_dd_left = 0xffffffffu; g_dd_ran = false; g_dd_exited = false;
+    struct Thread *t = thread_create(par, dd_entry);
+    if (t) {
+        ready(t);
+        u64 dl = timer_now_ns() + TEST_YIELD_BUDGET_NS;
+        while (!g_dd_ran && timer_now_ns() < dl) sched();
+    }
+    bool ran = g_dd_ran;
+    u32 left = g_dd_left;
+    bool joined = (t == NULL);
+    if (ran) {
+        test_thread_join_last(par, &g_dd_exited);
+        joined = test_proc_threads_freed(par);
+    }
+    TEST_ASSERT(joined, "the thread was joined");
+    test_proc_free_drained(par);
+
+    TEST_EXPECT_EQ(row, (s64)0, "the leg's disposition");
+    TEST_EXPECT_EQ(post, 0, "the note was posted");
+    TEST_EXPECT_EQ(queued, 1u, "and queued: only the tail may discard it");
+    TEST_ASSERT(ran, "the thread ran its tail");
+    TEST_EXPECT_EQ(left, want_left, why);
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree empty after cleanup");
+}
+
+void test_rendez_tail_discards_dead_note(void) {
+    dd_leg(DD_NO_TABLE, 1u, "no table, no handler: it stays for the fd path");
+    dd_leg(DD_DEFAULT_ROW, 0u, "a default row with no table allocated: discarded");
+    dd_leg(DD_STALE_TOKEN, 0u, "a caught row with nobody to take the note: discarded");
+}
+
+// rendez.tail_settles_an_unwound_call (ARCH 8.8.3): the tail's own call of the settle. A
+// wait unwound for a note that is gone by the tail, a peer's or a row's that changed, so
+// no handler runs here and the call is re-issued. notes.restart_settle has the settle's
+// arms; this is that the tail reaches it, one variable from the control.
+static volatile u32  g_rs_run;
+static volatile u64  g_rs_elr, g_rs_x0, g_rs_ctl_elr, g_rs_ctl_x0;
+static volatile bool g_rs_mark_after;
+static volatile bool g_rs_exited;
+
+static void rs_ctx(struct exception_context *ctx) {
+    for (size_t k = 0; k < sizeof(*ctx); k++) ((u8 *)ctx)[k] = 0;
+    ctx->sp      = 0x10000000u;
+    ctx->elr     = 0x8000u;
+    ctx->regs[0] = (u64)-(s64)T_E_INTR;
+}
+
+static void rs_entry(void) {
+    struct Thread *t = current_thread();
+    struct exception_context ctx;
+
+    t->note_restartable  = true;
+    t->note_call_x0      = 0x77u;
+    t->note_call_unwound = true;
+    rs_ctx(&ctx);
+    irq_state_t s = spin_lock_irqsave(NULL);   // the tail runs masked (#713)
+    notes_deliver_at_el0_return(&ctx);
+    spin_unlock_irqrestore(NULL, s);
+    g_rs_elr = ctx.elr;
+    g_rs_x0  = ctx.regs[0];
+    g_rs_mark_after = t->note_call_unwound;
+
+    t->note_restartable  = true;
+    t->note_call_unwound = false;
+    rs_ctx(&ctx);
+    s = spin_lock_irqsave(NULL);
+    notes_deliver_at_el0_return(&ctx);
+    spin_unlock_irqrestore(NULL, s);
+    g_rs_ctl_elr = ctx.elr;
+    g_rs_ctl_x0  = ctx.regs[0];
+
+    g_rs_run++;
+    test_thread_park_terminal(&g_rs_exited);
+}
+
+void test_rendez_tail_settles_an_unwound_call(void) {
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree must be empty at test entry");
+    struct Proc *par = proc_alloc();
+    TEST_ASSERT(par != NULL, "parent alloc");
+    par->state = PROC_STATE_ALIVE;
+    g_rs_run = 0; g_rs_exited = false; g_rs_mark_after = true;
+    g_rs_elr = g_rs_x0 = g_rs_ctl_elr = g_rs_ctl_x0 = 0;
+
+    struct Thread *t = thread_create(par, rs_entry);
+    bool joined = (t == NULL);
+    if (t) {
+        ready(t);
+        u64 dl = timer_now_ns() + TEST_YIELD_BUDGET_NS;
+        while (g_rs_run < 1u && timer_now_ns() < dl) sched();
+        if (g_rs_run >= 1u) {
+            test_thread_join_last(par, &g_rs_exited);
+            joined = test_proc_threads_freed(par);
+        }
+    }
+    TEST_ASSERT(t != NULL, "thread_create");
+    TEST_ASSERT(joined, "the thread ran its tails and was joined");
+    test_proc_free_drained(par);
+
+    TEST_EXPECT_EQ(g_rs_elr, 0x7ffcull, "no handler ran: the call is re-issued");
+    TEST_EXPECT_EQ(g_rs_x0, 0x77ull, "with its first argument back");
+    TEST_ASSERT(!g_rs_mark_after, "and the mark is gone with the call");
+    TEST_EXPECT_EQ(g_rs_ctl_elr, 0x8000ull, "control: no mark, no re-issue");
+    TEST_EXPECT_EQ(g_rs_ctl_x0, (u64)-(s64)T_E_INTR, "control: x0 stands");
+}
+
+// rendez.native_tail_past_sak (ARCH 8.8.3): sak has no row in a table, so nothing
+// says to ignore it but its default. At the head of a governed native queue it held
+// every note behind it, and the wait that unwound for the caught interrupt behind it
+// would see that note neither delivered nor passed. Same chain as c3, on a native Proc.
+void test_rendez_native_tail_past_sak(void) {
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree must be empty at test entry");
+    struct Proc *par = proc_alloc();
+    TEST_ASSERT(par != NULL, "parent alloc");
+    par->state = PROC_STATE_ALIVE;
+    notes_set_handler(par, 0x4000u);
+    s64 row = sys_note_dispose_for_proc(par, NOTE_NAME_INTERRUPT, NOTE_DISP_CAUGHT, 0);
+    g_c3_run = 0; g_c3_rc1 = g_c3_rc2 = 0x7fffffff; g_c3_left = 0xffffffffu;
+    g_c3_release = false; g_c3_exited = false;
+    rendez_init(&g_c3_rendez);
+    struct Thread *t = row == 0 ? thread_create(par, c3_entry) : NULL;
+
+    bool parked = false;
+    if (t) {
+        int tid = t->tid;
+        ready(t);
+        u64 dl = timer_now_ns() + TEST_YIELD_BUDGET_NS;
+        while (!(parked = g_c3_run == 1u && test_thread_sleeping(par, tid)) &&
+               timer_now_ns() < dl)
+            sched();
+    }
+    bool posted = false;
+    if (parked) {
+        irq_state_t s = proc_table_lock_acquire();
+        int p1 = notes_post(par, NOTE_NAME_SAK, 0u, NULL, true);
+        int p2 = notes_post(par, NOTE_NAME_INTERRUPT, 0u, NULL, true);
+        proc_caught_note_wake(par);
+        proc_table_lock_release(s);
+        posted = p1 == 0 && p2 == 0;
+        u64 dl = timer_now_ns() + TEST_YIELD_BUDGET_NS;
+        while (g_c3_run < 3u && timer_now_ns() < dl) sched();
+    }
+    int rc1 = g_c3_rc1, rc2 = g_c3_rc2;
+    u32 left = g_c3_left;
+
+    bool joined = (t == NULL);
+    if (t) {
+        if (g_c3_run < 3u) { g_c3_release = true; (void)wakeup(&g_c3_rendez); }
+        u64 dl = timer_now_ns() + TEST_YIELD_BUDGET_NS;
+        while (g_c3_run < 3u && timer_now_ns() < dl) sched();
+        if (g_c3_run >= 3u) {
+            test_thread_join_last(par, &g_c3_exited);
+            joined = test_proc_threads_freed(par);
+        }
+    }
+    TEST_ASSERT(joined, "the sleeper returned and was joined");
+    test_proc_free_drained(par);
+
+    TEST_EXPECT_EQ(row, (s64)0, "the caught row was written");
+    TEST_ASSERT(parked, "the sleeper parked in an interruptible wait");
+    TEST_ASSERT(posted, "sak and interrupt were posted");
+    TEST_EXPECT_EQ(rc1, SLEEP_NOTEINTR, "the caught interrupt unwinds the wait");
+    TEST_EXPECT_EQ(left, 1u,
+        "the tail passed sak to the caught note, which stays queued (no frame on a "
+        "kernel thread)");
+    TEST_EXPECT_EQ(rc2, SLEEP_NOTEINTR,
+        "the retried wait unwinds again: the tail released the claim");
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree empty after cleanup");
+}
+
+// rendez.reread_wakes_a_sleeper (ARCH 8.8.3). A wait rides out a note no table has
+// judged, and then a row changes what that note means. A post wakes nobody for this,
+// because the post is over: the re-read owes the wake, or the wait ends only if
+// something else ends it. Queued fatal, queued caught and direct fatal: each has its
+// own wake to forget. The last leg posts after the row: a wait entered before the
+// Proc's first row is an unwinding wait from that row on.
+enum { RR_FATAL, RR_CAUGHT, RR_DIRECT, RR_LATER };
+static volatile u32  g_rr_run;
+static volatile int  g_rr_rc;
+static volatile bool g_rr_release;
+static volatile bool g_rr_exited;
+static struct Rendez g_rr_rendez;
+
+static int rr_cond(void *arg) { (void)arg; return g_rr_release ? 1 : 0; }
+
+static void rr_entry(void) {
+    struct Thread *t = current_thread();
+    t->note_interruptible = true;
+    g_rr_run++;
+    g_rr_rc = sleep_noteintr(&g_rr_rendez, rr_cond, NULL);
+    t->note_interruptible = false;
+    g_rr_run++;
+    test_thread_park_terminal(&g_rr_exited);
+}
+
+static void rr_leg(int leg, int want) {
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree must be empty at test entry");
+    struct Proc *par = proc_alloc();
+    TEST_ASSERT(par != NULL, "parent alloc");
+    par->state = PROC_STATE_ALIVE;
+    notes_set_handler(par, 0x4000u);
+    g_rr_run = 0; g_rr_rc = 0x7fffffff;
+    g_rr_release = false; g_rr_exited = false;
+    rendez_init(&g_rr_rendez);
+    struct Thread *t = thread_create(par, rr_entry);
+
+    bool parked = false;
+    int tid = 0;
+    if (t) {
+        tid = t->tid;
+        ready(t);
+        u64 dl = timer_now_ns() + TEST_YIELD_BUDGET_NS;
+        while (!(parked = g_rr_run == 1u && test_thread_sleeping(par, tid)) &&
+               timer_now_ns() < dl)
+            sched();
+    }
+    int posted = -1;
+    if (parked) {
+        if (leg == RR_DIRECT) {
+            posted = proc_note_thread(par, tid, NOTE_NAME_USR1, NULL);
+        } else if (leg == RR_LATER) {
+            posted = 0;
+        } else {
+            irq_state_t s = proc_table_lock_acquire();
+            posted = notes_post(par, NOTE_NAME_USR1, 0u, NULL, true);
+            proc_caught_note_wake(par);
+            proc_table_lock_release(s);
+        }
+    }
+    u64 settle = timer_now_ns() + 20000000u;
+    while (posted == 0 && timer_now_ns() < settle) sched();
+    bool rode_out = posted == 0 && g_rr_run == 1u && test_thread_sleeping(par, tid);
+
+    s64 row = -1;
+    if (rode_out) {
+        row = leg == RR_CAUGHT || leg == RR_LATER
+            ? sys_note_dispose_for_proc(par, NOTE_NAME_USR1, NOTE_DISP_CAUGHT, 0)
+            : sys_note_dispose_for_proc(par, NOTE_NAME_USR2, NOTE_DISP_IGNORE, 0);
+        if (leg == RR_LATER) {
+            irq_state_t s = proc_table_lock_acquire();
+            posted = notes_post(par, NOTE_NAME_USR1, 0u, NULL, true);
+            proc_caught_note_wake(par);
+            proc_table_lock_release(s);
+        }
+        u64 dl = timer_now_ns() + TEST_YIELD_BUDGET_NS;
+        while (g_rr_run < 2u && timer_now_ns() < dl) sched();
+    }
+    bool woke = g_rr_run >= 2u;
+    int  rc   = g_rr_rc;
+
+    bool joined = (t == NULL);
+    if (t) {
+        if (g_rr_run < 2u) { g_rr_release = true; (void)wakeup(&g_rr_rendez); }
+        u64 dl = timer_now_ns() + TEST_YIELD_BUDGET_NS;
+        while (g_rr_run < 2u && timer_now_ns() < dl) sched();
+        if (g_rr_run >= 2u) {
+            __atomic_store_n(&t->note_direct, 0, __ATOMIC_RELEASE);
+            test_thread_join_last(par, &g_rr_exited);
+            joined = test_proc_threads_freed(par);
+        }
+    }
+    TEST_ASSERT(joined, "the sleeper returned and was joined");
+    test_proc_free_drained(par);
+
+    TEST_ASSERT(parked, "the sleeper parked in an interruptible wait");
+    TEST_EXPECT_EQ(posted, 0, "the note was posted");
+    TEST_ASSERT(rode_out, "with no table the handler's note leaves the wait standing");
+    TEST_EXPECT_EQ(row, (s64)0, "the row was written");
+    TEST_ASSERT(woke, "the re-read woke it");
+    TEST_EXPECT_EQ(rc, want, "and the wait ended as the row now says");
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree empty after cleanup");
+}
+
+void test_rendez_reread_wakes_a_sleeper(void) {
+    rr_leg(RR_FATAL, SLEEP_INTR);
+    rr_leg(RR_CAUGHT, SLEEP_NOTEINTR);
+    rr_leg(RR_DIRECT, SLEEP_INTR);
+    rr_leg(RR_LATER, SLEEP_NOTEINTR);
+}

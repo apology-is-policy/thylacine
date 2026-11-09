@@ -3315,7 +3315,8 @@ static s64 sys_walk_open_handler(u64 spoor_fd_raw, u64 name_va,
     // with new_priv (fid_owned=true); on failure it clunks the fid + frees
     // the Walkqid carrier itself.
     const char *names[1] = { name_scratch };
-    struct Walkqid *w = src->dev->walk(src, nc, names, 1);
+    int why = 0;
+    struct Walkqid *w = dev_walk(src, nc, names, 1, &why);
     // #844: src's last use is the walk above; release the borrow now. nc
     // carries the walk result (its own ref) through the rest of the handler,
     // so the post-walk exits clunk nc (unchanged), not src.
@@ -3329,7 +3330,7 @@ static s64 sys_walk_open_handler(u64 spoor_fd_raw, u64 name_va,
         // the Walkqid before returning NULL).
         nc->aux = NULL;
         spoor_unref(nc);
-        return -T_E_NOENT;   // errno-rollout (ER-1): walk-miss -> NotFound
+        return -(s64)(why ? why : T_E_NOENT);   // ER-1, ER-2: only a miss reads NotFound
     }
     // F4 close (P5-stratumd-stub-bringup audit): the Dev `walk` vtable
     // is documented as permissive ("Either reuses nc OR ignores it and
@@ -4356,8 +4357,10 @@ static s64 sys_open_handler(u64 start_fd_raw, u64 path_va,
 
     char path_scratch[SYS_OPEN_PATH_MAX + 1];
     if (sys_copy_open_path(path_va, path_len_raw, path_scratch) != 0) return -1;
-    return sys_open_kpath_for_proc(p, start_fd_raw, path_scratch,
-                                   path_len_raw, omode_raw);
+    // SYS_WALK_OPEN_OINTR did its work in native_note_class: no server, no Dev and
+    // no other open sees the bit.
+    return sys_open_kpath_for_proc(p, start_fd_raw, path_scratch, path_len_raw,
+                                   omode_raw & ~(u64)SYS_WALK_OPEN_OINTR);
 }
 
 // =============================================================================
@@ -4664,7 +4667,8 @@ static s64 spoor_create_install(struct Proc *p, struct Spoor *src,
     struct Spoor *nc = spoor_clone(src);
     if (!nc)                                          { spoor_clunk(src); return -T_E_NOMEM; }
 
-    struct Walkqid *w = src->dev->walk(src, nc, NULL, 0);
+    int why = 0;
+    struct Walkqid *w = dev_walk(src, nc, NULL, 0, &why);
     // #844: src's last use is the clone-walk above; release the borrow now.
     // nc carries its own ref through create + the rest of the handler.
     spoor_clunk(src);
@@ -4681,8 +4685,8 @@ static s64 spoor_create_install(struct Proc *p, struct Spoor *src,
         // the not-a-directory half precise wants a qid.type gate on the parent
         // -- the single-hop twin of the #79 stalk gate -- which is a resolution
         // change, not an errno one, and is tracked with #81 rather than
-        // smuggled into this rollout.
-        return -T_E_IO;
+        // smuggled into this rollout. A Dev that knows why says so (ER-2).
+        return -(s64)(why ? why : T_E_IO);
     }
     // Defense-in-depth: the reuse-nc contract (same rationale as
     // SYS_WALK_OPEN's F4 close). A clone-walk returns nqid==0, so we do NOT
@@ -9613,6 +9617,10 @@ static int sys_bump_inherit_fds(struct Proc *p, const u32 *fds, u32 fd_count,
 // stat'd size). Runs in the parent's context (its Territory), like Unix exec.
 // Returns the pinned Spoor (caller spoor_clunks) + *size_out, or NULL on any
 // failure.
+// *errp (OPTIONAL) is why, as a T_E_* code: the walk's own reason (ENOENT only for a
+// miss, ERRORS.md ER-2), EACCES for a file the mount or the Dev will not execute, a
+// failing stat's errno, and ENOEXEC for an empty or oversized image. It means nothing on
+// a success, where it holds whatever was last written.
 // _ex variant (VIVARIUM section 13): reports, via *pheno_out (OPTIONAL), whether
 // the binary's resolution crossed an MPHENO_LINUX mount -- the /viv/bin subtree
 // phenotype channel. The plain exec_resolve_from_namespace wrapper below passes
@@ -9620,7 +9628,10 @@ static int sys_bump_inherit_fds(struct Proc *p, const u32 *fds, u32 fd_count,
 // SYS_SPAWN_FULL_ARGV path (the sole fresh-phenotype declarer, ARCH I-43) reads it.
 static struct Spoor *exec_resolve_from_namespace_ex(struct Proc *p, const char *name,
                                                     size_t name_len, size_t *size_out,
-                                                    bool *pheno_out) {
+                                                    bool *pheno_out, int *errp) {
+    int unasked;
+    if (!errp) errp = &unasked;
+    *errp = T_E_INVAL;
     if (pheno_out) *pheno_out = false;
     if (!p || !name || !size_out)                  return NULL;
     *size_out = 0;
@@ -9630,7 +9641,7 @@ static struct Spoor *exec_resolve_from_namespace_ex(struct Proc *p, const char *
     // absolute name resolves from it directly; a relative name is cwd-joined
     // (territory_join_cwd) into an absolute path first -- exactly SYS_OPEN.
     struct Spoor *start = territory_root_ref(p->territory);
-    if (!start)                                    return NULL;
+    if (!start)                                    { *errp = T_E_NOENT; return NULL; }
 
     char joined[SYS_OPEN_PATH_MAX + 1];
     const char *rpath = name;
@@ -9647,10 +9658,12 @@ static struct Spoor *exec_resolve_from_namespace_ex(struct Proc *p, const char *
     // MPHENO_LINUX mount (the /viv/bin subtree). Written to *pheno_out only on the
     // successful return below, so a failed walk leaves the caller's init (native).
     bool crossed_pheno = false;
+    *errp = T_E_NOENT;
     struct Spoor *quarry = stalk_exec(p, start, rpath, rlen, STALK_OPEN,
-                                      3u /* OEXEC */, NULL, &crossed_pheno);
+                                      3u /* OEXEC */, errp, &crossed_pheno);
     spoor_clunk(start);   // borrowed by stalk; release the ref we took
     if (!quarry)                                   return NULL;
+    *errp = T_E_ACCES;
     if (!quarry->dev || !quarry->dev->read)        { spoor_clunk(quarry); return NULL; }
 
     // #217: MNOEXEC refuses exec as well as the R+X map, because a mount that
@@ -9666,8 +9679,13 @@ static struct Spoor *exec_resolve_from_namespace_ex(struct Proc *p, const char *
     // anymore; only its identity is pinned). A truncated file surfaces later as
     // a short read in exec_setup_from_spoor -> clean exec failure, no partial map.
     struct t_stat st;
-    if (spoor_stat_native(quarry, &st) != 0)       { spoor_clunk(quarry); return NULL; }
-    if (st.size == 0 || (u64)st.size > EXEC_FILE_MAX) { spoor_clunk(quarry); return NULL; }
+    int sr = spoor_stat_native(quarry, &st);
+    if (sr != 0) { *errp = stalk_err_code(sr); spoor_clunk(quarry); return NULL; }
+    if (st.size == 0 || (u64)st.size > EXEC_FILE_MAX) {
+        *errp = T_E_NOEXEC;
+        spoor_clunk(quarry);
+        return NULL;
+    }
 
     *size_out = (size_t)st.size;
     if (pheno_out) *pheno_out = crossed_pheno;   // section 13: reported on success only
@@ -9678,7 +9696,12 @@ static struct Spoor *exec_resolve_from_namespace_ex(struct Proc *p, const char *
 // not declare a fresh phenotype (they inherit it via rfork) call this.
 struct Spoor *exec_resolve_from_namespace(struct Proc *p, const char *name,
                                           size_t name_len, size_t *size_out) {
-    return exec_resolve_from_namespace_ex(p, name, name_len, size_out, NULL);
+    return exec_resolve_from_namespace_ex(p, name, name_len, size_out, NULL, NULL);
+}
+
+struct Spoor *exec_resolve_interp(struct Proc *p, const char *name, size_t name_len,
+                                  size_t *size_out, int *errp) {
+    return exec_resolve_from_namespace_ex(p, name, name_len, size_out, NULL, errp);
 }
 
 // Kernel-side body: takes a kernel-resident NUL-terminated name and the
@@ -9707,7 +9730,7 @@ int sys_spawn_for_proc(struct Proc *p, const char *name, size_t name_len) {
     // inside a declared Territory is Linux by the clone it inherits.
     bool exe_pheno_linux = false;
     struct Spoor *exe = exec_resolve_from_namespace_ex(p, name, name_len, &exe_size,
-                                                       &exe_pheno_linux);
+                                                       &exe_pheno_linux, NULL);
     if (!exe)                                          return -1;
 
     struct spawn_args *sa = kmalloc(sizeof(*sa), KP_ZERO);
@@ -9901,7 +9924,7 @@ int sys_spawn_with_fds_for_proc(struct Proc *p, const char *name, size_t name_le
     // inside a declared Territory is Linux by the clone it inherits.
     bool exe_pheno_linux = false;
     struct Spoor *exe = exec_resolve_from_namespace_ex(p, name, name_len, &exe_size,
-                                                       &exe_pheno_linux);
+                                                       &exe_pheno_linux, NULL);
     if (!exe) {
         sys_spawn_unbump_fds(p, bumped, fd_count);
         return -1;
@@ -9963,7 +9986,7 @@ int sys_spawn_with_caps_for_proc(struct Proc *p, const char *name, size_t name_l
     // inside a declared Territory is Linux by the clone it inherits.
     bool exe_pheno_linux = false;
     struct Spoor *exe = exec_resolve_from_namespace_ex(p, name, name_len, &exe_size,
-                                                       &exe_pheno_linux);
+                                                       &exe_pheno_linux, NULL);
     if (!exe)                                          return -1;
 
     struct spawn_args *sa = kmalloc(sizeof(*sa), KP_ZERO);
@@ -10062,7 +10085,7 @@ static int sys_spawn_full_with_perms_for_proc(struct Proc *p,
     // inside a declared Territory is Linux by the clone it inherits.
     bool exe_pheno_linux = false;
     struct Spoor *exe = exec_resolve_from_namespace_ex(p, name, name_len, &exe_size,
-                                                       &exe_pheno_linux);
+                                                       &exe_pheno_linux, NULL);
     if (!exe) {
         sys_spawn_unbump_fds(p, bumped, fd_count);
         return -1;
@@ -10819,20 +10842,32 @@ static int sys_spawn_full_argv_with_perms_for_proc(
     size_t exe_size = 0;
     bool exe_pheno_linux = false;
     struct Spoor *exe = NULL;
+    int exe_err = 0;
     if (cwd && name[0] != '/') {
         char *jbuf = kmalloc(SYS_OPEN_PATH_MAX + 1u, 0);
         int jl = jbuf ? cwd_join(cwd, name, (u64)name_len, jbuf, SYS_OPEN_PATH_MAX + 1u) : -1;
         if (jl > 0)
             exe = exec_resolve_from_namespace_ex(p, jbuf, (size_t)jl,
-                                                 &exe_size, &exe_pheno_linux);
+                                                 &exe_size, &exe_pheno_linux, &exe_err);
+        else
+            exe_err = jbuf ? T_E_INVAL : T_E_NOMEM;
         if (jbuf) kfree(jbuf);
     } else {
         exe = exec_resolve_from_namespace_ex(p, name, name_len,
-                                             &exe_size, &exe_pheno_linux);
+                                             &exe_size, &exe_pheno_linux, &exe_err);
     }
     if (!exe) {
         sys_spawn_unbump_fds(p, bumped, fd_count);
-        return -1;
+        return -exe_err;
+    }
+
+    // Past the rfork a load's failure is a pid and an exit status, and this call has no
+    // way left to say what the file is.
+    int image_rc = exec_image_check(exe, exe_size);
+    if (image_rc != 0) {
+        spoor_clunk(exe);
+        sys_spawn_unbump_fds(p, bumped, fd_count);
+        return image_rc;
     }
 
     // Kernel-side argv copy. Lifetime: owned by the spawn_args struct
@@ -11674,8 +11709,9 @@ static s64 sys_execve_core(struct exception_context *ctx,
     // ABI intact (review F1 Leg B). The loader and the signal reset both take
     // the decided value as a parameter (Legs C and A).
     bool crossed_pheno = false;
+    int exe_err = 0;
     struct Spoor *exe = exec_resolve_from_namespace_ex(p, path, (size_t)path_len,
-                                                       &exe_size, &crossed_pheno);
+                                                       &exe_size, &crossed_pheno, &exe_err);
     if (!exe) {
         // NOTE: argv_kbuf and env_kbuf are the CALLER's -- every front end frees
         // its own blobs on every path. The pre-L-6a body freed it here, when the
@@ -11683,9 +11719,7 @@ static s64 sys_execve_core(struct exception_context *ctx,
         // across the split made it a double free, which is not a leak but a heap
         // corruption that surfaces in an unrelated allocation later. Do not
         // re-add them.
-        // stalk's failure reason is not plumbed out yet (ER-x); ENOENT is the
-        // honest majority answer and matches what SYS_OPEN reports today.
-        return -(s64)T_E_NOENT;
+        return -(s64)exe_err;
     }
 
     // 3. Build the new image in a DETACHED address space. Nothing below this
@@ -11716,15 +11750,11 @@ static s64 sys_execve_core(struct exception_context *ctx,
         // detached.
         addrspace_unref(nas);
         spoor_clunk(exe);
-        // DEGRADED, deliberately: POSIX says ENOEXEC here, and the errno
-        // registry has no T_E_NOEXEC. docs/ERRORS.md is ABI-bearing and its
-        // additions need signoff, so this reports EINVAL and the gap is tracked
-        // rather than closed by fiat -- the same disposition T_E_SPIPE (#106)
-        // carries. It matters at L-6: a shell reads ENOEXEC as "run it as a
-        // script", so until the code exists a shell cannot make that
-        // distinction. A refused allocation is NOT that case: it travels up
-        // as -T_E_NOMEM and is reported as such (B-1a' audit F15).
-        return rc == -T_E_NOMEM ? -(s64)T_E_NOMEM : -(s64)T_E_INVAL;
+        // The loader says why. A shell reads ENOEXEC as "run it as a script", so
+        // the loader answers it for the file alone, and a refused allocation or a
+        // failed read travels as itself. -1 is an argument the checks above should
+        // have refused, or a frame that would not build.
+        return rc == -1 ? -(s64)T_E_INVAL : (s64)rc;
     }
 
     // 3b. Take the Proc (ARCH 7.3.3, LINEAGE L-2b): every other thread dies, and
@@ -12070,6 +12100,7 @@ static s64 sys_wait_pid_handler(u64 want_pid_u, u64 flags_u, u64 status_out_va) 
 
     int status = 0;
     int reaped = wait_pid_for(want_pid, flags, &status);
+    if (reaped == WAIT_PID_NOTEINTR)                   return -(s64)T_E_INTR;
     if (reaped < 0)                                    return -1;
     if (reaped == 0)                                   return 0;  // WAIT_WNOHANG: no zombie ready
 
@@ -12127,8 +12158,11 @@ int sys_srv_accept_for_proc(struct Proc *p, hidx_t service_h) {
 
     // Block until a connection is on the backlog. NULL means the service
     // stopped being LIVE while we blocked (the poster exited / a test
-    // reset the registry) — fail closed.
-    struct SrvConn *cn = srv_accept_blocking(svc, caller);
+    // reset the registry) — fail closed. Or a caught note ended the wait with
+    // nothing taken (ARCH 8.8.3).
+    bool noted = false;
+    struct SrvConn *cn = srv_accept_interruptible(svc, caller, &noted);
+    if (noted) return -(int)T_E_INTR;
     if (!cn) return -1;
 
     // Wrap the accepted SrvConn in a devsrv connection Spoor — corvus's
@@ -12469,11 +12503,19 @@ static s64 sys_poll_handler(u64 fds_va, u64 nfds_raw, u64 timeout_ms_raw) {
     struct Proc *p = t->proc;
     if (!p)                                                  return -1;
 
+    // No fds is a sleep, as the phenotype's ppoll has it: Pouch's pause() and the
+    // poll(NULL, 0, ms) idiom reach it, and a caught note ends it.
+    if (nfds_raw == 0) {
+        s32 sleep_ms = 0;
+        if (!sys_s32_arg(timeout_ms_raw, &sleep_ms))         return -T_E_INVAL;
+        return sys_poll_sleep_for(sleep_ms);
+    }
+
     // nfds bound — same as the testable core's check, but also the
     // stack-array bound on `kfds[]` below. Reject before touching
     // user-VA. POLL_MAX_NFDS (decoupled from PROC_HANDLE_MAX) keeps the
     // kfds[] frame bounded regardless of the open-fd table size.
-    if (nfds_raw == 0 || nfds_raw > POLL_MAX_NFDS)          return -1;
+    if (nfds_raw > POLL_MAX_NFDS)                            return -1;
     u64 nfds = nfds_raw;
 
     // User-VA range check on the entire pollfd[] array.
@@ -14086,9 +14128,12 @@ static s64 viv_poll_translated(struct Proc *p, struct pollfd *kfds, u64 nfds,
                              : sys_resolve_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT,
                                                           path, plen, 0u /* OREAD */,
                                                           &sp, &r);
-                if (rc == -(s64)T_E_NOMEM) {
+                if (rc == -(s64)T_E_NOMEM || rc == -(s64)T_E_INTR) {
                     // V-5d F6: a SHORTAGE fails the whole call, as Linux's poll
                     // and select do (ENOMEM), rather than posing as a broken fd.
+                    // So does a caught note that ended the open's wait: nothing is
+                    // wrong with the socket, and the caller is owed its EINTR. A
+                    // POLLNVAL here tells an event loop to close a live connection.
                     result = rc;
                     goto out;
                 }
@@ -14098,9 +14143,7 @@ static s64 viv_poll_translated(struct Proc *p, struct pollfd *kfds, u64 nfds,
                     // is the POSIX answer for an fd that cannot be polled, and it
                     // is per-pollfd: one broken socket must not fail the call for
                     // the fds beside it (pselect6 then turns it into a whole-call
-                    // EBADF, select's own contract). A dev walk that failed for want
-                    // of memory lands here too: stalk reports every dev walk miss
-                    // as T_E_NOENT.
+                    // EBADF, select's own contract).
                     kfds[i].fd = -1;
                     continue;
                 }
@@ -14200,10 +14243,22 @@ static bool viv_timeout_from_timespec(u64 tmo_va, s32 *out_ms, s32 *out_err) {
     return vivarium_timespec_to_ms(ts.tv_sec, ts.tv_nsec, out_ms, out_err);
 }
 
+// A wait's own mask, read and put in place right before the wait, with everything that
+// could still refuse the call behind it (ARCH 8.8.3). 0 to go on. notes_wait_mask_end
+// follows the wait, and does nothing if no mask went in.
+static s64 viv_wait_mask_begin(u64 set_va, s32 timeout_ms) {
+    if (set_va == 0) return 0;
+    u64 want = 0;
+    if (!sys_validate_user_buf(set_va, sizeof(u64)) || viv_load_u64(set_va, &want) != 0)
+        return -(s64)T_E_FAULT;
+    return notes_wait_mask_begin(current_thread(), viv_sigset_to_notemask(want, &g_viv_notebits),
+                                 timeout_ms < 0);
+}
+
 static s64 viv_ppoll(struct Proc *p, u64 fds_va, u64 nfds, u64 tmo_va,
-                     u64 sigmask_va) {
+                     u64 sigmask_va, u64 sigsetsize) {
     s32 err = 0;
-    if (!vivarium_ppoll_decide(nfds, sigmask_va, &err)) return -(s64)err;
+    if (!vivarium_ppoll_decide(nfds, sigmask_va, sigsetsize, &err)) return -(s64)err;
 
     s32 timeout_ms = -1;
     if (!viv_timeout_from_timespec(tmo_va, &timeout_ms, &err)) return -(s64)err;
@@ -14211,7 +14266,13 @@ static s64 viv_ppoll(struct Proc *p, u64 fds_va, u64 nfds, u64 tmo_va,
     // nfds == 0 is Linux's "sleep for the timeout". The native poll rejects it
     // (deliberately -- see sys_poll_sleep_for), so it routes to the sleep rather
     // than declining as it did before V-5c-2.
-    if (nfds == 0) return sys_poll_sleep_for(timeout_ms);
+    if (nfds == 0) {
+        s64 slept = viv_wait_mask_begin(sigmask_va, timeout_ms);
+        if (slept != 0) return slept;
+        slept = sys_poll_sleep_for(timeout_ms);
+        notes_wait_mask_end(current_thread(), slept);
+        return slept;
+    }
 
     u64 buf_bytes = nfds * sizeof(struct pollfd);
     if (!sys_validate_user_buf(fds_va, buf_bytes))      return -(s64)T_E_FAULT;
@@ -14222,7 +14283,10 @@ static s64 viv_ppoll(struct Proc *p, u64 fds_va, u64 nfds, u64 tmo_va,
         if (uaccess_load_u8(fds_va + i, &kbytes[i]) != 0) return -(s64)T_E_FAULT;
     }
 
-    s64 result = viv_poll_translated(p, kfds, nfds, timeout_ms);
+    s64 result = viv_wait_mask_begin(sigmask_va, timeout_ms);
+    if (result != 0) return result;
+    result = viv_poll_translated(p, kfds, nfds, timeout_ms);
+    notes_wait_mask_end(current_thread(), result);
 
     if (result < 0) return result;
     if (poll_writeback_revents(fds_va, kfds, nfds) != 0) return -(s64)T_E_FAULT;
@@ -14241,15 +14305,24 @@ static s64 viv_ppoll(struct Proc *p, u64 fds_va, u64 nfds, u64 tmo_va,
 // THE SIXTH ARGUMENT IS A POINTER TO A PAIR, not a mask. aarch64 caps a syscall
 // at six registers and pselect6 needs seven things, so Linux packs the last two
 // into `struct { const sigset_t *ss; size_t ss_len; }` and passes its address.
-// A NULL sixth argument is unambiguously "no signal mask"; anything non-NULL is
-// declined without being dereferenced, since a non-NULL pair holding a NULL ss
-// is a distinction we do not need to make in order to say no.
+// A NULL sixth argument and a pair holding a NULL ss both mean no mask, and only a
+// mask has its size looked at (Linux's set_user_sigmask).
 static s64 viv_pselect6(struct Proc *p, u64 nfds_arg, u64 rd_va, u64 wr_va,
                         u64 ex_va, u64 tmo_va, u64 sigmask_va) {
     s32 err   = 0;
     u32 nfds  = 0;
-    if (!vivarium_pselect6_decide(nfds_arg, sigmask_va, &nfds, &err))
+    if (!vivarium_pselect6_decide(nfds_arg, &nfds, &err))
         return -(s64)err;
+
+    u64 set_va = 0;
+    if (sigmask_va != 0) {
+        u64 ss_len = 0;
+        if (!sys_validate_user_buf(sigmask_va, 2u * sizeof(u64)) ||
+            viv_load_u64(sigmask_va, &set_va) != 0 ||
+            viv_load_u64(sigmask_va + sizeof(u64), &ss_len) != 0)
+            return -(s64)T_E_FAULT;
+        if (set_va != 0 && ss_len != sizeof(u64)) return -(s64)T_E_INVAL;
+    }
 
     s32 timeout_ms = -1;
     if (!viv_timeout_from_timespec(tmo_va, &timeout_ms, &err)) return -(s64)err;
@@ -14280,12 +14353,16 @@ static s64 viv_pselect6(struct Proc *p, u64 nfds_arg, u64 rd_va, u64 wr_va,
                                    POLL_MAX_NFDS, &count, &err))
         return -(s64)err;
 
+    s64 begun = viv_wait_mask_begin(set_va, timeout_ms);
+    if (begun != 0) return begun;
+
     u32 bits = 0;
     if (count == 0) {
         // No fd contributes: `select(0, NULL, NULL, NULL, &tv)`, the classic
         // portable sleep, and equally `select(n, ...)` with every set empty.
         // Nothing to poll -- but there is still something to write back.
         s64 slept = sys_poll_sleep_for(timeout_ms);
+        notes_wait_mask_end(current_thread(), slept);
         if (slept < 0) return slept;
 
         // Linux writes the sets back on this path too: it copies FDS_BYTES(n)
@@ -14300,6 +14377,7 @@ static s64 viv_pselect6(struct Proc *p, u64 nfds_arg, u64 rd_va, u64 wr_va,
         }
     } else {
         s64 result = viv_poll_translated(p, kfds, count, timeout_ms);
+        notes_wait_mask_end(current_thread(), result);
         if (result < 0) return result;
 
         if (!vivarium_pollfds_to_fdset(kfds, count, rd_va ? rd : NULL,
@@ -15281,17 +15359,18 @@ s64 viv_kill_for_test(struct Proc *caller, int pid, int tid, u64 sig) {
 // SIG_IGN. Nothing to discard is the common case and costs one locked scan of an
 // empty ring.
 //
-// A disposition that TERMINATES makes a caught direct note a peer is riding out
-// fatal, and that peer's wait reads its word only when something rouses it.
+// Whatever the disposition, what stays pending is judged by it (ARCH 8.8.3): a row
+// that TERMINATES ends a wait that rode the note out, one that CATCHES interrupts
+// it, and a handler installed over an armed terminate latch disarms it.
 static void viv_sigaction_settled(struct Proc *p, enum viv_signote note,
                                   const struct viv_ksigaction *act) {
     if (act->handler == VIV_SIG_IGN ||
-        (act->handler == VIV_SIG_DFL && viv_signote_default_is_ignore(note))) {
+        (act->handler == VIV_SIG_DFL && viv_signote_default_is_ignore(note) &&
+         !proc_is_self_managing_notes(p))) {
         const char *nm = viv_signote_note_name(note);
         if (nm) (void)notes_discard_name(p, nm);
-    } else if (act->handler == VIV_SIG_DFL && viv_signote_default_is_terminate(note)) {
-        proc_note_direct_rouse(p);
     }
+    notes_disposition_reread(p);
 }
 
 #ifdef KERNEL_TESTS
@@ -15313,6 +15392,171 @@ s64 viv_umask_for_test(struct Proc *p, u64 mask) {
     return viv_umask(p, mask);
 }
 #endif // KERNEL_TESTS
+
+// The queue's lock, because a one-shot's reset holds it across the read and the store:
+// without it the reset can land on a row a peer has written since, and that peer's
+// sigaction has returned.
+static void viv_sigtab_store(struct Proc *p, struct viv_sigtab *tab, enum viv_signote note,
+                             const struct viv_ksigaction *act) {
+    spin_lock(&p->notes->lock);
+    (void)viv_sigtab_set(tab, note, act);
+    spin_unlock(&p->notes->lock);
+}
+
+// SYS_NOTE_DISPOSE past its copy (ARCH 8.8.3). Row first, flag second, each with
+// RELEASE, so a reader that sees the table govern reads the row. Default needs a
+// table only when there is one to clear, as rt_sigaction's SIG_DFL does.
+VISIBLE_IF_KERNEL_TESTS
+s64 sys_note_dispose_for_proc(struct Proc *p, const char *name, u64 disposition,
+                              u64 flags) {
+    _Static_assert(NOTE_DISP_FLAGS < (1u << NOTE_DISP_MASK_SHIFT) &&
+                   NOTE_MASK_SUPPORTED < (1u << NOTE_DISP_MASK_SHIFT),
+                   "the flags word holds the flags below the mask, and every family");
+    u64 row_mask = flags >> NOTE_DISP_MASK_SHIFT;
+    if (disposition > NOTE_DISP_CAUGHT) return -(s64)T_E_INVAL;
+    if ((flags & (NOTE_DISP_MASK(1u) - 1u)) & ~(u64)NOTE_DISP_FLAGS) return -(s64)T_E_INVAL;
+    if (row_mask & ~(u64)NOTE_MASK_SUPPORTED) return -(s64)T_E_INVAL;
+    if (flags && disposition != NOTE_DISP_CAUGHT) return -(s64)T_E_INVAL;
+    enum viv_signote note = viv_signote_from_note_name(name);
+    if (note == VIV_SIGNOTE_NONE || note == VIV_SIGNOTE_KILL) return -(s64)T_E_INVAL;
+    // With nothing to enter and no fd to read it, a caught row would hold the note
+    // forever.
+    if (disposition == NOTE_DISP_CAUGHT &&
+        __atomic_load_n(&p->handler_va, __ATOMIC_ACQUIRE) == 0 &&
+        !proc_is_self_managing_notes(p))
+        return -(s64)T_E_INVAL;
+
+    struct viv_ksigaction act = { .handler = VIV_SIG_DFL, .flags = 0,
+                                  .restorer = 0, .mask = 0 };
+    if (disposition == NOTE_DISP_IGNORE) act.handler = VIV_SIG_IGN;
+    if (disposition == NOTE_DISP_CAUGHT) {
+        act.handler = VIV_NATIVE_CAUGHT;
+        if (flags & NOTE_DISP_RESTART)   act.flags |= VIV_SA_RESTART;
+        if (flags & NOTE_DISP_RESETHAND) act.flags |= VIV_SA_RESETHAND;
+        if (flags & NOTE_DISP_NODEFER)   act.flags |= VIV_SA_NODEFER;
+        // In note bits, where a guest's row holds its sigset: no reader asks one of
+        // the other's, since the delivery arm goes by the Proc's phenotype.
+        act.mask = row_mask;
+    }
+    struct viv_sigtab *tab = __atomic_load_n(&p->sigtab, __ATOMIC_ACQUIRE);
+    if (disposition != NOTE_DISP_DEFAULT && !tab) {
+        tab = viv_sigtab_of(p);
+        if (!tab) return -(s64)T_E_NOMEM;
+    }
+    if (tab) viv_sigtab_store(p, tab, note, &act);
+    __atomic_or_fetch(&p->proc_flags, PROC_FLAG_NOTE_TABLE, __ATOMIC_RELEASE);
+    viv_sigaction_settled(p, note, &act);
+    return 0;
+}
+
+static s64 sys_note_dispose_handler(u64 name_va, u64 name_len_raw, u64 disposition,
+                                    u64 flags) {
+    struct Thread *t = current_thread();
+    if (!t || !t->proc) return -(s64)T_E_INVAL;
+    char buf[NOTE_NAME_MAX];
+    s64 name_err = postnote_copy_name(name_va, name_len_raw, buf);
+    if (name_err) return name_err;
+    return sys_note_dispose_for_proc(t->proc, buf, disposition, flags);
+}
+
+// poll's copies, around the mask's window. The array is read before the mask goes in, so
+// a call that was going to fault has changed nothing.
+static s64 sys_note_wait_poll(struct Thread *t, u64 mask, u64 fds_va, s64 timeout_ns,
+                              u64 nfds) {
+    if (nfds > POLL_MAX_NFDS) return -(s64)T_E_INVAL;
+    u64 buf_bytes = nfds * sizeof(struct pollfd);
+    struct pollfd kfds[POLL_MAX_NFDS];
+    if (nfds != 0) {
+        if (!sys_validate_user_buf(fds_va, buf_bytes)) return -(s64)T_E_FAULT;
+        u8 *kbytes = (u8 *)kfds;
+        for (u64 i = 0; i < buf_bytes; i++) {
+            if (uaccess_load_u8(fds_va + i, &kbytes[i]) != 0) return -(s64)T_E_FAULT;
+        }
+    }
+
+    s32 timeout_ms = -1;
+    if (timeout_ns >= 0) {
+        u64 ms = (u64)timeout_ns / 1000000u + ((u64)timeout_ns % 1000000u != 0u);
+        timeout_ms = ms > 0x7fffffffu ? 0x7fffffff : (s32)ms;
+    }
+
+    t->note_interruptible = true;       // as native_note_class has SYS_POLL
+    s64 begun = notes_wait_mask_begin(t, mask, timeout_ns < 0);
+    if (begun != 0) return begun;
+    s64 result = nfds != 0 ? sys_poll_for_proc(t->proc, kfds, nfds, timeout_ms)
+                           : sys_poll_sleep_for(timeout_ms);
+    notes_wait_mask_end(t, result);
+    if (result < 0 || nfds == 0) return result;
+    if (poll_writeback_revents(fds_va, kfds, nfds) != 0) return -(s64)T_E_FAULT;
+    return result;
+}
+
+// ARCH 8.8.3; the form's rules are on the number (syscall.h).
+VISIBLE_IF_KERNEL_TESTS
+s64 sys_note_wait_handler(u64 how, u64 set, u64 rec_va, u64 timeout_raw, u64 nfds_raw) {
+    struct Thread *t = current_thread();
+    if (!t || !t->proc) return -(s64)T_E_INVAL;
+    s64 timeout_ns = (s64)timeout_raw;
+
+    if (how == NOTE_WAIT_POLL) return sys_note_wait_poll(t, set, rec_va, timeout_ns, nfds_raw);
+    if (how == NOTE_WAIT_PENDING) {
+        if (set != 0 || rec_va != 0 || timeout_raw != 0) return -(s64)T_E_INVAL;
+        return (s64)notes_wait_pending(t);
+    }
+    if (how == NOTE_WAIT_SUSPEND) {
+        if (rec_va != 0 || timeout_ns >= 0) return -(s64)T_E_INVAL;
+        return notes_wait_suspend(t, set);
+    }
+    if (how != NOTE_WAIT_TAKE || !notes_take_word_valid(set)) return -(s64)T_E_INVAL;
+    if (rec_va != 0 && !sys_validate_user_buf(rec_va, sizeof(struct note_record)))
+        return -(s64)T_E_FAULT;
+
+    struct Note note;
+    int direct;
+    s64 r = notes_wait_take(t, set, timeout_ns, &note, &direct);
+    if (r != 0) return r;
+    if (rec_va != 0 && uaccess_copy_out(rec_va, &note, sizeof(note)) != 0) {
+        notes_wait_untake(t, direct, &note);
+        return -(s64)T_E_FAULT;
+    }
+    return 0;
+}
+
+// rt_sigtimedwait past its sigset. The frame's reason for SI_KERNEL holds here too: the
+// union has no source a guest should trust, so it stays zero (vivarium.h).
+static s64 viv_rt_sigtimedwait(struct Thread *t, u64 set, u64 info_va, u64 ts_va) {
+    s64 timeout_ns = -1;
+    if (ts_va != 0) {
+        struct t_timespec ts;
+        if (!sys_validate_user_buf(ts_va, sizeof(ts)) ||
+            uaccess_copy_in(&ts, ts_va, sizeof(ts)) != 0)
+            return -(s64)T_E_FAULT;
+        s32 err = 0;
+        if (!vivarium_timespec_to_ns(ts.tv_sec, ts.tv_nsec, &timeout_ns, &err))
+            return -(s64)err;
+    }
+    if (info_va != 0 && !sys_validate_user_buf(info_va, sizeof(struct viv_linux_siginfo)))
+        return -(s64)T_E_FAULT;
+
+    struct Note note;
+    int direct;
+    s64 r = notes_wait_take(t, notes_take_for_sigset(set), timeout_ns, &note, &direct);
+    if (r != 0) return r;
+
+    u64 signum = viv_signote_to_signal(viv_signote_from_note_name(note.name));
+    if (info_va != 0) {
+        struct viv_linux_siginfo si;
+        u8 *raw = (u8 *)&si;
+        for (u32 i = 0; i < (u32)sizeof(si); i++) raw[i] = 0;
+        si.si_signo = (s32)signum;
+        si.si_code  = VIV_SI_KERNEL;
+        if (uaccess_copy_out(info_va, &si, sizeof(si)) != 0) {
+            notes_wait_untake(t, direct, &note);
+            return -(s64)T_E_FAULT;
+        }
+    }
+    return (s64)signum;
+}
 
 static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
                      u64 linux_nr, const u64 *args) {
@@ -16099,7 +16343,7 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
                 tab = viv_sigtab_of(p);
                 if (!tab) return -(s64)T_E_NOMEM;
             }
-            (void)viv_sigtab_set(tab, note, &act);
+            viv_sigtab_store(p, tab, note, &act);
         }
 
         viv_sigaction_settled(p, note, &act);
@@ -16156,6 +16400,36 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         return 0;
     }
 
+    case VIV_LINUX_RT_SIGSUSPEND: {
+        // rt_sigsuspend(set, sigsetsize): x0 set, x1 sigsetsize. Through the mask row's
+        // translation, so SIGKILL drops and a tty signal lets in or holds its family.
+        if (args[1] != sizeof(u64)) return -(s64)T_E_INVAL;
+        u64 want = 0;
+        if (!sys_validate_user_buf(args[0], sizeof(u64)) || viv_load_u64(args[0], &want) != 0)
+            return -(s64)T_E_FAULT;
+        return notes_wait_suspend(current_thread(),
+                                  viv_sigset_to_notemask(want, &g_viv_notebits));
+    }
+
+    case VIV_LINUX_RT_SIGPENDING: {
+        // rt_sigpending(set, sigsetsize): x0, x1. Linux takes a smaller size and copies
+        // that much. This row wants the whole word, as its neighbours do, and no libc
+        // passes less.
+        if (args[1] != sizeof(u64)) return -(s64)T_E_INVAL;
+        if (!sys_validate_user_buf(args[0], sizeof(u64))) return -(s64)T_E_FAULT;
+        u64 pending = notes_sigset_for_take(notes_wait_pending(current_thread()));
+        return viv_store_u64(args[0], pending) != 0 ? -(s64)T_E_FAULT : 0;
+    }
+
+    case VIV_LINUX_RT_SIGTIMEDWAIT: {
+        // rt_sigtimedwait(set, info, timeout, sigsetsize): x0..x3.
+        if (args[3] != sizeof(u64)) return -(s64)T_E_INVAL;
+        u64 want = 0;
+        if (!sys_validate_user_buf(args[0], sizeof(u64)) || viv_load_u64(args[0], &want) != 0)
+            return -(s64)T_E_FAULT;
+        return viv_rt_sigtimedwait(current_thread(), want, args[1], args[2]);
+    }
+
     case VIV_LINUX_SOCKET:
         // socket(domain, type, protocol): x0, x1, x2.
         return viv_sock_socket(p, args[0], args[1], args[2]);
@@ -16208,10 +16482,9 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         return viv_sock_recvmsg(p, args[0], args[1], args[2]);
 
     case VIV_LINUX_PPOLL:
-        // ppoll(fds, nfds, tmo_p, sigmask, sigsetsize): x0..x4. sigsetsize is
-        // read only via the sigmask decline, which needs no size -- Linux itself
-        // skips that check when the mask is NULL.
-        return viv_ppoll(p, args[0], args[1], args[2], args[3]);
+        // ppoll(fds, nfds, tmo_p, sigmask, sigsetsize): x0..x4. Linux skips the size
+        // check when the mask is NULL, and so does the decide.
+        return viv_ppoll(p, args[0], args[1], args[2], args[3], args[4]);
 
     case VIV_LINUX_PSELECT6:
         // pselect6(nfds, rd, wr, ex, tmo, sigmask_and_size): x0..x5 -- the one
@@ -16447,15 +16720,7 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         u32 path_len = 0;
         s64 m = viv_measure_user_path(args[0], &path_len);
         if (m != 0)                                  return m;
-        s64 rc = sys_chdir_handler(args[0], (u64)path_len, 0, 0);
-        // sys_chdir_handler collapses every failure (target missing, not a
-        // directory, no search permission) to a bare -1. Passing that through
-        // would read as EPERM at the libc -- a code chdir never returns on
-        // Linux -- so map it to ENOENT, the dominant and least-wrong cause.
-        // The collapse of ENOTDIR/EACCES into ENOENT is a fidelity gap tracked
-        // for when a richer native chdir errno path exists; the SUCCESS path
-        // (the only one milestone A exercises) is exact.
-        return (rc == 0) ? 0 : -(s64)T_E_NOENT;
+        return sys_chdir_handler(args[0], (u64)path_len, 0, 0);
     }
 
     case VIV_LINUX_FCHMODAT: {
@@ -17040,20 +17305,20 @@ s64 viv_session_for_test(struct Proc *p, u64 linux_num, u64 a0, u64 a1) {
 // uninterruptible. A peer thread may close and reuse the fd between this and
 // the call. That misclassifies only that one call, for a guest racing its own
 // close: a handler that runs late, or an EINTR from the file it replaced.
-static bool viv_fd_is_slow(struct Proc *p, u64 fd) {
+static bool file_is_slow(struct Proc *p, hidx_t fd) {
     struct viv_socktab *tab = __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
     struct viv_sock row;
-    if (tab && viv_socktab_get(tab, (s32)(s64)fd, &row)) return true;
+    if (tab && viv_socktab_get(tab, fd, &row)) return true;
 
-    struct Spoor *c = sys_lookup_rw_handle(p, (hidx_t)fd, 0);
+    struct Spoor *c = sys_lookup_rw_handle(p, fd, 0);
     if (!c) return false;
     u32 f = spoor_flag_get(c);
     if (!(f & CSLOWKNOWN)) {
         struct t_stat ks;
         if (spoor_stat_native(c, &ks) != 0) { spoor_clunk(c); return false; }
         u32 type = ks.mode & T_S_IFMT;
-        f = (type == T_S_IFIFO || type == T_S_IFCHR) ? (CSLOWKNOWN | CSLOW)
-                                                     : CSLOWKNOWN;
+        f = (type == T_S_IFIFO || type == T_S_IFCHR || type == T_S_IFSOCK)
+                ? (CSLOWKNOWN | CSLOW) : CSLOWKNOWN;
         spoor_flag_set(c, f);
     }
     spoor_clunk(c);
@@ -17064,16 +17329,18 @@ static bool viv_fd_is_slow(struct Proc *p, u64 fd) {
 static bool viv_call_interruptible(struct Proc *p, u64 linux_nr, const u64 *args) {
     switch (vivarium_intr_class(linux_nr, args)) {
     case VIV_INTR_ALWAYS:  return true;
-    case VIV_INTR_IF_SLOW: return viv_fd_is_slow(p, args[0]);
+    case VIV_INTR_IF_SLOW: return file_is_slow(p, (hidx_t)args[0]);
     case VIV_INTR_NEVER:   break;
     }
     return false;
 }
 
 #ifdef KERNEL_TESTS
-// Drives viv_fd_is_slow so a test can prove the classification and its
+// Drives file_is_slow so a test can prove the classification and its
 // per-Spoor cache (ARCH 8.8.3).
-bool viv_fd_is_slow_for_test(struct Proc *p, u64 fd) { return viv_fd_is_slow(p, fd); }
+bool file_is_slow_for_test(struct Proc *p, u64 fd) {
+    return file_is_slow(p, sys_hidx_arg(fd));
+}
 #endif
 
 static bool viv_linux_dispatch(struct exception_context *ctx, struct Proc *p) {
@@ -17147,8 +17414,12 @@ static bool viv_linux_dispatch(struct exception_context *ctx, struct Proc *p) {
     // ARCH 8.8.3: whether a caught note may interrupt this call is Linux's
     // answer, taken once from the Linux number before it is renumbered.
     // syscall_dispatch clears it on the way out.
-    current_thread()->note_interruptible =
-        viv_call_interruptible(p, nr, args);
+    {
+        struct Thread *ct = current_thread();
+        ct->note_interruptible = viv_call_interruptible(p, nr, args);
+        ct->note_restartable   = ct->note_interruptible &&
+                                 vivarium_call_restartable(nr, args);
+    }
 
     // A CONNECTING socket's fd still names ctl, so read and write finish its
     // interrupted connect before they reach the file. A hook, as close's is,
@@ -17289,6 +17560,58 @@ void syscall_dispatch(struct exception_context *ctx) {
                        "which inherits its mask (#713)");
 }
 
+// ARCH 8.8.3: signal(7)'s list for the native numbers, for a Proc whose table says
+// which notes it expects. Taken before the call runs, as the Linux dispatcher's is.
+// Unlisted calls ride a caught note out, so the failure of a call left off is a
+// handler that runs late, never a spurious EINTR.
+static void native_note_class(struct Thread *t, struct Proc *p,
+                              const struct exception_context *ctx) {
+    bool intr = false, restart = false;
+    switch (ctx->regs[8]) {
+    case SYS_READ:
+    case SYS_WRITE:
+    case SYS_PREAD:
+    case SYS_PWRITE:
+        intr = restart = file_is_slow(p, sys_hidx_arg(ctx->regs[0]));
+        break;
+    case SYS_WAIT_PID:
+    case SYS_SRV_ACCEPT:
+        intr = restart = true;
+        break;
+    case SYS_TORPOR_WAIT:
+        // < 0 waits forever and re-issues as it stands. A timed wait would owe a
+        // restart block with its remaining time, as a timed futex would.
+        intr    = true;
+        restart = (s64)ctx->regs[2] < 0;
+        break;
+    case SYS_POLL:
+        intr = true;
+        break;
+    case SYS_OPEN:
+        intr = restart = (ctx->regs[3] & SYS_WALK_OPEN_OINTR) != 0;
+        break;
+    case SYS_FILE_LOCK:
+        // F_SETLKW: a take that waits for the holder (filelock.c). An unlock and a
+        // test never wait. Each attempt is refused or never applied before it can
+        // unwind, so a restart asks again from the start, as Linux's does.
+        intr = restart = (ctx->regs[1] & SYS_FILE_LOCK_WAIT) != 0 &&
+                         (ctx->regs[1] & SYS_FILE_LOCK_TEST) == 0 &&
+                         (ctx->regs[1] & SYS_FILE_LOCK_TYPE_MASK) != SYS_FILE_LOCK_UN;
+        break;
+    default:
+        break;
+    }
+    t->note_interruptible = intr;
+    t->note_restartable   = restart;
+}
+
+#ifdef KERNEL_TESTS
+void native_note_class_for_test(struct Thread *t, struct Proc *p,
+                                const struct exception_context *ctx) {
+    native_note_class(t, p, ctx);
+}
+#endif
+
 static void syscall_dispatch_body(struct exception_context *ctx) {
     // ARCH 8.12's property, witnessed on EVERY syscall of every boot rather
     // than in one test. This is what replaced poll's preemption point: the
@@ -17305,6 +17628,11 @@ static void syscall_dispatch_body(struct exception_context *ctx) {
     {
         struct Thread *vt = current_thread();
         struct Proc   *vp = vt ? vt->proc : NULL;
+        if (vt) {
+            vt->note_call_x0      = ctx->regs[0];
+            vt->note_call_unwound = false;
+            vt->note_restartable  = false;
+        }
         if (vp && vp->phenotype == PHENO_LINUX) {
             // Linux hands back every register but x0 as the guest left it, and a
             // compiler may keep x1-x5 or x8 live across the svc (musl declares
@@ -17319,6 +17647,14 @@ static void syscall_dispatch_body(struct exception_context *ctx) {
             ctx->regs[8] = kept_x8;
             return;
         }
+        // SYS_NOTE_DISPOSE refuses a caught row with no handler and no notes fd, and
+        // SYS_NOTIFY(0) takes them back, so without one no note can unwind a wait,
+        // and a program that only ignores SIGPIPE pays no stat per open file. A
+        // handler a peer is installing right now makes this call's note late.
+        if (vp && notes_table_governs(vp) &&
+            (__atomic_load_n(&vp->handler_va, __ATOMIC_ACQUIRE) != 0 ||
+             proc_is_self_managing_notes(vp)))
+            native_note_class(vt, vp, ctx);
     }
     syscall_native_switch(ctx);
 }
@@ -18098,6 +18434,17 @@ static void syscall_native_switch(struct exception_context *ctx) {
         ctx->regs[0] = (u64)sys_postnote_tid_handler(ctx, ctx->regs[0],
                                                       ctx->regs[1],
                                                       ctx->regs[2]);
+        return;
+
+    case SYS_NOTE_DISPOSE:
+        ctx->regs[0] = (u64)sys_note_dispose_handler(ctx->regs[0], ctx->regs[1],
+                                                     ctx->regs[2], ctx->regs[3]);
+        return;
+
+    case SYS_NOTE_WAIT:
+        ctx->regs[0] = (u64)sys_note_wait_handler(ctx->regs[0], ctx->regs[1],
+                                                  ctx->regs[2], ctx->regs[3],
+                                                  ctx->regs[4]);
         return;
 
     case SYS_NOTE_MASK:

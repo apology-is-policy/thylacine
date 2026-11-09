@@ -48,7 +48,10 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <dirent.h>
+#include <spawn.h>
 #include <sys/stat.h>
+
+extern char **environ;
 
 static int fail(const char *wire, const char *why) {
 	printf("pouch-hello-fs: %s FAIL (%s, errno=%d)\n", wire, why, errno);
@@ -337,6 +340,26 @@ int main(void) {
 	if (rmdir("d86/sub/") != 0) return fail("rmdir(d/sub/)", "nested trailing slash must remove");
 	if (rmdir("d86/") != 0) return fail("rmdir(dir/)", "trailing slash must remove");
 	if (access("d86", F_OK) == 0) return fail("rmdir(dir/)", "d86 still present");
+
+	// --- posix_spawn of a file that may run and is no image: ENOEXEC, through 9P. The
+	//     answer comes from the parent's look: text, and then nothing at all. ---
+	static const char *const noimg_path[2] = { "/pouch-fs-probe/notelf", "/pouch-fs-probe/empty" };
+	static const char *const noimg_body[2] = { "echo hi\n", "" };
+	for (int i = 0; i < 2; i++) {
+		int nfd = open(noimg_path[i], O_WRONLY | O_CREAT | O_TRUNC, 0755);
+		if (nfd < 0) return fail("posix_spawn(noimg)", "create");
+		size_t want = strlen(noimg_body[i]);
+		if (write(nfd, noimg_body[i], want) != (ssize_t)want) return fail("posix_spawn(noimg)", "write");
+		(void)close(nfd);
+		pid_t none = 0;
+		char *const nargv[] = { (char *)noimg_path[i], NULL };
+		int s_rc = posix_spawn(&none, noimg_path[i], NULL, NULL, nargv, environ);
+		(void)unlink(noimg_path[i]);
+		if (s_rc != ENOEXEC) {
+			errno = s_rc;
+			return fail("posix_spawn(noimg)", "must answer ENOEXEC");
+		}
+	}
 
 	// --- unlink ---
 	if (unlink("b.txt") != 0) return fail("unlink", "b.txt");

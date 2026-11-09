@@ -88,6 +88,8 @@ u64 asid_resolve(u64 *context_id, unsigned cpu);
 unsigned asid_bits(void);              // 8 or 16
 u64      asid_generation_now(void);    // current generation value
 u64      asid_rollover_count(void);    // number of rollovers since boot
+unsigned asid_fixture_slot(void);      // a slot no CPU runs on
+bool     asid_flush_owed(unsigned cpu);
 #endif // KERNEL_TESTS
 
 #endif // THYLACINE_ARM64_ASID_H

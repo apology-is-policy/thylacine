@@ -14,11 +14,10 @@
 //                                         returns; SYS_NOTED(NCONT) restores
 //                                         the saved user context; raise()
 //                                         returns 0 with the flag set.
-//   sigaction(SIGINT, SIG_IGN, NULL)   -> handler cleared.
-//   raise(SIGINT)                      -> same wire shape but the bootstrap
-//                                         dispatcher hits SIG_IGN -> NCONT
-//                                         without invoking the user handler;
-//                                         the flag must NOT change.
+//   sigaction(SIGINT, SIG_IGN, NULL)   -> the kernel's row ignores it.
+//   raise(SIGINT)                      -> same wire shape but the post drops the
+//                                         note, so the user handler does not
+//                                         run; the flag must NOT change.
 //   sigaction(SIGALRM, ...)            -> EINVAL (unsupported v1.0 signum).
 //   deaths (gcpark-b)                  -> the binary re-spawns itself to die
 //                                         by abort(), a failed assert(), a
@@ -72,12 +71,16 @@
 //   pouch-hello-signals: death usr1 reads WIFSIGNALED SIGUSR1  (and usr2)
 //   pouch-hello-signals: kill errnos read ESRCH and EPERM
 //   pouch-hello-signals: kill(pid, 0) probes and getppid reads the parent
+//   pouch-hello-signals: blocked <leg> ok  (x18 legs; see test_blocked)
+//   pouch-hello-signals: note-wait ok: 45 legs  (see test_note_wait)
+//   pouch-hello-signals: a poll or select over no fds sleeps for its timeout
 //   POUCH_CENSUS_SIGNALS (pouch-census.h; joey matches it)
 //
 // Returns non-zero on any deviation — joey's content-check catches missing
 // "exit 0" or non-zero exit status.
 
 #undef NDEBUG
+#define _GNU_SOURCE
 #include "pouch-census.h"
 #include <assert.h>
 #include <signal.h>
@@ -86,7 +89,14 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <pthread.h>
+#include <setjmp.h>
+#include <time.h>
 #include <unistd.h>
+#include <sys/select.h>
+#include <sys/time.h>
 #include <sys/wait.h>
 
 extern char **environ;
@@ -393,7 +403,7 @@ static int test_term_apart(void) {
 
 // SIGUSR1 and SIGUSR2 have a note each (0068). A handler on one runs at once with its
 // own number while the other is blocked, and the blocked one waits for its unblock:
-// the family bit reaches the kernel's mask and comes back through the shadow.
+// the family bit reaches the kernel's mask and comes back from it.
 static int test_usr_apart(void) {
     struct sigaction ua;
     memset(&ua, 0, sizeof ua);
@@ -434,6 +444,1144 @@ static int test_usr_apart(void) {
     return 0;
 }
 
+// ===== A blocked call and a note (ARCHITECTURE 8.8.3) =====
+//
+// Each leg is a fresh image, so it shows what that image did with nothing left over
+// from the legs above. The child holds two fixed fds: LEG_DATA, a pipe it blocks
+// reading, and LEG_STATUS, where it writes 'R' just before it blocks and its handler
+// writes 'H'. The driver watches /proc/<pid>/sched until the child's thread sleeps and
+// only then posts, so a witness reaches the wait it names. A wait a note fails to end
+// is a deadline in the driver, never a hung boot.
+// Pouch's posix_spawn builds the child's table with no holes and carries only what a
+// dup2 names, so these sit just above the standard streams, and nothing needs closing.
+#define LEG_DATA         3
+#define LEG_STATUS       4
+#define LEG_DEADLINE_MS  20000LL
+#define LEG_QUIET_MS     100
+
+static volatile sig_atomic_t g_leg_caught;
+static volatile pid_t g_leg_kid;
+
+static long long leg_now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long long)ts.tv_sec * 1000LL + ts.tv_nsec / 1000000L;
+}
+
+static void leg_handler(int sig) {
+    (void)sig;
+    g_leg_caught++;
+    char h = 'H';
+    (void)write(LEG_STATUS, &h, 1);
+}
+
+// A launcher's shape: the handler ends the child the wait is for, and the wait,
+// restarted, reaps it.
+static void leg_handler_kills(int sig) {
+    leg_handler(sig);
+    kill(g_leg_kid, SIGTERM);
+}
+
+static int leg_catch(int sig, void (*h)(int), int flags) {
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = h;
+    sa.sa_flags = flags;
+    sigemptyset(&sa.sa_mask);
+    return sigaction(sig, &sa, NULL);
+}
+
+static void leg_ready(void) {
+    char r = 'R';
+    (void)write(LEG_STATUS, &r, 1);
+}
+
+static int leg_is_asleep(pid_t pid) {
+    char path[32], buf[512];
+    snprintf(path, sizeof path, "/proc/%d/sched", (int)pid);
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return 0;
+    ssize_t n = read(fd, buf, sizeof buf - 1);
+    close(fd);
+    if (n <= 0) return 0;
+    buf[n] = 0;
+    return strstr(buf, " SLP\n") != NULL;
+}
+
+// Two readings apart, because one can catch the child paging in the call it is about
+// to make.
+static int leg_wait_asleep(pid_t pid, long long deadline) {
+    int seen = 0;
+    while (leg_now_ms() < deadline) {
+        seen = leg_is_asleep(pid) ? seen + 1 : 0;
+        if (seen >= 2) return 0;
+        usleep(5000);
+    }
+    return -1;
+}
+
+// Reap pid by the deadline. With repost, post again each second: a note that still
+// beat the wait ran its handler early and left the wait standing, and a post that
+// reaches the wait is what the leg is for. The kill on the way out keeps a failure
+// from outliving its report.
+static int leg_wait_exit(pid_t pid, int *st, int repost, long long deadline) {
+    long long next = leg_now_ms() + 1000;
+    for (;;) {
+        pid_t r = waitpid(pid, st, WNOHANG);
+        if (r == pid) return 0;
+        if (r < 0 && errno != EINTR) return -1;
+        long long now = leg_now_ms();
+        if (now >= deadline) {
+            kill(pid, SIGKILL);
+            waitpid(pid, st, 0);
+            return -1;
+        }
+        if (repost && now >= next) {
+            kill(pid, repost);
+            next = now + 1000;
+        }
+        usleep(2000);
+    }
+}
+
+static int leg_spawn_waiter(pid_t *out) {
+    char *a[] = { (char *)SELF, (char *)"die", (char *)"wait", NULL };
+    return posix_spawn(out, SELF, NULL, NULL, a, environ);
+}
+
+static jmp_buf g_leg_escape;
+
+static void leg_handler_escapes(int sig) {
+    (void)sig;
+    longjmp(g_leg_escape, 1);
+}
+
+// Pouch declines fork (POUCH-DESIGN 8.3), and SYS_clone is its sentinel, so what crosses
+// the kernel's fork is reached the way a native program reaches it: SYS_RFORK, RFPROC
+// alone, on this stack and thread pointer. The child runs nothing that needs musl's
+// thread list set up again: read, write, wait and _exit.
+#define LEG_SYS_RFORK 105
+#define LEG_RFPROC    1L
+
+// Nor has Pouch an exec: SYS_execve is the same sentinel. SYS_EXECVE takes the path by
+// length and argc packed strings, each with its NUL, and keeps the descriptors.
+#define LEG_SYS_EXECVE 104
+
+static pid_t leg_native_fork(void) {
+    return (pid_t)syscall(LEG_SYS_RFORK, LEG_RFPROC, 0L, 0L);
+}
+
+// With SIGUSR1 blocked, reap 14 children and count how many notes then fit. The kernel
+// discards a dead child's note at the tail, so all of NOTE_QUEUE_DEPTH's 16 slots are
+// free. With no table governing, each child leaves an entry until they coalesce at 12.
+static int leg_ring_room(void) {
+    sigset_t s;
+    int st = 0;
+    sigemptyset(&s);
+    sigaddset(&s, SIGUSR1);
+    if (sigprocmask(SIG_BLOCK, &s, NULL) != 0) return -1;
+    for (int i = 0; i < 14; i++) {
+        pid_t k = leg_native_fork();
+        if (k < 0) return -1;
+        if (k == 0) _exit(0);
+        if (waitpid(k, &st, 0) != k) return -1;
+    }
+    int room = 0;
+    while (room < 32 && kill(getpid(), SIGUSR1) == 0) room++;
+    return room;
+}
+
+// ===== The mask at a handler, sigsuspend and sigtimedwait (ARCHITECTURE 8.8.3) =====
+//
+// Fresh images and the same driver as the blocked legs, because what these prove is a
+// mask the kernel holds, and each starts from the one the constructor left.
+static volatile sig_atomic_t g_nw_runs;
+static volatile sig_atomic_t g_nw_other;
+static volatile int g_nw_rc, g_nw_errno, g_nw_other_inside;
+static volatile int g_nw_info_signo, g_nw_info_code, g_nw_uc_null;
+static sigset_t g_nw_seen;
+
+static sigset_t nw_set(int a, int b) {
+    sigset_t s;
+    sigemptyset(&s);
+    if (a) sigaddset(&s, a);
+    if (b) sigaddset(&s, b);
+    return s;
+}
+
+static int nw_catch(int sig, void (*h)(int), int flags, int also) {
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = h;
+    sa.sa_flags = flags;
+    sigemptyset(&sa.sa_mask);
+    if (also) sigaddset(&sa.sa_mask, also);
+    return sigaction(sig, &sa, NULL);
+}
+
+static int nw_masked(int sig) {
+    sigset_t m;
+    return sigprocmask(SIG_BLOCK, NULL, &m) == 0 && sigismember(&m, sig) == 1;
+}
+
+static void nw_block(int a, int b) {
+    sigset_t s = nw_set(a, b);
+    sigprocmask(SIG_BLOCK, &s, NULL);
+}
+
+static void nw_handler(int sig) {
+    (void)sig;
+    g_nw_runs++;
+    sigprocmask(SIG_BLOCK, NULL, &g_nw_seen);
+}
+
+static void nw_other(int sig) {
+    (void)sig;
+    g_nw_other++;
+}
+
+static void nw_handler_masks(int sig) {
+    (void)sig;
+    g_nw_runs++;
+    nw_block(SIGINT, 0);
+}
+
+// No handler can nest here, so the note this one's wait admits runs at its return.
+static void nw_handler_suspends(int sig) {
+    (void)sig;
+    sigset_t none = nw_set(0, 0);
+    kill(getpid(), SIGUSR2);
+    g_nw_rc = sigsuspend(&none);
+    g_nw_errno = errno;
+    g_nw_other_inside = g_nw_other;
+    g_nw_runs++;
+}
+
+static void nw_handler_info(int sig, siginfo_t *si, void *uc) {
+    (void)sig;
+    g_nw_runs++;
+    g_nw_info_signo = si ? si->si_signo : -1;
+    g_nw_info_code = si ? si->si_code : -1;
+    g_nw_uc_null = uc == NULL;
+}
+
+static void nw_handler_pipe_dfl(int sig) {
+    (void)sig;
+    signal(SIGPIPE, SIG_DFL);
+}
+
+static void nw_handler_pipe_catch(int sig) {
+    (void)sig;
+    nw_catch(SIGPIPE, nw_handler, 0, 0);
+}
+
+// A pipe with no reader. A write to it answers EPIPE and the program lives to see that,
+// or the leg's driver reads a death.
+static int nw_closed_pipe(void) {
+    int p[2];
+    if (pipe(p) != 0) return -1;
+    close(p[0]);
+    return p[1];
+}
+
+static int nw_write_reads_epipe(int fd) {
+    char c = 'x';
+    errno = 0;
+    return write(fd, &c, 1) == -1 && errno == EPIPE;
+}
+
+static int g_nw_pipe_fd;
+static int g_nw_pipe_go[2];
+static pthread_t g_nw_pipe_thread;
+static volatile int g_nw_ran_on_thread;
+
+static void nw_handler_notes_thread(int sig) {
+    (void)sig;
+    g_nw_runs++;
+    g_nw_ran_on_thread = pthread_equal(pthread_self(), g_nw_pipe_thread);
+}
+
+static void *nw_pipe_writer(void *arg) {
+    char b = 0;
+    (void)arg;
+    if (read(g_nw_pipe_go[0], &b, 1) != 1) return NULL;
+    return nw_write_reads_epipe(g_nw_pipe_fd) ? (void *)1 : NULL;
+}
+
+static int nw_done(void) {
+    char b = 0;
+    leg_ready();
+    ssize_t n = read(LEG_DATA, &b, 1);
+    return n == 1 && b == 'D' ? 0 : 78;
+}
+
+// ppoll and pselect, one variable apart: which one. *ready says the fd came home set.
+static int nw_wait_fd(int sel, int fd, const struct timespec *ts, const sigset_t *mask, int *ready) {
+    int rc;
+    if (sel) {
+        fd_set r;
+        FD_ZERO(&r);
+        FD_SET(fd, &r);
+        rc = pselect(fd + 1, &r, NULL, NULL, ts, mask);
+        *ready = rc > 0 && FD_ISSET(fd, &r);
+    } else {
+        struct pollfd pf = { fd, POLLIN, 0 };
+        rc = ppoll(&pf, 1, ts, mask);
+        *ready = rc > 0 && (pf.revents & POLLIN) != 0;
+    }
+    return rc;
+}
+
+// The mask in a ppoll or pselect (operator vote 28, ARCH 8.8.3). The wait's mask opens
+// SIGUSR1 and holds SIGUSR2; the caller holds both.
+static int nw_mask_leg(int sel, const char *what) {
+    sigset_t none = nw_set(0, 0), usr1 = nw_set(SIGUSR1, 0), usr2 = nw_set(SIGUSR2, 0), pend;
+    const struct timespec two = { 2, 0 }, shortly = { 0, 30000000 }, zero = { 0, 0 };
+    int p[2], ready = 0, rc;
+    if (pipe(p) != 0) return 60;
+    if (nw_catch(SIGUSR1, nw_handler, 0, SIGTERM) != 0) return 60;
+
+    // A note the mask opens ends the call with EINTR. The handler runs under the call's
+    // mask, sa_mask and its own bit, and its return has the caller's mask back: the next
+    // note stays held.
+    if (!strcmp(what, "note")) {
+        nw_block(SIGUSR1, SIGUSR2);
+        raise(SIGUSR1);
+        errno = 0;
+        rc = nw_wait_fd(sel, p[0], &two, &usr2, &ready);
+        if (rc != -1 || errno != EINTR) return 144;
+        if (g_nw_runs != 1) return 145;
+        if (sigismember(&g_nw_seen, SIGUSR2) != 1 || sigismember(&g_nw_seen, SIGUSR1) != 1 ||
+            sigismember(&g_nw_seen, SIGTERM) != 1) return 146;
+        if (!nw_masked(SIGUSR1) || !nw_masked(SIGUSR2) || nw_masked(SIGTERM)) return 147;
+        raise(SIGUSR1);
+        if (g_nw_runs != 1 || sigtimedwait(&usr1, NULL, &zero) != SIGUSR1) return 148;
+        return nw_done();
+    }
+    // A ready fd answers first: no handler, the caller's mask back, the note still there.
+    if (!strcmp(what, "ready")) {
+        char c = 'x';
+        nw_block(SIGUSR1, SIGUSR2);
+        if (write(p[1], &c, 1) != 1) return 60;
+        raise(SIGUSR1);
+        rc = nw_wait_fd(sel, p[0], &two, &usr2, &ready);
+        if (rc != 1 || !ready) return 149;
+        if (g_nw_runs != 0 || !nw_masked(SIGUSR1)) return 150;
+        if (sigpending(&pend) != 0 || sigismember(&pend, SIGUSR1) != 1) return 151;
+        if (sigtimedwait(&usr1, NULL, &zero) != SIGUSR1 || g_nw_runs != 0) return 152;
+        return nw_done();
+    }
+    // The deadline restores it too, and the next note stays held.
+    if (!strcmp(what, "timeout")) {
+        nw_block(SIGUSR1, SIGUSR2);
+        long long t0 = leg_now_ms();
+        rc = nw_wait_fd(sel, p[0], &shortly, &usr2, &ready);
+        long long spent = leg_now_ms() - t0;
+        if (rc != 0 || spent < 25) return 153;
+        if (!nw_masked(SIGUSR1)) return 154;
+        raise(SIGUSR1);
+        if (g_nw_runs != 0 || sigtimedwait(&usr1, NULL, &zero) != SIGUSR1) return 155;
+        // A deadline writes the array home too, or a stale revents reads as an answer.
+        struct pollfd stale = { p[0], POLLIN, POLLOUT };
+        if (ppoll(&stale, 1, &zero, &usr2) != 0 || stale.revents != 0) return 176;
+        return nw_done();
+    }
+    // The driver's post reaches a call that is asleep.
+    if (!strcmp(what, "asleep")) {
+        nw_block(SIGUSR1, 0);
+        leg_ready();
+        errno = 0;
+        rc = nw_wait_fd(sel, p[0], NULL, &none, &ready);
+        return rc == -1 && errno == EINTR && g_nw_runs >= 1 && nw_masked(SIGUSR1) ? 0 : 156;
+    }
+    if (!strcmp(what, "dies")) {
+        nw_block(SIGTERM, 0);
+        leg_ready();
+        (void)nw_wait_fd(sel, p[0], NULL, &none, &ready);
+        return 157;
+    }
+    // A negative fd sends poll down the path that copies the array, and with nothing else
+    // it is the path that sleeps. The mask goes down both.
+    if (!strcmp(what, "slow")) {
+        struct pollfd two_fds[2] = { { -1, POLLIN, 0 }, { p[0], POLLIN, 0 } };
+        nw_block(SIGUSR1, SIGUSR2);
+        raise(SIGUSR1);
+        errno = 0;
+        if (ppoll(two_fds, 2, &two, &usr2) != -1 || errno != EINTR || g_nw_runs != 1) return 177;
+        raise(SIGUSR1);
+        errno = 0;
+        if (ppoll(two_fds, 1, &two, &usr2) != -1 || errno != EINTR || g_nw_runs != 2) return 178;
+        return nw_done();
+    }
+    // With no fds the kernel takes another path, and the mask holds on it.
+    if (!strcmp(what, "nofds")) {
+        nw_block(SIGUSR1, SIGUSR2);
+        raise(SIGUSR1);
+        errno = 0;
+        rc = sel ? pselect(0, NULL, NULL, NULL, &two, &usr2) : ppoll(NULL, 0, &two, &usr2);
+        if (rc != -1 || errno != EINTR || g_nw_runs != 1 || !nw_masked(SIGUSR1)) return 158;
+        rc = sel ? pselect(0, NULL, NULL, NULL, &shortly, &usr2) : ppoll(NULL, 0, &shortly, &usr2);
+        if (rc != 0 || !nw_masked(SIGUSR1)) return 159;
+        return nw_done();
+    }
+    // Held already, with a row that terminates: the wait never starts, and no latch would
+    // have ended it.
+    if (!strcmp(what, "tail")) {
+        pid_t kid = leg_native_fork();
+        if (kid < 0) return 60;
+        if (kid == 0) {
+            nw_block(SIGTERM, 0);
+            raise(SIGTERM);
+            (void)nw_wait_fd(sel, p[0], &two, &none, &ready);
+            _exit(71);
+        }
+        int st = 0;
+        if (waitpid(kid, &st, 0) != kid) return 75;
+        if (!WIFSIGNALED(st) || WTERMSIG(st) != SIGTERM) return 160;
+        return nw_done();
+    }
+    // Held already, with a default that ignores: the tail drops it and the timed call goes
+    // on, and no EINTR says it ever ended.
+    if (!strcmp(what, "quiet")) {
+        nw_block(SIGCHLD, 0);
+        raise(SIGCHLD);
+        if (sigpending(&pend) != 0 || sigismember(&pend, SIGCHLD) != 1) return 161;
+        long long t0 = leg_now_ms();
+        rc = nw_wait_fd(sel, p[0], &shortly, &none, &ready);
+        long long spent = leg_now_ms() - t0;
+        if (rc != 0 || spent < 25) return 162;
+        if (sigpending(&pend) != 0 || sigismember(&pend, SIGCHLD) == 1) return 163;
+        if (!nw_masked(SIGCHLD)) return 164;
+        return nw_done();
+    }
+    return 59;
+}
+
+// CHILD: one leg. Exit 0 is the leg's claim holding; a code above 99 names what failed.
+static int nw_child(const char *mode) {
+    if (!strncmp(mode, "ppoll-", 6)) return nw_mask_leg(0, mode + 6);
+    if (!strncmp(mode, "pselect-", 8)) return nw_mask_leg(1, mode + 8);
+    sigset_t none = nw_set(0, 0), usr1 = nw_set(SIGUSR1, 0), usr2 = nw_set(SIGUSR2, 0);
+    siginfo_t si;
+    int got = 0;
+    const struct timespec zero = { 0, 0 };
+
+    // A note that was already waiting ends the wait, and the wait's mask is gone again
+    // by the handler's return: the second note stays held until the second wait. The
+    // two legs differ by the row's SA_RESTART, which a sigsuspend does not honour.
+    if (!strcmp(mode, "suspend-held") || !strcmp(mode, "suspend-restart")) {
+        int flags = !strcmp(mode, "suspend-restart") ? SA_RESTART : 0;
+        if (nw_catch(SIGUSR1, nw_handler, flags, 0) != 0) return 60;
+        nw_block(SIGUSR1, 0);
+        raise(SIGUSR1);
+        if (g_nw_runs != 0) return 100;
+        errno = 0;
+        int rc = sigsuspend(&none);
+        if (rc != -1 || errno != EINTR) return 101;
+        if (g_nw_runs != 1) return 102;
+        if (!nw_masked(SIGUSR1)) return 103;
+        raise(SIGUSR1);
+        if (g_nw_runs != 1) return 104;
+        rc = sigsuspend(&none);
+        if (rc != -1 || errno != EINTR || g_nw_runs != 2) return 105;
+        return nw_done();
+    }
+    if (!strcmp(mode, "suspend-asleep")) {
+        if (nw_catch(SIGUSR1, nw_handler, 0, 0) != 0) return 60;
+        nw_block(SIGUSR1, 0);
+        leg_ready();
+        int rc = sigsuspend(&none);
+        return rc == -1 && errno == EINTR && g_nw_runs >= 1 && nw_masked(SIGUSR1) ? 0 : 106;
+    }
+    // The driver posts SIGUSR2, which the wait's mask holds, and later SIGUSR1. Exactly
+    // one handler ran, on the wait's mask and not the caller's, and the held note is still
+    // there for a poll to take, with no handler. Its negative twin is the wait's mask: with
+    // it empty SIGUSR2 ends the wait.
+    if (!strcmp(mode, "suspend-mask")) {
+        if (nw_catch(SIGUSR1, nw_handler, 0, 0) != 0) return 60;
+        if (nw_catch(SIGUSR2, nw_other, 0, 0) != 0) return 60;
+        nw_block(SIGUSR1, SIGUSR2);
+        nw_block(SIGTERM, 0);
+        leg_ready();
+        int rc = sigsuspend(&usr2);
+        if (rc != -1 || errno != EINTR) return 107;
+        if (g_nw_runs < 1 || g_nw_other != 0) return 108;
+        if (sigismember(&g_nw_seen, SIGTERM) == 1 || sigismember(&g_nw_seen, SIGUSR1) != 1 ||
+            sigismember(&g_nw_seen, SIGUSR2) != 1) return 143;
+        if (sigtimedwait(&usr2, &si, &zero) != SIGUSR2 || g_nw_other != 0) return 109;
+        return 0;
+    }
+    // A default-ignored note and an ignored one do not end it. SIGUSR1 does, and only it
+    // can have run the handler.
+    if (!strcmp(mode, "suspend-quiet")) {
+        if (nw_catch(SIGUSR1, nw_handler, 0, 0) != 0) return 60;
+        if (signal(SIGINT, SIG_IGN) == SIG_ERR) return 60;
+        leg_ready();
+        int rc = sigsuspend(&none);
+        return rc == -1 && errno == EINTR && g_nw_runs >= 1 ? 0 : 110;
+    }
+    if (!strcmp(mode, "suspend-dies")) {
+        nw_block(SIGTERM, 0);
+        leg_ready();
+        (void)sigsuspend(&none);
+        return 111;
+    }
+    if (!strcmp(mode, "suspend-handler")) {
+        if (nw_catch(SIGUSR1, nw_handler_suspends, 0, 0) != 0) return 60;
+        if (nw_catch(SIGUSR2, nw_other, 0, 0) != 0) return 60;
+        raise(SIGUSR1);
+        if (g_nw_runs != 1 || g_nw_rc != -1 || g_nw_errno != EINTR) return 112;
+        if (g_nw_other_inside != 0 || g_nw_other != 1) return 113;
+        return nw_done();
+    }
+    if (!strcmp(mode, "sigpause")) {
+        if (nw_catch(SIGUSR1, nw_handler, 0, 0) != 0) return 60;
+        nw_block(SIGUSR1, 0);
+        raise(SIGUSR1);
+        int rc = sigpause(SIGUSR1);
+        if (rc != -1 || errno != EINTR || g_nw_runs != 1 || !nw_masked(SIGUSR1)) return 114;
+        return nw_done();
+    }
+    // sa_mask and the signal's own family are in force in the handler, an unnamed one is
+    // not, and both are gone at its return. The row's handler stays without SA_RESETHAND.
+    if (!strcmp(mode, "sa-mask")) {
+        struct sigaction now;
+        if (nw_catch(SIGUSR1, nw_handler, 0, SIGUSR2) != 0) return 60;
+        raise(SIGUSR1);
+        if (g_nw_runs != 1) return 115;
+        if (sigismember(&g_nw_seen, SIGUSR1) != 1 || sigismember(&g_nw_seen, SIGUSR2) != 1 ||
+            sigismember(&g_nw_seen, SIGINT) == 1) return 116;
+        if (nw_masked(SIGUSR1) || nw_masked(SIGUSR2)) return 117;
+        if (sigaction(SIGUSR1, NULL, &now) != 0 || now.sa_handler != nw_handler) return 118;
+        return nw_done();
+    }
+    if (!strcmp(mode, "nodefer")) {
+        if (nw_catch(SIGUSR1, nw_handler, SA_NODEFER, 0) != 0) return 60;
+        raise(SIGUSR1);
+        if (g_nw_runs != 1 || sigismember(&g_nw_seen, SIGUSR1) == 1) return 119;
+        return nw_done();
+    }
+    // Both halves of the reset: the table reads SIG_DFL, and the kernel's row ends the
+    // program when the driver posts again.
+    if (!strcmp(mode, "one-shot")) {
+        struct sigaction now;
+        if (nw_catch(SIGUSR1, nw_handler, SA_RESETHAND, 0) != 0) return 60;
+        raise(SIGUSR1);
+        if (g_nw_runs != 1) return 120;
+        if (sigaction(SIGUSR1, NULL, &now) != 0 || now.sa_handler != SIG_DFL) return 121;
+        char b = 0;
+        leg_ready();
+        (void)read(LEG_DATA, &b, 1);
+        return 122;
+    }
+    // The kernel's half alone. A default-ignored note reaches no wait once its row is
+    // default; with the row left caught it would unwind the read, whatever the table says.
+    if (!strcmp(mode, "one-shot-row")) {
+        if (nw_catch(SIGCHLD, nw_handler, SA_RESETHAND, 0) != 0) return 60;
+        raise(SIGCHLD);
+        if (g_nw_runs != 1) return 142;
+        return nw_done();
+    }
+    if (!strcmp(mode, "handler-mask")) {
+        if (nw_catch(SIGUSR1, nw_handler_masks, 0, 0) != 0) return 60;
+        raise(SIGUSR1);
+        if (g_nw_runs != 1 || nw_masked(SIGINT)) return 123;
+        return nw_done();
+    }
+    if (!strcmp(mode, "setjmp-mask")) {
+        sigjmp_buf env;
+        if (sigsetjmp(env, 1) == 0) {
+            nw_block(SIGUSR1, 0);
+            if (!nw_masked(SIGUSR1)) return 124;
+            siglongjmp(env, 1);
+        }
+        if (nw_masked(SIGUSR1)) return 125;
+        if (sigsetjmp(env, 0) == 0) {
+            nw_block(SIGUSR1, 0);
+            siglongjmp(env, 1);
+        }
+        if (!nw_masked(SIGUSR1)) return 126;
+        return nw_done();
+    }
+    // SIGPIPE's default is the EPIPE alone (POUCH-DESIGN 6.4), a row and not a mask bit:
+    // nothing reads it blocked, and clearing the whole mask does not make it fatal.
+    if (!strcmp(mode, "pipe-row")) {
+        struct sigaction now;
+        int fd = nw_closed_pipe();
+        if (fd < 0) return 60;
+        if (nw_masked(SIGPIPE)) return 127;
+        if (!nw_write_reads_epipe(fd)) return 128;
+        if (raise(SIGPIPE) != 0) return 129;
+        if (sigprocmask(SIG_SETMASK, &none, NULL) != 0) return 60;
+        if (!nw_write_reads_epipe(fd)) return 144;
+        if (nw_catch(SIGPIPE, nw_handler, 0, 0) != 0) return 60;
+        if (!nw_write_reads_epipe(fd) || g_nw_runs != 1) return 145;
+        if (signal(SIGPIPE, SIG_DFL) == SIG_ERR) return 60;
+        if (!nw_write_reads_epipe(fd) || g_nw_runs != 1) return 146;
+        if (sigaction(SIGPIPE, NULL, &now) != 0 || now.sa_handler != SIG_DFL) return 147;
+        return nw_done();
+    }
+    // The change of disposition outlasts the handler that made it. With a mask bit the
+    // first of these ended the program at its next write, and the second kept the note
+    // masked on this thread.
+    if (!strcmp(mode, "pipe-handler")) {
+        int fd = nw_closed_pipe();
+        if (fd < 0) return 60;
+        if (nw_catch(SIGPIPE, nw_handler, 0, 0) != 0) return 60;
+        if (nw_catch(SIGUSR1, nw_handler_pipe_dfl, 0, 0) != 0) return 60;
+        raise(SIGUSR1);
+        if (!nw_write_reads_epipe(fd) || g_nw_runs != 0) return 148;
+        if (nw_catch(SIGUSR1, nw_handler_pipe_catch, 0, 0) != 0) return 60;
+        raise(SIGUSR1);
+        if (!nw_write_reads_epipe(fd) || g_nw_runs != 1) return 149;
+        return nw_done();
+    }
+    // The kernel resets a one-shot's row to its own default, which would end the program.
+    if (!strcmp(mode, "pipe-oneshot")) {
+        int fd = nw_closed_pipe();
+        if (fd < 0) return 60;
+        if (nw_catch(SIGPIPE, nw_handler, SA_RESETHAND, 0) != 0) return 60;
+        if (!nw_write_reads_epipe(fd) || g_nw_runs != 1) return 150;
+        if (!nw_write_reads_epipe(fd) || g_nw_runs != 1) return 151;
+        return nw_done();
+    }
+    // A sigaction on one thread reaches a thread that was already running. Main blocks
+    // the signal, so the only thread that can run the handler is the one that wrote. With
+    // a mask bit that thread still held SIGPIPE from the constructor, and no handler ran.
+    if (!strcmp(mode, "pipe-thread")) {
+        void *wrote = NULL;
+        g_nw_pipe_fd = nw_closed_pipe();
+        if (g_nw_pipe_fd < 0 || pipe(g_nw_pipe_go) != 0) return 60;
+        if (pthread_create(&g_nw_pipe_thread, NULL, nw_pipe_writer, NULL) != 0) return 60;
+        if (nw_catch(SIGPIPE, nw_handler_notes_thread, 0, 0) != 0) return 60;
+        nw_block(SIGPIPE, 0);
+        char go = 'G';
+        if (write(g_nw_pipe_go[1], &go, 1) != 1) return 60;
+        if (pthread_join(g_nw_pipe_thread, &wrote) != 0) return 60;
+        if (wrote == NULL || g_nw_runs != 1 || !g_nw_ran_on_thread) return 152;
+        return nw_done();
+    }
+    if (!strcmp(mode, "siginfo")) {
+        struct sigaction sa;
+        memset(&sa, 0, sizeof sa);
+        sa.sa_sigaction = nw_handler_info;
+        sa.sa_flags = SA_SIGINFO;
+        if (sigaction(SIGUSR1, &sa, NULL) != 0) return 60;
+        raise(SIGUSR1);
+        if (g_nw_runs != 1 || g_nw_info_signo != SIGUSR1 || g_nw_info_code != SI_KERNEL ||
+            !g_nw_uc_null) return 130;
+        return nw_done();
+    }
+    // raise() is this thread's own and kill(getpid()) is the Proc's queue, so both routes
+    // are taken. A handler is installed, and must not run.
+    if (!strcmp(mode, "take-queued")) {
+        if (nw_catch(SIGUSR1, nw_handler, 0, 0) != 0) return 60;
+        if (nw_catch(SIGUSR2, nw_other, 0, 0) != 0) return 60;
+        nw_block(SIGUSR1, SIGUSR2);
+        raise(SIGUSR1);
+        kill(getpid(), SIGUSR2);
+        if (sigtimedwait(&usr1, &si, NULL) != SIGUSR1) return 131;
+        if (si.si_signo != SIGUSR1 || si.si_code != SI_KERNEL || si.si_pid != 0) return 132;
+        if (sigwaitinfo(&usr2, &si) != SIGUSR2 || si.si_signo != SIGUSR2) return 133;
+        raise(SIGUSR1);
+        if (sigwait(&usr1, &got) != 0 || got != SIGUSR1) return 134;
+        if (g_nw_runs != 0 || g_nw_other != 0) return 135;
+        errno = 0;
+        if (sigtimedwait(&usr1, NULL, &zero) != -1 || errno != EAGAIN) return 136;
+        return nw_done();
+    }
+    if (!strcmp(mode, "take-asleep")) {
+        if (nw_catch(SIGUSR1, nw_handler, 0, 0) != 0) return 60;
+        nw_block(SIGUSR1, 0);
+        leg_ready();
+        if (sigwait(&usr1, &got) != 0 || got != SIGUSR1 || g_nw_runs != 0) return 137;
+        return 0;
+    }
+    if (!strcmp(mode, "take-timeout")) {
+        const struct timespec ts = { 0, 60000000 };
+        nw_block(SIGUSR1, 0);
+        long long t0 = leg_now_ms();
+        errno = 0;
+        int rc = sigtimedwait(&usr1, &si, &ts);
+        long long spent = leg_now_ms() - t0;
+        if (rc != -1 || errno != EAGAIN || spent < 50) return 138;
+        return nw_done();
+    }
+    if (!strcmp(mode, "take-badts")) {
+        static const struct timespec bad[] = { { 0, 1000000000 }, { 0, -1 }, { -1, 0 } };
+        for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+            errno = 0;
+            if (sigtimedwait(&usr1, &si, &bad[i]) != -1 || errno != EINVAL) return 139;
+        }
+        return nw_done();
+    }
+    // The other note's handler runs, and the wait goes on.
+    if (!strcmp(mode, "take-bystander")) {
+        const struct timespec ts = { 60, 0 };
+        if (leg_catch(SIGUSR1, leg_handler, 0) != 0) return 60;
+        nw_block(SIGUSR2, 0);
+        leg_ready();
+        if (sigtimedwait(&usr2, &si, &ts) != SIGUSR2 || g_leg_caught < 1) return 140;
+        return 0;
+    }
+    // The driver posts a note each second and the timeout is longer, so a retry that
+    // waited the whole timeout again would never reach it, and the leg reads its deadline.
+    if (!strcmp(mode, "take-remaining")) {
+        const struct timespec ts = { 1, 500000000 };
+        if (leg_catch(SIGUSR1, leg_handler, 0) != 0) return 60;
+        nw_block(SIGUSR2, 0);
+        long long t0 = leg_now_ms();
+        leg_ready();
+        errno = 0;
+        int rc = sigtimedwait(&usr2, NULL, &ts);
+        int e = errno;
+        long long spent = leg_now_ms() - t0;
+        return rc == -1 && e == EAGAIN && g_leg_caught >= 1 && spent >= 1400 ? 0 : 141;
+    }
+    // Held by the mask, by thread or by process, each shows. Taken, it is gone.
+    if (!strcmp(mode, "sigpending")) {
+        sigset_t pend;
+        if (nw_catch(SIGUSR1, nw_handler, 0, 0) != 0) return 60;
+        if (nw_catch(SIGUSR2, nw_other, 0, 0) != 0) return 60;
+        nw_block(SIGUSR1, SIGUSR2);
+        if (sigpending(&pend) != 0 || sigismember(&pend, SIGUSR1) == 1 ||
+            sigismember(&pend, SIGUSR2) == 1) return 165;
+        raise(SIGUSR1);
+        if (sigpending(&pend) != 0 || sigismember(&pend, SIGUSR1) != 1 ||
+            sigismember(&pend, SIGUSR2) == 1) return 166;
+        kill(getpid(), SIGUSR2);
+        if (sigpending(&pend) != 0 || sigismember(&pend, SIGUSR1) != 1 ||
+            sigismember(&pend, SIGUSR2) != 1) return 167;
+        if (sigwait(&usr1, &got) != 0 || got != SIGUSR1) return 168;
+        if (sigpending(&pend) != 0 || sigismember(&pend, SIGUSR1) == 1 ||
+            sigismember(&pend, SIGUSR2) != 1) return 169;
+        if (sigwait(&usr2, &got) != 0 || got != SIGUSR2) return 170;
+        if (sigpending(&pend) != 0 || sigismember(&pend, SIGUSR2) == 1) return 171;
+        if (g_nw_runs != 0 || g_nw_other != 0) return 172;
+        return nw_done();
+    }
+    // A plain select's EINTR survives its own conversion, and it has no mask to confuse it.
+    if (!strcmp(mode, "select-eintr")) {
+        int p[2];
+        fd_set r;
+        if (pipe(p) != 0 || nw_catch(SIGUSR1, nw_handler, 0, 0) != 0) return 60;
+        FD_ZERO(&r);
+        FD_SET(p[0], &r);
+        leg_ready();
+        errno = 0;
+        int rc = select(p[0] + 1, &r, NULL, NULL, NULL);
+        return rc == -1 && errno == EINTR && g_nw_runs >= 1 ? 0 : 173;
+    }
+    // A closed fd in a set is the whole call's error, and the sets stay as they were. A
+    // select that read POLLNVAL as nothing ready answered 0 at once, as a timeout does.
+    if (!strcmp(mode, "select-badfd")) {
+        int p[2];
+        fd_set r;
+        struct timeval left = { 2, 0 };
+        if (pipe(p) != 0) return 60;
+        close(p[0]);
+        FD_ZERO(&r);
+        FD_SET(p[0], &r);
+        errno = 0;
+        int rc = select(p[0] + 1, &r, NULL, NULL, &left);
+        if (rc != -1 || errno != EBADF) return 174;
+        if (!FD_ISSET(p[0], &r)) return 175;
+        return nw_done();
+    }
+    return 59;
+}
+
+// CHILD: one leg. Exit 0 is the leg's own claim holding. A code above that names what
+// it saw instead.
+static int leg_child(const char *mode) {
+    char b = 0;
+    ssize_t n;
+
+    if (!strcmp(mode, "dfl-reset")) {
+        signal(SIGINT, SIG_DFL);
+        signal(SIGTERM, SIG_DFL);
+        mode = "dfl";
+    }
+    if (!strcmp(mode, "dfl-after-handler")) {
+        if (leg_catch(SIGINT, leg_handler, 0) != 0) return 60;
+        signal(SIGINT, SIG_DFL);
+        mode = "dfl";
+    }
+    if (!strcmp(mode, "exec-dfl")) {
+        if (leg_catch(SIGINT, leg_handler, 0) != 0) return 60;
+        static const char args[] = "/bin/pouch-hello-signals\0leg\0dfl";
+        syscall(LEG_SYS_EXECVE, SELF, sizeof SELF - 1, args, sizeof args, 3L);
+        return 61;
+    }
+    if (!strcmp(mode, "dfl")) {
+        leg_ready();
+        n = read(LEG_DATA, &b, 1);
+        return 62;
+    }
+    if (!strcmp(mode, "intr-norestart")) {
+        if (leg_catch(SIGUSR1, leg_handler, 0) != 0) return 60;
+        leg_ready();
+        n = read(LEG_DATA, &b, 1);
+        return n == -1 && errno == EINTR && g_leg_caught >= 1 ? 0 : 63;
+    }
+    if (!strcmp(mode, "intr-restart")) {
+        if (leg_catch(SIGUSR1, leg_handler, SA_RESTART) != 0) return 60;
+        leg_ready();
+        n = read(LEG_DATA, &b, 1);
+        return n == 1 && b == 'D' && g_leg_caught >= 1 ? 0 : 64;
+    }
+    if (!strcmp(mode, "signal-restart")) {
+        if (signal(SIGUSR2, leg_handler) == SIG_ERR) return 60;
+        leg_ready();
+        n = read(LEG_DATA, &b, 1);
+        return n == 1 && b == 'D' && g_leg_caught >= 1 ? 0 : 65;
+    }
+    if (!strcmp(mode, "quiet")) {
+        if (leg_catch(SIGUSR1, leg_handler, 0) != 0) return 60;
+        if (signal(SIGINT, SIG_IGN) == SIG_ERR) return 60;
+        leg_ready();
+        n = read(LEG_DATA, &b, 1);
+        return n == 1 && b == 'D' && g_leg_caught == 0 ? 0 : 66;
+    }
+    if (!strcmp(mode, "pause")) {
+        if (leg_catch(SIGUSR1, leg_handler, 0) != 0) return 60;
+        leg_ready();
+        int rc = pause();
+        return rc == -1 && errno == EINTR && g_leg_caught >= 1 ? 0 : 67;
+    }
+    if (!strcmp(mode, "nanosleep")) {
+        if (leg_catch(SIGUSR1, leg_handler, 0) != 0) return 60;
+        leg_ready();
+        struct timespec req = { 60, 0 }, rem = { 0, 0 };
+        int rc = nanosleep(&req, &rem);
+        return rc == -1 && errno == EINTR && g_leg_caught >= 1 &&
+               rem.tv_sec > 0 && rem.tv_sec <= 60 ? 0 : 68;
+    }
+    if (!strcmp(mode, "wait-norestart")) {
+        pid_t kid;
+        int st = 0;
+        if (leg_catch(SIGUSR1, leg_handler, 0) != 0) return 60;
+        if (leg_spawn_waiter(&kid) != 0) return 60;
+        leg_ready();
+        int rc = waitpid(kid, &st, 0);
+        int e = errno;
+        kill(kid, SIGKILL);
+        pid_t reaped = waitpid(kid, &st, 0);
+        return rc == -1 && e == EINTR && g_leg_caught >= 1 && reaped == kid ? 0 : 69;
+    }
+    if (!strcmp(mode, "wait-restart")) {
+        pid_t kid;
+        int st = 0;
+        if (leg_spawn_waiter(&kid) != 0) return 60;
+        g_leg_kid = kid;
+        if (leg_catch(SIGUSR1, leg_handler_kills, SA_RESTART) != 0) return 60;
+        leg_ready();
+        int rc = waitpid(kid, &st, 0);
+        return rc == kid && WIFSIGNALED(st) && WTERMSIG(st) == SIGTERM &&
+               g_leg_caught >= 1 ? 0 : 70;
+    }
+    if (!strcmp(mode, "escape")) {
+        if (leg_catch(SIGUSR1, leg_handler_escapes, 0) != 0) return 60;
+        if (setjmp(g_leg_escape) == 0) {
+            raise(SIGUSR1);
+            return 76;
+        }
+        leg_ready();
+        n = read(LEG_DATA, &b, 1);
+        return 77;
+    }
+    if (!strcmp(mode, "ring-room")) {
+        // A forked child first, whose table crossed the fork; the ring is then still
+        // empty for the image's own count.
+        int st = 0;
+        pid_t kid = leg_native_fork();
+        if (kid < 0) return 60;
+        if (kid == 0) _exit(leg_ring_room());
+        if (waitpid(kid, &st, 0) != kid) return 60;
+        if (!WIFEXITED(st) || WEXITSTATUS(st) != 16) return 120 + (WEXITSTATUS(st) & 31);
+        int room = leg_ring_room();
+        if (room != 16) return 80 + (room & 31);
+        leg_ready();
+        n = read(LEG_DATA, &b, 1);
+        return n == 1 && b == 'D' ? 0 : 78;
+    }
+    if (!strcmp(mode, "fork-read")) {
+        int p[2];
+        if (leg_catch(SIGUSR1, leg_handler, 0) != 0) return 60;
+        if (pipe(p) != 0) return 60;
+        pid_t kid = leg_native_fork();
+        if (kid < 0) return 60;
+        if (kid == 0) {
+            close(p[0]);
+            char r = 'R';
+            (void)write(p[1], &r, 1);
+            n = read(LEG_DATA, &b, 1);
+            _exit(n == -1 && errno == EINTR && g_leg_caught >= 1 ? 0 : 71);
+        }
+        close(p[1]);
+        char r = 0;
+        if (read(p[0], &r, 1) != 1) return 72;
+        long long deadline = leg_now_ms() + LEG_DEADLINE_MS;
+        int st = 0;
+        if (leg_wait_asleep(kid, deadline) != 0) {
+            kill(kid, SIGKILL);
+            waitpid(kid, &st, 0);
+            return 73;
+        }
+        kill(kid, SIGUSR1);
+        if (leg_wait_exit(kid, &st, SIGUSR1, deadline) != 0) return 74;
+        if (!WIFEXITED(st) || WEXITSTATUS(st) != 0) return 75;
+        leg_ready();
+        n = read(LEG_DATA, &b, 1);
+        return n == 1 && b == 'D' ? 0 : 78;
+    }
+    if (!strcmp(mode, "fork-mask")) {
+        // The child starts with the caller's mask: its own note waits for it to unblock.
+        sigset_t s, old;
+        if (leg_catch(SIGUSR1, leg_handler, 0) != 0) return 60;
+        sigemptyset(&s);
+        sigaddset(&s, SIGUSR1);
+        if (sigprocmask(SIG_BLOCK, &s, &old) != 0) return 60;
+        pid_t kid = leg_native_fork();
+        if (kid < 0) return 60;
+        if (kid == 0) {
+            if (kill(getpid(), SIGUSR1) != 0) _exit(71);
+            if (g_leg_caught != 0) _exit(72);
+            if (sigprocmask(SIG_SETMASK, &old, NULL) != 0) _exit(73);
+            _exit(g_leg_caught == 1 ? 0 : 74);
+        }
+        int st = 0;
+        if (waitpid(kid, &st, 0) != kid) return 75;
+        if (!WIFEXITED(st) || WEXITSTATUS(st) != 0) return 90 + (WEXITSTATUS(st) & 15);
+        leg_ready();
+        n = read(LEG_DATA, &b, 1);
+        return n == 1 && b == 'D' ? 0 : 78;
+    }
+    return nw_child(mode);
+}
+
+// One byte from the status pipe equal to `want`, by the deadline. 'H' can precede
+// nothing else that matters, so anything else read on the way is passed over.
+static int leg_read_status(int fd, char want, long long deadline) {
+    for (;;) {
+        long long left = deadline - leg_now_ms();
+        if (left <= 0) return -1;
+        struct pollfd pf = { fd, POLLIN, 0 };
+        int r = poll(&pf, 1, (int)left);
+        if (r < 0 && errno == EINTR) continue;
+        if (r <= 0) return -1;
+        char c = 0;
+        if (read(fd, &c, 1) != 1) return -1;
+        if (c == want) return 0;
+    }
+}
+
+struct blocked_leg {
+    const char *mode;
+    int sig;     // the note the driver posts once the child sleeps; 0 for none
+    int also;    // a second note the row must also keep from the wait
+    int then;    // a note posted after those, once they have had their chance
+    int repost;  // keep posting until the child exits
+    int ack;     // the handler must ack before any data goes
+    int data;    // write the byte that ends the read
+    int dies;    // the signal the child must die of; 0 means it must exit 0
+};
+
+static int run_blocked_leg(const struct blocked_leg *l, int say_ok) {
+    int data[2], status[2];
+    if (pipe(data) != 0 || pipe(status) != 0) {
+        printf("pouch-hello-signals: blocked %s: pipe errno=%d\n", l->mode, errno);
+        return -1;
+    }
+    posix_spawn_file_actions_t fa;
+    posix_spawn_file_actions_init(&fa);
+    posix_spawn_file_actions_adddup2(&fa, data[0], LEG_DATA);
+    posix_spawn_file_actions_adddup2(&fa, status[1], LEG_STATUS);
+    char *cargv[] = { (char *)SELF, (char *)"leg", (char *)l->mode, NULL };
+    pid_t pid;
+    int sp = posix_spawn(&pid, SELF, &fa, NULL, cargv, environ);
+    posix_spawn_file_actions_destroy(&fa);
+    close(data[0]);
+    close(status[1]);
+    int rc = -1;
+    int st = 0;
+    if (sp != 0) {
+        printf("pouch-hello-signals: blocked %s: spawn=%d\n", l->mode, sp);
+        goto out;
+    }
+
+    long long deadline = leg_now_ms() + LEG_DEADLINE_MS;
+    const char *why = NULL;
+    if (leg_read_status(status[0], 'R', deadline) != 0) {
+        why = "never reached its wait";
+    } else if (leg_wait_asleep(pid, deadline) != 0) {
+        why = "never slept";
+    } else {
+        if (l->sig) kill(pid, l->sig);
+        if (l->also) kill(pid, l->also);
+        if (l->ack && leg_read_status(status[0], 'H', deadline) != 0) {
+            why = "handler did not run during the wait";
+        } else {
+            if (!l->ack && !l->repost && !l->dies) usleep(LEG_QUIET_MS * 1000);
+            if (l->then) kill(pid, l->then);
+            if (l->data) {
+                char d = 'D';
+                (void)write(data[1], &d, 1);
+            }
+        }
+    }
+    if (why) {
+        kill(pid, SIGKILL);
+        waitpid(pid, &st, 0);
+        printf("pouch-hello-signals: blocked %s: %s (status %#x)\n", l->mode, why, (unsigned)st);
+        goto out;
+    }
+    if (leg_wait_exit(pid, &st, l->repost ? l->sig : 0, deadline) != 0) {
+        printf("pouch-hello-signals: blocked %s: alive at the deadline\n", l->mode);
+        goto out;
+    }
+    int good = l->dies ? WIFSIGNALED(st) && WTERMSIG(st) == l->dies
+                       : WIFEXITED(st) && WEXITSTATUS(st) == 0;
+    if (!good) {
+        printf("pouch-hello-signals: blocked %s: status %#x (want %s %d)\n",
+               l->mode, (unsigned)st, l->dies ? "signal" : "exit", l->dies);
+        goto out;
+    }
+    if (say_ok) printf("pouch-hello-signals: blocked %s ok\n", l->mode);
+    rc = 0;
+out:
+    close(data[1]);
+    close(status[0]);
+    return rc;
+}
+
+// The positive and the negative halves are one variable apart: intr-norestart and
+// quiet are the same child, and only the note's row differs. Every leg runs and
+// reports, so one regression cannot hide another.
+static int test_blocked(void) {
+    static const struct blocked_leg legs[] = {
+        // A program with no handler dies in its wait: nothing registered at startup.
+        { .mode = "dfl",               .sig = SIGINT,  .dies = SIGINT  },
+        { .mode = "dfl",               .sig = SIGTERM, .dies = SIGTERM },
+        { .mode = "dfl",               .sig = SIGUSR1, .dies = SIGUSR1 },
+        // Resetting a signal that never had a row dies the same.
+        { .mode = "dfl-reset",         .sig = SIGINT,  .dies = SIGINT  },
+        // A dispatcher is registered, and this note's row says default.
+        { .mode = "dfl-after-handler", .sig = SIGINT,  .dies = SIGINT  },
+        // Exec drops the table and the handler it held.
+        { .mode = "exec-dfl",          .sig = SIGINT,  .dies = SIGINT  },
+        // A caught note unwinds the wait.
+        { .mode = "intr-norestart",    .sig = SIGUSR1, .repost = 1 },
+        // And the kernel re-issues it for SA_RESTART. The handler acks before the
+        // data goes, so the handler ran during the wait and not after it.
+        { .mode = "intr-restart",      .sig = SIGUSR1, .ack = 1, .data = 1 },
+        { .mode = "signal-restart",    .sig = SIGUSR2, .ack = 1, .data = 1 },
+        // A default-ignored note and an ignored one stay out of the wait.
+        { .mode = "quiet",             .sig = SIGCHLD, .also = SIGINT, .data = 1 },
+        { .mode = "pause",             .sig = SIGUSR1, .repost = 1 },
+        { .mode = "nanosleep",         .sig = SIGUSR1, .repost = 1 },
+        { .mode = "wait-norestart",    .sig = SIGUSR1, .repost = 1 },
+        { .mode = "wait-restart",      .sig = SIGUSR1 },
+        // The table and the handler cross a fork.
+        { .mode = "fork-read",         .data = 1 },
+        { .mode = "fork-mask",         .data = 1 },
+        // A handler that longjmp'd out never told the kernel it was done, and a fatal
+        // note with a default row must still end the program, not spin its waits.
+        { .mode = "escape",            .sig = SIGINT,  .dies = SIGINT  },
+        // A dead child's note takes no room in a program with no handler.
+        { .mode = "ring-room",         .data = 1 },
+    };
+    int bad = 0;
+    for (size_t i = 0; i < sizeof legs / sizeof legs[0]; i++) {
+        if (run_blocked_leg(&legs[i], 1) != 0) bad = 1;
+        fflush(stdout);
+    }
+    return bad ? -1 : 0;
+}
+
+static int test_note_wait(void) {
+    static const struct blocked_leg legs[] = {
+        { .mode = "suspend-held",    .data = 1 },
+        { .mode = "suspend-restart", .data = 1 },
+        { .mode = "suspend-asleep",  .sig = SIGUSR1 },
+        { .mode = "suspend-mask",    .sig = SIGUSR2, .then = SIGUSR1 },
+        { .mode = "suspend-quiet",   .sig = SIGCHLD, .also = SIGINT, .then = SIGUSR1 },
+        { .mode = "suspend-dies",    .sig = SIGTERM, .dies = SIGTERM },
+        { .mode = "suspend-handler", .data = 1 },
+        { .mode = "sigpause",        .data = 1 },
+        { .mode = "sa-mask",         .data = 1 },
+        { .mode = "nodefer",         .data = 1 },
+        { .mode = "one-shot",        .sig = SIGUSR1, .dies = SIGUSR1 },
+        { .mode = "one-shot-row",    .sig = SIGCHLD, .data = 1 },
+        { .mode = "handler-mask",    .data = 1 },
+        { .mode = "setjmp-mask",     .data = 1 },
+        { .mode = "pipe-row",        .data = 1 },
+        { .mode = "pipe-handler",    .data = 1 },
+        { .mode = "pipe-oneshot",    .data = 1 },
+        { .mode = "pipe-thread",     .data = 1 },
+        { .mode = "siginfo",         .data = 1 },
+        { .mode = "take-queued",     .data = 1 },
+        { .mode = "take-asleep",     .sig = SIGUSR1 },
+        { .mode = "take-timeout",    .data = 1 },
+        { .mode = "take-badts",      .data = 1 },
+        { .mode = "take-bystander",  .sig = SIGUSR1, .ack = 1, .then = SIGUSR2 },
+        { .mode = "take-remaining",  .sig = SIGUSR1, .repost = 1 },
+        { .mode = "ppoll-note",      .data = 1 },
+        { .mode = "pselect-note",    .data = 1 },
+        { .mode = "ppoll-ready",     .data = 1 },
+        { .mode = "pselect-ready",   .data = 1 },
+        { .mode = "ppoll-timeout",   .data = 1 },
+        { .mode = "pselect-timeout", .data = 1 },
+        { .mode = "ppoll-asleep",    .sig = SIGUSR1 },
+        { .mode = "pselect-asleep",  .sig = SIGUSR1 },
+        { .mode = "ppoll-dies",      .sig = SIGTERM, .dies = SIGTERM },
+        { .mode = "pselect-dies",    .sig = SIGTERM, .dies = SIGTERM },
+        { .mode = "ppoll-slow",      .data = 1 },
+        { .mode = "ppoll-nofds",     .data = 1 },
+        { .mode = "pselect-nofds",   .data = 1 },
+        { .mode = "ppoll-tail",      .data = 1 },
+        { .mode = "pselect-tail",    .data = 1 },
+        { .mode = "ppoll-quiet",     .data = 1 },
+        { .mode = "pselect-quiet",   .data = 1 },
+        { .mode = "sigpending",      .data = 1 },
+        { .mode = "select-eintr",    .sig = SIGUSR1 },
+        { .mode = "select-badfd",    .data = 1 },
+    };
+    // One line for the lot: joey's reap-first capture holds a pipe's ring, and a wide
+    // failure has to fit in it to say why.
+    int bad = 0;
+    for (size_t i = 0; i < sizeof legs / sizeof legs[0]; i++) {
+        if (run_blocked_leg(&legs[i], 0) != 0) bad = 1;
+        fflush(stdout);
+    }
+    if (bad) return -1;
+    printf("pouch-hello-signals: note-wait ok: %zu legs\n", sizeof legs / sizeof legs[0]);
+    return 0;
+}
+
+// The kernel sleeps a poll over no fds. These answered ENOSYS, and pause() sits on
+// the same sleep.
+static int test_empty_poll(void) {
+    const long long want = 30;
+    long long t0 = leg_now_ms();
+    int r1 = poll(NULL, 0, 40);
+    long long t1 = leg_now_ms();
+    struct pollfd neg = { -1, POLLIN, 0 };
+    int r2 = poll(&neg, 1, 40);
+    long long t2 = leg_now_ms();
+    struct timeval tv = { 0, 40000 };
+    int r3 = select(0, NULL, NULL, NULL, &tv);
+    long long t3 = leg_now_ms();
+    if (r1 != 0 || r2 != 0 || r3 != 0 ||
+        t1 - t0 < want || t2 - t1 < want || t3 - t2 < want) {
+        printf("pouch-hello-signals: empty poll: rc %d %d %d after %lld %lld %lld ms errno=%d\n",
+               r1, r2, r3, t1 - t0, t2 - t1, t3 - t2, errno);
+        return -1;
+    }
+    printf("pouch-hello-signals: a poll or select over no fds sleeps for its timeout\n");
+    return 0;
+}
+
 // Task #96 sentinel buffers. 16-byte aligned for STP/LDP-Q.
 static unsigned char g_fp_sent[512] __attribute__((aligned(16)));
 static unsigned char g_fp_seen[512] __attribute__((aligned(16)));
@@ -442,6 +1590,7 @@ int main(int argc, char **argv) {
     if (argc >= 3 && !strcmp(argv[1], "die")) return die(argv[2]);
     if (argc >= 3 && !strcmp(argv[1], "kill-parent")) return kill_parent(argv[2]);
     if (argc >= 3 && !strcmp(argv[1], "probe-parent")) return probe_parent(argv[2]);
+    if (argc >= 3 && !strcmp(argv[1], "leg")) return leg_child(argv[2]);
 
     printf("pouch-hello-signals: install handler\n");
     fflush(stdout);
@@ -583,9 +1732,9 @@ int main(int argc, char **argv) {
         fflush(stdout);
         return 6;
     }
-    // The bootstrap dispatcher sees SIG_IGN and calls SYS_NOTED(NCONT)
-    // without invoking the user handler; g_handler_count must stay at 2
-    // (one from the raise above, one from the #96 FP leg's self-post).
+    // The kernel's row ignores it, so the handler does not run;
+    // g_handler_count must stay at 2 (one from the raise above, one from the
+    // #96 FP leg's self-post).
     if (g_handler_count != 2) {
         printf("pouch-hello-signals: SIG_IGN failed to suppress (count=%d, expected 2)\n",
                (int)g_handler_count);
@@ -633,11 +1782,18 @@ int main(int argc, char **argv) {
     int errnos = test_errnos();
     int probe = test_probe();
     fflush(stdout);
+    int blocked = test_blocked();
+    int note_wait = test_note_wait();
+    int empty = test_empty_poll();
+    fflush(stdout);
+    if (blocked != 0) return 19;
+    if (note_wait != 0) return 21;
+    if (empty != 0) return 20;
     if (deaths != 0) return 15;
     if (term_death != 0) return 14;
     if (usr_death != 0) return 18;
     if (errnos != 0) return 16;
-    if (probe != 0) return 17;
+    if (probe != 0) return 22;
 
     printf("%s\n", POUCH_CENSUS_SIGNALS);
     fflush(stdout);

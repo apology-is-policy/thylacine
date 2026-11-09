@@ -1,36 +1,32 @@
 ---
 id: lock-torpor
 type: lock
-title: "torpor_lock — the global futex-bucket lock"
+title: "A torpor bucket's lock"
 kind: spin (non-irqsave)
-guards: "all 64 hash buckets, every waiter's bucket link, and every waiter's awoken flag"
+guards: "one bucket's chain, its waiters' links, and every waker's write of their awoken"
 orders-before: [lock-rendez]
 created: 2026-08-01
-updated: 2026-08-01
+updated: 2026-11-03
 ---
 ## Discipline
 
-ONE global lock for the whole wait-on-address surface — the
-serialization the [[inv-i9]] prose proof is stated over: the
-sleeper's compare + register run under it; every wake walk (per-VA,
-death, stop) takes the same lock. The sleeper RELEASES it before
-`tsleep`, so only the wake side ever nests it over
-[[lock-rendez]] (inside `wakeup`).
+One per bucket, and they never nest: the serialization the [[inv-i9]] proof is stated over is
+a word's own bucket. The sleeper's compare + register run under it; every wake walk (per-VA,
+death, stop) takes it. The sleeper RELEASES it before `tsleep`, so only the wake side ever nests
+it over [[lock-rendez]].
 
 The #343 lock-free mismatch return and the R-5 pre-fault both exist
 to keep traffic OFF this lock: the mismatch path never takes it, and
 the pre-fault guarantees the under-lock user-VA load cannot
-fault-and-SLEEP (a blocking 9P page-in under a global spinlock was a
-system-wide futex stall). The surviving fault edge —
-`torpor_lock → vma_lock → buddy` — exists only in the
+fault-and-SLEEP. The surviving fault edge, bucket lock → `vma_lock` → buddy, exists only in the
 decommit-race window and is non-blocking (the lazy-anon arm).
 
 ## Held across
 
-- The bucket walk INCLUDING each `wakeup()` — which can spin on the
-  woken thread's `on_cpu` while a peer CPU switches it out. The
-  documented serialization hazard ([[fnd-torpor8-r1-f2]],
-  [[seam-torpor-lock-wake-spin]]); all three walks share it.
+- WAKE's walk, and each mark's hold of [[lock-rendez]]. NOT `wakeup()`: that comes after the
+  unlock, under `wake_held` ([[spec-torpor]]).
+- The death and stop walks' `wakeup()`, one bucket at a time. This is what keeps a linked
+  waiter's record alive for them, and both walks are rare.
 - The under-lock `uaccess_load_u32` (post-pre-fault: resident or a
   clean -EFAULT or the non-blocking lazy re-fault).
 

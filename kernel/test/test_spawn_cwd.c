@@ -170,7 +170,7 @@ void test_spawn_cwd_image_joins_child_cwd(void) {
 
     TEST_ASSERT(at_root == NULL, "premise: no /hello at the root");
     TEST_ASSERT(gs > 0 && sb == 0 && sr == 0, "premise: the spawner stood in /bin, then in /");
-    TEST_EXPECT_EQ(p_root, -1,
+    TEST_EXPECT_EQ(p_root, -(int)T_E_NOENT,
         "a relative image is joined to the child's cwd: \"hello\" under \"/\" is not found");
     (void)r_root;
     TEST_ASSERT(p_bin > 0, "the same name under the child cwd \"/bin\" spawns /bin/hello");

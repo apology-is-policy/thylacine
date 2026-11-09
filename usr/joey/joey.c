@@ -706,14 +706,13 @@ static int pouch_smoke_core(const char *name, size_t name_len,
         (void)t_close(rd);
         return -1;
     }
-    // 2048 B headroom -- pouch-hello-sockets prints 1331 B of test progress
-    // (measured 2026-09-23, after the xproc-gate leg; was ~850 B before it)
-    // lines and the marker "<bin>: exit 0" must land inside the window. Earlier
-    // 512 B sized for the leaner pre-sub-chunk-12 pouch binaries; bumped so the
-    // marker is never truncated out (the failure mode looks like "expected
-    // marker absent" even when the child exited cleanly).
+    // The size of the pipe's ring, which is what a reap-first child's output is
+    // bounded by: pouch-hello-signals prints 2385 B (measured 2026-11-05, after its
+    // note-wait legs) and the marker "<bin>: exit 0" comes last, so it must land inside
+    // the window. A shorter one reads "expected marker absent" for a child that
+    // exited cleanly.
     int status = -1;
-    unsigned char acc[2048];
+    unsigned char acc[4096];
     size_t acc_len = 0;
     if (drain_first) {
         // Third-party / unbounded-output child (the run_viv_bundle order): drain
@@ -1129,10 +1128,9 @@ static int do_pouch_hello_smoke(void) {
     // Exercises every site of the 0007-pouch-signals boundary-line patch:
     //   - sigaction(SIGINT, &h)       sigaction.c -> __pouch_sigtab + mask adjust
     //   - raise(SIGINT)               raise.c -> SYS_postnote(pid=0=self,"interrupt",9)
-    //   - bootstrap __pouch_note_handler dispatches via __pouch_note_name_eq
+    //   - __pouch_note_handler dispatches via __pouch_note_name_eq
     //   - SYS_NOTED(NCONT) restores the saved user context, raise() returns 0
-    //   - sigaction(SIGINT, SIG_IGN)  bootstrap fast-paths to NCONT without
-    //                                  invoking the user handler
+    //   - sigaction(SIGINT, SIG_IGN)  the kernel's row drops the note at the post
     //   - sigaction(SIGALRM, ...)     -> EINVAL (unsupported signum)
     //   - deaths: children that abort(), fail an assert(), brk #1 and NULL-
     //     store read WIFSIGNALED SIGABRT/SIGABRT/SIGTRAP/SIGSEGV (gcpark-b);
@@ -5050,7 +5048,7 @@ static int probe_spawn_cwd(void) {
     int stayed = al == 1 && after[0] == '/';
     (void)t_chdir(saved, (unsigned long)sl);
 
-    if (!a_ok || !p_ok || unreaped || hz >= 0 || pb <= 0 || pc != -1 || r_nf != -2 || r_nd != -20 || r_em != -22 ||
+    if (!a_ok || !p_ok || unreaped || hz >= 0 || pb <= 0 || pc != -2 || r_nf != -2 || r_nd != -20 || r_em != -22 ||
         r_fl != -1 || r_bit != -1 || !stayed) {
         t_putstr("joey: spawn-cwd probe FAILED abs=");
         t_putstr(itoa_dec(pa, nb, sizeof(nb)));
@@ -5067,7 +5065,7 @@ static int probe_spawn_cwd(void) {
         t_putstr(hz >= 0 ? "yes" : "no");
         t_putstr(" rel-no-tail=");
         t_putstr(itoa_dec(pc, nb, sizeof(nb)));
-        t_putstr(" (want -1) nope=");
+        t_putstr(" (want -2) nope=");
         t_putstr(itoa_dec(r_nf, nb, sizeof(nb)));
         t_putstr(" (want -2) file=");
         t_putstr(itoa_dec(r_nd, nb, sizeof(nb)));

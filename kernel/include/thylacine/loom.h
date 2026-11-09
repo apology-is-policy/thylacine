@@ -543,7 +543,7 @@ struct Loom {
     // the producer). The list owns its own lock -- the register-then-observe
     // discipline is poll.tla's (object lock = l->lock for the readiness sample;
     // the list lock serializes the hook walk). Lock order: l->lock -> cq_waiters
-    // list -> g_timerwait -> rendez -> cpu_sched (the poll.h global order, with
+    // list -> rendez -> cpu_sched (the poll.h global order, with
     // l->lock as the "object"). specs/loom.tla: CqWaitRegister / PostCqe-wake /
     // CqWaitCommitOrSleep; invariants CqFlagTracksCq + NoMissedCqWake (I-9 on the
     // CQ wait-list) + NoStrandedWaiter + CqWaitFlagSound.

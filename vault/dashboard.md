@@ -41,7 +41,7 @@ Generated — do not edit between the markers (`quaestor render`).
 | [[arc-vivarium]] | active | 2 |
 | [[arc-weft]] | active | 4 |
 
-## Open seams: 79
+## Open seams: 77
 
 - [[seam-220-netd-listener-poll]] (sub-netd-server)
 - [[seam-240-lo-redial]] (sub-netd-server)
@@ -76,6 +76,7 @@ Generated — do not edit between the markers (`quaestor render`).
 - [[seam-hwcap-boot-cpu-only]] (sub-kernel-boot-sequence, sub-kernel-alternatives)
 - [[seam-kaslr-link-va-unchecked]] (sub-kernel-kaslr, sub-kernel-boot-entry)
 - [[seam-kobj-handle-release]] (sub-stratum-bdev)
+- [[seam-kstack-va-predictable]] (sub-kernel-thread)
 - [[seam-larder-cacheable-proxy]] (sub-kernel-larder, sub-kernel-ninep-dev9p)
 - [[seam-larder-lazy-array-robustness]] (sub-kernel-larder)
 - [[seam-larder-loom-bypass]] (sub-kernel-larder)
@@ -87,6 +88,7 @@ Generated — do not edit between the markers (`quaestor render`).
 - [[seam-loom-sqpoll-p3s]] (sub-kernel-loom, sub-kernel-poll)
 - [[seam-mm-directmap-cap-absolute]] (sub-kernel-mm-phys)
 - [[seam-mount-graph-unmodeled]] (sub-kernel-territory)
+- [[seam-native-exec-drops-sig-ign]] (sub-kernel-notes, sub-pouch-signal)
 - [[seam-netd-host-tests]] (sub-netd-server, sub-netd-nic)
 - [[seam-nuname-trust-stamp]] (sub-kernel-syscall-dispatch, sub-kernel-ninep-attach)
 - [[seam-poll-heap-waiters]] (sub-kernel-poll)
@@ -99,16 +101,15 @@ Generated — do not edit between the markers (`quaestor render`).
 - [[seam-pouch-select-fd-bound]] (sub-pouch-net)
 - [[seam-pouch-sendmsg]] (sub-pouch-net)
 - [[seam-pouch-sigmask-per-thread]] (sub-pouch-signal)
-- [[seam-pouch-sigtstp-ignore]] (sub-pouch-signal, sub-pouch-tty)
 - [[seam-pouch-sock-single-user]] (sub-pouch-net)
 - [[seam-proc-find-no-refcount]] (sub-kernel-proc)
 - [[seam-proc-name-torn-read]] (sub-kernel-devproc, sub-kernel-devctl, sub-kernel-proc)
 - [[seam-proxy-coord-eof]] (sub-stratum-session)
-- [[seam-queue-note-fatal-after-post-wakes-nobody]] (sub-kernel-notes)
 - [[seam-rfnameg-shared-territory]] (sub-kernel-territory)
 - [[seam-rfork-flags-unimplemented]] (sub-kernel-proc)
 - [[seam-runq-rbtree]] (sub-kernel-sched)
 - [[seam-sak-revoke-note]] (sub-kernel-proc)
+- [[seam-self-managing-handler-no-restart]] (sub-kernel-notes)
 - [[seam-slub-debug-mode]] (sub-kernel-mm-slub)
 - [[seam-sparse-mpidr]] (sub-kernel-sched-smp)
 - [[seam-srv-9p-connect-unit]] (sub-kernel-devsrv)
@@ -116,21 +117,18 @@ Generated — do not edit between the markers (`quaestor render`).
 - [[seam-stratum-notify-peercred]] (sub-stratum-session, sub-stratum-server)
 - [[seam-tapestry-battery-unowned]] (sub-tapestryd)
 - [[seam-tickless-bare-metal]] (sub-kernel-sched-smp)
-- [[seam-timerwait-sharding]] (sub-kernel-rendez)
 - [[seam-torpor-cross-proc]] (sub-kernel-torpor)
-- [[seam-torpor-lock-wake-spin]] (sub-kernel-torpor)
-- [[seam-torpor-reclaim-uaccess]] (sub-kernel-torpor)
 - [[seam-viv-tier2-frame]] (sub-kernel-syscall-abi, sub-kernel-vivarium)
 - [[seam-warp-prove-unowned]] (sub-tapestryd)
 
 ## Recent changes
 
+- 2026-11-06 [[chg-2026-11-06-aux-join2]] — The aux join: aux-3 (the thread-model arc through ENOEXEC) reaches main through corona's branch
 - 2026-11-05 [[chg-2026-11-05-as4-r6-join]] — AS-4 audit round 6, the join's half
 - 2026-11-05 [[chg-2026-11-05-as4-r6-shell]] — AS-4 audit round 6, the shell's half
 - 2026-11-05 [[chg-2026-11-05-as4-r7-join]] — AS-4 audit round 7, the join's half
 - 2026-11-05 [[chg-2026-11-05-as4-r7-shell-corrected]] — AS-4 round 7's shell chg, corrected
 - 2026-11-05 [[chg-2026-11-05-as4-r7-shell]] — AS-4 audit round 7, the shell's half
-- 2026-11-05 [[chg-2026-11-05-ut-tree-walks]] — A parsed tree is shared, not copied, and its operators drop without recursing
-- 2026-11-04 [[chg-2026-11-04-as4-r4]] — AS-4 audit round 4: the paste flow's waits arm, and Alt reaches a tile
-- 2026-11-04 [[chg-2026-11-04-as4-r5]] — AS-4 audit round 5, the join's half: Alt only on a printable rune
+- 2026-11-05 [[chg-2026-11-05-c10-owed-readings]] — C10's owed readings: a witness for the vector's tag-bit test, and two sabotages read alone
+- 2026-11-05 [[chg-2026-11-05-c9-r2]] — The switch decides from TTBR0: round 2's fixes, in the tests' fixtures
 <!-- generated:end -->

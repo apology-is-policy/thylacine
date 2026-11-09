@@ -141,7 +141,7 @@ stalled). And `verify-kaslr.sh` is the ROADMAP §4.2 exit-criterion gate for
 take an invariant's only runtime witness with it.
 
 **The `EXTINCTION:` prefix is ABI; the message body after it is not — except
-that one gate depends on thirteen of them.** `tools/test-fault.sh` runs eighteen
+that one gate depends on thirteen of them.** `tools/test-fault.sh` runs twenty-three
 variants (`ALL_VARIANTS`), and its `expected_for` case matches thirteen bodies:
 `EXTINCTION: stack canary mismatch`, `... PTE violates W^X`, and since
 2026-10-27 `... PTE violates W^X at install (kernel page)`, `... (kernel L2
@@ -149,7 +149,7 @@ block)`, `... (kernel L1 block)` and `... (user page)` (the
 four `wxe_install_*` variants, printed by `arch/arm64/mmu.c`'s leaf encoders;
 operator vote 22; `extinction_mmu_off`, since 2026-10-27, expects the `(kernel
 page)` body too, printed before the MMU is on), `... BTI fault`,
-`... kernel stack overflow` (three provokers), `... recursive kernel fault`,
+`... kernel stack overflow` (eight provokers; where the path is the claim, `require_for` also names `(thread stack, caught at the vector)`, `(overflow-stack guard)` or `(current-thread kstack guard)`, so those three parentheticals are tool-matched too), `... recursive kernel fault`,
 `... el1-sync recursion` (printed by `arch/arm64/exception.c`'s recursion
 guard, not by `extinction()`), and, since 2026-10-14, `EXTINCTION: peer chatter:
 this banner must reach the wire whole` (`extinction_peer_chatter`, which
@@ -497,7 +497,7 @@ That is the implementation track's call.
   that this note called it informational for two weeks. `verify-kaslr.sh` is
   I-16's runtime witness.
 - A reworded extinction **message** is an ABI break for `test-fault.sh`'s
-  eighteen matched variants (thirteen bodies), which is not what "the prefix is the
+  twenty-three matched variants (thirteen bodies), which is not what "the prefix is the
   ABI" leads a reader to expect.
 - **Settled 2026-09-25** (the item the 2026-09 recount left open): the
   `el1_sync_runaway` body is already in the pinned set. `test-fault.sh` lists

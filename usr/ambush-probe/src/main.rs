@@ -448,9 +448,10 @@ fn launch_e2e() -> bool {
 // #95 focus-thread paths as stage C, driven through the standard DAP request set
 // a real editor (VS Code / Nora-8e) speaks. Unlike the REPL stages, dap-selftest
 // exits 0 on PASS / non-zero on any failed step, so this gates on BOTH the PASS
-// marker AND the exit code. Its second program, /bin/ambush-notelf (executable,
-// not an ELF image), is launched first: the spawn makes a child that dies in its
-// exec, and the failed launch must reap it, because a held spawn hands that child
+// marker AND the exit code. Its second program, /bin/ambush-nointerp (executable, a
+// header the spawn's look passes, naming an interpreter that does not exist), is
+// launched first: the spawn makes a child that dies in its load, and the failed
+// launch must reap it, because a held spawn hands that child
 // back already dead and the kernel refuses to kill a dead Proc -- a reap that
 // waited for a landed kill would leave one zombie per attempt in a long-lived
 // `ambush dap`. Then /bin/ambush-child is launched, killed from outside while the
@@ -463,7 +464,7 @@ fn dap_e2e() -> bool {
         return true;
     }
     let mut amb = match Command::new("/bin/ambush")
-        .args(["dap-selftest", "/bin/ambush-child", "/bin/ambush-notelf"])
+        .args(["dap-selftest", "/bin/ambush-child", "/bin/ambush-nointerp"])
         .stdin(Stdio::Piped)
         .stdout(Stdio::Piped)
         .stderr(Stdio::Piped)

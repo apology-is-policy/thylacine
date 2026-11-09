@@ -1,0 +1,936 @@
+pouch boundary-line patch 0072 - the kernel owns the mask; sigsuspend, sigtimedwait, sa_mask.
+
+Operator vote 24 (2026-11-03); ARCHITECTURE 8.8.3 and POUCH-DESIGN 6.4.
+
+One mechanism restores a mask at a handler's return, in the kernel, for both phenotypes.
+Once the kernel moves the mask at a handler's entry, at SYS_NOTED and across a
+sigsuspend, a copy of it here is wrong in a handler and after one. So the copy goes.
+
+  src/internal/_pouch_signal.h, src/signal/_pouch_signal.c, src/signal/block.c,
+  src/thread/pthread_sigmask.c  __pouch_note_mask_shadow goes. SYS_NOTE_MASK swaps and hands
+      back the old mask, so SIG_SETMASK is one call, and a read-modify-write is
+      __pouch_note_mask_hold (block every note, return the old mask) and then the mask it
+      wants. pthread_sigmask reads the caller's set before any swap, so a bad pointer faults
+      with the mask as it was.
+  src/signal/sigaction.c        The row carries SA_RESETHAND, SA_NODEFER and sa_mask in the
+      flags word (bits 16..31).
+  SIGPIPE (operator vote 25)    Its default is a row that ignores and no longer a mask bit.
+      The restore at a handler's return undid a bit set in a handler, so signal(SIGPIPE,
+      SIG_DFL) there left a default row and a clear bit, and the next write to a closed pipe
+      terminated. A row also holds for every thread, which a bit never did. The constructor
+      writes it, __pouch_pipe_mask goes, and the dispatcher writes it back after a one-shot,
+      since the kernel resets to its own default.
+  src/signal/_pouch_signal.c    The dispatcher takes x2, the row's flags, and under
+      RESETHAND resets the table with a compare from the handler it read, so a peer's
+      sigaction that has landed since stands. The name-to-signal table is
+      __pouch_note_to_sig, shared with sigtimedwait. __pouch_sigset_to_take gives each tty
+      signal its own row. An SA_SIGINFO handler gets a real siginfo_t, si_signo and SI_KERNEL
+      with a zero union, where it used to find the dispatcher's x1 and x2. Its ucontext_t *
+      is NULL.
+  src/signal/sigsuspend.c       SYS_NOTE_WAIT's suspend: the mask and the sleep are one step.
+  src/signal/sigtimedwait.c     SYS_NOTE_WAIT's take. Upstream's EINTR loop stays, because
+      sigwait may not read EINTR, but a retry waits only for what is left of the timeout: a
+      steady note would otherwise keep the timeout from passing. sigwait, sigwaitinfo and
+      sigpause sit on these unchanged.
+  src/select/poll.c             Operator vote 28. poll's body moves to the hidden __pouch_poll,
+      which takes a mask, and __pouch_poll_wait is the one call: SYS_poll with no mask,
+      SYS_NOTE_WAIT's poll form with one, so that the swap and the wait are one step.
+  src/select/ppoll.c            The mask goes through, where it was ignored.
+  src/select/select.c           The same split, as __pouch_select. A failed call went through
+      __syscall_ret twice, and the second one read syscall_cp's -1 as the native error and
+      turned it into EIO, so every failed select read EIO and an interrupted one never read
+      EINTR. A closed fd in a set is EBADF for the whole call, with the sets as they were: it
+      was a POLLNVAL no set counted, so select answered 0 at once, as a timeout does.
+  src/select/pselect.c          The mask goes through, where it was ignored.
+  src/signal/sigpending.c       SYS_NOTE_WAIT's pending form, and __pouch_take_to_sigset, so a
+      tty signal shows as itself. It called the SYS_rt_sigpending sentinel, which read ENOSYS.
+  src/signal/sigsetjmp_tail.c   Through pthread_sigmask. It called the SYS_rt_sigprocmask
+      sentinel, so sigsetjmp saved nothing and siglongjmp restored nothing.
+  arch/aarch64/bits/syscall.h.in  __NR_note_wait 141. After a musl re-vendor, extend 0001's
+      awk filter: m["note_wait"]="141";
+
+Witnesses: pouch-hello-signals `suspend-*`, `sigpause`, `sa-mask`, `nodefer`, `one-shot`,
+`one-shot-row`, `handler-mask`, `setjmp-mask`, `pipe-*`, `siginfo`, `take-*`, `ppoll-*`,
+`pselect-*`, `sigpending`, `select-eintr`, `select-badfd`.
+
+--- a/arch/aarch64/bits/syscall.h.in
++++ b/arch/aarch64/bits/syscall.h.in
+@@ -496,3 +496,10 @@
+  *   m["note_dispose"]="139";
+  */
+ #define __NR_note_dispose 139
++
++/* Operator vote 24: sigsuspend and sigtimedwait. Number per
++ * kernel/include/thylacine/syscall.h. After a musl re-vendor, extend 0001's awk
++ * filter:
++ *   m["note_wait"]="141";
++ */
++#define __NR_note_wait 141
+--- a/src/internal/_pouch_signal.h
++++ b/src/internal/_pouch_signal.h
+@@ -29,10 +29,12 @@
+  * arms for these are a peer's reset that crosses a delivery: the kernel read
+  * the row as caught, and the table reads default by the time we look.
+  *
+- * Per-thread shadow + per-Proc sigtab: the kernel's note_mask is per-
+- * Thread (POSIX pthread_sigmask semantics); pouch keeps a __thread shadow
+- * to support SIG_BLOCK / SIG_UNBLOCK read-modify-write. The sigaction
+- * table is per-Proc (POSIX sigaction semantics); pouch keeps it in a
++ * The mask is the kernel's alone: note_mask is per-Thread (POSIX
++ * pthread_sigmask semantics), and the kernel moves it at a handler's entry, at
++ * its return and across a sigsuspend, so a copy here would be wrong in a handler
++ * and after one. SYS_NOTE_MASK swaps and hands back the old mask, so a
++ * read-modify-write is two swaps with every note blocked between them. The
++ * sigaction table is per-Proc (POSIX sigaction semantics); pouch keeps it in a
+  * static array indexed by signum.
+  *
+  * The dispatcher: a sigaction that installs a real handler registers
+@@ -44,8 +46,8 @@
+  * handler has no handler at all and the kernel gives it every note's
+  * default, a dead child's included, so its note takes no room. The kernel
+  * calls the dispatcher Plan-9-style with x0 = pointer to 16-byte note name
+- * on the user stack + x1 = note arg. We dispatch by name to the
+- * user-registered sigaction handler and end with SYS_NOTED(NCONT) — the
++ * on the user stack + x1 = note arg + x2 = the row's flags. We dispatch by name
++ * to the user-registered sigaction handler and end with SYS_NOTED(NCONT) — the
+  * synchronous-handler ABI is hidden from POSIX source. POSIX programs see
+  * standard sigaction + raise + kill.
+  *
+@@ -53,22 +55,27 @@
+  * delivery it re-issues a call on the signal(7) list instead of returning
+  * EINTR. Nothing in pouch or musl re-issues a call.
+  *
+- * SIGPIPE default-mask at startup (POUCH-DESIGN section 6.4 [RESOLVED
+- * 6.4]): the constructor sets the main thread's note_mask to
+- * NOTE_BIT_PIPE so a write-to-closed-pipe returns EPIPE without
+- * delivering a SIGPIPE — modern-daemon-friendly default. A subsequent
+- * sigaction(SIGPIPE, &sa) with a non-default handler clears the mask
+- * bit (so the note is delivered + the handler fires).
++ * sa_mask, SA_NODEFER and SA_RESETHAND are the row's too. The kernel enters a
++ * handler under sa_mask plus the signal's family, and SYS_NOTED puts the thread's
++ * mask back, so what a handler does to the mask lasts until its return. Every note
++ * waits for that return whatever the mask says (no nesting, VIVARIUM 6.22), so
++ * sa_mask and SA_NODEFER change what a handler reads and passes on, not what can
++ * interrupt it. Under SA_RESETHAND the kernel resets its row as it takes the note,
++ * and the dispatcher resets the table from the flags it is handed.
+  *
++ * SIGPIPE's default is a row that ignores (POUCH-DESIGN section 6.4, operator
++ * vote 25): a write to a closed pipe returns EPIPE and posts nothing — the
++ * modern-daemon-friendly default. SIG_DFL and SIG_IGN write the same row, and a
++ * real handler writes a caught one. It is a row and not a mask bit because a row
++ * holds for every thread of the Proc and outlasts any handler's mask.
++ *
+  * v1.0 limitations documented in docs/reference/83-pouch-signals.md
+  * (created at sub-chunk 13b):
+- *   - sigsetjmp/siglongjmp do NOT preserve signal masks (the
+- *     sigsetjmp_tail.c path still hits the SYS_rt_sigprocmask = 0xFFFF
+- *     sentinel → -ENOSYS). v1.x extension.
+  *   - sigaltstack returns ENOSYS (alt-stack not supported at v1.0).
+- *   - sigpending / sigtimedwait / sigqueue / sigsuspend return ENOSYS.
+- *   - SIGRT* (real-time signals) and per-signal-info (siginfo_t) not
+- *     supported. sigqueue() returns ENOSYS.
++ *   - sigpending / sigqueue return ENOSYS.
++ *   - SIGRT* (real-time signals) not supported. A handler's siginfo_t, like
++ *     sigtimedwait's, names the signal with si_code SI_KERNEL and a zero union,
++ *     and an SA_SIGINFO handler's ucontext_t * is NULL.
+  *   - SIGABRT not in the supported set (sigaction(SIGABRT) returns
+  *     EINVAL). abort() does not raise it: 0011-pouch-abort.patch makes
+  *     abort() one `brk #0xab06`, which the kernel ends as the fault note
+@@ -87,6 +94,8 @@
+ #include <signal.h>
+ #include <stdint.h>
+ #include <features.h>
++#include <poll.h>
++#include <sys/select.h>
+ 
+ /* Mirror NOTE_BIT_* from kernel/include/thylacine/notes.h. The kernel
+  * header isn't pulled into the pouch build (pouch is built against its
+@@ -121,22 +130,43 @@
+ #define POUCH_NOTE_DISP_IGNORE   1u
+ #define POUCH_NOTE_DISP_CAUGHT   2u
+ #define POUCH_NOTE_DISP_RESTART  1u
++#define POUCH_NOTE_DISP_RESETHAND 2u
++#define POUCH_NOTE_DISP_NODEFER  4u
++#define POUCH_NOTE_DISP_MASK(m)  ((unsigned long)(m) << 16)
+ 
++/* SYS_NOTE_WAIT's forms, and the take word's rows of the tty family, whose five
++ * notes share one mask bit (kernel syscall.h). */
++#define POUCH_NOTE_WAIT_SUSPEND  0u
++#define POUCH_NOTE_WAIT_TAKE     1u
++#define POUCH_NOTE_WAIT_POLL     2u
++#define POUCH_NOTE_WAIT_PENDING  3u
++#define POUCH_NOTE_TAKE_TTY_WINCH (1ull << 16)
++#define POUCH_NOTE_TAKE_TTY_SUSP  (1ull << 17)
++#define POUCH_NOTE_TAKE_TTY_CONT  (1ull << 18)
++#define POUCH_NOTE_TAKE_TTY_QUIT  (1ull << 19)
++#define POUCH_NOTE_TAKE_TTY_HUP   (1ull << 20)
++
+ /* Kernel pushes exactly NOTE_NAME_MAX (= 16) bytes of the note name onto
+  * the user stack. POSIX programs never reach into this directly; the
+  * bootstrap handler does the bounded compare via __pouch_note_name_eq. */
+ #define POUCH_NOTE_NAME_MAX  16
+ 
++/* struct note_record (kernel notes.h, ABI-pinned at 32 bytes). */
++struct __pouch_note_record {
++    char name[POUCH_NOTE_NAME_MAX];
++    uint32_t arg;
++    uint32_t sender_pid;
++    uint64_t timestamp_ns;
++};
++
+ /* The per-Proc sigaction table. v1.0 supported set: SIGINT, SIGTERM,
+  * SIGPIPE, SIGCHLD. Other slots are unused (sigaction returns EINVAL).
+  * Indexed by signum (1..NSIG-1). Slot 0 unused. */
+ extern hidden struct sigaction __pouch_sigtab[_NSIG];
+ 
+-/* Per-thread shadow of the kernel note mask. Pouch is the sole writer.
+- * TLS so each thread has its own copy (matches the kernel's per-Thread
+- * note_mask). Initialized to 0; the constructor sets the main thread's
+- * to POUCH_NOTE_BIT_PIPE. */
+-extern hidden __thread uint64_t __pouch_note_mask_shadow;
++/* Block every supported note and return the mask that was set. The caller's next
++ * SYS_note_mask names the mask it wants. */
++hidden uint64_t __pouch_note_mask_hold(void);
+ 
+ /* Translate POSIX signum -> note name string. Writes the static-storage
+  * canonical name to *out on success. Returns 0 on the supported set
+@@ -145,6 +175,12 @@
+  * family), -1 on unsupported. */
+ hidden int __pouch_sig_to_note(int sig, const char **out);
+ 
++/* The other way: the signal a note's name means, or -1. */
++hidden int __pouch_note_to_sig(const char *name);
++
++/* A handler's and sigtimedwait's siginfo: the signal, SI_KERNEL, a zero union. */
++hidden void __pouch_siginfo_fill(siginfo_t *si, int sig);
++
+ /* The snare a fault signal names, for a process ending itself with it:
+  * SIGSEGV -> "snare:segv", SIGBUS -> "snare:bus", SIGILL -> "snare:ill",
+  * SIGFPE -> "snare:fpe"; NULL for every other signal. Posted to the caller
+@@ -156,8 +192,9 @@
+  * that installs a real handler; the kernel calls this at EL0-return tail
+  * when a caught note is dispatched.
+  * Plan-9-style ABI: x0 = pointer to 16-byte note name on user stack;
+- * x1 = note arg. NEVER returns normally — ends with SYS_NOTED. */
+-hidden void __pouch_note_handler(const char *name, unsigned int arg);
++ * x1 = note arg; x2 = the row's NOTE_DISP_* flags. NEVER returns normally —
++ * ends with SYS_NOTED. */
++hidden void __pouch_note_handler(const char *name, unsigned int arg, unsigned long flags);
+ 
+ /* Bounded name compare: the kernel pushes exactly POUCH_NOTE_NAME_MAX
+  * (= 16) bytes onto the user stack, NUL-padded. Returns 1 if `name`'s
+@@ -171,8 +208,25 @@
+  * undefined-behaviour or silently ignored). */
+ hidden uint64_t __pouch_sigset_to_note(const sigset_t *s);
+ 
++/* A POSIX sigset_t as a SYS_NOTE_WAIT take word: as above, except that each member
++ * of the tty family names its own row, so that waiting for a SIGWINCH does not eat
++ * a SIGHUP. */
++hidden uint64_t __pouch_sigset_to_take(const sigset_t *s);
++
++/* The other way, for sigpending: each tty row names its one signal. */
++hidden void __pouch_take_to_sigset(uint64_t t, sigset_t *out);
++
+ /* Reverse: NOTE_BIT_* mask -> POSIX sigset_t. The result is a synthetic
+  * sigset that callers see when reading the "old" mask. */
+ hidden void __pouch_note_to_sigset(uint64_t m, sigset_t *out);
+ 
++/* poll and select with a mask in for the one call, for ppoll and pselect. A NULL mask is
++ * plain poll and select. __pouch_poll_wait is the call itself, over pollfds that are
++ * already the kernel's. Each answers as syscall_cp does: -1 with errno set. */
++hidden int __pouch_poll_wait(struct pollfd *k, nfds_t n, int ms, const sigset_t *mask);
++hidden int __pouch_poll(struct pollfd *fds, nfds_t n, int ms, const sigset_t *mask);
++hidden int __pouch_select(int n, fd_set *restrict rfds, fd_set *restrict wfds,
++                          fd_set *restrict efds, struct timeval *restrict tv,
++                          const sigset_t *restrict mask);
++
+ #endif
+--- a/src/signal/_pouch_signal.c
++++ b/src/signal/_pouch_signal.c
+@@ -2,10 +2,9 @@
+  * sub-chunk 13b). See src/internal/_pouch_signal.h for the design
+  * preamble. This file holds:
+  *   - the per-Proc sigaction table (__pouch_sigtab)
+- *   - the per-thread note-mask shadow (__pouch_note_mask_shadow)
+  *   - the signum<->note name translation helpers
+  *   - the async dispatcher (__pouch_note_handler), which sigaction registers
+- *   - the constructor that sets the SIGPIPE default mask and child_exit's row
++ *   - the constructor that writes SIGPIPE's row and child_exit's
+  */
+ 
+ #include <signal.h>
+@@ -18,8 +17,14 @@
+ #include "_pouch_signal.h"
+ 
+ hidden struct sigaction __pouch_sigtab[_NSIG];
+-hidden __thread uint64_t __pouch_note_mask_shadow;
+ 
++hidden uint64_t __pouch_note_mask_hold(void)
++{
++    uint64_t old = 0;
++    __syscall(SYS_note_mask, (long)POUCH_NOTE_MASK_SUPPORTED, (long)&old);
++    return old;
++}
++
+ hidden int __pouch_note_name_eq(const char *name, const char *literal)
+ {
+     /* The kernel zero-pads the 16-byte name buffer (struct Note.name) on
+@@ -120,6 +125,27 @@
+     return m;
+ }
+ 
++hidden uint64_t __pouch_sigset_to_take(const sigset_t *s)
++{
++    uint64_t t = __pouch_sigset_to_note(s) & ~(uint64_t)POUCH_NOTE_BIT_TTY;
++    if (sigismember(s, SIGQUIT) == 1)  t |= POUCH_NOTE_TAKE_TTY_QUIT;
++    if (sigismember(s, SIGTSTP) == 1)  t |= POUCH_NOTE_TAKE_TTY_SUSP;
++    if (sigismember(s, SIGCONT) == 1)  t |= POUCH_NOTE_TAKE_TTY_CONT;
++    if (sigismember(s, SIGWINCH) == 1) t |= POUCH_NOTE_TAKE_TTY_WINCH;
++    if (sigismember(s, SIGHUP) == 1)   t |= POUCH_NOTE_TAKE_TTY_HUP;
++    return t;
++}
++
++hidden void __pouch_take_to_sigset(uint64_t t, sigset_t *out)
++{
++    __pouch_note_to_sigset(t & ~(uint64_t)POUCH_NOTE_BIT_TTY, out);
++    if (t & POUCH_NOTE_TAKE_TTY_QUIT)  sigaddset(out, SIGQUIT);
++    if (t & POUCH_NOTE_TAKE_TTY_SUSP)  sigaddset(out, SIGTSTP);
++    if (t & POUCH_NOTE_TAKE_TTY_CONT)  sigaddset(out, SIGCONT);
++    if (t & POUCH_NOTE_TAKE_TTY_WINCH) sigaddset(out, SIGWINCH);
++    if (t & POUCH_NOTE_TAKE_TTY_HUP)   sigaddset(out, SIGHUP);
++}
++
+ hidden void __pouch_note_to_sigset(uint64_t m, sigset_t *out)
+ {
+     sigemptyset(out);
+@@ -138,43 +164,41 @@
+     }
+ }
+ 
+-hidden void __pouch_note_handler(const char *name, unsigned int arg)
++hidden int __pouch_note_to_sig(const char *name)
+ {
++    if (__pouch_note_name_eq(name, "interrupt"))  return SIGINT;
++    if (__pouch_note_name_eq(name, "term"))       return SIGTERM;
++    if (__pouch_note_name_eq(name, "usr1"))       return SIGUSR1;
++    if (__pouch_note_name_eq(name, "usr2"))       return SIGUSR2;
++    if (__pouch_note_name_eq(name, "pipe"))       return SIGPIPE;
++    if (__pouch_note_name_eq(name, "child_exit")) return SIGCHLD;
++    if (__pouch_note_name_eq(name, "tty:quit"))   return SIGQUIT;
++    if (__pouch_note_name_eq(name, "tty:susp"))   return SIGTSTP;
++    if (__pouch_note_name_eq(name, "tty:cont"))   return SIGCONT;
++    if (__pouch_note_name_eq(name, "tty:winch"))  return SIGWINCH;
++    if (__pouch_note_name_eq(name, "tty:hup"))    return SIGHUP;
++    /* `kill` is non-catchable per N-4 (notes.h). The kernel calls
++     * exits("killed") directly; this branch is defense-in-depth in
++     * case a future extension routes "kill" through the handler. */
++    if (__pouch_note_name_eq(name, "kill"))       return SIGKILL;
++    return -1;
++}
++
++hidden void __pouch_siginfo_fill(siginfo_t *si, int sig)
++{
++    memset(si, 0, sizeof *si);
++    si->si_signo = sig;
++    si->si_code = SI_KERNEL;
++}
++
++hidden void __pouch_note_handler(const char *name, unsigned int arg, unsigned long flags)
++{
+     (void)arg;     /* v1.0 doesn't propagate the note arg through to the
+-                    * POSIX handler — siginfo_t carries it on Linux but
+-                    * pouch's POSIX surface is the legacy `void (int)`
+-                    * shape; the modern fd-shaped path (SYS_NOTE_OPEN) is
+-                    * the way to access full note records. */
++                    * POSIX handler; the modern fd-shaped path
++                    * (SYS_NOTE_OPEN) is the way to access full note
++                    * records. */
+ 
+-    int sig = -1;
+-    if (__pouch_note_name_eq(name, "interrupt")) {
+-        sig = SIGINT;
+-    } else if (__pouch_note_name_eq(name, "term")) {
+-        sig = SIGTERM;
+-    } else if (__pouch_note_name_eq(name, "usr1")) {
+-        sig = SIGUSR1;
+-    } else if (__pouch_note_name_eq(name, "usr2")) {
+-        sig = SIGUSR2;
+-    } else if (__pouch_note_name_eq(name, "pipe")) {
+-        sig = SIGPIPE;
+-    } else if (__pouch_note_name_eq(name, "child_exit")) {
+-        sig = SIGCHLD;
+-    } else if (__pouch_note_name_eq(name, "tty:quit")) {
+-        sig = SIGQUIT;
+-    } else if (__pouch_note_name_eq(name, "tty:susp")) {
+-        sig = SIGTSTP;
+-    } else if (__pouch_note_name_eq(name, "tty:cont")) {
+-        sig = SIGCONT;
+-    } else if (__pouch_note_name_eq(name, "tty:winch")) {
+-        sig = SIGWINCH;
+-    } else if (__pouch_note_name_eq(name, "tty:hup")) {
+-        sig = SIGHUP;
+-    } else if (__pouch_note_name_eq(name, "kill")) {
+-        /* `kill` is non-catchable per N-4 (notes.h). The kernel calls
+-         * exits("killed") directly; this branch is defense-in-depth in
+-         * case a future extension routes "kill" through the handler. */
+-        sig = SIGKILL;
+-    }
++    int sig = __pouch_note_to_sig(name);
+ 
+     if (sig < 0) {
+         /* Unknown note name (kernel only delivers supported names; this
+@@ -186,11 +210,22 @@
+ 
+     void (*h)(int) = __pouch_sigtab[sig].sa_handler;
+ 
++    /* The kernel reset its row as it took this note. A compare, because a peer's
++     * sigaction that has landed since is the disposition now. */
++    if (flags & POUCH_NOTE_DISP_RESETHAND) {
++        void *was = a_cas_p(&__pouch_sigtab[sig].sa_handler, (void *)h, (void *)SIG_DFL);
++        /* The kernel reset to its own default, which ends the Proc; SIGPIPE's here
++         * is the row that ignores. */
++        if (sig == SIGPIPE && was == (void *)h)
++            __syscall(SYS_note_dispose, "pipe", 4L, (long)POUCH_NOTE_DISP_IGNORE, 0L);
++    }
++
+     if (h == SIG_DFL || h == 0) {
+         /* Default action for the v1.0 supported set:
+-         *   SIGINT / SIGTERM / SIGUSR1 / SIGUSR2 / SIGPIPE: terminate (NDFLT →
++         *   SIGINT / SIGTERM / SIGUSR1 / SIGUSR2: terminate (NDFLT →
+          *       kernel exits)
+          *   SIGCHLD: ignore (NCONT — child_exit's default per POSIX)
++         *   SIGPIPE: ignore (NCONT — Pouch's own default, POUCH-DESIGN 6.4)
+          *   SIGKILL: terminate (NDFLT; though this branch is unreachable
+          *            because the kernel handles kill before delivery)
+          *
+@@ -217,7 +252,7 @@
+          *   SIGCHLD / SIGWINCH / SIGCONT: NCONT. The kernel agrees these
+          *       default to ignore, so NDFLT would be equivalent -- NCONT is
+          *       kept because a no-op should not need the kernel's table. */
+-        if (sig == SIGCHLD || sig == SIGWINCH || sig == SIGCONT) {
++        if (sig == SIGCHLD || sig == SIGWINCH || sig == SIGCONT || sig == SIGPIPE) {
+             __syscall(SYS_noted, POUCH_SYS_NOTED_NCONT);
+         } else {
+             long r = __syscall(SYS_noted, POUCH_SYS_NOTED_NDFLT);
+@@ -235,29 +270,32 @@
+         for (;;);     /* unreachable */
+     }
+ 
+-    /* User handler. Plain `void (*)(int)` shape (no siginfo_t at v1.0).
+-     * The kernel saved the full reg file before invoking us, so AAPCS64
+-     * call-preserved regs are restored when we return via SYS_NOTED. */
+-    h(sig);
++    /* The kernel saved the full reg file before invoking us, so AAPCS64
++     * call-preserved regs are restored when we return via SYS_NOTED.
++     *
++     * Every handler gets the SA_SIGINFO arguments, which a `void (int)` never reads:
++     * sa_flags is not read here, because sigaction's table write is not atomic and
++     * sa_handler alone is one aligned word. */
++    siginfo_t si;
++    __pouch_siginfo_fill(&si, sig);
++    ((void (*)(int, siginfo_t *, void *))h)(sig, &si, 0);
+ 
+     __syscall(SYS_noted, POUCH_SYS_NOTED_NCONT);
+     for (;;);         /* unreachable */
+ }
+ 
+ /* Constructor: runs once at process startup on the main thread, before
+- * main(). Static-init iteration via musl's CRT (.init_array). Sets the
+- * SIGPIPE default-mask. It registers no handler: a program with none gets the
+- * kernel's default for every note, including while blocked in a wait. And it
+- * writes child_exit's default row, which allocates nothing: a table now governs,
+- * so the kernel discards a dead child's note at the tail. With no table and no
+- * handler that note would wait for a notes fd nobody opened, and hold a slot. */
++ * main(). Static-init iteration via musl's CRT (.init_array). It registers no
++ * handler: a program with none gets the kernel's default for every note,
++ * including while blocked in a wait. It writes SIGPIPE's row, which ignores, and
++ * child_exit's default row: a table now governs, so the kernel discards a dead
++ * child's note at the tail. With no table and no handler that note would wait for
++ * a notes fd nobody opened, and hold a slot. child_exit's row allocates nothing,
++ * so it governs even if SIGPIPE's could not allocate the table. */
+ static __attribute__((constructor)) void __pouch_signal_init(void)
+ {
+-    /* SIGPIPE default-mask. POUCH-DESIGN.md section 6.4 [RESOLVED 6.4]:
+-     * SIGPIPE is masked at startup so a write to a closed pipe returns
+-     * EPIPE without delivering the note. A subsequent sigaction(SIGPIPE)
+-     * with a real handler clears the mask bit (sigaction.c). */
+-    __pouch_note_mask_shadow = POUCH_NOTE_BIT_PIPE;
+-    __syscall(SYS_note_mask, (long)__pouch_note_mask_shadow, 0L);
++    /* A write to a closed pipe returns EPIPE and posts nothing, POUCH-DESIGN.md
++     * section 6.4. */
++    __syscall(SYS_note_dispose, "pipe", 4L, (long)POUCH_NOTE_DISP_IGNORE, 0L);
+     __syscall(SYS_note_dispose, "child_exit", 10L, (long)POUCH_NOTE_DISP_DEFAULT, 0L);
+ }
+--- a/src/signal/block.c
++++ b/src/signal/block.c
+@@ -11,8 +11,8 @@
+  *   __restore_sigs(set):    set kernel mask from sigset_t *set
+  *
+  * The sigset_t shape stays POSIX so callers' on-stack storage is
+- * unchanged. Translation lives here: pouch reads the current note mask
+- * out of the shadow, marshals to/from sigset_t.
++ * unchanged. Translation lives here: SYS_NOTE_MASK hands back the mask
++ * it replaced, and pouch marshals to/from sigset_t.
+  */
+ 
+ #include "pthread_impl.h"
+@@ -23,24 +23,20 @@
+ 
+ void __block_all_sigs(void *set)
+ {
+-	if (set) __pouch_note_to_sigset(__pouch_note_mask_shadow, (sigset_t *)set);
+-	__pouch_note_mask_shadow = POUCH_NOTE_MASK_SUPPORTED;
+-	__syscall(SYS_note_mask, (long)__pouch_note_mask_shadow, 0L);
++	uint64_t old = __pouch_note_mask_hold();
++	if (set) __pouch_note_to_sigset(old, (sigset_t *)set);
+ }
+ 
+ void __block_app_sigs(void *set)
+ {
+ 	/* At v1.0, "app" sigs == every supported note (no internal libc
+ 	 * signals like SIGTIMER). */
+-	if (set) __pouch_note_to_sigset(__pouch_note_mask_shadow, (sigset_t *)set);
+-	__pouch_note_mask_shadow = POUCH_NOTE_MASK_SUPPORTED;
+-	__syscall(SYS_note_mask, (long)__pouch_note_mask_shadow, 0L);
++	__block_all_sigs(set);
+ }
+ 
+ void __restore_sigs(void *set)
+ {
+ 	if (!set) return;
+ 	uint64_t m = __pouch_sigset_to_note((const sigset_t *)set);
+-	__pouch_note_mask_shadow = m;
+ 	__syscall(SYS_note_mask, (long)m, 0L);
+ }
+--- a/src/signal/sigaction.c
++++ b/src/signal/sigaction.c
+@@ -41,8 +41,12 @@
+ 		long r = __syscall(SYS_notify, (long)(uintptr_t)__pouch_note_handler);
+ 		if (r < 0) return r;
+ 		disposition = POUCH_NOTE_DISP_CAUGHT;
+-		if (sa->sa_flags & SA_RESTART) flags = POUCH_NOTE_DISP_RESTART;
+-	} else if (sa->sa_handler == SIG_IGN) {
++		if (sa->sa_flags & SA_RESTART) flags |= POUCH_NOTE_DISP_RESTART;
++		if (sa->sa_flags & SA_RESETHAND) flags |= POUCH_NOTE_DISP_RESETHAND;
++		if (sa->sa_flags & SA_NODEFER) flags |= POUCH_NOTE_DISP_NODEFER;
++		flags |= POUCH_NOTE_DISP_MASK(__pouch_sigset_to_note(&sa->sa_mask));
++	} else if (sa->sa_handler == SIG_IGN || sig == SIGPIPE) {
++		/* SIGPIPE's default here is the EPIPE alone (POUCH-DESIGN 6.4). */
+ 		disposition = POUCH_NOTE_DISP_IGNORE;
+ 	}
+ 
+@@ -50,17 +54,6 @@
+ 	return r < 0 ? r : 0;
+ }
+ 
+-static void __pouch_pipe_mask(int masked)
+-{
+-	uint64_t cur = __pouch_note_mask_shadow;
+-	uint64_t new_m = masked ? cur | (uint64_t)POUCH_NOTE_BIT_PIPE
+-	                        : cur & ~(uint64_t)POUCH_NOTE_BIT_PIPE;
+-	if (new_m != cur) {
+-		__pouch_note_mask_shadow = new_m;
+-		__syscall(SYS_note_mask, (long)new_m, 0L);
+-	}
+-}
+-
+ int __libc_sigaction(int sig, const struct sigaction *restrict sa,
+                      struct sigaction *restrict old)
+ {
+@@ -98,27 +91,13 @@
+ 		int live = (uintptr_t)sa->sa_handler > 1UL;
+ 		__pouch_sigtab[sig] = *sa;
+ 
+-		/* SIGPIPE special: installing a real handler clears the kernel's
+-		 * NOTE_BIT_PIPE mask so the kernel will deliver pipe notes to
+-		 * the dispatcher. Removing the handler (SIG_DFL/SIG_IGN) restores
+-		 * the default mask. POUCH-DESIGN section 6.4 [RESOLVED 6.4]:
+-		 * masked-by-default is the modern-daemon-friendly behavior. The
+-		 * mask moves on whichever side of the row keeps a pipe note from
+-		 * meeting a default row unmasked: set before the handler is given
+-		 * up, cleared after it is taken. */
+-		if (sig == SIGPIPE && !live) __pouch_pipe_mask(1);
+-
+ 		long r = __pouch_sig_dispose(sig, sa, live);
+ 		if (r < 0) {
+ 			__pouch_sigtab[sig] = prev;
+-			if (sig == SIGPIPE && !live)
+-				__pouch_pipe_mask((uintptr_t)prev.sa_handler <= 1UL);
+ 			errno = -r;
+ 			return -1;
+ 		}
+ 
+-		if (sig == SIGPIPE && live) __pouch_pipe_mask(0);
+-
+ 		/* The kernel restarts a call for an SA_RESTART row. This flag is
+ 		 * only musl's futex filter (__timedwait): an EINTR from a futex is
+ 		 * real once some handler without SA_RESTART exists. */
+--- a/src/signal/sigsetjmp_tail.c
++++ b/src/signal/sigsetjmp_tail.c
+@@ -5,6 +5,6 @@
+ hidden int __sigsetjmp_tail(sigjmp_buf jb, int ret)
+ {
+ 	void *p = jb->__ss;
+-	__syscall(SYS_rt_sigprocmask, SIG_SETMASK, ret?p:0, ret?0:p, _NSIG/8);
++	pthread_sigmask(SIG_SETMASK, ret?p:0, ret?0:p);
+ 	return ret;
+ }
+--- a/src/signal/sigsuspend.c
++++ b/src/signal/sigsuspend.c
+@@ -1,7 +1,11 @@
+ #include <signal.h>
+ #include "syscall.h"
++#include "_pouch_signal.h"
+ 
++/* The kernel swaps the mask and sleeps as one step, and puts the caller's mask back
++ * when the handler returns (ARCHITECTURE 8.8.3). */
+ int sigsuspend(const sigset_t *mask)
+ {
+-	return syscall_cp(SYS_rt_sigsuspend, mask, _NSIG/8);
++	return syscall_cp(SYS_note_wait, POUCH_NOTE_WAIT_SUSPEND,
++		__pouch_sigset_to_note(mask), 0L, -1L);
+ }
+--- a/src/signal/sigtimedwait.c
++++ b/src/signal/sigtimedwait.c
+@@ -1,32 +1,40 @@
+ #include <signal.h>
+ #include <errno.h>
++#include <limits.h>
++#include <stdint.h>
++#include <time.h>
+ #include "syscall.h"
++#include "_pouch_signal.h"
+ 
+-#define IS32BIT(x) !((x)+0x80000000ULL>>32)
+-#define CLAMP(x) (int)(IS32BIT(x) ? (x) : 0x7fffffffU+((0ULL+(x))>>63))
+-
+-static int do_sigtimedwait(const sigset_t *restrict mask, siginfo_t *restrict si, const struct timespec *restrict ts)
+-{
+-#ifdef SYS_rt_sigtimedwait_time64
+-	time_t s = ts ? ts->tv_sec : 0;
+-	long ns = ts ? ts->tv_nsec : 0;
+-	int r = -ENOSYS;
+-	if (SYS_rt_sigtimedwait == SYS_rt_sigtimedwait_time64 || !IS32BIT(s))
+-		r = __syscall_cp(SYS_rt_sigtimedwait_time64, mask, si,
+-			ts ? ((long long[]){s, ns}) : 0, _NSIG/8);
+-	if (SYS_rt_sigtimedwait == SYS_rt_sigtimedwait_time64 || r!=-ENOSYS)
+-		return r;
+-	return __syscall_cp(SYS_rt_sigtimedwait, mask, si,
+-		ts ? ((long[]){CLAMP(s), ns}) : 0, _NSIG/8);;
+-#else
+-	return __syscall_cp(SYS_rt_sigtimedwait, mask, si, ts, _NSIG/8);
+-#endif
+-}
+-
++/* A caught note outside the set runs its handler and the kernel answers EINTR. As
++ * upstream the wait goes on, since sigwait may not read EINTR, but with what is left of
++ * the timeout: starting it again would let a steady note keep it from ever passing. */
+ int sigtimedwait(const sigset_t *restrict mask, siginfo_t *restrict si, const struct timespec *restrict timeout)
+ {
+-	int ret;
+-	do ret = do_sigtimedwait(mask, si, timeout);
+-	while (ret==-EINTR);
+-	return __syscall_ret(ret);
++	uint64_t take = __pouch_sigset_to_take(mask);
++	long long whole = -1, left = -1;
++	struct timespec t0, now;
++
++	if (timeout) {
++		long long sec = timeout->tv_sec, nsec = timeout->tv_nsec;
++		if (sec < 0 || nsec < 0 || nsec >= 1000000000LL)
++			return __syscall_ret(-EINVAL);
++		whole = sec > (LLONG_MAX - nsec) / 1000000000LL ? LLONG_MAX : sec * 1000000000LL + nsec;
++		left = whole;
++		__clock_gettime(CLOCK_MONOTONIC, &t0);
++	}
++
++	struct __pouch_note_record rec;
++	long r;
++	while ((r = __syscall_cp(SYS_note_wait, POUCH_NOTE_WAIT_TAKE, take, &rec, left)) == -EINTR) {
++		if (!timeout) continue;
++		__clock_gettime(CLOCK_MONOTONIC, &now);
++		long long spent = (now.tv_sec - t0.tv_sec) * 1000000000LL + (now.tv_nsec - t0.tv_nsec);
++		left = spent >= whole ? 0 : whole - spent;
++	}
++	if (r < 0) return __syscall_ret(r);
++
++	int sig = __pouch_note_to_sig(rec.name);
++	if (si) __pouch_siginfo_fill(si, sig);
++	return sig;
+ }
+--- a/src/signal/sigpending.c
++++ b/src/signal/sigpending.c
+@@ -1,7 +1,11 @@
+ #include <signal.h>
+ #include "syscall.h"
++#include "_pouch_signal.h"
+ 
+ int sigpending(sigset_t *set)
+ {
+-	return syscall(SYS_rt_sigpending, set, _NSIG/8);
++	long held = __syscall(SYS_note_wait, POUCH_NOTE_WAIT_PENDING, 0L, 0L, 0L);
++	if (held < 0) return __syscall_ret(held);
++	__pouch_take_to_sigset((uint64_t)held, set);
++	return 0;
+ }
+--- a/src/thread/pthread_sigmask.c
++++ b/src/thread/pthread_sigmask.c
+@@ -2,16 +2,15 @@
+  * Replaces musl's Linux SYS_rt_sigprocmask call with SYS_NOTE_MASK,
+  * translating the POSIX sigset_t to/from a NOTE_BIT_* bitmap.
+  *
+- * Per POSIX, this is per-thread. The kernel's note_mask is per-Thread;
+- * we keep __pouch_note_mask_shadow as a __thread TLS shadow so we can
+- * do SIG_BLOCK / SIG_UNBLOCK read-modify-write without racing with
+- * another thread's mask updates. Pouch is the sole writer to each
+- * thread's note_mask, so the shadow stays in sync.
++ * Per POSIX, this is per-thread, and the kernel's note_mask is per-Thread.
++ * SYS_NOTE_MASK swaps, so SIG_SETMASK is one call. Anything that needs the old
++ * mask to compute the new one holds every note for the two calls between: a
++ * handler that ran there would be back before the second, its mask put back by
++ * the kernel, and a caught note that waited runs at the second's return.
+  *
+  * Returns 0 on success, or a POSIX errno on failure (matches musl's
+  * convention — pthread_sigmask returns errno directly, not via the
+- * errno variable). The only error path at v1.0 is EINVAL for a bogus
+- * `how` value.
++ * errno variable).
+  */
+ 
+ #include <signal.h>
+@@ -24,30 +23,18 @@
+ int pthread_sigmask(int how, const sigset_t *restrict set, sigset_t *restrict old)
+ {
+ 	if (set && (unsigned)how - SIG_BLOCK > 2U) return EINVAL;
++	if (!set && !old) return 0;
+ 
+-	uint64_t cur = __pouch_note_mask_shadow;
++	/* Read before any swap: a bad set must fault with the mask as it was. */
++	uint64_t s = set ? __pouch_sigset_to_note(set) : 0;
++	uint64_t cur = 0;
+ 
+-	/* Translate the proposed sigset (if any) into a NOTE_BIT_* delta
+-	 * and compute the new mask under the chosen `how`. */
+-	if (set) {
+-		uint64_t s = __pouch_sigset_to_note(set);
+-		uint64_t new_m;
+-		switch (how) {
+-		case SIG_BLOCK:   new_m = cur | s;          break;
+-		case SIG_UNBLOCK: new_m = cur & ~s;         break;
+-		case SIG_SETMASK: new_m = s;                 break;
+-		default:          return EINVAL;
+-		}
+-		__pouch_note_mask_shadow = new_m;
+-		long r = __syscall(SYS_note_mask, (long)new_m, 0L);
+-		if (r < 0) {
+-			/* Restore the shadow on failure so callers see a
+-			 * consistent state. EAGAIN/EIO from the kernel maps
+-			 * to EINVAL at v1.0 — the only realistic failure is
+-			 * bad VA, which our 0L out-pointer rules out. */
+-			__pouch_note_mask_shadow = cur;
+-			return EINVAL;
+-		}
++	if (set && how == SIG_SETMASK) {
++		if (__syscall(SYS_note_mask, (long)s, (long)&cur) < 0) return EINVAL;
++	} else {
++		cur = __pouch_note_mask_hold();
++		uint64_t new_m = !set ? cur : how == SIG_BLOCK ? cur | s : cur & ~s;
++		__syscall(SYS_note_mask, (long)new_m, 0L);
+ 	}
+ 
+ 	if (old) __pouch_note_to_sigset(cur, old);
+--- a/src/select/poll.c
++++ b/src/select/poll.c
+@@ -69,17 +69,32 @@
+ #include <stddef.h>
+ #include "syscall.h"
+ #include "_pouch_socket.h"
++#include "_pouch_signal.h"
+ 
+ /* Mirrors kernel/include/thylacine/proc.h PROC_HANDLE_MAX. The kernel
+  * already rejects nfds > 64 at sys_poll_for_proc; we mirror to bound
+  * the stack allocation. */
+ #define POUCH_POLL_NFDS_MAX 64u
+ 
++/* A mask means SYS_NOTE_WAIT's poll form: the swap and the wait are one step, which is
++ * what ppoll is for (ARCHITECTURE 8.8.3). */
++hidden int __pouch_poll_wait(struct pollfd *k, nfds_t n, int ms, const sigset_t *mask)
++{
++	if (!mask) return syscall_cp(SYS_poll, k, n, ms);
++	return syscall_cp(SYS_note_wait, POUCH_NOTE_WAIT_POLL, __pouch_sigset_to_note(mask), k,
++		ms < 0 ? -1LL : ms * 1000000LL, n);
++}
++
+ int poll(struct pollfd *fds, nfds_t n, int timeout)
+ {
++	return __pouch_poll(fds, n, timeout, 0);
++}
++
++hidden int __pouch_poll(struct pollfd *fds, nfds_t n, int timeout, const sigset_t *mask)
++{
+ 	/* Zero fds: the kernel sleeps for the timeout. */
+ 	if (n == 0) {
+-		return syscall_cp(SYS_poll, 0, 0, timeout);
++		return __pouch_poll_wait(0, 0, timeout, mask);
+ 	}
+ 	if (!fds) {
+ 		errno = EFAULT;
+@@ -107,7 +122,7 @@
+ 		}
+ 	}
+ 	if (!needs_slow) {
+-		return syscall_cp(SYS_poll, fds, n, timeout);
++		return __pouch_poll_wait(fds, n, timeout, mask);
+ 	}
+ 
+ 	/* Compact the active (fd >= 0) entries into kfds, translating tagged
+@@ -153,10 +168,10 @@
+ 
+ 	if (nk == 0) {
+ 		/* Every entry was a POSIX-ignored negative fd: the n == 0 case. */
+-		return syscall_cp(SYS_poll, 0, 0, timeout);
++		return __pouch_poll_wait(0, 0, timeout, mask);
+ 	}
+ 
+-	int r = syscall_cp(SYS_poll, kfds, nk, timeout);
++	int r = __pouch_poll_wait(kfds, nk, timeout, mask);
+ 
+ 	/* Map revents back (fd left untouched so the caller still sees its
+ 	 * original tagged identifiers). Ignored fd < 0 entries already read
+--- a/src/select/ppoll.c
++++ b/src/select/ppoll.c
+@@ -1,4 +1,4 @@
+-/* pouch: ppoll routed through SYS_POLL (= 29).
++/* pouch: ppoll, on poll's own path.
+  *
+  * Thylacine's poll uses int timeout_ms (Linux poll(2) shape); ppoll's
+  * timespec gets folded to ms here. The conversion ROUNDS UP — POSIX
+@@ -6,23 +6,22 @@
+  * bug; firing later is permitted) but a sub-ms positive timeout that
+  * truncates to zero would degenerate into a non-blocking probe.
+  *
+- * The sigset_t argument is IGNORED at v1.0 — Thylacine does not yet
+- * deliver signals atomically with poll. The race window between sigmask
+- * unblock and a SYS_POLL park is the same hazard ppoll exists to
+- * eliminate; v1.0 callers that depend on the atomic-sigmask semantics
+- * must use a thread-level signal model instead. See docs/POUCH-DESIGN.md
+- * sub-chunk 13 (pouch-signals) for the planned re-enable path.
++ * The mask goes in for the one call, and the swap and the wait are one step
++ * (__pouch_poll_wait). Any answer but EINTR has the caller's mask back before it
++ * returns, so a note only the mask let in stays pending and no handler runs beside
++ * a ready fd. EINTR has the handler run under the mask, and its return puts the
++ * caller's back (ARCHITECTURE 8.8.3).
+  */
+ #define _BSD_SOURCE
+ #include <poll.h>
+ #include <signal.h>
+ #include <errno.h>
+ #include "syscall.h"
++#include "_pouch_signal.h"
+ 
+ int ppoll(struct pollfd *fds, nfds_t n, const struct timespec *to,
+           const sigset_t *mask)
+ {
+-	(void)mask;
+ 	int timeout_ms;
+ 	if (!to) {
+ 		timeout_ms = -1;
+@@ -39,9 +38,9 @@
+ 		if (ms > 0x7fffffffLL) ms = 0x7fffffffLL;
+ 		timeout_ms = (int)ms;
+ 	}
+-	/* Through poll(), not SYS_poll: poll() is where a pouch socket fd is
++	/* Through poll's body, not SYS_poll: it is where a pouch socket fd is
+ 	 * translated to its kernel poll target and a negative fd is dropped. Raw,
+ 	 * a tagged fd reaches the kernel as 0x4000000N, answers POLLNVAL, counts
+ 	 * as ready and busy-spins the caller. */
+-	return poll(fds, n, timeout_ms);
++	return __pouch_poll(fds, n, timeout_ms, mask);
+ }
+--- a/src/select/pselect.c
++++ b/src/select/pselect.c
+@@ -1,10 +1,8 @@
+-/* pouch: pselect routed through select (and thus SYS_POLL).
++/* pouch: pselect, on select's own path.
+  *
+- * Same caveats as ppoll: the sigset_t argument is IGNORED at v1.0 —
+- * Thylacine does not yet deliver signals atomically with poll. The
+- * timespec gets folded to a timeval; sub-µs precision is unobservable
+- * because the kernel's poll deadline is millisecond-grained anyway.
+- * See pselect.c's comment in src/select/select.c for the full
++ * The mask does as ppoll's does. The timespec gets folded to a timeval;
++ * sub-µs precision is unobservable because the kernel's poll deadline is
++ * millisecond-grained anyway. See src/select/select.c for the full
+  * translation contract.
+  */
+ #include <sys/select.h>
+@@ -13,13 +11,13 @@
+ #include <stdint.h>
+ #include <errno.h>
+ #include "syscall.h"
++#include "_pouch_signal.h"
+ 
+ int pselect(int n, fd_set *restrict rfds, fd_set *restrict wfds,
+             fd_set *restrict efds, const struct timespec *restrict ts,
+             const sigset_t *restrict mask)
+ {
+-	(void)mask;
+-	if (!ts) return select(n, rfds, wfds, efds, NULL);
++	if (!ts) return __pouch_select(n, rfds, wfds, efds, NULL, mask);
+ 	if (ts->tv_sec < 0 || ts->tv_nsec < 0 ||
+ 	    ts->tv_nsec >= 1000000000L) {
+ 		return __syscall_ret(-EINVAL);
+@@ -34,5 +32,5 @@
+ 		if (tv.tv_sec < 0x7fffffffL) tv.tv_sec += 1;
+ 		tv.tv_usec -= 1000000L;
+ 	}
+-	return select(n, rfds, wfds, efds, &tv);
++	return __pouch_select(n, rfds, wfds, efds, &tv, mask);
+ }
+--- a/src/select/select.c
++++ b/src/select/select.c
+@@ -26,6 +26,7 @@
+ #include <stdint.h>
+ #include <errno.h>
+ #include "syscall.h"
++#include "_pouch_signal.h"
+ 
+ /* The kernel ceiling on nfds (PROC_HANDLE_MAX). See
+  * kernel/include/thylacine/poll.h. */
+@@ -34,6 +35,13 @@
+ int select(int n, fd_set *restrict rfds, fd_set *restrict wfds,
+            fd_set *restrict efds, struct timeval *restrict tv)
+ {
++	return __pouch_select(n, rfds, wfds, efds, tv, 0);
++}
++
++hidden int __pouch_select(int n, fd_set *restrict rfds, fd_set *restrict wfds,
++                          fd_set *restrict efds, struct timeval *restrict tv,
++                          const sigset_t *restrict mask)
++{
+ 	if (n < 0 || n > FD_SETSIZE) return __syscall_ret(-EINVAL);
+ 
+ 	int timeout_ms;
+@@ -80,12 +88,19 @@
+ 	if (npfd == 0) {
+ 		/* POSIX: select(n, NULL, NULL, NULL, tv) sleeps for tv then
+ 		 * returns 0. */
+-		return syscall_cp(SYS_poll, 0, 0, timeout_ms);
++		return __pouch_poll_wait(0, 0, timeout_ms, mask);
+ 	}
+ 
+-	int rc = syscall_cp(SYS_poll, pfds, (unsigned long)npfd, timeout_ms);
+-	if (rc < 0) return __syscall_ret(rc);
++	/* -1 with errno already set: a second __syscall_ret would read it as a code. */
++	int rc = __pouch_poll_wait(pfds, (nfds_t)npfd, timeout_ms, mask);
++	if (rc < 0) return rc;
+ 
++	/* POLLNVAL anywhere fails the whole call, with the sets as they were: select has no
++	 * per-fd error, and a hit it did not count would read as a timeout. */
++	for (int i = 0; i < npfd; i++) {
++		if (pfds[i].revents & POLLNVAL) return __syscall_ret(-EBADF);
++	}
++
+ 	if (rfds) FD_ZERO(rfds);
+ 	if (wfds) FD_ZERO(wfds);
+ 	if (efds) FD_ZERO(efds);

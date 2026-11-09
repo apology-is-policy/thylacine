@@ -45,16 +45,21 @@
 #include "test.h"
 
 #include <thylacine/burrow.h>
+#include <thylacine/dev.h>
 #include <thylacine/exec.h>
 #include <thylacine/page.h>
 #include <thylacine/proc.h>
 #include <thylacine/rendez.h>
 #include <thylacine/sched.h>
+#include <thylacine/smp.h>
+#include <thylacine/spinlock.h>
+#include <thylacine/spoor.h>
 #include <thylacine/thread.h>
 #include <thylacine/torpor.h>
 #include <thylacine/types.h>
 #include <thylacine/vma.h>
 
+#include "../../arch/arm64/gic.h"
 #include "../../arch/arm64/timer.h"
 #include "../../arch/arm64/uaccess.h"
 #include <thylacine/syscall.h>
@@ -240,7 +245,7 @@ void test_torpor_wait_value_mismatch_fast_path(void) {
     TEST_ASSERT(consumer != NULL, "thread_create(consumer) failed");
     ready(consumer);
 
-    // Consumer runs, takes torpor_lock, loads the user VA (demand-zero,
+    // Consumer runs, takes the bucket's lock, loads the user VA (demand-zero,
     // reads 0), 0 != 0xDEADBEEF → fast path returns 0 without sleeping.
     // SMP (#20): ready() may place the consumer on a peer CPU's runqueue,
     // so one local sched() does not guarantee it ran — yield until it
@@ -318,7 +323,7 @@ void test_torpor_wait_wake_handoff(void) {
     int ctid = consumer->tid;
     ready(consumer);
 
-    // Consumer: runs, increments to 1, takes torpor_lock, loads (0 == 0
+    // Consumer: runs, increments to 1, takes the bucket's lock, loads (0 == 0
     // match), registers in the bucket, tsleeps with the far deadline →
     // SLEEPING. SMP (#20): it may run on a peer CPU — yield until it is
     // observably SLEEPING (registration precedes the SLEEPING
@@ -430,8 +435,8 @@ void test_torpor_wake_two_waiters_count_bound(void) {
     TEST_EXPECT_EQ(ca->state, THREAD_SLEEPING, "A must be SLEEPING");
     TEST_EXPECT_EQ(cb->state, THREAD_SLEEPING, "B must be SLEEPING");
 
-    // First WAKE(count=1) wakes exactly ONE. Order is bucket-walk order
-    // (most-recently-inserted first), but we don't depend on which.
+    // First WAKE(count=1) wakes exactly ONE. They raced to the bucket, so
+    // which is not known here; torpor.wake_takes_the_oldest orders them.
     // SMP (#20): the woken consumer may resume on a peer CPU, so a
     // RUNNABLE point-check right here is unsound (it can already be
     // RUNNING or parked) — the sound partition is over COMPLETION:
@@ -533,4 +538,442 @@ void test_torpor_caught_note_ends_wait(void) {
     TEST_ASSERT(ctl.rode_out, "control: woken with the note pending, the native waiter slept again");
     TEST_EXPECT_EQ(ctl.rc, (long)TORPOR_OK, "control: the native WAIT ends on the WAKE");
     TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree empty after cleanup");
+}
+
+// ---------------------------------------------------------------------------
+// C8: the order, the key, the count and the record's lifetime.
+// ---------------------------------------------------------------------------
+
+#define TQ_WAITERS 3u
+static struct Thread *g_tq_t[TQ_WAITERS];
+static volatile u32   g_tq_ticket;
+static volatile u32   g_tq_done[TQ_WAITERS];
+static volatile s64   g_tq_rc[TQ_WAITERS];
+static volatile bool  g_tq_exited[TQ_WAITERS];
+static volatile u64   g_tq_va;
+static volatile s64   g_tq_timeout_us;
+
+static void tq_entry(void) {
+    u32 me = __atomic_fetch_add(&g_tq_ticket, 1u, __ATOMIC_ACQ_REL);
+    g_tq_rc[me] = sys_torpor_wait_for_proc(current_thread()->proc, g_tq_va, 0, g_tq_timeout_us);
+    __atomic_store_n(&g_tq_done[me], 1u, __ATOMIC_RELEASE);
+    test_thread_park_terminal(&g_tq_exited[me]);
+}
+
+static void tq_reset(u64 va, s64 timeout_us) {
+    g_tq_ticket = 0; g_tq_va = va; g_tq_timeout_us = timeout_us;
+    for (u32 i = 0; i < TQ_WAITERS; i++) {
+        g_tq_t[i] = NULL; g_tq_done[i] = 0; g_tq_rc[i] = (s64)-999; g_tq_exited[i] = false;
+    }
+}
+
+// Start waiter `i` in `p` and let it reach the bucket before the next one starts.
+static bool tq_start(struct Proc *p, u32 i) {
+    g_tq_t[i] = thread_create(p, tq_entry);
+    if (!g_tq_t[i]) return false;
+    int tid = g_tq_t[i]->tid;
+    ready(g_tq_t[i]);
+    u64 dl = timer_now_ns() + TEST_YIELD_BUDGET_NS;
+    while (!test_thread_sleeping(p, tid) && timer_now_ns() < dl) sched();
+    return test_thread_sleeping(p, tid);
+}
+
+static bool tq_done(u32 i) { return __atomic_load_n(&g_tq_done[i], __ATOMIC_ACQUIRE) != 0; }
+
+static bool tq_finished(u32 i) {
+    u64 dl = timer_now_ns() + TEST_YIELD_BUDGET_NS;
+    while (!tq_done(i) && timer_now_ns() < dl) sched();
+    return tq_done(i);
+}
+
+// A wake takes the oldest waiter, so a mutex's first waiter cannot starve (F-9).
+void test_torpor_wake_takes_the_oldest(void) {
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree must be empty at test entry");
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+    s64 r = sys_burrow_attach_for_proc(p, PAGE_SIZE);
+    TEST_ASSERT(r > 0, "burrow_attach failed");
+    tq_reset((u64)r, 60ll * 1000000ll);
+
+    bool started = true;
+    for (u32 i = 0; i < TQ_WAITERS; i++) started = tq_start(p, i) && started;
+
+    s64  wake[TQ_WAITERS];
+    bool order = started;
+    for (u32 i = 0; i < TQ_WAITERS; i++) {
+        wake[i] = sys_torpor_wake_for_proc(p, g_tq_va, 1);
+        order = tq_finished(i) && order;
+        for (u32 j = i + 1u; j < TQ_WAITERS; j++) order = !tq_done(j) && order;
+    }
+    (void)sys_torpor_wake_for_proc(p, g_tq_va, (u32)~0u);
+    for (u32 i = 0; i < TQ_WAITERS; i++)
+        if (g_tq_t[i]) test_thread_join_last(p, &g_tq_exited[i]);
+    test_proc_free_drained(p);
+
+    TEST_ASSERT(started, "the three waiters reached the bucket in turn");
+    TEST_EXPECT_EQ(wake[0], (s64)1, "the first wake woke one");
+    TEST_EXPECT_EQ(wake[2], (s64)1, "and so did the last");
+    TEST_ASSERT(order, "each wake took the oldest, and left the younger waiting");
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree empty after cleanup");
+}
+
+// The key is the space, not the Proc (F-10): a sharer wakes it, and a stranger at the
+// same address does not. Sharing as rfork(RFPROC|RFMEM) does: the same AddrSpace, ref'd.
+static void tq_share_space(struct Proc *q, struct Proc *with) {
+    addrspace_unref(q->as);
+    addrspace_ref(with->as);
+    q->as = with->as;
+}
+
+void test_torpor_key_is_the_address_space(void) {
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree must be empty at test entry");
+    struct Proc *p = proc_alloc(), *sharer = proc_alloc(), *stranger = proc_alloc();
+    s64 r = (p && sharer && stranger) ? sys_burrow_attach_for_proc(p, PAGE_SIZE) : 0;
+    if (r <= 0) {
+        if (p) test_proc_free_drained(p);
+        if (sharer) test_proc_free_drained(sharer);
+        if (stranger) test_proc_free_drained(stranger);
+    }
+    TEST_ASSERT(r > 0, "the fixture failed");
+    tq_share_space(sharer, p);
+    tq_reset((u64)r, 60ll * 1000000ll);
+
+    bool started  = tq_start(p, 0);
+    s64  strange  = sys_torpor_wake_for_proc(stranger, g_tq_va, 1);
+    bool stood    = !tq_done(0);
+    s64  shared   = sys_torpor_wake_for_proc(sharer, g_tq_va, 1);
+    bool finished = tq_finished(0);
+    s64  rc       = g_tq_rc[0];
+
+    (void)sys_torpor_wake_for_proc(p, g_tq_va, (u32)~0u);
+    if (g_tq_t[0]) test_thread_join_last(p, &g_tq_exited[0]);
+    test_proc_free_drained(p);
+    test_proc_free_drained(sharer);
+    test_proc_free_drained(stranger);
+
+    TEST_ASSERT(started, "the waiter reached the bucket");
+    TEST_EXPECT_EQ(strange, (s64)0, "a Proc with its own space wakes nobody");
+    TEST_ASSERT(stood, "and the waiter stands");
+    TEST_EXPECT_EQ(shared, (s64)1, "a Proc sharing the space wakes it");
+    TEST_ASSERT(finished, "and its wait ends");
+    TEST_EXPECT_EQ(rc, (s64)TORPOR_OK, "as a wake");
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree empty after cleanup");
+}
+
+// A wake counts only a waiter its mark found asleep, and goes on past one it did not.
+// A stopped waiter stays in the bucket and is not on its rendez, which makes it the
+// deterministic case of a waiter past its sleep. Its Proc is stopped and a sharer's
+// waiter is younger, so a wake(1) that counted the first mark would strand the second.
+static struct Proc *volatile g_tqs_proc;
+static volatile u64  g_tqs_va;
+static volatile u32  g_tqs_done;
+static volatile s64  g_tqs_rc;
+
+static void tqs_stopped_thunk(void *arg) {
+    (void)arg;
+    struct Proc *self = current_thread()->proc;
+    if (proc_setpgid(self, 0, 0) != 0) exits("setpgid failed");
+    s64 va = sys_burrow_attach_for_proc(self, PAGE_SIZE);
+    if (va <= 0) exits("burrow_attach failed");
+    __atomic_store_n(&g_tqs_va, (u64)va, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_tqs_proc, self, __ATOMIC_RELEASE);
+    g_tqs_rc = sys_torpor_wait_for_proc(self, (u64)va, 0, 60ll * 1000000ll);
+    __atomic_store_n(&g_tqs_done, 1u, __ATOMIC_RELEASE);
+    exits("ok");
+}
+
+void test_torpor_wake_counts_only_a_sleeper(void) {
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree must be empty at test entry");
+    g_tqs_proc = NULL; g_tqs_va = 0; g_tqs_done = 0; g_tqs_rc = (s64)-999;
+    tq_reset(0, 60ll * 1000000ll);
+
+    int pid = rfork(RFPROC, tqs_stopped_thunk, NULL);
+    TEST_ASSERT(pid > 0, "rfork failed");
+
+    // Every step from here is bounded and only recorded. The child and the sharer are
+    // released below whatever happened, so the asserts come after that.
+    struct Proc *stopped = NULL;
+    u64 dl = timer_now_ns() + TEST_YIELD_BUDGET_NS;
+    while (!(stopped = __atomic_load_n(&g_tqs_proc, __ATOMIC_ACQUIRE)) && timer_now_ns() < dl)
+        sched();
+    struct Thread *th = NULL;
+    int stid = 0;
+    if (stopped) {
+        irq_state_t ts = proc_threads_lock(stopped);
+        th = stopped->threads;
+        stid = th ? th->tid : 0;
+        proc_threads_unlock(stopped, ts);
+    }
+    bool slept = false;
+    dl = timer_now_ns() + TEST_YIELD_BUDGET_NS;
+    while (th && !(slept = test_thread_sleeping(stopped, stid)) && timer_now_ns() < dl) sched();
+
+    int fan = slept ? proc_job_stop_pgrp((u32)pid) : -1;
+    bool parked = false;
+    dl = timer_now_ns() + TEST_YIELD_BUDGET_NS;
+    while (fan == 1 && !parked && timer_now_ns() < dl) {
+        irq_state_t ws = spin_lock_irqsave(&th->wait_lock);
+        parked = th->rendez_blocked_on == &th->debug_rendez;
+        spin_unlock_irqrestore(&th->wait_lock, ws);
+        if (!parked) sched();
+    }
+
+    struct Proc *sharer = parked ? proc_alloc() : NULL;
+    bool started = false, finished = false;
+    s64 woken = (s64)-999, again = (s64)-999;
+    if (sharer) {
+        tq_share_space(sharer, stopped);
+        g_tq_va = g_tqs_va;
+        started  = tq_start(sharer, 0);
+        woken    = sys_torpor_wake_for_proc(sharer, g_tqs_va, 1);
+        finished = tq_finished(0);
+        again    = sys_torpor_wake_for_proc(sharer, g_tqs_va, (u32)~0u);
+    }
+
+    int cont = fan == 1 ? proc_job_cont_pgrp((u32)pid) : -1;
+    if (stopped) (void)sys_torpor_wake_for_proc(stopped, g_tqs_va, (u32)~0u);
+    dl = timer_now_ns() + TEST_YIELD_BUDGET_NS;
+    while (!__atomic_load_n(&g_tqs_done, __ATOMIC_ACQUIRE) && timer_now_ns() < dl) sched();
+    s64 stopped_rc = g_tqs_rc;
+    int st = -42;
+    int reaped = wait_pid_for(pid, 0, &st);
+    if (g_tq_t[0]) test_thread_join_last(sharer, &g_tq_exited[0]);
+    if (sharer) test_proc_free_drained(sharer);
+
+    TEST_ASSERT(slept, "the first waiter published its Proc and slept");
+    TEST_EXPECT_EQ(fan, 1, "the fan stops the first waiter's group");
+    TEST_ASSERT(parked, "the first waiter is parked for the stop");
+    TEST_ASSERT(started, "the younger waiter reached the bucket");
+    TEST_EXPECT_EQ(woken, (s64)1, "the wake counted the sleeper alone");
+    TEST_ASSERT(finished, "and the sleeper's wait ended: the stopped waiter did not use it up");
+    TEST_EXPECT_EQ(again, (s64)0, "both had left the bucket");
+    TEST_EXPECT_EQ(cont, 1, "cont the group");
+    TEST_EXPECT_EQ(stopped_rc, (s64)TORPOR_OK, "the stopped waiter read its mark on resume");
+    TEST_EXPECT_EQ(reaped, pid, "reap the stopped waiter");
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree empty after cleanup");
+}
+
+// A wake's batch holds a stack record after it has dropped the lock. The wake stalls on a
+// peer with its mark made, and the bucket stays free: E-7's point, so a second wake comes
+// back while the stall lasts, where a wake done under the lock would hold it until the
+// stall ends. A second wake source then runs the waiter here, and it must wait on the
+// hold rather than leave the frame the wake can still reach.
+//
+// The wake is non-preemptible, so it needs its own CPU. In the test phase ready() stays
+// on this one and the secondaries stay parked, so it is placed and kicked.
+static volatile s64  g_tqw_woken;
+static volatile bool g_tqw_exited;
+static struct Proc  *g_tqw_proc;
+
+static void tqw_entry(void) {
+    g_tqw_woken = sys_torpor_wake_for_proc(g_tqw_proc, g_tq_va, 1);
+    test_thread_park_terminal(&g_tqw_exited);
+}
+
+void test_torpor_record_outlives_the_wake(void) {
+    if (!test_requires(smp_cpu_count() >= 2, "thylacine.smp", 0, true, "one CPU is online"))
+        return;
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree must be empty at test entry");
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+    s64 r = sys_burrow_attach_for_proc(p, PAGE_SIZE);
+    if (r <= 0) test_proc_free_drained(p);
+    TEST_ASSERT(r > 0, "burrow_attach failed");
+    tq_reset((u64)r, 60ll * 1000000ll);
+    g_tqw_proc = p; g_tqw_woken = (s64)-999; g_tqw_exited = false;
+
+    bool started = tq_start(p, 0);
+    struct Thread *sleeper = g_tq_t[0];
+    u64 spins_before = torpor_held_spins_for_test();
+    torpor_stall_wakes_for_test(true);
+    struct Thread *w = thread_create(p, tqw_entry);
+    bool stalled = false;
+    if (w) {
+        unsigned peer = (smp_cpu_idx_self() + 1u) % smp_cpu_count();
+        ready_on(peer, w);
+        (void)gic_send_ipi(peer, IPI_RESCHED);
+        // No sched() here: a yield onto an empty tree could steal the wake back.
+        u64 dl = timer_now_ns() + TEST_YIELD_BUDGET_NS;
+        while (!(stalled = torpor_wake_stalled_for_test()) && timer_now_ns() < dl)
+            __asm__ __volatile__("yield" ::: "memory");
+    }
+
+    s64  other = sys_torpor_wake_for_proc(p, g_tq_va, 1);
+    bool free_in_stall = torpor_wake_stalled_for_test();
+
+    // The cascade's own wake, under the wait_lock that keeps the rendez alive.
+    if (sleeper) {
+        irq_state_t ws = spin_lock_irqsave(&sleeper->wait_lock);
+        struct Rendez *rz = sleeper->rendez_blocked_on;
+        if (rz) (void)wakeup(rz);
+        spin_unlock_irqrestore(&sleeper->wait_lock, ws);
+    }
+
+    // ready() put it on this CPU, so this yield is what runs it. Done is read before the
+    // stall: done, with the stall still standing, means it left under the hold.
+    u64 dl = timer_now_ns() + TEST_YIELD_BUDGET_NS;
+    while (torpor_held_spins_for_test() == spins_before && !tq_done(0) &&
+           torpor_wake_stalled_for_test() && timer_now_ns() < dl)
+        sched();
+    bool spun = torpor_held_spins_for_test() != spins_before;
+    bool left_in_hold = tq_done(0) && torpor_wake_stalled_for_test();
+
+    torpor_stall_wakes_for_test(false);
+    bool finished = tq_finished(0);
+    dl = timer_now_ns() + TEST_YIELD_BUDGET_NS;
+    while (g_tqw_woken == (s64)-999 && timer_now_ns() < dl) sched();
+    s64 woken = g_tqw_woken, rc = g_tq_rc[0];
+
+    (void)sys_torpor_wake_for_proc(p, g_tq_va, (u32)~0u);
+    if (w) test_thread_join_last(p, &g_tqw_exited);
+    if (sleeper) test_thread_join_last(p, &g_tq_exited[0]);
+    test_proc_free_drained(p);
+
+    TEST_ASSERT(started, "the waiter reached the bucket");
+    TEST_ASSERT(stalled, "the wake reached its stall, with its mark made");
+    TEST_EXPECT_EQ(other, (s64)0, "a second wake found nobody: the first took the waiter off");
+    TEST_ASSERT(free_in_stall, "and it came straight back: no wake holds the bucket's lock");
+    TEST_ASSERT(spun, "the waiter ran, and found the wake holding its record");
+    TEST_ASSERT(!left_in_hold, "the waiter did not leave while the wake held its record");
+    TEST_ASSERT(finished, "lifting the stall let the waiter go");
+    TEST_EXPECT_EQ(woken, (s64)1, "the wake counted it");
+    TEST_EXPECT_EQ(rc, (s64)TORPOR_OK, "and the waiter read the mark");
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree empty after cleanup");
+}
+
+// A mark lands under the rendez's lock. A waiter holds that lock from reading its cond
+// through registering on the rendez, so a mark comes before the read, which sees it, or
+// after the registering, and finds it asleep. A mark outside the lock can land between:
+// it finds nobody asleep, so the wake counts nothing and wakes nothing, and the waiter
+// sleeps on a mark it has already missed (I-9).
+//
+// The waiter runs here and stops in that window, masked and under the lock. So the wake
+// comes from a peer.
+static volatile s64  g_tqc_woken;
+static volatile bool g_tqc_exited;
+static struct Proc  *g_tqc_proc;
+
+static void tqc_entry(void) {
+    u64 dl = timer_now_ns() + TEST_YIELD_BUDGET_NS;
+    while (!torpor_cond_stalled_for_test() && timer_now_ns() < dl)
+        __asm__ __volatile__("yield" ::: "memory");
+    g_tqc_woken = sys_torpor_wake_for_proc(g_tqc_proc, g_tq_va, 1);
+    test_thread_park_terminal(&g_tqc_exited);
+}
+
+void test_torpor_mark_takes_the_rendez_lock(void) {
+    if (!test_requires(smp_cpu_count() >= 2, "thylacine.smp", 0, true, "one CPU is online"))
+        return;
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree must be empty at test entry");
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+    s64 r = sys_burrow_attach_for_proc(p, PAGE_SIZE);
+    if (r <= 0) test_proc_free_drained(p);
+    TEST_ASSERT(r > 0, "burrow_attach failed");
+    // Past a yield budget, so a stranded waiter reads as not finished, and short enough
+    // that it then leaves on its own deadline: a wake can no longer find it.
+    tq_reset((u64)r, 3ll * 1000000ll);
+    g_tqc_proc = p; g_tqc_woken = (s64)-999; g_tqc_exited = false;
+
+    struct Thread *w = thread_create(p, tqc_entry);
+    g_tq_t[0] = thread_create(p, tq_entry);
+    if (w && g_tq_t[0]) torpor_stall_cond_for_test();
+    if (w) {
+        unsigned peer = (smp_cpu_idx_self() + 1u) % smp_cpu_count();
+        ready_on(peer, w);
+        (void)gic_send_ipi(peer, IPI_RESCHED);
+    }
+    if (g_tq_t[0]) ready(g_tq_t[0]);
+    bool finished = tq_finished(0);
+
+    u64 dl = timer_now_ns() + TEST_YIELD_BUDGET_NS;
+    while (g_tqc_woken == (s64)-999 && timer_now_ns() < dl) sched();
+    s64 woken = g_tqc_woken, rc = g_tq_rc[0];
+
+    dl = timer_now_ns() + 4000000000ull;
+    while (!tq_done(0) && timer_now_ns() < dl) sched();
+    if (w) test_thread_join_last(p, &g_tqc_exited);
+    if (g_tq_t[0]) test_thread_join_last(p, &g_tq_exited[0]);
+    test_proc_free_drained(p);
+
+    TEST_ASSERT(w != NULL && g_tq_t[0] != NULL, "thread_create failed");
+    TEST_ASSERT(torpor_cond_stalled_for_test(), "CONTROL: the waiter stopped in the window");
+    TEST_ASSERT(torpor_cond_saw_try_for_test(), "CONTROL: the wake came to mark it there");
+    TEST_ASSERT(!torpor_cond_saw_mark_for_test(), "no mark landed in the window");
+    TEST_EXPECT_EQ(woken, (s64)1, "the wake counted the waiter");
+    TEST_ASSERT(finished, "and its wait ended");
+    TEST_EXPECT_EQ(rc, (s64)TORPOR_OK, "as a wake");
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree empty after cleanup");
+}
+
+// A peer's MAP_FIXED over the word, between the wait's first load and its lock. The load
+// under the lock misses on a file page it may not wait for. The wait comes back as if
+// spuriously, having read nothing, and the next call faults the word in. A read under
+// the lock would be an extinction on a real server, which sleeps; this stub does not,
+// so the read count is what tells.
+#define TR_WORD_BYTE 0xABu
+static volatile int  g_tr_reads;
+static volatile int  g_tr_map_rc;
+static volatile s64  g_tr_rc[2];
+static volatile int  g_tr_reads_at[2];
+static struct Burrow *g_tr_file;
+
+static long tr_read(struct Spoor *c, void *buf, long n, s64 off) {
+    (void)c; (void)off;
+    g_tr_reads++;
+    u8 *b = (u8 *)buf;
+    for (long i = 0; i < n; i++) b[i] = TR_WORD_BYTE;
+    return n;
+}
+
+static struct Dev g_tr_dev = { .dc = '?', .name = "tr", .read = tr_read };
+
+static void tr_replace(void *arg) {
+    struct Proc *p = (struct Proc *)arg;
+    struct Burrow *gone = NULL;
+    spin_lock(&p->as->lock);
+    g_tr_map_rc = burrow_map_fixed(p, g_tr_file, g_torpor_vaddr, PAGE_SIZE, VMA_PROT_READ,
+                                   0, &gone);
+    spin_unlock(&p->as->lock);
+    if (gone) burrow_free_deferred(gone);
+}
+
+static void tr_entry(void) {
+    struct Proc *p = current_thread()->proc;
+    torpor_after_prefault_for_test(tr_replace, p);
+    for (int i = 0; i < 2; i++) {
+        g_tr_rc[i] = sys_torpor_wait_for_proc(p, g_torpor_vaddr, 0, 1000000);
+        g_tr_reads_at[i] = g_tr_reads;
+    }
+    __atomic_store_n(&g_torpor_done, 1u, __ATOMIC_RELEASE);
+    test_thread_park_terminal(&g_torpor_exited);
+}
+
+void test_torpor_word_replaced_under_the_wait(void) {
+    TEST_EXPECT_EQ(torpor_consumer_setup(0, 1000000), 0, "consumer fixture setup");
+    g_tr_reads = 0;
+    g_tr_map_rc = -999;
+    g_tr_rc[0] = g_tr_rc[1] = (s64)-999;
+    g_tr_reads_at[0] = g_tr_reads_at[1] = -1;
+    struct Spoor *s = spoor_alloc(&g_tr_dev);
+    TEST_ASSERT(s != NULL, "spoor_alloc");
+    g_tr_file = burrow_create_file(s, 0, PAGE_SIZE);
+    TEST_ASSERT(g_tr_file != NULL, "burrow_create_file");
+
+    struct Thread *consumer = thread_create(g_torpor_proc, tr_entry);
+    TEST_ASSERT(consumer != NULL, "thread_create failed");
+    ready(consumer);
+    TEST_YIELD_UNTIL(__atomic_load_n(&g_torpor_done, __ATOMIC_ACQUIRE) != 0u);
+    bool done = __atomic_load_n(&g_torpor_done, __ATOMIC_ACQUIRE) != 0u;
+
+    torpor_consumer_teardown(consumer);
+    burrow_unref(g_tr_file);
+    g_tr_file = NULL;
+
+    TEST_ASSERT(done, "the waiter came back");
+    TEST_EXPECT_EQ(g_tr_map_rc, 0, "the MAP_FIXED landed in the window");
+    TEST_EXPECT_EQ(g_tr_rc[0], (s64)TORPOR_OK, "the first wait returned as if spuriously");
+    TEST_EXPECT_EQ(g_tr_reads_at[0], 0, "and read nothing under the bucket's lock");
+    TEST_EXPECT_EQ(g_tr_rc[1], (s64)TORPOR_OK, "the second saw the file's word, not 0");
+    TEST_ASSERT(g_tr_reads_at[1] > 0, "having faulted it in with no lock held");
 }
