@@ -687,6 +687,21 @@ void p9_close_flush_failed(u32 fid, int rc) {
     cons_diag_line_emit(&dl);
 }
 
+void p9_close_unlock_lost(u32 fid, int rc) {
+    spin_lock(&g_closer_lock);
+    g_closer_st.unlocks_lost++;
+    spin_unlock(&g_closer_lock);
+    if (__atomic_load_n(&g_close_flush_quiet, __ATOMIC_RELAXED)) return;
+    struct cons_diag_line dl;
+    cons_diag_line_init(&dl);
+    cons_diag_line_puts(&dl, "9p: close: unlock of fid ");
+    cons_diag_line_putdec(&dl, (u64)fid);
+    cons_diag_line_puts(&dl, " failed rc ");
+    cons_diag_line_putdec(&dl, (u64)(rc < 0 ? -rc : rc));
+    cons_diag_line_puts(&dl, "\n");
+    cons_diag_line_emit(&dl);
+}
+
 static int closer_never_cond(void *arg) {
     (void)arg;
     return 0;

@@ -12,13 +12,17 @@ hazards: []
 abis: []
 design: ["docs/ARCHITECTURE.md section 9.2"]
 created: 2026-08-03
-updated: 2026-11-03
+updated: 2026-11-09
 ---
 ## The lock slots (B-3h2, 2026-10-29)
 
 Five slots serve [[sub-kernel-filelock]] (ARCH 9.6.11):
 - `lock(c, type, start, len, test)` acts as the open file `c` and never
-  waits. A conflict is `-T_E_AGAIN`.
+  waits on a conflict: a conflict is `-T_E_AGAIN`. An unlock that could not be
+  sent for want of memory is sent again, after a wait only a death ends, until
+  the server answers it or drops the owner's locks anyway (2026-11-06). In an
+  exit's close it is sent once, and what it owes goes to a closer while another
+  reference holds the open, and otherwise with the fid's clunk (2026-11-09).
 - `lock_owner(c, &err)` mints an unpublished Spoor naming the same file
   through its own fid: the Proc owner.
 - `lock_same_file(a, b)` is non-blocking. It is asked only of two Spoors of

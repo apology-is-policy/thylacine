@@ -51,7 +51,8 @@ testing precisely because it is the one part of this file that is a pure functio
 — everything else is entangled with the machine state.
 
 **The slide.** Masking preserves eleven bits at 8 MiB alignment, giving 2048
-distinct positions inside a 16 GiB window. That is deliberately narrower than the
+masked values inside a 16 GiB window; the non-zero contract folds the zero value
+onto the first step, so 2047 distinct slides. That is deliberately narrower than the
 address space allows. The alignment has been widened twice, each time because a
 sanitizer build's image outgrew the fixed page-grain mapping, and each widening
 costs a bit of entropy — the current figure is the accumulated result of image

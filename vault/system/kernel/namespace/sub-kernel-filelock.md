@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/ARCHITECTURE.md section 9.6.11"]
 created: 2026-10-29
-updated: 2026-11-05
+updated: 2026-11-09
 ---
 ## Purpose
 
@@ -79,7 +79,11 @@ per (Proc, file), and which file each names.
   once granted, that its descriptor still names the same Spoor. If it does
   not, the call unlocks the range it took and answers `-T_E_BADF`. Without
   this, a lock whose descriptor closed mid-call would outlive the close meant
-  to drop it.
+  to drop it. The unlock is answered before the call returns, a shortage of
+  memory only delaying it
+  (the Dev's unlock contract, [[sub-kernel-dev]]). A program told EBADF may take
+  the range again at once, and an unlock that landed after that take would drop
+  it.
 - **No deadlock detection.** Stratum has none, and Linux has none for OFD
   locks. `_WAIT` never answers EDEADLK.
 
@@ -404,11 +408,44 @@ Round 3 (Fable 5.1: 0 P0, 0 P1, 0 P2, 2 P3) found the close-work posture sound. 
 `filelock.wait`'s assert that the flag ends with the call could not fail. No table
 governs the harness's Proc, so the classifier never set the flag in the first place.
 The assert is gone, and `notes.native_class` now witnesses the dispatcher's exit clear
-([[sub-kernel-syscall-dispatch]]). Its F2, a re-check unlock refused for a reason other
-than a cancellation, is under Caveats. The reviewer suggested removing the entry when it
-is alone. That would clunk the clone and drop every lock the entry holds, including one
-a peer thread took on another range after the close. A lock silently lost is worse than
-one held until the Proc exits.
+([[sub-kernel-syscall-dispatch]]). Its F2 was a re-check unlock refused for a reason
+other than a cancellation. The reachable case: the client could not allocate the reply
+buffer, the frame never left, and the session stayed live. The granted entry was then
+kept, and the lock stayed on the server until the Proc next closed a descriptor of the
+file, or exited. The reviewer suggested removing the entry when it is alone. That would
+clunk the clone and drop every lock the entry holds, including one a peer thread took on
+another range after the close. Instead every unlock is sent until the server answers it
+(2026-11-06, branch aux-3-unlock; [[sub-kernel-ninep-client]]'s `p9_client_unlock`). The
+re-check waits for memory as a close does, killable only. Three other senders had the
+same loss and get the same fix. A close's whole-file unlock through the Proc owner, sent
+while another lock call holds the entry, could fail and leave every lock the Proc held on
+the file. So could the open file's last close and the closer's job, when another
+reference keeps the open alive.
+
+That fix's round 1 (Fable 5.1: 0 P0, 0 P1, 0 P2, 3 P3; the author found two P2s) bounded
+the waits a kill cannot reach. An exit's close sends once: its Proc's memory is freed at
+reap, after the close, so a wait there could wait on itself. What it could not send stays
+owed, for a closer when another reference holds the open and otherwise for the clunk that
+follows. A closer gives up after about a second, as it does for its own sends, sets the
+grant again and says so (`9p: close: unlock of fid N failed rc R`). And the identity a
+close's whole-file unlock learns first is sent again too. The guarantee: a thread a kill
+reaches sends until the server answers; a closer for about a second, then loudly; an
+exit's close once, then the clunk or a closer (2026-11-09). Round 2 (Fable 5.1: 0 P0,
+0 P1, 0 P2, 4 P3) found the "never left" value shared a wire errno (a server's EAGAIN
+read as owed), and the closer reporting a server's refusal as a loss, which Stratum's
+ESTALE for a file unlinked under the lock would have made a gate red. Never left is now
+`P9_E_UNSENT`, outside any ecode, a flushed unlock is told by the call's mark, and a
+refusal is an answer everywhere.
+
+The rejected design published an owed range on the entry. The next lock call through the
+entry would pay it first, and the closer would pay it when the entry stays idle. Paying
+later is exactly the trap: the program, told EBADF, may legitimately take the range again
+through another descriptor, and a late owed unlock would silently drop that new lock.
+That design closed the trap only by making every later call through the entry wait for
+the payment. It also needed preallocated storage for the owed ranges and for the closer
+job, because the failure is itself an allocation failure. A bounded retry was rejected for
+the re-check, which a kill reaches: memory that outlasts the budget would leave the same
+leak, silently.
 
 Booted at the join's lease 2 (87a56ff3c): each of the fix sabotages J13-J25 went red at
 its own leg, on the suite narrowed to `filelock.`, `dev9p.` and `notes.native_class`
@@ -425,13 +462,14 @@ native or Pouch wait since the aux join brought item 11c (2026-11-05). Go's
 
 - `_WAIT` is a poll (1 to 64 ms), not a wakeup: 9P2000.L has no lock
   callback.
-- A Proc take's re-check unlock can be refused for a reason other than a
-  cancellation. The reachable case is the client running out of memory for
-  the reply buffer: it frees the tag and the session stays live. The granted
-  entry is then kept, and the lock stays on the server until the Proc closes
-  a descriptor of the file again or exits. Tracked (OPEN-BUGS 2026-11-05, the
-  join's round 3 F2). The fix is an owed unlock that the session's closer
-  retries, as Linux's lock clients retry a failed unlock asynchronously.
+- The post-grant re-check races as Linux's does. Thread B closes the descriptor
+  thread A is taking through. Thread C then takes an overlapping range through
+  another descriptor, after B's close and before A's re-check unlock lands. A's
+  unlock drops C's lock, because one owner holds both. Only a program that closes a
+  descriptor while another thread locks through it can see this. Under memory
+  pressure the unlock waits, so the window lasts as long as that wait.
+- A server that answers an unlock with an error keeps the range: that is
+  I-14's non-conformant server, and nothing is retried.
 
 ## History
 

@@ -251,7 +251,14 @@ void p9_close_flush_failed(u32 fid, int rc);
 // it as a job error, since closer_serve cannot tell. Holds no lock.
 void p9_close_job_lost(u32 fid, int rc);
 
-// Tests: a leg that loses a run on purpose keeps the line out of the log.
+// Print `9p: close: unlock of fid N failed rc R` and count it: a close's unlock
+// of a fid a live session still holds never reached the server, so the open
+// keeps its locks until its last reference clunks the fid. A refusal is the
+// server's answer, and is not this.
+void p9_close_unlock_lost(u32 fid, int rc);
+
+// Tests: a leg that loses a run or an unlock on purpose keeps its line out of
+// the log (the count still moves).
 void p9_close_flush_quiet_for_test(bool quiet);
 
 // Boot: start the pool with its first closer. -1 if it could not be created.
@@ -277,6 +284,7 @@ struct p9_closer_stats {
     u64 spawn_failed;
     u64 reaped;
     u64 live_refusals;   // p9_clunk_refused lines, from every caller
+    u64 unlocks_lost;    // p9_close_unlock_lost reports, from every caller
 };
 #ifdef KERNEL_TESTS
 void p9_closer_stats(struct p9_closer_stats *out);

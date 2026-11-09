@@ -1,33 +1,35 @@
-// Scheduler dispatch + Plan 9 idiom layer (P2-Ba sched/ready; P2-Bb
-// adds sleep/wakeup over Rendez). Per ARCH §8.
+// Scheduler dispatch and the Plan 9 sleep/wakeup layer over Rendez (ARCH 8.4,
+// 8.12).
 //
 // State model:
-//   - One run tree per priority band (INTERACTIVE / NORMAL / IDLE).
-//     Implemented as a doubly-linked list sorted ascending by `vd_t`.
-//     The head holds the minimum vd_t — the next-to-run for the band.
-//   - Highest-priority band with runnable threads wins; within a band,
-//     pick-min-vd_t.
-//   - On yield (sched() with prev->state == RUNNING): prev's vd_t is
-//     advanced past every other runnable thread's vd_t (g_vd_counter++)
-//     so prev lands at the back of the rotation; prev → RUNNABLE +
-//     inserted into the band's tree; pick-next switches in.
-//   - On block (sched() with prev->state set to SLEEPING by caller):
-//     prev is NOT inserted into the run tree — it remains SLEEPING
-//     until some peer transitions it back via wakeup() / ready(). The
-//     caller's responsibility to set state BEFORE calling sched().
+//   - Each CPU owns a struct CpuSched: one run tree per band (INTERACTIVE /
+//     NORMAL / IDLE), each a list sorted ascending by vd_t; its own monotonic
+//     vd_counter; a pinned idle thread, so the CPU always has a current
+//     thread; and the lock that guards them.
+//   - The highest band with a runnable thread wins; within a band, the
+//     minimum vd_t.
+//   - On yield (sched() with prev->state == RUNNING): prev takes
+//     cs->vd_counter++, which puts it behind every runnable thread of its
+//     band, and goes back into the tree.
+//   - On block (sched() with prev->state set to SLEEPING by the caller first):
+//     prev stays out of every tree until wakeup() or ready() puts it back.
 //
-// At P2-Ba+P2-Bb this is FIFO-like dispatch keyed on monotonic vd_t.
-// Full EEVDF math (vd_t = ve_t + slice × W_total / w_self with weighted
-// virtual time advance + bounded latency proof I-17) lands at P2-Bc.
+// vd_t is a per-CPU rotation counter, not yet EEVDF's weighted virtual
+// deadline (vd_t = ve_t + slice x W_total / w_self). The weighted math and the
+// latency bound I-17 names are a design target, not built.
 //
-// UP + no preemption: no contention on the run tree. sleep/wakeup use
-// per-Rendez spin_lock_irqsave; the IRQ mask is real (PSTATE.DAIF.I)
-// even on UP and is what makes the wait/wake protocol robust against
-// IRQ-context wakers (P2-Bc lands the timer-IRQ-driven scheduler tick
-// that uses this discipline). P2-C adds the SMP CPU-cross IPI / per-
-// CPU run-tree refinements; the per-Rendez spinlock then becomes a
-// real contention point and sched() needs the finish_task_switch
-// pattern — see trip-hazards in docs/phase2-status.md.
+// SMP (ARCH 8.4.1-8.4.5): ready() places a thread through select_target_cpu
+// and kicks the target with an IPI; a CPU whose trees are empty pulls from a
+// peer (balance_pull, which is try_steal). The on_cpu protocol carries the
+// switch: set under the CPU's lock before cpu_switch_context, cleared with a
+// RELEASE store by the resuming thread's finish_task_switch, and spun on by
+// wakeup() and thread_free before they touch a thread mid-switch. The run-tree
+// lock is held across the whole switch.
+//
+// Preemption: each CPU's tick, and a cross-CPU placement, set that CPU's
+// need_resched; preempt_check_irq switches on the way out of an IRQ unless the
+// thread holds a spinlock (#360), is inside a syscall body (ARCH 8.12: deferred
+// to the EL0-return tail), or is not RUNNING. Kernel threads stay preemptible.
 
 #include <thylacine/dtb.h>
 #include <thylacine/extinction.h>

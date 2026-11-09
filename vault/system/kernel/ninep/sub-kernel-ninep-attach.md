@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: []
 created: 2026-07-31
-updated: 2026-11-02
+updated: 2026-11-09
 ---
 ## A closer entry may be a job alone (B-3h2, 2026-10-29)
 
@@ -365,7 +365,16 @@ it sleeps on, the `kicked` flag, `exited`, `started`), `g_closer_idle` (at
 most one),
 `g_closer_retired`, and `struct p9_closer_stats` (threads, idle,
 idle_parked, retired, runq, pending, sent, dropped, refused, spawned,
-spawn_failed, reaped, live_refusals).
+spawn_failed, reaped, live_refusals, unlocks_lost).
+
+`p9_close_unlock_lost(fid, rc)` prints `9p: close: unlock of fid N failed rc R` and counts
+`unlocks_lost`: a close's unlock of a fid a live session still holds never reached the
+server within the caller's bound, so the open keeps its locks until its last reference
+clunks the fid ([[sub-kernel-ninep-dev9p]]). A refusal is the server's answer and is not
+reported: Stratum answers ESTALE for a file unlinked under the lock, whose records went
+with it (round 2 F2, 2026-11-09). The closer's own patience bounds a closer's
+unlock (`P9_RESEND_CLOSER`, about the ~1 s of `CLOSER_RETRIES`). The flush-quiet test
+knob silences the line, not the count.
 
 `p9_close_job_lost` prints the flush-failed line and counts a job error for a job alone,
 which `closer_serve` cannot tell: its entry names no fid. Such a job runs once, because the
@@ -502,7 +511,25 @@ input.)
 ## Tests
 
 `kernel/test/test_9p_closer.c` (`p9_closer.*`, 2026-09-29, each seen red by a
-sabotage): `dying_close_delivers_tclunk` (a dying thread drops a walked
+sabotage). The unlock legs (2026-11-06, bounded 2026-11-09; [[sub-kernel-ninep-client]]'s
+`p9_client_unlock`): `unlock_waits_out_a_reply_oom`,
+`close_unlock_waits_out_a_reply_oom` and `closer_unlock_waits_out_a_reply_oom`. Each
+starves the reply buffer by raising `recv_cap` past any buddy order. The control in the
+first: `p9_client_lock`'s unlock fails, never reaches the server, and the fid stays
+bound. In each, the sender is still waiting after two refused sends, with nothing on the
+wire. Once `recv_cap` is put back, exactly one UNLCK reaches the server. The senders are
+dev9p's unlock on a kernel thread, a last close on a kernel thread, and a closer's job
+for a close on a dying thread whose open another reference keeps alive.
+`exit_close_unlock_sends_once`: a close under `exit_close_active` returns while the
+shortage lasts, sent once, the unlock owed; the last reference's clunk reaches the server
+and no UNLCK does. `closer_unlock_gives_up_loudly`: a shortage past the closer's patience
+ends its job after `P9_RESEND_CLOSER` sends, one `unlocks_lost`, no UNLCK, the grant set
+again. `exit_close_refused_unlock_is_answered` and `closer_refused_unlock_is_answered`: a
+server that refuses the unlock (EAGAIN and EINTR at an exit's close, ESTALE at a closer's)
+leaves nothing owed, nothing reported. `lock_ident_waits_out_a_reply_oom`: `dev9p.lock_ident` waits out the shortage and
+one Tgetattr reaches the server. `unlock_ends_when_its_session_dies`: the session's death
+ends the wait with EIO. A leg whose sender never returned skips its teardown and latches
+`g_uo_abandoned`, which refuses every later unlock leg rather than share its session. The older legs: `dying_close_delivers_tclunk` (a dying thread drops a walked
 Spoor's last reference over an owned session, and a closer sends the
 Tclunk), `stalled_session_holds_one_closer` (a server that stops answering
 holds one closer while a spare sends another session's Tclunk; its death

@@ -15,7 +15,7 @@ hazards: [haz-shared-stream-desync]
 abis: []
 design: [docs/LARDER-DESIGN.md, docs/FID-LIFECYCLE-DESIGN.md, docs/POUNCE-DESIGN.md]
 created: 2026-07-31
-updated: 2026-11-05
+updated: 2026-11-09
 ---
 ## The fid a cached open keeps, and locks on it (B-3h3, 2026-11-02)
 
@@ -113,6 +113,22 @@ dev9p serves the five lock slots of [[sub-kernel-dev]] for
 - A grant drops the qid's Larder attributes and pages. The invalidates log
   the qid, so a fill in flight from before the grant is dropped rather than
   installed after it.
+- Every unlock goes through `p9_client_unlock` ([[sub-kernel-ninep-client]]), which
+  sends again one that never left for want of memory. `lock_unlock_resends` sets the
+  bound: none on a thread a kill reaches (`dev9p_lock`'s unlock: a lock call's own, a
+  close's through the Proc owner, and the one a lock call owes when its descriptor
+  was closed during the call; and `lock_release_all` from the last close), and 0 in an
+  exit's close (`exit_close_active`), whose Proc's memory is freed at reap, after the
+  close, so a wait there for memory could wait on itself. The closer's job passes
+  `P9_RESEND_CLOSER`, about a second. When it gives up on a fid the session still
+  holds, it sets `lock_granted` again and reports `9p: close: unlock of fid N failed
+  rc R` (`p9_close_unlock_lost`, counted); the open keeps the locks until its last
+  reference clunks the fid. A refusal is the server's answer there as at the close
+  (Stratum's ESTALE for a file unlinked under the lock holds nothing). `dev9p_lock_ident` learns the
+  generation with `p9_client_getattr_patient`, so a close's whole-file unlock through
+  the Proc owner is not lost one round trip earlier. Before 2026-11-06 a reply buffer
+  that could not be allocated answered `-T_E_IO` with the range still held (the aux
+  join's round 3 F2); the bounds are its round 1 (2026-11-09).
 - `dev9p_fd_close`, the last descriptor's close (`Dev.fd_close`), flushes the
   open's run, then exchanges `lock_granted` (sticky until then) and, if it was set,
   sends a whole-file unlock and waits for it. `dev9p_close`, the last reference,
@@ -121,8 +137,13 @@ dev9p serves the five lock slots of [[sub-kernel-dev]] for
   wait (`close_may_wait`) queues the flush and the unlock to a closer when another
   reference holds the Spoor (`dev9p_lock_flush_queue` with `release_locks`), and
   otherwise leaves them to the last reference, which follows at once and hands the
-  run to a closer with its clunk. `dev9p_lock_held` tells the handle layer to land
-  every open's run first (ARCH 9.6.11).
+  run to a closer with its clunk. An unlock the server never applied (`-P9_E_UNSENT`:
+  never sent; `-P9_E_INTR` with the call's mark, `wb_note_cancelled`: flushed) on a
+  fid the session still holds stays owed the same way, as does one a death cut short;
+  a server's refusal is an answer, its Rlerror(EAGAIN) and Rlerror(EINTR) included. A job that
+  cannot be allocated for an owed unlock is reported with the unlock line.
+  `dev9p_lock_held` tells the handle layer to land every open's run first (ARCH
+  9.6.11).
 - Every set-lock first lands `c`'s write-behind run (`dev9p_lock_sync`): an
   unlock gives its range up, and a conversion to a read lock admits readers. A
   test lands nothing. A flush a caught note cancelled answers `-T_E_INTR` and
@@ -190,6 +211,12 @@ false still refuses), `dev9p.open_create_refuses_non_end`,
 `dev9p.client_init_clears_ends` and `dev9p.create_mode_on_the_wire`. Every M7
 creator holds CAP_DAC_OVERRIDE, so only M7 can refuse, and each refusal sits
 beside an admitted control one variable away.
+
+A create whose parent descriptor names a file answers ENOTDIR before any RPC,
+whatever the file's mode: `spoor_create_install` tests the parent's QTDIR before
+the W|X check and the clone-walk (#81). `dev9p.create_into_a_file_is_enotdir`
+witnesses it with the session root's QTDIR cleared, beside the same create from
+the directory, which reaches the wire.
 
 F-5 ([[dec-2026-10-19-create-group-from-parent]]): the gid a create carries is
 the parent directory's, which `spoor_create_install` reads from the parent's

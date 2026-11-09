@@ -21,7 +21,7 @@ hazards: [haz-shared-stream-desync, haz-single-waiter-rendez, haz-death-path-wak
 abis: []
 design: ["docs/ARCHITECTURE.md sections 21 + 21.10 + 8.8.1.1"]
 created: 2026-07-31
-updated: 2026-11-02
+updated: 2026-11-09
 ---
 ## Tlock and Tgetlock (B-3h, 2026-10-29)
 
@@ -32,6 +32,42 @@ error: the server never waits. The session sends the fid as `proc_id` and an
 empty client id. Stratum keys its owner on the fid and ignores both. An Rlerror
 maps through `map_error`, which folds a server EBADF to `-P9_E_IO`. The
 callers are [[sub-kernel-ninep-dev9p]]'s lock slots.
+
+**A frame that never left is sent again (2026-11-06, the aux join's round 3 F2;
+bounded 2026-11-09 by that fix's round 1).** A frame never reaches the wire when
+`client_run_ex` takes its tag back because the reply buffer (`kmalloc(recv_cap)`) or the
+spill of the frame could not be allocated. Such a take-back sets its `*unsent`
+(`client_run` is the same call with no flag), and the server knows nothing of the op.
+`client_resend_wait` decides whether to send it again: only an unsent frame, only on a
+thread no death has reached, only while the sends are under the caller's bound, and
+after a backoff (1 ms doubling to 64 ms) on a private Rendez that is never woken. It
+answers 0 (send again), the op's own error when the frame left (an Rlerror among them: a
+server's EIO is never resent), `-P9_E_UNSENT` when it never did, or `-P9_E_INTR` when a
+caught note ended a `tsleep_noteintr` wait. Two callers:
+- `p9_client_unlock(c, fid, start, length, client, client_len, max_resends, &status)`,
+  a Tlock UNLCK, waits in a plain `tsleep`: no note ends it. `P9_RESEND_UNBOUNDED` is
+  for a thread a kill reaches, and sends until the server answers. `P9_RESEND_CLOSER`
+  (21: 1, 2, ... 32 ms, then 15 x 64 ms, 1023 ms in all) is a closer's own patience, the
+  ten doubling retries of `closer_send`. A bound of 0 sends once (an exit's close,
+  [[sub-kernel-ninep-dev9p]]). A dead session or an unbound fid ends it at the loop's
+  top or at the build, and the server drops the fid's locks in both.
+- `p9_client_getattr_patient` (`client_getattr` with `patient`) sends without bound in
+  `tsleep_noteintr`, so a waiting take's identity learn stays interruptible, while a
+  close's, on a thread that has not opted in, waits as a plain `tsleep` does. Tgetattr
+  is idempotent. `p9_client_getattr` is the same call sent once.
+
+`P9_E_UNSENT` (4096) is no wire ecode: `map_error` passes a server's Rlerror only in
+[1, 4095], so a refusal can never read as a frame that never left (round 2 F1: the first
+sentinel, `-P9_E_AGAIN`, was a server's EAGAIN too). `dev9p_wire_errno` folds it to EIO
+before it can reach a program.
+
+`unsent_resends` counts the sends again. Legs, in [[sub-kernel-ninep-attach]]'s file:
+`p9_closer.unlock_waits_out_a_reply_oom`, `close_unlock_waits_out_a_reply_oom`,
+`exit_close_unlock_sends_once`, `exit_close_refused_unlock_is_answered`,
+`closer_unlock_waits_out_a_reply_oom`, `closer_refused_unlock_is_answered`,
+`closer_unlock_gives_up_loudly`, `lock_ident_waits_out_a_reply_oom` and
+`unlock_ends_when_its_session_dies`. Each starves the reply buffer by raising `recv_cap`
+past any order the buddy allocator serves.
 
 ## The session's create ends (2026-10-19, B-3e M7)
 

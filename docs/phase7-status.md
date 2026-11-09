@@ -3318,3 +3318,13 @@ Audit: Fable 5.1 each round: r1 0/0/0/3 at f5fe6d8e4, r2 0/0/1/2 at f81f1f217, r
 Tests: green 2421 plus guest legs on b441f5c35. 37 sabotages on the join (lease 1, f5fe6d8e4: 36 red, E07 the recorded equivalent) and 13 on the fixes (lease 2, 87a56ff3c: all red). test-fault 23/23; viv-run and r5f9-ash PASS. The full SMP matrix (vote 37): N=10, 0 corruption across default-smp1/4/8 and ubsan-smp4/8. The UBSan kernel first overflowed its 8 MiB L3 window; four test statics moved to the heap (b441f5c35).
 
 **Did not run:** the rest of the interactive fleet. No spec models the lock path. Record: `chg-2026-11-06-aux-join2`.
+
+## An unlock that never left is sent again: the join's round 3 F2 -- 2026-11-09
+
+Branch aux-3-unlock, off aux-3-tidy2. A Tlock UNLCK whose reply buffer or spill could not be allocated never reached the server, and on a live session the lock stayed: for the Proc's life in the post-grant re-check's case, while the call answered EBADF. `p9_client_unlock` now sends such a frame again, synchronously (43c1916d9). How long depends on who waits. A thread a kill reaches waits until the server answers. The closer waits about a second (`P9_RESEND_CLOSER`, its own rule), then sets the grant again and prints `9p: close: unlock of fid N failed rc R`, which `tools/test.sh` fails on. An exit's close sends once, then leaves the unlock to a closer or to the last reference's clunk. The identity a close's whole-file unlock learns first is resent the same way. A frame that never left reads `P9_E_UNSENT`, which no server ecode can produce, and a server's refusal is an answer everywhere. The owed-range design in OPEN-BUGS was rejected: paying an unlock later can drop a lock the program took after EBADF.
+
+Audit: Fable 5.1 r1 at 43c1916d9, 0/0/0/3 plus the author's two P2s (fixed in 25321863c); r2 at 25321863c, 0/0/0/4, clean (fixed in 54341523b).
+
+Tests: 2431. Leases: runs-1 green 2426, U01-U05 red; runs-2 green 2429 plus guest legs, U01-U11 red, regreen == green; runs-3 (54341523b, 06:49-07:02Z) green 2431 plus guest legs with the nine unlock legs, U12-U16 each red at its leg (U13 at tools/test.sh's new verdict line, its leg passing), regreen == green (c15ef522807edc30).
+
+**Did not run:** the full SMP matrix (held since 11-02), the interactive fleet, test-fault. No spec models the lock path. Record: `chg-2026-11-09-aux-unlock`.
