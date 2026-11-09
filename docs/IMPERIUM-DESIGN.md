@@ -566,9 +566,11 @@ can veto any of them:**
 5. **BEGIN discards ALL pending input** -- the ring's committed lines as well
    as the cooked partial line: a completed-but-undrained line is pre-SAK input
    by the same argument (the shell had not consumed it, and the SAK is the
-   operator declaring that what follows is for the trusted prompt). Documented
-   residue: a PL011 holdback byte parked by #174 back-pressure (a FULL ring at
-   the SAK instant) is pumped in by the attached reader's first drain.
+   operator declaring that what follows is for the trusted prompt). The serial
+   side queue goes too (vote 73, 2026-11-05: serial bytes read before the SAK
+   that the ring had no room for), so no pre-SAK byte is left for the attached
+   reader's first drain; the old residue, a held PL011 byte pumped in there, is
+   gone with the holdback.
 6. **Three fail-safe closes, all under `g_proc_table_lock`:** the trusted
    Proc's death (the ZOMBIE chokepoint; the arm dies with it), its own
    `SYS_CONSOLE_RELINQUISH` (it could never END through the gate again; the

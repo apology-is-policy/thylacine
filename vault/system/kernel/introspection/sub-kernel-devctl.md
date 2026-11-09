@@ -14,7 +14,7 @@ locks: [lock-proc-table]
 abis: []
 design: ["docs/ARCHITECTURE.md section 9.4", "docs/PROWL-DESIGN.md section 3.4", "docs/VIVARIUM.md section 6.17", "docs/IMPERIUM-DESIGN.md section 11.3 item 10"]
 created: 2026-08-02
-updated: 2026-10-27
+updated: 2026-11-09
 ---
 ## Session transport accounting
 
@@ -36,7 +36,8 @@ observations, not authorization inputs; see [[sub-kernel-srvconn]].
 The `/ctl` Dev (`dc='C'`, uppercase to leave `c` for the console): eight flat
 text files rendering machine-wide state — the process list, physical memory,
 the registered Devs, the KASLR base, scheduler stats, per-CPU meters, the
-console's admission counters, and the live 9P sessions.
+console's admission and loss counters (`/ctl/cons`, `rx_drop_side` among them
+since vote 73), and the live 9P sessions.
 
 Read-only. Admin *commands* were deferred and never landed; `write` refuses
 unconditionally.

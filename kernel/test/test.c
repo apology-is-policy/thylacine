@@ -1701,15 +1701,16 @@ struct test_case g_tests[] = {
     { "cons.ring_unclaimed_on_clean_boot",     test_cons_ring_unclaimed_on_clean_boot,     false, NULL },
     { "cons.ring_fill_drain",          test_cons_ring_fill_drain,          false, NULL },
     { "cons.ring_full_refuses",        test_cons_ring_full_refuses,        false, NULL },
-    { "cons.rx_can_accept_boundary",   test_cons_rx_can_accept_boundary,   false, NULL },
     { "cons.full_line_fits_ring",      test_cons_full_line_fits_ring,      false, NULL },
     { "cons.full_ring_never_blocks_sak", test_cons_full_ring_never_blocks_sak, false, NULL },
     { "cons.feed_write_short_on_full", test_cons_feed_write_short_on_full, false, NULL },
     { "cons.refused_byte_is_not_echoed", test_cons_refused_byte_is_not_echoed, false, NULL },
     { "cons.serial_silent_gate",       test_cons_serial_silent_gate,       false, NULL },
     { "cons.serial_silent_sak_restores", test_cons_serial_silent_sak_restores, false, NULL },
-    { "cons.rx_holdback_reoffer",      test_cons_rx_holdback_reoffer,      false, NULL },
-    { "cons.rx_holdback_not_stranded", test_cons_rx_holdback_not_stranded, false, NULL },
+    { "cons.rx_side_sak_and_intr_behind_full_ring", test_cons_rx_side_sak_and_intr_behind_full_ring, false, NULL },
+    { "cons.rx_side_cooked_intr_in_order", test_cons_rx_side_cooked_intr_in_order, false, NULL },
+    { "cons.rx_side_cooked_typing_past_half", test_cons_rx_side_cooked_typing_past_half, false, NULL },
+    { "cons.rx_side_full_drops_and_counts", test_cons_rx_side_full_drops_and_counts, false, NULL },
     { "cons.rx_drop_counters",         test_cons_rx_drop_counters,         false, NULL },
     { "cons.ctrlc_consumed",           test_cons_ctrlc_consumed,           false, NULL },
     { "cons.break_sets_sak",           test_cons_break_sets_sak,           false, NULL },
@@ -1728,6 +1729,7 @@ struct test_case g_tests[] = {
     // IM-1: the trusted EPISODE (IMPERIUM-DESIGN.md 11.3; I-27 on serial).
     { "cons.episode_requires_arm",     test_cons_episode_requires_arm,     false, NULL },
     { "cons.episode_begins_on_sak",    test_cons_episode_begins_on_sak,    false, NULL },
+    { "cons.rx_side_discarded_at_begin", test_cons_rx_side_discarded_at_begin, false, NULL },
     { "cons.episode_discards_pending_input",
                                        test_cons_episode_discards_pending_input, false, NULL },
     { "cons.episode_freezes_nonattached_reader",
@@ -3700,25 +3702,22 @@ void test_run_all(void) {
         // The UART stall lives in the arch layer, not the cons layer, so it gets
         // a bit here rather than in the CONS_TEST_OWNED_* set.
         #define TEST_OWNED_UART_TX_STALL (1u << 4)
-        // #129-audit F2: the RX holdback + its pause latch is the SIXTH piece of
-        // global console state a failing test can leave armed -- and the worst,
-        // because a stranded pause leaves RX MASKED, so console input is dead for
-        // the rest of the boot and every later console test mis-reports.
-        // Per-site cleanup cannot cover a site that does not exist yet (#133).
-        #define TEST_OWNED_UART_RX_HOLD  (1u << 5)
+        // Bit 5 is free: it swept the RX holdback, which vote 73 retired. The
+        // side queue that replaced it is production state (a person typing
+        // into a full ring fills it), so cons_test_reset clears it and no sweep
+        // keys on it (the #136-audit F2 lesson).
         u32 owned = cons_test_release_owned_state();
         if (uart_test_tx_stalled()) {
             uart_test_tx_stall(false);
             owned |= TEST_OWNED_UART_TX_STALL;
         }
-        if (uart_test_rx_release_hold()) owned |= TEST_OWNED_UART_RX_HOLD;
         if (owned != 0) {
             // Bit 6 = CONS_TEST_OWNED_EPISODE (cons.h; IM-1): the table spans
-            // the cons set AND the two arch bits above, so it is indexed by
-            // the UNION's bit numbers.
+            // the cons set AND the arch bit above, so it is indexed by the
+            // UNION's bit numbers.
             static const char *const names[7] = {
                 "echo-capture", "tx-role", "mgr-hold", "reader-busy", "uart-tx-stall",
-                "uart-rx-hold", "episode"
+                "-", "episode"
             };
             uart_puts("LEAKED-STATE(");
             bool first = true;

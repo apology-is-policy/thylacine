@@ -121,6 +121,13 @@ sends BREAK, the serial secure-attention gesture. The development launcher
 `THYLACINE_SERIAL_SAK=0` to test graphical-only operation. Boot firmware that
 omits the token leaves serial authorization disabled.
 
+BREAK and Ctrl–C act as soon as they arrive, even while a program that reads
+nothing holds the console and earlier typing is still waiting. About 4,600 typed
+bytes wait, in order, for the next program that reads; past that the newest
+keystrokes are dropped, and `/ctl/cons` counts them as `rx_drop_side`. When BREAK
+opens the trusted dialog it discards the typing that was still waiting, so none
+of it reaches the dialog or, afterwards, the shell.
+
 ## Technical Details
 
 Corvus checks eligibility and the distinct authorization key. Lictor owns the

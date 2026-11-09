@@ -20,7 +20,7 @@ design:
   - "docs/TAPESTRY.md section 18.7 (the renderer drain/feed)"
   - "docs/LIFE-SUPPORT.md LS-8"
 created: 2026-08-02
-updated: 2026-10-28
+updated: 2026-11-09
 ---
 ## Graphical attention and serial posture
 
@@ -346,13 +346,24 @@ corrupt the assertions it exists for.
 ### Receive back-pressure
 
 **Both** producers are refused rather than silently dropped, and the admission
-answer is returned to them. The serial drain **stops reading the FIFO** and masks
-receive, leaving the bytes in hardware; the graphical renderer's keyboard feed
-returns a **short count**. The reader resumes the drain after freeing space.
-Masking rather than clearing is what makes resumption reader-driven and
-idempotent.
+answer is returned to them. The graphical renderer's keyboard feed returns a
+**short count**. The serial drain cannot hold a byte for a re-offer without
+leaving everything behind it unread, a BREAK and a Ctrl-C included, so its
+refused bytes wait in a **side queue** (vote 73, 2026-11-05): 4096 entries under
+the console lock, moved into the line discipline by the reader after each drain
+and discarded by BEGIN with the ring. `cons_rx_receive`, the drain's entry,
+never refuses: a BREAK is the SAK as read; a byte with nothing queued ahead
+goes straight to the discipline; any other waits its turn. An ISIG Ctrl-C that
+must wait posts its interrupt at once and keeps its place as a *signalled*
+entry, so its discard of the pending line lands in order — the line typed before
+it goes, the line after it survives, as if the ring had had room. A full queue
+drops the newest byte and counts it (`rx_drop_side`); a signalled Ctrl-C there
+takes the newest entry's place, the displaced byte counted. Since only a refusal
+starts the queue and both refusing arms need the ring more than half full, a
+non-empty queue implies a non-empty ring once the reader has moved, so poll's
+`count > 0` and the reader's sleep cannot strand a queued byte.
 
-Three properties make the refusal honest rather than a narrower drop:
+Two properties make the refusal honest rather than a narrower drop:
 
 - **The room check is per-operation, not per-byte.** A canonical Enter pushes the
   whole assembled line plus its terminator in one call, so the check reserves
@@ -364,42 +375,10 @@ Three properties make the refusal honest rather than a narrower drop:
   consumed, and nothing is echoed — the echo moved *inside* the accepted branch,
   because echoing a refused byte shows the user a character the console did not
   take and then shows it twice when the producer re-offers it.
-- **A one-byte holdback covers the pre-check race.** The serial drain's room
-  check is lockless, so a peer producer can take the room before the under-lock
-  push; by then the byte is out of the data register and cannot be put back,
-  which is the one way the leave-it-in-the-FIFO guarantee could be escaped. The
-  drain parks that byte and re-offers it before touching the FIFO again. Without
-  it the fix would merely narrow the loss window rather than close it — and the
-  four properties of the holdback all fail *silently*, which is why it is seeded
-  and inspected directly by a test rather than left to the counters.
 
-**The holdback itself then stranded, at exactly one exit, and the reason it was
-a real defect rather than a cosmetic one is that it could not self-heal.** The
-scripture asserted the held-but-unpaused state unreachable. It was reachable:
-the last unit of the drain budget is spent on a refusal whose recheck then
-*lifts* the pause, and the loop's continue lands on a failed budget test.
-
-What makes that P1 is where the byte lives. **A held byte sits in a software
-variable, not in the hardware FIFO** — so it raises neither the receive
-interrupt nor the receive timeout, and the hardware re-fire that covers every
-ordinary budget-hit exit does not cover this one. The pump short-circuits while
-unpaused. The byte waits for an unrelated later arrival: a keystroke that
-vanishes and comes back when the user next types, with no counter and no log
-entry. Ordering survives, nothing wedges, and any later byte recovers it — which
-is precisely why it could sit there.
-
-**Every other exit was already sound for a reason that does not generalize**:
-three of them return with the pause *standing*, and the fourth is only reachable
-with nothing held. So the bug was not "an exit was forgotten" but "one exit had
-a different post-condition from its siblings", which no amount of reading the
-siblings would reveal.
-
-The severity note is worth keeping separate from the bug. Two prosecutors found
-it independently and graded it differently — P1 citing the architecture
-document, P2 citing only the code comment — and the higher grade was taken after
-verifying the quote was verbatim. **A contradicted comment is a bug; a
-contradicted binding document means the commit's own claim is false.** The same
-defect earns a different grade depending on what it falsifies.
+Ordinary cooked bytes need no ring room, so typing keeps assembling behind any
+amount of unread committed input; the drain no longer reserves a whole line's
+room before reading a byte.
 
 The counters distinguish the two dispositions by name: back-pressure (a raw byte
 or a cooked flush refused for room) is not loss and does not arm the report,
@@ -412,7 +391,8 @@ were silent, and the shape is why that mattered: a dropped input byte truncates 
 command that then *runs anyway* (`sleep 30` observed as `sleep 3`). Each site now
 names its counter under the console lock — the two back-pressure counters (`rx_bp_raw`,
 `rx_bp_flush`; refusals, not losses, and so they do **not** arm the report),
-`rx_drop_line` (past the line limit), the zero-witness `rx_drop_ring`, and
+`rx_drop_line` (past the line limit), the zero-witness `rx_drop_ring`,
+`rx_drop_side` (a serial byte that met a full side queue), and
 `rx_drop_modeflush`. That last is the drop the mode-flip discipline above does
 **not** cover: a consctl write clearing ICANON *delivers* the half-assembled
 canonical line, a full ring takes none of it, and the fragment's tail is lost so
@@ -428,13 +408,12 @@ something the test does not consume.
 
 **A full ring never suppresses the trusted path.** A serial BREAK is recognized
 before any admission logic and ungated by the mode flags, because it is a line
-condition rather than a data byte; the secure-attention trigger cannot be starved
-by filling the ring.
+condition rather than a data byte, and since vote 73 the drain reads it on
+arrival whatever the ring and queue hold; the secure-attention trigger cannot be
+starved by filling the ring, end to end (`ls-serial-sak-typeahead`).
 
-The acyclicity argument is explicit and fragile enough to be worth restating:
-the UART receive lock orders *before* [[lock-cons]], and the reader **releases
-the console lock before calling the pump** — so no reverse edge exists. That
-release is load-bearing, not stylistic.
+The UART receive lock orders *before* [[lock-cons]], and nothing holding the
+console lock takes the receive lock, so no reverse edge exists.
 
 ### The interactive-band promotion
 
@@ -652,13 +631,13 @@ gave up.
   anything added here: a new ring-lock acquirer must be bounded or IRQ-safe and
   must never be reachable from the crash path, and the claim must stay **raw** —
   a counted variant reintroduces main#244 exactly.
-- **Every drain-loop exit must leave the holdback and the pause agreeing.**
-  The exits do not share a post-condition, so a new one has to be argued on its
-  own; a held byte is invisible to the hardware and therefore cannot be
-  recovered by a re-fire.
+- **A non-empty side queue means a non-empty ring once the reader has moved.**
+  Anything new that takes bytes out of the ring must move the queue after it,
+  and anything that discards the ring (as BEGIN does) must discard the queue in
+  the same lock hold, or a queued byte is stranded or outlives the SAK.
 - **The window-size post stays iff-changed.**
-- **The reader must keep releasing [[lock-cons]] before pumping the UART**, or
-  the receive lock order becomes cyclic.
+- **Nothing holding [[lock-cons]] may take the UART receive lock**, or the
+  receive lock order becomes cyclic.
 - **The interactive promotion stays gated on the trusted console roles.**
   Ungating it is a starvation vector from unprivileged code.
 - **A new field read from a sleep condition must be a relaxed atomic.**
