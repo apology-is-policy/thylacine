@@ -22,6 +22,20 @@ needed the operator.
 
 
 ---
+## 2026-11-05..09 (corona): nine votes, aux's join taken in, three of the trusted-path votes written
+
+**The Pi's evening line (ended 2026-11-05T20:12:24Z).** On the old gate's image the poison scenario went red ("the episode failed at its deadline"), where the fix's passed: poison discriminates on V3D. The old 64-less ring lost every line behind a client (0/3 and 0/2) against the fix's 4/7 and 1/2. At 100 ms a character (ls-q2-person) every line arrived (12/12, 8/8), so the loss is a machine-pace one: a paste, or a password manager's auto-type. Two of four boots missed login (old and noretry chain), at +187 s and more against a 180-s limit: joey's go-threads dump, fixed in 829c8cfac, not yet booted on the Pi.
+
+**The slow console is not the harness.** expect, with lc_boot's buffer and arms, consumed the 439 KB dump on the Pi in 48-83 ms whole, and kept within 2% of a feeder alone when it trickled at 32 B a millisecond (work/nov03-mm1/v50/xr). So the ~3 KB/s is upstream: the bridge, QEMU 10.0.11's PL011, or the guest's TX path. Still UNEXPLAINED (OPEN-BUGS).
+
+**Votes 70-78** (answered 2026-11-05T20:20Z and by 2026-11-06T06:39Z, all the recommended options): panels close on Enter or Esc and the key prompt runs from the SAK (70); a chord behind a backlog keeps waiting with keys held (71); a 500-ms wait and an input thread in Lictor (72); a serial side queue (73); raw Ctrl-C stays in order (74); ptyfs whole-or-wait kept (75); ESTALE for a stale account (76); MM-2's shape (77); strike =~ and the palette prompt (78).
+
+**Three days of quota, then the yip server would not start.** The session resumed on 2026-11-09 in a new Claude process while the old one (pid 48947, since 11-02) still sat in a detached tmux pane; its yip server held corona's channel lock, so the new one exited at once ("another Channels server owns corona"), and corona's deliveries went to the idle pane. The operator said kill it; /exit there freed the lock.
+
+**aux's join, taken in.** Operator vote 38 has corona land aux-3-join2 on main with this arc. It merged into the join cleanly at 7037fd0d9 (one shared file, joey.c, disjoint hunks), then into vote50 (fc11b9744) and mm1c (418dbcf6c), whose only conflicts were generated views; every file both sides touched was checked to keep each side's lines, and mm1c's SYS_ACCOUNT 140 sits between aux's 139 and 141 with no collision. i32 has real conflicts (ARCHITECTURE, burrow.c, exec.c, vma.c): not merged yet.
+
+**The trusted path, written, not compiled** (corona/trusted, off vote50): adf7e2782 vote 70 (corvus's console_wait_dismiss; the prompt's own 60 s; witnesses in im1-sak-lever, ls-graphical-sak-states, im3-lex-curiata's late-SAK arm); 65d90c1f9 vote 72's first half (wait_widens gone; gallery and tapestry-demo retry a refused present for 31 s; the C-6 DEADLINE arm counts a recovered stall as survival); 1dd5f6fd3 vote 71 (SEAT_RENEW, 5 s at a time up to 35 s from the chord; a kernel test; ls-graphical-sak-backlog, whose Tcl read 9 rows of 9 against the fake guest). One catch before any compile: the syscall layer refused every seat op above SEAT_CLIENT, so RENEW would have died there; reading abi-trusted-seat's mirror list found it.
+
 ## 2026-11-06 (aux): the thread-model arc meets corona's branch, and three audit rounds on what the merge woke up
 
 Stamped 2026-11-06T05:27:53Z. Branch aux-3-join2 at b441f5c35 (records on top), off corona/async-memory 9e0c6b87e. Pushed to GitHub with this entry; Codeberg is best-effort. The landing on main waits for the operator (vote 34).
