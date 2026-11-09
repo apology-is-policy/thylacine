@@ -659,30 +659,22 @@ int notes_post_pgrp(u32 pgid, const char *name, u32 arg);
 int notes_post_pid(int pid, const char *name, u32 arg);
 
 // =============================================================================
-// LS-5c (P3-terminate, ARCH 8.8.2): the terminate-disposition interrupt latch.
+// LS-5c (ARCH 8.8.2): the terminate latches.
 // =============================================================================
 //
-// PROC_FLAG_INTR_TERMINATE_PENDING (proc.h) caches "an uncaught interrupt
-// will terminate this Proc at its next EL0-return tail" so the #811
-// sleep/tsleep register-then-observe can read it LOCK-FREE (the sleep path
-// must never take q->lock -- the devnotes F3-close ABBA). ALL latch writes
-// run under p->notes->lock: the set in notes_post's interrupt arm, and the
-// clears in the three disposition-change choke points below + the
-// drained-last-interrupt clear inside the dequeue helpers. The EL0-return
-// tail re-validates against the live queue, so a stale-positive latch costs
-// one spurious *_INTR unwind, never a wrong termination.
-//
-// Known caveat (RW-0 F4, accepted): the spurious-*_INTR window has a
-// multi-thread variant. Thread B registering a handler (SYS_NOTIFY) or
-// opening the notes fd (self-managing) AFTER an interrupt armed the latch
-// but BEFORE a latch-woken thread A reaches its EL0-return tail clears the
-// latch — but A has already unwound its blocked syscall *_INTR (e.g. a 9P
-// RPC surfaces -P9_E_IO). No wrong termination (the tail re-validates, and a
-// fault re-validates at the fault: notes_fault_dying_latch); the cost is one
-// EINTR-class return on A, the POSIX EINTR-with-handler shape. Reachable: a
-// phenotype guest that clones threads is multi-thread, and a phenotype
-// handler install is not one of the clearing choke points, so its latch stays
-// armed until the note is delivered or drained.
+// One PROC_FLAG_*_TERMINATE_PENDING bit per terminate-default note (proc.h)
+// caches "this note, queued and uncaught, ends the Proc at an EL0-return tail",
+// so the death predicate reads it LOCK-FREE (the sleep path must never take
+// q->lock -- the devnotes F3-close ABBA). Every arm and clear runs under
+// p->notes->lock through notes_latch_write_locked: the post's arm, the drain of
+// a class's last note, the disposition re-read, the self-managing mark, the
+// tail's yield. A read that finds a latch commits the death by a lock-free swap
+// (vote 35): PROC_FLAG_TERMINATE_COMMITTED, with the latch it acted on left
+// armed. Every latch write refuses once that is set, so a handler installed
+// after the read revokes nothing, and one installed before it clears the latch
+// and the read is false. The RW-0 F4 caveat that stood here -- a handler
+// installed after a latch-woken unwind left the thread living with an answer
+// given for its death -- was that window.
 
 // ARCH 8.8.3: a disposition just changed. Discards nothing: it sets the terminate
 // and caught latches to what the queue says under the new disposition, then wakes
@@ -759,16 +751,12 @@ const char *notes_death_committed(const struct Proc *p);
 // predicate of sleep_death_only (DEBUG-FS-DESIGN §5g).
 bool thread_group_death_pending(struct Thread *t);
 
-// The EL0 fault arm's act on a terminate latch: a fault left unresolved while
-// thread_die_pending read true for a latch, not a group death. exits() with the
-// first queued terminate note `t` would die of -- the tail's own pick, made
-// here because the tail defers a note while a handler runs or the user SP is
-// unusable, and the faulting instruction would re-execute into the same fault
-// forever. A committed death (ARCH 8.8.2) is died of first. When no queued note
-// of an armed class would still default-terminate (a handler installed for it
-// since the arm, before the disposition's re-read clears the latch), those
-// latches are stale: cleared under q->lock, and the call returns. Owner thread
-// only.
+// The EL0 fault arm's act on a death a page-in gave up for: thread_die_pending
+// read true and the caller filtered group death, so a death is committed (ARCH
+// 8.8.2), and this exits() with the note it names. The tail would defer it while
+// a handler runs or the user SP is unusable, and the faulting instruction would
+// re-execute into the same fault forever. Returns only when nothing is committed,
+// which no true read leaves. Owner thread only.
 void notes_fault_dying_latch(struct Thread *t);
 
 // Can a death end this thread's sleeps? Not a kernel thread's (no death

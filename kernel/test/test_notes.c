@@ -3952,22 +3952,22 @@ void test_notes_phenotype_sigreturn_restores_mask(void) {
     TEST_ASSERT(c_mask == HAND, "C: a refused restore touches nothing");
 }
 
-// The EL0 fault arm's latch act: a fault taken while a terminate latch is
-// pending ends the thread with that note at the fault, because the tail it
-// would otherwise wait for defers notes inside a handler or on a bad SP, and
-// the faulting instruction would re-execute forever. Driven from an rfork'd
-// child, since the helper acts on the calling thread. Returning is the defect
-// in the live case: the child then leaves with 7, not the note's 1.
+// The EL0 fault arm's act: a page-in that gave up because the death predicate
+// read true for a latch, which committed the death, ends the thread with that
+// note at the fault, because the tail it would otherwise wait for defers notes
+// inside a handler or on a bad SP, and the faulting instruction would re-execute
+// forever. Driven from an rfork'd child in the fault path's order (the read, then
+// the arm), since the helper acts on the calling thread. Returning is the defect:
+// the child then leaves with 7, not the note's 1.
 static volatile int g_fdl_pending;
 
 static void fdl_live_entry(void *arg) {
     (void)arg;
     struct Thread *t = current_thread();
     (void)notes_post(t->proc, "interrupt", 0u, NULL, true);
-    // Read without the predicate, which would commit: the arm's own pick must.
     g_fdl_pending = (__atomic_load_n(&t->proc->proc_flags, __ATOMIC_ACQUIRE) &
                      PROC_FLAG_INTR_TERMINATE_PENDING) ? 1 : 0;
-    notes_fault_dying_latch(t);
+    if (thread_die_pending(t)) notes_fault_dying_latch(t);
     exits_code(7, "returned");
 }
 
@@ -4024,42 +4024,7 @@ void test_notes_fault_dying_latch_live_note_exits(void) {
     TEST_ASSERT(msg != NULL && fdl_str_eq(msg, NOTE_NAME_INTERRUPT),
                 "the child's exit message is the note's name, not a snare:*");
     TEST_EXPECT_EQ(word, PROC_FLAG_INTR_TERMINATE_PENDING | PROC_FLAG_TERMINATE_COMMITTED,
-                   "the arm committed the death it died of (ARCH 8.8.2)");
-}
-
-// The stale half: a latch whose class has no default-terminating note queued
-// is cleared; one whose note is live but masked by THIS thread is kept, since a
-// peer may still die of it -- and the call returns.
-static volatile int g_fdl_returned;
-static volatile u32 g_fdl_flags_after;
-
-static void fdl_stale_entry(void *arg) {
-    (void)arg;
-    struct Thread *t = current_thread();
-    struct Proc *p = t->proc;
-    t->note_mask |= (1u << NOTE_BIT_INTERRUPT);
-    (void)notes_post(p, "interrupt", 0u, NULL, true);
-    __atomic_or_fetch(&p->proc_flags, PROC_FLAG_PIPE_TERMINATE_PENDING, __ATOMIC_RELEASE);
-    notes_fault_dying_latch(t);
-    g_fdl_returned = 1;
-    g_fdl_flags_after = __atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE);
-    exits_code(0, "ok");
-}
-
-void test_notes_fault_dying_latch_clears_only_stale(void) {
-    g_fdl_returned = 0;
-    g_fdl_flags_after = 0;
-    int pid = rfork(RFPROC, fdl_stale_entry, NULL);
-    int st = -1;
-    int got = pid > 0 ? wait_pid_for(pid, 0, &st) : -1;
-    TEST_ASSERT(pid > 0, "rfork");
-    TEST_EXPECT_EQ(got, pid, "reaped the child");
-    TEST_EXPECT_EQ(g_fdl_returned, 1, "no unmasked live note: the call returned");
-    TEST_EXPECT_EQ(st, 0, "the child left by its own exit");
-    TEST_ASSERT((g_fdl_flags_after & PROC_FLAG_PIPE_TERMINATE_PENDING) == 0,
-                "the stale pipe latch (no pipe note queued) was cleared");
-    TEST_ASSERT((g_fdl_flags_after & PROC_FLAG_INTR_TERMINATE_PENDING) != 0,
-                "the live interrupt latch this thread masks was kept");
+                   "the page-in's read committed the death it died of (ARCH 8.8.2)");
 }
 
 // ---------------------------------------------------------------------------
@@ -4316,10 +4281,15 @@ static int th_run(u32 mode, int *lived) {
 // dies, and a peer's tail that met it after a handler arrived would hand it on.
 // Read from the ZOMBIE's word; tail_hands_no_committed_note shows what the
 // commit then refuses.
+#define TU_LINUX      1u
+#define TU_IN_HANDLER 2u
+
 static void tu_entry(void *arg) {
+    u32 mode = (u32)(u64)arg;
     struct Thread *t = current_thread();
-    if (arg && !cd_linux(t->proc)) exits_code(9, "setup");
+    if ((mode & TU_LINUX) && !cd_linux(t->proc)) exits_code(9, "setup");
     (void)notes_post(t->proc, NOTE_NAME_INTERRUPT, 0u, NULL, true);
+    if (mode & TU_IN_HANDLER) t->in_handler = true;   // a syscall made from a handler
     struct exception_context ctx;
     for (size_t k = 0; k < sizeof(ctx); k++) ((u8 *)&ctx)[k] = 0;
     ctx.sp = NOTE_NAME_MAX;
@@ -4329,8 +4299,8 @@ static void tu_entry(void *arg) {
     exits_code(7, "lived");
 }
 
-static int tu_run(bool linux_pheno, u32 *word) {
-    int pid = rfork(RFPROC, tu_entry, linux_pheno ? (void *)1 : NULL);
+static int tu_run(u32 mode, u32 *word) {
+    int pid = rfork(RFPROC, tu_entry, (void *)(u64)mode);
     *word   = pid > 0 ? fdl_zombie_word(pid) : ~0u;
     int st  = -1;
     int got = pid > 0 ? wait_pid_for(pid, WAIT_PACKED, &st) : -1;
@@ -4339,13 +4309,27 @@ static int tu_run(bool linux_pheno, u32 *word) {
 
 void test_notes_tail_death_commits_its_note(void) {
     u32 word = 0, lword = 0;
-    int st  = tu_run(false, &word);
-    int lst = tu_run(true, &lword);
+    int st  = tu_run(0u, &word);
+    int lst = tu_run(TU_LINUX, &lword);
     u32 const want = PROC_FLAG_INTR_TERMINATE_PENDING | PROC_FLAG_TERMINATE_COMMITTED;
     TEST_EXPECT_EQ(st, (int)WAIT_STATUS_SIGNALED(NOTE_SIG_INT), "native: the tail ended it by the interrupt");
     TEST_EXPECT_EQ(word, want, "native: the uncaught arm committed that death first");
     TEST_EXPECT_EQ(lst, (int)WAIT_STATUS_SIGNALED(NOTE_SIG_INT), "phenotype: SIG_DFL ended it by SIGINT");
     TEST_EXPECT_EQ(lword, want, "phenotype: the SIG_DFL arm committed that death first");
+}
+
+// The tail holds every note while a handler runs, but a fatal default does not
+// wait for it (a syscall made from inside the handler ends the Proc), and that
+// death commits before the lock goes, as the uncaught arm's does.
+void test_notes_handler_tail_death_commits_its_note(void) {
+    u32 word = 0, lword = 0;
+    int st  = tu_run(TU_IN_HANDLER, &word);
+    int lst = tu_run(TU_IN_HANDLER | TU_LINUX, &lword);
+    u32 const want = PROC_FLAG_INTR_TERMINATE_PENDING | PROC_FLAG_TERMINATE_COMMITTED;
+    TEST_EXPECT_EQ(st, (int)WAIT_STATUS_SIGNALED(NOTE_SIG_INT), "native: the in-handler tail ended it by the interrupt");
+    TEST_EXPECT_EQ(word, want, "native: and committed that death first");
+    TEST_EXPECT_EQ(lst, (int)WAIT_STATUS_SIGNALED(NOTE_SIG_INT), "phenotype: the in-handler tail ended it by SIGINT");
+    TEST_EXPECT_EQ(lword, want, "phenotype: and committed that death first");
 }
 
 void test_notes_tail_hands_no_committed_note(void) {

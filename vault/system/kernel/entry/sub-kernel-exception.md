@@ -347,8 +347,9 @@ the faulting instruction re-executes. `FAULT_UNHANDLED_USER` and
 `FAULT_USER_BUS` end the Proc through `proc_fault_terminate` with `snare:segv`
 or `snare:bus`. `FAULT_USER_DYING` (the thread's death was pending when the
 fault went unresolved) splits on the death. A group death returns: the tail's
-`el0_return_die_check` acts on `group_exit_msg` unconditionally. A terminate
-latch is acted on at the fault, by `notes_fault_dying_latch`
+`el0_return_die_check` acts on `group_exit_msg` unconditionally. A committed
+death (ARCH 8.8.2; the page-in's true read committed it) is acted on at the
+fault, by `notes_fault_dying_latch`
 ([[sub-kernel-notes]]), because the tail defers notes in two states -- while a
 handler runs (the N-3 guard) and while `SP_EL0` is unusable -- and returning
 there re-executed the faulting instruction into the same fault forever

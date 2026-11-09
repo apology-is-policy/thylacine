@@ -667,24 +667,19 @@ entry, and patch 0067 points Pouch's `pthread_kill` and `raise` at it
 
 A user fault left unresolved while a terminate latch is pending reaches the
 EL0 fault arm as `FAULT_USER_DYING` ([[sub-kernel-fault]],
-[[sub-kernel-exception]]), and the arm does not wait for the return tail:
-`notes_fault_dying_latch` takes `q->lock` and ends the Proc with
-`exits_note()` of the note `notes_terminate_note_name_locked` picks, the tail's
-own choice -- so the death records that note's signal (SIGPIPE for a `pipe`),
-not the fault's. The tail
-defers every note but `kill` while a handler runs and while `SP_EL0` is
-unusable, and the faulting instruction would otherwise re-execute into the
-same fault forever. Ending the thread inside a running handler matches Linux,
-whose `complete_signal` makes a fatal default signal a group exit at send time.
-A committed death is died of first, whatever the queue holds now: a handler
-installed since the commit leaves the pick empty. When no queued note of an armed
-class would still default-terminate (a handler installed for it since the arm,
-before the disposition's re-read clears the latch), those
-latches are stale: cleared under the lock, and the arm returns so the
-instruction re-executes. A class whose note is live but masked by the faulting
-thread stays armed, because a peer may still die of it. Witnesses:
-`notes.fault_dying_latch_live_note_exits`,
-`notes.fault_dying_latch_clears_only_stale`, viv-pheno-probe L329/L330 (which
+[[sub-kernel-exception]]): the page-in gave up because the death predicate read
+true, and with group death filtered by the caller, that read committed the death
+(ARCH 8.8.2). The arm does not wait for the return tail: `notes_fault_dying_latch`
+ends the Proc with `exits_note()` of the committed note, so the death records that
+note's signal (SIGPIPE for a `pipe`), not the fault's. The tail defers every note
+but `kill` while a handler runs and while `SP_EL0` is unusable, and the faulting
+instruction would otherwise re-execute into the same fault forever. Ending the
+thread inside a running handler matches Linux, whose `complete_signal` makes a
+fatal default signal a group exit at send time. A handler installed since the
+commit changes nothing. The arm returns only when nothing is committed, which no
+true read leaves. Witnesses: `notes.fault_dying_latch_live_note_exits` (the fault
+path's order: the read, then the arm), `notes.fault_arm_meets_a_commit`,
+viv-pheno-probe L329/L330 (which
 since gcpark-b require wait4 to read WIFSIGNALED SIGPIPE: a death by the fault
 itself would read SIGSEGV).
 
@@ -790,19 +785,23 @@ compare, and whichever lands first wins. Once committed:
 - the tail hands no note to a handler. `notes_tail_yield_or_die_locked` runs before
   both delivery paths and clears the latch of the note about to be delivered, since a
   latch armed on a note a handler now catches is stale; when that clear is refused, the
-  thread dies of the committed note instead. No note is both handled and died of
+  thread dies of the committed note instead. No note is both handed to a handler and died of
   ([[inv-i19]]);
-- the fault arm dies of it first, and the page-in reads the predicate once, after its
+- the fault arm dies of it, and the page-in reads the predicate once, after its
   read ([[sub-kernel-fault]]);
 - no stop is asked of the Proc, no exec claims it, and rfork spawns no child from it
   ([[sub-kernel-proc]], [[sub-kernel-jobctl]]).
 
 A masked read commits nothing. The tail's own deaths commit too: the native uncaught
-arm, the phenotype's SIG_DFL terminate arm and the fault arm each commit the note they
-die of under `q->lock` before releasing it (`notes_commit_note_locked`), because the
+arm, the in-handler arm (a fatal default while a handler runs) and the phenotype's
+SIG_DFL terminate arm each commit the note they die of under `q->lock` before releasing it (`notes_commit_note_locked`), because the
 note stays queued while the Proc dies, and a peer's tail that met it after a handler
 arrived would otherwise hand it on. If a peer committed another note's death first, the
-tail dies of that one, the note every die check reads. `kill` has no latch and is never caught, so it
+tail dies of that one, the note every die check reads. A synchronous consumer -- a
+notes-fd read, a take (`SYS_NOTE_WAIT`, rt_sigtimedwait), a SIG_IGN discard -- may still
+pop the committed note: its latch stays, and the popping thread dies at its tail before
+any EL0 instruction, as on Linux, where sigtimedwait can dequeue the signal a group exit
+was made of while the SIGKILL that exit queued ends the thread on its way out. `kill` has no latch and is never caught, so it
 needs none. The commit wakes nobody: the thread that made it is
 unwinding to its tail and dies there, and the group termination wakes the rest. Kernel
 threads charged to a user Proc run in kproc and never reach the latch leg. Nothing
@@ -810,7 +809,8 @@ clears the bit. Witnesses: `notes.latch_read_commits_the_death` and its control
 `notes.latch_clear_first_lets_it_live`, `notes.commit_takes_the_readers_latch`,
 `notes.latch_names_its_note` (walked from `g_known_notes`), `notes.poll_zero_is_a_death`
 (the class's own case, with a handler-first control that answers EINTR and lives),
-`notes.tail_hands_no_committed_note`, `notes.tail_death_commits_its_note` and
+`notes.tail_hands_no_committed_note`, `notes.tail_death_commits_its_note`,
+`notes.handler_tail_death_commits_its_note` and
 `notes.fault_dying_latch_live_note_exits` (each reads the commit off the ZOMBIE),
 `notes.tail_dies_of_the_committed_note`, `notes.fault_arm_meets_a_commit` (a handler
 installed since the commit leaves the arm's pick empty; it dies anyway),

@@ -1604,9 +1604,10 @@ death does, and every EL0-return tail ends the Proc by the named note before it
 stops or delivers a note. A tail that hands a terminate-class note to a handler
 first clears that note's latch by the same swap -- a latch stands for one note
 name, and a handler now catches it -- and dies of the committed note when the swap
-is refused; a tail or fault arm that dies of a note's default commits that death
-under the queue lock before releasing it, since the note stays queued while the
-Proc dies. So no note is both handled and died of. A committed Proc refuses what
+is refused; a tail that dies of a note's default commits that death under the
+queue lock before releasing it, since the note stays queued while the Proc dies,
+and a fault the death abandoned dies of the committed note at the fault. So no
+note is both handed to a handler and died of. A committed Proc refuses what
 group death refuses: a stop park, an exec's point of no return, a fork. Each
 terminate latch names one note (`tty:quit` and `tty:hup` latch separately), so the
 named death does not depend on the note still being queued. Linux decides the same

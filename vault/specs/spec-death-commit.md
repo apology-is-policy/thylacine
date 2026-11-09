@@ -37,8 +37,10 @@ Every step is one atomic action: a compare-and-swap on the word
 notes and latches (the fixed order that picks among them is
 `notes.commit_takes_the_readers_latch`'s), the mask (a masked read commits
 nothing: `notes.latch_read_commits_the_death`), group death (monotonic, and
-[[spec-poll]]'s `dying`), the stop park (`notes.stop_park_meets_a_commit`), and
-the wakes, which [[spec-poll]] and the death-wake model own.
+[[spec-poll]]'s `dying`), the stop park (`notes.stop_park_meets_a_commit`), the
+wakes, which [[spec-poll]] and the death-wake model own, and the synchronous
+consumers (a notes-fd read, a take, a SIG_IGN discard), which may pop the committed
+note while its latch stays and the popping thread dies at its tail before EL0.
 
 [[spec-poll]] models the poller's death as monotonic. Before vote 35 that was
 false for a latch; this model is why it now holds.
@@ -61,9 +63,10 @@ false for a latch; this model is why it now holds.
 | `RDieCheck` | `kernel/proc.c::el0_return_die_check`: `notes_death_committed(p)` -> `exits_note`; the stop park's `el0_stop_park_death` does the same for a thread that parked after it |
 | `HStore` / `HReread` | `notes_set_handler` (and `viv_sigaction_settled`, `notes_handler_resets`, exec's drop): the store, then `notes_disposition_reread` under `q->lock`, whose latch write is `notes_latch_write_locked`. `BUGGY_PLAIN_CLEAR` = a plain store there |
 | `RNotes` / `PNotes`, a handler | `notes_deliver_at_el0_return` -> `notes_tail_yield_or_die_locked` before both delivery paths (the native frame and `notes_deliver_linux_locked`). `BUGGY_TAIL_NO_YIELD` = no call |
-| `RNotes` / `PNotes`, no handler | the native uncaught arm and the phenotype's SIG_DFL terminate arm -> `notes_commit_note_locked` -> `exits_note`; the fault arm `notes_fault_dying_latch` does the same. `BUGGY_UNCAUGHT_NO_COMMIT` = no commit |
+| `RNotes` / `PNotes`, no handler | the native uncaught arm, the in-handler arm (a fatal default while a handler runs) and the phenotype's SIG_DFL terminate arm -> `notes_commit_note_locked` -> `exits_note`. `BUGGY_UNCAUGHT_NO_COMMIT` = no commit. The fault arm `notes_fault_dying_latch` is `RWaitDeath`'s commit (the page-in's read) followed by `RDieCheck`'s death, taken at the fault |
 
 Kernel witnesses: `notes.poll_zero_is_a_death`, `notes.tail_hands_no_committed_note`,
-`notes.tail_death_commits_its_note`, `notes.tail_dies_of_the_committed_note`,
+`notes.tail_death_commits_its_note`, `notes.handler_tail_death_commits_its_note`,
+`notes.tail_dies_of_the_committed_note`,
 `notes.fault_arm_meets_a_commit`, `notes.latch_read_commits_the_death` and its
 control `notes.latch_clear_first_lets_it_live`.

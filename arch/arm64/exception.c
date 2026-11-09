@@ -547,12 +547,10 @@ static void exception_sync_lower_el_impl(struct exception_context *ctx) {
             // The thread's death was pending when the fault went unresolved
             // (I-24): no user-fault line and no snare:* status of its own. A
             // group death is acted on by the vector tail's el0_return_die_check
-            // before any EL0 instruction. A terminate latch is acted on HERE:
-            // the tail defers a note while a handler runs or while the user SP
-            // is unusable, and the faulting instruction would re-execute into
-            // this same fault forever. A latch no queued note still backs is
-            // cleared instead, and the instruction re-executes into a fault the
-            // latch no longer shapes.
+            // before any EL0 instruction. A committed death (ARCH 8.8.2) is
+            // acted on HERE: the tail defers a note while a handler runs or while
+            // the user SP is unusable, and the faulting instruction would
+            // re-execute into this same fault forever.
             if (!thread_group_death_pending(cur)) notes_fault_dying_latch(cur);
             return;
         case FAULT_FATAL:

@@ -1612,8 +1612,8 @@ static bool thread_death_held(const struct Thread *t) {
 // masked one family never unwinds for another's note -- "a latch-woken thread
 // never unwinds into a tail that refuses to act". The pipe latch's pairing is
 // where "mask to opt out of Plan 9 pipe-death" lives: libthyla-rs, libt and the
-// Go rt0 mask NOTE_BIT_PIPE at startup (#237). The order is fixed, so the latch a
-// commit keeps is the same whichever reader commits first.
+// Go rt0 mask NOTE_BIT_PIPE at startup (#237). The order is fixed, so readers
+// with the same mask keep the same latch whichever commits first.
 static u32 notes_latch_for(u32 flags, const struct Thread *t) {
     static const struct { u32 latch; u32 bit; } pairs[] = {
         { PROC_FLAG_INTR_TERMINATE_PENDING, NOTE_BIT_INTERRUPT },
@@ -1732,9 +1732,9 @@ bool thread_die_pending(struct Thread *t) {
         // wins the swap, the thread is not dying.
         if (notes_latch_for(flags, t) != 0 && notes_commit_latch(p, t, 0))
             return true;
-        // A note aimed at this thread alone ends every wait of this thread, and
-        // no peer's: the tail's exits_note then runs the group's one death. It
-        // commits by its own latch, armed by the swap.
+        // A note aimed at this thread alone: its post wakes only this thread, and
+        // the commit, by the note's own latch armed by the swap, ends every peer's
+        // next wait too. The tail's exits_note runs the group's one death.
         const char *dname = notes_direct_fatal_name(p, t);
         if (dname) {
             u32 dlatch = notes_name_terminate_latch(dname);
@@ -1763,39 +1763,12 @@ bool thread_group_death_pending(struct Thread *t) {
 void notes_fault_dying_latch(struct Thread *t) {
     if (!t) return;
     struct Proc *p = t->proc;
-    if (!p || p == kproc() || !p->notes) return;
-    // A committed death is the one this thread dies of, whatever the queue holds
-    // now: a handler installed since the commit leaves the pick below empty, and
-    // the faulting instruction would re-execute into the same fault forever.
+    if (!p || p == kproc()) return;
+    // The page-in's true read committed the death (ARCH 8.8.2), so the thread dies
+    // of the note it names, whatever the queue holds now: a handler installed since
+    // leaves no pick, and the instruction would re-execute into the same fault.
     const char *committed = notes_death_committed(p);
     if (committed) exits_note(committed);
-    struct NoteQueue *q = p->notes;
-    spin_lock(&q->lock);
-    const char *tname = notes_terminate_note_name_locked(p, t);
-    if (tname) {
-        tname = notes_commit_note_locked(p, t, tname);
-        spin_unlock(&q->lock);
-        exits_note(tname);
-        // unreachable
-    }
-    // A latch whose class has a default-terminating note queued stays armed
-    // even when this thread masks it: a peer may still die of it. The gates are
-    // notes_terminate_note_name_locked's, so a class kept here is one that
-    // lookup would have found for an unmasked thread.
-    u32 live = 0;
-    if (!proc_is_self_managing_notes(p)) {
-        u32 idx = q->head;
-        for (u32 n = 0; n < q->count; n++) {
-            const char *name = q->ring[idx].name;
-            if (notes_proc_default_applies(p, name))
-                live |= notes_name_terminate_latch(name);
-            idx = (idx + 1) % NOTE_RING_SLOTS;
-        }
-    }
-    u32 armed = __atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE) &
-                PROC_FLAG_TERMINATE_PENDING_MASK;
-    if (armed & ~live) (void)notes_latch_write_locked(p, armed & ~live, 0);
-    spin_unlock(&q->lock);
 }
 
 // item 11 (ARCH 8.8.3): the NON-death sibling of thread_die_pending. True iff a
@@ -2436,8 +2409,11 @@ again:
     // longjmp'd out never reaches SYS_NOTED (thread_note_handler_escaped stays Linux-
     // only, since a native runtime may run its handler on another stack), the latch
     // stays armed, and every wait would return at once for as long as the Proc spins.
+    // The death commits before the lock goes, as the uncaught arm's does: the note
+    // stays queued, and a peer's tail must not hand it to a handler installed since.
     if (t->in_handler) {
         const char *fatal = notes_terminate_note_name_locked(p, t);
+        if (fatal) fatal = notes_commit_note_locked(p, t, fatal);
         spin_unlock(&q->lock);
         if (fatal) exits_note(fatal);
         return false;
