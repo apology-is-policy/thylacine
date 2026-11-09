@@ -1475,16 +1475,18 @@ impl Controlq {
     }
 
     /// A dead engine publishes nothing again, so every parked chain is released
-    /// as REFUSED, not abandoned: the device never saw it, so its slot is free
-    /// and nothing it names is at risk (vote 81).
+    /// (`released`), not abandoned: the device never saw it, so its slot is free
+    /// and nothing it names is at risk. The seam ends its context's fence
+    /// stream rather than count a fence that never signals (vote 81).
     fn release_parked(&mut self, why: &str) {
         for p in core::mem::take(&mut self.parked) {
             self.fslot_parked[p.slot] = false;
             let mut tag = p.tag;
             tag.ok = false;
+            tag.released = true;
             tag.parked_ms = elapsed_ms_u32(p.since);
             say!(
-                "tapestryd: gpu fence {} released unpublished ({}) -- slot {} free, ctx {} not poisoned",
+                "tapestryd: gpu fence {} released unpublished ({}) -- slot {} free, ctx {}: the device never saw it",
                 tag.fence_id, why, p.slot, tag.ctx_pub
             );
             self.completed.push(tag);
@@ -1573,6 +1575,7 @@ impl Controlq {
                 self.fslot_parked[p.slot] = false;
                 let mut tag = p.tag;
                 tag.ok = false;
+                tag.released = true;
                 tag.parked_ms = elapsed_ms_u32(p.since);
                 say!(
                     "tapestryd: gpu fence {} released unpublished{} -- ctx {} has an abandoned chain, slot {} free",
@@ -4296,6 +4299,7 @@ impl Gpu {
             comp,
             abandoned: false,
             ok: false,
+            released: false,
             ring_idx,
             parked_ms: 0,
             exec_ms: 0,

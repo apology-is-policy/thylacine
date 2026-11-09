@@ -688,7 +688,8 @@ the chains behind it, up to that context's next readback (`gpu_api::unpark_plan`
   a parked chain has no abandonment clock, so a chain left parked would keep
   `fenced_outstanding` above zero, and tapestryd's poll at 1 ms, until the
   context died. For the compositor's readback the release also frees the one
-  reserved slot for every other surface.
+  reserved slot for every other surface. A released tag carries `released`, so
+  the seam can tell it from a chain the device answered with an error.
 - **The harness hold.** A chain whose retirement the test hold swallowed
   (`held_retires`) has finished on the device, so nothing waits for it.
 

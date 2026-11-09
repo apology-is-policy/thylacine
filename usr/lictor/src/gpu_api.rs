@@ -76,6 +76,12 @@ pub struct FenceTag {
     /// blanks) and counting it `rb_landed`. False for an abandoned tag too:
     /// nothing was verified about a chain that never retired.
     pub ok: bool,
+    /// Released unpublished (vote 81): a parked chain the device never saw,
+    /// refused because its context's prefix was abandoned or the engine died.
+    /// Not a completion: its fence never signals. The seam ends the context's
+    /// fence stream and owes the count until a vindication proves the prefix
+    /// finished, so a dense count never passes an abandoned fence.
+    pub released: bool,
     /// The venus TIMELINE this fence rides (multi-queue F3): 0 = the
     /// ctx-global lane (every pre-multi-queue submission, transfers, the
     /// compositor readback); 1..=3 = a VkQueue's timeline (the submit
@@ -163,7 +169,7 @@ macro_rules! record {
 }
 record!(FenceVindication { ctx_pub: u32, comp: bool, ring_idx: u8 });
 record!(FenceTag { fence_id: u64, ctx_pub: u32, readback: bool, comp: bool,
-    abandoned: bool, ok: bool, ring_idx: u8, parked_ms: u32, exec_ms: u32 });
+    abandoned: bool, ok: bool, released: bool, ring_idx: u8, parked_ms: u32, exec_ms: u32 });
 impl Wire for FencedErr {
     fn put(&self, out: &mut Vec<u8>) {
         match self { Self::Again => 0u8, Self::TooBig => 1, Self::Dead => 2 }.put(out);
@@ -920,7 +926,7 @@ mod park_tests {
     #[test]
     fn a_tag_carries_its_park_and_its_execution_across_the_seam() {
         let tag = FenceTag { fence_id: 9, ctx_pub: A, readback: true, comp: false, abandoned: false,
-            ok: true, ring_idx: 0, parked_ms: 0x0102_0304, exec_ms: 0x0506_0708 };
+            ok: false, released: true, ring_idx: 2, parked_ms: 0x0102_0304, exec_ms: 0x0506_0708 };
         let mut bytes = Vec::new();
         tag.put(&mut bytes);
         assert_eq!(FenceTag::get(&mut Reader::new(&bytes).unwrap()).unwrap(), tag);

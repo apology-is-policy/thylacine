@@ -3718,7 +3718,7 @@ fn rb_abandoned_prefix() -> bool {
         rb_incomplete("instrument:abandon-hold");
     }
     let a0 = abandoned(w);
-    let _ = rb_queue_heavy(w, ctx, RB_ABANDON_SUBMITS, "abandon");
+    let (s0, _) = rb_queue_heavy(w, ctx, RB_ABANDON_SUBMITS, "abandon");
     let xfer = format!("transfer_from 0 0 0 0 {} {} 1 0 0 0", RB_W, RB_H);
     let (n, _) = write_behind_stall(w, &format!("ctx/{}/bo/{}/ctl", ctx, bo), xfer.as_bytes());
     if n != xfer.len() as i64 {
@@ -3735,6 +3735,10 @@ fn rb_abandoned_prefix() -> bool {
         left = ctx_field(w, ctx, "fences-in-flight");
     }
     let drained_ms = t.elapsed().as_millis() as u64;
+    // Nothing may count while the context is poisoned: the abandoned chains are
+    // not completions and the released readback never ran. A dense count past
+    // s0 would answer a wait on the abandoned fence as if it had finished.
+    let s1 = ctx_field(w, ctx, "fence-signaled");
     let poisoned = parse_field(&open_read_string(w, &format!("ctx/{}/ctl", ctx)), "poisoned").unwrap_or(99);
     let _ = write_ctl(w, "ctl", "warp-hold off");
     let mut healed = false;
@@ -3747,6 +3751,9 @@ fn rb_abandoned_prefix() -> bool {
         }
         let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(50));
     }
+    // Once the hold's replay vindicates the queue, the queue and the owed
+    // readback count: exactly four, or the client's issue count is left ahead.
+    let s2 = ctx_field(w, ctx, "fence-signaled");
     let _ = write_ctl(w, &format!("ctx/{}/ctl", ctx), "destroy");
     unsafe { t_close(w) };
     // Constructed only if the abandon took exactly the queue: a readback the
@@ -3758,11 +3765,13 @@ fn rb_abandoned_prefix() -> bool {
         ));
         return false;
     }
-    let ok = left == 0 && healed;
+    let due = RB_ABANDON_SUBMITS as u64 + 1;
+    let ok = left == 0 && healed && s1 == s0 && s2 == s0 + due;
     t_putstr(&format!(
-        "warp-prove: C6-RB ABANDON {} -- the readback parked behind {} abandoned chains; the ctx's fences in flight {} after {} ms (0 = the parked readback was released){}\n",
+        "warp-prove: C6-RB ABANDON {} -- the readback parked behind {} abandoned chains; the ctx's fences in flight {} after {} ms (0 = the parked readback was released); fence-signaled +{} while poisoned (want +0), +{} after the vindication (want +{}){}\n",
         if ok { "PASS" } else { "FAIL" },
         RB_ABANDON_SUBMITS, left, drained_ms,
+        s1.wrapping_sub(s0), s2.wrapping_sub(s0), due,
         if healed { "" } else { "; the lane did not heal after the hold came off" }
     ));
     ok

@@ -343,12 +343,16 @@ the context's last readback (`readback-parked-ms`, `readback-exec-ms`), and the
 warp ctl reports both for the last landed compositor readback
 (`rb-last-parked-ms`, `rb-last-exec-ms`); a refused readback reports neither,
 since it ran for no time. Any chain parked behind an abandoned chain of its
-context is released as refused. A client's released chain counts as signaled,
-like one the device answered with an error, though its context is already
-poisoned (fence stream over, fenced work refused). A compositor readback is
-counted `rb_dropped` by `comp_readback_retired`, and `gl_adoption` already
-refuses the poisoned context, so the reserved slot is not held for every other
-surface.
+context, and every parked chain on a dead engine, is released (`released` on
+its tag). A released chain is not a completion: `warp_service_fences` poisons
+its context, so the fence stream is over and a waiter reads EOF, and owes its
+count in `released_owed` (per timeline). Counting it at once would carry the
+dense `fence_signaled` past the abandoned fence ahead of it. The vindication
+that un-poisons the context adds what is owed to `fence_signaled` and
+`timeline_signaled`, so the client's count stays in step afterwards. A
+compositor readback is counted `rb_dropped` by `comp_readback_retired`, and
+`gl_adoption` already refuses the poisoned context, so the reserved slot is not
+held for every other surface.
 
 ### The coherent ring lane
 

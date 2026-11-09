@@ -127,8 +127,8 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-11-09 [[chg-2026-11-09-narrow-sync-wait]] — Lictor's synchronous wait no longer widens behind a readback (vote 72, first half)
 - 2026-11-09 [[chg-2026-11-09-panels-enter-or-esc]] — Trusted panels close on Enter or Esc; the key prompt runs on its own clock (vote 70)
 - 2026-11-09 [[chg-2026-11-09-park-readbacks-f1]] — A parked chain behind an abandoned chain is released, not kept (vote 81 audit F1)
+- 2026-11-09 [[chg-2026-11-09-park-readbacks-r2f1]] — A released chain is owed, not counted, until its context is vindicated (vote 81 audit round 2 F1)
 - 2026-11-09 [[chg-2026-11-09-park-readbacks]] — Lictor parks a readback until its context's earlier chains retire (vote 81)
 - 2026-11-09 [[chg-2026-11-09-sak-renew]] — A takeover behind a GPU backlog renews the kernel's quiesce deadline (vote 71)
 - 2026-11-09 [[chg-2026-11-09-serial-side-queue]] — The serial console reads every byte; what the ring refuses waits in a side queue (vote 73)
-- 2026-11-09 [[chg-2026-11-09-takeover-bound-round4]] — The takeover's bound lives inside one seat step (round 4)
 <!-- generated:end -->

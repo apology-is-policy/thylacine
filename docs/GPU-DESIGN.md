@@ -2586,20 +2586,27 @@ bounded by its prefix, because each chain ahead of it is abandoned at
   nothing it could still do needs them. The compositor's readback is released
   the same way, and that frees the reserved slot for every other surface;
   `gl_adoption` refuses the poisoned context, and its surface keeps its last
-  frame. Like a chain the device answered with an error, a released chain's
-  fence counts as signaled, so the client's count stays in step if a late
-  retirement later vindicates the context; the bytes it would have read did not
-  land. (First written as "keeps it parked until its late retirement"; the
-  vote-81 audit round's F1 found the pin.)
+  frame. A released chain's tag says so (`released`), and it is not a
+  completion. The seam counts fences densely (a count of N means everything up
+  to N finished), so counting a released chain would carry the count past the
+  abandoned fence ahead of it, and a wait on either would return as if it had
+  finished. Instead the seam ends the context's fence stream, so a waiter reads
+  EOF, and owes the count. The vindication that un-poisons the context, the
+  proof that every chain ahead finished, pays what is owed, so the client's
+  count stays in step afterwards; the bytes a released readback would have read
+  never landed. (First written as "keeps it parked until its late retirement",
+  which round 1's F1 found pinned the poll; then as "counts as signaled", which
+  round 2's F1 found passed the abandoned fence.)
 - **The harness hold.** A chain whose retirement the test hold swallowed
   (#177) has finished on the device, so nothing parked waits for it. Otherwise
   a held client would park the compositor's readback on the reserved slot: the
   cross-client wedge that ROUND F4 closed.
 - **Stalled engine.** Nothing publishes while the engine is stalled. Parked
   chains publish at revival.
-- **Dead engine.** A parked chain is released as refused (`ok = false`, not
+- **Dead engine.** A parked chain is released (`ok = false`, `released`, not
   abandoned). The device never saw it, so its slot returns to the pool and
-  nothing it named is at risk.
+  nothing it named is at risk. The seam ends its context's fence stream, as for
+  any released chain, and no vindication comes on a dead engine.
 
 *The compositor readback.* `comp-rb` rides the client's context, so it parks
 like the client's own readback. The reserved slot holds it while it is parked,
@@ -2672,9 +2679,12 @@ The census:
   harness hold), queues three heavy submits, then a readback, which parks, then
   abandons its chains. The abandon must take exactly the three, which shows the
   readback was parked and not on the device. Within two seconds, the context's
-  fences in flight must reach zero: the parked readback was released. The hold
-  then comes off and the lane must heal before CLEAN judges it. A mutant that
-  never releases a parked chain must go red here and nowhere else.
+  fences in flight must reach zero (the parked readback was released) while its
+  `fence-signaled` has not moved. The hold then comes off, the replay vindicates
+  the queue, and `fence-signaled` must rise by exactly four: the queue and the
+  owed readback. The lane must heal before CLEAN judges it. A mutant that never
+  releases a parked chain, and one that counts a released chain at once, must
+  each go red here and nowhere else.
 
 *Witnesses whose premise was the hold.* `ls-graphical-sak-chain`'s readback and
 pointer legs, and `ls-graphical-keys-behind`'s readback leg, stood a client

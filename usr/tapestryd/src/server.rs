@@ -2146,6 +2146,11 @@ struct WarpCtx {
     /// -- the server's single reported cursor would let two parked readers
     /// steal each other's wakes).
     timeline_signaled: [u64; WARP_TIMELINES],
+    /// Released parked chains (vote 81), per timeline: never run, so not yet
+    /// counted. Owed until the vindication that un-poisons the context proves
+    /// every chain ahead of them finished; counting them at release would let
+    /// the dense count pass the abandoned fence ahead of them.
+    released_owed: [u64; WARP_TIMELINES],
     /// #210 ledger reconciliation: every fenced write that REACHED the
     /// dispatch funnel (rx), split by outcome (minted / E_AGAIN refused /
     /// other error). The client's `issued` counts its successful fenced
@@ -11360,6 +11365,7 @@ impl Comp {
             fence_signaled: 0,
             fence_reported: 0,
             timeline_signaled: [0; WARP_TIMELINES],
+            released_owed: [0; WARP_TIMELINES],
             fenced_rx: 0,
             fenced_minted: 0,
             fenced_again: 0,
@@ -15422,6 +15428,26 @@ impl Comp {
                     // poisons the client's ctx the same way -- the device
                     // may still be writing that client's BO backing.
                     c.fence_poisoned = true;
+                } else if tag.released {
+                    // Vote 81: a parked chain the device never saw, released
+                    // because its context's prefix was abandoned or the
+                    // engine died. Its fence never signals, so the stream is
+                    // over (the waiter reads EOF, not success), and the count
+                    // is owed: counted now, the dense count would pass the
+                    // abandoned fence ahead of it, and every wait at or below
+                    // it would return as if that chain had finished.
+                    c.fence_poisoned = true;
+                    if !tag.comp {
+                        let t = tag.ring_idx as usize;
+                        if t < WARP_TIMELINES {
+                            c.released_owed[t] += 1;
+                        } else {
+                            say!(
+                                "tapestryd: warp released tag ring_idx {} out of range (ctx {}) -- count dropped",
+                                tag.ring_idx, tag.ctx_pub
+                            );
+                        }
+                    }
                 } else if !tag.comp {
                     // #210 ROOT CAUSE FIX: count completions DENSELY per
                     // ctx instead of publishing the device-GLOBAL max
@@ -15547,6 +15573,16 @@ impl Comp {
                     c.fence_poisoned = false;
                     c.leaked_bytes = 0;
                     c.leaked_count = 0;
+                    // Every chain ahead of the released ones has now finished,
+                    // so their counts come due: without them the client's
+                    // issue count stays ahead for good (#210's silent park).
+                    // The bytes a released readback would have read never
+                    // landed; the stream was over until this point.
+                    for t in 0..WARP_TIMELINES {
+                        let owed = core::mem::take(&mut c.released_owed[t]);
+                        c.fence_signaled += owed;
+                        c.timeline_signaled[t] += owed;
+                    }
                 }
             }
             let slot = match self.warp_ctx_vindicate.iter().position(|&p| p == v.ctx_pub) {
