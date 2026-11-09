@@ -161,6 +161,43 @@ fn write_ctl(root: i64, path: &str, data: &str) -> bool {
     n == data.len() as i64
 }
 
+/// The broker's stall (GPU-DESIGN 4.5.15) refuses every submission with EAGAIN until
+/// the synchronous chain it waits on retires, and a deep queue of this program's own
+/// can cause it; past FENCE_ABANDON_MS (30 s) the chain is abandoned, so a refusal
+/// still standing after this bound is a fault, not a stall.
+const STALL_RESEND_BOUND_MS: u64 = 35_000;
+
+/// Write one whole command, resending it while the broker answers EAGAIN (its stall),
+/// up to STALL_RESEND_BOUND_MS. Returns the write's last answer and how many times
+/// the stall refused it; a refused command was never queued, so resending is exact.
+fn write_behind_stall(root: i64, path: &str, bytes: &[u8]) -> (i64, u32) {
+    let t0 = libthyla_rs::time::Instant::now();
+    let mut refused = 0u32;
+    loop {
+        let fd = unsafe { t_open(root, path.as_ptr(), path.len(), T_OWRITE) };
+        if fd < 0 {
+            return (fd, refused);
+        }
+        let n = unsafe { t_write(fd, bytes.as_ptr(), bytes.len()) };
+        unsafe { t_close(fd) };
+        if n != -11 || t0.elapsed().as_millis() as u64 >= STALL_RESEND_BOUND_MS {
+            return (n, refused);
+        }
+        refused += 1;
+        let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(20));
+    }
+}
+
+/// Say that the broker's stall refused a command before it was taken.
+fn note_stall_refusals(what: &str, refused: u32) {
+    if refused > 0 {
+        t_putstr(&format!(
+            "warp-prove: {} -- the broker's stall refused it {} times before it was taken\n",
+            what, refused
+        ));
+    }
+}
+
 fn parse_u32_prefix(s: &str) -> Option<u32> {
     s.trim().split_ascii_whitespace().next()?.parse().ok()
 }
@@ -1587,18 +1624,12 @@ fn mint_sized_bo(root: i64, ctx: u32, what: &str) -> (u32, u32, u64) {
 
 fn submit_stream(root: i64, ctx: u32, st: &[u32], what: &str) {
     let bytes: Vec<u8> = st.iter().flat_map(|d| d.to_le_bytes()).collect();
-    let fd = unsafe {
-        let p = format!("ctx/{}/submit", ctx);
-        t_open(root, p.as_ptr(), p.len(), T_OWRITE)
-    };
-    if fd < 0 {
-        fail(&format!("cross-blit: submit open ({})", what));
-    }
-    let n = unsafe { t_write(fd, bytes.as_ptr(), bytes.len()) };
-    unsafe { t_close(fd) };
+    let (n, refused) = write_behind_stall(root, &format!("ctx/{}/submit", ctx), &bytes);
     if n != bytes.len() as i64 {
-        fail(&format!("cross-blit: submit refused ({})", what));
+        // n is the open's answer when the open failed, else the write's.
+        fail(&format!("cross-blit: submit refused ({}, {}, after {} stall refusals)", what, n, refused));
     }
+    note_stall_refusals(what, refused);
 }
 
 /// CREATE_SUB_CTX + SET_SUB_CTX. vrend scopes object state to a sub-context
@@ -3941,9 +3972,11 @@ fn rb_upload_triangles(warp: i64, ctx: u32, vbo: u32, vbo_va: u64) {
     }
     let before = ctx_field(warp, ctx, "fence-signaled");
     let up = format!("transfer_to 0 0 0 0 {} 1 1 0 0 0", RB_TRIS * 48);
-    if !write_ctl(warp, &format!("ctx/{}/bo/{}/ctl", ctx, vbo), &up) {
+    let (n, refused) = write_behind_stall(warp, &format!("ctx/{}/bo/{}/ctl", ctx, vbo), up.as_bytes());
+    if n != up.len() as i64 {
         rb_incomplete("instrument:vbo-upload");
     }
+    note_stall_refusals("vbo upload", refused);
     let _ = rb_wait_signaled(warp, ctx, before, 1, libthyla_rs::time::Instant::now(), "vbo-upload");
 }
 
@@ -4524,9 +4557,11 @@ fn observe_readback() {
     // latency is REPORTED.
     let (dl_before, dl_t0) = rb_queue_heavy(warp, ctx, RB_DEADLINE_SUBMITS, "deadline");
     let xfer = format!("transfer_from 0 0 0 0 {} {} 1 0 0 0", RB_W, RB_H);
-    if !write_ctl(warp, &format!("ctx/{}/bo/{}/ctl", ctx, bo), &xfer) {
+    let (n, refused) = write_behind_stall(warp, &format!("ctx/{}/bo/{}/ctl", ctx, bo), xfer.as_bytes());
+    if n != xfer.len() as i64 {
         rb_incomplete("instrument:f2b-transfer-refused");
     }
+    note_stall_refusals("deadline readback", refused);
     let mut b_refused = 0u64;
     let mut b_max_ms = 0u64;
     let mut b_sum_ms = 0u64;
