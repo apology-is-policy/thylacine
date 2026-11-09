@@ -130,5 +130,5 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-11-09 [[chg-2026-11-09-serial-side-queue]] — The serial console reads every byte; what the ring refuses waits in a side queue (vote 73)
 - 2026-11-09 [[chg-2026-11-09-trusted-audit-close]] — The trusted-path batch audit close: renewal behind a live engine, serial verdicts wait, the episode tail (votes 70-73)
 - 2026-11-09 [[chg-2026-11-09-trusted-round2]] — The trusted-path round 2: the cursor lane renews, renewal at first sight, the readback judge
-- 2026-11-06 [[chg-2026-11-06-aux-join2]] — The aux join: aux-3 (the thread-model arc through ENOEXEC) reaches main through corona's branch
+- 2026-11-09 [[chg-2026-11-09-trusted-round3]] — The trusted-path round 3: an abandoned lane renews nothing, leg X asserts the stop, an unjudged deadline is not a pass
 <!-- generated:end -->

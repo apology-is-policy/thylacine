@@ -59,7 +59,8 @@
 # (vote 79): the lane revives and the takeover completes.
 #
 # Leg X (abandoned): shot 10 is that stall held past the abandonment bound. The wait
-# ends there and the kernel fails the chord; the restore needs only the control queue,
+# ends there: no renewal follows the abandonment, Lictor names the lane as what holds
+# the takeover, and the kernel fails the chord; the restore needs only the control queue,
 # so it goes through with the cursor chain still outstanding. The lane is abandoned,
 # not lost: tapestryd keeps being refused and keeps retrying a pointer update, the
 # late retirement (10 s after the abandonment) frees the lane, and the update goes
@@ -335,16 +336,17 @@ expect {
         lc_fail "withheld: the kernel closed the seat behind a live engine's stall (renewed=$renewed) -- the chord ended in neither the trusted screen nor a dead engine"
     }
     -re {input withheld|engine dead} { lc_fail "withheld: the engine died on a stall released inside the abandonment bound" }
-    -re {lictor: takeover renewed behind a draining backlog generation=[0-9]+ chains=[0-9]+} {
-        incr renewed
-        exp_continue
-    }
-    -ex "gpu synchronous chain retirement released (test-latch-dead)" {
-        set released 1
-        exp_continue
-    }
-    -re {gpu synchronous chain retired [0-9]+ ms after its deadline -- engine revived} {
-        set revived 1
+    -re {lictor: takeover renewed behind a draining backlog generation=[0-9]+ chains=[0-9]+|gpu synchronous chain retirement released \(test-latch-dead\)|gpu synchronous chain retired [0-9]+ ms after its deadline -- engine revived} {
+        # One alternation: lictor prints a release and a renewal in the same pass, and
+        # separate arms would let the one listed first discard the other.
+        set hit $expect_out(0,string)
+        if {[string match "*takeover renewed*" $hit]} {
+            incr renewed
+        } elseif {[string match "*retirement released*" $hit]} {
+            set released 1
+        } else {
+            set revived 1
+        }
         exp_continue
     }
     -ex "lictor: trusted scanout active" {
@@ -569,16 +571,16 @@ expect {
         lc_fail "cursor: the kernel closed the seat behind a stalled cursor lane (renewed=$renewed) -- the chord ended in neither the trusted screen nor the lane's abandonment"
     }
     -re {cursor queue abandoned|cursor queue failed} { lc_fail "cursor: the cursor queue died on a chain released inside the abandonment bound" }
-    -re {lictor: takeover renewed behind a draining backlog generation=[0-9]+ chains=[0-9]+} {
-        incr renewed
-        exp_continue
-    }
-    -ex "lictor: cursor chain retirement released (test-latch-dead)" {
-        set released 1
-        exp_continue
-    }
-    -re {cursor chain retired [0-9]+ ms after its deadline -- cursor queue revived} {
-        set revived 1
+    -re {lictor: takeover renewed behind a draining backlog generation=[0-9]+ chains=[0-9]+|lictor: cursor chain retirement released \(test-latch-dead\)|cursor chain retired [0-9]+ ms after its deadline -- cursor queue revived} {
+        # One alternation, as in leg 1: the release and a renewal share a pass.
+        set hit $expect_out(0,string)
+        if {[string match "*takeover renewed*" $hit]} {
+            incr renewed
+        } elseif {[string match "*retirement released*" $hit]} {
+            set released 1
+        } else {
+            set revived 1
+        }
         exp_continue
     }
     -ex "lictor: trusted scanout active" {
@@ -621,6 +623,7 @@ expect {
 }
 set renewed 0
 set never 0
+set held 0
 set restored 0
 set timeout 50
 expect {
@@ -628,25 +631,31 @@ expect {
     -ex "lictor: trusted scanout active" { lc_fail "abandon: the takeover completed although the cursor chain never retired" }
     -re {cursor queue failed} { lc_fail "abandon: the cursor queue failed where it was only abandoned" }
     -ex "lictor: cursor chain retirement released (test-latch-dead)" { lc_fail "abandon: the hold ended before the seat restored past the abandoned lane" }
-    -re {lictor: takeover renewed behind a draining backlog generation=[0-9]+ chains=[0-9]+} {
-        incr renewed
-        exp_continue
-    }
-    -re {cursor chain never retired in [0-9]+ ms -- cursor queue abandoned until it retires} {
-        set never 1
-        exp_continue
-    }
-    -re {lictor: normal scanout restored generation=[0-9]+} {
-        set restored 1
+    -re {lictor: takeover renewed behind a draining backlog generation=[0-9]+ chains=[0-9]+|cursor chain never retired in [0-9]+ ms -- cursor queue abandoned until it retires|lictor: takeover held by a cursor lane out of service \(abandoned\)|lictor: normal scanout restored generation=[0-9]+} {
+        # One alternation: lictor prints these in pass order, and the abandonment and a
+        # renewal can share a read. Reap runs before renew, so with the wait ended no
+        # renewal can follow the abandonment line.
+        set hit $expect_out(0,string)
+        if {[string match "*takeover renewed*" $hit]} {
+            if {$never} { lc_fail "abandon: a renewal after the lane was abandoned (renewed=$renewed) -- the abandonment did not end the wait" }
+            incr renewed
+        } elseif {[string match "*never retired*" $hit]} {
+            set never 1
+        } elseif {[string match "*out of service*" $hit]} {
+            set held 1
+        } else {
+            set restored 1
+        }
         exp_continue
     }
     -ex "lictor: trusted seat recovered; nothing was conferred" {
         if {!$restored} { lc_fail "abandon: the seat went back to normal with no restore" }
         if {!$never} { lc_fail "abandon: the seat gave up before the cursor lane was abandoned (renewed=$renewed) -- the wait behind the lane ended early" }
         if {!$renewed} { lc_fail "abandon: the lane was abandoned with no renewal behind it" }
-        lc_step "abandon: renewed $renewed times until the lane was abandoned, then the chord failed past the outstanding chain"
+        if {!$held} { lc_fail "abandon: the chord failed behind the abandoned lane and lictor never said why" }
+        lc_step "abandon: renewed $renewed times until the lane was abandoned, then none; lictor named the lane, and the chord failed past the outstanding chain"
     }
-    timeout { lc_fail "abandon: within 50s: renewed=$renewed never=$never restored=$restored and no recovery" }
+    timeout { lc_fail "abandon: within 50s: renewed=$renewed never=$never held=$held restored=$restored and no recovery" }
 }
 after 1500
 pointer 9000 9000
@@ -655,6 +664,8 @@ set released 0
 set revived 0
 set timeout 30
 expect {
+    -re {cursor queue failed} { lc_fail "abandon: a well-formed late retirement failed the cursor queue" }
+    -re {EXTINCTION:} { lc_extinction_fail "abandon revival" }
     -ex "tapestryd: pointer backend refused an update; retrying" {
         set refused 1
         exp_continue
@@ -670,8 +681,6 @@ expect {
     -ex "tapestryd: pointer backend accepted an update again" {
         lc_step "abandon: the late retirement freed the lane and the pointer update went through"
     }
-    -re {cursor queue failed} { lc_fail "abandon: a well-formed late retirement failed the cursor queue" }
-    -re {EXTINCTION:} { lc_extinction_fail "abandon revival" }
     timeout { lc_fail "abandon: within 30s: refused=$refused released=$released revived=$revived and no accepted update" }
 }
 if {!$refused} { lc_fail "abandon: the update was accepted, but tapestryd never said it had been refused" }

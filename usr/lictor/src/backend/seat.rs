@@ -39,6 +39,8 @@ pub struct Seat {
     takeover_began: Option<(u64, u32, libthyla_rs::time::Instant)>,
     /// The generation whose takeover deadline was last renewed, and when.
     renewed: Option<(u64, libthyla_rs::time::Instant)>,
+    /// The generation whose takeover was reported held by a cursor lane out of service.
+    lane_noted: Option<u64>,
     failed_since: Option<libthyla_rs::time::Instant>,
     /// A takeover began, so normal output may not be showing: owed a restore
     /// until the device completes one or its engine dies.
@@ -277,7 +279,17 @@ impl Seat {
                     device.gpu.test_cursor_release();
                 }
                 if !self.active() { self.renew_behind_backlog(device); }
-                if !device.gpu.takeover_clear() { return; }
+                if !device.gpu.takeover_clear() {
+                    if let Some(why) = device.gpu.cursor_out_of_service() {
+                        if self.lane_noted != Some(self.generation) {
+                            self.lane_noted = Some(self.generation);
+                            super::diagnostic(&alloc::format!(
+                                "lictor: takeover held by a cursor lane out of service ({}) generation={}; the chord fails at the kernel's deadline\n",
+                                why, self.generation));
+                        }
+                    }
+                    return;
+                }
                 if !self.active() {
                     if self.takeover_began.is_none_or(|(generation, ..)| generation != self.generation) {
                         self.takeover_began = Some((self.generation, device.gpu.fenced_in_flight(),
@@ -422,8 +434,10 @@ impl Seat {
                 });
                 #[cfg(feature = "test-mode")]
                 if self.test_release_at.take().is_some() { device.gpu.test_stall_release(); }
+                // A takeover that failed before it displaced anything is not restored, so
+                // the held cursor chain is let go here.
                 #[cfg(feature = "test-mode")]
-                let _ = self.test_cursor_release_at.take();
+                if self.test_cursor_release_at.take().is_some() { device.gpu.test_cursor_release(); }
                 if !released || (self.active() && since.elapsed().as_millis() < FAILURE_NOTICE_MS) { return; }
                 if self.displaced || self.active.is_some() {
                     if device.gpu.engine_dead() {

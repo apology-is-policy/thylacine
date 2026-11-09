@@ -70,7 +70,7 @@ pub enum SeatShot {
     RefuseFrame,
     /// The ordinary return's restore waits with keys left in the ring.
     HoldRestore,
-    /// A cursor stall inside exclusion, held until the seat restores.
+    /// A cursor stall inside exclusion whose retirement is held 8 s: the takeover waits it out.
     CursorStall,
     /// The same cursor stall, held past the abandonment bound.
     CursorAbandon,

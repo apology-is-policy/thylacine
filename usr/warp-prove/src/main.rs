@@ -4003,11 +4003,28 @@ fn chain_hold() -> i64 {
     let mut refused = 0u64;
     let mut read_at: Option<u64> = None;
     let mut said = false;
+    // Why a run never reports DEEP: readbacks accepted / refused, draws refused, the
+    // deepest queue seen behind an accepted readback, and per readback (first 8) the
+    // fences retired when it was issued and how long it stood.
+    let mut rb_ok = 0u64;
+    let mut rb_refused = 0u64;
+    let mut out_rb_max = 0u64;
+    let mut rb_retired: Vec<u64> = Vec::new();
+    let mut rb_stood: Vec<u64> = Vec::new();
+    let mut rb_t: Option<libthyla_rs::time::Instant> = None;
     let t0 = libthyla_rs::time::Instant::now();
     while t0.elapsed().as_secs() < secs {
         let retired = ctx_field(warp, ctx, "fence-signaled") - base;
         if read_at.is_some_and(|at| retired > at) {
             read_at = None;
+            if let Some(t) = rb_t.take() {
+                if rb_stood.len() < 8 {
+                    rb_stood.push(t.elapsed().as_millis() as u64);
+                }
+            }
+        }
+        if read_at.is_some() && sent - retired > out_rb_max {
+            out_rb_max = sent - retired;
         }
         if sent - retired < depth {
             let mut st: Vec<u32> = Vec::new();
@@ -4026,8 +4043,14 @@ fn chain_hold() -> i64 {
             if write_unless_behind(warp, &bo_ctl, xfer.as_bytes()) {
                 read_at = Some(sent);
                 sent += 1;
+                rb_ok += 1;
+                rb_t = Some(libthyla_rs::time::Instant::now());
+                if rb_retired.len() < 8 {
+                    rb_retired.push(retired);
+                }
             } else {
                 refused += 1;
+                rb_refused += 1;
                 let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(5));
             }
         } else {
@@ -4044,6 +4067,19 @@ fn chain_hold() -> i64 {
             }
             let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(5));
         }
+    }
+    if readback {
+        t_putstr(&format!(
+            "warp-prove: CHAIN-HOLD TRACE ctx {} deep {} readbacks {} refused {} draws-refused {} deepest-behind-readback {} retired-at-readback {:?} readback-stood-ms {:?}\n",
+            ctx,
+            said as u32,
+            rb_ok,
+            rb_refused,
+            refused - rb_refused,
+            out_rb_max,
+            rb_retired,
+            rb_stood
+        ));
     }
     t_putstr(&format!(
         "warp-prove: CHAIN-HOLD END ctx {} sent {} refused {} after {} ms\n",
@@ -4515,12 +4551,12 @@ fn observe_readback() {
             t_putstr(&format!("warp-prove: C6-RB DEADLINE -- B present {} refused after {} ms\n", i, ms));
         }
         if dl_seen_ms.is_none()
-            && ctx_field(warp, ctx, "fence-signaled") >= dl_before + RB_DEADLINE_SUBMITS as u64 + 1
+            && ctx_field(warp, ctx, "fence-signaled") > dl_before + RB_DEADLINE_SUBMITS as u64
         {
             dl_seen_ms = Some(dl_t0.elapsed().as_millis() as u64);
         }
     }
-    // The client's readback + the 7 submits retire; the engine must be alive.
+    // The client's readback + the RB_DEADLINE_SUBMITS submits retire; the engine must be alive.
     let dl_after_ms =
         rb_wait_signaled(warp, ctx, dl_before, RB_DEADLINE_SUBMITS as u64 + 1, dl_t0, "deadline");
     let dl_queue_ms = dl_seen_ms.unwrap_or(dl_after_ms);
@@ -4541,12 +4577,14 @@ fn observe_readback() {
     // Vote 72a: no synchronous wait outlasts SUBMIT_DEADLINE_MS behind a readback. When
     // the client's readback stood past that with slack, a present stalled at the bound
     // and was refused, and none waited the readback out.
+    // A readback that stood no longer than the bound judges nothing: it is not a pass.
     let stood = dl_stood_ms > RB_F2B_BOUND_MS;
-    let bounded = !stood || (b_max_ms < RB_F2B_BOUND_MS && b_refused > 0);
-    let deadline_ok = alive && poisoned_after == 0 && bounded;
+    let healthy = alive && poisoned_after == 0;
+    let bounded = b_max_ms < RB_F2B_BOUND_MS && b_refused > 0;
+    let deadline_ok = healthy && stood && bounded;
     t_putstr(&format!(
         "warp-prove: C6-RB DEADLINE {} -- {} B presents behind the client's own busy readback, {} refused while the engine stalled, longest {} ms (bound {} ms; the readback stood {} ms past the first present, {}); engine alive after: {}; poisoned {}\n",
-        if deadline_ok { "PASS" } else { "FAIL" },
+        if !healthy || (stood && !bounded) { "FAIL" } else if !stood { "UNJUDGED" } else { "PASS" },
         b_n, b_refused, b_max_ms, RB_F2B_BOUND_MS, dl_stood_ms,
         if stood { "so a present must have stalled at its bound" } else { "too short to judge the bound" },
         alive as u32, poisoned_after
@@ -4555,6 +4593,9 @@ fn observe_readback() {
         "warp-prove: C6-RB F2B REPORT -- bystander present latency behind a client readback of a busy BO: max {} ms mean {} ms over {} presents; the {} heavy submits + the readback retired in {} ms (the client's readback observed draw index {} of {}, pixel {:#010x})\n",
         b_max_ms, b_sum_ms / b_n, b_n, RB_DEADLINE_SUBMITS, dl_queue_ms, landed_idx, RB_DEADLINE_SUBMITS * RB_DRAWS_PER_SUBMIT, landed_px
     ));
+    if healthy && !stood {
+        rb_incomplete("deadline-unjudged");
+    }
     record(deadline_ok, "deadline");
 
     // ---- Teardown: withdraw the adoption, destroy the ctx, drop the

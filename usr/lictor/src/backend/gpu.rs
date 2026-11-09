@@ -4712,16 +4712,18 @@ impl Gpu {
         self.ctrl.fenced_in_flight()
     }
 
-    /// The device holds a takeover up while its engine lives: the control queue
-    /// (stalled behind a chain, or a command not yet retired; vote 71) or the cursor
-    /// lane stalled behind its chain (vote 79). A takeover waiting on either is
-    /// renewed. The control queue's stall ends in a retirement or, at
+    /// The device holds a takeover up while its engine lives: the cursor lane stalled
+    /// behind its chain (vote 79), or, with the lane idle, the control queue (stalled
+    /// behind a chain, or a command not yet retired; vote 71). A takeover waiting on
+    /// either is renewed. The control queue's stall ends in a retirement or, at
     /// FENCE_ABANDON_MS, a dead engine; the lane's in a retirement or, at the same
-    /// bound, its abandonment, which ends the wait.
+    /// bound, its abandonment, which ends the wait. An abandoned or failed lane holds
+    /// the takeover past anything the control queue does, so nothing is renewed then.
     pub fn takeover_waiting(&self) -> bool {
         !self.ctrl.dead
-            && (self.ctrl.stalled.is_some() || self.ctrl.sync_pending || self.ctrl.sync2_pending
-                || self.cursor_stalled())
+            && (self.cursor_stalled()
+                || (self.cursor.queue.idle()
+                    && (self.ctrl.stalled.is_some() || self.ctrl.sync_pending || self.ctrl.sync2_pending)))
     }
 
     /// The broker enables this after boot probes, then releases imported DMA

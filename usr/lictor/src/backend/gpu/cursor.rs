@@ -370,6 +370,17 @@ impl Gpu {
         self.cursor.stalled.is_some()
     }
 
+    /// Why the lane takes no chain: abandoned until a late retirement, or failed.
+    pub fn cursor_out_of_service(&self) -> Option<&'static str> {
+        if self.cursor.queue.poisoned() {
+            Some("failed")
+        } else if self.cursor.queue.abandoned() {
+            Some("abandoned")
+        } else {
+            None
+        }
+    }
+
     pub(super) fn cursor_hide_output(&mut self, output: u32) -> Result<(), Error> {
         self.cursor_prepare()?;
         // Some display listeners (notably QEMU VNC) ignore mouse visibility
