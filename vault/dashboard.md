@@ -123,6 +123,7 @@ Generated — do not edit between the markers (`quaestor render`).
 
 ## Recent changes
 
+- 2026-11-09 [[chg-2026-11-09-aux-unlock]] — An unlock that never left for want of memory is sent again: the aux join's round 3 F2, bounded where a kill cannot reach
 - 2026-11-06 [[chg-2026-11-06-aux-join2]] — The aux join: aux-3 (the thread-model arc through ENOEXEC) reaches main through corona's branch
 - 2026-11-05 [[chg-2026-11-05-as4-r6-join]] — AS-4 audit round 6, the join's half
 - 2026-11-05 [[chg-2026-11-05-as4-r6-shell]] — AS-4 audit round 6, the shell's half
@@ -130,5 +131,4 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-11-05 [[chg-2026-11-05-as4-r7-shell-corrected]] — AS-4 round 7's shell chg, corrected
 - 2026-11-05 [[chg-2026-11-05-as4-r7-shell]] — AS-4 audit round 7, the shell's half
 - 2026-11-05 [[chg-2026-11-05-c10-owed-readings]] — C10's owed readings: a witness for the vector's tag-bit test, and two sabotages read alone
-- 2026-11-05 [[chg-2026-11-05-c9-r2]] — The switch decides from TTBR0: round 2's fixes, in the tests' fixtures
 <!-- generated:end -->
