@@ -430,7 +430,7 @@ struct p9_client {
     // Diagnostics.
     u32                  total_ops;
     u32                  total_errors;
-    u32                  unlock_resends;   // p9_client_unlock's sends after an unsent one
+    u32                  unsent_resends;   // sends again of a frame that never left
 };
 
 // Stamp the identity cape on a client no other thread can reach yet: the
@@ -637,6 +637,12 @@ int  p9_client_write(struct p9_client *c, u32 fid, u64 offset,
 
 int  p9_client_getattr(struct p9_client *c, u32 fid,
                         u64 request_mask, struct p9_attr *out_attr);
+// p9_client_getattr, but a Tgetattr that never reached the wire (its reply
+// buffer, or its frame's spill, could not be allocated) is sent again until the
+// server answers. The wait between sends ends at a death, and at a caught note
+// where the thread opted in (-P9_E_INTR).
+int  p9_client_getattr_patient(struct p9_client *c, u32 fid,
+                               u64 request_mask, struct p9_attr *out_attr);
 int  p9_client_setattr(struct p9_client *c, u32 fid,
                         const struct p9_setattr *attr);
 int  p9_client_readdir(struct p9_client *c, u32 fid, u64 offset,
@@ -653,12 +659,20 @@ int  p9_client_fsync(struct p9_client *c, u32 fid, u32 datasync);
 int  p9_client_lock(struct p9_client *c, u32 fid, u8 type, u32 flags,
                     u64 start, u64 length, const u8 *client, u16 client_len,
                     u8 *status);
-// An unlock is never lost for want of memory: a Tlock UNLCK that never reached
-// the wire is sent again until the server answers it, or a death, a dead
-// session or an unbound fid has the server drop the fid's locks anyway.
-// Killable only. Otherwise p9_client_lock's contract.
+// A Tlock UNLCK that never reached the wire told the server nothing, and on a
+// live session nothing else releases the range before the fid's clunk. So it is
+// sent again, after a wait no note ends, up to `max_resends` times:
+// P9_RESEND_UNBOUNDED, for a thread a kill reaches, until it is answered;
+// P9_RESEND_CLOSER, about a second, a closer's own patience. -P9_E_AGAIN: it
+// never left (that bound, or a death). A dead session or an unbound fid ends it
+// at once, and the server drops the fid's locks in both. Otherwise
+// p9_client_lock's contract.
+#define P9_RESEND_UNBOUNDED  0xffffffffu
+#define P9_RESEND_CLOSER     21u   // 1, 2, ... 32 ms, then 15 x 64: 1023 ms, as a
+                                   // closer's own ten doubling retries
 int  p9_client_unlock(struct p9_client *c, u32 fid, u64 start, u64 length,
-                      const u8 *client, u16 client_len, u8 *status);
+                      const u8 *client, u16 client_len, u32 max_resends,
+                      u8 *status);
 int  p9_client_getlock(struct p9_client *c, u32 fid, u8 type,
                        u64 start, u64 length, const u8 *client, u16 client_len,
                        struct p9_getlock *out);

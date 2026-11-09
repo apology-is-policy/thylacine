@@ -18,7 +18,7 @@
 #include <thylacine/spinlock.h>
 #include <thylacine/thread.h>
 
-#include "../arch/arm64/timer.h"  // timer_now_ns: an unsent unlock's backoff
+#include "../arch/arm64/timer.h"  // timer_now_ns: a resend's backoff
 #include "../arch/arm64/uart.h"   // #210: the bounded ownerless-frame log
 #include <thylacine/types.h>
 
@@ -2469,30 +2469,93 @@ int p9_client_write(struct p9_client *c, u32 fid, u64 offset,
 }
 
 // =============================================================================
+// Sending again a frame that never left.
+// =============================================================================
+
+// The wait between sends: 1 ms, doubling to 64 ms (P9_RESEND_CLOSER counts it).
+#define CLIENT_RESEND_BACKOFF_MIN_NS   1000000ull
+#define CLIENT_RESEND_BACKOFF_MAX_NS  64000000ull
+
+static int client_resend_never(void *arg) { (void)arg; return 0; }
+
+// Under c->lock, which this drops. client_run_ex failed with `e`. A frame that
+// never left told the server nothing, so it may be built and sent again: on a
+// thread no death has reached, while *sends is under `bound`, after a wait.
+// 0: send it again. Otherwise the op's answer: e if the frame left (an Rlerror
+// among them), -P9_E_AGAIN if it never did, -P9_E_INTR if a caught note ended
+// the wait (`noteintr`, and only where the thread opted in).
+static int client_resend_wait(struct p9_client *c, int e, bool unsent,
+                              u32 *sends, u32 bound, bool noteintr,
+                              u64 *backoff) {
+    if (!unsent) CLIENT_UNLOCK_RET(c, e);
+    if (client_self_dying() || (bound != P9_RESEND_UNBOUNDED && *sends >= bound))
+        CLIENT_UNLOCK_RET(c, -P9_E_AGAIN);
+    (*sends)++;
+    c->unsent_resends++;
+    client_unlock(c);
+
+    struct Rendez rz;
+    rendez_init(&rz);
+    u64 now = timer_now_ns();
+    u64 dl  = now + *backoff;
+    if (dl < now) dl = (u64)-1ll;
+    if (dl == 0)  dl = 1;              // 0 is tsleep's "no deadline"
+    int ts = noteintr ? tsleep_noteintr(&rz, client_resend_never, NULL, dl)
+                      : tsleep(&rz, client_resend_never, NULL, dl);
+    if (ts == TSLEEP_INTR)     return -P9_E_AGAIN;
+    if (ts == TSLEEP_NOTEINTR) return -P9_E_INTR;
+    if (*backoff < CLIENT_RESEND_BACKOFF_MAX_NS) *backoff *= 2;
+    return 0;
+}
+
+// =============================================================================
 // Metadata operations.
 // =============================================================================
 
-int p9_client_getattr(struct p9_client *c, u32 fid,
-                       u64 request_mask, struct p9_attr *out_attr) {
+// A dead or closed session and an unbound fid end a resend's next pass, at the
+// checks at its top or at the build.
+static int client_getattr(struct p9_client *c, u32 fid, u64 request_mask,
+                          struct p9_attr *out_attr, bool patient) {
     if (!c) return -P9_E_INVAL;
     if (c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
-    client_lock(c);
-    if (c->progress) CLIENT_UNLOCK_RET(c, -P9_E_INVAL);
-    if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
-    if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
-    int te = client_await_tag_locked(c);
-    if (te != 0) CLIENT_UNLOCK_RET(c, te);
-    int len = p9_session_send_getattr(&c->session, c->out_buf,
-                                       c->out_buf_cap,
-                                       fid, request_mask);
-    if (len < 0) CLIENT_UNLOCK_RET(c, -P9_E_IO);
-    struct p9_dispatch_result r;
-    int e = client_run(c, (size_t)len, &r);
-    c->total_ops++;
-    if (e != 0) { c->total_errors++; CLIENT_UNLOCK_RET(c, e); }
-    if (out_attr) copy_attr(out_attr, &r.attr);
-    client_unlock(c);
-    return 0;
+    u32 sends   = 0;
+    u64 backoff = CLIENT_RESEND_BACKOFF_MIN_NS;
+    for (;;) {
+        client_lock(c);
+        if (c->progress) CLIENT_UNLOCK_RET(c, -P9_E_INVAL);
+        if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
+        if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
+        int te = client_await_tag_locked(c);
+        if (te != 0) CLIENT_UNLOCK_RET(c, te);
+        int len = p9_session_send_getattr(&c->session, c->out_buf,
+                                           c->out_buf_cap,
+                                           fid, request_mask);
+        if (len < 0) CLIENT_UNLOCK_RET(c, -P9_E_IO);
+        struct p9_dispatch_result r;
+        bool unsent = false;
+        int e = client_run_ex(c, (size_t)len, &r, &unsent);
+        c->total_ops++;
+        if (e == 0) {
+            if (out_attr) copy_attr(out_attr, &r.attr);
+            client_unlock(c);
+            return 0;
+        }
+        c->total_errors++;
+        if (!patient) CLIENT_UNLOCK_RET(c, e);
+        int w = client_resend_wait(c, e, unsent, &sends, P9_RESEND_UNBOUNDED,
+                                   /*noteintr=*/true, &backoff);
+        if (w != 0) return w;
+    }
+}
+
+int p9_client_getattr(struct p9_client *c, u32 fid,
+                       u64 request_mask, struct p9_attr *out_attr) {
+    return client_getattr(c, fid, request_mask, out_attr, /*patient=*/false);
+}
+
+int p9_client_getattr_patient(struct p9_client *c, u32 fid,
+                              u64 request_mask, struct p9_attr *out_attr) {
+    return client_getattr(c, fid, request_mask, out_attr, /*patient=*/true);
 }
 
 int p9_client_setattr(struct p9_client *c, u32 fid,
@@ -2615,25 +2678,16 @@ int p9_client_lock(struct p9_client *c, u32 fid, u8 type, u32 flags,
     return 0;
 }
 
-// The wait between sends of an unlock that never left: 1 ms, doubling to 64 ms.
-#define CLIENT_UNLOCK_BACKOFF_MIN_NS   1000000ull
-#define CLIENT_UNLOCK_BACKOFF_MAX_NS  64000000ull
-
-static int client_unlock_never(void *arg) { (void)arg; return 0; }
-
-// A Tlock UNLCK that never reached the wire (its reply buffer, or the spill of
-// its frame, could not be allocated) leaves the server holding the range, and
-// on a live session nothing else releases it before the fid's clunk. So it is
-// built and sent again, after a wait no note ends, until the server answers it.
-// It stops at a death, whose exit clunks the fid; at a dead session or an
-// unbound fid, either of which drops the fid's locks on the server; and at any
-// answer, an Rlerror among them, which is returned as p9_client_lock returns
-// it.
+// A death stops the sends: the dying Proc's exit clunks the fid, which drops
+// its locks. Any answer, an Rlerror among them, returns as p9_client_lock's
+// does.
 int p9_client_unlock(struct p9_client *c, u32 fid, u64 start, u64 length,
-                     const u8 *client, u16 client_len, u8 *status) {
+                     const u8 *client, u16 client_len, u32 max_resends,
+                     u8 *status) {
     if (!c || !status) return -P9_E_INVAL;
     if (c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
-    u64 backoff = CLIENT_UNLOCK_BACKOFF_MIN_NS;
+    u32 sends   = 0;
+    u64 backoff = CLIENT_RESEND_BACKOFF_MIN_NS;
     for (;;) {
         client_lock(c);
         if (c->progress) CLIENT_UNLOCK_RET(c, -P9_E_INVAL);
@@ -2655,20 +2709,9 @@ int p9_client_unlock(struct p9_client *c, u32 fid, u64 start, u64 length,
             return 0;
         }
         c->total_errors++;
-        // A dead or closed session and an unbound fid end the next pass, at the
-        // checks above or at the build.
-        if (!unsent || client_self_dying()) CLIENT_UNLOCK_RET(c, e);
-        c->unlock_resends++;
-        client_unlock(c);
-
-        struct Rendez rz;
-        rendez_init(&rz);
-        u64 now = timer_now_ns();
-        u64 dl  = now + backoff;
-        if (dl < now) dl = (u64)-1ll;
-        if (dl == 0)  dl = 1;          // 0 is tsleep's "no deadline"
-        if (tsleep(&rz, client_unlock_never, NULL, dl) == TSLEEP_INTR) return e;
-        if (backoff < CLIENT_UNLOCK_BACKOFF_MAX_NS) backoff *= 2;
+        int w = client_resend_wait(c, e, unsent, &sends, max_resends,
+                                   /*noteintr=*/false, &backoff);
+        if (w != 0) return w;
     }
 }
 

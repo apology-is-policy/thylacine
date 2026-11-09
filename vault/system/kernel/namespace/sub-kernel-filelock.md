@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/ARCHITECTURE.md section 9.6.11"]
 created: 2026-10-29
-updated: 2026-11-05
+updated: 2026-11-09
 ---
 ## Purpose
 
@@ -79,7 +79,8 @@ per (Proc, file), and which file each names.
   once granted, that its descriptor still names the same Spoor. If it does
   not, the call unlocks the range it took and answers `-T_E_BADF`. Without
   this, a lock whose descriptor closed mid-call would outlive the close meant
-  to drop it. The unlock is answered before the call returns, memory or not
+  to drop it. The unlock is answered before the call returns, a shortage of
+  memory only delaying it
   (the Dev's unlock contract, [[sub-kernel-dev]]). A program told EBADF may take
   the range again at once, and an unlock that landed after that take would drop
   it.
@@ -421,14 +422,25 @@ while another lock call holds the entry, could fail and leave every lock the Pro
 the file. So could the open file's last close and the closer's job, when another
 reference keeps the open alive.
 
+That fix's round 1 (Fable 5.1: 0 P0, 0 P1, 0 P2, 3 P3; the author found two P2s) bounded
+the waits a kill cannot reach. An exit's close sends once: its Proc's memory is freed at
+reap, after the close, so a wait there could wait on itself. What it could not send stays
+owed, for a closer when another reference holds the open and otherwise for the clunk that
+follows. A closer gives up after about a second, as it does for its own sends, sets the
+grant again and says so (`9p: close: unlock of fid N failed rc R`). And the identity a
+close's whole-file unlock learns first is sent again too. The guarantee: a thread a kill
+reaches sends until the server answers; a closer for about a second, then loudly; an
+exit's close once, then the clunk or a closer (2026-11-09).
+
 The rejected design published an owed range on the entry. The next lock call through the
 entry would pay it first, and the closer would pay it when the entry stays idle. Paying
 later is exactly the trap: the program, told EBADF, may legitimately take the range again
 through another descriptor, and a late owed unlock would silently drop that new lock.
 That design closed the trap only by making every later call through the entry wait for
 the payment. It also needed preallocated storage for the owed ranges and for the closer
-job, because the failure is itself an allocation failure. A bounded retry was rejected as
-a mitigation: memory that outlasts the budget leaves the same leak.
+job, because the failure is itself an allocation failure. A bounded retry was rejected for
+the re-check, which a kill reaches: memory that outlasts the budget would leave the same
+leak, silently.
 
 Booted at the join's lease 2 (87a56ff3c): each of the fix sabotages J13-J25 went red at
 its own leg, on the suite narrowed to `filelock.`, `dev9p.` and `notes.native_class`

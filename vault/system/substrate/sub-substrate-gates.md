@@ -22,7 +22,7 @@ locks: []
 abis: [abi-boot-banner]
 design: ["docs/TOOLING.md", "docs/PORTABILITY.md", "docs/DEBUGGING-PLAYBOOK.md"]
 created: 2026-08-01
-updated: 2026-10-27
+updated: 2026-11-09
 ---
 ## Purpose
 
@@ -369,7 +369,9 @@ line and prints it. Its red run injected one refusal at boot: all 1764 kernel
 tests passed and the verdict failed on the line; the clean boot prints none.
 Its sibling `9p: close: flush of fid N failed rc R` (2026-10-07, ARCH 7.9.1
 part C: a last close's staged bytes never reached a live server) fails the
-verdict the same way. The knob, and the collector
+verdict the same way, and so does `9p: close: unlock of fid N failed rc R`
+(2026-11-09: a close's unlock a live server refused or never got, so the open
+keeps its locks until its last reference). The knob, and the collector
 mode the dev9p tests set, are released by the kernel test runner after every
 test (`kernel/test/test.c`: the registry, one `{name, fn, ...}` row per test,
 run in order at boot, each printing `[test] <name> ... PASS` or a `FAIL:

@@ -216,9 +216,10 @@ s64 sys_file_lock_handler(u64 fd_raw, u64 op, u64 start, u64 len, u64 out_va) {
     // left it, for the restart.
     t->note_interruptible = false;
 
-    // The owed unlock is answered before the call returns, memory or not (the
-    // Dev's unlock contract): a program told EBADF may take the range again at
-    // once, and an unlock that landed after that take would drop it.
+    // The owed unlock is answered before the call returns, a shortage of memory
+    // only delaying it (the Dev's unlock contract): a program told EBADF may take
+    // the range again at once, and an unlock that landed after that take would
+    // drop it.
     if (rc == 0 && proc_owner && !test && type != SYS_FILE_LOCK_UN &&
         !file_lock_fd_names(p, fd, c)) {
         (void)file_lock_once(p, c, SYS_FILE_LOCK_UN, true, start, len, NULL);
