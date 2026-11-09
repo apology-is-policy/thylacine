@@ -39,12 +39,6 @@
 //     when `interp == true`, or a single Literal part when `interp
 //     == false` (the `<<"TAG"` quoted-tag flavor).
 //
-//   - Regex literals after `=~` (per scripture section 7.3:
-//     `$var =~ /^foo/`) are scanned as a special `Regex(String)`
-//     token containing the regex body with `\/` escapes resolved.
-//     The regex semantics itself is opaque at v1.0 (open
-//     question #5 answer).
-//
 //   - Arithmetic blocks `(( expr ))` are not a separate lex mode. `((`
 //     and `))` emit as DoubleLParen / DoubleRParen, and most of the body
 //     lexes under normal command rules; the parser re-interprets the
@@ -56,7 +50,7 @@
 //
 // Every token carries a Span covering its source bytes. For
 // compound tokens (DoubleQuoted, Subst, Backtick, ProcSubIn/Out,
-// HeredocStart, HeredocBody, Regex), the outer span covers from
+// HeredocStart, HeredocBody), the outer span covers from
 // the opening delimiter through the closing delimiter (inclusive
 // of both). DqPart sub-spans are not tracked at U-5a; if U-5d
 // needs them for finer-grained error reporting we add them then.

@@ -1777,14 +1777,15 @@ mod tests {
     #[test]
     fn equal_tilde_is_no_operator() {
         // Vote 78 struck `=~`: `=` and `~` are themselves, and the slash
-        // after them begins a word as anywhere else.
+        // after them begins a word as anywhere else. (A `^` in the word
+        // would lex as rc's join, Caret, which says nothing of `=~`.)
         assert_eq!(
-            kinds_no_eof("$x =~ /^foo/"),
+            kinds_no_eof("$x =~ /foo/"),
             vec![
                 TokenKind::Var("x".into()),
                 TokenKind::Equal,
                 TokenKind::Tilde,
-                TokenKind::Word("/^foo/".into()),
+                TokenKind::Word("/foo/".into()),
             ]
         );
     }
