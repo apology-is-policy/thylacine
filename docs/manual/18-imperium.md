@@ -27,7 +27,7 @@ capabilities. Enter the Imperium key in that dialog and press Enter. The field
 shows masked characters; it does not send the key into the terminal transcript.
 Escape cancels the request.
 
-After a successful verdict, press a key to return. The elevated shell opens in
+After the verdict, press Enter to return; other keys do nothing there. The elevated shell opens in
 the original terminal, in the directory where you ran `imperium`. Inspect its
 authority with:
 

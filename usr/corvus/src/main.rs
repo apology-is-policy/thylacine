@@ -3419,10 +3419,10 @@ unsafe fn handle_clearance_revoke(handle: i64, payload: &[u8], response: &mut Ve
 // grant (SYS_CAP_GRANT_IMPERIUM, PROPAGATING when the level says so); then it
 // stages the reply, answers the parked read, ENDs the episode, closes the
 // console handle and wipes every buffer. A SAK with nothing pending shows a
-// "nothing pending" panel and ENDs on any key.
+// "nothing pending" panel and ENDs on Enter or Esc.
 //
 // Bounds: one slot; 60 s from the request to a SAK else TIMEOUT; 60 s for the
-// key prompt else TIMEOUT; wrong keys counted per (user, level) (the RECOVER
+// key prompt, timed from the SAK so the requester cannot aim it, else TIMEOUT; wrong keys counted per (user, level) (the RECOVER
 // discipline) -- past IMPERIUM_FAIL_MAX the key is not even asked for. The
 // episode blocks corvus's other clients for its duration (their 9P messages
 // wait in the kernel rings): a documented residue, simpler to audit than a
@@ -3446,6 +3446,7 @@ static mut IMPERIUM_PENDING: Option<ImperiumPending> = None;
 
 const IMPERIUM_REQUEST_TIMEOUT_NS: u64 = 60 * 1_000_000_000;
 const IMPERIUM_PROMPT_TIMEOUT_MS: u64 = 60_000;
+const PANEL_SWALLOW_MAX: usize = 4096;
 const IMPERIUM_PROMPT_SLICE_MS: u64 = 1000;
 // Wrong keys per (user, level) before the level locks until restart. A decline
 // (empty key / Ctrl-C) or a prompt timeout is not a wrong key and is not
@@ -3911,11 +3912,19 @@ unsafe fn console_read_key(fd: &mut EpisodeIo, timeout_ms: u64) -> KeyRead {
     }
 }
 
-// Dismiss an informational panel: any byte, or the bound.
-unsafe fn console_wait_any_key(fd: &mut EpisodeIo, timeout_ms: u64) {
+// Dismiss an informational panel: Enter, Esc, or the bound. Every other byte is
+// swallowed, so the rest of a key still being typed when a panel comes up never
+// reaches the surface the episode returns to. The swallow cap bounds the loop
+// when a broken clock leaves only the idle fallback, which a flood never feeds.
+unsafe fn console_wait_dismiss(fd: &mut EpisodeIo, timeout_ms: u64) {
     let start = monotonic_ns();
     let mut idle: u64 = 0;
-    let _ = console_next_byte(fd, start, timeout_ms, &mut idle);
+    for _ in 0..PANEL_SWALLOW_MAX {
+        match console_next_byte(fd, start, timeout_ms, &mut idle) {
+            NextByte::Byte(0x0d | 0x0a | 0x1b) | NextByte::Timeout | NextByte::Error => return,
+            NextByte::Byte(_) => {}
+        }
+    }
 }
 
 fn caps_names(caps: u64, out: &mut Vec<&'static [u8]>) {
@@ -3996,7 +4005,7 @@ unsafe fn verdict(fd: &mut EpisodeIo, out: &mut Vec<u8>, line: &[u8], state: lic
     fd.model.notice = line.to_vec();
     out.clear();
     provincia::compose_verdict(line, out);
-    if console_write_all(fd, out) && fd.generation != 0 { console_wait_any_key(fd, 10_000); }
+    if console_write_all(fd, out) && fd.generation != 0 { console_wait_dismiss(fd, 10_000); }
 }
 
 // The `sak` note arrived: the kernel opened an episode, which may already be over.
@@ -4022,7 +4031,7 @@ unsafe fn episode_consume(conns: &mut Vec<Conn>) {
         None => {
             provincia::compose_nothing_pending(&mut out);
             let _ = console_write_all(fd, &out);
-            console_wait_any_key(fd, IMPERIUM_PROMPT_TIMEOUT_MS);
+            console_wait_dismiss(fd, IMPERIUM_PROMPT_TIMEOUT_MS);
             out.clear();
             provincia::compose_verdict(b"trusted path: done", &mut out);
             let _ = console_write_all(fd, &out);
@@ -4066,6 +4075,13 @@ unsafe fn episode_confer(
     conns: &mut Vec<Conn>,
     out: &mut Vec<u8>,
 ) -> ImperiumOutcome {
+    // 0. The request's window runs from the request to the SAK; past it the
+    //    request is answered TIMEOUT and nothing is asked.
+    if monotonic_ns() >= p.deadline_ns {
+        verdict(fd, out, b"imperium TIMEOUT: request expired", lictor::model::State::Expired);
+        t_putstr("corvus: imperium: SAK after the request's window\n");
+        return ImperiumOutcome::Timeout;
+    }
     // 1. The rate limit, BEFORE the provincia and any KDF: a locked subject is
     //    told so and asked nothing.
     if imperium_fail_count(&p.user, p.level) >= IMPERIUM_FAIL_MAX {
@@ -4073,7 +4089,7 @@ unsafe fn episode_confer(
         out.clear();
         provincia::compose_locked(&p.user, p.level, out);
         let _ = console_write_all(fd, out);
-        console_wait_any_key(fd, IMPERIUM_PROMPT_TIMEOUT_MS);
+        console_wait_dismiss(fd, IMPERIUM_PROMPT_TIMEOUT_MS);
         // One console write: another process's line can land between two, and
         // the seat scenarios read these three verdict lines whole.
         t_putstr(&alloc::format!("corvus: imperium: RATE-LIMITED {}\n", bytes_text(&p.user)));
@@ -4100,9 +4116,10 @@ unsafe fn episode_confer(
         t_putstr("corvus: imperium: console write FAILED\n");
         return ImperiumOutcome::Internal;
     }
-    // 3. The key.
-    let remaining = p.deadline_ns.saturating_sub(monotonic_ns()) / 1_000_000;
-    let mut key = match console_read_key(fd, remaining.min(IMPERIUM_PROMPT_TIMEOUT_MS)) {
+    // 3. The key, on its own clock from the SAK: the request's window ended when
+    //    the person answered it, and a prompt cut to the window's remainder would
+    //    let the requester time a verdict into the middle of the typing.
+    let mut key = match console_read_key(fd, IMPERIUM_PROMPT_TIMEOUT_MS) {
         KeyRead::Key(k) => k,
         KeyRead::Declined => {
             verdict(fd, out, b"imperium DECLINED", lictor::model::State::Cancelled);
@@ -4176,10 +4193,6 @@ unsafe fn episode_confer(
     if !user_eligible_for(&p.user, p.level) {
         verdict(fd, out, b"imperium DENIED: eligibility revoked", lictor::model::State::Denied);
         return ImperiumOutcome::Denied;
-    }
-    if monotonic_ns() >= p.deadline_ns {
-        verdict(fd, out, b"imperium TIMEOUT: request expired", lictor::model::State::Expired);
-        return ImperiumOutcome::Timeout;
     }
     // 6. The grant. The kernel bounds a PROPAGATING mask to
     //    CAP_GRANTABLE_IMPERIUM and refuses its redeem into an existing scope

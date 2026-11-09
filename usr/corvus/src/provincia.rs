@@ -214,7 +214,7 @@ pub fn compose_key_prompt(out: &mut Vec<u8>) {
 pub fn compose_nothing_pending(out: &mut Vec<u8>) {
     let mut g = Grid::new(PROVINCIA_COLS, 5);
     g.frame(b"TRUSTED PATH");
-    g.put(3, 2, b"nothing pending -- press any key", ATTR_BOLD);
+    g.put(3, 2, b"nothing pending -- press Enter", ATTR_BOLD);
     out.extend_from_slice(b"\r\n");
     g.rasterize(out);
 }
@@ -229,7 +229,7 @@ pub fn compose_locked(user: &[u8], level: &[u8], out: &mut Vec<u8>) {
     x += user.len();
     g.put(x, 2, b" / ", ATTR_NONE);
     g.put(x + 3, 2, level, ATTR_BOLD);
-    g.put(3, 3, b"locked until corvus restarts -- press any key", ATTR_NONE);
+    g.put(3, 3, b"locked until corvus restarts -- press Enter", ATTR_NONE);
     out.extend_from_slice(b"\r\n");
     g.rasterize(out);
 }

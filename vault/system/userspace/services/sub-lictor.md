@@ -60,7 +60,7 @@ hazards: [haz-driver-panic-dos]
 abis: [abi-trusted-seat, abi-native-nonblock]
 design: ["docs/GRAPHICAL-SAK-OWNERSHIP.md", "docs/GRAPHICAL-SAK-PORTABILITY.md", "docs/HALCYON-TRUSTED-EPISODE.md"]
 created: 2026-09-18
-updated: 2026-11-05
+updated: 2026-11-09
 ---
 ## Clipboard cancellation progress boundary
 
@@ -303,7 +303,9 @@ Input latency under that load remains a runtime gate.
 See `docs/HALCYON-INTERACTION.md` section 14.
 
 Corvus sends bounded semantic frames containing identity, exact capabilities,
-term and verdict. Lictor uses baked fonts and colors. Corvus receives key bytes
+term and verdict. Lictor uses baked fonts and colors. Its panels say "Press
+Enter to return": Corvus closes them only on Enter or Esc
+([[dec-2026-11-05-panels-enter-or-esc]]). Corvus receives key bytes
 only after Lictor acknowledges the current frame's actual presentation. The
 ordinary compositor receives neither those bytes nor the trusted framebuffer.
 The current backend uses the approved neutral backdrop when a completed private

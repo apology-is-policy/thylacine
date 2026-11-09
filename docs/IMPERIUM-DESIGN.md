@@ -810,7 +810,7 @@ so the operator can veto any of them:**
   handle -> read the key (raw, no echo, bounded, 60 s poll timeout) -> verify ->
   `SYS_CAP_GRANT_IMPERIUM(..., PROPAGATING)` -> stage the reply ->
   `SYS_CONSOLE_EPISODE_END` -> close the handle + wipe. No pending request:
-  "trusted path: nothing pending -- press any key" -> END. Audit-log lines for
+  "trusted path: nothing pending -- press Enter" -> END on Enter or Esc. Audit-log lines for
   request / confer / deny / timeout.
 - `CLEARANCE_ACTIVATE(_SELF)` on a DISTINCT_SECRET level stays REFUSED: the only
   path is the SAK episode.
@@ -867,8 +867,8 @@ the operator can veto any of them:**
    duration. Simpler to audit than a state machine interleaved with the poll
    loop; a documented residue.
 8. **Two wire-additive statuses**: `Timeout` (7) and `Busy` (8).
-9. **A SAK with nothing pending** renders "nothing pending -- press any key",
-   waits for one byte (bounded), and ENDs -- the §4 "when in doubt, hit the
+9. **A SAK with nothing pending** renders "nothing pending -- press Enter",
+   waits for Enter or Esc (bounded; every other byte swallowed), and ENDs -- the §4 "when in doubt, hit the
    SAK" check, and what `im1-sak-lever.exp` now exercises.
 10. **ARM at startup, not fatal.** corvus opens its notes fd and ARMs after
     loading its databases; a refused ARM (a spawn outside the boot chain --
@@ -884,8 +884,15 @@ the operator can veto any of them:**
     grant and no reply.
 13. **The key prompt**: raw, unechoed; DEL/BS edit, Ctrl-U kills the line,
     CR/LF submits; Ctrl-C or an EMPTY key DECLINES (denied, uncounted); a key
-    past `MAX_PASS_LEN` is denied; the whole prompt is bounded at 60 s ->
-    `Timeout`. The prompt's clock is `CLOCK_MONOTONIC` with an idle-slice
+    past `MAX_PASS_LEN` is denied; the whole prompt is bounded at 60 s from
+    the SAK -> `Timeout`. The request's own 60-s window runs from the request
+    to the SAK and no further: a prompt cut to the window's remainder would
+    let the requester time a verdict into the middle of the person's typing,
+    and a SAK after the window answers `Timeout` without a prompt. Every
+    panel (a verdict, nothing pending, locked) closes only on Enter or Esc or
+    its bound and swallows every other byte, so the rest of a key still
+    being typed when a panel comes up never reaches the surface the episode
+    returns to (operator vote 70, 2026-11-05). The prompt's clock is `CLOCK_MONOTONIC` with an idle-slice
     fallback (a broken clock still bounds it; a keystroke flood cannot
     exhaust it). Every buffer is wiped on every path; the console handle is
     closed at END.

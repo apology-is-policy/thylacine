@@ -84,6 +84,16 @@ witness baseline
 key "ctrl+alt+f10"
 after 1000
 capture empty
+# A letter at a panel is swallowed: the rest of a key still being typed when a
+# panel comes up must not reach the workspace the episode returns to.
+key "x"
+set timeout 3
+expect {
+    -ex "corvus: imperium: SAK with nothing pending" { lc_fail "a letter dismissed the trusted panel" }
+    -re {EXTINCTION:} { lc_extinction_fail "panel" }
+    timeout { lc_step "the letter was swallowed and the panel stayed" }
+    eof { lc_fail "EOF at the panel" }
+}
 key "ret"
 lc_expect "corvus: imperium: SAK with nothing pending" "empty trusted episode ended"
 after 1200

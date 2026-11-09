@@ -127,6 +127,23 @@ expect {
 }
 lc_pass "IM-3(4): an unconferred request TIMES OUT -- a script cannot confer"
 
+# ---- (4b) LATE SAK: the prompt's time runs from the SAK, not the request ----
+# A requester cannot aim a verdict into the middle of the person's typing: the SAK
+# lands 52 s into the request's 60-s window and the key 12 s later, past the
+# window and inside the prompt's own 60 s. A prompt cut to the window's
+# remainder answers TIMEOUT here instead.
+lc_send "imperium-probe chown"
+expect_probe_line "press the SAK" "the request posted (4b)"
+after 52000
+press_sak "late"
+lc_expect "imperium key: " "the key prompt (4b)"
+after 12000
+lc_raw_send "imperium-key-michael-v1\r" "the fixture key, past the request's window"
+lc_expect "Authority conferred to the requesting process." "corvus's verdict past the request's window (4b)"
+expect_probe_line "imperium-probe: OK session=" "the parked read returned OK (4b)"
+expect_probe_line "imperium-probe: PASS" "the probe's own verdict (4b)"
+lc_pass "IM-3(4b): a SAK late in the request's window still gets the prompt's full time"
+
 # ---- (5) the session survives ---------------------------------------------
 lc_send "echo im3-after-curiata | tr a-z A-Z"
 lc_expect "IM3-AFTER-CURIATA" "a command executes after every arm (5)"
