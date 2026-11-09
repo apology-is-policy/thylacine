@@ -2482,14 +2482,14 @@ static int client_resend_never(void *arg) { (void)arg; return 0; }
 // never left told the server nothing, so it may be built and sent again: on a
 // thread no death has reached, while *sends is under `bound`, after a wait.
 // 0: send it again. Otherwise the op's answer: e if the frame left (an Rlerror
-// among them), -P9_E_AGAIN if it never did, -P9_E_INTR if a caught note ended
+// among them), -P9_E_UNSENT if it never did, -P9_E_INTR if a caught note ended
 // the wait (`noteintr`, and only where the thread opted in).
 static int client_resend_wait(struct p9_client *c, int e, bool unsent,
                               u32 *sends, u32 bound, bool noteintr,
                               u64 *backoff) {
     if (!unsent) CLIENT_UNLOCK_RET(c, e);
     if (client_self_dying() || (bound != P9_RESEND_UNBOUNDED && *sends >= bound))
-        CLIENT_UNLOCK_RET(c, -P9_E_AGAIN);
+        CLIENT_UNLOCK_RET(c, -P9_E_UNSENT);
     (*sends)++;
     c->unsent_resends++;
     client_unlock(c);
@@ -2502,7 +2502,7 @@ static int client_resend_wait(struct p9_client *c, int e, bool unsent,
     if (dl == 0)  dl = 1;              // 0 is tsleep's "no deadline"
     int ts = noteintr ? tsleep_noteintr(&rz, client_resend_never, NULL, dl)
                       : tsleep(&rz, client_resend_never, NULL, dl);
-    if (ts == TSLEEP_INTR)     return -P9_E_AGAIN;
+    if (ts == TSLEEP_INTR)     return -P9_E_UNSENT;
     if (ts == TSLEEP_NOTEINTR) return -P9_E_INTR;
     if (*backoff < CLIENT_RESEND_BACKOFF_MAX_NS) *backoff *= 2;
     return 0;

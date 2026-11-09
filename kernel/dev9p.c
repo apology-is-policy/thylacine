@@ -2530,7 +2530,7 @@ static u32 lock_unlock_resends(void) {
 
 // Give up every lock the open's fid holds, naming what its latest take named.
 // An unlock that never left is sent again up to `resends` times
-// (p9_client_unlock); -P9_E_AGAIN if it still never left.
+// (p9_client_unlock); -P9_E_UNSENT if it still never left.
 static int lock_release_all(struct dev9p_priv *p, u32 resends) {
     u8   status = P9_LOCK_ERROR;
     char cid[LOCK_CLIENT_ID_MAX];
@@ -2580,11 +2580,12 @@ static int dev9p_lock_flush_job_run(struct p9_close_job *job,
     if (rc != 0 && p9_client_fid_held(p->client, p->fid))
         p9_close_job_lost(p->fid, rc);
     // A closer waits about a second for memory, as for its own sends, and then
-    // says what it could not do. The open keeps the locks it still holds until
-    // its last reference clunks the fid.
+    // says what it could not send. The open keeps the locks it still holds until
+    // its last reference clunks the fid. A refusal is the server's answer, as at
+    // the close: Stratum's ESTALE for a file unlinked under the lock holds nothing.
     if (__atomic_exchange_n(&p->lock_granted, false, __ATOMIC_SEQ_CST)) {
         int lr = lock_release_all(p, P9_RESEND_CLOSER);
-        if (lr != 0 && p9_client_fid_held(p->client, lock_fid(p))) {
+        if (lr == -P9_E_UNSENT && p9_client_fid_held(p->client, lock_fid(p))) {
             __atomic_store_n(&p->lock_granted, true, __ATOMIC_SEQ_CST);
             p9_close_unlock_lost(lock_fid(p), lr);
         }
@@ -2792,12 +2793,14 @@ static int dev9p_fd_close(struct Spoor *c, bool heard) {
         p9_close_job_lost(p->fid, rc);
 
     // An exit's close sends once (lock_unlock_resends). The server never applied
-    // an unlock that never left or was flushed: on a fid the session still holds
-    // it stays owed, as does one a death cut short, for the clunk or a closer.
+    // an unlock that never left or that a caught note's flush cancelled (the mark,
+    // not the value: a server may answer Rlerror(EINTR) itself). On a fid the
+    // session still holds it stays owed, as does one a death cut short, for the
+    // clunk or a closer. Any other answer, a refusal among them, is the server's.
     bool granted = __atomic_exchange_n(&p->lock_granted, false, __ATOMIC_SEQ_CST);
     if (granted && close_may_wait()) {
         int lr = lock_release_all(p, lock_unlock_resends());
-        granted = ((lr == -P9_E_AGAIN || lr == -P9_E_INTR) &&
+        granted = ((lr == -P9_E_UNSENT || wb_note_cancelled(lr)) &&
                    p9_client_fid_held(p->client, lock_fid(p))) ||
                   !close_may_wait();
     }

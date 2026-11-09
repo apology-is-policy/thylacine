@@ -430,7 +430,12 @@ follows. A closer gives up after about a second, as it does for its own sends, s
 grant again and says so (`9p: close: unlock of fid N failed rc R`). And the identity a
 close's whole-file unlock learns first is sent again too. The guarantee: a thread a kill
 reaches sends until the server answers; a closer for about a second, then loudly; an
-exit's close once, then the clunk or a closer (2026-11-09).
+exit's close once, then the clunk or a closer (2026-11-09). Round 2 (Fable 5.1: 0 P0,
+0 P1, 0 P2, 4 P3) found the "never left" value shared a wire errno (a server's EAGAIN
+read as owed), and the closer reporting a server's refusal as a loss, which Stratum's
+ESTALE for a file unlinked under the lock would have made a gate red. Never left is now
+`P9_E_UNSENT`, outside any ecode, a flushed unlock is told by the call's mark, and a
+refusal is an answer everywhere.
 
 The rejected design published an owed range on the entry. The next lock call through the
 entry would pay it first, and the closer would pay it when the entry stays idle. Paying

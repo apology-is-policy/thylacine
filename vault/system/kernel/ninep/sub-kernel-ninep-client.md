@@ -42,7 +42,7 @@ spill of the frame could not be allocated. Such a take-back sets its `*unsent`
 thread no death has reached, only while the sends are under the caller's bound, and
 after a backoff (1 ms doubling to 64 ms) on a private Rendez that is never woken. It
 answers 0 (send again), the op's own error when the frame left (an Rlerror among them: a
-server's EIO is never resent), `-P9_E_AGAIN` when it never did, or `-P9_E_INTR` when a
+server's EIO is never resent), `-P9_E_UNSENT` when it never did, or `-P9_E_INTR` when a
 caught note ended a `tsleep_noteintr` wait. Two callers:
 - `p9_client_unlock(c, fid, start, length, client, client_len, max_resends, &status)`,
   a Tlock UNLCK, waits in a plain `tsleep`: no note ends it. `P9_RESEND_UNBOUNDED` is
@@ -56,9 +56,15 @@ caught note ended a `tsleep_noteintr` wait. Two callers:
   close's, on a thread that has not opted in, waits as a plain `tsleep` does. Tgetattr
   is idempotent. `p9_client_getattr` is the same call sent once.
 
+`P9_E_UNSENT` (4096) is no wire ecode: `map_error` passes a server's Rlerror only in
+[1, 4095], so a refusal can never read as a frame that never left (round 2 F1: the first
+sentinel, `-P9_E_AGAIN`, was a server's EAGAIN too). `dev9p_wire_errno` folds it to EIO
+before it can reach a program.
+
 `unsent_resends` counts the sends again. Legs, in [[sub-kernel-ninep-attach]]'s file:
 `p9_closer.unlock_waits_out_a_reply_oom`, `close_unlock_waits_out_a_reply_oom`,
-`exit_close_unlock_sends_once`, `closer_unlock_waits_out_a_reply_oom`,
+`exit_close_unlock_sends_once`, `exit_close_refused_unlock_is_answered`,
+`closer_unlock_waits_out_a_reply_oom`, `closer_refused_unlock_is_answered`,
 `closer_unlock_gives_up_loudly`, `lock_ident_waits_out_a_reply_oom` and
 `unlock_ends_when_its_session_dies`. Each starves the reply buffer by raising `recv_cap`
 past any order the buddy allocator serves.

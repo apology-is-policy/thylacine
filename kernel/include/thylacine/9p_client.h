@@ -663,7 +663,7 @@ int  p9_client_lock(struct p9_client *c, u32 fid, u8 type, u32 flags,
 // live session nothing else releases the range before the fid's clunk. So it is
 // sent again, after a wait no note ends, up to `max_resends` times:
 // P9_RESEND_UNBOUNDED, for a thread a kill reaches, until it is answered;
-// P9_RESEND_CLOSER, about a second, a closer's own patience. -P9_E_AGAIN: it
+// P9_RESEND_CLOSER, about a second, a closer's own patience. -P9_E_UNSENT: it
 // never left (that bound, or a death). A dead session or an unbound fid ends it
 // at once, and the server drops the fid's locks in both. Otherwise
 // p9_client_lock's contract.
@@ -899,5 +899,9 @@ void p9_client_mark_devgone(struct p9_client *c);
 #define P9_E_INTR     4       // EINTR (== T_E_INTR); item 11 caught-note unwind of a
                               // blocked client read/wait -- the thread LIVES, the note
                               // delivers at its EL0-return tail (11b-9p, ARCH 8.8.3)
+#define P9_E_UNSENT 4096      // no wire ecode (map_error stops at 4095): a frame that
+                              // never reached the wire, from p9_client_unlock and
+                              // p9_client_getattr_patient. dev9p_wire_errno folds it
+                              // to EIO before it can reach a program.
 
 #endif  // THYLACINE_9P_CLIENT_H

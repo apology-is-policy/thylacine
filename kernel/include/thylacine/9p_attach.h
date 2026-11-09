@@ -252,8 +252,9 @@ void p9_close_flush_failed(u32 fid, int rc);
 void p9_close_job_lost(u32 fid, int rc);
 
 // Print `9p: close: unlock of fid N failed rc R` and count it: a close's unlock
-// of a fid a live session still holds was refused, or never sent, so the open
-// keeps its locks until its last reference clunks the fid.
+// of a fid a live session still holds never reached the server, so the open
+// keeps its locks until its last reference clunks the fid. A refusal is the
+// server's answer, and is not this.
 void p9_close_unlock_lost(u32 fid, int rc);
 
 // Tests: a leg that loses a run or an unlock on purpose keeps its line out of

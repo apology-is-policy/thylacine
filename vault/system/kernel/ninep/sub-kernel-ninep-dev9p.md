@@ -120,10 +120,11 @@ dev9p serves the five lock slots of [[sub-kernel-dev]] for
   was closed during the call; and `lock_release_all` from the last close), and 0 in an
   exit's close (`exit_close_active`), whose Proc's memory is freed at reap, after the
   close, so a wait there for memory could wait on itself. The closer's job passes
-  `P9_RESEND_CLOSER`, about a second. When it gives up, or the server refuses, on a
-  fid the session still holds, it sets `lock_granted` again and reports `9p: close:
-  unlock of fid N failed rc R` (`p9_close_unlock_lost`, counted); the open keeps the
-  locks until its last reference clunks the fid. `dev9p_lock_ident` learns the
+  `P9_RESEND_CLOSER`, about a second. When it gives up on a fid the session still
+  holds, it sets `lock_granted` again and reports `9p: close: unlock of fid N failed
+  rc R` (`p9_close_unlock_lost`, counted); the open keeps the locks until its last
+  reference clunks the fid. A refusal is the server's answer there as at the close
+  (Stratum's ESTALE for a file unlinked under the lock holds nothing). `dev9p_lock_ident` learns the
   generation with `p9_client_getattr_patient`, so a close's whole-file unlock through
   the Proc owner is not lost one round trip earlier. Before 2026-11-06 a reply buffer
   that could not be allocated answered `-T_E_IO` with the range still held (the aux
@@ -136,9 +137,10 @@ dev9p serves the five lock slots of [[sub-kernel-dev]] for
   wait (`close_may_wait`) queues the flush and the unlock to a closer when another
   reference holds the Spoor (`dev9p_lock_flush_queue` with `release_locks`), and
   otherwise leaves them to the last reference, which follows at once and hands the
-  run to a closer with its clunk. An unlock the server never applied (`-P9_E_AGAIN`:
-  never sent; `-P9_E_INTR`: flushed) on a fid the session still holds stays owed the
-  same way, as does one a death cut short; a server's refusal is an answer. A job that
+  run to a closer with its clunk. An unlock the server never applied (`-P9_E_UNSENT`:
+  never sent; `-P9_E_INTR` with the call's mark, `wb_note_cancelled`: flushed) on a
+  fid the session still holds stays owed the same way, as does one a death cut short;
+  a server's refusal is an answer, its Rlerror(EAGAIN) and Rlerror(EINTR) included. A job that
   cannot be allocated for an owed unlock is reported with the unlock line.
   `dev9p_lock_held` tells the handle layer to land every open's run first (ARCH
   9.6.11).

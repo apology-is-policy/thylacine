@@ -475,8 +475,8 @@ case "$result" in
             grep -a '9p: close: flush of fid' "$LOG_FILE" >&2 || true
             exit 1
         fi
-        # A close's unlock that a live server refused or never got: the open
-        # keeps its locks until its last reference clunks the fid.
+        # A close's unlock that never reached a live server: the open keeps its
+        # locks until its last reference clunks the fid.
         if grep -aq '9p: close: unlock of fid' "$LOG_FILE"; then
             echo "==> FAIL: a close's unlock was lost on a live session (9p: close: unlock of fid)." >&2
             grep -a '9p: close: unlock of fid' "$LOG_FILE" >&2 || true

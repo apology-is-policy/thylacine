@@ -69,6 +69,8 @@ struct srv_rec {
     u32 nlock;
     u32 lock_at;     // nmsg at the last Tlock
     u32 ngetattr;
+    u32 fail_unlocks;      // answer this many Tlock UNLCKs with Rlerror(fail_unlock_ecode)
+    u32 fail_unlock_ecode;
     u8  lock_type;
     u16 lock_cid_len;
 };
@@ -150,6 +152,17 @@ static int rec_responder(void *ctx, const u8 *req, size_t req_len,
             r->lock_type = req[11];
             if (req_len >= 38) r->lock_cid_len = (u16)req[36] | (u16)req[37] << 8;
             __atomic_store_n(&r->nlock, r->nlock + 1, __ATOMIC_RELEASE);
+            if (req[11] == P9_LOCK_TYPE_UNLCK && r->fail_unlocks) {
+                r->fail_unlocks--;
+                u32 ec = r->fail_unlock_ecode;
+                if (resp_cap < 11) return -1;
+                resp[0] = 11; resp[1] = resp[2] = resp[3] = 0;
+                resp[4] = P9_RLERROR;
+                resp[5] = (u8)tag; resp[6] = (u8)(tag >> 8);
+                resp[7] = (u8)ec; resp[8] = (u8)(ec >> 8);
+                resp[9] = (u8)(ec >> 16); resp[10] = (u8)(ec >> 24);
+                return 11;
+            }
             if (resp_cap < P9_HDR_LEN + 1) return -1;
             resp[0] = 8; resp[1] = resp[2] = resp[3] = 0;
             resp[4] = P9_RLOCK;
@@ -2222,6 +2235,58 @@ void test_p9_closer_exit_close_unlock_sends_once(void) {
     TEST_ASSERT(quiet, "the pool is quiet again");
 }
 
+// A refusal is the server's answer, never an unlock that never left: an exit's
+// close owes nothing after one, whatever the ecode -- EAGAIN, which a frame that
+// never left once shared, and EINTR, which a caught note's flush shares, though
+// a close has no note to take.
+void test_p9_closer_exit_close_refused_unlock_is_answered(void) {
+    TEST_ASSERT(closer_quiet(), "the pool is quiet at entry");
+    struct p9_closer_stats base = closer_now();
+    static const u32 ecodes[2] = { T_E_AGAIN, T_E_INTR };
+    struct uo u = {0};
+    bool opened = uo_open(&u);
+    int  trc[2] = { 1, 1 };
+    bool started[2] = { false, false }, reaped[2] = { false, false };
+    bool owed[2] = { true, true };
+    u32  nlock[2] = { 0, 0 };
+    if (opened) {
+        for (int i = 0; i < 2; i++) {
+            trc[i] = uo_take(&u);
+            u32 nlock0 = uo_nlock();
+            g_rec_a.fail_unlock_ecode = ecodes[i];
+            g_rec_a.fail_unlocks      = 1;
+            g_uo_dying_rc = 1;
+            started[i] = test_dying_start(&g_uo_dying, uo_exit_close, u.f, /*dead_now=*/false);
+            if (started[i]) {
+                TEST_YIELD_UNTIL_SOFT(test_dying_done(&g_uo_dying));
+                if (test_dying_done(&g_uo_dying)) {
+                    test_dying_reap(&g_uo_dying);
+                    reaped[i] = true;
+                }
+            }
+            nlock[i] = uo_nlock() - nlock0;
+            owed[i]  = dev9p.lock_held(u.f);
+            g_rec_a.fail_unlocks = 0;
+            if (!reaped[i]) break;
+        }
+    }
+    TEST_YIELD_UNTIL_SOFT(closer_quiet());
+    bool quiet = closer_quiet();
+    struct p9_closer_stats st = closer_now();
+    uo_finish(&u, !started[0] || (reaped[0] && (!started[1] || reaped[1])));
+
+    TEST_ASSERT(opened, "a walked file on its own session");
+    for (int i = 0; i < 2; i++) {
+        TEST_EXPECT_EQ((u64)(s64)trc[i], 0, "the take is granted");
+        TEST_ASSERT(started[i] && reaped[i], "the exit's close returns");
+        TEST_EXPECT_EQ(nlock[i], 1u, "its one unlock reached the server, which refused it");
+        TEST_ASSERT(!owed[i], "a refusal is an answer: nothing stays owed");
+    }
+    TEST_EXPECT_EQ(st.jobs, base.jobs, "no close job");
+    TEST_EXPECT_EQ(st.unlocks_lost, base.unlocks_lost, "nothing was reported lost");
+    TEST_ASSERT(quiet, "the pool is quiet again");
+}
+
 // A death reaches the closing thread, and another reference keeps the open
 // alive: its close hands the unlock to a closer, whose send is refused the same
 // way. The closer waits too, about a second, as for its own sends.
@@ -2332,6 +2397,51 @@ void test_p9_closer_closer_unlock_gives_up_loudly(void) {
     TEST_EXPECT_EQ(resends, P9_RESEND_CLOSER, "after its bound of sends again");
     TEST_EXPECT_EQ(nlock_end, 0u, "none of which reached the server");
     TEST_ASSERT(owed, "the open still holds the lock, for its last reference's clunk");
+    TEST_EXPECT_EQ(st.jobs, base.jobs + 1, "one close job ran");
+    TEST_ASSERT(quiet, "the pool is quiet again");
+}
+
+// A closer's unlock that the server refuses is answered, not lost: Stratum
+// answers ESTALE for a file unlinked or replaced under the lock, whose records
+// went with it. No line, no count, and the grant is gone.
+void test_p9_closer_closer_refused_unlock_is_answered(void) {
+    TEST_ASSERT(closer_quiet(), "the pool is quiet at entry");
+    struct p9_closer_stats base = closer_now();
+    struct uo u = {0};
+    bool opened = uo_open(&u);
+    int  trc = 1;
+    bool started = false, quiet = false, held_after = true;
+    u32  nlock0 = 0, nlock_end = 0;
+    struct p9_closer_stats st = base;
+    if (opened) {
+        trc = uo_take(&u);
+        nlock0 = uo_nlock();
+        spoor_ref(u.f);                          // the reference that keeps it alive
+        g_uo_dying_rc = 1;
+        g_rec_a.fail_unlock_ecode = T_E_STALE;
+        g_rec_a.fail_unlocks      = 1;
+        started = test_dying_start(&g_uo_dying, uo_dying_close, u.f, /*dead_now=*/true);
+        if (started) {
+            TEST_YIELD_UNTIL_SOFT(test_dying_done(&g_uo_dying));
+            TEST_YIELD_UNTIL_SOFT(uo_nlock() > nlock0 && closer_quiet());
+            test_dying_reap(&g_uo_dying);
+        }
+        quiet      = closer_quiet();
+        nlock_end  = uo_nlock() - nlock0;
+        held_after = dev9p.lock_held(u.f);
+        st         = closer_now();
+        g_rec_a.fail_unlocks = 0;
+        spoor_clunk(u.f);                        // the extra reference
+    }
+    uo_finish(&u, quiet);
+
+    TEST_ASSERT(opened, "a walked file on its own session");
+    TEST_EXPECT_EQ((u64)(s64)trc, 0, "the take is granted");
+    TEST_ASSERT(started, "a dying thread");
+    TEST_EXPECT_EQ((u64)(s64)g_uo_dying_rc, 0, "its close returns at once");
+    TEST_EXPECT_EQ(nlock_end, 1u, "the closer's one unlock reached the server, which refused it");
+    TEST_EXPECT_EQ(st.unlocks_lost, base.unlocks_lost, "a refusal is no loss: nothing reported");
+    TEST_ASSERT(!held_after, "and the grant is gone");
     TEST_EXPECT_EQ(st.jobs, base.jobs + 1, "one close job ran");
     TEST_ASSERT(quiet, "the pool is quiet again");
 }
