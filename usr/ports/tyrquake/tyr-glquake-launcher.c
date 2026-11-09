@@ -106,19 +106,14 @@ int main(int argc, char **argv)
     if (posix_spawn(&pid, TARGET, NULL, NULL, argv, environ) == 0) {
         int st = 0;
         g_child = pid;
-        /* WNOHANG + a short sleep instead of a blocking wait: a CAUGHT note
-         * delivers only at an EL0-return (#199 -- the kernel wakes blocked
-         * threads for the terminate latch alone), so a blocking waitpid
-         * here would deadlock: the handler that kills the child can never
-         * run while this thread sleeps waiting for the child to die. The
-         * poll cadence IS the delivery point; 50 ms bounds the ^C latency. */
+        /* A caught note unwinds this wait, the handler kills the child, and
+         * signal()'s SA_RESTART re-issues the wait for the child's death. */
         for (;;) {
-            pid_t r = waitpid(pid, &st, WNOHANG);
+            pid_t r = waitpid(pid, &st, 0);
             if (r == pid)
                 break;
             if (r < 0 && errno != EINTR)
                 return 1;
-            usleep(50000);
         }
         if (WIFEXITED(st))
             return WEXITSTATUS(st);

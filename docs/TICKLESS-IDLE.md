@@ -84,18 +84,17 @@ nearest pending wake; on any wake it resumes the normal periodic tick.
 ### 3.1 The one-shot deadline
 
 The wake an idle CPU must still honor is a deadlined sleeper
-(`tsleep`/`torpor`): a thread on the global `g_timerwait` list whose
+(`tsleep`/`torpor`): a thread on this CPU's timer base whose
 `sleep_deadline` (a `CNTVCT` counter value) will pass. The idle CPU arms:
 
 ```
-target_cnt = min( earliest g_timerwait deadline (if any),
+target_cnt = min( earliest deadline on this CPU's base (if any),
                   now + TICKLESS_IDLE_BACKSTOP )
 arm one-shot at target_cnt   (CNTV_TVAL = target_cnt - now, clamped)
 ```
 
-- `earliest g_timerwait deadline`: a new `timerwait_earliest_deadline()` helper,
-  an O(n) min-scan over the global list under `g_timerwait.lock` (n is the count
-  of deadlined sleepers -- small). Returns 0 if none.
+- `earliest deadline`: `timerwait_earliest_deadline()`, one load of the base's
+  `earliest`, the head's deadline, kept under the base's lock. Returns 0 if none.
 - `TICKLESS_IDLE_BACKSTOP`: a long bounded cap (proposed **100 ms**; tunable) so
   an idle CPU wakes at most ~10x/s even with no pending deadline. This is the
   defense-in-depth answer to the documented dropped-IPI hazard (smp.c:145: a
@@ -156,15 +155,13 @@ another CPU). The whole restore runs under the same `spin_lock_irqsave(NULL)`
 region as the arm + WFI, so it completes before the pending IRQ is taken at the
 unmask -- a placed thread never runs un-ticked.
 
-### 3.4 Per-CPU, global deadline list
+### 3.4 Per-CPU: each CPU covers its own timer base
 
-Each CPU independently goes tickless when *its* idle thread is selected. The
-`g_timerwait` list is global, so multiple idle CPUs may each arm a one-shot to
-the same earliest deadline (redundant coverage). At the deadline they all wake,
-one wins `g_timerwait.lock` + `timerwait_tick` wakes the sleeper, the others find
-nothing expired and re-arm. This is SAFE and simple; the redundant wakes are
-bounded by ncpus and occur only at actual deadlines (rare vs the retired
-1 kHz x ncpus). A v1.x refinement could designate a single deadline-owner CPU.
+Each CPU independently goes tickless when *its* idle thread is selected, and
+covers its own timer base only (ARCHITECTURE.md 8.8). A sleeper links on the CPU
+it runs on, which then goes on to idle with that deadline in its base, so no
+other CPU owes it a wake. The exception is a secondary with no armed tick, which
+links on cpu0's base and kicks cpu0, whose next park reads the new head.
 
 ---
 
@@ -186,7 +183,7 @@ spin_lock_irqsave(NULL)
 sched_set_idle_in_wfi(true)        // register: peers will now IPI us on work
 sched()                            // observe: nothing runnable -> idle selected
 // --- tickless arm (new) ---
-D = timerwait_earliest_deadline()              // under g_timerwait.lock
+D = timerwait_earliest_deadline()              // one load, no lock
 arm one-shot at tickless_target_cnt(now, D, BACKSTOP)   // min(D, now+BACKSTOP)
 // --------------------------
 wfi
@@ -213,9 +210,10 @@ CPU which, on its own idle-enter, arms to the new nearest -- and if that adder i
 a running CPU it is still periodically ticking and `timerwait_tick` catches it
 within a tick. No deadline is lost.
 
-**Lock order:** the arm takes `g_timerwait.lock` (a near-outer lock; `wakeup()`
-already takes it as its OUTER lock) only to read the earliest deadline, then
-releases it before WFI -- no new cycle (`g_timerwait.lock` -> nothing).
+**Lock order:** the arm reads the base's `earliest` with no lock, so it adds no
+edge at all. A stale read costs one early wake or, for a link from another CPU,
+the wait until that link's kick lands: `gic_send_ipi` orders the store before the
+IPI. The test phase gates the kick off, and the backstop then bounds it.
 
 **Timekeeping is unaffected.** `CLOCK_MONOTONIC`/`REALTIME` read `CNTVCT_EL0`
 (the always-running counter), NOT the tick (`timer_now_ns`, timer.c:185). The

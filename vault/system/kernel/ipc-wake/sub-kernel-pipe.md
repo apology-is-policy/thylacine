@@ -225,12 +225,12 @@ unregister.
 
 ## Seams
 
-- **No `SA_RESTART`.** A Linux reader or writer whose handler was
-  installed with `SA_RESTART` gets `-EINTR` where Linux would restart the
-  call — the documented DEGRADED gap (VIVARIUM 6.22). git's
-  `xread`/`xwrite` and busybox's `safe_read`/`safe_write` retry EINTR; an
-  unmodified program that relies on the restart does not. The item-11 seam this section carried (a pipe wait that only death
-  ended) closed with [[chg-2026-10-05-signal7-list]].
+- **`SA_RESTART` is the kernel's, since item 11c.** A pipe wait a caught note unwinds
+  with nothing moved answers `-T_E_INTR`, and the kernel re-issues the call under
+  `SA_RESTART`, for a Linux guest and a native table alike ([[sub-kernel-notes]]). A
+  native read or write of a pipe opts in by `native_note_class`. A write that moved
+  bytes returns its count. The item-11 seam this section carried (a pipe wait that only
+  death ended) closed with [[chg-2026-10-05-signal7-list]].
 
 The pouch `pipe(2)` translation landed long ago. The "multi-waiter
 direction queues (never needed — poll covers it)" this section once

@@ -306,7 +306,7 @@ void test_9p_transport_exchange_drives_session_handshake(void) {
     p9_transport_init(&t, p9_loopback_ops_for(&lb),
                        g_recv_buf, sizeof(g_recv_buf));
 
-    struct p9_session s;
+    static struct p9_session s;
     p9_session_init(&s, /*root_fid=*/0, 8192);
 
     // Phase 1: Tversion → Rversion via exchange.
@@ -344,7 +344,7 @@ void test_9p_transport_exchange_drives_session_walk(void) {
     p9_transport_init(&t, p9_loopback_ops_for(&lb),
                        g_recv_buf, sizeof(g_recv_buf));
 
-    struct p9_session s;
+    static struct p9_session s;
     p9_session_init(&s, /*root_fid=*/0, 8192);
 
     // Drive handshake.

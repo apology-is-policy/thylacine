@@ -3180,3 +3180,141 @@ aux-3 3407cf093 merged into corona/async-memory at 1227710c2: the deferring-lock
 - **Gate (narrow; the full CI gate stays on the operator's hold).** Default build and suite 2176/2176 with both sides' boot markers. Host: libhalcyon 184, lictor 51, halcyond 559, libtapestry 27, seat-control 32 mutants red. Session scenarios -start, -refused, -unread, plain, -recover, -dead, -states, -soak; CI scenarios interaction-seat, im1-sak-lever, ls-imperium, im3-lex-curiata, viv-run, pty-4. One attempt each, all rc 0.
 - **Not run on this tree.** The SMP gate, the sanitizer matrix and the Pi.
 - **Vote 42.** A pass after a failed attempt stays named, rc 0, revisit after one fleet run.
+
+## Item 11c: a native note table and a kernel that restarts — 2026-11-03
+
+- **The chunk** (operator votes 18, 19, 20; `dec-2026-11-03-note-dispose-table`, `-restart-in-kernel`, `-open-ointr`).
+  `SYS_NOTE_DISPOSE` = 139 gives a native Proc the per-note table. Pouch's constructor stops registering a catch-all
+  handler, so a `SIG_DFL` program dies on ^C in its wait and stops on ^Z. The kernel re-issues a call for `SA_RESTART`, on a
+  per-thread mark set when the wait really unwound. `SYS_WALK_OPEN_OINTR` marks the one open that waits for a peer.
+- **Audits.** Rounds 1 to 3 on Fable 5.1, each on a frozen copy: 0/0/1/4, 0/0/1/2, 0/0/0/3. Details in the closed list.
+- **Runs on a2930f8bf.** The sweep red on its own lines. Lease 2: P01-P06, R01, W1-W4 and G10 red at their named witnesses;
+  final suite rc 0, census signals, sockets and net; `pty-4`, `pty-susp-pouch`, `item10-ctrlc` PASS. Lease 3, on an image
+  with the Alpine bundles: `viv-run`, `r5f9-ash`, `viv-console-ctrlc` PASS; G06, G07, G11, K60 red at their named witnesses.
+- **Void in lease 2, and why it says so.** G06, G07, G11 and K60 never booted there: the lean build stopped `tools/test.sh`, and
+  the script copied the previous boot log as theirs. md5 proved it. Across 410 boot logs of every lease the only other copy is C4's
+  first G1, which its landing lease re-ran for real. Every lease script now reports NO BOOT.
+- **SMP subset:** ran on d0afb5937, 2026-11-04 01:40-02:41Z: `default-smp4` and `ubsan-smp4`, 10 PASS each, 0 corruption, 0 other. The same lease's suite is 2192/0 with the Alpine gates live, for the first time on this chunk's clean images (L-6c PASS); git, clade and netperf still skip, for want of a bundle or a host server. Vote 17 named C4, so this is aux's reading of the
+  hold as a narrow gate, not a vote. **Did not run:** the full SMP matrix, `tools/test-fault.sh`, the interactive fleet and
+  `tools/check-production.sh` beyond what `tools/test.sh` does first. All owed at the merge to main, under the operator's hold.
+- **Still open, owned.** `seam-self-managing-handler-no-restart`; a longjmp out of a Pouch handler (OPEN-BUGS); a missing
+  bundle read as a regression by two scenarios (OPEN-BUGS). The rfork tear and clone copy have no deterministic test.
+
+## The walk errno: only a miss reads ENOENT — 2026-11-04
+
+- **The chunk** (operator vote 23, the signoff for ER-2's walk half; `dec-2026-11-03-walk-errno`). dev9p records a failed walk's
+  reason with `dev_walk_failed`, in `Thread.walk_errno`; `dev_walk` and `dev_walk_attrs` clear the slot, call the vtable and hand
+  it back. A Stratum integrity `EIO` on a lookup no longer says the file is absent. Open-or-create refuses. A union keeps Plan 9's
+  skip, but with no other member holding the name "absent" is not known. execve and `SYS_SPAWN_FULL_ARGV` say why; a Linux chdir
+  stops flattening; Pouch's `posix_spawnp` search stops on a non-miss.
+- **Audits.** Rounds 1 and 2 on Fable 5.1, each on a frozen copy: 0/0/1/4, 0/0/0/1. Details in the closed list.
+- **First boots.** Two stopped on stale pins of the flat -1: `spawn_cwd.image_joins_child_cwd` (`5d0028b85`) and joey's spawn-cwd
+  probe (`b8c8116c5`). The second cost a lease because my search after the first filtered on variable names. A boot stops at its
+  first red, so before a first boot the pin search takes no name filter, over kernel tests and joey.
+- **Runs on b8c8116c5.** Suite rc 0, 2201 tests. Pouch's spawn leg and the Linux phenotype leg pass. The watch for userspace reading a
+  failed walk as absent printed one line, `xproc-child: EACCES on the TCB service ok`, which is that probe's expected answer. 27 of
+  29 kernel sabotages red at their named lines, in a suite narrowed to 230 tests whose own control passed. G01 red at `viv-pheno-probe`
+  L351. P01, the patch mutated and baked, red at `posix_spawn(miss)`. Regreen ELF == green ELF, suite 2201/0.
+- **Green, each read.** E07: `stalk_union_child` is static and its one caller reads the reason only on a NULL, so nothing can see the
+  difference; E08, its public twin, went red. E11: a test gap, a failed run of two names re-walks through the plain wrapper, which
+  clears the slot and hid the fused one. `6ca029353` adds two one-name queries in a row. Lease 2, 10:30:54Z to 10:34:12Z, on 6ca029353: suite rc 0, 2201 tests, with the new check in; E11 red at `stalk.walk_failure_keeps_its_errno`, "the next one's miss has no reason left over".
+- **Void as a guest witness.** G02 went red in the kernel tests, E19's witnesses, so joey never reached its guest line.
+- **No test turns these red:** `SYS_WALK_OPEN`'s return, execve's return, dev9p's no-priv, bad-args, walkqid and attrs alloc, fid
+  exhaustion and new_priv alloc arms, the `: -T_E_IO` half of the fused arm, exec_resolve's stat and empty-image arms, the nrun and
+  NOENT clauses (RPC count only), lictor's Twalk, Pouch's `default: return errno`, and E07's guard.
+- **SMP subset did not run on this chunk.** Its one new piece of state is a per-thread slot. C8a carries this code and runs the subset
+  by vote 27. **Did not run:** the full SMP matrix, `tools/test-fault.sh`, the interactive fleet and `tools/check-production.sh` beyond
+  what `tools/test.sh` does first. All owed at the merge to main, under the operator's hold.
+- **At the merge.** Main's `optional_absent` already reads only `-2` as absent, so a walk that fails for another reason will fail the
+  boot instead of skipping a present program. That has not run: it needs this chunk on main's tree.
+- **Still open, owned.** `T_E_NOEXEC`, signed off by vote 26, its own chunk; a 9P server answering ENOENT past its first name poisons
+  a dentry (OPEN-BUGS); the older spawn fronts keep a flat -1, which ER-3 owns.
+
+## C8a: torpor keyed on the space, a lock per bucket, oldest first — 2026-11-04
+
+A futex is now keyed on `(AddrSpace, va)`, with a lock per bucket, oldest first, and no wake under the
+bucket's lock. The two kernel walks and the die check under the bucket's lock are gone: a death or a stop
+reaches a waiter through `rendez_blocked_on`, as any sleep (operator votes 22 and 29). A pinned thread's
+wake now goes to its home CPU rather than the waker's (`chg-2026-11-04-pinned-wake`), a bug on main since
+#864. `specs/torpor.tla` models the wake and the record's lifetime, with the rendez lock's hold as two steps.
+
+Audit: round 1 Fable 5.1, 0/1/2/2; round 2 Fable 5.1, 0/0/2/5; round 3 Fable 5.1 on the walks' removal and the `ready_on` guard, 0/0/0/3. All fixed.
+
+Tests: the full suite is green at 2211 on `3e2adf489`, twice, one ELF, with joey and the guest legs. Sabotages:
+16 on `e8b0515ee`, 10 on `9059174e3`, 3 on `3e2adf489`, each read at its target. TLC: `torpor.cfg` 533,564
+distinct states and `torpor_broadcast.cfg` 880,388 clean, seven buggy cfgs each failing on its own invariant;
+`death_wake` and `debug_stop` re-run. SMP subset (`default-smp4 ubsan-smp4`, 20 boots, votes 27 and 31): 20 of 20 boots passed, 0 corruption
+on `3e2adf489`.
+
+**Did not run:** the full SMP matrix, under the 11-02 hold. It stays owed at the merge to main, with
+`tools/test-fault.sh`, the interactive fleet and `tools/check-production.sh`.
+
+## C10: each kernel stack in a range of its own — 2026-11-04
+
+A thread's kernel stack now sits in a range of its own: 32 KiB of address, the low 16 KiB never mapped, the high 16 KiB four pages from anywhere in RAM. The guard costs no memory, so a thread costs the pool 5 pages where it cost 9. The EL1 sync vector tests the frame's address, so an overflow reaches a per-CPU stack and says so rather than spinning. The direct map keeps its blocks: the guard toggles and #808's page map are gone. ARCH now describes the thread model as built (`0da38e604`, `e8b3529af`).
+
+Audit: round 1 Fable 5.1, 0/0/1/7. F7 is deferred to OPEN-BUGS and F8 is stated; the rest are fixed.
+
+Tests: the full suite is green at 2216 on `d0a545836`, twice, one ELF, with joey and the guest legs. Fault variants 8 of 8: `kstack_overflow`, `kstack_overflow_frame`, `kstack_overflow_irq`, `kstack_overflow_peer`, `kstack_dump_at_top`, `overflow_stack_guard`, `secondary_stack_guard`, `bootcpu_idle_guard`. Sabotages, 20: 16 red on their named line or variant; K02 and K15 red, not on the line they name (below); K10 and C01 green, as each predicted.
+
+Measured on those boots, on a shared Mac: 128 threads hold 512 stack pages and 1 new table, buddy down 568 pages; create and free 1183 ns cached and 1951 ns new (1100 and 1695 on the earlier boot). C2's figures were 924-1018 and 1417-1570 on another tree, so these are not a measured change.
+
+**Not settled:** K02 skips the TLB invalidate. It went red under HVF at `thread.kstack_cache_keeps_the_guard`, as `thread_free of a thread still owing hook walks`, which reads as a stale stack mapping writing over a page reused for a thread slot; that cause is read, not shown. K15 went red at the map's own guard. So `thread.kstack_release_invalidates_a_warm_entry` and `thread.kstack_cache_is_bounded` have not been seen red on their own lines, and K10 has no witness at all. C8b's lease runs K02 and K15 alone at those tests, and adds a test for K10.
+
+**Did not run:** the full SMP matrix, under the 11-02 hold. It stays owed at the merge to main, with the rest of `tools/test-fault.sh`, the interactive fleet and `tools/check-production.sh`. C10 ran no SMP subset: votes 27 and 31 name C8a, C8b and C9, and C8b's runs on top of this.
+
+## C8b: per-CPU timer bases, and a wake takes no timer lock — 2026-11-05
+
+The one global list of timed sleepers is gone. A thread in `tsleep` links on its current CPU's sorted base, and the sleeper unlinks itself on every way out. `wakeup` and the death and note wakers take no timer lock, and a CPU's tick expires its own base's head, reading the earliest deadline with no lock until one is due. A secondary with no tick yet links on cpu0's base. Operator vote 21 chose this design; `specs/tsleep.tla` is restated to match, with `NoStaleTimerEntry` restated.
+
+Audit: round 1 Fable 5.1, 0/0/0/4, all fixed.
+
+Tests: the full suite is green at 2221 on `2d4c38abe`, twice, one ELF, with joey and the guest legs. Sabotages, 13: X01 to X04 and X06 to X11 red at their target, X05 the hang at `timerbase.wake_takes_no_timer_lock` it predicts, M01 and M02 green as predicted, since only `tsleep_buggy_clear_first.cfg` and `tsleep_buggy_unlink_early.cfg` can reach those windows. X08 goes red from the test's entry, because it strands state across earlier tests; "off the tail" fired among the rest. SMP subset (`default-smp4 ubsan-smp4`, 20 boots, vote 27): 20 of 20 boots passed, 0 corruption on `2d4c38abe`.
+
+C10's owed readings, settled here: K02 and K15 each go red alone at the line they name, K10 ends the boot at its new test, and each test passes alone with no sabotage (`chg-2026-11-05-c10-owed-readings`).
+
+**Did not run:** the full SMP matrix, under the 11-02 hold. It stays owed at the merge to main, with the rest of `tools/test-fault.sh`, the interactive fleet and `tools/check-production.sh`.
+
+## C9: the switch decides from TTBR0, and kernel threads get the real root — 2026-11-05
+
+`cpu_switch_context` reads TTBR0 and nothing else: a zero ASID field is a kernel thread, which saves and loads no V state; an equal value writes no MSR; one ISB on every path. Lazy FP restore is not built (operator vote 30), and neither is FPCR's msr skip (`chg-2026-11-05-c9-readings`).
+
+The first full boot found a bug on main since P3-Bdb (`fd400476b`, 2026-05-06): `mmu_kernel_ttbr0_pa` returned a high VA, because clang shrank `g_l0_ttbr0_pa` to a byte and recomputed the address at its caller's PC. Every kernel thread but the boot thread ran on ASID 0xffff with a root made of VA bits. `volatile`, as `kaslr.c` already has for the same reason (`chg-2026-11-05-kernel-root-pa`). Main and corona were told.
+
+Audit: round 1 Fable 5.1, 0/0/0/5; round 2 Fable 5.1 on what a real ASID 0 changes, 0/0/0/4. All fixed.
+
+Tests: the full suite is green at 2225 on `5c31d1867`, twice, one ELF, with joey and the guest legs. Sabotages, 13: S01 to S11 red at their target, G01 green with same-space up 4 ns as predicted, G02 predicted green and red, read in `chg-2026-11-05-c9-readings`. TLC: `sched_ctxsw` and `asid` clean, six buggy cfgs each failing on its own invariant. SMP subset (`default-smp4 ubsan-smp4`, 20 boots, vote 31): 20 of 20 boots passed on `5c31d1867`.
+
+**Did not run:** the full SMP matrix, under the 11-02 hold. It stays owed at the merge to main, with `tools/test-fault.sh`, the interactive fleet and `tools/check-production.sh`. No figures were taken on a real CPU.
+
+## Sigsuspend, sigtimedwait, the mask for one call — 2026-11-05
+
+Votes 24, 25 and 28. `SYS_NOTE_WAIT` = 141, with forms SUSPEND, TAKE, POLL and PENDING. One mask restore at handler return, for both phenotypes. Pouch's own copy of the mask is gone. `sa_mask`, `SA_NODEFER` and `SA_RESETHAND` are carried in the row. `ppoll`, `pselect` and `sigpending` work on the same mechanism with no new number. Pouch's SIGPIPE default is a row that ignores, not a mask bit (`dec-2026-11-03-sigpipe-row`). Two Pouch `select` bugs found on the way are fixed: every failed `select` read EIO, and a closed fd read as a timeout.
+
+Audit: round 1 Fable 5.1, 0/0/0/7; round 2 Fable 5.1, 0/1/2/2. All fixed.
+
+Tests: the full suite is green at 2257 on `982d66e93`, twice, one ELF (`0e08156c900b25de`), with joey and the guest legs, `note-wait ok: 45 legs`. 83 sabotages on `ea0d92b15` and the seven whose witnesses changed on `982d66e93`, read one by one in `chg-2026-11-05-sigsuspend-readings`. No witness: K17 and G22. `pty-4`, `pty-susp-pouch`, `item10-ctrlc`, `viv-console-ctrlc` and `r5f9-ash` passed on `ea0d92b15`; `982d66e93` changes only tests, one probe leg and a comment, so they were not run again. Specs on the final tip: `tail_order` and `caught_target`, read in the same note.
+
+**Did not run:** the full SMP matrix, under the 11-02 hold, and no SMP subset was voted for this chunk. It stays owed at the merge to main, with `tools/test-fault.sh`, the interactive fleet and `tools/check-production.sh`. Round 2 did not read `vivarium_build_sigframe`, the probe's restorer, `pouch_sock_poll_fd`'s lazy open, dosbox-x's select sites or `el0_stop_park`, and read `client_wait`, `do_reader_recv_frame`, `client_flush_wait` and `proc_note_direct_rouse` at gate level only. Its Linux semantics came from its memory, not a source.
+
+## ENOEXEC and ELIBBAD: exec says whose fault it is — 2026-11-05
+
+Votes 26, 32 and 33. `execve` and `SYS_SPAWN_FULL_ARGV` answer `T_E_NOEXEC` for a file that is no image, where they read EINVAL. `execve` answers `T_E_LIBBAD` (80) for a good program whose interpreter is no image. An image with a W+X segment or an executable stack reads `T_E_ACCES`, because a shell re-runs an ENOEXEC file as a script (`dec-2026-11-05-policy-refusal`). A refused allocation and a failed read keep their own names. The full spawn reads the header in the parent, through `exec_image_check`, so it can answer before the rfork.
+
+Audit: round 1 Fable 5.1 at `796492e86`, 0/4/1/5; round 2 Fable 5.1 at `7f7fab418`, on what round 1 never read, 0/0/1/4. All fixed.
+
+Tests: the full suite is green at 2264 on `c32114c7c`, twice, one ELF (`7099c273c971a61a`), with joey and the guest legs. 35 sabotages across four leases, read one by one in `chg-2026-11-05-noexec-readings`. Three stayed green, and each showed a leg that had not reached its code; each now goes red. No witness: `kernel/joey.c`'s printed sign, which needs an init that fails to load. `check-burrow.sh` clean; no spec models exec's answers.
+
+**Still reads a pid:** the full spawn cannot report a missing interpreter, an interpreter that is no image, or a segment refused while mapping. The child dies in its load and the parent sees exit 1. The four older spawn calls keep their flat -1 (ER-3).
+
+**Did not run:** the full SMP matrix, under the 11-02 hold, and no SMP subset was voted for this chunk. It stays owed at the merge to main, with `tools/test-fault.sh`, the interactive fleet and `tools/check-production.sh`. No interactive scenario ran on this chunk, so no shell has been watched taking any of these answers. Round 2 did not read `usr/ambush`, `usr/ut`, `usr/joey`, the Go fork's decode of 80 or devramfs on an empty file, and read busybox and dash from memory.
+
+## The aux join: aux-3 reaches main through corona's branch -- 2026-11-06
+
+Vote 34. aux-3-join2 merges aux-3 (the thread-model arc through ENOEXEC) into corona/async-memory at 9e0c6b87e (f48e20df4). The merge made the native side's waiting take interruptible, and audit found what that woke up in B-3h. A set-lock now stops at a cancelled flush of another open of the file, but only for a take. Everything after the wait loop (the re-check's unlock, the open-file twin's close) runs uninterruptible, as a close does. The mirrors of the renumbered syscalls are held to the kernel enum by a derived check.
+
+Audit: Fable 5.1 each round: r1 0/0/0/3 at f5fe6d8e4, r2 0/0/1/2 at f81f1f217, r3 0/0/0/2 at 6d8af1673 (clean). All fixed except r3 F2, tracked: a re-check unlock refused for a reason other than a cancellation keeps its entry.
+
+Tests: green 2421 plus guest legs on b441f5c35. 37 sabotages on the join (lease 1, f5fe6d8e4: 36 red, E07 the recorded equivalent) and 13 on the fixes (lease 2, 87a56ff3c: all red). test-fault 23/23; viv-run and r5f9-ash PASS. The full SMP matrix (vote 37): N=10, 0 corruption across default-smp1/4/8 and ubsan-smp4/8. The UBSan kernel first overflowed its 8 MiB L3 window; four test statics moved to the heap (b441f5c35).
+
+**Did not run:** the rest of the interactive fleet. No spec models the lock path. Record: `chg-2026-11-06-aux-join2`.

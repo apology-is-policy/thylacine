@@ -4,7 +4,7 @@ type: chg
 title: "A pinned thread's wake goes to its home CPU, not the waker's"
 date: 2026-11-04
 arc: arc-phase6-pouch
-commits: []
+commits: [e8b0515ee]
 touched:
   - sub-kernel-sched-smp
 established: []

@@ -757,8 +757,10 @@ static int accept_cond_is_ready(void *arg) {
 // order. Under reg->lock, validate the caller, exclude a second waiter on the
 // single-waiter Rendez, and prevent rebind/recycle until this call unwinds.
 // Sleep returns on death; every exit below releases the pin before the
-// EL0-return die check.
-struct SrvConn *srv_accept_blocking(struct SrvService *svc, u64 poster_stripes) {
+// EL0-return die check. With `noted`, a caught note ends the wait too, and sets it
+// with nothing taken (ARCH 8.8.3).
+static struct SrvConn *srv_accept_wait(struct SrvService *svc, u64 poster_stripes,
+                                       bool *noted) {
     if (!svc || svc->magic != SRV_SERVICE_MAGIC || !svc->reg || !poster_stripes)
         return NULL;
     irq_state_t s = spin_lock_irqsave(&svc->reg->lock);
@@ -780,13 +782,27 @@ struct SrvConn *srv_accept_blocking(struct SrvService *svc, u64 poster_stripes) 
 
         // Register/recheck under the Rendez lock pairs with enqueue/tombstone
         // wakeup. The identity pin prevents a new LIVE lifetime hiding EOF.
-        if (sleep(&svc->accept_rendez, accept_cond_is_ready, svc) == SLEEP_INTR)
+        int sr = noted ? sleep_noteintr(&svc->accept_rendez, accept_cond_is_ready, svc)
+                       : sleep(&svc->accept_rendez, accept_cond_is_ready, svc);
+        if (sr == SLEEP_INTR) break;
+        if (sr == SLEEP_NOTEINTR) {
+            *noted = true;
             break;
+        }
     }
     s = spin_lock_irqsave(&svc->reg->lock);
     svc->accept_active = false;
     spin_unlock_irqrestore(&svc->reg->lock, s);
     return cn;
+}
+
+struct SrvConn *srv_accept_blocking(struct SrvService *svc, u64 poster_stripes) {
+    return srv_accept_wait(svc, poster_stripes, NULL);
+}
+
+struct SrvConn *srv_accept_interruptible(struct SrvService *svc, u64 poster_stripes,
+                                         bool *noted) {
+    return srv_accept_wait(svc, poster_stripes, noted);
 }
 
 struct Spoor *devsrv_make_conn_spoor(struct SrvConn *cn) {
@@ -1023,11 +1039,15 @@ static int devsrv_stat(struct Spoor *c, u8 *dp, int n) {
 // the Spoor's own qid.type, set by devsrv_walk). devsrv is system-owned +
 // world-r/x (0555/0444); the per-territory /srv visibility (the mount table),
 // not rwx, is the isolation boundary (I-1) -- devsrv is NOT perm_enforced.
+//
+// An open connection is a socket: its reads and writes wait for a peer, and its
+// type is how file_is_slow knows that (ARCH 8.8.3).
 static int devsrv_stat_native(struct Spoor *c, struct t_stat *out) {
     if (!c || c->dc != 's' || !out) return -1;
     for (size_t i = 0; i < sizeof(*out); i++) ((u8 *)out)[i] = 0;
     bool is_dir   = (c->qid.type & QTDIR) != 0;
-    out->mode     = is_dir ? (T_S_IFDIR | 0555u) : (T_S_IFREG | 0444u);
+    out->mode     = is_dir ? (T_S_IFDIR | 0555u)
+                           : devsrv_conn_of(c) ? (T_S_IFSOCK | 0666u) : (T_S_IFREG | 0444u);
     out->nlink    = 1;
     out->qid_path = c->qid.path;
     out->qid_vers = c->qid.vers;
@@ -1292,6 +1312,10 @@ struct Spoor *devsrv_open_connect(struct Proc *p, struct Spoor *c, int omode) {
     struct Spoor *root = srvconn_attach_dev9p_root(cn, NULL, 0, p, /*flags=*/0,
                                                    &err);
     if (!root) {
+        // A handshake a caught note cancelled reports that, or the call reads EIO and
+        // no restart follows (ARCH 8.8.3). Any other failure keeps the generic open
+        // error above.
+        if (err == -T_E_INTR) ref->open_errno = err;
         srvconn_teardown(cn);      // idempotent (the helper may already have torn it)
         devsrv_connect_release(&admission);         // drop admission refs; the poster drains the backlog ref
         return NULL;
@@ -1427,7 +1451,16 @@ static long devsrv_read(struct Spoor *c, void *buf, long n, s64 off) {
         // directly. The CSRVCLIENT direction is the mirror of the server arm.
         if (spoor_flag_get(c) & CNONBLOCK)
             return srvconn_io_nonblock(cn, false, false, buf, n);
-        return srvconn_client_recv(cn, (u8 *)buf, n);
+        // ARCH 8.8.3: this is a call's own wait, not the kernel 9P client's frame
+        // pump, so a caught note may end it. The recv answers -1 for that as it
+        // does for a death, for the 9P classifier that reads its own mark. This one
+        // reads the call's: it is set only by the unwind this wait just took.
+        struct Thread *self = current_thread();
+        self->recv_caught_ok = true;
+        long got = srvconn_client_recv(cn, (u8 *)buf, n);
+        self->recv_caught_ok = false;
+        if (got < 0 && self->note_call_unwound) return -(long)T_E_INTR;
+        return got;
     }
     // SERVER endpoint (the poster's accepted Spoor): read c2s. Atomic acquire on
     // byte_mode (F5 close): pair the setter's ATOMIC_RELEASE in

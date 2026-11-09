@@ -41,7 +41,7 @@
 //   g_dev9p_poll_lock -> c->lock           (the arm submit; the collector's flush)
 //   g_dev9p_poll_lock -> poll_list lock     (the GC's empty-check, nested so it
 //                                            is atomic with the unlink vs a reuse)
-//   poll_list lock    -> g_timerwait -> rendez -> cpu_sched   (a walk's wakes)
+//   poll_list lock    -> rendez -> cpu_sched   (a walk's wakes)
 //   c->lock           -> rendez             (a completion wakes the kthread or a
 //                                            poller)
 // g_dev9p_poll_lock is never held across a wakeup, a pump, a snapshot submit, or

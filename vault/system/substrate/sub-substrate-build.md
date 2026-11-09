@@ -30,7 +30,7 @@ locks: []
 abis: []
 design: ["docs/TOOLING.md"]
 created: 2026-08-01
-updated: 2026-10-29
+updated: 2026-11-04
 ---
 ## Purpose
 
@@ -462,7 +462,7 @@ the same toolchain (`$GOFORK/bin/go`) with the same environment, so the file
 selection cannot change between them and the artifact needs no check of its
 own. Whether `Launch` still acts on the constant is
 behaviour, which `/ambush-probe` checks at the entry. The ramfs also carries
-`/bin/ambush-notelf`, an executable that is not an ELF image, for stage D's
+`/bin/ambush-nointerp`, an executable whose header names an interpreter that does not exist, for stage D's
 abandoned-launch leg (DELVE-PORT-DESIGN section 7 (b)).
 
 **A fourth guard warns about a stage the main chain never refreshes.** The
@@ -981,3 +981,6 @@ or when an entry has no definition its pattern parses (so a definition it
 cannot read fails instead of escaping). `test_devcap_clearance_audio_graph`
 ran zero times for 51 days that way; the check fails the tree just before its
 registration (a3144a8c5^) on exactly that test.
+
+The pheno bundle supplies `pheno-notelf` and `pheno-empty`, 0755, for viv-pheno-probe's L369 and L370.
+`pheno-badinterp` is a one-`PT_INTERP` header naming `/pheno-notelf`, for L373. `pheno-wx` is one W+X `PT_LOAD`, for L374. The ramfs carries `/bin/exec-notelf` and `/bin/exec-empty` for `execve.interpreter_says_why` and `/bin/exec-wx` for `execve.policy_refusal_says_eacces`: the kernel tests run before the bundle is mounted, so a bundle file cannot serve them.

@@ -2,12 +2,13 @@
 id: seam-torpor-lock-wake-spin
 type: seam
 title: "torpor_lock held across wakeup()'s on_cpu spin"
-status: open
+status: closed
 surface: [sub-kernel-torpor]
 opened-by: chg-2026-05-23-torpor
 tracker: "torpor-8 audit F2 (P2, documented)"
 created: 2026-08-01
-updated: 2026-08-01
+updated: 2026-11-03
+closed-by: chg-2026-11-03-c8a-torpor
 ---
 ## Owed
 
@@ -28,3 +29,11 @@ lock per bucket ([[inv-i24]]'s closure) — or (b) two-pass wake:
 mark + collect under the lock, dispatch the wakeups after the drop
 (each waiter is pinned by its bucket link until its own unlink, so
 the collected list stays valid).
+
+## Closed
+
+Both, with a correction to (b): a collected waiter is off its bucket, so its link pins nothing,
+and its frame could go. The wake marks under the lock and wakes after it, and each waiter waits
+for the wake to let go of its record (`wake_held`, [[spec-torpor]]). The death and stop walks,
+which are rare, keep the lock across `wakeup`, one bucket at a time, and that is what keeps a
+linked record alive for them.

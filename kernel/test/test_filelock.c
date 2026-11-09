@@ -56,6 +56,14 @@ static u32            g_lk_acq_last_seq;
 static struct Spoor  *g_lk_acquired[8];
 static struct Spoor  *g_lk_acq_fail;       // .lock_sync(ACQUIRE) on this Spoor fails
 static int            g_lk_acq_fail_rc;
+static struct Spoor  *g_lk_rel_fail;       // .lock_sync(RELEASE) on this Spoor fails
+static int            g_lk_rel_fail_rc;
+static bool           g_lk_rel_fail_mark;  // and leaves the caller's call unwound
+static struct Spoor  *g_lk_rel_fail_armed; // becomes g_lk_rel_fail at the mid-call close
+static u32            g_lk_rel_fail_hits;  // release syncs that failed as the knobs said
+// The caller's note_interruptible at the last take, unlock, release sync and
+// fd_close the fake served: which of its waits a caught note could unwind.
+static bool           g_lk_take_intr, g_lk_un_intr, g_lk_sync_intr, g_lk_fd_close_intr;
 static u32            g_lk_take_seq;       // seq of the last take that reached .lock
 static hidx_t         g_lk_close_fd = -1;  // close this fd inside the next .lock
 static u8             g_lk_owner_tag;      // aux of a minted owner
@@ -89,6 +97,12 @@ static void lk_reset(void) {
     for (u32 i = 0; i < 8; i++) g_lk_acquired[i] = NULL;
     g_lk_acq_fail = NULL;
     g_lk_acq_fail_rc = 0;
+    g_lk_rel_fail = NULL;
+    g_lk_rel_fail_rc = 0;
+    g_lk_rel_fail_mark = false;
+    g_lk_rel_fail_armed = NULL;
+    g_lk_rel_fail_hits = 0;
+    g_lk_take_intr = g_lk_un_intr = g_lk_sync_intr = g_lk_fd_close_intr = false;
     g_lk_close_fd = -1;
     g_lk_stale = NULL;
     g_lk_stale_path = 0;
@@ -139,10 +153,16 @@ static int lk_lock(struct Spoor *c, u32 type, u64 start, u64 len,
     g_lk_calls++;
     g_lk_seq++;
     if (!test && type != SYS_FILE_LOCK_UN) g_lk_take_seq = g_lk_seq;
+    if (!test && type != SYS_FILE_LOCK_UN) g_lk_take_intr = current_thread()->note_interruptible;
+    if (!test && type == SYS_FILE_LOCK_UN) g_lk_un_intr = current_thread()->note_interruptible;
     if (g_lk_close_fd >= 0) {       // a peer thread's close lands mid-call
         hidx_t fd = g_lk_close_fd;
         g_lk_close_fd = -1;
         handle_close(current_thread()->proc, fd);
+        if (g_lk_rel_fail_armed) {
+            g_lk_rel_fail = g_lk_rel_fail_armed;
+            g_lk_rel_fail_armed = NULL;
+        }
     }
     // A fid of a file that has died (the server answers ESTALE; its records
     // went with the file).
@@ -233,7 +253,12 @@ static int lk_sync(struct Spoor *c, u32 how) {
     if (g_lk_sync_n < 8) g_lk_synced[g_lk_sync_n] = c;
     g_lk_sync_n++;
     g_lk_sync_last_seq = g_lk_seq;
-    return 0;
+    g_lk_sync_intr = current_thread()->note_interruptible;
+    if (c != g_lk_rel_fail) return 0;
+    g_lk_rel_fail_hits++;
+    // dev9p's cancelled flush: a caught note unwound the Twrite's wait.
+    if (g_lk_rel_fail_mark) current_thread()->note_call_unwound = true;
+    return g_lk_rel_fail_rc;
 }
 
 static bool lk_held(struct Spoor *c) {
@@ -248,6 +273,7 @@ static int lk_fd_close(struct Spoor *c, bool heard) {
     g_lk_fd_closes++;
     g_lk_fd_close_last = c;
     g_lk_fd_close_heard = heard;
+    g_lk_fd_close_intr = current_thread()->note_interruptible;
     if (lk_held(c)) g_lk_held_close_seq = g_lk_seq;
     for (u32 i = 0; i < LK_MAXREC; i++)
         if (g_lk[i].live && g_lk[i].owner == c) g_lk[i].live = false;
@@ -618,8 +644,6 @@ static void wait_body(struct lk_fix *f, int a) {
     TEST_SYSCALL_DISPATCH(&ctx);
     TEST_EXPECT_EQ((s64)ctx.regs[0], (s64)0, "a waiting lock is granted after three refusals");
     TEST_EXPECT_EQ(g_lk_calls - calls, 4u, "in four attempts");
-    TEST_EXPECT_EQ(current_thread()->note_interruptible, false,
-                   "the call's interruptibility ends with it");
     g_lk_agains = 1;
     calls = g_lk_calls;
     TEST_EXPECT_EQ(lk_call(f, a, SYS_FILE_LOCK_WR | SYS_FILE_LOCK_PROC, 0, 10),
@@ -1034,6 +1058,168 @@ void test_filelock_acquire_syncs(void) {
     if (a >= 0 && b >= 0 && o >= 0 && o2 >= 0) acquire_syncs_body(&f, a, b, o, o2);
     else test_fail("filelock: fixture allocation failed");
     lk_teardown(&f, 8);
+}
+
+// -----------------------------------------------------------------------------
+// A set-lock's flush of the file's other opens, cancelled by a caught note.
+// -----------------------------------------------------------------------------
+
+struct lk_cancel_seen {
+    s64  rc;
+    u32  calls, acqs;
+    bool synced_e, mark;
+    u32  entries;
+};
+
+// One set-lock through a, with b's release sync failing as the knobs say. The
+// mark is read and cleared here, before anything asserts.
+static struct lk_cancel_seen lk_cancel_call(struct lk_fix *f, int a, int b, int e,
+                                            u64 op, int rc, bool mark) {
+    struct lk_cancel_seen w;
+    struct Thread *t = current_thread();
+    lk_sync_reset();
+    lk_acq_reset();
+    u32 calls0 = g_lk_calls;
+    g_lk_rel_fail      = f->sp[b];
+    g_lk_rel_fail_rc   = rc;
+    g_lk_rel_fail_mark = mark;
+    w.rc       = lk_call(f, a, op, 0, 4);
+    w.mark     = t->note_call_unwound;
+    t->note_call_unwound = false;
+    g_lk_rel_fail = NULL;
+    g_lk_rel_fail_mark = false;
+    w.calls    = g_lk_calls - calls0;
+    w.acqs     = g_lk_acq_n;
+    w.synced_e = lk_synced(f->sp[e]);
+    w.entries  = handle_lock_owner_count(f->p);
+    return w;
+}
+
+// A set-lock lands every open's staged writes first (ARCH 9.6.11). When a caught
+// note cancels one of those flushes the call answers EINTR before the server is
+// asked anything, the mark still set for the restart, and a Proc take spends no
+// slot. One variable away each: the same EINTR with no mark is a failure the open
+// latches, and the lock goes ahead; the mark with another failure goes ahead too;
+// a close, which cannot be refused, goes on to every open and gives the lock up.
+static void cancelled_release_body(struct lk_fix *f, int a, int b, int e) {
+    const u64 W = SYS_FILE_LOCK_WR, U = SYS_FILE_LOCK_UN, P = SYS_FILE_LOCK_PROC;
+    TEST_ASSERT(f->fd[a] < f->fd[b] && f->fd[b] < f->fd[e],
+                "fixture: a, b, e sit in that order in the table");
+    struct lk_cancel_seen w;
+
+    w = lk_cancel_call(f, a, b, e, W, -T_E_INTR, true);
+    TEST_EXPECT_EQ(w.rc, -(s64)T_E_INTR, "an open-file take whose flush of b a note cancelled is EINTR");
+    TEST_ASSERT(w.mark, "with the mark still set: nothing after the flush cleared it");
+    TEST_EXPECT_EQ(w.calls, 0u, "and no lock reached the server");
+    TEST_EXPECT_EQ(w.acqs, 0u, "nor did the take ask any open to read the server");
+    TEST_ASSERT(!w.synced_e, "the flushes stopped at b");
+
+    u32 entries = handle_lock_owner_count(f->p);
+    w = lk_cancel_call(f, a, b, e, W | P, -T_E_INTR, true);
+    TEST_EXPECT_EQ(w.rc, -(s64)T_E_INTR, "a Proc take whose flush of b a note cancelled is EINTR");
+    TEST_ASSERT(w.mark, "with the mark still set");
+    TEST_EXPECT_EQ(w.calls, 0u, "and no lock reached the server");
+    TEST_EXPECT_EQ(w.entries, entries, "and it spent no slot");
+
+    w = lk_cancel_call(f, a, b, e, W, -T_E_INTR, false);
+    TEST_EXPECT_EQ(w.rc, (s64)0, "CONTROL: the same EINTR with no mark is no cancellation");
+    TEST_EXPECT_EQ(w.calls, 1u, "CONTROL: the take reached the server");
+    TEST_ASSERT(w.synced_e, "CONTROL: after every open's flush");
+    TEST_EXPECT_EQ(lk_call(f, a, U, 0, 4), (s64)0, "its unlock");
+
+    w = lk_cancel_call(f, a, b, e, W, -T_E_IO, true);
+    TEST_EXPECT_EQ(w.rc, (s64)0, "CONTROL: the mark with another failure refuses nothing");
+    TEST_EXPECT_EQ(w.calls, 1u, "CONTROL: the take reached the server");
+    TEST_ASSERT(w.synced_e, "CONTROL: after every open's flush");
+    TEST_EXPECT_EQ(lk_call(f, a, U, 0, 4), (s64)0, "its unlock");
+
+    // The close: the Proc's lock on the file drops at b's close, after every
+    // open's flush, a's cancelled one included.
+    TEST_EXPECT_EQ(lk_call(f, a, W | P, 0, 4), (s64)0, "the Proc locks the file through a");
+    struct Thread *t = current_thread();
+    lk_sync_reset();
+    u32 un0 = g_lk_un_seq;
+    g_lk_rel_fail      = f->sp[a];
+    g_lk_rel_fail_rc   = -T_E_INTR;
+    g_lk_rel_fail_mark = true;
+    lk_close_fd(f, b);
+    t->note_call_unwound = false;
+    g_lk_rel_fail = NULL;
+    g_lk_rel_fail_mark = false;
+    TEST_ASSERT(lk_synced(f->sp[a]), "CONTROL: a close flushes a, whose flush a note cancels");
+    TEST_ASSERT(lk_synced(f->sp[e]), "CONTROL: and goes on to e");
+    TEST_ASSERT(g_lk_un_seq != un0 && g_lk_sync_last_seq < g_lk_un_seq,
+                "CONTROL: then unlocks the file");
+    TEST_EXPECT_EQ(handle_lock_owner_count(f->p), entries, "CONTROL: and drops the entry");
+
+    // An unlock is never refused: it goes on past a flush a note cancelled.
+    TEST_EXPECT_EQ(lk_call(f, a, W, 0, 4), (s64)0, "an open-file take through a");
+    w = lk_cancel_call(f, a, e, e, U, -T_E_INTR, true);
+    TEST_EXPECT_EQ(w.rc, (s64)0, "its unlock goes ahead past a flush a note cancelled");
+    TEST_ASSERT(w.mark, "fixture: that flush was cancelled");
+    TEST_EXPECT_EQ(w.calls, 1u, "the unlock reached the server");
+    TEST_EXPECT_EQ(lk_held_on(9), 0u, "and nothing is held");
+
+    // A Proc take whose descriptor closed mid-call unlocks its range before the
+    // EBADF. That unlock is no take: a flush a note cancels on its way does not
+    // stop it. And it is a close's work, so it runs uninterruptible: a claim the
+    // take left held must not unwind its waits, or the Tflush can cancel the
+    // unlock on the server. note_interruptible is what native_note_class sets
+    // for a waiting take; the call itself is dispatched here without it.
+    lk_sync_reset();
+    g_lk_rel_fail_hits  = 0;
+    g_lk_close_fd       = f->fd[a];
+    g_lk_rel_fail_armed = f->sp[e];
+    g_lk_rel_fail_rc    = -T_E_INTR;
+    g_lk_rel_fail_mark  = true;
+    t->note_interruptible = true;
+    s64 rr = lk_call(f, a, W | P, 0, 4);
+    f->fd[a] = -1;   // the fake closed it
+    bool cancelled = g_lk_rel_fail_hits == 1u && t->note_call_unwound;
+    t->note_call_unwound = false;
+    t->note_interruptible = false;
+    g_lk_rel_fail = g_lk_rel_fail_armed = NULL;
+    g_lk_rel_fail_mark = false;
+    TEST_EXPECT_EQ(rr, -(s64)T_E_BADF, "a Proc take whose descriptor closed mid-call is EBADF");
+    TEST_ASSERT(cancelled, "fixture: the re-check's flush of e, the one sync after the close, was cancelled");
+    TEST_EXPECT_EQ(lk_held_on(9), 0u, "and its unlock went out past the cancelled flush");
+    TEST_ASSERT(g_lk_take_intr, "CONTROL: the take itself ran interruptible");
+    TEST_ASSERT(!g_lk_un_intr, "the re-check's unlock runs as a close: no wait in it can unwind");
+    TEST_ASSERT(!g_lk_sync_intr, "nor can its flush of the file's opens");
+
+    // The open-file twin: the take's last descriptor closed mid-call, and the
+    // call runs that close again for the grant it missed, as a close.
+    u32 closes0 = g_lk_fd_closes;
+    g_lk_close_fd = f->fd[e];
+    t->note_interruptible = true;
+    rr = lk_call(f, e, W, 0, 4);
+    f->fd[e] = -1;   // the fake closed it
+    bool twin_intr = g_lk_fd_close_intr, take_intr = g_lk_take_intr;
+    u32 closes = g_lk_fd_closes - closes0;
+    t->note_interruptible = false;
+    TEST_EXPECT_EQ(rr, -(s64)T_E_BADF, "an open-file take whose last descriptor closed mid-call is EBADF");
+    TEST_ASSERT(take_intr, "CONTROL: the take itself ran interruptible");
+    TEST_EXPECT_EQ(closes, 2u, "fixture: the mid-call close and the twin's both ran");
+    TEST_ASSERT(!twin_intr, "the twin's last close runs as a close: no wait in it can unwind");
+    TEST_EXPECT_EQ(lk_held_on(9), 0u, "and it gave the lock up");
+}
+
+void test_filelock_cancelled_flush_ends_call(void) {
+    struct lk_fix f;
+    lk_fix_init(&f);
+    struct Thread *t = current_thread();
+    TEST_ASSERT(!t->note_call_unwound, "a test thread's call has no mark");
+    int a = lk_open(&f, &g_lk_dev, 9, RW);
+    int b = lk_open(&f, &g_lk_dev, 9, RW);
+    int e = lk_open(&f, &g_lk_dev, 9, RW);
+    if (a >= 0 && b >= 0 && e >= 0) cancelled_release_body(&f, a, b, e);
+    else test_fail("filelock: fixture allocation failed");
+    g_lk_rel_fail = g_lk_rel_fail_armed = NULL;
+    g_lk_rel_fail_mark = false;
+    g_lk_close_fd = -1;
+    t->note_call_unwound = false;
+    t->note_interruptible = false;
+    lk_teardown(&f, 9);
 }
 
 // -----------------------------------------------------------------------------

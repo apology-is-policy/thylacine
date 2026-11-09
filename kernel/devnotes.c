@@ -130,7 +130,7 @@ static int devnotes_close(struct Spoor *c) {
 // poll_waiter_list_wake under q->lock; routing devnotes_read through the
 // same list breaks the ABBA deadlock cycle the prior single-waiter design
 // had with the cond-under-q->lock path. The cond callback now reads only
-// pw->ready (no q->lock acquisition under the tsleep g_timerwait + rendez
+// pw->ready (no q->lock acquisition under the tsleep timer base + rendez
 // locks).
 static int devnotes_read_cond(void *arg) {
     const struct poll_waiter *pw = (const struct poll_waiter *)arg;

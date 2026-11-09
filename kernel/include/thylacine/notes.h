@@ -185,6 +185,12 @@ struct Thread;
 // Proc.note_caught holds latch and claim in a u32. notes.c asserts each fits.
 #define NOTE_MASK_SUPPORTED  0x3ffu
 
+// Thread.note_wait_flags. MASK_HELD: this call runs under a mask of its own, and
+// note_saved_mask holds the thread's. NOHAND: the tail re-issues the call if it
+// unwound and no handler ran, whatever the row says, as Linux's ERESTARTNOHAND does.
+#define NOTE_WF_MASK_HELD  0x01u
+#define NOTE_WF_NOHAND     0x02u
+
 // #15: the DEFAULT ACTION of a note -- what happens when nobody catches it.
 // One value per row of `g_known_notes`, so a note's disposition is a property
 // OF the note rather than of whichever call site is asking. Before #15 the
@@ -564,9 +570,14 @@ int notes_reenqueue_head_locked(struct NoteQueue *q, const struct Note *n);
 int notes_interrupt_should_terminate_locked(struct Proc *p, struct Thread *t);
 #endif // KERNEL_TESTS
 
+// ARCH 8.8.3: is `p`'s disposition per note, in its table? A Linux Proc's always
+// is, a native Proc's from its first SYS_NOTE_DISPOSE until its next exec. Pure; no
+// lock required.
+bool notes_table_governs(const struct Proc *p);
+
 // Would `name` take its DEFAULT action on `p`? False iff something intercepts
-// it: a native handler (handler_va), a phenotype sigtab handler, or a phenotype
-// SIG_IGN. Pure; no lock required (each read is a single atomic load).
+// it: a native handler with no table (handler_va), a table's caught row, or a
+// table's ignored row. Pure; no lock required (each read is a single atomic load).
 //
 // Exists because a decider that runs INSTEAD of notes_post cannot rely on the
 // SIG_IGN drop inside it. proc_tty_susp_would_stop_locked is the caller that
@@ -673,18 +684,49 @@ int notes_post_pid(int pid, const char *name, u32 arg);
 // handler install is not one of the clearing choke points, so its latch stays
 // armed until the note is delivered or drained.
 
+// ARCH 8.8.3: a disposition just changed. Discards nothing: it sets the terminate
+// and caught latches to what the queue says under the new disposition, then wakes
+// and rouses as a post would. The caller stored the disposition first and holds no
+// lock (it takes q->lock, then p->threads_lock). `p` is the caller's own, or one
+// it pins.
+void notes_disposition_reread(struct Proc *p);
+
 // Register/clear the async note handler (the SYS_NOTIFY body). Stores
-// handler_va with RELEASE (pairs with the dispatcher's acquire, F9) and, when
-// registering (handler_va != 0), clears the terminate latch -- BOTH under
-// q->lock, so the store+clear cannot interleave with notes_post's
-// check-handler-then-arm and leave a stale armed latch behind a registered
-// handler (which would *_INTR every future sleep of a surviving Proc).
+// handler_va with RELEASE (pairs with the dispatcher's acquire, F9); clearing it
+// resets a native table's caught rows; then notes_disposition_reread, so no stale
+// latch is left behind a registered handler (which would *_INTR every future sleep
+// of a surviving Proc) and none is missing behind a cleared one.
 void notes_set_handler(struct Proc *p, u64 handler_va);
 
 // Mark `p` self-managing (the SYS_NOTE_OPEN tail; wraps
 // proc_mark_self_managing_notes) and clear the terminate latch -- both under
 // q->lock, same serialization rationale as notes_set_handler.
 void notes_mark_self_managing(struct Proc *p);
+
+// SYS_NOTE_WAIT's forms, and the phenotype's rt_sigsuspend, rt_sigtimedwait, ppoll,
+// pselect6 and rt_sigpending (ARCH 8.8.3). notes_wait_suspend always answers a negative
+// errno. notes_wait_take answers 0 with the note in *out and where it came from in
+// *direct, which notes_wait_untake takes back if the caller cannot hand the note over.
+// notes_take_for_sigset is a Linux sigset as a take word: a signal with no note
+// names nothing, and SIGKILL's note is nobody's to take. notes_sigset_for_take goes the
+// other way, for a word that names rows.
+//
+// notes_wait_mask_begin puts a mask in place for one call that can also end some other
+// way: 0 to go on, or -T_E_INTR when only the tail can act on what is queued. `forever`
+// says the call has no timeout, so that re-issuing it loses nothing. notes_wait_mask_end
+// takes the call's answer: anything but -T_E_INTR had no note to report, and puts the
+// mask back at once. Neither does anything in a handler. notes_wait_pending answers a
+// take word of what is queued for this thread and held.
+s64  notes_wait_suspend(struct Thread *t, u64 mask);
+s64  notes_wait_take(struct Thread *t, u64 take, s64 timeout_ns, struct Note *out,
+                     int *direct);
+void notes_wait_untake(struct Thread *t, int direct, const struct Note *n);
+s64  notes_wait_mask_begin(struct Thread *t, u64 mask, bool forever);
+void notes_wait_mask_end(struct Thread *t, s64 result);
+u64  notes_wait_pending(struct Thread *t);
+u64  notes_take_for_sigset(u64 set);
+u64  notes_sigset_for_take(u64 take);
+bool notes_take_word_valid(u64 take);
 
 // The SYS_NOTED bodies. notes_noted_restore puts back the user context saved
 // at delivery (NCONT): 0, or -1 when `t` is not in a handler. notes_noted_default
@@ -701,7 +743,7 @@ int notes_noted_default(struct exception_context *ctx, struct Thread *t);
 // (a masked thread defers: it neither unwinds nor terminates until it
 // unmasks). LOCK-FREE (atomic loads + the owner-read note_mask): callable
 // from sleep/tsleep's register-then-observe under wait_lock/r->lock, from
-// torpor's post-register check under torpor_lock, and from the 9P client's
+// torpor's post-register check under its bucket's lock, and from the 9P client's
 // reader-unwind decision. Replaces every direct group_exit_msg load at
 // those sites.
 bool thread_die_pending(struct Thread *t);
@@ -751,6 +793,11 @@ bool thread_caught_note_deliverable(struct Thread *t);
 // releases it and walks the Proc again if its note is still queued. The sleep
 // sites evaluate it LAST, only when every other unwind gate has passed.
 bool thread_caught_note_claim(struct Thread *t);
+
+// ARCH 8.8.3: the tail's last word on a call whose wait unwound with no handler run
+// here. Re-issues it if nothing is left to report; clears the mark.
+struct exception_context;
+void notes_call_settle(struct exception_context *ctx, struct Thread *t);
 #endif // KERNEL_TESTS
 
 // ARCH 8.8.3 (dec-2026-10-12-note-target): the posting walk's designation.
@@ -783,12 +830,10 @@ bool thread_note_handler_escaped(const struct Thread *t, u64 sp_el0);
 
 // 11b-9p (item 11): does `p`'s reader handle -T_E_INTR? A caught-note wait unwind
 // returns EINTR to userspace, and a reader that does not expect it breaks (the
-// native ut $(cmd) capture, 11b-core's build bug). PHENO_LINUX programs go through
-// musl, which is EINTR-aware by construction (POSIX); native (libthyla-rs) readers
-// are NOT until they retry -T_E_INTR (11c). So the caught-note sleep unwind is gated
-// on this in the sched caught branch: only an EINTR-ready Proc unwinds; a native
-// reader's opted-in sleep degrades to death-only (the note delivers late, the
-// pre-item-11 behavior -- no regression). Widens to native per-reader at 11c.
+// native ut $(cmd) capture, 11b-core's build bug). A Proc whose table governs has
+// said which notes it expects (ARCH 8.8.3): the latch reads the row, so only a
+// caught row's note unwinds. Every other Proc has said nothing, and its opted-in
+// sleep degrades to death-only (the note delivers late, as before item 11).
 bool proc_caught_note_eintr_ready(struct Proc *p);
 
 // ARCH 8.8.3: the caught-note unwind decision, all but the wait's own condition
@@ -843,6 +888,8 @@ int notes_tail_consume_for_test(struct Proc *p, struct Thread *t, int direct,
                                 struct Note *out);
 void notes_tail_unconsume_for_test(struct Proc *p, struct Thread *t, int direct,
                                    const struct Note *n);
+u64  notes_interrupted_mask_for_test(const struct Thread *t);
+void notes_handler_mask_enter_for_test(struct Thread *t, u64 handler_mask);
 void notes_handler_resets_for_test(struct Proc *p, u32 sn);   // an enum viv_signote
 #endif // KERNEL_TESTS
 

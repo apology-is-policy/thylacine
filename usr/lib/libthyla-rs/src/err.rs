@@ -73,6 +73,15 @@ pub enum Error {
     /// Maps `T_E_IO` = 5 (POSIX `EIO`).
     Io,
 
+    /// Not a runnable image: the file resolved and may be executed, and it
+    /// is not something this kernel can load.
+    /// Maps `T_E_NOEXEC` = 8 (POSIX `ENOEXEC`).
+    NotExecutable,
+
+    /// A good program whose interpreter is not a runnable image.
+    /// Maps `T_E_LIBBAD` = 80 (Linux `ELIBBAD`).
+    BadInterpreter,
+
     /// Bad handle: handle table slot empty, magic-corrupted, or holds
     /// the wrong `KObj` kind for the requested operation.
     /// Maps `T_E_BADF` = 9 (POSIX `EBADF`).
@@ -222,6 +231,8 @@ impl Error {
             Error::NotFound         => 2,
             Error::NoSuchProcess    => 3,
             Error::Io               => 5,
+            Error::NotExecutable    => 8,
+            Error::BadInterpreter   => 80,
             Error::BadHandle        => 9,
             Error::WouldBlock       => 11,
             Error::NoMemory         => 12,
@@ -310,6 +321,8 @@ impl From<i32> for Error {
             2   => Error::NotFound,
             3   => Error::NoSuchProcess,
             5   => Error::Io,
+            8   => Error::NotExecutable,
+            80  => Error::BadInterpreter,
             9   => Error::BadHandle,
             11  => Error::WouldBlock,
             12  => Error::NoMemory,
@@ -349,6 +362,8 @@ impl fmt::Display for Error {
             Error::PermissionDenied => "permission denied",
             Error::BadAddress       => "bad address",
             Error::Busy             => "resource busy",
+            Error::NotExecutable    => "not a runnable image",
+            Error::BadInterpreter   => "its interpreter is not a runnable image",
             Error::Exists           => "already exists",
             Error::NotADirectory    => "not a directory",
             Error::IsADirectory     => "is a directory",

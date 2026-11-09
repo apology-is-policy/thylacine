@@ -39,6 +39,7 @@
 //     ring; it returns EOF (0) — a corvus crash never wedges a client.
 
 #include "test.h"
+#include "../../mm/slub.h"
 
 #include <thylacine/proc.h>
 #include <thylacine/errno.h>
@@ -626,17 +627,19 @@ void test_srvconn_bulk_ring_class(void) {
     // the FIRST bulk write (the fsbench hang). 96 KiB > the old 64 KiB
     // cap; must be accepted whole, frame-atomically, in ONE call.
     {
-        static u8 bigframe[96 * 1024];
-        for (long j = 0; j < (long)sizeof bigframe; j++)
+        const long bigframe_len = 96 * 1024;
+        u8 *bigframe = kmalloc((size_t)bigframe_len, 0);   // not a static: the image's L3 window
+        TEST_ASSERT(bigframe != NULL, "kmalloc the big frame");
+        for (long j = 0; j < bigframe_len; j++)
             bigframe[j] = (u8)(0x51 + (u8)j);
         TEST_EXPECT_EQ(srvconn_client_send_frame(cn, bigframe,
-                                                 (long)sizeof bigframe),
-                       (long)sizeof bigframe,
+                                                 bigframe_len),
+                       bigframe_len,
             "a >default-cap frame is accepted WHOLE on the bulk ring "
             "(the fsbench-wedge regression)");
         long drained = 0;
-        while (drained < (long)sizeof bigframe) {
-            long want = (long)sizeof bigframe - drained;
+        while (drained < bigframe_len) {
+            long want = bigframe_len - drained;
             if (want > (long)sizeof g_sc_chunk) want = (long)sizeof g_sc_chunk;
             TEST_EXPECT_EQ(srvconn_server_recv(cn, g_sc_chunk, want), want,
                 "drain the big frame");
@@ -645,6 +648,7 @@ void test_srvconn_bulk_ring_class(void) {
                     "big-frame byte intact");
             drained += want;
         }
+        kfree(bigframe);
     }
 
     // A default conn still reports the default class.

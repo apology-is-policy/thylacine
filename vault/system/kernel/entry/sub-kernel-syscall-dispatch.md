@@ -22,7 +22,7 @@ design:
   - "docs/VIVARIUM.md"
   - "docs/LINEAGE.md"
 created: 2026-08-03
-updated: 2026-11-04
+updated: 2026-11-05
 ---
 ## Session registry factory
 
@@ -714,9 +714,9 @@ It answers each refusal's errno: `T_E_NOENT` for a missing component,
 `T_E_NOTDIR` for a target that is not a directory, `T_E_ACCES` for a refused
 search (the walk's or the final X check's), `T_E_INVAL` for an empty, over-long
 or NUL-bearing path or a name the walk cannot name back, and a failing stat's
-or re-walk's own errno (`T_E_IO` when it carries none). A Dev's walk carries no
-errno, so a 9P walk that fails for any reason -- a dead session, a caught note
-that interrupts it -- answers `T_E_NOENT`, as for `SYS_OPEN`. `SYS_CHDIR` passes
+or re-walk's own errno (`T_E_IO` when it carries none). A walk's own reason crosses
+as it does for `SYS_OPEN`, and only a miss reads `T_E_NOENT` (ERRORS.md ER-2).
+`SYS_CHDIR` passes
 it through, with `T_E_FAULT` for a bad buffer
 and `T_E_NOMEM` for the store; until then it answered every failure the bare -1
 that pouch and Go read as `EPERM` (ERRORS.md's binding rule). The landed name
@@ -1105,9 +1105,18 @@ that identity refusal is observable from Thylacine at all
 
 The single exit also clears the thread's `note_interruptible`, which the
 vivarium dispatcher sets for a Linux call on signal(7)'s list
-([[sub-kernel-vivarium]]). Clearing it at the one exit is what keeps a wait
+([[sub-kernel-vivarium]]) and `native_note_class` sets for a native call on the same
+list where a table governs ([[sub-kernel-notes]]), `SYS_FILE_LOCK`'s waiting take (F_SETLKW)
+among them. The class is asked only with a handler
+or a notes fd present, so a program that only ignores SIGPIPE pays no stat per open
+file. Both also record `note_call_x0` and `note_restartable`, which the return tail
+reads and clears, for the kernel's re-issue under `SA_RESTART`. Clearing it at the one exit is what keeps a wait
 outside that syscall -- a page-in at EL0, the next syscall's own waits -- from
 inheriting its interruptibility ([[dec-2026-09-29-caught-signal-slow-calls]]).
+Most classed handlers never clear the flag themselves. `notes.native_class` witnesses
+the clear through the real wrapper: it presets the flag, dispatches `SYS_GETPID` and
+reads the flag cleared. As its control, the handler called alone leaves the flag set.
+No table governs the harness's Proc, so the classifier cannot overwrite the preset.
 
 ### The body runs with interrupts ON (ARCH 8.12)
 
@@ -1430,11 +1439,6 @@ threshold so small transfers never pay the extra handle lookup.
   case today — every native symbol the table can emit has an arm, and a
   compile-time assertion pins the native/Linux boundary constant — but the
   guarantee is a census, not a mechanism.
-- **execve cannot say "not executable".** POSIX's `ENOEXEC` has no entry in the
-  errno registry, so a load failure reports `EINVAL`. The registry is ABI-bearing
-  and additions need signoff, so the gap is tracked rather than closed by fiat.
-  It matters at the shell: `ENOEXEC` is how a shell learns to re-run a file as a
-  script, and until the code exists a shell cannot make that distinction.
 - **The environment's bounds answer a different error code than argv's, on
   purpose.** Over-long environment data answers `E2BIG` — a caller acts on the
   difference, since it says the request was well-formed and splitting will work —

@@ -37,7 +37,7 @@ done
 The Phase-0 plan gate-tied nine specs; the committed inventory is **17
 modules** (the authoritative table: `docs/ARCHITECTURE.md §25.2`). Three of
 the planned nine were dropped per the 2026-05-23 spec-to-code suspension:
-`futex.tla` (torpor is prose-validated), `notes.tla` (prose + audit + tests),
+`futex.tla` (`torpor.tla` took its place at thread-model C8), `notes.tla` (prose + audit + tests),
 `pty.tla` (the PTY mechanism is unbuilt — LS-8, task #952).
 
 | Spec | Landed | Pins |

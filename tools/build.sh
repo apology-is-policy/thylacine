@@ -502,6 +502,31 @@ build_kernel() {
     build_disk
 }
 
+# A header a full spawn's look passes and nothing can run: one PT_INTERP, naming $2.
+elf_with_interp() {   # <out> <interp-path>
+    python3 - "$1" "$2" <<'PY'
+import struct, sys
+interp = sys.argv[2].encode() + b'\0'
+ident = b'\x7fELF\x02\x01\x01' + bytes(9)
+ehdr = ident + struct.pack('<HHIQQQIHHHHHH', 2, 183, 1, 0x400000, 64, 0, 0, 64, 56, 1, 0, 0, 0)
+phdr = struct.pack('<IIQQQQQQ', 3, 4, 64 + 56, 0, 0, len(interp), len(interp), 1)
+open(sys.argv[1], 'wb').write(ehdr + phdr + interp)
+PY
+    chmod 0755 "$1"
+}
+
+# A well-formed header I-12 refuses: one PT_LOAD, writable and executable.
+elf_wx() {   # <out>
+    python3 - "$1" <<'PY'
+import struct, sys
+ident = b'\x7fELF\x02\x01\x01' + bytes(9)
+ehdr = ident + struct.pack('<HHIQQQIHHHHHH', 2, 183, 1, 0x400078, 64, 0, 0, 64, 56, 1, 0, 0, 0)
+phdr = struct.pack('<IIQQQQQQ', 1, 7, 0, 0x400000, 0x400000, 120, 120, 0x1000)
+open(sys.argv[1], 'wb').write(ehdr + phdr)
+PY
+    chmod 0755 "$1"
+}
+
 build_ramfs() {
     local ramfs_src="$BUILD_DIR/ramfs-src"
     local ramfs_out="$BUILD_DIR/ramfs.cpio"
@@ -555,13 +580,19 @@ bt
 print main.Sentinel
 EOF
     # Stage D's abandoned-launch leg: `ambush dap-selftest /bin/ambush-child
-    # /bin/ambush-notelf` launches this first. It is executable, so the spawn makes
-    # a child, and not an ELF image, so that child dies in its exec before it runs;
-    # the failed launch must reap it. The mode is set rather than left to the
-    # umask: without X the spawn is refused before any child exists, and the leg
-    # fails saying so.
-    printf 'not an ELF image\n' > "$ramfs_bin/ambush-notelf"
-    chmod 0755 "$ramfs_bin/ambush-notelf"
+    # /bin/ambush-nointerp` launches this first. A full spawn reads a file's header in
+    # the parent and refuses one that is no image, so this is a header it passes: only
+    # a PT_INTERP, naming nothing. The spawn makes a child, and that child dies in its
+    # load before it runs; the failed launch must reap it. The mode is set rather than
+    # left to the umask: without X the spawn is refused before any child exists, and
+    # the leg fails saying so.
+    elf_with_interp "$ramfs_bin/ambush-nointerp" /nonexistent/ld.so
+    # execve.interpreter_says_why: interpreters that resolve and are no image. They live
+    # here because the kernel tests run before anything is mounted but this.
+    printf 'echo hi\n' > "$ramfs_bin/exec-notelf"
+    : > "$ramfs_bin/exec-empty"
+    chmod 0755 "$ramfs_bin/exec-notelf" "$ramfs_bin/exec-empty"
+    elf_wx "$ramfs_bin/exec-wx"
     # U-6e-a: the `source` builtin's read fixture (/u-builtin-test sources
     # this and asserts the assignment + fn registration persist into the
     # caller's Env).
@@ -1399,10 +1430,18 @@ VIVEOF
         # An empty writable file the probe fills through Linux write(64) and
         # then reads back: a write proven by its return value proves only the
         # renumber; proven by the bytes coming back it proves the data path.
-        # (It cannot CREATE one -- O_CREAT is deliberately not translatable,
-        # VIVARIUM section 6.20 correction 1 -- so the bundle supplies it.)
+        # The bundle supplies it, so that the leg proves the write and not whether this
+        # principal may create in the root.
         : > "$hb/rootfs/pheno-scratch"
         chmod 0666 "$hb/rootfs/pheno-scratch"
+        # L369, L370: files that may run and are no image.
+        printf 'echo hi\n' > "$hb/rootfs/pheno-notelf"
+        : > "$hb/rootfs/pheno-empty"
+        chmod 0755 "$hb/rootfs/pheno-notelf" "$hb/rootfs/pheno-empty"
+        # L373: a program that is fine, and whose interpreter is one of those.
+        elf_with_interp "$hb/rootfs/pheno-badinterp" /pheno-notelf
+        # L374: an image I-12 refuses, which is no reason to run it as a script.
+        elf_wx "$hb/rootfs/pheno-wx"
         for leaf in null zero full random urandom tty; do
             : > "$hb/rootfs/dev/$leaf"
             chmod 0666 "$hb/rootfs/dev/$leaf"

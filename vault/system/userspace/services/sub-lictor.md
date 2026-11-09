@@ -87,6 +87,14 @@ open. The solid backdrop is the operator-selected presentation; blur is not an
 outstanding implementation requirement.
 
 
+## Walk answers (2026-11-03)
+
+The broker's Twalk answers a miss on its first name with `Rlerror(ENOENT)` and on a later
+name with a short Rwalk, neither binding newfid, where it used to treat every miss as a bad
+request and drop the connection. A dead ring is a miss. The kernel now reports what a
+server says about a walk (ERRORS.md ER-2), and its only client, `proxy/gpu.rs`, treats
+every failure alike. `..` from the root is the root.
+
 ## Purpose
 
 Lictor owns the graphical seat's physical input and display transport. It is

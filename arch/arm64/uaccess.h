@@ -49,7 +49,7 @@ extern s64 uaccess_store_u8(u64 user_va, u8 value);
 //
 // Added at P6-pouch-wait-addr (sub-chunk 8) for SYS_TORPOR_WAIT's
 // futex-word compare. Plain LDR — relies on the caller holding the
-// torpor_lock for memory ordering against the producer's WAKE-side
+// the bucket lock for memory ordering against the producer's WAKE-side
 // store-then-WAKE sequence.
 extern s64 uaccess_load_u32(u64 user_va, u32 *out);
 
@@ -62,7 +62,7 @@ extern s64 uaccess_load_u32(u64 user_va, u32 *out);
 // the tidptr the Thread set via SYS_SET_TID_ADDRESS, then issues a
 // torpor wake so a joiner blocked on the word observes the death.
 // Plain STR — the joiner's later torpor_wait load runs under
-// torpor_lock, whose acquire pairs with the producer-side store
+// the bucket lock, whose acquire pairs with the producer-side store
 // (the kernel here) for memory ordering. Mirrors uaccess_load_u32.
 extern s64 uaccess_store_u32(u64 user_va, u32 value);
 

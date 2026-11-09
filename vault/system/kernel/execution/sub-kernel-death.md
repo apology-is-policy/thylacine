@@ -10,7 +10,7 @@ validated-by: [spec-death-wake, gate-smp]
 locks: [lock-proc-table]
 design: ["docs/ARCHITECTURE.md", "docs/LINEAGE.md"]
 created: 2026-08-01
-updated: 2026-10-29
+updated: 2026-11-04
 ---
 ## Session registry retirement
 
@@ -75,9 +75,9 @@ that michael can abdicate/log out and cora can log in afterward.
    "killgrp the driver" revoke-then-terminate atomically, so an in-flight
    `SYS_*_CREATE` observes `revoked` at its commit re-check.
 2. CAS `group_exit_msg` (RELEASE, first msg wins).
-3. Wake, in two passes: `torpor_wake_all_for_proc` for futex sleepers, then
-   the **#811 universal death-wake** — walk `p->threads`, take each peer's
-   `wait_lock`, read `rendez_blocked_on`, `wakeup()` it.
+3. Wake: the **#811 universal death-wake** — walk `p->threads`, take each peer's
+   `wait_lock`, read `rendez_blocked_on`, `wakeup()` it. A futex sleeper is reached
+   this way too, on its private rendez.
 4. `smp_resched_others()` so a peer running at EL0 on another CPU traps to
    its IRQ-from-EL0 die-check without waiting for a tick. The periodic
    timer is the floor if the IPI is missed.
@@ -498,8 +498,8 @@ each thread on its own single-waiter rendez.
 ## Concurrency
 
 Lock order, exhaustively:
-`g_proc_table_lock → p->threads_lock → wait_lock → g_timerwait.lock → r->lock → cs->lock`,
-plus the torpor leg `p->threads_lock → torpor_lock → g_timerwait → r->lock`
+`g_proc_table_lock → p->threads_lock → wait_lock → a timer base's lock → r->lock → cs->lock`,
+plus the torpor leg `p->threads_lock → a bucket's lock → r->lock`
 ([[lock-proc-threads]], thread-model C3). The exit decision is one hold of the
 thread lock: a non-last thread commits there and takes nothing else; the last
 thread reads the claim, marks the close, drops every lock for the handle close,
@@ -509,7 +509,7 @@ thread still live (`thread_reap.tla` `ZombieImpliesAllExiting`). The
 clear-child-tid store follows the commit and cannot sleep: the FILE page-in
 refuses a thread that is not RUNNING ([[sub-kernel-fault]],
 [[seam-exiting-tails-never-sleep]]).
-`torpor_lock` and `wait_lock` never nest (torpor drops its lock before
+A bucket's lock and `wait_lock` never nest (torpor drops its lock before
 `tsleep`). `smp_resched_others` and the IPI handler take no locks. No ABBA.
 
 Acyclicity rests on one asymmetry: only the **owner** writes
@@ -517,8 +517,8 @@ Acyclicity rests on one asymmetry: only the **owner** writes
 therefore read-only, and no path takes a rendez lock and then reaches for
 the table lock.
 
-Double-wake is idempotent — `torpor_wake_all` and the rendez walk can both
-target the same waiter, and the second `wakeup()` no-ops on `waiter == NULL`.
+Double-wake is idempotent — a futex WAKE and the rendez walk can both target
+the same waiter, and the second `wakeup()` no-ops on `waiter == NULL`.
 
 ## Invariants enforced
 
@@ -630,9 +630,7 @@ What a change **must** re-establish:
   kill, an `exit_group`, a hangup or `EXITKILL` never force. A forced exit's
   parent can read the file before the closer's write lands: the I-38 window
   the second kill buys.
-- The interrupt-terminate wake deliberately omits both
-  `torpor_wake_all_for_proc` and `smp_resched_others` — the former because
-  torpor waiters are reachable via `rendez_blocked_on` anyway, the latter
+- The interrupt-terminate wake deliberately omits `smp_resched_others`,
   because the IRQ-from-EL0 tail evaluates only `group_exit_msg`, so an IPI
   cannot accelerate an interrupt-death. The no-IPI shape is also what lets
   the unit test drive the real waker on the single-CPU harness.

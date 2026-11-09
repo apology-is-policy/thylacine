@@ -11,9 +11,8 @@
 //
 // smp.exception_stack_smoke (P5-el1h-kernel)
 //   Verifies the kernel runs uniformly at EL1h — PSTATE.SPSel == 1
-//   (invariant I-21). Also sanity-checks the layout of the reserved
-//   g_exception_stacks buffer (kept for a future dedicated overflow
-//   stack; see smp.h).
+//   (invariant I-21). Also checks what a CPU's overflow stack is: a guard page
+//   that does not translate under a usable region that does.
 //
 // smp.per_cpu_idle_smoke (P2-Cd)
 //   Verifies each CPU has its sched state initialized + an idle thread
@@ -42,6 +41,7 @@
 #include "test.h"
 
 #include "../../arch/arm64/gic.h"
+#include "../../arch/arm64/mmu.h"
 #include "../../arch/arm64/timer.h"
 
 #include <thylacine/dtb.h>
@@ -108,20 +108,18 @@ void test_smp_exception_stack_smoke(void) {
     TEST_EXPECT_EQ(spsel, (u64)1,
         "kernel must run uniformly at EL1h (SPSel=1) — invariant I-21");
 
-    // g_exception_stacks is the RESERVED per-CPU buffer kept for a
-    // future dedicated stack-overflow / SError handler stack (smp.h).
-    // It is NOT the live exception stack under the uniform-EL1h model
-    // (exception frames are built on the per-thread kernel stack), but
-    // the BSS layout is still asserted so the future hardening item
-    // lands without a layout surprise.
-    TEST_EXPECT_EQ((u64)sizeof(g_exception_stacks),
-                   (u64)(DTB_MAX_CPUS * EXCEPTION_STACK_SIZE),
-        "g_exception_stacks BSS size must equal NCPUS * EXCEPTION_STACK_SIZE");
-    uintptr_t base = (uintptr_t)&g_exception_stacks[0][0];
     for (unsigned i = 0; i < DTB_MAX_CPUS; i++) {
-        uintptr_t slot_base = (uintptr_t)&g_exception_stacks[i][0];
-        TEST_EXPECT_EQ((u64)slot_base, (u64)(base + i * EXCEPTION_STACK_SIZE),
-            "per-CPU exception-stack slot must be contiguous");
+        const struct secondary_stack *o = &g_overflow_stacks[i];
+        TEST_ASSERT(!mmu_kva_readable_for_test(&o->guard[0]),
+            "an overflow stack's guard page does not translate");
+        TEST_ASSERT(mmu_kva_readable_for_test(&o->usable[0]) &&
+                    mmu_kva_readable_for_test(&o->usable[SECONDARY_STACK_USABLE_SIZE - 1u]),
+            "and its usable region does");
+        TEST_EXPECT_EQ((u64)((uintptr_t)&o->usable[SECONDARY_STACK_USABLE_SIZE]) & 15u, 0ull,
+            "the top of a slot is an SP the vector can load");
+        TEST_EXPECT_EQ((u64)((uintptr_t)o - (uintptr_t)&g_overflow_stacks[0]),
+                       (u64)i * 5u * 4096u,
+            "a slot sits where vectors.S computes it");
     }
 }
 
