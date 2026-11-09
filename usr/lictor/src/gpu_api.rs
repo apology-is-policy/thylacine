@@ -101,8 +101,46 @@ pub struct FenceTag {
 /// (vote 81): behind any parked chain of its context, so the context's stream
 /// order holds, and, a readback, while its context has a chain the device may
 /// still run (`on_device`). `parked` is (context, readback) per parked chain.
-pub fn must_park(parked: &[(u32, bool)], ctx: u32, readback: bool, on_device: bool) -> bool {
+/// A context with a released chain parks everything, and the pump releases it.
+pub fn must_park(parked: &[(u32, bool)], ctx: u32, readback: bool, on_device: bool, released: &Released) -> bool {
+    if released.holds(ctx) {
+        return true;
+    }
     parked.iter().any(|&(c, _)| c == ctx) || (readback && on_device)
+}
+/// The contexts with a released client chain (vote 81). The device never ran
+/// that chain, so nothing later of its context may run: a later chain's
+/// completion would count past it. Kept here, where the release happens,
+/// because the seam latches the stream only on its next pump and admits from
+/// the older view until then. One entry per device context, forgotten when
+/// that device context is destroyed or created anew.
+#[derive(Clone, Debug, Default)]
+pub struct Released(Vec<(u32, u32)>);
+impl Released {
+    /// Record a released chain of device context `dev`. A compositor
+    /// readback's release does not end the client's stream.
+    pub fn note(&mut self, dev: u32, tag: &FenceTag) {
+        if !tag.comp {
+            self.forget(dev);
+            self.0.push((dev, tag.ctx_pub));
+        }
+    }
+    pub fn forget(&mut self, dev: u32) {
+        self.0.retain(|&(d, _)| d != dev);
+    }
+    pub fn holds(&self, ctx_pub: u32) -> bool {
+        self.0.iter().any(|&(_, p)| p == ctx_pub)
+    }
+}
+/// The tag of a parked chain released unpublished (device context `dev`):
+/// refused, not abandoned, since the device never saw it; its context is
+/// recorded in `released`.
+pub fn release_tag(mut tag: FenceTag, parked_ms: u32, dev: u32, released: &mut Released) -> FenceTag {
+    tag.ok = false;
+    tag.released = true;
+    tag.parked_ms = parked_ms;
+    released.note(dev, &tag);
+    tag
 }
 /// One `fenced-held` census row (W-4): (slot, fence_id, ctx_pub, ring_idx,
 /// readback, comp, age_ms, parked). A parked chain's age is the time parked.
@@ -121,17 +159,19 @@ pub enum Unpark {
 /// context waits for them. Another context's run is independent. A context
 /// with an abandoned chain not yet retired (`poisoned`) has its parked chains
 /// released: that chain may never retire, and a parked chain has no clock of
-/// its own, so it would count in the lane forever.
+/// its own, so it would count in the lane forever. So does a context with a
+/// released chain, for as long as its device context lives.
 pub fn unpark_plan(
     parked: &[(u32, bool)],
     on_device: &dyn Fn(u32) -> bool,
     poisoned: &dyn Fn(u32) -> bool,
+    released: &Released,
 ) -> Vec<Unpark> {
     let mut plan = alloc::vec![Unpark::Keep; parked.len()];
     let mut blocked: Vec<u32> = Vec::new();
     let mut sent: Vec<u32> = Vec::new();
     for (i, &(ctx, readback)) in parked.iter().enumerate() {
-        if poisoned(ctx) {
+        if poisoned(ctx) || released.holds(ctx) {
             plan[i] = Unpark::Release;
             continue;
         }
@@ -893,38 +933,74 @@ mod park_tests {
     use alloc::vec;
     const A: u32 = 3;
     const B: u32 = 4;
+    const N: Released = Released(Vec::new());
     #[test]
     fn a_readback_parks_only_behind_its_own_contexts_device_work() {
-        assert!(must_park(&[], A, true, true), "its context has a chain on the device");
-        assert!(!must_park(&[], A, true, false), "nothing ahead of it: it publishes");
-        assert!(!must_park(&[], A, false, true), "a submit behind a submit is the device's order");
-        assert!(!must_park(&[(B, true)], A, true, false), "another context's parked readback");
+        assert!(must_park(&[], A, true, true, &N), "its context has a chain on the device");
+        assert!(!must_park(&[], A, true, false, &N), "nothing ahead of it: it publishes");
+        assert!(!must_park(&[], A, false, true, &N), "a submit behind a submit is the device's order");
+        assert!(!must_park(&[(B, true)], A, true, false, &N), "another context's parked readback");
     }
     #[test]
     fn everything_behind_a_parked_chain_of_its_context_parks() {
-        assert!(must_park(&[(A, true)], A, false, false), "a submit behind the readback");
-        assert!(must_park(&[(A, true), (A, false)], A, true, false), "a second readback");
-        assert!(!must_park(&[(A, true)], B, false, true), "another context's submit");
+        assert!(must_park(&[(A, true)], A, false, false, &N), "a submit behind the readback");
+        assert!(must_park(&[(A, true), (A, false)], A, true, false, &N), "a second readback");
+        assert!(!must_park(&[(A, true)], B, false, true, &N), "another context's submit");
     }
     use Unpark::{Keep as K, Publish as P, Release as R};
     #[test]
     fn a_readback_goes_with_the_chains_behind_it_up_to_the_next_readback() {
         let parked = [(A, true), (A, false), (A, false), (A, true), (A, false)];
-        assert_eq!(unpark_plan(&parked, &|_| false, &|_| false), vec![P, P, P, K, K]);
-        assert_eq!(unpark_plan(&parked, &|c| c == A, &|_| false), vec![K; 5], "its prefix is on the device");
+        assert_eq!(unpark_plan(&parked, &|_| false, &|_| false, &N), vec![P, P, P, K, K]);
+        assert_eq!(unpark_plan(&parked, &|c| c == A, &|_| false, &N), vec![K; 5], "its prefix is on the device");
     }
     #[test]
     fn contexts_unpark_independently_and_keep_their_order() {
         let parked = [(A, true), (B, true), (A, false), (B, false)];
-        assert_eq!(unpark_plan(&parked, &|c| c == A, &|_| false), vec![K, P, K, P]);
-        assert_eq!(unpark_plan(&parked, &|c| c == B, &|_| false), vec![P, K, P, K]);
+        assert_eq!(unpark_plan(&parked, &|c| c == A, &|_| false, &N), vec![K, P, K, P]);
+        assert_eq!(unpark_plan(&parked, &|c| c == B, &|_| false, &N), vec![P, K, P, K]);
     }
     #[test]
     fn a_poisoned_contexts_parked_chains_are_released_and_no_one_elses() {
         let parked = [(A, true), (B, true), (A, false), (B, false)];
         // A's abandoned chain is still "on the device" too: release wins over waiting.
-        assert_eq!(unpark_plan(&parked, &|c| c == A || c == B, &|c| c == A), vec![R, K, R, K]);
-        assert_eq!(unpark_plan(&parked, &|c| c == A, &|c| c == A), vec![R, P, R, P]);
+        assert_eq!(unpark_plan(&parked, &|c| c == A || c == B, &|c| c == A, &N), vec![R, K, R, K]);
+        assert_eq!(unpark_plan(&parked, &|c| c == A, &|c| c == A, &N), vec![R, P, R, P]);
+    }
+    fn released_tag(ctx_pub: u32, comp: bool) -> FenceTag {
+        FenceTag { fence_id: 7, ctx_pub, readback: true, comp, abandoned: false, ok: false,
+            released: true, ring_idx: 0, parked_ms: 0, exec_ms: 0 }
+    }
+    const A_DEV: u32 = 1;
+    #[test]
+    fn nothing_of_a_context_runs_after_its_released_chain_while_its_device_context_lives() {
+        // A's readback is released behind its abandoned chain; the seam has not
+        // pumped yet, so it admits A's next submit from the older view.
+        let mut rel = Released::default();
+        assert_eq!(unpark_plan(&[(A, true)], &|c| c == A, &|c| c == A, &rel), vec![R]);
+        let mut parked = released_tag(A, false);
+        (parked.ok, parked.released) = (true, false);
+        let tag = release_tag(parked, 5, A_DEV, &mut rel);
+        assert!(tag.released && !tag.ok && !tag.abandoned && tag.parked_ms == 5);
+        assert!(must_park(&[], A, false, false, &rel), "nothing of A parked or on the device: still parks");
+        assert!(!must_park(&[], A, false, false, &N), "control: without the record it publishes");
+        assert!(!must_park(&[], B, false, false, &rel), "another context publishes");
+        // The pump releases it even once the abandoned chain retired late.
+        assert_eq!(unpark_plan(&[(A, false), (B, false)], &|_| false, &|_| false, &rel), vec![R, P]);
+        assert_eq!(unpark_plan(&[(A, false), (B, false)], &|_| false, &|_| false, &N), vec![P, P]);
+        assert!(must_park(&[], A, true, false, &rel), "a readback after the vindication too");
+        rel.forget(A_DEV);
+        assert!(!must_park(&[], A, false, false, &rel), "a new device context is a new stream");
+    }
+    #[test]
+    fn a_released_record_is_one_per_device_context_and_never_a_compositor_readbacks() {
+        let mut rel = Released::default();
+        rel.note(A_DEV, &released_tag(B, true));
+        assert!(!rel.holds(B), "a compositor readback's release leaves the client's stream");
+        rel.note(A_DEV, &released_tag(A, false));
+        rel.note(A_DEV, &released_tag(B, false));
+        assert!(rel.holds(B) && !rel.holds(A));
+        assert_eq!(rel.0.len(), 1);
     }
     #[test]
     fn a_tag_carries_its_park_and_its_execution_across_the_seam() {

@@ -352,7 +352,9 @@ context's fence stream for good: both fence-file readers answer EOF,
 `warp_fenced_admit` and `verify` refuse with E_IO, and the compose path treats
 the context as poisoned. The ctx ctl reports `released N`. Device liveness
 stays `fence_poisoned`'s, so the vindication still un-poisons and reclaims, and
-destroy takes the ordinary path. A
+destroy takes the ordinary path. The latch takes effect only at the next
+pump, so a chain admitted in between from the older view reaches Lictor, which
+keeps the same latch at the release and releases that chain too (sub-lictor). A
 compositor readback is counted `rb_dropped` by `comp_readback_retired`, before
 `cost readback-wait` (a completed readback's sample), and `gl_adoption` already
 refuses the poisoned context, so the reserved slot is not held for every other

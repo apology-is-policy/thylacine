@@ -2598,10 +2598,18 @@ bounded by its prefix, because each chain ahead of it is abandoned at
   is refused, `verify` is refused, the context is not composed, and the client
   must make a new context. Device liveness stays the poison's: the vindication
   still un-poisons the context, so its memory is reclaimed and its destroy runs
-  the ordinary path. (First written as "keeps it parked until its late
-  retirement", which round 1's F1 found pinned the poll; then as "counts as
+  the ordinary path. Lictor keeps the same latch where the release happens: a
+  context with a released client chain parks every later chain, and the pump
+  releases it in turn, until its device context is destroyed or created anew.
+  The seam latches only on its next pump, and Lictor's own loop runs the pump's
+  release in between, so the seam can admit one more chain from the older view.
+  Published, that chain would run after a readback that never ran, and its
+  completion would count past it. (First written as "keeps it parked until its
+  late retirement", which round 1's F1 found pinned the poll; then as "counts as
   signaled", which round 2's F1 found passed the abandoned fence; then as "owed
-  until the vindication", which round 2's F5 found resumed a broken stream.)
+  until the vindication", which round 2's F5 found resumed a broken stream; then
+  with the latch in the seam alone, which round 3's F1 found admitted a chain
+  from the seam's older view.)
 - **The harness hold.** A chain whose retirement the test hold swallowed
   (#177) has finished on the device, so nothing parked waits for it. Otherwise
   a held client would park the compositor's readback on the reserved slot: the

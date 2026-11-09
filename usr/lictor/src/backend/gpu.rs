@@ -995,6 +995,9 @@ struct Controlq {
     parked: alloc::vec::Vec<Parked>,
     /// The slots parked chains hold: not allocatable, not published.
     fslot_parked: [bool; FENCED_SLOTS],
+    /// Contexts with a released client chain: everything later of theirs parks
+    /// and is released too, until the device context is destroyed or recreated.
+    released: crate::gpu_api::Released,
     /// Contexts whose abandoned chain the device later retired: proof the
     /// host is finished with them, so the seam may un-poison.
     vindicated: alloc::vec::Vec<FenceVindication>,
@@ -1498,10 +1501,7 @@ impl Controlq {
     fn release_parked(&mut self, why: &str) {
         for p in core::mem::take(&mut self.parked) {
             self.fslot_parked[p.slot] = false;
-            let mut tag = p.tag;
-            tag.ok = false;
-            tag.released = true;
-            tag.parked_ms = elapsed_ms_u32(p.since);
+            let tag = crate::gpu_api::release_tag(p.tag, elapsed_ms_u32(p.since), p.reach.ctx, &mut self.released);
             say!(
                 "tapestryd: gpu fence {} released unpublished ({}) -- slot {} free, ctx {}: the device never saw it",
                 tag.fence_id, why, p.slot, tag.ctx_pub
@@ -1584,18 +1584,16 @@ impl Controlq {
             &self.parked_view(),
             &|c| self.ctx_on_device(c),
             &|c| self.ctx_poisoned(c),
+            &self.released,
         );
         let mut keep = alloc::vec::Vec::new();
         let mut failed = false;
         for (p, what) in core::mem::take(&mut self.parked).into_iter().zip(plan) {
             if what == crate::gpu_api::Unpark::Release {
                 self.fslot_parked[p.slot] = false;
-                let mut tag = p.tag;
-                tag.ok = false;
-                tag.released = true;
-                tag.parked_ms = elapsed_ms_u32(p.since);
+                let tag = crate::gpu_api::release_tag(p.tag, elapsed_ms_u32(p.since), p.reach.ctx, &mut self.released);
                 say!(
-                    "tapestryd: gpu fence {} released unpublished{} -- ctx {} has an abandoned chain, slot {} free",
+                    "tapestryd: gpu fence {} released unpublished{} -- ctx {} has an abandoned or released chain, slot {} free",
                     tag.fence_id,
                     if tag.comp { " (compositor readback)" } else { "" },
                     tag.ctx_pub,
@@ -2426,6 +2424,7 @@ impl Gpu {
                 fslot_reach: [ChainReach::default(); FENCED_SLOTS],
                 parked: alloc::vec::Vec::new(),
                 fslot_parked: [false; FENCED_SLOTS],
+                released: crate::gpu_api::Released::default(),
                 fslot_poison_ring: [0; FENCED_SLOTS],
                 fslot_poison_ctx: [0; FENCED_SLOTS],
                 vindicated: alloc::vec::Vec::new(),
@@ -3871,12 +3870,16 @@ impl Gpu {
             GPU_CTRL_HDR_LEN + 72,
             GPU_CTRL_HDR_LEN,
             VIRTIO_GPU_RESP_OK_NODATA,
-        )
+        )?;
+        // The host refuses an id that is live, so this is a new context.
+        self.ctrl.released.forget(ctx_id);
+        Ok(())
     }
 
     pub fn ctx_destroy(&mut self, ctx_id: u32) -> Result<(), Error> {
         let req_va = self.req(REQ_OFF)?;
         unsafe { write_ctrl_hdr_ctx(req_va, VIRTIO_GPU_CMD_CTX_DESTROY, ctx_id) };
+        self.ctrl.released.forget(ctx_id);
         self.ctrl.step(
             "CTX_DESTROY",
             GPU_CTRL_HDR_LEN,
@@ -4324,7 +4327,7 @@ impl Gpu {
             exec_ms: 0,
         };
         let on_device = readback && self.ctrl.ctx_on_device(ctx_pub);
-        if crate::gpu_api::must_park(&self.ctrl.parked_view(), ctx_pub, readback, on_device) {
+        if crate::gpu_api::must_park(&self.ctrl.parked_view(), ctx_pub, readback, on_device, &self.ctrl.released) {
             self.ctrl.fslot_parked[slot] = true;
             self.ctrl.parked.push(Parked { slot, req_len, tag, reach, since: Instant::now() });
         } else {

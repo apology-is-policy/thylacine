@@ -692,6 +692,17 @@ the chains behind it, up to that context's next readback (`gpu_api::unpark_plan`
   context died. For the compositor's readback the release also frees the one
   reserved slot for every other surface. A released tag carries `released`, so
   the seam can tell it from a chain the device answered with an error.
+- **Released context.** `gpu_api::release_tag` builds the released tag and
+  records a client chain's context in `Controlq::released`
+  (`gpu_api::Released`, one entry per device context). From then on
+  `must_park` parks every chain of that context and `unpark_plan` releases it,
+  until `ctx_destroy` or a successful `ctx_create_capset` of that device context
+  forgets it. tapestryd latches the stream only when its next pump takes the
+  released tag, and Lictor runs the pump's release in the reap that trails a
+  request, so tapestryd can admit one more chain from its older view.
+  Published, that chain would run after a readback that never ran and its
+  completion would count past it. A compositor readback's release records
+  nothing, the same as tapestryd.
 - **The harness hold.** A chain whose retirement the test hold swallowed
   (`held_retires`) has finished on the device, so nothing waits for it.
 
