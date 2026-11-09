@@ -360,10 +360,11 @@ stall, so the second could still stand at the kernel's limit with the engine ali
 nothing on the glass. Every wait is therefore bounded from the chord too (vote 80,
 [[dec-2026-11-09-takeover-bound-from-chord]]): the seat stamps a generation's first
 sight in QUIESCING, which is the reply to the key that made the chord, and hands that
-instant to the device while its takeover is not yet up (`Gpu::bound_takeover`, cleared
-at activation and at the end of every `Seat::step`, so the serve loop's own pump between
-steps never sees it: the kernel fails an expired chord lazily, at a call, and that pump
-could otherwise kill a stall only the restore waits on, round 4 F1). At `TAKEOVER_BOUND_MS` from it a control stall
+instant to the device only across the phase-1 reap, the one pump after a STATUS that read
+the takeover still waiting (`Gpu::bound_takeover` set before it and cleared after it, round
+5; round 4 had cleared it at the end of each step). Every other pump runs without it: the
+kernel fails an expired chord lazily, at a call, and a later pump could otherwise kill a
+stall only the restore waits on (round 4 F1). At `TAKEOVER_BOUND_MS` from it a control stall
 still standing kills the engine (`settle_stall`) and a cursor stall abandons the lane
 (`cursor_settle`), both through `gpu_api::stall_verdict`, whose host test reads
 `SEAT_QUIESCE_LIMIT_NS` out of `seat.h` and asserts the bound plus one renewal interval
@@ -372,10 +373,11 @@ No renewal follows either end, so the kernel's limit fails the chord by 35 s unl
 abandoned chain retires first and the takeover goes through: every chord ends in the
 trusted screen, a dead engine, or a logged failure. The cost falls on a takeover still
 waiting at 33 s: a second wait in series dies younger than 30 s, and a takeover's own
-command stalling after 33 s dies at the next pump. The phase term of `waiting_chord` is
-now redundant (only phase 1 pumps inside a step); the activation term keeps a stall in
-phase 1 after activation clear, which no witness constructs (it needs the chord held
-past 33 s after the trusted screen is up). Witnesses:
+command stalling after 33 s dies at the next seat step's reap if the chord is still live,
+otherwise the restore waits on it. The phase term of `waiting_chord` is redundant (the
+reap it bounds is phase 1's); the activation term keeps a stall in phase 1 after
+activation clear, which no witness constructs (it needs the chord held past 33 s after
+the trusted screen is up). Witnesses:
 `ls-graphical-sak-dead` leg 1 (a stall withheld 8 s, no retirement in between), leg C
 (a cursor chain held 8 s: the takeover completes), leg X (one held past the abandonment:
 no renewal follows it, Lictor names the lane, the chord fails, then the lane revives),

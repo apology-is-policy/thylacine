@@ -83,7 +83,9 @@ pub enum SeatShot {
     /// withheld: the engine dies.
     StallHeld,
     /// A controlq stall after exclusion held 8 s, then a cursor stall held past
-    /// every bound: the takeover's bound from the chord abandons the lane.
+    /// every bound: the takeover's bound from the chord abandons the lane. At 34 s
+    /// from the chord a controlq stall is withheld and the seat fails behind it:
+    /// only the restore waits on that one, so no bound may judge it.
     ControlThenCursor,
     /// A cursor stall held 8 s, then a controlq stall withheld for good: the
     /// takeover's bound from the chord kills the engine.
