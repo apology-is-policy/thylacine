@@ -713,7 +713,7 @@ static size_t format_cpu(const struct Proc *reader, char *buf, size_t cap) {
 // Do not read these as five of a kind -- #129 split them into two classes:
 //
 //   rx_bp_raw     -- ring full in raw/cbreak mode: the byte was REFUSED, and the
-//   rx_bp_flush      producer (PL011 FIFO / holdback, or cons_feed_write's short
+//   rx_bp_flush      producer (the serial side queue, or cons_feed_write's short
 //                    count) still holds it. NOT loss. Non-zero means the console
 //                    was pushed harder than the reader drained -- a load signal,
 //                    normal on a busy or briefly-stalled console.
@@ -731,6 +731,10 @@ static size_t format_cpu(const struct Proc *reader, char *buf, size_t cap) {
 //                    PROMPT_MODE before it drains, so a ring's worth of pasted
 //                    complete lines into a non-reading job plus a trailing
 //                    partial line meets a full ring at the re-arm.
+//   rx_drop_side  -- a real drop: a serial byte that met a FULL side queue
+//                    (vote 73). The serial drain reads every byte so a BREAK
+//                    or a Ctrl-C is never stuck behind it; past the queue's
+//                    4096 entries, the newest is dropped.
 //   tx_*          -- the output side (#75/#126), unchanged.
 static size_t format_cons(const struct Proc *reader, char *buf, size_t cap) {
     (void)reader;
@@ -738,19 +742,20 @@ static size_t format_cons(const struct Proc *reader, char *buf, size_t cap) {
     u32 tx_dropped = 0, tx_room_waits = 0;
     cons_rx_counters(&rx_bp_raw, &rx_bp_flush, &rx_drop_line, &rx_drop_ring);
     u32 rx_drop_modeflush = cons_rx_drop_modeflush();
+    u32 rx_drop_side = cons_rx_drop_side();
     cons_tx_drops(&tx_dropped, &tx_room_waits);
 
-    static const char *const labels[7] = {
+    static const char *const labels[8] = {
         "rx_bp_raw:     ", "rx_bp_flush:   ",
         "rx_drop_line:  ", "rx_drop_ring:  ",
-        "rx_drop_modeflush: ",
+        "rx_drop_modeflush: ", "rx_drop_side:  ",
         "tx_dropped:    ", "tx_room_waits: ",
     };
-    u32 vals[7] = { rx_bp_raw, rx_bp_flush, rx_drop_line, rx_drop_ring,
-                    rx_drop_modeflush, tx_dropped, tx_room_waits };
+    u32 vals[8] = { rx_bp_raw, rx_bp_flush, rx_drop_line, rx_drop_ring,
+                    rx_drop_modeflush, rx_drop_side, tx_dropped, tx_room_waits };
 
     size_t off = 0, n;
-    for (int i = 0; i < 7; i++) {
+    for (int i = 0; i < 8; i++) {
         n = fmt_str(buf, cap, off, labels[i]);              if (!n) return off; off += n;
         n = fmt_udec(buf, cap, off, (unsigned long)vals[i]); if (!n) return off; off += n;
         n = fmt_str(buf, cap, off, "\n");                   if (!n) return off; off += n;

@@ -2,7 +2,7 @@
 //
 // v1.0 P4-B landed the write-side (devcons_write -> uart_putc). A-4c-1 adds
 // the kernel UART RX path: the PL011 RX IRQ handler (arch/arm64/uart.c) hands
-// each received byte to cons_rx_input, which fills a bounded console input ring
+// each received byte to cons_rx_receive, which fills a bounded console input ring
 // (data bytes) or recognizes a control event (Ctrl-C -> a deferred `interrupt`
 // note; a serial BREAK is the A-4c-2 SAK and is discarded at A-4c-1). A blocking
 // devcons_read drains the ring.
@@ -10,7 +10,7 @@
 // IRQ-context discipline (IDENTITY-DESIGN.md section 9.8 "As-built"): the RX
 // handler runs in IRQ context, where notes_post is NOT IRQ-safe (plain
 // spin_lock) and a poll_waiter_list_wake walk (O(pollers) nested wakeups) is
-// kept out to hold the per-byte cost O(1). So cons_rx_input is wakeup-only -- it fills the
+// kept out to hold the per-byte cost O(1). So cons_rx_receive is wakeup-only -- it fills the
 // ring + sets deferred-action flags + wakes two Rendez (wakeup() IS IRQ-safe).
 // The console_mgr kproc kthread services the deferred actions (the `interrupt`
 // note post; the A-4c-2 SAK revoke/re-grant) in process context.
@@ -63,8 +63,9 @@ struct poll_waiter;   // <thylacine/poll.h> -- the cons_poll hook parameter
 // coincidence, not by construction.
 #define CONS_LINE_MAX     256u
 
-// Feed one received byte to the console input layer. Called from the PL011 RX
-// IRQ handler (arch/arm64/uart.c::uart_rx_handler), IRQ context. `is_break` is
+// Feed one byte to the console input layer, refusable: the renderer's feed
+// and the kernel tests come through here; the PL011 drain uses cons_rx_receive
+// (below). Safe in IRQ context. `is_break` is
 // true when the PL011 flagged a line BREAK on this entry (DR bit-10 BE) -- the
 // A-4c-2 SAK: it sets sak-pending + wakes console_mgr (which runs the privileged
 // revoke/re-grant in process context); the accompanying DR byte is NOT enqueued.
@@ -76,8 +77,8 @@ struct poll_waiter;   // <thylacine/poll.h> -- the cons_poll hook parameter
 // take what this byte would push -- and, critically, that NOTHING CHANGED: no
 // ring push, no line_len mutation, no echo, no flags. The caller still owns the
 // byte and must re-offer this exact byte later; that is what turns a full ring
-// from a silent drop into back-pressure. (The PL011 drain holds it in the FIFO
-// or its 1-byte holdback; cons_feed_write returns a short count.)
+// from a silent drop into back-pressure. (cons_feed_write returns a short
+// count; the serial side queue keeps it for cons_rx_receive.)
 //
 // Refusal is confined to the two arms that push ring bytes -- the raw/cbreak
 // byte and the canonical terminator's line_len + 1 flush. Everything that
@@ -89,6 +90,16 @@ struct poll_waiter;   // <thylacine/poll.h> -- the cons_poll hook parameter
 // (returns true): the line buffer is a fixed bound, so back-pressuring there
 // would wedge on a user who simply never presses Enter.
 bool cons_rx_input(u8 byte, bool is_break);
+
+// Vote 73: the PL011 RX drain's entry (IRQ context). Never refuses, so the
+// drain never leaves a byte in the FIFO: a BREAK is the SAK as read; a byte
+// with nothing queued ahead of it goes to the line discipline (cons_rx_input's
+// arms); any other waits its turn in a bounded side queue that the reader
+// moves after each drain and BEGIN discards with the ring. An ISIG Ctrl-C that
+// must wait is acted on as read and keeps its place, so its discard of the
+// pending line lands in order. A full queue drops the newest byte and counts
+// it (cons_rx_drop_side).
+void cons_rx_receive(u8 byte, bool is_break);
 
 // #57b: the shared console-input/output API -- the ONE implementation behind
 // both console front doors. `devcons` (the SYS_CONSOLE_OPEN syscall path) and
@@ -260,21 +271,6 @@ u32  cons_test_tx_ring_capacity(void);
 u64  cons_test_tx_room_wait_ns(void);
 #endif // KERNEL_TESTS
 
-// #174/#129 backpressure PRE-check: true iff the RX ring has room for the
-// worst-case push one more admitted byte could cause. The PL011 RX drain
-// (uart_rx_handler / uart_rx_pump) checks this BEFORE reading a byte out of the
-// FIFO -- on false it leaves the byte in the FIFO and pauses RX.
-//
-// #129 widened the reservation from ONE byte to CONS_LINE_MAX + 1. In canonical
-// mode a single admitted byte can be the terminator that flushes an entire
-// assembled line, so "room for this byte" was never the question the drain
-// needed answered -- the same per-ITEM-vs-per-OPERATION category error #126 hit
-// on the TX side. Lockless and deliberately unconditional (it consults neither
-// termios nor line_len; both can change under it). It is an OPTIMIZATION, not
-// the guarantee: cons_rx_input's under-lock room check is what makes an overrun
-// impossible, so a stale read here costs at most one refuse-and-retry.
-bool cons_rx_can_accept(void);
-
 // #95/#129: the INPUT-path counters. NULL args are skipped. Surfaced at
 // /ctl/cons; console_mgr emits one loud line on the first real DROP of a boot.
 //
@@ -293,6 +289,8 @@ void cons_rx_counters(u32 *bp_raw, u32 *bp_flush, u32 *drop_line, u32 *drop_ring
 // take (a real drop; a mode write cannot back-pressure). Its own accessor so
 // the four-counter callers are untouched.
 u32 cons_rx_drop_modeflush(void);
+// Vote 73: serial bytes that met a FULL side queue (a real drop).
+u32 cons_rx_drop_side(void);
 
 // #95: the TX-side loss counts (#75/#126), for the same /ctl/cons surface.
 void cons_tx_drops(u32 *dropped, u32 *room_waits);
@@ -519,6 +517,8 @@ void cons_test_reset(void);
 // True iff a Ctrl-C `interrupt` post is pending (set by cons_rx_input, cleared
 // by the console_mgr kthread).
 bool cons_test_intr_pending(void);
+// Clears it, as console_mgr's post does.
+void cons_test_intr_consume(void);
 
 // True iff an A-4c-2 SAK (serial BREAK) is pending (set by cons_rx_input on a
 // BREAK, cleared by the console_mgr kthread before proc_console_sak runs).
@@ -577,17 +577,8 @@ bool cons_test_serial_silent(void);
 // G-4: drain observability for tests. Buffered byte count / cumulative
 // drop-oldest count / the deferred drain POLLIN edge flag.
 u32  cons_test_rx_count(void);      // #129-audit F2: NON-BLOCKING RX depth
+u32  cons_test_side_count(void);    // vote 73: entries waiting in the side queue
 
-// #136-audit F1 (test-only; production never calls this). Models the PEER
-// PRODUCER that takes the ring room between the lockless pre-check and the
-// under-lock push -- the exact interleaving the holdback exists for, and the
-// only route to the budget-exhaustion strand. While armed, cons_ring_room()
-// reports FULL (so both pushing arms of cons_rx_input refuse through their
-// real paths, bp counters and echo suppression included) while
-// cons_rx_can_accept() -- which reads the count directly, not the room --
-// still reports room, so uart_rx_pause_and_recheck LIFTS. That divergence IS
-// the race; single-threaded, it is otherwise unreachable.
-void cons_test_force_full(bool on);
 u32  cons_test_drain_count(void);
 u32  cons_test_drain_overflow(void);
 bool cons_test_drain_pollwake_pending(void);

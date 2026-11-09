@@ -29,6 +29,8 @@ lc_expect "CONFERRING IMPERIUM" "trusted provincia"
 lc_expect "CAP_POST_SERVICE" "posting authority"
 lc_expect "imperium key: " "trusted key prompt"
 lc_raw_send "imperium-key-michael-v1\r" "fixture key"
+lc_expect "Authority conferred to the requesting process." "corvus's verdict panel"
+lc_raw_send "\r" "Enter closes the verdict panel (vote 70)"
 lc_expect "imperium: conferred" "post capability conferred"
 lc_send "kaua-term-probe --ut-paste"
 set timeout 300

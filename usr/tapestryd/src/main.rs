@@ -133,7 +133,7 @@ const IDLE_HZ: u32 = 15;
 const IDLE_AFTER_MS: u64 = 1000;
 // I-6: a serve pass longer than this is said under test-mode. At IDLE_HZ the
 // poll is bounded to ~67 ms, so anything past 250 ms means the loop was held
-// somewhere -- the only condition under which the 16-deep input eventq can
+// somewhere -- the only condition under which the input eventq can
 // run out of descriptors between drains.
 #[cfg(feature = "test-mode")]
 const SLOW_PASS_MS: u64 = 250;
@@ -508,7 +508,7 @@ impl Driver for Tapestryd {
         // I-6: the pass clock. The input devices are poll-mode and are NOT in
         // the pollfd set, so nothing about an arriving event wakes this loop
         // -- the drain interval IS the pass period, and a held pass is the
-        // only way the 16-deep eventq can fill. This names such a pass.
+        // only way the eventq can fill. This names such a pass.
         #[cfg(feature = "test-mode")]
         let mut pass_mark = Instant::now();
 

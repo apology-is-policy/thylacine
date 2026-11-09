@@ -19,6 +19,8 @@ struct Backing { resource: u32, _pin: Pin }
 const TEST_LATCH_SIZE: (u32, u32) = (97, 89);
 #[cfg(feature = "test-mode")]
 const TEST_LATCH_TARGETS: usize = 16;
+#[cfg(feature = "test-mode")]
+const TEST_BLIND_MS: u64 = 5000;
 struct Retiring { resource: u32, ticket: Retirement, done: bool }
 pub struct Device {
     // Drop order matters: reset the GPU before releasing any imported pins.
@@ -42,6 +44,8 @@ pub struct Device {
     /// Seat shots left, one per trusted takeover (`test_latch_seat_shot`).
     #[cfg(feature = "test-mode")]
     test_seat_shots: u8,
+    #[cfg(feature = "test-mode")]
+    test_blind_armed: bool,
     /// Stall shots left for the compositor to aim (`Request::TestStallNext`).
     #[cfg(feature = "test-mode")]
     test_stall_shots: u8,
@@ -52,8 +56,24 @@ pub struct Device {
 pub enum SeatShot {
     /// A controlq stall between exclusion and bind; the device retires it.
     StallAfterExclusion,
+    /// A controlq stall on the takeover's first paint; the device retires it.
+    StallInPaint,
+    /// The same stall with its retirement withheld past the kernel's deadline.
+    HoldAfterExclusion,
+    /// The device refuses the trusted bind: an answer, so the takeover fails at once.
+    RefuseBind,
+    /// A readback stands ahead of the takeover's commands for longer than their bound.
+    BehindReadback,
+    /// A controlq stall on the episode's first frame; the device retires it.
+    StallInFrame,
+    /// The device refuses the episode's first frame: an answer, so the episode fails.
+    RefuseFrame,
+    /// The ordinary return's restore waits with keys left in the ring.
+    HoldRestore,
     /// A cursor stall inside exclusion, held until the seat restores.
     CursorStall,
+    /// The same cursor stall, held past the abandonment bound.
+    CursorAbandon,
     /// The kernel's RESTORED refused after a completed restore.
     RefuseRestored,
     /// A controlq stall under the trusted scanout whose retirement is
@@ -69,6 +89,7 @@ impl Device {
             refused_retirements: 0,
             #[cfg(feature = "test-mode")] test_latch_shots: 0,
             #[cfg(feature = "test-mode")] test_seat_shots: 0,
+            #[cfg(feature = "test-mode")] test_blind_armed: false,
             #[cfg(feature = "test-mode")] test_stall_shots: 0,
             #[cfg(feature = "test-mode")] test_latch_targets: Vec::new(),
             #[cfg(feature = "test-mode")] test_latch_fired: Vec::new() })
@@ -144,10 +165,11 @@ impl Device {
     /// Used only after kernel END. Ordinary admission remains closed while a
     /// complete previous normal frame is rebound and flushed. The compositor
     /// must also observe the changed seat epoch and repaint after it resumes.
-    /// Only the control queue need be quiet (GPU-DESIGN 4.5.15), so a cursor
-    /// queue poisoned on a live engine does not cost the display.
+    /// Only synchronous work holds it (GPU-DESIGN 4.5.15), so neither a cursor
+    /// queue poisoned on a live engine nor a client's poisoned chain costs the
+    /// display.
     pub fn restore(&mut self) -> Result<(), Error> {
-        if !self.gpu.controlq_retired() { return Err(Error::Hardware); }
+        if !self.gpu.synchronous_clear() { return Err(Error::Hardware); }
         match self.presentation {
             Presentation::None => self.gpu.set_scanout(0, 0, 0),
             Presentation::Image { resource, width, height } => {
@@ -182,13 +204,32 @@ impl Device {
             _ => {}
         }
     }
+    /// The same lever's input half: stops the serve loop as a synchronous wait stops
+    /// it, and asks the device for nothing. The input thread stopped itself at the pass
+    /// that read the key (`intake::test`), so the rings stay undrained until this ends.
+    #[cfg(feature = "test-mode")]
+    pub fn test_blind_loop(&self) {
+        if !self.test_blind_armed { return; }
+        super::diagnostic("lictor: serve loop stopped (INJECTED by test-latch-dead)\n");
+        let _ = libthyla_rs::time::sleep(core::time::Duration::from_millis(TEST_BLIND_MS));
+        super::intake::test::resume();
+        super::diagnostic("lictor: serve loop resumed\n");
+    }
     /// The same lever's seat half, one shot per trusted takeover in this
     /// order, so one boot walks every way an episode's return can go wrong.
     #[cfg(feature = "test-mode")]
     pub fn test_latch_seat_shot(&mut self) -> Option<SeatShot> {
         let shot = match self.test_seat_shots {
-            4 => SeatShot::StallAfterExclusion,
-            3 => SeatShot::CursorStall,
+            12 => SeatShot::StallAfterExclusion,
+            11 => SeatShot::StallInPaint,
+            10 => SeatShot::HoldAfterExclusion,
+            9 => SeatShot::RefuseBind,
+            8 => SeatShot::BehindReadback,
+            7 => SeatShot::StallInFrame,
+            6 => SeatShot::RefuseFrame,
+            5 => SeatShot::HoldRestore,
+            4 => SeatShot::CursorStall,
+            3 => SeatShot::CursorAbandon,
             2 => SeatShot::RefuseRestored,
             1 => SeatShot::StallHeld,
             _ => return None,
@@ -590,7 +631,9 @@ impl Device {
             }
             Request::TestArmLatch => {
                 #[cfg(feature = "test-mode")] {
-                    self.test_latch_shots = 2; self.test_seat_shots = 4; self.test_stall_shots = 3;
+                    self.test_latch_shots = 2; self.test_seat_shots = 12; self.test_stall_shots = 3;
+                    self.test_blind_armed = true;
+                    super::intake::test::arm();
                     ().put(&mut out);
                 }
                 #[cfg(not(feature = "test-mode"))] { return Err(Error::BadField); }

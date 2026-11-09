@@ -18,7 +18,7 @@ hazards: []
 abis: []
 design: ["docs/CORVUS-DESIGN.md", "docs/IDENTITY-DESIGN.md", "docs/USER-AUTHORITY-DESIGN.md"]
 created: 2026-08-04
-updated: 2026-11-02
+updated: 2026-11-09
 ---
 
 ## Administrative authority specification
@@ -86,7 +86,17 @@ imperium level includes DAC_OVERRIDE, CHOWN, KILL and POST_SERVICE; the tool
 can restrict it, never expand it. The pending peer is revalidated before
 conferral, and the propagating grant is redeemed through the kernel. Key
 state, eligibility and rate limits remain corvus-owned. See [[sub-imperium]]
-and `docs/IMPERIUM-DESIGN.md §11` for the integrated contract.
+and `docs/IMPERIUM-DESIGN.md §11` for the integrated contract. The request's
+60-s window runs from the request to the SAK; a SAK past it answers TIMEOUT
+without a prompt, and the key prompt then has its own 60 s from the SAK, so a
+requester cannot time a verdict into the person's typing. Every trusted panel
+closes only on Enter or Esc, or its bound, and swallows every other byte
+(`console_wait_dismiss`), so the rest of a key typed into a panel never reaches
+the surface the episode returns to ([[dec-2026-11-05-panels-enter-or-esc]]). A
+verdict waits on both media, and waits even when its frame was not confirmed
+visible; on serial it says `press Enter` under the outcome (`compose_verdict_panel`;
+`im3-lex-curiata` arm 1 types a letter at it). Until vote 70's audit a serial verdict
+did not wait at all.
 
 
 Graphical service ownership was approved on 2026-09-18; see

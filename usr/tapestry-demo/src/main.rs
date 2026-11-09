@@ -43,6 +43,12 @@ const COLOR_WHITE: u32 = 0xFFFF_FFFF;
 const CONNECT_TRIES: u32 = 25;
 const CONNECT_DELAY_MS: u64 = 200;
 
+// A present refused while the compositor's GPU engine is stalled behind another
+// client's work is a dropped frame; past the engine's abandonment bound (30 s)
+// it is dead and the refusal stands.
+const PRESENT_RETRY_MS: u64 = 31_000;
+const PRESENT_RETRY_DELAY_MS: u64 = 100;
+
 fn draw_quadrants(px: &mut [u32], w: u32, h: u32) {
     let (hw, hh) = (w / 2, h / 2);
     for y in 0..h {
@@ -129,9 +135,13 @@ pub extern "C" fn rs_main() -> i64 {
         draw_quadrants(px, w, h);
         draw_plasma(px, w, bx, by, bw, bh, 0);
     }
-    if let Err(e) = surf.present(None) {
-        say!("tapestry-demo: FAIL first present {:?}", e);
-        return 1;
+    let first = libthyla_rs::time::Instant::now();
+    while let Err(e) = surf.present(None) {
+        if first.elapsed().as_millis() as u64 >= PRESENT_RETRY_MS {
+            say!("tapestry-demo: FAIL first present {:?}", e);
+            return 1;
+        }
+        let _ = sleep(Duration::from_millis(PRESENT_RETRY_DELAY_MS));
     }
     say!("tapestry-demo: surface {} up {}x{} (plasma {}x{}@{},{})", surf.id, w, h, bw, bh, bx, by);
 
@@ -141,6 +151,7 @@ pub extern "C" fn rs_main() -> i64 {
     // 0 -- partial rects never touch it).
     let mut phase: u32 = 0;
     let mut frames: u64 = 0;
+    let mut refused_since: Option<libthyla_rs::time::Instant> = None;
     loop {
         let ev: Event = match surf.wait_event() {
             Ok(ev) => ev,
@@ -182,9 +193,14 @@ pub extern "C" fn rs_main() -> i64 {
                     Some(Rect { x: bx, y: by, w: bw, h: bh })
                 };
                 if let Err(e) = surf.present(damage) {
-                    say!("tapestry-demo: FAIL present {:?}", e);
-                    return 1;
+                    let since = *refused_since.get_or_insert_with(libthyla_rs::time::Instant::now);
+                    if since.elapsed().as_millis() as u64 >= PRESENT_RETRY_MS {
+                        say!("tapestry-demo: FAIL present {:?}", e);
+                        return 1;
+                    }
+                    continue;
                 }
+                refused_since = None;
                 frames += 1;
                 if frames == 60 {
                     say!("tapestry-demo: 60 frames woven");

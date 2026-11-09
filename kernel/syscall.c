@@ -12588,7 +12588,7 @@ static s64 sys_console_relinquish_handler(void) {
 // open episode).
 static s64 sys_trusted_seat_handler(u64 op, u64 va) {
     struct Thread *t = current_thread();
-    if (!t || !t->proc || op > SEAT_CLIENT || !va ||
+    if (!t || !t->proc || op > SEAT_RENEW || !va ||
             va >= UACCESS_USER_VA_TOP || sizeof(struct seat_message) > UACCESS_USER_VA_TOP - va)
         return -1;
     struct seat_message message;

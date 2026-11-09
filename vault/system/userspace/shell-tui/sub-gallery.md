@@ -15,7 +15,7 @@ hazards: []
 abis: []
 design: ["docs/HALCYON.md"]
 created: 2026-09-09
-updated: 2026-09-29
+updated: 2026-11-09
 ---
 ## Purpose
 
@@ -90,7 +90,10 @@ now follow the system's memory is an open policy question (OPEN-BUGS). The succe
 raster and FWxFH the fitted size) -- printed only after a successful present, so
 it is the end-to-end witness the E2E keys on. Then an event loop: `TEV_KEY` ->
 `is_exit_key`; `TEV_CLOSE` -> exit; `TEV_CONFIGURE` -> `handle_configure` and, on
-ANY `Ok`, a full repaint + present.
+ANY `Ok`, a full repaint + present. A refused present is retried every 100 ms for
+31 s (`present_retrying`): the compositor's engine refuses work while it is stalled
+behind another client's GPU queue and revives when that work retires, and past its
+30-s abandonment bound it is dead and the refusal stands (vote 72).
 
 ## Data structures
 

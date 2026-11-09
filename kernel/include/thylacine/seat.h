@@ -22,6 +22,14 @@ struct Proc;
 #define SEAT_MASK 10u
 #define SEAT_GRANT 11u
 #define SEAT_CLIENT 12u
+// The service renews a takeover's deadline while its GPU engine is alive and still
+// retiring work ahead of the trusted paint: a backlog delays the SAK, it does not
+// fail it. QUIESCING only, never past SEAT_QUIESCE_LIMIT_NS from the chord.
+#define SEAT_RENEW 13u
+#define SEAT_QUIESCE_NS 5000000000ull
+// The backend abandons a GPU chain outstanding 30 s; one more window covers a
+// takeover that starts over just before that.
+#define SEAT_QUIESCE_LIMIT_NS 35000000000ull
 // SEAT_QUERY's reply carries the console episode's medium in `code`. Every other
 // reply that carries a status carries the mask length there.
 #define SEAT_MEDIUM_NONE 0u

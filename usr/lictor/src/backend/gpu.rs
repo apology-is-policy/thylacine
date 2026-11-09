@@ -596,6 +596,9 @@ const _: () = {
 // only matters to the Loom bulk path (GPU-DESIGN 4.1), which will carry
 // its own sizing.
 pub const FENCED_SLOTS: usize = 16;
+/// How long the behind-a-readback lever stands: past the ordinary bound.
+#[cfg(feature = "test-mode")]
+const TEST_BEHIND_MS: u128 = 800;
 /// The one slot reserved for compositor-owned chains (Warp-C C-6, GPU-DESIGN
 /// 4.5.13): the composed-GL present's readback rides it, so it never
 /// competes with -- and can never be starved by -- the client pool, which is
@@ -919,6 +922,10 @@ struct Controlq {
     test_latch_next: bool,
     #[cfg(feature = "test-mode")]
     test_stall_hold: bool,
+    /// The behind-a-readback lever: until `TEST_BEHIND_MS` have passed, no
+    /// synchronous wait is done and a readback reads as in flight.
+    #[cfg(feature = "test-mode")]
+    test_behind_since: Option<Instant>,
     /// The stall lever (`Gpu::test_stall_next`): the next synchronous wait
     /// sees its chain retire, then reports the deadline missed.
     #[cfg(feature = "test-mode")]
@@ -1086,14 +1093,6 @@ impl Controlq {
         (0..COMP_FSLOT).all(|i| self.fslot_poisoned[i] && self.fslots[i].is_none())
     }
 
-    /// Any in-flight fenced chain that is a READBACK (a client's
-    /// `transfer_3d(to_host = false)` or the compositor's own): the device
-    /// executes it synchronously at processing time and every sync step
-    /// queued behind it inherits that wait (C-6, consequence 2).
-    fn readback_in_flight(&self) -> bool {
-        self.fslots.iter().flatten().any(|t| t.readback)
-    }
-
     /// Reclaim slots whose chains never retired (audit F6). Bounds the
     /// spin + the slot pool WITHOUT latching `dead` (a slow device is not
     /// a dead one -- the #31 rule) and WITHOUT freeing anything the device
@@ -1220,10 +1219,9 @@ impl Controlq {
             // harness hold. The lever matches on the tag's ctx, and our
             // readback's tag carries the CLIENT's ctx (AS-BUILT 1) -- so a
             // client holding its OWN ctx used to pin `COMP_FSLOT` too, which
-            // freezes readback composition for EVERY client, pins
-            // `readback_in_flight()` (disabling the 500 ms sync deadline
-            // process-wide) and pins `warp_fences_pending()` (a ~1 kHz spin in
-            // the console). #178's bound -- "the worst a client can do is wedge
+            // freezes readback composition for EVERY client, stalls every
+            // synchronous command behind that readback and pins
+            // `warp_fences_pending()` (a ~1 kHz spin in the console). #178's bound -- "the worst a client can do is wedge
             // its own ctx" -- was written when "your ctx's fences" meant only
             // your own; C-6b made that false one resource over.
             #[cfg(feature = "test-mode")]
@@ -1497,32 +1495,36 @@ impl Controlq {
     /// the spin-poll nets the used.idx store-propagation window, and the
     /// wall-clock deadline bounds EVENT-ful non-progress. The deadline
     /// applies to THIS chain only -- fenced chains have none (a fence
-    /// legitimately takes as long as its GL work) -- and stays honest under
-    /// a fence backlog of SUBMITs: the device writes a non-fenced response
-    /// at PROCESSING time, and controlq processing is in-order, so pending
-    /// fenced submits ahead of this chain cannot delay its retirement --
-    /// their processing is a decode.
+    /// legitimately takes as long as its GL work). It does not stand clear of
+    /// a fence backlog: a synchronous chain is fenced too (`fence_sync`), and
+    /// its fence retires behind the GL work ahead of it, so this chain can miss
+    /// the deadline behind a client's draws (on V3D, behind the C-6 gate's queue,
+    /// such chains retired 241 to 311 ms after it). That is a stall, not a death.
     ///
-    /// A pending fenced READBACK is the exception, and the claim above is
-    /// false for it (Warp-C C-6, GPU-DESIGN 4.5.13; F2b): QEMU processes the
-    /// controlq inline on its main loop and virglrenderer executes a
-    /// TRANSFER_FROM_HOST_3D synchronously at decode (`glMapBufferRange` /
-    /// `glReadPixels` on the resource's context -- a GL wait for every job
-    /// that writes the resource), so a sync step queued behind a readback of
-    /// a BUSY resource inherits that wait, for as long as the resource's
-    /// owner has queued ahead of it. That device is busy, not dead, and the
-    /// 500 ms deadline latching `dead` on it is exactly the #31 loss it
-    /// exists to prevent. So while ANY readback is in flight -- a client's
-    /// `transfer_3d(to_host = false)` or the compositor's own -- the deadline
-    /// is FENCE_ABANDON_MS, the bound every fenced chain already carries.
-    /// STICKY for this wait once observed: the readback that caused a stall
-    /// retires in the drain that finally moves used.idx, and this chain's own
-    /// entry follows it in the same drain or the next -- re-narrowing the
-    /// bound the instant the readback is gone would fail the very wait it
-    /// widened.
+    /// A pending fenced READBACK goes further (Warp-C C-6, GPU-DESIGN 4.5.13;
+    /// F2b): QEMU processes the controlq inline on its main loop and
+    /// virglrenderer executes a TRANSFER_FROM_HOST_3D synchronously at decode
+    /// (`glMapBufferRange` / `glReadPixels` on the resource's context -- a GL
+    /// wait for every job that writes the resource), so a sync step queued
+    /// behind a readback of a BUSY resource inherits that wait, for as long as
+    /// the resource's owner has queued ahead of it. That device is busy, not
+    /// dead, and the wait still ends at SUBMIT_DEADLINE_MS: the stall is
+    /// recoverable (vote 29), and a longer wait would stop the serve loop for
+    /// as long as any client chose to queue, with chords unseen and keys lost
+    /// (vote 72). A command refused meanwhile answers its client an error.
     /// True when every sync chain this wait covers has retired.
     fn sync_done(&self, both: bool) -> bool {
+        #[cfg(feature = "test-mode")]
+        if self.test_behind_readback() {
+            return false;
+        }
         !self.sync_pending && (!both || !self.sync2_pending)
+    }
+
+    /// The behind-a-readback lever (`Gpu::test_behind_readback`) stands.
+    #[cfg(feature = "test-mode")]
+    fn test_behind_readback(&self) -> bool {
+        self.test_behind_since.is_some_and(|t| t.elapsed().as_millis() < TEST_BEHIND_MS)
     }
 
     /// The synchronous wait, extracted so the batched pair (W-4 C) shares
@@ -1530,11 +1532,7 @@ impl Controlq {
     /// chain(s) retire. The caller has already written descriptors, set the
     /// pending flag(s), and published.
     fn wait_sync_done(&mut self, both: bool) -> Result<(), ()> {
-        let mut deadline_ms = if self.readback_in_flight() || !self.serving {
-            FENCE_ABANDON_MS
-        } else {
-            SUBMIT_DEADLINE_MS
-        };
+        let deadline_ms = if self.serving { SUBMIT_DEADLINE_MS } else { FENCE_ABANDON_MS };
         let used_va = self.ring_va + CTRL_USED_OFF;
         let mut wakes = 0u32;
         let mut stale_since: Option<Instant> = None;
@@ -1579,9 +1577,6 @@ impl Controlq {
                 spins += 1;
             }
             wakes += 1;
-            if self.readback_in_flight() {
-                deadline_ms = FENCE_ABANDON_MS;
-            }
             let t0 = *stale_since.get_or_insert_with(Instant::now);
             if t0.elapsed().as_millis() as u64 >= deadline_ms {
                 // A deadline already at the abandonment bound has spent the
@@ -2204,6 +2199,8 @@ impl Gpu {
                 test_latch_next: false,
                 #[cfg(feature = "test-mode")]
                 test_stall_hold: false,
+                #[cfg(feature = "test-mode")]
+                test_behind_since: None,
                 #[cfg(feature = "test-mode")]
                 test_stall_late: false,
                 #[cfg(feature = "test-mode")]
@@ -4484,6 +4481,15 @@ impl Gpu {
         self.ctrl.serving = true;
     }
 
+    /// A stall stands on a lane. It ends in a retirement, or for the engine at the
+    /// abandonment bound; an abandoned cursor lane waits for its chain. What a
+    /// command met while this holds is no answer from the device.
+    pub fn stall_pending(&self) -> bool {
+        !self.ctrl.dead
+            && !self.cursor.queue.poisoned()
+            && (self.ctrl.stalled.is_some() || !self.cursor.queue.idle())
+    }
+
     /// Take the drained fence completions (the server posts each on its
     /// owning seam ctx).
     pub fn take_completions(&mut self) -> alloc::vec::Vec<FenceTag> {
@@ -4618,6 +4624,26 @@ impl Gpu {
         stalled
     }
 
+    /// A readback stands ahead of the next synchronous commands, for longer than
+    /// their ordinary bound: what a wait does behind one, with no client or host.
+    #[cfg(feature = "test-mode")]
+    pub fn test_behind_readback(&mut self) {
+        self.ctrl.test_behind_since = Some(Instant::now());
+        say!("lictor: a readback stands ahead of the takeover (INJECTED by test-latch-dead)");
+    }
+
+    /// Let a withheld synchronous retirement through: the completion pump then
+    /// revives the engine, the way a device that was only slow does.
+    #[cfg(feature = "test-mode")]
+    pub fn test_stall_release(&mut self) {
+        // Still armed means the entry has not come: it retires by the ordinary
+        // path. Consumed means nothing else will end the chain.
+        if !core::mem::take(&mut self.ctrl.test_stall_hold) {
+            self.ctrl.sync_pending = false;
+        }
+        say!("lictor: gpu synchronous chain retirement released (test-latch-dead)");
+    }
+
     /// Fenced slots currently allocatable. Read-only, and the ONLY thing that
     /// can tell a departed client's slots came back from a client that
     /// silently stranded them: `ctxs` deliberately excludes `retiring`
@@ -4677,6 +4703,14 @@ impl Gpu {
         self.ctrl.fenced_in_flight()
     }
 
+    /// The control queue holds synchronous work back: stalled behind a chain, or a
+    /// command not yet retired. A takeover waiting on it is renewed (vote 71); the
+    /// stall ends in a retirement or, at FENCE_ABANDON_MS, a dead engine.
+    pub fn control_waiting(&self) -> bool {
+        !self.ctrl.dead
+            && (self.ctrl.stalled.is_some() || self.ctrl.sync_pending || self.ctrl.sync2_pending)
+    }
+
     /// The broker enables this after boot probes, then releases imported DMA
     /// only for IDs returned here. A deferred unref never publishes retirement.
     pub fn enable_retirement_journal(&mut self) { self.collect_retirements = true; }
@@ -4684,11 +4718,14 @@ impl Gpu {
         core::mem::take(&mut self.retired_resources)
     }
 
-    /// Device completion proof for trusted takeover. An abandoned fence is still
-    /// device work until a late used entry retires it. Counting only the public
-    /// in-flight counter would lose that case.
-    pub fn all_work_retired(&self) -> bool {
-        self.cursor.queue.idle() && self.controlq_retired()
+    /// What trusted takeover asks of the device. A fenced chain need not have
+    /// retired, in flight or poisoned: `Objects::valid_id` refuses a trusted id on
+    /// every named route, the trusted image is never attached to a context, and only
+    /// the broker binds scanouts (TRUSTED-PATH, vote 50). Waiting for it would let a
+    /// client whose chain never retires deny the SAK. The cursor queue is another
+    /// matter, since a late cursor chain could put a plane over the trusted scene.
+    pub fn takeover_clear(&self) -> bool {
+        self.cursor.queue.idle() && self.synchronous_clear()
     }
 
     /// What stands between a retirement of `object` and the device: only the
@@ -4707,13 +4744,12 @@ impl Gpu {
         )
     }
 
-    /// The control queue's share of `all_work_retired`, which is all that
-    /// rebinding a normal scanout needs: a late cursor chain can touch only a
-    /// cursor plane, and a busy cursor queue keeps every later takeover out.
-    pub fn controlq_retired(&self) -> bool {
+    /// All that rebinding a normal scanout needs. A late cursor chain can touch
+    /// only a cursor plane, and a busy cursor queue keeps every later takeover
+    /// out. A fenced chain could equally have been running with that frame on the
+    /// glass before the episode, so rebinding adds nothing for it to reach.
+    pub fn synchronous_clear(&self) -> bool {
         !self.ctrl.dead && !self.ctrl.sync_pending && !self.ctrl.sync2_pending
-            && self.ctrl.fslots.iter().all(Option::is_none)
-            && self.ctrl.fslot_poisoned.iter().all(|poisoned| !poisoned)
     }
 
     /// Disable every advertised output before selecting trusted scanout 0.
@@ -4721,7 +4757,7 @@ impl Gpu {
     /// is hidden with proven queue retirement before any trusted pixels appear.
     /// A new backend must prove exclusion of its own overlays/writeback planes.
     pub fn exclude_all_outputs(&mut self) -> Result<(), Error> {
-        if !self.all_work_retired() { return Err(Error::Hardware); }
+        if !self.takeover_clear() { return Err(Error::Hardware); }
         let (cfg, len) = self.pci.region(PciRegion::Device).ok_or(Error::Hardware)?;
         if len < 12 { return Err(Error::Hardware); }
         let outputs = unsafe { r32(cfg + 8) };

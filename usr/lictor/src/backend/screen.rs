@@ -46,9 +46,20 @@ pub struct Screen {
     active: bool,
     raster: Raster,
     /// Stall the engine between disabling the outputs and binding the trusted
-    /// image: a takeover that fails part-way (the test-latch-dead lever).
+    /// image (the test-latch-dead lever): the device retires it, and the takeover
+    /// starts over.
     #[cfg(feature = "test-mode")]
     pub test_stall_after_exclusion: bool,
+    /// The same stall with its retirement withheld: a takeover that fails
+    /// part-way, at the kernel's deadline.
+    #[cfg(feature = "test-mode")]
+    pub test_hold_after_exclusion: bool,
+    /// The device refuses the trusted bind: an answer, so the takeover fails at once.
+    #[cfg(feature = "test-mode")]
+    pub test_refuse_bind: bool,
+    /// The device refuses the next paint: an answer, so the episode fails at once.
+    #[cfg(feature = "test-mode")]
+    pub test_refuse_frame: bool,
     // Once attached these pins survive every error. The owning service must
     // reset/drop Gpu before dropping Screen, including on an unwinding exit.
     _backing: Vec<Dma>,
@@ -82,10 +93,15 @@ impl Screen {
             return Err(Error::Hardware);
         }
         Ok(Self { width, height, pixels, active: false, raster, _backing: backing,
-            #[cfg(feature = "test-mode")] test_stall_after_exclusion: false })
+            #[cfg(feature = "test-mode")] test_stall_after_exclusion: false,
+            #[cfg(feature = "test-mode")] test_hold_after_exclusion: false,
+            #[cfg(feature = "test-mode")] test_refuse_bind: false,
+            #[cfg(feature = "test-mode")] test_refuse_frame: false })
     }
     pub fn paint(&mut self, gpu: &mut Gpu, model: &Model, masked: usize,
                  backdrop: Option<&[u32]>) -> Result<(), Error> {
+        #[cfg(feature = "test-mode")]
+        if core::mem::take(&mut self.test_refuse_frame) { return Err(Error::Hardware); }
         // Rasterize away from scanout. Invalid content leaves the last complete
         // trusted image intact. CPU writes finish before the GPU upload begins.
         let next = self.raster.pixels(self.pixels);
@@ -100,9 +116,18 @@ impl Screen {
     pub fn activate(&mut self, gpu: &mut Gpu) -> Result<(), Error> {
         #[cfg(feature = "test-mode")]
         let stall = core::mem::take(&mut self.test_stall_after_exclusion);
+        #[cfg(feature = "test-mode")]
+        let hold = core::mem::take(&mut self.test_hold_after_exclusion);
+        #[cfg(feature = "test-mode")]
+        let refuse = core::mem::take(&mut self.test_refuse_bind);
         gpu.exclude_all_outputs()?;
         #[cfg(feature = "test-mode")]
-        if stall { gpu.test_latch_now(false); }
+        if stall || hold { gpu.test_latch_now(hold); }
+        #[cfg(feature = "test-mode")]
+        if refuse {
+            super::diagnostic("lictor: trusted bind refused (INJECTED by test-latch-dead)\n");
+            return Err(Error::Hardware);
+        }
         gpu.set_scanout(RESOURCE, self.width, self.height)?;
         gpu.flush(RESOURCE, 0, 0, self.width, self.height)?;
         self.active = true;

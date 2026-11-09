@@ -77,10 +77,10 @@ after 1500
 key "meta_l+f"
 witness baseline
 lc_raw_send "\001b" "monitor BREAK opens a serial episode"
-lc_expect "nothing pending -- press any key" "the serial episode is open"
+lc_expect "nothing pending -- press Enter" "the serial episode is open"
 key "ctrl+alt+f10"
 after 1000
-lc_raw_send "x" "dismiss the panel"
+lc_raw_send "\r" "dismiss the panel"
 lc_expect "trusted path: done" "the serial episode ended"
 set timeout 15
 expect {

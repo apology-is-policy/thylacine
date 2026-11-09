@@ -566,9 +566,11 @@ can veto any of them:**
 5. **BEGIN discards ALL pending input** -- the ring's committed lines as well
    as the cooked partial line: a completed-but-undrained line is pre-SAK input
    by the same argument (the shell had not consumed it, and the SAK is the
-   operator declaring that what follows is for the trusted prompt). Documented
-   residue: a PL011 holdback byte parked by #174 back-pressure (a FULL ring at
-   the SAK instant) is pumped in by the attached reader's first drain.
+   operator declaring that what follows is for the trusted prompt). The serial
+   side queue goes too (vote 73, 2026-11-05: serial bytes read before the SAK
+   that the ring had no room for), so no pre-SAK byte is left for the attached
+   reader's first drain; the old residue, a held PL011 byte pumped in there, is
+   gone with the holdback.
 6. **Three fail-safe closes, all under `g_proc_table_lock`:** the trusted
    Proc's death (the ZOMBIE chokepoint; the arm dies with it), its own
    `SYS_CONSOLE_RELINQUISH` (it could never END through the gate again; the
@@ -614,7 +616,9 @@ can veto any of them:**
    empty owner slot in between. What still crosses BEGIN is output, bounded and
    pre-SAK: the echo of a feed byte accepted before it (at most
    `CONS_ECHO_MAX` bytes, emitted after the lock drops, while the byte itself
-   is discarded), the same class as the in-flight first chunk of a write.
+   is discarded), the same class as the in-flight first chunk of a write. A byte
+   moved from the serial side queue keeps the same bound: the mover stops after a
+   take that echoes (vote 73's audit, F5).
 10. **The episode's cadence is not published by the scheduler's counters
    either** (2026-10-06; the IM Fable pass F3; operator votes "Gate CPU time
    to the owner" and "Restrict it too", `dec-2026-10-06-cpu-time-gate`).
@@ -810,7 +814,7 @@ so the operator can veto any of them:**
   handle -> read the key (raw, no echo, bounded, 60 s poll timeout) -> verify ->
   `SYS_CAP_GRANT_IMPERIUM(..., PROPAGATING)` -> stage the reply ->
   `SYS_CONSOLE_EPISODE_END` -> close the handle + wipe. No pending request:
-  "trusted path: nothing pending -- press any key" -> END. Audit-log lines for
+  "trusted path: nothing pending -- press Enter" -> END on Enter or Esc. Audit-log lines for
   request / confer / deny / timeout.
 - `CLEARANCE_ACTIVATE(_SELF)` on a DISTINCT_SECRET level stays REFUSED: the only
   path is the SAK episode.
@@ -867,8 +871,8 @@ the operator can veto any of them:**
    duration. Simpler to audit than a state machine interleaved with the poll
    loop; a documented residue.
 8. **Two wire-additive statuses**: `Timeout` (7) and `Busy` (8).
-9. **A SAK with nothing pending** renders "nothing pending -- press any key",
-   waits for one byte (bounded), and ENDs -- the §4 "when in doubt, hit the
+9. **A SAK with nothing pending** renders "nothing pending -- press Enter",
+   waits for Enter or Esc (bounded; every other byte swallowed), and ENDs -- the §4 "when in doubt, hit the
    SAK" check, and what `im1-sak-lever.exp` now exercises.
 10. **ARM at startup, not fatal.** corvus opens its notes fd and ARMs after
     loading its databases; a refused ARM (a spawn outside the boot chain --
@@ -884,8 +888,15 @@ the operator can veto any of them:**
     grant and no reply.
 13. **The key prompt**: raw, unechoed; DEL/BS edit, Ctrl-U kills the line,
     CR/LF submits; Ctrl-C or an EMPTY key DECLINES (denied, uncounted); a key
-    past `MAX_PASS_LEN` is denied; the whole prompt is bounded at 60 s ->
-    `Timeout`. The prompt's clock is `CLOCK_MONOTONIC` with an idle-slice
+    past `MAX_PASS_LEN` is denied; the whole prompt is bounded at 60 s from
+    the SAK -> `Timeout`. The request's own 60-s window runs from the request
+    to the SAK and no further: a prompt cut to the window's remainder would
+    let the requester time a verdict into the middle of the person's typing,
+    and a SAK after the window answers `Timeout` without a prompt. Every
+    panel (a verdict, nothing pending, locked) closes only on Enter or Esc or
+    its bound and swallows every other byte, so the rest of a key still
+    being typed when a panel comes up never reaches the surface the episode
+    returns to (operator vote 70, 2026-11-05). The prompt's clock is `CLOCK_MONOTONIC` with an idle-slice
     fallback (a broken clock still bounds it; a keystroke flood cannot
     exhaust it). Every buffer is wiped on every path; the console handle is
     closed at END.

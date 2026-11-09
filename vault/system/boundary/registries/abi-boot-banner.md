@@ -25,6 +25,10 @@ mirrors:
   - "tools/interactive/ls-graphical-sak-states.exp"
   - "tools/interactive/ls-graphical-sak-recover.exp"
   - "tools/interactive/ls-graphical-sak-poison.exp"
+  - "tools/interactive/ls-graphical-sak-chain.exp"
+  - "tools/interactive/ls-graphical-sak-backlog.exp"
+  - "tools/interactive/ls-graphical-keys-overrun.exp"
+  - "tools/interactive/ls-graphical-keys-behind.exp"
   - "tools/interactive/ls-graphical-sak-start.exp"
   - "tools/interactive/ls-graphical-sak-refused.exp"
   - "tools/interactive/ls-graphical-sak-unread.exp"
@@ -96,6 +100,7 @@ mirrors:
   - "tools/interactive/ls-gfx-throttle.exp"
   - "tools/interactive/im1-sak-lever.exp"
   - "tools/interactive/im3-lex-curiata.exp"
+  - "tools/interactive/ls-serial-sak-typeahead.exp"
   - "tools/interactive/ls-imperium.exp"
   - "tools/interactive/ls-bghome-stall.exp"
   - "tools/interactive/s7-nora-probe.exp"
@@ -112,7 +117,7 @@ literal-mentions:
   - "tools/interactive/go8d.exp (a prose note)"
   - "tools/check-console-lines.py (exempts the base line by its text; a reword only drops the exemption, and the check then fails)"
 created: 2026-08-01
-updated: 2026-11-03
+updated: 2026-11-09
 ---
 ## The surface
 

@@ -1,0 +1,143 @@
+#!/usr/bin/expect -f
+# ls-graphical-keys-behind -- do keys typed behind a client's GPU queue arrive?
+#
+# Lictor's serve loop waits on the GPU, and a synchronous step behind a client's queue holds
+# it. Until vote 72 that loop also drained the eventq, so the ring filled behind it, and an
+# event the device cannot place never arrives. Now an input thread drains the ring into a
+# 4096-entry queue whatever the loop waits on. Each round types a whole command line: its
+# witness runs only if every key of it arrived in order. Control: the same rounds with no
+# client, one variable away.
+#
+# The eventq line is the ring's own low-water mark, test-mode only. Zero free means the
+# device had nowhere to put the next report.
+#
+# Needs a ctx, so a virgl device, and the session compositor. From the remote repo:
+# THYLACINE_GPU_DEV=virtio-gpu-gl-pci THYLACINE_DISPLAY=egl-headless
+# THYLACINE_EGL_VNC_SOCKET=/tmp/sak-vnc.sock LS_CI_JOBS=1
+# tools/test-interactive.sh ls-graphical-keys-behind
+set ::env(THYLACINE_ACCEL) [expr {[info exists ::env(LS_CI_GFX_ACCEL)] ? $::env(LS_CI_GFX_ACCEL) : "hvf"}]
+set ::env(THYLACINE_SERIAL_SAK) 0
+source [file join [file dirname [info script]] lib.exp]
+if {![info exists ::env(THYLACINE_GPU_DEV)] || ![string match virtio-gpu-gl* $::env(THYLACINE_GPU_DEV)]} {
+    puts "\nLS-CI SKIP: this scenario needs a warp ctx, so a virgl device (THYLACINE_GPU_DEV=virtio-gpu-gl-pci)"
+    exit 77
+}
+set repo $lc_repo
+set qmp [lc_qmp_sock]
+
+proc key {chord} {
+    global repo qmp
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -k $chord} e]} { lc_fail $e }
+    after 700
+}
+proc type {text} {
+    global repo qmp
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp $text} e]} { lc_fail $e }
+}
+proc client {args} {
+    global timeout
+    type "warp-prove chain-hold $args &\n"
+    set timeout 60
+    expect {
+        -re {warp-prove: CHAIN-HOLD DEEP ctx [0-9]+ sent [0-9]+ retired [0-9]+ refused [0-9]+ after [0-9]+ ms} {
+            lc_pass "KEYS-BEHIND client: $expect_out(0,string)"
+        }
+        -re {warp-prove: FAIL[^\r\n]*[\r\n]} { lc_fail "the client failed: $expect_out(0,string)" }
+        -re {EXTINCTION:} { lc_extinction_fail "starting the client" }
+        timeout { lc_fail "the client reported no full queue within 60 s of chain-hold" }
+        eof { lc_fail "EOF starting the client" }
+    }
+}
+# One command line, then every line until its witness or the wait's end. Lines from several
+# processes come in no fixed order, so they are one alternation.
+proc round {} {
+    global timeout whole low minfree stalls ended
+    type "\ncaps-probe --seat-control\n"
+    set timeout 20
+    expect {
+        -re {input eventq LOW: [0-9]+ free|missed its [0-9]+ ms deadline|CHAIN-HOLD END|warp-prove: FAIL|seat-probe: FAIL|seat-probe: PASS control|EXTINCTION:} {
+            set m $expect_out(0,string)
+            if {[regexp {LOW: ([0-9]+) free} $m -> free]} {
+                incr low
+                if {$free < $minfree} { set minfree $free }
+                exp_continue -continue_timer
+            }
+            if {[string match {missed its*} $m]} { incr stalls; exp_continue -continue_timer }
+            if {$m eq "CHAIN-HOLD END"} { set ended 1; exp_continue -continue_timer }
+            if {$m eq "EXTINCTION:"} { lc_extinction_fail "a round" }
+            if {$m eq "seat-probe: PASS control"} { incr whole } else { lc_fail "unexpected: $m" }
+        }
+        timeout {}
+        eof { lc_fail "EOF in a round" }
+    }
+}
+proc leg {name n} {
+    global whole low minfree stalls ended
+    set whole 0; set low 0; set minfree 99; set stalls 0; set ended 0
+    set done 0
+    for {set i 0} {$i < $n && !$ended} {incr i} { round; incr done; after 400 }
+    lc_pass "KEYS-BEHIND $name whole=$whole/$done low=$low minfree=$minfree stalls=$stalls ended=$ended"
+    return [list $whole $done $stalls]
+}
+proc client_end {} {
+    global timeout ended
+    if {$ended} { return }
+    set timeout 120
+    expect {
+        -re {warp-prove: CHAIN-HOLD END [^\r\n]*[\r\n]} { lc_pass "KEYS-BEHIND client: $expect_out(0,string)" }
+        -re {warp-prove: FAIL[^\r\n]*[\r\n]} { lc_fail "the client failed: $expect_out(0,string)" }
+        -re {EXTINCTION:} { lc_extinction_fail "ending the client" }
+        timeout { lc_fail "the client did not end within 120 s" }
+        eof { lc_fail "EOF ending the client" }
+    }
+}
+lc_boot
+set timeout $lc_boot_timeout
+expect {
+    -ex "Thylacine login: " {}
+    -re {EXTINCTION:} { lc_extinction_fail "boot" }
+    timeout { lc_fail "no login" }
+    eof { lc_fail "EOF before login" }
+}
+lc_raw_send "michael\r" "login user"
+expect {
+    -ex "password: " {}
+    timeout { lc_fail "no password prompt" }
+    eof { lc_fail "EOF before password" }
+}
+lc_raw_send "correct-horse-battery-staple-v1\r" "login password"
+expect {
+    -ex "login: session compositor (halcyond) spawned" {}
+    -ex "Thylacine textual shell" {
+        puts "\nLS-CI SKIP: default (ut) image -- this scenario drives the session\
+ compositor. Bake with: THYLACINE_HALCYON_SESSION=1 THYLACINE_HALCYON_PROFILE=instrument tools/build.sh kernel --config ci"
+        lc_quit
+        exit 77
+    }
+    timeout { lc_fail "no graphical session" }
+    eof { lc_fail "EOF at session start" }
+}
+set timeout 60
+expect {
+    -re {halcyond: status bar [^\r\n]*running false panes 2} {}
+    -re {EXTINCTION:} { lc_extinction_fail "session" }
+    timeout { lc_fail "welcome and shell did not become ready" }
+}
+after 1500
+key "meta_l+f"
+
+lassign [leg control 6] whole done stalls
+if {$whole != $done} { lc_fail "KEYS-BEHIND RED (control): keys were lost with no client, so this control tells nothing" }
+if {$stalls != 0} { lc_fail "KEYS-BEHIND RED (control): a step with no client stalled, so this control tells nothing" }
+
+client 60
+lassign [leg chain 12] cw cd cs
+client_end
+client 30 readback
+lassign [leg readback 8] rw rd rs
+client_end
+lc_pass "KEYS-BEHIND TOTAL chain $cw/$cd stalls=$cs readback $rw/$rd stalls=$rs"
+if {$cw != $cd || $rw != $rd} { lc_fail "KEYS-BEHIND RED: a whole command line typed behind a client did not arrive" }
+if {$cs + $rs == 0} { lc_fail "KEYS-BEHIND INCONCLUSIVE: no step stalled behind the client" }
+lc_quit
+exit 0

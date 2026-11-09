@@ -311,6 +311,12 @@ pub extern "C" fn rs_main() -> i64 {
         return poison_hold();
     }
 
+    // A client rendering without pause, with a backlog on the device at any moment
+    // (tools/interactive/ls-graphical-sak-chain.exp).
+    if libthyla_rs::env::args().get_str(1) == Some("chain-hold") {
+        return chain_hold();
+    }
+
     // V-3a: the coherent-ring gate. Needs NO virgl (the ring is coherent
     // shmem + a doorbell), so it runs on the local 2D device.
     if libthyla_rs::env::args().get_str(1) == Some("ring") {
@@ -3460,10 +3466,11 @@ fn prove_corpse_reclaim(root: i64) {
 //             its busy BO in flight, the console's next sync steps inherit
 //             the device stall (QEMU processes the controlq inline; the
 //             readback is a synchronous GL wait) -- and that stall must be
-//             read as BUSY, never as dead: every present of the bystander
-//             surface B queued behind it SUCCEEDS, and the engine is alive
-//             after. Under the 500 ms deadline a stall past it latched
-//             `dead` and lost the console's GPU.
+//             read as BUSY, never as dead. A present of the bystander
+//             surface B behind it may be refused while the engine is
+//             stalled (the wait no longer widens behind a readback, vote
+//             72), and the engine must be alive after the readback retires:
+//             a present succeeds and nothing is poisoned.
 //   F2B       REPORTED, not judged: B's present latency behind that stall
 //             (max / mean over the presents), the number that Venus / v3d
 //             will remove and that no guest-side change can (4.5.13).
@@ -3507,6 +3514,13 @@ const RB_DRAWS_PER_SUBMIT: usize = 300;
 /// half the Twrites -- the send phase is the leg's exposure to another
 /// client's present landing while the queue is deep (see `constructed`).
 const RB_TRIS: usize = 6;
+/// The heavy submits `chain-hold` keeps on the device: the C-6 gate's queue, about
+/// a second of V3D.
+const CHAIN_HOLD_DEPTH: u64 = 4;
+/// `chain-hold deep`: every fenced slot a ctx has, each draw instanced, so the queue
+/// outlasts the kernel's five-second deadline on V3D and each submit still fits a Twrite.
+const CHAIN_HOLD_DEEP_DEPTH: u64 = 8;
+const CHAIN_HOLD_DEEP_INSTANCES: u32 = 5;
 /// The draw-state object handles (surfaces 1 and 2 are the clear legs').
 const RB_H_VS: u32 = 10;
 const RB_H_FS: u32 = 11;
@@ -3536,6 +3550,9 @@ const RB_LIVE_SUBMITS: usize = 4;
 const RB_LIVE_ROUNDS: usize = 3;
 const RB_LIVE_ATTEMPTS: usize = 7;
 const RB_DEADLINE_SUBMITS: usize = 4;
+/// Lictor's SUBMIT_DEADLINE_MS (500) with slack: past it, a bystander present stalled at
+/// its bound rather than waiting behind a readback (vote 72a).
+const RB_F2B_BOUND_MS: u64 = 900;
 /// Bound on waiting for a readback to land: FENCE_ABANDON_MS is 30 s.
 const RB_LAND_BOUND_MS: u64 = 35_000;
 
@@ -3816,6 +3833,10 @@ fn draw_state_stream(st: &mut Vec<u32>, vbo_res: u32, w: u32, h: u32) {
 /// (SET_CONSTANT_BUFFER stage FS index 0, 4 floats), then DRAW_VBO of 3
 /// vertices, TRIANGLES.
 fn draw_stream(st: &mut Vec<u32>, r: f32, g: f32, b: f32) {
+    draw_stream_instanced(st, r, g, b, 1);
+}
+
+fn draw_stream_instanced(st: &mut Vec<u32>, r: f32, g: f32, b: f32, instances: u32) {
     st.push(cmd0(VIRGL_CCMD_SET_CONSTANT_BUFFER, 0, 6));
     st.push(VIRGL_SHADER_FRAGMENT);
     st.push(0); // index
@@ -3828,7 +3849,7 @@ fn draw_stream(st: &mut Vec<u32>, r: f32, g: f32, b: f32) {
     st.push((RB_TRIS * 3) as u32); // count
     st.push(MESA_PRIM_TRIANGLES);
     st.push(0); // indexed
-    st.push(1); // instance count
+    st.push(instances); // instance count
     st.push(0); // index bias
     st.push(0); // start instance
     st.push(0); // primitive restart
@@ -3904,6 +3925,136 @@ fn rb_wait_signaled(
     }
 }
 
+/// RB_TRIS full-screen triangles per draw (the same clip-space triangle RB_TRIS
+/// times): RB_TRIS x the fill per DRAW_VBO at the same stream size, so the queue
+/// is deep enough that the stall remaining when the readback is issued -- after
+/// the ~130-290 ms the eight 24 KiB Twrites themselves take -- clears the DEEP
+/// floor with margin (run 5: a 415 ms queue left 88 ms once).
+fn rb_upload_triangles(warp: i64, ctx: u32, vbo: u32, vbo_va: u64) {
+    let tri: [f32; 12] = [-1.0, -1.0, 0.0, 1.0, 3.0, -1.0, 0.0, 1.0, -1.0, 3.0, 0.0, 1.0];
+    for t in 0..RB_TRIS {
+        for (i, v) in tri.iter().enumerate() {
+            unsafe {
+                core::ptr::write_volatile((vbo_va + ((t * 12 + i) as u64) * 4) as *mut u32, v.to_bits())
+            };
+        }
+    }
+    let before = ctx_field(warp, ctx, "fence-signaled");
+    let up = format!("transfer_to 0 0 0 0 {} 1 1 0 0 0", RB_TRIS * 48);
+    if !write_ctl(warp, &format!("ctx/{}/bo/{}/ctl", ctx, vbo), &up) {
+        rb_incomplete("instrument:vbo-upload");
+    }
+    let _ = rb_wait_signaled(warp, ctx, before, 1, libthyla_rs::time::Instant::now(), "vbo-upload");
+}
+
+/// Write one whole command to a warp file, and say whether the broker took it. EAGAIN
+/// is the broker's stall (GPU-DESIGN 4.5.15), which ends by itself, and a client
+/// keeping a queue full causes it; anything else fails this program.
+fn write_unless_behind(root: i64, path: &str, bytes: &[u8]) -> bool {
+    let fd = unsafe { t_open(root, path.as_ptr(), path.len(), T_OWRITE) };
+    if fd < 0 {
+        fail(&format!("chain-hold: open {}", path));
+    }
+    let n = unsafe { t_write(fd, bytes.as_ptr(), bytes.len()) };
+    unsafe { t_close(fd) };
+    if n == -11 {
+        return false;
+    }
+    if n != bytes.len() as i64 {
+        fail(&format!("chain-hold: {} refused ({})", path, n));
+    }
+    true
+}
+
+/// Keep `CHAIN_HOLD_DEPTH` heavy submits on the device for `argv[2]` seconds, and
+/// say when the first full queue has turned over and refilled, read from the
+/// broker's own fence count. With `readback` as `argv[3]`, one transfer of the busy
+/// target also stays in flight at the tail.
+fn chain_hold() -> i64 {
+    let secs: u64 = libthyla_rs::env::args()
+        .get_str(2)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| fail("chain-hold <seconds> [readback|deep]"));
+    let mode = libthyla_rs::env::args().get_str(3);
+    let readback = mode == Some("readback");
+    let (depth, instances) = if mode == Some("deep") {
+        (CHAIN_HOLD_DEEP_DEPTH, CHAIN_HOLD_DEEP_INSTANCES)
+    } else {
+        (CHAIN_HOLD_DEPTH, 1)
+    };
+    let warp = warp_connect("chain-hold");
+    let ctx = mint_ctx(warp, "chain-hold");
+    let (bo, res, _) = mint_bo_wh(warp, ctx, RB_W, RB_H, VIRGL_RESOURCE_Y_0_TOP, "chain-hold target");
+    let (vbo, vbo_res, vbo_va) = mint_buffer_bo(warp, ctx, "chain-hold vbo");
+    rb_upload_triangles(warp, ctx, vbo, vbo_va);
+    let before = ctx_field(warp, ctx, "fence-signaled");
+    let mut prime: Vec<u32> = Vec::new();
+    subctx_preamble(&mut prime);
+    clear_stream(&mut prime, res, 1, 1.0, 0.0, 0.0);
+    draw_state_stream(&mut prime, vbo_res, RB_W, RB_H);
+    submit_stream(warp, ctx, &prime, "chain-hold prime");
+    guard_not_poisoned(warp, "chain-hold prime");
+    let _ = rb_wait_signaled(warp, ctx, before, 1, libthyla_rs::time::Instant::now(), "chain-hold prime");
+    let base = ctx_field(warp, ctx, "fence-signaled");
+    let submit = format!("ctx/{}/submit", ctx);
+    let bo_ctl = format!("ctx/{}/bo/{}/ctl", ctx, bo);
+    let xfer = format!("transfer_from 0 0 0 0 {} {} 1 0 0 0", RB_W, RB_H);
+    let mut sent = 0u64;
+    let mut refused = 0u64;
+    let mut read_at: Option<u64> = None;
+    let mut said = false;
+    let t0 = libthyla_rs::time::Instant::now();
+    while t0.elapsed().as_secs() < secs {
+        let retired = ctx_field(warp, ctx, "fence-signaled") - base;
+        if read_at.is_some_and(|at| retired > at) {
+            read_at = None;
+        }
+        if sent - retired < depth {
+            let mut st: Vec<u32> = Vec::new();
+            fb_state_stream(&mut st, 1);
+            for k in 0..RB_DRAWS_PER_SUBMIT {
+                draw_stream_instanced(&mut st, 0.0, 1.0, rb_clear_color(k, RB_DRAWS_PER_SUBMIT), instances);
+            }
+            let bytes: Vec<u8> = st.iter().flat_map(|d| d.to_le_bytes()).collect();
+            if write_unless_behind(warp, &submit, &bytes) {
+                sent += 1;
+            } else {
+                refused += 1;
+                let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(5));
+            }
+        } else if readback && read_at.is_none() {
+            if write_unless_behind(warp, &bo_ctl, xfer.as_bytes()) {
+                read_at = Some(sent);
+                sent += 1;
+            } else {
+                refused += 1;
+                let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(5));
+            }
+        } else {
+            if !said && retired >= depth {
+                said = true;
+                t_putstr(&format!(
+                    "warp-prove: CHAIN-HOLD DEEP ctx {} sent {} retired {} refused {} after {} ms\n",
+                    ctx,
+                    sent,
+                    retired,
+                    refused,
+                    t0.elapsed().as_millis()
+                ));
+            }
+            let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(5));
+        }
+    }
+    t_putstr(&format!(
+        "warp-prove: CHAIN-HOLD END ctx {} sent {} refused {} after {} ms\n",
+        ctx,
+        sent,
+        refused,
+        t0.elapsed().as_millis()
+    ));
+    0
+}
+
 fn observe_readback() {
     use tapestry::Surface;
     t_putstr("warp-prove: C6-READBACK starting (the compositor readback arm under a deep queue)\n");
@@ -3936,28 +4087,7 @@ fn observe_readback() {
     // The vertex buffer: one clip-space full-screen triangle, uploaded
     // through the fenced transfer verb (the C0-F1 leg's buffer shape).
     let (vbo, vbo_res, vbo_va) = mint_buffer_bo(warp, ctx, "readback vbo");
-    {
-        // RB_TRIS full-screen triangles per draw (the same clip-space
-        // triangle RB_TRIS times): RB_TRIS x the fill per DRAW_VBO at the
-        // same stream size, so the queue is deep enough that the stall
-        // remaining when the readback is issued -- after the ~130-290 ms
-        // the eight 24 KiB Twrites themselves take -- clears the DEEP floor
-        // with margin (run 5: a 415 ms queue left 88 ms once).
-        let tri: [f32; 12] = [-1.0, -1.0, 0.0, 1.0, 3.0, -1.0, 0.0, 1.0, -1.0, 3.0, 0.0, 1.0];
-        for t in 0..RB_TRIS {
-            for (i, v) in tri.iter().enumerate() {
-                unsafe {
-                    core::ptr::write_volatile((vbo_va + ((t * 12 + i) as u64) * 4) as *mut u32, v.to_bits())
-                };
-            }
-        }
-        let before = ctx_field(warp, ctx, "fence-signaled");
-        let up = format!("transfer_to 0 0 0 0 {} 1 1 0 0 0", RB_TRIS * 48);
-        if !write_ctl(warp, &format!("ctx/{}/bo/{}/ctl", ctx, vbo), &up) {
-            rb_incomplete("instrument:vbo-upload");
-        }
-        let _ = rb_wait_signaled(warp, ctx, before, 1, libthyla_rs::time::Instant::now(), "vbo-upload");
-    }
+    rb_upload_triangles(warp, ctx, vbo, vbo_va);
     let tap = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/srv/tapestry".as_ptr(), 13, T_OREAD) };
     if tap < 0 {
         rb_incomplete("instrument:tapestry-ctl");
@@ -4353,14 +4483,15 @@ fn observe_readback() {
     record(live_ok, "live");
 
     // ---- DEADLINE + F2B: the CLIENT's own fenced readback of its busy BO,
-    // then B's presents behind it. Every present must succeed (busy is not
-    // dead); their latency is REPORTED.
+    // then B's presents behind it. A present refused during the stall is
+    // counted, not failed; the engine must revive (busy is not dead). Their
+    // latency is REPORTED.
     let (dl_before, dl_t0) = rb_queue_heavy(warp, ctx, RB_DEADLINE_SUBMITS, "deadline");
     let xfer = format!("transfer_from 0 0 0 0 {} {} 1 0 0 0", RB_W, RB_H);
     if !write_ctl(warp, &format!("ctx/{}/bo/{}/ctl", ctx, bo), &xfer) {
         rb_incomplete("instrument:f2b-transfer-refused");
     }
-    let mut b_ok = true;
+    let mut b_refused = 0u64;
     let mut b_max_ms = 0u64;
     let mut b_sum_ms = 0u64;
     let b_n = 10u64;
@@ -4376,9 +4507,8 @@ fn observe_readback() {
             b_max_ms = ms;
         }
         if r.is_err() {
-            b_ok = false;
-            t_putstr(&format!("warp-prove: C6-RB DEADLINE -- B present {} FAILED after {} ms\n", i, ms));
-            break;
+            b_refused += 1;
+            t_putstr(&format!("warp-prove: C6-RB DEADLINE -- B present {} refused after {} ms\n", i, ms));
         }
     }
     // The client's readback + the 7 submits retire; the engine must be alive.
@@ -4386,13 +4516,29 @@ fn observe_readback() {
         rb_wait_signaled(warp, ctx, dl_before, RB_DEADLINE_SUBMITS as u64 + 1, dl_t0, "deadline");
     let landed_px = unsafe { core::ptr::read_volatile(va as *const u32) };
     let landed_idx = rb_index_of(landed_px, RB_DEADLINE_SUBMITS * RB_DRAWS_PER_SUBMIT);
-    let alive = b.present(None).is_ok();
+    // The revival is the serve loop's next pump after the retirement, so the
+    // first present may still meet the stall; a second of retries bounds it.
+    let mut alive = false;
+    for _ in 0..20 {
+        if b.present(None).is_ok() {
+            alive = true;
+            break;
+        }
+        let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(50));
+    }
     let poisoned_after = parse_field(&open_read_string(warp, "ctl"), "poisoned").unwrap_or(99);
-    let deadline_ok = b_ok && alive && poisoned_after == 0;
+    // Vote 72a: no synchronous wait outlasts SUBMIT_DEADLINE_MS behind a readback. When
+    // the client's readback stood past that with slack, a present stalled at the bound
+    // and was refused, and none waited the readback out.
+    let stood = dl_queue_ms > RB_F2B_BOUND_MS;
+    let bounded = !stood || (b_max_ms < RB_F2B_BOUND_MS && b_refused > 0);
+    let deadline_ok = alive && poisoned_after == 0 && bounded;
     t_putstr(&format!(
-        "warp-prove: C6-RB DEADLINE {} -- {} B presents behind the client's own busy readback all succeeded: {}; engine alive after: {}; poisoned {}\n",
+        "warp-prove: C6-RB DEADLINE {} -- {} B presents behind the client's own busy readback, {} refused while the engine stalled, longest {} ms (bound {} ms; the readback stood {} ms, {}); engine alive after: {}; poisoned {}\n",
         if deadline_ok { "PASS" } else { "FAIL" },
-        b_n, b_ok as u32, alive as u32, poisoned_after
+        b_n, b_refused, b_max_ms, RB_F2B_BOUND_MS, dl_queue_ms,
+        if stood { "so a present must have stalled at its bound" } else { "too short to judge the bound" },
+        alive as u32, poisoned_after
     ));
     t_putstr(&format!(
         "warp-prove: C6-RB F2B REPORT -- bystander present latency behind a client readback of a busy BO: max {} ms mean {} ms over {} presents; the {} heavy submits + the readback retired in {} ms (the client's readback observed draw index {} of {}, pixel {:#010x})\n",

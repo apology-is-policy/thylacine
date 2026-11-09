@@ -339,6 +339,9 @@ const WARP_CTX_FENCE_MAX: usize = crate::gpu::FENCED_SLOTS / 2;
 /// been named at least once before the abandonment machinery could touch it.
 #[cfg(feature = "test-mode")]
 const WARP_WATCH_MS: u64 = 30_000;
+/// How long the pointer waits to try the backend again after a refusal. A refusal
+/// costs the backend nothing: it answers from its lane's state.
+const CURSOR_RETRY_MS: u128 = 250;
 const _: () = {
     // Round-6 F2: the share is a DIVISION, so it silently degenerates.
     // At FENCED_SLOTS = 1 the cap is 0 and `fences_in_flight >= 0` is
@@ -1908,7 +1911,9 @@ pub struct Comp {
     chords: Chords,
     /// Last hardware-acknowledged normal pointer, invalidated at seat resume.
     cursor_sent: Option<(u8, u16, u32, u32)>,
-    cursor_failed: bool,
+    /// When the pointer backend last refused an update, if the last answer was
+    /// a refusal. A stall ends by itself, so this retries rather than latches.
+    cursor_refused: Option<Instant>,
     /// The pointer's last display position (G-7c; tablet-absolute, scaled
     /// by the input drain). Buttons/scroll route by it.
     ptr_x: u32,
@@ -2646,7 +2651,7 @@ impl Comp {
             chord_down: [0; KEYCODE_SPAN / 64],
             chords: Chords::new(),
             cursor_sent: None,
-            cursor_failed: false,
+            cursor_refused: None,
             ptr_x: 0,
             abs_last: None,
             ptr_over: None,
@@ -9988,7 +9993,10 @@ impl Comp {
     /// stale client's shape latched on another surface. No saved backdrop.
     fn cursor_sync(&mut self) {
         use libhalcyon::cursor::Shape;
-        if self.cursor_failed || self.gpu.width == 0 || self.gpu.height == 0 {
+        if self.gpu.width == 0 || self.gpu.height == 0 {
+            return;
+        }
+        if self.cursor_refused.is_some_and(|t| t.elapsed().as_millis() < CURSOR_RETRY_MS) {
             return;
         }
         self.ptr_x = self.ptr_x.min(self.gpu.width - 1);
@@ -10018,10 +10026,20 @@ impl Comp {
             return;
         }
         match self.gpu.cursor(state.0, state.1, state.2, state.3, true) {
-            Ok(()) => self.cursor_sent = Some(state),
+            Ok(()) => {
+                self.cursor_sent = Some(state);
+                if self.cursor_refused.take().is_some() {
+                    say!("tapestryd: pointer backend accepted an update again");
+                }
+            }
             Err(_) => {
-                self.cursor_failed = true;
-                say!("tapestryd: pointer backend failed; cursor updates stopped");
+                // A stalled command's outcome is unknown, so the plane may hold this
+                // state or the last: only an accepted update says which.
+                self.cursor_sent = None;
+                if self.cursor_refused.is_none() {
+                    say!("tapestryd: pointer backend refused an update; retrying");
+                }
+                self.cursor_refused = Some(Instant::now());
             }
         }
     }
@@ -16788,9 +16806,9 @@ impl Conn {
                 Some((shape, scale, x, y)) => {
                     let name = libhalcyon::cursor::Shape::from_code(shape).unwrap().name();
                     let _ = core::fmt::write(&mut s, format_args!("cursor {} {} {} {} {}\n",
-                        name, scale, x, y, if comp.cursor_failed { "failed" } else { "ready" }));
+                        name, scale, x, y, if comp.cursor_refused.is_some() { "failed" } else { "ready" }));
                 }
-                None => s.push_str(if comp.cursor_failed { "cursor failed\n" } else { "cursor pending\n" }),
+                None => s.push_str(if comp.cursor_refused.is_some() { "cursor failed\n" } else { "cursor pending\n" }),
             }
             // Warp-C C-3: which composed-pixel path presents are taking,
             // and whether the GPU one latched off. Both paths must stay

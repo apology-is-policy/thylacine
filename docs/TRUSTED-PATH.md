@@ -172,14 +172,51 @@ All planes, cursors, outputs, capture paths, DMA access and pending submissions
 are part of the exclusion proof. A simple-framebuffer node or CPU mapping alone
 is insufficient evidence. Backends must pass conformance tests before enablement.
 
-**A client's GPU work does not hold the trusted scene back** (operator vote 50,
-2026-11-03). In that proof, a pending submission must be shown unable to reach the
-trusted image; it need not have retired. A chain reaches only resources attached to
-its context, the trusted image is never attached to a context, and only the broker
-binds scanouts. Waiting for every chain would let any client that keeps one in flight
-deny the SAK, with no trusted screen and no notice, while a fake prompt stays on the
-glass. Not yet built: `Seat::step` still returns before any trusted paint while a chain
-is unretired, and that denial, read in code, is to be reproduced before the change.
+**A client's GPU work cannot reach the trusted scene, so takeover does not wait for it
+to retire** (operator vote 50, 2026-11-03). In that proof, a pending submission must be
+shown unable to reach the trusted image; it need not have retired. `Objects::valid_id`
+refuses a trusted id on every named route, a ctx-0 transfer included, the trusted image
+is never attached to a context, and only the broker binds scanouts. Waiting for every
+chain would let any client whose chain never retires deny the SAK, with no trusted
+screen and no notice, while a fake prompt stays on the glass. So takeover asks only that
+the cursor queue is idle and no synchronous chain is outstanding
+(`Gpu::takeover_clear`), and restoring asks only the second
+(`Gpu::synchronous_clear`).
+
+That settles a client's poison, not its backlog. The trusted paint is itself fenced, so
+on the host's one FIFO it runs behind whatever is already queued there. It can stall,
+and a stall is no answer from the device: the takeover starts over when the engine
+revives, under the kernel's deadline. A backlog delays the SAK. One longer than that
+deadline, or a host loop held that long, fails the episode with no trusted screen shown:
+the outputs stay as they were, or dark if the hold came after exclusion. That is not the
+stalled-participant case `HALCYON-INTERACTION-SEAT-REVIEW.md` approved, since an
+unprivileged client causes it. Operator vote 71 (2026-11-05) decided what it should do:
+while the engine is alive and draining, Lictor renews the kernel's deadline, up to a
+bound, with input withheld, so a chord ends in the trusted screen or a dead engine, and
+the screen looks hung for as long as the client queued. Measured before it on the Pi's
+V3D: behind a client's deep queue, six chords of six failed at the five-second deadline
+with the session's screen still up. Built (`SEAT_RENEW`): Lictor renews at most once a
+second while the control queue holds the takeover up, stalled behind a chain or with a
+command not yet retired, and the kernel stops at 35 s from the chord. Draining means the
+engine is working through what is ahead, not that something retired lately: one chain
+that runs for seconds retires nothing meanwhile and is renewed all the same, and a
+chain that never retires kills the engine at `FENCE_ABANDON_MS` (30 s), inside the
+bound. A cursor queue stalled alone renews nothing: no client reaches it, so that stall
+is the device's, and the deadline fails the takeover.
+
+Before a chord is seen the gap is the serve loop's. A synchronous command waits at most
+`SUBMIT_DEADLINE_MS`, a client's readback ahead of it or not (operator vote 72), so a
+command behind a stall holds the loop about 600 ms. Keys typed meanwhile wait in the
+input device's 64-event ring, which fills in about that time at 30 ms a character, the
+pace of a paste or a password manager's auto-type; keys were measured lost that way behind
+a deep client queue, and none at 100 ms a character. Vote 72's second half closes that:
+Lictor's input thread drains the rings every 4 ms into a 4096-entry queue, whatever the
+serve loop is waiting on, and the serve loop takes the queue whole on its next pass. Seat
+logic stays on the serve loop. A key is lost now only if the input thread itself stops
+draining for about half a second at that pace, or if the queue fills: about a thousand
+keys behind a serve loop that stands still. An entry that finds the queue full is
+dropped, and that device's held keys are released at that point, as after a ring
+overrun. Written 2026-11-09, not yet booted.
 
 **As built:** the serial episode gates UART output to the attached trusted
 process. The QEMU graphical backend uses Lictor as the boot-trusted physical

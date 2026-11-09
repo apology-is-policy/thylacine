@@ -1,0 +1,115 @@
+#!/usr/bin/expect -f
+# tools/interactive/ls-serial-sak-typeahead.exp -- vote 73 (operator,
+# 2026-11-05): a Ctrl-C and a serial BREAK behind type-ahead that nobody reads.
+#
+# A foreground `sleep 60` reads no console, so everything typed meanwhile waits.
+# Until vote 73 the PL011 drain paused RX once the console ring held more than
+# 255 bytes: the rest stayed in the FIFO, the Ctrl-C and the BREAK behind them,
+# and neither acted until the sleep ended by itself. Now the drain reads every
+# byte, the ring's overflow waits in the console's side queue, and both act on
+# arrival.
+#
+#   (A) ~880 bytes of command lines (past the ring's 512, past the old pause's
+#       255) typed into the sleep, then Ctrl-C. The sleep must end within 15 s of
+#       the Ctrl-C, and every typed line must then run, in order: what waited is
+#       kept and kept in order. On the old kernel the first line runs only when
+#       the sleep ends by itself, about 55 s later: RED.
+#   (B) the same type-ahead, then a BREAK. The SAK must open the trusted episode
+#       within 10 s (old kernel: RED, the BREAK waits in the FIFO). BEGIN
+#       discards the ring and the side queue, so after the episode none of the
+#       typed lines may run. The positive control one variable away: a command
+#       typed after the episode does run, so a line that had survived would
+#       have run before it.
+#   (C) /ctl/cons shows rx_drop_side at 0: nothing typed here met a full queue.
+#
+# The output lines are matched as "\nqa<n>\r": the editor's echo of the command
+# puts "echo " before the token, never a newline. Every wait lists EXTINCTION
+# first: expect takes the first pattern that matches anywhere in the buffer.
+
+set ::env(THYLACINE_ACCEL) hvf
+
+source [file join [file dirname [info script]] lib.exp]
+
+set LINES 80
+
+proc typeahead {tag} {
+    global LINES
+    set burst ""
+    for {set i 1} {$i <= $LINES} {incr i} { append burst "echo $tag$i\r" }
+    lc_step "type-ahead: $LINES lines of `echo $tag<n>`, [string length $burst] bytes, into a sleep that reads nothing"
+    lc_raw_send $burst "type-ahead $tag"
+}
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+
+# (A) Ctrl-C behind the type-ahead.
+lc_send "sleep 60"
+sleep 2
+typeahead qa
+sleep 2
+lc_step "Ctrl-C behind the type-ahead"
+lc_ctrlc
+lc_within 15 {
+    -re {EXTINCTION:} { lc_extinction_fail "(A) after the Ctrl-C" }
+    -re {\nqa1\r} { lc_step "the sleep ended at the Ctrl-C and the first typed line ran" }
+    timeout { lc_fail "SIDE-QUEUE RED (A): no typed line ran within 15 s of the Ctrl-C -- it waited behind the type-ahead (the drain paused RX), or the type-ahead was lost" }
+    eof { lc_fail "EOF after the Ctrl-C" }
+}
+# The arms stay a braced multi-line block: given a one-line list, expect reads
+# it as a flag. The pattern rides in $want, which expect substitutes there.
+for {set i 2} {$i <= $LINES} {incr i} {
+    set want "\nqa$i\r"
+    lc_within 15 {
+        -re {EXTINCTION:} { lc_extinction_fail "(A) line $i" }
+        -ex $want {}
+        -re {\nqa[0-9]+\r} { lc_fail "SIDE-QUEUE RED (A): line $i out of order or missing (saw [string trim $expect_out(0,string)])" }
+        timeout { lc_fail "SIDE-QUEUE RED (A): typed line $i never ran -- type-ahead lost" }
+        eof { lc_fail "EOF at line $i" }
+    }
+}
+lc_pass "SIDE-QUEUE (A): a Ctrl-C behind $LINES unread lines ended the sleep at once, and all $LINES lines ran in order"
+
+# (B) BREAK behind the type-ahead.
+lc_send "sleep 60"
+sleep 2
+typeahead qb
+sleep 2
+lc_raw_send "\001b" "monitor BREAK behind the type-ahead"
+lc_within 10 {
+    -re {EXTINCTION:} { lc_extinction_fail "(B) after the BREAK" }
+    -re {cons: SAK \(episode\)} { lc_step "the SAK opened the episode behind the type-ahead" }
+    -re {cons: SAK \(([a-z ]+)\)} { lc_fail "SIDE-QUEUE (B): SAK decision '$expect_out(1,string)', expected 'episode'" }
+    timeout { lc_fail "SIDE-QUEUE RED (B): no SAK within 10 s of the BREAK -- it waited behind the type-ahead (the drain paused RX)" }
+    eof { lc_fail "EOF after the BREAK" }
+}
+lc_expect "nothing pending -- press Enter" "corvus's empty-episode panel"
+lc_raw_send "\r" "Enter dismisses the panel"
+lc_expect "cons: trusted episode END" "the episode END witness"
+sleep 1
+lc_ctrlc
+sleep 1
+lc_send "echo qbdone | tr a-z A-Z"
+lc_within 20 {
+    -re {EXTINCTION:} { lc_extinction_fail "(B) after the episode" }
+    -re {\nqb[0-9]+\r} { lc_fail "SIDE-QUEUE RED (B): a line typed before the SAK ran after the episode ([string trim $expect_out(0,string)]) -- BEGIN left the side queue" }
+    -ex "QBDONE" { lc_step "the command typed after the episode ran, and no pre-SAK line before it" }
+    timeout { lc_fail "SIDE-QUEUE (B): the session did not run a command after the episode" }
+    eof { lc_fail "EOF after the episode" }
+}
+lc_pass "SIDE-QUEUE (B): a BREAK behind $LINES unread lines opened the episode at once, and BEGIN discarded them"
+
+# (C) the counter: nothing here met a full queue.
+lc_send "cat /ctl/cons"
+lc_within 15 {
+    -re {EXTINCTION:} { lc_extinction_fail "(C)" }
+    -re {rx_drop_side: *0\r} { lc_step "rx_drop_side 0" }
+    -re {rx_drop_side: *([0-9]+)} { lc_fail "SIDE-QUEUE (C): rx_drop_side $expect_out(1,string) -- type-ahead well under the queue was dropped" }
+    timeout { lc_fail "SIDE-QUEUE (C): /ctl/cons has no rx_drop_side line" }
+    eof { lc_fail "EOF at (C)" }
+}
+lc_pass "SIDE-QUEUE (C): /ctl/cons rx_drop_side 0"
+
+lc_quit
+lc_pass "ls-serial-sak-typeahead: Ctrl-C and BREAK act behind unread type-ahead; the queue keeps order and BEGIN discards it"
+exit 0

@@ -124,11 +124,11 @@ Generated — do not edit between the markers (`quaestor render`).
 ## Recent changes
 
 - 2026-11-09 [[chg-2026-11-09-aux-unlock]] — An unlock that never left for want of memory is sent again: the aux join's round 3 F2, bounded where a kill cannot reach
+- 2026-11-09 [[chg-2026-11-09-input-thread]] — Lictor reads input on its own thread, into a 4096-entry queue (vote 72, second half)
+- 2026-11-09 [[chg-2026-11-09-narrow-sync-wait]] — Lictor's synchronous wait no longer widens behind a readback (vote 72, first half)
+- 2026-11-09 [[chg-2026-11-09-panels-enter-or-esc]] — Trusted panels close on Enter or Esc; the key prompt runs on its own clock (vote 70)
+- 2026-11-09 [[chg-2026-11-09-sak-renew]] — A takeover behind a GPU backlog renews the kernel's quiesce deadline (vote 71)
+- 2026-11-09 [[chg-2026-11-09-serial-side-queue]] — The serial console reads every byte; what the ring refuses waits in a side queue (vote 73)
 - 2026-11-09 [[chg-2026-11-09-strike-regex-palette]] — The shell's =~, palette builtin and prompt function are struck (vote 78)
-- 2026-11-06 [[chg-2026-11-06-aux-join2]] — The aux join: aux-3 (the thread-model arc through ENOEXEC) reaches main through corona's branch
-- 2026-11-05 [[chg-2026-11-05-as4-r6-join]] — AS-4 audit round 6, the join's half
-- 2026-11-05 [[chg-2026-11-05-as4-r6-shell]] — AS-4 audit round 6, the shell's half
-- 2026-11-05 [[chg-2026-11-05-as4-r7-join]] — AS-4 audit round 7, the join's half
-- 2026-11-05 [[chg-2026-11-05-as4-r7-shell-corrected]] — AS-4 round 7's shell chg, corrected
-- 2026-11-05 [[chg-2026-11-05-as4-r7-shell]] — AS-4 audit round 7, the shell's half
+- 2026-11-09 [[chg-2026-11-09-trusted-audit-close]] — The trusted-path batch audit close: renewal behind a live engine, serial verdicts wait, the episode tail (votes 70-73)
 <!-- generated:end -->

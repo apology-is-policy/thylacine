@@ -70,7 +70,9 @@ fn seat_probe(stage: &str) -> i64 {
     use lictor::endpoint as seat;
     let elevated = match stage {
         "--seat-baseline" | "--seat-restored" | "--seat-denied" | "--seat-cancelled"
-        | "--seat-control" | "--seat-poisoned" => false,
+        | "--seat-control" | "--seat-poisoned" | "--seat-chain" | "--seat-readback"
+        | "--seat-pointer" | "--seat-answered" | "--seat-framed" | "--seat-refused"
+        | "--seat-held" | "--seat-painted" => false,
         "--seat-elevated" => true,
         _ => return 2,
     };

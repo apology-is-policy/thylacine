@@ -1,0 +1,162 @@
+#!/usr/bin/expect -f
+# ls-graphical-keys-overrun -- a release the input ring could not hold must not park
+# the seat (I-27).
+#
+# thylacine.test-latch-dead arms lictor's lever, and F8 then stops its input thread at the
+# pass that read it, and its serve loop for five seconds, with the rings undrained, as an
+# input thread that stopped draining would leave them. Shift goes down first, the ring
+# fills behind the stopped thread, and shift comes
+# up with no room left, so the device drops the release and tells nobody. With no recovery
+# that key reads as held for good: Lictor withholds its ACK and the kernel its restore, so
+# every chord fails at its deadline until that key is pressed again.
+#
+# Control: the same stop with nothing typed behind it, one variable away. No ring may
+# overrun. Each leg's witness is a whole command line typed afterwards, so a key the
+# compositor still thinks is down shows there.
+set ::env(THYLACINE_ACCEL) [expr {[info exists ::env(LS_CI_GFX_ACCEL)] ? $::env(LS_CI_GFX_ACCEL) : "hvf"}]
+set ::env(THYLACINE_SERIAL_SAK) 0
+set ::env(THYLACINE_TEST_LATCH_DEAD) 1
+source [file join [file dirname [info script]] lib.exp]
+set repo $lc_repo
+set qmp [lc_qmp_sock]
+
+proc send_key {chord} {
+    global repo qmp
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -k $chord} e]} { lc_fail $e }
+}
+proc key {chord} {
+    send_key $chord
+    after 700
+}
+proc type {text} {
+    global repo qmp
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp $text} e]} { lc_fail $e }
+}
+proc witness {stage} {
+    type "\ncaps-probe --seat-$stage\n"
+    global timeout
+    set timeout 60
+    expect {
+        -ex "seat-probe: PASS $stage (endpoint denied; GPU denied; DAC verified)" { lc_pass "KEYS-OVERRUN $stage: a whole line arrived" }
+        -ex "seat-probe: FAIL" { lc_fail "guest authority witness failed ($stage)" }
+        -re {EXTINCTION:} { lc_extinction_fail "witness $stage" }
+        timeout { lc_fail "KEYS-OVERRUN RED ($stage): a whole command line did not arrive" }
+        eof { lc_fail "EOF ($stage)" }
+    }
+}
+set depth 0
+lc_boot
+set timeout $lc_boot_timeout
+expect {
+    -re {input\[0\] up \(poll-mode eventq, depth ([0-9]+)\)} { set depth $expect_out(1,string); exp_continue }
+    -ex "Thylacine login: " {}
+    -re {EXTINCTION:} { lc_extinction_fail "boot" }
+    timeout { lc_fail "no login" }
+    eof { lc_fail "EOF before login" }
+}
+lc_raw_send "michael\r" "login user"
+expect {
+    -ex "password: " {}
+    timeout { lc_fail "no password prompt" }
+    eof { lc_fail "EOF before password" }
+}
+lc_raw_send "correct-horse-battery-staple-v1\r" "login password"
+expect {
+    -re {input\[0\] up \(poll-mode eventq, depth ([0-9]+)\)} { set depth $expect_out(1,string); exp_continue }
+    -ex "login: session compositor (halcyond) spawned" {}
+    -ex "Thylacine textual shell" {
+        puts "\nLS-CI SKIP: default (ut) image -- this scenario drives the session\
+ compositor. Bake with: THYLACINE_HALCYON_SESSION=1 THYLACINE_HALCYON_PROFILE=instrument tools/build.sh kernel --config ci"
+        lc_quit
+        exit 77
+    }
+    timeout { lc_fail "no graphical session" }
+    eof { lc_fail "EOF at session start" }
+}
+set timeout 60
+expect {
+    -re {halcyond: status bar [^\r\n]*running false panes 2} {}
+    -re {EXTINCTION:} { lc_extinction_fail "session" }
+    timeout { lc_fail "welcome and shell did not become ready" }
+}
+if {$depth != 64} { lc_fail "KEYS-OVERRUN RED: the keyboard's ring is $depth deep, and QEMU offers 64" }
+after 1500
+key "meta_l+f"
+witness baseline
+
+# Control: the loop stops, and nothing arrives behind it.
+send_key "f8"
+set timeout 30
+expect {
+    -re {lictor: input ring overran, [0-9]+ held keys released} {
+        lc_fail "KEYS-OVERRUN RED (control): a ring overran with nothing typed behind the stop"
+    }
+    -ex "lictor: serve loop resumed" { lc_pass "KEYS-OVERRUN control: the loop stopped and resumed" }
+    -re {EXTINCTION:} { lc_extinction_fail "the control stop" }
+    timeout { lc_fail "KEYS-OVERRUN: the lever never stopped the loop (was it armed?)" }
+    eof { lc_fail "EOF at the control stop" }
+}
+after 800
+set timeout 0
+expect {
+    -re {lictor: input ring overran, [0-9]+ held keys released} {
+        lc_fail "KEYS-OVERRUN RED (control): a ring overran with nothing typed behind the stop"
+    }
+    timeout {}
+}
+witness control
+
+# Shift down, the loop stopped, the ring full, and shift up with nowhere to go.
+if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -k shift@2500 >/dev/null 2>/dev/null &} e]} { lc_fail $e }
+after 300
+send_key "f8"
+type [string repeat x 40]
+set timeout 30
+expect {
+    -re {lictor: input ring overran, ([0-9]+) held keys released} {
+        lc_pass "KEYS-OVERRUN overrun: $expect_out(1,string) held keys released"
+    }
+    -re {lictor: seat failed: [^\r\n]*[\r\n]} { lc_fail "KEYS-OVERRUN RED: the seat failed behind the stop: $expect_out(0,string)" }
+    -re {EXTINCTION:} { lc_extinction_fail "the stop" }
+    timeout { lc_fail "KEYS-OVERRUN RED: the loop came back and no held key was released" }
+    eof { lc_fail "EOF at the stop" }
+}
+witness answered
+
+# The seat must not read a key as down: the chord takes the screen, and normal output
+# returns. The first chord under the lever meets an injected stall and starts over.
+send_key "ctrl+alt+f10"
+set timeout 20
+expect {
+    -re {lictor: seat failed: [^\r\n]*[\r\n]} { lc_fail "KEYS-OVERRUN RED: the seat refused the takeover: $expect_out(0,string)" }
+    -re {lictor: kernel closed trusted seat \(scanout [a-z]+\)} {
+        lc_fail "KEYS-OVERRUN RED: the episode failed at its deadline: $expect_out(0,string)"
+    }
+    -ex "lictor: trusted scanout active" { lc_pass "KEYS-OVERRUN takeover" }
+    -re {EXTINCTION:} { lc_extinction_fail "the takeover" }
+    timeout { lc_fail "KEYS-OVERRUN RED: no takeover and no failure within 20 s of the chord" }
+    eof { lc_fail "EOF at the takeover" }
+}
+after 1500
+key "ret"
+set timeout 30
+set ended 0
+set rejoined 0
+expect {
+    -re {lictor: seat failed: [^\r\n]*[\r\n]} { lc_fail "KEYS-OVERRUN RED: the episode failed after the takeover: $expect_out(0,string)" }
+    -re {lictor: kernel closed trusted seat \(scanout [a-z]+\)} {
+        lc_fail "KEYS-OVERRUN RED: the episode failed at its deadline: $expect_out(0,string)"
+    }
+    -re {corvus: imperium: SAK with nothing pending|halcyond: seat link rejoined generation=[0-9]+} {
+        if {[string match corvus* $expect_out(0,string)]} { set ended 1 } else { set rejoined 1 }
+        if {!($ended && $rejoined)} { exp_continue }
+    }
+    -re {EXTINCTION:} { lc_extinction_fail "the end of the episode" }
+    timeout { lc_fail "KEYS-OVERRUN RED: the episode did not return within 30 s (ended=$ended rejoined=$rejoined)" }
+    eof { lc_fail "EOF at the end of the episode" }
+}
+after 1500
+witness restored
+lc_pass "KEYS-OVERRUN a release the ring dropped did not park the seat"
+lc_quit
+exit 0

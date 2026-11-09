@@ -11,7 +11,7 @@
 # Since IM-3 corvus ARMS itself as the episode consumer at startup, so the
 # decision is `episode`: the kernel freezes the console for everyone but
 # corvus, corvus finds no pending imperium request, shows the "nothing
-# pending" panel on the trusted path, and ENDs on any key -- the section-4
+# pending" panel on the trusted path, and ENDs on Enter or Esc -- the section-4
 # "when in doubt, hit the SAK" check. (Before IM-3 this scenario asserted
 # `unarmed`; the request arms live in im3-lex-curiata.exp.)
 #
@@ -19,8 +19,10 @@
 #       never satisfy (a): a bare `b` (the lever minus the monitor escape)
 #       produces no SAK line -- the witness keys on the BREAK, not the byte.
 #   (a) POSITIVE: Ctrl-A b -> `cons: SAK (episode)` -> the "nothing pending"
-#       panel (corvus's bytes, on a console the shell cannot reach) -> a key
-#       dismisses it -> `trusted path: done`.
+#       panel (corvus's bytes, on a console the shell cannot reach) -> a
+#       letter is swallowed and the panel stays (a key still being typed when a
+#       panel comes up must not reach the shell) -> Enter dismisses it ->
+#       `trusted path: done`.
 #   (c) EVERY SAK: a second Ctrl-A b -> a second episode (the refinement that
 #       retired the early return which swallowed every SAK after the first).
 #   (d) the session SURVIVES: after END a command EXECUTES, keyed on an
@@ -71,8 +73,16 @@ proc empty_episode {phase} {
     if {$d ne "episode"} {
         lc_fail "SAK decision was '$d', expected 'episode' ($phase) -- corvus is not ARMED as the episode consumer (IM-3's startup ARM), or the trusted Proc is gone"
     }
-    lc_expect "nothing pending -- press any key" "corvus's empty-episode panel ($phase)"
-    lc_raw_send "x" "dismiss the panel ($phase)"
+    lc_expect "nothing pending -- press Enter" "corvus's empty-episode panel ($phase)"
+    lc_raw_send "x" "a letter at the panel ($phase)"
+    set timeout 3
+    expect {
+        -ex "trusted path: done" { lc_fail "a letter dismissed the panel ($phase): the rest of a key typed into a panel would reach the shell" }
+        -re {EXTINCTION:} { lc_extinction_fail "panel ($phase)" }
+        timeout { lc_step "the letter was swallowed and the panel stayed ($phase)" }
+        eof { lc_fail "EOF at the panel ($phase)" }
+    }
+    lc_raw_send "\r" "Enter dismisses the panel ($phase)"
     lc_expect "trusted path: done" "corvus's verdict line ($phase)"
     # corvus prints that line INSIDE the episode and ENDs afterwards, so it is
     # not the END witness it was used as until 2026-09-21: the next Ctrl-A b,

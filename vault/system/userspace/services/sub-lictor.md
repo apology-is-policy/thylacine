@@ -12,8 +12,10 @@ code:
   - usr/lictor/src/backend/gpu.rs
   - usr/lictor/src/backend/gpu/cursor.rs
   - usr/lictor/src/cursor_queue.rs
+  - usr/lictor/src/eventq.rs
   - usr/lictor/src/backend/import.rs
   - usr/lictor/src/backend/input.rs
+  - usr/lictor/src/backend/intake.rs
   - usr/lictor/src/backend/mod.rs
   - usr/lictor/src/backend/screen.rs
   - usr/lictor/src/backend/seat.rs
@@ -38,6 +40,8 @@ code:
   - usr/lictor/examples/render-preview.rs
   - tools/bake-lictor.py
   - tools/interactive/ls-graphical-sak.exp
+  - tools/interactive/ls-graphical-keys-overrun.exp
+  - tools/interactive/ls-graphical-keys-behind.exp
   - tools/interactive/ls-graphical-sak-states.exp
   - tools/interactive/ls-graphical-sak-recover.exp
   - tools/interactive/ls-graphical-sak-dead.exp
@@ -57,7 +61,7 @@ hazards: [haz-driver-panic-dos]
 abis: [abi-trusted-seat, abi-native-nonblock]
 design: ["docs/GRAPHICAL-SAK-OWNERSHIP.md", "docs/GRAPHICAL-SAK-PORTABILITY.md", "docs/HALCYON-TRUSTED-EPISODE.md"]
 created: 2026-09-18
-updated: 2026-11-03
+updated: 2026-11-09
 ---
 ## Clipboard cancellation progress boundary
 
@@ -71,7 +75,7 @@ failure/restoration path. No clipboard payload, new kernel role or syscall enter
 Lictor. Native healthy/stalled physical F10 probes and graphical regressions
 are pinned in HALCYON-INTERACTION-STATUS; no Pi/minimum-mode qualification is
 claimed. The test-mode parked-RPC marker is emitted only in QUIESCING, before
-this sole hardware-owner thread can ACK into EXCLUSIVE.
+the serve thread, the only one that calls the seat endpoint, can ACK into EXCLUSIVE.
 
 ## October 1 production-debt recheck
 
@@ -254,9 +258,34 @@ the stall shots.
 
 Physical Ctrl-Alt-F10 (with Ctrl-Alt-Delete retained for compatibility)
 starts a kernel generation (the kernel scans the chord; [[abi-trusted-seat]]). Normal hardware requests
-park while the service drains all outstanding work, excludes every advertised
+park while the service waits out the synchronous work and the cursor queue, excludes every advertised
 scanout and selects private, non-shareable trusted backing. Held keys and buttons
-must be released before Corvus can receive input. Operation 65 admits only
+must be released before Corvus can receive input, and the kernel refuses RESTORED
+while its own table shows a key down. Both read the device's reports, and a device
+with no room for a report drops it whole and tells nobody, so a release can go
+missing behind an input thread that stopped draining. The device cannot be asked
+what is down. So the eventq is as deep as QEMU offers and one page holds (`eventq.rs`,
+64 against 16 before), and when a drain finds less than a report's worth free, every
+key this side holds is released through the normal path, to the kernel and the
+compositor alike. That count is taken after the recycle is published, against what
+was offered before it: the device moves it, it never goes back, and a drop at any
+moment before the read leaves it at least that close, so it can overstate a drop and
+never miss one. A key still down loses one press, and reads as released to both gates,
+so after an overrun the chord can be physically down when ACK goes out; Delete and F10
+have no rune, so nothing reaches Corvus from them. A release that
+never came would park the seat on every chord until that key was pressed again. This
+recovers the seat, not the keystrokes: a report the device dropped is gone
+(`ls-graphical-keys-overrun`, and `ls-graphical-keys-behind` for a real client's
+queue). The same release runs where an entry found the input queue full (see
+Concurrency). Whatever the devices had placed as the seat returns was pressed at a trusted
+screen, and the input thread may not have moved it yet: until a pass of the input
+thread begun after the return has been taken (`intake::passes`, `Seat::tail_until`), what
+it hands over reaches the kernel and `held`, not the compositor, and the seat says how
+much it kept back (`ls-graphical-sak-dead` leg H, whose lever stops the input thread
+through the held restore). A paint in phase 2 retries after a
+stall and fails the episode on an answer, and in neither case does VISIBLE go out for
+it (legs F and G). The takeover line reports how many fenced chains stood on the device
+when the takeover reached it and how long it took. Operation 65 admits only
 standard normal pointer shapes, scale and position from the authenticated
 compositor. Private cursor DMA never enters the normal object ledger. Before
 trusted scanout every cursor plane receives a transparent image followed by a
@@ -266,19 +295,22 @@ misses its deadline stalls the lane, exactly as the controlq stalls:
 - the queue is not idle, so cursor commands are refused and quiescence waits;
 - the completion pump retires the chain late (`cursor_settle`), with the same
   validation an on-time chain gets;
-- a malformed entry, or a chain outstanding for 30 s, fails the queue.
+- a malformed entry fails the queue, and a chain outstanding for 30 s abandons it
+  until that chain retires.
 A controlq step on the plane that stalled (the image upload, the plane's
 one-time create and attach) is not the lane's failure, since the controlq's own
 stall holds quiescence. A stalled create or attach is taken as done, because
-repeating it would collide with what it made. A failed cursor queue retains its
-backing until GPU reset and prevents trusted acknowledgement.
-Cursor waits share controlq's sticky allowance for an outstanding GPU readback;
-the two queues share the device loop, so a delayed readback is not itself proof
-of a dead cursor queue. Input latency under that load remains a runtime gate.
+repeating it would collide with what it made. A failed or abandoned cursor queue
+prevents trusted acknowledgement, and a failed one retains its backing until GPU
+reset. The two queues share the device loop, so a client's readback can delay a
+cursor chain, which stalls at its ordinary bound rather than hold the serve loop.
+Input latency under that load remains a runtime gate.
 See `docs/HALCYON-INTERACTION.md` section 14.
 
 Corvus sends bounded semantic frames containing identity, exact capabilities,
-term and verdict. Lictor uses baked fonts and colors. Corvus receives key bytes
+term and verdict. Lictor uses baked fonts and colors. Its panels say "Press
+Enter to return": Corvus closes them only on Enter or Esc
+([[dec-2026-11-05-panels-enter-or-esc]]). Corvus receives key bytes
 only after Lictor acknowledges the current frame's actual presentation. The
 ordinary compositor receives neither those bytes nor the trusted framebuffer.
 The current backend uses the approved neutral backdrop when a completed private
@@ -299,10 +331,32 @@ compositor never sees an error for a display that is about to return.
 Restoration is owed from the moment a takeover begins (`Seat.displaced`, set
 before `exclude_all_outputs`), not only once it completes: a takeover that
 fails part-way may already have disabled outputs or bound the trusted image.
-`Device::restore` needs only the control queue's quiescence
-(`Gpu::controlq_retired`), so a cursor queue poisoned on a live engine does not
-cost the display. A restore refused by a stalled engine is retried every
-pass until the engine revives or dies. Restoration stays owed until the
+`Device::restore` needs only synchronous quiescence
+(`Gpu::synchronous_clear`), so neither a cursor queue poisoned on a live engine
+nor a client's poisoned chain costs the display. Takeover itself asks that and an
+idle cursor queue (`Gpu::takeover_clear`, vote 50): a fenced chain, in flight or
+poisoned, cannot reach the trusted image, whose id `Objects::valid_id` refuses on
+every named route and which is never attached to a context, so a client's poison
+does not deny the SAK. Its backlog can: the paint is fenced, so it retires behind
+what the host has queued. A takeover that meets a stall starts over when the engine
+revives (`Gpu::stall_pending`), under the kernel's five-second deadline, and says so; a
+device's answer fails it at once. While the engine is alive and the control queue
+holds the takeover up (`Gpu::control_waiting`: stalled behind a chain, or a command not
+yet retired), the takeover renews that deadline at most once a second (`SEAT_RENEW`,
+up to 35 s from the chord: vote 71), so a backlog delays the SAK rather than failing
+it. One chain that runs for seconds retires nothing and is renewed all the same; one
+that never retires kills the engine at `FENCE_ABANDON_MS`, inside the 35 s. A cursor
+queue stalled alone renews nothing, since no client reaches it. Witnesses:
+`ls-graphical-sak-dead` leg 1 (a stall withheld 8 s, no retirement in between) and
+`ls-graphical-sak-backlog` (a client's deep queue, on a virgl device). A frame paint that meets a stall stays owed and the
+next pass paints it again. Once serving, no synchronous command waits past
+`SUBMIT_DEADLINE_MS`, a client's readback ahead of it or not (operator vote 72): one
+transfer cannot stop this loop for as long as its client queued; the command stalls
+the engine, which revives when the chain retires, and what a client sent meanwhile is
+refused. A serving `cursor_command` stalls the same way. A chain past
+`FENCE_ABANDON_MS` is abandoned rather than poisoned: a well-formed late retirement
+frees the lane (`cursor_queue::Queue::abandon`). A restore refused by a stalled engine
+is retried every pass until the engine revives or dies. Restoration stays owed until the
 kernel acknowledges RESTORED: when the kernel refuses it (a grantee that
 exited before the commit), the seat fails and rebinds again before it
 returns. `Seat.active` names the generation whose trusted scanout is up, so
@@ -380,6 +434,26 @@ and partial input/output buffers. Kernel seat state holds process incarnations,
 generation, phase, semantic frame/visibility sequence, held keys and secret FIFO.
 
 ## Concurrency
+
+Lictor runs two threads. The input thread (`backend/intake.rs`, operator vote 72,
+2026-11-05) owns the virtio-input devices from the end of probe. Every 4 ms it drains
+each eventq into one queue of 4096 entries behind a futex `Mutex`, so a serve loop held
+in a synchronous GPU wait (up to `SUBMIT_DEADLINE_MS` behind a stall) leaves no ring
+undrained. It never calls the seat endpoint and never prints: a console write parks in
+the exclusive phase, and the thread that drains the rings must not park there. The
+ring's own notes (the test-mode low-water line, a malformed used element) travel in the
+queue, and the serve thread prints them. The serve thread swaps the whole queue out
+each pass and keeps every seat decision: what a key means, the kernel INPUT call, the
+compositor batches, the held-key table. An eventq overrun travels as an entry at its
+place in the order. An entry that finds the queue full is dropped and marks its device;
+the mark is set only while the queue is full and is taken with the entries, so the loss
+follows everything taken with it, and the serve thread releases that device's held keys
+there (`lictor: input queue overran`). A lost diagnostic note marks nothing. InputInfo
+answers from values read at probe, since the device belongs to the input thread.
+Nothing joins the thread: `t_exit_group` ends it with the process, and no input DMA is
+released before then. Under the armed test latch, F8 stops the input thread at the pass
+that read it, before that batch is queued, and the serve loop resumes it after its own
+five-second stop, so `ls-graphical-keys-overrun` still overruns the ring.
 
 The event loop polls physical input independently of broker reply progress.
 Accepted endpoints are nonblocking, so a stalled normal reader cannot park the

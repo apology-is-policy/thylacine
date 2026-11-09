@@ -2495,6 +2495,11 @@ and require the gate to go RED; (c) state here what raises the stale wakes
 during the stall — and if nothing does on this host, say that the widening is
 INERT here and name the lane where it is not.
 
+Superseded on 2026-11-09 by operator vote 72: the widening is gone, so a
+synchronous command behind a readback stalls at `SUBMIT_DEADLINE_MS` on every
+lane, and the DEADLINE arm asks that the engine revive after the readback rather
+than that every present behind it succeed.
+
 ### 4.5.14 The owed round on C-6b (2026-08-18, OPUS fallback): 1 P0 / 3 P1 / 3 P2 / 3 P3
 
 The C-0d Fable close was dirty, so a follow-up was owed on its fixes plus C-6b.
@@ -2532,8 +2537,9 @@ a general floor would reject legitimate compressed textures).
 #### 4.5.15 The synchronous deadline is a two-stage latch: STALLED, then DEAD (decided 2026-10-29, operator vote 29)
 
 **What it replaces.** A synchronous chain that saw `SUBMIT_DEADLINE_MS`
-(500 ms) of stale wakes latched `Controlq.dead`, permanently (§4.5.13 widens
-the deadline to `FENCE_ABANDON_MS` while a readback is in flight). The latch
+(500 ms) of stale wakes latched `Controlq.dead`, permanently (§4.5.13 widened
+the deadline to `FENCE_ABANDON_MS` while a readback was in flight, until vote
+72 removed the widening). The latch
 answers the #31 cascade: a late completion writing a response buffer that the
 next command has already reused. Because it was permanent, any host stall past
 500 ms cost the display for the boot. It was measured on thyla-pi on
@@ -2590,14 +2596,53 @@ block the serve loop, and seat input with it. Neither was taken.
     pins kept;
   - the 30 s park bound.
   A stall is not a poisoned chain. It is the one non-quiescent state
-  that comes back by itself. A seat episode whose restoration meets a stall
+  that comes back by itself. A takeover that meets a stall starts over when the
+  engine revives, under the kernel's deadline: the command it stalled on has no answer
+  yet, and everything it repeats is idempotent (TRUSTED-PATH, vote 50's audit). A frame
+  paint that meets one stays owed: the next pass paints it again, and Corvus reads no
+  key until it is visible. A seat episode whose restoration meets a stall
   fails at once, so its grant is cancelled. The seat's return to normal then
   waits for the stall: it rebinds once the engine revives, or goes back
   without its display once the engine dies (TRUSTED-PATH §7, vote 30).
-- **Restoring a scanout needs only the control queue's quiescence.** A late
-  cursor chain can touch only a cursor plane, and a cursor queue that is not
-  idle already keeps any later takeover out. So a poisoned cursor queue on a
-  live engine does not cost the display.
+- **Restoring a scanout needs only synchronous quiescence.** A late cursor chain
+  can touch only a cursor plane, and a cursor queue that is not idle already keeps
+  any later takeover out. A client's fenced chain, in flight or poisoned, could
+  equally have been running with that frame on the glass before the episode, so
+  rebinding adds nothing for it to reach. Neither costs the display. (Vote 50: a
+  chain that had to retire first would strand the trusted scene behind a client's
+  poison, since this refusal repeats every pass.)
+- **Takeover waits for no fenced chain.** `Gpu::takeover_clear` asks that the cursor
+  queue is idle and no synchronous chain is outstanding. A fenced chain cannot reach
+  the trusted image: `Objects::valid_id` refuses a trusted id on every named route,
+  a ctx-0 transfer included, the trusted resource is never attached to a context, and
+  only the broker binds scanouts (TRUSTED-PATH, vote 50). The trusted paint still
+  retires behind what the host has queued, since a synchronous chain is fenced, so a
+  client's backlog delays a takeover: on V3D, behind the C-6 gate's queue, synchronous
+  commands retired 241 to 311 ms after their 500 ms deadline.
+- **No serving synchronous command waits past `SUBMIT_DEADLINE_MS`, readback or
+  not** (operator vote 72, 2026-11-05). The wait used to widen to `FENCE_ABANDON_MS`
+  while any readback was in flight, outside a trusted episode; one transfer from any
+  client then stopped the serve loop for as long as that client queued, so a chord went
+  unseen and keys were lost. The widening predated the recoverable stall (vote 29),
+  which already keeps a busy device from latching `dead`. A command behind a readback
+  now stalls the engine at 500 ms; submissions are refused until the chain retires, so a
+  bystander's present answers an error for that long instead of blocking, and the C-6
+  gate's DEADLINE arm counts a recovered stall as survival. Only bring-up, before the
+  serve loop, still waits the abandonment bound.
+- **Input does not wait for the serve loop** (operator vote 72, second half). A
+  synchronous wait still holds the serve loop up to `SUBMIT_DEADLINE_MS`, so Lictor's
+  input thread (`backend/intake.rs`) drains every eventq every 4 ms into a 4096-entry
+  queue, and the serve loop takes it whole each pass. The thread never prints and never
+  calls the seat endpoint; every seat decision stays on the serve loop. A full queue
+  drops the entry and releases that device's held keys where it was dropped.
+- **The cursor lane stalls and comes back.** A serving `cursor_command` never widens:
+  it stalls at `SUBMIT_DEADLINE_MS`, so a client's readback cannot hold the serve loop
+  through a pointer motion. A chain that outlives `FENCE_ABANDON_MS` is abandoned, not
+  poisoned: `Queue::idle` stays false, so takeover stays out, and a well-formed late
+  retirement frees the lane. A malformed entry, an unsolicited one, or a step of the
+  plane's own that the device refused poisons it, until device reset. Tapestry retries a
+  refused pointer update (`CURSOR_RETRY_MS`) rather than latching it, and forgets what it
+  last sent, since a stalled command's outcome is unknown.
 - **An unknown outcome keeps what it named.** A stalled command may have
   executed, so every guest resource it named stays referenced:
   - a stalled ATTACH keeps its pins, as `Device::attach` already does for any
@@ -2620,10 +2665,10 @@ block the serve loop, and seat input with it. Neither was taken.
   read as a device refusal and cost 3D for the boot.
 - **The cursor queue follows the same two stages.** A missed deadline leaves
   its chain outstanding, so the queue is not idle: cursor commands are refused
-  and `all_work_retired` is false. The completion pump retires the chain when
+  and `takeover_clear` is false. The completion pump retires the chain when
   its used entry arrives, with the validation an on-time completion gets, and a
   malformed entry still poisons the queue. A chain outstanding for
-  `FENCE_ABANDON_MS` poisons it permanently, as before.
+  `FENCE_ABANDON_MS` abandons the queue until that chain retires.
 
 **What a stall costs tapestryd.** During a stall, every request tapestryd makes
 other than a retirement fails at once, and the present path skips frames. A

@@ -12,7 +12,7 @@ hazards: [haz-driver-panic-dos]
 abis: []
 design: ["docs/TAPESTRY.md", "docs/AURORA-CONFIG.md"]
 created: 2026-08-02
-updated: 2026-11-04
+updated: 2026-11-05
 ---
 ## Cooperative hidden storage (October 4)
 
@@ -2038,7 +2038,7 @@ X,Y` speaks for the crossing off a track.
 the recycle and BEFORE the nothing-new early return, because the device can
 only deliver into descriptors this driver has published and it has not yet
 consumed: `avail_idx - cur_used` is exactly what the transport had to work with
-while the serve loop was away, and `QUEUE_SIZE` is 16. At zero it had none, and
+while the serve loop was away, and the ring is as deep as `eventq::depth` chose. At zero it had none, and
 an event it could not place did not arrive -- a guest-side fact that holds
 whatever the transport chooses to do with such an event.
 
@@ -2046,7 +2046,7 @@ whatever the transport chooses to do with such an event.
 stating plainly: the input devices are POLL-MODE and are NOT in the pollfd set,
 so nothing about an arriving event wakes the serve loop. The drain interval IS
 the pass period -- bounded by the frame tick, so <= ~67 ms at `IDLE_HZ` -- and a
-HELD pass is therefore the only condition under which a 16-deep eventq can run
+HELD pass is therefore the only condition under which the eventq can run
 out of descriptors between drains. `serve pass took N ms` names such a pass.
 
 **Calibration (the control that makes a future firing mean something).** On a
@@ -3096,7 +3096,10 @@ frame boundary, then sends changed shape/scale/position through Lictor. It never
 paints over a stale CPU mirror of accelerated content or restores saved pointer
 background pixels. Preferences live in surface incarnations and vanish with
 them. A seat generation change invalidates the last-sent pointer state because
-Lictor hid it during the trusted episode. The portable cursor raster lives in
+Lictor hid it during the trusted episode. A refused update is retried after
+`CURSOR_RETRY_MS`, never latched: a cursor stall behind a client's readback comes
+back by itself. A refusal also forgets the last-sent state, since a stalled command's
+outcome is unknown. The portable cursor raster lives in
 [[sub-libhalcyon]]; VirtIO queue ownership and exclusion live in [[sub-lictor]].
 
 HI-0 runtime checkpoint (2026-09-24): `ls-halcyon-pointer` passes on QEMU/KVM

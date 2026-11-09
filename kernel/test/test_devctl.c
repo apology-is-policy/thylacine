@@ -498,6 +498,7 @@ void test_devctl_read_cons_format(void) {
     TEST_ASSERT(contains(buf, (size_t)got, "rx_drop_line:"),  "has rx_drop_line:");
     TEST_ASSERT(contains(buf, (size_t)got, "rx_drop_ring:"),  "has rx_drop_ring:");
     TEST_ASSERT(contains(buf, (size_t)got, "rx_drop_modeflush:"), "has rx_drop_modeflush:");
+    TEST_ASSERT(contains(buf, (size_t)got, "rx_drop_side:"),  "has rx_drop_side:");
     TEST_ASSERT(contains(buf, (size_t)got, "tx_dropped:"),    "has tx_dropped:");
     TEST_ASSERT(contains(buf, (size_t)got, "tx_room_waits:"), "has tx_room_waits:");
 

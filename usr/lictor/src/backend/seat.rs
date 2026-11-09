@@ -1,21 +1,25 @@
 //! Physical input and the kernel-bound episode pump. This remains independent
 //! of normal compositor RPC progress: a parked GPU request cannot stall SAK.
-use alloc::vec::Vec;
+use alloc::{collections::VecDeque, vec::Vec};
 use crate::{endpoint as ep, keymap::{self, Mods}, model::{Model, State}};
-use super::{device::Device, screen::Screen, input::{InputDev, RawInputEvent, EV_KEY}};
+use super::{device::Device, screen::Screen, input::{InputDev, RawInputEvent, Report, EV_KEY}, intake::{self, Entry}};
 #[cfg(feature = "test-mode")]
 use super::device::SeatShot;
 
+/// One input device as the serve thread sees it. The device itself belongs to the input
+/// thread (`intake`), so what InputInfo answers is read once, here: virtio-input's
+/// configuration does not change.
 pub struct Input {
-    pub device: InputDev,
+    /// EV_ABS, EV_REL, and the X and Y maxima.
+    pub info: (bool, bool, u32, u32),
     pub keyboard: bool,
     pub events: Vec<(u16, u16, u32)>,
     held: [bool; 768],
 }
 impl Input {
-    pub fn new(device: InputDev) -> Self {
-        let keyboard = !device.supports_abs() && !device.supports_rel();
-        Self { device, keyboard, events: Vec::new(), held: [false; 768] }
+    pub fn new(device: &InputDev) -> Self {
+        let info = (device.supports_abs(), device.supports_rel(), device.abs_max(0), device.abs_max(1));
+        Self { info, keyboard: !info.0 && !info.1, events: Vec::new(), held: [false; 768] }
     }
 }
 #[derive(Default)]
@@ -30,6 +34,11 @@ pub struct Seat {
     sequence: u64,
     masked: u32,
     model: Model,
+    /// When this generation's takeover first reached the device, and how many fenced
+    /// chains stood on it then: what the takeover line reports.
+    takeover_began: Option<(u64, u32, libthyla_rs::time::Instant)>,
+    /// The generation whose takeover deadline was last renewed, and when.
+    renewed: Option<(u64, libthyla_rs::time::Instant)>,
     failed_since: Option<libthyla_rs::time::Instant>,
     /// A takeover began, so normal output may not be showing: owed a restore
     /// until the device completes one or its engine dies.
@@ -41,7 +50,46 @@ pub struct Seat {
     withheld_said: bool,
     #[cfg(feature = "test-mode")]
     test_refuse_restored: bool,
+    /// A withheld stall is let through this long after the shot, past the kernel's
+    /// first deadline, or when the kernel closes the episode it held up, if sooner.
+    #[cfg(feature = "test-mode")]
+    test_release_at: Option<libthyla_rs::time::Instant>,
+    #[cfg(feature = "test-mode")]
+    test_stall_frame: bool,
+    /// What the frame's shot did. This process says nothing in an open episode
+    /// (`diagnostic`), so it says so afterwards.
+    #[cfg(feature = "test-mode")]
+    test_frame_stalled: Option<bool>,
+    /// How many paints of a frame failed, and whether VISIBLE ever went out over one.
+    #[cfg(feature = "test-mode")]
+    test_frame_retries: u32,
+    #[cfg(feature = "test-mode")]
+    test_frame_unpainted: bool,
+    /// Keep the next ordinary return's restore waiting, with the keys left in the ring.
+    #[cfg(feature = "test-mode")]
+    test_hold_restore: bool,
+    /// The generation whose shot is taken: a takeover that starts over after a
+    /// stall is the same takeover.
+    #[cfg(feature = "test-mode")]
+    test_shot_generation: Option<u64>,
+    /// Taken before the first paint, which it may stall, and acted on after it.
+    #[cfg(feature = "test-mode")]
+    test_shot_due: Option<SeatShot>,
+    /// The key that stops the serve loop was pressed; the armed lever decides.
+    #[cfg(feature = "test-mode")]
+    pub test_blind: bool,
+    /// The serve thread's half of the intake swap, kept for its capacity.
+    taken: VecDeque<(u8, Entry)>,
+    /// The seat returned when the input thread had finished fewer passes than this: what it
+    /// hands over until then was pressed at a trusted screen (`drain_episode_tail`).
+    tail_until: Option<u64>,
 }
+const RENEW_EVERY_MS: u64 = 1000;
+#[cfg(feature = "test-mode")]
+const TEST_HOLD_RESTORE_MS: u64 = 3000;
+/// Past the kernel's five-second takeover deadline, well inside FENCE_ABANDON_MS.
+#[cfg(feature = "test-mode")]
+const TEST_RELEASE_AFTER_MS: u64 = 8000;
 /// How long the failure notice stays up before normal output returns.
 const FAILURE_NOTICE_MS: u128 = 1500;
 impl Seat {
@@ -52,38 +100,38 @@ impl Seat {
 
     pub fn input(&mut self, inputs: &mut [Input]) {
         let mut lost = false;
-        for input in inputs.iter_mut() {
-            let mut events: Vec<RawInputEvent> = Vec::new();
-            input.device.drain(|event| events.push(event));
-            for event in events {
-                if event.etype == EV_KEY && (event.code as usize) < input.held.len() {
-                    input.held[event.code as usize] = event.value != 0;
-                }
-                if input.keyboard && event.etype == EV_KEY && event.code < 256 {
-                    self.mods.update(event.code, event.value != 0);
-                    let mut m = ep::Message::default();
-                    m.code = event.code as u32; m.value = event.value;
-                    if event.value == 1 {
-                        if let Some(ch) = char::from_u32(keymap::resolve(event.code, self.mods.mask())) {
-                            if ch != '\0' { m.length = ch.encode_utf8(&mut m.data[..4]).len() as u32; }
-                        }
-                    }
-                    if ep::call(ep::INPUT, &mut m).is_err() { self.phase = 4; lost = true; }
-                    else { self.adopt(&m); }
-                }
-                if self.phase == 0 && self.withheld {
-                    if !core::mem::replace(&mut self.withheld_said, true) {
-                        super::diagnostic("lictor: input withheld from the compositor (display lost in a trusted episode)\n");
-                    }
-                } else if self.phase == 0 {
-                    if input.events.len() < 256 { input.events.push((event.etype, event.code, event.value)); }
-                    else {
-                        // Losing a release could stick a key. Drop the batch
-                        // and report SYN_DROPPED, which forces an input reset.
-                        input.events.clear(); input.events.push((0, 3, 0));
-                    }
-                }
+        let passes = intake::passes();
+        let mut taken = core::mem::take(&mut self.taken);
+        let dropped = intake::take(&mut taken);
+        for (index, entry) in taken.drain(..) {
+            let Some(input) = inputs.get_mut(index as usize) else { continue };
+            match entry {
+                Entry::Report(Report::Event(event)) => self.deliver(input, event, &mut lost),
+                Entry::Report(Report::Low { free, depth, avail, used }) => super::diagnostic(&alloc::format!(
+                    "tapestryd: input eventq LOW: {} free of {} (avail {} used {})\n", free, depth, avail, used)),
+                Entry::Report(Report::Malformed { id, len }) => super::diagnostic(&alloc::format!(
+                    "tapestryd: input malformed used elem id={} len={}\n", id, len)),
+                Entry::Overran => self.release_held(input, "input ring", &mut lost),
             }
+        }
+        self.taken = taken;
+        for (index, input) in inputs.iter_mut().enumerate() {
+            if dropped.get(index).copied().unwrap_or(false) { self.release_held(input, "input queue", &mut lost); }
+        }
+        // Only a prefix is kept back, so a release may reach the compositor without its
+        // press, never a press without its release.
+        if let Some(until) = self.tail_until {
+            let mut kept_back = 0;
+            for input in inputs.iter_mut() {
+                let before = input.events.len();
+                input.events.retain(|event| *event == (0, 3, 0));
+                kept_back += before - input.events.len();
+            }
+            if kept_back != 0 {
+                super::diagnostic(&alloc::format!(
+                    "lictor: {} input events pressed at a trusted screen kept from the compositor\n", kept_back));
+            }
+            if passes >= until { self.tail_until = None; }
         }
         // A refused chord moves no generation, so nothing else tells the compositor
         // that a release it was owed is gone.
@@ -91,6 +139,62 @@ impl Seat {
             for input in inputs {
                 input.events.clear();
                 if lost && !self.withheld { input.events.push((0, 3, 0)); }
+            }
+        }
+    }
+    // A release may be among what was dropped, and the device cannot be asked what is
+    // down. A release of a key still down costs one press. A release that never comes
+    // parks the seat: this side withholds its ACK and the kernel its restore, on every
+    // chord until that key is pressed again.
+    fn release_held(&mut self, input: &mut Input, what: &str, lost: &mut bool) {
+        let mut released = 0;
+        for code in 0..input.held.len() {
+            if input.held[code] {
+                self.deliver(input, RawInputEvent { etype: EV_KEY, code: code as u16, value: 0 }, lost);
+                released += 1;
+            }
+        }
+        if released != 0 {
+            super::diagnostic(&alloc::format!("lictor: {} overran, {} held keys released\n", what, released));
+        }
+    }
+    // Whatever the devices had placed as the seat returns was pressed at a trusted screen,
+    // and the input thread may not have moved it yet: it moves the rings every few ms, later
+    // under load. The kernel and `held` still read it; the compositor must not, until a
+    // pass begun after this point has been taken. A pass under way now ends at passes() + 1
+    // and may have read its ring already, so the first pass begun after it ends at + 2.
+    fn drain_episode_tail(&mut self, inputs: &mut [Input]) {
+        self.tail_until = Some(intake::passes() + 2);
+        self.input(inputs);
+    }
+    fn deliver(&mut self, input: &mut Input, event: RawInputEvent, lost: &mut bool) {
+        #[cfg(feature = "test-mode")]
+        if event.etype == EV_KEY && event.code == intake::test::BLIND_KEY && event.value == 1 { self.test_blind = true; }
+        if event.etype == EV_KEY && (event.code as usize) < input.held.len() {
+            input.held[event.code as usize] = event.value != 0;
+        }
+        if input.keyboard && event.etype == EV_KEY && event.code < 256 {
+            self.mods.update(event.code, event.value != 0);
+            let mut m = ep::Message::default();
+            m.code = event.code as u32; m.value = event.value;
+            if event.value == 1 {
+                if let Some(ch) = char::from_u32(keymap::resolve(event.code, self.mods.mask())) {
+                    if ch != '\0' { m.length = ch.encode_utf8(&mut m.data[..4]).len() as u32; }
+                }
+            }
+            if ep::call(ep::INPUT, &mut m).is_err() { self.phase = 4; *lost = true; }
+            else { self.adopt(&m); }
+        }
+        if self.phase == 0 && self.withheld {
+            if !core::mem::replace(&mut self.withheld_said, true) {
+                super::diagnostic("lictor: input withheld from the compositor (display lost in a trusted episode)\n");
+            }
+        } else if self.phase == 0 {
+            if input.events.len() < 256 { input.events.push((event.etype, event.code, event.value)); }
+            else {
+                // Losing a release could stick a key. Drop the batch
+                // and report SYN_DROPPED, which forces an input reset.
+                input.events.clear(); input.events.push((0, 3, 0));
             }
         }
     }
@@ -106,10 +210,54 @@ impl Seat {
         let _ = ep::call(ep::FAIL, &mut m);
         super::diagnostic(&alloc::format!("lictor: seat failed: {} generation={}\n", why, self.generation));
     }
+    // A stall is other work ahead of ours on the device, not an answer from it: the
+    // chain retires, the engine revives and the next pass starts over. The kernel's
+    // deadline bounds that.
+    fn takeover_refused(&mut self, device: &Device) {
+        if device.gpu.stall_pending() {
+            super::diagnostic(&alloc::format!(
+                "lictor: takeover met a stall, starting over generation={}\n", self.generation));
+        } else {
+            self.fail("private scanout activation");
+        }
+    }
+    // A backlog ahead of the trusted paint delays the takeover (vote 71): while the
+    // engine is alive and the control queue holds the takeover up, the kernel's
+    // deadline is renewed, at most once a second and never past the limit the chord
+    // set. One chain that runs for seconds retires nothing meanwhile and is renewed
+    // all the same; a chain that never retires kills the engine at FENCE_ABANDON_MS,
+    // inside that limit. So a chord behind a client's work ends in the trusted screen
+    // or a dead engine. A cursor queue stalled alone renews nothing: no client
+    // reaches it, so that stall is the device's, and the deadline fails the takeover.
+    fn renew_behind_backlog(&mut self, device: &Device) {
+        if !device.gpu.control_waiting() { return; }
+        let now = libthyla_rs::time::Instant::now();
+        let at = match self.renewed {
+            Some((generation, at)) if generation == self.generation => at,
+            _ => { self.renewed = Some((self.generation, now)); return; }
+        };
+        if (at.elapsed().as_millis() as u64) < RENEW_EVERY_MS { return; }
+        let mut m = ep::Message::default(); m.generation = self.generation;
+        if ep::call(ep::RENEW, &mut m).is_ok() {
+            self.renewed = Some((self.generation, now));
+            super::diagnostic(&alloc::format!(
+                "lictor: takeover renewed behind a draining backlog generation={} chains={}\n",
+                self.generation, device.gpu.fenced_in_flight()));
+        }
+    }
     pub fn step(&mut self, device: &mut Device, screen: &mut Screen, inputs: &mut [Input]) {
         let mut m = ep::Message::default();
         if ep::call(ep::STATUS, &mut m).is_err() { self.fail("status"); return; }
         self.adopt(&m);
+        #[cfg(feature = "test-mode")]
+        if self.phase != 2 {
+            if let Some(stalled) = self.test_frame_stalled.take() {
+                super::diagnostic(&alloc::format!(
+                    "lictor: frame stall shot: stalled={} retries={} unpainted={} generation={}\n",
+                    stalled as u8, core::mem::take(&mut self.test_frame_retries),
+                    core::mem::take(&mut self.test_frame_unpainted) as u8, self.generation));
+            }
+        }
         self.quiescence.observe(self.generation, self.phase);
         let released = inputs.iter().all(|i| i.held.iter().all(|held| !held));
         match self.phase {
@@ -117,19 +265,46 @@ impl Seat {
             1 => {
                 for input in inputs.iter_mut() { input.events.clear(); }
                 device.reap();
-                if !device.gpu.all_work_retired() { return; }
+                #[cfg(feature = "test-mode")]
+                if self.test_release_at.is_some_and(|at| at.elapsed().as_millis() as u64 >= TEST_RELEASE_AFTER_MS) {
+                    self.test_release_at = None;
+                    device.gpu.test_stall_release();
+                }
+                if !self.active() { self.renew_behind_backlog(device); }
+                if !device.gpu.takeover_clear() { return; }
                 if !self.active() {
+                    if self.takeover_began.is_none_or(|(generation, ..)| generation != self.generation) {
+                        self.takeover_began = Some((self.generation, device.gpu.fenced_in_flight(),
+                                                    libthyla_rs::time::Instant::now()));
+                    }
                     self.model = Model { notice: b"Preparing the trusted path.".to_vec(), ..Model::default() };
+                    #[cfg(feature = "test-mode")]
+                    if self.test_shot_generation != Some(self.generation) {
+                        self.test_shot_generation = Some(self.generation);
+                        self.test_shot_due = device.test_latch_seat_shot();
+                        if self.test_shot_due == Some(SeatShot::StallInPaint) { device.gpu.test_latch_now(false); }
+                    }
                     if screen.paint(&mut device.gpu, &self.model, 0, None).is_err() {
-                        self.fail("private scanout activation"); return;
+                        self.takeover_refused(device);
+                        return;
                     }
                     #[cfg(feature = "test-mode")]
-                    let shot = device.test_latch_seat_shot();
+                    let shot = self.test_shot_due.take();
                     #[cfg(feature = "test-mode")]
                     {
                         screen.test_stall_after_exclusion = shot == Some(SeatShot::StallAfterExclusion);
-                        device.gpu.test_cursor_stall_next(shot == Some(SeatShot::CursorStall));
-                        self.test_refuse_restored = shot == Some(SeatShot::RefuseRestored);
+                        screen.test_hold_after_exclusion = shot == Some(SeatShot::HoldAfterExclusion);
+                        screen.test_refuse_bind = shot == Some(SeatShot::RefuseBind);
+                        device.gpu.test_cursor_stall_next(matches!(shot, Some(SeatShot::CursorStall | SeatShot::CursorAbandon)));
+                        if shot == Some(SeatShot::CursorAbandon) { device.gpu.test_cursor_abandon_next(); }
+                        if shot == Some(SeatShot::BehindReadback) { device.gpu.test_behind_readback(); }
+                        self.test_refuse_restored |= shot == Some(SeatShot::RefuseRestored);
+                        if shot == Some(SeatShot::HoldAfterExclusion) {
+                            self.test_release_at = Some(libthyla_rs::time::Instant::now());
+                        }
+                        self.test_stall_frame |= shot == Some(SeatShot::StallInFrame);
+                        screen.test_refuse_frame = shot == Some(SeatShot::RefuseFrame);
+                        self.test_hold_restore |= shot == Some(SeatShot::HoldRestore);
                     }
                     // A takeover that fails part-way may already have disabled
                     // outputs or bound the trusted image.
@@ -137,9 +312,16 @@ impl Seat {
                     let activated = screen.activate(&mut device.gpu);
                     #[cfg(feature = "test-mode")]
                     device.gpu.test_cursor_stall_next(false);
-                    if activated.is_err() { self.fail("private scanout activation"); return; }
+                    if activated.is_err() {
+                        self.takeover_refused(device);
+                        return;
+                    }
                     self.active = Some(self.generation); self.sequence = 0; self.masked = 0;
-                    super::diagnostic(&alloc::format!("lictor: trusted scanout active generation={}\n", self.generation));
+                    let (chains, ms) = self.takeover_began.take()
+                        .map_or((0, 0), |(_, chains, t0)| (chains, t0.elapsed().as_millis()));
+                    super::diagnostic(&alloc::format!(
+                        "lictor: trusted scanout active generation={} chains={} took_ms={}\n",
+                        self.generation, chains, ms));
                     #[cfg(feature = "test-mode")]
                     if shot == Some(SeatShot::StallHeld) { device.gpu.test_latch_now(true); }
                 }
@@ -153,19 +335,47 @@ impl Seat {
             2 => {
                 if !self.active() { self.fail("exclusive without active scanout"); return; }
                 if m.sequence != self.sequence || m.code != self.masked {
+                    // Nothing can reach the device until the engine revives.
+                    if device.gpu.stall_pending() { return; }
                     let model = match Model::decode(&m.data[..m.length as usize]) {
                         Ok(model) => model, Err(_) => { self.fail("frame decode"); return; }
                     };
-                    if screen.paint(&mut device.gpu, &model, m.code as usize, None).is_err() {
-                        self.fail("private frame paint"); return;
+                    #[cfg(feature = "test-mode")]
+                    if core::mem::take(&mut self.test_stall_frame) {
+                        self.test_frame_stalled = Some(device.gpu.test_latch_now(false));
                     }
+                    // The frame stays owed, so the next pass paints it again. Corvus
+                    // reads no key until it is visible, and bounds that wait.
+                    let painted = screen.paint(&mut device.gpu, &model, m.code as usize, None);
+                    #[cfg(feature = "test-mode")]
+                    if painted.is_err() { self.test_frame_retries += 1; }
+                    if painted.is_err() {
+                        if !device.gpu.stall_pending() { self.fail("private frame paint"); }
+                        return;
+                    }
+                    #[cfg(feature = "test-mode")]
+                    { self.test_frame_unpainted |= painted.is_err(); }
+                    // VISIBLE's reply is the seat's state now, and a dot Corvus added
+                    // during the paint is not in this frame.
+                    let masked = m.code;
                     if ep::call(ep::VISIBLE, &mut m).is_err() { self.fail("visibility acknowledgement"); return; }
-                    self.model = model; self.sequence = m.sequence; self.masked = m.code;
+                    self.model = model; self.sequence = m.sequence; self.masked = masked;
                 }
             }
             3 => {
                 for input in inputs.iter_mut() { input.events.clear(); }
                 if !released { return; }
+                #[cfg(feature = "test-mode")]
+                let _resume = if core::mem::take(&mut self.test_hold_restore) {
+                    // The input thread stops too, so keys typed while the restore waits are
+                    // still in the rings when the tail is drained.
+                    intake::test::stop();
+                    super::diagnostic("lictor: restore held (INJECTED by test-latch-dead)\n");
+                    let _ = libthyla_rs::time::sleep(core::time::Duration::from_millis(TEST_HOLD_RESTORE_MS));
+                    Some(intake::test::Resume)
+                } else {
+                    None
+                };
                 if device.restore().is_err() { self.fail("normal scanout restoration"); return; }
                 screen.deactivated();
                 // The trusted scanout is down; restoration stays owed until
@@ -181,6 +391,7 @@ impl Seat {
                 // rebinds again before the seat may return.
                 if refused || ep::call(ep::RESTORED, &mut m).is_err() { self.fail("restoration acknowledgement"); return; }
                 self.adopt(&m); self.displaced = false;
+                self.drain_episode_tail(inputs);
             }
             _ => {
                 // The kernel already cancelled any grant and scrubbed the key
@@ -200,6 +411,8 @@ impl Seat {
                     }
                     libthyla_rs::time::Instant::now()
                 });
+                #[cfg(feature = "test-mode")]
+                if self.test_release_at.take().is_some() { device.gpu.test_stall_release(); }
                 if !released || (self.active() && since.elapsed().as_millis() < FAILURE_NOTICE_MS) { return; }
                 if self.displaced || self.active.is_some() {
                     if device.gpu.engine_dead() {
@@ -225,6 +438,7 @@ impl Seat {
                 self.mods = Mods::default(); self.model = Model::default(); self.masked = 0;
                 if ep::call(ep::RESTORED, &mut m).is_ok() {
                     self.adopt(&m); self.failed_since = None;
+                    self.drain_episode_tail(inputs);
                     super::diagnostic("lictor: trusted seat recovered; nothing was conferred\n");
                 }
             }

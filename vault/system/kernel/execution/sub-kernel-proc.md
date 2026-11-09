@@ -10,7 +10,7 @@ validated-by: [gate-smp]
 locks: [lock-proc-table]
 design: ["docs/ARCHITECTURE.md", "docs/IDENTITY-DESIGN.md", "docs/LINEAGE.md"]
 created: 2026-08-01
-updated: 2026-11-03
+updated: 2026-11-09
 ---
 ## Session posting ownership
 
@@ -88,7 +88,9 @@ its own generation is how Corvus knows the grant committed
 scanned here (`seat_attention_held`: Control + Alt + Delete or F10). Episode
 transitions, pending-grant commit/cancellation and death serialize under the
 process-table lock. The three phase deadlines (5 s quiesce, 90 s exclusive, 5 s
-restoring) are checked LAZILY, at the next seat operation by the service or
+restoring) are checked LAZILY; the service may renew a live quiesce by 5 s at a time
+while its GPU engine still retires work ahead of the trusted paint, never past 35 s
+from the chord (`SEAT_RENEW`, [[dec-2026-11-05-sak-waits-on-backlog]]). They are checked at the next seat operation by the service or
 Corvus -- there is no kernel timer, so a seat whose two operators are both
 wedged stays frozen on the trusted scene: fail-closed for I-27, and an
 availability loss only if TCB processes hang. `proc_test_seat_expire`

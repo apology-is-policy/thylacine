@@ -65,13 +65,13 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**729 owned · 39 unowned · 768 files (94% owned) · ~10329 unswept lines.**
+**731 owned · 39 unowned · 770 files (94% owned) · ~10475 unswept lines.**
 
-Excluded as harness and counted here rather than dropped: **97 files, ~49385 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
+Excluded as harness and counted here rather than dropped: **97 files, ~49403 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
 | area | owned | unowned | unswept lines |
 |---|---:|---:|---:|
-| usr/warp-prove | 0 | 1 | 4434 |
+| usr/warp-prove | 0 | 1 | 4580 |
 | usr/pouch-hello | 24 | 14 | 2076 |
 | usr/ports | 19 | 5 | 1691 |
 | kernel | 196 | 10 | 1227 |
@@ -98,7 +98,7 @@ Excluded as harness and counted here rather than dropped: **97 files, ~49385 lin
 | usr/joey | 1 | 0 | 0 |
 | usr/kaua-term | 4 | 0 | 0 |
 | usr/lantern | 4 | 0 | 0 |
-| usr/lictor | 31 | 0 | 0 |
+| usr/lictor | 33 | 0 | 0 |
 | usr/login | 1 | 0 | 0 |
 | usr/loom-fixture | 1 | 0 | 0 |
 | usr/loom-stress | 1 | 0 | 0 |
@@ -131,7 +131,7 @@ Excluded as harness and counted here rather than dropped: **97 files, ~49385 lin
 
 | file | lines |
 |---|---:|
-| usr/warp-prove/src/main.rs | 4434 |
+| usr/warp-prove/src/main.rs | 4580 |
 | usr/ports/gnumake/config.h | 1357 |
 | usr/pouch-hello/pouch-hello-net.c | 618 |
 | kernel/include/thylacine/spinlock.h | 287 |

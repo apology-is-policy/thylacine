@@ -74,8 +74,11 @@ The separation is architectural work, not merely a modal overlay.
    input injection is a distinct untrusted route and cannot trigger SAK or enter
    the secret queue. Serial BREAK remains a recovery trigger only in a configured dev/recovery posture.
 2. The kernel starts a generation and freezes normal presentation/input admission.
-   The trusted owner drains previously admitted presentation fences before acknowledging
-   exclusive trusted scanout. Corvus cannot accept secret input before this acknowledgement.
+   The trusted owner does not need previously admitted client chains to retire, since
+   they cannot reach the trusted image (`TRUSTED-PATH.md`, vote 50). Its own fenced
+   commands still retire behind them, so a backlog delays the trusted image and the
+   acknowledgement of exclusive trusted scanout. Corvus cannot accept secret input before
+   this acknowledgement.
    The October 2 approved clipboard extension additionally requires Tapestry's
    exact-generation aggregate cancellation acknowledgement before this ACK.
    A stalled participant uses the existing five-second episode timeout, with

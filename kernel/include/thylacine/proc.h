@@ -3259,6 +3259,8 @@ void proc_release_territory_at_exit_for_test(struct Proc *p);
 void proc_test_orphan_rule(struct Proc *dying);
 u32 proc_test_release_leaked(int *pids, u32 max);
 void proc_test_seat_expire(void);
+u64 proc_test_seat_deadline(u64 *limit);
+void proc_test_seat_limit(u64 limit);
 void proc_test_seat_reset(void);
 int proc_test_serial_sak(int posture);
 void proc_test_set_init(struct Proc *p);
