@@ -4302,7 +4302,12 @@ static void tu_entry(void *arg) {
     struct Thread *t = current_thread();
     if ((mode & TU_LINUX) && !cd_linux(t->proc)) exits_code(9, "setup");
     (void)notes_post(t->proc, NOTE_NAME_INTERRUPT, 0u, NULL, true);
-    if (mode & TU_IN_HANDLER) t->in_handler = true;   // a syscall made from a handler
+    if (mode & TU_IN_HANDLER) {                        // a syscall made from a handler
+        t->in_handler = true;
+        // The handler runs below the frame its delivery pushed, so the phenotype's
+        // escape check (thread_note_handler_escaped) keeps it in the handler.
+        t->note_saved_sp_el0 = (u64)NOTE_NAME_MAX + 0x1000u;
+    }
     struct exception_context ctx;
     for (size_t k = 0; k < sizeof(ctx); k++) ((u8 *)&ctx)[k] = 0;
     ctx.sp = NOTE_NAME_MAX;
@@ -4433,9 +4438,35 @@ static void sp_entry(void *arg) {
     exits_code(7, "lived");
 }
 
+// A park the death fails to end would hold the suite: past a deadline, resume the
+// job as a cont does (the owner's clear, then the debug_rendez wake), so a missing
+// death reads as a return, lived 1, not a hang.
+static void sp_unpark_after(int pid, u64 budget_ns) {
+    struct Proc *c = proc_find_by_pid(pid);
+    if (!c) return;
+    u64 deadline = timer_now_ns() + budget_ns;
+    for (;;) {
+        irq_state_t s = proc_table_lock_acquire();
+        bool z = c->state == PROC_STATE_ZOMBIE;
+        proc_table_lock_release(s);
+        if (z) return;
+        if (timer_now_ns() >= deadline) break;
+        sched();
+    }
+    __atomic_store_n(&c->job_stop_req, 0u, __ATOMIC_RELEASE);
+    irq_state_t ts = proc_threads_lock(c);
+    for (struct Thread *x = c->threads; x; x = x->next_in_proc) {
+        irq_state_t ws = spin_lock_irqsave(&x->wait_lock);
+        if (x->rendez_blocked_on == &x->debug_rendez) wakeup(&x->debug_rendez);
+        spin_unlock_irqrestore(&x->wait_lock, ws);
+    }
+    proc_threads_unlock(c, ts);
+}
+
 static int sp_run(bool stop, int *lived) {
     g_sp_lived = 0;
     int pid = rfork(RFPROC, sp_entry, stop ? (void *)1 : NULL);
+    if (pid > 0) sp_unpark_after(pid, 2000000000ull);
     int st  = -1;
     int got = pid > 0 ? wait_pid_for(pid, WAIT_PACKED, &st) : -1;
     *lived = g_sp_lived;

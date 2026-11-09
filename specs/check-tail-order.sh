@@ -52,6 +52,17 @@ run() {  # $1 = cfg basename -> sets RC, LOG and GOT (distinct states)
 
 fail() { echo "$1"; echo fail > "$TMP/failed"; }
 
+# A temporal violation names its property under the documented TLC (SPEC-POLICY's
+# v1.8.0); 2.19 (Aug 2024) says only "Temporal properties were violated.", which
+# is accepted only from a cfg that checks that one property and no other, as
+# check-poll.sh does.
+temporal_as_claimed() {  # $1 = cfg, $2 = property
+    grep -q "Temporal property $2 was violated" "$LOG" && return 0
+    grep -q 'Temporal properties were violated' "$LOG" || return 1
+    props=$(awk '/^\\\*/{next} /^PROPERT(Y|IES)/{p=1;next} /^[A-Z]/{p=0} p && NF{print $1}' "$1.cfg")
+    [ "$props" = "$2" ]
+}
+
 echo "== clean (must run to completion) =="
 echo "$CLEAN" | while IFS=: read -r cfg want; do
     run "$cfg"
@@ -81,8 +92,8 @@ echo "$TEMPORAL" | while IFS=: read -r cfg prop want; do
     run "$cfg"
     if grep -q "Invariant [A-Za-z]* is violated" "$LOG"; then
         fail "FAIL $cfg: a SAFETY invariant fired -- this cfg documents a hang, not an unsafe state"
-    elif ! grep -q "Temporal property $prop was violated" "$LOG"; then
-        fail "FAIL $cfg: rc=$RC, $prop not reported violated -- got: $(grep -o 'Temporal property [A-Za-z]* was violated' "$LOG" | head -1)"
+    elif ! temporal_as_claimed "$cfg" "$prop"; then
+        fail "FAIL $cfg: rc=$RC, $prop not reported violated -- got: $(grep -oE 'Temporal propert[a-z]* [A-Za-z ]*violated' "$LOG" | head -1)"
     elif [ "$want" != "-" ] && [ "$GOT" != "$want" ]; then
         fail "FAIL $cfg: $GOT distinct states, expected $want -- the model CHANGED"
     else
