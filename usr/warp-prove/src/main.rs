@@ -195,6 +195,24 @@ fn write_behind_stall(root: i64, path: &str, bytes: &[u8]) -> (i64, u32) {
     }
 }
 
+/// One write's return, a stall's EAGAIN resent within the bound; Err(rc) when
+/// the open itself is refused, so a refusal is never read as the write's.
+fn write_rc(root: i64, path: &str, bytes: &[u8]) -> Result<i64, i64> {
+    let t0 = libthyla_rs::time::Instant::now();
+    loop {
+        let fd = unsafe { t_open(root, path.as_ptr(), path.len(), T_OWRITE) };
+        if fd < 0 {
+            return Err(fd);
+        }
+        let n = unsafe { t_write(fd, bytes.as_ptr(), bytes.len()) };
+        unsafe { t_close(fd) };
+        if n != -11 || t0.elapsed().as_millis() as u64 >= STALL_RESEND_BOUND_MS {
+            return Ok(n);
+        }
+        let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(20));
+    }
+}
+
 /// Say that the broker's stall refused a command before it was taken.
 fn note_stall_refusals(what: &str, refused: u32) {
     if refused > 0 {
@@ -3604,6 +3622,8 @@ const RB_LATE_DRAWS: usize = 50;
 /// ABANDON's queue: long enough on V3D that every chain is still running when
 /// the readback arrives and when the abandon lands a few ms later.
 const RB_ABANDON_SUBMITS: usize = 3;
+/// The seam's E_IO, as a refused write returns it (negated).
+const E_IO_RC: i64 = 5;
 /// A leg whose sends met an engine stall (another client's sync step behind the
 /// queue) may have had its readback publish unparked; it retries this often.
 const RB_DEADLINE_ATTEMPTS: u32 = 4;
@@ -3789,18 +3809,27 @@ fn rb_abandon_attempt(k: u32) -> Option<bool> {
     let s2 = ctx_field(w, ctx, "fence-signaled");
     let f_end = fenced_free(w);
     let released = parse_field(&open_read_all(w, &format!("ctx/{}/ctl", ctx)), "released").unwrap_or(99);
-    let submit_path = format!("ctx/{}/submit", ctx);
-    let nop = [cmd0(VIRGL_CCMD_CLEAR, 0, 0).to_le_bytes()].concat();
-    let refused_after = {
-        let fd = unsafe { t_open(w, submit_path.as_ptr(), submit_path.len(), T_OWRITE) };
+    // Each of the latch's readers, by the answer only the latch gives. The
+    // fence file answers EOF at once: nothing has read it, so a build without
+    // the latch there answers the vindicated count instead, also at once. A
+    // submit and `verify` are refused with E_IO, never a stall's EAGAIN (resent)
+    // or an open refusal; without the latch both would be taken.
+    let fence_path = format!("ctx/{}/fence", ctx);
+    let fence_n = unsafe {
+        let fd = t_open(w, fence_path.as_ptr(), fence_path.len(), T_OREAD);
         if fd < 0 {
-            true
+            fd
         } else {
-            let n = unsafe { t_write(fd, nop.as_ptr(), nop.len()) };
-            unsafe { t_close(fd) };
-            n < 0
+            let mut fb = [0u8; 64];
+            let n = t_read(fd, fb.as_mut_ptr(), fb.len());
+            t_close(fd);
+            n
         }
     };
+    let nop = [cmd0(VIRGL_CCMD_CLEAR, 0, 0).to_le_bytes()].concat();
+    let submit_rc = write_rc(w, &format!("ctx/{}/submit", ctx), &nop);
+    let verify_rc = write_rc(w, &format!("ctx/{}/ctl", ctx), b"verify");
+    let refused_after = fence_n == 0 && submit_rc == Ok(-E_IO_RC) && verify_rc == Ok(-E_IO_RC);
     let _ = write_ctl(w, &format!("ctx/{}/ctl", ctx), "destroy");
     unsafe { t_close(w) };
     // Constructed only if the abandon took exactly the queue: a readback the
@@ -3815,12 +3844,12 @@ fn rb_abandon_attempt(k: u32) -> Option<bool> {
     let due = RB_ABANDON_SUBMITS as u64;
     let ok = left == 0 && healed && s1 == s0 && s2 == s0 + due && released == 1 && refused_after && f_end >= f0;
     t_putstr(&format!(
-        "warp-prove: C6-RB ABANDON {} -- the readback parked behind {} abandoned chains; the ctx's fences in flight {} after {} ms (0 = the parked readback was released); fence-signaled +{} while poisoned (want +0), +{} after the vindication (want +{}, the queue alone); released {} (want 1); a submit after the vindication {} (want refused: the stream stays over); fenced-free {} after, {} before{}\n",
+        "warp-prove: C6-RB ABANDON {} -- the readback parked behind {} abandoned chains; the ctx's fences in flight {} after {} ms (0 = the parked readback was released); fence-signaled +{} while poisoned (want +0), +{} after the vindication (want +{}, the queue alone); released {} (want 1); after the vindication the stream stays over: fence read {} (want 0, EOF), submit {:?}, verify {:?} (want Ok(-{}) each, E_IO); fenced-free {} after, {} before{}\n",
         if ok { "PASS" } else { "FAIL" },
         RB_ABANDON_SUBMITS, left, drained_ms,
         s1.wrapping_sub(s0), s2.wrapping_sub(s0), due,
         released,
-        if refused_after { "refused" } else { "ACCEPTED" },
+        fence_n, submit_rc, verify_rc, E_IO_RC,
         f_end, f0,
         if healed { "" } else { "; the lane did not heal after the hold came off" }
     ));
@@ -4748,13 +4777,17 @@ fn observe_readback() {
         }
         note_stall_refusals("deadline readback", refused);
         let met = stall_refusals().wrapping_sub(r0);
-        if met == 0 {
+        // DEEP's rule, by the fence timeline: none of the queue may have retired
+        // when the readback was taken. A hold on the sends without a refusal (a
+        // present's flush queued behind the draws) drains the queue under them.
+        let ahead = ctx_field(warp, ctx, "fence-signaled").saturating_sub(dl_before);
+        if met == 0 && ahead == 0 {
             break (dl_before, dl_t0, dl_c0);
         }
         let _ = rb_wait_signaled(warp, ctx, dl_before, RB_DEADLINE_SUBMITS as u64 + 1, dl_t0, "deadline unconstructed");
         t_putstr(&format!(
-            "warp-prove: C6-RB DEADLINE attempt {} not constructed -- its sends met an engine stall ({} refusals), so the readback may have published after its queue retired\n",
-            dl_try, met
+            "warp-prove: C6-RB DEADLINE attempt {} not constructed -- its sends met an engine stall ({} refusals) or {} of the {} submits had retired when the readback was taken, so it may have published into a draining queue\n",
+            dl_try, met, ahead, RB_DEADLINE_SUBMITS
         ));
         if dl_try >= RB_DEADLINE_ATTEMPTS {
             rb_incomplete("deadline-unconstructed");

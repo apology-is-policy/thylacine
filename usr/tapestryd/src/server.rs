@@ -17360,8 +17360,8 @@ impl Conn {
                         let _ = core::fmt::write(
                             &mut s,
                             format_args!(
-                                "poisoned {}\nleaked-count {}\nleaked-bytes {}\nreleased {}\n",
-                                c.fence_poisoned as u32, c.leaked_count, c.leaked_bytes, c.released
+                                "poisoned {}\nleaked-count {}\nleaked-bytes {}\n",
+                                c.fence_poisoned as u32, c.leaked_count, c.leaked_bytes
                             ),
                         );
                         // #240 (GPU-DESIGN 4.5.4b). DISTINCT from `poisoned`
@@ -17477,6 +17477,11 @@ impl Conn {
                             &mut s,
                             format_args!("readback-parked-ms {}\nreadback-exec-ms {}\n", parked, exec),
                         );
+                        // Vote 81: the released chains that ended the stream. A
+                        // client learns that from the fence file's EOF, so the
+                        // count stays out of the prefix it parses.
+                        let released = comp.wctx(id, self.conn_id).map_or(0, |c| c.released);
+                        let _ = core::fmt::write(&mut s, format_args!("released {}\n", released));
                     }
                     // Audit F11: the "keep the client-critical keys inside a
                     // 255-byte snapshot" discipline above was a comment with

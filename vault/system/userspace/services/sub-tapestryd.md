@@ -350,7 +350,8 @@ at a later vindication it would resume a stream that lacks the released draws.
 A released client chain instead raises `WarpCtx::released`, which ends the
 context's fence stream for good: both fence-file readers answer EOF,
 `warp_fenced_admit` and `verify` refuse with E_IO, and the compose path treats
-the context as poisoned. The ctx ctl reports `released N`. Device liveness
+the context as poisoned. The ctx ctl reports `released N`, after the prefix a
+client parses (a client learns of it from the EOF). Device liveness
 stays `fence_poisoned`'s, so the vindication still un-poisons and reclaims, and
 destroy takes the ordinary path. The latch takes effect only at the next
 pump, so a chain admitted in between from the older view reaches Lictor, which

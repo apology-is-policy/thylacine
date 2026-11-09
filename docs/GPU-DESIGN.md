@@ -2633,8 +2633,9 @@ second number is the one QEMU spent decoding it, so it is short when the rule
 holds and the whole queue when it does not. The context's ctl reports both for
 its last readback (`readback-parked-ms`, `readback-exec-ms`), and the warp ctl
 reports both for the last compositor readback that landed. A released or
-refused readback reports neither and is no sample of `cost readback-wait`,
-which counts completed readbacks only. In a test build the warp ctl's census
+refused readback reports neither. A released one is no sample of `cost
+readback-wait`, which counts readbacks that retired; a refused one retired, so
+it is a sample. In a test build the warp ctl's census
 names each parked chain on its own row (`fenced-parked slot= fence= ctx= ring=
 rb= comp= parked_ms=`) beside the `fenced-held` rows of the chains on the
 device, so a slot held by a parked chain is never an anonymous missing count.

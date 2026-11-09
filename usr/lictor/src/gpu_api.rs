@@ -78,9 +78,10 @@ pub struct FenceTag {
     pub ok: bool,
     /// Released unpublished (vote 81): a parked chain the device never saw,
     /// refused because its context's prefix was abandoned or the engine died.
-    /// Not a completion: its fence never signals. The seam ends the context's
-    /// fence stream and owes the count until a vindication proves the prefix
-    /// finished, so a dense count never passes an abandoned fence.
+    /// Not a completion: its fence never signals and is never counted, or a
+    /// dense count would pass the fence ahead of it. A released client chain
+    /// ends its context's fence stream for good (`WarpCtx::released`), and
+    /// Lictor releases every later chain of that context too (`Released`).
     pub released: bool,
     /// The venus TIMELINE this fence rides (multi-queue F3): 0 = the
     /// ctx-global lane (every pre-multi-queue submission, transfers, the

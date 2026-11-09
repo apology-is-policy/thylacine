@@ -57,4 +57,4 @@ if {$lc_cmd_timeout < 240} { set lc_cmd_timeout 240 }
 # prover's own `FAIL --` on an instrument fault -- fail the scenario at once.
 lc_run_expect_hardfail_re "warp-prove readback" "C6-READBACK DONE" {warp-prove: (FAIL --|C6-READBACK INCOMPLETE)}
 
-lc_pass "warp-prove readback: the compositor readback arm is fenced + deferred (ARM/DEEP/LIVE/DEADLINE/CLEAN)"
+lc_pass "warp-prove readback: the compositor readback arm is fenced + deferred (ARM/GUARD/DEEP/LIVE/DEADLINE/ABANDON/CLEAN)"

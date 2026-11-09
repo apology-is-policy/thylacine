@@ -130,5 +130,5 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-11-09 [[chg-2026-11-09-park-readbacks-r2f1]] — A released chain is owed, not counted, until its context is vindicated (vote 81 audit round 2 F1)
 - 2026-11-09 [[chg-2026-11-09-park-readbacks-r2p3]] — Vote 81 audit round 2 closed: the released stream latch, slot witnesses, stall retries, P3s
 - 2026-11-09 [[chg-2026-11-09-park-readbacks-r3f1]] — Lictor keeps the released-stream latch where the release happens (vote 81 audit r3 F1)
-- 2026-11-09 [[chg-2026-11-09-park-readbacks]] — Lictor parks a readback until its context's earlier chains retire (vote 81)
+- 2026-11-09 [[chg-2026-11-09-park-readbacks-r3p3]] — Vote 81 audit round 3 closed: the latch's readers witnessed, DEADLINE's timeline rule, P3s
 <!-- generated:end -->
