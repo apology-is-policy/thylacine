@@ -3328,3 +3328,15 @@ Audit: Fable 5.1 r1 at 43c1916d9, 0/0/0/3 plus the author's two P2s (fixed in 25
 Tests: 2431. Leases: runs-1 green 2426, U01-U05 red; runs-2 green 2429 plus guest legs, U01-U11 red, regreen == green; runs-3 (54341523b, 06:49-07:02Z) green 2431 plus guest legs with the nine unlock legs, U12-U16 each red at its leg (U13 at tools/test.sh's new verdict line, its leg passing), regreen == green (c15ef522807edc30).
 
 **Did not run:** the full SMP matrix (held since 11-02), the interactive fleet, test-fault. No spec models the lock path. Record: `chg-2026-11-09-aux-unlock`.
+
+## A fatal note's unwind commits the death: vote 35 -- 2026-11-09
+
+Branch aux-3-commit, off aux-3-unlock 5f6d97e23. A wait that unwinds for a terminate latch answers as if its thread dies (poll's 0, a sleep's SLEEP_INTR), and a handler installed before the EL0 tail used to clear the latch, so the thread lived holding that answer (OPEN-BUGS 2026-11-04, the poll false-0 class; notes.h's RW-0 F4 caveat). Reading the death predicate true for a latch now commits the death by one lock-free compare-and-swap (`PROC_FLAG_TERMINATE_COMMITTED`, with only the latch acted on left armed). Every latch write is a swap refused once that is set. The tail yields to a commit before either delivery path, and its uncaught, in-handler and SIG_DFL deaths commit under `q->lock`. A committed death ends every thread's waits whatever its mask; the EL0 return and the stop park end the Proc by the named note; a stop, an exec claim and a fork are refused. tty:quit and tty:hup latch separately, so each latch names its note. `specs/death_commit.tla` models it. A synchronous consumer may still pop the committed note while its thread dies before EL0 (Linux's sigtimedwait shape), so the claim (ARCH 8.8.2) is that no note is both handed to a handler and died of.
+
+Audit: Fable 5.1 r1 at c8ca8bde5, before any boot, 0/0/1/2, not dirty (fixed in 729fe7922; F1, the in-handler arm died without committing).
+
+Tests: 2442. Leases: runs-1 (729fe7922) hung in poll_zero_is_a_death's control, a native Proc that a caught note cannot interrupt (ARCH 8.8.3; fixed in 3ffe15e8f); runs-2 (3ffe15e8f) green 2442 plus guest legs with the 15 commit legs, all 21 sabotages red, regreen == green (6fb0722bc287046c), death_commit and poll as claimed; runs-3 (204b1c82d) green 2442 again with what runs-2 taught, C01 C07 C09 C22 C23 each red at its leg and C01 no longer hanging, regreen == green (bcb4893c19052b69), tail_order and death_wake as claimed; runs-4 (b0284cd29) C24, the in-handler arm's commit dropped for the phenotype alone, red at handler_tail_death_commits_its_note's phenotype leg, regreen == green.
+
+Spec check scripts (b0284cd29, OPEN-BUGS 11-09 16:21Z): the eleven scripts with a temporal leg take TLC 2.19's unnamed "Temporal properties were violated." as a named red only from a cfg listing that one property; runs-3 ran each as committed (the seven failed on exactly their 15 temporal cfgs) and patched (all as claimed, counts unchanged).
+
+**Did not run:** the full SMP matrix (held since 11-02), the interactive fleet, test-fault. Record: `chg-2026-11-09-aux-commit-death`.
