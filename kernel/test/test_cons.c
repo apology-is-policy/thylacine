@@ -600,7 +600,7 @@ void test_cons_rx_side_sak_and_intr_behind_full_ring(void) {
 // Vote 73: a Ctrl-C that has to wait signals at once but discards in order. The
 // partial line typed before it goes and the line after it survives, exactly as
 // with room in the ring. Without the in-order marker "xyz" would survive into
-// the next line.
+// the next line. A canonical read ends at its line, so the two lines take two reads.
 void test_cons_rx_side_cooked_intr_in_order(void) {
     static u8 cbuf[1024];
     cons_test_reset();
@@ -616,8 +616,9 @@ void test_cons_rx_side_cooked_intr_in_order(void) {
     cons_rx_receive((u8)'\n', false);
     u32  queued = cons_test_side_count();
     long first  = cons_drain(cbuf, (long)sizeof(cbuf));
-    u32  ring1  = cons_test_rx_count();
-    long second = (ring1 > 0u) ? cons_drain(cbuf, (long)sizeof(cbuf)) : 0;
+    long second = 0;
+    for (int r = 0; r < 2 && cons_test_rx_count() > 0u; r++)
+        second += cons_drain(cbuf + second, (long)sizeof(cbuf) - second);
     const char *want = "abc\nq\n";
     bool exact  = second == 6;
     for (int i = 0; exact && i < 6; i++) exact = cbuf[i] == (u8)want[i];
