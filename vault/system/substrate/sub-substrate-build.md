@@ -105,6 +105,15 @@ release default, and `build.sh` builds that kernel into
 ([[sub-kernel-loom-bridge]]). `test-build-config.sh` pins both the refusal and
 the export.
 
+The compile-group `READINESS_QUAL` bool, default off and in no preset, has the
+environment shim `THYLACINE_READINESS_QUALIFICATION`; the Rust build maps it to
+`kaua-term-probe/readiness-qualification` and logs it. The feature turns on
+libthyla-rs's `poll-worker-test` hooks, which Cargo unifies across the workspace
+build, so every binary in that image carries them: a fixture image, never a
+release. `readiness-qualification.exp` and `service-readiness-failure.exp` boot it
+([[sub-substrate-interactive]]). `test-build-config.sh` pins that no preset sets
+it, that each exports 0, and that an explicit set exports 1.
+
 KASLR (I-16) and the kernel hardening flags are not configuration: every
 image has both ([[dec-2026-10-27-build-knobs]]). The schema has no `KASLR` or
 `HARDENING_FULL` symbol and `build.sh` no `--kaslr` or `--hardening-full`.

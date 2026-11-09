@@ -1357,6 +1357,12 @@ build_userspace() {
                echo "==> Halcyon interaction qualification ENABLED (not a release default)" ;;
             *) echo "THYLACINE_INTERACTION_QUALIFICATION must be 0 or 1" >&2; return 1 ;;
         esac
+        case "${THYLACINE_READINESS_QUALIFICATION:-0}" in
+            0) ;;
+            1) hi_features+=(--features kaua-term-probe/readiness-qualification)
+               echo "==> Native readiness qualification probe ENABLED (libthyla-rs test hooks in every binary; not a release default)" ;;
+            *) echo "THYLACINE_READINESS_QUALIFICATION must be 0 or 1" >&2; return 1 ;;
+        esac
         ( cd "$REPO_ROOT/usr" && cargo build --release $verbose ${hi_features[@]+"${hi_features[@]}"} )
         echo "==> Userspace Rust built under $USR_RS_BUILD"
         ls -la "$USR_RS_BUILD/$USR_RS_TARGET/release/hello-rs" 2>/dev/null || true

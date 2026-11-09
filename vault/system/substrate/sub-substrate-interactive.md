@@ -682,7 +682,9 @@ honors the requested accelerator, so the same scenario can run under KVM/HVF.
 ## Controlled native readiness fixture
 
 readiness-qualification and service-readiness-failure require a probe built with
-`--features readiness-qualification` and THYLACINE_READINESS_QUALIFICATION=1.
+`--features readiness-qualification`, which a bake with `READINESS_QUAL=y`
+(`THYLACINE_READINESS_QUALIFICATION=1`, [[sub-substrate-build]]) produces, and the
+same variable set when they run.
 Absent the explicit fixture flag they exit 77 (SKIP, not PASS) before boot.
 The first controls before/after-poll schedules and acquisition rollback; the
 second uses the same CI Imperium enrollment as service-wire and checks registry

@@ -271,5 +271,19 @@ bc_reset; bc_apply_preset default; bc_set PRIVATE_ASYNC_QUAL=y; bc_resolve 2>/de
 private_async_qual=""; bc_export
 eq "explicit private async qualification -> ON" "$private_async_qual" "ON"
 
+# The readiness probe's feature puts test hooks in every binary: in no preset, and
+# exported only when set.
+for rq_preset in "$BC_DIR_CONFIGS"/*.config; do
+    rq_name="$(basename "$rq_preset" .config)"
+    unset THYLACINE_READINESS_QUALIFICATION
+    bc_reset; bc_apply_preset "$rq_name"; bc_resolve 2>/dev/null; bc_export
+    eq "preset $rq_name leaves readiness qualification n" "$(bc_get READINESS_QUAL)" "n"
+    eq "preset $rq_name exports readiness qualification 0" "${THYLACINE_READINESS_QUALIFICATION:-}" "0"
+done
+unset THYLACINE_READINESS_QUALIFICATION
+bc_reset; bc_apply_preset default; bc_set READINESS_QUAL=y; bc_export
+eq "explicit readiness qualification export" "${THYLACINE_READINESS_QUALIFICATION:-}" "1"
+unset THYLACINE_READINESS_QUALIFICATION
+
 echo
 if [[ "$fail" == 0 ]]; then echo "ALL PASS"; exit 0; else echo "FAILURES"; exit 1; fi
