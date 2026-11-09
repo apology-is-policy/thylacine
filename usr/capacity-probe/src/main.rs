@@ -287,7 +287,7 @@ fn account_legs() -> i64 {
         QUERY,
         &mut r,
         RECORD,
-        EINVAL,
+        ESTALE,
     );
     if f != 0 {
         return f;
