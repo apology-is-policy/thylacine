@@ -33,6 +33,9 @@ pub struct Seat {
     /// When this generation's takeover first reached the device, and how many fenced
     /// chains stood on it then: what the takeover line reports.
     takeover_began: Option<(u64, u32, libthyla_rs::time::Instant)>,
+    /// The generation whose takeover deadline was last renewed, the device's
+    /// retirement mark then, and when.
+    renewed: Option<(u64, u16, libthyla_rs::time::Instant)>,
     failed_since: Option<libthyla_rs::time::Instant>,
     /// A takeover began, so normal output may not be showing: owed a restore
     /// until the device completes one or its engine dies.
@@ -72,6 +75,7 @@ pub struct Seat {
     #[cfg(feature = "test-mode")]
     pub test_blind: bool,
 }
+const RENEW_EVERY_MS: u64 = 1000;
 /// The key that stops the serve loop under the armed lever: F8.
 #[cfg(feature = "test-mode")]
 const TEST_BLIND_KEY: u16 = 66;
@@ -186,6 +190,27 @@ impl Seat {
             self.fail("private scanout activation");
         }
     }
+    // A backlog ahead of the trusted paint delays the takeover: while the engine is
+    // alive and still retiring work, the kernel's deadline is renewed, at most once a
+    // second and never past the limit the chord set (vote 71). An engine that
+    // retires nothing for the kernel's five seconds still fails the takeover.
+    fn renew_behind_backlog(&mut self, device: &Device) {
+        if device.gpu.engine_dead() { return; }
+        let mark = device.gpu.retired_mark();
+        let now = libthyla_rs::time::Instant::now();
+        let (last, at) = match self.renewed {
+            Some((generation, last, at)) if generation == self.generation => (last, at),
+            _ => { self.renewed = Some((self.generation, mark, now)); return; }
+        };
+        if last == mark || (at.elapsed().as_millis() as u64) < RENEW_EVERY_MS { return; }
+        let mut m = ep::Message::default(); m.generation = self.generation;
+        if ep::call(ep::RENEW, &mut m).is_ok() {
+            self.renewed = Some((self.generation, mark, now));
+            super::diagnostic(&alloc::format!(
+                "lictor: takeover renewed behind a draining backlog generation={} chains={}\n",
+                self.generation, device.gpu.fenced_in_flight()));
+        }
+    }
     pub fn step(&mut self, device: &mut Device, screen: &mut Screen, inputs: &mut [Input]) {
         let mut m = ep::Message::default();
         if ep::call(ep::STATUS, &mut m).is_err() { self.fail("status"); return; }
@@ -206,6 +231,7 @@ impl Seat {
             1 => {
                 for input in inputs.iter_mut() { input.events.clear(); }
                 device.reap();
+                if !self.active() { self.renew_behind_backlog(device); }
                 if !device.gpu.takeover_clear() { return; }
                 if !self.active() {
                     if self.takeover_began.is_none_or(|(generation, ..)| generation != self.generation) {

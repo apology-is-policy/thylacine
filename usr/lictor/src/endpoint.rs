@@ -11,6 +11,7 @@ pub const VISIBLE: u64 = 9;
 pub const MASK: u64 = 10;
 pub const GRANT: u64 = 11;
 pub const CLIENT: u64 = 12;
+pub const RENEW: u64 = 13;
 // QUERY's `code`: the console episode's medium. Other replies carry the mask
 // length there.
 pub const MEDIUM_NONE: u32 = 0;

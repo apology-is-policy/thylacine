@@ -125,10 +125,10 @@ Generated — do not edit between the markers (`quaestor render`).
 
 - 2026-11-09 [[chg-2026-11-09-narrow-sync-wait]] — Lictor's synchronous wait no longer widens behind a readback (vote 72, first half)
 - 2026-11-09 [[chg-2026-11-09-panels-enter-or-esc]] — Trusted panels close on Enter or Esc; the key prompt runs on its own clock (vote 70)
+- 2026-11-09 [[chg-2026-11-09-sak-renew]] — A takeover behind a GPU backlog renews the kernel's quiesce deadline (vote 71)
 - 2026-11-06 [[chg-2026-11-06-aux-join2]] — The aux join: aux-3 (the thread-model arc through ENOEXEC) reaches main through corona's branch
 - 2026-11-05 [[chg-2026-11-05-as4-r6-join]] — AS-4 audit round 6, the join's half
 - 2026-11-05 [[chg-2026-11-05-as4-r6-shell]] — AS-4 audit round 6, the shell's half
 - 2026-11-05 [[chg-2026-11-05-as4-r7-join]] — AS-4 audit round 7, the join's half
 - 2026-11-05 [[chg-2026-11-05-as4-r7-shell-corrected]] — AS-4 round 7's shell chg, corrected
-- 2026-11-05 [[chg-2026-11-05-as4-r7-shell]] — AS-4 audit round 7, the shell's half
 <!-- generated:end -->

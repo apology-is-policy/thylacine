@@ -335,7 +335,10 @@ every named route and which is never attached to a context, so a client's poison
 does not deny the SAK. Its backlog can: the paint is fenced, so it retires behind
 what the host has queued. A takeover that meets a stall starts over when the engine
 revives (`Gpu::stall_pending`), under the kernel's five-second deadline, and says so; a
-device's answer fails it at once. A frame paint that meets a stall stays owed and the
+device's answer fails it at once. While the engine is alive and its retirement mark
+(`Gpu::retired_mark`) moves, the takeover renews that deadline at most once a second
+(`SEAT_RENEW`, up to 35 s from the chord: vote 71), so a backlog delays the SAK
+rather than failing it; `ls-graphical-sak-backlog` is the witness. A frame paint that meets a stall stays owed and the
 next pass paints it again. Once serving, no synchronous command waits past
 `SUBMIT_DEADLINE_MS`, a client's readback ahead of it or not (operator vote 72): one
 transfer cannot stop this loop for as long as its client queued; the command stalls

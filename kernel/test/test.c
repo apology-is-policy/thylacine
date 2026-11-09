@@ -1746,6 +1746,7 @@ struct test_case g_tests[] = {
     { "cons.graphical_seat_gate", test_cons_graphical_seat_gate, false, NULL },
     { "cons.graphical_seat_grant_and_failure", test_cons_graphical_seat_grant_and_failure, false, NULL },
     { "cons.graphical_seat_deadline_and_death", test_cons_graphical_seat_deadline_and_death, false, NULL },
+    { "cons.graphical_seat_renew", test_cons_graphical_seat_renew, false, NULL },
     { "cons.graphical_seat_episode_medium", test_cons_graphical_seat_episode_medium, false, NULL },
     { "cons.graphical_seat_service_death", test_cons_graphical_seat_service_death, false, NULL },
     { "cons.graphical_seat_service_death_grant", test_cons_graphical_seat_service_death_grant, false, NULL },

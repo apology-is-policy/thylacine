@@ -17,14 +17,15 @@ mirrors:
   - usr/lib/libt/include/thyla/syscall.h
   - kernel/include/thylacine/vivarium.h
 created: 2026-09-18
-updated: 2026-11-02
+updated: 2026-11-09
 ---
 ## Contract
 
 Native 121 TRUSTED_SEAT takes operation and a user message pointer. The 544-byte
 message contains u64 generation/sequence, u32 phase/length/code/value, then
-512 data bytes. Operations 1..12 are STATUS, INPUT, ACK, FRAME, KEY, RESTORED,
-FAIL, QUERY, VISIBLE, MASK, GRANT and CLIENT. Phases 0..4 are normal, quiescing,
+512 data bytes. Operations 1..13 are STATUS, INPUT, ACK, FRAME, KEY, RESTORED,
+FAIL, QUERY, VISIBLE, MASK, GRANT, CLIENT and RENEW (the service extends a
+quiescing takeover's deadline by 5 s, never past 35 s from the chord: vote 71). Phases 0..4 are normal, quiescing,
 exclusive, restoring and failed. Success is 0; refusal is -1. Generation and
 frame sequence bind state transitions and visibility, never a caller's name.
 

@@ -1084,6 +1084,7 @@ void test_cons_episode_gate(void);
 void test_cons_graphical_seat_gate(void);
 void test_cons_graphical_seat_grant_and_failure(void);
 void test_cons_graphical_seat_deadline_and_death(void);
+void test_cons_graphical_seat_renew(void);
 void test_cons_graphical_seat_episode_medium(void);
 void test_cons_graphical_seat_service_death(void);
 void test_cons_graphical_seat_service_death_grant(void);

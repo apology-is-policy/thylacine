@@ -4708,6 +4708,12 @@ impl Gpu {
         self.ctrl.fenced_in_flight()
     }
 
+    /// Moves whenever the device retires a chain: a takeover behind a backlog is
+    /// renewed while it does (vote 71).
+    pub fn retired_mark(&self) -> u16 {
+        self.ctrl.used_seen
+    }
+
     /// The broker enables this after boot probes, then releases imported DMA
     /// only for IDs returned here. A deferred unref never publishes retirement.
     pub fn enable_retirement_journal(&mut self) { self.collect_retirements = true; }

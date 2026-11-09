@@ -4253,6 +4253,76 @@ cleanup:
 #undef SEAT_CHECK
 }
 
+// A takeover behind a GPU backlog: the service renews the quiesce deadline while
+// its engine still retires work. Only the service, only its own generation, only
+// while QUIESCING, never past the chord's limit, and never an expired quiesce.
+void test_cons_graphical_seat_renew(void) {
+    struct ep_fixture f;
+    struct Proc *service = NULL;
+    const char *err = NULL;
+    struct seat_message m;
+    u64 generation = 0, limit = 0, d0 = 0, d1 = 0, near = 0;
+    proc_test_seat_reset();
+    bool setup = ep_setup(&f, true, true);
+    service = proc_alloc();
+#define SEAT_CHECK(test, why) do { if (!(test)) { err = why; goto cleanup; } } while (0)
+    SEAT_CHECK(setup && service, "seat fixture");
+    SEAT_CHECK(proc_set_seat_service(service) == 0, "service");
+    SEAT_CHECK(seat_test_chord(service, &generation), "chord");
+    d0 = proc_test_seat_deadline(&limit);
+    SEAT_CHECK(d0 != 0 && limit > d0 && limit - d0 == SEAT_QUIESCE_LIMIT_NS - SEAT_QUIESCE_NS,
+               "the chord sets the deadline and the limit");
+
+    seat_zero(&m, sizeof(m));
+    m.generation = generation;
+    SEAT_CHECK(proc_seat_op(service, SEAT_RENEW, &m) == 0 && m.phase == SEAT_QUIESCING, "the service renews");
+    d1 = proc_test_seat_deadline(NULL);
+    SEAT_CHECK(d1 >= d0 && d1 <= limit, "a renewal moves the deadline on, inside the limit");
+
+    seat_zero(&m, sizeof(m));
+    m.generation = generation;
+    SEAT_CHECK(proc_seat_op(f.trusted, SEAT_RENEW, &m) == -1, "Corvus cannot renew");
+    seat_zero(&m, sizeof(m));
+    m.generation = generation + 1;
+    SEAT_CHECK(proc_seat_op(service, SEAT_RENEW, &m) == -1, "another generation cannot be renewed");
+    SEAT_CHECK(proc_test_seat_deadline(NULL) == d1, "refused renewals leave the deadline");
+
+    // Capped: a limit one second out takes the deadline no further than it.
+    near = timer_now_ns() + 1000000000ull;
+    proc_test_seat_limit(near);
+    seat_zero(&m, sizeof(m));
+    m.generation = generation;
+    SEAT_CHECK(proc_seat_op(service, SEAT_RENEW, &m) == 0 && proc_test_seat_deadline(NULL) == near,
+               "a renewal stops at the limit");
+    // Spent: a limit in the past refuses, and the deadline stays.
+    proc_test_seat_limit(1);
+    seat_zero(&m, sizeof(m));
+    m.generation = generation;
+    SEAT_CHECK(proc_seat_op(service, SEAT_RENEW, &m) == -1 && proc_test_seat_deadline(NULL) == near,
+               "a spent limit refuses the renewal");
+    // Expired: the op fails the seat first, so a renewal cannot revive it.
+    proc_test_seat_limit(timer_now_ns() + SEAT_QUIESCE_LIMIT_NS);
+    proc_test_seat_expire();
+    seat_zero(&m, sizeof(m));
+    m.generation = generation;
+    SEAT_CHECK(proc_seat_op(service, SEAT_RENEW, &m) == -1, "an expired quiesce is not renewed");
+    SEAT_CHECK(proc_seat_op(service, SEAT_STATUS, &m) == 0 && m.phase == SEAT_FAILED,
+               "the expiry failed the seat");
+    SEAT_CHECK(seat_test_recover(service, generation), "recovered");
+
+    // Not QUIESCING: an open episode is not a takeover.
+    SEAT_CHECK(seat_test_open(service, f.trusted, &generation) && cons_episode_active(), "episode opens");
+    seat_zero(&m, sizeof(m));
+    m.generation = generation;
+    SEAT_CHECK(proc_seat_op(service, SEAT_RENEW, &m) == -1, "an exclusive seat is not renewed");
+cleanup:
+    proc_test_seat_reset();
+    ep_teardown(&f);
+    if (service) { service->state = PROC_STATE_ZOMBIE; proc_free(service); }
+    TEST_ASSERT(err == NULL, err ? err : "graphical seat renew");
+#undef SEAT_CHECK
+}
+
 // What Corvus reads from SEAT_QUERY: the medium, or ~0u when the query is refused.
 static u32 seat_test_medium(struct Proc *corvus, u32 *phase) {
     struct seat_message m;

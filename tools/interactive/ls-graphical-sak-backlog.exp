@@ -1,0 +1,106 @@
+#!/usr/bin/expect -f
+# A chord behind a GPU backlog longer than the kernel's five-second deadline must
+# still reach the trusted screen (operator vote 71; TRUSTED-PATH). Requires
+# HALCYON_SESSION=y. warp-prove's deep chain queues more GL work than five seconds
+# drains; Lictor renews the kernel's deadline while the engine retires that work.
+# Each chord must show at least one renewal before the trusted scanout, or it never
+# crossed the backlog and proves nothing: INCONCLUSIVE, never PASS. Red on a tree
+# without the renewal: measured 2026-11-05 on the Pi's V3D, six chords of six closed
+# at the deadline with the session's screen still up.
+set ::env(THYLACINE_ACCEL) [expr {[info exists ::env(LS_CI_GFX_ACCEL)] ? $::env(LS_CI_GFX_ACCEL) : "hvf"}]
+set ::env(THYLACINE_SERIAL_SAK) 0
+source [file join [file dirname [info script]] lib.exp]
+set repo $lc_repo
+set qmp [lc_qmp_sock]
+
+proc key {chord} {
+    global repo qmp
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -k $chord} e]} { lc_fail $e }
+    after 700
+}
+proc type {text} {
+    global repo qmp
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp $text} e]} { lc_fail $e }
+}
+
+lc_boot
+set timeout $lc_boot_timeout
+expect {
+    -ex "Thylacine login: " {}
+    -re {EXTINCTION:} { lc_extinction_fail "boot" }
+    timeout { lc_fail "no login" }
+    eof { lc_fail "EOF before login" }
+}
+lc_raw_send "michael\r" "login user"
+set timeout 30
+expect {
+    -ex "password: " {}
+    timeout { lc_fail "no password prompt" }
+    eof { lc_fail "EOF at the password prompt" }
+}
+lc_raw_send "correct-horse-battery-staple-v1\r" "login password"
+set timeout 60
+expect {
+    -re {halcyond: status bar [^\r\n]*running false panes 2} {}
+    -re {EXTINCTION:} { lc_extinction_fail "session" }
+    timeout { lc_fail "no session" }
+    eof { lc_fail "EOF before the session" }
+}
+after 1500
+key "meta_l+f"
+
+# One client keeps a deep queue for the whole run; at a chord admission closes, so the
+# backlog the takeover meets is finite, and after each episode the client refills it.
+type "warp-prove chain-hold 240 deep &\n"
+set timeout 60
+expect {
+    -re {warp-prove: CHAIN-HOLD DEEP ctx [0-9]+ sent [0-9]+ retired [0-9]+ refused [0-9]+ after [0-9]+ ms} {
+        lc_step "the backlog: $expect_out(0,string)"
+    }
+    -re {warp-prove: FAIL[^\r\n]*[\r\n]} { lc_fail "client: $expect_out(0,string)" }
+    -re {EXTINCTION:} { lc_extinction_fail "backlog" }
+    timeout { lc_fail "no deep queue within 60 s" }
+    eof { lc_fail "EOF before the backlog" }
+}
+for {set i 1} {$i <= 3} {incr i} {
+    set t0 [clock milliseconds]
+    key "ctrl+alt+f10"
+    set renewals 0
+    set timeout 45
+    expect {
+        -re {lictor: takeover renewed behind a draining backlog generation=[0-9]+ chains=[0-9]+} {
+            incr renewals
+            exp_continue
+        }
+        -re {lictor: takeover met a stall, starting over generation=[0-9]+} { exp_continue }
+        -re {lictor: trusted scanout active generation=[0-9]+ chains=[0-9]+ took_ms=[0-9]+} {
+            set active $expect_out(0,string)
+        }
+        -re {lictor: kernel closed trusted seat \(scanout [a-z]+\)} {
+            lc_fail "SAK-BACKLOG RED (chord $i): the seat closed at its deadline behind the backlog after [expr {[clock milliseconds] - $t0}] ms, renewals=$renewals"
+        }
+        -re {lictor: seat failed: [^\r\n]*[\r\n]} { lc_fail "SAK-BACKLOG RED (chord $i): $expect_out(0,string)" }
+        -re {warp-prove: FAIL[^\r\n]*[\r\n]} { lc_fail "client (chord $i): $expect_out(0,string)" }
+        -re {EXTINCTION:} { lc_extinction_fail "chord $i" }
+        timeout { lc_fail "SAK-BACKLOG RED (chord $i): no trusted scanout within 45 s, renewals=$renewals" }
+        eof { lc_fail "EOF (chord $i)" }
+    }
+    if {$renewals == 0} {
+        lc_fail "SAK-BACKLOG INCONCLUSIVE (chord $i): the trusted scanout came up with no renewal, so the backlog was not crossed: $active"
+    }
+    lc_pass "SAK-BACKLOG chord $i: trusted scanout after $renewals renewals, [expr {[clock milliseconds] - $t0}] ms: $active"
+    after 500
+    key "ret"
+    set timeout 40
+    expect {
+        -ex "corvus: imperium: SAK with nothing pending" { lc_step "chord $i: the empty episode ended" }
+        -re {lictor: kernel closed trusted seat \(scanout [a-z]+\)} { lc_fail "SAK-BACKLOG RED (chord $i): the episode closed unended" }
+        -re {EXTINCTION:} { lc_extinction_fail "end $i" }
+        timeout { lc_fail "chord $i: the episode did not end within 40 s" }
+        eof { lc_fail "EOF (end $i)" }
+    }
+    # The client refills its queue once admission reopens.
+    after 6000
+}
+lc_pass "SAK-BACKLOG: three chords behind a deep GPU backlog each reached the trusted screen"
+lc_quit
