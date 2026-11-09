@@ -3,7 +3,7 @@ id: sub-kernel-mm-slub
 type: sub
 parent: moc-kernel-memory
 title: "SLUB — the kernel object allocator"
-code: ["mm/slub.c", "mm/slub.h"]
+code: ["mm/slub.c", "mm/slub.h", "kernel/test/test_slab_refusal.c"]
 audit: hard
 guarded-by: []
 validated-by: [gate-smp]
@@ -37,8 +37,13 @@ structs; requests above `SLUB_MAX_OBJECT_SIZE` (2048) bypass to
 - `kmem_cache_create(name, size, align, flags)` — NULL if size >
   2048 or if the align/size combination yields zero objects per slab
   (RW-1 F-S3 — pre-guard, an impossible geometry left an empty
-  freelist that NULL-deref'd at first alloc). `KMEM_CACHE_PANIC_ON_FAIL`
-  turns alloc OOM into extinction.
+  freelist that NULL-deref'd at first alloc). No flag is defined: a shortfall
+  is NULL, and each caller refuses or, at boot, extincts (I-32). The thread,
+  proc, vma and territory caches panicked until 2026-11-05. `slab_refusal.*`
+  injects the shortfall one allocation at a time, on the calling thread only
+  (`kmem_cache_test_refuse`, tests build), and asserts each unwind leaves nothing.
+  The lever sits beside the real allocation, so a refusal leaves by the path a
+  shortfall takes. A thread's fork shape, with a copied handle table, is not driven.
 - `kmem_cache_destroy(c)` (tests build only) — **caller-quiesce contract** (RW-1 F-S2:
   no concurrent alloc/free on any CPU; the live-count read and the
   drain run without `c->lock`). A cache holding ANY live object
@@ -99,7 +104,7 @@ row's obligations: freelist integrity, partial/full membership
 
 NULL: OOM, oversize, impossible geometry. Extinction: wrong-cache
 free, interior pointer (both paths), `PG_SLAB` with no backref,
-live-object destroy, PANIC_ON_FAIL OOM.
+live-object destroy.
 
 ## Performance
 

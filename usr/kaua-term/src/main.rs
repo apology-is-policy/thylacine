@@ -128,8 +128,8 @@ struct Shared {
     master_write: WriteLock,
 }
 
-/// A zero-count write is back-pressure, not an error: a raw-mode pts master
-/// accepts what fits and replies 0 when its ring is full. Retry briefly so a
+/// A zero-count write is back-pressure, not an error: a pts master accepts
+/// what fits and replies 0 when its ring is full. Retry briefly so a
 /// key's bytes stay whole; give up (and drop the rest) only when the ring
 /// stays full past the bound or the fd errors.
 const WRITE_ZERO_RETRIES: u32 = 200;

@@ -130,6 +130,13 @@ segment or an executable stack reads `T_E_ACCES`, whoever's image it is: it may 
 which is not the same as being no image (`dec-2026-11-05-policy-refusal`). A dynamic program
 whose own segments break those rules passes here, because `elf_load` stops at its `PT_INTERP`:
 its interpreter maps it.
+
+A slab shortfall on a segment's, the stack's or its guard's Vma reads `-T_E_NOMEM` on
+both arms: `exec.vma_refused_says_enomem` walks each on the boot blob's arm and
+`exec.load_vma_refused_says_enomem` on the file's, the one `sys_execve` takes, with the
+slab's own lever, and `exec.setup_says_nomem_on_a_refused_vma` refuses at `vma_alloc`. A
+refused header buffer says ENOMEM too; it sits above the slab, so no lever drives it. The
+vDSO stays best-effort.
 `execve.load_refuses_nomem_at_the_pool_edge` parks the pool full and loads.
 
 That is worth stating as a shape rather than a fact, because it is the better

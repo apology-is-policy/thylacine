@@ -300,6 +300,76 @@ void test_cons_full_line_fits_ring(void) {
     cons_settle_mgr();
 }
 
+static void cons_feed_text(const char *s) {
+    while (*s) (void)cons_rx_input((u8)*s++, false);
+}
+
+// A canonical read ends at its line, and a read shorter than the line leaves the rest
+// for the next. A raw read takes what is there, newlines and all.
+void test_cons_read_ends_at_its_line(void) {
+    static u8 first[16], second[16], head[16], tail[16], whole[16];
+    cons_test_reset();
+    sched();
+    cons_test_set_termios(CONS_ICANON);
+    cons_feed_text("one\ntwo\n");
+    long first_n = cons_drain(first, (long)sizeof(first));
+    long second_n = (cons_test_rx_count() > 0u) ? cons_drain(second, (long)sizeof(second)) : -1;
+    cons_feed_text("abc\n");
+    long head_n = cons_drain(head, 2);
+    long tail_n = (cons_test_rx_count() > 0u) ? cons_drain(tail, (long)sizeof(tail)) : -1;
+    cons_test_set_termios(0u);
+    cons_feed_text("a\nb");
+    long whole_n = cons_drain(whole, (long)sizeof(whole));
+    cons_settle_mgr();
+
+    TEST_EXPECT_EQ(first_n, 4L, "the first read takes the first line and no more");
+    TEST_ASSERT(first[0] == 'o' && first[3] == '\n', "and it is one + NL");
+    TEST_EXPECT_EQ(second_n, 4L, "the second line waited for the second read");
+    TEST_ASSERT(second[0] == 't' && second[3] == '\n', "and it is two + NL");
+    TEST_EXPECT_EQ(head_n, 2L, "a read shorter than the line takes what it asked for");
+    TEST_EXPECT_EQ(tail_n, 2L, "the rest of that line stays for the next read");
+    TEST_ASSERT(tail[0] == 'c' && tail[1] == '\n', "and it is c + NL");
+    TEST_EXPECT_EQ(whole_n, 3L, "a raw read does not stop at a newline");
+}
+
+// A control byte in a canonical line echoes as ^X and erases as two columns. A tab
+// echoes as itself, and raw echo is unchanged. The line itself holds the byte.
+void test_cons_control_byte_echoes_as_caret(void) {
+    static u8 caret[16], erase[16], tab[16], raw[16], line[16];
+    cons_test_reset();
+    sched();
+    cons_test_set_termios(CONS_ICANON | CONS_ECHO);
+    cons_test_echo_capture(true);
+    (void)cons_rx_input(0x1bu, false);
+    u32 caret_n = cons_test_echo_captured(caret, sizeof(caret));
+    cons_test_echo_capture(true);
+    (void)cons_rx_input(0x7fu, false);
+    u32 erase_n = cons_test_echo_captured(erase, sizeof(erase));
+    cons_test_echo_capture(true);
+    (void)cons_rx_input((u8)'\t', false);
+    u32 tab_n = cons_test_echo_captured(tab, sizeof(tab));
+    (void)cons_rx_input(0x01u, false);
+    (void)cons_rx_input((u8)'\n', false);
+    long line_n = cons_drain(line, (long)sizeof(line));
+    cons_test_set_termios(CONS_ECHO);
+    cons_test_echo_capture(true);
+    (void)cons_rx_input(0x1bu, false);
+    u32 raw_n = cons_test_echo_captured(raw, sizeof(raw));
+    cons_settle_mgr();
+
+    TEST_EXPECT_EQ((long)caret_n, 2L, "a control byte echoes in two columns");
+    TEST_ASSERT(caret[0] == '^' && caret[1] == '[', "and they read ^[");
+    TEST_EXPECT_EQ((long)erase_n, 6L, "erasing it takes back both columns");
+    TEST_ASSERT(erase[0] == '\b' && erase[1] == ' ' && erase[3] == '\b' && erase[5] == '\b',
+                "back, space, back, twice");
+    TEST_EXPECT_EQ((long)tab_n, 1L, "a tab echoes as itself");
+    TEST_EXPECT_EQ((long)tab[0], (long)'\t', "and it is the tab");
+    TEST_EXPECT_EQ(line_n, 3L, "the line holds tab, the control byte and its newline");
+    TEST_EXPECT_EQ((long)line[1], 1L, "the line holds the byte itself, not its caret");
+    TEST_EXPECT_EQ((long)raw_n, 1L, "raw echo stays one byte");
+    TEST_EXPECT_EQ((long)raw[0], 0x1bL, "and it is the byte");
+}
+
 // #129 (I-27): a full ring must NEVER block the SAK or a cooked Ctrl-C. Both are
 // consumed without pushing ring bytes, so both are unconditionally accepted --
 // deliberately, because a wedged reader that filled the ring would otherwise be
@@ -657,6 +727,47 @@ void test_cons_feed_write_short_on_full(void) {
     TEST_EXPECT_EQ(cons_feed_write(feed, 1L), 0L, "full ring -> 0 accepted, not -1");
     cons_test_reset();
     cons_settle_mgr();
+}
+
+// #129's rule for a lone Ctrl-C holds for one behind a refused terminator in one
+// write: it is not held up, and it takes the line with it. A raw one waits its turn.
+void test_cons_feed_intr_behind_refused_line(void) {
+    static const u8 cooked[] = { 'x', '\n', 'w', 0x03u, 'y' };
+    static const u8 raw[] = { 'q', 0x03u };
+    static const u8 lone[] = { 0x03u };
+    static u8 sink[1024];
+
+    cons_test_reset();
+    cons_test_mgr_hold(true);
+    while (cons_rx_input((u8)0xAAu, false)) { }
+    cons_test_set_termios(CONS_ICANON | CONS_ISIG);
+    long cooked_took = cons_feed_write(cooked, (long)sizeof(cooked));
+    bool cooked_intr = cons_test_intr_pending();
+    cons_test_mgr_hold(false);
+    long full = cons_drain(sink, (long)sizeof(sink));
+    (void)cons_rx_input((u8)'\n', false);
+    long line = (cons_test_rx_count() > 0u) ? cons_drain(sink, (long)sizeof(sink)) : -1;
+    u8 first = sink[0];
+
+    cons_test_reset();
+    cons_test_mgr_hold(true);
+    while (cons_rx_input((u8)0xAAu, false)) { }
+    long raw_took = cons_feed_write(raw, (long)sizeof(raw));
+    bool raw_intr = cons_test_intr_pending();
+    long lone_took = cons_feed_write(lone, (long)sizeof(lone));
+    bool lone_intr = cons_test_intr_pending();
+    cons_test_mgr_hold(false);
+    cons_settle_mgr();
+
+    TEST_EXPECT_EQ(cooked_took, 5L, "the Ctrl-C behind the refused line is not held up");
+    TEST_ASSERT(cooked_intr, "the Ctrl-C behind the refused line raised its note");
+    TEST_EXPECT_EQ(full, 512L, "the committed lines stand");
+    TEST_EXPECT_EQ(line, 2L, "it took the line with it, and what followed it cooks");
+    TEST_EXPECT_EQ((long)first, (long)'y', "what followed it is the line");
+    TEST_EXPECT_EQ(raw_took, 0L, "a raw Ctrl-C waits its turn behind a refused byte");
+    TEST_ASSERT(!raw_intr, "a raw Ctrl-C behind a refused byte raises nothing yet");
+    TEST_EXPECT_EQ(lone_took, 1L, "alone, a raw Ctrl-C goes");
+    TEST_ASSERT(lone_intr, "alone, a raw Ctrl-C raises its note");
 }
 
 // #95/#129: the input counters must actually COUNT, per site.
@@ -1893,6 +2004,7 @@ void test_cons_cook_isig_discards_pending_line(void) {
     cons_rx_input((u8)'\n', false);
     u32  c_cnt = cons_test_rx_count();
     long c_n   = (c_cnt > 0u) ? cons_drain(c_buf, (long)sizeof(c_buf)) : -1;
+    long c2_n  = (cons_test_rx_count() > 0u) ? cons_drain(&c_buf[2], (long)sizeof(c_buf) - 2) : -1;
 
     // ---- TEAR DOWN, then ASSERT. ------------------------------------------
     cons_settle_mgr();
@@ -1914,7 +2026,8 @@ void test_cons_cook_isig_discards_pending_line(void) {
                 "B: ab 03 cd NL in order -- the discard is gated on ISIG-consumption, not on the byte");
 
     TEST_EXPECT_EQ((long)c_cnt, 4L, "C: the committed x+NL and the later y+NL are both in the ring");
-    TEST_EXPECT_EQ(c_n, 4L, "C: drained 4 bytes");
+    TEST_EXPECT_EQ(c_n, 2L, "C: the first read took its line");
+    TEST_EXPECT_EQ(c2_n, 2L, "C: and the second read the next");
     TEST_ASSERT(c_buf[0] == 'x' && c_buf[1] == '\n' && c_buf[2] == 'y' && c_buf[3] == '\n',
                 "C: x NL y NL -- the ^C discarded only the pending ab, never the ring");
 }

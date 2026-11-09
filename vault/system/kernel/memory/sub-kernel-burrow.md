@@ -579,8 +579,8 @@ the page). Both have a named buggy cfg in [[spec-cow]].
 
 Constructors return NULL on allocation failure, having released anything they
 took. `burrow_map` returns -1 on misalignment, zero length, an address-space
-overflow, an address above the user ceiling, a W+X protection, a VMA overlap, or
-allocation failure — and `-T_E_NOMEM` when the address space is at its VMA cap
+overflow, an address above the user ceiling, a W+X protection, or a VMA overlap —
+and `-T_E_NOMEM` when the slab has no Vma or the address space is at its VMA cap
 (the resource refusal reported as one since B-1a' round 4, F18) — with no state
 changed on any of them.
 

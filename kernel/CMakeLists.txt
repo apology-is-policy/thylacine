@@ -156,6 +156,7 @@ set(KERNEL_TEST_SRCS
     test/test_dtb.c
     test/test_phys.c
     test/test_slub.c
+    test/test_slab_refusal.c
     test/test_gic.c
     test/test_timer.c
     test/test_clock.c

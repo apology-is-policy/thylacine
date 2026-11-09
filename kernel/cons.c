@@ -1203,6 +1203,12 @@ static void cons_echo_stage(u8 b, u32 tio, u8 *echo, int *necho) {
     }
 }
 
+// A control byte in a canonical line echoes as ^X, two columns, as N_TTY's ECHOCTL
+// does: echoed as itself it would drive the terminal, not show what is in the line.
+static bool cons_echoes_as_caret(u8 b) {
+    return b < 0x20u && b != (u8)'\t';
+}
+
 // Enqueue one byte to the RX ring under g_cons.lock. Returns true iff a byte was
 // actually enqueued (-> a data-Rendez wake is owed). On the empty->non-empty
 // edge it arms the LS-8a deferred poll-wake (poll_wake_pending) and sets
@@ -1367,9 +1373,12 @@ static bool cons_rx_accept(u8 byte, bool is_break, bool feed) {
                 if (g_cons.line_len > 0u) {
                     g_cons.line_len--;
                     if (tio & CONS_ECHO) {            // visually erase: back, space, back
-                        echo[necho++] = (u8)'\b';
-                        echo[necho++] = (u8)' ';
-                        echo[necho++] = (u8)'\b';
+                        int columns = cons_echoes_as_caret(g_cons.line[g_cons.line_len]) ? 2 : 1;
+                        for (int i = 0; i < columns; i++) {
+                            echo[necho++] = (u8)'\b';
+                            echo[necho++] = (u8)' ';
+                            echo[necho++] = (u8)'\b';
+                        }
                     }
                 }
                 // empty line + erase: nothing to erase, nothing echoed (never
@@ -1404,7 +1413,12 @@ static bool cons_rx_accept(u8 byte, bool is_break, bool feed) {
             } else {                                  // ordinary char: buffer it
                 if (g_cons.line_len < CONS_LINE_MAX) {
                     g_cons.line[g_cons.line_len++] = byte;
-                    if (tio & CONS_ECHO) cons_echo_stage(byte, tio, echo, &necho);
+                    if ((tio & CONS_ECHO) && cons_echoes_as_caret(byte)) {
+                        echo[necho++] = (u8)'^';
+                        echo[necho++] = (u8)(byte + 0x40u);
+                    } else if (tio & CONS_ECHO) {
+                        cons_echo_stage(byte, tio, echo, &necho);
+                    }
                 } else {
                     // Line buffer full -> drop (bounded; Enter still delivers
                     // what fits). A dropped byte is NOT echoed. #95: counted,
@@ -1446,6 +1460,24 @@ static bool cons_rx_accept(u8 byte, bool is_break, bool feed) {
 
 bool cons_rx_input(u8 byte, bool is_break) {
     return cons_rx_accept(byte, is_break, /*feed=*/false);
+}
+
+// The ISIG arm for a Ctrl-C a feed holds behind a refused terminator (see
+// cons_feed_write). The mode is read under the lock that discards the line, so a
+// mode write racing this orders wholly before or after it. False: it is not a
+// signal here, and nothing changed.
+static bool cons_feed_intr_past_refusal(void) {
+    bool raised = false;
+    irq_state_t s = spin_lock_irqsave(&g_cons.lock);
+    u32 tio = cons_termios_load();
+    if (!cons_episode_active_load() && (tio & CONS_ICANON) && (tio & CONS_ISIG)) {
+        cons_intr_store(true);
+        g_cons.line_len = 0u;
+        raised = true;
+    }
+    spin_unlock_irqrestore(&g_cons.lock, s);
+    if (raised) wakeup(&g_cons_mgr_rendez);
+    return raised;
 }
 
 // (The reader's data cond is cons_data_or_vacate, with the episode block: it
@@ -2262,10 +2294,16 @@ long cons_input_read(void *buf, long n) {
             continue;
         }
         u32 c = cons_count_load();
-        while (c > 0u && got < n) {
-            out[got++] = g_cons.ring[g_cons.head];
+        // A canonical read ends at its line: a reader taking one line leaves the
+        // next for whoever reads after it.
+        bool canonical = (cons_termios_load() & CONS_ICANON) != 0u;
+        bool line_ended = false;
+        while (c > 0u && got < n && !line_ended) {
+            u8 b = g_cons.ring[g_cons.head];
+            out[got++] = b;
             g_cons.head = (g_cons.head + 1u) & (CONS_RING_SIZE - 1u);
             c--;
+            line_ended = canonical && b == (u8)'\n';
         }
         cons_count_store(c);
         spin_unlock_irqrestore(&g_cons.lock, s);
@@ -2605,6 +2643,13 @@ short cons_drain_poll(short events, struct poll_waiter *pw) {
 // path into the RX ring during the prompt is exactly the spoof the episode
 // exists to exclude. A loop that finds one opening stops short (the renderer
 // retries and is refused).
+//
+// #129's rule for a lone Ctrl-C holds for one behind a refused terminator in the
+// same write, or a renderer that keeps re-offering the terminator never reaches
+// it: a reader that never comes must not hold it up. The refused line is still the
+// pending assembly and goes with it; what the write held between them was never
+// committed. Raw mode has no assembly, and consuming past a refused byte would
+// leave a hole in the stream, so there it waits its turn.
 long cons_feed_write(const void *buf, long n) {
     if (!buf || n < 0) return -1;
     if (cons_episode_active_load()) return -1;
@@ -2613,7 +2658,11 @@ long cons_feed_write(const void *buf, long n) {
     for (; i < n; i++) {
         if (cons_episode_active_load()) break;
         cons_test_window();
-        if (!cons_rx_accept(bytes[i], /*is_break=*/false, /*feed=*/true)) break;
+        if (cons_rx_accept(bytes[i], /*is_break=*/false, /*feed=*/true)) continue;
+        long at = i + 1;
+        while (at < n && bytes[at] != 0x03u) at++;
+        if (at == n || !cons_feed_intr_past_refusal()) break;
+        i = at;
     }
     return i;
 }

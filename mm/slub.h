@@ -38,9 +38,8 @@
 #define SLUB_MIN_OBJECT_SIZE   8
 #define SLUB_MIN_ALIGN         8
 
-// kmem_cache flags.
-#define KMEM_CACHE_PANIC_ON_FAIL  (1u << 0)   // extinction on alloc failure
-// (Future: KMEM_CACHE_ZERO, KMEM_CACHE_DEBUG_REDZONE, etc.)
+// kmem_cache flags: none is defined. A shortfall is NULL, and each caller refuses
+// or, at boot, extincts (I-32).
 
 struct kmem_cache {
     const char *name;
@@ -91,6 +90,14 @@ void kmem_cache_destroy(struct kmem_cache *c);
 
 // Allocate / free a single object from a cache.
 void *kmem_cache_alloc(struct kmem_cache *c, unsigned flags);
+
+#ifdef KERNEL_TESTS
+// Refuse the calling thread's allocation from the cache named `name`, once, after
+// `skip` that succeed. Another thread's allocations are not touched.
+void kmem_cache_test_refuse(const char *name, u32 skip);
+// Whether the refusal fired. Disarms it either way.
+bool kmem_cache_test_refused(void);
+#endif
 void  kmem_cache_free(struct kmem_cache *c, void *obj);
 
 // Generic kmalloc / kfree. kmalloc finds the smallest power-of-two
