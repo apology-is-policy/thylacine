@@ -698,5 +698,9 @@ ancestor. `ACCOUNT_LIMIT_NONE`, all ones, clears one. A limit shows in the query
 Neither has a limit today, so `headroom` reads the chain and the pool, and a session's steps
 show in it from anything else on the machine. A sandbox inside a session sees its session's
 figures, and with a limit of its own in every RAM class it sees only itself (vote 65). Nothing
-gives one such a child yet, and what a diorama Proc reaches is still to be measured (vote 59).
+gives one such a child yet. What a diorama Proc reaches, measured on this branch's merged tip
+(418dbcf6c, viv-run, 2026-11-09): its query answers 0 at level 0 with nothing limiting, its
+headroom is the session's chain and the pool (1.74 GB of a 2 GiB machine), and the total it
+reads is the machine's (2097152 kB, which viv-run checks against `/ctl/memory`'s pages). A
+container sees its session's figures, as vote 59 left it, until one gets limits of its own.
 Polling the kind is `POLLNVAL` until MM-3.
