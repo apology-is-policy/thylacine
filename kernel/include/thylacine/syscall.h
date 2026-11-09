@@ -2693,14 +2693,21 @@ enum {
     SYS_NOTE_DISPOSE = 139,
 
     // SYS_ACCOUNT(handle, op, rec_va, rec_size), with thylacine/account.h's records
-    // (SHARED-MEMORY-ACCOUNTING.md section 13, operator votes 47 and 48). Serves
-    // ACCOUNT_QUERY on ACCOUNT_SELF, which must arrive sign-extended. Returns 0, or:
+    // (SHARED-MEMORY-ACCOUNTING.md sections 13 and 14, operator votes 47, 48 and 58).
+    // Serves ACCOUNT_QUERY, ACCOUNT_CHILD and ACCOUNT_SET_LIMITS, on a KOBJ_ACCOUNT handle
+    // or ACCOUNT_SELF, which must arrive sign-extended. Returns 0 or CHILD's new handle, or:
     //   -T_E_INVAL      op names no operation; rec_size, version, size, flags or pad
-    //                   is wrong; incarnation is neither 0 nor the account's
+    //                   is wrong; incarnation is 0 on a handle (0 is ACCOUNT_SELF's)
+    //   -T_E_STALE      incarnation is another account's (operator vote 76)
     //   -T_E_OPNOTSUPP  an operation with no code behind it yet
-    //   -T_E_BADF       a handle other than ACCOUNT_SELF: no KOBJ_ACCOUNT exists yet
-    //   -T_E_FAULT      the record is not readable and writable memory of the caller,
-    //                   in which case any part of it may have been written
+    //   -T_E_BADF       a handle that is not a live KOBJ_ACCOUNT of the caller's
+    //   -T_E_ACCES      SET_LIMITS on ACCOUNT_SELF, or a limit above an ancestor's
+    //   -T_E_NOSPC      CHILD at the depth limit
+    //   -T_E_NOMEM      CHILD with no pool or memory
+    //   -T_E_MFILE      CHILD with no free handle slot
+    //   -T_E_FAULT      the record is not memory of the caller it may read, and write
+    //                   for QUERY and CHILD, in which case any part of it may have
+    //                   been written
     //
     // Linux's 140 is setpriority, which has no row, so a Linux Proc takes ENOSYS before
     // the native switch (vivarium.c).
@@ -3364,7 +3371,13 @@ _Static_assert(__builtin_popcount(SPAWN_PERM_ALL) ==
 // Ungated: the spawner could write the same variables into its own /env before
 // spawning.
 #define SPAWN_EXT_ENV                (1u << 2)
-#define SPAWN_EXT_FLAGS_ALL          (SPAWN_EXT_CWD | SPAWN_EXT_THREADS | SPAWN_EXT_ENV)
+// SPAWN_EXT_ACCOUNT: a struct sys_spawn_ext_account names the memory account the child
+// is born under, by a KOBJ_ACCOUNT handle of the spawner's own (not a live one of that
+// kind: -T_E_BADF) and that account's incarnation (0: -T_E_INVAL; another: -T_E_STALE). No gate: the handle is the authority, and it only ever names a
+// descendant of the spawner's account, so the child's budget can only be narrower.
+// docs/SHARED-MEMORY-ACCOUNTING.md section 13.
+#define SPAWN_EXT_ACCOUNT            (1u << 3)
+#define SPAWN_EXT_FLAGS_ALL          (SPAWN_EXT_CWD | SPAWN_EXT_THREADS | SPAWN_EXT_ENV | SPAWN_EXT_ACCOUNT)
 
 // SYS_SPAWN_FULL_ARGV hardware-allowance descriptor (Menagerie build-arc step
 // 5). The warden fills this in user memory and points sys_spawn_args.
@@ -4291,6 +4304,24 @@ _Static_assert(__builtin_offsetof(struct sys_spawn_ext_env, env_len) == 8,
 _Static_assert(__builtin_offsetof(struct sys_spawn_ext_env, env_flags) == 12,
                "sys_spawn_ext_env.env_flags at ABI offset 12");
 
+// The SPAWN_EXT_ACCOUNT tail, after every lower tail whose bit is set, else directly
+// after the record.
+struct sys_spawn_ext_account {
+    u32 account_h;      // the spawner's KOBJ_ACCOUNT handle
+    u32 account_flags;  // must be 0 -> else -1, the unknown-bits rule
+    u64 incarnation;    // the account's; 0 is not an answer, as it is for no handle
+};
+_Static_assert(sizeof(struct sys_spawn_ext_account) == 16,
+               "struct sys_spawn_ext_account is a SYS_SPAWN_FULL_ARGV ABI type -- "
+               "16 bytes, no implicit padding; tools/check-spawn-args-mirrors.py "
+               "compares its mirrors with it.");
+_Static_assert(__builtin_offsetof(struct sys_spawn_ext_account, incarnation) == 8,
+               "sys_spawn_ext_account.incarnation at ABI offset 8");
+_Static_assert(__builtin_offsetof(struct sys_spawn_ext_account, account_h) == 0,
+               "sys_spawn_ext_account.account_h at ABI offset 0");
+_Static_assert(__builtin_offsetof(struct sys_spawn_ext_account, account_flags) == 4,
+               "sys_spawn_ext_account.account_flags at ABI offset 4");
+
 struct exception_context;
 
 // Dispatch entry called from arch/arm64/exception.c::exception_sync_lower_el
@@ -4437,6 +4468,7 @@ int sys_spawn_full_argv_cwd_for_proc(struct Proc *p,
         const struct spawn_allowance *want_allowance,
         u32 req_budget, u32 pheno_flags, u32 debug_flags,
         const char *cwd, u32 cwd_len, u32 req_threads);
+struct MemoryAccount;
 int sys_spawn_full_argv_env_for_proc(struct Proc *p,
         const char *name, size_t name_len,
         const char *argv_data, u32 argv_data_len, u32 argc,
@@ -4447,7 +4479,8 @@ int sys_spawn_full_argv_env_for_proc(struct Proc *p,
         const struct spawn_allowance *want_allowance,
         u32 req_budget, u32 pheno_flags, u32 debug_flags,
         const char *cwd, u32 cwd_len, u32 req_threads,
-        bool env_set, const char *env_block, u32 env_len);
+        bool env_set, const char *env_block, u32 env_len,
+        struct MemoryAccount *account);
 int sys_spawn_full_argv_debug_for_proc(struct Proc *p,
         const char *name, size_t name_len,
         const char *argv_data, u32 argv_data_len, u32 argc,

@@ -67,6 +67,8 @@ GO_TYPE = "spawnArgs"
 # The kernel struct's 8-byte fields that are not user addresses; every other one
 # must be named *_va.
 NON_ADDRESS_U64 = {"cap_mask"}
+# The same for a tail: its 8-byte fields are addresses unless named here.
+TAIL_NON_ADDRESS_U64 = {"sys_spawn_ext_account": {"incarnation"}}
 # The record's tails (SPAWN_EXT_*, announced by ext_flags): each kernel tail
 # struct and its in-tree mirrors, held to the same rules as the record. The go
 # fork declares none until it sends one; a `type spawnExt<...> struct` it
@@ -81,6 +83,8 @@ EXT_TAILS = [
     ("sys_spawn_ext_env", [("libt", "t_sys_spawn_ext_env", "c"),
                            ("libthyla-rs", "TSpawnExtEnv", "rust"),
                            ("pouch-env", "pouch_spawn_ext_env", "patch")]),
+    ("sys_spawn_ext_account", [("libt", "t_sys_spawn_ext_account", "c"),
+                               ("libthyla-rs", "TSpawnExtAccount", "rust")]),
 ]
 # Tail mirrors that live outside the MIRRORS files: pouch's env tail comes in its
 # own patch, after the one that mirrors the record.
@@ -350,8 +354,9 @@ def u64_class_errs(text, struct=None):
         wide = {name for name, size, count, _ in parse_fields(text, struct, "kernel", label)
                 if size == 8 and count == 1}
         return [f"{label}: {name} is 8 bytes but not named *_va (a user address) "
-                f"-- a tail carries addresses only, so name it *_va"
-                for name in sorted(wide) if not name.endswith("_va")]
+                f"-- name it *_va, or list it in TAIL_NON_ADDRESS_U64 if it is no address"
+                for name in sorted(wide)
+                if not name.endswith("_va") and name not in TAIL_NON_ADDRESS_U64.get(struct, ())]
     struct = main_struct
     wide = {name for name, size, count, _ in parse_fields(text, struct, "kernel", label)
             if size == 8 and count == 1}

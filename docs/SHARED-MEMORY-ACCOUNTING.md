@@ -569,13 +569,23 @@ I-4 and I-5, widens fork's copy unless it is special-cased, and changes what
 MM-2 behind a large path nobody has built.
 
 **A sandbox reads its own chain.** Operator vote 59, November 4. The query reports the
-caller's account and what bounds it from above. Until sessions have child accounts that
+caller's account and what bounds it from above, up to the nearest limit. Until sessions have child accounts that
 chain is the root, so a Proc with no `/ctl` reads machine totals, and other sessions'
 allocations and thread creations show as steps. It reaches no address, lock or per-key
 data. Giving sessions children narrows this to the session's. No capability gates the
 query and its figures are not coarsened, because a program should be able to ask its
 budget rather than find it by allocating until refused. A sandbox that should see less
-is given its own child, and then sees only itself.
+is given its own child with a limit in every RAM class, and then sees only itself.
+
+**The query stops at the nearest limit, per class.** Operator vote 65, November 4. It reads
+no further up than a class's nearest limit, and reads the pool only for a RAM class that met
+none on the way to the root. Device storage has no pool, so leaving it open reads nothing of
+the machine's RAM. A child with no limit still reads the chain, and a limit in one class
+stops that class only. So `headroom` can overstate the room on a nearly full machine, and
+the refusal at allocation is what tells the truth. A refusal reads every ancestor and the
+pool, whatever the query showed. This is cgroup v2's model, where `memory.max` and
+`memory.current` report no machine figure. The counter behind account incarnations stays a
+small machine-wide channel either way.
 
 Not settled here: whether `ALLOCATE_FUNDED` returns a `KOBJ_DMA`, a Burrow or either by
 class; and whether a map needs its own operation or `burrow_share_into`'s callers charge
@@ -586,7 +596,7 @@ inside it, section 4's MAP_ACCOUNTED (MM-2).
 Section 10's first step: durable accounts and an exact physical ledger, watching only.
 The 128 MiB limit and the capacity pool decide everything they decided before.
 
-**Written, not yet booted:** the account tree, every Proc's account, a sponsor on every
+**MM-1a and MM-1b, booted:** the account tree, every Proc's account, a sponsor on every
 pool block and DMA block, thread pool pages as `CLASS_META`, and a test that the ledger
 equals the pool to the page across every allocation since boot.
 
@@ -612,17 +622,18 @@ context.
 the ledger. It is counted, and the test runner reddens the test it happened under. That
 changes when a decision first reads the ledger.
 
-**The query is the whole of the call, also not yet booted.** `ACCOUNT_QUERY` on the self
-selector is served. Any other handle is `-EBADF`, since `KOBJ_ACCOUNT` does not exist,
-and the other operations are `-EOPNOTSUPP`. A stale incarnation is `-EINVAL`, because the
-error registry has no `ESTALE` and this is not worth a change to it.
+**`ACCOUNT_QUERY` takes the self selector or a `KOBJ_ACCOUNT` handle.** Any other handle is
+`-EBADF`, and the voucher operations are `-EOPNOTSUPP`. An incarnation that is another
+account's is `-ESTALE` (operator vote 76), so a caller can tell a number closed and reused
+under it from a malformed record. 0 on a handle is `-EINVAL`: 0 is the self selector's word.
 
 `used` is the account's and its descendants', in bytes. Nothing charges `CLASS_RETAIN`
-or `CLASS_DEVICE` yet. An account has no limits of its own until MM-1c, so `limit` is
-section 4's default: the pool for a RAM class, and all ones for device storage, which
-has no budget yet. `headroom` is the least of each class's room at each level up the
-chain and the pool's own room, floored at zero, and `limiting` names the class of the
-chain's tightest room even when the pool is tighter still, because the pool is no class.
+or `CLASS_DEVICE` yet. `limit` is a class's nearest limit, the account's own or an
+ancestor's, which is what bounds it. A class that meets none reads section 4's default: the
+pool for a RAM class, and all ones for device storage, which has no budget yet. `headroom` is the
+least of each class's room at its nearest limit, or at the root when it meets none, and the
+pool's own room when a RAM class met none, floored at zero. `limiting` names the class of the
+tightest of those rooms even when the pool is tighter still, because the pool is no class.
 `generation`, `level` and the three reclaim figures are zero, as no pressure machinery
 exists. The header is read once and the whole record then written, so a peer thread
 cannot steer a check, and a fault on the way out may leave a part-written record, which
@@ -640,12 +651,58 @@ leave them equal. It is also counted in `unpaired`, with a refund past zero and 
 dying charged. Section 10's reconciliation walks the frames in a test, so the ledger is
 held to the blocks that exist and not only to the other counter.
 
-**`headroom` can read low.** `CLASS_ALLOC` counts DMA blocks outside the pool, and its limit
-is the pool, so a class's room can reach zero while the pool has room and allocations
-succeed. That is honest for a figure that decides nothing. MM-2 must not admit on it as it
-stands, and critical device DMA stays outside the pool even after section 7's routing.
+**`headroom` can read low, and high.** `CLASS_ALLOC` counts DMA blocks outside the pool, and
+its limit is the pool, so a class's room can reach zero while the pool has room and allocations
+succeed. And an account with limits of its own does not read what is above them, so its room
+can exceed what its ancestors or the pool have left. That is honest for a figure that decides
+nothing. MM-2 must not admit on it, and critical device DMA stays outside the pool even after
+section 7's routing.
 
-**Until sessions have children, every Proc's account is the root,** so a query shows
-machine totals. `/ctl/memory` already shows them to every process, but a sandboxed Proc
-whose namespace has no `/ctl` learns them only through this call. MM-1c ends that for a
-session and leaves a sandbox seeing its session's totals.
+**MM-1c gives sessions and resident services accounts of their own: written, not yet
+booted (votes 58 and 59).** `ACCOUNT_CHILD`, on the self selector or a handle, subdivides
+that account and returns a `KOBJ_ACCOUNT` handle. No handle crosses a Proc boundary: the
+kind is its own non-transferable partition, so it has no dup, fork does not copy it and
+spawn's descriptor array refuses it, and an exec closes it whatever its flag says. A
+`SPAWN_EXT_ACCOUNT` tail names the handle and the account's incarnation, as an operation's
+record does, so the child is born under the account the caller meant, and gives the child no
+control of it. `ACCOUNT_SET_LIMITS` needs the handle and refuses the self selector with
+`-EACCES`, so nobody adjusts the account they are charged to through any handle. A debugger is
+the one other way to reach a holder, since the owner axis compares capabilities and cannot see
+a handle: a program that spawns a same-principal child under an account should know that child
+can stop it and drive it. Login and joey run as the system principal, out of the session's
+reach. MM-2, when limits begin to refuse, must seal any other holder. If the creator exits, the limits stay as they are and nobody can change
+them; a Halcyon setting that adjusts a session goes through login or waits for a transfer
+path.
+
+**Login makes the session's account before it binds the home,** and a failure refuses the
+login. The home proxy, `aurora-push`, the shell and `halcyond` are born under it. Joey makes
+the resident services' account before its probes, and a failure is fatal. Corvus, `stratumd`,
+ptyfs, diorama, the console renderer and the warden are born under that one, and so is
+everything the warden binds: Lictor, tapestryd, netd and the other drivers.
+
+**An account costs its parent one page of `CLASS_META` and the pool one page,** as a thread's
+slot costs a whole page, so a table of handles to empty accounts is a bound on the pool and
+not a hole in it. An exempt payer is counted and never refused. Both come back when the last
+reference goes, and a last reference can be a block's, so `account_unref` now frees the slab
+object and uncharges the pool from inside `free_pages`. Past depth 16 is `-ENOSPC`, no pool
+or memory `-ENOMEM`, a full table `-EMFILE`, and a fault writing the child's record closes
+the handle and returns `-EFAULT`. The call returns the handle, and `created` in the record is
+the child's incarnation.
+
+**Limits change whole or not at all, and decide nothing yet.** Each is rounded down to a page.
+A limit above any ancestor's ceiling is `-EACCES`, every class against every ancestor under
+one hold of the tree lock, before any is written. Lowering one below current use is allowed,
+and a child above a lowered parent keeps its figure, so MM-2's refusal has to read every
+ancestor. `ACCOUNT_LIMIT_NONE`, all ones, clears one. A limit shows in the query's `limit`,
+`headroom` and `limiting`, and refuses nothing until MM-2.
+
+**What a query shows now.** `used` is the session's or the services' and their descendants'.
+Neither has a limit today, so `headroom` reads the chain and the pool, and a session's steps
+show in it from anything else on the machine. A sandbox inside a session sees its session's
+figures, and with a limit of its own in every RAM class it sees only itself (vote 65). Nothing
+gives one such a child yet. What a diorama Proc reaches, measured on this branch's merged tip
+(418dbcf6c, viv-run, 2026-11-09): its query answers 0 at level 0 with nothing limiting, its
+headroom is the session's chain and the pool (1.74 GB of a 2 GiB machine), and the total it
+reads is the machine's (2097152 kB, which viv-run checks against `/ctl/memory`'s pages). A
+container sees its session's figures, as vote 59 left it, until one gets limits of its own.
+Polling the kind is `POLLNVAL` until MM-3.

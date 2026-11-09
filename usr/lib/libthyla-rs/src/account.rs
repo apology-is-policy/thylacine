@@ -7,6 +7,9 @@ pub const ACCOUNT_VERSION: u32 = 1;
 /// In place of a handle, the caller's own account. No handle is negative.
 pub const ACCOUNT_SELF: i32 = -1;
 
+/// No ceiling of the account's own: section 4's default for the class bounds it.
+pub const ACCOUNT_LIMIT_NONE: u64 = !0;
+
 pub const ACCOUNT_QUERY: u32 = 1;
 pub const ACCOUNT_CHILD: u32 = 2;
 pub const ACCOUNT_SET_LIMITS: u32 = 3;
@@ -66,6 +69,24 @@ pub struct AccountQuery {
     pub c: [AccountClass; ACCOUNT_CLASSES],
 }
 
+/// `ACCOUNT_CHILD`: `h.incarnation` is the account being subdivided. The call returns the
+/// new account's control handle and `created` carries its incarnation.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct AccountChildRec {
+    pub h: AccountRecHdr,
+    pub created: u64,
+}
+
+/// `ACCOUNT_SET_LIMITS`: the whole vector, in bytes, rounded down to pages. Every class
+/// changes or none does.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct AccountLimitsRec {
+    pub h: AccountRecHdr,
+    pub limit: [u64; ACCOUNT_CLASSES],
+}
+
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct AccountOutcome {
@@ -83,5 +104,9 @@ const _: () = {
     assert!(size_of::<AccountClass>() == 24);
     assert!(size_of::<AccountQuery>() == 168);
     assert!(offset_of!(AccountQuery, c) == 72);
+    assert!(size_of::<AccountChildRec>() == 32);
+    assert!(offset_of!(AccountChildRec, created) == 24);
+    assert!(size_of::<AccountLimitsRec>() == 56);
+    assert!(offset_of!(AccountLimitsRec, limit) == 24);
     assert!(size_of::<AccountOutcome>() == 40);
 };

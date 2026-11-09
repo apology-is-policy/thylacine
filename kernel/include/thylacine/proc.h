@@ -1965,12 +1965,19 @@ int rfork_forked_with_caps(unsigned flags, const struct fork_context *fc,
 int rfork_with_caps(unsigned flags, void (*entry)(void *), void *arg,
                     caps_t caps_mask);
 
-// The birth hold (DEBUG-FS-DESIGN 5f): rfork_with_caps(flags, ...) whose child
-// is published already marked BIRTH_HOLD_UNBORN. The SPAWN_DEBUG_HELD spawn's
-// fork; `flags` is RFPROC, or RFPROC|RFCENVG. Same return contract as
+// SYS_SPAWN_FULL_ARGV's fork: rfork_with_caps(flags, ...), with the child born under
+// `account` (NULL: the parent's; the caller holds a reference across the call) and, when
+// `held` (SPAWN_DEBUG_HELD, DEBUG-FS-DESIGN 5f), published already marked
+// BIRTH_HOLD_UNBORN. `flags` is RFPROC, or RFPROC|RFCENVG. Same return contract as
 // rfork_with_caps.
+int rfork_spawn_under(unsigned flags, void (*entry)(void *), void *arg,
+                      caps_t caps_mask, bool held, struct MemoryAccount *account);
+
+#ifdef KERNEL_TESTS
+// rfork_spawn_under with `held` true and the parent's account.
 int rfork_spawn_held(unsigned flags, void (*entry)(void *), void *arg,
                      caps_t caps_mask);
+#endif
 
 // rfork_with_caps(RFPROC, ...) for init: the child takes PROC_ID_INIT as its
 // pid, so init is pid 1 however many kernel threads boot started before it

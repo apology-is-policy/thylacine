@@ -18,6 +18,7 @@ mirrors:
   - "tools/interactive/ls-halcyon-clipboard-async.exp"
   - "tools/interactive/ls-nora-stopped-copy.exp"
   - "tools/interactive/ls-ut-paste.exp"
+  - "tools/interactive/ls-session-account.exp"
   - "tools/interactive/ls-halcyon-paste-flow.exp"
   - "tools/interactive/ls-halcyon-pointer.exp"
   - "tools/interactive/ls-halcyon-session-media.exp"
@@ -43,6 +44,7 @@ mirrors:
   - "tools/interactive/im3-lex-curiata.exp"
   - "tools/interactive/ls-bghome-stall.exp"
   - "tools/interactive/ls-imperium.exp"
+  - "tools/interactive/viv-run.exp"
   - "tools/interactive/haul-post.exp"
   - "tools/interactive/haul-cape.exp"
   - "tools/interactive/haul-links.exp"
@@ -562,6 +564,11 @@ session. It is a new mirror of the unchanged prefix.
 
 The opt-in `ls-ut-paste` scenario fails on `EXTINCTION:` during its probe's run. It is a
 new mirror of the unchanged prefix.
+
+### Session-account consumer (November 4)
+
+The `ls-session-account` scenario fails on `EXTINCTION:` while it reads an account. It
+is a new mirror of the unchanged prefix.
 
 ### Existing PTY-envelope consumer (October 4)
 

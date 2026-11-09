@@ -123,6 +123,7 @@ Generated — do not edit between the markers (`quaestor render`).
 
 ## Recent changes
 
+- 2026-11-09 [[chg-2026-11-09-account-estale]] — A memory account named by another account's incarnation answers ESTALE (vote 76)
 - 2026-11-09 [[chg-2026-11-09-aux-unlock]] — An unlock that never left for want of memory is sent again: the aux join's round 3 F2, bounded where a kill cannot reach
 - 2026-11-09 [[chg-2026-11-09-input-thread]] — Lictor reads input on its own thread, into a 4096-entry queue (vote 72, second half)
 - 2026-11-09 [[chg-2026-11-09-narrow-sync-wait]] — Lictor's synchronous wait no longer widens behind a readback (vote 72, first half)
@@ -130,5 +131,4 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-11-09 [[chg-2026-11-09-sak-renew]] — A takeover behind a GPU backlog renews the kernel's quiesce deadline (vote 71)
 - 2026-11-09 [[chg-2026-11-09-serial-side-queue]] — The serial console reads every byte; what the ring refuses waits in a side queue (vote 73)
 - 2026-11-09 [[chg-2026-11-09-strike-regex-palette]] — The shell's =~, palette builtin and prompt function are struck (vote 78)
-- 2026-11-09 [[chg-2026-11-09-takeover-bound-round4]] — The takeover's bound lives inside one seat step (round 4)
 <!-- generated:end -->

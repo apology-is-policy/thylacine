@@ -55,8 +55,9 @@ use crate::fs::{read_dir, File, OpenOptions};
 use crate::handle::{Handle, Rights};
 use crate::io::{Read, Write};
 use crate::{
-    t_pipe, t_spawn_full_argv, t_wait_pid_for, TAllowanceDesc, TSpawnArgs, TSpawnExtCwd,
-    TSpawnExtEnv, T_SPAWN_ALLOWANCE_SET, T_SPAWN_DEBUG_HELD, T_SPAWN_EXT_CWD, T_SPAWN_EXT_ENV,
+    t_pipe, t_spawn_full_argv, t_wait_pid_for, TAllowanceDesc, TSpawnArgs, TSpawnExtAccount,
+    TSpawnExtCwd, TSpawnExtEnv, T_SPAWN_ALLOWANCE_SET, T_SPAWN_DEBUG_HELD, T_SPAWN_EXT_ACCOUNT,
+    T_SPAWN_EXT_CWD, T_SPAWN_EXT_ENV,
     T_SPAWN_IDENTITY_SET, T_SPAWN_MAX_FDS, T_SPAWN_NAME_MAX, T_SYS_SPAWN_ARGV_DATA_MAX,
     T_SYS_SPAWN_ARGV_MAX, T_WAIT_WNOHANG,
 };
@@ -293,6 +294,9 @@ pub struct Command {
     // The child's environment changes (the T_SPAWN_EXT_ENV tail); None inherits
     // the caller's /env whole.
     env: Option<EnvPlan>,
+    // The memory account the child is born under (the T_SPAWN_EXT_ACCOUNT tail): a
+    // control handle of this Proc's; None is this Proc's own account.
+    account: Option<(u32, u64)>,
 }
 
 // What the caller asked of the child's environment: start from nothing (after
@@ -303,30 +307,35 @@ struct EnvPlan {
     ops: Vec<(String, Option<String>)>,
 }
 
-// The record with its cwd tail, laid out as the kernel reads it: the tail at
-// the record's address + 104.
+// The record with its tails, laid out as the kernel reads it: the first tail at
+// the record's address + 104, the rest following in bit order. Every tail is a
+// multiple of 8 bytes, so each lands aligned in `tails`, with room for all of
+// the ones this builder writes.
 #[repr(C)]
-struct SpawnRecordCwd {
-    base: TSpawnArgs,
-    cwd:  TSpawnExtCwd,
+struct SpawnRecord {
+    base:  TSpawnArgs,
+    tails: [u64; 6],
+    used:  usize,
 }
-const _: () = assert!(core::mem::offset_of!(SpawnRecordCwd, cwd) == 104);
+const _: () = assert!(core::mem::offset_of!(SpawnRecord, tails) == 104);
+const _: () = assert!(
+    core::mem::size_of::<TSpawnExtCwd>()
+        + core::mem::size_of::<TSpawnExtEnv>()
+        + core::mem::size_of::<TSpawnExtAccount>()
+        <= 6 * 8
+);
 
-// The record with its environment tail alone, and after the cwd tail (tails
-// follow in bit order).
-#[repr(C)]
-struct SpawnRecordEnv {
-    base: TSpawnArgs,
-    env:  TSpawnExtEnv,
+impl SpawnRecord {
+    fn push<T>(&mut self, tail: T) {
+        // SAFETY: the assert above bounds the tails this builder pushes, once each,
+        // and each is a multiple of 8 bytes, so `used` stays aligned for T.
+        unsafe {
+            let at = self.tails.as_mut_ptr().cast::<u8>().add(self.used).cast::<T>();
+            core::ptr::write(at, tail);
+        }
+        self.used += core::mem::size_of::<T>();
+    }
 }
-const _: () = assert!(core::mem::offset_of!(SpawnRecordEnv, env) == 104);
-#[repr(C)]
-struct SpawnRecordCwdEnv {
-    base: TSpawnArgs,
-    cwd:  TSpawnExtCwd,
-    env:  TSpawnExtEnv,
-}
-const _: () = assert!(core::mem::offset_of!(SpawnRecordCwdEnv, env) == 120);
 
 impl Command {
     /// Construct a Command that will spawn the binary at path `name`. The
@@ -350,6 +359,7 @@ impl Command {
             debug_held: false, // 5f: run from the first instruction, as ever
             cwd: None,       // inherit the caller's working directory
             env: None,       // inherit the caller's environment
+            account: None,   // this Proc's own account
         }
     }
 
@@ -481,6 +491,15 @@ impl Command {
     #[inline]
     pub fn debug_held(&mut self, held: bool) -> &mut Command {
         self.debug_held = held;
+        self
+    }
+
+    /// Start the child under the memory account a control handle of this Proc's
+    /// names, rather than this Proc's own. The kernel refuses anything else with
+    /// `EBADF`, so a bad handle fails `spawn` and no child exists.
+    #[inline]
+    pub fn account(&mut self, handle: u32, incarnation: u64) -> &mut Command {
+        self.account = Some((handle, incarnation));
         self
     }
 
@@ -624,6 +643,9 @@ impl Command {
         if env_buf.is_some() {
             ext_flags |= T_SPAWN_EXT_ENV;
         }
+        if self.account.is_some() {
+            ext_flags |= T_SPAWN_EXT_ACCOUNT;
+        }
 
         let args_record = TSpawnArgs {
             name_va: self.name.as_ptr() as u64,
@@ -658,36 +680,30 @@ impl Command {
         // end). PreparedStdio's keep_through_syscall Files hold any child-end
         // fds alive across the SVC. The kernel copies all data before returning.
         //
-        // With a cwd or an environment the record travels with its tails:
-        // `record` owns them, and `dir` (borrowed from self.cwd) and env_buf
-        // outlive the call; the kernel copies both before it returns.
-        let cwd_tail = self.cwd.as_ref().map(|dir| TSpawnExtCwd {
-            cwd_va: dir.as_ptr() as u64,
-            cwd_len: dir.len() as u32,
-            cwd_flags: 0,
-        });
-        let env_tail = env_buf.as_ref().map(|b| TSpawnExtEnv {
-            env_va: if b.is_empty() { 0 } else { b.as_ptr() as u64 },
-            env_len: b.len() as u32,
-            env_flags: 0,
-        });
-        // Each pointer is the whole record's, so it covers the tails the kernel
+        // The record travels with its tails: `record` owns them, and `dir`
+        // (borrowed from self.cwd) and env_buf outlive the call; the kernel
+        // copies both before it returns.
+        let mut record = SpawnRecord { base: args_record, tails: [0; 6], used: 0 };
+        if let Some(dir) = self.cwd.as_ref() {
+            record.push(TSpawnExtCwd {
+                cwd_va: dir.as_ptr() as u64,
+                cwd_len: dir.len() as u32,
+                cwd_flags: 0,
+            });
+        }
+        if let Some(b) = env_buf.as_ref() {
+            record.push(TSpawnExtEnv {
+                env_va: if b.is_empty() { 0 } else { b.as_ptr() as u64 },
+                env_len: b.len() as u32,
+                env_flags: 0,
+            });
+        }
+        if let Some((h, incarnation)) = self.account {
+            record.push(TSpawnExtAccount { account_h: h, account_flags: 0, incarnation });
+        }
+        // The pointer is the whole record's, so it covers the tails the kernel
         // reads past the base.
-        let rc = match (cwd_tail, env_tail) {
-            (Some(cwd), Some(env)) => {
-                let record = SpawnRecordCwdEnv { base: args_record, cwd, env };
-                unsafe { t_spawn_full_argv(&record as *const SpawnRecordCwdEnv as *const TSpawnArgs) }
-            }
-            (Some(cwd), None) => {
-                let record = SpawnRecordCwd { base: args_record, cwd };
-                unsafe { t_spawn_full_argv(&record as *const SpawnRecordCwd as *const TSpawnArgs) }
-            }
-            (None, Some(env)) => {
-                let record = SpawnRecordEnv { base: args_record, env };
-                unsafe { t_spawn_full_argv(&record as *const SpawnRecordEnv as *const TSpawnArgs) }
-            }
-            (None, None) => unsafe { t_spawn_full_argv(&args_record as *const _) },
-        };
+        let rc = unsafe { t_spawn_full_argv(&record as *const SpawnRecord as *const TSpawnArgs) };
         let pid_or_err = Error::from_syscall_return(rc);
 
         // Whether spawn succeeded or failed, the parent's copies of

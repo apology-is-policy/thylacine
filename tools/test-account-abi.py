@@ -19,10 +19,13 @@ query = hdr + struct.pack('<QIIQQQQ', 0x1112131415161718, 2, 3, 0x21222324252627
                           0x3132333435363738, 0x4142434445464748, 0x5152535455565758) + classes
 outcome = struct.pack('<QIIQQQ', 0x6162636465666768, 1, 9, 0x7172737475767778,
                       0x8182838485868788, 0x9192939495969798)
-assert len(query) == 168 and len(outcome) == 40
+child = struct.pack('<IIIIQ', 1, 32, 0x0c, 0x0d, 0x1112131415161718) + struct.pack('<Q', 0xa1a2a3a4a5a6a7a8)
+limits = struct.pack('<IIIIQ', 1, 56, 0x0e, 0x0f, 0x2122232425262728) + struct.pack('<QQQQ', 0xb1, 0xb2, 0xb3, 0xb4)
+none = struct.pack('<Q', 0xffffffffffffffff)
+assert len(query) == 168 and len(outcome) == 40 and len(child) == 32 and len(limits) == 56
 # The explicit pad keeps the records eight-aligned and every byte defined.
 constants = struct.pack('<Q25i4x', 140, 1, -1, 1, 2, 3, 4, 5, 6, 0, 1, 2, 3, 4, 0, 1, 2, 1, 2, 3, 4, 5, 6, 7, 8, 9)
-EXPECTED = constants + query + outcome
+EXPECTED = constants + query + outcome + child + limits + none
 
 
 def values(p):
@@ -42,7 +45,12 @@ def values(p):
    .c = {{ {{.used = 0x10, .reserved = 0x20, .limit = 0x30}}, {{.used = 0x11, .reserved = 0x21, .limit = 0x31}},
           {{.used = 0x12, .reserved = 0x22, .limit = 0x32}}, {{.used = 0x13, .reserved = 0x23, .limit = 0x33}} }} }},
  {{ .request_id = 0x6162636465666768ull, .cls = 1, .reason = 9, .requested = 0x7172737475767778ull,
-   .available = 0x8182838485868788ull, .limiting_account = 0x9192939495969798ull }} }}'''
+   .available = 0x8182838485868788ull, .limiting_account = 0x9192939495969798ull }},
+ {{ .h = {{ .version = 1, .size = 32, .flags = 0x0c, .pad = 0x0d, .incarnation = 0x1112131415161718ull }},
+   .created = 0xa1a2a3a4a5a6a7a8ull }},
+ {{ .h = {{ .version = 1, .size = 56, .flags = 0x0e, .pad = 0x0f, .incarnation = 0x2122232425262728ull }},
+   .limit = {{ 0xb1, 0xb2, 0xb3, 0xb4 }} }},
+ {p}ACCOUNT_LIMIT_NONE }}'''
 
 
 with tempfile.TemporaryDirectory(prefix='account-abi-') as tmp:
@@ -53,7 +61,9 @@ with tempfile.TemporaryDirectory(prefix='account-abi-') as tmp:
     ]:
         (tmp / 'fixture.c').write_text(f'''{headers}
 struct fixture {{ unsigned long long sysno; int constants[25]; int pad;
-  struct {sprefix}account_query query; struct {sprefix}account_outcome outcome; }};
+  struct {sprefix}account_query query; struct {sprefix}account_outcome outcome;
+  struct {sprefix}account_child_rec child; struct {sprefix}account_limits_rec limits;
+  unsigned long long none; }};
 __attribute__((used, section(".account_abi"))) const struct fixture fixture = {values(p)};
 ''')
         subprocess.run(cc + ['-std=c11', '-ffreestanding', '-Werror', '-I', str(root / include), '-I',
@@ -93,6 +103,13 @@ fn main() {{
   available: 0x8182838485868788, limiting_account: 0x9192939495969798 }};
  o.write_all(unsafe {{ core::slice::from_raw_parts((&q as *const AccountQuery).cast::<u8>(), 168) }}).unwrap();
  o.write_all(unsafe {{ core::slice::from_raw_parts((&r as *const AccountOutcome).cast::<u8>(), 40) }}).unwrap();
+ let k = AccountChildRec {{ h: AccountRecHdr {{ version: 1, size: 32, flags: 0x0c, pad: 0x0d, incarnation: 0x1112131415161718 }},
+  created: 0xa1a2a3a4a5a6a7a8 }};
+ let l = AccountLimitsRec {{ h: AccountRecHdr {{ version: 1, size: 56, flags: 0x0e, pad: 0x0f, incarnation: 0x2122232425262728 }},
+  limit: [0xb1, 0xb2, 0xb3, 0xb4] }};
+ o.write_all(unsafe {{ core::slice::from_raw_parts((&k as *const AccountChildRec).cast::<u8>(), 32) }}).unwrap();
+ o.write_all(unsafe {{ core::slice::from_raw_parts((&l as *const AccountLimitsRec).cast::<u8>(), 56) }}).unwrap();
+ o.write_all(&ACCOUNT_LIMIT_NONE.to_le_bytes()).unwrap();
 }}
 ''')
     subprocess.run(['rustc', '--edition=2021', '-A', 'dead_code', str(tmp / 'fixture.rs'), '-o', str(tmp / 'fixture')],

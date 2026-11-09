@@ -1,0 +1,93 @@
+#!/usr/bin/expect -f
+# A session is charged to an account of its own, and the next login's is another.
+set ::env(THYLACINE_ACCEL) hvf
+
+source [file join [file dirname [info script]] lib.exp]
+
+# The home proxy is login's other long-lived child: its stratumd row shares the shell's parent.
+# Reading the account twice needs ps's rows once, so this also leaves the proxy's pid.
+set proxy_pid ""
+# There is no /proc/self: the shell's own row in ps names the process to read.
+proc shell_pid {leg} {
+    global proxy_pid
+    lc_send "ps --beacon=never | grep ALIVE; echo pid-$leg-end"
+    set timeout 30
+    set pid ""
+    set ppid ""
+    set stratumds {}
+    expect {
+        -re {([0-9]+) +([0-9]+) +ut } {
+            set pid $expect_out(1,string); set ppid $expect_out(2,string); exp_continue
+        }
+        -re {([0-9]+) +([0-9]+) +stratumd } {
+            lappend stratumds $expect_out(1,string) $expect_out(2,string); exp_continue
+        }
+        -re "\[\r\n\]pid-$leg-end" {}
+        -re {EXTINCTION:} { lc_extinction_fail "extinction in ps ($leg)" }
+        timeout           { lc_fail "no end of ps ($leg)" }
+        eof               { lc_fail "qemu exited in ps ($leg)" }
+    }
+    if {$pid eq ""} { lc_fail "no row for ut in ps ($leg)" }
+    set proxy_pid ""
+    foreach {p pp} $stratumds { if {$pp eq $ppid} { set proxy_pid $p } }
+    if {$proxy_pid eq ""} { lc_fail "no home proxy among stratumd rows {$stratumds} under $ppid ($leg)" }
+    return $pid
+}
+
+# 1 is the root and 2 the system cache, so a shell left on either reads 1 or 2 here.
+proc session_account {leg} {
+    set pid [shell_pid $leg]
+    lc_send "cat /proc/$pid/account; echo account-$leg-end"
+    set timeout 30
+    set inc ""
+    set used ""
+    expect {
+        -re {incarnation: (\d+)\r?\n} { set inc $expect_out(1,string) }
+        -re {EXTINCTION:} { lc_extinction_fail "extinction reading the account ($leg)" }
+        timeout           { lc_fail "no incarnation line in the account file ($leg)" }
+        eof               { lc_fail "qemu exited reading the account ($leg)" }
+    }
+    expect {
+        -re {alloc: used (\d+) } { set used $expect_out(1,string) }
+        -re {EXTINCTION:} { lc_extinction_fail "extinction reading the account ($leg)" }
+        timeout           { lc_fail "no alloc line in the account file ($leg)" }
+        eof               { lc_fail "qemu exited reading the account ($leg)" }
+    }
+    expect {
+        -re "\[\r\n\]account-$leg-end" {}
+        timeout { lc_fail "no end of the account ($leg)" }
+        eof     { lc_fail "qemu exited after the account ($leg)" }
+    }
+    if {$inc <= 2} { lc_fail "$leg: the shell's account is static, incarnation $inc" }
+    if {$used == 0} { lc_fail "$leg: account $inc holds nothing while its shell runs" }
+    lc_step "$leg: account $inc, alloc $used bytes"
+    global proxy_pid
+    lc_send "cat /proc/$proxy_pid/account; echo proxy-$leg-end"
+    set proxy_inc ""
+    expect {
+        -re {incarnation: (\d+)\r?\n} { set proxy_inc $expect_out(1,string) }
+        -re {EXTINCTION:} { lc_extinction_fail "extinction reading the proxy's account ($leg)" }
+        timeout           { lc_fail "no incarnation line for the home proxy ($leg)" }
+        eof               { lc_fail "qemu exited reading the proxy's account ($leg)" }
+    }
+    expect {
+        -re "\[\r\n\]proxy-$leg-end" {}
+        timeout { lc_fail "no end of the proxy's account ($leg)" }
+        eof     { lc_fail "qemu exited after the proxy's account ($leg)" }
+    }
+    if {$proxy_inc != $inc} { lc_fail "$leg: the home proxy is on account $proxy_inc, the shell on $inc" }
+    return $inc
+}
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+set first [session_account first]
+
+lc_send "exit"
+lc_login michael correct-horse-battery-staple-v1
+set second [session_account second]
+
+if {$second <= $first} { lc_fail "the second login's account $second is not newer than $first" }
+lc_pass "two logins, accounts $first and $second"
+lc_quit
+exit 0

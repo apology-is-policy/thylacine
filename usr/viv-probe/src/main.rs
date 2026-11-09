@@ -25,6 +25,9 @@
 //      (/dev/zero reads zeros, /dev/null eats writes and reads EOF) -- the
 //      file-over-file bind mechanism proven end to end.
 //
+// One leg reports rather than asserts: what the container can read of the machine, on the
+// `viv-probe: reach` line, before the principal leg so a run as a person reaches it too.
+//
 // Exit 0 + "viv-probe: PASS" only if every leg holds; the first failure
 // prints its leg and exits 1 (viv propagates the status; joey's boot leg is
 // fatal on nonzero).
@@ -41,9 +44,10 @@ use alloc::vec::Vec;
 #[global_allocator]
 static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
 
+use libthyla_rs::account::{AccountQuery, CLASS_ALLOC, CLASS_META};
 use libthyla_rs::{
-    t_close, t_exits, t_getpid, t_getuid, t_open, t_putstr, t_read, t_write, T_OPATH, T_OREAD,
-    T_OWRITE, T_WALK_OPEN_FROM_ROOT,
+    t_account_query, t_close, t_exits, t_getpid, t_getuid, t_open, t_putstr, t_read, t_write,
+    T_OPATH, T_OREAD, T_OWRITE, T_WALK_OPEN_FROM_ROOT,
 };
 
 fn fail(leg: &str) -> ! {
@@ -91,12 +95,60 @@ fn contains(hay: &[u8], needle: &[u8]) -> bool {
     hay.len() >= needle.len() && hay.windows(needle.len()).any(|w| w == needle)
 }
 
+/// The decimal figure after the first `key` in `text`, past any spaces; 0 when absent.
+fn figure(text: &[u8], key: &[u8]) -> u64 {
+    let at = match text.windows(key.len()).position(|w| w == key) {
+        Some(at) => at + key.len(),
+        None => return 0,
+    };
+    let digits = text[at..].iter().skip_while(|b| **b == b' ');
+    digits
+        .take_while(|b| b.is_ascii_digit())
+        .fold(0u64, |n, b| {
+            n.saturating_mul(10).saturating_add((*b - b'0') as u64)
+        })
+}
+
+// /ctl is absent here, so these are the routes still open. A withheld figure reads 0.
+fn report_reach(buf: &mut [u8]) {
+    let n = read_some("/proc/meminfo", buf).unwrap_or(0);
+    let (total_kb, free_kb) = (
+        figure(&buf[..n], b"MemTotal:"),
+        figure(&buf[..n], b"MemFree:"),
+    );
+    let n = read_some("/proc/stat", buf).unwrap_or(0);
+    let (processes, ctxt) = (figure(&buf[..n], b"processes"), figure(&buf[..n], b"ctxt"));
+    let mut q = AccountQuery::default();
+    let rc = t_account_query(&mut q);
+    t_putstr(&format!(
+        "viv-probe: reach total_kb={} free_kb={} processes={} ctxt={} query_rc={} level={} limiting={} headroom={} alloc={} meta={}\n",
+        total_kb,
+        free_kb,
+        processes,
+        ctxt,
+        rc,
+        q.level,
+        q.limiting,
+        q.headroom,
+        q.c[CLASS_ALLOC as usize].used,
+        q.c[CLASS_META as usize].used,
+    ));
+}
+
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
     // --- leg 1a: the host is ABSENT (checked FIRST: every one of these
     //     resolves in the invoker's namespace, so a viv that failed to chroot
     //     fails here rather than passing on the marker by accident).
-    for host in ["/bin/joey", "/bin/viv", "/vivarium", "/ctl", "/dio", "/goroot", "/srv"] {
+    for host in [
+        "/bin/joey",
+        "/bin/viv",
+        "/vivarium",
+        "/ctl",
+        "/dio",
+        "/goroot",
+        "/srv",
+    ] {
         if resolves(host) {
             fail(host);
         }
@@ -116,7 +168,8 @@ pub extern "C" fn rs_main() -> i64 {
 
     // --- leg 2: /proc + /sys are the diorama's Linux shapes.
     let mut buf = [0u8; 4096];
-    let n = read_some("/proc/self/status", &mut buf).unwrap_or_else(|| fail("read /proc/self/status"));
+    let n =
+        read_some("/proc/self/status", &mut buf).unwrap_or_else(|| fail("read /proc/self/status"));
     if !contains(&buf[..n], b"Name:") || !contains(&buf[..n], b"Pid:") {
         fail("/proc/self/status shape");
     }
@@ -129,6 +182,8 @@ pub extern "C" fn rs_main() -> i64 {
     if n == 0 {
         fail("/sys cpu online empty");
     }
+
+    report_reach(&mut buf);
 
     // --- leg 3: the pid view is exactly {self}.
     let my_pid = unsafe { t_getpid() } as u64;
@@ -157,7 +212,10 @@ pub extern "C" fn rs_main() -> i64 {
         Err(_) => fail("readdir /proc"),
     }
     if listed.len() != 1 || listed[0] != my_pid {
-        fail(&format!("pid enumeration not exactly self ({} entries)", listed.len()));
+        fail(&format!(
+            "pid enumeration not exactly self ({} entries)",
+            listed.len()
+        ));
     }
 
     // --- leg 4 rode leg 1a (/srv has no path into this namespace at all).

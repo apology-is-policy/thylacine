@@ -662,6 +662,12 @@ void test_account_blocks_that_exist_are_the_ledger(void);
 void test_account_wrong_order_release_is_counted(void);
 void test_account_grown_node_has_the_maps_sponsor(void);
 void test_account_query_reports_bytes_up_the_chain(void);
+void test_account_child_costs_its_parent_meta(void);
+void test_account_limits_change_whole_or_not_at_all(void);
+void test_account_limit_bounds_the_room(void);
+void test_account_query_stops_at_the_nearest_limit(void);
+void test_account_handle_is_the_control(void);
+void test_account_fork_does_not_copy_the_handle(void);
 void test_account_syscall_refuses_by_name(void);
 void test_vma_range_is_mapped(void);                     // B-1b
 void test_mmap_eager_copy_charge_pairing(void);   // #197
@@ -1023,6 +1029,7 @@ void test_spawn_env_block_parse(void);
 void test_spawn_env_install_refills(void);
 void test_spawn_env_child_gets_block(void);
 void test_spawn_env_refusals(void);
+void test_spawn_env_account_tail(void);
 void test_devproc_debug_stop_start_resume(void);
 void test_devproc_debug_mem(void);
 void test_devproc_debug_regs(void);

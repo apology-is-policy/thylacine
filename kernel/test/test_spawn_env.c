@@ -27,6 +27,7 @@
 #include <thylacine/env.h>
 #include <thylacine/errno.h>
 #include <thylacine/notes.h>
+#include <thylacine/memaccount.h>
 #include <thylacine/proc.h>
 #include <thylacine/sched.h>
 #include <thylacine/spoor.h>
@@ -248,7 +249,7 @@ static int se_spawn_path(const char *path, size_t path_len, bool env_set,
     return sys_spawn_full_argv_env_for_proc(current_thread()->proc,
             path, path_len, NULL, 0u, 0u, NULL, 0u, CAP_NONE, 0u,
             false, 0u, 0u, NULL, 0u, NULL, 0u, 0u, SPAWN_DEBUG_HELD,
-            NULL, 0u, 0u, env_set, blk, len);
+            NULL, 0u, 0u, env_set, blk, len, NULL);
 }
 
 static int se_spawn_held(bool env_set, const char *blk, u32 len) {
@@ -455,4 +456,45 @@ void test_spawn_env_refusals(void) {
     TEST_EXPECT_EQ(leaked, 0, "no refused spawn left a child to reap");
     TEST_ASSERT(ma == ml && se_bytes_eq(mine_after, mine, ml),
                 "no spawn, refused or not, changed the spawner's environment");
+}
+
+// =============================================================================
+// spawn_env.account_tail
+// =============================================================================
+
+static int se_spawn_under(struct MemoryAccount *account) {
+    return sys_spawn_full_argv_env_for_proc(current_thread()->proc,
+            "/bin/hello", 10, NULL, 0u, 0u, NULL, 0u, CAP_NONE, 0u,
+            false, 0u, 0u, NULL, 0u, NULL, 0u, 0u, SPAWN_DEBUG_HELD,
+            NULL, 0u, 0u, false, NULL, 0u, account);
+}
+
+// What the SPAWN_EXT_ACCOUNT tail reaches once the handler has resolved its handle, with
+// the child held so its account can be read before it could do anything.
+void test_spawn_env_account_tail(void) {
+    struct MemoryAccount *mine = current_thread()->proc->account;
+    struct MemoryAccount *a = account_child(mine);
+    TEST_ASSERT(a != NULL, "an account");
+
+    int named = se_spawn_under(a);
+    int plain = se_spawn_under(NULL);
+    struct Proc *cn = (named > 0) ? proc_find_by_pid(named) : NULL;
+    struct Proc *cp = (plain > 0) ? proc_find_by_pid(plain) : NULL;
+    struct MemoryAccount *on_named = cn ? cn->account : NULL;
+    struct MemoryAccount *on_plain = cp ? cp->account : NULL;
+    u64 meta_named = account_used(a, CLASS_META);
+    u32 refs_held = __atomic_load_n(&a->refs, __ATOMIC_RELAXED);
+    int r_named = se_release_and_reap(named);
+    int r_plain = se_release_and_reap(plain);
+
+    TEST_ASSERT(on_named == a, "a child is born under the account the tail named");
+    TEST_ASSERT(on_plain == mine, "control: with no tail, under the spawner's");
+    TEST_ASSERT(meta_named >= THREAD_POOL_PAGES, "its thread is paid for by that account");
+    TEST_ASSERT(refs_held >= 2u, "and the Proc holds it");
+    TEST_EXPECT_EQ(r_named, named, "reaped");
+    TEST_EXPECT_EQ(r_plain, plain, "reaped");
+    TEST_EXPECT_EQ(account_used(a, CLASS_META), 0ull, "the reap refunds the thread");
+    TEST_EXPECT_EQ(account_used(a, CLASS_ALLOC), 0ull, "and every page came back");
+    TEST_EXPECT_EQ(__atomic_load_n(&a->refs, __ATOMIC_RELAXED), 1u, "and let go of the account");
+    account_unref(a);
 }

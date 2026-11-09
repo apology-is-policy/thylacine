@@ -309,8 +309,9 @@
 // keeps working.
 // ---------------------------------------------------------------------------
 
-// Too many open files -- the per-Proc socket table (VIV_SOCK_MAX) is full, or
-// no handle slot at or above a SYS_HANDLE_DUP_LOWEST floor is free (B-3b).
+// Too many open files -- the per-Proc socket table (VIV_SOCK_MAX) is full, no
+// handle slot at or above a SYS_HANDLE_DUP_LOWEST floor is free (B-3b), or
+// SYS_ACCOUNT's CHILD has no slot for its new handle.
 // POSIX: EMFILE.
 #define T_E_MFILE      24
 
@@ -320,9 +321,10 @@
 // a failed TIOCGWINSZ) as "not a tty". POSIX: ENOTTY.
 #define T_E_NOTTY      25
 
-// No space left. Kernel-originated for two causes: a mount into a Territory
-// whose mount table is at its cap (SYS_MOUNT; operator vote 2026-10-19), and a
-// fixed interaction pool or identifier space exhausted (HI-1). A server's ENOSPC
+// No space left. Kernel-originated for three causes: a mount into a Territory
+// whose mount table is at its cap (SYS_MOUNT; operator vote 2026-10-19), a
+// fixed interaction pool or identifier space exhausted (HI-1), and a memory
+// account's child past the tree's depth (ACCOUNT_CHILD). A server's ENOSPC
 // (a full pool) crosses by value, as it always has.
 // POSIX: ENOSPC.
 #define T_E_NOSPC      28
@@ -376,7 +378,9 @@
 // Stale file handle: the file a descriptor names can no longer be reached
 // to act on it. Kernel-originated for a loose cached open (FID-LIFECYCLE
 // 3.3) whose re-walk no longer reaches the same qid.path and generation
-// (renamed away, unlinked or replaced). Signed off with PX-22's ESTALE
+// (renamed away, unlinked or replaced), and for a memory account named by an
+// incarnation that is not its own (SYS_ACCOUNT and the spawn account tail, operator
+// vote 76). Signed off with PX-22's ESTALE
 // (operator vote 2026-10-18 (28)); a server's ESTALE crosses by value.
 // POSIX: ESTALE.
 #define T_E_STALE      116

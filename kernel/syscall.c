@@ -10413,7 +10413,9 @@ static s64 sys_spawn_with_perms_handler(u64 name_va, u64 name_len_raw,
 //     directory the spawner can search (cwd_flags 0, cwd_len in
 //     [1, SYS_OPEN_PATH_MAX]). SPAWN_EXT_ENV's tail names the child's whole
 //     environment (env_flags 0, env_len <= SYS_SPAWN_ENV_DATA_MAX, every record
-//     NAME=VALUE with a name /env accepts).
+//     NAME=VALUE with a name /env accepts). SPAWN_EXT_ACCOUNT's names the child's
+//     account by a KOBJ_ACCOUNT handle of the caller's and that account's incarnation
+//     (account_flags 0).
 
 // A-1a: identity bundle threaded from the spawn handler/entry into the
 // child via spawn_full_argv_args. `set` mirrors SPAWN_IDENTITY_SET; when
@@ -10581,6 +10583,10 @@ _Static_assert(SYS_SPAWN_ENV_DATA_MAX == EXEC_ENV_DATA_MAX,
 _Static_assert((SPAWN_EXT_FLAGS_ALL & (SPAWN_EXT_ENV - 1u)) ==
                    (SPAWN_EXT_CWD | SPAWN_EXT_THREADS),
                "a tail below SPAWN_EXT_ENV: add its size to the env tail's offset "
+               "in sys_spawn_full_argv_handler");
+_Static_assert((SPAWN_EXT_FLAGS_ALL & (SPAWN_EXT_ACCOUNT - 1u)) ==
+                   (SPAWN_EXT_CWD | SPAWN_EXT_THREADS | SPAWN_EXT_ENV),
+               "a tail below SPAWN_EXT_ACCOUNT: add its size to the account tail's offset "
                "in sys_spawn_full_argv_handler");
 
 __attribute__((noreturn))
@@ -10791,7 +10797,8 @@ static int sys_spawn_full_argv_with_perms_for_proc(
         u32 eff_budget, u32 eff_threads,
         const struct spawn_identity *id,
         const struct spawn_allowance *want_allowance,
-        u32 pheno_flags, u32 debug_flags, const char *cwd, struct Env *env) {
+        u32 pheno_flags, u32 debug_flags, const char *cwd, struct Env *env,
+        struct MemoryAccount *account) {
     if (!p)                                            return -1;
     if (!name)                                         return -1;
     if (name_len == 0 || name_len > SYS_SPAWN_NAME_MAX) return -1;
@@ -10938,9 +10945,7 @@ static int sys_spawn_full_argv_with_perms_for_proc(
     // A named environment: the child is born with none (RFCENVG), never with a
     // copy of the spawner's, and the thunk adopts `env` as its group.
     unsigned rf = RFPROC | (env ? (unsigned)RFCENVG : 0u);
-    int pid = held
-        ? rfork_spawn_held(rf, sys_spawn_full_argv_thunk, sa, cap_mask)
-        : rfork_with_caps(rf, sys_spawn_full_argv_thunk, sa, cap_mask);
+    int pid = rfork_spawn_under(rf, sys_spawn_full_argv_thunk, sa, cap_mask, held, account);
     if (pid < 0) {
         kfree(sa);
         if (argv_data_copy) kfree(argv_data_copy);
@@ -10974,8 +10979,9 @@ static int sys_spawn_full_argv_with_perms_for_proc(
 // `env_block` (kernel memory, `env_len` bytes) is the SPAWN_EXT_ENV tail's
 // records when `env_set`; the child's environment is built from it here, after
 // the cwd, and a malformed or oversized block answers env_from_block's errno and
-// leaves nothing to reap. `env_set` false: the child keeps rfork's copy. Every
-// other refusal is -1.
+// leaves nothing to reap. `env_set` false: the child keeps rfork's copy. `account`
+// is what the SPAWN_EXT_ACCOUNT tail named, held by the caller across this call;
+// NULL: the spawner's. Every other refusal is -1.
 VISIBLE_IF_KERNEL_TESTS
 int sys_spawn_full_argv_env_for_proc(struct Proc *p,
         const char *name, size_t name_len,
@@ -10987,7 +10993,8 @@ int sys_spawn_full_argv_env_for_proc(struct Proc *p,
         const struct spawn_allowance *want_allowance,
         u32 req_budget, u32 pheno_flags, u32 debug_flags,
         const char *cwd, u32 cwd_len, u32 req_threads,
-        bool env_set, const char *env_block, u32 env_len) {
+        bool env_set, const char *env_block, u32 env_len,
+        struct MemoryAccount *account) {
     if (!p)                                             return -1;
     if (spawn_perm_grant_check(p, perm_flags) != 0)     return -1;
     // V-1b: unknown pheno bits reject (forward-compat); the known bit needs
@@ -11082,7 +11089,7 @@ int sys_spawn_full_argv_env_for_proc(struct Proc *p,
                                                       eff_threads,
                                                       eff_id, want_allowance,
                                                       pheno_flags, debug_flags,
-                                                      landed, env);
+                                                      landed, env, account);
     if (pid < 0) env_discard(env);  // a refused spawn never reached the child
     if (cwd_buf) kfree(cwd_buf);
     return pid;
@@ -11110,7 +11117,7 @@ int sys_spawn_full_argv_cwd_for_proc(struct Proc *p,
                                             supp_gid_count, want_allowance,
                                             req_budget, pheno_flags, debug_flags,
                                             cwd, cwd_len, req_threads,
-                                            /*env_set=*/false, NULL, 0u);
+                                            /*env_set=*/false, NULL, 0u, NULL);
 }
 
 // No cwd tail (the child inherits the spawner's cwd).
@@ -11442,6 +11449,22 @@ static s64 sys_spawn_full_argv_handler(u64 req_va) {
             return -(s64)T_E_FAULT;
     }
 
+    // SPAWN_EXT_ACCOUNT: after every lower tail whose bit is set. The handle is
+    // resolved last, just before the entry, so no path above has to drop it.
+    struct sys_spawn_ext_account acct_ext = { 0 };
+    const bool acct_set = (req.ext_flags & SPAWN_EXT_ACCOUNT) != 0;
+    if (acct_set) {
+        u64 tail_va = req_va + sizeof(struct sys_spawn_args) +
+            ((req.ext_flags & SPAWN_EXT_CWD) ? sizeof(struct sys_spawn_ext_cwd) : 0u) +
+            ((req.ext_flags & SPAWN_EXT_THREADS) ? sizeof(struct sys_spawn_ext_threads) : 0u) +
+            ((req.ext_flags & SPAWN_EXT_ENV) ? sizeof(struct sys_spawn_ext_env) : 0u);
+        if (!sys_validate_user_buf(tail_va, sizeof(acct_ext)))
+            return -(s64)T_E_FAULT;
+        if (uaccess_copy_in(&acct_ext, tail_va, sizeof(acct_ext)) != 0)
+            return -(s64)T_E_FAULT;
+        if (acct_ext.account_flags != 0)               return -1;   // the unknown-bits rule
+    }
+
     // SPAWN_EXT_CWD: the tail directly after the record, read only when the
     // record announces it -- a caller that does not set the bit is never read
     // past its 104 bytes. Copied into a kmalloc'd buffer (the frame already
@@ -11520,6 +11543,34 @@ static s64 sys_spawn_full_argv_handler(u64 req_va) {
             argv_kbuf[i] = (char)b;
         }
     }
+    struct Handle acct_hh;
+    struct MemoryAccount *account = NULL;
+    if (acct_set) {
+        s64 acct_err = 0;
+        if (handle_get(p, sys_hidx_arg(acct_ext.account_h), &acct_hh) != 0) {
+            acct_err = -(s64)T_E_BADF;
+        } else if (acct_hh.kind != KOBJ_ACCOUNT) {
+            handle_put(&acct_hh);
+            acct_err = -(s64)T_E_BADF;
+        } else if (acct_ext.incarnation == 0u) {
+            // 0 is the self selector's word, and a tail names a handle.
+            handle_put(&acct_hh);
+            acct_err = -(s64)T_E_INVAL;
+        } else if (((struct MemoryAccount *)acct_hh.obj)->incarnation != acct_ext.incarnation) {
+            // Section 4's rule as sys_account_op applies it: a number closed and reused
+            // cannot steer a child at an account the caller did not mean (vote 76: ESTALE).
+            handle_put(&acct_hh);
+            acct_err = -(s64)T_E_STALE;
+        } else {
+            account = (struct MemoryAccount *)acct_hh.obj;
+        }
+        if (acct_err != 0) {
+            if (argv_kbuf) kfree(argv_kbuf);
+            if (env_kbuf) kfree(env_kbuf);
+            if (cwd_kbuf) kfree(cwd_kbuf);
+            return acct_err;
+        }
+    }
     s64 rc = (s64)sys_spawn_full_argv_env_for_proc(
         p, name, (size_t)req.name_len,
         argv_kbuf, req.argv_data_len, req.argc,
@@ -11533,7 +11584,9 @@ static s64 sys_spawn_full_argv_handler(u64 req_va) {
         req.debug_flags,                  // 5f: 0 == not held
         cwd_kbuf, cwd_len,                // SPAWN_EXT_CWD: NULL == inherit
         req_threads,                      // SPAWN_EXT_THREADS: 0 == inherit
-        env_set, env_kbuf, env_ext.env_len); // SPAWN_EXT_ENV: false == inherit
+        env_set, env_kbuf, env_ext.env_len, // SPAWN_EXT_ENV: false == inherit
+        account);                         // SPAWN_EXT_ACCOUNT: NULL == the spawner's
+    if (acct_set) handle_put(&acct_hh);
     if (argv_kbuf) kfree(argv_kbuf);
     if (env_kbuf) kfree(env_kbuf);
     if (cwd_kbuf) kfree(cwd_kbuf);
@@ -12364,29 +12417,93 @@ static s64 sys_srv_peer_handler(u64 conn_h_raw, u64 out_va) {
     return 0;
 }
 
-// The header is read once and the whole record then replaced, so a peer thread
-// rewriting it during the call can change only what its own thread reads back.
-static s64 sys_account_handler(u64 handle_raw, u64 op, u64 rec_va, u64 rec_size) {
-    struct Thread *t = current_thread();
-    if (!t || !t->proc)                                return -(s64)T_E_INVAL;
-    if (op < ACCOUNT_QUERY || op > ALLOCATE_FUNDED)    return -(s64)T_E_INVAL;
-    if (op != ACCOUNT_QUERY)                           return -(s64)T_E_OPNOTSUPP;
-    if ((s64)handle_raw != ACCOUNT_SELF)               return -(s64)T_E_BADF;
-    if (rec_size != sizeof(struct account_query))      return -(s64)T_E_INVAL;
+// One operation on the account `a`, which the caller keeps alive. The header is read once
+// and the record then replaced, so a peer thread rewriting it during the call can change
+// only what its own thread reads back. Section 4's expected incarnation: 0 means "whatever
+// I am" and only the self selector may say that, so a handle number that was closed and
+// reused cannot steer a request at an account the caller did not mean. Any other
+// incarnation that is not the account's is stale (vote 76).
+static s64 sys_account_op(struct Proc *p, struct MemoryAccount *a, bool self, u64 op,
+                          u64 rec_va, u64 rec_size) {
     if (!sys_validate_user_buf(rec_va, rec_size))      return -(s64)T_E_FAULT;
 
     struct account_rec_hdr h;
     if (uaccess_copy_in(&h, rec_va, sizeof(h)) != 0)   return -(s64)T_E_FAULT;
     if (h.version != ACCOUNT_VERSION || h.size != rec_size || h.flags != 0u || h.pad != 0u)
         return -(s64)T_E_INVAL;
-    const struct MemoryAccount *a = t->proc->account;
+    if (h.incarnation == 0u && !self)                  return -(s64)T_E_INVAL;
     if (h.incarnation != 0u && h.incarnation != a->incarnation)
-        return -(s64)T_E_INVAL;
+        return -(s64)T_E_STALE;
 
-    struct account_query q;
-    account_query_fill(a, &q);
-    if (uaccess_copy_out(rec_va, &q, sizeof(q)) != 0)  return -(s64)T_E_FAULT;
-    return 0;
+    if (op == ACCOUNT_QUERY) {
+        struct account_query q;
+        account_query_fill(a, &q);
+        if (uaccess_copy_out(rec_va, &q, sizeof(q)) != 0) return -(s64)T_E_FAULT;
+        return 0;
+    }
+
+    if (op == ACCOUNT_SET_LIMITS) {
+        u64 limit[ACCOUNT_CLASSES];
+        if (uaccess_copy_in(limit, rec_va + __builtin_offsetof(struct account_limits_rec, limit),
+                            sizeof(limit)) != 0)
+            return -(s64)T_E_FAULT;
+        return account_set_limits(a, limit) == 0 ? 0 : -(s64)T_E_ACCES;
+    }
+
+    // ACCOUNT_CHILD. Its incarnation is read before the handle exists: from then on a peer
+    // thread can close it, and the account with it.
+    struct MemoryAccount *c = account_child(a);
+    if (!c) {
+        return a->depth + 1u >= ACCOUNT_MAX_DEPTH ? -(s64)T_E_NOSPC : -(s64)T_E_NOMEM;
+    }
+    struct account_child_rec out;
+    out.h.version = ACCOUNT_VERSION;
+    out.h.size = (u32)sizeof(out);
+    out.h.flags = 0u;
+    out.h.pad = 0u;
+    out.h.incarnation = a->incarnation;
+    out.created = c->incarnation;
+    // Fixed rights, as KOBJ_PCI's: the kind has no dup, so they never narrow. Close-on-exec,
+    // because control of a budget should not pass to an image that does not know it has it.
+    hidx_t nh = handle_alloc_cloexec(p, KOBJ_ACCOUNT, RIGHT_READ | RIGHT_WRITE, c, true);
+    if (nh < 0) {
+        account_unref(c);
+        return -(s64)T_E_MFILE;
+    }
+    if (uaccess_copy_out(rec_va, &out, sizeof(out)) != 0) {
+        (void)handle_close_obj(p, nh, KOBJ_ACCOUNT, c);
+        return -(s64)T_E_FAULT;
+    }
+    return (s64)nh;
+}
+
+static s64 sys_account_handler(u64 handle_raw, u64 op, u64 rec_va, u64 rec_size) {
+    struct Thread *t = current_thread();
+    if (!t || !t->proc)                                return -(s64)T_E_INVAL;
+    struct Proc *p = t->proc;
+    if (op < ACCOUNT_QUERY || op > ALLOCATE_FUNDED)    return -(s64)T_E_INVAL;
+    if (op > ACCOUNT_SET_LIMITS)                       return -(s64)T_E_OPNOTSUPP;
+    const u64 want = op == ACCOUNT_QUERY ? sizeof(struct account_query)
+                   : op == ACCOUNT_CHILD ? sizeof(struct account_child_rec)
+                                         : sizeof(struct account_limits_rec);
+    if (rec_size != want)                              return -(s64)T_E_INVAL;
+
+    // A Proc's own account never changes while it runs, so its reference is held for this
+    // call. The handle is the authority on any other, and no Proc holds its own: nobody
+    // adjusts their own account (section 13).
+    if ((s64)handle_raw == ACCOUNT_SELF) {
+        if (op == ACCOUNT_SET_LIMITS)                  return -(s64)T_E_ACCES;
+        return sys_account_op(p, p->account, true, op, rec_va, rec_size);
+    }
+    struct Handle hh;
+    if (handle_get(p, sys_hidx_arg(handle_raw), &hh) != 0) return -(s64)T_E_BADF;
+    if (hh.kind != KOBJ_ACCOUNT) {
+        handle_put(&hh);
+        return -(s64)T_E_BADF;
+    }
+    s64 rc = sys_account_op(p, (struct MemoryAccount *)hh.obj, false, op, rec_va, rec_size);
+    handle_put(&hh);
+    return rc;
 }
 
 // =============================================================================

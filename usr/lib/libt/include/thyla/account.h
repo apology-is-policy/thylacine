@@ -8,6 +8,9 @@
 // In place of a handle, the caller's own account. No handle is negative.
 #define T_ACCOUNT_SELF (-1)
 
+// No ceiling of the account's own: section 4's default for the class bounds it.
+#define T_ACCOUNT_LIMIT_NONE (~0ull)
+
 enum {
     T_ACCOUNT_QUERY = 1,
     T_ACCOUNT_CHILD = 2,
@@ -69,6 +72,20 @@ struct t_account_query {
     struct t_account_class c[T_ACCOUNT_CLASSES];
 };
 
+// T_ACCOUNT_CHILD: `h.incarnation` is the account being subdivided. The call returns the
+// new account's control handle and `created` carries its incarnation.
+struct t_account_child_rec {
+    struct t_account_rec_hdr h;
+    unsigned long long created;
+};
+
+// T_ACCOUNT_SET_LIMITS: the whole vector, in bytes, rounded down to pages. Every class
+// changes or none does.
+struct t_account_limits_rec {
+    struct t_account_rec_hdr h;
+    unsigned long long limit[T_ACCOUNT_CLASSES];
+};
+
 struct t_account_outcome {
     unsigned long long request_id;
     unsigned int cls;
@@ -82,6 +99,8 @@ _Static_assert(sizeof(struct t_account_rec_hdr) == 24, "t_account_rec_hdr ABI: 2
 _Static_assert(sizeof(struct t_account_class) == 24, "t_account_class ABI: 24 bytes");
 _Static_assert(sizeof(struct t_account_query) == 168, "t_account_query ABI: 168 bytes");
 _Static_assert(__builtin_offsetof(struct t_account_query, c) == 72, "t_account_query ABI: c@72");
+_Static_assert(sizeof(struct t_account_child_rec) == 32, "t_account_child_rec ABI: 32 bytes");
+_Static_assert(sizeof(struct t_account_limits_rec) == 56, "t_account_limits_rec ABI: 56 bytes");
 _Static_assert(sizeof(struct t_account_outcome) == 40, "t_account_outcome ABI: 40 bytes");
 
 #endif

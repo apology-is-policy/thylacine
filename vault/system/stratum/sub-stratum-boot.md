@@ -12,7 +12,7 @@ locks: []
 abis: []
 design: ["docs/reference/86-pouch-stratumd-boot.md (the 16c design section)"]
 created: 2026-08-02
-updated: 2026-11-02
+updated: 2026-11-04
 ---
 ## Session factory handoff
 
@@ -346,6 +346,12 @@ to `/`, so the services and sessions it starts from then on inherit the disk
 root; its post-pivot spawns name `/bin/<prog>`, which also resolves before the
 pivot. A pre-pivot probe therefore sees `/bin` as its working directory (the
 `coreutil-smoke` `pwd` leg).
+
+**The resident services share a memory account (MM-1c, vote 58).** Joey makes it in `main`
+before its probes, and a failure is fatal. Corvus, ptyfs, diorama and the console renderer are
+born under it through `joey_spawn_service`, and `stratumd` through its own record. Under
+`THYLA_BOOT_PROBES`, `joey_service_is_on_its_account` checks that on ptyfs and is boot-fatal
+([[sub-kernel-accounts]]).
 
 **`/dev/pts` is grafted separately, after the swap, once ptyfs is up** — it is
 not one of the carried handles because its tree does not exist until joey

@@ -112,7 +112,7 @@ One line each. The authoritative text, with the full enforcement cells, is `ARCH
 | I-2 | Fork-grantable caps only shrink; `CAP_ELEVATION_ONLY` stripped at every fork; growth only via the `cap` device. Re-derive the elevation set from `caps.h`, never from a prose list | `handles.tla` |
 | I-3 | Mount points form a DAG, never a cycle | `territory.tla` |
 | I-4 | Handles transfer between Procs only via 9P sessions | `handles.tla` |
-| I-5 | `KObj_MMIO`/`IRQ`/`DMA`/`Loom` non-transferable; one kernel-mediated exception: `SYS_SEAT_IMPORT` | `handles.tla` + static_asserts + `seat` tests |
+| I-5 | `KObj_MMIO`/`IRQ`/`DMA`/`Loom`/`Account` non-transferable; one kernel-mediated exception: `SYS_SEAT_IMPORT` | `handles.tla` + static_asserts + `seat` tests |
 | I-6 | Handle rights only shrink on transfer/dup/endow | `handles.tla` |
 | I-7 | BURROW pages live until last handle closed AND last mapping unmapped | `burrow.tla` |
 | I-8 | Every runnable thread eventually runs | `scheduler.tla` liveness |
