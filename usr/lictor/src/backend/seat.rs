@@ -69,6 +69,10 @@ pub struct Seat {
     test_then_cursor: bool,
     #[cfg(feature = "test-mode")]
     test_then_control: bool,
+    /// The cursor half, released and due at the next paint that succeeds: the paint's
+    /// shot block sets the cursor lever every pass, so it is armed there.
+    #[cfg(feature = "test-mode")]
+    test_cursor_due: bool,
     #[cfg(feature = "test-mode")]
     test_stall_frame: bool,
     /// What the frame's shot did. This process says nothing in an open episode
@@ -293,8 +297,7 @@ impl Seat {
                     self.test_release_at = None;
                     device.gpu.test_stall_release();
                     if core::mem::take(&mut self.test_then_cursor) {
-                        device.gpu.test_cursor_stall_next(true);
-                        device.gpu.test_cursor_abandon_next();
+                        self.test_cursor_due = true;
                         super::diagnostic(&alloc::format!(
                             "lictor: chained shot: the cursor lane is held next, past every bound generation={}\n",
                             self.generation));
@@ -346,8 +349,10 @@ impl Seat {
                         screen.test_stall_after_exclusion = shot == Some(SeatShot::StallAfterExclusion);
                         screen.test_hold_after_exclusion = matches!(shot, Some(SeatShot::HoldAfterExclusion | SeatShot::ControlThenCursor));
                         screen.test_refuse_bind = shot == Some(SeatShot::RefuseBind);
-                        device.gpu.test_cursor_stall_next(matches!(shot, Some(SeatShot::CursorStall | SeatShot::CursorAbandon | SeatShot::CursorThenControl)));
-                        if shot == Some(SeatShot::CursorAbandon) { device.gpu.test_cursor_abandon_next(); }
+                        let chained_cursor = core::mem::take(&mut self.test_cursor_due);
+                        device.gpu.test_cursor_stall_next(chained_cursor
+                            || matches!(shot, Some(SeatShot::CursorStall | SeatShot::CursorAbandon | SeatShot::CursorThenControl)));
+                        if chained_cursor || shot == Some(SeatShot::CursorAbandon) { device.gpu.test_cursor_abandon_next(); }
                         if shot == Some(SeatShot::BehindReadback) { device.gpu.test_behind_readback(); }
                         self.test_refuse_restored |= shot == Some(SeatShot::RefuseRestored);
                         if matches!(shot, Some(SeatShot::HoldAfterExclusion | SeatShot::ControlThenCursor)) {
@@ -476,7 +481,7 @@ impl Seat {
                 if self.test_cursor_release_at.take().is_some() { device.gpu.test_cursor_release(); }
                 // A chained shot's second wait is armed only inside the takeover it breaks.
                 #[cfg(feature = "test-mode")]
-                { self.test_then_cursor = false; self.test_then_control = false; }
+                { self.test_then_cursor = false; self.test_then_control = false; self.test_cursor_due = false; }
                 if !released || (self.active() && since.elapsed().as_millis() < FAILURE_NOTICE_MS) { return; }
                 if self.displaced || self.active.is_some() {
                     if device.gpu.engine_dead() {
