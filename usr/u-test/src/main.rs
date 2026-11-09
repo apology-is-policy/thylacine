@@ -1280,9 +1280,10 @@ fn flow_parser_lexer() -> Result<(), i64> {
     }
 
     // Probe 6 -- `=~` is no operator (struck by operator vote 78): `=` and
-    // `~` lex as themselves and the slash after them begins a word.
+    // `~` lex as themselves and the slash after them begins a word. (No `^`
+    // in the word: that lexes as rc's join.)
     {
-        let toks = match tokenize("$x =~ /^foo/") {
+        let toks = match tokenize("$x =~ /foo/") {
             Ok(t) => t,
             Err(_) => {
                 t_putstr("u-test: flow_parser_lexer: probe 6 tokenize FAILED\n");
@@ -1305,7 +1306,7 @@ fn flow_parser_lexer() -> Result<(), i64> {
             return Err(1);
         }
         match &toks[3].kind {
-            TokenKind::Word(s) if s == "/^foo/" => {}
+            TokenKind::Word(s) if s == "/foo/" => {}
             _ => {
                 t_putstr("u-test: flow_parser_lexer: probe 6 slash word FAILED\n");
                 return Err(1);
