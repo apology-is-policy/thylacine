@@ -623,7 +623,9 @@ the ledger. It is counted, and the test runner reddens the test it happened unde
 changes when a decision first reads the ledger.
 
 **`ACCOUNT_QUERY` takes the self selector or a `KOBJ_ACCOUNT` handle.** Any other handle is
-`-EBADF`, and the voucher operations are `-EOPNOTSUPP`. A stale incarnation is `-EINVAL`.
+`-EBADF`, and the voucher operations are `-EOPNOTSUPP`. An incarnation that is another
+account's is `-ESTALE` (operator vote 76), so a caller can tell a number closed and reused
+under it from a malformed record. 0 on a handle is `-EINVAL`: 0 is the self selector's word.
 
 `used` is the account's and its descendants', in bytes. Nothing charges `CLASS_RETAIN`
 or `CLASS_DEVICE` yet. `limit` is a class's nearest limit, the account's own or an

@@ -25,8 +25,9 @@ The checks run in this order: `-EINVAL` for an operation outside 1 to 6; `-EOPNO
 4 to 6; `-EINVAL` for a `rec_size` other than the operation's record; `-EACCES` for SET_LIMITS
 on the self selector; `-EBADF` for a handle that is not a `KOBJ_ACCOUNT`; `-EFAULT` for a record
 that is not memory the caller may read, and for QUERY and CHILD write, after which any part of
-it may have been written; `-EINVAL` for a wrong version, size, flags or pad, or an incarnation that is
-not the account's, where 0 is taken only with the self selector.
+it may have been written; `-EINVAL` for a wrong version, size, flags or pad, or an incarnation of 0
+on a handle, since 0 is taken only with the self selector; `-ESTALE` for an incarnation that is
+another account's (operator vote 76).
 
 QUERY returns 0 and replaces the record. A class's `limit` is its nearest limit. `headroom`
 reads each class up to that limit and no further, and the pool only for a RAM class that met none, so it can
@@ -37,7 +38,7 @@ rights read and write, and replaces the record: the header's incarnation is the 
 written. An exec closes the handle whatever its flag says. SET_LIMITS returns 0 having replaced
 every limit, or `-EACCES` with none replaced when one is above an ancestor's. The
 `SPAWN_EXT_ACCOUNT` tail is 16 bytes: the handle, flags that must be 0, and the account's
-incarnation, `-EBADF` and `-EINVAL` as for an operation, and never 0. A limit is rounded down to a page, and `ACCOUNT_LIMIT_NONE`, all
+incarnation, `-EBADF`, `-EINVAL` and `-ESTALE` as for an operation, and never 0. A limit is rounded down to a page, and `ACCOUNT_LIMIT_NONE`, all
 ones, clears it.
 
 Operations: QUERY 1, CHILD 2, SET_LIMITS 3, VOUCHER_CREATE 4, VOUCHER_CLOSE 5,

@@ -2697,8 +2697,8 @@ enum {
     // Serves ACCOUNT_QUERY, ACCOUNT_CHILD and ACCOUNT_SET_LIMITS, on a KOBJ_ACCOUNT handle
     // or ACCOUNT_SELF, which must arrive sign-extended. Returns 0 or CHILD's new handle, or:
     //   -T_E_INVAL      op names no operation; rec_size, version, size, flags or pad
-    //                   is wrong; incarnation is not the account's, where 0 is taken
-    //                   only with ACCOUNT_SELF
+    //                   is wrong; incarnation is 0 on a handle (0 is ACCOUNT_SELF's)
+    //   -T_E_STALE      incarnation is another account's (operator vote 76)
     //   -T_E_OPNOTSUPP  an operation with no code behind it yet
     //   -T_E_BADF       a handle that is not a live KOBJ_ACCOUNT of the caller's
     //   -T_E_ACCES      SET_LIMITS on ACCOUNT_SELF, or a limit above an ancestor's
@@ -3373,7 +3373,7 @@ _Static_assert(__builtin_popcount(SPAWN_PERM_ALL) ==
 #define SPAWN_EXT_ENV                (1u << 2)
 // SPAWN_EXT_ACCOUNT: a struct sys_spawn_ext_account names the memory account the child
 // is born under, by a KOBJ_ACCOUNT handle of the spawner's own (not a live one of that
-// kind: -T_E_BADF) and that account's incarnation (another: -T_E_INVAL). No gate: the handle is the authority, and it only ever names a
+// kind: -T_E_BADF) and that account's incarnation (0: -T_E_INVAL; another: -T_E_STALE). No gate: the handle is the authority, and it only ever names a
 // descendant of the spawner's account, so the child's budget can only be narrower.
 // docs/SHARED-MEMORY-ACCOUNTING.md section 13.
 #define SPAWN_EXT_ACCOUNT            (1u << 3)

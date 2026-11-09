@@ -53,6 +53,7 @@ const EBADF: i64 = 9;
 const EACCES: i64 = 13;
 const EFAULT: i64 = 14;
 const EINVAL: i64 = 22;
+const ESTALE: i64 = 116;
 const ENOSPC: i64 = 28;
 const EOPNOTSUPP: i64 = 95;
 
@@ -590,19 +591,20 @@ fn account_control_legs(pool: u64) -> i64 {
     }
     ok("account-child");
 
-    // A handle names one account: "whatever I am" is only the self selector's to say.
-    for (leg, expected) in [
-        ("account-handle-unnamed", 0),
-        ("account-handle-stale", made + 1),
+    // A handle names one account: "whatever I am" is only the self selector's to say, and
+    // any other account's incarnation is stale (vote 76).
+    for (leg, expected, errno) in [
+        ("account-handle-unnamed", 0, EINVAL),
+        ("account-handle-stale", made + 1, ESTALE),
     ] {
         let rc = t_account_query_of(hi, expected, &mut q);
-        if rc != -EINVAL {
-            return fail_rc(leg, rc, EINVAL);
+        if rc != -errno {
+            return fail_rc(leg, rc, errno);
         }
     }
     let rc = t_account_query_of(ACCOUNT_SELF, made, &mut q);
-    if rc != -EINVAL {
-        return fail_rc("account-self-named-wrong", rc, EINVAL);
+    if rc != -ESTALE {
+        return fail_rc("account-self-named-wrong", rc, ESTALE);
     }
     ok("account-expected-incarnation");
 
@@ -799,13 +801,13 @@ fn account_control_legs(pool: u64) -> i64 {
     if rc != -1 {
         return fail_rc("account-spawn-flags", rc, 1);
     }
-    for (leg, expected) in [
-        ("account-spawn-unnamed", 0),
-        ("account-spawn-stale", made + 1),
+    for (leg, expected, errno) in [
+        ("account-spawn-unnamed", 0, EINVAL),
+        ("account-spawn-stale", made + 1, ESTALE),
     ] {
         let rc = spawn_under(h as u32, 0, expected, h as u64, made);
-        if rc != -EINVAL {
-            return fail_rc(leg, rc, EINVAL);
+        if rc != -errno {
+            return fail_rc(leg, rc, errno);
         }
     }
     ok("account-refuses-other-kinds");

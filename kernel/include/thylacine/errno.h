@@ -378,7 +378,9 @@
 // Stale file handle: the file a descriptor names can no longer be reached
 // to act on it. Kernel-originated for a loose cached open (FID-LIFECYCLE
 // 3.3) whose re-walk no longer reaches the same qid.path and generation
-// (renamed away, unlinked or replaced). Signed off with PX-22's ESTALE
+// (renamed away, unlinked or replaced), and for a memory account named by an
+// incarnation that is not its own (SYS_ACCOUNT and the spawn account tail, operator
+// vote 76). Signed off with PX-22's ESTALE
 // (operator vote 2026-10-18 (28)); a server's ESTALE crosses by value.
 // POSIX: ESTALE.
 #define T_E_STALE      116

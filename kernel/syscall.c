@@ -11552,11 +11552,15 @@ static s64 sys_spawn_full_argv_handler(u64 req_va) {
         } else if (acct_hh.kind != KOBJ_ACCOUNT) {
             handle_put(&acct_hh);
             acct_err = -(s64)T_E_BADF;
-        } else if (((struct MemoryAccount *)acct_hh.obj)->incarnation != acct_ext.incarnation) {
-            // Section 4's rule as sys_account_op applies it: a number closed and reused
-            // cannot steer a child at an account the caller did not mean.
+        } else if (acct_ext.incarnation == 0u) {
+            // 0 is the self selector's word, and a tail names a handle.
             handle_put(&acct_hh);
             acct_err = -(s64)T_E_INVAL;
+        } else if (((struct MemoryAccount *)acct_hh.obj)->incarnation != acct_ext.incarnation) {
+            // Section 4's rule as sys_account_op applies it: a number closed and reused
+            // cannot steer a child at an account the caller did not mean (vote 76: ESTALE).
+            handle_put(&acct_hh);
+            acct_err = -(s64)T_E_STALE;
         } else {
             account = (struct MemoryAccount *)acct_hh.obj;
         }
@@ -12417,7 +12421,8 @@ static s64 sys_srv_peer_handler(u64 conn_h_raw, u64 out_va) {
 // and the record then replaced, so a peer thread rewriting it during the call can change
 // only what its own thread reads back. Section 4's expected incarnation: 0 means "whatever
 // I am" and only the self selector may say that, so a handle number that was closed and
-// reused cannot steer a request at an account the caller did not mean.
+// reused cannot steer a request at an account the caller did not mean. Any other
+// incarnation that is not the account's is stale (vote 76).
 static s64 sys_account_op(struct Proc *p, struct MemoryAccount *a, bool self, u64 op,
                           u64 rec_va, u64 rec_size) {
     if (!sys_validate_user_buf(rec_va, rec_size))      return -(s64)T_E_FAULT;
@@ -12426,8 +12431,9 @@ static s64 sys_account_op(struct Proc *p, struct MemoryAccount *a, bool self, u6
     if (uaccess_copy_in(&h, rec_va, sizeof(h)) != 0)   return -(s64)T_E_FAULT;
     if (h.version != ACCOUNT_VERSION || h.size != rec_size || h.flags != 0u || h.pad != 0u)
         return -(s64)T_E_INVAL;
-    if (h.incarnation != a->incarnation && !(self && h.incarnation == 0u))
-        return -(s64)T_E_INVAL;
+    if (h.incarnation == 0u && !self)                  return -(s64)T_E_INVAL;
+    if (h.incarnation != 0u && h.incarnation != a->incarnation)
+        return -(s64)T_E_STALE;
 
     if (op == ACCOUNT_QUERY) {
         struct account_query q;
