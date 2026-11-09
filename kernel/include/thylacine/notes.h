@@ -748,6 +748,10 @@ int notes_noted_default(struct exception_context *ctx, struct Thread *t);
 // those sites.
 bool thread_die_pending(struct Thread *t);
 
+// ARCH 8.8.2 (vote 35): the note `p`'s committed death is by -- the one terminate
+// latch the commit left armed -- or NULL when no death is committed. Lock-free.
+const char *notes_death_committed(const struct Proc *p);
+
 // thread_die_pending's group-death leg alone, with the same holds (the exit
 // close until forced, the kthread join): never a terminate latch. The
 // predicate of sleep_death_only (DEBUG-FS-DESIGN §5g).
@@ -771,6 +775,8 @@ void notes_fault_dying_latch(struct Thread *t);
 bool thread_death_reaches(struct Thread *t);
 
 #ifdef KERNEL_TESTS
+const char *notes_latch_note_name_for_test(u32 latch);
+
 // item 11 (ARCH §8.8.3): the NON-death sibling of thread_die_pending. True iff a
 // CAUGHT, deliverable note (a handler is installed OR the Proc self-manages its
 // notes fd) of a family UNMASKED for `t` is queued -- so `t`'s caught-note-

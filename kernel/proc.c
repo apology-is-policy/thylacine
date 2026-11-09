@@ -2113,7 +2113,11 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
     // v1.0 straggler was merely an unelevated Proc with a stale tag; with
     // caps propagating it is the escape TLC finds in four steps.
     irq_state_t s = proc_table_lock_acquire();
-    if (__atomic_load_n(&parent->group_exit_msg, __ATOMIC_ACQUIRE) != NULL) {
+    // A committed death refuses too (ARCH 8.8.2). It is set by a lock-free swap,
+    // so one landing just after this read leaves a child, as a fork just before a
+    // kill does.
+    if (__atomic_load_n(&parent->group_exit_msg, __ATOMIC_ACQUIRE) != NULL ||
+        notes_death_committed(parent)) {
         proc_table_lock_release(s);
         rfork_rollback_unpublished(child, ct);
         return -1;
@@ -5342,10 +5346,13 @@ int proc_exec_claim(struct Proc *p) {
         extinction("proc_exec_claim: not a thread of the Proc");
 
     // The group claim is written under this lock too, so both reads are exact.
-    // A held claim is another exec's, which has doomed this thread.
+    // A held claim is another exec's, which has doomed this thread. A committed
+    // death (ARCH 8.8.2) is set by a lock-free swap, so this read is not exact:
+    // one landing after it crosses the exec, since no latch write may clear it,
+    // and the new image dies of it at its first EL0 return.
     irq_state_t s = proc_threads_lock(p);
     if (__atomic_load_n(&p->group_exit_msg, __ATOMIC_ACQUIRE) != NULL ||
-        p->exec_task != NULL) {
+        notes_death_committed(p) || p->exec_task != NULL) {
         proc_threads_unlock(p, s);
         return -1;
     }
@@ -5934,6 +5941,11 @@ void el0_return_die_check(void) {
         // on the die path).
         thread_exit_self();
     }
+
+    // ARCH 8.8.2 (vote 35): a committed death ends the Proc by the note it names,
+    // before this tail stops or delivers a note.
+    const char *committed = notes_death_committed(p);
+    if (committed) exits_note(committed);
 }
 
 // =============================================================================

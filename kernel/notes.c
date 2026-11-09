@@ -465,6 +465,51 @@ static u32 notes_name_terminate_latch(const char *name) {
     return 0;
 }
 
+// ARCH 8.8.2 (vote 35): the note a terminate latch stands for. Each latch is
+// armed by one terminate-default note (the tty family latches per note), so the
+// one latch a commit leaves armed names the death (notes_death_committed).
+static const char *notes_latch_note_name(u32 latch) {
+    switch (latch) {
+    case PROC_FLAG_INTR_TERMINATE_PENDING: return notes_canonical_name_ptr(NOTE_NAME_INTERRUPT);
+    case PROC_FLAG_QUIT_TERMINATE_PENDING: return notes_canonical_name_ptr(NOTE_NAME_TTY_QUIT);
+    case PROC_FLAG_HUP_TERMINATE_PENDING:  return notes_canonical_name_ptr(NOTE_NAME_TTY_HUP);
+    case PROC_FLAG_PIPE_TERMINATE_PENDING: return notes_canonical_name_ptr(NOTE_NAME_PIPE);
+    case PROC_FLAG_TERM_TERMINATE_PENDING: return notes_canonical_name_ptr(NOTE_NAME_TERM);
+    case PROC_FLAG_USR1_TERMINATE_PENDING: return notes_canonical_name_ptr(NOTE_NAME_USR1);
+    case PROC_FLAG_USR2_TERMINATE_PENDING: return notes_canonical_name_ptr(NOTE_NAME_USR2);
+    default:                               return NULL;
+    }
+}
+
+// Every terminate-latch arm and clear, under q->lock. A committed death freezes
+// the latches, because the one it left armed names its note; the commit holds no
+// lock, so this write is a compare-and-swap that refuses once it sees it. False
+// when the death is committed.
+static bool notes_latch_write_locked(struct Proc *p, u32 clear, u32 set) {
+    u32 old = __atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE);
+    for (;;) {
+        if (old & PROC_FLAG_TERMINATE_COMMITTED) return false;
+        u32 nw = (old & ~clear) | set;
+        if (nw == old) return true;
+        if (__atomic_compare_exchange_n(&p->proc_flags, &old, nw, false,
+                                        __ATOMIC_RELEASE, __ATOMIC_ACQUIRE))
+            return true;
+    }
+}
+
+const char *notes_death_committed(const struct Proc *p) {
+    if (!p) return NULL;
+    u32 f = __atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE);
+    if (!(f & PROC_FLAG_TERMINATE_COMMITTED)) return NULL;
+    const char *name = notes_latch_note_name(f & PROC_FLAG_TERMINATE_PENDING_MASK);
+    if (!name) extinction("notes: a committed death names no note");
+    return name;
+}
+
+#ifdef KERNEL_TESTS
+const char *notes_latch_note_name_for_test(u32 latch) { return notes_latch_note_name(latch); }
+#endif
+
 #ifdef KERNEL_TESTS
 // Test support: lets the #15 table test assert that the EL0-tail uncaught arm
 // and the NDFLT arm read the SAME `dfl` column -- the two used to be
@@ -570,7 +615,7 @@ static void notes_arm_intr_terminate_locked(struct Proc *p, const char *name) {
     if (p == kproc()) return;
     if (notes_proc_has_live_handler(p, name)) return;
     if (proc_is_self_managing_notes(p)) return;
-    __atomic_or_fetch(&p->proc_flags, latch, __ATOMIC_RELEASE);
+    (void)notes_latch_write_locked(p, 0, latch);
 }
 
 // The caught latch and its claim (proc.h, Proc.note_caught) carry literal masks
@@ -661,7 +706,21 @@ static void notes_drain_intr_locked(struct Proc *p, struct NoteQueue *q,
             return;             // another same-class note remains queued
         idx = (idx + 1) % NOTE_RING_SLOTS;
     }
-    __atomic_and_fetch(&p->proc_flags, ~latch, __ATOMIC_RELEASE);
+    (void)notes_latch_write_locked(p, latch, 0);
+}
+
+// ARCH 8.8.2 (vote 35): the tail is about to hand `name` to a handler. If its
+// latch is armed, the latch is stale -- a latch stands for one note name, and
+// this one's disposition now catches it, with the re-read still to come -- so it
+// is cleared first, by the swap a commit races; one of the two wins, and no note
+// is both handled and died of. A committed death hands nothing to a handler:
+// the caller unlocks and dies of it. Caller holds q->lock.
+static void notes_tail_yield_or_die_locked(struct Proc *p, struct NoteQueue *q,
+                                           const char *name) {
+    if (notes_latch_write_locked(p, notes_name_terminate_latch(name), 0)) return;
+    const char *committed = notes_death_committed(p);
+    spin_unlock(&q->lock);
+    exits_note(committed);
 }
 
 // item 11 (ARCH 8.8.3): the CAUGHT-note twin of notes_drain_intr_locked. When a
@@ -1470,12 +1529,7 @@ void notes_disposition_reread(struct Proc *p) {
         caught |= notes_caught_latch_bit(p, name);
         idx = (idx + 1) % NOTE_RING_SLOTS;
     }
-    u32 was_term = __atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE) &
-                   PROC_FLAG_TERMINATE_PENDING_MASK;
-    if (was_term & ~term)
-        __atomic_and_fetch(&p->proc_flags, ~(was_term & ~term), __ATOMIC_RELEASE);
-    if (term & ~was_term)
-        __atomic_or_fetch(&p->proc_flags, term & ~was_term, __ATOMIC_RELEASE);
+    (void)notes_latch_write_locked(p, PROC_FLAG_TERMINATE_PENDING_MASK & ~term, term);
     u32 was_caught = __atomic_load_n(&p->note_caught, __ATOMIC_ACQUIRE) & CAUGHT_LATCH_MASK;
     if (was_caught & ~caught)
         __atomic_and_fetch(&p->note_caught, ~(was_caught & ~caught), __ATOMIC_RELEASE);
@@ -1518,9 +1572,7 @@ void notes_mark_self_managing(struct Proc *p) {
     }
     spin_lock(&q->lock);
     proc_mark_self_managing_notes(p);
-    __atomic_and_fetch(&p->proc_flags,
-                       ~PROC_FLAG_TERMINATE_PENDING_MASK,
-                       __ATOMIC_RELEASE);
+    (void)notes_latch_write_locked(p, PROC_FLAG_TERMINATE_PENDING_MASK, 0);
     spin_unlock(&q->lock);
 
     // The fd has no per-thread reader, and no handler will ever run for a
@@ -1553,6 +1605,52 @@ static bool thread_death_held(const struct Thread *t) {
     const struct Proc *p = t->proc;
     return !(p && (__atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE) &
                    PROC_FLAG_EXIT_CLOSE_FORCED));
+}
+
+// The first armed terminate latch `t` has unmasked, or 0. Each latch pairs with
+// its own family's mask bit (both tty latches with NOTE_BIT_TTY), so a thread that
+// masked one family never unwinds for another's note -- "a latch-woken thread
+// never unwinds into a tail that refuses to act". The pipe latch's pairing is
+// where "mask to opt out of Plan 9 pipe-death" lives: libthyla-rs, libt and the
+// Go rt0 mask NOTE_BIT_PIPE at startup (#237). The order is fixed, so the latch a
+// commit keeps is the same whichever reader commits first.
+static u32 notes_latch_for(u32 flags, const struct Thread *t) {
+    static const struct { u32 latch; u32 bit; } pairs[] = {
+        { PROC_FLAG_INTR_TERMINATE_PENDING, NOTE_BIT_INTERRUPT },
+        { PROC_FLAG_QUIT_TERMINATE_PENDING, NOTE_BIT_TTY },
+        { PROC_FLAG_HUP_TERMINATE_PENDING,  NOTE_BIT_TTY },
+        { PROC_FLAG_PIPE_TERMINATE_PENDING, NOTE_BIT_PIPE },
+        { PROC_FLAG_TERM_TERMINATE_PENDING, NOTE_BIT_TERM },
+        { PROC_FLAG_USR1_TERMINATE_PENDING, NOTE_BIT_USR1 },
+        { PROC_FLAG_USR2_TERMINATE_PENDING, NOTE_BIT_USR2 },
+    };
+    for (u32 i = 0; i < sizeof(pairs) / sizeof(pairs[0]); i++) {
+        if ((flags & pairs[i].latch) && !(t->note_mask & (1ull << pairs[i].bit)))
+            return pairs[i].latch;
+    }
+    return 0;
+}
+
+// ARCH 8.8.2 (vote 35): commit the Proc's death by a terminate latch. One
+// compare-and-swap on proc_flags, the word every latch write changes
+// (notes_latch_write_locked), sets PROC_FLAG_TERMINATE_COMMITTED and leaves armed
+// only the latch acted on: `forced` for a thread-directed note, otherwise the
+// first latch `t` has unmasked in the word the swap compares. True once the death
+// is committed, by this call or an earlier one; false when no such latch is left,
+// because a handler's or the notes fd's re-read cleared it first. Lock-free, so
+// every reader of the death predicate commits, whatever lock it holds.
+static bool notes_commit_latch(struct Proc *p, const struct Thread *t, u32 forced) {
+    u32 old = __atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE);
+    for (;;) {
+        if (old & PROC_FLAG_TERMINATE_COMMITTED) return true;
+        u32 latch = forced ? forced : notes_latch_for(old, t);
+        if (latch == 0) return false;
+        u32 nw = (old & ~PROC_FLAG_TERMINATE_PENDING_MASK) | latch |
+                 PROC_FLAG_TERMINATE_COMMITTED;
+        if (__atomic_compare_exchange_n(&p->proc_flags, &old, nw, false,
+                                        __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+            return true;
+    }
 }
 
 // The widened #811 death predicate (ARCH 8.8.1 + 8.8.2). LOCK-FREE: atomic
@@ -1605,44 +1703,23 @@ bool thread_die_pending(struct Thread *t) {
     // never EL0-return, so the latch could never be consumed.
     if (p != kproc()) {
         u32 flags = __atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE);
-        // PTY-1b: each terminate latch pairs with ITS OWN family mask bit
-        // (interrupt <-> NOTE_BIT_INTERRUPT, the tty:quit/hup latch <->
-        // NOTE_BIT_TTY) so a thread that masked one family never spuriously
-        // unwinds for the other's pending note -- preserving "a latch-woken
-        // thread never unwinds into a tail that refuses to act".
-        if ((flags & PROC_FLAG_INTR_TERMINATE_PENDING) != 0 &&
-            (t->note_mask & (1u << NOTE_BIT_INTERRUPT)) == 0)
-            return true;
-        if ((flags & (PROC_FLAG_QUIT_TERMINATE_PENDING |
-                      PROC_FLAG_HUP_TERMINATE_PENDING)) != 0 &&
-            (t->note_mask & (1u << NOTE_BIT_TTY)) == 0)
-            return true;
-        // #237: the pipe terminate latch, PER-FAMILY like the two above -- a
-        // thread that masked NOTE_BIT_PIPE (libthyla-rs / libt / the Go rt0
-        // mask it at startup, so a native's default on a closed-pipe write is
-        // EPIPE-not-death) does NOT unwind here; an UNMASKED one terminates.
-        // This per-family precision -- not the whole-class MASK -- is exactly
-        // where "mask to opt out of Plan 9 pipe-death" lives.
-        if ((flags & PROC_FLAG_PIPE_TERMINATE_PENDING) != 0 &&
-            (t->note_mask & (1u << NOTE_BIT_PIPE)) == 0)
-            return true;
-        // The term latch pairs with NOTE_BIT_TERM alone: a thread that masked
-        // only interrupt (SIGINT blocked) still unwinds for a pending term.
-        if ((flags & PROC_FLAG_TERM_TERMINATE_PENDING) != 0 &&
-            (t->note_mask & (1u << NOTE_BIT_TERM)) == 0)
-            return true;
-        // Each user-defined latch pairs with its own bit: SIGUSR1 blocked leaves
-        // a pending usr2 fatal, and the reverse.
-        if ((flags & PROC_FLAG_USR1_TERMINATE_PENDING) != 0 &&
-            (t->note_mask & (1u << NOTE_BIT_USR1)) == 0)
-            return true;
-        if ((flags & PROC_FLAG_USR2_TERMINATE_PENDING) != 0 &&
-            (t->note_mask & (1u << NOTE_BIT_USR2)) == 0)
+        // ARCH 8.8.2 (vote 35): a committed death ends every thread's waits, its
+        // mask notwithstanding, as group death does.
+        if (flags & PROC_FLAG_TERMINATE_COMMITTED) return true;
+        // Reading true for a latch commits the death, so no reader of this
+        // predicate hands out an answer given on the footing of a death that a
+        // handler installed a moment later would revoke. If the latch's clear
+        // wins the swap, the thread is not dying.
+        if (notes_latch_for(flags, t) != 0 && notes_commit_latch(p, t, 0))
             return true;
         // A note aimed at this thread alone ends every wait of this thread, and
-        // no peer's: the tail's exits_note then runs the group's one death.
-        if (notes_direct_fatal_name(p, t))
-            return true;
+        // no peer's: the tail's exits_note then runs the group's one death. It
+        // commits by its own latch, armed by the swap.
+        const char *dname = notes_direct_fatal_name(p, t);
+        if (dname) {
+            u32 dlatch = notes_name_terminate_latch(dname);
+            return dlatch == 0 || notes_commit_latch(p, t, dlatch);
+        }
     }
     return false;
 }
@@ -1667,6 +1744,11 @@ void notes_fault_dying_latch(struct Thread *t) {
     if (!t) return;
     struct Proc *p = t->proc;
     if (!p || p == kproc() || !p->notes) return;
+    // A committed death is the one this thread dies of, whatever the queue holds
+    // now: a handler installed since the commit leaves the pick below empty, and
+    // the faulting instruction would re-execute into the same fault forever.
+    const char *committed = notes_death_committed(p);
+    if (committed) exits_note(committed);
     struct NoteQueue *q = p->notes;
     spin_lock(&q->lock);
     const char *tname = notes_terminate_note_name_locked(p, t);
@@ -1691,8 +1773,7 @@ void notes_fault_dying_latch(struct Thread *t) {
     }
     u32 armed = __atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE) &
                 PROC_FLAG_TERMINATE_PENDING_MASK;
-    if (armed & ~live)
-        __atomic_and_fetch(&p->proc_flags, ~(armed & ~live), __ATOMIC_RELEASE);
+    if (armed & ~live) (void)notes_latch_write_locked(p, armed & ~live, 0);
     spin_unlock(&q->lock);
 }
 
@@ -2419,6 +2500,7 @@ again:
         }
 
         if (have_handler && p->phenotype == PHENO_LINUX) {
+            notes_tail_yield_or_die_locked(p, q, candidate.name);
             notes_deliver_linux_locked(ctx, p, t, q, sn, &act, direct);
             return false;               // the helper owns the unlock either way
         }
@@ -2526,6 +2608,7 @@ again:
     // push under the SAME q->lock so a failing push can re-enqueue at
     // head without losing the note (round-2 close M2 — the F5/F6 race).
     struct Note popped;
+    notes_tail_yield_or_die_locked(p, q, candidate.name);
     int got = notes_tail_consume_locked(p, t, direct, &popped);
     if (!got) {
         // Defense-in-depth: peek returned a candidate, dequeue under the

@@ -1403,6 +1403,15 @@ bool proc_may_create_srv_registry(const struct Proc *p);
 // first, and PROC_FLAGS_ALL's disjointness assert caught the join.
 #define PROC_FLAG_NOTE_TABLE         (1u << 25)
 
+// ARCH 8.8.2 (vote 35): a death a terminate latch began is committed. Set once,
+// by the compare-and-swap in thread_die_pending that also leaves armed only the
+// latch it acted on, which names the note (notes_death_committed); never cleared.
+// While it is set no latch is armed or cleared (notes_latch_write_locked), every
+// thread's waits end whatever its mask, el0_return_die_check ends the Proc by the
+// named note, and a stop park, an exec claim and an rfork are refused, as group
+// death refuses them. Not inherited.
+#define PROC_FLAG_TERMINATE_COMMITTED (1u << 16)
+
 // The terminate-CLASS latch set (interrupt, tty:quit, tty:hup, pipe, term, usr1, usr2). Used by the
 // whole-class clears -- handler registration, the self-managing mark, the
 // lock-free wake gate -- which suppress/observe EVERY terminate family at once.
@@ -1433,7 +1442,7 @@ bool proc_may_create_srv_registry(const struct Proc *p);
      PROC_FLAG_EXIT_CLOSE_FORCED | PROC_FLAG_EXIT_CLOSING | PROC_FLAG_MAIN_TID | \
      PROC_FLAG_MAY_RAISE_THREAD_BUDGET | PROC_FLAG_SESSION_REGISTRY | \
      PROC_FLAG_USR1_TERMINATE_PENDING | PROC_FLAG_USR2_TERMINATE_PENDING | \
-     PROC_FLAG_NOTE_TABLE)
+     PROC_FLAG_NOTE_TABLE | PROC_FLAG_TERMINATE_COMMITTED)
 _Static_assert(__builtin_popcount(PROC_FLAGS_ALL) ==
     __builtin_popcount(PROC_FLAG_NODUMP) + __builtin_popcount(PROC_FLAG_NOTRACE) +
     __builtin_popcount(PROC_FLAG_MLOCKED) + __builtin_popcount(PROC_FLAG_CONSOLE_ATTACHED) +
@@ -1455,7 +1464,8 @@ _Static_assert(__builtin_popcount(PROC_FLAGS_ALL) ==
     __builtin_popcount(PROC_FLAG_MAIN_TID) +
     __builtin_popcount(PROC_FLAG_MAY_RAISE_THREAD_BUDGET) +
     __builtin_popcount(PROC_FLAG_SESSION_REGISTRY) +
-    __builtin_popcount(PROC_FLAG_NOTE_TABLE),
+    __builtin_popcount(PROC_FLAG_NOTE_TABLE) +
+    __builtin_popcount(PROC_FLAG_TERMINATE_COMMITTED),
     "two proc_flags bits alias");
 
 // LINEAGE L-1 re-based EVERY offset below: extracting struct AddrSpace removed
@@ -2380,6 +2390,8 @@ static inline bool proc_stop_owned(const struct Proc *p) {
 static inline bool proc_stop_requested(const struct Proc *p) {
     return proc_stop_owned(p) &&
            __atomic_load_n(&p->group_exit_msg, __ATOMIC_ACQUIRE) == NULL &&
+           !(__atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE) &
+             PROC_FLAG_TERMINATE_COMMITTED) &&
            __atomic_load_n(&p->exec_task, __ATOMIC_ACQUIRE) == NULL;
 }
 
