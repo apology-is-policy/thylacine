@@ -169,6 +169,8 @@ expect {
     }
     timeout { lc_fail "cursor-late: within 30s: renewed=$renewed released=$released armed=$armed revived=$revived and no cursor stall" }
 }
+# The second wait counts its own renewals: the first wait's would satisfy its check.
+set renewed 0
 set bound 0
 set held 0
 set late 0
@@ -322,6 +324,7 @@ expect {
     }
     timeout { lc_fail "control-late: within 30s: renewed=$renewed released=$released withheld=$withheld and no control stall" }
 }
+set renewed 0
 set dead 0
 set closed 0
 set returned 0
@@ -359,6 +362,7 @@ expect {
         if {!$dead} { lc_fail "control-late: the seat recovered and the engine never died at the takeover's bound" }
         if {!$closed} { lc_fail "control-late: the seat recovered and lictor never said the kernel closed it" }
         if {!$returned} { lc_fail "control-late: the seat recovered without saying its display was lost" }
+        if {!$renewed} { lc_fail "control-late: no renewal behind the withheld control chain" }
         lc_step "control-late: renewed $renewed times; the takeover's bound killed the engine $ms ms from the chord, before the kernel's limit; the seat returned without its display"
     }
     timeout { lc_fail "control-late: within 40s: renewed=$renewed revived=$revived dead=$dead closed=$closed returned=$returned and no recovery" }

@@ -220,10 +220,11 @@ fails the chord by 35 s, unless the abandoned chain retires first and the takeov
 through (vote 50's revival). A chord ends in the trusted screen, a dead engine, or a
 failure on the log. The cost falls on a takeover still waiting at 33 s: its stall dies
 however young, so a second wait in series dies younger than 30 s, and a takeover's own
-command that stalls after 33 s dies at the next pump. The bound lives only inside the
-seat step that read the kernel's phase, because the kernel fails an expired chord at
-its next call: a pump between steps would otherwise kill a stall only the restore waits
-on, and lose the display. Windows' secure desktop takes the same line through its GPU timeout:
+command that stalls after 33 s dies at the next seat step's reap if the chord is still
+live; otherwise the restore waits on it. The bound lives only across that reap, the one
+pump after a status read that saw the takeover still waiting, because the kernel fails
+an expired chord at its next call: any later pump could kill a stall only the restore
+waits on, and lose the display. Windows' secure desktop takes the same line through its GPU timeout:
 the trusted path waits on client work only to a fixed bound from the request.
 
 Before a chord is seen the gap is the serve loop's. A synchronous command waits at most

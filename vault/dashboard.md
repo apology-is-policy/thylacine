@@ -129,6 +129,6 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-11-09 [[chg-2026-11-09-sak-renew]] — A takeover behind a GPU backlog renews the kernel's quiesce deadline (vote 71)
 - 2026-11-09 [[chg-2026-11-09-serial-side-queue]] — The serial console reads every byte; what the ring refuses waits in a side queue (vote 73)
 - 2026-11-09 [[chg-2026-11-09-takeover-bound-round4]] — The takeover's bound lives inside one seat step (round 4)
+- 2026-11-09 [[chg-2026-11-09-takeover-bound-round5]] — The takeover's bound lives across one reap (round 5)
 - 2026-11-09 [[chg-2026-11-09-takeover-bound]] — Every wait a takeover makes is bounded from the chord (vote 80)
-- 2026-11-09 [[chg-2026-11-09-trusted-audit-close]] — The trusted-path batch audit close: renewal behind a live engine, serial verdicts wait, the episode tail (votes 70-73)
 <!-- generated:end -->

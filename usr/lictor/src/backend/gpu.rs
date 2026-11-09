@@ -911,8 +911,8 @@ struct Controlq {
     /// one outstanding FENCE_ABANDON_MS, or TAKEOVER_BOUND_MS from the chord of
     /// a takeover waiting on it, latches `dead`.
     stalled: Option<Instant>,
-    /// The chord, while a trusted takeover waits on the device: a stall still
-    /// standing TAKEOVER_BOUND_MS after it latches `dead` (vote 80).
+    /// The chord of a takeover not yet up, set only across the seat's phase-1 reap:
+    /// a stall still standing TAKEOVER_BOUND_MS after it latches `dead` (vote 80).
     takeover_from: Option<Instant>,
     /// Stalls begun, monotone: compared across one command, it says whether
     /// that command's outcome is unknown.
@@ -4757,9 +4757,10 @@ impl Gpu {
         core::mem::take(&mut self.retired_resources)
     }
 
-    /// The chord of the takeover now waiting on the device, or None once it is up or
-    /// gone. A stall still standing TAKEOVER_BOUND_MS after it ends as its own bound
-    /// would end it: the engine dies, or the cursor lane is abandoned.
+    /// The chord of the takeover now waiting on the device, set by the seat around the one
+    /// reap that follows a STATUS reading QUIESCING and cleared after it. A stall still
+    /// standing TAKEOVER_BOUND_MS after it ends as its own bound would end it: the engine
+    /// dies, or the cursor lane is abandoned.
     pub fn bound_takeover(&mut self, chord: Option<Instant>) {
         self.ctrl.takeover_from = chord;
     }

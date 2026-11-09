@@ -278,14 +278,7 @@ impl Seat {
                 self.generation, device.gpu.fenced_in_flight()));
         }
     }
-    /// The bound on a takeover's waits lives only inside the step that read the kernel's
-    /// phase. The kernel fails an expired chord lazily, at the next call, so a pump between
-    /// steps could otherwise kill a stall that only the restore still waits on.
     pub fn step(&mut self, device: &mut Device, screen: &mut Screen, inputs: &mut [Input]) {
-        self.step_once(device, screen, inputs);
-        device.gpu.bound_takeover(None);
-    }
-    fn step_once(&mut self, device: &mut Device, screen: &mut Screen, inputs: &mut [Input]) {
         let mut m = ep::Message::default();
         if ep::call(ep::STATUS, &mut m).is_err() { self.fail("status"); return; }
         self.adopt(&m);
@@ -299,13 +292,17 @@ impl Seat {
             }
         }
         self.quiescence.observe(self.generation, self.phase);
-        device.gpu.bound_takeover(self.waiting_chord());
         let released = inputs.iter().all(|i| i.held.iter().all(|held| !held));
         match self.phase {
             0 => {},
             1 => {
                 for input in inputs.iter_mut() { input.events.clear(); }
+                // The bound on a takeover's waits lives only across this reap, the one pump
+                // after a STATUS that read QUIESCING. The kernel fails an expired chord lazily,
+                // at the next call, so any later pump could kill a stall only the restore waits on.
+                device.gpu.bound_takeover(self.waiting_chord());
                 device.reap();
+                device.gpu.bound_takeover(None);
                 #[cfg(feature = "test-mode")]
                 if self.test_release_at.is_some_and(|at| at.elapsed().as_millis() as u64 >= TEST_RELEASE_AFTER_MS) {
                     self.test_release_at = None;
@@ -405,7 +402,6 @@ impl Seat {
                         return;
                     }
                     self.active = Some(self.generation); self.sequence = 0; self.masked = 0;
-                    device.gpu.bound_takeover(None);
                     let (chains, ms) = self.takeover_began.take()
                         .map_or((0, 0), |(_, chains, t0)| (chains, t0.elapsed().as_millis()));
                     super::diagnostic(&alloc::format!(
