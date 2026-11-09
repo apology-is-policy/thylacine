@@ -2,9 +2,10 @@
 # ls-graphical-keys-overrun -- a release the input ring could not hold must not park
 # the seat (I-27).
 #
-# thylacine.test-latch-dead arms lictor's lever, and F8 then stops its serve loop for
-# five seconds with the rings undrained, as a synchronous wait behind a client's queue
-# stops it. Shift goes down first, the ring fills behind the stopped loop, and shift comes
+# thylacine.test-latch-dead arms lictor's lever, and F8 then stops its input thread at the
+# pass that read it, and its serve loop for five seconds, with the rings undrained, as an
+# input thread that stopped draining would leave them. Shift goes down first, the ring
+# fills behind the stopped thread, and shift comes
 # up with no room left, so the device drops the release and tells nobody. With no recovery
 # that key reads as held for good: Lictor withholds its ACK and the kernel its restore, so
 # every chord fails at its deadline until that key is pressed again.

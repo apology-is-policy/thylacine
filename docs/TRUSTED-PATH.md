@@ -202,8 +202,14 @@ Before a chord is seen the gap is the serve loop's. A synchronous command waits 
 command behind a stall holds the loop about 600 ms. Keys typed meanwhile wait in the
 input device's 64-event ring, which fills in about that time at 30 ms a character, the
 pace of a paste or a password manager's auto-type; keys were measured lost that way behind
-a deep client queue, and none at 100 ms a character. Vote 72's second half, a Lictor
-thread moving raw input into a 4096-event queue, closes that. Not yet built.
+a deep client queue, and none at 100 ms a character. Vote 72's second half closes that:
+Lictor's input thread drains the rings every 4 ms into a 4096-entry queue, whatever the
+serve loop is waiting on, and the serve loop takes the queue whole on its next pass. Seat
+logic stays on the serve loop. A key is lost now only if the input thread itself stops
+draining for about half a second at that pace, or if the queue fills: about a thousand
+keys behind a serve loop that stands still. An entry that finds the queue full is
+dropped, and that device's held keys are released at that point, as after a ring
+overrun. Written 2026-11-09, not yet booted.
 
 **As built:** the serial episode gates UART output to the attached trusted
 process. The QEMU graphical backend uses Lictor as the boot-trusted physical

@@ -6,7 +6,7 @@ extern crate alloc;
 use alloc::{vec::Vec, vec};
 use libdriver::{driver::{run, Driver}, resource::BoundResources, Error};
 use libthyla_rs::{io::Write, *};
-use lictor::{backend::{gpu::Gpu, input::InputDev, screen::Screen, device::Device,
+use lictor::{backend::{gpu::Gpu, input::InputDev, intake, screen::Screen, device::Device,
     server::Conn, seat::{Seat, Input}}, endpoint as ep, gpu_api::{admit, Request, Stats}, wire::Wire};
 #[global_allocator]
 static ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
@@ -29,12 +29,18 @@ impl Driver for Lictor {
         let count = resources.pci_extra.len();
         if resources.pci.is_none() || count == 0 || count > windows.len() { return Err(Error::Hardware); }
         let mut inputs = Vec::new();
+        let mut devices = Vec::new();
         for (index, &(bar, dma)) in windows[..count].iter().enumerate() {
-            inputs.push(Input::new(InputDev::probe(index as u32, bar, dma)?));
+            let device = InputDev::probe(index as u32, bar, dma)?;
+            inputs.push(Input::new(&device));
+            devices.push(device);
         }
         if inputs.iter().filter(|i| i.keyboard).count() != 1 { return Err(Error::Hardware); }
         let screen = Screen::new(&mut gpu)?;
         let device = Device::new(gpu, 0)?;
+        // The input devices go to their own thread, so a GPU wait here never leaves a
+        // ring undrained. Last: nothing after it can fail the probe.
+        intake::start(devices)?;
         Ok(Self { device, screen, inputs, seat: Seat::default() })
     }
     fn serve(mut self, _resources: &BoundResources) -> Result<(), Error> {
@@ -83,8 +89,7 @@ impl Driver for Lictor {
                 let (sequence, request) = conn.pending.take().unwrap();
                 let result = match request {
                     Request::InputInfo { index } => {
-                        let info = self.inputs.get(index as usize).map(|i| (i.device.supports_abs(),
-                            i.device.supports_rel(), i.device.abs_max(0), i.device.abs_max(1)));
+                        let info = self.inputs.get(index as usize).map(|i| i.info);
                         let mut bytes = Vec::new(); info.put(&mut bytes); Ok(bytes)
                     }
                     Request::InputDrain { index } => {

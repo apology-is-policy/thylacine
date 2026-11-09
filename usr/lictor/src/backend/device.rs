@@ -205,12 +205,14 @@ impl Device {
         }
     }
     /// The same lever's input half: stops the serve loop as a synchronous wait stops
-    /// it, with the rings undrained, and asks the device for nothing.
+    /// it, and asks the device for nothing. The input thread stopped itself at the pass
+    /// that read the key (`intake::test`), so the rings stay undrained until this ends.
     #[cfg(feature = "test-mode")]
     pub fn test_blind_loop(&self) {
         if !self.test_blind_armed { return; }
         super::diagnostic("lictor: serve loop stopped (INJECTED by test-latch-dead)\n");
         let _ = libthyla_rs::time::sleep(core::time::Duration::from_millis(TEST_BLIND_MS));
+        super::intake::test::resume();
         super::diagnostic("lictor: serve loop resumed\n");
     }
     /// The same lever's seat half, one shot per trusted takeover in this
@@ -631,6 +633,7 @@ impl Device {
                 #[cfg(feature = "test-mode")] {
                     self.test_latch_shots = 2; self.test_seat_shots = 12; self.test_stall_shots = 3;
                     self.test_blind_armed = true;
+                    super::intake::test::arm();
                     ().put(&mut out);
                 }
                 #[cfg(not(feature = "test-mode"))] { return Err(Error::BadField); }

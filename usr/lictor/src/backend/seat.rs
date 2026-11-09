@@ -1,21 +1,25 @@
 //! Physical input and the kernel-bound episode pump. This remains independent
 //! of normal compositor RPC progress: a parked GPU request cannot stall SAK.
-use alloc::vec::Vec;
+use alloc::{collections::VecDeque, vec::Vec};
 use crate::{endpoint as ep, keymap::{self, Mods}, model::{Model, State}};
-use super::{device::Device, screen::Screen, input::{InputDev, RawInputEvent, EV_KEY}};
+use super::{device::Device, screen::Screen, input::{InputDev, RawInputEvent, Report, EV_KEY}, intake::{self, Entry}};
 #[cfg(feature = "test-mode")]
 use super::device::SeatShot;
 
+/// One input device as the serve thread sees it. The device itself belongs to the input
+/// thread (`intake`), so what InputInfo answers is read once, here: virtio-input's
+/// configuration does not change.
 pub struct Input {
-    pub device: InputDev,
+    /// EV_ABS, EV_REL, and the X and Y maxima.
+    pub info: (bool, bool, u32, u32),
     pub keyboard: bool,
     pub events: Vec<(u16, u16, u32)>,
     held: [bool; 768],
 }
 impl Input {
-    pub fn new(device: InputDev) -> Self {
-        let keyboard = !device.supports_abs() && !device.supports_rel();
-        Self { device, keyboard, events: Vec::new(), held: [false; 768] }
+    pub fn new(device: &InputDev) -> Self {
+        let info = (device.supports_abs(), device.supports_rel(), device.abs_max(0), device.abs_max(1));
+        Self { info, keyboard: !info.0 && !info.1, events: Vec::new(), held: [false; 768] }
     }
 }
 #[derive(Default)]
@@ -74,11 +78,10 @@ pub struct Seat {
     /// The key that stops the serve loop was pressed; the armed lever decides.
     #[cfg(feature = "test-mode")]
     pub test_blind: bool,
+    /// The serve thread's half of the intake swap, kept for its capacity.
+    taken: VecDeque<(u8, Entry)>,
 }
 const RENEW_EVERY_MS: u64 = 1000;
-/// The key that stops the serve loop under the armed lever: F8.
-#[cfg(feature = "test-mode")]
-const TEST_BLIND_KEY: u16 = 66;
 #[cfg(feature = "test-mode")]
 const TEST_HOLD_RESTORE_MS: u64 = 3000;
 /// How long the failure notice stays up before normal output returns.
@@ -91,26 +94,22 @@ impl Seat {
 
     pub fn input(&mut self, inputs: &mut [Input]) {
         let mut lost = false;
-        for input in inputs.iter_mut() {
-            let mut events: Vec<RawInputEvent> = Vec::new();
-            let overran = input.device.drain(|event| events.push(event));
-            for event in events { self.deliver(input, event, &mut lost); }
-            // A release may be among what the device dropped, and it cannot be asked
-            // what is down. A release of a key still down costs one press. A release that
-            // never comes parks the seat: this side withholds its ACK and the kernel its
-            // restore, on every chord until that key is pressed again.
-            if overran {
-                let mut released = 0;
-                for code in 0..input.held.len() {
-                    if input.held[code] {
-                        self.deliver(input, RawInputEvent { etype: EV_KEY, code: code as u16, value: 0 }, &mut lost);
-                        released += 1;
-                    }
-                }
-                if released != 0 {
-                    super::diagnostic(&alloc::format!("lictor: input ring overran, {} held keys released\n", released));
-                }
+        let mut taken = core::mem::take(&mut self.taken);
+        let dropped = intake::take(&mut taken);
+        for (index, entry) in taken.drain(..) {
+            let Some(input) = inputs.get_mut(index as usize) else { continue };
+            match entry {
+                Entry::Report(Report::Event(event)) => self.deliver(input, event, &mut lost),
+                Entry::Report(Report::Low { free, depth, avail, used }) => super::diagnostic(&alloc::format!(
+                    "tapestryd: input eventq LOW: {} free of {} (avail {} used {})\n", free, depth, avail, used)),
+                Entry::Report(Report::Malformed { id, len }) => super::diagnostic(&alloc::format!(
+                    "tapestryd: input malformed used elem id={} len={}\n", id, len)),
+                Entry::Overran => self.release_held(input, "input ring", &mut lost),
             }
+        }
+        self.taken = taken;
+        for (index, input) in inputs.iter_mut().enumerate() {
+            if dropped.get(index).copied().unwrap_or(false) { self.release_held(input, "input queue", &mut lost); }
         }
         // A refused chord moves no generation, so nothing else tells the compositor
         // that a release it was owed is gone.
@@ -121,7 +120,23 @@ impl Seat {
             }
         }
     }
-    // Whatever is in the rings as the seat returns was pressed at a trusted screen. The
+    // A release may be among what was dropped, and the device cannot be asked what is
+    // down. A release of a key still down costs one press. A release that never comes
+    // parks the seat: this side withholds its ACK and the kernel its restore, on every
+    // chord until that key is pressed again.
+    fn release_held(&mut self, input: &mut Input, what: &str, lost: &mut bool) {
+        let mut released = 0;
+        for code in 0..input.held.len() {
+            if input.held[code] {
+                self.deliver(input, RawInputEvent { etype: EV_KEY, code: code as u16, value: 0 }, lost);
+                released += 1;
+            }
+        }
+        if released != 0 {
+            super::diagnostic(&alloc::format!("lictor: {} overran, {} held keys released\n", what, released));
+        }
+    }
+    // Whatever is in the rings or the queue as the seat returns was pressed at a trusted screen. The
     // kernel and `held` still read it; the compositor must not.
     fn drain_episode_tail(&mut self, inputs: &mut [Input]) {
         self.input(inputs);
@@ -138,7 +153,7 @@ impl Seat {
     }
     fn deliver(&mut self, input: &mut Input, event: RawInputEvent, lost: &mut bool) {
         #[cfg(feature = "test-mode")]
-        if event.etype == EV_KEY && event.code == TEST_BLIND_KEY && event.value == 1 { self.test_blind = true; }
+        if event.etype == EV_KEY && event.code == intake::test::BLIND_KEY && event.value == 1 { self.test_blind = true; }
         if event.etype == EV_KEY && (event.code as usize) < input.held.len() {
             input.held[event.code as usize] = event.value != 0;
         }

@@ -9,11 +9,9 @@
 // VirtioNetPci lineage); the eventq's drain + recycle discipline is the audited
 // P4-K-events probe's, verbatim.
 //
-// POLL-MODE, deliberately IRQ-free: tapestryd's single-threaded serve loop
-// blocks in t_poll on its 9P conns (the netd shape) and cannot also block in
-// SYS_IRQ_WAIT; instead the eventq is drained on every loop tick (<= the
-// FRAME period, so worst-case input latency is one frame -- fine for stage
-// 0). The avail ring carries VIRTQ_AVAIL_F_NO_INTERRUPT so the device
+// POLL-MODE, deliberately IRQ-free: Lictor's input thread (intake.rs) drains
+// the eventq every few milliseconds, whatever the serve loop is waiting on.
+// The avail ring carries VIRTQ_AVAIL_F_NO_INTERRUPT so the device
 // suppresses eventq interrupts entirely; no IRQ is claimed for the function.
 // (A stray assertion would also be harmless: nothing waits on the line, and
 // the GPU's own INTx is a different function/pin.)
@@ -120,6 +118,17 @@ pub struct RawInputEvent {
     pub etype: u16,
     pub code: u16,
     pub value: u32,
+}
+
+/// What one drain pass found, in ring order. The ring's own notes travel with the events
+/// because the thread that drains it must never print: a console write parks during a
+/// trusted episode, and that thread must not.
+#[derive(Clone, Copy)]
+pub enum Report {
+    Event(RawInputEvent),
+    /// Test-mode only: the device had at most three descriptors left at this pass.
+    Low { free: u16, depth: u16, avail: u16, used: u16 },
+    Malformed { id: u32, len: u32 },
 }
 
 #[inline(always)]
@@ -361,7 +370,7 @@ impl InputDev {
     /// Drain every pending eventq record, invoking `f` per record; recycle
     /// each descriptor back to the device. Bounded by the ring size per call.
     /// Answers whether the device may have dropped a report since the last drain.
-    pub fn drain(&mut self, mut f: impl FnMut(RawInputEvent)) -> bool {
+    pub fn drain(&mut self, mut f: impl FnMut(Report)) -> bool {
         let used_va = self.dma_va + USED_OFF;
         let avail_va = self.dma_va + AVAIL_OFF;
         let pool_va = self.dma_va + EVENT_POOL_OFF;
@@ -377,13 +386,7 @@ impl InputDev {
         {
             let free = self.avail_idx.wrapping_sub(cur_used);
             if free <= 3 {
-                say!(
-                    "tapestryd: input eventq LOW: {} free of {} (avail {} used {})",
-                    free,
-                    self.depth,
-                    self.avail_idx,
-                    cur_used
-                );
+                f(Report::Low { free, depth: self.depth, avail: self.avail_idx, used: cur_used });
             }
         }
         if cur_used == self.last_used_idx {
@@ -409,18 +412,14 @@ impl InputDev {
                     code: unsafe { r16(evt_va + 2) },
                     value: unsafe { r32(evt_va + 4) },
                 };
-                f(ev);
+                f(Report::Event(ev));
 
                 // Recycle: re-publish this descriptor to the avail ring.
                 let avail_slot = (self.avail_idx % self.depth) as u64;
                 unsafe { w16(avail_va + 4 + avail_slot * 2, desc_id as u16) };
                 self.avail_idx = self.avail_idx.wrapping_add(1);
             } else {
-                say!(
-                    "tapestryd: input malformed used elem id={} len={}",
-                    desc_id,
-                    used_len
-                );
+                f(Report::Malformed { id: desc_id, len: used_len });
             }
             idx = idx.wrapping_add(1);
             consumed += 1;

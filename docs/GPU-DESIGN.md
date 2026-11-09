@@ -2629,6 +2629,12 @@ block the serve loop, and seat input with it. Neither was taken.
   bystander's present answers an error for that long instead of blocking, and the C-6
   gate's DEADLINE arm counts a recovered stall as survival. Only bring-up, before the
   serve loop, still waits the abandonment bound.
+- **Input does not wait for the serve loop** (operator vote 72, second half). A
+  synchronous wait still holds the serve loop up to `SUBMIT_DEADLINE_MS`, so Lictor's
+  input thread (`backend/intake.rs`) drains every eventq every 4 ms into a 4096-entry
+  queue, and the serve loop takes it whole each pass. The thread never prints and never
+  calls the seat endpoint; every seat decision stays on the serve loop. A full queue
+  drops the entry and releases that device's held keys where it was dropped.
 - **The cursor lane stalls and comes back.** A serving `cursor_command` never widens:
   it stalls at `SUBMIT_DEADLINE_MS`, so a client's readback cannot hold the serve loop
   through a pointer motion. A chain that outlives `FENCE_ABANDON_MS` is abandoned, not

@@ -15,6 +15,7 @@ code:
   - usr/lictor/src/eventq.rs
   - usr/lictor/src/backend/import.rs
   - usr/lictor/src/backend/input.rs
+  - usr/lictor/src/backend/intake.rs
   - usr/lictor/src/backend/mod.rs
   - usr/lictor/src/backend/screen.rs
   - usr/lictor/src/backend/seat.rs
@@ -74,7 +75,7 @@ failure/restoration path. No clipboard payload, new kernel role or syscall enter
 Lictor. Native healthy/stalled physical F10 probes and graphical regressions
 are pinned in HALCYON-INTERACTION-STATUS; no Pi/minimum-mode qualification is
 claimed. The test-mode parked-RPC marker is emitted only in QUIESCING, before
-this sole hardware-owner thread can ACK into EXCLUSIVE.
+the serve thread, the only one that calls the seat endpoint, can ACK into EXCLUSIVE.
 
 ## October 1 production-debt recheck
 
@@ -262,7 +263,7 @@ scanout and selects private, non-shareable trusted backing. Held keys and button
 must be released before Corvus can receive input, and the kernel refuses RESTORED
 while its own table shows a key down. Both read the device's reports, and a device
 with no room for a report drops it whole and tells nobody, so a release can go
-missing behind a serve loop stopped in a synchronous wait. The device cannot be asked
+missing behind an input thread that stopped draining. The device cannot be asked
 what is down. So the eventq is as deep as QEMU offers and one page holds (`eventq.rs`,
 64 against 16 before), and when a drain finds less than a report's worth free, every
 key this side holds is released through the normal path, to the kernel and the
@@ -275,7 +276,8 @@ have no rune, so nothing reaches Corvus from them. A release that
 never came would park the seat on every chord until that key was pressed again. This
 recovers the seat, not the keystrokes: a report the device dropped is gone
 (`ls-graphical-keys-overrun`, and `ls-graphical-keys-behind` for a real client's
-queue). Whatever is still in the rings as the seat returns was pressed at a trusted
+queue). The same release runs where an entry found the input queue full (see
+Concurrency). Whatever is still in the rings or the queue as the seat returns was pressed at a trusted
 screen: it reaches the kernel and `held`, not the compositor, and the seat says how
 much it kept back (`ls-graphical-sak-dead` leg H). A paint in phase 2 retries after a
 stall and fails the episode on an answer, and in neither case does VISIBLE go out for
@@ -424,6 +426,26 @@ and partial input/output buffers. Kernel seat state holds process incarnations,
 generation, phase, semantic frame/visibility sequence, held keys and secret FIFO.
 
 ## Concurrency
+
+Lictor runs two threads. The input thread (`backend/intake.rs`, operator vote 72,
+2026-11-05) owns the virtio-input devices from the end of probe. Every 4 ms it drains
+each eventq into one queue of 4096 entries behind a futex `Mutex`, so a serve loop held
+in a synchronous GPU wait (up to `SUBMIT_DEADLINE_MS` behind a stall) leaves no ring
+undrained. It never calls the seat endpoint and never prints: a console write parks in
+the exclusive phase, and the thread that drains the rings must not park there. The
+ring's own notes (the test-mode low-water line, a malformed used element) travel in the
+queue, and the serve thread prints them. The serve thread swaps the whole queue out
+each pass and keeps every seat decision: what a key means, the kernel INPUT call, the
+compositor batches, the held-key table. An eventq overrun travels as an entry at its
+place in the order. An entry that finds the queue full is dropped and marks its device;
+the mark is set only while the queue is full and is taken with the entries, so the loss
+follows everything taken with it, and the serve thread releases that device's held keys
+there (`lictor: input queue overran`). A lost diagnostic note marks nothing. InputInfo
+answers from values read at probe, since the device belongs to the input thread.
+Nothing joins the thread: `t_exit_group` ends it with the process, and no input DMA is
+released before then. Under the armed test latch, F8 stops the input thread at the pass
+that read it, before that batch is queued, and the serve loop resumes it after its own
+five-second stop, so `ls-graphical-keys-overrun` still overruns the ring.
 
 The event loop polls physical input independently of broker reply progress.
 Accepted endpoints are nonblocking, so a stalled normal reader cannot park the

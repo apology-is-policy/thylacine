@@ -1,10 +1,12 @@
 #!/usr/bin/expect -f
 # ls-graphical-keys-behind -- do keys typed behind a client's GPU queue arrive?
 #
-# Lictor's one thread drains the eventq and waits on the GPU, so a synchronous step behind
-# a client's queue leaves the ring undrained. An event the device cannot place never
-# arrives. Each round types a whole command line: its witness runs only if every key of it
-# arrived in order. Control: the same rounds with no client, one variable away.
+# Lictor's serve loop waits on the GPU, and a synchronous step behind a client's queue holds
+# it. Until vote 72 that loop also drained the eventq, so the ring filled behind it, and an
+# event the device cannot place never arrives. Now an input thread drains the ring into a
+# 4096-entry queue whatever the loop waits on. Each round types a whole command line: its
+# witness runs only if every key of it arrived in order. Control: the same rounds with no
+# client, one variable away.
 #
 # The eventq line is the ring's own low-water mark, test-mode only. Zero free means the
 # device had nowhere to put the next report.
