@@ -54,13 +54,17 @@ fail() { echo "$1"; echo fail > "$TMP/failed"; }
 
 # A temporal violation names its property under the documented TLC (SPEC-POLICY's
 # v1.8.0); 2.19 (Aug 2024) says only "Temporal properties were violated.", which
-# is accepted only from a cfg that checks that one property and no other, as
-# check-poll.sh does.
+# names the property only when the cfg checks that one and no other, so it is
+# accepted from such a cfg alone.
+cfg_properties() {  # $1 = cfg: each name after PROPERTY/PROPERTIES, same line or below
+    awk '/^\\\*/{next} /^[A-Z]/{p=0}
+         /^PROPERT(Y|IES)([ \t]|$)/{p=1; for (i = 2; i <= NF; i++) print $i; next}
+         p{for (i = 1; i <= NF; i++) print $i}' "$1.cfg"
+}
 temporal_as_claimed() {  # $1 = cfg, $2 = property
     grep -q "Temporal property $2 was violated" "$LOG" && return 0
     grep -q 'Temporal properties were violated' "$LOG" || return 1
-    props=$(awk '/^\\\*/{next} /^PROPERT(Y|IES)/{p=1;next} /^[A-Z]/{p=0} p && NF{print $1}' "$1.cfg")
-    [ "$props" = "$2" ]
+    [ "$(cfg_properties "$1")" = "$2" ]
 }
 
 echo "== clean (must run to completion) =="

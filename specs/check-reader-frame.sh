@@ -71,13 +71,28 @@ echo "$BUGGY" | while IFS=: read -r cfg want count; do
     fi
 done
 
+# A temporal violation names its property under the documented TLC (SPEC-POLICY's
+# v1.8.0); 2.19 (Aug 2024) says only "Temporal properties were violated.", which
+# names the property only when the cfg checks that one and no other, so it is
+# accepted from such a cfg alone.
+cfg_properties() {  # $1 = cfg: each name after PROPERTY/PROPERTIES, same line or below
+    awk '/^\\\*/{next} /^[A-Z]/{p=0}
+         /^PROPERT(Y|IES)([ \t]|$)/{p=1; for (i = 2; i <= NF; i++) print $i; next}
+         p{for (i = 1; i <= NF; i++) print $i}' "$1.cfg"
+}
+temporal_as_claimed() {  # $1 = cfg, $2 = property
+    grep -q "Temporal property $2 was violated" "$LOG" && return 0
+    grep -q 'Temporal properties were violated' "$LOG" || return 1
+    [ "$(cfg_properties "$1")" = "$2" ]
+}
+
 echo "== temporal (the liveness property must fail) =="
 echo "$TEMPORAL" | while IFS=: read -r cfg prop want; do
     run "$cfg"
     if grep -q "Invariant [A-Za-z]* is violated" "$LOG"; then
         fail "FAIL $cfg: a SAFETY invariant fired -- this cfg documents a hang, not an unsafe state"
-    elif ! grep -q "Temporal property $prop was violated" "$LOG"; then
-        fail "FAIL $cfg: rc=$RC, $prop not reported violated -- got: $(grep -o 'Temporal property [A-Za-z]* was violated' "$LOG" | head -1)"
+    elif ! temporal_as_claimed "$cfg" "$prop"; then
+        fail "FAIL $cfg: rc=$RC, $prop not reported violated -- got: $(grep -oE 'Temporal propert[a-z]* [A-Za-z ]*violated' "$LOG" | head -1)"
     elif [ "$want" != "-" ] && [ "$GOT" != "$want" ]; then
         fail "FAIL $cfg: $GOT distinct states, expected $want -- the model CHANGED"
     else

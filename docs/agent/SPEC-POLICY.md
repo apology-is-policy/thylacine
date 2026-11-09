@@ -91,8 +91,10 @@ property ("Temporal property X was violated."). TLC2 2.19 (Aug 2024) does not
 ("Temporal properties were violated."), and on it every temporal red cfg of
 check-cow, check-syscall-irqs and the older check-poll failed, so those gates
 could not pass (2026-09-28). A run's log prints the version near the top
-(`TLC2 Version ...`). `specs/check-caught-target.sh` works on both: it takes 2.19's
-generic line as a named red only when the cfg lists that one property and no other.
+(`TLC2 Version ...`). Every check script with a temporal leg works on both
+(since 2026-11-09; check-caught-target first): it takes 2.19's generic line as a
+named red only when the cfg lists that one property and no other, after PROPERTY
+or PROPERTIES, on the keyword's line or below.
 
 Run every spec in `specs/`:
 

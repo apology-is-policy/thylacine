@@ -80,6 +80,21 @@ for row in $CLEAN; do
     fi
 done
 
+# A temporal violation names its property under the documented TLC (SPEC-POLICY's
+# v1.8.0); 2.19 (Aug 2024) says only "Temporal properties were violated.", which
+# names the property only when the cfg checks that one and no other, so it is
+# accepted from such a cfg alone.
+cfg_properties() {  # $1 = cfg: each name after PROPERTY/PROPERTIES, same line or below
+    awk '/^\\\*/{next} /^[A-Z]/{p=0}
+         /^PROPERT(Y|IES)([ \t]|$)/{p=1; for (i = 2; i <= NF; i++) print $i; next}
+         p{for (i = 1; i <= NF; i++) print $i}' "$1.cfg"
+}
+temporal_as_claimed() {  # $1 = cfg, $2 = property
+    grep -q "Temporal property $2 was violated" "$LOG" && return 0
+    grep -q 'Temporal properties were violated' "$LOG" || return 1
+    [ "$(cfg_properties "$1")" = "$2" ]
+}
+
 echo "== must fail, each on its OWN named property =="
 for row in $MUSTFAIL; do
     cfg=${row%%:*}; want=${row##*:}
@@ -90,6 +105,7 @@ for row in $MUSTFAIL; do
     fi
     got=$(grep -oE "(Invariant|Temporal property) [A-Za-z]+ (is|was) violated" "$LOG" \
           | head -1 | awk '{print $(NF-2)}')
+    if [ -z "$got" ] && temporal_as_claimed "$cfg" "$want"; then got=$want; fi
     if [ "$got" != "$want" ]; then
         echo "FAIL $cfg: reported '$got', must report '$want'"; FAILED=1
     else

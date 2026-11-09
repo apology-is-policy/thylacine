@@ -106,7 +106,9 @@ run() {  # $1 = cfg basename -> sets RC and LOG
 violated_as_claimed() {
     grep -qE "Invariant $2 is violated|Temporal property $2 was violated" "$LOG" && return 0
     grep -q 'Temporal properties were violated' "$LOG" || return 1
-    props=$(awk '/^\\\*/{next} /^PROPERT(Y|IES)/{p=1;next} /^[A-Z]/{p=0} p && NF{print $1}' "$1.cfg")
+    props=$(awk '/^\\\*/{next} /^[A-Z]/{p=0}
+                 /^PROPERT(Y|IES)([ \t]|$)/{p=1; for (i = 2; i <= NF; i++) print $i; next}
+                 p{for (i = 1; i <= NF; i++) print $i}' "$1.cfg")
     [ "$props" = "$2" ]
 }
 

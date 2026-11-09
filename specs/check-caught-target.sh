@@ -66,7 +66,9 @@ fail() { echo "$1"; echo fail > "$TMP/failed"; }
 # 2.19 prints only "Temporal properties were violated.", and that identifies it
 # only when the cfg lists this property and no other (docs/agent/SPEC-POLICY.md).
 listed_properties() {
-    awk '/^PROPERT/ { f = 1; next } /^[A-Z]+/ { f = 0 } f && NF { print $1 }' "$1.cfg"
+    awk '/^\\\*/{next} /^[A-Z]/{p=0}
+         /^PROPERT(Y|IES)([ \t]|$)/{p=1; for (i = 2; i <= NF; i++) print $i; next}
+         p{for (i = 1; i <= NF; i++) print $i}' "$1.cfg"
 }
 temporal_fired() {
     grep -q "Temporal property $2 was violated" "$LOG" && return 0
