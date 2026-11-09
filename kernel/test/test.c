@@ -1499,6 +1499,8 @@ struct test_case g_tests[] = {
     { "notes.tail_death_commits_its_note", test_notes_tail_death_commits_its_note, false, NULL },
     { "notes.committed_death_refuses", test_notes_committed_death_refuses, false, NULL },
     { "notes.stop_park_meets_a_commit", test_notes_stop_park_meets_a_commit, false, NULL },
+    { "notes.fault_arm_meets_a_commit", test_notes_fault_arm_meets_a_commit, false, NULL },
+    { "notes.tail_dies_of_the_committed_note", test_notes_tail_dies_of_the_committed_note, false, NULL },
     { "notes.die_pending_predicate",           test_notes_die_pending_predicate,           false, NULL },
     { "notes.death_reaches_predicate",         test_notes_death_reaches_predicate,         false, NULL },
     { "notes.forced_close_lifts_the_hold",     test_notes_forced_close_lifts_the_hold,     false, NULL },

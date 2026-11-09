@@ -64,5 +64,6 @@ false for a latch; this model is why it now holds.
 | `RNotes` / `PNotes`, no handler | the native uncaught arm and the phenotype's SIG_DFL terminate arm -> `notes_commit_note_locked` -> `exits_note`; the fault arm `notes_fault_dying_latch` does the same. `BUGGY_UNCAUGHT_NO_COMMIT` = no commit |
 
 Kernel witnesses: `notes.poll_zero_is_a_death`, `notes.tail_hands_no_committed_note`,
-`notes.tail_death_commits_its_note`, `notes.latch_read_commits_the_death` and its
+`notes.tail_death_commits_its_note`, `notes.tail_dies_of_the_committed_note`,
+`notes.fault_arm_meets_a_commit`, `notes.latch_read_commits_the_death` and its
 control `notes.latch_clear_first_lets_it_live`.

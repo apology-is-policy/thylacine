@@ -874,6 +874,8 @@ void test_notes_tail_hands_no_committed_note(void);
 void test_notes_tail_death_commits_its_note(void);
 void test_notes_committed_death_refuses(void);
 void test_notes_stop_park_meets_a_commit(void);
+void test_notes_fault_arm_meets_a_commit(void);
+void test_notes_tail_dies_of_the_committed_note(void);
 void test_notes_die_pending_predicate(void);
 void test_notes_death_reaches_predicate(void);
 void test_notes_forced_close_lifts_the_hold(void);

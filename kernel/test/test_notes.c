@@ -4468,6 +4468,84 @@ void test_notes_committed_death_refuses(void) {
     TEST_EXPECT_EQ(fork, -1, "committed: and it spawns no child");
 }
 
+// A fault taken under a committed death ends the Proc by its note even once a
+// handler for that note is installed: the arm's pick finds the note caught, and
+// the faulting instruction would re-execute into the same fault. The control,
+// one variable away, commits nothing: the handler's re-read clears the latch, and
+// the arm returns.
+static volatile int g_fc_returned;
+
+static void fc_entry(void *arg) {
+    struct Thread *t = current_thread();
+    struct Proc *p = t->proc;
+    (void)notes_post(p, NOTE_NAME_INTERRUPT, 0u, NULL, true);
+    if (arg) (void)thread_die_pending(t);
+    notes_set_handler(p, 0x1000ull);
+    notes_fault_dying_latch(t);
+    g_fc_returned = 1;
+    exits_code(7, "returned");
+}
+
+static int fc_run(bool commit, int *returned) {
+    g_fc_returned = 0;
+    int pid = rfork(RFPROC, fc_entry, commit ? (void *)1 : NULL);
+    int st  = -1;
+    int got = pid > 0 ? wait_pid_for(pid, WAIT_PACKED, &st) : -1;
+    *returned = g_fc_returned;
+    return (pid > 0 && got == pid) ? st : -1;
+}
+
+void test_notes_fault_arm_meets_a_commit(void) {
+    int returned = 0, creturned = 0;
+    int st  = fc_run(true, &returned);
+    int cst = fc_run(false, &creturned);
+    TEST_EXPECT_EQ(returned, 0, "committed: the fault arm did not return");
+    TEST_EXPECT_EQ(st, (int)WAIT_STATUS_SIGNALED(NOTE_SIG_INT), "it ended the Proc by the interrupt");
+    TEST_EXPECT_EQ(creturned, 1, "control: nothing committed, the arm returned");
+    TEST_EXPECT_EQ(cst, (int)WAIT_STATUS_EXITED(7), "control: and the thread left by its own exit");
+}
+
+// A tail dying of one note's default under a death committed by another dies of
+// the committed one, the note every other thread's die check reads. Interrupt is
+// queued ahead of term and the death committed by term's latch (a read with
+// interrupt masked), so the uncaught arm's pick, interrupt, is not the committed
+// note. The control, one variable away, commits nothing: the tail dies of
+// interrupt, the first queued.
+static void td_entry(void *arg) {
+    struct Thread *t = current_thread();
+    struct Proc *p = t->proc;
+    (void)notes_post(p, NOTE_NAME_INTERRUPT, 0u, NULL, true);
+    (void)notes_post(p, NOTE_NAME_TERM, 0u, NULL, false);
+    if (arg) {
+        t->note_mask |= 1ull << NOTE_BIT_INTERRUPT;
+        (void)thread_die_pending(t);
+        t->note_mask &= ~(1ull << NOTE_BIT_INTERRUPT);
+    }
+    struct exception_context ctx;
+    for (size_t k = 0; k < sizeof(ctx); k++) ((u8 *)&ctx)[k] = 0;
+    ctx.sp = NOTE_NAME_MAX;
+    irq_state_t s = spin_lock_irqsave(NULL);   // the tail runs masked (#713)
+    notes_deliver_at_el0_return(&ctx);
+    spin_unlock_irqrestore(NULL, s);
+    exits_code(7, "lived");
+}
+
+static int td_run(bool commit) {
+    int pid = rfork(RFPROC, td_entry, commit ? (void *)1 : NULL);
+    int st  = -1;
+    int got = pid > 0 ? wait_pid_for(pid, WAIT_PACKED, &st) : -1;
+    return (pid > 0 && got == pid) ? st : -1;
+}
+
+void test_notes_tail_dies_of_the_committed_note(void) {
+    int st  = td_run(true);
+    int cst = td_run(false);
+    TEST_EXPECT_EQ(st, (int)WAIT_STATUS_SIGNALED(NOTE_SIG_TERM),
+                   "committed by term: the tail picking interrupt died of term");
+    TEST_EXPECT_EQ(cst, (int)WAIT_STATUS_SIGNALED(NOTE_SIG_INT),
+                   "control: nothing committed, it died of interrupt, the first queued");
+}
+
 // gcpark-b: the signal each death by note records, row by row (the same reason
 // the default-action test names every row: a lookup that returned one signal for
 // everything would pass a spot-check). Then the two pins: a known note kills iff

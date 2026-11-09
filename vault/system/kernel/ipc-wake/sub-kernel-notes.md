@@ -801,7 +801,8 @@ A masked read commits nothing. The tail's own deaths commit too: the native unca
 arm, the phenotype's SIG_DFL terminate arm and the fault arm each commit the note they
 die of under `q->lock` before releasing it (`notes_commit_note_locked`), because the
 note stays queued while the Proc dies, and a peer's tail that met it after a handler
-arrived would otherwise hand it on. `kill` has no latch and is never caught, so it
+arrived would otherwise hand it on. If a peer committed another note's death first, the
+tail dies of that one, the note every die check reads. `kill` has no latch and is never caught, so it
 needs none. The commit wakes nobody: the thread that made it is
 unwinding to its tail and dies there, and the group termination wakes the rest. Kernel
 threads charged to a user Proc run in kproc and never reach the latch leg. Nothing
@@ -811,6 +812,8 @@ clears the bit. Witnesses: `notes.latch_read_commits_the_death` and its control
 (the class's own case, with a handler-first control that answers EINTR and lives),
 `notes.tail_hands_no_committed_note`, `notes.tail_death_commits_its_note` and
 `notes.fault_dying_latch_live_note_exits` (each reads the commit off the ZOMBIE),
+`notes.tail_dies_of_the_committed_note`, `notes.fault_arm_meets_a_commit` (a handler
+installed since the commit leaves the arm's pick empty; it dies anyway),
 `notes.committed_death_refuses` and
 `demand_page.file_read_revoked_latch_is_dying`. Decision:
 [[dec-2026-11-05-commit-the-death]].
