@@ -915,8 +915,6 @@ struct Controlq {
     /// live, so a synchronous command waits out FENCE_ABANDON_MS instead of
     /// stalling at SUBMIT_DEADLINE_MS.
     serving: bool,
-    /// A trusted episode is open: no wait takes the abandonment bound.
-    seat_bound: bool,
     /// The latch lever (`Device::test_latch_consider`): the next
     /// synchronous wait reports its deadline passed, and with
     /// `test_stall_hold` the stalled chain's retirement is withheld.
@@ -1095,18 +1093,6 @@ impl Controlq {
         (0..COMP_FSLOT).all(|i| self.fslot_poisoned[i] && self.fslots[i].is_none())
     }
 
-    /// Any in-flight fenced chain that is a READBACK (a client's
-    /// `transfer_3d(to_host = false)` or the compositor's own): the device
-    /// executes it synchronously at processing time and every sync step
-    /// queued behind it inherits that wait (C-6, consequence 2).
-    fn readback_in_flight(&self) -> bool {
-        #[cfg(feature = "test-mode")]
-        if self.test_behind_readback() {
-            return true;
-        }
-        self.fslots.iter().flatten().any(|t| t.readback)
-    }
-
     /// Reclaim slots whose chains never retired (audit F6). Bounds the
     /// spin + the slot pool WITHOUT latching `dead` (a slow device is not
     /// a dead one -- the #31 rule) and WITHOUT freeing anything the device
@@ -1233,10 +1219,9 @@ impl Controlq {
             // harness hold. The lever matches on the tag's ctx, and our
             // readback's tag carries the CLIENT's ctx (AS-BUILT 1) -- so a
             // client holding its OWN ctx used to pin `COMP_FSLOT` too, which
-            // freezes readback composition for EVERY client, pins
-            // `readback_in_flight()` (disabling the 500 ms sync deadline
-            // process-wide) and pins `warp_fences_pending()` (a ~1 kHz spin in
-            // the console). #178's bound -- "the worst a client can do is wedge
+            // freezes readback composition for EVERY client, stalls every
+            // synchronous command behind that readback and pins
+            // `warp_fences_pending()` (a ~1 kHz spin in the console). #178's bound -- "the worst a client can do is wedge
             // its own ctx" -- was written when "your ctx's fences" meant only
             // your own; C-6b made that false one resource over.
             #[cfg(feature = "test-mode")]
@@ -1517,19 +1502,16 @@ impl Controlq {
     /// such chains retired 241 to 311 ms after it). That is a stall, not a death.
     ///
     /// A pending fenced READBACK goes further (Warp-C C-6, GPU-DESIGN 4.5.13;
-    /// F2b): QEMU processes the
-    /// controlq inline on its main loop and virglrenderer executes a
-    /// TRANSFER_FROM_HOST_3D synchronously at decode (`glMapBufferRange` /
-    /// `glReadPixels` on the resource's context -- a GL wait for every job
-    /// that writes the resource), so a sync step queued behind a readback of
-    /// a BUSY resource inherits that wait, for as long as the resource's
-    /// owner has queued ahead of it. That device is busy, not dead. So while ANY
-    /// readback is in flight -- a client's `transfer_3d(to_host = false)` or the
-    /// compositor's own -- the deadline is FENCE_ABANDON_MS, the bound every fenced
-    /// chain already carries. This predates the recoverable stall (vote 29), which
-    /// already keeps a missed deadline from latching `dead`, and it has a cost: one
-    /// transfer from any client stops the serve loop for as long as that client
-    /// queued, so chords go unseen (TRUSTED-PATH).
+    /// F2b): QEMU processes the controlq inline on its main loop and
+    /// virglrenderer executes a TRANSFER_FROM_HOST_3D synchronously at decode
+    /// (`glMapBufferRange` / `glReadPixels` on the resource's context -- a GL
+    /// wait for every job that writes the resource), so a sync step queued
+    /// behind a readback of a BUSY resource inherits that wait, for as long as
+    /// the resource's owner has queued ahead of it. That device is busy, not
+    /// dead, and the wait still ends at SUBMIT_DEADLINE_MS: the stall is
+    /// recoverable (vote 29), and a longer wait would stop the serve loop for
+    /// as long as any client chose to queue, with chords unseen and keys lost
+    /// (vote 72). A command refused meanwhile answers its client an error.
     /// STICKY for this wait once observed: the readback that caused a stall
     /// retires in the drain that finally moves used.idx, and this chain's own
     /// entry follows it in the same drain or the next -- re-narrowing the
@@ -1550,23 +1532,12 @@ impl Controlq {
         self.test_behind_since.is_some_and(|t| t.elapsed().as_millis() < TEST_BEHIND_MS)
     }
 
-    /// Whether this wait takes the abandonment bound behind a readback. Never in
-    /// a trusted episode: the wait would stop the serve loop under the seat, with
-    /// the kernel's deadline running, for as long as a client chose.
-    fn wait_widens(&self) -> bool {
-        !self.seat_bound && self.readback_in_flight()
-    }
-
     /// The synchronous wait, extracted so the batched pair (W-4 C) shares
     /// it verbatim: IRQ-wait + drain + bounded spin until the pending sync
     /// chain(s) retire. The caller has already written descriptors, set the
     /// pending flag(s), and published.
     fn wait_sync_done(&mut self, both: bool) -> Result<(), ()> {
-        let mut deadline_ms = if self.wait_widens() || !self.serving {
-            FENCE_ABANDON_MS
-        } else {
-            SUBMIT_DEADLINE_MS
-        };
+        let deadline_ms = if self.serving { SUBMIT_DEADLINE_MS } else { FENCE_ABANDON_MS };
         let used_va = self.ring_va + CTRL_USED_OFF;
         let mut wakes = 0u32;
         let mut stale_since: Option<Instant> = None;
@@ -1611,9 +1582,6 @@ impl Controlq {
                 spins += 1;
             }
             wakes += 1;
-            if self.wait_widens() {
-                deadline_ms = FENCE_ABANDON_MS;
-            }
             let t0 = *stale_since.get_or_insert_with(Instant::now);
             if t0.elapsed().as_millis() as u64 >= deadline_ms {
                 // A deadline already at the abandonment bound has spent the
@@ -2232,7 +2200,6 @@ impl Gpu {
                 stalled: None,
                 stalls: 0,
                 serving: false,
-                seat_bound: false,
                 #[cfg(feature = "test-mode")]
                 test_latch_next: false,
                 #[cfg(feature = "test-mode")]
@@ -4517,11 +4484,6 @@ impl Gpu {
     /// engine instead of waiting out FENCE_ABANDON_MS (GPU-DESIGN 4.5.15).
     pub fn begin_serving(&mut self) {
         self.ctrl.serving = true;
-    }
-
-    /// Whether a trusted episode is open (`Controlq::wait_widens`).
-    pub fn seat_bound(&mut self, open: bool) {
-        self.ctrl.seat_bound = open;
     }
 
     /// A stall stands on a lane. It ends in a retirement, or for the engine at the

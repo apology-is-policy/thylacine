@@ -2495,6 +2495,11 @@ and require the gate to go RED; (c) state here what raises the stale wakes
 during the stall — and if nothing does on this host, say that the widening is
 INERT here and name the lane where it is not.
 
+Superseded on 2026-11-09 by operator vote 72: the widening is gone, so a
+synchronous command behind a readback stalls at `SUBMIT_DEADLINE_MS` on every
+lane, and the DEADLINE arm asks that the engine revive after the readback rather
+than that every present behind it succeed.
+
 ### 4.5.14 The owed round on C-6b (2026-08-18, OPUS fallback): 1 P0 / 3 P1 / 3 P2 / 3 P3
 
 The C-0d Fable close was dirty, so a follow-up was owed on its fixes plus C-6b.
@@ -2532,8 +2537,9 @@ a general floor would reject legitimate compressed textures).
 #### 4.5.15 The synchronous deadline is a two-stage latch: STALLED, then DEAD (decided 2026-10-29, operator vote 29)
 
 **What it replaces.** A synchronous chain that saw `SUBMIT_DEADLINE_MS`
-(500 ms) of stale wakes latched `Controlq.dead`, permanently (§4.5.13 widens
-the deadline to `FENCE_ABANDON_MS` while a readback is in flight). The latch
+(500 ms) of stale wakes latched `Controlq.dead`, permanently (§4.5.13 widened
+the deadline to `FENCE_ABANDON_MS` while a readback was in flight, until vote
+72 removed the widening). The latch
 answers the #31 cascade: a late completion writing a response buffer that the
 next command has already reused. Because it was permanent, any host stall past
 500 ms cost the display for the boot. It was measured on thyla-pi on
@@ -2613,16 +2619,16 @@ block the serve loop, and seat input with it. Neither was taken.
   retires behind what the host has queued, since a synchronous chain is fenced, so a
   client's backlog delays a takeover: on V3D, behind the C-6 gate's queue, synchronous
   commands retired 241 to 311 ms after their 500 ms deadline.
-- **No wait in a trusted episode takes the abandonment bound.** `Gpu::seat_bound` is
-  set while the kernel's seat is not normal, and `wait_widens` then keeps a synchronous
-  command at `SUBMIT_DEADLINE_MS` behind a readback. Waiting 30 s there would stop the
-  serve loop under the seat with the kernel's deadline running.
-- **Outside an episode an ordinary synchronous command still widens behind a readback**
-  (`Controlq::wait_widens`). One transfer from any client stops the serve loop for as
-  long as that client queued, so a chord goes unseen and keys can be lost, and at 30 s
-  the engine dies. The rule predates the recoverable stall (vote 29), and the C-6 gate's
-  DEADLINE arm relies on it. Whether to narrow it is an open operator vote, with what a
-  backlog past the seat's deadline should do (TRUSTED-PATH).
+- **No serving synchronous command waits past `SUBMIT_DEADLINE_MS`, readback or
+  not** (operator vote 72, 2026-11-05). The wait used to widen to `FENCE_ABANDON_MS`
+  while any readback was in flight, outside a trusted episode; one transfer from any
+  client then stopped the serve loop for as long as that client queued, so a chord went
+  unseen and keys were lost. The widening predated the recoverable stall (vote 29),
+  which already keeps a busy device from latching `dead`. A command behind a readback
+  now stalls the engine at 500 ms; submissions are refused until the chain retires, so a
+  bystander's present answers an error for that long instead of blocking, and the C-6
+  gate's DEADLINE arm counts a recovered stall as survival. Only bring-up, before the
+  serve loop, still waits the abandonment bound.
 - **The cursor lane stalls and comes back.** A serving `cursor_command` never widens:
   it stalls at `SUBMIT_DEADLINE_MS`, so a client's readback cannot hold the serve loop
   through a pointer motion. A chain that outlives `FENCE_ABANDON_MS` is abandoned, not

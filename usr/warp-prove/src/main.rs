@@ -3466,10 +3466,11 @@ fn prove_corpse_reclaim(root: i64) {
 //             its busy BO in flight, the console's next sync steps inherit
 //             the device stall (QEMU processes the controlq inline; the
 //             readback is a synchronous GL wait) -- and that stall must be
-//             read as BUSY, never as dead: every present of the bystander
-//             surface B queued behind it SUCCEEDS, and the engine is alive
-//             after. Under the 500 ms deadline a stall past it latched
-//             `dead` and lost the console's GPU.
+//             read as BUSY, never as dead. A present of the bystander
+//             surface B behind it may be refused while the engine is
+//             stalled (the wait no longer widens behind a readback, vote
+//             72), and the engine must be alive after the readback retires:
+//             a present succeeds and nothing is poisoned.
 //   F2B       REPORTED, not judged: B's present latency behind that stall
 //             (max / mean over the presents), the number that Venus / v3d
 //             will remove and that no guest-side change can (4.5.13).
@@ -4479,14 +4480,15 @@ fn observe_readback() {
     record(live_ok, "live");
 
     // ---- DEADLINE + F2B: the CLIENT's own fenced readback of its busy BO,
-    // then B's presents behind it. Every present must succeed (busy is not
-    // dead); their latency is REPORTED.
+    // then B's presents behind it. A present refused during the stall is
+    // counted, not failed; the engine must revive (busy is not dead). Their
+    // latency is REPORTED.
     let (dl_before, dl_t0) = rb_queue_heavy(warp, ctx, RB_DEADLINE_SUBMITS, "deadline");
     let xfer = format!("transfer_from 0 0 0 0 {} {} 1 0 0 0", RB_W, RB_H);
     if !write_ctl(warp, &format!("ctx/{}/bo/{}/ctl", ctx, bo), &xfer) {
         rb_incomplete("instrument:f2b-transfer-refused");
     }
-    let mut b_ok = true;
+    let mut b_refused = 0u64;
     let mut b_max_ms = 0u64;
     let mut b_sum_ms = 0u64;
     let b_n = 10u64;
@@ -4502,9 +4504,8 @@ fn observe_readback() {
             b_max_ms = ms;
         }
         if r.is_err() {
-            b_ok = false;
-            t_putstr(&format!("warp-prove: C6-RB DEADLINE -- B present {} FAILED after {} ms\n", i, ms));
-            break;
+            b_refused += 1;
+            t_putstr(&format!("warp-prove: C6-RB DEADLINE -- B present {} refused after {} ms\n", i, ms));
         }
     }
     // The client's readback + the 7 submits retire; the engine must be alive.
@@ -4512,13 +4513,22 @@ fn observe_readback() {
         rb_wait_signaled(warp, ctx, dl_before, RB_DEADLINE_SUBMITS as u64 + 1, dl_t0, "deadline");
     let landed_px = unsafe { core::ptr::read_volatile(va as *const u32) };
     let landed_idx = rb_index_of(landed_px, RB_DEADLINE_SUBMITS * RB_DRAWS_PER_SUBMIT);
-    let alive = b.present(None).is_ok();
+    // The revival is the serve loop's next pump after the retirement, so the
+    // first present may still meet the stall; a second of retries bounds it.
+    let mut alive = false;
+    for _ in 0..20 {
+        if b.present(None).is_ok() {
+            alive = true;
+            break;
+        }
+        let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(50));
+    }
     let poisoned_after = parse_field(&open_read_string(warp, "ctl"), "poisoned").unwrap_or(99);
-    let deadline_ok = b_ok && alive && poisoned_after == 0;
+    let deadline_ok = alive && poisoned_after == 0;
     t_putstr(&format!(
-        "warp-prove: C6-RB DEADLINE {} -- {} B presents behind the client's own busy readback all succeeded: {}; engine alive after: {}; poisoned {}\n",
+        "warp-prove: C6-RB DEADLINE {} -- {} B presents behind the client's own busy readback, {} refused while the engine stalled; engine alive after: {}; poisoned {}\n",
         if deadline_ok { "PASS" } else { "FAIL" },
-        b_n, b_ok as u32, alive as u32, poisoned_after
+        b_n, b_refused, alive as u32, poisoned_after
     ));
     t_putstr(&format!(
         "warp-prove: C6-RB F2B REPORT -- bystander present latency behind a client readback of a busy BO: max {} ms mean {} ms over {} presents; the {} heavy submits + the readback retired in {} ms (the client's readback observed draw index {} of {}, pixel {:#010x})\n",

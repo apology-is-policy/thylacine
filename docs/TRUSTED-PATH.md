@@ -190,13 +190,20 @@ revives, under the kernel's deadline. A backlog delays the SAK. One longer than 
 deadline, or a host loop held that long, fails the episode with no trusted screen shown:
 the outputs stay as they were, or dark if the hold came after exclusion. That is not the
 stalled-participant case `HALCYON-INTERACTION-SEAT-REVIEW.md` approved, since an
-unprivileged client causes it, and what it should do is an open operator vote.
+unprivileged client causes it. Operator vote 71 (2026-11-05) decided what it should do:
+while the engine is alive and draining, Lictor renews the kernel's deadline, up to a
+bound, with input withheld, so a chord ends in the trusted screen or a dead engine, and
+the screen looks hung for as long as the client queued. Measured before it on the Pi's
+V3D: behind a client's deep queue, six chords of six failed at the five-second deadline
+with the session's screen still up. Not yet built.
 
-Before a chord is seen there is a wider gap, in the same vote. With the seat normal, a
-synchronous command behind a client's readback waits up to `FENCE_ABANDON_MS`
-(`Controlq::wait_widens`) and Lictor's serve loop stops for it, so a chord goes unseen
-for as long as that client queued, and keys typed in that time can be lost. At 30 s the
-engine dies for the boot.
+Before a chord is seen the gap is the serve loop's. A synchronous command waits at most
+`SUBMIT_DEADLINE_MS`, a client's readback ahead of it or not (operator vote 72), so a
+command behind a stall holds the loop about 600 ms. Keys typed meanwhile wait in the
+input device's 64-event ring, which fills in about that time at 30 ms a character, the
+pace of a paste or a password manager's auto-type; keys were measured lost that way behind
+a deep client queue, and none at 100 ms a character. Vote 72's second half, a Lictor
+thread moving raw input into a 4096-event queue, closes that. Not yet built.
 
 **As built:** the serial episode gates UART output to the attached trusted
 process. The QEMU graphical backend uses Lictor as the boot-trusted physical

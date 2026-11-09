@@ -200,7 +200,6 @@ impl Seat {
             }
         }
         self.quiescence.observe(self.generation, self.phase);
-        device.gpu.seat_bound(self.phase != 0);
         let released = inputs.iter().all(|i| i.held.iter().all(|held| !held));
         match self.phase {
             0 => {},

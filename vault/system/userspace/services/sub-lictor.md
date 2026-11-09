@@ -336,11 +336,11 @@ does not deny the SAK. Its backlog can: the paint is fenced, so it retires behin
 what the host has queued. A takeover that meets a stall starts over when the engine
 revives (`Gpu::stall_pending`), under the kernel's five-second deadline, and says so; a
 device's answer fails it at once. A frame paint that meets a stall stays owed and the
-next pass paints it again. While the seat is not normal no wait takes the abandonment
-bound (`Gpu::seat_bound`). With the seat normal, a command behind a client's readback
-still does, so one transfer can stop this loop for as long as that client queued; that
-is an open operator vote (`docs/TRUSTED-PATH.md`). A serving
-`cursor_command` stalls at `SUBMIT_DEADLINE_MS` and never widens. A chain past
+next pass paints it again. Once serving, no synchronous command waits past
+`SUBMIT_DEADLINE_MS`, a client's readback ahead of it or not (operator vote 72): one
+transfer cannot stop this loop for as long as its client queued; the command stalls
+the engine, which revives when the chain retires, and what a client sent meanwhile is
+refused. A serving `cursor_command` stalls the same way. A chain past
 `FENCE_ABANDON_MS` is abandoned rather than poisoned: a well-formed late retirement
 frees the lane (`cursor_queue::Queue::abandon`). A restore refused by a stalled engine
 is retried every pass until the engine revives or dies. Restoration stays owed until the
