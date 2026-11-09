@@ -412,7 +412,7 @@ static int notes_find_locked(struct NoteQueue *q, const char *name,
 // action -- the child_exit shape; #237 moved pipe OUT of this shape into
 // TERMINATE). Returns the class's LATCH flag
 // (PROC_FLAG_INTR_TERMINATE_PENDING for interrupt,
-// PROC_FLAG_TTY_TERMINATE_PENDING for the tty pair, and #237's
+// PROC_FLAG_QUIT_ / PROC_FLAG_HUP_TERMINATE_PENDING for tty:quit and tty:hup, and #237's
 // PROC_FLAG_PIPE_TERMINATE_PENDING for pipe -- each latch pairs
 // with ITS OWN family mask bit in the lock-free die predicate), or 0 for a
 // non-terminate name.
@@ -423,9 +423,11 @@ static int notes_find_locked(struct NoteQueue *q, const char *name,
 // row did -- TERMINATE in the table catches its class for free, but NOTE_BIT_-
 // PIPE had no prior latch, so its bit->flag line was added).
 //
-// The family split stays: a latch is per-FAMILY (one flag for interrupt, one
-// for the tty family), not per-note, because notes_drain_intr_locked clears a
-// latch when the last note sharing it is consumed.
+// A latch is per family (one flag for interrupt, one for term, ...), except the
+// tty family, which latches per note (tty:quit, tty:hup): the latch a committed
+// death leaves armed names the note it dies of (ARCH 8.8.2), and those two die
+// with different signals. notes_drain_intr_locked clears a latch when the last
+// note sharing it is consumed.
 //
 // ONE terminate-class note deliberately yields NO latch, a load-bearing
 // omission rather than an oversight:
@@ -447,8 +449,11 @@ static u32 notes_name_terminate_latch(const char *name) {
     int bit = notes_name_to_bit(name);
     if (bit == (int)NOTE_BIT_INTERRUPT)
         return PROC_FLAG_INTR_TERMINATE_PENDING;
-    if (bit == (int)NOTE_BIT_TTY)
-        return PROC_FLAG_TTY_TERMINATE_PENDING;
+    if (bit == (int)NOTE_BIT_TTY) {
+        if (notes_name_eq(name, NOTE_NAME_TTY_QUIT)) return PROC_FLAG_QUIT_TERMINATE_PENDING;
+        if (notes_name_eq(name, NOTE_NAME_TTY_HUP))  return PROC_FLAG_HUP_TERMINATE_PENDING;
+        return 0;
+    }
     if (bit == (int)NOTE_BIT_PIPE)
         return PROC_FLAG_PIPE_TERMINATE_PENDING;
     if (bit == (int)NOTE_BIT_TERM)
@@ -1608,7 +1613,8 @@ bool thread_die_pending(struct Thread *t) {
         if ((flags & PROC_FLAG_INTR_TERMINATE_PENDING) != 0 &&
             (t->note_mask & (1u << NOTE_BIT_INTERRUPT)) == 0)
             return true;
-        if ((flags & PROC_FLAG_TTY_TERMINATE_PENDING) != 0 &&
+        if ((flags & (PROC_FLAG_QUIT_TERMINATE_PENDING |
+                      PROC_FLAG_HUP_TERMINATE_PENDING)) != 0 &&
             (t->note_mask & (1u << NOTE_BIT_TTY)) == 0)
             return true;
         // #237: the pipe terminate latch, PER-FAMILY like the two above -- a

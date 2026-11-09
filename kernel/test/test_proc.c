@@ -2384,7 +2384,7 @@ void test_proc_job_stop_orphan_rule(void) {
         c_hup     = js_note_count(c, NOTE_NAME_TTY_HUP);
         c_cont    = js_note_count(c, NOTE_NAME_TTY_CONT);
         c_latched = (__atomic_load_n(&c->proc_flags, __ATOMIC_ACQUIRE) &
-                     PROC_FLAG_TTY_TERMINATE_PENDING) != 0;
+                     PROC_FLAG_HUP_TERMINATE_PENDING) != 0;
         c2_req    = (int)c2->job_stop_req;
         c2_hup    = js_note_count(c2, NOTE_NAME_TTY_HUP);
         c_run_hup = js_note_count(c_run, NOTE_NAME_TTY_HUP);

@@ -1630,22 +1630,24 @@ void test_notes_discard_name_purges_pending(void) {
     TEST_ASSERT(rk == 1 && notes_name_is_kill(got.name), "the kill survived the purge");
     TEST_EXPECT_EQ(p->notes->count, 0u, "queue empty");
 
-    // Per-CLASS drain: tty:hup and tty:quit share the TTY terminate latch.
-    // Discarding one name leaves the latch armed for the other; discarding
-    // the other clears it.
+    // Per-NOTE drain: tty:hup and tty:quit each arm their own latch, so the
+    // latch a committed death leaves names its note. Discarding one clears its
+    // own latch and leaves the other's.
     TEST_EXPECT_EQ(notes_post(p, NOTE_NAME_TTY_HUP, 0u, NULL, true), 0, "post tty:hup");
     TEST_EXPECT_EQ(notes_post(p, NOTE_NAME_TTY_QUIT, 0u, NULL, true), 0, "post tty:quit");
     TEST_ASSERT((__atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE)
-                 & PROC_FLAG_TTY_TERMINATE_PENDING) != 0u,
-                "the tty pair armed the TTY latch");
+                 & (PROC_FLAG_QUIT_TERMINATE_PENDING | PROC_FLAG_HUP_TERMINATE_PENDING)) ==
+                (PROC_FLAG_QUIT_TERMINATE_PENDING | PROC_FLAG_HUP_TERMINATE_PENDING),
+                "the tty pair armed both latches");
     TEST_EXPECT_EQ(notes_discard_name(p, NOTE_NAME_TTY_HUP), 1u, "tty:hup removed");
     TEST_ASSERT((__atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE)
-                 & PROC_FLAG_TTY_TERMINATE_PENDING) != 0u,
-                "TTY latch stays while tty:quit remains (per-class drain)");
+                 & (PROC_FLAG_QUIT_TERMINATE_PENDING | PROC_FLAG_HUP_TERMINATE_PENDING)) ==
+                PROC_FLAG_QUIT_TERMINATE_PENDING,
+                "tty:hup's latch drained, tty:quit's stays");
     TEST_EXPECT_EQ(notes_discard_name(p, NOTE_NAME_TTY_QUIT), 1u, "tty:quit removed");
     TEST_ASSERT((__atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE)
-                 & PROC_FLAG_TTY_TERMINATE_PENDING) == 0u,
-                "removing the last of the class drained the TTY latch");
+                 & PROC_FLAG_QUIT_TERMINATE_PENDING) == 0u,
+                "removing tty:quit drained its latch");
     TEST_EXPECT_EQ(p->notes->count, 0u, "queue empty again");
 
     // Every removal is a real dequeue: a full ring purged of one name has room
@@ -1728,9 +1730,9 @@ void test_notes_default_action_table(void) {
     TEST_EXPECT_EQ((int)notes_name_terminate_latch_for_test(NOTE_NAME_INTERRUPT),
                    (int)PROC_FLAG_INTR_TERMINATE_PENDING, "interrupt -> INTR latch");
     TEST_EXPECT_EQ((int)notes_name_terminate_latch_for_test(NOTE_NAME_TTY_QUIT),
-                   (int)PROC_FLAG_TTY_TERMINATE_PENDING, "tty:quit -> TTY latch");
+                   (int)PROC_FLAG_QUIT_TERMINATE_PENDING, "tty:quit -> QUIT latch");
     TEST_EXPECT_EQ((int)notes_name_terminate_latch_for_test(NOTE_NAME_TTY_HUP),
-                   (int)PROC_FLAG_TTY_TERMINATE_PENDING, "tty:hup -> TTY latch");
+                   (int)PROC_FLAG_HUP_TERMINATE_PENDING, "tty:hup -> HUP latch");
     TEST_EXPECT_EQ((int)notes_name_terminate_latch_for_test(NOTE_NAME_TTY_SUSP),
                    0, "tty:susp -> NO latch (it stops, it does not die)");
     TEST_EXPECT_EQ((int)notes_name_terminate_latch_for_test(NOTE_NAME_TTY_WINCH),

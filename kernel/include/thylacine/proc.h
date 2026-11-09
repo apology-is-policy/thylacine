@@ -1164,20 +1164,23 @@ static inline u32 phenotype_decide(bool crossed_pheno, bool territory_linux) {
 // (the arm guards it: in-kernel tests post to kproc's queue via the boot
 // thread, and an armed kproc would *_INTR every kernel-thread sleep).
 #define PROC_FLAG_INTR_TERMINATE_PENDING (1u << 7)
-// PTY-1b: the tty-class twin of the LS-5c latch above -- a terminate-
-// disposition tty:quit / tty:hup is pending (posted with no handler + not
-// self-managing). A SEPARATE bit, not a widening of the interrupt latch,
+// PTY-1b: the tty-class twins of the LS-5c latch above -- a terminate-
+// disposition tty:quit (QUIT) or tty:hup (HUP) is pending (posted with no handler
+// + not self-managing). One latch per note, not one for the pair, so the latch a
+// committed death leaves armed names its note (ARCH 8.8.2): the two die with
+// different signals. SEPARATE bits, not a widening of the interrupt latch,
 // because the lock-free #811 die-pending predicate pairs each latch with
 // ITS OWN family mask bit (interrupt <-> NOTE_BIT_INTERRUPT, tty <->
-// NOTE_BIT_TTY) -- one shared latch would make a thread that masked only
+// NOTE_BIT_TTY, for both) -- one shared latch would make a thread that masked only
 // interrupts spuriously *_INTR-unwind for a pending tty note it HAS
 // masked, breaking the "a latch-woken thread never unwinds into a tail
 // that refuses to act" property. Same latch discipline as the interrupt
 // bit: set/cleared ONLY under p->notes->lock (armed by notes_post's
 // terminate-class arm; cleared by handler registration, the self-managing
-// mark, or draining the last queued terminate-class tty note); NOT
+// mark, or draining the last queued note of its name); NOT
 // propagated by rfork; never set on kproc.
-#define PROC_FLAG_TTY_TERMINATE_PENDING (1u << 8)
+#define PROC_FLAG_QUIT_TERMINATE_PENDING (1u << 8)
+#define PROC_FLAG_HUP_TERMINATE_PENDING  (1u << 15)
 // G-4 (TAPESTRY.md section 18.12 R2-F6): marks the bound console RENDERER --
 // the Proc granted the /dev/consdrain + /dev/consfeed pair (Aurora). The THIRD
 // console role, orthogonal to BOTH console-ATTACH (the elevation gate; the
@@ -1344,7 +1347,8 @@ _Static_assert((CAUGHT_CLAIM_MASK & CAUGHT_LATCH_MASK) == 0 &&
 _Static_assert((PROC_FLAG_TEST_FIXTURE & (PROC_FLAG_NODUMP | PROC_FLAG_NOTRACE |
     PROC_FLAG_MLOCKED | PROC_FLAG_CONSOLE_ATTACHED | PROC_FLAG_MAY_POST_SERVICE |
     PROC_FLAG_LEGATE_ROOT | PROC_FLAG_SELF_MANAGING_NOTES |
-    PROC_FLAG_INTR_TERMINATE_PENDING | PROC_FLAG_TTY_TERMINATE_PENDING |
+    PROC_FLAG_INTR_TERMINATE_PENDING | PROC_FLAG_QUIT_TERMINATE_PENDING |
+    PROC_FLAG_HUP_TERMINATE_PENDING |
     PROC_FLAG_CONSOLE_RENDERER | PROC_FLAG_MAY_RAISE_PAGE_BUDGET |
     PROC_FLAG_MAY_RAISE_THREAD_BUDGET | PROC_FLAG_TERM_TERMINATE_PENDING |
     PROC_FLAG_PIPE_TERMINATE_PENDING | PROC_FLAG_SESSION_HANGUP |
@@ -1366,7 +1370,8 @@ _Static_assert((PROC_FLAG_TEST_FIXTURE & (PROC_FLAG_NODUMP | PROC_FLAG_NOTRACE |
 _Static_assert((PROC_FLAG_EXIT_CLOSE_FORCED & (PROC_FLAG_NODUMP | PROC_FLAG_NOTRACE |
     PROC_FLAG_MLOCKED | PROC_FLAG_CONSOLE_ATTACHED | PROC_FLAG_MAY_POST_SERVICE |
     PROC_FLAG_LEGATE_ROOT | PROC_FLAG_SELF_MANAGING_NOTES |
-    PROC_FLAG_INTR_TERMINATE_PENDING | PROC_FLAG_TTY_TERMINATE_PENDING |
+    PROC_FLAG_INTR_TERMINATE_PENDING | PROC_FLAG_QUIT_TERMINATE_PENDING |
+    PROC_FLAG_HUP_TERMINATE_PENDING |
     PROC_FLAG_CONSOLE_RENDERER | PROC_FLAG_MAY_RAISE_PAGE_BUDGET |
     PROC_FLAG_MAY_RAISE_THREAD_BUDGET | PROC_FLAG_TERM_TERMINATE_PENDING |
     PROC_FLAG_PIPE_TERMINATE_PENDING | PROC_FLAG_SESSION_HANGUP |
@@ -1375,7 +1380,8 @@ _Static_assert((PROC_FLAG_EXIT_CLOSE_FORCED & (PROC_FLAG_NODUMP | PROC_FLAG_NOTR
 _Static_assert((PROC_FLAG_EXIT_CLOSING & (PROC_FLAG_NODUMP | PROC_FLAG_NOTRACE |
     PROC_FLAG_MLOCKED | PROC_FLAG_CONSOLE_ATTACHED | PROC_FLAG_MAY_POST_SERVICE |
     PROC_FLAG_LEGATE_ROOT | PROC_FLAG_SELF_MANAGING_NOTES |
-    PROC_FLAG_INTR_TERMINATE_PENDING | PROC_FLAG_TTY_TERMINATE_PENDING |
+    PROC_FLAG_INTR_TERMINATE_PENDING | PROC_FLAG_QUIT_TERMINATE_PENDING |
+    PROC_FLAG_HUP_TERMINATE_PENDING |
     PROC_FLAG_CONSOLE_RENDERER | PROC_FLAG_MAY_RAISE_PAGE_BUDGET |
     PROC_FLAG_MAY_RAISE_THREAD_BUDGET | PROC_FLAG_TERM_TERMINATE_PENDING |
     PROC_FLAG_PIPE_TERMINATE_PENDING | PROC_FLAG_SESSION_HANGUP |
@@ -1397,14 +1403,15 @@ bool proc_may_create_srv_registry(const struct Proc *p);
 // first, and PROC_FLAGS_ALL's disjointness assert caught the join.
 #define PROC_FLAG_NOTE_TABLE         (1u << 25)
 
-// The terminate-CLASS latch set (interrupt + tty:quit/hup + pipe). Used by the
+// The terminate-CLASS latch set (interrupt, tty:quit, tty:hup, pipe, term, usr1, usr2). Used by the
 // whole-class clears -- handler registration, the self-managing mark, the
 // lock-free wake gate -- which suppress/observe EVERY terminate family at once.
 // NOT for thread_die_pending's per-family checks, which stay per-latch so a
 // thread that masked one family never unwinds for another's pending note.
 #define PROC_FLAG_TERMINATE_PENDING_MASK \
     (PROC_FLAG_INTR_TERMINATE_PENDING | \
-     PROC_FLAG_TTY_TERMINATE_PENDING | \
+     PROC_FLAG_QUIT_TERMINATE_PENDING | \
+     PROC_FLAG_HUP_TERMINATE_PENDING | \
      PROC_FLAG_PIPE_TERMINATE_PENDING | \
      PROC_FLAG_TERM_TERMINATE_PENDING | \
      PROC_FLAG_USR1_TERMINATE_PENDING | \
@@ -1417,7 +1424,8 @@ bool proc_may_create_srv_registry(const struct Proc *p);
     (PROC_FLAG_NODUMP | PROC_FLAG_NOTRACE | PROC_FLAG_MLOCKED | \
      PROC_FLAG_CONSOLE_ATTACHED | PROC_FLAG_MAY_POST_SERVICE | PROC_FLAG_LEGATE_ROOT | \
      PROC_FLAG_SELF_MANAGING_NOTES | PROC_FLAG_INTR_TERMINATE_PENDING | \
-     PROC_FLAG_TTY_TERMINATE_PENDING | PROC_FLAG_CONSOLE_RENDERER | \
+     PROC_FLAG_QUIT_TERMINATE_PENDING | PROC_FLAG_HUP_TERMINATE_PENDING | \
+     PROC_FLAG_CONSOLE_RENDERER | \
      PROC_FLAG_MAY_RAISE_PAGE_BUDGET | PROC_FLAG_TERM_TERMINATE_PENDING | \
      PROC_FLAG_PIPE_TERMINATE_PENDING | PROC_FLAG_SESSION_HANGUP | \
      PROC_FLAG_SEAT_MANAGER | PROC_FLAG_SEAT_CLIENT | PROC_FLAG_DEBUG_TAINTED | \
@@ -1432,7 +1440,8 @@ _Static_assert(__builtin_popcount(PROC_FLAGS_ALL) ==
     __builtin_popcount(PROC_FLAG_MAY_POST_SERVICE) + __builtin_popcount(PROC_FLAG_LEGATE_ROOT) +
     __builtin_popcount(PROC_FLAG_SELF_MANAGING_NOTES) +
     __builtin_popcount(PROC_FLAG_INTR_TERMINATE_PENDING) +
-    __builtin_popcount(PROC_FLAG_TTY_TERMINATE_PENDING) +
+    __builtin_popcount(PROC_FLAG_QUIT_TERMINATE_PENDING) +
+    __builtin_popcount(PROC_FLAG_HUP_TERMINATE_PENDING) +
     __builtin_popcount(PROC_FLAG_CONSOLE_RENDERER) +
     __builtin_popcount(PROC_FLAG_MAY_RAISE_PAGE_BUDGET) +
     __builtin_popcount(PROC_FLAG_TERM_TERMINATE_PENDING) +

@@ -10,7 +10,7 @@ validated-by: [gate-smp]
 locks: [lock-proc-table]
 design: ["docs/ARCHITECTURE.md", "docs/IDENTITY-DESIGN.md", "docs/LINEAGE.md"]
 created: 2026-08-01
-updated: 2026-11-03
+updated: 2026-11-09
 ---
 ## Session posting ownership
 
@@ -595,8 +595,10 @@ the Proc terminating, which lifts the final close's hold on death. Neither is
 inherited or ever cleared: both mark a Proc that is going.
 
 Bit 11 is `PROC_FLAG_TERM_TERMINATE_PENDING` (2026-10-13), `term`'s terminate
-latch, in `PROC_FLAG_TERMINATE_PENDING_MASK` with the interrupt, tty and pipe
-latches. It became free when the caught-note latch and claim sub-fields (bits
+latch, in `PROC_FLAG_TERMINATE_PENDING_MASK` with the interrupt, tty:quit, tty:hup
+and pipe latches. The tty pair latches per note (2026-11-09): bit 8 is
+`PROC_FLAG_QUIT_TERMINATE_PENDING`, bit 15 `PROC_FLAG_HUP_TERMINATE_PENDING`, so a latch
+names one note, as ARCH 8.8.2's committed death needs. It became free when the caught-note latch and claim sub-fields (bits
 11..17 and 22..28) left for `Proc.note_caught`. Bits 22 and 23 are
 `PROC_FLAG_USR1_TERMINATE_PENDING` and `PROC_FLAG_USR2_TERMINATE_PENDING`
 (2026-11-02), in the same mask, a latch each. `PROC_FLAGS_ALL` names every

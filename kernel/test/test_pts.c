@@ -803,7 +803,7 @@ void test_pts_teardown_hup_cont(void) {
     TEST_EXPECT_EQ(pts_note_count(leader, NOTE_NAME_TTY_HUP), 1u,
         "the out-of-fg controlling process got the hup (F13 dual target)");
     TEST_ASSERT((__atomic_load_n(&m->proc_flags, __ATOMIC_ACQUIRE) &
-                 PROC_FLAG_TTY_TERMINATE_PENDING) != 0,
+                 PROC_FLAG_HUP_TERMINATE_PENDING) != 0,
         "the uncaught hup armed the terminate latch on the resumed member");
 
     m->threads = NULL;

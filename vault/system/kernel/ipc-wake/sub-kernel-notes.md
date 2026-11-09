@@ -12,7 +12,7 @@ hazards: []
 abis: [abi-note-names]
 design: ["docs/ARCHITECTURE.md", "docs/ERRORS.md"]
 created: 2026-08-03
-updated: 2026-11-05
+updated: 2026-11-09
 ---
 ## Purpose
 
@@ -308,6 +308,13 @@ say; with the lock dropped it runs the terminate wake, the caught wake and
 `proc_note_direct_rouse`. That closes [[seam-queue-note-fatal-after-post-wakes-nobody]]:
 a note a wait rode out now ends the wait when its row turns fatal. Exec commits
 `p->phenotype` before the drop, and the drop's test hook does not, so a test stores it.
+
+**The terminate latches** are one per family (`interrupt`, `term`, `pipe`, `usr1`, `usr2`),
+except the tty family, which latches per note: `PROC_FLAG_QUIT_TERMINATE_PENDING` for
+`tty:quit` and `PROC_FLAG_HUP_TERMINATE_PENDING` for `tty:hup`, both paired with
+`NOTE_BIT_TTY` in `thread_die_pending` (`notes_name_terminate_latch`). A latch names one
+note, which ARCH 8.8.2's committed death relies on, since the two die with different
+signals; a latch drains when the last queued note of its name goes.
 
 **Which native calls a note may unwind** is `native_note_class` (syscall.c). It runs
 only where a table governs and there is a handler or a notes fd, so a program that only

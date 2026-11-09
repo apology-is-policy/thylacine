@@ -303,7 +303,7 @@ void test_tty_terminate_class_gate(void) {
 
     // The TTY latch armed; the INTERRUPT latch untouched (per-class).
     u32 flags = __atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE);
-    TEST_ASSERT((flags & PROC_FLAG_TTY_TERMINATE_PENDING) != 0,
+    TEST_ASSERT((flags & PROC_FLAG_QUIT_TERMINATE_PENDING) != 0,
                 "tty terminate latch not armed");
     TEST_ASSERT((flags & PROC_FLAG_INTR_TERMINATE_PENDING) == 0,
                 "interrupt latch spuriously armed");
@@ -324,14 +324,14 @@ void test_tty_terminate_class_gate(void) {
     spin_unlock(&p->notes->lock);
     TEST_ASSERT(tname == NULL, "handler-bearing Proc still terminate-pending");
     flags = __atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE);
-    TEST_ASSERT((flags & (PROC_FLAG_TTY_TERMINATE_PENDING |
+    TEST_ASSERT((flags & (PROC_FLAG_QUIT_TERMINATE_PENDING | PROC_FLAG_HUP_TERMINATE_PENDING |
                           PROC_FLAG_INTR_TERMINATE_PENDING)) == 0,
                 "handler registration did not clear the latches");
     // ARCH 8.8.3: the write re-reads what is pending, so the latch says what the
     // queue says, for its own family alone, and a peer riding the note out is woken.
     notes_set_handler(p, 0u);
     flags = __atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE);
-    TEST_ASSERT((flags & PROC_FLAG_TTY_TERMINATE_PENDING) != 0,
+    TEST_ASSERT((flags & PROC_FLAG_QUIT_TERMINATE_PENDING) != 0,
                 "unregister left the queued note's latch unarmed");
     TEST_ASSERT((flags & PROC_FLAG_INTR_TERMINATE_PENDING) == 0,
                 "unregister armed another family's latch");
@@ -353,7 +353,7 @@ void test_tty_terminate_class_gate(void) {
     spin_unlock(&w->notes->lock);
     TEST_ASSERT(tname == NULL, "tty:winch wrongly terminate-class");
     TEST_ASSERT((__atomic_load_n(&w->proc_flags, __ATOMIC_ACQUIRE) &
-                 PROC_FLAG_TTY_TERMINATE_PENDING) == 0,
+                 (PROC_FLAG_QUIT_TERMINATE_PENDING | PROC_FLAG_HUP_TERMINATE_PENDING)) == 0,
                 "winch armed the terminate latch");
 
     // `interrupt` still terminates + arms ITS latch only (regression +
@@ -368,7 +368,7 @@ void test_tty_terminate_class_gate(void) {
     flags = __atomic_load_n(&w->proc_flags, __ATOMIC_ACQUIRE);
     TEST_ASSERT((flags & PROC_FLAG_INTR_TERMINATE_PENDING) != 0,
                 "interrupt latch not armed");
-    TEST_ASSERT((flags & PROC_FLAG_TTY_TERMINATE_PENDING) == 0,
+    TEST_ASSERT((flags & (PROC_FLAG_QUIT_TERMINATE_PENDING | PROC_FLAG_HUP_TERMINATE_PENDING)) == 0,
                 "interrupt armed the tty latch");
 
     pgrp_drop_linked(w);

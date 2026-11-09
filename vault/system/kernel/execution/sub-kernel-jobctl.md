@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/PTY-DESIGN.md section 4"]
 created: 2026-08-03
-updated: 2026-10-27
+updated: 2026-11-09
 ---
 ## Purpose
 
@@ -230,7 +230,8 @@ The per-member order is hangup, then the terminate wake, then continue, then
 the caught-note wake, then the job resume: POSIX's order for a newly orphaned
 stopped group (SIGHUP, then SIGCONT). A member that dies of the hangup records
 `SIGHUP` for its parent's packed wait (gcpark-b, 2026-10-12; [[sub-kernel-death]]).
-The hangup arms the terminate latch, and
+The hangup arms `tty:hup`'s terminate latch (`PROC_FLAG_HUP_TERMINATE_PENDING`;
+`tty:quit` has its own since 2026-11-09), and
 the wake unwinds the member's blocked threads to die at their tails. The
 caught-note wake comes after **both** posts because a member may ignore the
 hangup and still catch the continue; a wake between them would find nothing
