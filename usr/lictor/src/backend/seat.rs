@@ -39,6 +39,11 @@ pub struct Seat {
     takeover_began: Option<(u64, u32, libthyla_rs::time::Instant)>,
     /// The generation whose takeover deadline was last renewed, and when.
     renewed: Option<(u64, libthyla_rs::time::Instant)>,
+    /// The generation whose takeover was reported held by a cursor lane out of service.
+    lane_noted: Option<u64>,
+    /// A generation's first sight in QUIESCING: the reply to the key that made the
+    /// chord, so this is the kernel's own start to within one call.
+    chord: Option<(u64, libthyla_rs::time::Instant)>,
     failed_since: Option<libthyla_rs::time::Instant>,
     /// A takeover began, so normal output may not be showing: owed a restore
     /// until the device completes one or its engine dies.
@@ -57,6 +62,21 @@ pub struct Seat {
     /// The same for a held cursor chain (leg C), past the first deadline.
     #[cfg(feature = "test-mode")]
     test_cursor_release_at: Option<libthyla_rs::time::Instant>,
+    /// A chained shot's second wait, armed when its first is released: the cursor lane
+    /// held past every bound after the control queue, or the control queue withheld
+    /// for good after the lane.
+    #[cfg(feature = "test-mode")]
+    test_then_cursor: bool,
+    #[cfg(feature = "test-mode")]
+    test_then_control: bool,
+    /// The cursor half, released and due at the next paint that succeeds: the paint's
+    /// shot block sets the cursor lever every pass, so it is armed there.
+    #[cfg(feature = "test-mode")]
+    test_cursor_due: bool,
+    /// Once the takeover's bound has abandoned the lane, a stall withheld past it and
+    /// the seat failed with it: no pump may then apply the bound to that stall.
+    #[cfg(feature = "test-mode")]
+    test_fail_late: bool,
     #[cfg(feature = "test-mode")]
     test_stall_frame: bool,
     /// What the frame's shot did. This process says nothing in an open episode
@@ -92,6 +112,9 @@ const TEST_HOLD_RESTORE_MS: u64 = 3000;
 /// Past the kernel's five-second takeover deadline, well inside FENCE_ABANDON_MS.
 #[cfg(feature = "test-mode")]
 const TEST_RELEASE_AFTER_MS: u64 = 8000;
+/// The chained late shot: past the takeover's bound, before the kernel's limit.
+#[cfg(feature = "test-mode")]
+const TEST_FAIL_LATE_MS: u64 = 34_000;
 /// How long the failure notice stays up before normal output returns.
 const FAILURE_NOTICE_MS: u128 = 1500;
 impl Seat {
@@ -205,6 +228,14 @@ impl Seat {
     fn adopt(&mut self, m: &ep::Message) {
         self.phase = m.phase;
         self.generation = m.generation;
+        if m.phase == 1 && self.chord.is_none_or(|(generation, _)| generation != m.generation) {
+            self.chord = Some((m.generation, libthyla_rs::time::Instant::now()));
+        }
+    }
+    /// The chord of a takeover not yet up: what bounds every wait it makes on the device.
+    fn waiting_chord(&self) -> Option<libthyla_rs::time::Instant> {
+        if self.phase != 1 || self.active() { return None; }
+        self.chord.filter(|(generation, _)| *generation == self.generation).map(|(_, at)| at)
     }
     fn fail(&mut self, why: &str) {
         self.phase = 4;
@@ -232,7 +263,8 @@ impl Seat {
     // work ends in the trusted screen or a dead engine. A cursor chain waits on the same
     // host loop a client's readback holds, so a stalled cursor lane renews too (vote
     // 79); its abandonment at that bound ends the wait, and the kernel's deadline then
-    // fails the takeover.
+    // fails the takeover. The two waits can run in series, so both are bounded from the
+    // chord as well (`waiting_chord`, vote 80).
     fn renew_behind_backlog(&mut self, device: &Device) {
         if !device.gpu.takeover_waiting() { return; }
         let last = self.renewed.map(|(generation, at)| (generation, at.elapsed().as_millis() as u64));
@@ -246,7 +278,14 @@ impl Seat {
                 self.generation, device.gpu.fenced_in_flight()));
         }
     }
+    /// The bound on a takeover's waits lives only inside the step that read the kernel's
+    /// phase. The kernel fails an expired chord lazily, at the next call, so a pump between
+    /// steps could otherwise kill a stall that only the restore still waits on.
     pub fn step(&mut self, device: &mut Device, screen: &mut Screen, inputs: &mut [Input]) {
+        self.step_once(device, screen, inputs);
+        device.gpu.bound_takeover(None);
+    }
+    fn step_once(&mut self, device: &mut Device, screen: &mut Screen, inputs: &mut [Input]) {
         let mut m = ep::Message::default();
         if ep::call(ep::STATUS, &mut m).is_err() { self.fail("status"); return; }
         self.adopt(&m);
@@ -260,6 +299,7 @@ impl Seat {
             }
         }
         self.quiescence.observe(self.generation, self.phase);
+        device.gpu.bound_takeover(self.waiting_chord());
         let released = inputs.iter().all(|i| i.held.iter().all(|held| !held));
         match self.phase {
             0 => {},
@@ -270,14 +310,48 @@ impl Seat {
                 if self.test_release_at.is_some_and(|at| at.elapsed().as_millis() as u64 >= TEST_RELEASE_AFTER_MS) {
                     self.test_release_at = None;
                     device.gpu.test_stall_release();
+                    if core::mem::take(&mut self.test_then_cursor) {
+                        self.test_cursor_due = true;
+                        super::diagnostic(&alloc::format!(
+                            "lictor: chained shot: the cursor lane is held next, past every bound generation={}\n",
+                            self.generation));
+                    }
                 }
                 #[cfg(feature = "test-mode")]
                 if self.test_cursor_release_at.is_some_and(|at| at.elapsed().as_millis() as u64 >= TEST_RELEASE_AFTER_MS) {
                     self.test_cursor_release_at = None;
                     device.gpu.test_cursor_release();
+                    if core::mem::take(&mut self.test_then_control) {
+                        let stalled = device.gpu.test_latch_now(true);
+                        super::diagnostic(&alloc::format!(
+                            "lictor: chained shot: a synchronous chain withheld for good behind the cursor lane stalled={} generation={}\n",
+                            stalled as u8, self.generation));
+                    }
                 }
                 if !self.active() { self.renew_behind_backlog(device); }
-                if !device.gpu.takeover_clear() { return; }
+                if !device.gpu.takeover_clear() {
+                    if let Some(why) = device.gpu.cursor_out_of_service() {
+                        if self.lane_noted != Some(self.generation) {
+                            self.lane_noted = Some(self.generation);
+                            super::diagnostic(&alloc::format!(
+                                "lictor: takeover held by a cursor lane out of service ({}) generation={}; the chord fails at the kernel's deadline\n",
+                                why, self.generation));
+                        }
+                        #[cfg(feature = "test-mode")]
+                        if let Some(ms) = self.chord.filter(|(generation, _)| self.test_fail_late && *generation == self.generation)
+                            .map(|(_, at)| at.elapsed().as_millis() as u64).filter(|ms| *ms >= TEST_FAIL_LATE_MS)
+                        {
+                            self.test_fail_late = false;
+                            let stalled = device.gpu.test_latch_now(true);
+                            self.test_release_at = Some(libthyla_rs::time::Instant::now());
+                            super::diagnostic(&alloc::format!(
+                                "lictor: late shot: a synchronous chain withheld {} ms from the chord, and the seat fails behind it stalled={} generation={}\n",
+                                ms, stalled as u8, self.generation));
+                            self.fail("late shot (test-latch-chained)");
+                        }
+                    }
+                    return;
+                }
                 if !self.active() {
                     if self.takeover_began.is_none_or(|(generation, ..)| generation != self.generation) {
                         self.takeover_began = Some((self.generation, device.gpu.fenced_in_flight(),
@@ -299,18 +373,23 @@ impl Seat {
                     #[cfg(feature = "test-mode")]
                     {
                         screen.test_stall_after_exclusion = shot == Some(SeatShot::StallAfterExclusion);
-                        screen.test_hold_after_exclusion = shot == Some(SeatShot::HoldAfterExclusion);
+                        screen.test_hold_after_exclusion = matches!(shot, Some(SeatShot::HoldAfterExclusion | SeatShot::ControlThenCursor));
                         screen.test_refuse_bind = shot == Some(SeatShot::RefuseBind);
-                        device.gpu.test_cursor_stall_next(matches!(shot, Some(SeatShot::CursorStall | SeatShot::CursorAbandon)));
-                        if shot == Some(SeatShot::CursorAbandon) { device.gpu.test_cursor_abandon_next(); }
+                        let chained_cursor = core::mem::take(&mut self.test_cursor_due);
+                        device.gpu.test_cursor_stall_next(chained_cursor
+                            || matches!(shot, Some(SeatShot::CursorStall | SeatShot::CursorAbandon | SeatShot::CursorThenControl)));
+                        if chained_cursor || shot == Some(SeatShot::CursorAbandon) { device.gpu.test_cursor_abandon_next(); }
                         if shot == Some(SeatShot::BehindReadback) { device.gpu.test_behind_readback(); }
                         self.test_refuse_restored |= shot == Some(SeatShot::RefuseRestored);
-                        if shot == Some(SeatShot::HoldAfterExclusion) {
+                        if matches!(shot, Some(SeatShot::HoldAfterExclusion | SeatShot::ControlThenCursor)) {
                             self.test_release_at = Some(libthyla_rs::time::Instant::now());
                         }
-                        if shot == Some(SeatShot::CursorStall) {
+                        if matches!(shot, Some(SeatShot::CursorStall | SeatShot::CursorThenControl)) {
                             self.test_cursor_release_at = Some(libthyla_rs::time::Instant::now());
                         }
+                        self.test_then_cursor |= shot == Some(SeatShot::ControlThenCursor);
+                        self.test_fail_late |= shot == Some(SeatShot::ControlThenCursor);
+                        self.test_then_control |= shot == Some(SeatShot::CursorThenControl);
                         self.test_stall_frame |= shot == Some(SeatShot::StallInFrame);
                         screen.test_refuse_frame = shot == Some(SeatShot::RefuseFrame);
                         self.test_hold_restore |= shot == Some(SeatShot::HoldRestore);
@@ -326,6 +405,7 @@ impl Seat {
                         return;
                     }
                     self.active = Some(self.generation); self.sequence = 0; self.masked = 0;
+                    device.gpu.bound_takeover(None);
                     let (chains, ms) = self.takeover_began.take()
                         .map_or((0, 0), |(_, chains, t0)| (chains, t0.elapsed().as_millis()));
                     super::diagnostic(&alloc::format!(
@@ -422,8 +502,13 @@ impl Seat {
                 });
                 #[cfg(feature = "test-mode")]
                 if self.test_release_at.take().is_some() { device.gpu.test_stall_release(); }
+                // A takeover that failed before it displaced anything is not restored, so
+                // the held cursor chain is let go here.
                 #[cfg(feature = "test-mode")]
-                let _ = self.test_cursor_release_at.take();
+                if self.test_cursor_release_at.take().is_some() { device.gpu.test_cursor_release(); }
+                // A chained shot's second wait is armed only inside the takeover it breaks.
+                #[cfg(feature = "test-mode")]
+                { self.test_then_cursor = false; self.test_then_control = false; self.test_cursor_due = false; self.test_fail_late = false; }
                 if !released || (self.active() && since.elapsed().as_millis() < FAILURE_NOTICE_MS) { return; }
                 if self.displaced || self.active.is_some() {
                     if device.gpu.engine_dead() {

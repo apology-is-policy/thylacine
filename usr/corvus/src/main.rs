@@ -4732,8 +4732,8 @@ unsafe fn try_dispatch_verb(conn: &mut Conn) {
 
         // Have a full frame. Dispatch.
         // SAFETY: copy the payload out before touching pending_request
-        // again (handlers don't mutate pending_request but we re-enter
-        // the loop after, so be defensive).
+        // again (handlers don't mutate pending_request, but the frame is
+        // drained below, so be defensive).
         let payload = &conn.pending_request[REQ_HDR_LEN..REQ_HDR_LEN + payload_len];
         let mut payload_owned = Vec::with_capacity(payload.len());
         payload_owned.extend_from_slice(payload);

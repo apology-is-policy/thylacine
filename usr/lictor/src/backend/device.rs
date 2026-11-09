@@ -44,6 +44,9 @@ pub struct Device {
     /// Seat shots left, one per trusted takeover (`test_latch_seat_shot`).
     #[cfg(feature = "test-mode")]
     test_seat_shots: u8,
+    /// Chained shots left (`Request::TestArmChained`), taken before any seat shot.
+    #[cfg(feature = "test-mode")]
+    test_chained_shots: u8,
     #[cfg(feature = "test-mode")]
     test_blind_armed: bool,
     /// Stall shots left for the compositor to aim (`Request::TestStallNext`).
@@ -70,7 +73,7 @@ pub enum SeatShot {
     RefuseFrame,
     /// The ordinary return's restore waits with keys left in the ring.
     HoldRestore,
-    /// A cursor stall inside exclusion, held until the seat restores.
+    /// A cursor stall inside exclusion whose retirement is held 8 s: the takeover waits it out.
     CursorStall,
     /// The same cursor stall, held past the abandonment bound.
     CursorAbandon,
@@ -79,6 +82,12 @@ pub enum SeatShot {
     /// A controlq stall under the trusted scanout whose retirement is
     /// withheld: the engine dies.
     StallHeld,
+    /// A controlq stall after exclusion held 8 s, then a cursor stall held past
+    /// every bound: the takeover's bound from the chord abandons the lane.
+    ControlThenCursor,
+    /// A cursor stall held 8 s, then a controlq stall withheld for good: the
+    /// takeover's bound from the chord kills the engine.
+    CursorThenControl,
 }
 impl Device {
     pub fn new(mut gpu: Gpu, owner: u64) -> Result<Self, Error> {
@@ -89,6 +98,7 @@ impl Device {
             refused_retirements: 0,
             #[cfg(feature = "test-mode")] test_latch_shots: 0,
             #[cfg(feature = "test-mode")] test_seat_shots: 0,
+            #[cfg(feature = "test-mode")] test_chained_shots: 0,
             #[cfg(feature = "test-mode")] test_blind_armed: false,
             #[cfg(feature = "test-mode")] test_stall_shots: 0,
             #[cfg(feature = "test-mode")] test_latch_targets: Vec::new(),
@@ -219,6 +229,11 @@ impl Device {
     /// order, so one boot walks every way an episode's return can go wrong.
     #[cfg(feature = "test-mode")]
     pub fn test_latch_seat_shot(&mut self) -> Option<SeatShot> {
+        if self.test_chained_shots > 0 {
+            let shot = if self.test_chained_shots == 2 { SeatShot::ControlThenCursor } else { SeatShot::CursorThenControl };
+            self.test_chained_shots -= 1;
+            return Some(shot);
+        }
         let shot = match self.test_seat_shots {
             12 => SeatShot::StallAfterExclusion,
             11 => SeatShot::StallInPaint,
@@ -636,6 +651,10 @@ impl Device {
                     super::intake::test::arm();
                     ().put(&mut out);
                 }
+                #[cfg(not(feature = "test-mode"))] { return Err(Error::BadField); }
+            }
+            Request::TestArmChained => {
+                #[cfg(feature = "test-mode")] { self.test_chained_shots = 2; ().put(&mut out); }
                 #[cfg(not(feature = "test-mode"))] { return Err(Error::BadField); }
             }
             Request::TestStallNext => {

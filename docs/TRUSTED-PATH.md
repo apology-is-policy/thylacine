@@ -197,8 +197,8 @@ the screen looks hung for as long as the client queued. Measured before it on th
 V3D: behind a client's deep queue, six chords of six failed at the five-second deadline
 with the session's screen still up. Built (`SEAT_RENEW`): Lictor renews at once when it
 first sees the hold and then at most once a second while the device holds the takeover
-up, and the kernel stops at 35 s from the chord. The control queue holds it up stalled
-behind a chain or with a command not yet retired. Draining means the
+up, and the kernel stops at 35 s from the chord. With the cursor lane idle, the control
+queue holds it up stalled behind a chain or with a command not yet retired. Draining means the
 engine is working through what is ahead, not that something retired lately: one chain
 that runs for seconds retires nothing meanwhile and is renewed all the same, and a
 chain that never retires kills the engine at `FENCE_ABANDON_MS` (30 s), inside the
@@ -208,8 +208,23 @@ takeover cannot pass a lane whose late chain could still put the pointer plane o
 trusted scene. Lictor renews while the lane's stall stands. A late retirement revives
 the lane and the takeover completes; at `FENCE_ABANDON_MS` the lane is abandoned, the
 wait ends, and the kernel's deadline fails the chord, with the abandonment on the log.
-The lane still comes back on its late retirement (vote 50). That residue needs a host
-loop held 30 s, the same hold that kills the engine on the control queue.
+An abandoned or failed lane holds the takeover past anything the control queue does, so
+it renews nothing, and Lictor says that the lane holds the takeover.
+The lane still comes back on its late retirement (vote 50). The two waits can run in
+series, since the paint and the activation each wait for an idle lane, and each is
+bounded 30 s from its own stall, so the second could still stand at the kernel's limit
+with the engine alive and nothing on the glass. Every wait is bounded from the chord as
+well (operator vote 80, 2026-11-09): at 33 s a control stall still standing kills the
+engine and a cursor stall abandons the lane. No renewal follows, so the kernel's limit
+fails the chord by 35 s, unless the abandoned chain retires first and the takeover goes
+through (vote 50's revival). A chord ends in the trusted screen, a dead engine, or a
+failure on the log. The cost falls on a takeover still waiting at 33 s: its stall dies
+however young, so a second wait in series dies younger than 30 s, and a takeover's own
+command that stalls after 33 s dies at the next pump. The bound lives only inside the
+seat step that read the kernel's phase, because the kernel fails an expired chord at
+its next call: a pump between steps would otherwise kill a stall only the restore waits
+on, and lose the display. Windows' secure desktop takes the same line through its GPU timeout:
+the trusted path waits on client work only to a fixed bound from the request.
 
 Before a chord is seen the gap is the serve loop's. A synchronous command waits at most
 `SUBMIT_DEADLINE_MS`, a client's readback ahead of it or not (operator vote 72), so a

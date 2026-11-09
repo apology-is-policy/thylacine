@@ -2598,7 +2598,10 @@ block the serve loop, and seat input with it. Neither was taken.
   A stall is not a poisoned chain. It is the one non-quiescent state
   that comes back by itself. A takeover that meets a stall starts over when the
   engine revives, under the kernel's deadline: the command it stalled on has no answer
-  yet, and everything it repeats is idempotent (TRUSTED-PATH, vote 50's audit). A frame
+  yet, and everything it repeats is idempotent (TRUSTED-PATH, vote 50's audit). A stall
+  a takeover still waits on 33 s after its chord (`TAKEOVER_BOUND_MS`) is death whatever
+  its own age, and a cursor stall then is abandonment, so two waits in series still end
+  inside the kernel's 35 s limit (vote 80). A frame
   paint that meets one stays owed: the next pass paints it again, and Corvus reads no
   key until it is visible. A seat episode whose restoration meets a stall
   fails at once, so its grant is cancelled. The seat's return to normal then

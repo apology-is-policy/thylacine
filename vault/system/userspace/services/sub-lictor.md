@@ -45,6 +45,7 @@ code:
   - tools/interactive/ls-graphical-sak-states.exp
   - tools/interactive/ls-graphical-sak-recover.exp
   - tools/interactive/ls-graphical-sak-dead.exp
+  - tools/interactive/ls-graphical-sak-chained.exp
   - tools/interactive/ls-graphical-sak-soak.exp
   - tools/interactive/ls-graphical-sak-start.exp
   - tools/interactive/ls-graphical-sak-refused.exp
@@ -187,7 +188,9 @@ vote 29). A chain that sees 500 ms of stale wakes STALLS the engine:
 The completion pump settles a stall (`settle_stall`, decided by the
 host-tested `gpu_api::stall_verdict`). A late retirement, drained by the
 ordinary path, revives the engine, and the parked retirement then runs. A chain
-still outstanding after 30 s latches the engine dead, permanently. The stall
+still outstanding after 30 s latches the engine dead, permanently, and so does one
+still outstanding `TAKEOVER_BOUND_MS` (33 s) after a chord whose takeover waits on it
+(vote 80, below), whatever the stall's own age; Lictor says which bound fired. The stall
 counter tells a caller whether its command stalled, and a stalled bind
 condemns its resource, because the display may name it once the device
 catches up. Every reply carries the engine state (live, stalled, dead) and the
@@ -341,18 +344,50 @@ does not deny the SAK. Its backlog can: the paint is fenced, so it retires behin
 what the host has queued. A takeover that meets a stall starts over when the engine
 revives (`Gpu::stall_pending`), under the kernel's five-second deadline, and says so; a
 device's answer fails it at once. While the engine is alive and the device holds the
-takeover up (`Gpu::takeover_waiting`: the control queue stalled behind a chain or with a
-command not yet retired, or the cursor lane stalled behind its chain), the takeover renews that deadline at once when first seen and then at most
+takeover up (`Gpu::takeover_waiting`: the cursor lane stalled behind its chain, or, with
+the lane idle, the control queue stalled behind a chain or with a command not yet
+retired), the takeover renews that deadline at once when first seen and then at most
 once a second (`gpu_api::renew_due`; `SEAT_RENEW`, up to 35 s from the chord: vote 71), so a backlog delays the SAK rather than failing
 it. One chain that runs for seconds retires nothing and is renewed all the same; one
 that never retires kills the engine at `FENCE_ABANDON_MS`, inside the 35 s. A cursor
 chain waits on the host loop a client's readback holds, so the lane's stall renews too
 (vote 79); its abandonment at the same bound ends the wait and the kernel's deadline
-fails the chord, and the lane comes back on the late retirement. Witnesses:
+fails the chord, and the lane comes back on the late retirement. An abandoned or failed
+lane holds the takeover past anything the control queue does, so it renews nothing, and
+Lictor says once per chord that the lane holds it. The two waits can run in series (the
+paint and the activation each wait for an idle lane), each bounded 30 s from its own
+stall, so the second could still stand at the kernel's limit with the engine alive and
+nothing on the glass. Every wait is therefore bounded from the chord too (vote 80,
+[[dec-2026-11-09-takeover-bound-from-chord]]): the seat stamps a generation's first
+sight in QUIESCING, which is the reply to the key that made the chord, and hands that
+instant to the device while its takeover is not yet up (`Gpu::bound_takeover`, cleared
+at activation and at the end of every `Seat::step`, so the serve loop's own pump between
+steps never sees it: the kernel fails an expired chord lazily, at a call, and that pump
+could otherwise kill a stall only the restore waits on, round 4 F1). At `TAKEOVER_BOUND_MS` from it a control stall
+still standing kills the engine (`settle_stall`) and a cursor stall abandons the lane
+(`cursor_settle`), both through `gpu_api::stall_verdict`, whose host test reads
+`SEAT_QUIESCE_LIMIT_NS` out of `seat.h` and asserts the bound plus one renewal interval
+falls inside it (and that a renewal a pass late still lands inside `SEAT_QUIESCE_NS`).
+No renewal follows either end, so the kernel's limit fails the chord by 35 s unless an
+abandoned chain retires first and the takeover goes through: every chord ends in the
+trusted screen, a dead engine, or a logged failure. The cost falls on a takeover still
+waiting at 33 s: a second wait in series dies younger than 30 s, and a takeover's own
+command stalling after 33 s dies at the next pump. The phase term of `waiting_chord` is
+now redundant (only phase 1 pumps inside a step); the activation term keeps a stall in
+phase 1 after activation clear, which no witness constructs (it needs the chord held
+past 33 s after the trusted screen is up). Witnesses:
 `ls-graphical-sak-dead` leg 1 (a stall withheld 8 s, no retirement in between), leg C
 (a cursor chain held 8 s: the takeover completes), leg X (one held past the abandonment:
-the chord fails, then the lane revives) and
-`ls-graphical-sak-backlog` (a client's deep queue, on a virgl device). A frame paint that meets a stall stays owed and the
+no renewal follows it, Lictor names the lane, the chord fails, then the lane revives),
+`ls-graphical-sak-chained` (its own lever, `Request::TestArmChained`: a control stall
+held 8 s and then a cursor stall held past every bound, which the takeover's bound
+abandons before the kernel closes the seat, after which, at 34 s, a control stall is
+withheld and the seat failed behind it, and that stall must survive to its release and
+the restore; then a cursor stall held 8 s and a control stall withheld for good, which
+the bound kills, last because the engine stays dead) and
+`ls-graphical-sak-backlog` (a client's deep queue, on a virgl device). Every lever raises
+its hold within milliseconds of the chord, so renewal at first sight rests on
+`gpu_api`'s host test alone, which fails on the old rule of arming first. A frame paint that meets a stall stays owed and the
 next pass paints it again. Once serving, no synchronous command waits past
 `SUBMIT_DEADLINE_MS`, a client's readback ahead of it or not (operator vote 72): one
 transfer cannot stop this loop for as long as its client queued; the command stalls

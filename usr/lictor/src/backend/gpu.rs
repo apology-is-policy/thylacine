@@ -485,7 +485,8 @@ const USED_SPIN_PER_WAKE: u32 = 65536;
 // a false dead-latch costs the console: #31). It bounds only OUR
 // bookkeeping: 30 s is orders above any real GL job, so reaching it means
 // the host renderer hung (the GPU-DESIGN section 9.2 accepted risk). A
-// synchronous chain stalled this long is the one thing that does declare it.
+// synchronous chain stalled this long declares it, and so does one a trusted
+// takeover still waits on TAKEOVER_BOUND_MS after its chord (vote 80).
 const FENCE_ABANDON_MS: u64 = 30_000;
 // A retirement the broker parks gives up at the same bound (gpu_api::admit).
 const _: () = assert!(crate::gpu_api::PARK_BOUND_MS == FENCE_ABANDON_MS);
@@ -892,7 +893,8 @@ struct Controlq {
     /// Count of used entries consumed.
     used_seen: u16,
     /// Latched on a ring failure, or on a stall that outlived
-    /// FENCE_ABANDON_MS: no ring cursor can then be trusted against the
+    /// FENCE_ABANDON_MS or a waiting takeover's bound from its chord: no ring
+    /// cursor can then be trusted against the
     /// device's consumption, so every later submit would read a
     /// freshly-zeroed response buffer as resp_type=0x0 (the #31 cascade).
     /// Fail fast + honestly instead.
@@ -906,8 +908,12 @@ struct Controlq {
     latched: Option<(Instant, u16)>,
     /// A synchronous chain missed its deadline and has not retired
     /// (GPU-DESIGN 4.5.15): every submission is refused until it does, and
-    /// one outstanding FENCE_ABANDON_MS latches `dead`.
+    /// one outstanding FENCE_ABANDON_MS, or TAKEOVER_BOUND_MS from the chord of
+    /// a takeover waiting on it, latches `dead`.
     stalled: Option<Instant>,
+    /// The chord, while a trusted takeover waits on the device: a stall still
+    /// standing TAKEOVER_BOUND_MS after it latches `dead` (vote 80).
+    takeover_from: Option<Instant>,
     /// Stalls begun, monotone: compared across one command, it says whether
     /// that command's outcome is unknown.
     stalls: u32,
@@ -1381,11 +1387,13 @@ impl Controlq {
 
     /// A stall ends one of two ways (GPU-DESIGN 4.5.15): the drain above
     /// retired the outstanding chain through the ordinary path (revival), or
-    /// it has been outstanding FENCE_ABANDON_MS (death, permanent).
+    /// it has been outstanding FENCE_ABANDON_MS, or a takeover has waited on it
+    /// TAKEOVER_BOUND_MS from the chord (death, permanent).
     fn settle_stall(&mut self) {
         let Some(t0) = self.stalled else { return };
         let ms = t0.elapsed().as_millis() as u64;
-        match crate::gpu_api::stall_verdict(self.sync_pending || self.sync2_pending, ms) {
+        let chord_ms = self.takeover_ms();
+        match crate::gpu_api::stall_verdict(self.sync_pending || self.sync2_pending, ms, chord_ms) {
             crate::gpu_api::Stall::Revived => {
                 self.stalled = None;
                 say!("lictor: gpu synchronous chain retired {} ms after its deadline -- engine revived", ms);
@@ -1394,10 +1402,20 @@ impl Controlq {
                 self.stalled = None;
                 self.latched = Some((Instant::now(), self.used_seen));
                 self.dead = true;
-                say!("lictor: gpu engine stalled {} ms without a retirement -- engine dead", ms);
+                if ms < FENCE_ABANDON_MS {
+                    say!("lictor: gpu engine stalled {} ms without a retirement, the takeover {} ms from its chord -- engine dead at the takeover's bound",
+                         ms, chord_ms.unwrap_or(0));
+                } else {
+                    say!("lictor: gpu engine stalled {} ms without a retirement -- engine dead", ms);
+                }
             }
             crate::gpu_api::Stall::Holding => {}
         }
+    }
+
+    /// How long ago the chord was, while a takeover waits on the device.
+    fn takeover_ms(&self) -> Option<u64> {
+        self.takeover_from.map(|t| t.elapsed().as_millis() as u64)
     }
 
     fn stall(&mut self) {
@@ -2197,6 +2215,7 @@ impl Gpu {
                 sync_slowest_ms: 0,
                 latched: None,
                 stalled: None,
+                takeover_from: None,
                 stalls: 0,
                 serving: false,
                 #[cfg(feature = "test-mode")]
@@ -4488,7 +4507,8 @@ impl Gpu {
     }
 
     /// A stall stands on a lane. It ends in a retirement, or for the engine at the
-    /// abandonment bound; an abandoned cursor lane waits for its chain. What a
+    /// abandonment bound or a waiting takeover's; an abandoned cursor lane waits for
+    /// its chain. What a
     /// command met while this holds is no answer from the device.
     pub fn stall_pending(&self) -> bool {
         !self.ctrl.dead
@@ -4712,16 +4732,22 @@ impl Gpu {
         self.ctrl.fenced_in_flight()
     }
 
-    /// The device holds a takeover up while its engine lives: the control queue
-    /// (stalled behind a chain, or a command not yet retired; vote 71) or the cursor
-    /// lane stalled behind its chain (vote 79). A takeover waiting on either is
-    /// renewed. The control queue's stall ends in a retirement or, at
+    /// The device holds a takeover up while its engine lives: the cursor lane stalled
+    /// behind its chain (vote 79), or, with the lane idle, the control queue (stalled
+    /// behind a chain, or a command not yet retired; vote 71). A takeover waiting on
+    /// either is renewed. The control queue's stall ends in a retirement or, at
     /// FENCE_ABANDON_MS, a dead engine; the lane's in a retirement or, at the same
-    /// bound, its abandonment, which ends the wait.
+    /// bound, its abandonment, which ends the wait. An abandoned or failed lane holds
+    /// the takeover past anything the control queue does, so nothing is renewed then.
+    ///
+    /// Two waits can run in series, the lane's and then the queue's or the other way
+    /// round, each bounded from its own stall, so both are bounded from the chord too
+    /// (`bound_takeover`, vote 80): every chord ends inside the kernel's limit.
     pub fn takeover_waiting(&self) -> bool {
         !self.ctrl.dead
-            && (self.ctrl.stalled.is_some() || self.ctrl.sync_pending || self.ctrl.sync2_pending
-                || self.cursor_stalled())
+            && (self.cursor_stalled()
+                || (self.cursor.queue.idle()
+                    && (self.ctrl.stalled.is_some() || self.ctrl.sync_pending || self.ctrl.sync2_pending)))
     }
 
     /// The broker enables this after boot probes, then releases imported DMA
@@ -4729,6 +4755,13 @@ impl Gpu {
     pub fn enable_retirement_journal(&mut self) { self.collect_retirements = true; }
     pub fn take_retired_resources(&mut self) -> alloc::vec::Vec<u32> {
         core::mem::take(&mut self.retired_resources)
+    }
+
+    /// The chord of the takeover now waiting on the device, or None once it is up or
+    /// gone. A stall still standing TAKEOVER_BOUND_MS after it ends as its own bound
+    /// would end it: the engine dies, or the cursor lane is abandoned.
+    pub fn bound_takeover(&mut self, chord: Option<Instant>) {
+        self.ctrl.takeover_from = chord;
     }
 
     /// What trusted takeover asks of the device. A fenced chain need not have
