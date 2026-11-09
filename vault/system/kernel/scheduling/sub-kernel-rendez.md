@@ -9,7 +9,7 @@ guarded-by: [inv-i9, inv-i8]
 validated-by: [spec-scheduler, spec-tsleep, spec-death-wake, gate-smp]
 locks: [lock-wait, lock-timerwait, lock-rendez]
 created: 2026-08-01
-updated: 2026-11-03
+updated: 2026-11-09
 ---
 ## Purpose
 
@@ -149,7 +149,11 @@ waker's walk (so the walk finds and wakes it), or the flag-set
 happens-before this thread's `wait_lock` acquire (so the re-check sees
 it). There is no third interleaving. On a hit it undoes the **full**
 registration — rendez waiter, backref, and in `tsleep` the timer
-entry — and returns INTR.
+entry — and returns INTR. A hit on a terminate latch has committed the death
+(ARCH 8.8.2, [[sub-kernel-notes]]): the predicate's lock-free swap runs here
+under `wait_lock` and `r->lock`, which is why it cannot be made under the
+notes-queue lock, so a handler installed after the INTR revokes nothing and
+the thread dies at its tail.
 
 The same check repeats on the resume path as the *prompt* path: the
 registered check would catch it on the next iteration anyway, but

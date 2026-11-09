@@ -2275,12 +2275,24 @@ void test_p9_closer_exit_close_refused_unlock_is_answered(void) {
     struct p9_closer_stats st = closer_now();
     uo_finish(&u, !started[0] || (reaped[0] && (!started[1] || reaped[1])));
 
+    // Each round says which it is, so a red names the ecode without a reading of
+    // the code.
+    static const char *const take_msg[2] = {
+        "EAGAIN round: the take is granted", "EINTR round: the take is granted" };
+    static const char *const ret_msg[2] = {
+        "EAGAIN round: the exit's close returns", "EINTR round: the exit's close returns" };
+    static const char *const sent_msg[2] = {
+        "EAGAIN round: its one unlock reached the server, which refused it",
+        "EINTR round: its one unlock reached the server, which refused it" };
+    static const char *const owed_msg[2] = {
+        "EAGAIN round: a refusal is an answer, nothing stays owed",
+        "EINTR round: a refusal is an answer, nothing stays owed" };
     TEST_ASSERT(opened, "a walked file on its own session");
     for (int i = 0; i < 2; i++) {
-        TEST_EXPECT_EQ((u64)(s64)trc[i], 0, "the take is granted");
-        TEST_ASSERT(started[i] && reaped[i], "the exit's close returns");
-        TEST_EXPECT_EQ(nlock[i], 1u, "its one unlock reached the server, which refused it");
-        TEST_ASSERT(!owed[i], "a refusal is an answer: nothing stays owed");
+        TEST_EXPECT_EQ((u64)(s64)trc[i], 0, take_msg[i]);
+        TEST_ASSERT(started[i] && reaped[i], ret_msg[i]);
+        TEST_EXPECT_EQ(nlock[i], 1u, sent_msg[i]);
+        TEST_ASSERT(!owed[i], owed_msg[i]);
     }
     TEST_EXPECT_EQ(st.jobs, base.jobs, "no close job");
     TEST_EXPECT_EQ(st.unlocks_lost, base.unlocks_lost, "nothing was reported lost");

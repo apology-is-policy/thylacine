@@ -153,7 +153,7 @@ explicit at both ends, and the paired ACQUIRE load lives in `devproc_debug_autho
 | `proc_setsid` / `setpgid` / `getpgid` / `getsid` | the POSIX session + process-group cores ([[sub-kernel-pts]] and [[sub-kernel-jobctl]] are what read them) |
 | `proc_page_charge` / `vma_charge` / `shared_map_charge` (+ uncharges) | **policy only** since L-2 — "has an address space" and "is exempt"; the counters and their arithmetic live on the `AddrSpace` ([[lock-vma]] for what the lock does and does not buy) |
 | `proc_thread_cap_ok` / `proc_child_cap_ok` | the I-32 creation gates (take the table lock themselves) |
-| `proc_exec_claim(p)` / `proc_exec_dooms(p, t)` | exec's claim on a process with live peers (thread-model C5, ARCH 7.3.3): -1 while a group claim or another exec holds it; otherwise it dooms every other thread, wakes them, and sleeps death-only until the caller is the only live thread, returning -1 only if group death ends the wait. `proc_exec_dooms` is the pointer compare every death predicate reads |
+| `proc_exec_claim(p)` / `proc_exec_dooms(p, t)` | exec's claim on a process with live peers (thread-model C5, ARCH 7.3.3): -1 while a group claim or another exec holds it, or the Proc's death is committed (ARCH 8.8.2; a commit landing after the read crosses the exec, and the new image dies of it at its first EL0 return); otherwise it dooms every other thread, wakes them, and sleeps death-only until the caller is the only live thread, returning -1 only if group death ends the wait. `proc_exec_dooms` is the pointer compare every death predicate reads |
 | `proc_apply_identity` | the single audited identity-mutation site |
 | `proc_seal` | the only writer of `PROC_FLAG_NODUMP`/`NOTRACE`: OR-only, under `g_proc_table_lock`, both SEAL bits in one critical section |
 | `proc_mark_*` / `proc_is_*` | the one-way `proc_flags` stamps and their fail-closed readers |
@@ -598,7 +598,14 @@ Bit 11 is `PROC_FLAG_TERM_TERMINATE_PENDING` (2026-10-13), `term`'s terminate
 latch, in `PROC_FLAG_TERMINATE_PENDING_MASK` with the interrupt, tty:quit, tty:hup
 and pipe latches. The tty pair latches per note (2026-11-09): bit 8 is
 `PROC_FLAG_QUIT_TERMINATE_PENDING`, bit 15 `PROC_FLAG_HUP_TERMINATE_PENDING`, so a latch
-names one note, as ARCH 8.8.2's committed death needs. It became free when the caught-note latch and claim sub-fields (bits
+names one note, as ARCH 8.8.2's committed death needs. Bit 16 is
+`PROC_FLAG_TERMINATE_COMMITTED` (vote 35, 2026-11-09): set by the death predicate's
+compare-and-swap together with the one latch it leaves armed, never cleared, and
+refused by every latch write ([[sub-kernel-notes]], "A latch's unwind commits the
+death"). While it is set `proc_stop_requested` reads false, `proc_exec_claim` refuses,
+and rfork's parent re-check refuses as it does for `group_exit_msg`; the swap holds no
+lock, so a commit landing just after that re-check leaves a child, as a fork just before
+a kill does. Bits 11, 15 and 16 became free when the caught-note latch and claim sub-fields (bits
 11..17 and 22..28) left for `Proc.note_caught`. Bits 22 and 23 are
 `PROC_FLAG_USR1_TERMINATE_PENDING` and `PROC_FLAG_USR2_TERMINATE_PENDING`
 (2026-11-02), in the same mask, a latch each. `PROC_FLAGS_ALL` names every

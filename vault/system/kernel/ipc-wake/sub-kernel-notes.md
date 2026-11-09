@@ -639,8 +639,10 @@ yet to come and moves the bit itself.
 **Death.** Whether a direct note is fatal is read at use (`notes_direct_is_fatal`),
 never latched at the post, so exec's reset and `SYS_NOTIFY(0)` are honest.
 `thread_die_pending` asks the word after the queue's latches: a fatal note ends every
-wait of this thread and no peer's, and the tail's `exits_note` then runs the group's
-one death, so there is no second termination primitive. A masked fatal note stays
+wait of this thread, and reading it true commits the group's death by the note's own
+latch (below, "A latch's unwind commits the death"), so the peers' waits end too, as
+the group death the tail's `exits_note` then runs would end them. There is no second
+termination primitive. A masked fatal note stays
 pending until that thread unmasks, as in Linux, where `complete_signal`'s group exit
 is not reached while `wants_signal` refuses.
 `notes_terminate_pending_name_locked` scans the word first, so the fault arm's
@@ -674,8 +676,10 @@ defers every note but `kill` while a handler runs and while `SP_EL0` is
 unusable, and the faulting instruction would otherwise re-execute into the
 same fault forever. Ending the thread inside a running handler matches Linux,
 whose `complete_signal` makes a fatal default signal a group exit at send time.
-When no queued note of an armed class would still default-terminate (a
-phenotype handler installed for it since the arm, which clears no latch), those
+A committed death is died of first, whatever the queue holds now: a handler
+installed since the commit leaves the pick empty. When no queued note of an armed
+class would still default-terminate (a handler installed for it since the arm,
+before the disposition's re-read clears the latch), those
 latches are stale: cleared under the lock, and the arm returns so the
 instruction re-executes. A class whose note is live but masked by the faulting
 thread stays armed, because a peer may still die of it. Witnesses:
@@ -734,8 +738,8 @@ wakes every blocked thread of the Proc outside a stop park
 (`proc_interrupt_terminate_wake`), and kicks every thread of the Proc running on
 another CPU, so a thread spinning at EL0 takes an IRQ into its tail, whose notes
 leg meets the latch (#964). An ordinary sleep then returns `SLEEP_INTR` and the thread dies of the note at
-its return tail: `thread_die_pending` reports the latch in any family the
-thread has not masked, as well as group death, and, like group death and
+its return tail, the sleep's read having committed the death (next section):
+`thread_die_pending` reports the latch in any family the thread has not masked, as well as group death, and, like group death and
 ignoring the mask, an exec by another thread of the Proc (`proc_exec_dooms`,
 thread-model C5, [[sub-kernel-proc]]); `thread_group_death_pending` reads the
 same exec leg. Five waits read
@@ -759,6 +763,57 @@ stays stopped, and a suspended parent stays suspended
 clears the latch. The note is met at the thread's next note checkpoint once
 it runs, and a revocable latch (a peer can install a handler or open the notes
 file) can no longer return a parent while its child still borrows its stack.
+
+### A latch's unwind commits the death (vote 35, ARCH 8.8.2)
+
+A wait that unwinds for a terminate latch answers on the footing that the thread dies:
+the poll loop's 0, an untimed `sys_poll_sleep_for`'s 0, the 9P client's abandoned call,
+dev9p's abandoned write-behind. A latch is revocable -- a handler installed or a notes
+fd opened re-reads it away -- so a peer could revoke it between the unwind and the
+tail, and the thread lived with an answer meant for a dying one (the poll false-0
+class, OPEN-BUGS 2026-11-04). Reading true now commits. `thread_die_pending`'s latch
+leg does one compare-and-swap on `proc_flags` (`notes_commit_latch`): it sets
+`PROC_FLAG_TERMINATE_COMMITTED` and leaves armed only the latch it acted on -- the
+first, in a fixed order, that the reader has unmasked, or a direct fatal note's own --
+and that latch names the note (`notes_death_committed`). The swap is lock-free because
+several readers hold spinlocks `q->lock` cannot nest under: sleep's
+register-then-observe under `wait_lock` and `r->lock`, the 9P client under `c->lock`.
+A commit made under `q->lock` was the rejected alternative. Every latch write -- the
+arm, the drain, the disposition re-read, the self-managing mark, the fault arm's stale
+clear, `notes_wait_untake`'s re-arm -- goes through `notes_latch_write_locked`, a swap
+that refuses once the bit is set, so a handler's clear and a commit are decided by one
+compare, and whichever lands first wins. Once committed:
+
+- every thread's waits end, whatever its mask: the death is no longer deferrable;
+- `el0_return_die_check` ends the Proc with `exits_note` of the named note, after the
+  group-death arm and before the stop check ([[sub-kernel-death]]);
+- the tail hands no note to a handler. `notes_tail_yield_or_die_locked` runs before
+  both delivery paths and clears the latch of the note about to be delivered, since a
+  latch armed on a note a handler now catches is stale; when that clear is refused, the
+  thread dies of the committed note instead. No note is both handled and died of
+  ([[inv-i19]]);
+- the fault arm dies of it first, and the page-in reads the predicate once, after its
+  read ([[sub-kernel-fault]]);
+- no stop is asked of the Proc, no exec claims it, and rfork spawns no child from it
+  ([[sub-kernel-proc]], [[sub-kernel-jobctl]]).
+
+A masked read commits nothing. The tail's own deaths commit too: the native uncaught
+arm, the phenotype's SIG_DFL terminate arm and the fault arm each commit the note they
+die of under `q->lock` before releasing it (`notes_commit_note_locked`), because the
+note stays queued while the Proc dies, and a peer's tail that met it after a handler
+arrived would otherwise hand it on. `kill` has no latch and is never caught, so it
+needs none. The commit wakes nobody: the thread that made it is
+unwinding to its tail and dies there, and the group termination wakes the rest. Kernel
+threads charged to a user Proc run in kproc and never reach the latch leg. Nothing
+clears the bit. Witnesses: `notes.latch_read_commits_the_death` and its control
+`notes.latch_clear_first_lets_it_live`, `notes.commit_takes_the_readers_latch`,
+`notes.latch_names_its_note` (walked from `g_known_notes`), `notes.poll_zero_is_a_death`
+(the class's own case, with a handler-first control that answers EINTR and lives),
+`notes.tail_hands_no_committed_note`, `notes.tail_death_commits_its_note` and
+`notes.fault_dying_latch_live_note_exits` (each reads the commit off the ZOMBIE),
+`notes.committed_death_refuses` and
+`demand_page.file_read_revoked_latch_is_dying`. Decision:
+[[dec-2026-11-05-commit-the-death]].
 
 ### A handler that escapes its frame must not deafen the Proc (bug-2)
 

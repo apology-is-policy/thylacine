@@ -475,9 +475,11 @@ static bool g_rev_record_intr = false;
 static int  g_rev_saw_intr    = -1;
 
 // groupstatus r1 P3-2: a peer registering a note handler while the page-in's
-// read runs, which clears the Proc's terminate latches. Set to the Proc; the
-// stub registers on it once.
+// read runs, which clears the Proc's terminate latches unless a death is
+// committed. Set to the Proc; the stub's read first gives up for the reading
+// thread's death, as dev9p's does, then registers on it once.
 static struct Proc *g_rev_revoke_proc = NULL;
+static volatile int g_rev_gave_up;
 
 static long rev_test_read(struct Spoor *c, void *buf, long n, s64 off) {
     (void)c;
@@ -496,6 +498,7 @@ static long rev_test_read(struct Spoor *c, void *buf, long n, s64 off) {
         g_rev_protect_proc = NULL;       // protect ONCE
     }
     if (g_rev_revoke_proc) {
+        g_rev_gave_up = thread_die_pending(current_thread()) ? 1 : 0;
         notes_set_handler(g_rev_revoke_proc, 0x1000u);
         g_rev_revoke_proc = NULL;        // register ONCE
     }
@@ -1152,15 +1155,21 @@ void test_demand_page_file_miss_under_a_lock_refuses(void) {
     burrow_unref(v);
 }
 
-// Pending is sampled before the page-in as well as after. A terminate latch
-// that a peer revokes while the read runs (a handler registered, interposed in
-// the stub read) leaves only the first sample true; the failed read is still
-// answered FAULT_USER_DYING -- the EL0 arm then finds the latch stale and
-// re-executes -- never FAULT_USER_BUS, a false snare:bus for a read the latch
-// abandoned.
+// The read gives up for a terminate latch, and a peer registers a handler before
+// the fault answers (both interposed in the stub read). The give-up committed the
+// death (ARCH 8.8.2), so the handler revokes nothing: the failed read is
+// answered FAULT_USER_DYING, never FAULT_USER_BUS, a false snare:bus for a read
+// the death abandoned, and the Proc dies of the interrupt.
 static volatile int g_revoke_r;
 static volatile int g_revoke_armed;
 static volatile int g_revoke_after;
+static const char *volatile g_revoke_named;
+
+static bool rev_named(const char *got, const char *want) {
+    if (!got) return false;
+    while (*got && *got == *want) { got++; want++; }
+    return *got == *want;
+}
 
 static void revoked_latch_page_in_entry(void *arg) {
     (void)arg;
@@ -1170,12 +1179,14 @@ static void revoked_latch_page_in_entry(void *arg) {
     struct Burrow *v = s ? burrow_create_file(s, 0, ONE_PAGE) : NULL;
     if (v && burrow_map(p, v, USER_VA, ONE_PAGE, VMA_PROT_RX) == 0) {
         (void)notes_post(p, "interrupt", 0u, NULL, true);
-        g_revoke_armed = thread_die_pending(t) ? 1 : 0;
+        g_revoke_armed = (__atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE) &
+                          PROC_FLAG_INTR_TERMINATE_PENDING) != 0;
         g_rev_revoke_proc = p;
         struct fault_info fi;
         make_fi(&fi, USER_VA, /*is_write=*/false, /*is_instr=*/true);
         g_revoke_r = (int)userland_demand_page(p, &fi);
         g_revoke_after = thread_die_pending(t) ? 1 : 0;
+        g_revoke_named = notes_death_committed(p);
     }
     if (v) burrow_unref(v);
     thread_exit_self();
@@ -1184,7 +1195,8 @@ static void revoked_latch_page_in_entry(void *arg) {
 void test_demand_page_file_read_revoked_latch_is_dying(void) {
     g_rev_read_fail  = true;
     g_rev_read_calls = 0;
-    g_revoke_r = g_revoke_armed = g_revoke_after = -1;
+    g_revoke_r = g_revoke_armed = g_revoke_after = g_rev_gave_up = -1;
+    g_revoke_named = NULL;
     int pid = rfork(RFPROC, revoked_latch_page_in_entry, NULL);
     int status = -1;
     int reaped = pid > 0 ? wait_pid_for(pid, 0, &status) : -1;
@@ -1194,9 +1206,12 @@ void test_demand_page_file_read_revoked_latch_is_dying(void) {
     TEST_EXPECT_EQ(reaped, pid, "reaped the child");
     TEST_EXPECT_EQ(g_revoke_armed, 1, "the interrupt armed a latch before the page-in");
     TEST_EXPECT_EQ(g_rev_read_calls, 1, "the page-in attempted the read");
-    TEST_EXPECT_EQ(g_revoke_after, 0, "the handler registered during the read revoked it");
+    TEST_EXPECT_EQ(g_rev_gave_up, 1, "the read gave up for the death");
+    TEST_EXPECT_EQ(g_revoke_after, 1, "the handler registered since revoked nothing");
+    TEST_ASSERT(rev_named(g_revoke_named, NOTE_NAME_INTERRUPT),
+                "the committed death is the interrupt's");
     TEST_EXPECT_EQ(g_revoke_r, (int)FAULT_USER_DYING,
-        "a failed read under a latch revoked mid-read is not a snare:bus");
+        "a read the death abandoned is not a snare:bus, whatever a peer installs since");
 }
 
 // REVENANT read-ahead (#343): a FILE fault fills a CLUSTER of pages from ONE

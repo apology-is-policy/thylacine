@@ -10,7 +10,7 @@ validated-by: [spec-death-wake, gate-smp]
 locks: [lock-proc-table]
 design: ["docs/ARCHITECTURE.md", "docs/LINEAGE.md"]
 created: 2026-08-01
-updated: 2026-11-04
+updated: 2026-11-09
 ---
 ## Session registry retirement
 
@@ -47,7 +47,7 @@ consequence of getting it wrong is a hang rather than a crash.
 | `thread_exit_self()` | any thread | terminate *this Thread*; the last live one out zombies the Proc |
 | `exits_signalled(sig, msg)` / `exits_note(name)` | the Proc's own thread | as `exits`, but a death by note: status 1 and the note's POSIX signal recorded (gcpark-b); `exits_note` on a name with no signal is an extinction |
 | `proc_group_terminate(p, sig, msg)` | **holds [[lock-proc-table]]** | flag + wake + kick; does **not** wait; `sig` is the death signal the claim records (0 for an exit) |
-| `el0_return_die_check()` | at every return-to-EL0 | if flagged, or another thread's exec holds the Proc, `thread_exit_self()` (noreturn) |
+| `el0_return_die_check()` | at every return-to-EL0 | if flagged, or another thread's exec holds the Proc, `thread_exit_self()` (noreturn); if the Proc's death is committed (ARCH 8.8.2), `exits_note()` of the note it names |
 | `proc_fault_terminate(name, addr)` | EL0 unhandled fault; a snare death a Proc chooses for itself (`SYS_POSTNOTE`'s self arm, the phenotype's `kill`; `addr` is then the SVC's ELR) | diagnose (`user fault:`, the line the gates watch; it ends `-- terminating thread (an exec holds the Proc)` for a doomed thread) + `exits_note(snare:*)`; noreturn |
 
 `proc_group_terminate`'s lock precondition is not stylistic: the cascade
@@ -444,7 +444,8 @@ or a held child still loading.
 `debug_stop_req` (I-39) and `job_stop_req` (I-20) — and they share one park
 (`el0_return_stop_check`, the `sleep`/`tsleep` detour, and each Thread's own
 `debug_rendez`). Each resume clears **only its own owner**; the park
-predicate is the disjunction, false in a dying group. Death overrides both:
+predicate is the disjunction, false in a dying group and in a Proc whose death is
+committed ([[sub-kernel-notes]], "A latch's unwind commits the death"). Death overrides both:
 the stop-check runs *after* the die-check at the tail (and before the notes
 leg, so a stop in turn wins over a note), and reads the owners'
 flags (`proc_stop_owned`), not the predicate, so a thread killed between the
@@ -529,7 +530,10 @@ the same waiter, and the second `wakeup()` no-ops on `waiter == NULL`.
   sleeper's cond-check and its sleep, for **every** rendez sleep. Extended
   by LS-5 to the terminate-disposition `interrupt` latch, which is read
   lock-free by the sleep predicate precisely because the sleep path can
-  never take the notes-queue lock. The five death-only waits read group death
+  never take the notes-queue lock. For the same reason a read that finds a
+  latch commits the death by a lock-free swap, not under that lock (vote 35):
+  the commit then acts as group death does at the die-check, at the stop
+  predicate, at exec's claim and at rfork's parent re-check. The five death-only waits read group death
   alone and register for the death wake exactly as every other sleep does.
 - I-39/I-20 compatibility (`StopCompatI39`): neither resume may clear the
   other's owner.

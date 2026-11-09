@@ -1631,6 +1631,10 @@ static u32 notes_latch_for(u32 flags, const struct Thread *t) {
     return 0;
 }
 
+#ifdef KERNEL_TESTS
+u32 notes_latch_for_test(u32 flags, const struct Thread *t) { return notes_latch_for(flags, t); }
+#endif
+
 // ARCH 8.8.2 (vote 35): commit the Proc's death by a terminate latch. One
 // compare-and-swap on proc_flags, the word every latch write changes
 // (notes_latch_write_locked), sets PROC_FLAG_TERMINATE_COMMITTED and leaves armed
@@ -1653,19 +1657,35 @@ static bool notes_commit_latch(struct Proc *p, const struct Thread *t, u32 force
     }
 }
 
+// A thread about to die of `name`'s default commits that death first, under
+// q->lock, before it lets the lock go: the note stays queued while the Proc
+// dies, and a peer's tail that met it after a handler arrived would otherwise
+// hand it to the handler (notes_tail_yield_or_die_locked refuses once this is
+// set). Answers the note to die of: `name`, or the death a peer committed first.
+// A note with no latch (`kill`) is never caught, and needs no commit.
+static const char *notes_commit_note_locked(struct Proc *p, const struct Thread *t,
+                                            const char *name) {
+    u32 latch = notes_name_terminate_latch(name);
+    if (latch == 0) return name;
+    (void)notes_commit_latch(p, t, latch);
+    return notes_death_committed(p);
+}
+
 // The widened #811 death predicate (ARCH 8.8.1 + 8.8.2). LOCK-FREE: atomic
-// loads of group_exit_msg + proc_flags, and the OWNER-read note_mask (`t` is
+// loads of group_exit_msg + proc_flags, the commit's compare-and-swap, and the
+// OWNER-read note_mask (`t` is
 // always the calling thread at every site -- sleep/tsleep's register-then-
 // observe, torpor's post-register check, the 9P reader's unwind decision --
 // and once the thread is linked note_mask is written ONLY by its owner -- the
 // writers, and the creator's store before the link, are listed at
 // Thread.note_mask in thread.h -- never while it is inside one of those waits).
 // A masked thread reads false from the latch
-// leg: it neither unwinds nor terminates until it unmasks (masking defers --
-// matching the EL0-return tail, which also applies the observing thread's
-// mask, so a latch-woken thread never unwinds into a tail that refuses to
-// act). group_exit_msg is checked FIRST and ignores the mask (death is not
-// deferrable; N-4).
+// leg until a death is committed: it neither unwinds nor terminates until it
+// unmasks (masking defers -- matching the EL0-return tail, which also applies
+// the observing thread's mask, so a latch-woken thread never unwinds into a
+// tail that refuses to act). A committed death, like group_exit_msg, which is
+// checked FIRST, ignores the mask, and el0_return_die_check ends every thread
+// by it (death is not deferrable; N-4).
 bool thread_die_pending(struct Thread *t) {
     if (!t) return false;
     // #68 F1: the exit-close window is ORDERLY FINALIZATION, not duress.
@@ -1753,6 +1773,7 @@ void notes_fault_dying_latch(struct Thread *t) {
     spin_lock(&q->lock);
     const char *tname = notes_terminate_note_name_locked(p, t);
     if (tname) {
+        tname = notes_commit_note_locked(p, t, tname);
         spin_unlock(&q->lock);
         exits_note(tname);
         // unreachable
@@ -2523,7 +2544,8 @@ again:
         if (!have_handler && viv_signote_default_is_terminate(sn)) {
             // sn decoded from a canonical literal, so the lookup cannot miss; a
             // miss (NULL) records no signal, and exits_note stops the kernel.
-            const char *tname = notes_canonical_name_ptr(candidate.name);
+            const char *tname = notes_commit_note_locked(
+                p, t, notes_canonical_name_ptr(candidate.name));
             spin_unlock(&q->lock);
             exits_note(tname);
             // unreachable
@@ -2550,6 +2572,7 @@ again:
         // the fd-read path as before, and `kill` (N-4) was handled above.
         const char *tname = notes_terminate_note_name_locked(p, t);
         if (tname) {
+            tname = notes_commit_note_locked(p, t, tname);
             spin_unlock(&q->lock);
             // exits_note() handles single-thread (-> ZOMBIE, status 1, the
             // note's signal) AND multi-thread (-> the #811 group cascade); it

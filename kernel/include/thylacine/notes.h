@@ -738,13 +738,15 @@ int notes_noted_default(struct exception_context *ctx, struct Thread *t);
 
 // The WIDENED #811 death predicate (ARCH 8.8.1 + 8.8.2): true iff `t`, on
 // returning to its EL0-return tail now, will die there -- its Proc is
-// group-terminating (group_exit_msg set), OR a terminate-disposition
-// `interrupt` is pending (the latch) and `interrupt` is not masked for `t`
-// (a masked thread defers: it neither unwinds nor terminates until it
-// unmasks). LOCK-FREE (atomic loads + the owner-read note_mask): callable
-// from sleep/tsleep's register-then-observe under wait_lock/r->lock, from
-// torpor's post-register check under its bucket's lock, and from the 9P client's
-// reader-unwind decision. Replaces every direct group_exit_msg load at
+// group-terminating (group_exit_msg set), OR a terminate latch is armed for a
+// family not masked for `t` (a masked thread defers: it neither unwinds nor
+// terminates until it unmasks), OR a fatal note aimed at `t`, OR the Proc's
+// death is committed. Reading true for a latch or an aimed note commits the
+// death (ARCH 8.8.2): a handler installed after the read revokes nothing.
+// LOCK-FREE (atomic loads, one compare-and-swap, the owner-read note_mask):
+// callable from sleep/tsleep's register-then-observe under wait_lock/r->lock,
+// from torpor's post-register check under its bucket's lock, and from the 9P
+// client's reader-unwind decision. Replaces every direct group_exit_msg load at
 // those sites.
 bool thread_die_pending(struct Thread *t);
 
@@ -762,10 +764,11 @@ bool thread_group_death_pending(struct Thread *t);
 // first queued terminate note `t` would die of -- the tail's own pick, made
 // here because the tail defers a note while a handler runs or the user SP is
 // unusable, and the faulting instruction would re-execute into the same fault
-// forever. When no queued note of an armed class would still default-terminate
-// (a phenotype handler installed for it since the arm, which clears no latch),
-// those latches are stale: cleared under q->lock, and the call returns. Owner
-// thread only.
+// forever. A committed death (ARCH 8.8.2) is died of first. When no queued note
+// of an armed class would still default-terminate (a handler installed for it
+// since the arm, before the disposition's re-read clears the latch), those
+// latches are stale: cleared under q->lock, and the call returns. Owner thread
+// only.
 void notes_fault_dying_latch(struct Thread *t);
 
 // Can a death end this thread's sleeps? Not a kernel thread's (no death
@@ -776,6 +779,10 @@ bool thread_death_reaches(struct Thread *t);
 
 #ifdef KERNEL_TESTS
 const char *notes_latch_note_name_for_test(u32 latch);
+
+// The latch thread_die_pending would commit for `t` in `flags`, without
+// committing: the per-family pairing, read apart from the commit.
+u32 notes_latch_for_test(u32 flags, const struct Thread *t);
 
 // item 11 (ARCH §8.8.3): the NON-death sibling of thread_die_pending. True iff a
 // CAUGHT, deliverable note (a handler is installed OR the Proc self-manages its

@@ -1602,8 +1602,11 @@ and the death stands, though the handler is installed a moment later. A committe
 death is not deferrable: it ends every thread's sleeps whatever its mask, as group
 death does, and every EL0-return tail ends the Proc by the named note before it
 stops or delivers a note. A tail that hands a terminate-class note to a handler
-first disarms that note's latch by the same swap when no other queued note keeps
-it armed, so no note is both handled and died of. A committed Proc refuses what
+first clears that note's latch by the same swap -- a latch stands for one note
+name, and a handler now catches it -- and dies of the committed note when the swap
+is refused; a tail or fault arm that dies of a note's default commits that death
+under the queue lock before releasing it, since the note stays queued while the
+Proc dies. So no note is both handled and died of. A committed Proc refuses what
 group death refuses: a stop park, an exec's point of no return, a fork. Each
 terminate latch names one note (`tty:quit` and `tty:hup` latch separately), so the
 named death does not depend on the note still being queued. Linux decides the same

@@ -421,7 +421,10 @@ VARIABLES
                       \*   of each fd returned (the revents it would report).
     deadline_passed,  \* BOOLEAN — monotonic time reached the poll timeout.
     dying,            \* BOOLEAN — the poller's Proc is group-terminating
-                      \*   (thread_die_pending). Monotonic.
+                      \*   (thread_die_pending). Monotonic: group death is,
+                      \*   and since vote 35 a terminate latch is once read,
+                      \*   because the read commits the death (ARCH 8.8.2;
+                      \*   death_commit.tla checks the commit).
     stop_req,         \* BOOLEAN — a debugger or job-control stop is pending
                       \*   (proc_stop_requested).
     stop_used,        \* BOOLEAN — the one stop request of a behavior has been

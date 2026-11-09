@@ -5985,6 +5985,23 @@ static int stop_park_wake_cond(void *arg) {
 // the IRQ tail (DEBUG-FS-DESIGN 4.2); group death does not return. A latched
 // interrupt does neither: the thread stays parked, and meets the note as the
 // park returns, or on the IRQ tail at its next checkpoint (DEBUG-FS-DESIGN 5g).
+// The stop park's death check: group death and an exec's doom end the thread,
+// a committed death (ARCH 8.8.2) ends the Proc by the note it names. A resume
+// lets a parked thread go on to the eret, so the park must meet a commit that
+// landed after the tail's die check, as it meets group death.
+static void el0_stop_park_death(struct Thread *t, struct Proc *p) {
+    if (__atomic_load_n(&p->group_exit_msg, __ATOMIC_ACQUIRE) != NULL ||
+        proc_exec_dooms(p, t)) {
+        t->debug_trapframe = NULL;   // 8a-1c holotype F2: don't die with a dangling frame pointer
+        thread_exit_self();          // noreturn
+    }
+    const char *committed = notes_death_committed(p);
+    if (committed) {
+        t->debug_trapframe = NULL;
+        exits_note(committed);       // noreturn
+    }
+}
+
 static void el0_stop_park(struct exception_context *ctx, struct Thread *t,
                           struct Proc *p, int (*wake_cond)(void *)) {
     // 8a-1c: publish the EL0-entry trapframe pointer (== the current SP at the
@@ -6004,12 +6021,10 @@ static void el0_stop_park(struct exception_context *ctx, struct Thread *t,
         // cascade reads rendez_blocked_on == &debug_rendez under wait_lock), so
         // we resume here and die rather than re-parking. group_exit_msg is the
         // model's `gflag`. An exec by another thread kills a parked thread the
-        // same way (ARCH 7.3.3); its claim woke debug_rendez too.
-        if (__atomic_load_n(&p->group_exit_msg, __ATOMIC_ACQUIRE) != NULL ||
-            proc_exec_dooms(p, t)) {
-            t->debug_trapframe = NULL;   // 8a-1c holotype F2: don't die with a dangling frame pointer
-            thread_exit_self();          // noreturn
-        }
+        // same way (ARCH 7.3.3); its claim woke debug_rendez too. A committed
+        // death wakes no park itself; the group termination its committer runs
+        // at its own tail does.
+        el0_stop_park_death(t, p);
 
         // Resumed (specs/debug_stop.tla ResumeThread -> proceed): start / detach
         // / ctl-fd close cleared the debug flag via proc_debug_resume, AND/OR
@@ -6028,11 +6043,9 @@ static void el0_stop_park(struct exception_context *ctx, struct Thread *t,
             // just before the terminate reads the cleared flags here. The
             // terminate is ordered before the clear wake_cond ACQUIRE-read
             // (both RELEASE), so this load sees it: a dying thread never erets.
-            if (__atomic_load_n(&p->group_exit_msg, __ATOMIC_ACQUIRE) != NULL ||
-                proc_exec_dooms(p, t)) {
-                t->debug_trapframe = NULL;
-                thread_exit_self();          // noreturn
-            }
+            // A committed death reads as no stop at all (proc_stop_requested),
+            // so a parked thread that wakes under one ends here too.
+            el0_stop_park_death(t, p);
             // 8a-2b-2 (specs/debug_step.tla Tail->stepping): a step-resume arms the
             // arm64 SS machine in the frame the eret restores -- SPSR.SS (bit 21) =
             // active-not-pending, so exactly ONE EL0 instruction executes before
@@ -6179,7 +6192,8 @@ void el0_birth_park(struct exception_context *ctx) {
 // with its close. The park is death-only:
 // a latched interrupt waits for the stop to clear, and the caller's own wait,
 // re-checking then, unwinds for it if it is one that does (DEBUG-FS-DESIGN
-// 5g). sleep()'s `r != &debug_rendez` detour gate skips the
+// 5g). A committed death (ARCH 8.8.2) reads as the stop cleared, and the group
+// termination its committer runs at its own tail is the wake. sleep()'s `r != &debug_rendez` detour gate skips the
 // stop-check for this nested park (r == debug_rendez here), so there is no
 // recursion. specs/debug_stop.tla: the sleeper's register-then-observe park
 // (StopWakesSleeper -> the handshake -> "stopped"); NoLostStop +

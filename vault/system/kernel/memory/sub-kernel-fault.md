@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/ARCHITECTURE.md", "docs/EXEC-LOAD-DESIGN.md"]
 created: 2026-08-03
-updated: 2026-11-03
+updated: 2026-11-09
 ---
 ## Purpose
 
@@ -39,7 +39,7 @@ a user fault. Four outcomes:
 | `FAULT_HANDLED` | resolved; the return-from-exception re-runs the faulting instruction |
 | `FAULT_UNHANDLED_USER` | bad address or denied permission — the caller terminates the Proc with `snare:segv` |
 | `FAULT_USER_BUS` | a **valid** mapping whose backing store failed, or an abort no page install can resolve — an alignment fault or a synchronous external abort on a mapped page (B-1a' round 4, F17) — `snare:bus` |
-| `FAULT_USER_DYING` | a user fault left unresolved while the faulting thread's death was pending (`thread_die_pending`, sampled before and after the page-in) — the death is its disposition: no `user fault:` line, no `snare:*` of its own (EL0 handling: [[sub-kernel-exception]]) |
+| `FAULT_USER_DYING` | a user fault left unresolved while the faulting thread's death was pending (`thread_die_pending`, read once, after the page-in) — the death is its disposition: no `user fault:` line, no `snare:*` of its own (EL0 handling: [[sub-kernel-exception]]) |
 | `FAULT_FATAL` | reserved; fatal kernel paths extinct in place |
 
 The `FAULT_USER_BUS` / `FAULT_UNHANDLED_USER` distinction is the substance, not
@@ -214,13 +214,17 @@ death can unwind the page-in's read, a fault that fails while
 abandoned a peer JIT thread's 9P text read (`9p: op abandoned (tag 0, death)`),
 the pager answered `snare:bus`, and the console printed a user fault that
 never happened; that thread's `exits()`, when it was the last out, recorded
-status 1 over the group's claim ([[sub-kernel-death]]). Pending is sampled before the page-in as well as after,
-so a terminate latch a peer revokes while the read unwinds (by installing a
-handler) still answers DYING; the EL0 arm then finds the latch stale and
-re-executes, and the re-executed fault meets a page-in no latch shapes.
-Witnesses: `demand_page.file_read_error_dying_is_death` (control: the same
-failed read with no death pending is BUS),
-`demand_page.file_read_revoked_latch_is_dying`.
+status 1 over the group's claim ([[sub-kernel-death]]). Pending is read once,
+after the page-in. A read that gave up for a terminate latch committed the death
+where it read it (ARCH 8.8.2, [[sub-kernel-notes]]), so a handler a peer installs
+while the read unwinds revokes nothing: the fault still answers DYING, and the EL0
+arm dies of the committed note. Until vote 35 the predicate was also sampled before
+the page-in, because a revoked latch left only that sample true and the arm then
+re-executed. Witnesses: `demand_page.file_read_error_dying_is_death` (control: the
+same failed read with no death pending is BUS),
+`demand_page.file_read_revoked_latch_is_dying` (the stub read gives up for the
+death, as dev9p's does, then registers a handler: DYING, and the death is the
+interrupt's).
 
 The note did not exist when this dossier was written, deliberately: half its
 enforcement was unswept, and an invariant written from half its enforcement is

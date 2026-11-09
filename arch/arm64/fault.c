@@ -1294,22 +1294,19 @@ static enum fault_result demand_page_one(struct Proc *p,
 // I-24: a fault left unresolved while the thread's death is pending answers
 // FAULT_USER_DYING, never a snare:* of its own -- the death that abandoned the
 // page-in's read is the cause, and a snare:bus here would print a false user
-// fault and race the group's claimed status. Pending is sampled before the
-// page-in as well as after: a terminate latch revoked while the read unwound (a
-// peer installed a handler) leaves only the first sample true, and the EL0 arm
-// then finds the latch stale and re-executes rather than reporting the unwound
-// read as an I/O error.
+// fault and race the group's claimed status. Pending is read once, after the
+// page-in: a read that gave up for a terminate latch committed the death where
+// it read it (ARCH 8.8.2), so a handler a peer installed since cannot make the
+// abandoned read look like an I/O error.
 enum fault_result userland_demand_page(struct Proc *p,
                                        const struct fault_info *fi) {
     struct Thread *t = current_thread();
     bool own = t && t->proc == p;
-    bool dying = own && thread_die_pending(t);
     bool intr = t && t->note_interruptible;
     if (t) t->note_interruptible = false;
     enum fault_result r = demand_page_one(p, fi);
     if (t) t->note_interruptible = intr;
-    if ((r == FAULT_UNHANDLED_USER || r == FAULT_USER_BUS) && own &&
-        (dying || thread_die_pending(t)))
+    if ((r == FAULT_UNHANDLED_USER || r == FAULT_USER_BUS) && own && thread_die_pending(t))
         r = FAULT_USER_DYING;
     return r;
 }

@@ -29,6 +29,7 @@
 
 #include <thylacine/dev.h>
 #include <thylacine/notes.h>
+#include <thylacine/poll.h>     // vote 35: sys_poll_sleep_for
 #include <thylacine/proc.h>
 #include <thylacine/sched.h>
 #include <thylacine/spinlock.h>
@@ -783,6 +784,14 @@ void test_notes_intr_latch_lifecycle(void) {
 // thread_die_pending — the widened #811 sleep predicate: group-exit death
 // (mask-blind) OR the terminate latch gated by the thread's own mask.
 
+// The note a committed death names, read by its text against the name expected,
+// not by the table pointer both sides would share.
+static bool dp_named(const char *got, const char *want) {
+    if (!got) return false;
+    while (*got && *got == *want) { got++; want++; }
+    return *got == *want;
+}
+
 void test_notes_die_pending_predicate(void) {
     struct Proc *p = proc_alloc();
     TEST_ASSERT(p != NULL, "proc_alloc succeeded");
@@ -800,12 +809,14 @@ void test_notes_die_pending_predicate(void) {
     TEST_ASSERT(!thread_die_pending(NULL), "NULL thread -> false");
     TEST_ASSERT(!thread_die_pending(&fake_t), "fresh Proc -> false");
 
-    // Latch leg: armed + unmasked -> true; masked -> false (masking defers).
+    // Latch leg: masked -> false (masking defers), and a deferring read commits
+    // nothing. The unmasked read commits the death (ARCH 8.8.2), so it is
+    // latch_read_commits_the_death's, on a Proc of its own.
     TEST_EXPECT_EQ(notes_post(p, "interrupt", 0u, NULL, true), 0, "post");
-    TEST_ASSERT(thread_die_pending(&fake_t), "armed + unmasked -> true");
     fake_t.note_mask = (1u << NOTE_BIT_INTERRUPT);
     TEST_ASSERT(!thread_die_pending(&fake_t),
                 "armed + MASKED -> false (the thread defers)");
+    TEST_ASSERT(notes_death_committed(p) == NULL, "a deferring read commits nothing");
 
     // Death leg: group_exit_msg overrides the mask (death is not deferrable).
     __atomic_store_n(&p->group_exit_msg, "killed", __ATOMIC_RELEASE);
@@ -843,6 +854,8 @@ void test_notes_die_pending_predicate(void) {
     (void)notes_dequeue_for_fd_locked(p, NULL, &got);
     spin_unlock(&p->notes->lock);
     TEST_ASSERT(!thread_die_pending(&fake_t), "drained -> false");
+    TEST_ASSERT(notes_death_committed(p) == NULL,
+                "no read along the way committed a death (the group leg comes first)");
 
     // RW-0 F3 (defense-in-depth): the latch leg never fires for kproc, even
     // with the flag FORCED onto proc_flags (the arm site refuses kproc; this
@@ -964,18 +977,21 @@ void test_notes_pipe_die_pending(void) {
     TEST_EXPECT_EQ(notes_post(p, "pipe", 0u, NULL, true), 0, "post pipe");
     TEST_ASSERT(proc_intr_terminate_pending(p),
                 "pipe post fires the wake gate (#237: PIPE in the class mask)");
-    TEST_ASSERT(thread_die_pending(&fake_t),
-                "armed + unmasked -> true (the #237 behaviour; FALSE pre-fix)");
 
-    // Masking NOTE_BIT_PIPE defers -- the native-runtime EPIPE-not-death path.
+    // Masking NOTE_BIT_PIPE defers -- the native-runtime EPIPE-not-death path --
+    // and a deferring read commits nothing.
     fake_t.note_mask = (1u << NOTE_BIT_PIPE);
     TEST_ASSERT(!thread_die_pending(&fake_t),
                 "armed + pipe MASKED -> false (libthyla-rs / libt / Go mask it)");
+    TEST_ASSERT(notes_death_committed(p) == NULL, "a deferring read commits nothing");
 
-    // Per-family precision: masking an UNRELATED family never defers pipe.
+    // Per-family precision, read without committing: masking an UNRELATED family
+    // never defers pipe.
     fake_t.note_mask = (1u << NOTE_BIT_INTERRUPT);
-    TEST_ASSERT(thread_die_pending(&fake_t),
-                "interrupt masked, pipe unmasked -> true (per-family latch)");
+    TEST_EXPECT_EQ(notes_latch_for_test(__atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE),
+                                        &fake_t),
+                   PROC_FLAG_PIPE_TERMINATE_PENDING,
+                   "interrupt masked, pipe unmasked -> the pipe latch (per-family)");
 
     // Death overrides the pipe mask (death is not deferrable).
     fake_t.note_mask = (1u << NOTE_BIT_PIPE);
@@ -995,8 +1011,18 @@ void test_notes_pipe_die_pending(void) {
     TEST_ASSERT(!thread_die_pending(&fake_t), "drained -> latch clears -> false");
     TEST_ASSERT(!proc_intr_terminate_pending(p), "drained -> wake gate clears");
 
+    // Armed and unmasked for this thread, the read is true and commits the death
+    // by pipe (the #237 behaviour; FALSE pre-fix), with interrupt masked.
+    TEST_EXPECT_EQ(notes_post(p, "pipe", 0u, NULL, true), 0, "post pipe again");
+    fake_t.note_mask = (1u << NOTE_BIT_INTERRUPT);
+    bool open_ = thread_die_pending(&fake_t);
+    const char *committed = notes_death_committed(p);
+
     p->state = PROC_STATE_ZOMBIE;
     proc_free(p);
+
+    TEST_ASSERT(open_, "armed + pipe unmasked -> true (the #237 behaviour; FALSE pre-fix)");
+    TEST_ASSERT(dp_named(committed, NOTE_NAME_PIPE), "and the read commits the death by pipe");
 }
 
 // ---------------------------------------------------------------------------
@@ -1026,11 +1052,11 @@ void test_notes_term_die_pending(void) {
     int  post  = notes_post(p, NOTE_NAME_TERM, 0u, NULL, false);
     u32  flags = __atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE);
     bool gate  = proc_intr_terminate_pending(p);
-    bool open_ = thread_die_pending(&fake_t);
-    fake_t.note_mask = (1u << NOTE_BIT_INTERRUPT);
-    bool intr_masked = thread_die_pending(&fake_t);
     fake_t.note_mask = (1u << NOTE_BIT_TERM);
     bool term_masked = thread_die_pending(&fake_t);
+    bool masked_none = notes_death_committed(p) == NULL;
+    fake_t.note_mask = (1u << NOTE_BIT_INTERRUPT);
+    u32  intr_masked = notes_latch_for_test(flags, &fake_t);
     fake_t.note_mask = 0u;
     struct Note got;
     got.name[0] = 0;
@@ -1040,6 +1066,9 @@ void test_notes_term_die_pending(void) {
     bool got_term = got.name[0] == 't' && got.name[1] == 'e' && got.name[2] == 'r' &&
                     got.name[3] == 'm' && got.name[4] == 0;
     bool drained  = thread_die_pending(&fake_t);
+    int  repost   = notes_post(p, NOTE_NAME_TERM, 0u, NULL, false);
+    bool open_    = thread_die_pending(&fake_t);
+    const char *committed = notes_death_committed(p);
 
     p->state = PROC_STATE_ZOMBIE;
     proc_free(p);
@@ -1051,11 +1080,15 @@ void test_notes_term_die_pending(void) {
     TEST_ASSERT((flags & PROC_FLAG_TERM_TERMINATE_PENDING) != 0, "term arms its own latch");
     TEST_ASSERT((flags & PROC_FLAG_INTR_TERMINATE_PENDING) == 0, "and not interrupt's");
     TEST_ASSERT(gate, "the wake gate fires on term");
-    TEST_ASSERT(open_, "armed + unmasked -> true");
-    TEST_ASSERT(intr_masked, "interrupt masked, term unmasked -> true (per-family)");
     TEST_ASSERT(!term_masked, "term masked -> false");
+    TEST_ASSERT(masked_none, "and that read commits nothing");
+    TEST_EXPECT_EQ(intr_masked, PROC_FLAG_TERM_TERMINATE_PENDING,
+                   "interrupt masked, term unmasked -> term's latch (per-family)");
     TEST_ASSERT(deq >= 0 && got_term, "the queued note is term");
     TEST_ASSERT(!drained, "drained -> the latch clears -> false");
+    TEST_EXPECT_EQ(repost, 0, "term posted again");
+    TEST_ASSERT(open_, "armed + unmasked -> true");
+    TEST_ASSERT(dp_named(committed, NOTE_NAME_TERM), "and the read commits the death by term");
 }
 
 // ---------------------------------------------------------------------------
@@ -2432,25 +2465,35 @@ void test_notes_direct_die_predicate(void) {
     TEST_ASSERT(!thread_die_pending(&g_dn_a), "fresh: a would not die");
     TEST_EXPECT_EQ(proc_note_thread(p, DN_TID_A, NOTE_NAME_TERM, NULL), 0, "post term at a, no handler");
     TEST_EXPECT_EQ(p->notes->count, 0u, "the queue holds nothing");
-    TEST_ASSERT(thread_die_pending(&g_dn_a), "a dies of it");
     TEST_ASSERT(!thread_die_pending(&g_dn_b), "b, which it does not name, does not");
     TEST_ASSERT(!proc_intr_terminate_pending(p), "and no group latch armed");
 
     g_dn_a.note_mask = term;
     TEST_ASSERT(!thread_die_pending(&g_dn_a), "masked, it waits behind that thread's mask");
     g_dn_a.note_mask = 0;
-    TEST_ASSERT(thread_die_pending(&g_dn_a), "unmasked, it is fatal again");
 
-    // Read at use, not latched at the post: a handler makes it a caught note, and
-    // losing the handler makes it fatal again.
+    // Read at use, not latched at the post: a handler makes it a caught note.
     __atomic_store_n(&p->handler_va, DN_HANDLER_VA, __ATOMIC_RELEASE);
     TEST_ASSERT(!thread_die_pending(&g_dn_a), "with a handler it is caught");
     __atomic_store_n(&p->handler_va, 0ull, __ATOMIC_RELEASE);
-    TEST_ASSERT(thread_die_pending(&g_dn_a), "without one, fatal");
 
     // A note whose default is to ignore never kills.
+    u32 word = dn_word(&g_dn_a);
     __atomic_store_n(&g_dn_a.note_direct, 1u << NOTE_BIT_CHILD_EXIT, __ATOMIC_RELEASE);
     TEST_ASSERT(!thread_die_pending(&g_dn_a), "child_exit's default ignores");
+    __atomic_store_n(&g_dn_a.note_direct, word, __ATOMIC_RELEASE);
+    TEST_ASSERT(notes_death_committed(p) == NULL, "no read so far committed a death");
+
+    // Unmasked and with no handler, it is fatal, and the read commits the group's
+    // death by term on term's latch (ARCH 8.8.2): b's waits end too, mask and all,
+    // as the group death a's tail runs would end them.
+    TEST_ASSERT(thread_die_pending(&g_dn_a), "losing the handler makes it fatal: a dies of it");
+    TEST_ASSERT(dp_named(notes_death_committed(p), NOTE_NAME_TERM), "a's read committed the death by term");
+    TEST_EXPECT_EQ(__atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE) & PROC_FLAG_TERMINATE_PENDING_MASK,
+                   PROC_FLAG_TERM_TERMINATE_PENDING, "on term's latch alone");
+    g_dn_b.note_mask = ~0ull;
+    TEST_ASSERT(thread_die_pending(&g_dn_b), "and b, every note masked, now ends its waits");
+    g_dn_b.note_mask = 0;
     __atomic_store_n(&g_dn_a.note_direct, 0, __ATOMIC_RELEASE);
     dn_free(p);
 }
@@ -2690,11 +2733,11 @@ void test_notes_usr_notes_die_apart(void) {
         int  post  = notes_post(p, name, 0u, NULL, false);
         u32  flags = __atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE);
         bool gate  = proc_intr_terminate_pending(p);
-        bool open_ = thread_die_pending(&fake_t);
-        fake_t.note_mask = (u64)1u << rows[i].other_bit;
-        bool other_masked = thread_die_pending(&fake_t);
         fake_t.note_mask = (u64)1u << rows[i].bit;
         bool own_masked = thread_die_pending(&fake_t);
+        bool masked_none = notes_death_committed(p) == NULL;
+        fake_t.note_mask = (u64)1u << rows[i].other_bit;
+        u32  other_masked = notes_latch_for_test(flags, &fake_t);
         fake_t.note_mask = 0u;
         struct Note got;
         got.name[0] = 0;
@@ -2703,6 +2746,9 @@ void test_notes_usr_notes_die_apart(void) {
         spin_unlock(&p->notes->lock);
         bool got_it  = dn_same_name(got.name, name);
         bool drained = thread_die_pending(&fake_t);
+        int  repost  = notes_post(p, name, 0u, NULL, false);
+        bool open_   = thread_die_pending(&fake_t);
+        bool named   = dp_named(notes_death_committed(p), name);
 
         p->state = PROC_STATE_ZOMBIE;
         proc_free(p);
@@ -2715,11 +2761,14 @@ void test_notes_usr_notes_die_apart(void) {
         TEST_ASSERT((flags & rows[i].latch) != 0, "it arms its own latch");
         TEST_ASSERT((flags & rows[i].other_latch) == 0, "and not its twin's");
         TEST_ASSERT(gate, "the wake gate fires on it");
-        TEST_ASSERT(open_, "armed + unmasked -> true");
-        TEST_ASSERT(other_masked, "its twin masked -> still true (per-family)");
         TEST_ASSERT(!own_masked, "itself masked -> false");
+        TEST_ASSERT(masked_none, "and that read commits nothing");
+        TEST_EXPECT_EQ(other_masked, rows[i].latch, "its twin masked -> its own latch (per-family)");
         TEST_ASSERT(deq >= 0 && got_it, "the queued note is it");
         TEST_ASSERT(!drained, "drained -> the latch clears -> false");
+        TEST_EXPECT_EQ(repost, 0, "posted again");
+        TEST_ASSERT(open_, "armed + unmasked -> true");
+        TEST_ASSERT(named, "and the read commits the death by it");
     }
 }
 
@@ -3915,7 +3964,9 @@ static void fdl_live_entry(void *arg) {
     (void)arg;
     struct Thread *t = current_thread();
     (void)notes_post(t->proc, "interrupt", 0u, NULL, true);
-    g_fdl_pending = thread_die_pending(t) ? 1 : 0;
+    // Read without the predicate, which would commit: the arm's own pick must.
+    g_fdl_pending = (__atomic_load_n(&t->proc->proc_flags, __ATOMIC_ACQUIRE) &
+                     PROC_FLAG_INTR_TERMINATE_PENDING) ? 1 : 0;
     notes_fault_dying_latch(t);
     exits_code(7, "returned");
 }
@@ -3941,10 +3992,29 @@ static const char *fdl_zombie_msg(int pid) {
     }
 }
 
+// The ZOMBIE's death word: the terminate latches and the commit bit, or ~0u when
+// the child is not a ZOMBIE inside the budget. Read before the reap frees it.
+static u32 fdl_zombie_word(int pid) {
+    struct Proc *c = proc_find_by_pid(pid);
+    if (!c) return ~0u;
+    u64 deadline = timer_now_ns() + 2000000000ull;
+    for (;;) {
+        irq_state_t s = proc_table_lock_acquire();
+        bool z = c->state == PROC_STATE_ZOMBIE;
+        u32 w = __atomic_load_n(&c->proc_flags, __ATOMIC_ACQUIRE) &
+                (PROC_FLAG_TERMINATE_PENDING_MASK | PROC_FLAG_TERMINATE_COMMITTED);
+        proc_table_lock_release(s);
+        if (z) return w;
+        if (timer_now_ns() >= deadline) return ~0u;
+        sched();
+    }
+}
+
 void test_notes_fault_dying_latch_live_note_exits(void) {
     g_fdl_pending = -1;
     int pid = rfork(RFPROC, fdl_live_entry, NULL);
     const char *msg = pid > 0 ? fdl_zombie_msg(pid) : NULL;
+    u32 word = pid > 0 ? fdl_zombie_word(pid) : ~0u;
     int st = -1;
     int got = pid > 0 ? wait_pid_for(pid, 0, &st) : -1;
     TEST_ASSERT(pid > 0, "rfork");
@@ -3953,6 +4023,8 @@ void test_notes_fault_dying_latch_live_note_exits(void) {
     TEST_EXPECT_EQ(st, 1, "the child died of the note (1), not by returning (7)");
     TEST_ASSERT(msg != NULL && fdl_str_eq(msg, NOTE_NAME_INTERRUPT),
                 "the child's exit message is the note's name, not a snare:*");
+    TEST_EXPECT_EQ(word, PROC_FLAG_INTR_TERMINATE_PENDING | PROC_FLAG_TERMINATE_COMMITTED,
+                   "the arm committed the death it died of (ARCH 8.8.2)");
 }
 
 // The stale half: a latch whose class has no default-terminating note queued
@@ -3988,6 +4060,368 @@ void test_notes_fault_dying_latch_clears_only_stale(void) {
                 "the stale pipe latch (no pipe note queued) was cleared");
     TEST_ASSERT((g_fdl_flags_after & PROC_FLAG_INTR_TERMINATE_PENDING) != 0,
                 "the live interrupt latch this thread masks was kept");
+}
+
+// ---------------------------------------------------------------------------
+// ARCH 8.8.2 (vote 35): a latch's unwind commits the death
+// ---------------------------------------------------------------------------
+
+static struct Thread g_cd_a, g_cd_m;
+
+static void cd_thread(struct Thread *t, struct Proc *p, u64 mask) {
+    t->note_direct         = 0;
+    t->proc                = p;
+    t->note_mask           = mask;
+    t->exit_close_active   = false;
+    t->kthread_join_active = false;
+}
+
+static u32 cd_latches(const struct Proc *p) {
+    return __atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE) &
+           (PROC_FLAG_TERMINATE_PENDING_MASK | PROC_FLAG_TERMINATE_COMMITTED);
+}
+
+static void cd_free(struct Proc *p) {
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+}
+
+// Reading true for a latch commits the death. A peer that masks both pending notes
+// defers and commits nothing; the unmasked read commits, leaving armed only the
+// latch it acted on (the first in the fixed order), which names the note. A post
+// after the commit arms nothing, a handler installed after it revokes nothing, and
+// the masked peer now reads true: a committed death is not deferrable.
+void test_notes_latch_read_commits_the_death(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc succeeded");
+    cd_thread(&g_cd_a, p, 0u);
+    cd_thread(&g_cd_m, p, (1ull << NOTE_BIT_INTERRUPT) | (1ull << NOTE_BIT_TERM));
+
+    int  post_i  = notes_post(p, NOTE_NAME_INTERRUPT, 0u, NULL, true);
+    int  post_t  = notes_post(p, NOTE_NAME_TERM, 0u, NULL, false);
+    bool m_first = thread_die_pending(&g_cd_m);
+    u32  before  = cd_latches(p);
+    bool a_read  = thread_die_pending(&g_cd_a);
+    u32  after   = cd_latches(p);
+    const char *named = notes_death_committed(p);
+    int  post_u  = notes_post(p, NOTE_NAME_USR1, 0u, NULL, false);
+    u32  posted  = cd_latches(p);
+    notes_set_handler(p, 0x1000ull);
+    u32  handled = cd_latches(p);
+    bool m_now   = thread_die_pending(&g_cd_m);
+    cd_free(p);
+
+    TEST_EXPECT_EQ(post_i, 0, "interrupt posted");
+    TEST_EXPECT_EQ(post_t, 0, "term posted");
+    TEST_ASSERT(!m_first, "a peer masking both defers");
+    TEST_EXPECT_EQ(before, PROC_FLAG_INTR_TERMINATE_PENDING | PROC_FLAG_TERM_TERMINATE_PENDING,
+                   "and commits nothing: both latches armed, no commit");
+    TEST_ASSERT(a_read, "the unmasked read is true");
+    TEST_EXPECT_EQ(after, PROC_FLAG_INTR_TERMINATE_PENDING | PROC_FLAG_TERMINATE_COMMITTED,
+                   "and commits, leaving armed the one latch it acted on");
+    TEST_ASSERT(dp_named(named, NOTE_NAME_INTERRUPT), "which names the interrupt");
+    TEST_EXPECT_EQ(post_u, 0, "a post after the commit is queued");
+    TEST_EXPECT_EQ(posted, after, "but arms no latch");
+    TEST_EXPECT_EQ(handled, after, "a handler installed after the commit revokes nothing");
+    TEST_ASSERT(m_now, "and the masked peer now reads true");
+}
+
+// The clear wins when it comes first: a handler installed before any read clears
+// the latch at its re-read, the read is false, and nothing is committed. One
+// variable away from latch_read_commits_the_death: the order.
+void test_notes_latch_clear_first_lets_it_live(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc succeeded");
+    cd_thread(&g_cd_a, p, 0u);
+
+    int  post    = notes_post(p, NOTE_NAME_INTERRUPT, 0u, NULL, true);
+    u32  armed   = cd_latches(p);
+    notes_set_handler(p, 0x1000ull);
+    u32  cleared = cd_latches(p);
+    bool read    = thread_die_pending(&g_cd_a);
+    const char *named = notes_death_committed(p);
+    cd_free(p);
+
+    TEST_EXPECT_EQ(post, 0, "interrupt posted");
+    TEST_EXPECT_EQ(armed, PROC_FLAG_INTR_TERMINATE_PENDING, "the post armed its latch");
+    TEST_EXPECT_EQ(cleared, 0u, "the handler's re-read cleared it");
+    TEST_ASSERT(!read, "so the read is false");
+    TEST_ASSERT(named == NULL, "and nothing is committed");
+}
+
+// The commit takes the latch its reader has unmasked, not the first one armed, and
+// a later reader with nothing masked finds that death, not its own first latch.
+void test_notes_commit_takes_the_readers_latch(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc succeeded");
+    cd_thread(&g_cd_m, p, 1ull << NOTE_BIT_INTERRUPT);
+    cd_thread(&g_cd_a, p, 0u);
+
+    int  post_i = notes_post(p, NOTE_NAME_INTERRUPT, 0u, NULL, true);
+    int  post_t = notes_post(p, NOTE_NAME_TERM, 0u, NULL, false);
+    bool m_read = thread_die_pending(&g_cd_m);
+    u32  after  = cd_latches(p);
+    bool a_read = thread_die_pending(&g_cd_a);
+    u32  later  = cd_latches(p);
+    const char *named = notes_death_committed(p);
+    cd_free(p);
+
+    TEST_EXPECT_EQ(post_i, 0, "interrupt posted");
+    TEST_EXPECT_EQ(post_t, 0, "term posted");
+    TEST_ASSERT(m_read, "a reader masking interrupt reads term's latch");
+    TEST_EXPECT_EQ(after, PROC_FLAG_TERM_TERMINATE_PENDING | PROC_FLAG_TERMINATE_COMMITTED,
+                   "and commits term's, clearing interrupt's");
+    TEST_ASSERT(a_read, "an unmasked reader after it reads true");
+    TEST_EXPECT_EQ(later, after, "and changes nothing");
+    TEST_ASSERT(dp_named(named, NOTE_NAME_TERM), "the death is term's");
+}
+
+// Every terminate-default note with a latch round-trips: its latch is one bit, no
+// other note shares it, the latch names it back, and every latch is some note's.
+// Walked from the note table, so a row added with a latch and no name, or two
+// notes on one latch, fails here.
+void test_notes_latch_names_its_note(void) {
+    u32  seen = 0, rows = 0;
+    bool single = true, unique = true, round = true;
+    for (u32 i = 0;; i++) {
+        const char *name = notes_known_name_for_test(i);
+        if (!name) break;
+        u32 latch = notes_name_terminate_latch_for_test(name);
+        if (!latch) continue;
+        rows++;
+        if (latch & (latch - 1u)) single = false;
+        if (seen & latch) unique = false;
+        seen |= latch;
+        if (!dp_named(notes_latch_note_name_for_test(latch), name)) round = false;
+    }
+    TEST_ASSERT(rows >= 7u, "the walk found the latched notes");
+    TEST_ASSERT(single, "each latch is one bit");
+    TEST_ASSERT(unique, "no two notes share a latch");
+    TEST_ASSERT(round, "each latch names its note back");
+    TEST_EXPECT_EQ(seen, PROC_FLAG_TERMINATE_PENDING_MASK, "and every latch is some note's");
+    TEST_ASSERT(notes_latch_note_name_for_test(0u) == NULL, "no latch names nothing");
+}
+
+// The poll false-0 class (OPEN-BUGS 2026-11-04): an untimed sleep unwinds for the
+// interrupt's latch and answers 0 on the footing that the thread dies, then a
+// handler arrives. The unwind committed the death, so the thread dies of the
+// interrupt at its die check instead of living with the 0. The control, one
+// variable away, installs the handler first: the sleep answers EINTR and the
+// thread lives.
+static volatile s64 g_pz_rc;
+static volatile int g_pz_lived;
+
+static void pz_entry(void *arg) {
+    bool handler_first = arg != NULL;
+    struct Thread *t = current_thread();
+    struct Proc *p = t->proc;
+    t->note_interruptible = true;              // as the syscall's own, on signal(7)'s list
+    (void)notes_post(p, NOTE_NAME_INTERRUPT, 0u, NULL, true);
+    if (handler_first) notes_set_handler(p, 0x1000ull);
+    g_pz_rc = sys_poll_sleep_for(-1);
+    t->note_interruptible = false;
+    if (!handler_first) notes_set_handler(p, 0x1000ull);
+    el0_return_die_check();
+    g_pz_lived = 1;
+    exits_code(7, "lived");
+}
+
+static int pz_run(bool handler_first, s64 *rc, int *lived) {
+    g_pz_rc    = 0x7fff;
+    g_pz_lived = 0;
+    int pid = rfork(RFPROC, pz_entry, handler_first ? (void *)1 : NULL);
+    int st  = -1;
+    int got = pid > 0 ? wait_pid_for(pid, WAIT_PACKED, &st) : -1;
+    *rc    = g_pz_rc;
+    *lived = g_pz_lived;
+    return (pid > 0 && got == pid) ? st : -1;
+}
+
+void test_notes_poll_zero_is_a_death(void) {
+    s64 rc = 0, crc = 0;
+    int lived = 0, clived = 0;
+    int st  = pz_run(false, &rc, &lived);
+    int cst = pz_run(true, &crc, &clived);
+    TEST_EXPECT_EQ(rc, 0ll, "the untimed sleep answered 0 for the latch");
+    TEST_EXPECT_EQ(lived, 0, "a handler installed after the unwind did not let the thread live");
+    TEST_EXPECT_EQ(st, (int)WAIT_STATUS_SIGNALED(NOTE_SIG_INT), "it died of the interrupt (SIGINT)");
+    TEST_EXPECT_EQ(crc, -(s64)T_E_INTR, "control: handler first, and the sleep answers EINTR");
+    TEST_EXPECT_EQ(clived, 1, "control: the thread lives");
+    TEST_EXPECT_EQ(cst, (int)WAIT_STATUS_EXITED(7), "control: and leaves by its own exit");
+}
+
+// The tail hands no note to a handler once the death is committed: a thread that
+// passed its die check before the commit, and reaches delivery after a handler
+// arrived, dies of the note instead of running the handler. The tail runs with an
+// sp a native frame refuses (new_sp 0), so in the control, with nothing committed,
+// the note stays queued and the thread lives.
+static volatile int g_th_lived;
+
+static void th_entry(void *arg) {
+    struct Thread *t = current_thread();
+    struct Proc *p = t->proc;
+    (void)notes_post(p, NOTE_NAME_INTERRUPT, 0u, NULL, true);
+    if (arg) (void)thread_die_pending(t);
+    notes_set_handler(p, 0x1000ull);
+    struct exception_context ctx;
+    for (size_t k = 0; k < sizeof(ctx); k++) ((u8 *)&ctx)[k] = 0;
+    ctx.sp = NOTE_NAME_MAX;
+    irq_state_t s = spin_lock_irqsave(NULL);   // the tail runs masked (#713)
+    notes_deliver_at_el0_return(&ctx);
+    spin_unlock_irqrestore(NULL, s);
+    g_th_lived = 1;
+    exits_code(7, "lived");
+}
+
+static int th_run(bool commit, int *lived) {
+    g_th_lived = 0;
+    int pid = rfork(RFPROC, th_entry, commit ? (void *)1 : NULL);
+    int st  = -1;
+    int got = pid > 0 ? wait_pid_for(pid, WAIT_PACKED, &st) : -1;
+    *lived = g_th_lived;
+    return (pid > 0 && got == pid) ? st : -1;
+}
+
+// A tail that dies of a note's default, with no handler to hand it to, commits
+// that death before it lets q->lock go: the note stays queued while the Proc
+// dies, and a peer's tail that met it after a handler arrived would hand it on.
+// Read from the ZOMBIE's word; tail_hands_no_committed_note shows what the
+// commit then refuses.
+static void tu_entry(void *arg) {
+    (void)arg;
+    struct Thread *t = current_thread();
+    (void)notes_post(t->proc, NOTE_NAME_INTERRUPT, 0u, NULL, true);
+    struct exception_context ctx;
+    for (size_t k = 0; k < sizeof(ctx); k++) ((u8 *)&ctx)[k] = 0;
+    ctx.sp = NOTE_NAME_MAX;
+    irq_state_t s = spin_lock_irqsave(NULL);   // the tail runs masked (#713)
+    notes_deliver_at_el0_return(&ctx);
+    spin_unlock_irqrestore(NULL, s);
+    exits_code(7, "lived");
+}
+
+void test_notes_tail_death_commits_its_note(void) {
+    int pid  = rfork(RFPROC, tu_entry, NULL);
+    u32 word = pid > 0 ? fdl_zombie_word(pid) : ~0u;
+    int st   = -1;
+    int got  = pid > 0 ? wait_pid_for(pid, WAIT_PACKED, &st) : -1;
+    TEST_ASSERT(pid > 0 && got == pid, "rfork and reap");
+    TEST_EXPECT_EQ(st, (int)WAIT_STATUS_SIGNALED(NOTE_SIG_INT), "the tail ended it by the interrupt");
+    TEST_EXPECT_EQ(word, PROC_FLAG_INTR_TERMINATE_PENDING | PROC_FLAG_TERMINATE_COMMITTED,
+                   "and committed that death before letting the queue go");
+}
+
+void test_notes_tail_hands_no_committed_note(void) {
+    int lived = 0, clived = 0;
+    int st  = th_run(true, &lived);
+    int cst = th_run(false, &clived);
+    TEST_EXPECT_EQ(lived, 0, "committed: the tail did not return");
+    TEST_EXPECT_EQ(st, (int)WAIT_STATUS_SIGNALED(NOTE_SIG_INT),
+                   "it died of the interrupt, which the handler never ran for");
+    TEST_EXPECT_EQ(clived, 1, "control: nothing committed, the tail returned");
+    TEST_EXPECT_EQ(cst, (int)WAIT_STATUS_EXITED(7), "control: and the thread left by its own exit");
+}
+
+// What a committed death refuses, as group death does: a stop parks no thread of
+// the Proc, an exec cannot claim it, and it spawns no child. The control, one
+// variable away, is the same child with nothing committed: all three proceed.
+static volatile int g_cr_stop, g_cr_claim, g_cr_fork;
+
+static void cr_grandchild(void *arg) {
+    (void)arg;
+    exits_code(0, "grandchild");
+}
+
+static void cr_entry(void *arg) {
+    struct Thread *t = current_thread();
+    struct Proc *p = t->proc;
+    if (arg) {
+        (void)notes_post(p, NOTE_NAME_INTERRUPT, 0u, NULL, true);
+        (void)thread_die_pending(t);
+    }
+    __atomic_store_n(&p->job_stop_req, 1u, __ATOMIC_RELEASE);
+    g_cr_stop = proc_stop_requested(p) ? 1 : 0;
+    __atomic_store_n(&p->job_stop_req, 0u, __ATOMIC_RELEASE);
+    g_cr_claim = proc_exec_claim(p);
+    if (g_cr_claim == 0) {
+        irq_state_t s = proc_threads_lock(p);
+        __atomic_store_n(&p->exec_task, (struct Thread *)NULL, __ATOMIC_RELEASE);
+        proc_threads_unlock(p, s);
+    }
+    g_cr_fork = rfork(RFPROC, cr_grandchild, NULL);
+    if (g_cr_fork > 0) {
+        int st = -1;
+        (void)wait_pid_for(g_cr_fork, 0, &st);
+    }
+    exits_code(0, "ok");
+}
+
+static bool cr_run(bool commit, int *stop, int *claim, int *fork) {
+    g_cr_stop = g_cr_claim = g_cr_fork = -99;
+    int pid = rfork(RFPROC, cr_entry, commit ? (void *)1 : NULL);
+    int st  = -1;
+    int got = pid > 0 ? wait_pid_for(pid, 0, &st) : -1;
+    *stop  = g_cr_stop;
+    *claim = g_cr_claim;
+    *fork  = g_cr_fork;
+    return pid > 0 && got == pid;
+}
+
+// A thread parked for a stop that wakes under a committed death ends the Proc by
+// its note instead of going on to the eret: a commit reads as no stop at all
+// (proc_stop_requested), so without the park's own check a resume, or the read
+// itself, would let it run EL0 code. Driven at the tail's stop leg with a job
+// stop owned and the death committed after the die check. The control, one
+// variable away, owns no stop: the leg's fast path returns, so the death above
+// is the park's.
+static volatile int g_sp_lived;
+
+static void sp_entry(void *arg) {
+    struct Thread *t = current_thread();
+    struct Proc *p = t->proc;
+    (void)notes_post(p, NOTE_NAME_INTERRUPT, 0u, NULL, true);
+    (void)thread_die_pending(t);
+    if (arg) __atomic_store_n(&p->job_stop_req, 1u, __ATOMIC_RELEASE);
+    struct exception_context ctx;
+    for (size_t k = 0; k < sizeof(ctx); k++) ((u8 *)&ctx)[k] = 0;
+    irq_state_t s = spin_lock_irqsave(NULL);   // the tail runs masked (#713)
+    el0_return_stop_check(&ctx);
+    spin_unlock_irqrestore(NULL, s);
+    __atomic_store_n(&p->job_stop_req, 0u, __ATOMIC_RELEASE);
+    g_sp_lived = 1;
+    exits_code(7, "lived");
+}
+
+static int sp_run(bool stop, int *lived) {
+    g_sp_lived = 0;
+    int pid = rfork(RFPROC, sp_entry, stop ? (void *)1 : NULL);
+    int st  = -1;
+    int got = pid > 0 ? wait_pid_for(pid, WAIT_PACKED, &st) : -1;
+    *lived = g_sp_lived;
+    return (pid > 0 && got == pid) ? st : -1;
+}
+
+void test_notes_stop_park_meets_a_commit(void) {
+    int lived = 0, clived = 0;
+    int st  = sp_run(true, &lived);
+    int cst = sp_run(false, &clived);
+    TEST_EXPECT_EQ(lived, 0, "a stop owned under a committed death: the park did not return");
+    TEST_EXPECT_EQ(st, (int)WAIT_STATUS_SIGNALED(NOTE_SIG_INT), "it ended the Proc by the interrupt");
+    TEST_EXPECT_EQ(clived, 1, "control: no stop owned, the leg returned");
+    TEST_EXPECT_EQ(cst, (int)WAIT_STATUS_EXITED(7), "control: and the thread left by its own exit");
+}
+
+void test_notes_committed_death_refuses(void) {
+    int stop, claim, fork, cstop, cclaim, cfork;
+    bool ran  = cr_run(true, &stop, &claim, &fork);
+    bool cran = cr_run(false, &cstop, &cclaim, &cfork);
+    TEST_ASSERT(ran && cran, "both children ran and were reaped");
+    TEST_EXPECT_EQ(cstop, 1, "control: a job stop is asked of a live Proc");
+    TEST_EXPECT_EQ(cclaim, 0, "control: an exec claims it");
+    TEST_ASSERT(cfork > 0, "control: and it spawns a child");
+    TEST_EXPECT_EQ(stop, 0, "committed: no stop is asked of it");
+    TEST_EXPECT_EQ(claim, -1, "committed: no exec claims it");
+    TEST_EXPECT_EQ(fork, -1, "committed: and it spawns no child");
 }
 
 // gcpark-b: the signal each death by note records, row by row (the same reason

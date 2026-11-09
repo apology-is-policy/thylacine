@@ -2307,10 +2307,12 @@ void test_rendez_direct_note_read_at_wait_entry(void) {
 }
 
 // rendez.direct_note_fatal_ends_any_wait -- `term` has no handler here, so a post at
-// a thread in a hold wait ends that wait to die, and only that thread's: the group's
-// end comes from its tail, through exits_note. A masked fatal note waits behind that
-// one thread's mask, as Linux keeps it pending and reaches no group exit: the thread
-// is roused, re-reads, and parks again.
+// a thread in a hold wait ends that wait to die, and only that thread's is woken:
+// the group's end comes from its tail, through exits_note. The read that ended it
+// committed the death (ARCH 8.8.2), so the peer's wait ends too once it is woken,
+// mask and all. A masked fatal note waits behind that one thread's mask, as Linux
+// keeps it pending and reaches no group exit: the thread is roused, re-reads, and
+// parks again -- on a Proc of its own, where nothing has committed.
 void test_rendez_direct_note_fatal_ends_any_wait(void) {
     TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree must be empty at test entry");
     struct Thread *t[2];
@@ -2323,35 +2325,50 @@ void test_rendez_direct_note_fatal_ends_any_wait(void) {
     int  wait0 = g_nt[0].rc;
     bool peer_still = asleep1 && nt_blocked(t[1], 1) && g_nt[1].evals == ev1;
     const char *group = made ? __atomic_load_n(&g_nt_proc->group_exit_msg, __ATOMIC_ACQUIRE) : NULL;
+    const char *committed = made ? notes_death_committed(g_nt_proc) : NULL;
+    bool term_named = committed && committed[0] == 't' && committed[1] == 'e' &&
+                      committed[2] == 'r' && committed[3] == 'm' && committed[4] == 0;
     if (made) nt_clear_words(t);
 
-    // The masked leg: t[1] is released, then masks term from the test's side, which
-    // is safe with it parked between steps, and takes a hold wait.
+    // The peer, woken with its release set, still meets the committed death.
     bool freed1 = false;
     if (asleep1) {
         g_nt[1].release = true;
         (void)wakeup(&g_nt[1].rendez);
         freed1 = nt_wait_done(1);
     }
-    if (freed1) t[1]->note_mask |= (u64)(1u << NOTE_BIT_TERM);
-    bool asleep_m = freed1 && nt_run(t[1], 1, NT_HWAIT, true);
+    int  wait1 = g_nt[1].rc;
+    bool down = nt_teardown(t);
+
+    // The masked leg: t[1] masks term from the test's side, which is safe with it
+    // parked between steps, and takes a hold wait.
+    struct Thread *m[2];
+    bool mmade = nt_setup(true, m);
+    if (mmade) m[1]->note_mask |= (u64)(1u << NOTE_BIT_TERM);
+    bool asleep_m = mmade && nt_run(m[1], 1, NT_HWAIT, true);
     u32  evm = g_nt[1].evals;
     int  rcm = asleep_m ? proc_note_thread(g_nt_proc, g_nt_tid[1], NOTE_NAME_TERM, NULL) : -99;
-    bool masked_still = asleep_m && nt_reparked(t[1], 1, evm);
-    if (made) nt_clear_words(t);
-    if (t[1]) t[1]->note_mask &= ~(u64)(1u << NOTE_BIT_TERM);
-    bool down = nt_teardown(t);
+    bool masked_still = asleep_m && nt_reparked(m[1], 1, evm);
+    bool m_none = mmade && notes_death_committed(g_nt_proc) == NULL;
+    if (mmade) nt_clear_words(m);
+    if (m[1]) m[1]->note_mask &= ~(u64)(1u << NOTE_BIT_TERM);
+    bool mdown = nt_teardown(m);
 
     TEST_ASSERT(made && asleep1, "two threads asleep in hold waits");
     TEST_ASSERT(down, "both threads returned and were reclaimed");
     TEST_EXPECT_EQ(rc0, 0, "the post answers 0");
     TEST_ASSERT(done0, "the named thread woke");
     TEST_EXPECT_EQ(wait0, SLEEP_INTR, "to die");
-    TEST_ASSERT(peer_still, "its peer slept on");
+    TEST_ASSERT(peer_still, "its peer slept on: the post woke only its target");
     TEST_ASSERT(group == NULL, "and the post itself ended no group");
+    TEST_ASSERT(term_named, "the target's read committed the death by term");
+    TEST_ASSERT(freed1, "the peer, released, returned");
+    TEST_EXPECT_EQ(wait1, SLEEP_INTR, "to die too: a committed death ends every thread's waits");
+    TEST_ASSERT(mmade && mdown, "a fresh pair, returned and reclaimed");
     TEST_ASSERT(asleep_m, "a hold wait with term masked");
     TEST_EXPECT_EQ(rcm, 0, "the post answers 0");
     TEST_ASSERT(masked_still, "and the masked thread rode it out");
+    TEST_ASSERT(m_none, "committing nothing");
     TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree empty after cleanup");
 }
 

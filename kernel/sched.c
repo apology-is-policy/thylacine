@@ -2277,15 +2277,15 @@ static int sleep_common(struct Rendez *r, int (*cond)(void *arg), void *arg,
         // by LS-5c per §8.8.2): re-check the death predicate UNDER wait_lock
         // -- the same lock both wakers (proc_group_terminate AND
         // proc_interrupt_terminate_wake) take per peer. thread_die_pending =
-        // group_exit_msg set, OR a terminate-disposition `interrupt` is
-        // pending (the PROC_FLAG_INTR_TERMINATE_PENDING latch, unmasked for
-        // this thread). If true: either we registered before the waker's
+        // group_exit_msg set, OR a terminate latch is armed for a family this
+        // thread has not masked, which the read commits (ARCH 8.8.2), OR a
+        // death is already committed. If true: either we registered before the waker's
         // walk (it finds + wakes us), or the flag-set happens-before our
         // wait_lock acquire (so the acquire-load observes it). Either way we
         // must NOT sleep through it: undo the registration and return
         // SLEEP_INTR -- the caller unwinds and the Thread dies at its
-        // EL0-return tail (die-check for group exit; the LS-5b dispatch for
-        // the interrupt, which re-validates against the live queue). kproc
+        // EL0-return tail (die-check for group exit and for the committed
+        // death, by the note it names). kproc
         // never group-terminates and the latch is never armed on kproc, so
         // kernel threads never take this branch. The elected 9P reader takes it
         // at any byte of a frame, like every sleeper (ARCH 8.8.1.1): the client

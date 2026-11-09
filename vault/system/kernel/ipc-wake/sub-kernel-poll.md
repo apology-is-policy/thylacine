@@ -9,7 +9,7 @@ guarded-by: [inv-i9]
 validated-by: [spec-poll, spec-poll-walk, spec-poll-owed, spec-poll-defer, spec-tsleep, gate-smp]
 locks: [lock-poll-list, lock-rendez, lock-wait, lock-timerwait]
 created: 2026-08-01
-updated: 2026-11-02
+updated: 2026-11-09
 ---
 ## Purpose
 
@@ -187,7 +187,9 @@ client's lock are deferred past it (Concurrency below).
    producer that sets a flag inside every re-sample window keeps every
    `tsleep` returning `AWOKEN` before either: a noise-driven `poll(-1)`
    was unkillable and unstoppable. Each pass checks `thread_die_pending`
-   (⇒ the sweep, 0) and parks on `proc_stop_sleeper_park` when a stop is
+   (⇒ the sweep, 0; a latch read there commits the death, ARCH 8.8.2, so a
+   handler installed before the tail cannot leave the thread living with a
+   0 meant for a dying one: `notes.poll_zero_is_a_death`) and parks on `proc_stop_sleeper_park` when a stop is
    pending — with every hook already off, so no producer walks to a
    parked poller; the park returns `SLEEP_INTR` on group death (DEATH
    WINS), never for a latch: a latch that lands while the poller is parked

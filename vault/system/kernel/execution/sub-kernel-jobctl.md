@@ -246,7 +246,8 @@ caught continue waits for the resume the same way.
 **Death wins from inside a stop** — the same clause the debugger's stop must
 satisfy, restated against the second owner. Without it, killing a Ctrl-Z'd job
 would hang forever. Group death clears neither flag, so the park predicate reads
-false once the group's exit message is published (`proc_stop_requested`): the
+false once the group's exit message is published (`proc_stop_requested`), and so it
+does once the Proc's death is committed (ARCH 8.8.2, [[sub-kernel-notes]]): the
 dying Proc's last thread, which reads no death while it closes its handles,
 never parks for the stop, and one parked while its group lived leaves when it
 dies. The flags a stop set before the kill stay set, because the tail reads
