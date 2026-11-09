@@ -458,7 +458,9 @@ they share the disposition (ptyfs, and the console's feed). Raw mode has no
 assembly and no such disposition: a signal behind a byte the ring cannot take
 waits its turn, because counting past that byte would leave a hole in the stream
 the reader cannot see (`CookData`, `SignalXorByte`; Linux's `n_tty` keeps it in
-order too). Alone, it goes. Tests: `cons.cook_isig_discards_pending_line` and
+order too). Alone, it goes. Operator vote 74 (2026-11-06) kept this order over POSIX's
+counted discard: a raw-mode program that stops reading is left by closing its terminal
+(the hangup) or by the SAK, never by skipping the bytes ahead of the signal. Tests: `cons.cook_isig_discards_pending_line` and
 `cons.feed_intr_behind_refused_line` (kernel) and ptyfs selftest leg (e4) and
 step 12 pin it in each ldisc.
 

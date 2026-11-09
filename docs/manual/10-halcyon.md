@@ -373,6 +373,11 @@ compositor: `tapestryd` delivers those chords to it through the top rail. The
 legacy profile has no rails, so there the first three chords have no effect,
 and `tapestryd` closes a tile on Super+Shift+Q itself, without asking.
 
+Keys reach a tile's program in the order they were typed, Ctrl-C included. When
+a program that reads its terminal raw stops reading, and its terminal holds as
+much input as it can, Ctrl-C waits behind the keys typed before it, as it does
+on Linux. Close the tile to end such a program.
+
 ### Rich text and the character grid
 
 A session tile's terminal tells the programs it runs, through the `BEACON`
