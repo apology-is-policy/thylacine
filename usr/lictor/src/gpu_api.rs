@@ -355,8 +355,9 @@ pub fn admit(request: &Request, phase: u32, hold: Hold, parked_ms: u64) -> bool 
 pub const PARK_BOUND_MS: u64 = 30_000;
 /// What a stalled engine or cursor lane becomes at a completion pump
 /// (GPU-DESIGN 4.5.15): a chain that has retired revives it however late. One
-/// still outstanding at the abandonment bound kills an engine, and abandons a
-/// cursor lane until that chain retires.
+/// still outstanding at the abandonment bound, or at the bound of a takeover
+/// waiting on it, kills an engine, and abandons a cursor lane until that chain
+/// retires.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Stall { Holding, Revived, Dead }
 /// How often a takeover held up by the device renews the kernel's deadline (vote 71).
@@ -377,8 +378,9 @@ pub fn renew_due(last: Option<(u64, u64)>, generation: u64) -> bool {
 /// inside the kernel's SEAT_QUIESCE_LIMIT_NS (35 s): a control stall still standing
 /// kills the engine, and a cursor stall abandons the lane.
 pub const TAKEOVER_BOUND_MS: u64 = 33_000;
-// A stall begun at the chord dies of its own bound first: only a second wait in series
-// meets this one.
+// A stall begun within TAKEOVER_BOUND_MS - PARK_BOUND_MS of the chord dies of its own
+// bound first; any later one, a second wait in series or a takeover's own command
+// stalling past the bound, meets this one.
 const _: () = assert!(PARK_BOUND_MS < TAKEOVER_BOUND_MS);
 /// `takeover_ms` is how long ago the chord was, while a takeover waits on the device.
 pub fn stall_verdict(outstanding: bool, stalled_ms: u64, takeover_ms: Option<u64>) -> Stall {
@@ -757,16 +759,27 @@ mod admission_tests {
         assert_eq!(stall_verdict(true, PARK_BOUND_MS - 1, Some(TAKEOVER_BOUND_MS - 1)), Stall::Holding);
         assert_eq!(stall_verdict(true, 0, Some(u64::MAX)), Stall::Dead);
     }
+    fn seat_h_ms(name: &str) -> u64 {
+        let header = include_str!("../../../kernel/include/thylacine/seat.h");
+        let prefix = alloc::format!("#define {name} ");
+        let line = header.lines().find(|l| l.starts_with(prefix.as_str()))
+            .unwrap_or_else(|| panic!("seat.h defines {name}"));
+        let ns: u64 = line.split_whitespace().nth(2).unwrap().trim_end_matches("ull").parse().unwrap();
+        ns / 1_000_000
+    }
     #[test]
     fn the_takeover_bound_falls_inside_the_kernels_limit() {
-        let header = include_str!("../../../kernel/include/thylacine/seat.h");
-        let line = header.lines().find(|l| l.starts_with("#define SEAT_QUIESCE_LIMIT_NS "))
-            .expect("seat.h defines SEAT_QUIESCE_LIMIT_NS");
-        let ns: u64 = line.split_whitespace().nth(2).unwrap().trim_end_matches("ull").parse().unwrap();
-        let limit_ms = ns / 1_000_000;
+        let limit_ms = seat_h_ms("SEAT_QUIESCE_LIMIT_NS");
         // Past the bound, a renewal a second old still covers one more pump before the
         // kernel's limit fails the chord.
         assert!(TAKEOVER_BOUND_MS + RENEW_EVERY_MS < limit_ms, "bound {TAKEOVER_BOUND_MS} ms, limit {limit_ms} ms");
+    }
+    #[test]
+    fn a_renewal_a_second_late_still_lands_inside_the_kernels_deadline() {
+        // The bound decides a chord only while the kernel's deadline is still ahead of it:
+        // renewals at RENEW_EVERY_MS, a pass late, must keep landing inside SEAT_QUIESCE_NS.
+        let quiesce_ms = seat_h_ms("SEAT_QUIESCE_NS");
+        assert!(2 * RENEW_EVERY_MS < quiesce_ms, "renew every {RENEW_EVERY_MS} ms, deadline {quiesce_ms} ms");
     }
     #[test]
     fn a_hold_first_seen_renews_at_once_then_once_a_second() {

@@ -485,7 +485,8 @@ const USED_SPIN_PER_WAKE: u32 = 65536;
 // a false dead-latch costs the console: #31). It bounds only OUR
 // bookkeeping: 30 s is orders above any real GL job, so reaching it means
 // the host renderer hung (the GPU-DESIGN section 9.2 accepted risk). A
-// synchronous chain stalled this long is the one thing that does declare it.
+// synchronous chain stalled this long declares it, and so does one a trusted
+// takeover still waits on TAKEOVER_BOUND_MS after its chord (vote 80).
 const FENCE_ABANDON_MS: u64 = 30_000;
 // A retirement the broker parks gives up at the same bound (gpu_api::admit).
 const _: () = assert!(crate::gpu_api::PARK_BOUND_MS == FENCE_ABANDON_MS);
@@ -892,7 +893,8 @@ struct Controlq {
     /// Count of used entries consumed.
     used_seen: u16,
     /// Latched on a ring failure, or on a stall that outlived
-    /// FENCE_ABANDON_MS: no ring cursor can then be trusted against the
+    /// FENCE_ABANDON_MS or a waiting takeover's bound from its chord: no ring
+    /// cursor can then be trusted against the
     /// device's consumption, so every later submit would read a
     /// freshly-zeroed response buffer as resp_type=0x0 (the #31 cascade).
     /// Fail fast + honestly instead.
@@ -906,7 +908,8 @@ struct Controlq {
     latched: Option<(Instant, u16)>,
     /// A synchronous chain missed its deadline and has not retired
     /// (GPU-DESIGN 4.5.15): every submission is refused until it does, and
-    /// one outstanding FENCE_ABANDON_MS latches `dead`.
+    /// one outstanding FENCE_ABANDON_MS, or TAKEOVER_BOUND_MS from the chord of
+    /// a takeover waiting on it, latches `dead`.
     stalled: Option<Instant>,
     /// The chord, while a trusted takeover waits on the device: a stall still
     /// standing TAKEOVER_BOUND_MS after it latches `dead` (vote 80).
@@ -4504,7 +4507,8 @@ impl Gpu {
     }
 
     /// A stall stands on a lane. It ends in a retirement, or for the engine at the
-    /// abandonment bound; an abandoned cursor lane waits for its chain. What a
+    /// abandonment bound or a waiting takeover's; an abandoned cursor lane waits for
+    /// its chain. What a
     /// command met while this holds is no answer from the device.
     pub fn stall_pending(&self) -> bool {
         !self.ctrl.dead

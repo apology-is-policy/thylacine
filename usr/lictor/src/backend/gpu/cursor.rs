@@ -26,7 +26,7 @@ pub(super) struct Plane {
     visible: bool,
     /// The outstanding chain missed its deadline (GPU-DESIGN 4.5.15): the
     /// completion pump retires it late, or abandons the lane at
-    /// FENCE_ABANDON_MS until it does.
+    /// FENCE_ABANDON_MS, or at a waiting takeover's bound, until it does.
     stalled: Option<Instant>,
     /// The next cursor command misses its deadline at once, and its
     /// retirement is held until released (the test-latch-dead lever).

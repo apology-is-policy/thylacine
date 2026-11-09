@@ -18,9 +18,14 @@
 # its retirement 8 s; its release arms a cursor stall held past every bound, which
 # the restarted takeover meets about 8.5 s after the chord. Its own bound would come
 # at about 38.5 s, past the kernel's limit. The takeover's bound abandons the lane
-# first: renewals stop, lictor names the lane, and only then does the kernel close the
-# seat. The restore needs only the control queue. The hold ends 10 s after the
-# abandonment and the lane revives, which a pointer update shows.
+# first: renewals stop and lictor names the lane. At 34 s from the chord, before the
+# kernel's limit, the lever then withholds a control stall and fails the seat behind it.
+# Only the restore waits on that stall now, so no pump may apply the takeover's bound to
+# it (round 4, F1: the bound once outlived the step that read the kernel's phase, and a
+# pump between steps killed such a stall, leaving the seat without its display). The
+# hold is released when the seat sees FAILED, the engine revives, and the restore goes
+# through. The cursor hold ends 10 s after the abandonment and the lane revives, which a
+# pointer update shows.
 #
 # Leg L (control late): shot 2 stalls the cursor lane inside the takeover and holds its
 # retirement 8 s; its release stalls the control queue with the retirement withheld
@@ -166,6 +171,11 @@ expect {
 }
 set bound 0
 set held 0
+set late 0
+set injected 0
+set failed 0
+set lreleased 0
+set lrevived 0
 set closed 0
 set restored 0
 set timeout 40
@@ -173,15 +183,16 @@ expect {
     -re {EXTINCTION:} { lc_extinction_fail "the cursor-late takeover's second wait" }
     -ex "lictor: trusted scanout active" { lc_fail "cursor-late: the takeover completed although the cursor chain never retired" }
     -re {cursor queue failed} { lc_fail "cursor-late: the cursor queue failed where it was only abandoned" }
-    -re {engine dead} { lc_fail "cursor-late: the engine died; only the cursor lane was held" }
+    -re {engine dead[^\r\n]*} {
+        lc_fail "cursor-late: the engine died (late=$late closed=$closed) -- a pump applied the takeover's bound to a stall only the restore waits on: $expect_out(0,string)"
+    }
     -ex "lictor: cursor chain retirement released (test-latch-dead)" { lc_fail "cursor-late: the hold ended before the seat restored past the abandoned lane" }
     -re {cursor chain never retired in [0-9]+ ms -- cursor queue abandoned until it retires} {
         lc_fail "cursor-late: the lane was abandoned by its own bound, not the takeover's: $expect_out(0,string)"
     }
-    -re {lictor: takeover renewed behind a draining backlog generation=[0-9]+ chains=[0-9]+|cursor chain never retired in [0-9]+ ms, the takeover [0-9]+ ms from its chord -- cursor queue abandoned at the takeover's bound|lictor: takeover held by a cursor lane out of service \(abandoned\)|lictor: kernel closed trusted seat \(scanout [a-z]+\)|lictor: normal scanout restored generation=[0-9]+} {
+    -re {lictor: takeover renewed behind a draining backlog generation=[0-9]+ chains=[0-9]+|cursor chain never retired in [0-9]+ ms, the takeover [0-9]+ ms from its chord -- cursor queue abandoned at the takeover's bound|lictor: takeover held by a cursor lane out of service \(abandoned\)|INJECTED by test-latch-dead, retirement withheld|lictor: late shot: a synchronous chain withheld [0-9]+ ms from the chord, and the seat fails behind it stalled=[01]|lictor: seat failed: late shot \(test-latch-chained\)|gpu synchronous chain retirement released \(test-latch-dead\)|gpu synchronous chain retired [0-9]+ ms after its deadline -- engine revived|lictor: kernel closed trusted seat \(scanout [a-z]+\)|lictor: normal scanout restored generation=[0-9]+} {
         # One alternation: lictor prints these in pass order. The pump runs before the
-        # renewal, so no renewal can follow the abandonment, and the kernel's limit
-        # comes 2 s after the bound.
+        # renewal, so no renewal can follow the abandonment.
         set hit $expect_out(0,string)
         if {[string match "*takeover renewed*" $hit]} {
             if {$bound} { lc_fail "cursor-late: a renewal after the takeover's bound (renewed=$renewed) -- the bound did not end the wait" }
@@ -191,12 +202,29 @@ expect {
             set bound 1
         } elseif {[string match "*out of service*" $hit]} {
             set held 1
+        } elseif {[string match "*INJECTED*" $hit]} {
+            if {!$bound} { lc_fail "cursor-late: a control stall injected before the takeover's bound" }
+            set injected 1
+        } elseif {[string match "*late shot: *" $hit]} {
+            if {!$bound || !$held} { lc_fail "cursor-late: the late shot fired with bound=$bound held=$held" }
+            if {![string match "*stalled=1" $hit]} { lc_fail "cursor-late: the late shot met a real stall and injected nothing" }
+            regexp {withheld ([0-9]+) ms from the chord} $hit -> late_ms
+            if {$late_ms < $bound_ms || $late_ms >= $limit_ms} { lc_fail "cursor-late: the late shot fired $late_ms ms from the chord, outside \[$bound_ms, $limit_ms)" }
+            set late 1
+        } elseif {[string match "*seat failed: late shot*" $hit]} {
+            set failed 1
+        } elseif {[string match "*retirement released*" $hit]} {
+            if {!$late} { lc_fail "cursor-late: a control release before the late shot" }
+            set lreleased 1
+        } elseif {[string match "*engine revived*" $hit]} {
+            set lrevived 1
         } elseif {[string match "*kernel closed*" $hit]} {
             if {!$bound} {
                 lc_fail "cursor-late: the kernel closed the seat behind a stalled cursor lane (renewed=$renewed) -- the takeover's bound never ended the second wait: $hit"
             }
             set closed 1
         } else {
+            if {!$lrevived} { lc_fail "cursor-late: the scanout was restored with the late shot's stall never revived" }
             set restored 1
         }
         exp_continue
@@ -204,12 +232,14 @@ expect {
     -ex "lictor: trusted seat recovered; nothing was conferred" {
         if {!$bound} { lc_fail "cursor-late: the seat recovered with no abandonment at the takeover's bound" }
         if {!$held} { lc_fail "cursor-late: the chord failed behind the abandoned lane and lictor never said why" }
+        if {!$late || !$injected || !$failed} { lc_fail "cursor-late: the late shot did not run whole: late=$late injected=$injected failed=$failed" }
         if {!$closed} { lc_fail "cursor-late: the seat recovered and lictor never said the kernel closed it" }
+        if {!$lreleased || !$lrevived} { lc_fail "cursor-late: the seat recovered with released=$lreleased revived=$lrevived for the late shot's stall" }
         if {!$restored} { lc_fail "cursor-late: the seat went back to normal with no restore" }
         if {!$renewed} { lc_fail "cursor-late: no renewal behind the stalled lane" }
-        lc_step "cursor-late: renewed $renewed times; the takeover's bound abandoned the lane $ms ms from the chord, before the kernel's limit; lictor named it, and the seat restored past the outstanding chain"
+        lc_step "cursor-late: renewed $renewed times; the takeover's bound abandoned the lane $ms ms from the chord and lictor named it; a stall withheld at $late_ms ms behind the failed seat survived to its release, and the seat restored"
     }
-    timeout { lc_fail "cursor-late: within 40s: renewed=$renewed bound=$bound held=$held closed=$closed restored=$restored and no recovery" }
+    timeout { lc_fail "cursor-late: within 40s: renewed=$renewed bound=$bound held=$held late=$late closed=$closed lreleased=$lreleased lrevived=$lrevived restored=$restored and no recovery" }
 }
 after 1500
 pointer 9000 9000
