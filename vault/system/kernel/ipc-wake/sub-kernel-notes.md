@@ -808,7 +808,9 @@ threads charged to a user Proc run in kproc and never reach the latch leg. Nothi
 clears the bit. Witnesses: `notes.latch_read_commits_the_death` and its control
 `notes.latch_clear_first_lets_it_live`, `notes.commit_takes_the_readers_latch`,
 `notes.latch_names_its_note` (walked from `g_known_notes`), `notes.poll_zero_is_a_death`
-(the class's own case, with a handler-first control that answers EINTR and lives),
+(the class's own case, native and phenotype, with a handler-first control that answers
+EINTR and lives -- a phenotype one, since a caught note interrupts a wait only where a
+table governs the Proc),
 `notes.tail_hands_no_committed_note`, `notes.tail_death_commits_its_note`,
 `notes.handler_tail_death_commits_its_note` and
 `notes.fault_dying_latch_live_note_exits` (each reads the commit off the ZOMBIE),

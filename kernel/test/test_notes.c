@@ -4167,54 +4167,6 @@ void test_notes_latch_names_its_note(void) {
     TEST_ASSERT(notes_latch_note_name_for_test(0u) == NULL, "no latch names nothing");
 }
 
-// The poll false-0 class (OPEN-BUGS 2026-11-04): an untimed sleep unwinds for the
-// interrupt's latch and answers 0 on the footing that the thread dies, then a
-// handler arrives. The unwind committed the death, so the thread dies of the
-// interrupt at its die check instead of living with the 0. The control, one
-// variable away, installs the handler first: the sleep answers EINTR and the
-// thread lives.
-static volatile s64 g_pz_rc;
-static volatile int g_pz_lived;
-
-static void pz_entry(void *arg) {
-    bool handler_first = arg != NULL;
-    struct Thread *t = current_thread();
-    struct Proc *p = t->proc;
-    t->note_interruptible = true;              // as the syscall's own, on signal(7)'s list
-    (void)notes_post(p, NOTE_NAME_INTERRUPT, 0u, NULL, true);
-    if (handler_first) notes_set_handler(p, 0x1000ull);
-    g_pz_rc = sys_poll_sleep_for(-1);
-    t->note_interruptible = false;
-    if (!handler_first) notes_set_handler(p, 0x1000ull);
-    el0_return_die_check();
-    g_pz_lived = 1;
-    exits_code(7, "lived");
-}
-
-static int pz_run(bool handler_first, s64 *rc, int *lived) {
-    g_pz_rc    = 0x7fff;
-    g_pz_lived = 0;
-    int pid = rfork(RFPROC, pz_entry, handler_first ? (void *)1 : NULL);
-    int st  = -1;
-    int got = pid > 0 ? wait_pid_for(pid, WAIT_PACKED, &st) : -1;
-    *rc    = g_pz_rc;
-    *lived = g_pz_lived;
-    return (pid > 0 && got == pid) ? st : -1;
-}
-
-void test_notes_poll_zero_is_a_death(void) {
-    s64 rc = 0, crc = 0;
-    int lived = 0, clived = 0;
-    int st  = pz_run(false, &rc, &lived);
-    int cst = pz_run(true, &crc, &clived);
-    TEST_EXPECT_EQ(rc, 0ll, "the untimed sleep answered 0 for the latch");
-    TEST_EXPECT_EQ(lived, 0, "a handler installed after the unwind did not let the thread live");
-    TEST_EXPECT_EQ(st, (int)WAIT_STATUS_SIGNALED(NOTE_SIG_INT), "it died of the interrupt (SIGINT)");
-    TEST_EXPECT_EQ(crc, -(s64)T_E_INTR, "control: handler first, and the sleep answers EINTR");
-    TEST_EXPECT_EQ(clived, 1, "control: the thread lives");
-    TEST_EXPECT_EQ(cst, (int)WAIT_STATUS_EXITED(7), "control: and leaves by its own exit");
-}
-
 // The child as a Linux phenotype with every row at its default, so the tail takes
 // the phenotype's paths: its SIG_DFL terminate arm, and notes_deliver_linux_locked
 // once a row catches. proc_free frees the sigtab.
@@ -4237,6 +4189,67 @@ static void cd_catch(struct Proc *p, bool linux_pheno) {
     }
     (void)viv_sigtab_set(p->sigtab, VIV_SIGNOTE_INTERRUPT, &g_cd_hand);
     viv_sigaction_settled_for_test(p, VIV_SIGNOTE_INTERRUPT, &g_cd_hand);
+}
+
+// The poll false-0 class (OPEN-BUGS 2026-11-04): an untimed sleep unwinds for the
+// interrupt's latch and answers 0 on the footing that the thread dies, then a
+// handler arrives. The unwind committed the death, so the thread dies of the
+// interrupt at its die check instead of living with the 0 -- native and phenotype.
+// The control, one variable away from the phenotype leg, installs the handler
+// first: the sleep answers EINTR and the thread lives. It runs as the phenotype
+// because a caught note interrupts a wait only where a table governs the Proc
+// (ARCH 8.8.3), and with a deadline, so a caught note that failed to interrupt
+// reads 0 here rather than holding the suite.
+#define PZ_HANDLER_FIRST 1u
+#define PZ_LINUX         2u
+
+static volatile s64 g_pz_rc;
+static volatile int g_pz_lived;
+
+static void pz_entry(void *arg) {
+    u32 mode = (u32)(u64)arg;
+    bool handler_first = (mode & PZ_HANDLER_FIRST) != 0;
+    bool linux_pheno   = (mode & PZ_LINUX) != 0;
+    struct Thread *t = current_thread();
+    struct Proc *p = t->proc;
+    if (linux_pheno && !cd_linux(p)) exits_code(9, "setup");
+    t->note_interruptible = true;              // as the syscall's own, on signal(7)'s list
+    (void)notes_post(p, NOTE_NAME_INTERRUPT, 0u, NULL, true);
+    if (handler_first) cd_catch(p, linux_pheno);
+    g_pz_rc = sys_poll_sleep_for(handler_first ? 3000 : -1);
+    t->note_interruptible = false;
+    if (!handler_first) cd_catch(p, linux_pheno);
+    el0_return_die_check();
+    g_pz_lived = 1;
+    exits_code(7, "lived");
+}
+
+static int pz_run(u32 mode, s64 *rc, int *lived) {
+    g_pz_rc    = 0x7fff;
+    g_pz_lived = 0;
+    int pid = rfork(RFPROC, pz_entry, (void *)(u64)mode);
+    int st  = -1;
+    int got = pid > 0 ? wait_pid_for(pid, WAIT_PACKED, &st) : -1;
+    *rc    = g_pz_rc;
+    *lived = g_pz_lived;
+    return (pid > 0 && got == pid) ? st : -1;
+}
+
+void test_notes_poll_zero_is_a_death(void) {
+    s64 rc = 0, lrc = 0, crc = 0;
+    int lived = 0, llived = 0, clived = 0;
+    int st  = pz_run(0u, &rc, &lived);
+    int lst = pz_run(PZ_LINUX, &lrc, &llived);
+    int cst = pz_run(PZ_LINUX | PZ_HANDLER_FIRST, &crc, &clived);
+    TEST_EXPECT_EQ(rc, 0ll, "native: the untimed sleep answered 0 for the latch");
+    TEST_EXPECT_EQ(lived, 0, "native: a handler installed after the unwind did not let the thread live");
+    TEST_EXPECT_EQ(st, (int)WAIT_STATUS_SIGNALED(NOTE_SIG_INT), "native: it died of the interrupt (SIGINT)");
+    TEST_EXPECT_EQ(lrc, 0ll, "phenotype: the untimed sleep answered 0 for the latch");
+    TEST_EXPECT_EQ(llived, 0, "phenotype: rt_sigaction after the unwind did not let the thread live");
+    TEST_EXPECT_EQ(lst, (int)WAIT_STATUS_SIGNALED(NOTE_SIG_INT), "phenotype: it died of SIGINT");
+    TEST_EXPECT_EQ(crc, -(s64)T_E_INTR, "control: handler first, and the sleep answers EINTR");
+    TEST_EXPECT_EQ(clived, 1, "control: the thread lives");
+    TEST_EXPECT_EQ(cst, (int)WAIT_STATUS_EXITED(7), "control: and leaves by its own exit");
 }
 
 // The tail hands no note to a handler once the death is committed: a thread that
