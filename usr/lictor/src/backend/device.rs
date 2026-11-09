@@ -680,7 +680,8 @@ impl Device {
                 result.put(&mut out);
             }
             Request::FencedInFlight => {
-                let result = self.gpu.fenced_in_flight();
+                // Parked chains included: the compositor's pump publishes them.
+                let result = self.gpu.fenced_outstanding();
                 result.put(&mut out);
             }
             Request::EngineDead => {

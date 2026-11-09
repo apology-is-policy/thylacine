@@ -1765,6 +1765,10 @@ pub struct Comp {
     rb_dropped: u64,
     rb_coalesced: u64,
     rb_abandoned: u64,
+    /// The last landed compositor readback's wait in Lictor and its run on the
+    /// device (operator vote 81: parked, then publication to retirement).
+    rb_last_parked_ms: u32,
+    rb_last_exec_ms: u32,
     /// Warp-C C-4: the present-path cost census (see `Cost`).
     cost: [CostCell; Cost::COUNT],
     /// The arm the present being dispatched took -- set inside `present`,
@@ -2126,6 +2130,10 @@ struct WarpCtx {
     /// so the client's share is not shortened by a fence it did not issue,
     /// and never counted in `fence_signaled` (the client's #210 ledger).
     comp_rb_in_flight: u32,
+    /// The client's last retired readback: how long Lictor parked it behind the
+    /// ctx's earlier chains, and publication to retirement (vote 81).
+    rb_parked_ms: u32,
+    rb_exec_ms: u32,
     fence_signaled: u64,
     fence_reported: u64,
     /// Multi-queue F3: the dense per-TIMELINE completion counts. A
@@ -2611,6 +2619,8 @@ impl Comp {
             rb_dropped: 0,
             rb_coalesced: 0,
             rb_abandoned: 0,
+            rb_last_parked_ms: 0,
+            rb_last_exec_ms: 0,
             cost: [CostCell::default(); Cost::COUNT],
             cost_arm: Cost::PresentOther,
             probe_tick: u64::MAX,
@@ -11345,6 +11355,8 @@ impl Comp {
             rings: 1,
             fences_in_flight: 0,
             comp_rb_in_flight: 0,
+            rb_parked_ms: 0,
+            rb_exec_ms: 0,
             fence_signaled: 0,
             fence_reported: 0,
             timeline_signaled: [0; WARP_TIMELINES],
@@ -15340,6 +15352,8 @@ impl Comp {
         // The stall the device paid for this frame's backlog (F2b's
         // measurement): `cost readback-wait` carries n / sum / max.
         self.cost_add(Cost::ReadbackWait, rec.issued);
+        self.rb_last_parked_ms = tag.parked_ms;
+        self.rb_last_exec_ms = tag.exec_ms;
         // ROUND F2 [P1]: the device REFUSED this transfer. The pre-C-6b
         // synchronous arm gated its compose on `.is_ok()`; the fenced form
         // dropped that gate because the tag carried no verdict. Composing
@@ -15394,6 +15408,9 @@ impl Comp {
                 c.fences_in_flight = c.fences_in_flight.saturating_sub(1);
                 if tag.comp {
                     c.comp_rb_in_flight = c.comp_rb_in_flight.saturating_sub(1);
+                } else if tag.readback && !tag.abandoned {
+                    c.rb_parked_ms = tag.parked_ms;
+                    c.rb_exec_ms = tag.exec_ms;
                 }
                 if tag.abandoned {
                     // NOT a completion: the chain may still be live
@@ -17244,6 +17261,15 @@ impl Conn {
                     );
                 }
             }
+            // Vote 81: the last landed compositor readback's park and its run on
+            // the device. Below the fixed prefix: a census, not a client key.
+            let _ = core::fmt::write(
+                &mut s,
+                format_args!(
+                    "rb-last-parked-ms {} rb-last-exec-ms {}\n",
+                    comp.rb_last_parked_ms, comp.rb_last_exec_ms
+                ),
+            );
             // ROUND-3 F4: the per-ctx ctl got a runtime width report and its
             // global sibling -- widened by six lines in the same arc -- got
             // only an ordering convention. Same check, same reason: a
@@ -17410,6 +17436,13 @@ impl Conn {
                         let refused = comp.wctx(id, self.conn_id).map_or(0, |c| c.create_refused);
                         let _ =
                             core::fmt::write(&mut s, format_args!("create-refused {}\n", refused));
+                        // Vote 81: the last readback's park and its run on the device.
+                        let (parked, exec) =
+                            comp.wctx(id, self.conn_id).map_or((0, 0), |c| (c.rb_parked_ms, c.rb_exec_ms));
+                        let _ = core::fmt::write(
+                            &mut s,
+                            format_args!("readback-parked-ms {}\nreadback-exec-ms {}\n", parked, exec),
+                        );
                     }
                     // Audit F11: the "keep the client-critical keys inside a
                     // 255-byte snapshot" discipline above was a comment with

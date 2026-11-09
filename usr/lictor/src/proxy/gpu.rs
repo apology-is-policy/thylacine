@@ -312,6 +312,7 @@ impl Gpu {
     pub fn ctx_has_poisoned_slot(&self, ctx_pub: u32) -> bool {
         self.query(Request::CtxHasPoisonedSlot { ctx_pub }).unwrap_or(true)
     }
+    /// Fenced chains whose completion is still owed, parked ones included.
     pub fn fenced_in_flight(&self) -> u32 {
         self.query(Request::FencedInFlight).unwrap_or(u32::MAX)
     }

@@ -305,8 +305,10 @@ one-time create and attach) is not the lane's failure, since the controlq's own
 stall holds quiescence. A stalled create or attach is taken as done, because
 repeating it would collide with what it made. A failed or abandoned cursor queue
 prevents trusted acknowledgement, and a failed one retains its backing until GPU
-reset. The two queues share the device loop, so a client's readback can delay a
-cursor chain, which stalls at its ordinary bound rather than hold the serve loop.
+reset. The two queues share the device loop, so a host-synchronous step (an
+egl-headless flush, an upload into a busy resource) can delay a cursor chain, which
+stalls at its ordinary bound rather than hold the serve loop. A readback no longer
+can: it is parked until its work is done (vote 81, below).
 Input latency under that load remains a runtime gate.
 See `docs/HALCYON-INTERACTION.md` section 14.
 
@@ -350,7 +352,7 @@ retired), the takeover renews that deadline at once when first seen and then at 
 once a second (`gpu_api::renew_due`; `SEAT_RENEW`, up to 35 s from the chord: vote 71), so a backlog delays the SAK rather than failing
 it. One chain that runs for seconds retires nothing and is renewed all the same; one
 that never retires kills the engine at `FENCE_ABANDON_MS`, inside the 35 s. A cursor
-chain waits on the host loop a client's readback holds, so the lane's stall renews too
+chain waits on the host loop whatever holds it, so the lane's stall renews too
 (vote 79); its abandonment at the same bound ends the wait and the kernel's deadline
 fails the chord, and the lane comes back on the late retirement. An abandoned or failed
 lane holds the takeover past anything the control queue does, so it renews nothing, and
@@ -656,6 +658,39 @@ ids. Test builds start the wire sequence 64 short of the rewind point, so
 every gate that reaches the desktop has crossed a real rewind on the real
 device; `ls-graphical-sak` asserts the witness line. A device that is never
 once idle across the last 2^31 ids still fails closed.
+
+**Parked readbacks (operator vote 81, GPU-DESIGN 4.5.13).** On thyla-pi, QEMU
+decoding a client's readback of a busy BO sat in V3D's wait-BO ioctl for the
+BO's whole queue holding QEMU's big lock, so no vCPU completed an emulated MMIO
+write, and this loop's queue notify froze before any timed wait began. The
+fenced lane therefore parks a `TRANSFER_FROM_HOST_3D` while its context has a
+chain the device may still run (in flight, or abandoned and not yet retired),
+and parks every later chain of that context behind it (`gpu_api::must_park`).
+The completion pump publishes a parked readback once its context is clear, with
+the chains behind it, up to that context's next readback (`gpu_api::unpark_plan`).
+- **Ids.** The owner id is minted at submission; the wire id is taken at
+  publication (`Controlq::publish_staged`), so the device sees wire ids in
+  publication order.
+- **What the lane counts.** A parked chain holds its slot (`fslot_parked`) and
+  counts for its context (`ctx_fences_in_flight`), and for the compositor's pump
+  (`fenced_outstanding`). It is not on the device: `fenced_in_flight`, which the
+  seat's takeover lines count, `device_idle` and the abandonment clock leave it
+  out.
+- **Retirements.** A retirement that a parked chain can reach parks
+  (`retirement_hold` counts parked reaches as in flight), so no detach or unref
+  runs under a chain that has yet to publish.
+- **Stall and death.** Nothing publishes while the engine refuses. A dead
+  engine releases every parked chain as refused (`ok = false`, not abandoned):
+  the device never saw it.
+- **The compositor's readback.** Parked behind an abandoned chain, it is
+  released as refused, because it would otherwise hold the one reserved slot for
+  every surface.
+- **The harness hold.** A chain whose retirement the test hold swallowed
+  (`held_retires`) has finished on the device, so nothing waits for it.
+
+Each tag carries `parked_ms` and `exec_ms` (publication to retirement), and a
+test build says each readback that parked or ran 20 ms or more. The C-6 gate's
+DEADLINE arm judges both.
 
 Open after that review:
 

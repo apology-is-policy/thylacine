@@ -2576,7 +2576,15 @@ bounded by its prefix, because each chain ahead of it is abandoned at
 - **Abandoned prefix.** A chain abandoned ahead of the readback keeps it parked
   until its late retirement, because the device may still be running it. A
   context with a hung chain therefore keeps its parked chains in their slots,
-  the same leak posture an abandoned chain already has.
+  the same leak posture an abandoned chain already has. The compositor's
+  readback is the exception. Parked behind an abandoned chain, it would hold the
+  one reserved slot for every surface until a retirement that may never come.
+  So it is released as refused: its context is poisoned, `gl_adoption` refuses
+  that context from then on, and its surface keeps its last frame.
+- **The harness hold.** A chain whose retirement the test hold swallowed
+  (#177) has finished on the device, so nothing parked waits for it. Otherwise
+  a held client would park the compositor's readback on the reserved slot: the
+  cross-client wedge that ROUND F4 closed.
 - **Stalled engine.** Nothing publishes while the engine is stalled. Parked
   chains publish at revival.
 - **Dead engine.** A parked chain is released as refused (`ok = false`, not

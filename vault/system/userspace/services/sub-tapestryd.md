@@ -329,6 +329,23 @@ context does not free its slot either, because `dev_ctx = slot + 1`:
 handing the slot on would hand a live device context id to the next
 client, and a stale stream would execute against a stranger's context.
 
+**Readbacks park in the broker (operator vote 81, GPU-DESIGN 4.5.13).**
+QEMU decodes a `TRANSFER_FROM_HOST_3D` synchronously under its big lock, and on
+V3D a readback of a busy BO held that lock for the BO's whole queue, freezing
+every vCPU that touched emulated hardware. Lictor now holds a readback, the
+client's or the compositor's, until its context's earlier chains retire, and
+holds that context's later chains behind it. The seam sees no change in its
+counts: a parked chain has its fence id and its slot, and it counts in
+`fences_in_flight`, `ctx_fences_in_flight` and the outstanding count that
+`warp_fences_pending` reads. Each tag carries how long the chain was parked and
+how long it took from publication to retirement. The ctx ctl reports both for
+the context's last readback (`readback-parked-ms`, `readback-exec-ms`), and the
+warp ctl reports both for the last landed compositor readback
+(`rb-last-parked-ms`, `rb-last-exec-ms`). A compositor readback parked behind an
+abandoned chain is released as refused, so `comp_readback_retired` counts it
+`rb_dropped`, and `gl_adoption` already refuses the poisoned context; the
+reserved slot is not held for every other surface.
+
 ### The coherent ring lane
 
 Warp-6 V-3a adds a third client transport beside the synchronous ring and

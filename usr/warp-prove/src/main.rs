@@ -3493,15 +3493,18 @@ fn prove_corpse_reclaim(root: i64) {
 //             device stall on QEMU/virgl and the single-threaded loop waits
 //             there for everyone (4.5.13 consequence 2 -- the console
 //             renderer's cursor blink is one such step; run 4 measured it).
-//   DEADLINE  F2b's guest-side half: with a client's OWN fenced readback of
-//             its busy BO in flight, the console's next sync steps inherit
-//             the device stall (QEMU processes the controlq inline; the
-//             readback is a synchronous GL wait) -- and that stall must be
-//             read as BUSY, never as dead. A present of the bystander
-//             surface B behind it may be refused while the engine is
-//             stalled (the wait no longer widens behind a readback, vote
-//             72), and the engine must be alive after the readback retires:
-//             a present succeeds and nothing is poisoned.
+//   DEADLINE  a client's OWN readback of its busy BO, then one more submit
+//             in a colour no queue index uses, then presents of the
+//             bystander surface B (operator vote 81, GPU-DESIGN 4.5.13).
+//             PARKED: Lictor held the readback back until the ctx's queue
+//             retired and QEMU then decoded it at once (the tag's park and
+//             run, on the ctx ctl). ORDER: it landed the queue's last draw,
+//             not the later submit's colour. BOUND: B's sync steps wait on
+//             the queue through their own fences, so one stalls at
+//             SUBMIT_DEADLINE_MS and is refused, and none outlasts
+//             RB_F2B_BOUND_MS (vote 72a, which a readback holding QEMU's
+//             lock made inert). HEALTH: the engine revives and nothing is
+//             poisoned.
 //   F2B       REPORTED, not judged: B's present latency behind that stall
 //             (max / mean over the presents), the number that Venus / v3d
 //             will remove and that no guest-side change can (4.5.13).
@@ -3580,7 +3583,17 @@ const RB_LIVE_SUBMITS: usize = 4;
 /// of queue left) is UNCONSTRUCTED and retried, up to RB_LIVE_ATTEMPTS.
 const RB_LIVE_ROUNDS: usize = 3;
 const RB_LIVE_ATTEMPTS: usize = 7;
-const RB_DEADLINE_SUBMITS: usize = 4;
+const RB_DEADLINE_SUBMITS: usize = 6;
+/// A DEADLINE readback must have waited in Lictor at least this long: its queue
+/// was deep, so the parking rule had something to hold it behind (ms).
+const RB_PARK_FLOOR_MS: u64 = 400;
+/// Publication to retirement for a readback whose work was done: the decode of
+/// a 1 MiB transfer plus the fence's round trip. One QEMU waited on takes the
+/// queue (ms).
+const RB_EXEC_BOUND_MS: u64 = 150;
+/// The later submit's draws: RED, which no queue index paints (they paint GREEN
+/// plus an index in BLUE).
+const RB_LATE_DRAWS: usize = 50;
 /// Lictor's SUBMIT_DEADLINE_MS (500) with slack: past it, a bystander present stalled at
 /// its bound rather than waiting behind a readback (vote 72a).
 const RB_F2B_BOUND_MS: u64 = 900;
@@ -4380,6 +4393,9 @@ fn observe_readback() {
         let others0 = others_census(&tap0);
         let (live_before, live_t0) = rb_queue_heavy(warp, ctx, RB_LIVE_SUBMITS, "live");
         let cl = rb_census(warp).unwrap();
+        // How much of the round's queue had retired when the readback was
+        // issued, read off the ctx's own fence count just before the present.
+        let retired_at_issue = ctx_field(warp, ctx, "fence-signaled").saturating_sub(live_before);
         // The issue time is stamped BEFORE the present: the issue is the
         // dispatch's first act, and a present that WAITS for the readback
         // (the pre-C-6 arm; sabotage S1) must read as a slow issuing
@@ -4445,6 +4461,9 @@ fn observe_readback() {
         let (rw_n1, rw_sum1, _) = cost_line(&tap1, "readback-wait").unwrap();
         let round_wait_ms = rw_sum1.saturating_sub(rw_sum0) / 1000;
         let others1 = others_census(&tap1);
+        let wctl = open_read_all(warp, "ctl");
+        let comp_parked = parse_field(&wctl, "rb-last-parked-ms").unwrap_or(u64::MAX);
+        let comp_exec = parse_field(&wctl, "rb-last-exec-ms").unwrap_or(u64::MAX);
         if abandoned {
             t_putstr("warp-prove: C6-RB LIVE FAIL -- the compositor readback was ABANDONED (30 s)\n");
             rb_incomplete("abandoned");
@@ -4453,20 +4472,23 @@ fn observe_readback() {
             t_putstr("warp-prove: C6-RB LIVE FAIL -- the compositor readback never landed inside the bound\n");
             rb_incomplete("live-never-landed");
         }
-        // CONSTRUCTED: the readback was issued while at least the floor of
-        // queue (plus slack) still lay ahead of it, by the queue's own
-        // retire clock. The sends can be blocked for the queue's remainder
-        // by another client's present landing behind it (its egl-headless
-        // flush is a screen readback queued behind the compositor's blit,
-        // behind the client's draws on V3D's one FIFO -- run 6 measured
-        // 478 / 794 / 1062 ms to send eight Twrites); a readback issued
-        // into a drained queue tests nothing and is retried, never judged.
-        let constructed = issued_at_ms + RB_DEEP_MS + 50 <= queue_ms;
+        // CONSTRUCTED: the readback was issued behind the WHOLE round's queue,
+        // by the fence timeline -- none of its submits had retired. The sends
+        // can be blocked for most of the queue by another client's present
+        // landing behind it (its egl-headless flush is a screen readback
+        // queued behind the client's draws on V3D's one FIFO -- run 6 measured
+        // 478 / 794 / 1062 ms to send eight Twrites). The old check compared
+        // the issue time with the time the LAST retire was observed, and on
+        // the Pi it passed a readback issued after three of four submits had
+        // retired: the holds delayed the sends, then the observation. A
+        // readback issued into a draining queue tests nothing and is retried,
+        // never judged.
+        let constructed = retired_at_issue == 0;
         if !constructed {
             unconstructed += 1;
             t_putstr(&format!(
-                "warp-prove: C6-RB ROUND {} UNCONSTRUCTED -- the readback was issued {} ms into a {} ms queue (sends blocked behind another client's present); retrying\n",
-                round, issued_at_ms, queue_ms
+                "warp-prove: C6-RB ROUND {} UNCONSTRUCTED -- {} of the {} submits had retired when the readback was issued {} ms into a {} ms queue (sends blocked behind another client's present); retrying\n",
+                round, retired_at_issue, RB_LIVE_SUBMITS, issued_at_ms, queue_ms
             ));
             continue;
         }
@@ -4502,10 +4524,10 @@ fn observe_readback() {
             flight_ctl_max = max_ctl_ms;
         }
         t_putstr(&format!(
-            "warp-prove: C6-RB ROUND {} -- issuing present {} ms; readback issued at {} landed at {} (ms since the first heavy submit), observed draw {} of {} (pixel {:#010x}); readback-wait +{} ms over {} retires (mean {} ms); the {} heavy submits retired in {} ms, fences at {:?}; during the flight: {} presents max {} ms, ctl reads max {} ms; other console work this round: slot-presents +{} cpu-presents +{} bo-presents +{} xfers +{} pushes +{} flushes +{} health +{}; deep {} live {}\n",
+            "warp-prove: C6-RB ROUND {} -- issuing present {} ms; readback issued at {} landed at {} (ms since the first heavy submit), observed draw {} of {} (pixel {:#010x}); readback-wait +{} ms over {} retires (mean {} ms); the {} heavy submits retired in {} ms, fences at {:?}; the last compositor readback parked {} ms and ran {} ms; during the flight: {} presents max {} ms, ctl reads max {} ms; other console work this round: slot-presents +{} cpu-presents +{} bo-presents +{} xfers +{} pushes +{} flushes +{} health +{}; deep {} live {}\n",
             round, first_ms, issued_at_ms, landed_at_ms, observed_idx, total, observed_px, round_wait_ms,
             round_n, round_mean_ms,
-            RB_LIVE_SUBMITS, queue_ms, fence_ms, presents, max_present_ms, max_ctl_ms,
+            RB_LIVE_SUBMITS, queue_ms, fence_ms, comp_parked, comp_exec, presents, max_present_ms, max_ctl_ms,
             others1[0] - others0[0], others1[1] - others0[1], others1[2] - others0[2],
             others1[3] - others0[3], others1[4] - others0[4], others1[5] - others0[5], others1[6] - others0[6],
             round_deep as u32, round_live as u32
@@ -4551,10 +4573,11 @@ fn observe_readback() {
     record(deep_ok, "deep");
     record(live_ok, "live");
 
-    // ---- DEADLINE + F2B: the CLIENT's own fenced readback of its busy BO,
-    // then B's presents behind it. A present refused during the stall is
-    // counted, not failed; the engine must revive (busy is not dead). Their
-    // latency is REPORTED.
+    // ---- DEADLINE + F2B (operator vote 81): the CLIENT's own readback of its
+    // busy BO, one later submit in a colour no queue index uses, then B's
+    // presents. Lictor must park the readback behind the queue and the later
+    // submit behind the readback; B's sync steps wait on the queue through
+    // their own fences, so one stalls and is refused, and the engine revives.
     let (dl_before, dl_t0) = rb_queue_heavy(warp, ctx, RB_DEADLINE_SUBMITS, "deadline");
     let xfer = format!("transfer_from 0 0 0 0 {} {} 1 0 0 0", RB_W, RB_H);
     let (n, refused) = write_behind_stall(warp, &format!("ctx/{}/bo/{}/ctl", ctx, bo), xfer.as_bytes());
@@ -4562,12 +4585,18 @@ fn observe_readback() {
         rb_incomplete("instrument:f2b-transfer-refused");
     }
     note_stall_refusals("deadline readback", refused);
+    let mut late: Vec<u32> = Vec::new();
+    fb_state_stream(&mut late, 1);
+    for _ in 0..RB_LATE_DRAWS {
+        draw_stream(&mut late, 1.0, 0.0, 0.0);
+    }
+    submit_stream(warp, ctx, &late, "deadline later submit");
     let mut b_refused = 0u64;
     let mut b_max_ms = 0u64;
     let mut b_sum_ms = 0u64;
     let b_n = 10u64;
-    // The readback's standing time is judged from the first present: when its
-    // retirement was first seen, sampled after each present, not after them all.
+    // The queue's standing time is judged from the first present: when the
+    // readback's retirement was first seen, sampled after each present.
     let dl_p0_ms = dl_t0.elapsed().as_millis() as u64;
     let mut dl_seen_ms: Option<u64> = None;
     for i in 0..b_n {
@@ -4591,13 +4620,23 @@ fn observe_readback() {
             dl_seen_ms = Some(dl_t0.elapsed().as_millis() as u64);
         }
     }
-    // The client's readback + the RB_DEADLINE_SUBMITS submits retire; the engine must be alive.
-    let dl_after_ms =
+    // The queue, then the readback, then the later submit retire.
+    let dl_rb_ms =
         rb_wait_signaled(warp, ctx, dl_before, RB_DEADLINE_SUBMITS as u64 + 1, dl_t0, "deadline");
-    let dl_queue_ms = dl_seen_ms.unwrap_or(dl_after_ms);
+    let dl_after_ms =
+        rb_wait_signaled(warp, ctx, dl_before, RB_DEADLINE_SUBMITS as u64 + 2, dl_t0, "deadline later");
+    let dl_queue_ms = dl_seen_ms.unwrap_or(dl_rb_ms);
     let dl_stood_ms = dl_queue_ms.saturating_sub(dl_p0_ms);
+    let total = RB_DEADLINE_SUBMITS * RB_DRAWS_PER_SUBMIT;
     let landed_px = unsafe { core::ptr::read_volatile(va as *const u32) };
-    let landed_idx = rb_index_of(landed_px, RB_DEADLINE_SUBMITS * RB_DRAWS_PER_SUBMIT);
+    let landed_idx = rb_index_of(landed_px, total);
+    // B8G8R8A8: the queue paints (R 0, G 255, B index); the later submit paints
+    // R 255, G 0.
+    let landed_late = (landed_px >> 16) & 0xff == 0xff;
+    let landed_queue = !landed_late && (landed_px >> 8) & 0xff == 0xff;
+    let cctl = open_read_all(warp, &format!("ctx/{}/ctl", ctx));
+    let rb_parked = parse_field(&cctl, "readback-parked-ms");
+    let rb_exec = parse_field(&cctl, "readback-exec-ms");
     // The revival is the serve loop's next pump after the retirement, so the
     // first present may still meet the stall; a second of retries bounds it.
     let mut alive = false;
@@ -4609,26 +4648,43 @@ fn observe_readback() {
         let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(50));
     }
     let poisoned_after = parse_field(&open_read_string(warp, "ctl"), "poisoned").unwrap_or(99);
-    // Vote 72a: no synchronous wait outlasts SUBMIT_DEADLINE_MS behind a readback. When
-    // the client's readback stood past that with slack, a present stalled at the bound
-    // and was refused, and none waited the readback out.
-    // A readback that stood no longer than the bound judges nothing: it is not a pass.
+    let (rb_parked, rb_exec) = match (rb_parked, rb_exec) {
+        (Some(p), Some(e)) => (p, e),
+        _ => rb_incomplete("instrument:readback-timing-absent"),
+    };
+    // PARKED: the positive control that the rule ran, and its discriminator --
+    // a readback QEMU decoded on arrival parks 0 ms and runs the whole queue.
+    let parked_ok = rb_parked >= RB_PARK_FLOOR_MS && rb_exec < RB_EXEC_BOUND_MS;
+    // ORDER: the readback saw everything submitted before it and nothing after.
+    let order_ok = landed_queue && landed_idx >= total as i64 - 8;
+    // BOUND (vote 72a): a queue standing past the bound after B's first present
+    // makes a sync step stall; it is refused, and no present waits it out. A
+    // queue that stood no longer judges nothing: it is not a pass.
     let stood = dl_stood_ms > RB_F2B_BOUND_MS;
-    let healthy = alive && poisoned_after == 0;
     let bounded = b_max_ms < RB_F2B_BOUND_MS && b_refused > 0;
-    let deadline_ok = healthy && stood && bounded;
+    let healthy = alive && poisoned_after == 0;
+    let deadline_ok = healthy && stood && bounded && parked_ok && order_ok;
     t_putstr(&format!(
-        "warp-prove: C6-RB DEADLINE {} -- {} B presents behind the client's own busy readback, {} refused while the engine stalled, longest {} ms (bound {} ms; the readback stood {} ms past the first present, {}); engine alive after: {}; poisoned {}\n",
-        if !healthy || (stood && !bounded) { "FAIL" } else if !stood { "UNJUDGED" } else { "PASS" },
-        b_n, b_refused, b_max_ms, RB_F2B_BOUND_MS, dl_stood_ms,
+        "warp-prove: C6-RB DEADLINE {} -- PARKED {} (the readback waited {} ms in Lictor, floor {}; ran {} ms from publication, bound {}); ORDER {} (landed draw {} of {}, pixel {:#010x}{}); BOUND {} ({} B presents, {} refused while the engine stalled, longest {} ms, bound {} ms; the queue stood {} ms past the first present, {}); HEALTH {} (engine alive after: {}; poisoned {})\n",
+        if !healthy || !parked_ok || !order_ok || (stood && !bounded) {
+            "FAIL"
+        } else if !stood {
+            "UNJUDGED"
+        } else {
+            "PASS"
+        },
+        parked_ok as u32, rb_parked, RB_PARK_FLOOR_MS, rb_exec, RB_EXEC_BOUND_MS,
+        order_ok as u32, landed_idx, total, landed_px,
+        if landed_late { " -- the LATER submit's colour" } else { "" },
+        (stood && bounded) as u32, b_n, b_refused, b_max_ms, RB_F2B_BOUND_MS, dl_stood_ms,
         if stood { "so a present must have stalled at its bound" } else { "too short to judge the bound" },
-        alive as u32, poisoned_after
+        healthy as u32, alive as u32, poisoned_after
     ));
     t_putstr(&format!(
-        "warp-prove: C6-RB F2B REPORT -- bystander present latency behind a client readback of a busy BO: max {} ms mean {} ms over {} presents; the {} heavy submits + the readback retired in {} ms (the client's readback observed draw index {} of {}, pixel {:#010x})\n",
-        b_max_ms, b_sum_ms / b_n, b_n, RB_DEADLINE_SUBMITS, dl_queue_ms, landed_idx, RB_DEADLINE_SUBMITS * RB_DRAWS_PER_SUBMIT, landed_px
+        "warp-prove: C6-RB F2B REPORT -- bystander present latency behind a client readback of a busy BO: max {} ms mean {} ms over {} presents; the {} heavy submits + the readback retired in {} ms, the later submit in {} ms\n",
+        b_max_ms, b_sum_ms / b_n, b_n, RB_DEADLINE_SUBMITS, dl_rb_ms, dl_after_ms
     ));
-    if healthy && !stood {
+    if healthy && parked_ok && order_ok && !stood {
         rb_incomplete("deadline-unjudged");
     }
     record(deadline_ok, "deadline");
