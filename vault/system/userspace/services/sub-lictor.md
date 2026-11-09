@@ -277,9 +277,12 @@ never came would park the seat on every chord until that key was pressed again. 
 recovers the seat, not the keystrokes: a report the device dropped is gone
 (`ls-graphical-keys-overrun`, and `ls-graphical-keys-behind` for a real client's
 queue). The same release runs where an entry found the input queue full (see
-Concurrency). Whatever is still in the rings or the queue as the seat returns was pressed at a trusted
-screen: it reaches the kernel and `held`, not the compositor, and the seat says how
-much it kept back (`ls-graphical-sak-dead` leg H). A paint in phase 2 retries after a
+Concurrency). Whatever the devices had placed as the seat returns was pressed at a trusted
+screen, and the input thread may not have moved it yet: until a pass of the input
+thread begun after the return has been taken (`intake::passes`, `Seat::tail_until`), what
+it hands over reaches the kernel and `held`, not the compositor, and the seat says how
+much it kept back (`ls-graphical-sak-dead` leg H, whose lever stops the input thread
+through the held restore). A paint in phase 2 retries after a
 stall and fails the episode on an answer, and in neither case does VISIBLE go out for
 it (legs F and G). The takeover line reports how many fenced chains stood on the device
 when the takeover reached it and how long it took. Operation 65 admits only
@@ -337,10 +340,15 @@ every named route and which is never attached to a context, so a client's poison
 does not deny the SAK. Its backlog can: the paint is fenced, so it retires behind
 what the host has queued. A takeover that meets a stall starts over when the engine
 revives (`Gpu::stall_pending`), under the kernel's five-second deadline, and says so; a
-device's answer fails it at once. While the engine is alive and its retirement mark
-(`Gpu::retired_mark`) moves, the takeover renews that deadline at most once a second
-(`SEAT_RENEW`, up to 35 s from the chord: vote 71), so a backlog delays the SAK
-rather than failing it; `ls-graphical-sak-backlog` is the witness. A frame paint that meets a stall stays owed and the
+device's answer fails it at once. While the engine is alive and the control queue
+holds the takeover up (`Gpu::control_waiting`: stalled behind a chain, or a command not
+yet retired), the takeover renews that deadline at most once a second (`SEAT_RENEW`,
+up to 35 s from the chord: vote 71), so a backlog delays the SAK rather than failing
+it. One chain that runs for seconds retires nothing and is renewed all the same; one
+that never retires kills the engine at `FENCE_ABANDON_MS`, inside the 35 s. A cursor
+queue stalled alone renews nothing, since no client reaches it. Witnesses:
+`ls-graphical-sak-dead` leg 1 (a stall withheld 8 s, no retirement in between) and
+`ls-graphical-sak-backlog` (a client's deep queue, on a virgl device). A frame paint that meets a stall stays owed and the
 next pass paints it again. Once serving, no synchronous command waits past
 `SUBMIT_DEADLINE_MS`, a client's readback ahead of it or not (operator vote 72): one
 transfer cannot stop this loop for as long as its client queued; the command stalls

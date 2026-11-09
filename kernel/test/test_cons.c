@@ -500,6 +500,7 @@ void test_cons_rx_side_sak_and_intr_behind_full_ring(void) {
     cons_rx_receive((u8)'b', false);
     cons_rx_receive(0x03u, false);
     bool intr   = cons_test_intr_pending();
+    cons_test_intr_consume();                    // posted, as console_mgr would
     cons_rx_receive(0x00u, true);
     bool sak    = cons_test_sak_pending();
     cons_rx_receive((u8)'c', false);
@@ -510,10 +511,12 @@ void test_cons_rx_side_sak_and_intr_behind_full_ring(void) {
     long second = (ring1 > 0u) ? cons_drain(sbuf, (long)sizeof(sbuf)) : 0;
     bool abc    = second == 3 && sbuf[0] == (u8)'a' && sbuf[1] == (u8)'b' && sbuf[2] == (u8)'c';
     u32  left   = cons_test_side_count();
+    bool again  = cons_test_intr_pending();
     cons_test_reset();
     cons_test_mgr_hold(false);
 
     TEST_ASSERT(intr, "a Ctrl-C behind a full ring signals as read");
+    TEST_ASSERT(!again, "and only then: its move raised no second interrupt");
     TEST_ASSERT(sak,  "a BREAK behind a full ring is the SAK as read");
     TEST_EXPECT_EQ((long)queued, 4L, "a, b, the signalled Ctrl-C and c wait; the BREAK does not");
     TEST_EXPECT_EQ((long)ring0, 512L, "nothing jumped the queue into the ring");
@@ -577,6 +580,34 @@ void test_cons_rx_side_cooked_typing_past_half(void) {
     TEST_EXPECT_EQ((long)line, 10L, "ten typed bytes assemble behind 300 unread");
     TEST_EXPECT_EQ((long)queued, 0L, "none of them waits");
     TEST_EXPECT_EQ((long)ring, 300L, "the ring is untouched");
+}
+
+// Vote 73 decides a waiting byte when the drain reads it. A Ctrl-C read with ISIG
+// clear is data, and stays data when ISIG is set before it moves into the ring.
+void test_cons_rx_side_literal_intr_stays_data(void) {
+    static u8 lbuf[1024];
+    cons_test_reset();
+    cons_test_mgr_hold(true);
+    cons_test_set_termios(0u);                   // raw, ISIG clear
+    while (cons_rx_input((u8)0xAAu, false)) { }
+    cons_rx_receive(0x03u, false);
+    bool intr0  = cons_test_intr_pending();
+    u32  queued = cons_test_side_count();
+    cons_test_set_termios(CONS_ISIG);
+    long first  = cons_drain(lbuf, (long)sizeof(lbuf));
+    u32  ring1  = cons_test_rx_count();
+    long second = (ring1 > 0u) ? cons_drain(lbuf, (long)sizeof(lbuf)) : 0;
+    bool data   = second == 1 && lbuf[0] == 0x03u;
+    bool intr1  = cons_test_intr_pending();
+    cons_test_reset();
+    cons_test_mgr_hold(false);
+
+    TEST_ASSERT(!intr0, "a Ctrl-C read with ISIG clear signals nothing");
+    TEST_EXPECT_EQ((long)queued, 1L, "it waits behind the full ring");
+    TEST_EXPECT_EQ(first, 512L, "the reader drains the filler");
+    TEST_ASSERT(data, "the move hands it on as data");
+    TEST_ASSERT(!intr1, "ISIG set meanwhile does not make it an interrupt");
+    cons_settle_mgr();
 }
 
 // Vote 73: past the queue's capacity the newest byte is dropped and counted; a
@@ -4286,7 +4317,7 @@ void test_cons_graphical_seat_renew(void) {
     struct Proc *service = NULL;
     const char *err = NULL;
     struct seat_message m;
-    u64 generation = 0, limit = 0, d0 = 0, d1 = 0, near = 0;
+    u64 generation = 0, limit = 0, d0 = 0, d1 = 0, near = 0, after = 0;
     proc_test_seat_reset();
     bool setup = ep_setup(&f, true, true);
     service = proc_alloc();
@@ -4301,8 +4332,10 @@ void test_cons_graphical_seat_renew(void) {
     seat_zero(&m, sizeof(m));
     m.generation = generation;
     SEAT_CHECK(proc_seat_op(service, SEAT_RENEW, &m) == 0 && m.phase == SEAT_QUIESCING, "the service renews");
+    after = timer_now_ns();
     d1 = proc_test_seat_deadline(NULL);
-    SEAT_CHECK(d1 >= d0 && d1 <= limit, "a renewal moves the deadline on, inside the limit");
+    SEAT_CHECK(d1 >= d0 && d1 <= after + SEAT_QUIESCE_NS && d1 < limit,
+               "a renewal moves the deadline on by one window, short of the limit");
 
     seat_zero(&m, sizeof(m));
     m.generation = generation;

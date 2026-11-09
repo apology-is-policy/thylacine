@@ -516,6 +516,8 @@ void cons_test_reset(void);
 // True iff a Ctrl-C `interrupt` post is pending (set by cons_rx_input, cleared
 // by the console_mgr kthread).
 bool cons_test_intr_pending(void);
+// Clears it, as console_mgr's post does.
+void cons_test_intr_consume(void);
 
 // True iff an A-4c-2 SAK (serial BREAK) is pending (set by cons_rx_input on a
 // BREAK, cleared by the console_mgr kthread before proc_console_sak runs).

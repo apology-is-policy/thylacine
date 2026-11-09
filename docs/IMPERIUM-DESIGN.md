@@ -616,7 +616,9 @@ can veto any of them:**
    empty owner slot in between. What still crosses BEGIN is output, bounded and
    pre-SAK: the echo of a feed byte accepted before it (at most
    `CONS_ECHO_MAX` bytes, emitted after the lock drops, while the byte itself
-   is discarded), the same class as the in-flight first chunk of a write.
+   is discarded), the same class as the in-flight first chunk of a write. A byte
+   moved from the serial side queue keeps the same bound: the mover stops after a
+   take that echoes (vote 73's audit, F5).
 10. **The episode's cadence is not published by the scheduler's counters
    either** (2026-10-06; the IM Fable pass F3; operator votes "Gate CPU time
    to the owner" and "Restrict it too", `dec-2026-10-06-cpu-time-gate`).

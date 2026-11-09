@@ -1057,6 +1057,7 @@ void test_cons_serial_silent_sak_restores(void);
 void test_cons_rx_side_sak_and_intr_behind_full_ring(void);
 void test_cons_rx_side_cooked_intr_in_order(void);
 void test_cons_rx_side_cooked_typing_past_half(void);
+void test_cons_rx_side_literal_intr_stays_data(void);
 void test_cons_rx_side_full_drops_and_counts(void);
 void test_cons_rx_side_discarded_at_begin(void);
 void test_cons_rx_drop_counters(void);

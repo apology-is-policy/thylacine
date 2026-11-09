@@ -101,7 +101,15 @@ a path every renderer drives (the kernel chunk's Fable round F2)
 (`cons.episode_mode_write_straddling_begin`, `cons.episode_feed_straddling_begin`).
 The echo of a feed byte accepted just before BEGIN can still reach the wire
 after it, at most `CONS_ECHO_MAX` bytes, the byte itself discarded: the same
-bounded pre-SAK output as a write's in-flight first chunk (round F1, kept).
+bounded pre-SAK output as a write's in-flight first chunk (round F1, kept). The
+side queue's mover keeps that bound by stopping after a take that echoes
+(`cons_side_move_locked`; `cons_rx_fx` holds one take's echo). A queued byte is
+read under the termios in force when it moves, as bytes waiting in Linux's flip
+buffer are under throttle, with two exceptions decided when the drain read it: a
+Ctrl-C under ISIG signalled then (SIGNALLED), and a Ctrl-C under -isig is data
+(LITERAL, `cons.rx_side_literal_intr_stays_data`). A moved byte's echo goes out
+after the unlock, so an RX interrupt in between can echo the next byte first; in
+echoing modes only, and cosmetic.
 A SAK while an episode is open saves no owner, so the owner END restores is the
 one from before the episode began (`cons.episode_repeat_sak_keeps_saved_owner`).
 

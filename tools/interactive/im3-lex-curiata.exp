@@ -91,6 +91,18 @@ lc_raw_send "imperium-key-michael-v1\r" "the fixture key"
 # The verdict is the one line the serial and graphical prompts SHARE (it is the
 # semantic model's notice), so it is worded for the operator, not the log.
 lc_expect "Authority conferred to the requesting process." "corvus's verdict on the trusted path (1)"
+# Vote 70: the verdict closes only on Enter or Esc, on serial as on graphical, so the
+# rest of what is typed never reaches the shell. Red before: the serial verdict did
+# not wait, and END followed it at once.
+lc_raw_send "q" "a letter at the verdict (1)"
+lc_within 3 {
+    -re {EXTINCTION:} { lc_extinction_fail "(1) a letter at the verdict" }
+    -ex "cons: trusted episode END" { lc_fail "IM-3(1): the episode ended at the verdict -- what is typed next reaches the shell" }
+    timeout { lc_step "the verdict stayed up past a letter (1)" }
+    eof { lc_fail "EOF at the verdict (1)" }
+}
+lc_raw_send "\r" "Enter closes the verdict panel (vote 70)"
+lc_expect "cons: trusted episode END" "Enter closed the verdict and the episode ended (1)"
 expect_probe_line "imperium-probe: OK session=" "the parked read returned OK (1)"
 expect_probe_line "propagating 1" "/proc/<pid>/imperium: the scope propagates (1)"
 expect_probe_line "imperium-probe: PASS" "the probe's own verdict (1)"
@@ -107,6 +119,7 @@ lc_expect_re {axe:     (\x1b\[1m)?YES} "the axe shown for CAP_KILL (2)"
 lc_expect "imperium key: " "the key prompt (2)"
 lc_raw_send "not-the-key\r" "a wrong key"
 lc_expect "imperium DENIED: wrong key" "corvus's verdict (2)"
+lc_raw_send "\r" "Enter closes the verdict panel (vote 70)"
 lc_expect "imperium-probe: DENIED" "the parked read returned DENIED (2)"
 lc_pass "IM-3(2): a wrong key is DENIED on the trusted path and to the requester"
 
@@ -140,6 +153,7 @@ lc_expect "imperium key: " "the key prompt (4b)"
 after 12000
 lc_raw_send "imperium-key-michael-v1\r" "the fixture key, past the request's window"
 lc_expect "Authority conferred to the requesting process." "corvus's verdict past the request's window (4b)"
+lc_raw_send "\r" "Enter closes the verdict panel (vote 70)"
 expect_probe_line "imperium-probe: OK session=" "the parked read returned OK (4b)"
 expect_probe_line "imperium-probe: PASS" "the probe's own verdict (4b)"
 lc_pass "IM-3(4b): a SAK late in the request's window still gets the prompt's full time"

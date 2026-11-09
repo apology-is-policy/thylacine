@@ -9,6 +9,12 @@
 # at the deadline with the session's screen still up.
 set ::env(THYLACINE_ACCEL) [expr {[info exists ::env(LS_CI_GFX_ACCEL)] ? $::env(LS_CI_GFX_ACCEL) : "hvf"}]
 set ::env(THYLACINE_SERIAL_SAK) 0
+# Needs a ctx, so a virgl device, and the session compositor. From the remote repo:
+# THYLACINE_GPU_DEV=virtio-gpu-gl-pci THYLACINE_DISPLAY=egl-headless
+if {![info exists ::env(THYLACINE_GPU_DEV)] || ![string match virtio-gpu-gl* $::env(THYLACINE_GPU_DEV)]} {
+    puts "\nLS-CI SKIP: this scenario needs a warp ctx, so a virgl device (THYLACINE_GPU_DEV=virtio-gpu-gl-pci)"
+    exit 77
+}
 source [file join [file dirname [info script]] lib.exp]
 set repo $lc_repo
 set qmp [lc_qmp_sock]
@@ -41,8 +47,8 @@ expect {
 lc_raw_send "correct-horse-battery-staple-v1\r" "login password"
 set timeout 60
 expect {
-    -re {halcyond: status bar [^\r\n]*running false panes 2} {}
     -re {EXTINCTION:} { lc_extinction_fail "session" }
+    -re {halcyond: status bar [^\r\n]*running false panes 2} {}
     timeout { lc_fail "no session" }
     eof { lc_fail "EOF before the session" }
 }
@@ -54,11 +60,11 @@ key "meta_l+f"
 type "warp-prove chain-hold 240 deep &\n"
 set timeout 60
 expect {
+    -re {EXTINCTION:} { lc_extinction_fail "backlog" }
     -re {warp-prove: CHAIN-HOLD DEEP ctx [0-9]+ sent [0-9]+ retired [0-9]+ refused [0-9]+ after [0-9]+ ms} {
         lc_step "the backlog: $expect_out(0,string)"
     }
     -re {warp-prove: FAIL[^\r\n]*[\r\n]} { lc_fail "client: $expect_out(0,string)" }
-    -re {EXTINCTION:} { lc_extinction_fail "backlog" }
     timeout { lc_fail "no deep queue within 60 s" }
     eof { lc_fail "EOF before the backlog" }
 }
@@ -68,6 +74,12 @@ for {set i 1} {$i <= 3} {incr i} {
     set renewals 0
     set timeout 45
     expect {
+        -re {EXTINCTION:} { lc_extinction_fail "chord $i" }
+        -re {lictor: kernel closed trusted seat \(scanout [a-z]+\)} {
+            lc_fail "SAK-BACKLOG RED (chord $i): the seat closed at its deadline behind the backlog after [expr {[clock milliseconds] - $t0}] ms, renewals=$renewals"
+        }
+        -re {lictor: seat failed: [^\r\n]*[\r\n]} { lc_fail "SAK-BACKLOG RED (chord $i): $expect_out(0,string)" }
+        -re {warp-prove: FAIL[^\r\n]*[\r\n]} { lc_fail "client (chord $i): $expect_out(0,string)" }
         -re {lictor: takeover renewed behind a draining backlog generation=[0-9]+ chains=[0-9]+} {
             incr renewals
             exp_continue
@@ -76,12 +88,6 @@ for {set i 1} {$i <= 3} {incr i} {
         -re {lictor: trusted scanout active generation=[0-9]+ chains=[0-9]+ took_ms=[0-9]+} {
             set active $expect_out(0,string)
         }
-        -re {lictor: kernel closed trusted seat \(scanout [a-z]+\)} {
-            lc_fail "SAK-BACKLOG RED (chord $i): the seat closed at its deadline behind the backlog after [expr {[clock milliseconds] - $t0}] ms, renewals=$renewals"
-        }
-        -re {lictor: seat failed: [^\r\n]*[\r\n]} { lc_fail "SAK-BACKLOG RED (chord $i): $expect_out(0,string)" }
-        -re {warp-prove: FAIL[^\r\n]*[\r\n]} { lc_fail "client (chord $i): $expect_out(0,string)" }
-        -re {EXTINCTION:} { lc_extinction_fail "chord $i" }
         timeout { lc_fail "SAK-BACKLOG RED (chord $i): no trusted scanout within 45 s, renewals=$renewals" }
         eof { lc_fail "EOF (chord $i)" }
     }
@@ -93,9 +99,9 @@ for {set i 1} {$i <= 3} {incr i} {
     key "ret"
     set timeout 40
     expect {
-        -ex "corvus: imperium: SAK with nothing pending" { lc_step "chord $i: the empty episode ended" }
-        -re {lictor: kernel closed trusted seat \(scanout [a-z]+\)} { lc_fail "SAK-BACKLOG RED (chord $i): the episode closed unended" }
         -re {EXTINCTION:} { lc_extinction_fail "end $i" }
+        -re {lictor: kernel closed trusted seat \(scanout [a-z]+\)} { lc_fail "SAK-BACKLOG RED (chord $i): the episode closed unended" }
+        -ex "corvus: imperium: SAK with nothing pending" { lc_step "chord $i: the empty episode ended" }
         timeout { lc_fail "chord $i: the episode did not end within 40 s" }
         eof { lc_fail "EOF (end $i)" }
     }

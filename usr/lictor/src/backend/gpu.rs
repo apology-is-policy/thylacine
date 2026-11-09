@@ -1512,11 +1512,6 @@ impl Controlq {
     /// recoverable (vote 29), and a longer wait would stop the serve loop for
     /// as long as any client chose to queue, with chords unseen and keys lost
     /// (vote 72). A command refused meanwhile answers its client an error.
-    /// STICKY for this wait once observed: the readback that caused a stall
-    /// retires in the drain that finally moves used.idx, and this chain's own
-    /// entry follows it in the same drain or the next -- re-narrowing the
-    /// bound the instant the readback is gone would fail the very wait it
-    /// widened.
     /// True when every sync chain this wait covers has retired.
     fn sync_done(&self, both: bool) -> bool {
         #[cfg(feature = "test-mode")]
@@ -4708,10 +4703,12 @@ impl Gpu {
         self.ctrl.fenced_in_flight()
     }
 
-    /// Moves whenever the device retires a chain: a takeover behind a backlog is
-    /// renewed while it does (vote 71).
-    pub fn retired_mark(&self) -> u16 {
-        self.ctrl.used_seen
+    /// The control queue holds synchronous work back: stalled behind a chain, or a
+    /// command not yet retired. A takeover waiting on it is renewed (vote 71); the
+    /// stall ends in a retirement or, at FENCE_ABANDON_MS, a dead engine.
+    pub fn control_waiting(&self) -> bool {
+        !self.ctrl.dead
+            && (self.ctrl.stalled.is_some() || self.ctrl.sync_pending || self.ctrl.sync2_pending)
     }
 
     /// The broker enables this after boot probes, then releases imported DMA

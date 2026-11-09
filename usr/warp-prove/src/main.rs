@@ -3550,6 +3550,9 @@ const RB_LIVE_SUBMITS: usize = 4;
 const RB_LIVE_ROUNDS: usize = 3;
 const RB_LIVE_ATTEMPTS: usize = 7;
 const RB_DEADLINE_SUBMITS: usize = 4;
+/// Lictor's SUBMIT_DEADLINE_MS (500) with slack: past it, a bystander present stalled at
+/// its bound rather than waiting behind a readback (vote 72a).
+const RB_F2B_BOUND_MS: u64 = 900;
 /// Bound on waiting for a readback to land: FENCE_ABANDON_MS is 30 s.
 const RB_LAND_BOUND_MS: u64 = 35_000;
 
@@ -4524,11 +4527,18 @@ fn observe_readback() {
         let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(50));
     }
     let poisoned_after = parse_field(&open_read_string(warp, "ctl"), "poisoned").unwrap_or(99);
-    let deadline_ok = alive && poisoned_after == 0;
+    // Vote 72a: no synchronous wait outlasts SUBMIT_DEADLINE_MS behind a readback. When
+    // the client's readback stood past that with slack, a present stalled at the bound
+    // and was refused, and none waited the readback out.
+    let stood = dl_queue_ms > RB_F2B_BOUND_MS;
+    let bounded = !stood || (b_max_ms < RB_F2B_BOUND_MS && b_refused > 0);
+    let deadline_ok = alive && poisoned_after == 0 && bounded;
     t_putstr(&format!(
-        "warp-prove: C6-RB DEADLINE {} -- {} B presents behind the client's own busy readback, {} refused while the engine stalled; engine alive after: {}; poisoned {}\n",
+        "warp-prove: C6-RB DEADLINE {} -- {} B presents behind the client's own busy readback, {} refused while the engine stalled, longest {} ms (bound {} ms; the readback stood {} ms, {}); engine alive after: {}; poisoned {}\n",
         if deadline_ok { "PASS" } else { "FAIL" },
-        b_n, b_refused, alive as u32, poisoned_after
+        b_n, b_refused, b_max_ms, RB_F2B_BOUND_MS, dl_queue_ms,
+        if stood { "so a present must have stalled at its bound" } else { "too short to judge the bound" },
+        alive as u32, poisoned_after
     ));
     t_putstr(&format!(
         "warp-prove: C6-RB F2B REPORT -- bystander present latency behind a client readback of a busy BO: max {} ms mean {} ms over {} presents; the {} heavy submits + the readback retired in {} ms (the client's readback observed draw index {} of {}, pixel {:#010x})\n",

@@ -92,7 +92,11 @@ without a prompt, and the key prompt then has its own 60 s from the SAK, so a
 requester cannot time a verdict into the person's typing. Every trusted panel
 closes only on Enter or Esc, or its bound, and swallows every other byte
 (`console_wait_dismiss`), so the rest of a key typed into a panel never reaches
-the surface the episode returns to ([[dec-2026-11-05-panels-enter-or-esc]]).
+the surface the episode returns to ([[dec-2026-11-05-panels-enter-or-esc]]). A
+verdict waits on both media, and waits even when its frame was not confirmed
+visible; on serial it says `press Enter` under the outcome (`compose_verdict_panel`;
+`im3-lex-curiata` arm 1 types a letter at it). Until vote 70's audit a serial verdict
+did not wait at all.
 
 
 Graphical service ownership was approved on 2026-09-18; see

@@ -86,7 +86,11 @@ _Static_assert(CONS_LINE_MAX + 1u <= CONS_RING_SIZE,
 // lock hold, which bounds the echo it stages.
 #define CONS_SIDE_SIZE      4096u  // power of two (mask-indexed)
 #define CONS_SIDE_SIGNALLED 0x100u
+#define CONS_SIDE_LITERAL   0x200u
 #define CONS_SIDE_BATCH     16u
+_Static_assert(((CONS_SIDE_SIGNALLED | CONS_SIDE_LITERAL) & 0xffu) == 0u &&
+               (CONS_SIDE_SIGNALLED | CONS_SIDE_LITERAL) <= 0xffffu,
+               "a side-queue entry's marks sit above its byte, inside its u16");
 _Static_assert((CONS_SIDE_SIZE & (CONS_SIDE_SIZE - 1u)) == 0u,
                "CONS_SIDE_SIZE must be a power of two (the queue is mask-indexed)");
 
@@ -1297,9 +1301,10 @@ static void cons_deliver_partial_line_locked(bool *wake_data, bool *wake_mgr) {
 }
 
 // What a lock hold of input processing leaves for after the unlock: the echo
-// to emit and the two wakes. Sized for a side-queue batch.
+// to emit and the two wakes. One take's echo: the side queue's mover stops after
+// a take that echoes (cons_side_move_locked).
 struct cons_rx_fx {
-    u8   echo[CONS_ECHO_MAX * CONS_SIDE_BATCH];
+    u8   echo[CONS_ECHO_MAX];
     int  necho;
     bool wake_data;
     bool wake_mgr;
@@ -1325,14 +1330,17 @@ static void cons_rx_fx_release(const struct cons_rx_fx *fx) {
 }
 
 // One input byte through the line discipline. Caller holds g_cons.lock, and
-// fx->echo has room for CONS_ECHO_MAX more bytes. Returns false iff the byte
-// was REFUSED, changing nothing. `signalled`: an ISIG character the serial
-// drain acted on when it read it (cons_side_offer_locked). It is never data,
-// whatever the mode is now; only its discard of the pending line is left, and
-// it happens here, in the character's place in the stream.
-static bool cons_rx_take_locked(u8 byte, bool is_break, bool signalled,
+// fx->echo is empty. Returns false iff the byte was REFUSED, changing nothing.
+// `marks`: 0 for a byte taken as read; for one that waited in the side queue,
+// what the serial drain decided when it read it (cons_side_offer_locked).
+// SIGNALLED: an ISIG character it acted on, never data whatever the mode is now;
+// only its discard of the pending line is left, and it happens here, in the
+// character's place in the stream. LITERAL: a Ctrl-C read with ISIG clear, data
+// whatever the mode is now.
+static bool cons_rx_take_locked(u8 byte, bool is_break, u32 marks,
                                 struct cons_rx_fx *fx) {
     bool accepted = true;
+    bool signalled = (marks & CONS_SIDE_SIGNALLED) != 0u;
     u32 tio = cons_termios_load();
 
     if (is_break) {
@@ -1357,7 +1365,7 @@ static bool cons_rx_take_locked(u8 byte, bool is_break, bool signalled,
             // it are discarded and the ones after survive, as if the ring had
             // had room.
             if (tio & CONS_ICANON) g_cons.line_len = 0u;
-        } else if (byte == 0x03u && (tio & CONS_ISIG)) {
+        } else if (byte == 0x03u && (tio & CONS_ISIG) && !(marks & CONS_SIDE_LITERAL)) {
             // ISIG: Ctrl-C is cooked-consumed -> the deferred `interrupt` note
             // (the LS-5 path). ISIG clear -> 0x03 falls through as a data byte.
             cons_intr_store(true);
@@ -1455,7 +1463,7 @@ static bool cons_rx_accept(u8 byte, bool is_break, bool feed) {
         spin_unlock_irqrestore(&g_cons.lock, s);
         return false;
     }
-    bool accepted = cons_rx_take_locked(byte, is_break, false, &fx);
+    bool accepted = cons_rx_take_locked(byte, is_break, 0u, &fx);
     spin_unlock_irqrestore(&g_cons.lock, s);
     cons_rx_fx_release(&fx);
     return accepted;
@@ -1494,6 +1502,8 @@ static void cons_side_offer_locked(u8 byte, struct cons_rx_fx *fx) {
         cons_intr_store(true);
         fx->wake_mgr = true;
         e |= CONS_SIDE_SIGNALLED;
+    } else if (byte == 0x03u) {
+        e |= CONS_SIDE_LITERAL;              // read as data: an ISIG set later finds it data
     }
     if (g_cons.side_count < CONS_SIDE_SIZE) {
         cons_side_push_locked(e);
@@ -1508,14 +1518,17 @@ static void cons_side_offer_locked(u8 byte, struct cons_rx_fx *fx) {
 }
 
 // Hand queued entries to the line discipline, in order, until it refuses one,
-// the queue empties or a batch is spent. Caller holds g_cons.lock. True iff a
-// batch ran out with entries left that the discipline may still take.
+// the queue empties, a batch is spent or a take echoes. Caller holds
+// g_cons.lock. True iff entries are left that the discipline may still take.
+// One echoing take per hold: the echo goes out after the unlock, where a BEGIN
+// can land first, so what a pre-SAK echo may leave past BEGIN stays
+// CONS_ECHO_MAX bytes (IMPERIUM-DESIGN, the bounded pre-SAK residue).
 static bool cons_side_move_locked(struct cons_rx_fx *fx) {
-    for (u32 i = 0; i < CONS_SIDE_BATCH; i++) {
+    for (u32 i = 0; i < CONS_SIDE_BATCH && fx->necho == 0; i++) {
         if (g_cons.side_count == 0u) return false;
         u16 e = g_cons.side[g_cons.side_head];
         if (!cons_rx_take_locked((u8)(e & 0xffu), false,
-                                 (e & CONS_SIDE_SIGNALLED) != 0u, fx))
+                                 (u32)e & (CONS_SIDE_SIGNALLED | CONS_SIDE_LITERAL), fx))
             return false;
         g_cons.side_head = (g_cons.side_head + 1u) & (CONS_SIDE_SIZE - 1u);
         g_cons.side_count--;
@@ -1543,8 +1556,8 @@ void cons_rx_receive(u8 byte, bool is_break) {
     cons_rx_fx_init(&fx);
     irq_state_t s = spin_lock_irqsave(&g_cons.lock);
     if (is_break)
-        (void)cons_rx_take_locked(0x00u, true, false, &fx);   // the SAK, as read
-    else if (g_cons.side_count != 0u || !cons_rx_take_locked(byte, false, false, &fx))
+        (void)cons_rx_take_locked(0x00u, true, 0u, &fx);   // the SAK, as read
+    else if (g_cons.side_count != 0u || !cons_rx_take_locked(byte, false, 0u, &fx))
         cons_side_offer_locked(byte, &fx);
     spin_unlock_irqrestore(&g_cons.lock, s);
     cons_rx_fx_release(&fx);
@@ -1821,6 +1834,10 @@ u32 cons_test_side_count(void) {
 #ifdef KERNEL_TESTS
 bool cons_test_intr_pending(void) {
     return cons_intr_load();
+}
+
+void cons_test_intr_consume(void) {
+    cons_intr_store(false);
 }
 
 bool cons_test_sak_pending(void) {

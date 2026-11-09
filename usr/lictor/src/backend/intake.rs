@@ -9,7 +9,10 @@
 //! that device's held keys there.
 use super::input::{InputDev, Report};
 use alloc::{boxed::Box, collections::VecDeque, vec::Vec};
-use core::time::Duration;
+use core::{
+    sync::atomic::{AtomicU64, Ordering},
+    time::Duration,
+};
 use libthyla_rs::{sync::Mutex, t_burrow_attach, thread};
 
 pub const CAPACITY: usize = 4096;
@@ -36,6 +39,10 @@ static QUEUE: Mutex<Queue> = Mutex::new(Queue {
     entries: VecDeque::new(),
     lost: [false; MAX_DEVICES],
 });
+
+/// Passes the thread has finished over every device. A pass that begins after a moment
+/// moves everything the devices had placed before it.
+static PASSES: AtomicU64 = AtomicU64::new(0);
 
 struct Reader {
     devices: Vec<InputDev>,
@@ -89,6 +96,12 @@ pub fn take(into: &mut VecDeque<(u8, Entry)>) -> [bool; MAX_DEVICES] {
     core::mem::take(&mut queue.lost)
 }
 
+/// The passes finished so far. Read before `take`, it bounds what that take holds: every
+/// entry of a pass counted here is in it or was taken earlier.
+pub fn passes() -> u64 {
+    PASSES.load(Ordering::Acquire)
+}
+
 extern "C" fn read(arg: u64) {
     // SAFETY: `arg` is the Box leaked by `start` for this thread alone.
     let reader = unsafe { &mut *(arg as *mut Reader) };
@@ -105,22 +118,32 @@ extern "C" fn read(arg: u64) {
             if overran {
                 batch.push((index as u8, Entry::Overran));
             }
-            // Stop before anything typed after the key leaves the ring.
+            // Stop at the pass that read the key: what that pass read is queued, and
+            // what comes later stays in the ring.
             #[cfg(feature = "test-mode")]
-            test::stop_at_key(batch);
+            let key_at = test::stop_at_key(batch);
             if !batch.is_empty() {
-                push(batch);
+                let accepted = push(batch);
+                #[cfg(feature = "test-mode")]
+                test::dropped_key(key_at, accepted);
+                #[cfg(not(feature = "test-mode"))]
+                let _ = accepted;
             }
         }
+        PASSES.fetch_add(1, Ordering::Release);
         let _ = libthyla_rs::time::sleep(Duration::from_millis(POLL_MS));
     }
 }
 
-fn push(batch: &mut Vec<(u8, Entry)>) {
+/// How many of the batch's leading entries were queued: nothing leaves the queue
+/// meanwhile, so once it is full the rest of the batch is lost.
+fn push(batch: &mut Vec<(u8, Entry)>) -> usize {
     let mut queue = QUEUE.lock();
+    let mut accepted = 0;
     for (index, entry) in batch.drain(..) {
         if queue.entries.len() < CAPACITY {
             queue.entries.push_back((index, entry));
+            accepted += 1;
         } else if !matches!(
             entry,
             Entry::Report(Report::Low { .. } | Report::Malformed { .. })
@@ -130,12 +153,14 @@ fn push(batch: &mut Vec<(u8, Entry)>) {
             queue.lost[index as usize] = true;
         }
     }
+    accepted
 }
 
 /// ls-graphical-keys-overrun's lever, input half. Under the armed latch, the blind key
 /// stops this thread at the pass that read it, as a synchronous wait stopped the serve
 /// loop when the serve loop drained the rings; the serve loop resumes it when its own
-/// stop ends (`Device::test_blind_loop`).
+/// stop ends (`Device::test_blind_loop`). The held restore stops it too, until the seat's
+/// return has drained the tail (`Resume`).
 #[cfg(feature = "test-mode")]
 pub mod test {
     use super::{Entry, Report};
@@ -153,19 +178,37 @@ pub mod test {
     pub fn resume() {
         STOPPED.store(false, Ordering::Release);
     }
+    pub fn stop() {
+        STOPPED.store(true, Ordering::Release);
+    }
+    /// Resumes the thread when dropped, on every way out of the arm that stopped it.
+    pub struct Resume;
+    impl Drop for Resume {
+        fn drop(&mut self) {
+            resume();
+        }
+    }
     pub(super) fn stopped() -> bool {
         STOPPED.load(Ordering::Acquire)
     }
     /// Set before the batch is queued, so the serve loop, which resumes this thread only
     /// after it has read the key, can never resume it first.
-    pub(super) fn stop_at_key(batch: &[(u8, Entry)]) {
+    pub(super) fn stop_at_key(batch: &[(u8, Entry)]) -> Option<usize> {
         if !ARMED.load(Ordering::Acquire) {
-            return;
+            return None;
         }
-        let pressed = batch.iter().any(|(_, entry)| matches!(entry,
+        let at = batch.iter().position(|(_, entry)| matches!(entry,
             Entry::Report(Report::Event(e)) if e.etype == EV_KEY && e.code == BLIND_KEY && e.value == 1));
-        if pressed {
+        if at.is_some() {
             STOPPED.store(true, Ordering::Release);
+        }
+        at
+    }
+    /// The full queue lost the key, so the serve loop, which alone resumes this
+    /// thread, never sees it: the thread resumes itself.
+    pub(super) fn dropped_key(at: Option<usize>, accepted: usize) {
+        if at.is_some_and(|at| at >= accepted) {
+            resume();
         }
     }
 }

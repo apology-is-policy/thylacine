@@ -1710,6 +1710,7 @@ struct test_case g_tests[] = {
     { "cons.rx_side_sak_and_intr_behind_full_ring", test_cons_rx_side_sak_and_intr_behind_full_ring, false, NULL },
     { "cons.rx_side_cooked_intr_in_order", test_cons_rx_side_cooked_intr_in_order, false, NULL },
     { "cons.rx_side_cooked_typing_past_half", test_cons_rx_side_cooked_typing_past_half, false, NULL },
+    { "cons.rx_side_literal_intr_stays_data", test_cons_rx_side_literal_intr_stays_data, false, NULL },
     { "cons.rx_side_full_drops_and_counts", test_cons_rx_side_full_drops_and_counts, false, NULL },
     { "cons.rx_drop_counters",         test_cons_rx_drop_counters,         false, NULL },
     { "cons.ctrlc_consumed",           test_cons_ctrlc_consumed,           false, NULL },

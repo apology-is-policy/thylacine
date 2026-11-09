@@ -4004,8 +4004,12 @@ unsafe fn verdict(fd: &mut EpisodeIo, out: &mut Vec<u8>, line: &[u8], state: lic
     fd.model.state = state;
     fd.model.notice = line.to_vec();
     out.clear();
-    provincia::compose_verdict(line, out);
-    if console_write_all(fd, out) && fd.generation != 0 { console_wait_dismiss(fd, 10_000); }
+    provincia::compose_verdict_panel(line, out);
+    // A verdict closes on Enter or Esc on both media (vote 70). It waits even when the
+    // frame was not confirmed: whatever is typed meanwhile is swallowed, and a medium
+    // that failed ends the wait at once.
+    let _ = console_write_all(fd, out);
+    console_wait_dismiss(fd, 10_000);
 }
 
 // The `sak` note arrived: the kernel opened an episode, which may already be over.

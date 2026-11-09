@@ -234,6 +234,17 @@ pub fn compose_locked(user: &[u8], level: &[u8], out: &mut Vec<u8>) {
     g.rasterize(out);
 }
 
+// A verdict panel on the serial console: the outcome, then how to leave it. Enter
+// or Esc closes it (vote 70); the graphical panel draws the model's notice.
+pub fn compose_verdict_panel(line: &[u8], out: &mut Vec<u8>) {
+    out.extend_from_slice(b"\r\n");
+    let mut g = Grid::new(PROVINCIA_COLS, 2);
+    g.put(0, 0, line, ATTR_BOLD);
+    g.put(0, 1, b"press Enter", ATTR_NONE);
+    g.rasterize(out);
+    out.extend_from_slice(b"\r\n");
+}
+
 // The one-line verdict after the prompt, then a blank line so the shell's
 // next output starts clean after END.
 pub fn compose_verdict(line: &[u8], out: &mut Vec<u8>) {

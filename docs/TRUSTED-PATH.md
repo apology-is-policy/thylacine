@@ -195,7 +195,14 @@ while the engine is alive and draining, Lictor renews the kernel's deadline, up 
 bound, with input withheld, so a chord ends in the trusted screen or a dead engine, and
 the screen looks hung for as long as the client queued. Measured before it on the Pi's
 V3D: behind a client's deep queue, six chords of six failed at the five-second deadline
-with the session's screen still up. Not yet built.
+with the session's screen still up. Built (`SEAT_RENEW`): Lictor renews at most once a
+second while the control queue holds the takeover up, stalled behind a chain or with a
+command not yet retired, and the kernel stops at 35 s from the chord. Draining means the
+engine is working through what is ahead, not that something retired lately: one chain
+that runs for seconds retires nothing meanwhile and is renewed all the same, and a
+chain that never retires kills the engine at `FENCE_ABANDON_MS` (30 s), inside the
+bound. A cursor queue stalled alone renews nothing: no client reaches it, so that stall
+is the device's, and the deadline fails the takeover.
 
 Before a chord is seen the gap is the serve loop's. A synchronous command waits at most
 `SUBMIT_DEADLINE_MS`, a client's readback ahead of it or not (operator vote 72), so a

@@ -16,7 +16,8 @@ pub mod server;
 
 /// Ordinary console writes park during SAK. The hardware owner must never
 /// block behind its own trusted episode merely to print a GPU diagnostic.
-/// No key material is logged. Only the exclusive phase holds console writes.
+/// No key material is logged. The exclusive phase holds console writes, and so
+/// does a serial episode, which freezes every writer but its own.
 /// Only the serve thread prints (the input thread never does), and it alone can
 /// acknowledge quiescence, so diagnostics in quiescing/restoring cannot race its own
 /// next acknowledgement.
