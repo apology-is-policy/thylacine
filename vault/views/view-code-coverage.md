@@ -65,13 +65,13 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**731 owned · 39 unowned · 770 files (94% owned) · ~10711 unswept lines.**
+**731 owned · 39 unowned · 770 files (94% owned) · ~10824 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **97 files, ~49394 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
 | area | owned | unowned | unswept lines |
 |---|---:|---:|---:|
-| usr/warp-prove | 0 | 1 | 4816 |
+| usr/warp-prove | 0 | 1 | 4929 |
 | usr/pouch-hello | 24 | 14 | 2076 |
 | usr/ports | 19 | 5 | 1691 |
 | kernel | 196 | 10 | 1227 |
@@ -131,7 +131,7 @@ Excluded as harness and counted here rather than dropped: **97 files, ~49394 lin
 
 | file | lines |
 |---|---:|
-| usr/warp-prove/src/main.rs | 4816 |
+| usr/warp-prove/src/main.rs | 4929 |
 | usr/ports/gnumake/config.h | 1357 |
 | usr/pouch-hello/pouch-hello-net.c | 618 |
 | kernel/include/thylacine/spinlock.h | 287 |

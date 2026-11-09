@@ -170,6 +170,12 @@ const STALL_RESEND_BOUND_MS: u64 = 35_000;
 /// Write one whole command, resending it while the broker answers EAGAIN (its stall),
 /// up to STALL_RESEND_BOUND_MS. Returns the write's last answer and how many times
 /// the stall refused it; a refused command was never queued, so resending is exact.
+/// Every stall refusal any send met, process-wide: a leg whose construction a
+/// stall can defeat compares it across its sends and retries instead of judging.
+static STALL_REFUSED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+fn stall_refusals() -> u32 {
+    STALL_REFUSED.load(core::sync::atomic::Ordering::Relaxed)
+}
 fn write_behind_stall(root: i64, path: &str, bytes: &[u8]) -> (i64, u32) {
     let t0 = libthyla_rs::time::Instant::now();
     let mut refused = 0u32;
@@ -184,6 +190,7 @@ fn write_behind_stall(root: i64, path: &str, bytes: &[u8]) -> (i64, u32) {
             return (n, refused);
         }
         refused += 1;
+        STALL_REFUSED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(20));
     }
 }
@@ -3597,6 +3604,10 @@ const RB_LATE_DRAWS: usize = 50;
 /// ABANDON's queue: long enough on V3D that every chain is still running when
 /// the readback arrives and when the abandon lands a few ms later.
 const RB_ABANDON_SUBMITS: usize = 3;
+/// A leg whose sends met an engine stall (another client's sync step behind the
+/// queue) may have had its readback publish unparked; it retries this often.
+const RB_DEADLINE_ATTEMPTS: u32 = 4;
+const RB_ABANDON_ATTEMPTS: u32 = 4;
 /// Lictor's SUBMIT_DEADLINE_MS (500) with slack: past it, a bystander present stalled at
 /// its bound rather than waiting behind a readback (vote 72a).
 const RB_F2B_BOUND_MS: u64 = 900;
@@ -3698,6 +3709,21 @@ fn rb_census(warp: i64) -> Option<RbCensus> {
 /// holding the console's poll at 1 ms. Its own connection, because the hold and
 /// the abandon act only on the caller's ctx. Leaves the lane healed for CLEAN.
 fn rb_abandoned_prefix() -> bool {
+    for k in 1..=RB_ABANDON_ATTEMPTS {
+        if let Some(ok) = rb_abandon_attempt(k) {
+            return ok;
+        }
+    }
+    t_putstr(&format!(
+        "warp-prove: C6-RB ABANDON UNCONSTRUCTED -- in {} attempts the readback was never parked when the abandon landed\n",
+        RB_ABANDON_ATTEMPTS
+    ));
+    false
+}
+
+/// One attempt: Some(verdict), or None when it was not constructed (the
+/// readback was on the device when the abandon landed, or a stall met its sends).
+fn rb_abandon_attempt(k: u32) -> Option<bool> {
     let w = warp_connect("abandon");
     let ctx = mint_ctx(w, "abandon");
     let (bo, res, _va) = mint_bo_wh(w, ctx, RB_W, RB_H, VIRGL_RESOURCE_Y_0_TOP, "abandon");
@@ -3714,16 +3740,20 @@ fn rb_abandoned_prefix() -> bool {
         parse_field(&open_read_string(w, "ctl"), "abandoned")
             .unwrap_or_else(|| rb_incomplete("instrument:abandoned-count"))
     };
+    // The slots a parked chain held must come back, not only its count.
+    let f0 = fenced_free(w);
     if !write_ctl(w, "ctl", "warp-hold on") {
         rb_incomplete("instrument:abandon-hold");
     }
     let a0 = abandoned(w);
+    let r0 = stall_refusals();
     let (s0, _) = rb_queue_heavy(w, ctx, RB_ABANDON_SUBMITS, "abandon");
     let xfer = format!("transfer_from 0 0 0 0 {} {} 1 0 0 0", RB_W, RB_H);
     let (n, _) = write_behind_stall(w, &format!("ctx/{}/bo/{}/ctl", ctx, bo), xfer.as_bytes());
     if n != xfer.len() as i64 {
         rb_incomplete("instrument:abandon-transfer-refused");
     }
+    let met = stall_refusals().wrapping_sub(r0);
     if !write_ctl(w, "ctl", "warp-abandon") {
         rb_incomplete("instrument:abandon");
     }
@@ -3745,36 +3775,56 @@ fn rb_abandoned_prefix() -> bool {
     for _ in 0..400 {
         if parse_field(&open_read_string(w, &format!("ctx/{}/ctl", ctx)), "poisoned") == Some(0)
             && ctx_field(w, ctx, "fences-in-flight") == 0
+            && fenced_free(w) >= f0
         {
             healed = true;
             break;
         }
         let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(50));
     }
-    // Once the hold's replay vindicates the queue, the queue and the owed
-    // readback count: exactly four, or the client's issue count is left ahead.
+    // Once the hold's replay vindicates the queue, the queue counts (exactly
+    // three) and the released readback never does: its context's stream stays
+    // over, so a later submit is refused rather than resumed over a readback
+    // that never ran.
     let s2 = ctx_field(w, ctx, "fence-signaled");
+    let f_end = fenced_free(w);
+    let released = parse_field(&open_read_all(w, &format!("ctx/{}/ctl", ctx)), "released").unwrap_or(99);
+    let submit_path = format!("ctx/{}/submit", ctx);
+    let nop = [cmd0(VIRGL_CCMD_CLEAR, 0, 0).to_le_bytes()].concat();
+    let refused_after = {
+        let fd = unsafe { t_open(w, submit_path.as_ptr(), submit_path.len(), T_OWRITE) };
+        if fd < 0 {
+            true
+        } else {
+            let n = unsafe { t_write(fd, nop.as_ptr(), nop.len()) };
+            unsafe { t_close(fd) };
+            n < 0
+        }
+    };
     let _ = write_ctl(w, &format!("ctx/{}/ctl", ctx), "destroy");
     unsafe { t_close(w) };
     // Constructed only if the abandon took exactly the queue: a readback the
     // device had been handed would have been abandoned with it.
-    if taken != RB_ABANDON_SUBMITS as u64 || poisoned != 1 {
+    if taken != RB_ABANDON_SUBMITS as u64 || poisoned != 1 || met != 0 {
         t_putstr(&format!(
-            "warp-prove: C6-RB ABANDON UNCONSTRUCTED -- the abandon took {} chains (the queue is {}; one more means the readback was on the device, not parked), ctx poisoned {}\n",
-            taken, RB_ABANDON_SUBMITS, poisoned
+            "warp-prove: C6-RB ABANDON attempt {} not constructed -- the abandon took {} chains (the queue is {}; one more means the readback was on the device, not parked), ctx poisoned {}, stall refusals on its sends {}\n",
+            k, taken, RB_ABANDON_SUBMITS, poisoned, met
         ));
-        return false;
+        return None;
     }
-    let due = RB_ABANDON_SUBMITS as u64 + 1;
-    let ok = left == 0 && healed && s1 == s0 && s2 == s0 + due;
+    let due = RB_ABANDON_SUBMITS as u64;
+    let ok = left == 0 && healed && s1 == s0 && s2 == s0 + due && released == 1 && refused_after && f_end >= f0;
     t_putstr(&format!(
-        "warp-prove: C6-RB ABANDON {} -- the readback parked behind {} abandoned chains; the ctx's fences in flight {} after {} ms (0 = the parked readback was released); fence-signaled +{} while poisoned (want +0), +{} after the vindication (want +{}){}\n",
+        "warp-prove: C6-RB ABANDON {} -- the readback parked behind {} abandoned chains; the ctx's fences in flight {} after {} ms (0 = the parked readback was released); fence-signaled +{} while poisoned (want +0), +{} after the vindication (want +{}, the queue alone); released {} (want 1); a submit after the vindication {} (want refused: the stream stays over); fenced-free {} after, {} before{}\n",
         if ok { "PASS" } else { "FAIL" },
         RB_ABANDON_SUBMITS, left, drained_ms,
         s1.wrapping_sub(s0), s2.wrapping_sub(s0), due,
+        released,
+        if refused_after { "refused" } else { "ACCEPTED" },
+        f_end, f0,
         if healed { "" } else { "; the lane did not heal after the hold came off" }
     ));
-    ok
+    Some(ok)
 }
 
 fn rb_incomplete(arm: &str) -> ! {
@@ -4667,13 +4717,49 @@ fn observe_readback() {
     // presents. Lictor must park the readback behind the queue and the later
     // submit behind the readback; B's sync steps wait on the queue through
     // their own fences, so one stalls and is refused, and the engine revives.
-    let (dl_before, dl_t0) = rb_queue_heavy(warp, ctx, RB_DEADLINE_SUBMITS, "deadline");
+    // The backing is re-sentinelled first and no compositor readback may land
+    // in it meanwhile, so the pixel ORDER reads is the client readback's: LIVE
+    // left the queue's last-draw colour there.
+    // A stall met by the queue's or the readback's sends (another client's sync
+    // step waiting behind the queue) lets the queue retire before the readback
+    // is taken, so it publishes unparked: that attempt is unconstructed, and the
+    // leg runs again rather than judging it.
     let xfer = format!("transfer_from 0 0 0 0 {} {} 1 0 0 0", RB_W, RB_H);
-    let (n, refused) = write_behind_stall(warp, &format!("ctx/{}/bo/{}/ctl", ctx, bo), xfer.as_bytes());
-    if n != xfer.len() as i64 {
-        rb_incomplete("instrument:f2b-transfer-refused");
-    }
-    note_stall_refusals("deadline readback", refused);
+    let mut dl_try = 0u32;
+    let (dl_before, dl_t0, dl_c0) = loop {
+        dl_try += 1;
+        let mut dl_c0 = rb_census(warp).unwrap_or_else(|| rb_incomplete("instrument:deadline-census"));
+        for _ in 0..40 {
+            if dl_c0.slot == 0 {
+                break;
+            }
+            let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(50));
+            dl_c0 = rb_census(warp).unwrap_or_else(|| rb_incomplete("instrument:deadline-census"));
+        }
+        if dl_c0.slot != 0 {
+            rb_incomplete("instrument:deadline-comp-rb-in-flight");
+        }
+        unsafe { core::ptr::write_volatile(va as *mut u32, SENTINEL) };
+        let r0 = stall_refusals();
+        let (dl_before, dl_t0) = rb_queue_heavy(warp, ctx, RB_DEADLINE_SUBMITS, "deadline");
+        let (n, refused) = write_behind_stall(warp, &format!("ctx/{}/bo/{}/ctl", ctx, bo), xfer.as_bytes());
+        if n != xfer.len() as i64 {
+            rb_incomplete("instrument:f2b-transfer-refused");
+        }
+        note_stall_refusals("deadline readback", refused);
+        let met = stall_refusals().wrapping_sub(r0);
+        if met == 0 {
+            break (dl_before, dl_t0, dl_c0);
+        }
+        let _ = rb_wait_signaled(warp, ctx, dl_before, RB_DEADLINE_SUBMITS as u64 + 1, dl_t0, "deadline unconstructed");
+        t_putstr(&format!(
+            "warp-prove: C6-RB DEADLINE attempt {} not constructed -- its sends met an engine stall ({} refusals), so the readback may have published after its queue retired\n",
+            dl_try, met
+        ));
+        if dl_try >= RB_DEADLINE_ATTEMPTS {
+            rb_incomplete("deadline-unconstructed");
+        }
+    };
     let mut late: Vec<u32> = Vec::new();
     fb_state_stream(&mut late, 1);
     for _ in 0..RB_LATE_DRAWS {
@@ -4718,6 +4804,10 @@ fn observe_readback() {
     let dl_stood_ms = dl_queue_ms.saturating_sub(dl_p0_ms);
     let total = RB_DEADLINE_SUBMITS * RB_DRAWS_PER_SUBMIT;
     let landed_px = unsafe { core::ptr::read_volatile(va as *const u32) };
+    let dl_c1 = rb_census(warp).unwrap_or_else(|| rb_incomplete("instrument:deadline-census"));
+    if dl_c1.issued != dl_c0.issued {
+        rb_incomplete("instrument:deadline-comp-rb-issued");
+    }
     let landed_idx = rb_index_of(landed_px, total);
     // B8G8R8A8: the queue paints (R 0, G 255, B index); the later submit paints
     // R 255, G 0.
@@ -4764,7 +4854,13 @@ fn observe_readback() {
         },
         parked_ok as u32, rb_parked, RB_PARK_FLOOR_MS, rb_exec, RB_EXEC_BOUND_MS,
         order_ok as u32, landed_idx, total, landed_px,
-        if landed_late { " -- the LATER submit's colour" } else { "" },
+        if landed_late {
+            " -- the LATER submit's colour"
+        } else if landed_px == SENTINEL {
+            " -- SENTINEL: the readback wrote nothing here"
+        } else {
+            ""
+        },
         (stood && bounded) as u32, b_n, b_refused, b_max_ms, RB_F2B_BOUND_MS, dl_stood_ms,
         if stood { "so a present must have stalled at its bound" } else { "too short to judge the bound" },
         healthy as u32, alive as u32, poisoned_after
@@ -4789,7 +4885,19 @@ fn observe_readback() {
     if !write_ctl(warp, &format!("ctx/{}/ctl", ctx), "destroy") {
         fail("readback: ctx destroy");
     }
-    let c_end = rb_census(warp).unwrap();
+    // Every slot back: the reserved one idle and the whole client pool free,
+    // within a bound (the last retirements land at the next pump).
+    let pool = parse_field(&open_read_string(warp, "ctl"), "fenced-pool").unwrap_or(0);
+    let mut c_end = rb_census(warp).unwrap();
+    let mut free_end = fenced_free(warp);
+    for _ in 0..40 {
+        if c_end.slot == 0 && free_end == pool {
+            break;
+        }
+        let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(50));
+        c_end = rb_census(warp).unwrap();
+        free_end = fenced_free(warp);
+    }
     let poisoned_end = parse_field(&open_read_string(warp, "ctl"), "poisoned").unwrap_or(99);
     drop(a);
     drop(b);
@@ -4797,12 +4905,17 @@ fn observe_readback() {
         t_close(tap);
         t_close(warp);
     }
-    if poisoned_end != 0 || c_end.slot == 2 {
+    if poisoned_end != 0 || c_end.slot != 0 || pool == 0 || free_end != pool {
         t_putstr(&format!(
-            "warp-prove: C6-RB CLEAN FAIL -- poisoned {} rb-slot {} after teardown\n",
-            poisoned_end, c_end.slot
+            "warp-prove: C6-RB CLEAN FAIL -- poisoned {} rb-slot {} fenced-free {} of {} after teardown\n",
+            poisoned_end, c_end.slot, free_end, pool
         ));
         record(false, "clean");
+    } else {
+        t_putstr(&format!(
+            "warp-prove: C6-RB CLEAN PASS -- poisoned 0, rb-slot 0, fenced-free {} of {} after teardown\n",
+            free_end, pool
+        ));
     }
     t_putstr(&format!(
         "warp-prove: C6-RB census at end -- issued {} landed {} coalesced {} rb-abandoned {} rb-slot {}\n",

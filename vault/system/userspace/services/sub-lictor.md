@@ -675,7 +675,9 @@ the chains behind it, up to that context's next readback (`gpu_api::unpark_plan`
   counts for its context (`ctx_fences_in_flight`), and for the compositor's pump
   (`fenced_outstanding`). It is not on the device: `fenced_in_flight`, which the
   seat's takeover lines count, `device_idle` and the abandonment clock leave it
-  out.
+  out. The test build's stall census (`fenced_held`, `Request::FencedHeld`)
+  returns parked chains as well, flagged (`gpu_api::HeldRow`; the wire carries
+  an 8-tuple), so a slot a parked chain holds is named, not missing.
 - **Retirements.** A retirement that a parked chain can reach parks
   (`retirement_hold` counts parked reaches as in flight), so no detach or unref
   runs under a chain that has yet to publish.
@@ -694,7 +696,9 @@ the chains behind it, up to that context's next readback (`gpu_api::unpark_plan`
   (`held_retires`) has finished on the device, so nothing waits for it.
 
 Each tag carries `parked_ms` and `exec_ms` (publication to retirement), and a
-test build says each readback that parked or ran 20 ms or more. The C-6 gate's
+test build says a readback that parked or ran 20 ms or more when its park or its
+run at least doubles the last one said (`Controlq::rb_said`), so the say is
+bounded per boot. The C-6 gate's
 DEADLINE arm judges both.
 
 Open after that review:

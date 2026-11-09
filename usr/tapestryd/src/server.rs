@@ -1756,7 +1756,8 @@ pub struct Comp {
     rb_wanted: VecDeque<(usize, u32)>,
     /// The C-6 census (global ctl `comp-readback`): issued; landed (composed
     /// at completion); dropped (the surface moved on -- retired, resized,
-    /// re-adopted -- between issue and completion, or the engine died);
+    /// re-adopted -- between issue and completion, or the engine died, or
+    /// it was released unpublished behind an abandoned chain (vote 81));
     /// coalesced (presents that enqueued instead of issuing); abandoned
     /// (never retired in FENCE_ABANDON_MS -- the client's ctx poisoned, its
     /// backing possibly still being written).
@@ -2146,11 +2147,13 @@ struct WarpCtx {
     /// -- the server's single reported cursor would let two parked readers
     /// steal each other's wakes).
     timeline_signaled: [u64; WARP_TIMELINES],
-    /// Released parked chains (vote 81), per timeline: never run, so not yet
-    /// counted. Owed until the vindication that un-poisons the context proves
-    /// every chain ahead of them finished; counting them at release would let
-    /// the dense count pass the abandoned fence ahead of them.
-    released_owed: [u64; WARP_TIMELINES],
+    /// Chains of this context released unpublished (vote 81): never run, so
+    /// never counted. Nonzero latches the fence stream over for good (EOF, no
+    /// fenced work): its count can never catch up honestly, and resuming it
+    /// at a vindication would answer later waits over draws and readbacks
+    /// that never ran. Device liveness stays `fence_poisoned`'s, so destroy
+    /// and reclamation follow the vindication as before.
+    released: u64,
     /// #210 ledger reconciliation: every fenced write that REACHED the
     /// dispatch funnel (rx), split by outcome (minted / E_AGAIN refused /
     /// other error). The client's `issued` counts its successful fenced
@@ -10933,7 +10936,8 @@ impl Comp {
         // time, so gating on those would collapse composition to the 2D
         // weave constantly. Returning `None` degrades to a stale frame,
         // which both call sites already handle.
-        if c.fence_poisoned {
+        // A stream with released chains lacks their draws for good (vote 81).
+        if c.fence_poisoned || c.released > 0 {
             return None;
         }
         let (slot, gen, src) = c.present_to?;
@@ -11365,7 +11369,7 @@ impl Comp {
             fence_signaled: 0,
             fence_reported: 0,
             timeline_signaled: [0; WARP_TIMELINES],
-            released_owed: [0; WARP_TIMELINES],
+            released: 0,
             fenced_rx: 0,
             fenced_minted: 0,
             fenced_again: 0,
@@ -15355,6 +15359,12 @@ impl Comp {
             self.rb_abandoned += 1;
             return;
         }
+        // Vote 81: released unpublished, so the device never ran it and its
+        // park behind a chain that never retired is no completed wait either.
+        if tag.released {
+            self.rb_dropped += 1;
+            return;
+        }
         // The stall the device paid for this frame's backlog (F2b's
         // measurement): `cost readback-wait` carries n / sum / max.
         self.cost_add(Cost::ReadbackWait, rec.issued);
@@ -15431,22 +15441,13 @@ impl Comp {
                 } else if tag.released {
                     // Vote 81: a parked chain the device never saw, released
                     // because its context's prefix was abandoned or the
-                    // engine died. Its fence never signals, so the stream is
-                    // over (the waiter reads EOF, not success), and the count
-                    // is owed: counted now, the dense count would pass the
-                    // abandoned fence ahead of it, and every wait at or below
-                    // it would return as if that chain had finished.
-                    c.fence_poisoned = true;
+                    // engine died. Its fence never signals and is never
+                    // counted: the dense count would pass the abandoned fence
+                    // ahead of it. A client chain latches this context's
+                    // stream over (`released`); a compositor readback's
+                    // release touches only the compositor's census.
                     if !tag.comp {
-                        let t = tag.ring_idx as usize;
-                        if t < WARP_TIMELINES {
-                            c.released_owed[t] += 1;
-                        } else {
-                            say!(
-                                "tapestryd: warp released tag ring_idx {} out of range (ctx {}) -- count dropped",
-                                tag.ring_idx, tag.ctx_pub
-                            );
-                        }
+                        c.released += 1;
                     }
                 } else if !tag.comp {
                     // #210 ROOT CAUSE FIX: count completions DENSELY per
@@ -15573,16 +15574,6 @@ impl Comp {
                     c.fence_poisoned = false;
                     c.leaked_bytes = 0;
                     c.leaked_count = 0;
-                    // Every chain ahead of the released ones has now finished,
-                    // so their counts come due: without them the client's
-                    // issue count stays ahead for good (#210's silent park).
-                    // The bytes a released readback would have read never
-                    // landed; the stream was over until this point.
-                    for t in 0..WARP_TIMELINES {
-                        let owed = core::mem::take(&mut c.released_owed[t]);
-                        c.fence_signaled += owed;
-                        c.timeline_signaled[t] += owed;
-                    }
                 }
             }
             let slot = match self.warp_ctx_vindicate.iter().position(|&p| p == v.ctx_pub) {
@@ -15748,7 +15739,7 @@ impl Comp {
     /// its issued-minus-signaled model never sees a fence it did not issue.
     fn warp_fenced_admit(&mut self, ctx_pub: u32, conn: u64) -> Result<u32, u32> {
         let c = self.wctx(ctx_pub, conn).ok_or(p9::E_NOENT)?;
-        if c.fence_poisoned {
+        if c.fence_poisoned || c.released > 0 {
             return Err(E_IO);
         }
         let own = c.fences_in_flight.saturating_sub(c.comp_rb_in_flight);
@@ -17273,12 +17264,17 @@ impl Conn {
                 // 512-byte snapshot -- the round-2 F6 blindness, reintroduced
                 // by rows built for the same hunt. The unbounded thing goes
                 // last.
-                for (i, fid, cpub, ridx, rb, cm, age) in comp.gpu.fenced_held() {
+                // Vote 81: a parked chain holds its slot without being on
+                // the device, so it gets its own row (age = time parked).
+                for (i, fid, cpub, ridx, rb, cm, age, parked) in comp.gpu.fenced_held() {
                     let _ = core::fmt::write(
                         &mut s,
                         format_args!(
-                            "fenced-held slot={} fence={} ctx={} ring={} rb={} comp={} age_ms={}\n",
-                            i, fid, cpub, ridx, rb as u32, cm as u32, age
+                            "{} slot={} fence={} ctx={} ring={} rb={} comp={} {}={}\n",
+                            if parked { "fenced-parked" } else { "fenced-held" },
+                            i, fid, cpub, ridx, rb as u32, cm as u32,
+                            if parked { "parked_ms" } else { "age_ms" },
+                            age
                         ),
                     );
                 }
@@ -17364,8 +17360,8 @@ impl Conn {
                         let _ = core::fmt::write(
                             &mut s,
                             format_args!(
-                                "poisoned {}\nleaked-count {}\nleaked-bytes {}\n",
-                                c.fence_poisoned as u32, c.leaked_count, c.leaked_bytes
+                                "poisoned {}\nleaked-count {}\nleaked-bytes {}\nreleased {}\n",
+                                c.fence_poisoned as u32, c.leaked_count, c.leaked_bytes, c.released
                             ),
                         );
                         // #240 (GPU-DESIGN 4.5.4b). DISTINCT from `poisoned`
@@ -17541,7 +17537,8 @@ impl Conn {
                         return p9::build_rread(&mut self.out_buf, tag, &[]);
                     }
                     let c = comp.wctx(id, self.conn_id).unwrap();
-                    if c.fence_poisoned {
+                    // Vote 81: released chains end the stream for good too.
+                    if c.fence_poisoned || c.released > 0 {
                         // Stream over: a fence of this ctx was abandoned
                         // and can never signal (round-2 F7). UNCONDITIONAL
                         // since round-5 F2 -- the old `&& fence_signaled <=
@@ -18516,6 +18513,9 @@ impl Conn {
             // the fenced lane sitting beside it.
             Some("verify") => {
                 let c = comp.wctx(id, self.conn_id).ok_or(p9::E_NOENT)?;
+                if c.released > 0 {
+                    return Err(E_IO);
+                }
                 if c.fences_in_flight > 0 || c.fence_poisoned {
                     return Err(p9::E_AGAIN);
                 }
@@ -20959,7 +20959,7 @@ impl Conn {
                 // stranded the reader with neither record nor EOF
                 // (round-2 F7) -- end the stream so the client learns.
                 // Unconditional since round-5 F2 -- see the h_read twin.
-                Some(c) if c.fence_poisoned => None,
+                Some(c) if c.fence_poisoned || c.released > 0 => None,
                 Some(c) if c.fence_signaled > c.fence_reported => Some(c.fence_signaled),
                 Some(_) => {
                     i += 1;

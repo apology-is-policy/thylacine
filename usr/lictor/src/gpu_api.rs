@@ -104,6 +104,9 @@ pub struct FenceTag {
 pub fn must_park(parked: &[(u32, bool)], ctx: u32, readback: bool, on_device: bool) -> bool {
     parked.iter().any(|&(c, _)| c == ctx) || (readback && on_device)
 }
+/// One `fenced-held` census row (W-4): (slot, fence_id, ctx_pub, ring_idx,
+/// readback, comp, age_ms, parked). A parked chain's age is the time parked.
+pub type HeldRow = (usize, u64, u32, u8, bool, bool, u64, bool);
 /// What the completion pump does with one parked chain.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Unpark {

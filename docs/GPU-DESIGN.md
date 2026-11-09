@@ -2590,13 +2590,18 @@ bounded by its prefix, because each chain ahead of it is abandoned at
   completion. The seam counts fences densely (a count of N means everything up
   to N finished), so counting a released chain would carry the count past the
   abandoned fence ahead of it, and a wait on either would return as if it had
-  finished. Instead the seam ends the context's fence stream, so a waiter reads
-  EOF, and owes the count. The vindication that un-poisons the context, the
-  proof that every chain ahead finished, pays what is owed, so the client's
-  count stays in step afterwards; the bytes a released readback would have read
-  never landed. (First written as "keeps it parked until its late retirement",
-  which round 1's F1 found pinned the poll; then as "counts as signaled", which
-  round 2's F1 found passed the abandoned fence.)
+  finished. Nor can the count be paid later, at the vindication: a client that
+  never waited inside the poisoned window would then resume over a readback
+  that never ran and submits whose draws never executed, and could not tell.
+  So a released client chain is never counted, and it ends its context's fence
+  stream for good (`released` on the context): a waiter reads EOF, fenced work
+  is refused, `verify` is refused, the context is not composed, and the client
+  must make a new context. Device liveness stays the poison's: the vindication
+  still un-poisons the context, so its memory is reclaimed and its destroy runs
+  the ordinary path. (First written as "keeps it parked until its late
+  retirement", which round 1's F1 found pinned the poll; then as "counts as
+  signaled", which round 2's F1 found passed the abandoned fence; then as "owed
+  until the vindication", which round 2's F5 found resumed a broken stream.)
 - **The harness hold.** A chain whose retirement the test hold swallowed
   (#177) has finished on the device, so nothing parked waits for it. Otherwise
   a held client would park the compositor's readback on the reserved slot: the
@@ -2605,8 +2610,8 @@ bounded by its prefix, because each chain ahead of it is abandoned at
   chains publish at revival.
 - **Dead engine.** A parked chain is released (`ok = false`, `released`, not
   abandoned). The device never saw it, so its slot returns to the pool and
-  nothing it named is at risk. The seam ends its context's fence stream, as for
-  any released chain, and no vindication comes on a dead engine.
+  nothing it named is at risk. The seam ends its context's fence stream for
+  good, as for any released client chain.
 
 *The compositor readback.* `comp-rb` rides the client's context, so it parks
 like the client's own readback. The reserved slot holds it while it is parked,
@@ -2619,7 +2624,18 @@ how long it took from publication to retirement (`parked_ms`, `exec_ms`). The
 second number is the one QEMU spent decoding it, so it is short when the rule
 holds and the whole queue when it does not. The context's ctl reports both for
 its last readback (`readback-parked-ms`, `readback-exec-ms`), and the warp ctl
-reports both for the last compositor readback.
+reports both for the last compositor readback that landed. A released or
+refused readback reports neither and is no sample of `cost readback-wait`,
+which counts completed readbacks only. In a test build the warp ctl's census
+names each parked chain on its own row (`fenced-parked slot= fence= ctx= ring=
+rb= comp= parked_ms=`) beside the `fenced-held` rows of the chains on the
+device, so a slot held by a parked chain is never an anonymous missing count.
+The boot log says a readback that parked or ran 20 ms or more only when its park
+or its run at least doubles the last one said, so no client can flood the
+console from Lictor's serve loop.
+DEADLINE re-sentinels the backing before its queue and requires that no
+compositor readback was issued meanwhile, so the pixel ORDER reads is the
+client readback's own.
 
 *What it does not reach (weighed, as the vote asks for the egl-headless
 flush).* Any device step whose decode needs a GPU result is in the same class.
@@ -2681,10 +2697,20 @@ The census:
   readback was parked and not on the device. Within two seconds, the context's
   fences in flight must reach zero (the parked readback was released) while its
   `fence-signaled` has not moved. The hold then comes off, the replay vindicates
-  the queue, and `fence-signaled` must rise by exactly four: the queue and the
-  owed readback. The lane must heal before CLEAN judges it. A mutant that never
-  releases a parked chain, and one that counts a released chain at once, must
-  each go red here and nowhere else.
+  the queue, and `fence-signaled` must rise by exactly three, the queue alone;
+  the context's `released` must read 1, a later submit must be refused (the
+  stream stays over), and `fenced-free` must be back where it was before the
+  hold (the slots came back, not only the counts). A mutant that never releases
+  a parked chain, one that counts a released chain at once, and one that
+  forgets to return a released chain's slot must each go red here.
+- **CLEAN** now waits, bounded, for the reserved slot idle and the whole client
+  pool free (`fenced-free` equal to `fenced-pool`), and says PASS.
+- **Stalls during a leg's sends.** Another client's synchronous step waiting
+  behind a leg's queue stalls the engine, and a send it refuses is resent after
+  the revival, which comes only once the queue has retired, so the readback
+  publishes unparked. DEADLINE and ABANDON count the stall refusals their own
+  sends met, and an attempt that met any is unconstructed: it runs again, up to
+  four times, rather than being judged.
 
 *Witnesses whose premise was the hold.* `ls-graphical-sak-chain`'s readback and
 pointer legs, and `ls-graphical-keys-behind`'s readback leg, stood a client

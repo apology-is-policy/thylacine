@@ -296,7 +296,7 @@ impl Gpu {
         self.query(Request::TestAbandonedTotal).unwrap_or(u32::MAX)
     }
     #[cfg(feature = "test-mode")]
-    pub fn fenced_held(&self) -> Vec<(usize, u64, u32, u8, bool, bool, u64)> {
+    pub fn fenced_held(&self) -> Vec<crate::gpu_api::HeldRow> {
         self.query(Request::FencedHeld).unwrap_or(Vec::new())
     }
     #[cfg(feature = "test-mode")]

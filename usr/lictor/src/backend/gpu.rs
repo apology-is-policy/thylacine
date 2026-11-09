@@ -489,7 +489,8 @@ const USED_SPIN_PER_WAKE: u32 = 65536;
 // takeover still waits on TAKEOVER_BOUND_MS after its chord (vote 80).
 const FENCE_ABANDON_MS: u64 = 30_000;
 /// A readback that parked or ran this long is said (test-mode), so a boot log
-/// shows the parking rule at work (vote 81).
+/// shows the parking rule at work (vote 81) -- but only when its park or its run
+/// at least doubles the last one said, so no client can flood the console.
 #[cfg(feature = "test-mode")]
 const READBACK_SAY_MS: u32 = 20;
 fn elapsed_ms_u32(t: Instant) -> u32 {
@@ -1055,16 +1056,22 @@ struct Controlq {
     /// trigger BIT before trusting anything downstream of it.
     #[cfg(feature = "test-mode")]
     abandoned_total: u32,
+    /// The longest park and run a readback say has reported (the doubling
+    /// throttle on that say).
+    #[cfg(feature = "test-mode")]
+    rb_said: (u32, u32),
 }
 
 impl Controlq {
     /// W-4 stall observability: every HELD fenced slot as
-    /// (slot, fence_id, ctx_pub, ring_idx, readback, comp, age_ms) -- the
-    /// ctl prints one row per entry so a post-mortem read NAMES the op
+    /// (slot, fence_id, ctx_pub, ring_idx, readback, comp, age_ms, parked) --
+    /// the ctl prints one row per entry so a post-mortem read NAMES the op
     /// class a wedged chain belongs to (run 6's whole evidence was one
-    /// anonymous missing count: fenced-free 15).
-    fn fenced_held(&self) -> alloc::vec::Vec<(usize, u64, u32, u8, bool, bool, u64)> {
-        self.fslots
+    /// anonymous missing count: fenced-free 15). A parked chain (vote 81)
+    /// holds its slot too; its age is the time parked.
+    fn fenced_held(&self) -> alloc::vec::Vec<crate::gpu_api::HeldRow> {
+        let mut rows: alloc::vec::Vec<_> = self
+            .fslots
             .iter()
             .enumerate()
             .filter_map(|(i, t)| {
@@ -1073,11 +1080,17 @@ impl Controlq {
                         .map(|s| s.elapsed().as_millis() as u64)
                         .unwrap_or(0);
                     (
-                        i, t.fence_id, t.ctx_pub, t.ring_idx, t.readback, t.comp, age,
+                        i, t.fence_id, t.ctx_pub, t.ring_idx, t.readback, t.comp, age, false,
                     )
                 })
             })
-            .collect()
+            .collect();
+        for p in &self.parked {
+            let t = p.tag;
+            let age = p.since.elapsed().as_millis() as u64;
+            rows.push((p.slot, t.fence_id, t.ctx_pub, t.ring_idx, t.readback, t.comp, age, true));
+        }
+        rows
     }
 
     fn fenced_in_flight(&self) -> u32 {
@@ -1337,7 +1350,11 @@ impl Controlq {
             }
             tag.exec_ms = published.map_or(0, elapsed_ms_u32);
             #[cfg(feature = "test-mode")]
-            if tag.readback && (tag.parked_ms >= READBACK_SAY_MS || tag.exec_ms >= READBACK_SAY_MS) {
+            if tag.readback
+                && ((tag.parked_ms >= READBACK_SAY_MS.max(self.rb_said.0.saturating_mul(2)))
+                    || (tag.exec_ms >= READBACK_SAY_MS.max(self.rb_said.1.saturating_mul(2))))
+            {
+                self.rb_said = (self.rb_said.0.max(tag.parked_ms), self.rb_said.1.max(tag.exec_ms));
                 say!(
                     "lictor: gpu readback (fence {}, ctx {}{}) parked {} ms, retired {} ms after publication",
                     tag.fence_id,
@@ -2425,6 +2442,8 @@ impl Gpu {
                 held_retires: alloc::vec::Vec::new(),
                 #[cfg(feature = "test-mode")]
                 abandoned_total: 0,
+                #[cfg(feature = "test-mode")]
+                rb_said: (0, 0),
             },
             ring_va,
             width: DEFAULT_DISPLAY_W,
@@ -4798,7 +4817,7 @@ impl Gpu {
 
     /// W-4 stall observability (delegate; the slots live on Controlq).
     #[cfg(feature = "test-mode")]
-    pub fn fenced_held(&self) -> alloc::vec::Vec<(usize, u64, u32, u8, bool, bool, u64)> {
+    pub fn fenced_held(&self) -> alloc::vec::Vec<crate::gpu_api::HeldRow> {
         self.ctrl.fenced_held()
     }
 
