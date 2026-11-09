@@ -4250,6 +4250,30 @@ void test_notes_poll_zero_is_a_death(void) {
     TEST_EXPECT_EQ(cst, (int)WAIT_STATUS_EXITED(7), "control: and leaves by its own exit");
 }
 
+// The child as a Linux phenotype with every row at its default, so the tail takes
+// the phenotype's paths: its SIG_DFL terminate arm, and notes_deliver_linux_locked
+// once a row catches. proc_free frees the sigtab.
+static bool cd_linux(struct Proc *p) {
+    if (!p->sigtab) p->sigtab = (struct viv_sigtab *)kzalloc(sizeof(struct viv_sigtab), 0);
+    if (!p->sigtab) return false;
+    p->phenotype = PHENO_LINUX;
+    return true;
+}
+
+static const struct viv_ksigaction g_cd_hand = {
+    .handler = 0x1000, .flags = 0, .restorer = 0x2000, .mask = 0 };
+
+// A handler for `interrupt`, the way each phenotype installs one: the native
+// SYS_NOTIFY body, or rt_sigaction's row and its settle.
+static void cd_catch(struct Proc *p, bool linux_pheno) {
+    if (!linux_pheno) {
+        notes_set_handler(p, 0x1000ull);
+        return;
+    }
+    (void)viv_sigtab_set(p->sigtab, VIV_SIGNOTE_INTERRUPT, &g_cd_hand);
+    viv_sigaction_settled_for_test(p, VIV_SIGNOTE_INTERRUPT, &g_cd_hand);
+}
+
 // The tail hands no note to a handler once the death is committed: a thread that
 // passed its die check before the commit, and reaches delivery after a handler
 // arrived, dies of the note instead of running the handler. The tail runs with an
@@ -4257,12 +4281,17 @@ void test_notes_poll_zero_is_a_death(void) {
 // the note stays queued and the thread lives.
 static volatile int g_th_lived;
 
+#define TH_COMMIT 1u
+#define TH_LINUX  2u
+
 static void th_entry(void *arg) {
+    u32 mode = (u32)(u64)arg;
     struct Thread *t = current_thread();
     struct Proc *p = t->proc;
+    if ((mode & TH_LINUX) && !cd_linux(p)) exits_code(9, "setup");
     (void)notes_post(p, NOTE_NAME_INTERRUPT, 0u, NULL, true);
-    if (arg) (void)thread_die_pending(t);
-    notes_set_handler(p, 0x1000ull);
+    if (mode & TH_COMMIT) (void)thread_die_pending(t);
+    cd_catch(p, (mode & TH_LINUX) != 0);
     struct exception_context ctx;
     for (size_t k = 0; k < sizeof(ctx); k++) ((u8 *)&ctx)[k] = 0;
     ctx.sp = NOTE_NAME_MAX;
@@ -4273,9 +4302,9 @@ static void th_entry(void *arg) {
     exits_code(7, "lived");
 }
 
-static int th_run(bool commit, int *lived) {
+static int th_run(u32 mode, int *lived) {
     g_th_lived = 0;
-    int pid = rfork(RFPROC, th_entry, commit ? (void *)1 : NULL);
+    int pid = rfork(RFPROC, th_entry, (void *)(u64)mode);
     int st  = -1;
     int got = pid > 0 ? wait_pid_for(pid, WAIT_PACKED, &st) : -1;
     *lived = g_th_lived;
@@ -4288,8 +4317,8 @@ static int th_run(bool commit, int *lived) {
 // Read from the ZOMBIE's word; tail_hands_no_committed_note shows what the
 // commit then refuses.
 static void tu_entry(void *arg) {
-    (void)arg;
     struct Thread *t = current_thread();
+    if (arg && !cd_linux(t->proc)) exits_code(9, "setup");
     (void)notes_post(t->proc, NOTE_NAME_INTERRUPT, 0u, NULL, true);
     struct exception_context ctx;
     for (size_t k = 0; k < sizeof(ctx); k++) ((u8 *)&ctx)[k] = 0;
@@ -4300,26 +4329,41 @@ static void tu_entry(void *arg) {
     exits_code(7, "lived");
 }
 
+static int tu_run(bool linux_pheno, u32 *word) {
+    int pid = rfork(RFPROC, tu_entry, linux_pheno ? (void *)1 : NULL);
+    *word   = pid > 0 ? fdl_zombie_word(pid) : ~0u;
+    int st  = -1;
+    int got = pid > 0 ? wait_pid_for(pid, WAIT_PACKED, &st) : -1;
+    return (pid > 0 && got == pid) ? st : -1;
+}
+
 void test_notes_tail_death_commits_its_note(void) {
-    int pid  = rfork(RFPROC, tu_entry, NULL);
-    u32 word = pid > 0 ? fdl_zombie_word(pid) : ~0u;
-    int st   = -1;
-    int got  = pid > 0 ? wait_pid_for(pid, WAIT_PACKED, &st) : -1;
-    TEST_ASSERT(pid > 0 && got == pid, "rfork and reap");
-    TEST_EXPECT_EQ(st, (int)WAIT_STATUS_SIGNALED(NOTE_SIG_INT), "the tail ended it by the interrupt");
-    TEST_EXPECT_EQ(word, PROC_FLAG_INTR_TERMINATE_PENDING | PROC_FLAG_TERMINATE_COMMITTED,
-                   "and committed that death before letting the queue go");
+    u32 word = 0, lword = 0;
+    int st  = tu_run(false, &word);
+    int lst = tu_run(true, &lword);
+    u32 const want = PROC_FLAG_INTR_TERMINATE_PENDING | PROC_FLAG_TERMINATE_COMMITTED;
+    TEST_EXPECT_EQ(st, (int)WAIT_STATUS_SIGNALED(NOTE_SIG_INT), "native: the tail ended it by the interrupt");
+    TEST_EXPECT_EQ(word, want, "native: the uncaught arm committed that death first");
+    TEST_EXPECT_EQ(lst, (int)WAIT_STATUS_SIGNALED(NOTE_SIG_INT), "phenotype: SIG_DFL ended it by SIGINT");
+    TEST_EXPECT_EQ(lword, want, "phenotype: the SIG_DFL arm committed that death first");
 }
 
 void test_notes_tail_hands_no_committed_note(void) {
-    int lived = 0, clived = 0;
-    int st  = th_run(true, &lived);
-    int cst = th_run(false, &clived);
-    TEST_EXPECT_EQ(lived, 0, "committed: the tail did not return");
+    int lived = 0, clived = 0, llived = 0, lclived = 0;
+    int st   = th_run(TH_COMMIT, &lived);
+    int cst  = th_run(0u, &clived);
+    int lst  = th_run(TH_COMMIT | TH_LINUX, &llived);
+    int lcst = th_run(TH_LINUX, &lclived);
+    TEST_EXPECT_EQ(lived, 0, "native, committed: the tail did not return");
     TEST_EXPECT_EQ(st, (int)WAIT_STATUS_SIGNALED(NOTE_SIG_INT),
-                   "it died of the interrupt, which the handler never ran for");
-    TEST_EXPECT_EQ(clived, 1, "control: nothing committed, the tail returned");
-    TEST_EXPECT_EQ(cst, (int)WAIT_STATUS_EXITED(7), "control: and the thread left by its own exit");
+                   "native: it died of the interrupt, which the handler never ran for");
+    TEST_EXPECT_EQ(clived, 1, "native control: nothing committed, the tail returned");
+    TEST_EXPECT_EQ(cst, (int)WAIT_STATUS_EXITED(7), "native control: and the thread left by its own exit");
+    TEST_EXPECT_EQ(llived, 0, "phenotype, committed: the tail did not return");
+    TEST_EXPECT_EQ(lst, (int)WAIT_STATUS_SIGNALED(NOTE_SIG_INT),
+                   "phenotype: it died of SIGINT, which the handler never ran for");
+    TEST_EXPECT_EQ(lclived, 1, "phenotype control: nothing committed, the tail returned");
+    TEST_EXPECT_EQ(lcst, (int)WAIT_STATUS_EXITED(7), "phenotype control: and the thread left by its own exit");
 }
 
 // What a committed death refuses, as group death does: a stop parks no thread of
