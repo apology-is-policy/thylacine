@@ -658,9 +658,9 @@ impl Repl {
     /// session), so it keeps the shape below -- a recorded residue with the
     /// two renderers' divergence (I-7).
     ///
-    /// v1.0 emits this built-in default directly. Capturing the user's
-    /// `prompt` shell function's stdout is deferred to a later U-* chunk
-    /// (it needs rc loading + function-output capture).
+    /// This is the prompt, not a default: operator vote 78 struck the `prompt`
+    /// shell function and the `palette` builtin from scripture, so nothing
+    /// captures a function's output here.
     fn prompt(&self) -> String {
         let cwd = self.env.cwd();
         let cwd = if cwd.is_empty() { "/" } else { cwd };

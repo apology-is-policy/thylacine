@@ -46,9 +46,6 @@ pub enum ParseErrorKind {
     /// `<<"TAG` opened but the matching closing `"` was not found
     /// before end-of-line.
     UnterminatedHeredocTag,
-    /// `=~ /pat` opened but the matching `/` was not found before
-    /// EOF or newline.
-    UnterminatedRegex,
     /// `$` was followed by no name at top-level scan position.
     EmptyVarName,
     /// `$#` with no name following.
@@ -184,7 +181,6 @@ impl fmt::Display for ParseError {
             ParseErrorKind::UnterminatedHeredocTag => {
                 f.write_str("unterminated heredoc tag (missing closing `\"`)")
             }
-            ParseErrorKind::UnterminatedRegex => f.write_str("unterminated regex literal"),
             ParseErrorKind::EmptyVarName => f.write_str("empty variable name after `$`"),
             ParseErrorKind::EmptyVarLenName => f.write_str("empty variable name after `$#`"),
             ParseErrorKind::EmptyVarNoSplitName => f.write_str("empty variable name after `$\"`"),

@@ -1279,7 +1279,8 @@ fn flow_parser_lexer() -> Result<(), i64> {
         }
     }
 
-    // Probe 6 -- regex literal after =~ (the one-shot lex mode).
+    // Probe 6 -- `=~` is no operator (struck by operator vote 78): `=` and
+    // `~` lex as themselves and the slash after them begins a word.
     {
         let toks = match tokenize("$x =~ /^foo/") {
             Ok(t) => t,
@@ -1288,7 +1289,7 @@ fn flow_parser_lexer() -> Result<(), i64> {
                 return Err(1);
             }
         };
-        if toks.len() != 4 {
+        if toks.len() != 5 {
             t_putstr("u-test: flow_parser_lexer: probe 6 token count FAILED\n");
             return Err(1);
         }
@@ -1299,14 +1300,14 @@ fn flow_parser_lexer() -> Result<(), i64> {
                 return Err(1);
             }
         }
-        if !matches!(&toks[1].kind, TokenKind::EqualTilde) {
-            t_putstr("u-test: flow_parser_lexer: probe 6 EqualTilde FAILED\n");
+        if !matches!(&toks[1].kind, TokenKind::Equal) || !matches!(&toks[2].kind, TokenKind::Tilde) {
+            t_putstr("u-test: flow_parser_lexer: probe 6 Equal Tilde FAILED\n");
             return Err(1);
         }
-        match &toks[2].kind {
-            TokenKind::Regex(s) if s == "^foo" => {}
+        match &toks[3].kind {
+            TokenKind::Word(s) if s == "/^foo/" => {}
             _ => {
-                t_putstr("u-test: flow_parser_lexer: probe 6 Regex FAILED\n");
+                t_putstr("u-test: flow_parser_lexer: probe 6 slash word FAILED\n");
                 return Err(1);
             }
         }
@@ -2595,7 +2596,7 @@ fn flow_eval_expr() -> Result<(), i64> {
 
     // Probe 15: $(cmd) substitution now CAPTURES (U-6f) -- it spawns echo,
     // captures its stdout, trims the trailing newline -> "hi" (one word).
-    // (The =~ regex match below stays NotImplemented.)
+    // (`=~` below is refused at parse: operator vote 78 struck it.)
     {
         let env = Env::new();
         match ev(&env, "$(echo hi)", ExprContext::Value) {
@@ -2614,12 +2615,20 @@ fn flow_eval_expr() -> Result<(), i64> {
         env.let_set("v", Value::scalar("foo"));
         match ev(&env, "($v =~ /^foo/)", ExprContext::Cond) {
             Ok(_) => {
-                t_putstr("u-test: flow_eval_expr: probe 15 regex should error FAILED\n");
+                t_putstr("u-test: flow_eval_expr: probe 15 =~ should not parse FAILED\n");
                 return Err(1);
             }
-            Err(e) if matches!(e.kind, EvalErrorKind::NotImplemented(_)) => {}
+            Err(e) if matches!(e.kind, EvalErrorKind::Internal("test parse failed")) => {}
             Err(_) => {
-                t_putstr("u-test: flow_eval_expr: probe 15 wrong regex error FAILED\n");
+                t_putstr("u-test: flow_eval_expr: probe 15 =~ wrong error FAILED\n");
+                return Err(1);
+            }
+        }
+        // The glob match one variable away parses and matches.
+        match ev(&env, "($v matches foo)", ExprContext::Cond) {
+            Ok(v) if v.as_scalar() == "1" => {}
+            _ => {
+                t_putstr("u-test: flow_eval_expr: probe 15 matches control FAILED\n");
                 return Err(1);
             }
         }

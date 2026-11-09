@@ -27,7 +27,6 @@
 //     ExprKind::UnOp         Neg / BitNot / Not
 //     ExprKind::Match        MatchOp::Glob -> 1/0;
 //                            MatchOp::In   -> 1/0;
-//                            MatchOp::Regex -> NotImplemented
 //     ExprKind::Case         case-as-expression (scripture 7.2)
 //
 //   DEFERRED (NotImplemented):
@@ -35,11 +34,6 @@
 //     ExprKind::Backtick     `{cmd} -- U-6e/g
 //     ExprKind::ProcSubIn    <(cmd) -- U-6e/g
 //     ExprKind::ProcSubOut   >(cmd) -- U-6e/g
-//     ExprKind::Regex        only reachable via Match::Regex's RHS;
-//                            return the pattern as a scalar so
-//                            other code paths that hold a regex
-//                            literal as a value (rare; not idiomatic)
-//                            see a sensible default.
 //
 // === Comparison + truthiness convention ===
 //
@@ -144,7 +138,6 @@ pub fn eval_expr(env: &Env, expr: &Expr) -> EvalResult<Value> {
             EvalErrorKind::NotImplemented("process substitution <(cmd) / >(cmd)"),
             expr.span,
         )),
-        ExprKind::Regex(pat) => Ok(Value::scalar(pat.clone())),
 
         // === Composites ===
         ExprKind::List(parts) => {
@@ -489,10 +482,6 @@ fn eval_match(
             }
             Ok(Value::scalar("0"))
         }
-        MatchOp::Regex => Err(EvalError::new(
-            EvalErrorKind::NotImplemented("regex match (=~)"),
-            outer.span,
-        )),
     }
 }
 
@@ -770,14 +759,6 @@ mod tests {
         env.let_set("v", Value::scalar("nope"));
         let v = eval_str(&env, "($v in (yes y true on))", ExprContext::Cond).unwrap();
         assert_eq!(v.as_scalar(), "0");
-    }
-
-    #[test]
-    fn match_regex_not_implemented() {
-        let mut env = Env::new();
-        env.let_set("v", Value::scalar("foo"));
-        let err = eval_str(&env, "($v =~ /^foo/)", ExprContext::Cond).unwrap_err();
-        assert!(matches!(err.kind, EvalErrorKind::NotImplemented(_)));
     }
 
     #[test]

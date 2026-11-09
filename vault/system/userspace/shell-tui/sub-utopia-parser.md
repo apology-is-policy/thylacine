@@ -59,10 +59,11 @@ value model is a list rather than a string.
 
 ### The lexer's job is to make the parser's job easy, and it says where it gives up
 
-A single-pass byte scanner over eight syntactic surfaces: whitespace and
+A single-pass byte scanner over seven syntactic surfaces: whitespace and
 comments, bare words, quoted strings, variable references, substitutions,
-process substitutions, heredocs, and regex literals. Every unambiguous surface
-gets its own token kind.
+process substitutions, and heredocs. Every unambiguous surface gets its own token
+kind. There is no regex literal: operator vote 78 struck `=~`, so `=` and `~` lex
+as themselves and `$x =~ /re/` is a parse error.
 
 Where lexical disambiguation is genuinely impossible without parse context, the
 lexer declines rather than guessing — `^` is concatenation in command position
@@ -100,10 +101,9 @@ escape at three positions, doubled and trailing backslashes, a continuation,
 multi-byte characters -- so no value changed, and only globs and patterns see the
 difference. The matcher's half is [[sub-utopia-eval]].
 
-Three pieces of state make the scanner not quite context-free. Heredoc bodies are
+Two pieces of state make the scanner not quite context-free. Heredoc bodies are
 collected at the *next newline* after the tag that requested them, drained
-first-in-first-out. A regex literal is recognized only through a one-shot flag set
-when the match operator is emitted. And the scanner keeps a stack of the parentheses
+first-in-first-out. And the scanner keeps a stack of the parentheses
 still open, each `(` or `((`: a closer belongs to its opener, so `)))` closing `((`
 and `(` is `)` then `))`, `))` closing two `(` is two `)`, and no depth count in the
 parser ever sees one token closing two things. Inside an open `((`, `<<` is the shift,

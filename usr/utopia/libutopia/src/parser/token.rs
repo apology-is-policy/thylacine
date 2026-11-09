@@ -143,12 +143,6 @@ pub enum TokenKind {
     /// Literal part when `interp == false`.
     HeredocBody(Vec<DqPart>),
 
-    // === Regex literal (after `=~`) =========================================
-    /// `/pattern/`. String is the regex body with `\/` -> `/` escape
-    /// resolved (other `\X` escapes are preserved verbatim -- the
-    /// regex engine will interpret them).
-    Regex(String),
-
     // === Punctuation =======================================================
     LBrace,        // {
     RBrace,        // }
@@ -188,10 +182,6 @@ pub enum TokenKind {
     NotEqual,      // !=
     LessEqual,     // <=
     GreaterEqual,  // >=
-    /// `=~` -- regex match. Per scripture section 7.3 the immediately
-    /// following token is a Regex literal (the lexer enters regex
-    /// mode after emitting this).
-    EqualTilde,
     /// `=>` -- case-arm separator. Per scripture section 7.1.
     FatArrow,
 

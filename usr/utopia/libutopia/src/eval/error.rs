@@ -10,7 +10,7 @@
 //   - Patterns: NoCaseMatch (case-as-expression exhausted without
 //     matching; rc errors here).
 //   - Deferred: NotImplemented (a feature not in v1 -- Subst /
-//     Backtick / ProcSub / Regex). The variant carries a short
+//     Backtick / ProcSub). The variant carries a short
 //     static string naming the feature so callers (and tests) can
 //     match.
 //

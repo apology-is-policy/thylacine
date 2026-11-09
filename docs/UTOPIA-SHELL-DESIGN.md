@@ -346,12 +346,15 @@ When `case` appears in an expression context (right of `=`), each branch must pr
 ```
 if ($var matches *.c) echo C
 if ($var in (yes y true on)) echo enabled
-if ($var =~ /^foo/) echo starts-with-foo
 ```
 
 - `matches` — glob match.
 - `in` — set membership against a list.
-- `=~` — regex match. Delimited by `/`. It parses, and the evaluator refuses it as not implemented: the tree has no regex engine yet.
+
+There is no regex match. Plan 9's rc matches with `~` and globs and has none, and
+operator vote 78 (2026-11-06) struck the `=~` this section once described, which
+parsed and was then refused: `=` and `~` are ordinary tokens, so `$var =~ /re/` is a
+parse error.
 
 ### 7.4 The legacy `~` operator
 
@@ -535,9 +538,11 @@ These are the user-facing surface of Thylacine's per-process namespace + capabil
 
 - `trace { ... }` — see §7.8.
 
-### 9.4 The palette builtin
+### 9.4 No palette builtin
 
-- `palette ROLE TEXT...` — emit `TEXT` in the named role's colour per `UTOPIA-VISUAL.md §4`.
+There is none: operator vote 78 (2026-11-06) struck the `palette` builtin with the
+`prompt` function it served (§11.1). Colour comes from `libutopia::palette`, which the
+shell's own prompt and line editor use.
 
 ### 9.5 The `on` and `mask` keywords
 
@@ -666,20 +671,15 @@ This entire surface is "Thylacine's notes substrate, exposed at the shell." Prog
 
 ## 11. Prompt and line editor
 
-### 11.1 Prompt as a function
+### 11.1 The prompt
 
-The prompt is the output of the user's `prompt` shell function (per `UTOPIA-VISUAL.md §3.3`). The shell calls `prompt` before each readline cycle and captures its stdout. The captured bytes become the prompt rendered by the line editor.
-
-The default `prompt` (shipped in `/etc/utopia/utopia.rc`) is:
-
-```
-fn prompt {
-    palette path (pwd)
-    palette glyph ' ⊢ '
-}
-```
-
-Users override `prompt` in `~/.config/utopia/utopia.rc`.
+The REPL draws the prompt itself before each readline cycle (`Repl::prompt`): the
+working directory, with a leading `$home` shown as `~`, then the turnstile glyph,
+in the shapes `UTOPIA-VISUAL.md §3` gives (`λ <cwd> ⊢ ` under a session that hands
+down its inks, the fasces in an `imperium` scope). That prompt is what ships and
+what the tests read. Operator vote 78 (2026-11-06) struck the user-defined `prompt`
+function and the `palette` builtin this section once described; nothing in the tree
+ran them.
 
 ### 11.2 The line editor
 
@@ -688,7 +688,7 @@ The line editor is implemented in `libutopia::line_editor`, hand-rolled. **Not r
 Approximate scope: 1500-2500 LOC across the following capabilities:
 
 - Raw-mode terminal handling: `termios`-equivalent via `/dev/consctl` writes (see `ARCHITECTURE.md §23.5`).
-- Display: glyph + cursor management within a single line, with prompt-length tracking that accounts for ANSI escapes (`palette` helpers register zero-width markers).
+- Display: glyph + cursor management within a single line, with prompt-length tracking that accounts for ANSI escapes (`libutopia::palette` helpers register zero-width markers).
 - Editing: standard cursor motion (Ctrl-A, Ctrl-E, Ctrl-B, Ctrl-F, Alt-B, Alt-F), kill/yank (Ctrl-K, Ctrl-U, Ctrl-W, Ctrl-Y), insert/delete (backspace, delete), single-character commands.
 - Clipboard: Alt-P fetches the session clipboard into the line at the cursor, over ut's own private ring, so no clipboard byte crosses the terminal and nothing submits. It refuses whole, and says so, past the line's 64 KiB limit or on a tab or control character, which the line cannot show. Ctrl-Y stays the local kill buffer. Enter or Ctrl-C ends a fetch still out, so a paste asked for in one edit never lands in another.
 - Multi-line input: continuation when brackets/quotes unbalanced; per-line cursor tracking; continuation glyph from `UTOPIA-VISUAL.md §3.2`.

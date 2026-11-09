@@ -863,7 +863,7 @@ Every module is idiomatic Rust (RAII, typed errors, builders, lifetimes). Every 
 
 **The Pale Fire visual identity**:
 - Binding scripture in `docs/UTOPIA-VISUAL.md`.
-- Implemented in `libutopia::palette` + the `palette` shell builtin.
+- Implemented in `libutopia::palette`; the `palette` shell builtin was struck by operator vote 78 (2026-11-06).
 - Discipline applies to Utopia's own programs; third-party tools colour freely.
 - Terminal-config files shipped at `share/terminal-configs/` (Ghostty / Kitty / Alacritty / etc.).
 

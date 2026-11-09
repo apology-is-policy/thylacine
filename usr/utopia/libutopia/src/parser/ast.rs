@@ -503,7 +503,7 @@ pub struct Expr {
 ///   context (scripture 6.3).
 /// - `BinOp/UnOp` -- arithmetic and logical operators (scripture
 ///   6.13 + 6.14 + 7.3).
-/// - `Match` -- the `matches`/`in`/`=~` match operators (scripture
+/// - `Match` -- the `matches`/`in` match operators (scripture
 ///   7.3).
 /// - `VarIndex/VarSlice` -- `$var(N)` element / `$var(M N)` slice
 ///   (scripture 6.9).
@@ -543,11 +543,6 @@ pub enum ExprKind {
     ProcSubIn(Box<Script>),
     /// `>(cmd)` -- process substitution (output).
     ProcSubOut(Box<Script>),
-    /// `/pattern/` -- regex literal. The string is the body
-    /// (escapes already resolved by the lexer). Semantics deferred
-    /// to U-5d's regex engine.
-    Regex(String),
-
     // === Composites ===
     /// `(a b c)` -- list literal. Used in value position
     /// (scripture 6.3). An empty list `()` is `List(vec![])`.
@@ -565,7 +560,7 @@ pub enum ExprKind {
     BinOp(BinOp, Operand, Operand),
     /// `OP a` -- unary operator (`- ~ !`).
     UnOp(UnOp, Operand),
-    /// `a matches glob`, `a in list`, `a =~ /regex/` -- match
+    /// `a matches glob`, `a in list` -- match
     /// operators (scripture 7.3). Right-hand side carries the
     /// glob pattern (Word/DoubleQuoted/SingleQuoted), the list
     /// (Var/List), or the regex literal.
@@ -663,8 +658,6 @@ pub enum MatchOp {
     Glob,
     /// `in` -- list membership (scripture 7.3).
     In,
-    /// `=~` -- regex match (scripture 7.3); evaluator wiring at U-5d.
-    Regex,
     /// rc's `~ subject pattern...` (scripture 7.4): any element against any pattern.
     Tilde,
 }
@@ -682,7 +675,7 @@ pub enum MatchOp {
 ///   conditional context for booleans). Concat (`^`) and var
 ///   indexing are recognized.
 /// - `Cond`: a boolean expression. Logical (`&& || !`), comparison
-///   (`== != < <= > >=`), and match (`matches in =~`) operators are
+///   (`== != < <= > >=`), and match (`matches in`) operators are
 ///   recognized.
 /// - `Arith`: a full arithmetic expression with all 18+ operators.
 ///   Integer-typed; vars auto-deref.
