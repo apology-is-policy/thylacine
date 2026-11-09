@@ -356,6 +356,18 @@ pub const PARK_BOUND_MS: u64 = 30_000;
 /// cursor lane until that chain retires.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Stall { Holding, Revived, Dead }
+/// How often a takeover held up by the device renews the kernel's deadline (vote 71).
+pub const RENEW_EVERY_MS: u64 = 1000;
+/// Whether a takeover held up by the device renews now. `last` is the generation of
+/// the last renewal and the ms since it. The first sight in a generation renews at
+/// once: a hold first seen late in the kernel's five seconds would otherwise wait a
+/// second more and miss them.
+pub fn renew_due(last: Option<(u64, u64)>, generation: u64) -> bool {
+    match last {
+        Some((renewed, since_ms)) if renewed == generation => since_ms >= RENEW_EVERY_MS,
+        _ => true,
+    }
+}
 pub fn stall_verdict(outstanding: bool, stalled_ms: u64) -> Stall {
     if !outstanding {
         Stall::Revived
@@ -718,6 +730,14 @@ mod admission_tests {
         assert_eq!(stall_verdict(true, PARK_BOUND_MS - 1), Stall::Holding);
         assert_eq!(stall_verdict(true, PARK_BOUND_MS), Stall::Dead);
         assert_eq!(stall_verdict(true, u64::MAX), Stall::Dead);
+    }
+    #[test]
+    fn a_hold_first_seen_renews_at_once_then_once_a_second() {
+        assert!(renew_due(None, 7));
+        assert!(renew_due(Some((6, 0)), 7), "a renewal of an earlier generation is not this one's");
+        assert!(!renew_due(Some((7, 0)), 7));
+        assert!(!renew_due(Some((7, RENEW_EVERY_MS - 1)), 7));
+        assert!(renew_due(Some((7, RENEW_EVERY_MS)), 7));
     }
     #[test]
     fn a_failure_on_a_live_engine_with_no_stall_is_the_works_own() {

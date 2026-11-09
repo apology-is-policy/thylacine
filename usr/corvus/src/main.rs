@@ -4693,7 +4693,7 @@ fn drain_response(conn: &mut Conn, out: &mut [u8], cap: usize) -> usize {
 // never collides in practice, and a confused client gets the latest
 // response).
 unsafe fn try_dispatch_verb(conn: &mut Conn) {
-    while conn.pending_request.len() >= REQ_HDR_LEN {
+    if conn.pending_request.len() >= REQ_HDR_LEN {
         let verb_id = conn.pending_request[0];
         let protocol_version = conn.pending_request[1];
         let payload_len = (conn.pending_request[2] as usize)
@@ -4799,7 +4799,7 @@ unsafe fn try_dispatch_verb(conn: &mut Conn) {
 
         // Process at most one frame per Twrite at v1.0 (strict request-
         // response; a queued second request before the first response
-        // drains is a client protocol error — let the loop handle it).
+        // drains is a client protocol error, left for the next Twrite).
         return;
     }
 }

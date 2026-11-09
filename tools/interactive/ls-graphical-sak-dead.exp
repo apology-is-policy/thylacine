@@ -53,16 +53,17 @@
 # return has been taken, say so, and the next line typed must reach the shell whole.
 # Red before the vote-72b audit: the return took only what the thread had moved.
 #
-# Leg C (cursor): shot 9 stalls the cursor queue inside the takeover and
-# holds its retirement until the seat has restored. The restore needs only
-# the control queue, so it must go through with the cursor chain still
-# outstanding; a restore that waited on the cursor queue would wait until the
-# cursor lane died at 30 s, and then forever.
+# Leg C (cursor): shot 9 stalls the cursor queue inside the takeover and holds its
+# retirement 8 s. A cursor chain waits on the host loop a client's readback holds, so
+# the stalled lane holds the takeover up and Lictor renews the kernel's deadline
+# (vote 79): the lane revives and the takeover completes.
 #
-# Leg X (abandoned): shot 10 is that stall held past the abandonment bound. The lane
-# is abandoned, not lost: tapestryd keeps being refused and keeps retrying a pointer
-# update, the late retirement frees the lane, and the update goes through. The next
-# leg's chord shows that takeover is back as well.
+# Leg X (abandoned): shot 10 is that stall held past the abandonment bound. The wait
+# ends there and the kernel fails the chord; the restore needs only the control queue,
+# so it goes through with the cursor chain still outstanding. The lane is abandoned,
+# not lost: tapestryd keeps being refused and keeps retrying a pointer update, the
+# late retirement (10 s after the abandonment) frees the lane, and the update goes
+# through. The next leg's chord shows that takeover is back as well.
 #
 # Leg R (refused): shot 11 has the kernel's RESTORED refused after a completed
 # restore (as the kernel refuses it when a grantee exits before the commit).
@@ -541,6 +542,11 @@ settled held
 witness held
 
 # ---- leg C: a cursor chain stalls inside the takeover ----
+# Vote 79: a cursor chain waits on the host loop a client's readback holds, so a stalled
+# cursor lane holds the takeover up like the control queue, and Lictor renews the
+# kernel's deadline while its stall stands. The lever holds the cursor chain 8 s, past
+# the first deadline: the lane revives and the takeover completes. Red before: nothing
+# renewed, and the kernel closed the seat at 5 s.
 key "ctrl+alt+f10"
 set timeout 30
 expect {
@@ -552,33 +558,56 @@ expect {
     -re {EXTINCTION:} { lc_extinction_fail "cursor takeover" }
     timeout { lc_fail "cursor: no injected cursor stall within 30s of the chord" }
 }
-set restored 0
-set timeout 20
+set renewed 0
+set released 0
+set revived 0
+set timeout 30
 expect {
-    -re {cursor queue abandoned|cursor queue failed} { lc_fail "cursor: the cursor queue died before the seat restored past it" }
-    -ex "lictor: trusted scanout active" { lc_fail "cursor: the takeover completed although the cursor chain never retired" }
-    -re {lictor: normal scanout restored generation=[0-9]+} {
-        set restored 1
-        lc_step "cursor: normal output restored with the cursor chain still outstanding"
+    -re {EXTINCTION:} { lc_extinction_fail "the cursor-held takeover" }
+    -re {lictor: seat failed: [^\r\n]*[\r\n]} { lc_fail "cursor: the seat failed: $expect_out(0,string)" }
+    -re {lictor: kernel closed trusted seat \(scanout [a-z]+\)} {
+        lc_fail "cursor: the kernel closed the seat behind a stalled cursor lane (renewed=$renewed) -- the chord ended in neither the trusted screen nor the lane's abandonment"
+    }
+    -re {cursor queue abandoned|cursor queue failed} { lc_fail "cursor: the cursor queue died on a chain released inside the abandonment bound" }
+    -re {lictor: takeover renewed behind a draining backlog generation=[0-9]+ chains=[0-9]+} {
+        incr renewed
         exp_continue
     }
-    -ex "lictor: trusted seat recovered; nothing was conferred" {
-        if {!$restored} { lc_fail "cursor: the seat went back to normal with no restore" }
+    -ex "lictor: cursor chain retirement released (test-latch-dead)" {
+        set released 1
+        exp_continue
     }
-    -re {EXTINCTION:} { lc_extinction_fail "after the cursor stall" }
-    timeout { lc_fail "cursor: within 20s: restored=$restored and no recovery (the restore waits on the stalled cursor queue)" }
-}
-set timeout 15
-expect {
     -re {cursor chain retired [0-9]+ ms after its deadline -- cursor queue revived} {
-        lc_step "cursor: the released chain retired and the cursor queue revived"
+        set revived 1
+        exp_continue
     }
-    -re {cursor queue abandoned|cursor queue failed} { lc_fail "cursor: the cursor queue died after its retirement was released" }
-    -re {EXTINCTION:} { lc_extinction_fail "cursor revival" }
-    timeout { lc_fail "cursor: the cursor queue never revived after its retirement was released (15s)" }
+    -ex "lictor: trusted scanout active" {
+        if {!$renewed || !$released || !$revived} {
+            lc_fail "cursor: the trusted scanout came up with renewed=$renewed released=$released revived=$revived"
+        }
+        lc_step "cursor: renewed $renewed times behind the stalled cursor lane, which revived at 8 s, and the takeover completed"
+    }
+    timeout { lc_fail "cursor: within 30s: renewed=$renewed released=$released revived=$revived and no trusted scanout" }
 }
+after 1000
+key "ret"
+expect {
+    -re {EXTINCTION:} { lc_extinction_fail "the end of the cursor episode" }
+    -re {lictor: seat failed: [^\r\n]*[\r\n]} { lc_fail "cursor: the episode failed after the takeover: $expect_out(0,string)" }
+    -re {lictor: kernel closed trusted seat \(scanout [a-z]+\)} { lc_fail "cursor: the episode failed instead of ending: $expect_out(0,string)" }
+    -ex "corvus: imperium: SAK with nothing pending" { lc_step "cursor: the empty episode ended" }
+    timeout { lc_fail "cursor: the episode did not end within 30s" }
+}
+settled cursor
+witness pointer
 
 # ---- leg X: a cursor chain outlives the abandonment bound ----
+# Vote 79: the wait behind a stalled cursor lane ends at its abandonment. The lever holds
+# the chain past FENCE_ABANDON_MS: renewals run until the lane is abandoned, then stop,
+# and the kernel fails the chord, which restores past the outstanding chain. The lane
+# is abandoned, not lost (vote 50): the hold ends 10 s after the abandonment, tapestryd
+# is refused and retries a pointer update meanwhile, the late retirement frees the lane,
+# and the update goes through. The next leg's chord shows that takeover is back too.
 key "ctrl+alt+f10"
 set timeout 30
 expect {
@@ -590,34 +619,48 @@ expect {
     -re {EXTINCTION:} { lc_extinction_fail "abandon takeover" }
     timeout { lc_fail "abandon: no injected cursor stall within 30s of the chord" }
 }
+set renewed 0
+set never 0
 set restored 0
-set timeout 20
+set timeout 50
 expect {
-    -re {cursor queue abandoned|cursor queue failed} { lc_fail "abandon: the cursor queue gave up before the seat restored past it" }
+    -re {EXTINCTION:} { lc_extinction_fail "after the abandon stall" }
     -ex "lictor: trusted scanout active" { lc_fail "abandon: the takeover completed although the cursor chain never retired" }
+    -re {cursor queue failed} { lc_fail "abandon: the cursor queue failed where it was only abandoned" }
+    -ex "lictor: cursor chain retirement released (test-latch-dead)" { lc_fail "abandon: the hold ended before the seat restored past the abandoned lane" }
+    -re {lictor: takeover renewed behind a draining backlog generation=[0-9]+ chains=[0-9]+} {
+        incr renewed
+        exp_continue
+    }
+    -re {cursor chain never retired in [0-9]+ ms -- cursor queue abandoned until it retires} {
+        set never 1
+        exp_continue
+    }
     -re {lictor: normal scanout restored generation=[0-9]+} {
         set restored 1
         exp_continue
     }
     -ex "lictor: trusted seat recovered; nothing was conferred" {
         if {!$restored} { lc_fail "abandon: the seat went back to normal with no restore" }
+        if {!$never} { lc_fail "abandon: the seat gave up before the cursor lane was abandoned (renewed=$renewed) -- the wait behind the lane ended early" }
+        if {!$renewed} { lc_fail "abandon: the lane was abandoned with no renewal behind it" }
+        lc_step "abandon: renewed $renewed times until the lane was abandoned, then the chord failed past the outstanding chain"
     }
-    -re {EXTINCTION:} { lc_extinction_fail "after the abandon stall" }
-    timeout { lc_fail "abandon: within 20s: restored=$restored and no recovery" }
+    timeout { lc_fail "abandon: within 50s: renewed=$renewed never=$never restored=$restored and no recovery" }
 }
 after 1500
 pointer 9000 9000
 set refused 0
-set never 0
+set released 0
 set revived 0
-set timeout 45
+set timeout 30
 expect {
     -ex "tapestryd: pointer backend refused an update; retrying" {
         set refused 1
         exp_continue
     }
-    -re {cursor chain never retired in [0-9]+ ms -- cursor queue abandoned until it retires} {
-        set never 1
+    -ex "lictor: cursor chain retirement released (test-latch-dead)" {
+        set released 1
         exp_continue
     }
     -ex "abandoned cursor chain retired -- cursor queue revived" {
@@ -629,10 +672,10 @@ expect {
     }
     -re {cursor queue failed} { lc_fail "abandon: a well-formed late retirement failed the cursor queue" }
     -re {EXTINCTION:} { lc_extinction_fail "abandon revival" }
-    timeout { lc_fail "abandon: within 45s: refused=$refused never=$never revived=$revived and no accepted update" }
+    timeout { lc_fail "abandon: within 30s: refused=$refused released=$released revived=$revived and no accepted update" }
 }
 if {!$refused} { lc_fail "abandon: the update was accepted, but tapestryd never said it had been refused" }
-if {!$never} { lc_fail "abandon: the lane came back, but lictor never said it abandoned the chain" }
+if {!$released} { lc_fail "abandon: the lane came back, but the lever never said it released the chain" }
 if {!$revived} { lc_fail "abandon: the update was accepted, but lictor never said the lane revived" }
 
 # ---- leg R: the kernel refuses RESTORED after a completed restore ----
@@ -726,5 +769,5 @@ expect {
     timeout {}
 }
 if {!$withheld} { lc_fail "dead: lictor never withheld the keys typed after the display was lost" }
-lc_pass "graphical SAK dead: a stalled takeover starts over; a stalled frame stays owed; keys typed at a trusted screen stay out of the compositor; a stall withheld past the deadline is waited out; answered, cursor-stalled, abandoned and refused-RESTORED takeovers restore normal output; a dead engine returns the seat without its display and withholds input"
+lc_pass "graphical SAK dead: a stalled takeover starts over; a stalled frame stays owed; keys typed at a trusted screen stay out of the compositor; a stall withheld past the deadline is waited out, and so is a stalled cursor lane, whose abandonment fails the chord; answered, abandoned and refused-RESTORED takeovers restore normal output; a dead engine returns the seat without its display and withholds input"
 lc_quit

@@ -2639,7 +2639,9 @@ block the serve loop, and seat input with it. Neither was taken.
   it stalls at `SUBMIT_DEADLINE_MS`, so a client's readback cannot hold the serve loop
   through a pointer motion. A chain that outlives `FENCE_ABANDON_MS` is abandoned, not
   poisoned: `Queue::idle` stays false, so takeover stays out, and a well-formed late
-  retirement frees the lane. A malformed entry, an unsolicited one, or a step of the
+  retirement frees the lane. While the lane's stall stands a takeover waits on it and
+  renews the kernel's deadline, as behind the control queue (vote 79); the
+  abandonment ends that wait. A malformed entry, an unsolicited one, or a step of the
   plane's own that the device refused poisons it, until device reset. Tapestry retries a
   refused pointer update (`CURSOR_RETRY_MS`) rather than latching it, and forgets what it
   last sent, since a stalled command's outcome is unknown.

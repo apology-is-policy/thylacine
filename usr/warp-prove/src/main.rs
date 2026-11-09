@@ -4495,6 +4495,10 @@ fn observe_readback() {
     let mut b_max_ms = 0u64;
     let mut b_sum_ms = 0u64;
     let b_n = 10u64;
+    // The readback's standing time is judged from the first present: when its
+    // retirement was first seen, sampled after each present, not after them all.
+    let dl_p0_ms = dl_t0.elapsed().as_millis() as u64;
+    let mut dl_seen_ms: Option<u64> = None;
     for i in 0..b_n {
         for px in b.pixels().iter_mut() {
             *px = 0xFF00_0000 | (0x20 + 8 * i as u32);
@@ -4510,10 +4514,17 @@ fn observe_readback() {
             b_refused += 1;
             t_putstr(&format!("warp-prove: C6-RB DEADLINE -- B present {} refused after {} ms\n", i, ms));
         }
+        if dl_seen_ms.is_none()
+            && ctx_field(warp, ctx, "fence-signaled") >= dl_before + RB_DEADLINE_SUBMITS as u64 + 1
+        {
+            dl_seen_ms = Some(dl_t0.elapsed().as_millis() as u64);
+        }
     }
     // The client's readback + the 7 submits retire; the engine must be alive.
-    let dl_queue_ms =
+    let dl_after_ms =
         rb_wait_signaled(warp, ctx, dl_before, RB_DEADLINE_SUBMITS as u64 + 1, dl_t0, "deadline");
+    let dl_queue_ms = dl_seen_ms.unwrap_or(dl_after_ms);
+    let dl_stood_ms = dl_queue_ms.saturating_sub(dl_p0_ms);
     let landed_px = unsafe { core::ptr::read_volatile(va as *const u32) };
     let landed_idx = rb_index_of(landed_px, RB_DEADLINE_SUBMITS * RB_DRAWS_PER_SUBMIT);
     // The revival is the serve loop's next pump after the retirement, so the
@@ -4530,13 +4541,13 @@ fn observe_readback() {
     // Vote 72a: no synchronous wait outlasts SUBMIT_DEADLINE_MS behind a readback. When
     // the client's readback stood past that with slack, a present stalled at the bound
     // and was refused, and none waited the readback out.
-    let stood = dl_queue_ms > RB_F2B_BOUND_MS;
+    let stood = dl_stood_ms > RB_F2B_BOUND_MS;
     let bounded = !stood || (b_max_ms < RB_F2B_BOUND_MS && b_refused > 0);
     let deadline_ok = alive && poisoned_after == 0 && bounded;
     t_putstr(&format!(
-        "warp-prove: C6-RB DEADLINE {} -- {} B presents behind the client's own busy readback, {} refused while the engine stalled, longest {} ms (bound {} ms; the readback stood {} ms, {}); engine alive after: {}; poisoned {}\n",
+        "warp-prove: C6-RB DEADLINE {} -- {} B presents behind the client's own busy readback, {} refused while the engine stalled, longest {} ms (bound {} ms; the readback stood {} ms past the first present, {}); engine alive after: {}; poisoned {}\n",
         if deadline_ok { "PASS" } else { "FAIL" },
-        b_n, b_refused, b_max_ms, RB_F2B_BOUND_MS, dl_queue_ms,
+        b_n, b_refused, b_max_ms, RB_F2B_BOUND_MS, dl_stood_ms,
         if stood { "so a present must have stalled at its bound" } else { "too short to judge the bound" },
         alive as u32, poisoned_after
     ));

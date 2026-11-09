@@ -340,14 +340,18 @@ every named route and which is never attached to a context, so a client's poison
 does not deny the SAK. Its backlog can: the paint is fenced, so it retires behind
 what the host has queued. A takeover that meets a stall starts over when the engine
 revives (`Gpu::stall_pending`), under the kernel's five-second deadline, and says so; a
-device's answer fails it at once. While the engine is alive and the control queue
-holds the takeover up (`Gpu::control_waiting`: stalled behind a chain, or a command not
-yet retired), the takeover renews that deadline at most once a second (`SEAT_RENEW`,
-up to 35 s from the chord: vote 71), so a backlog delays the SAK rather than failing
+device's answer fails it at once. While the engine is alive and the device holds the
+takeover up (`Gpu::takeover_waiting`: the control queue stalled behind a chain or with a
+command not yet retired, or the cursor lane stalled behind its chain), the takeover renews that deadline at once when first seen and then at most
+once a second (`gpu_api::renew_due`; `SEAT_RENEW`, up to 35 s from the chord: vote 71), so a backlog delays the SAK rather than failing
 it. One chain that runs for seconds retires nothing and is renewed all the same; one
 that never retires kills the engine at `FENCE_ABANDON_MS`, inside the 35 s. A cursor
-queue stalled alone renews nothing, since no client reaches it. Witnesses:
-`ls-graphical-sak-dead` leg 1 (a stall withheld 8 s, no retirement in between) and
+chain waits on the host loop a client's readback holds, so the lane's stall renews too
+(vote 79); its abandonment at the same bound ends the wait and the kernel's deadline
+fails the chord, and the lane comes back on the late retirement. Witnesses:
+`ls-graphical-sak-dead` leg 1 (a stall withheld 8 s, no retirement in between), leg C
+(a cursor chain held 8 s: the takeover completes), leg X (one held past the abandonment:
+the chord fails, then the lane revives) and
 `ls-graphical-sak-backlog` (a client's deep queue, on a virgl device). A frame paint that meets a stall stays owed and the
 next pass paints it again. Once serving, no synchronous command waits past
 `SUBMIT_DEADLINE_MS`, a client's readback ahead of it or not (operator vote 72): one

@@ -9,6 +9,10 @@ const RESOURCE: u32 = crate::objects::TRUSTED_ID_START + 2;
 const IMAGE_BYTES: usize = 64 * 64 * 4;
 const ALLOCATION: usize = IMAGE_BYTES + 4096;
 const REPLY: u64 = BASE + IMAGE_BYTES as u64 + 64;
+/// Long enough past an abandonment for the kernel to fail the takeover it held up
+/// and for the seat to restore, so a pointer update meets the abandoned lane.
+#[cfg(feature = "test-mode")]
+const TEST_ABANDON_RELEASE_MS: u64 = 10_000;
 
 pub(super) struct Plane {
     notify: u64,
@@ -30,9 +34,13 @@ pub(super) struct Plane {
     test_stall_next: bool,
     #[cfg(feature = "test-mode")]
     test_hold: bool,
-    /// The hold outlasts the seat's restore and ends at the abandonment bound.
+    /// The hold outlasts the abandonment bound and the seat's restore.
     #[cfg(feature = "test-mode")]
     test_abandon: bool,
+    /// When the lane was abandoned under that hold; the hold ends
+    /// TEST_ABANDON_RELEASE_MS later.
+    #[cfg(feature = "test-mode")]
+    test_abandon_release: Option<Instant>,
 }
 impl Plane {
     pub(super) fn new(notify: u64) -> Self {
@@ -53,6 +61,8 @@ impl Plane {
             test_hold: false,
             #[cfg(feature = "test-mode")]
             test_abandon: false,
+            #[cfg(feature = "test-mode")]
+            test_abandon_release: None,
         }
     }
 }
@@ -203,6 +213,14 @@ impl Gpu {
     /// after that still revives it.
     pub(super) fn cursor_settle(&mut self) {
         if self.cursor.queue.abandoned() {
+            #[cfg(feature = "test-mode")]
+            if self.cursor.test_abandon_release
+                .is_some_and(|at| at.elapsed().as_millis() as u64 >= TEST_ABANDON_RELEASE_MS)
+            {
+                self.cursor.test_abandon_release = None;
+                self.cursor.test_hold = false;
+                say!("lictor: cursor chain retirement released (test-latch-dead)");
+            }
             match self.cursor_retire() {
                 Some(Ok(())) => say!("lictor: abandoned cursor chain retired -- cursor queue revived"),
                 Some(Err(())) => say!("lictor: cursor queue failed; backing retained, trusted takeover unavailable"),
@@ -227,8 +245,7 @@ impl Gpu {
                 say!("lictor: cursor chain never retired in {} ms -- cursor queue abandoned until it retires", ms);
                 #[cfg(feature = "test-mode")]
                 if core::mem::take(&mut self.cursor.test_abandon) {
-                    self.cursor.test_hold = false;
-                    say!("lictor: cursor chain retirement released (test-latch-dead)");
+                    self.cursor.test_abandon_release = Some(Instant::now());
                 }
             }
             None => {}
@@ -339,12 +356,18 @@ impl Gpu {
     /// retires the chain late, the way a slow device does.
     #[cfg(feature = "test-mode")]
     pub fn test_cursor_release(&mut self) {
-        if self.cursor.test_abandon {
+        if self.cursor.test_abandon || self.cursor.test_abandon_release.is_some() {
             return;
         }
         if core::mem::take(&mut self.cursor.test_hold) {
             say!("lictor: cursor chain retirement released (test-latch-dead)");
         }
+    }
+
+    /// The lane waits on a chain past its deadline. The chain need not be a device
+    /// fault: it shares the host loop a client's readback holds.
+    pub(super) fn cursor_stalled(&self) -> bool {
+        self.cursor.stalled.is_some()
     }
 
     pub(super) fn cursor_hide_output(&mut self, output: u32) -> Result<(), Error> {
