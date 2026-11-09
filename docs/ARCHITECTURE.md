@@ -1583,6 +1583,36 @@ its stop nor its continue, `stop`, `waitstop` and a step's wait read it as gone,
 the orphan rule does not count it as a stopped member, and `/ctl/procs` does not
 show it STOPPED (DEBUG-FS-DESIGN 5g).
 
+**A latch's unwind commits the death (operator vote 35, 2026-11-05).**
+P3-terminate decided the disposition at post time on the footing that a blocked
+thread cannot change it. With threads a peer can: installing a handler, changing
+a sigaction or opening the notes fd re-reads the latches (§8.8.3) and disarms
+one, after a sleeper may already have unwound for it. The waits that unwind for a
+latch answer on the footing that the thread dies -- `poll`'s 0, a console read's
+EOF, a 9P call's abandoned request, a close handed to the closer -- and a thread
+that then lived would act on that answer. So the death predicate
+(`thread_die_pending`) commits the death the moment it reads true for a latch:
+one atomic compare-and-swap on `proc_flags`, the word every latch clear changes,
+sets `PROC_FLAG_TERMINATE_COMMITTED` and leaves armed only the latch it acted on,
+which names the note. Every reader of the predicate commits by construction,
+whatever lock it holds. The word orders the swap against the re-read's clear: if
+the clear lands first, the predicate reads false and the wait goes on as §8.8.3
+says (a caught note interrupts it); if the swap lands first, the clear is refused
+and the death stands, though the handler is installed a moment later. A committed
+death is not deferrable: it ends every thread's sleeps whatever its mask, as group
+death does, and every EL0-return tail ends the Proc by the named note before it
+stops or delivers a note. A tail that hands a terminate-class note to a handler
+first disarms that note's latch by the same swap when no other queued note keeps
+it armed, so no note is both handled and died of. A committed Proc refuses what
+group death refuses: a stop park, an exec's point of no return, a fork. Each
+terminate latch names one note (`tty:quit` and `tty:hup` latch separately), so the
+named death does not depend on the note still being queued. Linux decides the same
+question at send time, under siglock (`complete_signal` sets `SIGNAL_GROUP_EXIT`
+when a thread that does not block the signal would take its default); here a
+note's disposition can still change between its post and the first answer given on
+the footing of death, so the decision is made at that answer
+(`dec-2026-11-05-commit-the-death`).
+
 **LS-5 / LS-8 boundary → item 11.** **P3-deliver** — promptly delivering a
 *caught* (handler-bearing / self-managing) `interrupt` to a *blocked* program via
 an interrupted-syscall (`-EINTR`) return WITHOUT terminating it — was deferred
