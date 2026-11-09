@@ -2344,7 +2344,9 @@ latency — owed with C-6's gate. Where it stops being ours to accept: Venus
 its own fences for, and v3d-native (Warp-7) puts the queue in our hands.
 Until then it sits with the host-side exposures §9.2 documents as TRUSTED —
 recorded HERE because "trusted host" must not read as "no client can reach
-it".
+it". (Since operator vote 81, the readback half no longer reaches QEMU: Lictor
+parks a readback until its context's earlier chains retire. Uploads and the
+egl-headless flush remain; see "Readbacks wait in Lictor" below.)
 
 **What this does NOT change.** The blit arm (the composed path every
 composable client takes on the GL host) stays on the sync slot exactly as
@@ -2500,6 +2502,162 @@ synchronous command behind a readback stalls at `SUBMIT_DEADLINE_MS` on every
 lane, and the DEADLINE arm asks that the engine revive after the readback rather
 than that every present behind it succeed.
 
+**Readbacks wait in Lictor, never in QEMU (operator vote 81, 2026-11-09).**
+
+*What the Pi showed.* Vote 72a's first 900 ms judgment on thyla-pi (QEMU
+10.0.11, virglrenderer 1.1.0, V3D, KVM) went red, and red identically with vote
+72a taken out. A host-side sampler of QEMU's threads and QEMU's own MMIO trace
+(work/nov03-mm1/pi-sample, pi-trace) found the cause:
+- Within 3-7 ms of decoding a client's `TRANSFER_FROM_HOST_3D` of a busy BO,
+  QEMU's main thread entered V3D's wait-BO ioctl. It stayed there 859-907 ms,
+  holding the big QEMU lock.
+- No vCPU completed an emulated MMIO write inside any hold.
+- The queued GPU notify and console writes landed within milliseconds after
+  each hold ended.
+
+Lictor's queue notify comes before every timed wait, and in the guest it froze
+for ~860 ms, so no guest deadline can bound the hold. Vote 72a is sound, but on
+this lane it never got to act. Consequence 1 above understated the stall. It is
+not only the device's: every vCPU that touches emulated hardware stops with it,
+including the console, every virtio device's notify and input delivery.
+`ioeventfd=on` does not take the GPU notify off the lock on this QEMU (737
+userspace notify writes in each arm), and the console and MSI-X-table exits
+need the lock anyway.
+
+*The rule.* Lictor hands QEMU a `TRANSFER_FROM_HOST_3D` only once the GPU work
+it would wait on has retired.
+- **Park.** A readback whose context has fenced chains in flight, or abandoned
+  and not yet retired, is parked. It is staged in its slot, and its owner is
+  told its fence id as usual, but it is not published.
+- **Queue behind it.** Every later fenced submission of that context (a
+  submit, a transfer either way, another readback) parks behind it, in order.
+- **Publish.** When the last chain of the context ahead of the readback
+  retires, the completion pump publishes the readback. It then publishes the
+  chains parked behind it, in order, up to the next parked readback, which
+  waits for the chains just published.
+
+The client sees no change. Its fence for the readback signals when the bytes
+have landed: after everything it submitted before the readback, and before
+anything it submitted after.
+
+*Which fences.* The vote's "fences submitted before it" are the readback's own
+context's. vrend executes the readback on the resource's context and waits only
+for the jobs that reference the resource (mesa v3d's map waits on that BO), and a
+client's resource is written by its own stream. C-6 run 2 measured that a
+client-context readback is not ordered behind another context's work: it waited
+84 ms against a 1335 ms queue on vrend's blitter context. The compositor's own
+reads of a client resource (the blit arm samples composable BOs) ride the
+synchronous slot. Those chains retire before the serve loop goes on, and a
+stalled one refuses every submission, a parked readback's publication included,
+so none is outstanding when a readback publishes. Waiting on every context's
+chains instead would let one client's backlog delay another client's readback
+and, through the barrier, that client's later submits. That was rejected.
+
+*Why this is not the quiescence gate rejected above.* That gate skipped the
+readback while the context had work in flight and composed from stale pages, so
+a single-buffered client at its throttle depth was never composed. A parked
+readback is never skipped. The barrier makes the context quiesce at the
+readback by holding back what was submitted after it. The cost falls on that
+context alone: one pipeline bubble per readback, while QEMU decodes a transfer
+whose work is done, and the overlap the client loses between its readback and
+its next frame.
+
+*Ids.* The owner id is minted at submission, because the owner is told it then.
+The wire id (`crate::fence`) is taken at publication and written into the staged
+header at that point. The device therefore sees wire ids in publication order,
+and the sequence still rewinds only on an idle device.
+
+*Accounting.* A parked chain holds its slot and counts in its context's
+`fences_in_flight`, which the share, `verify`'s gate and every quiesce predicate
+read. It is not on the device, though: no abandonment clock runs for it,
+`device_idle` does not see it, and the hold lever cannot reach it. Its wait is
+bounded by its prefix, because each chain ahead of it is abandoned at
+`FENCE_ABANDON_MS` if it never retires.
+- **Abandoned prefix.** A chain abandoned ahead of the readback keeps it parked
+  until its late retirement, because the device may still be running it. A
+  context with a hung chain therefore keeps its parked chains in their slots,
+  the same leak posture an abandoned chain already has.
+- **Stalled engine.** Nothing publishes while the engine is stalled. Parked
+  chains publish at revival.
+- **Dead engine.** A parked chain is released as refused (`ok = false`, not
+  abandoned). The device never saw it, so its slot returns to the pool and
+  nothing it named is at risk.
+
+*The compositor readback.* `comp-rb` rides the client's context, so it parks
+like the client's own readback. The reserved slot holds it while it is parked,
+and the client's later submits queue behind it. `Cost::ReadbackWait` (issue to
+retire) now includes the park. The arm is otherwise unchanged: one compositor
+readback in flight, latest wins.
+
+*What it shows.* Each retired readback's tag carries how long it was parked and
+how long it took from publication to retirement (`parked_ms`, `exec_ms`). The
+second number is the one QEMU spent decoding it, so it is short when the rule
+holds and the whole queue when it does not. The context's ctl reports both for
+its last readback (`readback-parked-ms`, `readback-exec-ms`), and the warp ctl
+reports both for the last compositor readback.
+
+*What it does not reach (weighed, as the vote asks for the egl-headless
+flush).* Any device step whose decode needs a GPU result is in the same class.
+The census:
+- **RESOURCE_FLUSH on egl-headless.** QEMU's display backend blits the scanout
+  and reads it back inside the flush's decode (`egl_scanout_flush`, then
+  `egl_fb_read`). The blit is a new job at the tail of V3D's single queue, which
+  all of QEMU's contexts share through one DRM file. Its readback therefore waits
+  for every job queued before it, from every context; this is the C-6 FLIGHT
+  REPORT's 1012 ms. Parking the flush behind its prefix cannot bound that unless
+  no context publishes while it waits. Only a device-wide drain before every
+  flush would, which costs every client a pipeline bubble at every display
+  update. That is not adopted here. It goes to the operator, with a measurement
+  of the flush holds that remain once readbacks park. A synchronous step queued
+  behind a client's backlog retires behind it through its own fence, so a flush
+  normally follows a drained queue. A flush still holds QEMU when a client
+  publishes between the step before it and the flush.
+- **TRANSFER_TO_HOST_3D into a busy resource.** mesa's write map waits for the
+  jobs that read the resource. Lictor cannot see which resources a chain's
+  opaque stream names, so parking uploads would drain the context at every
+  upload: a bubble every frame for a client that streams textures. mesa's guest
+  virgl driver already waits guest-side on a resource it knows is busy. Uploads
+  are not parked, and a client that uploads into a busy resource holds QEMU for
+  its own queue (F2b's lever, narrowed to uploads).
+- **The synchronous readbacks** (`verify`'s probe; the slot and BO import
+  witnesses; the blit-convention, screen and composability probes; `probe_screen`).
+  `verify` refuses a context with fences in flight, a parked chain included. The
+  others run once per event (an import, an adoption, bring-up, a test ctl),
+  never per frame, and each reads after a copy the compositor queued, so each can
+  hold QEMU once for whatever V3D has queued at that moment. They are not
+  parked; the count of such events bounds them.
+
+*The gate (C-6, `warp-prove readback`).* ARM, LIVE and F2B are unchanged.
+- **DEEP.** DEEP keeps its claim, because issue-to-retire still includes the
+  queue. Its CONSTRUCTED check moves to the fence timeline. A round is
+  constructed only if none of its heavy submits had retired when the readback was
+  issued. The old check compared the issue time against the time the last
+  retirement was observed, and it passed a readback issued after three of four
+  submits had retired: QEMU's holds delayed the sends, then the observation.
+- **DEADLINE**, redesigned. Six heavy submits, then the client's own
+  `transfer_from`, then one heavy submit `S_after` in a colour no queue index
+  uses, then ten presents of the bystander B. It requires four things:
+  - **PARKED**: the readback was parked at least `RB_PARK_FLOOR_MS` and took
+    under `RB_EXEC_BOUND_MS` from publication to retirement. This is the
+    positive control that the rule ran, and its discriminator.
+  - **ORDER**: the pixel the readback landed names the queue's last draw, not
+    `S_after`'s colour. This shows stream order and no tearing.
+  - **BOUND**: vote 72a, now able to act. The queue stood past
+    `RB_F2B_BOUND_MS` after B's first present, a present was refused while the
+    engine stalled, and none took longer than the bound.
+  - **HEALTH**: the engine is alive afterwards and nothing is poisoned.
+
+  The mutant with parking disabled must go red on PARKED, and on the Pi on
+  BOUND. The mutant whose later submits do not queue behind a parked readback
+  must go red on ORDER.
+
+*Witnesses whose premise was the hold.* `ls-graphical-sak-chain`'s readback and
+pointer legs, and `ls-graphical-keys-behind`'s readback leg, stood a client
+readback in the host loop. With readbacks parked, what a seat step meets behind
+such a client is the client's backlog, through the step's own fence: the stall at
+`SUBMIT_DEADLINE_MS` and the refusal are unchanged, and the host loop is not
+held. Their comments say so, and they are re-run on the Pi.
+
 ### 4.5.14 The owed round on C-6b (2026-08-18, OPUS fallback): 1 P0 / 3 P1 / 3 P2 / 3 P3
 
 The C-0d Fable close was dirty, so a follow-up was owed on its fixes plus C-6b.
@@ -2631,7 +2789,11 @@ block the serve loop, and seat input with it. Neither was taken.
   now stalls the engine at 500 ms; submissions are refused until the chain retires, so a
   bystander's present answers an error for that long instead of blocking, and the C-6
   gate's DEADLINE arm counts a recovered stall as survival. Only bring-up, before the
-  serve loop, still waits the abandonment bound.
+  serve loop, still waits the abandonment bound. Since vote 81 a readback no longer
+  holds the host loop (Lictor parks it until its context's earlier chains retire).
+  What a synchronous command meets behind a client is therefore that client's
+  backlog, through the command's own fence, and the stall and the refusal are as
+  above.
 - **Input does not wait for the serve loop** (operator vote 72, second half). A
   synchronous wait still holds the serve loop up to `SUBMIT_DEADLINE_MS`, so Lictor's
   input thread (`backend/intake.rs`) drains every eventq every 4 ms into a 4096-entry
