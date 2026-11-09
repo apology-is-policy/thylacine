@@ -54,6 +54,9 @@ pub struct Seat {
     /// first deadline, or when the kernel closes the episode it held up, if sooner.
     #[cfg(feature = "test-mode")]
     test_release_at: Option<libthyla_rs::time::Instant>,
+    /// The same for a held cursor chain (leg C), past the first deadline.
+    #[cfg(feature = "test-mode")]
+    test_cursor_release_at: Option<libthyla_rs::time::Instant>,
     #[cfg(feature = "test-mode")]
     test_stall_frame: bool,
     /// What the frame's shot did. This process says nothing in an open episode
@@ -84,7 +87,6 @@ pub struct Seat {
     /// hands over until then was pressed at a trusted screen (`drain_episode_tail`).
     tail_until: Option<u64>,
 }
-const RENEW_EVERY_MS: u64 = 1000;
 #[cfg(feature = "test-mode")]
 const TEST_HOLD_RESTORE_MS: u64 = 3000;
 /// Past the kernel's five-second takeover deadline, well inside FENCE_ABANDON_MS.
@@ -222,24 +224,23 @@ impl Seat {
         }
     }
     // A backlog ahead of the trusted paint delays the takeover (vote 71): while the
-    // engine is alive and the control queue holds the takeover up, the kernel's
-    // deadline is renewed, at most once a second and never past the limit the chord
-    // set. One chain that runs for seconds retires nothing meanwhile and is renewed
-    // all the same; a chain that never retires kills the engine at FENCE_ABANDON_MS,
-    // inside that limit. So a chord behind a client's work ends in the trusted screen
-    // or a dead engine. A cursor queue stalled alone renews nothing: no client
-    // reaches it, so that stall is the device's, and the deadline fails the takeover.
+    // engine is alive and the device holds the takeover up, the kernel's
+    // deadline is renewed, at once when first seen and then at most once a second,
+    // never past the limit the chord set. One chain that runs for seconds retires
+    // nothing meanwhile and is renewed all the same; a chain that never retires kills
+    // the engine at FENCE_ABANDON_MS, inside that limit. So a chord behind a client's
+    // work ends in the trusted screen or a dead engine. A cursor chain waits on the same
+    // host loop a client's readback holds, so a stalled cursor lane renews too (vote
+    // 79); its abandonment at that bound ends the wait, and the kernel's deadline then
+    // fails the takeover.
     fn renew_behind_backlog(&mut self, device: &Device) {
-        if !device.gpu.control_waiting() { return; }
-        let now = libthyla_rs::time::Instant::now();
-        let at = match self.renewed {
-            Some((generation, at)) if generation == self.generation => at,
-            _ => { self.renewed = Some((self.generation, now)); return; }
-        };
-        if (at.elapsed().as_millis() as u64) < RENEW_EVERY_MS { return; }
+        if !device.gpu.takeover_waiting() { return; }
+        let last = self.renewed.map(|(generation, at)| (generation, at.elapsed().as_millis() as u64));
+        if !crate::gpu_api::renew_due(last, self.generation) { return; }
+        // A refused renewal (the seat already left QUIESCING) is not retried every pass.
+        self.renewed = Some((self.generation, libthyla_rs::time::Instant::now()));
         let mut m = ep::Message::default(); m.generation = self.generation;
         if ep::call(ep::RENEW, &mut m).is_ok() {
-            self.renewed = Some((self.generation, now));
             super::diagnostic(&alloc::format!(
                 "lictor: takeover renewed behind a draining backlog generation={} chains={}\n",
                 self.generation, device.gpu.fenced_in_flight()));
@@ -269,6 +270,11 @@ impl Seat {
                 if self.test_release_at.is_some_and(|at| at.elapsed().as_millis() as u64 >= TEST_RELEASE_AFTER_MS) {
                     self.test_release_at = None;
                     device.gpu.test_stall_release();
+                }
+                #[cfg(feature = "test-mode")]
+                if self.test_cursor_release_at.is_some_and(|at| at.elapsed().as_millis() as u64 >= TEST_RELEASE_AFTER_MS) {
+                    self.test_cursor_release_at = None;
+                    device.gpu.test_cursor_release();
                 }
                 if !self.active() { self.renew_behind_backlog(device); }
                 if !device.gpu.takeover_clear() { return; }
@@ -301,6 +307,9 @@ impl Seat {
                         self.test_refuse_restored |= shot == Some(SeatShot::RefuseRestored);
                         if shot == Some(SeatShot::HoldAfterExclusion) {
                             self.test_release_at = Some(libthyla_rs::time::Instant::now());
+                        }
+                        if shot == Some(SeatShot::CursorStall) {
+                            self.test_cursor_release_at = Some(libthyla_rs::time::Instant::now());
                         }
                         self.test_stall_frame |= shot == Some(SeatShot::StallInFrame);
                         screen.test_refuse_frame = shot == Some(SeatShot::RefuseFrame);
@@ -413,6 +422,8 @@ impl Seat {
                 });
                 #[cfg(feature = "test-mode")]
                 if self.test_release_at.take().is_some() { device.gpu.test_stall_release(); }
+                #[cfg(feature = "test-mode")]
+                let _ = self.test_cursor_release_at.take();
                 if !released || (self.active() && since.elapsed().as_millis() < FAILURE_NOTICE_MS) { return; }
                 if self.displaced || self.active.is_some() {
                     if device.gpu.engine_dead() {

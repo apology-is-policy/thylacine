@@ -195,14 +195,21 @@ while the engine is alive and draining, Lictor renews the kernel's deadline, up 
 bound, with input withheld, so a chord ends in the trusted screen or a dead engine, and
 the screen looks hung for as long as the client queued. Measured before it on the Pi's
 V3D: behind a client's deep queue, six chords of six failed at the five-second deadline
-with the session's screen still up. Built (`SEAT_RENEW`): Lictor renews at most once a
-second while the control queue holds the takeover up, stalled behind a chain or with a
-command not yet retired, and the kernel stops at 35 s from the chord. Draining means the
+with the session's screen still up. Built (`SEAT_RENEW`): Lictor renews at once when it
+first sees the hold and then at most once a second while the device holds the takeover
+up, and the kernel stops at 35 s from the chord. The control queue holds it up stalled
+behind a chain or with a command not yet retired. Draining means the
 engine is working through what is ahead, not that something retired lately: one chain
 that runs for seconds retires nothing meanwhile and is renewed all the same, and a
 chain that never retires kills the engine at `FENCE_ABANDON_MS` (30 s), inside the
-bound. A cursor queue stalled alone renews nothing: no client reaches it, so that stall
-is the device's, and the deadline fails the takeover.
+bound. The cursor lane holds it up too (operator vote 79, 2026-11-09): no client submits
+there, but a cursor chain waits on the same host loop a client's readback holds, and the
+takeover cannot pass a lane whose late chain could still put the pointer plane over the
+trusted scene. Lictor renews while the lane's stall stands. A late retirement revives
+the lane and the takeover completes; at `FENCE_ABANDON_MS` the lane is abandoned, the
+wait ends, and the kernel's deadline fails the chord, with the abandonment on the log.
+The lane still comes back on its late retirement (vote 50). That residue needs a host
+loop held 30 s, the same hold that kills the engine on the control queue.
 
 Before a chord is seen the gap is the serve loop's. A synchronous command waits at most
 `SUBMIT_DEADLINE_MS`, a client's readback ahead of it or not (operator vote 72), so a

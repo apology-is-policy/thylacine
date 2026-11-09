@@ -922,6 +922,9 @@ struct Controlq {
     test_latch_next: bool,
     #[cfg(feature = "test-mode")]
     test_stall_hold: bool,
+    /// The hold consumed a stalled chain's entry: only the lever's release ends it.
+    #[cfg(feature = "test-mode")]
+    test_stall_withheld: bool,
     /// The behind-a-readback lever: until `TEST_BEHIND_MS` have passed, no
     /// synchronous wait is done and a readback reads as in flight.
     #[cfg(feature = "test-mode")]
@@ -1182,6 +1185,7 @@ impl Controlq {
                 // entry is consumed, the chain stays outstanding.
                 #[cfg(feature = "test-mode")]
                 if self.stalled.is_some() && core::mem::take(&mut self.test_stall_hold) {
+                    self.test_stall_withheld = true;
                     say!("lictor: gpu synchronous chain retirement WITHHELD (test-latch-dead hold)");
                     continue;
                 }
@@ -2199,6 +2203,8 @@ impl Gpu {
                 test_latch_next: false,
                 #[cfg(feature = "test-mode")]
                 test_stall_hold: false,
+                #[cfg(feature = "test-mode")]
+                test_stall_withheld: false,
                 #[cfg(feature = "test-mode")]
                 test_behind_since: None,
                 #[cfg(feature = "test-mode")]
@@ -4636,9 +4642,12 @@ impl Gpu {
     /// revives the engine, the way a device that was only slow does.
     #[cfg(feature = "test-mode")]
     pub fn test_stall_release(&mut self) {
-        // Still armed means the entry has not come: it retires by the ordinary
-        // path. Consumed means nothing else will end the chain.
-        if !core::mem::take(&mut self.ctrl.test_stall_hold) {
+        // Withheld means the hold consumed the entry and nothing else will end the
+        // chain. Still armed means the entry has not come: it retires by the ordinary
+        // path. Neither (the shot met a real stall and armed nothing) leaves a real
+        // chain to its own retirement.
+        self.ctrl.test_stall_hold = false;
+        if core::mem::take(&mut self.ctrl.test_stall_withheld) {
             self.ctrl.sync_pending = false;
         }
         say!("lictor: gpu synchronous chain retirement released (test-latch-dead)");
@@ -4703,12 +4712,16 @@ impl Gpu {
         self.ctrl.fenced_in_flight()
     }
 
-    /// The control queue holds synchronous work back: stalled behind a chain, or a
-    /// command not yet retired. A takeover waiting on it is renewed (vote 71); the
-    /// stall ends in a retirement or, at FENCE_ABANDON_MS, a dead engine.
-    pub fn control_waiting(&self) -> bool {
+    /// The device holds a takeover up while its engine lives: the control queue
+    /// (stalled behind a chain, or a command not yet retired; vote 71) or the cursor
+    /// lane stalled behind its chain (vote 79). A takeover waiting on either is
+    /// renewed. The control queue's stall ends in a retirement or, at
+    /// FENCE_ABANDON_MS, a dead engine; the lane's in a retirement or, at the same
+    /// bound, its abandonment, which ends the wait.
+    pub fn takeover_waiting(&self) -> bool {
         !self.ctrl.dead
-            && (self.ctrl.stalled.is_some() || self.ctrl.sync_pending || self.ctrl.sync2_pending)
+            && (self.ctrl.stalled.is_some() || self.ctrl.sync_pending || self.ctrl.sync2_pending
+                || self.cursor_stalled())
     }
 
     /// The broker enables this after boot probes, then releases imported DMA
