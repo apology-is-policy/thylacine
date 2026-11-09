@@ -344,7 +344,12 @@ impl Seat {
                             super::diagnostic(&alloc::format!(
                                 "lictor: late shot: a synchronous chain withheld {} ms from the chord, and the seat fails behind it stalled={} generation={}\n",
                                 ms, stalled as u8, self.generation));
-                            self.fail("late shot (test-latch-chained)");
+                            // The kernel is failed and Lictor's phase stays 1 to the next STATUS, the
+                            // state its lazy expiry leaves, so a clear keyed to that phase meets it.
+                            let mut m = ep::Message { generation: self.generation, ..Default::default() };
+                            let _ = ep::call(ep::FAIL, &mut m);
+                            super::diagnostic(&alloc::format!(
+                                "lictor: seat failed: late shot (test-latch-chained) generation={}\n", self.generation));
                         }
                     }
                     return;

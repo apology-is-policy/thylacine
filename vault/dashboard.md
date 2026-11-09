@@ -130,5 +130,5 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-11-09 [[chg-2026-11-09-serial-side-queue]] — The serial console reads every byte; what the ring refuses waits in a side queue (vote 73)
 - 2026-11-09 [[chg-2026-11-09-takeover-bound-round4]] — The takeover's bound lives inside one seat step (round 4)
 - 2026-11-09 [[chg-2026-11-09-takeover-bound-round5]] — The takeover's bound lives across one reap (round 5)
-- 2026-11-09 [[chg-2026-11-09-takeover-bound]] — Every wait a takeover makes is bounded from the chord (vote 80)
+- 2026-11-09 [[chg-2026-11-09-takeover-bound-round6]] — The late shot leaves Lictor's phase where the kernel's expiry would (round 6)
 <!-- generated:end -->
