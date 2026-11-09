@@ -14,6 +14,7 @@
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 #include "../../arch/arm64/uart.h"
+#include "../../mm/slub.h"
 
 #define ARGWIDTH_PROBE_STATUS 72
 
@@ -22,7 +23,6 @@ _Static_assert(SYS_POSTNOTE == 47, "argwidth-probe's SYS_POSTNOTE_NR");
 _Static_assert(SYS_BURROW_MAP_FILE == 126, "argwidth-probe's SYS_BURROW_MAP_FILE_NR");
 
 #define ARGWIDTH_PROBE_BLOB_MAX 65536
-static _Alignas(16) u8 g_argwidth_probe_blob[ARGWIDTH_PROBE_BLOB_MAX];
 
 struct argwidth_probe_exec_args {
     const void *blob;
@@ -52,13 +52,19 @@ void test_syscall_argwidth_probe(void) {
     TEST_ASSERT(size <= ARGWIDTH_PROBE_BLOB_MAX, "argwidth-probe too large for its buffer");
     // cpio is 4-aligned; the ELF header cast needs 8.
     const u8 *src = (const u8 *)cpio_blob;
-    for (size_t i = 0; i < size; i++) g_argwidth_probe_blob[i] = src[i];
+    // Not a static: the image's L3 window (kernel.ld). kmalloc's large path is
+    // page-aligned, which the ELF header cast needs.
+    u8 *blob = kmalloc(ARGWIDTH_PROBE_BLOB_MAX, 0);
+    TEST_ASSERT(blob != NULL, "kmalloc the argwidth-probe blob");
+    for (size_t i = 0; i < size; i++) blob[i] = src[i];
 
-    struct argwidth_probe_exec_args args = { .blob = g_argwidth_probe_blob, .size = size };
+    struct argwidth_probe_exec_args args = { .blob = blob, .size = size };
     int pid = rfork(RFPROC, argwidth_probe_exec_thunk, &args);
+    if (pid <= 0) kfree(blob);
     TEST_ASSERT(pid > 0, "rfork failed for /argwidth-probe");
     int status = -42;
     int reaped = wait_pid(&status);
+    if (reaped == pid) kfree(blob);   // the child's exec_setup read it before it ran
 
     uart_puts("    argwidth-probe status=");
     uart_putdec((u64)status);

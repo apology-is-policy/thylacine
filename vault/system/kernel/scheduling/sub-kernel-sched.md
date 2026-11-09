@@ -356,7 +356,8 @@ pair the one raw acquire: the resume tail and the no-switch return. The
 first cut released one counted, and the underflow probe caught it.
 
 **Lock order.** [[lock-runq]] is the innermost of the wait chain
-([[lock-wait]] → [[lock-timerwait]] → [[lock-rendez]] → [[lock-runq]]).
+([[lock-wait]] → [[lock-timerwait]] → [[lock-rendez]] → [[lock-runq]]); the
+tick enters at [[lock-timerwait]], a wake at [[lock-rendez]].
 `ready_on` holds exactly one `CpuSched` lock and never nests, so it
 cannot cycle with `try_steal` (which trylocks peers while holding its
 own) or with `sched_remove_if_runnable` (which takes one at a time).

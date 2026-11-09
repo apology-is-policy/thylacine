@@ -31,6 +31,7 @@
 #include <thylacine/spinlock.h>
 #include <thylacine/spoor.h>
 #include <thylacine/syscall.h>    // T_S_IFDIR (the 8.5.1 directory Rgetattr)
+#include <thylacine/notes.h>      // flush(5) legs: a direct note
 #include <thylacine/thread.h>     // flush(5) legs: current_thread()->note_interruptible
 #include <thylacine/types.h>
 #include <thylacine/vivarium.h>  // flush(5) legs: a Linux sigtab row catches child_exit
@@ -4659,6 +4660,8 @@ static struct {
     int  rc;
     bool noted;       // the op runs as a call on signal(7)'s list, SIGCHLD caught
     bool setup_ok;
+    bool marked;      // the call's mark as the op returned: the kernel may re-issue it
+    u32  claim;       // the claim it held then
     u8   data[16];
 } g_dyop;
 
@@ -4699,6 +4702,8 @@ static void dy_run(void *arg) {
                             g_dyop.data, &got);
         if (rc == 0) rc = (int)got;
     }
+    g_dyop.marked = current_thread()->note_call_unwound;
+    g_dyop.claim  = current_thread()->note_claim;
     g_dyop.rc = rc;
 }
 
@@ -4708,6 +4713,8 @@ static bool dy_launch(int op, u32 fid, bool dying, bool noted) {
     g_dyop.rc       = 0x7fffffff;
     g_dyop.noted    = noted;
     g_dyop.setup_ok = false;
+    g_dyop.marked   = false;
+    g_dyop.claim    = 0xffffffffu;
     for (u32 i = 0; i < sizeof(g_dyop.data); i++) g_dyop.data[i] = 0;
     return test_dying_start(&g_dy, dy_run, NULL, dying);
 }
@@ -4732,6 +4739,7 @@ static u8   g_rec_type[DY_REC_MAX];
 static bool g_rec_clunk_err;
 static u8   g_rec_bad_reply_to;
 static u8   g_rec_hold;         // a T-type the server holds unanswered (until flushed)
+static bool g_rec_read_err;     // answer a Tread with an Rlerror (g_rlerror_ecode)
 static u16  g_rec_last_tag;     // the tag of the last request it received
 
 static int recording_responder(void *ctx, const u8 *req, size_t req_len,
@@ -4751,7 +4759,7 @@ static int recording_responder(void *ctx, const u8 *req, size_t req_len,
         for (u32 i = 0; i < 9; i++) resp[i] = bad[i];
         return 9;
     }
-    if (type == P9_TCLUNK && g_rec_clunk_err)
+    if ((type == P9_TCLUNK && g_rec_clunk_err) || (type == P9_TREAD && g_rec_read_err))
         return rlerror_responder(ctx, req, req_len, resp, resp_cap);
     return canonical_responder(ctx, req, req_len, resp, resp_cap);
 }
@@ -4766,6 +4774,7 @@ static u32 rec_count(u8 type) {
 static int dy_client_open(void) {
     g_rec_n            = 0;
     g_rec_clunk_err    = false;
+    g_rec_read_err     = false;
     g_rec_bad_reply_to = 0;
     g_rec_hold         = 0;
     if (p9_mq_loopback_init(&g_mq, recording_responder, NULL) != 0) return -1;
@@ -5461,6 +5470,7 @@ void test_9p_client_note_flush_honours_late_read(void) {
     TEST_EXPECT_EQ((u64)(s64)g_dyop.rc, (u64)5,
                    "flush(5): a reply that beats the Rflush is honoured -- the bytes, not EINTR");
     TEST_ASSERT(g_dyop.data[0] == 'h' && g_dyop.data[4] == 'o', "the bytes the server sent");
+    TEST_ASSERT(!g_dyop.marked, "the reply answered the call: nothing to re-issue");
     TEST_EXPECT_EQ(honoured, (u64)1, "counted as honoured");
     TEST_EXPECT_EQ(late, (u64)0, "not absorbed as an ownerless late reply");
     TEST_EXPECT_EQ(mid, (u64)2, "its tag stays reserved until the Rflush (I-10)");
@@ -5581,6 +5591,7 @@ void test_9p_client_note_flush_rflush_first_cancels(void) {
     TEST_ASSERT(!killed, "the Rflush ended the wait");
     TEST_EXPECT_EQ((u64)(s64)g_dyop.rc, (u64)(s64)-P9_E_INTR,
                    "an Rflush that comes first cancels the read: -EINTR");
+    TEST_ASSERT(g_dyop.marked, "the unwind cancelled it: a call the kernel may re-issue");
     TEST_EXPECT_EQ(cancel, (u64)1, "counted as cancelled");
     TEST_EXPECT_EQ(honoured, (u64)0, "nothing honoured");
     TEST_EXPECT_EQ(end, (u64)0, "the Rflush freed both tags");
@@ -5589,6 +5600,76 @@ void test_9p_client_note_flush_rflush_first_cancels(void) {
     TEST_EXPECT_EQ(after, (u64)0, "the Rclunk freed its tag");
     TEST_EXPECT_EQ(orphan, (u64)0, "no unexplained frame");
     TEST_ASSERT(!dead, "the session stays live");
+}
+
+// A thread-directed note unwinds with no claim (notes_direct_caught). The Rflush still
+// cancels the op, and the mark is what says so: dev9p's write-back asks it.
+void test_9p_client_note_flush_direct_note_marks(void) {
+    TEST_EXPECT_EQ(dy_client_open(), 0, "client over mq");
+    TEST_EXPECT_EQ(dy_bind(131), 1u, "walk binds 131");
+    g_rec_hold = P9_TREAD;
+
+    dy_hold_reader(true);
+    TEST_ASSERT(dy_start_noted(DY_READ, 131), "reader");
+    TEST_YIELD_UNTIL_SOFT(test_dying_parked(&g_dy) && rec_count(P9_TREAD) == 1);
+    bool parked = test_dying_parked(&g_dy) && !test_dying_done(&g_dy);
+    int  pn = parked ? proc_note_thread(g_dy.proc, g_dy.tid, NOTE_NAME_CHILD_EXIT, NULL) : -1;
+    TEST_YIELD_UNTIL_SOFT(test_dying_done(&g_dy) ||
+                          (rec_count(P9_TFLUSH) == 1 && test_dying_parked(&g_dy)));
+    bool waited = rec_count(P9_TFLUSH) == 1 && !test_dying_done(&g_dy);
+    dy_hold_reader(false);
+    int  pf = p9_client_reader_pump_ready(&g_client);          // the Rflush
+    bool killed;
+    dy_finish(&killed);
+    u64  cancel = g_client.flush_cancelled;
+    dy_client_close();
+
+    TEST_ASSERT(g_dyop.setup_ok, "a Linux phenotype whose SIGCHLD is caught");
+    TEST_ASSERT(parked, "the read parked behind the held reader");
+    TEST_EXPECT_EQ(pn, 0, "the note went to that thread");
+    TEST_ASSERT(waited, "the interrupted read waits for its Tflush's answer");
+    TEST_EXPECT_EQ(pf, 1, "the Rflush");
+    TEST_ASSERT(!killed, "the Rflush ended the wait");
+    TEST_EXPECT_EQ((u64)(s64)g_dyop.rc, (u64)(s64)-P9_E_INTR, "cancelled: -EINTR");
+    TEST_EXPECT_EQ(cancel, (u64)1, "counted as cancelled");
+    TEST_EXPECT_EQ(g_dyop.claim, 0u, "the note took no claim");
+    TEST_ASSERT(g_dyop.marked, "and the mark says the unwind cancelled the op");
+}
+
+// The server's own Rlerror(EINTR) beats the flush. The value is what a cancel answers,
+// and it is the server's error: an SA_RESTART row must not re-issue the call for it.
+void test_9p_client_note_flush_server_eintr_stands(void) {
+    TEST_EXPECT_EQ(dy_client_open(), 0, "client over mq");
+    TEST_EXPECT_EQ(dy_bind(130), 1u, "walk binds 130");
+    g_rec_read_err  = true;
+    g_rlerror_ecode = P9_E_INTR;
+
+    dy_hold_reader(true);
+    TEST_ASSERT(dy_start_noted(DY_READ, 130), "reader");
+    bool parked;
+    bool waited = dy_note_and_flush(P9_TREAD, &parked);
+    dy_hold_reader(false);
+    int  pr = p9_client_reader_pump_ready(&g_client);          // the Rlerror
+    bool killed;
+    dy_finish(&killed);
+    int  pf = p9_client_reader_pump_ready(&g_client);          // the Rflush
+    u64  honoured = g_client.flush_honoured;
+    u64  cancel   = g_client.flush_cancelled;
+    u64  orphan   = g_client.demux_orphan;
+    dy_client_close();
+    g_rlerror_ecode = 2;
+
+    TEST_ASSERT(g_dyop.setup_ok, "a Linux phenotype whose SIGCHLD is caught");
+    TEST_ASSERT(parked, "the read parked behind the held reader");
+    TEST_ASSERT(waited, "the interrupted read waits for its Tflush's answer");
+    TEST_EXPECT_EQ(pr, 1, "the Rlerror, before the Rflush");
+    TEST_ASSERT(!killed, "the read returned on its own");
+    TEST_EXPECT_EQ((u64)(s64)g_dyop.rc, (u64)(s64)-P9_E_INTR, "the server's answer stands");
+    TEST_ASSERT(!g_dyop.marked, "and it is no call for the kernel to re-issue");
+    TEST_EXPECT_EQ(pf, 1, "the Rflush");
+    TEST_EXPECT_EQ(honoured, (u64)1, "counted as honoured");
+    TEST_EXPECT_EQ(cancel, (u64)0, "nothing cancelled");
+    TEST_EXPECT_EQ(orphan, (u64)0, "no unexplained frame");
 }
 
 // A death in the flush wait abandons the op as #845 does: the Tflush is already

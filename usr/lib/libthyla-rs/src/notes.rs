@@ -36,10 +36,11 @@ use crate::err::{Error, Result};
 use crate::handle::{Handle, Rights};
 use crate::poll::AsFd;
 use crate::{
-    t_note_mask, t_note_open, t_postnote, t_read, t_poll, TNoteRecord, TPollFd,
+    t_note_dispose, t_note_mask, t_note_open, t_postnote, t_read, t_poll, TNoteRecord, TPollFd,
     T_NOTE_BIT_CHILD_EXIT, T_NOTE_BIT_INTERRUPT, T_NOTE_BIT_KILL, T_NOTE_BIT_PIPE,
     T_NOTE_BIT_SAK, T_NOTE_BIT_SNARE, T_NOTE_BIT_TERM, T_NOTE_BIT_TTY, T_NOTE_BIT_USR1,
     T_NOTE_BIT_USR2, T_NOTE_MASK_SUPPORTED,
+    T_NOTE_DISP_CAUGHT, T_NOTE_DISP_DEFAULT, T_NOTE_DISP_IGNORE, T_NOTE_DISP_RESTART,
     T_NOTE_NAME_MAX,
     T_POLLIN, T_POSTNOTE_SELF_PID,
 };
@@ -479,6 +480,50 @@ pub fn send(target: NoteTarget, name: &str) -> Result<()> {
     // SAFETY: bytes points to name.len() readable bytes in the
     // caller's user-VA memory (a &str borrows that).
     let rc = unsafe { t_postnote(target.to_kernel_pid(), bytes.as_ptr(), bytes.len()) };
+    Error::from_syscall_return(rc).map(|_| ())
+}
+
+/// What one note does to this Proc: a row in the kernel's per-note table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Disposition {
+    /// The note's default action. It never reaches a handler.
+    Default,
+    /// The note is dropped at the post.
+    Ignore,
+    /// The note is delivered: to the `SYS_NOTIFY` handler, or left queued for a
+    /// notes fd. It may interrupt a blocking call, which returns
+    /// `Error::Other(4)` (EINTR). With `restart`, a handler's return re-issues
+    /// the call instead, if the call is one signal(7) lists as restartable. A
+    /// notes-fd reader always sees the error: it drains the fd and re-issues.
+    Caught { restart: bool },
+}
+
+/// Write this Proc's row for the note `name`.
+///
+/// The first call makes the table govern the Proc until its next exec: every
+/// note whose row is `Default` then gets the kernel's default, so a program
+/// using a catch-all `SYS_NOTIFY` handler must write a row for each note it
+/// wants. Rows and the handler cross a fork. They do not cross an exec.
+///
+/// Errors:
+///   - `Error::InvalidArgument`: a name with no row (a name the kernel does not
+///     know, or `kill`), or `Caught` with neither a handler registered nor a
+///     notes fd open to take the note.
+///   - `Error::NoMemory`: the kernel could not allocate the table.
+pub fn dispose(name: &str, disposition: Disposition) -> Result<()> {
+    if name.is_empty() || name.len() >= T_NOTE_NAME_MAX {
+        return Err(Error::InvalidArgument);
+    }
+    let (word, flags) = match disposition {
+        Disposition::Default => (T_NOTE_DISP_DEFAULT, 0),
+        Disposition::Ignore => (T_NOTE_DISP_IGNORE, 0),
+        Disposition::Caught { restart: false } => (T_NOTE_DISP_CAUGHT, 0),
+        Disposition::Caught { restart: true } => (T_NOTE_DISP_CAUGHT, T_NOTE_DISP_RESTART),
+    };
+    let bytes = name.as_bytes();
+    // SAFETY: bytes points to name.len() readable bytes in the
+    // caller's user-VA memory (a &str borrows that).
+    let rc = unsafe { t_note_dispose(bytes.as_ptr(), bytes.len(), word, flags) };
     Error::from_syscall_return(rc).map(|_| ())
 }
 

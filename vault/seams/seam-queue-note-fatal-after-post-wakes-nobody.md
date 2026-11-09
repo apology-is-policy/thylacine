@@ -2,12 +2,13 @@
 id: seam-queue-note-fatal-after-post-wakes-nobody
 type: seam
 title: "A process-directed caught note made fatal after its post wakes nobody"
-status: open
+status: closed
+closed-by: chg-2026-11-03-item-11c-close
 surface: [sub-kernel-notes]
 opened-by: fnd-thread-c4-r2-f1
 tracker: "OPEN-BUGS 2026-11-02T11:37Z; owned by item 11c"
 created: 2026-11-02
-updated: 2026-11-02
+updated: 2026-11-03
 ---
 ## Owed
 
@@ -24,3 +25,7 @@ Item 11c decides it: the defect bites a native wait that rode the note out at po
 which 11c changes. What remains after that is a hold wait, which is Linux-equivalent.
 11c either rouses from the three stores as C4's words do, or records why not and
 changes the two tests' reading.
+
+## Closed
+
+Closed by item 11c. `notes_disposition_reread` re-arms what a write makes fatal and rouses the sleepers. Witnesses that ran: K22-K24 and K58 red on `rendez.reread_wakes_a_sleeper`, green on the tip.

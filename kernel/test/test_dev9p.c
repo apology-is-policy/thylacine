@@ -223,6 +223,7 @@ static int lock_rlerror(u8 *resp, size_t resp_cap, u16 tag, u32 ec) {
     for (int i = 0; i < 4; i++) resp[7 + i] = (u8)(ec >> (8 * i));
     return 11;
 }
+static u32  g_walk_lerror_ecode; // != 0: the NEXT Twalk answers Rlerror, then clears
 
 // Canonical responder — synthesizes valid Rmsgs for every op type
 // dev9p might issue. Mirrors the responder used in test_9p_client.c
@@ -260,6 +261,18 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
         return (int)total;
     }
     if (type == P9_TWALK) {
+        if (g_walk_lerror_ecode) {
+            u32 ec = g_walk_lerror_ecode;
+            g_walk_lerror_ecode = 0;
+            size_t etotal = P9_HDR_LEN + 4;
+            if (resp_cap < etotal) return -1;
+            resp[0] = 11; resp[1] = 0; resp[2] = 0; resp[3] = 0;
+            resp[4] = P9_RLERROR;
+            resp[5] = (u8)(tag & 0xff); resp[6] = (u8)((tag >> 8) & 0xff);
+            resp[7] = (u8)(ec & 0xff);         resp[8] = (u8)((ec >> 8) & 0xff);
+            resp[9] = (u8)((ec >> 16) & 0xff); resp[10] = (u8)((ec >> 24) & 0xff);
+            return (int)etotal;
+        }
         // Inspect Twalk body to learn nwname; respond with that many
         // qids so partial-walk checks pass. Body offset: hdr(7) +
         // fid(4) + newfid(4) = 15; nwname at 15..17.
@@ -3639,6 +3652,12 @@ void test_dev9p_cached_open(void) {
                 "walk FROM a cached open rejected");
     TEST_ASSERT(dev9p.walk_attrs(co, NULL, names, lens, 1, sts) == NULL,
                 "walk_attrs FROM a cached open rejected");
+    int co_why = 0;
+    TEST_ASSERT(dev_walk(co, NULL, names, 1, &co_why) == NULL, "and through the wrapper");
+    TEST_EXPECT_EQ(co_why, T_E_INVAL, "a walk from a cached open is no miss");
+    TEST_ASSERT(dev_walk_attrs(co, NULL, names, lens, 1, sts, &co_why) == NULL,
+                "and the fused one");
+    TEST_EXPECT_EQ(co_why, T_E_INVAL, "and neither is that");
 
     // Close: one Tclunk, of the kept fid, and the budget released.
     u32 kept = cp->fid;
@@ -4335,12 +4354,13 @@ void test_dev9p_wb_loom_register_keeps_the_latch(void) {
 
 // A caught note that interrupts a flush has its Twrite cancelled (flush(5)):
 // EINTR, never applied. The run stays staged and nothing latches, so the next
-// fsync sends it whole. The dev9p half is driven here: the thread holds a note
-// claim, as every caught-note unwind leaves it (thread_caught_note_unwinds),
-// and the flush meets -P9_E_INTR -- injected as a server Rlerror(EINTR), which
-// the client returns as the same value. The client half (a Tflush answered
-// first returns -P9_E_INTR) is 9p_client.note_flush_rflush_first_cancels.
-// The control, one variable away, is wb_server_eintr_latches: no claim.
+// fsync sends it whole. The dev9p half is driven here: the call carries the mark,
+// as every caught-note unwind leaves it (thread_caught_note_unwinds), and the
+// flush meets -P9_E_INTR -- injected as a server Rlerror(EINTR), which the client
+// returns as the same value. The client half (a Tflush answered first returns
+// -P9_E_INTR with the mark kept) is 9p_client.note_flush_rflush_first_cancels and
+// note_flush_direct_note_marks. The control, one variable away, is
+// wb_server_eintr_latches: no mark.
 void test_dev9p_wb_interrupted_flush_keeps_run(void) {
     struct Spoor *root = NULL;
     struct Spoor *f = wb_make_created(&root);
@@ -4349,14 +4369,14 @@ void test_dev9p_wb_interrupted_flush_keeps_run(void) {
     TEST_ASSERT(chunk != NULL, "scratch");
     for (u32 i = 0; i < 512; i++) chunk[i] = wb_pat(i);
     struct Thread *t = current_thread();
-    TEST_ASSERT(t != NULL && t->note_claim == 0, "a test thread holds no claim");
+    TEST_ASSERT(t != NULL && !t->note_call_unwound, "a test thread's call has no mark");
     wb_wire_reset();
     g_twrite_pat_on = true;
     TEST_EXPECT_EQ((u64)dev9p.write(f, chunk, 256, 0), 256ull, "stage");
     g_twrite_fail_ecode = P9_E_INTR;
-    t->note_claim = 1;                  // the claim an unwind would hold
+    t->note_call_unwound = true;        // what an unwind leaves, claim or no claim
     long fe0    = dev9p.fsync(f, 0);
-    t->note_claim = 0;                  // what the EL0-return tail releases
+    t->note_call_unwound = false;       // what the EL0-return tail clears
     u32  seen0  = g_twrite_seen;
     long fe1    = dev9p.fsync(f, 0);
     u32  seen1  = g_twrite_seen;
@@ -4381,10 +4401,12 @@ void test_dev9p_wb_interrupted_flush_keeps_run(void) {
 }
 
 // A server that answers a flush's Twrite with Rlerror(EINTR) has failed the
-// write: with no note claim the EINTR is the server's, not a cancellation, so
-// it latches and drops the run like ENOSPC, and the last close reports it
-// rather than handing the run to a closer and returning 0.
-void test_dev9p_wb_server_eintr_latches(void) {
+// write: with no mark the EINTR is the server's, not a cancellation, so it
+// latches and drops the run like ENOSPC, and the last close reports it rather
+// than handing the run to a closer and returning 0. A claim changes nothing: it
+// is what a thread holds when that answer beats its flush, and client_run has
+// taken the mark back by then.
+static void wb_server_eintr_leg(u32 claim) {
     struct Spoor *root = NULL;
     struct Spoor *f = wb_make_created(&root);
     TEST_ASSERT(f != NULL, "create");
@@ -4392,11 +4414,13 @@ void test_dev9p_wb_server_eintr_latches(void) {
     TEST_ASSERT(chunk != NULL, "scratch");
     for (u32 i = 0; i < 256; i++) chunk[i] = wb_pat(i);
     struct Thread *t = current_thread();
-    TEST_ASSERT(t != NULL && t->note_claim == 0, "no note claim");
+    TEST_ASSERT(t != NULL && !t->note_call_unwound, "no mark");
     wb_wire_reset();
     TEST_EXPECT_EQ((u64)dev9p.write(f, chunk, 256, 0), 256ull, "stage");
     g_twrite_fail_ecode = P9_E_INTR;
+    t->note_claim = (u16)claim;
     long fe0  = dev9p.fsync(f, 0);
+    t->note_claim = 0;
     long fe1  = dev9p.fsync(f, 0);
     u32  seen = g_twrite_seen;
     int  crc  = d9_close(f);
@@ -4408,6 +4432,11 @@ void test_dev9p_wb_server_eintr_latches(void) {
     TEST_EXPECT_EQ((u64)seen, 1ull, "nothing was resent");
     TEST_EXPECT_EQ((u64)seen_close, 1ull, "the close sends nothing: the run was dropped");
     TEST_EXPECT_EQ((u64)(s64)crc, (u64)(s64)-P9_E_INTR, "and the last close reports it");
+}
+
+void test_dev9p_wb_server_eintr_latches(void) {
+    wb_server_eintr_leg(0u);
+    wb_server_eintr_leg(1u);
 }
 
 // A non-append write (the Go buildid interior pwrite) flushes the staged run
@@ -5695,6 +5724,65 @@ void test_dev9p_lock_wire_and_status(void) {
         test_fail("open fileA");
     }
     teardown(root);
+}
+
+// A set-lock lands the staged run first. A caught note that cancelled that flush
+// cancelled the call: EINTR, no Tlock, and the run still staged with nothing
+// latched, so an fsync resends it. One variable away each: the same EINTR with no
+// mark is the server failing the write, which latches and drops the run, and the
+// lock goes ahead; the mark with nothing staged sends no Twrite, and the lock goes
+// ahead.
+static void lk_cancelled_flush_leg(bool mark, bool staged, long *rc, u32 *twrites,
+                                   u32 *tlocks, long *retry_rc, u32 *retry_twrites) {
+    struct Spoor *root = NULL;
+    struct Spoor *f = wb_make_created(&root);
+    *rc = 1; *twrites = 0xffffffffu; *tlocks = 0xffffffffu;
+    *retry_rc = 1; *retry_twrites = 0xffffffffu;
+    u8 *chunk = wb_scratch();
+    if (!f || !chunk) { if (f) (void)d9_close(f); if (root) wb_test_end(root); return; }
+    for (u32 i = 0; i < 256; i++) chunk[i] = wb_pat(i);
+    struct Thread *t = current_thread();
+    wb_wire_reset();
+    lock_wire_reset();
+    if (staged) (void)dev9p.write(f, chunk, 256, 0);
+    g_twrite_fail_ecode = P9_E_INTR;
+    t->note_call_unwound = mark;
+    *rc = (long)dev9p.lock(f, SYS_FILE_LOCK_WR, 0, 0, NULL);
+    t->note_call_unwound = false;
+    g_twrite_fail_ecode = 0;
+    *twrites = g_twrite_seen;
+    *tlocks  = g_tlock_seen;
+    *retry_rc = (long)dev9p.fsync(f, 0);
+    *retry_twrites = g_twrite_seen - *twrites;
+    if (*rc == 0) (void)dev9p.lock(f, SYS_FILE_LOCK_UN, 0, 0, NULL);
+    lock_wire_reset();
+    (void)d9_close(f);
+    wb_test_end(root);
+}
+
+void test_dev9p_lock_cancelled_flush_says_eintr(void) {
+    struct Thread *t = current_thread();
+    TEST_ASSERT(t != NULL && !t->note_call_unwound, "a test thread's call has no mark");
+    long rc0, rc1, rc2, f0, f1, f2;
+    u32 w0, l0, w1, l1, w2, l2, fw0, fw1, fw2;
+    lk_cancelled_flush_leg(true, true, &rc0, &w0, &l0, &f0, &fw0);
+    lk_cancelled_flush_leg(false, true, &rc1, &w1, &l1, &f1, &fw1);
+    lk_cancelled_flush_leg(true, false, &rc2, &w2, &l2, &f2, &fw2);
+    TEST_EXPECT_EQ((s64)rc0, -(s64)T_E_INTR, "a set-lock whose flush a note cancelled is EINTR");
+    TEST_EXPECT_EQ(w0, 1u, "its Twrite went out and was cancelled");
+    TEST_EXPECT_EQ(l0, 0u, "and no Tlock followed");
+    TEST_EXPECT_EQ((s64)f0, 0ll, "the run stayed staged and nothing latched: an fsync succeeds");
+    TEST_EXPECT_EQ(fw0, 1u, "and resends it");
+    TEST_EXPECT_EQ((s64)rc1, 0ll, "CONTROL: the server's own EINTR is no cancellation");
+    TEST_EXPECT_EQ(w1, 1u, "CONTROL: the Twrite went out");
+    TEST_EXPECT_EQ(l1, 1u, "CONTROL: and the lock went ahead");
+    TEST_EXPECT_EQ((s64)f1, -(s64)T_E_INTR, "CONTROL: the server's EINTR latched: the fsync reports it");
+    TEST_EXPECT_EQ(fw1, 0u, "CONTROL: and the run was dropped: nothing resent");
+    TEST_EXPECT_EQ((s64)rc2, 0ll, "CONTROL: with nothing staged the mark alone refuses nothing");
+    TEST_EXPECT_EQ(w2, 0u, "CONTROL: no Twrite");
+    TEST_EXPECT_EQ(l2, 1u, "CONTROL: one Tlock");
+    TEST_EXPECT_EQ((s64)f2, 0ll, "CONTROL: nothing staged: the fsync has nothing to report");
+    TEST_EXPECT_EQ(fw2, 0u, "CONTROL: nor to send");
 }
 
 // A server keying owners by proc_id and client_id sees one owner on a fid: every
@@ -7002,3 +7090,103 @@ void test_dev9p_cached_open_loom(void) {
     __atomic_store_n(&g_client.cacheable, false, __ATOMIC_RELAXED);
     teardown(root);
 }
+
+// ER-2: what the server said about a walk reaches the caller, by value. Both wire ops.
+void test_dev9p_walk_reports_the_reason(void) {
+    static const struct { u32 ecode; int want; const char *what; } cases[] = {
+        { 5,    T_E_IO,    "Rlerror(EIO) reads EIO" },
+        { 2,    T_E_NOENT, "Rlerror(ENOENT) is a miss" },
+        { 116,  116,       "Rlerror(ESTALE) crosses, by value" },
+        { 13,   T_E_ACCES, "Rlerror(EACCES) crosses" },
+        { 1,    T_E_IO,    "Rlerror(EPERM) is -1 here, which never reads as errno 1" },
+        { 5000, T_E_IO,    "an ecode out of range reads EIO" },
+    };
+    const char  *name = "etc";
+    const char  *names[1] = { "etc" };
+    const size_t lens[1]  = { 3 };
+    for (unsigned i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        struct Spoor *root = make_open_client_and_root();
+        TEST_ASSERT(root != NULL, "client + root");
+
+        struct Spoor *nc = spoor_clone(root);
+        TEST_ASSERT(nc != NULL, "clone");
+        g_walk_lerror_ecode = cases[i].ecode;
+        int why = -1;
+        struct Walkqid *w = dev_walk(root, nc, &name, 1, &why);
+        bool walk_failed = w == NULL;
+        if (w) { walkqid_free(w); spoor_clunk(nc); } else { nc->aux = NULL; spoor_unref(nc); }
+
+        struct Spoor *nf = spoor_clone(root);
+        TEST_ASSERT(nf != NULL, "clone");
+        struct t_stat sts[1];
+        g_wga_lerror_ecode = cases[i].ecode;
+        int fwhy = -1;
+        struct Walkqid *fw = dev_walk_attrs(root, nf, names, lens, 1, sts, &fwhy);
+        bool fused_failed = fw == NULL;
+        if (fw) { walkqid_free(fw); spoor_clunk(nf); } else { nf->aux = NULL; spoor_unref(nf); }
+
+        struct Spoor *ok = spoor_clone(root);
+        TEST_ASSERT(ok != NULL, "clone");
+        int owhy = -1;
+        struct Walkqid *owalk = dev_walk(root, ok, &name, 1, &owhy);
+        bool control = owalk != NULL;
+        if (owalk) { walkqid_free(owalk); spoor_clunk(ok); }
+        else       { ok->aux = NULL; spoor_unref(ok); }
+        teardown(root);
+
+        TEST_ASSERT(walk_failed, cases[i].what);
+        TEST_EXPECT_EQ(why, cases[i].want, cases[i].what);
+        TEST_ASSERT(fused_failed, cases[i].what);
+        TEST_EXPECT_EQ(fwhy, cases[i].want, cases[i].what);
+        TEST_ASSERT(control, "control: the next walk goes through");
+        TEST_EXPECT_EQ(owhy, 0, "control: and has no reason");
+    }
+}
+
+// A server's ENOSYS to the base op is no missing translator. The fused op's ENOSYS is
+// its latch, so only the plain walk meets this.
+void test_dev9p_walk_enosys_reads_eio(void) {
+    static const u32 ecodes[] = { 38, 95 };
+    const char *name = "etc";
+    for (unsigned i = 0; i < sizeof ecodes / sizeof ecodes[0]; i++) {
+        struct Spoor *root = make_open_client_and_root();
+        TEST_ASSERT(root != NULL, "client + root");
+        struct Spoor *nc = spoor_clone(root);
+        TEST_ASSERT(nc != NULL, "clone");
+        g_walk_lerror_ecode = ecodes[i];
+        int why = -1;
+        struct Walkqid *w = dev_walk(root, nc, &name, 1, &why);
+        bool failed = w == NULL;
+        if (w) { walkqid_free(w); spoor_clunk(nc); } else { nc->aux = NULL; spoor_unref(nc); }
+        // The clone walk, nname 0, has its own arm.
+        struct Spoor *nc0 = spoor_clone(root);
+        if (!nc0) { teardown(root); TEST_ASSERT(false, "clone"); }
+        g_walk_lerror_ecode = ecodes[i];
+        int why0 = -1;
+        struct Walkqid *w0 = dev_walk(root, nc0, NULL, 0, &why0);
+        bool failed0 = w0 == NULL;
+        if (w0) { walkqid_free(w0); spoor_clunk(nc0); } else { nc0->aux = NULL; spoor_unref(nc0); }
+        teardown(root);
+        TEST_ASSERT(failed, "the walk failed");
+        TEST_EXPECT_EQ(why, T_E_IO, "the server is broken: EIO");
+        TEST_ASSERT(failed0, "the clone walk failed");
+        TEST_EXPECT_EQ(why0, T_E_IO, "and it says EIO too");
+    }
+}
+
+// SYS_WALK_CREATE's clone walk: a leaf Dev's NULL stays EIO, a server's reason crosses.
+void test_dev9p_walk_create_clone_keeps_the_reason(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "client + root");
+    hidx_t base = 0;
+    struct Proc *p = oc9_proc(root, &base);
+    if (!p) { teardown(root); TEST_ASSERT(false, "the fixture's Proc"); }
+    g_walk_lerror_ecode = 28;
+    s64 r = sys_walk_create_kname_for_proc(p, (u64)base, "capefile", 8, 1 /*OWRITE*/, 0644);
+    g_walk_lerror_ecode = 0;
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+    teardown(root);
+    TEST_EXPECT_EQ(r, (s64)-28, "the clone walk's ENOSPC is what create reports");
+}
+

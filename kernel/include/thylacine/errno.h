@@ -128,6 +128,15 @@
 // accidental. POSIX: E2BIG.
 #define T_E_2BIG       7
 
+// Not a runnable image: the file resolved and may be executed, and it is not
+// something this kernel can load. POSIX ENOEXEC. A shell reads it as "run this as
+// a script", so it is never the answer for a read that failed.
+#define T_E_NOEXEC     8
+
+// A good program whose interpreter is no image. POSIX has no name for it; the value is
+// Linux's ELIBBAD. A shell runs ENOEXEC as a script, and this program is not one.
+#define T_E_LIBBAD     80
+
 // No such device -- the BACKING SERVICE/DEVICE ENDPOINT disappeared. The
 // Loom device-gone terminal CQE (MENAGERIE.md section 10, the
 // "T_E_DEVGONE" class): when an in-flight Loom op's 9P session dies
@@ -400,6 +409,8 @@ _Static_assert(T_E_NOLCK          == 37,  "T_E_NOLCK ABI pin (POSIX ENOLCK)");
 _Static_assert(T_E_STALE          == 116, "T_E_STALE ABI pin (POSIX ESTALE)");
 _Static_assert(T_E_IO        == 5,   "T_E_IO ABI pin (POSIX EIO)");
 _Static_assert(T_E_2BIG      == 7,   "T_E_2BIG ABI pin (POSIX E2BIG)");
+_Static_assert(T_E_NOEXEC    == 8,   "T_E_NOEXEC ABI pin (POSIX ENOEXEC)");
+_Static_assert(T_E_LIBBAD    == 80,  "T_E_LIBBAD ABI pin (Linux ELIBBAD)");
 _Static_assert(T_E_NODEV     == 19,  "T_E_NODEV ABI pin (POSIX ENODEV)");
 _Static_assert(T_E_BADF      == 9,   "T_E_BADF ABI pin (POSIX EBADF)");
 _Static_assert(T_E_CHILD     == 10,  "T_E_CHILD ABI pin (POSIX ECHILD)");

@@ -58,7 +58,7 @@ static int file_lock_acquire_sync(struct Proc *p, struct Spoor *c,
     }
     int rc = d->lock_sync(c, DEV_LOCK_SYNC_ACQUIRE);
     if (rc != 0) return rc;
-    return handle_lock_sync_file(p, owner, DEV_LOCK_SYNC_ACQUIRE);
+    return handle_lock_sync_file(p, owner, DEV_LOCK_SYNC_ACQUIRE, /*stop_cancelled=*/false);
 }
 
 // One attempt, as the owner the op names. Never waits.
@@ -69,9 +69,14 @@ static int file_lock_once(struct Proc *p, struct Spoor *c, u32 type,
     if (!proc_owner) {
         // A set-lock gives up what it replaces, and every open's staged writes
         // land first, as Linux's NFS client syncs the whole mapping. c's own land
-        // in its lock call: its descriptor may have left the table.
-        if (!test)
-            (void)handle_lock_sync_file(p, c, DEV_LOCK_SYNC_RELEASE);
+        // in its lock call: its descriptor may have left the table. A flush a
+        // caught note cancelled cancels a take, as in that lock call; an unlock,
+        // the re-check's among them, goes ahead. Any other failure is latched for
+        // its open to report.
+        if (!test) {
+            int rr = handle_lock_sync_file(p, c, DEV_LOCK_SYNC_RELEASE, take);
+            if (rr != 0) return rr;
+        }
         if (take) {
             int sr = file_lock_acquire_sync(p, c, c);
             if (sr != 0) return sr;
@@ -97,9 +102,15 @@ static int file_lock_once(struct Proc *p, struct Spoor *c, u32 type,
             return rc;
         }
         // A set-lock gives up what it replaces: an unlock its range, a
-        // conversion its old type. Every open's staged writes land first.
-        if (!test)
-            (void)handle_lock_sync_file(p, owner, DEV_LOCK_SYNC_RELEASE);
+        // conversion its old type. Every open's staged writes land first, and
+        // a flush a caught note cancelled cancels a take.
+        if (!test) {
+            int rr = handle_lock_sync_file(p, owner, DEV_LOCK_SYNC_RELEASE, take);
+            if (rr != 0) {
+                handle_lock_owner_put(p, owner, false);
+                return rr;
+            }
+        }
         if (take) {
             int sr = file_lock_acquire_sync(p, c, owner);
             if (sr != 0) {
@@ -180,10 +191,9 @@ s64 sys_file_lock_handler(u64 fd_raw, u64 op, u64 start, u64 len, u64 out_va) {
         return -(s64)T_E_NOLCK;
     }
 
-    // ARCH 8.8.3: F_SETLKW is on signal(7)'s list, so the WAIT of a lock to
-    // take is interruptible (syscall_dispatch clears the flag on the way out).
-    // An unlock and a test never wait, and stay uninterruptible.
-    if (wait && type != SYS_FILE_LOCK_UN) t->note_interruptible = true;
+    // ARCH 8.8.3: F_SETLKW is on signal(7)'s list. native_note_class makes the
+    // WAIT of a lock to take interruptible and restartable, for a Proc whose table
+    // can catch a note; an unlock and a test never wait.
 
     struct t_file_lock ans = { 0 };
     u64 backoff = FILE_LOCK_BACKOFF_MIN_NS;
@@ -196,6 +206,15 @@ s64 sys_file_lock_handler(u64 fd_raw, u64 op, u64 start, u64 len, u64 out_va) {
         if (rc != 0) break;
         if (backoff < FILE_LOCK_BACKOFF_MAX_NS) backoff *= 2;
     }
+
+    // The take has its answer, and what follows is a close's work: the unlock a
+    // descriptor closed mid-call left owed, and the twin's last close. A close is
+    // never interruptible (SYS_CLOSE is unclassed). Here a claim this call still
+    // holds would unwind each wait at once, and the Tflush after it can cancel
+    // the unlock on the server, leaving the lock held for the Proc's life while
+    // the caller reads EBADF. Killable only from here; the mark stays as the loop
+    // left it, for the restart.
+    t->note_interruptible = false;
 
     if (rc == 0 && proc_owner && !test && type != SYS_FILE_LOCK_UN &&
         !file_lock_fd_names(p, fd, c)) {

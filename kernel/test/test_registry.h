@@ -62,9 +62,13 @@ void test_alternatives_atomics_correct(void);
 void test_context_create_destroy(void);
 void test_context_round_trip(void);
 void test_context_switch_irq_safe(void);
+void test_context_switch_cost(void);
 void test_fp_cpacr_enabled(void);
 void test_fp_round_trip_v_regs_fpsr_fpcr(void);
 void test_fp_note_area_round_trip(void);
+void test_fp_kernel_thread_holds_no_v(void);
+void test_fp_user_v_survives_a_kernel_thread(void);
+void test_context_ttbr0_follows_next(void);
 void test_sched_dispatch_smoke(void);
 void test_sched_runnable_count(void);
 void test_sched_run_counts_match_trees(void);
@@ -112,6 +116,11 @@ void test_rendez_caught_wake_tty_cont(void);
 void test_rendez_caught_wake_orphan_hup_cont(void);
 void test_rendez_caught_note_one_unwind(void);
 void test_rendez_caught_note_tail_discards_and_releases(void);
+void test_rendez_restart_undone_on_refused_frame(void);
+void test_rendez_tail_discards_dead_note(void);
+void test_rendez_native_tail_past_sak(void);
+void test_rendez_tail_settles_an_unwound_call(void);
+void test_rendez_reread_wakes_a_sleeper(void);
 void test_rendez_tail_parks_for_the_stop_it_applies(void);
 void test_rendez_caught_note_release_wakes_peer(void);
 void test_rendez_caught_note_prefers_awake(void);
@@ -138,6 +147,10 @@ void test_tsleep_woken_before_deadline(void);
 void test_tsleep_timeout_via_tick(void);
 void test_tsleep_herd_timeout(void);
 void test_timerwait_earliest_deadline(void);
+void test_timerbase_sorted_and_fifo(void);
+void test_timerbase_wake_takes_no_timer_lock(void);
+void test_timerbase_stale_entry_fires_no_wake(void);
+void test_timerbase_secondary_links_on_cpu0(void);
 void test_tickless_target_cnt(void);
 void test_smp_bringup_smoke(void);
 void test_smp_exception_stack_smoke(void);
@@ -228,6 +241,8 @@ void test_proc_job_stop_owner_algebra(void);
 void test_proc_job_stop_park_report_cont_live(void);
 void test_proc_job_stop_recycle(void);
 void test_proc_job_stop_preserves_torpor_wait(void);
+void test_proc_group_death_wakes_a_torpor_waiter(void);
+void test_proc_group_death_before_a_torpor_wait(void);
 void test_proc_job_stop_orphan_rule(void);
 void test_proc_dying_takes_no_stop(void);
 void test_proc_exec_reset_dispositions(void);      // #243 (main)
@@ -423,6 +438,7 @@ void test_demand_page_file_geometry_shift_bails_single(void);
 void test_demand_page_file_read_error_snare_bus(void);
 void test_demand_page_file_read_error_dying_is_death(void);
 void test_demand_page_file_miss_refuses_exiting_thread(void);
+void test_demand_page_file_miss_under_a_lock_refuses(void);
 void test_demand_page_file_read_revoked_latch_is_dying(void);
 void test_demand_page_file_multi_page(void);
 void test_demand_page_file_short_read_fills_page(void);
@@ -468,6 +484,13 @@ void test_execve_load_into_rejects_dirty(void);
 void test_execve_load_refuses_nomem_at_the_pool_edge(void);
 void test_execve_load_refuses_nomem_on_the_frame(void);
 void test_execve_failed_load_leaves_target_drainable(void);
+void test_execve_load_says_a_file_is_no_image(void);
+void test_execve_load_keeps_a_read_failure(void);
+void test_execve_image_check_answers_for_the_parent(void);
+void test_execve_interpreter_says_why(void);
+void test_execve_load_says_nomem_on_a_refused_vma(void);
+void test_execve_policy_refusal_says_eacces(void);
+void test_exec_setup_says_nomem_on_a_refused_vma(void);
 void test_exec_native_rejects_dynamic_linux(void);
 void test_exec_load_failure_leaves_phenotype(void);    // Design D Leg B
 void test_exec_reset_follows_decided_phenotype(void);  // Design D Leg A (+ audit F1 leg)
@@ -649,6 +672,12 @@ void test_torpor_wait_timeout_zero_returns_etimedout(void);
 void test_torpor_wait_wake_handoff(void);
 void test_torpor_wake_two_waiters_count_bound(void);
 void test_torpor_caught_note_ends_wait(void);
+void test_torpor_wake_takes_the_oldest(void);
+void test_torpor_key_is_the_address_space(void);
+void test_torpor_wake_counts_only_a_sleeper(void);
+void test_torpor_record_outlives_the_wake(void);
+void test_torpor_mark_takes_the_rendez_lock(void);
+void test_torpor_word_replaced_under_the_wait(void);
 void test_loom_create_geometry(void);
 void test_loom_private_owner_lifecycle(void);
 void test_loom_service_slots(void);
@@ -745,12 +774,17 @@ void test_proc_cap_counts_live_threads(void);
 void test_proc_exit_tail_runs_to_its_end(void);
 void test_proc_exec_waits_for_exiting_peer(void);
 void test_proc_exec_waits_for_exiting_peer_on_another_cpu(void);
-void test_thread_kstack_cache_reuses_without_guard_toggle(void);
+void test_thread_kstack_cache_reuses_without_a_remap(void);
 void test_thread_kstack_cache_keeps_the_guard(void);
 void test_thread_kstack_recycled_stack_is_fully_poisoned(void);
 void test_thread_kstack_cache_is_bounded(void);
-void test_directmap_tlbi_operand_masks_the_ttl_hint(void);
-void test_directmap_guard_toggle_invalidates_a_warm_entry(void);
+void test_thread_kstack_tlbi_operand_masks_the_ttl_hint(void);
+void test_thread_kstack_lives_in_its_range(void);
+void test_thread_kstack_costs_its_four_pages(void);
+void test_thread_kstack_release_invalidates_a_warm_entry(void);
+void test_thread_kstack_tables_grow_and_stay(void);
+void test_thread_kstack_refused_step_leaks_nothing(void);
+void test_thread_kstack_dump_stops_at_the_top(void);
 void test_thread_kstack_create_free_cost(void);
 void test_proc_spawn_refused_in_dying_proc(void);
 void test_thread_tid_and_pid_spaces_refuse_when_spent(void);
@@ -801,6 +835,38 @@ void test_notes_stop_dequeue_picks_its_own_note(void);  // the class-blind pop
 void test_notes_class_scans_read_phenotype_sigtab(void); // c8ab2744 F1
 void test_notes_discard_name_purges_pending(void);      // the install-time SIG_IGN discard
 void test_notes_phenotype_sigreturn_restores_mask(void); // the mask half of sigreturn
+void test_notewait_take_names_its_rows(void); // a tty row, a family, and order
+void test_notewait_take_word(void); // what a take word may name
+void test_notewait_take_drains_and_untake_rearms(void); // N-2 across a taker's fault
+void test_notewait_take_own_word_first(void); // a thread's own note first
+void test_notewait_take_leaves_a_kill(void); // a kill is the tail's
+void test_notewait_suspend_frame_fails_mask_back(void); // the wait's mask, and the tail's restore
+void test_notewait_suspend_note_gone_reissues(void); // no handler ran: re-issued
+void test_notewait_suspend_held_note_ends_it(void); // the race sigsuspend closes
+void test_notewait_suspend_tail_note_goes_to_the_tail(void); // a note only the tail acts on
+void test_notewait_suspend_refused(void); // no table, nothing to end it
+void test_notewait_suspend_handler_installed_late(void); // no handler when the wait began
+void test_notewait_suspend_bad_sp_keeps_eintr(void); // the tail refuses it: no re-issue
+void test_notewait_suspend_in_a_handler(void); // no nesting: the wait ends, the note waits
+void test_notewait_take_sleeps_until_posted(void); // the queue's hook wakes a masked taker
+void test_notewait_take_wakes_for_its_word(void); // so does a note at the thread
+void test_notewait_take_times_out(void); // EAGAIN at the deadline
+void test_notewait_take_unwinds_for_another_note(void); // a handler owed ends the wait
+void test_notewait_take_before_unwinding(void); // taken, not interrupted
+void test_notewait_handler_mask_enter_and_restore(void); // one way in, one way out
+void test_notewait_dispose_row_carries_mask(void); // the flags word's row
+void test_notewait_poll_ready_keeps_the_note(void); // a ready fd answers first
+void test_notewait_poll_deadline_restores(void); // the mask is back at 0
+void test_notewait_poll_death_wake_keeps_the_mask(void);
+void test_notewait_mask_end_reads_the_answer(void);
+void test_notewait_poll_no_table_has_no_tail_note(void);
+void test_notewait_poll_note_ends_the_wait(void); // the call's mask until the tail
+void test_notewait_poll_tail_note_goes_to_the_tail(void); // no time lost
+void test_notewait_poll_in_a_handler(void); // the masks stay
+void test_notewait_pending_reads_what_is_held(void); // sigpending's word
+void test_notewait_pending_sigset_names_the_row(void); // the word as a sigset
+void test_notewait_syscall_refusals(void); // the call's edges
+void test_vivarium_timespec_to_ns(void); // rt_sigtimedwait's timeout
 void test_notes_self_managing_flag(void);
 void test_notes_intr_latch_lifecycle(void);
 void test_notes_fault_dying_latch_live_note_exits(void);
@@ -833,10 +899,18 @@ void test_notes_caught_note_claim_once(void);
 void test_notes_handler_escape_predicate(void);
 void test_notes_caught_note_stop_dequeue_drains(void);
 void test_notes_fstat_reports_chr(void);
+void test_notes_table_refusals(void);
+void test_notes_table_rows_govern(void);
+void test_notes_table_token_needs_a_taker(void);
+void test_notes_table_reread(void);
+void test_notes_table_exec(void);
+void test_notes_restart_settle(void);
+void test_notes_unwind_sets_the_mark(void);
+void test_notes_native_class(void);
 void test_directmap_kva_round_trip(void);
 void test_directmap_alloc_through_directmap(void);
 void test_directmap_vmalloc_mmio_smoke(void);
-void test_directmap_pagemapped_808(void);
+void test_directmap_stays_in_blocks(void);
 void test_elf_parse_minimal_ok(void);
 void test_elf_parse_multi_segment_ok(void);
 void test_elf_header_rejection(void);
@@ -1115,6 +1189,7 @@ void test_vivarium_getdents64_guards_uaccess(void);
 void test_vivarium_readv_writev_guard_iovec_array(void);
 void test_vivarium_intr_class(void);
 void test_vivarium_fd_is_slow_cached(void);
+void test_vivarium_call_restartable(void);
 void test_vivarium_ioctl_termios_map(void);
 void test_vivarium_ioctl_grammar_roundtrip(void);
 void test_vivarium_ioctl_dispatch_ebadf(void);
@@ -1413,6 +1488,14 @@ void test_stalk_open_create_open_if_present(void);
 void test_stalk_open_create_mkdir_and_nest(void);
 void test_stalk_open_create_leaf_rows(void);
 void test_stalk_open_create_containment_and_denials(void);
+void test_stalk_open_is_the_only_interruptible_step(void);
+void test_stalk_walk_failure_keeps_its_errno(void);
+void test_stalk_create_refuses_on_a_failed_walk(void);
+void test_stalk_union_walk_failure(void);
+void test_stalk_walk_failure_on_the_rewalk(void);
+void test_stalk_spawn_reports_the_walk_reason(void);
+void test_stalk_fused_failure_keeps_the_x_gate(void);
+void test_dev9p_walk_enosys_reads_eio(void);
 void test_devsrv_registered(void);
 void test_devsrv_open_root_dir(void);
 void test_devsrv_stat_native_root(void);
@@ -1761,6 +1844,8 @@ void test_9p_client_clunk_rlerror_drains_as_clunk(void);
 void test_9p_client_clunk_malformed_reply_fails_closed(void);
 void test_9p_client_abandoned_walk_malformed_late_reply_fails_closed(void);
 void test_9p_client_flush_malformed_reply_fails_closed(void);
+void test_9p_client_note_flush_direct_note_marks(void);
+void test_9p_client_note_flush_server_eintr_stands(void);
 void test_9p_client_note_flush_honours_late_read(void);
 void test_9p_client_note_flush_rflush_first_cancels(void);
 void test_9p_client_note_flush_death_abandons(void);
@@ -1882,6 +1967,8 @@ void test_dev9p_remote_format_ns(void);
 void test_dev9p_origin_format_ns(void);
 void test_dev9p_walk_attrs(void);
 void test_dev9p_wga_unsupported_latches_by_errno(void);
+void test_dev9p_walk_reports_the_reason(void);
+void test_dev9p_walk_create_clone_keeps_the_reason(void);
 void test_dev9p_page_cache_serve_and_gate(void);
 void test_dev9p_read_align_heals_partial(void);
 void test_dev9p_read_align_short_not_eof(void);
@@ -2049,6 +2136,7 @@ void test_poll_caught_note_ends_a_noise_driven_poll(void);
 void test_poll_caught_note_ends_pause(void);
 void test_poll_stop_parks_a_noise_driven_poll(void);
 void test_thread_kstack_watermark_follows_the_frontier(void);
+void test_thread_kstack_fault_off_the_range_is_no_overflow(void);
 void test_poll_noise_keeps_it_looping(void);
 void test_poll_noise_keeps_the_deadline(void);
 void test_poll_null_obj_spoor_pollnval(void);
@@ -2262,6 +2350,7 @@ void test_filelock_fork_exec_dup_teardown(void);
 void test_filelock_stale_entry_retired(void);
 void test_filelock_reused_number(void);
 void test_filelock_acquire_syncs(void);
+void test_filelock_cancelled_flush_ends_call(void);
 void test_filelock_last_descriptor_closes(void);
 void test_filelock_endowment_is_a_descriptor(void);
 void test_pagemap_grow_keeps_every_page(void);
@@ -2323,6 +2412,7 @@ void test_dev9p_create_mode_on_the_wire(void);
 void test_dev9p_create_group_from_parent(void);
 void test_dev9p_client_init_clears_ends(void);
 void test_dev9p_lock_wire_and_status(void);
+void test_dev9p_lock_cancelled_flush_says_eintr(void);
 void test_dev9p_lock_one_name_on_a_fid(void);
 void test_dev9p_lock_caped_names_nothing(void);
 void test_dev9p_lock_grant_drops_larder(void);

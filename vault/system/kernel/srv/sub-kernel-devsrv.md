@@ -198,7 +198,8 @@ accept. Gates: a KObj_Srv handle with `RIGHT_READ` whose obj magic is
 released immediately — the registry entry is registry-owned and outlives
 the handle), PLUS the stripes match `svc->poster_stripes == proc_stripes(p)`
 (rejects a stale handle into a tombstoned-and-rebound service). Blocks
-in `srv_accept_blocking`; wraps the dequeued SrvConn in a pre-opened
+in `srv_accept_interruptible`, which a caught note ends with nothing taken (item 11c;
+`srv_accept_blocking` is the same wait with no such end); wraps the dequeued SrvConn in a pre-opened
 server-endpoint conn Spoor (`devsrv_make_conn_spoor`) installed as a
 KOBJ_SPOOR handle; on any endpoint-build failure the connection is torn
 down so the client wakes with EOF rather than waiting on a server it

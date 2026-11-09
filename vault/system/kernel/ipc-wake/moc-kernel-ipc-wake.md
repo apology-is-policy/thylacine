@@ -38,7 +38,7 @@ The area's shared grammar is [[inv-i9]] instantiated three ways: the
 window between observing "not ready" and parking must be closed by
 registering FIRST, under the same serialization the producer's wake
 takes. poll closes it under each object's lock, pipe under the ring
-lock, torpor under `torpor_lock` — and each then delegates the
+lock, torpor under a bucket's lock — and each then delegates the
 park itself to the scheduler's modelled machinery
 ([[spec-scheduler]], [[spec-tsleep]]).
 

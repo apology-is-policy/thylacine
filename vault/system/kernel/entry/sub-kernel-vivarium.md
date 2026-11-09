@@ -10,20 +10,25 @@ validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/VIVARIUM.md", "docs/LINEAGE.md"]
 created: 2026-08-06
-updated: 2026-11-03
+updated: 2026-11-04
 ---
-## Native ceiling 140
+## Native ceiling 141
 
-The native ceiling is SYS_ACCOUNT, at 140 under votes 47 and 48
-(2026-11-03). It rose over rt_sigreturn and setpriority, each argued per number in
-vivarium.c. setpriority has no row, so a Linux Proc takes ENOSYS before the native switch,
-reaches no account operation and is charged without one, and a native program mis-declared
-as Linux loses the call, which confers nothing. rt_sigreturn meets no native number on this
-tree. The ceiling argument now starts at setgid (144).
+The native ceiling is SYS_NOTE_WAIT, at 141 since vote 24 (2026-11-03); Linux's 141 is
+getpriority, which has no row. SYS_NOTE_DISPOSE takes 139 (vote 18, 2026-11-03), Linux
+rt_sigreturn's number, which viv_linux_dispatch intercepts before the table.
+
+SYS_ACCOUNT holds 140 under votes 47 and 48 (2026-11-03). It raised the ceiling over
+rt_sigreturn and setpriority, each argued per number in vivarium.c. setpriority has no row,
+so a Linux Proc takes ENOSYS before the native switch, reaches no account operation and is
+charged without one, and a native program mis-declared as Linux loses the call, which
+confers nothing. The ceiling argument now starts at setgid (144).
 
 POSTNOTE_TID held it at 138 from vote 14 (2026-11-02). The rows that
 raise newly covers are argued per number in vivarium.c: rt_sigprocmask and rt_sigpending
-meet READLINK and LSTAT (135, 136), rt_sigtimedwait meets FILE_LOCK (137), and rt_sigqueueinfo
+meet READLINK and LSTAT (135, 136), rt_sigtimedwait meets FILE_LOCK (137), each consumed by
+its own row before the native switch (rt_sigpending and rt_sigtimedwait are TIER2 rows since
+votes 24 and 28, as is rt_sigsuspend, which meets UMASK at 133), and rt_sigqueueinfo
 (138) collides with POSTNOTE_TID but is an ENOSYS row, so a Linux Proc never reaches
 the post, and a native program mis-declared as Linux reads ENOSYS and is exposed to
 nothing. SRV_REGISTRY_NEW held
@@ -43,7 +48,8 @@ tkill, tgkill, sigaltstack and rt_sigsuspend (129..133) meet main's handle,
 GETPPID and UMASK calls since the join (2026-11-03), each with its collision
 assert, and each is consumed
 before the native switch (the kill family is TIER2 through
-`vivarium_kill_decide`; the other two are ENOSYS rows), pinned by name in
+`vivarium_kill_decide`, rt_sigsuspend is TIER2 on SYS_NOTE_WAIT's core, and sigaltstack
+is an ENOSYS row), pinned by name in
 `vivarium.rejects_are_deliberate`. There is no Linux phenotype factory operation; the
 entry is native only and keeps the kernel role gate. See
 [[sub-kernel-syscall-abi]].
@@ -218,7 +224,7 @@ touches EL0.
 | `vivarium_{mmap_file,mmap_fixed_file,mmap_fixed_anon}_decide` | verdict | DISTRO D-3 file-backed mmap; PROT_WRITE **refused** to keep I-36; the fixed-anon arm admits PROT_NONE since B-1a; both fixed arms are confined to the burrow window since B-1a' (`fixed_addr_ok`) |
 | `vivarium_mprotect_decide` | verdict | B-1a: the prot word alone; `addr` / `len` are the shell's (a zero length succeeds, an unaligned address is EINVAL) |
 | `vivarium_madvise_decide` | verdict + kind | B-1b: the advice word alone -- RELEASE (`DONTNEED` / `FREE`) over the decommit core, HINT (twelve) answers 0 / ENOMEM and changes nothing, everything else declines; `addr` / `len` are the shell's |
-| `vivarium_{ppoll,pselect6}_decide` | verdict + params | the poll family; `exceptfds`/POLLPRI is the load-bearing decline (Error paths) |
+| `vivarium_{ppoll,pselect6}_decide` | verdict + params | the poll family; `exceptfds`/POLLPRI is the load-bearing decline (Error paths). A mask is served since vote 28: `ppoll`'s size is judged here beside a mask, `pselect6`'s pair in `viv_pselect6`, and the mask goes in right before the wait, with everything that could still refuse the call behind it. A note that interrupts a socket's readiness open fails the whole call with EINTR, as a shortage does, and does not pose as a broken fd ([[fnd-note-wait-r2-f2]]) |
 | `vivarium_clock_nanosleep_decide` | errno + clock + abstime | 6.29: EINVAL exactly where the gettime map refuses (derived), EOPNOTSUPP for MONOTONIC_RAW and both COARSE clocks; only `TIMER_ABSTIME` is read |
 | `vivarium_sleep_req_ns`, `vivarium_sleep_verdict` | bool / verdict | 6.29: the request's validity and saturation; at the deadline the clock beats every wait outcome |
 | `vivarium_clock_sleep` | 0 / `-EINTR` | 6.29: the one entry here that sleeps; a relative sleep counts on the monotonic clock, an absolute `CLOCK_REALTIME` one hooks the step list |
@@ -1093,9 +1099,9 @@ Each of those waits now opts in ([[sub-kernel-notes]] lists them) and returns
 `-EINTR` with nothing consumed; a pipe or console write that moved bytes returns
 its count. `viv_wait4` maps `WAIT_PID_NOTEINTR` before its `ECHILD` line
 ([[sub-kernel-syscall-dispatch]]); the futex's `TORPOR_ERR_EINTR` is already
-`-EINTR` numerically. The kernel restarts none of them: a guest that installed
-its handler with `SA_RESTART` sees `EINTR` where Linux would restart `wait4`, a
-pipe or a futex -- the DEGRADED row of 6.22.
+`-EINTR` numerically. Since item 11c (vote 19) the kernel restarts what signal(7)
+restarts under `SA_RESTART`: `vivarium_call_restartable` is the positive list, and the
+machinery is [[sub-kernel-notes]]'s. That closed the DEGRADED row of 6.22.
 
 Witnesses: viv-pheno-probe L311-L318, which run under the counting `SIGCHLD`
 handler L301-L310 installed (no `SA_RESTART`), block in each listed call -- a
@@ -1155,8 +1161,8 @@ derived monotonic deadline or a step (the condition is the hook's `ready`),
 unhooks, and asks the verdict on the wall clock; a step wakes it to derive
 again, so a step past the instant ends the sleep and a step back lengthens it.
 Both rows join `vivarium_intr_class`'s ALWAYS arm. signal(7) lists the sleep
-interfaces among the calls never restarted, so the missing kernel-side
-`SA_RESTART` (the DEGRADED row of 6.22) costs them nothing.
+interfaces among the calls never restarted, so `vivarium_call_restartable` leaves
+them out.
 
 Witnesses: `vivarium.nanosleep_domain` (the clock verdicts against the gettime
 map over 21 ids, the narrowing on both maps, the flag, the request's validity

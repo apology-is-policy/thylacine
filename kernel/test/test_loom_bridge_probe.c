@@ -16,6 +16,7 @@
 #include <thylacine/types.h>
 #include "../../arch/arm64/timer.h"
 #include "../../arch/arm64/uart.h"
+#include "../../mm/slub.h"
 
 #ifdef LOOM_PRIVATE_QUALIFICATION
 #define BRIDGE_PROBE_STATUS 71
@@ -26,7 +27,6 @@
 #endif
 
 #define BRIDGE_PROBE_BLOB_MAX 98304
-static _Alignas(16) u8 g_bridge_probe_blob[BRIDGE_PROBE_BLOB_MAX];
 
 struct bridge_probe_exec_args {
     const void *blob;
@@ -56,14 +56,20 @@ void test_loom_bridge_probe(void) {
     TEST_ASSERT(size <= BRIDGE_PROBE_BLOB_MAX, "loom-bridge-probe too large for its buffer");
     // cpio is 4-aligned; the ELF header cast needs 8.
     const u8 *src = (const u8 *)cpio_blob;
-    for (size_t i = 0; i < size; i++) g_bridge_probe_blob[i] = src[i];
+    // Not a static: the image's L3 window (kernel.ld). kmalloc's large path is
+    // page-aligned, which the ELF header cast needs.
+    u8 *blob = kmalloc(BRIDGE_PROBE_BLOB_MAX, 0);
+    TEST_ASSERT(blob != NULL, "kmalloc the loom-bridge-probe blob");
+    for (size_t i = 0; i < size; i++) blob[i] = src[i];
 
     u64 made0 = loom_private_created(), gone0 = loom_private_retired();
-    struct bridge_probe_exec_args args = { .blob = g_bridge_probe_blob, .size = size };
+    struct bridge_probe_exec_args args = { .blob = blob, .size = size };
     int pid = rfork(RFPROC, bridge_probe_exec_thunk, &args);
+    if (pid <= 0) kfree(blob);
     TEST_ASSERT(pid > 0, "rfork failed for /loom-bridge-probe");
     int status = -42;
     int reaped = wait_pid(&status);
+    if (reaped == pid) kfree(blob);   // the child's exec_setup read it before it ran
 
     // The retirer is its own thread. Both counts are monotonic and every created
     // ring is eventually retired, so wait until the probe's rings have all gone.

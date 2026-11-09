@@ -337,6 +337,9 @@ static inline long t_torpor_wake(unsigned int *addr_va, unsigned int count) {
 // children + a valid SYS_CHROOT target (a normally-opened handle is not: 9P
 // forbids Twalk from an opened fid). Access bits are ignored when set.
 #define T_OPATH    0x80u
+// A caught note may interrupt this open's wait for a peer (SYS_OPEN only; every
+// other open refuses it). Mirrors SYS_WALK_OPEN_OINTR.
+#define T_OINTR    0x2000u
 
 // Maximum single-component name length for t_walk_open (matches the
 // kernel cap; passing longer returns -1 from the syscall). 255 since the
@@ -2626,6 +2629,50 @@ static inline long t_postnote_tid(long tid, const char *name, unsigned long name
     register long x2 __asm__("x2") = (long)name_len;
     register long x8 __asm__("x8") = T_SYS_POSTNOTE_TID;
     __asm__ volatile ("svc #0" : "+r"(x0) : "r"(x1), "r"(x2), "r"(x8) : "memory", "cc");
+    return x0;
+}
+
+// Write the calling Proc's row for one note. The first call makes the table
+// govern the Proc until its next exec.
+#define T_SYS_NOTE_DISPOSE 139
+#define T_NOTE_DISP_DEFAULT 0ul
+#define T_NOTE_DISP_IGNORE  1ul
+#define T_NOTE_DISP_CAUGHT  2ul
+#define T_NOTE_DISP_RESTART 1ul
+#define T_NOTE_DISP_RESETHAND 2ul
+#define T_NOTE_DISP_NODEFER 4ul
+#define T_NOTE_DISP_MASK(m) ((unsigned long)(m) << 16)
+static inline long t_note_dispose(const char *name, unsigned long name_len,
+                                  unsigned long disposition, unsigned long flags) {
+    register long x0 __asm__("x0") = (long)name;
+    register long x1 __asm__("x1") = (long)name_len;
+    register long x2 __asm__("x2") = (long)disposition;
+    register long x3 __asm__("x3") = (long)flags;
+    register long x8 __asm__("x8") = T_SYS_NOTE_DISPOSE;
+    __asm__ volatile ("svc #0" : "+r"(x0) : "r"(x1), "r"(x2), "r"(x3), "r"(x8) : "memory", "cc");
+    return x0;
+}
+
+// Wait for a note under a mask of the call's own, or take one with no handler
+// (kernel syscall.h). A take word is 1 << T_NOTE_BIT_* for a family, and the
+// T_NOTE_TAKE_TTY_* rows for one note of the tty family.
+#define T_SYS_NOTE_WAIT 141
+#define T_NOTE_WAIT_SUSPEND 0ul
+#define T_NOTE_WAIT_TAKE 1ul
+#define T_NOTE_WAIT_POLL 2ul
+#define T_NOTE_WAIT_PENDING 3ul
+#define T_NOTE_TAKE_TTY_WINCH (1ul << 16)
+#define T_NOTE_TAKE_TTY_SUSP  (1ul << 17)
+#define T_NOTE_TAKE_TTY_CONT  (1ul << 18)
+#define T_NOTE_TAKE_TTY_QUIT  (1ul << 19)
+#define T_NOTE_TAKE_TTY_HUP   (1ul << 20)
+static inline long t_note_wait(unsigned long how, unsigned long set, void *record, long timeout_ns) {
+    register long x0 __asm__("x0") = (long)how;
+    register long x1 __asm__("x1") = (long)set;
+    register long x2 __asm__("x2") = (long)record;
+    register long x3 __asm__("x3") = timeout_ns;
+    register long x8 __asm__("x8") = T_SYS_NOTE_WAIT;
+    __asm__ volatile ("svc #0" : "+r"(x0) : "r"(x1), "r"(x2), "r"(x3), "r"(x8) : "memory", "cc");
     return x0;
 }
 

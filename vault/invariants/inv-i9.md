@@ -95,7 +95,7 @@ one locked step per fd (`dev->poll` under the object lock; the hook
 flag is the cross-lock handoff, `ready`-before-`wakeup` on the
 producer walk); [[sub-kernel-pipe]] — every state-enabling mutation
 carries its wake (the four wakes ↔ [[spec-pipe]]'s four buggy cfgs);
-[[sub-kernel-torpor]] — compare + register under `torpor_lock`, the
+[[sub-kernel-torpor]] — compare + register under the word's bucket lock, the
 same lock every wake walk takes (the PROSE proof; plus the
 post-register die-pending re-check that closes the cascade race,
 [[inv-i24]]'s futex leg).

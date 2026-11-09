@@ -16,7 +16,7 @@ design:
   - "docs/ARCHITECTURE.md section 12.3"
   - "docs/PORTABILITY.md section 5"
 created: 2026-08-02
-updated: 2026-10-13
+updated: 2026-11-03
 ---
 ## Purpose
 
@@ -355,6 +355,11 @@ the lending layer sets the trigger explicitly both ways) and `gic_intid_enabled`
 mask+ack). Both are consumed by [[sub-kernel-irqfwd]].
 
 ## MSI backend boundary
+
+`gic_send_ipi` opens with `DSB ISHST`: what the sender stored is visible before the
+IPI is, since a sysreg write and a Device write order with neither a release nor a
+`DMB`. A woken CPU reads what it was woken for, a timer base's head with no lock
+([[sub-kernel-rendez]]). Linux's `gic_ipi_send_mask` carries the same barrier.
 
 [[sub-kernel-gic-msi]] owns GICv2m leases and ITS translation. This layer owns
 full-width LPI dispatch/EOI, redistributor topology validation and the CPU-side

@@ -181,7 +181,8 @@ static void joey_thunk(void *arg) {
 
     if (rc != 0) {
         uart_puts("  joey: exec_setup failed rc=");
-        uart_putdec((u64)rc);
+        if (rc < 0) uart_puts("-");
+        uart_putdec(rc < 0 ? (u64)-(s64)rc : (u64)rc);
         uart_puts("; exits(fail-exec)\n");
         exits("fail-exec");
     }

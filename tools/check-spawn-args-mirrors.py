@@ -99,7 +99,7 @@ POUCH_MIRROR_NAME = re.compile(
 # posix_spawn returns a refused tail's -T_E value as this libc's errno, which
 # holds only while the kernel's values are the Linux ones (docs/ERRORS.md).
 KERNEL_ERRNO = "kernel/include/thylacine/errno.h"
-POUCH_ERRNOS = {"T_E_2BIG": 7, "T_E_NOMEM": 12, "T_E_FAULT": 14, "T_E_INVAL": 22}
+POUCH_ERRNOS = {"T_E_2BIG": 7, "T_E_NOEXEC": 8, "T_E_LIBBAD": 80, "T_E_NOMEM": 12, "T_E_FAULT": 14, "T_E_INVAL": 22}
 
 # aarch64 LP64: every type here is naturally aligned (alignment == size).
 C_SIZES = {

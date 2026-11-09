@@ -6,10 +6,8 @@
 // initial Thread; exits transitions Proc to ZOMBIE; wait_pid reaps
 // zombie children.
 //
-// At v1.0 P2-D, only RFPROC is supported in rfork — territory, fd
-// table, address space, credentials, etc. land in subsequent P2 sub-
-// chunks. Multi-thread Procs and the Linux clone() flag translation
-// land at Phase 5+ with the syscall surface.
+// rfork takes RFPROC or RFPROC|RFMEM (ARCH 7.4). A thread is not an rfork:
+// see SYS_THREAD_SPAWN and vivarium's clone arms.
 //
 // Bootstrap order (kernel/main.c calls in this order):
 //   1. slub_init      — kmem_cache_create can allocate now
@@ -1918,23 +1916,42 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
     // rule, ARCH 7.6): the child inherits every signal disposition -- caught
     // and ignored -- in a table of its OWN, so the immortal-per-Proc lifetime
     // that keeps the lock-free cross-Proc readers safe (#254) is unchanged. A
-    // NULL parent table is all-SIG_DFL and leaves the child's NULL. Native
-    // Procs: nothing crosses rfork (the handler_va precedent). On OOM
+    // NULL parent table is all-SIG_DFL and leaves the child's NULL. On OOM
     // child->sigtab stays NULL and proc_free's kfree is a clean no-op (the
     // allowance/env discipline above); the fork fails rather than producing a
     // child with the wrong dispositions. The mask half is copied onto the child
     // thread below, once it exists.
-    if (parent->phenotype == PHENO_LINUX &&
+    //
+    // A native fork too (ARCH 8.8.3): the child runs the parent's image, so its
+    // handler and table are the parent's, as Plan 9's sysrfork copies p->notify.
+    // Only `fc`: a native spawn has no fork context and is on its way to an image
+    // these addresses mean nothing in. The table's flag crosses at the publication.
+    //
+    // A peer may be in its first sigaction now: NOTIFY, then the row, then the flag.
+    // One read of the flag decides the clone and the publication, and the handler is
+    // read after it, so a child that takes a row also takes what the row was written
+    // against. A peer's SYS_NOTIFY(0) can still cross this, and then the child's row
+    // has no taker and reads as the default (notes_row_has_taker).
+    bool native_fork_notes = parent->phenotype != PHENO_LINUX && fc != NULL;
+    bool note_table_crosses =
+        native_fork_notes && (__atomic_load_n(&parent->proc_flags, __ATOMIC_ACQUIRE) &
+                              PROC_FLAG_NOTE_TABLE);
+    if ((parent->phenotype == PHENO_LINUX || note_table_crosses) &&
         viv_sigtab_clone_into(child, parent) != 0) {
         child->state = PROC_STATE_ZOMBIE;
         proc_free(child);
         return -1;
     }
+    if (native_fork_notes)
+        __atomic_store_n(&child->handler_va,
+                         __atomic_load_n(&parent->handler_va, __ATOMIC_ACQUIRE),
+                         __ATOMIC_RELAXED);
 
     // P5-hostowner-a: child->proc_flags starts 0 (KP_ZERO from proc_alloc).
-    // ONE bit is copied from the parent, at the publication below and nowhere
-    // else: PROC_FLAG_DEBUG_TAINTED, which is a RESTRICTION and must cross
-    // because the child's memory is the parent's debugged memory. Every other
+    // TWO bits are copied from the parent, at the publication below and nowhere
+    // else. PROC_FLAG_DEBUG_TAINTED is a RESTRICTION and must cross because the
+    // child's memory is the parent's debugged memory. PROC_FLAG_NOTE_TABLE says
+    // the table just copied governs, and confers nothing. Every other
     // bit -- every one that CONFERS anything -- is deliberately not copied. In
     // particular PROC_FLAG_CONSOLE_ATTACHED is never conferred by
     // rfork: console-attachment grows ONLY via an explicit
@@ -2028,12 +2045,14 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
         proc_free(child);
         return -1;
     }
-    // POSIX fork(2), the mask half (the phenotype only): the child's thread
-    // starts with the CALLING thread's note_mask. Written before ready() -- the
-    // child has not run, so no reader can race the plain store; the mask is
-    // owner-written thereafter (rt_sigprocmask). Native keeps a zero mask (the
-    // rfork rule).
-    if (parent->phenotype == PHENO_LINUX) {
+    // POSIX fork(2), the mask half: the child's thread starts with the CALLING
+    // thread's note_mask. Written before ready() -- the child has not run, so no
+    // reader can race the plain store; the mask is owner-written thereafter
+    // (rt_sigprocmask, SYS_NOTE_MASK). A native fork's handler crossed above, so its
+    // mask crosses too: a caller that blocked its notes around the fork, to fix up the
+    // child first, would otherwise have a handler run in a child born unmasked. A
+    // native spawn keeps a zero mask (ARCH 7.6).
+    if (parent->phenotype == PHENO_LINUX || fc != NULL) {
         ct->note_mask = t->note_mask;
         // And the HANDLER-EXECUTION SNAPSHOT (the d3a11c8e round's F1): this
         // design keeps the interrupted user context KERNEL-side -- the sigframe
@@ -2051,8 +2070,10 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
         // is the PRE-handler context it resumes at after its sigreturn. The
         // fork+exec / fork+_exit shapes were already fine (exec clears the
         // block, #247; _exit never returns); the flag is written last, once the
-        // block is whole. Native: a Plan 9 child is not notified (sysrfork), and
-        // no native handler crosses rfork either (the handler_va precedent).
+        // block is whole. A native fork the same, since its handler crosses: a
+        // Pouch child returning from the handler it forked in reaches SYS_NOTED,
+        // which refuses a thread not in a handler. Plan 9's child is not notified
+        // (sysrfork), but its noted is not called from a libc dispatcher either.
         //
         // The list below is EVERYTHING notes_noted_restore reads -- the round's
         // lesson was that a copy rule written from the standard's field list
@@ -2127,6 +2148,8 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
     if (pflags & PROC_FLAG_DEBUG_TAINTED)
         __atomic_fetch_or(&child->proc_flags, PROC_FLAG_DEBUG_TAINTED,
                           __ATOMIC_RELAXED);
+    if (note_table_crosses)
+        __atomic_fetch_or(&child->proc_flags, PROC_FLAG_NOTE_TABLE, __ATOMIC_RELAXED);
 
     // The birth hold (DEBUG-FS-DESIGN 5f), in the same hold as the publication
     // and for the taint's reason: the orphan rule runs under this lock at the
@@ -3514,10 +3537,8 @@ bool proc_caught_note_pending(const struct Proc *p) {
 // serialization -- with wait_lock HELD ACROSS wakeup (Option A) so a torpor
 // waiter's stack rendez cannot be popped out from under the waker.
 //
-// Deliberate deltas from the death template (see the proc.h contract):
-// no torpor_wake_all_for_proc (torpor waiters are reachable through
-// rendez_blocked_on, and tsleep's widened register-then-observe closes the
-// register-after-walk race) and a kick of each thread running elsewhere in
+// Deliberate delta from the death template (see the proc.h contract):
+// a kick of each thread running elsewhere in
 // place of smp_resched_others. Since #964 the IRQ-from-EL0 tail carries the
 // notes leg, so IPI_RESCHED makes a thread spinning at EL0 take the interrupt
 // at once rather than at its next tick; only the CPUs running a thread of `p`
@@ -3610,10 +3631,12 @@ static struct Thread *caught_pick(struct Proc *p, u32 fam, struct Thread *poster
 }
 
 // Make a designee take its note: wake it if it is blocked in an unwinding wait,
-// else kick it, so a thread running at EL0 takes an IRQ into its tail. Caller
+// else kick it, so a thread running at EL0 takes an IRQ into its tail. Until a
+// table governs the Proc, a wait of that kind rides the note out and the first
+// row's re-read is what ends it, so a wake here would be for nothing. Caller
 // holds x->wait_lock.
 static void caught_rouse_locked(struct Thread *x) {
-    if (caught_waits(x, CAUGHT_WAIT_UNWINDS)) {
+    if (caught_waits(x, CAUGHT_WAIT_UNWINDS) && notes_table_governs(x->proc)) {
         struct Rendez *r = x->rendez_blocked_on;
         if (r && r != &x->debug_rendez) wakeup(r);
         return;
@@ -3741,11 +3764,12 @@ int proc_note_thread(struct Proc *p, int tid, const char *name, struct Proc *sen
         proc_threads_unlock(p, s);
         return -(int)T_E_SRCH;
     }
-    bool to_queue = false;
+    bool to_queue = false, on_word = false;
     if (p->state == PROC_STATE_ALIVE && x->state != THREAD_EXITING) {
         to_queue = proc_is_self_managing_notes(p);
         if (!to_queue && !notes_direct_ignored(p, name)) {
             __atomic_or_fetch(&x->note_direct, (u16)(1u << (u32)bit), __ATOMIC_RELEASE);
+            on_word = true;
             // Masked or not. The owner writes its mask with no lock and no fence, so
             // a read here can see the old mask while the owner, having unmasked,
             // reads a word without this bit, and each misses the other. The reader's
@@ -3761,6 +3785,9 @@ int proc_note_thread(struct Proc *p, int tid, const char *name, struct Proc *sen
         }
     }
     proc_threads_unlock(p, s);
+    // A taker in SYS_NOTE_WAIT blocked the family, so nothing above woke it. After the
+    // bit: it hooks the queue's list before it reads the word.
+    if (on_word) proc_wake_or_owe(&p->notes->owed);
     if (!to_queue) return 0;
 
     // A self-managing Proc reads its notes from an fd, which has no per-thread
@@ -3813,8 +3840,8 @@ void proc_caught_note_walk_locked(struct Proc *p, struct Thread *skip) {
         }
     }
 
-    // Every family queued and held by nobody gets one thread. A native Proc's
-    // waits never unwind for a caught note (item 11c), so its walk only kicks.
+    // Every family queued and held by nobody gets one thread. A Proc no table
+    // governs never unwinds a wait for a caught note, so its walk only kicks.
     // No pick means no thread can take the note soon; any thread's tail still
     // delivers it.
     u32 open = caught & ~held & NOTE_MASK_SUPPORTED;
@@ -4323,7 +4350,7 @@ void proc_threads_unlock(struct Proc *p, irq_state_t s) {
 // unmapped tidptr silently skips the wake without extinction.
 //
 // The store-then-wake order matters: the joiner's torpor_wait re-checks
-// the user word inside torpor_lock; the lock acquire pairs with this
+// the user word inside its bucket's lock; the lock acquire pairs with this
 // store's preceding lock-release sequence (the producer side of the
 // Linux-futex discipline). Same as torpor's standard producer pattern.
 static void thread_clear_child_tid_handoff(struct Thread *t, struct Proc *p) {
@@ -5069,7 +5096,7 @@ static void exits_term(int code, int sig, const char *msg) {
     // torpor_wake observes a consistent state -- the EXITING write is visible
     // through the unlock's release, paired with the joiner's acquire of any
     // synchronizing lock. It runs with no lock held (torpor_wake takes
-    // torpor_lock); its store may fault but never sleeps (demand_page_locked).
+    // a bucket's lock); its store may fault but never sleeps (demand_page_locked).
     thread_clear_child_tid_handoff(t, p);
 
     // Yield. Will not return — we're EXITING, sched() doesn't re-insert,
@@ -5219,7 +5246,7 @@ void thread_exit_self(void) {
     // F3 audit close: the clear-child-tid handoff runs HERE, after the EXITING
     // commit, so a joiner that reads the zeroed word finds us EXITING -- every
     // live-peer decision relies on it --
-    // and with no lock held (torpor_wake takes torpor_lock). The store may
+    // and with no lock held (torpor_wake takes a bucket's lock). The store may
     // fault but never sleeps: demand_page_locked refuses a thread that is not
     // RUNNING the one page-in that would.
     thread_clear_child_tid_handoff(t, p);
@@ -5287,9 +5314,8 @@ static _Alignas(16) const u8 g_fp_zero_area[FP_AREA_SIZE];
 // AFTER the publish: a thread that registers after the walk re-observes the
 // death in its post-register check (register-then-observe; I-9).
 //
-// First every futex (torpor) sleeper; torpor_lock is strictly below
-// threads_lock. Then EVERY thread blocked in a sleep()/tsleep() Rendez sleep,
-// so it returns *_INTR -- which closed the 7.9.1 residual where an indefinite
+// EVERY thread blocked in a sleep()/tsleep() Rendez sleep, a futex (torpor) waiter
+// on its private rendez among them, so it returns *_INTR -- which closed the 7.9.1 residual where an indefinite
 // poll(-1) / pipe / devnotes_read sleeper was never woken and its Proc never
 // reaped (the #809-audit F1 hang). The only record of "Thread T sleeps on
 // Rendez R" is t->rendez_blocked_on, read under T's wait_lock -- the SAME lock
@@ -5298,11 +5324,10 @@ static _Alignas(16) const u8 g_fp_zero_area[FP_AREA_SIZE];
 // cannot be popped from under the waker. A RUNNING thread reads NULL and is
 // skipped (it reaches its own die-check); wakeup re-validates r->waiter under
 // r->lock, so one already woken is a no-op. Order: threads_lock -> wait_lock ->
-// (wakeup: g_timerwait.lock -> r->lock); only the owner writes
+// (wakeup: r->lock); only the owner writes
 // rendez_blocked_on.
 static void proc_death_wake_locked(struct Proc *p) {
     ASSERT_TL_HELD(p);
-    torpor_wake_all_for_proc(p);
     for (struct Thread *peer = p->threads; peer; peer = peer->next_in_proc) {
         irq_state_t ws = spin_lock_irqsave(&peer->wait_lock);
         struct Rendez *r = peer->rendez_blocked_on;
@@ -5376,6 +5401,10 @@ void proc_exec_live_dropped_locked(struct Proc *p) {
 static void proc_exec_drop_image_state(struct Proc *p, struct Thread *self,
                                        u32 pheno) {
     __atomic_store_n(&p->handler_va, 0ull, __ATOMIC_RELEASE);
+    // ARCH 8.8.3: the table's governance over a native Proc is the image's, as
+    // its handler is. A Linux image's table governs by its phenotype. Atomic AND:
+    // the word is multi-writer (the SAK kthread).
+    __atomic_and_fetch(&p->proc_flags, ~PROC_FLAG_NOTE_TABLE, __ATOMIC_RELEASE);
 
     // VIVARIUM V-6b Linux dispositions, reset IN PLACE -- the table is NOT
     // freed here (#254). It used to be, with the pointer NULLed, under no lock:
@@ -5512,6 +5541,11 @@ static void proc_exec_drop_image_state(struct Proc *p, struct Thread *self,
     // outgoing image; carried across, it would make the new image's first
     // console read wait for a slot the single-reader guard should refuse.
     self->cons_frozen_unwound = false;
+
+    // The queue survives and the dispositions just changed, so what is pending is
+    // judged by the new image's (ARCH 8.8.3). A note the old image caught is the
+    // default's now, and arms what a post now would.
+    notes_disposition_reread(p);
 }
 
 #ifdef KERNEL_TESTS
@@ -6164,13 +6198,11 @@ int proc_stop_sleeper_park(struct Thread *t) {
 // flag under its wait_lock, and DETOURS to park on its own debug_rendez
 // (8c-2 stop-of-a-sleeper, DEBUG-FS-DESIGN 5c.2 -- the multi-thread-Go-target
 // fix: an idle futex-parked M never reaches the EL0-return tail on its own).
-// This is proc_group_terminate's death-wake cascade's SHAPE, with ONE
-// deliberate difference (#19): the NON-COMPLETING torpor_stop_wake_all_for_proc
-// for the futex (torpor) waiters -- the death walk's completing wake fabricates
-// TORPOR_OK, which a SURVIVING stopped Proc observes at resume (a time::sleep
-// job "finishes" the instant fg resumes it); the stop wake preserves the wait
-// (the woken sleeper reparks + re-registers its original deadline). Then the
-// per-peer wait_lock rendez wake for every other blocking sleep, verbatim. The caller's RELEASE
+// This is proc_group_terminate's death-wake cascade: the per-peer wait_lock rendez
+// wake for every blocking sleep, a futex (torpor) waiter among them. It sets no
+// futex mark, so that waiter's cond stays false and it reparks with its wait and its
+// original deadline (#19: a completed wait here made a time::sleep job "finish" the
+// instant fg resumed it). The caller's RELEASE
 // store of its stop flag happens-before each wake AND before each peer's
 // wait_lock acquire here, so the woken sleeper's ACQUIRE-read of the flag
 // under its wait_lock observes the stop -- no stop-wake is lost between the
@@ -6181,27 +6213,15 @@ int proc_stop_sleeper_park(struct Thread *t) {
 // the park waits on (a resume or group death ends it, and each wakes it
 // itself), so the wake could only be absorbed, with the cost the latch walk's
 // skip describes (proc_interrupt_terminate_wake). wakeup() re-validates
-// r->waiter under r->lock, so a peer already woken (or by torpor_wake_all) is
+// r->waiter under r->lock, so a peer already woken is
 // a safe no-op; wait_lock held across wakeup pins a torpor waiter's stack
 // rendez. LOCK CONTRACT: caller holds p->threads_lock (pins p->threads); order
-// threads_lock -> wait_lock -> (wakeup: r->lock); torpor_lock strictly below
-// threads_lock. The EL0-running-peer IPI kick
+// threads_lock -> wait_lock -> (wakeup: r->lock). The EL0-running-peer IPI kick
 // is SEPARATE (smp_resched_others below) -- it is group-GLOBAL (a broadcast to
 // every online CPU), so a fan-out over N members issues it ONCE after the walk
 // (audit F2), not per-member.
 static void proc_stop_wake_sleepers_locked(struct Proc *p) {
     ASSERT_TL_HELD(p);
-    // PTY-4e (#19): the NON-COMPLETING torpor wake. The death cascade's
-    // torpor_wake_all_for_proc fabricates a completed wait (awoken=1) --
-    // immaterial for a dying Proc, but a STOPPED one SURVIVES: the fabricated
-    // TORPOR_OK rode back to EL0 at resume and made every torpor-timed wait
-    // (time::sleep -> /bin/sleep) "finish" instead of continuing -- the
-    // resumed job exited, fg returned Done, and a second ^Z found no job (the
-    // #19 hang). The non-completing wake leaves `awoken` clear, so the woken
-    // waiter's tsleep re-loop takes the 8c-2 stop detour and parks with the
-    // wait PRESERVED -- on resume it re-registers with its original deadline
-    // (parks-and-reparks; the Linux SIGSTOP-over-futex_wait restart shape).
-    torpor_stop_wake_all_for_proc(p);
     for (struct Thread *peer = p->threads; peer; peer = peer->next_in_proc) {
         irq_state_t ws = spin_lock_irqsave(&peer->wait_lock);
         struct Rendez *r = peer->rendez_blocked_on;
@@ -6348,7 +6368,7 @@ void proc_debug_resume(struct Proc *p) {
     // wait_lock is held across wakeup (Option A, ARCH 8.8.1): it pins the peer so
     // its debug_rendez cannot be resumed + reused under the waker. Lock order
     // g_proc_table_lock (caller-held) -> threads_lock -> wait_lock -> (wakeup)
-    // g_timerwait.lock -> r->lock; acyclic (only the owner WRITES
+    // r->lock; acyclic (only the owner WRITES
     // rendez_blocked_on).
     for (struct Thread *peer = p->threads; peer; peer = peer->next_in_proc) {
         irq_state_t ws = spin_lock_irqsave(&peer->wait_lock);
@@ -6429,7 +6449,7 @@ static void proc_birth_hold_orphan_rule_locked(struct Proc *p) {
 // (job_stop_req), per-owner set/clear (StopCompatI39 / BUGGY_DOUBLE_STOP).
 // All helpers run under g_proc_table_lock (the fan-outs take it; the
 // notes_post_pgrp precedent covers every nested edge: q->lock for the posts,
-// torpor_lock + wait_lock -> r->lock for the cascade, the poll-waiter list
+// wait_lock -> r->lock for the cascade, the poll-waiter list
 // for the parent wake).
 // =============================================================================
 

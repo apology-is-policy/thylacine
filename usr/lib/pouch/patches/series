@@ -214,3 +214,9 @@
 0068-pouch-thread-directed-kill.patch
 # 0069 (operator vote 15): SIGUSR1 and SIGUSR2 are the usr1 and usr2 notes.
 0069-pouch-usr-notes.patch
+# 0070 (operator votes 18, 19 and 20): the kernel's note table, and the calls a note can interrupt.
+0070-pouch-note-table.patch
+# 0071 (operator vote 23): a failed spawn says why; only a miss reads ENOENT.
+0071-pouch-spawn-errno.patch
+# 0072 (operator vote 24): the kernel owns the mask; sigsuspend, sigtimedwait, sa_mask and SA_RESETHAND.
+0072-pouch-note-wait.patch

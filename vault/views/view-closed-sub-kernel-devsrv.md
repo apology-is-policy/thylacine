@@ -11,7 +11,7 @@ on-demand by `quaestor closed sub-kernel-devsrv`). Paste or
 transclude into a prosecutor prompt as the closed-findings preamble.
 
 <!-- generated:begin -->
-19 closed findings on [[sub-kernel-devsrv]] — do NOT re-report
+20 closed findings on [[sub-kernel-devsrv]] — do NOT re-report
 these in a future round (open/deferred findings are NOT listed
 here; see the seam inbox):
 
@@ -34,4 +34,5 @@ here; see the seam inbox):
 - [[fnd-stalk3c-r1-f1]] [P3] handle.c's KOBJ_SRV release comment cited the deleted connect core; the SrvConn arm went defensively dead (fixed) — Fixed: comment reworded to the as-built; the `SRV_CONN_MAGIC` arm
 - [[fnd-stalk3c-r1-f2]] [P3] Residual stale references to the retired /srv symbols across seven files' comments (fixed) — Fixed: all reworded to create=post / open=connect /
 - [[fnd-stalk3c-r1-f3]] [P3] The boot-registry getter comment overstated production reachability — I-1 prosecuted directly and HELD (fixed) — The prosecution came back HELD and STRENGTHENED: post/connect resolve
+- [[fnd-thread-11c-r3-f2]] [P3] An attach handshake a caught note cancelled reported EIO, so no restart could follow (fixed)
 <!-- generated:end -->

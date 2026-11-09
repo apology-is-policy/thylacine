@@ -439,6 +439,13 @@ new `require_for` names what the expected line cannot: the report line
 `console-claim: skipped with the MMU off` and a symbolized `extinction+0x` frame
 (before the MMU every code address is physical, and only the dump's rebase names
 it). Without the fix the variant printed nothing, on HVF and on thyla-pi's KVM.
+`kstack_overflow` requires the body only the vector's path prints, the dump naming the
+thread's stack in the range (`HALLS: SP   0xffff9`) and `HALLS: --- end ---`, and it forbids
+`(recursive on cpu`, what extinction prints when the dump itself faulted. Its siblings
+`kstack_overflow_frame`, `_irq` and `_peer` take the shapes recursion does not reach
+([[sub-kernel-exception]]), and `kstack_dump_at_top` the fault taken a line under the stack's
+top, where a hexdump reading past its 16 bytes would lose the dump's end. `expected_for`
+holds the prefix for all of them, so the matched set stays thirteen bodies.
 Since 2026-10-28 it also requires a `  mmu_enable+0x` frame: `mmu_enable` ends in
 its call to `extinction`, so only a dump that names a return address at its call
 names that frame for it ([[sub-kernel-halls]]).

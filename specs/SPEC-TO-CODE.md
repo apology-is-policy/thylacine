@@ -872,71 +872,81 @@ abstraction of the cross-CPU work-stealing case.
 
 ## tsleep.tla — P5-tsleep (deadline-bounded Rendez sleep)
 
-Status: **landed at P5-tsleep.** Models `tsleep` — `sleep` plus a
+Status: **landed at P5-tsleep, restated at C8b (per-CPU timer bases).** Models `tsleep` — `sleep` plus a
 deadline — and the three-way wake race it introduces: the condition,
-`wakeup`, and the timer (the `sched_tick` scan of the global timer-wait
-list). A focused sibling of `scheduler.tla`, on the `sched_ctxsw.tla` /
+`wakeup`, and the timer (`sched_tick` expiring the head of its CPU's timer
+base). A focused sibling of `scheduler.tla`, on the `sched_ctxsw.tla` /
 `pipe.tla` precedent: `scheduler.tla` already proves the check-then-
 sleep atomicity for `sleep` (and `tsleep`'s no-deadline path *is*
 `sleep`), so `tsleep.tla` models only the new surface — the deadline.
 
 State universe: one waiter, one Rendez, one deadline (`Rendez` is
 single-waiter by construction, so one sleeper exercises the whole race;
-`MaxSleeps` bounds the spurious-wakeup re-sleep loop). CONSTANTS:
-`HAS_DEADLINE` (FALSE = the no-deadline path), `BUGGY_LAZY_UNLINK`,
+`MaxSleeps` bounds the spurious-wakeup re-sleep loop). One base is modelled.
+`Commit` is blocked by a tick holding the Rendez lock and not by one holding
+only the base's, since the owner may be on another CPU by then. The correct
+configuration never reaches that freedom (a tick in `"base"` means the entry
+is linked, so the owner has not left); `BUGGY_UNLINK_EARLY` does. CONSTANTS: `HAS_DEADLINE` (FALSE = the no-deadline
+path), `BUGGY_OWNER_KEEPS`, `BUGGY_CLEAR_FIRST`, `BUGGY_UNLINK_EARLY`,
 `BUGGY_TIMEOUT_STALE`, `BUGGY_RECHECK_ORDER`.
 
 | Config | Flags | Checked | Result | Distinct |
 |---|---|---|---|---|
-| `tsleep.cfg`                     | all FALSE, `HAS_DEADLINE`  | `Invariants` | clean (depth 10) | 52 |
-| `tsleep_nodeadline.cfg`          | `HAS_DEADLINE=FALSE`       | `Invariants` | clean | 18 |
-| `tsleep_liveness.cfg`            | all FALSE, `Spec_Live`     | `Invariants` + `TsleepTerminates` | clean | 37 |
-| `tsleep_buggy_lazy_unlink.cfg`   | `BUGGY_LAZY_UNLINK`        | `NoStaleTimerEntry` | violation (depth 3) | 15 |
-| `tsleep_buggy_double_wake.cfg`   | `BUGGY_LAZY_UNLINK` + `BUGGY_TIMEOUT_STALE` | `NoDoubleWake` | violation (depth 5) | 58 |
-| `tsleep_buggy_recheck_order.cfg` | `BUGGY_RECHECK_ORDER`      | `TimeoutSound` | violation (depth 4) | 56 |
-| `tsleep_buggy_wedge.cfg`         | `HAS_DEADLINE=FALSE`, `Spec_Live` | `TsleepTerminates` | violation (stutter) | 13 |
+| `tsleep.cfg`                     | all FALSE, `HAS_DEADLINE`  | `Invariants` | clean (depth 15) | 106 |
+| `tsleep_nodeadline.cfg`          | `HAS_DEADLINE=FALSE`       | `Invariants` | clean (depth 12) | 24 |
+| `tsleep_liveness.cfg`            | all FALSE, `Spec_Live`     | `Invariants` + `TsleepTerminates` | clean | 73 |
+| `tsleep_buggy_owner_keeps.cfg`   | `BUGGY_OWNER_KEEPS`        | `NoStaleTimerEntry` | violation (4 states) | 20 |
+| `tsleep_buggy_clear_first.cfg`   | `BUGGY_CLEAR_FIRST`        | `TimerEntryHasRendez` | violation (4 states) | 21 |
+| `tsleep_buggy_unlink_early.cfg`  | `BUGGY_UNLINK_EARLY`       | `RendezOutlivesTick` | violation (7 states) | 45 |
+| `tsleep_buggy_double_wake.cfg`   | `BUGGY_TIMEOUT_STALE`      | `NoDoubleWake` | violation (7 states) | 39 |
+| `tsleep_buggy_recheck_order.cfg` | `BUGGY_RECHECK_ORDER`      | `TimeoutSound` | violation (4 states) | 36 |
+| `tsleep_buggy_wedge.cfg`         | `HAS_DEADLINE=FALSE`, `Spec_Live` | `TsleepTerminates` | violation (stutter) | 17 |
 
 Spec action ↔ impl mapping:
 
 | Spec action | Source location | Notes |
 |---|---|---|
-| `Commit` | `kernel/sched.c::tsleep()` loop body | The cond-first-then-deadline evaluation + the enqueue (`timerwait_link` + `r->waiter` + `SLEEPING`). Both first entry and every resume. |
-| `Wakeup` | `kernel/sched.c::wakeup()` → `wake_rendez_waiter(…, false)` | `wakeup` does the `timerwait_unlink` under `g_timerwait.lock`, releases it, then `wake_rendez_waiter` runs the transition under `r->lock`. |
-| `Timeout` | `kernel/sched.c::timerwait_tick()` → `wake_rendez_waiter(…, true)` | The `sched_tick` scan, one thread per `g_timerwait.lock` acquisition (P5-tsleep-scale): `timerwait_unlink` + the `state==SLEEPING && r->waiter==t` re-check + the wake, all under `g_timerwait.lock` + `r->lock` held continuously. Skips an `on_cpu` thread (woken next tick). |
+| `Commit` | `kernel/sched.c::tsleep_common()` loop body | The cond-first-then-deadline evaluation + the enqueue (`timer_base_link` + `r->waiter` + `SLEEPING`). Both first entry and every resume. Under `r->lock`, so not while the tick holds it. |
+| `Wakeup` | `kernel/sched.c::wakeup()` → `wake_rendez_waiter(…, false)` | `r->lock` alone. The entry stays; `pc` goes to `woken`. |
+| `TickPick` | `kernel/sched.c::timerwait_tick()` | Under the base's lock: the first expired entry not `on_cpu`, and its `rendez_blocked_on`. The model has no `on_cpu`: it may pick any expired entry, a superset. |
+| `TickLock` | `kernel/sched.c::timerwait_tick()` | Takes `r->lock`, then `timer_base_unlink`. |
+| `TickFire` | `kernel/sched.c::timerwait_tick()` → `wake_rendez_waiter(…, true)` | The `state==SLEEPING && r->waiter==t` re-check, the wake on a hit, both locks dropped. On a stale entry, nothing. |
+| `OwnerLeave` | `kernel/sched.c::tsleep_common()` resume path | `timer_base_leave`, then the clear of `rendez_blocked_on`. A set mark takes the base's lock, so a tick holding it blocks this; a clear mark takes no lock. |
 | `SetCond` / `AdvanceTime` | the producer's cond mutation / the monotonic counter | Environment actions — not kernel code. |
-| `BuggyLazyUnlink` | (none — `wakeup` + `timerwait_tick` both `timerwait_unlink` before readying) | Eager unlink is the discipline; lazy removal is the bug. |
-| `BuggyTimeoutStale` | (none — `timerwait_tick` re-checks `state==SLEEPING && r->waiter==t`) | The scan re-validates before waking. |
-| `BuggyRecheckOrder` | (none — `tsleep`'s loop checks `cond` before the timeout) | cond-first is success precedence. |
+| `BUGGY_OWNER_KEEPS` | (none — every way out of `tsleep_common` is off the base, and an extinction at the exit says so) | |
+| `BUGGY_CLEAR_FIRST` | (none — `timer_base_leave` precedes the clear) | The tick extincts on a linked entry with no rendez. |
+| `BUGGY_UNLINK_EARLY` | (none — `timerwait_tick` unlinks under `r->lock`) | The mark-clear path skips the base's lock, and `r->lock` is what stops it leaving. |
+| `BUGGY_TIMEOUT_STALE` | (none — `timerwait_tick` re-checks `state==SLEEPING && r->waiter==t`) | The tick re-validates before waking. |
+| `BUGGY_RECHECK_ORDER` | (none — `tsleep`'s loop checks `cond` before the timeout) | cond-first is success precedence. |
 
 Spec invariant ↔ impl enforcement:
 
 | Spec invariant | Source enforcement |
 |---|---|
-| `NoStaleTimerEntry` | The eager `timerwait_unlink` in `wakeup` (under `g_timerwait.lock`) and in `timerwait_tick`. A thread is on the list iff in a deadlined `tsleep`. |
-| `NoDoubleWake` | The `r->waiter` single-consumer check + `timerwait_tick`'s `state==SLEEPING` re-check: `wakeup` and the timeout scan are mutually exclusive — whichever fires first clears `r->waiter` and unlinks the thread. |
+| `NoStaleTimerEntry` | `timer_base_leave` on the resume path and the unlink in each undo arm. An entry exists from the commit to the owner's leaving; the extinction at `tsleep_common`'s exit checks it. |
+| `TimerEntryHasRendez` | The owner clears `rendez_blocked_on` only after it is off the base. |
+| `RendezOutlivesTick` | The unlink under `r->lock`: an owner that reads its mark clear takes `r->lock` before it can return, so the tick is done with `r` by then. |
+| `NoDoubleWake` | The `r->waiter` single-consumer check + the tick's `state==SLEEPING` re-check: whichever waker fires first clears `r->waiter`, and a stale entry fires nothing. |
 | `WokenSound` / `TimeoutSound` | `tsleep`'s resume re-checks `cond` first; only a false `cond` consults `sleep_timedout` / the deadline. Success precedence. |
 | `SleepingHasWaiter` | `tsleep` sets `r->waiter` and `SLEEPING` together under `r->lock`. |
-| `TsleepTerminates` (liveness) | The deadline + the periodic `timerwait_tick` scan: a hung producer (no `wakeup`, `cond` never true) still sees the wait end at the deadline. |
+| `TsleepTerminates` (liveness) | The deadline + the periodic `timerwait_tick`: a hung producer (no `wakeup`, `cond` never true) still sees the wait end at the deadline. |
 
 The spec's `Expired == HAS_DEADLINE /\ (timedout_flag \/ deadline_passed)`
 lumps **two** impl mechanisms that `Commit` consults: `t->sleep_timedout`
-(set by `timerwait_tick`, the `Timeout` action) and the synchronous
+(set by `timerwait_tick`, `TickFire`) and the synchronous
 `timer_get_counter() >= deadline_cnt` read in `tsleep`'s loop (the entry
 / spurious-resume path — no dedicated spec action; modeled implicitly by
 `AdvanceTime` + `Commit`). Both yield `TIMEDOUT` only with `cond` false,
 so `TimeoutSound` covers both.
 
-P5-tsleep-scale (audit F6) reworked `timerwait_tick` to wake a herd of
-expired sleepers one thread per `g_timerwait.lock` acquisition rather
-than under one hold. No spec change: each thread is still unlinked +
-woken atomically (both locks held continuously across its wake), which
-is exactly what the single-waiter `Timeout` action models — the
-inter-thread lock release is below the one-sleeper model's resolution
-and introduces no race (independent per-thread processing composes).
+Below the model's resolution, and argued in the code: `timerwait_tick` wakes
+one thread per acquisition of the base's lock; each base has its own lock
+and its own tick; and a secondary with no armed tick links on cpu0's base.
+Per-thread processing composes, so a one-sleeper model covers each.
 
 cfgs run with `-deadlock`; `tsleep.tla`'s `Done` self-loop keeps a
 legitimate terminal state from tripping the deadlock check. See
-`docs/reference/16-rendez.md` (the `tsleep` section).
+`vault/specs/spec-tsleep.md`.
 
 ## poll.tla — P5-poll-spec (spec landed); P5-poll-a (mechanism + SYS_POLL + devpipe poll); P5-poll-b (devsrv poll); the RE-ARM (2026-09-21)
 
@@ -1257,11 +1267,32 @@ cfgs run with `-deadlock`; the `Done` self-loop keeps the legitimate
 terminal state from tripping the deadlock check (the lost-wake stuck state
 is PRE-terminal, so it is still caught). See ARCH §23.5.1 + I-9.
 
-## futex.tla — DROPPED (2026-05-23 spec-to-code suspension)
+## torpor.tla — the wake and the record's lifetime (thread-model C8)
 
-Never written. The `torpor` wait-on-address primitive (Phase 6) is
-prose-validated (`kernel/torpor.c` + `torpor.h` reasoning + the focused
-audit); `death_wake.tla` covers the death-wake interaction (I-9 generalized).
+Replaces the `futex.tla` the 2026-05-23 suspension dropped; the overhaul's plan names it.
+`death_wake.tla` still covers the death-wake interaction (I-9 generalized).
+
+| Spec | Code |
+|---|---|
+| `WaitLink` | `sys_torpor_wait_for_proc`: the under-lock load, `torpor_append_locked` |
+| `SleepRead`, `SleepCommit` | `tsleep_noteintr` on the waiter's rendez with `torpor_cond_awoken`: the rendez's lock from the cond through registering |
+| `Deadline`, `CaughtNote` | `timerwait_tick`; tsleep's caught arm, which asks the cond first |
+| `Stop`, `Resume` | `proc_stop_wake_sleepers_locked`'s rendez wake and the stop detour: on no rendez, still linked |
+| `Unlink`, `Leave` | the bucket lock's second hold in WAIT, then the wait for `wake_held` |
+| `WakeMark` | `sys_torpor_wake_for_proc`'s walk with `torpor_mark_awoken` |
+| `WakeUnlock`, `WakeDeliver` | the lock's release, then `wakeup` and the clear of `wake_held` |
+| `NoUseAfterFree` | `wake_held`; a record's frame outlives the batch |
+| `CountHonest` | `torpor_mark_awoken`'s answer is the count; tsleep's cond-first order |
+| `OldestFirst` | the tail append and the walk from the head |
+| `NoStranded` | the walk goes on past a mark that did not count |
+| `NoLostWake` | the compare and the link are one hold |
+| `MarkedSleeperIsHeld` | the mark takes the rendez's lock; `torpor.mark_takes_the_rendez_lock` stops a waiter in that window |
+
+Buggy cfgs: `no_wait`, `lifo`, `count_any`, `eintr_any`, `unlocked_check`, `stop_at_mark`, `unlocked_mark`, each
+with the invariant it breaks in the module's header. What it does not model: two buckets, since a lock per bucket
+changes nothing a single bucket's order depends on; and the hash. A stop or a caught note that
+wakes a waiter before a mark reaches it lands in the code as an uncounted OK, which the model
+reaches only through `Deadline`: the same state and the same count.
 
 ## notes.tla — DROPPED (2026-05-23 spec-to-code suspension)
 
@@ -1687,7 +1718,7 @@ the spec's own F1 (ownerless reservation reclaim the impl never had — the
 
 | Spec action | Code site | Invariant pinned |
 |---|---|---|
-| `FastSwitch(c, p)` | `arch/arm64/asid.c::asid_check_and_switch` generation-match fast path — lockless `xchg` publish into `active_asids[cpu]` | `NoActiveAlias`: the publish makes the ASID visible to a concurrent rollover BEFORE the TTBR0 write |
+| `FastSwitch(c, p)` | `arch/arm64/asid.c::asid_check_and_switch` generation-match fast path — lockless `xchg` publish into `active_asids[cpu]` | `NoActiveAlias`: the publish makes the ASID visible to a concurrent rollover BEFORE the switch writes or keeps TTBR0 |
 | `SlowSwitch(c, p)` | `asid.c::new_context` under `g_asid_lock` — claim a free ASID or roll the generation (reset bitmap; preserve each CPU's active ASID into `reserved_asids[cpu]`; set per-CPU `flush_pending`) | `ActiveClaimed` + rollover preserves active/reserved (a running CPU is never yanked) |
 | `Deschedule(c)` | the context switch away from a Proc (the per-CPU active slot becomes reclaimable only via the rollover's reserve pass) | — |
 | `CacheTranslation(c)` | (hardware TLB fill; no code site) — cleared by the `flush_pending` local `tlbi` consumed at the next switch | `NoStaleTLB`: no CPU runs on a translation cached under a previous generation's aliasing |

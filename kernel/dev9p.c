@@ -440,14 +440,17 @@ static int wb_write_run(struct p9_client *cl, u32 fid, u64 off, u32 total,
 // bytes written. The run stays staged and nothing is latched, so the next
 // flusher -- the last close or a closer at the latest -- sends it; a prefix
 // that landed is rewritten with the same bytes at the same offsets.
-// Was this flush's EINTR a caught note cancelling the Twrite? Every caught-note
-// unwind takes the note's claim (thread_caught_note_unwinds), held until the
-// thread's EL0-return tail, so a claim marks the client's flush(5) cancellation.
-// A server that answers Rlerror(EINTR) itself reaches here as the same value
-// with no claim: that is the server failing the write, and it latches.
+// Was this flush's EINTR a caught note cancelling the Twrite? The call's mark says
+// a wait unwound for one (thread_caught_note_unwinds), whichever way the note came:
+// a thread-directed note unwinds with no claim. client_run takes the mark back when
+// the op's own reply stood, so a server that answers Rlerror(EINTR) itself reaches
+// here as the same value with no mark, note or none: that is the server failing the
+// write, and it latches.
+_Static_assert(P9_E_INTR == T_E_INTR,
+               "a cancelled flush crosses Dev.lock_sync as -T_E_INTR (handle.c, dev.h)");
 static bool wb_note_cancelled(int err) {
     struct Thread *t = current_thread();
-    return err == -P9_E_INTR && t && t->note_claim != 0;
+    return err == -P9_E_INTR && t && t->note_call_unwound;
 }
 
 // Waiting out a peer's flush. A thread a death can reach yields, and the death
@@ -837,12 +840,21 @@ static struct Spoor *dev9p_attach_spec(const char *spec) {
     return NULL;
 }
 
+// A server's ENOSYS or EOPNOTSUPP to the base op says the server is broken, not that
+// the kernel is missing a call: a Linux guest's T2 row reads ENOSYS as its own decline.
+static int dev9p_walk_reason(int rc) {
+    return (rc == -T_E_NOSYS || rc == -T_E_OPNOTSUPP) ? -T_E_IO : rc;
+}
+
 static struct Walkqid *dev9p_walk(struct Spoor *c, struct Spoor *nc,
                                     const char **name, int nname) {
     struct dev9p_priv *src_priv = priv_of(c);
-    if (!src_priv) return NULL;
-    if (src_priv->fid == P9_NOFID || src_priv->cached_open) return NULL;   // a cached open
-    if (nname < 0 || nname > (int)P9_MAX_WALK) return NULL;
+    if (!src_priv) { dev_walk_failed(-T_E_IO); return NULL; }
+    if (src_priv->fid == P9_NOFID || src_priv->cached_open) {   // a cached open
+        dev_walk_failed(-T_E_INVAL);
+        return NULL;
+    }
+    if (nname < 0 || nname > (int)P9_MAX_WALK) { dev_walk_failed(-T_E_INVAL); return NULL; }
 
     // F3 close (P5-stratumd-stub-bringup audit): allocate the Walkqid
     // carrier FIRST so a SLUB OOM here doesn't consume a fid number
@@ -852,11 +864,12 @@ static struct Walkqid *dev9p_walk(struct Spoor *c, struct Spoor *nc,
     // be released" is the right shape.)
     int max_qids = (nname == 0) ? 1 : nname;
     struct Walkqid *w = walkqid_alloc(max_qids);
-    if (!w) return NULL;
+    if (!w) { dev_walk_failed(-T_E_NOMEM); return NULL; }
 
     // Allocate a fresh fid for the destination.
     u32 new_fid = p9_client_alloc_fid(src_priv->client);
     if (new_fid == P9_NOFID) {
+        dev_walk_failed(-T_E_MFILE);
         walkqid_free(w);
         return NULL;
     }
@@ -870,6 +883,7 @@ static struct Walkqid *dev9p_walk(struct Spoor *c, struct Spoor *nc,
         rc = p9_client_walk(src_priv->client, src_priv->fid, new_fid,
                               0, NULL, NULL, &nwqid, qids);
         if (rc != 0) {
+            dev_walk_failed(dev9p_walk_reason(rc));
             walkqid_free(w);
             return NULL;
         }
@@ -893,12 +907,14 @@ static struct Walkqid *dev9p_walk(struct Spoor *c, struct Spoor *nc,
                               (u16)nname, (const u8 *const *)name,
                               lens, &nwqid, qids);
         if (rc != 0) {
+            dev_walk_failed(dev9p_walk_reason(rc));
             walkqid_free(w);
             return NULL;
         }
         // Caller asked for `nname` components; the server may have
         // walked fewer (partial walk). At v1.0 we treat that as a
-        // failure — partial-walk handling is a Phase 5+ extension.
+        // failure — partial-walk handling is a Phase 5+ extension. A short
+        // reply is how 9P says a later name is missing, so it stays a miss.
         if ((int)nwqid != nname) {
             walkqid_free(w);
             return NULL;
@@ -927,6 +943,7 @@ static struct Walkqid *dev9p_walk(struct Spoor *c, struct Spoor *nc,
                                                 src_priv->attached_owner);
     if (!new_priv) {
         // Clunk the fid the walk just bound; the walk fails either way.
+        dev_walk_failed(-T_E_NOMEM);
         dev9p_clunk_fid(src_priv->client, src_priv->attached_owner, new_fid);
         walkqid_free(w);
         return NULL;
@@ -1113,10 +1130,15 @@ static struct Walkqid *dev9p_walk_attrs(struct Spoor *c, struct Spoor *nc,
                                         const size_t *name_lens,
                                         int nname, struct t_stat *sts) {
     struct dev9p_priv *src_priv = priv_of(c);
-    if (!src_priv) return NULL;
-    if (src_priv->fid == P9_NOFID || src_priv->cached_open) return NULL;   // a cached open
-    if (nname <= 0 || nname > (int)P9_MAX_WALK) return NULL;
-    if (!name || !name_lens || !sts) return NULL;
+    if (!src_priv) { dev_walk_failed(-T_E_IO); return NULL; }
+    if (src_priv->fid == P9_NOFID || src_priv->cached_open) {   // a cached open
+        dev_walk_failed(-T_E_INVAL);
+        return NULL;
+    }
+    if (nname <= 0 || nname > (int)P9_MAX_WALK || !name || !name_lens || !sts) {
+        dev_walk_failed(-T_E_INVAL);
+        return NULL;
+    }
 
     // Per-session capability latch: Twalkgetattr is a Stratum extension.
     // netd's /net (and any plain 9P2000.L server) answers it Rlerror ENOSYS
@@ -1215,10 +1237,11 @@ static struct Walkqid *dev9p_walk_attrs(struct Spoor *c, struct Spoor *nc,
 
     // Carrier first (the F3 resource-order discipline shared with dev9p_walk).
     struct Walkqid *w = walkqid_alloc(nname);
-    if (!w) return NULL;
+    if (!w) { dev_walk_failed(-T_E_NOMEM); return NULL; }
 
     struct p9_attr *attrs = kmalloc(sizeof(struct p9_attr) * (size_t)nname, 0);
     if (!attrs) {
+        dev_walk_failed(-T_E_NOMEM);
         walkqid_free(w);
         return NULL;
     }
@@ -1231,6 +1254,7 @@ static struct Walkqid *dev9p_walk_attrs(struct Spoor *c, struct Spoor *nc,
     if (nc) {
         new_fid = p9_client_alloc_fid(src_priv->client);
         if (new_fid == P9_NOFID) {
+            dev_walk_failed(-T_E_MFILE);
             kfree(attrs);
             walkqid_free(w);
             return NULL;
@@ -1308,6 +1332,7 @@ static struct Walkqid *dev9p_walk_attrs(struct Spoor *c, struct Spoor *nc,
         // Rlerror: a miss at the first component, or a one-name walk's failure.
         // Nothing was bound (the session layer binds new_fid only on a FULL
         // walk); nc untouched.
+        dev_walk_failed(rc != 0 ? rc : -T_E_IO);
         kfree(attrs);
         walkqid_free(w);
         return NULL;
@@ -1365,6 +1390,7 @@ static struct Walkqid *dev9p_walk_attrs(struct Spoor *c, struct Spoor *nc,
                                                  /*fid_owned=*/true,
                                                  src_priv->attached_owner);
         if (!new_priv) {
+            dev_walk_failed(-T_E_NOMEM);
             dev9p_clunk_fid(src_priv->client, src_priv->attached_owner,
                             new_fid);
             walkqid_free(w);
@@ -2804,8 +2830,12 @@ static int dev9p_lock(struct Spoor *c, u32 type, u64 start, u64 len,
 
     // Every set-lock lands c's staged writes first: an unlock gives its range
     // up, and a write lock converted to a read lock admits readers. Linux's NFS
-    // client flushes before any setlk, for the same reason.
-    (void)dev9p_lock_sync(c, DEV_LOCK_SYNC_RELEASE);
+    // client flushes before any setlk, for the same reason. A caught note that
+    // cancelled that flush cancels the call before the server is asked anything;
+    // the run stays staged, and under SA_RESTART the call runs again. Any other
+    // failure is latched for the next write or close to report, and the lock
+    // goes ahead.
+    if (wb_note_cancelled(dev9p_lock_sync(c, DEV_LOCK_SYNC_RELEASE))) return -T_E_INTR;
 
     u32  who = type == SYS_FILE_LOCK_UN ? lock_named(p) : lock_taker(p);
     char cid[LOCK_CLIENT_ID_MAX];

@@ -61,18 +61,21 @@
 // mode), so its `msr sp_el0` always writes the non-current bank — the
 // architecturally well-defined form.
 //
-// Trip hazard (partially closed at #214): a kernel-stack overflow into
-// the guard page still faults recursively (KERNEL_ENTRY builds the frame
-// on the same overflowing stack), but the C-side depth guard in
-// exception.c (exception_sync_curr_el) now parks a CPU whose EL1h-sync
-// chain re-enters — stopping the descent that scribbled exception frames
-// across RAM through the directmap on the Pi 400 (#214 autopsy). The
-// guard catches every DESTRUCTIVE case (a mapped SP whose frame stores
-// land); an unmapped-SP spiral still recurses store-free below the C
-// layer — harmless to memory, but that CPU spins. The full asm-side
-// fix — an SP-validity check in this 0x200 slot switching to a dedicated
-// overflow / SError stack — remains the future hardening item;
-// g_exception_stacks is retained as the reserved buffer for it.
+// A thread's stack overflows into address space with nothing behind it, and
+// what lies below that may be just as empty, so KERNEL_ENTRY could descend
+// through it for as long as SP lasts, storing nothing and printing nothing. The
+// 0x200 slot therefore reads SP before it stores anything: el1h_sync. A frame
+// that would land in a guard goes on this CPU's overflow stack, and that CPU
+// never returns. The other sync and IRQ slots need no test of their own: a frame
+// they start in a guard faults at its first store, and that fault comes here.
+//
+// The boot and idle stacks live in the image, each with a one-page guard and
+// mapped BSS below it. There a recursive fault still descends through the guard
+// and lands in that BSS, and the C-side depth guard in exception.c
+// (exception_sync_curr_el) parks the CPU (#214: such a descent once scribbled
+// frames across RAM through the direct map on the Pi 400). A wild SP that is
+// nowhere at all still recurses store-free below the C layer: harmless to
+// memory, but that CPU spins.
 
 #include "exception.h"
 
@@ -92,8 +95,7 @@
 // Total: 0x120 = 288 bytes (matches EXCEPTION_CTX_SIZE).
 // ---------------------------------------------------------------------------
 
-.macro KERNEL_ENTRY
-    sub     sp, sp, #EXCEPTION_CTX_SIZE
+.macro KERNEL_SAVE
     stp     x0,  x1,  [sp, #0x000]
     stp     x2,  x3,  [sp, #0x010]
     stp     x4,  x5,  [sp, #0x020]
@@ -117,6 +119,11 @@
     mrs     x13, esr_el1
     mrs     x14, far_el1
     stp     x13, x14, [sp, #0x110]
+.endm
+
+.macro KERNEL_ENTRY
+    sub     sp, sp, #EXCEPTION_CTX_SIZE
+    KERNEL_SAVE
 .endm
 
 // KERNEL_EXIT — mirror of KERNEL_ENTRY; the live shared recoverable-exit
@@ -214,10 +221,7 @@ _exception_vectors:
     // erets — staying at EL1h for a kernel→kernel return.
     // ------------------------------------------------------------------
     .org _exception_vectors + 0x200      /* Sync */
-    KERNEL_ENTRY
-    mov     x0, sp
-    bl      exception_sync_curr_el
-    b       .Lexception_return           /* R12-uaccess: see 0x000 slot. */
+    b       el1h_sync                  /* the SP test and the frame exceed 0x80 bytes */
 
     .org _exception_vectors + 0x280      /* IRQ — recoverable */
     KERNEL_ENTRY
@@ -285,6 +289,52 @@ _exception_vectors:
 
     .org _exception_vectors + 0x800
 .size _exception_vectors, . - _exception_vectors
+
+// ---------------------------------------------------------------------------
+// el1h_sync -- the 0x200 slot, under a symbol of its own so a dump names it: file
+// local, like .Lexception_return, and for that reason. Nothing is free yet to test
+// SP with, so x0
+// travels inside SP for three instructions: SP holds frame + x0, x0 holds the
+// frame, and the two subtractions at 1: undo it. Testing the frame's address,
+// not SP's, catches a frame that would straddle the guard before any store, so
+// ELR and FAR still name the fault that got here.
+// ---------------------------------------------------------------------------
+el1h_sync:
+    sub     sp, sp, #EXCEPTION_CTX_SIZE
+    add     sp, sp, x0                   /* sp = frame + x0 */
+    sub     x0, sp, x0                   /* x0 = frame */
+    tbz     x0, #KSTACK_RANGE_TAG_BIT, 1f
+    tbz     x0, #KSTACK_USABLE_BIT, el1h_sync_overflow
+1:  sub     x0, sp, x0                   /* x0 = x0 at entry */
+    sub     sp, sp, x0                   /* sp = frame */
+    KERNEL_SAVE
+    mov     x0, sp
+    bl      exception_sync_curr_el
+    b       .Lexception_return           /* R12-uaccess: see 0x000 slot. */
+
+// This CPU is finished, so EL0's two thread registers can carry what the frame
+// needs: nothing returns to the thread they belong to. The slot arithmetic is
+// (cpu + 1) * SECONDARY_STACK_SLOT_SIZE, the top of this CPU's slot, with the
+// literals smp.h pins.
+el1h_sync_overflow:
+    msr     tpidr_el0, x0                /* the frame that had nowhere to go */
+    sub     x0, sp, x0                   /* x0 at entry */
+    msr     tpidrro_el0, x0
+    mrs     x0, mpidr_el1
+    and     x0, x0, #7
+    add     x0, x0, #1
+    add     x0, x0, x0, lsl #2
+    lsl     x0, x0, #12
+    mov     sp, x0
+    adrp    x0, g_overflow_stacks
+    add     x0, x0, :lo12:g_overflow_stacks
+    add     sp, sp, x0
+    KERNEL_ENTRY
+    mov     x0, sp
+    mrs     x1, tpidr_el0
+    mrs     x2, tpidrro_el0
+    bl      exception_kstack_overflow
+    b       _torpor                      /* unreached */
 
 // ---------------------------------------------------------------------------
 // .Lexception_return — shared trampoline for recoverable exception paths.

@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Check query ABI mirrors and exercise the actual native handler with mocks.
-Usage: test-native-handle-query.py [--mutant ceiling|append] OUTPUT_DIRECTORY
+Usage: test-native-handle-query.py [--mutant ceiling|append|mirror] OUTPUT_DIRECTORY
 The output must be new. This does not emulate handle locking or Vivarium;
 run the native guest witness and Linux collision witness for those boundaries.
 A mutant must be refused: ceiling moves VIV_NATIVE_CEILING in the text the pins
-read, and append drops the handler's APPEND bit from the code the test runs.
+read, append drops the handler's APPEND bit from the code the test runs, and
+mirror moves NOTE_WAIT in libthyla-rs and in Pouch's 0072, in the text the
+mirror check reads.
 """
 if not __debug__:raise SystemExit(__file__+': run without -O or PYTHONOPTIMIZE: its verdicts are asserts')
 import argparse
@@ -17,7 +19,7 @@ from pathlib import Path
 p = argparse.ArgumentParser(description=__doc__)
 p.add_argument('output', type=Path)
 p.add_argument('--cc', default='/opt/homebrew/opt/llvm/bin/clang')
-p.add_argument('--mutant', choices=['ceiling', 'append'])
+p.add_argument('--mutant', choices=['ceiling', 'append', 'mirror'])
 a = p.parse_args()
 r = Path(__file__).resolve().parent.parent
 checks = {
@@ -55,7 +57,7 @@ checks = {
         r'\+#define SYS_thyla_lstat\s+136\b'],
     'usr/lib/pouch/patches/0065-pouch-file-locks.patch': [
         r'\+#define SYS_thyla_file_lock\s+137\b'],
-    'kernel/include/thylacine/vivarium.h': [r'#define VIV_NATIVE_CEILING\s+140\b'],
+    'kernel/include/thylacine/vivarium.h': [r'#define VIV_NATIVE_CEILING\s+141\b'],
     'kernel/vivarium.c': [
         r'VIV_LINUX_KILL == SYS_HANDLE_FLAGS_GET',
         r'\{ VIV_LINUX_KILL,\s+VIV_TIER2 \}',
@@ -66,22 +68,84 @@ checks = {
         r'VIV_LINUX_RT_SIGPENDING == SYS_LSTAT',
         r'VIV_LINUX_RT_SIGACTION == SYS_SRV_REGISTRY_NEW',
         r'VIV_LINUX_RT_SIGTIMEDWAIT == SYS_FILE_LOCK',
-        r'VIV_LINUX_RT_SIGQUEUEINFO == SYS_POSTNOTE_TID'],
+        r'VIV_LINUX_RT_SIGQUEUEINFO == SYS_POSTNOTE_TID',
+        r'VIV_LINUX_RT_SIGRETURN == SYS_NOTE_DISPOSE',
+        r'_Static_assert\(SYS_ACCOUNT == 140,',
+        r'_Static_assert\(SYS_NOTE_WAIT == 141,'],
 }
 failed = []
 for name, patterns in checks.items():
     source = (r / name).read_text()
     if a.mutant == 'ceiling' and name.endswith('vivarium.h'):
-        source, n = re.subn(r'(#define VIV_NATIVE_CEILING\s+)140\b', r'\g<1>139', source)
+        source, n = re.subn(r'(#define VIV_NATIVE_CEILING\s+)141\b', r'\g<1>140', source)
         assert n == 1
     for pattern in patterns:
         if len(re.findall(pattern, source)) != 1:
             failed.append((name, pattern))
 if a.mutant == 'ceiling':
-    assert failed == [('kernel/include/thylacine/vivarium.h', r'#define VIV_NATIVE_CEILING\s+140\b')], failed
+    assert failed == [('kernel/include/thylacine/vivarium.h', r'#define VIV_NATIVE_CEILING\s+141\b')], failed
     print('PASS ceiling mutant refused by the pin')
     raise SystemExit(0)
 assert not failed, failed
+
+# Every syscall number a mirror names, against the kernel enum, by name: a pin per
+# number is re-pointed by hand at each renumber, and a merge that has two branches
+# take one number moves a mirror alone. A floor and the renumbered region prove
+# each search read its mirror.
+kernel_numbers = {}
+for m in re.finditer(r'^\s*SYS_([A-Z0-9_]+)\s*=\s*(\d+)\s*,',
+                     (r / 'kernel/include/thylacine/syscall.h').read_text(), re.M):
+    assert m.group(1) not in kernel_numbers, m.group(1)
+    kernel_numbers[m.group(1)] = int(m.group(2))
+POUCH_ALIASES = {'PREAD64': 'PREAD', 'PWRITE64': 'PWRITE', 'EXIT': 'EXITS', 'SCHED_YIELD': 'YIELD',
+                 'MMAP': 'BURROW_ATTACH_LAZY', 'MUNMAP': 'BURROW_DETACH'}
+pouch_patches = sorted((r / 'usr/lib/pouch/patches').glob('*.patch'))
+pouch_text = {patch: patch.read_text() for patch in pouch_patches}
+libt = (r / 'usr/lib/libt/include/thyla/syscall.h').read_text()
+rust = (r / 'usr/lib/libthyla-rs/src/lib.rs').read_text()
+if a.mutant == 'mirror':
+    rust, n = re.subn(r'^(pub const T_SYS_NOTE_WAIT:\s*u64\s*=\s*)141;', r'\g<1>142;', rust, flags=re.M)
+    assert n == 1
+    wait_patch = r / 'usr/lib/pouch/patches/0072-pouch-note-wait.patch'
+    pouch_text[wait_patch], n = re.subn(r'^(\+#define __NR_note_wait\s+)141\b', r'\g<1>142',
+                                        pouch_text[wait_patch], flags=re.M)
+    assert n == 1
+# Every Pouch define of a syscall number is read, or is an ENOSYS stub (0xFFFF):
+# a line in a form the read misses (a trailing comment once hid 30) fails here.
+pouch_numbers, pouch_unread = [], []
+for patch in pouch_patches:
+    for line in pouch_text[patch].splitlines():
+        if not re.match(r'\+#define\s+(?:__NR_|SYS_)', line):
+            continue
+        m = re.match(r'\+#define\s+(?:__NR_|SYS_)(?:thyla_)?([a-z0-9_]+)\s+(\d+)\b', line)
+        if m:
+            pouch_numbers.append((POUCH_ALIASES.get(m.group(1).upper(), m.group(1).upper()), int(m.group(2))))
+        elif not re.match(r'\+#define\s+\S+\s+0xFFFF\b', line):
+            pouch_unread.append((patch.name, line))
+assert not pouch_unread, pouch_unread
+mirrors = {
+    'libt': [(m.group(1), int(m.group(2)))
+             for pattern in (r'^\s*T_SYS_([A-Z0-9_]+)\s*=\s*(\d+)\s*,', r'^#define T_SYS_([A-Z0-9_]+)\s+(\d+)\s*$')
+             for m in re.finditer(pattern, libt, re.M)],
+    'libthyla-rs': [(m.group(1), int(m.group(2))) for m in re.finditer(
+        r'^pub const T_SYS_([A-Z0-9_]+):\s*u64\s*=\s*(\d+)\s*;', rust, re.M)],
+    'pouch': pouch_numbers,
+}
+floor = {'libt': 100, 'libthyla-rs': 120, 'pouch': 80}
+region = {'POSTNOTE_TID', 'NOTE_DISPOSE', 'NOTE_WAIT'}
+drift = []
+for mirror, pairs in mirrors.items():
+    names = {name for name, _ in pairs}
+    assert len(pairs) >= floor[mirror] and region <= names, (mirror, len(pairs), region - names)
+    drift += [(mirror, name, number, kernel_numbers.get(name))
+              for name, number in pairs if kernel_numbers.get(name) != number]
+if a.mutant == 'mirror':
+    assert drift == [('libthyla-rs', 'NOTE_WAIT', 142, 141), ('pouch', 'NOTE_WAIT', 142, 141)], drift
+    print('PASS mirror mutant refused by the mirror check')
+    raise SystemExit(0)
+assert not drift, drift
+print('mirror check: ' + ', '.join(f'{k} {len(v)}' for k, v in mirrors.items()) + ' numbers match the kernel')
+
 source = r / 'kernel/syscall.c'
 s = source.read_text()
 assert 'sys_handle_flags_get_handler(ctx->regs[0])' in s
@@ -97,7 +161,7 @@ if a.mutant == 'append':
     handler = handler.replace(old, '')
 a.output.mkdir(parents=True, exist_ok=False)
 (a.output / 'handler.c').write_text(handler+'\n')
-inputs = [r / n for n in checks] + [source, Path(__file__), r / 'tools/host-tests/native-handle-query.c']
+inputs = [r / n for n in checks] + pouch_patches + [source, Path(__file__), r / 'tools/host-tests/native-handle-query.c']
 (a.output / 'inputs.json').write_text(json.dumps({str(x): hashlib.sha256(x.read_bytes()).hexdigest() for x in inputs}, indent=2)+'\n')
 import platform
 sdk = ['-isysroot', subprocess.check_output(['xcrun', '--show-sdk-path'], text=True).strip()] if platform.system() == 'Darwin' else []

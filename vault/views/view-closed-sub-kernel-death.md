@@ -16,7 +16,7 @@ load-bearing as the findings, because it is what stops a round
 re-deriving the I-9 close from scratch.
 
 <!-- generated:begin -->
-13 closed findings on [[sub-kernel-death]] — do NOT re-report
+16 closed findings on [[sub-kernel-death]] — do NOT re-report
 these in a future round (open/deferred findings are NOT listed
 here; see the seam inbox):
 
@@ -33,4 +33,7 @@ here; see the seam inbox):
 - [[fnd-926-r1-f1]] [P3] handle.c's lockless justification named a premise the new ALIVE-Proc call site broke (fixed) — FIXED: comment updated, plus a FOOTGUN flag for a future cross-Proc
 - [[fnd-926-r1-f2]] [P3] A KILLED single-thread Proc still deferred its fd close to reap (fixed) — Documented at the time as a v1.x EXITING-protocol-restructure item — and
 - [[fnd-926-r1-f3]] [P3] $errstr goes stale on a substitution spawn failure (documented) — CLOSED WITH JUSTIFICATION, no code change: the failure remains observable
+- [[fnd-c8a-r3-f1]] [P3] I-24's dossier still named the removed walk and die check (fixed) — Reworded.
+- [[fnd-c8a-r3-f2]] [P3] The death dossier kept a sentence about the walk (fixed) — Reworded.
+- [[fnd-c8a-r3-f3]] [P3] A test program's comment named the walk (fixed) — Reworded.
 <!-- generated:end -->

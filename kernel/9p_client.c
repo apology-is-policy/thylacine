@@ -1311,8 +1311,13 @@ static int client_run(struct p9_client *c, size_t built_len,
     }
 
     int wr = client_wait(c, &rpc);
-    if (wr == CLIENT_WAIT_NOTEINTR && type != P9_TCLUNK)
+    if (wr == CLIENT_WAIT_NOTEINTR && type != P9_TCLUNK) {
         wr = client_flush_wait(c, &rpc);
+        // The op ended on its own answer, so the unwind cancelled nothing: a server's
+        // Rlerror(EINTR) that beat the flush is an error to report, not a call to
+        // re-issue. A later op of this call that unwinds marks it again.
+        if (wr == CLIENT_WAIT_DONE) current_thread()->note_call_unwound = false;
+    }
     if ((wr == CLIENT_WAIT_DIED || wr == CLIENT_WAIT_NOTEINTR) &&
         type == P9_TCLUNK) {
         // A Tclunk is never flushed (FID-LIFECYCLE section 9, flush(5)): a

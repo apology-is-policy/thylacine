@@ -57,9 +57,21 @@ _Static_assert(VIV_LINUX_SETGID > VIV_NATIVE_CEILING,
 // confers nothing. A row arriving at 140 owes this paragraph again.
 _Static_assert(SYS_ACCOUNT == 140,
                "revisit setpriority / ACCOUNT collision on renumber");
-// rt_sigreturn (139) meets no native number on this tree, and
-// syscall.native_holes_unassigned pins that. syscall.c intercepts it for a Linux Proc before the native
-// switch regardless.
+// SYS_NOTE_DISPOSE takes 139 (vote 18, 2026-11-03), Linux rt_sigreturn's
+// number. viv_linux_dispatch intercepts rt_sigreturn before the
+// translation table, so a Linux Proc never reaches the native call. A native
+// program mis-declared as Linux loses it and has its dispose restore a frame that
+// was never saved, which rt_sigreturn refuses; the call grants nothing beyond the
+// caller's own dispositions, so nothing is exposed either way.
+_Static_assert(VIV_LINUX_RT_SIGRETURN == SYS_NOTE_DISPOSE,
+               "revisit rt_sigreturn / NOTE_DISPOSE collision on renumber");
+// SYS_NOTE_WAIT at 141 (vote 24, 2026-11-03) lifted the ceiling over 141. Linux
+// getpriority (141) has no row: only a row that renumbers returns into the native
+// switch, so a Linux Proc never reaches the native call, and a native program
+// mis-declared as Linux reads ENOSYS. The native call grants nothing beyond the
+// caller's own Proc, so nothing is exposed either way. Nothing can be asserted against a
+// row that does not exist; a row added at 141 is a per-number argument.
+_Static_assert(SYS_NOTE_WAIT == 141, "revisit Linux getpriority's row on renumber");
 // SYS_POSTNOTE_TID at 138 (vote 2026-11-02) lifted the ceiling over 135..138.
 // Linux rt_sigqueueinfo (138) collides with it. The row is VIV_ENOSYS, so a Linux
 // Proc never reaches the post (tgkill is how it names a thread). A native program
@@ -68,24 +80,28 @@ _Static_assert(SYS_ACCOUNT == 140,
 _Static_assert(VIV_LINUX_RT_SIGQUEUEINFO == SYS_POSTNOTE_TID,
                "revisit rt_sigqueueinfo / POSTNOTE_TID collision on renumber");
 // Linux rt_sigtimedwait (137) collides with SYS_FILE_LOCK (votes 34-35). Its
-// row is VIV_ENOSYS, and viv_linux_dispatch returns before the native switch
-// for every row that is not TRANSLATED, so a Linux Proc never reaches the
-// native lock call -- test_vivarium pins the verdict. A native program
-// mis-declared as Linux loses its locks to ENOSYS, which takes nothing. A change
-// of the row to TRANSLATED must re-argue this.
+// row is VIV_TIER2 (vote 24: viv_rt_sigtimedwait), and viv_linux_dispatch returns
+// before the native switch for every row that is not TRANSLATED, so a Linux Proc
+// never reaches the native lock call -- test_vivarium pins the verdict. A native
+// program mis-declared as Linux loses its locks: file_lock(fd, op, start, len,
+// out_va) arrives as rt_sigtimedwait(set, info, timeout, sigsetsize), which refuses
+// unless len is 8 and then reads a set at the fd's number, and at most takes the
+// caller's own notes into its own memory. It takes no lock. A change of the row to
+// TRANSLATED must re-argue this.
 _Static_assert(VIV_LINUX_RT_SIGTIMEDWAIT == SYS_FILE_LOCK,
                "revisit rt_sigtimedwait / FILE_LOCK collision on renumber");
 // Linux rt_sigprocmask (135) collides with SYS_READLINK, and rt_sigpending
 // (136) with SYS_LSTAT (vote 2026-10-20). rt_sigprocmask's row is VIV_TIER2
-// (vivarium_sigprocmask_decide and its shell) and rt_sigpending's VIV_ENOSYS;
-// viv_linux_dispatch returns before the native switch for every row that is
-// not TRANSLATED, so a Linux Proc reaches neither native call -- test_vivarium
-// pins both verdicts. A native program mis-declared as Linux loses both: its
-// readlink arrives as rt_sigprocmask with the path pointer as `how`, which the
-// decide FORWARDs unless it is 0, 1 or 2, and even then the shell reads and
-// writes only the caller's own mask and memory; its lstat arrives as
-// rt_sigpending, which is ENOSYS. A change of either row to TRANSLATED must
-// re-argue this.
+// (vivarium_sigprocmask_decide and its shell), and so is rt_sigpending's (vote 28:
+// notes_wait_pending); viv_linux_dispatch returns before the native switch for
+// every row that is not TRANSLATED, so a Linux Proc reaches neither native call --
+// test_vivarium pins both verdicts. A native program mis-declared as Linux loses
+// both: its readlink arrives as rt_sigprocmask with the path pointer as `how`,
+// which the decide FORWARDs unless it is 0, 1 or 2, and even then the shell reads
+// and writes only the caller's own mask and memory; its lstat(path_va, path_len,
+// stat_va) arrives as rt_sigpending(set, sigsetsize), which refuses unless path_len
+// is 8 and then writes the pending word over the caller's own path. A change of
+// either row to TRANSLATED must re-argue this.
 // Linux utimensat (88) collides with SYS_STAT (G12). Its row is VIV_TIER2 and
 // viv_linux_dispatch answers it in its own shell, so a Linux Proc never
 // reaches the native stat; a native program mis-declared as Linux loses it to
@@ -96,11 +112,14 @@ _Static_assert(VIV_LINUX_RT_SIGPROCMASK == SYS_READLINK,
                "revisit rt_sigprocmask / READLINK collision on renumber");
 _Static_assert(VIV_LINUX_RT_SIGPENDING == SYS_LSTAT,
                "revisit rt_sigpending / LSTAT collision on renumber");
-// Linux rt_sigsuspend (133) collides with SYS_UMASK (M8). Its row is
-// VIV_ENOSYS and viv_linux_dispatch consumes every row that is not TRANSLATED
-// before the native switch, so a Linux Proc's rt_sigsuspend never sets its
-// creation mask; test_vivarium pins the ENOSYS verdict. Serving rt_sigsuspend
-// must re-argue this.
+// Linux rt_sigsuspend (133) collides with SYS_UMASK (M8). Its row is VIV_TIER2
+// (vote 24: notes_wait_suspend), and viv_linux_dispatch consumes every row that is
+// not TRANSLATED before the native switch, so a Linux Proc's rt_sigsuspend never
+// sets its creation mask; test_vivarium pins the TIER2 verdict. A native program
+// mis-declared as Linux loses its umask: umask(mask) arrives as rt_sigsuspend(set,
+// sigsetsize), which refuses unless x1 is 8 and then reads a set at the mask's
+// value, at most suspending the caller's own thread. A change of the row to
+// TRANSLATED must re-argue this.
 _Static_assert(VIV_LINUX_RT_SIGSUSPEND == SYS_UMASK,
                "revisit rt_sigsuspend / UMASK collision on renumber");
 // Linux sigaltstack (132) collides with SYS_GETPPID (vote 6). Its row is
@@ -478,6 +497,9 @@ static const struct viv_reject g_viv_rejects[] = {
     // The signal family (V-6, §6.22).
     { VIV_LINUX_RT_SIGACTION,   VIV_TIER2 },  // V-6b: vivarium_sigaction_decide
     { VIV_LINUX_RT_SIGPROCMASK, VIV_TIER2 },  // V-6b: vivarium_sigprocmask_decide
+    { VIV_LINUX_RT_SIGSUSPEND,   VIV_TIER2 }, // vote 24: notes_wait_suspend
+    { VIV_LINUX_RT_SIGTIMEDWAIT, VIV_TIER2 }, // vote 24: notes_wait_take
+    { VIV_LINUX_RT_SIGPENDING,   VIV_TIER2 }, // vote 28: notes_wait_pending
     // The only signal rows that are an AUTHORITY question rather than a
     // disposition one: they name another Proc, so they reuse SYS_POSTNOTE's own
     // gate verbatim -- the caller, or a child it spawned; the gate Pouch's kill
@@ -491,19 +513,12 @@ static const struct viv_reject g_viv_rejects[] = {
     // "not yet":
     //   sigaltstack   — an alternate signal stack is only meaningful once
     //                   delivery honours SA_ONSTACK, which it does not.
-    //   rt_sigsuspend — atomically swap the mask and sleep; needs the mask to be
-    //                   a wait predicate, which note_mask is not.
-    //   rt_sigpending — Thylacine's queue is per-Proc and consumed exactly once
-    //                   (I-19 N-2); "pending but undelivered" is not a state it
-    //                   distinguishes.
-    //   rt_sigtimedwait / rt_sigqueueinfo — queued siginfo, which notes do not
-    //                   carry (a note has a 16-byte name and one u32 arg).
-    //   restart_syscall — the kernel-internal restart continuation, meaningless
-    //                   without SA_RESTART.
+    //   rt_sigqueueinfo — queued siginfo, which notes do not carry (a note has a
+    //                   16-byte name and one u32 arg).
+    //   restart_syscall — the continuation of a restart block, and no call here
+    //                   owes one: a timed call the kernel would have to resume
+    //                   reports EINTR instead.
     { VIV_LINUX_SIGALTSTACK,     VIV_ENOSYS },
-    { VIV_LINUX_RT_SIGSUSPEND,   VIV_ENOSYS },
-    { VIV_LINUX_RT_SIGPENDING,   VIV_ENOSYS },
-    { VIV_LINUX_RT_SIGTIMEDWAIT, VIV_ENOSYS },
     { VIV_LINUX_RT_SIGQUEUEINFO, VIV_ENOSYS },
     { VIV_LINUX_RESTART_SYSCALL, VIV_ENOSYS },
 
@@ -745,6 +760,42 @@ enum viv_intr vivarium_intr_class(u64 linux_nr, const u64 *args) {
         return VIV_INTR_IF_SLOW;
     default:
         return VIV_INTR_NEVER;
+    }
+}
+
+// ARCH 8.8.3: of the calls above, the ones SA_RESTART re-issues. signal(7) leaves
+// ppoll, pselect6, nanosleep, clock_nanosleep, rt_sigsuspend and rt_sigtimedwait
+// out whatever the flag says; a timed futex would need a restart block with its
+// remaining time, and restart_syscall stays ENOSYS, so it returns EINTR instead.
+// The default is false on purpose: a row added later reports EINTR until someone
+// puts it here, which a program must handle anyway.
+bool vivarium_call_restartable(u64 linux_nr, const u64 *args) {
+    if (!args) return false;
+    switch (linux_nr) {
+    case VIV_LINUX_ACCEPT:
+    case VIV_LINUX_ACCEPT4:
+    case VIV_LINUX_CONNECT:
+    case VIV_LINUX_RECVFROM:
+    case VIV_LINUX_RECVMSG:
+    case VIV_LINUX_SENDTO:
+    case VIV_LINUX_SENDMSG:
+    case VIV_LINUX_WAIT4:
+    case VIV_LINUX_READ:
+    case VIV_LINUX_READV:
+    case VIV_LINUX_WRITE:
+    case VIV_LINUX_WRITEV:
+    case VIV_LINUX_PREAD64:
+    case VIV_LINUX_PWRITE64:
+    case VIV_LINUX_IOCTL:
+        return true;
+    case VIV_LINUX_FCNTL: {
+        u32 cmd = (u32)args[1];
+        return cmd == VIV_F_SETLKW || cmd == VIV_F_OFD_SETLKW;
+    }
+    case VIV_LINUX_FUTEX:
+        return args[3] == 0;
+    default:
+        return false;
     }
 }
 
@@ -2984,6 +3035,18 @@ bool vivarium_parse_conn_n(const char *buf, u32 len, u32 *out_n) {
 // Readiness (V-5c, section 5.5.4).
 // -----------------------------------------------------------------------------
 
+bool vivarium_timespec_to_ns(s64 sec, s64 nsec, s64 *out_ns, s32 *out_err) {
+    if (!out_ns || !out_err) return false;
+    *out_err = 0;
+    if (sec < 0 || nsec < 0 || nsec >= 1000000000) {
+        *out_err = (s32)T_E_INVAL;
+        return false;
+    }
+    const s64 max_ns = 0x7FFFFFFFFFFFFFFFll;
+    *out_ns = sec > (max_ns - nsec) / 1000000000 ? max_ns : sec * 1000000000 + nsec;
+    return true;
+}
+
 bool vivarium_timespec_to_ms(s64 sec, s64 nsec, s32 *out_ms, s32 *out_err) {
     if (!out_ms || !out_err) return false;
     *out_err = 0;
@@ -3012,15 +3075,13 @@ bool vivarium_timespec_to_ms(s64 sec, s64 nsec, s32 *out_ms, s32 *out_err) {
     return true;
 }
 
-bool vivarium_ppoll_decide(u64 nfds, u64 sigmask_va, s32 *out_err) {
+bool vivarium_ppoll_decide(u64 nfds, u64 sigmask_va, u64 sigsetsize, s32 *out_err) {
     if (!out_err) return false;
     *out_err = 0;
 
-    // The atomic mask swap has no counterpart -- see the header. Checked FIRST
-    // so a caller using ppoll for its signal semantics learns that is the
-    // unserved part, rather than being told its nfds is wrong.
-    if (sigmask_va != 0) {
-        *out_err = (s32)T_E_NOSYS;
+    // Linux's set_user_sigmask: a size is only looked at beside a mask.
+    if (sigmask_va != 0 && sigsetsize != sizeof(u64)) {
+        *out_err = (s32)T_E_INVAL;
         return false;
     }
 
@@ -3059,18 +3120,10 @@ static void viv_fdset_set_bit(u8 *set, u32 fd) {
     set[fd >> 3] |= (u8)(1u << (fd & 7u));
 }
 
-bool vivarium_pselect6_decide(u64 nfds_raw, u64 sigmask_va, u32 *out_nfds,
-                              s32 *out_err) {
+bool vivarium_pselect6_decide(u64 nfds_raw, u32 *out_nfds, s32 *out_err) {
     if (!out_nfds || !out_err) return false;
     *out_err  = 0;
     *out_nfds = 0;
-
-    // Checked first, exactly as in ppoll: a caller reaching for pselect6's
-    // signal semantics should learn THAT is the unserved part.
-    if (sigmask_va != 0) {
-        *out_err = (s32)T_E_NOSYS;
-        return false;
-    }
 
     // Linux's own check, and it must be signed AND 32-bit: nfds is an `int`, so
     // only the low word is significant. A caller may leave x0 sign-extended
@@ -3499,7 +3552,15 @@ int viv_sigtab_clone_into(struct Proc *child, const struct Proc *parent) {
     if (!src) return 0;
     struct viv_sigtab *dst = (struct viv_sigtab *)kzalloc(sizeof(*dst), 0);
     if (!dst) return -1;
-    for (u32 i = 0; i < (u32)VIV_SIGNOTE_COUNT; i++) dst->act[i] = src->act[i];
+    // A peer may be writing a row now. The handler first, as every reader has it: its
+    // RELEASE vouches for the rest of the row, and for a SYS_NOTIFY ahead of it.
+    for (u32 i = 0; i < (u32)VIV_SIGNOTE_COUNT; i++) {
+        const struct viv_ksigaction *a = &src->act[i];
+        dst->act[i].handler  = sigact_ld_handler(a);
+        dst->act[i].flags    = __atomic_load_n(&a->flags,    __ATOMIC_RELAXED);
+        dst->act[i].restorer = __atomic_load_n(&a->restorer, __ATOMIC_RELAXED);
+        dst->act[i].mask     = __atomic_load_n(&a->mask,     __ATOMIC_RELAXED);
+    }
     __atomic_store_n(&child->sigtab, dst, __ATOMIC_RELEASE);
     return 0;
 }

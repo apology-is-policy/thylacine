@@ -18,9 +18,9 @@
 //                         t->in_handler = true   (notes.c:1426)
 //   inside that handler: raise(SIGCHLD)
 //
-// SIGCHLD is chosen over SIGPIPE deliberately: pouch MASKS SIGPIPE at startup,
-// so a pipe-based second signal would be suppressed by the mask rather than by
-// N-3, and the test would pass for the wrong reason.
+// SIGCHLD is chosen over SIGPIPE deliberately: pouch's row ignores SIGPIPE from
+// startup, so a pipe-based second signal would be dropped at the post rather than
+// held by N-3, and the test would pass for the wrong reason.
 //
 // THE POINT THAT MAKES THE NEGATIVE REAL: a sleep inside the first handler.
 // "The second note was not delivered" is worthless if the kernel never got the

@@ -24,9 +24,10 @@
 #   2. the PTS (a ptyhost'ed ut): `viv run /vivarium/alpine-ash` -- the
 #      interactive phenotype ash (args /bin/sh -i; ioctl is unserved so
 #      isatty() is false and ash needs the flag). Its prompt on the pts, a
-#      command answered through stdin/stdout, `exit` back to ut. SKIPs when
-#      the bundle is not staged (it needs the Alpine minirootfs + busybox
-#      apk in build/cache, like the L-6c gate).
+#      command answered through stdin/stdout, `exit` back to ut. The scenario
+#      reports SKIP, never PASS, when the bundle is not staged (it needs the
+#      Alpine minirootfs + busybox apk in build/cache, like the L-6c gate):
+#      the ^C the scenario exists for is in this half.
 #
 # The creation mask (IDENTITY-DESIGN 9.7 M8) rides both vantages: the console
 # ut prints it, sets it and creates under it; the mask it leaves (027) is
@@ -187,5 +188,8 @@ if {$have_ash} {
     lc_pass "VIV-RUN: a plain user shell runs a container on the console and on a pts, ^C reaches the container, not the runner, and the creation mask reaches the container"
 } else {
     lc_step "alpine-ash bundle not staged ($ash_bundle) -- the pts half is skipped"
-    lc_pass "VIV-RUN: console half PASS (with the creation mask); the pts half needs the Alpine bundle staged"
+    puts "\nLS-CI SKIP: the console half held, with the creation mask; the pts half and\
+          its ^C need the alpine-ash bundle staged at $ash_bundle"
+    lc_quit
+    exit 77
 }

@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/ARCHITECTURE.md section 9.2"]
 created: 2026-08-03
-updated: 2026-11-02
+updated: 2026-11-03
 ---
 ## The lock slots (B-3h2, 2026-10-29)
 
@@ -25,7 +25,9 @@ Five slots serve [[sub-kernel-filelock]] (ARCH 9.6.11):
   the same Dev.
 - `lock_sync(c, DEV_LOCK_SYNC_RELEASE)` lands `c`'s staged writes, for any open
   of the file in the Proc, before a
-  release.
+  release. A flush a caught note cancelled answers `-T_E_INTR` with the thread's
+  `note_call_unwound` still set and the run staged, and a lock call then answers
+  EINTR ([[sub-kernel-filelock]]).
 - `lock_ident(c)` learns once which file `c` names, and can answer ESTALE.
 - `wstat_bind(c)` readies `c` before SYS_WSTAT reads the stat its policy judges,
   so that stat is the file's own rather than its state at open. A failure refuses
@@ -315,6 +317,16 @@ Two disciplines, split by who is at fault:
 - **Operations return NULL / -1.** `dev_lookup_*` return NULL for an
   absent Dev; the trivial Devs' unsupported ops return -1 or NULL;
   `devnone` returns failure from everything.
+- **A failed walk may say why.** `walk` and `walk_attrs` answer NULL with no errno,
+  which reads as "no such name". A Dev with another reason records it with
+  `dev_walk_failed(-errno)` just before the NULL, in `Thread.walk_errno`. A caller that
+  reports errnos goes through `dev_walk` or `dev_walk_attrs`, which clear the slot,
+  call the vtable and hand the reason through `*why` (0: a plain miss), ahead of any
+  cleanup that could walk again. Per thread rather than an out-param on the vtable:
+  only dev9p has a reason, every other Dev would carry a parameter it ignores, and a
+  caller that skips the wrapper keeps today's miss, which fails safe. A value the Dev
+  passes is bounded by `stalk_err_code`: `-1` and anything outside `[-4095,-2]` read
+  `T_E_IO`. ERRORS.md ER-2.
 
 `dev_simple_attach` propagates a `spoor_alloc` NULL. The helpers are
 NULL-safe in their Spoor argument.

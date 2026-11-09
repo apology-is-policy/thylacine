@@ -43,8 +43,9 @@ _Static_assert(THREAD_STATE_INVALID == 0,
                "(P2-A audit R4 F46 close)");
 
 // Thread.caught_wait (ARCH 8.8.3). NONE: not in a wait, so the thread reaches
-// an EL0-return tail soon. UNWINDS: in a wait a caught note unwinds. HOLDS: in
-// a wait that rides a caught note out, which the posting walk never designates.
+// an EL0-return tail soon. UNWINDS: in a wait a caught note unwinds, from the
+// moment a table governs the Proc. HOLDS: in a wait that rides a caught note out,
+// which the posting walk never designates.
 enum caught_wait {
     CAUGHT_WAIT_NONE    = 0,
     CAUGHT_WAIT_UNWINDS = 1,
@@ -69,9 +70,9 @@ struct Thread {
     // cpu_switch_context call saves into it.
     struct Context     ctx;
 
-    // Kernel stack. 16 KiB usable (THREAD_KSTACK_SIZE) + 16 KiB guard,
-    // allocated as one 32 KiB order-3 chunk via alloc_pages; the bottom
-    // THREAD_KSTACK_GUARD_PAGES are mapped no-access. kstack_base is the
+    // Kernel stack. 32 KiB of the stack range (mmu.h): the low 16 KiB are never
+    // mapped and the high 16 KiB (THREAD_KSTACK_SIZE) are four pages, which may
+    // sit anywhere in RAM, so kva_to_pa means nothing here. kstack_base is the
     // LOW address (guard base); ctx.sp is set to kstack_base +
     // THREAD_KSTACK_TOTAL_SIZE (the top) on thread_create and grows down
     // through the 16 KiB usable region, faulting into the guard on overflow.
@@ -83,10 +84,9 @@ struct Thread {
     // cpu_switch_context on a host-stalled secondary -> buddy-LIFO recycle of
     // the slot+kstack -> the stalled CPU's late register-save corrupts the
     // recycled thread's ctx.sp -> wild SP faults in its own guard). Fixed by
-    // the on_cpu gate in thread_free (DEBUGGING-PLAYBOOK 6.12). Separately,
-    // a dedicated per-CPU exception/IRQ stack is still NOT implemented (a
-    // kernel IRQ builds its frame on the interrupted thread's own kstack);
-    // that is unrelated to #788 and remains a documented future hardening.
+    // the on_cpu gate in thread_free (DEBUGGING-PLAYBOOK 6.12). A kernel IRQ
+    // builds its frame on the interrupted thread's own kstack; only a frame
+    // that would land in the guard goes elsewhere (vectors.S el1h_sync).
     void              *kstack_base;
     size_t             kstack_size;
 
@@ -181,23 +181,24 @@ struct Thread {
     // constants + energy model are the deferred EAS tuning (ARCH §8.4.4 "the
     // verification boundary"), landing on real heterogeneous hardware. Occupies
     // the 4 bytes of on_cpu/cpu_pinned tail padding before timerwait_next -- no
-    // struct-size change (the _Static_assert below still pins 1136).
+    // struct-size change.
     u32                util;
 
-    // P5-tsleep: deadline-bounded Rendez sleep. A thread inside a
-    // deadlined tsleep() is linked onto the global timer-wait list
-    // (kernel/sched.c) via timerwait_{next,prev}; sched_tick() scans
-    // that list on every timer fire and wakes any thread whose
-    // sleep_deadline has passed. sleep_deadline is an architectural-
-    // counter value (timer_get_counter units, 0 = unset); sleep_timedout
-    // is set by the timeout wake so tsleep's resume can return
-    // TSLEEP_TIMEDOUT. All four fields are touched only under the
-    // timer-wait lock and r->lock; both links NULL when the thread is
-    // not in a deadlined tsleep. Modeled by specs/tsleep.tla.
+    // P5-tsleep, C8b: deadline-bounded Rendez sleep. A thread inside a
+    // deadlined tsleep() is linked on one per-CPU timer base (kernel/sched.c)
+    // via timerwait_{next,prev}, sorted by sleep_deadline, an architectural-
+    // counter value (timer_get_counter units, 0 = unset). The links and the
+    // deadline are touched only under the base's lock; a wake leaves them, and
+    // the thread unlinks itself as it runs. sleep_timedout is set by the
+    // timeout wake, under r->lock, so tsleep's resume can return
+    // TSLEEP_TIMEDOUT. timer_base_cpu is the base's CPU + 1, 0 when on none,
+    // written under that base's lock and read without it by the owner.
+    // Modeled by specs/tsleep.tla.
     struct Thread     *timerwait_next;
     struct Thread     *timerwait_prev;
     u64                sleep_deadline;
     bool               sleep_timedout;
+    u16                timer_base_cpu;
 
     // P6-pouch-threads (sub-chunk 9): clear-child-tid address — the
     // user-VA of a 4-byte word the kernel atomically zeroes + torpor-
@@ -234,9 +235,10 @@ struct Thread {
     //                later unmask). Before the thread is linked its creator
     //                writes it (rfork_internal, both spawn arms; the link's lock
     //                release orders that store); after, ONLY the owner writes
-    //                it: SYS_NOTE_MASK, the phenotype rt_sigprocmask row, the
-    //                Linux delivery store, the sigreturn restore -- never inside
-    //                a sleep/tsleep/torpor (thread_die_pending relies on this).
+    //                it: SYS_NOTE_MASK, the phenotype rt_sigprocmask row, SYS_NOTE_WAIT
+    //                before its wait, a delivery's store, SYS_NOTED's restore, the
+    //                tail's -- never inside a sleep/tsleep/torpor (thread_die_pending
+    //                relies on this).
     //
     // `in_handler` — true while an async note handler is RUNNING on this
     //                Thread (between the EL0-return-tail dispatch and the
@@ -274,7 +276,10 @@ struct Thread {
     // Set at create, before anything can free the thread; returned once, by
     // thread_destroy. Carved from in_handler's pad -- no size change.
     u8                 pool_pages;
-    u8                 _pad_in_handler;      // explicit 2-byte alignment
+    // NOTE_WF_* (notes.h), for the call in hand: SYS_NOTE_WAIT and the phenotype's
+    // rt_sigsuspend and rt_sigtimedwait set them, and the EL0-return tail ends them.
+    // Owner-only; KP_ZERO; a fork, being a call of its own, never sees them set.
+    u8                 note_wait_flags;
     // ARCH 7.6.4: the note families posted at this thread by name (tkill,
     // tgkill, pthread_kill, raise). No other thread can take them, whatever its
     // mask. A poster sets a bit holding the Proc's threads_lock; the owner's
@@ -286,14 +291,14 @@ struct Thread {
     u64                note_saved_sp_el0;
     u64                note_saved_elr;
     u64                note_saved_spsr;
-    // The PRE-handler note_mask, saved by the phenotype delivery path beside
-    // the register block and restored by the phenotype's rt_sigreturn -- the
-    // kernel-side twin of the frame's uc_sigmask (the frame is written for
-    // reading; this is what the restore reads). Meaningful only while
-    // in_handler is true AND the delivery was the Linux path; the native
-    // path neither writes nor restores it (a native handler's mask change
-    // persists past noted). Part of the handler-execution snapshot a fork
-    // from inside a handler copies to the child.
+    // The mask to put back (ARCH 8.8.3). While in_handler: the mask the interrupted
+    // code ran under, which every delivery writes beside the register block and
+    // SYS_NOTED's restore reads, on both phenotypes -- the kernel-side twin of a Linux
+    // frame's uc_sigmask (the frame is written for reading). While NOTE_WF_MASK_HELD:
+    // the mask a wait of SYS_NOTE_WAIT replaced, which its handler's return or its
+    // tail puts back. Never both: such a wait holds the slot only outside a handler.
+    // Part of the handler-execution snapshot a fork from inside a handler copies to
+    // the child.
     u64                note_saved_mask;
     // SYS_NOTED(NDFLT) needs to know the note name to apply the default
     // action (`exits(name)` for the v1.0 supported set). Captured at
@@ -310,7 +315,7 @@ struct Thread {
     // takes a peer's wait_lock to READ rendez_blocked_on and wake it, so the
     // cascade-vs-register read/write is serialized (acquire/release on
     // group_exit_msg alone loses the wakeup in the miss case). wait_lock is
-    // the OUTERMOST wait-lock: order wait_lock -> g_timerwait.lock -> r->lock,
+    // the OUTERMOST wait-lock: order wait_lock -> a timer base's lock -> r->lock,
     // and it is NEVER held across sched() (a sleeper that held it would
     // deadlock the cascade). Zero (KP_ZERO from the SLUB cache) == unlocked,
     // so no explicit init is needed.
@@ -634,13 +639,33 @@ struct Thread {
     struct poll_defer_chain lock_owed;
     u32                     defer_depth;
 
+    // ARCH 8.8.3, the kernel's restart. For the call in hand: may the tail re-issue
+    // it (note_restartable, set where note_interruptible is), did a wait of it
+    // unwind for a caught note (note_call_unwound, set by thread_caught_note_-
+    // unwinds, and not note_unwound, the 9P reader's), and the x0 it came in with
+    // (note_call_x0). syscall_dispatch_body sets them and the EL0-return tail
+    // ends them, so a tail reached from anything but a syscall finds them clear.
+    // Owner-only; KP_ZERO inits them; not rfork-propagated.
+    bool                    note_restartable;
+    bool                    note_call_unwound;
+    // Why this thread's last Dev.walk or walk_attrs returned NULL, as a T_E_* code, 0
+    // for a plain miss (dev_walk_failed, read by dev_walk; ERRORS.md ER-2). A slot, since
+    // c can be a shared Spoor and the query form has no nc, and only dev9p has a reason to
+    // give. Sits in defer_depth's trailing pad. Owner-only; KP_ZERO inits it; not rfork-propagated.
+    u16                     walk_errno;
+    u64                     note_call_x0;
+
     // The account paying for pool_pages, with a reference for as long as it does.
     // NULL exactly when pool_pages is 0. Set and cleared with pool_pages.
     struct MemoryAccount   *pool_sponsor;
 };
 
 _Static_assert(sizeof(struct Thread) == 1792,
-               "MM-1 appended pool_sponsor (a pointer): 1776 -> 1792. "
+               "MM-1 appended pool_sponsor (a pointer), and item 11c appended "
+               "note_restartable + note_call_unwound (2 bools) + walk_errno (u16) "
+               "into defer_depth's trailing pad and note_call_x0 (u64) after it: "
+               "1776 -> 1792, with no pad; the thread cache keeps 2 objects per "
+               "4 KiB slab. "
                "Before that the deferred-walk chunk appended lock_owed (a pointer) + "
                "defer_depth (u32) after table_owed: 1760 -> 1776 (12 bytes + "
                "4 trailing pad to the 16-byte alignment); the thread cache "
@@ -697,23 +722,29 @@ _Static_assert(__builtin_offsetof(struct Thread, magic) == 0,
 // Default kernel stack size per thread. 4 pages × 4 KiB = 16 KiB.
 // Matches ARCHITECTURE.md §7.3 (THREAD_STACK_SIZE = 16 KiB).
 //
-// P2-Dc adds a 4-page (16 KiB) guard region BELOW the kstack. Total
-// allocation per thread is 8 pages = 32 KiB at order=3 from buddy.
-// The guard pages are no-access in the kernel direct map (P3-Bca) — a
-// stack-overflow access faults, the exception handler reports it, and
-// extinction("kstack overflow") fires.
+// A 16 KiB guard BELOW the kstack, the same size though it costs nothing: it is
+// address space in the kernel stack range (mmu.h), with no memory behind it. A
+// span twice the stack's size, aligned to itself, is what lets vectors.S tell a
+// guard address from a stack address by one bit; and no frame the compiler lays
+// out jumps a guard that large.
 #define THREAD_KSTACK_SIZE         (16 * 1024)
 #define THREAD_KSTACK_GUARD_SIZE   (16 * 1024)
 #define THREAD_KSTACK_TOTAL_SIZE   (THREAD_KSTACK_SIZE + THREAD_KSTACK_GUARD_SIZE)
-#define THREAD_KSTACK_TOTAL_ORDER  3                  // 8 pages = 32 KiB
-#define THREAD_KSTACK_GUARD_PAGES  4                  // bottom 4 pages
+#define THREAD_KSTACK_PAGES        4u                 // what backs the usable half
+#define THREAD_KSTACK_GUARD_PAGES  4u                 // the guard's span, unbacked
+
+#ifdef KERNEL_TESTS
+// A block as large as a stack's whole span, for fixtures that fake a stack in the
+// direct map.
+#define THREAD_KSTACK_TOTAL_ORDER  3
+#endif
 
 // What a user Proc's thread costs the user pool (mm/phys.h, ARCH 7.3.5): the
-// stack block plus one page for its slot. kproc's threads cost it nothing.
-#define THREAD_POOL_PAGES          ((1u << THREAD_KSTACK_TOTAL_ORDER) + 1u)
+// stack's pages plus one page for its slot. kproc's threads cost it nothing.
+#define THREAD_POOL_PAGES          (THREAD_KSTACK_PAGES + 1u)
 
-// Freed stacks kept with their guard still no-access, for the next create:
-// 1 MiB of the TCB reserve (phys.h) at most.
+// Freed stacks kept mapped, for the next create: 512 KiB of the TCB reserve
+// (phys.h) at most.
 #define THREAD_KSTACK_CACHE_MAX    32
 
 // The kernel-stack WATERMARK (ARCH 8.12).
@@ -745,6 +776,12 @@ u32  thread_kstack_used(const struct Thread *t, u32 *budget_words);
 // buddy (answers how many it released).
 u32  thread_kstack_cache_count(void);
 u32  thread_kstack_cache_drain(void);
+u32  thread_kstack_slots_in_use(void);   // the range's slots taken, cached stacks included
+u32  thread_kstack_pages_in_use(void);   // pages mapped in the range
+// Makes one step of the next new stack's making fail: 1 to THREAD_KSTACK_PAGES a
+// page, +1 the slot, +2 the map. Pending reads it back, 0 once it has fired.
+void thread_kstack_refuse_step(u32 step);
+u32  thread_kstack_refuse_pending(void);
 #endif // KERNEL_TESTS
 
 // "current thread" is held in TPIDR_EL1, the per-CPU OS-use register.
