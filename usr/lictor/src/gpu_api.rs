@@ -98,15 +98,34 @@ pub struct FenceTag {
 pub fn must_park(parked: &[(u32, bool)], ctx: u32, readback: bool, on_device: bool) -> bool {
     parked.iter().any(|&(c, _)| c == ctx) || (readback && on_device)
 }
-/// Which parked chains publish now, in order. A context's parked run starts at a
-/// readback; it goes once the context has nothing the device may still run, the
-/// chains behind it go with it, and the next readback of that context waits for
-/// them. Another context's run is independent.
-pub fn unpark_plan(parked: &[(u32, bool)], on_device: &dyn Fn(u32) -> bool) -> Vec<bool> {
-    let mut go = alloc::vec![false; parked.len()];
+/// What the completion pump does with one parked chain.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unpark {
+    Keep,
+    Publish,
+    /// Refused unpublished: the device never saw it, so its slot is free.
+    Release,
+}
+/// What happens to each parked chain now, in order. A context's parked run
+/// starts at a readback; it goes once the context has nothing the device may
+/// still run, the chains behind it go with it, and the next readback of that
+/// context waits for them. Another context's run is independent. A context
+/// with an abandoned chain not yet retired (`poisoned`) has its parked chains
+/// released: that chain may never retire, and a parked chain has no clock of
+/// its own, so it would count in the lane forever.
+pub fn unpark_plan(
+    parked: &[(u32, bool)],
+    on_device: &dyn Fn(u32) -> bool,
+    poisoned: &dyn Fn(u32) -> bool,
+) -> Vec<Unpark> {
+    let mut plan = alloc::vec![Unpark::Keep; parked.len()];
     let mut blocked: Vec<u32> = Vec::new();
     let mut sent: Vec<u32> = Vec::new();
     for (i, &(ctx, readback)) in parked.iter().enumerate() {
+        if poisoned(ctx) {
+            plan[i] = Unpark::Release;
+            continue;
+        }
         if blocked.contains(&ctx) {
             continue;
         }
@@ -114,12 +133,12 @@ pub fn unpark_plan(parked: &[(u32, bool)], on_device: &dyn Fn(u32) -> bool) -> V
             blocked.push(ctx);
             continue;
         }
-        go[i] = true;
+        plan[i] = Unpark::Publish;
         if !sent.contains(&ctx) {
             sent.push(ctx);
         }
     }
-    go
+    plan
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FencedErr {
@@ -878,17 +897,25 @@ mod park_tests {
         assert!(must_park(&[(A, true), (A, false)], A, true, false), "a second readback");
         assert!(!must_park(&[(A, true)], B, false, true), "another context's submit");
     }
+    use Unpark::{Keep as K, Publish as P, Release as R};
     #[test]
     fn a_readback_goes_with_the_chains_behind_it_up_to_the_next_readback() {
         let parked = [(A, true), (A, false), (A, false), (A, true), (A, false)];
-        assert_eq!(unpark_plan(&parked, &|_| false), vec![true, true, true, false, false]);
-        assert_eq!(unpark_plan(&parked, &|c| c == A), vec![false; 5], "its prefix is on the device");
+        assert_eq!(unpark_plan(&parked, &|_| false, &|_| false), vec![P, P, P, K, K]);
+        assert_eq!(unpark_plan(&parked, &|c| c == A, &|_| false), vec![K; 5], "its prefix is on the device");
     }
     #[test]
     fn contexts_unpark_independently_and_keep_their_order() {
         let parked = [(A, true), (B, true), (A, false), (B, false)];
-        assert_eq!(unpark_plan(&parked, &|c| c == A), vec![false, true, false, true]);
-        assert_eq!(unpark_plan(&parked, &|c| c == B), vec![true, false, true, false]);
+        assert_eq!(unpark_plan(&parked, &|c| c == A, &|_| false), vec![K, P, K, P]);
+        assert_eq!(unpark_plan(&parked, &|c| c == B, &|_| false), vec![P, K, P, K]);
+    }
+    #[test]
+    fn a_poisoned_contexts_parked_chains_are_released_and_no_one_elses() {
+        let parked = [(A, true), (B, true), (A, false), (B, false)];
+        // A's abandoned chain is still "on the device" too: release wins over waiting.
+        assert_eq!(unpark_plan(&parked, &|c| c == A || c == B, &|c| c == A), vec![R, K, R, K]);
+        assert_eq!(unpark_plan(&parked, &|c| c == A, &|c| c == A), vec![R, P, R, P]);
     }
     #[test]
     fn a_tag_carries_its_park_and_its_execution_across_the_seam() {

@@ -15352,8 +15352,6 @@ impl Comp {
         // The stall the device paid for this frame's backlog (F2b's
         // measurement): `cost readback-wait` carries n / sum / max.
         self.cost_add(Cost::ReadbackWait, rec.issued);
-        self.rb_last_parked_ms = tag.parked_ms;
-        self.rb_last_exec_ms = tag.exec_ms;
         // ROUND F2 [P1]: the device REFUSED this transfer. The pre-C-6b
         // synchronous arm gated its compose on `.is_ok()`; the fenced form
         // dropped that gate because the tag carried no verdict. Composing
@@ -15363,6 +15361,10 @@ impl Comp {
             self.rb_dropped += 1;
             return;
         }
+        // Only a readback that landed reports its timing: a refused or released
+        // one ran for no time, and a zero there would read as the rule holding.
+        self.rb_last_parked_ms = tag.parked_ms;
+        self.rb_last_exec_ms = tag.exec_ms;
         let same_gen = self.surf(rec.surf).map_or(false, |s| s.gen == rec.gen);
         let same_adoption = self.gl_adoption(rec.surf).map_or(false, |g| {
             // The kind pin (W-3c-2): img and bo pub ids are separate
@@ -15408,7 +15410,7 @@ impl Comp {
                 c.fences_in_flight = c.fences_in_flight.saturating_sub(1);
                 if tag.comp {
                     c.comp_rb_in_flight = c.comp_rb_in_flight.saturating_sub(1);
-                } else if tag.readback && !tag.abandoned {
+                } else if tag.readback && tag.ok {
                     c.rb_parked_ms = tag.parked_ms;
                     c.rb_exec_ms = tag.exec_ms;
                 }

@@ -341,10 +341,14 @@ counts: a parked chain has its fence id and its slot, and it counts in
 how long it took from publication to retirement. The ctx ctl reports both for
 the context's last readback (`readback-parked-ms`, `readback-exec-ms`), and the
 warp ctl reports both for the last landed compositor readback
-(`rb-last-parked-ms`, `rb-last-exec-ms`). A compositor readback parked behind an
-abandoned chain is released as refused, so `comp_readback_retired` counts it
-`rb_dropped`, and `gl_adoption` already refuses the poisoned context; the
-reserved slot is not held for every other surface.
+(`rb-last-parked-ms`, `rb-last-exec-ms`); a refused readback reports neither,
+since it ran for no time. Any chain parked behind an abandoned chain of its
+context is released as refused. A client's released chain counts as signaled,
+like one the device answered with an error, though its context is already
+poisoned (fence stream over, fenced work refused). A compositor readback is
+counted `rb_dropped` by `comp_readback_retired`, and `gl_adoption` already
+refuses the poisoned context, so the reserved slot is not held for every other
+surface.
 
 ### The coherent ring lane
 

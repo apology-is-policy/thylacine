@@ -3594,6 +3594,9 @@ const RB_EXEC_BOUND_MS: u64 = 150;
 /// The later submit's draws: RED, which no queue index paints (they paint GREEN
 /// plus an index in BLUE).
 const RB_LATE_DRAWS: usize = 50;
+/// ABANDON's queue: long enough on V3D that every chain is still running when
+/// the readback arrives and when the abandon lands a few ms later.
+const RB_ABANDON_SUBMITS: usize = 3;
 /// Lictor's SUBMIT_DEADLINE_MS (500) with slack: past it, a bystander present stalled at
 /// its bound rather than waiting behind a readback (vote 72a).
 const RB_F2B_BOUND_MS: u64 = 900;
@@ -3686,6 +3689,83 @@ fn rb_census(warp: i64) -> Option<RbCensus> {
         abandoned: parse_field(&s, "rb-abandoned")?,
         slot: parse_field(&s, "rb-slot")?,
     })
+}
+
+/// A readback parks behind its context's heavy queue, the queue is abandoned
+/// under the hold (so no late retirement can free it), and Lictor must release
+/// the readback rather than keep it parked: a parked chain has no abandonment
+/// clock, and one left behind counts in the lane until the context dies,
+/// holding the console's poll at 1 ms. Its own connection, because the hold and
+/// the abandon act only on the caller's ctx. Leaves the lane healed for CLEAN.
+fn rb_abandoned_prefix() -> bool {
+    let w = warp_connect("abandon");
+    let ctx = mint_ctx(w, "abandon");
+    let (bo, res, _va) = mint_bo_wh(w, ctx, RB_W, RB_H, VIRGL_RESOURCE_Y_0_TOP, "abandon");
+    let (vbo, vbo_res, vbo_va) = mint_buffer_bo(w, ctx, "abandon vbo");
+    rb_upload_triangles(w, ctx, vbo, vbo_va);
+    let before = ctx_field(w, ctx, "fence-signaled");
+    let mut st: Vec<u32> = Vec::new();
+    subctx_preamble(&mut st);
+    clear_stream(&mut st, res, 1, 0.0, 0.0, 1.0);
+    draw_state_stream(&mut st, vbo_res, RB_W, RB_H);
+    submit_stream(w, ctx, &st, "abandon prime");
+    let _ = rb_wait_signaled(w, ctx, before, 1, libthyla_rs::time::Instant::now(), "abandon prime");
+    let abandoned = |w: i64| {
+        parse_field(&open_read_string(w, "ctl"), "abandoned")
+            .unwrap_or_else(|| rb_incomplete("instrument:abandoned-count"))
+    };
+    if !write_ctl(w, "ctl", "warp-hold on") {
+        rb_incomplete("instrument:abandon-hold");
+    }
+    let a0 = abandoned(w);
+    let _ = rb_queue_heavy(w, ctx, RB_ABANDON_SUBMITS, "abandon");
+    let xfer = format!("transfer_from 0 0 0 0 {} {} 1 0 0 0", RB_W, RB_H);
+    let (n, _) = write_behind_stall(w, &format!("ctx/{}/bo/{}/ctl", ctx, bo), xfer.as_bytes());
+    if n != xfer.len() as i64 {
+        rb_incomplete("instrument:abandon-transfer-refused");
+    }
+    if !write_ctl(w, "ctl", "warp-abandon") {
+        rb_incomplete("instrument:abandon");
+    }
+    let taken = abandoned(w).saturating_sub(a0);
+    let t = libthyla_rs::time::Instant::now();
+    let mut left = ctx_field(w, ctx, "fences-in-flight");
+    while left != 0 && t.elapsed().as_millis() < 2000 {
+        let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(50));
+        left = ctx_field(w, ctx, "fences-in-flight");
+    }
+    let drained_ms = t.elapsed().as_millis() as u64;
+    let poisoned = parse_field(&open_read_string(w, &format!("ctx/{}/ctl", ctx)), "poisoned").unwrap_or(99);
+    let _ = write_ctl(w, "ctl", "warp-hold off");
+    let mut healed = false;
+    for _ in 0..400 {
+        if parse_field(&open_read_string(w, &format!("ctx/{}/ctl", ctx)), "poisoned") == Some(0)
+            && ctx_field(w, ctx, "fences-in-flight") == 0
+        {
+            healed = true;
+            break;
+        }
+        let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(50));
+    }
+    let _ = write_ctl(w, &format!("ctx/{}/ctl", ctx), "destroy");
+    unsafe { t_close(w) };
+    // Constructed only if the abandon took exactly the queue: a readback the
+    // device had been handed would have been abandoned with it.
+    if taken != RB_ABANDON_SUBMITS as u64 || poisoned != 1 {
+        t_putstr(&format!(
+            "warp-prove: C6-RB ABANDON UNCONSTRUCTED -- the abandon took {} chains (the queue is {}; one more means the readback was on the device, not parked), ctx poisoned {}\n",
+            taken, RB_ABANDON_SUBMITS, poisoned
+        ));
+        return false;
+    }
+    let ok = left == 0 && healed;
+    t_putstr(&format!(
+        "warp-prove: C6-RB ABANDON {} -- the readback parked behind {} abandoned chains; the ctx's fences in flight {} after {} ms (0 = the parked readback was released){}\n",
+        if ok { "PASS" } else { "FAIL" },
+        RB_ABANDON_SUBMITS, left, drained_ms,
+        if healed { "" } else { "; the lane did not heal after the hold came off" }
+    ));
+    ok
 }
 
 fn rb_incomplete(arm: &str) -> ! {
@@ -4688,6 +4768,10 @@ fn observe_readback() {
         rb_incomplete("deadline-unjudged");
     }
     record(deadline_ok, "deadline");
+
+    // ---- ABANDON (the vote-81 round's F1): a readback parked behind chains that
+    // are then abandoned is released, so its context's fences drain.
+    record(rb_abandoned_prefix(), "abandon");
 
     // ---- Teardown: withdraw the adoption, destroy the ctx, drop the
     // surfaces; the seam must be clean.

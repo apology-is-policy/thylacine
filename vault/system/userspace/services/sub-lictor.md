@@ -682,9 +682,13 @@ the chains behind it, up to that context's next readback (`gpu_api::unpark_plan`
 - **Stall and death.** Nothing publishes while the engine refuses. A dead
   engine releases every parked chain as refused (`ok = false`, not abandoned):
   the device never saw it.
-- **The compositor's readback.** Parked behind an abandoned chain, it is
-  released as refused, because it would otherwise hold the one reserved slot for
-  every surface.
+- **Abandoned prefix.** When a context has an abandoned chain not yet retired
+  (`ctx_poisoned`), the pump releases every parked chain of that context as
+  refused (`gpu_api::Unpark::Release`). The abandoned chain may never retire and
+  a parked chain has no abandonment clock, so a chain left parked would keep
+  `fenced_outstanding` above zero, and tapestryd's poll at 1 ms, until the
+  context died. For the compositor's readback the release also frees the one
+  reserved slot for every other surface.
 - **The harness hold.** A chain whose retirement the test hold swallowed
   (`held_retires`) has finished on the device, so nothing waits for it.
 

@@ -2573,14 +2573,24 @@ read. It is not on the device, though: no abandonment clock runs for it,
 `device_idle` does not see it, and the hold lever cannot reach it. Its wait is
 bounded by its prefix, because each chain ahead of it is abandoned at
 `FENCE_ABANDON_MS` if it never retires.
-- **Abandoned prefix.** A chain abandoned ahead of the readback keeps it parked
-  until its late retirement, because the device may still be running it. A
-  context with a hung chain therefore keeps its parked chains in their slots,
-  the same leak posture an abandoned chain already has. The compositor's
-  readback is the exception. Parked behind an abandoned chain, it would hold the
-  one reserved slot for every surface until a retirement that may never come.
-  So it is released as refused: its context is poisoned, `gl_adoption` refuses
-  that context from then on, and its surface keeps its last frame.
+- **Abandoned prefix.** A readback must not run while a chain abandoned ahead of
+  it may still be running. That chain may never retire, though, and a parked
+  chain has no abandonment clock of its own. Left parked, it would count in the
+  lane until its context died: tapestryd's poll stays at 1 ms while any fenced
+  chain is outstanding (the bound audit F6 put on it), and slots held by parked
+  chains hide the lane's exhaustion from its clients. So when a context has an
+  abandoned chain not yet retired, the completion pump releases every parked
+  chain of that context as refused (`ok = false`, not abandoned). The device
+  never saw them, so their slots return to the pool. The context is already
+  poisoned: its fence stream is over and the seam refuses its fenced work, so
+  nothing it could still do needs them. The compositor's readback is released
+  the same way, and that frees the reserved slot for every other surface;
+  `gl_adoption` refuses the poisoned context, and its surface keeps its last
+  frame. Like a chain the device answered with an error, a released chain's
+  fence counts as signaled, so the client's count stays in step if a late
+  retirement later vindicates the context; the bytes it would have read did not
+  land. (First written as "keeps it parked until its late retirement"; the
+  vote-81 audit round's F1 found the pin.)
 - **The harness hold.** A chain whose retirement the test hold swallowed
   (#177) has finished on the device, so nothing parked waits for it. Otherwise
   a held client would park the compositor's readback on the reserved slot: the
@@ -2658,6 +2668,13 @@ The census:
   The mutant with parking disabled must go red on PARKED, and on the Pi on
   BOUND. The mutant whose later submits do not queue behind a parked readback
   must go red on ORDER.
+- **ABANDON**. On its own connection, a context holds its retirements (the
+  harness hold), queues three heavy submits, then a readback, which parks, then
+  abandons its chains. The abandon must take exactly the three, which shows the
+  readback was parked and not on the device. Within two seconds, the context's
+  fences in flight must reach zero: the parked readback was released. The hold
+  then comes off and the lane must heal before CLEAN judges it. A mutant that
+  never releases a parked chain must go red here and nowhere else.
 
 *Witnesses whose premise was the hold.* `ls-graphical-sak-chain`'s readback and
 pointer legs, and `ls-graphical-keys-behind`'s readback leg, stood a client

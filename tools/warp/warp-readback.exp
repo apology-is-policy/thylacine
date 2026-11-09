@@ -9,8 +9,8 @@
 # Separate from warp-prove.exp for the same reason warp-reject.exp is: the leg
 # stalls the device for seconds, twice, by design, and the Warp-2 gate's value
 # is being cheap enough to run every time. `warp-prove readback` prints
-# `C6-READBACK DONE` ONLY when every verdict arm (ARM / DEEP / LIVE / DEADLINE
-# / CLEAN) passed, else `C6-READBACK INCOMPLETE(<arm>)`, so the scenario is
+# `C6-READBACK DONE` ONLY when every verdict arm (ARM / GUARD / DEEP / LIVE /
+# DEADLINE / ABANDON / CLEAN) passed, else `C6-READBACK INCOMPLETE(<arm>)`, so the scenario is
 # self-gating; the F2B line is a MEASUREMENT (data, not a verdict) and
 # warp-host.sh prints it. The #186 caveat holds for READERS of the transcript:
 # lc_expect writes its own pattern into its timeout text, so the DONE token

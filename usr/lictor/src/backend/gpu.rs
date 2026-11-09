@@ -1548,37 +1548,43 @@ impl Controlq {
     /// its context has nothing on the device, with the chains behind it, up to
     /// that context's next readback. Nothing goes while the engine refuses; a
     /// stall's revival publishes at the next pump.
+    ///
+    /// A context with an abandoned chain not yet retired has its parked chains
+    /// released as refused. The chain may never retire, a parked chain has no
+    /// abandonment clock, and it counts in `fenced_outstanding`, so without this
+    /// one hung job would hold the console's poll at 1 ms for good and keep its
+    /// slots out of `lane_exhausted`. The context is poisoned: its fence stream
+    /// is over and the seam refuses its fenced work, so nothing it could still
+    /// do needs them. The compositor's readback is released the same way, which
+    /// frees the reserved slot for every other surface.
     fn unpark(&mut self) {
         if self.parked.is_empty() || self.refusing() {
             return;
         }
-        // A compositor readback behind an abandoned chain would hold the one
-        // reserved slot for every surface until a late retirement that may never
-        // come. Its context is poisoned and its surface keeps its last frame, so
-        // it is released as refused; the client's own parked chains stay behind
-        // the abandoned one, in the client's own slots.
-        let mut i = 0;
-        while i < self.parked.len() {
-            if self.parked[i].tag.comp && self.ctx_poisoned(self.parked[i].tag.ctx_pub) {
-                let p = self.parked.remove(i);
+        let plan = crate::gpu_api::unpark_plan(
+            &self.parked_view(),
+            &|c| self.ctx_on_device(c),
+            &|c| self.ctx_poisoned(c),
+        );
+        let mut keep = alloc::vec::Vec::new();
+        let mut failed = false;
+        for (p, what) in core::mem::take(&mut self.parked).into_iter().zip(plan) {
+            if what == crate::gpu_api::Unpark::Release {
                 self.fslot_parked[p.slot] = false;
                 let mut tag = p.tag;
                 tag.ok = false;
                 tag.parked_ms = elapsed_ms_u32(p.since);
                 say!(
-                    "tapestryd: gpu compositor readback (fence {}) released unpublished -- ctx {} has an abandoned chain",
-                    tag.fence_id, tag.ctx_pub
+                    "tapestryd: gpu fence {} released unpublished{} -- ctx {} has an abandoned chain, slot {} free",
+                    tag.fence_id,
+                    if tag.comp { " (compositor readback)" } else { "" },
+                    tag.ctx_pub,
+                    p.slot
                 );
                 self.completed.push(tag);
-            } else {
-                i += 1;
+                continue;
             }
-        }
-        let plan = crate::gpu_api::unpark_plan(&self.parked_view(), &|c| self.ctx_on_device(c));
-        let mut keep = alloc::vec::Vec::new();
-        let mut failed = false;
-        for (p, go) in core::mem::take(&mut self.parked).into_iter().zip(plan) {
-            if !go || failed {
+            if what == crate::gpu_api::Unpark::Keep || failed {
                 keep.push(p);
                 continue;
             }
