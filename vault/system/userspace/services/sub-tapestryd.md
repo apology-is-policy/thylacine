@@ -596,7 +596,14 @@ CLAIM + the `warp-prove` cross-Proc leg are 1c-2b). Four pieces, all in
 **lazily** created on the first host3d ring mint (`wctx_venus_ensure` →
 `gpu.ctx_create_venus`, capset-4) and destroyed with the warp ctx in
 `wctx_finish` (condemn-slot-on-refuse, before the `dev_ctx` destroy — else a
-reused slot could re-mint the venus id into a live host ctx). A client that mints
+reused slot could re-mint the venus id into a live host ctx). Both destroys go
+through `warp_ctx_destroy_id`: a standing stall's refusal before staging is
+owed (`warp_ctx_destroy_owed`, `warp_ctx_venus_destroy_owed`), not final, and a
+create a stall met (`wctx_mint`, `wctx_venus_ensure`) owes its id a destroy
+too, its dev slot condemned meanwhile; `warp_destroy_owed` runs them from
+`warp_service_fences` once the engine is live, and a completed dev destroy
+frees the slot. The warp ctl reports `ctx-owed`, `venus-owed` and
+`slots-condemned`. A client that mints
 only V-3a guest-blob rings pays no venus ctx. Section 0.6 ratifies one venus ctx
 per client (V-3b-2's forward reuses it, no rework). The id is a **dedicated band**
 `WARP_VENUS_CTX_BASE (0x200) + slot`, pinned disjoint by a `const _` gap assert +

@@ -2011,6 +2011,12 @@ pub struct Comp {
     /// abandoned chain. The vindication destroys WARP_VENUS_CTX_BASE+slot once
     /// the device is proven finished, exactly as dev_ctx is deferred.
     warp_ctx_venus_vindicate: [bool; MAX_WARP_CTXS],
+    /// A destroy owed on each slot's device context (`slot + 1`) and on its
+    /// venus one: a create a stall met may exist host-side, and lictor keeps
+    /// its reservation, and a standing stall refuses a destroy before staging.
+    /// `warp_destroy_owed` runs them once the engine is live (GPU-DESIGN 4.5.15).
+    warp_ctx_destroy_owed: [bool; MAX_WARP_CTXS],
+    warp_ctx_venus_destroy_owed: [bool; MAX_WARP_CTXS],
     warp_ctx_seq: u32,
     warp_bo_seq: u32,
     warp_ring_seq: u32,
@@ -2103,6 +2109,18 @@ struct CtxProbe {
 
 /// A GPU-seam rendering context (Warp-2c). Owned by one conn; the DEVICE
 /// ctx id is its slot + 1 (reused only after the synchronous CTX_DESTROY).
+/// How a warp device-context destroy ended (GPU-DESIGN 4.5.15).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WarpDestroy {
+    /// The context is gone; its id may be minted again.
+    Done,
+    /// A standing stall refused it before staging: nothing changed, and the
+    /// destroy is owed until the engine is live.
+    Owed,
+    /// The device refused it, a stall met it, or the engine is dead: the host
+    /// may still hold the context.
+    Refused,
+}
 struct WarpCtx {
     owner_conn: u64,
     pub_id: u32,
@@ -2685,6 +2703,8 @@ impl Comp {
             warp_ctx_leaked_probe: core::array::from_fn(|_| None),
             warp_ctx_vindicate: [0; MAX_WARP_CTXS],
             warp_ctx_venus_vindicate: [false; MAX_WARP_CTXS],
+            warp_ctx_destroy_owed: [false; MAX_WARP_CTXS],
+            warp_ctx_venus_destroy_owed: [false; MAX_WARP_CTXS],
             warp_ctx_seq: 0,
             warp_bo_seq: 0,
             warp_ring_seq: 0,
@@ -11340,7 +11360,17 @@ impl Comp {
             return None;
         }
         let dev_ctx = (slot as u32) + 1;
+        let stalls = self.gpu.stalls;
         if self.gpu.ctx_create(dev_ctx, b"warp").is_err() {
+            // A create a stall met may exist host-side, and lictor keeps its
+            // reservation (GPU-DESIGN 4.5.15), so this id would be refused for
+            // good and every later mint would pick this slot again. Condemn it;
+            // the destroy owed for it runs once the engine is live.
+            if self.gpu.stalls != stalls || self.gpu.engine == Engine::Dead {
+                self.warp_ctx_slot_poisoned[slot] = true;
+                self.warp_ctx_destroy_owed[slot] = true;
+                say!("tapestryd: warp ctx slot {} create met a stall -- condemned, its destroy owed", slot);
+            }
             return None;
         }
         // Never mint 0: it is `warp_ctx_vindicate`'s "no condemned slot"
@@ -12640,8 +12670,17 @@ impl Comp {
             return Ok(v);
         }
         let slot = self.wctx_slot(ctx_pub).ok_or(p9::E_NOENT)?;
+        if self.warp_ctx_venus_destroy_owed[slot] {
+            return Err(E_IO);
+        }
         let v = WARP_VENUS_CTX_BASE + slot as u32;
+        let stalls = self.gpu.stalls;
         if self.gpu.ctx_create_venus(v).is_err() {
+            // As in `wctx_mint`: the id is owed a destroy before it is tried again.
+            if self.gpu.stalls != stalls || self.gpu.engine == Engine::Dead {
+                self.warp_ctx_venus_destroy_owed[slot] = true;
+                say!("tapestryd: warp ctx slot {} venus-ctx create met a stall -- its destroy owed", slot);
+            }
             return Err(E_IO);
         }
         self.warp_ctxs[slot].as_mut().unwrap().venus_ctx = Some(v);
@@ -14257,8 +14296,20 @@ impl Comp {
             // no live device work. (The WEDGE arm above defers the venus destroy
             // to the vindication -- F1.) A refused destroy condemns the slot
             // exactly as dev_ctx does.
-            if let Some(v) = c.venus_ctx {
-                if self.gpu.ctx_destroy(v).is_err() {
+            let venus_r = match c.venus_ctx {
+                Some(v) => {
+                    debug_assert_eq!(v, WARP_VENUS_CTX_BASE + slot as u32);
+                    self.warp_ctx_destroy_id(slot, true)
+                }
+                None => WarpDestroy::Done,
+            };
+            match venus_r {
+                WarpDestroy::Done => {}
+                WarpDestroy::Owed => say!(
+                    "tapestryd: warp ctx slot {} venus-ctx destroy refused by a standing stall on clean retire -- owed",
+                    slot
+                ),
+                WarpDestroy::Refused => {
                     self.warp_ctx_slot_poisoned[slot] = true;
                     say!(
                         "tapestryd: warp ctx slot {} venus-ctx destroy REFUSED on clean retire -- condemned",
@@ -14273,12 +14324,78 @@ impl Comp {
             // slot rather than mint into a live id. No `warp_ctx_vindicate`
             // stamp: nothing can prove this one safe later, and a permanent
             // condemnation that `warp_poisoned_slots` reports is honest.
-            if self.gpu.ctx_destroy(c.dev_ctx).is_err() {
-                self.warp_ctx_slot_poisoned[slot] = true;
-                say!(
-                    "tapestryd: warp ctx slot {} destroy REFUSED on clean retire -- condemned",
-                    slot
-                );
+            debug_assert_eq!(c.dev_ctx, slot as u32 + 1);
+            match self.warp_ctx_destroy_id(slot, false) {
+                WarpDestroy::Done => {}
+                WarpDestroy::Owed => {
+                    self.warp_ctx_slot_poisoned[slot] = true;
+                    // A refused venus destroy keeps the slot condemned for good.
+                    if venus_r == WarpDestroy::Refused {
+                        self.warp_ctx_destroy_owed[slot] = false;
+                    }
+                    say!(
+                        "tapestryd: warp ctx slot {} destroy refused by a standing stall on clean retire -- condemned until it runs",
+                        slot
+                    );
+                }
+                WarpDestroy::Refused => {
+                    self.warp_ctx_slot_poisoned[slot] = true;
+                    say!(
+                        "tapestryd: warp ctx slot {} destroy REFUSED on clean retire -- condemned",
+                        slot
+                    );
+                }
+            }
+        }
+    }
+
+    /// Destroy slot `slot`'s device context (`venus`: its venus one). A standing
+    /// stall refuses it before staging and lictor keeps nothing of it, so that
+    /// one is owed; any other refusal is final.
+    fn warp_ctx_destroy_id(&mut self, slot: usize, venus: bool) -> WarpDestroy {
+        let id = if venus { WARP_VENUS_CTX_BASE + slot as u32 } else { slot as u32 + 1 };
+        let stalls = self.gpu.stalls;
+        let r = if self.gpu.ctx_destroy(id).is_ok() {
+            WarpDestroy::Done
+        } else if self.gpu.stalls == stalls && self.gpu.engine == Engine::Stalled {
+            WarpDestroy::Owed
+        } else {
+            WarpDestroy::Refused
+        };
+        let owed = if venus { &mut self.warp_ctx_venus_destroy_owed[slot] } else { &mut self.warp_ctx_destroy_owed[slot] };
+        *owed = r == WarpDestroy::Owed;
+        r
+    }
+
+    /// Run the owed destroys once the engine is live. Ordered after the create's
+    /// revival, a completed destroy leaves the id free whichever way that create
+    /// went, so a slot with no context in it is mintable again. A destroy the
+    /// device refused, or one a stall met, leaves its slot condemned for good;
+    /// a venus id stays refused by lictor's ledger, failing that slot's venus
+    /// mints clean.
+    fn warp_destroy_owed(&mut self) {
+        for slot in 0..MAX_WARP_CTXS {
+            for venus in [true, false] {
+                let owed = if venus { self.warp_ctx_venus_destroy_owed[slot] } else { self.warp_ctx_destroy_owed[slot] };
+                if !owed || self.gpu.engine != Engine::Live {
+                    continue;
+                }
+                match self.warp_ctx_destroy_id(slot, venus) {
+                    WarpDestroy::Done if !venus => {
+                        debug_assert!(self.warp_ctxs[slot].is_none() && self.warp_ctx_leaked[slot].is_empty());
+                        self.warp_ctx_slot_poisoned[slot] = false;
+                        say!("tapestryd: warp ctx slot {} owed destroy ran -- recovered", slot);
+                    }
+                    WarpDestroy::Done => {
+                        say!("tapestryd: warp ctx slot {} owed venus-ctx destroy ran", slot)
+                    }
+                    WarpDestroy::Owed => {}
+                    WarpDestroy::Refused => say!(
+                        "tapestryd: warp ctx slot {} owed {}destroy REFUSED -- stays refused",
+                        slot,
+                        if venus { "venus-ctx " } else { "" }
+                    ),
+                }
             }
         }
     }
@@ -15644,6 +15761,7 @@ impl Comp {
                 slot
             );
         }
+        self.warp_destroy_owed();
         self.warp_pump_retires();
         // C-6: a completion or a vindication may have freed the reserved
         // slot; issue the next wanted readback (after the retires above, so
@@ -17255,6 +17373,17 @@ impl Conn {
                 // The fixed-size prefix ends HERE; everything below grows
                 // with the live-ctx count and is deliberately non-critical.
                 gcrit_end = s.len();
+                // Destroys owed on warp device contexts (GPU-DESIGN 4.5.15), and
+                // the slots condemned meanwhile or for good.
+                let _ = core::fmt::write(
+                    &mut s,
+                    format_args!(
+                        "ctx-owed {} venus-owed {} slots-condemned {}\n",
+                        comp.warp_ctx_destroy_owed.iter().filter(|&&o| o).count(),
+                        comp.warp_ctx_venus_destroy_owed.iter().filter(|&&o| o).count(),
+                        comp.warp_ctx_slot_poisoned.iter().filter(|&&o| o).count()
+                    ),
+                );
                 // W-4 stall observability: one row per HELD fenced slot, so a
                 // wedged chain is NAMED (op class + owner + age), not just a
                 // missing count. Empty when all slots are free. BELOW the

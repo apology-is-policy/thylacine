@@ -2600,7 +2600,8 @@ bounded by its prefix, because each chain ahead of it is abandoned at
   still un-poisons the context, so its memory is reclaimed and its destroy runs
   the ordinary path. Lictor keeps the same latch where the release happens: a
   context with a released client chain parks every later chain, and the pump
-  releases it in turn, until its device context is destroyed or created anew.
+  releases it in turn, until a destroy of the device context the released chain
+  rode completes.
   The seam latches only on its next pump, and Lictor's own loop runs the pump's
   release in between, so the seam can admit one more chain from the older view.
   Published, that chain would run after a readback that never ran, and its
@@ -2886,7 +2887,14 @@ block the serve loop, and seat input with it. Neither was taken.
     error;
   - a stalled DETACH or UNREF releases nothing;
   - a stalled CREATE consumes its id, because the reservation precedes the
-    command and is never undone;
+    command and is never undone. A warp context's id is its slot's
+    (`slot + 1`, the venus band likewise), so tapestryd condemns that slot
+    and owes the id a destroy; once the engine is live the destroy runs,
+    ordered after the create, and its completion frees the slot whichever
+    way the create went. A destroy that a standing stall refused before
+    staging left nothing, so lictor un-retires the context and tapestryd
+    owes the destroy the same way; one the device refused, or one a stall
+    met, condemns for good;
   - a stalled hostmem MAP or UNMAP leaks its extent (`mint_host3d_ring`,
     `drop_host3d_ring`).
   A stalled SET_SCANOUT is the case a permanent latch never had to answer: once

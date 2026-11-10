@@ -996,7 +996,7 @@ struct Controlq {
     /// The slots parked chains hold: not allocatable, not published.
     fslot_parked: [bool; FENCED_SLOTS],
     /// Contexts with a released client chain: everything later of theirs parks
-    /// and is released too, until the device context is destroyed or recreated.
+    /// and is released too, until a destroy of that device context completes.
     released: crate::gpu_api::Released,
     /// Contexts whose abandoned chain the device later retired: proof the
     /// host is finished with them, so the seam may un-poison.
@@ -3870,22 +3870,22 @@ impl Gpu {
             GPU_CTRL_HDR_LEN + 72,
             GPU_CTRL_HDR_LEN,
             VIRTIO_GPU_RESP_OK_NODATA,
-        )?;
-        // The host refuses an id that is live, so this is a new context.
-        self.ctrl.released.forget(ctx_id);
-        Ok(())
+        )
     }
 
     pub fn ctx_destroy(&mut self, ctx_id: u32) -> Result<(), Error> {
         let req_va = self.req(REQ_OFF)?;
         unsafe { write_ctrl_hdr_ctx(req_va, VIRTIO_GPU_CMD_CTX_DESTROY, ctx_id) };
-        self.ctrl.released.forget(ctx_id);
         self.ctrl.step(
             "CTX_DESTROY",
             GPU_CTRL_HDR_LEN,
             GPU_CTRL_HDR_LEN,
             VIRTIO_GPU_RESP_OK_NODATA,
-        )
+        )?;
+        // Only a destroy that completed ends the device context the record
+        // names; one whose outcome is unknown keeps it, failing closed.
+        self.ctrl.released.forget(ctx_id);
+        Ok(())
     }
 
     /// Attach a device-global resource to a context: virgl scopes command

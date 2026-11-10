@@ -98,6 +98,18 @@ impl Objects {
         object.retiring = true;
         Ok(Retirement { owner, id, kind, serial: object.serial })
     }
+    /// Undo a retirement whose device command left nothing behind: refused
+    /// before staging, or refused by the device. The object lives on and may be
+    /// retired again; a stale ticket undoes nothing.
+    pub fn unretire(&mut self, ticket: Retirement) -> Result<(), Error> {
+        let Retirement { owner, id, kind, serial } = ticket;
+        let o = self.entries.iter_mut().find(|o| o.id == id && o.kind == kind).ok_or(Error::Missing)?;
+        if o.owner != owner { return Err(Error::WrongOwner); }
+        if o.serial != serial { return Err(Error::Missing); }
+        if !o.retiring { return Err(Error::Busy); }
+        o.retiring = false;
+        Ok(())
+    }
     /// Invoked only after the backend proves retirement (including scanout and
     /// fence references) and has detached all context links. Repeated/stale retire
     /// completions are errors, never permissions to free another object's backing.
@@ -118,6 +130,22 @@ impl Objects {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_retirement_that_left_nothing_is_undone_and_only_by_its_own_ticket() {
+        let mut o = Objects::default();
+        o.reserve(1, 3, Kind::Context).unwrap();
+        let ticket = o.retire(1, 3, Kind::Context).unwrap();
+        assert_eq!(o.check(1, 3, Kind::Context), Err(Error::Busy), "retiring: no admission");
+        o.unretire(ticket).unwrap();
+        o.check(1, 3, Kind::Context).unwrap();
+        assert_eq!(o.unretire(ticket), Err(Error::Busy), "not retiring any more");
+        let again = o.retire(1, 3, Kind::Context).unwrap();
+        o.retired(again).unwrap();
+        o.reserve(1, 3, Kind::Context).unwrap();
+        let fresh = o.retire(1, 3, Kind::Context).unwrap();
+        assert_eq!(o.unretire(ticket), Err(Error::Missing), "a stale ticket names an older object");
+        o.unretire(fresh).unwrap();
+    }
     #[test]
     fn trusted_ids_and_other_owners_never_enter_normal_contexts() {
         let mut o = Objects::default();

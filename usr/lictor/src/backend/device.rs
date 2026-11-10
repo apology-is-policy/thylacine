@@ -461,10 +461,15 @@ impl Device {
             Request::CtxDestroy { ctx_id } => {
                 self.check(ctx_id, Kind::Context)?;
                 let ticket = self.objects.retire(self.owner, ctx_id, Kind::Context).map_err(|_| Error::BadField)?;
+                let stalls = self.gpu.stalls();
                 let result = self.gpu.ctx_destroy(ctx_id);
                 if result.is_ok() {
                     self.objects.context_destroyed(self.owner, ctx_id).map_err(|_| Error::Hardware)?;
                     self.objects.retired(ticket).map_err(|_| Error::Hardware)?;
+                } else if self.left_nothing(stalls) {
+                    // Refused before staging (a standing stall) or by the device:
+                    // the context lives on, so it may be destroyed again.
+                    let _ = self.objects.unretire(ticket);
                 }
                 result.put(&mut out);
             }

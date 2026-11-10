@@ -113,8 +113,8 @@ pub fn must_park(parked: &[(u32, bool)], ctx: u32, readback: bool, on_device: bo
 /// that chain, so nothing later of its context may run: a later chain's
 /// completion would count past it. Kept here, where the release happens,
 /// because the seam latches the stream only on its next pump and admits from
-/// the older view until then. One entry per device context, forgotten when
-/// that device context is destroyed or created anew.
+/// the older view until then. One entry per device context, forgotten only
+/// when a destroy of the device context the released chain rode completes.
 #[derive(Clone, Debug, Default)]
 pub struct Released(Vec<(u32, u32)>);
 impl Released {
