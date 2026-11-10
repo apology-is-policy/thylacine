@@ -5307,10 +5307,8 @@ unsafe fn srv_server_loop(listener: i64, notes: &Notes) -> i64 {
                     }
                 }
             }
-            // else: listener torn down; loop will pick it up via
-            // POLLHUP on the listener (T_POLLHUP isn't requested
-            // here — at v1.0 corvus only ever sees POLLIN on the
-            // listener).
+            // else: the listener was torn down; its POLLHUP, reported
+            // whether asked for or not, ends the loop below.
         }
         if pollfds[0].revents & T_POLLHUP != 0 {
             // Listener torn down (admin/proc exit / unposted). Drain

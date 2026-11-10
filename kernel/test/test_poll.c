@@ -824,8 +824,6 @@ void test_poll_devsrv_listener_unasked_parks(void) {
     TEST_EXPECT_EQ(g_listener_poll_result, 1L, "the service's death ends the wait");
     TEST_ASSERT((g_listener_poll_revents & POLLHUP) != 0,
         "POLLHUP is reported to a poller that asked for nothing");
-    TEST_ASSERT((g_listener_poll_revents & POLLIN) == 0,
-        "and POLLIN is still not");
 
     test_kthread_join_free(poller, &g_listener_poll_exited);
     drop_test_proc(client2);

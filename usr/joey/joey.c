@@ -11526,7 +11526,8 @@ int main(void) {
     // about a listener it cannot accept from never sleeps. It then frees a slot
     // and requires the waiting connect to be served. Run by joey because only
     // the system principal (or a hostowner) reads another Proc's CPU time, and
-    // here because corvus is up and nothing else is talking to either server.
+    // here because corvus is up and the login E2Es are reaped. Standing
+    // connections (joey's /net mount, a held login) only shorten the fill.
     {
         const char sf_name[] = "/bin/srvfull-probe";
         long sf_pid = t_spawn(sf_name, sizeof(sf_name) - 1);

@@ -22,7 +22,7 @@ locks: []
 abis: [abi-boot-banner]
 design: ["docs/TOOLING.md", "docs/PORTABILITY.md", "docs/DEBUGGING-PLAYBOOK.md"]
 created: 2026-08-01
-updated: 2026-10-27
+updated: 2026-11-10
 ---
 ## Purpose
 
@@ -346,6 +346,14 @@ posts `/net`, joey treats a missing `/net` as non-fatal, and the banner still
 prints, so a check keyed on serving would skip exactly the deterministic
 failure. [[seam-242-selftest-nonfatal]] (the other selftests proceed after a
 FAIL) is narrowed by this capture, not closed.
+
+**The full-pool rung's lines are required by name (2026-11-10).** joey's
+`/bin/srvfull-probe` rung ([[sub-stratum-boot]]) probes netd only where
+`/srv/net` is posted and prints `NOT PROBED` where it is not. On a boot where
+the rung passed (`joey: srvfull PROBE OK`), `tools/test.sh` requires
+`srvfull-probe: corvus OK`, and -- wherever netd printed `netd: serving /net`
+-- `srvfull-probe: netd OK`. Without the second, a service posted under
+another name would read as "not posted" on every boot and pass.
 
 **A readiness fail-safe fails the verdict (2026-09-28, #98).** The poll core
 asks a remote readiness file's server (netd, ptyfs) for a snapshot and waits a

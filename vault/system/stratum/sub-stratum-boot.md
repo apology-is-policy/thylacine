@@ -130,15 +130,20 @@ login E2E, under `THYLA_BOOT_PROBES`, joey spawns `/bin/srvfull-probe` and
 requires status 0. Per server (`/srv/corvus` always; `/srv/net` wherever it is
 posted, else a `NOT PROBED` line -- and `tools/test.sh` requires netd's OK line
 on every boot where netd served `/net`) the probe opens one
-connection of its own, starts a holder child that opens connections until one
-does not return, and from an agreed instant reads the server's `CPU_NS` in
-`/ctl/procs` twice, 400 ms apart; it then closes its own connection and the
-holder's waiting connect must be served. The holder exits 0 only if that
-connect began before the window and returned after it, so the reading sits
-inside one wait at a full pool; a fill still running at the window's start
-takes the attempt again with twice the settle (three attempts, the longest
-well inside the 5 s connect handshake deadline), so a slow boot
-costs time and not a verdict. The bar is a quarter of the window: a server
+connection of its own and starts a holder child with a pipe at its fd 0. The
+holder writes a byte when it starts and one per connect that returns; when no
+byte has come for 250 ms the probe takes it to be waiting at a full pool and
+reads the server's `cpu_ns` from `/proc/<pid>/status` twice, 400 ms apart (one
+read call each: the kernel renders these files afresh on every read, so a
+paged read stitches two renders). It then closes its own connection, the
+holder's waiting connect must be served, and the holder reports the instants
+that connect began and returned. The inference is checked against that
+report: the attempt is judged only if the connect began before the first
+reading and returned after the probe began to free its slot; otherwise it is
+taken again with twice the quiet (three attempts). The waiting connect waits
+about 650 ms however long the holder took to start, so only a connect slower
+than a second at a pool with room can exhaust the attempts -- that boot goes
+red, and should. The bar is a quarter of the window: a server
 that keeps asking about a listener it cannot accept from never sleeps and
 takes all of it ([[sub-corvus]], [[sub-netd-nic]]). It runs in joey's ladder
 because only the system principal or a hostowner reads another Proc's CPU

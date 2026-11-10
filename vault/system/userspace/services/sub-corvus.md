@@ -368,8 +368,9 @@ threads, and none of the wait/wake reasoning the kernel notes carry.
 **A full table waits.** The listener stays in the poll set at index 0 and is
 asked about (`POLLIN`) only while `conns.len() < MAX_CONNS`. At eight
 connections it is asked nothing: a connect that waits on the kernel's accept
-backlog is then not an event, the infinite-timeout poll parks, and the
-waiting client is bounded by its own handshake deadline. The listener's
+backlog is then not an event, the poll parks (for good, or until a pending
+imperium request's expiry), and the waiting client is bounded by its own
+handshake deadline. The listener's
 hang-up is reported whether asked or not, so the teardown arm is unchanged.
 A connection that closes ends the poll through its own entry; the next pass
 has room, asks again, and accepts what waited. This rests on two kernel
@@ -379,8 +380,9 @@ rather than returning (`poll.devsrv_listener_unasked_parks`,
 [[sub-kernel-poll]]). On the device, `/bin/srvfull-probe` in joey's ladder
 fills the table, leaves one connect waiting, reads corvus's CPU time across
 the wait (a quarter of the window is the bar; a loop that never sleeps takes
-all of it), then frees a slot and requires the waiting connect to be served
-([[sub-stratum-boot]]).
+all of it, whether it returns to EL0 or turns inside the kernel, since a
+running thread is charged at every tick), then frees a slot and requires the
+waiting connect to be served ([[sub-stratum-boot]]).
 
 Up to eight connections interleave at request granularity. D7 removes the
 single global AUTH slot: independent owners, including the same principal,
