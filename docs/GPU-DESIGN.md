@@ -2729,7 +2729,17 @@ The census:
   the revival, which comes only once the queue has retired, so the readback
   publishes unparked. DEADLINE and ABANDON count the stall refusals their own
   sends met, and an attempt that met any is unconstructed: it runs again, up to
-  four times, rather than being judged.
+  four times, rather than being judged. On every run that client is the console
+  renderer. It paints every line said on the console (the leg's own just before
+  each window, and tapestryd's idle-throttle line up to 500 ms after a burst of
+  presents), and it flips its cursor every 30 frames on its own. On the Pi at f02c10862, every one of
+  DEADLINE's four attempts met a stall this way, and one round of DEEP had its
+  sends held up behind such a present.
+  So each such window (DEADLINE's and ABANDON's attempts, and the LIVE/DEEP
+  rounds) now opens just after a console present, and only once the console
+  has gone quiet for 700 ms. The next flip is then a whole cursor period away
+  (2 s at the idle rate), which is longer than the sends take. An unconstructed attempt's line says what the
+  settle saw and how many presents were served in its window.
 
 *Witnesses whose premise was the hold.* `ls-graphical-sak-chain`'s readback and
 pointer legs, and `ls-graphical-keys-behind`'s readback leg, stood a client

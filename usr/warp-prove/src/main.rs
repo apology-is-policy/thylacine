@@ -3658,6 +3658,16 @@ const RB_ABANDON_ATTEMPTS: u32 = 4;
 const RB_F2B_BOUND_MS: u64 = 900;
 /// Bound on waiting for a readback to land: FENCE_ABANDON_MS is 30 s.
 const RB_LAND_BOUND_MS: u64 = 35_000;
+/// Aurora paints every say within a FRAME of it (67 ms at the idle 15 Hz), and
+/// tapestryd says its idle throttle up to two present buckets (2 x 250 ms)
+/// after a burst: this long with no present served, nothing said is still to
+/// be painted (ms).
+const RB_SETTLE_QUIET_MS: u64 = 700;
+/// Aurora's cursor flips every 30 FRAME events: 2 s at the idle 15 Hz (ms).
+const RB_SETTLE_EDGE_MS: u64 = 2500;
+/// The quiet is waited on this long at most; a console that never goes quiet
+/// leaves the attempt to the construction rule (ms).
+const RB_SETTLE_BOUND_MS: u64 = 6000;
 
 /// Read a ctl file whole (offset-continued): the tapestry ctl's cost census
 /// runs past the 512-byte single read the other legs take.
@@ -3753,9 +3763,9 @@ fn rb_census(warp: i64) -> Option<RbCensus> {
 /// clock, and one left behind counts in the lane until the context dies,
 /// holding the console's poll at 1 ms. Its own connection, because the hold and
 /// the abandon act only on the caller's ctx. Leaves the lane healed for CLEAN.
-fn rb_abandoned_prefix() -> bool {
+fn rb_abandoned_prefix(tap: i64) -> bool {
     for k in 1..=RB_ABANDON_ATTEMPTS {
-        if let Some(ok) = rb_abandon_attempt(k) {
+        if let Some(ok) = rb_abandon_attempt(k, tap) {
             return ok;
         }
     }
@@ -4859,7 +4869,7 @@ fn rb_yield_attempt(k: u32) -> Option<bool> {
 
 /// One attempt: Some(verdict), or None when it was not constructed (the
 /// readback was on the device when the abandon landed, or a stall met its sends).
-fn rb_abandon_attempt(k: u32) -> Option<bool> {
+fn rb_abandon_attempt(k: u32, tap: i64) -> Option<bool> {
     let w = warp_connect("abandon");
     let ctx = mint_ctx(w, "abandon");
     let (bo, res, _va) = mint_bo_wh(w, ctx, RB_W, RB_H, VIRGL_RESOURCE_Y_0_TOP, "abandon");
@@ -4882,6 +4892,7 @@ fn rb_abandon_attempt(k: u32) -> Option<bool> {
         rb_incomplete("instrument:abandon-hold");
     }
     let a0 = abandoned(w);
+    let settle = rb_console_settle(tap);
     let r0 = stall_refusals();
     let (s0, _) = rb_queue_heavy(w, ctx, RB_ABANDON_SUBMITS, "abandon");
     let xfer = format!("transfer_from 0 0 0 0 {} {} 1 0 0 0", RB_W, RB_H);
@@ -4962,8 +4973,8 @@ fn rb_abandon_attempt(k: u32) -> Option<bool> {
     // device had been handed would have been abandoned with it.
     if taken != RB_ABANDON_SUBMITS as u64 || poisoned != 1 || met != 0 {
         t_putstr(&format!(
-            "warp-prove: C6-RB ABANDON attempt {} not constructed -- the abandon took {} chains (the queue is {}; one more means the readback was on the device, not parked), ctx poisoned {}, stall refusals on its sends {}\n",
-            k, taken, RB_ABANDON_SUBMITS, poisoned, met
+            "warp-prove: C6-RB ABANDON attempt {} not constructed -- the abandon took {} chains (the queue is {}; one more means the readback was on the device, not parked), ctx poisoned {}, stall refusals on its sends {}; the console {}\n",
+            k, taken, RB_ABANDON_SUBMITS, poisoned, met, settle.said()
         ));
         return None;
     }
@@ -5244,6 +5255,79 @@ fn rb_queue_heavy(
     }
     guard_not_poisoned(root, what);
     (before, t0)
+}
+
+/// Presents tapestryd has served, over every arm.
+fn presents_served(tap: i64) -> u64 {
+    let s = open_read_all(tap, "ctl");
+    [
+        "present-direct-gl",
+        "present-direct-2d",
+        "present-composed-bo",
+        "present-composed-slot",
+        "present-composed-cpu",
+        "present-other",
+        "present-poke-img",
+    ]
+    .iter()
+    .map(|k| cost_line(&s, k).map_or(0, |(n, _, _)| n))
+    .sum()
+}
+
+/// What a console settle saw, for an attempt's line.
+struct Settle {
+    quiet: bool,
+    edge: bool,
+    served: u64,
+    waited_ms: u64,
+}
+
+impl Settle {
+    fn said(&self) -> String {
+        match (self.quiet, self.edge) {
+            (true, true) => format!("settled, the window opening on a present {} ms in", self.waited_ms),
+            (true, false) => format!("was still (no present in {} ms)", RB_SETTLE_EDGE_MS),
+            (false, _) => format!("never went quiet in {} ms", RB_SETTLE_BOUND_MS),
+        }
+    }
+}
+
+/// A window whose sends must meet no engine stall opens just after a console
+/// present: every present is a sync step, and one that waits behind the deep
+/// queue past its deadline stalls the engine and drains the queue under the
+/// sends. Aurora paints every say (this process's before each window, and the
+/// console's own about what that painting did) and flips its cursor on its own
+/// frames, so the console first goes quiet and the window then opens on the
+/// next present, a flip: the one after it is a cursor period away, longer
+/// than the sends. Nothing is said in here.
+fn rb_console_settle(tap: i64) -> Settle {
+    let t0 = libthyla_rs::time::Instant::now();
+    let mut served = presents_served(tap);
+    let mut since = libthyla_rs::time::Instant::now();
+    let mut quiet = false;
+    while (t0.elapsed().as_millis() as u64) < RB_SETTLE_BOUND_MS {
+        let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(5));
+        let n = presents_served(tap);
+        if n != served {
+            served = n;
+            since = libthyla_rs::time::Instant::now();
+        } else if since.elapsed().as_millis() as u64 >= RB_SETTLE_QUIET_MS {
+            quiet = true;
+            break;
+        }
+    }
+    let te = libthyla_rs::time::Instant::now();
+    let mut edge = false;
+    while (te.elapsed().as_millis() as u64) < RB_SETTLE_EDGE_MS {
+        let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(2));
+        let n = presents_served(tap);
+        if n != served {
+            served = n;
+            edge = true;
+            break;
+        }
+    }
+    Settle { quiet, edge, served, waited_ms: t0.elapsed().as_millis() as u64 }
 }
 
 /// Wait until this ctx's fence-signaled has advanced by `n` (bounded);
@@ -5691,6 +5775,7 @@ fn observe_readback() {
         // Sentinel the pixel the compositor readback will overwrite: after
         // it lands, the BLUE byte names the last draw the readback observed.
         unsafe { core::ptr::write_volatile(va as *mut u32, SENTINEL) };
+        let _ = rb_console_settle(tap);
         let tap0 = open_read_all(tap, "ctl");
         let (rw_n0, rw_sum0, _) = cost_line(&tap0, "readback-wait").unwrap();
         let others0 = others_census(&tap0);
@@ -5904,6 +5989,7 @@ fn observe_readback() {
             rb_incomplete("instrument:deadline-comp-rb-in-flight");
         }
         unsafe { core::ptr::write_volatile(va as *mut u32, SENTINEL) };
+        let settle = rb_console_settle(tap);
         let r0 = stall_refusals();
         let (dl_before, dl_t0) = rb_queue_heavy(warp, ctx, RB_DEADLINE_SUBMITS, "deadline");
         let (n, refused) = write_behind_stall(warp, &format!("ctx/{}/bo/{}/ctl", ctx, bo), xfer.as_bytes());
@@ -5919,10 +6005,18 @@ fn observe_readback() {
         if met == 0 && ahead == 0 {
             break (dl_before, dl_t0, dl_c0);
         }
+        let in_window = presents_served(tap).saturating_sub(settle.served);
         let _ = rb_wait_signaled(warp, ctx, dl_before, RB_DEADLINE_SUBMITS as u64 + 1, dl_t0, "deadline unconstructed");
+        // `ahead` counts the readback's own fence after the queue's.
         t_putstr(&format!(
-            "warp-prove: C6-RB DEADLINE attempt {} not constructed -- its sends met an engine stall ({} refusals) or {} of the {} submits had retired when the readback was taken, so it may have published into a draining queue\n",
-            dl_try, met, ahead, RB_DEADLINE_SUBMITS
+            "warp-prove: C6-RB DEADLINE attempt {} not constructed -- its sends met an engine stall ({} refusals) or {} of the {} submits had retired when the readback was taken{}, so it may have published into a draining queue; the console {}, and {} presents were served in the window\n",
+            dl_try,
+            met,
+            ahead.min(RB_DEADLINE_SUBMITS as u64),
+            RB_DEADLINE_SUBMITS,
+            if ahead > RB_DEADLINE_SUBMITS as u64 { ", and the readback too" } else { "" },
+            settle.said(),
+            in_window
         ));
         if dl_try >= RB_DEADLINE_ATTEMPTS {
             rb_incomplete("deadline-unconstructed");
@@ -6044,7 +6138,7 @@ fn observe_readback() {
 
     // ---- ABANDON (the vote-81 round's F1): a readback parked behind chains that
     // are then abandoned is released, so its context's fences drain.
-    record(rb_abandoned_prefix(), "abandon");
+    record(rb_abandoned_prefix(tap), "abandon");
 
     // ---- CREATE / DESTROY: a create or a destroy a stall met owes a destroy,
     // and the slot mints again once it runs. FREE: a free a stall met is owed.
