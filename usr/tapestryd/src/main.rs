@@ -512,6 +512,7 @@ impl Driver for Tapestryd {
         // listener's budget being spent has been said since it last had room.
         let mut refused_conns: u32 = 0;
         let mut warp_budget_said = false;
+        let mut warp_budget_spells: u32 = 0;
         let mut raw_events: Vec<RawInputEvent> = Vec::new();
 
         // The FRAME clock (section 18.4): a synthesized fixed-rate tick
@@ -832,11 +833,16 @@ impl Driver for Tapestryd {
             let arm_tapestry = true;
             let arm_warp = warp_conns < MAX_WARP_CONNS;
             // Unarmed, a warp connect waits on the kernel's handshake deadline
-            // with nothing said here; once per spell of a spent budget.
+            // with nothing said here.
             if arm_warp {
                 warp_budget_said = false;
             } else if !core::mem::replace(&mut warp_budget_said, true) {
-                say!("tapestryd: warp connections at their budget ({}): a new warp connect waits", MAX_WARP_CONNS);
+                // A client can open and close a spell at will: said at powers
+                // of two, like the refusals.
+                warp_budget_spells = warp_budget_spells.wrapping_add(1);
+                if warp_budget_spells.is_power_of_two() {
+                    say!("tapestryd: warp connections at their budget ({}): a new warp connect waits (spell {})", MAX_WARP_CONNS, warp_budget_spells);
+                }
             }
             let mut pollfds: Vec<TPollFd> = Vec::new();
             if arm_tapestry {
@@ -889,13 +895,18 @@ impl Driver for Tapestryd {
             // accept: a conn that hung up gives its slot back first, so a
             // client that closes one connection and opens another is not
             // refused at a full pool for the slot it just left. The poll
-            // results cover exactly the conns that stand here.
+            // results cover exactly the conns that stand here. A conn that
+            // hung up goes this pass whatever its last bytes held (a partial
+            // frame, a read that parks): both directions closed together, so
+            // no request can follow and no reply be read.
             let nc = interaction_base - conn_base;
             let mut i = nc;
             while i > 0 {
                 i -= 1;
                 let re = pollfds[conn_base + i].revents;
-                if re & (T_POLLIN | T_POLLHUP) != 0 && !conns[i].service(&mut self.comp) {
+                if re & (T_POLLIN | T_POLLHUP) != 0
+                    && (!conns[i].service(&mut self.comp) || re & T_POLLHUP != 0)
+                {
                     let mut c = conns.remove(i);
                     c.teardown(&mut self.comp);
                     // H-4b-2: on the LAST conn of a real user principal, reap

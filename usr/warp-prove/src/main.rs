@@ -4351,6 +4351,9 @@ const RB_REOPEN_PAIRS: u32 = 32;
 /// More connections than the broker's pool holds: the fill must be refused
 /// before this many are taken.
 const RB_REOPEN_FILL_BOUND: usize = 16;
+/// A refusal at a full pool is an accept and a close, at once; a listener left
+/// unpolled instead would answer at the kernel's handshake deadline, 5 s (ms).
+const RB_REOPEN_FAST_MS: u64 = 1000;
 
 fn tapestry_connect() -> i64 {
     unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/srv/tapestry".as_ptr(), 13, T_OREAD) }
@@ -4379,9 +4382,11 @@ fn rb_reopen() -> bool {
     let mut first_rc = 0i64;
     let mut lost = false;
     if full && filled > 0 {
-        for _ in 0..RB_REOPEN_PAIRS {
-            let last = held.pop().unwrap_or(-1);
-            unsafe { t_close(last) };
+        for k in 0..RB_REOPEN_PAIRS {
+            // The oldest and the newest in turn: the broker's removal shifts
+            // the conns behind it only for the first.
+            let gone = if k % 2 == 0 { held.remove(0) } else { held.pop().unwrap_or(-1) };
+            unsafe { t_close(gone) };
             let mut fd = tapestry_connect();
             if fd < 0 {
                 refused += 1;
@@ -4406,7 +4411,9 @@ fn rb_reopen() -> bool {
         }
     }
     // Still full after the pairs: each took exactly the slot the close left.
+    let to = libthyla_rs::time::Instant::now();
     let over = if full && !lost { tapestry_connect() } else { -1 };
+    let over_ms = to.elapsed().as_millis() as u64;
     if over >= 0 {
         unsafe { t_close(over) };
     }
@@ -4420,17 +4427,21 @@ fn rb_reopen() -> bool {
         ));
         return false;
     }
-    let ok = refused == 0 && !lost && over < 0;
+    let fast = refused_ms < RB_REOPEN_FAST_MS && over_ms < RB_REOPEN_FAST_MS;
+    let ok = refused == 0 && !lost && over < 0 && fast;
     t_putstr(&format!(
-        "warp-prove: C6-RB REOPEN {} -- the pool filled at {} more connections (the next was refused in {} ms); {} times one was closed and another opened at once: {} refused (want 0{}){}; one more than the pool after the pairs was {} (want refused)\n",
+        "warp-prove: C6-RB REOPEN {} -- the pool filled at {} more connections (the next was refused in {} ms, want < {}); {} times one was closed and another opened at once: {} refused (want 0{}){}; one more than the pool after the pairs was {} in {} ms (want refused, < {})\n",
         if ok { "PASS" } else { "FAIL" },
         filled,
         refused_ms,
+        RB_REOPEN_FAST_MS,
         RB_REOPEN_PAIRS,
         refused,
         if refused > 0 { format!("; the first answered {}", first_rc) } else { String::new() },
         if lost { ", and a slot never came back in 1 s" } else { "" },
-        if over >= 0 { "taken" } else { "refused" }
+        if over >= 0 { "taken" } else { "refused" },
+        over_ms,
+        RB_REOPEN_FAST_MS
     ));
     ok
 }

@@ -787,12 +787,16 @@ The 8 connections are one pool over both roots (`MAX_CONNS`), of which at most
 4 are warp (`MAX_WARP_CONNS`). A connect at a full pool is accepted and closed
 at once, so the client sees EOF instead of waiting on the kernel's handshake
 deadline; a warp connect at a spent warp budget waits, because that listener is
-not polled. Under test-mode both are said on the console (the refusal with the
-counts, at powers of two; the spent budget once per spell). The serve pass
-services the connections that hung up **before** it accepts, so a client that
-closes one connection and opens another gets the slot it just left; accepting
-first refused it at a full pool. A connection stands for as long as any fid of
-its session is open, a BO's `map` fd included, not only its root.
+not polled. Both are said on the console in every build, each at powers of two
+(the refusal with the counts; the spent budget by spell, since a client can
+open and close a spell at will). The serve pass services the connections that
+hung up **before** it accepts, and a connection whose handle reports the
+hang-up is torn down in that pass whatever its last bytes held, so a client
+that closes one connection and opens another gets the slot it just left;
+accepting first refused it at a full pool. A connection stands for as long as
+any fid of its session is open, a BO's `map` fd included, not only its root.
+The pool is first-come with no bound per peer: one client can take every free
+slot (the C-6 leg's REOPEN arm does), and the others are then refused.
 
 `Comp` holds the surfaces, the pane `Layout`, the `Gpu`, the scanout
 mode (`Off` / `Direct(n)` / `Composed`), and the mapping window (`va`, a

@@ -2726,7 +2726,12 @@ The census:
   pool free (`fenced-free` equal to `fenced-pool`), and says PASS.
 - **REOPEN** fills tapestryd's connection pool (the connect past it is refused:
   the control), then 32 times closes one connection and opens another at once.
-  None may be refused, and one more than the pool is still refused afterwards.
+  None may be refused, and one more than the pool is still refused afterwards;
+  both refusals must come inside a second, since a listener left unpolled at a
+  full pool would answer at the 5 s handshake deadline instead. It closes the
+  oldest and the newest of its connections in turn. A connection of an earlier
+  arm that leaves late, during the pairs, frees a slot and turns the arm red on
+  a sound build; the line then reads "taken".
   Every arm above opens its own connection right after the last one's close; on
   the Pi the pass that accepted before it serviced the hang-up refused DESTROY's
   and FREE's connects. A build that accepts first must go red here. The arms
@@ -2744,9 +2749,11 @@ The census:
   DEADLINE's four attempts met a stall this way, and one round of DEEP had its
   sends held up behind such a present.
   So each such window (DEADLINE's and ABANDON's attempts, and the LIVE/DEEP
-  rounds) now opens just after a console present, and only once the console
-  has gone quiet for 700 ms. The next flip is then a whole cursor period away
-  (2 s at the idle rate), which is longer than the sends take. An unconstructed attempt's line says what the
+  rounds) now opens just after a console present, once the console has gone
+  quiet for 700 ms. The next flip is then a whole cursor period away (2 s at
+  the idle rate), which is longer than the sends take. Both waits are bounded
+  (6 s for the quiet, 2.5 s for the present): past a bound the window opens
+  anyway and the stall rule decides. An unconstructed attempt's line says what the
   settle saw and how many presents were served in its window. On a console
   that quiet, DEADLINE's sends take about as long as the queue's first submit
   runs on V3D: at 1c86ffbcf one of the six had retired at every take, with no

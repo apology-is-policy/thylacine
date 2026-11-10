@@ -418,12 +418,16 @@ fn control_run(sh: &'static Shared, listener: i64, ctl_listener: i64) -> ! {
         // 3. Service the readable connections (backward, remove-safe), before
         //    the accept: a conn that hung up gives its slot back first, so a
         //    client that closes one connection and opens another is not
-        //    refused at a full pool for the slot it just left.
+        //    refused at a full pool for the slot it just left. A conn that hung
+        //    up goes this pass whatever its last bytes held: both directions
+        //    closed together.
         let mut i = nc;
         while i > 0 {
             i -= 1;
             let pf = pollfds[conn_base + i];
-            if pf.revents & (T_POLLIN | T_POLLHUP) != 0 && !conns[i].service(sh) {
+            if pf.revents & (T_POLLIN | T_POLLHUP) != 0
+                && (!conns[i].service(sh) || pf.revents & T_POLLHUP != 0)
+            {
                 conns[i].teardown(sh);
                 let _ = unsafe { t_close(conns[i].handle()) };
                 conns.remove(i);
