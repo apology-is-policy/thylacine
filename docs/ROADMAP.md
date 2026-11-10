@@ -1167,6 +1167,14 @@ Other v1.1+ candidates:
 - Bare-metal Pi 5.
 - Apple Silicon bare metal.
 
+### 10.8 The Mac runner arc (scheduled 2026-11-10; `docs/MAC-RUNNER.md` authoritative)
+
+The operator scheduled a host-side product arc on the aux track, ahead of that track's next kernel chunk: **Thylacine as a Mac app.** Download a DMG, click the Dock icon, and Thylacine runs in its own window or fullscreen under HVF. A Rust app owns the window; a patched QEMU runs hidden beneath it as a helper; the guest mounts the Mac's interop service at `/mnt/mac` (clipboard, display, shared folders, power); hardware 3D follows. The design, the operator's votes, the measurement plan and the phasing are in `docs/MAC-RUNNER.md`.
+
+**Bounds.** The app and the QEMU fork are host-side and outside the kernel. The guest pieces are few: one userspace driver (virtio-serial), a session service that mounts `/mnt/mac`, a Lictor change (act on the display-change event), and fixes for the HVF-only bugs the app makes user-facing. Each is a chunk under the standing rules: scripture first, an audit round on a trigger surface, its gates. **The arc takes no Phase 7 ship risk and no Halcyon-blocking risk:** v1.0-rc.1 does not wait for it, and nothing it lands changes a gate's image or a default of the dev loop without its own decision.
+
+**Exit, alpha:** someone who has never seen the project installs the app from the DMG and works in Halcyon for an hour: sharp on a Retina display, resizing live, copying and pasting both ways, one shared folder.
+
 ---
 
 ## 11. Phase 8: Halcyon + v1.0 final release
@@ -1633,3 +1641,4 @@ The thylacine runs again.
 |---|---|---|
 | 2026-05-04 | Initial draft (Phase 0). | Ground-up rewrite from `tlcprimer/ROADMAP.md`. Userspace drivers from Phase 3 (no in-kernel virtio-blk shortcut). Utopia milestone at Phase 5 exit. uutils-coreutils as default coreutils; Plan 9 userland Tier 1; BusyBox in initramfs. Stratum coordination story aligned with Stratum's actual state (feature-complete; Phase 9 9P server is the integration target). 9 TLA+ specs gate-tied to phases (`scheduler` / `territory` / `handles` at Phase 2; `burrow` at Phase 3; `9p_client` at Phase 4; `poll` / `futex` / `notes` / `pty` at Phase 5). 8-CPU stress at Phase 8. SOTA hardening from Phase 1. Performance budgets per phase. Per-phase deliverable mapping cross-reference. Risk register expanded. v2.0 contracts (factotum / multikernel / in-kernel Stratum) tracked under post-v1.0. |
 | 2026-05-04 | Halcyon-as-last-phase reorder. | User direction: "place Halcyon as the last phase — practical working OS with compat, binary shims, and polished Utopia will suffice." Phase 6 → Linux compat + network (was Phase 7). Phase 7 → Hardening + audit + 8-CPU stress + **v1.0-rc.1 tag** (was Phase 8 hardening). Phase 8 → Halcyon + Halcyon-surface audit + **v1.0 final** (was Phase 6). Risk register restructured: Halcyon's medium-high risk now isolated to the last phase; Phase 7 produces a shippable v1.0-rc as deliberate insurance. If Halcyon hits a wall, v1.0-rc ships as v1.0 and Halcyon becomes v1.1. |
+| 2026-11-10 | Section 10.8: the Mac runner arc scheduled. | Operator direction: "I want Thylacine to be useful running on MacOS under HVF -- Imagine Parallels running Windows on a Mac." Design and votes in `docs/MAC-RUNNER.md`. |
