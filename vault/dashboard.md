@@ -130,5 +130,5 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-11-10 [[chg-2026-11-10-owed-quiet]] — The owed-free pass and its barrier wait for a quiet engine, so a sustained load cannot take every revived window or freeze the owner's chains
 - 2026-11-10 [[chg-2026-11-10-owed-stand-down]] — The owed-free pass stands down for one window only after a stall its own repeat met; any other stall leaves it and its barrier up, so it gets the first turn after every other revival
 - 2026-11-10 [[chg-2026-11-10-owed-turn-budget]] — A parked context's turn in the owed-free pass has its own looks, the rotation its own, and a turn out of looks moves past its context
-- 2026-11-10 [[chg-2026-11-10-stall-met-destroys]] — A destroy a stall met, or the vindication's, is owed rather than final; the r4 P3 batch and the CREATE/DESTROY witnesses
+- 2026-11-10 [[chg-2026-11-10-owed-turn-cursor]] — A parked context cut short in the owed-free pass's turn starts the next turn, and a turn looks only at frees that hold a chain back
 <!-- generated:end -->

@@ -778,10 +778,13 @@ below).
   one free a window, and in plain rotation a context would wait once per owed
   free, which another client can make hundreds (audit r11 F1 addendum); in turn,
   once per context with a parked chain. The turn has its own looks and the
-  rotation its own, set once the turn's pick is out, and a turn out of looks
-  inside a context moves the cursor past it (audit r12 F1: a shared budget let
-  one context whose frees all waited on chains spend the whole pass, every
-  pass). Any other stall leaves the
+  rotation its own, set once the turn's pick is out (audit r12 F1: a shared
+  budget let one context whose frees all waited on chains spend the whole
+  pass, every pass). A turn out of looks inside a context that had them all
+  moves the cursor past it; inside one the contexts before it cut short, the
+  next turn starts at it (audit r13 F1: a context cut short went last again in
+  the next pass). A turn looks only at frees that hold a parked chain back
+  (`OwedReach::bars`), never one a poisoned chain reaches. Any other stall leaves the
   pass and every barrier up: at its revival the chains a barrier holds stay
   parked, and the pass takes its turn ahead of the requests after whatever else
   that pump published, a readback's run say (audit r9 F1: standing down after

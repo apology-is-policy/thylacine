@@ -502,6 +502,10 @@ impl OwedReach {
             self.ctxs.binary_search(&chain.ctx).is_ok()
         }
     }
+    /// Whether the free `res` holds chains back: a transfer naming it parks.
+    pub fn bars(&self, res: u32) -> bool {
+        self.res.binary_search(&res).is_ok()
+    }
 }
 /// The longest the owed-free pass stands down after a revival: a synchronous
 /// deadline's worth (backend gpu.rs asserts the two equal).
@@ -541,11 +545,13 @@ pub fn owed_barrier<'a>(owed: impl Iterator<Item = &'a OwedFree>, stalls: u32, r
 /// lets only that free's holders' chains go, so in plain rotation a context
 /// would wait for its own free's turn once per debt, which another client
 /// can make long; taken in turn, it waits once per context with a parked
-/// chain. Then the rest in rotation. A turn looks at `cap` frees at most and
-/// the rotation as many again, each free still queued once, never the turn's
-/// pick: so a context whose frees all wait on chains still on the device
-/// spends neither the rotation nor the next context's turn. A free the
-/// rotation looks at and finds not clear goes to the back.
+/// chain, unless more than `cap` of the frees its chains wait on are waiting
+/// in turn for chains on the device. Then the rest in rotation. A turn looks
+/// at `cap` frees at most, only frees that hold a parked chain back, and the
+/// rotation as many again, each free still queued once, never the turn's
+/// pick: so a turn never spends the rotation, and a context whose turn the
+/// contexts before it cut short starts the next turn with every look. A free
+/// the rotation looks at and finds not clear goes to the back.
 pub struct OwedPass {
     /// Each context with a parked chain, and the frees its chains wait on.
     waits: Vec<(u32, Vec<u32>)>,
@@ -555,8 +561,15 @@ pub struct OwedPass {
 }
 impl OwedPass {
     /// `parked`: what each parked chain can reach (a transfer its resource,
-    /// a stream all `held_by` its context).
-    pub fn new(parked: impl Iterator<Item = ChainReach>, held_by: impl Fn(u32) -> Vec<u32>, cap: usize) -> Self {
+    /// a stream all `held_by` its context), of which only the frees that hold
+    /// chains back count (`bars`, as `OwedReach::bars`): one a poisoned chain
+    /// reaches holds none back, and stays unclear for as long as the poison.
+    pub fn new(
+        parked: impl Iterator<Item = ChainReach>,
+        held_by: impl Fn(u32) -> Vec<u32>,
+        bars: impl Fn(u32) -> bool,
+        cap: usize,
+    ) -> Self {
         let mut waits: Vec<(u32, Vec<u32>, bool)> = Vec::new();
         for p in parked {
             let i = match waits.iter().position(|w| w.0 == p.ctx) {
@@ -568,10 +581,12 @@ impl OwedPass {
             };
             let w = &mut waits[i];
             if p.res != 0 {
-                w.1.push(p.res);
+                if bars(p.res) {
+                    w.1.push(p.res);
+                }
             } else if !w.2 {
                 w.2 = true;
-                w.1.extend(held_by(p.ctx));
+                w.1.extend(held_by(p.ctx).into_iter().filter(|&r| bars(r)));
             }
         }
         let mut waits: Vec<(u32, Vec<u32>)> = waits
@@ -586,9 +601,11 @@ impl OwedPass {
         OwedPass { waits, turned: false, cap, left: 0 }
     }
     /// The next free to try, taken out of `owed`, and whether it was a parked
-    /// context's turn (`turn` is the context last served, and then names
-    /// this one); None once the pass has looked at its share. `clear(res)`:
-    /// the free may be tried now.
+    /// context's turn; None once the pass has looked at its share. `turn` is
+    /// the context the next turn starts after: the one last served, one whose
+    /// turn had every look and found no free clear, or the one before a
+    /// context a turn was cut short in. `clear(res)`: the free may be tried
+    /// now.
     pub fn next(
         &mut self,
         owed: &mut alloc::collections::VecDeque<OwedFree>,
@@ -615,8 +632,9 @@ impl OwedPass {
         None
     }
     /// The contexts with parked chains in turn from the one after `turn`, each
-    /// asked for a clear free its chains wait on. Out of looks inside one, the
-    /// next pass starts after it.
+    /// asked for a clear free its chains wait on. Out of looks inside one that
+    /// had them all, the next turn starts after it; inside one the contexts
+    /// before it cut short, at it.
     fn turn(
         &self,
         owed: &mut alloc::collections::VecDeque<OwedFree>,
@@ -632,6 +650,7 @@ impl OwedPass {
         let mut looks = self.cap;
         for k in 0..n {
             let w = &self.waits[(from + k) % n];
+            let had = looks;
             let mut i = 0;
             while i < owed.len() && looks > 0 {
                 if w.1.binary_search(&owed[i].res).is_ok() {
@@ -641,7 +660,8 @@ impl OwedPass {
                     }
                     looks -= 1;
                     if looks == 0 {
-                        *turn = Some(w.0);
+                        // Cut short (k > 0): the next turn starts at it.
+                        *turn = Some(if had == self.cap { w.0 } else { self.waits[(from + k - 1) % n].0 });
                     }
                 }
                 i += 1;
@@ -1474,14 +1494,14 @@ mod park_tests {
         let ids: Vec<u32> = (100..200).chain([50]).collect();
         let mut owed = owed_queue(&ids);
         let mut turn = None;
-        let mut pass = OwedPass::new([ChainReach { ctx: 9, res: 0 }].into_iter(), held_by, 16);
+        let mut pass = OwedPass::new([ChainReach { ctx: 9, res: 0 }].into_iter(), held_by, |_| true, 16);
         let (o, turned) = pass.next(&mut owed, &mut turn, |_| true).unwrap();
         assert_eq!((o.res, turned, turn), (50, true, Some(9)), "the parked context's free first");
         let (o, turned) = pass.next(&mut owed, &mut turn, |_| true).unwrap();
         assert_eq!((o.res, turned), (100, false), "then the rotation");
         // The control, one variable away: nothing parked, the rotation alone.
         let mut owed = owed_queue(&ids);
-        let mut pass = OwedPass::new(core::iter::empty(), held_by, 16);
+        let mut pass = OwedPass::new(core::iter::empty(), held_by, |_| true, 16);
         assert_eq!(pass.next(&mut owed, &mut None, |_| true).map(|(o, t)| (o.res, t)), Some((100, false)));
     }
     #[test]
@@ -1502,7 +1522,7 @@ mod park_tests {
         let mut turn = None;
         let mut served = Vec::new();
         for _ in 0..4 {
-            let mut pass = OwedPass::new(parked.iter().copied(), held_by, 16);
+            let mut pass = OwedPass::new(parked.iter().copied(), held_by, |_| true, 16);
             let (o, turned) = pass.next(&mut owed, &mut turn, |_| true).unwrap();
             assert!(turned);
             served.push((turn.unwrap(), o.res));
@@ -1517,7 +1537,7 @@ mod park_tests {
         let parked = [ChainReach { ctx: 9, res: 0 }];
         let mut owed = owed_queue(&[1, 50, 2, 51, 3]);
         let mut turn = None;
-        let mut pass = OwedPass::new(parked.iter().copied(), held_by, 3);
+        let mut pass = OwedPass::new(parked.iter().copied(), held_by, |_| true, 3);
         // A chain on the device holds 50 and 2; 51 is clear.
         let clear = |r: u32| r != 50 && r != 2;
         let mut next = |owed: &mut alloc::collections::VecDeque<OwedFree>| pass.next(owed, &mut turn, clear).map(|(o, t)| (o.res, t));
@@ -1529,7 +1549,7 @@ mod park_tests {
         // No clear free a parked chain waits on: no turn is taken.
         let mut owed = owed_queue(&[50, 1]);
         let mut turn = None;
-        let mut pass = OwedPass::new(parked.iter().copied(), held_by, 16);
+        let mut pass = OwedPass::new(parked.iter().copied(), held_by, |_| true, 16);
         assert_eq!(pass.next(&mut owed, &mut turn, |r| r != 50).map(|(o, t)| (o.res, t)), Some((1, false)));
         assert_eq!(turn, None);
     }
@@ -1547,11 +1567,11 @@ mod park_tests {
         let mut owed = owed_queue(&ids);
         let clear = |r: u32| !(100..120).contains(&r);
         let mut turn = None;
-        let mut pass = OwedPass::new(parked.iter().copied(), held_by, 16);
+        let mut pass = OwedPass::new(parked.iter().copied(), held_by, |_| true, 16);
         assert_eq!(pass.next(&mut owed, &mut turn, clear).map(|(o, t)| (o.res, t)), Some((1, false)),
             "3's turn ran out of looks; the rotation still has its own");
         assert_eq!(turn, Some(3), "and the next pass starts after 3");
-        let mut pass = OwedPass::new(parked.iter().copied(), held_by, 16);
+        let mut pass = OwedPass::new(parked.iter().copied(), held_by, |_| true, 16);
         assert_eq!(pass.next(&mut owed, &mut turn, clear).map(|(o, t)| (o.res, t)), Some((70, true)));
         assert_eq!(turn, Some(7));
     }
@@ -1560,13 +1580,52 @@ mod park_tests {
         let held_by = |ctx: u32| if ctx == 9 { vec![50] } else { Vec::new() };
         let mut owed = owed_queue(&[50, 1]);
         let mut turn = None;
-        let mut pass = OwedPass::new([ChainReach { ctx: 9, res: 0 }].into_iter(), held_by, 16);
+        let mut pass = OwedPass::new([ChainReach { ctx: 9, res: 0 }].into_iter(), held_by, |_| true, 16);
         let (o, turned) = pass.next(&mut owed, &mut turn, |_| true).unwrap();
         assert_eq!((o.res, turned), (50, true));
         // Kept, as a refused repeat is: back behind the rest.
         owed.push_back(o);
         assert_eq!(pass.next(&mut owed, &mut turn, |_| true).map(|(o, t)| (o.res, t)), Some((1, false)));
         assert_eq!(pass.next(&mut owed, &mut turn, |_| true).map(|(o, t)| (o.res, t)), None, "50 is not refused twice in one pass");
+    }
+    #[test]
+    fn a_context_cut_short_by_the_ones_before_it_starts_the_next_turn() {
+        // 3 waits on eleven frees, 7 on seven and 70; only 70 is clear, and a
+        // hundred frees nothing waits on are owed ahead, none clear.
+        let held_by = |ctx: u32| match ctx {
+            3 => (100..=110).collect(),
+            7 => (200..=206).chain([70]).collect(),
+            _ => Vec::new(),
+        };
+        let parked = [ChainReach { ctx: 3, res: 0 }, ChainReach { ctx: 7, res: 0 }];
+        let ids: Vec<u32> = (1000..=1100).chain(100..=110).chain(200..=206).chain([70]).collect();
+        let mut owed = owed_queue(&ids);
+        let clear = |r: u32| r == 70;
+        let mut turn = None;
+        // 3 spends eleven looks, 7 the last five before it reaches 70.
+        let mut pass = OwedPass::new(parked.iter().copied(), held_by, |_| true, 16);
+        assert_eq!(pass.next(&mut owed, &mut turn, clear).map(|(o, t)| (o.res, t)), None);
+        assert_eq!(turn, Some(3), "7 was cut short: the next turn starts at it");
+        let mut pass = OwedPass::new(parked.iter().copied(), held_by, |_| true, 16);
+        assert_eq!(pass.next(&mut owed, &mut turn, clear).map(|(o, t)| (o.res, t)), Some((70, true)));
+        assert_eq!(turn, Some(7));
+    }
+    #[test]
+    fn a_turn_looks_only_at_frees_that_hold_its_chains_back() {
+        // 3 holds sixteen frees a poisoned chain reaches, which hold nothing
+        // back, ahead of 70, which parks 3's stream and is clear.
+        let held_by = |ctx: u32| if ctx == 3 { (100..116).chain([70]).collect() } else { Vec::new() };
+        let parked = [ChainReach { ctx: 3, res: 0 }];
+        let ids: Vec<u32> = (100..116).chain([70]).collect();
+        let clear = |r: u32| r == 70;
+        let mut owed = owed_queue(&ids);
+        let mut pass = OwedPass::new(parked.iter().copied(), held_by, |r| r == 70, 16);
+        assert_eq!(pass.next(&mut owed, &mut None, clear).map(|(o, t)| (o.res, t)), Some((70, true)));
+        // The control, one variable away: every free counted, the turn and
+        // the rotation each spend their sixteen looks on the poisoned ones.
+        let mut owed = owed_queue(&ids);
+        let mut pass = OwedPass::new(parked.iter().copied(), held_by, |_| true, 16);
+        assert_eq!(pass.next(&mut owed, &mut None, clear).map(|(o, t)| (o.res, t)), None);
     }
     #[test]
     fn a_free_a_poisoned_chain_reaches_holds_no_chain_back() {

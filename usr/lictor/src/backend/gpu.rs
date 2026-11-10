@@ -2302,8 +2302,9 @@ pub struct Gpu {
     owed_stood_down: Option<u32>,
     /// `FreesOwed`'s count of the pass's stand-downs, monotone.
     owed_stood_downs: u32,
-    /// The context whose parked chains the pass last served first
-    /// (`gpu_api::OwedPass`), and how many frees it has tried so, monotone.
+    /// The context the next parked context's turn starts after
+    /// (`gpu_api::OwedPass`), and how many frees the turns have tried,
+    /// monotone.
     owed_turn: Option<u32>,
     owed_parked_firsts: u32,
     /// Self-test lever: fail the next display disable without issuing it.
@@ -3610,8 +3611,8 @@ impl Gpu {
     /// free goes whole: every context link the ledger still records
     /// (`links`), the unmap a mapped blob needs, then the free
     /// (`OwedFree::next`). A pass looks at OWED_FREES_EXAMINED owed frees at
-    /// most for a parked context's turn (`gpu_api::OwedPass`) and as many in
-    /// rotation, and stops at OWED_COMMANDS_PER_PASS commands or
+    /// most for a parked context's turn, only frees that hold chains back
+    /// (`gpu_api::OwedPass`, `OwedReach::bars`), and as many in rotation, and stops at OWED_COMMANDS_PER_PASS commands or
     /// SUBMIT_DEADLINE_MS spent; a free cut short keeps what it reached.
     /// One the device keeps refusing with no stall is given up, its id left
     /// retiring and its pins and extent held: a leak, never a reuse of memory
@@ -3649,6 +3650,7 @@ impl Gpu {
                 crate::gpu_api::OwedPass::new(
                     self.ctrl.parked.iter().map(|p| p.reach),
                     &held_by,
+                    |res| self.ctrl.owed_reach.bars(res),
                     OWED_FREES_EXAMINED,
                 )
             });
