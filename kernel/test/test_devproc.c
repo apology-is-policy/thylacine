@@ -362,32 +362,86 @@ void test_proc_cpu_ns_accounting(void) {
     TEST_ASSERT(cpu_ns2 >= cpu_ns, "cpu_ns is monotonic across polls");
 }
 
-// A thread that keeps its CPU is charged while it runs, not only when it is
-// switched out: a busy loop on an otherwise idle core would otherwise read as
-// idle for as long as nothing displaced it. The wait is half a slice long and
-// starts on a fresh one, so no slice expiry falls inside it, and it never calls
-// sched(): whatever run_ns gains, it gained with the thread still running.
+// A thread is charged while it runs, not only when it is switched out: one
+// that is never switched (a loop inside a syscall body, which the tick will not
+// preempt) would otherwise read as idle for as long as it ran. The window is
+// counted in ticks charged to this thread (its slice counts them down), not in
+// time, and the bounds are relations between values read in one masked
+// section, so a window the host stretched cannot break one.
+struct cpu_run_reading { u64 run_ns, stamp, nsched, now; s64 slice; };
+static struct cpu_run_reading cpu_run_read(struct Thread *t) {
+    struct cpu_run_reading r;
+    irq_state_t s = spin_lock_irqsave(NULL);   // no tick between these reads
+    r.run_ns = __atomic_load_n(&t->run_ns, __ATOMIC_RELAXED);
+    r.stamp  = t->switched_in_at;
+    r.nsched = t->nsched;
+    r.slice  = t->slice_remaining;
+    r.now    = timer_now_ns();
+    spin_unlock_irqrestore(NULL, s);
+    return r;
+}
+
 void test_proc_cpu_ns_running_thread(void) {
     struct Thread *t = current_thread();
     TEST_ASSERT(t != NULL, "current thread present");
-    const u64 spin_ns = 3ull * 1000ull * 1000ull;
-    u64 gained = 0;
-    bool unswitched = false;
-    // A wake that displaces this thread mid-wait would charge it at the
-    // switch and prove nothing, so only a wait with no switch in it is judged.
-    for (int attempt = 0; attempt < 8 && !unswitched; attempt++) {
+    _Static_assert(THREAD_DEFAULT_SLICE_TICKS > 3, "three ticks fit inside one slice");
+    struct cpu_run_reading a = { 0 }, b = { 0 };
+    bool judged = false;
+    // A wake that displaces this thread mid-window would charge it at the
+    // switch and prove nothing, so only a window with no switch in it counts.
+    for (int attempt = 0; attempt < 8 && !judged; attempt++) {
         sched();                              // a fresh slice and a fresh stamp
-        u64 nsched0 = t->nsched;
-        u64 run0 = __atomic_load_n(&t->run_ns, __ATOMIC_RELAXED);
-        u64 t0 = timer_now_ns();
-        while (timer_now_ns() - t0 < spin_ns) { /* keep the CPU */ }
-        gained = __atomic_load_n(&t->run_ns, __ATOMIC_RELAXED) - run0;
-        unswitched = t->nsched == nsched0;
+        a = cpu_run_read(t);
+        u64 cap = a.now + 500ull * 1000ull * 1000ull;
+        for (;;) {                            // keep the CPU for three ticks
+            s64 left = __atomic_load_n(&t->slice_remaining, __ATOMIC_RELAXED);
+            if (left > a.slice || a.slice - left >= 3 || timer_now_ns() >= cap) break;
+        }
+        b = cpu_run_read(t);
+        judged = b.nsched == a.nsched && b.slice <= a.slice && a.slice - b.slice >= 3;
     }
-    TEST_ASSERT(unswitched, "one 3 ms wait in eight ran without a switch");
-    TEST_ASSERT(gained >= 1000ull * 1000ull,
-        "a thread that kept its CPU for 3 ms was charged at least 1 ms of it");
-    TEST_ASSERT(gained <= spin_ns + 1000ull * 1000ull, "and no more than it ran");
+    TEST_ASSERT(judged, "one window in eight took three ticks without a switch");
+    u64 gained = b.run_ns - a.run_ns;
+    TEST_ASSERT(gained > 0, "a thread that kept its CPU across three ticks was charged");
+    TEST_ASSERT(gained == b.stamp - a.stamp,
+        "what it was charged is exactly how far the stamp moved (nothing twice, nothing lost)");
+    TEST_ASSERT(b.stamp <= b.now, "and the stamp is not ahead of the clock");
+    // Ticks are a period apart, so the third fold is two periods past the first.
+    TEST_ASSERT(gained >= 1000ull * 1000ull, "three ticks charged it at least 1 ms");
+}
+
+// A thread freed by its joiner leaves its time in its Proc's total, as a reaped
+// one does. The worker's time is read once it has published its exit (a lower
+// bound on its final run_ns: its last switch-out may still add to it).
+static volatile bool g_cnf_exited;
+static void cnf_worker(void) {
+    u64 t0 = timer_now_ns();
+    while (timer_now_ns() - t0 < 3ull * 1000ull * 1000ull) { /* run */ }
+    test_kthread_park_terminal(&g_cnf_exited);
+}
+
+static u64 cnf_reaped(struct Proc *p) {
+    irq_state_t s = proc_threads_lock(p);
+    u64 v = p->reaped_run_ns;
+    proc_threads_unlock(p, s);
+    return v;
+}
+
+void test_proc_cpu_ns_survives_thread_free(void) {
+    struct Proc *kp = kproc();
+    __atomic_store_n(&g_cnf_exited, false, __ATOMIC_RELEASE);
+    struct Thread *w = thread_create(kp, cnf_worker);
+    TEST_ASSERT(w != NULL, "worker created");
+    ready(w);
+    u64 dl = timer_now_ns() + TEST_YIELD_BUDGET_NS;
+    while (!__atomic_load_n(&g_cnf_exited, __ATOMIC_ACQUIRE) && timer_now_ns() < dl) sched();
+    TEST_ASSERT(__atomic_load_n(&g_cnf_exited, __ATOMIC_ACQUIRE), "the worker ran to its exit");
+    u64 ran = __atomic_load_n(&w->run_ns, __ATOMIC_RELAXED);
+    TEST_ASSERT(ran > 0, "the worker was charged for its 3 ms");
+    u64 before = cnf_reaped(kp);
+    test_kthread_join_free(w, &g_cnf_exited);
+    u64 after = cnf_reaped(kp);
+    TEST_ASSERT(after - before >= ran, "a freed thread's time stays in its Proc's total");
 }
 
 // prowl-3a: the per-thread scheduler counters (nsched/nsleeps/nmigrations/

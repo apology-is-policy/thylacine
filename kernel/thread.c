@@ -150,6 +150,9 @@ static void thread_unlink_from_proc_locked(struct Thread *t) {
 static void thread_unlink_from_proc(struct Thread *t) {
     struct Proc *p = t->proc;
     irq_state_t s = proc_threads_lock(p);
+    // A freed thread's time stays in its Proc's total, as a reaped one's does:
+    // cpu_ns never goes backwards (a reader takes a drop for a reused pid).
+    p->reaped_run_ns += __atomic_load_n(&t->run_ns, __ATOMIC_RELAXED);
     thread_unlink_from_proc_locked(t);
     proc_threads_unlock(p, s);
 }

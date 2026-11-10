@@ -496,8 +496,12 @@ secondary mis-init. It is kept as a loud failure rather than deleted.
 - Deliberately **not** prosecuted here: the telemetry counters
   (`run_ns`, `nsched`, `nmigrations`, `last_cpu`, `idle_ns`, `nctxt`).
   `run_ns` is also folded by `sched_tick` for the thread running on that
-  CPU, so a thread that keeps its core is charged within a tick
-  (`proc.cpu_ns_running_thread`); the rest are
+  CPU -- a second write site, in IRQ context, on the thread's own CPU with
+  IRQs masked -- so a thread that is never switched out (a loop inside a
+  syscall body or under a plain lock, which `preempt_check_irq` will not
+  preempt) is charged within a tick; the stamp moves with every fold
+  (`proc.cpu_ns_running_thread` holds that what was charged is exactly how
+  far the stamp moved). The rest are
   stamped at the single switch chokepoint, single-writer by the
   `on_cpu`/`I-21` discipline, and **no scheduling decision reads any of
   them** — a property that has been grep-verified twice (prowl-1,

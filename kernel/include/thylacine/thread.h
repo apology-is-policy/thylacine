@@ -528,9 +528,10 @@ struct Thread {
     // scheduling decision reads run_ns, so EEVDF placement / the vd_t math /
     // liveness / latency are byte-unchanged; this is telemetry, not policy.
     //
-    // Concurrency: run_ns is written ONLY by this thread's own switch-out, which
-    // runs on exactly one CPU at a time (I-21 on_cpu -- a thread is never on two
-    // CPUs), so there is a single writer. A cross-Proc reader (devproc / devctl)
+    // Concurrency: run_ns is written at this thread's own switch-out and by
+    // the tick that interrupts it, both on the one CPU it is running on with
+    // IRQs masked (I-21 on_cpu -- a thread is never on two CPUs), so there is
+    // a single writer at a time. A cross-Proc reader (devproc / devctl)
     // uses __atomic_load_n and the writer __atomic_store_n for a coherent
     // snapshot -- the page_count/thread_count lockless-reader pattern. RELAXED
     // is sufficient: the value is a monotonic counter the reader diffs across

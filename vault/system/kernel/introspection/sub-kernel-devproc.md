@@ -317,12 +317,14 @@ the bytes mean*, and a monitor or a Linux `/proc` shim breaks if they drift:
   wrong line.
 - **`cpu_ns` is cumulative and monotonic** — the sum of every thread's `run_ns`
   plus what the Proc's freed threads left (`proc_cpu_ns`, under
-  [[lock-proc-threads]]; `thread_reap_dead` folds a thread's time in the same
-  hold that unlinks it), so a monitor derives %CPU by
+  [[lock-proc-threads]]; `thread_reap_dead` and a joiner's `thread_free` each
+  fold a thread's time in the same hold that unlinks it), so a monitor derives %CPU by
   diffing it across two polls (`Δcpu_ns / Δwall`, the htop method); the kernel
-  keeps no instantaneous-rate state. It deliberately excludes the running
-  thread's in-flight slice since its last switch-in (under one slice, negligible
-  over a poll). **It is owner-only since 2026-10-06** (IMPERIUM-DESIGN 11.3
+  keeps no instantaneous-rate state. It excludes only what a running thread
+  has run since its last tick or switch-in (under a tick: `sched_tick` folds
+  the slice so far, [[sub-kernel-sched]]; before 2026-11-10 it was the whole
+  time since the switch-in, which for a loop inside a syscall body had no
+  bound). **It is owner-only since 2026-10-06** (IMPERIUM-DESIGN 11.3
   item 10): a reader that is neither the Proc's owner nor a `CAP_HOSTOWNER`
   holder reads `cpu_ns: -`, because the trusted episode's authority accrues CPU
   time once per key and the number would publish a typed secret's cadence.

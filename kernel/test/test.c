@@ -114,7 +114,6 @@ struct test_thread_view test_thread_view(struct Proc *p, int tid) {
         v.state           = (int)__atomic_load_n(&x->state, __ATOMIC_ACQUIRE);
         v.blocked_on      = __atomic_load_n(&x->rendez_blocked_on, __ATOMIC_ACQUIRE);
         v.on_debug_rendez = v.blocked_on == &x->debug_rendez;
-        v.switched_in_at  = __atomic_load_n(&x->switched_in_at, __ATOMIC_RELAXED);
         v.nsched          = __atomic_load_n(&x->nsched, __ATOMIC_RELAXED);
     }
     proc_threads_unlock(p, s);
@@ -290,14 +289,15 @@ static bool test_caught_blocked(struct Proc *p, int tid) {
 }
 
 // Yield until the call returns or the thread sleeps -- with `seen` not 0, a
-// sleep after a switch-in later than `seen`: the thread ran, and rode out what
-// woke it. switched_in_at is stamped at every switch-in, so that is a positive
+// sleep after a dispatch later than `seen`: the thread ran, and rode out what
+// woke it. nsched moves at a switch-in and nowhere else (the switch-in stamp
+// also moves at every tick the thread stays on its CPU), so that is a positive
 // signal, not a quiet interval. Bounded; true iff it slept.
 static bool test_caught_settle(struct Proc *p, int tid, u64 seen) {
     u64 dl = timer_now_ns() + TEST_YIELD_BUDGET_NS;
     while (!test_caught_returned() && timer_now_ns() < dl) {
         if (test_caught_blocked(p, tid) &&
-            (seen == 0 || test_thread_view(p, tid).switched_in_at != seen))
+            (seen == 0 || test_thread_view(p, tid).nsched != seen))
             return true;
         sched();
     }
@@ -346,7 +346,7 @@ struct test_caught_leg test_caught_run(struct Proc *p, long (*call)(void *arg),
     } else if (leg.parked) {
         leg.prepped = !prep || (prep(arg) && test_caught_settle(p, tid, 0));
         if (leg.prepped) {
-            u64 seen     = test_thread_view(p, tid).switched_in_at;
+            u64 seen     = test_thread_view(p, tid).nsched;
             leg.posted   = test_caught_post(p);
             test_caught_wake_holder(p, tid);
             leg.rode_out = test_caught_settle(p, tid, seen);
@@ -1614,6 +1614,7 @@ struct test_case g_tests[] = {
     { "devproc.read_imperium_format",  test_devproc_read_imperium_format,  false, NULL },
     { "proc.cpu_ns_accounting",        test_proc_cpu_ns_accounting,        false, NULL },
     { "proc.cpu_ns_running_thread",    test_proc_cpu_ns_running_thread,    false, NULL },
+    { "proc.cpu_ns_survives_thread_free", test_proc_cpu_ns_survives_thread_free, false, NULL },
     { "scheduler.prowl_counters",      test_sched_prowl_counters,          false, NULL },
     { "devproc.read_cmdline_kproc",    test_devproc_read_cmdline_kproc,    false, NULL },
     { "devproc.read_ns_format",        test_devproc_read_ns_format,        false, NULL },

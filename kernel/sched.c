@@ -2941,10 +2941,12 @@ void sched_tick(void) {
     // topology + for pinned threads (select_target_cpu ignores util there).
     sched_util_accrue(t);
 
-    // The switch boundary alone would leave a thread that keeps its CPU
-    // uncharged for as long as it runs (sched() with no runnable peer keeps
-    // prev and folds nothing), and a reader diffing cpu_ns would see a busy
-    // loop as idle. Fold the slice so far here too. The writer is still one:
+    // The switch boundary alone leaves a thread that is never switched out
+    // uncharged for as long as it runs: one looping inside a syscall body or
+    // under a plain lock, which preempt_check_irq will not preempt. A reader
+    // diffing cpu_ns would see that loop as idle. (A preemptible thread was
+    // charged, up to a slice late.) Fold the slice so far here too. The
+    // writer is still one at a time:
     // this is the CPU the thread runs on, with IRQs masked, exactly as at its
     // switch-out, and the stamp moves with the fold so nothing is counted
     // twice. The != 0 guard is the switch-out's (a never-stamped boot thread).

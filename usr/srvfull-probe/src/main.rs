@@ -20,15 +20,21 @@
 //      serve the waiting connect: the holder's open returns, it writes the
 //      two instants its last connect began and returned, and exits 0.
 //
-// Step 3's inference is then checked, not trusted: the attempt counts only if
-// that connect began before the first reading and returned after the probe
-// began to free its slot. One that began later (the quiet was a slow connect, not a
-// full pool) or returned earlier (someone else freed a slot) retakes the
-// attempt with twice the quiet. The waiting connect waits about QUIET_MS +
-// SAMPLE_MS however long the holder took to start, far inside the kernel's
-// connect handshake deadline (5 s); only a connect that takes longer than the
-// longest quiet while the pool has room can exhaust the attempts, and that is
-// a defect worth a red boot.
+// Step 3's inference is then checked, not trusted. The attempt counts only if
+// the reported connect began before the first reading, returned after the
+// probe began to free its slot, and returned within one quiet of that. An
+// attempt that fails a check is taken again with twice the quiet:
+//   - it began later, or the holder completed further connects after the
+//     quiet: the holder had stalled between connects and nothing was waiting;
+//   - it returned before the probe freed its slot: someone else freed one, or
+//     it was a slow connect at a pool with room;
+//   - it returned long after: the free is not what served it.
+// The probe cannot see the pool's size. What it takes for "one waiting at a
+// full pool" is a connect that outlasts the quiet and the window after every
+// earlier one returned inside the quiet, and that the probe's own free then
+// serves at once. The waiting connect waits about QUIET_MS + SAMPLE_MS however
+// long the holder took to start, far inside the kernel's connect handshake
+// deadline (5 s).
 //
 // Prints one "srvfull-probe: <server> OK -- ..." line per server and exits 0,
 // or "srvfull-probe: FAIL <server> <what> -- ..." and exits 1. netd is probed
@@ -75,6 +81,10 @@ const BUSY_DIVISOR: u64 = 4;
 /// Both kernel files are rendered afresh on every read at an offset, so each
 /// is read in one call; this is the kernel's own bound on either.
 const CTL_BUF: usize = 4096;
+/// The kernel drops whole rows that do not fit its buffer and says nothing, so
+/// a table that ends within one row of the bound may be missing its tail. No
+/// row of either file comes near this (nine short columns).
+const CTL_ROW_MAX: usize = 512;
 
 const HOLD_SERVED: i32 = 0;
 const HOLD_REFUSED: i32 = 2;
@@ -106,8 +116,9 @@ fn sleep_until(t_ns: u64) {
     }
 }
 
-/// One read of a kernel text file. None: unreadable, or it filled the buffer
-/// (the tail may be cut, and a second read would be of a different render).
+/// One read of a kernel text file. None: unreadable, or it ended within one
+/// row of the kernel's bound (rows may have been dropped, and a second read
+/// would be of a different render).
 fn read_once(path: &str) -> Option<Vec<u8>> {
     let fd = connect(path);
     if fd < 0 {
@@ -116,7 +127,7 @@ fn read_once(path: &str) -> Option<Vec<u8>> {
     let mut buf = [0u8; CTL_BUF];
     let n = unsafe { t_read(fd, buf.as_mut_ptr(), buf.len()) };
     unsafe { t_close(fd) };
-    if n <= 0 || n as usize >= CTL_BUF {
+    if n <= 0 || n as usize > CTL_BUF - CTL_ROW_MAX {
         return None;
     }
     Some(buf[..n as usize].to_vec())
@@ -337,7 +348,10 @@ fn attempt(path: &str, name: &str, quiet_ms: u64) -> Verdict {
         Pid::Absent => return Verdict::Fail(format!("CPU -- no /ctl/procs row is named {}", name)),
         Pid::Twice => return Verdict::Fail(format!("CPU -- two /ctl/procs rows are named {}", name)),
         Pid::Unreadable => {
-            return Verdict::Fail(String::from("CPU -- /ctl/procs could not be read whole in one call"))
+            return Verdict::Fail(format!(
+                "CPU -- /ctl/procs could not be read whole in one call (unreadable, or within {} bytes of the kernel's {}-byte table, where rows are dropped)",
+                CTL_ROW_MAX, CTL_BUF
+            ))
         }
     };
     let own = connect(path);
@@ -363,6 +377,7 @@ fn attempt(path: &str, name: &str, quiet_ms: u64) -> Verdict {
     let mut got: Vec<u8> = Vec::new();
     let fill = await_quiet(rd, quiet_ms, &mut got);
     let filled = got.iter().filter(|&&b| b == CONNECTED).count();
+    let at_quiet = got.len();
 
     // The readings. Taken even when the fill did not go quiet: the slot is
     // freed and the holder reaped on one path either way.
@@ -377,10 +392,31 @@ fn attempt(path: &str, name: &str, quiet_ms: u64) -> Verdict {
     drain(rd, &mut got);
     unsafe { t_close(rd) };
     let status = reap(child);
+    // The report is the holder's last write, so everything between the quiet
+    // and it is a connect that completed after the probe took it to be waiting.
+    let report = match got.len().checked_sub(REPORT_LEN).map(|i| &got[i..]) {
+        Some(r) if status == Some(HOLD_SERVED) && r[0] == REPORT => {
+            let mut p = [0u8; 8];
+            let mut e = [0u8; 8];
+            p.copy_from_slice(&r[1..9]);
+            e.copy_from_slice(&r[9..17]);
+            Some((u64::from_le_bytes(p), u64::from_le_bytes(e)))
+        }
+        _ => None,
+    };
+    let tail_end = if report.is_some() { got.len() - REPORT_LEN } else { got.len() };
+    let later = got[at_quiet.min(tail_end)..tail_end].iter().filter(|&&b| b == CONNECTED).count();
 
     match fill {
         Fill::Quiet => {}
         Fill::Ended => {
+            // The waiting connect was served before the probe had counted out
+            // its quiet: whatever freed that slot, it was not the probe.
+            if report.is_some() {
+                return Verdict::Retry(String::from(
+                    "the holder's waiting connect was served before the quiet had passed",
+                ));
+            }
             return match status {
                 Some(HOLD_REFUSED) => Verdict::Fail(String::from(
                     "REFUSED -- a connect failed before any waited (the holder's line says which)",
@@ -398,6 +434,12 @@ fn attempt(path: &str, name: &str, quiet_ms: u64) -> Verdict {
             ));
         }
     }
+    if later > 0 {
+        return Verdict::Retry(format!(
+            "the holder completed {} more connects after the quiet: it had stalled, nothing was waiting",
+            later
+        ));
+    }
     match status {
         Some(HOLD_SERVED) => {}
         Some(HOLD_REFUSED) => {
@@ -407,15 +449,8 @@ fn attempt(path: &str, name: &str, quiet_ms: u64) -> Verdict {
         }
         other => return Verdict::Fail(format!("HOLDER -- the holder ended with {:?}", other)),
     }
-    let (began, returned) = match got.len().checked_sub(REPORT_LEN).map(|i| &got[i..]) {
-        Some(r) if r[0] == REPORT => {
-            let mut p = [0u8; 8];
-            let mut e = [0u8; 8];
-            p.copy_from_slice(&r[1..9]);
-            e.copy_from_slice(&r[9..17]);
-            (u64::from_le_bytes(p), u64::from_le_bytes(e))
-        }
-        _ => return Verdict::Fail(String::from("HOLDER -- the holder exited 0 without its report")),
+    let Some((began, returned)) = report else {
+        return Verdict::Fail(String::from("HOLDER -- the holder exited 0 without its report"));
     };
     if began > before {
         return Verdict::Retry(format!(
@@ -427,6 +462,12 @@ fn attempt(path: &str, name: &str, quiet_ms: u64) -> Verdict {
         return Verdict::Retry(format!(
             "the waiting connect returned {} us before the probe freed its slot",
             (freeing - returned) / 1000
+        ));
+    }
+    if returned - freeing > quiet_ms * MS {
+        return Verdict::Retry(format!(
+            "the waiting connect returned {} ms after the probe freed its slot: the free did not serve it",
+            (returned - freeing) / MS
         ));
     }
 

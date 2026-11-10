@@ -195,8 +195,7 @@ struct test_thread_view {
     int            state;            // enum thread_state
     struct Rendez *blocked_on;
     bool           on_debug_rendez;  // blocked_on is its own debug_rendez
-    u64            switched_in_at;
-    u64            nsched;           // dispatch count: moves when it runs
+    u64            nsched;           // dispatch count: moves at a switch-in only
 };
 struct test_thread_view test_thread_view(struct Proc *p, int tid);
 bool test_thread_sleeping(struct Proc *p, int tid);   // present and SLEEPING
