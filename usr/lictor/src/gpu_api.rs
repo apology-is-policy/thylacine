@@ -367,6 +367,9 @@ pub enum Request {
     CtxHasPoisonedSlot { ctx_pub: u32 },
     FencedInFlight,
     EngineDead,
+    /// The frees the device has not acknowledged, which the broker retries:
+    /// (owed now, incurred, paid, given up), the last three monotone.
+    FreesOwed,
     InputInfo { index: u32 },
     InputDrain { index: u32 },
     SeatState,
@@ -605,6 +608,7 @@ impl Wire for Request {
             Self::CtxHasPoisonedSlot { ctx_pub } => { 59u16.put(out); ctx_pub.put(out); },
             Self::FencedInFlight => { 60u16.put(out); },
             Self::EngineDead => { 61u16.put(out); },
+            Self::FreesOwed => { 71u16.put(out); },
             Self::InputInfo { index } => { 62u16.put(out); index.put(out); },
             Self::InputDrain { index } => { 63u16.put(out); index.put(out); },
             Self::SeatState => { 64u16.put(out); },
@@ -680,6 +684,7 @@ impl Wire for Request {
             59 => Self::CtxHasPoisonedSlot { ctx_pub: <u32>::get(r)? },
             60 => Self::FencedInFlight,
             61 => Self::EngineDead,
+            71 => Self::FreesOwed,
             62 => Self::InputInfo { index: <u32>::get(r)? },
             63 => Self::InputDrain { index: <u32>::get(r)? },
             64 => Self::SeatState,
@@ -692,19 +697,22 @@ impl Wire for Request {
 
 /// Every reply carries these, an error reply included: a caller reads a
 /// failed step against the engine state it left (`failure_cause`).
+/// `stalls_begun` is the count as the request began, so a one-request span
+/// reads `failure_cause(stalls_begun, stalls, engine)`, which no stall the
+/// broker met between two requests can move.
 #[derive(Default, Clone, Copy)]
 pub struct Stats {
     pub cmd_seq: u64, pub last_scanout_seq: u64, pub last_unref_seq: u64,
-    pub condemned_lost: u32, pub engine: Engine, pub stalls: u32,
+    pub condemned_lost: u32, pub engine: Engine, pub stalls: u32, pub stalls_begun: u32,
 }
 record!(Stats { cmd_seq: u64, last_scanout_seq: u64, last_unref_seq: u64, condemned_lost: u32,
-    engine: Engine, stalls: u32 });
+    engine: Engine, stalls: u32, stalls_begun: u32 });
 #[cfg(feature = "backend")]
 impl From<&crate::backend::gpu::Gpu> for Stats {
     fn from(g: &crate::backend::gpu::Gpu) -> Self {
         Self { cmd_seq: g.cmd_seq, last_scanout_seq: g.last_scanout_seq,
             last_unref_seq: g.last_unref_seq, condemned_lost: g.condemned_lost,
-            engine: g.engine(), stalls: g.stalls() }
+            engine: g.engine(), stalls: g.stalls(), stalls_begun: g.stalls() }
     }
 }
 /// A host allocation's description. The mapping arrives through authenticated
@@ -725,7 +733,8 @@ mod admission_tests {
         vec![Request::Info, Request::Submit3dSync { ctx_id: 1, stream: Vec::new() },
             Request::CtxCreate { ctx_id: 1, debug_name: Vec::new() },
             Request::Flush { resource_id: 1, x: 0, y: 0, w: 1, h: 1 }, Request::EngineDead,
-            Request::TestArmLatch, Request::TestStallNext, Request::TestArmChained, Request::TestStallShot]
+            Request::TestArmLatch, Request::TestStallNext, Request::TestArmChained, Request::TestStallShot,
+            Request::FreesOwed]
     }
     fn seat() -> Vec<Request> {
         vec![Request::InputInfo { index: 0 }, Request::InputDrain { index: 0 }, Request::SeatState,
@@ -1051,6 +1060,15 @@ mod cursor_wire_tests {
         r.finish().unwrap();
     }
     #[test]
+    fn the_owed_frees_query_has_its_own_opcode() {
+        let mut bytes = Vec::new();
+        Request::FreesOwed.put(&mut bytes);
+        assert_eq!(bytes, [1, 0, 71, 0]);
+        let mut r = Reader::new(&bytes).unwrap();
+        assert!(matches!(Request::get(&mut r).unwrap(), Request::FreesOwed));
+        r.finish().unwrap();
+    }
+    #[test]
     fn the_stall_shot_has_its_own_opcode() {
         let mut bytes = Vec::new();
         Request::TestStallShot.put(&mut bytes);
@@ -1071,11 +1089,12 @@ mod cursor_wire_tests {
     #[test]
     fn stats_carry_the_engine_and_refuse_an_unknown_state() {
         let mut bytes = Vec::new();
-        Stats { engine: Engine::Stalled, stalls: 0x0403_0201, ..Stats::default() }.put(&mut bytes);
-        assert_eq!(&bytes[bytes.len() - 5..], [1, 1, 2, 3, 4]);
+        Stats { engine: Engine::Stalled, stalls: 0x0403_0201, stalls_begun: 0x0807_0605, ..Stats::default() }
+            .put(&mut bytes);
+        assert_eq!(&bytes[bytes.len() - 9..], [1, 1, 2, 3, 4, 5, 6, 7, 8]);
         let s = Stats::get(&mut Reader::new(&bytes).unwrap()).unwrap();
-        assert_eq!((s.engine, s.stalls), (Engine::Stalled, 0x0403_0201));
-        let at = bytes.len() - 5;
+        assert_eq!((s.engine, s.stalls, s.stalls_begun), (Engine::Stalled, 0x0403_0201, 0x0807_0605));
+        let at = bytes.len() - 9;
         bytes[at] = 3;
         assert!(Stats::get(&mut Reader::new(&bytes).unwrap()).is_err());
     }

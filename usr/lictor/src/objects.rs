@@ -98,9 +98,10 @@ impl Objects {
         object.retiring = true;
         Ok(Retirement { owner, id, kind, serial: object.serial })
     }
-    /// Undo a retirement whose device command left nothing behind: refused
-    /// before staging, or refused by the device. The object lives on and may be
-    /// retired again; a stale ticket undoes nothing.
+    /// Undo a retirement whose device command may be issued again: one that
+    /// left nothing behind (refused before staging, or by the device), or a
+    /// context destroy a stall met, which is harmless to repeat. The object
+    /// lives on and may be retired again; a stale ticket undoes nothing.
     pub fn unretire(&mut self, ticket: Retirement) -> Result<(), Error> {
         let Retirement { owner, id, kind, serial } = ticket;
         let o = self.entries.iter_mut().find(|o| o.id == id && o.kind == kind).ok_or(Error::Missing)?;

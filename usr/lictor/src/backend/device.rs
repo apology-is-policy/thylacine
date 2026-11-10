@@ -52,6 +52,9 @@ pub struct Device {
     /// Stall shots left for the compositor to aim (`Request::TestStallNext`).
     #[cfg(feature = "test-mode")]
     test_stall_shots: u8,
+    /// The connection whose next request a `TestStallShot` rides.
+    #[cfg(feature = "test-mode")]
+    test_stall_shot_for: Option<i64>,
 }
 /// How the lever breaks a trusted takeover's return, in firing order.
 #[cfg(feature = "test-mode")]
@@ -103,6 +106,7 @@ impl Device {
             #[cfg(feature = "test-mode")] test_chained_shots: 0,
             #[cfg(feature = "test-mode")] test_blind_armed: false,
             #[cfg(feature = "test-mode")] test_stall_shots: 0,
+            #[cfg(feature = "test-mode")] test_stall_shot_for: None,
             #[cfg(feature = "test-mode")] test_latch_targets: Vec::new(),
             #[cfg(feature = "test-mode")] test_latch_fired: Vec::new() })
     }
@@ -133,10 +137,17 @@ impl Device {
         self.gpu.stalls() == stalls && !self.gpu.engine_dead()
     }
     /// Release the reservation a create made, when its failure left nothing.
+    /// One whose unwind left a free owed retires once that free is paid,
+    /// whichever way the create went: the paid free proves the id gone.
     fn unreserve(&mut self, id: u32, kind: Kind, stalls: u32) {
-        if self.left_nothing(stalls) {
+        let owed = kind == Kind::Resource && self.gpu.owes_free(id);
+        if owed || self.left_nothing(stalls) {
             if let Ok(ticket) = self.objects.retire(self.owner, id, kind) {
-                let _ = self.objects.retired(ticket);
+                if owed {
+                    self.retiring.push(Retiring { resource: id, ticket, done: false });
+                } else {
+                    let _ = self.objects.retired(ticket);
+                }
             }
         }
     }
@@ -152,6 +163,30 @@ impl Device {
             self.backings.push(Backing { resource, _pin: pin });
         }
         result
+    }
+    /// Repeat the frees the device has not acknowledged (`Gpu::pay_owed_frees`),
+    /// then finish the ledger entries they paid. Never inside a request: a
+    /// stall one meets would read as that request's.
+    pub fn pay_owed_frees(&mut self) {
+        let objects = &self.objects;
+        self.gpu.pay_owed_frees(|ctx, res| objects.holds(ctx, res));
+        self.reap();
+    }
+    /// Arm the shot `connection` asked for onto this request of its, whatever
+    /// it is; `test_stall_settle` spends it if no synchronous command took it.
+    #[cfg(feature = "test-mode")]
+    pub fn test_stall_ride(&mut self, connection: i64) -> bool {
+        if self.test_stall_shot_for != Some(connection) { return false; }
+        self.test_stall_shot_for = None;
+        self.gpu.test_stall_next();
+        true
+    }
+    #[cfg(feature = "test-mode")]
+    pub fn test_stall_settle(&mut self) { self.gpu.test_stall_unspent(); }
+    /// A connection gone leaves no shot for whoever reuses its descriptor.
+    #[cfg(feature = "test-mode")]
+    pub fn test_stall_forget(&mut self, connection: i64) {
+        if self.test_stall_shot_for == Some(connection) { self.test_stall_shot_for = None; }
     }
     pub fn reap(&mut self) {
         self.gpu.poll_completions();
@@ -461,7 +496,6 @@ impl Device {
             Request::CtxDestroy { ctx_id } => {
                 self.check(ctx_id, Kind::Context)?;
                 let ticket = self.objects.retire(self.owner, ctx_id, Kind::Context).map_err(|_| Error::BadField)?;
-                let stalls = self.gpu.stalls();
                 let result = self.gpu.ctx_destroy(ctx_id);
                 if result.is_ok() {
                     self.objects.context_destroyed(self.owner, ctx_id).map_err(|_| Error::Hardware)?;
@@ -677,7 +711,7 @@ impl Device {
                 #[cfg(not(feature = "test-mode"))] { return Err(Error::BadField); }
             }
             Request::TestStallShot => {
-                #[cfg(feature = "test-mode")] { self.gpu.test_stall_next(); ().put(&mut out); }
+                #[cfg(feature = "test-mode")] { self.test_stall_shot_for = Some(connection); ().put(&mut out); }
                 #[cfg(not(feature = "test-mode"))] { return Err(Error::BadField); }
             }
             Request::CompSlotState => {
@@ -700,6 +734,9 @@ impl Device {
             Request::EngineDead => {
                 let result = self.gpu.engine_dead();
                 result.put(&mut out);
+            }
+            Request::FreesOwed => {
+                self.gpu.frees_owed().put(&mut out);
             }
             Request::InputInfo { .. } => {
                 return Err(Error::BadField);

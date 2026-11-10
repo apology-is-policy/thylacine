@@ -2889,12 +2889,32 @@ block the serve loop, and seat input with it. Neither was taken.
   executed, so every guest resource it named stays referenced:
   - a stalled ATTACH keeps its pins, as `Device::attach` already does for any
     error;
-  - a stalled DETACH or UNREF releases nothing;
+  - a stalled DETACH releases nothing;
+  - a free the device has not acknowledged is owed. A stalled UNREF, one
+    refused before staging, and one the device refused all leave the
+    resource possibly on the device, so lictor keeps its id retiring and its
+    pins held, and repeats the free once the engine takes commands: a few
+    per serve pass, at the top of the loop, never inside a request, where a
+    stall it met would read as that request's. The device answers a repeat
+    of a free that ran with "no such resource", which lictor reads as gone,
+    as it reads a first free answered so (QEMU v10.0
+    `virgl_cmd_resource_unref`). QEMU refuses a free of an existing
+    resource only when the host unmap fails, which clears the mapping, so
+    the next repeat runs; three answered refusals give the free up, its id,
+    pins and extent kept. A mapped HOST3D blob's unmap is owed the same way
+    (a repeat of one that ran is answered OK), and its extent returns only
+    once both are acknowledged. A create whose unwind left a free owed keeps
+    its id retiring until it is paid. Only frees made while serving are
+    owed; a bring-up probe's refused free is said and leaked as before. The
+    readback leg's FREE arm witnesses it (`warp-stall-free`);
   - a stalled CREATE consumes its id, because the reservation precedes the
     command and is never undone. A warp context's id is its slot's
-    (`slot + 1`, the venus band likewise), so tapestryd condemns that slot
-    and owes the id a destroy; once the engine is live the destroy runs,
-    ordered after the create, and its completion frees the slot whichever
+    (`slot + 1`, and `WARP_VENUS_CTX_BASE + slot` for its venus one). A GL
+    create a stall met condemns that slot and owes the id a destroy; a venus
+    create a stall met owes the venus id a destroy and fails that slot's
+    venus mints until it runs, without condemning a slot whose GL context
+    lives on. Once the engine is live the destroy runs,
+    ordered after the create, and its completion frees the id whichever
     way the create went. A destroy a stall refused before staging, or one a
     stall met, leaves the id named but destroyable: lictor un-retires the
     context and tapestryd owes the destroy the same way. A repeat of one
@@ -2903,13 +2923,19 @@ block the serve loop, and seat input with it. Neither was taken.
     `virgl_cmd_context_destroy`, virglrenderer 1.1.0 `virgl_context_remove`),
     and no create can take the id meanwhile. The vindication's destroys are
     owed the same way, since no later vindication of that context comes.
-    Only an answered refusal, or a dead engine, condemns for good. A slot is
-    reused only once each device context it carried is gone or refused for
-    good. The readback leg's CREATE and DESTROY arms witness it, aiming one
-    stall shot at their own next create or their own ctx's destroy
-    (`warp-stall-create`, `warp-stall-destroy`, a few per boot);
-  - a stalled hostmem MAP or UNMAP leaks its extent (`mint_host3d_ring`,
-    `drop_host3d_ring`).
+    Only an answered refusal, or a dead engine, condemns for good, and a
+    condemned slot holds its pub. A slot is reused only once each device
+    context it carried is gone or refused for good. tapestryd reads a
+    create's or a destroy's failure on that reply's own span
+    (`Stats::stalls_begun`), as lictor reads it, so a stall lictor met
+    between two requests never has tapestryd owe a destroy for an id lictor
+    released. The readback leg's CREATE and DESTROY arms witness the GL
+    band, aiming one stall shot at their own next create or their own ctx's
+    destroy (`warp-stall-create`, `warp-stall-destroy`; a dozen shots per
+    boot across these and FREE). The venus band runs the same code, but no
+    leg drives it: the readback host runs virgl without venus;
+  - a refused detach of a HOST3D ring's guest mapping leaks its extent until
+    restart (`drop_host3d_ring`); nothing has been asked of the device.
   A stalled SET_SCANOUT is the case a permanent latch never had to answer: once
   the device catches up, the display may name the resource the bind carried, so
   that resource is *condemned*. Its free is then deferred to the next accepted
@@ -2965,8 +2991,8 @@ are the poisoned holder's own.
 (§4.5.12) fails closed: a failed step latches GPU composition OFF, sticky. A
 stall says nothing about the compositor's context, though, so a step that met
 one must not decide it. Every broker reply carries the engine state (live,
-stalled, dead) and the monotone stall count, an error reply included, and the
-proxy adopts them on every reply. The tick reads its failure against them
+stalled, dead), the monotone stall count and that count as the request began,
+an error reply included, and the proxy adopts them on every reply. The tick reads its failure against them
 (`gpu_api::failure_cause`):
 - a stall began during the tick, or the engine is still stalled: some step's
   outcome is unknown, so the tick takes no verdict. That present is composed by
@@ -3002,7 +3028,10 @@ request revives the engine, so the reply already reads live with the stall
 count moved: the count, not the engine state, is what tells the compositor its
 step met a stall. A command that is refused, at staging or at submission, or
 ends before its chain retires, spends the shot and says `stall shot LOST`, so
-the shot never lands on a later command. tapestryd aims them at the compositor context's create, at one
+the shot never lands on a later command. The compositor's own shot
+(`TestStallShot`, which tapestryd bounds) is bound to its connection: it rides
+that connection's next request, whatever it is, and the broker spends it at
+that request's end if no synchronous command took it. tapestryd aims them at the compositor context's create, at one
 blit-convention attempt, and at a health step once GPU composition runs.
 `tools/warp-host.sh composed-stall` (the GL host) asks that each bring-up step
 retries and succeeds, with no blit class left to the CPU, and that the health

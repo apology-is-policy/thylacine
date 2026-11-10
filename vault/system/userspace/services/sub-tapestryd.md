@@ -600,10 +600,15 @@ reused slot could re-mint the venus id into a live host ctx). Both destroys go
 through `warp_ctx_destroy_id`: one a stall refused before staging or met
 (`failure_cause` says `Stall`) is owed (`warp_ctx_destroy_owed`,
 `warp_ctx_venus_destroy_owed`), not final, since Lictor leaves the id
-destroyable; only an answered refusal or a dead engine is final. A create a
-stall met (`wctx_mint`, `wctx_venus_ensure`) owes its id a destroy too, its dev
-slot condemned meanwhile, and so do the vindication's destroys, since no later
-vindication of that ctx comes. `warp_destroy_owed` runs them from
+destroyable; only an answered refusal or a dead engine is final, and an
+answered refusal condemns the slot for good, an owed venus one included. A
+create a stall met (`wctx_mint`, `wctx_venus_ensure`) owes its id a destroy
+too, its dev slot condemned meanwhile, and so do the vindication's destroys,
+since no later vindication of that ctx comes. A create's or a destroy's
+failure is read on that reply's own span (`Gpu::stalls_begun`, the count as
+the broker began the request), as Lictor reads it, so a stall the broker met
+between two requests never has the seam owe a destroy for an id Lictor
+released. `warp_destroy_owed` runs them from
 `warp_service_fences` once the engine is live, and a completed dev destroy frees
 the slot (and a vindicated slot's parked backings). A slot is minted again only
 once no destroy of it is owed, the venus one included, and `wctx_mint` never
@@ -612,11 +617,15 @@ reissues a pub a slot still carries (live, condemned or owing a destroy;
 released-stream record names the pub. The warp ctl reports the gauges
 `ctx-owed`, `venus-owed` and `slots-condemned`, and the monotone `gpu-stalls`,
 `owed-incurred` (each debt once), `owed-ran` and `destroy-failed`, which a
-recovery inside one serve pass cannot hide. The test-mode
-`warp-stall-create` and `warp-stall-destroy` verbs arm one stall shot at the
-caller's own next create or its own ctx's destroy (`TEST_STALL_SHOTS` per
-boot, one connection at a time), which the readback leg's CREATE and DESTROY
-arms use. A client that mints
+recovery inside one serve pass cannot hide, and Lictor's owed frees as
+`frees-owed`, then monotone `frees-incurred`, `frees-paid` and `frees-leaked`
+([[sub-lictor]]). The test-mode `warp-stall-create`, `warp-stall-destroy` and
+`warp-stall-free` verbs arm one stall shot at the caller's own next create
+(of its GL ctx; the venus create is not aimed), its own ctx's destroy, or the
+free of the next BO it destroys (`TEST_STALL_SHOTS` per boot, one connection
+at a time), which the readback leg's CREATE, DESTROY and FREE arms use. The
+free is the last command a BO's retire sends, so the proxy sends the shot
+just before it (`Gpu::test_stall_at_next_unref`). A client that mints
 only V-3a guest-blob rings pays no venus ctx. Section 0.6 ratifies one venus ctx
 per client (V-3b-2's forward reuses it, no rework). The id is a **dedicated band**
 `WARP_VENUS_CTX_BASE (0x200) + slot`, pinned disjoint by a `const _` gap assert +

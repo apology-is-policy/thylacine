@@ -135,6 +135,25 @@ pub const BLOB_FLAG_SHAREABLE: u32 = VIRTIO_GPU_BLOB_FLAG_USE_SHAREABLE;
 /// absorb a burst and no more; overflow is counted and leaks, never frees.
 const GPU_CONDEMNED_MAX: usize = 16;
 
+/// Owed frees repeated per serve pass (`Gpu::pay_owed_frees`).
+const OWED_FREES_PER_PASS: usize = 8;
+/// Answered refusals an owed free may meet before it is given up. QEMU
+/// refuses a free of an existing resource only when the host unmap fails,
+/// and that clears the mapping, so the next repeat runs (QEMU v10.0
+/// virgl_cmd_resource_unref, virtio_gpu_virgl_unmap_resource_blob).
+const OWED_FREE_ANSWERS: u8 = 3;
+
+/// A free the device has not acknowledged (GPU-DESIGN 4.5.15). `extent` is
+/// the hostmem range a mapped blob returns once both its unmap (`unmapped`)
+/// and its free are acknowledged; a guest-backed resource has none.
+#[derive(Clone, Copy)]
+struct OwedFree {
+    res: u32,
+    extent: Option<(u64, u64)>,
+    unmapped: bool,
+    answered: u8,
+}
+
 /// One display-condemned resource. `unref_requested` is what keeps the drain
 /// from ACCELERATING a free: an id parked at a pre-quiesce eviction whose
 /// owner has not yet asked to free it is simply un-parked by the drain, and
@@ -2234,6 +2253,14 @@ pub struct Gpu {
     /// Sticky: the park list overflowed, so EVERY unref defers until the next
     /// drain. Over-deferral is the safe direction (round-3 F2).
     condemned_overflowed: bool,
+    /// Frees the device has not acknowledged, repeated until it does. Each
+    /// id stays retiring in the broker's ledger meanwhile, so no create can
+    /// take it and a repeat cannot free a newer resource.
+    owed_frees: alloc::vec::Vec<OwedFree>,
+    /// `FreesOwed`'s monotone counts: frees owed, paid by a repeat, given up.
+    owed_incurred: u32,
+    owed_paid: u32,
+    owed_leaked: u32,
     /// Self-test lever: fail the next display disable without issuing it.
     fail_next_scanout_disable: bool,
     /// Set when the lever (not the device) produced the last refusal, so the
@@ -2464,6 +2491,10 @@ impl Gpu {
             collect_retirements: false,
             retired_resources: alloc::vec::Vec::new(),
             condemned_overflowed: false,
+            owed_frees: alloc::vec::Vec::new(),
+            owed_incurred: 0,
+            owed_paid: 0,
+            owed_leaked: 0,
             fail_next_scanout_disable: false,
             injected_refusal: false,
             condemned_lost: 0,
@@ -3292,7 +3323,7 @@ impl Gpu {
         if self.condemned_overflowed {
             return Ok(());
         }
-        self.resource_unref_raw(resource_id)
+        self.unref_or_owe(resource_id)
     }
 
     /// Park `res_id` as still-scanned-by-the-device. Idempotent.
@@ -3389,15 +3420,16 @@ impl Gpu {
                 kept += 1;
                 continue;
             }
-            // An owner told Ok never asks again, so an unref the engine could
-            // not take (or that stalled) stays parked for the next accepted
-            // bind; a second UNREF of a freed id is a harmless refusal.
-            if e.res != 0
-                && e.unref_requested
-                && (!self.takes_commands() || (self.resource_unref_raw(e.res).is_err() && !self.takes_commands()))
-            {
-                self.condemned[kept] = e;
-                kept += 1;
+            // An owner told Ok never asks again, so a free the engine cannot
+            // take now stays parked for the next accepted bind, and one the
+            // device does not acknowledge is owed.
+            if e.res != 0 && e.unref_requested {
+                if self.takes_commands() {
+                    let _ = self.unref_or_owe(e.res);
+                } else {
+                    self.condemned[kept] = e;
+                    kept += 1;
+                }
             }
         }
         self.condemned_n = kept;
@@ -3415,16 +3447,120 @@ impl Gpu {
             w32(req_va + 24, resource_id);
             w32(req_va + 28, 0);
         };
-        let result = self.ctrl.step(
-            "RESOURCE_UNREF",
-            GPU_CTRL_HDR_LEN + 8,
-            GPU_CTRL_HDR_LEN,
-            VIRTIO_GPU_RESP_OK_NODATA,
-        );
+        let result = match self.ctrl.submit_and_wait(GPU_CTRL_HDR_LEN + 8, GPU_CTRL_HDR_LEN) {
+            Ok(VIRTIO_GPU_RESP_OK_NODATA) => Ok(()),
+            // No such resource on the device: as gone as a completed free
+            // leaves it -- a repeat of one that ran, or one whose create a
+            // stall met never ran (QEMU v10.0 virgl_cmd_resource_unref).
+            Ok(GPU_RESP_ERR_INVALID_RESOURCE_ID) => Ok(()),
+            Ok(t) => {
+                say!("tapestryd: gpu RESOURCE_UNREF resp_type={:#x} (expected {:#x})", t, VIRTIO_GPU_RESP_OK_NODATA);
+                Err(Error::Hardware)
+            }
+            Err(()) => {
+                say!("tapestryd: gpu RESOURCE_UNREF submit error");
+                Err(Error::Hardware)
+            }
+        };
         if result.is_ok() && self.collect_retirements {
             self.retired_resources.push(resource_id);
         }
         result
+    }
+
+    /// Free `resource_id`, owing the free when the device may still hold the
+    /// resource: a stall leaves the outcome unknown, a refusal before staging
+    /// asked nothing, and an answered refusal leaves the resource in place.
+    fn unref_or_owe(&mut self, resource_id: u32) -> Result<(), Error> {
+        let result = self.resource_unref_raw(resource_id);
+        if result.is_err() {
+            self.owe_free(OwedFree { res: resource_id, extent: None, unmapped: true, answered: 0 });
+        }
+        result
+    }
+
+    /// Unmap and free a mapped HOST3D blob, then return its extent, owing
+    /// whatever the device has not acknowledged: the extent is reused only
+    /// after both are. A repeat of an unmap that ran is answered OK, and of a
+    /// free that ran, as no such resource.
+    fn free_mapped_or_owe(&mut self, resource_id: u32, offset: u64, size: u64) -> Result<(), Error> {
+        let unmapped = self.unmap_blob(resource_id).is_ok();
+        if unmapped && self.resource_unref_raw(resource_id).is_ok() {
+            self.hostmem_free(offset, size);
+            return Ok(());
+        }
+        self.owe_free(OwedFree { res: resource_id, extent: Some((offset, size)), unmapped, answered: 0 });
+        Err(Error::Hardware)
+    }
+
+    /// Before serving, a caller says and leaks a refused free itself (its
+    /// ids are bring-up probes'); after death nothing runs again.
+    fn owe_free(&mut self, owed: OwedFree) {
+        if !self.ctrl.serving || self.ctrl.dead || self.owes_free(owed.res) {
+            return;
+        }
+        if self.owed_frees.len() >= crate::objects::MAX_OBJECTS || self.owed_frees.try_reserve(1).is_err() {
+            self.owed_leaked = self.owed_leaked.wrapping_add(1);
+            say!("lictor: resource {} free owed past the bound -- leaked (id, pins and extent kept)", owed.res);
+            return;
+        }
+        self.owed_frees.push(owed);
+        self.owed_incurred = self.owed_incurred.wrapping_add(1);
+    }
+
+    /// A free of `resource_id` is owed: the resource may still be on the device.
+    pub fn owes_free(&self, resource_id: u32) -> bool {
+        self.owed_frees.iter().any(|o| o.res == resource_id)
+    }
+
+    /// Repeat owed frees while the engine takes commands, a few per serve
+    /// pass, each once no chain can reach it, as its first try waited
+    /// (`holds` is the ledger's context-to-resource relation). One the device
+    /// keeps refusing with no stall is given up after `OWED_FREE_ANSWERS`,
+    /// its id left retiring and its pins and extent held: a leak, never a
+    /// reuse of memory the device may still read.
+    pub fn pay_owed_frees(&mut self, holds: impl Fn(u32, u32) -> bool) {
+        let mut i = 0;
+        let mut tried = 0;
+        while i < self.owed_frees.len() && tried < OWED_FREES_PER_PASS {
+            if !self.takes_commands()
+                || (self.collect_retirements && self.retired_resources.len() >= crate::objects::MAX_OBJECTS)
+            {
+                return;
+            }
+            let mut o = self.owed_frees[i];
+            if self.retirement_hold(Retired::Resource(o.res), &holds) != Hold::Clear {
+                i += 1;
+                continue;
+            }
+            tried += 1;
+            let stalls = self.ctrl.stalls;
+            o.unmapped = o.unmapped || self.unmap_blob(o.res).is_ok();
+            if o.unmapped && self.resource_unref_raw(o.res).is_ok() {
+                if let Some((offset, size)) = o.extent {
+                    self.hostmem_free(offset, size);
+                }
+                self.owed_frees.swap_remove(i);
+                self.owed_paid = self.owed_paid.wrapping_add(1);
+                continue;
+            }
+            if self.ctrl.stalls == stalls && !self.ctrl.dead {
+                o.answered += 1;
+            }
+            if o.answered >= OWED_FREE_ANSWERS {
+                self.owed_frees.swap_remove(i);
+                self.owed_leaked = self.owed_leaked.wrapping_add(1);
+                say!("lictor: resource {} owed free refused {} times -- given up (id, pins and extent kept)", o.res, o.answered);
+                continue;
+            }
+            self.owed_frees[i] = o;
+            i += 1;
+        }
+    }
+
+    /// (owed now, incurred, paid, given up); the last three are monotone.
+    pub fn frees_owed(&self) -> (u32, u32, u32, u32) {
+        (self.owed_frees.len() as u32, self.owed_incurred, self.owed_paid, self.owed_leaked)
     }
 
     /// RESOURCE_CREATE_BLOB for a GUEST-memory blob (Warp-6 V-1): the blob's
@@ -3649,9 +3785,7 @@ impl Gpu {
             Err(e) => {
                 // MAP may have reached the host before its reply was lost.
                 // Reuse only after explicit unmap AND unref acknowledgements.
-                if self.unmap_blob(res_id).is_ok() && self.resource_unref_raw(res_id).is_ok() {
-                    self.hostmem_free(off, size);
-                }
+                let _ = self.free_mapped_or_owe(res_id, off, size);
                 return Err(e);
             }
         };
@@ -3659,9 +3793,7 @@ impl Gpu {
         let va = match self.pci.burrow_from_hostmem(1, off, size, cache) {
             Ok(v) => v,
             Err(_) => {
-                if self.unmap_blob(res_id).is_ok() && self.resource_unref_raw(res_id).is_ok() {
-                    self.hostmem_free(off, size);
-                }
+                let _ = self.free_mapped_or_owe(res_id, off, size);
                 return Err(Error::Hardware);
             }
         };
@@ -3784,25 +3916,20 @@ impl Gpu {
             self.hostmem_parked.push(ring);
             return;
         }
-        // Every step is a prerequisite of address reuse. An uncertain device
-        // completion deliberately leaks this reserved extent until service
-        // restart/reset; logging an error is not permission to alias it.
+        // Every step is a prerequisite of address reuse. A refused detach
+        // leaks this reserved extent until service restart/reset; logging an
+        // error is not permission to alias it.
         let rc = unsafe { t_burrow_detach(ring.va, ring.size) };
         if rc < 0 {
             say!("lictor: hostmem detach refused {}; extent remains reserved", rc);
             return;
         }
-        if self.unmap_blob(ring.res_id).is_err() {
-            say!("lictor: hostmem unmap refused; extent remains reserved");
-            return;
+        // Unlike resource_unref(), this never defers for scanout retirement:
+        // host rings are never scanout targets. A device step not
+        // acknowledged is owed, the extent reserved until it is paid.
+        if self.free_mapped_or_owe(ring.res_id, ring.offset, ring.size).is_err() {
+            say!("lictor: hostmem teardown not acknowledged; owed, extent reserved until paid");
         }
-        // Unlike resource_unref(), the raw operation cannot return success
-        // for deferred scanout retirement. Host rings are never scanout targets.
-        if self.resource_unref_raw(ring.res_id).is_err() {
-            say!("lictor: hostmem unref refused; extent remains reserved");
-            return;
-        }
-        self.hostmem_free(ring.offset, ring.size);
     }
 
     /// Return a hostmem extent to the persistent allocator (no-op when there is no
@@ -4833,6 +4960,14 @@ impl Gpu {
     #[cfg(feature = "test-mode")]
     pub fn test_stall_next(&mut self) {
         self.ctrl.test_stall_late = true;
+    }
+
+    /// Spend a shot no command took: its request staged no synchronous one.
+    #[cfg(feature = "test-mode")]
+    pub fn test_stall_unspent(&mut self) {
+        if core::mem::take(&mut self.ctrl.test_stall_late) {
+            say!("lictor: stall shot LOST -- its request staged no synchronous command");
+        }
     }
 
     /// The latch lever's shot: a harmless display query whose wait reports

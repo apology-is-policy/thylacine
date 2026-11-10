@@ -3544,6 +3544,9 @@ fn prove_corpse_reclaim(root: i64) {
 //   DESTROY   a ctx destroy a stall meets is owed, not final: the broker keeps
 //             the id destroyable, the owed destroy runs once the engine lives,
 //             and a mint takes the slot's id again.
+//   FREE      a BO's free a stall meets is owed by the broker, which repeats it
+//             once the engine lives; the repeat is acknowledged (the device
+//             answers a free that ran with no such resource) and the debt paid.
 //   CLEAN     after teardown nothing is poisoned and every slot is back.
 //
 // Prints `C6-READBACK DONE` iff every verdict arm passed, else
@@ -3753,17 +3756,19 @@ fn rb_abandoned_prefix() -> bool {
     false
 }
 
-/// The stall shots CREATE and DESTROY may spend each: half tapestryd's
-/// TEST_STALL_SHOTS.
+/// The stall shots CREATE, DESTROY and FREE may spend each: a third of
+/// tapestryd's TEST_STALL_SHOTS.
 const RB_STALL_ATTEMPTS: u32 = 4;
 /// The owed destroy runs at the first fence pump after the engine revives,
 /// itself the broker's next pump after the stalled create retired (ms).
 const RB_CREATE_RECOVER_MS: u64 = 2000;
 
 /// The seam's owed-destroy census on the warp ctl: the gauges, and the monotone
-/// counters, which a recovery inside one serve pass cannot hide (the broker
-/// revives the engine in the reply that reports the stall, so the owed destroy
-/// may run before this program reads anything).
+/// counters, which a recovery inside one serve pass cannot hide. The lever's
+/// shot lets its chain retire before the broker reports the deadline missed,
+/// so the reply that reports the stall already reads the engine live, and the
+/// owed destroy may run before this program reads anything; a real stall's
+/// reply reads it stalled until the chain retires.
 #[derive(Clone, Copy)]
 struct Owed {
     owed: u64,
@@ -3922,6 +3927,101 @@ fn rb_destroy_attempt(k: u32) -> Option<bool> {
     let again = owed_remint(w);
     unsafe { t_close(w) };
     Some(owed_verdict("DESTROY", "the ctx's destroy", b, n, ms, again))
+}
+
+/// The broker's owed frees on the warp ctl: the gauge, then the monotone
+/// counts, and the engine's stalls as the seam last saw them.
+#[derive(Clone, Copy)]
+struct Frees {
+    owed: u64,
+    incurred: u64,
+    paid: u64,
+    leaked: u64,
+    stalls: u64,
+}
+
+fn frees_census(w: i64) -> Frees {
+    let s = open_read_all(w, "ctl");
+    let f = |k: &str| parse_field(&s, k).unwrap_or_else(|| rb_incomplete("instrument:frees-census"));
+    Frees {
+        owed: f("frees-owed"),
+        incurred: f("frees-incurred"),
+        paid: f("frees-paid"),
+        leaked: f("frees-leaked"),
+        stalls: f("gpu-stalls"),
+    }
+}
+
+/// A stall meeting a resource free used to leave the broker's ledger retiring
+/// the id for good, its pins held: enough of them and no client could create.
+/// Its own connection: the lever aims at the caller's next BO free.
+fn rb_stalled_free() -> bool {
+    for k in 1..=RB_STALL_ATTEMPTS {
+        if let Some(ok) = rb_free_attempt(k) {
+            return ok;
+        }
+    }
+    t_putstr(&format!(
+        "warp-prove: C6-RB FREE UNCONSTRUCTED -- in {} attempts the stall shot never met the free\n",
+        RB_STALL_ATTEMPTS
+    ));
+    false
+}
+
+/// One attempt: Some(verdict), or None when the shot did not meet the free.
+/// The broker pays an owed free at its next pass, so the counts are waited on.
+fn rb_free_attempt(k: u32) -> Option<bool> {
+    let w = warp_connect("free");
+    let ctx = mint_ctx(w, "free");
+    let (bo, _res, _va) = mint_bo_wh(w, ctx, RB_W, RB_H, VIRGL_RESOURCE_Y_0_TOP, "free");
+    // A free still owed from an earlier arm could be paid inside this window
+    // and read as this one's: start from none owed.
+    let t0 = libthyla_rs::time::Instant::now();
+    let mut b = frees_census(w);
+    while b.owed != 0 && (t0.elapsed().as_millis() as u64) < RB_CREATE_RECOVER_MS {
+        let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(50));
+        b = frees_census(w);
+    }
+    if b.owed != 0 {
+        rb_incomplete("instrument:frees-owed-at-baseline");
+    }
+    if !write_ctl(w, "ctl", "warp-stall-free") {
+        rb_incomplete("instrument:stall-free-refused");
+    }
+    let destroyed = write_ctl(w, &format!("ctx/{}/bo/{}/ctl", ctx, bo), "destroy");
+    let a = frees_census(w);
+    if !destroyed || a.stalls == b.stalls {
+        let _ = write_ctl(w, &format!("ctx/{}/ctl", ctx), "destroy");
+        unsafe { t_close(w) };
+        t_putstr(&format!(
+            "warp-prove: C6-RB FREE attempt {} not constructed -- the BO destroy {}, the engine's stalls moved by {}\n",
+            k,
+            if destroyed { "was taken" } else { "was refused" },
+            a.stalls.wrapping_sub(b.stalls)
+        ));
+        return None;
+    }
+    let t = libthyla_rs::time::Instant::now();
+    let mut n = a;
+    while !(n.paid == b.paid + 1 && n.owed == b.owed) && (t.elapsed().as_millis() as u64) < RB_CREATE_RECOVER_MS {
+        let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(50));
+        n = frees_census(w);
+    }
+    let ms = t.elapsed().as_millis() as u64;
+    let _ = write_ctl(w, &format!("ctx/{}/ctl", ctx), "destroy");
+    unsafe { t_close(w) };
+    let ok = n.incurred == b.incurred + 1 && n.paid == b.paid + 1 && n.owed == b.owed && n.leaked == b.leaked;
+    t_putstr(&format!(
+        "warp-prove: C6-RB FREE {} -- the BO's free met the stall shot; frees owed +{} (want +1), paid by a repeat +{} (want +1) within {} ms, given up +{} (want 0); frees-owed {} after (want {})\n",
+        if ok { "PASS" } else { "FAIL" },
+        n.incurred.wrapping_sub(b.incurred),
+        n.paid.wrapping_sub(b.paid),
+        ms,
+        n.leaked.wrapping_sub(b.leaked),
+        n.owed,
+        b.owed
+    ));
+    Some(ok)
 }
 
 /// One attempt: Some(verdict), or None when it was not constructed (the
@@ -5114,9 +5214,10 @@ fn observe_readback() {
     record(rb_abandoned_prefix(), "abandon");
 
     // ---- CREATE / DESTROY: a create or a destroy a stall met owes a destroy,
-    // and the slot mints again once it runs.
+    // and the slot mints again once it runs. FREE: a free a stall met is owed.
     record(rb_stalled_create(), "create");
     record(rb_stalled_destroy(), "destroy");
+    record(rb_stalled_free(), "free");
 
     // ---- Teardown: withdraw the adoption, destroy the ctx, drop the
     // surfaces; the seam must be clean.

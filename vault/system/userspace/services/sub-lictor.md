@@ -193,8 +193,10 @@ still outstanding `TAKEOVER_BOUND_MS` (33 s) after a chord whose takeover waits 
 (vote 80, below), whatever the stall's own age; Lictor says which bound fired. The stall
 counter tells a caller whether its command stalled, and a stalled bind
 condemns its resource, because the display may name it once the device
-catches up. Every reply carries the engine state (live, stalled, dead) and the
-stall count in its `Stats`, an error reply included. The client keeps the last
+catches up. Every reply carries the engine state (live, stalled, dead), the
+stall count and the count as its request began (`stalls_begun`, sampled by the
+serve loop) in its `Stats`, an error reply included, so a one-request span
+reads on its own reply, untouched by a stall met between two requests. The client keeps the last
 one (`rpc_client::Client::stats`), and the GPU proxy adopts it on every reply,
 so a caller reads a failed step against the state it left. The host-tested
 `gpu_api::failure_cause` decides what such a failure says: a stall begun inside
@@ -240,16 +242,22 @@ at the end of that same request (`Device::execute`'s trailing reap) revives the
 engine, so the reply already reads `Engine::Live` with the stall count moved: a
 stall of known length, with no race against the device, carried to the
 compositor by the count alone. `Request::TestStallShot` (opcode 70) gives one
-more shot outside that budget, with no arming: tapestryd's test-mode
-`warp-stall-create` and `warp-stall-destroy` verbs aim it at a client's own next
-device-context create or its own ctx's destroy, and bound it to a few per boot. The shot rides exactly the next synchronous
+more shot outside that budget, with no arming, bound to the connection that
+asked: it rides that connection's next request, whatever it is, and the serve
+loop spends it at that request's end if no synchronous command took it
+(`Device::test_stall_ride`, `test_stall_settle`; forgotten with the
+connection), so neither a seat takeover nor another client can take it.
+tapestryd's test-mode `warp-stall-create`, `warp-stall-destroy` and
+`warp-stall-free` verbs aim it at a client's own next device-context create,
+its own ctx's destroy, or the free of the next BO it destroys, and bound it to
+a dozen per boot. Within a request a shot rides exactly the next synchronous
 submission (`Controlq::stall_shot_bound`): one refused, unfenced, or ended
-before its chain retired spends it and says `stall shot LOST`, rather than
-leaving it armed for whoever sends next. So does a command refused at staging
-(`Gpu::req`, while the engine takes no commands). The shot still rides the next
-synchronous command whoever sends it, so a seat takeover landing between the
-compositor's aim and its command would take it. That needs test-mode, the
-bootarg and the operator's chord, and vote 30 recovers the seat.
+before its chain retired spends it and says `stall shot LOST`. So does a
+command refused at staging (`Gpu::req`, while the engine takes no commands).
+The arming's `TestStallNext` shots still ride the next synchronous command
+whoever sends it, so a seat takeover landing between the compositor's aim and
+its command would take one. That needs test-mode, the bootarg and the
+operator's chord, and vote 30 recovers the seat.
 `CtxAttachResource` links the attachment in the ledger before the device
 answers, and a failure that left nothing (`left_nothing`) unlinks it, so the
 resource can still retire. `CtxDestroy` retires the context in the ledger before the
@@ -258,7 +266,23 @@ device answers, and any failure but a dead engine un-retires it
 met, can be sent again. The id stays named either way, and a repeat of a destroy
 that ran is harmless, since QEMU's CTX_DESTROY has no error path and
 virglrenderer only drops the handle from its table (QEMU v10.0
-`virgl_cmd_context_destroy`, virglrenderer 1.1.0 `virgl_context_remove`). tapestryd aims the arming's shots at the
+`virgl_cmd_context_destroy`, virglrenderer 1.1.0 `virgl_context_remove`).
+A free the device has not acknowledged is owed (`Gpu::unref_or_owe`,
+`free_mapped_or_owe`): a stalled `RESOURCE_UNREF`, one refused before staging,
+or one the device refused may leave the resource on the device, so its id
+stays retiring and its pins held. The serve loop repeats owed frees at the top
+of a NORMAL pass while the engine takes commands (`Device::pay_owed_frees`),
+eight at most, each once no chain can reach it (`retirement_hold`), and never
+inside a request, where a stall it met would read as that request's. An unref
+answered "no such resource" reads as gone, a first free's as a repeat's (QEMU
+v10.0 `virgl_cmd_resource_unref`). QEMU refuses an existing resource's free
+only when its host unmap fails, which clears the mapping, so three answered
+refusals give a free up, its id, pins and extent kept. A mapped HOST3D blob's
+unmap is owed with its free, and its extent returns once both are acknowledged
+(a repeat of an unmap that ran is answered OK); a create whose unwind left a
+free owed retires its id when the free is paid. Only frees made while serving
+are owed, so a bring-up probe keeps its own posture. `Request::FreesOwed`
+(opcode 71) reports (owed now, incurred, paid, given up). tapestryd aims the arming's shots at the
 compositor context's create, at one blit-convention attempt, and at a
 composition health step once GPU composition runs.
 Only the designated compositor reaches the broker, and only the booting

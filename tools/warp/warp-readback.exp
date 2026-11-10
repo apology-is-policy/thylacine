@@ -10,7 +10,7 @@
 # stalls the device for seconds, twice, by design, and the Warp-2 gate's value
 # is being cheap enough to run every time. `warp-prove readback` prints
 # `C6-READBACK DONE` ONLY when every verdict arm (ARM / GUARD / DEEP / LIVE /
-# DEADLINE / ABANDON / CREATE / DESTROY / CLEAN) passed, else `C6-READBACK INCOMPLETE(<arm>)`, so the scenario is
+# DEADLINE / ABANDON / CREATE / DESTROY / FREE / CLEAN) passed, else `C6-READBACK INCOMPLETE(<arm>)`, so the scenario is
 # self-gating; the F2B line is a MEASUREMENT (data, not a verdict) and
 # warp-host.sh prints it. The #186 caveat holds for READERS of the transcript:
 # lc_expect writes its own pattern into its timeout text, so the DONE token
@@ -57,4 +57,4 @@ if {$lc_cmd_timeout < 240} { set lc_cmd_timeout 240 }
 # prover's own `FAIL --` on an instrument fault -- fail the scenario at once.
 lc_run_expect_hardfail_re "warp-prove readback" "C6-READBACK DONE" {warp-prove: (FAIL --|C6-READBACK INCOMPLETE)}
 
-lc_pass "warp-prove readback: the compositor readback arm is fenced + deferred (ARM/GUARD/DEEP/LIVE/DEADLINE/ABANDON/CREATE/DESTROY/CLEAN)"
+lc_pass "warp-prove readback: the compositor readback arm is fenced + deferred (ARM/GUARD/DEEP/LIVE/DEADLINE/ABANDON/CREATE/DESTROY/FREE/CLEAN)"

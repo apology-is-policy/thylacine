@@ -61,6 +61,7 @@ impl Driver for Lictor {
             #[cfg(feature = "test-mode")]
             if core::mem::take(&mut self.seat.test_blind) { self.device.test_blind_loop(); }
             self.device.reap();
+            if self.seat.phase == 0 { self.device.pay_owed_frees(); }
             self.seat.step(&mut self.device, &mut self.screen, &mut self.inputs);
             for conn in &mut conns {
                 conn.advance(&self.device);
@@ -87,6 +88,9 @@ impl Driver for Lictor {
                     continue;
                 }
                 let (sequence, request) = conn.pending.take().unwrap();
+                let stalls_begun = self.device.gpu.stalls();
+                #[cfg(feature = "test-mode")]
+                let shot = self.device.test_stall_ride(conn.fd);
                 let result = match request {
                     Request::InputInfo { index } => {
                         let info = self.inputs.get(index as usize).map(|i| i.info);
@@ -118,8 +122,12 @@ impl Driver for Lictor {
                     request if self.seat.phase == 0 => self.device.execute(conn.fd, request),
                     _ => Err(Error::Hardware),
                 };
-                conn.finish(sequence, Stats::from(&self.device.gpu), result);
+                #[cfg(feature = "test-mode")]
+                if shot { self.device.test_stall_settle(); }
+                conn.finish(sequence, Stats { stalls_begun, ..Stats::from(&self.device.gpu) }, result);
             }
+            #[cfg(feature = "test-mode")]
+            for conn in conns.iter().filter(|c| !c.alive()) { self.device.test_stall_forget(conn.fd); }
             conns.retain(Conn::alive);
             let mut poll = vec![TPollFd { fd: listener as i32, events: T_POLLIN, revents: 0 }];
             let base = poll.len();

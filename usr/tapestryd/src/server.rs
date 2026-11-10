@@ -1257,19 +1257,20 @@ const _: () = assert!(
     COMPOSE_PROBE_CTX >= WARP_VENUS_CTX_BASE + MAX_WARP_CTXS as u32,
     "the compose probe ctx must clear the venus band"
 );
-/// Stall shots a boot's `warp-stall-create` / `warp-stall-destroy` lever has. A
+/// Stall shots a boot's `warp-stall-create` / `-destroy` / `-free` lever has. A
 /// stall is engine-wide, so the lever cannot act on its caller's ctx alone the way
 /// `warp-hold` does (#178); it aims at the caller's own next device-context create,
-/// or its own ctx's destroy, and is bounded in count instead, and a client spending
-/// the shots denies only the lever.
+/// its own ctx's destroy, or the free of the next BO it destroys, and is bounded in
+/// count instead, and a client spending the shots denies only the lever.
 #[cfg(feature = "test-mode")]
-const TEST_STALL_SHOTS: u8 = 8;
+const TEST_STALL_SHOTS: u8 = 12;
 /// What an armed stall shot meets.
 #[cfg(feature = "test-mode")]
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum StallAim {
     Create,
     Destroy,
+    Free,
 }
 
 /// The renderer's MEASURED blit-box conventions (Warp-C C-3, GPU-DESIGN
@@ -1735,9 +1736,9 @@ pub struct Comp {
     test_stall_ctx_aimed: bool,
     #[cfg(feature = "test-mode")]
     test_stall_conv_aimed: bool,
-    /// The connection whose next device-context create, or its ctx's destroy,
-    /// meets a stall shot (`warp-stall-create`, `warp-stall-destroy`), and the
-    /// shots this boot has left.
+    /// The connection whose next device-context create, its ctx's destroy, or
+    /// its next BO's free meets a stall shot (`warp-stall-create`, `-destroy`,
+    /// `-free`), and the shots this boot has left.
     #[cfg(feature = "test-mode")]
     test_stall_aim: Option<(u64, StallAim)>,
     #[cfg(feature = "test-mode")]
@@ -11413,13 +11414,14 @@ impl Comp {
         let dev_ctx = (slot as u32) + 1;
         #[cfg(feature = "test-mode")]
         self.test_stall_take(conn, StallAim::Create);
-        let stalls = self.gpu.stalls;
         if self.gpu.ctx_create(dev_ctx, b"warp").is_err() {
             // A create a stall met may exist host-side, and lictor keeps its
             // reservation (GPU-DESIGN 4.5.15), so this id would be refused for
             // good and every later mint would pick this slot again. Condemn it;
-            // the destroy owed for it runs once the engine is live.
-            if self.gpu.stalls != stalls || self.gpu.engine == Engine::Dead {
+            // the destroy owed for it runs once the engine is live. Judged on
+            // the reply's own span, as lictor judges it: a stall met between
+            // two requests leaves lictor releasing the id.
+            if self.gpu.stalls != self.gpu.stalls_begun || self.gpu.engine == Engine::Dead {
                 self.warp_ctx_slot_poisoned[slot] = true;
                 self.warp_owe(slot, false);
                 say!("tapestryd: warp ctx slot {} create met a stall -- condemned, its destroy owed", slot);
@@ -12737,12 +12739,9 @@ impl Comp {
             return Err(E_IO);
         }
         let v = WARP_VENUS_CTX_BASE + slot as u32;
-        #[cfg(feature = "test-mode")]
-        self.test_stall_take(conn, StallAim::Create);
-        let stalls = self.gpu.stalls;
         if self.gpu.ctx_create_venus(v).is_err() {
             // As in `wctx_mint`: the id is owed a destroy before it is tried again.
-            if self.gpu.stalls != stalls || self.gpu.engine == Engine::Dead {
+            if self.gpu.stalls != self.gpu.stalls_begun || self.gpu.engine == Engine::Dead {
                 self.warp_owe(slot, true);
                 say!("tapestryd: warp ctx slot {} venus-ctx create met a stall -- its destroy owed", slot);
             }
@@ -14417,10 +14416,9 @@ impl Comp {
     /// repeat of a destroy that ran is harmless. An answered refusal is final.
     fn warp_ctx_destroy_id(&mut self, slot: usize, venus: bool) -> WarpDestroy {
         let id = if venus { WARP_VENUS_CTX_BASE + slot as u32 } else { slot as u32 + 1 };
-        let stalls = self.gpu.stalls;
         let r = if self.gpu.ctx_destroy(id).is_ok() {
             WarpDestroy::Done
-        } else if failure_cause(stalls, self.gpu.stalls, self.gpu.engine) == FailureCause::Stall {
+        } else if failure_cause(self.gpu.stalls_begun, self.gpu.stalls, self.gpu.engine) == FailureCause::Stall {
             WarpDestroy::Owed
         } else {
             WarpDestroy::Refused
@@ -14452,8 +14450,7 @@ impl Comp {
     /// revival, a completed destroy leaves the id free whichever way that create
     /// went, so a slot with no context in it is mintable again. One a stall
     /// meets again stays owed. An answered refusal leaves its slot condemned
-    /// for good; a venus id stays refused by lictor's ledger, failing that
-    /// slot's venus mints clean.
+    /// for good, its pub held: lictor keeps a refused id named.
     fn warp_destroy_owed(&mut self) {
         for slot in 0..MAX_WARP_CTXS {
             for venus in [true, false] {
@@ -14481,11 +14478,16 @@ impl Comp {
                         say!("tapestryd: warp ctx slot {} owed venus-ctx destroy ran", slot)
                     }
                     WarpDestroy::Owed => {}
-                    WarpDestroy::Refused => say!(
-                        "tapestryd: warp ctx slot {} owed {}destroy REFUSED -- stays refused",
-                        slot,
-                        if venus { "venus-ctx " } else { "" }
-                    ),
+                    WarpDestroy::Refused if venus => {
+                        // As on clean retire: condemned for good, so a dev
+                        // destroy still owed must not recover the slot.
+                        self.warp_ctx_slot_poisoned[slot] = true;
+                        self.warp_ctx_destroy_owed[slot] = false;
+                        say!("tapestryd: warp ctx slot {} owed venus-ctx destroy REFUSED -- condemned", slot);
+                    }
+                    WarpDestroy::Refused => {
+                        say!("tapestryd: warp ctx slot {} owed destroy REFUSED -- stays condemned", slot)
+                    }
                 }
             }
         }
@@ -14509,15 +14511,22 @@ impl Comp {
         Ok(())
     }
 
-    /// Aim the armed shot at `conn`'s create or destroy, the next synchronous
-    /// command. The broker spends a shot its command never staged (a standing
-    /// stall), so none is left for another command.
+    /// Aim the armed shot at `conn`'s create, destroy or BO free. The broker
+    /// binds a shot to this connection's next request and spends it there,
+    /// so none is left for another command.
     #[cfg(feature = "test-mode")]
     fn test_stall_take(&mut self, conn: u64, aim: StallAim) {
         if self.test_stall_aim != Some((conn, aim)) {
             return;
         }
         self.test_stall_aim = None;
+        if aim == StallAim::Free {
+            // The free is the last command a BO's retire sends: the client
+            // sends the shot just before it (`Gpu::test_stall_at_next_unref`).
+            self.gpu.test_stall_at_next_unref();
+            say!("tapestryd: warp-stall: the BO's free retires past its deadline");
+            return;
+        }
         let what = if aim == StallAim::Create { "the next device ctx create" } else { "the ctx's destroy" };
         if self.gpu.test_stall_shot() {
             say!("tapestryd: warp-stall: {} retires past its deadline", what);
@@ -15379,7 +15388,13 @@ impl Comp {
                 let mut b = self.warp_ctxs[slot].as_mut().unwrap().bos[j]
                     .take()
                     .unwrap();
+                #[cfg(feature = "test-mode")]
+                self.test_stall_take(conn, StallAim::Free);
                 let leaked = Self::wbo_retire(&mut self.gpu, &mut self.va, dev_ctx, &mut b, poisoned);
+                #[cfg(feature = "test-mode")]
+                if self.gpu.test_stall_unref_unspent() {
+                    say!("tapestryd: warp-stall: stall shot at the BO's free LOST -- the retire sent none");
+                }
                 if leaked > 0 {
                     self.warp_park_leaked(slot, b);
                 }
@@ -17530,6 +17545,16 @@ impl Conn {
                         comp.warp_destroy_failed
                     ),
                 );
+                // The broker's frees the device has not acknowledged, then,
+                // monotone, those owed, paid by a repeat, and given up.
+                let (owed, incurred, paid, leaked) = comp.gpu.frees_owed();
+                let _ = core::fmt::write(
+                    &mut s,
+                    format_args!(
+                        "frees-owed {} frees-incurred {} frees-paid {} frees-leaked {}\n",
+                        owed, incurred, paid, leaked
+                    ),
+                );
                 // W-4 stall observability: one row per HELD fenced slot, so a
                 // wedged chain is NAMED (op class + owner + age), not just a
                 // missing count. Empty when all slots are free. BELOW the
@@ -18483,11 +18508,16 @@ impl Conn {
                     Err(e) => self.err(tag, e),
                 };
             }
-            if s == "warp-stall-create" || s == "warp-stall-destroy" {
+            if s == "warp-stall-create" || s == "warp-stall-destroy" || s == "warp-stall-free" {
                 // The caller's own next create, which a conn with its one ctx
-                // has none of, or its own ctx's destroy.
-                let aim = if s == "warp-stall-create" { StallAim::Create } else { StallAim::Destroy };
-                if comp.wctx_of_conn(self.conn_id).is_some() != (aim == StallAim::Destroy) {
+                // has none of; its own ctx's destroy; or the free of the next
+                // BO it destroys.
+                let aim = match s {
+                    "warp-stall-create" => StallAim::Create,
+                    "warp-stall-destroy" => StallAim::Destroy,
+                    _ => StallAim::Free,
+                };
+                if comp.wctx_of_conn(self.conn_id).is_some() != (aim != StallAim::Create) {
                     return self.err(tag, p9::E_INVAL);
                 }
                 return match comp.test_stall_arm(self.conn_id, aim) {

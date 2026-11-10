@@ -38,11 +38,15 @@ pub struct Gpu {
     pub condemned_lost: u32,
     pub engine: Engine,
     pub stalls: u32,
+    /// The last reply's count as its request began (`Stats::stalls_begun`).
+    pub stalls_begun: u32,
     pub num_capsets: u32,
     pub capset_blob: alloc::vec::Vec<u8>,
     pub capset_id: u32,
     pub capset_ver: u32,
     pub venus_capset_blob: alloc::vec::Vec<u8>,
+    #[cfg(feature = "test-mode")]
+    test_shot_at_unref: bool,
 }
 impl Gpu {
     pub fn probe(_bar: u64, _ring: u64, _flane: u64, _blob_probe: u64) -> Result<Self, Error> {
@@ -63,11 +67,14 @@ impl Gpu {
             condemned_lost: info.condemned_lost,
             engine: stats.engine,
             stalls: stats.stalls,
+            stalls_begun: stats.stalls_begun,
             num_capsets: info.num_capsets,
             capset_blob: info.capset_blob,
             capset_id: info.capset_id,
             capset_ver: info.capset_ver,
             venus_capset_blob: info.venus_capset_blob,
+            #[cfg(feature = "test-mode")]
+            test_shot_at_unref: false,
         })
     }
     /// Adopts the reply's Stats on an error too: a failed step is read
@@ -83,7 +90,7 @@ impl Gpu {
     fn adopt(&mut self, s: Stats) {
         self.cmd_seq = s.cmd_seq; self.last_scanout_seq = s.last_scanout_seq;
         self.last_unref_seq = s.last_unref_seq; self.condemned_lost = s.condemned_lost;
-        self.engine = s.engine; self.stalls = s.stalls;
+        self.engine = s.engine; self.stalls = s.stalls; self.stalls_begun = s.stalls_begun;
     }
     pub fn sync_stream_max() -> usize { 0x500 - 32 }
     pub fn seat_state(&self) -> Result<(u64, u32), Error> { self.query(Request::SeatState) }
@@ -156,6 +163,10 @@ impl Gpu {
         self.invoke(Request::DetachBacking { resource_id }).unwrap_or(Err(Error::Hardware))
     }
     pub fn resource_unref(&mut self, resource_id: u32) -> Result<(), Error> {
+        #[cfg(feature = "test-mode")]
+        if core::mem::take(&mut self.test_shot_at_unref) && !self.test_stall_shot() {
+            let _ = libthyla_rs::t_putstr("lictor client: stall shot at a free REFUSED by the broker\n");
+        }
         self.invoke(Request::ResourceUnref { resource_id }).unwrap_or(Err(Error::Hardware))
     }
     pub fn condemn(&mut self, res_id: u32) -> () {
@@ -291,10 +302,17 @@ impl Gpu {
     pub fn test_stall_next(&mut self) -> bool {
         self.invoke(Request::TestStallNext).unwrap_or(false)
     }
+    /// The shot rides this connection's next request, whatever it is.
     #[cfg(feature = "test-mode")]
     pub fn test_stall_shot(&mut self) -> bool {
         self.invoke::<()>(Request::TestStallShot).is_ok()
     }
+    /// Aim a stall shot at the next resource free this client sends.
+    #[cfg(feature = "test-mode")]
+    pub fn test_stall_at_next_unref(&mut self) { self.test_shot_at_unref = true; }
+    /// Disarm an aim no free took; true when one was left.
+    #[cfg(feature = "test-mode")]
+    pub fn test_stall_unref_unspent(&mut self) -> bool { core::mem::take(&mut self.test_shot_at_unref) }
     #[cfg(feature = "test-mode")]
     pub fn test_abandoned_total(&self) -> u32 {
         self.query(Request::TestAbandonedTotal).unwrap_or(u32::MAX)
@@ -322,5 +340,9 @@ impl Gpu {
     }
     pub fn engine_dead(&self) -> bool {
         self.query(Request::EngineDead).unwrap_or(true)
+    }
+    /// The broker's owed frees: (owed now, incurred, paid, given up).
+    pub fn frees_owed(&self) -> (u32, u32, u32, u32) {
+        self.query(Request::FreesOwed).unwrap_or((u32::MAX, 0, 0, 0))
     }
 }
