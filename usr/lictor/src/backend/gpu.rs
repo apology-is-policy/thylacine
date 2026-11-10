@@ -139,8 +139,9 @@ const GPU_CONDEMNED_MAX: usize = 16;
 /// (`Gpu::pay_owed_frees`), which also stops once the pass has spent
 /// SUBMIT_DEADLINE_MS: the seat's next look at the chord waits on it.
 const OWED_COMMANDS_PER_PASS: usize = 8;
-/// Owed frees one pass examines, in turn: a free still held by a chain
-/// costs a reach scan each time it is looked at.
+/// Owed frees one pass looks at for a parked context's turn, and again in
+/// rotation: a free still held by a chain costs a reach scan each time it is
+/// looked at.
 const OWED_FREES_EXAMINED: usize = 16;
 const _: () = assert!(crate::gpu_api::OWED_QUIET_MS == SUBMIT_DEADLINE_MS);
 
@@ -3609,8 +3610,8 @@ impl Gpu {
     /// free goes whole: every context link the ledger still records
     /// (`links`), the unmap a mapped blob needs, then the free
     /// (`OwedFree::next`). A pass looks at OWED_FREES_EXAMINED owed frees at
-    /// most, a parked context's first in turn (`gpu_api::OwedPass`), then the
-    /// rest in rotation, and stops at OWED_COMMANDS_PER_PASS commands or
+    /// most for a parked context's turn (`gpu_api::OwedPass`) and as many in
+    /// rotation, and stops at OWED_COMMANDS_PER_PASS commands or
     /// SUBMIT_DEADLINE_MS spent; a free cut short keeps what it reached.
     /// One the device keeps refusing with no stall is given up, its id left
     /// retiring and its pins and extent held: a leak, never a reuse of memory
@@ -3648,7 +3649,7 @@ impl Gpu {
                 crate::gpu_api::OwedPass::new(
                     self.ctrl.parked.iter().map(|p| p.reach),
                     &held_by,
-                    self.owed_frees.len().min(OWED_FREES_EXAMINED),
+                    OWED_FREES_EXAMINED,
                 )
             });
             let c = &self.ctrl;

@@ -2910,7 +2910,8 @@ block the serve loop, and seat input with it. Neither was taken.
     paragraph below), and goes whole: a
     CTX_DETACH_RESOURCE for each context link lictor's ledger still records
     (a retired id names none), the unmap a mapped blob needs, then the free.
-    A pass looks at sixteen owed frees at most, in turn, and stops at eight
+    A pass looks at sixteen owed frees at most for a parked context's turn
+    (below) and sixteen in rotation, and stops at eight
     device commands or `SUBMIT_DEADLINE_MS` spent, so a pass adds at most
     about a second before the seat's next look at the chord; a free cut
     short keeps what it reached. The device answers a repeat of a free that ran with "no such
@@ -3095,7 +3096,10 @@ taking the contexts with parked chains in turn, then the rest in rotation
 (`gpu_api::OwedPass`). In plain rotation a context would wait for its own free's
 turn once per owed free, and another client can owe hundreds of cheap ones on an
 idle context; taken in turn, it waits once per context with a parked chain, and
-the seam's context slots bound those. A free is paid once the device answers a
+the seam's context slots bound those. A turn looks at sixteen of the frees a
+context waits on at most, and the rotation has its own sixteen, so a context
+whose frees all wait on chains still on the device spends neither the rotation
+nor the next context's turn. A free is paid once the device answers a
 repeat in time. A device that answers none in time leaves it owed, its id
 retiring and its pins held: the debt's bound, never a reuse. The predicates and
 the order are host-tested. The readback leg witnesses the wiring with a test
