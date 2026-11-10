@@ -141,6 +141,11 @@ the one genuinely new kernel mechanism.
 - At **switch-in** (in `sched()`, around `cpu_switch_context`): `switched_in_at =
   timer_now_ns()`.
 - At **switch-out**: `run_ns += timer_now_ns() - switched_in_at`.
+- At every **tick** a thread is running on (`sched_tick`): the same fold, and
+  `switched_in_at` moves to now. Without it a thread that keeps its CPU (a busy
+  loop on an otherwise idle core: `sched()` finds no peer and keeps it) would
+  be charged nothing until something displaced it, and would read as idle.
+  Busy CPUs tick at 1 kHz, so a running thread's `run_ns` is at most a tick old.
 - Per-process CPU time = sum of `run_ns` over `p->threads` (computed at read time
   in devproc, under the proc-table lock, atomics on the counters).
 - **Cost:** one `CNTVCT` read + one add + a couple of stores on the context-switch

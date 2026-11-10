@@ -522,7 +522,8 @@ struct Thread {
 
     // prowl-1 (docs/PROWL-DESIGN.md section 3.1; I-8/I-17 untouched): cumulative
     // on-CPU time telemetry. run_ns accumulates (now - switched_in_at) at every
-    // switch-OUT; the per-Proc cpu_ns a /proc reader reports is the sum over
+    // switch-OUT and at every tick the thread is running on (so a thread that
+    // keeps its CPU is charged within a tick); the per-Proc cpu_ns a /proc reader reports is the sum over
     // p->threads (proc_cpu_ns, under p->threads_lock). READ-ONLY -- NO
     // scheduling decision reads run_ns, so EEVDF placement / the vd_t math /
     // liveness / latency are byte-unchanged; this is telemetry, not policy.
@@ -535,8 +536,9 @@ struct Thread {
     // is sufficient: the value is a monotonic counter the reader diffs across
     // polls (htop's method); no other memory is ordered against it.
     //
-    // switched_in_at is the last switch-IN timestamp (timer_now_ns). It is
-    // owner-local -- set at switch-in and read at switch-out, both on this
+    // switched_in_at is the instant run_ns was last brought up to (the last
+    // switch-IN, or the last tick's fold; timer_now_ns). It is owner-local --
+    // set at switch-in and by the tick, read at switch-out, all on this
     // thread's own CPU (a thread does not migrate WHILE running) -- so it needs
     // no atomics. 0 == "never switched in": the boot thread + the per-CPU idles
     // become current WITHOUT a sched() switch-in stamp, so their first switch-out

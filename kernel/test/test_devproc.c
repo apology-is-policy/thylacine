@@ -362,6 +362,34 @@ void test_proc_cpu_ns_accounting(void) {
     TEST_ASSERT(cpu_ns2 >= cpu_ns, "cpu_ns is monotonic across polls");
 }
 
+// A thread that keeps its CPU is charged while it runs, not only when it is
+// switched out: a busy loop on an otherwise idle core would otherwise read as
+// idle for as long as nothing displaced it. The wait is half a slice long and
+// starts on a fresh one, so no slice expiry falls inside it, and it never calls
+// sched(): whatever run_ns gains, it gained with the thread still running.
+void test_proc_cpu_ns_running_thread(void) {
+    struct Thread *t = current_thread();
+    TEST_ASSERT(t != NULL, "current thread present");
+    const u64 spin_ns = 3ull * 1000ull * 1000ull;
+    u64 gained = 0;
+    bool unswitched = false;
+    // A wake that displaces this thread mid-wait would charge it at the
+    // switch and prove nothing, so only a wait with no switch in it is judged.
+    for (int attempt = 0; attempt < 8 && !unswitched; attempt++) {
+        sched();                              // a fresh slice and a fresh stamp
+        u64 nsched0 = t->nsched;
+        u64 run0 = __atomic_load_n(&t->run_ns, __ATOMIC_RELAXED);
+        u64 t0 = timer_now_ns();
+        while (timer_now_ns() - t0 < spin_ns) { /* keep the CPU */ }
+        gained = __atomic_load_n(&t->run_ns, __ATOMIC_RELAXED) - run0;
+        unswitched = t->nsched == nsched0;
+    }
+    TEST_ASSERT(unswitched, "one 3 ms wait in eight ran without a switch");
+    TEST_ASSERT(gained >= 1000ull * 1000ull,
+        "a thread that kept its CPU for 3 ms was charged at least 1 ms of it");
+    TEST_ASSERT(gained <= spin_ns + 1000ull * 1000ull, "and no more than it ran");
+}
+
 // prowl-3a: the per-thread scheduler counters (nsched/nsleeps/nmigrations/
 // last_cpu) + the per-CPU idle_ns accessor -- the /proc/<pid>/sched + /ctl/cpu
 // substrate. Drives the SAME forced-yield vehicle as the run_ns test above: a

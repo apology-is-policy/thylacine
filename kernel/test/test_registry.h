@@ -950,6 +950,7 @@ void test_devproc_imperium_read_gated(void);   // IM-2: /proc/<pid>/imperium gat
 void test_devproc_account_read_gated(void);    // MM-1: /proc/<pid>/account gate
 void test_devproc_read_imperium_format(void);  // IM-2: /proc/<pid>/imperium line
 void test_proc_cpu_ns_accounting(void);     // prowl-1: name + run_ns substrate
+void test_proc_cpu_ns_running_thread(void);
 void test_sched_prowl_counters(void);       // prowl-3a: per-thread sched counters + per-CPU idle_ns
 void test_devproc_read_cmdline_kproc(void);
 void test_devproc_read_ns_format(void);

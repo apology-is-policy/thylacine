@@ -1613,6 +1613,7 @@ struct test_case g_tests[] = {
     { "devproc.account_read_gated",    test_devproc_account_read_gated,    false, NULL },
     { "devproc.read_imperium_format",  test_devproc_read_imperium_format,  false, NULL },
     { "proc.cpu_ns_accounting",        test_proc_cpu_ns_accounting,        false, NULL },
+    { "proc.cpu_ns_running_thread",    test_proc_cpu_ns_running_thread,    false, NULL },
     { "scheduler.prowl_counters",      test_sched_prowl_counters,          false, NULL },
     { "devproc.read_cmdline_kproc",    test_devproc_read_cmdline_kproc,    false, NULL },
     { "devproc.read_ns_format",        test_devproc_read_ns_format,        false, NULL },
