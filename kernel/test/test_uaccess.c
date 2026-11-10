@@ -17,12 +17,15 @@
 #include "test.h"
 
 #include "../../arch/arm64/exception.h"
+#include "../../arch/arm64/fault.h"
 #include "../../arch/arm64/mmu.h"
 #include "../../arch/arm64/uaccess.h"
 #include "../../arch/arm64/uart.h"
 #include "../../mm/phys.h"
 
+#include <thylacine/mmio_handle.h>
 #include <thylacine/proc.h>
+#include <thylacine/spinlock.h>
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 #include <thylacine/vma.h>
@@ -197,15 +200,88 @@ void test_uaccess_copy_in_unmapped_faults_all_arms(void) {
         "copy_in tail-arm fault must return -1");
 }
 
+// The table's entries, walked: each (op, fixup) pair as absolute PCs.
+static u64 fx_op(const struct uaccess_fixup_entry *e)    { return (u64)(uintptr_t)&e->op_rel    + (u64)(s64)e->op_rel; }
+static u64 fx_fixup(const struct uaccess_fixup_entry *e) { return (u64)(uintptr_t)&e->fixup_rel + (u64)(s64)e->fixup_rel; }
+
+// Every crossing is an unprivileged load or store (LDTR/STTR and their byte
+// forms). The bus-error route leans on it: such an instruction cannot reach a
+// kernel-half address, so an abort it takes is about a user address even when
+// the abort reports none.
+void test_uaccess_fixup_ops_are_unprivileged(void) {
+    unsigned n = 0;
+    for (const struct uaccess_fixup_entry *e = _uaccess_fixup_start; e < _uaccess_fixup_end; e++, n++) {
+        u32 insn = *(const u32 *)(uintptr_t)fx_op(e);
+        TEST_ASSERT((insn & 0x3f200c00u) == 0x38000800u, "a fixup-table instruction is not LDTR/STTR");
+    }
+    TEST_EXPECT_EQ(n, 10u, "the table holds the ten crossings");
+    // Control: the mask refuses the ordinary forms a new primitive might use.
+    TEST_ASSERT((0xf9400023u & 0x3f200c00u) != 0x38000800u, "control: ldr x3, [x1] is not unprivileged");
+    TEST_ASSERT((0xf8400023u & 0x3f200c00u) != 0x38000800u, "control: ldur x3, [x1] is not unprivileged");
+}
+
+#define ESR_DATA_SAME(dfsc)  ((0x25ull << 26) | (1ull << 25) | (u64)(dfsc))
+#define ESR_INST_SAME(ifsc)  ((0x21ull << 26) | (1ull << 25) | (u64)(ifsc))
+#define ESR_FNV              (1ull << 10)
+
+// Which aborts the bus-error route takes, whatever machine this is: only a
+// synchronous external abort on a data access itself, and only for a user
+// address where the abort reports one.
+void test_uaccess_bus_route_takes_only_the_access_abort(void) {
+    const u64 user = 0x30000000ull, kern = 0xffff000012345000ull;
+    struct fault_info fi;
+    fault_info_decode(ESR_DATA_SAME(0x10), user, 0, &fi);
+    TEST_ASSERT(fault_is_user_access_bus(&fi), "an external abort on a user address is taken");
+    fault_info_decode(ESR_DATA_SAME(0x10) | ESR_FNV, kern, 0, &fi);
+    TEST_ASSERT(fault_is_user_access_bus(&fi), "one that reports no address is taken on the PC's word");
+    fault_info_decode(ESR_DATA_SAME(0x10), kern, 0, &fi);
+    TEST_ASSERT(!fault_is_user_access_bus(&fi), "one that reports a kernel address is not");
+    fault_info_decode(ESR_INST_SAME(0x10), user, 0, &fi);
+    TEST_ASSERT(!fault_is_user_access_bus(&fi), "an instruction abort is not");
+    static const u8 others[] = { 0x14, 0x15, 0x16, 0x17,   // external abort on a table walk
+                                 0x21,                     // alignment
+                                 0x18,                     // parity or ECC error on the access
+                                 0x11,                     // tag check
+                                 0x00, 0x03,               // address size
+                                 0x07, 0x0b, 0x0f };       // translation, access flag, permission
+    for (unsigned i = 0; i < sizeof(others); i++) {
+        fault_info_decode(ESR_DATA_SAME(others[i]), user, 0, &fi);
+        TEST_ASSERT(!fault_is_user_access_bus(&fi), "a fault status other than 0x10 is not taken");
+    }
+}
+
+// The handler itself, given a bus error at each crossing: it resumes at that
+// crossing's fixup. A synthetic frame, so this runs where the machine never
+// raises the abort. IRQs are masked as they are when the handler really runs.
+void test_uaccess_bus_abort_resumes_at_the_fixup(void) {
+    static spin_lock_t lock = SPIN_LOCK_INIT;
+    unsigned n = 0, wrong = 0;
+    for (const struct uaccess_fixup_entry *e = _uaccess_fixup_start; e < _uaccess_fixup_end; e++, n++) {
+        for (int fnv = 0; fnv < 2; fnv++) {
+            struct exception_context ctx;
+            for (unsigned i = 0; i < sizeof(ctx); i++) ((u8 *)&ctx)[i] = 0;
+            ctx.esr = ESR_DATA_SAME(0x10) | (fnv ? ESR_FNV : 0);
+            ctx.far = fnv ? 0xffff000012345000ull : 0x30000000ull;
+            ctx.elr = fx_op(e);
+            irq_state_t s = spin_lock_irqsave(&lock);
+            exception_sync_curr_el(&ctx);
+            spin_unlock_irqrestore(&lock, s);
+            if (ctx.elr != fx_fixup(e)) wrong++;
+        }
+    }
+    TEST_EXPECT_EQ(n, 10u, "the table holds the ten crossings");
+    TEST_EXPECT_EQ(wrong, 0u, "a bus error at a crossing resumes at its fixup");
+}
+
 // A device window whose device refuses the access: the copy fails, and the
 // kernel does not end. The child maps a physical address the machine has
-// nothing at into its own address space and hands that address to every
-// uaccess arm. Where the machine reports the refusal (a synchronous external
-// abort, as TCG does) each call returns -1; where the hypervisor completes the
-// access itself each returns 0. Either way all seven agree.
+// nothing at into its own address space and hands that address to every arm
+// of every primitive. Where the machine reports the refusal (a synchronous
+// external abort, as TCG does) each call returns -1; where the hypervisor
+// completes the access itself each returns 0. Either way all ten agree.
 #define UB_VA      0x30000000ull     // 768 MiB, user half; nothing else maps it
 #define UB_PA      0x0b000000ull     // a hole in the virt machine's low device region: no RAM, no device
-#define UB_CALLS   7
+#define UB_CALLS   10
 static volatile s64 g_ub_rc[UB_CALLS];
 static volatile int g_ub_map_rc, g_ub_under_rc, g_ub_past_rc;
 
@@ -230,11 +306,16 @@ static void ub_child(void *arg) {
     g_ub_rc[4] = uaccess_copy_out(UB_VA + 1, buf, 16);
     g_ub_rc[5] = uaccess_copy_out(UB_VA, buf, 64);
     g_ub_rc[6] = uaccess_copy_out(UB_VA, buf, 3);
+    u32 word = 0;
+    g_ub_rc[7] = uaccess_store_u8(UB_VA, 0);
+    g_ub_rc[8] = uaccess_load_u32(UB_VA, &word);
+    g_ub_rc[9] = uaccess_store_u32(UB_VA, 0);
     exits("ok");
 }
 
 void test_uaccess_bus_error_fails_the_copy(void) {
     TEST_ASSERT(!phys_pa_is_ram((paddr_t)UB_PA), "premise: the probe address is not RAM");
+    TEST_ASSERT(!kobj_mmio_pa_claimed(UB_PA, PAGE_SIZE), "premise: nor a device anything has claimed or the kernel reserved");
     for (int i = 0; i < UB_CALLS; i++) g_ub_rc[i] = -99;
     g_ub_map_rc = g_ub_under_rc = g_ub_past_rc = -99;
 
@@ -256,7 +337,7 @@ void test_uaccess_bus_error_fails_the_copy(void) {
     TEST_ASSERT(refused == 0 || refused == UB_CALLS, "every arm met the same answer from the machine");
     uart_puts("    uaccess.bus_error: the machine refused ");
     uart_putdec((u64)refused);
-    uart_puts(" of 7 copies\n");
+    uart_puts(" of 10 copies\n");
 }
 
 void test_uaccess_copy_fixup_entries_present(void) {

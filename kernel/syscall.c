@@ -14029,8 +14029,9 @@ static s64 viv_sock_accept(struct Proc *p, u64 fd_raw, u64 addr_va,
     // the number, and clunks the data Spoor, which frees M.
     if (addr_va != 0 && addrlen_va != 0) {
         u32 cap = 0;
+        // Byte-wise: the guest's addrlen pointer need not be aligned.
         if (!sys_validate_user_buf(addrlen_va, 4) ||
-            uaccess_load_u32(addrlen_va, &cap) != 0)
+            viv_load_u32(addrlen_va, &cap) != 0)
             goto fault_unwind;
 
         // If `remote` could not be read we still return the fd -- the peer is
@@ -14049,7 +14050,7 @@ static s64 viv_sock_accept(struct Proc *p, u64 fd_raw, u64 addr_va,
                 if (uaccess_store_u8(addr_va + i, sa[i]) != 0)
                     goto fault_unwind;
         }
-        if (uaccess_store_u32(addrlen_va, salen) != 0) goto fault_unwind;
+        if (viv_store_u32(addrlen_va, salen) != 0) goto fault_unwind;
     }
 
     handle_install_reserved(p, dh, KOBJ_SPOOR, dr, dsp, /*cloexec=*/false);

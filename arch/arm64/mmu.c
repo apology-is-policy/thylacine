@@ -2029,7 +2029,8 @@ u32 mmu_pa_bits(void) {
     __asm__ __volatile__("mrs %0, id_aa64mmfr0_el1" : "=r"(mmfr0));
     u64 range = mmfr0 & 0xf;
     bits = range < sizeof(by_parange) ? by_parange[range] : 40;
-    if (bits > 40) bits = 40;   // TCR_IPS_VALUE
+    _Static_assert(TCR_IPS_VALUE == TCR_IPS_40BIT, "the cap below is what TCR_EL1.IPS is programmed for");
+    if (bits > 40) bits = 40;
     __atomic_store_n(&cached, bits, __ATOMIC_RELAXED);
     return bits;
 }

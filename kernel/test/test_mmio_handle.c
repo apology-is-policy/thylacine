@@ -86,13 +86,28 @@ void test_mmio_handle_create_adjacent_ok(void) {
     kobj_mmio_unref(k2);
 }
 
-// A device window is never RAM: a claim that shares a byte with the allocator's
-// zone is refused, whoever asks. The control is one page away, just past the
-// zone's end, where nothing differs but the RAM.
+// A device window is never the machine's memory: a claim that shares a byte
+// with the memory bank is refused, whoever asks. The control is one page away,
+// just past the bank's end, where nothing differs but the RAM.
 void test_mmio_handle_create_over_ram_rejected(void) {
-    paddr_t base = 0, end = 0;
-    phys_zone_bounds(&base, &end);
-    TEST_ASSERT(base < end && (end & (PAGE_SIZE - 1)) == 0, "premise: a page-aligned zone");
+    paddr_t base = 0, zone_end = 0;
+    phys_zone_bounds(&base, &zone_end);
+    paddr_t end = phys_ram_end();
+    TEST_ASSERT(base < zone_end && zone_end <= end && (end & (PAGE_SIZE - 1)) == 0,
+                "premise: a page-aligned bank that holds the zone");
+
+    // The predicate by itself, away from the claim table (a reservation next to
+    // the bank cannot stand in for it): a range is refused for any byte inside,
+    // wherever it starts and ends.
+    u64 span = (u64)(end - base);
+    TEST_ASSERT(phys_range_touches_ram(base, PAGE_SIZE), "the first page touches");
+    TEST_ASSERT(phys_range_touches_ram(end - PAGE_SIZE, PAGE_SIZE), "the last page touches");
+    TEST_ASSERT(phys_range_touches_ram(base - PAGE_SIZE, 2 * PAGE_SIZE), "a range that starts below and ends inside touches");
+    TEST_ASSERT(phys_range_touches_ram(end - PAGE_SIZE, 2 * PAGE_SIZE), "a range that starts inside and ends above touches");
+    TEST_ASSERT(phys_range_touches_ram(base - PAGE_SIZE, span + 2 * PAGE_SIZE), "a range that holds the whole bank touches");
+    TEST_ASSERT(!phys_range_touches_ram(base - PAGE_SIZE, PAGE_SIZE), "the page just below does not");
+    TEST_ASSERT(!phys_range_touches_ram(end, PAGE_SIZE), "the page just above does not");
+    TEST_ASSERT(!phys_range_touches_ram(base, 0), "an empty range does not");
 
     struct page *pg = alloc_pages(0, KP_ZERO);
     TEST_ASSERT(pg != NULL, "alloc a RAM page");
@@ -219,16 +234,17 @@ void test_mmio_handle_create_out_of_ips_rejected(void) {
     TEST_ASSERT(bits >= 32 && bits <= 40, "premise: a physical address size the kernel can program");
     u64 top = (u64)1 << bits;
     struct KObj_MMIO *k = kobj_mmio_create(top, PAGE_SIZE);
-    TEST_ASSERT(k == NULL, "a claim at the first address past the physical address size is refused");
-
     // The first page is valid, the second is past the bound.
     struct KObj_MMIO *k2 = kobj_mmio_create(top - PAGE_SIZE, 2 * PAGE_SIZE);
-    TEST_ASSERT(k2 == NULL, "a claim that crosses the physical address size is refused");
-
+    bool past = k != NULL, crossing = k2 != NULL;
+    if (k)  kobj_mmio_unref(k);
+    if (k2) kobj_mmio_unref(k2);
     // Control: the last page under the bound can be claimed.
     struct KObj_MMIO *k3 = kobj_mmio_create(top - PAGE_SIZE, PAGE_SIZE);
     bool last_ok = k3 != NULL;
     if (k3) kobj_mmio_unref(k3);
+    TEST_ASSERT(!past, "a claim at the first address past the physical address size is refused");
+    TEST_ASSERT(!crossing, "a claim that crosses the physical address size is refused");
     TEST_ASSERT(last_ok, "control: the last page under the bound can be claimed");
 }
 

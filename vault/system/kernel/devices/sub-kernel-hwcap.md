@@ -61,7 +61,7 @@ from.
 **A register range is external to the allocator, so it needs a table.** A
 fixed-size array of live claims, scanned under one lock for overlap before
 anything is allocated. A claim is refused before that scan if it shares a byte
-with RAM (the allocator's zone, `phys_range_touches_ram`) or reaches past the
+with the machine's memory bank (`phys_range_touches_ram`) or reaches past the
 physical address size a translation can output (`mmu_pa_bits`: the CPU's own
 size where that is under the 40 bits the kernel programs). The first keeps a
 holder of the broad allowance from mapping the kernel's memory as if it were a
@@ -72,10 +72,12 @@ overlap iff each starts before the other ends — which admits *adjacency*: a ra
 beginning exactly where another ends is contiguous but distinct, and is allowed.
 Creation also rejects a range that is unaligned, zero-length, wrapping, or past
 the address width the translation tables can hold. That last check exists to
-convert a fault into a refusal: without it the create would succeed and the
-kernel would take an unhandled fault later, on the driver's first access, when the
-mapping layer rejected the same address. **Rejecting at the door turns a kernel
-death into a clean failure return** — the same move the area makes elsewhere.
+convert a late failure into a refusal: without it the create would succeed and
+the driver's first access would fault with no leaf to install, since the
+mapping layer rejects the same address (the driver dies of `snare:segv`; a
+kernel copy on its behalf fails). **Rejecting at the door turns a death on
+first use into a clean failure return** — the same move the area makes
+elsewhere.
 
 **A DMA buffer comes from the allocator, so there is no table at all.** The page
 allocator already hands out disjoint chunks; its partitioning *is* the exclusivity

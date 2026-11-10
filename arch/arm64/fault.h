@@ -47,10 +47,11 @@ struct fault_info {
                           // abort (the bus refused the access). Same disposition.
 };
 
-// True iff the abort is a synchronous external abort on a data access itself:
-// the bus refused a mapped address. Not one on a table walk, which is the
-// kernel's own tables failing.
-bool fault_is_access_bus(const struct fault_info *fi);
+// True iff the abort is a synchronous external abort on a data access itself
+// (the bus refused a mapped address) whose address, where the abort reports
+// one, is in the user half. Not one on a table walk, which is the kernel's own
+// tables failing; not a parity or ECC error, whose handling is undecided.
+bool fault_is_user_access_bus(const struct fault_info *fi);
 
 // Dispatcher result. The caller (exception_sync_curr_el / equivalent for
 // EL0) inspects this value and decides whether to ERET (resumes the

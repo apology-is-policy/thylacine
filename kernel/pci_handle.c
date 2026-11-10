@@ -174,7 +174,7 @@ static bool pci_bar_alloc(u64 size, bool is64, u64 *out_pa) {
         u64 base = 0, len = 0;
         if (dtb_pci_mem_window(&base, &len) && len != 0) {
             g_pci_bar_base = base;
-            g_pci_bar_end  = base + len;   // dtb_pci_mem_window bounds this < IPS
+            g_pci_bar_end  = base + len;   // kobj_mmio_create bounds each claim made from it
             g_pci_bar_next = base;
             g_pci_bar_inited = true;
         }

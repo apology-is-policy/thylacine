@@ -145,9 +145,10 @@ struct KObj_MMIO *kobj_mmio_create(u64 pa, size_t size) {
     // (2026-11-10: the bound is the size the CPU implements where that is
     // smaller, since such a leaf takes an address size fault instead.)
     if ((pa + size - 1) >> mmu_pa_bits()) return NULL;
-    // A device window is never RAM. The reservations below keep a claim off
-    // the kernel's devices; this keeps it off the kernel's memory, which a
-    // holder of the broad allowance could otherwise map as if it were one.
+    // A device window is never the machine's memory bank. The reservations
+    // below keep a claim off the kernel's devices; this keeps it off the
+    // kernel's memory, which a holder of the broad allowance could otherwise
+    // map as if it were one.
     if (phys_range_touches_ram(pa, size)) return NULL;
 
     struct KObj_MMIO *k = kmalloc(sizeof(*k), KP_ZERO);

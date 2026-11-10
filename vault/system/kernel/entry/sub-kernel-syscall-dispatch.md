@@ -22,7 +22,7 @@ design:
   - "docs/VIVARIUM.md"
   - "docs/LINEAGE.md"
 created: 2026-08-03
-updated: 2026-11-05
+updated: 2026-11-10
 ---
 ## Session registry factory
 
@@ -1453,6 +1453,16 @@ threshold so small transfers never pay the extra handle lookup.
   two surfaces that were each sound alone.
 
 ## Caveats
+
+**A word-sized uaccess takes an aligned address or none (2026-11-10).** The
+32-bit crossings fault on an unaligned address when the page behind it is
+device memory, and that fault is fatal by design ([[sub-kernel-exception]]), so
+every handler either refuses an unaligned word pointer or reads the word byte
+by byte. The Linux-phenotype `accept` was the one that did neither: it loaded
+and stored the guest's `addrlen` with the 32-bit primitives straight from the
+guest's register. It now uses the byte-wise helpers its `getsockopt` sibling
+already used. No Proc could reach the fault (a Linux-phenotype Proc cannot hold
+a device mapping), which is why no test turns red without the change.
 
 - **Two syscalls of identical shape disagree about oversized buffers, and the
   disagreement is a fix applied to one of them.** Both the working-directory

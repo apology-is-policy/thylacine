@@ -33,6 +33,8 @@ static u64 g_initial_free_pages;
 // Buddy zone bounds (post-cap): what phys_pa_is_ram answers from.
 static paddr_t g_zone_base;
 static paddr_t g_zone_end;
+// The memory bank as the DTB gave it, before the cap.
+static paddr_t g_ram_end;
 
 // F3 (audit-r-memory-model): The kernel direct map (arch/arm64/mmu.c
 // build_page_tables) covers PA [1 GiB, 9 GiB) via l1_directmap[1..8].
@@ -232,6 +234,7 @@ bool phys_init(void) {
     g_initial_free_pages = g_zone0.total_free_pages;
     g_zone_base          = zone_base;
     g_zone_end           = zone_end;
+    g_ram_end            = zone_end_dtb;
 
     return true;
 }
@@ -257,13 +260,17 @@ bool phys_pa_is_ram(paddr_t pa) {
 }
 
 bool phys_range_touches_ram(paddr_t pa, u64 size) {
-    return size != 0 && pa < g_zone_end && pa + size > g_zone_base;
+    return size != 0 && pa < g_ram_end && pa + size > g_zone_base;
 }
 
 #ifdef KERNEL_TESTS
 void phys_zone_bounds(paddr_t *base, paddr_t *end) {
     if (base) *base = g_zone_base;
     if (end)  *end  = g_zone_end;
+}
+
+paddr_t phys_ram_end(void) {
+    return g_ram_end;
 }
 #endif // KERNEL_TESTS
 

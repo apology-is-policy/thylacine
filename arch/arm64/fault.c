@@ -12,6 +12,7 @@
 // space) + §28 invariants I-7 + I-12.
 
 #include "fault.h"
+#include "uaccess.h"
 
 #include "kaslr.h"
 #include "mmu.h"
@@ -72,6 +73,7 @@ static volatile bool g_in_kernel_fault[DTB_MAX_CPUS];
 // it, and with the wrong bit its write arm is simply unreachable: the store
 // re-installs read-only, re-faults, and loops forever.
 #define ESR_ISS_WNR_BIT    6
+#define ESR_ISS_FNV_BIT    10   /* FAR not valid (external aborts) */
 
 // FSC = ISS[5:0] for data and instruction aborts.
 #define FSC_MASK           0x3F
@@ -161,8 +163,10 @@ void fault_info_decode(u64 esr, u64 far, u64 elr, struct fault_info *out) {
         fsc == FSC_EXT_ABORT_L3;
 }
 
-bool fault_is_access_bus(const struct fault_info *fi) {
-    return !fi->is_instruction && fi->fsc == FSC_EXT_ABORT;
+bool fault_is_user_access_bus(const struct fault_info *fi) {
+    if (fi->is_instruction || fi->fsc != FSC_EXT_ABORT) return false;
+    bool far_not_valid = ((fi->esr >> ESR_ISS_FNV_BIT) & 1) != 0;
+    return far_not_valid || fi->vaddr < UACCESS_USER_VA_TOP;
 }
 
 // =============================================================================
@@ -1331,7 +1335,8 @@ static enum fault_result demand_page_one(struct Proc *p,
     // Proc owes a snare:bus death (Linux: SIGBUS from do_alignment_fault /
     // do_sea). Decided on the fault's class alone, before any lookup, so no
     // arm can answer it (B-1a' audit F17). The kernel-mode uaccess entry
-    // (exception.c) already admits only the three classes.
+    // (exception.c) sends the three classes here and a bus error on the
+    // access straight to its fixup.
     if (!fi->is_translation && !fi->is_access_flag && !fi->is_permission)
         return FAULT_USER_BUS;
 

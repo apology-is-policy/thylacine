@@ -459,9 +459,11 @@ As built: `fault_info` decodes `is_alignment` / `is_external`, and the top of
 uaccess entry (`arch/arm64/exception.c`) already admitted only the three
 classes, so a kernel-side alignment fault through a user pointer still
 extincts as the kernel bug it is. (Since 2026-11-10 that entry also sends a
-synchronous external abort on the access itself, `fault_is_access_bus`, to the
-uaccess fixup: a user's device window whose device refused the access fails
-the copy instead of reaching this file's catch-all. [[sub-kernel-exception]].)
+synchronous external abort on the access itself to the uaccess fixup: a user's
+device window whose device refused the access fails the copy instead of
+reaching this file's catch-all. The predicate is `fault_is_user_access_bus`,
+here beside the decoder: DFSC 0x10 on a data abort, and a user address wherever
+the abort reports one (`ESR.FnV` clear). [[sub-kernel-exception]].)
 Witnesses:
 `demand_page.alignment_abort_is_bus_not_handled` (a synthetic 0x21 and a 0x10
 on a mapped, admitting page -> `FAULT_USER_BUS`; CONTROL: a translation fault

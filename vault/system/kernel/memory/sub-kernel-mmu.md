@@ -263,18 +263,21 @@ a device window or a hole is short at the page boundary.
 
 The test leans on a device window never being RAM, and that is enforced where
 windows are made: `kobj_mmio_create` refuses a claim that shares a byte with
-the zone ([[sub-kernel-hwcap]]). Before 2026-11-10 it refused only the ranges
+the machine's memory bank ([[sub-kernel-hwcap]]). Before 2026-11-10 it refused only the ranges
 the kernel reserved for its own devices, so a holder of the broad hardware
 allowance could claim a window over the kernel image; that leaf was in the
 zone, and a copy through the image's read-only alias took a permission fault.
 
 **`mmu_pa_bits`** is the number of physical address bits a translation may
 output: the CPU's implemented size (`ID_AA64MMFR0_EL1.PARange`), capped at the
-40 that `TCR_EL1.IPS` is programmed for. `mmu_install_user_pte`, the leaf
-replace and `mmu_map_mmio` refuse an address past it, where they used to
-compare against 40 whatever the CPU had. An Apple core under its hypervisor
-reports 36, and a leaf above that takes an address size fault on first use,
-a class neither the pager nor the uaccess fixup answers.
+40 that `TCR_EL1.IPS` is programmed for (a static assertion ties the cap to
+that setting). `mmu_install_user_pte` and the leaf replace refuse an address
+past it, and `mmu_map_mmio`, whose callers are the kernel's own, extincts on
+one; all three used to compare against 40 whatever the CPU had. An Apple core
+under its hypervisor reports 36, and a leaf above that takes an address size
+fault on first use. From EL0 the pager answers that with `snare:bus`; a kernel
+copy through such a leaf had no answer and ended the kernel (measured:
+`unclassified kernel fault (ESR) 0x96000003` at `uaccess_load_u8`).
 
 **I-42** — the JIT's outward generalization of the self-modification alias
 (the [[sub-kernel-burrow]] `BURROW_TYPE_CODE` dual mapping), and its two I-cache

@@ -174,8 +174,11 @@ A user address can be a device window, and a device can refuse an access. Since
 instruction, is a fault like the others: `-1`, by way of the fixup
 ([[sub-kernel-exception]]). `uaccess.bus_error_fails_the_copy` forks a child
 that maps an address the machine has nothing at and hands it to every arm of
-every primitive; all seven calls must agree, `-1` where the machine reports the
-refusal and `0` where a hypervisor completes the access itself.
+every primitive; all ten calls must agree, `-1` where the machine reports the
+refusal (TCG does) and `0` where a hypervisor completes the access itself (HVF
+and KVM do). Because that leaves the route unexercised on the hosts the suite
+usually boots on, two more tests drive it without the machine's help
+([[sub-kernel-exception]]).
 
 ## Performance
 

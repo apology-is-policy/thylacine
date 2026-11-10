@@ -84,8 +84,11 @@ table lists it as a trigger surface in its own right.
   pointer from a user leaf's address, because a device's registers are outside
   the zone and have no alias ([[sub-kernel-mmu]]).
 - `phys_range_touches_ram(pa, size)`: whether a range shares a byte with the
-  zone. `kobj_mmio_create` asks it, so that no device window is ever RAM
-  ([[sub-kernel-hwcap]]).
+  memory bank the DTB names, which is the zone plus whatever the direct map's
+  8 GiB cap left out above it. `kobj_mmio_create` asks it, so that no device
+  window lies over that bank ([[sub-kernel-hwcap]]). The DTB parser reads one
+  bank; a machine with a second one is not covered, here or anywhere else in
+  the allocator.
 
 ## Mechanism
 

@@ -362,13 +362,21 @@ static void exception_sync_curr_el_impl(struct exception_context *ctx) {
 
         // A bus error taken BY a uaccess instruction is the user's address
         // answering badly -- a device window whose device refused the access
-        // -- and not a kernel fault: the same abort from EL0 costs that Proc
-        // a snare:bus, so here it costs the syscall its copy. No page install
-        // resolves it, so straight to the fixup. Keyed on the PC alone: FAR is
-        // not valid for every external abort, and a uaccess instruction's
-        // operand is a user address by construction. An alignment fault stays
-        // fatal: the callers validate alignment, so one is a kernel bug.
-        if (!fi.from_user && fault_is_access_bus(&fi)) {
+        // -- and not a kernel fault: the same abort, reported synchronously
+        // from EL0, costs that Proc a snare:bus, so here it costs the syscall
+        // its copy. No page install resolves it, so straight to the fixup.
+        //
+        // The address is checked where the abort reports one. Where it does
+        // not, the PC alone decides, and that is sound because a crossing
+        // cannot reach the bus through a kernel address: every instruction in
+        // the fixup table is an unprivileged load or store (LDTR/STTR), UAO
+        // is never set, and no kernel-half leaf grants EL0 access, so a
+        // kernel-half operand takes a permission fault first, which is still
+        // fatal. uaccess.fixup_ops_are_unprivileged holds the first of those.
+        //
+        // An alignment fault stays fatal: a crossing that takes one was handed
+        // an address its caller should have refused.
+        if (!fi.from_user && fault_is_user_access_bus(&fi)) {
             u64 fixup_pc = uaccess_fixup_lookup(fi.elr);
             if (fixup_pc != 0) {
                 ctx->elr = fixup_pc;

@@ -480,7 +480,15 @@ interrupt slot currently holds **thirty-one** of its thirty-two instructions.
   tail**, and see below for why that is currently harder than it sounds.
 - **The kernel synchronous handler's user-half check must stay narrow.** It is
   the only thing separating a deliberate crossing from a corrupted kernel
-  pointer, and widening it would silently absorb real corruption.
+  pointer, and widening it would silently absorb real corruption. The bus-error
+  route below makes the same check wherever the abort reports an address. Where
+  it reports none the PC decides, and three facts make that safe: every
+  instruction in the fixup table is an unprivileged load or store
+  (`uaccess.fixup_ops_are_unprivileged` decodes all ten), `PSTATE.UAO` is never
+  set, and no kernel-half leaf grants EL0 access. A crossing aimed at a kernel
+  address therefore takes a permission fault before it can reach the bus, and
+  that fault is still fatal. A primitive written with a plain `ldr`, or an
+  EL0-readable page in the kernel half, would break it.
 
 ## Seams
 
@@ -494,14 +502,22 @@ interrupt slot currently holds **thirty-one** of its thirty-two instructions.
   access to a user address is not in that set and extincts. Callers that could
   produce one validate alignment themselves.
 - **A bus error at a uaccess instruction fails the copy (2026-11-10).** A
-  synchronous external abort on the access itself (`fault_is_access_bus`: DFSC
-  0x10, a data abort) taken at a PC the fixup table knows goes straight to the
-  fixup, with no pager call, since no page install answers it. That is a user's
-  device window whose device refused the access; before, it fell through to the
-  catch-all and ended the kernel, while the same abort from EL0 cost only that
-  Proc a `snare:bus`. The route is keyed on the PC and not on the fault
-  address, which an external abort need not report. An external abort on a
-  table walk is not in the set: that is the kernel's own tables failing.
+  synchronous external abort on the access itself
+  (`fault_is_user_access_bus`: DFSC 0x10, a data abort, and a user address
+  where the abort reports one) taken at a PC the fixup table knows goes
+  straight to the fixup, with no pager call, since no page install answers it.
+  That is a user's device window whose device refused the access; before, it
+  fell through to the catch-all and ended the kernel, while the same abort
+  reported synchronously from EL0 cost only that Proc a `snare:bus`. An external
+  abort on a table walk is not in the set: that is the kernel's own tables
+  failing. Nor is a parity or ECC error on the access (DFSC 0x18): what a
+  memory error should cost is undecided, and no machine the suite boots raises
+  one. A device that reports its refusal asynchronously, as an SError, still
+  ends the machine from either level; that belongs to the bare-metal work.
+  Witnesses that need no cooperating machine:
+  `uaccess.bus_route_takes_only_the_access_abort` (the predicate over every
+  fault status) and `uaccess.bus_abort_resumes_at_the_fixup` (the handler,
+  given a synthetic frame at each of the ten crossings).
 
 ## The SP test at the 0x200 slot (2026-11-03; thread-model C10)
 
