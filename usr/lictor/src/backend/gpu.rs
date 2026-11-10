@@ -2276,6 +2276,8 @@ pub struct Gpu {
     /// The stall one of the owed-free pass's own commands met, by number
     /// (`gpu_api::owed_stands_down`).
     owed_stood_down: Option<u32>,
+    /// `FreesOwed`'s count of the pass's stand-downs, monotone.
+    owed_stood_downs: u32,
     /// Self-test lever: fail the next display disable without issuing it.
     fail_next_scanout_disable: bool,
     /// Set when the lever (not the device) produced the last refusal, so the
@@ -2315,13 +2317,13 @@ pub struct Gpu {
     /// count, so reclaiming the offset here while a client's weft map -- or a
     /// claimed-but-not-yet-mapped client's transferred pin -- is live would
     /// re-hand it under the client's PTEs (a cross-client alias). A ring whose
-    /// total ref count is still > 1 (any client ref beyond tapestryd's own map)
-    /// is parked here -- tapestryd KEEPS its own VA mapped so `t_hostmem_refcount`
+    /// total ref count is still > 1 (any client ref beyond lictor's own map)
+    /// is parked here -- lictor KEEPS its own VA mapped so `t_hostmem_refcount`
     /// can re-query it -- and reaped by `reap_hostmem_parked` once the count drops
     /// to 1. Bounded: a client that never unmaps pins only its own I-32 budget.
     hostmem_parked: alloc::vec::Vec<HostRing>,
     /// V-3b-2 xproc-E2E: the host3d-ring reap ledger. `park` counts retires that
-    /// PARKED (a client ref beyond tapestryd's own map kept the offset live);
+    /// PARKED (a client ref beyond lictor's own map kept the offset live);
     /// `reap` counts parked rings later RECLAIMED (the client released, so the
     /// total ref count dropped to 1). The cross-Proc lifecycle E2E reads both via
     /// the warp ctl to witness park-on-mapped-retire -> reclaim-on-release with a
@@ -2513,6 +2515,7 @@ impl Gpu {
             owed_paid: 0,
             owed_leaked: 0,
             owed_stood_down: None,
+            owed_stood_downs: 0,
             fail_next_scanout_disable: false,
             injected_refusal: false,
             condemned_lost: 0,
@@ -3546,19 +3549,20 @@ impl Gpu {
         self.owed_frees.iter().any(|o| o.res == resource_id)
     }
 
-    /// The owed frees a new chain may not go to the device past: every owed
-    /// free, except none once the engine is dead (nothing publishes again)
-    /// and none while the pass stands down (its barrier stands down with it).
-    /// Not the debt itself: `owes_free` and `frees_owed` answer that.
+    /// The owed frees a new chain may not go to the device past: each but one
+    /// standing down after a stall its own repeat met (`gpu_api::barrier_ids`),
+    /// and none once the engine is dead (nothing publishes again). Not the
+    /// debt itself: `owes_free` and `frees_owed` answer that.
     pub fn barrier_ids(&self) -> alloc::vec::Vec<u32> {
-        if self.ctrl.dead || self.owed_standing_down() {
+        if self.ctrl.dead {
             return alloc::vec::Vec::new();
         }
-        self.owed_frees.iter().map(|o| o.res).collect()
+        let since = self.ctrl.revived_at.map(|t| t.elapsed().as_millis() as u64);
+        crate::gpu_api::barrier_ids(self.owed_frees.iter(), self.ctrl.stalls, self.ctrl.refusing(), since)
     }
 
-    /// The pass and its barrier stand down for one window after a stall the
-    /// pass met (`gpu_api::owed_stands_down`).
+    /// The pass stands down for one window after a stall any of its commands
+    /// met (`gpu_api::owed_stands_down`); a free's barrier only after its own.
     fn owed_standing_down(&self) -> bool {
         crate::gpu_api::owed_stands_down(
             self.owed_stood_down,
@@ -3580,7 +3584,8 @@ impl Gpu {
     /// retiring and its pins and extent held: a leak, never a reuse of memory
     /// the device may still read. Returns the links the device detached, for
     /// the ledger to drop. A command that meets a stall stands the pass down
-    /// (`owed_stood_down`). `deferred` and `aim` are the test levers'
+    /// (`owed_stood_down`), and that free's barrier (`OwedFree::stood_down`).
+    /// `deferred` and `aim` are the test levers'
     /// (`TestOwedDefer`, `TestOwedStall`): `aim` answers yes once, for the
     /// free whose next command the stall shot rides.
     pub fn pay_owed_frees(
@@ -3643,6 +3648,8 @@ impl Gpu {
                 let _ = shot;
                 if self.ctrl.stalls != stalls {
                     self.owed_stood_down = Some(self.ctrl.stalls);
+                    o.stood_down = Some(self.ctrl.stalls);
+                    self.owed_stood_downs = self.owed_stood_downs.wrapping_add(1);
                 }
                 match o.after(step, Answer::of(done, self.ctrl.stalls != stalls, self.ctrl.dead)) {
                     Owed::Next => continue,
@@ -3674,6 +3681,7 @@ impl Gpu {
             paid: self.owed_paid,
             leaked: self.owed_leaked,
             retiring: 0,
+            stood_down: self.owed_stood_downs,
         }
     }
 
@@ -3923,12 +3931,12 @@ impl Gpu {
     /// V-3b-1c-2b F2: retire a HOST3D ring -- reap now if safe, else PARK. The
     /// CALLER disarms any weft share BEFORE this (so no NEW client can claim the
     /// backing). Then this reads the ring's hostmem burrow's TOTAL ref count
-    /// (handle_count + mapping_count) via tapestryd's still-live VA: at count == 1
-    /// the ONLY reference is tapestryd's own map -- no client map AND no client
+    /// (handle_count + mapping_count) via lictor's still-live VA: at count == 1
+    /// the ONLY reference is lictor's own map -- no client map AND no client
     /// that has CLAIMED but not yet mapped -- so the offset is safe to reclaim NOW
     /// (`drop_host3d_ring`). At count > 1 (a client kept its map past its conn, OR
     /// a client claimed the share and holds the transferred registration pin
-    /// pending its map) or on an unexpected query error, tapestryd KEEPS its VA
+    /// pending its map) or on an unexpected query error, lictor KEEPS its VA
     /// mapped and parks the token for `reap_hostmem_parked`; freeing the QEMU
     /// subregion now would re-hand the offset under the client's live-or-pending
     /// PTEs (a cross-client alias).
@@ -3965,7 +3973,7 @@ impl Gpu {
     }
 
     /// V-3b-1c-2b F2: re-check parked HOST3D rings and reclaim those whose only
-    /// remaining reference is tapestryd's own map (total ref count back to 1 --
+    /// remaining reference is lictor's own map (total ref count back to 1 --
     /// the claiming client released BOTH its mapping and its transferred pin).
     /// Runs at MINT-time (reclaim-before-alloc), NOT the completion pump: reclaim
     /// issues controlq teardown (`drop_host3d_ring`), which is only established

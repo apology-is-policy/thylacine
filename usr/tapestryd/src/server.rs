@@ -1261,10 +1261,10 @@ const _: () = assert!(
 /// stall is engine-wide, so the lever cannot act on its caller's ctx alone the way
 /// `warp-hold` does (#178); it aims at the caller's own next device-context create,
 /// its own ctx's destroy, or the free of the next BO it destroys, and is bounded in
-/// count instead, and a client spending the shots denies only the lever. Four
-/// readback arms of four attempts each: CREATE, DESTROY, FREE, YIELD.
+/// count instead, and a client spending the shots denies only the lever. Five
+/// readback arms of four attempts each: CREATE, DESTROY, FREE, YIELD, APART.
 #[cfg(feature = "test-mode")]
-const TEST_STALL_SHOTS: u8 = 16;
+const TEST_STALL_SHOTS: u8 = 20;
 /// What an armed stall shot meets.
 #[cfg(feature = "test-mode")]
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -15838,10 +15838,11 @@ impl Comp {
             // here, and the broker's pins when it pays the frees it took at
             // the park: on this same proof nothing on the device reaches the
             // BOs, and a later chain that could parks until they are paid
-            // (GPU-DESIGN 4.5.15; the barrier stands down only for one window
-            // after a repeat the device was too slow to answer), so a busy
-            // ctx cannot hold them off: the pins go once the chains already
-            // on the device retire and the device answers a repeat. Without this
+            // (GPU-DESIGN 4.5.15; a free's barrier stands down only for one
+            // window after the device was too slow to answer that free's own
+            // repeat), so a busy ctx cannot hold them off: the pins go once
+            // the chains already on the device retire and the device answers
+            // a repeat in time. Without this
             // a vindicated-but-still-live ctx stayed charged for memory it
             // no longer held, and once `leaked_count` hit the cap it could
             // never build another backing -- bricked while healthy.
@@ -17565,13 +17566,14 @@ impl Conn {
                     ),
                 );
                 // The broker's owed frees; then, monotone, those owed, paid
-                // by a repeat, and given up; then its retirements unfinished.
+                // by a repeat, and given up; then its retirements unfinished;
+                // then, monotone, the times its pass stood down.
                 let f = comp.gpu.frees_owed();
                 let _ = core::fmt::write(
                     &mut s,
                     format_args!(
-                        "frees-owed {} frees-incurred {} frees-paid {} frees-leaked {} frees-retiring {}\n",
-                        f.owed, f.incurred, f.paid, f.leaked, f.retiring
+                        "frees-owed {} frees-incurred {} frees-paid {} frees-leaked {} frees-retiring {} frees-stood-down {}\n",
+                        f.owed, f.incurred, f.paid, f.leaked, f.retiring, f.stood_down
                     ),
                 );
                 // W-4 stall observability: one row per HELD fenced slot, so a
@@ -18548,7 +18550,7 @@ impl Conn {
                 // The broker passes over the owed frees the caller's own GL
                 // device ctx can reach, so a chain of it submitted meanwhile
                 // meets one (#178: its own ctx only; the broker bounds the
-                // arms, four a boot of two seconds at most). It only delays
+                // arms, sixteen a boot of two seconds at most). It only delays
                 // frees that ctx can reach.
                 let dev = match comp.wctx_dev_of_conn(self.conn_id) {
                     Some(d) => d,
@@ -19113,7 +19115,7 @@ impl Conn {
             }
             // A test lever: one stall shot on the broker's next repeat of this
             // BO's free, should the free be owed (#178: the caller's own BO;
-            // the broker bounds the shots, four a boot, each gone in 2 s).
+            // the broker bounds the shots, twelve a boot, each gone in 2 s).
             #[cfg(feature = "test-mode")]
             Some("stall-repay") => {
                 let res = comp

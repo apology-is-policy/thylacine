@@ -619,23 +619,25 @@ released-stream record names the pub. The warp ctl reports the gauges
 `owed-incurred` (each debt once), `owed-ran` and `destroy-failed`, which a
 recovery inside one serve pass cannot hide, and Lictor's owed frees as
 `frees-owed`, then monotone `frees-incurred`, `frees-paid` and `frees-leaked`,
-then `frees-retiring` ([[sub-lictor]]). A BO destroyed on a poisoned ctx still
+then `frees-retiring`, then monotone `frees-stood-down` ([[sub-lictor]]). A BO destroyed on a poisoned ctx still
 sends its device frees: the broker takes the unref as a debt and pays it once
 the chain retires, the same proof the vindication frees the parked backing's
 guest half on, and once the chains already on the device that can reach the BO
-retire and the device answers a repeat (a later chain that could reach it parks
-until the free is paid, except for one window after a repeat the device was too
-slow to answer), so the uncharge there is honest within that delay, however busy
-the ctx is kept; the readback leg's TAKEN and BUSY arms witness it. The test-mode
+retire and the device answers a repeat in time (a later chain that could reach
+it parks until the free is paid, except for one window after the device was too
+slow to answer that free's own repeat), so the uncharge there is honest within
+that delay, however busy the ctx is kept; the readback leg's TAKEN, BUSY and
+APART arms witness it. The test-mode
 `warp-defer-frees on|off` has the broker pass over the owed frees the caller's
-own GL device ctx can reach (the broker bounds the arms), which the BUSY arm
-uses. The test-mode bo ctl verb `stall-repay` aims one stall shot at the
-broker's next repeat of that BO's free, should it be owed (the broker bounds the
-shots, four a boot, each gone in two seconds), which the YIELD arm uses. The test-mode `warp-stall-create`, `warp-stall-destroy` and
+own GL device ctx can reach (the broker bounds the arms), which the BUSY, APART
+and LIFT arms use. The test-mode bo ctl verb `stall-repay` aims one stall shot at
+the broker's next repeat of that BO's free, should it be owed (the broker bounds
+the shots, twelve a boot, each gone in two seconds), which the YIELD, APART and
+LIFT arms use. The test-mode `warp-stall-create`, `warp-stall-destroy` and
 `warp-stall-free` verbs arm one stall shot at the caller's own next create
 (of its GL ctx; the venus create is not aimed), its own ctx's destroy, or the
 free of the next BO it destroys (`TEST_STALL_SHOTS` per boot, one connection
-at a time), which the readback leg's CREATE, DESTROY and FREE arms use. The
+at a time), which the readback leg's CREATE, DESTROY, FREE, YIELD and APART arms use. The
 free is the last command a BO's retire sends, so the proxy sends the shot
 just before it (`Gpu::test_stall_at_next_unref`). A client that mints
 only V-3a guest-blob rings pays no venus ctx. Section 0.6 ratifies one venus ctx

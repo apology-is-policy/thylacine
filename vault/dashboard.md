@@ -123,6 +123,7 @@ Generated — do not edit between the markers (`quaestor render`).
 
 ## Recent changes
 
+- 2026-11-10 [[chg-2026-11-10-owed-barrier-per-free]] — A free's barrier stands down only after a stall its own repeat met; the owed-free pass still stands down after any of its stalls
 - 2026-11-10 [[chg-2026-11-10-owed-barrier]] — A chain that can reach an owed free parks until the free is paid, so a busy context cannot hold its taken free off
 - 2026-11-10 [[chg-2026-11-10-owed-frees]] — A free the device has not acknowledged is owed and repeated; replies carry the stall count their request began at; the stall shot is bound to its connection
 - 2026-11-10 [[chg-2026-11-10-owed-quiet]] — The owed-free pass and its barrier wait for a quiet engine, so a sustained load cannot take every revived window or freeze the owner's chains
@@ -130,5 +131,4 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-11-10 [[chg-2026-11-10-stall-met-destroys]] — A destroy a stall met, or the vindication's, is owed rather than final; the r4 P3 batch and the CREATE/DESTROY witnesses
 - 2026-11-10 [[chg-2026-11-10-stalled-ctx-create]] — A warp context create a stall met condemns its slot and owes a destroy, instead of wedging the slot
 - 2026-11-10 [[chg-2026-11-10-taken-frees]] — A free a chain still holds is taken as a debt and paid once none can reach it; the owed-free pass runs after the seat's step, bounded, links first
-- 2026-11-09 [[chg-2026-11-09-input-thread]] — Lictor reads input on its own thread, into a 4096-entry queue (vote 72, second half)
 <!-- generated:end -->

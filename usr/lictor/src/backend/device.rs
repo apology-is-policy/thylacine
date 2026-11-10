@@ -71,16 +71,18 @@ pub struct Device {
     #[cfg(feature = "test-mode")]
     test_owed_stalls: u8,
 }
-/// Defer-lever arms per boot: one readback leg's attempts.
+/// Defer-lever arms per boot: the readback leg's attempts at BUSY, LIFT and
+/// APART, which arms twice.
 #[cfg(feature = "test-mode")]
-const TEST_OWED_DEFERS: u8 = 4;
+const TEST_OWED_DEFERS: u8 = 16;
 /// How long one arm of the defer lever lasts at most; an owed-stall shot
 /// no repeat took is gone as soon.
 #[cfg(feature = "test-mode")]
 const TEST_OWED_DEFER_MS: u64 = 2000;
-/// Owed-stall shots per boot: one readback leg's attempts.
+/// Owed-stall shots per boot: the readback leg's attempts at YIELD, APART
+/// and LIFT.
 #[cfg(feature = "test-mode")]
-const TEST_OWED_STALLS: u8 = 4;
+const TEST_OWED_STALLS: u8 = 12;
 /// How the lever breaks a trusted takeover's return, in firing order.
 #[cfg(feature = "test-mode")]
 #[derive(Clone, Copy, PartialEq, Eq)]

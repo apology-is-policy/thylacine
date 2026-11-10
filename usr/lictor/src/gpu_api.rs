@@ -497,18 +497,24 @@ impl OwedReach {
 /// The longest the owed-free pass stands down after a revival: a synchronous
 /// deadline's worth (backend gpu.rs asserts the two equal).
 pub const OWED_QUIET_MS: u64 = 500;
-/// Whether the owed-free pass stands down, and its barrier with it: from a
-/// stall one of the pass's own commands met (`stood_down`, that stall's
-/// number; `stalls` is the engine's count) until another stall begins or the
-/// engine has run `OWED_QUIET_MS` since that stall revived. The revival's
-/// window goes to the requests, and the chains the barrier held go to the
-/// device. Any other stall leaves both up: fenced submissions are refused
-/// while the engine is stalled, so at its revival the pass sends first into
-/// a queue the stall emptied, and the chains it holds back stay parked. So
-/// the pass gets the first turn after every revival but those that follow its
-/// own stall, and each of those goes to the requests and the held chains.
+/// Whether a stand-down holds: from a stall an owed-free pass command met
+/// (`stood_down`, that stall's number; `stalls` is the engine's count) until
+/// another stall begins or the engine has run `OWED_QUIET_MS` since that
+/// stall revived. The pass stands down after a stall any of its commands met,
+/// so that revival's window goes to the requests; a free's barrier stands
+/// down only after a stall its own command met (`barrier_ids`). Any other
+/// stall leaves the pass and every barrier up, and the pass takes its turn
+/// ahead of the requests at that revival, after whatever the revival's pump
+/// published (a readback's run, never a chain a barrier holds).
 pub fn owed_stands_down(stood_down: Option<u32>, stalls: u32, refusing: bool, since_revival_ms: Option<u64>) -> bool {
     stood_down == Some(stalls) && (refusing || since_revival_ms.is_some_and(|ms| ms < OWED_QUIET_MS))
+}
+/// The owed frees a new chain may not go to the device past: each but one
+/// whose own command met the stall now standing down. Another free's stall
+/// lowers none of the rest, so the pass's turn at one free never lets the
+/// chains held back for another go.
+pub fn barrier_ids<'a>(owed: impl Iterator<Item = &'a OwedFree>, stalls: u32, refusing: bool, since_revival_ms: Option<u64>) -> Vec<u32> {
+    owed.filter(|o| !owed_stands_down(o.stood_down, stalls, refusing, since_revival_ms)).map(|o| o.res).collect()
 }
 /// What stands between a retirement and its object.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -566,6 +572,8 @@ pub struct OwedFree {
     pub unmapped: bool,
     /// Answered refusals so far; a stall or a death is no answer.
     pub answered: u8,
+    /// The last stall one of its own commands met (`barrier_ids`).
+    pub stood_down: Option<u32>,
 }
 /// The device command an owed free needs next.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -615,7 +623,7 @@ pub enum Owed {
 pub const OWED_FREE_ANSWERS: u8 = 3;
 impl OwedFree {
     pub fn new(res: u32, extent: Option<(u64, u64)>, unmapped: bool) -> Self {
-        Self { res, extent, unmapped, answered: 0 }
+        Self { res, extent, unmapped, answered: 0, stood_down: None }
     }
     /// Links first, then the unmap a mapped blob needs, then the free.
     /// `linked`: the ledger still links the resource to a context.
@@ -900,11 +908,11 @@ pub struct Stats {
 record!(Stats { cmd_seq: u64, last_scanout_seq: u64, last_unref_seq: u64, condemned_lost: u32,
     engine: Engine, stalls: u32, stalls_begun: u32 });
 /// The broker's owed frees: owed now; incurred, paid and given up, monotone;
-/// and the resources whose retirement has not finished (`retiring`), each
-/// owed a free or still linked to a context.
+/// the resources whose retirement has not finished (`retiring`), each owed a
+/// free or still linked to a context; and the pass's stand-downs, monotone.
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Frees { pub owed: u32, pub incurred: u32, pub paid: u32, pub leaked: u32, pub retiring: u32 }
-record!(Frees { owed: u32, incurred: u32, paid: u32, leaked: u32, retiring: u32 });
+pub struct Frees { pub owed: u32, pub incurred: u32, pub paid: u32, pub leaked: u32, pub retiring: u32, pub stood_down: u32 }
+record!(Frees { owed: u32, incurred: u32, paid: u32, leaked: u32, retiring: u32, stood_down: u32 });
 #[cfg(feature = "backend")]
 impl From<&crate::backend::gpu::Gpu> for Stats {
     fn from(g: &crate::backend::gpu::Gpu) -> Self {
@@ -1283,6 +1291,24 @@ mod park_tests {
         assert!(!owed_stands_down(Some(u32::MAX), 0, true, None), "the count wraps");
     }
     #[test]
+    fn a_free_stands_its_own_barrier_down_and_no_other() {
+        let free = |res, stood_down| OwedFree { stood_down, ..OwedFree::new(res, None, true) };
+        // 10's own repeat met stall 3, the one now counted; 11's never met
+        // one; 12's met stall 2, long revived.
+        let owed = [free(10, Some(3)), free(11, None), free(12, Some(2))];
+        assert_eq!(barrier_ids(owed.iter(), 3, true, None), vec![11, 12], "while 10's stall stands, only 10 lets chains past");
+        assert_eq!(barrier_ids(owed.iter(), 3, false, Some(0)), vec![11, 12], "and for the window after it revives");
+        assert_eq!(barrier_ids(owed.iter(), 3, false, Some(OWED_QUIET_MS - 1)), vec![11, 12]);
+        assert_eq!(barrier_ids(owed.iter(), 3, false, Some(OWED_QUIET_MS)), vec![10, 11, 12], "the window has run: every free holds");
+        assert_eq!(barrier_ids(owed.iter(), 4, true, None), vec![10, 11, 12], "the next stall, whoever's, ends it");
+        assert_eq!(barrier_ids(owed.iter(), 4, false, Some(0)), vec![10, 11, 12]);
+        // A stall none of their own commands met lowers no barrier.
+        let none = [free(10, None), free(11, None)];
+        assert_eq!(barrier_ids(none.iter(), 3, true, None), vec![10, 11]);
+        assert_eq!(barrier_ids(none.iter(), 3, false, Some(0)), vec![10, 11]);
+        assert!(barrier_ids(core::iter::empty(), 3, true, None).is_empty());
+    }
+    #[test]
     fn a_free_a_poisoned_chain_reaches_holds_no_chain_back() {
         // Context 1 links 10 and 11, context 2 links 11, 12 was born in 3, 13 in 4.
         let holds = |ctx: u32, res: u32| matches!((ctx, res), (1, 10) | (1, 11) | (2, 11) | (3, 12) | (4, 13));
@@ -1350,14 +1376,14 @@ mod cursor_wire_tests {
         r.finish().unwrap();
     }
     #[test]
-    fn the_frees_census_is_five_counts_in_order() {
+    fn the_frees_census_is_six_counts_in_order() {
         let mut bytes = Vec::new();
-        Frees { owed: 1, incurred: 2, paid: 3, leaked: 4, retiring: 5 }.put(&mut bytes);
-        assert_eq!(bytes, [1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 4, 0, 0, 0, 5, 0, 0, 0]);
+        Frees { owed: 1, incurred: 2, paid: 3, leaked: 4, retiring: 5, stood_down: 6 }.put(&mut bytes);
+        assert_eq!(bytes, [1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 4, 0, 0, 0, 5, 0, 0, 0, 6, 0, 0, 0]);
         let mut r = Reader::new(&bytes).unwrap();
-        assert_eq!(Frees::get(&mut r).unwrap(), Frees { owed: 1, incurred: 2, paid: 3, leaked: 4, retiring: 5 });
+        assert_eq!(Frees::get(&mut r).unwrap(), Frees { owed: 1, incurred: 2, paid: 3, leaked: 4, retiring: 5, stood_down: 6 });
         r.finish().unwrap();
-        assert!(Frees::get(&mut Reader::new(&bytes[..16]).unwrap()).is_err());
+        assert!(Frees::get(&mut Reader::new(&bytes[..20]).unwrap()).is_err());
     }
     #[test]
     fn the_owed_defer_lever_has_its_own_opcode() {
