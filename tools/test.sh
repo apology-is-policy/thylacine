@@ -448,6 +448,22 @@ case "$result" in
                 exit 1
             fi
         fi
+        # The full-pool rung probes netd only where /srv/net is posted, and says
+        # NOT PROBED where it is not. A boot where netd served /net and the rung
+        # ran must therefore carry netd's OK line: without this, a renamed
+        # service would read as "not posted" on every boot and nobody would see.
+        if grep -aq 'joey: srvfull PROBE OK' "$LOG_FILE"; then
+            if ! grep -aq 'srvfull-probe: corvus OK' "$LOG_FILE"; then
+                echo "==> FAIL: the full-pool rung passed without corvus's OK line." >&2
+                exit 1
+            fi
+            if grep -aq 'netd: serving /net' "$LOG_FILE" \
+               && ! grep -aq 'srvfull-probe: netd OK' "$LOG_FILE"; then
+                echo "==> FAIL: netd served /net, but the full-pool rung did not probe it:" >&2
+                grep -a 'srvfull-probe:' "$LOG_FILE" >&2 || true
+                exit 1
+            fi
+        fi
         # A readiness snapshot that a server (netd, ptyfs) left unanswered for
         # the fixed 1 s is reported not ready and printed as `poll: FAILSAFE`
         # (ARCH 23.3). The count is zero on a healthy system, so one line means a

@@ -65,13 +65,13 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**731 owned · 39 unowned · 770 files (94% owned) · ~10527 unswept lines.**
+**733 owned · 38 unowned · 771 files (95% owned) · ~12222 unswept lines.**
 
-Excluded as harness and counted here rather than dropped: **97 files, ~50043 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
+Excluded as harness and counted here rather than dropped: **98 files, ~50605 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
 | area | owned | unowned | unswept lines |
 |---|---:|---:|---:|
-| usr/warp-prove | 0 | 1 | 4632 |
+| usr/warp-prove | 0 | 1 | 6348 |
 | usr/pouch-hello | 24 | 14 | 2076 |
 | usr/ports | 19 | 5 | 1691 |
 | kernel | 196 | 10 | 1227 |
@@ -81,7 +81,7 @@ Excluded as harness and counted here rather than dropped: **97 files, ~50043 lin
 | usr/susp-mask-child | 0 | 1 | 139 |
 | usr/lib | 129 | 1 | 72 |
 | usr/bus-probe-child | 0 | 1 | 63 |
-| usr/tapestryd | 11 | 2 | 23 |
+| usr/tapestryd | 13 | 1 | 2 |
 | mm | 8 | 0 | 0 |
 | usr/aurora | 5 | 0 | 0 |
 | usr/coreutils | 67 | 0 | 0 |
@@ -131,7 +131,7 @@ Excluded as harness and counted here rather than dropped: **97 files, ~50043 lin
 
 | file | lines |
 |---|---:|
-| usr/warp-prove/src/main.rs | 4632 |
+| usr/warp-prove/src/main.rs | 6348 |
 | usr/ports/gnumake/config.h | 1357 |
 | usr/pouch-hello/pouch-hello-net.c | 618 |
 | kernel/include/thylacine/spinlock.h | 287 |
@@ -168,6 +168,5 @@ Excluded as harness and counted here rather than dropped: **97 files, ~50043 lin
 | usr/pouch-hello/pouch-hello-stdio.c | 42 |
 | usr/pouch-hello/pouch-hello-fault.c | 40 |
 | kernel/include/thylacine/types.h | 30 |
-| usr/tapestryd/src/lib.rs | 21 |
 | usr/tapestryd/src/skein.rs | 2 |
 <!-- generated:end -->

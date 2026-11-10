@@ -9,7 +9,7 @@ guarded-by: [inv-i8, inv-i17, inv-i21, inv-i44, inv-i48]
 validated-by: [spec-scheduler, spec-sched-alpha, spec-thread-reap, gate-smp]
 locks: [lock-runq]
 created: 2026-08-01
-updated: 2026-10-29
+updated: 2026-11-10
 ---
 ## Purpose
 
@@ -495,7 +495,14 @@ secondary mis-init. It is kept as a loud failure rather than deleted.
   reset's whole value is that a genuine runaway cannot reach the site.
 - Deliberately **not** prosecuted here: the telemetry counters
   (`run_ns`, `nsched`, `nmigrations`, `last_cpu`, `idle_ns`, `nctxt`).
-  They are stamped at the single switch chokepoint, single-writer by the
+  `run_ns` is also folded by `sched_tick` for the thread running on that
+  CPU -- a second write site, in IRQ context, on the thread's own CPU with
+  IRQs masked -- so a thread that is never switched out (a loop inside a
+  syscall body or under a plain lock, which `preempt_check_irq` will not
+  preempt) is charged within a tick; the stamp moves with every fold
+  (`proc.cpu_ns_running_thread` holds that what was charged is exactly how
+  far the stamp moved). The rest are
+  stamped at the single switch chokepoint, single-writer by the
   `on_cpu`/`I-21` discipline, and **no scheduling decision reads any of
   them** — a property that has been grep-verified twice (prowl-1,
   prowl-5) and must stay true.

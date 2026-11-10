@@ -16,14 +16,16 @@
 # if the paint met one, is reported and forbidden in the control; the retry's own
 # witness is ls-graphical-sak-dead, by lever.
 #
-# The readback leg is the same chord with a transfer of the busy target always in
-# flight, and it proves only that the seat comes through that: the wide wait can drain
-# the queue before the chord is seen. The pointer leg moves the pointer behind that
-# transfer, and tapestryd must retry an update it was refused and have it taken again.
-# QEMU runs the cursor queue apart from the GL work a client queued, so on virgl a move
-# is refused by the engine's stall rather than its own lane's: the lane's own stall is
-# reported, and required to come back when it happens. The dead scenario's lever drives
-# that lane on every boot.
+# The readback leg is the same chord with a transfer of the busy target always
+# outstanding, and it proves only that the seat comes through that. Lictor parks the
+# transfer until the client's earlier draws retire and holds the client's later draws
+# behind it (vote 81), so the transfer never holds the host loop; what the chord meets
+# is the client's backlog, through each synchronous step's own fence. The pointer leg
+# moves the pointer behind that client, and tapestryd must retry an update it was
+# refused and have it taken again. QEMU runs the cursor queue apart from the GL work a
+# client queued, so on virgl a move is refused by the engine's stall behind that
+# backlog rather than its own lane's: the lane's own stall is reported, and required to
+# come back when it happens. The dead scenario's lever drives that lane on every boot.
 #
 # Each client ends before a witness types, because keys typed behind its queue can
 # be lost.

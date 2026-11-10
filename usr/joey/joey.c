@@ -11616,6 +11616,32 @@ int main(void) {
     if (do_login_e2e() != 0) {
         return 1;
     }
+
+    // === A server at a full pool waits ===
+    // Spawn /bin/srvfull-probe: per server (corvus, and netd where /srv/net is
+    // posted) it fills the connection pool, leaves one connect waiting, and
+    // reads the server's CPU time across that wait -- a loop that keeps asking
+    // about a listener it cannot accept from never sleeps. It then frees a slot
+    // and requires the waiting connect to be served. Run by joey because only
+    // the system principal (or a hostowner) reads another Proc's CPU time, and
+    // here because corvus is up and the login E2Es are reaped. Standing
+    // connections (joey's /net mount, a held login) only shorten the fill.
+    {
+        const char sf_name[] = "/bin/srvfull-probe";
+        long sf_pid = t_spawn(sf_name, sizeof(sf_name) - 1);
+        if (sf_pid <= 0) {
+            t_putstr("joey: t_spawn(\"srvfull-probe\") FAILED\n");
+            return 1;
+        }
+        int sf_status = -1;
+        long sf_reaped = t_wait_pid_for((int)sf_pid, 0, &sf_status);
+        if (sf_reaped != sf_pid || sf_status != 0) {
+            t_putstr("joey: srvfull PROBE FAILED\n");
+            return 1;
+        }
+        t_putstr("joey: srvfull PROBE OK (a server at a full pool waits, "
+                 "and serves the waiting connect)\n");
+    }
 #endif /* THYLA_BOOT_PROBES (login + recover boot-test E2Es) */
 
     // === PTY-2a: spawn /bin/ptyfs + mount /dev/pts (the pseudoterminal server) ===

@@ -2943,6 +2943,22 @@ void sched_tick(void) {
     // topology + for pinned threads (select_target_cpu ignores util there).
     sched_util_accrue(t);
 
+    // The switch boundary alone leaves a thread that is never switched out
+    // uncharged for as long as it runs: one looping inside a syscall body or
+    // under a plain lock, which preempt_check_irq will not preempt. A reader
+    // diffing cpu_ns would see that loop as idle. (A preemptible thread was
+    // charged, up to a slice late.) Fold the slice so far here too. The
+    // writer is still one at a time:
+    // this is the CPU the thread runs on, with IRQs masked, exactly as at its
+    // switch-out, and the stamp moves with the fold so nothing is counted
+    // twice. The != 0 guard is the switch-out's (a never-stamped boot thread).
+    if (t->switched_in_at) {
+        u64 tick_now = timer_now_ns();
+        __atomic_store_n(&t->run_ns, t->run_ns + (tick_now - t->switched_in_at),
+                         __ATOMIC_RELAXED);
+        t->switched_in_at = tick_now;
+    }
+
     // Decrement; if expired, request preemption + replenish. The flag
     // is per-CPU — each CPU's IRQ writes its own slot.
     if (--t->slice_remaining <= 0) {

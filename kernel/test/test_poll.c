@@ -753,6 +753,84 @@ void test_poll_devsrv_listener_pollhup_on_tombstone(void) {
     drop_test_proc(corvus);
 }
 
+// A full server leaves its listener in the poll set and asks nothing of it. The
+// waiting connect must not make that poll return: unasked, a backlog is not an
+// event, a later connect's wake finds nothing asked about and sleeps again, and
+// only the service's death -- reported whether asked or not -- ends the wait.
+static void listener_poll_unasked_entry(void) {
+    struct pollfd pfds[1] = {
+        { .fd = g_listener_fd, .events = 0, .revents = 0 },
+    };
+    s64 r = sys_poll_for_proc(g_listener_proc, pfds, 1, -1);
+    g_listener_poll_revents = pfds[0].revents;
+    __atomic_store_n(&g_listener_poll_result, r, __ATOMIC_RELEASE);
+    test_kthread_park_terminal(&g_listener_poll_exited);
+}
+
+void test_poll_devsrv_listener_unasked_parks(void) {
+    srv_registry_reset();
+
+    struct Proc *corvus = make_marked_test_proc();
+    TEST_ASSERT(corvus != NULL, "corvus proc");
+    int svc_h = post_svc_byte(corvus, "corvus", 6);
+    TEST_ASSERT(svc_h >= 0, "post \"corvus\"");
+
+    struct Proc *client = make_test_proc();
+    TEST_ASSERT(client != NULL, "client proc");
+    struct Spoor *cs = connect_byte(client, "corvus");
+    TEST_ASSERT(cs != NULL, "a connect waits on the backlog");
+    int client_h = handle_alloc(client, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE, cs);
+    TEST_ASSERT(client_h >= 0, "client handle");
+
+    // The control one variable away: asked, the same backlog is an event.
+    struct pollfd asked[1] = { { .fd = svc_h, .events = POLLIN, .revents = 0 } };
+    TEST_EXPECT_EQ(sys_poll_for_proc(corvus, asked, 1, 0), 1L,
+        "asked about POLLIN, the waiting connect is reported");
+    struct pollfd unasked[1] = { { .fd = svc_h, .events = 0, .revents = 0 } };
+    TEST_EXPECT_EQ(sys_poll_for_proc(corvus, unasked, 1, 0), 0L,
+        "unasked, the waiting connect is not an event");
+    TEST_EXPECT_EQ((s64)unasked[0].revents, 0L, "unasked listener revents = 0");
+
+    g_listener_proc         = corvus;
+    g_listener_fd           = (hidx_t)svc_h;
+    g_listener_poll_result  = -999; g_listener_poll_exited = false;
+    g_listener_poll_revents = 0;
+
+    struct Thread *poller = thread_create(kproc(), listener_poll_unasked_entry);
+    TEST_ASSERT(poller != NULL, "thread_create");
+    ready(poller);
+    TEST_YIELD_UNTIL(poller->state == THREAD_SLEEPING);
+    TEST_EXPECT_EQ(poller->state, THREAD_SLEEPING,
+        "the unasked poll parks with a connect waiting");
+
+    // A second connect wakes the listener's poll list. Nothing asked about is
+    // ready, so the poller goes back to sleep without returning.
+    u64 resleeps = poll_total_resleeps();
+    struct Proc *client2 = make_test_proc();
+    TEST_ASSERT(client2 != NULL, "second client proc");
+    struct Spoor *cs2 = connect_byte(client2, "corvus");
+    TEST_ASSERT(cs2 != NULL, "a second connect waits");
+    int client2_h = handle_alloc(client2, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE, cs2);
+    TEST_ASSERT(client2_h >= 0, "second client handle");
+    TEST_YIELD_UNTIL(poll_total_resleeps() > resleeps);
+    TEST_ASSERT(poll_total_resleeps() > resleeps,
+        "the second connect's wake found nothing asked about and slept again");
+    TEST_YIELD_UNTIL(poller->state == THREAD_SLEEPING);
+    TEST_EXPECT_EQ(__atomic_load_n(&g_listener_poll_result, __ATOMIC_ACQUIRE), -999L,
+        "the unasked poll has not returned");
+
+    srv_registry_reset();
+    TEST_YIELD_UNTIL(__atomic_load_n(&g_listener_poll_result, __ATOMIC_ACQUIRE) != -999);
+    TEST_EXPECT_EQ(g_listener_poll_result, 1L, "the service's death ends the wait");
+    TEST_ASSERT((g_listener_poll_revents & POLLHUP) != 0,
+        "POLLHUP is reported to a poller that asked for nothing");
+
+    test_kthread_join_free(poller, &g_listener_poll_exited);
+    drop_test_proc(client2);
+    drop_test_proc(client);
+    drop_test_proc(corvus);
+}
+
 void test_poll_devsrv_conn_pollin_on_send(void) {
     srv_registry_reset();
 

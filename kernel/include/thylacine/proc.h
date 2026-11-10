@@ -1777,9 +1777,9 @@ void proc_set_name(struct Proc *p, const char *path, size_t len);
 //   call this from inside proc_for_each, under g_proc_table_lock -- and holds
 //   no threads_lock of its own. Each run_ns is read __atomic (a single-writer coherent
 //   snapshot); the sum is a snapshot-of-snapshots, exact enough for the
-//   diff-across-polls %CPU the reader derives. Does NOT include the currently-
-//   running thread's in-flight slice since its last switch-in (< 1 slice; the
-//   design accepts the lag). Returns 0 for a NULL p.
+//   diff-across-polls %CPU the reader derives. Does NOT include a running
+//   thread's time since its last fold (its switch-in or the last tick on its
+//   CPU, so under a tick). Returns 0 for a NULL p.
 u64 proc_cpu_ns(struct Proc *p);
 
 // proc_kstack_peak -- the deepest kernel stack any of p's threads has ever

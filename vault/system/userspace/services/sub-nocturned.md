@@ -11,7 +11,7 @@ locks: []
 abis: []
 design: ["docs/NOCTURNE.md", "docs/PCI-INTERRUPTS-DESIGN.md"]
 created: 2026-09-17
-updated: 2026-09-17
+updated: 2026-11-10
 ---
 ## Purpose
 
@@ -37,7 +37,10 @@ mode-aware acknowledgement accessor. `cycle_entry` owns `VirtioSnd`, its PCI map
 DMA pool and queue state. The serving thread owns the 9P connections. `Shared`
 holds graph state and the cycle wake word; the cycle uses `try_lock` and can
 replay the last period when a graph edit holds the lock. The control thread
-does not hold the graph lock across a reply.
+does not hold the graph lock across a reply. Its pass services the connections
+that hung up before it accepts on either post, and tears a hung-up connection
+down in that pass whatever its last bytes held, so a connect at a full pool is
+refused only when no slot was just given back.
 
 `PciIrq::for_virtio` selects and verifies one masked config/control/event/TX/RX
 vector before DMA setup, preferring MSI-X with transactional INTx fallback.

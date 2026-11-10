@@ -58,6 +58,6 @@ if {$lc_cmd_timeout < 180} { set lc_cmd_timeout 180 }
 # host-side verdict then greps ANSWER= and the three PASS terms as well -- which
 # this timeout message cannot contain, so the #186 direction still holds (a
 # timeout can never read as a pass).
-lc_run_expect_hardfail_re "warp-prove reject" "C0-REJECT DONE" {warp-prove: (FAIL --|C0-REJECT INCOMPLETE)}
+lc_run_expect_hardfail_re "warp-prove reject" "C0-REJECT DONE" {warp-prove: (FAIL --|C0-REJECT INCOMPLETE)[^\r\n]*[\r\n]}
 
 lc_pass "warp-prove reject: the #240 observation leg ran to completion"

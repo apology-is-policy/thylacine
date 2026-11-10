@@ -123,12 +123,12 @@ Generated — do not edit between the markers (`quaestor render`).
 
 ## Recent changes
 
-- 2026-11-09 [[chg-2026-11-09-account-estale]] — A memory account named by another account's incarnation answers ESTALE (vote 76)
-- 2026-11-09 [[chg-2026-11-09-aux-unlock]] — An unlock that never left for want of memory is sent again: the aux join's round 3 F2, bounded where a kill cannot reach
-- 2026-11-09 [[chg-2026-11-09-input-thread]] — Lictor reads input on its own thread, into a 4096-entry queue (vote 72, second half)
-- 2026-11-09 [[chg-2026-11-09-narrow-sync-wait]] — Lictor's synchronous wait no longer widens behind a readback (vote 72, first half)
-- 2026-11-09 [[chg-2026-11-09-panels-enter-or-esc]] — Trusted panels close on Enter or Esc; the key prompt runs on its own clock (vote 70)
-- 2026-11-09 [[chg-2026-11-09-sak-renew]] — A takeover behind a GPU backlog renews the kernel's quiesce deadline (vote 71)
-- 2026-11-09 [[chg-2026-11-09-serial-side-queue]] — The serial console reads every byte; what the ring refuses waits in a side queue (vote 73)
-- 2026-11-09 [[chg-2026-11-09-strike-regex-palette]] — The shell's =~, palette builtin and prompt function are struck (vote 78)
+- 2026-11-10 [[chg-2026-11-10-full-pool-waits]] — corvus and netd ask about their listener only while they have room, so a full pool waits instead of running
+- 2026-11-10 [[chg-2026-11-10-owed-barrier-holders]] — A free's stand-down lets every context holding it go, the owed-free pass serves contexts with parked chains in turn, and a destroyed context's blob births are cleared
+- 2026-11-10 [[chg-2026-11-10-owed-barrier-per-free]] — A free's barrier stands down only after a stall its own repeat met; the owed-free pass still stands down after any of its stalls
+- 2026-11-10 [[chg-2026-11-10-owed-barrier]] — A chain that can reach an owed free parks until the free is paid, so a busy context cannot hold its taken free off
+- 2026-11-10 [[chg-2026-11-10-owed-frees]] — A free the device has not acknowledged is owed and repeated; replies carry the stall count their request began at; the stall shot is bound to its connection
+- 2026-11-10 [[chg-2026-11-10-owed-quiet]] — The owed-free pass and its barrier wait for a quiet engine, so a sustained load cannot take every revived window or freeze the owner's chains
+- 2026-11-10 [[chg-2026-11-10-owed-stand-down]] — The owed-free pass stands down for one window only after a stall its own repeat met; any other stall leaves it and its barrier up, so it gets the first turn after every other revival
+- 2026-11-10 [[chg-2026-11-10-owed-turn-budget]] — A parked context's turn in the owed-free pass has its own looks, the rotation its own, and a turn out of looks moves past its context
 <!-- generated:end -->

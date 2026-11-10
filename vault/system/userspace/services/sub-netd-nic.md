@@ -12,7 +12,7 @@ hazards: [haz-driver-panic-dos]
 abis: []
 design: ["docs/NET-DESIGN.md", "docs/NET-THROUGHPUT.md", "docs/NET-CLOSE-DESIGN.md"]
 created: 2026-07-31
-updated: 2026-09-24
+updated: 2026-11-10
 ---
 ## Purpose
 
@@ -114,12 +114,20 @@ no-lost-wakeup argument, see Concurrency):
    `poll_ready` → `poll_connects` (each delivers held replies whose
    condition landed this tick; any write failure condemns the Conn).
 6. The poll-delay decision (below), then `t_poll` over
-   `[listener] + conns` with that timeout; `rc < 0` → a
+   `[listener] + conns` with that timeout. The listener is asked about
+   (`POLLIN`) only while the table has room: at `MAX_CONNS` a connect
+   waiting on the accept backlog would otherwise end every poll at once
+   with nothing accepted, and the loop -- stack service included -- would
+   run without sleeping until a slot freed. Unasked, the waiting connect
+   is not an event; a Conn that closes ends the poll through its own
+   entry and the next pass asks again. `/bin/srvfull-probe` holds this on
+   the device ([[sub-stratum-boot]]); `rc < 0` → a
    full-idle-period backoff sleep (a persistent poll error cannot
    busy-spin — the #108 discipline); `rc == 0` → loop (re-service the
    stack).
-7. Accept at most one new 9P connection per tick (the listener re-fires
-   next iteration; `MAX_CONNS` bounds the table).
+7. Accept at most one new 9P connection per tick, reached only with
+   room (the listener re-fires next iteration; `MAX_CONNS` bounds the
+   table).
 8. Service readable Conns BACKWARD (`Conn::service` — reads + dispatches
    complete frames); a `false` return or `POLLHUP` tears the Conn down
    (`teardown` + `t_close` + remove).

@@ -5242,8 +5242,17 @@ unsafe fn srv_server_loop(listener: i64, notes: &Notes) -> i64 {
     let notes_fd = notes.as_raw_fd();
 
     loop {
-        // Build pollfd list.
-        pollfds[0] = TPollFd { fd: listener as i32, events: T_POLLIN, revents: 0 };
+        // Build pollfd list. The listener is asked about only while there is
+        // room to accept: at a full pool a waiting connect would keep it
+        // readable, the accept would be skipped, and every poll would return
+        // at once. Unasked, it parks the loop; its hang-up is reported either
+        // way, and a conn that closes re-arms it on the next pass.
+        let room = conns.len() < MAX_CONNS;
+        pollfds[0] = TPollFd {
+            fd: listener as i32,
+            events: if room { T_POLLIN } else { 0 },
+            revents: 0,
+        };
         pollfds[1] = TPollFd { fd: notes_fd, events: T_POLLIN, revents: 0 };
         let nfds = POLL_FIXED + conns.len();
         for (i, c) in conns.iter().enumerate() {
@@ -5264,49 +5273,42 @@ unsafe fn srv_server_loop(listener: i64, notes: &Notes) -> i64 {
         // show "nothing pending" and strand the request until its timeout.
         let sak_ready = pollfds[1].revents & T_POLLIN != 0;
 
-        // Accept new connections.
-        if pollfds[0].revents & T_POLLIN != 0 {
-            if conns.len() < MAX_CONNS {
-                let h = t_srv_accept(listener);
-                if h >= 0 {
-                    let mut peer = TSrvPeerInfo::default();
-                    // F4 close (P5-corvus-srv-impl audit): fail-closed
-                    // on a non-zero `t_srv_peer` rc. The pre-audit code
-                    // discarded the return and left `peer` at zeros —
-                    // future admin verbs (P5-hostowner-b) that read
-                    // `caps`/`stripes` for gating would have aliased a
-                    // failed-read with a fail-closed value rather than
-                    // explicitly catching it. Better to refuse the
-                    // accept now than to admit an unknown-identity
-                    // conn into the loop. The handle is closed so the
-                    // kernel-side SrvConn tears down promptly.
-                    if t_srv_peer(h, &mut peer) != 0 {
-                        let _ = t_close(h);
-                        // Continue — the kernel's tear-down on
-                        // `t_close` will surface to a subsequent
-                        // listener-side state; corvus's loop will
-                        // re-poll.
-                    } else {
-                        conns.push(Conn::new(h, peer, next_conn_id));
-                        // Skip the 0 sentinel on the 2^64 wrap so a recycled
-                        // id can never alias the "no owner" value and falsely
-                        // pass the SESSION_CLOSE / close_conn ownership gate.
-                        next_conn_id = next_conn_id.wrapping_add(1);
-                        if next_conn_id == 0 {
-                            next_conn_id = 1;
-                        }
+        // Accept new connections. Reached only with room: a full pool leaves
+        // the listener unasked, and the kernel's accept backlog holds the
+        // connects that wait (SRV_ACCEPT_BACKLOG, kernel/devsrv.c).
+        if room && pollfds[0].revents & T_POLLIN != 0 {
+            let h = t_srv_accept(listener);
+            if h >= 0 {
+                let mut peer = TSrvPeerInfo::default();
+                // F4 close (P5-corvus-srv-impl audit): fail-closed
+                // on a non-zero `t_srv_peer` rc. The pre-audit code
+                // discarded the return and left `peer` at zeros —
+                // future admin verbs (P5-hostowner-b) that read
+                // `caps`/`stripes` for gating would have aliased a
+                // failed-read with a fail-closed value rather than
+                // explicitly catching it. Better to refuse the
+                // accept now than to admit an unknown-identity
+                // conn into the loop. The handle is closed so the
+                // kernel-side SrvConn tears down promptly.
+                if t_srv_peer(h, &mut peer) != 0 {
+                    let _ = t_close(h);
+                    // Continue — the kernel's tear-down on
+                    // `t_close` will surface to a subsequent
+                    // listener-side state; corvus's loop will
+                    // re-poll.
+                } else {
+                    conns.push(Conn::new(h, peer, next_conn_id));
+                    // Skip the 0 sentinel on the 2^64 wrap so a recycled
+                    // id can never alias the "no owner" value and falsely
+                    // pass the SESSION_CLOSE / close_conn ownership gate.
+                    next_conn_id = next_conn_id.wrapping_add(1);
+                    if next_conn_id == 0 {
+                        next_conn_id = 1;
                     }
                 }
-                // else: listener torn down; loop will pick it up via
-                // POLLHUP on the listener (T_POLLHUP isn't requested
-                // here — at v1.0 corvus only ever sees POLLIN on the
-                // listener).
-            } else {
-                // Backlog full; defer accept (the listener's accept
-                // backlog absorbs up to SRV_ACCEPT_BACKLOG = 16 per
-                // kernel/devsrv.c). Continue serving extant conns; the
-                // backlog will drain as conns close.
             }
+            // else: the listener was torn down; its POLLHUP, reported
+            // whether asked for or not, ends the loop below.
         }
         if pollfds[0].revents & T_POLLHUP != 0 {
             // Listener torn down (admin/proc exit / unposted). Drain

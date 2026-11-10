@@ -1,5 +1,5 @@
 pub use crate::gpu_api::{HostRing, FenceVindication, FenceTag, FencedErr};
-use crate::gpu_api::{retirement_hold, ChainReach, Hold, Retired};
+use crate::gpu_api::{retirement_hold, unref_frees, Answer, ChainReach, FreeStep, Frees, Hold, Owed, OwedFree, Retired};
 // The virtio-gpu backend shared during the Lictor migration (Tapestry G-3; TAPESTRY.md
 // section 18). A port of the audited G-1 gpud device machinery (itself the
 // P4-L probe's command layer over the netdev VirtioNetPci PCI transport),
@@ -134,6 +134,27 @@ pub const BLOB_FLAG_SHAREABLE: u32 = VIRTIO_GPU_BLOB_FLAG_USE_SHAREABLE;
 /// unbind is a device-level anomaly, not a steady state, so this is sized to
 /// absorb a burst and no more; overflow is counted and leaks, never frees.
 const GPU_CONDEMNED_MAX: usize = 16;
+
+/// Device commands one serve pass may spend on owed frees
+/// (`Gpu::pay_owed_frees`), which also stops once the pass has spent
+/// SUBMIT_DEADLINE_MS: the seat's next look at the chord waits on it.
+const OWED_COMMANDS_PER_PASS: usize = 8;
+/// Owed frees one pass looks at for a parked context's turn, and again in
+/// rotation: a free still held by a chain costs a reach scan each time it is
+/// looked at.
+const OWED_FREES_EXAMINED: usize = 16;
+const _: () = assert!(crate::gpu_api::OWED_QUIET_MS == SUBMIT_DEADLINE_MS);
+
+/// How a teardown of a mapped HOST3D blob ended.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Teardown {
+    Done,
+    /// Not acknowledged; repeated by the owed-free pass, the extent reserved.
+    Owed,
+    /// Not acknowledged and not owed (bring-up, a dead engine, the debt's
+    /// bound): the extent is reserved until the service restarts.
+    Leaked,
+}
 
 /// One display-condemned resource. `unref_requested` is what keeps the drain
 /// from ACCELERATING a free: an id parked at a pre-quiesce eviction whose
@@ -403,6 +424,7 @@ const VIRTIO_GPU_FLAG_FENCE: u32 = 1 << 0;
 const VIRTIO_GPU_FLAG_INFO_RING_IDX: u32 = 1 << 1;
 
 const VIRTIO_GPU_RESP_OK_NODATA: u32 = 0x1100;
+const _: () = assert!(VIRTIO_GPU_RESP_OK_NODATA == crate::gpu_api::RESP_OK_NODATA);
 const VIRTIO_GPU_RESP_OK_DISPLAY_INFO: u32 = 0x1101;
 const VIRTIO_GPU_RESP_OK_CAPSET_INFO: u32 = 0x1102;
 const VIRTIO_GPU_RESP_OK_CAPSET: u32 = 0x1103;
@@ -422,6 +444,7 @@ const VIRTIO_GPU_RESP_OK_MAP_INFO: u32 = 0x1106;
 pub const GPU_RESP_OK_NODATA: u32 = VIRTIO_GPU_RESP_OK_NODATA;
 pub const GPU_RESP_ERR_UNSPEC: u32 = 0x1200;
 pub const GPU_RESP_ERR_INVALID_RESOURCE_ID: u32 = 0x1203;
+const _: () = assert!(GPU_RESP_ERR_INVALID_RESOURCE_ID == crate::gpu_api::RESP_ERR_INVALID_RESOURCE_ID);
 
 // struct virtio_gpu_config field offsets in the Device region (section 5.7.4):
 // events_read @0x00, events_clear @0x04, num_scanouts @0x08, num_capsets @0x0C.
@@ -488,6 +511,14 @@ const USED_SPIN_PER_WAKE: u32 = 65536;
 // synchronous chain stalled this long declares it, and so does one a trusted
 // takeover still waits on TAKEOVER_BOUND_MS after its chord (vote 80).
 const FENCE_ABANDON_MS: u64 = 30_000;
+/// A readback that parked or ran this long is said (test-mode), so a boot log
+/// shows the parking rule at work (vote 81) -- but only when its park or its run
+/// at least doubles the last one said, so no client can flood the console.
+#[cfg(feature = "test-mode")]
+const READBACK_SAY_MS: u32 = 20;
+fn elapsed_ms_u32(t: Instant) -> u32 {
+    u32::try_from(t.elapsed().as_millis()).unwrap_or(u32::MAX)
+}
 // A retirement the broker parks gives up at the same bound (gpu_api::admit).
 const _: () = assert!(crate::gpu_api::PARK_BOUND_MS == FENCE_ABANDON_MS);
 
@@ -879,6 +910,17 @@ fn init_device(
 /// Why a fenced submission was refused (mapped to a 9P errno at the seam).
 
 
+/// A fenced chain staged in its slot but not yet published (operator vote 81,
+/// GPU-DESIGN 4.5.13): a readback waiting for its context's earlier chains, or
+/// one of that context's later chains waiting behind it.
+struct Parked {
+    slot: usize,
+    req_len: u32,
+    tag: FenceTag,
+    reach: ChainReach,
+    since: Instant,
+}
+
 struct Controlq {
     ring_va: u64,
     ring_pa: u64,
@@ -917,6 +959,8 @@ struct Controlq {
     /// Stalls begun, monotone: compared across one command, it says whether
     /// that command's outcome is unknown.
     stalls: u32,
+    /// When the engine last revived from a stall (`gpu_api::owed_stands_down`).
+    revived_at: Option<Instant>,
     /// The serve loop exists. Before it (bring-up) nothing needs to stay
     /// live, so a synchronous command waits out FENCE_ABANDON_MS instead of
     /// stalling at SUBMIT_DEADLINE_MS.
@@ -970,6 +1014,19 @@ struct Controlq {
     /// not in it: the tag crosses to the compositor and is taken at abandon,
     /// and this must survive that, because an abandoned chain still reaches.
     fslot_reach: [ChainReach; FENCED_SLOTS],
+    /// Chains staged and held back, in submission order (vote 81). Each holds its
+    /// slot; none is on the device, so no abandonment clock runs for it and
+    /// `device_idle` does not see it.
+    parked: alloc::vec::Vec<Parked>,
+    /// The slots parked chains hold: not allocatable, not published.
+    fslot_parked: [bool; FENCED_SLOTS],
+    /// Contexts with a released client chain: everything later of theirs parks
+    /// and is released too, until a destroy of that device context completes.
+    released: crate::gpu_api::Released,
+    /// The owed frees a chain may not go to the device past, and who can reach
+    /// them (`OwedReach`): such a chain parks until they are paid. Set by the
+    /// broker before every completion pump (`Gpu::set_owed_reach`).
+    owed_reach: crate::gpu_api::OwedReach,
     /// Contexts whose abandoned chain the device later retired: proof the
     /// host is finished with them, so the seam may un-poison.
     vindicated: alloc::vec::Vec<FenceVindication>,
@@ -1031,16 +1088,45 @@ struct Controlq {
     /// trigger BIT before trusting anything downstream of it.
     #[cfg(feature = "test-mode")]
     abandoned_total: u32,
+    /// The longest park and run a readback say has reported (the doubling
+    /// throttle on that say).
+    #[cfg(feature = "test-mode")]
+    rb_said: (u32, u32),
 }
 
 impl Controlq {
+    /// What an owed free's repeat waits on: `Gpu::retirement_hold` less the
+    /// parked chains. None is on the device, and none publishes while the
+    /// pass runs, so none can reach the resource while it is freed; one that
+    /// can reach it parks until the free is paid (`OwedReach`), so counting it
+    /// would hold the free on the chain that waits for it.
+    fn owed_free_hold(&self, res: u32, holds: impl Fn(u32, u32) -> bool) -> Hold {
+        self.hold(Retired::Resource(res), holds, false)
+    }
+
+    fn hold(&self, object: Retired, holds: impl Fn(u32, u32) -> bool, parked: bool) -> Hold {
+        retirement_hold(
+            object,
+            self.dead,
+            self.sync_pending || self.sync2_pending,
+            (0..FENCED_SLOTS)
+                .filter(|&i| self.fslots[i].is_some())
+                .map(|i| self.fslot_reach[i])
+                .chain(self.parked.iter().filter(|_| parked).map(|p| p.reach)),
+            (0..FENCED_SLOTS).filter(|&i| self.fslot_poisoned[i]).map(|i| self.fslot_reach[i]),
+            holds,
+        )
+    }
+
     /// W-4 stall observability: every HELD fenced slot as
-    /// (slot, fence_id, ctx_pub, ring_idx, readback, comp, age_ms) -- the
-    /// ctl prints one row per entry so a post-mortem read NAMES the op
+    /// (slot, fence_id, ctx_pub, ring_idx, readback, comp, age_ms, parked) --
+    /// the ctl prints one row per entry so a post-mortem read NAMES the op
     /// class a wedged chain belongs to (run 6's whole evidence was one
-    /// anonymous missing count: fenced-free 15).
-    fn fenced_held(&self) -> alloc::vec::Vec<(usize, u64, u32, u8, bool, bool, u64)> {
-        self.fslots
+    /// anonymous missing count: fenced-free 15). A parked chain (vote 81)
+    /// holds its slot too; its age is the time parked.
+    fn fenced_held(&self) -> alloc::vec::Vec<crate::gpu_api::HeldRow> {
+        let mut rows: alloc::vec::Vec<_> = self
+            .fslots
             .iter()
             .enumerate()
             .filter_map(|(i, t)| {
@@ -1049,11 +1135,17 @@ impl Controlq {
                         .map(|s| s.elapsed().as_millis() as u64)
                         .unwrap_or(0);
                     (
-                        i, t.fence_id, t.ctx_pub, t.ring_idx, t.readback, t.comp, age,
+                        i, t.fence_id, t.ctx_pub, t.ring_idx, t.readback, t.comp, age, false,
                     )
                 })
             })
-            .collect()
+            .collect();
+        for p in &self.parked {
+            let t = p.tag;
+            let age = p.since.elapsed().as_millis() as u64;
+            rows.push((p.slot, t.fence_id, t.ctx_pub, t.ring_idx, t.readback, t.comp, age, true));
+        }
+        rows
     }
 
     fn fenced_in_flight(&self) -> u32 {
@@ -1076,7 +1168,8 @@ impl Controlq {
     /// compositor's own readback must not compete here; the shares are
     /// unchanged and the second client's last chain simply refuses Again.
     fn alloc_fenced_slot(&self) -> Option<usize> {
-        (0..COMP_FSLOT).find(|&i| self.fslots[i].is_none() && !self.fslot_poisoned[i])
+        (0..COMP_FSLOT)
+            .find(|&i| self.fslots[i].is_none() && !self.fslot_poisoned[i] && !self.fslot_parked[i])
     }
 
     /// The reserved slot for compositor-owned chains (C-6): free and not
@@ -1086,7 +1179,10 @@ impl Controlq {
     /// client slot (a compositor chain abandoned in the client pool would
     /// shrink the lane for every client).
     fn alloc_comp_slot(&self) -> Option<usize> {
-        if self.fslots[COMP_FSLOT].is_none() && !self.fslot_poisoned[COMP_FSLOT] {
+        if self.fslots[COMP_FSLOT].is_none()
+            && !self.fslot_poisoned[COMP_FSLOT]
+            && !self.fslot_parked[COMP_FSLOT]
+        {
             Some(COMP_FSLOT)
         } else {
             None
@@ -1251,9 +1347,7 @@ impl Controlq {
             // `(Some(_), Some(t0))` test could never fire on it -- the pin was
             // INDEFINITE rather than bounded by the 30 s deadline. A swallowed
             // retire must leave the slot exactly as it was.
-            if slot < FENCED_SLOTS {
-                self.fslot_since[slot] = None;
-            }
+            let published = if slot < FENCED_SLOTS { self.fslot_since[slot].take() } else { None };
             let mut tag = match self.fslots.get_mut(slot).and_then(|s| s.take()) {
                 Some(t) => t,
                 None => {
@@ -1307,6 +1401,22 @@ impl Controlq {
                     "tapestryd: gpu fenced cmd (fence {}) resp_type={:#x}",
                     tag.fence_id,
                     rt
+                );
+            }
+            tag.exec_ms = published.map_or(0, elapsed_ms_u32);
+            #[cfg(feature = "test-mode")]
+            if tag.readback
+                && ((tag.parked_ms >= READBACK_SAY_MS.max(self.rb_said.0.saturating_mul(2)))
+                    || (tag.exec_ms >= READBACK_SAY_MS.max(self.rb_said.1.saturating_mul(2))))
+            {
+                self.rb_said = (self.rb_said.0.max(tag.parked_ms), self.rb_said.1.max(tag.exec_ms));
+                say!(
+                    "lictor: gpu readback (fence {}, ctx {}{}) parked {} ms, retired {} ms after publication",
+                    tag.fence_id,
+                    tag.ctx_pub,
+                    if tag.comp { ", compositor" } else { "" },
+                    tag.parked_ms,
+                    tag.exec_ms
                 );
             }
             self.completed.push(tag);
@@ -1383,6 +1493,7 @@ impl Controlq {
             return;
         }
         self.reap_abandoned();
+        self.unpark();
     }
 
     /// A stall ends one of two ways (GPU-DESIGN 4.5.15): the drain above
@@ -1396,6 +1507,7 @@ impl Controlq {
         match crate::gpu_api::stall_verdict(self.sync_pending || self.sync2_pending, ms, chord_ms) {
             crate::gpu_api::Stall::Revived => {
                 self.stalled = None;
+                self.revived_at = Some(Instant::now());
                 say!("lictor: gpu synchronous chain retired {} ms after its deadline -- engine revived", ms);
             }
             crate::gpu_api::Stall::Dead => {
@@ -1431,7 +1543,136 @@ impl Controlq {
     /// Release every occupied fenced slot as abandoned (poisoning both the
     /// slot and, via the tag, its owning ctx).
     fn abandon_all(&mut self, why: &str) {
-        self.abandon_matching(why, None)
+        self.abandon_matching(why, None);
+        self.release_parked(why);
+    }
+
+    /// A dead engine publishes nothing again, so every parked chain is released
+    /// (`released`), not abandoned: the device never saw it, so its slot is free
+    /// and nothing it names is at risk. The seam ends its context's fence
+    /// stream rather than count a fence that never signals (vote 81).
+    fn release_parked(&mut self, why: &str) {
+        for p in core::mem::take(&mut self.parked) {
+            self.fslot_parked[p.slot] = false;
+            let tag = crate::gpu_api::release_tag(p.tag, elapsed_ms_u32(p.since), p.reach.ctx, &mut self.released);
+            say!(
+                "tapestryd: gpu fence {} released unpublished ({}) -- slot {} free, ctx {}: the device never saw it",
+                tag.fence_id, why, p.slot, tag.ctx_pub
+            );
+            self.completed.push(tag);
+        }
+    }
+
+    /// The context has a chain the device may still run: in flight, or abandoned
+    /// and not yet retired (the device may still be running it). A readback of
+    /// that context waits for none of these to remain (vote 81).
+    fn ctx_on_device(&self, ctx_pub: u32) -> bool {
+        (0..FENCED_SLOTS).any(|i| match self.fslots[i] {
+            Some(t) => t.ctx_pub == ctx_pub && !self.retire_withheld(i),
+            None => self.fslot_poisoned[i] && self.fslot_poison_ctx[i] == ctx_pub,
+        })
+    }
+
+    /// The context has a chain abandoned and not yet retired: poisoned.
+    fn ctx_poisoned(&self, ctx_pub: u32) -> bool {
+        (0..FENCED_SLOTS).any(|i| {
+            self.fslots[i].is_none() && self.fslot_poisoned[i] && self.fslot_poison_ctx[i] == ctx_pub
+        })
+    }
+
+    /// The device retired this slot's chain but the harness hold swallowed it
+    /// (#177): finished on the device, so nothing parked waits for it. Without
+    /// this a held client would park the compositor's readback on the shared
+    /// reserved slot, the cross-client wedge ROUND F4 closed.
+    fn retire_withheld(&self, slot: usize) -> bool {
+        #[cfg(feature = "test-mode")]
+        {
+            self.held_retires.contains(&slot)
+        }
+        #[cfg(not(feature = "test-mode"))]
+        {
+            let _ = slot;
+            false
+        }
+    }
+
+    fn parked_view(&self) -> alloc::vec::Vec<(u32, bool)> {
+        self.parked.iter().map(|p| (p.tag.ctx_pub, p.tag.readback)).collect()
+    }
+
+    /// Publish a chain staged in `slot`. The wire id is taken here, not at
+    /// staging, so the device sees wire ids in publication order whether or not
+    /// the chain was parked, and the sequence rewinds only on an idle device.
+    fn publish_staged(&mut self, slot: usize, req_len: u32, tag: FenceTag, reach: ChainReach) -> Result<(), ()> {
+        if self.refusing() || self.flane_va == 0 || self.fslots[slot].is_some() {
+            return Err(());
+        }
+        let Some(wire) = self.wire_take(self.device_idle()) else {
+            self.dead = true;
+            return Err(());
+        };
+        unsafe { w64(self.flane_va + (slot as u64) * FREQ_LEN + 8, wire) };
+        self.fslot_reach[slot] = reach;
+        self.submit_fenced(slot, req_len, tag)
+    }
+
+    /// Publish what vote 81 lets go, in submission order: a parked readback once
+    /// its context has nothing on the device, with the chains behind it, up to
+    /// that context's next readback. Nothing goes while the engine refuses; a
+    /// stall's revival publishes at the next pump. A context `released` records
+    /// has its parked chains released, as a poisoned one's are.
+    ///
+    /// A context with an abandoned chain not yet retired has its parked chains
+    /// released as refused. The chain may never retire, a parked chain has no
+    /// abandonment clock, and it counts in `fenced_outstanding`, so without this
+    /// one hung job would hold the console's poll at 1 ms for good and keep its
+    /// slots out of `lane_exhausted`. The context is poisoned: its fence stream
+    /// is over and the seam refuses its fenced work, so nothing it could still
+    /// do needs them. The compositor's readback is released the same way, which
+    /// frees the reserved slot for every other surface.
+    fn unpark(&mut self) {
+        if self.parked.is_empty() || self.refusing() {
+            return;
+        }
+        let plan = crate::gpu_api::unpark_plan(
+            &self.parked_view(),
+            &|c| self.ctx_on_device(c),
+            &|c| self.ctx_poisoned(c),
+            &|i| self.owed_reach.reaches(self.parked[i].reach),
+            &self.released,
+        );
+        let mut keep = alloc::vec::Vec::new();
+        let mut failed = false;
+        for (p, what) in core::mem::take(&mut self.parked).into_iter().zip(plan) {
+            if what == crate::gpu_api::Unpark::Release {
+                self.fslot_parked[p.slot] = false;
+                let tag = crate::gpu_api::release_tag(p.tag, elapsed_ms_u32(p.since), p.reach.ctx, &mut self.released);
+                say!(
+                    "tapestryd: gpu fence {} released unpublished{} -- ctx {} has an abandoned or released chain, slot {} free",
+                    tag.fence_id,
+                    if tag.comp { " (compositor readback)" } else { "" },
+                    tag.ctx_pub,
+                    p.slot
+                );
+                self.completed.push(tag);
+                continue;
+            }
+            if what == crate::gpu_api::Unpark::Keep || failed {
+                keep.push(p);
+                continue;
+            }
+            let mut tag = p.tag;
+            tag.parked_ms = elapsed_ms_u32(p.since);
+            self.fslot_parked[p.slot] = false;
+            if self.publish_staged(p.slot, p.req_len, tag, p.reach).is_err() {
+                // Only a latched engine refuses here (the checks above ran on
+                // this pump); the next pump releases what is left.
+                self.fslot_parked[p.slot] = true;
+                failed = true;
+                keep.push(p);
+            }
+        }
+        self.parked = keep;
     }
 
     /// The same release, optionally restricted to ONE ctx (#178). The
@@ -2047,6 +2288,25 @@ pub struct Gpu {
     /// Sticky: the park list overflowed, so EVERY unref defers until the next
     /// drain. Over-deferral is the safe direction (round-3 F2).
     condemned_overflowed: bool,
+    /// Frees owed the device -- not acknowledged, or taken while a chain
+    /// could reach the resource -- repeated until it acknowledges one, in
+    /// turn. Each id stays retiring in the broker's ledger meanwhile, so no
+    /// create can take it and a repeat cannot free a newer resource.
+    owed_frees: alloc::collections::VecDeque<OwedFree>,
+    /// `FreesOwed`'s monotone counts: frees owed, paid by a repeat, given up.
+    owed_incurred: u32,
+    owed_paid: u32,
+    owed_leaked: u32,
+    /// The stall one of the owed-free pass's own commands met, by number
+    /// (`gpu_api::owed_stands_down`).
+    owed_stood_down: Option<u32>,
+    /// `FreesOwed`'s count of the pass's stand-downs, monotone.
+    owed_stood_downs: u32,
+    /// The context the next parked context's turn starts after
+    /// (`gpu_api::OwedPass`), and how many frees the turns have tried,
+    /// monotone.
+    owed_turn: Option<u32>,
+    owed_parked_firsts: u32,
     /// Self-test lever: fail the next display disable without issuing it.
     fail_next_scanout_disable: bool,
     /// Set when the lever (not the device) produced the last refusal, so the
@@ -2086,13 +2346,13 @@ pub struct Gpu {
     /// count, so reclaiming the offset here while a client's weft map -- or a
     /// claimed-but-not-yet-mapped client's transferred pin -- is live would
     /// re-hand it under the client's PTEs (a cross-client alias). A ring whose
-    /// total ref count is still > 1 (any client ref beyond tapestryd's own map)
-    /// is parked here -- tapestryd KEEPS its own VA mapped so `t_hostmem_refcount`
+    /// total ref count is still > 1 (any client ref beyond lictor's own map)
+    /// is parked here -- lictor KEEPS its own VA mapped so `t_hostmem_refcount`
     /// can re-query it -- and reaped by `reap_hostmem_parked` once the count drops
     /// to 1. Bounded: a client that never unmaps pins only its own I-32 budget.
     hostmem_parked: alloc::vec::Vec<HostRing>,
     /// V-3b-2 xproc-E2E: the host3d-ring reap ledger. `park` counts retires that
-    /// PARKED (a client ref beyond tapestryd's own map kept the offset live);
+    /// PARKED (a client ref beyond lictor's own map kept the offset live);
     /// `reap` counts parked rings later RECLAIMED (the client released, so the
     /// total ref count dropped to 1). The cross-Proc lifecycle E2E reads both via
     /// the warp ctl to witness park-on-mapped-retire -> reclaim-on-release with a
@@ -2217,6 +2477,7 @@ impl Gpu {
                 stalled: None,
                 takeover_from: None,
                 stalls: 0,
+                revived_at: None,
                 serving: false,
                 #[cfg(feature = "test-mode")]
                 test_latch_next: false,
@@ -2236,6 +2497,10 @@ impl Gpu {
                 fslot_since: [None; FENCED_SLOTS],
                 fslot_poisoned: [false; FENCED_SLOTS],
                 fslot_reach: [ChainReach::default(); FENCED_SLOTS],
+                parked: alloc::vec::Vec::new(),
+                fslot_parked: [false; FENCED_SLOTS],
+                released: crate::gpu_api::Released::default(),
+                owed_reach: crate::gpu_api::OwedReach::default(),
                 fslot_poison_ring: [0; FENCED_SLOTS],
                 fslot_poison_ctx: [0; FENCED_SLOTS],
                 vindicated: alloc::vec::Vec::new(),
@@ -2252,6 +2517,8 @@ impl Gpu {
                 held_retires: alloc::vec::Vec::new(),
                 #[cfg(feature = "test-mode")]
                 abandoned_total: 0,
+                #[cfg(feature = "test-mode")]
+                rb_said: (0, 0),
             },
             ring_va,
             width: DEFAULT_DISPLAY_W,
@@ -2272,6 +2539,14 @@ impl Gpu {
             collect_retirements: false,
             retired_resources: alloc::vec::Vec::new(),
             condemned_overflowed: false,
+            owed_frees: alloc::collections::VecDeque::new(),
+            owed_incurred: 0,
+            owed_paid: 0,
+            owed_leaked: 0,
+            owed_stood_down: None,
+            owed_stood_downs: 0,
+            owed_turn: None,
+            owed_parked_firsts: 0,
             fail_next_scanout_disable: false,
             injected_refusal: false,
             condemned_lost: 0,
@@ -3100,7 +3375,7 @@ impl Gpu {
         if self.condemned_overflowed {
             return Ok(());
         }
-        self.resource_unref_raw(resource_id)
+        self.unref_or_owe(resource_id)
     }
 
     /// Park `res_id` as still-scanned-by-the-device. Idempotent.
@@ -3197,15 +3472,16 @@ impl Gpu {
                 kept += 1;
                 continue;
             }
-            // An owner told Ok never asks again, so an unref the engine could
-            // not take (or that stalled) stays parked for the next accepted
-            // bind; a second UNREF of a freed id is a harmless refusal.
-            if e.res != 0
-                && e.unref_requested
-                && (!self.takes_commands() || (self.resource_unref_raw(e.res).is_err() && !self.takes_commands()))
-            {
-                self.condemned[kept] = e;
-                kept += 1;
+            // An owner told Ok never asks again, so a free the engine cannot
+            // take now stays parked for the next accepted bind, and one the
+            // device does not acknowledge is owed.
+            if e.res != 0 && e.unref_requested {
+                if self.takes_commands() {
+                    let _ = self.unref_or_owe(e.res);
+                } else {
+                    self.condemned[kept] = e;
+                    kept += 1;
+                }
             }
         }
         self.condemned_n = kept;
@@ -3223,16 +3499,237 @@ impl Gpu {
             w32(req_va + 24, resource_id);
             w32(req_va + 28, 0);
         };
-        let result = self.ctrl.step(
-            "RESOURCE_UNREF",
-            GPU_CTRL_HDR_LEN + 8,
-            GPU_CTRL_HDR_LEN,
-            VIRTIO_GPU_RESP_OK_NODATA,
-        );
+        let result = match self.ctrl.submit_and_wait(GPU_CTRL_HDR_LEN + 8, GPU_CTRL_HDR_LEN) {
+            Ok(t) if unref_frees(t) => Ok(()),
+            Ok(t) => {
+                say!("tapestryd: gpu RESOURCE_UNREF resp_type={:#x} (expected {:#x})", t, VIRTIO_GPU_RESP_OK_NODATA);
+                Err(Error::Hardware)
+            }
+            Err(()) => {
+                say!("tapestryd: gpu RESOURCE_UNREF submit error");
+                Err(Error::Hardware)
+            }
+        };
         if result.is_ok() && self.collect_retirements {
             self.retired_resources.push(resource_id);
         }
         result
+    }
+
+    /// Free `resource_id`, owing the free when the device may still hold the
+    /// resource: a stall leaves the outcome unknown, a refusal before staging
+    /// asked nothing, and an answered refusal leaves the resource in place.
+    fn unref_or_owe(&mut self, resource_id: u32) -> Result<(), Error> {
+        let result = self.resource_unref_raw(resource_id);
+        if result.is_err() {
+            self.owe_free(OwedFree::new(resource_id, None, true));
+        }
+        result
+    }
+
+    /// Unmap and free a mapped HOST3D blob, then return its extent, owing
+    /// whatever the device has not acknowledged: the extent is reused only
+    /// after both are. A repeat of an unmap that ran is answered OK, and of a
+    /// free that ran, as no such resource.
+    fn free_mapped_or_owe(&mut self, resource_id: u32, offset: u64, size: u64) -> Teardown {
+        let unmapped = self.unmap_blob(resource_id).is_ok();
+        if unmapped && self.resource_unref_raw(resource_id).is_ok() {
+            self.hostmem_free(offset, size);
+            return Teardown::Done;
+        }
+        if self.owe_free(OwedFree::new(resource_id, Some((offset, size)), unmapped)) {
+            Teardown::Owed
+        } else {
+            Teardown::Leaked
+        }
+    }
+
+    /// Whether the free is owed now. Before serving, a caller says and leaks
+    /// a refused free itself (its ids are bring-up probes'); after death
+    /// nothing runs again.
+    fn owe_free(&mut self, owed: OwedFree) -> bool {
+        if !self.ctrl.serving || self.ctrl.dead {
+            return false;
+        }
+        if self.owes_free(owed.res) {
+            return true;
+        }
+        if self.owed_frees.len() >= crate::objects::MAX_OBJECTS || self.owed_frees.try_reserve(1).is_err() {
+            self.owed_leaked = self.owed_leaked.wrapping_add(1);
+            say!("lictor: resource {} free owed past the bound -- leaked (id, pins and extent kept)", owed.res);
+            return false;
+        }
+        self.owed_frees.push_back(owed);
+        self.owed_incurred = self.owed_incurred.wrapping_add(1);
+        true
+    }
+
+    /// Owe the free of `resource_id` without asking the device now: a chain
+    /// that may still reach it stands in the way, and the repeat waits until
+    /// none can. Not for a resource the display may still scan: that free
+    /// waits on the display (`resource_unref`), never on the debt.
+    pub fn owe_unsent_free(&mut self, resource_id: u32) -> bool {
+        if self.condemned_overflowed || self.condemned[..self.condemned_n].iter().any(|e| e.res == resource_id) {
+            return false;
+        }
+        self.owe_free(OwedFree::new(resource_id, None, true))
+    }
+
+    /// A free of `resource_id` is owed: the resource may still be on the device.
+    pub fn owes_free(&self, resource_id: u32) -> bool {
+        self.owed_frees.iter().any(|o| o.res == resource_id)
+    }
+
+    /// The owed frees a new chain may not go to the device past, and the one
+    /// standing down after a stall its own repeat met, whose holders' chains
+    /// may (`gpu_api::owed_barrier`); neither once the engine is dead (nothing
+    /// publishes again). Not the debt itself: `owes_free` and `frees_owed`
+    /// answer that.
+    pub fn owed_barrier(&self) -> (alloc::vec::Vec<u32>, alloc::vec::Vec<u32>) {
+        if self.ctrl.dead {
+            return (alloc::vec::Vec::new(), alloc::vec::Vec::new());
+        }
+        let since = self.ctrl.revived_at.map(|t| t.elapsed().as_millis() as u64);
+        crate::gpu_api::owed_barrier(self.owed_frees.iter(), self.ctrl.stalls, self.ctrl.refusing(), since)
+    }
+
+    /// The pass stands down for one window after a stall any of its commands
+    /// met (`gpu_api::owed_stands_down`); a free's barrier only after its own.
+    fn owed_standing_down(&self) -> bool {
+        crate::gpu_api::owed_stands_down(
+            self.owed_stood_down,
+            self.ctrl.stalls,
+            self.ctrl.refusing(),
+            self.ctrl.revived_at.map(|t| t.elapsed().as_millis() as u64),
+        )
+    }
+
+    /// Repeat owed frees while the engine takes commands and the pass is not
+    /// standing down (`owed_standing_down`), each once no chain on the device
+    /// can reach it, as a first try waits (`holds` is the ledger's
+    /// context-to-resource relation, `held_by` the same from a context). A
+    /// free goes whole: every context link the ledger still records
+    /// (`links`), the unmap a mapped blob needs, then the free
+    /// (`OwedFree::next`). A pass looks at OWED_FREES_EXAMINED owed frees at
+    /// most for a parked context's turn, only frees that hold chains back
+    /// (`gpu_api::OwedPass`, `OwedReach::bars`), and as many in rotation, and stops at OWED_COMMANDS_PER_PASS commands or
+    /// SUBMIT_DEADLINE_MS spent; a free cut short keeps what it reached.
+    /// One the device keeps refusing with no stall is given up, its id left
+    /// retiring and its pins and extent held: a leak, never a reuse of memory
+    /// the device may still read. Returns the links the device detached, for
+    /// the ledger to drop. A command that meets a stall stands the pass down
+    /// (`owed_stood_down`), and that free's barrier (`OwedFree::stood_down`).
+    /// `deferred` and `aim` are the test levers'
+    /// (`TestOwedDefer`, `TestOwedStall`): `aim` answers yes once, for the
+    /// free whose next command the stall shot rides.
+    pub fn pay_owed_frees(
+        &mut self,
+        holds: impl Fn(u32, u32) -> bool,
+        held_by: impl Fn(u32) -> alloc::vec::Vec<u32>,
+        deferred: impl Fn(u32) -> bool,
+        links: impl Fn(u32) -> alloc::vec::Vec<u32>,
+        mut aim: impl FnMut(u32) -> bool,
+    ) -> alloc::vec::Vec<(u32, u32)> {
+        let mut unlinked = alloc::vec::Vec::new();
+        let began = Instant::now();
+        let mut commands = 0;
+        let spent = |commands: usize| {
+            commands >= OWED_COMMANDS_PER_PASS || began.elapsed().as_millis() >= u128::from(SUBMIT_DEADLINE_MS)
+        };
+        let mut pass: Option<crate::gpu_api::OwedPass> = None;
+        loop {
+            if self.owed_frees.is_empty()
+                || self.owed_standing_down()
+                || !self.takes_commands()
+                || spent(commands)
+                || (self.collect_retirements && self.retired_resources.len() >= crate::objects::MAX_OBJECTS)
+            {
+                break;
+            }
+            let pass = pass.get_or_insert_with(|| {
+                crate::gpu_api::OwedPass::new(
+                    self.ctrl.parked.iter().map(|p| p.reach),
+                    &held_by,
+                    |res| self.ctrl.owed_reach.bars(res),
+                    OWED_FREES_EXAMINED,
+                )
+            });
+            let c = &self.ctrl;
+            let clear = |res| !deferred(res) && c.owed_free_hold(res, &holds) == Hold::Clear;
+            let Some((mut o, turned)) = pass.next(&mut self.owed_frees, &mut self.owed_turn, clear) else { break };
+            if turned {
+                self.owed_parked_firsts = self.owed_parked_firsts.wrapping_add(1);
+            }
+            let mut linked = links(o.res);
+            let outcome = loop {
+                if spent(commands) || !self.takes_commands() {
+                    break Owed::Kept;
+                }
+                commands += 1;
+                let step = o.next(!linked.is_empty());
+                let stalls = self.ctrl.stalls;
+                let shot = aim(o.res);
+                #[cfg(feature = "test-mode")]
+                if shot {
+                    self.test_stall_next();
+                }
+                let done = match step {
+                    FreeStep::Detach => {
+                        let ctx = linked[linked.len() - 1];
+                        let done = self.ctx_detach_resource(ctx, o.res).is_ok();
+                        if done {
+                            linked.pop();
+                            unlinked.push((ctx, o.res));
+                        }
+                        done
+                    }
+                    FreeStep::Unmap => self.unmap_blob(o.res).is_ok(),
+                    FreeStep::Unref => self.resource_unref_raw(o.res).is_ok(),
+                };
+                #[cfg(feature = "test-mode")]
+                if shot {
+                    self.test_stall_unspent();
+                }
+                #[cfg(not(feature = "test-mode"))]
+                let _ = shot;
+                if self.ctrl.stalls != stalls {
+                    self.owed_stood_down = Some(self.ctrl.stalls);
+                    o.stood_down = Some(self.ctrl.stalls);
+                    self.owed_stood_downs = self.owed_stood_downs.wrapping_add(1);
+                }
+                match o.after(step, Answer::of(done, self.ctrl.stalls != stalls, self.ctrl.dead)) {
+                    Owed::Next => continue,
+                    outcome => break outcome,
+                }
+            };
+            match outcome {
+                Owed::Paid(extent) => {
+                    if let Some((offset, size)) = extent {
+                        self.hostmem_free(offset, size);
+                    }
+                    self.owed_paid = self.owed_paid.wrapping_add(1);
+                }
+                Owed::GivenUp => {
+                    self.owed_leaked = self.owed_leaked.wrapping_add(1);
+                    say!("lictor: resource {} owed free refused {} times -- given up (id, pins and extent kept)", o.res, o.answered);
+                }
+                Owed::Kept | Owed::Next => self.owed_frees.push_back(o),
+            }
+        }
+        unlinked
+    }
+
+    /// The owed-free counts; the caller adds `retiring`, which it keeps.
+    pub fn frees_owed(&self) -> Frees {
+        Frees {
+            owed: self.owed_frees.len() as u32,
+            incurred: self.owed_incurred,
+            paid: self.owed_paid,
+            leaked: self.owed_leaked,
+            retiring: 0,
+            stood_down: self.owed_stood_downs,
+            parked_first: self.owed_parked_firsts,
+        }
     }
 
     /// RESOURCE_CREATE_BLOB for a GUEST-memory blob (Warp-6 V-1): the blob's
@@ -3457,9 +3954,7 @@ impl Gpu {
             Err(e) => {
                 // MAP may have reached the host before its reply was lost.
                 // Reuse only after explicit unmap AND unref acknowledgements.
-                if self.unmap_blob(res_id).is_ok() && self.resource_unref_raw(res_id).is_ok() {
-                    self.hostmem_free(off, size);
-                }
+                let _ = self.free_mapped_or_owe(res_id, off, size);
                 return Err(e);
             }
         };
@@ -3467,9 +3962,7 @@ impl Gpu {
         let va = match self.pci.burrow_from_hostmem(1, off, size, cache) {
             Ok(v) => v,
             Err(_) => {
-                if self.unmap_blob(res_id).is_ok() && self.resource_unref_raw(res_id).is_ok() {
-                    self.hostmem_free(off, size);
-                }
+                let _ = self.free_mapped_or_owe(res_id, off, size);
                 return Err(Error::Hardware);
             }
         };
@@ -3485,12 +3978,12 @@ impl Gpu {
     /// V-3b-1c-2b F2: retire a HOST3D ring -- reap now if safe, else PARK. The
     /// CALLER disarms any weft share BEFORE this (so no NEW client can claim the
     /// backing). Then this reads the ring's hostmem burrow's TOTAL ref count
-    /// (handle_count + mapping_count) via tapestryd's still-live VA: at count == 1
-    /// the ONLY reference is tapestryd's own map -- no client map AND no client
+    /// (handle_count + mapping_count) via lictor's still-live VA: at count == 1
+    /// the ONLY reference is lictor's own map -- no client map AND no client
     /// that has CLAIMED but not yet mapped -- so the offset is safe to reclaim NOW
     /// (`drop_host3d_ring`). At count > 1 (a client kept its map past its conn, OR
     /// a client claimed the share and holds the transferred registration pin
-    /// pending its map) or on an unexpected query error, tapestryd KEEPS its VA
+    /// pending its map) or on an unexpected query error, lictor KEEPS its VA
     /// mapped and parks the token for `reap_hostmem_parked`; freeing the QEMU
     /// subregion now would re-hand the offset under the client's live-or-pending
     /// PTEs (a cross-client alias).
@@ -3527,7 +4020,7 @@ impl Gpu {
     }
 
     /// V-3b-1c-2b F2: re-check parked HOST3D rings and reclaim those whose only
-    /// remaining reference is tapestryd's own map (total ref count back to 1 --
+    /// remaining reference is lictor's own map (total ref count back to 1 --
     /// the claiming client released BOTH its mapping and its transferred pin).
     /// Runs at MINT-time (reclaim-before-alloc), NOT the completion pump: reclaim
     /// issues controlq teardown (`drop_host3d_ring`), which is only established
@@ -3592,25 +4085,23 @@ impl Gpu {
             self.hostmem_parked.push(ring);
             return;
         }
-        // Every step is a prerequisite of address reuse. An uncertain device
-        // completion deliberately leaks this reserved extent until service
-        // restart/reset; logging an error is not permission to alias it.
+        // Every step is a prerequisite of address reuse. A refused detach
+        // leaks this reserved extent until service restart/reset; logging an
+        // error is not permission to alias it.
         let rc = unsafe { t_burrow_detach(ring.va, ring.size) };
         if rc < 0 {
             say!("lictor: hostmem detach refused {}; extent remains reserved", rc);
             return;
         }
-        if self.unmap_blob(ring.res_id).is_err() {
-            say!("lictor: hostmem unmap refused; extent remains reserved");
-            return;
+        // Unlike resource_unref(), this never defers for scanout retirement:
+        // host rings are never scanout targets. A device step not
+        // acknowledged is owed, the extent reserved until it is paid; at
+        // bring-up nothing is owed, and the extent stays reserved.
+        match self.free_mapped_or_owe(ring.res_id, ring.offset, ring.size) {
+            Teardown::Done => {}
+            Teardown::Owed => say!("lictor: hostmem teardown not acknowledged; owed, extent reserved until paid"),
+            Teardown::Leaked => say!("lictor: hostmem teardown not acknowledged and not owed; extent reserved until restart"),
         }
-        // Unlike resource_unref(), the raw operation cannot return success
-        // for deferred scanout retirement. Host rings are never scanout targets.
-        if self.resource_unref_raw(ring.res_id).is_err() {
-            say!("lictor: hostmem unref refused; extent remains reserved");
-            return;
-        }
-        self.hostmem_free(ring.offset, ring.size);
     }
 
     /// Return a hostmem extent to the persistent allocator (no-op when there is no
@@ -3690,7 +4181,11 @@ impl Gpu {
             GPU_CTRL_HDR_LEN,
             GPU_CTRL_HDR_LEN,
             VIRTIO_GPU_RESP_OK_NODATA,
-        )
+        )?;
+        // Only a destroy that completed ends the device context the record
+        // names; one whose outcome is unknown keeps it, failing closed.
+        self.ctrl.released.forget(ctx_id);
+        Ok(())
     }
 
     /// Attach a device-global resource to a context: virgl scopes command
@@ -4102,39 +4597,46 @@ impl Gpu {
         self.ctrl.alloc_comp_slot().ok_or(FencedErr::Again)
     }
 
+    /// Publish a staged chain, or park it (operator vote 81): a readback while
+    /// its context has a chain the device may still run, anything of a context
+    /// that already has a parked chain, and anything of a context with a
+    /// released chain, which the pump then releases. The owner's fence id is minted
+    /// here either way, since the owner is told it now; the wire id staged with
+    /// the request is a placeholder that publication overwrites.
     #[allow(clippy::too_many_arguments)]
     fn fenced_commit(
         &mut self,
         slot: usize,
         req_len: u32,
-        (wire, fence_id): (u64, u64),
+        (_staged_wire, fence_id): (u64, u64),
         reach: ChainReach,
         ctx_pub: u32,
         readback: bool,
         comp: bool,
         ring_idx: u8,
     ) -> Result<u64, FencedErr> {
-        self.ctrl.fslot_reach[slot] = reach;
-        self.ctrl
-            .submit_fenced(
-                slot,
-                req_len,
-                FenceTag {
-                    fence_id,
-                    ctx_pub,
-                    readback,
-                    comp,
-                    abandoned: false,
-                    ok: false,
-                    ring_idx,
-                },
-            )
-            .map_err(|_| FencedErr::Dead)?;
-        #[cfg(feature = "test-mode")]
-        if wire <= self.ctrl.wire_next {
-            say!("lictor: gpu fence sequence rewound at {} (device idle)", self.ctrl.wire_next);
+        let tag = FenceTag {
+            fence_id,
+            ctx_pub,
+            readback,
+            comp,
+            abandoned: false,
+            ok: false,
+            released: false,
+            ring_idx,
+            parked_ms: 0,
+            exec_ms: 0,
+        };
+        let on_device = readback && self.ctrl.ctx_on_device(ctx_pub);
+        let owed = self.ctrl.owed_reach.reaches(reach);
+        if crate::gpu_api::must_park(&self.ctrl.parked_view(), ctx_pub, readback, on_device, owed, &self.ctrl.released) {
+            self.ctrl.fslot_parked[slot] = true;
+            self.ctrl.parked.push(Parked { slot, req_len, tag, reach, since: Instant::now() });
+        } else {
+            self.ctrl
+                .publish_staged(slot, req_len, tag, reach)
+                .map_err(|_| FencedErr::Dead)?;
         }
-        self.ctrl.wire_next = wire;
         self.ctrl.fence_next = fence_id;
         Ok(fence_id)
     }
@@ -4551,8 +5053,11 @@ impl Gpu {
         // on whether an abandon intervened: a live tag completes normally,
         // a taken one leaves the slot poisoned and owes a vindication.
         for slot in core::mem::take(&mut self.ctrl.held_retires) {
+            let published = self.ctrl.fslot_since[slot];
             match self.ctrl.fslots[slot].take() {
                 Some(mut tag) => {
+                    self.ctrl.fslot_since[slot] = None;
+                    tag.exec_ms = published.map_or(0, elapsed_ms_u32);
                     let resp_va = self.ctrl.flane_va + FRESP_OFF + (slot as u64) * FRESP_STRIDE;
                     let rt = unsafe { r32(resp_va) };
                     // Mirror `drain`'s arm EXACTLY -- including the round-F2
@@ -4617,7 +5122,7 @@ impl Gpu {
 
     /// W-4 stall observability (delegate; the slots live on Controlq).
     #[cfg(feature = "test-mode")]
-    pub fn fenced_held(&self) -> alloc::vec::Vec<(usize, u64, u32, u8, bool, bool, u64)> {
+    pub fn fenced_held(&self) -> alloc::vec::Vec<crate::gpu_api::HeldRow> {
         self.ctrl.fenced_held()
     }
 
@@ -4628,6 +5133,14 @@ impl Gpu {
     #[cfg(feature = "test-mode")]
     pub fn test_stall_next(&mut self) {
         self.ctrl.test_stall_late = true;
+    }
+
+    /// Spend a shot no command took: its request staged no synchronous one.
+    #[cfg(feature = "test-mode")]
+    pub fn test_stall_unspent(&mut self) {
+        if core::mem::take(&mut self.ctrl.test_stall_late) {
+            say!("lictor: stall shot LOST -- its request staged no synchronous command");
+        }
     }
 
     /// The latch lever's shot: a harmless display query whose wait reports
@@ -4687,7 +5200,9 @@ impl Gpu {
         // stranded -- the relative comparisons this feeds would go red on an
         // unrelated surface's present.
         (0..COMP_FSLOT)
-            .filter(|&i| self.ctrl.fslots[i].is_none() && !self.ctrl.fslot_poisoned[i])
+            .filter(|&i| {
+                self.ctrl.fslots[i].is_none() && !self.ctrl.fslot_poisoned[i] && !self.ctrl.fslot_parked[i]
+            })
             .count() as u32
     }
 
@@ -4695,7 +5210,7 @@ impl Gpu {
     /// compositor readback in flight), 2 poisoned (one was abandoned and the
     /// device has not yet proved it finished).
     pub fn comp_slot_state(&self) -> u32 {
-        if self.ctrl.fslots[COMP_FSLOT].is_some() {
+        if self.ctrl.fslots[COMP_FSLOT].is_some() || self.ctrl.fslot_parked[COMP_FSLOT] {
             1
         } else if self.ctrl.fslot_poisoned[COMP_FSLOT] {
             2
@@ -4711,13 +5226,11 @@ impl Gpu {
     /// poll over this is the same shape as the existing vindication wait.
     /// Un-gated at Warp-3 alongside the ctl promotion: the winsys throttles
     /// on it, so it is production surface now.
+    /// A parked chain counts: its owner holds its fence id and its slot (vote 81).
     pub fn ctx_fences_in_flight(&self, ctx_pub: u32) -> u32 {
-        self.ctrl
-            .fslots
-            .iter()
-            .flatten()
-            .filter(|t| t.ctx_pub == ctx_pub)
-            .count() as u32
+        let on_device = self.ctrl.fslots.iter().flatten().filter(|t| t.ctx_pub == ctx_pub).count();
+        let parked = self.ctrl.parked.iter().filter(|p| p.tag.ctx_pub == ctx_pub).count();
+        (on_device + parked) as u32
     }
 
     /// Does this ctx still own a POISONED slot? A vindication is only
@@ -4728,8 +5241,16 @@ impl Gpu {
             .any(|i| self.ctrl.fslot_poisoned[i] && self.ctrl.fslot_poison_ctx[i] == ctx_pub)
     }
 
+    /// Chains on the device. The seat's takeover lines count these: a parked
+    /// chain is not ahead of anything the seat submits.
     pub fn fenced_in_flight(&self) -> u32 {
         self.ctrl.fenced_in_flight()
+    }
+
+    /// Chains whose completion is still owed, parked ones included: what the
+    /// compositor keeps pumping for, since only a pump publishes a parked chain.
+    pub fn fenced_outstanding(&self) -> u32 {
+        self.ctrl.fenced_in_flight() + self.ctrl.parked.len() as u32
     }
 
     /// The device holds a takeover up while its engine lives: the cursor lane stalled
@@ -4780,15 +5301,20 @@ impl Gpu {
     /// for. `holds` is the ledger's context-to-resource relation. A cursor
     /// chain touches only a cursor plane, so it holds nothing here.
     pub fn retirement_hold(&self, object: Retired, holds: impl Fn(u32, u32) -> bool) -> Hold {
+        // A parked chain reaches its objects the moment it publishes.
+        self.ctrl.hold(object, holds, true)
+    }
+
+    /// What each poisoned chain can reach (`OwedReach::of`).
+    pub fn poisoned_reach(&self) -> alloc::vec::Vec<ChainReach> {
         let c = &self.ctrl;
-        retirement_hold(
-            object,
-            c.dead,
-            c.sync_pending || c.sync2_pending,
-            (0..FENCED_SLOTS).filter(|&i| c.fslots[i].is_some()).map(|i| c.fslot_reach[i]),
-            (0..FENCED_SLOTS).filter(|&i| c.fslot_poisoned[i]).map(|i| c.fslot_reach[i]),
-            holds,
-        )
+        (0..FENCED_SLOTS).filter(|&i| c.fslot_poisoned[i]).map(|i| c.fslot_reach[i]).collect()
+    }
+
+    /// Set what a new chain may not go to the device past. The broker sets it
+    /// before every completion pump, the only place a parked chain publishes.
+    pub fn set_owed_reach(&mut self, reach: crate::gpu_api::OwedReach) {
+        self.ctrl.owed_reach = reach;
     }
 
     /// All that rebinding a normal scanout needs. A late cursor chain can touch

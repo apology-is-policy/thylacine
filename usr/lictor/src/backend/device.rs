@@ -32,6 +32,7 @@ pub struct Device {
     owner: u64,
     pub presentation: Presentation,
     refused_retirements: u64,
+    taken_frees: u64,
     /// Latch lever shots left: 2 = the revive shot is next, 1 = the hold.
     #[cfg(feature = "test-mode")]
     test_latch_shots: u8,
@@ -52,7 +53,36 @@ pub struct Device {
     /// Stall shots left for the compositor to aim (`Request::TestStallNext`).
     #[cfg(feature = "test-mode")]
     test_stall_shots: u8,
+    /// The connection whose next request a `TestStallShot` rides.
+    #[cfg(feature = "test-mode")]
+    test_stall_shot_for: Option<i64>,
+    /// The context whose reachable owed frees the pay pass passes over, and
+    /// since when (`Request::TestOwedDefer`).
+    #[cfg(feature = "test-mode")]
+    test_owed_defer: Option<(u32, libthyla_rs::time::Instant)>,
+    /// Defer-lever arms left this boot.
+    #[cfg(feature = "test-mode")]
+    test_owed_defers: u8,
+    /// The resource whose owed free's next repeat command the stall shot
+    /// rides, and since when (`Request::TestOwedStall`).
+    #[cfg(feature = "test-mode")]
+    test_owed_stall: Option<(u32, libthyla_rs::time::Instant)>,
+    /// Owed-stall shots left this boot.
+    #[cfg(feature = "test-mode")]
+    test_owed_stalls: u8,
 }
+/// Defer-lever arms per boot: the readback leg's attempts at BUSY, LIFT and
+/// APART, which arms twice.
+#[cfg(feature = "test-mode")]
+const TEST_OWED_DEFERS: u8 = 16;
+/// How long one arm of the defer lever lasts at most; an owed-stall shot
+/// no repeat took is gone as soon.
+#[cfg(feature = "test-mode")]
+const TEST_OWED_DEFER_MS: u64 = 2000;
+/// Owed-stall shots per boot: the readback leg's attempts at YIELD, APART
+/// and LIFT.
+#[cfg(feature = "test-mode")]
+const TEST_OWED_STALLS: u8 = 12;
 /// How the lever breaks a trusted takeover's return, in firing order.
 #[cfg(feature = "test-mode")]
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -98,11 +128,17 @@ impl Device {
         Ok(Self { gpu, objects: Objects::default(), backings: Vec::new(),
             retiring: Vec::new(), rings: Vec::new(), owner, presentation: Presentation::None,
             refused_retirements: 0,
+            taken_frees: 0,
             #[cfg(feature = "test-mode")] test_latch_shots: 0,
             #[cfg(feature = "test-mode")] test_seat_shots: 0,
             #[cfg(feature = "test-mode")] test_chained_shots: 0,
             #[cfg(feature = "test-mode")] test_blind_armed: false,
             #[cfg(feature = "test-mode")] test_stall_shots: 0,
+            #[cfg(feature = "test-mode")] test_stall_shot_for: None,
+            #[cfg(feature = "test-mode")] test_owed_defer: None,
+            #[cfg(feature = "test-mode")] test_owed_defers: TEST_OWED_DEFERS,
+            #[cfg(feature = "test-mode")] test_owed_stall: None,
+            #[cfg(feature = "test-mode")] test_owed_stalls: TEST_OWED_STALLS,
             #[cfg(feature = "test-mode")] test_latch_targets: Vec::new(),
             #[cfg(feature = "test-mode")] test_latch_fired: Vec::new() })
     }
@@ -133,10 +169,17 @@ impl Device {
         self.gpu.stalls() == stalls && !self.gpu.engine_dead()
     }
     /// Release the reservation a create made, when its failure left nothing.
+    /// One whose unwind left a free owed retires once that free is paid,
+    /// whichever way the create went: the paid free proves the id gone.
     fn unreserve(&mut self, id: u32, kind: Kind, stalls: u32) {
-        if self.left_nothing(stalls) {
+        let owed = kind == Kind::Resource && self.gpu.owes_free(id);
+        if owed || self.left_nothing(stalls) {
             if let Ok(ticket) = self.objects.retire(self.owner, id, kind) {
-                let _ = self.objects.retired(ticket);
+                if owed {
+                    self.retiring.push(Retiring { resource: id, ticket, done: false });
+                } else {
+                    let _ = self.objects.retired(ticket);
+                }
             }
         }
     }
@@ -153,7 +196,130 @@ impl Device {
         }
         result
     }
+    /// Repeat the frees the device has not acknowledged (`Gpu::pay_owed_frees`),
+    /// then finish the ledger entries they paid. Never inside a request: a
+    /// stall one meets would read as that request's.
+    pub fn pay_owed_frees(&mut self) {
+        let deferred = self.test_owed_deferred();
+        let aimed = self.test_owed_stall_aimed();
+        let mut fired = false;
+        let (objects, owner) = (&self.objects, self.owner);
+        let unlinked = self.gpu.pay_owed_frees(
+            |ctx, res| objects.holds(ctx, res),
+            |ctx| objects.held_by(ctx),
+            |res| deferred.is_some_and(|ctx| objects.holds(ctx, res)),
+            |res| objects.links(owner, res),
+            |res| {
+                let hit = !fired && aimed == Some(res);
+                fired |= hit;
+                hit
+            },
+        );
+        #[cfg(feature = "test-mode")]
+        if fired {
+            self.test_owed_stall = None;
+        }
+        for (ctx, res) in unlinked {
+            let _ = self.objects.detached(self.owner, ctx, res);
+        }
+        self.reap();
+    }
+    /// Take a free that a chain which may still reach the resource stands in
+    /// the way of, as a debt: the ledger entry retires now and the free is
+    /// owed unsent, so the owed-free pass detaches the resource's context
+    /// links and frees it once no chain can reach it. Refused instead, the
+    /// entry and its pins would stay for the boot, since no client asks
+    /// again. A resource on the display, a dead engine or a full debt is
+    /// refused as before, its pins kept.
+    fn take_unref(&mut self, resource_id: u32) -> bool {
+        if self.gpu.engine_dead() || self.ordinary_resource(resource_id).is_err()
+            || matches!(self.presentation, Presentation::Image { resource, .. } | Presentation::Blob { resource, .. } if resource == resource_id)
+        {
+            return false;
+        }
+        let Ok(ticket) = self.objects.retire(self.owner, resource_id, Kind::Resource) else { return false };
+        if !self.gpu.owe_unsent_free(resource_id) {
+            let _ = self.objects.unretire(ticket);
+            return false;
+        }
+        self.retiring.push(Retiring { resource: resource_id, ticket, done: false });
+        self.taken_frees += 1;
+        if self.taken_frees.is_power_of_two() {
+            crate::backend::diagnostic(&alloc::format!(
+                "lictor: resource {} free taken while a chain can reach it -- owed until none can (pins kept until paid; {} so far)\n",
+                resource_id, self.taken_frees));
+        }
+        true
+    }
+    /// Before every completion pump, what a new chain may not go to the device
+    /// past (`OwedReach`). Every serve pass begins with a pump, so a chain
+    /// commits against a reach at most a pass old; a stale reach only lets a
+    /// chain go to the device, where the free waits for it as for any, or
+    /// keeps one parked until the next pump.
+    fn refresh_owed_reach(&mut self) {
+        let objects = &self.objects;
+        let (holding, standing_down) = self.gpu.owed_barrier();
+        let reach = OwedReach::of(
+            holding,
+            &standing_down,
+            &self.gpu.poisoned_reach(),
+            |ctx| objects.held_by(ctx),
+            |set: &dyn Fn(u32) -> bool| objects.holders(set),
+        );
+        self.gpu.set_owed_reach(reach);
+    }
+    /// The context the defer lever names, while its arm lasts.
+    fn test_owed_deferred(&mut self) -> Option<u32> {
+        #[cfg(feature = "test-mode")]
+        {
+            let (ctx, since) = self.test_owed_defer?;
+            if since.elapsed().as_millis() < u128::from(TEST_OWED_DEFER_MS) {
+                return Some(ctx);
+            }
+            self.test_owed_defer = None;
+            crate::backend::diagnostic(&alloc::format!("lictor: owed-free defer on ctx {} expired\n", ctx));
+            None
+        }
+        #[cfg(not(feature = "test-mode"))]
+        {
+            None
+        }
+    }
+    /// The resource the owed-stall shot is aimed at, while it lasts.
+    fn test_owed_stall_aimed(&mut self) -> Option<u32> {
+        #[cfg(feature = "test-mode")]
+        {
+            let (res, since) = self.test_owed_stall?;
+            if since.elapsed().as_millis() < u128::from(TEST_OWED_DEFER_MS) {
+                return Some(res);
+            }
+            self.test_owed_stall = None;
+            crate::backend::diagnostic(&alloc::format!("lictor: owed-stall shot on resource {} expired unspent\n", res));
+            None
+        }
+        #[cfg(not(feature = "test-mode"))]
+        {
+            None
+        }
+    }
+    /// Arm the shot `connection` asked for onto this request of its, whatever
+    /// it is; `test_stall_settle` spends it if no synchronous command took it.
+    #[cfg(feature = "test-mode")]
+    pub fn test_stall_ride(&mut self, connection: i64) -> bool {
+        if self.test_stall_shot_for != Some(connection) { return false; }
+        self.test_stall_shot_for = None;
+        self.gpu.test_stall_next();
+        true
+    }
+    #[cfg(feature = "test-mode")]
+    pub fn test_stall_settle(&mut self) { self.gpu.test_stall_unspent(); }
+    /// A connection gone leaves no shot for whoever reuses its descriptor.
+    #[cfg(feature = "test-mode")]
+    pub fn test_stall_forget(&mut self, connection: i64) {
+        if self.test_stall_shot_for == Some(connection) { self.test_stall_shot_for = None; }
+    }
     pub fn reap(&mut self) {
+        self.refresh_owed_reach();
         self.gpu.poll_completions();
         for resource in self.gpu.take_retired_resources() {
             if let Some(r) = self.retiring.iter_mut().find(|r| r.resource == resource) { r.done = true; }
@@ -274,10 +440,16 @@ impl Device {
     /// really retired (an abandoned chain does not qualify); the server parks
     /// it until then, and one admitted without it (`gpu_api::admit`: a hold
     /// nothing can clear, or the park bound) is refused here before any ledger
-    /// change, so no `retiring` entry is left that `reap` could never finish.
+    /// change, so no `retiring` entry is left that `reap` could never finish --
+    /// except a resource's free, which is taken as a debt the owed-free pass
+    /// pays once no chain can reach it (`take_unref`).
     pub fn execute(&mut self, connection: i64, request: Request) -> Result<Vec<u8>, Error> {
         let hold = self.retirement_hold(&request);
         if hold != Hold::Clear {
+            // Answered as a refusal either way: the free has not happened.
+            if let Request::ResourceUnref { resource_id } = request {
+                if self.take_unref(resource_id) { return Err(Error::Hardware); }
+            }
             self.refused_retirements += 1;
             if self.refused_retirements.is_power_of_two() {
                 let why = if hold == Hold::Parks || self.gpu.engine_dead() {
@@ -460,11 +632,23 @@ impl Device {
             }
             Request::CtxDestroy { ctx_id } => {
                 self.check(ctx_id, Kind::Context)?;
+                #[cfg(feature = "test-mode")]
+                if self.test_owed_defer.is_some_and(|(c, _)| c == ctx_id) {
+                    self.test_owed_defer = None;
+                }
                 let ticket = self.objects.retire(self.owner, ctx_id, Kind::Context).map_err(|_| Error::BadField)?;
                 let result = self.gpu.ctx_destroy(ctx_id);
                 if result.is_ok() {
                     self.objects.context_destroyed(self.owner, ctx_id).map_err(|_| Error::Hardware)?;
                     self.objects.retired(ticket).map_err(|_| Error::Hardware)?;
+                } else if !self.gpu.engine_dead() {
+                    // Refused before staging, answered, or met by a stall: the id
+                    // stays named and may be destroyed again. A repeat of one that
+                    // ran is harmless: QEMU's CTX_DESTROY only drops the handle
+                    // from virglrenderer's table (QEMU v10.0
+                    // virgl_cmd_context_destroy, virglrenderer 1.1.0
+                    // virgl_context_remove), and no create can take the id meanwhile.
+                    let _ = self.objects.unretire(ticket);
                 }
                 result.put(&mut out);
             }
@@ -607,6 +791,7 @@ impl Device {
                 result.put(&mut out);
             }
             Request::PollCompletions => {
+                self.refresh_owed_reach();
                 let result = self.gpu.poll_completions();
                 result.put(&mut out);
             }
@@ -667,6 +852,43 @@ impl Device {
                 }
                 #[cfg(not(feature = "test-mode"))] { return Err(Error::BadField); }
             }
+            Request::TestStallShot => {
+                #[cfg(feature = "test-mode")] { self.test_stall_shot_for = Some(connection); ().put(&mut out); }
+                #[cfg(not(feature = "test-mode"))] { return Err(Error::BadField); }
+            }
+            Request::TestOwedDefer { ctx_id, on } => {
+                #[cfg(feature = "test-mode")] {
+                    // One context at a time; only its own arm ends it early.
+                    self.check(ctx_id, Kind::Context)?;
+                    let current = self.test_owed_deferred();
+                    let done = if !on {
+                        let mine = current == Some(ctx_id);
+                        if mine { self.test_owed_defer = None; }
+                        mine
+                    } else if current.is_some_and(|c| c != ctx_id) || self.test_owed_defers == 0 {
+                        false
+                    } else {
+                        self.test_owed_defers -= 1;
+                        self.test_owed_defer = Some((ctx_id, libthyla_rs::time::Instant::now()));
+                        true
+                    };
+                    done.put(&mut out);
+                }
+                #[cfg(not(feature = "test-mode"))] { let _ = (ctx_id, on); return Err(Error::BadField); }
+            }
+            Request::TestOwedStall { resource_id } => {
+                #[cfg(feature = "test-mode")] {
+                    // One shot at a time, on a live resource of the caller's.
+                    self.check(resource_id, Kind::Resource)?;
+                    let armed = self.test_owed_stall_aimed().is_none() && self.test_owed_stalls > 0;
+                    if armed {
+                        self.test_owed_stalls -= 1;
+                        self.test_owed_stall = Some((resource_id, libthyla_rs::time::Instant::now()));
+                    }
+                    armed.put(&mut out);
+                }
+                #[cfg(not(feature = "test-mode"))] { let _ = resource_id; return Err(Error::BadField); }
+            }
             Request::CompSlotState => {
                 let result = self.gpu.comp_slot_state();
                 result.put(&mut out);
@@ -680,12 +902,17 @@ impl Device {
                 result.put(&mut out);
             }
             Request::FencedInFlight => {
-                let result = self.gpu.fenced_in_flight();
+                // Parked chains included: the compositor's pump publishes them.
+                let result = self.gpu.fenced_outstanding();
                 result.put(&mut out);
             }
             Request::EngineDead => {
                 let result = self.gpu.engine_dead();
                 result.put(&mut out);
+            }
+            Request::FreesOwed => {
+                let retiring = u32::try_from(self.retiring.len()).unwrap_or(u32::MAX);
+                Frees { retiring, ..self.gpu.frees_owed() }.put(&mut out);
             }
             Request::InputInfo { .. } => {
                 return Err(Error::BadField);
