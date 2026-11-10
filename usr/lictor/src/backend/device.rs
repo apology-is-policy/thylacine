@@ -32,6 +32,7 @@ pub struct Device {
     owner: u64,
     pub presentation: Presentation,
     refused_retirements: u64,
+    taken_frees: u64,
     /// Latch lever shots left: 2 = the revive shot is next, 1 = the hold.
     #[cfg(feature = "test-mode")]
     test_latch_shots: u8,
@@ -101,6 +102,7 @@ impl Device {
         Ok(Self { gpu, objects: Objects::default(), backings: Vec::new(),
             retiring: Vec::new(), rings: Vec::new(), owner, presentation: Presentation::None,
             refused_retirements: 0,
+            taken_frees: 0,
             #[cfg(feature = "test-mode")] test_latch_shots: 0,
             #[cfg(feature = "test-mode")] test_seat_shots: 0,
             #[cfg(feature = "test-mode")] test_chained_shots: 0,
@@ -168,9 +170,39 @@ impl Device {
     /// then finish the ledger entries they paid. Never inside a request: a
     /// stall one meets would read as that request's.
     pub fn pay_owed_frees(&mut self) {
-        let objects = &self.objects;
-        self.gpu.pay_owed_frees(|ctx, res| objects.holds(ctx, res));
+        let (objects, owner) = (&self.objects, self.owner);
+        let unlinked = self.gpu.pay_owed_frees(|ctx, res| objects.holds(ctx, res), |res| objects.links(owner, res));
+        for (ctx, res) in unlinked {
+            let _ = self.objects.detached(self.owner, ctx, res);
+        }
         self.reap();
+    }
+    /// Take a free that a chain which may still reach the resource stands in
+    /// the way of, as a debt: the ledger entry retires now and the free is
+    /// owed unsent, so the owed-free pass detaches the resource's context
+    /// links and frees it once no chain can reach it. Refused instead, the
+    /// entry and its pins would stay for the boot, since no client asks
+    /// again. A resource on the display, a dead engine or a full debt is
+    /// refused as before, its pins kept.
+    fn take_unref(&mut self, resource_id: u32) -> bool {
+        if self.gpu.engine_dead() || self.ordinary_resource(resource_id).is_err()
+            || matches!(self.presentation, Presentation::Image { resource, .. } | Presentation::Blob { resource, .. } if resource == resource_id)
+        {
+            return false;
+        }
+        let Ok(ticket) = self.objects.retire(self.owner, resource_id, Kind::Resource) else { return false };
+        if !self.gpu.owe_unsent_free(resource_id) {
+            let _ = self.objects.unretire(ticket);
+            return false;
+        }
+        self.retiring.push(Retiring { resource: resource_id, ticket, done: false });
+        self.taken_frees += 1;
+        if self.taken_frees.is_power_of_two() {
+            crate::backend::diagnostic(&alloc::format!(
+                "lictor: resource {} free taken while a chain can reach it -- owed until none can (pins kept until paid; {} so far)\n",
+                resource_id, self.taken_frees));
+        }
+        true
     }
     /// Arm the shot `connection` asked for onto this request of its, whatever
     /// it is; `test_stall_settle` spends it if no synchronous command took it.
@@ -309,10 +341,16 @@ impl Device {
     /// really retired (an abandoned chain does not qualify); the server parks
     /// it until then, and one admitted without it (`gpu_api::admit`: a hold
     /// nothing can clear, or the park bound) is refused here before any ledger
-    /// change, so no `retiring` entry is left that `reap` could never finish.
+    /// change, so no `retiring` entry is left that `reap` could never finish --
+    /// except a resource's free, which is taken as a debt the owed-free pass
+    /// pays once no chain can reach it (`take_unref`).
     pub fn execute(&mut self, connection: i64, request: Request) -> Result<Vec<u8>, Error> {
         let hold = self.retirement_hold(&request);
         if hold != Hold::Clear {
+            // Answered as a refusal either way: the free has not happened.
+            if let Request::ResourceUnref { resource_id } = request {
+                if self.take_unref(resource_id) { return Err(Error::Hardware); }
+            }
             self.refused_retirements += 1;
             if self.refused_retirements.is_power_of_two() {
                 let why = if hold == Hold::Parks || self.gpu.engine_dead() {
@@ -736,7 +774,8 @@ impl Device {
                 result.put(&mut out);
             }
             Request::FreesOwed => {
-                self.gpu.frees_owed().put(&mut out);
+                let retiring = u32::try_from(self.retiring.len()).unwrap_or(u32::MAX);
+                Frees { retiring, ..self.gpu.frees_owed() }.put(&mut out);
             }
             Request::InputInfo { .. } => {
                 return Err(Error::BadField);

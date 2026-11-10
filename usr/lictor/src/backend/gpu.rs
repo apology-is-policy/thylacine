@@ -1,5 +1,5 @@
 pub use crate::gpu_api::{HostRing, FenceVindication, FenceTag, FencedErr};
-use crate::gpu_api::{retirement_hold, ChainReach, Hold, Retired};
+use crate::gpu_api::{retirement_hold, unref_frees, Answer, ChainReach, FreeStep, Frees, Hold, Owed, OwedFree, Retired};
 // The virtio-gpu backend shared during the Lictor migration (Tapestry G-3; TAPESTRY.md
 // section 18). A port of the audited G-1 gpud device machinery (itself the
 // P4-L probe's command layer over the netdev VirtioNetPci PCI transport),
@@ -135,23 +135,23 @@ pub const BLOB_FLAG_SHAREABLE: u32 = VIRTIO_GPU_BLOB_FLAG_USE_SHAREABLE;
 /// absorb a burst and no more; overflow is counted and leaks, never frees.
 const GPU_CONDEMNED_MAX: usize = 16;
 
-/// Owed frees repeated per serve pass (`Gpu::pay_owed_frees`).
-const OWED_FREES_PER_PASS: usize = 8;
-/// Answered refusals an owed free may meet before it is given up. QEMU
-/// refuses a free of an existing resource only when the host unmap fails,
-/// and that clears the mapping, so the next repeat runs (QEMU v10.0
-/// virgl_cmd_resource_unref, virtio_gpu_virgl_unmap_resource_blob).
-const OWED_FREE_ANSWERS: u8 = 3;
+/// Device commands one serve pass may spend on owed frees
+/// (`Gpu::pay_owed_frees`), which also stops once the pass has spent
+/// SUBMIT_DEADLINE_MS: the seat's next look at the chord waits on it.
+const OWED_COMMANDS_PER_PASS: usize = 8;
+/// Owed frees one pass examines, in turn: a free still held by a chain
+/// costs a reach scan each time it is looked at.
+const OWED_FREES_EXAMINED: usize = 16;
 
-/// A free the device has not acknowledged (GPU-DESIGN 4.5.15). `extent` is
-/// the hostmem range a mapped blob returns once both its unmap (`unmapped`)
-/// and its free are acknowledged; a guest-backed resource has none.
-#[derive(Clone, Copy)]
-struct OwedFree {
-    res: u32,
-    extent: Option<(u64, u64)>,
-    unmapped: bool,
-    answered: u8,
+/// How a teardown of a mapped HOST3D blob ended.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Teardown {
+    Done,
+    /// Not acknowledged; repeated by the owed-free pass, the extent reserved.
+    Owed,
+    /// Not acknowledged and not owed (bring-up, a dead engine, the debt's
+    /// bound): the extent is reserved until the service restarts.
+    Leaked,
 }
 
 /// One display-condemned resource. `unref_requested` is what keeps the drain
@@ -422,6 +422,7 @@ const VIRTIO_GPU_FLAG_FENCE: u32 = 1 << 0;
 const VIRTIO_GPU_FLAG_INFO_RING_IDX: u32 = 1 << 1;
 
 const VIRTIO_GPU_RESP_OK_NODATA: u32 = 0x1100;
+const _: () = assert!(VIRTIO_GPU_RESP_OK_NODATA == crate::gpu_api::RESP_OK_NODATA);
 const VIRTIO_GPU_RESP_OK_DISPLAY_INFO: u32 = 0x1101;
 const VIRTIO_GPU_RESP_OK_CAPSET_INFO: u32 = 0x1102;
 const VIRTIO_GPU_RESP_OK_CAPSET: u32 = 0x1103;
@@ -441,6 +442,7 @@ const VIRTIO_GPU_RESP_OK_MAP_INFO: u32 = 0x1106;
 pub const GPU_RESP_OK_NODATA: u32 = VIRTIO_GPU_RESP_OK_NODATA;
 pub const GPU_RESP_ERR_UNSPEC: u32 = 0x1200;
 pub const GPU_RESP_ERR_INVALID_RESOURCE_ID: u32 = 0x1203;
+const _: () = assert!(GPU_RESP_ERR_INVALID_RESOURCE_ID == crate::gpu_api::RESP_ERR_INVALID_RESOURCE_ID);
 
 // struct virtio_gpu_config field offsets in the Device region (section 5.7.4):
 // events_read @0x00, events_clear @0x04, num_scanouts @0x08, num_capsets @0x0C.
@@ -2253,10 +2255,11 @@ pub struct Gpu {
     /// Sticky: the park list overflowed, so EVERY unref defers until the next
     /// drain. Over-deferral is the safe direction (round-3 F2).
     condemned_overflowed: bool,
-    /// Frees the device has not acknowledged, repeated until it does. Each
-    /// id stays retiring in the broker's ledger meanwhile, so no create can
-    /// take it and a repeat cannot free a newer resource.
-    owed_frees: alloc::vec::Vec<OwedFree>,
+    /// Frees owed the device -- not acknowledged, or taken while a chain
+    /// could reach the resource -- repeated until it acknowledges one, in
+    /// turn. Each id stays retiring in the broker's ledger meanwhile, so no
+    /// create can take it and a repeat cannot free a newer resource.
+    owed_frees: alloc::collections::VecDeque<OwedFree>,
     /// `FreesOwed`'s monotone counts: frees owed, paid by a repeat, given up.
     owed_incurred: u32,
     owed_paid: u32,
@@ -2491,7 +2494,7 @@ impl Gpu {
             collect_retirements: false,
             retired_resources: alloc::vec::Vec::new(),
             condemned_overflowed: false,
-            owed_frees: alloc::vec::Vec::new(),
+            owed_frees: alloc::collections::VecDeque::new(),
             owed_incurred: 0,
             owed_paid: 0,
             owed_leaked: 0,
@@ -3448,11 +3451,7 @@ impl Gpu {
             w32(req_va + 28, 0);
         };
         let result = match self.ctrl.submit_and_wait(GPU_CTRL_HDR_LEN + 8, GPU_CTRL_HDR_LEN) {
-            Ok(VIRTIO_GPU_RESP_OK_NODATA) => Ok(()),
-            // No such resource on the device: as gone as a completed free
-            // leaves it -- a repeat of one that ran, or one whose create a
-            // stall met never ran (QEMU v10.0 virgl_cmd_resource_unref).
-            Ok(GPU_RESP_ERR_INVALID_RESOURCE_ID) => Ok(()),
+            Ok(t) if unref_frees(t) => Ok(()),
             Ok(t) => {
                 say!("tapestryd: gpu RESOURCE_UNREF resp_type={:#x} (expected {:#x})", t, VIRTIO_GPU_RESP_OK_NODATA);
                 Err(Error::Hardware)
@@ -3474,7 +3473,7 @@ impl Gpu {
     fn unref_or_owe(&mut self, resource_id: u32) -> Result<(), Error> {
         let result = self.resource_unref_raw(resource_id);
         if result.is_err() {
-            self.owe_free(OwedFree { res: resource_id, extent: None, unmapped: true, answered: 0 });
+            self.owe_free(OwedFree::new(resource_id, None, true));
         }
         result
     }
@@ -3483,29 +3482,48 @@ impl Gpu {
     /// whatever the device has not acknowledged: the extent is reused only
     /// after both are. A repeat of an unmap that ran is answered OK, and of a
     /// free that ran, as no such resource.
-    fn free_mapped_or_owe(&mut self, resource_id: u32, offset: u64, size: u64) -> Result<(), Error> {
+    fn free_mapped_or_owe(&mut self, resource_id: u32, offset: u64, size: u64) -> Teardown {
         let unmapped = self.unmap_blob(resource_id).is_ok();
         if unmapped && self.resource_unref_raw(resource_id).is_ok() {
             self.hostmem_free(offset, size);
-            return Ok(());
+            return Teardown::Done;
         }
-        self.owe_free(OwedFree { res: resource_id, extent: Some((offset, size)), unmapped, answered: 0 });
-        Err(Error::Hardware)
+        if self.owe_free(OwedFree::new(resource_id, Some((offset, size)), unmapped)) {
+            Teardown::Owed
+        } else {
+            Teardown::Leaked
+        }
     }
 
-    /// Before serving, a caller says and leaks a refused free itself (its
-    /// ids are bring-up probes'); after death nothing runs again.
-    fn owe_free(&mut self, owed: OwedFree) {
-        if !self.ctrl.serving || self.ctrl.dead || self.owes_free(owed.res) {
-            return;
+    /// Whether the free is owed now. Before serving, a caller says and leaks
+    /// a refused free itself (its ids are bring-up probes'); after death
+    /// nothing runs again.
+    fn owe_free(&mut self, owed: OwedFree) -> bool {
+        if !self.ctrl.serving || self.ctrl.dead {
+            return false;
+        }
+        if self.owes_free(owed.res) {
+            return true;
         }
         if self.owed_frees.len() >= crate::objects::MAX_OBJECTS || self.owed_frees.try_reserve(1).is_err() {
             self.owed_leaked = self.owed_leaked.wrapping_add(1);
             say!("lictor: resource {} free owed past the bound -- leaked (id, pins and extent kept)", owed.res);
-            return;
+            return false;
         }
-        self.owed_frees.push(owed);
+        self.owed_frees.push_back(owed);
         self.owed_incurred = self.owed_incurred.wrapping_add(1);
+        true
+    }
+
+    /// Owe the free of `resource_id` without asking the device now: a chain
+    /// that may still reach it stands in the way, and the repeat waits until
+    /// none can. Not for a resource the display may still scan: that free
+    /// waits on the display (`resource_unref`), never on the debt.
+    pub fn owe_unsent_free(&mut self, resource_id: u32) -> bool {
+        if self.condemned_overflowed || self.condemned[..self.condemned_n].iter().any(|e| e.res == resource_id) {
+            return false;
+        }
+        self.owe_free(OwedFree::new(resource_id, None, true))
     }
 
     /// A free of `resource_id` is owed: the resource may still be on the device.
@@ -3513,54 +3531,92 @@ impl Gpu {
         self.owed_frees.iter().any(|o| o.res == resource_id)
     }
 
-    /// Repeat owed frees while the engine takes commands, a few per serve
-    /// pass, each once no chain can reach it, as its first try waited
-    /// (`holds` is the ledger's context-to-resource relation). One the device
-    /// keeps refusing with no stall is given up after `OWED_FREE_ANSWERS`,
-    /// its id left retiring and its pins and extent held: a leak, never a
-    /// reuse of memory the device may still read.
-    pub fn pay_owed_frees(&mut self, holds: impl Fn(u32, u32) -> bool) {
-        let mut i = 0;
-        let mut tried = 0;
-        while i < self.owed_frees.len() && tried < OWED_FREES_PER_PASS {
+    /// Repeat owed frees while the engine takes commands, each once no chain
+    /// can reach it, as a first try waits (`holds` is the ledger's
+    /// context-to-resource relation). A free goes whole: every context link
+    /// the ledger still records (`links`), the unmap a mapped blob needs, then
+    /// the free (`OwedFree::next`). A pass looks at OWED_FREES_EXAMINED owed
+    /// frees at most, in turn, and stops at OWED_COMMANDS_PER_PASS commands
+    /// or SUBMIT_DEADLINE_MS spent; a free cut short keeps what it reached.
+    /// One the device keeps refusing with no stall is given up, its id left
+    /// retiring and its pins and extent held: a leak, never a reuse of memory
+    /// the device may still read. Returns the links the device detached, for
+    /// the ledger to drop.
+    pub fn pay_owed_frees(
+        &mut self,
+        holds: impl Fn(u32, u32) -> bool,
+        links: impl Fn(u32) -> alloc::vec::Vec<u32>,
+    ) -> alloc::vec::Vec<(u32, u32)> {
+        let mut unlinked = alloc::vec::Vec::new();
+        let began = Instant::now();
+        let mut commands = 0;
+        let spent = |commands: usize| {
+            commands >= OWED_COMMANDS_PER_PASS || began.elapsed().as_millis() >= u128::from(SUBMIT_DEADLINE_MS)
+        };
+        for _ in 0..self.owed_frees.len().min(OWED_FREES_EXAMINED) {
             if !self.takes_commands()
+                || spent(commands)
                 || (self.collect_retirements && self.retired_resources.len() >= crate::objects::MAX_OBJECTS)
             {
-                return;
+                break;
             }
-            let mut o = self.owed_frees[i];
+            let Some(mut o) = self.owed_frees.pop_front() else { break };
             if self.retirement_hold(Retired::Resource(o.res), &holds) != Hold::Clear {
-                i += 1;
+                self.owed_frees.push_back(o);
                 continue;
             }
-            tried += 1;
-            let stalls = self.ctrl.stalls;
-            o.unmapped = o.unmapped || self.unmap_blob(o.res).is_ok();
-            if o.unmapped && self.resource_unref_raw(o.res).is_ok() {
-                if let Some((offset, size)) = o.extent {
-                    self.hostmem_free(offset, size);
+            let mut linked = links(o.res);
+            let outcome = loop {
+                if spent(commands) || !self.takes_commands() {
+                    break Owed::Kept;
                 }
-                self.owed_frees.swap_remove(i);
-                self.owed_paid = self.owed_paid.wrapping_add(1);
-                continue;
+                commands += 1;
+                let step = o.next(!linked.is_empty());
+                let stalls = self.ctrl.stalls;
+                let done = match step {
+                    FreeStep::Detach => {
+                        let ctx = linked[linked.len() - 1];
+                        let done = self.ctx_detach_resource(ctx, o.res).is_ok();
+                        if done {
+                            linked.pop();
+                            unlinked.push((ctx, o.res));
+                        }
+                        done
+                    }
+                    FreeStep::Unmap => self.unmap_blob(o.res).is_ok(),
+                    FreeStep::Unref => self.resource_unref_raw(o.res).is_ok(),
+                };
+                match o.after(step, Answer::of(done, self.ctrl.stalls != stalls, self.ctrl.dead)) {
+                    Owed::Next => continue,
+                    outcome => break outcome,
+                }
+            };
+            match outcome {
+                Owed::Paid(extent) => {
+                    if let Some((offset, size)) = extent {
+                        self.hostmem_free(offset, size);
+                    }
+                    self.owed_paid = self.owed_paid.wrapping_add(1);
+                }
+                Owed::GivenUp => {
+                    self.owed_leaked = self.owed_leaked.wrapping_add(1);
+                    say!("lictor: resource {} owed free refused {} times -- given up (id, pins and extent kept)", o.res, o.answered);
+                }
+                Owed::Kept | Owed::Next => self.owed_frees.push_back(o),
             }
-            if self.ctrl.stalls == stalls && !self.ctrl.dead {
-                o.answered += 1;
-            }
-            if o.answered >= OWED_FREE_ANSWERS {
-                self.owed_frees.swap_remove(i);
-                self.owed_leaked = self.owed_leaked.wrapping_add(1);
-                say!("lictor: resource {} owed free refused {} times -- given up (id, pins and extent kept)", o.res, o.answered);
-                continue;
-            }
-            self.owed_frees[i] = o;
-            i += 1;
         }
+        unlinked
     }
 
-    /// (owed now, incurred, paid, given up); the last three are monotone.
-    pub fn frees_owed(&self) -> (u32, u32, u32, u32) {
-        (self.owed_frees.len() as u32, self.owed_incurred, self.owed_paid, self.owed_leaked)
+    /// The owed-free counts; the caller adds `retiring`, which it keeps.
+    pub fn frees_owed(&self) -> Frees {
+        Frees {
+            owed: self.owed_frees.len() as u32,
+            incurred: self.owed_incurred,
+            paid: self.owed_paid,
+            leaked: self.owed_leaked,
+            retiring: 0,
+        }
     }
 
     /// RESOURCE_CREATE_BLOB for a GUEST-memory blob (Warp-6 V-1): the blob's
@@ -3926,9 +3982,12 @@ impl Gpu {
         }
         // Unlike resource_unref(), this never defers for scanout retirement:
         // host rings are never scanout targets. A device step not
-        // acknowledged is owed, the extent reserved until it is paid.
-        if self.free_mapped_or_owe(ring.res_id, ring.offset, ring.size).is_err() {
-            say!("lictor: hostmem teardown not acknowledged; owed, extent reserved until paid");
+        // acknowledged is owed, the extent reserved until it is paid; at
+        // bring-up nothing is owed, and the extent stays reserved.
+        match self.free_mapped_or_owe(ring.res_id, ring.offset, ring.size) {
+            Teardown::Done => {}
+            Teardown::Owed => say!("lictor: hostmem teardown not acknowledged; owed, extent reserved until paid"),
+            Teardown::Leaked => say!("lictor: hostmem teardown not acknowledged and not owed; extent reserved until restart"),
         }
     }
 

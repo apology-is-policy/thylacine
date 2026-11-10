@@ -367,8 +367,7 @@ pub enum Request {
     CtxHasPoisonedSlot { ctx_pub: u32 },
     FencedInFlight,
     EngineDead,
-    /// The frees the device has not acknowledged, which the broker retries:
-    /// (owed now, incurred, paid, given up), the last three monotone.
+    /// The frees the broker owes the device and repeats (`Frees`).
     FreesOwed,
     InputInfo { index: u32 },
     InputDrain { index: u32 },
@@ -467,6 +466,106 @@ pub fn admit(request: &Request, phase: u32, hold: Hold, parked_ms: u64) -> bool 
 /// bound every fenced chain already carries (backend gpu.rs asserts the two
 /// equal), past which the device's own abandonment has given up on it too.
 pub const PARK_BOUND_MS: u64 = 30_000;
+/// A free the broker owes the device (GPU-DESIGN 4.5.15): one it could not
+/// finish, or one it took while a chain could still reach the resource.
+/// `extent` is the hostmem range a mapped HOST3D blob returns, only once both
+/// its unmap (`unmapped`) and its free are acknowledged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OwedFree {
+    pub res: u32,
+    pub extent: Option<(u64, u64)>,
+    pub unmapped: bool,
+    /// Answered refusals so far; a stall or a death is no answer.
+    pub answered: u8,
+}
+/// The device command an owed free needs next.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FreeStep {
+    /// CTX_DETACH_RESOURCE of a context link the ledger still records: a
+    /// retired id names no link, and a refused detach left one.
+    Detach,
+    Unmap,
+    Unref,
+}
+/// How the device took one command of an owed free.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Answer {
+    Done,
+    /// Refused on a live engine with no stall across it: nothing changed.
+    Refused,
+    /// A stall began across it, or the engine died: it may have run or not.
+    Unknown,
+}
+impl Answer {
+    pub fn of(acknowledged: bool, stalled: bool, dead: bool) -> Self {
+        if acknowledged {
+            Self::Done
+        } else if stalled || dead {
+            Self::Unknown
+        } else {
+            Self::Refused
+        }
+    }
+}
+/// What one command made of an owed free.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Owed {
+    /// Acknowledged, and another command is due.
+    Next,
+    /// Still owed, for a later pass.
+    Kept,
+    /// Off the device: the id may retire and `extent` be reused.
+    Paid(Option<(u64, u64)>),
+    /// Refused `OWED_FREE_ANSWERS` times: a leak, its id, pins and extent kept.
+    GivenUp,
+}
+/// Answered refusals an owed free may meet before it is given up. QEMU
+/// refuses a free of an existing resource only when the host unmap fails,
+/// and that clears the mapping, so the next repeat runs (QEMU v10.0
+/// virgl_cmd_resource_unref, virtio_gpu_virgl_unmap_resource_blob).
+pub const OWED_FREE_ANSWERS: u8 = 3;
+impl OwedFree {
+    pub fn new(res: u32, extent: Option<(u64, u64)>, unmapped: bool) -> Self {
+        Self { res, extent, unmapped, answered: 0 }
+    }
+    /// Links first, then the unmap a mapped blob needs, then the free.
+    /// `linked`: the ledger still links the resource to a context.
+    pub fn next(&self, linked: bool) -> FreeStep {
+        if linked {
+            FreeStep::Detach
+        } else if self.unmapped {
+            FreeStep::Unref
+        } else {
+            FreeStep::Unmap
+        }
+    }
+    pub fn after(&mut self, step: FreeStep, answer: Answer) -> Owed {
+        match (answer, step) {
+            (Answer::Done, FreeStep::Unref) => Owed::Paid(self.extent),
+            (Answer::Done, FreeStep::Unmap) => {
+                self.unmapped = true;
+                Owed::Next
+            }
+            (Answer::Done, FreeStep::Detach) => Owed::Next,
+            (Answer::Unknown, _) => Owed::Kept,
+            (Answer::Refused, _) => {
+                self.answered = self.answered.saturating_add(1);
+                if self.answered >= OWED_FREE_ANSWERS { Owed::GivenUp } else { Owed::Kept }
+            }
+        }
+    }
+}
+/// virtio-gpu response types a RESOURCE_UNREF is judged by.
+pub const RESP_OK_NODATA: u32 = 0x1100;
+pub const RESP_ERR_INVALID_RESOURCE_ID: u32 = 0x1203;
+/// Whether a RESOURCE_UNREF's answer leaves the resource off the device: OK,
+/// or no such resource, which a repeat of a free that ran gets, and so does
+/// a free whose create a stall met and never ran (QEMU v10.0
+/// virgl_cmd_resource_unref). Any other answer leaves the resource and the
+/// backing it reads in place.
+pub fn unref_frees(resp_type: u32) -> bool {
+    resp_type == RESP_OK_NODATA || resp_type == RESP_ERR_INVALID_RESOURCE_ID
+}
 /// What a stalled engine or cursor lane becomes at a completion pump
 /// (GPU-DESIGN 4.5.15): a chain that has retired revives it however late. One
 /// still outstanding at the abandonment bound, or at the bound of a takeover
@@ -707,6 +806,12 @@ pub struct Stats {
 }
 record!(Stats { cmd_seq: u64, last_scanout_seq: u64, last_unref_seq: u64, condemned_lost: u32,
     engine: Engine, stalls: u32, stalls_begun: u32 });
+/// The broker's owed frees: owed now; incurred, paid and given up, monotone;
+/// and the resources whose retirement has not finished (`retiring`), each
+/// owed a free or still linked to a context.
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Frees { pub owed: u32, pub incurred: u32, pub paid: u32, pub leaked: u32, pub retiring: u32 }
+record!(Frees { owed: u32, incurred: u32, paid: u32, leaked: u32, retiring: u32 });
 #[cfg(feature = "backend")]
 impl From<&crate::backend::gpu::Gpu> for Stats {
     fn from(g: &crate::backend::gpu::Gpu) -> Self {
@@ -1069,6 +1174,16 @@ mod cursor_wire_tests {
         r.finish().unwrap();
     }
     #[test]
+    fn the_frees_census_is_five_counts_in_order() {
+        let mut bytes = Vec::new();
+        Frees { owed: 1, incurred: 2, paid: 3, leaked: 4, retiring: 5 }.put(&mut bytes);
+        assert_eq!(bytes, [1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 4, 0, 0, 0, 5, 0, 0, 0]);
+        let mut r = Reader::new(&bytes).unwrap();
+        assert_eq!(Frees::get(&mut r).unwrap(), Frees { owed: 1, incurred: 2, paid: 3, leaked: 4, retiring: 5 });
+        r.finish().unwrap();
+        assert!(Frees::get(&mut Reader::new(&bytes[..16]).unwrap()).is_err());
+    }
+    #[test]
     fn the_stall_shot_has_its_own_opcode() {
         let mut bytes = Vec::new();
         Request::TestStallShot.put(&mut bytes);
@@ -1117,5 +1232,78 @@ mod cursor_wire_tests {
         assert!(r.finish().is_err());
         bytes.pop(); *bytes.last_mut().unwrap() = 2;
         assert!(Request::get(&mut Reader::new(&bytes).unwrap()).is_err());
+    }
+}
+
+#[cfg(test)]
+mod owed_free_tests {
+    use super::*;
+    const EXTENT: Option<(u64, u64)> = Some((0x4000, 0x2000));
+    #[test]
+    fn a_guest_backed_free_is_paid_by_one_unref() {
+        let mut o = OwedFree::new(7, None, true);
+        assert_eq!(o.next(false), FreeStep::Unref);
+        assert_eq!(o.after(FreeStep::Unref, Answer::Done), Owed::Paid(None));
+    }
+    #[test]
+    fn a_mapped_blob_returns_its_extent_only_once_both_are_acknowledged() {
+        let mut o = OwedFree::new(7, EXTENT, false);
+        assert_eq!(o.next(false), FreeStep::Unmap);
+        assert_eq!(o.after(FreeStep::Unmap, Answer::Refused), Owed::Kept);
+        assert_eq!(o.next(false), FreeStep::Unmap);
+        assert_eq!(o.after(FreeStep::Unmap, Answer::Done), Owed::Next);
+        assert_eq!(o.next(false), FreeStep::Unref);
+        assert_eq!(o.after(FreeStep::Unref, Answer::Unknown), Owed::Kept);
+        // The unmap that ran is not asked again.
+        assert_eq!(o.next(false), FreeStep::Unref);
+        assert_eq!(o.after(FreeStep::Unref, Answer::Done), Owed::Paid(EXTENT));
+    }
+    #[test]
+    fn a_stall_or_a_death_is_never_an_answer() {
+        let mut o = OwedFree::new(7, EXTENT, true);
+        for _ in 0..20 {
+            assert_eq!(o.after(FreeStep::Unref, Answer::of(false, true, false)), Owed::Kept);
+            assert_eq!(o.after(FreeStep::Unref, Answer::of(false, false, true)), Owed::Kept);
+        }
+        assert_eq!(o.answered, 0);
+    }
+    #[test]
+    fn answers_are_judged_by_acknowledgement_then_stall_then_death() {
+        assert_eq!(Answer::of(true, false, false), Answer::Done);
+        assert_eq!(Answer::of(false, false, false), Answer::Refused);
+        assert_eq!(Answer::of(false, true, false), Answer::Unknown);
+        assert_eq!(Answer::of(false, false, true), Answer::Unknown);
+        assert_eq!(Answer::of(false, true, true), Answer::Unknown);
+    }
+    #[test]
+    fn answered_refusals_give_a_free_up_without_its_extent() {
+        let mut o = OwedFree::new(7, EXTENT, true);
+        for _ in 1..OWED_FREE_ANSWERS {
+            assert_eq!(o.after(FreeStep::Unref, Answer::Refused), Owed::Kept);
+        }
+        // Given up carries no extent: it stays reserved, never reused.
+        assert_eq!(o.after(FreeStep::Unref, Answer::Refused), Owed::GivenUp);
+    }
+    #[test]
+    fn context_links_go_before_the_unmap_and_the_free() {
+        let mut o = OwedFree::new(7, EXTENT, false);
+        assert_eq!(o.next(true), FreeStep::Detach);
+        assert_eq!(o.after(FreeStep::Detach, Answer::Done), Owed::Next);
+        assert!(!o.unmapped);
+        assert_eq!(o.next(true), FreeStep::Detach);
+        assert_eq!(o.next(false), FreeStep::Unmap);
+        let mut g = OwedFree::new(8, None, true);
+        assert_eq!(g.next(true), FreeStep::Detach);
+        assert_eq!(g.after(FreeStep::Detach, Answer::Unknown), Owed::Kept);
+    }
+    #[test]
+    fn only_ok_and_no_such_resource_read_as_gone() {
+        assert!(unref_frees(0x1100));
+        assert!(unref_frees(0x1203));
+        // UNSPEC is QEMU's answer to a failed host unmap: the resource and
+        // the iovs it reads stay, so the pins must too.
+        for t in [0x1200, 0x1201, 0x1202, 0x1204, 0x1205, 0x1101, 0x0, 0xffff_ffff] {
+            assert!(!unref_frees(t), "resp {:#x}", t);
+        }
     }
 }

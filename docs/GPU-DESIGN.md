@@ -2893,20 +2893,38 @@ block the serve loop, and seat input with it. Neither was taken.
   - a free the device has not acknowledged is owed. A stalled UNREF, one
     refused before staging, and one the device refused all leave the
     resource possibly on the device, so lictor keeps its id retiring and its
-    pins held, and repeats the free once the engine takes commands: a few
-    per serve pass, at the top of the loop, never inside a request, where a
-    stall it met would read as that request's. The device answers a repeat
-    of a free that ran with "no such resource", which lictor reads as gone,
-    as it reads a first free answered so (QEMU v10.0
-    `virgl_cmd_resource_unref`). QEMU refuses a free of an existing
-    resource only when the host unmap fails, which clears the mapping, so
-    the next repeat runs; three answered refusals give the free up, its id,
-    pins and extent kept. A mapped HOST3D blob's unmap is owed the same way
-    (a repeat of one that ran is answered OK), and its extent returns only
-    once both are acknowledged. A create whose unwind left a free owed keeps
-    its id retiring until it is paid. Only frees made while serving are
-    owed; a bring-up probe's refused free is said and leaked as before. The
-    readback leg's FREE arm witnesses it (`warp-stall-free`);
+    pins held, and repeats the free once the engine takes commands. A free
+    a chain could still reach is owed too, unsent (the retirement paragraph
+    below). The repeat runs while the seat is normal, after the seat's look
+    at the chord in each serve pass and never inside a request, where a
+    stall it met would read as that request's. Each free waits until no
+    chain can reach its resource, as a first try waits, and goes whole: a
+    CTX_DETACH_RESOURCE for each context link lictor's ledger still records
+    (a retired id names none), the unmap a mapped blob needs, then the free.
+    A pass looks at sixteen owed frees at most, in turn, and stops at eight
+    device commands or `SUBMIT_DEADLINE_MS` spent, so the chord is looked
+    at again within about a second; a free cut short keeps what it
+    reached. The device answers a repeat of a free that ran with "no such
+    resource", which lictor reads as gone, as it reads a first free
+    answered so (QEMU v10.0 `virgl_cmd_resource_unref`); any other refusal
+    leaves the resource and its backing in place. QEMU refuses a free of
+    an existing resource only when the host unmap fails, which clears the
+    mapping, so the next repeat runs; three answered refusals give the free
+    up, its id, pins and extent kept. A stall or a death is never an
+    answer. A mapped HOST3D blob's unmap is owed the same way (a repeat of
+    one that ran is answered OK), and its extent returns only once both are
+    acknowledged. A create whose unwind left a free owed keeps its id
+    retiring until it is paid. Only frees made while serving are owed; a
+    bring-up probe's refused free, a ring's teardown included, is said and
+    leaked as before. The state machine (`gpu_api::OwedFree`) and the
+    answer each response reads as (`gpu_api::unref_frees`) are host-tested.
+    The readback leg witnesses two paths: FREE, a guest-backed free a stall
+    meets (`warp-stall-free`), repaid once the engine lives, its id retired;
+    and TAKEN, a free a poisoned chain holds, left unpaid while the poison
+    stands and paid once the vindication retires the chain, its link
+    detached and its id retired. The HOST3D extent's order, a create's
+    unwind, the display drain's owing and the give-up have no leg (the
+    readback host runs virgl without venus);
   - a stalled CREATE consumes its id, because the reservation precedes the
     command and is never undone. A warp context's id is its slot's
     (`slot + 1`, and `WARP_VENUS_CTX_BASE + slot` for its venus one). A GL
@@ -2923,8 +2941,9 @@ block the serve loop, and seat input with it. Neither was taken.
     `virgl_cmd_context_destroy`, virglrenderer 1.1.0 `virgl_context_remove`),
     and no create can take the id meanwhile. The vindication's destroys are
     owed the same way, since no later vindication of that context comes.
-    Only an answered refusal, or a dead engine, condemns for good, and a
-    condemned slot holds its pub. A slot is reused only once each device
+    An answered refusal, or a dead engine, condemns the slot, which a later
+    vindication of a live context may recover; lictor's ledger keeps a
+    refused id named, and a condemned slot holds its pub. A slot is reused only once each device
     context it carried is gone or refused for good. tapestryd reads a
     create's or a destroy's failure on that reply's own span
     (`Stats::stalls_begun`), as lictor reads it, so a stall lictor met
@@ -2969,9 +2988,22 @@ device-wide sync work, and a dead engine refuses them. A cursor chain touches on
 cursor plane, so the cursor queue holds no retirement, and a poisoned cursor queue
 on a live engine costs a surface nothing. A context holds what is attached to it and
 any host blob minted under it, attached or not. A poisoned slot may never
-end, so a retirement that only a poisoned holder blocks is refused at once. One
+end, so a retirement that only a poisoned holder blocks is admitted at once. One
 that a chain in flight blocks still parks, within the bound, which keeps the barrier
 for the short case. Another client's poison then costs a surface nothing.
+
+Admitted with a holder still there, a retirement is refused, its pins kept, except
+a resource's free: lictor takes that as a debt. The ledger entry retires and the free
+is owed unsent; the owed-free pass sends it once no chain can reach the resource,
+after detaching the resource's context links, which the holder's refused
+`CtxDetachResource` left. The refused `DetachBacking` needs no repeat: QEMU's free
+detaches the guest backing itself (QEMU v10.0 `virgl_cmd_resource_unref`). The
+answer is still a refusal, since nothing has been freed yet. A refused free used to
+be final, and no client asks again, so the entry and its pins stayed for the boot
+while tapestryd's vindication uncharged the context: a client repeating poison and
+destroy pinned a context's backing cap each time, uncharged, and spent a ledger entry
+per buffer toward `MAX_OBJECTS`. A resource on the display, a dead engine, or a debt
+at its bound is refused as before.
 
 The global rule this replaces was measured on the GL host: after one abandoned
 fence on an unrelated client's context, a plain new surface met a refused retirement
@@ -2983,9 +3015,9 @@ tables, and a transfer naming a context looks up again in that context's table. 
 chain reaches only what its context holds. The order of detaching holds: after
 `CtxDetachResource`, no new chain of that context can name the resource. Host
 behaviour here is I-45's trusted half. Refusing on any poison, globally, was the
-smaller change and was not taken: a refused pin is not retried and has no charge
-behind it, so a client could leak pins at full speed. Scoped, the only pins refused
-are the poisoned holder's own.
+smaller change and was not taken: a refused pin had no charge behind it, so a client
+could leak pins at full speed. Scoped, only the poisoned holder's own retirements
+wait on its poison, and its frees are paid once the poison clears.
 
 **A stall takes no composition verdict.** The composition health tick
 (§4.5.12) fails closed: a failed step latches GPU composition OFF, sticky. A

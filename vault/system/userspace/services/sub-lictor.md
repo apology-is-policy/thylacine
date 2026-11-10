@@ -157,7 +157,14 @@ parked `PARK_BOUND_MS` (30 s, asserted equal to the fenced abandonment bound) is
 admitted whatever the cause. Either way `Device::execute`
 refuses it before any ledger change, says so (at the 1st, 2nd, 4th, ... refusal, with
 the cause: a non-quiescent engine, or a poisoned chain that can reach the object),
-and the compositor degrades instead of blocking on a reply that never comes.
+and the compositor degrades instead of blocking on a reply that never comes. A
+resource's free is the exception (`Device::take_unref`): on a live engine it is
+taken as a debt, its ledger entry retired and its free owed unsent, and the owed-free
+pass below detaches its context links and frees it once no chain can reach it. The
+reply is still a refusal. A refused free used to be final, and no client asks
+again, so the entry and its pins stayed for the boot while tapestryd's vindication
+uncharged the context (vote 81 audit r6 F1). A resource on the display, a dead
+engine or a debt at its bound is refused as before.
 Another client's poison reaches nothing of this one's, so it refuses and parks nothing
 here (`tools/warp/warp-poison-retire.exp`). Scoping relies on the host resolving a
 stream's ids through its context's table (I-45's trusted half).
@@ -255,8 +262,10 @@ submission (`Controlq::stall_shot_bound`): one refused, unfenced, or ended
 before its chain retired spends it and says `stall shot LOST`. So does a
 command refused at staging (`Gpu::req`, while the engine takes no commands).
 The arming's `TestStallNext` shots still ride the next synchronous command
-whoever sends it, so a seat takeover landing between the compositor's aim and
-its command would take one. That needs test-mode, the bootarg and the
+whoever sends it, so a seat takeover or the owed-free pass landing between the
+compositor's aim and its command would take one, and since both kinds share one
+flag, `test_stall_settle` spends a pending `TestStallNext` shot too; tapestryd
+never has both kinds pending. A takeover needs test-mode, the bootarg and the
 operator's chord, and vote 30 recovers the seat.
 `CtxAttachResource` links the attachment in the ledger before the device
 answers, and a failure that left nothing (`left_nothing`) unlinks it, so the
@@ -270,19 +279,36 @@ virglrenderer only drops the handle from its table (QEMU v10.0
 A free the device has not acknowledged is owed (`Gpu::unref_or_owe`,
 `free_mapped_or_owe`): a stalled `RESOURCE_UNREF`, one refused before staging,
 or one the device refused may leave the resource on the device, so its id
-stays retiring and its pins held. The serve loop repeats owed frees at the top
-of a NORMAL pass while the engine takes commands (`Device::pay_owed_frees`),
-eight at most, each once no chain can reach it (`retirement_hold`), and never
-inside a request, where a stall it met would read as that request's. An unref
+stays retiring and its pins held. A taken free (above) is owed unsent
+(`Gpu::owe_unsent_free`, never for a resource the display may still scan).
+The serve loop repeats owed frees after the seat's step, on a NORMAL seat,
+while the engine takes commands (`Device::pay_owed_frees`), and never inside a
+request, where a stall it met would read as that request's. Each waits until
+no chain can reach it (`retirement_hold`) and goes whole
+(`gpu_api::OwedFree::next`): a `CTX_DETACH_RESOURCE` for each context link
+the ledger still records (`Objects::links`; each acknowledged one is dropped
+from the ledger, since `Objects::retired` refuses a linked id), the unmap a
+mapped blob needs, then the unref. A pass looks at `OWED_FREES_EXAMINED` (16)
+owed frees at most, rotating through them, and stops at
+`OWED_COMMANDS_PER_PASS` (8) commands or `SUBMIT_DEADLINE_MS` spent, so the
+seat's next look at the chord is never more than about a second off. An unref
 answered "no such resource" reads as gone, a first free's as a repeat's (QEMU
-v10.0 `virgl_cmd_resource_unref`). QEMU refuses an existing resource's free
-only when its host unmap fails, which clears the mapping, so three answered
-refusals give a free up, its id, pins and extent kept. A mapped HOST3D blob's
-unmap is owed with its free, and its extent returns once both are acknowledged
-(a repeat of an unmap that ran is answered OK); a create whose unwind left a
-free owed retires its id when the free is paid. Only frees made while serving
-are owed, so a bring-up probe keeps its own posture. `Request::FreesOwed`
-(opcode 71) reports (owed now, incurred, paid, given up). tapestryd aims the arming's shots at the
+v10.0 `virgl_cmd_resource_unref`; `gpu_api::unref_frees`, host-tested to read
+no other answer so). QEMU refuses an existing resource's free only when its
+host unmap fails, which clears the mapping, so three answered refusals give a
+free up, its id, pins and extent kept; a stall or a death is never an answer
+(`gpu_api::Answer`). A mapped HOST3D blob's unmap is owed with its free, and
+its extent returns once both are acknowledged (a repeat of an unmap that ran is
+answered OK); a create whose unwind left a free owed retires its id when the
+free is paid. Only frees made while serving are owed, so a bring-up probe
+keeps its own posture, and a ring teardown at bring-up says its extent is
+leaked rather than owed. `Request::FreesOwed` (opcode 71) reports `Frees`:
+owed now, then monotone incurred, paid and given up, then `retiring`, the
+resources whose retirement has not finished. The readback leg's FREE arm
+witnesses a guest-backed free a stall met, and its TAKEN arm a taken free, the
+hold on its repeat and the link detach; the state machine's other paths (the
+HOST3D extent, a create's unwind, the display drain, the give-up) are
+host-tested in `gpu_api` and witnessed by no leg. tapestryd aims the arming's shots at the
 compositor context's create, at one blit-convention attempt, and at a
 composition health step once GPU composition runs.
 Only the designated compositor reaches the broker, and only the booting

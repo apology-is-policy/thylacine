@@ -5,7 +5,7 @@ use core::cell::RefCell;
 use libdriver::Error;
 use libthyla_rs::{t_open, t_close, t_weft_map, t_burrow_detach, t_weft_share,
     t_weft_unshare, T_WALK_OPEN_FROM_ROOT, T_OREAD};
-use crate::{rpc_client::Client, gpu_api::{Info, Stats, Request, BufferRef, RingInfo}, wire::Wire};
+use crate::{rpc_client::Client, gpu_api::{Info, Stats, Frees, Request, BufferRef, RingInfo}, wire::Wire};
 pub use crate::gpu_api::{HostRing, FenceTag, FenceVindication, FencedErr, Engine, FailureCause, failure_cause};
 pub const PAGE_SIZE: u64 = 4096;
 pub const RING_DMA_SIZE: usize = 8192;
@@ -341,8 +341,8 @@ impl Gpu {
     pub fn engine_dead(&self) -> bool {
         self.query(Request::EngineDead).unwrap_or(true)
     }
-    /// The broker's owed frees: (owed now, incurred, paid, given up).
-    pub fn frees_owed(&self) -> (u32, u32, u32, u32) {
-        self.query(Request::FreesOwed).unwrap_or((u32::MAX, 0, 0, 0))
+    /// The broker's owed frees; an unanswered query reads `owed` u32::MAX.
+    pub fn frees_owed(&self) -> Frees {
+        self.query(Request::FreesOwed).unwrap_or(Frees { owed: u32::MAX, ..Frees::default() })
     }
 }

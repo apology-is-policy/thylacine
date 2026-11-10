@@ -618,8 +618,12 @@ released-stream record names the pub. The warp ctl reports the gauges
 `ctx-owed`, `venus-owed` and `slots-condemned`, and the monotone `gpu-stalls`,
 `owed-incurred` (each debt once), `owed-ran` and `destroy-failed`, which a
 recovery inside one serve pass cannot hide, and Lictor's owed frees as
-`frees-owed`, then monotone `frees-incurred`, `frees-paid` and `frees-leaked`
-([[sub-lictor]]). The test-mode `warp-stall-create`, `warp-stall-destroy` and
+`frees-owed`, then monotone `frees-incurred`, `frees-paid` and `frees-leaked`,
+then `frees-retiring` ([[sub-lictor]]). A BO destroyed on a poisoned ctx still
+sends its device frees: the broker takes the unref as a debt and pays it once
+the chain retires, the same proof the vindication frees the parked backing's
+guest half on, so the uncharge there is honest; the readback leg's TAKEN arm
+witnesses it. The test-mode `warp-stall-create`, `warp-stall-destroy` and
 `warp-stall-free` verbs arm one stall shot at the caller's own next create
 (of its GL ctx; the venus create is not aimed), its own ctx's destroy, or the
 free of the next BO it destroys (`TEST_STALL_SHOTS` per boot, one connection

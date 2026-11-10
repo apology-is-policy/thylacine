@@ -3544,9 +3544,13 @@ fn prove_corpse_reclaim(root: i64) {
 //   DESTROY   a ctx destroy a stall meets is owed, not final: the broker keeps
 //             the id destroyable, the owed destroy runs once the engine lives,
 //             and a mint takes the slot's id again.
-//   FREE      a BO's free a stall meets is owed by the broker, which repeats it
-//             once the engine lives; the repeat is acknowledged (the device
-//             answers a free that ran with no such resource) and the debt paid.
+//   FREE      a guest-backed BO's free a stall meets is owed by the broker,
+//             which repeats it once the engine lives; the repeat is
+//             acknowledged (the device answers a free that ran with no such
+//             resource), the debt paid and the id retired.
+//   TAKEN     a BO's free a poisoned chain can reach is taken by the broker as
+//             a debt, left unpaid while the chain is poisoned, and paid once
+//             the vindication retires it: links detached, freed, id retired.
 //   CLEAN     after teardown nothing is poisoned and every slot is back.
 //
 // Prints `C6-READBACK DONE` iff every verdict arm passed, else
@@ -3937,6 +3941,7 @@ struct Frees {
     incurred: u64,
     paid: u64,
     leaked: u64,
+    retiring: u64,
     stalls: u64,
 }
 
@@ -3948,6 +3953,7 @@ fn frees_census(w: i64) -> Frees {
         incurred: f("frees-incurred"),
         paid: f("frees-paid"),
         leaked: f("frees-leaked"),
+        retiring: f("frees-retiring"),
         stalls: f("gpu-stalls"),
     }
 }
@@ -3974,17 +3980,7 @@ fn rb_free_attempt(k: u32) -> Option<bool> {
     let w = warp_connect("free");
     let ctx = mint_ctx(w, "free");
     let (bo, _res, _va) = mint_bo_wh(w, ctx, RB_W, RB_H, VIRGL_RESOURCE_Y_0_TOP, "free");
-    // A free still owed from an earlier arm could be paid inside this window
-    // and read as this one's: start from none owed.
-    let t0 = libthyla_rs::time::Instant::now();
-    let mut b = frees_census(w);
-    while b.owed != 0 && (t0.elapsed().as_millis() as u64) < RB_CREATE_RECOVER_MS {
-        let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(50));
-        b = frees_census(w);
-    }
-    if b.owed != 0 {
-        rb_incomplete("instrument:frees-owed-at-baseline");
-    }
+    let b = frees_settled(w).unwrap_or_else(|_| rb_incomplete("instrument:frees-owed-at-baseline"));
     if !write_ctl(w, "ctl", "warp-stall-free") {
         rb_incomplete("instrument:stall-free-refused");
     }
@@ -4003,23 +3999,159 @@ fn rb_free_attempt(k: u32) -> Option<bool> {
     }
     let t = libthyla_rs::time::Instant::now();
     let mut n = a;
-    while !(n.paid == b.paid + 1 && n.owed == b.owed) && (t.elapsed().as_millis() as u64) < RB_CREATE_RECOVER_MS {
+    while !(n.paid == b.paid + 1 && n.owed == b.owed && n.retiring == b.retiring)
+        && (t.elapsed().as_millis() as u64) < RB_CREATE_RECOVER_MS
+    {
         let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(50));
         n = frees_census(w);
     }
     let ms = t.elapsed().as_millis() as u64;
     let _ = write_ctl(w, &format!("ctx/{}/ctl", ctx), "destroy");
     unsafe { t_close(w) };
-    let ok = n.incurred == b.incurred + 1 && n.paid == b.paid + 1 && n.owed == b.owed && n.leaked == b.leaked;
+    let ok = n.incurred == b.incurred + 1
+        && n.paid == b.paid + 1
+        && n.owed == b.owed
+        && n.leaked == b.leaked
+        && n.retiring == b.retiring;
     t_putstr(&format!(
-        "warp-prove: C6-RB FREE {} -- the BO's free met the stall shot; frees owed +{} (want +1), paid by a repeat +{} (want +1) within {} ms, given up +{} (want 0); frees-owed {} after (want {})\n",
+        "warp-prove: C6-RB FREE {} -- the BO's free met the stall shot; frees owed +{} (want +1), paid by a repeat +{} (want +1) within {} ms, given up +{} (want 0); frees-owed {} after (want {}); frees-retiring {} after (want {}, the id retired and its pins gone)\n",
         if ok { "PASS" } else { "FAIL" },
         n.incurred.wrapping_sub(b.incurred),
         n.paid.wrapping_sub(b.paid),
         ms,
         n.leaked.wrapping_sub(b.leaked),
         n.owed,
-        b.owed
+        b.owed,
+        n.retiring,
+        b.retiring
+    ));
+    Some(ok)
+}
+
+/// The census once no free is owed, so an earlier arm's debt paid inside a
+/// window cannot read as the window's own; Err with the census if one stays.
+fn frees_settled(w: i64) -> Result<Frees, Frees> {
+    let t0 = libthyla_rs::time::Instant::now();
+    let mut b = frees_census(w);
+    while b.owed != 0 && (t0.elapsed().as_millis() as u64) < RB_CREATE_RECOVER_MS {
+        let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(50));
+        b = frees_census(w);
+    }
+    if b.owed != 0 { Err(b) } else { Ok(b) }
+}
+
+/// A BO free the broker refused while a poisoned chain could reach the BO
+/// was never asked again: the ledger entry and the pins stayed for the boot,
+/// while the vindication uncharged the ctx. The broker now takes such a free
+/// as a debt and pays it once the chain has retired, links first.
+fn rb_taken_free() -> bool {
+    for k in 1..=RB_STALL_ATTEMPTS {
+        if let Some(ok) = rb_taken_attempt(k) {
+            return ok;
+        }
+    }
+    t_putstr(&format!(
+        "warp-prove: C6-RB TAKEN UNCONSTRUCTED -- in {} attempts the BO's free never met a poisoned ctx with no stall\n",
+        RB_STALL_ATTEMPTS
+    ));
+    false
+}
+
+/// How long a debt must stay unpaid while its chain is poisoned: many serve
+/// passes, each of which would pay a free nothing held.
+const RB_TAKEN_HELD_MS: u64 = 300;
+
+/// One attempt: Some(verdict), or None when the ctx did not poison or a stall
+/// met the destroy (a stall's debt would read as a taken one).
+fn rb_taken_attempt(k: u32) -> Option<bool> {
+    let w = warp_connect("taken");
+    let ctx = mint_ctx(w, "taken");
+    let (bo, res, _va) = mint_bo_wh(w, ctx, RB_W, RB_H, VIRGL_RESOURCE_Y_0_TOP, "taken");
+    // Past FREE, a debt still owed is one the broker never paid: a failure of
+    // the mechanism under test, not of the instrument.
+    let b = match frees_settled(w) {
+        Ok(b) => b,
+        Err(b) => {
+            let _ = write_ctl(w, &format!("ctx/{}/ctl", ctx), "destroy");
+            unsafe { t_close(w) };
+            t_putstr(&format!(
+                "warp-prove: C6-RB TAKEN FAIL -- a free owed before the window was never paid (frees-owed {}, paid {}, given up {})\n",
+                b.owed, b.paid, b.leaked
+            ));
+            return Some(false);
+        }
+    };
+    // One chain on the ctx, kept from completing, then abandoned: the ctx is
+    // poisoned, and its chain reaches every resource linked to it.
+    if !write_ctl(w, "ctl", "warp-hold on") {
+        rb_incomplete("instrument:taken-hold");
+    }
+    let mut st: Vec<u32> = Vec::new();
+    subctx_preamble(&mut st);
+    clear_stream(&mut st, res, 1, 0.0, 1.0, 0.0);
+    submit_stream(w, ctx, &st, "taken");
+    if !write_ctl(w, "ctl", "warp-abandon") {
+        rb_incomplete("instrument:taken-abandon");
+    }
+    // A destroy on a ctx with fences in flight is deferred, not sent.
+    let t = libthyla_rs::time::Instant::now();
+    let mut left = ctx_field(w, ctx, "fences-in-flight");
+    while left != 0 && t.elapsed().as_millis() < 2000 {
+        let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(50));
+        left = ctx_field(w, ctx, "fences-in-flight");
+    }
+    let ctl = format!("ctx/{}/ctl", ctx);
+    let poisoned = parse_field(&open_read_string(w, &ctl), "poisoned").unwrap_or(99);
+    let p = frees_census(w);
+    let destroyed = poisoned == 1 && left == 0 && write_ctl(w, &format!("ctx/{}/bo/{}/ctl", ctx, bo), "destroy");
+    let a = frees_census(w);
+    let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(RB_TAKEN_HELD_MS));
+    let held = frees_census(w);
+    let _ = write_ctl(w, "ctl", "warp-hold off");
+    if !destroyed || a.stalls != p.stalls || held.stalls != p.stalls {
+        let _ = write_ctl(w, &ctl, "destroy");
+        unsafe { t_close(w) };
+        t_putstr(&format!(
+            "warp-prove: C6-RB TAKEN attempt {} not constructed -- ctx poisoned {} (want 1), fences in flight {} (want 0), the BO destroy {}, the engine's stalls moved by {}\n",
+            k,
+            poisoned,
+            left,
+            if destroyed { "was taken" } else { "was not sent or was refused" },
+            held.stalls.wrapping_sub(p.stalls)
+        ));
+        return None;
+    }
+    let t = libthyla_rs::time::Instant::now();
+    let mut n = held;
+    while !(n.paid == b.paid + 1 && n.owed == b.owed && n.retiring == b.retiring)
+        && (t.elapsed().as_millis() as u64) < RB_CREATE_RECOVER_MS
+    {
+        let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(50));
+        n = frees_census(w);
+    }
+    let ms = t.elapsed().as_millis() as u64;
+    let _ = write_ctl(w, &ctl, "destroy");
+    unsafe { t_close(w) };
+    let taken = a.incurred == b.incurred + 1 && a.owed == b.owed + 1 && a.retiring == b.retiring + 1;
+    let waited = held.paid == b.paid && held.owed == b.owed + 1;
+    let paid = n.paid == b.paid + 1 && n.owed == b.owed && n.leaked == b.leaked && n.retiring == b.retiring;
+    let ok = taken && waited && paid;
+    t_putstr(&format!(
+        "warp-prove: C6-RB TAKEN {} -- the BO's free met its poisoned ctx; taken: frees owed +{} incurred +{} retiring +{} (want +1 each); {} ms on, still poisoned: paid +{} (want 0) owed +{} (want +1); after the vindication: paid +{} (want +1) within {} ms, owed {} (want {}), given up +{} (want 0), retiring {} (want {}, the links detached, the id retired, the pins gone)\n",
+        if ok { "PASS" } else { "FAIL" },
+        a.owed.wrapping_sub(b.owed),
+        a.incurred.wrapping_sub(b.incurred),
+        a.retiring.wrapping_sub(b.retiring),
+        RB_TAKEN_HELD_MS,
+        held.paid.wrapping_sub(b.paid),
+        held.owed.wrapping_sub(b.owed),
+        n.paid.wrapping_sub(b.paid),
+        ms,
+        n.owed,
+        b.owed,
+        n.leaked.wrapping_sub(b.leaked),
+        n.retiring,
+        b.retiring
     ));
     Some(ok)
 }
@@ -5218,6 +5350,9 @@ fn observe_readback() {
     record(rb_stalled_create(), "create");
     record(rb_stalled_destroy(), "destroy");
     record(rb_stalled_free(), "free");
+    // ---- TAKEN: a free a poisoned chain stands in the way of is taken as a
+    // debt and paid once the chain has retired.
+    record(rb_taken_free(), "taken");
 
     // ---- Teardown: withdraw the adoption, destroy the ctx, drop the
     // surfaces; the seam must be clean.

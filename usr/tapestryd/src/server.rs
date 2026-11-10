@@ -14164,9 +14164,10 @@ impl Comp {
                 unsafe { t_close(b.dma_fd) };
             }
         }
-        // The probe rides the same proof (#240 audit F3). Its device-side
-        // refs went at the park -- as a BO's do -- so only the guest backing
-        // was waiting on this.
+        // The probe rides the same proof (#240 audit F3). Its device frees
+        // went to the broker at the park, as a BO's do: one a chain could
+        // still reach the broker owes and pays once none can, so only the
+        // guest backing waited on this.
         if let Some(p) = self.warp_ctx_leaked_probe[slot].take() {
             for (va, fd) in [(p.mark_va, p.mark_fd), (p.sent_va, p.sent_fd)] {
                 Self::warp_probe_undo_guest(&mut self.va, va, fd, p.size);
@@ -15822,7 +15823,10 @@ impl Comp {
             // and can be freed HERE rather than waiting for it to die.
             // Both counters reset with them: an uncharge is honest exactly
             // when it is paired with the drop that FREES (the #130/#131
-            // rule), and these pages are genuinely returned. Without this
+            // rule), and these pages are genuinely returned -- the guest half
+            // here, and the broker's pins at its next owed-free pass, which
+            // pays the frees it took at the park on this same proof (no
+            // chain can reach the BOs; GPU-DESIGN 4.5.15). Without this
             // a vindicated-but-still-live ctx stayed charged for memory it
             // no longer held, and once `leaked_count` hit the cap it could
             // never build another backing -- bricked while healthy.
@@ -17545,14 +17549,14 @@ impl Conn {
                         comp.warp_destroy_failed
                     ),
                 );
-                // The broker's frees the device has not acknowledged, then,
-                // monotone, those owed, paid by a repeat, and given up.
-                let (owed, incurred, paid, leaked) = comp.gpu.frees_owed();
+                // The broker's owed frees; then, monotone, those owed, paid
+                // by a repeat, and given up; then its retirements unfinished.
+                let f = comp.gpu.frees_owed();
                 let _ = core::fmt::write(
                     &mut s,
                     format_args!(
-                        "frees-owed {} frees-incurred {} frees-paid {} frees-leaked {}\n",
-                        owed, incurred, paid, leaked
+                        "frees-owed {} frees-incurred {} frees-paid {} frees-leaked {} frees-retiring {}\n",
+                        f.owed, f.incurred, f.paid, f.leaked, f.retiring
                     ),
                 );
                 // W-4 stall observability: one row per HELD fenced slot, so a

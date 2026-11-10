@@ -61,8 +61,11 @@ impl Driver for Lictor {
             #[cfg(feature = "test-mode")]
             if core::mem::take(&mut self.seat.test_blind) { self.device.test_blind_loop(); }
             self.device.reap();
-            if self.seat.phase == 0 { self.device.pay_owed_frees(); }
             self.seat.step(&mut self.device, &mut self.screen, &mut self.inputs);
+            // After the seat's look at the chord, so a pass's device time
+            // never stands before it; outside any request, so a stall met
+            // here is no request's.
+            if self.seat.phase == 0 { self.device.pay_owed_frees(); }
             for conn in &mut conns {
                 conn.advance(&self.device);
                 #[cfg(feature = "test-mode")]

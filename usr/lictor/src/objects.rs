@@ -71,6 +71,10 @@ impl Objects {
             && self.check(owner, res, Kind::Resource).is_ok()
             && self.attachments.iter().any(|a| a.owner == owner && a.ctx == ctx && a.res == res)
     }
+    /// The contexts the ledger links `res` to.
+    pub fn links(&self, owner: u64, res: u32) -> Vec<u32> {
+        self.attachments.iter().filter(|a| a.owner == owner && a.res == res).map(|a| a.ctx).collect()
+    }
     /// Call only after backend detach completion. A failed detach retains the
     /// relationship, preventing premature reuse or backing release.
     pub fn detached(&mut self, owner: u64, ctx: u32, res: u32) -> Result<(), Error> {
