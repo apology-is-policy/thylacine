@@ -20,7 +20,7 @@
 
 // Synthetic PA range — chosen to NOT overlap any real MMIO region.
 // kobj_mmio_create only tracks the claim; it doesn't access memory.
-#define TEST_BURROW_PA   0x100050000ull
+#define TEST_BURROW_PA   0xF00050000ull
 #define TEST_BURROW_SIZE 0x2000ull       // 2 pages
 
 void test_burrow_mmio_create_basic(void) {

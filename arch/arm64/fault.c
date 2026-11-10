@@ -161,6 +161,10 @@ void fault_info_decode(u64 esr, u64 far, u64 elr, struct fault_info *out) {
         fsc == FSC_EXT_ABORT_L3;
 }
 
+bool fault_is_access_bus(const struct fault_info *fi) {
+    return !fi->is_instruction && fi->fsc == FSC_EXT_ABORT;
+}
+
 // =============================================================================
 // Address-range classifiers.
 // =============================================================================

@@ -36,6 +36,10 @@ u64 phys_reserved_pages(void);  // total - free, computed at init
 // alias at all.
 bool phys_pa_is_ram(paddr_t pa);
 
+// True iff [pa, pa + size) shares a byte with the zone. The caller has shown
+// the range does not wrap.
+bool phys_range_touches_ram(paddr_t pa, u64 size);
+
 #ifdef KERNEL_TESTS
 // Buddy zone bounds [base, end) after the direct-map 8 GiB-reach cap.
 // NULL args are skipped. Used by the direct-map sweep test.

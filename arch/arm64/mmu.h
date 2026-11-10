@@ -315,6 +315,12 @@ bool mmu_directmap_is_pagemapped(paddr_t pa);
 // the safe choice — never accidentally translate a low VA.
 paddr_t mmu_kernel_ttbr0_pa(void);
 
+// Physical address bits a translation may output: what the CPU implements
+// (ID_AA64MMFR0_EL1.PARange), capped at the 40 that TCR_EL1.IPS is programmed
+// for. A leaf whose output address has a bit at or above this takes an address
+// size fault on its first use, so nothing may install one.
+u32 mmu_pa_bits(void);
+
 // =============================================================================
 // P3-Bcb / P3-Db: per-Proc translation table allocator + recursive teardown.
 //

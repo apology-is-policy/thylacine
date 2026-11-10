@@ -83,6 +83,9 @@ table lists it as a trigger surface in its own right.
   guard pages not at all. The cross-Proc copy asks it before making a kernel
   pointer from a user leaf's address, because a device's registers are outside
   the zone and have no alias ([[sub-kernel-mmu]]).
+- `phys_range_touches_ram(pa, size)`: whether a range shares a byte with the
+  zone. `kobj_mmio_create` asks it, so that no device window is ever RAM
+  ([[sub-kernel-hwcap]]).
 
 ## Mechanism
 

@@ -30,7 +30,7 @@
 #include "../../arch/arm64/uart.h"
 
 // Synthetic MMIO range; chosen to not overlap any real device.
-#define MMIO_MAP_PA      0x100060000ull
+#define MMIO_MAP_PA      0xF00060000ull
 #define MMIO_MAP_SIZE    0x1000ull
 #define USER_VA_MMIO     0x40000000ull        // 1 GiB into user-VA
 

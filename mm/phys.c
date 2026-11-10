@@ -256,6 +256,10 @@ bool phys_pa_is_ram(paddr_t pa) {
     return pa >= g_zone_base && pa < g_zone_end;
 }
 
+bool phys_range_touches_ram(paddr_t pa, u64 size) {
+    return size != 0 && pa < g_zone_end && pa + size > g_zone_base;
+}
+
 #ifdef KERNEL_TESTS
 void phys_zone_bounds(paddr_t *base, paddr_t *end) {
     if (base) *base = g_zone_base;

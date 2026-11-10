@@ -360,6 +360,22 @@ static void exception_sync_curr_el_impl(struct exception_context *ctx) {
             }
         }
 
+        // A bus error taken BY a uaccess instruction is the user's address
+        // answering badly -- a device window whose device refused the access
+        // -- and not a kernel fault: the same abort from EL0 costs that Proc
+        // a snare:bus, so here it costs the syscall its copy. No page install
+        // resolves it, so straight to the fixup. Keyed on the PC alone: FAR is
+        // not valid for every external abort, and a uaccess instruction's
+        // operand is a user address by construction. An alignment fault stays
+        // fatal: the callers validate alignment, so one is a kernel bug.
+        if (!fi.from_user && fault_is_access_bus(&fi)) {
+            u64 fixup_pc = uaccess_fixup_lookup(fi.elr);
+            if (fixup_pc != 0) {
+                ctx->elr = fixup_pc;
+                return;
+            }
+        }
+
         enum fault_result r = arch_fault_handle(&fi);
 
         switch (r) {

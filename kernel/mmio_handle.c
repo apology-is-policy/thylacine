@@ -19,7 +19,9 @@
 #include <thylacine/spinlock.h>
 #include <thylacine/types.h>
 
+#include "../arch/arm64/mmu.h"
 #include "../arch/arm64/uart.h"
+#include "../mm/phys.h"
 #include "../mm/slub.h"
 
 // Claim table. At v1.0 P4-Ib a static array bounds the number of
@@ -140,7 +142,13 @@ struct KObj_MMIO *kobj_mmio_create(u64 pa, size_t size) {
     // the syscall entry point instead so a malformed userspace request
     // gets a clean -1 instead of a kernel termination. Mirrors
     // `mmu_map_mmio`'s IPS check at mmu.c:668.
-    if ((pa + size - 1) >> 40)            return NULL;
+    // (2026-11-10: the bound is the size the CPU implements where that is
+    // smaller, since such a leaf takes an address size fault instead.)
+    if ((pa + size - 1) >> mmu_pa_bits()) return NULL;
+    // A device window is never RAM. The reservations below keep a claim off
+    // the kernel's devices; this keeps it off the kernel's memory, which a
+    // holder of the broad allowance could otherwise map as if it were one.
+    if (phys_range_touches_ram(pa, size)) return NULL;
 
     struct KObj_MMIO *k = kmalloc(sizeof(*k), KP_ZERO);
     if (!k) return NULL;

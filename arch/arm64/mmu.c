@@ -916,10 +916,10 @@ void *mmu_map_mmio(paddr_t pa, size_t size) {
     if (pa + size < pa) {
         extinction("mmu_map_mmio: pa + size overflow");
     }
-    // R6-B F118: PA must fit in TCR.IPS=40-bit (per mmu.c TCR_IPS_VALUE).
-    // Architecturally undefined behavior on out-of-IPS PA in PTE bits.
-    if (pa >> 40) {
-        extinction("mmu_map_mmio: PA exceeds TCR.IPS=40 (1 TiB)");
+    // R6-B F118: the PA must fit what a translation may output; a leaf past
+    // it takes an address size fault on first use.
+    if ((pa + size - 1) >> mmu_pa_bits()) {
+        extinction("mmu_map_mmio: PA exceeds the physical address size");
     }
     // RW-1 F4: the page-round below wraps for size within PAGE_SIZE-1 of
     // SIZE_MAX (aligned_size -> tiny, n_pages -> tiny), mapping far fewer
@@ -1697,8 +1697,8 @@ int mmu_install_user_pte_attr(struct AddrSpace *as, bool exempt,
     // fail fast before any per-Proc tree mutation; this check remains as
     // per-page defense-in-depth for the demand-page path.
     if (vaddr >> 47)                     return -1;
-    // PA must fit in TCR.IPS = 40-bit (mirrors mmu_map_mmio's R6-B F118).
-    if (pa >> 40)                        return -1;
+    // The PA must fit what a translation may output (mirrors mmu_map_mmio).
+    if (pa >> mmu_pa_bits())             return -1;
     // VMA layer rejects W+X already; defense-in-depth duplicate check.
     if ((prot & VMA_PROT_WRITE) && (prot & VMA_PROT_EXEC)) return -1;
 
@@ -1808,7 +1808,7 @@ int mmu_replace_user_pte_attr(struct AddrSpace *as, bool exempt,
     if (vaddr & (PAGE_SIZE - 1)) return -1;
     if (pa & (PAGE_SIZE - 1)) return -1;
     if (vaddr >> 47)                     return -1;
-    if (pa >> 40)                        return -1;
+    if (pa >> mmu_pa_bits())             return -1;
     if ((prot & VMA_PROT_WRITE) && (prot & VMA_PROT_EXEC)) return -1;
 
     u32 idx0 = (u32)((vaddr >> BLOCK_SHIFT_L0) & 0x1ff);
@@ -2018,6 +2018,21 @@ u64 mmu_uninstall_pte_calls(void) {
 // for table descriptors, whose upper bits are 0) would leave them in the PA --
 // mask [47:12] explicitly for the leaf.
 #define PTE_OA_MASK  0x0000FFFFFFFFF000ull
+
+u32 mmu_pa_bits(void) {
+    // Read once; every CPU of the machines this runs on reports the same range.
+    static u8 cached;
+    u8 bits = __atomic_load_n(&cached, __ATOMIC_RELAXED);
+    if (bits) return bits;
+    static const u8 by_parange[] = { 32, 36, 40, 42, 44, 48, 52 };
+    u64 mmfr0;
+    __asm__ __volatile__("mrs %0, id_aa64mmfr0_el1" : "=r"(mmfr0));
+    u64 range = mmfr0 & 0xf;
+    bits = range < sizeof(by_parange) ? by_parange[range] : 40;
+    if (bits > 40) bits = 40;   // TCR_IPS_VALUE
+    __atomic_store_n(&cached, bits, __ATOMIC_RELAXED);
+    return bits;
+}
 
 // Resolve one user byte at `vaddr` in `pgtable_root` to a direct-map kernel
 // pointer, or NULL if not resident or not RAM. `*writable_out` (when non-NULL) = the leaf

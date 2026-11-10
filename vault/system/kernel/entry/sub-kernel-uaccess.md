@@ -16,7 +16,7 @@ design:
   - "docs/reference/40-uaccess.md"
   - "docs/CONCURRENT-FS.md CF-3"
 created: 2026-08-02
-updated: 2026-10-07
+updated: 2026-11-10
 ---
 ## Purpose
 
@@ -168,6 +168,14 @@ uaccess fault" and passes on to the ordinary fatal path.
 
 There is no error path for a bad caller: an unvalidated address or an unaligned
 word access is a caller bug, and the alignment case is not recoverable.
+
+A user address can be a device window, and a device can refuse an access. Since
+2026-11-10 that refusal, a synchronous external abort taken by the crossing
+instruction, is a fault like the others: `-1`, by way of the fixup
+([[sub-kernel-exception]]). `uaccess.bus_error_fails_the_copy` forks a child
+that maps an address the machine has nothing at and hands it to every arm of
+every primitive; all seven calls must agree, `-1` where the machine reports the
+refusal and `0` where a hypervisor completes the access itself.
 
 ## Performance
 

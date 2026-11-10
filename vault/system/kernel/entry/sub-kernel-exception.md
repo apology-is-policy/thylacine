@@ -16,7 +16,7 @@ design:
   - "docs/ARCHITECTURE.md section 12"
   - "docs/reference/08-exception.md"
 created: 2026-08-02
-updated: 2026-11-03
+updated: 2026-11-10
 ---
 ## Purpose
 
@@ -493,6 +493,15 @@ interrupt slot currently holds **thirty-one** of its thirty-two instructions.
   covers translation, permission and access-flag faults; an unaligned kernel
   access to a user address is not in that set and extincts. Callers that could
   produce one validate alignment themselves.
+- **A bus error at a uaccess instruction fails the copy (2026-11-10).** A
+  synchronous external abort on the access itself (`fault_is_access_bus`: DFSC
+  0x10, a data abort) taken at a PC the fixup table knows goes straight to the
+  fixup, with no pager call, since no page install answers it. That is a user's
+  device window whose device refused the access; before, it fell through to the
+  catch-all and ended the kernel, while the same abort from EL0 cost only that
+  Proc a `snare:bus`. The route is keyed on the PC and not on the fault
+  address, which an external abort need not report. An external abort on a
+  table walk is not in the set: that is the kernel's own tables failing.
 
 ## The SP test at the 0x200 slot (2026-11-03; thread-model C10)
 

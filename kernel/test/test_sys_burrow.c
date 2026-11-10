@@ -328,7 +328,7 @@ void test_sys_burrow_detach_mmio_map_by_identity(void) {
     struct Proc *p = proc_alloc();
     TEST_ASSERT(p != NULL, "proc_alloc failed");
 
-    const u64 pa   = 0x2000000000ull;               // 128 GiB: no RAM, no device
+    const u64 pa   = 0xE00000000ull;                // 56 GiB: no RAM, no device, inside a 36-bit PA size
     const u64 size = 512ull * 1024 * 1024;          // > BURROW_ATTACH_MAX
     TEST_ASSERT(size > BURROW_ATTACH_MAX, "the span must exceed BURROW_ATTACH_MAX");
     struct KObj_MMIO *km = kobj_mmio_create(pa, size);

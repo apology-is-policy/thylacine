@@ -21,8 +21,8 @@
 #include "../../arch/arm64/timer.h" // TIMER_INTID_EL1_VIRT (R9 F142 test)
 #include "../../arch/arm64/gic.h"   // gic_max_intid (R12-gic-edge F205 test)
 
-#define TEST_PA_C   0x100020000ull
-#define TEST_PA_D   0x100030000ull
+#define TEST_PA_C   0xF00020000ull
+#define TEST_PA_D   0xF00030000ull
 
 // handle_dup of a KOBJ_MMIO handle returns -1 (NoHwDup invariant).
 void test_handle_hw_mmio_dup_rejected(void) {

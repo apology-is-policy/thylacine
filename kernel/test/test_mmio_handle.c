@@ -2,13 +2,10 @@
 //
 // Per <thylacine/mmio_handle.h> + specs/handles.tla::HwResourceExclusive.
 // Tests cover the basic lifecycle + the overlap-rejection invariant.
-// Uses a synthetic PA range chosen to NOT overlap any real MMIO region
-// in the QEMU virt platform (TEST_MMIO_PA picked from the "no devices
-// here" gap above 0x80000000 — RAM extends from 0x40000000, so this
-// range may overlap RAM, but kobj_mmio_create doesn't actually access
-// the memory; it just tracks the claim. Real driver use (P4-Ic+) maps
-// device PAs and reads/writes them; tests only exercise the claim
-// machinery.)
+// Uses a synthetic PA range at 60 GiB, where the QEMU virt machine has
+// neither a device nor RAM (a claim over RAM is refused) and which a CPU
+// with a 36-bit physical address size can still name. The tests only
+// exercise the claim machinery and never touch the range.
 
 #include "test.h"
 #include <thylacine/dtb.h>
@@ -19,12 +16,13 @@
 #include <thylacine/types.h>
 
 #include "../../arch/arm64/gic.h"
+#include "../../arch/arm64/mmu.h"
 #include "../../arch/arm64/uart.h"
+#include "../../mm/phys.h"
 
-// Synthetic PA range used by the tests. Page-aligned. Picked
-// arbitrarily — claim tracking doesn't touch the actual memory.
-#define TEST_MMIO_PA_A   0x100000000ull
-#define TEST_MMIO_PA_B   0x100010000ull   // 64 KiB past A
+// Synthetic PA range used by the tests. Page-aligned.
+#define TEST_MMIO_PA_A   0xF00000000ull
+#define TEST_MMIO_PA_B   0xF00010000ull   // 64 KiB past A
 #define TEST_MMIO_SIZE   0x1000ull        // 1 page
 
 void test_mmio_handle_create_basic(void) {
@@ -86,6 +84,37 @@ void test_mmio_handle_create_adjacent_ok(void) {
     TEST_ASSERT(k2 != NULL, "k2 create (adjacent to k1) should succeed");
     kobj_mmio_unref(k1);
     kobj_mmio_unref(k2);
+}
+
+// A device window is never RAM: a claim that shares a byte with the allocator's
+// zone is refused, whoever asks. The control is one page away, just past the
+// zone's end, where nothing differs but the RAM.
+void test_mmio_handle_create_over_ram_rejected(void) {
+    paddr_t base = 0, end = 0;
+    phys_zone_bounds(&base, &end);
+    TEST_ASSERT(base < end && (end & (PAGE_SIZE - 1)) == 0, "premise: a page-aligned zone");
+
+    struct page *pg = alloc_pages(0, KP_ZERO);
+    TEST_ASSERT(pg != NULL, "alloc a RAM page");
+    struct KObj_MMIO *over_page = kobj_mmio_create(page_to_pa(pg), PAGE_SIZE);
+    free_pages(pg, 0);
+    struct KObj_MMIO *first    = kobj_mmio_create(base, PAGE_SIZE);
+    struct KObj_MMIO *last     = kobj_mmio_create(end - PAGE_SIZE, PAGE_SIZE);
+    struct KObj_MMIO *straddle = kobj_mmio_create(end - PAGE_SIZE, 2 * PAGE_SIZE);
+    struct KObj_MMIO *past     = kobj_mmio_create(end, PAGE_SIZE);
+    bool r_page = over_page != NULL, r_first = first != NULL, r_last = last != NULL;
+    bool r_straddle = straddle != NULL, r_past = past != NULL;
+    if (over_page) kobj_mmio_unref(over_page);
+    if (first)     kobj_mmio_unref(first);
+    if (last)      kobj_mmio_unref(last);
+    if (straddle)  kobj_mmio_unref(straddle);
+    if (past)      kobj_mmio_unref(past);
+
+    TEST_ASSERT(r_past, "control: the page just past the zone can be claimed");
+    TEST_ASSERT(!r_page, "a claim over an allocated page is refused");
+    TEST_ASSERT(!r_first, "a claim over the zone's first page is refused");
+    TEST_ASSERT(!r_last, "a claim over the zone's last page is refused");
+    TEST_ASSERT(!r_straddle, "a claim that runs off the zone's end is refused for the page inside it");
 }
 
 // After unref, the claim slot is freed and a subsequent create on the
@@ -184,17 +213,23 @@ void test_mmio_handle_virtio_mmio_claimable(void) {
 // trigger FAULT_UNHANDLED_USER on first access → kernel extinction.
 // Mirrors mmu_map_mmio's IPS check.
 void test_mmio_handle_create_out_of_ips_rejected(void) {
-    // PA at 1 TiB (2^40). Architecturally invalid in 40-bit IPS.
-    struct KObj_MMIO *k = kobj_mmio_create((u64)1 << 40, PAGE_SIZE);
-    TEST_ASSERT(k == NULL, "kobj_mmio_create at PA=2^40 must be rejected");
+    // The bound is what a translation may output: the CPU's own physical
+    // address size where that is below the 40 bits TCR.IPS is programmed for.
+    u32 bits = mmu_pa_bits();
+    TEST_ASSERT(bits >= 32 && bits <= 40, "premise: a physical address size the kernel can program");
+    u64 top = (u64)1 << bits;
+    struct KObj_MMIO *k = kobj_mmio_create(top, PAGE_SIZE);
+    TEST_ASSERT(k == NULL, "a claim at the first address past the physical address size is refused");
 
-    // PA just below the boundary, but pa + size crosses it: pa =
-    // (1<<40) - PAGE_SIZE; size = 2 * PAGE_SIZE. The first page is
-    // valid but pa+size-1 sits at (1<<40) + PAGE_SIZE - 1 → out of IPS.
-    struct KObj_MMIO *k2 = kobj_mmio_create(((u64)1 << 40) - PAGE_SIZE,
-                                            2 * PAGE_SIZE);
-    TEST_ASSERT(k2 == NULL,
-                "kobj_mmio_create with range crossing IPS boundary must be rejected");
+    // The first page is valid, the second is past the bound.
+    struct KObj_MMIO *k2 = kobj_mmio_create(top - PAGE_SIZE, 2 * PAGE_SIZE);
+    TEST_ASSERT(k2 == NULL, "a claim that crosses the physical address size is refused");
+
+    // Control: the last page under the bound can be claimed.
+    struct KObj_MMIO *k3 = kobj_mmio_create(top - PAGE_SIZE, PAGE_SIZE);
+    bool last_ok = k3 != NULL;
+    if (k3) kobj_mmio_unref(k3);
+    TEST_ASSERT(last_ok, "control: the last page under the bound can be claimed");
 }
 
 // Verify the live-count instrumentation tracks correctly across a

@@ -17,10 +17,15 @@
 #include "test.h"
 
 #include "../../arch/arm64/exception.h"
+#include "../../arch/arm64/mmu.h"
 #include "../../arch/arm64/uaccess.h"
+#include "../../arch/arm64/uart.h"
 #include "../../mm/phys.h"
 
+#include <thylacine/proc.h>
+#include <thylacine/thread.h>
 #include <thylacine/types.h>
+#include <thylacine/vma.h>
 
 void test_uaccess_fixup_table_well_formed(void) {
     // start < end (table is non-empty).
@@ -190,6 +195,68 @@ void test_uaccess_copy_in_unmapped_faults_all_arms(void) {
 
     TEST_EXPECT_EQ(uaccess_copy_in(dst, 0x10000000ull, 3), (s64)-1,
         "copy_in tail-arm fault must return -1");
+}
+
+// A device window whose device refuses the access: the copy fails, and the
+// kernel does not end. The child maps a physical address the machine has
+// nothing at into its own address space and hands that address to every
+// uaccess arm. Where the machine reports the refusal (a synchronous external
+// abort, as TCG does) each call returns -1; where the hypervisor completes the
+// access itself each returns 0. Either way all seven agree.
+#define UB_VA      0x30000000ull     // 768 MiB, user half; nothing else maps it
+#define UB_PA      0x0b000000ull     // a hole in the virt machine's low device region: no RAM, no device
+#define UB_CALLS   7
+static volatile s64 g_ub_rc[UB_CALLS];
+static volatile int g_ub_map_rc, g_ub_under_rc, g_ub_past_rc;
+
+static void ub_child(void *arg) {
+    (void)arg;
+    struct Proc *p = current_thread()->proc;
+    g_ub_map_rc = mmu_install_user_pte(p->as, proc_resource_exempt(p), UB_VA, (paddr_t)UB_PA, VMA_PROT_RW, true);
+    if (g_ub_map_rc != 0) exits("map");
+    // A leaf may not name an address past the CPU's physical address size: its
+    // first use would be an address size fault, which no fixup answers. Neither
+    // of these two is ever touched.
+    paddr_t top = (paddr_t)1 << mmu_pa_bits();
+    g_ub_under_rc = mmu_install_user_pte(p->as, proc_resource_exempt(p), UB_VA + PAGE_SIZE,     top - PAGE_SIZE, VMA_PROT_RW, true);
+    g_ub_past_rc  = mmu_install_user_pte(p->as, proc_resource_exempt(p), UB_VA + 2 * PAGE_SIZE, top,             VMA_PROT_RW, true);
+    u8 buf[64];
+    for (int i = 0; i < 64; i++) buf[i] = 0;
+    u8 one = 0;
+    g_ub_rc[0] = uaccess_load_u8(UB_VA, &one);
+    g_ub_rc[1] = uaccess_copy_in(buf, UB_VA + 1, 16);    // head arm
+    g_ub_rc[2] = uaccess_copy_in(buf, UB_VA, 64);        // body arm
+    g_ub_rc[3] = uaccess_copy_in(buf, UB_VA, 3);         // tail arm
+    g_ub_rc[4] = uaccess_copy_out(UB_VA + 1, buf, 16);
+    g_ub_rc[5] = uaccess_copy_out(UB_VA, buf, 64);
+    g_ub_rc[6] = uaccess_copy_out(UB_VA, buf, 3);
+    exits("ok");
+}
+
+void test_uaccess_bus_error_fails_the_copy(void) {
+    TEST_ASSERT(!phys_pa_is_ram((paddr_t)UB_PA), "premise: the probe address is not RAM");
+    for (int i = 0; i < UB_CALLS; i++) g_ub_rc[i] = -99;
+    g_ub_map_rc = g_ub_under_rc = g_ub_past_rc = -99;
+
+    int pid = rfork(RFPROC, ub_child, NULL);
+    TEST_ASSERT(pid > 0, "rfork");
+    int status = -1;
+    TEST_EXPECT_EQ(wait_pid(&status), pid, "wait_pid");
+    TEST_EXPECT_EQ(g_ub_map_rc, 0, "the child mapped the device leaf");
+    TEST_EXPECT_EQ(status, 0, "the child ran every copy and exited cleanly");
+    TEST_EXPECT_EQ(g_ub_under_rc, 0, "control: a leaf at the last page under the physical address size installs");
+    TEST_EXPECT_EQ(g_ub_past_rc, -1, "a leaf at the first page past the physical address size is refused");
+
+    int refused = 0;
+    for (int i = 0; i < UB_CALLS; i++) {
+        s64 rc = g_ub_rc[i];
+        TEST_ASSERT(rc == 0 || rc == -1, "a copy at a device window returns 0 or -1");
+        if (rc == -1) refused++;
+    }
+    TEST_ASSERT(refused == 0 || refused == UB_CALLS, "every arm met the same answer from the machine");
+    uart_puts("    uaccess.bus_error: the machine refused ");
+    uart_putdec((u64)refused);
+    uart_puts(" of 7 copies\n");
 }
 
 void test_uaccess_copy_fixup_entries_present(void) {

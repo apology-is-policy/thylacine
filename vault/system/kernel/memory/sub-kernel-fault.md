@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/ARCHITECTURE.md", "docs/EXEC-LOAD-DESIGN.md"]
 created: 2026-08-03
-updated: 2026-11-09
+updated: 2026-11-10
 ---
 ## Purpose
 
@@ -458,7 +458,11 @@ As built: `fault_info` decodes `is_alignment` / `is_external`, and the top of
 `is_permission` holds -- the class decides, not the page. The kernel-mode
 uaccess entry (`arch/arm64/exception.c`) already admitted only the three
 classes, so a kernel-side alignment fault through a user pointer still
-extincts as the kernel bug it is. Witnesses:
+extincts as the kernel bug it is. (Since 2026-11-10 that entry also sends a
+synchronous external abort on the access itself, `fault_is_access_bus`, to the
+uaccess fixup: a user's device window whose device refused the access fails
+the copy instead of reaching this file's catch-all. [[sub-kernel-exception]].)
+Witnesses:
 `demand_page.alignment_abort_is_bus_not_handled` (a synthetic 0x21 and a 0x10
 on a mapped, admitting page -> `FAULT_USER_BUS`; CONTROL: a translation fault
 on the same VA -> `FAULT_HANDLED`) and `/bus-probe-child` from EL0 (joey: a

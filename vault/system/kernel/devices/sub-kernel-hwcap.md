@@ -60,7 +60,14 @@ from.
 
 **A register range is external to the allocator, so it needs a table.** A
 fixed-size array of live claims, scanned under one lock for overlap before
-anything is allocated. The overlap predicate is the symmetric one — two ranges
+anything is allocated. A claim is refused before that scan if it shares a byte
+with RAM (the allocator's zone, `phys_range_touches_ram`) or reaches past the
+physical address size a translation can output (`mmu_pa_bits`: the CPU's own
+size where that is under the 40 bits the kernel programs). The first keeps a
+holder of the broad allowance from mapping the kernel's memory as if it were a
+device; the second keeps out a leaf whose first use is an address size fault,
+which on a 36-bit CPU (an Apple core under its hypervisor) begins at 64 GiB
+(both since 2026-11-10). The overlap predicate is the symmetric one — two ranges
 overlap iff each starts before the other ends — which admits *adjacency*: a range
 beginning exactly where another ends is contiguous but distinct, and is allowed.
 Creation also rejects a range that is unaligned, zero-length, wrapping, or past
