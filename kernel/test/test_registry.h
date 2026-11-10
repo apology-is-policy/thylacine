@@ -2115,6 +2115,7 @@ void test_poll_devsrv_listener_immediate_pollin(void);
 void test_poll_devsrv_listener_empty_not_ready(void);
 void test_poll_devsrv_listener_block_then_wake(void);
 void test_poll_devsrv_listener_pollhup_on_tombstone(void);
+void test_poll_devsrv_listener_unasked_parks(void);
 void test_poll_devsrv_conn_pollin_on_send(void);
 void test_poll_devsrv_conn_pollout_immediate(void);
 void test_poll_devsrv_conn_pollhup_on_teardown(void);

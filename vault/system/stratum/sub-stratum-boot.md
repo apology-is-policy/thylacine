@@ -12,7 +12,7 @@ locks: []
 abis: []
 design: ["docs/reference/86-pouch-stratumd-boot.md (the 16c design section)"]
 created: 2026-08-02
-updated: 2026-11-02
+updated: 2026-11-10
 ---
 ## Session factory handoff
 
@@ -125,7 +125,25 @@ fall back to within dlmalloc's kept top of the base with no trim asked for and
 to the base after one; a 32 MiB block returns every page while a small block
 stays live; a reservation switch releases the emptied first reservation; and the
 churn is timed on either side of dlmalloc's trim threshold. Boot-fatal
-(`joey: /heap-probe FAILED`). The CL-5 probe (`probe_cl5_page_budget`)
+(`joey: /heap-probe FAILED`). **The full-pool rung (2026-11-10).** After the
+login E2E, under `THYLA_BOOT_PROBES`, joey spawns `/bin/srvfull-probe` and
+requires status 0. Per server (`/srv/corvus` always; `/srv/net` wherever it is
+posted, else a `NOT PROBED` line -- and `tools/test.sh` requires netd's OK line
+on every boot where netd served `/net`) the probe opens one
+connection of its own, starts a holder child that opens connections until one
+does not return, and from an agreed instant reads the server's `CPU_NS` in
+`/ctl/procs` twice, 400 ms apart; it then closes its own connection and the
+holder's waiting connect must be served. The holder exits 0 only if that
+connect began before the window and returned after it, so the reading sits
+inside one wait at a full pool; a fill still running at the window's start
+takes the attempt again with twice the settle (three attempts, the longest
+well inside the 5 s connect handshake deadline), so a slow boot
+costs time and not a verdict. The bar is a quarter of the window: a server
+that keeps asking about a listener it cannot accept from never sleeps and
+takes all of it ([[sub-corvus]], [[sub-netd-nic]]). It runs in joey's ladder
+because only the system principal or a hostowner reads another Proc's CPU
+time. Boot-fatal (`joey: srvfull PROBE FAILED`); it adds about a second per
+server to the boot. The CL-5 probe (`probe_cl5_page_budget`)
 reads joey's OWN `budget:` from its status file (`proc_status_field`) rather
 than restating a constant, asks for one page more (refused: a raise without
 authority) and for `0xFFFFFFFF` (refused at validation: over the hard maximum

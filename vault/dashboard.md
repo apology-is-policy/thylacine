@@ -123,6 +123,7 @@ Generated — do not edit between the markers (`quaestor render`).
 
 ## Recent changes
 
+- 2026-11-10 [[chg-2026-11-10-full-pool-waits]] — corvus and netd ask about their listener only while they have room, so a full pool waits instead of running
 - 2026-11-10 [[chg-2026-11-10-owed-barrier-holders]] — A free's stand-down lets every context holding it go, the owed-free pass serves contexts with parked chains in turn, and a destroyed context's blob births are cleared
 - 2026-11-10 [[chg-2026-11-10-owed-barrier-per-free]] — A free's barrier stands down only after a stall its own repeat met; the owed-free pass still stands down after any of its stalls
 - 2026-11-10 [[chg-2026-11-10-owed-barrier]] — A chain that can reach an owed free parks until the free is paid, so a busy context cannot hold its taken free off
@@ -130,5 +131,4 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-11-10 [[chg-2026-11-10-owed-quiet]] — The owed-free pass and its barrier wait for a quiet engine, so a sustained load cannot take every revived window or freeze the owner's chains
 - 2026-11-10 [[chg-2026-11-10-owed-stand-down]] — The owed-free pass stands down for one window only after a stall its own repeat met; any other stall leaves it and its barrier up, so it gets the first turn after every other revival
 - 2026-11-10 [[chg-2026-11-10-owed-turn-budget]] — A parked context's turn in the owed-free pass has its own looks, the rotation its own, and a turn out of looks moves past its context
-- 2026-11-10 [[chg-2026-11-10-owed-turn-cursor]] — A parked context cut short in the owed-free pass's turn starts the next turn, and a turn looks only at frees that hold a chain back
 <!-- generated:end -->

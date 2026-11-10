@@ -3057,6 +3057,7 @@ struct test_case g_tests[] = {
     { "poll.devsrv_listener_empty_not_ready",   test_poll_devsrv_listener_empty_not_ready,   false, NULL },
     { "poll.devsrv_listener_block_then_wake",   test_poll_devsrv_listener_block_then_wake,   false, NULL },
     { "poll.devsrv_listener_pollhup_on_tombstone", test_poll_devsrv_listener_pollhup_on_tombstone, false, NULL },
+    { "poll.devsrv_listener_unasked_parks",     test_poll_devsrv_listener_unasked_parks,     false, NULL },
     { "poll.devsrv_conn_pollin_on_send",        test_poll_devsrv_conn_pollin_on_send,        false, NULL },
     { "poll.devsrv_conn_pollout_immediate",     test_poll_devsrv_conn_pollout_immediate,     false, NULL },
     { "poll.devsrv_conn_pollhup_on_teardown",   test_poll_devsrv_conn_pollhup_on_teardown,   false, NULL },
