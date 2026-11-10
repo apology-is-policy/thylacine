@@ -2019,7 +2019,7 @@ u64 mmu_uninstall_pte_calls(void) {
 #define PTE_OA_MASK  0x0000FFFFFFFFF000ull
 
 // Resolve one user byte at `vaddr` in `pgtable_root` to a direct-map kernel
-// pointer, or NULL if not resident. `*writable_out` (when non-NULL) = the leaf
+// pointer, or NULL if not resident or not RAM. `*writable_out` (when non-NULL) = the leaf
 // is user-writable (AP[2] == 0). Read-only, non-growing.
 static void *cross_proc_resolve(paddr_t pgtable_root, u64 vaddr, bool *writable_out) {
     if (pgtable_root == 0)  return NULL;
@@ -2049,9 +2049,15 @@ static void *cross_proc_resolve(paddr_t pgtable_root, u64 vaddr, bool *writable_
     // them; a reader with authority over that Proc must not be the way around.
     if (!(e & (1ull << 6))) return NULL;
 
+    paddr_t page_pa = e & PTE_OA_MASK;
+    // A device window (an MMIO or BAR leaf) is not memory: its physical address
+    // has no direct-map alias, and a byte copy is not a device access. It reads
+    // as a hole. Judged by the address, not the leaf's attribute, because a
+    // cached host-memory window is a device behind a Normal attribute.
+    if (!phys_pa_is_ram(page_pa)) return NULL;
+
     if (writable_out)
         *writable_out = ((e & (1ull << 7)) == 0);   // AP[2] (bit 7) clear -> writable
-    paddr_t page_pa = e & PTE_OA_MASK;
     u64 pgoff = vaddr & (PAGE_SIZE - 1);
     return (void *)((u8 *)pa_to_kva(page_pa) + pgoff);
 }

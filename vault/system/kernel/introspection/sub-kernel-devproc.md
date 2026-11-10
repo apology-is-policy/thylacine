@@ -21,7 +21,7 @@ design:
   - "docs/IMPERIUM-DESIGN.md section 11.3 item 10"
   - "docs/IDENTITY-DESIGN.md reserved ids (none owns nothing)"
 created: 2026-08-02
-updated: 2026-10-29
+updated: 2026-11-10
 ---
 ## Purpose
 
@@ -244,6 +244,13 @@ Dev keeps no per-Spoor state except the debug-attach flag.
 refuse. `.seekable = true`, because `mem` is VA-addressed and the register files
 are struct-offset-addressed; without it the positioned-I/O gate rejects them
 before the Dev is reached.
+
+`mem` copies only RAM. A page the target has not faulted in reads as a hole, and
+so does a device window (a driver's MMIO or PCI BAR mapping, a GPU client's
+host-memory window): its address has no kernel alias to copy through and a byte
+copy is not a device access, so the resolver refuses the leaf
+([[sub-kernel-mmu]]; `devproc.debug_mem` reads and writes the interrupt
+distributor's address through a target's `mem`).
 
 **The header.** `devproc.h` declares the two visibility predicates `/ctl/procs`
 shares with `/proc`: `devproc_none_walled` (Plan 9's `nonone()`) and

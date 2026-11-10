@@ -605,7 +605,10 @@ what the parent held. Three things leaked that way: a code region, which is
 aliases); an MMIO, DMA or PCI BAR window, which is the I-34 allowance's (B-2b audit
 r3 F3: L-3 keeps a shared space's device mapped for the surviving sharer, so a
 capless same-principal peer covered the child and wrote the device through its
-`mem`); and a seal, since seals do not cross fork while the secret the seal kept is
+`mem` -- as the audit reasoned it; since 2026-11-10 `mem` refuses a device window
+outright, and before that the write ended the kernel on the emulated machine
+rather than reaching the device, so the cover rule is now the second guard on
+that path and the only one on a DMA window, which is RAM); and a seal, since seals do not cross fork while the secret the seal kept is
 still in the shared bytes. So the `AddrSpace` keeps `caps_ever`, the OR of the caps
 of every holder that has left it, and `guards_ever`, the OR of those holders'
 `NODUMP`, `NOTRACE` and `DEBUG_TAINTED` bits, and the join ORs both in, sole mapper
@@ -687,7 +690,7 @@ files today: `status`, `cmdline`, `ctl`, `ns`. The debug surface adds flat files
 | File | Mode | Semantics |
 |---|---|---|
 | `ctl` (extend) | `0600` | debug verbs (§4.3), per-verb I-39 gate, ADDED to the existing kill/killgrp parser |
-| `mem` | `0600` | RW the target's user memory via its `pgtable_root`; **stopped-only** for both R and W (I-39); a non-resident VA (unfaulted lazy-anon / REVENANT FILE) reads as "not resident" |
+| `mem` | `0600` | RW the target's user memory via its `pgtable_root`; **stopped-only** for both R and W (I-39); a non-resident VA (unfaulted lazy-anon / REVENANT FILE) reads as "not resident", and so does a device window (an MMIO, PCI BAR or host-memory leaf: its address is not RAM, the kernel has no pointer to copy through, and a byte copy is not a device access; Linux refuses `VM_IO` mappings the same way) |
 | `regs` | `0600` | RW the saved EL0 GPR frame (`x0..x30`, `SP_EL0`, `ELR_EL1`, `SPSR_EL1`); writes stopped-only |
 | `fpregs` | `0600` | RW the saved FP/SIMD frame; stopped-only writes |
 | `wait` | `0400` | read blocks until the target stops at a trap/checkpoint (the debugger's stop-notification channel) |

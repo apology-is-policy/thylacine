@@ -253,6 +253,10 @@ u64 phys_reserved_pages(void) {
     return g_total_pages - g_initial_free_pages;
 }
 
+bool phys_pa_is_ram(paddr_t pa) {
+    return pa >= g_zone_base && pa < g_zone_end;
+}
+
 #ifdef KERNEL_TESTS
 void phys_zone_bounds(paddr_t *base, paddr_t *end) {
     if (base) *base = g_zone_base;

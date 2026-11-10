@@ -21,6 +21,7 @@
 #include "test.h"
 
 #include "../../arch/arm64/mmu.h"        // 8a-1b-gamma-1: mmu_install_user_pte + mmu_cross_proc_* + pa_to_kva
+#include "../../arch/arm64/gic.h"        // gic_dist_pa: a physical address that is a device on every machine
 #include "../../arch/arm64/exception.h"  // 8a-1b-gamma-2: struct exception_context (the regs test's synthetic trapframe)
 #include "../../arch/arm64/halls.h"
 #include "../../arch/arm64/halls_symtab.h"
@@ -2535,6 +2536,7 @@ void test_devproc_debug_mem(void) {
     const u64 RW_VA  = 0x20000000ull;   // 512 MiB, user-half
     const u64 RO_VA  = 0x20001000ull;   // + one page
     const u64 GAP_VA = 0x20002000ull;   // + two pages: never mapped (a hole)
+    const u64 DEV_VA = 0x20003000ull;   // + three pages: a device window
 
     struct page *rw_pg = alloc_pages(0, KP_ZERO);
     struct page *ro_pg = alloc_pages(0, KP_ZERO);
@@ -2545,6 +2547,7 @@ void test_devproc_debug_mem(void) {
     for (int i = 0; i < 64; i++) { rw_kva[i] = (u8)(0xA0 + i); ro_kva[i] = (u8)(0x50 + i); }
     TEST_EXPECT_EQ(mmu_install_user_pte(tgt->as, proc_resource_exempt(tgt), RW_VA, rw_pa, VMA_PROT_RW,   false), 0, "map RW page");
     TEST_EXPECT_EQ(mmu_install_user_pte(tgt->as, proc_resource_exempt(tgt), RO_VA, ro_pa, VMA_PROT_READ, false), 0, "map RO page");
+    TEST_EXPECT_EQ(mmu_install_user_pte(tgt->as, proc_resource_exempt(tgt), DEV_VA, (paddr_t)gic_dist_pa(), VMA_PROT_RW, true), 0, "map a device leaf");
 
     // --- Layer 1: the raw cross-Proc resolver ---
     u8 buf[64], wbuf[64];
@@ -2566,6 +2569,13 @@ void test_devproc_debug_mem(void) {
     // A non-resident VA -> 0 (not resident; no fault-in).
     TEST_EXPECT_EQ(mmu_cross_proc_read(tgt->as->pgtable_root,  GAP_VA, buf,  64), 0L, "read of a hole returns 0");
     TEST_EXPECT_EQ(mmu_cross_proc_write(tgt->as->pgtable_root, GAP_VA, wbuf, 64), 0L, "write of a hole returns 0");
+
+    // A device window is refused like a hole, both ways: it has no RAM behind
+    // it, so there is nothing in the direct map to copy from or to.
+    TEST_ASSERT(!phys_pa_is_ram((paddr_t)gic_dist_pa()) && phys_pa_is_ram(rw_pa),
+                "premise: the distributor is not RAM and an allocated page is");
+    TEST_EXPECT_EQ(mmu_cross_proc_read(tgt->as->pgtable_root,  DEV_VA, buf,  64), 0L, "read of a device leaf returns 0");
+    TEST_EXPECT_EQ(mmu_cross_proc_write(tgt->as->pgtable_root, DEV_VA, wbuf, 64), 0L, "write of a device leaf returns 0");
 
     // --- Layer 2: the devproc mem-file path (I-39 + stopped-only) ---
     proc_test_link(tgt);
@@ -2600,6 +2610,7 @@ void test_devproc_debug_mem(void) {
     bool mem_tainted_after =
         (__atomic_load_n(&tgt->proc_flags, __ATOMIC_ACQUIRE) & PROC_FLAG_DEBUG_TAINTED) != 0;
     TEST_EXPECT_EQ(devproc.read(mem, buf, 64, (s64)GAP_VA), 0L, "mem read of a hole returns 0");
+    TEST_EXPECT_EQ(devproc.read(mem, buf, 64, (s64)DEV_VA), 0L, "mem read of a device window returns 0");
 
     // Non-owner (a target owned by a different principal; caller has no debug
     // cap) -> refused even while stopped (I-39).

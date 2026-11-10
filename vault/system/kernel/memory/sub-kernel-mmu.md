@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/ARCHITECTURE.md", "docs/PORTABILITY.md"]
 created: 2026-08-03
-updated: 2026-11-05
+updated: 2026-11-10
 ---
 ## Purpose
 
@@ -243,6 +243,18 @@ never faulting anything in, and refusing to write a read-only page. Since B-2b
 debug reader resolves the leaf to its page and copies through the direct map,
 where no permission bit of the leaf applies, so without the check
 `/proc/<pid>/mem` would read back a sealed region's bytes.
+
+It refuses a leaf whose physical address is not RAM, too (`phys_pa_is_ram`: the
+allocator's zone, which is the RAM the direct map covers). A driver's MMIO
+window, a PCI BAR window and a host-memory window are leaves like any other,
+but nothing in the direct map stands for them: on the emulated machine their
+addresses lie below the first mapped gigabyte, and the copy took a kernel
+translation fault and ended the world; on a board whose devices sit inside the
+mapped range it would have been a byte-wise, cacheable access to device
+registers. The test is on the address and not on the leaf's memory attribute,
+because a cached host-memory window is a device behind a Normal attribute. To
+the debugger a device window reads as a hole (`devproc.debug_mem` maps the
+interrupt distributor's address into a target and reads and writes it).
 
 **I-42** — the JIT's outward generalization of the self-modification alias
 (the [[sub-kernel-burrow]] `BURROW_TYPE_CODE` dual mapping), and its two I-cache

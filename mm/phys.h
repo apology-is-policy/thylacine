@@ -30,6 +30,11 @@ u64 phys_total_pages(void);     // total pages in the zone
 u64 phys_free_pages(void);      // free pages in the buddy, all orders; per-CPU magazines hold more
 u64 phys_reserved_pages(void);  // total - free, computed at init
 
+// True iff `pa` lies in the zone: RAM the direct map covers, reservations
+// included. A device window's physical address is outside it, and so has no
+// direct-map alias a kernel pointer may be made from.
+bool phys_pa_is_ram(paddr_t pa);
+
 #ifdef KERNEL_TESTS
 // Buddy zone bounds [base, end) after the direct-map 8 GiB-reach cap.
 // NULL args are skipped. Used by the #808 page-map sweep test.

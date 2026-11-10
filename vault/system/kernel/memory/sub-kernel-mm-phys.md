@@ -9,7 +9,7 @@ guarded-by: [inv-i32]
 validated-by: [gate-smp, spec-capacity, gate-magazines-tsan]
 locks: [lock-buddy-zone, lock-magazine-set]
 created: 2026-08-01
-updated: 2026-11-03
+updated: 2026-11-10
 ---
 
 ## Shared-memory accounting review
@@ -77,6 +77,10 @@ table lists it as a trigger surface in its own right.
   BBM race for the buddy zone by construction.
 - Diagnostics: total/free/reserved pages, the #808 table-page cost, and
   the tests' `phys_zone_bounds`.
+- `phys_pa_is_ram(pa)`: whether an address lies in the zone, i.e. is RAM the
+  direct map covers (reservations included). The cross-Proc copy asks it before
+  making a kernel pointer from a user leaf's address, because a device window
+  has none ([[sub-kernel-mmu]]).
 
 ## Mechanism
 
