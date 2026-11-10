@@ -727,7 +727,9 @@ fenced lane therefore parks a `TRANSFER_FROM_HOST_3D` while its context has a
 chain the device may still run (in flight, or abandoned and not yet retired),
 and parks every later chain of that context behind it (`gpu_api::must_park`).
 The completion pump publishes a parked readback once its context is clear, with
-the chains behind it, up to that context's next readback (`gpu_api::unpark_plan`).
+the chains behind it, up to that context's next readback (`gpu_api::unpark_plan`);
+a chain that can reach an owed free stays until the free is paid (Owed frees,
+below).
 - **Ids.** The owner id is minted at submission; the wire id is taken at
   publication (`Controlq::publish_staged`), so the device sees wire ids in
   publication order.
@@ -751,10 +753,16 @@ the chains behind it, up to that context's next readback (`gpu_api::unpark_plan`
   publishes, from the owed ids no poisoned chain reaches (`OwedReach::of`: one
   that is reached waits for the vindication anyway, and a chain parked behind
   it would have no clock) and the contexts that hold one (`Objects::held_by`,
-  `Objects::holders`). Whatever owes a free or changes a link runs in a request
-  or in the pay pass, each ending in a pump; a vindication inside a pump is seen
-  at the next, and a chain the barrier would have parked meanwhile goes to the
-  device, where the free waits for it as for any. The pay pass's hold leaves
+  `Objects::holders`). Every serve pass begins with a pump, so a chain commits
+  against a reach at most a pass old; a stale reach only lets a chain go to the
+  device, where the free waits for it as for any, or keeps one parked until the
+  next pump. The pass and the barrier wait for a quiet engine
+  (`gpu_api::owed_quiet`): nothing while it is stalled, and nothing for
+  `OWED_QUIET_MS` (a synchronous deadline) after it revives
+  (`Controlq::revived_at`), so under a load that stalls every repeat the
+  requests keep the revived windows and the held-back chains go to the device
+  (vote 81 audit r8 F4 and a self-found twin: the pass ran before the requests
+  in each serve pass and re-stalled the engine at every revival). The pay pass's hold leaves
   parked chains out (`Gpu::owed_free_hold`): none is on the device or publishes
   during the pass, and one that can reach the free waits for it. The test-mode
   `Request::TestOwedDefer` (opcode 72; a context of the caller's,

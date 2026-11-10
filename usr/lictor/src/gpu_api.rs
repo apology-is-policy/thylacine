@@ -491,6 +491,20 @@ impl OwedReach {
         }
     }
 }
+/// How long the engine runs after a revival before the owed-free pass and its
+/// barrier resume: a synchronous deadline's worth (backend gpu.rs asserts the
+/// two equal).
+pub const OWED_QUIET_MS: u64 = 500;
+/// Whether the owed-free pass may send, and its barrier hold chains back: the
+/// engine takes submissions and has run `OWED_QUIET_MS` since it last revived
+/// (`since_revival_ms`, None if it never stalled). While the device keeps
+/// stalling, a repeat would take each revived window from the requests and
+/// stall it again, and the chains it held back would wait as long; standing
+/// down, the requests run and those chains go to the device, where the free
+/// waits for them as for any.
+pub fn owed_quiet(refusing: bool, since_revival_ms: Option<u64>) -> bool {
+    !refusing && since_revival_ms.is_none_or(|ms| ms >= OWED_QUIET_MS)
+}
 /// What stands between a retirement and its object.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Hold {
@@ -1242,6 +1256,14 @@ mod park_tests {
         }
         assert!(seen.0 > 0 && seen.1 > 0, "both answers were asked: {seen:?}");
         assert!(!OwedReach::default().reaches(ChainReach { ctx: 1, res: 0 }), "nothing owed reaches nothing");
+    }
+    #[test]
+    fn the_pass_and_its_barrier_stand_down_until_the_engine_has_run_a_while() {
+        assert!(owed_quiet(false, None), "never stalled");
+        assert!(!owed_quiet(true, None), "stalled or dead");
+        assert!(!owed_quiet(false, Some(OWED_QUIET_MS - 1)), "just revived: the requests go first");
+        assert!(owed_quiet(false, Some(OWED_QUIET_MS)));
+        assert!(!owed_quiet(true, Some(OWED_QUIET_MS)), "stalled again");
     }
     #[test]
     fn a_free_a_poisoned_chain_reaches_holds_no_chain_back() {

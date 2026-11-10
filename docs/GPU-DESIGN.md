@@ -2572,7 +2572,9 @@ and the sequence still rewinds only on an idle device.
 read. It is not on the device, though: no abandonment clock runs for it,
 `device_idle` does not see it, and the hold lever cannot reach it. Its wait is
 bounded by its prefix, because each chain ahead of it is abandoned at
-`FENCE_ABANDON_MS` if it never retires.
+`FENCE_ABANDON_MS` if it never retires. A chain parked behind an owed free
+(4.5.15) waits for that free's repeat instead, which waits only for the chains
+on the device that can reach it.
 - **Abandoned prefix.** A readback must not run while a chain abandoned ahead of
   it may still be running. That chain may never retire, though, and a parked
   chain has no abandonment clock of its own. Left parked, it would count in the
@@ -2620,7 +2622,8 @@ bounded by its prefix, because each chain ahead of it is abandoned at
   cross-client wedge that ROUND F4 closed.
 - **Stalled engine.** Nothing publishes while the engine is stalled. At revival
   the pump runs its plan: a poisoned or released context's parked chains are
-  released, the rest publish.
+  released, and the rest go by the rules above, except that for a synchronous
+  deadline after a revival no owed free holds a chain back (4.5.15).
 - **Dead engine.** A parked chain is released (`ok = false`, `released`, not
   abandoned). The device never saw it, so its slot returns to the pool and
   nothing it named is at risk. The seam ends its context's fence stream for
@@ -2999,7 +3002,8 @@ for the short case. Another client's poison then costs a surface nothing.
 
 Admitted with a holder still there, a retirement is refused, its pins kept, except
 a resource's free: lictor takes that as a debt. The ledger entry retires and the free
-is owed unsent; the owed-free pass sends it once no chain can reach the resource,
+is owed unsent; the owed-free pass sends it once no chain on the device can reach
+the resource,
 after detaching the resource's context links, which the holder's refused
 `CtxDetachResource` left. The refused `DetachBacking` needs no repeat: QEMU's free
 detaches the guest backing itself (QEMU v10.0 `virgl_cmd_resource_unref`). The
@@ -3026,10 +3030,25 @@ whatever else runs, and a chain parked behind it would wait as long with no cloc
 its own. Another context that holds the resource parks too, until the chains on the
 device that reach the resource retire, or are abandoned at their bound, which
 poisons them and lets it go. In practice that is only the owner's: the compositor's
-context, which holds adopted BOs, puts no fenced chain on the device (its readback
-rides the client's context as a transfer naming the BO, which parks only behind that
-BO's own free), and the convention probe's context is tapestryd's own and
-synchronous. The readback leg's BUSY arm witnesses the barrier with
+context, which holds adopted BOs, puts no fenced chain on the device, and the
+convention probe's context is tapestryd's own and synchronous. The compositor's
+readback of a client's BO rides the client's context as a transfer, though, so it
+waits behind that context's parked chains as any readback does (4.5.13), holding
+the reserved slot meanwhile: other surfaces' readbacks are refused for as long as
+the client's free is unpaid, within the bound 4.5.13 accepts for a readback parked
+behind its context's work, and up to 2 s per arm of the test lever below.
+
+The pass and the barrier wait for a quiet engine (`gpu_api::owed_quiet`): nothing
+while the engine is stalled, and nothing for `OWED_QUIET_MS`, a synchronous
+deadline, after it revives. Under a load that makes every synchronous command
+miss its deadline, a repeat would otherwise stall the engine again at each
+revival, before any request of that serve pass ran, and the chains held back for
+it would wait for as long as the load lasted. An ordinary destroy under such a
+load leaves exactly that state, no poison needed: its detach stalls, so the link
+stays, and its free stalls and is owed. Standing down, the requests keep the
+revived windows and those chains go to the device, where the free waits for them;
+it is paid once the engine has been quiet for a deadline. The gate is
+host-tested; no leg drives a sustained load. The readback leg's BUSY arm witnesses the barrier with
 a test lever (`warp-defer-frees`: the caller's own context, four arms a boot of 2 s
 at most) that has the pass skip the context's frees while its next chain goes in.
 

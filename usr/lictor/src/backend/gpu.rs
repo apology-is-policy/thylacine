@@ -142,6 +142,7 @@ const OWED_COMMANDS_PER_PASS: usize = 8;
 /// Owed frees one pass examines, in turn: a free still held by a chain
 /// costs a reach scan each time it is looked at.
 const OWED_FREES_EXAMINED: usize = 16;
+const _: () = assert!(crate::gpu_api::OWED_QUIET_MS == SUBMIT_DEADLINE_MS);
 
 /// How a teardown of a mapped HOST3D blob ended.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -957,6 +958,8 @@ struct Controlq {
     /// Stalls begun, monotone: compared across one command, it says whether
     /// that command's outcome is unknown.
     stalls: u32,
+    /// When the engine last revived from a stall (`gpu_api::owed_quiet`).
+    revived_at: Option<Instant>,
     /// The serve loop exists. Before it (bring-up) nothing needs to stay
     /// live, so a synchronous command waits out FENCE_ABANDON_MS instead of
     /// stalling at SUBMIT_DEADLINE_MS.
@@ -1480,6 +1483,7 @@ impl Controlq {
         match crate::gpu_api::stall_verdict(self.sync_pending || self.sync2_pending, ms, chord_ms) {
             crate::gpu_api::Stall::Revived => {
                 self.stalled = None;
+                self.revived_at = Some(Instant::now());
                 say!("lictor: gpu synchronous chain retired {} ms after its deadline -- engine revived", ms);
             }
             crate::gpu_api::Stall::Dead => {
@@ -2439,6 +2443,7 @@ impl Gpu {
                 stalled: None,
                 takeover_from: None,
                 stalls: 0,
+                revived_at: None,
                 serving: false,
                 #[cfg(feature = "test-mode")]
                 test_latch_next: false,
@@ -3540,10 +3545,17 @@ impl Gpu {
     /// The resources whose free is owed; none once the engine is dead, since
     /// nothing publishes again.
     pub fn owed_ids(&self) -> alloc::vec::Vec<u32> {
-        if self.ctrl.dead {
+        if self.ctrl.dead || !self.owed_quiet() {
             return alloc::vec::Vec::new();
         }
         self.owed_frees.iter().map(|o| o.res).collect()
+    }
+
+    /// The owed-free pass and its barrier wait for a quiet engine
+    /// (`gpu_api::owed_quiet`): none while stalled, and none for a deadline
+    /// after a revival, which goes to the requests.
+    fn owed_quiet(&self) -> bool {
+        crate::gpu_api::owed_quiet(self.ctrl.refusing(), self.ctrl.revived_at.map(|t| t.elapsed().as_millis() as u64))
     }
 
     /// Repeat owed frees while the engine takes commands, each once no chain
@@ -3570,7 +3582,8 @@ impl Gpu {
             commands >= OWED_COMMANDS_PER_PASS || began.elapsed().as_millis() >= u128::from(SUBMIT_DEADLINE_MS)
         };
         for _ in 0..self.owed_frees.len().min(OWED_FREES_EXAMINED) {
-            if !self.takes_commands()
+            if !self.owed_quiet()
+                || !self.takes_commands()
                 || spent(commands)
                 || (self.collect_retirements && self.retired_resources.len() >= crate::objects::MAX_OBJECTS)
             {

@@ -4272,11 +4272,19 @@ fn rb_busy_attempt(k: u32) -> Option<bool> {
     }
     let ms = t.elapsed().as_millis() as u64;
     let _ = write_ctl(w, "ctl", "warp-hold off");
+    // The chain that waited for the free must then go to the device and end.
+    let t = libthyla_rs::time::Instant::now();
+    let mut next_left = ctx_field(w, ctx, "fences-in-flight");
+    while next_left != 0 && t.elapsed().as_millis() < 2000 {
+        let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(20));
+        next_left = ctx_field(w, ctx, "fences-in-flight");
+    }
     let _ = write_ctl(w, &ctl, "destroy");
     unsafe { t_close(w) };
-    let ok = n.paid == b.paid + 1 && n.owed == b.owed && n.leaked == b.leaked && n.retiring == b.retiring;
+    let ok = n.paid == b.paid + 1 && n.owed == b.owed && n.leaked == b.leaked && n.retiring == b.retiring
+        && next_left == 0;
     t_putstr(&format!(
-        "warp-prove: C6-RB BUSY {} -- the taken free was still owed when the vindicated ctx's next chain went in, held; with the defer {}: paid +{} (want +1) within {} ms (bound {}), owed {} (want {}), given up +{} (want 0), retiring {} (want {}): {}\n",
+        "warp-prove: C6-RB BUSY {} -- the taken free was still owed when the vindicated ctx's next chain went in, held; with the defer {}: paid +{} (want +1) within {} ms (bound {}), owed {} (want {}), given up +{} (want 0), retiring {} (want {}), fences in flight {} after the hold (want 0, the chain ran): {}\n",
         if ok { "PASS" } else { "FAIL" },
         if undeferred { "lifted" } else { "already expired" },
         n.paid.wrapping_sub(b.paid),
@@ -4287,7 +4295,14 @@ fn rb_busy_attempt(k: u32) -> Option<bool> {
         n.leaked.wrapping_sub(b.leaked),
         n.retiring,
         b.retiring,
-        if ok { "the chain parked behind the free" } else { "the chain on the device held the free off" }
+        next_left,
+        if ok {
+            "the chain parked behind the free, then ran"
+        } else if next_left != 0 {
+            "the chain never ran"
+        } else {
+            "the chain on the device held the free off"
+        }
     ));
     Some(ok)
 }

@@ -225,11 +225,10 @@ impl Device {
         true
     }
     /// Before every completion pump, what a new chain may not go to the device
-    /// past (`OwedReach`). A free is owed, and a link made or dropped, only in
-    /// a request or in the pay pass, each of which ends in a pump; a
-    /// vindication inside a pump is seen at the next, and a chain the barrier
-    /// would have parked meanwhile goes to the device, where the free waits
-    /// for it as for any other.
+    /// past (`OwedReach`). Every serve pass begins with a pump, so a chain
+    /// commits against a reach at most a pass old; a stale reach only lets a
+    /// chain go to the device, where the free waits for it as for any, or
+    /// keeps one parked until the next pump.
     fn refresh_owed_reach(&mut self) {
         let objects = &self.objects;
         let reach = OwedReach::of(
