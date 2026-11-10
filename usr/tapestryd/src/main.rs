@@ -508,6 +508,10 @@ impl Driver for Tapestryd {
             self.comp.gpu.height
         );
         let mut conns: Vec<Conn> = Vec::new();
+        // Connections refused because the pool was full, and whether the warp
+        // listener's budget being spent has been said since it last had room.
+        let mut refused_conns: u32 = 0;
+        let mut warp_budget_said = false;
         let mut raw_events: Vec<RawInputEvent> = Vec::new();
 
         // The FRAME clock (section 18.4): a synthesized fixed-rate tick
@@ -827,6 +831,13 @@ impl Driver for Tapestryd {
             // (audit F7: it must never starve the tapestry listener).
             let arm_tapestry = true;
             let arm_warp = warp_conns < MAX_WARP_CONNS;
+            // Unarmed, a warp connect waits on the kernel's handshake deadline
+            // with nothing said here; once per spell of a spent budget.
+            if arm_warp {
+                warp_budget_said = false;
+            } else if !core::mem::replace(&mut warp_budget_said, true) {
+                say!("tapestryd: warp connections at their budget ({}): a new warp connect waits", MAX_WARP_CONNS);
+            }
             let mut pollfds: Vec<TPollFd> = Vec::new();
             if arm_tapestry {
                 pollfds.push(TPollFd {
@@ -892,6 +903,10 @@ impl Driver for Tapestryd {
                         } else {
                             // Refuse fast: the pool is full.
                             unsafe { t_close(h) };
+                            refused_conns = refused_conns.wrapping_add(1);
+                            if refused_conns.is_power_of_two() {
+                                say!("tapestryd: tapestry connect refused -- the pool is full ({} of {}, {} warp; {} refused so far)", conns.len(), MAX_CONNS, warp_conns, refused_conns);
+                            }
                         }
                     }
                 }
@@ -906,6 +921,10 @@ impl Driver for Tapestryd {
                         } else { unsafe { t_close(h) }; }
                     } else {
                         unsafe { t_close(h) };
+                        refused_conns = refused_conns.wrapping_add(1);
+                        if refused_conns.is_power_of_two() {
+                            say!("tapestryd: warp connect refused -- the pool is full ({} of {}, {} warp; {} refused so far)", conns.len(), MAX_CONNS, warp_conns, refused_conns);
+                        }
                     }
                 }
             }

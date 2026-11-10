@@ -1542,9 +1542,12 @@ fn ring_xproc_prove() -> i64 {
 }
 
 fn warp_connect(what: &str) -> i64 {
+    // The wait tells a full pool (refused at once) from a spent warp budget
+    // (the listener unarmed: the kernel's handshake deadline).
+    let t = libthyla_rs::time::Instant::now();
     let fd = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/srv/warp".as_ptr(), 9, T_OREAD) };
     if fd < 0 {
-        fail(&format!("two-client: open /srv/warp for {}", what));
+        fail(&format!("two-client: open /srv/warp for {} (rc {} after {} ms)", what, fd, t.elapsed().as_millis()));
     }
     fd
 }
