@@ -622,8 +622,12 @@ recovery inside one serve pass cannot hide, and Lictor's owed frees as
 then `frees-retiring` ([[sub-lictor]]). A BO destroyed on a poisoned ctx still
 sends its device frees: the broker takes the unref as a debt and pays it once
 the chain retires, the same proof the vindication frees the parked backing's
-guest half on, so the uncharge there is honest; the readback leg's TAKEN arm
-witnesses it. The test-mode `warp-stall-create`, `warp-stall-destroy` and
+guest half on, and once the chains already on the device that can reach the BO
+retire (a later chain that could parks until the free is paid), so the uncharge
+there is honest within that delay, however busy the ctx is kept; the readback
+leg's TAKEN and BUSY arms witness it. The test-mode `warp-defer-frees on|off`
+has the broker pass over the owed frees the caller's own GL device ctx can reach
+(the broker bounds the arms), which the BUSY arm uses. The test-mode `warp-stall-create`, `warp-stall-destroy` and
 `warp-stall-free` verbs arm one stall shot at the caller's own next create
 (of its GL ctx; the venus create is not aimed), its own ctx's destroy, or the
 free of the next BO it destroys (`TEST_STALL_SHOTS` per boot, one connection

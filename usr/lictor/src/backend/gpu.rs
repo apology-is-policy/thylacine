@@ -1019,6 +1019,10 @@ struct Controlq {
     /// Contexts with a released client chain: everything later of theirs parks
     /// and is released too, until a destroy of that device context completes.
     released: crate::gpu_api::Released,
+    /// The owed frees a chain may not go to the device past, and who can reach
+    /// them (`OwedReach`): such a chain parks until they are paid. Set by the
+    /// broker before every completion pump (`Gpu::set_owed_reach`).
+    owed_reach: crate::gpu_api::OwedReach,
     /// Contexts whose abandoned chain the device later retired: proof the
     /// host is finished with them, so the seam may un-poison.
     vindicated: alloc::vec::Vec<FenceVindication>,
@@ -1606,6 +1610,7 @@ impl Controlq {
             &self.parked_view(),
             &|c| self.ctx_on_device(c),
             &|c| self.ctx_poisoned(c),
+            &|i| self.owed_reach.reaches(self.parked[i].reach),
             &self.released,
         );
         let mut keep = alloc::vec::Vec::new();
@@ -2456,6 +2461,7 @@ impl Gpu {
                 parked: alloc::vec::Vec::new(),
                 fslot_parked: [false; FENCED_SLOTS],
                 released: crate::gpu_api::Released::default(),
+                owed_reach: crate::gpu_api::OwedReach::default(),
                 fslot_poison_ring: [0; FENCED_SLOTS],
                 fslot_poison_ctx: [0; FENCED_SLOTS],
                 vindicated: alloc::vec::Vec::new(),
@@ -3531,6 +3537,15 @@ impl Gpu {
         self.owed_frees.iter().any(|o| o.res == resource_id)
     }
 
+    /// The resources whose free is owed; none once the engine is dead, since
+    /// nothing publishes again.
+    pub fn owed_ids(&self) -> alloc::vec::Vec<u32> {
+        if self.ctrl.dead {
+            return alloc::vec::Vec::new();
+        }
+        self.owed_frees.iter().map(|o| o.res).collect()
+    }
+
     /// Repeat owed frees while the engine takes commands, each once no chain
     /// can reach it, as a first try waits (`holds` is the ledger's
     /// context-to-resource relation). A free goes whole: every context link
@@ -3541,10 +3556,11 @@ impl Gpu {
     /// One the device keeps refusing with no stall is given up, its id left
     /// retiring and its pins and extent held: a leak, never a reuse of memory
     /// the device may still read. Returns the links the device detached, for
-    /// the ledger to drop.
+    /// the ledger to drop. `deferred` is the test lever's (`TestOwedDefer`).
     pub fn pay_owed_frees(
         &mut self,
         holds: impl Fn(u32, u32) -> bool,
+        deferred: impl Fn(u32) -> bool,
         links: impl Fn(u32) -> alloc::vec::Vec<u32>,
     ) -> alloc::vec::Vec<(u32, u32)> {
         let mut unlinked = alloc::vec::Vec::new();
@@ -3561,7 +3577,7 @@ impl Gpu {
                 break;
             }
             let Some(mut o) = self.owed_frees.pop_front() else { break };
-            if self.retirement_hold(Retired::Resource(o.res), &holds) != Hold::Clear {
+            if deferred(o.res) || self.owed_free_hold(o.res, &holds) != Hold::Clear {
                 self.owed_frees.push_back(o);
                 continue;
             }
@@ -4515,7 +4531,8 @@ impl Gpu {
             exec_ms: 0,
         };
         let on_device = readback && self.ctrl.ctx_on_device(ctx_pub);
-        if crate::gpu_api::must_park(&self.ctrl.parked_view(), ctx_pub, readback, on_device, &self.ctrl.released) {
+        let owed = self.ctrl.owed_reach.reaches(reach);
+        if crate::gpu_api::must_park(&self.ctrl.parked_view(), ctx_pub, readback, on_device, owed, &self.ctrl.released) {
             self.ctrl.fslot_parked[slot] = true;
             self.ctrl.parked.push(Parked { slot, req_len, tag, reach, since: Instant::now() });
         } else {
@@ -5187,6 +5204,20 @@ impl Gpu {
     /// for. `holds` is the ledger's context-to-resource relation. A cursor
     /// chain touches only a cursor plane, so it holds nothing here.
     pub fn retirement_hold(&self, object: Retired, holds: impl Fn(u32, u32) -> bool) -> Hold {
+        // A parked chain reaches its objects the moment it publishes.
+        self.hold(object, holds, true)
+    }
+
+    /// What an owed free's repeat waits on: `retirement_hold` less the parked
+    /// chains. None is on the device, and none publishes while the pass runs,
+    /// so none can reach the resource while it is freed; one that can reach
+    /// it parks until the free is paid (`OwedReach`), so counting it would
+    /// hold the free on the chain that waits for it.
+    fn owed_free_hold(&self, res: u32, holds: impl Fn(u32, u32) -> bool) -> Hold {
+        self.hold(Retired::Resource(res), holds, false)
+    }
+
+    fn hold(&self, object: Retired, holds: impl Fn(u32, u32) -> bool, parked: bool) -> Hold {
         let c = &self.ctrl;
         retirement_hold(
             object,
@@ -5195,11 +5226,22 @@ impl Gpu {
             (0..FENCED_SLOTS)
                 .filter(|&i| c.fslots[i].is_some())
                 .map(|i| c.fslot_reach[i])
-                // A parked chain reaches its objects the moment it publishes.
-                .chain(c.parked.iter().map(|p| p.reach)),
+                .chain(c.parked.iter().filter(|_| parked).map(|p| p.reach)),
             (0..FENCED_SLOTS).filter(|&i| c.fslot_poisoned[i]).map(|i| c.fslot_reach[i]),
             holds,
         )
+    }
+
+    /// What each poisoned chain can reach (`OwedReach::of`).
+    pub fn poisoned_reach(&self) -> alloc::vec::Vec<ChainReach> {
+        let c = &self.ctrl;
+        (0..FENCED_SLOTS).filter(|&i| c.fslot_poisoned[i]).map(|i| c.fslot_reach[i]).collect()
+    }
+
+    /// Set what a new chain may not go to the device past. The broker sets it
+    /// before every completion pump, the only place a parked chain publishes.
+    pub fn set_owed_reach(&mut self, reach: crate::gpu_api::OwedReach) {
+        self.ctrl.owed_reach = reach;
     }
 
     /// All that rebinding a normal scanout needs. A late cursor chain can touch

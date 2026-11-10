@@ -2898,13 +2898,15 @@ block the serve loop, and seat input with it. Neither was taken.
     below). The repeat runs while the seat is normal, after the seat's look
     at the chord in each serve pass and never inside a request, where a
     stall it met would read as that request's. Each free waits until no
-    chain can reach its resource, as a first try waits, and goes whole: a
+    chain on the device can reach its resource, as a first try waits (one
+    yet to publish that could parks until the free is paid: the retirement
+    paragraph below), and goes whole: a
     CTX_DETACH_RESOURCE for each context link lictor's ledger still records
     (a retired id names none), the unmap a mapped blob needs, then the free.
     A pass looks at sixteen owed frees at most, in turn, and stops at eight
-    device commands or `SUBMIT_DEADLINE_MS` spent, so the chord is looked
-    at again within about a second; a free cut short keeps what it
-    reached. The device answers a repeat of a free that ran with "no such
+    device commands or `SUBMIT_DEADLINE_MS` spent, so a pass adds at most
+    about a second before the seat's next look at the chord; a free cut
+    short keeps what it reached. The device answers a repeat of a free that ran with "no such
     resource", which lictor reads as gone, as it reads a first free
     answered so (QEMU v10.0 `virgl_cmd_resource_unref`); any other refusal
     leaves the resource and its backing in place. QEMU refuses a free of
@@ -2918,11 +2920,14 @@ block the serve loop, and seat input with it. Neither was taken.
     bring-up probe's refused free, a ring's teardown included, is said and
     leaked as before. The state machine (`gpu_api::OwedFree`) and the
     answer each response reads as (`gpu_api::unref_frees`) are host-tested.
-    The readback leg witnesses two paths: FREE, a guest-backed free a stall
+    The readback leg witnesses three paths: FREE, a guest-backed free a stall
     meets (`warp-stall-free`), repaid once the engine lives, its id retired;
-    and TAKEN, a free a poisoned chain holds, left unpaid while the poison
+    TAKEN, a free a poisoned chain holds, left unpaid while the poison
     stands and paid once the vindication retires the chain, its link
-    detached and its id retired. The HOST3D extent's order, a create's
+    detached and its id retired; and BUSY, the same free still owed once
+    its context is live again (`warp-defer-frees` has the pass skip it a
+    while), paid although the context's next chain is held, because that
+    chain parks behind it. The HOST3D extent's order, a create's
     unwind, the display drain's owing and the give-up have no leg (the
     readback host runs virgl without venus);
   - a stalled CREATE consumes its id, because the reservation precedes the
@@ -3005,6 +3010,29 @@ destroy pinned a context's backing cap each time, uncharged, and spent a ledger 
 per buffer toward `MAX_OBJECTS`. A resource on the display, a dead engine, or a debt
 at its bound is refused as before.
 
+Once the poison clears, the context is live and may render again, and every chain
+of it can reach the resource until the pass has detached it. A free that waited for
+every chain on the device that can reach it would wait for as long as the context
+kept one there, while tapestryd had already uncharged it. So a chain that can reach
+an owed free does not go to the device: it parks, as a readback does (4.5.13), with
+its context's later chains behind it, until the free is paid (`gpu_api::OwedReach`,
+which lictor builds before every completion pump, the only place a parked chain
+publishes). The free then waits only on the chains already on the device, and those
+end. Its repeat does not wait on a parked chain: none is on the device, none
+publishes while the pass runs, and one that can reach the free waits for it, so
+counting it would hold each on the other for good. Only frees no poisoned chain
+reaches hold chains back: one a poisoned chain reaches waits for the vindication
+whatever else runs, and a chain parked behind it would wait as long with no clock of
+its own. Another context that holds the resource parks too, until the chains on the
+device that reach the resource retire, or are abandoned at their bound, which
+poisons them and lets it go. In practice that is only the owner's: the compositor's
+context, which holds adopted BOs, puts no fenced chain on the device (its readback
+rides the client's context as a transfer naming the BO, which parks only behind that
+BO's own free), and the convention probe's context is tapestryd's own and
+synchronous. The readback leg's BUSY arm witnesses the barrier with
+a test lever (`warp-defer-frees`: the caller's own context, four arms a boot of 2 s
+at most) that has the pass skip the context's frees while its next chain goes in.
+
 The global rule this replaces was measured on the GL host: after one abandoned
 fence on an unrelated client's context, a plain new surface met a refused retirement
 and the next listing of `/dev/tapestry/surface` had not ended after 60 s
@@ -3017,7 +3045,8 @@ chain reaches only what its context holds. The order of detaching holds: after
 behaviour here is I-45's trusted half. Refusing on any poison, globally, was the
 smaller change and was not taken: a refused pin had no charge behind it, so a client
 could leak pins at full speed. Scoped, only the poisoned holder's own retirements
-wait on its poison, and its frees are paid once the poison clears.
+wait on its poison, and its frees are paid once the poison clears and the chains
+already on the device that can reach them retire.
 
 **A stall takes no composition verdict.** The composition health tick
 (§4.5.12) fails closed: a failed step latches GPU composition OFF, sticky. A

@@ -307,6 +307,12 @@ impl Gpu {
     pub fn test_stall_shot(&mut self) -> bool {
         self.invoke::<()>(Request::TestStallShot).is_ok()
     }
+    /// For a bounded time the broker's owed-free pass passes over the frees
+    /// a stream on device context `ctx_id` can reach (`on`), or no longer.
+    #[cfg(feature = "test-mode")]
+    pub fn test_owed_defer(&mut self, ctx_id: u32, on: bool) -> bool {
+        self.invoke(Request::TestOwedDefer { ctx_id, on }).unwrap_or(false)
+    }
     /// Aim a stall shot at the next resource free this client sends.
     #[cfg(feature = "test-mode")]
     pub fn test_stall_at_next_unref(&mut self) { self.test_shot_at_unref = true; }

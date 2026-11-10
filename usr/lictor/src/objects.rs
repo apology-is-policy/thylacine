@@ -71,6 +71,27 @@ impl Objects {
             && self.check(owner, res, Kind::Resource).is_ok()
             && self.attachments.iter().any(|a| a.owner == owner && a.ctx == ctx && a.res == res)
     }
+    /// The contexts a stream on which can reach a resource `owed` names:
+    /// `holds` asked of a set of resources at once.
+    pub fn holders(&self, owed: impl Fn(u32) -> bool) -> Vec<u32> {
+        let mut ctxs: Vec<u32> = self.attachments.iter().filter(|a| owed(a.res)).map(|a| a.ctx)
+            .chain(self.entries.iter().filter(|o| o.born_in != 0 && owed(o.id)).map(|o| o.born_in))
+            .filter(|&c| c != 0)
+            .collect();
+        ctxs.sort_unstable();
+        ctxs.dedup();
+        ctxs
+    }
+    /// What a stream on `ctx` can reach: `holds(ctx, _)` as a set.
+    pub fn held_by(&self, ctx: u32) -> Vec<u32> {
+        if ctx == 0 { return Vec::new(); }
+        let mut res: Vec<u32> = self.attachments.iter().filter(|a| a.ctx == ctx).map(|a| a.res)
+            .chain(self.entries.iter().filter(|o| o.born_in == ctx).map(|o| o.id))
+            .collect();
+        res.sort_unstable();
+        res.dedup();
+        res
+    }
     /// The contexts the ledger links `res` to.
     pub fn links(&self, owner: u64, res: u32) -> Vec<u32> {
         self.attachments.iter().filter(|a| a.owner == owner && a.res == res).map(|a| a.ctx).collect()
@@ -242,6 +263,32 @@ mod tests {
         assert!(!o.holds(3, 7), "7 here is a context");
         o.reserve_in(1, 7, 3).unwrap();
         assert!(o.holds(3, 7));
+    }
+    #[test]
+    fn the_holders_of_a_set_are_the_contexts_that_hold_one_of_it() {
+        let mut o = Objects::default();
+        for ctx in [3, 4, 5] { o.reserve(1, ctx, Kind::Context).unwrap(); }
+        o.reserve(1, 10, Kind::Resource).unwrap();
+        o.reserve(1, 11, Kind::Resource).unwrap();
+        o.reserve_in(1, 12, 5).unwrap();
+        o.attach(1, 3, 10).unwrap();
+        o.attach(1, 4, 11).unwrap();
+        o.attach(1, 4, 10).unwrap();
+        let owed = |r: u32| r == 10 || r == 12;
+        let want: Vec<u32> = (0..8).filter(|&c| [10, 12].iter().any(|&r| o.holds(c, r))).collect();
+        assert_eq!(want, [3, 4, 5]);
+        assert_eq!(o.holders(owed), want);
+        assert_eq!(o.holders(|r| r == 11), [4]);
+        for ctx in 0..8 {
+            let want: Vec<u32> = (0..16).filter(|&r| o.holds(ctx, r)).collect();
+            assert_eq!(o.held_by(ctx), want, "ctx {ctx}");
+        }
+        assert_eq!(o.held_by(4), [10, 11]);
+        assert!(o.holders(|r| r == 3).is_empty(), "3 is a context, held by none");
+        let ticket = o.retire(1, 12, Kind::Resource).unwrap();
+        assert_eq!(o.holders(owed), want, "a retiring resource is held until it retires");
+        o.retired(ticket).unwrap();
+        assert_eq!(o.holders(owed), [3, 4]);
     }
     #[test]
     fn object_budget_is_global_and_zero_owner_is_invalid() {

@@ -56,7 +56,20 @@ pub struct Device {
     /// The connection whose next request a `TestStallShot` rides.
     #[cfg(feature = "test-mode")]
     test_stall_shot_for: Option<i64>,
+    /// The context whose reachable owed frees the pay pass passes over, and
+    /// since when (`Request::TestOwedDefer`).
+    #[cfg(feature = "test-mode")]
+    test_owed_defer: Option<(u32, libthyla_rs::time::Instant)>,
+    /// Defer-lever arms left this boot.
+    #[cfg(feature = "test-mode")]
+    test_owed_defers: u8,
 }
+/// Defer-lever arms per boot: one readback leg's attempts.
+#[cfg(feature = "test-mode")]
+const TEST_OWED_DEFERS: u8 = 4;
+/// How long one arm of the defer lever lasts at most.
+#[cfg(feature = "test-mode")]
+const TEST_OWED_DEFER_MS: u64 = 2000;
 /// How the lever breaks a trusted takeover's return, in firing order.
 #[cfg(feature = "test-mode")]
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -109,6 +122,8 @@ impl Device {
             #[cfg(feature = "test-mode")] test_blind_armed: false,
             #[cfg(feature = "test-mode")] test_stall_shots: 0,
             #[cfg(feature = "test-mode")] test_stall_shot_for: None,
+            #[cfg(feature = "test-mode")] test_owed_defer: None,
+            #[cfg(feature = "test-mode")] test_owed_defers: TEST_OWED_DEFERS,
             #[cfg(feature = "test-mode")] test_latch_targets: Vec::new(),
             #[cfg(feature = "test-mode")] test_latch_fired: Vec::new() })
     }
@@ -170,8 +185,13 @@ impl Device {
     /// then finish the ledger entries they paid. Never inside a request: a
     /// stall one meets would read as that request's.
     pub fn pay_owed_frees(&mut self) {
+        let deferred = self.test_owed_deferred();
         let (objects, owner) = (&self.objects, self.owner);
-        let unlinked = self.gpu.pay_owed_frees(|ctx, res| objects.holds(ctx, res), |res| objects.links(owner, res));
+        let unlinked = self.gpu.pay_owed_frees(
+            |ctx, res| objects.holds(ctx, res),
+            |res| deferred.is_some_and(|ctx| objects.holds(ctx, res)),
+            |res| objects.links(owner, res),
+        );
         for (ctx, res) in unlinked {
             let _ = self.objects.detached(self.owner, ctx, res);
         }
@@ -204,6 +224,39 @@ impl Device {
         }
         true
     }
+    /// Before every completion pump, what a new chain may not go to the device
+    /// past (`OwedReach`). A free is owed, and a link made or dropped, only in
+    /// a request or in the pay pass, each of which ends in a pump; a
+    /// vindication inside a pump is seen at the next, and a chain the barrier
+    /// would have parked meanwhile goes to the device, where the free waits
+    /// for it as for any other.
+    fn refresh_owed_reach(&mut self) {
+        let objects = &self.objects;
+        let reach = OwedReach::of(
+            self.gpu.owed_ids(),
+            &self.gpu.poisoned_reach(),
+            |ctx| objects.held_by(ctx),
+            |set: &dyn Fn(u32) -> bool| objects.holders(set),
+        );
+        self.gpu.set_owed_reach(reach);
+    }
+    /// The context the defer lever names, while its arm lasts.
+    fn test_owed_deferred(&mut self) -> Option<u32> {
+        #[cfg(feature = "test-mode")]
+        {
+            let (ctx, since) = self.test_owed_defer?;
+            if since.elapsed().as_millis() < u128::from(TEST_OWED_DEFER_MS) {
+                return Some(ctx);
+            }
+            self.test_owed_defer = None;
+            crate::backend::diagnostic(&alloc::format!("lictor: owed-free defer on ctx {} expired\n", ctx));
+            None
+        }
+        #[cfg(not(feature = "test-mode"))]
+        {
+            None
+        }
+    }
     /// Arm the shot `connection` asked for onto this request of its, whatever
     /// it is; `test_stall_settle` spends it if no synchronous command took it.
     #[cfg(feature = "test-mode")]
@@ -221,6 +274,7 @@ impl Device {
         if self.test_stall_shot_for == Some(connection) { self.test_stall_shot_for = None; }
     }
     pub fn reap(&mut self) {
+        self.refresh_owed_reach();
         self.gpu.poll_completions();
         for resource in self.gpu.take_retired_resources() {
             if let Some(r) = self.retiring.iter_mut().find(|r| r.resource == resource) { r.done = true; }
@@ -533,6 +587,10 @@ impl Device {
             }
             Request::CtxDestroy { ctx_id } => {
                 self.check(ctx_id, Kind::Context)?;
+                #[cfg(feature = "test-mode")]
+                if self.test_owed_defer.is_some_and(|(c, _)| c == ctx_id) {
+                    self.test_owed_defer = None;
+                }
                 let ticket = self.objects.retire(self.owner, ctx_id, Kind::Context).map_err(|_| Error::BadField)?;
                 let result = self.gpu.ctx_destroy(ctx_id);
                 if result.is_ok() {
@@ -688,6 +746,7 @@ impl Device {
                 result.put(&mut out);
             }
             Request::PollCompletions => {
+                self.refresh_owed_reach();
                 let result = self.gpu.poll_completions();
                 result.put(&mut out);
             }
@@ -751,6 +810,26 @@ impl Device {
             Request::TestStallShot => {
                 #[cfg(feature = "test-mode")] { self.test_stall_shot_for = Some(connection); ().put(&mut out); }
                 #[cfg(not(feature = "test-mode"))] { return Err(Error::BadField); }
+            }
+            Request::TestOwedDefer { ctx_id, on } => {
+                #[cfg(feature = "test-mode")] {
+                    // One context at a time; only its own arm ends it early.
+                    self.check(ctx_id, Kind::Context)?;
+                    let current = self.test_owed_deferred();
+                    let done = if !on {
+                        let mine = current == Some(ctx_id);
+                        if mine { self.test_owed_defer = None; }
+                        mine
+                    } else if current.is_some_and(|c| c != ctx_id) || self.test_owed_defers == 0 {
+                        false
+                    } else {
+                        self.test_owed_defers -= 1;
+                        self.test_owed_defer = Some((ctx_id, libthyla_rs::time::Instant::now()));
+                        true
+                    };
+                    done.put(&mut out);
+                }
+                #[cfg(not(feature = "test-mode"))] { let _ = (ctx_id, on); return Err(Error::BadField); }
             }
             Request::CompSlotState => {
                 let result = self.gpu.comp_slot_state();

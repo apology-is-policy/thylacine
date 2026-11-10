@@ -3551,6 +3551,9 @@ fn prove_corpse_reclaim(root: i64) {
 //   TAKEN     a BO's free a poisoned chain can reach is taken by the broker as
 //             a debt, left unpaid while the chain is poisoned, and paid once
 //             the vindication retires it: links detached, freed, id retired.
+//   BUSY      the same free, still owed once the ctx is live again (the broker
+//             told to pass over it for a while), is paid although the ctx's
+//             next chain is held: that chain parks behind the free.
 //   CLEAN     after teardown nothing is poisoned and every slot is back.
 //
 // Prints `C6-READBACK DONE` iff every verdict arm passed, else
@@ -4152,6 +4155,139 @@ fn rb_taken_attempt(k: u32) -> Option<bool> {
         n.leaked.wrapping_sub(b.leaked),
         n.retiring,
         b.retiring
+    ));
+    Some(ok)
+}
+
+/// A taken free waited for every chain on the device that could reach it,
+/// and after the vindication its ctx is live again: a ctx kept busy held the
+/// free off for as long as it rendered, while the seam had uncharged it. A
+/// chain that can reach an owed free now parks until the free is paid.
+fn rb_taken_busy() -> bool {
+    for k in 1..=RB_STALL_ATTEMPTS {
+        if let Some(ok) = rb_busy_attempt(k) {
+            return ok;
+        }
+    }
+    t_putstr(&format!(
+        "warp-prove: C6-RB BUSY UNCONSTRUCTED -- in {} attempts the taken free was never still owed when the live ctx's next chain went in\n",
+        RB_STALL_ATTEMPTS
+    ));
+    false
+}
+
+/// How long a broker may take to pay a free nothing on the device can reach:
+/// a few serve passes. A chain kept on the device holds it far longer.
+const RB_BUSY_PAY_MS: u64 = 1000;
+
+/// One attempt: Some(verdict), or None when it was not constructed (the ctx
+/// did not poison, a stall met a step, or the free was paid before the live
+/// ctx's next chain went in).
+fn rb_busy_attempt(k: u32) -> Option<bool> {
+    let w = warp_connect("busy");
+    let ctx = mint_ctx(w, "busy");
+    let (bo, res, _va) = mint_bo_wh(w, ctx, RB_W, RB_H, VIRGL_RESOURCE_Y_0_TOP, "busy");
+    let (_bo2, res2, _va2) = mint_bo_wh(w, ctx, RB_W, RB_H, VIRGL_RESOURCE_Y_0_TOP, "busy next");
+    let ctl = format!("ctx/{}/ctl", ctx);
+    let b = match frees_settled(w) {
+        Ok(b) => b,
+        Err(b) => {
+            let _ = write_ctl(w, &ctl, "destroy");
+            unsafe { t_close(w) };
+            t_putstr(&format!(
+                "warp-prove: C6-RB BUSY FAIL -- a free owed before the window was never paid (frees-owed {}, paid {}, given up {})\n",
+                b.owed, b.paid, b.leaked
+            ));
+            return Some(false);
+        }
+    };
+    // As TAKEN: the ctx poisoned, then the BO's free taken.
+    if !write_ctl(w, "ctl", "warp-hold on") {
+        rb_incomplete("instrument:busy-hold");
+    }
+    let mut st: Vec<u32> = Vec::new();
+    subctx_preamble(&mut st);
+    clear_stream(&mut st, res, 1, 0.0, 1.0, 0.0);
+    submit_stream(w, ctx, &st, "busy");
+    if !write_ctl(w, "ctl", "warp-abandon") {
+        rb_incomplete("instrument:busy-abandon");
+    }
+    let t = libthyla_rs::time::Instant::now();
+    let mut left = ctx_field(w, ctx, "fences-in-flight");
+    while left != 0 && t.elapsed().as_millis() < 2000 {
+        let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(50));
+        left = ctx_field(w, ctx, "fences-in-flight");
+    }
+    let poisoned = |w: i64| parse_field(&open_read_string(w, &ctl), "poisoned").unwrap_or(99);
+    let poisoned_at_destroy = poisoned(w);
+    let p = frees_census(w);
+    let destroyed = poisoned_at_destroy == 1 && left == 0 && write_ctl(w, &format!("ctx/{}/bo/{}/ctl", ctx, bo), "destroy");
+    let a = frees_census(w);
+    let taken = destroyed && a.incurred == b.incurred + 1 && a.owed == b.owed + 1 && a.retiring == b.retiring + 1;
+    // The broker passes over this ctx's owed frees for a while, so the free
+    // is still owed when the ctx, vindicated, sends its next chain; held, a
+    // chain that goes to the device stays there.
+    let deferred = taken && write_ctl(w, "ctl", "warp-defer-frees on");
+    let _ = write_ctl(w, "ctl", "warp-hold off");
+    let t = libthyla_rs::time::Instant::now();
+    let mut live = poisoned(w);
+    while live != 0 && t.elapsed().as_millis() < 2000 {
+        let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(20));
+        live = poisoned(w);
+    }
+    let held = deferred && live == 0 && write_ctl(w, "ctl", "warp-hold on");
+    if held {
+        let mut st: Vec<u32> = Vec::new();
+        subctx_preamble(&mut st);
+        clear_stream(&mut st, res2, 1, 0.0, 0.0, 1.0);
+        submit_stream(w, ctx, &st, "busy next");
+    }
+    let s = frees_census(w);
+    let undeferred = deferred && write_ctl(w, "ctl", "warp-defer-frees off");
+    if !(held && s.owed == b.owed + 1 && s.paid == b.paid && s.stalls == p.stalls) {
+        let _ = write_ctl(w, "ctl", "warp-hold off");
+        let _ = write_ctl(w, &ctl, "destroy");
+        unsafe { t_close(w) };
+        t_putstr(&format!(
+            "warp-prove: C6-RB BUSY attempt {} not constructed -- ctx poisoned {} at the destroy (want 1), fences in flight {} (want 0), the free {}, the defer {}, poisoned {} after the vindication (want 0), at the next chain frees owed +{} (want +1) paid +{} (want 0), the engine's stalls moved by {}\n",
+            k,
+            poisoned_at_destroy,
+            left,
+            if taken { "taken" } else { "not taken" },
+            if deferred { "armed" } else { "refused" },
+            live,
+            s.owed.wrapping_sub(b.owed),
+            s.paid.wrapping_sub(b.paid),
+            s.stalls.wrapping_sub(p.stalls)
+        ));
+        return None;
+    }
+    let t = libthyla_rs::time::Instant::now();
+    let mut n = frees_census(w);
+    while !(n.paid == b.paid + 1 && n.owed == b.owed && n.retiring == b.retiring)
+        && (t.elapsed().as_millis() as u64) < RB_BUSY_PAY_MS
+    {
+        let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(20));
+        n = frees_census(w);
+    }
+    let ms = t.elapsed().as_millis() as u64;
+    let _ = write_ctl(w, "ctl", "warp-hold off");
+    let _ = write_ctl(w, &ctl, "destroy");
+    unsafe { t_close(w) };
+    let ok = n.paid == b.paid + 1 && n.owed == b.owed && n.leaked == b.leaked && n.retiring == b.retiring;
+    t_putstr(&format!(
+        "warp-prove: C6-RB BUSY {} -- the taken free was still owed when the vindicated ctx's next chain went in, held; with the defer {}: paid +{} (want +1) within {} ms (bound {}), owed {} (want {}), given up +{} (want 0), retiring {} (want {}): {}\n",
+        if ok { "PASS" } else { "FAIL" },
+        if undeferred { "lifted" } else { "already expired" },
+        n.paid.wrapping_sub(b.paid),
+        ms,
+        RB_BUSY_PAY_MS,
+        n.owed,
+        b.owed,
+        n.leaked.wrapping_sub(b.leaked),
+        n.retiring,
+        b.retiring,
+        if ok { "the chain parked behind the free" } else { "the chain on the device held the free off" }
     ));
     Some(ok)
 }
@@ -5353,6 +5489,9 @@ fn observe_readback() {
     // ---- TAKEN: a free a poisoned chain stands in the way of is taken as a
     // debt and paid once the chain has retired.
     record(rb_taken_free(), "taken");
+    // ---- BUSY: once its ctx is live again, a taken free is paid however
+    // busy the ctx is kept: a chain that can reach it parks until it is.
+    record(rb_taken_busy(), "busy");
 
     // ---- Teardown: withdraw the adoption, destroy the ctx, drop the
     // surfaces; the seam must be clean.

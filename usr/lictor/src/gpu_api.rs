@@ -103,8 +103,10 @@ pub struct FenceTag {
 /// order holds, and, a readback, while its context has a chain the device may
 /// still run (`on_device`). `parked` is (context, readback) per parked chain.
 /// A context with a released chain parks everything, and the pump releases it.
-pub fn must_park(parked: &[(u32, bool)], ctx: u32, readback: bool, on_device: bool, released: &Released) -> bool {
-    if released.holds(ctx) {
+/// A chain that can reach an owed free (`owed`, `OwedReach::reaches`) parks
+/// until the free is paid.
+pub fn must_park(parked: &[(u32, bool)], ctx: u32, readback: bool, on_device: bool, owed: bool, released: &Released) -> bool {
+    if owed || released.holds(ctx) {
         return true;
     }
     parked.iter().any(|&(c, _)| c == ctx) || (readback && on_device)
@@ -163,11 +165,14 @@ pub enum Unpark {
 /// with an abandoned chain not yet retired (`poisoned`) has its parked chains
 /// released: that chain may never retire, and a parked chain has no clock of
 /// its own, so it would count in the lane forever. So does a context with a
-/// released chain, for as long as its device context lives.
+/// released chain, for as long as its device context lives. A chain that can
+/// reach an owed free (`owed`, by index) stays, and its context's later
+/// chains with it, until the free is paid.
 pub fn unpark_plan(
     parked: &[(u32, bool)],
     on_device: &dyn Fn(u32) -> bool,
     poisoned: &dyn Fn(u32) -> bool,
+    owed: &dyn Fn(usize) -> bool,
     released: &Released,
 ) -> Vec<Unpark> {
     let mut plan = alloc::vec![Unpark::Keep; parked.len()];
@@ -181,7 +186,7 @@ pub fn unpark_plan(
         if blocked.contains(&ctx) {
             continue;
         }
-        if readback && (sent.contains(&ctx) || on_device(ctx)) {
+        if owed(i) || (readback && (sent.contains(&ctx) || on_device(ctx))) {
             blocked.push(ctx);
             continue;
         }
@@ -360,6 +365,10 @@ pub enum Request {
     /// Test lever: one stall shot outside the latch witness's budget, for the
     /// compositor to aim at a command of its own; the caller bounds how often.
     TestStallShot,
+    /// Test lever: for a bounded time the owed-free pass passes over the
+    /// frees a stream on `ctx_id` can reach (`on`), or no longer (`!on`, its
+    /// own only); the broker bounds how often.
+    TestOwedDefer { ctx_id: u32, on: bool },
     FencedHeld,
     TestFencedFree,
     CompSlotState,
@@ -418,6 +427,67 @@ impl ChainReach {
             Retired::Context(ctx) => self.ctx == ctx,
             Retired::Resource(res) if self.res != 0 => self.res == res,
             Retired::Resource(res) => holds(self.ctx, res),
+        }
+    }
+}
+/// The owed frees a chain may not go to the device past (GPU-DESIGN 4.5.15):
+/// their ids, and the device contexts whose streams can name one (`holds`).
+/// A free's repeat waits for every chain on the device that can reach it, so
+/// a context that kept a chain there would hold the free off for as long as
+/// it kept rendering; a chain that can reach one parks instead, and the free
+/// waits only on chains already on the device, which end. Only frees no
+/// poisoned chain reaches are listed: one a poisoned chain reaches waits for
+/// the vindication whatever else runs, and a chain parked behind it would
+/// wait as long with no clock of its own.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct OwedReach {
+    res: Vec<u32>,
+    ctxs: Vec<u32>,
+}
+impl OwedReach {
+    fn new(mut res: Vec<u32>, mut ctxs: Vec<u32>) -> Self {
+        res.sort_unstable();
+        res.dedup();
+        ctxs.sort_unstable();
+        ctxs.dedup();
+        OwedReach { res, ctxs }
+    }
+    /// The frees in `owed` no chain in `poisoned` can reach, and the contexts
+    /// that can reach one of them: `held_by(ctx)` is what a stream on `ctx`
+    /// can name, `holders(set)` the contexts that can name one of a set.
+    pub fn of(
+        mut owed: Vec<u32>,
+        poisoned: &[ChainReach],
+        held_by: impl Fn(u32) -> Vec<u32>,
+        holders: impl Fn(&dyn Fn(u32) -> bool) -> Vec<u32>,
+    ) -> Self {
+        if owed.is_empty() {
+            return OwedReach::default();
+        }
+        for p in poisoned {
+            if p.res != 0 {
+                owed.retain(|&r| r != p.res);
+            } else {
+                let mut held = held_by(p.ctx);
+                held.sort_unstable();
+                owed.retain(|r| held.binary_search(r).is_err());
+            }
+        }
+        if owed.is_empty() {
+            return OwedReach::default();
+        }
+        owed.sort_unstable();
+        owed.dedup();
+        let ctxs = holders(&|r| owed.binary_search(&r).is_ok());
+        OwedReach::new(owed, ctxs)
+    }
+    /// Whether `chain` can reach one of the frees, as `ChainReach::reaches`
+    /// asks of each.
+    pub fn reaches(&self, chain: ChainReach) -> bool {
+        if chain.res != 0 {
+            self.res.binary_search(&chain.res).is_ok()
+        } else {
+            self.ctxs.binary_search(&chain.ctx).is_ok()
         }
     }
 }
@@ -700,6 +770,7 @@ impl Wire for Request {
             Self::TestStallNext => { 68u16.put(out); },
             Self::TestArmChained => { 69u16.put(out); },
             Self::TestStallShot => { 70u16.put(out); },
+            Self::TestOwedDefer { ctx_id, on } => { 72u16.put(out); ctx_id.put(out); on.put(out); },
             Self::FencedHeld => { 55u16.put(out); },
             Self::TestFencedFree => { 56u16.put(out); },
             Self::CompSlotState => { 57u16.put(out); },
@@ -776,6 +847,7 @@ impl Wire for Request {
             68 => Self::TestStallNext,
             69 => Self::TestArmChained,
             70 => Self::TestStallShot,
+            72 => Self::TestOwedDefer { ctx_id: <u32>::get(r)?, on: <bool>::get(r)? },
             55 => Self::FencedHeld,
             56 => Self::TestFencedFree,
             57 => Self::CompSlotState,
@@ -839,7 +911,7 @@ mod admission_tests {
             Request::CtxCreate { ctx_id: 1, debug_name: Vec::new() },
             Request::Flush { resource_id: 1, x: 0, y: 0, w: 1, h: 1 }, Request::EngineDead,
             Request::TestArmLatch, Request::TestStallNext, Request::TestArmChained, Request::TestStallShot,
-            Request::FreesOwed]
+            Request::TestOwedDefer { ctx_id: 1, on: true }, Request::FreesOwed]
     }
     fn seat() -> Vec<Request> {
         vec![Request::InputInfo { index: 0 }, Request::InputDrain { index: 0 }, Request::SeatState,
@@ -1058,36 +1130,36 @@ mod park_tests {
     const N: Released = Released(Vec::new());
     #[test]
     fn a_readback_parks_only_behind_its_own_contexts_device_work() {
-        assert!(must_park(&[], A, true, true, &N), "its context has a chain on the device");
-        assert!(!must_park(&[], A, true, false, &N), "nothing ahead of it: it publishes");
-        assert!(!must_park(&[], A, false, true, &N), "a submit behind a submit is the device's order");
-        assert!(!must_park(&[(B, true)], A, true, false, &N), "another context's parked readback");
+        assert!(must_park(&[], A, true, true, false, &N), "its context has a chain on the device");
+        assert!(!must_park(&[], A, true, false, false, &N), "nothing ahead of it: it publishes");
+        assert!(!must_park(&[], A, false, true, false, &N), "a submit behind a submit is the device's order");
+        assert!(!must_park(&[(B, true)], A, true, false, false, &N), "another context's parked readback");
     }
     #[test]
     fn everything_behind_a_parked_chain_of_its_context_parks() {
-        assert!(must_park(&[(A, true)], A, false, false, &N), "a submit behind the readback");
-        assert!(must_park(&[(A, true), (A, false)], A, true, false, &N), "a second readback");
-        assert!(!must_park(&[(A, true)], B, false, true, &N), "another context's submit");
+        assert!(must_park(&[(A, true)], A, false, false, false, &N), "a submit behind the readback");
+        assert!(must_park(&[(A, true), (A, false)], A, true, false, false, &N), "a second readback");
+        assert!(!must_park(&[(A, true)], B, false, true, false, &N), "another context's submit");
     }
     use Unpark::{Keep as K, Publish as P, Release as R};
     #[test]
     fn a_readback_goes_with_the_chains_behind_it_up_to_the_next_readback() {
         let parked = [(A, true), (A, false), (A, false), (A, true), (A, false)];
-        assert_eq!(unpark_plan(&parked, &|_| false, &|_| false, &N), vec![P, P, P, K, K]);
-        assert_eq!(unpark_plan(&parked, &|c| c == A, &|_| false, &N), vec![K; 5], "its prefix is on the device");
+        assert_eq!(unpark_plan(&parked, &|_| false, &|_| false, &|_| false, &N), vec![P, P, P, K, K]);
+        assert_eq!(unpark_plan(&parked, &|c| c == A, &|_| false, &|_| false, &N), vec![K; 5], "its prefix is on the device");
     }
     #[test]
     fn contexts_unpark_independently_and_keep_their_order() {
         let parked = [(A, true), (B, true), (A, false), (B, false)];
-        assert_eq!(unpark_plan(&parked, &|c| c == A, &|_| false, &N), vec![K, P, K, P]);
-        assert_eq!(unpark_plan(&parked, &|c| c == B, &|_| false, &N), vec![P, K, P, K]);
+        assert_eq!(unpark_plan(&parked, &|c| c == A, &|_| false, &|_| false, &N), vec![K, P, K, P]);
+        assert_eq!(unpark_plan(&parked, &|c| c == B, &|_| false, &|_| false, &N), vec![P, K, P, K]);
     }
     #[test]
     fn a_poisoned_contexts_parked_chains_are_released_and_no_one_elses() {
         let parked = [(A, true), (B, true), (A, false), (B, false)];
         // A's abandoned chain is still "on the device" too: release wins over waiting.
-        assert_eq!(unpark_plan(&parked, &|c| c == A || c == B, &|c| c == A, &N), vec![R, K, R, K]);
-        assert_eq!(unpark_plan(&parked, &|c| c == A, &|c| c == A, &N), vec![R, P, R, P]);
+        assert_eq!(unpark_plan(&parked, &|c| c == A || c == B, &|c| c == A, &|_| false, &N), vec![R, K, R, K]);
+        assert_eq!(unpark_plan(&parked, &|c| c == A, &|c| c == A, &|_| false, &N), vec![R, P, R, P]);
     }
     fn released_tag(ctx_pub: u32, comp: bool) -> FenceTag {
         FenceTag { fence_id: 7, ctx_pub, readback: true, comp, abandoned: false, ok: false,
@@ -1099,20 +1171,20 @@ mod park_tests {
         // A's readback is released behind its abandoned chain; the seam has not
         // pumped yet, so it admits A's next submit from the older view.
         let mut rel = Released::default();
-        assert_eq!(unpark_plan(&[(A, true)], &|c| c == A, &|c| c == A, &rel), vec![R]);
+        assert_eq!(unpark_plan(&[(A, true)], &|c| c == A, &|c| c == A, &|_| false, &rel), vec![R]);
         let mut parked = released_tag(A, false);
         (parked.ok, parked.released) = (true, false);
         let tag = release_tag(parked, 5, A_DEV, &mut rel);
         assert!(tag.released && !tag.ok && !tag.abandoned && tag.parked_ms == 5);
-        assert!(must_park(&[], A, false, false, &rel), "nothing of A parked or on the device: still parks");
-        assert!(!must_park(&[], A, false, false, &N), "control: without the record it publishes");
-        assert!(!must_park(&[], B, false, false, &rel), "another context publishes");
+        assert!(must_park(&[], A, false, false, false, &rel), "nothing of A parked or on the device: still parks");
+        assert!(!must_park(&[], A, false, false, false, &N), "control: without the record it publishes");
+        assert!(!must_park(&[], B, false, false, false, &rel), "another context publishes");
         // The pump releases it even once the abandoned chain retired late.
-        assert_eq!(unpark_plan(&[(A, false), (B, false)], &|_| false, &|_| false, &rel), vec![R, P]);
-        assert_eq!(unpark_plan(&[(A, false), (B, false)], &|_| false, &|_| false, &N), vec![P, P]);
-        assert!(must_park(&[], A, true, false, &rel), "a readback after the vindication too");
+        assert_eq!(unpark_plan(&[(A, false), (B, false)], &|_| false, &|_| false, &|_| false, &rel), vec![R, P]);
+        assert_eq!(unpark_plan(&[(A, false), (B, false)], &|_| false, &|_| false, &|_| false, &N), vec![P, P]);
+        assert!(must_park(&[], A, true, false, false, &rel), "a readback after the vindication too");
         rel.forget(A_DEV);
-        assert!(!must_park(&[], A, false, false, &rel), "a new device context is a new stream");
+        assert!(!must_park(&[], A, false, false, false, &rel), "a new device context is a new stream");
     }
     #[test]
     fn a_released_record_is_one_per_device_context_and_never_a_compositor_readbacks() {
@@ -1131,6 +1203,71 @@ mod park_tests {
         let mut bytes = Vec::new();
         tag.put(&mut bytes);
         assert_eq!(FenceTag::get(&mut Reader::new(&bytes).unwrap()).unwrap(), tag);
+    }
+    #[test]
+    fn a_chain_that_can_reach_an_owed_free_parks_and_holds_its_context_back() {
+        assert!(must_park(&[], A, false, false, true, &N), "nothing ahead of it, but it reaches an owed free");
+        assert!(!must_park(&[], A, false, false, false, &N), "control: one variable away it publishes");
+        let none = |_: usize| false;
+        let parked = [(A, false), (A, false), (B, false)];
+        assert_eq!(unpark_plan(&parked, &|_| false, &|_| false, &|i| i == 0, &N), vec![K, K, P],
+            "A's later chain keeps A's order; B goes");
+        assert_eq!(unpark_plan(&parked, &|_| false, &|_| false, &none, &N), vec![P, P, P], "control");
+        assert_eq!(unpark_plan(&parked, &|_| false, &|_| false, &|i| i == 1, &N), vec![P, K, P],
+            "the chain ahead of it is not held");
+        assert_eq!(unpark_plan(&[(A, false), (A, true)], &|_| false, &|_| false, &|i| i == 0, &N), vec![K, K],
+            "nor is a readback behind it sent past it");
+        // A poisoned or released context's chains are released, never kept.
+        assert_eq!(unpark_plan(&parked, &|_| false, &|c| c == A, &|_| true, &N), vec![R, R, K]);
+        let mut rel = Released::default();
+        rel.note(A_DEV, &released_tag(A, false));
+        assert_eq!(unpark_plan(&parked, &|_| false, &|_| false, &|_| true, &rel), vec![R, R, K]);
+    }
+    #[test]
+    fn owed_reach_asks_what_each_owed_free_asks_of_a_chain() {
+        // Context 1 links resource 10, context 2 links 11, resource 12 was born in 3.
+        let holds = |ctx: u32, res: u32| ctx != 0 && matches!((ctx, res), (1, 10) | (2, 11) | (3, 12));
+        let owed = [12, 10];
+        let ctxs: Vec<u32> = (0..6).filter(|&c| owed.iter().any(|&r| holds(c, r))).collect();
+        let reach = OwedReach::new(vec![12, 10, 10], ctxs);
+        assert!(!reach.res.is_empty() && !reach.ctxs.is_empty());
+        let mut seen = (0, 0);
+        for ctx in 0..6 {
+            for res in [0, 10, 11, 12, 13] {
+                let chain = ChainReach { ctx, res };
+                let want = owed.iter().any(|&r| chain.reaches(Retired::Resource(r), &holds));
+                assert_eq!(reach.reaches(chain), want, "{chain:?}");
+                if want { seen.0 += 1 } else { seen.1 += 1 }
+            }
+        }
+        assert!(seen.0 > 0 && seen.1 > 0, "both answers were asked: {seen:?}");
+        assert!(!OwedReach::default().reaches(ChainReach { ctx: 1, res: 0 }), "nothing owed reaches nothing");
+    }
+    #[test]
+    fn a_free_a_poisoned_chain_reaches_holds_no_chain_back() {
+        // Context 1 links 10 and 11, context 2 links 11, 12 was born in 3, 13 in 4.
+        let holds = |ctx: u32, res: u32| matches!((ctx, res), (1, 10) | (1, 11) | (2, 11) | (3, 12) | (4, 13));
+        let held_by = |ctx: u32| (1..20).filter(|&r| holds(ctx, r)).collect::<Vec<u32>>();
+        let holders = |set: &dyn Fn(u32) -> bool| (1..6).filter(|&c| (1..20).any(|r| set(r) && holds(c, r))).collect::<Vec<u32>>();
+        let owed = vec![13, 10, 11, 12];
+        // A poisoned stream on 2 reaches 11; a poisoned transfer names 12.
+        let poisoned = [ChainReach { ctx: 2, res: 0 }, ChainReach { ctx: 5, res: 12 }];
+        let reach = OwedReach::of(owed.clone(), &poisoned, held_by, holders);
+        let payable: Vec<u32> = owed.iter().copied()
+            .filter(|&r| !poisoned.iter().any(|p| p.reaches(Retired::Resource(r), &holds))).collect();
+        assert_eq!(payable, [13, 10], "the control: two frees left, two excluded");
+        for ctx in 0..6 {
+            for res in [0, 10, 11, 12, 13, 14] {
+                let chain = ChainReach { ctx, res };
+                let want = payable.iter().any(|&r| chain.reaches(Retired::Resource(r), &holds));
+                assert_eq!(reach.reaches(chain), want, "{chain:?}");
+            }
+        }
+        assert_eq!(reach.ctxs, [1, 4], "2 holds only the excluded 11, 3 only the excluded 12");
+        let none = OwedReach::of(vec![11], &poisoned, held_by, holders);
+        assert_eq!(none, OwedReach::default(), "every free excluded: nothing parks");
+        let all = OwedReach::of(owed.clone(), &[], held_by, holders);
+        assert_eq!(all.ctxs, [1, 2, 3, 4], "nothing poisoned: every holder");
     }
 }
 
@@ -1182,6 +1319,15 @@ mod cursor_wire_tests {
         assert_eq!(Frees::get(&mut r).unwrap(), Frees { owed: 1, incurred: 2, paid: 3, leaked: 4, retiring: 5 });
         r.finish().unwrap();
         assert!(Frees::get(&mut Reader::new(&bytes[..16]).unwrap()).is_err());
+    }
+    #[test]
+    fn the_owed_defer_lever_has_its_own_opcode() {
+        let mut bytes = Vec::new();
+        Request::TestOwedDefer { ctx_id: 0x0102_0304, on: true }.put(&mut bytes);
+        assert_eq!(bytes, [1, 0, 72, 0, 4, 3, 2, 1, 1]);
+        let mut r = Reader::new(&bytes).unwrap();
+        assert!(matches!(Request::get(&mut r).unwrap(), Request::TestOwedDefer { ctx_id: 0x0102_0304, on: true }));
+        r.finish().unwrap();
     }
     #[test]
     fn the_stall_shot_has_its_own_opcode() {

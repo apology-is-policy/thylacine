@@ -10972,6 +10972,16 @@ impl Comp {
             .map(|c| c.pub_id)
     }
 
+    /// The GL device ctx of this conn's ctx, if it has one (#178).
+    #[cfg(feature = "test-mode")]
+    fn wctx_dev_of_conn(&self, conn: u64) -> Option<u32> {
+        self.warp_ctxs
+            .iter()
+            .flatten()
+            .find(|c| c.owner_conn == conn)
+            .map(|c| c.dev_ctx)
+    }
+
     /// Warp-4: the ACTIVE GL adoption for surface `n`, or None. Active =
     /// the surface names a live ctx (`glsrc`), that ctx's consent names
     /// this surface INCARNATION back (slot + gen), the consented BO is
@@ -15824,9 +15834,11 @@ impl Comp {
             // Both counters reset with them: an uncharge is honest exactly
             // when it is paired with the drop that FREES (the #130/#131
             // rule), and these pages are genuinely returned -- the guest half
-            // here, and the broker's pins at its next owed-free pass, which
-            // pays the frees it took at the park on this same proof (no
-            // chain can reach the BOs; GPU-DESIGN 4.5.15). Without this
+            // here, and the broker's pins when it pays the frees it took at
+            // the park: on this same proof nothing on the device reaches the
+            // BOs, and a later chain that could parks until they are paid
+            // (GPU-DESIGN 4.5.15), so the pins go once the chains already
+            // on the device retire, however busy the ctx is kept. Without this
             // a vindicated-but-still-live ctx stayed charged for memory it
             // no longer held, and once `leaked_count` hit the cap it could
             // never build another backing -- bricked while healthy.
@@ -18527,6 +18539,22 @@ impl Conn {
                 return match comp.test_stall_arm(self.conn_id, aim) {
                     Ok(()) => p9::build_rwrite(&mut self.out_buf, tag, a.count),
                     Err(e) => self.err(tag, e),
+                };
+            }
+            if s == "warp-defer-frees on" || s == "warp-defer-frees off" {
+                // The broker passes over the owed frees the caller's own GL
+                // device ctx can reach, so a chain of it submitted meanwhile
+                // meets one (#178: its own ctx only; the broker bounds the
+                // arms, four a boot of two seconds at most). It only delays
+                // frees that ctx can reach.
+                let dev = match comp.wctx_dev_of_conn(self.conn_id) {
+                    Some(d) => d,
+                    None => return self.err(tag, p9::E_INVAL),
+                };
+                return if comp.gpu.test_owed_defer(dev, s.ends_with(" on")) {
+                    p9::build_rwrite(&mut self.out_buf, tag, a.count)
+                } else {
+                    self.err(tag, p9::E_AGAIN)
                 };
             }
             if s == "warp-hold on" || s == "warp-hold off" || s == "warp-abandon" {

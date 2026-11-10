@@ -284,14 +284,15 @@ stays retiring and its pins held. A taken free (above) is owed unsent
 The serve loop repeats owed frees after the seat's step, on a NORMAL seat,
 while the engine takes commands (`Device::pay_owed_frees`), and never inside a
 request, where a stall it met would read as that request's. Each waits until
-no chain can reach it (`retirement_hold`) and goes whole
+no chain on the device can reach it (`Gpu::owed_free_hold`: `retirement_hold`
+less the parked chains; see Parked readbacks, owed frees) and goes whole
 (`gpu_api::OwedFree::next`): a `CTX_DETACH_RESOURCE` for each context link
 the ledger still records (`Objects::links`; each acknowledged one is dropped
 from the ledger, since `Objects::retired` refuses a linked id), the unmap a
 mapped blob needs, then the unref. A pass looks at `OWED_FREES_EXAMINED` (16)
 owed frees at most, rotating through them, and stops at
-`OWED_COMMANDS_PER_PASS` (8) commands or `SUBMIT_DEADLINE_MS` spent, so the
-seat's next look at the chord is never more than about a second off. An unref
+`OWED_COMMANDS_PER_PASS` (8) commands or `SUBMIT_DEADLINE_MS` spent, so a pass
+adds at most about a second before the seat's next look at the chord. An unref
 answered "no such resource" reads as gone, a first free's as a repeat's (QEMU
 v10.0 `virgl_cmd_resource_unref`; `gpu_api::unref_frees`, host-tested to read
 no other answer so). QEMU refuses an existing resource's free only when its
@@ -305,8 +306,8 @@ keeps its own posture, and a ring teardown at bring-up says its extent is
 leaked rather than owed. `Request::FreesOwed` (opcode 71) reports `Frees`:
 owed now, then monotone incurred, paid and given up, then `retiring`, the
 resources whose retirement has not finished. The readback leg's FREE arm
-witnesses a guest-backed free a stall met, and its TAKEN arm a taken free, the
-hold on its repeat and the link detach; the state machine's other paths (the
+witnesses a guest-backed free a stall met, its TAKEN arm a taken free, the
+hold on its repeat and the link detach, and its BUSY arm the owed-free barrier; the state machine's other paths (the
 HOST3D extent, a create's unwind, the display drain, the give-up) are
 host-tested in `gpu_api` and witnessed by no leg. tapestryd aims the arming's shots at the
 compositor context's create, at one blit-convention attempt, and at a
@@ -739,7 +740,28 @@ the chains behind it, up to that context's next readback (`gpu_api::unpark_plan`
   an 8-tuple), so a slot a parked chain holds is named, not missing.
 - **Retirements.** A retirement that a parked chain can reach parks
   (`retirement_hold` counts parked reaches as in flight), so no detach or unref
-  runs under a chain that has yet to publish.
+  runs under a chain that has yet to publish. An owed free's repeat is the
+  exception (next).
+- **Owed frees.** A chain that can reach an owed free parks, and the pump keeps
+  it, with its context's later chains, until the free is paid
+  (`gpu_api::OwedReach`, an argument to `must_park` and `unpark_plan`). Without
+  it, a context live again after its vindication and kept rendering held its
+  taken free off for good (vote 81 audit r7 F1). `Device::refresh_owed_reach`
+  builds it before every completion pump, the only place a parked chain
+  publishes, from the owed ids no poisoned chain reaches (`OwedReach::of`: one
+  that is reached waits for the vindication anyway, and a chain parked behind
+  it would have no clock) and the contexts that hold one (`Objects::held_by`,
+  `Objects::holders`). Whatever owes a free or changes a link runs in a request
+  or in the pay pass, each ending in a pump; a vindication inside a pump is seen
+  at the next, and a chain the barrier would have parked meanwhile goes to the
+  device, where the free waits for it as for any. The pay pass's hold leaves
+  parked chains out (`Gpu::owed_free_hold`): none is on the device or publishes
+  during the pass, and one that can reach the free waits for it. The test-mode
+  `Request::TestOwedDefer` (opcode 72; a context of the caller's,
+  `TEST_OWED_DEFERS` (4) arms a boot of `TEST_OWED_DEFER_MS` (2 s) at most, one
+  context at a time, ended early only by its own, cleared at that context's
+  destroy) has the pass skip the frees a context can reach, for the readback
+  leg's BUSY arm.
 - **Stall and death.** Nothing publishes while the engine refuses. A dead
   engine releases every parked chain as refused (`ok = false`, not abandoned):
   the device never saw it.
