@@ -115,6 +115,8 @@ pub fn must_park(parked: &[(u32, bool)], ctx: u32, readback: bool, on_device: bo
 /// because the seam latches the stream only on its next pump and admits from
 /// the older view until then. One entry per device context, forgotten only
 /// when a destroy of the device context the released chain rode completes.
+/// Held by pub: a seam context's chains ride two device contexts (GL and
+/// venus), and the seam reissues no pub while an entry may still name it.
 #[derive(Clone, Debug, Default)]
 pub struct Released(Vec<(u32, u32)>);
 impl Released {
@@ -355,6 +357,9 @@ pub enum Request {
     /// Test lever: the next two trusted takeovers each wait twice in series, the
     /// second wait outlasting the takeover's bound from the chord (vote 80).
     TestArmChained,
+    /// Test lever: one stall shot outside the latch witness's budget, for the
+    /// compositor to aim at a command of its own; the caller bounds how often.
+    TestStallShot,
     FencedHeld,
     TestFencedFree,
     CompSlotState,
@@ -592,6 +597,7 @@ impl Wire for Request {
             Self::TestArmLatch => { 67u16.put(out); },
             Self::TestStallNext => { 68u16.put(out); },
             Self::TestArmChained => { 69u16.put(out); },
+            Self::TestStallShot => { 70u16.put(out); },
             Self::FencedHeld => { 55u16.put(out); },
             Self::TestFencedFree => { 56u16.put(out); },
             Self::CompSlotState => { 57u16.put(out); },
@@ -666,6 +672,7 @@ impl Wire for Request {
             67 => Self::TestArmLatch,
             68 => Self::TestStallNext,
             69 => Self::TestArmChained,
+            70 => Self::TestStallShot,
             55 => Self::FencedHeld,
             56 => Self::TestFencedFree,
             57 => Self::CompSlotState,
@@ -718,7 +725,7 @@ mod admission_tests {
         vec![Request::Info, Request::Submit3dSync { ctx_id: 1, stream: Vec::new() },
             Request::CtxCreate { ctx_id: 1, debug_name: Vec::new() },
             Request::Flush { resource_id: 1, x: 0, y: 0, w: 1, h: 1 }, Request::EngineDead,
-            Request::TestArmLatch, Request::TestStallNext, Request::TestArmChained]
+            Request::TestArmLatch, Request::TestStallNext, Request::TestArmChained, Request::TestStallShot]
     }
     fn seat() -> Vec<Request> {
         vec![Request::InputInfo { index: 0 }, Request::InputDrain { index: 0 }, Request::SeatState,
@@ -1041,6 +1048,15 @@ mod cursor_wire_tests {
         assert_eq!(bytes, [1, 0, 69, 0]);
         let mut r = Reader::new(&bytes).unwrap();
         assert!(matches!(Request::get(&mut r).unwrap(), Request::TestArmChained));
+        r.finish().unwrap();
+    }
+    #[test]
+    fn the_stall_shot_has_its_own_opcode() {
+        let mut bytes = Vec::new();
+        Request::TestStallShot.put(&mut bytes);
+        assert_eq!(bytes, [1, 0, 70, 0]);
+        let mut r = Reader::new(&bytes).unwrap();
+        assert!(matches!(Request::get(&mut r).unwrap(), Request::TestStallShot));
         r.finish().unwrap();
     }
     #[test]

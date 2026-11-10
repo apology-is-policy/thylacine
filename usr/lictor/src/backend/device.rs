@@ -466,9 +466,13 @@ impl Device {
                 if result.is_ok() {
                     self.objects.context_destroyed(self.owner, ctx_id).map_err(|_| Error::Hardware)?;
                     self.objects.retired(ticket).map_err(|_| Error::Hardware)?;
-                } else if self.left_nothing(stalls) {
-                    // Refused before staging (a standing stall) or by the device:
-                    // the context lives on, so it may be destroyed again.
+                } else if !self.gpu.engine_dead() {
+                    // Refused before staging, answered, or met by a stall: the id
+                    // stays named and may be destroyed again. A repeat of one that
+                    // ran is harmless: QEMU's CTX_DESTROY only drops the handle
+                    // from virglrenderer's table (QEMU v10.0
+                    // virgl_cmd_context_destroy, virglrenderer 1.1.0
+                    // virgl_context_remove), and no create can take the id meanwhile.
                     let _ = self.objects.unretire(ticket);
                 }
                 result.put(&mut out);
@@ -670,6 +674,10 @@ impl Device {
                     if armed { self.test_stall_shots -= 1; self.gpu.test_stall_next(); }
                     armed.put(&mut out);
                 }
+                #[cfg(not(feature = "test-mode"))] { return Err(Error::BadField); }
+            }
+            Request::TestStallShot => {
+                #[cfg(feature = "test-mode")] { self.gpu.test_stall_next(); ().put(&mut out); }
                 #[cfg(not(feature = "test-mode"))] { return Err(Error::BadField); }
             }
             Request::CompSlotState => {

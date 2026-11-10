@@ -3533,6 +3533,18 @@ fn prove_corpse_reclaim(root: i64) {
 //   F2B       REPORTED, not judged: B's present latency behind that stall
 //             (max / mean over the presents), the number that Venus / v3d
 //             will remove and that no guest-side change can (4.5.13).
+//   GUARD     an adoption of a BO declaring more than its backing issues no
+//             readback; a well-backed control issues one.
+//   ABANDON   a readback parked behind chains then abandoned is released, its
+//             context's count never passes it, and its stream stays over.
+//   CREATE    a device-context create a stall meets (4.5.15) condemns its slot
+//             and owes its id a destroy; once the engine lives the destroy runs,
+//             the slot comes back, and a mint takes it. Here because this leg
+//             drives the GL lane's engine.
+//   DESTROY   a ctx destroy a stall meets is owed, not final: the broker keeps
+//             the id destroyable, the owed destroy runs once the engine lives,
+//             and a mint takes the slot's id again.
+//   CLEAN     after teardown nothing is poisoned and every slot is back.
 //
 // Prints `C6-READBACK DONE` iff every verdict arm passed, else
 // `C6-READBACK INCOMPLETE(<arm>)`; warp-readback.exp hard-fails on the
@@ -3741,6 +3753,177 @@ fn rb_abandoned_prefix() -> bool {
     false
 }
 
+/// The stall shots CREATE and DESTROY may spend each: half tapestryd's
+/// TEST_STALL_SHOTS.
+const RB_STALL_ATTEMPTS: u32 = 4;
+/// The owed destroy runs at the first fence pump after the engine revives,
+/// itself the broker's next pump after the stalled create retired (ms).
+const RB_CREATE_RECOVER_MS: u64 = 2000;
+
+/// The seam's owed-destroy census on the warp ctl: the gauges, and the monotone
+/// counters, which a recovery inside one serve pass cannot hide (the broker
+/// revives the engine in the reply that reports the stall, so the owed destroy
+/// may run before this program reads anything).
+#[derive(Clone, Copy)]
+struct Owed {
+    owed: u64,
+    condemned: u64,
+    stalls: u64,
+    incurred: u64,
+    ran: u64,
+    failed: u64,
+}
+
+fn owed_census(w: i64) -> Owed {
+    let s = open_read_all(w, "ctl");
+    let f = |k: &str| parse_field(&s, k).unwrap_or_else(|| rb_incomplete("instrument:owed-census"));
+    Owed {
+        owed: f("ctx-owed"),
+        condemned: f("slots-condemned"),
+        stalls: f("gpu-stalls"),
+        incurred: f("owed-incurred"),
+        ran: f("owed-ran"),
+        failed: f("destroy-failed"),
+    }
+}
+
+/// Wait, within RB_CREATE_RECOVER_MS, for the debt incurred since `b` to be
+/// paid: one owed destroy run, the gauges back where they were.
+fn owed_settle(w: i64, b: Owed) -> (Owed, u64) {
+    let t = libthyla_rs::time::Instant::now();
+    let mut n = owed_census(w);
+    while !(n.ran == b.ran + 1 && n.owed == b.owed && n.condemned == b.condemned)
+        && (t.elapsed().as_millis() as u64) < RB_CREATE_RECOVER_MS
+    {
+        let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(50));
+        n = owed_census(w);
+    }
+    (n, t.elapsed().as_millis() as u64)
+}
+
+/// Mint on `w` (the lowest free slot, so the one just recovered, under the id
+/// the broker held) and destroy what it made.
+fn owed_remint(w: i64) -> bool {
+    let again = try_open_read(w, "ctx/new").and_then(|s| parse_u32_prefix(&s));
+    if let Some(id) = again {
+        let _ = write_ctl(w, &format!("ctx/{}/ctl", id), "destroy");
+    }
+    again.is_some()
+}
+
+/// The verdict line both arms print once constructed.
+fn owed_verdict(arm: &str, what: &str, b: Owed, n: Owed, ms: u64, again: bool) -> bool {
+    let ok = n.incurred == b.incurred + 1 && n.ran == b.ran + 1 && n.owed == b.owed && n.condemned == b.condemned && again;
+    t_putstr(&format!(
+        "warp-prove: C6-RB {} {} -- {} met the stall shot; destroys owed +{} (want +1, not condemned for good), owed destroys run +{} (want +1) within {} ms; ctx-owed {} slots-condemned {} after (want {} and {}); a mint of the slot's id then {}\n",
+        arm,
+        if ok { "PASS" } else { "FAIL" },
+        what,
+        n.incurred.wrapping_sub(b.incurred),
+        n.ran.wrapping_sub(b.ran),
+        ms,
+        n.owed,
+        n.condemned,
+        b.owed,
+        b.condemned,
+        if again { "succeeded" } else { "FAILED" }
+    ));
+    ok
+}
+
+/// A stall meeting a context create used to leave the broker holding the id
+/// while the seam re-picked the slot for every later mint, failing them all.
+/// Its own connection: the lever aims at the caller's own next create.
+fn rb_stalled_create() -> bool {
+    for k in 1..=RB_STALL_ATTEMPTS {
+        if let Some(ok) = rb_create_attempt(k) {
+            return ok;
+        }
+    }
+    t_putstr(&format!(
+        "warp-prove: C6-RB CREATE UNCONSTRUCTED -- in {} attempts the stall shot never met the create\n",
+        RB_STALL_ATTEMPTS
+    ));
+    false
+}
+
+/// One attempt: Some(verdict), or None when the shot did not meet the create
+/// (another command took it, or a standing stall refused the create unstaged).
+fn rb_create_attempt(k: u32) -> Option<bool> {
+    let w = warp_connect("create");
+    let b = owed_census(w);
+    if !write_ctl(w, "ctl", "warp-stall-create") {
+        rb_incomplete("instrument:stall-create-refused");
+    }
+    let first = try_open_read(w, "ctx/new").and_then(|s| parse_u32_prefix(&s));
+    let a = owed_census(w);
+    if first.is_some() || a.stalls == b.stalls {
+        if let Some(id) = first {
+            let _ = write_ctl(w, &format!("ctx/{}/ctl", id), "destroy");
+        }
+        unsafe { t_close(w) };
+        t_putstr(&format!(
+            "warp-prove: C6-RB CREATE attempt {} not constructed -- ctx/new {} and the engine's stalls moved by {}\n",
+            k,
+            if first.is_some() { "succeeded" } else { "failed" },
+            a.stalls.wrapping_sub(b.stalls)
+        ));
+        return None;
+    }
+    let (n, ms) = owed_settle(w, b);
+    let again = owed_remint(w);
+    unsafe { t_close(w) };
+    Some(owed_verdict("CREATE", "ctx/new", b, n, ms, again))
+}
+
+/// A stall meeting a ctx destroy used to leave the broker's ledger retiring
+/// the id for good and the seam condemning its slot for good: eight of them
+/// and no client could mint.
+fn rb_stalled_destroy() -> bool {
+    for k in 1..=RB_STALL_ATTEMPTS {
+        if let Some(ok) = rb_destroy_attempt(k) {
+            return ok;
+        }
+    }
+    t_putstr(&format!(
+        "warp-prove: C6-RB DESTROY UNCONSTRUCTED -- in {} attempts the stall shot never met the destroy\n",
+        RB_STALL_ATTEMPTS
+    ));
+    false
+}
+
+/// One attempt: Some(verdict), or None when the shot did not meet the destroy.
+/// The destroy not completing is the construction, owed or not: a build that
+/// condemns it for good is what this tells apart.
+fn rb_destroy_attempt(k: u32) -> Option<bool> {
+    let w = warp_connect("destroy");
+    let ctx = match try_open_read(w, "ctx/new").and_then(|s| parse_u32_prefix(&s)) {
+        Some(c) => c,
+        None => rb_incomplete("instrument:destroy-mint"),
+    };
+    let b = owed_census(w);
+    if !write_ctl(w, "ctl", "warp-stall-destroy") {
+        rb_incomplete("instrument:stall-destroy-refused");
+    }
+    let destroyed = write_ctl(w, &format!("ctx/{}/ctl", ctx), "destroy");
+    let a = owed_census(w);
+    if !destroyed || a.stalls == b.stalls || a.failed == b.failed {
+        unsafe { t_close(w) };
+        t_putstr(&format!(
+            "warp-prove: C6-RB DESTROY attempt {} not constructed -- the destroy write {}, the engine's stalls moved by {}, destroys not completed +{}\n",
+            k,
+            if destroyed { "was taken" } else { "was refused" },
+            a.stalls.wrapping_sub(b.stalls),
+            a.failed.wrapping_sub(b.failed)
+        ));
+        return None;
+    }
+    let (n, ms) = owed_settle(w, b);
+    let again = owed_remint(w);
+    unsafe { t_close(w) };
+    Some(owed_verdict("DESTROY", "the ctx's destroy", b, n, ms, again))
+}
+
 /// One attempt: Some(verdict), or None when it was not constructed (the
 /// readback was on the device when the abandon landed, or a stall met its sends).
 fn rb_abandon_attempt(k: u32) -> Option<bool> {
@@ -3830,6 +4013,16 @@ fn rb_abandon_attempt(k: u32) -> Option<bool> {
     let submit_rc = write_rc(w, &format!("ctx/{}/submit", ctx), &nop);
     let verify_rc = write_rc(w, &format!("ctx/{}/ctl", ctx), b"verify");
     let refused_after = fence_n == 0 && submit_rc == Ok(-E_IO_RC) && verify_rc == Ok(-E_IO_RC);
+    // Where a submit the seam took anyway went: the broker's own record of the
+    // released chain parks and releases it (released +1), and without that
+    // record too it runs and counts (fence-signaled +1). Read once the
+    // context has nothing in flight.
+    let t = libthyla_rs::time::Instant::now();
+    while ctx_field(w, ctx, "fences-in-flight") != 0 && t.elapsed().as_millis() < 2000 {
+        let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(50));
+    }
+    let s3 = ctx_field(w, ctx, "fence-signaled");
+    let released3 = parse_field(&open_read_all(w, &format!("ctx/{}/ctl", ctx)), "released").unwrap_or(99);
     let _ = write_ctl(w, &format!("ctx/{}/ctl", ctx), "destroy");
     unsafe { t_close(w) };
     // Constructed only if the abandon took exactly the queue: a readback the
@@ -3842,14 +4035,23 @@ fn rb_abandon_attempt(k: u32) -> Option<bool> {
         return None;
     }
     let due = RB_ABANDON_SUBMITS as u64;
-    let ok = left == 0 && healed && s1 == s0 && s2 == s0 + due && released == 1 && refused_after && f_end >= f0;
+    let ok = left == 0
+        && healed
+        && s1 == s0
+        && s2 == s0 + due
+        && released == 1
+        && refused_after
+        && s3 == s2
+        && released3 == 1
+        && f_end >= f0;
     t_putstr(&format!(
-        "warp-prove: C6-RB ABANDON {} -- the readback parked behind {} abandoned chains; the ctx's fences in flight {} after {} ms (0 = the parked readback was released); fence-signaled +{} while poisoned (want +0), +{} after the vindication (want +{}, the queue alone); released {} (want 1); after the vindication the stream stays over: fence read {} (want 0, EOF), submit {:?}, verify {:?} (want Ok(-{}) each, E_IO); fenced-free {} after, {} before{}\n",
+        "warp-prove: C6-RB ABANDON {} -- the readback parked behind {} abandoned chains; the ctx's fences in flight {} after {} ms (0 = the parked readback was released); fence-signaled +{} while poisoned (want +0), +{} after the vindication (want +{}, the queue alone); released {} (want 1); after the vindication the stream stays over: fence read {} (want 0, EOF), submit {:?}, verify {:?} (want Ok(-{}) each, E_IO); after them fence-signaled +{} released {} (after-submit S{}R{}; want S{}R1); fenced-free {} after, {} before{}\n",
         if ok { "PASS" } else { "FAIL" },
         RB_ABANDON_SUBMITS, left, drained_ms,
         s1.wrapping_sub(s0), s2.wrapping_sub(s0), due,
         released,
         fence_n, submit_rc, verify_rc, E_IO_RC,
+        s3.wrapping_sub(s0), released3, s3.wrapping_sub(s0), released3, due,
         f_end, f0,
         if healed { "" } else { "; the lane did not heal after the hold came off" }
     ));
@@ -4910,6 +5112,11 @@ fn observe_readback() {
     // ---- ABANDON (the vote-81 round's F1): a readback parked behind chains that
     // are then abandoned is released, so its context's fences drain.
     record(rb_abandoned_prefix(), "abandon");
+
+    // ---- CREATE / DESTROY: a create or a destroy a stall met owes a destroy,
+    // and the slot mints again once it runs.
+    record(rb_stalled_create(), "create");
+    record(rb_stalled_destroy(), "destroy");
 
     // ---- Teardown: withdraw the adoption, destroy the ctx, drop the
     // surfaces; the seam must be clean.

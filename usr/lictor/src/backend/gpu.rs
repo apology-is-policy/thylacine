@@ -1566,7 +1566,8 @@ impl Controlq {
     /// Publish what vote 81 lets go, in submission order: a parked readback once
     /// its context has nothing on the device, with the chains behind it, up to
     /// that context's next readback. Nothing goes while the engine refuses; a
-    /// stall's revival publishes at the next pump.
+    /// stall's revival publishes at the next pump. A context `released` records
+    /// has its parked chains released, as a poisoned one's are.
     ///
     /// A context with an abandoned chain not yet retired has its parked chains
     /// released as refused. The chain may never retire, a parked chain has no
@@ -4298,8 +4299,9 @@ impl Gpu {
     }
 
     /// Publish a staged chain, or park it (operator vote 81): a readback while
-    /// its context has a chain the device may still run, and anything of a
-    /// context that already has a parked chain. The owner's fence id is minted
+    /// its context has a chain the device may still run, anything of a context
+    /// that already has a parked chain, and anything of a context with a
+    /// released chain, which the pump then releases. The owner's fence id is minted
     /// here either way, since the owner is told it now; the wire id staged with
     /// the request is a placeholder that publication overwrites.
     #[allow(clippy::too_many_arguments)]

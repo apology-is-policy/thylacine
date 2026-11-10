@@ -2601,7 +2601,10 @@ bounded by its prefix, because each chain ahead of it is abandoned at
   the ordinary path. Lictor keeps the same latch where the release happens: a
   context with a released client chain parks every later chain, and the pump
   releases it in turn, until a destroy of the device context the released chain
-  rode completes.
+  rode completes. The record names the seam context's pub, so it holds the
+  context's chains on both its device contexts, GL and venus, and tapestryd never
+  reissues a pub while a slot that carried it has a context, is condemned, or owes
+  a destroy (section 4.5.15).
   The seam latches only on its next pump, and Lictor's own loop runs the pump's
   release in between, so the seam can admit one more chain from the older view.
   Published, that chain would run after a readback that never ran, and its
@@ -2615,8 +2618,9 @@ bounded by its prefix, because each chain ahead of it is abandoned at
   (#177) has finished on the device, so nothing parked waits for it. Otherwise
   a held client would park the compositor's readback on the reserved slot: the
   cross-client wedge that ROUND F4 closed.
-- **Stalled engine.** Nothing publishes while the engine is stalled. Parked
-  chains publish at revival.
+- **Stalled engine.** Nothing publishes while the engine is stalled. At revival
+  the pump runs its plan: a poisoned or released context's parked chains are
+  released, the rest publish.
 - **Dead engine.** A parked chain is released (`ok = false`, `released`, not
   abandoned). The device never saw it, so its slot returns to the pool and
   nothing it named is at risk. The seam ends its context's fence stream for
@@ -2891,10 +2895,19 @@ block the serve loop, and seat input with it. Neither was taken.
     (`slot + 1`, the venus band likewise), so tapestryd condemns that slot
     and owes the id a destroy; once the engine is live the destroy runs,
     ordered after the create, and its completion frees the slot whichever
-    way the create went. A destroy that a standing stall refused before
-    staging left nothing, so lictor un-retires the context and tapestryd
-    owes the destroy the same way; one the device refused, or one a stall
-    met, condemns for good;
+    way the create went. A destroy a stall refused before staging, or one a
+    stall met, leaves the id named but destroyable: lictor un-retires the
+    context and tapestryd owes the destroy the same way. A repeat of one
+    that ran is harmless: QEMU's CTX_DESTROY has no error path and
+    virglrenderer only drops the handle from its table (QEMU v10.0
+    `virgl_cmd_context_destroy`, virglrenderer 1.1.0 `virgl_context_remove`),
+    and no create can take the id meanwhile. The vindication's destroys are
+    owed the same way, since no later vindication of that context comes.
+    Only an answered refusal, or a dead engine, condemns for good. A slot is
+    reused only once each device context it carried is gone or refused for
+    good. The readback leg's CREATE and DESTROY arms witness it, aiming one
+    stall shot at their own next create or their own ctx's destroy
+    (`warp-stall-create`, `warp-stall-destroy`, a few per boot);
   - a stalled hostmem MAP or UNMAP leaks its extent (`mint_host3d_ring`,
     `drop_host3d_ring`).
   A stalled SET_SCANOUT is the case a permanent latch never had to answer: once

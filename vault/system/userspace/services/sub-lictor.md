@@ -62,7 +62,7 @@ hazards: [haz-driver-panic-dos]
 abis: [abi-trusted-seat, abi-native-nonblock]
 design: ["docs/GRAPHICAL-SAK-OWNERSHIP.md", "docs/GRAPHICAL-SAK-PORTABILITY.md", "docs/HALCYON-TRUSTED-EPISODE.md"]
 created: 2026-09-18
-updated: 2026-11-09
+updated: 2026-11-10
 ---
 ## Clipboard cancellation progress boundary
 
@@ -239,7 +239,10 @@ retirement shots' so a scenario waiting on one cannot match the other. The pump
 at the end of that same request (`Device::execute`'s trailing reap) revives the
 engine, so the reply already reads `Engine::Live` with the stall count moved: a
 stall of known length, with no race against the device, carried to the
-compositor by the count alone. The shot rides exactly the next synchronous
+compositor by the count alone. `Request::TestStallShot` (opcode 70) gives one
+more shot outside that budget, with no arming: tapestryd's test-mode
+`warp-stall-create` and `warp-stall-destroy` verbs aim it at a client's own next
+device-context create or its own ctx's destroy, and bound it to a few per boot. The shot rides exactly the next synchronous
 submission (`Controlq::stall_shot_bound`): one refused, unfenced, or ended
 before its chain retired spends it and says `stall shot LOST`, rather than
 leaving it armed for whoever sends next. So does a command refused at staging
@@ -250,9 +253,12 @@ bootarg and the operator's chord, and vote 30 recovers the seat.
 `CtxAttachResource` links the attachment in the ledger before the device
 answers, and a failure that left nothing (`left_nothing`) unlinks it, so the
 resource can still retire. `CtxDestroy` retires the context in the ledger before the
-device answers, and a failure that left nothing un-retires it
-(`Objects::unretire`), so a destroy a standing stall refused before staging can
-be sent again; one a stall met keeps the context retiring, its outcome unknown. tapestryd aims them at the
+device answers, and any failure but a dead engine un-retires it
+(`Objects::unretire`): a destroy a stall refused before staging, or one a stall
+met, can be sent again. The id stays named either way, and a repeat of a destroy
+that ran is harmless, since QEMU's CTX_DESTROY has no error path and
+virglrenderer only drops the handle from its table (QEMU v10.0
+`virgl_cmd_context_destroy`, virglrenderer 1.1.0 `virgl_context_remove`). tapestryd aims the arming's shots at the
 compositor context's create, at one blit-convention attempt, and at a
 composition health step once GPU composition runs.
 Only the designated compositor reaches the broker, and only the booting
@@ -700,7 +706,10 @@ the chains behind it, up to that context's next readback (`gpu_api::unpark_plan`
   (`gpu_api::Released`, one entry per device context). From then on
   `must_park` parks every chain of that context and `unpark_plan` releases it,
   until a `ctx_destroy` of the device context the released chain rode completes
-  and forgets it (a destroy whose outcome is unknown keeps the record). tapestryd latches the stream only when its next pump takes the
+  and forgets it (a destroy whose outcome is unknown keeps the record). The
+  entry is held by pub, because a seam context's chains ride two device
+  contexts (GL and venus), and tapestryd reissues no pub while an entry may
+  still name it. tapestryd latches the stream only when its next pump takes the
   released tag, and Lictor runs the pump's release in the reap that trails a
   request, so tapestryd can admit one more chain from its older view.
   Published, that chain would run after a readback that never ran and its

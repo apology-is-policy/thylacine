@@ -3,7 +3,7 @@ id: sub-tapestryd
 type: sub
 title: "tapestryd — the compositor: the weave lifecycle, the present engine, and the retire ordering"
 parent: moc-userspace
-code: [usr/tapestryd/src/storage.rs, usr/kaua-term-probe/src/storage.rs, tools/interactive/tapestry-storage.exp, usr/kaua-term-probe/src/seat_control.rs, usr/kaua-term-probe/src/admission.rs, tools/interactive/interaction-seat.exp, usr/tapestryd/src/seat_coordinator.rs, usr/tapestryd/src/interaction.rs, usr/tapestryd/src/server.rs, usr/tapestryd/src/gpu.rs, usr/tapestryd/src/pane.rs, usr/tapestryd/src/va.rs, usr/tapestryd/src/input.rs, usr/tapestryd/src/main.rs, usr/tapestryd/src/chords.rs, usr/tapestryd/src/keymap.rs, usr/tapestryd/Cargo.toml]
+code: [usr/tapestryd/src/storage.rs, usr/kaua-term-probe/src/storage.rs, tools/interactive/tapestry-storage.exp, usr/kaua-term-probe/src/seat_control.rs, usr/kaua-term-probe/src/admission.rs, tools/interactive/interaction-seat.exp, usr/tapestryd/src/seat_coordinator.rs, usr/tapestryd/src/interaction.rs, usr/tapestryd/src/server.rs, usr/tapestryd/src/gpu.rs, usr/tapestryd/src/pane.rs, usr/tapestryd/src/va.rs, usr/tapestryd/src/input.rs, usr/tapestryd/src/main.rs, usr/tapestryd/src/chords.rs, usr/tapestryd/src/keymap.rs, usr/tapestryd/src/lib.rs, usr/tapestryd/src/warp_ids.rs, usr/tapestryd/Cargo.toml]
 audit: hard
 guarded-by: [inv-i40, inv-i5, inv-i34, inv-i1, inv-i45, inv-i9]
 validated-by: [spec-tapestry-storage, spec-tapestry-present, prose, gate-smp]
@@ -12,7 +12,7 @@ hazards: [haz-driver-panic-dos]
 abis: []
 design: ["docs/TAPESTRY.md", "docs/AURORA-CONFIG.md"]
 created: 2026-08-02
-updated: 2026-11-05
+updated: 2026-11-10
 ---
 ## Cooperative hidden storage (October 4)
 
@@ -597,17 +597,31 @@ CLAIM + the `warp-prove` cross-Proc leg are 1c-2b). Four pieces, all in
 `gpu.ctx_create_venus`, capset-4) and destroyed with the warp ctx in
 `wctx_finish` (condemn-slot-on-refuse, before the `dev_ctx` destroy — else a
 reused slot could re-mint the venus id into a live host ctx). Both destroys go
-through `warp_ctx_destroy_id`: a standing stall's refusal before staging is
-owed (`warp_ctx_destroy_owed`, `warp_ctx_venus_destroy_owed`), not final, and a
-create a stall met (`wctx_mint`, `wctx_venus_ensure`) owes its id a destroy
-too, its dev slot condemned meanwhile; `warp_destroy_owed` runs them from
-`warp_service_fences` once the engine is live, and a completed dev destroy
-frees the slot. The warp ctl reports `ctx-owed`, `venus-owed` and
-`slots-condemned`. A client that mints
+through `warp_ctx_destroy_id`: one a stall refused before staging or met
+(`failure_cause` says `Stall`) is owed (`warp_ctx_destroy_owed`,
+`warp_ctx_venus_destroy_owed`), not final, since Lictor leaves the id
+destroyable; only an answered refusal or a dead engine is final. A create a
+stall met (`wctx_mint`, `wctx_venus_ensure`) owes its id a destroy too, its dev
+slot condemned meanwhile, and so do the vindication's destroys, since no later
+vindication of that ctx comes. `warp_destroy_owed` runs them from
+`warp_service_fences` once the engine is live, and a completed dev destroy frees
+the slot (and a vindicated slot's parked backings). A slot is minted again only
+once no destroy of it is owed, the venus one included, and `wctx_mint` never
+reissues a pub a slot still carries (live, condemned or owing a destroy;
+`warp_ctx_slot_pub`, `warp_ids::next_ctx_pub`), because Lictor's
+released-stream record names the pub. The warp ctl reports the gauges
+`ctx-owed`, `venus-owed` and `slots-condemned`, and the monotone `gpu-stalls`,
+`owed-incurred` (each debt once), `owed-ran` and `destroy-failed`, which a
+recovery inside one serve pass cannot hide. The test-mode
+`warp-stall-create` and `warp-stall-destroy` verbs arm one stall shot at the
+caller's own next create or its own ctx's destroy (`TEST_STALL_SHOTS` per
+boot, one connection at a time), which the readback leg's CREATE and DESTROY
+arms use. A client that mints
 only V-3a guest-blob rings pays no venus ctx. Section 0.6 ratifies one venus ctx
 per client (V-3b-2's forward reuses it, no rework). The id is a **dedicated band**
 `WARP_VENUS_CTX_BASE (0x200) + slot`, pinned disjoint by a `const _` gap assert +
-a `conv_attempt` `debug_assert`. The band matters because the recon's first
+a `conv_attempt` `debug_assert`; the compose probe's `COMPOSE_PROBE_CTX` sits
+above the band, pinned by its own `const _` assert. The band matters because the recon's first
 choice — `COMPOSITOR_CTX + 1 + slot` — **aliases `CONV_PROBE_CTX_BASE`
 (`COMPOSITOR_CTX + 1`)**, the conv-probe throwaway ids: an enumerate-mirrors catch
 found by grepping every `ctx_create*` id before writing, not after a collision.

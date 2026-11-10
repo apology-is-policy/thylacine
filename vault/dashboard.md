@@ -123,6 +123,7 @@ Generated — do not edit between the markers (`quaestor render`).
 
 ## Recent changes
 
+- 2026-11-10 [[chg-2026-11-10-stall-met-destroys]] — A destroy a stall met, or the vindication's, is owed rather than final; the r4 P3 batch and the CREATE/DESTROY witnesses
 - 2026-11-10 [[chg-2026-11-10-stalled-ctx-create]] — A warp context create a stall met condemns its slot and owes a destroy, instead of wedging the slot
 - 2026-11-09 [[chg-2026-11-09-input-thread]] — Lictor reads input on its own thread, into a 4096-entry queue (vote 72, second half)
 - 2026-11-09 [[chg-2026-11-09-narrow-sync-wait]] — Lictor's synchronous wait no longer widens behind a readback (vote 72, first half)
@@ -130,5 +131,4 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-11-09 [[chg-2026-11-09-park-readbacks-f1]] — A parked chain behind an abandoned chain is released, not kept (vote 81 audit F1)
 - 2026-11-09 [[chg-2026-11-09-park-readbacks-r2f1]] — A released chain is owed, not counted, until its context is vindicated (vote 81 audit round 2 F1)
 - 2026-11-09 [[chg-2026-11-09-park-readbacks-r2p3]] — Vote 81 audit round 2 closed: the released stream latch, slot witnesses, stall retries, P3s
-- 2026-11-09 [[chg-2026-11-09-park-readbacks-r3f1]] — Lictor keeps the released-stream latch where the release happens (vote 81 audit r3 F1)
 <!-- generated:end -->

@@ -292,6 +292,10 @@ impl Gpu {
         self.invoke(Request::TestStallNext).unwrap_or(false)
     }
     #[cfg(feature = "test-mode")]
+    pub fn test_stall_shot(&mut self) -> bool {
+        self.invoke::<()>(Request::TestStallShot).is_ok()
+    }
+    #[cfg(feature = "test-mode")]
     pub fn test_abandoned_total(&self) -> u32 {
         self.query(Request::TestAbandonedTotal).unwrap_or(u32::MAX)
     }
