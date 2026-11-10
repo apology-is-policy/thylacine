@@ -1541,6 +1541,30 @@ fn ring_xproc_prove() -> i64 {
     0
 }
 
+/// The map fds minted under each warp connection: (root, fd). A BO's mapping
+/// lives on its map fd, and an open fd keeps the connection's session up, so
+/// closing the root alone leaves the broker's conn standing against its pool.
+static MAP_FDS: libthyla_rs::sync::Mutex<Vec<(i64, i64)>> = libthyla_rs::sync::Mutex::new(Vec::new());
+
+fn map_fd_note(root: i64, fd: i64) {
+    MAP_FDS.lock().push((root, fd));
+}
+
+/// Close a warp connection with the map fds minted under it; their mappings
+/// go with them, so nothing may read a BO of this connection afterwards.
+fn warp_close(root: i64) {
+    let mine: Vec<i64> = {
+        let mut m = MAP_FDS.lock();
+        let mine = m.iter().filter(|&&(r, _)| r == root).map(|&(_, fd)| fd).collect();
+        m.retain(|&(r, _)| r != root);
+        mine
+    };
+    for fd in mine {
+        unsafe { t_close(fd) };
+    }
+    unsafe { t_close(root) };
+}
+
 fn warp_connect(what: &str) -> i64 {
     // The wait tells a full pool (refused at once) from a spent warp budget
     // (the listener unarmed: the kernel's handshake deadline).
@@ -2645,6 +2669,7 @@ fn mint_buffer_bo(root: i64, ctx: u32, what: &str) -> (u32, u32, u64) {
     if va < 0 {
         fail(&format!("{}: weft_map", what));
     }
+    map_fd_note(root, map_fd);
     (bo, res, va as u64)
 }
 
@@ -3903,7 +3928,7 @@ fn rb_create_attempt(k: u32) -> Option<bool> {
         if let Some(id) = first {
             let _ = write_ctl(w, &format!("ctx/{}/ctl", id), "destroy");
         }
-        unsafe { t_close(w) };
+        warp_close(w);
         t_putstr(&format!(
             "warp-prove: C6-RB CREATE attempt {} not constructed -- ctx/new {} and the engine's stalls moved by {}\n",
             k,
@@ -3914,7 +3939,7 @@ fn rb_create_attempt(k: u32) -> Option<bool> {
     }
     let (n, ms) = owed_settle(w, b);
     let again = owed_remint(w);
-    unsafe { t_close(w) };
+    warp_close(w);
     Some(owed_verdict("CREATE", "ctx/new", b, n, ms, again))
 }
 
@@ -3950,7 +3975,7 @@ fn rb_destroy_attempt(k: u32) -> Option<bool> {
     let destroyed = write_ctl(w, &format!("ctx/{}/ctl", ctx), "destroy");
     let a = owed_census(w);
     if !destroyed || a.stalls == b.stalls || a.failed == b.failed {
-        unsafe { t_close(w) };
+        warp_close(w);
         t_putstr(&format!(
             "warp-prove: C6-RB DESTROY attempt {} not constructed -- the destroy write {}, the engine's stalls moved by {}, destroys not completed +{}\n",
             k,
@@ -3962,7 +3987,7 @@ fn rb_destroy_attempt(k: u32) -> Option<bool> {
     }
     let (n, ms) = owed_settle(w, b);
     let again = owed_remint(w);
-    unsafe { t_close(w) };
+    warp_close(w);
     Some(owed_verdict("DESTROY", "the ctx's destroy", b, n, ms, again))
 }
 
@@ -4026,7 +4051,7 @@ fn rb_free_attempt(k: u32) -> Option<bool> {
     let a = frees_census(w);
     if !destroyed || a.stalls == b.stalls {
         let _ = write_ctl(w, &format!("ctx/{}/ctl", ctx), "destroy");
-        unsafe { t_close(w) };
+        warp_close(w);
         t_putstr(&format!(
             "warp-prove: C6-RB FREE attempt {} not constructed -- the BO destroy {}, the engine's stalls moved by {}\n",
             k,
@@ -4045,7 +4070,7 @@ fn rb_free_attempt(k: u32) -> Option<bool> {
     }
     let ms = t.elapsed().as_millis() as u64;
     let _ = write_ctl(w, &format!("ctx/{}/ctl", ctx), "destroy");
-    unsafe { t_close(w) };
+    warp_close(w);
     // A stall past the destroy's (the repeat itself missing its deadline)
     // stands the pass down, so the repay comes a window later: not this one.
     if n.stalls != a.stalls {
@@ -4123,7 +4148,7 @@ fn rb_taken_attempt(k: u32) -> Option<bool> {
         Ok(b) => b,
         Err(b) => {
             let _ = write_ctl(w, &format!("ctx/{}/ctl", ctx), "destroy");
-            unsafe { t_close(w) };
+            warp_close(w);
             t_putstr(&format!(
                 "warp-prove: C6-RB TAKEN FAIL -- a free owed before the window was never paid (frees-owed {}, paid {}, given up {})\n",
                 b.owed, b.paid, b.leaked
@@ -4160,7 +4185,7 @@ fn rb_taken_attempt(k: u32) -> Option<bool> {
     let _ = write_ctl(w, "ctl", "warp-hold off");
     if !destroyed || a.stalls != p.stalls || held.stalls != p.stalls {
         let _ = write_ctl(w, &ctl, "destroy");
-        unsafe { t_close(w) };
+        warp_close(w);
         t_putstr(&format!(
             "warp-prove: C6-RB TAKEN attempt {} not constructed -- ctx poisoned {} (want 1), fences in flight {} (want 0), the BO destroy {}, the engine's stalls moved by {}\n",
             k,
@@ -4181,7 +4206,7 @@ fn rb_taken_attempt(k: u32) -> Option<bool> {
     }
     let ms = t.elapsed().as_millis() as u64;
     let _ = write_ctl(w, &ctl, "destroy");
-    unsafe { t_close(w) };
+    warp_close(w);
     let taken = a.incurred == b.incurred + 1 && a.owed == b.owed + 1 && a.retiring == b.retiring + 1;
     let waited = held.paid == b.paid && held.owed == b.owed + 1;
     let paid = n.paid == b.paid + 1 && n.owed == b.owed && n.leaked == b.leaked && n.retiring == b.retiring;
@@ -4321,13 +4346,102 @@ fn arm_stall_repay(w: i64, bo_ctl: &str) {
     }
 }
 
+/// How often REOPEN closes a connection and opens another at once.
+const RB_REOPEN_PAIRS: u32 = 32;
+/// More connections than the broker's pool holds: the fill must be refused
+/// before this many are taken.
+const RB_REOPEN_FILL_BOUND: usize = 16;
+
+fn tapestry_connect() -> i64 {
+    unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/srv/tapestry".as_ptr(), 13, T_OREAD) }
+}
+
+/// A connection closed gives its slot back before the next connect is judged:
+/// at a full pool, a client that closes one connection and opens another at
+/// once must get the slot it just left. The fill is the control: one connect
+/// more than the pool holds is refused, so the pool was full for every pair.
+fn rb_reopen() -> bool {
+    let mut held: Vec<i64> = Vec::new();
+    let mut refused_ms = 0u64;
+    let mut full = false;
+    while held.len() < RB_REOPEN_FILL_BOUND {
+        let t = libthyla_rs::time::Instant::now();
+        let fd = tapestry_connect();
+        if fd < 0 {
+            refused_ms = t.elapsed().as_millis() as u64;
+            full = true;
+            break;
+        }
+        held.push(fd);
+    }
+    let filled = held.len();
+    let mut refused = 0u32;
+    let mut first_rc = 0i64;
+    let mut lost = false;
+    if full && filled > 0 {
+        for _ in 0..RB_REOPEN_PAIRS {
+            let last = held.pop().unwrap_or(-1);
+            unsafe { t_close(last) };
+            let mut fd = tapestry_connect();
+            if fd < 0 {
+                refused += 1;
+                if first_rc == 0 {
+                    first_rc = fd;
+                }
+                // The pool is full again for the next pair, once the broker
+                // has seen the close.
+                for _ in 0..40 {
+                    let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(25));
+                    fd = tapestry_connect();
+                    if fd >= 0 {
+                        break;
+                    }
+                }
+                if fd < 0 {
+                    lost = true;
+                    break;
+                }
+            }
+            held.push(fd);
+        }
+    }
+    // Still full after the pairs: each took exactly the slot the close left.
+    let over = if full && !lost { tapestry_connect() } else { -1 };
+    if over >= 0 {
+        unsafe { t_close(over) };
+    }
+    for fd in held {
+        unsafe { t_close(fd) };
+    }
+    if !full || filled == 0 {
+        t_putstr(&format!(
+            "warp-prove: C6-RB REOPEN UNCONSTRUCTED -- {} connections were taken and none refused (bound {}): the pool was never full\n",
+            filled, RB_REOPEN_FILL_BOUND
+        ));
+        return false;
+    }
+    let ok = refused == 0 && !lost && over < 0;
+    t_putstr(&format!(
+        "warp-prove: C6-RB REOPEN {} -- the pool filled at {} more connections (the next was refused in {} ms); {} times one was closed and another opened at once: {} refused (want 0{}){}; one more than the pool after the pairs was {} (want refused)\n",
+        if ok { "PASS" } else { "FAIL" },
+        filled,
+        refused_ms,
+        RB_REOPEN_PAIRS,
+        refused,
+        if refused > 0 { format!("; the first answered {}", first_rc) } else { String::new() },
+        if lost { ", and a slot never came back in 1 s" } else { "" },
+        if over >= 0 { "taken" } else { "refused" }
+    ));
+    ok
+}
+
 /// Destroy an attempt's ctxs and close their connections.
 fn busy_quit(w: i64, ctx: u32, other: Option<(i64, u32, u32)>) {
     let _ = write_ctl(w, &format!("ctx/{}/ctl", ctx), "destroy");
-    unsafe { t_close(w) };
+    warp_close(w);
     if let Some((w2, ctx2, _)) = other {
         let _ = write_ctl(w2, &format!("ctx/{}/ctl", ctx2), "destroy");
-        unsafe { t_close(w2) };
+        warp_close(w2);
     }
 }
 
@@ -4791,7 +4905,7 @@ fn rb_yield_attempt(k: u32) -> Option<bool> {
         Ok(b) => b,
         Err(b) => {
             let _ = write_ctl(w, &ctl, "destroy");
-            unsafe { t_close(w) };
+            warp_close(w);
             t_putstr(&format!(
                 "warp-prove: C6-RB YIELD FAIL -- a free owed before the window was never paid (frees-owed {}, paid {}, given up {})\n",
                 b.owed, b.paid, b.leaked
@@ -4810,7 +4924,7 @@ fn rb_yield_attempt(k: u32) -> Option<bool> {
     let a = frees_census(w);
     if !destroyed || a.stalls == b.stalls {
         let _ = write_ctl(w, &ctl, "destroy");
-        unsafe { t_close(w) };
+        warp_close(w);
         t_putstr(&format!(
             "warp-prove: C6-RB YIELD attempt {} not constructed -- the BO destroy {}, the engine's stalls moved by {}\n",
             k,
@@ -4829,7 +4943,7 @@ fn rb_yield_attempt(k: u32) -> Option<bool> {
     }
     let ms = t.elapsed().as_millis() as u64;
     let _ = write_ctl(w, &ctl, "destroy");
-    unsafe { t_close(w) };
+    warp_close(w);
     if n.stalls > b.stalls + 2 {
         t_putstr(&format!(
             "warp-prove: C6-RB YIELD attempt {} not constructed -- the engine stalled {} times, more than the two shots\n",
@@ -4973,7 +5087,7 @@ fn rb_abandon_attempt(k: u32, tap: i64) -> Option<bool> {
     let s3 = ctx_field(w, ctx, "fence-signaled");
     let released3 = parse_field(&open_read_all(w, &format!("ctx/{}/ctl", ctx)), "released").unwrap_or(99);
     let _ = write_ctl(w, &format!("ctx/{}/ctl", ctx), "destroy");
-    unsafe { t_close(w) };
+    warp_close(w);
     // Constructed only if the abandon took exactly the queue: a readback the
     // device had been handed would have been abandoned with it.
     if taken != RB_ABANDON_SUBMITS as u64 || poisoned != 1 || met != 0 {
@@ -5073,6 +5187,7 @@ fn mint_bo_wh(root: i64, ctx: u32, w: u32, h: u32, flags: u32, what: &str) -> (u
     if va < 0 {
         fail(&format!("readback: weft_map for {}", what));
     }
+    map_fd_note(root, map_fd);
     (bo, res, va as u64)
 }
 
@@ -6169,6 +6284,9 @@ fn observe_readback() {
     // stall lets the chains held back for it go to the device for the window.
     record(rb_apart(), "apart");
     record(rb_lift(), "lift");
+    // ---- REOPEN: at a full pool, closing a connection and opening another at
+    // once gets the slot back. Every arm above opens right after a close.
+    record(rb_reopen(), "reopen");
 
     // ---- Teardown: withdraw the adoption, destroy the ctx, drop the
     // surfaces; the seam must be clean.
@@ -6193,10 +6311,8 @@ fn observe_readback() {
     let poisoned_end = parse_field(&open_read_string(warp, "ctl"), "poisoned").unwrap_or(99);
     drop(a);
     drop(b);
-    unsafe {
-        t_close(tap);
-        t_close(warp);
-    }
+    unsafe { t_close(tap) };
+    warp_close(warp);
     if poisoned_end != 0 || c_end.slot != 0 || pool == 0 || free_end != pool {
         t_putstr(&format!(
             "warp-prove: C6-RB CLEAN FAIL -- poisoned {} rb-slot {} fenced-free {} of {} after teardown\n",

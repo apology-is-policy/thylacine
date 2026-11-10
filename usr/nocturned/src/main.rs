@@ -415,7 +415,22 @@ fn control_run(sh: &'static Shared, listener: i64, ctl_listener: i64) -> ! {
             continue;
         }
 
-        // 3. Accept on either post -- push if there is room, else close so the
+        // 3. Service the readable connections (backward, remove-safe), before
+        //    the accept: a conn that hung up gives its slot back first, so a
+        //    client that closes one connection and opens another is not
+        //    refused at a full pool for the slot it just left.
+        let mut i = nc;
+        while i > 0 {
+            i -= 1;
+            let pf = pollfds[conn_base + i];
+            if pf.revents & (T_POLLIN | T_POLLHUP) != 0 && !conns[i].service(sh) {
+                conns[i].teardown(sh);
+                let _ = unsafe { t_close(conns[i].handle()) };
+                conns.remove(i);
+            }
+        }
+
+        // 4. Accept on either post -- push if there is room, else close so the
         //    connector fails fast and falls to its own fallback. Each conn is
         //    tagged by the post it arrived on: playback (pollfds[0]) vs the
         //    sink-authority control post (pollfds[1], the volume-write gate).
@@ -429,18 +444,6 @@ fn control_run(sh: &'static Shared, listener: i64, ctl_listener: i64) -> ! {
                         let _ = unsafe { t_close(h) };
                     }
                 }
-            }
-        }
-
-        // 4. Service the readable connections (backward, remove-safe).
-        let mut i = nc;
-        while i > 0 {
-            i -= 1;
-            let pf = pollfds[conn_base + i];
-            if pf.revents & (T_POLLIN | T_POLLHUP) != 0 && !conns[i].service(sh) {
-                conns[i].teardown(sh);
-                let _ = unsafe { t_close(conns[i].handle()) };
-                conns.remove(i);
             }
         }
     }

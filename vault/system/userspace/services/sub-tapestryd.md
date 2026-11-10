@@ -783,6 +783,17 @@ display (the weave is tapestryd's own DMA allocation, so the client's
 page budget does not bound it), 8 connections, 32 fids, a 128-entry
 per-surface event queue, 64 rects per present.
 
+The 8 connections are one pool over both roots (`MAX_CONNS`), of which at most
+4 are warp (`MAX_WARP_CONNS`). A connect at a full pool is accepted and closed
+at once, so the client sees EOF instead of waiting on the kernel's handshake
+deadline; a warp connect at a spent warp budget waits, because that listener is
+not polled. Under test-mode both are said on the console (the refusal with the
+counts, at powers of two; the spent budget once per spell). The serve pass
+services the connections that hung up **before** it accepts, so a client that
+closes one connection and opens another gets the slot it just left; accepting
+first refused it at a full pool. A connection stands for as long as any fid of
+its session is open, a BO's `map` fd included, not only its root.
+
 `Comp` holds the surfaces, the pane `Layout`, the `Gpu`, the scanout
 mode (`Off` / `Direct(n)` / `Composed`), and the mapping window (`va`, a
 `VaWindow` over `[WEAVE_VA_BASE, WEAVE_VA_TOP)`: first-fit, a range returned only

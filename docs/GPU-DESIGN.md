@@ -2724,6 +2724,14 @@ The census:
   forgets to return a released chain's slot must each go red here.
 - **CLEAN** now waits, bounded, for the reserved slot idle and the whole client
   pool free (`fenced-free` equal to `fenced-pool`), and says PASS.
+- **REOPEN** fills tapestryd's connection pool (the connect past it is refused:
+  the control), then 32 times closes one connection and opens another at once.
+  None may be refused, and one more than the pool is still refused afterwards.
+  Every arm above opens its own connection right after the last one's close; on
+  the Pi the pass that accepted before it serviced the hang-up refused DESTROY's
+  and FREE's connects. A build that accepts first must go red here. The arms
+  also close each BO's `map` fd with their connection: an open one keeps the
+  session, and so tapestryd's conn, standing until the process exits.
 - **Stalls during a leg's sends.** Another client's synchronous step waiting
   behind a leg's queue stalls the engine, and a send it refuses is resent after
   the revival, which comes only once the queue has retired, so the readback

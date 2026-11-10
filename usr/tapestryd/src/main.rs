@@ -885,7 +885,33 @@ impl Driver for Tapestryd {
                 continue;
             }
 
-            // (5) Accept (one per listener per pass).
+            // (5) Service ready conns (backward, remove-safe), before the
+            // accept: a conn that hung up gives its slot back first, so a
+            // client that closes one connection and opens another is not
+            // refused at a full pool for the slot it just left. The poll
+            // results cover exactly the conns that stand here.
+            let nc = interaction_base - conn_base;
+            let mut i = nc;
+            while i > 0 {
+                i -= 1;
+                let re = pollfds[conn_base + i].revents;
+                if re & (T_POLLIN | T_POLLHUP) != 0 && !conns[i].service(&mut self.comp) {
+                    let mut c = conns.remove(i);
+                    c.teardown(&mut self.comp);
+                    // H-4b-2: on the LAST conn of a real user principal, reap
+                    // its empty layout scaffolding (occupied tiles are already
+                    // gone via teardown's retire_conn). `conns` no longer holds
+                    // `c`, so this scans only the survivors; reap_session_empties
+                    // itself no-ops for the environment / system / unknown.
+                    let gone_principal = c.peer_principal();
+                    if conns.iter().all(|o| o.peer_principal() != gone_principal) {
+                        self.comp.reap_session_empties(gone_principal);
+                    }
+                    unsafe { t_close(c.raw_fd()) };
+                }
+            }
+
+            // (6) Accept (one per listener per pass).
             // Accept from each ARMED listener. The arming above already
             // encodes both budgets, and `conn_base` is derived from how
             // many were pushed -- never a hardcoded 2 (round-2 F2). The
@@ -905,7 +931,8 @@ impl Driver for Tapestryd {
                             unsafe { t_close(h) };
                             refused_conns = refused_conns.wrapping_add(1);
                             if refused_conns.is_power_of_two() {
-                                say!("tapestryd: tapestry connect refused -- the pool is full ({} of {}, {} warp; {} refused so far)", conns.len(), MAX_CONNS, warp_conns, refused_conns);
+                                let warp_now = conns.iter().filter(|c| c.root() == ROOT_WARP).count();
+                                say!("tapestryd: tapestry connect refused -- the pool is full ({} of {}, {} warp; {} refused so far)", conns.len(), MAX_CONNS, warp_now, refused_conns);
                             }
                         }
                     }
@@ -923,33 +950,10 @@ impl Driver for Tapestryd {
                         unsafe { t_close(h) };
                         refused_conns = refused_conns.wrapping_add(1);
                         if refused_conns.is_power_of_two() {
-                            say!("tapestryd: warp connect refused -- the pool is full ({} of {}, {} warp; {} refused so far)", conns.len(), MAX_CONNS, warp_conns, refused_conns);
+                            let warp_now = conns.iter().filter(|c| c.root() == ROOT_WARP).count();
+                            say!("tapestryd: warp connect refused -- the pool is full ({} of {}, {} warp; {} refused so far)", conns.len(), MAX_CONNS, warp_now, refused_conns);
                         }
                     }
-                }
-            }
-
-            // (6) Service ready conns (backward, remove-safe).
-            // Watches follow the old connection set. Newly accepted connections
-            // have no poll result in this iteration.
-            let nc = interaction_base - conn_base;
-            let mut i = nc;
-            while i > 0 {
-                i -= 1;
-                let re = pollfds[conn_base + i].revents;
-                if re & (T_POLLIN | T_POLLHUP) != 0 && !conns[i].service(&mut self.comp) {
-                    let mut c = conns.remove(i);
-                    c.teardown(&mut self.comp);
-                    // H-4b-2: on the LAST conn of a real user principal, reap
-                    // its empty layout scaffolding (occupied tiles are already
-                    // gone via teardown's retire_conn). `conns` no longer holds
-                    // `c`, so this scans only the survivors; reap_session_empties
-                    // itself no-ops for the environment / system / unknown.
-                    let gone_principal = c.peer_principal();
-                    if conns.iter().all(|o| o.peer_principal() != gone_principal) {
-                        self.comp.reap_session_empties(gone_principal);
-                    }
-                    unsafe { t_close(c.raw_fd()) };
                 }
             }
         }
