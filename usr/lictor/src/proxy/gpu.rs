@@ -313,6 +313,12 @@ impl Gpu {
     pub fn test_owed_defer(&mut self, ctx_id: u32, on: bool) -> bool {
         self.invoke(Request::TestOwedDefer { ctx_id, on }).unwrap_or(false)
     }
+    /// One stall shot on the broker's owed-free pass: its next command for
+    /// `resource_id`'s free, if the free is owed and repeated soon enough.
+    #[cfg(feature = "test-mode")]
+    pub fn test_owed_stall(&mut self, resource_id: u32) -> bool {
+        self.invoke(Request::TestOwedStall { resource_id }).unwrap_or(false)
+    }
     /// Aim a stall shot at the next resource free this client sends.
     #[cfg(feature = "test-mode")]
     pub fn test_stall_at_next_unref(&mut self) { self.test_shot_at_unref = true; }

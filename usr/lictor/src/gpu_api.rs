@@ -369,6 +369,9 @@ pub enum Request {
     /// frees a stream on `ctx_id` can reach (`on`), or no longer (`!on`, its
     /// own only); the broker bounds how often.
     TestOwedDefer { ctx_id: u32, on: bool },
+    /// Test lever: one stall shot on the owed-free pass's next command for
+    /// `resource_id`'s free, for a bounded time; the broker bounds how often.
+    TestOwedStall { resource_id: u32 },
     FencedHeld,
     TestFencedFree,
     CompSlotState,
@@ -491,19 +494,21 @@ impl OwedReach {
         }
     }
 }
-/// How long the engine runs after a revival before the owed-free pass and its
-/// barrier resume: a synchronous deadline's worth (backend gpu.rs asserts the
-/// two equal).
+/// The longest the owed-free pass stands down after a revival: a synchronous
+/// deadline's worth (backend gpu.rs asserts the two equal).
 pub const OWED_QUIET_MS: u64 = 500;
-/// Whether the owed-free pass may send, and its barrier hold chains back: the
-/// engine takes submissions and has run `OWED_QUIET_MS` since it last revived
-/// (`since_revival_ms`, None if it never stalled). While the device keeps
-/// stalling, a repeat would take each revived window from the requests and
-/// stall it again, and the chains it held back would wait as long; standing
-/// down, the requests run and those chains go to the device, where the free
-/// waits for them as for any.
-pub fn owed_quiet(refusing: bool, since_revival_ms: Option<u64>) -> bool {
-    !refusing && since_revival_ms.is_none_or(|ms| ms >= OWED_QUIET_MS)
+/// Whether the owed-free pass stands down, and its barrier with it: from a
+/// stall one of the pass's own commands met (`stood_down`, that stall's
+/// number; `stalls` is the engine's count) until another stall begins or the
+/// engine has run `OWED_QUIET_MS` since that stall revived. The revival's
+/// window goes to the requests, and the chains the barrier held go to the
+/// device. Any other stall leaves both up: fenced submissions are refused
+/// while the engine is stalled, so at its revival the pass sends first into
+/// a queue the stall emptied, and the chains it holds back stay parked. So
+/// the pass gets the first turn after every revival but those that follow its
+/// own stall, and each of those goes to the requests and the held chains.
+pub fn owed_stands_down(stood_down: Option<u32>, stalls: u32, refusing: bool, since_revival_ms: Option<u64>) -> bool {
+    stood_down == Some(stalls) && (refusing || since_revival_ms.is_some_and(|ms| ms < OWED_QUIET_MS))
 }
 /// What stands between a retirement and its object.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -785,6 +790,7 @@ impl Wire for Request {
             Self::TestArmChained => { 69u16.put(out); },
             Self::TestStallShot => { 70u16.put(out); },
             Self::TestOwedDefer { ctx_id, on } => { 72u16.put(out); ctx_id.put(out); on.put(out); },
+            Self::TestOwedStall { resource_id } => { 73u16.put(out); resource_id.put(out); },
             Self::FencedHeld => { 55u16.put(out); },
             Self::TestFencedFree => { 56u16.put(out); },
             Self::CompSlotState => { 57u16.put(out); },
@@ -862,6 +868,7 @@ impl Wire for Request {
             69 => Self::TestArmChained,
             70 => Self::TestStallShot,
             72 => Self::TestOwedDefer { ctx_id: <u32>::get(r)?, on: <bool>::get(r)? },
+            73 => Self::TestOwedStall { resource_id: <u32>::get(r)? },
             55 => Self::FencedHeld,
             56 => Self::TestFencedFree,
             57 => Self::CompSlotState,
@@ -925,7 +932,8 @@ mod admission_tests {
             Request::CtxCreate { ctx_id: 1, debug_name: Vec::new() },
             Request::Flush { resource_id: 1, x: 0, y: 0, w: 1, h: 1 }, Request::EngineDead,
             Request::TestArmLatch, Request::TestStallNext, Request::TestArmChained, Request::TestStallShot,
-            Request::TestOwedDefer { ctx_id: 1, on: true }, Request::FreesOwed]
+            Request::TestOwedDefer { ctx_id: 1, on: true }, Request::TestOwedStall { resource_id: 1 },
+            Request::FreesOwed]
     }
     fn seat() -> Vec<Request> {
         vec![Request::InputInfo { index: 0 }, Request::InputDrain { index: 0 }, Request::SeatState,
@@ -1258,12 +1266,21 @@ mod park_tests {
         assert!(!OwedReach::default().reaches(ChainReach { ctx: 1, res: 0 }), "nothing owed reaches nothing");
     }
     #[test]
-    fn the_pass_and_its_barrier_stand_down_until_the_engine_has_run_a_while() {
-        assert!(owed_quiet(false, None), "never stalled");
-        assert!(!owed_quiet(true, None), "stalled or dead");
-        assert!(!owed_quiet(false, Some(OWED_QUIET_MS - 1)), "just revived: the requests go first");
-        assert!(owed_quiet(false, Some(OWED_QUIET_MS)));
-        assert!(!owed_quiet(true, Some(OWED_QUIET_MS)), "stalled again");
+    fn the_pass_stands_down_only_after_its_own_stall_and_only_for_one_window() {
+        // A stall the pass did not meet leaves it, and its barrier, up.
+        assert!(!owed_stands_down(None, 3, true, None), "another's stall, standing");
+        assert!(!owed_stands_down(None, 3, false, Some(0)), "another's stall, just revived");
+        // Its own stall: down while it stands and for a deadline after it revives.
+        assert!(owed_stands_down(Some(3), 3, true, None));
+        assert!(owed_stands_down(Some(3), 3, true, Some(OWED_QUIET_MS)), "standing, whenever the last revival was");
+        assert!(owed_stands_down(Some(3), 3, false, Some(0)), "just revived: the requests go first");
+        assert!(owed_stands_down(Some(3), 3, false, Some(OWED_QUIET_MS - 1)));
+        assert!(!owed_stands_down(Some(3), 3, false, Some(OWED_QUIET_MS)), "the window has run");
+        assert!(!owed_stands_down(Some(3), 3, false, None), "no revival to count from: never down for good");
+        // The next stall, whoever's, ends it: the requests have had their turn.
+        assert!(!owed_stands_down(Some(3), 4, true, None));
+        assert!(!owed_stands_down(Some(3), 4, false, Some(0)));
+        assert!(!owed_stands_down(Some(u32::MAX), 0, true, None), "the count wraps");
     }
     #[test]
     fn a_free_a_poisoned_chain_reaches_holds_no_chain_back() {
@@ -1349,6 +1366,15 @@ mod cursor_wire_tests {
         assert_eq!(bytes, [1, 0, 72, 0, 4, 3, 2, 1, 1]);
         let mut r = Reader::new(&bytes).unwrap();
         assert!(matches!(Request::get(&mut r).unwrap(), Request::TestOwedDefer { ctx_id: 0x0102_0304, on: true }));
+        r.finish().unwrap();
+    }
+    #[test]
+    fn the_owed_stall_lever_has_its_own_opcode() {
+        let mut bytes = Vec::new();
+        Request::TestOwedStall { resource_id: 0x0102_0304 }.put(&mut bytes);
+        assert_eq!(bytes, [1, 0, 73, 0, 4, 3, 2, 1]);
+        let mut r = Reader::new(&bytes).unwrap();
+        assert!(matches!(Request::get(&mut r).unwrap(), Request::TestOwedStall { resource_id: 0x0102_0304 }));
         r.finish().unwrap();
     }
     #[test]

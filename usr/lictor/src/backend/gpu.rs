@@ -958,7 +958,7 @@ struct Controlq {
     /// Stalls begun, monotone: compared across one command, it says whether
     /// that command's outcome is unknown.
     stalls: u32,
-    /// When the engine last revived from a stall (`gpu_api::owed_quiet`).
+    /// When the engine last revived from a stall (`gpu_api::owed_stands_down`).
     revived_at: Option<Instant>,
     /// The serve loop exists. Before it (bring-up) nothing needs to stay
     /// live, so a synchronous command waits out FENCE_ABANDON_MS instead of
@@ -2273,6 +2273,9 @@ pub struct Gpu {
     owed_incurred: u32,
     owed_paid: u32,
     owed_leaked: u32,
+    /// The stall one of the owed-free pass's own commands met, by number
+    /// (`gpu_api::owed_stands_down`).
+    owed_stood_down: Option<u32>,
     /// Self-test lever: fail the next display disable without issuing it.
     fail_next_scanout_disable: bool,
     /// Set when the lever (not the device) produced the last refusal, so the
@@ -2509,6 +2512,7 @@ impl Gpu {
             owed_incurred: 0,
             owed_paid: 0,
             owed_leaked: 0,
+            owed_stood_down: None,
             fail_next_scanout_disable: false,
             injected_refusal: false,
             condemned_lost: 0,
@@ -3542,23 +3546,30 @@ impl Gpu {
         self.owed_frees.iter().any(|o| o.res == resource_id)
     }
 
-    /// The resources whose free is owed; none once the engine is dead, since
-    /// nothing publishes again.
-    pub fn owed_ids(&self) -> alloc::vec::Vec<u32> {
-        if self.ctrl.dead || !self.owed_quiet() {
+    /// The owed frees a new chain may not go to the device past: every owed
+    /// free, except none once the engine is dead (nothing publishes again)
+    /// and none while the pass stands down (its barrier stands down with it).
+    /// Not the debt itself: `owes_free` and `frees_owed` answer that.
+    pub fn barrier_ids(&self) -> alloc::vec::Vec<u32> {
+        if self.ctrl.dead || self.owed_standing_down() {
             return alloc::vec::Vec::new();
         }
         self.owed_frees.iter().map(|o| o.res).collect()
     }
 
-    /// The owed-free pass and its barrier wait for a quiet engine
-    /// (`gpu_api::owed_quiet`): none while stalled, and none for a deadline
-    /// after a revival, which goes to the requests.
-    fn owed_quiet(&self) -> bool {
-        crate::gpu_api::owed_quiet(self.ctrl.refusing(), self.ctrl.revived_at.map(|t| t.elapsed().as_millis() as u64))
+    /// The pass and its barrier stand down for one window after a stall the
+    /// pass met (`gpu_api::owed_stands_down`).
+    fn owed_standing_down(&self) -> bool {
+        crate::gpu_api::owed_stands_down(
+            self.owed_stood_down,
+            self.ctrl.stalls,
+            self.ctrl.refusing(),
+            self.ctrl.revived_at.map(|t| t.elapsed().as_millis() as u64),
+        )
     }
 
-    /// Repeat owed frees while the engine takes commands, each once no chain
+    /// Repeat owed frees while the engine takes commands and the pass is not
+    /// standing down (`owed_standing_down`), each once no chain on the device
     /// can reach it, as a first try waits (`holds` is the ledger's
     /// context-to-resource relation). A free goes whole: every context link
     /// the ledger still records (`links`), the unmap a mapped blob needs, then
@@ -3568,12 +3579,16 @@ impl Gpu {
     /// One the device keeps refusing with no stall is given up, its id left
     /// retiring and its pins and extent held: a leak, never a reuse of memory
     /// the device may still read. Returns the links the device detached, for
-    /// the ledger to drop. `deferred` is the test lever's (`TestOwedDefer`).
+    /// the ledger to drop. A command that meets a stall stands the pass down
+    /// (`owed_stood_down`). `deferred` and `aim` are the test levers'
+    /// (`TestOwedDefer`, `TestOwedStall`): `aim` answers yes once, for the
+    /// free whose next command the stall shot rides.
     pub fn pay_owed_frees(
         &mut self,
         holds: impl Fn(u32, u32) -> bool,
         deferred: impl Fn(u32) -> bool,
         links: impl Fn(u32) -> alloc::vec::Vec<u32>,
+        mut aim: impl FnMut(u32) -> bool,
     ) -> alloc::vec::Vec<(u32, u32)> {
         let mut unlinked = alloc::vec::Vec::new();
         let began = Instant::now();
@@ -3582,7 +3597,7 @@ impl Gpu {
             commands >= OWED_COMMANDS_PER_PASS || began.elapsed().as_millis() >= u128::from(SUBMIT_DEADLINE_MS)
         };
         for _ in 0..self.owed_frees.len().min(OWED_FREES_EXAMINED) {
-            if !self.owed_quiet()
+            if self.owed_standing_down()
                 || !self.takes_commands()
                 || spent(commands)
                 || (self.collect_retirements && self.retired_resources.len() >= crate::objects::MAX_OBJECTS)
@@ -3602,6 +3617,11 @@ impl Gpu {
                 commands += 1;
                 let step = o.next(!linked.is_empty());
                 let stalls = self.ctrl.stalls;
+                let shot = aim(o.res);
+                #[cfg(feature = "test-mode")]
+                if shot {
+                    self.test_stall_next();
+                }
                 let done = match step {
                     FreeStep::Detach => {
                         let ctx = linked[linked.len() - 1];
@@ -3615,6 +3635,15 @@ impl Gpu {
                     FreeStep::Unmap => self.unmap_blob(o.res).is_ok(),
                     FreeStep::Unref => self.resource_unref_raw(o.res).is_ok(),
                 };
+                #[cfg(feature = "test-mode")]
+                if shot {
+                    self.test_stall_unspent();
+                }
+                #[cfg(not(feature = "test-mode"))]
+                let _ = shot;
+                if self.ctrl.stalls != stalls {
+                    self.owed_stood_down = Some(self.ctrl.stalls);
+                }
                 match o.after(step, Answer::of(done, self.ctrl.stalls != stalls, self.ctrl.dead)) {
                     Owed::Next => continue,
                     outcome => break outcome,

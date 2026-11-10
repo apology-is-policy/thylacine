@@ -63,13 +63,24 @@ pub struct Device {
     /// Defer-lever arms left this boot.
     #[cfg(feature = "test-mode")]
     test_owed_defers: u8,
+    /// The resource whose owed free's next repeat command the stall shot
+    /// rides, and since when (`Request::TestOwedStall`).
+    #[cfg(feature = "test-mode")]
+    test_owed_stall: Option<(u32, libthyla_rs::time::Instant)>,
+    /// Owed-stall shots left this boot.
+    #[cfg(feature = "test-mode")]
+    test_owed_stalls: u8,
 }
 /// Defer-lever arms per boot: one readback leg's attempts.
 #[cfg(feature = "test-mode")]
 const TEST_OWED_DEFERS: u8 = 4;
-/// How long one arm of the defer lever lasts at most.
+/// How long one arm of the defer lever lasts at most; an owed-stall shot
+/// no repeat took is gone as soon.
 #[cfg(feature = "test-mode")]
 const TEST_OWED_DEFER_MS: u64 = 2000;
+/// Owed-stall shots per boot: one readback leg's attempts.
+#[cfg(feature = "test-mode")]
+const TEST_OWED_STALLS: u8 = 4;
 /// How the lever breaks a trusted takeover's return, in firing order.
 #[cfg(feature = "test-mode")]
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -124,6 +135,8 @@ impl Device {
             #[cfg(feature = "test-mode")] test_stall_shot_for: None,
             #[cfg(feature = "test-mode")] test_owed_defer: None,
             #[cfg(feature = "test-mode")] test_owed_defers: TEST_OWED_DEFERS,
+            #[cfg(feature = "test-mode")] test_owed_stall: None,
+            #[cfg(feature = "test-mode")] test_owed_stalls: TEST_OWED_STALLS,
             #[cfg(feature = "test-mode")] test_latch_targets: Vec::new(),
             #[cfg(feature = "test-mode")] test_latch_fired: Vec::new() })
     }
@@ -186,12 +199,23 @@ impl Device {
     /// stall one meets would read as that request's.
     pub fn pay_owed_frees(&mut self) {
         let deferred = self.test_owed_deferred();
+        let aimed = self.test_owed_stall_aimed();
+        let mut fired = false;
         let (objects, owner) = (&self.objects, self.owner);
         let unlinked = self.gpu.pay_owed_frees(
             |ctx, res| objects.holds(ctx, res),
             |res| deferred.is_some_and(|ctx| objects.holds(ctx, res)),
             |res| objects.links(owner, res),
+            |res| {
+                let hit = !fired && aimed == Some(res);
+                fired |= hit;
+                hit
+            },
         );
+        #[cfg(feature = "test-mode")]
+        if fired {
+            self.test_owed_stall = None;
+        }
         for (ctx, res) in unlinked {
             let _ = self.objects.detached(self.owner, ctx, res);
         }
@@ -232,7 +256,7 @@ impl Device {
     fn refresh_owed_reach(&mut self) {
         let objects = &self.objects;
         let reach = OwedReach::of(
-            self.gpu.owed_ids(),
+            self.gpu.barrier_ids(),
             &self.gpu.poisoned_reach(),
             |ctx| objects.held_by(ctx),
             |set: &dyn Fn(u32) -> bool| objects.holders(set),
@@ -249,6 +273,23 @@ impl Device {
             }
             self.test_owed_defer = None;
             crate::backend::diagnostic(&alloc::format!("lictor: owed-free defer on ctx {} expired\n", ctx));
+            None
+        }
+        #[cfg(not(feature = "test-mode"))]
+        {
+            None
+        }
+    }
+    /// The resource the owed-stall shot is aimed at, while it lasts.
+    fn test_owed_stall_aimed(&mut self) -> Option<u32> {
+        #[cfg(feature = "test-mode")]
+        {
+            let (res, since) = self.test_owed_stall?;
+            if since.elapsed().as_millis() < u128::from(TEST_OWED_DEFER_MS) {
+                return Some(res);
+            }
+            self.test_owed_stall = None;
+            crate::backend::diagnostic(&alloc::format!("lictor: owed-stall shot on resource {} expired unspent\n", res));
             None
         }
         #[cfg(not(feature = "test-mode"))]
@@ -829,6 +870,19 @@ impl Device {
                     done.put(&mut out);
                 }
                 #[cfg(not(feature = "test-mode"))] { let _ = (ctx_id, on); return Err(Error::BadField); }
+            }
+            Request::TestOwedStall { resource_id } => {
+                #[cfg(feature = "test-mode")] {
+                    // One shot at a time, on a live resource of the caller's.
+                    self.check(resource_id, Kind::Resource)?;
+                    let armed = self.test_owed_stall_aimed().is_none() && self.test_owed_stalls > 0;
+                    if armed {
+                        self.test_owed_stalls -= 1;
+                        self.test_owed_stall = Some((resource_id, libthyla_rs::time::Instant::now()));
+                    }
+                    armed.put(&mut out);
+                }
+                #[cfg(not(feature = "test-mode"))] { let _ = resource_id; return Err(Error::BadField); }
             }
             Request::CompSlotState => {
                 let result = self.gpu.comp_slot_state();

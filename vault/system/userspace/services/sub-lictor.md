@@ -257,7 +257,7 @@ connection), so neither a seat takeover nor another client can take it.
 tapestryd's test-mode `warp-stall-create`, `warp-stall-destroy` and
 `warp-stall-free` verbs aim it at a client's own next device-context create,
 its own ctx's destroy, or the free of the next BO it destroys, and bound it to
-a dozen per boot. Within a request a shot rides exactly the next synchronous
+sixteen per boot. Within a request a shot rides exactly the next synchronous
 submission (`Controlq::stall_shot_bound`): one refused, unfenced, or ended
 before its chain retired spends it and says `stall shot LOST`. So does a
 command refused at staging (`Gpu::req`, while the engine takes no commands).
@@ -282,8 +282,9 @@ or one the device refused may leave the resource on the device, so its id
 stays retiring and its pins held. A taken free (above) is owed unsent
 (`Gpu::owe_unsent_free`, never for a resource the display may still scan).
 The serve loop repeats owed frees after the seat's step, on a NORMAL seat,
-while the engine takes commands (`Device::pay_owed_frees`), and never inside a
-request, where a stall it met would read as that request's. Each waits until
+while the engine takes commands and the pass is not standing down (below)
+(`Device::pay_owed_frees`), and never inside a request, where a stall it met
+would read as that request's. Each waits until
 no chain on the device can reach it (`Gpu::owed_free_hold`: `retirement_hold`
 less the parked chains; see Parked readbacks, owed frees) and goes whole
 (`gpu_api::OwedFree::next`): a `CTX_DETACH_RESOURCE` for each context link
@@ -756,20 +757,31 @@ below).
   `Objects::holders`). Every serve pass begins with a pump, so a chain commits
   against a reach at most a pass old; a stale reach only lets a chain go to the
   device, where the free waits for it as for any, or keeps one parked until the
-  next pump. The pass and the barrier wait for a quiet engine
-  (`gpu_api::owed_quiet`): nothing while it is stalled, and nothing for
-  `OWED_QUIET_MS` (a synchronous deadline) after it revives
-  (`Controlq::revived_at`), so under a load that stalls every repeat the
-  requests keep the revived windows and the held-back chains go to the device
-  (vote 81 audit r8 F4 and a self-found twin: the pass ran before the requests
-  in each serve pass and re-stalled the engine at every revival). The pay pass's hold leaves
+  next pump. A stall one of the pass's own commands meets stands the pass and
+  the barrier down (`Gpu::owed_stood_down`, `gpu_api::owed_stands_down`) until
+  another stall begins or the engine has run `OWED_QUIET_MS` (a synchronous
+  deadline) since that stall revived (`Controlq::revived_at`): that revival's
+  window goes to the requests, and the chains the barrier held go to the device
+  (vote 81 audit r8 F4 and a self-found twin: the pass ran before the requests in
+  each serve pass and re-stalled the engine at every revival). Any other stall
+  leaves both up, so at its revival the chains stay parked and the pass sends
+  first, into a queue the stall emptied, since fenced submissions are refused
+  while the engine is stalled (audit r9 F1: standing down after every stall, a
+  workload with one slow command per revival kept every owed free unpaid and the
+  barrier lifted for good). So the pass gets the first turn after every revival
+  but those that follow its own stall, the requests get each of those, and
+  `Gpu::barrier_ids` (the owed ids the barrier holds chains back for) is empty
+  while the pass stands down or the engine is dead. The pay pass's hold leaves
   parked chains out (`Gpu::owed_free_hold`): none is on the device or publishes
   during the pass, and one that can reach the free waits for it. The test-mode
   `Request::TestOwedDefer` (opcode 72; a context of the caller's,
   `TEST_OWED_DEFERS` (4) arms a boot of `TEST_OWED_DEFER_MS` (2 s) at most, one
   context at a time, ended early only by its own, cleared at that context's
   destroy) has the pass skip the frees a context can reach, for the readback
-  leg's BUSY arm.
+  leg's BUSY arm. The test-mode `Request::TestOwedStall` (opcode 73; a live
+  resource of the caller's, `TEST_OWED_STALLS` (4) shots a boot, one at a time,
+  gone unspent after `TEST_OWED_DEFER_MS`) rides one stall shot on the pass's
+  next command for that resource's owed free, for the YIELD arm.
 - **Stall and death.** Nothing publishes while the engine refuses. A dead
   engine releases every parked chain as refused (`ok = false`, not abandoned):
   the device never saw it.

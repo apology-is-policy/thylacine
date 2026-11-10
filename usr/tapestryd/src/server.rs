@@ -1261,9 +1261,10 @@ const _: () = assert!(
 /// stall is engine-wide, so the lever cannot act on its caller's ctx alone the way
 /// `warp-hold` does (#178); it aims at the caller's own next device-context create,
 /// its own ctx's destroy, or the free of the next BO it destroys, and is bounded in
-/// count instead, and a client spending the shots denies only the lever.
+/// count instead, and a client spending the shots denies only the lever. Four
+/// readback arms of four attempts each: CREATE, DESTROY, FREE, YIELD.
 #[cfg(feature = "test-mode")]
-const TEST_STALL_SHOTS: u8 = 12;
+const TEST_STALL_SHOTS: u8 = 16;
 /// What an armed stall shot meets.
 #[cfg(feature = "test-mode")]
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -15837,8 +15838,10 @@ impl Comp {
             // here, and the broker's pins when it pays the frees it took at
             // the park: on this same proof nothing on the device reaches the
             // BOs, and a later chain that could parks until they are paid
-            // (GPU-DESIGN 4.5.15), so the pins go once the chains already
-            // on the device retire, however busy the ctx is kept. Without this
+            // (GPU-DESIGN 4.5.15; the barrier stands down only for one window
+            // after a repeat the device was too slow to answer), so a busy
+            // ctx cannot hold them off: the pins go once the chains already
+            // on the device retire and the device answers a repeat. Without this
             // a vindicated-but-still-live ctx stayed charged for memory it
             // no longer held, and once `leaked_count` hit the cap it could
             // never build another backing -- bricked while healthy.
@@ -19106,6 +19109,22 @@ impl Conn {
                     Ok(())
                 } else {
                     Err(p9::E_NOENT)
+                }
+            }
+            // A test lever: one stall shot on the broker's next repeat of this
+            // BO's free, should the free be owed (#178: the caller's own BO;
+            // the broker bounds the shots, four a boot, each gone in 2 s).
+            #[cfg(feature = "test-mode")]
+            Some("stall-repay") => {
+                let res = comp
+                    .wbo(id, self.conn_id)
+                    .map(|(_, b)| b.res_id)
+                    .filter(|&r| r != 0)
+                    .ok_or(p9::E_NOENT)?;
+                if comp.gpu.test_owed_stall(res) {
+                    Ok(())
+                } else {
+                    Err(p9::E_AGAIN)
                 }
             }
             _ => Err(p9::E_INVAL),

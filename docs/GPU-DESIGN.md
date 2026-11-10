@@ -2573,8 +2573,10 @@ read. It is not on the device, though: no abandonment clock runs for it,
 `device_idle` does not see it, and the hold lever cannot reach it. Its wait is
 bounded by its prefix, because each chain ahead of it is abandoned at
 `FENCE_ABANDON_MS` if it never retires. A chain parked behind an owed free
-(4.5.15) waits for that free's repeat instead, which waits only for the chains
-on the device that can reach it.
+(4.5.15) waits for that free's repeat instead. The repeat waits for the chains
+on the device that can reach the resource and for its turn in the owed-free pass,
+and the barrier lets the chain go for one window after a repeat the device is too
+slow to answer.
 - **Abandoned prefix.** A readback must not run while a chain abandoned ahead of
   it may still be running. That chain may never retire, though, and a parked
   chain has no abandonment clock of its own. Left parked, it would count in the
@@ -2896,7 +2898,9 @@ block the serve loop, and seat input with it. Neither was taken.
   - a free the device has not acknowledged is owed. A stalled UNREF, one
     refused before staging, and one the device refused all leave the
     resource possibly on the device, so lictor keeps its id retiring and its
-    pins held, and repeats the free once the engine takes commands. A free
+    pins held, and repeats the free while the engine takes commands, standing
+    down for one window after a repeat that meets a stall (the retirement
+    paragraph below). A free
     a chain could still reach is owed too, unsent (the retirement paragraph
     below). The repeat runs while the seat is normal, after the seat's look
     at the chord in each serve pass and never inside a request, where a
@@ -2958,8 +2962,8 @@ block the serve loop, and seat input with it. Neither was taken.
     between two requests never has tapestryd owe a destroy for an id lictor
     released. The readback leg's CREATE and DESTROY arms witness the GL
     band, aiming one stall shot at their own next create or their own ctx's
-    destroy (`warp-stall-create`, `warp-stall-destroy`; a dozen shots per
-    boot across these and FREE). The venus band runs the same code, but no
+    destroy (`warp-stall-create`, `warp-stall-destroy`; sixteen shots per
+    boot across these, FREE and YIELD). The venus band runs the same code, but no
     leg drives it: the readback host runs virgl without venus;
   - a refused detach of a HOST3D ring's guest mapping leaks its extent until
     restart (`drop_host3d_ring`); nothing has been asked of the device.
@@ -3000,6 +3004,20 @@ end, so a retirement that only a poisoned holder blocks is admitted at once. One
 that a chain in flight blocks still parks, within the bound, which keeps the barrier
 for the short case. Another client's poison then costs a surface nothing.
 
+A HOST3D ring or device-memory blob (`RetireHost3dRing`, `DropHost3dRing`) is the
+exception after admission. The retirement waits for its chains as any does, but
+its free waits for the clients' mappings, not for chains: freed at once when only
+lictor maps it, otherwise parked and freed at a later mint once the last client
+mapping and claimed pin are gone, with no second look at the chains (its owed
+repeat, if one is owed, waits for them as any repeat does). Its backing is host
+memory, so a chain still running cannot write guest memory. The extent returns to
+the allocator only once the unmap and the free are both acknowledged, a re-mint
+maps a fresh blob, and the id stays named in the ledger until the free is
+journaled. The venus stream is decoded at submit, so nothing later resolves the
+id. What could still read a freed ring is the renderer's ring thread, which is
+the trusted host half (8 and 9.2), and no chain gate could cover it, since that
+thread is not a chain.
+
 Admitted with a holder still there, a retirement is refused, its pins kept, except
 a resource's free: lictor takes that as a debt. The ledger entry retires and the free
 is owed unsent; the owed-free pass sends it once no chain on the device can reach
@@ -3038,17 +3056,32 @@ the reserved slot meanwhile: other surfaces' readbacks are refused for as long a
 the client's free is unpaid, within the bound 4.5.13 accepts for a readback parked
 behind its context's work, and up to 2 s per arm of the test lever below.
 
-The pass and the barrier wait for a quiet engine (`gpu_api::owed_quiet`): nothing
-while the engine is stalled, and nothing for `OWED_QUIET_MS`, a synchronous
-deadline, after it revives. Under a load that makes every synchronous command
-miss its deadline, a repeat would otherwise stall the engine again at each
-revival, before any request of that serve pass ran, and the chains held back for
-it would wait for as long as the load lasted. An ordinary destroy under such a
-load leaves exactly that state, no poison needed: its detach stalls, so the link
-stays, and its free stalls and is owed. Standing down, the requests keep the
-revived windows and those chains go to the device, where the free waits for them;
-it is paid once the engine has been quiet for a deadline. The gate is
-host-tested; no leg drives a sustained load. The readback leg's BUSY arm witnesses the barrier with
+The pass and the barrier stand down for one window after a repeat that meets a
+stall, and only then (`gpu_api::owed_stands_down`): from that stall until another
+stall begins, or until the engine has run `OWED_QUIET_MS`, a synchronous deadline,
+since that stall revived. The revival's window goes to the requests, and the
+chains held back for the free go to the device, where the free waits for them as
+for any. Without it, under a load that makes every synchronous command miss its
+deadline, a repeat would stall the engine again at each revival, before any
+request of that serve pass ran, and the chains held back for it would wait for as
+long as the load lasted. An ordinary destroy under such a load leaves exactly that
+state, no poison needed: its detach stalls, so the link stays, and its free stalls
+and is owed. Any other stall leaves the pass and the barrier up. Fenced
+submissions are refused while the engine is stalled, so at the revival the held
+chains stay parked and the pass sends first, into a queue the stall emptied.
+Standing down after every stall instead, a workload needs only one slow command
+per revival, queued behind the very chains the lowered barrier had just let go,
+to keep the pass from ever running and the barrier lifted for good. So the pass
+gets the first turn after every revival except those that follow its own stall,
+and each of those goes to the requests and the held chains. A free is paid once
+the device answers a repeat in time. A device that answers none in time leaves it
+owed, its id retiring and its pins held: the debt's bound, never a reuse. The
+predicate is host-tested. The readback leg's YIELD arm witnesses its wiring with a
+test lever (the bo ctl's `stall-repay`: one stall shot on the pass's next repeat
+of that BO's free, four a boot, each gone in 2 s if no repeat takes it). There the
+free is paid no sooner than a window after the repeat's own stall, and FREE's
+repay, after a stall that met the client's own free rather than the pass, comes at
+the pass's next turn. No leg drives a sustained load. The readback leg's BUSY arm witnesses the barrier with
 a test lever (`warp-defer-frees`: the caller's own context, four arms a boot of 2 s
 at most) that has the pass skip the context's frees while its next chain goes in.
 
