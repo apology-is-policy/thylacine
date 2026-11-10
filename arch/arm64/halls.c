@@ -26,6 +26,7 @@
 #include "exception.h"
 #include "halls_symtab.h"
 #include "kaslr.h"
+#include "mmio.h"
 #include "uart.h"
 
 #include <thylacine/smp.h>
@@ -152,7 +153,8 @@ static u64 halls_strip_pac(u64 addr) {
 }
 
 // Bounded reads of (possibly bad) kernel memory. A fault here is caught by
-// HX-I1. volatile so the access is not elided or reordered by the optimizer.
+// HX-I1. The fixed-form load is never elided or reordered, and stays
+// decodable by a hypervisor if a corrupt frame pointer aims it at a device.
 //
 // F3 (Lazarus-gated): on real hardware a read to a Device-nGnRnE MMIO VA can
 // stall the interconnect (never reaching _torpor) rather than fault. This is
@@ -163,7 +165,7 @@ static u64 halls_strip_pac(u64 addr) {
 // when the bare-metal (Lazarus) arc lands; a normal-RAM-VA predicate on the
 // peek targets is the fix there.
 static u64 halls_peek(u64 addr) {
-    return *(volatile u64 *)(uintptr_t)addr;
+    return io_read64((const volatile void *)(uintptr_t)addr);
 }
 
 // AT never faults, and the dying CPU has IRQs masked, so nothing can take PAR_EL1

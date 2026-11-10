@@ -36,12 +36,10 @@
 // GICv2 (Lazarus W2): the v2 CPU interface is a banked MMIO region (GICC)
 // rather than the v3 ICC_* system registers, SGI/PPI config lives in the
 // distributor's per-CPU-banked low region (no redistributor), and IPIs go
-// through GICD_SGIR rather than ICC_SGI1R_EL1. The MMIO CPU interface is
-// precisely what sidesteps the HVF-on-Apple GICv3-distributor MMIO `isv`
-// assertion (PORTABILITY.md §2) -- so v2 is the convergent enabler for the
-// fast HVF dev loop and for the Pi 4 / GIC-400 bare-metal target. v3 stays
-// QEMU virt's gic-version=3 default + the CI baseline; gic_init autodetects
-// from the DTB compatible (I-15).
+// through GICD_SGIR rather than ICC_SGI1R_EL1. v2 is what the Pi 4 / GIC-400
+// bare-metal target and KVM on it present, and the HVF launcher's default; v3
+// is QEMU virt's TCG default and what Apple's in-kernel HVF irqchip presents.
+// gic_init autodetects from the DTB compatible (I-15).
 //
 // GICv2 reference: ARM IHI 0048B. The two SGI-EOI subtleties the driver
 // must honor: (1) GICC_IAR returns the source CPUID in bits [12:10] for an
@@ -291,46 +289,42 @@ bool gic_synchronize_cpu(unsigned cpu, u64 timeout_ns) {
 // MMIO helpers.
 // ---------------------------------------------------------------------------
 
+// Every GIC register access is one of mmio.h's fixed-form loads or stores. A
+// hypervisor emulates a trapped device access from the abort's instruction
+// syndrome, and a writeback form -- which the compiler is free to pick for a
+// plain volatile access in a loop -- traps with ESR_EL2.ISV=0: no syndrome.
+// QEMU's HVF backend asserts on one; KVM refuses it.
 static inline u32 mmio_r32(u64 base, u32 off) {
-    return *(volatile u32 *)(uintptr_t)(base + off);
+    return io_read32((const volatile void *)(uintptr_t)(base + off));
 }
 
 static inline void mmio_w32(u64 base, u32 off, u32 val) {
-    *(volatile u32 *)(uintptr_t)(base + off) = val;
+    io_write32((volatile void *)(uintptr_t)(base + off), val);
 }
 
 static inline void mmio_w8(u64 base, u32 off, u8 val) {
-    *(volatile u8 *)(uintptr_t)(base + off) = val;
+    io_write8((volatile void *)(uintptr_t)(base + off), val);
 }
 
 static inline void mmio_w64(u64 base, u32 off, u64 val) {
-    *(volatile u64 *)(uintptr_t)(base + off) = val;
+    io_write64((volatile void *)(uintptr_t)(base + off), val);
 }
 
-// GICv2-only MMIO accessors that drain with `dsb sy` after every access.
-//
-// PORTABILITY.md §5 (HVF-MMIO mitigation): under QEMU/HVF on Apple Silicon,
-// rapid back-to-back GIC distributor MMIO can trap into Hypervisor.framework
-// with ESR.ISV=0 (no instruction syndrome), which QEMU cannot decode and
-// asserts on. The empirical mitigation from the assessment is a barrier
-// between consecutive GIC MMIO accesses; a `dsb sy` after each access drains
-// it to completion before the next, pacing the trap rate. Device-nGnRnE
-// memory is already strongly ordered architecturally, so the barrier is for
-// the emulator's benefit, not for correctness on real silicon. Confined to
-// the v2 path (the only path taken under HVF + GIC-400); v3 keeps the plain
-// accessors. The cost is a drain per GIC access on the IRQ/IPI path -- a
-// handful per interrupt, negligible at interrupt rates.
+// GICv2 accessors: the same fixed-form access, then a `dsb sy`. The one after
+// the GICC_IAR read orders irq_barrier_handler's ticket read after the
+// acknowledge. No argument here shows the others unnecessary (a distributor
+// mask followed by a CPU-interface EOI crosses two peripherals on a GIC-400).
 static inline void v2_w32(u64 base, u32 off, u32 val) {
-    *(volatile u32 *)(uintptr_t)(base + off) = val;
+    io_write32((volatile void *)(uintptr_t)(base + off), val);
     __asm__ __volatile__("dsb sy" ::: "memory");
 }
 static inline u32 v2_r32(u64 base, u32 off) {
-    u32 v = *(volatile u32 *)(uintptr_t)(base + off);
+    u32 v = io_read32((const volatile void *)(uintptr_t)(base + off));
     __asm__ __volatile__("dsb sy" ::: "memory");
     return v;
 }
 static inline void v2_w8(u64 base, u32 off, u8 val) {
-    *(volatile u8 *)(uintptr_t)(base + off) = val;
+    io_write8((volatile void *)(uintptr_t)(base + off), val);
     __asm__ __volatile__("dsb sy" ::: "memory");
 }
 
@@ -969,9 +963,7 @@ void gic_set_spi_edge_triggered(u32 intid) {
     u32 bit_off = (intid % 16) * 2;
     u32 mask    = 0x3u << bit_off;
     u32 val     = 0x2u << bit_off;  // 0b10 = edge-triggered
-    // The read+write to GICD_ICFGR is a back-to-back distributor access; on
-    // v2 it MUST drain (v2_r32/v2_w32) like every other v2 GIC MMIO, or under
-    // HVF the pair can trap with ESR.ISV=0. v3 uses the plain accessors.
+    // v2 goes through the draining accessors like every other v2 GIC access.
     if (g_version == GIC_VERSION_V2) {
         u32 cur = v2_r32(g_dist_base, reg);
         v2_w32(g_dist_base, reg, (cur & ~mask) | val);
@@ -1063,7 +1055,7 @@ bool gic_set_pending_spi(u32 intid) {
     if (g_dist_base == 0)                              return false;
     u32 n = intid / 32;
     u32 bit = intid % 32;
-    // v2 distributor writes drain (HVF ISV mitigation); v3 uses the plain form.
+    // v2 distributor writes drain.
     if (g_version == GIC_VERSION_V2)
         v2_w32(g_dist_base, GICD_ISPENDR(n), 1u << bit);
     else

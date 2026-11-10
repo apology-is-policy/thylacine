@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/HALLS-OF-EXTINCTION.md", "docs/TOOLING.md section 10"]
 created: 2026-08-03
-updated: 2026-11-03
+updated: 2026-11-10
 ---
 ## Purpose
 
@@ -233,7 +233,10 @@ strongly-ordered device space can hang the interconnect instead of faulting, and
 the re-entrancy guard only catches faults. Dormant on the emulated target, whose
 memory is all RAM-backed, and largely unreachable now that only a plausible live
 frame is dumped. Recorded against the bare-metal arc; the fix there is a
-normal-memory predicate on the peek targets.
+normal-memory predicate on the peek targets. Under a hypervisor the same stray
+read traps, and the peek is one of `arch/arm64/mmio.h`'s fixed-form loads so
+that the hypervisor can decode it and the dump continues; it would still
+acknowledge an interrupt if it landed on the controller's acknowledge register.
 
 **An out-of-range CPU index aliases onto CPU 0.** Documented as dormant — the
 supported topologies use a dense affinity field within the maximum. Worth noting

@@ -18,7 +18,7 @@ design:
   - "docs/PORTABILITY.md section 5"
   - "docs/TICKLESS-IDLE.md"
 created: 2026-08-02
-updated: 2026-10-06
+updated: 2026-11-10
 ---
 ## Purpose
 
@@ -135,6 +135,11 @@ a date early in the twenty-second century and look plausible enough to keep.
 
 **Userspace counter access** is enabled for both counters, though the kernel and
 userspace agree to use the virtual one.
+
+**The clock chip is read with a fixed-form load.** The one read of the PL031's
+data register goes through `arch/arm64/mmio.h`, like every kernel device access:
+under a hypervisor it traps, and only a load of one general register with no
+writeback carries the syndrome the emulation needs ([[sub-kernel-gic]]).
 
 ## Data structures
 

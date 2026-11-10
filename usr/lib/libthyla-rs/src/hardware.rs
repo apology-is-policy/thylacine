@@ -115,16 +115,18 @@ fn hw_error(rc: i64) -> Error {
 // plain volatile access is functionally correct but lets LLVM choose the
 // addressing mode. When the `#[inline(always)]` driver helpers fold into
 // a caller that pokes several nearby registers off one base, LLVM emits
-// a PRE-INDEXED WRITEBACK (`str w, [x, #imm]!`) and unscaled `stur`/
-// `ldur`. On a stage-2 / MMIO abort the ARM ARM leaves ESR_EL1.ISS
-// UNKNOWN for those forms -- ESR_EL1.ISV (Instruction Syndrome Valid) is
-// 0 -- so a hypervisor cannot reconstruct the emulated access (size +
-// target register + direction) and QEMU's HVF backend `assert(isv)`s
-// (hvf.c). `read_volatile` constrains elision + ordering, NOT the
-// addressing mode, so the volatile contract holds while the instruction
-// is still undecodable. A bare `ldr/str {reg}, [{base}]` cannot become
-// writeback / pre-post-index / unscaled / paired / SIMD, so ISV is
-// always 1. (#890; PORTABILITY.md section 8.)
+// a WRITEBACK form (pre-indexed `str w, [x, #imm]!`, or post-indexed in
+// a loop). On a stage-2 / MMIO abort the hypervisor's ESR_EL2.ISV
+// (Instruction Syndrome Valid) is 0 for a writeback, pair or SIMD
+// access, so it cannot reconstruct the emulated access (size + target
+// register + direction) and QEMU's HVF backend `assert(isv)`s (hvf.c).
+// An unscaled `stur`/`ldur` has no writeback and does carry a syndrome
+// (measured under HVF, 2026-11-10). `read_volatile` constrains elision +
+// ordering, NOT the addressing mode, so the volatile contract holds while
+// the instruction is still undecodable. A bare `ldr/str {reg}, [{base}]`
+// cannot become writeback / pre-post-index / paired / SIMD, so ISV is
+// always 1. (#890; PORTABILITY.md section 8. The kernel's twin is
+// arch/arm64/mmio.h.)
 //
 // Reads are deliberately NOT `readonly`/`pure`: a device read is
 // side-effecting (it can pop a FIFO or clear a latch). The default

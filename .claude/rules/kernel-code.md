@@ -37,6 +37,14 @@ For torn-write-sensitive paths (Stratum mount transition, persistent state machi
 
 For Thylacine: kernel panic during ramfs → Stratum transition; driver process kill mid-IO; 9P session drop mid-walk.
 
+### Device memory goes through `arch/arm64/mmio.h`
+
+A device register is read or written only with `io_read8/16/32/64` and `io_write8/16/32/64`. Under a hypervisor the access traps and is emulated from the abort's instruction syndrome, and ARM supplies one only for a load or store of a single general register with no writeback. A plain volatile access leaves the form to the compiler; a post-indexed, pre-indexed or pair form traps with no syndrome and cannot be emulated (QEMU's HVF backend asserts, KVM returns an error). The GICv3 bring-up did exactly this and never booted under HVF.
+
+- Compute the address in C and pass it; hold a device pointer as `volatile void *` or `volatile u8 *` and never dereference or index it.
+- No `memcpy`, `memset` or struct overlay on device memory.
+- `tools/check-mmio-forms.py` (fatal in `build.sh`) refuses a dereference of a cast to a volatile integer pointer and a file that calls `mmu_map_mmio` without including the header. It does not see a dereference through a typed variable: the rule is yours to keep, and a boot under HVF or KVM is the witness.
+
 ### Cross-file declarations (operator votes 19 + 20, 2026-10-27)
 
 C compares a declaration with its definition only inside one translation unit. A declaration written in some other `.c` file is never compared with the definition, and a call through one of the wrong type is undefined behaviour that no diagnostic sees: a test declared a 16-parameter syscall core with 17 parameters from 2026-07-30 to 2026-10-26, and every build passed. Plan 9 declares each cross-file kernel function once, in `port/portfns.h` or the architecture's `fns.h`; Thylacine does the same.

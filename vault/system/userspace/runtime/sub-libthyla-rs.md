@@ -50,7 +50,7 @@ design:
   - "docs/UTOPIA-SHELL-DESIGN.md section 15"
   - "docs/ARCHITECTURE.md section 3.5"
 created: 2026-08-03
-updated: 2026-11-04
+updated: 2026-11-10
 ---
 ## Dedicated service owner (October 2)
 
@@ -333,9 +333,10 @@ silicon) decode the emulated access.
 
 A plain `read_volatile` is functionally correct but lets LLVM choose the
 addressing mode; once the `#[inline(always)]` driver helpers fold into a
-register-dense caller, LLVM emits pre-indexed writeback (`str w, [x, #imm]!`) or
-unscaled `stur`/`ldur` — both `ISV=0`, which trips HVF's `assert(isv)` and kills
-the guest. This was #890, and its signature was that *kernel* virtio worked under
+register-dense caller, LLVM emits a writeback form (`str w, [x, #imm]!`) —
+`ISV=0`, which trips HVF's `assert(isv)` and kills the guest. (An unscaled
+`stur`/`ldur` has no writeback and does carry a syndrome: measured under HVF,
+2026-11-10.) This was #890, and its signature was that *kernel* virtio worked under
 HVF while *userspace* tripped: the kernel's out-of-line accessors stayed base-only
 (ISV=1) by construction, the inlined userspace ones did not. The primitives ship
 for all four widths (`mmio_read8`/`16`/`32`/`64` plus the writes) and are the

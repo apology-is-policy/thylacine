@@ -20,7 +20,7 @@ design:
   - "docs/ARCHITECTURE.md section 9.4"
   - "docs/ARCHITECTURE.md section 22.7"
 created: 2026-08-02
-updated: 2026-10-21
+updated: 2026-11-10
 ---
 ## Purpose
 
@@ -116,6 +116,12 @@ Resetting is not enough on its own — disarming a queue does not drain a
 transfer already in the device's pipeline, so anything returning ring pages to
 the shared allocator must reset the whole device first, and the per-queue
 disarm is only the second layer.
+
+**Transport registers are read and written in one instruction form.** The
+virtio-mmio accessors are `arch/arm64/mmio.h`'s fixed-form load and store, as the
+PCI ones already were: each access traps to the hypervisor, which can emulate
+only a load or store of one general register with no writeback
+([[sub-kernel-gic]]).
 
 ## Data structures
 

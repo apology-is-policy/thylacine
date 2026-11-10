@@ -19,6 +19,7 @@
 #include <thylacine/virtio.h>
 #include <thylacine/visibility.h>
 
+#include "../arch/arm64/mmio.h"
 #include "../arch/arm64/mmu.h"
 #include "../arch/arm64/uart.h"
 #include "../mm/phys.h"
@@ -41,12 +42,12 @@ static bool                   g_virtio_init_done;
 VISIBLE_IF_KERNEL_TESTS
 u32 virtio_mmio_read32(struct virtio_mmio_dev *dev, u32 off) {
     if (!dev || !dev->base) return 0;
-    return *(volatile u32 *)((u8 *)dev->base + off);
+    return io_read32((const volatile u8 *)dev->base + off);
 }
 
 static void virtio_mmio_write32(struct virtio_mmio_dev *dev, u32 off, u32 val) {
     if (!dev || !dev->base) return;
-    *(volatile u32 *)((u8 *)dev->base + off) = val;
+    io_write32((volatile u8 *)dev->base + off, val);
 }
 
 // =============================================================================

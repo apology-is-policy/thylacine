@@ -15,7 +15,7 @@ design:
   - "docs/ARCHITECTURE.md section 23.5"
   - "docs/TRUSTED-PATH.md"
 created: 2026-09-06
-updated: 2026-10-27
+updated: 2026-11-10
 ---
 ## Purpose
 
@@ -139,6 +139,14 @@ The PL011 RX, RX-timeout and TX sources share one interrupt line, so
 whichever are pending. TX is serviced first — it is the cheap non-blocking arm,
 and draining it promptly keeps a blocked writer's room-wait short — then RX under
 its own lock and backpressure discipline.
+
+**Register accesses have one instruction form.** Under a hypervisor every PL011
+access traps and is emulated from the abort's instruction syndrome, which exists
+only for a load or store of one general register with no writeback. The two
+accessors are therefore the fixed-form load and store of `arch/arm64/mmio.h`
+([[sub-kernel-gic]] has the access that proved the rule), on the boot-time
+physical base and the remapped one alike, and on the scratch page the transmit
+self-test swaps in.
 
 ## Data structures
 

@@ -22,6 +22,7 @@
 
 #include "uart.h"
 
+#include "mmio.h"
 #include "mmu.h"
 #include "timer.h"   // timer_now_ns() -- the bounded TX-spin wall-clock deadline
 
@@ -80,15 +81,15 @@ uintptr_t uart_get_base(void) {
     return pl011_base;
 }
 
-// Volatile MMIO accessors. ARM64 needs DSB after writes that must be ordered
-// with subsequent operations; for a polled-on-flag UART the natural order is
-// preserved by the FR-poll loop, so we don't need explicit barriers here.
+// Fixed-form accesses (mmio.h): a trapped PL011 access must carry a valid
+// instruction syndrome for the hypervisor to emulate it. For a polled-on-flag
+// UART the FR-poll loop preserves the order, so no explicit barriers here.
 static inline void mmio_write32(uintptr_t base, uintptr_t off, uint32_t val) {
-    *(volatile uint32_t *)(base + off) = val;
+    io_write32((volatile void *)(base + off), val);
 }
 
 static inline uint32_t mmio_read32(uintptr_t base, uintptr_t off) {
-    return *(volatile uint32_t *)(base + off);
+    return io_read32((const volatile void *)(base + off));
 }
 
 // #174 RX backpressure state. g_uart_rx_lock serializes the RX FIFO drain, the

@@ -321,14 +321,34 @@ Apple vGIC with `hv_gic_config_set_distributor_base(cfg, 0x08000000)` /
 15.0)` (`target/arm/hvf/hvf.c:1350-1360`), and the vGIC has full vmstate save/restore
 (`arm_gicv3_hvf.c:785-811`). `hw/arm/virt.c:2717-2724`: under HVF, GICv2 is offered only
 WITHOUT the in-kernel irqchip and GICv3 WITH it; `:2800-2802` "ITS not supported on HVF
-when using the hardware vGIC" (so `its=off`; MSIs come from GICv2m, `:2771`); `:4111-4118`
+when using the hardware vGIC" (MSIs come from GICv2m, `:2771` -- with the default `its=auto`;
+measured: `its=off` removes the MSI controller altogether and PCI falls back to INTx); `:4111-4118`
 + `:4449-4457`: machine types `virt-11.0` and older default to NO in-kernel irqchip, `virt`
 (= `virt-11.1`) defaults to it. Measured on the M2, 2026-11-10: `hv_gic_create` with those
 bases returned rc=0 and `GICD_TYPER = 0x0478001f` (ITLinesNumber 31 -> 1024 INTIDs, IDbits
-16). So "HVF cannot do GICv3 here" (`tree:docs/TOOLING.md:699-701`) is a property of QEMU's
-EMULATED GICv3 distributor under HVF, retired by `-machine virt,gic-version=3,its=off`
-with `kernel-irqchip=on` on QEMU >= 11.1 and macOS >= 15. Homebrew's 10.0.2 imports no
-`hv_gic_*` symbol (measured). The patch series (Mohamed Mediouni, v1 2025-07 to v20
+16). Homebrew's 10.0.2 imports no `hv_gic_*` symbol (measured).
+
+**D1a. "HVF cannot do GICv3 here" was a guest bug (measured 2026-11-10, M-1; this replaces
+the draft's reading that the limit was QEMU's emulated distributor).** With QEMU 11.1.3
+and Apple's vGIC the guest still died at GIC bring-up on `assert(isv)`
+(`target/arm/hvf/hvf.c:2447`), three boots of three. QEMU's `hvf_data_abort` trace shows
+exactly one abort without a syndrome in such a boot: a write at IPA `0x08000c0c`,
+`GICD_ICFGR`, on 11.1.3 and on stock 10.0.2 alike. The kernel's `dist_init` loop had
+compiled to a post-indexed store (`str wzr, [x10], #0x8`), and ARM gives a hypervisor a
+valid syndrome only for a load or store of one general register with no writeback. The
+kernel's device accesses now all take the fixed form of `arch/arm64/mmio.h`. With that
+fix: stock QEMU 10.0.2 under HVF runs the suite green with GICv3 and the emulated ITS
+(2442/0), so the fleet's "HVF means GICv2" is no longer forced; QEMU 11.1.3 refuses GICv2
+under HVF unless `kernel-irqchip=off` (`virt.c:2717-2724`; with it off, the suite is green
+there too), and with the in-kernel GICv3 the kernel boots and a whole kernel-suite boot
+makes 318,344 trapped device accesses, none without a syndrome. Apple's vGIC implements
+every INTID (1020), which one kernel test had assumed no controller does. Final build
+(1abdae4194c9c021, with that test corrected): QEMU 11.1.3 with the in-kernel GICv3 runs the
+WHOLE suite green, 2442/0, four boots of four (three with `its=off`, one with `its=auto`); one of those boots with the trace on made 1,350,398 trapped device
+accesses, kernel and userspace drivers together, none without a syndrome. **The machine
+line is `-machine virt,gic-version=3` with `its` left at `auto`:** the guest then finds a
+GICv2m frame (`gic-msi: v2m first=80 count=64`) and MSIs work; with `its=off` it finds no
+MSI controller and every PCI function shares INTx lines. The patch series (Mohamed Mediouni, v1 2025-07 to v20
 2026-03-16) carried a known macOS 15 build trap: `HV_SYS_REG_CNTHCTL_EL2` needs the
 `macOS 15.0` guard when the deployment target is lower.
 
@@ -353,10 +373,14 @@ HVF supports it"), clamps `PARange` to the VM's IPA size, sets `reset_sctlr =
 0x30100180`. PMU: with `kernel-irqchip=on` QEMU forces `ID_AA64DFR0.PMUVer = 1` and the OS
 provides a cycles-counter-only PMU; with it off, PMUVer = 0 and QEMU "emulates" a
 time-derived cycle counter (`qemu-11.1:hvf.c:1210-1227`). MTE: refused -- "mach-virt: hvf
-does not support providing MTE to the guest CPU" (`virt.c:3017-3020`). The tree's own
-measurement (`tree:docs/TOOLING.md:95`): Apple cores under HVF = LSE + PAC + BTI, no RNDR
-(the kernel seeds from virtio-rng). **UNVERIFIED per generation** (M1 vs M2 vs M3 vs M4 vs
-M5 feature words, e.g. BTI on M1): the probe in M-1 (section 9) prints the ID registers;
+does not support providing MTE to the guest CPU" (`virt.c:3017-3020`). Measured on the M2
+(macOS 26.4, `aux-gate/macrunner/probe`): `MIDR 0x610f0000`, `ID_AA64PFR0 0x1101000011110011`,
+**`ID_AA64PFR1 0x0`**, `ISAR0 0x0221100110212120`, `ISAR1 0x0000111110211402`, `MMFR0
+0x000010000f100001`, `MMFR1 0x11212000`, `MMFR2 0x1001001100001011`, `DFR0 0x10305006`. So
+a guest under HVF on the M2 has LSE and PAC and **no BTI** (PFR1.BT = 0; the boot banner
+reads `features: PAC,LSE,CRC32`), no MTE, no RNDR (the kernel seeds from virtio-rng). The
+tree's earlier "Apple cores: LSE+PAC+BTI" (`docs/TOOLING.md`) was wrong and is corrected.
+**UNVERIFIED per generation** (M1 vs M3 vs M4 vs M5 feature words): the probe prints them;
 the public sources I found give ISA levels only (M1 ARMv8.5-A; M4 ARMv9.2-A with SME2, no
 SVE, "flagged as 8.7-A by LLVM").
 
@@ -533,6 +557,15 @@ to be hunted per CLAUDE.md, not avoided by TCG).
 guest interrupts indefinitely and hangs pause_all_vcpus() on guest reset". Route: carry
 UTM's patch in our queue until upstream, and re-run every "HVF wedges" repro with it.
 
+**H4. A guest access QEMU cannot decode kills the VM with no message** (found by M-1, D1a).
+`hvf_handle_exception` has `assert(isv)` under a comment "TODO: ISV will be 0 for SIMD or
+SVE accesses. Inject the exception into the guest" (`qemu-11.1:target/arm/hvf/hvf.c:2443-2447`),
+and `assert(!s1ptw)` beside it. To the user of the app that is a window that vanishes. The
+guest is fixed (D1a) and gated (`tools/check-mmio-forms.py`), but a product does not abort
+on guest input. Route: a fork patch that reports the PC, the IPA and the instruction to
+the app over QMP and injects an external data abort into the guest, so the guest names
+its own faulting instruction (a `snare:` for userspace, an extinction for the kernel).
+
 ---
 
 ## 4. Architecture (each piece cites the finding that forces it)
@@ -699,7 +732,10 @@ release):
 6. `ui/dbus.c`: accept the p2p client fd from the command line / inherited fd (4.1) --
    upstreamable as `-display dbus,p2p=on,fd=N`.
 7. `SetUIInfo` refresh rate (B4) -- upstreamable as a new interface version.
-8. Build: single target `aarch64-softmmu`, arm64 host only (vote M3),
+8. `target/arm/hvf/hvf.c`: an undecodable data abort (ISV=0, or a stage-1 walk fault) is
+   reported and injected into the guest as an external abort instead of `assert` (H4) --
+   upstream candidate (it is their TODO).
+9. Build: single target `aarch64-softmmu`, arm64 host only (vote M3),
    `--disable-*` everything unused (no gnutls, libssh, libusb, vde, capstone, curses,
    cocoa, sdl, gtk, vnc?, spice), `--enable-hvf --enable-dbus-display --enable-virtfs
    --enable-coreaudio --enable-virglrenderer --enable-opengl --enable-slirp`.
@@ -756,7 +792,7 @@ Size: section 3.6 P4.
 | nested virt (M3+, macOS 15+) | no | no | **no** (measured) | yes per series author | yes | UNVERIFIED |
 | SME (QEMU 11.1, macOS 15.2+) | no | no | **no** (measured) | no | yes (SME2, no SVE) | UNVERIFIED |
 | MTE to guest | no | no (HVF refuses, D4) | no | no | no | no |
-| PAC / BTI / LSE | TCG `max` | PAC+LSE; BTI UNVERIFIED | PAC+BTI+LSE (tree) | UNVERIFIED | UNVERIFIED | UNVERIFIED |
+| PAC / BTI / LSE | TCG `max` | PAC+LSE; BTI UNVERIFIED | PAC+LSE, **no BTI** (measured: `ID_AA64PFR1 = 0`) | UNVERIFIED | UNVERIFIED | UNVERIFIED |
 | max IPA | n/a | UNVERIFIED | **36 bits** (measured) | UNVERIFIED | UNVERIFIED | UNVERIFIED |
 | max vCPUs | host cores | UNVERIFIED | **64** (measured) | | | |
 | 3D route 1 (ANGLE virgl) | yes (slow guest) | yes | yes | yes | yes | yes |
@@ -772,7 +808,8 @@ to print the ID registers from a scratch vCPU); it costs seconds per machine.
 |---|---|---|---|
 | "HVF wedges on a mere held key" (freeze-172/flood-174 pinned to TCG) | fixed guest PL011/cons bugs; the live twin is keys lost behind a client's GPU queue (H1), OPEN | guest: corona's and Lictor's (a deeper eventq did not end it); also run both .exp forced-HVF under the in-kernel GIC | M-9 |
 | nora-demo breaks under HVF (CPR handshake) | guest race exposed by real SMP | guest: hunt it (elusive-bug-hunt; `bug_nora_hvf_cpr_handshake`) | M-2 |
-| GICv2 only under HVF | QEMU's emulated GICv3 distributor | QEMU 11.1 in-kernel GICv3, `its=off`; guest already runs GICv3+v2m? (M-1 checks the MSI path) | M-1 |
+| GICv2 only under HVF | a GUEST bug: a post-indexed store to `GICD_ICFGR` that no hypervisor can emulate (D1a) | fixed in the kernel (`arch/arm64/mmio.h` everywhere, gated); GICv3 now runs under HVF on QEMU 10.0.2 (emulated, ITS) and 11.1.3 (in-kernel, GICv2m with `its=auto`) | M-1, done; owed: `run-vm.sh` declares `thylacine.msi` for GICv3 under HVF so the MSI tests stop skipping there |
+| QEMU aborts on an access it cannot decode | `assert(isv)` in the fork's base (H4) | fork patch: report it and inject an external abort into the guest | M-2 |
 | an unexplained HVF hang, if one recurs | UTM's WFI lost-kick race (H3) | carry UTM's hvf.c patch; re-run every wedge repro with it | M-2 |
 
 ## 7. Scripture and coordination owed (before the code each item governs)
@@ -831,6 +868,12 @@ tests pass or the launcher's `its` token logic needs the `3:*:hvf` case; full su
 `ci-smp-gate` green under it; time-to-login vs emulated GICv2 (two runs each). Extend the
 M2 probe to dump `ID_AA64{PFR0,PFR1,ISAR0,ISAR1,MMFR0,MMFR1,MMFR2,DFR0}` from a
 scratch vCPU and record the M2's feature words for section 5.
+**Ran 2026-11-10** (`aux-gate/macrunner/m1`, `m2`, `m3`; finding D1a). Login-level verdict:
+the whole suite, 2442/0, four boots of four under the in-kernel GICv3 on the final build.
+The banner's GIC line says v3. MSI: GICv2m with `its=auto`, none with `its=off`; the
+launcher's `thylacine.msi` case for GICv3 under HVF is owed. Boot to the marker 71.6 to
+84.4 s against 72.5 to 79.0 s on the emulated GICv2: no wall-time difference at this
+grain. The ID registers are in D4. Not run: `ci-smp-gate` under it (the full gate is held).
 
 M-2 **The HVF wedge class under the new GIC.** Run `freeze-172.exp`, `flood-174.exp`,
 `nora-demo.exp` with `THYLACINE_ACCEL=hvf` on the M-1 build, 10 boots each; then apply

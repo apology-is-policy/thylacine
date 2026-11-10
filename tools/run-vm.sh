@@ -609,9 +609,10 @@ case "${THYLACINE_DISPLAY:-none}" in
            exit 2 ;;
 esac
 
-# -cpu model + GIC version default off the chosen accel. HVF wants -cpu host +
-# GICv2: its emulated GICv3 distributor MMIO trips an `isv` data-abort assert,
-# and the GICv2 MMIO CPU interface is the HVF-on-Apple enabler (Lazarus W2). KVM
+# -cpu model + GIC version default off the chosen accel. HVF gets -cpu host +
+# GICv2, the configuration its scenario fleet was measured on (Lazarus W2);
+# THYLACINE_GIC=3 works under HVF too, QEMU's emulated GICv3 and ITS included,
+# and is what QEMU 11.1's in-kernel HVF irqchip requires. KVM
 # (Linux hosts, e.g. thyla-pi) wants -cpu host + gic-version=host so the guest
 # GIC is the in-kernel one matching the silicon (GIC-400 = v2 on BCM2711 -- the
 # kernel autodetects v2-vs-v3 from DTB either way). TCG wants -cpu max (full

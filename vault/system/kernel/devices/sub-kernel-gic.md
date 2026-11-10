@@ -16,7 +16,7 @@ design:
   - "docs/ARCHITECTURE.md section 12.3"
   - "docs/PORTABILITY.md section 5"
 created: 2026-08-02
-updated: 2026-11-03
+updated: 2026-11-10
 ---
 ## Purpose
 
@@ -93,6 +93,20 @@ choice the mainstream Linux driver makes.
 interrupts per word, and the obvious read-modify-write of the word would lose a
 concurrent update to a neighbouring interrupt. The hardware permits byte stores;
 using them makes each interrupt's priority independently writable.
+
+**Every register access is one instruction of a fixed form.** Under a
+hypervisor a controller register is not memory: the access traps, and the
+hypervisor emulates it from the syndrome the trap carries. The architecture
+supplies that syndrome only for a load or store of a single general register
+with no writeback. A plain volatile access leaves the form to the compiler, and
+for the configuration-register loop in the newer generation's bring-up it chose
+a post-indexed store, which traps with no syndrome: the emulator cannot tell
+what was written, and QEMU's Hypervisor.framework backend ends the machine. So
+every accessor here is one of the fixed-form loads and stores of
+`arch/arm64/mmio.h` (owned by [[sub-kernel-hwcap]]), whose address is computed
+before the instruction, never by it. `tools/check-mmio-forms.py` refuses the
+old idiom at build time; a boot under a trapping hypervisor is the witness for
+the paths that boot reaches.
 
 **Routing.** Shared interrupts all go to CPU 0. The newer generation writes a
 per-interrupt destination register; the older writes a per-interrupt bitmask
@@ -272,9 +286,17 @@ exception path already filters.
 Every operation is a small number of memory-mapped or system-register accesses.
 Dispatch is one array index and an indirect call, plus one counter store.
 
-The older generation's accessors each carry a memory barrier, an
-empirically-validated mitigation for the hypervisor path rather than an
-architectural requirement — the cost is paid only on that generation.
+The older generation's accessors each carry a memory barrier. The one after the
+acknowledge read is load-bearing: it orders the barrier handler's ticket read
+after the acknowledge (the IRQ barrier, under the MSI backend boundary below).
+The rest were added when the hypervisor's no-syndrome aborts were read as a
+matter of how fast accesses arrived. The cause was the instruction form, and
+what the barriers actually did was make the compiler reload the base after
+every access, which kept it from forming a writeback. The fixed-form accessors
+do that themselves now, but nothing shows the remaining barriers unnecessary
+for ordering (a distributor mask followed by a CPU-interface completion crosses
+two peripherals on the reference board), so they stay, at a drain per access on
+that generation only.
 
 ## Prosecution
 
@@ -347,6 +369,12 @@ decode, and the margin argument that replaced a fabricated hardware claim — is
 [[chg-2026-08-16-gic-counter-geometry]].
 
 Absorbed `docs/reference/10-gic.md`.
+
+Revised 2026-11-10 for the access form: every accessor is one of `arch/arm64/mmio.h`'s
+fixed-form loads and stores. Measured on the final build (1abdae4194c9c021): the newer
+generation boots and runs the whole suite under Hypervisor.framework, on QEMU 10.0.2's
+emulated controller and on QEMU 11.1.3 with the host's in-kernel one, which it never
+had; a traced suite made 1,350,398 trapped device accesses, none without a syndrome.
 
 Revised 2026-09-15 at `12d154eb` for the F-A1 cure (docs/ARCHITECTURE.md 9.3.1):
 `gic_set_spi_level_triggered` (the level sibling of the edge configuration, so

@@ -192,6 +192,24 @@ tools/check-decls.py --self-test                 # each rule turns red on a seed
 tools/check-lock-helpers.py                      # 0 ok; names each raw site
 tools/check-lock-helpers.py --self-test
 
+# Device-access form (aux, the Mac runner arc, 2026-11-10). A hypervisor emulates
+# a trapped device access from the abort's instruction syndrome, and ARM supplies
+# one only for a load or store of a single general register with no writeback.
+# A plain `*(volatile u32 *)p = v` leaves the form to the compiler: it chose a
+# post-indexed store for GICD_ICFGR, and GICv3 did not boot under HVF until
+# 2026-11-10 (QEMU asserts on ISV=0). arch/arm64/mmio.h pins the form. FATAL in
+# build.sh, textual, the in-kernel tests included, self-test first (22 cases,
+# each naming the rule that must fire): the old idiom in nine spellings (cast
+# then index, split over lines, type first, size_t, __volatile__, const after
+# the star), in a header inline, in a test, one more site in an allowed file,
+# an allowance gone stale, a mapper without mmio.h, a writeback template in
+# mmio.h, each red; the idiom in a line comment, a block comment and a string,
+# a cast passed on and never dereferenced, and an include by relative path,
+# green. It gates the IDIOM; the witness for the paths a boot reaches is a boot
+# under HVF or KVM (QEMU's `-trace hvf_data_abort` prints each abort's isv):
+tools/check-mmio-forms.py                        # 0 ok; names each site
+tools/check-mmio-forms.py --self-test
+
 # Kernel-to-userspace prot-bit mirror (corona, 2026-10-07). Userspace cannot
 # include a kernel header, so VMA_PROT_* and BURROW_PROT_* are RETYPED in
 # usr/lib/libt and usr/lib/libthyla-rs behind a comment asking the author to keep

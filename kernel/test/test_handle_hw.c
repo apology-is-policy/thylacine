@@ -141,8 +141,12 @@ void test_handle_hw_irq_out_of_range_rejected(void) {
     u32 max = gic_max_intid();
     TEST_ASSERT(max > 0,
                 "gic_max_intid() must be > 0 after gic_init");
-    TEST_ASSERT(max + 1u < GIC_NUM_INTIDS,
-                "test requires g_max_intid < GIC_NUM_INTIDS - 1 headroom");
+    // A controller that implements every INTID (Apple's vGIC reports 1020)
+    // leaves no gap between the two bounds: the same create is then refused
+    // by the architectural one. Either way the first INTID past the
+    // implemented range is never claimable.
+    TEST_ASSERT(max < GIC_NUM_INTIDS,
+                "gic_max_intid() must stay inside the architectural range");
     struct KObj_IRQ *k = kobj_irq_create(max + 1u);
     TEST_ASSERT(k == NULL,
                 "kobj_irq_create(g_max_intid + 1) must be rejected by intid_try_claim");

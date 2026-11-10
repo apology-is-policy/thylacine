@@ -99,7 +99,9 @@ deterministic); HVF + bare metal use GICv2.
     steady-state runtime branch — by the **W1.5** boot-time patcher (§4.5).
 - **Keep** `-mbranch-protection=pac-ret+bti`. PAC (`paciasp`/`autiasp`) and BTI
   markers are **HINT-space** (they do not need the `+pauth`/`+bti` arch
-  extensions to emit): NOP on v8.0 (A72), **active** on v8.3/v8.5+ (M2). So one
+  extensions to emit): NOP on v8.0 (A72), **active** on v8.3/v8.5+ (M2; PAC
+  only under HVF: measured 2026-11-10, HVF on the M2 reports `ID_AA64PFR1_EL1 = 0`,
+  so a guest there has no BTI and the banner reads `features: PAC,LSE,CRC32`). So one
   binary gets full PAC/BTI on capable hardware and harmless NOPs on A72 — **no
   hardening loss on the M2 dev/accel platform.**
 
@@ -534,6 +536,22 @@ consecutive GIC MMIO accesses (interspersing MMIO empirically hid the assert).
 **To be validated empirically when W2 lands** — it is the one residual risk on
 the HVF-on-M2 deliverable.
 
+> **Corrected 2026-11-10 (measured; the Mac runner arc, `docs/MAC-RUNNER.md`).**
+> Blocker 1 was never timing. The abort's syndrome is valid (`ISV=1`) for a load
+> or store of one general register with no writeback, and invalid for a
+> writeback or pair form, every time. The kernel's GIC accessors were plain
+> volatile accesses, so the compiler chose the form: in the GICv3 `dist_init`
+> loop it chose `str wzr, [x10], #0x8` for `GICD_ICFGR`. QEMU's
+> `hvf_data_abort` trace shows exactly one `isv=0` abort in a boot, a write at
+> IPA `0x08000c0c`, on QEMU 10.0.2 (emulated GICv3) and on QEMU 11.1.3 (Apple's
+> in-kernel GICv3) alike; the neighbouring `stur` to `0xc08` arrives with
+> `isv=1`. "Intervening MMIO hides it" was the compiler choosing another form
+> for a different loop body, and the `dsb` between accesses worked for the same
+> reason. Every kernel device access now goes through the fixed-form accessors
+> of `arch/arm64/mmio.h` (`tools/check-mmio-forms.py` gates the old idiom). The
+> GICv2 `dsb` stays for a different reason: the one after the `GICC_IAR` read
+> orders the barrier handler's ticket read after the acknowledge.
+
 **Audit-bearing** (scheduler / IPI surface; I-18 IPI ordering). Follows the
 CLAUDE.md audit-trigger discipline for `kernel/smp.c` + the new gic v2 path.
 
@@ -557,7 +575,9 @@ The GICv2 path is built and the v2 detection no longer extincts. As-built:
   per-target loop is unchanged.
 - **HVF-MMIO mitigation**: `v2_w32`/`v2_r32`/`v2_w8` issue a `dsb sy` after every
   GIC access, pacing the trap rate so QEMU/HVF does not see the `isv=0`
-  data-abort. **Empirically validated under HVF on M-series**: `gic_init`,
+  data-abort (corrected 2026-11-10, above: the trap rate was never the cause;
+  the barrier's memory clobber made the compiler reload the base after each
+  access, which kept it from forming a writeback store). **Empirically validated under HVF on M-series**: `gic_init`,
   the timer, IRQ delivery, and the full kernel boot run clean under
   `-accel hvf -machine virt,gic-version=2`.
 - **I-5 reservation**: `kobj_mmio_reserve_kernel_ranges` now reserves the GICC

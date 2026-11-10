@@ -22,7 +22,7 @@ design:
   - "docs/ARCHITECTURE.md section 13"
   - "docs/VIRTIO-PCI-DESIGN.md"
 created: 2026-08-02
-updated: 2026-11-03
+updated: 2026-11-10
 ---
 ## Purpose
 
@@ -455,6 +455,16 @@ BAR claims. A failed reset cannot authorize vector reuse.
 compiler's post-indexed store in a table-clearing loop reproduced QEMU/HVF's
 ISV assertion; disassembly records the failing instruction and its removal.
 The corrected HVF run passes the real MSI-X RNG test and boot gate.
+
+Every kernel file that maps device memory reaches it through this header. The
+interrupt controller, the console UART, the clock and the virtio-mmio transport
+were the last to move ([[sub-kernel-gic]] has the mechanism and the access that
+proved it). `tools/check-mmio-forms.py`, fatal in the build, refuses a
+dereference of a cast to a volatile integer pointer outside two named uses on
+ordinary memory, a file that calls the mapper without including the header, and
+an accessor whose template is no longer one base-only load or store. It is a
+gate on the idiom: a device pointer dereferenced through a typed variable would
+pass it, and for that the witness is a boot under a trapping hypervisor.
 
 The claim's `irq_faulted` state is distinct from revocation. A live routing
 readback failure masks MSI-X and INTx without waiting for device reset in IRQ

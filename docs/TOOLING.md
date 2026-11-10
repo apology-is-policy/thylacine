@@ -92,7 +92,7 @@ was added, re-wedging #70 under TCG. Membership is tested against `"1"`, not wit
 turn this *off* dead on arrival — the same defect this arc found in
 `NP3_HOSTPORT`.
 
-**`-cpu max`** is preferred over `-cpu cortex-a76` for the TCG compat reference: it exposes every ARMv8.5+ extension QEMU emulates (PAC, MTE, BTI, LSE, SVE), which the hardening stack relies on per `ARCHITECTURE.md §24`. Under HVF the guest sees the host CPU via `-cpu host` (Apple cores: LSE+PAC+BTI, no RNDR — the kernel CSPRNG seeds from virtio-rng instead, Lazarus W3). For Pi 5 hardware testing, the actual Pi 5 CPU (Cortex-A76, ARMv8.2) provides PAC+LSE but not MTE/BTI; the kernel detects and adapts at boot.
+**`-cpu max`** is preferred over `-cpu cortex-a76` for the TCG compat reference: it exposes every ARMv8.5+ extension QEMU emulates (PAC, MTE, BTI, LSE, SVE), which the hardening stack relies on per `ARCHITECTURE.md §24`. Under HVF the guest sees the host CPU via `-cpu host` (measured on the M2, 2026-11-10: LSE+PAC, **no BTI** -- HVF reports `ID_AA64PFR1_EL1 = 0` and the banner reads `features: PAC,LSE,CRC32`; no RNDR — the kernel CSPRNG seeds from virtio-rng instead, Lazarus W3). For Pi 5 hardware testing, the actual Pi 5 CPU (Cortex-A76, ARMv8.2) provides PAC+LSE but not MTE/BTI; the kernel detects and adapts at boot.
 
 **Flags to add as phases progress:**
 
@@ -697,8 +697,13 @@ before anyone measured it: HVF scenarios cost 31–77 s, TCG ones 185–270 s, a
 **Accel is not only a speed knob**, which is what makes this a coverage
 decision rather than a tuning one: `run-vm.sh` derives the CPU model *and* the
 GIC version from it — `hvf` gives `-cpu host` + GICv2, `tcg` gives `-cpu max` +
-GICv3 (HVF cannot do v3 here at all; its emulated GICv3 distributor trips an
-`isv` data-abort assert). Every flip therefore moves a scenario off those axes,
+GICv3. (Until 2026-11-10 this read "HVF cannot do v3 here at all; its
+emulated GICv3 distributor trips an `isv` data-abort assert". The assert was
+the guest's: a post-indexed store to `GICD_ICFGR`, which no hypervisor can
+emulate. With the kernel's device accesses on `arch/arm64/mmio.h`,
+`THYLACINE_ACCEL=hvf THYLACINE_GIC=3` runs the suite green on stock QEMU 10.0.2,
+ITS included; GICv2 stays the HVF default the scenario fleet was measured on.)
+Every flip therefore moves a scenario off those axes,
 and #166 is the standing proof that a scenario can go **inert** under HVF while
 still reporting PASS — a green test that quietly stopped testing.
 

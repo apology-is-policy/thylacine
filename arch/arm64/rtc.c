@@ -3,6 +3,7 @@
 
 #include "rtc.h"
 
+#include "mmio.h"
 #include "mmu.h"
 
 #include <stdint.h>
@@ -44,7 +45,7 @@ u64 rtc_read_epoch_seconds(void) {
     // Single MMIO read. The mapping is held (there is no mmu_unmap_mmio and
     // the kernel never re-reads the RTC at v1.0); one page of vmalloc for a
     // kernel-reserved device (I-5) is harmless.
-    u32 secs = *(volatile u32 *)((uintptr_t)kva + PL031_DR);
+    u32 secs = io_read32((const volatile u8 *)kva + PL031_DR);
 
     if ((u64)secs < RTC_EPOCH_FLOOR || (u64)secs > RTC_EPOCH_CEILING)
         return 0;   // outside [2020, 2100) -> implausible -> fail-soft

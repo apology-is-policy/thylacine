@@ -60,7 +60,7 @@ locks: []
 abis: []
 design: ["docs/LIFE-SUPPORT.md"]
 created: 2026-08-01
-updated: 2026-11-04
+updated: 2026-11-10
 ---
 ## Purpose
 
@@ -347,9 +347,10 @@ Concurrency.
 
 **Accel is not a speed knob, and G-3's anchor set is the best structure in
 the file.** `run-vm.sh` derives the CPU model *and* the GIC version from
-it: hvf gives `-cpu host` + GICv2, tcg gives `-cpu max` + GICv3 (HVF cannot
-do v3 here at all — its emulated GICv3 distributor trips an `isv`
-data-abort assert). So every scenario moved to HVF stops covering GICv3 and
+it: hvf gives `-cpu host` + GICv2, tcg gives `-cpu max` + GICv3 (by default;
+`THYLACINE_GIC=3` runs under HVF since 2026-11-10, when the `isv` data-abort
+assert turned out to be the kernel's own post-indexed store to a distributor
+register, [[sub-kernel-gic]]). So every scenario moved to HVF stops covering GICv3 and
 `-cpu max`, and #166 is the standing proof that a scenario can go **inert
 under HVF while still reporting PASS** — the worst outcome available, a
 green test that quietly stopped testing.

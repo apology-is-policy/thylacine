@@ -12,7 +12,7 @@ locks: []
 abis: [abi-boot-banner]
 design: ["docs/TOOLING.md", "docs/PORTABILITY.md"]
 created: 2026-08-01
-updated: 2026-11-03
+updated: 2026-11-10
 ---
 ## Purpose
 
@@ -91,7 +91,7 @@ Hence the deliberate `gpu0`/`gpu-mmio0` and `kbd-pci0`/`kbd0` pairs.
 
 | | accel | `-cpu` | GIC | Why |
 |---|---|---|---|---|
-| default on Apple Silicon | `hvf` | `host` | v2 | HVF's emulated GICv3 distributor MMIO trips an `isv` data-abort assert; the GICv2 MMIO CPU interface is the HVF enabler (Lazarus W2) |
+| default on Apple Silicon | `hvf` | `host` | v2 | the configuration the HVF scenario fleet was measured on (Lazarus W2). `THYLACINE_GIC=3` works under HVF too since 2026-11-10: the `isv` assert once blamed on QEMU's emulated GICv3 was a post-indexed store in the kernel's own GIC bring-up ([[sub-kernel-gic]]) |
 | Linux on ARM silicon | `kvm` | `host` | `host` | the guest GIC is the in-kernel one matching the actual silicon |
 | fallback / compat | `tcg` | `max` | v3 | full ISA incl. RNDR; v3 is QEMU-virt's modern default |
 
