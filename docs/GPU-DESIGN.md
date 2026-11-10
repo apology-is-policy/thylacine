@@ -2739,7 +2739,13 @@ The census:
   rounds) now opens just after a console present, and only once the console
   has gone quiet for 700 ms. The next flip is then a whole cursor period away
   (2 s at the idle rate), which is longer than the sends take. An unconstructed attempt's line says what the
-  settle saw and how many presents were served in its window.
+  settle saw and how many presents were served in its window. On a console
+  that quiet, DEADLINE's sends take about as long as the queue's first submit
+  runs on V3D: at 1c86ffbcf one of the six had retired at every take, with no
+  stall and no present in the window. "None retired" had held on earlier runs
+  only because console work in front of the queue delayed its head. So the
+  head may have retired (at most one of six), and the leg says which attempt
+  was constructed and how many had.
 
 *Witnesses whose premise was the hold.* `ls-graphical-sak-chain`'s readback and
 pointer legs, and `ls-graphical-keys-behind`'s readback leg, stood a client

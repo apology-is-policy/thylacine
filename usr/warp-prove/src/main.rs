@@ -3652,6 +3652,11 @@ const E_IO_RC: i64 = 5;
 /// A leg whose sends met an engine stall (another client's sync step behind the
 /// queue) may have had its readback publish unparked; it retries this often.
 const RB_DEADLINE_ATTEMPTS: u32 = 4;
+/// On V3D the leg's sends take about as long as the queue's first submit runs
+/// (the Pi, a quiet console: one of the six had retired at every take), so the
+/// head of the queue may be gone when the readback is taken. Five standing is
+/// more than twice the park floor.
+const RB_DEADLINE_AHEAD_MAX: u64 = 1;
 const RB_ABANDON_ATTEMPTS: u32 = 4;
 /// Lictor's SUBMIT_DEADLINE_MS (500) with slack: past it, a bystander present stalled at
 /// its bound rather than waiting behind a readback (vote 72a).
@@ -5975,7 +5980,7 @@ fn observe_readback() {
     // leg runs again rather than judging it.
     let xfer = format!("transfer_from 0 0 0 0 {} {} 1 0 0 0", RB_W, RB_H);
     let mut dl_try = 0u32;
-    let (dl_before, dl_t0, dl_c0) = loop {
+    let (dl_before, dl_t0, dl_c0, dl_ahead, dl_settle) = loop {
         dl_try += 1;
         let mut dl_c0 = rb_census(warp).unwrap_or_else(|| rb_incomplete("instrument:deadline-census"));
         for _ in 0..40 {
@@ -5998,23 +6003,24 @@ fn observe_readback() {
         }
         note_stall_refusals("deadline readback", refused);
         let met = stall_refusals().wrapping_sub(r0);
-        // DEEP's rule, by the fence timeline: none of the queue may have retired
-        // when the readback was taken. A hold on the sends without a refusal (a
-        // present's flush queued behind the draws) drains the queue under them.
+        // By the fence timeline: the queue must still stand when the readback is
+        // taken. A hold on the sends without a refusal (a present's flush queued
+        // behind the draws) drains the queue under them.
         let ahead = ctx_field(warp, ctx, "fence-signaled").saturating_sub(dl_before);
-        if met == 0 && ahead == 0 {
-            break (dl_before, dl_t0, dl_c0);
+        if met == 0 && ahead <= RB_DEADLINE_AHEAD_MAX {
+            break (dl_before, dl_t0, dl_c0, ahead, settle);
         }
         let in_window = presents_served(tap).saturating_sub(settle.served);
         let _ = rb_wait_signaled(warp, ctx, dl_before, RB_DEADLINE_SUBMITS as u64 + 1, dl_t0, "deadline unconstructed");
         // `ahead` counts the readback's own fence after the queue's.
         t_putstr(&format!(
-            "warp-prove: C6-RB DEADLINE attempt {} not constructed -- its sends met an engine stall ({} refusals) or {} of the {} submits had retired when the readback was taken{}, so it may have published into a draining queue; the console {}, and {} presents were served in the window\n",
+            "warp-prove: C6-RB DEADLINE attempt {} not constructed -- its sends met an engine stall ({} refusals) or {} of the {} submits had retired when the readback was taken{} (at most {} may), so it may have published into a draining queue; the console {}, and {} presents were served in the window\n",
             dl_try,
             met,
             ahead.min(RB_DEADLINE_SUBMITS as u64),
             RB_DEADLINE_SUBMITS,
             if ahead > RB_DEADLINE_SUBMITS as u64 { ", and the readback too" } else { "" },
+            RB_DEADLINE_AHEAD_MAX,
             settle.said(),
             in_window
         ));
@@ -6130,6 +6136,10 @@ fn observe_readback() {
     t_putstr(&format!(
         "warp-prove: C6-RB F2B REPORT -- bystander present latency behind a client readback of a busy BO: max {} ms mean {} ms over {} presents; the {} heavy submits + the readback retired in {} ms, the later submit in {} ms\n",
         b_max_ms, b_sum_ms / b_n, b_n, RB_DEADLINE_SUBMITS, dl_rb_ms, dl_after_ms
+    ));
+    t_putstr(&format!(
+        "warp-prove: C6-RB DL-CONSTRUCTION -- DEADLINE attempt {} of {}: {} of the {} submits had retired when the readback was taken (at most {} may); the console {}\n",
+        dl_try, RB_DEADLINE_ATTEMPTS, dl_ahead, RB_DEADLINE_SUBMITS, RB_DEADLINE_AHEAD_MAX, dl_settle.said()
     ));
     if healthy && parked_ok && order_ok && !stood {
         rb_incomplete("deadline-unjudged");
