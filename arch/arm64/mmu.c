@@ -2003,7 +2003,8 @@ u64 mmu_uninstall_pte_calls(void) {
 //
 // I-13 (kernel/user isolation): the walk reaches ONLY pages mapped in the
 // target's own TTBR0 tree, so a debug read/write cannot touch another Proc's
-// memory (or the kernel's -- the tree holds only user leaves). The write
+// memory (or the kernel's: a user leaf names a page the allocator gave that
+// Proc, or a device window, which the resolver refuses). The write
 // additionally REFUSES a read-only leaf (AP[2]==1): a debugger writes DATA, and
 // letting it write a user-RO page via the direct map would violate I-12 (W^X:
 // the page is RO+X text) AND corrupt the I-36 REVENANT Image cache (shared text

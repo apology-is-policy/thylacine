@@ -534,7 +534,7 @@ case "$result" in
                     thylacine.msi)
                         [[ -n "$q_gic" && -n "$q_its" && -n "$q_accel" ]] || return 1
                         case "$q_gic:$q_its:$q_accel" in
-                            2:*|3:on:tcg|3:auto:tcg) return 1 ;;
+                            2:*|3:on:tcg|3:auto:tcg|3:auto:hvf) return 1 ;;   # run-vm.sh declares it for these
                         esac
                         return 0 ;;
                     /lib/libc.so) [[ ! -f "$REPO_ROOT/build/sysroot/lib/libc.so" ]] ;;

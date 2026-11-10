@@ -70,17 +70,19 @@ table lists it as a trigger surface in its own right.
   (low-firmware, kernel image, struct-page array, DTB, initrd),
   sort + verify disjoint (F29/F34 — a Pi-5-shaped DTB landing inside
   the ~96 MiB struct-page claim would otherwise be silently zeroed),
-  free the gaps, init magazines, then **#808**: page-map the buddy
-  direct map to L3 granularity while still single-CPU and IRQ-masked
-  — after which runtime kstack-guard flips only toggle present L3
-  leaves, never a break-before-make, eliminating the #806 IRQ-during-
-  BBM race for the buddy zone by construction.
-- Diagnostics: total/free/reserved pages, the #808 table-page cost, and
-  the tests' `phys_zone_bounds`.
-- `phys_pa_is_ram(pa)`: whether an address lies in the zone, i.e. is RAM the
-  direct map covers (reservations included). The cross-Proc copy asks it before
-  making a kernel pointer from a user leaf's address, because a device window
-  has none ([[sub-kernel-mmu]]).
+  free the gaps, init magazines. It does not touch the direct map: the
+  zone keeps the blocks `build_page_tables` gave it, and nothing writes a
+  direct-map leaf at runtime (since 2026-11-03; [[sub-kernel-mmu]] has the
+  history of the boot-time page map this replaced).
+- Diagnostics: total/free/reserved pages, and the tests' `phys_zone_bounds`.
+- `phys_pa_is_ram(pa)`: whether an address lies in the zone, the RAM the
+  allocator manages, reservations included. Every page the allocator hands out
+  is in the zone and has a writable direct-map alias (the blocks are never
+  demoted or re-permissioned); the reservations are in the zone too, and of
+  those the kernel image's text and read-only data are mapped read-only and its
+  guard pages not at all. The cross-Proc copy asks it before making a kernel
+  pointer from a user leaf's address, because a device's registers are outside
+  the zone and have no alias ([[sub-kernel-mmu]]).
 
 ## Mechanism
 
@@ -192,9 +194,9 @@ Magazine pages in the stack carry `flags = 0` — deliberately NOT
 across split/merge only, never across anything that allocates or
 sleeps. Order: bare-IRQ-mask → zone (magazines), kmem-cache →
 zone (SLUB slab ops), `vma_lock` → zone (demand paging), larder leaf
-→ buddy (page-buffer frees). The #808 boot page-map runs before
-`smp_init` under a full mask, so its block→table demotes race
-nothing.
+→ buddy (page-buffer frees). `phys_init` runs before `smp_init` under a
+full mask and writes the zone bounds once, so `phys_pa_is_ram` reads them
+without a lock.
 
 The user pool's counter (`g_user_pool_charged`, B-1a') is under no lock
 at all: `pool_charge` is a CAS that re-decides on failure (a non-exempt
@@ -212,8 +214,9 @@ None numbered — deliberately recorded as such (the honest analog of
 [[inv-i17]]'s prose strength). The nearest obligations: the F5
 `dsb ish` underwrites the cross-CPU zero-visibility that the I-13
 kernel/user info-leak arguments assume (no inv-i13 note exists yet —
-that surface is unswept), and the #808 page-map is what makes the
-kstack-guard path BBM-free. Validated by the boot smoke
+that surface is unswept). The direct map is no longer this subsystem's
+to change: kernel stacks live in a range of their own and their guards are
+never direct-map leaves ([[sub-kernel-mmu]]). Validated by the boot smoke
 (alloc/free/drain round-trip to an exact free count), the suite under
 UBSan, and the multi-boot SMP gate.
 

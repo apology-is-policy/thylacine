@@ -250,7 +250,13 @@ so does a device window (a driver's MMIO or PCI BAR mapping, a GPU client's
 host-memory window): its address has no kernel alias to copy through and a byte
 copy is not a device access, so the resolver refuses the leaf
 ([[sub-kernel-mmu]]; `devproc.debug_mem` reads and writes the interrupt
-distributor's address through a target's `mem`).
+distributor's address through a target's `mem`, behind each memory attribute a
+window can carry, and checks that a write which moved no byte stamps no debug
+taint). A copy that starts in RAM and runs into a window is short at the page
+boundary. That test samples every result it takes between linking its target
+and freeing it, and judges them after the cleanup: an assertion that returns in
+between leaves a linked, live Proc behind, and the next test that waits on a
+child then wedges the boot instead of this one reporting red.
 
 **The header.** `devproc.h` declares the two visibility predicates `/ctl/procs`
 shares with `/proc`: `devproc_none_walled` (Plan 9's `nonone()`) and

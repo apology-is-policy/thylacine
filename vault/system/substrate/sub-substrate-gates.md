@@ -394,7 +394,9 @@ script's own configuration, kind by kind: `virtio-net` by `THYLACINE_NO_NET=1`;
 by `THYLACINE_NO_GPU=1` or a display that drops the MMIO GPU (console, vnc,
 egl-headless, dbus-gl, gpu); `virtio-blk` by neither `disk.img` nor `pool.img`;
 `smp` and `msi` by run-vm.sh's own `==> qemu:` line (one CPU; a GICv3 machine
-with `its=off`, or under KVM or hvf, where the launcher cannot know the ITS);
+with `its=off`, under KVM, or under hvf with `its=on`, where the launcher
+cannot know the ITS; under hvf with `its=auto` the launcher declares the
+controller since 2026-11-10, so a skip there is not explained);
 the dlopen prover by a sysroot without `libc.so`; `virtio-rng` and
 `virtio-pci-rng` by `THYLACINE_NO_RNG=1` (2026-10-26: without RNDR that boot
 refuses userspace before the suite, so only an RNDR machine reaches the

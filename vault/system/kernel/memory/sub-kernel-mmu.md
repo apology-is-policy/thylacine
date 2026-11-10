@@ -248,13 +248,27 @@ It refuses a leaf whose physical address is not RAM, too (`phys_pa_is_ram`: the
 allocator's zone, which is the RAM the direct map covers). A driver's MMIO
 window, a PCI BAR window and a host-memory window are leaves like any other,
 but nothing in the direct map stands for them: on the emulated machine their
-addresses lie below the first mapped gigabyte, and the copy took a kernel
-translation fault and ended the world; on a board whose devices sit inside the
+addresses lie below the first mapped gigabyte, or far above the last one (a BAR
+too large for the 32-bit window is placed at 512 GiB), and the copy took a
+kernel translation fault and ended the world; on a board whose devices sit inside the
 mapped range it would have been a byte-wise, cacheable access to device
 registers. The test is on the address and not on the leaf's memory attribute,
 because a cached host-memory window is a device behind a Normal attribute. To
-the debugger a device window reads as a hole (`devproc.debug_mem` maps the
-interrupt distributor's address into a target and reads and writes it).
+the debugger a device window reads as a hole. `devproc.debug_mem` maps the
+interrupt distributor's address into a target three times, behind the Device
+attribute and behind both Normal ones, and maps a RAM page behind the Device
+attribute: the three are refused and the RAM page is served, so a resolver that
+judged by the attribute fails the test. A copy that starts in RAM and runs into
+a device window or a hole is short at the page boundary.
+
+One leaf still gets past the test. `kobj_mmio_create` refuses the ranges the
+kernel reserved for its own devices but not RAM, so a holder of the broad
+hardware allowance can claim a window over RAM and map it; that leaf is in the
+zone, and if it names a page of the kernel image the copy takes a permission
+fault on the image's read-only alias. Such a holder can already write the
+kernel through its own mapping, so no authority moves, but the kernel should
+not end there. Open; the refusal belongs in `kobj_mmio_create`
+([[sub-kernel-hwcap]]).
 
 **I-42** — the JIT's outward generalization of the self-modification alias
 (the [[sub-kernel-burrow]] `BURROW_TYPE_CODE` dual mapping), and its two I-cache

@@ -30,8 +30,7 @@
 // Snapshot of the layout for diagnostic queries (banner).
 static u64 g_total_pages;
 static u64 g_initial_free_pages;
-// #808: page-table pages the boot-time direct-map page-map consumed.
-// Buddy zone bounds (post-cap), retained for diagnostics + the #808 sweep test.
+// Buddy zone bounds (post-cap): what phys_pa_is_ram answers from.
 static paddr_t g_zone_base;
 static paddr_t g_zone_end;
 

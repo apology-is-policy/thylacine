@@ -2533,105 +2533,148 @@ void test_devproc_debug_mem(void) {
     tgt->principal_id = caller->principal_id;   // owner -> I-39 authorized
     tgt->state        = PROC_STATE_ALIVE;
 
-    const u64 RW_VA  = 0x20000000ull;   // 512 MiB, user-half
-    const u64 RO_VA  = 0x20001000ull;   // + one page
-    const u64 GAP_VA = 0x20002000ull;   // + two pages: never mapped (a hole)
-    const u64 DEV_VA = 0x20003000ull;   // + three pages: a device window
+    const u64 RW_VA     = 0x20000000ull;   // 512 MiB, user-half
+    const u64 RO_VA     = 0x20001000ull;   // + one page
+    const u64 GAP_VA    = 0x20002000ull;   // + two pages: never mapped (a hole)
+    const u64 DEV_VA    = 0x20003000ull;   // a device window behind the Device attribute
+    const u64 DEVWB_VA  = 0x20004000ull;   // the same device address behind Normal-WB (a cached host-memory window)
+    const u64 DEVNC_VA  = 0x20005000ull;   // ... and behind Normal-NC (a write-combining one)
+    const u64 RAMDEV_VA = 0x20006000ull;   // the RW page again, behind the Device attribute
+    const u64 DEV2_VA   = 0x20007000ull;   // a device window directly after that RAM page
 
     struct page *rw_pg = alloc_pages(0, KP_ZERO);
     struct page *ro_pg = alloc_pages(0, KP_ZERO);
     TEST_ASSERT(rw_pg && ro_pg, "alloc backing pages");
     paddr_t rw_pa = page_to_pa(rw_pg), ro_pa = page_to_pa(ro_pg);
+    paddr_t dev_pa = (paddr_t)gic_dist_pa();
+    bool exempt = proc_resource_exempt(tgt);
     u8 *rw_kva = (u8 *)pa_to_kva(rw_pa);
     u8 *ro_kva = (u8 *)pa_to_kva(ro_pa);
     for (int i = 0; i < 64; i++) { rw_kva[i] = (u8)(0xA0 + i); ro_kva[i] = (u8)(0x50 + i); }
-    TEST_EXPECT_EQ(mmu_install_user_pte(tgt->as, proc_resource_exempt(tgt), RW_VA, rw_pa, VMA_PROT_RW,   false), 0, "map RW page");
-    TEST_EXPECT_EQ(mmu_install_user_pte(tgt->as, proc_resource_exempt(tgt), RO_VA, ro_pa, VMA_PROT_READ, false), 0, "map RO page");
-    TEST_EXPECT_EQ(mmu_install_user_pte(tgt->as, proc_resource_exempt(tgt), DEV_VA, (paddr_t)gic_dist_pa(), VMA_PROT_RW, true), 0, "map a device leaf");
+    // No CPU ever loads this tree, so a leaf whose attribute does not suit what
+    // is behind it has no effect beyond what the resolver reads from it.
+    TEST_EXPECT_EQ(mmu_install_user_pte(tgt->as, exempt, RW_VA, rw_pa, VMA_PROT_RW,   false), 0, "map RW page");
+    TEST_EXPECT_EQ(mmu_install_user_pte(tgt->as, exempt, RO_VA, ro_pa, VMA_PROT_READ, false), 0, "map RO page");
+    TEST_EXPECT_EQ(mmu_install_user_pte(tgt->as, exempt, DEV_VA,  dev_pa, VMA_PROT_RW, true), 0, "map a device leaf");
+    TEST_EXPECT_EQ(mmu_install_user_pte(tgt->as, exempt, DEV2_VA, dev_pa, VMA_PROT_RW, true), 0, "map a second device leaf");
+    TEST_EXPECT_EQ(mmu_install_user_pte_attr(tgt->as, exempt, DEVWB_VA, dev_pa, VMA_PROT_RW, MAIR_IDX_NORMAL_WB), 0,
+                   "map the device address behind Normal-WB");
+    TEST_EXPECT_EQ(mmu_install_user_pte_attr(tgt->as, exempt, DEVNC_VA, dev_pa, VMA_PROT_RW, MAIR_IDX_NORMAL_NC), 0,
+                   "map the device address behind Normal-NC");
+    TEST_EXPECT_EQ(mmu_install_user_pte(tgt->as, exempt, RAMDEV_VA, rw_pa, VMA_PROT_RW, true), 0,
+                   "map the RW page behind the Device attribute");
 
     // --- Layer 1: the raw cross-Proc resolver ---
+    paddr_t root = tgt->as->pgtable_root;
     u8 buf[64], wbuf[64];
-    long got = mmu_cross_proc_read(tgt->as->pgtable_root, RW_VA, buf, 64);
+    long got = mmu_cross_proc_read(root, RW_VA, buf, 64);
     TEST_EXPECT_EQ(got, 64L, "cross_proc_read reads the RW page span");
     bool match = true; for (int i = 0; i < 64; i++) if (buf[i] != (u8)(0xA0 + i)) match = false;
     TEST_ASSERT(match, "cross_proc_read returns the RW page bytes");
 
     for (int i = 0; i < 64; i++) wbuf[i] = (u8)(0x11 + i);
-    TEST_EXPECT_EQ(mmu_cross_proc_write(tgt->as->pgtable_root, RW_VA, wbuf, 64), 64L, "cross_proc_write writes the RW page");
+    TEST_EXPECT_EQ(mmu_cross_proc_write(root, RW_VA, wbuf, 64), 64L, "cross_proc_write writes the RW page");
     match = true; for (int i = 0; i < 64; i++) if (rw_kva[i] != (u8)(0x11 + i)) match = false;
     TEST_ASSERT(match, "cross_proc_write landed the bytes in the target page");
 
     // RO leaf: read OK, write REFUSED (W^X / Image cache) + the page untouched.
-    TEST_EXPECT_EQ(mmu_cross_proc_read(tgt->as->pgtable_root, RO_VA, buf, 64), 64L, "cross_proc_read reads an RO page");
-    TEST_EXPECT_EQ(mmu_cross_proc_write(tgt->as->pgtable_root, RO_VA, wbuf, 64), 0L, "cross_proc_write REFUSES an RO leaf");
+    TEST_EXPECT_EQ(mmu_cross_proc_read(root, RO_VA, buf, 64), 64L, "cross_proc_read reads an RO page");
+    TEST_EXPECT_EQ(mmu_cross_proc_write(root, RO_VA, wbuf, 64), 0L, "cross_proc_write REFUSES an RO leaf");
     TEST_ASSERT(ro_kva[0] == 0x50, "the RO page was NOT modified by the refused write");
 
     // A non-resident VA -> 0 (not resident; no fault-in).
-    TEST_EXPECT_EQ(mmu_cross_proc_read(tgt->as->pgtable_root,  GAP_VA, buf,  64), 0L, "read of a hole returns 0");
-    TEST_EXPECT_EQ(mmu_cross_proc_write(tgt->as->pgtable_root, GAP_VA, wbuf, 64), 0L, "write of a hole returns 0");
+    TEST_EXPECT_EQ(mmu_cross_proc_read(root,  GAP_VA, buf,  64), 0L, "read of a hole returns 0");
+    TEST_EXPECT_EQ(mmu_cross_proc_write(root, GAP_VA, wbuf, 64), 0L, "write of a hole returns 0");
 
     // A device window is refused like a hole, both ways: it has no RAM behind
     // it, so there is nothing in the direct map to copy from or to.
-    TEST_ASSERT(!phys_pa_is_ram((paddr_t)gic_dist_pa()) && phys_pa_is_ram(rw_pa),
+    TEST_ASSERT(!phys_pa_is_ram(dev_pa) && phys_pa_is_ram(rw_pa),
                 "premise: the distributor is not RAM and an allocated page is");
-    TEST_EXPECT_EQ(mmu_cross_proc_read(tgt->as->pgtable_root,  DEV_VA, buf,  64), 0L, "read of a device leaf returns 0");
-    TEST_EXPECT_EQ(mmu_cross_proc_write(tgt->as->pgtable_root, DEV_VA, wbuf, 64), 0L, "write of a device leaf returns 0");
+    TEST_EXPECT_EQ(mmu_cross_proc_read(root,  DEV_VA, buf,  64), 0L, "read of a device leaf returns 0");
+    TEST_EXPECT_EQ(mmu_cross_proc_write(root, DEV_VA, wbuf, 64), 0L, "write of a device leaf returns 0");
+
+    // What decides is the address, not the leaf's memory attribute: a device
+    // address behind a Normal attribute is refused, and RAM behind the Device
+    // attribute is served.
+    TEST_EXPECT_EQ(mmu_cross_proc_read(root,  DEVWB_VA, buf,  64), 0L, "read of a device address behind Normal-WB returns 0");
+    TEST_EXPECT_EQ(mmu_cross_proc_write(root, DEVWB_VA, wbuf, 64), 0L, "write of a device address behind Normal-WB returns 0");
+    TEST_EXPECT_EQ(mmu_cross_proc_read(root,  DEVNC_VA, buf,  64), 0L, "read of a device address behind Normal-NC returns 0");
+    TEST_EXPECT_EQ(mmu_cross_proc_write(root, DEVNC_VA, wbuf, 64), 0L, "write of a device address behind Normal-NC returns 0");
+    for (int i = 0; i < 64; i++) buf[i] = 0;
+    TEST_EXPECT_EQ(mmu_cross_proc_read(root, RAMDEV_VA, buf, 64), 64L, "read of RAM behind the Device attribute returns the bytes");
+    match = true; for (int i = 0; i < 64; i++) if (buf[i] != (u8)(0x11 + i)) match = false;
+    TEST_ASSERT(match, "RAM behind the Device attribute reads as the RW page");
+
+    // A copy that runs off a page stops at the first page it may not touch.
+    // Control first: across two RAM pages it does not stop.
+    const u64 EDGE = PAGE_SIZE - 32;
+    TEST_EXPECT_EQ(mmu_cross_proc_read(root, RW_VA + EDGE, buf, 64), 64L, "control: a read across two RAM pages is whole");
+    TEST_EXPECT_EQ(mmu_cross_proc_read(root, RO_VA + EDGE, buf, 64), 32L, "a read that runs into a hole is short at the boundary");
+    TEST_EXPECT_EQ(mmu_cross_proc_read(root, RAMDEV_VA + EDGE, buf, 64), 32L, "a read that runs into a device window is short at the boundary");
+    TEST_EXPECT_EQ(mmu_cross_proc_write(root, RAMDEV_VA + EDGE, wbuf, 64), 32L, "a write that runs into a device window is short at the boundary");
+    TEST_ASSERT(rw_kva[EDGE] == wbuf[0] && rw_kva[PAGE_SIZE - 1] == wbuf[31], "the short write landed its first 32 bytes");
 
     // --- Layer 2: the devproc mem-file path (I-39 + stopped-only) ---
-    proc_test_link(tgt);
-    struct Spoor *mem = open_mem_for_pid(tgt->pid);
-    TEST_ASSERT(mem != NULL, "open /proc/<pid>/mem");
-
-    // NOT stopped -> refused (stopped-only; DEBUG-FS 3).
-    tgt->debug_stop_req = 0;
-    TEST_EXPECT_EQ(devproc.read(mem, buf, 64, (s64)RW_VA), (long)-1, "mem read of a NOT-stopped target is refused");
-    TEST_EXPECT_EQ(devproc.write(mem, wbuf, 64, (s64)RW_VA), (long)-1, "mem write of a NOT-stopped target is refused");
-
-    // Stopped (thread-less -> vacuously fully-stopped) -> read/write work.
-    tgt->debug_stop_req = 1;
-    got = devproc.read(mem, buf, 64, (s64)RW_VA);
-    TEST_EXPECT_EQ(got, 64L, "mem read of a stopped target returns the bytes");
-    match = true; for (int i = 0; i < 64; i++) if (buf[i] != (u8)(0x11 + i)) match = false;   // the layer-1 write
-    TEST_ASSERT(match, "mem read returns the RW page bytes");
-
-    for (int i = 0; i < 64; i++) wbuf[i] = (u8)(0x77 + i);
-    bool mem_untainted_before =
-        (__atomic_load_n(&tgt->proc_flags, __ATOMIC_ACQUIRE) & PROC_FLAG_DEBUG_TAINTED) == 0;
-    TEST_EXPECT_EQ(devproc.write(mem, wbuf, 64, (s64)RW_VA), 64L, "mem write of a stopped target");
-    TEST_ASSERT(rw_kva[0] == 0x77, "mem write landed in the target page");
     // The mem path needs authority and a stopped target but NOT the debug-owner
     // slot, so a caller that never attached reaches it -- which is why it carries
-    // its own taint stamp rather than leaning on the attach's. SAMPLED here and
-    // verdicted after the cleanup below, with this test's other late verdicts: an
-    // assertion placed between here and proc_free returns on failure with a
-    // LINKED, ALIVE, spoor-open Proc and two pages still held, and the next test
-    // to call wait_pid then wedges the entire boot instead of reporting this one
-    // red. Measured -- that is exactly what the mem-stamp sabotage leg did.
-    bool mem_tainted_after =
-        (__atomic_load_n(&tgt->proc_flags, __ATOMIC_ACQUIRE) & PROC_FLAG_DEBUG_TAINTED) != 0;
-    TEST_EXPECT_EQ(devproc.read(mem, buf, 64, (s64)GAP_VA), 0L, "mem read of a hole returns 0");
-    TEST_EXPECT_EQ(devproc.read(mem, buf, 64, (s64)DEV_VA), 0L, "mem read of a device window returns 0");
+    // its own taint stamp rather than leaning on the attach's. Every result here
+    // is SAMPLED and judged after the cleanup below: an assertion placed between
+    // the link and proc_free returns on failure with a LINKED, ALIVE, spoor-open
+    // Proc and two pages still held, and the next test to call wait_pid then
+    // wedges the entire boot instead of reporting this one red. Measured -- that
+    // is exactly what the mem-stamp sabotage leg did.
+    proc_test_link(tgt);
+    struct Spoor *mem = open_mem_for_pid(tgt->pid);
+    bool caller_plain = !(caller->caps & (CAP_HOSTOWNER | CAP_DEBUG));
+    long ns_read = -99, ns_write = -99, st_read = -99, st_write = -99, dev_write = -99;
+    long hole_read = -99, dev_read = -99, devwb_read = -99, edge_read = -99, other_read = -99;
+    long nd_control = -99, nd_read = -99, nd_write = -99;
+    bool st_match = false, mem_untainted_before = false, mem_tainted_after = false;
+    u8 st_landed = 0, nd_landed = 0;
+    if (mem) {
+        // NOT stopped -> refused (stopped-only; DEBUG-FS 3).
+        tgt->debug_stop_req = 0;
+        ns_read  = devproc.read(mem, buf, 64, (s64)RW_VA);
+        ns_write = devproc.write(mem, wbuf, 64, (s64)RW_VA);
 
-    // Non-owner (a target owned by a different principal; caller has no debug
-    // cap) -> refused even while stopped (I-39).
-    TEST_ASSERT(!(caller->caps & (CAP_HOSTOWNER | CAP_DEBUG)),
-                "test caller lacks CAP_HOSTOWNER/CAP_DEBUG (the denied case is meaningful)");
-    tgt->principal_id = (caller->principal_id == 0x0D0D0D0Du) ? 0x0E0E0E0Eu : 0x0D0D0D0Du;
-    TEST_EXPECT_EQ(devproc.read(mem, buf, 64, (s64)RW_VA), (long)-T_E_ACCES,
-                   "mem read by a non-owner (no CAP_DEBUG) is refused (I-39, EACCES)");
+        // Stopped (thread-less -> vacuously fully-stopped) -> read/write work.
+        tgt->debug_stop_req = 1;
+        st_read = devproc.read(mem, buf, 64, (s64)RW_VA);
+        st_match = true; for (int i = 0; i < 64; i++) if (buf[i] != (u8)(0x11 + i)) st_match = false;   // the layer-1 write
 
-    // The dump seal refuses the READ direction only (DEBUG-FS-DESIGN 3.2): reading
-    // memory is extraction; writing it is control and answers to NOTRACE. LAST,
-    // because the bit is one-way. Back to the owner, still stopped, with a positive
-    // control one variable away from the seal.
-    tgt->principal_id = caller->principal_id;
-    long nd_control = devproc.read(mem, buf, 64, (s64)RW_VA);
-    proc_seal(tgt, PROC_FLAG_NODUMP);
-    long nd_read = devproc.read(mem, buf, 64, (s64)RW_VA);
-    for (int i = 0; i < 64; i++) wbuf[i] = (u8)(0x33 + i);
-    long nd_write  = devproc.write(mem, wbuf, 64, (s64)RW_VA);
-    u8   nd_landed = rw_kva[0];
-    spoor_clunk(mem);
+        // The refused device write comes BEFORE the taint is sampled clear: a
+        // write that moved no byte stamps nothing.
+        for (int i = 0; i < 64; i++) wbuf[i] = (u8)(0x77 + i);
+        dev_write = devproc.write(mem, wbuf, 64, (s64)DEV_VA);
+        mem_untainted_before =
+            (__atomic_load_n(&tgt->proc_flags, __ATOMIC_ACQUIRE) & PROC_FLAG_DEBUG_TAINTED) == 0;
+        st_write  = devproc.write(mem, wbuf, 64, (s64)RW_VA);
+        st_landed = rw_kva[0];
+        mem_tainted_after =
+            (__atomic_load_n(&tgt->proc_flags, __ATOMIC_ACQUIRE) & PROC_FLAG_DEBUG_TAINTED) != 0;
+        hole_read  = devproc.read(mem, buf, 64, (s64)GAP_VA);
+        dev_read   = devproc.read(mem, buf, 64, (s64)DEV_VA);
+        devwb_read = devproc.read(mem, buf, 64, (s64)DEVWB_VA);
+        edge_read  = devproc.read(mem, buf, 64, (s64)(RAMDEV_VA + EDGE));
+
+        // Non-owner (a target owned by a different principal; caller has no debug
+        // cap) -> refused even while stopped (I-39).
+        tgt->principal_id = (caller->principal_id == 0x0D0D0D0Du) ? 0x0E0E0E0Eu : 0x0D0D0D0Du;
+        other_read = devproc.read(mem, buf, 64, (s64)RW_VA);
+
+        // The dump seal refuses the READ direction only (DEBUG-FS-DESIGN 3.2): reading
+        // memory is extraction; writing it is control and answers to NOTRACE. LAST,
+        // because the bit is one-way. Back to the owner, still stopped, with a positive
+        // control one variable away from the seal.
+        tgt->principal_id = caller->principal_id;
+        nd_control = devproc.read(mem, buf, 64, (s64)RW_VA);
+        proc_seal(tgt, PROC_FLAG_NODUMP);
+        nd_read = devproc.read(mem, buf, 64, (s64)RW_VA);
+        for (int i = 0; i < 64; i++) wbuf[i] = (u8)(0x33 + i);
+        nd_write  = devproc.write(mem, wbuf, 64, (s64)RW_VA);
+        nd_landed = rw_kva[0];
+        spoor_clunk(mem);
+    }
 
     // Cleanup: free MY backing pages (proc_pgtable_destroy leaves leaf data pages
     // to the VMA layer), then the tree via proc_free.
@@ -2641,12 +2684,26 @@ void test_devproc_debug_mem(void) {
     tgt->state = PROC_STATE_ZOMBIE;
     proc_free(tgt);
 
+    TEST_ASSERT(mem != NULL, "open /proc/<pid>/mem");
+    TEST_EXPECT_EQ(ns_read,  (long)-1, "mem read of a NOT-stopped target is refused");
+    TEST_EXPECT_EQ(ns_write, (long)-1, "mem write of a NOT-stopped target is refused");
+    TEST_EXPECT_EQ(st_read, 64L, "mem read of a stopped target returns the bytes");
+    TEST_ASSERT(st_match, "mem read returns the RW page bytes");
+    TEST_EXPECT_EQ(dev_write, 0L, "mem write of a device window returns 0");
+    TEST_ASSERT(mem_untainted_before, "premise: the mem target was untainted before the write, the refused device write included");
+    TEST_EXPECT_EQ(st_write, 64L, "mem write of a stopped target");
+    TEST_ASSERT(st_landed == 0x77, "mem write landed in the target page");
+    TEST_ASSERT(mem_tainted_after, "a mem WRITE stamps the debug taint on the target");
+    TEST_EXPECT_EQ(hole_read, 0L, "mem read of a hole returns 0");
+    TEST_EXPECT_EQ(dev_read, 0L, "mem read of a device window returns 0");
+    TEST_EXPECT_EQ(devwb_read, 0L, "mem read of a device address behind Normal-WB returns 0");
+    TEST_EXPECT_EQ(edge_read, 32L, "mem read that runs into a device window is short at the boundary");
+    TEST_ASSERT(caller_plain, "test caller lacks CAP_HOSTOWNER/CAP_DEBUG (the denied case is meaningful)");
+    TEST_EXPECT_EQ(other_read, (long)-T_E_ACCES, "mem read by a non-owner (no CAP_DEBUG) is refused (I-39, EACCES)");
     TEST_EXPECT_EQ(nd_control, 64L, "control: the owner's mem read of a stopped target returns the bytes");
     TEST_EXPECT_EQ(nd_read, (long)-T_E_ACCES, "the dump seal refuses a mem READ (EACCES)");
     TEST_EXPECT_EQ(nd_write, 64L, "the dump seal does not refuse a mem WRITE -- that is control, NOTRACE's");
     TEST_ASSERT(nd_landed == 0x33, "the mem write to the NODUMP target landed");
-    TEST_ASSERT(mem_untainted_before, "premise: the mem target was untainted before the write");
-    TEST_ASSERT(mem_tainted_after, "a mem WRITE stamps the debug taint on the target");
 }
 
 // 8a-1b-gamma-2: /proc/<pid>/regs + fpregs -- the saved EL0 register frames of a

@@ -194,9 +194,12 @@ input-host are `input`; gpu-gl and gpu-rutabaga are `gpu`; a `-transitional`
 suffix is dropped), and `thylacine.virtio-pci-9p` for the `-virtfs` share.
 Then `thylacine.smp` for more than one CPU, and `thylacine.msi` when the
 launcher knows the machine has an MSI controller: GICv2 always carries a v2m
-frame, and GICv3 under TCG an ITS unless `its=off`; under KVM or hvf a GICv3
-ITS depends on the host, which the launcher cannot see even with `its=on`, so
-nothing is declared. `--no-share` now drops the share: it used to empty an
+frame, and GICv3 under TCG an ITS unless `its=off`. Under hvf with `its=auto`
+a GICv3 machine has one either way (since 2026-11-10): QEMU's own GICv3 brings
+the ITS, and Apple's in-kernel one, which QEMU 11.1 uses and which has no ITS,
+makes the machine add the v2m frame. Under KVM, and under hvf with `its=on`,
+the ITS depends on the host, which the launcher cannot see, so nothing is
+declared. `--no-share` now drops the share: it used to empty an
 array the default then refilled, so every boot that passed it, `tools/test.sh`'s
 included, carried the 9P function anyway. The words are derived from the arguments, not
 written beside them, so dropping a device -- `THYLACINE_NO_NET=1`, a missing

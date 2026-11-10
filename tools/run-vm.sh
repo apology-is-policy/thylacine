@@ -894,11 +894,13 @@ if [[ "$cpus" =~ ^[0-9]+$ ]] && (( cpus >= 2 )); then
 fi
 # An MSI controller, when the launcher can know the machine has one: GICv2
 # always carries a v2m frame, and GICv3 under TCG an ITS unless its=off. Under
-# KVM or hvf a GICv3 ITS depends on what the host supports, which the launcher
-# cannot see even with its=on, so nothing is declared and the MSI tests do not
-# require it.
+# hvf with its=auto a GICv3 machine has one either way: QEMU's own GICv3 brings
+# the ITS, and Apple's in-kernel one (QEMU 11.1), which has no ITS, makes the
+# machine add the v2m frame. Under KVM, and under hvf with its=on, the ITS
+# depends on what the host supports, which the launcher cannot see, so nothing
+# is declared and the MSI tests do not require it.
 case "$gicv:${THYLACINE_ITS:-auto}:$accel" in
-    2:*|3:on:tcg|3:auto:tcg) append_tokens+=("thylacine.msi") ;;
+    2:*|3:on:tcg|3:auto:tcg|3:auto:hvf) append_tokens+=("thylacine.msi") ;;
 esac
 append_flags=()
 if (( ${#append_tokens[@]} > 0 )); then
