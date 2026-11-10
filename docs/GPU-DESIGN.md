@@ -3000,7 +3000,8 @@ holding the resource and for chains naming it directly. `CtxDetachResource` and
 device-wide sync work, and a dead engine refuses them. A cursor chain touches only a
 cursor plane, so the cursor queue holds no retirement, and a poisoned cursor queue
 on a live engine costs a surface nothing. A context holds what is attached to it and
-any host blob minted under it, attached or not. A poisoned slot may never
+any host blob minted under it, attached or not, until its destroy completes: a
+context later given the same id holds none of them. A poisoned slot may never
 end, so a retirement that only a poisoned holder blocks is admitted at once. One
 that a chain in flight blocks still parks, within the bound, which keeps the barrier
 for the short case. Another client's poison then costs a surface nothing.
@@ -3054,43 +3055,62 @@ context, which holds adopted BOs, puts no fenced chain on the device, and the
 convention probe's context is tapestryd's own and synchronous. The compositor's
 readback of a client's BO rides the client's context as a transfer, though, so it
 waits behind that context's parked chains as any readback does (4.5.13), holding
-the reserved slot meanwhile: other surfaces' readbacks are refused for as long as
-the client's free is unpaid, within the bound 4.5.13 accepts for a readback parked
-behind its context's work, and up to 2 s per arm of the test lever below.
+the reserved slot meanwhile: other surfaces' readbacks are refused until the
+client's free is paid or the context goes in a stand-down's window (below), which
+under a load that stalls every repeat comes at least once per context with a
+parked chain, and for up to 2 s per arm of the test lever below.
 
 The pass stands down for one window after any of its commands meets a stall,
 and a free's barrier only after that free's own repeat met one
-(`gpu_api::owed_stands_down`, `gpu_api::barrier_ids`): from that stall until
+(`gpu_api::owed_stands_down`, `gpu_api::owed_barrier`): from that stall until
 another stall begins, or until the engine has run `OWED_QUIET_MS`, a synchronous
 deadline, since that stall revived. The revival's window goes to the requests,
-and the chains held back for that free go to the device, where the free waits for
-them as for any. Without it, under a load that makes every synchronous command
-miss its deadline, a repeat would stall the engine again at each revival, before
-any request of that serve pass ran, and the chains held back for it would wait
-for as long as the load lasted. An ordinary destroy under such a load leaves
-exactly that state, no poison needed: its detach stalls, so the link stays, and
-its free stalls and is owed. Any other stall leaves the pass and every barrier
-up: at its revival the chains a barrier holds stay parked, and the pass takes its
-turn ahead of the requests, after whatever else that revival's pump published (a
-readback's run, say). Standing down after every stall instead, a workload needs
-only one slow command per revival, queued behind the very chains the lowered
-barrier had just let go, to keep the pass from ever running and the barrier
-lifted for good. Lowering every barrier when the pass met a stall at any one free
-fails the same way: a context busy enough to make the pass's repeat of another
-client's free stall had its chains let past its own free at every such revival.
-So the requests get the window after each stall of the pass's own, and a free
-lets its chains go only after a stall its own repeat met. A free is paid once the
-device answers a repeat in time. A device that answers none in time leaves it
-owed, its id retiring and its pins held: the debt's bound, never a reuse. Both
-predicates are host-tested. The readback leg witnesses the wiring with a test
+and every context that holds that free goes to the device, whatever other owed
+free it holds (`OwedReach::of`); a transfer naming another owed free still parks.
+The free then waits for those chains as for any. Without it, under a load that
+makes every synchronous command miss its deadline, a repeat would stall the
+engine again at each revival, before any request of that serve pass ran, and the
+chains held back for it would wait for as long as the load lasted. An ordinary
+destroy under such a load leaves exactly that state, no poison needed: its detach
+stalls, so the link stays, and its free stalls and is owed. Two destroys leave
+two such frees on one context, which is why the stand-down lets the context go
+rather than only its chains that reach no other owed free: otherwise the two
+frees would stand down in turn and the context would never go. Any other stall
+leaves the pass and every barrier up: at its revival the chains a barrier holds
+stay parked, and the pass takes its turn ahead of the requests, after whatever
+else that revival's pump published (a readback's run, say). Standing down after
+every stall instead, a workload needs only one slow command per revival, queued
+behind the very chains the lowered barrier had just let go, to keep the pass from
+ever running and the barrier lifted for good. Lowering every barrier when the
+pass met a stall at any one free fails the same way: a context busy enough to
+make the pass's repeat of another client's free stall had its chains let past its
+own free at every such revival. A free is tried only while no chain on the device
+can reach it, so the work of the contexts its stand-down lets go cannot have
+caused its stall. So the requests get the window after each stall of the pass's
+own, and a context's chains go only after a stall met by a free it holds.
+
+Under such a load the pass tries one free a window, so the free it tries decides
+which context goes. Each pass first tries one free a parked chain waits on,
+taking the contexts with parked chains in turn, then the rest in rotation
+(`gpu_api::OwedPass`). In plain rotation a context would wait for its own free's
+turn once per owed free, and another client can owe hundreds of cheap ones on an
+idle context; taken in turn, it waits once per context with a parked chain, and
+the seam's context slots bound those. A free is paid once the device answers a
+repeat in time. A device that answers none in time leaves it owed, its id
+retiring and its pins held: the debt's bound, never a reuse. The predicates and
+the order are host-tested. The readback leg witnesses the wiring with a test
 lever (the bo ctl's `stall-repay`: one stall shot on the pass's next repeat of
 that BO's free, twelve a boot, each gone in 2 s if no repeat takes it). In YIELD
 the free is paid no sooner than a window after its repeat's own stall, while in
 FREE, after a stall that met the client's own free rather than the pass, the
-repay comes at the pass's next turn. In LIFT a chain parked behind a free goes to
-the device in the window after that free's own repeat stalls; in APART one parked
-behind a deferred free stays parked through the window after another client's
-free's repeat stalls. No leg drives a sustained load. The readback leg's BUSY arm
+repay comes at the pass's next turn. In LIFT a context holds two owed frees with
+a chain parked behind them: the pass tries the first as that context's turn (the
+warp ctl's `frees-parked-first`), its repeat meets the shot, the chain goes to
+the device in the window though the context holds the other free, and the
+context's next chain, sent once the window has closed, parks again. In APART a
+chain parked behind a deferred free stays parked through the window after
+another client's free's repeat stalls. No leg drives a sustained load, so none
+shows the turn serving one context among several. The readback leg's BUSY arm
 witnesses the barrier with a test lever (`warp-defer-frees`: the caller's own
 context, sixteen arms a boot of 2 s at most) that has the pass skip the context's
 frees while its next chain goes in; APART and LIFT use it too.

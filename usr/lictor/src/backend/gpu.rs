@@ -1094,6 +1094,29 @@ struct Controlq {
 }
 
 impl Controlq {
+    /// What an owed free's repeat waits on: `Gpu::retirement_hold` less the
+    /// parked chains. None is on the device, and none publishes while the
+    /// pass runs, so none can reach the resource while it is freed; one that
+    /// can reach it parks until the free is paid (`OwedReach`), so counting it
+    /// would hold the free on the chain that waits for it.
+    fn owed_free_hold(&self, res: u32, holds: impl Fn(u32, u32) -> bool) -> Hold {
+        self.hold(Retired::Resource(res), holds, false)
+    }
+
+    fn hold(&self, object: Retired, holds: impl Fn(u32, u32) -> bool, parked: bool) -> Hold {
+        retirement_hold(
+            object,
+            self.dead,
+            self.sync_pending || self.sync2_pending,
+            (0..FENCED_SLOTS)
+                .filter(|&i| self.fslots[i].is_some())
+                .map(|i| self.fslot_reach[i])
+                .chain(self.parked.iter().filter(|_| parked).map(|p| p.reach)),
+            (0..FENCED_SLOTS).filter(|&i| self.fslot_poisoned[i]).map(|i| self.fslot_reach[i]),
+            holds,
+        )
+    }
+
     /// W-4 stall observability: every HELD fenced slot as
     /// (slot, fence_id, ctx_pub, ring_idx, readback, comp, age_ms, parked) --
     /// the ctl prints one row per entry so a post-mortem read NAMES the op
@@ -2278,6 +2301,10 @@ pub struct Gpu {
     owed_stood_down: Option<u32>,
     /// `FreesOwed`'s count of the pass's stand-downs, monotone.
     owed_stood_downs: u32,
+    /// The context whose parked chains the pass last served first
+    /// (`gpu_api::OwedPass`), and how many frees it has tried so, monotone.
+    owed_turn: Option<u32>,
+    owed_parked_firsts: u32,
     /// Self-test lever: fail the next display disable without issuing it.
     fail_next_scanout_disable: bool,
     /// Set when the lever (not the device) produced the last refusal, so the
@@ -2516,6 +2543,8 @@ impl Gpu {
             owed_leaked: 0,
             owed_stood_down: None,
             owed_stood_downs: 0,
+            owed_turn: None,
+            owed_parked_firsts: 0,
             fail_next_scanout_disable: false,
             injected_refusal: false,
             condemned_lost: 0,
@@ -3549,16 +3578,17 @@ impl Gpu {
         self.owed_frees.iter().any(|o| o.res == resource_id)
     }
 
-    /// The owed frees a new chain may not go to the device past: each but one
-    /// standing down after a stall its own repeat met (`gpu_api::barrier_ids`),
-    /// and none once the engine is dead (nothing publishes again). Not the
-    /// debt itself: `owes_free` and `frees_owed` answer that.
-    pub fn barrier_ids(&self) -> alloc::vec::Vec<u32> {
+    /// The owed frees a new chain may not go to the device past, and the one
+    /// standing down after a stall its own repeat met, whose holders' chains
+    /// may (`gpu_api::owed_barrier`); neither once the engine is dead (nothing
+    /// publishes again). Not the debt itself: `owes_free` and `frees_owed`
+    /// answer that.
+    pub fn owed_barrier(&self) -> (alloc::vec::Vec<u32>, alloc::vec::Vec<u32>) {
         if self.ctrl.dead {
-            return alloc::vec::Vec::new();
+            return (alloc::vec::Vec::new(), alloc::vec::Vec::new());
         }
         let since = self.ctrl.revived_at.map(|t| t.elapsed().as_millis() as u64);
-        crate::gpu_api::barrier_ids(self.owed_frees.iter(), self.ctrl.stalls, self.ctrl.refusing(), since)
+        crate::gpu_api::owed_barrier(self.owed_frees.iter(), self.ctrl.stalls, self.ctrl.refusing(), since)
     }
 
     /// The pass stands down for one window after a stall any of its commands
@@ -3575,11 +3605,13 @@ impl Gpu {
     /// Repeat owed frees while the engine takes commands and the pass is not
     /// standing down (`owed_standing_down`), each once no chain on the device
     /// can reach it, as a first try waits (`holds` is the ledger's
-    /// context-to-resource relation). A free goes whole: every context link
-    /// the ledger still records (`links`), the unmap a mapped blob needs, then
-    /// the free (`OwedFree::next`). A pass looks at OWED_FREES_EXAMINED owed
-    /// frees at most, in turn, and stops at OWED_COMMANDS_PER_PASS commands
-    /// or SUBMIT_DEADLINE_MS spent; a free cut short keeps what it reached.
+    /// context-to-resource relation, `held_by` the same from a context). A
+    /// free goes whole: every context link the ledger still records
+    /// (`links`), the unmap a mapped blob needs, then the free
+    /// (`OwedFree::next`). A pass looks at OWED_FREES_EXAMINED owed frees at
+    /// most, a parked context's first in turn (`gpu_api::OwedPass`), then the
+    /// rest in rotation, and stops at OWED_COMMANDS_PER_PASS commands or
+    /// SUBMIT_DEADLINE_MS spent; a free cut short keeps what it reached.
     /// One the device keeps refusing with no stall is given up, its id left
     /// retiring and its pins and extent held: a leak, never a reuse of memory
     /// the device may still read. Returns the links the device detached, for
@@ -3591,6 +3623,7 @@ impl Gpu {
     pub fn pay_owed_frees(
         &mut self,
         holds: impl Fn(u32, u32) -> bool,
+        held_by: impl Fn(u32) -> alloc::vec::Vec<u32>,
         deferred: impl Fn(u32) -> bool,
         links: impl Fn(u32) -> alloc::vec::Vec<u32>,
         mut aim: impl FnMut(u32) -> bool,
@@ -3601,18 +3634,28 @@ impl Gpu {
         let spent = |commands: usize| {
             commands >= OWED_COMMANDS_PER_PASS || began.elapsed().as_millis() >= u128::from(SUBMIT_DEADLINE_MS)
         };
-        for _ in 0..self.owed_frees.len().min(OWED_FREES_EXAMINED) {
-            if self.owed_standing_down()
+        let mut pass: Option<crate::gpu_api::OwedPass> = None;
+        loop {
+            if self.owed_frees.is_empty()
+                || self.owed_standing_down()
                 || !self.takes_commands()
                 || spent(commands)
                 || (self.collect_retirements && self.retired_resources.len() >= crate::objects::MAX_OBJECTS)
             {
                 break;
             }
-            let Some(mut o) = self.owed_frees.pop_front() else { break };
-            if deferred(o.res) || self.owed_free_hold(o.res, &holds) != Hold::Clear {
-                self.owed_frees.push_back(o);
-                continue;
+            let pass = pass.get_or_insert_with(|| {
+                crate::gpu_api::OwedPass::new(
+                    self.ctrl.parked.iter().map(|p| p.reach),
+                    &held_by,
+                    self.owed_frees.len().min(OWED_FREES_EXAMINED),
+                )
+            });
+            let c = &self.ctrl;
+            let clear = |res| !deferred(res) && c.owed_free_hold(res, &holds) == Hold::Clear;
+            let Some((mut o, turned)) = pass.next(&mut self.owed_frees, &mut self.owed_turn, clear) else { break };
+            if turned {
+                self.owed_parked_firsts = self.owed_parked_firsts.wrapping_add(1);
             }
             let mut linked = links(o.res);
             let outcome = loop {
@@ -3682,6 +3725,7 @@ impl Gpu {
             leaked: self.owed_leaked,
             retiring: 0,
             stood_down: self.owed_stood_downs,
+            parked_first: self.owed_parked_firsts,
         }
     }
 
@@ -5255,31 +5299,7 @@ impl Gpu {
     /// chain touches only a cursor plane, so it holds nothing here.
     pub fn retirement_hold(&self, object: Retired, holds: impl Fn(u32, u32) -> bool) -> Hold {
         // A parked chain reaches its objects the moment it publishes.
-        self.hold(object, holds, true)
-    }
-
-    /// What an owed free's repeat waits on: `retirement_hold` less the parked
-    /// chains. None is on the device, and none publishes while the pass runs,
-    /// so none can reach the resource while it is freed; one that can reach
-    /// it parks until the free is paid (`OwedReach`), so counting it would
-    /// hold the free on the chain that waits for it.
-    fn owed_free_hold(&self, res: u32, holds: impl Fn(u32, u32) -> bool) -> Hold {
-        self.hold(Retired::Resource(res), holds, false)
-    }
-
-    fn hold(&self, object: Retired, holds: impl Fn(u32, u32) -> bool, parked: bool) -> Hold {
-        let c = &self.ctrl;
-        retirement_hold(
-            object,
-            c.dead,
-            c.sync_pending || c.sync2_pending,
-            (0..FENCED_SLOTS)
-                .filter(|&i| c.fslots[i].is_some())
-                .map(|i| c.fslot_reach[i])
-                .chain(c.parked.iter().filter(|_| parked).map(|p| p.reach)),
-            (0..FENCED_SLOTS).filter(|&i| c.fslot_poisoned[i]).map(|i| c.fslot_reach[i]),
-            holds,
-        )
+        self.ctrl.hold(object, holds, true)
     }
 
     /// What each poisoned chain can reach (`OwedReach::of`).

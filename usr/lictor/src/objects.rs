@@ -105,13 +105,18 @@ impl Objects {
         Ok(())
     }
     /// A completed backend context destroy removes all of that context's
-    /// attachment references. This must never run on a mere submission or
+    /// attachment references, and every blob's birth in it: the device's
+    /// table for the context went with it, so a context later given the same
+    /// id reaches none of them. This must never run on a mere submission or
     /// timeout; callers retain both context and backing pins in those cases.
     pub fn context_destroyed(&mut self, owner: u64, ctx: u32) -> Result<(), Error> {
         let object = self.entries.iter().find(|o| o.id == ctx && o.kind == Kind::Context)
             .ok_or(Error::Missing)?;
         if object.owner != owner { return Err(Error::WrongOwner); }
         self.attachments.retain(|a| !(a.owner == owner && a.ctx == ctx));
+        for o in self.entries.iter_mut().filter(|o| o.born_in == ctx) {
+            o.born_in = 0;
+        }
         Ok(())
     }
 
@@ -248,6 +253,21 @@ mod tests {
         o.retire(1, 7, Kind::Resource).unwrap();
         assert!(o.holds(3, 7), "still, while it retires");
         assert_eq!(o.reserve_in(1, 7, 3), Err(Error::Busy));
+    }
+    #[test]
+    fn a_blob_born_in_a_destroyed_context_is_held_by_no_context_given_its_id() {
+        let mut o = Objects::default();
+        o.reserve(1, 3, Kind::Context).unwrap();
+        o.reserve_in(1, 7, 3).unwrap();
+        o.retire(1, 7, Kind::Resource).unwrap();
+        let ticket = o.retire(1, 3, Kind::Context).unwrap();
+        assert!(o.holds(3, 7), "a destroy not yet answered proves nothing");
+        o.context_destroyed(1, 3).unwrap();
+        o.retired(ticket).unwrap();
+        o.reserve(1, 3, Kind::Context).unwrap();
+        assert!(!o.holds(3, 7), "the new context 3 never had 7");
+        assert!(o.holders(|r| r == 7).is_empty());
+        assert!(o.held_by(3).is_empty());
     }
     #[test]
     fn no_chain_with_no_context_holds_anything() {

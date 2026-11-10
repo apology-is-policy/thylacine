@@ -619,15 +619,15 @@ released-stream record names the pub. The warp ctl reports the gauges
 `owed-incurred` (each debt once), `owed-ran` and `destroy-failed`, which a
 recovery inside one serve pass cannot hide, and Lictor's owed frees as
 `frees-owed`, then monotone `frees-incurred`, `frees-paid` and `frees-leaked`,
-then `frees-retiring`, then monotone `frees-stood-down` ([[sub-lictor]]). A BO destroyed on a poisoned ctx still
+then `frees-retiring`, then monotone `frees-stood-down` and `frees-parked-first` ([[sub-lictor]]). A BO destroyed on a poisoned ctx still
 sends its device frees: the broker takes the unref as a debt and pays it once
 the chain retires, the same proof the vindication frees the parked backing's
 guest half on, and once the chains already on the device that can reach the BO
 retire and the device answers a repeat in time (a later chain that could reach
 it parks until the free is paid, except for one window after the device was too
-slow to answer that free's own repeat), so the uncharge there is honest within
-that delay, however busy the ctx is kept; the readback leg's TAKEN, BUSY and
-APART arms witness it. The test-mode
+slow to answer the repeat of a free that ctx holds), so the uncharge there is
+honest within that delay, however busy the ctx is kept; the readback leg's
+TAKEN, BUSY, APART and LIFT arms witness it. The test-mode
 `warp-defer-frees on|off` has the broker pass over the owed frees the caller's
 own GL device ctx can reach (the broker bounds the arms), which the BUSY, APART
 and LIFT arms use. The test-mode bo ctl verb `stall-repay` aims one stall shot at

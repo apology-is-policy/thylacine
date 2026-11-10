@@ -15838,9 +15838,9 @@ impl Comp {
             // here, and the broker's pins when it pays the frees it took at
             // the park: on this same proof nothing on the device reaches the
             // BOs, and a later chain that could parks until they are paid
-            // (GPU-DESIGN 4.5.15; a free's barrier stands down only for one
-            // window after the device was too slow to answer that free's own
-            // repeat), so a busy ctx cannot hold them off: the pins go once
+            // (GPU-DESIGN 4.5.15; such a chain goes only in the window after
+            // the device was too slow to answer the repeat of a free its ctx
+            // holds), so a busy ctx cannot hold them off: the pins go once
             // the chains already on the device retire and the device answers
             // a repeat in time. Without this
             // a vindicated-but-still-live ctx stayed charged for memory it
@@ -17567,13 +17567,14 @@ impl Conn {
                 );
                 // The broker's owed frees; then, monotone, those owed, paid
                 // by a repeat, and given up; then its retirements unfinished;
-                // then, monotone, the times its pass stood down.
+                // then, monotone, the times its pass stood down, and the
+                // frees it tried first as a parked context's turn.
                 let f = comp.gpu.frees_owed();
                 let _ = core::fmt::write(
                     &mut s,
                     format_args!(
-                        "frees-owed {} frees-incurred {} frees-paid {} frees-leaked {} frees-retiring {} frees-stood-down {}\n",
-                        f.owed, f.incurred, f.paid, f.leaked, f.retiring, f.stood_down
+                        "frees-owed {} frees-incurred {} frees-paid {} frees-leaked {} frees-retiring {} frees-stood-down {} frees-parked-first {}\n",
+                        f.owed, f.incurred, f.paid, f.leaked, f.retiring, f.stood_down, f.parked_first
                     ),
                 );
                 // W-4 stall observability: one row per HELD fenced slot, so a

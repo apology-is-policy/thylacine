@@ -144,7 +144,8 @@ context's resource, retire or drop of a host ring) runs only once every chain th
 can reach its object has really retired (GPU-DESIGN 4.5.15, vote 49). Each pending
 request asks `Device::retirement_hold`. For a resource the answer reads every stream
 on a context holding it (`Objects::holds`: attached, or a host blob minted under
-that context) and every fenced transfer naming it. For a context, or a detach from
+that context until its destroy completes, so a context given the id later holds
+none) and every fenced transfer naming it. For a context, or a detach from
 one, it reads that context's chains, transfers included. Each slot's `fslot_reach`
 records what its chain can reach and survives abandonment, because an abandoned
 chain still can. Device-wide synchronous work holds every retirement, and a dead
@@ -764,8 +765,18 @@ below).
   the requests (vote 81 audit r8 F4 and a self-found twin: the pass ran before
   the requests in each serve pass and re-stalled the engine at every revival).
   The same stall stands down the barrier of the free whose command met it, and
-  no other (`OwedFree::stood_down`, `gpu_api::barrier_ids`), so the chains held
-  back for that free go to the device for the window. Any other stall leaves the
+  no other (`OwedFree::stood_down`, `gpu_api::owed_barrier`), and every context
+  that holds that free goes to the device for the window, whatever other owed
+  free it holds (`OwedReach::of`; audit r11 F1: a context holding two owed frees
+  never went, the two standing down in turn); a transfer naming another owed free
+  still parks. A free is tried only while no chain on the device can reach it,
+  so the work of the contexts its stand-down lets go cannot have caused its
+  stall. Each pass first tries one free a parked chain waits on, taking the
+  contexts with parked chains in turn (`gpu_api::OwedPass`, `Gpu::owed_turn`),
+  then the rest in rotation: under a load that stalls every repeat a pass tries
+  one free a window, and in plain rotation a context would wait once per owed
+  free, which another client can make hundreds (audit r11 F1 addendum); in turn,
+  once per context with a parked chain. Any other stall leaves the
   pass and every barrier up: at its revival the chains a barrier holds stay
   parked, and the pass takes its turn ahead of the requests after whatever else
   that pump published, a readback's run say (audit r9 F1: standing down after
@@ -773,10 +784,12 @@ below).
   unpaid and the barrier lifted for good; audit r10 F1: one stand-down lowering
   every barrier, a context busy enough to stall the pass's repeat of another
   client's free had its chains let past its own free at every such revival).
-  `Gpu::barrier_ids` (the owed ids the barrier holds chains back for) leaves out
-  each free standing down, and is empty once the engine is dead. `FreesOwed`
-  counts the pass's stand-downs (`Frees::stood_down`, monotone). The pay pass's hold leaves
-  parked chains out (`Gpu::owed_free_hold`): none is on the device or publishes
+  `Gpu::owed_barrier` (the owed ids the barrier holds chains back for, and apart
+  from them each free standing down) is empty once the engine is dead.
+  `FreesOwed` counts the pass's stand-downs (`Frees::stood_down`) and the frees
+  it tried as a parked context's turn (`Frees::parked_first`), both monotone.
+  The pay pass's hold leaves parked chains out (`Controlq::owed_free_hold`): none
+  is on the device or publishes
   during the pass, and one that can reach the free waits for it. The test-mode
   `Request::TestOwedDefer` (opcode 72; a context of the caller's,
   `TEST_OWED_DEFERS` (16) arms a boot of `TEST_OWED_DEFER_MS` (2 s) at most, one

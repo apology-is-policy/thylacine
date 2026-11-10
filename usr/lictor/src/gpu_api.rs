@@ -456,10 +456,15 @@ impl OwedReach {
         OwedReach { res, ctxs }
     }
     /// The frees in `owed` no chain in `poisoned` can reach, and the contexts
-    /// that can reach one of them: `held_by(ctx)` is what a stream on `ctx`
-    /// can name, `holders(set)` the contexts that can name one of a set.
+    /// that can reach one of them, less every context that can reach a free
+    /// in `standing_down`: a free's stand-down lets its holders' streams go
+    /// whatever else they hold, or a context holding two would never have a
+    /// window. A transfer naming a free in `owed` still parks. `held_by(ctx)`
+    /// is what a stream on `ctx` can name, `holders(set)` the contexts that
+    /// can name one of a set.
     pub fn of(
         mut owed: Vec<u32>,
+        standing_down: &[u32],
         poisoned: &[ChainReach],
         held_by: impl Fn(u32) -> Vec<u32>,
         holders: impl Fn(&dyn Fn(u32) -> bool) -> Vec<u32>,
@@ -481,7 +486,11 @@ impl OwedReach {
         }
         owed.sort_unstable();
         owed.dedup();
-        let ctxs = holders(&|r| owed.binary_search(&r).is_ok());
+        let mut ctxs = holders(&|r| owed.binary_search(&r).is_ok());
+        if !standing_down.is_empty() {
+            let released = holders(&|r| standing_down.contains(&r));
+            ctxs.retain(|c| !released.contains(c));
+        }
         OwedReach::new(owed, ctxs)
     }
     /// Whether `chain` can reach one of the frees, as `ChainReach::reaches`
@@ -502,19 +511,121 @@ pub const OWED_QUIET_MS: u64 = 500;
 /// another stall begins or the engine has run `OWED_QUIET_MS` since that
 /// stall revived. The pass stands down after a stall any of its commands met,
 /// so that revival's window goes to the requests; a free's barrier stands
-/// down only after a stall its own command met (`barrier_ids`). Any other
+/// down only after a stall its own command met (`owed_barrier`). Any other
 /// stall leaves the pass and every barrier up, and the pass takes its turn
 /// ahead of the requests at that revival, after whatever the revival's pump
 /// published (a readback's run, never a chain a barrier holds).
 pub fn owed_stands_down(stood_down: Option<u32>, stalls: u32, refusing: bool, since_revival_ms: Option<u64>) -> bool {
     stood_down == Some(stalls) && (refusing || since_revival_ms.is_some_and(|ms| ms < OWED_QUIET_MS))
 }
-/// The owed frees a new chain may not go to the device past: each but one
-/// whose own command met the stall now standing down. Another free's stall
-/// lowers none of the rest, so the pass's turn at one free never lets the
-/// chains held back for another go.
-pub fn barrier_ids<'a>(owed: impl Iterator<Item = &'a OwedFree>, stalls: u32, refusing: bool, since_revival_ms: Option<u64>) -> Vec<u32> {
-    owed.filter(|o| !owed_stands_down(o.stood_down, stalls, refusing, since_revival_ms)).map(|o| o.res).collect()
+/// The owed frees a new chain may not go to the device past, and apart from
+/// them the one standing down because its own command met the stall now
+/// counted (`OwedReach::of` lets its holders go). Another free's stall lowers
+/// none of the rest, so the pass's turn at one free never lets the chains
+/// held back for another go: a free is tried only while no chain on the
+/// device can reach it, so its holders' work cannot have caused its stall.
+pub fn owed_barrier<'a>(owed: impl Iterator<Item = &'a OwedFree>, stalls: u32, refusing: bool, since_revival_ms: Option<u64>) -> (Vec<u32>, Vec<u32>) {
+    let (mut holding, mut standing_down) = (Vec::new(), Vec::new());
+    for o in owed {
+        if owed_stands_down(o.stood_down, stalls, refusing, since_revival_ms) {
+            standing_down.push(o.res);
+        } else {
+            holding.push(o.res);
+        }
+    }
+    (holding, standing_down)
+}
+/// One owed-free pass's order. It first tries, once, a free a parked chain
+/// waits on, taking the contexts with parked chains in turn. Under a load
+/// that stalls every repeat a pass tries one free a window, and a stand-down
+/// lets only that free's holders' chains go, so in plain rotation a context
+/// would wait for its own free's turn once per debt, which another client
+/// can make long; taken in turn, it waits once per context with a parked
+/// chain. Then the rest in rotation. A free looked at and not clear goes to
+/// the back; the pass looks at `examined` frees at most.
+pub struct OwedPass {
+    /// Each context with a parked chain, and the frees its chains wait on.
+    waits: Vec<(u32, Vec<u32>)>,
+    turned: bool,
+    left: usize,
+}
+impl OwedPass {
+    /// `parked`: what each parked chain can reach (a transfer its resource,
+    /// a stream all `held_by` its context).
+    pub fn new(parked: impl Iterator<Item = ChainReach>, held_by: impl Fn(u32) -> Vec<u32>, examined: usize) -> Self {
+        let mut waits: Vec<(u32, Vec<u32>, bool)> = Vec::new();
+        for p in parked {
+            let i = match waits.iter().position(|w| w.0 == p.ctx) {
+                Some(i) => i,
+                None => {
+                    waits.push((p.ctx, Vec::new(), false));
+                    waits.len() - 1
+                }
+            };
+            let w = &mut waits[i];
+            if p.res != 0 {
+                w.1.push(p.res);
+            } else if !w.2 {
+                w.2 = true;
+                w.1.extend(held_by(p.ctx));
+            }
+        }
+        let mut waits: Vec<(u32, Vec<u32>)> = waits
+            .into_iter()
+            .map(|(ctx, mut res, _)| {
+                res.sort_unstable();
+                res.dedup();
+                (ctx, res)
+            })
+            .collect();
+        waits.sort_unstable_by_key(|w| w.0);
+        OwedPass { waits, turned: false, left: examined }
+    }
+    /// The next free to try, taken out of `owed`, and whether it was a parked
+    /// context's turn (`turn` is the context last served, and then names
+    /// this one); None once the pass has looked at its share. `clear(res)`:
+    /// the free may be tried now.
+    pub fn next(
+        &mut self,
+        owed: &mut alloc::collections::VecDeque<OwedFree>,
+        turn: &mut Option<u32>,
+        mut clear: impl FnMut(u32) -> bool,
+    ) -> Option<(OwedFree, bool)> {
+        if !core::mem::replace(&mut self.turned, true) {
+            let n = self.waits.len();
+            let from = self.waits.iter().position(|w| match *turn {
+                Some(t) => w.0 > t,
+                None => true,
+            });
+            let from = from.unwrap_or(0);
+            for k in 0..n {
+                let w = &self.waits[(from + k) % n];
+                let mut i = 0;
+                while i < owed.len() {
+                    if w.1.binary_search(&owed[i].res).is_ok() {
+                        if self.left == 0 {
+                            return None;
+                        }
+                        self.left -= 1;
+                        if clear(owed[i].res) {
+                            *turn = Some(w.0);
+                            return owed.remove(i).map(|o| (o, true));
+                        }
+                    }
+                    i += 1;
+                }
+            }
+        }
+        while self.left > 0 {
+            self.left -= 1;
+            let o = owed.pop_front()?;
+            if clear(o.res) {
+                return Some((o, false));
+            }
+            owed.push_back(o);
+        }
+        None
+    }
 }
 /// What stands between a retirement and its object.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -572,7 +683,7 @@ pub struct OwedFree {
     pub unmapped: bool,
     /// Answered refusals so far; a stall or a death is no answer.
     pub answered: u8,
-    /// The last stall one of its own commands met (`barrier_ids`).
+    /// The last stall one of its own commands met (`owed_barrier`).
     pub stood_down: Option<u32>,
 }
 /// The device command an owed free needs next.
@@ -909,10 +1020,11 @@ record!(Stats { cmd_seq: u64, last_scanout_seq: u64, last_unref_seq: u64, condem
     engine: Engine, stalls: u32, stalls_begun: u32 });
 /// The broker's owed frees: owed now; incurred, paid and given up, monotone;
 /// the resources whose retirement has not finished (`retiring`), each owed a
-/// free or still linked to a context; and the pass's stand-downs, monotone.
+/// free or still linked to a context; the pass's stand-downs, monotone; and,
+/// monotone, the frees it tried first as a parked context's turn.
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Frees { pub owed: u32, pub incurred: u32, pub paid: u32, pub leaked: u32, pub retiring: u32, pub stood_down: u32 }
-record!(Frees { owed: u32, incurred: u32, paid: u32, leaked: u32, retiring: u32, stood_down: u32 });
+pub struct Frees { pub owed: u32, pub incurred: u32, pub paid: u32, pub leaked: u32, pub retiring: u32, pub stood_down: u32, pub parked_first: u32 }
+record!(Frees { owed: u32, incurred: u32, paid: u32, leaked: u32, retiring: u32, stood_down: u32, parked_first: u32 });
 #[cfg(feature = "backend")]
 impl From<&crate::backend::gpu::Gpu> for Stats {
     fn from(g: &crate::backend::gpu::Gpu) -> Self {
@@ -1296,17 +1408,106 @@ mod park_tests {
         // 10's own repeat met stall 3, the one now counted; 11's never met
         // one; 12's met stall 2, long revived.
         let owed = [free(10, Some(3)), free(11, None), free(12, Some(2))];
-        assert_eq!(barrier_ids(owed.iter(), 3, true, None), vec![11, 12], "while 10's stall stands, only 10 lets chains past");
-        assert_eq!(barrier_ids(owed.iter(), 3, false, Some(0)), vec![11, 12], "and for the window after it revives");
-        assert_eq!(barrier_ids(owed.iter(), 3, false, Some(OWED_QUIET_MS - 1)), vec![11, 12]);
-        assert_eq!(barrier_ids(owed.iter(), 3, false, Some(OWED_QUIET_MS)), vec![10, 11, 12], "the window has run: every free holds");
-        assert_eq!(barrier_ids(owed.iter(), 4, true, None), vec![10, 11, 12], "the next stall, whoever's, ends it");
-        assert_eq!(barrier_ids(owed.iter(), 4, false, Some(0)), vec![10, 11, 12]);
+        let (down, all) = ((vec![11, 12], vec![10]), (vec![10, 11, 12], vec![]));
+        assert_eq!(owed_barrier(owed.iter(), 3, true, None), down, "while 10's stall stands, only 10 lets chains past");
+        assert_eq!(owed_barrier(owed.iter(), 3, false, Some(0)), down, "and for the window after it revives");
+        assert_eq!(owed_barrier(owed.iter(), 3, false, Some(OWED_QUIET_MS - 1)), down);
+        assert_eq!(owed_barrier(owed.iter(), 3, false, Some(OWED_QUIET_MS)), all, "the window has run: every free holds");
+        assert_eq!(owed_barrier(owed.iter(), 4, true, None), all, "the next stall, whoever's, ends it");
+        assert_eq!(owed_barrier(owed.iter(), 4, false, Some(0)), all);
         // A stall none of their own commands met lowers no barrier.
         let none = [free(10, None), free(11, None)];
-        assert_eq!(barrier_ids(none.iter(), 3, true, None), vec![10, 11]);
-        assert_eq!(barrier_ids(none.iter(), 3, false, Some(0)), vec![10, 11]);
-        assert!(barrier_ids(core::iter::empty(), 3, true, None).is_empty());
+        assert_eq!(owed_barrier(none.iter(), 3, true, None), (vec![10, 11], vec![]));
+        assert_eq!(owed_barrier(none.iter(), 3, false, Some(0)), (vec![10, 11], vec![]));
+        assert_eq!(owed_barrier(core::iter::empty(), 3, true, None), (vec![], vec![]));
+    }
+    #[test]
+    fn a_free_standing_down_lets_every_context_that_holds_it_go() {
+        // Context 1 links 10 and 11, context 2 links 11 only, context 3 links 12.
+        let holds = |ctx: u32, res: u32| matches!((ctx, res), (1, 10) | (1, 11) | (2, 11) | (3, 12));
+        let held_by = |ctx: u32| (1..20).filter(|&r| holds(ctx, r)).collect::<Vec<u32>>();
+        let holders = |set: &dyn Fn(u32) -> bool| (1..6).filter(|&c| (1..20).any(|r| set(r) && holds(c, r))).collect::<Vec<u32>>();
+        // 10 stands down; 11 and 12 hold.
+        let reach = OwedReach::of(vec![11, 12], &[10], &[], held_by, holders);
+        assert!(!reach.reaches(ChainReach { ctx: 1, res: 0 }), "1 holds 11 too, but 10's window is its window");
+        assert!(reach.reaches(ChainReach { ctx: 2, res: 0 }), "2 holds only 11: still parked");
+        assert!(reach.reaches(ChainReach { ctx: 3, res: 0 }));
+        assert!(reach.reaches(ChainReach { ctx: 1, res: 11 }), "a transfer naming a free that holds still parks");
+        assert!(!reach.reaches(ChainReach { ctx: 1, res: 10 }), "one naming the free standing down goes");
+        // The control, one variable away: nothing standing down, 1 parks.
+        let held = OwedReach::of(vec![11, 12], &[], &[], held_by, holders);
+        assert!(held.reaches(ChainReach { ctx: 1, res: 0 }));
+        assert_eq!(held.ctxs, [1, 2, 3]);
+        assert_eq!(reach.ctxs, [2, 3]);
+    }
+    fn owed_queue(ids: &[u32]) -> alloc::collections::VecDeque<OwedFree> {
+        ids.iter().map(|&r| OwedFree::new(r, None, true)).collect()
+    }
+    #[test]
+    fn a_parked_context_gets_its_turn_ahead_of_any_debt() {
+        // Context 9 has a stream parked and holds 50; a hundred frees nothing
+        // waits on are owed ahead of 50.
+        let held_by = |ctx: u32| if ctx == 9 { vec![50, 51] } else { Vec::new() };
+        let ids: Vec<u32> = (100..200).chain([50]).collect();
+        let mut owed = owed_queue(&ids);
+        let mut turn = None;
+        let mut pass = OwedPass::new([ChainReach { ctx: 9, res: 0 }].into_iter(), held_by, 16);
+        let (o, turned) = pass.next(&mut owed, &mut turn, |_| true).unwrap();
+        assert_eq!((o.res, turned, turn), (50, true, Some(9)), "the parked context's free first");
+        let (o, turned) = pass.next(&mut owed, &mut turn, |_| true).unwrap();
+        assert_eq!((o.res, turned), (100, false), "then the rotation");
+        // The control, one variable away: nothing parked, the rotation alone.
+        let mut owed = owed_queue(&ids);
+        let mut pass = OwedPass::new(core::iter::empty(), held_by, 16);
+        assert_eq!(pass.next(&mut owed, &mut None, |_| true).map(|(o, t)| (o.res, t)), Some((100, false)));
+    }
+    #[test]
+    fn parked_contexts_take_their_turns_in_order() {
+        // Streams parked on 7 (twice) and 3; a transfer parked on 5 names 55.
+        let held_by = |ctx: u32| match ctx {
+            3 => vec![30],
+            7 => vec![70, 71],
+            _ => Vec::new(),
+        };
+        let parked = [
+            ChainReach { ctx: 7, res: 0 },
+            ChainReach { ctx: 3, res: 0 },
+            ChainReach { ctx: 5, res: 55 },
+            ChainReach { ctx: 7, res: 0 },
+        ];
+        let mut owed = owed_queue(&[71, 1, 55, 2, 30, 70]);
+        let mut turn = None;
+        let mut served = Vec::new();
+        for _ in 0..4 {
+            let mut pass = OwedPass::new(parked.iter().copied(), held_by, 16);
+            let (o, turned) = pass.next(&mut owed, &mut turn, |_| true).unwrap();
+            assert!(turned);
+            served.push((turn.unwrap(), o.res));
+            // Kept, as a repeat a stall met is: to the back.
+            owed.push_back(o);
+        }
+        assert_eq!(served, [(3, 30), (5, 55), (7, 71), (3, 30)], "each context in turn, its first free in the queue's order");
+    }
+    #[test]
+    fn a_turn_passes_over_a_free_not_clear_and_the_pass_keeps_to_its_share() {
+        let held_by = |ctx: u32| if ctx == 9 { vec![50, 51] } else { Vec::new() };
+        let parked = [ChainReach { ctx: 9, res: 0 }];
+        let mut owed = owed_queue(&[1, 50, 2, 51, 3]);
+        let mut turn = None;
+        let mut pass = OwedPass::new(parked.iter().copied(), held_by, 5);
+        // A chain on the device holds 50 and 2; 51 is clear.
+        let clear = |r: u32| r != 50 && r != 2;
+        assert_eq!(pass.next(&mut owed, &mut turn, clear).map(|(o, t)| (o.res, t)), Some((51, true)));
+        // 50 and 51 looked at; three left: 1, then 50 and 2 to the back.
+        assert_eq!(pass.next(&mut owed, &mut turn, clear).map(|(o, t)| (o.res, t)), Some((1, false)));
+        assert_eq!(pass.next(&mut owed, &mut turn, clear).map(|(o, t)| (o.res, t)), None, "the share is spent");
+        assert_eq!(owed.iter().map(|o| o.res).collect::<Vec<_>>(), [3, 50, 2]);
+        // No clear free a parked chain waits on: no turn is taken.
+        let mut owed = owed_queue(&[50, 1]);
+        let mut turn = None;
+        let mut pass = OwedPass::new(parked.iter().copied(), held_by, 16);
+        assert_eq!(pass.next(&mut owed, &mut turn, |r| r != 50).map(|(o, t)| (o.res, t)), Some((1, false)));
+        assert_eq!(turn, None);
     }
     #[test]
     fn a_free_a_poisoned_chain_reaches_holds_no_chain_back() {
@@ -1317,7 +1518,7 @@ mod park_tests {
         let owed = vec![13, 10, 11, 12];
         // A poisoned stream on 2 reaches 11; a poisoned transfer names 12.
         let poisoned = [ChainReach { ctx: 2, res: 0 }, ChainReach { ctx: 5, res: 12 }];
-        let reach = OwedReach::of(owed.clone(), &poisoned, held_by, holders);
+        let reach = OwedReach::of(owed.clone(), &[], &poisoned, held_by, holders);
         let payable: Vec<u32> = owed.iter().copied()
             .filter(|&r| !poisoned.iter().any(|p| p.reaches(Retired::Resource(r), &holds))).collect();
         assert_eq!(payable, [13, 10], "the control: two frees left, two excluded");
@@ -1329,9 +1530,9 @@ mod park_tests {
             }
         }
         assert_eq!(reach.ctxs, [1, 4], "2 holds only the excluded 11, 3 only the excluded 12");
-        let none = OwedReach::of(vec![11], &poisoned, held_by, holders);
+        let none = OwedReach::of(vec![11], &[], &poisoned, held_by, holders);
         assert_eq!(none, OwedReach::default(), "every free excluded: nothing parks");
-        let all = OwedReach::of(owed.clone(), &[], held_by, holders);
+        let all = OwedReach::of(owed.clone(), &[], &[], held_by, holders);
         assert_eq!(all.ctxs, [1, 2, 3, 4], "nothing poisoned: every holder");
     }
 }
@@ -1376,14 +1577,15 @@ mod cursor_wire_tests {
         r.finish().unwrap();
     }
     #[test]
-    fn the_frees_census_is_six_counts_in_order() {
+    fn the_frees_census_is_seven_counts_in_order() {
         let mut bytes = Vec::new();
-        Frees { owed: 1, incurred: 2, paid: 3, leaked: 4, retiring: 5, stood_down: 6 }.put(&mut bytes);
-        assert_eq!(bytes, [1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 4, 0, 0, 0, 5, 0, 0, 0, 6, 0, 0, 0]);
+        let f = Frees { owed: 1, incurred: 2, paid: 3, leaked: 4, retiring: 5, stood_down: 6, parked_first: 7 };
+        f.put(&mut bytes);
+        assert_eq!(bytes, [1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 4, 0, 0, 0, 5, 0, 0, 0, 6, 0, 0, 0, 7, 0, 0, 0]);
         let mut r = Reader::new(&bytes).unwrap();
-        assert_eq!(Frees::get(&mut r).unwrap(), Frees { owed: 1, incurred: 2, paid: 3, leaked: 4, retiring: 5, stood_down: 6 });
+        assert_eq!(Frees::get(&mut r).unwrap(), f);
         r.finish().unwrap();
-        assert!(Frees::get(&mut Reader::new(&bytes[..20]).unwrap()).is_err());
+        assert!(Frees::get(&mut Reader::new(&bytes[..24]).unwrap()).is_err());
     }
     #[test]
     fn the_owed_defer_lever_has_its_own_opcode() {

@@ -206,6 +206,7 @@ impl Device {
         let (objects, owner) = (&self.objects, self.owner);
         let unlinked = self.gpu.pay_owed_frees(
             |ctx, res| objects.holds(ctx, res),
+            |ctx| objects.held_by(ctx),
             |res| deferred.is_some_and(|ctx| objects.holds(ctx, res)),
             |res| objects.links(owner, res),
             |res| {
@@ -257,8 +258,10 @@ impl Device {
     /// keeps one parked until the next pump.
     fn refresh_owed_reach(&mut self) {
         let objects = &self.objects;
+        let (holding, standing_down) = self.gpu.owed_barrier();
         let reach = OwedReach::of(
-            self.gpu.barrier_ids(),
+            holding,
+            &standing_down,
             &self.gpu.poisoned_reach(),
             |ctx| objects.held_by(ctx),
             |set: &dyn Fn(u32) -> bool| objects.holders(set),

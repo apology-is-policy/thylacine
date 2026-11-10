@@ -3949,7 +3949,8 @@ fn rb_destroy_attempt(k: u32) -> Option<bool> {
 }
 
 /// The broker's owed frees on the warp ctl: the gauge, the monotone counts,
-/// the pass's stand-downs, and the engine's stalls as the seam last saw them.
+/// the pass's stand-downs, the frees it tried first as a parked ctx's turn,
+/// and the engine's stalls as the seam last saw them.
 #[derive(Clone, Copy)]
 struct Frees {
     owed: u64,
@@ -3958,6 +3959,7 @@ struct Frees {
     leaked: u64,
     retiring: u64,
     stood_down: u64,
+    parked_first: u64,
     stalls: u64,
 }
 
@@ -3971,6 +3973,7 @@ fn frees_census(w: i64) -> Frees {
         leaked: f("frees-leaked"),
         retiring: f("frees-retiring"),
         stood_down: f("frees-stood-down"),
+        parked_first: f("frees-parked-first"),
         stalls: f("gpu-stalls"),
     }
 }
@@ -4202,8 +4205,10 @@ fn rb_apart() -> bool {
 }
 
 /// The barrier's half of a free's stand-down: once the free's own repeat
-/// meets a stall, the chains held back for it go to the device for the
-/// window, and the free waits for them as for any.
+/// meets a stall, the ctx holding it goes to the device for the window, even
+/// while it holds another owed free, and the frees wait for its chain as for
+/// any; then the barrier stands again. A ctx with a parked chain has its
+/// free tried as its turn, whatever else is owed.
 fn rb_lift() -> bool {
     rb_busy_arm(Busy::Lift)
 }
@@ -4215,7 +4220,8 @@ enum Busy {
     Plain,
     /// Another client's free stands the pass down; the chain must stay parked.
     Apart,
-    /// The free's own repeat stands it down; the chain must go to the device.
+    /// The first of the ctx's two frees stands down on its own repeat; the
+    /// chain must go to the device, and the next one park after the window.
     Lift,
 }
 
@@ -4316,6 +4322,10 @@ fn rb_busy_attempt(k: u32, mode: Busy) -> Option<bool> {
     let ctx = mint_ctx(w, "busy");
     let (bo, res, _va) = mint_bo_wh(w, ctx, RB_W, RB_H, VIRGL_RESOURCE_Y_0_TOP, "busy");
     let (_bo2, res2, _va2) = mint_bo_wh(w, ctx, RB_W, RB_H, VIRGL_RESOURCE_Y_0_TOP, "busy next");
+    // LIFT's second free on the ctx: one free's stand-down must let the ctx
+    // go though it holds the other.
+    let bo3 = (mode == Busy::Lift).then(|| mint_bo_wh(w, ctx, RB_W, RB_H, VIRGL_RESOURCE_Y_0_TOP, "lift second").0);
+    let frees: u64 = if bo3.is_some() { 2 } else { 1 };
     let ctl = format!("ctx/{}/ctl", ctx);
     let bo_ctl = format!("ctx/{}/bo/{}/ctl", ctx, bo);
     // APART's other client, on its own connection, minted with the rest.
@@ -4366,13 +4376,20 @@ fn rb_busy_attempt(k: u32, mode: Busy) -> Option<bool> {
         let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(20));
     }
     // LIFT's shot rides the pass's first repeat of this BO's free: armed while
-    // the BO lives, taken once the defer is lifted.
+    // the BO lives, taken once the defer is lifted. This free is owed first,
+    // so the pass comes to it first.
     if mode == Busy::Lift {
         arm_stall_repay(w, &bo_ctl);
     }
-    let destroyed = poisoned_at_destroy == 1 && left == 0 && write_ctl(w, &bo_ctl, "destroy");
+    let destroyed = poisoned_at_destroy == 1
+        && left == 0
+        && write_ctl(w, &bo_ctl, "destroy")
+        && match bo3 {
+            Some(bo3) => write_ctl(w, &format!("ctx/{}/bo/{}/ctl", ctx, bo3), "destroy"),
+            None => true,
+        };
     let a = frees_census(w);
-    let taken = destroyed && a.incurred == b.incurred + 1 && a.owed == b.owed + 1 && a.retiring == b.retiring + 1;
+    let taken = destroyed && a.incurred == b.incurred + frees && a.owed == b.owed + frees && a.retiring == b.retiring + frees;
     // The broker passes over this ctx's owed frees for a while, so the free
     // is still owed when the ctx, vindicated, sends its next chain; held, a
     // chain that goes to the device stays there.
@@ -4398,14 +4415,14 @@ fn rb_busy_attempt(k: u32, mode: Busy) -> Option<bool> {
     let s = frees_census(w);
     let (parked_s, on_device_s) = if held { ctx_chains(w, ctx) } else { (0, 0) };
     let undeferred = deferred && mode != Busy::Apart && write_ctl(w, "ctl", "warp-defer-frees off");
-    if !(held && rearmed && s.owed == b.owed + 1 && s.paid == b.paid && s.stalls == m.stalls) {
+    if !(held && rearmed && s.owed == b.owed + frees && s.paid == b.paid && s.stalls == m.stalls) {
         if mode == Busy::Apart && deferred {
             let _ = write_ctl(w, "ctl", "warp-defer-frees off");
         }
         let _ = write_ctl(w, "ctl", "warp-hold off");
         busy_quit(w, ctx, other);
         t_putstr(&format!(
-            "warp-prove: C6-RB {} attempt {} not constructed -- ctx poisoned {} at the destroy (want 1), fences in flight {} (want 0), the free {}, the defer {}, poisoned {} after the vindication (want 0), at the next chain frees owed +{} (want +1) paid +{} (want 0), the engine's stalls moved by {}\n",
+            "warp-prove: C6-RB {} attempt {} not constructed -- ctx poisoned {} at the destroy (want 1), fences in flight {} (want 0), the free {}, the defer {}, poisoned {} after the vindication (want 0), at the next chain frees owed +{} (want +{}) paid +{} (want 0), the engine's stalls moved by {}\n",
             arm,
             k,
             poisoned_at_destroy,
@@ -4414,6 +4431,7 @@ fn rb_busy_attempt(k: u32, mode: Busy) -> Option<bool> {
             if deferred && rearmed { "armed" } else { "refused" },
             live,
             s.owed.wrapping_sub(b.owed),
+            frees,
             s.paid.wrapping_sub(b.paid),
             s.stalls.wrapping_sub(m.stalls)
         ));
@@ -4434,9 +4452,10 @@ fn rb_busy_attempt(k: u32, mode: Busy) -> Option<bool> {
         return Some(false);
     }
     if mode == Busy::Lift {
-        // The pass repeats the free once the defer is lifted, and that repeat
-        // meets the shot: the free's barrier stands down, and the chain held
-        // back for it goes to the device for the window.
+        // Once the defer is lifted the pass repeats the first free, as the
+        // parked ctx's turn, and that repeat meets the shot: the free's
+        // barrier stands down, and the ctx, though it holds the second free
+        // too, goes to the device for the window.
         let t = libthyla_rs::time::Instant::now();
         let mut n = frees_census(w);
         while !(n.stood_down != s.stood_down && n.stalls != s.stalls)
@@ -4447,11 +4466,13 @@ fn rb_busy_attempt(k: u32, mode: Busy) -> Option<bool> {
             n = frees_census(w);
         }
         let stood = n.stood_down == s.stood_down + 1;
-        if n.stalls > s.stalls + 1 || (n.paid != s.paid && !stood) {
+        // A payment first, more than the one stall, or a stall the pass did
+        // not meet: not this window.
+        if n.stalls > s.stalls + 1 || n.paid != s.paid || (n.stalls != s.stalls && !stood) {
             let _ = write_ctl(w, "ctl", "warp-hold off");
             busy_quit(w, ctx, None);
             t_putstr(&format!(
-                "warp-prove: C6-RB LIFT attempt {} not constructed -- with the defer lifted the engine stalled {} times (want 1), the pass stood down +{} (want +1), paid +{} first\n",
+                "warp-prove: C6-RB LIFT attempt {} not constructed -- with the defer lifted the engine stalled {} times (want 1), the pass stood down +{} (want +1), paid +{} first (want 0)\n",
                 k,
                 n.stalls.wrapping_sub(s.stalls),
                 n.stood_down.wrapping_sub(s.stood_down),
@@ -4464,13 +4485,20 @@ fn rb_busy_attempt(k: u32, mode: Busy) -> Option<bool> {
             let _ = write_ctl(w, "ctl", "warp-hold off");
             busy_quit(w, ctx, None);
             t_putstr(&format!(
-                "warp-prove: C6-RB LIFT FAIL -- with the defer lifted the free's repeat never met its shot within {} ms (stalls +{}, paid +{}); the chain parked {} on the device {}: {}\n",
+                "warp-prove: C6-RB LIFT FAIL -- with the defer lifted the free's repeat never met its shot within {} ms (no stall, paid +0); the chain parked {} on the device {}: {}\n",
                 RB_BUSY_PAY_MS,
-                n.stalls.wrapping_sub(s.stalls),
-                n.paid.wrapping_sub(s.paid),
                 parked,
                 on_device,
-                if on_device > 0 { "it went to the device with no stand-down and held the free off" } else { "the pass never repeated the free" }
+                if on_device > 0 { "it went to the device with no stand-down and held the frees off" } else { "the pass never repeated the free" }
+            ));
+            return Some(false);
+        }
+        if n.parked_first != s.parked_first + 1 {
+            let _ = write_ctl(w, "ctl", "warp-hold off");
+            busy_quit(w, ctx, None);
+            t_putstr(&format!(
+                "warp-prove: C6-RB LIFT FAIL -- the repeat that met the shot was not tried as the parked ctx's turn (parked-first +{}, want +1)\n",
+                n.parked_first.wrapping_sub(s.parked_first)
             ));
             return Some(false);
         }
@@ -4481,27 +4509,33 @@ fn rb_busy_attempt(k: u32, mode: Busy) -> Option<bool> {
             went = ctx_chains(w, ctx);
         }
         let went_ms = seen.elapsed().as_millis() as u64;
-        // Past the window, the chain on the device still holds the free off.
+        // Past the window the chain on the device still holds both frees off,
+        // and the barrier stands again: the ctx's next chain parks.
         while (seen.elapsed().as_millis() as u64) < RB_QUIET_MS {
             let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(20));
         }
         let c = frees_census(w);
+        let mut st: Vec<u32> = Vec::new();
+        subctx_preamble(&mut st);
+        clear_stream(&mut st, res2, 1, 1.0, 0.0, 0.0);
+        submit_stream(w, ctx, &st, "lift after");
+        let (after_parked, after_on_device) = ctx_chains(w, ctx);
         let _ = write_ctl(w, "ctl", "warp-hold off");
         let t = libthyla_rs::time::Instant::now();
         let mut e = frees_census(w);
-        while !(e.paid == b.paid + 1 && e.owed == b.owed && e.retiring == b.retiring)
+        while !(e.paid == b.paid + frees && e.owed == b.owed && e.retiring == b.retiring)
             && (t.elapsed().as_millis() as u64) < RB_BUSY_PAY_MS
         {
             let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(20));
             e = frees_census(w);
         }
         let ms = t.elapsed().as_millis() as u64;
-        // A stall after the shot while the free was due may stand it down
+        // A stall after the shot while the frees were due may stand one down
         // again past the bound: not this window.
         if e.stalls != s.stalls + 1 {
             busy_quit(w, ctx, None);
             t_putstr(&format!(
-                "warp-prove: C6-RB LIFT attempt {} not constructed -- the engine stalled {} more times after the shot while the free was due\n",
+                "warp-prove: C6-RB LIFT attempt {} not constructed -- the engine stalled {} more times after the shot while the frees were due\n",
                 k,
                 e.stalls.wrapping_sub(s.stalls + 1)
             ));
@@ -4517,13 +4551,14 @@ fn rb_busy_attempt(k: u32, mode: Busy) -> Option<bool> {
         let ok = went.1 >= 1
             && c.paid == s.paid
             && c.owed == s.owed
-            && e.paid == b.paid + 1
+            && after_parked >= 1
+            && e.paid == b.paid + frees
             && e.owed == b.owed
             && e.leaked == b.leaked
             && e.retiring == b.retiring
             && next_left == 0;
         t_putstr(&format!(
-            "warp-prove: C6-RB LIFT {} -- the free's own repeat met its shot once the defer was {} (the pass stood down +1): the chain {} the device {} ms after (want within {}); {} ms after the stand-down, the chain held, paid +{} (want 0: the chain on the device holds the free) owed {} (want {}); after the hold paid +{} (want +1) within {} ms (bound {}), owed {} (want {}), given up +{} (want 0), retiring {} (want {}), fences in flight {} (want 0): {}\n",
+            "warp-prove: C6-RB LIFT {} -- the first of the ctx's two frees met its shot on its own repeat once the defer was {} (the pass stood down +1, the parked ctx's turn): the chain {} the device {} ms after (want within {}); {} ms after the stand-down, the chain held, paid +{} (want 0: the chain on the device holds the frees) owed {} (want {}); the ctx's next chain then parked {} on the device {} (want parked: the window had closed); after the hold paid +{} (want +2) within {} ms (bound {}), owed {} (want {}), given up +{} (want 0), retiring {} (want {}), fences in flight {} (want 0): {}\n",
             if ok { "PASS" } else { "FAIL" },
             if undeferred { "lifted" } else { "gone" },
             if went.1 >= 1 { "reached" } else { "never reached" },
@@ -4533,6 +4568,8 @@ fn rb_busy_attempt(k: u32, mode: Busy) -> Option<bool> {
             c.paid.wrapping_sub(s.paid),
             c.owed,
             s.owed,
+            after_parked,
+            after_on_device,
             e.paid.wrapping_sub(b.paid),
             ms,
             RB_BUSY_PAY_MS,
@@ -4543,15 +4580,17 @@ fn rb_busy_attempt(k: u32, mode: Busy) -> Option<bool> {
             b.retiring,
             next_left,
             if ok {
-                "the free's own stand-down let the chain go, and the free waited for it"
+                "the free's own stand-down let the ctx go though it held the other, the window closed, and the frees waited for its chain"
             } else if went.1 == 0 {
                 "the chain stayed parked through the free's own stand-down"
             } else if c.paid != s.paid {
-                "the chain went only once the free was paid"
+                "the chain went only once the frees were paid"
+            } else if after_parked == 0 {
+                "the window never closed: the ctx's next chain went to the device past the frees"
             } else if next_left != 0 {
-                "the chain never ran"
+                "the chains never ran"
             } else {
-                "the free was not paid after the hold"
+                "the frees were not paid after the hold"
             }
         ));
         return Some(ok);
