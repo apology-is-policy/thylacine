@@ -49,6 +49,11 @@ pub fn fit_mode(
 /// surface and a repaint by every client.
 pub const QUIET_MS: u64 = 150;
 
+/// How many times an asking that failed is made again. The waits double from
+/// twice QUIET_MS, so six are 18.9 s in all: past a device that stalled and
+/// came back, and not for ever behind one that did not.
+pub const RETRY_MAX: u8 = 6;
+
 /// What a pass does about the host's display.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Step {
@@ -67,7 +72,10 @@ pub enum Step {
 #[derive(Clone, Copy, Debug)]
 pub struct Follow {
     seen: u32,
-    moved_at: Option<u64>,
+    /// When the event that is waiting is to be reported.
+    due_at: Option<u64>,
+    /// Askings made again for that event so far.
+    retries: u8,
     pinned: bool,
 }
 
@@ -76,7 +84,7 @@ impl Follow {
     /// too, so one that is not zero is an event since the driver's own first
     /// question, which is the size a display starts from.
     pub const fn new() -> Self {
-        Self { seen: 0, moved_at: None, pinned: false }
+        Self { seen: 0, due_at: None, retries: 0, pinned: false }
     }
 
     /// A mode was asked for by size: it stands whatever the host's window
@@ -103,15 +111,16 @@ impl Follow {
 
     /// One pass. A count that moved restarts the quiet time, so a train of
     /// events is answered once, after its last. An event that has stood is
-    /// reported once, and then forgotten whether or not the mode followed.
+    /// reported once, and then forgotten unless `retry` says otherwise.
     pub fn step(&mut self, count: u32, now_ms: u64) -> Step {
         if count != self.seen {
             self.seen = count;
-            self.moved_at = Some(now_ms);
+            self.due_at = Some(now_ms.saturating_add(QUIET_MS));
+            self.retries = 0;
         }
-        match self.moved_at {
-            Some(at) if now_ms.saturating_sub(at) >= QUIET_MS => {
-                self.moved_at = None;
+        match self.due_at {
+            Some(due) if now_ms >= due => {
+                self.due_at = None;
                 if self.pinned {
                     Step::Pinned
                 } else {
@@ -120,6 +129,19 @@ impl Follow {
             }
             _ => Step::Wait,
         }
+    }
+
+    /// The asking `step` called for failed for a reason that may pass (the
+    /// device did not answer): it is called for again, after a wait that
+    /// doubles each time. False once RETRY_MAX askings have been made again:
+    /// the event is then forgotten, and the next one starts afresh.
+    pub fn retry(&mut self, now_ms: u64) -> bool {
+        if self.retries >= RETRY_MAX {
+            return false;
+        }
+        self.retries += 1;
+        self.due_at = Some(now_ms.saturating_add(QUIET_MS << self.retries));
+        true
     }
 }
 
@@ -249,6 +271,57 @@ mod tests {
         assert_eq!(f.step(1, 1_000), Step::Wait);
         assert_eq!(f.step(1, 10), Step::Wait);
         assert_eq!(f.step(1, 1_000 + QUIET_MS), Step::Ask);
+    }
+
+    #[test]
+    fn an_asking_that_failed_is_made_again_a_bounded_number_of_times() {
+        let mut f = Follow::new();
+        assert_eq!(f.step(1, 0), Step::Wait);
+        assert_eq!(f.step(1, QUIET_MS), Step::Ask);
+        // Not asked again by itself.
+        assert_eq!(f.step(1, 60_000), Step::Wait);
+        // Asked again when told the asking failed: after twice the quiet
+        // time, then four times, each from when it was told.
+        let mut now = 60_000;
+        let mut total = 0;
+        for n in 1..=RETRY_MAX {
+            assert!(f.retry(now));
+            let wait = QUIET_MS << n;
+            assert_eq!(f.step(1, now + wait - 1), Step::Wait, "retry {n}");
+            assert_eq!(f.step(1, now + wait), Step::Ask, "retry {n}");
+            assert_eq!(f.step(1, now + wait + 1), Step::Wait, "retry {n}");
+            now += wait;
+            total += wait;
+        }
+        assert_eq!(total, 18_900);
+        // And then no more: the event is forgotten.
+        assert!(!f.retry(now));
+        assert_eq!(f.step(1, now + 3_600_000), Step::Wait);
+        // A new event starts afresh, with all its askings.
+        assert_eq!(f.step(2, now), Step::Wait);
+        assert_eq!(f.step(2, now + QUIET_MS), Step::Ask);
+        assert!(f.retry(now + QUIET_MS));
+        // An event during the wait for another asking takes its place, and
+        // is asked after the ordinary quiet time.
+        assert_eq!(f.step(3, now + QUIET_MS + 10), Step::Wait);
+        assert_eq!(f.step(3, now + QUIET_MS + 10 + QUIET_MS), Step::Ask);
+        for _ in 0..RETRY_MAX {
+            assert!(f.retry(now));
+        }
+        assert!(!f.retry(now));
+        // A mode pinned while an asking waits to be made again stands.
+        let mut f = Follow::new();
+        assert_eq!(f.step(1, 0), Step::Wait);
+        assert_eq!(f.step(1, QUIET_MS), Step::Ask);
+        assert!(f.retry(QUIET_MS));
+        f.pin();
+        assert_eq!(f.step(1, QUIET_MS + (QUIET_MS << 1)), Step::Pinned);
+        // A clock at its end does not wrap the wait into the past.
+        let mut f = Follow::new();
+        assert_eq!(f.step(1, u64::MAX - 1), Step::Wait);
+        assert_eq!(f.step(1, u64::MAX), Step::Ask);
+        assert!(f.retry(u64::MAX));
+        assert_eq!(f.step(1, 1_000), Step::Wait);
     }
 
     #[test]

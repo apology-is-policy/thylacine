@@ -6162,7 +6162,13 @@ impl Comp {
     /// event leads to while the mode follows the host. Absent or
     /// probe-failed: fail soft, the current mode stands.
     fn follow_display(&mut self) -> Result<(), u32> {
-        let (host_w, host_h) = self.gpu.query_display_info().ok().flatten().ok_or(p9::E_AGAIN)?;
+        // No display to follow (the output is disabled) is not the device
+        // failing to answer: the first stands, the second may pass.
+        let (host_w, host_h) = match self.gpu.query_display_info() {
+            Ok(Some(host)) => host,
+            Ok(None) => return Err(p9::E_AGAIN),
+            Err(_) => return Err(E_IO),
+        };
         let Some((w, h)) = self.mode_for_host(host_w, host_h) else {
             say!("tapestryd: no mode for a display of {}x{}; {}x{} stands",
                 host_w, host_h, self.gpu.width, self.gpu.height);
@@ -6195,8 +6201,15 @@ impl Comp {
             }
             display::Step::Ask => {
                 say!("tapestryd: display event {}: asking the host", n);
-                if let Err(e) = self.follow_display() {
-                    say!("tapestryd: display event {}: not followed (errno {})", n, e);
+                match self.follow_display() {
+                    Ok(()) => {}
+                    // The device did not answer, or did not take the new
+                    // screen: a stall passes, and the event must not be
+                    // lost to it.
+                    Err(e) if e == E_IO && self.follow.retry(now_ms) => {
+                        say!("tapestryd: display event {}: not followed (errno {}), to be asked again", n, e);
+                    }
+                    Err(e) => say!("tapestryd: display event {}: not followed (errno {})", n, e),
                 }
             }
         }

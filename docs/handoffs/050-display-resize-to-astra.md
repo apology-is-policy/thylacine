@@ -58,7 +58,8 @@ resized or moved to a display with another scale.
   over 4, times 4. A whole factor keeps the host's picture of the screen sharp, and the
   scale needs nothing more: the same millimetres under half the pixels are half the DPI.
   `Follow`: the timing of a follow as a small state machine over the count and a clock
-  (150 ms of quiet, once; a pinned mode stands).
+  (150 ms of quiet, once; a pinned mode stands; an asking the device did not answer is
+  made again, at most six times over 18.9 s).
 - **`usr/tapestryd/src/server.rs`**: the first mode at boot, `mode auto` and a followed
   display event all take the fitted mode (`mode_in_bounds` and a probe allocation of the
   full-screen surface are the `can`). `display_pump`, called once a pass after the fence

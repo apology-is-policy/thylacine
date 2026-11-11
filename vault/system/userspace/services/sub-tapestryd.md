@@ -154,9 +154,12 @@ returns at the seat's phase before it reaches the pump, so nothing is followed
 while the trusted screen is up. The count still arrives then, with
 `seat_state`'s reply, and the event is followed afterwards.
 
-**What following does.** `follow_display` asks the device for its display. No
-answer (a disabled output, a host that told 0x0) is `not followed` and the mode
-stands. Otherwise it fits, calls `change_mode` if the fitted mode is not the
+**What following does.** `follow_display` asks the device for its display. A
+disabled output (a host that told 0x0) is `not followed` and the mode stands.
+A device that does not answer, or does not take the new screen, is a failure
+that may pass (a stalled engine): the pump tells `Follow` to ask again, which
+it does up to six times over 18.9 s (`... not followed (errno 5), to be asked
+again`), so an event is not lost to a stall. Otherwise it fits, calls `change_mode` if the fitted mode is not the
 standing one, asks for the EDID again and derives the scale again, unless a
 verb's override stands. `change_mode` is the body `set_mode` had: the menu's
 card dismissed, a new screen allocated, held presents dropped, the scanout

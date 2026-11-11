@@ -129,7 +129,9 @@ wait_dims "2560 1440" "followed to half of 5120x2880"
 lc_pass "display: a host of 5120x2880 is followed at 2560x1440"
 
 tell 0x0
-follow_expect {tapestryd: display event \d+: not followed} "a host with no size is not followed"
+# The line ends at the errno: a host with no size is not a device that did not
+# answer, and is not asked again.
+follow_expect {tapestryd: display event \d+: not followed \(errno \d+\)[\r\n]} "a host with no size is not followed"
 wait_dims "2560 1440" "the mode stands"
 lc_pass "display: a host that tells no size leaves the mode standing"
 
