@@ -4,7 +4,7 @@ type: chg
 title: "The Mac app measured with a guest, and a boot that has no rule for the host's size"
 date: 2026-11-11
 arc: arc-mac-runner
-commits: ["pending"]
+commits: ["53665452e"]
 touched:
   - sub-macrunner-app
 established: []
