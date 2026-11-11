@@ -506,7 +506,7 @@ pub(super) const DEFAULT_DISPLAY_W: u32 = 1024;
 pub(super) const DEFAULT_DISPLAY_H: u32 = 768;
 /// A sanity clamp on the device-reported geometry (an absurd size would
 /// size every fullscreen weave allocation).
-const MAX_DISPLAY_DIM: u32 = 8192;
+pub(super) const MAX_DISPLAY_DIM: u32 = 8192;
 
 // Two-page DMA ring (the gpud/probe audited single-page layout, plus a
 // dedicated RESP page): page 1 holds both queues + the request region;

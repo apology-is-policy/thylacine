@@ -50,8 +50,8 @@ pub fn fit_mode(
 pub const QUIET_MS: u64 = 150;
 
 /// How many times an asking that failed is made again. The waits double from
-/// twice QUIET_MS, so six are 18.9 s in all: past a device that stalled and
-/// came back, and not for ever behind one that did not.
+/// twice QUIET_MS, so six are 18.9 s in all. This is for a failure of a device
+/// that answers; one that is stalled is waited for with `hold`, uncounted.
 pub const RETRY_MAX: u8 = 6;
 
 /// What a pass does about the host's display.
@@ -76,6 +76,8 @@ pub struct Follow {
     due_at: Option<u64>,
     /// Askings made again for that event so far.
     retries: u8,
+    /// That event has been held since it arrived (`hold`).
+    held: bool,
     pinned: bool,
 }
 
@@ -84,7 +86,7 @@ impl Follow {
     /// too, so one that is not zero is an event since the driver's own first
     /// question, which is the size a display starts from.
     pub const fn new() -> Self {
-        Self { seen: 0, due_at: None, retries: 0, pinned: false }
+        Self { seen: 0, due_at: None, retries: 0, held: false, pinned: false }
     }
 
     /// A mode was asked for by size: it stands whatever the host's window
@@ -117,6 +119,7 @@ impl Follow {
             self.seen = count;
             self.due_at = Some(now_ms.saturating_add(QUIET_MS));
             self.retries = 0;
+            self.held = false;
         }
         match self.due_at {
             Some(due) if now_ms >= due => {
@@ -131,9 +134,20 @@ impl Follow {
         }
     }
 
-    /// The asking `step` called for failed for a reason that may pass (the
-    /// device did not answer): it is called for again, after a wait that
-    /// doubles each time. False once RETRY_MAX askings have been made again:
+    /// The asking cannot be made, or failed, because the device is stalled
+    /// and says so. The event stays owed and is called for again after the
+    /// quiet time, without a count: the device's driver ends a stall
+    /// itself, by answering again or by declaring the device dead, and the
+    /// caller stops at the second. True the first time for an event, so
+    /// that the caller says it once.
+    pub fn hold(&mut self, now_ms: u64) -> bool {
+        self.due_at = Some(now_ms.saturating_add(QUIET_MS));
+        !core::mem::replace(&mut self.held, true)
+    }
+
+    /// The asking `step` called for failed with the device answering (a
+    /// change it did not take, an allocation that failed): it is called
+    /// for again, after a wait that doubles each time. False once RETRY_MAX askings have been made again:
     /// the event is then forgotten, and the next one starts afresh.
     pub fn retry(&mut self, now_ms: u64) -> bool {
         if self.retries >= RETRY_MAX {
@@ -322,6 +336,36 @@ mod tests {
         assert_eq!(f.step(1, u64::MAX), Step::Ask);
         assert!(f.retry(u64::MAX));
         assert_eq!(f.step(1, 1_000), Step::Wait);
+    }
+
+    #[test]
+    fn an_event_is_held_for_as_long_as_the_device_is_stalled() {
+        let mut f = Follow::new();
+        assert_eq!(f.step(1, 0), Step::Wait);
+        assert_eq!(f.step(1, QUIET_MS), Step::Ask);
+        // Held: called for again every quiet time, far past any count of
+        // askings made again (500 are 75 s), and said once.
+        let mut now = QUIET_MS;
+        assert!(f.hold(now));
+        for _ in 0..500 {
+            assert_eq!(f.step(1, now + QUIET_MS - 1), Step::Wait);
+            assert_eq!(f.step(1, now + QUIET_MS), Step::Ask);
+            now += QUIET_MS;
+            assert!(!f.hold(now));
+        }
+        // Holding costs none of the askings a failure has.
+        assert_eq!(f.step(1, now + QUIET_MS), Step::Ask);
+        for _ in 0..RETRY_MAX {
+            assert!(f.retry(now));
+        }
+        assert!(!f.retry(now));
+        // A new event that is held is said again.
+        assert_eq!(f.step(2, now), Step::Wait);
+        assert_eq!(f.step(2, now + QUIET_MS), Step::Ask);
+        assert!(f.hold(now + QUIET_MS));
+        // A mode pinned while an event is held stands.
+        f.pin();
+        assert_eq!(f.step(2, now + 2 * QUIET_MS), Step::Pinned);
     }
 
     #[test]

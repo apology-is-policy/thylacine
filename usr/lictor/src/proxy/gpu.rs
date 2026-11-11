@@ -38,8 +38,6 @@ pub struct Gpu {
     pub condemned_lost: u32,
     pub engine: Engine,
     pub stalls: u32,
-    /// The broker's count of display events as of the last reply.
-    pub display_events: u32,
     pub num_capsets: u32,
     pub capset_blob: alloc::vec::Vec<u8>,
     pub capset_id: u32,
@@ -65,7 +63,6 @@ impl Gpu {
             condemned_lost: info.condemned_lost,
             engine: stats.engine,
             stalls: stats.stalls,
-            display_events: stats.display_events,
             num_capsets: info.num_capsets,
             capset_blob: info.capset_blob,
             capset_id: info.capset_id,
@@ -87,8 +84,11 @@ impl Gpu {
         self.cmd_seq = s.cmd_seq; self.last_scanout_seq = s.last_scanout_seq;
         self.last_unref_seq = s.last_unref_seq; self.condemned_lost = s.condemned_lost;
         self.engine = s.engine; self.stalls = s.stalls;
-        self.display_events = s.display_events;
     }
+    /// The broker's count of display events as of its last reply of any kind:
+    /// a query's reply carries the count as an invocation's does, and no copy
+    /// of it is kept here to go stale between invocations.
+    pub fn display_events(&self) -> u32 { self.client.borrow().stats().display_events }
     pub fn sync_stream_max() -> usize { 0x500 - 32 }
     pub fn seat_state(&self) -> Result<(u64, u32), Error> { self.query(Request::SeatState) }
     /// Share a whole kernel object and select its logical subrange. No caller

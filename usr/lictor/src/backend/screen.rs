@@ -56,11 +56,14 @@ pub struct Screen {
 impl Screen {
     /// The size for a host whose display is `host`: its own if the trusted
     /// screen can be drawn at it (`render::fits`), else that over or times a
-    /// whole number, else the driver's default.
+    /// whole number, else the driver's default. No side is longer than the
+    /// longest a display is taken to report, which is also the longest a
+    /// client's scanout may be.
     /// The host's size is whatever its window happens to be, and this driver
     /// is the keyboard and the pointer too: it does not fail for a size.
     pub fn size_for(host: (u32, u32)) -> (u32, u32) {
-        libhalcyon::display::fit_mode(host.0, host.1, render::fits)
+        let side = super::gpu::MAX_DISPLAY_DIM;
+        libhalcyon::display::fit_mode(host.0, host.1, |w, h| w <= side && h <= side && render::fits(w, h))
             .unwrap_or((super::gpu::DEFAULT_DISPLAY_W, super::gpu::DEFAULT_DISPLAY_H))
     }
     pub fn new(gpu: &mut Gpu) -> Result<Self, Error> {

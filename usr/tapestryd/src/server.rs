@@ -1518,12 +1518,25 @@ fn mode_in_bounds(w: u32, h: u32) -> bool {
 /// single-buffered SCREEN fine but its triple-buffered SURFACE weave then
 /// failed -1 -> the geometry was committed, so aurora's reweave died ->
 /// retire -> the display disconnected (and, persisted, bricked every boot).
-/// So the real fullscreen surface allocation is made, and released, before
-/// a mode is taken: by the `mode` verb, by the boot, and by a followed
-/// display event.
-fn surface_can_be_made(w: u32, h: u32) -> bool {
+/// So the real allocations are made, and released, before a mode is taken
+/// by the `mode` verb, by the boot, or by a followed display event: the
+/// screen and one fullscreen surface, held together, which is the least a
+/// display of that mode has. On a change the standing screen and surfaces
+/// are still there, so the new is tried beside the old, as the change will
+/// have them. It is a test at one moment, not a reservation: what is
+/// allocated between it and the change can still make the change fail,
+/// which then leaves the standing mode as it was.
+fn mode_can_be_made(w: u32, h: u32) -> bool {
+    let rights = T_RIGHT_READ | T_RIGHT_WRITE | T_RIGHT_MAP;
+    let screen_size = ((w as u64) * 4 * (h as u64) + PAGE - 1) & !(PAGE - 1);
+    let screen = unsafe { t_dma_create_weave(screen_size, rights) };
+    if screen < 0 {
+        say!("tapestryd: mode {}x{} refused -- screen weave {} unallocatable ({})", w, h, screen_size, screen);
+        return false;
+    }
     let size = surface_bytes(w, h);
-    let probe = unsafe { t_dma_create_weave(size, T_RIGHT_READ | T_RIGHT_WRITE | T_RIGHT_MAP) };
+    let probe = unsafe { t_dma_create_weave(size, rights) };
+    unsafe { t_close(screen) };
     if probe < 0 {
         say!(
             "tapestryd: mode {}x{} refused -- surface weave {} unallocatable ({})",
@@ -1536,6 +1549,19 @@ fn surface_can_be_made(w: u32, h: u32) -> bool {
     }
     unsafe { t_close(probe) };
     true
+}
+
+/// What became of an asking of the host's display.
+enum Followed {
+    /// The mode is the one fitted to the host's display, the device scans
+    /// it, and the scale is the one its EDID gives.
+    Done,
+    /// The host shows no display (its output is disabled): nothing to follow.
+    NoDisplay,
+    /// The host's size leads to no mode that can be made.
+    NoMode,
+    /// The device did not answer, or the change was not made: it may be, later.
+    Failed(u32),
 }
 
 /// What scanout 0 references (G-6). `Boot` = untouched since startup (the
@@ -2592,7 +2618,7 @@ impl Comp {
         // so the first mode is found as `mode auto` finds one.
         let host = (gpu.width, gpu.height);
         let first = display::fit_mode(host.0, host.1, |w, h| {
-            mode_in_bounds(w, h) && surface_can_be_made(w, h)
+            mode_in_bounds(w, h) && mode_can_be_made(w, h)
         })
         .unwrap_or(MODE_DEFAULT);
         if first != host {
@@ -6140,7 +6166,7 @@ impl Comp {
         // The current working geometry stands on a refusal: the OSD apply
         // is refused (never persisted), and a startup push of a too-big
         // persisted mode is rejected (the self-heal in aurora clears it).
-        if !surface_can_be_made(w, h) {
+        if !mode_can_be_made(w, h) {
             return Err(p9::E_NOMEM);
         }
         self.change_mode(w, h)
@@ -6153,38 +6179,77 @@ impl Comp {
     fn mode_for_host(&self, host_w: u32, host_h: u32) -> Option<(u32, u32)> {
         let cur = (self.gpu.width, self.gpu.height);
         display::fit_mode(host_w, host_h, |w, h| {
-            mode_in_bounds(w, h) && ((w, h) == cur || surface_can_be_made(w, h))
+            mode_in_bounds(w, h) && ((w, h) == cur || mode_can_be_made(w, h))
         })
     }
 
     /// Ask the host what it prefers and take the mode for it, then the
     /// scale its EDID gives that mode: `mode auto`, and what a display
-    /// event leads to while the mode follows the host. Absent or
-    /// probe-failed: fail soft, the current mode stands.
-    fn follow_display(&mut self) -> Result<(), u32> {
-        // No display to follow (the output is disabled) is not the device
-        // failing to answer: the first stands, the second may pass.
+    /// event leads to while the mode follows the host. Whatever is not
+    /// `Done` leaves a mode standing; `Failed` is the one worth asking
+    /// again.
+    fn follow_display(&mut self) -> Followed {
+        // No display to follow (the output is disabled) is an answer. The
+        // device failing to answer is not.
         let (host_w, host_h) = match self.gpu.query_display_info() {
             Ok(Some(host)) => host,
-            Ok(None) => return Err(p9::E_AGAIN),
-            Err(_) => return Err(E_IO),
+            Ok(None) => return Followed::NoDisplay,
+            Err(_) => return Followed::Failed(E_IO),
         };
         let Some((w, h)) = self.mode_for_host(host_w, host_h) else {
             say!("tapestryd: no mode for a display of {}x{}; {}x{} stands",
                 host_w, host_h, self.gpu.width, self.gpu.height);
-            return Err(p9::E_NOMEM);
+            return Followed::NoMode;
         };
         if (w, h) != (host_w, host_h) {
             say!("tapestryd: mode {}x{} for a display of {}x{}", w, h, host_w, host_h);
         }
         if (w, h) != (self.gpu.width, self.gpu.height) {
-            self.change_mode(w, h)?;
+            if let Err(e) = self.change_mode(w, h) {
+                return Followed::Failed(e);
+            }
+        }
+        if !self.composed_bind_holds() {
+            return Followed::Failed(E_IO);
         }
         // The EDID is asked with it: a change of display is the one time
-        // it changes, and it can change under a mode that does not.
-        self.gpu.edid_mm = self.gpu.query_edid().unwrap_or(None);
+        // it changes, and it can change under a mode that does not. No
+        // EDID is an answer (the scale is then 100); no answer is not.
+        match self.gpu.query_edid() {
+            Ok(mm) => self.gpu.edid_mm = mm,
+            Err(_) => return Followed::Failed(E_IO),
+        }
         self.rescale_after_mode();
-        Ok(())
+        Followed::Done
+    }
+
+    /// Is the device scanning the screen, where the display is composed?
+    /// `reconcile` enters the composed state whether or not its bind was
+    /// taken, and says so in a line; `bound_res` keeps naming what the
+    /// device really scans.
+    fn composed_bound(&self) -> bool {
+        self.scanout != Scanout::Composed
+            || self.screen.as_ref().map_or(true, |s| s.res == self.bound_res)
+    }
+
+    /// Bind the screen again if the display is composed and the device is
+    /// scanning something else (a bind that met a stalled device). False
+    /// if it still is afterwards.
+    fn composed_bind_holds(&mut self) -> bool {
+        if self.composed_bound() {
+            return true;
+        }
+        let Some(res) = self.screen.as_ref().map(|s| s.res) else { return true };
+        let (w, h) = (self.gpu.width, self.gpu.height);
+        if self.gpu.set_scanout(res, w, h).is_err() {
+            return false;
+        }
+        self.bound_res = res;
+        // After the bind, as in `reconcile` (#57): a flush reaches only a
+        // scanout bound to the resource.
+        let _ = self.gpu.flush(res, 0, 0, w, h);
+        say!("tapestryd: scanout composed ({}x{}) res {} bound, late", w, h, res);
+        true
     }
 
     /// Once a pass: has the host's display changed (the broker counts the
@@ -6193,25 +6258,41 @@ impl Comp {
     /// unless an explicit `mode W H` pinned it.
     pub fn display_pump(&mut self) {
         let now_ms = libthyla_rs::time::monotonic_ns() / 1_000_000;
-        let n = self.gpu.display_events;
+        let n = self.gpu.display_events();
         match self.follow.step(n, now_ms) {
             display::Step::Wait => {}
             display::Step::Pinned => {
                 say!("tapestryd: display event {}: the mode is pinned and stands", n);
             }
-            display::Step::Ask => {
-                say!("tapestryd: display event {}: asking the host", n);
-                match self.follow_display() {
-                    Ok(()) => {}
-                    // The device did not answer, or did not take the new
-                    // screen: a stall passes, and the event must not be
-                    // lost to it.
-                    Err(e) if e == E_IO && self.follow.retry(now_ms) => {
-                        say!("tapestryd: display event {}: not followed (errno {}), to be asked again", n, e);
+            // The broker ends a stall of its engine itself: it answers
+            // again, or it declares the device dead. Nothing asked of a
+            // stalled engine is answered, so the event waits for one of
+            // the two and is not lost to the stall.
+            display::Step::Ask => match self.gpu.engine {
+                Engine::Dead => say!("tapestryd: display event {}: not followed, the device is dead", n),
+                Engine::Stalled => self.display_hold(n, now_ms),
+                Engine::Live => {
+                    say!("tapestryd: display event {}: asking the host", n);
+                    match self.follow_display() {
+                        Followed::Done | Followed::NoMode => {}
+                        Followed::NoDisplay => say!(
+                            "tapestryd: display event {}: no display to follow; {}x{} stands",
+                            n, self.gpu.width, self.gpu.height),
+                        // The engine as the failed step left it.
+                        Followed::Failed(_) if self.gpu.engine == Engine::Stalled => self.display_hold(n, now_ms),
+                        Followed::Failed(e) if self.gpu.engine == Engine::Live && self.follow.retry(now_ms) => {
+                            say!("tapestryd: display event {}: not followed (errno {}), to be asked again", n, e);
+                        }
+                        Followed::Failed(e) => say!("tapestryd: display event {}: not followed (errno {})", n, e),
                     }
-                    Err(e) => say!("tapestryd: display event {}: not followed (errno {})", n, e),
                 }
-            }
+            },
+        }
+    }
+
+    fn display_hold(&mut self, n: u32, now_ms: u64) {
+        if self.follow.hold(now_ms) {
+            say!("tapestryd: display event {}: the device is stalled; to be asked when it answers", n);
         }
     }
 
@@ -6225,17 +6306,20 @@ impl Comp {
             h,
             self.scanout_name()
         );
-        // Section 10: a placed card was clamped to the display this replaces,
-        // and what it reached names the old geometry -- a dismiss after the
-        // swap would put back the wrong pixels at the wrong rects. Dismissed
-        // first, as a modal opening ends a divider drag.
-        if self.menu.is_some() {
-            self.menu_dismiss("mode");
-        }
+        // The new screen first. Until it exists nothing of the standing
+        // display is touched, so a change that cannot be made (it may be
+        // one nobody asked for: the host's window moved) costs nothing.
         let new = match self.alloc_screen(w, h) {
             Some(s) => s,
             None => return Err(p9::E_NOMEM),
         };
+        // Section 10: a placed card was clamped to the display this replaces,
+        // and what it reached names the old geometry -- a dismiss after the
+        // swap would put back the wrong pixels at the wrong rects. Dismissed
+        // before it, as a modal opening ends a divider drag.
+        if self.menu.is_some() {
+            self.menu_dismiss("mode");
+        }
         // Held pushes reference the OLD geometry/screen; a deferred push
         // against the new one would land wrong bytes at wrong rects. The
         // CONFIGURE fan below makes every client repaint.
@@ -6271,6 +6355,13 @@ impl Comp {
             self.free_screen(o);
         }
         self.reconcile();
+        // Said after the change, of what the device then scans: the line at
+        // the top says what was begun.
+        if self.composed_bound() {
+            say!("tapestryd: mode {}x{} is up (scanout {})", w, h, self.scanout_name());
+        } else {
+            say!("tapestryd: mode {}x{} is set; the display is not bound to its screen", w, h);
+        }
         Ok(())
     }
 
@@ -19343,7 +19434,12 @@ impl Conn {
             // follow the host's display from here on. A verb that is
             // refused changes nothing: a pinned mode stays pinned, as the
             // setting its sender then keeps says it is.
-            let r = comp.follow_display();
+            let r = match comp.follow_display() {
+                Followed::Done => Ok(()),
+                Followed::NoDisplay => Err(p9::E_AGAIN),
+                Followed::NoMode => Err(p9::E_NOMEM),
+                Followed::Failed(e) => Err(e),
+            };
             if r.is_ok() {
                 comp.follow.unpin();
             }
