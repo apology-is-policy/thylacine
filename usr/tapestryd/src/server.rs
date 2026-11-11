@@ -6270,9 +6270,15 @@ impl Comp {
         }
         let Some(res) = self.screen.as_ref().map(|s| s.res) else { return true };
         let (w, h) = (self.gpu.width, self.gpu.height);
+        // An engine that is not live takes no command: the bind is refused
+        // before it is sent, which is no attempt and must not lengthen the
+        // wait for the next one.
+        let sent = self.gpu.engine == Engine::Live;
         if self.gpu.set_scanout(res, w, h).is_err() {
             self.screen_bind_owed = true;
-            self.bind_again.failed(libthyla_rs::time::monotonic_ns() / 1_000_000);
+            if sent {
+                self.bind_again.failed(libthyla_rs::time::monotonic_ns() / 1_000_000);
+            }
             return false;
         }
         self.bound_res = res;
