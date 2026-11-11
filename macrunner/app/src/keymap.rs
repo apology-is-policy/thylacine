@@ -182,7 +182,11 @@ fn side_flags(vk: u16) -> Option<(usize, usize)> {
 // Whether modifier `vk` is down after an event that reports a change to it. The key's own bit says
 // so when the event has one. An event made without those bits (by a remapper, by a test) has only
 // the bit the pair shares, which stays set while the twin is down: a change to a key that was down
-// is then taken as its release. None if `vk` is not a modifier.
+// is then taken as its release, and a change to one the guest does not hold as a press. That
+// last is a guess when the twin holds the bit. The same event is a key that went down, and a key
+// the guest was made to let go of (the keys were lost) coming up at last; a press sent for a
+// release ends when the pair's bit clears, and a press not sent is a key that does not work.
+// None if `vk` is not a modifier.
 pub fn modifier_is_down(vk: u16, flags: usize, was_held: bool) -> Option<bool> {
     let shared = modifier_flag(vk)?;
     Some(match side_flags(vk) {
@@ -278,6 +282,8 @@ mod tests {
         // Its own bit set while held: nothing changed.
         assert_eq!(modifier_is_down(left, SHIFT | 0x06, true), Some(true));
         // Without the keyboard's bits: the shared flag, and a change to a held key is its release.
+        // A change to one the guest does not hold is a press, also when it was in truth the
+        // release of a key the guest had been made to let go of while its twin stays down.
         assert_eq!(modifier_is_down(left, SHIFT, false), Some(true));
         assert_eq!(modifier_is_down(left, SHIFT, true), Some(false));
         assert_eq!(modifier_is_down(left, 0, true), Some(false));
@@ -289,6 +295,26 @@ mod tests {
         assert_eq!(modifier_is_down(0x36, 1 << 20 | 0x10, false), Some(true));
         assert_eq!(modifier_is_down(0x37, 1 << 20 | 0x10, true), Some(false));
         assert_eq!(modifier_is_down(0x00, SHIFT, false), None);
+        // A key from a source without the bits, going down while its twin on a keyboard with
+        // them is down: the pair's bits are there and its own is not, which is also what a
+        // release looks like, and is what it is taken for.
+        assert_eq!(modifier_is_down(right, SHIFT | 0x02, false), Some(false));
+    }
+    #[test]
+    fn a_press_sent_for_a_release_ends_when_the_pairs_flag_clears() {
+        const SHIFT: usize = 1 << 17;
+        let (left, right) = (0x38, 0x3c);
+        let mut held = Held::default();
+        // Both Shifts down without bits of their own, and the keys lost: the guest holds neither.
+        held.press(left, false);
+        held.press(right, false);
+        assert_eq!(held.drain(), vec![0x2a, 0x36]);
+        // The left one comes up, the right one still holding the flag: sent as a press.
+        assert_eq!(modifier_is_down(left, SHIFT, held.holds(left)), Some(true));
+        held.press(left, false);
+        // The right one comes up: the flag is clear, and what the guest holds of the pair goes.
+        assert_eq!(held.modifiers_gone(0), vec![left]);
+        assert_eq!(modifier_is_down(right, 0, held.holds(right)), Some(false));
     }
     #[test]
     fn an_iso_keyboard_has_two_keys_the_other_way_round() {

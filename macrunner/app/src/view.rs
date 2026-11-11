@@ -17,7 +17,9 @@ use objc2_app_kit::{
     NSWindowDidResignKeyNotification,
 };
 use objc2_core_foundation::{CGPoint, CGSize};
-use objc2_core_graphics::{kCGColorSpaceSRGB, CGColorSpace, CGEvent, CGScrollEventUnit};
+use objc2_core_graphics::{
+    kCGColorSpaceSRGB, CGColorSpace, CGEvent, CGEventFlags, CGScrollEventUnit,
+};
 use objc2_foundation::{
     ns_string, MainThreadMarker, NSNotificationCenter, NSObject, NSObjectProtocol, NSPoint, NSRect,
     NSRunLoop, NSRunLoopCommonModes, NSSize, NSTimer,
@@ -597,7 +599,7 @@ pub struct Options {
     pub exit_after: Option<f64>,       // seconds
     pub dump: Option<String>,          // a PPM of the pipeline's output, written at exit_after
     pub scripted_input: bool, // one second in, a fixed run of key and pointer events through the window
-    pub resize_to: Option<(f64, f64)>, // one second in, the window's content set to this many points
+    pub resize_to: Option<(f64, f64)>, // one second in, the window's content set to this many points, and nudged a second later
 }
 
 define_class!(
@@ -649,6 +651,9 @@ define_class!(
 
         #[unsafe(method(resize:))]
         fn resize(&self, _timer: &NSTimer) { self.scripted_resize(); }
+
+        #[unsafe(method(resizeBack:))]
+        fn resize_back(&self, _timer: &NSTimer) { self.scripted_resize_back(); }
 
         // Every change of the view's size comes through here, a step at a time while the window's
         // edge is dragged.
@@ -873,6 +878,27 @@ impl GuestView {
             "scripted: content set to {w}x{h} points; the view is {}x{}",
             b.size.width, b.size.height
         );
+        unsafe {
+            NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(
+                1.0,
+                &*(self as *const Self as *const AnyObject),
+                sel!(resizeBack:),
+                None,
+                false,
+            );
+        }
+    }
+
+    // A second later, when that size has been told: the content a point wider and back in one
+    // turn of the run loop. The view's size changed and is what it was, so nothing is told.
+    fn scripted_resize_back(&self) {
+        let (Some(window), Some((w, h))) = (self.window(), self.ivars().opts.resize_to) else {
+            return;
+        };
+        let before = self.ivars().tellings.get();
+        window.setContentSize(NSSize::new(w + 1.0, h));
+        window.setContentSize(NSSize::new(w, h));
+        eprintln!("scripted: content set a point wider and back, after {before} tellings");
     }
 
     // Release everything the guest believes is held, keys and buttons: the window stopped being where
@@ -1119,6 +1145,30 @@ impl GuestView {
         key(NSEventType::FlagsChanged, 0x3c, shift(0x06), false);
         key(NSEventType::FlagsChanged, 0x38, shift(0x04), false);
         key(NSEventType::FlagsChanged, 0x3c, none, false);
+        // The two Shifts from a source that gives neither a bit of its own. Both go down, the
+        // window loses the keys, and the left one comes up while the right one holds the flag
+        // they share: nothing tells that from a press, and it is sent as one, let go of when
+        // the flag clears.
+        key(
+            NSEventType::FlagsChanged,
+            0x38,
+            NSEventModifierFlags::Shift,
+            false,
+        );
+        key(
+            NSEventType::FlagsChanged,
+            0x3c,
+            NSEventModifierFlags::Shift,
+            false,
+        );
+        lose_keys();
+        key(
+            NSEventType::FlagsChanged,
+            0x38,
+            NSEventModifierFlags::Shift,
+            false,
+        );
+        key(NSEventType::FlagsChanged, 0x3c, none, false);
         // The pointer: the middle of the view, then the centre of guest pixel (10, 10).
         let b = self.bounds();
         let (tw, th) = iv
@@ -1203,6 +1253,56 @@ impl GuestView {
         left(false, mid);
         // A move over the bar reaches the guest as nothing.
         mouse(NSEventType::MouseMoved, bar);
+        // A modifier whose release is never seen is let go of by whatever comes next, before
+        // it: here by a move, with nothing else.
+        key(
+            NSEventType::FlagsChanged,
+            0x3a,
+            NSEventModifierFlags::Option,
+            false,
+        );
+        mouse(NSEventType::MouseMoved, mid);
+        key(NSEventType::FlagsChanged, 0x3a, none, false);
+        // And by a click over the bar and a scroll over it, which send nothing of their own.
+        // What reaches QEMU cannot show when the release was sent, the late one would look the
+        // same, so the view says what the guest holds after each.
+        let let_go = |what: &str, vk: u16| {
+            let verdict = if iv.held.borrow().holds(vk) {
+                "DID NOT let go of"
+            } else {
+                "let go of"
+            };
+            eprintln!("scripted: {what} over the bar {verdict} the modifier");
+        };
+        key(
+            NSEventType::FlagsChanged,
+            0x38,
+            NSEventModifierFlags::Shift,
+            false,
+        );
+        mouse(NSEventType::RightMouseDown, bar);
+        let_go("a click", 0x38);
+        mouse(NSEventType::RightMouseUp, bar);
+        key(NSEventType::FlagsChanged, 0x38, none, false);
+        key(
+            NSEventType::FlagsChanged,
+            0x3b,
+            NSEventModifierFlags::Control,
+            false,
+        );
+        // Core Graphics gives an event it makes the modifiers that are down on the Mac just
+        // then; this one must say that none is.
+        let over_bar = CGEvent::new_scroll_wheel_event2(None, CGScrollEventUnit::Line, 1, 1, 0, 0);
+        if let Some(cg) = &over_bar {
+            CGEvent::set_location(Some(cg), CGPoint::new(bar.x, top - bar.y));
+            CGEvent::set_flags(Some(cg), CGEventFlags(0));
+        }
+        match over_bar.and_then(|cg| NSEvent::eventWithCGEvent(&cg)) {
+            Some(ev) => unsafe { msg_send![self, scrollWheel: &*ev] },
+            None => eprintln!("scripted: no scroll event"),
+        }
+        let_go("a scroll", 0x3b);
+        key(NSEventType::FlagsChanged, 0x3b, none, false);
         // The same through NSApplication, as the event loop delivers them: a key-up while Command is held is
         // the one AppKit keeps to itself.
         let app = objc2_app_kit::NSApplication::sharedApplication(self.mtm());

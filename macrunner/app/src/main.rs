@@ -3,6 +3,13 @@
 mod display;
 mod keymap;
 mod view;
+// The guest's own rule for a scale, compiled into the tests from its source, so that what the
+// tests say a guest makes of a size is what a guest makes of it.
+#[cfg(test)]
+#[rustfmt::skip]
+#[allow(dead_code, clippy::all)]
+#[path = "../../../usr/lib/libhalcyon/src/scale.rs"]
+mod guest_scale;
 
 use std::cell::OnceCell;
 
@@ -103,7 +110,9 @@ define_class!(
             window.setContentView(Some(&view));
             window.makeFirstResponder(Some(&view));
             window.setDelegate(Some(ProtocolObject::from_ref(self)));
-            // The least the window can be dragged to. A guest can set a screen that small.
+            // The least the window can be dragged to. A guest that is running can set a screen
+            // that small (its `mode` goes down to 320x200); Lictor's own screen, made when it
+            // starts, needs 800x720 pixels.
             window.setContentMinSize(NSSize::new(640.0, 400.0));
             window.center();
             window.makeKeyAndOrderFront(None);

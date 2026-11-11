@@ -6,6 +6,8 @@ and one virtio-gpu-pci on its first bus. Every run resets the device and brings 
 
 usage: as_guest.py <qtest socket>
 prints: display WxH on N, edid AxB mm prefers WxH, event N
+    or: display WxH on N, edid AxB cm no preferred timing, event N
+the second when the block has no detailed timing, which is what QEMU makes for a large mode.
 """
 import socket
 import struct
@@ -121,8 +123,10 @@ def header(kind):
     return struct.pack("<IIQII", kind, 0, 0, 0, 0)
 
 
-# The image size of a base EDID block, as libhalcyon's parse_edid_mm reads it, and the mode its
-# first detailed timing prefers.
+# The image size of a base EDID block and the mode it prefers, found where libhalcyon's
+# parse_edid_mm finds the size: in the first detailed timing when there is one (its pixel clock is
+# not zero), and otherwise in the whole centimetres of bytes 21 and 22, with no mode. A guest
+# takes the size only when both sides are 1 to 2000 mm; this says whatever is there.
 def edid_size(block):
     if block[:8] != bytes([0, 255, 255, 255, 255, 255, 255, 0]) or sum(block[:128]) % 256:
         sys.exit("as_guest: not an EDID block (%s...)" % block[:8].hex())
@@ -130,9 +134,8 @@ def edid_size(block):
     if d[0] or d[1]:
         mm = (d[12] | (d[14] >> 4) << 8, d[13] | (d[14] & 15) << 8)
         prefers = (d[2] | (d[4] >> 4) << 8, d[5] | (d[7] >> 4) << 8)
-    else:
-        mm, prefers = (block[21] * 10, block[22] * 10), (0, 0)
-    return mm, prefers
+        return "edid %dx%d mm prefers %dx%d" % (mm + prefers)
+    return "edid %dx%d cm no preferred timing" % (block[21], block[22])
 
 
 def main():
@@ -153,6 +156,8 @@ def main():
     kind = struct.unpack_from("<I", info)[0]
     if kind != OK_DISPLAY_INFO:
         sys.exit("as_guest: GET_DISPLAY_INFO answered %#x" % kind)
+    # QEMU answers with no position (virtio_gpu_base_fill_display_info sets a width and a height),
+    # so the offsets a display was told are not to be seen from here.
     _x, _y, w, h, on, _flags = struct.unpack_from("<6I", info, 24)
     edid = "no edid"
     if has_edid:
@@ -160,8 +165,7 @@ def main():
         kind, size = struct.unpack_from("<I", got)[0], struct.unpack_from("<I", got, 24)[0]
         if kind != OK_EDID or size < 128:
             sys.exit("as_guest: GET_EDID answered %#x, %d bytes" % (kind, size))
-        mm, prefers = edid_size(got[32:32 + 128])
-        edid = "edid %dx%d mm prefers %dx%d" % (mm + prefers)
+        edid = edid_size(got[32:32 + 128])
     print("display %dx%d on %d, %s, event %d" % (w, h, on, edid, event & 1))
 
 

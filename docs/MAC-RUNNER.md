@@ -183,7 +183,13 @@ EDID from `req_state[scanout].{width_mm,height_mm,refresh_rate}`
 then raises `VIRTIO_GPU_EVENT_DISPLAY` (`:124`). The guest derives its scale from the EDID
 millimetres (`tree:docs/HALCYON-SCALE.md:51-57, 85-97`: QEMU's default EDID reads 100 DPI,
 so the guest snaps to 100%). So the app sets `width_mm = width_px * 25.4 / (96 * scale)`
-and the guest's own scale machinery does the rest. The D-Bus `SetUIInfo` has NO refresh_rate
+and the guest's own scale machinery does the rest. For a large mode the millimetres reach the
+guest as whole centimetres only: told no rate, QEMU takes 75 Hz, and gives the EDID no detailed
+timing when a side is 4096 pixels or more or the pixel clock would pass 655.36 MHz
+(`qemu-11.1:hw/display/edid-generate.c:390, 417-420, 473-474, 500-505`), which is from 6.25
+megapixels; the base block's centimetres are cut, not rounded, and the mode is in an extension
+block. The guest's rule still gives the Mac's scale there (found by audit round 3 on the app,
+2026-11-11; `macrunner/app`'s unit test runs the guest's own `scale.rs` over it). The D-Bus `SetUIInfo` has NO refresh_rate
 argument (xml:94-101); UTM carries a QEMU patch adding a `refresh_rate` device property
 (mHz) for displays that report none (`utm:patches/qemu-10.0.12-utm.patch:4464-4486`), the
 precedent for telling the guest 120 Hz on ProMotion.
@@ -995,7 +1001,10 @@ timing of its EDID says 338x211 mm, and `events_read` has the display bit. The s
 QEMU started with `-S` (status `prelaunch`): the timer that hands the size to the device is on the
 real-time clock (`ui/console.c`, `qemu_console_set_ui_info`), not the machine's. So B4's QEMU half
 is as read. The app now tells the size itself, as it attaches and after a resize (A3's app half;
-339x212 mm for 1280x800 points, rounded where the probe's figures were cut off). What is left of
+339x212 mm for 1280x800 points, rounded where the probe's figures were cut off). A mode too large
+for a detailed timing, 4200x700 points told by the app on this screen (8400x1400), comes back with
+no preferred timing and `111x18 cm` for the 1111x185 mm told, on both QEMUs (the size leg since
+round 3). What is left of
 M-8 needs a guest: that Lictor boots at the size, the scale the guest takes from the
 millimetres, and the latency of a follow, which waits for Lictor to follow the event.
 

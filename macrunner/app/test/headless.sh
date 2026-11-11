@@ -7,10 +7,12 @@
 #   input    a scripted run of AppKit events (view.rs, scripted_input) reaches QEMU as exactly the
 #            expected lines of its dbus_kbd_* / dbus_mouse_* trace: a repeat, a modifier, keys and a
 #            button let go of when the window loses the keys or a menu opens, late releases that must
-#            send nothing, a modifier whose release never arrived (before a key, and before a click),
-#            the two Shifts told apart by their own bits, positions through the letterbox, clicks and
-#            moves over the bar that must send nothing, a wheel notch with its place, a key-up under
-#            Command, and a button still down when the app leaves;
+#            send nothing, a modifier whose release never arrived (before a key, a click, a move, and
+#            a click and a scroll over the bar, where the view itself says what the guest still
+#            holds), the two Shifts told apart by their own bits and what is made of them without,
+#            positions through the letterbox, clicks and moves over the bar that must send nothing,
+#            a wheel notch with its place, a key-up under Command, and a button still down when the
+#            app leaves;
 #   pointer  an image defined as the guest defines its pointer is what AppKit draws for the Mac's.
 # A window opens for four seconds per path and does not take focus.
 #
@@ -21,7 +23,11 @@
 #   size     the device answers with the size the app told it for the window: when the app attaches
 #            (a run that ends before a change of size could have been told), and again a moment
 #            after the window's content is set to another size in three steps, which is told once.
-# The window opens twice more, for a moment and for two seconds.
+#            That size is 4200x700 points, a mode too large for QEMU's EDID to have a detailed
+#            timing on any screen: the millimetres reach a guest as whole centimetres. A second
+#            later the content is set a point wider and back, and nothing more is told.
+# The window opens twice more, for a moment and for three seconds, the second time wider than the
+# screen.
 #
 #   macrunner/app/test/headless.sh       exit 0 pass, 1 fail, 77 skipped (not macOS, or no D-Bus display)
 #   THYLACINE_QEMU=<qemu-system-aarch64>  the QEMU to attach to (default: the one on PATH)
@@ -51,6 +57,8 @@ want+='kbd_press 31;kbd_release 31;kbd_press 35;kbd_release 35;' # S, the window
 want+='kbd_press 56;kbd_release 56;kbd_press 48;kbd_release 48;' # Option whose release never came, then B
 want+='kbd_press 18;kbd_release 18;kbd_press 34;kbd_release 34;' # E, a menu opens, G, E up late
 want+='kbd_press 42;kbd_release 42;kbd_press 54;kbd_release 54;' # the Shifts by their own bits: left up while the guest does not hold it
+want+='kbd_press 42;kbd_press 54;kbd_release 42;kbd_release 54;' # the Shifts without bits of their own, and the keys lost
+want+='kbd_press 42;kbd_release 42;'                             # left up while right holds their flag: sent as a press, let go of when it clears
 want+='mouse_set_pos x=320, y=240;'                              # a move; the click after it is the window's
 want+='kbd_press 33;kbd_release 33;'                             # F
 want+='mouse_set_pos x=10, y=10;mouse_press b2;mouse_set_pos x=10, y=10;mouse_release b2;'     # right click
@@ -60,6 +68,9 @@ want+='mouse_set_pos x=10, y=10;mouse_press b3;mouse_release b3;'  # a wheel not
 want+='mouse_set_pos x=320, y=240;mouse_press b0;mouse_set_pos x=320, y=240;mouse_release b0;' # left click
 want+='mouse_set_pos x=10, y=10;mouse_press b2;mouse_release b2;'  # after a click over the bar: a press let go of over it
 want+='mouse_set_pos x=320, y=240;mouse_press b0;mouse_release b0;' # left held when the window loses the keys
+want+='kbd_press 56;kbd_release 56;mouse_set_pos x=320, y=240;'  # Option whose release never came, let go of by a move
+want+='kbd_press 42;kbd_release 42;'                             # Shift likewise, by a click over the bar
+want+='kbd_press 29;kbd_release 29;'                             # Control likewise, by a scroll over the bar
 want+='kbd_press 32;kbd_release 32;'                             # D through NSApplication
 want+='kbd_press 219;kbd_press 32;kbd_release 32;kbd_release 219;' # D under Command
 want+='mouse_set_pos x=320, y=240;mouse_press b0;mouse_release b0;' # left down when the app leaves: let go of on the way out
@@ -113,6 +124,13 @@ PY
     else
         echo "$name: FAIL: input differs"; echo "  got:  $got"; echo "  want: $want"; rc=1
     fi
+    # The trace cannot tell a modifier let go of by an event over the bar from one let go of by
+    # its own late release, so the script asks the view after each.
+    local what
+    for what in 'a click' 'a scroll'; do
+        grep -q "^scripted: $what over the bar let go of the modifier\$" app.out \
+            || { echo "$name: FAIL: $what over the bar did not let go of a modifier whose release never came ($(grep "^scripted: $what" app.out))"; rc=1; }
+    done
     grep -q "pixels $pixels" app.out || { echo "$name: FAIL: the app did not take the '$pixels' path ($(grep '^finish' app.out))"; rc=1; }
     grep -q 'pointer 3x2 hot 1,1 shown$' app.out || { echo "$name: FAIL: the Mac's pointer did not take the image that was defined ($(grep '^finish' app.out))"; rc=1; }
     if python3 - app-pointer.ppm <<'PY' >> app.out 2>&1
@@ -168,7 +186,7 @@ size_leg() {
       # as it attaches.
       size_run app-a.out 15 --exit-after 0.2; echo "a exit: $?"
       echo "a: $(python3 -I "$here/as_guest.py" t.sock 2>&1)"
-      size_run app-b.out 15 --exit-after 2 --resize-to 1000x640; echo "b exit: $?"
+      size_run app-b.out 15 --exit-after 3 --resize-to 4200x700; echo "b exit: $?"
       echo "b: $(python3 -I "$here/as_guest.py" t.sock 2>&1)"; } > seen.out
     kill "$qp" 2>/dev/null; wait "$qp" 2>/dev/null; qp=""
     python3 -I - <<'PY' || rc=1
@@ -204,6 +222,13 @@ before = seen.get("before", "")
 check("the device as it was made answers 1024x768, with no event (%s)" % before,
       re.fullmatch(r"display 1024x768 on 1, edid \d+x\d+ mm prefers 1024x768, event 0", before) is not None, before)
 
+# Whether QEMU's EDID has a detailed timing for a mode: not when a side is 4096 or more, or the
+# pixel clock at the 75 Hz it takes for a display that named no rate is past the field's 16 bits
+# (hw/display/edid-generate.c, qemu_edid_generate).
+def timing(px):
+    clock = 75000 * (px[0] + px[0] * 35 // 100) * (px[1] + px[1] * 35 // 1000) // 10000000
+    return px[0] < 4096 and px[1] < 4096 and clock < 65536
+
 def told(run, points, tellings):
     line = size_line("app-%s.out" % run)
     m = re.fullmatch(r"view ([\d.]+)x([\d.]+) points at ([\d.]+), told (\d+)x(\d+) px (\d+)x(\d+) mm, (\d+) tellings", line)
@@ -221,7 +246,13 @@ def told(run, points, tellings):
         return
     px = (round(w * scale), round(h * scale))
     mm = (round(w * 25.4 / 96), round(h * 25.4 / 96))
-    want = "display %dx%d on 1, edid %dx%d mm prefers %dx%d, event 1" % (px + mm + px)
+    if timing(px):
+        want = "display %dx%d on 1, edid %dx%d mm prefers %dx%d, event 1" % (px + mm + px)
+    else:
+        want = "display %dx%d on 1, edid %dx%d cm no preferred timing, event 1" % (px + (mm[0] // 10, mm[1] // 10))
+    if points and timing(px):
+        check("run %s: the size set is one QEMU has no detailed timing for" % run, False, line)
+        return
     got = seen.get(run, "")
     check("%s: QEMU answers a guest with the view's %gx%g points at %g (%s)" % (run, w, h, scale, got),
           got == want, "got '%s', want '%s'; the app says: %s" % (got, want, line))
@@ -229,7 +260,12 @@ def told(run, points, tellings):
           int(m[8]) == tellings and (int(m[4]), int(m[5]), int(m[6]), int(m[7])) == px + mm, line)
 
 told("a", None, 1)
-told("b", (1000.0, 640.0), 2)
+told("b", (4200.0, 700.0), 2)
+# The size told had stood when the content went a point wider and back: two tellings by then,
+# and (above) two at the end.
+back = [l.strip() for l in open("app-b.out", errors="replace") if l.startswith("scripted: content set a point wider")]
+check("b: a size that changed and came back is not told again",
+      back == ["scripted: content set a point wider and back, after 2 tellings"], back or "the script did not get that far")
 raise SystemExit(1 if bad else 0)
 PY
     return $rc

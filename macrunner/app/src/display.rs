@@ -287,8 +287,9 @@ pub struct UiInfo {
     pub height: u32,
 }
 impl UiInfo {
-    // For a view `w` x `h` points with `scale` pixels to a point. None for a view that has no
-    // size: QEMU takes a size of nothing as the display being turned off.
+    // For a view `w` x `h` points with `scale` pixels to a point. None for a view with no size,
+    // or with one that is not a number: there is nothing true to tell, and the floors below
+    // would make one pixel and one millimetre of it.
     pub fn of(w: f64, h: f64, scale: f64) -> Option<UiInfo> {
         let real = |v: f64| v.is_finite() && v > 0.0;
         if !real(w) || !real(h) || !real(scale) {
@@ -1058,25 +1059,13 @@ mod tests {
             (plain.width, plain.height, plain.width_mm, plain.height_mm),
             (1280, 800, 339, 212)
         );
-        // What a guest makes of it: pixels to the inch over 96, to the nearest quarter.
-        let quarters = |u: UiInfo| (u.width as f64 * 25.4 / u.width_mm as f64 / 96.0 * 4.0).round();
-        assert_eq!((quarters(retina), quarters(plain)), (8.0, 4.0));
-        for (w, h, scale, q) in [
-            (320.0, 200.0, 2.0, 8.0),
-            (3008.0, 1692.0, 2.0, 8.0),
-            (1470.5, 919.0, 1.0, 4.0),
-        ] {
-            assert_eq!(
-                quarters(UiInfo::of(w, h, scale).unwrap()),
-                q,
-                "{w}x{h} at {scale}"
-            );
-        }
         // A half pixel goes up, as the drawable's does.
         assert_eq!(UiInfo::of(100.25, 50.0, 2.0).unwrap().width, 201);
         assert_eq!(pixels(100.25, 2.0), 201);
         assert_eq!(pixels(0.1, 1.0), 1);
-        // No size is not a size to tell: QEMU would turn the display off.
+        // No size, and a size that is not a number, are not told. The arithmetic alone would
+        // tell one pixel for nothing.
+        assert_eq!(pixels(0.0, 2.0), 1);
         for (w, h, scale) in [
             (0.0, 800.0, 2.0),
             (1280.0, 0.0, 2.0),
@@ -1090,6 +1079,103 @@ mod tests {
         // A sliver still has a millimetre, and a width past any screen still fits its field.
         let odd = UiInfo::of(1.0, 1e9, 1.0).unwrap();
         assert_eq!((odd.width_mm, odd.height_mm), (1, u16::MAX));
+    }
+
+    // The base block of the EDID QEMU makes for a size it was told, as far as a size is read
+    // from it (hw/display/edid-generate.c, the same in 10.1 and 11.1): whole centimetres
+    // always, and the millimetres in a first detailed timing unless the mode is too large for
+    // one at the 75 Hz QEMU takes when it is told no rate. Whether it had a detailed timing.
+    fn qemu_edid(u: UiInfo) -> ([u8; 128], bool) {
+        let (x, y) = (u.width as u64, u.height as u64);
+        let clock = 75_000 * (x + x * 35 / 100) * (y + y * 35 / 1000) / 10_000_000;
+        let large = x >= 4096 || y >= 4096 || clock >= 65536;
+        let mut e = [0u8; 128];
+        e[..8].copy_from_slice(&[0, 255, 255, 255, 255, 255, 255, 0]);
+        e[21] = (u.width_mm / 10) as u8;
+        e[22] = (u.height_mm / 10) as u8;
+        if !large {
+            e[54] = clock as u8;
+            e[55] = (clock >> 8) as u8;
+            e[66] = u.width_mm as u8;
+            e[67] = u.height_mm as u8;
+            e[68] = ((u.width_mm & 0xf00) >> 4) as u8 | ((u.height_mm & 0xf00) >> 8) as u8;
+        }
+        e[127] = 0u8.wrapping_sub(e[..127].iter().fold(0u8, |a, &b| a.wrapping_add(b)));
+        (e, !large)
+    }
+
+    // The scale a guest takes for a view: its own reading of that block and its own rule.
+    fn guest_scale_for(w: f64, h: f64, scale: f64) -> (Option<u16>, bool) {
+        use crate::guest_scale::{parse_edid_mm, scale_pct};
+        let u = UiInfo::of(w, h, scale).unwrap();
+        let (edid, timing) = qemu_edid(u);
+        let pct = parse_edid_mm(&edid).map(|(mw, mh)| scale_pct(u.width, u.height, mw, mh));
+        (pct, timing)
+    }
+
+    #[test]
+    fn a_guest_takes_the_macs_scale_from_what_it_is_told() {
+        // The window as it opens, at its least, full screen on a 13-inch Air below the camera,
+        // and on the larger screens, where QEMU's block has centimetres only.
+        for (w, h, timing_at_1, timing_at_2) in [
+            (1280.0, 800.0, true, true),
+            (640.0, 400.0, true, true),
+            (1470.0, 924.0, true, true),
+            (1512.0, 982.0, true, true),
+            (1728.0, 1117.0, true, false),
+            (2560.0, 1440.0, true, false),
+            (3008.0, 1692.0, true, false),
+            (3840.0, 2160.0, false, false),
+            (4200.0, 700.0, false, false),
+        ] {
+            assert_eq!(
+                guest_scale_for(w, h, 1.0),
+                (Some(100), timing_at_1),
+                "{w}x{h} at 1"
+            );
+            assert_eq!(
+                guest_scale_for(w, h, 2.0),
+                (Some(200), timing_at_2),
+                "{w}x{h} at 2"
+            );
+        }
+        // And the sizes between: every pair of sides from 22 points, where a millimetre more or
+        // less stops moving the answer, to the two metres past which a guest takes an EDID's size
+        // for garbage. Half points among the small ones. A side under a centimetre (38 points)
+        // is tried only against one of no more than 640: see below.
+        let mut sides: Vec<f64> = vec![];
+        let mut side = 22.0;
+        while side <= 7500.0 {
+            sides.push(side);
+            side += match side {
+                s if s < 100.0 => 0.5,
+                s if s < 640.0 => 1.5,
+                _ => 13.5,
+            };
+        }
+        let mut tried = 0u32;
+        for scale in [1.0, 2.0] {
+            let want = Some((100.0 * scale) as u16);
+            for &w in &sides {
+                for &h in &sides {
+                    if w.min(h) < 38.0 && w.max(h) > 640.0 {
+                        continue;
+                    }
+                    assert_eq!(guest_scale_for(w, h, scale).0, want, "{w}x{h} at {scale}");
+                    tried += 1;
+                }
+            }
+        }
+        assert!(tried > 2_000_000, "{tried}");
+        // Under 22 points a side is a few millimetres, and rounding them is too much of it: 21
+        // points are 5.56 mm, told as 6, and 42 pixels over 6 mm are not twice 96 to the inch.
+        assert_eq!(guest_scale_for(21.0, 800.0, 2.0).0, Some(175));
+        // A strip: under a centimetre one way and too long the other for a detailed timing.
+        // QEMU's block then has whole centimetres only, none of them, and a guest reads no size
+        // from it and keeps the scale it has. So does one past two metres. Neither is a window:
+        // the least is 640x400 points.
+        assert_eq!(guest_scale_for(22.0, 4096.0, 1.0), (None, false));
+        assert_eq!(guest_scale_for(7600.0, 800.0, 1.0).0, None);
     }
 
     #[test]

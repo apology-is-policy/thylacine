@@ -48,10 +48,13 @@ between. It does not start QEMU yet: it attaches to one that runs with
   to the inch finds the Mac's own. It is told as the app attaches, before any
   input is sent, and again a quarter of a second after the view's size, or the
   pixels to a point of the screen it is on, last changed. A size that is the
-  last one told is not told again, and a view with no size is not told (QEMU
-  reads a size of nothing as the display being turned off). QEMU keeps the
+  last one told is not told again. A view with no size, or with one that is
+  not a number, is not told at all: there is nothing true to tell, and the
+  rounding would make one pixel and one millimetre of it. QEMU keeps the
   size, answers the guest's next question about its display with it, puts the
-  millimetres in the EDID, and raises the device's display event. A guest that
+  millimetres in the EDID (as whole centimetres only, when the mode is too
+  large for a detailed timing: Caveats), and raises the device's display
+  event. A guest that
   has not started yet finds it when it first asks; a guest that is running is
   not changed by it until it asks again, and Lictor does not follow the event
   yet.
@@ -172,10 +175,18 @@ window's pixels to a point. The pixels come from `pixels`, the one rule the
 drawable's size also comes from, so a guest frame of the size told is drawn a
 pixel to a pixel (a whole-number scale of one, sampled nearest). The
 millimetres are the points times 25.4 over 96, rounded, at least one. The
-guest's rule for a scale (`libhalcyon::scale::scale_pct`: pixels to the inch over 96,
-to the nearest quarter) then gives 200% on a screen with two pixels to a point
-and 100% on one with one; that is arithmetic with a unit test here, and the
-guest's own answer is `docs/MAC-RUNNER.md` M-3's to measure. The telling is an
+guest's rule for a scale (`libhalcyon::scale::scale_pct`: for each side, pixels
+to the inch over 96 to the nearest quarter, held to 100..200; then the smaller
+of the two) gives 200% on a screen with two pixels to a point and 100% on one
+with one. The unit test for it compiles the guest's own source in
+(`usr/lib/libhalcyon/src/scale.rs`: `parse_edid_mm` reads the size, `scale_pct`
+takes the scale) and puts between the app and it a model of the two ways
+QEMU's EDID carries a size. It tries every pair of sides from 22 points to two
+metres, at one and at two pixels to a point; a side under a centimetre only
+against one of no more than 640 points. Under 22 points the rounding of the
+millimetres is too much of the side (21 points at two pixels to a point read
+175%), and Caveats has the strip. With a guest, `docs/MAC-RUNNER.md` M-3:
+2560x1600 told, 200% taken. The telling is an
 entry in the input queue (`Input::Size`), so the window's thread does not wait
 for QEMU and the size is in order with the keys. `setFrameSize:` and
 `viewDidChangeBackingProperties` each put back a one-shot timer (`SETTLE`); when
@@ -184,12 +195,15 @@ is in the run loop's ordinary mode, and AppKit runs a drag of the window's edge
 in another, so a drag should be told where it ends; no test drags.
 
 What QEMU does with it, read in 11.1.3 (`ui/console.c`, `qemu_console_set_ui_info`;
-`hw/display/virtio-gpu-base.c`, `virtio_gpu_ui_info`) and then measured with no
-guest by the size leg on 10.0.2 and 11.1.3, against a QEMU that is paused: it
-drops a repeat of the same size, and otherwise a timer on the real-time clock,
-which runs while the machine does not, hands the size to the device. The device overwrites the size its
-`xres` and `yres` properties seeded, answers `GET_DISPLAY_INFO` and `GET_EDID`
-from it, and raises `VIRTIO_GPU_EVENT_DISPLAY`.
+`hw/display/virtio-gpu-base.c`, `virtio_gpu_ui_info`): it drops a repeat of the
+same size, and otherwise a timer on the real-time clock, which runs while the
+machine does not, hands the size to the device. The device overwrites the size
+its `xres` and `yres` properties seeded, answers `GET_DISPLAY_INFO` and
+`GET_EDID` from it, and raises `VIRTIO_GPU_EVENT_DISPLAY`. Measured with no
+guest by the size leg, on 10.0.2 and 11.1.3 and against a QEMU that is paused:
+the device's two answers and the event. That QEMU drops a repeat is read only;
+the leg cannot see it, because the app sends none. The offsets (the app sends
+0, 0) are not in QEMU's answer to a guest at all.
 
 **Keys the guest holds.** `keymap::Held` maps each key code that is down to
 the place it was sent as, and decides everything: a key-up for a code not in
@@ -202,7 +216,9 @@ carry the keyboard driver's own bit for each of the eight modifier keys
 (`NX_DEVICE*KEYMASK`) below the bit AppKit names for the pair, and the key's
 own bit says whether it is down. An event made without those bits has only
 the pair's, which stays set while the twin is down, so there a change to a
-key that was down is taken as its release. Every event, of any kind, also
+key that was down is taken as its release, and a change to one the guest does
+not hold as a press. That last is a guess while the twin holds the bit
+(Caveats). Every event, of any kind, also
 says which pairs are down; a modifier the guest holds whose pair the event
 shows up was released where the view could not see it, and is released in the
 guest before the event's own key or button is sent.
@@ -349,8 +365,8 @@ sharing for good), to the bounds of the copy into the texture, to what is done
 while the mutex is held (QEMU waits a second, once, and then stops sharing),
 to the bookkeeping of held keys and buttons, the way out included (one
 left down in the guest), and to what the guest is told of the window: a size
-of nothing turns the guest's display off, and a size told at every step of a
-drag is a mode the guest sets at every step.
+of nothing, were one sent, turns the guest's display off, and a size told at
+every step of a drag is a mode the guest sets at every step.
 
 ## Seams
 
@@ -395,6 +411,35 @@ drag is a mode the guest sets at every step.
   is not affected: its `mode` refuses what it cannot make (and more than
   3840x2160; the scale stops at 200%). The fix is the guest's, a mode for any
   host size, and is not landed.
+- **A large view's EDID has whole centimetres and no preferred timing.** QEMU
+  is told no refresh rate and takes 75 Hz, and its EDID gets no detailed
+  timing when a side is 4096 pixels or more, or the pixel clock would pass the
+  field's 655.36 MHz, which is from 6.25 megapixels: about 1582x989 points on a
+  screen with two pixels to a point (full screen on a 16-inch MacBook Pro, an
+  iMac, a Studio Display), 3164x1977 on a screen with one. The base block then
+  has the size in whole centimetres, cut and not rounded, and the mode only in
+  an extension block. The scale a guest takes is still the Mac's: the unit
+  test covers those sizes, and the size leg reads such a block from QEMU
+  (4200x700 points told, `111x18 cm` answered, on 10.0.2 and 11.1.3). What
+  looks for a preferred mode in the base block finds none. A strip, under a
+  centimetre one way and that long the other, has no centimetres at all and
+  gives a guest no size; no window is that shape (the least is 640x400
+  points).
+- **A modifier from a source that gives it no bit of its own.** An event made
+  by a remapper or a test can carry only the flag a pair shares. While one key
+  of the pair holds that flag, a change to the other that the guest does not
+  hold is sent as a press. It is a guess. The same event is the release of a
+  key the guest was made to let go of (the window lost the keys while both
+  were down), and then the guest sees a press where there was a release; it
+  ends when the flag clears, and the script has the case. The other guess
+  loses a press that was real, and a key that does not work is the worse of
+  the two. Asking the system which keys are down was weighed and not taken:
+  its answer is of the moment it is asked and not of the event, and whether it
+  follows events made without the bits could only be tried by posting keys
+  into a person's session. The mirror: a key from such a source going down
+  while its twin on a real keyboard is down has the pair's bits and not its
+  own, which is what a release looks like, and is read as one; the guest
+  still holds the twin.
 - **The pointer's colours are not managed.** The picture is tagged sRGB; the
   pointer's image is given to AppKit as device RGB.
 - **The input queue has no bound.** Adjacent pointer positions are sent as
@@ -416,7 +461,18 @@ drag is a mode the guest sets at every step.
   leaves through `terminate:` by its own deadline); a hand on the window's
   edge (the script sets the content's size three times in one turn of the run
   loop, so that a drag is told only where it ends is read, not run), full
-  screen, and a move to a screen with other pixels to a point.
+  screen (how many sizes the transition goes through, and whether any stands
+  a quarter of a second, is not known), and a move to a screen with other
+  pixels to a point; Caps Lock (one event a toggle, sent as a press and a
+  release); Sticky Keys and a remapped Caps Lock, whose events have not been
+  looked at; how long the size must stand and which run-loop mode its timer
+  is in (the size leg passes with any wait under some three quarters of a
+  second, none included); that the size is told before any input (no leg has
+  both); a console whose device takes no size; the half second the releases
+  are given at quit (that the wait ends when asked has a unit test). An
+  upload of part of a frame, after the first, has no unit test and no
+  headless leg (QEMU's placeholder is one frame); the guest run of M-3 drove
+  it for 87 frames and the picture was QEMU's.
 - **Two keyboards of different kinds** are read through one call that answers
   for the keyboard last typed on. A key is sent as the place it went down as,
   so it cannot stick; which of two places a key pressed on the other keyboard
