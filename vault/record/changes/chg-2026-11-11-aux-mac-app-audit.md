@@ -4,7 +4,7 @@ type: chg
 title: "The Mac app after its first window: the guest's pointer, and two audit rounds"
 date: 2026-11-11
 arc: arc-mac-runner
-commits: ["985bbb42c", "*(pending)*"]
+commits: ["985bbb42c", "8421fd848"]
 touched:
   - sub-macrunner-app
 established: []
