@@ -4,7 +4,7 @@ type: chg
 title: "The Mac app: audit round 3's seven findings"
 date: 2026-11-11
 arc: arc-mac-runner
-commits: ["*(pending)*"]
+commits: ["319e5a47d"]
 touched:
   - sub-macrunner-app
 established: []
