@@ -25,6 +25,7 @@ Generated — do not edit between the markers (`quaestor render`).
 | [[arc-holotype-rw]] | active | 9 |
 | [[arc-identity-detour]] | active | 12 |
 | [[arc-life-support]] | active | 2 |
+| [[arc-mac-runner]] | active | 2 |
 | [[arc-net]] | active | 14 |
 | [[arc-phase1-foundation]] | complete | 3 |
 | [[arc-phase2-lifecycle]] | active | 4 |
@@ -123,12 +124,12 @@ Generated — do not edit between the markers (`quaestor render`).
 
 ## Recent changes
 
+- 2026-11-10 [[chg-2026-11-10-aux-device-windows]] — The kernel never touches a device window on a user's behalf: /proc mem, claims over RAM, the CPU's address size, a bus error in a copy
+- 2026-11-10 [[chg-2026-11-10-aux-mmio-forms]] — Device accesses take one instruction form; GICv3 boots under HVF
 - 2026-11-09 [[chg-2026-11-09-aux-commit-death]] — A fatal note's unwind commits the death: no handler installed a moment later revokes it (vote 35)
 - 2026-11-09 [[chg-2026-11-09-aux-unlock]] — An unlock that never left for want of memory is sent again: the aux join's round 3 F2, bounded where a kill cannot reach
 - 2026-11-06 [[chg-2026-11-06-aux-join2]] — The aux join: aux-3 (the thread-model arc through ENOEXEC) reaches main through corona's branch
 - 2026-11-05 [[chg-2026-11-05-as4-r6-join]] — AS-4 audit round 6, the join's half
 - 2026-11-05 [[chg-2026-11-05-as4-r6-shell]] — AS-4 audit round 6, the shell's half
 - 2026-11-05 [[chg-2026-11-05-as4-r7-join]] — AS-4 audit round 7, the join's half
-- 2026-11-05 [[chg-2026-11-05-as4-r7-shell-corrected]] — AS-4 round 7's shell chg, corrected
-- 2026-11-05 [[chg-2026-11-05-as4-r7-shell]] — AS-4 audit round 7, the shell's half
 <!-- generated:end -->

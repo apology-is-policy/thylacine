@@ -393,6 +393,10 @@ high region that does not fit (`virt_set_high_memmap`, `:2493-2516`): on a 36-bi
 512 GiB high PCIe window is dropped, so a virtio-gpu `hostmem` BAR of any size has no home
 -- the exact problem UTM's "shrink the high PCIe MMIO window" patch fixes (C2). Blob /
 hostmem resources on the M2 therefore need that patch (or `hostmem=0` -- no mapped blobs).
+The guest reads the same limit: `mmu_pa_bits()` is `ID_AA64MMFR0_EL1.PARange` capped at 40,
+and a device claim or a user leaf past it is refused. Before that bound the kernel assumed
+40 bits, and the first touch of a leaf above 64 GiB was an address size fault (measured,
+`aux-gate/macrunner/m7`: ESR `0x96000003`). A BAR the fork places must stay under it.
 
 **D6. Host pages are 16 KiB.** `qemu-10.1:accel/hvf/hvf-all.c:99-115`: a RAM section not
 aligned to `qemu_real_host_page_size()` "can not map as RAM" (it becomes MMIO-trapped).
@@ -871,7 +875,8 @@ scratch vCPU and record the M2's feature words for section 5.
 **Ran 2026-11-10** (`aux-gate/macrunner/m1`, `m2`, `m3`; finding D1a). Login-level verdict:
 the whole suite, 2442/0, four boots of four under the in-kernel GICv3 on the final build.
 The banner's GIC line says v3. MSI: GICv2m with `its=auto`, none with `its=off`; the
-launcher's `thylacine.msi` case for GICv3 under HVF is owed. Boot to the marker 71.6 to
+launcher declares `thylacine.msi` for GICv3 under HVF with `its=auto` (f48fc214c), and the
+four MSI tests run there. Boot to the marker 71.6 to
 84.4 s against 72.5 to 79.0 s on the emulated GICv2: no wall-time difference at this
 grain. The ID registers are in D4. Not run: `ci-smp-gate` under it (the full gate is held).
 
