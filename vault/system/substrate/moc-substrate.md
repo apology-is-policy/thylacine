@@ -16,6 +16,9 @@ counts. Five dossiers:
 - **[[sub-substrate-machine]]** — `tools/run-vm.sh`: the QEMU virt board,
   the HVF/TCG matrix, the device wiring whose ORDER is load-bearing, and
   the `nowatchpoint` token whose absence is the safe default.
+- **[[sub-macrunner-app]]** — `macrunner/app`: the Mac app's window, its D-Bus
+  display listener and its input path; attaches to a QEMU run under
+  `THYLACINE_DISPLAY=app`.
 - **[[sub-substrate-gates]]** — the non-interactive verdicts: `test.sh`,
   `smp-multiboot.sh`, `ci-smp-gate.sh`, `check-v80-floor.py`.
 - **[[sub-substrate-interactive]]** — LS-CI: the only harness that can

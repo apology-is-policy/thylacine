@@ -1,0 +1,21 @@
+[package]
+name = "thylacine-mac"
+version = "0.0.1"
+edition = "2021"
+publish = false
+license = "GPL-3.0-only"
+description = "Thylacine for Mac: the window that shows the guest (docs/MAC-RUNNER.md)"
+
+[dependencies]
+zbus = { version = "6.2", features = ["p2p"] }
+libc = "0.2"
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["std"] }
+objc2-app-kit = { version = "0.3", features = ["std"] }
+objc2-quartz-core = { version = "0.3", features = ["std"] }
+objc2-metal = { version = "0.3", features = ["std"] }
+objc2-core-foundation = { version = "0.3", features = ["std"] }
+objc2-core-graphics = { version = "0.3", features = ["std"] }
+
+[profile.release]
+debug = 1

@@ -712,7 +712,9 @@ crate as the typed proxies; MIT), a 9P server crate (there is none in the tree's
 that targets std; write a small one -- the message set is 13 verbs), `clonefile` via libc.
 No winit, no wgpu: the window needs native menus, kiosk presentation options, IME and
 exact key routing (R2), and the drawing is one textured quad (F11). Threads: main (AppKit
-+ display link), D-Bus (zbus executor), 9P server, XPC. Rendering with raw Metal keeps the
++ display link), D-Bus (one thread that owns both connections and never leaves `block_on`:
+zbus 6 has no executor thread of its own and QEMU calls the listener synchronously, M-3),
+input (so that the window's thread never waits for QEMU), 9P server, XPC. Rendering with raw Metal keeps the
 IOSurface path a two-liner (`newTextureWithDescriptor:iosurface:plane:`).
 
 ### 4.6 The QEMU fork
@@ -831,7 +833,9 @@ to print the ID registers from a scratch vCPU); it costs seconds per machine.
    browser) stays closed until virgl is sandboxed or the render server covers it.
 4. **TOOLING.md 60-100 / 690-720 and DISPLAY-MODES.md**: a new display mode `app`
    (`-display dbus,p2p=on`), the GICv3-under-HVF flip, `run-vm.sh` growing the fork as an
-   optional `THYLACINE_QEMU=` binary.
+   optional `THYLACINE_QEMU=` binary. (Done 2026-11-11: `THYLACINE_DISPLAY=app`, and `=dbus`
+   with serial left live for tests; both drop `gpu-mmio0`, because a client is handed
+   console 0. `THYLACINE_QEMU=` is still owed.)
 5. **Lictor (Astra, `docs/handoffs/`)**: handle `VIRTIO_GPU_EVENT_DISPLAY` as `mode auto`
    (B5). **Corona**: the `snarf` file contract (E6). **Nocturne**: nothing changes for
    `-audiodev coreaudio`; the dbus audio route is a host-side swap.
@@ -890,6 +894,43 @@ M-3 **D-Bus p2p + Unix.Map on macOS.** `-display dbus,p2p=on` + a 150-line zbus 
 `ScanoutMap`). Verdict: the fd mmaps (the mkstemp fallback) and pixels match a QMP
 screendump; per-frame cost of `UpdateMap` -> Metal upload at 2560x1600 on a 60 Hz link
 (ms/frame, %CPU of app and helper); input round trip (keystroke to echo) in ms.
+
+**Ran 2026-11-10 and 2026-11-11, the part that needs no guest** (`macrunner/app/test/headless.sh`;
+QEMU 10.0.2 and 11.1.3, unpatched, started `-S -nodefaults -display dbus,p2p=on -device
+virtio-gpu-pci`, so no vCPU runs and the console shows QEMU's placeholder). The transport works
+on macOS as built: the private D-Bus connection comes up over a socket pair handed in by QMP
+`getfd` + `add_client` with EXTERNAL authentication (0.8 ms), `RegisterListener` is accepted, and
+`Listener.Unix.Map` delivers the scanout as a file descriptor that maps (640x480, stride 2560,
+pixman `0x20020888`). The mapped frame, and the app's own output read back from Metal at 1:1, are
+each byte-identical to QMP `screendump`; so is the app's output when it does not advertise
+`Unix.Map` and QEMU sends the pixels in `Listener.Scanout` instead. A deliberately flipped shader
+turns the comparison red. Not shown by a grey-on-black placeholder: channel order and colour
+management, which need a guest frame with colour. Owed under a lease: a real guest, damage rates,
+key-to-damage time, the per-frame upload cost at 2560x1600.
+
+Four things that run measured and the design did not say:
+
+1. **QEMU's main loop calls the listener synchronously** (`ui/dbus-listener.c`: the proxies are
+   made with `*_proxy_new_sync`, and `ScanoutMap` is `call_scanout_map_sync` with
+   `DBUS_DEFAULT_TIMEOUT`). zbus 6 runs a connection on the thread that is inside `block_on` and
+   has no thread of its own, so a listener whose thread sleeps stalls the VM: 5019 ms to the
+   first frame with the probe's thread asleep, 1.3 ms with both connections on a thread parked in
+   `block_on`. The app keeps one thread for D-Bus that does nothing else, and sends input from
+   another so that the window's thread never waits for QEMU.
+2. **A display link does not tick while the display sleeps** (0 ticks in 4 s with
+   `CGDisplayIsAsleep` true; about 57 a second awake). Only presentation may hang off
+   `NSView.displayLink`; anything that must happen regardless needs its own source.
+3. **AppKit does not deliver a key-up while Command is held.** Reproduced through
+   `NSApplication.sendEvent`: Command down, D down, D up, Command up reached QEMU as press 219,
+   press 32, release 219, so the guest keeps D held. The app's `NSApplication` subclass hands that
+   key-up to the event's window; the same script then gives press 219, press 32, release 32,
+   release 219.
+4. **The click that activates the window does not reach the guest** (`acceptsFirstMouse:` is NO
+   by default; with YES the click arrives). Kept as AppKit has it.
+
+And one thing reading the app's source found, which no well-behaved QEMU shows: **macOS grants a
+shared mapping past the end of a file** (1 MiB of an 8192-byte file, measured) and faults on the
+read, so `ScanoutMap`'s geometry is checked against the file's length before the map.
 
 M-4 **virgl GL over ANGLE.** Build libepoxy (EGL only), ANGLE (from WebKit, UTM's
 script), upstream virglrenderer; patch `egl_init` for Darwin; `-device

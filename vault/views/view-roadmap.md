@@ -24,7 +24,7 @@ Generated from note fields — do not edit between the markers
 | [[arc-holotype-rw]] | active | 9 |  |
 | [[arc-identity-detour]] | active | 12 |  |
 | [[arc-life-support]] | active | 2 |  |
-| [[arc-mac-runner]] | active | 2 |  |
+| [[arc-mac-runner]] | active | 3 |  |
 | [[arc-net]] | active | 14 | seam-221-idle-pump-wake, seam-223-pump-tail-starvation, seam-220-netd-listener-poll, seam-56-netd-cancelled-tag, seam-240-lo-redial, seam-242-selftest-nonfatal, seam-netd-host-tests |
 | [[arc-phase2-lifecycle]] | active | 4 |  |
 | [[arc-phase5-namespace]] | active | 3 |  |

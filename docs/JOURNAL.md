@@ -22,6 +22,22 @@ needed the operator.
 
 
 ---
+## 2026-11-11 (aux): the Mac app's first window goes into the tree, read before it landed
+
+Stamped 2026-11-11T13:45Z. Branch aux-3-mac, after 17320343d (the entry below): f003526d8 (two display modes in `run-vm.sh`) and the commit that carries this entry (`macrunner/app`). The guest measurement (M-3) is queued for the mac behind main and corona and is NOT in this entry.
+
+**What it is.** `macrunner/app`, crate `thylacine-mac`: one AppKit window with a Metal layer that shows gpu0 and sends keys and the pointer, attached over QMP to a QEMU run with `-display dbus,p2p=on`. About 1,900 lines of Rust on `objc2` and `zbus`. It does not start QEMU, resize the guest, share a clipboard or a folder: those are the next stations. Its test (`macrunner/app/test/headless.sh`) needs no guest and no person: the pipeline's 1:1 output read back from Metal is QEMU's screendump byte for byte on both pixel paths, and 22 scripted AppKit events reach QEMU's trace as exactly the scripted run. Green on QEMU 11.1.3 and on the stock 10.0.2, macOS 27.2.1. Controls that went red when they should: a shader with the picture upside down and the missing key-up under Command (both 2026-11-10), and a leg forced onto the other pixel path (today).
+
+**The wrong turn the lease was spared.** My plan for the guest run was `THYLACINE_DISPLAY=gpu-headless` with `-display dbus,p2p=on` passed through `THYLACINE_QEMU_EXTRA`. Reading `run-vm.sh` to script it showed why that could not work: `gpu-headless` keeps the vestigial `gpu-mmio0` (QEMU keeps no console surface under `-nographic` without it), and under a display backend that device takes console 0, the console the app registers on. The app would have been handed the wrong head. So the launcher has two modes now: `dbus` (serial live, for a test that logs in over serial) and `app` (the gpu deployment). I checked the command lines with a stand-in `qemu-system-aarch64` that records its arguments, and the stand-in had a bug of its own: its `*-version*` arm matched `gic-version=3`, so the first run said rc=0 for every mode and recorded nothing. The missing output files said so; a check that only read the exit status would not have.
+
+**What reading the source found before it landed.** I read all four files again as a reviewer, since this is the first code of the arc that parses what another process sends. Four defects, none reachable by the test because the test's QEMU is well-behaved and its picture is static: (1) a scanout of zero width or beyond Metal's 16384 reached texture creation, and a zero height underflowed the copy's bound; (2) `ScanoutMap` mapped whatever length QEMU claimed, and macOS grants that (I measured: a 1 MiB shared mapping of an 8192-byte file is granted) and faults on the read; (3) a frame was dropped for good when the layer had no drawable to give, until the next damage; (4) a trackpad scrolled one wheel notch per event, which is dozens a second. Fixed: one `geometry` function at the boundary, an `fstat` before the map, a frame that stays owed, and scroll accumulated to a notch per ten points. Unit tests for 1, 2 and 4; 8 tests in all. The second control for (2) is the measurement itself: without the check the map is granted.
+
+**What "tested" covers here.** The picture path up to but not including the panel, with a grey-on-black placeholder: no colour, no damage after the first frame, no guest. The key and pointer path from `sendEvent` on, not from the window server. Not the scroll wheel end to end. Nobody has looked at the glass.
+
+**New audit surface.** The app is a host process with the user's authority reading what QEMU sends, so its boundary has a row in `docs/AUDIT-TRIGGERS.md` and the dossier (`sub-macrunner-app`) is `audit: hard`. Its first round has not run; nothing of it goes to `main` before it does.
+
+**Decisions.** None asked. One left for the operator: the manifest says `GPL-3.0-only` because vote M1 says "GPLv3"; "or later" is one word if that is what was meant.
+
 ## 2026-11-10 (aux), later: the device-window bug was one of four, and each fix was booted without itself first
 
 Stamped 2026-11-11T13:13Z. Branch aux-3-mac: 6f8ab5387 (the entry below), then e5e9d7b2e, f48fc214c, 5340e2713 and 91c0d51af, each marked WIP because it was committed before its lease, then the commit that carries this entry. No vote was asked in this half. One operator instruction arrived (17:41Z, a broadcast): leave thyla-pi alone until told otherwise; I had nothing running there and it is persisted.

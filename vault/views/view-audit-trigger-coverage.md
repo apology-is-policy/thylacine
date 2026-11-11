@@ -40,7 +40,7 @@ that would catch it — has the owning dossier been updated since the row last
 changed on main? — is the next increment, tracked as task #169.
 
 <!-- generated:begin -->
-**250 declared surfaces · 243 covered by a hard-audit dossier · 7 soft-owned · 0 unowned · 0 unparsed · 27 cited path(s) that do not resolve.**
+**251 declared surfaces · 243 covered by a hard-audit dossier · 7 soft-owned · 0 unowned · 1 unparsed · 27 cited path(s) that do not resolve.**
 
 ### Cited paths that do not resolve
 
@@ -83,6 +83,7 @@ changed on main? — is the next increment, tracked as task #169.
 | Host-side pool populate via existing `stratumd + stratum-fs` (host build infra) | soft-owned | owned by [[sub-substrate-build]], none `audit: hard` |
 | Kaua console-TUI substrate: the cons/consctl backend + the ut raw-mode dance (LS-7) | soft-owned | owned by [[sub-kaua]], [[sub-nora-engine]], [[sub-nora-host]], [[sub-nora-view]] (+2 more), none `audit: hard` |
 | Rust registered payload ownership | soft-owned | owned by [[sub-libthyla-rs]], none `audit: hard` |
+| The Mac app's boundary with QEMU: the display listener, the upload, the keys (the Mac runn… | **unparsed** | no path token extracted — the ledger cannot judge this row |
 | Thylacine mkfs RNG seed pinning | soft-owned | owned by [[sub-substrate-build]], none `audit: hard` |
 | mesa W-3d: the WSI DIRECT path -- vn_wsi_thylacine + the no-eager-mint marker + the img cl… | soft-owned | owned by [[sub-substrate-remote-host]], none `audit: hard` |
 <!-- generated:end -->
