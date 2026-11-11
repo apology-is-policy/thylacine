@@ -129,6 +129,13 @@ context with NO listener and no readback: nothing can look at it
 (no screendump, no VNC), so it is the measurement lane for the guest's
 own present costs and only that (`WARP_DISPLAY=dbus-gl
 tools/warp-host.sh decomp gl`). Both drop `gpu-mmio0` like `vnc:N`.
+`=dbus` (`-display dbus,p2p=on`, no GL) is the display a client attaches
+to: the Mac app (`macrunner/app`, `docs/MAC-RUNNER.md` 4.2) or a probe
+hands QEMU one end of a socket pair over QMP (`getfd` + `add_client`) and
+registers a listener on console 0; the scanout is the guest's 2D
+resource, so QMP `screendump` reads the same picture. `=app` is that
+backend as the gpu deployment (`thylacine.display=gpu`, serial quiet
+after boot): what the app runs. Both drop `gpu-mmio0`.
 
 **N is ALLOCATED, never hardcoded (#127).** `lc_pick_vnc_display`
 (`tools/interactive/lib.exp`) derives a per-tree base from the repo's

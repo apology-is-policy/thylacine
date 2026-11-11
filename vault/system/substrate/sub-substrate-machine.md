@@ -12,7 +12,7 @@ locks: []
 abis: [abi-boot-banner]
 design: ["docs/TOOLING.md", "docs/PORTABILITY.md"]
 created: 2026-08-01
-updated: 2026-11-10
+updated: 2026-11-11
 ---
 ## Purpose
 
@@ -283,6 +283,17 @@ sized for the slower TCG compat run. Idle cost under HVF was the subject of
 
 ## Caveats
 
+- **The Mac app's display is two modes on one backend** (2026-11-11).
+  `THYLACINE_DISPLAY=dbus` and `=app` both run `-display dbus,p2p=on` (no GL)
+  and drop `gpu-mmio0`, so gpu0 is console 0: the console a D-Bus client
+  registers its listener on. `dbus` is testing-hybrid (serial live, no token);
+  `app` emits `thylacine.display=gpu`. QEMU opens no window in either. A
+  client attaches by handing one end of a socket pair over QMP (`getfd`, then
+  `add_client` with protocol `@dbus-display`); the scanout stays the guest's
+  2D resource, so QMP `screendump` reads the picture the client is given.
+  `gpu-headless` with a `-display` in `THYLACINE_QEMU_EXTRA` is not a
+  substitute: it keeps `gpu-mmio0`, which takes console 0. The modes need a
+  QEMU built with the D-Bus display (`--enable-dbus-display`).
 - **Under cocoa, the guest's Super is the Mac's Cmd, and macOS takes some Cmd
   combos first** (2026-09-16, operator-found): Cmd+Tab (the app switcher),
   Cmd+H (Hide -- Halcyon's split), Cmd+Shift+Q (Log Out -- Halcyon's close).

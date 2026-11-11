@@ -524,7 +524,7 @@ case "$result" in
                     thylacine.virtio-gpu)
                         [[ "${THYLACINE_NO_GPU:-0}" == "1" ]] && return 0
                         case "${THYLACINE_DISPLAY:-none}" in
-                            console|vnc:*|vnc-unix|egl-headless|dbus-gl|gpu) return 0 ;;
+                            console|vnc:*|vnc-unix|egl-headless|dbus-gl|dbus|app|gpu) return 0 ;;
                         esac
                         return 1 ;;
                     thylacine.virtio-blk)

@@ -22,7 +22,7 @@ locks: []
 abis: [abi-boot-banner]
 design: ["docs/TOOLING.md", "docs/PORTABILITY.md", "docs/DEBUGGING-PLAYBOOK.md"]
 created: 2026-08-01
-updated: 2026-11-09
+updated: 2026-11-11
 ---
 ## Purpose
 
@@ -392,7 +392,7 @@ the verdict fails on it. Each gated skip must then be explained by this
 script's own configuration, kind by kind: `virtio-net` by `THYLACINE_NO_NET=1`;
 `virtio-input` and `virtio-pci-input` by `THYLACINE_NO_INPUT=1`; `virtio-gpu`
 by `THYLACINE_NO_GPU=1` or a display that drops the MMIO GPU (console, vnc,
-egl-headless, dbus-gl, gpu); `virtio-blk` by neither `disk.img` nor `pool.img`;
+egl-headless, dbus-gl, dbus, app, gpu); `virtio-blk` by neither `disk.img` nor `pool.img`;
 `smp` and `msi` by run-vm.sh's own `==> qemu:` line (one CPU; a GICv3 machine
 with `its=off`, under KVM, or under hvf with `its=on`, where the launcher
 cannot know the ITS; under hvf with `its=auto` the launcher declares the

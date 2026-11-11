@@ -145,7 +145,7 @@ round-trip); reading `/dev/winsize` first sidesteps both.
    launcher, with `gpu0` bound to console 0 like the other real backends) →
    append `thylacine.display=gpu`. **Only these two EXPLICIT values emit a
    token.** The pre-existing display backends -- `cocoa` / `vnc:N` /
-   `egl-headless` / `dbus-gl` -- stay **testing-hybrid** (serial LIVE, no token),
+   `egl-headless` / `dbus-gl` / `dbus` -- stay **testing-hybrid** (serial LIVE, no token),
    and this is not a nicety but a correctness requirement: `ls-gfx-live.exp`
    boots under `vnc:N` and then *logs in over serial, drives serial round-trips,
    and sweeps the serial tee for controlq-desync diagnostics* -- so folding

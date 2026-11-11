@@ -388,13 +388,14 @@ if [[ "${THYLACINE_NO_GPU:-0}" != "1" && "${THYLACINE_DISPLAY:-none}" != "consol
     # head (the ls-gfx-live #31 leg). cocoa keeps the canonical device set
     # (its View menu switches consoles interactively).
     # Drop the vestigial MMIO gpu ONLY when a real display backend binds
-    # QemuConsole 0 (vnc/egl-headless/dbus-gl, and gpu->cocoa): there gpu0 must
-    # take console 0, and gpu-mmio0 would squat it. gpu-headless is -nographic
+    # QemuConsole 0 (vnc/egl-headless/dbus-gl/dbus/app, and gpu->cocoa): there
+    # gpu0 must take console 0, and gpu-mmio0 would squat it. gpu-headless is -nographic
     # (NO backend), so QEMU only maintains a console surface for a BOUND scanout
     # -- keep gpu-mmio0 (exactly the default -nographic device set) or gpu0's
     # scanout gets no surface and aurora waits forever for its first present.
     if [[ "${THYLACINE_DISPLAY:-none}" == vnc:* || "${THYLACINE_DISPLAY:-none}" == "vnc-unix" || "${THYLACINE_DISPLAY:-none}" == "egl-headless" \
-       || "${THYLACINE_DISPLAY:-none}" == "dbus-gl" || "${THYLACINE_DISPLAY:-none}" == "gpu" ]]; then
+       || "${THYLACINE_DISPLAY:-none}" == "dbus-gl" || "${THYLACINE_DISPLAY:-none}" == "gpu" \
+       || "${THYLACINE_DISPLAY:-none}" == "dbus" || "${THYLACINE_DISPLAY:-none}" == "app" ]]; then
         gpu_flags=(
             -device "$gpu_dev,id=gpu0,disable-legacy=on$gpu_res$pci_gpu_addr"
         )
@@ -557,6 +558,13 @@ fi
 #                             (headless live-display; the ls-gfx-live #31
 #                             leg -- gpu-mmio0 is dropped so gpu0 binds
 #                             QemuConsole 0, see gpu_flags above)
+#   THYLACINE_DISPLAY=app     the Mac app's display (docs/MAC-RUNNER.md 4.2):
+#                             QEMU opens no window; the app attaches over
+#                             the QMP socket and draws gpu0 itself. The gpu
+#                             deployment, so serial goes quiet after boot.
+#   THYLACINE_DISPLAY=dbus    the same display with serial left live, for a
+#                             test that logs in over serial and looks at
+#                             the picture through a D-Bus client.
 case "${THYLACINE_DISPLAY:-none}" in
     none)  display_flags=(-nographic) ;;
     # DISPLAY-MODES.md the two production postures. console (mode 1): serial is
@@ -605,7 +613,13 @@ case "${THYLACINE_DISPLAY:-none}" in
     # (no screendump, no VNC): it is the lane for measuring the guest's own
     # present costs, and only that.
     dbus-gl) display_flags=(-display dbus,p2p=on,gl=on) ;;
-    *)     echo "run-vm.sh: unknown THYLACINE_DISPLAY='${THYLACINE_DISPLAY}' (none|console|gpu|gpu-headless|cocoa|vnc:N|vnc-unix|egl-headless|dbus-gl)" >&2
+    # The 2D D-Bus display a client attaches to (the Mac app, or a probe): QMP
+    # `getfd` + `add_client` hand it one end of a socket pair, and it registers
+    # a listener on console 0. No GL, so the scanout is the guest's 2D resource
+    # and QMP screendump still reads it. `dbus` is testing-hybrid; `app` is the
+    # gpu deployment (the token below) on the same backend.
+    dbus|app) display_flags=(-display dbus,p2p=on) ;;
+    *)     echo "run-vm.sh: unknown THYLACINE_DISPLAY='${THYLACINE_DISPLAY}' (none|console|gpu|gpu-headless|cocoa|vnc:N|vnc-unix|egl-headless|dbus-gl|dbus|app)" >&2
            exit 2 ;;
 esac
 
@@ -743,12 +757,12 @@ fi
 # DISPLAY-MODES.md the display-mode signal. The kernel has no cmdline parser;
 # the guest reads this back through /hw/chosen/bootargs (aurora, joey). Only the
 # two EXPLICIT production values emit it -- the testing-hybrid backends
-# (cocoa/vnc/egl-headless/dbus-gl) and the -nographic default stay tokenless so
+# (cocoa/vnc/egl-headless/dbus-gl/dbus) and the -nographic default stay tokenless so
 # serial keeps flowing and no existing gate churns. Substring-matched by both
 # readers, so the full key=value token discriminates console from gpu.
 case "${THYLACINE_DISPLAY:-none}" in
     console)            append_tokens+=("thylacine.display=console") ;;
-    gpu|gpu-headless)   append_tokens+=("thylacine.display=gpu") ;;
+    gpu|gpu-headless|app) append_tokens+=("thylacine.display=gpu") ;;
 esac
 # HALCYON-SCALE 3 (SC-5): the platform's scale declaration. QEMU's synthetic
 # EDID claims 100 DPI at any size (cocoa passes no physical size; virtio-gpu
