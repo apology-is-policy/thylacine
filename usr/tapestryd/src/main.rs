@@ -741,6 +741,9 @@ impl Driver for Tapestryd {
             // device and post each on its owning ctx -- then the deferred
             // event-read + fence-read deliveries (backward, remove-safe).
             self.comp.warp_service_fences();
+            // The fence pump's reply carried the broker's count of display
+            // events: follow the host's display if it changed and has stood.
+            self.comp.display_pump();
             let mut i = conns.len();
             while i > 0 {
                 i -= 1;

@@ -1489,6 +1489,57 @@ const MODE_MAX_H: u32 = 2160;
 /// The kernel's KOBJ_DMA_WEAVE_MAX_SIZE (dma_handle.h) -- the per-weave
 /// framebuffer-class cap a fullscreen surface at the new mode must fit.
 const WEAVE_MAX_SIZE: u64 = 64 * 1024 * 1024;
+/// The mode a display starts at when its host prefers a size that no whole
+/// number takes to one that can be made.
+const MODE_DEFAULT: (u32, u32) = (1024, 768);
+/// How long the host's display must have stood since it last changed before
+/// the mode follows it. Each size followed is a new screen, a reweave of
+/// every surface and a repaint by every client.
+const DISPLAY_QUIET_MS: u64 = 150;
+
+/// The bytes of one fullscreen client surface at `w x h`: WEAVE_SLOTS
+/// page-rounded buffers, as `alloc_weave` sizes it.
+fn surface_bytes(w: u32, h: u32) -> u64 {
+    let slot = (((w as u64) * 4 * (h as u64)) + PAGE - 1) & !(PAGE - 1);
+    slot * (WEAVE_SLOTS as u64)
+}
+
+/// Is `w x h` a mode at all: inside the coarse bounds, and (F3) its
+/// fullscreen TRIPLE-buffered surface inside the per-weave cap? A mode
+/// past the cap could be set, and the renderer's immediate fullscreen
+/// create would then fail, blanking the console.
+fn mode_in_bounds(w: u32, h: u32) -> bool {
+    (MODE_MIN_W..=MODE_MAX_W).contains(&w)
+        && (MODE_MIN_H..=MODE_MAX_H).contains(&h)
+        && surface_bytes(w, h) <= WEAVE_MAX_SIZE
+}
+
+/// F3-follow-up (the max-resolution display-brick, reported 2026-07-23):
+/// the STATIC cap is not enough -- the kernel's DMA allocator can fail
+/// BELOW KOBJ_DMA_WEAVE_MAX_SIZE (fragmentation / physical RAM). A
+/// 2560x1440 surface (44 MiB, < the 64 MiB cap) allocated its
+/// single-buffered SCREEN fine but its triple-buffered SURFACE weave then
+/// failed -1 -> the geometry was committed, so aurora's reweave died ->
+/// retire -> the display disconnected (and, persisted, bricked every boot).
+/// So the real fullscreen surface allocation is made, and released, before
+/// a mode is taken: by the `mode` verb, by the boot, and by a followed
+/// display event.
+fn surface_can_be_made(w: u32, h: u32) -> bool {
+    let size = surface_bytes(w, h);
+    let probe = unsafe { t_dma_create_weave(size, T_RIGHT_READ | T_RIGHT_WRITE | T_RIGHT_MAP) };
+    if probe < 0 {
+        say!(
+            "tapestryd: mode {}x{} refused -- surface weave {} unallocatable ({})",
+            w,
+            h,
+            size,
+            probe
+        );
+        return false;
+    }
+    unsafe { t_close(probe) };
+    true
+}
 
 /// What scanout 0 references (G-6). `Boot` = untouched since startup (the
 /// kernel test pattern stays until a first present -- the stage-0 look);
@@ -1593,6 +1644,14 @@ fn owner_unpack(v: u64) -> Option<(usize, u32)> {
 
 pub struct Comp {
     pub gpu: Gpu,
+    /// The mode follows the host's display: so from boot, until an explicit
+    /// `mode W H` pins one (which then stands whatever the host's window
+    /// does); `mode auto` follows again.
+    follow_host: bool,
+    /// `gpu.display_events` as of the last look, and when it last moved
+    /// (None once that change has been followed, or let stand).
+    display_seen: u32,
+    display_changed: Option<Instant>,
     /// HALCYON-SCALE 4: the display scale in percent (100/125/150/175/200)
     /// -- derived from the EDID at boot and on `mode auto`, overridden by
     /// the `scale` verb / chords; published as `scale <pct>` in the ctl.
@@ -2532,8 +2591,23 @@ impl Comp {
         Ok(())
     }
 
-    pub fn new(gpu: Gpu, declared: Option<u16>, bundle: libhalcyon::instrument::Bundle) -> Comp {
+    pub fn new(mut gpu: Gpu, declared: Option<u16>, bundle: libhalcyon::instrument::Bundle) -> Comp {
         let theme = bundle.theme;
+        // The host's rect is whatever its window happens to be, and the
+        // driver adopts any of it. A first mode whose fullscreen surface
+        // cannot be made would come up with a screen and no session on it,
+        // so the first mode is found as `mode auto` finds one.
+        let host = (gpu.width, gpu.height);
+        let first = scale::fit_mode(host.0, host.1, |w, h| {
+            mode_in_bounds(w, h) && surface_can_be_made(w, h)
+        })
+        .unwrap_or(MODE_DEFAULT);
+        if first != host {
+            say!("tapestryd: mode {}x{} for a display of {}x{}", first.0, first.1, host.0, host.1);
+            gpu.width = first.0;
+            gpu.height = first.1;
+        }
+        let display_seen = gpu.display_events;
         let (derived, src) = match declared {
             Some(p) => (p, "declared"),
             None => (
@@ -2557,6 +2631,9 @@ impl Comp {
         say!("tapestryd: scale {} ({})", scale, src);
         Comp {
             gpu,
+            follow_host: true,
+            display_seen,
+            display_changed: None,
             scale,
             scale_override: None,
             declared,
@@ -6061,47 +6138,82 @@ impl Comp {
     /// aurora startup push lands here; the surface then creates at the
     /// new geometry).
     fn set_mode(&mut self, w: u32, h: u32) -> Result<(), u32> {
-        if !(MODE_MIN_W..=MODE_MAX_W).contains(&w) || !(MODE_MIN_H..=MODE_MAX_H).contains(&h) {
-            return Err(p9::E_INVAL);
-        }
-        // F3: reject a mode whose fullscreen TRIPLE-buffered surface would
-        // exceed the per-weave cap -- else set_mode would succeed but the
-        // renderer's immediate fullscreen create fails, blanking the
-        // console. The page-rounded slot stride matches alloc_weave.
-        let slot = (((w as u64) * 4 * (h as u64)) + PAGE - 1) & !(PAGE - 1);
-        let surf_size = slot * (WEAVE_SLOTS as u64);
-        if surf_size > WEAVE_MAX_SIZE {
+        if !mode_in_bounds(w, h) {
             return Err(p9::E_INVAL);
         }
         if w == self.gpu.width && h == self.gpu.height {
             return Ok(()); // same mode: a push of the current value no-ops
         }
-        // F3-follow-up (the max-resolution display-brick, reported 2026-07-23):
-        // the STATIC cap is not enough -- the kernel's contiguous-DMA
-        // allocator can fail BELOW KOBJ_DMA_WEAVE_MAX_SIZE (buddy max-order /
-        // fragmentation / physical RAM). A 2560x1440 surface (44 MiB, < the
-        // 64 MiB cap) allocated its single-buffered SCREEN fine but its
-        // triple-buffered SURFACE weave then failed -1 -> set_mode had
-        // committed the geometry, so aurora's reweave died -> retire ->
-        // the display disconnected (and, persisted, bricked every boot).
-        // PRE-FLIGHT the real fullscreen surface allocation and reject the
-        // mode if it cannot back a surface -- the current working geometry
-        // stands, the OSD apply is refused (never persisted), and a
-        // startup push of a too-big persisted mode is rejected so aurora
-        // comes up at the default (the self-heal in aurora clears it).
-        let probe =
-            unsafe { t_dma_create_weave(surf_size, T_RIGHT_READ | T_RIGHT_WRITE | T_RIGHT_MAP) };
-        if probe < 0 {
-            say!(
-                "tapestryd: mode {}x{} refused -- surface weave {} unallocatable ({})",
-                w,
-                h,
-                surf_size,
-                probe
-            );
+        // The current working geometry stands on a refusal: the OSD apply
+        // is refused (never persisted), and a startup push of a too-big
+        // persisted mode is rejected (the self-heal in aurora clears it).
+        if !surface_can_be_made(w, h) {
             return Err(p9::E_NOMEM);
         }
-        unsafe { t_close(probe) };
+        self.change_mode(w, h)
+    }
+
+    /// The mode for a host that prefers `host_w x host_h`: that size, or it
+    /// over or times a whole number, the first that is a mode and whose
+    /// surface can be made (the mode that stands is known to be). None: the
+    /// host's size leads to no mode, and the one that stands stays.
+    fn mode_for_host(&self, host_w: u32, host_h: u32) -> Option<(u32, u32)> {
+        let cur = (self.gpu.width, self.gpu.height);
+        scale::fit_mode(host_w, host_h, |w, h| {
+            mode_in_bounds(w, h) && ((w, h) == cur || surface_can_be_made(w, h))
+        })
+    }
+
+    /// Ask the host what it prefers and take the mode for it, then the
+    /// scale its EDID gives that mode: `mode auto`, and what a display
+    /// event leads to while the mode follows the host. Absent or
+    /// probe-failed: fail soft, the current mode stands.
+    fn follow_display(&mut self) -> Result<(), u32> {
+        let (host_w, host_h) = self.gpu.query_display_info().ok().flatten().ok_or(p9::E_AGAIN)?;
+        let Some((w, h)) = self.mode_for_host(host_w, host_h) else {
+            say!("tapestryd: no mode for a display of {}x{}; {}x{} stands",
+                host_w, host_h, self.gpu.width, self.gpu.height);
+            return Err(p9::E_NOMEM);
+        };
+        if (w, h) != (host_w, host_h) {
+            say!("tapestryd: mode {}x{} for a display of {}x{}", w, h, host_w, host_h);
+        }
+        if (w, h) != (self.gpu.width, self.gpu.height) {
+            self.change_mode(w, h)?;
+        }
+        // The EDID is asked with it: a change of display is the one time
+        // it changes, and it can change under a mode that does not.
+        self.gpu.edid_mm = self.gpu.query_edid().unwrap_or(None);
+        self.rescale_after_mode();
+        Ok(())
+    }
+
+    /// Once a pass: has the host's display changed (the broker counts the
+    /// device's display events, and every reply carries the count)? The
+    /// mode follows once the count has stood for DISPLAY_QUIET_MS, unless
+    /// an explicit `mode W H` pinned it.
+    pub fn display_pump(&mut self) {
+        if self.gpu.display_events != self.display_seen {
+            self.display_seen = self.gpu.display_events;
+            self.display_changed = Some(Instant::now());
+        }
+        let Some(at) = self.display_changed.as_ref() else { return };
+        if (at.elapsed().as_millis() as u64) < DISPLAY_QUIET_MS {
+            return;
+        }
+        self.display_changed = None;
+        if !self.follow_host {
+            say!("tapestryd: display event {}: the mode is pinned and stands", self.display_seen);
+            return;
+        }
+        say!("tapestryd: display event {}: asking the host", self.display_seen);
+        if let Err(e) = self.follow_display() {
+            say!("tapestryd: display event {}: not followed (errno {})", self.display_seen, e);
+        }
+    }
+
+    /// The change itself, to a mode already judged one that can be made.
+    fn change_mode(&mut self, w: u32, h: u32) -> Result<(), u32> {
         say!(
             "tapestryd: mode {}x{} -> {}x{} (scanout {})",
             self.gpu.width,
@@ -19223,22 +19335,11 @@ impl Conn {
             return Ok(());
         }
         if s == "mode auto" {
-            // Re-probe the host's preferred rect and adopt it (base
-            // virtio-gpu reports one rect, not a mode list). Absent or
-            // probe-failed: fail soft, current mode stands. The EDID is
-            // re-queried with it (a hotplug is the one time it changes).
-            let probed = comp.gpu.query_display_info().ok().flatten();
-            return match probed {
-                Some((w, h)) => {
-                    let r = comp.set_mode(w, h);
-                    if r.is_ok() {
-                        comp.gpu.edid_mm = comp.gpu.query_edid().unwrap_or(None);
-                        comp.rescale_after_mode();
-                    }
-                    r
-                }
-                None => Err(p9::E_AGAIN),
-            };
+            // Re-probe the host's preferred rect and take the mode for it
+            // (base virtio-gpu reports one rect, not a mode list), and
+            // follow the host's display from here on.
+            comp.follow_host = true;
+            return comp.follow_display();
         }
         if let Some(rest) = s.strip_prefix("mode ") {
             let mut it = rest.split_ascii_whitespace();
@@ -19259,6 +19360,9 @@ impl Conn {
             // new DPI -- re-derive unless a verb/chord override stands.
             let r = comp.set_mode(w, h);
             if r.is_ok() {
+                // A mode asked for by size is pinned: it stands whatever
+                // the host's window does, until `mode auto`.
+                comp.follow_host = false;
                 comp.rescale_after_mode();
             }
             return r;

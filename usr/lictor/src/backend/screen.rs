@@ -54,10 +54,29 @@ pub struct Screen {
     _backing: Vec<Dma>,
 }
 impl Screen {
+    /// The sizes the trusted screen can be: no smaller than its own layout
+    /// needs, and no more pixels than its raster holds.
+    pub fn fits(width: u32, height: u32) -> bool {
+        width >= render::MIN_WIDTH && height >= render::MIN_HEIGHT
+            && width as u64 * height as u64 <= render::MAX_PIXELS as u64
+    }
+    /// The size for a host whose display is `host`: its own if that fits,
+    /// else that over or times a whole number, else the driver's default.
+    /// The host's size is whatever its window happens to be, and this driver
+    /// is the keyboard and the pointer too: it does not fail for a size.
+    pub fn size_for(host: (u32, u32)) -> (u32, u32) {
+        libhalcyon::scale::fit_mode(host.0, host.1, Self::fits)
+            .unwrap_or((super::gpu::DEFAULT_DISPLAY_W, super::gpu::DEFAULT_DISPLAY_H))
+    }
     pub fn new(gpu: &mut Gpu) -> Result<Self, Error> {
-        let (width, height) = (gpu.width, gpu.height);
+        let (width, height) = Self::size_for((gpu.width, gpu.height));
+        if (width, height) != (gpu.width, gpu.height) {
+            crate::backend::diagnostic(&alloc::format!(
+                "lictor: trusted screen {}x{} for a display of {}x{}\n",
+                width, height, gpu.width, gpu.height));
+        }
         let pixels = (width as usize).checked_mul(height as usize).ok_or(Error::Hardware)?;
-        if width < render::MIN_WIDTH || height < render::MIN_HEIGHT || pixels > 4096 * 2160 {
+        if !Self::fits(width, height) {
             return Err(Error::Hardware);
         }
         let bytes = pixels.checked_mul(4).ok_or(Error::Hardware)?;

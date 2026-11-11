@@ -552,16 +552,20 @@ impl Wire for Request {
 #[derive(Default, Clone, Copy)]
 pub struct Stats {
     pub cmd_seq: u64, pub last_scanout_seq: u64, pub last_unref_seq: u64,
-    pub condemned_lost: u32, pub engine: Engine, pub stalls: u32,
+    pub condemned_lost: u32,
+    /// The device's display events so far, wrapping. A change since the last
+    /// reply: the host's preferred rect or EDID may differ; ask again.
+    pub display_events: u32,
+    pub engine: Engine, pub stalls: u32,
 }
 record!(Stats { cmd_seq: u64, last_scanout_seq: u64, last_unref_seq: u64, condemned_lost: u32,
-    engine: Engine, stalls: u32 });
+    display_events: u32, engine: Engine, stalls: u32 });
 #[cfg(feature = "backend")]
 impl From<&crate::backend::gpu::Gpu> for Stats {
     fn from(g: &crate::backend::gpu::Gpu) -> Self {
         Self { cmd_seq: g.cmd_seq, last_scanout_seq: g.last_scanout_seq,
             last_unref_seq: g.last_unref_seq, condemned_lost: g.condemned_lost,
-            engine: g.engine(), stalls: g.stalls() }
+            display_events: g.display_events(), engine: g.engine(), stalls: g.stalls() }
     }
 }
 /// A host allocation's description. The mapping arrives through authenticated
@@ -784,10 +788,11 @@ mod cursor_wire_tests {
     #[test]
     fn stats_carry_the_engine_and_refuse_an_unknown_state() {
         let mut bytes = Vec::new();
-        Stats { engine: Engine::Stalled, stalls: 0x0403_0201, ..Stats::default() }.put(&mut bytes);
-        assert_eq!(&bytes[bytes.len() - 5..], [1, 1, 2, 3, 4]);
+        Stats { display_events: 0x0807_0605, engine: Engine::Stalled, stalls: 0x0403_0201,
+            ..Stats::default() }.put(&mut bytes);
+        assert_eq!(&bytes[bytes.len() - 9..], [5, 6, 7, 8, 1, 1, 2, 3, 4]);
         let s = Stats::get(&mut Reader::new(&bytes).unwrap()).unwrap();
-        assert_eq!((s.engine, s.stalls), (Engine::Stalled, 0x0403_0201));
+        assert_eq!((s.display_events, s.engine, s.stalls), (0x0807_0605, Engine::Stalled, 0x0403_0201));
         let at = bytes.len() - 5;
         bytes[at] = 3;
         assert!(Stats::get(&mut Reader::new(&bytes).unwrap()).is_err());

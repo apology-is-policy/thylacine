@@ -425,9 +425,17 @@ pub const GPU_RESP_ERR_INVALID_RESOURCE_ID: u32 = 0x1203;
 
 // struct virtio_gpu_config field offsets in the Device region (section 5.7.4):
 // events_read @0x00, events_clear @0x04, num_scanouts @0x08, num_capsets @0x0C.
+const GPUCFG_EVENTS_READ: u64 = 0x00;
+const GPUCFG_EVENTS_CLEAR: u64 = 0x04;
 const GPUCFG_NUM_SCANOUTS: u64 = 0x08;
 const GPUCFG_NUM_CAPSETS: u64 = 0x0C;
 const GPUCFG_MIN_LEN: u32 = 0x10;
+/// events_read's one bit (section 5.7.4.1): the host's preferred rect or its
+/// EDID changed, and GET_DISPLAY_INFO / GET_EDID now answer differently.
+const VIRTIO_GPU_EVENT_DISPLAY: u32 = 1;
+/// The ISR byte's second bit (section 4.1.4.5): the device's configuration
+/// changed. Reading the byte clears it.
+const ISR_CONFIG: u8 = 2;
 
 // Capset ids (section 5.7.6.8 + virglrenderer): 1 = VIRGL, 2 = VIRGL2 (what
 // Mesa's virgl driver prefers when offered); higher ids (venus, cross-domain,
@@ -494,8 +502,8 @@ const _: () = assert!(crate::gpu_api::PARK_BOUND_MS == FENCE_ABANDON_MS);
 /// GET_DISPLAY_INFO reports no enabled scanout (never observed on QEMU;
 /// fail-soft rather than fail-closed -- the display size is policy, not
 /// soundness).
-const DEFAULT_DISPLAY_W: u32 = 1024;
-const DEFAULT_DISPLAY_H: u32 = 768;
+pub(super) const DEFAULT_DISPLAY_W: u32 = 1024;
+pub(super) const DEFAULT_DISPLAY_H: u32 = 768;
 /// A sanity clamp on the device-reported geometry (an absurd size would
 /// size every fullscreen weave allocation).
 const MAX_DISPLAY_DIM: u32 = 8192;
@@ -880,6 +888,12 @@ struct Controlq {
     ring_pa: u64,
     notify_va: u64,
     isr_va: u64,
+    /// The device's `events_read`, or 0 on a device with no such register.
+    events_va: u64,
+    /// Display events taken so far, wrapping: the compositor follows a
+    /// CHANGE of this by asking the device again, so a count that stands for
+    /// two events loses nothing.
+    display_events: u32,
     irq: PciIrq,
     /// Count of avail entries published. Up to 1 + FENCED_SLOTS chains can
     /// be outstanding (Warp-2d), so completion is attributed by used-ENTRY
@@ -1313,8 +1327,17 @@ impl Controlq {
             say!("tapestryd: gpu PCI interrupt wait failed");
             self.dead = true;
         })?;
-        if self.irq.mode() == PciIrqMode::Intx {
-            let _ = unsafe { r8(self.isr_va) };
+        // The device's configuration interrupt comes with the queues': on
+        // the line, where the ISR byte tells the two apart, or on the one
+        // vector both were given, where nothing does and every ticket may
+        // be either.
+        let config = if self.irq.mode() == PciIrqMode::Intx {
+            unsafe { r8(self.isr_va) } & ISR_CONFIG != 0
+        } else {
+            event.is_some()
+        };
+        if config {
+            self.take_events();
         }
         self.drain();
         dsb_sy();
@@ -1325,6 +1348,26 @@ impl Controlq {
             }
         }
         if self.dead { Err(()) } else { Ok(()) }
+    }
+
+    /// Take the device's pending events: each is cleared as it is read, so
+    /// the next is news, and a display event is counted. An event raised
+    /// between the read and the clear is cleared uncounted, and is covered
+    /// by the count this call makes: whoever follows the count asks the
+    /// device afterwards, and is answered with the state after both.
+    fn take_events(&mut self) {
+        if self.events_va == 0 {
+            return;
+        }
+        let events = unsafe { r32(self.events_va + GPUCFG_EVENTS_READ) };
+        if events == 0 {
+            return;
+        }
+        unsafe { w32(self.events_va + GPUCFG_EVENTS_CLEAR, events) };
+        dsb_sy();
+        if events & VIRTIO_GPU_EVENT_DISPLAY != 0 {
+            self.display_events = self.display_events.wrapping_add(1);
+        }
     }
 
     /// The serve loop's bounded completion pump. Even an idle queue may own
@@ -2128,6 +2171,10 @@ impl Gpu {
             })?
             .0;
         let notify_mul = u64::from(pci.notify_off_multiplier());
+        let events_va = match pci.region(PciRegion::Device) {
+            Some((va, len)) if len >= GPUCFG_NUM_SCANOUTS as u32 => va,
+            _ => 0,
+        };
         let irq = PciIrq::for_virtio(&pci, &[0, 1]).map_err(|_| {
             say!("tapestryd: gpu PCI interrupt endpoint creation failed");
             Error::Hardware
@@ -2191,6 +2238,8 @@ impl Gpu {
                 ring_pa,
                 notify_va,
                 isr_va,
+                events_va,
+                display_events: 0,
                 irq,
                 avail_idx: 0,
                 used_seen: 0,
@@ -2267,6 +2316,10 @@ impl Gpu {
             _flane: flane,
         };
 
+        // An event from before this driver existed says nothing the question
+        // below does not ask afresh: it is taken, and not counted.
+        gpu.ctrl.take_events();
+        gpu.ctrl.display_events = 0;
         gpu.read_display_info()?;
         // HALCYON-SCALE 3: the physical size, once, beside the geometry
         // (re-queried by `mode auto`). A refusal or garbage is None -- the
@@ -4759,6 +4812,12 @@ impl Gpu {
     /// command's outcome is unknown (GPU-DESIGN 4.5.15).
     pub fn stalls(&self) -> u32 {
         self.ctrl.stalls
+    }
+
+    /// Display events taken so far (wrapping). A change means the host's
+    /// preferred rect or its EDID may have changed since it was last asked.
+    pub fn display_events(&self) -> u32 {
+        self.ctrl.display_events
     }
 }
 

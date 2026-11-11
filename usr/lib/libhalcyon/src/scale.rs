@@ -118,6 +118,43 @@ pub fn parse_edid_mm(edid: &[u8]) -> Option<(u32, u32)> {
     }
 }
 
+/// The largest whole number `fit_mode` divides or multiplies a host's size
+/// by. 8192 a side, the most a display is taken to report, is 2048 at 4.
+pub const FIT_MAX_FACTOR: u32 = 4;
+
+/// The mode for a display whose host prefers `host_w x host_h`, when not
+/// every size can be made: the host's own size if `can` make it, else that
+/// size over 2, times 2, over 3, times 3 and so on -- the first `can`
+/// accepts. A whole factor keeps the host's picture of the mode sharp (a
+/// guest pixel is k by k of the host's, or k by k of them are one), and the
+/// scale follows by itself: the same millimetres under half the pixels are
+/// half the DPI. None when no factor up to FIT_MAX_FACTOR gives a size `can`
+/// accepts: the caller keeps the mode it has.
+pub fn fit_mode(
+    host_w: u32,
+    host_h: u32,
+    mut can: impl FnMut(u32, u32) -> bool,
+) -> Option<(u32, u32)> {
+    if host_w == 0 || host_h == 0 {
+        return None;
+    }
+    if can(host_w, host_h) {
+        return Some((host_w, host_h));
+    }
+    for k in 2..=FIT_MAX_FACTOR {
+        let (w, h) = (host_w / k, host_h / k);
+        if w > 0 && h > 0 && can(w, h) {
+            return Some((w, h));
+        }
+        if let (Some(w), Some(h)) = (host_w.checked_mul(k), host_h.checked_mul(k)) {
+            if can(w, h) {
+                return Some((w, h));
+            }
+        }
+    }
+    None
+}
+
 /// The platform's scale declaration on the kernel command line
 /// (HALCYON-SCALE 3, SC-5): what `declared_scale` found.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -278,6 +315,61 @@ mod tests {
                 assert!(is_valid_pct(p), "scale_pct({px_w}, 1600, {mm_w}, 100) = {p}");
             }
         }
+    }
+
+    #[test]
+    fn a_mode_is_the_hosts_size_over_or_times_a_whole_number() {
+        // A compositor's bound: three buffers of the mode within 64 MiB, and
+        // no smaller than 320x200.
+        let surface = |w: u32, h: u32| {
+            w >= 320 && h >= 200 && (w as u64) * (h as u64) * 4 * 3 <= 64 << 20
+        };
+        // A size that can be made is the mode.
+        assert_eq!(fit_mode(2560, 1600, surface), Some((2560, 1600)));
+        assert_eq!(fit_mode(2940, 1848, surface), Some((2940, 1848)));
+        // Full screen on larger panels cannot: half of it can, and the same
+        // millimetres under half the pixels are half the scale.
+        assert_eq!(fit_mode(3456, 2160, surface), Some((1728, 1080)));
+        assert_eq!(fit_mode(3024, 1890, surface), Some((1512, 945)));
+        assert_eq!(fit_mode(5120, 2880, surface), Some((2560, 1440)));
+        assert_eq!(scale_pct(3456, 2160, 457, 286), 200);
+        assert_eq!(scale_pct(1728, 1080, 457, 286), 100);
+        // The most a display reports needs a quarter; an odd size loses the
+        // remainder.
+        assert_eq!(fit_mode(8192, 8192, surface), Some((2048, 2048)));
+        assert_eq!(fit_mode(6016, 3384, surface), Some((3008, 1692)));
+        assert_eq!(fit_mode(2941, 1913, surface), Some((1470, 956)));
+        // A driver's own screen has a floor: a small host's size is doubled,
+        // and the scale doubles with it.
+        let screen = |w: u32, h: u32| w >= 800 && h >= 720 && w * h <= 4096 * 2160;
+        assert_eq!(fit_mode(640, 400, screen), Some((1280, 800)));
+        assert_eq!(scale_pct(640, 400, 169, 106), 100);
+        assert_eq!(scale_pct(1280, 800, 169, 106), 200);
+        assert_eq!(fit_mode(320, 200, screen), Some((1280, 800)));
+        assert_eq!(fit_mode(1024, 768, screen), Some((1024, 768)));
+        assert_eq!(fit_mode(5120, 2880, screen), Some((2560, 1440)));
+        // The order: the size itself, then over 2, times 2, over 3, times 3.
+        let mut asked = [(0u32, 0u32); 8];
+        let mut n = 0;
+        assert_eq!(
+            fit_mode(600, 300, |w, h| {
+                asked[n] = (w, h);
+                n += 1;
+                false
+            }),
+            None
+        );
+        assert_eq!(
+            asked[..n],
+            [(600, 300), (300, 150), (1200, 600), (200, 100), (1800, 900), (150, 75), (2400, 1200)]
+        );
+        // Nothing that can be made, no size at all, a division to nothing,
+        // and a product past u32: None, and never a size of nothing asked.
+        assert_eq!(fit_mode(100, 90, screen), None);
+        assert_eq!(fit_mode(0, 800, |_, _| true), None);
+        assert_eq!(fit_mode(800, 0, |_, _| true), None);
+        assert_eq!(fit_mode(3, 1, |w, h| w * h == 0), None);
+        assert_eq!(fit_mode(u32::MAX, u32::MAX, |w, _| w < 1 << 30), Some((u32::MAX / 4, u32::MAX / 4)));
     }
 
     #[test]

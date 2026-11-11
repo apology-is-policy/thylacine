@@ -11,7 +11,7 @@ const RULE: u32 = 0xff343e39;
 const BORDER: u32 = 0xff59635e;
 pub const MIN_WIDTH: u32 = 800;
 pub const MIN_HEIGHT: u32 = 720;
-const MAX_PIXELS: usize = 4096 * 2160;
+pub const MAX_PIXELS: usize = 4096 * 2160;
 const CAP_TEXT: &[(u64, &str, &str)] = &[
     (1 << 7, "CAP_DAC_OVERRIDE", "Bypass file permission checks."),
     (1 << 8, "CAP_CHOWN", "Change file ownership."),
