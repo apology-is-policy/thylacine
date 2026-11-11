@@ -93,10 +93,12 @@ fn trim(mut v: &[u8]) -> &[u8] {
 /// `key` and a colon, spaces trimmed. A key is matched at the START of a line,
 /// never inside one, so "pid" does not find "ppid" and no value can pass for a
 /// key: the one free-form value, the name, holds no newline (the kernel stores
-/// only printable ASCII there).
+/// only printable ASCII there). A last line whose newline did not arrive is
+/// no line: a text cut mid-value would otherwise yield the shorter value.
 #[must_use]
 pub fn field<'a>(status: &'a [u8], key: &[u8]) -> Option<&'a [u8]> {
-    for line in status.split(|&b| b == b'\n') {
+    let end = status.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
+    for line in status[..end].split(|&b| b == b'\n') {
         if line.len() > key.len() && line.starts_with(key) && line[key.len()] == b':' {
             return Some(trim(&line[key.len() + 1..]));
         }
@@ -242,6 +244,20 @@ children:7\npeak:    500\nbudget:  65536\n";
         // "threads" and "threadcap" are told apart by the colon.
         assert_eq!(field(JOEY, b"threads"), Some(&b"3"[..]));
         assert_eq!(field(JOEY, b"thread"), None);
+    }
+
+    #[test]
+    fn a_cut_last_line_is_no_field() {
+        // "ppid:    41" cut to "ppid:    4" must not read as parent 4.
+        let cut = b"pid:     57\nppid:    4";
+        assert_eq!(field(cut, b"pid"), Some(&b"57"[..]));
+        assert_eq!(field(cut, b"ppid"), None);
+        assert_eq!(field(b"ppid:    4", b"ppid"), None);
+        // A status cut inside the last field a row needs is no row; the same
+        // text through that line's newline is one.
+        let at = JOEY.windows(10).position(|w| w == b"children:7").expect("fixture") + 10;
+        assert_eq!(Row::parse(&JOEY[..at]), None);
+        assert_eq!(Row::parse(&JOEY[..=at]).expect("whole through children").children, 7);
     }
 
     #[test]

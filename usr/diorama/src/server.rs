@@ -771,6 +771,11 @@ pub fn deputy_check() -> Result<(), &'static str> {
     let n = native_proc_path(unsafe { t_getpid() } as u32, b"imperium", &mut pbuf);
     let mut buf = [0u8; 160];
     let len = read_native(&pbuf[..n], &mut buf).ok_or("cannot read my imperium")?;
+    // The render is one line. Without its newline the caps value may be cut
+    // short, and a cut value must not read as holding none.
+    if buf[..len].last() != Some(&b'\n') {
+        return Err("my imperium was cut");
+    }
     match parse_hex_after(&buf[..len], b" caps ") {
         Some(0) => Ok(()),
         Some(_) => Err("holds an elevation-only cap"),
@@ -1183,8 +1188,12 @@ pub fn push_cpu_list(r: &mut Render, set: &[bool]) {
 
 /// Parse "<key>:<spaces><decimal>" out of a native key/value render (the shape
 /// /proc/<pid>/status and /ctl/memory both use). Returns None if absent, so a
-/// consumer can omit a field rather than invent one.
+/// consumer can omit a field rather than invent one. A last line whose newline
+/// did not arrive is absent too: a read cut mid-value would otherwise yield
+/// the shorter number.
 pub fn parse_kv_dec(text: &[u8], key: &[u8]) -> Option<u64> {
+    let end = text.iter().rposition(|&c| c == b'\n').map_or(0, |i| i + 1);
+    let text = &text[..end];
     let mut i = 0usize;
     while i < text.len() {
         // Is `key` at the start of this line, followed by ':'?
@@ -2897,6 +2906,18 @@ pub fn selftest() -> Result<(), &'static str> {
             || viv_tree_member(41, 10, 11, |p| ppid(&cyclic, p))
         {
             return Err("vivarium cycle handled wrong");
+        }
+        // A status that ends mid-line: host pid 57's "ppid:    41" cut to
+        // "ppid:    4" is no parent, or 57 would read as the runner's child.
+        let cut = b"name:    sh\npid:     57\nppid:    4";
+        if parse_kv_dec(cut, b"ppid").is_some() {
+            return Err("a cut line parsed as a parent");
+        }
+        if parse_kv_dec(cut, b"pid") != Some(57) {
+            return Err("a whole line before a cut one was lost");
+        }
+        if viv_runner_is_parent(cut, 4) {
+            return Err("a cut line passed the parent check");
         }
     }
 

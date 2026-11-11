@@ -120,25 +120,22 @@ ping summary and a long listing share one visual language, and they share
 the connection plumbing — dial-string resolution and the byte pumps — from
 the library rather than each reimplementing back-pressure.
 
-**`ps` presents the kernel's process table.** It reads `/ctl/procs` with one
-`read` (`io::read_rendered`) — the kernel renders the whole table under
-`g_proc_table_lock` on every read, so one read is one consistent table and a
-second would continue a different one — and offers three
-realizations of the same nine columns (PID PPID NAME STATE THREADS PAGES
-TABLES CHILDREN CPU; TABLES since prowl-6, and the end-anchored parse moved
-with it). Colour off *and* beacon off: the kernel text passes through
-**verbatim**, byte-clean and parseable, raw `CPU_NS` intact — the same
-pass-through discipline `ns` uses. Colour on: a boxed listing, CPU
+**`ps` presents the process set.** It lists `/proc` and reads each
+`/proc/<pid>/status` once (`procs::list`, [[sub-libthyla-rs]]), as Plan 9's
+ps does. The directory is whole at any number of Procs, where one read of
+`/ctl/procs` holds only the rows that fit the kernel's buffer. Each row is
+one instant of its Proc; the set is not one instant, and a Proc that ends
+during the listing is skipped. It offers three realizations of the same
+nine columns (PID PPID NAME STATE THREADS PAGES TABLES CHILDREN CPU),
+ascending by pid. Colour off *and* beacon off: the plain table in
+`/ctl/procs`'s own shape (its header, four-space columns, raw `CPU_NS`),
+byte-clean and parseable. Colour on: a boxed listing, CPU
 humanized (ns -> ms/s) and STATE coloured against the kernel's own
 vocabulary (ALIVE green, ZOMBIE ember, STOPPED gold). A CPU column of `-`
 stays `-`: since 2026-10-06 the kernel withholds another principal's CPU time
-(IMPERIUM-DESIGN 11.3 item 10, [[sub-kernel-devctl]]), and before ps learned
-the dash its row failed the parse below, so an ordinary user's listing always
-fell back to the verbatim text (`cpu-gate.exp` requires the box). It parses defensively
-— the NAME column is rejoined from the middle fields so a spaced name
-cannot shear the numeric columns, and **any** row it cannot parse (kernel
-format drift) drops the whole render back to the verbatim text rather than
-draw a partial table.
+(IMPERIUM-DESIGN 11.3 item 10, [[sub-kernel-devctl]]), and `cpu-gate.exp`
+requires the box for an ordinary user. A status that cannot be read or
+parsed fails the listing: `ps` never prints a table it knows is short.
 
 **Four tools gain a Beacon Rich realization** (`docs/BEACON.md`). At the
 Rich tier — resolved by the shared `beacon_gate` from the `BEACON` env
@@ -228,10 +225,9 @@ drops a write's error, so no failed write is reported or seen in their status.
 Both fixes are owed, the second with the one-shot tools' sweep
 ([[sub-coreutils-filters]]).
 
-`ps` reports a `/ctl/procs` open/read failure on stderr and exits non-zero;
-a row it cannot parse is *not* an error but a trigger to emit the kernel
-text verbatim (Mechanism) — the exit stays zero, because the data was
-delivered, just not styled.
+`ps` reports a `/proc` listing it cannot read, or a status it cannot read or
+parse, on stderr (`ps: /proc: ...`) and exits one without printing a table. A
+Proc that ended between the listing and its status read is not an error.
 
 ## Performance
 
