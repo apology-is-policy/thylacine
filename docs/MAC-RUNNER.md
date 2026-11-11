@@ -969,6 +969,17 @@ M-8 **HiDPI chain.** After Lictor's re-probe lands: send `SetUIInfo(338, 211, 0,
 scale; resize the window and measure guest relayout latency (ms from `SetUIInfo` to the
 first frame at the new size).
 
+Measured so far, with no guest (2026-11-11; QEMU 10.0.2 and 11.1.3; `macrunner/app/test/as_guest.py`
+reads the device over QEMU's qtest socket as a driver would): after `SetUIInfo(338, 211, 0, 0,
+2560, 1600)` a device made 1024x768 answers `GET_DISPLAY_INFO` with 2560x1600, the detailed
+timing of its EDID says 338x211 mm, and `events_read` has the display bit. The same holds on a
+QEMU started with `-S` (status `prelaunch`): the timer that hands the size to the device is on the
+real-time clock (`ui/console.c`, `qemu_console_set_ui_info`), not the machine's. So B4's QEMU half
+is as read. The app now tells the size itself, as it attaches and after a resize (A3's app half;
+339x212 mm for 1280x800 points, rounded where the probe's figures were cut off). What is left of
+M-8 needs a guest: that Lictor boots at the size, the scale the guest takes from the
+millimetres, and the latency of a follow, which waits for Lictor to follow the event.
+
 M-9 **Input under load.** 120 Hz host autorepeat of a held key into a guest with a 0.6 s
 GPU-busy client (H1's repro) on whatever fix corona's arc has by then. Verdict: lost
 keys and lost releases (counts), seat parked or not. Also Cmd-Tab/Cmd-H/Cmd-Q routing in fullscreen with the

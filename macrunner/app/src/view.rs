@@ -33,7 +33,7 @@ use objc2_metal::{
 };
 use objc2_quartz_core::{CADisplayLink, CALayer, CAMetalDrawable, CAMetalLayer};
 
-use crate::display::{Display, Input, Order, Pixels, Pointer, Rect};
+use crate::display::{pixels, Display, Input, Order, Pixels, Pointer, Rect, UiInfo};
 use crate::keymap;
 
 const SHADERS: &str = r#"
@@ -120,6 +120,10 @@ impl Stats {
         )
     }
 }
+
+// How long the view's size must have stood before the guest is told it, in seconds. Each size told
+// is a mode the guest sets.
+const SETTLE: f64 = 0.25;
 
 // A trackpad reports a scroll in points and a wheel in notches; the guest's wheel only has notches.
 const POINTS_PER_NOTCH: f64 = 10.0;
@@ -581,15 +585,19 @@ pub struct Ivars {
     ticks: Cell<u64>,
     scroll: Cell<f64>,
     worn: RefCell<Worn>,
+    told: Cell<Option<UiInfo>>, // the size the guest's display was last told
+    tellings: Cell<u32>,
+    settling: RefCell<Option<Retained<NSTimer>>>, // runs out SETTLE after the size last changed
 }
 
 // What a test asks of the window; a user's run leaves all of it off.
 #[derive(Clone, Default)]
 pub struct Options {
     pub print_stats: bool,
-    pub exit_after: Option<f64>, // seconds
-    pub dump: Option<String>,    // a PPM of the pipeline's output, written at exit_after
+    pub exit_after: Option<f64>,       // seconds
+    pub dump: Option<String>,          // a PPM of the pipeline's output, written at exit_after
     pub scripted_input: bool, // one second in, a fixed run of key and pointer events through the window
+    pub resize_to: Option<(f64, f64)>, // one second in, the window's content set to this many points
 }
 
 define_class!(
@@ -638,6 +646,30 @@ define_class!(
 
         #[unsafe(method(scripted:))]
         fn scripted(&self, _timer: &NSTimer) { self.scripted_input(); }
+
+        #[unsafe(method(resize:))]
+        fn resize(&self, _timer: &NSTimer) { self.scripted_resize(); }
+
+        // Every change of the view's size comes through here, a step at a time while the window's
+        // edge is dragged.
+        #[unsafe(method(setFrameSize:))]
+        fn set_frame_size(&self, size: NSSize) {
+            let _: () = unsafe { msg_send![super(self), setFrameSize: size] };
+            self.size_changed();
+        }
+
+        // The window's pixels to a point may have changed: it is on another screen.
+        #[unsafe(method(viewDidChangeBackingProperties))]
+        fn backing_changed(&self) {
+            let _: () = unsafe { msg_send![super(self), viewDidChangeBackingProperties] };
+            self.size_changed();
+        }
+
+        #[unsafe(method(settled:))]
+        fn settled(&self, _timer: &NSTimer) {
+            self.ivars().settling.borrow_mut().take();
+            self.tell_size();
+        }
 
         #[unsafe(method(keyDown:))]
         fn key_down(&self, ev: &NSEvent) {
@@ -737,6 +769,9 @@ impl GuestView {
             ticks: Cell::new(0),
             scroll: Cell::new(0.0),
             worn: RefCell::new(Worn::default()),
+            told: Cell::new(None),
+            tellings: Cell::new(0),
+            settling: RefCell::new(None),
         });
         let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: frame] };
         this.setWantsLayer(true);
@@ -771,7 +806,73 @@ impl GuestView {
                 );
             }
         }
+        if this.ivars().opts.resize_to.is_some() {
+            unsafe {
+                NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(
+                    1.0,
+                    &*(Retained::as_ptr(&this) as *const AnyObject),
+                    sel!(resize:),
+                    None,
+                    false,
+                );
+            }
+        }
         Ok(this)
+    }
+
+    // The view's size changed, and may be about to again. The guest is told the size that is still
+    // standing SETTLE later. The timer is one of the run loop's ordinary mode, which is not the
+    // mode a drag of the window's edge runs in.
+    fn size_changed(&self) {
+        let iv = self.ivars();
+        if let Some(waiting) = iv.settling.borrow_mut().take() {
+            waiting.invalidate();
+        }
+        let timer = unsafe {
+            NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(
+                SETTLE,
+                &*(self as *const Self as *const AnyObject),
+                sel!(settled:),
+                None,
+                false,
+            )
+        };
+        *iv.settling.borrow_mut() = Some(timer);
+    }
+
+    // Tell the guest's display the view's size, unless that is what it was last told. QEMU answers
+    // the guest's next question about its display with it; a guest that has not booted yet boots
+    // at it.
+    pub fn tell_size(&self) {
+        let Some(window) = self.window() else { return };
+        let b = self.bounds();
+        let scale = window.backingScaleFactor();
+        let Some(size) = UiInfo::of(b.size.width, b.size.height, scale) else {
+            return;
+        };
+        let iv = self.ivars();
+        if iv.told.get() == Some(size) {
+            return;
+        }
+        iv.told.set(Some(size));
+        iv.tellings.set(iv.tellings.get() + 1);
+        self.send(Input::Size(size));
+    }
+
+    // The window's content set to three sizes in one turn of the run loop, the last the one asked
+    // for: what a resize is to the view, without a hand on the window's edge.
+    fn scripted_resize(&self) {
+        let (Some(window), Some((w, h))) = (self.window(), self.ivars().opts.resize_to) else {
+            return;
+        };
+        for (dw, dh) in [(120.0, 40.0), (-60.0, 20.0), (0.0, 0.0)] {
+            window.setContentSize(NSSize::new(w + dw, h + dh));
+        }
+        let b = self.bounds();
+        eprintln!(
+            "scripted: content set to {w}x{h} points; the view is {}x{}",
+            b.size.width, b.size.height
+        );
     }
 
     // Release everything the guest believes is held, keys and buttons: the window stopped being where
@@ -1144,6 +1245,24 @@ impl GuestView {
         }
         // A display that sleeps gives no ticks, so the pointer is brought up to date here as well.
         self.wear_pointer();
+        let b = self.bounds();
+        let told = match iv.told.get() {
+            Some(t) => format!(
+                "told {}x{} px {}x{} mm, {} tellings",
+                t.width,
+                t.height,
+                t.width_mm,
+                t.height_mm,
+                iv.tellings.get()
+            ),
+            None => "told nothing".to_string(),
+        };
+        eprintln!(
+            "size: view {}x{} points at {}, {told}",
+            b.size.width,
+            b.size.height,
+            self.window().map_or(0.0, |w| w.backingScaleFactor())
+        );
         if let Some(r) = iv.renderer.borrow().as_ref() {
             let worn = iv.worn.borrow();
             let pointer = match (&worn.image, &worn.cursor) {
@@ -1219,10 +1338,7 @@ impl GuestView {
         let t0 = Instant::now();
         let scale = self.window().map(|w| w.backingScaleFactor()).unwrap_or(1.0);
         let b = self.bounds();
-        let want = (
-            (b.size.width * scale).round().max(1.0) as u32,
-            (b.size.height * scale).round().max(1.0) as u32,
-        );
+        let want = (pixels(b.size.width, scale), pixels(b.size.height, scale));
         let mut changed = false;
         if want != r.drawable_size {
             r.layer.setContentsScale(scale);

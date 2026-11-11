@@ -9,6 +9,7 @@ code:
   - macrunner/app/src/display.rs
   - macrunner/app/src/keymap.rs
   - macrunner/app/test/headless.sh
+  - macrunner/app/test/as_guest.py
 audit: hard
 guarded-by: []
 validated-by: [gate-macrunner-headless, prose]
@@ -36,10 +37,24 @@ between. It does not start QEMU yet: it attaches to one that runs with
   `add_client` with protocol `@dbus-display`), and closes QMP again. The
   socket's path is used as given, so a caller with a long path starts the app
   in the socket's directory.
-- **The window** is 1280x800 points, titled Thylacine, resizable, and goes
+- **The window** is 1280x800 points, titled Thylacine, resizable down to
+  640x400, and goes
   full screen (Control-Command-F). Command-Q quits; closing the window quits.
   Either way everything the guest holds is let go of first, and the releases
   are given up to half a second to reach QEMU.
+- **The guest is told the window's size** (`Console.SetUIInfo`): the view's
+  size in pixels, and the size in millimetres of a screen that many POINTS
+  across at 96 to the inch, so that a guest which takes its scale from pixels
+  to the inch finds the Mac's own. It is told as the app attaches, before any
+  input is sent, and again a quarter of a second after the view's size, or the
+  pixels to a point of the screen it is on, last changed. A size that is the
+  last one told is not told again, and a view with no size is not told (QEMU
+  reads a size of nothing as the display being turned off). QEMU keeps the
+  size, answers the guest's next question about its display with it, puts the
+  millimetres in the EDID, and raises the device's display event. A guest that
+  has not started yet finds it when it first asks; a guest that is running is
+  not changed by it until it asks again, and Lictor does not follow the event
+  yet.
 - **The picture** is the guest's scanout, letterboxed on black. A whole-number
   scale of one or more is sampled nearest, anything else is filtered. The
   guest's alpha is ignored.
@@ -98,8 +113,9 @@ between. It does not start QEMU yet: it attaches to one that runs with
   `acceptsFirstMouse:` default).
 - **A test's arguments** (`view::Options`): `--stats`, `--no-activate`,
   `--exit-after <s>`, `--dump <ppm>` (and, beside it, `<name>-pointer.ppm`:
-  what AppKit draws of the pointer over mid-grey), `--scripted-input`; and
-  `THYLACINE_NO_MAP=1`, which stops the listener advertising `Unix.Map`.
+  what AppKit draws of the pointer over mid-grey), `--scripted-input`,
+  `--resize-to <w>x<h>` (one second in, the window's content is set to that
+  many points, in three steps); and `THYLACINE_NO_MAP=1`, which stops the listener advertising `Unix.Map`.
 
 ## Mechanism
 
@@ -150,6 +166,30 @@ the pointer takes the picture's rectangle from it (in points). A position is
 mapped against the texture, which is what is on the glass: the texture for a
 new scanout replaces the old one only once that scanout is known to be the
 current one still.
+
+**The size the guest is told.** `UiInfo::of` takes the view's points and the
+window's pixels to a point. The pixels come from `pixels`, the one rule the
+drawable's size also comes from, so a guest frame of the size told is drawn a
+pixel to a pixel (a whole-number scale of one, sampled nearest). The
+millimetres are the points times 25.4 over 96, rounded, at least one. The
+guest's rule for a scale (`libhalcyon::scale::scale_pct`: pixels to the inch over 96,
+to the nearest quarter) then gives 200% on a screen with two pixels to a point
+and 100% on one with one; that is arithmetic with a unit test here, and the
+guest's own answer is `docs/MAC-RUNNER.md` M-3's to measure. The telling is an
+entry in the input queue (`Input::Size`), so the window's thread does not wait
+for QEMU and the size is in order with the keys. `setFrameSize:` and
+`viewDidChangeBackingProperties` each put back a one-shot timer (`SETTLE`); when
+it runs out the view's size is told if it is not the last one told. The timer
+is in the run loop's ordinary mode, and AppKit runs a drag of the window's edge
+in another, so a drag should be told where it ends; no test drags.
+
+What QEMU does with it, read in 11.1.3 (`ui/console.c`, `qemu_console_set_ui_info`;
+`hw/display/virtio-gpu-base.c`, `virtio_gpu_ui_info`) and then measured with no
+guest by the size leg on 10.0.2 and 11.1.3, against a QEMU that is paused: it
+drops a repeat of the same size, and otherwise a timer on the real-time clock,
+which runs while the machine does not, hands the size to the device. The device overwrites the size its
+`xres` and `yres` properties seeded, answers `GET_DISPLAY_INFO` and `GET_EDID`
+from it, and raises `VIRTIO_GPU_EVENT_DISPLAY`.
 
 **Keys the guest holds.** `keymap::Held` maps each key code that is down to
 the place it was sent as, and decides everything: a key-up for a code not in
@@ -215,7 +255,9 @@ serial that changes with every scanout the guest sets), the pending damage recta
 (its base, its length, and where in it the frame starts) and unmaps on drop.
 `view::Renderer` holds the Metal objects, the texture and the size and byte
 order it was made for; `view::Worn` the `NSCursor` and what it was made from;
-`keymap::Held` the keys that are down.
+`keymap::Held` the keys that are down. `display::UiInfo` is a size as the
+guest is told it (millimetres and pixels); the view keeps the last one told,
+how many were, and the timer that waits for the size to stand.
 
 ## Concurrency
 
@@ -278,6 +320,9 @@ app's own defence against a QEMU that sends something wrong.
   gone: it is logged and the input thread stops. The display thread stays
   parked and the window keeps its last frame; nothing in the window says so
   yet.
+- A console whose device takes no size answers `SetUIInfo` with an error. It
+  is counted and logged with the other calls QEMU refuses, and nothing else
+  changes.
 - A file QEMU truncates after the map faults the app on its next read. This is
   inherent to mapping a file a peer owns; the IOSurface scanout
   (`docs/MAC-RUNNER.md` 4.2) replaces the mapping.
@@ -295,20 +340,27 @@ offsets, formats and their byte orders, rectangles, the shared file, the
 pointer's image), to what `ScanoutMap` answers with an error (QEMU stops
 sharing for good), to the bounds of the copy into the texture, to what is done
 while the mutex is held (QEMU waits a second, once, and then stops sharing),
-and to the bookkeeping of held keys and buttons, the way out included (one
-left down in the guest).
+to the bookkeeping of held keys and buttons, the way out included (one
+left down in the guest), and to what the guest is told of the window: a size
+of nothing turns the guest's display off, and a size told at every step of a
+drag is a mode the guest sets at every step.
 
 ## Seams
 
 - QEMU's D-Bus display (`org.qemu.Display1.*`), an upstream interface; run
   against QEMU 10.0.2 and 11.1.3.
+- QEMU's `qtest` accelerator and protocol, which the size leg's `as_guest.py`
+  speaks in a guest's place (a virtio-pci driver of a hundred lines: reset,
+  features, one queue, two commands).
 - `tools/run-vm.sh`'s `app` and `dbus` display modes ([[sub-substrate-machine]]).
 - The guest sees a virtio keyboard, a virtio tablet and gpu0 through QEMU; the
   app knows nothing of the guest.
 
 ## Caveats
 
-- **Not there yet:** resize and HiDPI (`SetUIInfo`), relative pointer motion
+- **Not there yet:** a guest that follows the window while it runs (the size
+  is told; Lictor does not follow the display event, and `mode auto` in the
+  guest takes it by hand), relative pointer motion
   and capturing the pointer (`docs/MAC-RUNNER.md` 4.2), the clipboard, starting
   and stopping QEMU, the XPC helper, the 9P server, a window that says it is
   connecting or that QEMU has gone.
@@ -323,6 +375,11 @@ left down in the guest).
   the guest changes its scanout's size QEMU sends no whole frame until the
   guest next flushes one, so an `Update` in between is cut to the old size.
   None of it applies while the scanout is mapped.
+- **A window larger than a guest can set.** The size told is the window's,
+  whatever it is. Lictor's boot takes a display of up to 8192 a side
+  (`MAX_DISPLAY_DIM`), tapestryd's `mode` refuses more than 3840x2160, and its
+  scale stops at 200%. What a guest does with the full-screen window of a 5K
+  or 6K screen is the guest half's to decide, and is not decided.
 - **The pointer's colours are not managed.** The picture is tagged sRGB; the
   pointer's image is given to AppKit as device RGB.
 - **The input queue has no bound.** Adjacent pointer positions are sent as
@@ -341,7 +398,10 @@ left down in the guest).
   on the pointer's size as it is applied, and the rectangle going when the
   picture does; a scanout in any byte order but QEMU's own from a real QEMU
   (a unit test draws all four through Metal); Quit from the menu (the test
-  leaves through `terminate:` by its own deadline).
+  leaves through `terminate:` by its own deadline); a hand on the window's
+  edge (the script sets the content's size three times in one turn of the run
+  loop, so that a drag is told only where it ends is read, not run), full
+  screen, and a move to a screen with other pixels to a point.
 - **Two keyboards of different kinds** are read through one call that answers
   for the keyboard last typed on. A key is sent as the place it went down as,
   so it cannot stick; which of two places a key pressed on the other keyboard

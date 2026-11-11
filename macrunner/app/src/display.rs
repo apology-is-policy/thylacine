@@ -269,12 +269,48 @@ fn show_pointer(shared: &Mutex<Shared>, dirty: &AtomicBool, on: bool) {
     }
 }
 
+// A length in points as whole pixels at `scale` pixels to a point. The drawable and the size the
+// guest is told both come from here: a guest frame of exactly the drawable's size is shown a pixel
+// to a pixel, and one a pixel off is not.
+pub fn pixels(points: f64, scale: f64) -> u32 {
+    (points * scale).round().max(1.0) as u32
+}
+
+// What the guest's display is told of the window that shows it: its size in pixels, and the size in
+// millimetres of a screen that many points across at the 96 to the inch a guest takes for a scale
+// of one. A guest that divides the one by the other finds the Mac's scale.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct UiInfo {
+    pub width_mm: u16,
+    pub height_mm: u16,
+    pub width: u32,
+    pub height: u32,
+}
+impl UiInfo {
+    // For a view `w` x `h` points with `scale` pixels to a point. None for a view that has no
+    // size: QEMU takes a size of nothing as the display being turned off.
+    pub fn of(w: f64, h: f64, scale: f64) -> Option<UiInfo> {
+        let real = |v: f64| v.is_finite() && v > 0.0;
+        if !real(w) || !real(h) || !real(scale) {
+            return None;
+        }
+        let mm = |points: f64| (points * 25.4 / 96.0).round().clamp(1.0, u16::MAX as f64) as u16;
+        Some(UiInfo {
+            width_mm: mm(w),
+            height_mm: mm(h),
+            width: pixels(w, scale),
+            height: pixels(h, scale),
+        })
+    }
+}
+
 #[derive(Debug, PartialEq)]
 pub enum Input {
     Key { qnum: u32, down: bool },
     Abs { x: u32, y: u32 },
     Button { button: u32, down: bool },
     Wheel { up: bool },
+    Size(UiInfo),
     Sync, // not sent: answered once everything before it has been
 }
 
@@ -684,6 +720,13 @@ fn send_input(conn: &zbus::Connection, ev: Input) -> zbus::Result<()> {
             call!("org.qemu.Display1.Mouse", "Press", &(b,))?;
             call!("org.qemu.Display1.Mouse", "Release", &(b,))
         }
+        // QEMU keeps it for the guest's next question about its display, and raises the device's
+        // display event. A console whose device takes no size refuses the call.
+        Input::Size(u) => call!(
+            "org.qemu.Display1.Console",
+            "SetUIInfo",
+            &(u.width_mm, u.height_mm, 0i32, 0i32, u.width, u.height)
+        ),
         Input::Sync => Ok(()),
     }
 }
@@ -995,6 +1038,58 @@ mod tests {
         assert!(begun.elapsed() < Duration::from_secs(4));
         pumping.join().unwrap();
         assert_eq!(sent.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn the_guest_is_told_pixels_and_the_size_of_as_many_points() {
+        // 1280 x 800 points is 338.67 x 211.67 mm at 96 to the inch, whatever the pixels are.
+        let retina = UiInfo::of(1280.0, 800.0, 2.0).unwrap();
+        assert_eq!(
+            (
+                retina.width,
+                retina.height,
+                retina.width_mm,
+                retina.height_mm
+            ),
+            (2560, 1600, 339, 212)
+        );
+        let plain = UiInfo::of(1280.0, 800.0, 1.0).unwrap();
+        assert_eq!(
+            (plain.width, plain.height, plain.width_mm, plain.height_mm),
+            (1280, 800, 339, 212)
+        );
+        // What a guest makes of it: pixels to the inch over 96, to the nearest quarter.
+        let quarters = |u: UiInfo| (u.width as f64 * 25.4 / u.width_mm as f64 / 96.0 * 4.0).round();
+        assert_eq!((quarters(retina), quarters(plain)), (8.0, 4.0));
+        for (w, h, scale, q) in [
+            (320.0, 200.0, 2.0, 8.0),
+            (3008.0, 1692.0, 2.0, 8.0),
+            (1470.5, 919.0, 1.0, 4.0),
+        ] {
+            assert_eq!(
+                quarters(UiInfo::of(w, h, scale).unwrap()),
+                q,
+                "{w}x{h} at {scale}"
+            );
+        }
+        // A half pixel goes up, as the drawable's does.
+        assert_eq!(UiInfo::of(100.25, 50.0, 2.0).unwrap().width, 201);
+        assert_eq!(pixels(100.25, 2.0), 201);
+        assert_eq!(pixels(0.1, 1.0), 1);
+        // No size is not a size to tell: QEMU would turn the display off.
+        for (w, h, scale) in [
+            (0.0, 800.0, 2.0),
+            (1280.0, 0.0, 2.0),
+            (1280.0, 800.0, 0.0),
+            (-1.0, 800.0, 2.0),
+            (f64::NAN, 800.0, 2.0),
+            (1280.0, f64::INFINITY, 2.0),
+        ] {
+            assert_eq!(UiInfo::of(w, h, scale), None, "{w}x{h} at {scale}");
+        }
+        // A sliver still has a millimetre, and a width past any screen still fits its field.
+        let odd = UiInfo::of(1.0, 1e9, 1.0).unwrap();
+        assert_eq!((odd.width_mm, odd.height_mm), (1, u16::MAX));
     }
 
     #[test]

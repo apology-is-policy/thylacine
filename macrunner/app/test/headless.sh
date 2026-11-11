@@ -14,6 +14,15 @@
 #   pointer  an image defined as the guest defines its pointer is what AppKit draws for the Mac's.
 # A window opens for four seconds per path and does not take focus.
 #
+# Then the size leg, where nothing is drawn or typed. QEMU has no guest to run, is paused all the
+# same, and takes a tester's reads and writes in a guest's place (qtest), so what its virtio GPU
+# answers a driver can be read
+# (as_guest.py): the display's rectangle, the millimetres in its EDID, and its display event.
+#   size     the device answers with the size the app told it for the window: when the app attaches
+#            (a run that ends before a change of size could have been told), and again a moment
+#            after the window's content is set to another size in three steps, which is told once.
+# The window opens twice more, for a moment and for two seconds.
+#
 #   macrunner/app/test/headless.sh       exit 0 pass, 1 fail, 77 skipped (not macOS, or no D-Bus display)
 #   THYLACINE_QEMU=<qemu-system-aarch64>  the QEMU to attach to (default: the one on PATH)
 #   THYLACINE_MAC_APP=<binary>            the app (default: target/release/thylacine-mac of this crate)
@@ -129,8 +138,106 @@ PY
     return $rc
 }
 
+# One run of the app against the size leg's QEMU: <out> <limit in seconds> <the app's arguments>.
+size_run() {
+    local out=$1 limit=$2; shift 2
+    "$app" --attach q.sock --no-activate "$@" > "$out" 2>&1 &
+    ap=$!
+    ( sleep "$limit"; kill "$ap" 2>/dev/null ) &
+    wd=$!
+    wait "$ap"; local arc=$?
+    kill "$wd" 2>/dev/null; wd=""; ap=""
+    return $arc
+}
+
+size_leg() {
+    local d=$repo/build/macrunner-app-test/size
+    mkdir -p "$d" && cd "$d" || return 1
+    rm -f q.sock t.sock qemu.out qtest.log app-a.out app-b.out seen.out
+    # A device made 1024x768, which no window of this test is: a size nobody told it reads as that.
+    "$qemu" -machine virt,highmem=off -accel qtest -S -m 64 -nodefaults -display dbus,p2p=on \
+        -device virtio-gpu-pci,xres=1024,yres=768 \
+        -qmp unix:q.sock,server=on,wait=off -qtest unix:t.sock,server=on,wait=off -qtest-log qtest.log \
+        -serial none -monitor none > qemu.out 2>&1 &
+    qp=$!
+    local i; for i in $(seq 50); do [ -S q.sock ] && [ -S t.sock ] && break; sleep 0.1; done
+    [ -S q.sock ] && [ -S t.sock ] || { echo "size: FAIL: QEMU gave no QMP and qtest sockets ($(head -1 qemu.out))"; return 1; }
+    local rc=0
+    { echo "before: $(python3 -I "$here/as_guest.py" t.sock 2>&1)"
+      # Shorter than the wait after a change of size (view.rs, SETTLE): what run a tells, it tells
+      # as it attaches.
+      size_run app-a.out 15 --exit-after 0.2; echo "a exit: $?"
+      echo "a: $(python3 -I "$here/as_guest.py" t.sock 2>&1)"
+      size_run app-b.out 15 --exit-after 2 --resize-to 1000x640; echo "b exit: $?"
+      echo "b: $(python3 -I "$here/as_guest.py" t.sock 2>&1)"; } > seen.out
+    kill "$qp" 2>/dev/null; wait "$qp" 2>/dev/null; qp=""
+    python3 -I - <<'PY' || rc=1
+import ctypes, re
+
+seen = dict(l.rstrip("\n").split(": ", 1) for l in open("seen.out"))
+def size_line(path):
+    for l in open(path, errors="replace"):
+        if l.startswith("size: "):
+            return l[6:].strip()
+    return "no size line (%s)" % (open(path, errors="replace").read().strip().splitlines() or ["no output"])[-1]
+
+# The pixels to a point of every display there is, asked of Core Graphics and not of the app.
+cg = ctypes.CDLL("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics")
+cg.CGDisplayCopyDisplayMode.restype = ctypes.c_void_p
+for f in (cg.CGDisplayModeGetPixelWidth, cg.CGDisplayModeGetWidth):
+    f.argtypes, f.restype = [ctypes.c_void_p], ctypes.c_size_t
+ids, n = (ctypes.c_uint32 * 16)(), ctypes.c_uint32(0)
+cg.CGGetActiveDisplayList(16, ids, ctypes.byref(n))
+scales = set()
+for i in range(n.value):
+    mode = cg.CGDisplayCopyDisplayMode(ids[i])
+    if mode and cg.CGDisplayModeGetWidth(mode):
+        scales.add(cg.CGDisplayModeGetPixelWidth(mode) / cg.CGDisplayModeGetWidth(mode))
+
+bad = []
+def check(what, ok, detail):
+    print("size: %s%s" % ("" if ok else "FAIL: ", what if ok else "%s: %s" % (what, detail)))
+    if not ok:
+        bad.append(what)
+
+before = seen.get("before", "")
+check("the device as it was made answers 1024x768, with no event (%s)" % before,
+      re.fullmatch(r"display 1024x768 on 1, edid \d+x\d+ mm prefers 1024x768, event 0", before) is not None, before)
+
+def told(run, points, tellings):
+    line = size_line("app-%s.out" % run)
+    m = re.fullmatch(r"view ([\d.]+)x([\d.]+) points at ([\d.]+), told (\d+)x(\d+) px (\d+)x(\d+) mm, (\d+) tellings", line)
+    if seen.get("%s exit" % run) != "0" or not m:
+        check("run %s" % run, False, "the app exited %s; QEMU answers '%s'; %s" % (seen.get("%s exit" % run), seen.get(run), line))
+        return
+    w, h, scale = float(m[1]), float(m[2]), float(m[3])
+    if points and (w, h) != points:
+        check("run %s: the view is the size the window was set to" % run, False, line)
+        return
+    if not scales:
+        print("size: %s: no display's pixels to a point could be read, so the app's own %g is not checked" % (run, scale))
+    elif scale not in scales:
+        check("run %s: the app's pixels to a point are a display's" % run, False, "%s, and the displays have %s" % (line, sorted(scales)))
+        return
+    px = (round(w * scale), round(h * scale))
+    mm = (round(w * 25.4 / 96), round(h * 25.4 / 96))
+    want = "display %dx%d on 1, edid %dx%d mm prefers %dx%d, event 1" % (px + mm + px)
+    got = seen.get(run, "")
+    check("%s: QEMU answers a guest with the view's %gx%g points at %g (%s)" % (run, w, h, scale, got),
+          got == want, "got '%s', want '%s'; the app says: %s" % (got, want, line))
+    check("%s: told in %d" % (run, tellings),
+          int(m[8]) == tellings and (int(m[4]), int(m[5]), int(m[6]), int(m[7])) == px + mm, line)
+
+told("a", None, 1)
+told("b", (1000.0, 640.0), 2)
+raise SystemExit(1 if bad else 0)
+PY
+    return $rc
+}
+
 rc=0
 pixels="mapped";          leg map || rc=1
 pixels="in the messages"; leg in-band THYLACINE_NO_MAP=1 || rc=1
+size_leg || rc=1
 [ $rc -eq 0 ] && echo "PASS: macrunner/app headless" || echo "FAIL: macrunner/app headless (evidence in $repo/build/macrunner-app-test)"
 exit $rc

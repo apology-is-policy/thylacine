@@ -103,8 +103,12 @@ define_class!(
             window.setContentView(Some(&view));
             window.makeFirstResponder(Some(&view));
             window.setDelegate(Some(ProtocolObject::from_ref(self)));
+            // The least the window can be dragged to. A guest can set a screen that small.
+            window.setContentMinSize(NSSize::new(640.0, 400.0));
             window.center();
             window.makeKeyAndOrderFront(None);
+            // Before anything else is sent: a guest that has not started yet starts at this size.
+            view.tell_size();
             app.setMainMenu(Some(&menu(mtm)));
             app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
             if self.ivars().activate {
@@ -245,6 +249,17 @@ fn main() {
                 i += 1;
             }
             "--scripted-input" => opts.scripted_input = true,
+            "--resize-to" => {
+                opts.resize_to = args.get(i + 1).and_then(|s| {
+                    let (w, h) = s.split_once('x')?;
+                    Some((w.parse().ok()?, h.parse().ok()?))
+                });
+                if opts.resize_to.is_none() {
+                    eprintln!("thylacine-mac: --resize-to takes <points>x<points>");
+                    std::process::exit(2);
+                }
+                i += 1;
+            }
             other => {
                 eprintln!("thylacine-mac: unknown argument {other}");
                 std::process::exit(2);
@@ -253,7 +268,7 @@ fn main() {
         i += 1;
     }
     let Some(qmp) = qmp else {
-        eprintln!("usage: thylacine-mac --attach <qmp socket> [--stats] [--no-activate] [--exit-after <s>] [--dump <ppm>] [--scripted-input]");
+        eprintln!("usage: thylacine-mac --attach <qmp socket> [--stats] [--no-activate] [--exit-after <s>] [--dump <ppm>] [--scripted-input] [--resize-to <w>x<h>]");
         std::process::exit(2);
     };
     let mtm = MainThreadMarker::new().expect("the main thread");

@@ -2,9 +2,9 @@
 id: gate-macrunner-headless
 type: gate
 title: "The Mac app's headless test"
-proves: "On each pixel path (the scanout mapped from QEMU's memory; pixels sent in the D-Bus messages): that the Metal pipeline's output at 1:1 is byte-identical to QEMU's own screendump of QEMU's placeholder frame; that a scripted run of AppKit events reaches QEMU as exactly 60 expected lines of its input trace; and that an image defined as the guest defines its pointer is what AppKit draws for the Mac's pointer (six pixels, one of them half-clear)."
-blind-to: "A guest: QEMU is paused before its first instruction, so the one frame is its 640x480 grey-on-black placeholder at offset 0 with rows exactly as wide as they are apart -- no colour (channel order of the picture is not shown), no damage after the first frame (partial uploads and in-band Update blits never run), no resize, no pointer the guest defined (the script defines one through the function CursorDefine calls; that the guest's image has its alpha multiplied in was read from its rasteriser, and this test cannot show it). The panel: the comparisons read back from Metal and from AppKit, not the glass, and a display that is asleep presents nothing. The letterbox as drawn (the picture is read back at 1:1; the crate's unit test draws it at four sizes). AppKit's own decisions: the script posts the lost-keys and menu notifications itself, hands the left click to the view (an inactive window keeps a left click), and its events are made by NSEvent, not by the window server. A trackpad's scroll (the script sends one wheel notch, made by Core Graphics and handed to the view), the middle and side buttons, drags, the ISO key exchange on a real keyboard, the application ceasing to be active, the two D-Bus methods that carry the guest's pointer and a pointer the guest hides, the cursor rectangles, any byte order but QEMU's own (the unit tests draw all four), Quit from the menu (the run leaves through terminate: by its own deadline). Whether the binary is the tree's: only that it is not older than the crate's sources."
-invocation: "macrunner/app/test/headless.sh (THYLACINE_QEMU, THYLACINE_MAC_APP); about 12 s; a window opens twice for 4 s without taking focus; exit 77 off macOS or when a QEMU that runs has no D-Bus display, exit 1 when there is no QEMU, when it does not run, or when the app is older than its sources. The unit tests: cargo test --release in macrunner/app (31; four drive Metal, and with no Metal device they say so and pass without trying)."
+proves: "On each pixel path (the scanout mapped from QEMU's memory; pixels sent in the D-Bus messages): that the Metal pipeline's output at 1:1 is byte-identical to QEMU's own screendump of QEMU's placeholder frame; that a scripted run of AppKit events reaches QEMU as exactly 60 expected lines of its input trace; and that an image defined as the guest defines its pointer is what AppKit draws for the Mac's pointer (six pixels, one of them half-clear). And on a QEMU with no guest that is read as a guest's driver reads it (qtest): that its virtio GPU answers GET_DISPLAY_INFO and GET_EDID with the size the app told it for the window, in pixels and in the millimetres of as many points, and has its display event pending -- once as the app attaches, and once after the window's content is set to another size in three steps."
+blind-to: "A guest: QEMU is paused before its first instruction, so the one frame is its 640x480 grey-on-black placeholder at offset 0 with rows exactly as wide as they are apart -- no colour (channel order of the picture is not shown), no damage after the first frame (partial uploads and in-band Update blits never run), no resize, no pointer the guest defined (the script defines one through the function CursorDefine calls; that the guest's image has its alpha multiplied in was read from its rasteriser, and this test cannot show it). The panel: the comparisons read back from Metal and from AppKit, not the glass, and a display that is asleep presents nothing. The letterbox as drawn (the picture is read back at 1:1; the crate's unit test draws it at four sizes). AppKit's own decisions: the script posts the lost-keys and menu notifications itself, hands the left click to the view (an inactive window keeps a left click), and its events are made by NSEvent, not by the window server. A trackpad's scroll (the script sends one wheel notch, made by Core Graphics and handed to the view), the middle and side buttons, drags, the ISO key exchange on a real keyboard, the application ceasing to be active, the two D-Bus methods that carry the guest's pointer and a pointer the guest hides, the cursor rectangles, any byte order but QEMU's own (the unit tests draw all four), Quit from the menu (the run leaves through terminate: by its own deadline). Whether the binary is the tree's: only that it is not older than the crate's sources. The size leg: a guest (what answers is QEMU's device model; whether Lictor boots at that size, and what scale the guest takes from those millimetres, needs one); a hand on the window's edge, full screen, and a move to another screen (the script sets the content's size three times in one turn of the run loop); a screen with one pixel to a point when the test runs on one with two, and the other way (the unit test has both); which screen the window is on (the app's pixels to a point must be those of SOME display Core Graphics lists); a device that takes no size."
+invocation: "macrunner/app/test/headless.sh (THYLACINE_QEMU, THYLACINE_MAC_APP); about 20 s; a window opens four times without taking focus (4 s, 4 s, a moment, 2 s); exit 77 off macOS or when a QEMU that runs has no D-Bus display, exit 1 when there is no QEMU, when it does not run, or when the app is older than its sources. The unit tests: cargo test --release in macrunner/app (32; four drive Metal, and with no Metal device they say so and pass without trying)."
 created: 2026-11-11
 updated: 2026-11-11
 ---
@@ -46,6 +46,21 @@ must not show, and (200, 100, 40) at half strength with its alpha multiplied
 in, as the guest's image has it, which over mid-grey is (164, 114, 84) when it
 is taken so and (114, 89, 74) when the alpha is applied to it a second time.
 
+The third leg, `size`, draws and types nothing. QEMU is started paused, with
+`-accel qtest` and a GPU made 1024x768, a size no window of the test has, and
+`as_guest.py` speaks to the device over the qtest socket as a driver would:
+it resets it, takes the EDID feature, sets up the control queue in the
+machine's memory, and asks `GET_DISPLAY_INFO` and `GET_EDID`; it reads the
+display event before the reset and clears it. It is asked three times: before
+any app (the control: 1024x768, no event), after a run of the app that ends
+0.2 s in (sooner than the app waits after a change of size, so what that run
+told it told as it attached), and after a run that sets the window's content
+to 1000x640 points in three steps one second in. The leg wants QEMU's answer
+to be the view's points times the pixels to a point, with the millimetres of
+the points and the event pending, and the app to have told once and twice.
+The points of the second run are the test's own; the pixels to a point must be
+those of a display Core Graphics lists.
+
 Evidence stays in `build/macrunner-app-test/<leg>/`.
 
 ## What it has and has not caught
@@ -85,11 +100,31 @@ Evidence stays in `build/macrunner-app-test/<leg>/`.
   whatever the frame's; each step of the attach given time of its own; pixels
   in another order copied into the scanout; a scanout in a message that cannot
   be shown leaving the last frame. With the three earlier lists that is 24
-  controls, all red on the tree as it now is, and the unchanged copy green.
+  controls, all red on that tree, and the unchanged copy green.
 - One control stayed GREEN and is not counted: with the wait for the queue
   removed from the way out, the release of the held button still reached QEMU
   before the process ended. That the app waits is therefore not shown by the
   script; that the wait works when asked is a unit test.
+- The size leg was red before the app told any size: on the commit before,
+  QEMU still answered 1024x768 after the app had run (2026-11-11). Its eight
+  controls, each red (QEMU 11.1.3): the size not told as the app attaches; a
+  change of size not followed; every step of a resize told (four tellings
+  where two are wanted); a size told again; points told for pixels; the
+  millimetres of the pixels (677x423 for a 1280x800-point window); a size of
+  nothing told (the unit test); width and height exchanged on the way to
+  QEMU. The two about pixels and points are red in the leg only on a screen
+  with two pixels to a point, which this one is; the unit test sees them
+  anywhere, so the eight count as ten. With these, 34 controls, all red on
+  the tree as it now is, and the unchanged copy green.
+- The first run of the size leg is 0.2 s long on purpose. The view's first
+  layout is itself a change of size, and the wait after one tells the same
+  size a quarter of a second later: in a longer run, removing the telling at
+  attach would have stayed green.
+- `as_guest.py` had its own control before it was trusted: a device made
+  1024x768 read as that; after the probe's `SetUIInfo(338, 211, 0, 0, 2560,
+  1600)` it read 2560x1600 and 338x211 mm with the event pending; read again,
+  the event was gone (it clears what it reads). Both on a running and on a
+  paused QEMU, 10.0.2 and 11.1.3.
 - The left click through the window is absent from the expected sequence on
   purpose: the window is not active, and AppKit keeps the activating click.
   With `acceptsFirstMouse:` answering YES it arrives.
