@@ -523,7 +523,7 @@ fn read_capped(path: &str, cap: usize) -> Result<Vec<u8>> {
     io::slurp_capped(&mut f, cap)
 }
 
-/// A /ctl or /proc file: rendered afresh on every read, so read once.
+/// A /ctl leaf: rendered whole and afresh on every read, so read once.
 fn read_rendered(path: &str) -> Result<Vec<u8>> {
     let mut f = File::open(path)?;
     io::read_rendered(&mut f)
@@ -1443,16 +1443,21 @@ fn own_ns_path() -> String {
 }
 
 /// What `/` is mounted from, per this process's own namespace listing
-/// (`mount / <src>` in /proc/<pid>/ns -- devproc serves no `self`).
+/// (`mount / <src>` in /proc/<pid>/ns -- devproc serves no `self`). The kernel
+/// serves that listing in windows, so it is read to the end.
 fn root_source() -> Option<String> {
-    let bytes = read_rendered(&own_ns_path()).ok()?;
+    let bytes = read_capped(&own_ns_path(), 64 * 1024).ok()?;
     let text = core::str::from_utf8(&bytes).ok()?;
     for line in text.lines() {
         let mut it = line.split_whitespace();
         if it.next() == Some("mount") && it.next() == Some("/") {
-            if let Some(src) = it.next() {
-                return Some(String::from(src));
+            let src = it.next()?;
+            // A union begun with `bind -a` lists the directory underneath first
+            // (`mount / / covered`): the root is then no mount's source.
+            if it.any(|flag| flag == "covered") {
+                return None;
             }
+            return Some(String::from(src));
         }
     }
     None

@@ -331,14 +331,8 @@ fn server_peak(pid: i32) -> Option<(u32, u32)> {
     let path = alloc::format!("/proc/{}/status", pid);
     let mut f = fs::File::open(&path).ok()?;
     let mut buf = [0u8; 1024];
-    let mut total = 0usize;
-    while total < buf.len() {
-        match f.read(&mut buf[total..]) {
-            Ok(0) => break,
-            Ok(k) => total += k,
-            Err(_) => break,
-        }
-    }
+    // One read: the status text is rendered afresh on each read.
+    let total = f.read(&mut buf).ok()?;
     let body = core::str::from_utf8(&buf[..total]).ok()?;
     Some((status_field(body, "peak:")?, status_field(body, "budget:")?))
 }

@@ -764,20 +764,26 @@ pub fn slurp_capped<R: Read + ?Sized>(reader: &mut R, limit: usize) -> Result<Ve
     Ok(v)
 }
 
-/// Twice the larger of the kernel's two render buffers (a /ctl leaf's 4096, a
-/// /proc file's 2048): one read that fills it did not get the whole file.
-pub const RENDERED_MAX: usize = 8 * 1024;
+/// The longest file the kernel renders whole: a /ctl leaf's DEVCTL_READ_BUF
+/// (kernel/devctl.c). A /proc/<pid> text file's is 2048.
+const KERNEL_RENDER_MAX: usize = 4096;
 
-/// Read a file the kernel renders afresh on every read -- a /ctl leaf, a
-/// /proc/<pid> text file -- with ONE read. A second read answers from a new
-/// rendering at the old offset, so reading to EOF (`slurp`) returns the first
-/// rendering plus the tail of a longer second one whenever the file grew in
-/// between. `NoMemory` if the read filled the buffer or the heap refused.
+/// Twice `KERNEL_RENDER_MAX`: one read that fills it did not get the whole file.
+pub const RENDERED_MAX: usize = 2 * KERNEL_RENDER_MAX;
+
+/// Read a file the kernel renders WHOLE on every read and slices at the
+/// reader's offset -- a /ctl leaf, /proc/<pid>/status, sched, maps -- with ONE
+/// read. A second read answers from a new rendering at the old offset, so
+/// reading to EOF (`slurp`) returns the first rendering plus the tail of a
+/// longer second one whenever the file grew in between. NOT for a file served
+/// in windows (/proc/<pid>/ns, environ): one read of those is one window, and
+/// they are read to EOF. `OutOfRange` if the read filled the buffer, `NoMemory`
+/// if the heap refused.
 pub fn read_rendered<R: Read + ?Sized>(reader: &mut R) -> Result<Vec<u8>> {
     let mut buf = [0u8; RENDERED_MAX];
     let n = reader.read(&mut buf)?;
     if n == buf.len() {
-        return Err(Error::NoMemory);
+        return Err(Error::OutOfRange);
     }
     let mut v = Vec::new();
     v.try_reserve(n).map_err(|_| Error::NoMemory)?;
@@ -833,6 +839,33 @@ mod tests {
                 Ok(buf.len())
             }
         }
-        assert_eq!(read_rendered(&mut Endless), Err(Error::NoMemory));
+        assert_eq!(read_rendered(&mut Endless), Err(Error::OutOfRange));
+    }
+
+    #[test]
+    fn read_rendered_holds_the_longest_kernel_rendering() {
+        let table = [b'r'; KERNEL_RENDER_MAX];
+        let mut f = Rendered { takes: &[&table[..]], reads: 0, off: 0 };
+        assert_eq!(read_rendered(&mut f).unwrap(), &table[..]);
+    }
+
+    #[test]
+    fn a_windowed_file_needs_the_loop() {
+        /// /proc/<pid>/ns: each read is the window at the cursor, 2048 bytes at most.
+        struct Windowed<'a> {
+            all: &'a [u8],
+            off: usize,
+        }
+        impl Read for Windowed<'_> {
+            fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
+                let n = cmp::min(cmp::min(self.all.len() - self.off, buf.len()), 2048);
+                buf[..n].copy_from_slice(&self.all[self.off..self.off + n]);
+                self.off += n;
+                Ok(n)
+            }
+        }
+        let listing = [b'm'; 5000];
+        assert_eq!(read_rendered(&mut Windowed { all: &listing, off: 0 }).unwrap().len(), 2048);
+        assert_eq!(slurp(&mut Windowed { all: &listing, off: 0 }).unwrap(), &listing[..]);
     }
 }

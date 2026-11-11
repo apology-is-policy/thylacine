@@ -93,6 +93,7 @@
 #endif
 #include "pouch-census.h"
 #include <errno.h>
+#include <fcntl.h>
 #include <stdint.h>
 #include <pthread.h>
 #include <signal.h>
@@ -385,18 +386,25 @@ static int guard_row_below_self(void) {
         pthread_attr_getguardsize(&at, &guard) != 0 || guard == 0)
         return 0;
     uintptr_t hi = (uintptr_t)addr, lo = hi - guard;
-    char path[64], line[256];
+    // ONE read, not stdio: the kernel renders maps afresh on each read, and the
+    // other workers' stacks come and go while this runs, so a second BUFSIZ
+    // refill would continue a table whose rows had moved.
+    char path[64], maps[4096];
     snprintf(path, sizeof path, "/proc/%d/maps", (int)getpid());
-    FILE *mf = fopen(path, "r");
-    if (!mf) return 0;
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return 0;
+    ssize_t got = read(fd, maps, sizeof maps - 1);
+    close(fd);
+    if (got <= 0) return 0;
+    maps[got] = '\0';
     int found = 0;
-    while (fgets(line, sizeof line, mf)) {
+    for (char *line = maps, *nl; (nl = strchr(line, '\n')) != NULL; line = nl + 1) {
         unsigned long a = 0, b = 0;
         char perms[8] = "";
+        *nl = '\0';
         if (sscanf(line, "%lx-%lx %7s", &a, &b, perms) != 3) continue;
         if (a == lo && b == hi && strcmp(perms, "---p") == 0) found++;
     }
-    fclose(mf);
     return found == 1;
 }
 
