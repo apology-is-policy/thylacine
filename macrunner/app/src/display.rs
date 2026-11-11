@@ -6,20 +6,19 @@
 use std::io::{BufRead, BufReader, Write};
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use std::os::unix::net::UnixStream;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use zbus::Fd;
 
 const CONSOLE: &str = "/org/qemu/Display1/Console_0";
 const LISTENER: &str = "/org/qemu/Display1/Listener";
-pub const PIXMAN_X8R8G8B8: u32 = 0x2002_0888;
-pub const PIXMAN_A8R8G8B8: u32 = 0x2002_8888;
 // Metal's largest 2D texture on Apple silicon: a scanout beyond it cannot be shown.
 const MAX_SIDE: u32 = 16384;
 // QEMU answers QMP and the display's first calls from its main loop; one that is hung never does.
+// The whole attach has this long, not each of its steps.
 const ATTACH_TIMEOUT: Duration = Duration::from_secs(10);
-// virtio-gpu's pointer is 64 a side; this is what the window server takes without complaint.
+// virtio-gpu's pointer is 64 a side. An image past this is not kept.
 const MAX_POINTER_SIDE: i32 = 256;
 
 pub struct Region {
@@ -130,16 +129,41 @@ pub enum Pixels {
     Owned(Vec<u8>),
 }
 
+// Where the colours are in a pixel's four bytes. The byte that is left is alpha or nothing, and is
+// not shown either way.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Order {
+    Bgrx,
+    Rgbx,
+    Xrgb,
+    Xbgr,
+}
+
+// The order of a pixman format, if it is one of the eight with a byte a channel: the ones a virtio
+// GPU's guest can give a scanout. pixman names a format by its 32-bit word, high byte first, and
+// this machine keeps the low byte first.
+pub fn order(pixman_format: u32) -> Option<Order> {
+    Some(match pixman_format {
+        0x2002_0888 | 0x2002_8888 => Order::Bgrx, // x8r8g8b8, a8r8g8b8
+        0x2003_0888 | 0x2003_8888 => Order::Rgbx, // x8b8g8r8, a8b8g8r8
+        0x2008_0888 | 0x2008_8888 => Order::Xrgb, // b8g8r8x8, b8g8r8a8
+        0x2009_0888 | 0x2009_8888 => Order::Xbgr, // r8g8b8x8, r8g8b8a8
+        _ => return None,
+    })
+}
+
 pub struct Scanout {
     pub pixels: Pixels,
     pub w: u32,
     pub h: u32,
     pub stride: u32,
+    pub order: Order,
     pub serial: u64, // a new value for every scanout the guest sets
 }
 
 // The guest's pointer. It is not in the scanout: the guest hands QEMU an image and a hot spot, and
-// whoever shows the screen draws it. Rows of B, G, R, A, with the colours not multiplied by the alpha.
+// whoever shows the screen draws it. Rows of B, G, R, A, the colours already multiplied by the alpha:
+// Lictor rasterises it so (as a DRM cursor plane is), and QEMU passes the bytes on as they are.
 #[derive(Debug, PartialEq)]
 pub struct Pointer {
     pub w: u32,
@@ -165,11 +189,16 @@ impl Pointer {
             bgra,
         })
     }
-    // The same rows as R, G, B, A.
+    // The same rows as R, G, B, A. A colour stronger than its alpha is not one such an image can
+    // hold, and what is drawn of it is not defined: it is cut to the alpha.
     pub fn rgba(&self) -> Vec<u8> {
         let mut out = self.bgra.clone();
         for px in out.chunks_exact_mut(4) {
             px.swap(0, 2);
+            let a = px[3];
+            for c in &mut px[..3] {
+                *c = (*c).min(a);
+            }
         }
         out
     }
@@ -201,8 +230,15 @@ pub struct Display {
     pub dirty: Arc<AtomicBool>,
     pub pointer_dirty: Arc<AtomicBool>,
     pub input: mpsc::Sender<Input>,
+    synced: mpsc::Receiver<()>,
 }
 impl Display {
+    // Wait until everything queued so far has been handed to QEMU, for at most `limit`. False if
+    // it has not been, or never will be.
+    pub fn drain(&self, limit: Duration) -> bool {
+        while self.synced.try_recv().is_ok() {}
+        self.input.send(Input::Sync).is_ok() && self.synced.recv_timeout(limit).is_ok()
+    }
     // What Listener.CursorDefine does with its arguments.
     pub fn define_pointer(&self, width: i32, height: i32, hot_x: i32, hot_y: i32, bgra: Vec<u8>) {
         define_pointer(
@@ -239,6 +275,7 @@ pub enum Input {
     Abs { x: u32, y: u32 },
     Button { button: u32, down: bool },
     Wheel { up: bool },
+    Sync, // not sent: answered once everything before it has been
 }
 
 struct State {
@@ -246,20 +283,45 @@ struct State {
     dirty: Arc<AtomicBool>,
     pointer_dirty: Arc<AtomicBool>,
     map: bool,
+    unshowable: AtomicU64,
 }
+
+fn set_scanout(
+    shared: &Mutex<Shared>,
+    dirty: &AtomicBool,
+    pixels: Pixels,
+    (w, h, stride): (u32, u32, u32),
+    order: Order,
+) {
+    let mut s = shared.lock().unwrap();
+    s.serials += 1;
+    let serial = s.serials;
+    s.scanout = Some(Scanout {
+        pixels,
+        w,
+        h,
+        stride,
+        order,
+        serial,
+    });
+    s.damage = Some(Rect { x: 0, y: 0, w, h });
+    dirty.store(true, Ordering::Release);
+}
+
 impl State {
-    fn set(&self, pixels: Pixels, w: u32, h: u32, stride: u32) {
+    fn set(&self, pixels: Pixels, size: (u32, u32, u32), order: Order) {
+        set_scanout(&self.shared, &self.dirty, pixels, size, order);
+    }
+    // A scanout that cannot be shown is shown as nothing, not as the frame before it: the guest's
+    // screen is no longer that frame, and the pointer would be placed by its size.
+    fn unshowable(&self, what: &str) {
+        let n = self.unshowable.fetch_add(1, Ordering::Relaxed) + 1;
+        if n.is_power_of_two() {
+            eprintln!("display: {what} cannot be shown ({n} so far); the window is blank until the guest sets one that can");
+        }
         let mut s = self.shared.lock().unwrap();
-        s.serials += 1;
-        let serial = s.serials;
-        s.scanout = Some(Scanout {
-            pixels,
-            w,
-            h,
-            stride,
-            serial,
-        });
-        s.damage = Some(Rect { x: 0, y: 0, w, h });
+        s.scanout = None;
+        s.damage = None;
         self.dirty.store(true, Ordering::Release);
     }
     fn damage(&self, x: i32, y: i32, w: i32, h: i32) {
@@ -284,27 +346,26 @@ const _: () = assert!(usize::BITS == 64);
 // the last row, and not the padding after it, which a frame placed at the end of its resource does
 // not have. An error if it is not a scanout that can be shown; everything past this point may assume
 // a frame of at least one pixel and at most MAX_SIDE a side, with rows a whole number of pixels apart.
-fn geometry(width: u32, height: u32, stride: u32) -> zbus::fdo::Result<usize> {
+fn geometry(width: u32, height: u32, stride: u32) -> Result<usize, String> {
     if width == 0 || height == 0 || width > MAX_SIDE || height > MAX_SIDE {
-        return Err(zbus::fdo::Error::InvalidArgs(format!(
-            "a scanout of {width}x{height}"
-        )));
+        return Err(format!("a scanout of {width}x{height}"));
     }
     if stride < width * 4 || !stride.is_multiple_of(4) || stride > i32::MAX as u32 {
-        return Err(zbus::fdo::Error::InvalidArgs(format!(
-            "a stride of {stride} for {width} pixels"
-        )));
+        return Err(format!("a stride of {stride} for {width} pixels"));
     }
     Ok((height as usize - 1) * stride as usize + width as usize * 4)
 }
 
-fn supported(format: u32) -> zbus::fdo::Result<()> {
-    if format == PIXMAN_X8R8G8B8 || format == PIXMAN_A8R8G8B8 {
-        return Ok(());
-    }
-    Err(zbus::fdo::Error::NotSupported(format!(
-        "pixman format {format:#010x}"
-    )))
+// The byte order and the length of a scanout that can be shown, or what it is that cannot be.
+fn showable(
+    width: u32,
+    height: u32,
+    stride: u32,
+    pixman_format: u32,
+) -> Result<(Order, usize), String> {
+    let order = order(pixman_format)
+        .ok_or_else(|| format!("a scanout in pixman format {pixman_format:#010x}"))?;
+    Ok((order, geometry(width, height, stride)?))
 }
 
 struct Listener(Arc<State>);
@@ -320,13 +381,14 @@ impl Listener {
         pixman_format: u32,
         data: Vec<u8>,
     ) -> zbus::fdo::Result<()> {
-        supported(pixman_format)?;
-        if data.len() < geometry(width, height, stride)? {
-            return Err(zbus::fdo::Error::InvalidArgs(
-                "scanout shorter than its geometry".into(),
-            ));
+        match showable(width, height, stride, pixman_format) {
+            Ok((order, len)) if data.len() >= len => {
+                self.0
+                    .set(Pixels::Owned(data), (width, height, stride), order);
+            }
+            Ok(_) => self.0.unshowable("a scanout shorter than its size"),
+            Err(what) => self.0.unshowable(&what),
         }
-        self.0.set(Pixels::Owned(data), width, height, stride);
         Ok(())
     }
     #[allow(clippy::too_many_arguments)]
@@ -340,12 +402,15 @@ impl Listener {
         pixman_format: u32,
         data: Vec<u8>,
     ) -> zbus::fdo::Result<()> {
-        supported(pixman_format)?;
         {
             let mut s = self.0.shared.lock().unwrap();
             let Some(sc) = &mut s.scanout else {
                 return Ok(());
             };
+            // Pixels in another order than the scanout's are not pixels of it.
+            if order(pixman_format) != Some(sc.order) {
+                return Ok(());
+            }
             let (sw, sh, sstride) = (sc.w, sc.h, sc.stride as usize);
             let Pixels::Owned(buf) = &mut sc.pixels else {
                 return Ok(());
@@ -403,7 +468,10 @@ impl Listener {
 struct MapListener(Arc<State>);
 #[zbus::interface(name = "org.qemu.Display1.Listener.Unix.Map", spawn = false)]
 impl MapListener {
-    // An error here makes QEMU fall back to sending pixels in the messages (Listener.Scanout/Update).
+    // An error here makes QEMU send pixels in the messages (Listener.Scanout/Update) instead, and
+    // not for this scanout only: it never offers its memory to this listener again. So the only
+    // error is a mapping that could not be made. A scanout that cannot be shown is taken, and
+    // shown as nothing.
     fn scanout_map(
         &mut self,
         handle: Fd<'_>,
@@ -413,16 +481,21 @@ impl MapListener {
         stride: u32,
         pixman_format: u32,
     ) -> zbus::fdo::Result<()> {
-        supported(pixman_format)?;
-        let len = geometry(width, height, stride)?;
+        let (order, len) = match showable(width, height, stride, pixman_format) {
+            Ok(shown) => shown,
+            Err(what) => {
+                self.0.unshowable(&what);
+                return Ok(());
+            }
+        };
         let region = Region::map(handle.as_fd(), offset as u64, len).map_err(|e| {
             eprintln!(
                 "display: the scanout's memory was not mapped ({e}); QEMU sends pixels instead"
             );
             zbus::fdo::Error::Failed(e.to_string())
         })?;
-        self.0
-            .set(Pixels::Mapped(Arc::new(region)), width, height, stride);
+        let pixels = Pixels::Mapped(Arc::new(region));
+        self.0.set(pixels, (width, height, stride), order);
         Ok(())
     }
     fn update_map(&mut self, x: i32, y: i32, width: i32, height: i32) {
@@ -459,20 +532,34 @@ fn send_with_fd(sock: &UnixStream, data: &[u8], fd: i32) -> std::io::Result<()> 
     Ok(())
 }
 
+// Give the socket what is left until `deadline` for its next read and write. The reader is a clone
+// of the same socket, so it has the same limits.
+fn limit(w: &UnixStream, deadline: Instant) -> std::io::Result<()> {
+    let left = deadline.saturating_duration_since(Instant::now());
+    if left.is_zero() {
+        return Err(std::io::ErrorKind::TimedOut.into());
+    }
+    w.set_read_timeout(Some(left))?;
+    w.set_write_timeout(Some(left))
+}
+
 // One QMP command; events are skipped. An error reply is an Err.
 fn qmp_cmd(
     w: &UnixStream,
     r: &mut BufReader<UnixStream>,
     json: &str,
     fd: Option<i32>,
+    deadline: Instant,
 ) -> std::io::Result<()> {
     let line = format!("{json}\n");
+    limit(w, deadline)?;
     match fd {
         Some(fd) => send_with_fd(w, line.as_bytes(), fd)?,
         None => (&*w).write_all(line.as_bytes())?,
     }
     loop {
         let mut reply = String::new();
+        limit(w, deadline)?;
         if r.read_line(&mut reply)? == 0 {
             return Err(std::io::Error::other("QMP closed"));
         }
@@ -487,8 +574,8 @@ fn qmp_cmd(
 }
 
 // Hand QEMU one end of a socket pair over QMP and make it a display client; returns our end.
-fn attach(qmp_path: &str) -> std::io::Result<UnixStream> {
-    attach_qmp(qmp_path).map_err(|e| {
+fn attach(qmp_path: &str, deadline: Instant) -> std::io::Result<UnixStream> {
+    attach_qmp(qmp_path, deadline).map_err(|e| {
         let why = match e.kind() {
             std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut => {
                 format!("no answer in {} s", ATTACH_TIMEOUT.as_secs())
@@ -499,26 +586,28 @@ fn attach(qmp_path: &str) -> std::io::Result<UnixStream> {
     })
 }
 
-fn attach_qmp(qmp_path: &str) -> std::io::Result<UnixStream> {
+fn attach_qmp(qmp_path: &str, deadline: Instant) -> std::io::Result<UnixStream> {
     let w = UnixStream::connect(qmp_path)?;
-    w.set_read_timeout(Some(ATTACH_TIMEOUT))?;
-    w.set_write_timeout(Some(ATTACH_TIMEOUT))?;
     let mut r = BufReader::new(w.try_clone()?);
     let mut greeting = String::new();
+    limit(&w, deadline)?;
     r.read_line(&mut greeting)?;
-    qmp_cmd(&w, &mut r, r#"{"execute":"qmp_capabilities"}"#, None)?;
+    let caps = r#"{"execute":"qmp_capabilities"}"#;
+    qmp_cmd(&w, &mut r, caps, None, deadline)?;
     let (ours, theirs) = UnixStream::pair()?;
     qmp_cmd(
         &w,
         &mut r,
         r#"{"execute":"getfd","arguments":{"fdname":"thylacine-display"}}"#,
         Some(theirs.as_raw_fd()),
+        deadline,
     )?;
     qmp_cmd(
         &w,
         &mut r,
         r#"{"execute":"add_client","arguments":{"protocol":"@dbus-display","fdname":"thylacine-display"}}"#,
         None,
+        deadline,
     )?;
     Ok(ours)
 }
@@ -595,11 +684,47 @@ fn send_input(conn: &zbus::Connection, ev: Input) -> zbus::Result<()> {
             call!("org.qemu.Display1.Mouse", "Press", &(b,))?;
             call!("org.qemu.Display1.Mouse", "Release", &(b,))
         }
+        Input::Sync => Ok(()),
+    }
+}
+
+// What the input thread does: the events in order, a run of positions as its last one, until the
+// window is gone or QEMU is.
+fn pump(
+    irx: mpsc::Receiver<Input>,
+    stx: mpsc::Sender<()>,
+    mut send: impl FnMut(Input) -> zbus::Result<()>,
+) {
+    let mut held_back = None;
+    let mut refused = 0u64;
+    while let Some(first) = held_back.take().or_else(|| irx.recv().ok()) {
+        let (ev, rest) = next_input(first, || irx.try_recv().ok());
+        held_back = rest;
+        if ev == Input::Sync {
+            stx.send(()).ok();
+            continue;
+        }
+        match send(ev) {
+            Ok(()) => {}
+            Err(zbus::Error::InputOutput(e)) => {
+                eprintln!("input: QEMU is gone ({e}); nothing more is sent");
+                break;
+            }
+            // QEMU still answers but will not take the event: another client took its
+            // console, or the position was outside a screen that has just changed.
+            Err(e) => {
+                refused += 1;
+                if refused.is_power_of_two() {
+                    eprintln!("input: QEMU refused an event ({e}); {refused} so far");
+                }
+            }
+        }
     }
 }
 
 pub fn connect(qmp_path: &str) -> Result<Display, Box<dyn std::error::Error>> {
-    let sock = attach(qmp_path)?;
+    let deadline = Instant::now() + ATTACH_TIMEOUT;
+    let sock = attach(qmp_path, deadline)?;
     let shared: Arc<Mutex<Shared>> = Arc::default();
     let dirty = Arc::new(AtomicBool::new(false));
     let pointer_dirty = Arc::new(AtomicBool::new(false));
@@ -611,6 +736,7 @@ pub fn connect(qmp_path: &str) -> Result<Display, Box<dyn std::error::Error>> {
         dirty: dirty.clone(),
         pointer_dirty: pointer_dirty.clone(),
         map,
+        unshowable: AtomicU64::new(0),
     });
     let (tx, rx) = mpsc::channel::<Result<zbus::Connection, String>>();
     std::thread::Builder::new()
@@ -629,54 +755,247 @@ pub fn connect(qmp_path: &str) -> Result<Display, Box<dyn std::error::Error>> {
                 }
             })
         })?;
-    let conn = match rx.recv_timeout(ATTACH_TIMEOUT) {
+    let conn = match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
         Ok(r) => r?,
         Err(_) => return Err("QEMU did not answer on its display connection".into()),
     };
     // Input has a thread of its own so that the window's thread never waits for QEMU.
     let (itx, irx) = mpsc::channel::<Input>();
+    let (stx, synced) = mpsc::channel::<()>();
     std::thread::Builder::new()
         .name("input".into())
-        .spawn(move || {
-            let mut held_back = None;
-            let mut refused = 0u64;
-            while let Some(first) = held_back.take().or_else(|| irx.recv().ok()) {
-                let (ev, rest) = next_input(first, || irx.try_recv().ok());
-                held_back = rest;
-                match send_input(&conn, ev) {
-                    Ok(()) => {}
-                    Err(zbus::Error::InputOutput(e)) => {
-                        eprintln!("input: QEMU is gone ({e}); nothing more is sent");
-                        break;
-                    }
-                    // QEMU still answers but will not take the event: another client took its
-                    // console, or the position was outside a screen that has just changed.
-                    Err(e) => {
-                        refused += 1;
-                        if refused.is_power_of_two() {
-                            eprintln!("input: QEMU refused an event ({e}); {refused} so far");
-                        }
-                    }
-                }
-            }
-        })?;
+        .spawn(move || pump(irx, stx, |ev| send_input(&conn, ev)))?;
     Ok(Display {
         shared,
         dirty,
         pointer_dirty,
         input: itx,
+        synced,
     })
+}
+
+// A display with no QEMU behind it, and a scanout set as the listener sets one: for tests.
+#[cfg(test)]
+impl Display {
+    pub fn detached() -> (Display, mpsc::Receiver<Input>) {
+        let (input, sent) = mpsc::channel();
+        let (_, synced) = mpsc::channel();
+        let display = Display {
+            shared: Arc::default(),
+            dirty: Arc::new(AtomicBool::new(false)),
+            pointer_dirty: Arc::new(AtomicBool::new(false)),
+            input,
+            synced,
+        };
+        (display, sent)
+    }
+    pub fn set_owned(&self, w: u32, h: u32, order: Order, bytes: Vec<u8>) {
+        assert_eq!(bytes.len(), w as usize * h as usize * 4);
+        set_scanout(
+            &self.shared,
+            &self.dirty,
+            Pixels::Owned(bytes),
+            (w, h, w * 4),
+            order,
+        );
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        define_pointer, geometry, next_input, show_pointer, Input, Pointer, Rect, Region, Shared,
-        MAX_POINTER_SIDE, MAX_SIDE,
-    };
-    use std::os::fd::AsFd;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Mutex;
+    use super::*;
+    use std::os::unix::net::UnixListener;
+
+    const X8R8G8B8: u32 = 0x2002_0888;
+
+    fn state(map: bool) -> (Arc<State>, Arc<Mutex<Shared>>) {
+        let shared: Arc<Mutex<Shared>> = Arc::default();
+        let state = Arc::new(State {
+            shared: shared.clone(),
+            dirty: Arc::new(AtomicBool::new(false)),
+            pointer_dirty: Arc::new(AtomicBool::new(false)),
+            map,
+            unshowable: AtomicU64::new(0),
+        });
+        (state, shared)
+    }
+
+    fn showing(shared: &Mutex<Shared>) -> Option<(u32, u32, Order)> {
+        let s = shared.lock().unwrap();
+        s.scanout.as_ref().map(|sc| (sc.w, sc.h, sc.order))
+    }
+
+    #[test]
+    fn the_eight_formats_of_a_guest_have_four_orders() {
+        // pixman's PIXMAN_FORMAT(32, type, a, 8, 8, 8), and its numbers for the four types.
+        let code = |ty: u32, a: u32| 32 << 24 | ty << 16 | a << 12 | 0x888;
+        let (argb, abgr, bgra, rgba) = (2, 3, 8, 9);
+        assert_eq!(code(argb, 0), X8R8G8B8);
+        for a in [0, 8] {
+            assert_eq!(order(code(argb, a)), Some(Order::Bgrx));
+            assert_eq!(order(code(abgr, a)), Some(Order::Rgbx));
+            assert_eq!(order(code(bgra, a)), Some(Order::Xrgb));
+            assert_eq!(order(code(rgba, a)), Some(Order::Xbgr));
+        }
+        // r5g6b5, r8g8b8, a2r10g10b10, nothing.
+        for other in [0x1002_0565, 0x1802_0888, 0x2002_2aaa, 0] {
+            assert_eq!(order(other), None, "{other:#010x}");
+        }
+    }
+
+    #[test]
+    fn a_mapped_scanout_that_cannot_be_shown_is_taken_and_shows_nothing() {
+        let (state, shared) = state(true);
+        let mut map = MapListener(state.clone());
+        let path = std::env::temp_dir().join(format!("thylacine-mac-take-{}", std::process::id()));
+        let f = std::fs::File::create_new(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        f.set_len(8192).unwrap();
+        let fd = || Fd::from(f.as_fd());
+        assert!(map.scanout_map(fd(), 0, 16, 16, 64, X8R8G8B8).is_ok());
+        assert_eq!(showing(&shared), Some((16, 16, Order::Bgrx)));
+        // A format with no byte a channel. Answered as taken, so that QEMU goes on sharing its
+        // memory; and the frame before it is not left standing.
+        assert!(map.scanout_map(fd(), 0, 16, 16, 64, 0x1002_0565).is_ok());
+        assert_eq!(showing(&shared), None);
+        assert!(state.dirty.swap(false, Ordering::AcqRel));
+        // The colours in another order are a scanout like any other.
+        assert!(map.scanout_map(fd(), 0, 16, 16, 64, 0x2003_8888).is_ok());
+        assert_eq!(showing(&shared), Some((16, 16, Order::Rgbx)));
+        // A side past what a texture can have.
+        let wide = MAX_SIDE + 1;
+        assert!(map
+            .scanout_map(fd(), 0, wide, 1, wide * 4, X8R8G8B8)
+            .is_ok());
+        assert_eq!(showing(&shared), None);
+        // Memory that is not there is the one refusal. QEMU then sends that scanout in a message,
+        // and until it does the one before stands.
+        assert!(map.scanout_map(fd(), 0, 16, 16, 64, X8R8G8B8).is_ok());
+        assert!(map.scanout_map(fd(), 0, 64, 64, 256, X8R8G8B8).is_err());
+        assert_eq!(showing(&shared), Some((16, 16, Order::Bgrx)));
+    }
+
+    #[test]
+    fn pixels_in_a_message_are_held_to_the_same() {
+        let (state, shared) = state(false);
+        let mut l = Listener(state);
+        assert!(l.scanout(2, 2, 8, X8R8G8B8, vec![7; 16]).is_ok());
+        assert_eq!(showing(&shared), Some((2, 2, Order::Bgrx)));
+        // An update in the scanout's order is copied in; one in another order is not its pixels.
+        assert!(l.update(0, 0, 1, 1, 4, X8R8G8B8, vec![1, 2, 3, 4]).is_ok());
+        assert!(l.update(1, 1, 1, 1, 4, 0x2003_0888, vec![9; 4]).is_ok());
+        {
+            let s = shared.lock().unwrap();
+            let Pixels::Owned(buf) = &s.scanout.as_ref().unwrap().pixels else {
+                panic!("a scanout sent in a message is owned");
+            };
+            assert_eq!(buf[..4], [1, 2, 3, 4]);
+            assert_eq!(buf[12..], [7; 4]);
+        }
+        // Fewer bytes than its size, or a size that is none: nothing is shown.
+        assert!(l.scanout(2, 2, 8, X8R8G8B8, vec![7; 15]).is_ok());
+        assert_eq!(showing(&shared), None);
+        assert!(l.scanout(2, 2, 8, X8R8G8B8, vec![7; 16]).is_ok());
+        assert_eq!(showing(&shared), Some((2, 2, Order::Bgrx)));
+        assert!(l.scanout(0, 2, 8, X8R8G8B8, Vec::new()).is_ok());
+        assert_eq!(showing(&shared), None);
+    }
+
+    // A monitor that greets at once and answers every line after `delay`.
+    fn monitor(name: &str, delay: Duration) -> (String, std::thread::JoinHandle<()>) {
+        let path = std::env::temp_dir().join(format!("tm-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let listener = UnixListener::bind(&path).unwrap();
+        let served = std::thread::spawn(move || {
+            let (s, _) = listener.accept().unwrap();
+            let mut r = BufReader::new(s.try_clone().unwrap());
+            (&s).write_all(b"{\"QMP\": {}}\n").unwrap();
+            let mut line = String::new();
+            while r.read_line(&mut line).is_ok_and(|n| n > 0) {
+                line.clear();
+                std::thread::sleep(delay);
+                if (&s).write_all(b"{\"return\": {}}\n").is_err() {
+                    break;
+                }
+            }
+        });
+        (path.to_str().unwrap().to_string(), served)
+    }
+
+    #[test]
+    fn the_whole_attach_has_one_deadline() {
+        let step = Duration::from_millis(150);
+        // Three answers, each `step` late, fit in five seconds.
+        let (path, served) = monitor("fits", step);
+        let begun = Instant::now();
+        assert!(attach_qmp(&path, begun + Duration::from_secs(5)).is_ok());
+        assert!(begun.elapsed() >= 3 * step);
+        served.join().unwrap();
+        std::fs::remove_file(&path).unwrap();
+        // They do not fit in two steps, though each of them alone does.
+        let (path, served) = monitor("late", step);
+        let e = attach_qmp(&path, Instant::now() + 2 * step).unwrap_err();
+        assert!(
+            matches!(
+                e.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            ),
+            "{e}"
+        );
+        served.join().unwrap();
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn a_drain_waits_for_what_was_queued() {
+        let (input, irx) = mpsc::channel();
+        let (stx, synced) = mpsc::channel();
+        let display = Display {
+            shared: Arc::default(),
+            dirty: Arc::new(AtomicBool::new(false)),
+            pointer_dirty: Arc::new(AtomicBool::new(false)),
+            input,
+            synced,
+        };
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let record = sent.clone();
+        let gone = Arc::new(AtomicBool::new(false));
+        let is_gone = gone.clone();
+        let pumping = std::thread::spawn(move || {
+            pump(irx, stx, |ev| {
+                if is_gone.load(Ordering::Acquire) {
+                    return Err(zbus::Error::InputOutput(Arc::new(std::io::Error::other(
+                        "gone",
+                    ))));
+                }
+                std::thread::sleep(Duration::from_millis(40)); // QEMU taking its time
+                record.lock().unwrap().push(ev);
+                Ok(())
+            })
+        });
+        let up = Input::Button {
+            button: 0,
+            down: false,
+        };
+        display
+            .input
+            .send(Input::Key {
+                qnum: 30,
+                down: false,
+            })
+            .unwrap();
+        display.input.send(up).unwrap();
+        assert!(display.drain(Duration::from_secs(5)));
+        assert_eq!(sent.lock().unwrap().len(), 2);
+        // With QEMU gone there is nothing to wait for, and the wait says so at once.
+        gone.store(true, Ordering::Release);
+        display.input.send(Input::Wheel { up: true }).unwrap();
+        let begun = Instant::now();
+        assert!(!display.drain(Duration::from_secs(5)));
+        assert!(begun.elapsed() < Duration::from_secs(4));
+        pumping.join().unwrap();
+        assert_eq!(sent.lock().unwrap().len(), 2);
+    }
 
     #[test]
     fn a_pointer_is_an_image_that_can_be_shown() {
@@ -700,9 +1019,10 @@ mod tests {
     }
 
     #[test]
-    fn a_pointer_keeps_its_alpha_and_exchanges_red_and_blue() {
-        let p = Pointer::new(2, 1, 0, 0, vec![1, 2, 3, 4, 250, 251, 252, 0]).unwrap();
-        assert_eq!(p.rgba(), vec![3, 2, 1, 4, 252, 251, 250, 0]);
+    fn a_pointer_exchanges_red_and_blue_and_holds_no_colour_past_its_alpha() {
+        let bgra = vec![1, 2, 3, 4, 250, 251, 252, 0, 40, 100, 200, 128];
+        let p = Pointer::new(3, 1, 0, 0, bgra).unwrap();
+        assert_eq!(p.rgba(), vec![3, 2, 1, 4, 0, 0, 0, 0, 128, 100, 40, 128]);
     }
 
     #[test]

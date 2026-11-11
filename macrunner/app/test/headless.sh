@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
 # The window's test, with no guest and nobody at the keyboard. The app attaches to a QEMU that is paused
 # before its first instruction, and on each pixel path (the scanout mapped from QEMU's memory; pixels
-# sent in the messages) two things must hold:
+# sent in the messages) three things must hold:
 #   picture  what the Metal pipeline makes of the scanout at 1:1, read back, is byte-identical to QEMU's
 #            own screendump of it;
 #   input    a scripted run of AppKit events (view.rs, scripted_input) reaches QEMU as exactly the
 #            expected lines of its dbus_kbd_* / dbus_mouse_* trace: a repeat, a modifier, keys and a
 #            button let go of when the window loses the keys or a menu opens, late releases that must
-#            send nothing, a modifier whose release never arrived, positions through the letterbox,
-#            clicks and moves over the bar that must send nothing, and a key-up under Command;
+#            send nothing, a modifier whose release never arrived (before a key, and before a click),
+#            the two Shifts told apart by their own bits, positions through the letterbox, clicks and
+#            moves over the bar that must send nothing, a wheel notch with its place, a key-up under
+#            Command, and a button still down when the app leaves;
 #   pointer  an image defined as the guest defines its pointer is what AppKit draws for the Mac's.
 # A window opens for four seconds per path and does not take focus.
 #
@@ -24,6 +26,8 @@ app=${THYLACINE_MAC_APP:-$crate/target/release/thylacine-mac}
 
 [ "$(uname -s)" = Darwin ] || { echo "SKIP: the app is a macOS program"; exit 77; }
 command -v "$qemu" > /dev/null || { echo "FAIL: no QEMU at $qemu (THYLACINE_QEMU names one)"; exit 1; }
+# One that is there and cannot run has no displays to list either, and is not a QEMU without D-Bus.
+"$qemu" --version > /dev/null 2>&1 || { echo "FAIL: $qemu does not run ($("$qemu" --version 2>&1 | head -1))"; exit 1; }
 "$qemu" -display help 2>/dev/null | grep -qw dbus || { echo "SKIP: $qemu has no D-Bus display"; exit 77; }
 [ -x "$app" ] || { echo "FAIL: no app at $app (cargo build --release in $crate)"; exit 1; }
 # A binary older than the source it is said to be is a test of something else.
@@ -37,14 +41,19 @@ want+='kbd_press 30;kbd_press 30;kbd_release 30;'                # A held: one r
 want+='kbd_press 31;kbd_release 31;kbd_press 35;kbd_release 35;' # S, the window loses the keys, H, S up late
 want+='kbd_press 56;kbd_release 56;kbd_press 48;kbd_release 48;' # Option whose release never came, then B
 want+='kbd_press 18;kbd_release 18;kbd_press 34;kbd_release 34;' # E, a menu opens, G, E up late
+want+='kbd_press 42;kbd_release 42;kbd_press 54;kbd_release 54;' # the Shifts by their own bits: left up while the guest does not hold it
 want+='mouse_set_pos x=320, y=240;'                              # a move; the click after it is the window's
 want+='kbd_press 33;kbd_release 33;'                             # F
 want+='mouse_set_pos x=10, y=10;mouse_press b2;mouse_set_pos x=10, y=10;mouse_release b2;'     # right click
+want+='kbd_press 29;kbd_release 29;'                             # Control whose release never came, let go of by a click
+want+='mouse_set_pos x=10, y=10;mouse_press b2;mouse_set_pos x=10, y=10;mouse_release b2;'     # that click
+want+='mouse_set_pos x=10, y=10;mouse_press b3;mouse_release b3;'  # a wheel notch up, with its place
 want+='mouse_set_pos x=320, y=240;mouse_press b0;mouse_set_pos x=320, y=240;mouse_release b0;' # left click
 want+='mouse_set_pos x=10, y=10;mouse_press b2;mouse_release b2;'  # after a click over the bar: a press let go of over it
 want+='mouse_set_pos x=320, y=240;mouse_press b0;mouse_release b0;' # left held when the window loses the keys
 want+='kbd_press 32;kbd_release 32;'                             # D through NSApplication
 want+='kbd_press 219;kbd_press 32;kbd_release 32;kbd_release 219;' # D under Command
+want+='mouse_set_pos x=320, y=240;mouse_press b0;mouse_release b0;' # left down when the app leaves: let go of on the way out
 lines=$(printf %s "$want" | tr -cd ';' | wc -c | tr -d ' ')
 
 qp=""; ap=""; wd=""
@@ -103,7 +112,7 @@ d = open(sys.argv[1], "rb").read()
 head = b"P6\n3 2\n255\n"
 px = d[len(head):]
 # red, green, blue; white, a clear pixel (the grey behind it), and (200, 100, 40) at half strength
-# over that grey: (192, 164, 104) if its alpha were taken as already applied
+# with its alpha multiplied in, over that grey: (114, 89, 74) if the alpha were applied to it again
 want = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 255), (128, 128, 128), (164, 114, 84)]
 slack = [0, 0, 0, 0, 0, 2]
 got = [tuple(px[i:i + 3]) for i in range(0, len(px), 3)]

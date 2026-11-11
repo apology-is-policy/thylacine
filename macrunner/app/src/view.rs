@@ -5,18 +5,19 @@ use std::collections::HashSet;
 use std::ptr::NonNull;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadOnly};
 use objc2_app_kit::{
-    NSBitmapFormat, NSBitmapImageRep, NSCursor, NSDeviceRGBColorSpace, NSEvent,
+    NSApplication, NSBitmapFormat, NSBitmapImageRep, NSCursor, NSDeviceRGBColorSpace, NSEvent,
     NSEventModifierFlags, NSEventType, NSGraphicsContext, NSImage,
-    NSMenuDidBeginTrackingNotification, NSResponder, NSView, NSWindowDidResignKeyNotification,
+    NSMenuDidBeginTrackingNotification, NSResponder, NSScreen, NSView,
+    NSWindowDidResignKeyNotification,
 };
-use objc2_core_foundation::CGSize;
-use objc2_core_graphics::{kCGColorSpaceSRGB, CGColorSpace};
+use objc2_core_foundation::{CGPoint, CGSize};
+use objc2_core_graphics::{kCGColorSpaceSRGB, CGColorSpace, CGEvent, CGScrollEventUnit};
 use objc2_foundation::{
     ns_string, MainThreadMarker, NSNotificationCenter, NSObject, NSObjectProtocol, NSPoint, NSRect,
     NSRunLoop, NSRunLoopCommonModes, NSSize, NSTimer,
@@ -27,11 +28,12 @@ use objc2_metal::{
     MTLPrimitiveType, MTLRegion, MTLRenderCommandEncoder, MTLRenderPassDescriptor,
     MTLRenderPipelineDescriptor, MTLRenderPipelineState, MTLSamplerDescriptor,
     MTLSamplerMinMagFilter, MTLSamplerState, MTLSize, MTLStoreAction, MTLTexture,
-    MTLTextureDescriptor, MTLTextureUsage, MTLViewport,
+    MTLTextureDescriptor, MTLTextureSwizzle, MTLTextureSwizzleChannels, MTLTextureUsage,
+    MTLViewport,
 };
 use objc2_quartz_core::{CADisplayLink, CALayer, CAMetalDrawable, CAMetalLayer};
 
-use crate::display::{Display, Input, Pixels, Pointer, Rect};
+use crate::display::{Display, Input, Order, Pixels, Pointer, Rect};
 use crate::keymap;
 
 const SHADERS: &str = r#"
@@ -60,8 +62,29 @@ struct Renderer {
     texture: Option<Retained<ProtocolObject<dyn MTLTexture>>>,
     serial: u64,
     tex_size: (u32, u32),
+    tex_order: Order,
     drawable_size: (u32, u32),
     mapped: bool, // whether the last upload read QEMU's memory or a copy it sent
+}
+
+type Texture = Retained<ProtocolObject<dyn MTLTexture>>;
+
+// A BGRA texture takes a pixel's four bytes as blue, green, red and alpha, in that order. This is
+// which of them each colour is read from when the frame's bytes are in another order.
+fn swizzle(order: Order) -> MTLTextureSwizzleChannels {
+    use MTLTextureSwizzle as From;
+    let (red, green, blue) = match order {
+        Order::Bgrx => (From::Red, From::Green, From::Blue),
+        Order::Rgbx => (From::Blue, From::Green, From::Red),
+        Order::Xrgb => (From::Green, From::Red, From::Alpha),
+        Order::Xbgr => (From::Alpha, From::Red, From::Green),
+    };
+    MTLTextureSwizzleChannels {
+        red,
+        green,
+        blue,
+        alpha: From::One,
+    }
 }
 
 #[derive(Default)]
@@ -202,6 +225,14 @@ struct Worn {
     cursor: Option<Retained<NSCursor>>, // None: the Mac's arrow stays
 }
 
+// The view points an image pixel of the pointer gets: a guest pixel's worth, but no more than keeps
+// the pointer within MAX_POINTER_POINTS a side. A guest may set a screen so small that its picture
+// is magnified many times over, and its pointer would be with it.
+const MAX_POINTER_POINTS: f64 = 256.0;
+fn pointer_scale(w: u32, h: u32, scale: f64) -> f64 {
+    scale.min(MAX_POINTER_POINTS / w.max(h).max(1) as f64)
+}
+
 // A bitmap AppKit owns, `w` x `h` pixels of R, G, B, A.
 fn bitmap(w: u32, h: u32, format: NSBitmapFormat) -> Option<Retained<NSBitmapImageRep>> {
     let rep = unsafe {
@@ -223,9 +254,10 @@ fn bitmap(w: u32, h: u32, format: NSBitmapFormat) -> Option<Retained<NSBitmapIma
     (!rep.bitmapData().is_null() && rep.bytesPerRow() == w as isize * 4).then_some(rep)
 }
 
-// The guest's pointer as an NSCursor, `scale` view points to a guest pixel.
+// The guest's pointer as an NSCursor, `scale` view points to an image pixel.
 fn ns_cursor(p: &Pointer, scale: f64) -> Option<Retained<NSCursor>> {
-    let rep = bitmap(p.w, p.h, NSBitmapFormat::AlphaNonpremultiplied)?;
+    // No flag: alpha last and multiplied in, which is what the guest's image is.
+    let rep = bitmap(p.w, p.h, NSBitmapFormat(0))?;
     let rgba = p.rgba();
     // SAFETY: `bitmap` made room for w * h * 4 bytes, which is what a Pointer holds.
     unsafe { std::ptr::copy_nonoverlapping(rgba.as_ptr(), rep.bitmapData(), rgba.len()) };
@@ -313,13 +345,37 @@ impl Renderer {
             texture: None,
             serial: 0,
             tex_size: (0, 0),
+            tex_order: Order::Bgrx,
             drawable_size: (0, 0),
             mapped: false,
         })
     }
 
+    fn make_texture(&self, w: u32, h: u32, order: Order) -> Option<Texture> {
+        let d = unsafe {
+            MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(
+                MTLPixelFormat::BGRA8Unorm,
+                w as usize,
+                h as usize,
+                false,
+            )
+        };
+        d.setSwizzle(swizzle(order));
+        self.device.newTextureWithDescriptor(&d)
+    }
+
     // Bring the texture up to the scanout. Returns whether anything changed on screen.
     fn upload(&mut self, display: &Display, stats: &mut Stats) -> bool {
+        self.upload_with(display, stats, Self::make_texture)
+    }
+
+    // `make` is the making of a texture, which a test replaces in order to act while it is made.
+    fn upload_with(
+        &mut self,
+        display: &Display,
+        stats: &mut Stats,
+        make: impl FnOnce(&Renderer, u32, u32, Order) -> Option<Texture>,
+    ) -> bool {
         let t0 = Instant::now();
         let mut s = display.shared.lock().unwrap();
         let Some(sc) = &s.scanout else {
@@ -329,31 +385,27 @@ impl Renderer {
             return self.texture.take().is_some();
         };
         let fresh = sc.serial != self.serial || self.texture.is_none();
-        if fresh && (self.tex_size != (sc.w, sc.h) || self.texture.is_none()) {
-            // A texture is made with the lock released. A large one takes long enough that QEMU,
-            // which waits on the display thread while it hands over a scanout, would give up on
-            // sharing its memory for good.
-            let (serial, w, h) = (sc.serial, sc.w, sc.h);
+        let fits = self.tex_size == (sc.w, sc.h) && self.tex_order == sc.order;
+        if fresh && (!fits || self.texture.is_none()) {
+            // A texture is made with the lock released: QEMU waits on the display thread, for a
+            // second at most, while it hands over a scanout, and gives up sharing its memory for
+            // good if it is not answered. What the making costs is not added to that wait.
+            let (serial, w, h, order) = (sc.serial, sc.w, sc.h, sc.order);
             drop(s);
-            let d = unsafe {
-                MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(
-                    MTLPixelFormat::BGRA8Unorm,
-                    w as usize,
-                    h as usize,
-                    false,
-                )
-            };
-            self.texture = self.device.newTextureWithDescriptor(&d);
-            self.tex_size = if self.texture.is_some() {
-                (w, h)
-            } else {
-                (0, 0)
-            };
+            let made = make(self, w, h, order);
             s = display.shared.lock().unwrap();
             if s.scanout.as_ref().map(|sc| sc.serial) != Some(serial) {
-                // The guest set another scanout meanwhile: that one is the next frame's.
+                // The guest set another scanout meanwhile: that one is the next frame's. What is on
+                // the glass, and the size the pointer is placed by, stay as they are until then.
                 display.dirty.store(true, Ordering::Release);
                 return false;
+            }
+            let had = self.texture.is_some();
+            self.tex_size = if made.is_some() { (w, h) } else { (0, 0) };
+            self.tex_order = order;
+            self.texture = made;
+            if self.texture.is_none() {
+                return had;
             }
         }
         let Some(tex) = &self.texture else {
@@ -518,7 +570,7 @@ pub struct Ivars {
     display: Display,
     renderer: RefCell<Option<Renderer>>,
     link: OnceCell<Retained<CADisplayLink>>,
-    held: RefCell<HashSet<u16>>,
+    held: RefCell<keymap::Held>,
     pressed: RefCell<HashSet<u32>>, // buttons the guest holds, by QEMU's number
     stats: RefCell<Stats>,
     total: RefCell<Stats>,
@@ -590,13 +642,13 @@ define_class!(
         #[unsafe(method(keyDown:))]
         fn key_down(&self, ev: &NSEvent) {
             self.settle_modifiers(ev);
-            self.key(keymap::position(ev.keyCode(), keymap::iso_keyboard()), true);
+            self.key(ev.keyCode(), true);
         }
 
         #[unsafe(method(keyUp:))]
         fn key_up(&self, ev: &NSEvent) {
             self.settle_modifiers(ev);
-            self.key(keymap::position(ev.keyCode(), keymap::iso_keyboard()), false);
+            self.key(ev.keyCode(), false);
         }
 
         #[unsafe(method(flagsChanged:))]
@@ -609,12 +661,9 @@ define_class!(
                 self.key(vk, false);
                 return;
             }
-            let Some(bit) = keymap::modifier_flag(vk) else { return };
-            let flag_set = ev.modifierFlags().0 & bit != 0;
-            let was_held = self.ivars().held.borrow().contains(&vk);
-            // The flag stays set while the key's twin on the other side is still down.
-            let down = flag_set && !was_held;
-            if down || was_held { self.key(vk, down); }
+            let was_held = self.ivars().held.borrow().holds(vk);
+            let Some(down) = keymap::modifier_is_down(vk, ev.modifierFlags().0, was_held) else { return };
+            if down != was_held { self.key(vk, down); }
         }
 
         #[unsafe(method(mouseMoved:))]
@@ -646,6 +695,7 @@ define_class!(
 
         #[unsafe(method(scrollWheel:))]
         fn scroll_wheel(&self, ev: &NSEvent) {
+            self.settle_modifiers(ev);
             // A scroll over the bars is not the guest's: it would land wherever its pointer last was.
             if self.guest_point(ev).is_none() {
                 return;
@@ -653,6 +703,12 @@ define_class!(
             let mut acc = self.ivars().scroll.get();
             let n = notches(&mut acc, ev.scrollingDeltaY(), ev.hasPreciseScrollingDeltas());
             self.ivars().scroll.set(acc);
+            if n == 0 {
+                return;
+            }
+            // A window that is not active is still scrolled, and is sent no moves: the guest's
+            // pointer may be anywhere, so the notches go with the place they were made over.
+            self.pointer(ev);
             for _ in 0..n.abs() { self.send(Input::Wheel { up: n > 0 }); }
         }
     }
@@ -670,7 +726,7 @@ impl GuestView {
             display,
             renderer: RefCell::new(Some(renderer)),
             link: OnceCell::new(),
-            held: RefCell::new(HashSet::new()),
+            held: RefCell::new(keymap::Held::default()),
             pressed: RefCell::new(HashSet::new()),
             stats: RefCell::new(Stats::default()),
             total: RefCell::new(Stats::default()),
@@ -721,15 +777,9 @@ impl GuestView {
     // Release everything the guest believes is held, keys and buttons: the window stopped being where
     // they go, and whatever is let go of from here on is let go of somewhere else.
     pub fn release_keys(&self) {
-        let mut held: Vec<u16> = self.ivars().held.borrow_mut().drain().collect();
-        held.sort_unstable();
-        for vk in held {
-            if let Some(q) = keymap::qnum(vk) {
-                self.send(Input::Key {
-                    qnum: q,
-                    down: false,
-                });
-            }
+        let held = self.ivars().held.borrow_mut().drain();
+        for qnum in held {
+            self.send(Input::Key { qnum, down: false });
         }
         let mut pressed: Vec<u32> = self.ivars().pressed.borrow_mut().drain().collect();
         pressed.sort_unstable();
@@ -741,22 +791,25 @@ impl GuestView {
         }
     }
 
-    // Every key event says which modifiers are down. One the guest holds that the event says is up
-    // was let go of where the view could not see it (a menu that was open, a shortcut the system
-    // took), so the guest is told now, before the event's own key.
+    // Quit: what is held is let go of, and the releases are given a moment to reach QEMU. It lifts
+    // the keys itself when the app goes away, and not the buttons.
+    pub fn part(&self) {
+        self.release_keys();
+        self.ivars().display.drain(Duration::from_millis(500));
+    }
+
+    // Every event, a click and a scroll as much as a key, says which modifiers are down. One the
+    // guest holds that the event says is up was let go of where the view could not see it (a menu
+    // that was open, a shortcut the system took), so the guest is told now, before the event's own
+    // key or button.
     fn settle_modifiers(&self, ev: &NSEvent) {
-        let flags = ev.modifierFlags().0;
-        let mut gone: Vec<u16> = self
+        let gone = self
             .ivars()
             .held
             .borrow()
-            .iter()
-            .copied()
-            .filter(|&vk| keymap::modifier_flag(vk).is_some_and(|bit| flags & bit == 0))
-            .collect();
-        gone.sort_unstable();
-        for vk in gone {
-            self.key(vk, false);
+            .modifiers_gone(ev.modifierFlags().0);
+        for code in gone {
+            self.key(code, false);
         }
     }
 
@@ -764,17 +817,20 @@ impl GuestView {
         self.ivars().display.input.send(ev).ok();
     }
 
-    fn key(&self, vk: u16, down: bool) {
-        let Some(q) = keymap::qnum(vk) else { return };
-        {
+    // `code` is the event's key code. Where that key is depends on the keyboard, and is settled
+    // when it goes down.
+    fn key(&self, code: u16, down: bool) {
+        let sent = {
             let mut held = self.ivars().held.borrow_mut();
             if down {
-                held.insert(vk);
-            } else if !held.remove(&vk) && vk != keymap::CAPS_LOCK {
-                return;
+                held.press(code, keymap::iso_keyboard())
+            } else {
+                held.release(code)
             }
+        };
+        if let Some(qnum) = sent {
+            self.send(Input::Key { qnum, down });
         }
-        self.send(Input::Key { qnum: q, down });
     }
 
     // Where the scanout is shown in the view, and how many view points a guest pixel takes.
@@ -821,19 +877,18 @@ impl GuestView {
                 // A guest that never defined a pointer has none to wear: the Mac's arrow stays.
                 None => None,
                 Some(_) if scale <= 0.0 => None,
-                Some(p) if worn.on => ns_cursor(p, scale),
+                Some(p) if worn.on => ns_cursor(p, pointer_scale(p.w, p.h, scale)),
                 // A guest that hides its pointer is shown none.
                 Some(_) => Pointer::new(1, 1, 0, 0, vec![0; 4]).and_then(|p| ns_cursor(&p, 1.0)),
             };
             worn.cursor.clone()
         };
-        let (Some(window), Some((rect, _))) = (self.window(), picture) else {
-            return;
-        };
+        let Some(window) = self.window() else { return };
+        // Also when the picture has gone: the rectangle that was registered for it goes with it.
         window.invalidateCursorRectsForView(self);
         // The rectangles are only looked at when the pointer next moves; one that is resting on the
         // picture would keep its old image until then.
-        if let (Some(cursor), true) = (cursor, window.isKeyWindow()) {
+        if let (Some(cursor), Some((rect, _)), true) = (cursor, picture, window.isKeyWindow()) {
             let p = self.convertPoint_fromView(window.mouseLocationOutsideOfEventStream(), None);
             let inside = p.x >= rect.origin.x
                 && p.y >= rect.origin.y
@@ -846,6 +901,7 @@ impl GuestView {
     }
 
     fn pointer(&self, ev: &NSEvent) {
+        self.settle_modifiers(ev);
         if let Some((x, y)) = self.guest_point(ev) {
             self.send(Input::Abs { x, y });
         }
@@ -854,6 +910,7 @@ impl GuestView {
     // A press counts only over the picture: over the bars it would land wherever the guest's
     // pointer last was. A release is sent exactly when its press was, wherever it happens.
     fn button(&self, ev: &NSEvent, button: Option<u32>, down: bool) {
+        self.settle_modifiers(ev);
         let Some(button) = button else { return };
         if down {
             if self.guest_point(ev).is_none() || !self.ivars().pressed.borrow_mut().insert(button) {
@@ -874,8 +931,8 @@ impl GuestView {
             r.upload(&iv.display, &mut iv.stats.borrow_mut());
         }
         // A pointer as the guest would define one: three colours, white, a clear pixel whose colour
-        // must not show, and a half-clear colour, which comes out one way if its alpha is applied
-        // to it and another if it is taken as applied already. B, G, R, A.
+        // must not show, and a colour at half strength with its alpha multiplied in, which comes
+        // out one way if it is taken so and another if the alpha is applied to it again. B, G, R, A.
         iv.display.define_pointer(
             3,
             2,
@@ -883,7 +940,7 @@ impl GuestView {
             1,
             vec![
                 0, 0, 255, 255, 0, 255, 0, 255, 255, 0, 0, 255, // red, green, blue
-                255, 255, 255, 255, 30, 20, 10, 0, 40, 100, 200, 128, // white, clear, half
+                255, 255, 255, 255, 30, 20, 10, 0, 20, 50, 100, 128, // white, clear, half
             ],
         );
         iv.display.show_pointer(true);
@@ -952,6 +1009,15 @@ impl GuestView {
         key(NSEventType::KeyDown, 0x05, none, false); // G
         key(NSEventType::KeyUp, 0x05, none, false);
         key(NSEventType::KeyUp, 0x0e, none, false);
+        // The two Shifts as a keyboard reports them, each with its own bit beside the one they
+        // share. Left goes down, the window loses the keys, right goes down, and left comes up:
+        // a key the guest no longer holds, which the shared bit alone would take for a press.
+        let shift = |own: usize| NSEventModifierFlags(NSEventModifierFlags::Shift.0 | own);
+        key(NSEventType::FlagsChanged, 0x38, shift(0x02), false);
+        lose_keys();
+        key(NSEventType::FlagsChanged, 0x3c, shift(0x06), false);
+        key(NSEventType::FlagsChanged, 0x38, shift(0x04), false);
+        key(NSEventType::FlagsChanged, 0x3c, none, false);
         // The pointer: the middle of the view, then the centre of guest pixel (10, 10).
         let b = self.bounds();
         let (tw, th) = iv
@@ -980,6 +1046,31 @@ impl GuestView {
         let corner = at(10.5, 10.5);
         mouse(NSEventType::RightMouseDown, corner);
         mouse(NSEventType::RightMouseUp, corner);
+        // Control goes down and its release is never seen. The next thing is a click whose flags
+        // say no modifier is down: Control is let go of before the button goes down.
+        key(
+            NSEventType::FlagsChanged,
+            0x3b,
+            NSEventModifierFlags::Control,
+            false,
+        );
+        mouse(NSEventType::RightMouseDown, corner);
+        mouse(NSEventType::RightMouseUp, corner);
+        key(NSEventType::FlagsChanged, 0x3b, none, false);
+        // A wheel notch over the same pixel. AppKit makes no scroll events, so Core Graphics does;
+        // the event belongs to no window, and its place is read as it is given. Core Graphics
+        // counts down from the top of the first screen, AppKit up from its bottom.
+        let top = NSScreen::screens(self.mtm())
+            .firstObject()
+            .map_or(0.0, |s| s.frame().size.height);
+        let notch = CGEvent::new_scroll_wheel_event2(None, CGScrollEventUnit::Line, 1, 1, 0, 0);
+        if let Some(cg) = &notch {
+            CGEvent::set_location(Some(cg), CGPoint::new(corner.x, top - corner.y));
+        }
+        match notch.and_then(|cg| NSEvent::eventWithCGEvent(&cg)) {
+            Some(ev) => unsafe { msg_send![self, scrollWheel: &*ev] },
+            None => eprintln!("scripted: no scroll event"),
+        }
         // The left button, handed to the view itself: a window that is not active keeps a left
         // click for its own activation, so the window's routing of one is not what is tried here.
         let left = |down: bool, p: NSPoint| {
@@ -1036,6 +1127,8 @@ impl GuestView {
         if let Some(ev) = fl {
             app.sendEvent(&ev);
         } // Command up -> 219 release
+          // The left button goes down and the run ends with it down: it is let go of on the way out.
+        left(true, mid);
         eprintln!(
             "scripted: sent; view {}x{} points, scanout {tw}x{th}, scale {scale:.4}",
             b.size.width, b.size.height
@@ -1115,7 +1208,8 @@ impl GuestView {
                 }
             }
         }
-        std::process::exit(0);
+        // Out through the application, as Quit goes, so that what is held is let go of on the way.
+        NSApplication::sharedApplication(self.mtm()).terminate(None);
     }
 
     fn frame(&self) {
@@ -1179,14 +1273,15 @@ impl GuestView {
 
 #[cfg(test)]
 mod tests {
-    use super::{button_code, fit, notches, replace, Renderer};
-    use crate::display::Rect;
+    use super::{button_code, fit, notches, pointer_scale, replace, Renderer, Stats};
+    use crate::display::{Display, Order, Rect};
     use objc2::runtime::ProtocolObject;
     use objc2_metal::{
         MTLCommandBuffer, MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice, MTLOrigin,
         MTLPixelFormat, MTLRegion, MTLSize, MTLTexture, MTLTextureDescriptor, MTLTextureUsage,
     };
     use std::ptr::NonNull;
+    use std::sync::atomic::Ordering;
 
     fn texture(
         device: &ProtocolObject<dyn MTLDevice>,
@@ -1477,6 +1572,102 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn the_pointer_is_a_guest_pixel_to_a_pixel_up_to_a_size() {
+        assert_eq!(pointer_scale(64, 64, 0.5), 0.5);
+        assert_eq!(pointer_scale(64, 64, 4.0), 4.0);
+        // A 16 x 16 guest screen filling the window: fifty points to a pixel, and not for the pointer.
+        assert_eq!(pointer_scale(64, 64, 50.0), 4.0);
+        assert_eq!(pointer_scale(256, 16, 3.0), 1.0);
+        assert_eq!(pointer_scale(16, 2, 1000.0), 16.0);
+    }
+
+    #[test]
+    fn the_colours_are_read_in_the_order_the_frame_has_them() {
+        let Ok(mut r) = Renderer::new() else {
+            eprintln!("no Metal device: not tried");
+            return;
+        };
+        let colours = [(200u8, 100u8, 40u8), (10, 250, 60)];
+        let junk = 0x77; // the byte that is alpha or nothing
+        for order in [Order::Bgrx, Order::Rgbx, Order::Xrgb, Order::Xbgr] {
+            let mut src = Vec::new();
+            for (red, green, blue) in colours {
+                src.extend_from_slice(&match order {
+                    Order::Bgrx => [blue, green, red, junk],
+                    Order::Rgbx => [red, green, blue, junk],
+                    Order::Xrgb => [junk, red, green, blue],
+                    Order::Xbgr => [junk, blue, green, red],
+                });
+            }
+            let tex = r.make_texture(2, 1, order).unwrap();
+            let all = Rect {
+                x: 0,
+                y: 0,
+                w: 2,
+                h: 1,
+            };
+            assert!(unsafe { replace(&tex, src.as_ptr(), src.len(), 8, all) });
+            r.texture = Some(tex);
+            r.tex_size = (2, 1);
+            let target = texture(&r.device, 2, 1, true);
+            let cmd = r.queue.commandBuffer().unwrap();
+            r.draw(&cmd, &target, (2, 1));
+            cmd.commit();
+            cmd.waitUntilCompleted();
+            let got = read(&target, 2, 1);
+            for (i, (red, green, blue)) in colours.into_iter().enumerate() {
+                assert_eq!(
+                    got[i * 4..][..4],
+                    [blue, green, red, 255],
+                    "{order:?}, pixel {i}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_scanout_set_while_a_texture_is_made_leaves_the_glass_alone() {
+        let Ok(mut r) = Renderer::new() else {
+            eprintln!("no Metal device: not tried");
+            return;
+        };
+        let (display, _sent) = Display::detached();
+        let mut stats = Stats::default();
+        let frame = |w: u32, h: u32, v: u8| vec![v; (w * h * 4) as usize];
+        display.set_owned(4, 2, Order::Bgrx, frame(4, 2, 0x11));
+        assert!(r.upload(&display, &mut stats));
+        assert_eq!((r.tex_size, r.serial), ((4, 2), 1));
+        // A larger scanout arrives, and while its texture is made the guest sets a third.
+        display.set_owned(8, 4, Order::Bgrx, frame(8, 4, 0x22));
+        let changed = r.upload_with(&display, &mut stats, |r, w, h, order| {
+            assert_eq!((w, h), (8, 4));
+            display.set_owned(2, 2, Order::Bgrx, frame(2, 2, 0x33));
+            display.dirty.store(false, Ordering::Release);
+            r.make_texture(w, h, order)
+        });
+        assert!(!changed);
+        assert!(
+            display.dirty.load(Ordering::Acquire),
+            "the next frame must look again"
+        );
+        // What is on the glass is still the first, and so is the size the pointer is placed by.
+        assert_eq!((r.tex_size, r.serial), ((4, 2), 1));
+        assert_eq!(read(r.texture.as_ref().unwrap(), 4, 2), frame(4, 2, 0x11));
+        // The next look shows the third.
+        assert!(r.upload(&display, &mut stats));
+        assert_eq!((r.tex_size, r.serial), ((2, 2), 3));
+        assert_eq!(read(r.texture.as_ref().unwrap(), 2, 2), frame(2, 2, 0x33));
+        // A texture that cannot be made takes the picture away, once.
+        display.set_owned(8, 4, Order::Bgrx, frame(8, 4, 0x44));
+        assert!(r.upload_with(&display, &mut stats, |_, _, _, _| None));
+        assert!(r.texture.is_none());
+        assert_eq!(r.tex_size, (0, 0));
+        assert!(!r.upload_with(&display, &mut stats, |_, _, _, _| None));
+        assert!(r.upload(&display, &mut stats));
+        assert_eq!((r.tex_size, r.serial), ((8, 4), 4));
     }
 
     #[test]

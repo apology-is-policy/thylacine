@@ -10,10 +10,10 @@ use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2::{define_class, msg_send, sel, ClassType, DefinedClass, MainThreadOnly};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSBackingStoreType,
-    NSEvent, NSEventModifierFlags, NSEventType, NSMenu, NSMenuDidBeginTrackingNotification,
-    NSMenuItem, NSResponder, NSWindow, NSWindowCollectionBehavior, NSWindowDelegate,
-    NSWindowStyleMask,
+    NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate,
+    NSApplicationTerminateReply, NSBackingStoreType, NSEvent, NSEventModifierFlags, NSEventType,
+    NSMenu, NSMenuDidBeginTrackingNotification, NSMenuItem, NSResponder, NSWindow,
+    NSWindowCollectionBehavior, NSWindowDelegate, NSWindowStyleMask,
 };
 use objc2_foundation::{
     ns_string, MainThreadMarker, NSNotification, NSNotificationCenter, NSObject, NSObjectProtocol,
@@ -127,6 +127,15 @@ define_class!(
         #[unsafe(method(applicationDidResignActive:))]
         fn did_resign_active(&self, _n: &NSNotification) {
             self.let_go();
+        }
+
+        // Quit and a closed window both end here.
+        #[unsafe(method(applicationShouldTerminate:))]
+        fn should_terminate(&self, _app: &NSApplication) -> NSApplicationTerminateReply {
+            if let Some(v) = self.ivars().view.get() {
+                v.part();
+            }
+            NSApplicationTerminateReply::TerminateNow
         }
     }
 

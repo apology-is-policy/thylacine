@@ -124,6 +124,7 @@ Generated — do not edit between the markers (`quaestor render`).
 
 ## Recent changes
 
+- 2026-11-11 [[chg-2026-11-11-aux-mac-app-audit]] — The Mac app after its first window: the guest's pointer, and two audit rounds
 - 2026-11-11 [[chg-2026-11-11-aux-mac-app]] — The Mac app's first window lands with its headless test; run-vm grows the display modes it attaches to
 - 2026-11-10 [[chg-2026-11-10-aux-device-windows]] — The kernel never touches a device window on a user's behalf: /proc mem, claims over RAM, the CPU's address size, a bus error in a copy
 - 2026-11-10 [[chg-2026-11-10-aux-mmio-forms]] — Device accesses take one instruction form; GICv3 boots under HVF
@@ -131,5 +132,4 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-11-09 [[chg-2026-11-09-aux-unlock]] — An unlock that never left for want of memory is sent again: the aux join's round 3 F2, bounded where a kill cannot reach
 - 2026-11-06 [[chg-2026-11-06-aux-join2]] — The aux join: aux-3 (the thread-model arc through ENOEXEC) reaches main through corona's branch
 - 2026-11-05 [[chg-2026-11-05-as4-r6-join]] — AS-4 audit round 6, the join's half
-- 2026-11-05 [[chg-2026-11-05-as4-r6-shell]] — AS-4 audit round 6, the shell's half
 <!-- generated:end -->

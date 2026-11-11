@@ -163,9 +163,133 @@ pub fn modifier_flag(vk: u16) -> Option<usize> {
     })
 }
 
+// The bit that says THIS modifier key is down, and the two bits of its pair. They are the keyboard
+// driver's own (IOLLEvent.h, NX_DEVICE*KEYMASK), below the bits AppKit names, in the same flags.
+fn side_flags(vk: u16) -> Option<(usize, usize)> {
+    Some(match vk {
+        0x38 => (0x02, 0x06),     // left Shift
+        0x3c => (0x04, 0x06),     // right Shift
+        0x3b => (0x01, 0x2001),   // left Control
+        0x3e => (0x2000, 0x2001), // right Control
+        0x3a => (0x20, 0x60),     // left Option
+        0x3d => (0x40, 0x60),     // right Option
+        0x37 => (0x08, 0x18),     // left Command
+        0x36 => (0x10, 0x18),     // right Command
+        _ => return None,
+    })
+}
+
+// Whether modifier `vk` is down after an event that reports a change to it. The key's own bit says
+// so when the event has one. An event made without those bits (by a remapper, by a test) has only
+// the bit the pair shares, which stays set while the twin is down: a change to a key that was down
+// is then taken as its release. None if `vk` is not a modifier.
+pub fn modifier_is_down(vk: u16, flags: usize, was_held: bool) -> Option<bool> {
+    let shared = modifier_flag(vk)?;
+    Some(match side_flags(vk) {
+        Some((own, pair)) if flags & pair != 0 => flags & own != 0,
+        _ => flags & shared != 0 && !was_held,
+    })
+}
+
+// The keys the guest believes are down: the code macOS gave each one, and the place it was sent
+// as. A key comes up as what it went down as, whatever the keyboard is taken to be by then.
+#[derive(Default)]
+pub struct Held(std::collections::HashMap<u16, u16>);
+impl Held {
+    // A key going down, or repeating: what to send, if it is a key the guest has.
+    pub fn press(&mut self, code: u16, iso: bool) -> Option<u32> {
+        let vk = self.0.get(&code).copied().unwrap_or(position(code, iso));
+        let q = qnum(vk)?;
+        self.0.insert(code, vk);
+        Some(q)
+    }
+    // A key coming up: what went down, if anything did.
+    pub fn release(&mut self, code: u16) -> Option<u32> {
+        qnum(self.0.remove(&code)?)
+    }
+    pub fn holds(&self, code: u16) -> bool {
+        self.0.contains_key(&code)
+    }
+    // Everything let go of at once, in a fixed order.
+    pub fn drain(&mut self) -> Vec<u32> {
+        let mut vks: Vec<u16> = self.0.drain().map(|(_, vk)| vk).collect();
+        vks.sort_unstable();
+        vks.into_iter().filter_map(qnum).collect()
+    }
+    // The modifiers held that an event's flags say are up, in a fixed order.
+    pub fn modifiers_gone(&self, flags: usize) -> Vec<u16> {
+        let mut gone: Vec<u16> = self
+            .0
+            .keys()
+            .copied()
+            .filter(|&code| modifier_flag(code).is_some_and(|bit| flags & bit == 0))
+            .collect();
+        gone.sort_unstable();
+        gone
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_key_comes_up_as_what_it_went_down_as() {
+        let mut held = Held::default();
+        // The key beside left Shift on an ISO keyboard, then let go of when the keyboard last
+        // typed on is another kind: the same place comes up.
+        assert_eq!(held.press(0x0a, true), Some(0x29));
+        assert!(held.holds(0x0a));
+        assert_eq!(held.release(0x0a), Some(0x29));
+        assert_eq!(held.release(0x0a), None);
+        assert_eq!(held.press(0x0a, false), Some(0x56));
+        // A repeat that arrives after the change repeats the place that is down.
+        assert_eq!(held.press(0x0a, true), Some(0x56));
+        assert_eq!(held.release(0x0a), Some(0x56));
+        // A key the guest has no place for is not held.
+        assert_eq!(held.press(0x3f, false), None);
+        assert!(!held.holds(0x3f));
+        assert_eq!(held.release(0x3f), None);
+    }
+    #[test]
+    fn what_is_held_is_let_go_of_in_order() {
+        let mut held = Held::default();
+        for code in [0x3b, 0x00, 0x38, 0x31] {
+            held.press(code, false);
+        }
+        // Shift's flag still set, Control's not.
+        assert_eq!(held.modifiers_gone(1 << 17), vec![0x3b]);
+        assert_eq!(held.modifiers_gone(0), vec![0x38, 0x3b]);
+        assert_eq!(held.modifiers_gone(1 << 17 | 1 << 18), Vec::<u16>::new());
+        assert_eq!(held.drain(), vec![0x1e, 0x39, 0x2a, 0x1d]);
+        assert_eq!(held.drain(), Vec::<u32>::new());
+    }
+    #[test]
+    fn a_modifier_is_down_by_its_own_bit() {
+        const SHIFT: usize = 1 << 17;
+        let (left, right) = (0x38, 0x3c);
+        // Left down, right down, left up, right up, as a keyboard reports them.
+        assert_eq!(modifier_is_down(left, SHIFT | 0x02, false), Some(true));
+        assert_eq!(modifier_is_down(right, SHIFT | 0x06, false), Some(true));
+        assert_eq!(modifier_is_down(left, SHIFT | 0x04, true), Some(false));
+        assert_eq!(modifier_is_down(right, 0, true), Some(false));
+        // Left let go of when the guest was not holding it (the window had lost the keys while
+        // it was down): not a press, though the pair's flag is set.
+        assert_eq!(modifier_is_down(left, SHIFT | 0x04, false), Some(false));
+        // Its own bit set while held: nothing changed.
+        assert_eq!(modifier_is_down(left, SHIFT | 0x06, true), Some(true));
+        // Without the keyboard's bits: the shared flag, and a change to a held key is its release.
+        assert_eq!(modifier_is_down(left, SHIFT, false), Some(true));
+        assert_eq!(modifier_is_down(left, SHIFT, true), Some(false));
+        assert_eq!(modifier_is_down(left, 0, true), Some(false));
+        assert_eq!(modifier_is_down(left, 0, false), Some(false));
+        // Each pair has its own bits; Control's right one is far from its left.
+        assert_eq!(modifier_is_down(0x3e, 1 << 18 | 0x2000, false), Some(true));
+        assert_eq!(modifier_is_down(0x3b, 1 << 18 | 0x2000, false), Some(false));
+        assert_eq!(modifier_is_down(0x3d, 1 << 19 | 0x20, false), Some(false));
+        assert_eq!(modifier_is_down(0x36, 1 << 20 | 0x10, false), Some(true));
+        assert_eq!(modifier_is_down(0x37, 1 << 20 | 0x10, true), Some(false));
+        assert_eq!(modifier_is_down(0x00, SHIFT, false), None);
+    }
     #[test]
     fn an_iso_keyboard_has_two_keys_the_other_way_round() {
         for vk in 0u16..0x80 {
