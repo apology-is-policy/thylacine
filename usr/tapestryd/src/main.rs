@@ -447,7 +447,7 @@ impl Driver for Tapestryd {
         if latch_dead_declared() {
             if self.comp.gpu.test_arm_latch() {
                 self.comp.test_latch_armed = true;
-                say!("tapestryd: test-latch-dead armed (the engine stalls when a 97x89 surface retires, at the compositor ctx create, at one blit-convention attempt, and at one health step once GPU composition runs)");
+                say!("tapestryd: test-latch-dead armed (the engine stalls when a 97x89 surface retires, at the compositor ctx create, at one blit-convention attempt, at one health step once GPU composition runs, and at a bind of the display's for a host 797 or 787 pixels high)");
             } else {
                 say!("tapestryd: test-latch-dead arm REFUSED by the broker");
             }

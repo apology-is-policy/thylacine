@@ -208,7 +208,9 @@ def main():
     args = ap.parse_args()
     if args.self_test:
         return 0 if self_test() else 1
-    files = sorted(pathlib.Path(args.root, "tools").rglob("*.exp"))
+    tools = pathlib.Path(args.root, "tools")
+    # The scenarios, and the Tcl two of them share (it is no scenario, so no .exp).
+    files = sorted(set(tools.rglob("*.exp")) | set(tools.glob("interactive/*.tcl")))
     if not files:
         print("check-expect-forms: no .exp under", args.root, "-- the check read nothing")
         return 1

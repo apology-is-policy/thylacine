@@ -113,9 +113,9 @@ define_class!(
             // The least the window can be dragged to. The guest takes a mode for any size told
             // (its modes go down to 320x200). Its trusted screen needs 800x720 pixels and is
             // sized once, when the guest starts: at the size told by then, or at the first
-            // whole multiple of it that fits. The size told is in pixels, so this least size
-            // is 1280x800 on a display of scale 2 and fits as it is; at scale 1 it is 640x400
-            // and the trusted screen is twice that.
+            // that fits of that size over 2, times 2, over 3, times 3, over 4, times 4. The
+            // size told is in pixels, so this least size is 1280x800 on a display of scale 2
+            // and fits as it is; at scale 1 it is 640x400 and the trusted screen is twice that.
             window.setContentMinSize(NSSize::new(640.0, 400.0));
             window.center();
             window.makeKeyAndOrderFront(None);

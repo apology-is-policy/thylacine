@@ -140,6 +140,30 @@ before. The caller that needs the difference is the compositor when it follows
 a display event: a stall at that step must not set the scale to 100
 ([[sub-tapestryd]]; audit round 2 of that section).
 
+**What the device scans, as the proxy knows it.** A scanout command whose
+deadline passes may still be executed, and the broker parks its resource for
+that reason (`condemn_if_stalled`). The proxy keeps the other half of the same
+fact for its client: `Gpu::scanout_unsettled`. Each of the four scanout
+commands (`set_scanout`, `set_scanout_blob`, `set_scanout_blob_then_flush`,
+`set_scanout_blob_probe`) notes the stall count of the last reply the client
+had, of any kind, before it calls. Accepted, it clears the flag: the device
+takes its commands in order, so an accepted scanout command is the last word.
+Not accepted, with the stall count in its reply moved, it sets the flag. Not
+accepted otherwise (the device answered with a refusal, or the command was
+refused before it was sent), it leaves the flag as it was. For the probe,
+accepted means the device answered OK. A deadline that passed for another
+client of the broker between the two replies reads as this command's own,
+which errs to "not known" and costs the compositor one bind. A client whose
+connection to the broker failed adopts no reply, and its flag stays as it was;
+it has no broker to ask anything of. The flag was added after audit round 3 of
+the display section, where a compositor-side flag set by hand at each bind had
+missed one ([[sub-tapestryd]], "What the device is known to scan").
+
+The broker could instead settle the scanout itself when a stall ends, by
+binding again what it last accepted; a client would then need to know only
+that a stall happened, to push its content again. That is a change to the
+stall design (`docs/GPU-DESIGN.md` 4.5.15) and is not made.
+
 **The trusted screen's size.** `render::fits` is the one test of a size the
 trusted scene can be drawn at: 800x720 at least and 4096x2160 pixels at most.
 `render()` asks it, and so does `Screen::size_for`, which gives the host's size
@@ -301,7 +325,7 @@ forgets the marks made before it:
   completes, said with its pins released;
 - on the second shot the chain's retirement is withheld, so the engine dies at
   30 s and the retirement is refused.
-The same arming gives the compositor three stall shots to aim
+The same arming gives the compositor six stall shots to aim
 (`Request::TestStallNext`, refused once spent). Each makes the next synchronous
 command retire, then report its deadline missed (`Gpu::test_stall_next`),
 said as `INJECTED stall shot of test-latch-dead`, a token distinct from the
@@ -319,13 +343,16 @@ compositor's aim and its command would take it. That needs test-mode, the
 bootarg and the operator's chord, and vote 30 recovers the seat.
 `CtxAttachResource` links the attachment in the ledger before the device
 answers, and a failure that left nothing (`left_nothing`) unlinks it, so the
-resource can still retire. tapestryd aims them at the
+resource can still retire. tapestryd aims three at the
 compositor context's create, at one blit-convention attempt, and at a
-composition health step once GPU composition runs.
+composition health step once GPU composition runs, and three at binds of the
+display's, chosen by the height of the host a display event tells
+([[sub-tapestryd]], `ls-display-stall`).
 Only the designated compositor reaches the broker, and only the booting
 operator sets the token. `tools/interactive/ls-gpu-dead.exp` is the gate for
-the retirement shots, and `tools/warp-host.sh composed-stall` (the GL host) for
-the stall shots.
+the retirement shots, `tools/warp-host.sh composed-stall` (the GL host) for
+the first three stall shots, and `tools/interactive/ls-display-stall.exp` for
+the display's.
 
 ### Episode
 

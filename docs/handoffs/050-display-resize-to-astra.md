@@ -81,10 +81,11 @@ resized or moved to a display with another scale.
   `Follow` and, when it says so, does what `mode auto` does. It reads your broker's
   engine state first: a stalled engine is not asked and the event waits for it; a dead
   one ends the matter. An explicit `mode W H` is judged by the same test and pins the
-  mode until a `mode auto` that is accepted. A bind of the screen that your engine did
-  not accept leaves the bind owed (`screen_bind_owed`), and `bind_pump` asks again once a
-  pass while your engine is live. `docs/AURORA-CONFIG.md` 3.4 has the rule, and the
-  compositor's dossier the whole of it.
+  mode until a `mode auto` that is accepted. After a scanout command that your engine did
+  not answer, the compositor does not know what the device scans (the proxy's
+  `scanout_unsettled`, below), and `bind_pump` settles it once a pass while your engine
+  is live. `docs/AURORA-CONFIG.md` 3.4 has the rule, and the compositor's dossier the
+  whole of it.
 
 ## The five questions this file put to you, as they were answered
 
@@ -124,13 +125,33 @@ resized or moved to a display with another scale.
 - A bind that meets a stalled engine. tapestryd's `reconcile()` enters its composed state
   whether or not the device took the bind, and a mode change takes its own bind back when
   it is not accepted, though the device may execute it later and scan a screen that was
-  given up. The compositor now keeps a flag for a bind of its screen that was not
-  accepted and binds the screen again, from its pass, until your engine accepts
-  (`bind_pump`). It rests on two things of your engine that I read in your code and would
-  want you to confirm: the device takes the control queue in order, so a bind whose
-  deadline passed is executed before any later command or never; and an accepted bind
-  lets go of everything parked before it except what it bound (`drain_condemned`). None
-  of this has run in a guest: nothing I have makes your engine stall on a bind.
+  given up. **Your proxy now carries a flag, `Gpu::scanout_unsettled` (`proxy/gpu.rs`).**
+  Each of the four scanout commands notes the stall count of the client's last reply
+  before it calls; accepted, it clears the flag; not accepted with the count moved, it
+  sets it; a refusal that was answered leaves it. It is your `condemn_if_stalled` test,
+  read from the client's side, and it errs to "not known" when another client's deadline
+  passed between two of this client's replies. The compositor reads `bound_res` as
+  knowledge only while the flag is clear, binds its screen again from its pass while your
+  engine is live (`bind_pump`), and then pushes everything again. A flag kept in the
+  compositor and set by hand at each bind came first, and round 3 found a bind it had
+  missed, which is why it moved to where every scanout command passes. It rests on two
+  things of your engine that I read in your code and would want you to confirm: the
+  device takes the control queue in order, so a bind whose deadline passed is executed
+  before any later command or never; and an accepted SET_SCANOUT lets go of what was
+  parked before it, all but what it bound and any entry whose deferred free your engine
+  does not take (`drain_condemned`; the blob probe drains nothing).
+- **A thing you may want to do instead.** The broker knows what it last accepted
+  (`presentation`). If it bound that again itself when a stall ends, the device would be
+  back at what every client believes without any client's help, and a client would need
+  to know only that a stall happened, to push its content again. I did not do it: it
+  changes the stall design (`docs/GPU-DESIGN.md` 4.5.15), which was voted, and the
+  proxy's flag needs no change to your engine.
+- **Your stall lever has three more shots** (`TestArmLatch` gives six `TestStallNext`
+  now, `backend/device.rs`). The compositor aims the new three at binds of the display's,
+  chosen by the height of the host a display event tells, and
+  `tools/interactive/ls-display-stall.exp` runs them. So the paths above do run in a
+  guest. (An earlier version of this file said nothing here could make your engine
+  stall on a bind. That was wrong: your lever could, and I had not looked.)
 - One read of `events_read` for each ticket under MSI-X. A vector of its own for the
   configuration interrupt would remove it; `PciIrq::for_virtio` gives one vector to all.
 - The INTx branch (the ISR bit) is in no gate.
@@ -157,8 +178,19 @@ is owed. The P3s: held presents were dropped before the bind that could still fa
 follow that changed the mode and then failed was reported as not followed (it is
 `Unfinished` now, and `mode auto` answers Ok for it); three changes to the timing that no
 host test caught; the scenario could pass a failure said just after its success line; and
-fifteen sentences that said more than the code does. A third round on these fixes
-follows.
+fifteen sentences that said more than the code does.
+
+Round 3, on those fixes: no P0, no P1, one P2, four P3. The P2: the flag round 2 added
+was set by hand where a screen is bound, and the switch to direct binds a client's buffer
+while the scanout still reads composed; that bind unanswered, and the layout then wanting
+the composed state, left the device scanning the client's buffer with nothing looking
+again. The flag is now the proxy's, as above. The P3s: the late bind pushed nothing, so
+the glass kept what was last pushed before the stall (everything is established again
+now); the scenario saw only changes begun from the direct state (a second scenario,
+`ls-display-stall`, begins one from the composed state and stalls three binds); a scale
+reset, `scale auto` or `mode W H` between a change and its display's EDID used the old
+display's millimetres (the scale now stands until the EDID is read); and eight more
+sentences. A narrow fourth round on the proxy's flag and these fixes follows.
 
 ## Measured
 

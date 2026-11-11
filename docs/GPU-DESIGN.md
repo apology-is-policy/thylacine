@@ -2693,7 +2693,8 @@ On the first marked retirement it injects a deadline miss whose chain the
 device then retires: the engine revives and the destroy succeeds. On the
 second it injects one whose retirement is withheld: the engine dies at 30 s
 and the destroy is refused, its pins kept. The same lever gives the compositor
-three stall shots to aim (`TestStallNext`). Each makes the next synchronous
+six stall shots to aim (`TestStallNext`; three for its bring-up and health
+step, three for binds of the display's). Each makes the next synchronous
 command retire, then report its deadline missed. The broker's pump at the end of that same
 request revives the engine, so the reply already reads live with the stall
 count moved: the count, not the engine state, is what tells the compositor its

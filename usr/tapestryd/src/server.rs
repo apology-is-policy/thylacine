@@ -1551,6 +1551,21 @@ fn mode_can_be_made(w: u32, h: u32) -> bool {
     true
 }
 
+/// The stall lever's display half (`thylacine.test-latch-dead`): a display
+/// event for a host of one of these heights has one bind retire past its
+/// deadline -- the first bind of the mode change it leads to, or the bind
+/// of the switch to direct that follows the change.
+#[cfg(feature = "test-mode")]
+const TEST_STALL_MODE_H: u32 = 797;
+#[cfg(feature = "test-mode")]
+const TEST_STALL_SWITCH_H: u32 = 787;
+#[cfg(feature = "test-mode")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StallBind {
+    Mode,
+    Switch,
+}
+
 /// What became of an asking of the host's display.
 enum Followed {
     /// The mode is the one fitted to the host's display, the device took
@@ -1794,6 +1809,13 @@ pub struct Comp {
     test_stall_ctx_aimed: bool,
     #[cfg(feature = "test-mode")]
     test_stall_conv_aimed: bool,
+    /// The lever's display half: which bind the next shot is for, and the
+    /// host size it was aimed by (one shot a size, so the asking that
+    /// follows the stall is not stalled too).
+    #[cfg(feature = "test-mode")]
+    test_stall_bind: Option<StallBind>,
+    #[cfg(feature = "test-mode")]
+    test_stall_host: (u32, u32),
     /// A health copy met a GPU stall and no copy has verified since.
     comp_health_unknown: bool,
     /// Health copies (the per-tick step or the attach-time copy) that met a
@@ -2703,6 +2725,10 @@ impl Comp {
             test_stall_aimed: false,
             #[cfg(feature = "test-mode")]
             test_stall_ctx_aimed: false,
+            #[cfg(feature = "test-mode")]
+            test_stall_bind: None,
+            #[cfg(feature = "test-mode")]
+            test_stall_host: (0, 0),
             #[cfg(feature = "test-mode")]
             test_stall_conv_aimed: false,
             comp_health_unknown: false,
@@ -6208,6 +6234,39 @@ impl Comp {
         })
     }
 
+    /// The lever's display half, aimed: a host of a lever height, once a
+    /// size.
+    #[cfg(feature = "test-mode")]
+    fn test_stall_aim(&mut self, host_w: u32, host_h: u32) {
+        if !self.test_latch_armed || self.test_stall_host == (host_w, host_h) {
+            return;
+        }
+        self.test_stall_bind = match host_h {
+            TEST_STALL_MODE_H => Some(StallBind::Mode),
+            TEST_STALL_SWITCH_H => Some(StallBind::Switch),
+            _ => return,
+        };
+        self.test_stall_host = (host_w, host_h);
+    }
+
+    /// The shot, called just before the bind it is for.
+    #[cfg(feature = "test-mode")]
+    fn test_stall_shot(&mut self, which: StallBind) {
+        if self.test_stall_bind != Some(which) {
+            return;
+        }
+        self.test_stall_bind = None;
+        let what = match which {
+            StallBind::Mode => "the mode's bind",
+            StallBind::Switch => "the bind of the switch to direct",
+        };
+        if self.gpu.test_stall_next() {
+            say!("tapestryd: test-latch-dead: {} retires past its deadline", what);
+        } else {
+            say!("tapestryd: test-latch-dead: {} stall REFUSED by the broker", what);
+        }
+    }
+
     /// Ask the host what it prefers and take the mode for it, then the
     /// scale its EDID gives that mode: `mode auto`, and what a display
     /// event leads to while the mode follows the host. `Failed` and
@@ -6230,7 +6289,15 @@ impl Comp {
             say!("tapestryd: mode {}x{} for a display of {}x{}", w, h, host_w, host_h);
         }
         if (w, h) != (self.gpu.width, self.gpu.height) {
-            if let Err(e) = self.change_mode(w, h) {
+            #[cfg(feature = "test-mode")]
+            self.test_stall_aim(host_w, host_h);
+            let changed = self.change_mode(w, h);
+            // A change that reached no bind spends no shot on a later one.
+            #[cfg(feature = "test-mode")]
+            if self.test_stall_bind == Some(StallBind::Mode) {
+                self.test_stall_bind = None;
+            }
+            if let Err(e) = changed {
                 return Followed::Failed(e);
             }
         }
@@ -6459,6 +6526,8 @@ impl Comp {
         // still a local here, so a failed rebind frees it and leaves the
         // old screen + geometry byte-for-byte intact.
         if self.scanout == Scanout::Composed {
+            #[cfg(feature = "test-mode")]
+            self.test_stall_shot(StallBind::Mode);
             if self.gpu.set_scanout(new.res, w, h).is_err() {
                 say!("tapestryd: mode rebind failed; old geometry retained");
                 self.free_screen(new);
@@ -8455,6 +8524,8 @@ impl Comp {
                     // so it is the witness that the screen the display is
                     // being handed exists; printing "composed" before it, as
                     // this line once did, reported an intent as an event.
+                    #[cfg(feature = "test-mode")]
+                    self.test_stall_shot(StallBind::Mode);
                     if self.gpu.set_scanout(sres, dw, dh).is_ok() {
                         self.bound_res = sres;
                         say!(
@@ -20293,6 +20364,8 @@ impl Conn {
                         return Err(E_IO);
                     }
                 }
+                #[cfg(feature = "test-mode")]
+                comp.test_stall_shot(StallBind::Switch);
                 if comp.gpu.set_scanout(res, w, h).is_ok() {
                     // Verdict-gated (round-7 F3 -- the round-4 F4 shape at
                     // its THIRD site; the img arms were fixed, this one

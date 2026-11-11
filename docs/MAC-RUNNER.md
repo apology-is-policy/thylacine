@@ -219,9 +219,10 @@ EDID, then the scale (`docs/AURORA-CONFIG.md` 3.4, amended the same day). The fi
 the host's size, or that size over or times a whole number, the first that is within the
 mode's bounds and whose screen and full-screen surface can be allocated; the same rule
 gives the first mode at boot. An event whose asking finds the device stalled waits for it
-to answer; an asking that was made and failed is made again, six times at most; and a bind
-of the screen that the device did not accept is asked for again from the compositor's pass
-until it is accepted. Lictor's own trusted screen is made once, at boot, by the same rule against its
+to answer; an asking that was made and failed is made again, six times at most; and after a
+scanout command that the device did not answer, the compositor's pass binds the screen again
+(or has the one client shown draw, whose present binds) for as long as the device is live,
+then pushes everything again. Lictor's own trusted screen is made once, at boot, by the same rule against its
 own limits (800x720 at least, 4096x2160 pixels at most), and no longer fails for a host of
 another size. An explicit `mode W H` pins the mode until a `mode auto` that is accepted.
 

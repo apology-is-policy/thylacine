@@ -312,11 +312,17 @@ things):
    a size, refused if it cannot be a mode, and it PINS the mode. A pinned
    mode stands whatever the host's window does, until a `mode auto` that
    is accepted, which also resumes the following (one that is refused
-   leaves the mode that stood, and the pin). A mode change that the device
-   does not take is not a mode change: the mode that stood stands, an
-   event's asking is made again a bounded number of times, and a display
-   whose screen the device did not take is bound again when the device
-   answers. (A persisted fixed mode is pushed as `mode W H` at
+   leaves the mode that stood, and the pin). A mode change that cannot be
+   made leaves the mode that stood. One that was made, and whose screen the
+   device has not taken, stands as made, and so does one whose display's
+   EDID is still unread: the screen is bound again while the device
+   answers, and until the EDID is read the scale that stood stands, since
+   the millimetres held are the display's that was. An event's asking is
+   made again a bounded number of times. Whatever is shown, a scanout
+   command that the device did not answer leaves the compositor not knowing
+   what the device scans, and it settles that as soon as the device answers
+   (binding its screen again, or having the one client shown draw). (A
+   persisted fixed mode is pushed as `mode W H` at
    startup, so it is pinned; a persisted `auto` pushes nothing, and the
    boot's fitted mode follows the host.) No mode changes while the trusted
    screen is up: an event that arrives then is followed after it comes

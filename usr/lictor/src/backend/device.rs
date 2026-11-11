@@ -590,7 +590,11 @@ impl Device {
             }
             Request::TestArmLatch => {
                 #[cfg(feature = "test-mode")] {
-                    self.test_latch_shots = 2; self.test_seat_shots = 4; self.test_stall_shots = 3;
+                    // Three for the compositor's bring-up and health step,
+                    // three for the display's binds (a mode's from the
+                    // direct state, a mode's from the composed one, a
+                    // switch to direct).
+                    self.test_latch_shots = 2; self.test_seat_shots = 4; self.test_stall_shots = 6;
                     ().put(&mut out);
                 }
                 #[cfg(not(feature = "test-mode"))] { return Err(Error::BadField); }

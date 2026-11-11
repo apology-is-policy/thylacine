@@ -203,10 +203,16 @@ things.
   change is owed. Either the device has not taken the bind of the screen
   (`reconcile()` entered the composed state and its bind failed), or the EDID
   was not answered. The scale is derived again only once the EDID is read: the
-  millimetres of the display that was say nothing of this one.
+  millimetres of the display that was say nothing of this one. From the
+  change until that answer `edid_stale` stands, and `derive_scale` then
+  answers the scale that stands, so a scale reset (Super+0), `scale auto` and
+  an explicit `mode W H` made in between derive nothing from the old
+  millimetres over the new pixels. Until round 3 they did.
 - `Done`: the fitted mode is the mode, the device took the bind of its screen
-  where the display is composed, and the scale is the one the EDID gives
-  (unless a verb's override stands). The pump says `... followed, WxH at S%`.
+  where the display is composed, and the scale is the one the EDID gives,
+  unless a verb's or a chord's override stands, or the platform declared a
+  scale, which `derive_scale` answers before it looks at the EDID. The pump
+  says `... followed, WxH at S%`.
 
 An asking that was made and failed, `Failed` or `Unfinished`, is counted
 whatever the engine is afterwards. `Follow::retry` asks again up to six times
@@ -227,40 +233,73 @@ name (the scale is then 100), and an error when the command was not answered.
 Until round 2 it answered `Ok(None)` for both, and a stall at that step set
 the scale to 100 on a `Done` ([[sub-lictor]]).
 
-**A bind that is owed.** The device takes a bind (SET_SCANOUT), or refuses it,
-or does not answer in time; and a bind that was not answered may still be
-executed (`docs/GPU-DESIGN.md` 4.5.15: the broker parks its resource until a
-later bind is accepted). So after a bind of a screen that was not accepted,
-the device is not known to scan the screen the display is composed into. Three
-binds can leave it so: `change_mode`'s bind of the new screen (the change is
-taken back and the new screen freed, and the device may come to scan it all
-the same, a black screen nobody draws into); `reconcile()`'s bind on entering
-the composed state, which is entered whether or not the bind was taken; and a
-repair that failed. Each sets `screen_bind_owed`, and an accepted bind of the
-screen clears it. `bound_res` names the resource of the last bind that was
-accepted, which is what the device scans only while nothing is owed.
+**What the device is known to scan.** The device takes a scanout command (a
+bind, a blob bind, a disable), or refuses it, or does not answer in time; and
+one that was not answered may still be executed (`docs/GPU-DESIGN.md` 4.5.15:
+the broker parks its resource until a later one is accepted). From then until
+a scanout command is accepted, what the device scans is not known.
+[[sub-lictor]]'s proxy keeps that as `Gpu::scanout_unsettled`, for every
+scanout command this compositor sends from anywhere in it: set when one was
+sent and the broker's stall count moved inside the call, cleared by one that
+is accepted, left as it is by a refusal that was answered.
 
-`composed_bound()` is true when the display is not composed, or has no
-screen, or nothing is owed and `bound_res` is the screen's resource.
-`composed_bind_holds()` binds the screen again when it is false, flushes it
-whole (a flush reaches only a scanout bound to the resource) and says
-`tapestryd: scanout composed (WxH) res N bound, late`. An accepted bind
-settles what the device scans, because the device takes its commands in
-order: a bind sent earlier and never answered was executed before this one or
-never will be.
+Round 2 had the compositor keep a flag of its own, set by hand at the three
+places that bind a screen. Round 3 found a fourth bind that nobody had marked:
+the switch to direct binds a client's buffer while the scanout still reads
+composed, and if that bind was not answered and the layout then wanted the
+composed state again, the pending switch was dropped without a bind, the
+device could scan the client's buffer while the compositor composed into its
+screen, and nothing looked again. So the fact is read where every such command
+passes, and the by-hand flag is gone.
 
-It has three callers. `change_mode` begins with it, so no screen is made
-while a bind is owed. The broker lets go of what was parked at every accepted
-bind, so a change that is begun again and again parks one given-up screen at
-most; the broker can park 16, and loses track of a 17th. `follow_display`
-calls it after the change. And `bind_pump` calls it once a pass while
-`composed_bound()` is false and the engine is live: at once the first time,
-then at waits that double from 300 ms to 9.6 s and stay there
-(`display::Backoff`). It does not give up while the bind fails; a dead engine
-is not asked. This covers every way into that state, an explicit `mode W H`
-included. Until round 2 only a followed event had its bind looked at again,
-and a display that stays composed binds its screen once, so nothing else
-would have.
+`bound_res` is what the device is taken to scan: the resource of the last bind
+that was accepted, or 0 after a disable, accepted or not (a disable that was
+refused has its resource parked at the broker). It is knowledge only through
+`scans(res)`, which is `bound_res == res` with the scanout not unsettled. Four
+places read it so. `composed_bound()` is true when the display is not
+composed, or has no screen, or `scans` the screen's resource. And the three
+places where the direct state skips a bind, because the device already scans
+the resource (a 2D present of the slot that is bound, a present of an adopted
+GL source, an image poke), bind when `scans` is false, so the first present
+after a bind that was not answered settles the scanout.
+
+`composed_bind_holds()` binds the screen again when `composed_bound()` is
+false and says `tapestryd: scanout composed (WxH) res N bound, late`. An
+accepted bind settles what the device scans, because the device takes its
+commands in order: a bind sent earlier and never answered was executed before
+this one or never will be. Then everything is established again, because what
+was pushed while the device did not answer never reached the host: a pending
+switch to direct is forgotten, and `reconcile()` runs as a structural pass,
+which repaints the screen, pushes the whole buffer and sends every client a
+CONFIGURE to draw. If the layout wants the direct state, that pass begins the
+switch again with its own request to draw. Until round 3 the late bind was
+followed by a flush alone, and the glass showed what had last been pushed
+before the stall.
+
+It has three callers. `change_mode` begins with it, so no screen is made while
+the device is not known to scan the standing one. An accepted SET_SCANOUT has
+the broker let go of what it had parked, all but the resource just bound,
+except an entry whose deferred free the engine does not take, which stays; so
+a change that is begun again and again parks one given-up screen at most while
+the engine takes commands. The broker can park 16 and loses track of a 17th.
+`follow_display` calls it after the change. And `bind_pump` runs once a pass:
+with the engine live, it puts right whichever state shows something.
+
+- Composed and not `composed_bound()`: it calls `composed_bind_holds()`.
+- Direct and unsettled: it sends the client a CONFIGURE to draw
+  (`tapestryd: scanout direct N is not known to be scanned; its client is
+  asked to draw`, said once a stretch), and the client's present binds.
+- Off, or still the boot's scanout: nothing, since nothing is shown.
+
+`display::Backoff` paces it. The first attempt of a stretch is made on the
+pass that finds it, unless a caller's own attempt has just failed, in which
+case it waits 300 ms; after that the waits double to 9.6 s and stay there. A
+bind refused before it was sent, because the engine was not live, is no
+attempt and lengthens no wait. The pacing starts afresh once nothing is owed.
+It does not give up while the engine is live, and a dead engine is not asked.
+This covers every way into the state, an explicit `mode W H` included. Until
+round 2 only a followed event had its bind looked at again, and a display that
+stays composed binds its screen once, so nothing else would have.
 
 `change_mode` is the body `set_mode` had, in a new order.
 
@@ -273,9 +312,11 @@ would have.
    retires a surface, and that must find the standing display whole. So a
    change whose bind is not taken has by then closed an open menu.
 5. A composed scanout is bound to the new screen before the old one is freed.
-   A bind that is not taken frees the new screen, leaves the old geometry
-   (`tapestryd: mode rebind failed; old geometry retained`) and leaves the
-   standing screen's bind owed.
+   A bind that is not taken frees the new screen and leaves the old geometry
+   (`tapestryd: mode rebind failed; old geometry retained`). If the device
+   refused it, the device still scans the standing screen and nothing is
+   owed. If it was not answered, the scanout is unsettled and `bind_pump`
+   binds the standing screen again.
 6. Held presents are dropped. Only now, when nothing is left that can fail: a
    change that is not made sends no CONFIGURE, and a present dropped for it
    would not be made again.
@@ -302,35 +343,82 @@ to be asked when it answers`, `... not followed (errno E), to be asked again`,
 `... not followed (errno E)`, `... the mode is WxH, not finished (errno E), to
 be asked again`, `... the mode is WxH, not finished (errno E)`, `... not
 followed, the device is dead`; `tapestryd: scanout composed (WxH) res N bound,
-late` for a bind taken at a later asking; and from the test of a size,
+late` for a bind taken at a later asking, and `tapestryd: scanout direct N is
+not known to be scanned; its client is asked to draw`; under the stall lever,
+`tapestryd: test-latch-dead: the mode's bind retires past its deadline` and
+`... the bind of the switch to direct retires past its deadline`; and from the
+test of a size,
 `tapestryd: mode WxH refused -- screen weave N unallocatable (rc)` and the
 same with `surface weave`.
 
 **Tests.** The rule, the timing and the backoff are host tests in
-[[sub-libhalcyon]]. In a guest, `tools/interactive/ls-display-follow.exp` (the
-gate image: it logs in) boots a device of 3456x2160 and wants the mode
-1728x1080, then tells sizes as a VNC viewer does
+[[sub-libhalcyon]]. Two scenarios run in a guest, both on the gate image (they
+log in), sharing their procedures in `tools/interactive/display-follow.tcl`.
+
+`tools/interactive/ls-display-follow.exp` boots a device of 3456x2160 and
+wants the mode 1728x1080, then tells sizes as a VNC viewer does
 (`tools/interactive/rfb_resize.py`, SetDesktopSize) and wants the mode at
 2000x1280, at half of 5120x2880, at the last of a train of three, and at
 640x400, and wants a host of no size left unfollowed. For each mode it wants
-four things: the lines `is up (scanout composed)`, said after the change, and
-`followed, WxH at 100%`, said last, when the bind and the scale are settled
-too; the scanout QEMU dumps at that size with more than one colour on it; the
-console's size in cells from `/dev/winsize` (10 by 22 pixels a cell), which a
-console that was never told of the mode, or never laid itself out again, does
-not change; and a dump that differs after a command is typed, which it does
-not if the device scans a screen nobody draws into. The lines that must not be
-said (an allocation that failed, a bind not taken, an asking that failed or
-was left unfinished, a pinned mode, an extinction) are armed once with
-`expect_before`, which puts them ahead of the patterns of every wait from the
-boot to the shutdown, the shared library's waits included. Not reached by it:
-a pinned mode under an event (the two calls in the verbs); a stall, whether it
-holds an event (noted and waited out), fails an asking or leaves a bind owed
-(either fails the leg); a follow across the trusted screen; and the scale a
-host's millimetres give (a VNC viewer tells none; measured with the Mac app,
-`docs/MAC-RUNNER.md` M-8). The paths a stall opens (`Unfinished`, `bind_pump`,
-the bind owed after `change_mode`) are built and audited and have not run in
-a guest: nothing here makes the device stall.
+the lines of the change: `mode AxB -> WxH (scanout direct)`, said before it,
+`is up (scanout composed)`, said after it, and `followed, WxH at 100%`, said
+last, when the bind and the scale are settled too. Then the scanout QEMU dumps
+at that size with more than one colour on it; the console's size in cells from
+`/dev/winsize` (10 by 22 pixels a cell), which a console that was never told
+of the mode, or never laid itself out again, does not change; and a dump that
+differs after a command is typed, which it does not if the device scans a
+screen nobody draws into. Every change in it begins from the direct state: the
+console is the one thing shown, so the device scans the console's own buffer
+before each change and again soon after it, the three readings are of that
+buffer, and the change's own bind of a new screen never runs. The lines that
+must not be said (an allocation that failed, a bind not taken, an asking that
+failed or was left unfinished, a pinned mode, an extinction) are armed once
+with `expect_before`, which puts them ahead of the patterns of every wait from
+the boot to the shutdown, the shared library's waits included; the redraw
+waits for its command's own output, so a line said during it fails under its
+own label.
+
+`tools/interactive/ls-display-stall.exp` makes a bind go unanswered, three
+times, and makes a change from the composed state. It boots with the stall
+lever (`thylacine.test-latch-dead`, below and in [[sub-lictor]]): the next
+synchronous command is executed and then reported as past its deadline, so the
+reply reads the engine live with the stall count moved, which is the state
+`scanout_unsettled` is derived from. The lever's display half is aimed by the
+host's size (`test_stall_aim`, once a size): a display event for a host 797
+pixels high stalls the first bind of its mode change, one for a host 787 high
+stalls the bind of the switch to direct that follows the change. Its legs:
+
+- A, from the direct state: the bind on entering the composed state is not
+  answered. Wanted, in order: `BIND FAILED`, `mode WxH is set; the display is
+  not bound to its screen`, `bound, late`, `followed`.
+- C: the change is made, the console draws, and the bind of the switch to
+  direct is not answered. Wanted: `bind REFUSED`, then `bound, late` before
+  any switch is made, then `scanout pending-direct` and the switch. Nothing is
+  typed in between, so without `bind_pump` the switch is made by no one and
+  `bound, late` is never said. This is round 3's finding.
+- B, from the composed state (the console's pane split by Super+H): the
+  change's own bind is not answered. Wanted: `mode rebind failed`, `not
+  followed (errno E), to be asked again`, then `bound, late` for the standing
+  mode before the host is asked again, then the second asking makes the
+  change. This is round 2's finding: between the two lines the device scans
+  the screen that was given up.
+- D, from the composed state with nothing stalled: `mode AxB -> WxH (scanout
+  composed)`, the dump at the new size, and a dump that differs after typing,
+  which here is read off the composed screen.
+
+The order of two lines that come from different passes is read with one
+pattern that is either of them, which matches the earlier; a list of two
+patterns is taken in the order listed.
+
+Not reached by either: a pinned mode under an event (the two calls in the
+verbs); a stall that is standing when an asking comes, which holds the event
+(noted and waited out by both scenarios, made by neither); an EDID that is not
+answered, so `Unfinished` by that way and `edid_stale`; the direct state's
+repair, where a present of the client's own is what binds; the later waits of
+`Backoff`; the adopted GL source and the image poke, whose bind no lever
+stalls; a follow across the trusted screen; and the scale a host's millimetres
+give (a VNC viewer tells none; measured with the Mac app,
+`docs/MAC-RUNNER.md` M-8).
 
 ## Purpose
 
@@ -1229,7 +1317,8 @@ says `test-latch-dead armed` only once the broker has accepted it, and
 `tools/interactive/ls-gpu-dead.exp` asks that state, then watches the compositor survive a
 dead engine -- the retirement refused, the ctl still answered
 ([[sub-lictor]]). The same arming lets tapestryd aim one stall at a
-composition health step (below). The battery and its expect
+composition health step (below), and three at binds of the display's
+(`ls-display-stall`, in "The display follows its host"). The battery and its expect
 scenario (`usr/tapestry-battery/src`, `tools/interactive/ls-gfx-panes.exp`)
 are UNOWNED -- their reference lives in `docs/reference/139-tapestryd.md`
 (the gate paragraph); the coverage sweep is
@@ -3571,8 +3660,9 @@ for the boot (OPEN-BUGS 2026-10-29T11:39Z).
 
 The witness is `tools/warp-host.sh composed-stall` on the GL host: the GL leg
 of `composed-screen.exp` with `thylacine.test-latch-dead`, armed now before
-any bring-up GPU step. tapestryd aims the broker's three stall shots
-(`Gpu::test_stall_next`): at the compositor ctx create, at the `slot S`
+any bring-up GPU step. tapestryd aims three of the broker's six stall shots
+here (`Gpu::test_stall_next`; the other three are for binds of the display's,
+"The display follows its host"): at the compositor ctx create, at the `slot S`
 convention class's first attempt, and, once GPU composition runs, at the next
 health issue, whose first command then retires past its deadline. The broker revives the engine inside that same
 request, so the reply reads live and the moved stall count alone carries the
