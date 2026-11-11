@@ -162,18 +162,24 @@ pub fn pids() -> Result<Vec<u32>> {
 /// The status text of `pid`, whole, into `buf`; its length, or `None` when no
 /// Proc has that pid any more.
 pub fn read_status(pid: u32, buf: &mut [u8; STATUS_MAX]) -> Result<Option<usize>> {
-    let mut f = match File::open(format!("/proc/{}/status", pid).as_str()) {
+    let path = format!("/proc/{}/status", pid);
+    let mut f = match File::open(path.as_str()) {
         Ok(f) => f,
         Err(Error::NotFound) => return Ok(None),
         Err(e) => return Err(e),
     };
     match f.read(&mut buf[..]) {
-        // Opened, then reaped before the read: devproc's generic refusal. (An
-        // authority refusal is PermissionDenied, and is an error here.)
-        Err(Error::NotPermitted) => Ok(None),
-        Err(e) => Err(e),
         Ok(0) => Err(Error::Io),
         Ok(n) => Ok(Some(n)),
+        // The kernel's unnamed failure: what the read of a Proc reaped after
+        // the open returns, and anything else it does not name. Only a pid
+        // that no longer opens is gone (pids are never reused); an authority
+        // refusal is PermissionDenied and stays an error.
+        Err(Error::Io) => match File::open(path.as_str()) {
+            Err(Error::NotFound) => Ok(None),
+            _ => Err(Error::Io),
+        },
+        Err(e) => Err(e),
     }
 }
 

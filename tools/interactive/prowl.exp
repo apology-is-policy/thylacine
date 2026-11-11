@@ -6,7 +6,7 @@
 # Terminal/PollSource render + ut's raw-mode dance are all fd-bound):
 #   1. ut sees a raw command (console::is_raw_command("prowl")), flips the console
 #      to RAW, and hands prowl fd 0/1/2 (Inherit) -- so prowl launches, ACQUIRES
-#      THE SCREEN, reads /ctl/procs + /ctl/sched, and renders. A failed dance
+#      THE SCREEN, reads the process set (/proc) + /ctl/sched, and renders. A failed dance
 #      (fd 0 a dead pipe) -> prowl exits at once and the render assertions time out.
 #   2. prowl renders the banner (procs:/cpus:), the process table (the MEM(pg)
 #      header), and a REAL process (kproc, always pid 0) -- proving the kernel
@@ -61,7 +61,7 @@ lc_expect "MEM(pg)" "prowl table header rendered"
 lc_expect "TBL" "prowl-6: the page-table column rendered"
 # A real process -- kproc is always pid 0, ALIVE, and the initial frame is
 # pid-sorted (all %CPU 0 until the first delta) so kproc is at the top: proves
-# /ctl/procs was read + parsed + drawn as real data.
+# the process set (/proc, each status) was read + parsed + drawn as real data.
 lc_expect "kproc" "prowl process list populated with live telemetry"
 lc_pass "prowl-2: launch + raw-mode dance + kernel-telemetry render"
 
@@ -93,7 +93,7 @@ sleep 1
 # prowl-4: toggle the parent->child tree view (t). The footer's mode token flips
 # to the UPPERCASE "TREE" (distinct from the lowercase "t tree" key hint), so the
 # match is unambiguous proof the toggle fired + the tree re-rendered (child procs
-# indented under kproc via the /ctl/procs PPID column). Then toggle back to flat.
+# indented under kproc via each status's ppid). Then toggle back to flat.
 lc_step "prowl: toggle the tree view (t) + navigate in tree order"
 send "t"
 sleep 1

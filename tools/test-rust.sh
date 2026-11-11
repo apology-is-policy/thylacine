@@ -75,10 +75,20 @@ HOST_TRIPLE="$(rustc -vV | awk '/^host:/ {print $2}')"
 # libutopia's second pass runs the shell's evaluator and REPL against libthyla-rs's
 # `host-test` stubs, where every syscall answers ENOSYS. The stubs are aarch64
 # instructions, so another host skips that pass and reports its tests stranded.
+#
+# libthyla-rs itself has no pass WITHOUT the stubs (its `_start` is guest
+# assembly), so its `host-test` pass is its only one: the loop below takes it in
+# place of the default pass, and a failure of it is a FAIL, never NO-HOST.
 FEATURE_PASSES=(
     "cornucopia:scale"
     "libutopia:host-test"
+    "libthyla-rs:host-test"
 )
+
+# What a crate the host cannot build says: libthyla-rs's ELF-only `_start` asm, a
+# cargo refusal to build it for this target at all, or its panic handler against
+# std's.
+NOHOST_RE='\.type _start, %function|could not compile `libthyla-rs`|the lang item is first defined in crate `libthyla_rs`'
 
 # The crates to try. With no arguments: every workspace member, read from the
 # manifest rather than from a hand-kept list here -- a list transcribed into this
@@ -209,12 +219,25 @@ for crate in "${crates[@]}"; do
     rc=0
     cargo_test "$crate" "$log" || rc=$?
 
+    # A crate with a `host-test` entry that the host cannot build without it:
+    # that pass is its only one, and is classified below like a default pass.
+    only=""
+    if (( rc != 0 )) && [[ "$HOST_TRIPLE" == aarch64-* ]] && grep -qE "$NOHOST_RE" "$log"; then
+        for entry in "${FEATURE_PASSES[@]}"; do
+            [[ "$entry" == "$crate:host-test" ]] || continue
+            only="$entry"
+            rc=0
+            cargo_test "$crate" "$log" --features host-test || rc=$?
+        done
+    fi
+
     if (( rc == 0 )); then
         ok=1
         collect_names "$log" "$names" || ok=0
         for entry in "${FEATURE_PASSES[@]}"; do
             (( ok )) || break
             [[ "${entry%%:*}" == "$crate" ]] || continue
+            [[ "$entry" != "$only" ]] || continue
             [[ "${entry#*:}" != host-test || "$HOST_TRIPLE" == aarch64-* ]] || continue
             flog="$logdir/$crate.features.log"
             frc=0
@@ -260,9 +283,16 @@ for crate in "${crates[@]}"; do
         continue
     fi
 
-    # The host-impossible signatures: libthyla-rs's ELF-only `_start` asm, a cargo
-    # refusal to build it for this target at all, or its panic handler against std's.
-    if grep -qE '\.type _start, %function|could not compile `libthyla-rs`|the lang item is first defined in crate `libthyla_rs`' "$log"; then
+    # A crate's only pass failing is a failure whatever its log says: "could not
+    # compile `libthyla-rs`" is also what a broken test of libthyla-rs prints.
+    if [[ -n "$only" ]]; then
+        fail+=("$crate")
+        echo "--- FAIL $crate (--features host-test, its only pass) ---"
+        tail -25 "$log"
+        continue
+    fi
+
+    if grep -qE "$NOHOST_RE" "$log"; then
         nohost+=("$crate")
     else
         fail+=("$crate")

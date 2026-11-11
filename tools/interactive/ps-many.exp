@@ -91,8 +91,8 @@ lc_pass "ps-many(2): /ctl/procs with more rows than fit ends with the cut line"
 set before [pids_of "ls /proc | cat" $ls_row "ls1"]
 set shown  [pids_of "ps --color=never --beacon=never" $ps_row "ps"]
 set after  [pids_of "ls /proc | cat" $ls_row "ls2"]
-if {[llength $before] < 80} {
-    lc_fail "/proc lists [llength $before] pids with seventy sleeps alive: {$before} (3)"
+if {[llength $before] <= [llength $sleeps]} {
+    lc_fail "/proc lists [llength $before] pids with [llength $sleeps] sleeps and their shell alive: {$before} (3)"
 }
 set owed {}
 foreach p $before { if {[lsearch -exact $after $p] >= 0} { lappend owed $p } }
@@ -108,6 +108,7 @@ lc_pass "ps-many(3): ps listed all [llength $owed] Procs alive throughout it ([l
 
 # ---- (4) a file name with a space: one alphabet for the name ----------------
 lc_send {cp /bin/sleep '/tmp/a b'}
+lc_send {chmod 755 '/tmp/a b'}
 set odd [start_job {'/tmp/a b' 900} "the program named `a b`"]
 lc_send "cat /proc/$odd/status"
 lc_expect_re {name: +a\?b\r?\n} "the status shows the space in the file name as ? (4)"
