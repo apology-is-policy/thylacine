@@ -2607,7 +2607,6 @@ impl Comp {
             gpu.width = first.0;
             gpu.height = first.1;
         }
-        let display_seen = gpu.display_events;
         let (derived, src) = match declared {
             Some(p) => (p, "declared"),
             None => (
@@ -2632,7 +2631,10 @@ impl Comp {
         Comp {
             gpu,
             follow_host: true,
-            display_seen,
+            // Not the broker's count as it is now: an event it counted since its own
+            // start may be newer than the size it started with, which is the size
+            // this display starts from. A count that is not zero is news.
+            display_seen: 0,
             display_changed: None,
             scale,
             scale_override: None,

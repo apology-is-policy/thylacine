@@ -1332,7 +1332,8 @@ impl Controlq {
         // vector both were given, where nothing does and every ticket may
         // be either.
         let config = if self.irq.mode() == PciIrqMode::Intx {
-            unsafe { r8(self.isr_va) } & ISR_CONFIG != 0
+            let isr = unsafe { r8(self.isr_va) };
+            isr & ISR_CONFIG != 0
         } else {
             event.is_some()
         };
