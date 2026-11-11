@@ -11,12 +11,13 @@ use objc2::runtime::ProtocolObject;
 use objc2::{define_class, msg_send, sel, ClassType, DefinedClass, MainThreadOnly};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSBackingStoreType,
-    NSEvent, NSEventModifierFlags, NSEventType, NSMenu, NSMenuItem, NSResponder, NSWindow,
-    NSWindowCollectionBehavior, NSWindowDelegate, NSWindowStyleMask,
+    NSEvent, NSEventModifierFlags, NSEventType, NSMenu, NSMenuDidBeginTrackingNotification,
+    NSMenuItem, NSResponder, NSWindow, NSWindowCollectionBehavior, NSWindowDelegate,
+    NSWindowStyleMask,
 };
 use objc2_foundation::{
-    ns_string, MainThreadMarker, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect,
-    NSSize, NSString,
+    ns_string, MainThreadMarker, NSNotification, NSNotificationCenter, NSObject, NSObjectProtocol,
+    NSPoint, NSRect, NSSize, NSString,
 };
 
 use view::{GuestView, Options};
@@ -112,15 +113,36 @@ define_class!(
             }
             self.ivars().window.set(window).ok();
             self.ivars().view.set(view).ok();
+            // SAFETY: the delegate lives as long as the application, and the selector is its own.
+            unsafe {
+                NSNotificationCenter::defaultCenter().addObserver_selector_name_object(
+                    self,
+                    sel!(menuDidBeginTracking:),
+                    Some(NSMenuDidBeginTrackingNotification),
+                    None,
+                );
+            }
+        }
+
+        #[unsafe(method(applicationDidResignActive:))]
+        fn did_resign_active(&self, _n: &NSNotification) {
+            self.let_go();
+        }
+    }
+
+    impl Delegate {
+        // A menu that is open takes the key events, releases included, and the window stays key
+        // throughout: what the guest holds is let go of as the menu opens.
+        #[unsafe(method(menuDidBeginTracking:))]
+        fn menu_did_begin_tracking(&self, _n: &NSNotification) {
+            self.let_go();
         }
     }
 
     unsafe impl NSWindowDelegate for Delegate {
         #[unsafe(method(windowDidResignKey:))]
         fn did_resign_key(&self, _n: &NSNotification) {
-            if let Some(v) = self.ivars().view.get() {
-                v.release_keys();
-            }
+            self.let_go();
         }
 
         #[unsafe(method(windowWillClose:))]
@@ -129,6 +151,14 @@ define_class!(
         }
     }
 );
+
+impl Delegate {
+    fn let_go(&self) {
+        if let Some(v) = self.ivars().view.get() {
+            v.release_keys();
+        }
+    }
+}
 
 fn item(
     mtm: MainThreadMarker,

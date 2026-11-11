@@ -627,9 +627,16 @@ must act on `VIRTIO_GPU_EVENT_DISPLAY` (B5 -- the Lictor change, coordinated wit
 HiDPI: the scanout is sized in backing pixels (`backingScaleFactor` x points) and the
 millimetres encode the scale, so the guest renders at 200% into a 1:1 texture
 (`tree:tools/run-vm.sh:366-376` already does this by hand with `THYLACINE_HIDPI`).
-Cursor: `CursorDefine` + `MouseSet` give a host-drawn cursor; Thylacine draws its own via
-Lictor's cursor plane, so the app hides the host arrow while the pointer is over the view
-(`run-vm.sh:430-434` reasoning).
+Cursor: Thylacine's pointer is NOT in the scanout. Lictor sends it down the virtio cursor
+queue (`usr/lictor/src/backend/gpu/cursor.rs`, a 64x64 image), and under `-display dbus`
+QEMU forwards it to the listener as `CursorDefine` (image and hot spot) and `MouseSet`
+(position, and whether the guest shows one); whoever shows the screen has to draw it, as
+QEMU's own cocoa window does. The app makes the Mac's pointer wear the guest's image while
+it is over the picture (an `NSCursor`, sized so that an image pixel covers a guest pixel)
+and shows none when the guest hides its own; the guest's position is not drawn from, because
+the guest only repeats the absolute position it was sent, a round trip late. (The first
+window, 4f02edd44, ignored both calls on a misreading of this paragraph's earlier text,
+"Thylacine draws its own": it showed the Mac's arrow and no guest pointer.)
 
 **Product: an IOSurface scanout.** For `virtio-gpu-gl` (virgl/Venus) the scanout is a GPU
 texture and the DMABUF kinds do not exist on macOS (B2). The fork adds

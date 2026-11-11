@@ -4,10 +4,12 @@
 # sent in the messages) two things must hold:
 #   picture  what the Metal pipeline makes of the scanout at 1:1, read back, is byte-identical to QEMU's
 #            own screendump of it;
-#   input    24 scripted AppKit events reach QEMU as exactly the expected run of keys and pointer moves
-#            (its dbus_kbd_* / dbus_mouse_* trace): a repeat, a modifier, keys released when the window
-#            loses them, a late key-up that must send nothing, positions through the letterbox, a move
-#            over the bar that must send nothing, and a key-up under Command.
+#   input    a scripted run of AppKit events (view.rs, scripted_input) reaches QEMU as exactly the
+#            expected lines of its dbus_kbd_* / dbus_mouse_* trace: a repeat, a modifier, keys and a
+#            button let go of when the window loses the keys or a menu opens, late releases that must
+#            send nothing, a modifier whose release never arrived, positions through the letterbox,
+#            clicks and moves over the bar that must send nothing, and a key-up under Command;
+#   pointer  an image defined as the guest defines its pointer is what AppKit draws for the Mac's.
 # A window opens for four seconds per path and does not take focus.
 #
 #   macrunner/app/test/headless.sh       exit 0 pass, 1 fail, 77 skipped (not macOS, or no D-Bus display)
@@ -21,10 +23,29 @@ qemu=${THYLACINE_QEMU:-qemu-system-aarch64}
 app=${THYLACINE_MAC_APP:-$crate/target/release/thylacine-mac}
 
 [ "$(uname -s)" = Darwin ] || { echo "SKIP: the app is a macOS program"; exit 77; }
+command -v "$qemu" > /dev/null || { echo "FAIL: no QEMU at $qemu (THYLACINE_QEMU names one)"; exit 1; }
 "$qemu" -display help 2>/dev/null | grep -qw dbus || { echo "SKIP: $qemu has no D-Bus display"; exit 77; }
 [ -x "$app" ] || { echo "FAIL: no app at $app (cargo build --release in $crate)"; exit 1; }
+# A binary older than the source it is said to be is a test of something else.
+newer=$(find "$crate/src" "$crate/Cargo.toml" "$crate/Cargo.lock" -newer "$app" | head -1)
+[ -z "$newer" ] || { echo "FAIL: $app is older than $newer (cargo build --release in $crate)"; exit 1; }
 
-want='kbd_press 30;kbd_release 30;kbd_press 200;kbd_release 200;kbd_press 42;kbd_release 42;kbd_press 30;kbd_press 30;kbd_release 30;kbd_press 31;kbd_release 31;mouse_set_pos x=320, y=240;kbd_press 33;kbd_release 33;mouse_set_pos x=10, y=10;mouse_press b2;mouse_set_pos x=10, y=10;mouse_release b2;kbd_press 32;kbd_release 32;kbd_press 219;kbd_press 32;kbd_release 32;kbd_release 219;'
+want='kbd_press 30;kbd_release 30;'                              # A
+want+='kbd_press 200;kbd_release 200;'                           # Up, a key with a prefix
+want+='kbd_press 42;kbd_release 42;'                             # left Shift
+want+='kbd_press 30;kbd_press 30;kbd_release 30;'                # A held: one repeat
+want+='kbd_press 31;kbd_release 31;kbd_press 35;kbd_release 35;' # S, the window loses the keys, H, S up late
+want+='kbd_press 56;kbd_release 56;kbd_press 48;kbd_release 48;' # Option whose release never came, then B
+want+='kbd_press 18;kbd_release 18;kbd_press 34;kbd_release 34;' # E, a menu opens, G, E up late
+want+='mouse_set_pos x=320, y=240;'                              # a move; the click after it is the window's
+want+='kbd_press 33;kbd_release 33;'                             # F
+want+='mouse_set_pos x=10, y=10;mouse_press b2;mouse_set_pos x=10, y=10;mouse_release b2;'     # right click
+want+='mouse_set_pos x=320, y=240;mouse_press b0;mouse_set_pos x=320, y=240;mouse_release b0;' # left click
+want+='mouse_set_pos x=10, y=10;mouse_press b2;mouse_release b2;'  # after a click over the bar: a press let go of over it
+want+='mouse_set_pos x=320, y=240;mouse_press b0;mouse_release b0;' # left held when the window loses the keys
+want+='kbd_press 32;kbd_release 32;'                             # D through NSApplication
+want+='kbd_press 219;kbd_press 32;kbd_release 32;kbd_release 219;' # D under Command
+lines=$(printf %s "$want" | tr -cd ';' | wc -c | tr -d ' ')
 
 qp=""; ap=""; wd=""
 stop() { for p in $wd $ap $qp; do kill "$p" 2>/dev/null; done; }
@@ -35,7 +56,7 @@ leg() {
     local name=$1; shift
     local d=$repo/build/macrunner-app-test/$name
     mkdir -p "$d" && cd "$d" || return 1
-    rm -f q.sock app.ppm screendump.ppm trace.log app.out qemu.out
+    rm -f q.sock app.ppm app-pointer.ppm screendump.ppm trace.log app.out qemu.out
     "$qemu" -machine virt,accel=tcg -cpu cortex-a72 -m 256 -S -nodefaults -display dbus,p2p=on \
         -device virtio-gpu-pci -device virtio-tablet-pci -device virtio-keyboard-pci \
         -qmp unix:q.sock,server=on,wait=off -serial none -monitor none \
@@ -70,11 +91,32 @@ PY
     fi
     got=$(grep 'dbus_kbd\|dbus_mouse' trace.log | sed 's/dbus_//; s/keycode //; s/button /b/' | tr '\n' ';')
     if [ "$got" = "$want" ]; then
-        echo "$name: input arrived as scripted (24 events)"
+        echo "$name: input arrived as scripted ($lines trace lines)"
     else
         echo "$name: FAIL: input differs"; echo "  got:  $got"; echo "  want: $want"; rc=1
     fi
     grep -q "pixels $pixels" app.out || { echo "$name: FAIL: the app did not take the '$pixels' path ($(grep '^finish' app.out))"; rc=1; }
+    grep -q 'pointer 3x2 hot 1,1 shown$' app.out || { echo "$name: FAIL: the Mac's pointer did not take the image that was defined ($(grep '^finish' app.out))"; rc=1; }
+    if python3 - app-pointer.ppm <<'PY' >> app.out 2>&1
+import sys
+d = open(sys.argv[1], "rb").read()
+head = b"P6\n3 2\n255\n"
+px = d[len(head):]
+# red, green, blue; white, a clear pixel (the grey behind it), and (200, 100, 40) at half strength
+# over that grey: (192, 164, 104) if its alpha were taken as already applied
+want = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 255), (128, 128, 128), (164, 114, 84)]
+slack = [0, 0, 0, 0, 0, 2]
+got = [tuple(px[i:i + 3]) for i in range(0, len(px), 3)]
+ok = d.startswith(head) and len(got) == 6 and all(
+    abs(a - b) <= t for g, w, t in zip(got, want, slack) for a, b in zip(g, w))
+print("pointer pixels:", got, "ok" if ok else "WANT %s" % want)
+sys.exit(0 if ok else 1)
+PY
+    then
+        echo "$name: the pointer AppKit draws is the image that was defined (6 pixels)"
+    else
+        echo "$name: FAIL: the pointer's pixels differ ($(grep '^pointer pixels' app.out | tail -1))"; rc=1
+    fi
     return $rc
 }
 

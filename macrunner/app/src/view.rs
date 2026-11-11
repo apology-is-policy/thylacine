@@ -4,17 +4,22 @@ use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::HashSet;
 use std::ptr::NonNull;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::Instant;
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
-use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadOnly};
-use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSEventType, NSResponder, NSView};
+use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadOnly};
+use objc2_app_kit::{
+    NSBitmapFormat, NSBitmapImageRep, NSCursor, NSDeviceRGBColorSpace, NSEvent,
+    NSEventModifierFlags, NSEventType, NSGraphicsContext, NSImage,
+    NSMenuDidBeginTrackingNotification, NSResponder, NSView, NSWindowDidResignKeyNotification,
+};
 use objc2_core_foundation::CGSize;
 use objc2_core_graphics::{kCGColorSpaceSRGB, CGColorSpace};
 use objc2_foundation::{
-    ns_string, MainThreadMarker, NSObject, NSObjectProtocol, NSPoint, NSRect, NSRunLoop,
-    NSRunLoopCommonModes, NSTimer,
+    ns_string, MainThreadMarker, NSNotificationCenter, NSObject, NSObjectProtocol, NSPoint, NSRect,
+    NSRunLoop, NSRunLoopCommonModes, NSSize, NSTimer,
 };
 use objc2_metal::{
     MTLClearColor, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue,
@@ -26,7 +31,7 @@ use objc2_metal::{
 };
 use objc2_quartz_core::{CADisplayLink, CALayer, CAMetalDrawable, CAMetalLayer};
 
-use crate::display::{Display, Input, Pixels, Rect};
+use crate::display::{Display, Input, Pixels, Pointer, Rect};
 use crate::keymap;
 
 const SHADERS: &str = r#"
@@ -122,6 +127,146 @@ fn notches(acc: &mut f64, dy: f64, precise: bool) -> i32 {
     n as i32
 }
 
+// Where a tw x th picture goes in a w x h area that shows all of it, centred, at one scale:
+// (x, y, width, height, scale). The drawing and the pointer both take the picture's place from here.
+fn fit(tw: f64, th: f64, w: f64, h: f64) -> Option<(f64, f64, f64, f64, f64)> {
+    if tw <= 0.0 || th <= 0.0 || w <= 0.0 || h <= 0.0 {
+        return None;
+    }
+    let scale = (w / tw).min(h / th);
+    let (vw, vh) = (tw * scale, th * scale);
+    Some(((w - vw) / 2.0, (h - vh) / 2.0, vw, vh, scale))
+}
+
+// QEMU's number for a button AppKit numbers `number` (left 0, right 1, middle 2, then the side
+// buttons). QEMU's 3 and 4 are the wheel.
+fn button_code(number: isize) -> Option<u32> {
+    Some(match number {
+        0 => 0,
+        1 => 2,
+        2 => 1,
+        3 => 5,
+        4 => 6,
+        _ => return None,
+    })
+}
+
+// Copy rectangle `r` of a frame whose rows are `stride` bytes apart into the same place in `tex`,
+// from `len` readable bytes at `src`. False, with nothing copied, if the rectangle's last pixel is not
+// among them. Metal is asked for r.w pixels of each row and reads no further (the test below puts an
+// unreadable page after the last one).
+// SAFETY: `src` is valid for reads of `len` bytes for the whole call, and `r` lies inside `tex`.
+unsafe fn replace(
+    tex: &ProtocolObject<dyn MTLTexture>,
+    src: *const u8,
+    len: usize,
+    stride: usize,
+    r: Rect,
+) -> bool {
+    if r.w == 0 || r.h == 0 {
+        return false;
+    }
+    let first = r.y as usize * stride + r.x as usize * 4;
+    let last = (r.y + r.h - 1) as usize * stride + (r.x + r.w) as usize * 4;
+    if last > len {
+        return false;
+    }
+    let region = MTLRegion {
+        origin: MTLOrigin {
+            x: r.x as usize,
+            y: r.y as usize,
+            z: 0,
+        },
+        size: MTLSize {
+            width: r.w as usize,
+            height: r.h as usize,
+            depth: 1,
+        },
+    };
+    tex.replaceRegion_mipmapLevel_withBytes_bytesPerRow(
+        region,
+        0,
+        NonNull::new_unchecked(src.add(first) as *mut std::ffi::c_void),
+        stride,
+    );
+    true
+}
+
+// The Mac's pointer wearing the guest's image while it is over the picture. The guest moves its own
+// pointer to the positions it is sent, so the Mac's is already where the guest's is, and has no lag.
+#[derive(Default)]
+struct Worn {
+    image: Option<Arc<Pointer>>,
+    on: bool,
+    scale: f64, // view points to a guest pixel when `cursor` was made
+    cursor: Option<Retained<NSCursor>>, // None: the Mac's arrow stays
+}
+
+// A bitmap AppKit owns, `w` x `h` pixels of R, G, B, A.
+fn bitmap(w: u32, h: u32, format: NSBitmapFormat) -> Option<Retained<NSBitmapImageRep>> {
+    let rep = unsafe {
+        NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bitmapFormat_bytesPerRow_bitsPerPixel(
+            NSBitmapImageRep::alloc(),
+            std::ptr::null_mut(),
+            w as isize,
+            h as isize,
+            8,
+            4,
+            true,
+            false,
+            NSDeviceRGBColorSpace,
+            format,
+            w as isize * 4,
+            32,
+        )
+    }?;
+    (!rep.bitmapData().is_null() && rep.bytesPerRow() == w as isize * 4).then_some(rep)
+}
+
+// The guest's pointer as an NSCursor, `scale` view points to a guest pixel.
+fn ns_cursor(p: &Pointer, scale: f64) -> Option<Retained<NSCursor>> {
+    let rep = bitmap(p.w, p.h, NSBitmapFormat::AlphaNonpremultiplied)?;
+    let rgba = p.rgba();
+    // SAFETY: `bitmap` made room for w * h * 4 bytes, which is what a Pointer holds.
+    unsafe { std::ptr::copy_nonoverlapping(rgba.as_ptr(), rep.bitmapData(), rgba.len()) };
+    let size = NSSize::new(p.w as f64 * scale, p.h as f64 * scale);
+    rep.setSize(size);
+    let image = NSImage::initWithSize(NSImage::alloc(), size);
+    image.addRepresentation(&rep);
+    Some(NSCursor::initWithImage_hotSpot(
+        NSCursor::alloc(),
+        &image,
+        NSPoint::new(p.hot_x as f64 * scale, p.hot_y as f64 * scale),
+    ))
+}
+
+// What AppKit draws of a cursor's image over mid-grey, `w` x `h` pixels as RGB rows: for a test to
+// compare, and for a person to look at.
+fn over_grey(cursor: &NSCursor, w: u32, h: u32) -> Option<Vec<u8>> {
+    let out = bitmap(w, h, NSBitmapFormat(0))?;
+    let len = w as usize * h as usize * 4;
+    // SAFETY: `bitmap` made room for `len` bytes, and nothing else holds them yet.
+    for px in unsafe { std::slice::from_raw_parts_mut(out.bitmapData(), len) }.chunks_exact_mut(4) {
+        px.copy_from_slice(&[0x80, 0x80, 0x80, 0xff]);
+    }
+    let ctx = NSGraphicsContext::graphicsContextWithBitmapImageRep(&out)?;
+    NSGraphicsContext::saveGraphicsState_class();
+    NSGraphicsContext::setCurrentContext(Some(&ctx));
+    cursor.image().drawInRect(NSRect::new(
+        NSPoint::new(0.0, 0.0),
+        NSSize::new(w as f64, h as f64),
+    ));
+    ctx.flushGraphics();
+    NSGraphicsContext::restoreGraphicsState_class();
+    // SAFETY: as above; the drawing is done.
+    let px = unsafe { std::slice::from_raw_parts(out.bitmapData(), len) };
+    Some(
+        px.chunks_exact(4)
+            .flat_map(|p| [p[0], p[1], p[2]])
+            .collect(),
+    )
+}
+
 impl Renderer {
     fn new() -> Result<Renderer, String> {
         let device = MTLCreateSystemDefaultDevice().ok_or("no Metal device")?;
@@ -177,31 +322,50 @@ impl Renderer {
     fn upload(&mut self, display: &Display, stats: &mut Stats) -> bool {
         let t0 = Instant::now();
         let mut s = display.shared.lock().unwrap();
-        let damage = s.damage.take();
         let Some(sc) = &s.scanout else {
-            let had = self.texture.take().is_some();
+            s.damage = None;
             self.serial = 0;
-            return had;
+            self.tex_size = (0, 0);
+            return self.texture.take().is_some();
         };
         let fresh = sc.serial != self.serial || self.texture.is_none();
-        if fresh {
-            if self.tex_size != (sc.w, sc.h) || self.texture.is_none() {
-                let d = unsafe {
-                    MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(
-                        MTLPixelFormat::BGRA8Unorm,
-                        sc.w as usize,
-                        sc.h as usize,
-                        false,
-                    )
-                };
-                self.texture = self.device.newTextureWithDescriptor(&d);
-                self.tex_size = (sc.w, sc.h);
+        if fresh && (self.tex_size != (sc.w, sc.h) || self.texture.is_none()) {
+            // A texture is made with the lock released. A large one takes long enough that QEMU,
+            // which waits on the display thread while it hands over a scanout, would give up on
+            // sharing its memory for good.
+            let (serial, w, h) = (sc.serial, sc.w, sc.h);
+            drop(s);
+            let d = unsafe {
+                MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(
+                    MTLPixelFormat::BGRA8Unorm,
+                    w as usize,
+                    h as usize,
+                    false,
+                )
+            };
+            self.texture = self.device.newTextureWithDescriptor(&d);
+            self.tex_size = if self.texture.is_some() {
+                (w, h)
+            } else {
+                (0, 0)
+            };
+            s = display.shared.lock().unwrap();
+            if s.scanout.as_ref().map(|sc| sc.serial) != Some(serial) {
+                // The guest set another scanout meanwhile: that one is the next frame's.
+                display.dirty.store(true, Ordering::Release);
+                return false;
             }
-            self.serial = sc.serial;
         }
         let Some(tex) = &self.texture else {
             return false;
         };
+        let damage = s.damage.take();
+        let Some(sc) = &s.scanout else {
+            return false;
+        };
+        if fresh {
+            self.serial = sc.serial;
+        }
         let r = if fresh {
             Rect {
                 x: 0,
@@ -215,53 +379,25 @@ impl Renderer {
                 None => return false,
             }
         };
-        let (w, h, stride) = (sc.w, sc.h, sc.stride as usize);
+        if r.x + r.w > sc.w || r.y + r.h > sc.h {
+            return false;
+        }
+        let stride = sc.stride as usize;
         self.mapped = matches!(sc.pixels, Pixels::Mapped(_));
-        let (ptr, len, keep) = match &sc.pixels {
-            Pixels::Mapped(region) => (region.as_ptr(), region.len(), Some(region.clone())),
-            Pixels::Owned(buf) => (buf.as_ptr(), buf.len(), None),
-        };
-        let copy = |ptr: *const u8| {
-            if r.x + r.w > w || r.y + r.h > h {
-                return;
-            }
-            let first = r.y as usize * stride + r.x as usize * 4;
-            let last = (r.y + r.h - 1) as usize * stride + (r.x + r.w) as usize * 4;
-            if last > len {
-                return;
-            }
-            let region = MTLRegion {
-                origin: MTLOrigin {
-                    x: r.x as usize,
-                    y: r.y as usize,
-                    z: 0,
-                },
-                size: MTLSize {
-                    width: r.w as usize,
-                    height: r.h as usize,
-                    depth: 1,
-                },
-            };
-            unsafe {
-                tex.replaceRegion_mipmapLevel_withBytes_bytesPerRow(
-                    region,
-                    0,
-                    NonNull::new_unchecked(ptr.add(first) as *mut std::ffi::c_void),
-                    stride,
-                );
-            }
-        };
-        match keep {
+        let copied = match &sc.pixels {
             // A mapping outlives the lock through its own reference, so the display thread (and with it
             // QEMU's main loop) is not held for the length of the copy.
-            Some(region) => {
+            Pixels::Mapped(region) => {
+                let region = region.clone();
                 drop(s);
-                copy(region.as_ptr());
+                // SAFETY: the mapping is `len` bytes and lives until `region` is dropped below.
+                unsafe { replace(tex, region.as_ptr(), region.len(), stride, r) }
             }
-            None => {
-                copy(ptr);
-                drop(s);
-            }
+            // SAFETY: the buffer cannot change or move while the lock is held.
+            Pixels::Owned(buf) => unsafe { replace(tex, buf.as_ptr(), buf.len(), stride, r) },
+        };
+        if !copied {
+            return false;
         }
         let us = t0.elapsed().as_micros() as u64;
         stats.uploads += 1;
@@ -293,16 +429,14 @@ impl Renderer {
             return;
         };
         if let Some(tex) = &self.texture {
-            let (dw, dh) = (size.0 as f64, size.1 as f64);
             let (tw, th) = (self.tex_size.0 as f64, self.tex_size.1 as f64);
-            if dw > 0.0 && dh > 0.0 && tw > 0.0 && th > 0.0 {
-                let scale = (dw / tw).min(dh / th);
-                let (vw, vh) = ((tw * scale).round(), (th * scale).round());
+            if let Some((x, y, vw, vh, scale)) = fit(tw, th, size.0 as f64, size.1 as f64) {
+                // Whole pixels, so that a whole-number scale stays one.
                 enc.setViewport(MTLViewport {
-                    originX: ((dw - vw) / 2.0).floor(),
-                    originY: ((dh - vh) / 2.0).floor(),
-                    width: vw,
-                    height: vh,
+                    originX: x.floor(),
+                    originY: y.floor(),
+                    width: vw.round(),
+                    height: vh.round(),
                     znear: 0.0,
                     zfar: 1.0,
                 });
@@ -385,6 +519,7 @@ pub struct Ivars {
     renderer: RefCell<Option<Renderer>>,
     link: OnceCell<Retained<CADisplayLink>>,
     held: RefCell<HashSet<u16>>,
+    pressed: RefCell<HashSet<u32>>, // buttons the guest holds, by QEMU's number
     stats: RefCell<Stats>,
     total: RefCell<Stats>,
     stats_since: Cell<Option<Instant>>,
@@ -393,6 +528,7 @@ pub struct Ivars {
     owed: Cell<bool>, // the texture changed and no frame has shown it yet
     ticks: Cell<u64>,
     scroll: Cell<f64>,
+    worn: RefCell<Worn>,
 }
 
 // What a test asks of the window; a user's run leaves all of it off.
@@ -433,6 +569,15 @@ define_class!(
         fn tick(&self, _link: &CADisplayLink) {
             self.ivars().ticks.set(self.ivars().ticks.get() + 1);
             self.frame();
+            self.wear_pointer();
+        }
+
+        #[unsafe(method(resetCursorRects))]
+        fn reset_cursor_rects(&self) {
+            let Ok(worn) = self.ivars().worn.try_borrow() else { return };
+            if let (Some(cursor), Some((rect, _))) = (&worn.cursor, self.picture()) {
+                self.addCursorRect_cursor(rect, cursor);
+            }
         }
 
         // A display link is silent while the display sleeps, so a test's deadline has a timer of its own.
@@ -443,13 +588,20 @@ define_class!(
         fn scripted(&self, _timer: &NSTimer) { self.scripted_input(); }
 
         #[unsafe(method(keyDown:))]
-        fn key_down(&self, ev: &NSEvent) { self.key(ev.keyCode(), true); }
+        fn key_down(&self, ev: &NSEvent) {
+            self.settle_modifiers(ev);
+            self.key(keymap::position(ev.keyCode(), keymap::iso_keyboard()), true);
+        }
 
         #[unsafe(method(keyUp:))]
-        fn key_up(&self, ev: &NSEvent) { self.key(ev.keyCode(), false); }
+        fn key_up(&self, ev: &NSEvent) {
+            self.settle_modifiers(ev);
+            self.key(keymap::position(ev.keyCode(), keymap::iso_keyboard()), false);
+        }
 
         #[unsafe(method(flagsChanged:))]
         fn flags_changed(&self, ev: &NSEvent) {
+            self.settle_modifiers(ev);
             let vk = ev.keyCode();
             if vk == keymap::CAPS_LOCK {
                 // macOS reports the lock's state, not the key: one event per toggle.
@@ -475,20 +627,29 @@ define_class!(
         fn other_mouse_dragged(&self, ev: &NSEvent) { self.pointer(ev); }
 
         #[unsafe(method(mouseDown:))]
-        fn mouse_down(&self, ev: &NSEvent) { self.button(ev, 0, true); }
+        fn mouse_down(&self, ev: &NSEvent) { self.button(ev, button_code(0), true); }
         #[unsafe(method(mouseUp:))]
-        fn mouse_up(&self, ev: &NSEvent) { self.button(ev, 0, false); }
+        fn mouse_up(&self, ev: &NSEvent) { self.button(ev, button_code(0), false); }
         #[unsafe(method(rightMouseDown:))]
-        fn right_mouse_down(&self, ev: &NSEvent) { self.button(ev, 2, true); }
+        fn right_mouse_down(&self, ev: &NSEvent) { self.button(ev, button_code(1), true); }
         #[unsafe(method(rightMouseUp:))]
-        fn right_mouse_up(&self, ev: &NSEvent) { self.button(ev, 2, false); }
+        fn right_mouse_up(&self, ev: &NSEvent) { self.button(ev, button_code(1), false); }
+        // Every button past the first two arrives here, with its number in the event.
         #[unsafe(method(otherMouseDown:))]
-        fn other_mouse_down(&self, ev: &NSEvent) { self.button(ev, 1, true); }
+        fn other_mouse_down(&self, ev: &NSEvent) {
+            self.button(ev, button_code(ev.buttonNumber()).filter(|&b| b != 0 && b != 2), true);
+        }
         #[unsafe(method(otherMouseUp:))]
-        fn other_mouse_up(&self, ev: &NSEvent) { self.button(ev, 1, false); }
+        fn other_mouse_up(&self, ev: &NSEvent) {
+            self.button(ev, button_code(ev.buttonNumber()).filter(|&b| b != 0 && b != 2), false);
+        }
 
         #[unsafe(method(scrollWheel:))]
         fn scroll_wheel(&self, ev: &NSEvent) {
+            // A scroll over the bars is not the guest's: it would land wherever its pointer last was.
+            if self.guest_point(ev).is_none() {
+                return;
+            }
             let mut acc = self.ivars().scroll.get();
             let n = notches(&mut acc, ev.scrollingDeltaY(), ev.hasPreciseScrollingDeltas());
             self.ivars().scroll.set(acc);
@@ -510,6 +671,7 @@ impl GuestView {
             renderer: RefCell::new(Some(renderer)),
             link: OnceCell::new(),
             held: RefCell::new(HashSet::new()),
+            pressed: RefCell::new(HashSet::new()),
             stats: RefCell::new(Stats::default()),
             total: RefCell::new(Stats::default()),
             stats_since: Cell::new(None),
@@ -518,6 +680,7 @@ impl GuestView {
             owed: Cell::new(false),
             ticks: Cell::new(0),
             scroll: Cell::new(0.0),
+            worn: RefCell::new(Worn::default()),
         });
         let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: frame] };
         this.setWantsLayer(true);
@@ -555,9 +718,11 @@ impl GuestView {
         Ok(this)
     }
 
-    // Release everything the guest believes is held: the window stopped being where keys go.
+    // Release everything the guest believes is held, keys and buttons: the window stopped being where
+    // they go, and whatever is let go of from here on is let go of somewhere else.
     pub fn release_keys(&self) {
-        let held: Vec<u16> = self.ivars().held.borrow_mut().drain().collect();
+        let mut held: Vec<u16> = self.ivars().held.borrow_mut().drain().collect();
+        held.sort_unstable();
         for vk in held {
             if let Some(q) = keymap::qnum(vk) {
                 self.send(Input::Key {
@@ -565,6 +730,33 @@ impl GuestView {
                     down: false,
                 });
             }
+        }
+        let mut pressed: Vec<u32> = self.ivars().pressed.borrow_mut().drain().collect();
+        pressed.sort_unstable();
+        for button in pressed {
+            self.send(Input::Button {
+                button,
+                down: false,
+            });
+        }
+    }
+
+    // Every key event says which modifiers are down. One the guest holds that the event says is up
+    // was let go of where the view could not see it (a menu that was open, a shortcut the system
+    // took), so the guest is told now, before the event's own key.
+    fn settle_modifiers(&self, ev: &NSEvent) {
+        let flags = ev.modifierFlags().0;
+        let mut gone: Vec<u16> = self
+            .ivars()
+            .held
+            .borrow()
+            .iter()
+            .copied()
+            .filter(|&vk| keymap::modifier_flag(vk).is_some_and(|bit| flags & bit == 0))
+            .collect();
+        gone.sort_unstable();
+        for vk in gone {
+            self.key(vk, false);
         }
     }
 
@@ -585,24 +777,72 @@ impl GuestView {
         self.send(Input::Key { qnum: q, down });
     }
 
+    // Where the scanout is shown in the view, and how many view points a guest pixel takes.
+    // None while there is no scanout, or while a frame is being drawn.
+    fn picture(&self) -> Option<(NSRect, f64)> {
+        let b = self.bounds();
+        let (tw, th) = self.ivars().renderer.try_borrow().ok()?.as_ref()?.tex_size;
+        let (x, y, vw, vh, scale) = fit(tw as f64, th as f64, b.size.width, b.size.height)?;
+        Some((NSRect::new(NSPoint::new(x, y), NSSize::new(vw, vh)), scale))
+    }
+
     // The scanout pixel under a window event, if it is over the picture.
     fn guest_point(&self, ev: &NSEvent) -> Option<(u32, u32)> {
         let p = self.convertPoint_fromView(ev.locationInWindow(), None);
-        let b = self.bounds();
-        let r = self.ivars().renderer.borrow();
-        let (tw, th) = r.as_ref()?.tex_size;
-        if tw == 0 || th == 0 || b.size.width <= 0.0 || b.size.height <= 0.0 {
-            return None;
-        }
-        let scale = (b.size.width / tw as f64).min(b.size.height / th as f64);
-        let (vw, vh) = (tw as f64 * scale, th as f64 * scale);
-        let x = (p.x - (b.size.width - vw) / 2.0) / scale;
+        let (r, scale) = self.picture()?;
+        let x = (p.x - r.origin.x) / scale;
         // AppKit's origin is the bottom left; the guest's is the top left.
-        let y = ((b.size.height - p.y) - (b.size.height - vh) / 2.0) / scale;
-        if x < 0.0 || y < 0.0 || x >= tw as f64 || y >= th as f64 {
+        let y = (r.origin.y + r.size.height - p.y) / scale;
+        if x < 0.0 || y < 0.0 || x >= r.size.width / scale || y >= r.size.height / scale {
             return None;
         }
         Some((x as u32, y as u32))
+    }
+
+    // Bring the Mac's pointer up to the guest's: its image, whether it shows one, and the size a
+    // guest pixel has in the view now.
+    fn wear_pointer(&self) {
+        let iv = self.ivars();
+        let picture = self.picture();
+        let scale = picture.map_or(0.0, |(_, s)| s);
+        let cursor = {
+            let mut worn = iv.worn.borrow_mut();
+            let news = iv.display.pointer_dirty.swap(false, Ordering::AcqRel);
+            if !news && scale == worn.scale {
+                return;
+            }
+            if news {
+                let s = iv.display.shared.lock().unwrap();
+                worn.image = s.pointer.clone();
+                worn.on = s.pointer_on;
+            }
+            worn.scale = scale;
+            worn.cursor = match &worn.image {
+                // A guest that never defined a pointer has none to wear: the Mac's arrow stays.
+                None => None,
+                Some(_) if scale <= 0.0 => None,
+                Some(p) if worn.on => ns_cursor(p, scale),
+                // A guest that hides its pointer is shown none.
+                Some(_) => Pointer::new(1, 1, 0, 0, vec![0; 4]).and_then(|p| ns_cursor(&p, 1.0)),
+            };
+            worn.cursor.clone()
+        };
+        let (Some(window), Some((rect, _))) = (self.window(), picture) else {
+            return;
+        };
+        window.invalidateCursorRectsForView(self);
+        // The rectangles are only looked at when the pointer next moves; one that is resting on the
+        // picture would keep its old image until then.
+        if let (Some(cursor), true) = (cursor, window.isKeyWindow()) {
+            let p = self.convertPoint_fromView(window.mouseLocationOutsideOfEventStream(), None);
+            let inside = p.x >= rect.origin.x
+                && p.y >= rect.origin.y
+                && p.x < rect.origin.x + rect.size.width
+                && p.y < rect.origin.y + rect.size.height;
+            if inside {
+                cursor.set();
+            }
+        }
     }
 
     fn pointer(&self, ev: &NSEvent) {
@@ -611,7 +851,17 @@ impl GuestView {
         }
     }
 
-    fn button(&self, ev: &NSEvent, button: u32, down: bool) {
+    // A press counts only over the picture: over the bars it would land wherever the guest's
+    // pointer last was. A release is sent exactly when its press was, wherever it happens.
+    fn button(&self, ev: &NSEvent, button: Option<u32>, down: bool) {
+        let Some(button) = button else { return };
+        if down {
+            if self.guest_point(ev).is_none() || !self.ivars().pressed.borrow_mut().insert(button) {
+                return;
+            }
+        } else if !self.ivars().pressed.borrow_mut().remove(&button) {
+            return;
+        }
         self.pointer(ev);
         self.send(Input::Button { button, down });
     }
@@ -623,6 +873,20 @@ impl GuestView {
         if let Some(r) = iv.renderer.borrow_mut().as_mut() {
             r.upload(&iv.display, &mut iv.stats.borrow_mut());
         }
+        // A pointer as the guest would define one: three colours, white, a clear pixel whose colour
+        // must not show, and a half-clear colour, which comes out one way if its alpha is applied
+        // to it and another if it is taken as applied already. B, G, R, A.
+        iv.display.define_pointer(
+            3,
+            2,
+            1,
+            1,
+            vec![
+                0, 0, 255, 255, 0, 255, 0, 255, 255, 0, 0, 255, // red, green, blue
+                255, 255, 255, 255, 30, 20, 10, 0, 40, 100, 200, 128, // white, clear, half
+            ],
+        );
+        iv.display.show_pointer(true);
         let Some(window) = self.window() else {
             eprintln!("scripted: no window");
             return;
@@ -659,9 +923,35 @@ impl GuestView {
         key(NSEventType::KeyDown, 0x00, none, false); // A held: one repeat
         key(NSEventType::KeyDown, 0x00, none, true);
         key(NSEventType::KeyUp, 0x00, none, false);
-        key(NSEventType::KeyDown, 0x01, none, false); // S down, the window loses the keys, S up arrives late
-        self.release_keys();
+        // What AppKit posts when the window stops being where keys go, and when a menu opens. Posted
+        // here as AppKit posts them, so that what answers is the app's own wiring.
+        let center = NSNotificationCenter::defaultCenter();
+        let lose_keys = || unsafe {
+            center.postNotificationName_object(NSWindowDidResignKeyNotification, Some(&window))
+        };
+        // S down, the window loses the keys, another key is typed, and S up arrives late.
+        key(NSEventType::KeyDown, 0x01, none, false);
+        lose_keys();
+        key(NSEventType::KeyDown, 0x04, none, false); // H
+        key(NSEventType::KeyUp, 0x04, none, false);
         key(NSEventType::KeyUp, 0x01, none, false);
+        // Option goes down and its release never arrives (a menu took it): the next key says no
+        // modifier is down, so Option is let go of before that key is sent.
+        key(
+            NSEventType::FlagsChanged,
+            0x3a,
+            NSEventModifierFlags::Option,
+            false,
+        );
+        key(NSEventType::KeyDown, 0x0b, none, false); // B
+        key(NSEventType::KeyUp, 0x0b, none, false);
+        key(NSEventType::FlagsChanged, 0x3a, none, false);
+        // E down, a menu opens, another key is typed, and E up arrives late.
+        key(NSEventType::KeyDown, 0x0e, none, false);
+        unsafe { center.postNotificationName_object(NSMenuDidBeginTrackingNotification, None) };
+        key(NSEventType::KeyDown, 0x05, none, false); // G
+        key(NSEventType::KeyUp, 0x05, none, false);
+        key(NSEventType::KeyUp, 0x0e, none, false);
         // The pointer: the middle of the view, then the centre of guest pixel (10, 10).
         let b = self.bounds();
         let (tw, th) = iv
@@ -690,11 +980,37 @@ impl GuestView {
         let corner = at(10.5, 10.5);
         mouse(NSEventType::RightMouseDown, corner);
         mouse(NSEventType::RightMouseUp, corner);
-        // Outside the picture (the letterbox bar): a move there reaches the guest as nothing.
-        mouse(
-            NSEventType::MouseMoved,
-            self.convertPoint_toView(NSPoint::new(1.0, b.size.height / 2.0), None),
-        );
+        // The left button, handed to the view itself: a window that is not active keeps a left
+        // click for its own activation, so the window's routing of one is not what is tried here.
+        let left = |down: bool, p: NSPoint| {
+            let ty = if down {
+                NSEventType::LeftMouseDown
+            } else {
+                NSEventType::LeftMouseUp
+            };
+            let ev = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+                ty, p, none, 0.0, wn, None, 0, 1, 1.0);
+            match (ev, down) {
+                (Some(ev), true) => unsafe { msg_send![self, mouseDown: &*ev] },
+                (Some(ev), false) => unsafe { msg_send![self, mouseUp: &*ev] },
+                (None, _) => eprintln!("scripted: no mouse event"),
+            }
+        };
+        left(true, mid);
+        left(false, mid);
+        // The letterbox bar, outside the picture. A click there is nobody's in the guest.
+        let bar = self.convertPoint_toView(NSPoint::new(1.0, b.size.height / 2.0), None);
+        mouse(NSEventType::RightMouseDown, bar);
+        mouse(NSEventType::RightMouseUp, bar);
+        // A press over the picture let go of over the bar: the release is sent, without a position.
+        mouse(NSEventType::RightMouseDown, corner);
+        mouse(NSEventType::RightMouseUp, bar);
+        // A button held when the window loses the keys is let go of then, and its own release is late.
+        left(true, mid);
+        lose_keys();
+        left(false, mid);
+        // A move over the bar reaches the guest as nothing.
+        mouse(NSEventType::MouseMoved, bar);
         // The same through NSApplication, as the event loop delivers them: a key-up while Command is held is
         // the one AppKit keeps to itself.
         let app = objc2_app_kit::NSApplication::sharedApplication(self.mtm());
@@ -732,8 +1048,28 @@ impl GuestView {
         let iv = self.ivars();
         if let Some(r) = iv.renderer.borrow_mut().as_mut() {
             r.upload(&iv.display, &mut iv.stats.borrow_mut());
+        }
+        // A display that sleeps gives no ticks, so the pointer is brought up to date here as well.
+        self.wear_pointer();
+        if let Some(r) = iv.renderer.borrow().as_ref() {
+            let worn = iv.worn.borrow();
+            let pointer = match (&worn.image, &worn.cursor) {
+                (None, _) => "none".to_string(),
+                (Some(p), cursor) => format!(
+                    "{}x{} hot {},{} {}",
+                    p.w,
+                    p.h,
+                    p.hot_x,
+                    p.hot_y,
+                    match (cursor.is_some(), worn.on) {
+                        (false, _) => "NOT WORN",
+                        (true, true) => "shown",
+                        (true, false) => "hidden",
+                    }
+                ),
+            };
             eprintln!(
-                "finish: {} display-link ticks, {} presented frames, texture {}x{}, pixels {}",
+                "finish: {} display-link ticks, {} presented frames, texture {}x{}, pixels {}, pointer {}",
                 iv.ticks.get(),
                 iv.presented.get(),
                 r.tex_size.0,
@@ -742,7 +1078,8 @@ impl GuestView {
                     "mapped"
                 } else {
                     "in the messages"
-                }
+                },
+                pointer
             );
             if iv.opts.print_stats {
                 let mut total = iv.total.borrow_mut();
@@ -760,6 +1097,21 @@ impl GuestView {
                         }
                     }
                     None => eprintln!("dump: no scanout to show"),
+                }
+                // The pointer the Mac wears, beside the picture: <name>-pointer.ppm.
+                if let (Some(p), Some(cursor), true) = (&worn.image, &worn.cursor, worn.on) {
+                    let beside = format!("{}-pointer.ppm", path.trim_end_matches(".ppm"));
+                    match over_grey(cursor, p.w, p.h) {
+                        Some(rgb) => {
+                            let mut out = format!("P6\n{} {}\n255\n", p.w, p.h).into_bytes();
+                            out.extend_from_slice(&rgb);
+                            match std::fs::write(&beside, out) {
+                                Ok(()) => eprintln!("dump: pointer {}x{} to {beside}", p.w, p.h),
+                                Err(e) => eprintln!("dump: {beside}: {e}"),
+                            }
+                        }
+                        None => eprintln!("dump: the pointer could not be drawn"),
+                    }
                 }
             }
         }
@@ -827,7 +1179,305 @@ impl GuestView {
 
 #[cfg(test)]
 mod tests {
-    use super::notches;
+    use super::{button_code, fit, notches, replace, Renderer};
+    use crate::display::Rect;
+    use objc2::runtime::ProtocolObject;
+    use objc2_metal::{
+        MTLCommandBuffer, MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice, MTLOrigin,
+        MTLPixelFormat, MTLRegion, MTLSize, MTLTexture, MTLTextureDescriptor, MTLTextureUsage,
+    };
+    use std::ptr::NonNull;
+
+    fn texture(
+        device: &ProtocolObject<dyn MTLDevice>,
+        w: u32,
+        h: u32,
+        target: bool,
+    ) -> objc2::rc::Retained<ProtocolObject<dyn MTLTexture>> {
+        let d = unsafe {
+            MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(
+                MTLPixelFormat::BGRA8Unorm,
+                w as usize,
+                h as usize,
+                false,
+            )
+        };
+        if target {
+            d.setUsage(MTLTextureUsage::RenderTarget | MTLTextureUsage::ShaderRead);
+        }
+        device.newTextureWithDescriptor(&d).unwrap()
+    }
+
+    // The texture's pixels, four bytes each, rows w * 4 apart.
+    fn read(tex: &ProtocolObject<dyn MTLTexture>, w: u32, h: u32) -> Vec<u8> {
+        let mut out = vec![0u8; w as usize * h as usize * 4];
+        let region = MTLRegion {
+            origin: MTLOrigin { x: 0, y: 0, z: 0 },
+            size: MTLSize {
+                width: w as usize,
+                height: h as usize,
+                depth: 1,
+            },
+        };
+        unsafe {
+            tex.getBytes_bytesPerRow_fromRegion_mipmapLevel(
+                NonNull::new_unchecked(out.as_mut_ptr() as *mut std::ffi::c_void),
+                w as usize * 4,
+                region,
+                0,
+            );
+        }
+        out
+    }
+
+    #[test]
+    fn a_picture_is_fitted_whole_and_centred() {
+        assert_eq!(
+            fit(4.0, 2.0, 400.0, 300.0),
+            Some((0.0, 50.0, 400.0, 200.0, 100.0))
+        );
+        assert_eq!(
+            fit(2.0, 4.0, 400.0, 300.0),
+            Some((125.0, 0.0, 150.0, 300.0, 75.0))
+        );
+        assert_eq!(
+            fit(4.0, 2.0, 400.0, 200.0),
+            Some((0.0, 0.0, 400.0, 200.0, 100.0))
+        );
+        assert_eq!(
+            fit(640.0, 480.0, 320.0, 240.0),
+            Some((0.0, 0.0, 320.0, 240.0, 0.5))
+        );
+        for (tw, th, w, h) in [
+            (0.0, 2.0, 4.0, 4.0),
+            (2.0, 0.0, 4.0, 4.0),
+            (2.0, 2.0, 0.0, 4.0),
+            (2.0, 2.0, 4.0, -1.0),
+        ] {
+            assert_eq!(fit(tw, th, w, h), None);
+        }
+    }
+
+    #[test]
+    fn a_button_keeps_its_meaning() {
+        // AppKit: left, right, middle, then the side buttons. QEMU: left 0, middle 1, right 2, side 5, extra 6.
+        assert_eq!(
+            [0, 1, 2, 3, 4].map(button_code),
+            [Some(0), Some(2), Some(1), Some(5), Some(6)]
+        );
+        assert_eq!(button_code(5), None);
+        assert_eq!(button_code(-1), None);
+    }
+
+    #[test]
+    fn an_upload_reads_the_rectangle_and_no_byte_past_it() {
+        let Some(device) = MTLCreateSystemDefaultDevice() else {
+            eprintln!("no Metal device: not tried");
+            return;
+        };
+        // A frame 8 x 4 whose rows are 48 bytes apart, placed so that its last pixel is the last
+        // readable byte: the page after it faults on any read.
+        let (w, h, stride) = (8u32, 4u32, 48usize);
+        let need = (h as usize - 1) * stride + w as usize * 4;
+        let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
+        let base = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                2 * page,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_ANON | libc::MAP_PRIVATE,
+                -1,
+                0,
+            )
+        };
+        assert_ne!(base, libc::MAP_FAILED);
+        assert_eq!(
+            unsafe { libc::mprotect(base.add(page), page, libc::PROT_NONE) },
+            0
+        );
+        let frame = unsafe { (base as *mut u8).add(page - need) };
+        // That a read of the very next byte does fault, shown by a child that makes one and dies of it.
+        let child = unsafe { libc::fork() };
+        assert!(child >= 0);
+        if child == 0 {
+            let byte = unsafe { std::ptr::read_volatile(frame.add(need)) };
+            unsafe { libc::_exit(byte as i32 & 1) };
+        }
+        let mut status = 0;
+        assert_eq!(unsafe { libc::waitpid(child, &mut status, 0) }, child);
+        assert!(
+            libc::WIFSIGNALED(status),
+            "the byte past the frame was readable"
+        );
+        let paint = |add: u8| {
+            let bytes = unsafe { std::slice::from_raw_parts_mut(frame, need) };
+            bytes.fill(0xee); // what lies between the rows
+            for y in 0..h as usize {
+                for x in 0..w as usize {
+                    let px = [x as u8 + add, y as u8 + add, (x ^ y) as u8, 255];
+                    bytes[y * stride + x * 4..][..4].copy_from_slice(&px);
+                }
+            }
+        };
+        let want = |x: usize, y: usize, add: u8| [x as u8 + add, y as u8 + add, (x ^ y) as u8, 255];
+        let tex = texture(&device, w, h, false);
+        let all = Rect { x: 0, y: 0, w, h };
+        paint(0);
+        assert!(unsafe { replace(&tex, frame, need, stride, all) });
+        let got = read(&tex, w, h);
+        for y in 0..h as usize {
+            for x in 0..w as usize {
+                assert_eq!(
+                    got[(y * w as usize + x) * 4..][..4],
+                    want(x, y, 0),
+                    "({x}, {y})"
+                );
+            }
+        }
+        // A rectangle that ends on the frame's last pixel: only it changes.
+        let part = Rect {
+            x: 5,
+            y: 2,
+            w: 3,
+            h: 2,
+        };
+        paint(100);
+        assert!(unsafe { replace(&tex, frame, need, stride, part) });
+        let got = read(&tex, w, h);
+        for y in 0..h as usize {
+            for x in 0..w as usize {
+                let add = if x >= 5 && y >= 2 { 100 } else { 0 };
+                assert_eq!(
+                    got[(y * w as usize + x) * 4..][..4],
+                    want(x, y, add),
+                    "({x}, {y})"
+                );
+            }
+        }
+        // A byte short of the last pixel, or no pixels at all: refused, and nothing is read.
+        assert!(!unsafe { replace(&tex, frame, need - 1, stride, all) });
+        assert!(!unsafe { replace(&tex, frame, need - 1, stride, part) });
+        assert!(!unsafe {
+            replace(
+                &tex,
+                frame,
+                need,
+                stride,
+                Rect {
+                    x: 0,
+                    y: 0,
+                    w: 0,
+                    h: 1,
+                },
+            )
+        });
+        assert!(unsafe {
+            replace(
+                &tex,
+                frame,
+                need - 1,
+                stride,
+                Rect {
+                    x: 0,
+                    y: 0,
+                    w: 7,
+                    h: 4,
+                },
+            )
+        });
+        unsafe { libc::munmap(base, 2 * page) };
+    }
+
+    #[test]
+    fn the_picture_is_drawn_where_the_pointer_is_mapped() {
+        let Ok(mut r) = Renderer::new() else {
+            eprintln!("no Metal device: not tried");
+            return;
+        };
+        // A scanout 4 x 2, every pixel its own colour (B, G, R, A).
+        let (tw, th) = (4u32, 2u32);
+        let colour = |x: u32, y: u32| {
+            [
+                10 + 60 * x as u8,
+                20 + 100 * y as u8,
+                200 - 40 * x as u8,
+                255u8,
+            ]
+        };
+        let mut src = Vec::new();
+        for y in 0..th {
+            for x in 0..tw {
+                src.extend_from_slice(&colour(x, y));
+            }
+        }
+        let tex = texture(&r.device, tw, th, false);
+        let all = Rect {
+            x: 0,
+            y: 0,
+            w: tw,
+            h: th,
+        };
+        assert!(unsafe { replace(&tex, src.as_ptr(), src.len(), tw as usize * 4, all) });
+        r.texture = Some(tex);
+        r.tex_size = (tw, th);
+        // Bars above and below, bars at the sides, no bars; then a size nothing divides.
+        for (dw, dh, exact) in [
+            (400u32, 300u32, true),
+            (300, 400, true),
+            (400, 200, true),
+            (37, 91, false),
+        ] {
+            let target = texture(&r.device, dw, dh, true);
+            let cmd = r.queue.commandBuffer().unwrap();
+            r.draw(&cmd, &target, (dw, dh));
+            cmd.commit();
+            cmd.waitUntilCompleted();
+            let got = read(&target, dw, dh);
+            let (x0, y0, vw, vh, scale) = fit(tw as f64, th as f64, dw as f64, dh as f64).unwrap();
+            let mut inside = 0;
+            for py in 0..dh {
+                for px in 0..dw {
+                    // The guest pixel under the middle of this one, as the pointer is mapped.
+                    let (gx, gy) = (
+                        (px as f64 + 0.5 - x0) / scale,
+                        (py as f64 + 0.5 - y0) / scale,
+                    );
+                    let at = &got[(py as usize * dw as usize + px as usize) * 4..][..4];
+                    let over = gx >= 0.0 && gy >= 0.0 && gx < tw as f64 && gy < th as f64;
+                    // Away from an edge by more than the one device pixel the drawing rounds to.
+                    let clear = |g: f64, n: u32| g < -1.0 / scale || g > n as f64 + 1.0 / scale;
+                    if exact && over {
+                        inside += 1;
+                        assert_eq!(
+                            at,
+                            colour(gx as u32, gy as u32),
+                            "{dw}x{dh} at ({px}, {py})"
+                        );
+                    } else if exact || clear(gx, tw) || clear(gy, th) {
+                        assert_eq!(at, [0, 0, 0, 255], "{dw}x{dh} bar at ({px}, {py})");
+                    }
+                }
+            }
+            if exact {
+                assert_eq!(inside, (vw * vh) as u32, "{dw}x{dh}");
+            } else {
+                // The middle of each guest pixel shows that pixel, near enough.
+                for y in 0..th {
+                    for x in 0..tw {
+                        let px = (x0 + (x as f64 + 0.5) * scale) as usize;
+                        let py = (y0 + (y as f64 + 0.5) * scale) as usize;
+                        let at = &got[(py * dw as usize + px) * 4..][..4];
+                        for (a, b) in at.iter().zip(colour(x, y)) {
+                            assert!(
+                                (*a as i32 - b as i32).abs() <= 40,
+                                "{dw}x{dh} guest ({x}, {y}): {at:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn a_wheel_scrolls_a_notch_an_event() {

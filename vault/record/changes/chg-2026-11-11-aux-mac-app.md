@@ -4,7 +4,7 @@ type: chg
 title: "The Mac app's first window lands with its headless test; run-vm grows the display modes it attaches to"
 date: 2026-11-11
 arc: arc-mac-runner
-commits: ["f003526d8", "4f02edd44"]
+commits: ["f003526d8", "4f02edd44", "7c17bf6b6"]
 touched:
   - sub-macrunner-app
   - sub-substrate-machine

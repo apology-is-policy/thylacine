@@ -3,6 +3,29 @@
 
 pub const CAPS_LOCK: u16 = 0x39;
 
+#[link(name = "Carbon", kind = "framework")]
+extern "C" {
+    fn LMGetKbdType() -> u8;
+    fn KBGetLayoutType(keyboard_type: i16) -> u32;
+}
+
+// Whether the keyboard that was last typed on is an ISO one (the tall Enter, a key beside left Shift).
+pub fn iso_keyboard() -> bool {
+    const ISO: u32 = u32::from_be_bytes(*b"ISO ");
+    // SAFETY: both read a value the system keeps; neither takes a pointer.
+    unsafe { KBGetLayoutType(LMGetKbdType() as i16) == ISO }
+}
+
+// The code for where a key is. On an ISO keyboard macOS reports the key left of 1 and the key beside
+// left Shift with each other's codes; everywhere else a code is already a place.
+pub fn position(vk: u16, iso: bool) -> u16 {
+    match (vk, iso) {
+        (0x0a, true) => 0x32,
+        (0x32, true) => 0x0a,
+        _ => vk,
+    }
+}
+
 pub fn qnum(vk: u16) -> Option<u32> {
     Some(match vk {
         0x00 => 0x1e,
@@ -143,6 +166,19 @@ pub fn modifier_flag(vk: u16) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn an_iso_keyboard_has_two_keys_the_other_way_round() {
+        for vk in 0u16..0x80 {
+            assert_eq!(position(vk, false), vk);
+            if vk != 0x0a && vk != 0x32 {
+                assert_eq!(position(vk, true), vk);
+            }
+        }
+        // The key left of 1 is the grave key's place, the key beside left Shift is the 102nd key's.
+        assert_eq!(qnum(position(0x0a, true)), Some(0x29));
+        assert_eq!(qnum(position(0x32, true)), Some(0x56));
+        assert_eq!(qnum(position(0x32, false)), Some(0x29));
+    }
     #[test]
     fn no_two_keys_share_a_code() {
         let mut seen = std::collections::HashMap::new();

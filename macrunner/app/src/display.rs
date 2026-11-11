@@ -19,16 +19,22 @@ pub const PIXMAN_A8R8G8B8: u32 = 0x2002_8888;
 const MAX_SIDE: u32 = 16384;
 // QEMU answers QMP and the display's first calls from its main loop; one that is hung never does.
 const ATTACH_TIMEOUT: Duration = Duration::from_secs(10);
+// virtio-gpu's pointer is 64 a side; this is what the window server takes without complaint.
+const MAX_POINTER_SIDE: i32 = 256;
 
 pub struct Region {
-    ptr: *mut u8,
+    base: *mut u8, // what mmap gave, and what munmap takes back
+    mapped: usize,
+    lead: usize, // from `base` to the first byte that was asked for
     len: usize,
 }
 unsafe impl Send for Region {}
 unsafe impl Sync for Region {}
 impl Region {
-    // `len` bytes of a file QEMU shares, read-only. The file must hold them: a mapping past the end of
-    // its object is granted and then faults on the first read.
+    // `len` bytes of a file QEMU shares, read-only, starting `offset` bytes in. The file must hold
+    // them: a mapping past the end of its object is granted and then faults on the first read. The
+    // offset is wherever the guest put its frame in the resource, so it need not be on a page; a
+    // mapping must start on one.
     fn map(fd: BorrowedFd<'_>, offset: u64, len: usize) -> std::io::Result<Region> {
         let mut st: libc::stat = unsafe { std::mem::zeroed() };
         if unsafe { libc::fstat(fd.as_raw_fd(), &mut st) } != 0 {
@@ -41,26 +47,35 @@ impl Region {
                 st.st_size
             )));
         }
+        let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+        if page <= 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let lead = (offset % page as u64) as usize;
+        let mapped = len + lead;
         let p = unsafe {
             libc::mmap(
                 std::ptr::null_mut(),
-                len,
+                mapped,
                 libc::PROT_READ,
                 libc::MAP_SHARED,
                 fd.as_raw_fd(),
-                offset as libc::off_t,
+                (offset - lead as u64) as libc::off_t,
             )
         };
         if p == libc::MAP_FAILED {
             return Err(std::io::Error::last_os_error());
         }
         Ok(Region {
-            ptr: p as *mut u8,
+            base: p as *mut u8,
+            mapped,
+            lead,
             len,
         })
     }
     pub fn as_ptr(&self) -> *const u8 {
-        self.ptr
+        // SAFETY: `lead` is inside the mapping, which is `lead + len` bytes.
+        unsafe { self.base.add(self.lead) }
     }
     pub fn len(&self) -> usize {
         self.len
@@ -68,7 +83,7 @@ impl Region {
 }
 impl Drop for Region {
     fn drop(&mut self) {
-        unsafe { libc::munmap(self.ptr as *mut libc::c_void, self.len) };
+        unsafe { libc::munmap(self.base as *mut libc::c_void, self.mapped) };
     }
 }
 
@@ -123,18 +138,99 @@ pub struct Scanout {
     pub serial: u64, // a new value for every scanout the guest sets
 }
 
-#[derive(Default)]
+// The guest's pointer. It is not in the scanout: the guest hands QEMU an image and a hot spot, and
+// whoever shows the screen draws it. Rows of B, G, R, A, with the colours not multiplied by the alpha.
+#[derive(Debug, PartialEq)]
+pub struct Pointer {
+    pub w: u32,
+    pub h: u32,
+    pub hot_x: u32,
+    pub hot_y: u32,
+    pub bgra: Vec<u8>,
+}
+impl Pointer {
+    // The image if it is one that can be shown. A hot spot outside it is brought to its edge.
+    pub fn new(width: i32, height: i32, hot_x: i32, hot_y: i32, bgra: Vec<u8>) -> Option<Pointer> {
+        if !(1..=MAX_POINTER_SIDE).contains(&width) || !(1..=MAX_POINTER_SIDE).contains(&height) {
+            return None;
+        }
+        if bgra.len() != width as usize * height as usize * 4 {
+            return None;
+        }
+        Some(Pointer {
+            w: width as u32,
+            h: height as u32,
+            hot_x: hot_x.clamp(0, width - 1) as u32,
+            hot_y: hot_y.clamp(0, height - 1) as u32,
+            bgra,
+        })
+    }
+    // The same rows as R, G, B, A.
+    pub fn rgba(&self) -> Vec<u8> {
+        let mut out = self.bgra.clone();
+        for px in out.chunks_exact_mut(4) {
+            px.swap(0, 2);
+        }
+        out
+    }
+}
+
 pub struct Shared {
     pub scanout: Option<Scanout>,
     pub damage: Option<Rect>,
     pub serials: u64,
     pub update_calls: u64,
+    pub pointer: Option<Arc<Pointer>>, // None until the guest defines one
+    pub pointer_on: bool,              // the guest shows its pointer
+}
+impl Default for Shared {
+    fn default() -> Shared {
+        Shared {
+            scanout: None,
+            damage: None,
+            serials: 0,
+            update_calls: 0,
+            pointer: None,
+            pointer_on: true,
+        }
+    }
 }
 
 pub struct Display {
     pub shared: Arc<Mutex<Shared>>,
     pub dirty: Arc<AtomicBool>,
+    pub pointer_dirty: Arc<AtomicBool>,
     pub input: mpsc::Sender<Input>,
+}
+impl Display {
+    // What Listener.CursorDefine does with its arguments.
+    pub fn define_pointer(&self, width: i32, height: i32, hot_x: i32, hot_y: i32, bgra: Vec<u8>) {
+        define_pointer(
+            &self.shared,
+            &self.pointer_dirty,
+            Pointer::new(width, height, hot_x, hot_y, bgra),
+        );
+    }
+    // What Listener.MouseSet does with its last argument.
+    pub fn show_pointer(&self, on: bool) {
+        show_pointer(&self.shared, &self.pointer_dirty, on);
+    }
+}
+
+// An image that cannot be shown leaves the pointer the guest had.
+fn define_pointer(shared: &Mutex<Shared>, dirty: &AtomicBool, pointer: Option<Pointer>) {
+    let Some(pointer) = pointer else { return };
+    shared.lock().unwrap().pointer = Some(Arc::new(pointer));
+    dirty.store(true, Ordering::Release);
+}
+
+// One call per pointer move, so it costs a comparison unless the guest changed its mind.
+fn show_pointer(shared: &Mutex<Shared>, dirty: &AtomicBool, on: bool) {
+    let mut s = shared.lock().unwrap();
+    if s.pointer_on != on {
+        s.pointer_on = on;
+        dirty.store(true, Ordering::Release);
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -148,6 +244,7 @@ pub enum Input {
 struct State {
     shared: Arc<Mutex<Shared>>,
     dirty: Arc<AtomicBool>,
+    pointer_dirty: Arc<AtomicBool>,
     map: bool,
 }
 impl State {
@@ -180,20 +277,25 @@ impl State {
     }
 }
 
-// The byte length of a width x height scanout whose rows are `stride` apart, if it is one that can be
-// shown. Everything past this point may assume a frame of at least one pixel and at most MAX_SIDE a side.
+// The arithmetic on frame sizes below is done in usize and assumes it cannot wrap.
+const _: () = assert!(usize::BITS == 64);
+
+// The bytes a width x height scanout needs when its rows are `stride` apart: up to the last pixel of
+// the last row, and not the padding after it, which a frame placed at the end of its resource does
+// not have. An error if it is not a scanout that can be shown; everything past this point may assume
+// a frame of at least one pixel and at most MAX_SIDE a side, with rows a whole number of pixels apart.
 fn geometry(width: u32, height: u32, stride: u32) -> zbus::fdo::Result<usize> {
     if width == 0 || height == 0 || width > MAX_SIDE || height > MAX_SIDE {
         return Err(zbus::fdo::Error::InvalidArgs(format!(
             "a scanout of {width}x{height}"
         )));
     }
-    if stride < width * 4 {
-        return Err(zbus::fdo::Error::InvalidArgs(
-            "stride below the width".into(),
-        ));
+    if stride < width * 4 || !stride.is_multiple_of(4) || stride > i32::MAX as u32 {
+        return Err(zbus::fdo::Error::InvalidArgs(format!(
+            "a stride of {stride} for {width} pixels"
+        )));
     }
-    Ok(height as usize * stride as usize)
+    Ok((height as usize - 1) * stride as usize + width as usize * 4)
 }
 
 fn supported(format: u32) -> zbus::fdo::Result<()> {
@@ -206,7 +308,9 @@ fn supported(format: u32) -> zbus::fdo::Result<()> {
 }
 
 struct Listener(Arc<State>);
-#[zbus::interface(name = "org.qemu.Display1.Listener")]
+// spawn = false: a call is finished before the next is looked at. A scanout and the updates to it
+// only mean something in the order QEMU sent them.
+#[zbus::interface(name = "org.qemu.Display1.Listener", spawn = false)]
 impl Listener {
     fn scanout(
         &mut self,
@@ -273,15 +377,17 @@ impl Listener {
         s.damage = None;
         self.0.dirty.store(true, Ordering::Release);
     }
-    fn mouse_set(&mut self, _x: i32, _y: i32, _on: i32) {}
-    fn cursor_define(
-        &mut self,
-        _width: i32,
-        _height: i32,
-        _hot_x: i32,
-        _hot_y: i32,
-        _data: Vec<u8>,
-    ) {
+    // The position is the guest repeating the one it was sent, so only whether it shows its pointer
+    // is news. QEMU says so once when the listener registers, before any guest has spoken.
+    fn mouse_set(&mut self, _x: i32, _y: i32, on: i32) {
+        show_pointer(&self.0.shared, &self.0.pointer_dirty, on != 0);
+    }
+    fn cursor_define(&mut self, width: i32, height: i32, hot_x: i32, hot_y: i32, data: Vec<u8>) {
+        define_pointer(
+            &self.0.shared,
+            &self.0.pointer_dirty,
+            Pointer::new(width, height, hot_x, hot_y, data),
+        );
     }
     #[zbus(property)]
     fn interfaces(&self) -> Vec<String> {
@@ -295,7 +401,7 @@ impl Listener {
 }
 
 struct MapListener(Arc<State>);
-#[zbus::interface(name = "org.qemu.Display1.Listener.Unix.Map")]
+#[zbus::interface(name = "org.qemu.Display1.Listener.Unix.Map", spawn = false)]
 impl MapListener {
     // An error here makes QEMU fall back to sending pixels in the messages (Listener.Scanout/Update).
     fn scanout_map(
@@ -496,12 +602,14 @@ pub fn connect(qmp_path: &str) -> Result<Display, Box<dyn std::error::Error>> {
     let sock = attach(qmp_path)?;
     let shared: Arc<Mutex<Shared>> = Arc::default();
     let dirty = Arc::new(AtomicBool::new(false));
+    let pointer_dirty = Arc::new(AtomicBool::new(false));
     // THYLACINE_NO_MAP=1 makes QEMU send pixels in its messages instead: the path a host without a
     // shareable surface takes, kept reachable so that it can be tried.
     let map = std::env::var_os("THYLACINE_NO_MAP").is_none_or(|v| v != "1");
     let state = Arc::new(State {
         shared: shared.clone(),
         dirty: dirty.clone(),
+        pointer_dirty: pointer_dirty.clone(),
         map,
     });
     let (tx, rx) = mpsc::channel::<Result<zbus::Connection, String>>();
@@ -531,27 +639,102 @@ pub fn connect(qmp_path: &str) -> Result<Display, Box<dyn std::error::Error>> {
         .name("input".into())
         .spawn(move || {
             let mut held_back = None;
+            let mut refused = 0u64;
             while let Some(first) = held_back.take().or_else(|| irx.recv().ok()) {
                 let (ev, rest) = next_input(first, || irx.try_recv().ok());
                 held_back = rest;
-                if let Err(e) = send_input(&conn, ev) {
-                    if matches!(e, zbus::Error::InputOutput(_)) {
+                match send_input(&conn, ev) {
+                    Ok(()) => {}
+                    Err(zbus::Error::InputOutput(e)) => {
+                        eprintln!("input: QEMU is gone ({e}); nothing more is sent");
                         break;
-                    } // QEMU is gone
+                    }
+                    // QEMU still answers but will not take the event: another client took its
+                    // console, or the position was outside a screen that has just changed.
+                    Err(e) => {
+                        refused += 1;
+                        if refused.is_power_of_two() {
+                            eprintln!("input: QEMU refused an event ({e}); {refused} so far");
+                        }
+                    }
                 }
             }
         })?;
     Ok(Display {
         shared,
         dirty,
+        pointer_dirty,
         input: itx,
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{geometry, next_input, Input, Rect, Region, MAX_SIDE};
+    use super::{
+        define_pointer, geometry, next_input, show_pointer, Input, Pointer, Rect, Region, Shared,
+        MAX_POINTER_SIDE, MAX_SIDE,
+    };
     use std::os::fd::AsFd;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Mutex;
+
+    #[test]
+    fn a_pointer_is_an_image_that_can_be_shown() {
+        let px = |n: i32| vec![0u8; n as usize * 4];
+        let p = Pointer::new(64, 64, 3, 5, px(64 * 64)).unwrap();
+        assert_eq!((p.w, p.h, p.hot_x, p.hot_y), (64, 64, 3, 5));
+        assert!(Pointer::new(MAX_POINTER_SIDE, 1, 0, 0, px(MAX_POINTER_SIDE)).is_some());
+        assert!(Pointer::new(0, 64, 0, 0, Vec::new()).is_none());
+        assert!(Pointer::new(64, 0, 0, 0, Vec::new()).is_none());
+        assert!(Pointer::new(-1, 64, 0, 0, px(64)).is_none());
+        assert!(Pointer::new(MAX_POINTER_SIDE + 1, 1, 0, 0, px(MAX_POINTER_SIDE + 1)).is_none());
+        assert!(Pointer::new(i32::MAX, i32::MAX, 0, 0, px(4)).is_none());
+        // The bytes are the image, no fewer and no more.
+        assert!(Pointer::new(2, 2, 0, 0, px(3)).is_none());
+        assert!(Pointer::new(2, 2, 0, 0, px(5)).is_none());
+        // A hot spot outside the image is brought to its edge.
+        let p = Pointer::new(4, 2, 9, -3, px(8)).unwrap();
+        assert_eq!((p.hot_x, p.hot_y), (3, 0));
+        let p = Pointer::new(4, 2, i32::MIN, i32::MAX, px(8)).unwrap();
+        assert_eq!((p.hot_x, p.hot_y), (0, 1));
+    }
+
+    #[test]
+    fn a_pointer_keeps_its_alpha_and_exchanges_red_and_blue() {
+        let p = Pointer::new(2, 1, 0, 0, vec![1, 2, 3, 4, 250, 251, 252, 0]).unwrap();
+        assert_eq!(p.rgba(), vec![3, 2, 1, 4, 252, 251, 250, 0]);
+    }
+
+    #[test]
+    fn a_pointer_that_cannot_be_shown_leaves_the_last_one() {
+        let shared = Mutex::new(Shared::default());
+        let dirty = AtomicBool::new(false);
+        assert!(shared.lock().unwrap().pointer_on);
+        define_pointer(&shared, &dirty, Pointer::new(1, 1, 0, 0, vec![9, 8, 7, 6]));
+        assert!(dirty.swap(false, Ordering::AcqRel));
+        define_pointer(&shared, &dirty, Pointer::new(0, 0, 0, 0, Vec::new()));
+        assert!(!dirty.load(Ordering::Acquire));
+        assert_eq!(
+            shared.lock().unwrap().pointer.as_ref().unwrap().bgra,
+            [9, 8, 7, 6]
+        );
+    }
+
+    #[test]
+    fn hiding_the_pointer_is_news_once() {
+        let shared = Mutex::new(Shared::default());
+        let dirty = AtomicBool::new(false);
+        show_pointer(&shared, &dirty, true);
+        assert!(!dirty.load(Ordering::Acquire));
+        show_pointer(&shared, &dirty, false);
+        assert!(dirty.swap(false, Ordering::AcqRel));
+        assert!(!shared.lock().unwrap().pointer_on);
+        show_pointer(&shared, &dirty, false);
+        assert!(!dirty.load(Ordering::Acquire));
+        show_pointer(&shared, &dirty, true);
+        assert!(dirty.load(Ordering::Acquire));
+        assert!(shared.lock().unwrap().pointer_on);
+    }
 
     #[test]
     fn of_a_run_of_positions_the_last_is_sent() {
@@ -594,7 +777,13 @@ mod tests {
     #[test]
     fn a_scanout_has_a_size_that_can_be_shown() {
         assert_eq!(geometry(640, 480, 2560).ok(), Some(480 * 2560));
-        assert_eq!(geometry(640, 480, 4096).ok(), Some(480 * 4096));
+        // Rows further apart than they are wide: the last row has no padding to count.
+        assert_eq!(geometry(640, 480, 4096).ok(), Some(479 * 4096 + 2560));
+        assert_eq!(geometry(1, 1, 4096).ok(), Some(4));
+        // A stride is a whole number of pixels, and one QEMU itself would allow.
+        assert!(geometry(640, 480, 2562).is_err());
+        assert!(geometry(640, 480, 0x8000_0000).is_err());
+        assert_eq!(geometry(1, 2, 0x7fff_fffc).ok(), Some(0x7fff_fffc + 4));
         assert_eq!(
             geometry(MAX_SIDE, MAX_SIDE, MAX_SIDE * 4).ok(),
             Some(MAX_SIDE as usize * MAX_SIDE as usize * 4)
@@ -619,6 +808,28 @@ mod tests {
         assert!(Region::map(f.as_fd(), 0, 8193).is_err());
         assert!(Region::map(f.as_fd(), 4096, 8192).is_err());
         assert!(Region::map(f.as_fd(), u64::MAX, 4096).is_err());
+        // The last byte of the file is in; one more is not.
+        assert!(Region::map(f.as_fd(), 5, 8187).is_ok());
+        assert!(Region::map(f.as_fd(), 5, 8188).is_err());
+    }
+
+    #[test]
+    fn a_mapping_starts_where_the_frame_does() {
+        use std::io::Write;
+        let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
+        let path = std::env::temp_dir().join(format!("thylacine-mac-lead-{}", std::process::id()));
+        let mut f = std::fs::File::create_new(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        let bytes: Vec<u8> = (0..3 * page).map(|i| (i % 251) as u8).collect();
+        f.write_all(&bytes).unwrap();
+        // Offsets a guest's frame can have: inside the first page, on a page, just past one.
+        for offset in [0, 4, 4096, page - 4, page, page + 4, 2 * page + 12] {
+            let len = page / 2 + 8;
+            let r = Region::map(f.as_fd(), offset as u64, len).unwrap();
+            assert_eq!(r.len(), len);
+            let got = unsafe { std::slice::from_raw_parts(r.as_ptr(), r.len()) };
+            assert_eq!(got, &bytes[offset..offset + len], "offset {offset}");
+        }
     }
     #[test]
     fn a_rectangle_is_cut_to_the_surface() {
