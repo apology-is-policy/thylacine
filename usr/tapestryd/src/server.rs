@@ -1864,22 +1864,25 @@ pub struct Comp {
     next_ordered: u64,
     screen: Option<Screen>,
     scanout: Scanout,
-    /// Warp-4: the resource id the DEVICE currently scans out (0 = none/
-    /// disabled). `scanout` is the mode-machine's INTENT; this is the
+    /// Warp-4: the resource id the DEVICE is taken to scan out (0 = none/
+    /// disabled): that of the last bind that was accepted, or 0 after a
+    /// disable, accepted or not. Read as knowledge through `scans`.
+    /// `scanout` is the mode-machine's INTENT; this is the
     /// device's truth -- they diverge across the soft-Off windows (the
     /// 1037-style defer keeps the old pixels bound until the next
     /// present-COMPLETE). The GL death-falls key on THIS: an unref of the
     /// scanned-out resource is the one order the display cannot survive,
     /// and only the device truth can name which resource that is.
     bound_res: u32,
-    /// The display is composed and a bind of its screen was not accepted,
-    /// so the device is not known to scan the screen: a bind that was not
-    /// answered may still be executed (GPU-DESIGN 4.5.15), and the device
-    /// would then scan a screen that was given up. Set by every such bind,
-    /// cleared by one that is accepted; `bind_pump` asks again while it
-    /// stands.
-    screen_bind_owed: bool,
+    /// Paces `bind_pump` while the device is not known to scan what is
+    /// shown.
     bind_again: display::Backoff,
+    /// Said once per stretch in which a direct scanout is not known to be
+    /// scanned.
+    direct_unsettled_said: bool,
+    /// The mode was taken for a display whose EDID has not been read: the
+    /// millimetres held are those of the display that was.
+    edid_stale: bool,
     /// How many times the DEVICE refused a display unbind (round-2 F1).
     /// The self-test's `unbind=` arm consumes this: round-1 F5 rebuilt the
     /// witness to observe the ISSUE ORDER and round-1 F8 exposed the
@@ -2730,8 +2733,9 @@ impl Comp {
             screen: None,
             scanout: Scanout::Boot,
             bound_res: 0,
-            screen_bind_owed: false,
             bind_again: display::Backoff::new(),
+            direct_unsettled_said: false,
+            edid_stale: false,
             unbind_refused: 0,
             pending_direct: None,
             pending_bind_refused_said: false,
@@ -4727,10 +4731,14 @@ impl Comp {
 
     /// HALCYON-SCALE 3: the platform's declaration while one stands, else
     /// the scale the display's EDID implies for its current pixel geometry
-    /// (100 without one).
+    /// (100 without one). While the EDID held is not this display's, the
+    /// scale that stands: old millimetres over new pixels is no one's DPI.
     fn derive_scale(&self) -> u16 {
         if let Some(p) = self.declared {
             return p;
+        }
+        if self.edid_stale {
+            return self.scale;
         }
         match self.gpu.edid_mm {
             Some((mm_w, mm_h)) => scale::scale_pct(self.gpu.width, self.gpu.height, mm_w, mm_h),
@@ -6227,34 +6235,44 @@ impl Comp {
             }
         }
         // From here the mode is the one for the host: what fails now is
-        // owed, not refused.
+        // owed, not refused. The EDID held is the display's that was until
+        // this one's is read, and nothing derives a scale from it meanwhile.
+        self.edid_stale = true;
         if !self.composed_bind_holds() {
             return Followed::Unfinished(E_IO);
         }
         // The EDID is asked with it: a change of display is the one time
         // it changes, and it can change under a mode that does not. No
         // EDID is an answer (the scale is then 100); no answer is not, and
-        // the scale stands until there is one: the millimetres of the
-        // display that was say nothing of this one.
+        // the scale stands until there is one.
         match self.gpu.query_edid() {
-            Ok(mm) => self.gpu.edid_mm = mm,
+            Ok(mm) => {
+                self.gpu.edid_mm = mm;
+                self.edid_stale = false;
+            }
             Err(_) => return Followed::Unfinished(E_IO),
         }
         self.rescale_after_mode();
         Followed::Done
     }
 
+    /// Is the device known to scan `res`? `bound_res` is what it is taken
+    /// to scan, by the last bind that was accepted, and that is knowledge
+    /// only while no scanout command since was sent and left unanswered:
+    /// one that was may still be executed (the proxy's `scanout_unsettled`).
+    fn scans(&self, res: u32) -> bool {
+        !self.gpu.scanout_unsettled && self.bound_res == res
+    }
+
     /// Is the device known to scan the screen, where the display is
-    /// composed? Not while a bind of the screen was not accepted:
-    /// `reconcile` enters the composed state whether or not its bind was
-    /// taken, and a bind that was not answered may still be executed, so
-    /// what `bound_res` names is then only the last bind that was accepted.
+    /// composed? `reconcile` enters the composed state whether or not its
+    /// bind was taken.
     fn composed_bound(&self) -> bool {
         if self.scanout != Scanout::Composed {
             return true;
         }
         match &self.screen {
-            Some(s) => !self.screen_bind_owed && s.res == self.bound_res,
+            Some(s) => self.scans(s.res),
             None => true,
         }
     }
@@ -6275,33 +6293,66 @@ impl Comp {
         // wait for the next one.
         let sent = self.gpu.engine == Engine::Live;
         if self.gpu.set_scanout(res, w, h).is_err() {
-            self.screen_bind_owed = true;
             if sent {
                 self.bind_again.failed(libthyla_rs::time::monotonic_ns() / 1_000_000);
             }
             return false;
         }
         self.bound_res = res;
-        self.screen_bind_owed = false;
-        self.bind_again.reset();
         // After the bind, as in `reconcile` (#57): a flush reaches only a
         // scanout bound to the resource.
         let _ = self.gpu.flush(res, 0, 0, w, h);
         say!("tapestryd: scanout composed ({}x{}) res {} bound, late", w, h, res);
-        true
+        // What the host holds of the screen is not known either: nothing
+        // pushed while the device did not answer reached it. So all of it
+        // is established again: a structural pass repaints, pushes the
+        // whole buffer and has every client draw, and a switch to direct
+        // that was pending begins again with its own request to draw.
+        self.pending_direct = None;
+        self.geom_sig = self.geom_sig.wrapping_add(1);
+        self.reconcile();
+        self.composed_bound()
     }
 
-    /// Once a pass: while the display is composed and the device is not
-    /// known to scan its screen, bind it again -- at once when the device
-    /// answers, then at waits that double to a cap (`display::Backoff`),
-    /// for as long as the engine is live. Nothing else would: a display
-    /// that stays composed never binds its screen a second time.
+    /// Once a pass, while the engine is live and the device is not known
+    /// to scan what is shown. Composed: the screen is bound again, which
+    /// nothing else would do -- a display that stays composed never binds
+    /// its screen a second time. Direct: the client is asked to draw, and
+    /// its present binds (`scans`). Paced by `display::Backoff` for as
+    /// long as it takes.
     pub fn bind_pump(&mut self) {
-        if self.composed_bound() || self.gpu.engine != Engine::Live {
+        let owed = match self.scanout {
+            Scanout::Composed => !self.composed_bound(),
+            Scanout::Direct(_) => self.gpu.scanout_unsettled,
+            // Nothing is shown: there is nothing to put right.
+            Scanout::Boot | Scanout::Off => false,
+        };
+        if !owed {
+            self.bind_again.reset();
+            self.direct_unsettled_said = false;
             return;
         }
-        if self.bind_again.ready(libthyla_rs::time::monotonic_ns() / 1_000_000) {
-            let _ = self.composed_bind_holds();
+        if self.gpu.engine != Engine::Live {
+            return;
+        }
+        let now_ms = libthyla_rs::time::monotonic_ns() / 1_000_000;
+        if !self.bind_again.ready(now_ms) {
+            return;
+        }
+        match self.scanout {
+            Scanout::Direct(n) => {
+                if !core::mem::replace(&mut self.direct_unsettled_said, true) {
+                    say!("tapestryd: scanout direct {} is not known to be scanned; its client is asked to draw", n);
+                }
+                self.bind_again.failed(now_ms);
+                let (dw, dh) = (self.gpu.width, self.gpu.height);
+                if !self.emit_configure_to(n, dw, dh) {
+                    self.retire(n);
+                }
+            }
+            _ => {
+                let _ = self.composed_bind_holds();
+            }
         }
     }
 
@@ -6415,15 +6466,13 @@ impl Comp {
                 // whose deadline passed may still be executed, and the
                 // device would then scan the screen just given up (the
                 // broker keeps its resource until a later bind is
-                // accepted). The standing screen's bind is owed.
-                self.screen_bind_owed = true;
+                // accepted). The scanout is then unsettled, and
+                // `bind_pump` binds the standing screen again.
                 return Err(E_IO);
             }
             // The device now scans new.res (zeroed; reconcile's structural
             // repaint fills it this dispatch); old.res is no longer bound.
             self.bound_res = new.res;
-            self.screen_bind_owed = false;
-            self.bind_again.reset();
         }
         // Held pushes reference the OLD geometry/screen; a deferred push
         // against the new one would land wrong bytes at wrong rects. The
@@ -8408,8 +8457,6 @@ impl Comp {
                     // this line once did, reported an intent as an event.
                     if self.gpu.set_scanout(sres, dw, dh).is_ok() {
                         self.bound_res = sres;
-                        self.screen_bind_owed = false;
-                        self.bind_again.reset();
                         say!(
                             "tapestryd: scanout composed ({}x{}) res {} bound",
                             dw,
@@ -8418,9 +8465,9 @@ impl Comp {
                         );
                     } else {
                         // The composed state is entered all the same (the
-                        // arms below compose into the screen); the bind is
-                        // owed, and `bind_pump` asks again.
-                        self.screen_bind_owed = true;
+                        // arms below compose into the screen); `bound_res`
+                        // does not name the screen, and `bind_pump` asks
+                        // again.
                         say!(
                             "tapestryd: scanout composed ({}x{}) res {} BIND FAILED -- display keeps the previous scanout",
                             dw, dh, sres
@@ -11437,7 +11484,7 @@ impl Comp {
             // same-image re-poke arm (new content in the bound res).
             // PokeBind therefore brackets scanout+flush (the paint
             // included); PokeFlush counts re-pokes alone.
-            if self.bound_res != g.res_id {
+            if !self.scans(g.res_id) {
                 let tb = Instant::now();
                 let ok = self.direct_bind_adopted(&g, w, h);
                 let bns = tb.elapsed().as_nanos() as u64;
@@ -20307,9 +20354,11 @@ impl Conn {
                 // cost shape, so it rides the same census row rather than
                 // hollowing the battery's arm-name table with a twin.
                 comp.cost_arm = Cost::PresentDirectGl;
-                if comp.bound_res != g.res_id {
-                    // Defensive (mode-machine-unreachable: every adoption
-                    // change routes through the pending switch): rebind
+                if !comp.scans(g.res_id) {
+                    // Reached after a scanout command that was not
+                    // answered (the same id on both sides of the line
+                    // below), and otherwise defensive: every adoption
+                    // change routes through the pending switch. Rebind
                     // rather than flush a non-scanned-out resource, which
                     // the spec drops silently. Family-dispatched (W-3c-2):
                     // an img rebind must be SET_SCANOUT_BLOB.
@@ -20361,7 +20410,7 @@ impl Conn {
             // what every display stack does. The offset loses its slot base.
             let res = res_ids[slot as usize];
             comp.cost_arm = Cost::PresentDirect2d;
-            if comp.bound_res != res {
+            if !comp.scans(res) {
                 let t0 = Instant::now();
                 if comp.gpu.set_scanout(res, w, h).is_err() {
                     return Err(E_IO);
