@@ -40,16 +40,20 @@ resized or moved to a display with another scale.
 - **`gpu_api.rs`: `Stats` carries the count.** `display_events: u32`, between
   `condemned_lost` and `engine`. `Stats` is on every reply, so the compositor learns of an
   event with whatever it asks next, and it asks something on every pass. The record's
-  layout changed; everything that decodes it (tapestryd, corvus, caps-probe) is built from
-  the same tree.
-- **`proxy/gpu.rs`**: the proxy keeps the last count it was told.
+  layout changed. It is decoded in one place, the client in `rpc_client.rs` that every
+  user of the broker links.
+- **`proxy/gpu.rs`**: `Gpu::display_events()` reads the count from the last reply the
+  client had, of any kind. It is not a field of the proxy, because `query` does not
+  refresh those and the count would have missed a reply (audit round 1, F2).
 - **`render.rs` and `backend/screen.rs`: the trusted screen has a size for any host.**
   `render::fits` is the old test (800x720 at least, 4096x2160 pixels at most), now one
   function that `render()` asks too. `Screen::size_for` gives the host's size if it fits,
   else that size over or times a whole number up to 4, the first that fits
   (`libhalcyon::display::fit_mode`), else 1024x768. The screen is still made once,
   at start; it says so when its size is not the host's (`lictor: trusted screen WxH for a
-  display of WxH`). The device scales it to the host's rect.
+  display of WxH`). A side is also at most 8192. Nothing in the device scales it: QEMU
+  makes the console's surface the scanout's own size, and the frontend decides how to
+  show it (an earlier form of this file said the device does; audit round 1, F3).
 
 ## What changed outside Lictor
 
@@ -58,13 +62,17 @@ resized or moved to a display with another scale.
   over 4, times 4. A whole factor keeps the host's picture of the screen sharp, and the
   scale needs nothing more: the same millimetres under half the pixels are half the DPI.
   `Follow`: the timing of a follow as a small state machine over the count and a clock
-  (150 ms of quiet, once; a pinned mode stands; an asking the device did not answer is
-  made again, at most six times over 18.9 s).
+  (150 ms of quiet, once; a pinned mode stands; an event that meets a stalled device is
+  held, uncounted, until the device answers or is dead; an asking that fails with the
+  device answering is made again, at most six times over 18.9 s).
 - **`usr/tapestryd/src/server.rs`**: the first mode at boot, `mode auto` and a followed
-  display event all take the fitted mode (`mode_in_bounds` and a probe allocation of the
-  full-screen surface are the `can`). `display_pump`, called once a pass after the fence
-  pump, hands the count to `Follow` and, when it says so, does what `mode auto` does. An explicit `mode W H` is judged as before and pins the mode until a `mode
-  auto` that is accepted. `docs/AURORA-CONFIG.md` 3.4 has the rule.
+  display event all take the fitted mode (`mode_in_bounds`, and `mode_can_be_made`: a
+  probe allocation of the screen and one full-screen surface, held together, are the
+  `can`). `display_pump`, called once a pass after the fence pump, hands the count to
+  `Follow` and, when it says so, does what `mode auto` does. It reads your broker's
+  engine state first: a stalled engine is not asked and the event waits for it; a dead
+  one ends the matter. An explicit `mode W H` is judged as before and pins the mode
+  until a `mode auto` that is accepted. `docs/AURORA-CONFIG.md` 3.4 has the rule.
 
 ## The five questions this file put to you, as they were answered
 
@@ -80,9 +88,12 @@ resized or moved to a display with another scale.
    the size it was made at.
 4. **Tearing.** The switch is the existing mode change (`change_mode`, what `mode W H` has
    always done): a new screen is bound before the old one is freed. Nothing new was
-   argued for I-40.
+   argued for I-40. Its order changed in one way: the new screen is allocated before the
+   menu's card is dismissed and held presents are dropped, so a change that cannot be
+   made touches nothing.
 5. **A zero size.** `query_display_info` answers None for a disabled scanout and the mode
-   stands (`not followed`).
+   stands (`no display to follow; WxH stands`). A question the device does not answer is
+   a different thing and is asked again.
 
 - **`tools/interactive/ls-display-follow.exp`** (new) boots a device of 3456x2160 and then
   resizes it as a VNC viewer does (`rfb_resize.py`, SetDesktopSize): no Mac app needed.
@@ -93,15 +104,29 @@ resized or moved to a display with another scale.
   session runs at 200% (the Mac app's default window) its text is half the session's
   physical size, and at a trusted screen of 3456x2160 beside a session of 1728x1080 the
   panel is under a fifth of the width. Two ways I can see: bake the faces at 2x as well and
-  pick by the EDID, or make the trusted screen at the session's mode and let the device
+  pick by the EDID, or make the trusted screen at the session's mode and let the frontend
   scale it. Not done; nobody has looked at the trusted screen under the Mac app yet.
-- The trusted screen is made once. After a followed resize it is the boot's size, scaled
-  by the device. Following there too would mean a new `Screen` between episodes.
+- The trusted screen is made once. After a followed resize it is the boot's size, shown
+  as the frontend shows a scanout of another size. Following there too would mean a new
+  `Screen` between episodes.
+- A bind that meets a stalled engine. tapestryd's `reconcile()` enters its composed state
+  whether or not the device took the bind. A followed event now checks afterwards and
+  binds again (`composed_bind_holds`); an explicit `mode W H` does not, and can leave the
+  display composed and not bound until the next mode change. That is in the bug queue as
+  an open defect of the compositor; it is your engine's stall that exposes it.
 - One read of `events_read` for each ticket under MSI-X. A vector of its own for the
   configuration interrupt would remove it; `PciIrq::for_virtio` gives one vector to all.
 - The INTx branch (the ISR bit) is in no gate.
 - An event raised between the read and the clear is cleared uncounted. It is covered:
   the count made by that call is followed by a question asked after both.
+
+## The audit
+
+Round 1 (a reviewer of another model family, with nothing booted): no P0, no P1, one P2,
+six P3. The P2 was that an event could be lost to a stall on three paths the first retry
+did not cover; the hold above is its fix. The P3s are the corrections marked above, the
+order in `change_mode`, a `mode auto` that unpinned before it was accepted, and the
+regression scenario's waits. A second round on the fixes follows the boots.
 
 ## Measured
 

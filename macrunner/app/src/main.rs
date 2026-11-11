@@ -111,8 +111,9 @@ define_class!(
             window.makeFirstResponder(Some(&view));
             window.setDelegate(Some(ProtocolObject::from_ref(self)));
             // The least the window can be dragged to. The guest takes a mode for any size told
-            // (its modes go down to 320x200); its trusted screen needs 800x720 pixels and is
-            // made at twice a host's size that is smaller.
+            // (its modes go down to 320x200). Its trusted screen needs 800x720 pixels and is
+            // sized once, when the guest starts: at the size told by then, or at the first
+            // whole multiple of it that fits (twice, for this least size).
             window.setContentMinSize(NSSize::new(640.0, 400.0));
             window.center();
             window.makeKeyAndOrderFront(None);

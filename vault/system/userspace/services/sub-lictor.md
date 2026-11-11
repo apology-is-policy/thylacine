@@ -119,7 +119,12 @@ without being counted. It is covered by the count that call makes, because
 whoever follows the count asks the device after seeing it.
 
 **The count rides every reply.** `Stats.display_events` sits between
-`condemned_lost` and `engine`, and the proxy keeps the last value it was told.
+`condemned_lost` and `engine`. `Stats` is decoded in one place, the client in
+`rpc_client.rs` that every user of the broker links, so the layout changed for
+all of them at once.
+The proxy's `Gpu::display_events` reads the count from the last reply its
+client had, of any kind. It is not one of the proxy's own fields, because a
+`query` does not refresh those and the count would then miss a reply.
 [[sub-tapestryd]] asks the broker something on every pass, so it learns of an
 event within a pass and needs no wake of its own. What it does then is in its
 section "The display follows its host".
@@ -128,15 +133,21 @@ section "The display follows its host".
 trusted scene can be drawn at: 800x720 at least and 4096x2160 pixels at most.
 `render()` asks it, and so does `Screen::size_for`, which gives the host's size
 if it fits, else that size over or times a whole number up to 4, the first
-that fits ([[sub-libhalcyon]]'s `display::fit_mode`), else 1024x768. So Lictor
-starts for any host: 640x400 gives a screen of 1280x800, 5120x2880 one of
-2560x1440, and the device scales it to the host's rect. Before this a host
+that fits ([[sub-libhalcyon]]'s `display::fit_mode`), else 1024x768; a side is
+also at most 8192 (`MAX_DISPLAY_DIM`). So Lictor starts for any host: 640x400
+gives a screen of 1280x800, 5120x2880 one of 2560x1440. Nothing in the device
+scales a screen that is not the host's size: QEMU makes the console's surface
+the size of the scanout, and whatever shows it (a window, a VNC viewer, the
+Mac app) decides how. The factor is whole so that a frontend scaling by whole
+pixels shows the screen sharp, and it is chosen once, at Lictor's start, as the
+first that fits. Before this a host
 outside the limits failed `Screen::new`, and with it the probe of the driver
 that is also the keyboard and the pointer. The screen says so when its size is
 not the host's: `lictor: trusted screen WxH for a display of WxH`.
 
 **What it does not do.** The trusted screen is made once and keeps the size of
-the boot whatever the host's window does afterwards. It knows no display
+the boot whatever the host's window does afterwards; after a followed resize
+it is shown as the frontend shows a scanout of another size. It knows no display
 scale: its layout is in pixels, so on a display the session runs at 200% its
 text is half the session's physical size. Both are in `docs/handoffs/050`.
 

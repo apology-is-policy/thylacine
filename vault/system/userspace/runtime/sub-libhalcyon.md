@@ -668,19 +668,28 @@ itself (its caller does) and leaves an event that is still waiting out its quiet
 time to be asked for when it ends. A clock that reads earlier than the event is
 a `Wait`, not a wrap.
 
-An asking can fail for a reason that passes: the device did not answer. The
-caller then calls `retry`, and `step` answers `Ask` again after a wait that
-doubles from twice the quiet time. `retry` is false once `RETRY_MAX` (6)
-askings have been made again, 18.9 s in all, and the event is forgotten; an
-event that arrives during the wait takes its place and has all its askings.
+An asking can fail, or be pointless to make, for a reason that passes, and the
+caller tells two kinds apart. The device is stalled and says so: the caller
+calls `hold`, and `step` answers `Ask` again after the quiet time, with no
+count, for as long as the caller goes on holding. `hold` is true the first time
+for an event, so that the caller says it once. Or the device answers and the
+asking failed all the same (a change it did not take, an allocation that
+failed): the caller calls `retry`, and `step` answers `Ask` again after a wait
+that doubles from twice the quiet time. `retry` is false once `RETRY_MAX` (6)
+askings have been made again, 18.9 s in all, and the event is forgotten. An
+event that arrives during either wait takes the old one's place, with all its
+askings and its own first `hold`. The first is uncounted because the device's
+driver ends a stall itself, by answering again or by declaring the device dead,
+and the caller stops at the second.
 
-**Tests.** 6 host tests: the fitted sizes for the Macs' full screens and for
+**Tests.** 7 host tests: the fitted sizes for the Macs' full screens and for
 Lictor's limits, the order of the factors, and the refusals; an event followed
 at exactly the quiet time and once; a train; the wrap and a first count that is
-not zero; the askings made again, their waits and their end; the pin in each
-order against a waiting event. Each of seventeen changes to the file turns one
-of them red (`aux-gate/macrunner/mut/a3b_mut.py`, a scratch harness, not a
-gate).
+not zero; the askings made again, their waits and their end; an event held
+while the device is stalled, said once, and its askings still whole afterwards;
+the pin in each order against a waiting event. Each of 21 changes to the file
+turns one of them red (`aux-gate/macrunner/mut/a3b_mut.py`, a scratch harness,
+not a gate).
 
 ## `motion` -- section 10's movement, and the rule deciding whether it runs
 

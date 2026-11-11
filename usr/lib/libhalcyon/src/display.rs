@@ -147,8 +147,9 @@ impl Follow {
 
     /// The asking `step` called for failed with the device answering (a
     /// change it did not take, an allocation that failed): it is called
-    /// for again, after a wait that doubles each time. False once RETRY_MAX askings have been made again:
-    /// the event is then forgotten, and the next one starts afresh.
+    /// for again, after a wait that doubles each time. False once
+    /// RETRY_MAX askings have been made again: the event is then
+    /// forgotten, and the next one starts afresh.
     pub fn retry(&mut self, now_ms: u64) -> bool {
         if self.retries >= RETRY_MAX {
             return false;

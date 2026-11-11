@@ -216,10 +216,11 @@ something on every pass, needs no new wake. tapestryd follows a change of the co
 has stood 150 ms: it asks for the display's size and takes the mode fitted to it, then the
 EDID, then the scale (`docs/AURORA-CONFIG.md` 3.4, amended the same day). The fitted mode is
 the host's size, or that size over or times a whole number, the first that is within the
-mode's bounds and whose full-screen surface can be allocated; the same rule gives the first
-mode at boot. Lictor's own trusted screen is made once, at boot, by the same rule against its
+mode's bounds and whose screen and full-screen surface can be allocated; the same rule
+gives the first mode at boot. An event that meets a stalled device waits for it to answer;
+an asking that fails with the device answering is made again, six times at most. Lictor's own trusted screen is made once, at boot, by the same rule against its
 own limits (800x720 at least, 4096x2160 pixels at most), and no longer fails for a host of
-another size. An explicit `mode W H` pins the mode until `mode auto`.
+another size. An explicit `mode W H` pins the mode until a `mode auto` that is accepted.
 
 **B6. Frame pacing API.** `NSView.displayLink(target:selector:)` returns a `CADisplayLink`
 "in-sync with the display the view is on", macOS 14+ (Apple docs JSON, fetched 2026-11-10).
