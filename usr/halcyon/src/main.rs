@@ -523,6 +523,12 @@ fn read_capped(path: &str, cap: usize) -> Result<Vec<u8>> {
     io::slurp_capped(&mut f, cap)
 }
 
+/// A /ctl or /proc file: rendered afresh on every read, so read once.
+fn read_rendered(path: &str) -> Result<Vec<u8>> {
+    let mut f = File::open(path)?;
+    io::read_rendered(&mut f)
+}
+
 /// mkdir -p `<home>/lib/halcyon/layouts`, ignoring already-existing components
 /// (the kernel create is exclusive; a re-save must not fail on the second run).
 fn mkdir_p(home: &str) -> bool {
@@ -1410,7 +1416,7 @@ fn layout_list() -> i64 {
 /// file or the field is missing (the welcome then omits the fact -- it never
 /// prints a placeholder).
 fn ctl_field(path: &str, key: &str) -> Option<String> {
-    let bytes = read_capped(path, 16 * 1024).ok()?;
+    let bytes = read_rendered(path).ok()?;
     let text = core::str::from_utf8(&bytes).ok()?;
     for line in text.lines() {
         if let Some(rest) = line.strip_prefix(key) {
@@ -1439,7 +1445,7 @@ fn own_ns_path() -> String {
 /// What `/` is mounted from, per this process's own namespace listing
 /// (`mount / <src>` in /proc/<pid>/ns -- devproc serves no `self`).
 fn root_source() -> Option<String> {
-    let bytes = read_capped(&own_ns_path(), 64 * 1024).ok()?;
+    let bytes = read_rendered(&own_ns_path()).ok()?;
     let text = core::str::from_utf8(&bytes).ok()?;
     for line in text.lines() {
         let mut it = line.split_whitespace();
@@ -1456,7 +1462,7 @@ fn root_source() -> Option<String> {
 /// pid, at most ten (five rows of two). Empty when /ctl/procs is unreadable.
 fn loaded_systems() -> Vec<(String, u32)> {
     let mut out: Vec<(String, u32)> = Vec::new();
-    let Ok(bytes) = read_capped("/ctl/procs", 64 * 1024) else {
+    let Ok(bytes) = read_rendered("/ctl/procs") else {
         return out;
     };
     let Ok(text) = core::str::from_utf8(&bytes) else {

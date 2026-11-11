@@ -694,7 +694,9 @@ impl Render {
 // holds no authority that would show it a code address (`deputy_check`).
 // ---------------------------------------------------------------------------
 
-/// Read a whole native file into `out`. Returns the byte count, or None if the
+/// Read a native file into `out` with ONE read: every file read here is one the
+/// kernel renders afresh on each read (/ctl, /proc/<pid>), so a second read
+/// would continue a different rendering. Returns the byte count, or None if the
 /// file is unreachable -- which is a legitimate outcome (a nameless Proc's
 /// /proc/<pid>/exe is EMPTY, not an error), so callers degrade rather than fail.
 fn read_native(path: &[u8], out: &mut [u8]) -> Option<usize> {
@@ -702,19 +704,9 @@ fn read_native(path: &[u8], out: &mut [u8]) -> Option<usize> {
     if fd < 0 {
         return None;
     }
-    let mut total = 0usize;
-    loop {
-        if total >= out.len() {
-            break;
-        }
-        let n = unsafe { libthyla_rs::t_read(fd, out.as_mut_ptr().add(total), out.len() - total) };
-        if n <= 0 {
-            break;
-        }
-        total += n as usize;
-    }
+    let n = unsafe { libthyla_rs::t_read(fd, out.as_mut_ptr(), out.len()) };
     let _ = unsafe { t_close(fd) };
-    Some(total)
+    Some(if n > 0 { n as usize } else { 0 })
 }
 
 /// Read a native file into `out` starting at byte `off`. Same degrade-to-None
@@ -808,7 +800,7 @@ fn native_pid_exists(pid: u32) -> bool {
 const VIV_PROCS_MAX: usize = 64;
 
 fn viv_read_pairs(pairs: &mut [(u32, u32)]) -> usize {
-    let mut buf = [0u8; 2048];
+    let mut buf = [0u8; RENDER_MAX]; // the kernel's DEVCTL_READ_BUF
     let got = match read_native(b"/ctl/procs", &mut buf) {
         Some(n) => n,
         None => return 0, // unreadable source -> empty set, fail-closed
@@ -942,7 +934,7 @@ fn native_pid_list(out: &mut [u32]) -> usize {
     if viv_runner() != 0 {
         return viv_members(out);
     }
-    let mut buf = [0u8; 2048]; // matches the kernel's DEVCTL_READ_BUF
+    let mut buf = [0u8; RENDER_MAX]; // the kernel's DEVCTL_READ_BUF
     let got = match read_native(b"/ctl/procs", &mut buf) {
         Some(n) => n,
         None => return 0,

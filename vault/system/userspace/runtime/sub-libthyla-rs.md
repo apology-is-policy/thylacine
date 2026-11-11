@@ -50,7 +50,7 @@ design:
   - "docs/UTOPIA-SHELL-DESIGN.md section 15"
   - "docs/ARCHITECTURE.md section 3.5"
 created: 2026-08-03
-updated: 2026-11-04
+updated: 2026-11-11
 ---
 ## Dedicated service owner (October 2)
 
@@ -262,6 +262,31 @@ drops a dot any more** — verified, not taken on trust. Two shapes replace it:
 the ported libc's splitter, and this — each getting it wrong differently. That
 is the argument for the principle: when N layers each normalize, they each
 normalize wrong, and the fix is not to fix N implementations but to have one.
+
+### A kernel-rendered file is read with one read
+
+devctl and devproc render a text file afresh on every `read`, at whatever
+offset the caller has reached; nothing ties a second read to the first
+rendering. A reader that loops to end-of-file (`io::slurp`,
+`Read::read_to_end`) therefore returns the first rendering followed by the tail
+of the second whenever the file grew in between -- and it grows whenever a
+number in it gains a digit, which a running Proc's `CPU_NS` can do at any
+scheduler tick. `cat /ctl/procs` has been seen to end in such a fragment line,
+and `ps`, reading the same way, met a line it could not parse and fell back to
+its verbatim output (2026-11-11).
+
+`io::read_rendered` reads such a file with ONE read into a `RENDERED_MAX`
+(8 KiB) buffer, twice the larger of the kernel's two render buffers
+(`DEVCTL_READ_BUF` 4096, `DEVPROC_READ_BUF` 2048), and refuses a read that
+fills it (`NoMemory`). `ps`, prowl's `read_ctl_file`, diorama's `read_native`
+and Halcyon's `read_rendered` read `/ctl` and `/proc/<pid>` text this way. Its
+host test feeds it a reader whose second read answers from a longer rendering:
+`read_rendered` returns the first, and `slurp` beside it returns the splice.
+
+A generic reader -- `cat`, a ported program's stdio -- still loops and can
+still show a spliced tail. Whether the kernel should hand a read-to-EOF reader
+one rendering (a length latched at the first read, or a per-open snapshot) is
+an open design question, not settled here.
 
 ### The 9P serving codec (`ninep`)
 

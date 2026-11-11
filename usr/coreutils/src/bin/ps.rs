@@ -257,7 +257,7 @@ fn run(args: Args) -> i64 {
     let rich = coreutils::beacon_gate::resolve(bmode) == beacon::Tier::Rich;
     let on = !rich && mode.resolve(|| libthyla_rs::stdout_is_terminal());
 
-    let raw = match File::open("/ctl/procs").and_then(|mut f| io::slurp(&mut f)) {
+    let raw = match File::open("/ctl/procs").and_then(|mut f| io::read_rendered(&mut f)) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("ps: /ctl/procs: {}", e);

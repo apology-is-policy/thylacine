@@ -763,3 +763,76 @@ pub fn slurp_capped<R: Read + ?Sized>(reader: &mut R, limit: usize) -> Result<Ve
     }
     Ok(v)
 }
+
+/// Twice the larger of the kernel's two render buffers (a /ctl leaf's 4096, a
+/// /proc file's 2048): one read that fills it did not get the whole file.
+pub const RENDERED_MAX: usize = 8 * 1024;
+
+/// Read a file the kernel renders afresh on every read -- a /ctl leaf, a
+/// /proc/<pid> text file -- with ONE read. A second read answers from a new
+/// rendering at the old offset, so reading to EOF (`slurp`) returns the first
+/// rendering plus the tail of a longer second one whenever the file grew in
+/// between. `NoMemory` if the read filled the buffer or the heap refused.
+pub fn read_rendered<R: Read + ?Sized>(reader: &mut R) -> Result<Vec<u8>> {
+    let mut buf = [0u8; RENDERED_MAX];
+    let n = reader.read(&mut buf)?;
+    if n == buf.len() {
+        return Err(Error::NoMemory);
+    }
+    let mut v = Vec::new();
+    v.try_reserve(n).map_err(|_| Error::NoMemory)?;
+    v.extend_from_slice(&buf[..n]);
+    Ok(v)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A file rendered per read: each read answers from the next rendering, at
+    /// the offset the reader has reached.
+    struct Rendered<'a> {
+        takes: &'a [&'a [u8]],
+        reads: usize,
+        off: usize,
+    }
+
+    impl Read for Rendered<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
+            let cur = self.takes[cmp::min(self.reads, self.takes.len() - 1)];
+            self.reads += 1;
+            let rest = if self.off < cur.len() { &cur[self.off..] } else { &[][..] };
+            let n = cmp::min(rest.len(), buf.len());
+            buf[..n].copy_from_slice(&rest[..n]);
+            self.off += n;
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn read_rendered_takes_one_rendering() {
+        // Between the two reads a counter gained digits and a row appeared.
+        let a: &[u8] = b"1 joey 0\n";
+        let b: &[u8] = b"1 joey 734211\n2 ps 0\n";
+        let mut f = Rendered { takes: &[a, b], reads: 0, off: 0 };
+        assert_eq!(read_rendered(&mut f).unwrap(), a);
+        assert_eq!(f.reads, 1);
+        // The control: reading to EOF splices the second rendering's tail on.
+        let mut g = Rendered { takes: &[a, b], reads: 0, off: 0 };
+        let spliced = slurp(&mut g).unwrap();
+        assert_eq!(&spliced[..a.len()], a);
+        assert_eq!(&spliced[a.len()..], &b[a.len()..]);
+    }
+
+    #[test]
+    fn read_rendered_refuses_a_full_buffer() {
+        struct Endless;
+        impl Read for Endless {
+            fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
+                buf.fill(b'x');
+                Ok(buf.len())
+            }
+        }
+        assert_eq!(read_rendered(&mut Endless), Err(Error::NoMemory));
+    }
+}

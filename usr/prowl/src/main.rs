@@ -447,8 +447,9 @@ fn resample(app: &mut App) {
     app.refresh_detail();
 }
 
-/// Slurp a /ctl or /proc text file into a String (the cpubench idiom: one bounded
-/// buffer, read to EOF). "" on any error -- prowl degrades to an empty list
+/// Read a /ctl or /proc text file into a String with ONE read: the kernel
+/// renders such a file afresh on each read, so a second read would continue a
+/// different rendering. "" on any error -- prowl degrades to an empty list
 /// rather than failing.
 fn read_ctl_file(path: &str) -> String {
     let mut f = match File::open(path) {
@@ -456,17 +457,7 @@ fn read_ctl_file(path: &str) -> String {
         Err(_) => return String::new(),
     };
     let mut buf = [0u8; CTL_BUF];
-    let mut total = 0usize;
-    loop {
-        if total >= buf.len() {
-            break;
-        }
-        match f.read(&mut buf[total..]) {
-            Ok(0) => break,
-            Ok(k) => total += k,
-            Err(_) => break,
-        }
-    }
+    let total = f.read(&mut buf).unwrap_or(0);
     String::from(core::str::from_utf8(&buf[..total]).unwrap_or(""))
 }
 
