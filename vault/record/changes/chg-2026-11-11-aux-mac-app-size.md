@@ -4,7 +4,7 @@ type: chg
 title: "The Mac app tells the guest the window's size"
 date: 2026-11-11
 arc: arc-mac-runner
-commits: ["*(pending)*"]
+commits: ["c9843e4a1"]
 touched:
   - sub-macrunner-app
 established: []
