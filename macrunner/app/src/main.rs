@@ -110,9 +110,9 @@ define_class!(
             window.setContentView(Some(&view));
             window.makeFirstResponder(Some(&view));
             window.setDelegate(Some(ProtocolObject::from_ref(self)));
-            // The least the window can be dragged to. A guest that is running can set a screen
-            // that small (its `mode` goes down to 320x200); Lictor's own screen, made when it
-            // starts, needs 800x720 pixels.
+            // The least the window can be dragged to. The guest takes a mode for any size told
+            // (its modes go down to 320x200); its trusted screen needs 800x720 pixels and is
+            // made at twice a host's size that is smaller.
             window.setContentMinSize(NSSize::new(640.0, 400.0));
             window.center();
             window.makeKeyAndOrderFront(None);

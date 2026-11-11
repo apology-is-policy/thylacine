@@ -20,6 +20,7 @@ mirrors:
   - "tools/interactive/ls-ut-paste.exp"
   - "tools/interactive/ls-halcyon-paste-flow.exp"
   - "tools/interactive/ls-halcyon-pointer.exp"
+  - "tools/interactive/ls-display-follow.exp (EXTINCTION: only)"
   - "tools/interactive/ls-halcyon-session-media.exp"
   - "tools/interactive/ls-graphical-sak.exp"
   - "tools/interactive/ls-graphical-sak-states.exp"

@@ -57,7 +57,7 @@ hazards: [haz-driver-panic-dos]
 abis: [abi-trusted-seat, abi-native-nonblock]
 design: ["docs/GRAPHICAL-SAK-OWNERSHIP.md", "docs/GRAPHICAL-SAK-PORTABILITY.md", "docs/HALCYON-TRUSTED-EPISODE.md"]
 created: 2026-09-18
-updated: 2026-11-03
+updated: 2026-11-11
 ---
 ## Clipboard cancellation progress boundary
 
@@ -91,6 +91,61 @@ name with a short Rwalk, neither binding newfid, where it used to treat every mi
 request and drop the connection. A dead ring is a miss. The kernel now reports what a
 server says about a walk (ERRORS.md ER-2), and its only client, `proxy/gpu.rs`, treats
 every failure alike. `..` from the root is the root.
+
+## Display events, and a trusted screen for any host size (2026-11-11)
+
+Written by aux while this dossier's keeper was away; `docs/handoffs/050` is the
+note left for her.
+
+**The device's events are taken.** virtio-gpu sets bit 0 of `events_read`
+(device configuration, offset 0) and raises its configuration interrupt when
+the host's preferred size or its EDID changes: a window resized, or moved to a
+display of another scale. `Controlq::take_events` reads the register. If it is
+not zero it writes the same bits to `events_clear` (offset 4), and if the
+display bit was among them it adds one to `display_events`, a wrapping `u32`.
+`service_completions` calls it when a configuration change may have happened.
+On the interrupt line that is when the ISR byte, which it reads to drop the
+line, has bit 1. On MSI-X the configuration interrupt has the queues' one
+vector (`PciIrq::for_virtio`), nothing tells the two apart, and the register is
+read once for each interrupt ticket. At start, pending events are taken and
+the count is set to zero just before the first `GET_DISPLAY_INFO`: that
+question asks for the state those events announced.
+
+No event is lost. A ticket's vector is masked from its delivery until
+`complete`, so the device pends a message raised in between and delivers it at
+the unmask as a new ticket; on the line, `complete` finds it asserted and
+replays the ticket. An event raised between the read and the clear is cleared
+without being counted. It is covered by the count that call makes, because
+whoever follows the count asks the device after seeing it.
+
+**The count rides every reply.** `Stats.display_events` sits between
+`condemned_lost` and `engine`, and the proxy keeps the last value it was told.
+[[sub-tapestryd]] asks the broker something on every pass, so it learns of an
+event within a pass and needs no wake of its own. What it does then is in its
+section "The display follows its host".
+
+**The trusted screen's size.** `render::fits` is the one test of a size the
+trusted scene can be drawn at: 800x720 at least and 4096x2160 pixels at most.
+`render()` asks it, and so does `Screen::size_for`, which gives the host's size
+if it fits, else that size over or times a whole number up to 4, the first
+that fits ([[sub-libhalcyon]]'s `display::fit_mode`), else 1024x768. So Lictor
+starts for any host: 640x400 gives a screen of 1280x800, 5120x2880 one of
+2560x1440, and the device scales it to the host's rect. Before this a host
+outside the limits failed `Screen::new`, and with it the probe of the driver
+that is also the keyboard and the pointer. The screen says so when its size is
+not the host's: `lictor: trusted screen WxH for a display of WxH`.
+
+**What it does not do.** The trusted screen is made once and keeps the size of
+the boot whatever the host's window does afterwards. It knows no display
+scale: its layout is in pixels, so on a display the session runs at 200% its
+text is half the session's physical size. Both are in `docs/handoffs/050`.
+
+**Tests.** Host: `render::tests::the_sizes_it_fits_are_its_layouts_floor_to_its_rasters_pixels`
+(each limit at and past its edge, a pixel count that does not wrap, `render()`
+refusing a raster of exactly an unfit size), and the `Stats` record's layout
+with the count in it. Guest: `tools/interactive/ls-display-follow.exp`
+([[sub-tapestryd]]) takes events through this path. The branch for the
+interrupt line is in no gate.
 
 ## Purpose
 

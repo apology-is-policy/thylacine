@@ -194,7 +194,7 @@ the compositor is a file server), made symmetric across both environments.
 - **Format**: plain `key value` text — greppable, hand-editable, ndb-adjacent
   (netd already parses ndb); no binary format, no ABI. Example (Aurora):
   ```
-  mode        1280 1024     # or: mode auto (largest the GPU reports)
+  mode        1280 1024     # or: mode auto (the host's size or a whole fraction of it; follows the host's window)
   font-size   8             # Cornucopia cell advance: 10 (default) .. 6 (cfg-5)
   theme       bonfire       # aurora palette
   gaps        4             # inter-pane gap px
@@ -277,11 +277,48 @@ things):
    preferred rect (GET_DISPLAY_INFO), not a mode list — so `W H` validates
    against sane bounds (320×200..3840×2160; the screen buffer stays under
    the 64-MiB weave cap) and `mode auto` re-probes GET_DISPLAY_INFO
-   (non-mutating query) and adopts the reported rect. The scanout swap
+   (non-mutating query) and takes the mode FITTED to the reported rect
+   (amended 2026-11-11; the rule is the paragraph after this one). The
+   scanout swap
    mints a FRESH per-generation screen resource (bind-then-flush per #57;
    the old screen freed only after the rebind); held presents drop (stale
    geometry); the layout recompute + the fan ride the audited
    `reconcile()` unchanged.
+
+   **The fitted mode, and a display that follows its host (amended
+   2026-11-11).** The reported rect is whatever the host's window happens
+   to be, and not every rect can be a mode: one outside the bounds, or one
+   whose fullscreen surface (three buffers) is over the weave cap or cannot
+   be allocated just now, cannot. So the mode for a reported rect is found
+   by ONE rule (`libhalcyon::display::fit_mode`): the rect itself if it can
+   be a mode; else the rect over 2, times 2, over 3, times 3, over 4, times
+   4, the first that can; if none can, the mode that stands stays (at boot,
+   when none stands yet, 1024×768). A whole factor keeps the host's picture
+   of the screen sharp, and the scale needs no rule of its own: the EDID's
+   millimetres under half the pixels are half the DPI
+   (`docs/HALCYON-SCALE.md` is unchanged). The rule is used in three
+   places, and only there:
+   - **at boot**, for the compositor's first mode (before this amendment
+     the boot adopted any rect unchecked, and a display of 3456×2160 came
+     up with a screen and no session on it: measured 2026-11-11);
+   - **by `mode auto`** (which used to adopt the rect or refuse it);
+   - **after a display event** (`VIRTIO_GPU_EVENT_DISPLAY`: the host's
+     window was resized or moved to another display). The compositor
+     follows it once the host's display has stood for 150 ms, so a train
+     of events is one mode change.
+
+   An explicit `mode W H` is NOT fitted: it is judged as before, refused
+   if it cannot be a mode, and it PINS the mode. A pinned mode stands
+   whatever the host's window does, until `mode auto`, which also resumes
+   the following. (A persisted fixed mode is pushed as `mode W H` at
+   startup, so it is pinned; a persisted `auto` pushes nothing, and the
+   boot's fitted mode follows the host.) No mode changes while the trusted
+   screen is up: an event that arrives then is followed after it comes
+   down. Precedent: a Linux guest's virtio-gpu driver turns the same event
+   into a hotplug and its compositor takes the new preferred mode; a
+   guest that cannot run the host's full pixel count runs a whole fraction
+   of it (what Parallels calls Scaled). Decided on the aux track under the
+   operator-away grant, not by a vote: the operator may overturn it.
 2. **Aurora cell/font size** — the shell's *effective* text resolution.
    **AS-BUILT (cfg-5):** `font-size <advance>` picks one of SEVERAL baked
    Cornucopia atlases (the SAME outline at progressively smaller cell advances

@@ -1,69 +1,107 @@
-# Handoff 050 -- a host that resizes the display: Lictor follows `VIRTIO_GPU_EVENT_DISPLAY` (to Astra)
+# Handoff 050 -- a host that resizes the display: what was changed in Lictor while you were away (to Astra)
 
-**From**: aux, 2026-11-11. **To**: Astra. **Why you**: Lictor is yours, and this
-is a change to what its GPU backend does with an interrupt it now discards.
-Nothing here is urgent: the Mac app (`macrunner/app`, branch `aux-3-mac`) is
-usable at a fixed size without it. It is the guest half of the arc's resize
-station (`docs/MAC-RUNNER.md` section 8, A3; findings B4 and B5).
+**From**: aux, 2026-11-11. **To**: Astra, for when you are back.
 
-## What the host will do
+This file used to ask you for a change (its first form is in git: `git log --follow` on this
+path). The operator then wrote, on 2026-11-11: "Astra is on vacation until further notice.
+Feel free to change Lictor." So the change is made, by aux, and this is the record of it. Your
+worktree and anything you had not committed were not touched. Everything below is yours to
+change or take out; the reasons are here so that you can judge them without me.
 
-When its window stops being resized, or moves to a display with another
-scale, the Mac app will call `org.qemu.Display1.Console.SetUIInfo(width_mm,
-height_mm, xoff, yoff, width, height)`. In QEMU that is
-`qemu_console_set_ui_info` (`ui/dbus-console.c:215` in 11.1.3), which reaches
-`virtio_gpu_ui_info` (`hw/display/virtio-gpu-base.c:101-124`): it stores the
-requested size and millimetres in `req_state[scanout]` and raises
-`VIRTIO_GPU_EVENT_DISPLAY`: bit 0 of `events_read` in the device's config
-space, announced by a configuration-change interrupt. `GET_DISPLAY_INFO` and
-`GET_EDID` then answer with the new size and the new millimetres. The
-millimetres carry the scale: the app will send `width_px * 25.4 / (96 *
-scale)`, so the guest's existing EDID rule (`docs/HALCYON-SCALE.md`) arrives
-at the right percentage by itself.
+## Why it could not wait
 
-The same event is raised by a VNC client that sends SetDesktopSize
-(`ui/vnc.c:2642`), by GTK, SDL and SPICE. So it can be driven from the
-headless VNC lane you already have; the Mac app is not needed to test it.
+Two defects, both reachable from the Mac app (`macrunner/app`) and from any QEMU window:
 
-## What Lictor does today (read on `aux-3-mac`, 98de882ae)
+1. **A boot with no session.** With the device made 3456x2160 (full screen on a 16-inch
+   MacBook Pro) the compositor adopted that size, its first full-screen surface could not
+   be allocated (three buffers of it are 85 MiB against the kernel's 64 MiB a weave), and
+   the display came up with a screen and no session (measured 2026-11-11,
+   `docs/MAC-RUNNER.md` M-8). The `mode` verb has refused such a size since 2026-07-23; the
+   boot had no rule for one.
+2. **A boot with no Lictor.** `Screen::new` refused a host under 800x720 pixels or over
+   4096x2160 in all, and the probe failed with it. Lictor is the keyboard and the pointer
+   too. (Read from the code.)
 
-- Display info is read at boot and when a client asks
-  (`Request::QueryDisplayInfo`, `usr/lictor/src/backend/device.rs:256`), which
-  tapestryd does on `mode auto` (`usr/tapestryd/src/server.rs:19225`).
-- The configuration-change interrupt is a stale wake: the comment at
-  `usr/lictor/src/backend/gpu.rs:450-466` names "an interrupt-ish train from
-  host window resizes" as noise the submit deadline must survive.
-- Nothing in `usr/` or `kernel/` reads `events_read` or writes `events_clear`
-  (`gpu.rs:427` records their offsets).
+And the feature the Mac app needs: a guest that takes a new mode when the host's window is
+resized or moved to a display with another scale.
 
-So a host resize changes nothing in the guest until someone types `mode auto`.
+## What changed in Lictor
 
-## The ask
+- **`backend/gpu.rs`: the device's events are taken and the display ones counted.**
+  `Controlq::take_events` reads `events_read` (device configuration, offset 0); if it is
+  not zero it writes the same bits to `events_clear` (offset 4), and if bit 0
+  (`VIRTIO_GPU_EVENT_DISPLAY`) was among them it adds one to a wrapping `display_events`.
+  `service_completions` calls it when a configuration change may have happened: under
+  INTx when the ISR byte, which it already read and threw away, has bit 1; under MSI-X on
+  every interrupt ticket, because `select_virtio_vectors` gives the configuration
+  interrupt the queues' one vector and nothing tells the two apart. That is one register
+  read more for each ticket. At start, just before `read_display_info`, pending events are
+  taken and the count set to 0: the first question supersedes them.
+- **`gpu_api.rs`: `Stats` carries the count.** `display_events: u32`, between
+  `condemned_lost` and `engine`. `Stats` is on every reply, so the compositor learns of an
+  event with whatever it asks next, and it asks something on every pass. The record's
+  layout changed; everything that decodes it (tapestryd, corvus, caps-probe) is built from
+  the same tree.
+- **`proxy/gpu.rs`**: the proxy keeps the last count it was told.
+- **`render.rs` and `backend/screen.rs`: the trusted screen has a size for any host.**
+  `render::fits` is the old test (800x720 at least, 4096x2160 pixels at most), now one
+  function that `render()` asks too. `Screen::size_for` gives the host's size if it fits,
+  else that size over or times a whole number up to 4, the first that fits
+  (`libhalcyon::display::fit_mode`), else 1024x768. The screen is still made once,
+  at start; it says so when its size is not the host's (`lictor: trusted screen WxH for a
+  display of WxH`). The device scales it to the host's rect.
 
-On a wake that carries a configuration change, read `events_read`; if the
-display bit is set, write it to `events_clear` and make the geometry change
-reach the seat's client the way `mode auto` does today (re-probe, re-read the
-EDID, let tapestryd re-create the scanout; halcyond already relayouts from the
-compositor's display info, `usr/halcyond/src/main.rs:584-606`).
+## What changed outside Lictor
 
-Yours to decide, and I have no view I would hold against yours:
+- **`usr/lib/libhalcyon/src/display.rs` (new), pure and host-tested.** `fit_mode(host_w,
+  host_h, can)`: the host's size if `can` accepts it, else over 2, times 2, over 3, times 3,
+  over 4, times 4. A whole factor keeps the host's picture of the screen sharp, and the
+  scale needs nothing more: the same millimetres under half the pixels are half the DPI.
+  `Follow`: the timing of a follow as a small state machine over the count and a clock
+  (150 ms of quiet, once; a pinned mode stands).
+- **`usr/tapestryd/src/server.rs`**: the first mode at boot, `mode auto` and a followed
+  display event all take the fitted mode (`mode_in_bounds` and a probe allocation of the
+  full-screen surface are the `can`). `display_pump`, called once a pass after the fence
+  pump, hands the count to `Follow` and, when it says so, does what `mode auto` does. An explicit `mode W H` is judged as before and pins the mode until `mode
+  auto`. `docs/AURORA-CONFIG.md` 3.4 has the rule.
 
-1. **When to follow.** Only while the mode is `auto`? A person who set a fixed
-   mode presumably meant it.
-2. **Trains.** The app sends one `SetUIInfo` when a live resize ends, but
-   another host may send many. Follow the last, not each.
-3. **The trusted path.** Whether a mode change may happen while the SAK
-   screen is up, and what the seat's owner sees across it (I-27).
-4. **Tearing.** The switch crosses a scanout change; I-40's argument was made
-   for a fixed size.
-5. **A zero size.** `virtio_gpu_ui_info` clears the scanout's bit in
-   `enabled_output_bitmask` when width or height is 0, so `GET_DISPLAY_INFO`
-   can answer "disabled". The app will never send that; another host might.
+## The five questions this file put to you, as they were answered
 
-## What I will do meanwhile
+1. **When to follow.** From boot, and after `mode auto`. Not after an explicit `mode W H`:
+   a person who set a size meant it. A persisted fixed mode is pushed as `mode W H` at
+   startup, so it is pinned too.
+2. **Trains.** The count is followed once it has not moved for 150 ms; a train is one mode
+   change. The Mac app itself waits 250 ms after a resize ends, QEMU's own windows a
+   second.
+3. **The trusted path.** No mode changes while the trusted screen is up: the compositor's
+   pass returns at the seat's phase before it reaches the pump, and the count that arrived
+   with that reply is followed after the screen comes down. The trusted screen itself keeps
+   the size it was made at.
+4. **Tearing.** The switch is the existing mode change (`change_mode`, what `mode W H` has
+   always done): a new screen is bound before the old one is freed. Nothing new was
+   argued for I-40.
+5. **A zero size.** `query_display_info` answers None for a disabled scanout and the mode
+   stands (`not followed`).
 
-The app's side: `SetUIInfo` with the view's backing size and the millimetres
-for its scale, and a test flag that sends one on request so that a scenario of
-yours can call it. I will measure against your branch when there is one. If
-you would rather I wrote the Lictor change for your review, say so and I will;
-I will not touch Lictor without your word.
+- **`tools/interactive/ls-display-follow.exp`** (new) boots a device of 3456x2160 and then
+  resizes it as a VNC viewer does (`rfb_resize.py`, SetDesktopSize): no Mac app needed.
+
+## What I would want your eye on
+
+- The trusted screen knows no display scale. Its layout is in pixels, so on a display the
+  session runs at 200% (the Mac app's default window) its text is half the session's
+  physical size, and at a trusted screen of 3456x2160 beside a session of 1728x1080 the
+  panel is under a fifth of the width. Two ways I can see: bake the faces at 2x as well and
+  pick by the EDID, or make the trusted screen at the session's mode and let the device
+  scale it. Not done; nobody has looked at the trusted screen under the Mac app yet.
+- The trusted screen is made once. After a followed resize it is the boot's size, scaled
+  by the device. Following there too would mean a new `Screen` between episodes.
+- One read of `events_read` for each ticket under MSI-X. A vector of its own for the
+  configuration interrupt would remove it; `PciIrq::for_virtio` gives one vector to all.
+- The INTx branch (the ISR bit) is in no gate.
+- An event raised between the read and the clear is cleared uncounted. It is covered:
+  the count made by that call is followed by a question asked after both.
+
+## Measured
+
+Nothing yet: the boots follow this commit.

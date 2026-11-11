@@ -3,7 +3,7 @@ id: sub-tapestryd
 type: sub
 title: "tapestryd — the compositor: the weave lifecycle, the present engine, and the retire ordering"
 parent: moc-userspace
-code: [usr/tapestryd/src/storage.rs, usr/kaua-term-probe/src/storage.rs, tools/interactive/tapestry-storage.exp, usr/kaua-term-probe/src/seat_control.rs, usr/kaua-term-probe/src/admission.rs, tools/interactive/interaction-seat.exp, usr/tapestryd/src/seat_coordinator.rs, usr/tapestryd/src/interaction.rs, usr/tapestryd/src/server.rs, usr/tapestryd/src/gpu.rs, usr/tapestryd/src/pane.rs, usr/tapestryd/src/va.rs, usr/tapestryd/src/input.rs, usr/tapestryd/src/main.rs, usr/tapestryd/src/chords.rs, usr/tapestryd/src/keymap.rs, usr/tapestryd/Cargo.toml]
+code: [tools/interactive/ls-display-follow.exp, tools/interactive/rfb_resize.py, usr/tapestryd/src/storage.rs, usr/kaua-term-probe/src/storage.rs, tools/interactive/tapestry-storage.exp, usr/kaua-term-probe/src/seat_control.rs, usr/kaua-term-probe/src/admission.rs, tools/interactive/interaction-seat.exp, usr/tapestryd/src/seat_coordinator.rs, usr/tapestryd/src/interaction.rs, usr/tapestryd/src/server.rs, usr/tapestryd/src/gpu.rs, usr/tapestryd/src/pane.rs, usr/tapestryd/src/va.rs, usr/tapestryd/src/input.rs, usr/tapestryd/src/main.rs, usr/tapestryd/src/chords.rs, usr/tapestryd/src/keymap.rs, usr/tapestryd/Cargo.toml]
 audit: hard
 guarded-by: [inv-i40, inv-i5, inv-i34, inv-i1, inv-i45, inv-i9]
 validated-by: [spec-tapestry-storage, spec-tapestry-present, prose, gate-smp]
@@ -12,7 +12,7 @@ hazards: [haz-driver-panic-dos]
 abis: []
 design: ["docs/TAPESTRY.md", "docs/AURORA-CONFIG.md"]
 created: 2026-08-02
-updated: 2026-11-04
+updated: 2026-11-11
 ---
 ## Cooperative hidden storage (October 4)
 
@@ -119,6 +119,64 @@ an open startup contract issue. Evidence: Astra's
 ## Shared capacity
 
 The pane tree re-exports `libhalcyon::layout::MAX_PANES` (32), the same constant used for interaction controller capacity. No layout, tree capacity or wire value changes.
+
+## The display follows its host (2026-11-11)
+
+`docs/AURORA-CONFIG.md` 3.4 as amended that day. Three things take a mode from
+the size the host prefers, by one rule: the boot (`Comp::new`), `mode auto`,
+and a display event that is followed (`display_pump`, `follow_display`).
+
+**The rule** is `display::fit_mode` ([[sub-libhalcyon]]) with this compositor's
+own test of a size: `mode_in_bounds` (320x200 to 3840x2160, and three
+page-rounded buffers of a full-screen surface within the kernel's 64 MiB a
+weave) and `surface_can_be_made`, which makes that allocation and releases it.
+The mode that stands is taken as one that can be made. The host's size is the
+mode if it passes; else that size over 2, times 2, over 3, times 3, over 4,
+times 4, the first that passes. If none does, the boot takes 1024x768 and a
+later asking leaves the mode as it is (`tapestryd: no mode for a display of
+WxH; WxH stands`). An explicit `mode W H` is never fitted: `set_mode` judges
+it as it always did.
+
+Before this the boot took the host's size unchecked. With the device made
+3456x2160 the screen came up, every full-screen surface failed
+(`t_dma_create_weave(89579520) failed -1`), and there was no console and no
+session on it.
+
+**When a change is followed.** [[sub-lictor]] counts the device's display
+events and every reply of the broker carries the count. `display_pump` runs
+once a pass, after the fence pump, whose reply refreshed the count, and before
+the deferred event deliveries, which carry the CONFIGUREs a mode change queues.
+It hands the count and the monotonic clock to `display::Follow`, which answers
+`Ask` once the count has stood 150 ms, so a train of events is one mode change,
+and `Pinned` when an explicit `mode W H` was the last word (the verb calls
+`follow.pin()`; `mode auto` calls `unpin()` and asks at once). The pass
+returns at the seat's phase before it reaches the pump, so nothing is followed
+while the trusted screen is up. The count still arrives then, with
+`seat_state`'s reply, and the event is followed afterwards.
+
+**What following does.** `follow_display` asks the device for its display. No
+answer (a disabled output, a host that told 0x0) is `not followed` and the mode
+stands. Otherwise it fits, calls `change_mode` if the fitted mode is not the
+standing one, asks for the EDID again and derives the scale again, unless a
+verb's override stands. `change_mode` is the body `set_mode` had: the menu's
+card dismissed, a new screen allocated, held presents dropped, the scanout
+rebound to the new screen before the old one is freed, `reconcile()`. It now
+also runs from the pass, with no request in hand. Nothing in it reads a
+connection.
+
+**Lines.** `tapestryd: mode WxH for a display of WxH` when the fitted mode is
+not the host's size; `tapestryd: display event N: asking the host`, `... the
+mode is pinned and stands`, `... not followed (errno E)`.
+
+**Tests.** The rule and the timing are host tests in [[sub-libhalcyon]]. In a
+guest, `tools/interactive/ls-display-follow.exp` boots a device of 3456x2160
+and wants the mode 1728x1080 with the console drawn on it, then tells sizes as
+a VNC viewer does (`tools/interactive/rfb_resize.py`, SetDesktopSize) and wants
+the mode at 2000x1280, at half of 5120x2880, at the last of a train of three,
+and at 640x400, and wants a host of no size left unfollowed. Not reached by it:
+a pinned mode under an event (the two calls in the verbs), a follow across the
+trusted screen, and the scale a host's millimetres give (a VNC viewer tells
+none; measured with the Mac app, `docs/MAC-RUNNER.md` M-8).
 
 ## Purpose
 
@@ -2703,11 +2761,12 @@ only. The consequences, each handled rather than inherited:
   ALREADY `Composed`. Entering `Composed` is the exception, and it must be:
   the screen resource is not yet what the display shows, so it goes up whole
   before `set_scanout` binds it.
-- **A display mode change dismisses the card.** `set_mode` swaps in a fresh,
+- **A display mode change dismisses the card.** `change_mode` swaps in a fresh,
   zeroed screen; a frozen upload onto it would show nothing but the card, and
-  `fx` would name the old geometry. So `set_mode` calls
-  `menu_dismiss("mode")` after its validation and pre-flight and before the
-  new screen is built -- a modal ends there as it ends a divider drag.
+  `fx` would name the old geometry. So `change_mode` calls
+  `menu_dismiss("mode")` first, after the mode has been judged (by `set_mode`
+  for a size asked for, by the fit for a host's) and before the new screen is
+  built -- a modal ends there as it ends a divider drag.
 - **Effects are only ever laid over a REBUILT scene.** `menu_paint_effects`
   starts with `scene_restore()`. Two reasons, both measured from the code
   rather than supposed: on a MOVE (the same surface placed again) the buffer

@@ -1,0 +1,156 @@
+#!/usr/bin/expect -f
+# tools/interactive/ls-display-follow.exp -- a display that takes a mode for any
+# size its host has, and follows the host when that size changes
+# (AURORA-CONFIG.md section 3.4 as amended 2026-11-11).
+#
+# One boot, no login, any image: the witnesses are the compositor's own lines
+# on serial and the scanout QEMU dumps, and the surface on it is the console's.
+#
+#   the boot:  the device is made 3456x2160, full screen on a 16-inch MacBook
+#              Pro. Three buffers of a surface that size are 85 MiB against 64
+#              MiB a weave, so it cannot be a mode. Before the amendment the
+#              compositor started at it all the same and no surface could be
+#              made (`t_dma_create_weave(89579520) failed`). Now the first
+#              mode is half of it, 1728x1080, and the console is on it.
+#   follows:   a VNC viewer that resized its window tells QEMU a size
+#              (rfb_resize.py), and virtio-gpu raises its display event: the
+#              path a host window takes, without a window. The mode follows:
+#              to a size it can be (2000x1280), to half of one it cannot
+#              (5120x2880 -> 2560x1440), through a train of three to its last
+#              (1000x640), and down to 640x400.
+#   no size:   a host that tells 0x0 disables the output. The compositor asks,
+#              is told nothing, and the mode stands.
+#
+# NOT asserted: how many mode changes a train costs. Its sizes go out 20 ms
+# apart and the compositor waits for 150 ms of quiet, so it is one change
+# unless the host stalls the sender for longer than that; the rule is
+# libhalcyon's `display::Follow` and its host tests hold it to one. NOT
+# reached: a pinned mode (`mode W H` is the console renderer's, through its
+# settings panel, which persists it: ls-gfx-mode drives that), the trusted
+# screen across a follow, and the millimetres (a VNC viewer tells none, so
+# the scale is 100 throughout).
+#
+# HVF like its ls-gfx siblings.
+
+set ::env(THYLACINE_ACCEL) [expr {[info exists ::env(LS_CI_GFX_ACCEL)] ? $::env(LS_CI_GFX_ACCEL) : "hvf"}]
+set ::env(THYLACINE_GPU_RES) 3456x2160
+set ::env(THYLACINE_VNC_SOCKET) /tmp/ls-display-follow-[pid].sock
+set ::env(THYLACINE_DISPLAY) vnc-unix
+
+source [file join [file dirname [info script]] lib.exp]
+
+set repo $lc_repo
+set qmp [lc_qmp_sock]
+set ppm /tmp/ls-display-follow-[pid].ppm
+
+# The scanout's geometry from the PPM header ("P6\nW H\n255"), and whether the
+# picture has more than one colour in it: a screen with nothing drawn on it
+# has the right geometry too. The stale-file guard is load-bearing: a dump that
+# failed must never be answered from the one before.
+proc dims {} {
+    global repo qmp ppm
+    file delete -force $ppm
+    if {[catch {exec $repo/tools/screendump.sh -s $qmp -P $ppm}]} { return "" }
+    if {![file exists $ppm]} { return "" }
+    if {[catch {exec python3 -I -c {
+import re, sys
+d = open(sys.argv[1], 'rb').read()
+m = re.match(rb'P6\s+(\d+)\s+(\d+)\s+255\s', d)
+w, h = int(m.group(1)), int(m.group(2))
+px = d[m.end():]
+assert len(px) == w * h * 3, (w, h, len(px))
+print(w, h, len({px[i:i + 3] for i in range(0, len(px), 3 * 101)}))
+} $ppm} out]} { return "" }
+    return $out
+}
+proc wait_dims {want label} {
+    set d "(no dump)"
+    for {set i 0} {$i < 20} {incr i} {
+        set d [dims]
+        if {[lrange $d 0 1] eq $want && [lindex $d 2] > 1} {
+            lc_step "scanout $want, [lindex $d 2] colours in the sample ($label)"
+            return
+        }
+        after 700
+    }
+    lc_fail "the scanout never became $want with a picture on it ($label; last: width height colours = $d)"
+}
+proc tell {args} {
+    global repo
+    if {[catch {exec python3 -I $repo/tools/interactive/rfb_resize.py $::env(THYLACINE_VNC_SOCKET) {*}$args} out]} {
+        lc_fail "rfb_resize.py $args: $out"
+    }
+    lc_step "told: [string map [list "\n" "; "] $out]"
+}
+# Wait for a line of the compositor's, with the defect's own lines as failures.
+proc follow_expect {re what} {
+    global timeout
+    set timeout 30
+    expect {
+        -re $re { lc_step "saw: $what" }
+        -re {tapestryd: [^\r\n]*t_dma_create_weave\((\d+)\) failed[^\r\n]*} { lc_fail "a surface could not be allocated during '$what': $expect_out(0,string)" }
+        -re {tapestryd: mode rebind failed[^\r\n]*} { lc_fail "the scanout was not rebound during '$what'" }
+        -re {EXTINCTION:} { lc_extinction_fail "extinction during '$what'" }
+        timeout { lc_fail "timeout (30s) waiting for \[$re\] during '$what'" }
+        eof     { lc_fail "qemu exited during '$what'" }
+    }
+}
+
+# ---------- the boot: a mode for a host size that cannot be one ----------
+lc_boot
+set timeout $lc_boot_timeout
+set fitted 0
+set serving ""
+set prompt 0
+expect {
+    -re {tapestryd: mode 1728x1080 for a display of 3456x2160} { set fitted 1; if {$serving eq "" || !$prompt} { exp_continue } }
+    -re {tapestryd: serving /srv/tapestry \+ /srv/warp \((\d+x\d+)\)} { set serving $expect_out(1,string); if {!$fitted || !$prompt} { exp_continue } }
+    -ex "Thylacine login: " { set prompt 1; if {!$fitted || $serving eq ""} { exp_continue } }
+    -re {tapestryd: [^\r\n]*t_dma_create_weave\((\d+)\) failed[^\r\n]*} { lc_fail "a surface could not be allocated at the boot's mode: $expect_out(0,string) (fitted=$fitted serving=$serving)" }
+    -re {EXTINCTION:} { lc_extinction_fail "extinction during boot" }
+    timeout { lc_fail "the boot did not get to a fitted mode, a serving compositor and a login prompt (fitted=$fitted serving=$serving prompt=$prompt)" }
+    eof     { lc_fail "qemu exited during boot" }
+}
+if {$serving ne "1728x1080"} { lc_fail "the compositor serves $serving, not the fitted 1728x1080" }
+wait_dims "1728 1080" "the boot's fitted mode"
+lc_pass "display: a host of 3456x2160 boots at 1728x1080 with the console on it"
+
+# ---------- follows ----------
+tell 2000x1280
+follow_expect {tapestryd: display event \d+: asking the host} "the event is taken up"
+follow_expect {tapestryd: mode 1728x1080 -> 2000x1280 } "a size that can be a mode is the mode"
+wait_dims "2000 1280" "followed to 2000x1280"
+lc_pass "display: followed the host to 2000x1280"
+
+tell 5120x2880
+follow_expect {tapestryd: mode 2560x1440 for a display of 5120x2880} "a size that cannot be a mode is halved"
+follow_expect {tapestryd: mode 2000x1280 -> 2560x1440 } "the halved mode is taken"
+wait_dims "2560 1440" "followed to half of 5120x2880"
+lc_pass "display: a host of 5120x2880 is followed at 2560x1440"
+
+tell 0x0
+follow_expect {tapestryd: display event \d+: not followed} "a host with no size is not followed"
+wait_dims "2560 1440" "the mode stands"
+lc_pass "display: a host that tells no size leaves the mode standing"
+
+tell 800x600 900x700 1000x640 --gap-ms 20
+follow_expect {tapestryd: mode \d+x\d+ -> 1000x640 } "a train ends at its last size"
+wait_dims "1000 640" "followed a train to 1000x640"
+lc_pass "display: a train of three sizes ends at the last"
+
+tell 640x400
+follow_expect {tapestryd: mode 1000x640 -> 640x400 } "a small size is a mode"
+wait_dims "640 400" "followed to 640x400"
+lc_pass "display: followed the host down to 640x400"
+
+file delete -force $ppm
+catch {send -- "\001x"}
+set timeout 10
+expect {
+    eof     { lc_step "EOF clean" }
+    timeout { lc_step "EOF timeout (the kill below reaps qemu)" }
+}
+lc_vm_kill
+file delete -force $::env(THYLACINE_VNC_SOCKET)
+lc_pass "ls-display-follow: a fitted first mode, four follows and a refusal"
+exit 0

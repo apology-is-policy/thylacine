@@ -206,6 +206,21 @@ halcyond already relayouts live from the compositor's display info
 propagating the geometry. Lictor is co-owned by Astra via `docs/handoffs/` -- a
 coordination item, not a unilateral edit.
 
+**B5, as built (2026-11-11; the operator, with Astra away: agents may change Lictor, and
+leave her a note, `docs/handoffs/050`).** Lictor takes the device's events and counts the
+display ones: on the interrupt line the ISR byte's configuration bit says when to look; on
+MSI-X the configuration interrupt shares the queues' one vector, so `events_read` is read
+once for each interrupt ticket. Each is cleared as it is read. The count goes out on every
+reply the broker makes (`Stats.display_events`), so the compositor, which asks the broker
+something on every pass, needs no new wake. tapestryd follows a change of the count once it
+has stood 150 ms: it asks for the display's size and takes the mode fitted to it, then the
+EDID, then the scale (`docs/AURORA-CONFIG.md` 3.4, amended the same day). The fitted mode is
+the host's size, or that size over or times a whole number, the first that is within the
+mode's bounds and whose full-screen surface can be allocated; the same rule gives the first
+mode at boot. Lictor's own trusted screen is made once, at boot, by the same rule against its
+own limits (800x720 at least, 4096x2160 pixels at most), and no longer fails for a host of
+another size. An explicit `mode W H` pins the mode until `mode auto`.
+
 **B6. Frame pacing API.** `NSView.displayLink(target:selector:)` returns a `CADisplayLink`
 "in-sync with the display the view is on", macOS 14+ (Apple docs JSON, fetched 2026-11-10).
 `CVDisplayLink` is deprecated: `SDK:CoreVideo.framework/Headers/CVDisplayLink.h:51`
@@ -863,7 +878,7 @@ to print the ID registers from a scratch vCPU); it costs seconds per machine.
 - **Alpha (window, 2D, input, resize, clipboard, one shared folder).** A1: fork v11.1.3,
   headless build with hvf + dbus-display + virtfs + coreaudio + slirp; the in-kernel GIC
   boot (M-1). A2: the Rust app -- AppKit window, Metal layer, Unix.Map listener, keyboard/
-  tablet input, fullscreen, menus; the helper an XPC service from the start (vote M1). A3: resize + HiDPI via SetUIInfo (needs Lictor's re-probe). A4: the
+  tablet input, fullscreen, menus; the helper an XPC service from the start (vote M1). A3: resize + HiDPI via SetUIInfo (A3a, the app tells the size; A3b, the guest takes a mode for any size told and follows a change: B5 as built). A4: the
   virtio-serial guest driver + mount-on-fd + the app's 9P server with `snarf`, `display`,
   `power`, `session`, and one shared folder under `folders/` (vote M5). A5: packaging -- ad-hoc signed
   bundle, DMG, the Open Anyway walkthrough; clonefile first run. Exit: a stranger installs
