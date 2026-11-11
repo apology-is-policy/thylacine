@@ -15,7 +15,7 @@ validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/POUCH-DESIGN.md"]
 created: 2026-08-01
-updated: 2026-11-02
+updated: 2026-11-11
 ---
 ## Purpose
 
@@ -143,7 +143,10 @@ prover keeps the maps-row equality and adds `size >= 8 MiB`, a 4 MiB
 `volatile` frame touched at both ends (fatal under 1 MiB), and every worker's
 `---p` row of exactly its `guardsize` immediately below its `stackaddr` in
 `/proc/<pid>/maps` — the guard VMA exists; `/pouch-hello-guard` proves it
-faults ([[sub-pouch-mem]]).
+faults ([[sub-pouch-mem]]). Each worker takes the table with one `read`, not
+stdio: the kernel renders it afresh on every read and the other workers'
+stacks are mapped and unmapped meanwhile, so 1 KiB refills would stitch rows
+from different tables and could count a guard row twice or not at all.
 
 ## Data structures
 

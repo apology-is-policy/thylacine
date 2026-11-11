@@ -16,7 +16,7 @@ hazards: []
 abis: []
 design: ["docs/VIVARIUM.md", "docs/IMPERIUM-DESIGN.md section 11.3 item 10"]
 created: 2026-08-04
-updated: 2026-10-07
+updated: 2026-11-11
 ---
 ## Purpose
 
@@ -412,34 +412,40 @@ Linux virtualizes this with a pid namespace.
   — saw nothing. The lesson is specific: a resolution test and an
   enumeration test are different tests.
 
-- **The `/ctl/procs` read buffer is half the kernel's, and the comment
-  asserting they match is why nobody noticed.** The buffer is 2048 with
-  the comment *"matches the kernel's DEVCTL_READ_BUF"*; the kernel's is
-  **4096**. It was true when written — the constant went 512 → 2048 at
-  prowl-1, the diorama landed against 2048, and #210 lifted it to 4096 for
-  an unrelated instrument, a change with no reason to open this file.
+- **The `/ctl/procs` read window equals the kernel's buffer only because
+  two hand-kept constants agree, so the parse does not rely on it.** Both
+  consumers — enumeration, and the membership reader that also decides
+  per-pid existence — take the table with one read into `RENDER_MAX`
+  (4096), which is the kernel's `DEVCTL_READ_BUF` today. Nothing ties the
+  two. Until 2026-11-11 the window was 2048 under the comment *"matches
+  the kernel's DEVCTL_READ_BUF"*: true when written (the constant went
+  512 → 2048 at prowl-1 and the diorama landed against 2048), stale since
+  #210 lifted the kernel's to 4096 for an unrelated instrument.
 
-  Both consumers ride that window, and the second is the one that matters:
-  the membership reader feeds the container's enumeration *and* per-pid
-  existence. The arithmetic is exact rather than estimated — 29 bytes of
-  fixed separators plus eight fields makes the shortest possible row 43
-  bytes against 1977 usable, an absolute ceiling of 45 rows — so
-  `VIV_PROCS_MAX = 64`, the declared capacity of both the pair table and
-  the member set, is **unreachable by arithmetic**, and would be reachable
-  at the kernel's actual size. The stale mirror is what keeps the declared
-  capacity fictional.
+  A window smaller than the table ends in the middle of a row, and a cut
+  row is not a lost row. The parsers took every newline-separated piece,
+  the unterminated tail included, so `57    41    sh ...` cut to `57    4`
+  read as pid 57 with parent 4; with 4 the runner or a member, a host pid
+  joined the member set and resolved in the container's `/proc`. That is a
+  visibility breach, not an authority one — the kernel still gates every
+  native read. This dossier used to argue it could not happen ("a lost
+  row can only narrow the set"): the kernel does stop at a whole row, but
+  within its own buffer, not the reader's smaller one. The parsers now
+  take only rows that end in a newline (`whole_lines`), so a cut by either
+  buffer loses rows and never invents one, whatever the two constants
+  become; the selftest carries the cut-row vector (audit round 17 F2).
 
-  **The security claim survives**: the kernel callback stops at first
-  overflow and membership only ever adds pids present in the snapshot, so
-  a lost row can only *narrow* the set. "Never the reverse" is correct.
-  The correctness consequence is the worse one, because the kernel's
+  What remains is the correctness consequence of the kernel's own cut. Its
   iteration is a **pre-order DFS from kproc**, not a pid scan: the
-  container's rows sit wherever the runner sits in the tree, so a cut
-  landing before that subtree empties the member set entirely — the
-  container's `/proc` shows nothing, including its own siblings, while
-  `/proc/self` keeps working. Task #182.
+  container's rows sit wherever the runner sits in the tree, so a table
+  that overflows 4096 bytes before that subtree empties the member set
+  entirely — the container's `/proc` shows nothing, including its own
+  siblings, while `/proc/self` keeps working. At 4096 the shortest row
+  (43 bytes) allows about 93 rows, so `VIV_PROCS_MAX = 64`, the declared
+  capacity of the pair table and the member set, is now a bound that can
+  be reached; it fails closed. Task #182.
 
-  **It came with its own control**, 758 lines away in the same file and in
+  **The stale comment came with its own control**, in the same file and in
   the identical idiom: `// matches the kernel's DEVPROC_READ_BUF`, which is
   **correct** — that constant has never moved. Nothing about the writing
   distinguishes the two. The difference is entirely external, which is the

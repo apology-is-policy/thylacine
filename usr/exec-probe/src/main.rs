@@ -331,14 +331,11 @@ fn proc_file(pid: i64, leaf: &[u8]) -> Option<([u8; 2048], usize)> {
     };
     if fd < 0 { return None; }
     let mut buf = [0u8; 2048];
-    let mut n = 0usize;
-    while n < buf.len() {
-        let r = unsafe { libthyla_rs::t_read(fd, buf[n..].as_mut_ptr(), buf.len() - n) };
-        if r <= 0 { break; }
-        n += r as usize;
-    }
+    // One read: the kernel renders status and sched afresh on each read, so a
+    // second read would continue a different rendering.
+    let r = unsafe { libthyla_rs::t_read(fd, buf.as_mut_ptr(), buf.len()) };
     let _ = unsafe { libthyla_rs::t_close(fd) };
-    Some((buf, n))
+    Some((buf, if r > 0 { r as usize } else { 0 }))
 }
 
 fn field_after(text: &[u8], key: &[u8]) -> i64 {

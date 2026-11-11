@@ -139,22 +139,17 @@ fn field(buf: &[u8], key: &[u8]) -> Option<u64> {
     None
 }
 
-// As much of a file as `buf` holds, read fresh.
+// As much of a /ctl or /proc file as `buf` holds, in ONE read: the kernel renders
+// such a file afresh on each read, so a second read would continue a different
+// rendering.
 fn read_path(path: &[u8], buf: &mut [u8]) -> Option<usize> {
     let fd = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, path.as_ptr(), path.len(), T_OREAD) };
     if fd < 0 {
         return None;
     }
-    let mut total = 0usize;
-    while total < buf.len() {
-        let n = unsafe { t_read(fd, buf[total..].as_mut_ptr(), buf.len() - total) };
-        if n <= 0 {
-            break;
-        }
-        total += n as usize;
-    }
+    let n = unsafe { t_read(fd, buf.as_mut_ptr(), buf.len()) };
     let _ = unsafe { t_close(fd) };
-    Some(total)
+    Some(if n > 0 { n as usize } else { 0 })
 }
 
 // A file of this Proc's /proc/<pid> directory (devproc names the pid, Plan 9's

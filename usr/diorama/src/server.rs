@@ -695,7 +695,9 @@ impl Render {
 // holds no authority that would show it a code address (`deputy_check`).
 // ---------------------------------------------------------------------------
 
-/// Read a whole native file into `out`. Returns the byte count, or None if the
+/// Read a native file into `out` with ONE read: every file read here is one the
+/// kernel renders afresh on each read (/ctl, /proc/<pid>), so a second read
+/// would continue a different rendering. Returns the byte count, or None if the
 /// file is unreachable -- which is a legitimate outcome (a nameless Proc's
 /// /proc/<pid>/exe is EMPTY, not an error), so callers degrade rather than fail.
 fn read_native(path: &[u8], out: &mut [u8]) -> Option<usize> {
@@ -703,19 +705,9 @@ fn read_native(path: &[u8], out: &mut [u8]) -> Option<usize> {
     if fd < 0 {
         return None;
     }
-    let mut total = 0usize;
-    loop {
-        if total >= out.len() {
-            break;
-        }
-        let n = unsafe { libthyla_rs::t_read(fd, out.as_mut_ptr().add(total), out.len() - total) };
-        if n <= 0 {
-            break;
-        }
-        total += n as usize;
-    }
+    let n = unsafe { libthyla_rs::t_read(fd, out.as_mut_ptr(), out.len()) };
     let _ = unsafe { t_close(fd) };
-    Some(total)
+    Some(if n > 0 { n as usize } else { 0 })
 }
 
 /// Read a native file into `out` starting at byte `off`. Same degrade-to-None
@@ -1037,8 +1029,8 @@ pub fn parse_cpu_cols(text: &[u8], want: u64) -> CpuCols {
     out
 }
 
-/// A /ctl/cpu render is bounded by the kernel's own 2 KiB leaf buffer; the
-/// widened V-4c-2b row is ~90 B x <= 8 CPUs plus two header lines.
+/// The window for a /ctl/cpu render: the widened V-4c-2b row is ~90 B x <= 8
+/// CPUs plus two header lines. (The kernel's leaf buffer is 4 KiB.)
 const CTL_CPU_MAX: usize = 2048;
 
 /// CPU `want`'s cumulative idle-park ns (column 1): Some(Some(ns)) measured,
