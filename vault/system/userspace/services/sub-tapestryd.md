@@ -149,7 +149,8 @@ the deferred event deliveries, which carry the CONFIGUREs a mode change queues.
 It hands the count and the monotonic clock to `display::Follow`, which answers
 `Ask` once the count has stood 150 ms, so a train of events is one mode change,
 and `Pinned` when an explicit `mode W H` was the last word (the verb calls
-`follow.pin()`; `mode auto` calls `unpin()` and asks at once). The pass
+`follow.pin()`; `mode auto` asks at once and calls `unpin()` if that asking
+succeeded, so a verb that is refused changes nothing). The pass
 returns at the seat's phase before it reaches the pump, so nothing is followed
 while the trusted screen is up. The count still arrives then, with
 `seat_state`'s reply, and the event is followed afterwards.

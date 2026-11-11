@@ -19340,9 +19340,14 @@ impl Conn {
         if s == "mode auto" {
             // Re-probe the host's preferred rect and take the mode for it
             // (base virtio-gpu reports one rect, not a mode list), and
-            // follow the host's display from here on.
-            comp.follow.unpin();
-            return comp.follow_display();
+            // follow the host's display from here on. A verb that is
+            // refused changes nothing: a pinned mode stays pinned, as the
+            // setting its sender then keeps says it is.
+            let r = comp.follow_display();
+            if r.is_ok() {
+                comp.follow.unpin();
+            }
+            return r;
         }
         if let Some(rest) = s.strip_prefix("mode ") {
             let mut it = rest.split_ascii_whitespace();

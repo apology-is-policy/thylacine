@@ -63,8 +63,8 @@ resized or moved to a display with another scale.
 - **`usr/tapestryd/src/server.rs`**: the first mode at boot, `mode auto` and a followed
   display event all take the fitted mode (`mode_in_bounds` and a probe allocation of the
   full-screen surface are the `can`). `display_pump`, called once a pass after the fence
-  pump, hands the count to `Follow` and, when it says so, does what `mode auto` does. An explicit `mode W H` is judged as before and pins the mode until `mode
-  auto`. `docs/AURORA-CONFIG.md` 3.4 has the rule.
+  pump, hands the count to `Follow` and, when it says so, does what `mode auto` does. An explicit `mode W H` is judged as before and pins the mode until a `mode
+  auto` that is accepted. `docs/AURORA-CONFIG.md` 3.4 has the rule.
 
 ## The five questions this file put to you, as they were answered
 

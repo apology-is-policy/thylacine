@@ -93,8 +93,8 @@ impl Follow {
         self.pinned = true;
     }
 
-    /// The mode follows the host again. The caller asks the host now; an
-    /// event still waiting out its quiet time is asked for again when it
+    /// The mode follows the host again. The caller has just asked the host;
+    /// an event still waiting out its quiet time is asked for again when it
     /// ends, which costs a question and changes nothing.
     pub fn unpin(&mut self) {
         self.pinned = false;
@@ -338,7 +338,7 @@ mod tests {
         assert_eq!(f.step(2, 1_000), Step::Wait);
         assert_eq!(f.step(2, 1_000 + QUIET_MS), Step::Pinned);
         // Following again: the event let stand is not asked for by itself
-        // (the caller asks as it unpins), the next one is.
+        // (the caller asked before it unpinned), the next one is.
         f.unpin();
         assert_eq!(f.step(2, 5_000), Step::Wait);
         assert_eq!(f.step(3, 6_000), Step::Wait);

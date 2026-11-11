@@ -309,8 +309,9 @@ things):
 
    An explicit `mode W H` is NOT fitted: it is judged as before, refused
    if it cannot be a mode, and it PINS the mode. A pinned mode stands
-   whatever the host's window does, until `mode auto`, which also resumes
-   the following. (A persisted fixed mode is pushed as `mode W H` at
+   whatever the host's window does, until a `mode auto` that is accepted,
+   which also resumes the following (one that is refused changes
+   nothing). (A persisted fixed mode is pushed as `mode W H` at
    startup, so it is pinned; a persisted `auto` pushes nothing, and the
    boot's fitted mode follows the host.) No mode changes while the trusted
    screen is up: an event that arrives then is followed after it comes
