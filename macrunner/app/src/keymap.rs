@@ -96,16 +96,35 @@ pub fn qnum(vk: u16) -> Option<u32> {
         0x6d => 0x44,
         0x67 => 0x57,
         0x6f => 0x58, // F7..F12
+        // The key a PC keyboard labels Insert. QEMU's table calls it Help (0xf5), which no guest binds.
         0x72 => 0xd2,
         0x73 => 0xc7,
         0x74 => 0xc9,
         0x75 => 0xd3,
         0x77 => 0xcf,
-        0x79 => 0xd1, // Help(Insert) Home PgUp Del End PgDn
+        0x79 => 0xd1, // Insert Home PgUp Del End PgDn
         0x7b => 0xcb,
         0x7c => 0xcd,
         0x7d => 0xd0,
         0x7e => 0xc8, // Left Right Down Up
+        0x69 => 0x5d,
+        0x6b => 0x5e,
+        0x71 => 0x5f,
+        0x6a => 0x55,
+        0x40 => 0x83,
+        0x4f => 0xf7,
+        0x50 => 0x84,
+        0x5a => 0x5a, // F13..F20
+        0x51 => 0x59,
+        0x6e => 0xdd, // keypad =, Menu
+        0x5d => 0x7d,
+        0x5e => 0x73,
+        0x5f => 0x5c,
+        0x66 => 0x71,
+        0x68 => 0x72, // JIS: Yen, Underscore, keypad comma, Eisu, Kana
+        0x48 => 0xb0,
+        0x49 => 0xae,
+        0x4a => 0xa0, // Volume up, down, mute: only a keyboard that sends them as keys
         _ => return None,
     })
 }
@@ -134,7 +153,24 @@ mod tests {
                 }
             }
         }
-        assert_eq!(seen.len(), 101);
+        assert_eq!(seen.len(), 119);
+    }
+    #[test]
+    fn the_keys_with_a_prefix_carry_the_high_bit() {
+        // Up, left Command, Insert, Menu, right Control, keypad Enter: e0-prefixed in set 1.
+        for (vk, q) in [
+            (0x7e, 0xc8),
+            (0x37, 0xdb),
+            (0x72, 0xd2),
+            (0x6e, 0xdd),
+            (0x3e, 0x9d),
+            (0x4c, 0x9c),
+        ] {
+            assert_eq!(qnum(vk), Some(q), "vk {vk:#x}");
+        }
+        // And two that are not: F13, keypad =.
+        assert_eq!(qnum(0x69), Some(0x5d));
+        assert_eq!(qnum(0x51), Some(0x59));
     }
     #[test]
     fn the_letters_land_on_their_rows() {

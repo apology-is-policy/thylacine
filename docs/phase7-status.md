@@ -3365,7 +3365,9 @@ Tests: 2447. Leases (`aux-gate/macrunner/`): m5, witness 39dbbf6c8f92 ends in `d
 
 Branch aux-3-mac, after 17320343d: f003526d8 (`THYLACINE_DISPLAY=dbus` and `=app` in `tools/run-vm.sh`: `-display dbus,p2p=on`, `gpu-mmio0` dropped so that gpu0 is console 0; `app` also emits `thylacine.display=gpu`) and the commit that carries this section: `macrunner/app` (crate `thylacine-mac`), a window that shows gpu0 through a private D-Bus connection to QEMU and sends keys and the pointer back (`docs/MAC-RUNNER.md` 4.2, 4.5; dossier `sub-macrunner-app`, change note `chg-2026-11-11-aux-mac-app`).
 
-Tests: the crate's 8 unit tests, and `macrunner/app/test/headless.sh` (gate note `gate-macrunner-headless`): on both pixel paths the pipeline's 1:1 output is QEMU's screendump byte for byte and 22 scripted events arrive as scripted; green on QEMU 11.1.3 and 10.0.2, macOS 27.2.1; three controls red as expected. The kernel suite is unchanged by these commits (no kernel or userspace source moved) and was not re-run.
+Then, the same day: handoff 050 (to Astra: Lictor follows `VIRTIO_GPU_EVENT_DISPLAY`), and a commit that brings the key table to 119 keys (checked key by key against QEMU 11.1.3's generated tables: one deliberate difference, Help sends Insert), bounds the attach at 10 s, and sends adjacent pointer positions as one.
+
+Tests: the crate's 10 unit tests, and `macrunner/app/test/headless.sh` (gate note `gate-macrunner-headless`): on both pixel paths the pipeline's 1:1 output is QEMU's screendump byte for byte and 24 scripted events arrive as scripted; green on QEMU 11.1.3 and 10.0.2, macOS 27.2.1; three controls red as expected. The kernel suite is unchanged by these commits (no kernel or userspace source moved) and was not re-run.
 
 Audit: the surface has a row in `docs/AUDIT-TRIGGERS.md`; its first round has NOT run. Four defects were found by reading the source before it landed and are fixed in this commit (zero or oversized frame dimensions, a map longer than its file, a frame lost without a drawable, a wheel notch per trackpad event).
 

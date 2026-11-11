@@ -4,7 +4,7 @@
 # sent in the messages) two things must hold:
 #   picture  what the Metal pipeline makes of the scanout at 1:1, read back, is byte-identical to QEMU's
 #            own screendump of it;
-#   input    22 scripted AppKit events reach QEMU as exactly the expected run of keys and pointer moves
+#   input    24 scripted AppKit events reach QEMU as exactly the expected run of keys and pointer moves
 #            (its dbus_kbd_* / dbus_mouse_* trace): a repeat, a modifier, keys released when the window
 #            loses them, a late key-up that must send nothing, positions through the letterbox, a move
 #            over the bar that must send nothing, and a key-up under Command.
@@ -24,7 +24,7 @@ app=${THYLACINE_MAC_APP:-$crate/target/release/thylacine-mac}
 "$qemu" -display help 2>/dev/null | grep -qw dbus || { echo "SKIP: $qemu has no D-Bus display"; exit 77; }
 [ -x "$app" ] || { echo "FAIL: no app at $app (cargo build --release in $crate)"; exit 1; }
 
-want='kbd_press 30;kbd_release 30;kbd_press 200;kbd_release 200;kbd_press 42;kbd_release 42;kbd_press 30;kbd_press 30;kbd_release 30;kbd_press 31;kbd_release 31;mouse_set_pos x=320, y=240;mouse_set_pos x=10, y=10;mouse_press b2;mouse_set_pos x=10, y=10;mouse_release b2;kbd_press 32;kbd_release 32;kbd_press 219;kbd_press 32;kbd_release 32;kbd_release 219;'
+want='kbd_press 30;kbd_release 30;kbd_press 200;kbd_release 200;kbd_press 42;kbd_release 42;kbd_press 30;kbd_press 30;kbd_release 30;kbd_press 31;kbd_release 31;mouse_set_pos x=320, y=240;kbd_press 33;kbd_release 33;mouse_set_pos x=10, y=10;mouse_press b2;mouse_set_pos x=10, y=10;mouse_release b2;kbd_press 32;kbd_release 32;kbd_press 219;kbd_press 32;kbd_release 32;kbd_release 219;'
 
 qp=""; ap=""; wd=""
 stop() { for p in $wd $ap $qp; do kill "$p" 2>/dev/null; done; }
@@ -70,7 +70,7 @@ PY
     fi
     got=$(grep 'dbus_kbd\|dbus_mouse' trace.log | sed 's/dbus_//; s/keycode //; s/button /b/' | tr '\n' ';')
     if [ "$got" = "$want" ]; then
-        echo "$name: input arrived as scripted (22 events)"
+        echo "$name: input arrived as scripted (24 events)"
     else
         echo "$name: FAIL: input differs"; echo "  got:  $got"; echo "  want: $want"; rc=1
     fi

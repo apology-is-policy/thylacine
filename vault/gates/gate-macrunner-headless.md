@@ -2,7 +2,7 @@
 id: gate-macrunner-headless
 type: gate
 title: "The Mac app's headless test"
-proves: "That the app's whole display path short of the panel is exact, and that its input path is exact: on each pixel path (the scanout mapped from QEMU's memory; pixels sent in the D-Bus messages) the Metal pipeline's 1:1 output is byte-identical to QEMU's own screendump, and 22 scripted AppKit events reach QEMU as exactly the expected run of key and pointer events."
+proves: "That the app's whole display path short of the panel is exact, and that its input path is exact: on each pixel path (the scanout mapped from QEMU's memory; pixels sent in the D-Bus messages) the Metal pipeline's 1:1 output is byte-identical to QEMU's own screendump, and 24 scripted AppKit events reach QEMU as exactly the expected run of key and pointer events."
 blind-to: "A guest: QEMU is paused before its first instruction, so the picture is QEMU's 640x480 grey-on-black placeholder -- no colour (channel order is not shown), no damage after the first frame (partial uploads and in-band Update blits never run), no resize. The panel: the comparison reads the pipeline's output back, not the glass, and a display that is asleep presents nothing. The scroll wheel. Real key events from the window server (the script calls sendEvent on the window and on NSApplication)."
 invocation: "macrunner/app/test/headless.sh (THYLACINE_QEMU, THYLACINE_MAC_APP); about 12 s; a window opens twice for 4 s without taking focus; exit 77 off macOS or when QEMU has no D-Bus display"
 created: 2026-11-11
@@ -21,7 +21,8 @@ line names the pixel path the leg is for.
 
 The script: a key, an arrow (an `e0` code), Shift through `flagsChanged`, a
 repeat, a key held while the window loses the keys and released late (the late
-key-up must send nothing), the middle of the view and guest pixel (10, 10)
+key-up must send nothing), the middle of the view, a key (two adjacent
+positions may be sent as one, and the script wants both), guest pixel (10, 10)
 through the letterbox, a move over the bar (must send nothing), and Command-D
 through `NSApplication` (the key-up AppKit keeps).
 
@@ -37,6 +38,9 @@ Evidence stays in `build/macrunner-app-test/<leg>/`.
 - The left click of the script is absent from the expected sequence on
   purpose: the window is not active, and AppKit keeps the activating click.
   With `acceptsFirstMouse:` answering YES it arrives.
+- A monitor socket that accepts and never answers: the app exits 1 after 10 s
+  with the monitor's path in the message (2026-11-11; before the timeout it
+  waited for ever). Not a leg of the script.
 - It did not find, and cannot find, the four defects a reading of the source
   found on 2026-11-11 (a frame of zero or oversized dimensions, a map longer
   than its file, a frame lost when the layer had no drawable, a notch per

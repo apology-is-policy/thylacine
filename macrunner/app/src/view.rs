@@ -684,6 +684,9 @@ impl GuestView {
         mouse(NSEventType::MouseMoved, mid);
         mouse(NSEventType::LeftMouseDown, mid);
         mouse(NSEventType::LeftMouseUp, mid);
+        // A key between the two positions: adjacent positions may be sent as one, and the test wants both.
+        key(NSEventType::KeyDown, 0x03, none, false); // F
+        key(NSEventType::KeyUp, 0x03, none, false);
         let corner = at(10.5, 10.5);
         mouse(NSEventType::RightMouseDown, corner);
         mouse(NSEventType::RightMouseUp, corner);

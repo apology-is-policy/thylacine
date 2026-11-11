@@ -47,7 +47,10 @@ between. It does not start QEMU yet: it attaches to one that runs with
   a D-Bus error, and a refused map makes QEMU send the pixels in its messages
   instead.
 - **Keys** go by position: the macOS virtual key code to QEMU's `qnum`
-  (`keymap.rs`, 101 keys). Modifiers come from `flagsChanged`; Caps Lock is a
+  (`keymap.rs`, 119 keys: every key QEMU's own table knows for a Mac but `fn`,
+  which has no `qnum`). One key departs from that table on purpose: the Help
+  position sends Insert, as a PC keyboard labels it. Modifiers come from
+  `flagsChanged`; Caps Lock is a
   press and a release per toggle. Every key the guest saw go down is released
   when the window stops being the key window.
 - **The pointer** is absolute, in scanout pixels; a position over the letterbox
@@ -125,7 +128,7 @@ Metal objects, the texture and the sizes it was made for.
   that memory only through a raw pointer given to Metal, never through a Rust
   reference.
 - The input queue is an unbounded channel from the main thread to the input
-  thread.
+  thread, which sends a run of adjacent pointer positions as its last one.
 
 ## Invariants enforced
 
@@ -140,7 +143,10 @@ app's own defence against a QEMU that sends something wrong.
 
 ## Error paths
 
-- No QMP, no D-Bus display, no Metal device: a message and exit 1.
+- No QMP, no D-Bus display, no Metal device: a message and exit 1. A monitor
+  or a display connection that does not answer within 10 s is the same
+  (`ATTACH_TIMEOUT`): QEMU answers both from its main loop, and one that is
+  hung never would.
 - A map that is refused is logged and QEMU falls back to sending pixels.
 - QEMU going away is not handled yet: the input thread stops at its first I/O
   error, the display thread stays parked, and the window keeps its last frame.
@@ -174,8 +180,9 @@ the texture, and to the bookkeeping of held keys (a key left down in the guest).
   and stopping QEMU, the XPC helper, the 9P server. `MouseSet` and
   `CursorDefine` are ignored: Halcyon draws its own pointer, and the host's
   arrow is not hidden over the view yet.
-- **Pointer motion is not coalesced.** If QEMU stalls, moves queue without
-  bound and are replayed afterwards.
+- **The input queue has no bound.** Adjacent pointer positions are sent as
+  one (`next_input`), so a stalled QEMU costs one stale position, not
+  thousands; keys and buttons behind it still queue and are replayed.
 - **The wheel has no end-to-end test.** The notch arithmetic has unit tests;
   nothing drives a scroll event through the window.
 - **Nobody has compared the glass with the guest.** The test compares the

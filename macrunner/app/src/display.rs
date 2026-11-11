@@ -8,6 +8,7 @@ use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
+use std::time::Duration;
 use zbus::Fd;
 
 const CONSOLE: &str = "/org/qemu/Display1/Console_0";
@@ -16,6 +17,8 @@ pub const PIXMAN_X8R8G8B8: u32 = 0x2002_0888;
 pub const PIXMAN_A8R8G8B8: u32 = 0x2002_8888;
 // Metal's largest 2D texture on Apple silicon: a scanout beyond it cannot be shown.
 const MAX_SIDE: u32 = 16384;
+// QEMU answers QMP and the display's first calls from its main loop; one that is hung never does.
+const ATTACH_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct Region {
     ptr: *mut u8,
@@ -134,7 +137,7 @@ pub struct Display {
     pub input: mpsc::Sender<Input>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum Input {
     Key { qnum: u32, down: bool },
     Abs { x: u32, y: u32 },
@@ -379,7 +382,21 @@ fn qmp_cmd(
 
 // Hand QEMU one end of a socket pair over QMP and make it a display client; returns our end.
 fn attach(qmp_path: &str) -> std::io::Result<UnixStream> {
+    attach_qmp(qmp_path).map_err(|e| {
+        let why = match e.kind() {
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut => {
+                format!("no answer in {} s", ATTACH_TIMEOUT.as_secs())
+            }
+            _ => e.to_string(),
+        };
+        std::io::Error::other(format!("QEMU's monitor at {qmp_path}: {why}"))
+    })
+}
+
+fn attach_qmp(qmp_path: &str) -> std::io::Result<UnixStream> {
     let w = UnixStream::connect(qmp_path)?;
+    w.set_read_timeout(Some(ATTACH_TIMEOUT))?;
+    w.set_write_timeout(Some(ATTACH_TIMEOUT))?;
     let mut r = BufReader::new(w.try_clone()?);
     let mut greeting = String::new();
     r.read_line(&mut greeting)?;
@@ -426,6 +443,20 @@ async fn serve(
         .build()
         .await?;
     Ok((conn, lconn))
+}
+
+// The next event to send, given `first` and whatever is already queued behind it. Of a run of pointer
+// positions only the last is worth a call: the guest wants where the pointer is, not where it was while
+// QEMU was busy. An event of another kind ends the run and is handed back for the next turn.
+fn next_input(first: Input, mut more: impl FnMut() -> Option<Input>) -> (Input, Option<Input>) {
+    let mut ev = first;
+    while matches!(ev, Input::Abs { .. }) {
+        match more() {
+            Some(next @ Input::Abs { .. }) => ev = next,
+            other => return (ev, other),
+        }
+    }
+    (ev, None)
 }
 
 fn send_input(conn: &zbus::Connection, ev: Input) -> zbus::Result<()> {
@@ -490,13 +521,19 @@ pub fn connect(qmp_path: &str) -> Result<Display, Box<dyn std::error::Error>> {
                 }
             })
         })?;
-    let conn = rx.recv()??;
+    let conn = match rx.recv_timeout(ATTACH_TIMEOUT) {
+        Ok(r) => r?,
+        Err(_) => return Err("QEMU did not answer on its display connection".into()),
+    };
     // Input has a thread of its own so that the window's thread never waits for QEMU.
     let (itx, irx) = mpsc::channel::<Input>();
     std::thread::Builder::new()
         .name("input".into())
         .spawn(move || {
-            for ev in irx {
+            let mut held_back = None;
+            while let Some(first) = held_back.take().or_else(|| irx.recv().ok()) {
+                let (ev, rest) = next_input(first, || irx.try_recv().ok());
+                held_back = rest;
                 if let Err(e) = send_input(&conn, ev) {
                     if matches!(e, zbus::Error::InputOutput(_)) {
                         break;
@@ -513,8 +550,46 @@ pub fn connect(qmp_path: &str) -> Result<Display, Box<dyn std::error::Error>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{geometry, Rect, Region, MAX_SIDE};
+    use super::{geometry, next_input, Input, Rect, Region, MAX_SIDE};
     use std::os::fd::AsFd;
+
+    #[test]
+    fn of_a_run_of_positions_the_last_is_sent() {
+        let abs = |x| Input::Abs { x, y: 7 };
+        let key = Input::Key {
+            qnum: 30,
+            down: true,
+        };
+        let mut q: std::collections::VecDeque<Input> = [abs(2), abs(3), key, abs(4), abs(5)].into();
+        // Three positions, then a key: the last position goes out and the key is handed back.
+        let (ev, rest) = next_input(abs(1), || q.pop_front());
+        assert_eq!(ev, abs(3));
+        assert_eq!(
+            rest,
+            Some(Input::Key {
+                qnum: 30,
+                down: true
+            })
+        );
+        // The key is sent as it is, and nothing behind it is looked at.
+        let (ev, rest2) = next_input(rest.unwrap(), || q.pop_front());
+        assert_eq!(
+            ev,
+            Input::Key {
+                qnum: 30,
+                down: true
+            }
+        );
+        assert_eq!(rest2, None);
+        assert_eq!(q.len(), 2);
+        // A run that ends with the queue: the last position, nothing handed back.
+        let first = q.pop_front().unwrap();
+        let (ev, rest) = next_input(first, || q.pop_front());
+        assert_eq!(ev, abs(5));
+        assert_eq!(rest, None);
+        // A single position with nothing behind it is itself.
+        assert_eq!(next_input(abs(9), || None), (abs(9), None));
+    }
 
     #[test]
     fn a_scanout_has_a_size_that_can_be_shown() {
