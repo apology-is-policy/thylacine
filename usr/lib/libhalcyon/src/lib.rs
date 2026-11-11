@@ -15,6 +15,7 @@ extern crate alloc;
 
 pub mod carve;
 pub mod cursor;
+pub mod display;
 pub mod instrument;
 pub mod interaction_client;
 pub mod interaction_control;

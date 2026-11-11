@@ -125,6 +125,7 @@ const PRESENT_BURST_WINDOW_MS: u64 = 250;
 const PRESENT_BURST_MIN: u32 = 4;
 
 use tapestryd::chords::{ChordAction, Chords};
+use libhalcyon::display::{self, Follow};
 use libhalcyon::scale;
 use libhalcyon::theme::Metrics;
 use crate::gpu::{failure_cause, Engine, FailureCause, FenceTag, FencedErr, Gpu};
@@ -1492,10 +1493,6 @@ const WEAVE_MAX_SIZE: u64 = 64 * 1024 * 1024;
 /// The mode a display starts at when its host prefers a size that no whole
 /// number takes to one that can be made.
 const MODE_DEFAULT: (u32, u32) = (1024, 768);
-/// How long the host's display must have stood since it last changed before
-/// the mode follows it. Each size followed is a new screen, a reweave of
-/// every surface and a repaint by every client.
-const DISPLAY_QUIET_MS: u64 = 150;
 
 /// The bytes of one fullscreen client surface at `w x h`: WEAVE_SLOTS
 /// page-rounded buffers, as `alloc_weave` sizes it.
@@ -1647,11 +1644,7 @@ pub struct Comp {
     /// The mode follows the host's display: so from boot, until an explicit
     /// `mode W H` pins one (which then stands whatever the host's window
     /// does); `mode auto` follows again.
-    follow_host: bool,
-    /// `gpu.display_events` as of the last look, and when it last moved
-    /// (None once that change has been followed, or let stand).
-    display_seen: u32,
-    display_changed: Option<Instant>,
+    follow: Follow,
     /// HALCYON-SCALE 4: the display scale in percent (100/125/150/175/200)
     /// -- derived from the EDID at boot and on `mode auto`, overridden by
     /// the `scale` verb / chords; published as `scale <pct>` in the ctl.
@@ -2598,7 +2591,7 @@ impl Comp {
         // cannot be made would come up with a screen and no session on it,
         // so the first mode is found as `mode auto` finds one.
         let host = (gpu.width, gpu.height);
-        let first = scale::fit_mode(host.0, host.1, |w, h| {
+        let first = display::fit_mode(host.0, host.1, |w, h| {
             mode_in_bounds(w, h) && surface_can_be_made(w, h)
         })
         .unwrap_or(MODE_DEFAULT);
@@ -2630,12 +2623,10 @@ impl Comp {
         say!("tapestryd: scale {} ({})", scale, src);
         Comp {
             gpu,
-            follow_host: true,
-            // Not the broker's count as it is now: an event it counted since its own
-            // start may be newer than the size it started with, which is the size
-            // this display starts from. A count that is not zero is news.
-            display_seen: 0,
-            display_changed: None,
+            // Not seeded with the broker's count as it is now: an event it
+            // counted since its own start may be newer than the size it started
+            // with, which is the size this display starts from.
+            follow: Follow::new(),
             scale,
             scale_override: None,
             declared,
@@ -6161,7 +6152,7 @@ impl Comp {
     /// host's size leads to no mode, and the one that stands stays.
     fn mode_for_host(&self, host_w: u32, host_h: u32) -> Option<(u32, u32)> {
         let cur = (self.gpu.width, self.gpu.height);
-        scale::fit_mode(host_w, host_h, |w, h| {
+        display::fit_mode(host_w, host_h, |w, h| {
             mode_in_bounds(w, h) && ((w, h) == cur || surface_can_be_made(w, h))
         })
     }
@@ -6192,25 +6183,22 @@ impl Comp {
 
     /// Once a pass: has the host's display changed (the broker counts the
     /// device's display events, and every reply carries the count)? The
-    /// mode follows once the count has stood for DISPLAY_QUIET_MS, unless
-    /// an explicit `mode W H` pinned it.
+    /// mode follows once the count has stood for `display::QUIET_MS`,
+    /// unless an explicit `mode W H` pinned it.
     pub fn display_pump(&mut self) {
-        if self.gpu.display_events != self.display_seen {
-            self.display_seen = self.gpu.display_events;
-            self.display_changed = Some(Instant::now());
-        }
-        let Some(at) = self.display_changed.as_ref() else { return };
-        if (at.elapsed().as_millis() as u64) < DISPLAY_QUIET_MS {
-            return;
-        }
-        self.display_changed = None;
-        if !self.follow_host {
-            say!("tapestryd: display event {}: the mode is pinned and stands", self.display_seen);
-            return;
-        }
-        say!("tapestryd: display event {}: asking the host", self.display_seen);
-        if let Err(e) = self.follow_display() {
-            say!("tapestryd: display event {}: not followed (errno {})", self.display_seen, e);
+        let now_ms = libthyla_rs::time::monotonic_ns() / 1_000_000;
+        let n = self.gpu.display_events;
+        match self.follow.step(n, now_ms) {
+            display::Step::Wait => {}
+            display::Step::Pinned => {
+                say!("tapestryd: display event {}: the mode is pinned and stands", n);
+            }
+            display::Step::Ask => {
+                say!("tapestryd: display event {}: asking the host", n);
+                if let Err(e) = self.follow_display() {
+                    say!("tapestryd: display event {}: not followed (errno {})", n, e);
+                }
+            }
         }
     }
 
@@ -19340,7 +19328,7 @@ impl Conn {
             // Re-probe the host's preferred rect and take the mode for it
             // (base virtio-gpu reports one rect, not a mode list), and
             // follow the host's display from here on.
-            comp.follow_host = true;
+            comp.follow.unpin();
             return comp.follow_display();
         }
         if let Some(rest) = s.strip_prefix("mode ") {
@@ -19364,7 +19352,7 @@ impl Conn {
             if r.is_ok() {
                 // A mode asked for by size is pinned: it stands whatever
                 // the host's window does, until `mode auto`.
-                comp.follow_host = false;
+                comp.follow.pin();
                 comp.rescale_after_mode();
             }
             return r;

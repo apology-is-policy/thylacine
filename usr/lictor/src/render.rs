@@ -11,7 +11,13 @@ const RULE: u32 = 0xff343e39;
 const BORDER: u32 = 0xff59635e;
 pub const MIN_WIDTH: u32 = 800;
 pub const MIN_HEIGHT: u32 = 720;
-pub const MAX_PIXELS: usize = 4096 * 2160;
+const MAX_PIXELS: usize = 4096 * 2160;
+/// The sizes this screen can be drawn at: no smaller than its layout needs,
+/// and no more pixels than its raster holds.
+pub fn fits(width: u32, height: u32) -> bool {
+    width >= MIN_WIDTH && height >= MIN_HEIGHT
+        && width as u64 * height as u64 <= MAX_PIXELS as u64
+}
 const CAP_TEXT: &[(u64, &str, &str)] = &[
     (1 << 7, "CAP_DAC_OVERRIDE", "Bypass file permission checks."),
     (1 << 8, "CAP_CHOWN", "Change file ownership."),
@@ -150,7 +156,7 @@ impl Layout {
 pub fn render(pixels: &mut [u32], width: u32, height: u32, backdrop: Option<&[u32]>, model: &Model, masked: usize) -> Result<(), RenderError> {
     let (w, h) = (width as usize, height as usize);
     let n = w.checked_mul(h).ok_or(RenderError::Geometry)?;
-    if width < MIN_WIDTH || height < MIN_HEIGHT || n > MAX_PIXELS || pixels.len() != n { return Err(RenderError::Geometry); }
+    if !fits(width, height) || pixels.len() != n { return Err(RenderError::Geometry); }
     model.encode().map_err(|_| RenderError::Content)?;
     if masked > 256 { return Err(RenderError::Content); }
     if backdrop.is_some_and(|b| b.len() != n) { return Err(RenderError::Geometry); }
@@ -268,6 +274,20 @@ mod tests {
     fn model() -> Model { Model { state: State::Pending, pid: u32::MAX, principal: u32::MAX,
         stripes: 1, caps: 0x3f80, term_ns: u64::MAX, request_deadline_ns: 1,
         propagating: true, user: alloc::vec![b'W'; 32], level: alloc::vec![b'W'; 32], notice: Vec::new() } }
+    #[test]
+    fn the_sizes_it_fits_are_its_layouts_floor_to_its_rasters_pixels() {
+        assert!(fits(800, 720) && fits(4096, 2160) && fits(2160, 4096) && fits(3456, 2160));
+        assert!(!fits(799, 720) && !fits(800, 719) && !fits(4097, 2160) && !fits(4096, 2161));
+        assert!(!fits(0, 0) && !fits(640, 400) && !fits(5120, 2880));
+        // Not a product that wrapped: 2^16 a side is 2^32 pixels.
+        assert!(!fits(65536, 65536) && !fits(u32::MAX, u32::MAX));
+        // And render refuses what fits refuses, given a raster of exactly
+        // that many pixels (a raster of another length it refuses anyway).
+        let mut small = alloc::vec![0u32; 640 * 400];
+        assert_eq!(render(&mut small, 640, 400, None, &model(), 0), Err(RenderError::Geometry));
+        let mut large = alloc::vec![0u32; 4096 * 2161];
+        assert_eq!(render(&mut large, 4096, 2161, None, &model(), 0), Err(RenderError::Geometry));
+    }
     #[test]
     fn maximum_authority_fits_without_elision() {
         let model = model();

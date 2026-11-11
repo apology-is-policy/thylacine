@@ -24,6 +24,7 @@ code:
   - usr/lib/libhalcyon/src/toml.rs
   - usr/lib/libhalcyon/src/carve.rs
   - usr/lib/libhalcyon/src/scale.rs
+  - usr/lib/libhalcyon/src/display.rs
   - usr/lib/libhalcyon/src/motion.rs
   - usr/lib/libhalcyon/Cargo.toml
   - usr/halcyon/src/lib.rs
@@ -35,9 +36,9 @@ validated-by: [prose]
 locks: []
 hazards: []
 abis: [abi-halcyon-palette]
-design: ["docs/HALCYON.md section 13", "docs/HALCYON-VISUAL.md", "docs/HALCYON-INSTRUMENT.md"]
+design: ["docs/HALCYON.md section 13", "docs/HALCYON-VISUAL.md", "docs/HALCYON-INSTRUMENT.md", "docs/AURORA-CONFIG.md"]
 created: 2026-09-05
-updated: 2026-11-04
+updated: 2026-11-11
 ---
 ## Ordered ownership codec and journal
 
@@ -633,6 +634,46 @@ ignored, and the EDID stands.
 steps, the pixel helpers' rounding, the EDID parse's fail-safe arms, a short
 millimetre axis never truncating off the table (the clamp-ordering regression),
 and the declaration being the last whole-word token with a table value.
+
+## `display` -- the mode for a host's size, and when to follow it (2026-11-11)
+
+`display.rs` holds the two pure rules of `docs/AURORA-CONFIG.md` 3.4 as amended:
+which mode a display takes for the size its host prefers, and when a change of
+that size is followed. [[sub-tapestryd]] uses both; [[sub-lictor]] uses the first
+for its trusted screen.
+
+**`fit_mode(host_w, host_h, can)`** returns the host's size if `can` accepts it,
+else that size over 2, times 2, over 3, times 3, over 4, times 4
+(`FIT_MAX_FACTOR`), the first `can` accepts; `None` when none is accepted or the
+host's size has a zero side. The caller's `can` is its own bound: the
+compositor's is the mode's range and a probe allocation of the full-screen
+surface, Lictor's is `render::fits`. The factor is whole on purpose: the host
+shows a guest pixel as k by k of its own (or k by k of the guest's as one), so
+nothing is filtered, and the scale needs no rule here, because the EDID's
+millimetres under half the pixels are half the DPI and `scale_pct` halves by
+itself. A division that reaches zero is never offered to `can`; a product past
+`u32` is skipped. The largest size a display is taken to report, 8192 a side,
+is 2048 at a quarter, which is why the factor stops at 4.
+
+**`Follow`** is the timing. The device's driver counts the display events it
+takes; a compositor hands that count and a millisecond clock to `step` once a
+pass. A count that moved starts (or restarts) a quiet time of `QUIET_MS`, 150;
+when the count has stood that long `step` answers `Ask` once, or `Pinned` once
+if `pin` was called since the last `unpin`, and `Wait` otherwise. So a train of
+events is one asking, after its last; several events between two passes are one
+change; and the count may wrap, since only a change of it is read. `Follow::new`
+starts at a count of zero, as the driver does, so a first count that is not zero
+is an event since the driver's own first question. `unpin` does not ask by
+itself (its caller does) and leaves an event that is still waiting out its quiet
+time to be asked for when it ends. A clock that reads earlier than the event is
+a `Wait`, not a wrap.
+
+**Tests.** 5 host tests: the fitted sizes for the Macs' full screens and for
+Lictor's limits, the order of the factors, and the refusals; an event followed
+at exactly the quiet time and once; a train; the wrap and a first count that is
+not zero; the pin in each order against a waiting event. Each of twelve changes
+to the file turns one of them red (`aux-gate/macrunner/mut/a3b_mut.py`, a
+scratch harness, not a gate).
 
 ## `motion` -- section 10's movement, and the rule deciding whether it runs
 
