@@ -909,28 +909,54 @@ void test_devctl_counters_gated(void) {
     TEST_ASSERT(!devctl_system_counters_readable(NULL), "no reader does not");
 }
 
-// A /ctl/procs row is committed whole or not at all. At every buffer size the
-// output is the header and whole rows of nine columns: a row cut mid-number
-// would hand ps and prowl a plausible smaller figure.
+// A /ctl/procs row is committed whole or not at all, and a table that does not
+// hold every row says so. At every buffer size the output is the header, a
+// prefix of the whole table's nine-column rows and, unless it IS the whole
+// table, the cut line last: a row cut mid-number would hand a parser a plausible
+// smaller figure, and a table short without a sign reads as "no other Proc".
 void test_devctl_procs_rows_whole(void) {
     static char buf[1024];
+    static char whole[1024];
+    static const char cutline[] =
+        "(cut: more processes than one read holds; /proc lists them all)\n";
+    const size_t cl = sizeof cutline - 1;
     const struct Proc *self = current_thread()->proc;
-    size_t full = devctl_format_procs_for_test(self, buf, sizeof buf);
-    TEST_ASSERT(full > 0 && buf[full - 1] == '\n', "procs formats into 1 KiB");
-    int cut = 0, short_rows = 0, sized = 0;
+    size_t full = devctl_format_procs_for_test(self, whole, sizeof whole);
+    TEST_ASSERT(full > cl && whole[full - 1] == '\n', "procs formats into 1 KiB");
+    bool whole_is_cut = true;
+    for (size_t i = 0; i < cl; i++)
+        if (whole[full - cl + i] != cutline[i]) { whole_is_cut = false; break; }
+    TEST_ASSERT(!whole_is_cut, "this boot's whole table fits 1 KiB (enlarge the buffers if not)");
+
+    int torn = 0, short_rows = 0, silent = 0, not_prefix = 0;
+    int sized = 0, cuts_with_rows = 0, wholes = 0;
     for (size_t cap = 1; cap <= full; cap++) {
         size_t got = devctl_format_procs_for_test(self, buf, cap);
-        if (got == 0) continue;                  // the header alone does not fit
+        if (got == 0) continue;                  // no room for the header and the cut line
         sized++;
-        if (buf[got - 1] != '\n') { cut++; continue; }
-        size_t ls = got - 1;
+        bool is_cut = got >= cl;
+        for (size_t i = 0; is_cut && i < cl; i++)
+            if (buf[got - cl + i] != cutline[i]) is_cut = false;
+        size_t body = is_cut ? got - cl : got;
+        if (!is_cut) {
+            if (got == full) wholes++; else silent++;
+        }
+        if (body == 0 || buf[body - 1] != '\n') { torn++; continue; }
+        for (size_t i = 0; i < body; i++)
+            if (buf[i] != whole[i]) { not_prefix++; break; }
+        size_t ls = body - 1;
         while (ls > 0 && buf[ls - 1] != '\n') ls--;
         int ntok = 0;
-        for (size_t i = ls; i < got - 1; i++)
+        for (size_t i = ls; i < body - 1; i++)
             if (buf[i] != ' ' && (i == ls || buf[i - 1] == ' ')) ntok++;
         if (ntok != 9) short_rows++;
+        if (is_cut && ls > 0) cuts_with_rows++;
     }
     TEST_ASSERT(sized > 1, "some sizes fit the header and more");
-    TEST_EXPECT_EQ(cut, 0, "no buffer size leaves a row cut mid-field");
-    TEST_EXPECT_EQ(short_rows, 0, "every last line carries nine columns");
+    TEST_EXPECT_EQ(torn, 0, "no buffer size leaves a row cut mid-field");
+    TEST_EXPECT_EQ(short_rows, 0, "the last line before the cut carries nine columns");
+    TEST_EXPECT_EQ(not_prefix, 0, "the rows of a cut table are the whole table's first rows");
+    TEST_EXPECT_EQ(silent, 0, "a table short of the whole one ends with the cut line");
+    TEST_EXPECT_EQ(wholes, 1, "the whole table, at its own size, carries no cut line");
+    TEST_ASSERT(cuts_with_rows > 0, "some size holds rows and the cut line");
 }

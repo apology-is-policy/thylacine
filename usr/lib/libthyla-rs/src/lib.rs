@@ -126,6 +126,7 @@ pub mod pty_observer;
 pub mod poll_worker;
 pub mod service_worker;
 pub mod process;
+pub mod procs;
 pub mod rand;
 pub mod sched;
 pub mod sync;

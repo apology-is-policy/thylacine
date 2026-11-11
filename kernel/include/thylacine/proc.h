@@ -1768,8 +1768,14 @@ void proc_shared_map_uncharge(struct Proc *p, u32 npages);
 //   the name is set in the Proc's OWN exec path before it runs at EL0, so no
 //   concurrent reader observes a torn write in practice; a /proc reader that
 //   races the one-time stamp sees either the old ("") or the new bytes of a
-//   fixed 32-byte field (never out of bounds).
+//   fixed 32-byte field (never out of bounds). The stored name holds only
+//   printable ASCII graphics; any other byte of the basename is stored as '?'.
 void proc_set_name(struct Proc *p, const char *path, size_t len);
+
+// proc_state_word -- the state word of /ctl/procs and /proc/<pid>/status:
+//   ALIVE / ZOMBIE / INVALID, and STOPPED for an ALIVE Proc under a job stop
+//   that is not dying. The caller pins p (g_proc_table_lock, or a test's own).
+const char *proc_state_word(const struct Proc *p);
 
 // proc_cpu_ns -- sum run_ns over p->threads (the per-Proc cumulative on-CPU
 //   time, PROWL-DESIGN section 3.1). Takes p->threads_lock for the walk (the

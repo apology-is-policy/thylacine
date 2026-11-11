@@ -1498,6 +1498,12 @@ bool proc_child_cap_ok(struct Proc *p) {
 // prowl-1 (PROWL-DESIGN.md section 3.2): stamp p->name with the basename of
 // `path` (the last '/'-delimited component). See proc.h for the concurrency
 // note (set once in the Proc's own exec path before it runs at EL0).
+//
+// The name is printed raw into text that is read by line and by column
+// (/proc/<pid>/status, /ctl/procs, the console), and a file name may hold any
+// byte but '/' and NUL: a newline would forge a line there, a space a column,
+// ESC a terminal command. So the name has one alphabet, the printable ASCII
+// graphics, and every other byte is stored as '?'.
 void proc_set_name(struct Proc *p, const char *path, size_t len) {
     if (!p || !path || len == 0) return;
     size_t start = 0;
@@ -1505,9 +1511,30 @@ void proc_set_name(struct Proc *p, const char *path, size_t len) {
         if (path[i] == '/') start = i + 1u;
     if (start >= len) return;   // trailing-slash / empty basename -- keep prior
     size_t j = 0;
-    for (size_t i = start; i < len && path[i] != '\0' && j < PROC_NAME_MAX - 1u; i++)
-        p->name[j++] = path[i];
+    for (size_t i = start; i < len && path[i] != '\0' && j < PROC_NAME_MAX - 1u; i++) {
+        u8 c = (u8)path[i];
+        p->name[j++] = (c > 0x20u && c < 0x7fu) ? (char)c : '?';
+    }
     p->name[j] = '\0';
+}
+
+// The word /ctl/procs and /proc/<pid>/status show for p's state: its lifecycle
+// state, except that an ALIVE Proc under a job stop (a Ctrl-Z, a monitor's
+// suspend) reads STOPPED -- the Unix ps T state, Plan 9's Stopped. The debugger's
+// stop is not shown: it is the debugger's own view (I-39). A dying Proc is not
+// stopped (DEBUG-FS-DESIGN 5g): its last thread runs its exit whatever stop it
+// had. Both flags are read atomically; the caller pins p.
+const char *proc_state_word(const struct Proc *p) {
+    if (p->state == PROC_STATE_ALIVE &&
+        __atomic_load_n(&p->job_stop_req, __ATOMIC_ACQUIRE) != 0 &&
+        __atomic_load_n(&p->group_exit_msg, __ATOMIC_ACQUIRE) == NULL)
+        return "STOPPED";
+    switch (p->state) {
+    case PROC_STATE_INVALID: return "INVALID";
+    case PROC_STATE_ALIVE:   return "ALIVE";
+    case PROC_STATE_ZOMBIE:  return "ZOMBIE";
+    default:                 return "?";
+    }
 }
 
 // prowl-1 (PROWL-DESIGN.md section 3.1): the per-Proc cumulative on-CPU time =

@@ -783,8 +783,8 @@ pub extern "C" fn rs_main() -> i64 {
     beacon_clean(&mut c, "ls -l auto pipe clean", "ls", &["-l", "/bin/version", "/bin/welcome"]);
 
     beacon_clean(&mut c, "ps auto pipe clean", "ps", &[]);
-    // `ps` piped = the verbatim /ctl/procs snapshot (parseable): the kernel
-    // header + this very process family are in it.
+    // `ps` piped = the plain table (parseable): /ctl/procs's header + this
+    // very process family are in it.
     c.expect_contains("ps raw header", "ps", &[], b"", b"PID    PPID    NAME", 0);
     c.expect_contains("ps raw joey", "ps", &[], b"", b"joey", 0);
 

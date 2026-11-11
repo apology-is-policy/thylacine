@@ -258,16 +258,6 @@ static size_t fmt_hex(char *buf, size_t cap, size_t off, u64 v) {
     return (size_t)n;
 }
 
-// Translate proc_state to printable form.
-static const char *state_name(enum proc_state s) {
-    switch (s) {
-    case PROC_STATE_INVALID: return "INVALID";
-    case PROC_STATE_ALIVE:   return "ALIVE";
-    case PROC_STATE_ZOMBIE:  return "ZOMBIE";
-    default:                 return "?";
-    }
-}
-
 // =============================================================================
 // File-content generators. Each writes up to `cap` bytes; returns the
 // number of bytes that would be produced for the WHOLE file (so the
@@ -295,7 +285,7 @@ static size_t format_status(const struct Proc *caller, struct Proc *p, char *buf
     n = fmt_str(buf, cap, off, "\n");             if (!n) return 0; off += n;
 
     n = fmt_str(buf, cap, off, "state:   ");      if (!n) return 0; off += n;
-    n = fmt_str(buf, cap, off, state_name(p->state)); if (!n) return 0; off += n;
+    n = fmt_str(buf, cap, off, proc_state_word(p)); if (!n) return 0; off += n;
     n = fmt_str(buf, cap, off, "\n");             if (!n) return 0; off += n;
 
     int tc = __atomic_load_n(&p->thread_count, __ATOMIC_ACQUIRE);  // #65 F6: lockless reader

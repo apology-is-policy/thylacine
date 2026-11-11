@@ -316,6 +316,36 @@ void test_devproc_read_status_format(void) {
     TEST_ASSERT(contains(buf, (size_t)got, "principal:"), "status contains 'principal:'");
 
     spoor_clunk(c);
+
+    // The state word is /ctl/procs's own: a job-stopped Proc reads STOPPED here
+    // too, and ALIVE again once continued (the pair is one variable apart, so
+    // a status that never said STOPPED and one that always did both fail).
+    struct Proc *js = proc_alloc();
+    TEST_ASSERT(js != NULL, "proc_alloc for the job-stop leg");
+    js->state = PROC_STATE_ALIVE;
+    proc_test_link(js);
+    struct Spoor *sc = open_status_for_pid(js->pid);
+    bool took = false, stopped_shown = false, alive_shown = false;
+    if (sc) {
+        irq_state_t s = proc_table_lock_acquire();
+        took = proc_job_stop_proc(js);
+        proc_table_lock_release(s);
+        long g1 = devproc.read(sc, buf, 512, 0);
+        stopped_shown = g1 > 0 && contains(buf, (size_t)g1, "state:   STOPPED\n");
+        s = proc_table_lock_acquire();
+        proc_job_cont_proc(js);
+        proc_table_lock_release(s);
+        long g2 = devproc.read(sc, buf, 512, 0);
+        alive_shown = g2 > 0 && contains(buf, (size_t)g2, "state:   ALIVE\n");
+        spoor_clunk(sc);
+    }
+    proc_test_unlink(js);
+    js->state = PROC_STATE_ZOMBIE;
+    proc_free(js);
+    TEST_ASSERT(sc != NULL, "open the linked Proc's status");
+    TEST_ASSERT(took, "the linked Proc takes the job stop");
+    TEST_ASSERT(stopped_shown, "status shows a job-stopped Proc STOPPED");
+    TEST_ASSERT(alive_shown, "status shows it ALIVE once continued");
 }
 
 // prowl-1 (PROWL-DESIGN.md section 3): the telemetry substrate --
@@ -339,6 +369,16 @@ void test_proc_cpu_ns_accounting(void) {
     // Truncation: a > PROC_NAME_MAX-1 name stays NUL-terminated within bounds.
     proc_set_name(&tp, "/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 41);
     TEST_ASSERT(tp.name[PROC_NAME_MAX - 1u] == '\0', "long name stays NUL-terminated");
+    // The name is printed raw into line- and column-shaped text: a byte that
+    // would forge a line, a column or a terminal command is stored as '?'.
+    proc_set_name(&tp, "/bin/a b", 8);
+    TEST_ASSERT(streq(tp.name, "a?b"), "a space in the basename is stored as '?'");
+    proc_set_name(&tp, "x\nstate:   ZOMBIE", 17);
+    TEST_ASSERT(streq(tp.name, "x?state:???ZOMBIE"), "a newline cannot start a forged line");
+    proc_set_name(&tp, "e\033[2Jt\177\200\377\t.", 11);
+    TEST_ASSERT(streq(tp.name, "e?[2Jt????."), "ESC, DEL, high bytes and a tab are stored as '?'");
+    proc_set_name(&tp, "!~", 2);
+    TEST_ASSERT(streq(tp.name, "!~"), "the first and last printable graphics are kept");
 
     // (b) run_ns accounting. sched() yields kthread to its CPU's idle and back;
     // each yield switches kthread OUT so its run_ns accrues (proc_cpu_ns sums

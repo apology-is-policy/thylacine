@@ -1,7 +1,8 @@
 // prowl::sample -- the pure telemetry layer (terminal-free).
 //
-// Reads the kernel /ctl/procs + /ctl/sched text (the prowl-1 substrate) and
-// derives the process table + per-proc %CPU the htop way: diff cumulative cpu_ns
+// Takes the process set (libthyla_rs::procs: /proc's directory, one status per
+// Proc) and the kernel's /ctl text (the prowl-1 substrate) and derives the
+// process table + per-proc %CPU the htop way: diff cumulative cpu_ns
 // across two polls, divide by the monotonic wall delta. 100% == one core fully
 // busy; a proc spanning two cores reads 200%. No float -- tenths-of-a-percent
 // integer math (delta_ns * 1000 / elapsed_ns). A buggy sampler mis-renders
@@ -9,14 +10,10 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
+use libthyla_rs::procs;
 
-/// One parsed /ctl/procs data line. The kernel format (kernel/devctl.c
-/// format_procs) is 9 whitespace-separated columns after a header line (PPID +
-/// STOPPED landed with prowl-4, TABLES with prowl-6):
-///   PID  PPID  NAME  STATE  THREADS  PAGES  TABLES  CHILDREN  CPU_NS
-/// NAME is a binary basename (no embedded spaces, <=31 bytes); STATE is one
-/// token (ALIVE/ZOMBIE/STOPPED/INVALID). So a 9-token whitespace split is exact.
-/// (CHILDREN is parsed for column alignment but not surfaced.)
+/// One Proc of the sampled set: a `procs::Row` plus the figure this sampler
+/// derives. (The row's CHILDREN count is not surfaced.)
 pub struct ProcRow {
     pub pid: i64,
     /// The parent pid (prowl-4, the tree view). 0 for kproc / a reparented root.
@@ -37,82 +34,30 @@ pub struct ProcRow {
     pub cpu_pct_x10: Option<u64>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum State {
-    Alive,
-    Zombie,
-    /// prowl-4: an ALIVE Proc with job_stop_req set (a monitor `suspend` / a
-    /// Ctrl-Z) -- the Unix `ps` T state, surfaced by the kernel so a suspend is
-    /// visible in the list.
-    Stopped,
-    Other,
-}
+pub use libthyla_rs::procs::State;
 
-impl State {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            State::Alive => "ALIVE",
-            State::Zombie => "ZOMBIE",
-            State::Stopped => "STOPPED",
-            State::Other => "?",
-        }
-    }
-    fn parse(tok: &str) -> State {
-        match tok {
-            "ALIVE" => State::Alive,
-            "ZOMBIE" => State::Zombie,
-            "STOPPED" => State::Stopped,
-            _ => State::Other,
-        }
-    }
-}
-
-/// Parse the `/ctl/procs` text into rows. The header line and any malformed
-/// (non-9-token, unparseable-pid) line are skipped -- a truncated last line (the
-/// kernel's DEVCTL_READ_BUF overflow early-return) drops cleanly rather than
-/// producing a bogus row.
-pub fn parse_procs(text: &str) -> Vec<ProcRow> {
-    let mut rows = Vec::new();
-    for line in text.lines() {
-        let mut it = line.split_whitespace();
-        let (pid, ppid, name, state, threads, pages, tables, _children, cpu_ns) = match (
-            it.next(), it.next(), it.next(), it.next(), it.next(),
-            it.next(), it.next(), it.next(), it.next(),
-        ) {
-            (Some(a), Some(b), Some(c), Some(d), Some(e), Some(f), Some(g), Some(h), Some(i)) => {
-                (a, b, c, d, e, f, g, h, i)
-            }
-            _ => continue, // header / blank / short line
-        };
-        // A trailing 10th token means a space in a field (a name with a space)
-        // would desync the columns -- reject the whole line rather than
-        // mis-attribute it.
-        if it.next().is_some() {
-            continue;
-        }
-        let pid: i64 = match pid.parse() {
-            Ok(v) => v,
-            Err(_) => continue, // the header line ("PID") lands here
-        };
-        rows.push(ProcRow {
-            pid,
-            ppid: ppid.parse().unwrap_or(0),
-            name: String::from(name),
-            state: State::parse(state),
-            threads: threads.parse().unwrap_or(0),
-            pages: pages.parse().unwrap_or(0),
-            tables: tables.parse().unwrap_or(0),
-            cpu_ns: cpu_ns.parse().ok(),
+/// The sampler's rows from the process set (`procs::list`): every Proc /proc
+/// lists, where one read of /ctl/procs holds only the rows that fit it.
+pub fn rows_from(set: Vec<procs::Row>) -> Vec<ProcRow> {
+    set.into_iter()
+        .map(|r| ProcRow {
+            pid: i64::from(r.pid),
+            ppid: i64::from(r.ppid),
+            name: r.name,
+            state: r.state,
+            threads: r.threads,
+            pages: r.pages,
+            tables: r.tables,
+            cpu_ns: r.cpu_ns,
             cpu_pct_x10: None,
-        });
-    }
-    rows
+        })
+        .collect()
 }
 
 /// prowl-4 tree view: order `rows` parent-before-children and return each row's
 /// (index-into-rows, depth) in display order. A DFS from the roots (a row whose
-/// ppid names no row in the set -- kproc, or a parent truncated out of the
-/// /ctl/procs page) following the ppid edges. Cycle-safe + orphan-safe: a
+/// ppid names no row in the set -- kproc, or a parent that ended before its
+/// status was read) following the ppid edges. Cycle-safe + orphan-safe: a
 /// `visited` set bounds it to one visit per row, and any row not reached from a
 /// root (a cycle, or a stale ppid) is appended at depth 0 so nothing is dropped.
 /// Pure -- the caller renders; a bad tree mis-indents prowl's own screen only.

@@ -53,13 +53,15 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::time::Duration;
+use libthyla_rs::err::Error;
+use libthyla_rs::procs;
 use libthyla_rs::time::{monotonic_ns, sleep};
 use libthyla_rs::{
     t_close, t_open, t_pipe, t_poll, t_putstr, t_read, t_spawn_full_argv, t_wait_pid_for, t_write,
     TPollFd, TSpawnArgs, T_OREAD, T_POLLIN, T_WALK_OPEN_FROM_ROOT,
 };
 
-/// (service path, the server's name in /ctl/procs, required). A server that
+/// (service path, the server's Proc name, required). A server that
 /// is not required is probed wherever its service is posted; the harness
 /// requires its OK line wherever that server reports itself up.
 const SERVERS: [(&str, &str, bool); 2] =
@@ -78,14 +80,6 @@ const FILL_BOUND: usize = 32;
 /// A waiting server's share of the window. A loop that never sleeps takes all
 /// of it; one that parks takes microseconds.
 const BUSY_DIVISOR: u64 = 4;
-/// Both kernel files are rendered afresh on every read at an offset, so each
-/// is read in one call; this is the kernel's own bound on either.
-const CTL_BUF: usize = 4096;
-/// The kernel drops whole rows that do not fit its buffer and says nothing, so
-/// a table that ends within one row of the bound may be missing its tail. No
-/// row of either file comes near this (nine short columns).
-const CTL_ROW_MAX: usize = 512;
-
 const HOLD_SERVED: i32 = 0;
 const HOLD_REFUSED: i32 = 2;
 const HOLD_NEVER_FULL: i32 = 4;
@@ -116,55 +110,29 @@ fn sleep_until(t_ns: u64) {
     }
 }
 
-/// One read of a kernel text file. None: unreadable, or it ended within one
-/// row of the kernel's bound (rows may have been dropped, and a second read
-/// would be of a different render).
-fn read_once(path: &str) -> Option<Vec<u8>> {
-    let fd = connect(path);
-    if fd < 0 {
-        return None;
-    }
-    let mut buf = [0u8; CTL_BUF];
-    let n = unsafe { t_read(fd, buf.as_mut_ptr(), buf.len()) };
-    unsafe { t_close(fd) };
-    if n <= 0 || n as usize > CTL_BUF - CTL_ROW_MAX {
-        return None;
-    }
-    Some(buf[..n as usize].to_vec())
-}
-
 fn parse_u64(b: &[u8]) -> Option<u64> {
     core::str::from_utf8(b).ok()?.parse::<u64>().ok()
 }
 
 enum Pid {
-    Is(u64),
+    Is(u32),
     Absent,
     Twice,
-    Unreadable,
+    Unreadable(Error),
 }
 
-/// The PID of the one /ctl/procs row whose NAME is `name`.
+/// The pid of the one Proc named `name`, over every Proc /proc lists.
 fn server_pid(name: &str) -> Pid {
-    let Some(table) = read_once("/ctl/procs") else {
-        return Pid::Unreadable;
+    let rows = match procs::list() {
+        Ok(rows) => rows,
+        Err(e) => return Pid::Unreadable(e),
     };
     let mut found = Pid::Absent;
-    for line in table.split(|&b| b == b'\n') {
-        let mut cols = line.split(|&b| b == b' ').filter(|c| !c.is_empty());
-        let (Some(pid), Some(_ppid), Some(n)) = (cols.next(), cols.next(), cols.next()) else {
-            continue;
-        };
-        if n != name.as_bytes() {
-            continue;
-        }
+    for r in rows.iter().filter(|r| r.name == name) {
         if matches!(found, Pid::Is(_)) {
             return Pid::Twice;
         }
-        found = match parse_u64(pid) {
-            Some(v) => Pid::Is(v),
-            None => return Pid::Unreadable,
-        };
+        found = Pid::Is(r.pid);
     }
     found
 }
@@ -175,28 +143,11 @@ enum Cpu {
     Unreadable,
 }
 
-fn field<'a>(status: &'a [u8], key: &str) -> Option<&'a [u8]> {
-    for line in status.split(|&b| b == b'\n') {
-        if let Some(rest) = line.strip_prefix(key.as_bytes()) {
-            let start = rest.iter().position(|&b| b != b' ')?;
-            return Some(&rest[start..]);
-        }
-    }
-    None
-}
-
 /// `cpu_ns` of /proc/<pid>/status, and only while that pid is still `name`.
-fn server_cpu(pid: u64, name: &str) -> Cpu {
-    let Some(status) = read_once(&format!("/proc/{}/status", pid)) else {
-        return Cpu::Unreadable;
-    };
-    if field(&status, "name:") != Some(name.as_bytes()) {
-        return Cpu::Unreadable;
-    }
-    match field(&status, "cpu_ns:") {
-        Some(b"-") => Cpu::Withheld,
-        Some(v) => parse_u64(v).map(Cpu::Ns).unwrap_or(Cpu::Unreadable),
-        None => Cpu::Unreadable,
+fn server_cpu(pid: u32, name: &str) -> Cpu {
+    match procs::row(pid) {
+        Ok(Some(r)) if r.name == name => r.cpu_ns.map_or(Cpu::Withheld, Cpu::Ns),
+        _ => Cpu::Unreadable,
     }
 }
 
@@ -345,13 +296,10 @@ fn reap(child: i32) -> Option<i32> {
 fn attempt(path: &str, name: &str, quiet_ms: u64) -> Verdict {
     let pid = match server_pid(name) {
         Pid::Is(p) => p,
-        Pid::Absent => return Verdict::Fail(format!("CPU -- no /ctl/procs row is named {}", name)),
-        Pid::Twice => return Verdict::Fail(format!("CPU -- two /ctl/procs rows are named {}", name)),
-        Pid::Unreadable => {
-            return Verdict::Fail(format!(
-                "CPU -- /ctl/procs could not be read whole in one call (unreadable, or within {} bytes of the kernel's {}-byte table, where rows are dropped)",
-                CTL_ROW_MAX, CTL_BUF
-            ))
+        Pid::Absent => return Verdict::Fail(format!("CPU -- no Proc in /proc is named {}", name)),
+        Pid::Twice => return Verdict::Fail(format!("CPU -- two Procs in /proc are named {}", name)),
+        Pid::Unreadable(e) => {
+            return Verdict::Fail(format!("CPU -- the process set could not be read from /proc ({})", e))
         }
     };
     let own = connect(path);

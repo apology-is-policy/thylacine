@@ -65,9 +65,9 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**733 owned · 38 unowned · 771 files (95% owned) · ~12222 unswept lines.**
+**733 owned · 39 unowned · 772 files (94% owned) · ~12533 unswept lines.**
 
-Excluded as harness and counted here rather than dropped: **98 files, ~50605 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
+Excluded as harness and counted here rather than dropped: **98 files, ~50553 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
 | area | owned | unowned | unswept lines |
 |---|---:|---:|---:|
@@ -75,8 +75,8 @@ Excluded as harness and counted here rather than dropped: **98 files, ~50605 lin
 | usr/pouch-hello | 24 | 14 | 2076 |
 | usr/ports | 19 | 5 | 1691 |
 | kernel | 196 | 10 | 1227 |
+| usr/libthyla-rs | 36 | 2 | 507 |
 | usr/gl-sdl-prove | 0 | 1 | 262 |
-| usr/libthyla-rs | 36 | 1 | 196 |
 | arch | 41 | 2 | 146 |
 | usr/susp-mask-child | 0 | 1 | 139 |
 | usr/lib | 129 | 1 | 72 |
@@ -134,6 +134,7 @@ Excluded as harness and counted here rather than dropped: **98 files, ~50605 lin
 | usr/warp-prove/src/main.rs | 6348 |
 | usr/ports/gnumake/config.h | 1357 |
 | usr/pouch-hello/pouch-hello-net.c | 618 |
+| usr/lib/libthyla-rs/src/procs.rs | 311 |
 | kernel/include/thylacine/spinlock.h | 287 |
 | usr/pouch-hello/pouch-hello.c | 277 |
 | kernel/include/thylacine/smp.h | 264 |

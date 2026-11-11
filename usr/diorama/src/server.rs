@@ -97,6 +97,7 @@
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
 use libthyla_rs::ninep as p9;
+use libthyla_rs::procs;
 use libthyla_rs::{
     t_close, t_getgid, t_getpid, t_getuid, t_open, t_srv_peer, t_walk_create, TSrvPeerInfo,
     T_OPATH, T_OREAD, T_WALK_OPEN_FROM_ROOT,
@@ -159,9 +160,9 @@ fn viv_runner() -> u32 {
 /// the Proc that made the pipe pair we are serving. Pure over the native
 /// /proc/<self>/status text ("ppid:    N", devproc's format_status) so the
 /// truth table is selftestable; the caller reads the live file. Our OWN status
-/// rather than the /ctl/procs table because the table is read into a bounded
-/// window that drops rows past the cut, and a healthy container must not fail
-/// its startup check on a busy box.
+/// rather than the /ctl/procs table because one read of that table holds only
+/// the rows that fit it, and a healthy container must not fail its startup
+/// check on a busy box.
 pub fn viv_runner_is_parent(status_text: &[u8], runner: u32) -> bool {
     runner != 0 && parse_kv_dec(status_text, b"ppid") == Some(runner as u64)
 }
@@ -328,7 +329,7 @@ static NODES: [Node; N_COUNT as usize] = [
 //     Linux guest -- the phenotype has no code-region syscall) sees its own
 //     code rows zeroed here, where its native read would not.
 //   * What it does NOT do is scope the pid set to a container, because THERE IS
-//     NO SUCH SCOPING NATIVELY YET -- /ctl/procs lists every Proc on the box.
+//     NO SUCH SCOPING NATIVELY YET -- native /proc lists every Proc on the box.
 //
 // So when V-7 gives a contained Proc its own territory, "which pids can I see"
 // becomes a real containment question, and it is a question about /proc and
@@ -792,7 +793,7 @@ pub fn deputy_check() -> Result<(), &'static str> {
 fn native_pid_exists(pid: u32) -> bool {
     // V-7: in vivarium mode a pid outside the container tree does not RESOLVE
     // (scripture: "a pid outside the tree does not resolve"). Membership first,
-    // then the liveness probe -- membership is read from the live /ctl/procs,
+    // then the liveness probe -- membership is read from the live parent links,
     // so a member is live modulo the same re-read window enumeration has.
     if viv_runner() != 0 && !viv_is_member(pid) {
         return false;
@@ -800,30 +801,51 @@ fn native_pid_exists(pid: u32) -> bool {
     native_pid_alive(pid)
 }
 
-// V-7 membership. VIV_PROCS_MAX bounds both the (pid, ppid) table and the
-// member set; /ctl/procs is read into the same 2048-byte window as
-// native_pid_list (the kernel render is itself bounded at DEVCTL_READ_BUF and
-// stops at buffer-full, so a truncated tail loses rows fail-closed -- a member
-// past the cut disappears from the view, never the reverse).
-const VIV_PROCS_MAX: usize = 64;
+// V-7 membership: the container's process tree is the runner's children other
+// than this server, and their descendants (docs/VIVARIUM.md section 7.2). It is
+// decided per pid, by walking the parent links through native
+// /proc/<pid>/status -- not from a table of every Proc: one read of /ctl/procs
+// holds only the rows that fit it, and a member past the cut would be absent
+// from its own container.
+//
+// The walk needs no depth bound. A parent is older than its child (pids are
+// handed out ascending and never reused, and an orphan goes to init or kproc),
+// so every step lowers the pid. A link that does not is not one the kernel
+// makes, and admits nothing.
 
-fn viv_read_pairs(pairs: &mut [(u32, u32)]) -> usize {
-    let mut buf = [0u8; 2048];
-    let got = match read_native(b"/ctl/procs", &mut buf) {
-        Some(n) => n,
-        None => return 0, // unreadable source -> empty set, fail-closed
-    };
-    parse_pid_ppid_list(&buf[..got], pairs)
+/// Is `pid` in the tree whose roots are `runner`'s children other than `me`?
+/// `ppid_of` answers a pid's parent, or None when that Proc is gone or cannot
+/// be read -- which admits nothing. Pure over `ppid_of`, so the truth table is
+/// selftestable; the live caller reads native status.
+pub fn viv_tree_member(
+    pid: u32,
+    runner: u32,
+    me: u32,
+    mut ppid_of: impl FnMut(u32) -> Option<u32>,
+) -> bool {
+    if runner == 0 || pid == runner {
+        return false;
+    }
+    let mut cur = pid;
+    loop {
+        let Some(parent) = ppid_of(cur) else {
+            return false;
+        };
+        if parent == runner {
+            return cur != me;
+        }
+        if parent == 0 || parent >= cur {
+            return false;
+        }
+        cur = parent;
+    }
 }
 
-fn viv_members(out: &mut [u32]) -> usize {
-    let runner = viv_runner();
-    if runner == 0 {
-        return 0;
-    }
-    let mut pairs = [(0u32, 0u32); VIV_PROCS_MAX];
-    let np = viv_read_pairs(&mut pairs);
-    compute_members(&pairs[..np], runner, VIV_SELF.load(Ordering::Relaxed), out)
+/// A native Proc's parent pid, from one read of its status.
+fn native_ppid(pid: u32) -> Option<u32> {
+    let mut buf = [0u8; procs::STATUS_MAX];
+    let len = procs::read_status(pid, &mut buf).ok().flatten()?;
+    u32::try_from(parse_kv_dec(&buf[..len], b"ppid")?).ok()
 }
 
 /// Is `pid` a live Proc, UNFILTERED by container membership -- the runner is
@@ -843,111 +865,24 @@ fn native_pid_alive(pid: u32) -> bool {
 }
 
 fn viv_is_member(pid: u32) -> bool {
-    let mut members = [0u32; VIV_PROCS_MAX];
-    let n = viv_members(&mut members);
-    members[..n].contains(&pid)
+    viv_tree_member(pid, viv_runner(), VIV_SELF.load(Ordering::Relaxed), native_ppid)
 }
 
-/// The (pid, ppid) pairs from /ctl/procs -- columns 1 and 2 of every row that
-/// parses (the header's "PID" fails the decimal parse and is skipped by the
-/// same rule as any junk, the parse_pid_list discipline). NOT split_fields:
-/// that splits on SINGLE spaces (the /ctl/cpu shape) and would read the
-/// 4-space-run /ctl/procs rows as pid + an empty column, skipping every row.
-pub fn parse_pid_ppid_list(text: &[u8], out: &mut [(u32, u32)]) -> usize {
-    fn token(line: &[u8], from: usize) -> (&[u8], usize) {
-        let mut s = from;
-        while s < line.len() && line[s] == b' ' {
-            s += 1;
-        }
-        let mut e = s;
-        while e < line.len() && line[e] != b' ' {
-            e += 1;
-        }
-        (&line[s..e], e)
-    }
-    // The PPID column accepts "0" -- a legitimate VALUE there (kproc-parented
-    // and reparented-orphan roots render ppid 0, joey's own row included) --
-    // where parse_pid rightly rejects it as a /proc NAME. Without this the
-    // whole ppid-0 tier of the table silently vanished from the snapshot
-    // (caught by the selftest vector at boot).
-    fn parse_ppid(tok: &[u8]) -> Option<u32> {
-        if tok == b"0" {
-            return Some(0);
-        }
-        parse_pid(tok)
-    }
-    let mut n = 0usize;
-    for line in text.split(|&c| c == b'\n') {
-        if n >= out.len() {
-            break;
-        }
-        let (c1, rest) = token(line, 0);
-        let (c2, _) = token(line, rest);
-        if let (Some(pid), Some(ppid)) = (parse_pid(c1), parse_ppid(c2)) {
-            out[n] = (pid, ppid);
-            n += 1;
-        }
-    }
-    n
-}
-
-/// The pure half of viv_members: the container's process tree from a (pid,
-/// ppid) snapshot. Roots = the runner's children minus this server; members =
-/// the roots plus their ppid-descendants, to a fixpoint. With the runner
-/// spawning exactly {diorama, entrypoint}, this IS ppid-descent from the
-/// entrypoint (docs/VIVARIUM.md section 7.2); stated over a root SET so a
-/// hypothetical extra runner child widens the view to its own tree only,
-/// never to the host's.
-pub fn compute_members(pairs: &[(u32, u32)], runner: u32, me: u32, out: &mut [u32]) -> usize {
-    let mut n = 0usize;
-    for &(pid, ppid) in pairs {
-        if ppid == runner && pid != me && pid != runner && n < out.len() {
-            out[n] = pid;
-            n += 1;
-        }
-    }
-    // Descend to a fixpoint. Each pass adds only pids whose parent is already a
-    // member; bounded by the member capacity, so this terminates even on a
-    // (corrupt) cyclic snapshot.
-    loop {
-        let before = n;
-        for &(pid, ppid) in pairs {
-            if n >= out.len() {
-                break;
-            }
-            if pid != runner && !out[..n].contains(&pid) && out[..n].contains(&ppid) {
-                out[n] = pid;
-                n += 1;
-            }
-        }
-        if n == before {
-            break;
-        }
-    }
-    n
-}
-
-/// The live pid list, from `/ctl/procs`' first column. Used only to ENUMERATE
-/// the root (Linux's /proc lists its processes); resolution never consults it,
-/// so a stale entry costs a readdir row, never a wrong answer.
+/// The pids the root lists at or above `from`, ascending: every native Proc's,
+/// or in vivarium mode the container's members (pre-entrypoint none,
+/// fail-closed). Used only to ENUMERATE the root (Linux's /proc lists its
+/// processes); resolution never consults it, so a stale entry costs a readdir
+/// row, never a wrong answer. An unreadable native /proc lists nothing.
 ///
-/// COHERENCY: the list is re-read per Treaddir call, so a Proc that exits or
-/// spawns mid-enumeration shifts the indices the cookie counts against and can
-/// make a pid appear twice or not at all. Linux's own /proc readdir has exactly
-/// this property (its cookie is a position in the tgid list), and no consumer
-/// treats a single enumeration as a consistent snapshot.
-fn native_pid_list(out: &mut [u32]) -> usize {
-    // V-7: in vivarium mode the enumeration IS the member set (same source,
-    // same snapshot semantics); pre-entrypoint it is empty, fail-closed.
-    if viv_runner() != 0 {
-        return viv_members(out);
-    }
-    let mut buf = [0u8; 2048]; // matches the kernel's DEVCTL_READ_BUF
-    let got = match read_native(b"/ctl/procs", &mut buf) {
-        Some(n) => n,
-        None => return 0,
-    };
-    parse_pid_list(&buf[..got], out)
+/// COHERENCY: a client resumes from the last pid it was given, so a Proc alive
+/// through an enumeration appears exactly once whatever exits or spawns around
+/// it -- native /proc's own contract (DEBUG-FS-DESIGN 5h), which this passes on.
+fn native_pid_list(from: u64) -> Vec<u32> {
+    let mut pids = procs::pids().unwrap_or_default();
+    let viv = viv_runner() != 0;
+    // pid 0 (kproc) is no /proc name here (parse_pid): 0 is the static-node range.
+    pids.retain(|&p| p != 0 && u64::from(p) >= from && (!viv || viv_is_member(p)));
+    pids
 }
 
 /// The declared CPU count, live from /ctl/cpu. Used to decide whether a `cpuN`
@@ -956,25 +891,6 @@ fn native_cpu_count() -> u64 {
     let mut buf = [0u8; 1024];
     let got = read_ctl_cpu(&mut buf);
     parse_cpu_count(&buf[..got])
-}
-
-/// The pure half of native_pid_list: first column of every line that parses as
-/// a pid. The header ("PID    PPID    ...") fails parse_pid and is skipped by
-/// the same rule as any junk, so no separate header-stripping step can drift
-/// out of sync with the kernel's format.
-pub fn parse_pid_list(text: &[u8], out: &mut [u32]) -> usize {
-    let mut n = 0usize;
-    for line in text.split(|&c| c == b'\n') {
-        if n >= out.len() {
-            break;
-        }
-        let end = line.iter().position(|&c| c == b' ').unwrap_or(line.len());
-        if let Some(pid) = parse_pid(&line[..end]) {
-            out[n] = pid;
-            n += 1;
-        }
-    }
-    n
 }
 
 // --- /ctl/cpu, the source for the whole /sys cpu tree (V-4c-1) -------------
@@ -1012,8 +928,7 @@ pub fn parse_cpu_count(text: &[u8]) -> u64 {
 ///
 /// The "cpu idle_ns capacity" header is skipped by the same rule as any junk
 /// (its first field fails the decimal parse), so no separate header-stripping
-/// step can drift out of sync with the kernel's format -- the parse_pid_list
-/// discipline.
+/// step can drift out of sync with the kernel's format.
 pub fn parse_cpu_online(text: &[u8], out: &mut [bool]) -> usize {
     let mut rows = 0usize;
     for line in text.split(|&c| c == b'\n') {
@@ -2546,24 +2461,21 @@ impl Conn {
         // at cookies >= N_COUNT -- so a `ps` that readdirs /proc sees the
         // numeric dirs Linux puts there. Reached only when the static phase ran
         // to completion, so a budget-truncated call resumes in the right phase.
+        // A pid's cookie is N_COUNT + pid + 1: the lowest pid not yet given.
         if f.node == N_PROC && child >= N_COUNT {
-            let mut pids = [0u32; 64];
-            let n = native_pid_list(&mut pids);
-            let mut i = (child - N_COUNT) as usize;
-            while i < n {
+            for pid in native_pid_list(child - N_COUNT) {
                 let mut nm = Render::new();
-                nm.push_dec(pids[i] as u64);
-                let node = pid_qid(pids[i], PK_DIR);
+                nm.push_dec(u64::from(pid));
+                let node = pid_qid(pid, PK_DIR);
                 if !self.emit_dirent(
                     &mut data,
                     budget,
                     node,
-                    N_COUNT + i as u64 + 1,
+                    N_COUNT + u64::from(pid) + 1,
                     nm.bytes(),
                 ) {
                     break;
                 }
-                i += 1;
             }
         }
         // .../system/cpu continues into the live cpuN dirs, by the same
@@ -2945,64 +2857,53 @@ pub fn selftest() -> Result<(), &'static str> {
         return Err("a pid resolved at the world root");
     }
 
-    // --- V-4b-3: the /ctl/procs pid-list parse, incl. the header skip.
+    // --- V-7: the vivarium membership walk, pure vectors.
     {
-        let procs = b"PID    PPID    NAME    STATE    THREADS\n\
-                      1    0    joey    ALIVE    1\n\
-                      42    1    ptyfs    ALIVE    2\n";
-        let mut pids = [0u32; 8];
-        let n = parse_pid_list(procs, &mut pids);
-        if n != 2 || pids[0] != 1 || pids[1] != 42 {
-            return Err("pid list parse");
+        fn ppid(t: &[(u32, u32)], pid: u32) -> Option<u32> {
+            t.iter().find(|r| r.0 == pid).map(|r| r.1)
         }
-        // The bound is honored rather than overrunning the caller's array.
-        let mut one = [0u32; 1];
-        if parse_pid_list(procs, &mut one) != 1 {
-            return Err("pid list bound");
+        // (pid, ppid): joey 1; the runner 10 under it; this server 11 and the
+        // entrypoint 20 under the runner; 21 under 20; 22 under 21; login 30.
+        let table = [(1u32, 0u32), (10, 1), (11, 10), (20, 10), (21, 20), (22, 21), (30, 1)];
+        // runner=10, me=11: the container tree is exactly {20, 21, 22} -- the
+        // server self-excludes, the runner and the host procs are out, and so
+        // is a pid no Proc has.
+        for pid in [20u32, 21, 22] {
+            if !viv_tree_member(pid, 10, 11, |p| ppid(&table, p)) {
+                return Err("vivarium member refused");
+            }
         }
-    }
-
-    // --- V-7: the vivarium membership computation, pure vectors.
-    {
-        let procs = b"PID    PPID    NAME    STATE    THREADS\n\
-                      1    0    joey    ALIVE    1\n\
-                      10    1    viv    ALIVE    1\n\
-                      11    10    diorama    ALIVE    1\n\
-                      20    10    probe    ALIVE    1\n\
-                      21    20    child    ALIVE    1\n\
-                      22    21    grandchild    ALIVE    1\n\
-                      30    1    login    ALIVE    1\n";
-        let mut pairs = [(0u32, 0u32); 8];
-        let np = parse_pid_ppid_list(procs, &mut pairs);
-        if np != 7 || pairs[1] != (10, 1) || pairs[3] != (20, 10) {
-            return Err("pid/ppid list parse");
+        for pid in [0u32, 1, 10, 11, 30, 99] {
+            if viv_tree_member(pid, 10, 11, |p| ppid(&table, p)) {
+                return Err("vivarium member leak");
+            }
         }
-        // runner=10, me=11: the container tree is exactly {20, 21, 22} --
-        // the diorama self-excludes, the runner and the host procs are out.
-        let mut m = [0u32; 8];
-        let n = compute_members(&pairs[..np], 10, 11, &mut m);
-        if n != 3 || !m[..n].contains(&20) || !m[..n].contains(&21) || !m[..n].contains(&22) {
-            return Err("vivarium members");
+        // No runner: nothing is a member.
+        if viv_tree_member(20, 0, 11, |p| ppid(&table, p)) {
+            return Err("vivarium membership without a runner");
         }
-        if m[..n].contains(&10) || m[..n].contains(&11) || m[..n].contains(&1) || m[..n].contains(&30)
-        {
-            return Err("vivarium member leak");
+        // The server is not in the tree, so neither is a child of its own.
+        let mine = [(1u32, 0u32), (10, 1), (11, 10), (12, 11)];
+        if viv_tree_member(12, 10, 11, |p| ppid(&mine, p)) {
+            return Err("the server's own child leaked in");
         }
-        // Pre-entrypoint (only the diorama exists yet): EMPTY, fail-closed.
-        let early = [(1u32, 0u32), (10u32, 1u32), (11u32, 10u32)];
-        if compute_members(&early, 10, 11, &mut m) != 0 {
-            return Err("vivarium pre-entrypoint not empty");
-        }
-        // A reparented orphan (ppid fell back to init) leaves the view --
+        // A reparented orphan (its parent fell back to init) leaves the view --
         // the documented fail-closed shape, never a host leak.
-        let orphaned = [(1u32, 0u32), (10u32, 1u32), (11u32, 10u32), (21u32, 1u32)];
-        if compute_members(&orphaned, 10, 11, &mut m) != 0 {
+        let orphaned = [(1u32, 0u32), (10, 1), (11, 10), (21, 1)];
+        if viv_tree_member(21, 10, 11, |p| ppid(&orphaned, p)) {
             return Err("vivarium orphan leaked in");
         }
-        // A corrupt CYCLIC snapshot terminates and admits nothing rooted
-        // outside the runner.
-        let cyclic = [(40u32, 41u32), (41u32, 40u32), (10u32, 1u32), (11u32, 10u32)];
-        if compute_members(&cyclic, 10, 11, &mut m) != 0 {
+        // An ancestor whose status cannot be read admits nothing below it.
+        let gap = [(10u32, 1u32), (22, 21)];
+        if viv_tree_member(22, 10, 11, |p| ppid(&gap, p)) {
+            return Err("vivarium membership past an unreadable ancestor");
+        }
+        // A link to a Proc that is not older is not one the kernel makes: the
+        // walk ends there and admits nothing.
+        let cyclic = [(40u32, 41u32), (41, 40), (10, 1)];
+        if viv_tree_member(40, 10, 11, |p| ppid(&cyclic, p))
+            || viv_tree_member(41, 10, 11, |p| ppid(&cyclic, p))
+        {
             return Err("vivarium cycle handled wrong");
         }
     }

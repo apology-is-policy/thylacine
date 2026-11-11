@@ -109,6 +109,7 @@ mirrors:
   - "tools/interactive/s7-nora-probe.exp"
   - "tools/interactive/manual.exp"
   - "tools/interactive/pts-probe.exp"
+  - "tools/interactive/ps-many.exp"
 literals:
   - "Thylacine boot OK"
   - "EXTINCTION:"
@@ -120,7 +121,7 @@ literal-mentions:
   - "tools/interactive/go8d.exp (a prose note)"
   - "tools/check-console-lines.py (exempts the base line by its text; a reword only drops the exemption, and the check then fails)"
 created: 2026-08-01
-updated: 2026-11-09
+updated: 2026-11-11
 ---
 ## The surface
 

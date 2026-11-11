@@ -16,7 +16,6 @@ struct Proc;
 size_t devctl_format_9p_sessions_for_test(const struct Proc *reader, char *buf, size_t cap);
 size_t devctl_format_procs_for_test(const struct Proc *reader, char *buf, size_t cap);
 bool devctl_kernel_base_readable(const struct Proc *caller);
-const char *devctl_procs_state_name_for_test(const struct Proc *p);
 bool devctl_system_counters_readable(const struct Proc *reader);
 #endif // KERNEL_TESTS
 

@@ -158,48 +158,26 @@ bool devctl_system_counters_readable(const struct Proc *reader) {
     return (__atomic_load_n(&reader->caps, __ATOMIC_ACQUIRE) & CAP_HOSTOWNER) != 0;
 }
 
-static const char *state_name(enum proc_state s) {
-    switch (s) {
-    case PROC_STATE_INVALID: return "INVALID";
-    case PROC_STATE_ALIVE:   return "ALIVE";
-    case PROC_STATE_ZOMBIE:  return "ZOMBIE";
-    default:                 return "?";
-    }
-}
-
-// prowl-4: the /ctl/procs STATE column shows the effective run-state -- an ALIVE
-// Proc with job_stop_req set (a monitor `suspend`, or a Ctrl-Z via the pts path)
-// reads STOPPED (the Unix `ps` T state), so a suspend is VISIBLE in the list.
-// The DEBUG stop (debug_stop_req, the attach-gated debugger stop) is deliberately
-// NOT surfaced here -- it is the debugger's private I-39 view, not a job-control
-// state a monitor should expose. job_stop_req is read atomically (a cross-Proc
-// reader holds g_proc_table_lock via proc_for_each but no per-Proc lock). A
-// dying Proc is not stopped (DEBUG-FS-DESIGN 5g): its last thread runs its exit
-// close whatever stop it had, so it shows its own state.
-static const char *procs_state_name(const struct Proc *p) {
-    if (p->state == PROC_STATE_ALIVE &&
-        __atomic_load_n(&p->job_stop_req, __ATOMIC_ACQUIRE) != 0 &&
-        __atomic_load_n(&p->group_exit_msg, __ATOMIC_ACQUIRE) == NULL)
-        return "STOPPED";
-    return state_name(p->state);
-}
-
-#ifdef KERNEL_TESTS
-// Test hook: the STATE column's word for `p`.
-const char *devctl_procs_state_name_for_test(const struct Proc *p) {
-    return procs_state_name(p);
-}
-#endif
-
 // =============================================================================
 // Per-leaf content generators.
 // =============================================================================
 
 // procs: column-aligned PID/state/threads listing.
+//
+// One read holds the rows that fit the buffer, not every Proc: the walk stops at
+// the first row that does not fit (format_procs), and the table then ends with
+// PROCS_CUT_LINE, whose room is kept free for it. A reader that needs every Proc
+// lists /proc -- a directory, with no such bound -- and reads each status.
+#define PROCS_HEADER   "PID    PPID    NAME    STATE    THREADS    PAGES    TABLES    CHILDREN    CPU_NS\n"
+#define PROCS_CUT_LINE "(cut: more processes than one read holds; /proc lists them all)\n"
+#define PROCS_CUT_LEN  (sizeof(PROCS_CUT_LINE) - 1u)
+
 struct procs_fmt_state {
     char              *buf;
     size_t             cap;
     size_t             off;
+    size_t             last;        // where the newest row starts
+    bool               in_reserve;  // that row ends inside the cut line's room
     bool               overflow;
     const struct Proc *reader;
 };
@@ -207,6 +185,13 @@ struct procs_fmt_state {
 static int format_procs_cb(struct Proc *p, void *arg) {
     struct procs_fmt_state *s = (struct procs_fmt_state *)arg;
     if (devproc_none_walled(s->reader, p)) return 0;   // a none reader: its own row only
+    // Only the table's LAST row may take the cut line's room. Another row
+    // follows the one that did, so that one goes and the table is cut there.
+    if (s->in_reserve) {
+        s->off = s->last;
+        s->overflow = true;
+        return 1;
+    }
     size_t row = s->off;   // a row is committed whole or not at all
     size_t n;
 
@@ -240,7 +225,7 @@ static int format_procs_cb(struct Proc *p, void *arg) {
     if (!n) goto full;
     s->off += n;
 
-    n = fmt_str(s->buf, s->cap, s->off, procs_state_name(p));   // prowl-4: STOPPED if job-stopped
+    n = fmt_str(s->buf, s->cap, s->off, proc_state_word(p));
     if (!n) goto full;
     s->off += n;
 
@@ -306,6 +291,8 @@ static int format_procs_cb(struct Proc *p, void *arg) {
     if (!n) goto full;
     s->off += n;
 
+    s->last = row;
+    s->in_reserve = s->off > s->cap - PROCS_CUT_LEN;
     return 0;        // continue iteration
 
 full:
@@ -317,11 +304,10 @@ full:
 }
 
 static size_t format_procs(const struct Proc *reader, char *buf, size_t cap) {
-    size_t off = 0;
-    size_t n;
-    n = fmt_str(buf, cap, off, "PID    PPID    NAME    STATE    THREADS    PAGES    TABLES    CHILDREN    CPU_NS\n");
-    if (!n) return 0;
-    off += n;
+    size_t off = fmt_str(buf, cap, 0, PROCS_HEADER);
+    // A buffer without room for the header and the cut line renders nothing:
+    // a table is never short without saying so.
+    if (!off || cap - off < PROCS_CUT_LEN) return 0;
 
     // #57a F3: format_procs_cb now early-returns (non-zero = STOP) on the first
     // overflow, so proc_for_each stops walking once the DEVCTL_READ_BUF fills
@@ -331,14 +317,20 @@ static size_t format_procs(const struct Proc *reader, char *buf, size_t cap) {
     // O(total-procs). The remaining O(N)-worst-case proc-table walk under the
     // global IRQ-off lock (find/kill) is the pre-existing scalability pattern
     // tracked to the #62 perf backlog (per-Proc locks / RCU).
-    struct procs_fmt_state s = { buf, cap, off, false, reader };
+    struct procs_fmt_state s = {
+        .buf = buf, .cap = cap, .off = off, .last = off,
+        .in_reserve = false, .overflow = false, .reader = reader,
+    };
     proc_for_each(format_procs_cb, &s);
+    // Every row began at or below cap - PROCS_CUT_LEN (the header's check, then
+    // in_reserve), and s.off is where one began: the line fits.
+    if (s.overflow) s.off += fmt_str(buf, cap, s.off, PROCS_CUT_LINE);
     return s.off;
 }
 
 #ifdef KERNEL_TESTS
 // Test hook: /ctl/procs formatted into a buffer of the caller's size, so a
-// test can make any row the one that overflows.
+// test can make any row the one that does not fit.
 size_t devctl_format_procs_for_test(const struct Proc *reader, char *buf, size_t cap) {
     return format_procs(reader, buf, cap);
 }
@@ -1167,6 +1159,8 @@ static int devctl_close(struct Spoor *c) {
 // may advance between pages — read the whole file in one call (any read
 // with n >= the content size) for a consistent snapshot.
 #define DEVCTL_READ_BUF 4096
+_Static_assert(DEVCTL_READ_BUF >= sizeof(PROCS_HEADER) - 1u + PROCS_CUT_LEN,
+               "/ctl/procs: the read buffer holds the header and the cut line");
 
 static long devctl_read(struct Spoor *c, void *buf, long n, s64 off) {
     if (!c || !buf) return -1;

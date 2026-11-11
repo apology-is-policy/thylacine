@@ -1,13 +1,15 @@
 // ps [--color[=WHEN]] [--beacon=WHEN] -- list processes, the Thylacine way.
 //
-// One atomic read of /ctl/procs (the kernel renders the whole table under
-// g_proc_table_lock -- no readdir race), columns PID PPID NAME STATE THREADS
-// PAGES TABLES CHILDREN CPU_NS. Styled (a presentation tool, color auto): a boxed
-// listing with CPU humanized (ns -> ms/s) and the state colored (ALIVE green,
-// ZOMBIE ember, STOPPED gold). Color off: the kernel text passes
-// through VERBATIM (parseable, byte-clean -- the ns/pelt discipline). If any
-// row fails to parse (a kernel format change), the whole output degrades to
-// the verbatim pass-through rather than a partial table.
+// Every Proc /proc lists, one row each from its /proc/<pid>/status (Plan 9's
+// ps): the directory is whole at any size, where one read of /ctl/procs holds
+// only the rows that fit it. Each row is one instant of its Proc; the set is
+// not one instant (a Proc that ends during the listing is skipped). Columns PID
+// PPID NAME STATE THREADS PAGES TABLES CHILDREN CPU_NS, ascending by pid.
+// Styled (a presentation tool, color auto): a boxed listing with CPU humanized
+// (ns -> ms/s) and the state colored (ALIVE green, ZOMBIE ember, STOPPED gold).
+// Color off: the plain table in /ctl/procs's own shape (the header, four-space
+// columns, CPU_NS raw) -- parseable and byte-clean. A status that cannot be
+// read or parsed fails the listing; ps never prints a table it knows is short.
 //
 // Beacon (docs/BEACON.md): at the Rich tier the listing is a beacon `table`
 // (plain-aligned payload + frames, no box) with `obj type=pid` on the PID
@@ -28,21 +30,21 @@ use core::fmt::Write as _;
 use coreutils::color::{self, ColorMode};
 use coreutils::{boxd, palette, usage};
 use libthyla_rs::env::{self, Args};
-use libthyla_rs::fs::File;
+use libthyla_rs::procs;
 use libthyla_rs::{eprintln, io};
 
 const USAGE: &str = "\
 usage: ps [--color[=WHEN]] [--beacon=WHEN]
-  List processes (one atomic /ctl/procs snapshot): PID, parent, name, state,
-  threads, pages, page tables, children, CPU time. Color off passes the kernel
-  text through verbatim (parseable).
+  List every process (/proc, one row per status): PID, parent, name, state,
+  threads, pages, page tables, children, CPU time. Color off prints the plain
+  table (parseable; CPU time in ns).
   --color[=WHEN]  colorize: always | never | auto (default)
   --beacon=WHEN   semantic markup: auto (default) | always | never
   --help  show this help
 
 Examples:
   ps                    # boxed, colored on the console; plain in a pipe
-  ps --color=never      # the raw kernel table, byte-clean
+  ps --color=never      # the plain table, byte-clean
 ";
 
 #[no_mangle]
@@ -63,43 +65,61 @@ struct PsRow {
 }
 
 /// ns -> a compact human figure: "<n>ms" under 10s, else "<n>s". The kernel
-/// withholds another principal's CPU time as "-", which stays "-".
-fn cpu_str(ns_text: &str) -> Option<String> {
-    if ns_text == "-" {
-        return Some(String::from("-"));
-    }
-    let ns: u64 = ns_text.parse().ok()?;
+/// withholds another principal's CPU time, which shows as "-".
+fn cpu_str(ns: Option<u64>) -> String {
+    let Some(ns) = ns else {
+        return String::from("-");
+    };
     let ms = ns / 1_000_000;
-    Some(if ms < 10_000 {
+    if ms < 10_000 {
         format!("{}ms", ms)
     } else {
         format!("{}s", ms / 1000)
-    })
-}
-
-/// Parse one /ctl/procs data row. The NAME column is rejoined from the middle
-/// fields so a (hypothetical) spaced name cannot shear the numeric columns.
-fn parse_row(line: &str) -> Option<PsRow> {
-    let f: Vec<&str> = line.split_whitespace().collect();
-    if f.len() < 9 {
-        return None;
     }
-    let n = f.len();
-    Some(PsRow {
-        pid: String::from(f[0]),
-        ppid: String::from(f[1]),
-        name: f[2..n - 6].join(" "),
-        state: String::from(f[n - 6]),
-        threads: String::from(f[n - 5]),
-        pages: String::from(f[n - 4]),
-        tables: String::from(f[n - 3]),
-        children: String::from(f[n - 2]),
-        cpu: cpu_str(f[n - 1])?,
-    })
 }
 
-/// The kernel's STATE vocabulary (devctl procs_state_name): ALIVE / ZOMBIE /
-/// STOPPED (job-stop) / INVALID / "?".
+fn styled_row(r: &procs::Row) -> PsRow {
+    PsRow {
+        pid: format!("{}", r.pid),
+        ppid: format!("{}", r.ppid),
+        name: r.name.clone(),
+        state: String::from(r.state.as_str()),
+        threads: format!("{}", r.threads),
+        pages: format!("{}", r.pages),
+        tables: format!("{}", r.tables),
+        children: format!("{}", r.children),
+        cpu: cpu_str(r.cpu_ns),
+    }
+}
+
+/// The plain table: /ctl/procs's header and row shape, so what parsed that file
+/// parses this.
+fn render_plain(out: &mut io::OutSink, rows: &[procs::Row]) {
+    out.put(b"PID    PPID    NAME    STATE    THREADS    PAGES    TABLES    CHILDREN    CPU_NS\n");
+    for r in rows {
+        let _ = write!(
+            out,
+            "{}    {}    {}    {}    {}    {}    {}    {}    ",
+            r.pid,
+            r.ppid,
+            r.name,
+            r.state.as_str(),
+            r.threads,
+            r.pages,
+            r.tables,
+            r.children
+        );
+        match r.cpu_ns {
+            Some(ns) => {
+                let _ = write!(out, "{}\n", ns);
+            }
+            None => out.put(b"-\n"),
+        }
+    }
+}
+
+/// The kernel's STATE vocabulary (proc_state_word): ALIVE / ZOMBIE / STOPPED
+/// (job-stop) / INVALID / "?".
 fn state_color(state: &str) -> &'static str {
     match state {
         "ALIVE" => palette::GREEN,
@@ -149,9 +169,9 @@ fn render_box(out: &mut io::OutSink, rows: &[PsRow], on: bool) {
     // Total visible content width: cells + two-space gutters.
     let content_w: usize = w.iter().sum::<usize>() + 2 * (w.len() - 1);
     let count = format!("{} proc{}", rows.len(), if rows.len() == 1 { "" } else { "s" });
-    let total = boxd::fit(content_w, "/ctl/procs", &count, "");
+    let total = boxd::fit(content_w, "/proc", &count, "");
 
-    let _ = write!(out, "{}{}{}\n", color::col(palette::DIM, on), boxd::top(total, "/ctl/procs", &count), color::reset(on));
+    let _ = write!(out, "{}{}{}\n", color::col(palette::DIM, on), boxd::top(total, "/proc", &count), color::reset(on));
     // Header row (dim).
     {
         let mut line = String::new();
@@ -257,42 +277,23 @@ fn run(args: Args) -> i64 {
     let rich = coreutils::beacon_gate::resolve(bmode) == beacon::Tier::Rich;
     let on = !rich && mode.resolve(|| libthyla_rs::stdout_is_terminal());
 
-    let raw = match File::open("/ctl/procs").and_then(|mut f| io::slurp(&mut f)) {
-        Ok(d) => d,
+    let rows = match procs::list() {
+        Ok(rows) => rows,
         Err(e) => {
-            eprintln!("ps: /ctl/procs: {}", e);
+            eprintln!("ps: /proc: {}", e);
             return 1;
         }
     };
 
     let mut out = io::OutSink::new();
     if !on && !rich {
-        // The verbatim pass-through (parseable; the raw CPU_NS is here).
-        out.put(&raw);
+        render_plain(&mut out, &rows);
     } else {
-        let text = String::from_utf8_lossy(&raw);
-        let mut rows: Vec<PsRow> = Vec::new();
-        let mut ok = true;
-        for line in text.lines().skip(1) {
-            if line.is_empty() {
-                continue;
-            }
-            match parse_row(line) {
-                Some(r) => rows.push(r),
-                None => {
-                    ok = false;
-                    break;
-                }
-            }
-        }
-        if !ok {
-            // A row this tool cannot parse (kernel format drift): degrade to
-            // the verbatim text rather than render a partial table.
-            out.put(&raw);
-        } else if rich {
-            render_rich(&mut out, &rows);
+        let styled: Vec<PsRow> = rows.iter().map(styled_row).collect();
+        if rich {
+            render_rich(&mut out, &styled);
         } else {
-            render_box(&mut out, &rows, on);
+            render_box(&mut out, &styled, on);
         }
     }
     out.finish("ps", 0)

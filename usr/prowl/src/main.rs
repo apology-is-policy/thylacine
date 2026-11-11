@@ -1,8 +1,8 @@
 // prowl -- the scheduler-aware process monitor (docs/PROWL-DESIGN.md; prowl-2).
 //
-// A native Kaua TUI (like nora): it polls the prowl-1 kernel telemetry --
-// /ctl/procs (the all-pids process table + cumulative cpu_ns) + /ctl/sched (the
-// online CPU count) -- diffs cpu_ns across ~1.5 s ticks for %CPU (the htop
+// A native Kaua TUI (like nora): it polls the prowl-1 kernel telemetry -- the
+// process set (/proc: every Proc's status, with its cumulative cpu_ns) +
+// /ctl/sched (the online CPU count) -- diffs cpu_ns across ~1.5 s ticks for %CPU (the htop
 // method), renders a per-core-aware CPU meter + a sortable process list, and (as
 // a manager) kills the selected process via /proc/<pid>/ctl. prowl adds NO
 // authority of its own: the kernel's I-26 two-axis gate decides every kill, so a
@@ -30,6 +30,7 @@ use libthyla_rs::alloc::ThylaAlloc;
 use libthyla_rs::fs::{File, OpenOptions};
 use libthyla_rs::io::{Read, Write};
 use libthyla_rs::poll::PollTimeout;
+use libthyla_rs::procs;
 use libthyla_rs::time::Instant;
 use libthyla_rs::{env, t_putstr};
 
@@ -58,9 +59,8 @@ const SIZE_QUERY_TIMEOUT_MS: u32 = 150;
 /// to feel live. Keys wake the loop early (responsive nav) without resampling
 /// unless a full interval has elapsed.
 const REFRESH_MS: u32 = 1500;
-/// /ctl/procs caps at DEVCTL_READ_BUF (4 KiB) kernel-side, so one 4 KiB read
-/// holds the whole snapshot. The truncation past some fifty to sixty procs is a
-/// kernel pagination seam (the #62 perf backlog / task #158), not prowl's.
+/// The kernel renders a /ctl or /proc text file into at most 4 KiB, so one
+/// 4 KiB read holds any of them whole.
 const CTL_BUF: usize = 4096;
 
 /// The whole prowl UI state.
@@ -423,13 +423,21 @@ fn job_action(app: &mut App, verb: &[u8], ok_word: &str, deny_word: &str) -> Act
     Action::None
 }
 
-/// Read /ctl/procs + /ctl/cpu + /ctl/memory, derive %CPU + per-CPU util against
-/// the previous poll, sort, store; refresh the detail pane if open.
+/// Read the process set + /ctl/cpu + /ctl/memory, derive %CPU + per-CPU util
+/// against the previous poll, sort, store; refresh the detail pane if open.
 fn resample(app: &mut App) {
     let elapsed_ns = app.last_sample.elapsed().as_nanos() as u64;
     app.last_sample = Instant::now();
 
-    let mut rows = sample::parse_procs(&read_ctl_file("/ctl/procs"));
+    // A set that cannot be read whole is shown as none, with the reason: a
+    // partial list would read as "these are all the Procs".
+    let mut rows = match procs::list() {
+        Ok(set) => sample::rows_from(set),
+        Err(e) => {
+            app.status = Some(format!("/proc: {}", e));
+            Vec::new()
+        }
+    };
     app.sampler.update(&mut rows, elapsed_ns);
     app.sort.apply(&mut rows);
     app.rows = rows;

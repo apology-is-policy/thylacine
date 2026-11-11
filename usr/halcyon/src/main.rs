@@ -1452,40 +1452,20 @@ fn root_source() -> Option<String> {
     None
 }
 
-/// The loaded systems: init's children per /ctl/procs -- (name, pid), by
-/// pid, at most ten (five rows of two). Empty when /ctl/procs is unreadable.
+/// The loaded systems: init's children among every Proc /proc lists -- (name,
+/// pid), by pid, at most ten (five rows of two). Empty when the set is
+/// unreadable.
 fn loaded_systems() -> Vec<(String, u32)> {
-    let mut out: Vec<(String, u32)> = Vec::new();
-    let Ok(bytes) = read_capped("/ctl/procs", 64 * 1024) else {
-        return out;
+    let Ok(rows) = libthyla_rs::procs::list() else {
+        return Vec::new();
     };
-    let Ok(text) = core::str::from_utf8(&bytes) else {
-        return out;
-    };
-    let mut rows: Vec<(u32, u32, String)> = Vec::new();
-    for line in text.lines().skip(1) {
-        let mut it = line.split_whitespace();
-        let (Some(pid), Some(ppid), Some(name)) = (it.next(), it.next(), it.next()) else {
-            continue;
-        };
-        let (Ok(pid), Ok(ppid)) = (pid.parse::<u32>(), ppid.parse::<u32>()) else {
-            continue;
-        };
-        rows.push((pid, ppid, String::from(name)));
-    }
-    let init = rows
-        .iter()
-        .find(|r| r.2 == "joey")
-        .map(|r| r.0)
-        .unwrap_or(1);
-    for (pid, ppid, name) in rows.into_iter() {
-        if ppid == init && pid != init {
-            out.push((name, pid));
-        }
-    }
-    out.sort_by_key(|r| r.1);
-    out.truncate(10);
-    out
+    let init = rows.iter().find(|r| r.name == "joey").map_or(1, |r| r.pid);
+    // procs::list is ascending by pid.
+    rows.into_iter()
+        .filter(|r| r.ppid == init && r.pid != init)
+        .map(|r| (r.name, r.pid))
+        .take(10)
+        .collect()
 }
 
 /// `halcyon welcome`: the first-launch herald (HALCYON.md 13.7, H-4d;
