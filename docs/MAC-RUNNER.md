@@ -194,17 +194,18 @@ argument (xml:94-101); UTM carries a QEMU patch adding a `refresh_rate` device p
 (mHz) for displays that report none (`utm:patches/qemu-10.0.12-utm.patch:4464-4486`), the
 precedent for telling the guest 120 Hz on ProMotion.
 
-**B5. Guest side today (read 2026-11-10).** Lictor owns virtio-gpu
+**B5. The guest side as it was read on 2026-11-10 (the next paragraph is what was built
+from it; line numbers are that day's).** Lictor owns virtio-gpu
 (`tree:usr/lictor/src/backend/gpu.rs`): `read_display_info` at boot (~2840),
 `query_display_info` only on `mode auto` (~2941, from `backend/device.rs:257`),
-`parse_edid_mm` (~2930). A host resize raises the config-change event, which Lictor treats
+`parse_edid_mm` (~2930). A host resize raised the config-change event, which Lictor treated
 as stale-wake noise ("an interrupt-ish train from host window resizes", `gpu.rs:448-462`)
-and does not re-probe; nothing in `kernel/` or `usr/` reads `events_read` for that bit.
+and did not re-probe; nothing in `kernel/` or `usr/` read `events_read` for that bit.
 halcyond already relayouts live from the compositor's display info
-(`usr/halcyond/src/main.rs:584-606`). Live resize therefore = Lictor treating
+(`usr/halcyond/src/main.rs:584-606`). Live resize was therefore Lictor treating
 `VIRTIO_GPU_EVENT_DISPLAY` like `mode auto` (re-probe + EDID re-read + `events_clear`) and
-propagating the geometry. Lictor is co-owned by Astra via `docs/handoffs/` -- a
-coordination item, not a unilateral edit.
+propagating the geometry. Lictor was co-owned by Astra via `docs/handoffs/`, so at that
+reading it was a coordination item, not a unilateral edit.
 
 **B5, as built (2026-11-11; the operator, with Astra away: agents may change Lictor, and
 leave her a note, `docs/handoffs/050`).** Lictor takes the device's events and counts the
@@ -217,8 +218,10 @@ has stood 150 ms: it asks for the display's size and takes the mode fitted to it
 EDID, then the scale (`docs/AURORA-CONFIG.md` 3.4, amended the same day). The fitted mode is
 the host's size, or that size over or times a whole number, the first that is within the
 mode's bounds and whose screen and full-screen surface can be allocated; the same rule
-gives the first mode at boot. An event that meets a stalled device waits for it to answer;
-an asking that fails with the device answering is made again, six times at most. Lictor's own trusted screen is made once, at boot, by the same rule against its
+gives the first mode at boot. An event whose asking finds the device stalled waits for it
+to answer; an asking that was made and failed is made again, six times at most; and a bind
+of the screen that the device did not accept is asked for again from the compositor's pass
+until it is accepted. Lictor's own trusted screen is made once, at boot, by the same rule against its
 own limits (800x720 at least, 4096x2160 pixels at most), and no longer fails for a host of
 another size. An explicit `mode W H` pins the mode until a `mode auto` that is accepted.
 

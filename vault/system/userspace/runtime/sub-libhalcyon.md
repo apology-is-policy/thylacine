@@ -637,17 +637,18 @@ and the declaration being the last whole-word token with a table value.
 
 ## `display` -- the mode for a host's size, and when to follow it (2026-11-11)
 
-`display.rs` holds the two pure rules of `docs/AURORA-CONFIG.md` 3.4 as amended:
-which mode a display takes for the size its host prefers, and when a change of
-that size is followed. [[sub-tapestryd]] uses both; [[sub-lictor]] uses the first
-for its trusted screen.
+`display.rs` holds the pure rules of `docs/AURORA-CONFIG.md` 3.4 as amended:
+which mode a display takes for the size its host prefers, when a change of that
+size is followed, and how often something that stays owed is tried again.
+[[sub-tapestryd]] uses all three; [[sub-lictor]] uses the first for its trusted
+screen.
 
 **`fit_mode(host_w, host_h, can)`** returns the host's size if `can` accepts it,
 else that size over 2, times 2, over 3, times 3, over 4, times 4
 (`FIT_MAX_FACTOR`), the first `can` accepts; `None` when none is accepted or the
 host's size has a zero side. The caller's `can` is its own bound: the
-compositor's is the mode's range and a probe allocation of the full-screen
-surface, Lictor's is `render::fits`. The factor is whole on purpose: the host
+compositor's is the mode's range and a probe allocation of a screen and one
+full-screen surface held together, Lictor's is `render::fits`. The factor is whole on purpose: the host
 shows a guest pixel as k by k of its own (or k by k of the guest's as one), so
 nothing is filtered, and the scale needs no rule here, because the EDID's
 millimetres under half the pixels are half the DPI and `scale_pct` halves by
@@ -668,28 +669,49 @@ itself (its caller does) and leaves an event that is still waiting out its quiet
 time to be asked for when it ends. A clock that reads earlier than the event is
 a `Wait`, not a wrap.
 
-An asking can fail, or be pointless to make, for a reason that passes, and the
-caller tells two kinds apart. The device is stalled and says so: the caller
-calls `hold`, and `step` answers `Ask` again after the quiet time, with no
-count, for as long as the caller goes on holding. `hold` is true the first time
-for an event, so that the caller says it once. Or the device answers and the
-asking failed all the same (a change it did not take, an allocation that
-failed): the caller calls `retry`, and `step` answers `Ask` again after a wait
-that doubles from twice the quiet time. `retry` is false once `RETRY_MAX` (6)
-askings have been made again, 18.9 s in all, and the event is forgotten. An
-event that arrives during either wait takes the old one's place, with all its
-askings and its own first `hold`. The first is uncounted because the device's
-driver ends a stall itself, by answering again or by declaring the device dead,
-and the caller stops at the second.
+An asking can be pointless to make, or fail, for a reason that passes, and the
+caller tells the two apart by whether anything was asked. The device is stalled
+before the asking and says so, and nothing is asked of it: the caller calls
+`hold`, and `step` answers `Ask` again after the quiet time, with no count.
+`hold` is true the first time for an event, so that the caller says it once. Or
+the asking was made and failed (a change the device did not take, an allocation
+that failed, a stall that began inside the asking): the caller calls `retry`,
+and `step` answers `Ask` again after a wait that doubles from twice the quiet
+time. `retry` is false once `RETRY_MAX` (6) askings have been made again, 18.9 s
+in all, and the event is forgotten. Holds between failed askings neither spend
+those askings nor give them back, and a hold waits the quiet time whatever the
+last failure's wait was. An event that arrives during either wait takes the old
+one's place, with all its askings and its own first `hold`.
 
-**Tests.** 7 host tests: the fitted sizes for the Macs' full screens and for
+A hold is uncounted because it costs nothing and because the device's driver
+ends a stall itself, by answering again or by declaring the device dead, and
+the caller stops at the second. That bounds one stall. It does not bound an
+event: an event is held again for every stall that is standing when its asking
+comes. What is bounded for an event is what costs something, the askings made.
+
+`again` starts an asking after the quiet time with all its askings, as a moved
+count does (`step` calls it). A caller that asked the host itself, outside
+`step`, calls it when what it began is not finished, so that the pass finishes
+it; under a pinned mode the answer is `Pinned`, as for an event.
+
+**`Backoff`** is for something that failed and stays owed for as long as it
+fails, such as a display's bind to its screen. `ready(now)` is true until the
+first `failed(now)`, then again once a wait has passed that doubles with each
+failure from twice the quiet time to `QUIET_MS << BACKOFF_MAX_SHIFT` (9.6 s
+at 6) and stays there; `reset` starts it afresh. It never gives up. Its caller
+decides when there is no point in trying, which for the compositor is a dead
+device.
+
+**Tests.** 10 host tests: the fitted sizes for the Macs' full screens and for
 Lictor's limits, the order of the factors, and the refusals; an event followed
 at exactly the quiet time and once; a train; the wrap and a first count that is
 not zero; the askings made again, their waits and their end; an event held
 while the device is stalled, said once, and its askings still whole afterwards;
-the pin in each order against a waiting event. Each of 21 changes to the file
-turns one of them red (`aux-gate/macrunner/mut/a3b_mut.py`, a scratch harness,
-not a gate).
+holds between failed askings, six of each in turn, with the sixth failure still
+the last; `again` with no event, after spent askings, and under a pin; the
+backoff's waits over 40 failures, its reset and its clock edges; the pin in
+each order against a waiting event. Each of 32 changes to the file turns one of
+them red (`aux-gate/macrunner/mut/a3b_mut.py`, a scratch harness, not a gate).
 
 ## `motion` -- section 10's movement, and the rule deciding whether it runs
 

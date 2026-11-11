@@ -4,12 +4,15 @@
 # (AURORA-CONFIG.md section 3.4 as amended 2026-11-11).
 #
 # One boot of the gate image (`tools/build.sh kernel --config ci`: the login
-# must reach a shell on the serial console). Three witnesses for every mode: the
-# compositor's line that the mode is up, said after the change and of what the
-# device then scans; the scanout QEMU dumps; and the console's size in cells as
-# its renderer reported it (`/dev/winsize`, 10 by 22 pixels a cell at scale
-# 100), which a console that was never told of the mode, or never laid itself
-# out again, does not change.
+# must reach a shell on the serial console). Four witnesses for every mode: the
+# compositor's lines (the mode is up, said after the change, and the event is
+# followed, said last, once the bind of the screen and the scale are settled
+# too); the scanout QEMU dumps, its size and a picture on it; the console's
+# size in cells as its renderer reported it (`/dev/winsize`, 10 by 22 pixels a
+# cell at scale 100), which a console that was never told of the mode, or never
+# laid itself out again, does not change; and that the dumped picture changes
+# when something is typed, which it does not if the device scans a screen
+# nobody composes into.
 #
 #   the boot:  the device is made 3456x2160, full screen on a 16-inch MacBook
 #              Pro. Three buffers of a surface that size are 85 MiB against 64
@@ -27,11 +30,14 @@
 #   no size:   a host that tells 0x0 disables the output. The compositor asks,
 #              is told nothing, and the mode stands.
 #
-# Every wait lists what must not happen before what is waited for: expect takes
-# the first pattern LISTED that matches, so a failure listed after the success
-# cannot fire while both are in its buffer. A follow that is put off because
-# the device is stalled is noted and waited out; one that fails with the device
-# answering fails the leg, though the compositor would ask again.
+# What must not be said is armed once, before every wait of the run, the
+# library's own (the login, a command's echo, the shutdown) included:
+# `expect_before` puts its patterns ahead of each wait's, and expect takes the
+# first pattern LISTED that matches, so a failure cannot hide behind a success
+# that is in the buffer with it. A follow that is put off because the device is
+# stalled before it is asked is noted and waited out. An asking that was made
+# and failed (the device refusing, or a stall that began inside the asking)
+# fails the leg, though the compositor would ask again.
 #
 # NOT asserted: how many mode changes a train costs. Its sizes go out 20 ms
 # apart and the compositor waits for 150 ms of quiet, so it is one change
@@ -57,23 +63,23 @@ set repo $lc_repo
 set qmp [lc_qmp_sock]
 set ppm /tmp/ls-display-follow-[pid].ppm
 
-# The scanout's geometry from the PPM header ("P6\nW H\n255"), and whether the
-# picture has more than one colour in it: a screen with nothing drawn on it
-# has the right geometry too. The stale-file guard is load-bearing: a dump that
-# failed must never be answered from the one before.
+# The scanout's geometry from the PPM header ("P6\nW H\n255"), how many
+# colours a sample of the picture has (a screen with nothing drawn on it has
+# the right geometry too), and a digest of all of it. The stale-file guard is
+# load-bearing: a dump that failed must never be answered from the one before.
 proc dims {} {
     global repo qmp ppm
     file delete -force $ppm
     if {[catch {exec $repo/tools/screendump.sh -s $qmp -P $ppm}]} { return "" }
     if {![file exists $ppm]} { return "" }
     if {[catch {exec python3 -I -c {
-import re, sys
+import hashlib, re, sys
 d = open(sys.argv[1], 'rb').read()
 m = re.match(rb'P6\s+(\d+)\s+(\d+)\s+255\s', d)
 w, h = int(m.group(1)), int(m.group(2))
 px = d[m.end():]
 assert len(px) == w * h * 3, (w, h, len(px))
-print(w, h, len({px[i:i + 3] for i in range(0, len(px), 3 * 101)}))
+print(w, h, len({px[i:i + 3] for i in range(0, len(px), 3 * 101)}), hashlib.md5(px).hexdigest())
 } $ppm} out]} { return "" }
     return $out
 }
@@ -101,11 +107,11 @@ proc tell {args} {
 # the question is put again until the answer is the one wanted. The newline
 # after the rows keeps a number that is still arriving from being read short.
 proc wait_cells {cols rows label} {
+    set ::what "reading the console's size ($label)"
     set got "(nothing read)"
     for {set i 0} {$i < 8} {incr i} {
         lc_send "cat /dev/winsize"
         lc_within 10 {
-            -re {EXTINCTION:} { lc_extinction_fail "extinction while reading the console's size ($label)" }
             -re {winsize (\d+) (\d+)[\r\n]} { set got "$expect_out(1,string) $expect_out(2,string)" }
             timeout { set got "(no answer in 10s)" }
             eof     { lc_fail "qemu exited while reading the console's size ($label)" }
@@ -118,68 +124,104 @@ proc wait_cells {cols rows label} {
     }
     lc_fail "the console never became $cols by $rows cells ($label; last: $got)"
 }
-# What must not be said while a mode is waited for. Listed before the line
-# waited for, everywhere; handed to expect word by word ({*}), since expect
-# reads one argument as arms only if a newline comes before its first word.
-set bad_lines {
-    -re {tapestryd: [^\r\n]*t_dma_create_weave\((\d+)\) failed -?\d+} { lc_fail "a surface could not be allocated during '$what': $expect_out(0,string)" }
-    -re {tapestryd: mode rebind failed; old geometry retained} { lc_fail "the scanout was not rebound during '$what'" }
-    -re {tapestryd: mode (\d+x\d+) is set; the display is not bound to its screen} { lc_fail "mode $expect_out(1,string) was set and the device does not scan its screen, during '$what'" }
-    -re {tapestryd: mode (\d+x\d+) refused -- (screen|surface) weave} { lc_fail "$expect_out(1,string) could not be allocated ($expect_out(2,string)) during '$what'" }
-    -re {tapestryd: no mode for a display of (\d+x\d+);} { lc_fail "no mode was found for a host of $expect_out(1,string) during '$what'" }
-    -re {tapestryd: display event \d+: not followed[^\r\n]*[\r\n]} { lc_fail "during '$what': [string trim $expect_out(0,string)]" }
-    -re {tapestryd: display event \d+: the mode is pinned and stands} { lc_fail "the mode is pinned during '$what': this pool's /lib/aurora/config holds a fixed mode" }
-    -re {EXTINCTION:} { lc_extinction_fail "extinction during '$what'" }
+# The picture on the scanout changes when something is typed at this mode. A
+# display whose device scans a screen that nobody composes into has the right
+# size and a picture on it, and never another.
+proc wait_redraw {label} {
+    set ::what "the redraw ($label)"
+    set before [lindex [dims] 3]
+    if {$before eq ""} { lc_fail "no dump to tell a redraw by ($label)" }
+    lc_send "echo display-follow-redraw"
+    for {set i 0} {$i < 12} {incr i} {
+        after 700
+        set now [lindex [dims] 3]
+        if {$now ne "" && $now ne $before} {
+            lc_step "the scanout's picture changed after a command was typed ($label)"
+            return
+        }
+    }
+    lc_fail "the scanout's picture did not change after a command was typed ($label): the device shows a screen nothing is drawn into"
 }
 # Wait for a line of the compositor's.
 proc follow_expect {re what} {
-    global timeout bad_lines
+    global timeout
+    set ::what $what
     set timeout 30
-    expect {*}$bad_lines \
-        -re {tapestryd: display event \d+: the device is stalled; to be asked when it answers} \
-            { lc_step "note: the device was stalled when '$what' was due; waited for"; exp_continue } \
-        -re $re { lc_step "saw: $what" } \
-        timeout { lc_fail "timeout (30s) waiting for \[$re\] during '$what'" } \
+    expect {
+        -re {tapestryd: display event \d+: the device is stalled; to be asked when it answers} {
+            lc_step "note: the device was stalled when '$what' was due; waited for"
+            exp_continue
+        }
+        -re $re { lc_step "saw: $what" }
+        timeout { lc_fail "timeout (30s) waiting for \[$re\] during '$what'" }
         eof     { lc_fail "qemu exited during '$what'" }
+    }
 }
 proc up {mode} { return "tapestryd: mode $mode is up \\(scanout composed\\)" }
+# The scale is 100 at every mode here: a VNC viewer tells no millimetres.
+proc followed {mode} { return "tapestryd: display event \\d+: followed, $mode at 100%" }
 
 # ---------- the boot: a mode for a host size that cannot be one ----------
 lc_boot
+# What must not be said, from here to the end of the run and in every wait,
+# the library's included. Each body runs in the scope of the wait that
+# matched, so what was being waited for is a global.
+set what "the boot"
+expect_before {
+    -re {tapestryd: [^\r\n]*t_dma_create_weave\((\d+)\) failed -?\d+} { lc_fail "a surface or a screen could not be allocated during '$::what': $expect_out(0,string)" }
+    -re {tapestryd: mode rebind failed; old geometry retained} { lc_fail "the scanout was not rebound during '$::what'" }
+    -re {tapestryd: mode (\d+x\d+) is set; the display is not bound to its screen} { lc_fail "mode $expect_out(1,string) was set and the device is not known to scan its screen, during '$::what'" }
+    -re {tapestryd: scanout composed \((\d+x\d+)\) res \d+ BIND FAILED} { lc_fail "the screen of $expect_out(1,string) was not bound, during '$::what'" }
+    -re {tapestryd: mode (\d+x\d+) refused -- (screen|surface) weave} { lc_fail "$expect_out(1,string) could not be allocated ($expect_out(2,string)) during '$::what'" }
+    -re {tapestryd: no mode for a display of (\d+x\d+);} { lc_fail "no mode was found for a host of $expect_out(1,string) during '$::what'" }
+    -re {tapestryd: display event \d+: not followed[^\r\n]*[\r\n]} { lc_fail "during '$::what': [string trim $expect_out(0,string)]" }
+    -re {tapestryd: display event \d+: the mode is \d+x\d+, not finished[^\r\n]*[\r\n]} { lc_fail "during '$::what': [string trim $expect_out(0,string)]" }
+    -re {tapestryd: display event \d+: the mode is pinned and stands} { lc_fail "the mode is pinned during '$::what': this pool's /lib/aurora/config holds a fixed mode" }
+    -re {EXTINCTION:} { lc_extinction_fail "extinction during '$::what'" }
+}
 set timeout $lc_boot_timeout
 # The fitted mode is said in the compositor's start and the size it serves just
 # after; the login prompt is a thousand lines later and is left for lc_login.
 set what "the boot's first mode"
-expect {*}$bad_lines \
-    -re {tapestryd: mode 1728x1080 for a display of 3456x2160} { lc_step "saw: the first mode is fitted" } \
-    -re {tapestryd: serving /srv/tapestry \+ /srv/warp \((\d+x\d+)\)} \
-        { lc_fail "the compositor serves $expect_out(1,string) with no fitted mode said before it" } \
-    timeout { lc_fail "the boot did not get to a fitted mode" } \
+expect {
+    -re {tapestryd: mode 1728x1080 for a display of 3456x2160} { lc_step "saw: the first mode is fitted" }
+    -re {tapestryd: serving /srv/tapestry \+ /srv/warp \((\d+x\d+)\)} {
+        lc_fail "the compositor serves $expect_out(1,string) with no fitted mode said before it"
+    }
+    timeout { lc_fail "the boot did not get to a fitted mode" }
     eof     { lc_fail "qemu exited during boot" }
+}
 set what "the boot's serving line"
-expect {*}$bad_lines \
-    -re {tapestryd: serving /srv/tapestry \+ /srv/warp \((\d+x\d+)\)} { set serving $expect_out(1,string) } \
-    timeout { lc_fail "the compositor never served" } \
+expect {
+    -re {tapestryd: serving /srv/tapestry \+ /srv/warp \((\d+x\d+)\)} { set serving $expect_out(1,string) }
+    timeout { lc_fail "the compositor never served" }
     eof     { lc_fail "qemu exited during boot" }
+}
 if {$serving ne "1728x1080"} { lc_fail "the compositor serves $serving, not the fitted 1728x1080" }
+set what "the login"
 lc_login michael correct-horse-battery-staple-v1
 wait_dims "1728 1080" "the boot's fitted mode"
 wait_cells 172 49 "the boot's fitted mode"
+wait_redraw "the boot's fitted mode"
 lc_pass "display: a host of 3456x2160 boots at 1728x1080 with the console on it"
 
 # ---------- follows ----------
 tell 2000x1280
 follow_expect {tapestryd: display event \d+: asking the host} "the event is taken up"
 follow_expect [up 2000x1280] "a size that can be a mode is the mode"
+follow_expect [followed 2000x1280] "the event is followed to 2000x1280"
 wait_dims "2000 1280" "followed to 2000x1280"
 wait_cells 200 58 "followed to 2000x1280"
+wait_redraw "followed to 2000x1280"
 lc_pass "display: followed the host to 2000x1280"
 
 tell 5120x2880
 follow_expect {tapestryd: mode 2560x1440 for a display of 5120x2880} "a size that cannot be a mode is halved"
 follow_expect [up 2560x1440] "the halved mode is up"
+follow_expect [followed 2560x1440] "the event is followed to half of 5120x2880"
 wait_dims "2560 1440" "followed to half of 5120x2880"
 wait_cells 256 65 "followed to half of 5120x2880"
+wait_redraw "followed to half of 5120x2880"
 lc_pass "display: a host of 5120x2880 is followed at 2560x1440"
 
 tell 0x0
@@ -188,21 +230,27 @@ tell 0x0
 follow_expect {tapestryd: display event \d+: no display to follow; 2560x1440 stands} "a host with no size is not followed"
 wait_dims "2560 1440" "the mode stands"
 wait_cells 256 65 "the mode stands"
+wait_redraw "the mode stands"
 lc_pass "display: a host that tells no size leaves the mode standing"
 
 tell 800x600 900x700 1000x640 --gap-ms 20
 follow_expect [up 1000x640] "a train ends at its last size"
+follow_expect [followed 1000x640] "the train's last event is followed"
 wait_dims "1000 640" "followed a train to 1000x640"
 wait_cells 100 29 "followed a train to 1000x640"
+wait_redraw "followed a train to 1000x640"
 lc_pass "display: a train of three sizes ends at the last"
 
 tell 640x400
 follow_expect [up 640x400] "a small size is a mode"
+follow_expect [followed 640x400] "the event is followed to 640x400"
 wait_dims "640 400" "followed to 640x400"
 wait_cells 64 18 "followed to 640x400"
+wait_redraw "followed to 640x400"
 lc_pass "display: followed the host down to 640x400"
 
 file delete -force $ppm
+set what "the shutdown"
 lc_quit
 file delete -force $::env(THYLACINE_VNC_SOCKET)
 lc_pass "ls-display-follow: a fitted first mode, four follows and a refusal"

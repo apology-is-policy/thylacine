@@ -45,6 +45,13 @@ resized or moved to a display with another scale.
 - **`proxy/gpu.rs`**: `Gpu::display_events()` reads the count from the last reply the
   client had, of any kind. It is not a field of the proxy, because `query` does not
   refresh those and the count would have missed a reply (audit round 1, F2).
+- **`backend/gpu.rs`: `query_edid` tells no EDID from no answer.** It answered `Ok(None)`
+  for every way GET_EDID could fail. Now `Ok(None)` is the device answering with something
+  other than an EDID (or a block that is not one), and an error is the command not
+  answered: the engine takes no commands, or the deadline passed. It matches on
+  `submit_and_wait` itself in place of `step`, and says the same two lines `step` would.
+  Your start still reads an error as no EDID. The compositor needed the difference: a
+  stall at that step set its scale to 100 and it called the follow done (audit round 2).
 - **`render.rs` and `backend/screen.rs`: the trusted screen has a size for any host.**
   `render::fits` is the old test (800x720 at least, 4096x2160 pixels at most), now one
   function that `render()` asks too. `Screen::size_for` gives the host's size if it fits,
@@ -62,17 +69,22 @@ resized or moved to a display with another scale.
   over 4, times 4. A whole factor keeps the host's picture of the screen sharp, and the
   scale needs nothing more: the same millimetres under half the pixels are half the DPI.
   `Follow`: the timing of a follow as a small state machine over the count and a clock
-  (150 ms of quiet, once; a pinned mode stands; an event that meets a stalled device is
-  held, uncounted, until the device answers or is dead; an asking that fails with the
-  device answering is made again, at most six times over 18.9 s).
+  (150 ms of quiet, once; a pinned mode stands; an event whose asking finds the device
+  stalled is held, uncounted, until the device answers or is dead; an asking that was made
+  and failed, a stall that began inside it included, is made again, at most six times over
+  18.9 s). `Backoff`: when to try again something that stays owed, at waits doubling from
+  300 ms to 9.6 s.
 - **`usr/tapestryd/src/server.rs`**: the first mode at boot, `mode auto` and a followed
   display event all take the fitted mode (`mode_in_bounds`, and `mode_can_be_made`: a
   probe allocation of the screen and one full-screen surface, held together, are the
   `can`). `display_pump`, called once a pass after the fence pump, hands the count to
   `Follow` and, when it says so, does what `mode auto` does. It reads your broker's
   engine state first: a stalled engine is not asked and the event waits for it; a dead
-  one ends the matter. An explicit `mode W H` is judged as before and pins the mode
-  until a `mode auto` that is accepted. `docs/AURORA-CONFIG.md` 3.4 has the rule.
+  one ends the matter. An explicit `mode W H` is judged by the same test and pins the
+  mode until a `mode auto` that is accepted. A bind of the screen that your engine did
+  not accept leaves the bind owed (`screen_bind_owed`), and `bind_pump` asks again once a
+  pass while your engine is live. `docs/AURORA-CONFIG.md` 3.4 has the rule, and the
+  compositor's dossier the whole of it.
 
 ## The five questions this file put to you, as they were answered
 
@@ -110,10 +122,15 @@ resized or moved to a display with another scale.
   as the frontend shows a scanout of another size. Following there too would mean a new
   `Screen` between episodes.
 - A bind that meets a stalled engine. tapestryd's `reconcile()` enters its composed state
-  whether or not the device took the bind. A followed event now checks afterwards and
-  binds again (`composed_bind_holds`); an explicit `mode W H` does not, and can leave the
-  display composed and not bound until the next mode change. That is in the bug queue as
-  an open defect of the compositor; it is your engine's stall that exposes it.
+  whether or not the device took the bind, and a mode change takes its own bind back when
+  it is not accepted, though the device may execute it later and scan a screen that was
+  given up. The compositor now keeps a flag for a bind of its screen that was not
+  accepted and binds the screen again, from its pass, until your engine accepts
+  (`bind_pump`). It rests on two things of your engine that I read in your code and would
+  want you to confirm: the device takes the control queue in order, so a bind whose
+  deadline passed is executed before any later command or never; and an accepted bind
+  lets go of everything parked before it except what it bound (`drain_condemned`). None
+  of this has run in a guest: nothing I have makes your engine stall on a bind.
 - One read of `events_read` for each ticket under MSI-X. A vector of its own for the
   configuration interrupt would remove it; `PciIrq::for_virtio` gives one vector to all.
 - The INTx branch (the ISR bit) is in no gate.
@@ -126,8 +143,32 @@ Round 1 (a reviewer of another model family, with nothing booted): no P0, no P1,
 six P3. The P2 was that an event could be lost to a stall on three paths the first retry
 did not cover; the hold above is its fix. The P3s are the corrections marked above, the
 order in `change_mode`, a `mode auto` that unpinned before it was accepted, and the
-regression scenario's waits. A second round on the fixes follows the boots.
+regression scenario's waits.
+
+Round 2, on those fixes: no P0, one P1, two P2, five P3. The P1: a mode change whose bind
+your engine did not answer took the change back, and the device could then execute the
+bind and scan the given-up screen, black, with nothing to bind the standing one again;
+the flag and `bind_pump` above are its fix, and they also close the open defect this file
+named before (an explicit `mode W H` left composed and not bound). The P2s: `query_edid`
+as above, and an event held without a count through a stall that began inside each
+asking, which would have had the change begun again without end and a screen parked each
+time; an asking that was made is now always counted, and no screen is made while a bind
+is owed. The P3s: held presents were dropped before the bind that could still fail; a
+follow that changed the mode and then failed was reported as not followed (it is
+`Unfinished` now, and `mode auto` answers Ok for it); three changes to the timing that no
+host test caught; the scenario could pass a failure said just after its success line; and
+fifteen sentences that said more than the code does. A third round on these fixes
+follows.
 
 ## Measured
 
-Nothing yet: the boots follow this commit.
+Part 1, on the commit before round 2's fixes (QEMU 11.1.3, HVF, an M2 Air). On the image
+from before this work a device of 640x400 and one of 5120x2880 each came up with no
+compositor (your probe failed four times), and a size told to the running guest was not
+followed. With this work: 640x400 gives your trusted screen 1280x800 and a session at
+640x400; 3456x2160 a session at 1728x1080; 5120x2880 your trusted screen and the session
+at 2560x1440. The Mac app's window was followed twice (1280x800 to 2560x1600 at 200%,
+then to 2000x1280), and a size told over the wire was on the scanout 214 ms later.
+
+Part 2, on the fixed code, has not run yet: the regression scenario, its two red
+controls, and a boot with every driver on the interrupt line.

@@ -135,18 +135,22 @@ least a display of that mode has. On a change the standing screen and surfaces
 are still there, so the new is tried beside the old, as the change will have
 them. The mode that stands is taken as one that can be made. The host's size is
 the mode if it passes; else that size over 2, times 2, over 3, times 3, over 4,
-times 4, the first that passes. If none does, the boot takes 1024x768 and a
-later asking leaves the mode as it is (`tapestryd: no mode for a display of
-WxH; WxH stands`). An explicit `mode W H` is never fitted: `set_mode` judges it
-as it always did, by the same two tests.
+times 4, the first that passes. If none does, the boot takes 1024x768, which it
+does not test, and a later asking leaves the mode as it is (`tapestryd: no mode
+for a display of WxH; WxH stands`). An explicit `mode W H` is never fitted:
+`set_mode` judges it by the same two tests. Its second test was the surface
+alone before this section; it is the screen and the surface now, for the verb
+too.
 
 The test is made at one moment and reserves nothing. What is allocated between
 it and the change can still make the change fail; the change then leaves the
-standing mode as it was. And the boot's choice is not looked at again by
-itself: a probe that failed at boot for a reason that passed leaves the display
-at a fraction of the host's size, or at 1024x768, until the host's display
-changes or `mode auto` is asked, because the device raises no event for a size
-that stayed the same.
+standing mode as it was. And a test that fails for a reason that passes is not
+made again by itself, at the boot or at a follow. The display is then at a
+fraction of the host's size (at the boot it may be at 1024x768; at a follow
+with no fraction that passes, at the mode it had), the asking counts as
+answered (`Done`, or `NoMode`), and the display stays so until the host's
+display changes or `mode auto` is asked, because the device raises no event
+for a size that stayed the same.
 
 Before this the boot took the host's size unchecked. With the device made
 3456x2160 the screen came up, every full-screen surface failed
@@ -155,95 +159,178 @@ session on it.
 
 **When a change is followed.** [[sub-lictor]] counts the device's display
 events and every reply of the broker carries the count; `Gpu::display_events`
-reads it from the last reply this client had, of any kind. `display_pump` runs
-once a pass, after the fence pump, whose reply refreshed the count, and before
-the deferred event deliveries, which carry the CONFIGUREs a mode change queues.
-It hands the count and the monotonic clock to `display::Follow`, which answers
-`Ask` once the count has stood 150 ms, so a train of events is one mode change,
-and `Pinned` when an explicit `mode W H` was the last word (the verb calls
-`follow.pin()`; `mode auto` asks at once and calls `unpin()` if that asking
-succeeded, so a verb that is refused changes nothing). The clock is the real
-one. Test-mode freezes the frame clock and not this one, so under test-mode a
-display event is still followed when it has stood 150 ms of real time. The pass
-returns at the seat's phase before it reaches the pump, so nothing is followed
-while the trusted screen is up; the count is in `seat_state`'s reply like any
-other, and the event is followed afterwards.
+reads it from the last reply this client had, of any kind. Two pumps run once
+a pass, `bind_pump` and then `display_pump`, after the fence pump and before
+the deferred event deliveries, which carry the CONFIGUREs a mode change
+queues. Both read the engine's state from `gpu.engine`, which only an
+invocation's reply moves (a query's does not); the fence pump invokes the
+broker three times every pass, so that state is this pass's. `display_pump`
+hands the count and the monotonic clock to `display::Follow`, which answers
+`Ask` once the count has stood 150 ms, so a train of events is one mode
+change, and `Pinned` when an explicit `mode W H` was the last word (the verb
+calls `follow.pin()`; `mode auto` asks at once and calls `unpin()` unless its
+asking was refused). The clock is the real one. Test-mode freezes the frame
+clock and not this one, so under test-mode a display event is still followed
+when it has stood 150 ms of real time. The pass returns at the seat's phase
+before it reaches the pumps, so nothing is followed and nothing is bound while
+the trusted screen is up; the count is in `seat_state`'s reply like any other,
+and the event is followed afterwards.
 
-**What following does.** The pump first reads the broker's engine state, which
-came with the same reply. A dead device is not asked (`... not followed, the
+**What following does.** A dead device is not asked (`... not followed, the
 device is dead`). A stalled one is not asked either, since nothing asked of a
 stalled engine is answered: the event is held (`Follow::hold`), looked at again
-every 150 ms without a count, and said once (`... the device is stalled; to be
-asked when it answers`). The broker ends a stall itself, by answering again or
-by declaring the device dead (its bound is 30 s), and the event waits for
-whichever comes.
+every 150 ms, and said once (`... the device is stalled; to be asked when it
+answers`). A hold is not counted, because nothing was attempted. The broker
+ends a stall itself, by answering again or by declaring the device dead after
+30 s. That bounds one stall and not an event: an event is held again for every
+stall that is standing when its asking comes.
 
-With the engine live, `follow_display` asks the device for its display and
-answers one of four things. `NoDisplay`: the output is disabled (a host that
-told 0x0); that is an answer, the mode stands and nothing is asked again
-(`... no display to follow; WxH stands`). `NoMode`: the host's size leads to no
-mode that can be made, and the mode stands. `Done`: the fitted mode is the
-mode, the device scans its screen, and the scale is the one the EDID gives
-(unless a verb's override stands). `Failed(errno)`: the device did not answer
-the question of its size or of its EDID, or `change_mode` could not make the
-change (no memory for the new screen, a bind the device did not take), or the
-device is still not scanning the screen afterwards. A failure is never dropped
-at once. If the engine is stalled by then, the event is held as above. If it is
-live, the pump calls `Follow::retry`, which asks again up to six times with
-waits doubling from 300 ms, 18.9 s in all (`... not followed (errno E), to be
-asked again`); after the sixth, or with the device dead, the event is given up
-(`... not followed (errno E)`) and the next one starts afresh.
+With the engine live the pump says `... asking the host`, and
+`follow_display` asks the device for its display and answers one of five
+things.
 
-`composed_bind_holds` is the last of those checks. `reconcile()` enters the
-composed state whether or not the device took its bind, and `bound_res` keeps
-naming what the device really scans. After a followed change the pump compares
-the two, binds the screen again if they differ (`tapestryd: scanout composed
-(WxH) res N bound, late`), and counts a bind that is still not taken as a
-failure to be asked again. This is done for a followed event only. An explicit
-`mode W H` whose bind meets a stalled device still leaves the display composed
-and not bound until the next mode change: an open defect, in the bug queue,
-that this section does not close.
+- `NoDisplay`: the output is disabled (a host that told 0x0), or the host
+  tells a size with a side past 8192, which the broker does not take for a
+  display. That is an answer: the mode stands and nothing is asked again
+  (`... no display to follow; WxH stands`).
+- `NoMode`: the host's size leads to no mode that can be made, and the mode
+  stands.
+- `Failed(errno)`: the device did not answer the question of its size, or
+  `change_mode` did not make the change (no memory for the new screen; a bind
+  that was owed and is still not taken; the new screen's bind not taken). The
+  mode that stood stands.
+- `Unfinished(errno)`: the mode is the fitted one and something after the
+  change is owed. Either the device has not taken the bind of the screen
+  (`reconcile()` entered the composed state and its bind failed), or the EDID
+  was not answered. The scale is derived again only once the EDID is read: the
+  millimetres of the display that was say nothing of this one.
+- `Done`: the fitted mode is the mode, the device took the bind of its screen
+  where the display is composed, and the scale is the one the EDID gives
+  (unless a verb's override stands). The pump says `... followed, WxH at S%`.
 
-`change_mode` is the body `set_mode` had, in a new order. It says what it
-begins (`tapestryd: mode AxB -> WxH (scanout S)`), then allocates the new
-screen, and only then touches the standing display: a change that cannot be
-made, which may be one nobody asked for, costs nothing. Then the menu's card is
-dismissed, held presents are dropped, a composed scanout is bound to the new
-screen before the old one is freed (a bind that is refused frees the new screen
-and leaves the old geometry: `tapestryd: mode rebind failed; old geometry
-retained`), the geometry is committed and `reconcile()` runs. Last it says what
-came of it, of what the device then scans: `tapestryd: mode WxH is up (scanout
-S)`, or `tapestryd: mode WxH is set; the display is not bound to its screen`.
+An asking that was made and failed, `Failed` or `Unfinished`, is counted
+whatever the engine is afterwards. `Follow::retry` asks again up to six times
+with waits doubling from 300 ms, 18.9 s in all, each wait running from the
+failure (`... not followed (errno E), to be asked again`; `... the mode is
+WxH, not finished (errno E), to be asked again`). After the sixth, or with the
+device dead, the event is given up (the same lines without their last clause)
+and the next one starts afresh. A stall that begins inside an asking is such a
+failure. It was held, uncounted, until audit round 2: a device that stalled
+inside every asking would then have had the change begun without end, a screen
+made and given up each time. When the askings of an `Unfinished` are spent the
+mode stays the fitted one; `bind_pump` goes on asking for the bind, and the
+scale stands until the next asking.
+
+Whether the EDID was answered is Lictor's to say. Its `query_edid` answers
+`Ok(None)` for a device that refuses the command or sends no block worth the
+name (the scale is then 100), and an error when the command was not answered.
+Until round 2 it answered `Ok(None)` for both, and a stall at that step set
+the scale to 100 on a `Done` ([[sub-lictor]]).
+
+**A bind that is owed.** The device takes a bind (SET_SCANOUT), or refuses it,
+or does not answer in time; and a bind that was not answered may still be
+executed (`docs/GPU-DESIGN.md` 4.5.15: the broker parks its resource until a
+later bind is accepted). So after a bind of a screen that was not accepted,
+the device is not known to scan the screen the display is composed into. Three
+binds can leave it so: `change_mode`'s bind of the new screen (the change is
+taken back and the new screen freed, and the device may come to scan it all
+the same, a black screen nobody draws into); `reconcile()`'s bind on entering
+the composed state, which is entered whether or not the bind was taken; and a
+repair that failed. Each sets `screen_bind_owed`, and an accepted bind of the
+screen clears it. `bound_res` names the resource of the last bind that was
+accepted, which is what the device scans only while nothing is owed.
+
+`composed_bound()` is true when the display is not composed, or has no
+screen, or nothing is owed and `bound_res` is the screen's resource.
+`composed_bind_holds()` binds the screen again when it is false, flushes it
+whole (a flush reaches only a scanout bound to the resource) and says
+`tapestryd: scanout composed (WxH) res N bound, late`. An accepted bind
+settles what the device scans, because the device takes its commands in
+order: a bind sent earlier and never answered was executed before this one or
+never will be.
+
+It has three callers. `change_mode` begins with it, so no screen is made
+while a bind is owed. The broker lets go of what was parked at every accepted
+bind, so a change that is begun again and again parks one given-up screen at
+most; the broker can park 16, and loses track of a 17th. `follow_display`
+calls it after the change. And `bind_pump` calls it once a pass while
+`composed_bound()` is false and the engine is live: at once the first time,
+then at waits that double from 300 ms to 9.6 s and stay there
+(`display::Backoff`). It does not give up while the bind fails; a dead engine
+is not asked. This covers every way into that state, an explicit `mode W H`
+included. Until round 2 only a followed event had its bind looked at again,
+and a display that stays composed binds its screen once, so nothing else
+would have.
+
+`change_mode` is the body `set_mode` had, in a new order.
+
+1. A bind that is owed is asked for; if it is not taken the change is not
+   begun.
+2. It says what it begins: `tapestryd: mode AxB -> WxH (scanout S)`.
+3. The new screen is allocated. A change whose screen cannot be made, which
+   may be one nobody asked for, costs nothing.
+4. The menu's card is dismissed. This comes before the bind because a dismiss
+   retires a surface, and that must find the standing display whole. So a
+   change whose bind is not taken has by then closed an open menu.
+5. A composed scanout is bound to the new screen before the old one is freed.
+   A bind that is not taken frees the new screen, leaves the old geometry
+   (`tapestryd: mode rebind failed; old geometry retained`) and leaves the
+   standing screen's bind owed.
+6. Held presents are dropped. Only now, when nothing is left that can fail: a
+   change that is not made sends no CONFIGURE, and a present dropped for it
+   would not be made again.
+7. The geometry is committed and `reconcile()` runs.
+8. It says what came of it: `tapestryd: mode WxH is up (scanout S)`, or
+   `tapestryd: mode WxH is set; the display is not bound to its screen`.
+
 It also runs from the pass now, with no request in hand; nothing in it reads a
 connection.
+
+`mode auto` answers Ok for `Done` and for `Unfinished`, and unpins for both:
+the mode is the host's, which is what was asked. For `Unfinished` it calls
+`Follow::again`, and the pass asks again after 150 ms, with all six askings,
+for what is owed. `NoDisplay` is `E_AGAIN`, `NoMode` `E_NOMEM`, `Failed` its
+errno. A verb that is refused left the mode that stood and a pinned mode
+pinned; what it may have cost is an open menu (step 4).
 
 **Lines.** `tapestryd: mode WxH for a display of WxH` when the fitted mode is
 not the host's size; `tapestryd: mode AxB -> WxH (scanout S)` and `tapestryd:
 mode WxH is up (scanout S)` around a change; `tapestryd: display event N:
-asking the host`, `... the mode is pinned and stands`, `... no display to
-follow; WxH stands`, `... the device is stalled; to be asked when it answers`,
-`... not followed (errno E), to be asked again`, `... not followed (errno E)`,
-`... not followed, the device is dead`; and from the test of a size,
-`tapestryd: mode WxH refused -- screen weave N unallocatable (rc)` and the same
-with `surface weave`.
+asking the host`, `... followed, WxH at S%`, `... the mode is pinned and
+stands`, `... no display to follow; WxH stands`, `... the device is stalled;
+to be asked when it answers`, `... not followed (errno E), to be asked again`,
+`... not followed (errno E)`, `... the mode is WxH, not finished (errno E), to
+be asked again`, `... the mode is WxH, not finished (errno E)`, `... not
+followed, the device is dead`; `tapestryd: scanout composed (WxH) res N bound,
+late` for a bind taken at a later asking; and from the test of a size,
+`tapestryd: mode WxH refused -- screen weave N unallocatable (rc)` and the
+same with `surface weave`.
 
-**Tests.** The rule and the timing are host tests in [[sub-libhalcyon]]. In a
-guest, `tools/interactive/ls-display-follow.exp` (the gate image: it logs in)
-boots a device of 3456x2160 and wants the mode 1728x1080, then tells sizes as a
-VNC viewer does (`tools/interactive/rfb_resize.py`, SetDesktopSize) and wants
-the mode at 2000x1280, at half of 5120x2880, at the last of a train of three,
-and at 640x400, and wants a host of no size left unfollowed. For each mode it
-wants three things: the `is up (scanout composed)` line, which is said after
-the change; the scanout QEMU dumps at that size with more than one colour on
-it; and the console's size in cells from `/dev/winsize` (10 by 22 pixels a
-cell), which a console that was never told of the mode, or never laid itself
-out again, does not change. Every wait lists the lines that must not come
-before the one it waits for, because expect takes the first pattern listed
-that matches. Not reached by it: a pinned mode under an event (the two calls in
-the verbs), a held or a retried event (a stall is noted and waited out, a retry
-fails the leg), a follow across the trusted screen, and the scale a host's
-millimetres give (a VNC viewer tells none; measured with the Mac app,
-`docs/MAC-RUNNER.md` M-8).
+**Tests.** The rule, the timing and the backoff are host tests in
+[[sub-libhalcyon]]. In a guest, `tools/interactive/ls-display-follow.exp` (the
+gate image: it logs in) boots a device of 3456x2160 and wants the mode
+1728x1080, then tells sizes as a VNC viewer does
+(`tools/interactive/rfb_resize.py`, SetDesktopSize) and wants the mode at
+2000x1280, at half of 5120x2880, at the last of a train of three, and at
+640x400, and wants a host of no size left unfollowed. For each mode it wants
+four things: the lines `is up (scanout composed)`, said after the change, and
+`followed, WxH at 100%`, said last, when the bind and the scale are settled
+too; the scanout QEMU dumps at that size with more than one colour on it; the
+console's size in cells from `/dev/winsize` (10 by 22 pixels a cell), which a
+console that was never told of the mode, or never laid itself out again, does
+not change; and a dump that differs after a command is typed, which it does
+not if the device scans a screen nobody draws into. The lines that must not be
+said (an allocation that failed, a bind not taken, an asking that failed or
+was left unfinished, a pinned mode, an extinction) are armed once with
+`expect_before`, which puts them ahead of the patterns of every wait from the
+boot to the shutdown, the shared library's waits included. Not reached by it:
+a pinned mode under an event (the two calls in the verbs); a stall, whether it
+holds an event (noted and waited out), fails an asking or leaves a bind owed
+(either fails the leg); a follow across the trusted screen; and the scale a
+host's millimetres give (a VNC viewer tells none; measured with the Mac app,
+`docs/MAC-RUNNER.md` M-8). The paths a stall opens (`Unfinished`, `bind_pump`,
+the bind owed after `change_mode`) are built and audited and have not run in
+a guest: nothing here makes the device stall.
 
 ## Purpose
 

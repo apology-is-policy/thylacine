@@ -287,9 +287,10 @@ things):
 
    **The fitted mode, and a display that follows its host (amended
    2026-11-11).** The reported rect is whatever the host's window happens
-   to be, and not every rect can be a mode: one outside the bounds, or one
-   whose fullscreen surface (three buffers) is over the weave cap or cannot
-   be allocated just now, cannot. So the mode for a reported rect is found
+   to be, and not every rect can be a mode: one outside the bounds, one
+   whose fullscreen surface (three buffers) is over the weave cap, or one
+   whose screen and fullscreen surface cannot be allocated together just
+   now, cannot. So the mode for a reported rect is found
    by ONE rule (`libhalcyon::display::fit_mode`): the rect itself if it can
    be a mode; else the rect over 2, times 2, over 3, times 3, over 4, times
    4, the first that can; if none can, the mode that stands stays (at boot,
@@ -307,11 +308,15 @@ things):
      follows it once the host's display has stood for 150 ms, so a train
      of events is one mode change.
 
-   An explicit `mode W H` is NOT fitted: it is judged as before, refused
-   if it cannot be a mode, and it PINS the mode. A pinned mode stands
-   whatever the host's window does, until a `mode auto` that is accepted,
-   which also resumes the following (one that is refused changes
-   nothing). (A persisted fixed mode is pushed as `mode W H` at
+   An explicit `mode W H` is NOT fitted: it is judged by the same test of
+   a size, refused if it cannot be a mode, and it PINS the mode. A pinned
+   mode stands whatever the host's window does, until a `mode auto` that
+   is accepted, which also resumes the following (one that is refused
+   leaves the mode that stood, and the pin). A mode change that the device
+   does not take is not a mode change: the mode that stood stands, an
+   event's asking is made again a bounded number of times, and a display
+   whose screen the device did not take is bound again when the device
+   answers. (A persisted fixed mode is pushed as `mode W H` at
    startup, so it is pinned; a persisted `auto` pushes nothing, and the
    boot's fitted mode follows the host.) No mode changes while the trusted
    screen is up: an event that arrives then is followed after it comes

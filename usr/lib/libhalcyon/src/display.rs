@@ -49,10 +49,14 @@ pub fn fit_mode(
 /// surface and a repaint by every client.
 pub const QUIET_MS: u64 = 150;
 
-/// How many times an asking that failed is made again. The waits double from
-/// twice QUIET_MS, so six are 18.9 s in all. This is for a failure of a device
-/// that answers; one that is stalled is waited for with `hold`, uncounted.
+/// How many times an asking that was made and failed is made again. The
+/// waits double from twice QUIET_MS, so six are 18.9 s in all. A device that
+/// is stalled before it is asked is waited for with `hold`, uncounted; a
+/// stall that begins inside an asking is a failure of that asking.
 pub const RETRY_MAX: u8 = 6;
+
+/// The most a `Backoff`'s wait doubles: QUIET_MS << 6 is 9.6 s.
+pub const BACKOFF_MAX_SHIFT: u8 = 6;
 
 /// What a pass does about the host's display.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -117,9 +121,7 @@ impl Follow {
     pub fn step(&mut self, count: u32, now_ms: u64) -> Step {
         if count != self.seen {
             self.seen = count;
-            self.due_at = Some(now_ms.saturating_add(QUIET_MS));
-            self.retries = 0;
-            self.held = false;
+            self.again(now_ms);
         }
         match self.due_at {
             Some(due) if now_ms >= due => {
@@ -134,22 +136,36 @@ impl Follow {
         }
     }
 
-    /// The asking cannot be made, or failed, because the device is stalled
-    /// and says so. The event stays owed and is called for again after the
-    /// quiet time, without a count: the device's driver ends a stall
-    /// itself, by answering again or by declaring the device dead, and the
-    /// caller stops at the second. True the first time for an event, so
-    /// that the caller says it once.
+    /// An asking is owed after the quiet time, with all its askings, as for
+    /// a new event: `step` does this for a count that moved, and a caller
+    /// that asked the host itself does it when what it began is not
+    /// finished.
+    pub fn again(&mut self, now_ms: u64) {
+        self.due_at = Some(now_ms.saturating_add(QUIET_MS));
+        self.retries = 0;
+        self.held = false;
+    }
+
+    /// The asking `step` called for cannot be made: the device is stalled
+    /// and says so, and nothing was asked of it. The event stays owed and
+    /// is called for again after the quiet time, without a count: the
+    /// device's driver ends a stall itself, by answering again or by
+    /// declaring the device dead, and the caller stops at the second. So
+    /// one stall holds an event for no longer than the driver lets a stall
+    /// last; an event is held again for each stall that is standing when
+    /// its asking comes. True the first time for an event, so that the
+    /// caller says it once.
     pub fn hold(&mut self, now_ms: u64) -> bool {
         self.due_at = Some(now_ms.saturating_add(QUIET_MS));
         !core::mem::replace(&mut self.held, true)
     }
 
-    /// The asking `step` called for failed with the device answering (a
-    /// change it did not take, an allocation that failed): it is called
-    /// for again, after a wait that doubles each time. False once
-    /// RETRY_MAX askings have been made again: the event is then
-    /// forgotten, and the next one starts afresh.
+    /// The asking `step` called for was made and failed (a change the
+    /// device did not take, an allocation that failed, a stall that began
+    /// inside it): it is called for again, after a wait that doubles each
+    /// time. False once RETRY_MAX askings have been made again: the event
+    /// is then forgotten, and the next one starts afresh. Holds between
+    /// them neither spend these askings nor give them back.
     pub fn retry(&mut self, now_ms: u64) -> bool {
         if self.retries >= RETRY_MAX {
             return false;
@@ -161,6 +177,47 @@ impl Follow {
 }
 
 impl Default for Follow {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// When to do again something that failed and stays owed for as long as it
+/// fails (a display's bind to its screen): at once the first time, then
+/// after waits that double from twice QUIET_MS to QUIET_MS <<
+/// BACKOFF_MAX_SHIFT and stay there. It never gives up; its caller does,
+/// when the device is dead.
+#[derive(Clone, Copy, Debug)]
+pub struct Backoff {
+    next_at: Option<u64>,
+    fails: u8,
+}
+
+impl Backoff {
+    pub const fn new() -> Self {
+        Self { next_at: None, fails: 0 }
+    }
+
+    /// May it be tried now?
+    pub fn ready(&self, now_ms: u64) -> bool {
+        self.next_at.map_or(true, |at| now_ms >= at)
+    }
+
+    /// It was tried and failed.
+    pub fn failed(&mut self, now_ms: u64) {
+        if self.fails < BACKOFF_MAX_SHIFT {
+            self.fails += 1;
+        }
+        self.next_at = Some(now_ms.saturating_add(QUIET_MS << self.fails));
+    }
+
+    /// It was done: the next failure starts from the shortest wait.
+    pub fn reset(&mut self) {
+        *self = Self::new();
+    }
+}
+
+impl Default for Backoff {
     fn default() -> Self {
         Self::new()
     }
@@ -367,6 +424,103 @@ mod tests {
         // A mode pinned while an event is held stands.
         f.pin();
         assert_eq!(f.step(2, now + 2 * QUIET_MS), Step::Pinned);
+    }
+
+    #[test]
+    fn holds_between_failed_askings_spend_none_and_give_none_back() {
+        let mut f = Follow::new();
+        assert_eq!(f.step(1, 0), Step::Wait);
+        assert_eq!(f.step(1, QUIET_MS), Step::Ask);
+        let mut now = QUIET_MS;
+        // Stalled before the first asking: held, and said.
+        assert!(f.hold(now));
+        for n in 1..=RETRY_MAX {
+            now += QUIET_MS;
+            assert_eq!(f.step(1, now), Step::Ask, "after the hold before failure {n}");
+            // An asking that was made and failed: the wait is the one for
+            // its number, whatever was held before it.
+            assert!(f.retry(now), "failure {n}");
+            let wait = QUIET_MS << n;
+            assert_eq!(f.step(1, now + wait - 1), Step::Wait, "failure {n}");
+            now += wait;
+            assert_eq!(f.step(1, now), Step::Ask, "failure {n}");
+            // Stalled when that asking comes: held for the quiet time, not
+            // for the doubled wait, and not said a second time for the event.
+            assert!(!f.hold(now), "the hold after failure {n} is said again");
+            assert_eq!(f.step(1, now + QUIET_MS - 1), Step::Wait, "the hold after failure {n}");
+        }
+        now += QUIET_MS;
+        assert_eq!(f.step(1, now), Step::Ask);
+        // The askings are spent however many holds came between them.
+        assert!(!f.retry(now));
+        assert_eq!(f.step(1, now + 3_600_000), Step::Wait);
+    }
+
+    #[test]
+    fn a_caller_that_asked_itself_has_the_asking_made_again() {
+        let mut f = Follow::new();
+        // With no event at all: an asking after the quiet time.
+        f.again(1_000);
+        assert_eq!(f.step(0, 1_000 + QUIET_MS - 1), Step::Wait);
+        assert_eq!(f.step(0, 1_000 + QUIET_MS), Step::Ask);
+        assert_eq!(f.step(0, 1_000 + QUIET_MS + 1), Step::Wait);
+        // For an event whose askings were spent and whose hold was said:
+        // all of them again, and a hold is said again.
+        assert_eq!(f.step(1, 2_000), Step::Wait);
+        assert_eq!(f.step(1, 2_000 + QUIET_MS), Step::Ask);
+        assert!(f.hold(3_000));
+        for _ in 0..RETRY_MAX {
+            assert!(f.retry(3_000));
+        }
+        assert!(!f.retry(3_000));
+        f.again(10_000);
+        assert_eq!(f.step(1, 10_000 + QUIET_MS - 1), Step::Wait);
+        assert_eq!(f.step(1, 10_000 + QUIET_MS), Step::Ask);
+        assert!(f.hold(11_000));
+        for _ in 0..RETRY_MAX {
+            assert!(f.retry(11_000));
+        }
+        assert!(!f.retry(11_000));
+        // Under a pinned mode it stands, as an event does.
+        f.again(20_000);
+        f.pin();
+        assert_eq!(f.step(1, 20_000 + QUIET_MS), Step::Pinned);
+    }
+
+    #[test]
+    fn what_stays_owed_is_tried_at_waits_that_double_to_a_cap() {
+        let mut b = Backoff::new();
+        // Nothing failed yet: at once, at any time.
+        assert!(b.ready(0));
+        assert!(b.ready(u64::MAX));
+        // Each failure doubles the wait, from twice the quiet time to the
+        // cap, and it stays there for as long as it fails.
+        let mut now = 5_000u64;
+        let mut total = 0;
+        for n in 1..=40u32 {
+            b.failed(now);
+            let wait = QUIET_MS << n.min(BACKOFF_MAX_SHIFT as u32);
+            assert!(!b.ready(now), "failure {n}");
+            assert!(!b.ready(now + wait - 1), "failure {n}");
+            assert!(b.ready(now + wait), "failure {n}");
+            now += wait;
+            total += wait;
+        }
+        // 300 + 600 + 1200 + 2400 + 4800, then 9.6 s each.
+        assert_eq!(total, 9_300 + 35 * 9_600);
+        // Done: at once again, and the next failure waits the shortest.
+        b.reset();
+        assert!(b.ready(0));
+        b.failed(100);
+        assert!(!b.ready(100 + 299));
+        assert!(b.ready(100 + 300));
+        // A clock that reads earlier than the failure: not yet, no panic.
+        assert!(!b.ready(0));
+        // A clock at its end does not wrap the wait into the past.
+        let mut b = Backoff::new();
+        b.failed(u64::MAX);
+        assert!(!b.ready(1_000));
+        assert!(b.ready(u64::MAX));
     }
 
     #[test]

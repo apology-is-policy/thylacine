@@ -2955,8 +2955,11 @@ impl Gpu {
     /// the command, the reply is shorter than a base block, or the block is
     /// garbage (`libhalcyon::scale::parse_edid_mm`: the header, the
     /// checksum, the range). The caller falls soft to 100; the boot line
-    /// says which it got. Untrusted device input: the reply is read within
-    /// its declared size and the ring's response region, never past.
+    /// says which it got. Err when the command was not answered (the engine
+    /// takes no commands, or its deadline passed): that is not "no EDID",
+    /// and a caller that asks while serving must not take it for one.
+    /// Untrusted device input: the reply is read within its declared size
+    /// and the ring's response region, never past.
     pub fn query_edid(&mut self) -> Result<Option<(u32, u32)>, Error> {
         if !self.edid {
             return Ok(None);
@@ -2967,17 +2970,17 @@ impl Gpu {
             w32(req_va + 24, 0); // scanout 0
             w32(req_va + 28, 0); // padding
         };
-        if self
-            .ctrl
-            .step(
-                "GET_EDID",
-                GPU_CTRL_HDR_LEN + 8,
-                GPU_RESP_EDID_LEN,
-                VIRTIO_GPU_RESP_OK_EDID,
-            )
-            .is_err()
-        {
-            return Ok(None); // refused: the scale stands at 100, said by the caller
+        match self.ctrl.submit_and_wait(GPU_CTRL_HDR_LEN + 8, GPU_RESP_EDID_LEN) {
+            Ok(VIRTIO_GPU_RESP_OK_EDID) => {}
+            Ok(t) => {
+                // Refused: an answer. The scale stands at 100, said by the caller.
+                say!("tapestryd: gpu GET_EDID resp_type={:#x} (expected {:#x})", t, VIRTIO_GPU_RESP_OK_EDID);
+                return Ok(None);
+            }
+            Err(()) => {
+                say!("tapestryd: gpu GET_EDID submit error");
+                return Err(Error::Hardware);
+            }
         }
         let resp = self.ring_va + RESP_OFF;
         let size = unsafe { r32(resp + GPU_CTRL_HDR_LEN as u64) } as usize;

@@ -129,6 +129,17 @@ client had, of any kind. It is not one of the proxy's own fields, because a
 event within a pass and needs no wake of its own. What it does then is in its
 section "The display follows its host".
 
+**An EDID that is not answered.** `query_edid` answered `Ok(None)` for every
+way GET_EDID could fail. It now tells two apart. The device answered with
+something other than an EDID, or with a block that is not one: `Ok(None)`,
+there is no EDID, and a caller's scale is 100. Or the command was not
+answered, because the engine takes no commands or its deadline passed: an
+error. It reads which from `submit_and_wait` itself, which gives the device's
+response type or nothing. Lictor's own start reads an error as no EDID, as
+before. The caller that needs the difference is the compositor when it follows
+a display event: a stall at that step must not set the scale to 100
+([[sub-tapestryd]]; audit round 2 of that section).
+
 **The trusted screen's size.** `render::fits` is the one test of a size the
 trusted scene can be drawn at: 800x720 at least and 4096x2160 pixels at most.
 `render()` asks it, and so does `Screen::size_for`, which gives the host's size

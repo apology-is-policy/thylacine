@@ -1553,15 +1553,22 @@ fn mode_can_be_made(w: u32, h: u32) -> bool {
 
 /// What became of an asking of the host's display.
 enum Followed {
-    /// The mode is the one fitted to the host's display, the device scans
-    /// it, and the scale is the one its EDID gives.
+    /// The mode is the one fitted to the host's display, the device took
+    /// the bind of its screen where the display is composed, and the scale
+    /// is the one its EDID gives.
     Done,
-    /// The host shows no display (its output is disabled): nothing to follow.
+    /// The host shows no display (its output is disabled, or it tells a
+    /// size past what a display is taken to report): nothing to follow.
     NoDisplay,
     /// The host's size leads to no mode that can be made.
     NoMode,
-    /// The device did not answer, or the change was not made: it may be, later.
+    /// The device did not answer, or the change was not made: the mode
+    /// that stood stands. It may be made, later.
     Failed(u32),
+    /// The mode is the one fitted to the host's display, and the bind of
+    /// its screen or the EDID's answer is still owed: to be asked again,
+    /// and not a refusal.
+    Unfinished(u32),
 }
 
 /// What scanout 0 references (G-6). `Boot` = untouched since startup (the
@@ -1865,6 +1872,14 @@ pub struct Comp {
     /// scanned-out resource is the one order the display cannot survive,
     /// and only the device truth can name which resource that is.
     bound_res: u32,
+    /// The display is composed and a bind of its screen was not accepted,
+    /// so the device is not known to scan the screen: a bind that was not
+    /// answered may still be executed (GPU-DESIGN 4.5.15), and the device
+    /// would then scan a screen that was given up. Set by every such bind,
+    /// cleared by one that is accepted; `bind_pump` asks again while it
+    /// stands.
+    screen_bind_owed: bool,
+    bind_again: display::Backoff,
     /// How many times the DEVICE refused a display unbind (round-2 F1).
     /// The self-test's `unbind=` arm consumes this: round-1 F5 rebuilt the
     /// witness to observe the ISSUE ORDER and round-1 F8 exposed the
@@ -2715,6 +2730,8 @@ impl Comp {
             screen: None,
             scanout: Scanout::Boot,
             bound_res: 0,
+            screen_bind_owed: false,
+            bind_again: display::Backoff::new(),
             unbind_refused: 0,
             pending_direct: None,
             pending_bind_refused_said: false,
@@ -6185,9 +6202,9 @@ impl Comp {
 
     /// Ask the host what it prefers and take the mode for it, then the
     /// scale its EDID gives that mode: `mode auto`, and what a display
-    /// event leads to while the mode follows the host. Whatever is not
-    /// `Done` leaves a mode standing; `Failed` is the one worth asking
-    /// again.
+    /// event leads to while the mode follows the host. `Failed` and
+    /// `Unfinished` are the two worth asking again: the first left the mode
+    /// that stood, the second changed it and owes the rest.
     fn follow_display(&mut self) -> Followed {
         // No display to follow (the output is disabled) is an answer. The
         // device failing to answer is not.
@@ -6209,32 +6226,44 @@ impl Comp {
                 return Followed::Failed(e);
             }
         }
+        // From here the mode is the one for the host: what fails now is
+        // owed, not refused.
         if !self.composed_bind_holds() {
-            return Followed::Failed(E_IO);
+            return Followed::Unfinished(E_IO);
         }
         // The EDID is asked with it: a change of display is the one time
         // it changes, and it can change under a mode that does not. No
-        // EDID is an answer (the scale is then 100); no answer is not.
+        // EDID is an answer (the scale is then 100); no answer is not, and
+        // the scale stands until there is one: the millimetres of the
+        // display that was say nothing of this one.
         match self.gpu.query_edid() {
             Ok(mm) => self.gpu.edid_mm = mm,
-            Err(_) => return Followed::Failed(E_IO),
+            Err(_) => return Followed::Unfinished(E_IO),
         }
         self.rescale_after_mode();
         Followed::Done
     }
 
-    /// Is the device scanning the screen, where the display is composed?
+    /// Is the device known to scan the screen, where the display is
+    /// composed? Not while a bind of the screen was not accepted:
     /// `reconcile` enters the composed state whether or not its bind was
-    /// taken, and says so in a line; `bound_res` keeps naming what the
-    /// device really scans.
+    /// taken, and a bind that was not answered may still be executed, so
+    /// what `bound_res` names is then only the last bind that was accepted.
     fn composed_bound(&self) -> bool {
-        self.scanout != Scanout::Composed
-            || self.screen.as_ref().map_or(true, |s| s.res == self.bound_res)
+        if self.scanout != Scanout::Composed {
+            return true;
+        }
+        match &self.screen {
+            Some(s) => !self.screen_bind_owed && s.res == self.bound_res,
+            None => true,
+        }
     }
 
     /// Bind the screen again if the display is composed and the device is
-    /// scanning something else (a bind that met a stalled device). False
-    /// if it still is afterwards.
+    /// not known to scan it. False if it still is not afterwards. An
+    /// accepted bind settles what the device scans: it takes its commands
+    /// in order, so a bind sent before this one and never answered was
+    /// executed before it or never will be.
     fn composed_bind_holds(&mut self) -> bool {
         if self.composed_bound() {
             return true;
@@ -6242,14 +6271,32 @@ impl Comp {
         let Some(res) = self.screen.as_ref().map(|s| s.res) else { return true };
         let (w, h) = (self.gpu.width, self.gpu.height);
         if self.gpu.set_scanout(res, w, h).is_err() {
+            self.screen_bind_owed = true;
+            self.bind_again.failed(libthyla_rs::time::monotonic_ns() / 1_000_000);
             return false;
         }
         self.bound_res = res;
+        self.screen_bind_owed = false;
+        self.bind_again.reset();
         // After the bind, as in `reconcile` (#57): a flush reaches only a
         // scanout bound to the resource.
         let _ = self.gpu.flush(res, 0, 0, w, h);
         say!("tapestryd: scanout composed ({}x{}) res {} bound, late", w, h, res);
         true
+    }
+
+    /// Once a pass: while the display is composed and the device is not
+    /// known to scan its screen, bind it again -- at once when the device
+    /// answers, then at waits that double to a cap (`display::Backoff`),
+    /// for as long as the engine is live. Nothing else would: a display
+    /// that stays composed never binds its screen a second time.
+    pub fn bind_pump(&mut self) {
+        if self.composed_bound() || self.gpu.engine != Engine::Live {
+            return;
+        }
+        if self.bind_again.ready(libthyla_rs::time::monotonic_ns() / 1_000_000) {
+            let _ = self.composed_bind_holds();
+        }
     }
 
     /// Once a pass: has the host's display changed (the broker counts the
@@ -6264,40 +6311,63 @@ impl Comp {
             display::Step::Pinned => {
                 say!("tapestryd: display event {}: the mode is pinned and stands", n);
             }
-            // The broker ends a stall of its engine itself: it answers
-            // again, or it declares the device dead. Nothing asked of a
-            // stalled engine is answered, so the event waits for one of
-            // the two and is not lost to the stall.
             display::Step::Ask => match self.gpu.engine {
                 Engine::Dead => say!("tapestryd: display event {}: not followed, the device is dead", n),
-                Engine::Stalled => self.display_hold(n, now_ms),
+                // Nothing asked of a stalled engine is answered, and the
+                // broker ends a stall itself: it answers again, or it
+                // declares the device dead. Nothing is attempted, so the
+                // event waits for one of the two without a count.
+                Engine::Stalled => {
+                    if self.follow.hold(now_ms) {
+                        say!("tapestryd: display event {}: the device is stalled; to be asked when it answers", n);
+                    }
+                }
                 Engine::Live => {
                     say!("tapestryd: display event {}: asking the host", n);
-                    match self.follow_display() {
-                        Followed::Done | Followed::NoMode => {}
+                    let followed = self.follow_display();
+                    // An asking that was made and failed is counted whatever
+                    // the engine is afterwards: a stall that began inside
+                    // every asking would otherwise have the change begun
+                    // again without end, a screen made and given up each
+                    // time. The wait runs from the failure, which a stalled
+                    // step puts well after the pass began.
+                    let again = |comp: &mut Self| {
+                        comp.gpu.engine != Engine::Dead
+                            && comp.follow.retry(libthyla_rs::time::monotonic_ns() / 1_000_000)
+                    };
+                    match followed {
+                        Followed::Done => say!(
+                            "tapestryd: display event {}: followed, {}x{} at {}%",
+                            n, self.gpu.width, self.gpu.height, self.scale),
+                        Followed::NoMode => {}
                         Followed::NoDisplay => say!(
                             "tapestryd: display event {}: no display to follow; {}x{} stands",
                             n, self.gpu.width, self.gpu.height),
-                        // The engine as the failed step left it.
-                        Followed::Failed(_) if self.gpu.engine == Engine::Stalled => self.display_hold(n, now_ms),
-                        Followed::Failed(e) if self.gpu.engine == Engine::Live && self.follow.retry(now_ms) => {
-                            say!("tapestryd: display event {}: not followed (errno {}), to be asked again", n, e);
+                        Followed::Failed(e) => {
+                            let tail = if again(self) { ", to be asked again" } else { "" };
+                            say!("tapestryd: display event {}: not followed (errno {}){}", n, e, tail);
                         }
-                        Followed::Failed(e) => say!("tapestryd: display event {}: not followed (errno {})", n, e),
+                        Followed::Unfinished(e) => {
+                            let tail = if again(self) { ", to be asked again" } else { "" };
+                            say!(
+                                "tapestryd: display event {}: the mode is {}x{}, not finished (errno {}){}",
+                                n, self.gpu.width, self.gpu.height, e, tail);
+                        }
                     }
                 }
             },
         }
     }
 
-    fn display_hold(&mut self, n: u32, now_ms: u64) {
-        if self.follow.hold(now_ms) {
-            say!("tapestryd: display event {}: the device is stalled; to be asked when it answers", n);
-        }
-    }
-
     /// The change itself, to a mode already judged one that can be made.
     fn change_mode(&mut self, w: u32, h: u32) -> Result<(), u32> {
+        // A bind that is owed, first: no screen is made while the device is
+        // not known to scan the standing one. An accepted bind also has the
+        // broker let go of what an unanswered one left parked, so a change
+        // that is begun again and again parks one given-up screen at most.
+        if !self.composed_bind_holds() {
+            return Err(E_IO);
+        }
         say!(
             "tapestryd: mode {}x{} -> {}x{} (scanout {})",
             self.gpu.width,
@@ -6307,8 +6377,9 @@ impl Comp {
             self.scanout_name()
         );
         // The new screen first. Until it exists nothing of the standing
-        // display is touched, so a change that cannot be made (it may be
-        // one nobody asked for: the host's window moved) costs nothing.
+        // display is touched, so a change whose screen cannot be made (it
+        // may be one nobody asked for: the host's window moved) costs
+        // nothing.
         let new = match self.alloc_screen(w, h) {
             Some(s) => s,
             None => return Err(p9::E_NOMEM),
@@ -6316,17 +6387,12 @@ impl Comp {
         // Section 10: a placed card was clamped to the display this replaces,
         // and what it reached names the old geometry -- a dismiss after the
         // swap would put back the wrong pixels at the wrong rects. Dismissed
-        // before it, as a modal opening ends a divider drag.
+        // before it, as a modal opening ends a divider drag. Before the
+        // bind too: a dismiss retires a surface, which must find the
+        // standing display whole. So a change whose bind is not taken has
+        // by then closed an open menu.
         if self.menu.is_some() {
             self.menu_dismiss("mode");
-        }
-        // Held pushes reference the OLD geometry/screen; a deferred push
-        // against the new one would land wrong bytes at wrong rects. The
-        // CONFIGURE fan below makes every client repaint.
-        for n in 0..MAX_SURFACES {
-            if let Some(s) = self.surf_mut(n) {
-                s.held = None;
-            }
         }
         // F2: for a DISPLAYED (Composed) scanout, rebind to the new screen
         // BEFORE committing any state -- and roll back cleanly on failure.
@@ -6339,11 +6405,30 @@ impl Comp {
             if self.gpu.set_scanout(new.res, w, h).is_err() {
                 say!("tapestryd: mode rebind failed; old geometry retained");
                 self.free_screen(new);
+                // Not accepted is not the same as not executed: a bind
+                // whose deadline passed may still be executed, and the
+                // device would then scan the screen just given up (the
+                // broker keeps its resource until a later bind is
+                // accepted). The standing screen's bind is owed.
+                self.screen_bind_owed = true;
                 return Err(E_IO);
             }
             // The device now scans new.res (zeroed; reconcile's structural
             // repaint fills it this dispatch); old.res is no longer bound.
             self.bound_res = new.res;
+            self.screen_bind_owed = false;
+            self.bind_again.reset();
+        }
+        // Held pushes reference the OLD geometry/screen; a deferred push
+        // against the new one would land wrong bytes at wrong rects. The
+        // CONFIGURE fan below makes every client repaint. Dropped only
+        // now, with nothing left that can fail: a change that is not made
+        // sends no CONFIGURE, and a present dropped for it would not be
+        // made again.
+        for n in 0..MAX_SURFACES {
+            if let Some(s) = self.surf_mut(n) {
+                s.held = None;
+            }
         }
         // Commit: the old screen is now un-scanned (rebound above) or was
         // never bound (Boot/Off/Direct) -- either way safe to free.
@@ -8317,6 +8402,8 @@ impl Comp {
                     // this line once did, reported an intent as an event.
                     if self.gpu.set_scanout(sres, dw, dh).is_ok() {
                         self.bound_res = sres;
+                        self.screen_bind_owed = false;
+                        self.bind_again.reset();
                         say!(
                             "tapestryd: scanout composed ({}x{}) res {} bound",
                             dw,
@@ -8324,6 +8411,10 @@ impl Comp {
                             sres
                         );
                     } else {
+                        // The composed state is entered all the same (the
+                        // arms below compose into the screen); the bind is
+                        // owed, and `bind_pump` asks again.
+                        self.screen_bind_owed = true;
                         say!(
                             "tapestryd: scanout composed ({}x{}) res {} BIND FAILED -- display keeps the previous scanout",
                             dw, dh, sres
@@ -19432,10 +19523,16 @@ impl Conn {
             // Re-probe the host's preferred rect and take the mode for it
             // (base virtio-gpu reports one rect, not a mode list), and
             // follow the host's display from here on. A verb that is
-            // refused changes nothing: a pinned mode stays pinned, as the
-            // setting its sender then keeps says it is.
+            // refused left the mode that stood, and a pinned mode pinned,
+            // as the setting its sender then keeps says it is.
             let r = match comp.follow_display() {
                 Followed::Done => Ok(()),
+                // The mode is the host's, which is what was asked: the
+                // pass asks again for what is owed.
+                Followed::Unfinished(_) => {
+                    comp.follow.again(libthyla_rs::time::monotonic_ns() / 1_000_000);
+                    Ok(())
+                }
                 Followed::NoDisplay => Err(p9::E_AGAIN),
                 Followed::NoMode => Err(p9::E_NOMEM),
                 Followed::Failed(e) => Err(e),
