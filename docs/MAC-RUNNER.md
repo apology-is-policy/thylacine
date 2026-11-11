@@ -939,6 +939,25 @@ And one thing reading the app's source found, which no well-behaved QEMU shows: 
 shared mapping past the end of a file** (1 MiB of an 8192-byte file, measured) and faults on the
 read, so `ScanoutMap`'s geometry is checked against the file's length before the map.
 
+**Ran 2026-11-11 with a guest** (five boots in 16 minutes under one lease; the app at `c045b8f24`,
+the Halcyon session image baked from `f003526d8`, QEMU 11.1.3, HVF, GICv3, an M2 Air on macOS
+27.2.1). The guest's scanout is 2560x1600, stride 10240, pixman `0x20028888`, and maps. The app's
+output read back from Metal is byte-identical to QMP `screendump` of the stopped guest in all four
+comparisons: mapped, sent in the messages, in the product posture (`THYLACINE_DISPLAY=app`), and in
+the boot the app itself sized (M-8). The frame has colour (an amber accent: red over blue in 0.3%
+of the pixels sampled, blue over red in none, the same in both pictures), so the channel order is
+settled against QEMU's own picture. Colour management is not: the panel was not measured. The
+Mac's pointer wears the guest's (`pointer 64x64 hot 4,4 shown` in every leg, and what AppKit draws
+of it was looked at). Upload cost at 2560x1600 on the mapped path in a settled session: 1.2 ms
+average and 3.6 ms at worst over 87 frames (a frame 1.4 ms); sent in the messages, 1.0 ms over 37
+smaller rectangles; in the product posture 1.4 ms, 12.5 ms at worst, over 32. Across a boot (the
+app attached before the guest started) the average was 9.2 ms and one upload took 120 ms; what
+that one waited for was not isolated. While the probe typed 18 keys the guest damaged about 6
+rectangles and 10.6 megapixels a second. From a key sent over the display connection to the
+guest's next damage: 7.5 to 42.2 ms, median 11.7. The connection is up in 2.4 ms and `ScanoutMap`
+arrives 0.9 ms after the listener registers. Not measured: the CPU the app and QEMU use, a stream
+of full frames at the display's rate, the making of a texture.
+
 M-4 **virgl GL over ANGLE.** Build libepoxy (EGL only), ANGLE (from WebKit, UTM's
 script), upstream virglrenderer; patch `egl_init` for Darwin; `-device
 virtio-gpu-gl-pci -display dbus,p2p=on,gl=on`. Verdict: `tapestryd: gpu up ... virgl=1
@@ -979,6 +998,27 @@ is as read. The app now tells the size itself, as it attaches and after a resize
 339x212 mm for 1280x800 points, rounded where the probe's figures were cut off). What is left of
 M-8 needs a guest: that Lictor boots at the size, the scale the guest takes from the
 millimetres, and the latency of a follow, which waits for Lictor to follow the event.
+
+**Measured 2026-11-11 with a guest** (the run under M-3). A size told before the guest starts is
+the size it starts at. With the device made 1280x800 and no scale on the kernel command line, the
+probe's `SetUIInfo(338, 211, 0, 0, 2560, 1600)` on a paused QEMU gives `tapestryd: edid 338x211
+mm for 2560x1600 px`, `scale 200 (edid)` and `halcyond: session up 2560x1600`. With the app
+attached to the paused QEMU in the probe's place (its window 1280x800 points on this screen) the
+lines are `edid 339x212 mm`, `scale 200 (edid)` and `session up 2560x1600`, and the app's picture
+of that session is QEMU's byte for byte. Left of M-8: the latency of a follow.
+
+**And a defect, measured in the same run.** With the device made 3456x2160 (full screen on a
+16-inch MacBook Pro), Lictor and tapestryd come up at that size (`scale 100`, from QEMU's own
+EDID), the session's first full-screen surface cannot be allocated (`tapestryd:
+t_dma_create_weave(89579520) failed -1`, 225 times in 18 s: three buffers against the kernel's 64
+MiB a weave), `halcyond: FAIL session connect/create`, and QEMU shows "Display output is not
+active". tapestryd's `mode` verb has refused such a size since 2026-07-23; the boot has no rule
+for one. Read, not run: under 800x720 pixels, or over 4096x2160 in all, Lictor's own probe fails
+(`Screen::new`), and Lictor is the keyboard and the pointer too. The app can reach both: a small
+window on a screen with one pixel to a point, full screen on a larger panel. So can QEMU's own
+windows and `xres`/`yres`. The fix is the guest's and belongs to this station's guest half: a mode
+for any host size (the host's size over or times a whole number, the first whose surfaces can be
+made).
 
 M-9 **Input under load.** 120 Hz host autorepeat of a held key into a guest with a 0.6 s
 GPU-busy client (H1's repro) on whatever fix corona's arc has by then. Verdict: lost

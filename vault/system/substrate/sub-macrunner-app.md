@@ -38,7 +38,7 @@ between. It does not start QEMU yet: it attaches to one that runs with
   socket's path is used as given, so a caller with a long path starts the app
   in the socket's directory.
 - **The window** is 1280x800 points, titled Thylacine, resizable down to
-  640x400, and goes
+  640x400 points, and goes
   full screen (Control-Command-F). Command-Q quits; closing the window quits.
   Either way everything the guest holds is let go of first, and the releases
   are given up to half a second to reach QEMU.
@@ -329,9 +329,16 @@ app's own defence against a QEMU that sends something wrong.
 
 ## Performance
 
-No figure with a guest yet (`docs/MAC-RUNNER.md` M-3 is the measurement).
-Without one, at 640x480: the D-Bus connection is up in 0.8 ms and the first
-frame arrives 1.3 ms after the listener registers.
+With a guest (`docs/MAC-RUNNER.md` M-3; 2026-11-11, an M2 Air, QEMU 11.1.3
+under HVF, the scanout 2560x1600 and mapped): an upload averages 1.2 ms and
+takes 3.6 ms at worst in a settled session (87 frames), a frame 1.4 ms;
+pixels sent in the messages, 1.0 ms over smaller rectangles. Across a guest's
+boot the average was 9.2 ms and one upload took 120 ms, which is not
+explained. From a key to the guest's next damage: 7.5 to 42 ms, median 11.7,
+over 18 keys. The connection is up in 2.4 ms and the first scanout arrives
+0.9 ms after the listener registers (0.8 and 1.3 ms with no guest, at
+640x480). Not measured: the CPU the app and QEMU use, a stream of full frames
+at the display's rate, the making of a texture.
 
 ## Prosecution
 
@@ -375,11 +382,19 @@ drag is a mode the guest sets at every step.
   the guest changes its scanout's size QEMU sends no whole frame until the
   guest next flushes one, so an `Update` in between is cut to the old size.
   None of it applies while the scanout is mapped.
-- **A window larger than a guest can set.** The size told is the window's,
-  whatever it is. Lictor's boot takes a display of up to 8192 a side
-  (`MAX_DISPLAY_DIM`), tapestryd's `mode` refuses more than 3840x2160, and its
-  scale stops at 200%. What a guest does with the full-screen window of a 5K
-  or 6K screen is the guest half's to decide, and is not decided.
+- **A window of a size the guest cannot start at.** The size told is the
+  window's, whatever it is, and a guest that starts takes it (Lictor adopts up
+  to 8192 a side, `MAX_DISPLAY_DIM`). Measured 2026-11-11: told 3456x2160, the
+  guest comes up with no session and no display, because three buffers of a
+  full-screen surface are 89.6 MB against the kernel's 64 MiB a weave. The
+  bound is 5.59 megapixels: this app's default window is under it, full screen
+  on a 14- or 16-inch MacBook Pro is over. Read, not run: under 800x720
+  pixels, or over 4096x2160 in all, Lictor does not start, and it is the
+  keyboard and the pointer too; the window's least content, 640x400 points,
+  is that small on a screen with one pixel to a point. A guest that is running
+  is not affected: its `mode` refuses what it cannot make (and more than
+  3840x2160; the scale stops at 200%). The fix is the guest's, a mode for any
+  host size, and is not landed.
 - **The pointer's colours are not managed.** The picture is tagged sRGB; the
   pointer's image is given to AppKit as device RGB.
 - **The input queue has no bound.** Adjacent pointer positions are sent as
