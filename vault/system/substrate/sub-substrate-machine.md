@@ -294,6 +294,23 @@ sized for the slower TCG compat run. Idle cost under HVF was the subject of
   `gpu-headless` with a `-display` in `THYLACINE_QEMU_EXTRA` is not a
   substitute: it keeps `gpu-mmio0`, which takes console 0. The modes need a
   QEMU built with the D-Bus display (`--enable-dbus-display`).
+- **`app` alone binds the tablet to the display** (2026-11-12):
+  `virtio-tablet-pci,...,display=gpu0,head=0`, declared after gpu0 because a
+  bind to a display that does not exist yet fails without a word. In that
+  posture gpu0 is one PCI slot lower than in the others and the tablet one
+  higher (NIC 1, keyboard 2, gpu0 3, tablet 4); the NIC, the sound card and
+  the GPU stay on three INTx lines. The Mac app addresses its pointer events
+  to gpu0, and a console's own device takes all of an event, the place and
+  the button as one report ([[sub-macrunner-app]]). No other posture may
+  bind it: an unaddressed QMP `abs` finds no handler on a machine whose
+  tablet is bound to a display, and the gates inject unaddressed. With the
+  tablet bound to nothing, as everywhere else, an unaddressed `abs` goes to
+  the tablet and a `btn` to the pointer device whose driver came up last,
+  the mouse: a gate's injected click arrives as a place on one device and a
+  button on the other, and a console's pointer mode
+  (`qemu_input_is_absolute`, which the cocoa, VNC and D-Bus displays go by)
+  is the mouse's, relative. Measured with no guest on QEMU 10.0.2 and
+  11.1.3; cocoa itself has not been measured.
 - **Under cocoa, the guest's Super is the Mac's Cmd, and macOS takes some Cmd
   combos first** (2026-09-16, operator-found): Cmd+Tab (the app switcher),
   Cmd+H (Hide -- Halcyon's split), Cmd+Shift+Q (Log Out -- Halcyon's close).

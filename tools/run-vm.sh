@@ -400,6 +400,22 @@ if [[ "${THYLACINE_NO_GPU:-0}" != "1" && "${THYLACINE_DISPLAY:-none}" != "consol
             -device "$gpu_dev,id=gpu0,disable-legacy=on$gpu_res$pci_gpu_addr"
         )
     fi
+    # The Mac app's posture binds the tablet to the display the app draws. The app addresses a
+    # click to gpu0, and QEMU hands a console's own device all of an event, the place and the
+    # button as one report; with the tablet bound to nothing the place goes to the tablet and
+    # the button to the mouse (the handler taking BTN whose driver came up last), which the
+    # compositor drains after the tablet. A bind to a display that does not exist yet fails
+    # without a word, so here the tablet is declared after gpu0: gpu0 is one PCI slot lower
+    # than in the other postures and the tablet one higher (the NIC, the sound card and the
+    # GPU stay on three INTx lines). Only here, because an unaddressed QMP `abs` finds no
+    # handler on a machine whose tablet is bound to a display, and the gates inject unaddressed.
+    if [[ "${THYLACINE_DISPLAY:-none}" == "app" && "${THYLACINE_NO_INPUT:-0}" != "1" ]]; then
+        input_flags=(
+            -device "virtio-keyboard-device,id=kbd0"
+            -device "virtio-keyboard-pci,id=kbd-pci0,disable-legacy=on"
+        )
+        gpu_flags+=(-device "virtio-tablet-pci,id=tab-pci0,disable-legacy=on,display=gpu0,head=0")
+    fi
 fi
 # The cocoa backend under HiDPI: zoom-to-fit maps the (doubled) guest
 # scanout onto the window's points, nearest-neighbour so a 2x guest lands

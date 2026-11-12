@@ -35,7 +35,7 @@ use objc2_metal::{
 };
 use objc2_quartz_core::{CADisplayLink, CALayer, CAMetalDrawable, CAMetalLayer};
 
-use crate::display::{pixels, Display, Input, Order, Pixels, Pointer, Rect, UiInfo};
+use crate::display::{pixels, Display, Input, Order, Pixels, Place, Pointer, Rect, UiInfo};
 use crate::keymap;
 
 const SHADERS: &str = r#"
@@ -789,19 +789,13 @@ define_class!(
         fn scroll_wheel(&self, ev: &NSEvent) {
             self.settle_modifiers(ev);
             // A scroll over the bars is not the guest's: it would land wherever its pointer last was.
-            if self.guest_point(ev).is_none() {
-                return;
-            }
+            let Some(at) = self.guest_point(ev) else { return };
             let mut acc = self.ivars().scroll.get();
             let n = notches(&mut acc, ev.scrollingDeltaY(), ev.hasPreciseScrollingDeltas());
             self.ivars().scroll.set(acc);
-            if n == 0 {
-                return;
-            }
             // A window that is not active is still scrolled, and is sent no moves: the guest's
-            // pointer may be anywhere, so the notches go with the place they were made over.
-            self.pointer(ev);
-            for _ in 0..n.abs() { self.send(Input::Wheel { up: n > 0 }); }
+            // pointer may be anywhere, so each notch goes with the place it was made over.
+            for _ in 0..n.abs() { self.send(Input::Wheel { up: n > 0, at }); }
         }
     }
 );
@@ -1052,6 +1046,7 @@ impl GuestView {
             self.send(Input::Button {
                 button,
                 down: false,
+                at: None,
             });
         }
     }
@@ -1109,12 +1104,13 @@ impl GuestView {
         Some((rect, scale, (tw, th)))
     }
 
-    // The scanout pixel under a window event, if it is over the picture.
-    fn guest_point(&self, ev: &NSEvent) -> Option<(u32, u32)> {
+    // The scanout pixel under a window event, if it is over the picture, and the scanout's size.
+    fn guest_point(&self, ev: &NSEvent) -> Option<Place> {
         let p = self.convertPoint_fromView(ev.locationInWindow(), None);
-        let (r, _, (tw, th)) = self.picture()?;
+        let (r, _, (w, h)) = self.picture()?;
         let rect = (r.origin.x, r.origin.y, r.size.width, r.size.height);
-        guest_pixel(p.x, p.y, rect, tw, th)
+        let (x, y) = guest_pixel(p.x, p.y, rect, w, h)?;
+        Some(Place { x, y, w, h })
     }
 
     // Bring the Mac's pointer up to the guest's: its image, whether it shows one, and the size a
@@ -1164,25 +1160,26 @@ impl GuestView {
 
     fn pointer(&self, ev: &NSEvent) {
         self.settle_modifiers(ev);
-        if let Some((x, y)) = self.guest_point(ev) {
-            self.send(Input::Abs { x, y });
+        if let Some(at) = self.guest_point(ev) {
+            self.send(Input::Abs(at));
         }
     }
 
     // A press counts only over the picture: over the bars it would land wherever the guest's
-    // pointer last was. A release is sent exactly when its press was, wherever it happens.
+    // pointer last was. A release is sent exactly when its press was, wherever it happens: with
+    // its place over the picture, and with none off it.
     fn button(&self, ev: &NSEvent, button: Option<u32>, down: bool) {
         self.settle_modifiers(ev);
         let Some(button) = button else { return };
+        let at = self.guest_point(ev);
         if down {
-            if self.guest_point(ev).is_none() || !self.ivars().pressed.borrow_mut().insert(button) {
+            if at.is_none() || !self.ivars().pressed.borrow_mut().insert(button) {
                 return;
             }
         } else if !self.ivars().pressed.borrow_mut().remove(&button) {
             return;
         }
-        self.pointer(ev);
-        self.send(Input::Button { button, down });
+        self.send(Input::Button { button, down, at });
     }
 
     // A fixed run of events, each made as AppKit makes them and handed to the window, so that what reaches

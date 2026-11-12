@@ -34,9 +34,12 @@ between. It does not start QEMU yet: it attaches to one that runs with
 
 - **`thylacine-mac --attach <qmp socket>`** connects to QMP, hands QEMU one end
   of a socket pair (`getfd` under the name `thylacine-display`, then
-  `add_client` with protocol `@dbus-display`), and closes QMP again. The
-  socket's path is used as given, so a caller with a long path starts the app
-  in the socket's directory.
+  `add_client` with protocol `@dbus-display`), asks whether there is a device
+  named `gpu0`, and keeps the monitor: the pointer's events go through it.
+  QEMU's monitor serves one client at a time, so that socket serves nobody
+  else while the app runs; a tool that wants QEMU's monitor meanwhile uses
+  another (`tools/run-vm.sh` gives two). The socket's path is used as given,
+  so a caller with a long path starts the app in the socket's directory.
 - **The window** is 1280x800 points, titled Thylacine, resizable down to
   640x400 points, and goes
   full screen (Control-Command-F). Command-Q quits; closing the window quits.
@@ -96,14 +99,27 @@ between. It does not start QEMU yet: it attaches to one that runs with
   comes up as the place it went down as, whatever keyboard was typed on in
   between. Modifiers come from `flagsChanged`, each by its own left or right
   bit when the event has one; Caps Lock is a press and a release per toggle.
-- **The pointer** is absolute, in scanout pixels. Over the letterbox bars
-  nothing is the guest's: a move, a press and a scroll there send nothing. A
-  release is sent exactly when its press was. Buttons, in QEMU's numbers: left
-  0, middle 1, right 2, the two side buttons 5 and 6; any other button sends
-  nothing. The wheel is buttons 3 (up) and 4 (down): one notch per wheel
-  event, and one per ten points of trackpad scroll, at most eight an event.
-  Notches are sent with the place they were made over, because a window that
-  is not active is still scrolled and is sent no moves.
+- **The pointer** is absolute: the scanout pixel under the Mac's pointer. It
+  goes to the guest through the monitor (`input-send-event`) and not through
+  the display connection, as the value a tablet's axis has for that pixel on a
+  screen of the scanout's size: the least value the compositor's own division
+  brings back to the pixel (`axis`), which is exact for every pixel of every
+  screen the app can show. An event is addressed to the display `gpu0`, head
+  0. With the tablet bound to that display (`tools/run-vm.sh` binds it under
+  `THYLACINE_DISPLAY=app`) a press, a release or a notch reaches the tablet's
+  driver as one report with its place. With the tablet bound to nothing QEMU
+  hands the place to the tablet and the button to the pointer device whose
+  driver came up last, which in a guest of ours is the mouse. A QEMU with no
+  device of that name is found out at the attach, said once, and sent its
+  events unaddressed. Over the letterbox bars nothing is the guest's: a move,
+  a press and a scroll there send nothing. A release is sent exactly when its
+  press was, with its place over the picture and with none off it. Buttons:
+  left, middle, right and the two side buttons (the view counts them in
+  QEMU's numbers 0, 1, 2, 5, 6); any other button sends nothing. The wheel:
+  one notch per wheel event, and one per ten points of trackpad scroll, at
+  most eight an event. A notch is the wheel's button going down, with the
+  place it was made over, because a window that is not active is still
+  scrolled and is sent no moves.
 - **The guest's pointer** is not in the scanout: the guest gives QEMU an image
   and a hot spot (`CursorDefine`) and says whether it shows one (`MouseSet`).
   While the window has the keys and the Mac's pointer is over the picture, it
@@ -135,9 +151,34 @@ between. It does not start QEMU yet: it attaches to one that runs with
 **Three threads.** The main thread has AppKit, Metal and the display link. A
 `display` thread owns both D-Bus connections (the one the app calls QEMU on,
 and the one QEMU calls the listener on) and never leaves `zbus::block_on`. An
-`input` thread makes the blocking calls to QEMU's console, an event at a time:
-one for a key, a button or a position (a run of positions is sent as its
-last), two for a wheel notch.
+`input` thread talks to QEMU an event at a time, each answered before the
+next is sent: a key or the window's size is a call on the display connection,
+and a position, a button or a notch is one command on the monitor (a run of
+positions is sent as its last). One thread sends both kinds, so the guest
+sees keys and the pointer in the order they happened.
+
+**Why the pointer goes over the monitor.** QEMU's display connection gives a
+console one pointer mode (`ui/input.c`, `qemu_input_is_absolute`): that of the
+pointer device bound to the console, and with none bound that of the one whose
+driver reached DRIVER_OK last. It refuses `SetAbsPosition` in the one ("Mouse
+is not absolute") and `RelMotion` in the other. Lictor brings up the keyboard,
+the tablet and then the mouse, so on a machine with the tablet bound to
+nothing, which every launcher of ours made until 2026-11-12, each position
+the app sent was refused: the app's pointer did nothing in a live guest, and
+no test had tried it (the window's test had a QEMU with a tablet and no
+mouse, and read a trace line QEMU writes before it decides). Binding the
+tablet to the display makes its console absolute whatever came up last, and
+would by itself have cured the refusal; it also rules relative motion out on
+that connection for good. The monitor's `input-send-event` takes a position
+and relative motion alike, at any time. It also takes the axis value as given,
+where the display connection makes one of a pixel as `x * 0x7fff / width`,
+which the compositor's `ax * (W - 1) / 32767` brings back a pixel short
+nearly everywhere (10 of 1280 as 9, the last column as 1277: OPEN-BUGS
+2026-11-12T08:49Z, a defect of every QEMU frontend against that line). And
+what one command holds reaches the guest as one report, so a press cannot be
+seen before the move to its place. `axis` is exact only against that one line
+of the compositor; a unit test reads `usr/tapestryd/src/main.rs` and fails
+when the line is no longer there.
 
 **Why the D-Bus thread does nothing else.** QEMU's main loop calls the listener
 synchronously (`ui/dbus-listener.c`: the proxies are made with
@@ -350,7 +391,9 @@ app's own defence against a QEMU that sends something wrong.
 
 - No QMP, no D-Bus display, no Metal device: a message and exit 1. An attach
   that is not done within 10 s is the same (`ATTACH_TIMEOUT`, one deadline for
-  the monitor's four answers and the display connection together): QEMU
+  the monitor's greeting, its four answers and the display connection
+  together; after the attach a command on the monitor waits for as long as
+  QEMU takes): QEMU
   answers all of them from its main loop, and one that is hung never would.
   Until then the launch shows nothing: the attach runs on the main thread,
   before the window and the menu exist.
@@ -359,11 +402,13 @@ app's own defence against a QEMU that sends something wrong.
   the window is blank.
 - A texture that cannot be made leaves the window blank; each later damage
   tries again.
-- An input call QEMU refuses is logged (the first, and then each time the
-  count doubles) and the next event is tried. An I/O error means QEMU is
-  gone: it is logged and the input thread stops. The display thread stays
-  parked and the window keeps its last frame; nothing in the window says so
-  yet.
+- An event QEMU refuses, a call on the display connection or a command on
+  the monitor, is logged with QEMU's reason (the first, and then each time
+  the count doubles) and the next event is tried. The monitor refuses the
+  pointer while the machine is stopped ("VM not running") and when the guest
+  has no device for it. An I/O error on either connection means QEMU is gone:
+  it is logged and the input thread stops. The display thread stays parked
+  and the window keeps its last frame; nothing in the window says so yet.
 - A console whose device takes no size answers `SetUIInfo` with an error. It
   is counted and logged with the other calls QEMU refuses, and nothing else
   changes.
@@ -480,9 +525,18 @@ every step of a drag is a mode the guest sets at every step.
 - **The input queue has no bound.** Adjacent pointer positions are sent as
   one (`next_input`), so a stalled QEMU costs one stale position, not
   thousands; keys and buttons behind it still queue and are replayed.
+- **The pointer has not been tried in a live guest.** What is shown is with a
+  QEMU that has no guest and a scripted driver in its place: the reports the
+  tablet's driver is handed, on QEMU 10.0.2 and 11.1.3. That the compositor
+  takes a button from the tablet was read in its source
+  (`usr/tapestryd/src/main.rs`, the tablet's drain), not seen.
+- **The monitor is the app's while it runs**, and a stopped machine refuses
+  the pointer: the app logs it and the window says nothing.
+- **`THYLACINE_ECHO_POINTER=1`** prints each place the guest says its pointer
+  is at (`MouseSet`), for a test that wants to see where an event landed.
 - **Not driven by any test:** a trackpad's scroll (the notch arithmetic has
   unit tests; the script sends one wheel notch); the middle and side buttons
-  (their numbers have a unit test); the ISO exchange on a real keyboard, and
+  (their names have a unit test); the ISO exchange on a real keyboard, and
   the call that asks which keyboard it is (unit test of the rule, the same one
   SDL applies); a real menu, a real loss of the keys and a real left click
   through the window (the test posts AppKit's notifications itself and hands
@@ -512,7 +566,9 @@ every step of a drag is a mode the guest sets at every step.
   has run since the rule was written. It is in the unit tests, on Metal off
   screen (every device pixel of 192 views against the pixel a click on it
   sends, and 27 filled views for which pixels are picture), and in one window
-  at two pixels to a point; never in a window at one.
+  at two pixels to a point, where the bars are a pixel on every side: AppKit
+  made 641x481 points of a content size of 640.5x480.5 (macOS 27.2.1), so a
+  window there has no odd pixel to place. Never in a window at one.
 - **Two keyboards of different kinds** are read through one call that answers
   for the keyboard last typed on. A key is sent as the place it went down as,
   so it cannot stick; which of two places a key pressed on the other keyboard

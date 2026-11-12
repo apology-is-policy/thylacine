@@ -305,12 +305,34 @@ impl UiInfo {
     }
 }
 
+// A pixel of the guest's screen, and the size the screen had when the pixel was found: a tablet
+// reports a fraction of its surface, and which pixel that is depends on the size.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Place {
+    pub x: u32,
+    pub y: u32,
+    pub w: u32,
+    pub h: u32,
+}
+
+// A button or a notch goes with the place it happened at, so that the guest is handed both as one
+// report. A button let go of off the picture has no place.
 #[derive(Debug, PartialEq)]
 pub enum Input {
-    Key { qnum: u32, down: bool },
-    Abs { x: u32, y: u32 },
-    Button { button: u32, down: bool },
-    Wheel { up: bool },
+    Key {
+        qnum: u32,
+        down: bool,
+    },
+    Abs(Place),
+    Button {
+        button: u32,
+        down: bool,
+        at: Option<Place>,
+    },
+    Wheel {
+        up: bool,
+        at: Place,
+    },
     Size(UiInfo),
     Sync, // not sent: answered once everything before it has been
 }
@@ -320,6 +342,7 @@ struct State {
     dirty: Arc<AtomicBool>,
     pointer_dirty: Arc<AtomicBool>,
     map: bool,
+    echo: bool,
     unshowable: AtomicU64,
 }
 
@@ -481,7 +504,10 @@ impl Listener {
     }
     // The position is the guest repeating the one it was sent, so only whether it shows its pointer
     // is news. QEMU says so once when the listener registers, before any guest has spoken.
-    fn mouse_set(&mut self, _x: i32, _y: i32, on: i32) {
+    fn mouse_set(&mut self, x: i32, y: i32, on: i32) {
+        if self.0.echo {
+            eprintln!("pointer: the guest has its pointer at {x},{y}, shown {on}");
+        }
         show_pointer(&self.0.shared, &self.0.pointer_dirty, on != 0);
     }
     fn cursor_define(&mut self, width: i32, height: i32, hot_x: i32, hot_y: i32, data: Vec<u8>) {
@@ -580,73 +606,221 @@ fn limit(w: &UnixStream, deadline: Instant) -> std::io::Result<()> {
     w.set_write_timeout(Some(left))
 }
 
-// One QMP command; events are skipped. An error reply is an Err.
-fn qmp_cmd(
-    w: &UnixStream,
-    r: &mut BufReader<UnixStream>,
-    json: &str,
-    fd: Option<i32>,
-    deadline: Instant,
-) -> std::io::Result<()> {
-    let line = format!("{json}\n");
-    limit(w, deadline)?;
-    match fd {
-        Some(fd) => send_with_fd(w, line.as_bytes(), fd)?,
-        None => (&*w).write_all(line.as_bytes())?,
-    }
-    loop {
-        let mut reply = String::new();
-        limit(w, deadline)?;
-        if r.read_line(&mut reply)? == 0 {
-            return Err(std::io::Error::other("QMP closed"));
-        }
-        if reply.contains("\"event\"") {
-            continue;
-        }
-        if reply.contains("\"error\"") {
-            return Err(std::io::Error::other(format!("{json} -> {}", reply.trim())));
-        }
-        return Ok(());
+// Why a monitor command was not carried out.
+#[derive(Debug)]
+enum QmpError {
+    Io(std::io::Error), // the connection: QEMU is gone, or gave no answer in time
+    Refused(String),    // QEMU's own answer, in its words
+}
+impl From<std::io::Error> for QmpError {
+    fn from(e: std::io::Error) -> QmpError {
+        QmpError::Io(e)
     }
 }
 
-// Hand QEMU one end of a socket pair over QMP and make it a display client; returns our end.
-fn attach(qmp_path: &str, deadline: Instant) -> std::io::Result<UnixStream> {
+// What a line from the monitor says of the command before it: nothing if it is not an answer (an
+// event, which QEMU sends whenever it has one), or else done, or refused with QEMU's reason. A
+// command sent without an id is answered by an object with one member, `return` or `error`.
+fn answer(line: &str) -> Option<Result<(), String>> {
+    if line.starts_with("{\"return\"") {
+        return Some(Ok(()));
+    }
+    if !line.starts_with("{\"error\"") {
+        return None;
+    }
+    // The reason is the text of "desc"; a quote inside it is written with a backslash before it.
+    let why = line.split_once("\"desc\": \"").map(|(_, rest)| {
+        let mut end = rest.len();
+        let mut escaped = false;
+        for (i, c) in rest.char_indices() {
+            match c {
+                '"' if !escaped => {
+                    end = i;
+                    break;
+                }
+                '\\' => escaped = !escaped,
+                _ => escaped = false,
+            }
+        }
+        rest[..end].to_string()
+    });
+    Some(Err(why.unwrap_or_else(|| line.trim().to_string())))
+}
+
+// A monitor connection. QEMU's monitor serves one client at a time and answers its commands in
+// the order they came.
+#[derive(Debug)]
+struct Monitor {
+    w: UnixStream,
+    r: BufReader<UnixStream>,
+}
+impl Monitor {
+    // One command and its answer. With no deadline it waits for as long as QEMU takes.
+    fn cmd(
+        &mut self,
+        json: &str,
+        fd: Option<i32>,
+        deadline: Option<Instant>,
+    ) -> Result<(), QmpError> {
+        let line = format!("{json}\n");
+        if let Some(deadline) = deadline {
+            limit(&self.w, deadline)?;
+        }
+        match fd {
+            Some(fd) => send_with_fd(&self.w, line.as_bytes(), fd)?,
+            None => (&self.w).write_all(line.as_bytes())?,
+        }
+        loop {
+            let mut reply = String::new();
+            if let Some(deadline) = deadline {
+                limit(&self.w, deadline)?;
+            }
+            if self.r.read_line(&mut reply)? == 0 {
+                return Err(std::io::Error::other("QMP closed").into());
+            }
+            match answer(&reply) {
+                None => continue,
+                Some(Ok(())) => return Ok(()),
+                Some(Err(why)) => return Err(QmpError::Refused(why)),
+            }
+        }
+    }
+}
+
+// A tablet's axis runs from 0 to this whatever the screen's size (QEMU's INPUT_EVENT_ABS_MAX).
+const AXIS_MAX: u64 = 0x7fff;
+// The display device the pointer's events are addressed to. A tablet bound to it (`display=gpu0`
+// on the tablet, tools/run-vm.sh) takes all of an event; with none bound QEMU picks a device for
+// each part, the tablet for a place and whichever pointer device came up last for a button.
+const SCREEN: &str = "gpu0";
+// QEMU's names for the buttons, by the numbers the view counts them in (InputButton's order).
+const BUTTONS: [&str; 7] = [
+    "left",
+    "middle",
+    "right",
+    "wheel-up",
+    "wheel-down",
+    "side",
+    "extra",
+];
+
+// The axis value for pixel `p` of `n`. The guest finds the pixel again as value * (n - 1) /
+// AXIS_MAX rounded down (usr/tapestryd/src/main.rs, the tablet's drain), so this is the least
+// value that division brings back to `p`: exact for every pixel while n - 1 is at most AXIS_MAX.
+fn axis(p: u32, n: u32) -> u64 {
+    if n < 2 {
+        return 0;
+    }
+    let last = n as u64 - 1;
+    ((p as u64).min(last) * AXIS_MAX).div_ceil(last)
+}
+const _: () = assert!(MAX_SIDE as u64 - 1 <= AXIS_MAX);
+
+// One input-send-event command: a place, a button going down or up, or both. QEMU hands the guest
+// what one command holds as one report, so a press cannot be seen before the move to its place.
+fn pointer_event(to_screen: bool, at: Option<Place>, button: Option<(&str, bool)>) -> String {
+    let mut events = Vec::new();
+    if let Some(p) = at {
+        for (name, value) in [("x", axis(p.x, p.w)), ("y", axis(p.y, p.h))] {
+            events.push(format!(
+                r#"{{"type":"abs","data":{{"axis":"{name}","value":{value}}}}}"#
+            ));
+        }
+    }
+    if let Some((name, down)) = button {
+        events.push(format!(
+            r#"{{"type":"btn","data":{{"down":{down},"button":"{name}"}}}}"#
+        ));
+    }
+    let to = if to_screen {
+        format!(r#""device":"{SCREEN}","head":0,"#)
+    } else {
+        String::new()
+    };
+    format!(
+        r#"{{"execute":"input-send-event","arguments":{{{to}"events":[{}]}}}}"#,
+        events.join(",")
+    )
+}
+
+// The pointer's way to the guest. QEMU's display connection gives a console one pointer mode: it
+// takes a position only while the console's pointer device is an absolute one (the device bound
+// to the console, or with none bound the one whose driver came up last, which in a guest of ours
+// is the mouse), and relative motion only while it is not. The monitor's input-send-event takes
+// either at any time.
+#[derive(Debug)]
+struct Pointing {
+    monitor: Monitor,
+    to_screen: bool,
+}
+impl Pointing {
+    fn send(&mut self, at: Option<Place>, button: Option<(&str, bool)>) -> Result<(), QmpError> {
+        self.monitor
+            .cmd(&pointer_event(self.to_screen, at, button), None, None)
+    }
+}
+
+// Hand QEMU one end of a socket pair over QMP and make it a display client; returns our end, and
+// the monitor, which is kept for the pointer.
+fn attach(qmp_path: &str, deadline: Instant) -> std::io::Result<(UnixStream, Pointing)> {
     attach_qmp(qmp_path, deadline).map_err(|e| {
-        let why = match e.kind() {
-            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut => {
+        let why = match e {
+            QmpError::Io(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
                 format!("no answer in {} s", ATTACH_TIMEOUT.as_secs())
             }
-            _ => e.to_string(),
+            QmpError::Io(e) => e.to_string(),
+            QmpError::Refused(why) => why,
         };
         std::io::Error::other(format!("QEMU's monitor at {qmp_path}: {why}"))
     })
 }
 
-fn attach_qmp(qmp_path: &str, deadline: Instant) -> std::io::Result<UnixStream> {
+fn attach_qmp(qmp_path: &str, deadline: Instant) -> Result<(UnixStream, Pointing), QmpError> {
     let w = UnixStream::connect(qmp_path)?;
-    let mut r = BufReader::new(w.try_clone()?);
+    let mut monitor = Monitor {
+        r: BufReader::new(w.try_clone()?),
+        w,
+    };
     let mut greeting = String::new();
-    limit(&w, deadline)?;
-    r.read_line(&mut greeting)?;
-    let caps = r#"{"execute":"qmp_capabilities"}"#;
-    qmp_cmd(&w, &mut r, caps, None, deadline)?;
+    limit(&monitor.w, deadline)?;
+    monitor.r.read_line(&mut greeting)?;
+    // A refusal here is the end of the attach, and is told with the command it answers.
+    let mut ask = |json: &str, fd: Option<i32>| {
+        monitor.cmd(json, fd, Some(deadline)).map_err(|e| match e {
+            QmpError::Refused(why) => QmpError::Refused(format!("{json} -> {why}")),
+            e => e,
+        })
+    };
+    ask(r#"{"execute":"qmp_capabilities"}"#, None)?;
     let (ours, theirs) = UnixStream::pair()?;
-    qmp_cmd(
-        &w,
-        &mut r,
+    ask(
         r#"{"execute":"getfd","arguments":{"fdname":"thylacine-display"}}"#,
         Some(theirs.as_raw_fd()),
-        deadline,
     )?;
-    qmp_cmd(
-        &w,
-        &mut r,
+    ask(
         r#"{"execute":"add_client","arguments":{"protocol":"@dbus-display","fdname":"thylacine-display"}}"#,
         None,
-        deadline,
     )?;
-    Ok(ours)
+    let screen = format!(
+        r#"{{"execute":"qom-get","arguments":{{"path":"/machine/peripheral/{SCREEN}","property":"type"}}}}"#
+    );
+    let to_screen = match monitor.cmd(&screen, None, Some(deadline)) {
+        Ok(()) => true,
+        Err(QmpError::Refused(why)) => {
+            eprintln!("input: this QEMU has no device named {SCREEN} ({why}); the pointer's events go to whichever device QEMU picks for each");
+            false
+        }
+        Err(e) => return Err(e),
+    };
+    // From here on a command waits for its answer for as long as QEMU takes.
+    monitor.w.set_read_timeout(None)?;
+    monitor.w.set_write_timeout(None)?;
+    Ok((ours, Pointing { monitor, to_screen }))
 }
 
 async fn serve(
@@ -682,16 +856,40 @@ async fn serve(
 // QEMU was busy. An event of another kind ends the run and is handed back for the next turn.
 fn next_input(first: Input, mut more: impl FnMut() -> Option<Input>) -> (Input, Option<Input>) {
     let mut ev = first;
-    while matches!(ev, Input::Abs { .. }) {
+    while matches!(ev, Input::Abs(_)) {
         match more() {
-            Some(next @ Input::Abs { .. }) => ev = next,
+            Some(next @ Input::Abs(_)) => ev = next,
             other => return (ev, other),
         }
     }
     (ev, None)
 }
 
-fn send_input(conn: &zbus::Connection, ev: Input) -> zbus::Result<()> {
+// Why an event did not reach the guest: QEMU is gone, or it answered that it will not take it.
+#[derive(Debug)]
+enum Unsent {
+    Gone(String),
+    Refused(String),
+}
+impl From<zbus::Error> for Unsent {
+    fn from(e: zbus::Error) -> Unsent {
+        match e {
+            zbus::Error::InputOutput(e) => Unsent::Gone(e.to_string()),
+            e => Unsent::Refused(e.to_string()),
+        }
+    }
+}
+impl From<QmpError> for Unsent {
+    fn from(e: QmpError) -> Unsent {
+        match e {
+            QmpError::Io(e) => Unsent::Gone(e.to_string()),
+            QmpError::Refused(why) => Unsent::Refused(why),
+        }
+    }
+}
+
+// Keys and the window's size go over the display connection; the pointer goes over the monitor.
+fn send_input(conn: &zbus::Connection, pointing: &mut Pointing, ev: Input) -> Result<(), Unsent> {
     macro_rules! call {
         ($iface:expr, $method:expr, $body:expr) => {
             zbus::block_on(conn.call_method(
@@ -701,7 +899,7 @@ fn send_input(conn: &zbus::Connection, ev: Input) -> zbus::Result<()> {
                 $method,
                 $body,
             ))
-            .map(|_| ())
+            .map(|_| ())?
         };
     }
     match ev {
@@ -710,16 +908,16 @@ fn send_input(conn: &zbus::Connection, ev: Input) -> zbus::Result<()> {
             if down { "Press" } else { "Release" },
             &(qnum,)
         ),
-        Input::Abs { x, y } => call!("org.qemu.Display1.Mouse", "SetAbsPosition", &(x, y)),
-        Input::Button { button, down } => call!(
-            "org.qemu.Display1.Mouse",
-            if down { "Press" } else { "Release" },
-            &(button,)
-        ),
-        Input::Wheel { up } => {
-            let b = if up { 3u32 } else { 4u32 };
-            call!("org.qemu.Display1.Mouse", "Press", &(b,))?;
-            call!("org.qemu.Display1.Mouse", "Release", &(b,))
+        Input::Abs(at) => pointing.send(Some(at), None)?,
+        Input::Button { button, down, at } => match BUTTONS.get(button as usize) {
+            Some(name) => pointing.send(at, Some((name, down)))?,
+            None => return Err(Unsent::Refused(format!("there is no button {button}"))),
+        },
+        // A notch is the wheel's button going down. Its coming up is no part of a notch, and a
+        // virtio tablet makes a key of it that no driver expects.
+        Input::Wheel { up, at } => {
+            let name = if up { "wheel-up" } else { "wheel-down" };
+            pointing.send(Some(at), Some((name, true)))?
         }
         // QEMU keeps it for the guest's next question about its display, and raises the device's
         // display event. A console whose device takes no size refuses the call.
@@ -728,8 +926,9 @@ fn send_input(conn: &zbus::Connection, ev: Input) -> zbus::Result<()> {
             "SetUIInfo",
             &(u.width_mm, u.height_mm, 0i32, 0i32, u.width, u.height)
         ),
-        Input::Sync => Ok(()),
+        Input::Sync => {}
     }
+    Ok(())
 }
 
 // What the input thread does: the events in order, a run of positions as its last one, until the
@@ -737,7 +936,7 @@ fn send_input(conn: &zbus::Connection, ev: Input) -> zbus::Result<()> {
 fn pump(
     irx: mpsc::Receiver<Input>,
     stx: mpsc::Sender<()>,
-    mut send: impl FnMut(Input) -> zbus::Result<()>,
+    mut send: impl FnMut(Input) -> Result<(), Unsent>,
 ) {
     let mut held_back = None;
     let mut refused = 0u64;
@@ -750,13 +949,13 @@ fn pump(
         }
         match send(ev) {
             Ok(()) => {}
-            Err(zbus::Error::InputOutput(e)) => {
+            Err(Unsent::Gone(e)) => {
                 eprintln!("input: QEMU is gone ({e}); nothing more is sent");
                 break;
             }
-            // QEMU still answers but will not take the event: another client took its
-            // console, or the position was outside a screen that has just changed.
-            Err(e) => {
+            // QEMU still answers but will not take the event: another client took its console,
+            // the machine is stopped, or the guest has no device for it.
+            Err(Unsent::Refused(e)) => {
                 refused += 1;
                 if refused.is_power_of_two() {
                     eprintln!("input: QEMU refused an event ({e}); {refused} so far");
@@ -768,18 +967,22 @@ fn pump(
 
 pub fn connect(qmp_path: &str) -> Result<Display, Box<dyn std::error::Error>> {
     let deadline = Instant::now() + ATTACH_TIMEOUT;
-    let sock = attach(qmp_path, deadline)?;
+    let (sock, mut pointing) = attach(qmp_path, deadline)?;
     let shared: Arc<Mutex<Shared>> = Arc::default();
     let dirty = Arc::new(AtomicBool::new(false));
     let pointer_dirty = Arc::new(AtomicBool::new(false));
     // THYLACINE_NO_MAP=1 makes QEMU send pixels in its messages instead: the path a host without a
     // shareable surface takes, kept reachable so that it can be tried.
     let map = std::env::var_os("THYLACINE_NO_MAP").is_none_or(|v| v != "1");
+    // THYLACINE_ECHO_POINTER=1 prints each place the guest says its pointer is at, for a test
+    // that wants to see where an event landed.
+    let echo = std::env::var_os("THYLACINE_ECHO_POINTER").is_some_and(|v| v == "1");
     let state = Arc::new(State {
         shared: shared.clone(),
         dirty: dirty.clone(),
         pointer_dirty: pointer_dirty.clone(),
         map,
+        echo,
         unshowable: AtomicU64::new(0),
     });
     let (tx, rx) = mpsc::channel::<Result<zbus::Connection, String>>();
@@ -808,7 +1011,7 @@ pub fn connect(qmp_path: &str) -> Result<Display, Box<dyn std::error::Error>> {
     let (stx, synced) = mpsc::channel::<()>();
     std::thread::Builder::new()
         .name("input".into())
-        .spawn(move || pump(irx, stx, |ev| send_input(&conn, ev)))?;
+        .spawn(move || pump(irx, stx, |ev| send_input(&conn, &mut pointing, ev)))?;
     Ok(Display {
         shared,
         dirty,
@@ -859,6 +1062,7 @@ mod tests {
             dirty: Arc::new(AtomicBool::new(false)),
             pointer_dirty: Arc::new(AtomicBool::new(false)),
             map,
+            echo: false,
             unshowable: AtomicU64::new(0),
         });
         (state, shared)
@@ -945,20 +1149,35 @@ mod tests {
         assert_eq!(showing(&shared), None);
     }
 
-    // A monitor that greets at once and answers every line after `delay`.
-    fn monitor(name: &str, delay: Duration) -> (String, std::thread::JoinHandle<()>) {
+    // Lines as QEMU 10.0.2 and 11.1.3 wrote them to a monitor (the two agree), carriage return
+    // and all.
+    const DONE: &str = "{\"return\": {}}\r\n";
+    const STOPPED: &str =
+        "{\"timestamp\": {\"seconds\": 1794471987, \"microseconds\": 21641}, \"event\": \"STOP\"}\r\n";
+    const NOT_RUNNING: &str =
+        "{\"error\": {\"class\": \"GenericError\", \"desc\": \"VM not running\"}}\r\n";
+    const NO_SCREEN: &str = "{\"error\": {\"class\": \"DeviceNotFound\", \"desc\": \"Device '/machine/peripheral/gpu0' not found\"}}\r\n";
+
+    // A monitor that greets at once and answers every line after `delay`: done, or, asked about
+    // the screen when it has none, that there is no such device.
+    fn monitor(name: &str, delay: Duration, screen: bool) -> (String, std::thread::JoinHandle<()>) {
         let path = std::env::temp_dir().join(format!("tm-{name}-{}", std::process::id()));
         let _ = std::fs::remove_file(&path);
         let listener = UnixListener::bind(&path).unwrap();
         let served = std::thread::spawn(move || {
             let (s, _) = listener.accept().unwrap();
             let mut r = BufReader::new(s.try_clone().unwrap());
-            (&s).write_all(b"{\"QMP\": {}}\n").unwrap();
+            (&s).write_all(b"{\"QMP\": {}}\r\n").unwrap();
             let mut line = String::new();
             while r.read_line(&mut line).is_ok_and(|n| n > 0) {
+                let answer = if line.contains("qom-get") && !screen {
+                    NO_SCREEN
+                } else {
+                    DONE
+                };
                 line.clear();
                 std::thread::sleep(delay);
-                if (&s).write_all(b"{\"return\": {}}\n").is_err() {
+                if (&s).write_all(answer.as_bytes()).is_err() {
                     break;
                 }
             }
@@ -969,23 +1188,41 @@ mod tests {
     #[test]
     fn the_whole_attach_has_one_deadline() {
         let step = Duration::from_millis(150);
-        // Three answers, each `step` late, fit in five seconds.
-        let (path, served) = monitor("fits", step);
+        // Four answers, each `step` late, fit in five seconds.
+        let (path, served) = monitor("fits", step, true);
         let begun = Instant::now();
-        assert!(attach_qmp(&path, begun + Duration::from_secs(5)).is_ok());
-        assert!(begun.elapsed() >= 3 * step);
+        let (_display, pointing) = attach_qmp(&path, begun + Duration::from_secs(5)).unwrap();
+        assert!(begun.elapsed() >= 4 * step);
+        assert!(pointing.to_screen);
+        // The monitor is kept, and after the attach it is waited on for as long as it takes.
+        assert_eq!(pointing.monitor.w.read_timeout().unwrap(), None);
+        assert_eq!(pointing.monitor.w.write_timeout().unwrap(), None);
+        drop(pointing);
         served.join().unwrap();
         std::fs::remove_file(&path).unwrap();
         // They do not fit in two steps, though each of them alone does.
-        let (path, served) = monitor("late", step);
-        let e = attach_qmp(&path, Instant::now() + 2 * step).unwrap_err();
-        assert!(
-            matches!(
-                e.kind(),
-                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+        let (path, served) = monitor("late", step, true);
+        match attach_qmp(&path, Instant::now() + 2 * step).unwrap_err() {
+            QmpError::Io(e) => assert!(
+                matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ),
+                "{e}"
             ),
-            "{e}"
-        );
+            e => panic!("{e:?}"),
+        }
+        served.join().unwrap();
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn a_qemu_without_the_screen_is_attached_to_and_sent_unaddressed_events() {
+        let (path, served) = monitor("bare", Duration::ZERO, false);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let (_display, pointing) = attach_qmp(&path, deadline).unwrap();
+        assert!(!pointing.to_screen);
+        drop(pointing);
         served.join().unwrap();
         std::fs::remove_file(&path).unwrap();
     }
@@ -1008,19 +1245,30 @@ mod tests {
         let pumping = std::thread::spawn(move || {
             pump(irx, stx, |ev| {
                 if is_gone.load(Ordering::Acquire) {
-                    return Err(zbus::Error::InputOutput(Arc::new(std::io::Error::other(
-                        "gone",
-                    ))));
+                    return Err(Unsent::Gone("gone".into()));
                 }
-                std::thread::sleep(Duration::from_millis(40)); // QEMU taking its time
+                // QEMU taking its time.
+                std::thread::sleep(Duration::from_millis(40));
+                // An event QEMU will not take is counted and the next one is tried.
+                if matches!(ev, Input::Abs(_)) {
+                    return Err(Unsent::Refused("VM not running".into()));
+                }
                 record.lock().unwrap().push(ev);
                 Ok(())
             })
         });
+        let at = Place {
+            x: 1,
+            y: 2,
+            w: 640,
+            h: 480,
+        };
         let up = Input::Button {
             button: 0,
             down: false,
+            at: None,
         };
+        display.input.send(Input::Abs(at)).unwrap();
         display
             .input
             .send(Input::Key {
@@ -1033,7 +1281,7 @@ mod tests {
         assert_eq!(sent.lock().unwrap().len(), 2);
         // With QEMU gone there is nothing to wait for, and the wait says so at once.
         gone.store(true, Ordering::Release);
-        display.input.send(Input::Wheel { up: true }).unwrap();
+        display.input.send(Input::Wheel { up: true, at }).unwrap();
         let begun = Instant::now();
         assert!(!display.drain(Duration::from_secs(5)));
         assert!(begun.elapsed() < Duration::from_secs(4));
@@ -1239,7 +1487,14 @@ mod tests {
 
     #[test]
     fn of_a_run_of_positions_the_last_is_sent() {
-        let abs = |x| Input::Abs { x, y: 7 };
+        let abs = |x| {
+            Input::Abs(Place {
+                x,
+                y: 7,
+                w: 640,
+                h: 480,
+            })
+        };
         let key = Input::Key {
             qnum: 30,
             down: true,
@@ -1273,6 +1528,175 @@ mod tests {
         assert_eq!(rest, None);
         // A single position with nothing behind it is itself.
         assert_eq!(next_input(abs(9), || None), (abs(9), None));
+    }
+
+    // The pixel the guest makes of an axis value on a screen `n` across, with the tablet's 32767
+    // for `mx`: the compositor's own arithmetic, which the test below finds in its source.
+    fn guest_pixel_of(value: u64, n: u32) -> u64 {
+        value.min(32767) * n.saturating_sub(1) as u64 / 32767
+    }
+
+    // `axis` is exact only against the arithmetic above. If the compositor comes to make a pixel of
+    // an axis value another way, this fails, and `axis` and `guest_pixel_of` follow it.
+    #[test]
+    fn the_compositor_still_makes_a_pixel_of_an_axis_value_this_way() {
+        let compositor = include_str!("../../../usr/tapestryd/src/main.rs");
+        for line in [
+            "(ax.min(mx) as u64 * dw.saturating_sub(1) as u64 / mx.max(1) as u64) as u32;",
+            "(ay.min(my) as u64 * dh.saturating_sub(1) as u64 / my.max(1) as u64) as u32;",
+        ] {
+            assert_eq!(compositor.matches(line).count(), 1, "{line}");
+        }
+    }
+
+    #[test]
+    fn every_pixel_of_every_screen_comes_back_from_its_axis_value() {
+        for n in 1..=MAX_SIDE {
+            let mut before = 0;
+            for p in 0..n {
+                let v = axis(p, n);
+                assert!(v <= AXIS_MAX && v >= before, "{p} of {n}: {v}");
+                assert_eq!(guest_pixel_of(v, n), p as u64, "{p} of {n}: {v}");
+                // The least such value: one less is the pixel before.
+                if p > 0 {
+                    assert_eq!(guest_pixel_of(v - 1, n), p as u64 - 1, "{p} of {n}: {v}");
+                }
+                before = v;
+            }
+        }
+        // What QEMU's display connection made of a pixel, x * 0x7fff / n, lands a pixel short
+        // nearly everywhere: this is why the value is not left to it.
+        assert_eq!(guest_pixel_of(10 * 0x7fff / 1280, 1280), 9);
+        assert_eq!(guest_pixel_of(1279 * 0x7fff / 1280, 1280), 1277);
+        assert_eq!((axis(10, 1280), axis(1279, 1280)), (257, 32767));
+        // A pixel past the screen, which a size that changed since could make of it, is the last.
+        assert_eq!(axis(700, 640), 32767);
+        assert_eq!((axis(0, 1), axis(5, 1), axis(5, 0)), (0, 0, 0));
+    }
+
+    #[test]
+    fn a_place_and_its_button_are_one_command() {
+        let at = Place {
+            x: 10,
+            y: 479,
+            w: 1280,
+            h: 480,
+        };
+        // The command that was tried by hand against QEMU 10.0.2 and 11.1.3 with a tablet bound
+        // to gpu0: the tablet reported `abs 0 257; abs 1 32767; key 0x111 1; syn` and the mouse
+        // nothing.
+        assert_eq!(
+            pointer_event(true, Some(at), Some(("right", true))),
+            r#"{"execute":"input-send-event","arguments":{"device":"gpu0","head":0,"events":[{"type":"abs","data":{"axis":"x","value":257}},{"type":"abs","data":{"axis":"y","value":32767}},{"type":"btn","data":{"down":true,"button":"right"}}]}}"#
+        );
+        assert_eq!(
+            pointer_event(false, Some(at), None),
+            r#"{"execute":"input-send-event","arguments":{"events":[{"type":"abs","data":{"axis":"x","value":257}},{"type":"abs","data":{"axis":"y","value":32767}}]}}"#
+        );
+        // A button let go of off the picture: no place.
+        assert_eq!(
+            pointer_event(true, None, Some(("left", false))),
+            r#"{"execute":"input-send-event","arguments":{"device":"gpu0","head":0,"events":[{"type":"btn","data":{"down":false,"button":"left"}}]}}"#
+        );
+        // The view's numbers are InputButton's: 0 left, 1 middle, 2 right, 5 and 6 the side ones.
+        assert_eq!(
+            [0, 1, 2, 5, 6].map(|b| BUTTONS[b]),
+            ["left", "middle", "right", "side", "extra"]
+        );
+    }
+
+    #[test]
+    fn an_answer_is_told_from_an_event_and_a_refusal_from_both() {
+        assert_eq!(answer(DONE), Some(Ok(())));
+        assert_eq!(answer("{\"return\": \"virtio-gpu-pci\"}\r\n"), Some(Ok(())));
+        assert_eq!(answer(STOPPED), None);
+        assert_eq!(answer(NOT_RUNNING), Some(Err("VM not running".into())));
+        assert_eq!(
+            answer("{\"error\": {\"class\": \"DeviceNotFound\", \"desc\": \"Device '/machine/peripheral/gpu1' not found\"}}\r\n"),
+            Some(Err("Device '/machine/peripheral/gpu1' not found".into()))
+        );
+        // An answer that only mentions the other words is still what its first member says.
+        assert_eq!(
+            answer("{\"return\": \"unknown command: 'error' \\\"event\\\"\\r\\n\"}\r\n"),
+            Some(Ok(()))
+        );
+        // Not seen from QEMU, made from JSON's rules: a quote inside the reason, and a reason
+        // that ends in a backslash.
+        assert_eq!(
+            answer(
+                "{\"error\": {\"class\": \"GenericError\", \"desc\": \"no \\\"x\\\" here\"}}\r\n"
+            ),
+            Some(Err("no \\\"x\\\" here".into()))
+        );
+        assert_eq!(
+            answer("{\"error\": {\"class\": \"GenericError\", \"desc\": \"ends \\\\\"}}\r\n"),
+            Some(Err("ends \\\\".into()))
+        );
+        // An error with no reason to be found is given whole.
+        assert_eq!(
+            answer("{\"error\": {}}\r\n"),
+            Some(Err("{\"error\": {}}".into()))
+        );
+    }
+
+    // A monitor whose other end is played by `script`: for each command read, the lines to answer
+    // with; when the script is over the connection closes.
+    fn scripted(script: Vec<String>) -> (Monitor, std::thread::JoinHandle<Vec<String>>) {
+        let (ours, theirs) = UnixStream::pair().unwrap();
+        let played = std::thread::spawn(move || {
+            let mut r = BufReader::new(theirs.try_clone().unwrap());
+            let mut seen = Vec::new();
+            for lines in script {
+                let mut cmd = String::new();
+                if r.read_line(&mut cmd).unwrap() == 0 {
+                    break;
+                }
+                seen.push(cmd.trim_end().to_string());
+                (&theirs).write_all(lines.as_bytes()).unwrap();
+            }
+            seen
+        });
+        let monitor = Monitor {
+            r: BufReader::new(ours.try_clone().unwrap()),
+            w: ours,
+        };
+        (monitor, played)
+    }
+
+    #[test]
+    fn the_pointer_is_refused_or_qemu_is_gone_and_the_two_are_told_apart() {
+        let (monitor, played) = scripted(vec![
+            format!("{STOPPED}{DONE}"),
+            NOT_RUNNING.into(),
+            DONE.into(),
+        ]);
+        let mut pointing = Pointing {
+            monitor,
+            to_screen: true,
+        };
+        let at = Place {
+            x: 0,
+            y: 0,
+            w: 640,
+            h: 480,
+        };
+        // An event that came first is passed over, and the answer behind it is the command's.
+        assert!(pointing.send(Some(at), None).is_ok());
+        // A refusal is QEMU's reason, and the connection is as good as before.
+        match pointing.send(Some(at), Some(("left", true))) {
+            Err(QmpError::Refused(why)) => assert_eq!(why, "VM not running"),
+            other => panic!("{other:?}"),
+        }
+        assert!(pointing.send(None, Some(("left", false))).is_ok());
+        // QEMU gone: the script is over and its end is closed.
+        let seen = played.join().unwrap();
+        match pointing.send(Some(at), None).map_err(Unsent::from) {
+            Err(Unsent::Gone(_)) => {}
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(seen.len(), 3);
+        assert_eq!(seen[0], pointer_event(true, Some(at), None));
+        assert_eq!(seen[2], pointer_event(true, None, Some(("left", false))));
     }
 
     #[test]
