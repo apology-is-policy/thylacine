@@ -84,6 +84,15 @@
 #            that button's release still goes to the mouse. A click after it is the tablet's again,
 #            with its place. On the machine whose tablet is bound to nothing that click's place
 #            goes ahead of it, and its button reaches the mouse, as in the bar leg.
+#            Three events are made on one side of a change of hands and handed over on the other,
+#            as a queue does to one made while the chord was on its way. A move made before the
+#            capture is no motion of the captured pointer: nothing arrives for it. A move made
+#            before the give-back is no place: nothing arrives for it. A press made before the
+#            give-back arrives with no place, and its release, made after, with one.
+#            Last the window is moved a point with the pointer captured: the script says the
+#            pointer was given back, and the click after it is the tablet's, with its place.
+#            The scale the moves are worked out from must be five thirds of a point to a pixel,
+#            which is what this picture in this window is, whatever the app says.
 #   drawn    with the pointer captured again, the picture read back is QEMU's screendump but for
 #            the guest's pointer: the image the script defined, its hot spot on the place the
 #            guest was said to have it at, the clear pixel showing the picture and the pixel at
@@ -476,7 +485,7 @@ capture_leg() {
     # The script says what it did: the Mac's pointer left alone, the two moves as AppKit read them
     # back from the events it was handed, and the view's points to a guest pixel.
     said=$(grep '^scripted: captured pointer: ' app.out)
-    scale=$(printf '%s\n' "$said" | sed -n "s/^scripted: captured pointer: the Mac's pointer held: false; moves of 51,-26 and -20,10 points at \([0-9][0-9.]*\) points to a guest pixel; the guest's pointer drawn at 100,60 of 640x480\$/\1/p")
+    scale=$(printf '%s\n' "$said" | sed -n "s/^scripted: captured pointer: the Mac's pointer held: false; moves of 51,-26 and -20,10 points at \([0-9][0-9.]*\) points to a guest pixel; given back when the window moved: true; the guest's pointer drawn at 100,60 of 640x480\$/\1/p")
     if [ -z "$scale" ]; then
         echo "$name: FAIL: the script did not say the capture it was to make (${said:-it did not get that far})"
         return 1
@@ -484,9 +493,12 @@ capture_leg() {
     # Each move in whole guest pixels, what is left of a pixel carried into the next move; an axis
     # that comes to nothing is not sent. First as QEMU's input layer is handed them, then as the
     # mouse hands them to its driver.
-    python3 -I - "$scale" > moves.out <<'PY'
+    if ! python3 -I - "$scale" > moves.out 2>&1 <<'PY'
 import math, sys
 scale = float(sys.argv[1])
+# The scale is not the app's to say: a 640x480 picture in a window of 1280x800 points is this.
+if abs(scale - 5 / 3) > 1e-12:
+    sys.exit("the view says %r points to a guest pixel; a 640x480 picture in 1280x800 points is five thirds of one" % scale)
 carry, moves = [0.0, 0.0], []
 for move in ((51, -26), (-20, 10)):
     whole = []
@@ -506,6 +518,10 @@ print(handed(moves[0]) + "con -1: press left;" + handed(moves[1])
 print(heard(moves[0]) + "press left;" + heard(moves[1]) + "release left;wheel-up;press right;release right;")
 print("%d,%d and %d,%d" % (moves[0][0], moves[0][1], moves[1][0], moves[1][1]))
 PY
+    then
+        echo "$name: FAIL: $(tail -1 moves.out)"
+        return 1
+    fi
     { read -r want_seen; read -r want_mouse; read -r said; } < moves.out
     got=$(seen 640 480)
     if [ "$got" = "$want_seen$want_after" ]; then
@@ -587,6 +603,8 @@ m = re.fullmatch(r"scripted: captured click: the pointer to guest pixel 600,108 
 if not m:
     sys.exit("the script did not say its three steps as they were (%s)" % (sys.argv[1] or "it said nothing"))
 px, py, scale = int(m[1]), int(m[2]), float(m[3])
+if abs(scale - 5 / 3) > 1e-12:
+    sys.exit("the view says %r points to a guest pixel; a 640x480 picture in 1280x800 points is five thirds of one" % scale)
 def whole(v):  # Rust's f64::round: halves away from zero
     return int(math.copysign(math.floor(abs(v) + 0.5), v))
 if (px, py) != (whole(-200 * scale), whole(100 * scale)):
@@ -752,12 +770,18 @@ bar_leg bar-unbound "" \
     "with the tablet bound to nothing each place went ahead of its press; the places reached the tablet's driver and the buttons the mouse's" || rc=1
 click_leg || rc=1
 stopped_leg || rc=1
-capture_leg capture ,display=gpu0,head=0 'at 320,240 press left;at 320,240 release left;' \
-    'at 320,240 press left;at 320,240 release left;' '' \
-    "all of it reached the mouse's driver, the right button's release after the pointer was given back too; the click after that reached the tablet's with its place" || rc=1
-capture_leg capture-unbound "" 'at 320,240;at 320,240 press left;at 320,240 release left;' \
-    'at 320,240;at 320,240;at 320,240;' 'press left;release left;' \
-    "with the tablet bound to nothing the same, and of the click after it the place went ahead to the tablet's driver and the button to the mouse's" || rc=1
+# After the mouse's events: the press made before the give-back, with no place; its release with
+# one; a click; and the click after the window moved.
+capture_leg capture ,display=gpu0,head=0 \
+    'press left;at 320,240 release left;at 320,240 press left;at 320,240 release left;at 320,240 press left;at 320,240 release left;' \
+    'press left;at 320,240 release left;at 320,240 press left;at 320,240 release left;at 320,240 press left;at 320,240 release left;' '' \
+    "all of it reached the mouse's driver, the right button's release after the pointer was given back too; what was made before a change of hands was not taken for the new state's; the clicks after the give-back and after the window moved reached the tablet's" || rc=1
+# With the tablet bound to nothing the place of the first of those to have one goes ahead of it.
+capture_leg capture-unbound "" \
+    'press left;at 320,240;at 320,240 release left;at 320,240 press left;at 320,240 release left;at 320,240 press left;at 320,240 release left;' \
+    'at 320,240;at 320,240;at 320,240;at 320,240;at 320,240;at 320,240;' \
+    'press left;release left;press left;release left;press left;release left;' \
+    "with the tablet bound to nothing the same, the places to the tablet's driver and the buttons to the mouse's" || rc=1
 captured_click_leg || rc=1
 [ $rc -eq 0 ] && echo "PASS: macrunner/app headless" || echo "FAIL: macrunner/app headless (evidence in $repo/build/macrunner-app-test)"
 exit $rc

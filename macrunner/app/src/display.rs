@@ -2401,6 +2401,99 @@ mod tests {
     }
 
     #[test]
+    fn a_notch_waits_behind_a_release_that_is_owed() {
+        let (monitor, played) = scripted(vec![
+            DONE.into(),                // left goes down
+            NOT_RUNNING.into(),         // and comes up while the machine is stopped
+            NOT_RUNNING.into(),         // a notch finds the release still refused, and is not sent
+            format!("{RESUMED}{DONE}"), // the next notch: the release first
+            DONE.into(),                // then that notch
+        ]);
+        let mut pointing = Pointing::new(monitor, true, true);
+        assert!(pointing.button(0, true, Some(at(1))).is_ok());
+        refused(pointing.button(0, false, Some(at(1))));
+        refused(pointing.notch(true, Some(at(2))));
+        assert!(pointing.notch(false, Some(at(3))).is_ok());
+        let up = pointer_event(true, Some(at(1)), Some(("left", false)));
+        assert_eq!(
+            played.join().unwrap(),
+            [
+                pointer_event(true, Some(at(1)), Some(("left", true))),
+                up.clone(),
+                up.clone(),
+                up,
+                pointer_event(true, Some(at(3)), Some(("wheel-down", true))),
+            ]
+        );
+    }
+
+    #[test]
+    fn two_releases_that_are_owed_are_both_sent_the_older_first() {
+        let (monitor, played) = scripted(vec![
+            DONE.into(),                // left goes down
+            DONE.into(),                // right goes down
+            NOT_RUNNING.into(),         // left comes up while the machine is stopped
+            NOT_RUNNING.into(),         // right too: the older release is tried first
+            format!("{RESUMED}{DONE}"), // a place: left's release first,
+            DONE.into(),                // then right's,
+            DONE.into(),                // then the place
+        ]);
+        let mut pointing = Pointing::new(monitor, true, true);
+        assert!(pointing.button(0, true, Some(at(1))).is_ok());
+        assert!(pointing.button(2, true, Some(at(1))).is_ok());
+        refused(pointing.button(0, false, Some(at(2))));
+        refused(pointing.button(2, false, Some(at(3))));
+        assert!(pointing.place(at(4)).is_ok());
+        let left = pointer_event(true, Some(at(2)), Some(("left", false)));
+        assert_eq!(
+            played.join().unwrap(),
+            [
+                pointer_event(true, Some(at(1)), Some(("left", true))),
+                pointer_event(true, Some(at(1)), Some(("right", true))),
+                left.clone(),
+                left.clone(),
+                left,
+                pointer_event(true, Some(at(3)), Some(("right", false))),
+                pointer_event(true, Some(at(4)), None),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_run_of_motion_ends_at_a_capture_and_what_follows_is_the_tablets() {
+        let (monitor, played) = scripted(vec![DONE.to_string(); 2]);
+        let mut pointing = Pointing::new(monitor, true, true);
+        assert_eq!(pointing.take(Input::Capture(true)).unwrap(), None);
+        let mut q: std::collections::VecDeque<Input> = [
+            Input::Rel { dx: 2, dy: 3 },
+            Input::Rel { dx: 1, dy: 1 },
+            Input::Capture(false),
+            Input::Button {
+                button: 0,
+                down: true,
+                at: Some(at(1)),
+            },
+        ]
+        .into();
+        // As the pump takes them: what ends a run is kept for the next turn.
+        let mut kept = None;
+        while let Some(first) = kept.take().or_else(|| q.pop_front()) {
+            let (ev, rest) = next_input(first, || q.pop_front());
+            kept = rest;
+            assert_eq!(pointing.take(ev).unwrap(), None);
+        }
+        // The motion as one, on the mouse; then the press on the tablet, with its place: the
+        // pointer was given back between them.
+        assert_eq!(
+            played.join().unwrap(),
+            [
+                mouse_event((3, 4), None),
+                pointer_event(true, Some(at(1)), Some(("left", true))),
+            ]
+        );
+    }
+
+    #[test]
     fn after_motion_a_place_the_guest_was_sent_before_goes_ahead_of_its_button_again() {
         let (monitor, played) = scripted(vec![DONE.to_string(); 5]);
         // No tablet bound to the screen: a place the guest does not have goes ahead of its button.

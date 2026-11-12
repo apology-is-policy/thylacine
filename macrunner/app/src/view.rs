@@ -18,12 +18,13 @@ use objc2_app_kit::{
 };
 use objc2_core_foundation::{CGPoint, CGSize};
 use objc2_core_graphics::{
-    kCGColorSpaceSRGB, CGAssociateMouseAndMouseCursorPosition, CGColorSpace, CGEvent, CGEventField,
-    CGEventFlags, CGEventType, CGMouseButton, CGScrollEventUnit, CGWarpMouseCursorPosition,
+    kCGColorSpaceSRGB, CGAssociateMouseAndMouseCursorPosition, CGColorSpace, CGError, CGEvent,
+    CGEventField, CGEventFlags, CGEventType, CGMouseButton, CGScrollEventUnit,
+    CGWarpMouseCursorPosition,
 };
 use objc2_foundation::{
-    ns_string, MainThreadMarker, NSNotificationCenter, NSObject, NSObjectProtocol, NSPoint, NSRect,
-    NSRunLoop, NSRunLoopCommonModes, NSSize, NSString, NSTimer,
+    ns_string, MainThreadMarker, NSNotificationCenter, NSObject, NSObjectProtocol, NSPoint,
+    NSProcessInfo, NSRect, NSRunLoop, NSRunLoopCommonModes, NSSize, NSString, NSTimer,
 };
 use objc2_metal::{
     MTLBlendFactor, MTLClearColor, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue,
@@ -318,6 +319,17 @@ fn guest_motion(carry: &mut f64, points: f64, scale: f64) -> i32 {
         0.0
     };
     whole as i32
+}
+// Now, on the clock an event is stamped with: seconds since the Mac started.
+fn uptime() -> f64 {
+    NSProcessInfo::processInfo().systemUptime()
+}
+// How long before a change of hands an event can have been made and still be waiting to be taken.
+const STALE_WITHIN: f64 = 5.0;
+// Stamp an event Core Graphics made for a script. The system stamps an event when it is posted,
+// and one that is only made says 0.
+fn stamp(cg: &CGEvent) {
+    CGEvent::set_timestamp(Some(cg), (uptime() * 1e9) as u64);
 }
 fn pointer_scale(w: u32, h: u32, scale: f64) -> f64 {
     scale.min(MAX_POINTER_POINTS / w.max(h).max(1) as f64)
@@ -766,6 +778,7 @@ pub struct Ivars {
     captured: Cell<bool>, // the pointer is captured: its moves are the guest's mouse's, and the guest's pointer is drawn
     seized: Cell<bool>, // the Mac's pointer is held and hidden (a captured pointer's is, in a window that was key)
     skip: Cell<bool>,   // the next move has in it the jump the Mac's pointer was just made to take
+    turned: Cell<f64>,  // when the pointer last changed hands, on the clock events are stamped with
     carry: Cell<(f64, f64)>, // the part of a guest pixel of a captured pointer's motion not sent yet
     script_step: Cell<u8>,   // how many steps of the paced capture script have run
     worn: RefCell<Worn>,
@@ -956,7 +969,7 @@ define_class!(
             self.settle_modifiers(ev);
             // A scroll over the bars is not the guest's: it would land wherever its pointer last was.
             // A captured pointer is the guest's own, and a notch lands where the guest has it.
-            let at = if self.ivars().captured.get() {
+            let at = if self.ivars().captured.get() || self.stale(ev) {
                 None
             } else {
                 let Some(at) = self.guest_point(ev) else { return };
@@ -997,6 +1010,7 @@ impl GuestView {
             captured: Cell::new(false),
             seized: Cell::new(false),
             skip: Cell::new(false),
+            turned: Cell::new(0.0),
             carry: Cell::new((0.0, 0.0)),
             script_step: Cell::new(0),
             worn: RefCell::new(Worn::default()),
@@ -1320,9 +1334,8 @@ impl GuestView {
     }
 
     // A move of the Mac's pointer as Core Graphics makes one, with how far the pointer went in
-    // the event, handed to the view. Handed back: the motion the event says it has, as AppKit
-    // reads it.
-    fn scripted_move(&self, dx: i64, dy: i64) -> (f64, f64) {
+    // the event, stamped when it is made.
+    fn made_move(&self, dx: i64, dy: i64) -> Option<Retained<NSEvent>> {
         let cg = CGEvent::new_mouse_event(
             None,
             CGEventType::MouseMoved,
@@ -1332,16 +1345,24 @@ impl GuestView {
         if let Some(cg) = &cg {
             CGEvent::set_integer_value_field(Some(cg), CGEventField::MouseEventDeltaX, dx);
             CGEvent::set_integer_value_field(Some(cg), CGEventField::MouseEventDeltaY, dy);
+            stamp(cg);
         }
-        match cg.and_then(|cg| NSEvent::eventWithCGEvent(&cg)) {
+        let ev = cg.and_then(|cg| NSEvent::eventWithCGEvent(&cg));
+        if ev.is_none() {
+            eprintln!("scripted: no motion event");
+        }
+        ev
+    }
+
+    // Such a move made now and handed to the view. Handed back: the motion the event says it
+    // has, as AppKit reads it.
+    fn scripted_move(&self, dx: i64, dy: i64) -> (f64, f64) {
+        match self.made_move(dx, dy) {
             Some(ev) => {
                 let _: () = unsafe { msg_send![self, mouseMoved: &*ev] };
                 (ev.deltaX(), ev.deltaY())
             }
-            None => {
-                eprintln!("scripted: no motion event");
-                (0.0, 0.0)
-            }
+            None => (0.0, 0.0),
         }
     }
 
@@ -1374,7 +1395,7 @@ impl GuestView {
         let wn = window.windowNumber();
         let event = |ty: NSEventType| {
             NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
-                ty, p, NSEventModifierFlags::empty(), 0.0, wn, None, 0, 1, 1.0)
+                ty, p, NSEventModifierFlags::empty(), uptime(), wn, None, 0, 1, 1.0)
         };
         match step {
             0 => {
@@ -1425,6 +1446,11 @@ impl GuestView {
     // key, so the Mac's pointer is left alone. A move is made as Core Graphics makes one, with how
     // far the pointer went in the event, and handed to the view, as the buttons and the notch are.
     // A button between two moves keeps them two: adjacent moves may be sent as one.
+    //
+    // Three events are made on one side of a change of hands and handed over on the other, as a
+    // queue does to an event made while the chord was on its way: a move made with the pointer
+    // free, and a move and a press made with it captured. And the window is moved under a
+    // captured pointer, which ends the capture.
     fn scripted_capture(&self) {
         let iv = self.ivars();
         // The script does not wait for a frame to bring the picture.
@@ -1458,44 +1484,80 @@ impl GuestView {
             ),
             None,
         );
-        let moved = |dx: i64, dy: i64| self.scripted_move(dx, dy);
-        let button = |ty: NSEventType| {
+        // An event over the middle of the picture, stamped when it is made.
+        let made = |ty: NSEventType| {
             let ev = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
-                ty, middle, none, 0.0, wn, None, 0, 1, 1.0);
-            let Some(ev) = ev else {
+                ty, middle, none, uptime(), wn, None, 0, 1, 1.0);
+            if ev.is_none() {
                 eprintln!("scripted: no mouse event");
-                return;
-            };
-            let _: () = match ty {
-                NSEventType::LeftMouseDown => unsafe { msg_send![self, mouseDown: &*ev] },
-                NSEventType::LeftMouseUp => unsafe { msg_send![self, mouseUp: &*ev] },
-                NSEventType::RightMouseDown => unsafe { msg_send![self, rightMouseDown: &*ev] },
-                _ => unsafe { msg_send![self, rightMouseUp: &*ev] },
+            }
+            ev
+        };
+        let hand = |ev: &NSEvent| {
+            let _: () = match ev.r#type() {
+                NSEventType::MouseMoved => unsafe { msg_send![self, mouseMoved: ev] },
+                NSEventType::LeftMouseDown => unsafe { msg_send![self, mouseDown: ev] },
+                NSEventType::LeftMouseUp => unsafe { msg_send![self, mouseUp: ev] },
+                NSEventType::RightMouseDown => unsafe { msg_send![self, rightMouseDown: ev] },
+                _ => unsafe { msg_send![self, rightMouseUp: ev] },
             };
         };
+        let button = |ty: NSEventType| {
+            if let Some(ev) = made(ty) {
+                hand(&ev);
+            }
+        };
+        let moved = |dx: i64, dy: i64| self.scripted_move(dx, dy);
+        // Made with the pointer free and handed over captured: no motion of a captured pointer.
+        let early = self.made_move(7, 7);
         self.capture(true);
         let held = iv.seized.get();
+        if let Some(ev) = &early {
+            hand(ev);
+        }
         let first = moved(51, -26);
         button(NSEventType::LeftMouseDown);
         let second = moved(-20, 10);
         button(NSEventType::LeftMouseUp);
         let notch = CGEvent::new_scroll_wheel_event2(None, CGScrollEventUnit::Line, 1, 1, 0, 0);
+        if let Some(cg) = &notch {
+            stamp(cg);
+        }
         match notch.and_then(|cg| NSEvent::eventWithCGEvent(&cg)) {
             Some(ev) => unsafe { msg_send![self, scrollWheel: &*ev] },
             None => eprintln!("scripted: no scroll event"),
         }
         // Right goes down captured and comes up after the pointer was given back, over the
-        // picture: it comes up on the mouse. Then a click that is the tablet's again.
+        // picture: it comes up on the mouse.
         button(NSEventType::RightMouseDown);
+        // Made captured and handed over after the give-back. The move is no place: it says where
+        // the Mac's pointer was held. The press is sent, with no place for the same reason.
+        let late = (
+            made(NSEventType::MouseMoved),
+            made(NSEventType::LeftMouseDown),
+        );
         self.capture(false);
         button(NSEventType::RightMouseUp);
+        for ev in [&late.0, &late.1].into_iter().flatten() {
+            hand(ev);
+        }
+        button(NSEventType::LeftMouseUp);
+        // Then a click that is the tablet's again.
+        button(NSEventType::LeftMouseDown);
+        button(NSEventType::LeftMouseUp);
+        // The window moves under a captured pointer. The Mac's pointer would be held at a point
+        // the picture is no longer under, so the capture ends, and a click is the tablet's.
+        self.capture(true);
+        let o = window.frame().origin;
+        window.setFrameOrigin(NSPoint::new(o.x + 1.0, o.y));
+        let let_go = !iv.captured.get();
         button(NSEventType::LeftMouseDown);
         button(NSEventType::LeftMouseUp);
         // Captured again and left so, for the picture a test takes at the end: the guest's
         // pointer is in it.
         self.capture(true);
         eprintln!(
-            "scripted: captured pointer: the Mac's pointer held: {held}; moves of {},{} and {},{} points at {scale} points to a guest pixel; the guest's pointer drawn at 100,60 of {tw}x{th}",
+            "scripted: captured pointer: the Mac's pointer held: {held}; moves of {},{} and {},{} points at {scale} points to a guest pixel; given back when the window moved: {let_go}; the guest's pointer drawn at 100,60 of {tw}x{th}",
             first.0, first.1, second.0, second.1
         );
     }
@@ -1627,18 +1689,30 @@ impl GuestView {
         }
     }
 
-    // Capture the pointer, or give it back. Captured, the Mac's pointer is held where it is and
-    // hidden, its moves go to the guest's mouse as motion, and the guest's own pointer is drawn
-    // in the picture. Nothing the guest holds is let go of either way: a button comes up on the
-    // device it went down on.
+    // Capture the pointer, or give it back. Captured, the Mac's pointer is put over the middle of
+    // the picture, held there and hidden, its moves go to the guest's mouse as motion, and the
+    // guest's own pointer is drawn in the picture. Nothing the guest holds is let go of either
+    // way: a button comes up on the device it went down on. A capture that cannot hold the Mac's
+    // pointer is not made.
     pub fn capture(&self, on: bool) {
         let iv = self.ivars();
-        if iv.captured.replace(on) == on {
+        if iv.captured.get() == on {
             return;
         }
+        // Only the capture that has just put the Mac's pointer somewhere has a jump to drop.
+        iv.skip.set(false);
+        if on {
+            if !self.seize() {
+                return;
+            }
+        } else {
+            self.give_back();
+        }
+        iv.captured.set(on);
         iv.carry.set((0.0, 0.0));
+        // Read after the Mac's pointer was moved: see `stale`.
+        iv.turned.set(uptime());
         self.send(Input::Capture(on));
-        self.seize(on);
         // The guest's pointer comes into the picture, or goes from it.
         iv.owed.set(true);
         if let Some(window) = self.window() {
@@ -1646,67 +1720,108 @@ impl GuestView {
         }
     }
 
-    // The Mac's side of a capture. Only a key window's: a click goes to the window the Mac's
-    // pointer is over, and a window that is not key does not hold that pointer over itself.
-    fn seize(&self, on: bool) {
+    // An event made before the pointer last changed hands and taken after it: a queue does that
+    // to whatever was made while the chord was on its way. Where it says the pointer is, and how
+    // far it says the pointer went, are the other state's. A move made while the pointer was held
+    // says the held place, and sent as a place it would put the guest's pointer there; one made
+    // while it was free has no jump in it to drop. So such a move is not sent, and such a press
+    // or notch is sent with no place.
+    //
+    // Only an event of the last few seconds before the change is one: nothing waits in a queue
+    // for longer. The bound is for the premise this stands on, that an event is stamped on the
+    // clock `uptime` reads, which no test can be handed a real event to show. Were it false,
+    // every event would be far older or newer than a change of hands and none would be stale,
+    // which is how it was before this rule; without the bound, every move after a capture could
+    // be taken for an old one.
+    fn stale(&self, ev: &NSEvent) -> bool {
+        let (made, turned) = (ev.timestamp(), self.ivars().turned.get());
+        made < turned && made > turned - STALE_WITHIN
+    }
+
+    // The Mac's side of a capture: its pointer put over the middle of the picture, so that a
+    // click is this view's whatever the pointer was over when the chord was pressed (a menu,
+    // another window), then held there and hidden. Only a key window's: a click goes to the
+    // window the Mac's pointer is over, and a window that is not key does not hold that pointer
+    // over itself; its capture stands with the Mac's pointer left alone. Handed back: whether
+    // the capture can stand. It cannot when the pointer could not be put there and held: one
+    // that is held somewhere else, or hidden and free, clicks on whatever is under it.
+    fn seize(&self) -> bool {
         let iv = self.ivars();
-        let Some(window) = self.window() else { return };
-        let done = |what: &str, e: objc2_core_graphics::CGError| {
-            if e != objc2_core_graphics::CGError::Success {
+        if !self.window().is_some_and(|w| w.isKeyWindow()) {
+            return true;
+        }
+        let b = self.bounds();
+        let middle = match self.picture() {
+            Some((r, _, _)) => NSPoint::new(
+                r.origin.x + r.size.width / 2.0,
+                r.origin.y + r.size.height / 2.0,
+            ),
+            None => NSPoint::new(b.size.width / 2.0, b.size.height / 2.0),
+        };
+        let Some(p) = self.on_screen(middle) else {
+            eprintln!("pointer: not captured: the view is on no screen");
+            return false;
+        };
+        let e = CGWarpMouseCursorPosition(p);
+        if e != CGError::Success {
+            eprintln!(
+                "pointer: not captured: the Mac's pointer could not be put over the picture ({})",
+                e.0
+            );
+            return false;
+        }
+        let e = CGAssociateMouseAndMouseCursorPosition(false);
+        if e != CGError::Success {
+            eprintln!(
+                "pointer: not captured: the Mac's pointer could not be held ({})",
+                e.0
+            );
+            return false;
+        }
+        NSCursor::hide();
+        iv.seized.set(true);
+        // The first move made after this has the jump in it.
+        iv.skip.set(true);
+        true
+    }
+
+    // Give the Mac's pointer back, if it is held. Nothing between taking the flag and letting go
+    // can leave early: letting go needs no window, only the place the pointer is put back to
+    // does. That place is where the guest's pointer has got to, so that the next place sent is
+    // the one the guest already has it at.
+    fn give_back(&self) {
+        let iv = self.ivars();
+        if !iv.seized.replace(false) {
+            return;
+        }
+        let at = match iv.display.shared.lock() {
+            Ok(s) => s.pointer_at,
+            Err(e) => e.into_inner().pointer_at,
+        };
+        let there = self.picture().map(|(r, _, (tw, th))| {
+            NSPoint::new(
+                r.origin.x + (at.0 as f64 + 0.5) * r.size.width / tw as f64,
+                r.origin.y + r.size.height - (at.1 as f64 + 0.5) * r.size.height / th as f64,
+            )
+        });
+        let done = |what: &str, e: CGError| {
+            if e != CGError::Success {
                 eprintln!("pointer: {what} failed ({})", e.0);
             }
         };
-        if on {
-            if !window.isKeyWindow() {
-                return;
-            }
-            // Held over the middle of the picture, so that a click is this view's whatever the
-            // pointer was over when the chord was pressed: a menu, or another window.
-            let b = self.bounds();
-            let middle = match self.picture() {
-                Some((r, _, _)) => NSPoint::new(
-                    r.origin.x + r.size.width / 2.0,
-                    r.origin.y + r.size.height / 2.0,
-                ),
-                None => NSPoint::new(b.size.width / 2.0, b.size.height / 2.0),
-            };
-            NSCursor::hide();
-            if let Some(p) = self.on_screen(middle) {
-                done(
-                    "putting the Mac's pointer over the picture",
-                    CGWarpMouseCursorPosition(p),
-                );
-                iv.skip.set(true);
-            }
+        if let Some(p) = there.and_then(|p| self.on_screen(p)) {
             done(
-                "holding the Mac's pointer",
-                CGAssociateMouseAndMouseCursorPosition(false),
+                "putting the Mac's pointer where the guest's is",
+                CGWarpMouseCursorPosition(p),
             );
-            iv.seized.set(true);
-        } else if iv.seized.replace(false) {
-            // Back where the guest's pointer has got to, so that the next place sent is the one
-            // the guest already has it at.
-            let at = iv.display.shared.lock().unwrap().pointer_at;
-            let there = self.picture().map(|(r, _, (tw, th))| {
-                NSPoint::new(
-                    r.origin.x + (at.0 as f64 + 0.5) * r.size.width / tw as f64,
-                    r.origin.y + r.size.height - (at.1 as f64 + 0.5) * r.size.height / th as f64,
-                )
-            });
-            if let Some(p) = there.and_then(|p| self.on_screen(p)) {
-                done(
-                    "putting the Mac's pointer where the guest's is",
-                    CGWarpMouseCursorPosition(p),
-                );
-            }
-            // Straight after the move: it also ends the moment for which the system holds a
-            // pointer still after one.
-            done(
-                "letting go of the Mac's pointer",
-                CGAssociateMouseAndMouseCursorPosition(true),
-            );
-            NSCursor::unhide();
         }
+        // Straight after the move: it also ends the moment for which the system holds a pointer
+        // still after one.
+        done(
+            "letting go of the Mac's pointer",
+            CGAssociateMouseAndMouseCursorPosition(true),
+        );
+        NSCursor::unhide();
     }
 
     // A point of the view where the system counts the pointer's place from: the first screen's
@@ -1746,6 +1861,9 @@ impl GuestView {
     // its motion was taken.
     fn pointer(&self, ev: &NSEvent) -> bool {
         self.settle_modifiers(ev);
+        if self.stale(ev) {
+            return false;
+        }
         if self.ivars().captured.get() {
             return self.motion(ev);
         }
@@ -1764,10 +1882,16 @@ impl GuestView {
     fn button(&self, ev: &NSEvent, button: Option<u32>, down: bool) -> bool {
         self.settle_modifiers(ev);
         let Some(button) = button else { return false };
-        let captured = self.ivars().captured.get();
-        let at = if captured { None } else { self.guest_point(ev) };
+        // No place: the guest's pointer is where its mouse moved it, and not where this event
+        // says the Mac's is.
+        let placeless = self.ivars().captured.get() || self.stale(ev);
+        let at = if placeless {
+            None
+        } else {
+            self.guest_point(ev)
+        };
         if down {
-            if (!captured && at.is_none()) || !self.ivars().pressed.borrow_mut().insert(button) {
+            if (!placeless && at.is_none()) || !self.ivars().pressed.borrow_mut().insert(button) {
                 return false;
             }
         } else if !self.ivars().pressed.borrow_mut().remove(&button) {
@@ -2236,8 +2360,8 @@ impl GuestView {
 #[cfg(test)]
 mod tests {
     use super::{
-        button_code, fit, guest_motion, guest_pixel, notches, place, pointer_scale, replace,
-        Renderer, Stats,
+        button_code, fit, guest_motion, guest_pixel, notches, place, pointer_scale, replace, stamp,
+        uptime, Renderer, Stats,
     };
     use crate::display::{pixels, Display, Order, Pointer, Rect};
     use objc2::runtime::ProtocolObject;
@@ -2965,6 +3089,36 @@ mod tests {
         assert!(!r.upload_with(&display, &mut stats, |_, _, _, _| None));
         assert!(r.upload(&display, &mut stats));
         assert_eq!((r.tex_size, r.serial), ((8, 4), 4));
+    }
+
+    // What the scripts stand on when they make an event on one side of a change of hands: an
+    // event Core Graphics only makes says 0, and one stamped with the clock's reading in
+    // nanoseconds reads back as that many seconds. That a real event is stamped on that clock is
+    // not shown here: no test can be handed one.
+    #[test]
+    fn an_event_a_script_stamps_reads_back_on_the_clock_a_change_of_hands_is_read_from() {
+        use objc2_app_kit::NSEvent;
+        use objc2_core_foundation::CGPoint;
+        use objc2_core_graphics::{CGEvent, CGEventType, CGMouseButton};
+        let made = || {
+            CGEvent::new_mouse_event(
+                None,
+                CGEventType::MouseMoved,
+                CGPoint::new(0.0, 0.0),
+                CGMouseButton::Left,
+            )
+            .unwrap()
+        };
+        assert_eq!(NSEvent::eventWithCGEvent(&made()).unwrap().timestamp(), 0.0);
+        let cg = made();
+        let before = uptime();
+        stamp(&cg);
+        let after = uptime();
+        let stamped = NSEvent::eventWithCGEvent(&cg).unwrap().timestamp();
+        assert!(
+            before - 1e-6 <= stamped && stamped <= after,
+            "stamped between {before} and {after}, reads {stamped}"
+        );
     }
 
     #[test]

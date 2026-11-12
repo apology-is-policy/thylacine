@@ -170,6 +170,36 @@ define_class!(
             self.let_go();
         }
 
+        // A captured pointer is held at a point of the screen, over the picture. A window that
+        // moves, changes its size or its screen, or goes to or from full screen is not under
+        // that point for certain any more, and a click of a hidden pointer would be whatever
+        // window's is: the capture ends. What the guest holds is not let go of: the window is
+        // still where its input goes.
+        #[unsafe(method(windowDidMove:))]
+        fn did_move(&self, _n: &NSNotification) {
+            self.give_pointer_back();
+        }
+
+        #[unsafe(method(windowDidResize:))]
+        fn did_resize(&self, _n: &NSNotification) {
+            self.give_pointer_back();
+        }
+
+        #[unsafe(method(windowDidChangeScreen:))]
+        fn did_change_screen(&self, _n: &NSNotification) {
+            self.give_pointer_back();
+        }
+
+        #[unsafe(method(windowWillEnterFullScreen:))]
+        fn will_enter_full_screen(&self, _n: &NSNotification) {
+            self.give_pointer_back();
+        }
+
+        #[unsafe(method(windowWillExitFullScreen:))]
+        fn will_exit_full_screen(&self, _n: &NSNotification) {
+            self.give_pointer_back();
+        }
+
         #[unsafe(method(windowWillClose:))]
         fn will_close(&self, _n: &NSNotification) {
             NSApplication::sharedApplication(self.mtm()).terminate(None);
@@ -178,6 +208,12 @@ define_class!(
 );
 
 impl Delegate {
+    fn give_pointer_back(&self) {
+        if let Some(v) = self.ivars().view.get() {
+            v.capture(false);
+        }
+    }
+
     fn let_go(&self) {
         if let Some(v) = self.ivars().view.get() {
             v.release_keys();
