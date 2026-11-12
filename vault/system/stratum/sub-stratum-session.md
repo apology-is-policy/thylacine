@@ -19,15 +19,18 @@ updated: 2026-11-12
 ---
 ## Route to the console renderer's place channel
 
-A login that runs the shell on the console routes `halcyon`, the console
-renderer's inline-media place channel (HALCYON.md 14.7.2), beside the twelve
-resident names; a login that starts the session compositor routes the twelve
-only (`private_service_registry(console_shell)`; the session lever is read
-before the view is made). The renderer's posting is a trusted one (joey spawns
+A login that runs the shell routes `halcyon`, the console renderer's
+inline-media place channel (HALCYON.md 14.7.2), beside the twelve resident
+names; a login that starts the session compositor routes the twelve only
+(`private_service_registry(shell_login)`; the session lever is read before
+the view is made). The shell logins are the console getty's, on an image
+without the session lever, and joey's seeded boot logins (`--no-session`),
+whose shells run a fixed script on pipes: login does not know whether it sits
+on the console, so both are routed. The renderer's posting is a trusted one (joey spawns
 it with MAY_POST_SERVICE), which a route may resolve; a capability-posted
 `halcyon` would be refused. The route is not authority and adds no gate: the
 place channel has no peer gate and serves one connection at a time, so any
-process of a console-shell login can hold its slot, fill its accept backlog or
+process of a shell login can hold its slot, fill its accept backlog or
 place into the console transcript, and a process that outlives its login keeps
 that reach against the next console user. A session compositor's panes use
 the session's own `halcyon-<user>`, a local posting and never a route, and
