@@ -54,6 +54,9 @@ impl Driver for Lictor {
             self.seat.input(&mut self.inputs);
             self.device.reap();
             self.seat.step(&mut self.device, &mut self.screen, &mut self.inputs);
+            // Only while no trusted episode is up, beginning or owed its
+            // restoration: entering one must find the screen whole.
+            if self.seat.phase == 0 { self.screen.follow(&mut self.device.gpu); }
             for conn in &mut conns {
                 conn.advance(&self.device);
                 #[cfg(feature = "test-mode")]

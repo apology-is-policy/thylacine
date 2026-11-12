@@ -1,12 +1,15 @@
 //! Private trusted pixels. Plain DMA is intentionally used here: unlike weave
 //! and GPU-BO memory, it cannot be exported by SYS_WEFT_SHARE. No ordinary
-//! context ever receives the reserved resource ID or these backing segments.
+//! context ever receives a reserved resource ID or these backing segments.
 use alloc::vec::Vec;
 use libdriver::Error;
+use libhalcyon::display::{Follow, Step};
 use libthyla_rs::{handle::Rights, hardware::Dma, T_PROT_READ, T_PROT_WRITE};
-use crate::{model::Model, render, skein::Seg};
+use crate::{gpu_api::Engine, model::Model, render::{self, Refit}, skein::Seg};
 use super::gpu::{Gpu, dsb_sy};
-const RESOURCE: u32 = crate::objects::TRUSTED_ID_START + 1;
+/// The image is in one of these, and a display that changes has the next one
+/// made in the other.
+const RESOURCES: [u32; 2] = [crate::objects::TRUSTED_ID_START + 1, crate::objects::TRUSTED_ID_START + 2];
 // The size taken where no other can be made is one the screen is drawn at.
 const _: () = assert!(render::fits(super::gpu::DEFAULT_DISPLAY_W, super::gpu::DEFAULT_DISPLAY_H));
 const CHUNK: usize = 1024 * 1024;
@@ -49,12 +52,27 @@ pub struct Screen {
     pixels: usize,
     active: bool,
     raster: Raster,
+    /// The platform's `thylacine.scale`, read once: a command line does not
+    /// change.
+    declared: Option<u16>,
+    /// Which of RESOURCES holds the image.
+    image: usize,
+    /// The other one may be the device's: a making of it that was not
+    /// finished, or a release of it that was not answered for. It is let go
+    /// of, and that answered for, before it is made again.
+    spare_owed: bool,
+    /// When the host's display is asked about again.
+    follow: Follow,
     /// Stall the engine between disabling the outputs and binding the trusted
     /// image: a takeover that fails part-way (the test-latch-dead lever).
     #[cfg(feature = "test-mode")]
     pub test_stall_after_exclusion: bool,
+    /// The backing's chunks in the device's terms, in their order.
+    segments: Vec<Seg>,
     // Once attached these pins survive every error. The owning service must
     // reset/drop Gpu before dropping Screen, including on an unwinding exit.
+    // They are never given back while the service runs: a display that grows
+    // again finds them.
     _backing: Vec<Dma>,
 }
 /// The platform's declared display scale, from the kernel's command line, as
@@ -75,6 +93,11 @@ pub fn declared_scale() -> Option<u16> {
         _ => None,
     }
 }
+fn said(width: u32, height: u32, scale: usize, host: (u32, u32)) {
+    crate::backend::diagnostic(&alloc::format!(
+        "lictor: trusted screen {}x{} at {}x for a display of {}x{}\n",
+        width, height, scale, host.0, host.1));
+}
 impl Screen {
     /// The screen for the device's display, at the size and the scale
     /// `render::geometry_for` gives it: no side longer than the longest a
@@ -88,38 +111,112 @@ impl Screen {
         let host = (gpu.width, gpu.height);
         let ((width, height), scale) = render::geometry_for(host, declared, gpu.edid_mm,
             super::gpu::MAX_DISPLAY_DIM, (super::gpu::DEFAULT_DISPLAY_W, super::gpu::DEFAULT_DISPLAY_H));
-        if (width, height) != host || scale != 1 {
-            crate::backend::diagnostic(&alloc::format!(
-                "lictor: trusted screen {}x{} at {}x for a display of {}x{}\n",
-                width, height, scale, host.0, host.1));
-        }
+        if (width, height) != host || scale != 1 { said(width, height, scale, host); }
         let pixels = (width as usize).checked_mul(height as usize).ok_or(Error::Hardware)?;
         if !render::fits_at(width, height, scale) {
             return Err(Error::Hardware);
         }
         let bytes = pixels.checked_mul(4).ok_or(Error::Hardware)?;
-        let rounded = (bytes + 4095) & !4095;
-        let raster = Raster::new(rounded)?;
-        let mut backing = Vec::new();
-        let mut segments = Vec::new();
-        let mut offset = 0;
-        while offset < rounded {
-            let size = (rounded - offset).min(CHUNK);
-            let dma = unsafe { Dma::new(size, Rights::READ | Rights::WRITE | Rights::MAP,
-                BASE + offset as u64, T_PROT_READ | T_PROT_WRITE) }.map_err(|_| Error::Hardware)?;
-            segments.push(Seg { pa: dma.paddr(), len: size as u64 });
-            backing.push(dma); offset += size;
-        }
-        unsafe { core::ptr::write_bytes(BASE as *mut u8, 0, rounded); }
-        if gpu.resource_create_2d(RESOURCE, width, height).is_err()
-            || gpu.attach_backing(RESOURCE, &segments).is_err() {
+        let raster = Raster::new((bytes + 4095) & !4095)?;
+        let mut screen = Self { width, height, scale, pixels, active: false, raster, declared,
+            image: 0, spare_owed: false, follow: Follow::new(), segments: Vec::new(), _backing: Vec::new(),
+            #[cfg(feature = "test-mode")] test_stall_after_exclusion: false };
+        screen.back(bytes)?;
+        if gpu.resource_create_2d(RESOURCES[0], width, height).is_err()
+            || gpu.attach_backing(RESOURCES[0], &screen.segments[..bytes.div_ceil(CHUNK)]).is_err() {
             // A timeout can mean the device accepted an attach but did not
             // report it. Never reclaim backing on an ambiguous completion.
-            core::mem::forget(backing);
+            core::mem::forget(core::mem::take(&mut screen._backing));
             return Err(Error::Hardware);
         }
-        Ok(Self { width, height, scale, pixels, active: false, raster, _backing: backing,
-            #[cfg(feature = "test-mode")] test_stall_after_exclusion: false })
+        Ok(screen)
+    }
+    /// Backing for an image of `bytes`: whole chunks, each mapped after the
+    /// last, so that the image is one run of memory whatever its size.
+    fn back(&mut self, bytes: usize) -> Result<(), Error> {
+        while self._backing.len() < bytes.div_ceil(CHUNK) {
+            let at = BASE + (self._backing.len() * CHUNK) as u64;
+            let dma = unsafe { Dma::new(CHUNK, Rights::READ | Rights::WRITE | Rights::MAP,
+                at, T_PROT_READ | T_PROT_WRITE) }.map_err(|_| Error::Hardware)?;
+            unsafe { core::ptr::write_bytes(at as *mut u8, 0, CHUNK); }
+            self.segments.push(Seg { pa: dma.paddr(), len: CHUNK as u64 });
+            self._backing.push(dma);
+        }
+        Ok(())
+    }
+    /// A pass of the service while the seat is normal. A display that has
+    /// changed and stood is asked about, and the trusted screen made the one
+    /// for it. Nothing here is needed to enter SAK, and nothing is done while
+    /// the screen is up: what cannot be made leaves the screen that stands.
+    pub fn follow(&mut self, gpu: &mut Gpu) {
+        if self.active { return; }
+        let now_ms = libthyla_rs::time::monotonic_ns() / 1_000_000;
+        if self.follow.step(gpu.display_events(), now_ms) == Step::Wait { return; }
+        match gpu.engine() {
+            Engine::Dead => return,
+            // The driver ends a stall itself; nothing is asked meanwhile.
+            Engine::Stalled => { self.follow.hold(now_ms); return; }
+            Engine::Live => {}
+        }
+        if let Err(why) = self.refit(gpu) {
+            let again = !gpu.engine_dead()
+                && self.follow.retry(libthyla_rs::time::monotonic_ns() / 1_000_000);
+            crate::backend::diagnostic(&alloc::format!(
+                "lictor: trusted screen stays {}x{} at {}x: {}{}\n",
+                self.width, self.height, self.scale, why, if again { ", to be tried again" } else { "" }));
+        }
+    }
+    fn refit(&mut self, gpu: &mut Gpu) -> Result<(), &'static str> {
+        // A host that shows no display has nothing to be followed to.
+        let Some(host) = gpu.query_display_info().map_err(|_| "its display was not told")? else {
+            return Ok(());
+        };
+        let mm = gpu.query_edid().map_err(|_| "its display's EDID was not answered")?;
+        match render::refit(((self.width, self.height), self.scale), host, self.declared, mm,
+            super::gpu::MAX_DISPLAY_DIM, (super::gpu::DEFAULT_DISPLAY_W, super::gpu::DEFAULT_DISPLAY_H)) {
+            Refit::Stands => return Ok(()),
+            Refit::Scale(scale) => self.scale = scale,
+            Refit::Size(size, scale) => self.remake(gpu, size, scale)?,
+        }
+        said(self.width, self.height, self.scale, host);
+        Ok(())
+    }
+    /// The image at another size. The one that stands is the image until the
+    /// device has answered for the new one whole, so a making that fails
+    /// anywhere leaves a screen SAK can enter.
+    fn remake(&mut self, gpu: &mut Gpu, (width, height): (u32, u32), scale: usize) -> Result<(), &'static str> {
+        if !render::fits_at(width, height, scale) { return Err("the size for its display is not one it is drawn at"); }
+        let pixels = width as usize * height as usize;
+        let bytes = pixels * 4;
+        if bytes as u64 > self.raster.bytes {
+            self.raster = Raster::new((bytes + 4095) & !4095).map_err(|_| "no memory for its workspace")?;
+        }
+        self.back(bytes).map_err(|_| "no memory for its pixels")?;
+        let spare = RESOURCES[1 - self.image];
+        if self.spare_owed {
+            // Either may be refused: the device has no such resource, which
+            // is what is wanted. Not answered, nothing is known.
+            let stalls = gpu.stalls();
+            let _ = gpu.detach_backing(spare);
+            let _ = gpu.resource_unref(spare);
+            if gpu.stalls() != stalls || gpu.engine_dead() {
+                return Err("the device did not answer for the image before the last");
+            }
+        }
+        // From its first command the spare may be the device's, whatever is
+        // answered.
+        self.spare_owed = true;
+        if gpu.resource_create_2d(spare, width, height).is_err()
+            || gpu.attach_backing(spare, &self.segments[..bytes.div_ceil(CHUNK)]).is_err() {
+            return Err("the device did not make its image");
+        }
+        let old = RESOURCES[self.image];
+        self.image = 1 - self.image;
+        (self.width, self.height, self.scale, self.pixels) = (width, height, scale, pixels);
+        let stalls = gpu.stalls();
+        let released = gpu.detach_backing(old).is_ok() && gpu.resource_unref(old).is_ok();
+        self.spare_owed = !released || gpu.stalls() != stalls;
+        Ok(())
     }
     pub fn paint(&mut self, gpu: &mut Gpu, model: &Model, masked: usize,
                  backdrop: Option<&[u32]>) -> Result<(), Error> {
@@ -130,8 +227,9 @@ impl Screen {
             .map_err(|_| Error::BadField)?;
         unsafe { core::ptr::copy_nonoverlapping(next.as_ptr(), BASE as *mut u32, self.pixels); }
         dsb_sy();
-        gpu.transfer(RESOURCE, 0, 0, 0, self.width, self.height)?;
-        if self.active { gpu.flush(RESOURCE, 0, 0, self.width, self.height)?; }
+        let image = RESOURCES[self.image];
+        gpu.transfer(image, 0, 0, 0, self.width, self.height)?;
+        if self.active { gpu.flush(image, 0, 0, self.width, self.height)?; }
         Ok(())
     }
     pub fn activate(&mut self, gpu: &mut Gpu) -> Result<(), Error> {
@@ -140,8 +238,9 @@ impl Screen {
         gpu.exclude_all_outputs()?;
         #[cfg(feature = "test-mode")]
         if stall { gpu.test_latch_now(false); }
-        gpu.set_scanout(RESOURCE, self.width, self.height)?;
-        gpu.flush(RESOURCE, 0, 0, self.width, self.height)?;
+        let image = RESOURCES[self.image];
+        gpu.set_scanout(image, self.width, self.height)?;
+        gpu.flush(image, 0, 0, self.width, self.height)?;
         self.active = true;
         Ok(())
     }

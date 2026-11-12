@@ -49,6 +49,25 @@ pub fn geometry_for(host: (u32, u32), declared: Option<u16>, mm: Option<(u32, u3
         .unwrap_or(fallback);
     (own, scale_at(own.0, own.1, libhalcyon::display::own_pct(host, own, declared, mm)))
 }
+/// What the display that is now asks of the trusted screen that stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Refit {
+    /// The screen that stands is the one for the display.
+    Stands,
+    /// The same size at another scale: nothing is made, and the next paint
+    /// draws at it.
+    Scale(usize),
+    /// Another size, with its scale: a new image.
+    Size((u32, u32), usize),
+}
+/// `geometry_for` the display that is now, against the screen that `stands`:
+/// a display that changes has the screen it would have had from the start.
+#[cfg(any(feature = "backend", test))]
+pub fn refit(stands: ((u32, u32), usize), host: (u32, u32), declared: Option<u16>,
+             mm: Option<(u32, u32)>, side: u32, fallback: (u32, u32)) -> Refit {
+    let (own, k) = geometry_for(host, declared, mm, side, fallback);
+    if own != stands.0 { Refit::Size(own, k) } else if k != stands.1 { Refit::Scale(k) } else { Refit::Stands }
+}
 const CAP_TEXT: &[(u64, &str, &str)] = &[
     (1 << 7, "CAP_DAC_OVERRIDE", "Bypass file permission checks."),
     (1 << 8, "CAP_CHOWN", "Change file ownership."),
@@ -443,6 +462,40 @@ mod tests {
                 for mm in [None, Some((100, 100)), Some((339, 212)), Some((1, 1))] {
                     let ((w, h), k) = made(host, declared, mm);
                     assert!(fits_at(w, h, k), "{host:?} {declared:?} {mm:?}: {w}x{h} at {k}");
+                }
+            }
+        }
+    }
+    #[test]
+    fn a_display_that_changed_asks_for_the_screen_it_would_have_had_from_the_start() {
+        let asks = |stands, host, declared, mm| refit(stands, host, declared, mm, 8192, (1024, 768));
+        // The display it was made for: the screen stands.
+        assert_eq!(asks(((2560, 1600), 2), (2560, 1600), Some(200), None), Refit::Stands);
+        // Another size: that size, at its own scale. A smaller one loses its
+        // room at two, and a larger one has it again.
+        assert_eq!(asks(((2560, 1600), 2), (1600, 1000), Some(200), None), Refit::Size((1600, 1000), 1));
+        assert_eq!(asks(((1600, 1000), 1), (3456, 2160), Some(200), None), Refit::Size((3456, 2160), 2));
+        // Another size at the scale that stood is still another size.
+        assert_eq!(asks(((2560, 1600), 2), (3456, 2160), Some(200), None), Refit::Size((3456, 2160), 2));
+        // A display it was moved to: the same pixels on other millimetres are
+        // another scale, and no image is made.
+        assert_eq!(asks(((2560, 1600), 1), (2560, 1600), None, Some((339, 212))), Refit::Scale(2));
+        assert_eq!(asks(((2560, 1600), 2), (2560, 1600), None, Some((677, 423))), Refit::Scale(1));
+        // A display that is halved to the size that stands: it stands.
+        assert_eq!(asks(((2560, 1440), 1), (5120, 2880), Some(200), None), Refit::Stands);
+        // Whatever stood, the screen after it is the one the start would have made.
+        for stands in [((1024, 768), 1), ((2560, 1600), 1), ((2560, 1600), 2), ((3456, 2234), 2)] {
+            for host in [(640, 400), (1280, 800), (2560, 1600), (3456, 2234), (5120, 2880), (8192, 8192), (0, 0)] {
+                for declared in [None, Some(100), Some(150), Some(200)] {
+                    for mm in [None, Some((339, 212)), Some((1, 1))] {
+                        let fresh = geometry_for(host, declared, mm, 8192, (1024, 768));
+                        let after = match asks(stands, host, declared, mm) {
+                            Refit::Stands => stands,
+                            Refit::Scale(k) => { assert_ne!(k, stands.1); (stands.0, k) }
+                            Refit::Size(size, k) => { assert_ne!(size, stands.0); (size, k) }
+                        };
+                        assert_eq!(after, fresh, "{stands:?} {host:?} {declared:?} {mm:?}");
+                    }
                 }
             }
         }
