@@ -326,6 +326,41 @@ fn uptime() -> f64 {
 }
 // How long before a change of hands an event can have been made and still be waiting to be taken.
 const STALE_WITHIN: f64 = 5.0;
+// The longest the promptest event taken so far can have waited, for the events' clock to be taken
+// for the one `uptime` reads.
+const LAG_MOST: f64 = 0.05;
+// Whether an event was made before the pointer last changed hands, and not long before. `made`
+// is the event's stamp, on the events' clock; `now` and `turned` are on the clock `uptime` reads.
+// `lag` carries the least any event was behind `now` when it was taken. On one clock that is the
+// promptest delivery there has been, which is short, and the two times are compared as they are.
+// Anything else is the distance between two clocks, an event not being taken before it is made:
+// `turned` is then read on the events' clock by it, and an event made within that promptest
+// delivery of the change is not told. A distance LAG_MOST or less behind is taken for a wait,
+// and events made in the first that long after a change are taken for old ones.
+fn stale_at(lag: &mut f64, made: f64, now: f64, turned: f64) -> bool {
+    // An event that was only made says 0 (`stamp`): it has no time to measure or to compare.
+    if made == 0.0 {
+        return false;
+    }
+    *lag = lag.min(now - made);
+    let turned = if (0.0..=LAG_MOST).contains(lag) {
+        turned
+    } else {
+        turned - *lag
+    };
+    made < turned && made > turned - STALE_WITHIN
+}
+// What `stale_at` has measured, for --stats: nothing until an event has been asked about.
+fn lag_said(lag: f64) -> String {
+    if lag.is_finite() {
+        format!(
+            ", an event taken {:.3} ms after it was made at the least",
+            lag * 1e3
+        )
+    } else {
+        String::new()
+    }
+}
 // Stamp an event Core Graphics made for a script. The system stamps an event when it is posted,
 // and one that is only made says 0.
 fn stamp(cg: &CGEvent) {
@@ -778,7 +813,8 @@ pub struct Ivars {
     captured: Cell<bool>, // the pointer is captured: its moves are the guest's mouse's, and the guest's pointer is drawn
     seized: Cell<bool>, // the Mac's pointer is held and hidden (a captured pointer's is, in a window that was key)
     skip: Cell<bool>,   // the next move has in it the jump the Mac's pointer was just made to take
-    turned: Cell<f64>,  // when the pointer last changed hands, on the clock events are stamped with
+    turned: Cell<f64>,  // when the pointer last changed hands, on the clock `uptime` reads
+    lag: Cell<f64>,     // the least an event was behind that clock when it was taken (`stale_at`)
     carry: Cell<(f64, f64)>, // the part of a guest pixel of a captured pointer's motion not sent yet
     script_step: Cell<u8>,   // how many steps of the paced capture script have run
     worn: RefCell<Worn>,
@@ -969,7 +1005,9 @@ define_class!(
             self.settle_modifiers(ev);
             // A scroll over the bars is not the guest's: it would land wherever its pointer last was.
             // A captured pointer is the guest's own, and a notch lands where the guest has it.
-            let at = if self.ivars().captured.get() || self.stale(ev) {
+            // Asked of every event, captured or not: the asking measures it.
+            let stale = self.stale(ev);
+            let at = if self.ivars().captured.get() || stale {
                 None
             } else {
                 let Some(at) = self.guest_point(ev) else { return };
@@ -1011,6 +1049,7 @@ impl GuestView {
             seized: Cell::new(false),
             skip: Cell::new(false),
             turned: Cell::new(0.0),
+            lag: Cell::new(f64::INFINITY),
             carry: Cell::new((0.0, 0.0)),
             script_step: Cell::new(0),
             worn: RefCell::new(Worn::default()),
@@ -1744,14 +1783,16 @@ impl GuestView {
     // or notch is sent with no place.
     //
     // Only an event of the last few seconds before the change is one: nothing waits in a queue
-    // for longer. The bound is for the premise this stands on, that an event is stamped on the
-    // clock `uptime` reads, which no test can be handed a real event to show. Were the events'
-    // clock ahead of it, none would be stale, which is how it was before this rule. Were it
-    // behind by L seconds, live events would be taken for old ones for min(L, bound) seconds,
-    // ending L seconds after each change of hands: the bound keeps that from being every move.
+    // for longer. An event is stamped on the clock `uptime` reads, by Apple's word, and no test
+    // can be handed a real event to show it. So every event asked about is measured against that
+    // clock, the rule does not stand on the two being one (`stale_at`), and --stats says what
+    // was measured.
     fn stale(&self, ev: &NSEvent) -> bool {
-        let (made, turned) = (ev.timestamp(), self.ivars().turned.get());
-        made < turned && made > turned - STALE_WITHIN
+        let iv = self.ivars();
+        let mut lag = iv.lag.get();
+        let stale = stale_at(&mut lag, ev.timestamp(), uptime(), iv.turned.get());
+        iv.lag.set(lag);
+        stale
     }
 
     // The Mac's side of a capture: its pointer put over the middle of the picture, so that a
@@ -1900,7 +1941,8 @@ impl GuestView {
         let Some(button) = button else { return false };
         // No place: the guest's pointer is where its mouse moved it, and not where this event
         // says the Mac's is.
-        let placeless = self.ivars().captured.get() || self.stale(ev);
+        let stale = self.stale(ev);
+        let placeless = self.ivars().captured.get() || stale;
         let at = if placeless {
             None
         } else {
@@ -2267,7 +2309,7 @@ impl GuestView {
             if iv.opts.print_stats {
                 let mut total = iv.total.borrow_mut();
                 total.add(&iv.stats.borrow());
-                eprintln!("stats in all: {}", total.line());
+                eprintln!("stats in all: {}{}", total.line(), lag_said(iv.lag.get()));
             }
             if let Some(path) = &iv.opts.dump {
                 match r.snapshot() {
@@ -2360,12 +2402,13 @@ impl GuestView {
                 let s = std::mem::take(&mut *stats);
                 iv.total.borrow_mut().add(&s);
                 eprintln!(
-                    "stats: {}, texture {}x{}, drawable {}x{}",
+                    "stats: {}, texture {}x{}, drawable {}x{}{}",
                     s.line(),
                     r.tex_size.0,
                     r.tex_size.1,
                     r.drawable_size.0,
-                    r.drawable_size.1
+                    r.drawable_size.1,
+                    lag_said(iv.lag.get())
                 );
                 iv.stats_since.set(Some(Instant::now()));
             }
@@ -2376,8 +2419,8 @@ impl GuestView {
 #[cfg(test)]
 mod tests {
     use super::{
-        button_code, fit, guest_motion, guest_pixel, notches, place, pointer_scale, replace, stamp,
-        uptime, Renderer, Stats,
+        button_code, fit, guest_motion, guest_pixel, lag_said, notches, place, pointer_scale,
+        replace, stale_at, stamp, uptime, Renderer, Stats, LAG_MOST, STALE_WITHIN,
     };
     use crate::display::{pixels, Display, Order, Pointer, Rect};
     use objc2::runtime::ProtocolObject;
@@ -3134,6 +3177,86 @@ mod tests {
         assert!(
             before - 1e-6 <= stamped && stamped <= after,
             "stamped between {before} and {after}, reads {stamped}"
+        );
+    }
+
+    // An event made before a change of hands is told whether or not the events' clock is the
+    // one the change was read on. An event here is made at a time on the clock `uptime` reads
+    // and taken `wait` later; `apart` is how far ahead of that clock the events' own is.
+    #[test]
+    fn an_old_event_is_told_whatever_clock_events_are_stamped_on() {
+        const TURNED: f64 = 1000.0;
+        const PROMPT: f64 = 0.0002;
+        // The first event is one taken promptly, long before the change; then the one asked about.
+        fn near(a: f64, b: f64) -> bool {
+            (a - b).abs() < 1e-9
+        }
+        fn told(apart: f64, made: f64, wait: f64) -> bool {
+            let mut lag = f64::INFINITY;
+            assert!(!stale_at(&mut lag, 900.0 + apart, 900.0 + PROMPT, TURNED));
+            assert!(near(lag, PROMPT - apart), "apart {apart}: measured {lag}");
+            stale_at(&mut lag, made + apart, (made + wait).max(TURNED), TURNED)
+        }
+        for apart in [0.0, -0.5, 0.5, -3.0, 3.0, -86400.0, 86400.0] {
+            assert!(
+                told(apart, TURNED - 0.010, 0.020),
+                "apart {apart}: an old event was not told"
+            );
+            assert!(
+                told(apart, TURNED - 4.9, 5.0),
+                "apart {apart}: an event that waited long"
+            );
+            assert!(
+                !told(apart, TURNED + 0.5, 0.001),
+                "apart {apart}: a live event was taken for an old one"
+            );
+            assert!(
+                !told(apart, TURNED + 0.001, 0.001),
+                "apart {apart}: the first event after the change"
+            );
+            assert!(
+                !told(apart, TURNED - STALE_WITHIN - 0.010, 6.0),
+                "apart {apart}: nothing waits that long"
+            );
+        }
+        // On one clock the two times are compared as they are: an event made a tenth of a
+        // millisecond before the change is old. On two, one made within the promptest wait of
+        // the change is not told, which is the cost of not knowing that wait from the distance.
+        assert!(told(0.0, TURNED - 0.0001, 0.001));
+        assert!(!told(3.0, TURNED - 0.0001, 0.001));
+        assert!(told(3.0, TURNED - 0.0003, 0.001));
+        // A wait is not a distance. The promptest event so far waited 10 ms less than the most
+        // a wait is taken to be: one clock.
+        let mut lag = f64::INFINITY;
+        assert!(!stale_at(&mut lag, 900.0, 900.0 + LAG_MOST - 0.010, TURNED));
+        assert!(stale_at(&mut lag, TURNED - 0.010, TURNED + 0.050, TURNED));
+        // It waited 10 ms more than that: taken for a distance, so an event made 10 ms before
+        // the change is not told, until an event is taken more promptly.
+        let mut lag = f64::INFINITY;
+        assert!(!stale_at(&mut lag, 900.0, 900.0 + LAG_MOST + 0.010, TURNED));
+        assert!(!stale_at(&mut lag, TURNED - 0.010, TURNED + 0.5, TURNED));
+        assert!(!stale_at(
+            &mut lag,
+            TURNED + 0.5,
+            TURNED + 0.5 + PROMPT,
+            TURNED
+        ));
+        assert!(near(lag, PROMPT), "measured {lag}");
+        assert!(stale_at(&mut lag, TURNED - 0.010, TURNED + 0.6, TURNED));
+        // The least is kept: a slow event after a prompt one changes nothing.
+        let least = lag;
+        assert!(!stale_at(&mut lag, TURNED + 1.0, TURNED + 3.0, TURNED));
+        assert_eq!(lag, least);
+        // An event that was only made says 0. It is no old event, and it is not measured: it
+        // would be the whole of the clock behind.
+        let mut lag = f64::INFINITY;
+        assert!(!stale_at(&mut lag, 0.0, 3.0, 4.0));
+        assert!(!stale_at(&mut lag, 0.0, TURNED + 1.0, TURNED));
+        assert_eq!(lag, f64::INFINITY);
+        assert_eq!(lag_said(f64::INFINITY), "");
+        assert_eq!(
+            lag_said(0.00025),
+            ", an event taken 0.250 ms after it was made at the least"
         );
     }
 
