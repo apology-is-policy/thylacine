@@ -4,17 +4,24 @@
 // the slave (the ptyhost shape, minus the pumps -- the probe IS the outer
 // terminal), and script the job-control ladder against the master.
 //
-// The stoppable foreground job is `sleep` (NOT `cat`): a v1.0 pts has no
-// foreground-read arbitration (TTIN), so a stopped job holding an outstanding
-// terminal READ would steal the shell's subsequent input off the shared pts
-// slave. `sleep` blocks in the timer, holds no terminal read, and stops/
-// resumes cleanly -- so it exercises the whole stop/report/resume machinery
-// without depending on TTIN (the documented follow-up; see
-// docs/reference/136-ptyfs.md "Known caveats"). The sleep is LONG (30 s, ended
-// by `^C`, never by its deadline): a short sleep's wall deadline keeps running
-// WHILE the job is stopped, so the stop window and the post-resume window both
-// race the expiry -- the PTY-4e F2 right edge, and the repro artifact that
-// originally masked the re-stop leg (task #19).
+// The stoppable foreground job is `debug-child tick` (NOT `cat`): a v1.0 pts
+// has no foreground-read arbitration (TTIN), so a stopped job holding an
+// outstanding terminal READ would steal the shell's subsequent input off the
+// shared pts slave. The tick child only writes, holds no terminal read, and
+// stops/resumes cleanly -- so it exercises the whole stop/report/resume
+// machinery without depending on TTIN (the documented follow-up; see
+// docs/reference/136-ptyfs.md "Known caveats"). It is ended by `^C`, never by
+// its own limit (60 s, past the watchdog): a short job's wall deadline keeps
+// running WHILE the job is stopped, so the stop window and the post-resume
+// window both race the expiry -- the PTY-4e F2 right edge, and the repro
+// artifact that originally masked the re-stop leg (task #19). Its TICKs are
+// what `sleep` could not give: a sign the job is running again after `fg`.
+//
+// No signal is sent on a clock. Each one waits for the condition it needs: the
+// pts's foreground group is the job's (read from the master side), and for the
+// re-stop a TICK written after the job was stopped. The 400 ms settle this
+// replaced was wall-anchored while the shell's spawn and handoff are not, and
+// one boot in about 170 lost its `^Z` to the shell and went extinct here.
 //
 // The matching discipline: the ut LINE EDITOR redraws the prompt on every
 // keystroke, so the master stream is full of escape noise WHILE ut is at its
@@ -33,16 +40,17 @@
 // Ladder:
 //   run    `echo runok | tr a-z A-Z` -> RUNOK  (a clean fg external + pipeline
 //          under jc: own pgrp + terminal handoff + the stop-aware wait, clean)
-//   stop   foreground `sleep 30`; `^Z` (0x1a) -> tty:susp -> the kernel stops
-//          sleep's group -> ut's WAIT_UNTRACED report -> `[1]+ Stopped` on pts
+//   stop   foreground `debug-child tick`; once it holds the terminal, `^Z`
+//          (0x1a) -> tty:susp -> the kernel stops its group -> ut's
+//          WAIT_UNTRACED report -> `[1]+ Stopped` on pts
 //   jobs   the listing shows the job Stopped
-//   restop `fg` resumes (terminal + SYS_TTY_CONT; the `sleep 30` echo); a
+//   restop `fg` resumes (terminal + SYS_TTY_CONT; a fresh TICK shows it); a
 //          second `^Z` re-stops it -- the re-stop IS the resume proof (only a
 //          RUNNING job can stop again) and the task-#19 decisive leg
 //   bg     `bg` resumes the re-stopped job in the background (the `&` line;
-//          no terminal handoff -- the job sleeps on, reading nothing)
+//          no terminal handoff -- the job runs on, reading nothing)
 //   int    `fg` foregrounds the RUNNING job (harmless cont); `^C` (0x03) ->
-//          interrupt -> sleep default-terminates (LS-5) -> a live prompt.
+//          interrupt -> the job default-terminates (LS-5) -> a live prompt.
 //          Post-resume signal delivery, the F4 leg -- no deadline reliance.
 //   health `echo fgok | tr a-z A-Z` -> FGOK (the shell owns the terminal and
 //          still runs pipelines after the whole stop/resume cycle)
@@ -79,9 +87,10 @@ use core::time::Duration;
 use libthyla_rs::fs::{self, File, OpenOptions};
 use libthyla_rs::io::{Read, Write};
 use libthyla_rs::process::{Command, Stdio};
+use libthyla_rs::time::Instant;
 use libthyla_rs::{
-    t_burrow_attach, t_close, t_exit_group, t_fstat, t_open, t_putstr, t_read, t_wait_if_stopped,
-    t_wait_pid_for, t_write, thread, T_ORDWR, T_WAIT_UNTRACED, T_WAIT_WNOHANG,
+    t_burrow_attach, t_close, t_exit_group, t_fstat, t_open, t_putstr, t_read, t_tty_get_fg,
+    t_wait_if_stopped, t_wait_pid_for, t_write, thread, T_ORDWR, T_WAIT_UNTRACED, T_WAIT_WNOHANG,
     T_WALK_OPEN_FROM_ROOT,
 };
 
@@ -98,13 +107,22 @@ const PROMPT: &[u8] = b"\xe2\x8a\xa2";
 /// silent-hang backstop, this caps a chatty-but-wrong stream).
 const MAX_READS_PER_LEG: usize = 512;
 
-/// Settle after a command line that foregrounds a job, before signalling it.
-/// ut must read the accepted line, spawn the job, place it in a pgrp, and hand
-/// it the terminal before the signal lands -- else a `^Z`/`^C` reaches ut
-/// (self-managing: note-only) instead of the job, the job runs on, the marker
-/// never arrives, and the watchdog names the leg. The settle is CNTVCT
-/// (wall-anchored) while guest progress is CPU-bound, so the margin is NOT
-/// dilation-invariant -- generous, and the watchdog converts the residual.
+/// The stoppable job (`debug-child tick`) as typed, as ut echoes it, and what
+/// it writes while it runs. MUST match debug-child's tick mode.
+const JOB_LINE: &[u8] = b"debug-child tick\r";
+const JOB_ECHO: &[u8] = b"debug-child tick";
+const TICK: &[u8] = b"TICK";
+
+/// The handoff wait's poll and its bound (4000 x 5 ms): a job that never takes
+/// the terminal is a named FAIL well inside the watchdog.
+const HANDOFF_POLL: Duration = Duration::from_millis(5);
+const HANDOFF_TRIES: u32 = 4000;
+
+/// A pause AFTER a job is known to hold the terminal, for two legs' own
+/// reasons (a spinner past its write's return tail; the mask rung's tick
+/// count). Nothing fails if it is too short: a signal no longer waits on it to
+/// find its job. It is also the old fixed settle's length, which
+/// `await_handoff` reports a handoff exceeding.
 const SETTLE: Duration = Duration::from_millis(400);
 
 /// The silent-hang watchdog (PTY-4e F2): a mis-routed signal leaves the ladder
@@ -143,6 +161,40 @@ extern "C" fn watchdog_main(_arg: u64) {
 
 fn settle() {
     let _ = libthyla_rs::time::sleep(SETTLE);
+}
+
+/// Wait until the terminal is held by a job (`to_job`), or by ut again. ut
+/// reads the accepted line, spawns the job, puts it in a group and hands it
+/// the terminal; a `^Z`/`^C` sent before the last of those reaches ut
+/// (self-managing: note-only) instead of the job, the job runs on and its
+/// marker never comes. The master side reads the foreground group at any time
+/// (SYS_TTY_GET_FG), so this is the condition itself, with no clock in it.
+fn await_terminal(mfd: i64, shell_fg: i64, to_job: bool, leg: &str) -> bool {
+    let start = Instant::now();
+    for _ in 0..HANDOFF_TRIES {
+        // SAFETY: SVC wrapper on the live master.
+        let fg = unsafe { t_tty_get_fg(mfd) };
+        if fg > 0 && (fg != shell_fg) == to_job {
+            let ms = start.elapsed().as_millis();
+            if ms > SETTLE.as_millis() {
+                t_putstr(&format!("jc-probe: {} handoff took {} ms\n", leg, ms));
+            }
+            return true;
+        }
+        let _ = libthyla_rs::time::sleep(HANDOFF_POLL);
+    }
+    t_putstr("jc-probe: FAIL (");
+    t_putstr(leg);
+    t_putstr(if to_job {
+        ": the job never took the terminal)\n"
+    } else {
+        ": ut never took the terminal back)\n"
+    });
+    false
+}
+
+fn await_handoff(mfd: i64, shell_fg: i64, leg: &str) -> bool {
+    await_terminal(mfd, shell_fg, true, leg)
 }
 
 /// The killst rung's file and bytes. MUST match debug-child's dirty mode.
@@ -454,6 +506,14 @@ impl Driver {
     fn mark(&self) -> usize {
         self.acc.len()
     }
+
+    /// The offset just past the first `needle` at or after `mark`.
+    fn past(&self, mark: usize, needle: &[u8]) -> Option<usize> {
+        self.acc[mark..]
+            .windows(needle.len())
+            .position(|w| w == needle)
+            .map(|i| mark + i + needle.len())
+    }
 }
 
 fn run() -> i64 {
@@ -541,19 +601,27 @@ fn run() -> i64 {
     if !d.send(b"echo runok | tr a-z A-Z\r", "run") || !d.read_until(m, b"RUNOK", 1, "run") {
         return 4;
     }
-    if !d.read_until(m, PROMPT, 1, "run-prompt") {
+    // The prompt that FOLLOWS the output: the editor redraws its prompt at each
+    // typed key, so one counted from before the line proves nothing.
+    let after_run = d.past(m, b"RUNOK").unwrap_or(m);
+    if !d.read_until(after_run, PROMPT, 1, "run-prompt") {
+        return 4;
+    }
+    // ut leads its session, so its group is its pid (SYS_SETSID: sid = pgid =
+    // pid). The pipeline held the terminal; the legs below start from ut
+    // holding it again.
+    let shell_fg = pid as i64;
+    if !await_terminal(d.mfd, shell_fg, false, "run") {
         return 4;
     }
 
-    // (c) Foreground `sleep 30` + `^Z`. Settle so sleep is spawned + owns the
-    //     terminal before the susp lands. 30 s: the deadline can never expire
-    //     inside the ladder, so the stop window has no right edge and the
-    //     later resumes prove RESUMPTION, never expiry (`^C` ends the job).
+    // (c) A foreground job + `^Z`, sent once the job holds the terminal. The
+    //     job is ended by `^C`, never by its own limit, so the stop window has
+    //     no right edge and the later resumes prove RESUMPTION, never expiry.
     leg("stop");
-    if !d.send(b"sleep 30\r", "sleep") {
+    if !d.send(JOB_LINE, "job") || !await_handoff(d.mfd, shell_fg, "stop") {
         return 5;
     }
-    settle();
     let stop_mark = d.mark();
     if !d.send(&[0x1a], "stop") || !d.read_until(stop_mark, b"Stopped", 1, "stop") {
         return 5;
@@ -573,7 +641,7 @@ fn run() -> i64 {
     }
 
     // (e) THE RE-STOP LEG (task #19's decisive experiment): `fg` resumes the
-    //     stopped sleep (terminal handoff + SYS_TTY_CONT; bi_fg echoes the
+    //     stopped job (terminal handoff + SYS_TTY_CONT; bi_fg echoes the
     //     job's command line first -- the resume-in-progress marker), then a
     //     second `^Z` must stop it AGAIN. Only a RUNNING job can stop, so the
     //     second `Stopped` report is simultaneously the resume proof and the
@@ -582,10 +650,16 @@ fn run() -> i64 {
     //     before the second ^Z -- the artifact behind the #19 report.)
     leg("restop");
     let m = d.mark();
-    if !d.send(b"fg\r", "restop-fg") || !d.read_until(m, b"sleep 30", 1, "restop-fg") {
+    if !d.send(b"fg\r", "restop-fg") || !d.read_until(m, JOB_ECHO, 1, "restop-fg") {
         return 7;
     }
-    settle();
+    // ut hands the terminal over and THEN continues the job. A `^Z` between
+    // the two meets a job that is still stopped and is spent on it. Every TICK
+    // the job wrote before it stopped precedes the `Stopped` report already
+    // read, so one after `m` is the job running again.
+    if !await_handoff(d.mfd, shell_fg, "restop") || !d.read_until(m, TICK, 1, "restop-running") {
+        return 7;
+    }
     let restop_mark = d.mark();
     if !d.send(&[0x1a], "restop") || !d.read_until(restop_mark, b"Stopped", 1, "restop") {
         return 7;
@@ -595,7 +669,7 @@ fn run() -> i64 {
     }
 
     // (f) `bg` resumes the re-stopped job in the BACKGROUND (no terminal
-    //     handoff; the `&` job line is bi_bg's). The job sleeps on, holding no
+    //     handoff; the `&` job line is bi_bg's). The job runs on, holding no
     //     terminal read -- the prompt stays ut's.
     leg("bg");
     let m = d.mark();
@@ -607,7 +681,7 @@ fn run() -> i64 {
     }
 
     // (g) `fg` foregrounds the now-RUNNING job (a harmless cont -- POSIX
-    //     SIGCONT on a running group), then `^C` -> interrupt -> sleep
+    //     SIGCONT on a running group), then `^C` -> interrupt -> the job
     //     default-terminates (LS-5) -> fg's stop-aware wait returns Done ->
     //     a fresh prompt. Post-RESUME signal delivery through the same
     //     pts_tty_signal fan as the susp (the F4 coverage). The prompt
@@ -616,10 +690,12 @@ fn run() -> i64 {
     //     satisfy it -- only ut's return to the prompt loop.
     leg("int");
     let m = d.mark();
-    if !d.send(b"fg\r", "int-fg") || !d.read_until(m, b"sleep 30", 1, "int-fg") {
+    if !d.send(b"fg\r", "int-fg") || !d.read_until(m, JOB_ECHO, 1, "int-fg") {
         return 9;
     }
-    settle();
+    if !await_handoff(d.mfd, shell_fg, "int") {
+        return 9;
+    }
     let int_mark = d.mark();
     if !d.send(&[0x03], "int") || !d.read_until(int_mark, PROMPT, 1, "int-prompt") {
         return 9;
@@ -644,6 +720,7 @@ fn run() -> i64 {
     let m = d.mark();
     if !d.send(b"debug-child spin-tty\r", "spinint-spawn")
         || !d.read_until(m, b"SPINNING", 1, "spinint-spawn")
+        || !await_handoff(d.mfd, shell_fg, "spinint")
     {
         return 14;
     }
@@ -659,6 +736,7 @@ fn run() -> i64 {
     let m = d.mark();
     if !d.send(b"debug-child spin-note\r", "spinnote-spawn")
         || !d.read_until(m, b"SPINNING", 1, "spinnote-spawn")
+        || !await_handoff(d.mfd, shell_fg, "spinnote")
     {
         return 15;
     }
@@ -696,6 +774,7 @@ fn run() -> i64 {
     let m = d.mark();
     if !d.send(b"susp-mask-child\r", "maskstop-spawn")
         || !d.read_until_unless(m, b"MASKREADY", 1, "MASKFAIL", "maskstop-spawn")
+        || !await_handoff(d.mfd, shell_fg, "maskstop")
     {
         return 12;
     }
