@@ -87,8 +87,9 @@ processes that paint chrome and glyphs, and what the bakes need.
   wins when they disagree beyond one step (a monitor lying about one
   axis must not blow the other up).
 - **From the EDID**, negotiated (the driver acks `F_EDID` when offered)
-  and read once at boot after `GET_DISPLAY_INFO` and again on `mode
-  auto`: `VIRTIO_GPU_CMD_GET_EDID` for scanout 0 -> `virtio_gpu_resp_edid
+  and read once at boot after `GET_DISPLAY_INFO`, again on `mode
+  auto`, and after every display event (`docs/AURORA-CONFIG.md` 3.4):
+  `VIRTIO_GPU_CMD_GET_EDID` for scanout 0 -> `virtio_gpu_resp_edid
   { size, edid[1024] }`. The size in millimetres comes from the FIRST
   detailed timing descriptor (bytes 54.., image size = byte 66 | (byte
   68 >> 4) << 8 by byte 67 | (byte 68 & 0xF) << 8), falling back to the
@@ -110,13 +111,18 @@ processes that paint chrome and glyphs, and what the bakes need.
   on the kernel command line, read ONCE at boot from `/hw/chosen/bootargs`
   (the channel joey's opt-outs and aurora's display mode already ride;
   QEMU's `-append`). When present and one of the five values it IS the
-  derived scale -- `scale auto` and a `mode` change return to it, not to
-  the EDID -- because a declaration outranks a measurement: it exists for
+  derived scale (carried to the mode that stands: the second paragraph
+  after this one) -- `scale auto` and a `mode` change return to it, not
+  to the EDID -- because a declaration outranks a measurement: it exists for
   the display whose EDID cannot say (QEMU's synthetic one claims 100 DPI at
   any size -- the cocoa backend passes no physical size and virtio-gpu has
   no DPI property -- so a 2560x1600 scanout shown 1:1 on a retina panel
   derived 100 and cost four chords per boot) and for the panel whose EDID
-  lies. Prior art: plan9.ini's `monitor=`/`vgasize=` (the boot side
+  lies. (Read 2026-11-12 in QEMU's source, `ui/cocoa.m` at v10.0.2 and at
+  v11.1.3: the cocoa backend does fill the millimetres, from the window's
+  share of the host's screen. The 100 above was measured under 10.0.2;
+  what a guest reads from a cocoa window under 11 has not been measured
+  since.) Prior art: plan9.ini's `monitor=`/`vgasize=` (the boot side
   declares the display; the component that owns the decision reads it),
   Linux's `video=` parameter, Fuchsia's board-level `display_pixel_density`
   (a device-tier declaration that outranks the EDID). Not a pool file: the
@@ -131,31 +137,64 @@ processes that paint chrome and glyphs, and what the bakes need.
   (`docs/GRAPHICAL-SAK-OWNERSHIP.md`, "The trusted screen's scale"); the verb
   and the session's setting do not reach it.
 
-  **Carried through a fitted mode (amended 2026-11-12 under the
-  operator's standing authorization of 2026-09-01).** The declaration is
-  the DISPLAY's: it stands in for the millimetres the EDID cannot say. A
-  mode the compositor FITTED from the host's rect (`docs/AURORA-CONFIG.md`
-  3.4: at boot, by `mode auto`, after a display event that is followed) is
-  that rect over or times a whole number, and the host makes up the factor
-  when it shows the mode. Millimetres carry through such a mode by
-  themselves (half the pixels over the same millimetres are half the DPI),
-  and the declaration is carried the same way: the derived scale for a
-  fitted mode is the declaration times the mode's width over the rect's,
-  brought to the nearest of the five values
-  (`libhalcyon::display::carried_pct`). A 5120x2880 display declared at 200
-  whose mode is 2560x1440 derives 100, which is what Lictor's trusted
-  screen reads for that mode. Before this the declaration stood unchanged
-  through the fit and that session came up with everything at twice its
-  size (seen in a guest 2026-11-12: `mode 2560x1440 for a display of
-  5120x2880` beside `scale 200 (declared)`). At the rect's own size the
-  factor is one and nothing changes. The boot line still says
-  `(declared)`; the number beside it is the carried one. Prior art: mutter
-  works a scale out per monitor MODE, from that mode's pixels over the
-  panel's size, and macOS gives each display mode its own backing scale
-  (on one panel, a mode at two pixels to a point beside modes at one).
+  **Carried to the mode (amended twice on 2026-11-12 under the operator's
+  standing authorization of 2026-09-01).** The declaration is the
+  DISPLAY's: it stands in for the millimetres the EDID cannot say, and it
+  is carried to a mode as millimetres carry themselves (half the pixels
+  over the same millimetres are half the DPI). The display is the host's
+  rect, in its pixels, as the compositor last read it: at boot, by `mode
+  auto`, and at every display event, whether the mode follows the host or
+  is pinned (`docs/AURORA-CONFIG.md` 3.4). The host is taken to show the
+  mode whole on that rect and as large as it goes, keeping its shape, so
+  the side that fills the rect says how large a pixel of the mode is: the
+  derived scale is the declaration times the larger of the mode's width
+  over the rect's and its height over the rect's, brought to the nearest
+  of the five values (`libhalcyon::display::carried_pct`). A 5120x2880
+  display declared at 200 whose mode is 2560x1440 derives 100, which is
+  what Lictor's trusted screen reads for that mode; 1024x768 on 2000x1280
+  fills its height, 768 rows of 1280, and derives 125. At the rect's own
+  size the factor is one and the declaration stands as it is. The boot
+  line still says `(declared)`; the number beside it is the carried one.
+
+  The first amendment carried the declaration through a mode the
+  compositor FITTED from the rect. Before it the declaration stood
+  unchanged through the fit, and such a session came up with everything
+  at twice its size (seen in a guest 2026-11-12: `mode 2560x1440 for a
+  display of 5120x2880` beside `scale 200 (declared)`). The second
+  carries it to a mode ASKED FOR BY SIZE as well (`mode W H`, aurora's
+  startup push of a persisted mode), which had kept the declaration as it
+  was. That was right only for a host that shows such a mode a pixel to a
+  pixel. QEMU's own window does not under `THYLACINE_HIDPI=1`
+  (zoom-to-fit keeps the window and scales the mode): a 1280x800 mode
+  picked in a 2560x1600 window declared at 200 was drawn at 200 and then
+  enlarged twice over. It also set the two sources against each other: a
+  scale from the EDID has always followed a mode asked for by size,
+  because the millimetres stay and the pixels change. The second
+  amendment also has a display event under a PINNED mode read the display
+  again, rect and EDID, and derive the scale again from them, for either
+  source; the mode stands. Before it that scale stood until something
+  else derived one, so a window resized, or moved to another display,
+  under a mode picked by size kept the old scale. (The Mac app declares
+  nothing: it tells the guest its window in pixels and in millimetres, so
+  its scale is the EDID's. An earlier text of this section named it among
+  the hosts where a mode asked for by size comes out enlarged. That was
+  wrong; what was wrong under the app is the pinned case.) An override
+  (the verb, the chord) stands through all of it, as before.
+
+  Prior art: mutter works a default scale out per monitor MODE, from that
+  mode's pixels over the panel's size (`calculate_scale`), and keeps a
+  scale the user chose; macOS gives each display mode a size in points
+  and one in pixels, and documents that the backing scale "can vary based
+  on the configured display mode"; Parallels' Scaled setting runs the
+  guest at half the Retina panel's pixels a side at 100 percent, and its
+  Best for Retina at all of them at 200; Plan 9 from User Space reads the
+  display's density again at every `getwindow`, so at every resize, and
+  its macOS devdraw when the window's backing changes; a Linux guest's
+  virtio-gpu driver answers the display event by reading the EDID and the
+  display info again. Original Plan 9 has no scale to carry.
 
   What the carry does not reach (recorded 2026-11-12, the second audit
-  round on it):
+  round on it; the third item rewritten with the second amendment):
   - **The floor.** A scale is never under 100, so under a mode at half its
     display a declaration of 100, 125, 150 or 175 gives a session at 2,
     1.6, 1.33 and 1.14 times the size declared. Only 200 halves exactly.
@@ -164,20 +203,20 @@ processes that paint chrome and glyphs, and what the bakes need.
     weave). There a declaration of 100 or 125 has the session at twice
     the trusted screen's size; from 150 the two agree. Where both fit
     the same mode they agree at every declaration.
-  - **A mode ASKED FOR BY SIZE** (`mode W H`, aurora's startup push of a
-    persisted mode) is nobody's fit and keeps the declaration as it is,
-    as before this amendment. That is right for a host that sizes its
-    window to the mode and shows it pixel for pixel. It is wrong for a
-    host that scales the mode to its window, which QEMU's own window
-    does under `THYLACINE_HIDPI=1` (zoom-to-fit) and the Mac app does:
-    there the session is drawn at the declaration and then enlarged by
-    the display's size over the mode's. The compositor does not ask for
-    the display's rect when it is told a mode, so it cannot tell the two
-    hosts apart. The way out (the display's rect kept current, every
-    mode carried by its ratio to it) changes what this section ratified
-    for a `mode` change, and is the operator's to choose. A push of the
-    mode that already stands changes neither the mode nor whose fit it
-    was; the verb pins it all the same.
+  - **A host that does not fill its rect with the mode.** The carry takes
+    it that a mode smaller than the rect is enlarged to it. A host that
+    shows such a mode a pixel to a pixel, in the middle of a rect it goes
+    on reporting, has the session at the mode's share of the declaration:
+    too small. None this is run under does. QEMU 11's own window without
+    zoom-to-fit takes the mode's size in its backing pixels and reports
+    that as its rect (read in its source at v11.1.3, not measured), so
+    the factor is one; with zoom-to-fit, and in the Mac app, the mode is
+    enlarged to the rect. (QEMU 10's window reports
+    its size in points, `ui/cocoa.m` before 11.0: on a Retina panel its
+    rect is half the pixels it shows, and a declaration made for the
+    panel is wrong there for every mode.) A push of the mode that already
+    stands changes neither the mode nor the scale; the verb pins it all
+    the same.
 
 ## 4. The authority and the channel
 

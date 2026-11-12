@@ -297,11 +297,12 @@ things):
    when none stands yet, 1024×768). A whole factor keeps the host's picture
    of the screen sharp, and a scale derived from the EDID needs no rule of
    its own: the EDID's millimetres under half the pixels are half the DPI.
-   A scale the platform DECLARED is carried through a fitted mode by the
-   fit's factor (`docs/HALCYON-SCALE.md` section 3, amended 2026-11-12
-   under the operator's standing authorization of 2026-09-01; until then
-   it stood unchanged, and a 5120×2880 display declared at 200 came up at
-   2560×1440 with everything at twice its size). The rule is used in three
+   A scale the platform DECLARED is carried to the mode by the mode's size
+   over the rect's, whoever chose the mode (`docs/HALCYON-SCALE.md` section
+   3, amended twice on 2026-11-12 under the operator's standing
+   authorization of 2026-09-01; until then it stood unchanged, and a
+   5120×2880 display declared at 200 came up at 2560×1440 with everything
+   at twice its size). The rule is used in three
    places, and only there:
    - **at boot**, for the compositor's first mode (before this amendment
      the boot adopted any rect unchecked, and a display of 3456×2160 came
@@ -313,12 +314,17 @@ things):
      of events is one mode change.
 
    An explicit `mode W H` is NOT fitted: it is judged by the same test of
-   a size, refused if it cannot be a mode, and it PINS the mode. (Under a
-   declared scale it keeps the declaration, where a fitted mode carries
-   it.) A pinned
+   a size, refused if it cannot be a mode, and it PINS the mode. (A declared
+   scale is carried to it as to a fitted mode.) A pinned
    mode stands whatever the host's window does, until a `mode auto` that
    is accepted, which also resumes the following (one that is refused
-   leaves the mode that stood, and the pin). A mode change that cannot be
+   leaves the mode that stood, and the pin). A display event under a pin
+   changes no mode: the host is asked for its rect and its EDID, and the
+   scale is derived again for the mode on the display that is now
+   (amended 2026-11-12 under the same authorization; until then the scale
+   stood); what that asking leaves owed is asked again as a follow's is.
+   The same is done where a display event leads to no mode: the mode that
+   stood is on another display. A mode change that cannot be
    made leaves the mode that stood. One that was made, and whose screen the
    device has not taken, stands as made, and so does one whose display's
    EDID is still unread: the screen is bound again while the device
