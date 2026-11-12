@@ -665,10 +665,10 @@ the least value that the compositor's `ax * (W - 1) / 32767` brings back to x (Q
 binds the tablet to `gpu0` (`display=gpu0,head=0`, the tablet declared after the GPU,
 because a bind to a display that does not exist yet fails without a word), so that an
 event reaches one device whole; with the tablet bound to nothing QEMU hands the place to
-the tablet and the button to the mouse. Relative motion, when the pointer is captured, is
-to ride the same command unaddressed, where `rel` and `btn` reach the mouse. UTM changes
-the mode with HMP `mouse_set` at each capture instead: a race against a guest that brings
-a device up again, on an interface QEMU does not keep stable. What it costs: QEMU's monitor
+the tablet and the button to the mouse. Relative motion is the captured pointer's, below.
+UTM changes the mode with HMP `mouse_set` at each capture instead: a race against a guest
+that brings a device up again, on an interface QEMU does not keep stable. What it costs:
+QEMU's monitor
 serves one client at a time, so the socket the app attached through is the app's while it
 runs, and the monitor refuses input for a machine that is stopped. Resize: the app
 calls `SetUIInfo(width_mm, height_mm, 0, 0, w_px, h_px)` on live-resize end (B4); the guest
@@ -701,6 +701,56 @@ and shows none when the guest hides its own; the guest's position is not drawn f
 the guest only repeats the absolute position it was sent, a round trip late. (The first
 window, 4f02edd44, ignored both calls on a misreading of this paragraph's earlier text,
 "Thylacine draws its own": it showed the Mac's arrow and no guest pointer.)
+
+The captured pointer (decided 2026-11-12, under the standing 2026-09-01 authorization).
+What it is for: the guest hands every motion to the surface that has the keys as deltas
+(`TEV_PTR_REL`, `docs/TAPESTRY.md`, "PTR_REL is the mouse-look stream"), exact from its
+mouse and made up from consecutive positions of its tablet, and the made-up ones stop
+where the picture ends. Captured, the Mac's pointer is hidden and held where it is
+(`CGAssociateMouseAndMouseCursorPosition(false)`, as `utm:Platform/macOS/Display/
+VMMetalView.swift:343` and `qemu-11.1:ui/cocoa.m:1065` do), and each move goes to the
+guest's mouse: `rel` events in a command addressed to no display, with a button or a notch
+in the same command. Measured with no guest on QEMU 10.0.2 and 11.1.3, the tablet bound and
+not: such a command is one report on the mouse; a notch is the wheel's button going down
+(its coming up is a stray key there too); QEMU passes any value on, and a zero as an event;
+and with the tablet bound a position addressed to no display is refused. What is sent is
+the event's own motion (`deltaX`, `deltaY`: points, with the Mac's acceleration in them)
+times the guest pixels a point covers in the picture, the fraction kept for the next
+event, so the guest's pointer goes as far on the glass as the Mac's would have. A button
+comes up on the device it went down on, whichever way the pointer is sent by then:
+capturing lets go of nothing. The guest's pointer is not the Mac's any longer, so the app
+draws it: the image of `CursorDefine` with its hot spot on the place of `MouseSet` (Lictor
+reports the hot spot's place; QEMU's cocoa window puts the image's corner there), in the
+pass that draws the picture. On release the Mac's pointer is put where the guest's is
+(`CGWarpMouseCursorPosition`) and let go. The guest has one thing to change for this: it
+makes a delta of the first position after the mouse's motion, from the last position
+before it, which is the whole captured motion a second time; a position that follows
+motion from the mouse is to seed and no more (`usr/tapestryd`, and the sentence of
+`docs/TAPESTRY.md` that describes the made-up deltas).
+
+Who captures: the person, with View > Capture Pointer, Control-Command-G (beside
+Control-Command-F for full screen), and the same lets go. The app lets go by itself when
+its window stops being key, when a menu opens and when it is left for another app; while
+captured the window's title says how to let go. Plan 9 has no capture, and no relative
+pointer for a program at all: one that wants motion past the edge writes the pointer back
+to the middle (`mouse(3)`: "Writing the mouse file, in the same format, causes the mouse
+cursor to move to the position specified"; 9front's `games/doom/i_video.c` does so
+whenever the pointer leaves the inner part of its window), and drawterm on a Mac obeys
+with `CGWarpMouseCursorPosition` (`gui-cocoa/screen.m`, `mouseset`). There the program
+decides, and that is what this is to grow into: a surface says it wants the pointer (a
+word on its `ctl`, as `intent` is one; the SDL port's relative mode is told today and
+tells nobody), the compositor passes that on, and the app captures while that surface has
+the keys. It needs a way from the guest to the app, which is the interop service's (4.4),
+and a word in Tapestry's protocol, which is its owners' to add. The person's chord stays
+then as the way out. Rejected: capturing on a click in the window or on entering full
+screen (QEMU's cocoa window when the guest's pointer is relative; two of UTM's settings,
+`VMDisplayQemuMetalWindowController.swift:442-465`): a guest of ours takes positions, so
+most of the time nothing wants deltas, and a capture only takes the Mac's pointer away. A
+chord of modifiers alone (UTM's Control-Option, taken the moment both are down,
+`VMMetalView.swift:188-201`: it fires inside any chord meant for the guest with those two
+in it). Motion straight from the device (`GCMouse`): the guest adds no acceleration, so
+its pointer would move a pixel a count; it is the right source for a surface that asks
+for the pointer and for raw motion with it, and belongs to that trigger.
 
 **Product: an IOSurface scanout.** For `virtio-gpu-gl` (virgl/Venus) the scanout is a GPU
 texture and the DMABUF kinds do not exist on macOS (B2). The fork adds
@@ -915,6 +965,9 @@ to print the ID registers from a scratch vCPU); it costs seconds per machine.
    (`run-vm.sh:840-890` derives tokens from `-device`). It is an audit-trigger surface:
    its row lands with it.
 7. **`docs/ROADMAP.md`**: the arc's entry, and its bound: it takes no Phase 7 ship risk.
+8. **`docs/TAPESTRY.md` and `usr/tapestryd` (main and corona)**: a position that follows
+   motion from the mouse seeds the made-up deltas and makes none (4.2, the captured
+   pointer). Later, with 4.4: the word by which a surface asks for the pointer.
 
 ## 8. Phasing
 
@@ -1178,6 +1231,8 @@ overturn any of them.
 | F13 close | Close suspends to disk (migrate to file); Quit shuts down | vote M4 | Close asks to shut down; Close keeps the VM running hidden |
 | F14 HVF bug fixes | in the guest for H1 and H2, in the fork queue for H3, all gated by M-2 and M-9 before beta | recommended | a beta that ships around them |
 | F15 scripture | this document, plus the I-45, GPU-DESIGN and TOOLING amendments of section 7, each before the code it governs | recommended | folding it into GPU-DESIGN and TOOLING |
+| F16 the pointer's path | QMP `input-send-event` on the monitor the app attached through; the launcher binds the tablet to `gpu0` (4.2) | aux, 2026-11-12, under the 2026-09-01 authorization | the display connection's `SetAbsPosition` and `RelMotion` (a console has one mode); binding the tablet and nothing else; HMP `mouse_set` at each capture (UTM) |
+| F17 capturing the pointer | the person's chord, Control-Command-G, now; a surface's own request once the guest can reach the app (4.2, 4.4) | aux, 2026-11-12, under the 2026-09-01 authorization | capture on a click or on full screen; a chord of modifiers alone; motion straight from the device |
 
 ## 12. What was not read, and what is UNVERIFIED
 
@@ -1193,7 +1248,10 @@ prompt for a self-updating ad-hoc app (M-7); the guest counter across host sleep
 whether `-display dbus,gl=on` has any further macOS-specific trap after `egl_init` (M-4);
 QEMU's exact deployment-target floor for v11.1 (`__builtin_available` guards suggest 12+;
 the policy doc gives no number); app size (M-12); whether UTM has sent its PCIe-window and
-WFI patches upstream (check qemu-devel before carrying them).
+WFI patches upstream (check qemu-devel before carrying them); that holding the Mac's
+pointer and putting it back ask no permission on the macOS this runs on (a person
+capturing once settles it: no test does it, because it would take the pointer from
+whoever is at the Mac).
 
 ## 13. Evidence index (short form; full citations inline above)
 
