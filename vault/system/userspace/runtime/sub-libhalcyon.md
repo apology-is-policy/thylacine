@@ -38,7 +38,7 @@ hazards: []
 abis: [abi-halcyon-palette]
 design: ["docs/HALCYON.md section 13", "docs/HALCYON-VISUAL.md", "docs/HALCYON-INSTRUMENT.md", "docs/AURORA-CONFIG.md"]
 created: 2026-09-05
-updated: 2026-11-11
+updated: 2026-11-12
 ---
 ## Ordered ownership codec and journal
 
@@ -656,6 +656,15 @@ itself. A division that reaches zero is never offered to `can`; a product past
 `u32` is skipped. The largest size a display is taken to report, 8192 a side,
 is 2048 at a quarter, which is why the factor stops at 4.
 
+**`own_pct(host, own, declared, mm)`** is the display scale, in `scale_pct`'s
+percent, of a screen of `own` pixels shown over the whole of a display of
+`host` pixels. A declared scale is the display's, so it is carried over by the
+ratio of the two widths; with none declared it is what the display's
+millimetres make of the screen's own pixels; with neither it is 100. A screen
+made at half its display's size is at half its display's scale. It is not held
+to the session's five values: [[sub-lictor]] rounds it to a whole scale for its
+trusted screen, and is its only caller.
+
 **`Follow`** is the timing. The device's driver counts the display events it
 takes; a compositor hands that count and a millisecond clock to `step` once a
 pass. A count that moved starts (or restarts) a quiet time of `QUIET_MS`, 150;
@@ -702,7 +711,9 @@ at 6) and stays there; `reset` starts it afresh. It never gives up. Its caller
 decides when there is no point in trying, which for the compositor is a dead
 device.
 
-**Tests.** 10 host tests: the fitted sizes for the Macs' full screens and for
+**Tests.** 11 host tests: a screen's scale each way it is known, at half and at
+twice its display's size, and with a display that has no width (`own_pct`);
+the fitted sizes for the Macs' full screens and for
 Lictor's limits, the order of the factors, and the refusals; an event followed
 at exactly the quiet time and once; a train; the wrap and a first count that is
 not zero; the askings made again, their waits and their end; an event held

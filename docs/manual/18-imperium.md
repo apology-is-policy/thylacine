@@ -8,6 +8,9 @@ enrolled Imperium key. That key is distinct from the ordinary login password.
 In Halcyon, secure attention temporarily takes over the display and keyboard.
 The Lex curiata dialog shows the requesting identity, process, capabilities and
 term. Returning from the dialog restores the workspace and its existing panes.
+The dialog is drawn for the display as it was when the system started: at twice
+the size on a display of 150% or more that has the room. It does not follow a
+later change of the display's size or scale.
 
 ## In Practice
 

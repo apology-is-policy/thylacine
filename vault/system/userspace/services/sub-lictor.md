@@ -35,6 +35,7 @@ code:
   - usr/lictor/src/typography.rs
   - usr/lictor/src/type_metrics.rs
   - usr/lictor/src/type.bin
+  - usr/lictor/src/type2.bin
   - usr/lictor/examples/render-preview.rs
   - tools/bake-lictor.py
   - tools/interactive/ls-graphical-sak.exp
@@ -174,10 +175,11 @@ stall design (`docs/GPU-DESIGN.md` 4.5.15) and is not made.
 
 **The trusted screen's size.** `render::fits` is the one test of a size the
 trusted scene can be drawn at: 800x720 at least and 4096x2160 pixels at most.
-`render()` asks it, and so does `Screen::size_for`, which gives the host's size
-if it fits, else that size over or times a whole number up to 4, the first
-that fits ([[sub-libhalcyon]]'s `display::fit_mode`), else 1024x768; a side is
-also at most 8192 (`MAX_DISPLAY_DIM`). So Lictor starts for any host: 640x400
+`render()` asks it, and so does `render::geometry_for` (the next section; it
+was `Screen::size_for`), which gives the host's size if it fits, else that size
+over or times a whole number up to 4, the first that fits ([[sub-libhalcyon]]'s
+`display::fit_mode`), else 1024x768; a side is also at most 8192
+(`MAX_DISPLAY_DIM`). So Lictor starts for any host: 640x400
 gives a screen of 1280x800, 5120x2880 one of 2560x1440. Nothing in the device
 scales a screen that is not the host's size: QEMU makes the console's surface
 the size of the scanout, and whatever shows it (a window, a VNC viewer, the
@@ -186,13 +188,14 @@ pixels shows the screen sharp, and it is chosen once, at Lictor's start, as the
 first that fits. Before this a host
 outside the limits failed `Screen::new`, and with it the probe of the driver
 that is also the keyboard and the pointer. The screen says so when its size is
-not the host's: `lictor: trusted screen WxH for a display of WxH`.
+not the host's or its scale is not one:
+`lictor: trusted screen WxH at Kx for a display of WxH`.
 
 **What it does not do.** The trusted screen is made once and keeps the size of
-the boot whatever the host's window does afterwards; after a followed resize
-it is shown as the frontend shows a scanout of another size. It knows no display
-scale: its layout is in pixels, so on a display the session runs at 200% its
-text is half the session's physical size. Both are in `docs/handoffs/050`.
+the boot whatever the host's window does afterwards; after a followed resize it
+is shown as the frontend shows a scanout of another size (`docs/handoffs/050`).
+Its scale, which it did not have when this section was written, is the next
+section's, and is the boot's too.
 
 **Tests.** Host: `render::tests::the_sizes_it_fits_are_its_layouts_floor_to_its_rasters_pixels`
 (each limit at and past its edge, a pixel count that does not wrap, `render()`
@@ -200,6 +203,84 @@ refusing a raster of exactly an unfit size), and the `Stats` record's layout
 with the count in it. Guest: `tools/interactive/ls-display-follow.exp`
 ([[sub-tapestryd]]) takes events through this path. The branch for the
 interrupt line is in no gate.
+
+## The trusted screen at its display's scale (2026-11-12)
+
+Written by aux while this dossier's keeper was away; `docs/handoffs/051` is the
+note left for her. The decisions are in `docs/GRAPHICAL-SAK-OWNERSHIP.md`, "The
+trusted screen's scale".
+
+**One layout, drawn at one or at two.** `render.rs` lays the screen out in
+layout pixels: the 48 px rail, the 660 px panel and every position in `draw`
+are in them, and nothing in the layout knows the scale. `Canvas` holds the
+raster in device pixels and `k`, the device pixels to a layout pixel. `rect`,
+`outline`, `text` and `fasces` take layout pixels and multiply; only `fill`
+takes device pixels. A rule or a border is `k` device pixels thick. A device
+row or column left over at the far edge of a raster with an odd side is the
+background's, and the rail is drawn one layout pixel wider than the screen so
+that it reaches the last column.
+
+**The type is baked at each scale.** `tools/bake-lictor.py` rasterises every
+face once for each scale (`SCALES = (1, 2)`) into `type.bin` (328151 bytes, the
+same bytes as before) and `type2.bin` (1310276 bytes). The set at two has the
+box, the baseline, the bearing room and the advance of the set at one, times
+two; only the outline is drawn finer. `typography::glyph(font, k, ch)` gives
+the advance and the box in layout pixels and a mask `k` times as wide and as
+high, and `width` measures with the advances, which are the same in both sets.
+So a word wraps at the same place and a line is on the same row at either
+scale, and the layout's host tests (the 127 capability subsets by nine states
+at 800x720) hold for both without being run twice. Nothing is resampled at run
+time. The emblem's two diagonals are the only other thing finer than a layout
+pixel: they step once a device row.
+
+**Which scale.** `render::scale_at(w, h, pct)` is the nearest whole scale to
+`pct` percent, so two from 150, taken only if the screen fits at it (`fits_at`:
+`w / k >= 800` and `h / k >= 720`), else one. A 1280x800 screen on a display at
+200% is drawn at one, because its layout would not fit at two. `pct` is the
+display's scale as the session reads it, by the session's rule
+([[sub-libhalcyon]]'s `scale`): the platform's `thylacine.scale` first, which
+`backend/screen.rs` `declared_scale` reads from `/hw/chosen/bootargs` at
+Lictor's start as the compositor does at its own, then the millimetres of the
+EDID Lictor reads at its start (`Gpu::edid_mm`), else 100.
+`libhalcyon::display::own_pct` carries that to the screen's own pixels: a
+screen made at half its display's size is at half its display's scale, and the
+frontend that shows it makes up the rest. `render::geometry_for(host, declared,
+mm, side, fallback)` is the size and the scale together, a pure function;
+`Screen::new` asks it and keeps both, and `paint` hands the scale to `render`.
+It is compiled for the backend and for tests, so libhalcyon is a dev-dependency
+of the crate as well as the backend's optional one. Nothing a client says is
+asked: not the compositor's scale, not a session's setting, not a surface's.
+
+**What it does not do.** The size and the scale are the boot's. A window
+resized afterwards, or moved to a display of another scale, leaves the trusted
+screen as it was made. A scale between one and two is drawn at the nearer whole
+one: at 125% the screen is four fifths of the session's size, at 150% a third
+larger than it. There is no scale of three. `declared_scale` says nothing when
+the command line is too long or the value is not a scale; the compositor reads
+the same line by the same rule and does say.
+
+**Tests.** Host, `render::tests`: `a_scale_is_one_the_screen_still_fits_at`
+(the rule and its edges), `at_two_it_is_the_same_screen_drawn_finer` (five
+screens: drawn at two with the type and the emblem as coarse as at one, every
+pixel of the screen at one is exactly four of its own; drawn at two in full, a
+layout pixel's mean is within 137 of 255 of the screen at one, the bound being
+the emblem's diagonals, and it is not the coarse screen),
+`type_at_two_lands_where_type_at_one_does` (each glyph of each face alone: over
+a face the ink's middle is within a twentieth of a layout pixel and its amount
+within 2%), `a_pixel_left_over_at_the_far_edges_is_drawn`,
+`a_scale_it_does_not_have_paints_nothing`, and
+`a_displays_screen_is_a_size_it_fits_at_the_scale_of_its_own_pixels`
+(`geometry_for`: a display it fits, one too small, one with too many pixels, an
+8K one whose half is still nearer two, the cap on a side, the fallback, and
+that every answer is one `render` takes). `typography::tests`:
+`the_sets_hold_every_glyph_and_nothing_else` and
+`a_glyph_at_two_is_the_glyph_at_one_drawn_finer` (the same advance and box;
+over a face the ink's middle within three hundredths of a layout pixel).
+[[sub-libhalcyon]] has `own_pct`'s. Not pixel for pixel between the two sets:
+the set at one is sampled four times a pixel each way, so a thin stem's middle
+is up to 0.44 of a pixel from the finer set's; the faces' means are the test.
+`backend/screen.rs` is in no host build: `declared_scale`, and the four values
+`Screen::new` hands `geometry_for`, are tested by a guest only.
 
 ## Purpose
 
@@ -465,8 +546,9 @@ The PID is authenticated model data; no executable label is fabricated from the
 HTML's sample request. Numeric UID and eligibility level remain visible.
 
 `typography.rs` consumes committed alpha masks and generated metrics from
-`tools/bake-lictor.py`: repository-owned IBM Plex Sans and Cornucopia, 97 glyphs
-in each of eight fixed faces, 328151 bytes total. No TTF parsing, theme read,
+`tools/bake-lictor.py`: repository-owned IBM Plex Sans and Cornucopia, 97
+glyphs in each of eight fixed faces, baked once for each scale the screen is
+drawn at: 328151 bytes at one, 1310276 at two. No TTF parsing, theme read,
 user atlas or GPU text renderer enters the trusted path. The host example
 `render-preview` uses the same rasterizer but is not an authorization channel.
 Normal OS builds require no Python font tooling.
@@ -475,7 +557,8 @@ Layout measures the actual baked glyph advances before painting. It chooses a
 compact spacing/type variant if the ordinary layout will not fit; long names
 and notices wrap rather than being ellipsized. Invalid semantics, mask counts,
 geometry or backdrop length are rejected before any destination pixel changes.
-The minimum remains 800x720. Host tests cover all 127 nonempty capability
+The minimum remains 800x720, in layout pixels. Host tests cover all 127
+nonempty capability
 subsets across nine verdict states with maximum-length principal, level,
 notice and lifetime values. This is bounded-layout evidence, separate from
 real display/input qualification.
@@ -670,8 +753,9 @@ Open after that review:
   request in every build. The verb is now refused (`BadField`) without the
   feature, like the four `Test*` verbs beside it; nothing in the tree sends it
   (the backend runs the selftest itself at init).
-- A display smaller than 800x720 refuses the whole seat at startup. There is no
-  reduced layout.
+- There is no layout under 800x720 layout pixels. A display smaller than that
+  is given a screen of twice or more its size (since 2026-11-11; before that it
+  refused the whole seat at startup), which the frontend shows scaled down.
 - The main loop polls at 100 Hz whether or not anything is happening, and the
   compositor asks for the seat state every pass. The idle cost is unmeasured.
 - Warden starts the compositor after the service signals READY and never reaps

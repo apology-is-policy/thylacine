@@ -4,6 +4,12 @@
 Run manually when changing the type specification. Normal OS builds consume
 the committed alpha masks, never a font parser or user-selected font. Uses the
 same nonzero-winding, 4x supersampling rasterizer as Cornucopia.
+
+Writes one set of masks for each scale in SCALES (usr/lictor/src/type.bin at
+one, typeN.bin at N; `*.bin` is ignored by git, so a new set is added with
+`git add -f`) and the metrics they share (type_metrics.rs). The output is the
+same bytes on every run: after a bake that changed nothing in the faces,
+`git status` shows nothing.
 """
 import importlib.util
 import math
