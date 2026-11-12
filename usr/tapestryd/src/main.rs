@@ -341,6 +341,17 @@ struct Tapestryd {
     mods: Mods,
 }
 
+impl Tapestryd {
+    /// Whether the seat has changed hands since `generation` was read at the
+    /// top of a pass: a trusted-path episode has begun, or begun and ended.
+    fn seat_moved(&self, generation: u64) -> Result<bool, Error> {
+        match self.comp.gpu.seat_state() {
+            Ok((now, phase)) => Ok(phase != 0 || now != generation),
+            Err(error) => { say!("tapestryd: seat state failed {:?}", error); Err(error) }
+        }
+    }
+}
+
 impl Driver for Tapestryd {
     fn probe(res: &BoundResources) -> Result<Self, Error> {
         say!(
@@ -573,6 +584,16 @@ impl Driver for Tapestryd {
                     self.comp.key_event(ev.code, ev.value, rune, mask);
                 }
             }
+            // An event handled above can have waited out a whole trusted-path
+            // episode inside a request the seat's owner parks until it ends
+            // (a chord's reconcile, a retirement). What the pointer did
+            // across an episode is no program's: before a pointer device is
+            // drained the seat is asked again, and a seat that has moved is
+            // the top of the loop's to deal with.
+            if input_seen && self.seat_moved(seat_generation)? {
+                last_input = Instant::now();
+                continue;
+            }
 
             // (1b) Tablet drain (G-7c) -> the under-pointer surface. ABS
             // records update the raw position; the EV_SYN frame boundary
@@ -628,6 +649,12 @@ impl Driver for Tapestryd {
                 // A trailing ABS run without its SYN (ring-boundary split):
                 // commit anyway -- the next drain's SYN is a no-op then.
                 commit(&mut self.comp, self.tab_ax, self.tab_ay, &mut moved);
+            }
+            // The same after the tablet's events: a place or a press can wait
+            // in such a request too.
+            if input_seen && self.seat_moved(seat_generation)? {
+                last_input = Instant::now();
+                continue;
             }
 
             // (1c) The mouse drain: REL_X/REL_Y deltas accumulate per SYN

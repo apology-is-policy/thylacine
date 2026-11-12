@@ -46,6 +46,7 @@ code:
   - tools/interactive/ls-graphical-sak-start.exp
   - tools/interactive/ls-graphical-sak-refused.exp
   - tools/interactive/ls-graphical-sak-unread.exp
+  - tools/interactive/ls-graphical-sak-scale.exp
   - usr/lictor/src/rpc_client.rs
   - usr/lictor/src/skein.rs
   - usr/lictor/src/wire.rs
@@ -190,6 +191,7 @@ outside the limits failed `Screen::new`, and with it the probe of the driver
 that is also the keyboard and the pointer. The screen says so when its size is
 not the host's or its scale is not one:
 `lictor: trusted screen WxH at Kx for a display of WxH`.
+`tools/interactive/ls-graphical-sak-scale.exp` reads that line, word for word.
 
 **What it does not do.** The trusted screen is made once and keeps the size of
 the boot whatever the host's window does afterwards; after a followed resize it
@@ -222,7 +224,11 @@ that it reaches the last column.
 
 **The type is baked at each scale.** `tools/bake-lictor.py` rasterises every
 face once for each scale (`SCALES = (1, 2)`) into `type.bin` (328151 bytes, the
-same bytes as before) and `type2.bin` (1310276 bytes). The set at two has the
+same bytes as before) and `type2.bin` (1310276 bytes). `type_metrics.rs`
+carries each set's hash as the baker wrote it (FNV-1a) and a host test
+recomputes it, so a set that is not the one its metrics were baked with fails:
+a glyph changed in the file, or a set left uncommitted after a bake
+(`.gitignore` exempts both from its `*.bin`). The set at two has the
 box, the baseline, the bearing room and the advance of the set at one, times
 two; only the outline is drawn finer. `typography::glyph(font, k, ch)` gives
 the advance and the box in layout pixels and a mask `k` times as wide and as
@@ -230,8 +236,11 @@ high, and `width` measures with the advances, which are the same in both sets.
 So a word wraps at the same place and a line is on the same row at either
 scale, and the layout's host tests (the 127 capability subsets by nine states
 at 800x720) hold for both without being run twice. Nothing is resampled at run
-time. The emblem's two diagonals are the only other thing finer than a layout
-pixel: they step once a device row.
+time: `text` reads the mask of the raster's own scale, a mask pixel for a
+device pixel. The emblem's two diagonals are the only other thing finer than a
+layout pixel: they step once a device row. (The layout's own test draws both as
+they are at one, each pixel doubled. Its switch, `coarse` on `Canvas` and on
+`draw`, is compiled for tests only; no build of the service has it.)
 
 **Which scale.** `render::scale_at(w, h, pct)` is the nearest whole scale to
 `pct` percent, so two from 150, taken only if the screen fits at it (`fits_at`:
@@ -241,7 +250,13 @@ display's scale as the session reads it, by the session's rule
 ([[sub-libhalcyon]]'s `scale`): the platform's `thylacine.scale` first, which
 `backend/screen.rs` `declared_scale` reads from `/hw/chosen/bootargs` at
 Lictor's start as the compositor does at its own, then the millimetres of the
-EDID Lictor reads at its start (`Gpu::edid_mm`), else 100.
+EDID Lictor reads at its start (`Gpu::edid_mm`), else 100. From millimetres
+the percent is the session's reading, the pixels to the inch in quarters of the
+reference rounded half up, so a display at 1.375 of the reference (132 to the
+inch) reads as 150 and is drawn at two: on that path two begins at 137.5
+percent. An EDID whose size is an aspect ratio written where the size goes
+says nothing ([[sub-libhalcyon]]'s `parse_edid_mm`), so such a display is at
+one unless the platform declares.
 `libhalcyon::display::own_pct` carries that to the screen's own pixels: a
 screen made at half its display's size is at half its display's scale, and the
 frontend that shows it makes up the rest. `render::geometry_for(host, declared,
@@ -263,24 +278,34 @@ the same line by the same rule and does say.
 (the rule and its edges), `at_two_it_is_the_same_screen_drawn_finer` (five
 screens: drawn at two with the type and the emblem as coarse as at one, every
 pixel of the screen at one is exactly four of its own; drawn at two in full, a
-layout pixel's mean is within 137 of 255 of the screen at one, the bound being
-the emblem's diagonals, and it is not the coarse screen),
+layout pixel's mean is within 48 of 255 of the screen at one where there is
+type (measured 46 to 48; a set a device pixel out is about 100) and within 137
+in the emblem's rectangle, which the test finds as `draw` does; and neither is
+what it is at one, doubled),
 `type_at_two_lands_where_type_at_one_does` (each glyph of each face alone: over
 a face the ink's middle is within a twentieth of a layout pixel and its amount
 within 2%), `a_pixel_left_over_at_the_far_edges_is_drawn`,
+`type_past_the_rasters_edge_is_cut_off`,
 `a_scale_it_does_not_have_paints_nothing`, and
 `a_displays_screen_is_a_size_it_fits_at_the_scale_of_its_own_pixels`
 (`geometry_for`: a display it fits, one too small, one with too many pixels, an
-8K one whose half is still nearer two, the cap on a side, the fallback, and
-that every answer is one `render` takes). `typography::tests`:
-`the_sets_hold_every_glyph_and_nothing_else` and
+8K one whose half the session's rule still reads as 150, the cap on a side,
+the fallback, and that every answer is one `render` takes). `typography::tests`:
+`the_sets_hold_every_glyph_and_nothing_else` (the lengths, and each set's
+hash) and
 `a_glyph_at_two_is_the_glyph_at_one_drawn_finer` (the same advance and box;
 over a face the ink's middle within three hundredths of a layout pixel).
 [[sub-libhalcyon]] has `own_pct`'s. Not pixel for pixel between the two sets:
 the set at one is sampled four times a pixel each way, so a thin stem's middle
 is up to 0.44 of a pixel from the finer set's; the faces' means are the test.
-`backend/screen.rs` is in no host build: `declared_scale`, and the four values
-`Screen::new` hands `geometry_for`, are tested by a guest only.
+`backend/screen.rs` is in no host build: `declared_scale`, the four values
+`Screen::new` hands `geometry_for`, and `paint` handing the scale to `render`
+are a guest's to show. `tools/interactive/ls-graphical-sak-scale.exp` is that
+test: a 2560x1600 display declared at 200, the line Lictor says of its screen,
+and the rail's rule read off a dump of the screen (device rows 94 and 95 at
+two; row 47 at one). The fallback's size is checked where it is compiled
+(`const _` in `screen.rs`). The baker itself is checked by baking again and
+finding nothing changed, which needs fontTools and is no gate's step.
 
 ## Purpose
 

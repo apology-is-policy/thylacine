@@ -10,3 +10,6 @@ fn metrics(font: Font) -> ([usize; SCALES], usize, usize) { match font {
     Font::Rail => ([291097, 1162642], 10, 16),
     Font::Mono => ([306714, 1224819], 11, 20),
 } }
+// FNV-1a 64 of each set, as baked.
+#[cfg(test)]
+const HASHES: [u64; SCALES] = [0x2c3810edea6f9709, 0x6d31601972d80a38];

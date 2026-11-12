@@ -21,16 +21,18 @@ physical size.
   gained `k`; `rect`, `outline`, `text` and `fasces` multiply, and `fill` is the one thing in
   device pixels. `render(pixels, width, height, k, backdrop, model, masked)` has the new
   argument. `fits_at(w, h, k)` is `fits` and the floor in layout pixels; `scale_at(w, h, pct)`
-  is the nearest whole scale the screen fits at, two from 150 percent. `draw` has a second
-  scale, `fine`, which is `k` in every build: the layout's own test sets it to one, to draw the
-  screen at two with coarse type and compare it with the screen at one exactly.
+  is the nearest whole scale the screen fits at, two from 150 percent. The layout's own test
+  draws the screen at two with the type as it is at one, doubled, and compares it with the
+  screen at one exactly; its switch (`coarse`, on `Canvas` and on `draw`) is compiled for tests
+  only, and no build of the service has it.
 - **`typography.rs`, `type2.bin`, `tools/bake-lictor.py`: the type is baked at both scales.**
   The set at two has the box, the baseline, the bearing room and the advance of the set at one,
   times two, and only the outline is finer. So `width` and `wrap` did not change, the words are
   on the same lines, and your layout tests hold for both scales as they stand. `type.bin` is the
   same bytes as before (the unchanged baker reproduced it first). `glyph(font, k, ch)` has the
-  new argument. The baker ran in a private Python environment with fontTools 4.68.0 from PyPI,
-  outside the tree.
+  new argument. `type_metrics.rs` carries each set's hash and a test recomputes it; `.gitignore`
+  exempts both sets. The baker ran in a private Python environment with fontTools 4.68.0 from
+  PyPI, outside the tree.
 - **`render::geometry_for` replaces `Screen::size_for`.** It gives the screen's size (as 050
   described) and its scale together, and it is pure and host-tested: compiled for the backend
   and for tests, which made libhalcyon a dev-dependency of the crate as well as the backend's
@@ -58,8 +60,13 @@ says; two from 150 percent.
   the backing and the resource again outside an episode, and `Trusted raster memory` in the same
   document says why that is a decision and not a patch.
 - A scale between one and two is drawn at the nearer whole one. There is no scale of three.
-- `backend/screen.rs` is in no host build, so `declared_scale` and the four values `Screen::new`
-  hands `geometry_for` are tested by a guest only.
+- `backend/screen.rs` is in no host build, so `declared_scale`, the four values `Screen::new`
+  hands `geometry_for` and `paint` handing the scale to `render` are a guest's to show:
+  `tools/interactive/ls-graphical-sak-scale.exp`.
+- From a display's millimetres two begins at a true 137.5 percent, because the session's rule
+  rounds to quarters before this one rounds to a whole scale. An EDID that has its aspect ratio
+  where its size goes is read as saying nothing (`libhalcyon::scale::parse_edid_mm`, changed
+  with this), so such a display is drawn at one unless the platform declares.
 
 ## Where the evidence is
 
@@ -68,3 +75,10 @@ mechanism, the tests by name and what they do not show; `docs/JOURNAL.md` has th
 two tests that failed first and what they taught (the set at one is sampled four times a pixel
 each way, so the two sets agree in their faces' means and not pixel for pixel).
 
+The change had an audit round (Opus 5.5 reviewing; no P0, P1 or P2, seven P3). What it changed
+is in this note as it now reads: the second scale `draw` used to take became the test-only
+switch, the full-screen test got a bound of its own for the type, the sets got their hashes, and
+the guest scenario was written. One finding is about the session and not this screen, and is
+open: tapestryd does not carry a declared scale through a mode it fitted to half its host, so at
+such a size the session is at twice the scale this screen is drawn at, and this screen's reading
+is the right one.

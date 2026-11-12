@@ -1,0 +1,103 @@
+#!/usr/bin/expect -f
+# ls-graphical-sak-scale -- the trusted screen is drawn at its display's scale.
+#
+# THYLACINE_HIDPI=1 gives the device a 2560x1600 display and puts
+# thylacine.scale=200 on the kernel's command line. Lictor reads the declaration
+# at its start and draws its screen at two device pixels to a layout pixel
+# (GRAPHICAL-SAK-OWNERSHIP.md, "The trusted screen's scale"). The code that
+# reads the command line, and the code that hands the scale to the renderer, are
+# in no host build, so this is their test. Two things are read:
+#
+#   the line Lictor says of its screen. It is said before the login prompt, so
+#   it is looked for in the transcript;
+#
+#   the screen. Its rail is 48 layout rows with a rule on the last. At two the
+#   rule is device rows 94 and 95 and device rows 46 and 47 are the rail's own
+#   colour; at one the rule is row 47 and rows 94 and 95 are the background. A
+#   screen drawn at one under a line that says two fails here and nowhere else.
+#
+# Requires HALCYON_SESSION=y: the seat runs under the session compositor.
+set ::env(THYLACINE_ACCEL) [expr {[info exists ::env(LS_CI_GFX_ACCEL)] ? $::env(LS_CI_GFX_ACCEL) : "hvf"}]
+set ::env(THYLACINE_SERIAL_SAK) 0
+set ::env(THYLACINE_HIDPI) 1
+# Whatever the caller has declared or sized, this display is the one above.
+foreach v {THYLACINE_SCALE THYLACINE_GPU_RES} { catch {unset ::env($v)} }
+source [file join [file dirname [info script]] lib.exp]
+set repo $lc_repo
+set qmp [lc_qmp_sock]
+
+lc_require_image {SESSION}
+
+set transcript /tmp/ls-graphical-sak-scale-[pid].log
+set shot /tmp/ls-graphical-sak-scale-[pid].png
+catch {file delete -force $transcript $shot}
+log_file -a $transcript
+
+set RAIL {11 14 14}
+set RULE {75 81 77}
+
+# How many pixels of a rect of the dump are not the colour, and the rect's commonest.
+proc off {x0 y0 x1 y1 colour what} {
+    global repo shot
+    if {[catch {exec python3 $repo/tools/interactive/gfx_region.py $shot $x0 $y0 $x1 $y1 {*}$colour} out]} {
+        lc_fail "$what: gfx_region.py: $out"
+    }
+    lassign $out n total r g b
+    if {$n != 0} {
+        lc_fail "$what: $n of $total pixels are not [join $colour ,] (the commonest there is $r,$g,$b)"
+    }
+    lc_step "$what: all $total pixels"
+}
+
+lc_boot
+set timeout $lc_boot_timeout
+expect {
+    -ex "Thylacine login: " {}
+    -re {EXTINCTION:} { lc_extinction_fail "boot" }
+    timeout { lc_fail "no login" }
+    eof { lc_fail "EOF before login" }
+}
+lc_raw_send "michael\r" "login user"
+expect {
+    -ex "password: " {}
+    timeout { lc_fail "no password prompt" }
+    eof { lc_fail "EOF before password" }
+}
+lc_raw_send "correct-horse-battery-staple-v1\r" "login password"
+set timeout 60
+expect {
+    -re {halcyond: session up 2560x1600 px} { lc_step "the session is up on the 2560x1600 display" }
+    -re {halcyond: session up [^\r\n]*} { lc_fail "the display is not the one this scenario asks for: $expect_out(0,string)" }
+    -re {halcyond: FAIL session[^\r\n]*} { lc_fail "the session failed: $expect_out(0,string)" }
+    -ex "Thylacine textual shell" { lc_fail "login gave a shell on an image whose bake record says SESSION" }
+    -re {EXTINCTION:} { lc_extinction_fail "session" }
+    timeout { lc_fail "no graphical session" }
+    eof { lc_fail "EOF at session start" }
+}
+
+# The line, exactly: the size, the scale, and the display it was made for.
+# Closing the transcript writes out what expect still holds of it.
+set want "lictor: trusted screen 2560x1600 at 2x for a display of 2560x1600"
+log_file
+if {[catch {exec grep -a -c -F -- $want $transcript} said]} { set said 0 }
+log_file -a $transcript
+if {$said != 1} {
+    if {[catch {exec grep -a -o {lictor: trusted screen[ -~]*} $transcript} other]} { set other "nothing" }
+    lc_fail "Lictor did not say, once, that its screen is at two (said: $other)"
+}
+lc_pass "Lictor read the declared scale: $want"
+
+# Nothing is waiting, so the screen is the rail and one panel.
+after 6000
+if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -k "ctrl+alt+f10"} e]} { lc_fail $e }
+after 3000
+if {[catch {exec $repo/tools/screendump.sh -s $qmp $shot} e]} { lc_fail "screendump: $e" }
+off 0 94 2560 96 $RULE "the rail's rule is device rows 94 and 95, the whole width"
+off 0 46 40 48 $RAIL "device rows 46 and 47 are the rail's, left of its type"
+lc_pass "the trusted screen is drawn at two device pixels to a layout pixel"
+
+if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -k "ret"} e]} { lc_fail $e }
+lc_expect "corvus: imperium: SAK with nothing pending" "the empty trusted episode ended"
+catch {file delete -force $transcript $shot}
+lc_pass "graphical SAK at the display's scale: the line, the rule, the return"
+lc_quit

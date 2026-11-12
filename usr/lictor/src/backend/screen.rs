@@ -7,6 +7,8 @@ use libthyla_rs::{handle::Rights, hardware::Dma, T_PROT_READ, T_PROT_WRITE};
 use crate::{model::Model, render, skein::Seg};
 use super::gpu::{Gpu, dsb_sy};
 const RESOURCE: u32 = crate::objects::TRUSTED_ID_START + 1;
+// The size taken where no other can be made is one the screen is drawn at.
+const _: () = assert!(render::fits(super::gpu::DEFAULT_DISPLAY_W, super::gpu::DEFAULT_DISPLAY_H));
 const CHUNK: usize = 1024 * 1024;
 const BASE: u64 = 0x0400_0000;
 

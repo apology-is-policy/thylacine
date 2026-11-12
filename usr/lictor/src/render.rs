@@ -14,7 +14,7 @@ pub const MIN_HEIGHT: u32 = 720;
 const MAX_PIXELS: usize = 4096 * 2160;
 /// The sizes this screen can be drawn at: no smaller than its layout needs,
 /// and no more pixels than its raster holds.
-pub fn fits(width: u32, height: u32) -> bool {
+pub const fn fits(width: u32, height: u32) -> bool {
     width >= MIN_WIDTH && height >= MIN_HEIGHT
         && width as u64 * height as u64 <= MAX_PIXELS as u64
 }
@@ -61,10 +61,14 @@ const CAP_TEXT: &[(u64, &str, &str)] = &[
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RenderError { Geometry, Content }
 // `w` and `h` are the raster's, in device pixels. `fill` takes device pixels;
-// everything else takes layout pixels, `k` device pixels each. `fine` is the
-// scale of what is drawn finer than a layout pixel, the type and the emblem's
-// diagonals: `k`, except in a test of the layout, which draws them at one.
-struct Canvas<'a> { pixels: &'a mut [u32], w: usize, h: usize, k: usize, fine: usize }
+// everything else takes layout pixels, `k` device pixels each. The type and
+// the emblem's diagonals are drawn at the raster's own scale. `coarse` is in
+// no build but a test's: it draws them as they are at one, each of their
+// pixels `k` square, so that a test of the layout can compare exactly.
+struct Canvas<'a> {
+    pixels: &'a mut [u32], w: usize, h: usize, k: usize,
+    #[cfg(test)] coarse: bool,
+}
 impl Canvas<'_> {
     fn fill(&mut self, x: usize, y: usize, w: usize, h: usize, color: u32) {
         for yy in y..y.saturating_add(h).min(self.h) {
@@ -80,16 +84,22 @@ impl Canvas<'_> {
         self.rect(x, y, 1, h, color); self.rect(x + w - 1, y, 1, h, color);
     }
     fn text(&mut self, mut x: usize, y: usize, text: &str, font: Font, color: u32, tracking: usize) {
-        let (k, fine) = (self.k, self.fine);
+        let k = self.k;
+        let set = k;
+        #[cfg(test)]
+        let set = if self.coarse { 1 } else { set };
         for ch in text.chars() {
-            let (advance, cw, ch, alpha) = typography::glyph(font, fine, ch);
+            let (advance, cw, ch, alpha) = typography::glyph(font, set, ch);
             for yy in 0..ch * k {
                 let py = y * k + yy;
                 if py >= self.h { continue; }
                 for xx in 0..cw * k {
                     let px = (x * k + xx).saturating_sub(2 * k); // baked bearing room
                     if px >= self.w { continue; }
-                    let a = alpha[(yy * fine / k) * cw * fine + xx * fine / k] as u32;
+                    let at = yy * cw * k + xx;
+                    #[cfg(test)]
+                    let at = if self.coarse { (yy / k) * cw + xx / k } else { at };
+                    let a = alpha[at] as u32;
                     if a == 0 { continue; }
                     let at = py * self.w + px;
                     let old = self.pixels[at];
@@ -111,10 +121,12 @@ impl Canvas<'_> {
             self.rect(x + dx, y + top, 2, height, AMBER);
         }
         for dy in [15, 38] { self.rect(x + 3, y + dy, 27, 2, AMBER); }
-        // The two diagonals step once a row of the type's scale, so they are as fine as it is.
-        let (k, coarse) = (self.k, self.k / self.fine);
+        // The two diagonals step once a device row, so they are as fine as the type is.
+        let k = self.k;
         for dy in 0..26 * k {
-            let over = (dy / coarse) * 22 / 25 * coarse;
+            let over = dy * 22 / 25;
+            #[cfg(test)]
+            let over = if self.coarse { (dy / k) * 22 / 25 * k } else { over };
             self.fill((x + 5) * k + over, (y + 14) * k + dy, 2 * k, 1, AMBER);
             self.fill((x + 27) * k - over, (y + 14) * k + dy, 2 * k, 1, AMBER);
         }
@@ -199,10 +211,10 @@ impl Layout {
 /// `width` and `height` are the raster's, and `k` its pixels to a layout
 /// pixel (`fits_at`). What is drawn is the same layout at every `k`.
 pub fn render(pixels: &mut [u32], width: u32, height: u32, k: usize, backdrop: Option<&[u32]>, model: &Model, masked: usize) -> Result<(), RenderError> {
-    draw(pixels, width, height, k, k, backdrop, model, masked)
+    draw(pixels, width, height, k, #[cfg(test)] false, backdrop, model, masked)
 }
 #[allow(clippy::too_many_arguments)]
-fn draw(pixels: &mut [u32], width: u32, height: u32, k: usize, fine: usize, backdrop: Option<&[u32]>, model: &Model, masked: usize) -> Result<(), RenderError> {
+fn draw(pixels: &mut [u32], width: u32, height: u32, k: usize, #[cfg(test)] coarse: bool, backdrop: Option<&[u32]>, model: &Model, masked: usize) -> Result<(), RenderError> {
     let n = (width as usize).checked_mul(height as usize).ok_or(RenderError::Geometry)?;
     if !fits_at(width, height, k) || pixels.len() != n { return Err(RenderError::Geometry); }
     // From here `w` and `h` are in layout pixels. A device row or column
@@ -221,7 +233,7 @@ fn draw(pixels: &mut [u32], width: u32, height: u32, k: usize, fine: usize, back
             for shift in [0, 8, 16] { *out |= (((old >> shift) & 255) * 26 / 100) << shift; }
         }
     } else { pixels.fill(BG); }
-    let mut c = Canvas { pixels, w: width as usize, h: height as usize, k, fine };
+    let mut c = Canvas { pixels, w: width as usize, h: height as usize, k, #[cfg(test)] coarse };
     // One layout pixel wider than the screen: the rail has no gap at an odd width.
     c.rect(0, 0, w + 1, 48, 0xff0b0e0e); c.rect(0, 47, w + 1, 1, 0xff4b514d);
     c.text(28, 15, "CORVUS   /   LEX CURIATA", Font::Rail, AMBER, 1);
@@ -415,7 +427,10 @@ mod tests {
         assert_eq!(made((5120, 2880), Some(200), None), ((2560, 1440), 1));
         assert_eq!(made((5120, 2880), None, Some((597, 336))), ((2560, 1440), 1));
         // Unless half of it is still fine: 7680 pixels across 708 mm are 275
-        // to the inch, and the 3840 of the screen 138, which is nearer two.
+        // to the inch, and the 3840 of the screen 138. That is 1.44 of the
+        // reference, nearer one; the session's rule reads it as 150 percent
+        // (the nearest quarter), and 150 is drawn at two. So from a display's
+        // millimetres two begins at 137.5 percent, 132 to the inch.
         assert_eq!(made((7680, 4320), None, Some((708, 398))), ((3840, 2160), 2));
         // No side is longer than a display is taken to report, though the
         // pixels would fit; and where no whole factor gives a size, the fallback.
@@ -424,7 +439,7 @@ mod tests {
         assert_eq!(made((0, 0), Some(200), None), ((1024, 768), 1));
         // Every answer is one render takes.
         for host in [(640, 400), (800, 720), (1280, 800), (2560, 1600), (3456, 2234), (5120, 2880), (7680, 4320), (8192, 8192), (1, 1), (0, 0)] {
-            for declared in [None, Some(100), Some(150), Some(200)] {
+            for declared in [None, Some(100), Some(125), Some(150), Some(175), Some(200)] {
                 for mm in [None, Some((100, 100)), Some((339, 212)), Some((1, 1))] {
                     let ((w, h), k) = made(host, declared, mm);
                     assert!(fits_at(w, h, k), "{host:?} {declared:?} {mm:?}: {w}x{h} at {k}");
@@ -448,33 +463,61 @@ mod tests {
             // The layout: at two, with the type and the emblem as coarse as
             // at one, every pixel of the screen at one is four of its own.
             let mut coarse = alloc::vec![0; 4 * w * h];
-            assert_eq!(draw(&mut coarse, 2 * w as u32, 2 * h as u32, 2, 1, None, &m, masked), Ok(()));
+            assert_eq!(draw(&mut coarse, 2 * w as u32, 2 * h as u32, 2, true, None, &m, masked), Ok(()));
             for y in 0..2 * h {
                 for x in 0..2 * w {
                     assert_eq!(coarse[y * 2 * w + x], one[(y / 2) * w + x / 2], "{name}: device pixel {x},{y}");
                 }
             }
-            // The type: drawn finer it is the same ink, a pixel of it no
-            // further off than the coarser sampling of the set at one puts it
-            // (typography's own test), and it is not the coarse type.
+            // What is drawn finer, the type and the emblem's diagonals: a
+            // layout pixel of the finer screen, the mean of its four, beside
+            // the same pixel of the screen at one. The emblem is where `draw`
+            // puts it, and is judged apart from the type.
             let fine = drawn(2 * w, 2 * h, 2, &m, masked);
-            let mut worst = 0;
+            let mut layout = Layout::new(&m, false);
+            if layout.ph > h - 80 { layout = Layout::new(&m, true); }
+            let (ex, ey) = ((w - 660) / 2 + 32, 56 + (h - 56 - layout.ph) / 2 + if layout.dense { 13 } else { 25 });
+            let emblem = |x: usize, y: usize| (ex..ex + 42).contains(&x) && (ey..ey + 54).contains(&y);
+            let (mut of_type, mut of_emblem) = (0, 0);
             for y in 0..h {
                 for x in 0..w {
                     for shift in [0, 8, 16] {
                         let four: u32 = [(0, 0), (1, 0), (0, 1), (1, 1)].iter()
                             .map(|(dx, dy)| (fine[(2 * y + dy) * 2 * w + 2 * x + dx] >> shift) & 255).sum();
-                        worst = worst.max(((four as i32 + 2) / 4 - ((one[y * w + x] >> shift) & 255) as i32).abs());
+                        let off = ((four as i32 + 2) / 4 - ((one[y * w + x] >> shift) & 255) as i32).abs();
+                        if emblem(x, y) { of_emblem = of_emblem.max(off); } else { of_type = of_type.max(off); }
                     }
                 }
             }
             // The emblem's diagonals are stepped a device row at a time at
             // two, and of a layout pixel's two rows one can be a device pixel
             // ahead of the coarse step and the other two: three quarters of
-            // the emblem's colour against the panel's, 137. Type is nearer.
-            assert!(worst <= 137, "{name}: a layout pixel of the finer screen is {worst} of 255 from the screen at one");
-            let differ = fine.iter().zip(&coarse).filter(|(a, b)| a != b).count();
-            assert!(differ > 500, "{name}: the type at two is the type at one, doubled ({differ} pixels differ)");
+            // the emblem's colour against the panel's, 137.
+            assert!(of_emblem <= 137, "{name}: a layout pixel of the finer emblem is {of_emblem} of 255 from the emblem at one");
+            // The type is nearer: the two sets are sampled differently, and
+            // that is at most 48 (measured: 46 to 48 over these five). A set
+            // at two a device pixel out is a stem's edge half out, about 100.
+            assert!(of_type <= 48, "{name}: a layout pixel of the finer type is {of_type} of 255 from the type at one");
+            // And neither is what it is at one, doubled. (The diagonals at
+            // two and the doubled ones differ in 92 device pixels, counted.)
+            let differ = |inside: bool| (0..4 * w * h)
+                .filter(|&at| emblem(at % (2 * w) / 2, at / (2 * w) / 2) == inside && fine[at] != coarse[at]).count();
+            assert!(differ(false) > 500, "{name}: the type at two is the type at one, doubled ({} pixels differ)", differ(false));
+            assert_eq!(differ(true), 92, "{name}: the emblem's diagonals at two against those at one, doubled");
+        }
+    }
+    #[test]
+    fn type_past_the_rasters_edge_is_cut_off() {
+        // A glyph whose box hangs over the right and the lower edge: what is
+        // inside is drawn, nothing comes round to the next row's start, and
+        // no pixel past the last row is asked for.
+        for k in 1..=MAX_SCALE {
+            let (w, h) = (64 * k, 64 * k);
+            let mut pixels = alloc::vec![0u32; w * h];
+            Canvas { pixels: &mut pixels, w, h, k, coarse: false }.text(50, 50, "W", Font::Title, 0xffffffff, 0);
+            let inked = |x0: usize, x1: usize| (0..h).any(|y| (x0..x1).any(|x| pixels[y * w + x] != 0));
+            assert!(inked(48 * k, w), "at {k}: the part of the glyph inside the raster is drawn");
+            assert!(!inked(0, 48 * k), "at {k}: ink left of the glyph's box");
         }
     }
     #[test]
@@ -493,7 +536,7 @@ mod tests {
                 for k in 1..=2 {
                     let (w, h) = (64 * k, 64 * k);
                     let mut pixels = alloc::vec![0u32; w * h];
-                    Canvas { pixels: &mut pixels, w, h, k, fine: k }.text(7, 9, &glyph, font, 0xffffffff, 0);
+                    Canvas { pixels: &mut pixels, w, h, k, coarse: false }.text(7, 9, &glyph, font, 0xffffffff, 0);
                     let (mut m, mut x, mut y) = (0.0f64, 0.0f64, 0.0f64);
                     for (px, p) in pixels.iter().enumerate() {
                         let a = (p & 255) as f64;

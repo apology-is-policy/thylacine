@@ -1745,10 +1745,10 @@ impl GuestView {
     //
     // Only an event of the last few seconds before the change is one: nothing waits in a queue
     // for longer. The bound is for the premise this stands on, that an event is stamped on the
-    // clock `uptime` reads, which no test can be handed a real event to show. Were it false,
-    // every event would be far older or newer than a change of hands and none would be stale,
-    // which is how it was before this rule; without the bound, every move after a capture could
-    // be taken for an old one.
+    // clock `uptime` reads, which no test can be handed a real event to show. Were the events'
+    // clock ahead of it, none would be stale, which is how it was before this rule. Were it
+    // behind by L seconds, live events would be taken for old ones for min(L, bound) seconds,
+    // ending L seconds after each change of hands: the bound keeps that from being every move.
     fn stale(&self, ev: &NSEvent) -> bool {
         let (made, turned) = (ev.timestamp(), self.ivars().turned.get());
         made < turned && made > turned - STALE_WITHIN

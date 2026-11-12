@@ -93,7 +93,12 @@ processes that paint chrome and glyphs, and what the bakes need.
   detailed timing descriptor (bytes 54.., image size = byte 66 | (byte
   68 >> 4) << 8 by byte 67 | (byte 68 & 0xF) << 8), falling back to the
   basic parameters' centimetres (bytes 21, 22) x 10. A missing feature,
-  a refused command, a size of 0 or over 2000 mm on either axis, or a
+  a refused command, a size of 0 or over 2000 mm on either axis, an
+  aspect ratio written where the size goes (16:9 or 16:10 as centimetres,
+  millimetres or tenths of them; added 2026-11-12 under the operator's
+  standing authorization of 2026-09-01 -- there are displays that do
+  this, the "size" reads as hundreds of DPI, and mutter's
+  `calculate_scale` gives such a monitor 1.0), or a
   checksum that fails is a GARBAGE EDID and yields 100 -- fail-safe to
   the 1.0 the whole tree is built and gated at, said once on the boot
   line with the raw millimetres.

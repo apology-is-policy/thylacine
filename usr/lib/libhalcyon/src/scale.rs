@@ -82,10 +82,22 @@ pub fn scale_pct(px_w: u32, px_h: u32, mm_w: u32, mm_h: u32) -> u16 {
 /// (2 m: no monitor; a zero is garbage too).
 pub const EDID_MM_MAX: u32 = 2000;
 
+/// Whether an EDID's size is an aspect ratio written where the size goes:
+/// 16:9 or 16:10 as centimetres, as millimetres, or as tenths of them. There
+/// are displays that do this, and such a size under any mode is hundreds of
+/// pixels to the inch: the most there is, for a display of a hundred. (EDID
+/// 1.4's own way to give a ratio, one of the two centimetre bytes zero, is
+/// no size already.) A display of exactly one of these sizes is read as one
+/// that does not say; a platform that knows better declares its scale.
+fn aspect_as_size(mm_w: u32, mm_h: u32) -> bool {
+    matches!((mm_w, mm_h), (16, 9) | (16, 10) | (160, 90) | (160, 100) | (1600, 900) | (1600, 1000))
+}
+
 /// The display's image size in millimetres from a base EDID block
 /// (untrusted device input; VESA E-EDID 1.4): None unless the block is 128
 /// bytes with the fixed header, a valid checksum, and a size in
-/// 1..=EDID_MM_MAX on both axes. The first detailed timing descriptor
+/// 1..=EDID_MM_MAX on both axes that is not an aspect ratio
+/// (`aspect_as_size`). The first detailed timing descriptor
 /// (bytes 54..72, a timing iff its pixel clock is non-zero) carries the
 /// size in mm; without one the basic parameters' centimetres (bytes 21,
 /// 22) x 10 stand in.
@@ -111,7 +123,7 @@ pub fn parse_edid_mm(edid: &[u8]) -> Option<(u32, u32)> {
         (b[21] as u32 * 10, b[22] as u32 * 10)
     };
     let ok = |v: u32| (1..=EDID_MM_MAX).contains(&v);
-    if ok(mm_w) && ok(mm_h) {
+    if ok(mm_w) && ok(mm_h) && !aspect_as_size(mm_w, mm_h) {
         Some((mm_w, mm_h))
     } else {
         None
@@ -262,6 +274,25 @@ mod tests {
         let mut long = [0u8; 256];
         long[..128].copy_from_slice(&edid((60, 34), Some((597, 336))));
         assert_eq!(parse_edid_mm(&long), Some((597, 336)));
+    }
+
+    #[test]
+    fn an_aspect_ratio_where_the_size_goes_is_no_size() {
+        // As the basic parameters' centimetres, and as the timing's millimetres.
+        assert_eq!(parse_edid_mm(&edid((16, 9), None)), None);
+        assert_eq!(parse_edid_mm(&edid((16, 10), None)), None);
+        for mm in [(16, 9), (16, 10), (160, 90), (160, 100), (1600, 900), (1600, 1000)] {
+            assert_eq!(parse_edid_mm(&edid((60, 34), Some(mm))), None, "{mm:?}");
+        }
+        // What one would have made of a 2560x1440 display: the most there is.
+        assert_eq!(scale_pct(2560, 1440, 160, 90), SCALE_MAX);
+        // The timing's size is asked first, and a size a millimetre from a
+        // ratio is a size.
+        assert_eq!(parse_edid_mm(&edid((16, 9), Some((597, 336)))), Some((597, 336)));
+        assert_eq!(parse_edid_mm(&edid((60, 34), Some((160, 91)))), Some((160, 91)));
+        assert_eq!(parse_edid_mm(&edid((60, 34), Some((161, 90)))), Some((161, 90)));
+        assert_eq!(parse_edid_mm(&edid((17, 9), None)), Some((170, 90)));
+        assert_eq!(parse_edid_mm(&edid((16, 11), None)), Some((160, 110)));
     }
 
     #[test]

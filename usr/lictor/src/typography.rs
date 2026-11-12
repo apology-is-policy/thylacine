@@ -35,6 +35,9 @@ mod tests {
                 end += 97 * (1 + w * k * h * k);
             }
             assert_eq!(end, MASKS[k - 1].len(), "the set at {k}");
+            // And it is, byte for byte, the set these metrics were baked with.
+            let hash = MASKS[k - 1].iter().fold(0xcbf29ce484222325u64, |h, b| (h ^ *b as u64).wrapping_mul(0x100000001b3));
+            assert_eq!(hash, HASHES[k - 1], "the set at {k} is not the one its metrics were baked with");
         }
     }
     #[test]

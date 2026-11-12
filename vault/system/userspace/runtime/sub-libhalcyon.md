@@ -619,7 +619,12 @@ lesson: a bound applied on the wrong side of a conversion is not a bound.
 **Two untrusted inputs, both fail-safe.** `parse_edid_mm` reads device bytes
 (VESA E-EDID 1.4) and returns `None` unless the block is 128 bytes with the
 fixed header, a wrapping checksum of zero, and BOTH axes within
-`1..=EDID_MM_MAX` (2 m -- larger is not a monitor); the first detailed timing
+`1..=EDID_MM_MAX` (2 m -- larger is not a monitor), and the pair not an aspect
+ratio written where the size goes (`aspect_as_size`: 16:9 or 16:10 as
+centimetres, millimetres or tenths of them; there are displays that do this,
+the pair reads as hundreds of pixels to the inch, and it picked 200% for the
+session and two for the trusted screen on a display of 100%; mutter's
+`calculate_scale` gives such a monitor 1.0); the first detailed timing
 descriptor carries the millimetres when its pixel clock is non-zero, otherwise
 the basic parameters' centimetres stand in. `declared_scale` reads the kernel
 command line for the LAST whole-word `thylacine.scale=<pct>` token -- word
@@ -630,8 +635,10 @@ for the display whose EDID cannot say (QEMU's synthetic one) or lies; a token
 that is not one of the five values is `Declared::Invalid`, said once and
 ignored, and the EDID stands.
 
-**Tests.** 6 host tests: the operator's snap rule, the five values and their
-steps, the pixel helpers' rounding, the EDID parse's fail-safe arms, a short
+**Tests.** 7 host tests: the operator's snap rule, the five values and their
+steps, the pixel helpers' rounding, the EDID parse's fail-safe arms, an aspect
+ratio where the size goes being no size (and a size a millimetre off one being
+a size), a short
 millimetre axis never truncating off the table (the clamp-ordering regression),
 and the declaration being the last whole-word token with a table value.
 

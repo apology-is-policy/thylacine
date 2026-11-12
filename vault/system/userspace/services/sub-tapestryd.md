@@ -3763,6 +3763,16 @@ for one the loop drains no device, so the first position after it was
 counted from the last one before it, and the focused program was handed, as
 one motion, the pointer's whole way over the trusted screen: input of an
 episode, which reaches no program. `seat_resumed` forgets the base. The
+loop reaches it at the top of a pass, when the seat's generation has moved,
+and that alone left a way through: a pass can itself wait out a whole
+episode, inside a request Lictor parks while the seat is taken (a chord's
+`reconcile`, a retirement from `key_event`), and go on to drain the tablet
+with the base from before it. So after a stage that handled any event the
+loop asks `seat_state` again before it drains a pointer device
+(`Tapestryd::seat_moved`), and a seat that has moved sends it back to the
+top. Events drained before such a wait are handled after it; they are from
+before the episode. None of this is seen in a guest: no scenario makes an
+episode begin inside a pass. The
 keyboard's `SYN_DROPPED` reaches `seat_resumed` as well and costs the tablet
 one position's motion. A dropped batch of the tablet's own is left as it
 is: the travel it lost is the person's, made for the same program, and the

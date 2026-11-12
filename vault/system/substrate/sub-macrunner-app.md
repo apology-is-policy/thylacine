@@ -342,8 +342,13 @@ stale (`stale`). A stale move is dropped. A stale press or notch is the
 person's all the same and is sent, with no place, so that it lands where
 the guest has its pointer. The five seconds are there because the rule
 rests on a premise nothing here shows: that the Mac stamps a real event on
-that clock. If it does not, an event's time is nowhere near the change, the
-rule does nothing, and the app behaves as it did without it. What is shown:
+that clock. If it does not, what follows depends on which way the Mac's
+clock for events is off. Ahead of the app's, no event is ever stale and the
+app behaves as it did without the rule. Behind it by L seconds, live events
+are taken for stale ones for min(L, 5) seconds, ending L seconds after each
+change of hands: moves are not sent, and a press or a notch loses its place.
+That has not been seen, and nothing here rules it out; the five seconds are
+what bound it. What is shown:
 Core Graphics stamps an event when it is posted, and one that is only made
 says zero; a script stamps its own (`stamp`), and what it stamps reads back
 as seconds on that clock (a unit test pins both).
@@ -775,12 +780,16 @@ every step of a drag is a mode the guest sets at every step.
 - **The rule for an event made before a change of hands rests on a premise
   that is not shown:** that the Mac stamps a real event on the clock the
   app reads (`NSProcessInfo.systemUptime`). The legs' events are stamped on
-  it by the script. If the premise is false the rule does nothing, and an
-  event made just before the chord is taken for one made after, as before
-  the rule: at a capture the guest's pointer can jump by the Mac pointer's
-  way to the middle, and at a give-back a program can be handed one made-up
-  motion. A second limit: a press made more than five seconds before the
-  change and taken after it has its place.
+  it by the script. If the premise is false with the events' clock ahead,
+  the rule does nothing, and an event made just before the chord is taken
+  for one made after, as before the rule: at a capture the guest's pointer
+  can jump by the Mac pointer's way to the middle, and at a give-back a
+  program can be handed one made-up motion. If it is false with the events'
+  clock behind by L seconds, live moves are dropped for min(L, 5) seconds,
+  ending L seconds after each change of hands. Comparing on the events' own
+  clock would take the premise away, and is not done yet. A second limit: a
+  press made more than five seconds before the change and taken after it
+  has its place.
 - **A captured pointer moves as the Mac's would have.** The motion is
   AppKit's, in points, with the Mac's acceleration, and not the device's own
   counts. A program that wants unaccelerated motion gets none. And it moves

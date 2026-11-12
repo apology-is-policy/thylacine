@@ -64,7 +64,9 @@ The separation is architectural work, not merely a modal overlay.
   Corvus instance can submit or finish the current episode. No secret is sent to
   Tapestry, Halcyon, Beacon, a PTY or an ordinary surface.
 - The trusted service uses fixed baked fonts, palette and framing. It does not load
-  user themes, images, font files, configuration or arbitrary UI programs.
+  user themes, images, font files, configuration or arbitrary UI programs. The one
+  thing it reads is the platform's display scale, at its start ("The trusted
+  screen's scale" below), which chooses between two baked renderings.
 
 ## Entry and restoration
 
@@ -211,7 +213,11 @@ bearing room and the advance of the set at one, times two, and only the outline
 is drawn finer, so every word is on the same line and in the same place at both
 scales and the layout is verified once. Nothing is scaled at run time: a rule,
 a border and a field are whole layout pixels, and a glyph is a baked mask. The
-rule above about fixed baked fonts stands.
+rule above about fixed baked fonts stands. The rule beside it, that the service
+loads no configuration, has this one exception, and it is the platform's word
+and no user's: the kernel's command line and the display's EDID can choose
+which of the two baked renderings is drawn and nothing else, and where neither
+says, or what they say cannot be drawn, it is one.
 
 Three decisions were made for this by the implementing agent under the
 operator's standing authorization of 2026-09-01 (a recommended design in line
@@ -232,4 +238,8 @@ must look the same whatever the session it suspended has been told.
 
 3. **Two from 150 percent.** At 150 the screen at two is a third larger than
 the session's type and at one a third smaller; larger is the readable side for
-a screen that asks for a key.
+a screen that asks for a key. From a display's millimetres the session's rule
+gives the percent in quarters, rounded half up, so on that path two begins at a
+true 137.5 percent, 132 pixels to the inch. A display too small for the layout
+at two is drawn at one whatever its scale, which is most panels of 1920 by
+1080 or 1200 at 150 percent.
