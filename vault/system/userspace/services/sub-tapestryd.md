@@ -3,7 +3,7 @@ id: sub-tapestryd
 type: sub
 title: "tapestryd — the compositor: the weave lifecycle, the present engine, and the retire ordering"
 parent: moc-userspace
-code: [tools/interactive/ls-halcyon-scale-fitted.exp, tools/interactive/ls-display-follow.exp, tools/interactive/rfb_resize.py, usr/tapestryd/src/storage.rs, usr/kaua-term-probe/src/storage.rs, tools/interactive/tapestry-storage.exp, usr/kaua-term-probe/src/seat_control.rs, usr/kaua-term-probe/src/admission.rs, tools/interactive/interaction-seat.exp, usr/tapestryd/src/seat_coordinator.rs, usr/tapestryd/src/interaction.rs, usr/tapestryd/src/server.rs, usr/tapestryd/src/gpu.rs, usr/tapestryd/src/pane.rs, usr/tapestryd/src/va.rs, usr/tapestryd/src/input.rs, usr/tapestryd/src/main.rs, usr/tapestryd/src/chords.rs, usr/tapestryd/src/keymap.rs, usr/tapestryd/Cargo.toml, usr/tapestryd/src/motion.rs, usr/tapestryd/src/lib.rs]
+code: [tools/interactive/ls-halcyon-scale-fitted.exp, tools/interactive/ls-display-follow-declared.exp, tools/interactive/ls-display-follow.exp, tools/interactive/rfb_resize.py, usr/tapestryd/src/storage.rs, usr/kaua-term-probe/src/storage.rs, tools/interactive/tapestry-storage.exp, usr/kaua-term-probe/src/seat_control.rs, usr/kaua-term-probe/src/admission.rs, tools/interactive/interaction-seat.exp, usr/tapestryd/src/seat_coordinator.rs, usr/tapestryd/src/interaction.rs, usr/tapestryd/src/server.rs, usr/tapestryd/src/gpu.rs, usr/tapestryd/src/pane.rs, usr/tapestryd/src/va.rs, usr/tapestryd/src/input.rs, usr/tapestryd/src/main.rs, usr/tapestryd/src/chords.rs, usr/tapestryd/src/keymap.rs, usr/tapestryd/Cargo.toml, usr/tapestryd/src/motion.rs, usr/tapestryd/src/lib.rs]
 audit: hard
 guarded-by: [inv-i40, inv-i5, inv-i34, inv-i1, inv-i45, inv-i9]
 validated-by: [spec-tapestry-storage, spec-tapestry-present, prose, gate-smp]
@@ -201,8 +201,20 @@ Tests. The rule, on a host (`carried_pct` and `nearest_pct`,
 `tools/interactive/ls-halcyon-scale-fitted.exp` boots a 5120x2880 display
 declared at 200, reads the mode line, `tapestryd: scale 100 (declared)` and
 Lictor's line of its screen, then steps the scale with Super+= and has Super+0
-derive it again: 100, not 200. `follow_display`'s and `set_mode`'s writes of
-`fitted_from` are read from the code and run by no test.
+derive it again: 100, not 200. The other two writes of `fitted_from`, in a
+guest of the gate image: `tools/interactive/ls-display-follow-declared.exp` boots
+a 3456x2160 display declared at 200 (`scale 100 (declared)` on 1728x1080) and
+reads the compositor's line for the scale at each mode after it. A follow to
+2000x1280, which is its own mode: `scale 100 -> 200 (mode)` and `followed,
+2000x1280 at 200%`; without `follow_display`'s write the carry is from the
+boot's display and says 125. A follow to 5120x2880, halved: 100. Then 1600x900
+asked for by size from the console's settings panel: 200; without `set_mode`'s
+write it is carried from 5120x2880 and stays 100. Then `mode auto` from the
+panel: 2560x1440 and 100 again. A failure after the panel's mode was applied
+asks the panel for auto before it is reported, because the panel writes the
+mode to the pool's `/lib/aurora/config`. Run by no test: the `scale auto`
+verb, which no program in the tree sends, and the lines above about an EDID
+that is not answered.
 
 **When a change is followed.** [[sub-lictor]] counts the device's display
 events and every reply of the broker carries the count; `Gpu::display_events`
