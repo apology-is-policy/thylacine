@@ -3758,11 +3758,26 @@ size is a place now. This one is older than the capture and was read in
 the code, not seen in a guest; a frontend that sets the guest's mode from
 its window's size reaches it once a resize.
 
+Nor does the base outlive a trusted-path episode. While Lictor has the seat
+for one the loop drains no device, so the first position after it was
+counted from the last one before it, and the focused program was handed, as
+one motion, the pointer's whole way over the trusted screen: input of an
+episode, which reaches no program. `seat_resumed` forgets the base. The
+keyboard's `SYN_DROPPED` reaches `seat_resumed` as well and costs the tablet
+one position's motion. A dropped batch of the tablet's own is left as it
+is: the travel it lost is the person's, made for the same program, and the
+next position's difference is its sum.
+
 What this does not order: the loop drains the tablet and then the mouse in
 each wake, so a position and motion that reach it within one wake are taken
-tablet first, whatever order they happened in. A person's chord keeps a
-capture's last motion and the first position after it well apart. A script
-has to pace itself.
+tablet first, whatever order they happened in. Nothing keeps a capture's
+last motion and the first position after it apart: a hand that moves
+through the chord makes them one report of the mouse apart, which is inside
+one wake (16.7 ms, and 66 ms once the loop is idle). The cost is small,
+because the base is forgotten by then. The position is a place, the motion
+taken after it moves the pointer off that place, and the next position puts
+it right and is a place again. A script that wants them in order paces
+itself.
 
 Tests: four host tests of `AbsBase` (the first position after motion from
 the mouse makes none, and the second exactly its own; a position on a
@@ -3772,7 +3787,13 @@ and the `relturn` leg of `tapestry-battery`
 under `tools/interactive/ls-gfx-panes.exp`: motion from the mouse, then two
 tablet positions, and the first motion to arrive after them must be the
 second position's own 160 pixels. Counted from where the leg before it
-leaves the tablet, the first position would arrive as -640. The mode's
+leaves the tablet, the first position would arrive as -640. The leg ran in
+a guest both ways on 2026-11-12 (the gate image, HVF, one attempt each):
+with `ptr_move_rel`'s `forget()` taken out the battery says `FAIL turn rel
+got (-640, 0)` and the scenario is red at that leg; with it the battery
+says `relturn OK 160` and the scenario is green. The trusted-path rule has
+no test either way: the call is in the binary, and no scenario puts a
+tablet position on each side of an episode (OPEN-BUGS 2026-11-12). The mode's
 rule has its host test only: `mode W H` is the renderer's to say, so the
 battery cannot change the mode, and the line of `ptr_move` that hands the
 base the mode is read and compiled, not run against a change of mode.

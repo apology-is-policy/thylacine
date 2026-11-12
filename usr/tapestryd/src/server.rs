@@ -10123,6 +10123,9 @@ impl Comp {
         // Lictor hid the normal plane before trusted activation. Even an
         // unchanged pointer must be republished for this normal seat epoch.
         self.cursor_sent = None;
+        // What the pointer did over the trusted screen is no program's motion:
+        // the first position after it is a place.
+        self.abs_last.forget();
         for code in 0..KEYCODE_SPAN {
             if self.key_owner[code] != 0 { self.key_event(code as u16, 0, 0, 0); }
         }

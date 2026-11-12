@@ -814,18 +814,20 @@ struct tevent {              /* little-endian, 24 bytes, version-pinned wire */
   boundary is inherent to the abs source). A run of absolute motion ends
   at motion from the relative device: the position that follows it is a
   place and makes no delta, as is the first position after a change of
-  mode, which is a pixel of another screen. A frontend that moves ONE
-  pointer through both devices (it captures the pointer, sends its motion
-  through the mouse, and sends positions again from where the mouse left
-  it) would otherwise have that motion counted twice. The two devices are
-  drained one after the other, the tablet first, so what both sent within
-  one wake is not taken in the order it happened. Deltas leak no placement (pure
-  motion — D5-consistent). Queueing: back-of-queue REL records coalesce by
-  SUMMATION (replacement would lose motion; an interleaved event starts a
-  fresh record, preserving order) and the kind is droppable under stall
-  (lossy motion stream — a burst must never WEDGE a client). A relative-mode
-  client (SDL mouse-look) consumes PTR_REL and must NOT diff successive
-  PTR_MOVE positions (every motion emits both — a diff double-counts).
+  mode, which is a pixel of another screen, and the first after a
+  trusted-path episode, whose pointer travel is no client's. A frontend
+  that moves ONE pointer through both devices (it captures the pointer,
+  sends its motion through the mouse, and sends positions again from
+  where the mouse left it) would otherwise have that motion counted
+  twice. The two devices are drained one after the other, the tablet
+  first, so what both sent within one wake is not taken in the order it
+  happened. Deltas leak no placement (pure motion — D5-consistent).
+  Queueing: back-of-queue REL records coalesce by SUMMATION (replacement
+  would lose motion; an interleaved event starts a fresh record,
+  preserving order) and the kind is droppable under stall (lossy motion
+  stream — a burst must never WEDGE a client). A relative-mode client
+  (SDL mouse-look) consumes PTR_REL and must NOT diff successive PTR_MOVE
+  positions (every motion emits both — a diff double-counts).
 - **FRAME is the display clock** (D1's pacing signal): base virtio-gpu 2D has
   NO guest-visible vblank (`EVENT_DISPLAY` is config-change only — verified),
   so tapestryd SYNTHESIZES a fixed-rate FRAME tick (60 Hz default,
