@@ -445,8 +445,14 @@ program's lines, bracketed by advancing lines. The program writes a counted
 line every 250 ms whoever holds the terminal, because the shell takes the
 terminal back as soon as a stop is reported: a program that wrote only while
 it held the terminal would be silent after `Stopped` whether or not it was
-ever parked. At most one line may follow `Stopped`, the one that was inside
-its write when the stop was latched. The line says `held` only while the
+ever parked. At most one line may follow `Stopped`: the program parks at its
+next return to EL0, so one write can still complete after the latch, the one
+it was inside or one it entered on another CPU before the stop reached it.
+After `fg` the scenario reads two lines, since the first may carry a `held`
+worked out before the stop. The program installs no handler, so this leg is
+the default stop of a Proc whose dispositions the kernel reads from the Pouch
+note table; the stop taken later at the EL0 return tail is the mask rung's.
+The line says `held` only while the
 program leads a group of its own and that group is the terminal's foreground
 group (`tcgetpgrp`), and the scenario types its key after reading one, so the
 key is typed at a job that can take it. The shell spawns a job,

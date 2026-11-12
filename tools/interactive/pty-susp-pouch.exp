@@ -4,12 +4,15 @@
 #
 # The gap this closes: pty-4.exp already drives the whole job-control ladder
 # through a real pts, but its subject is `debug-child fgtick`, a NATIVE program.
-# So the pouch boundary-line's note path -- and the EL0 return tail's stop
-# WIRING -- were never on the line in-guest. The unit tests cannot reach that
-# tail at all: notes_deliver_at_el0_return takes no Thread argument (it reads
-# current_thread()), which is why test_notes.c:1732 records the identical hole
-# for its own decider and routes it here. This scenario is the only leg that
-# also exercises the lock order under real contention.
+# A Pouch program's note dispositions are a table its runtime registers, and the
+# kernel reads that table to decide whether a tty:susp stops the program. This
+# is the only in-guest leg whose subject that table governs. The program
+# installs no handler, so its stop is the default one: applied when the key is
+# posted, with the program parked in its sleep or at its next return to EL0,
+# and lifted by `fg`. The stop a thread takes LATER, at the EL0 return tail
+# once it unmasks the note, is not on this path, and neither is the lock order
+# there: jc-probe's maskstop rung is that leg (the note over
+# test_notes_masked_susp_stops_at_delivery in kernel/test/test_notes.c).
 #
 # WHY THE PROGRAM COUNTS ITS LINES. The load-bearing claim is a NEGATIVE -- a
 # stopped process emits nothing -- and a negative assertion is satisfied by a
@@ -36,11 +39,12 @@
 source [file join [file dirname [info script]] lib.exp]
 
 # Assert at most ONE SUSP-TICK line arrives in `secs`. A stop is reported when
-# it is latched, not when the program parks, so one line can have been inside
-# its write then and reach us after `Stopped`, however late; a second cannot. A
-# program that was never parked writes four a second, `away` once the shell has
-# the terminal back. Only meaningful between the two positive legs above --
-# alone it passes against a dead guest.
+# it is latched, not when the program parks, and the program parks at its next
+# return to EL0: so one write can still complete and reach us after `Stopped`,
+# however late -- the one it was inside, or one it entered on another CPU before
+# the stop reached it. A second cannot. A program that was never parked writes
+# four a second, `away` once the shell has the terminal back. Only meaningful
+# between the two positive legs above -- alone it passes against a dead guest.
 proc susp_expect_stopped {secs phase} {
     global timeout
     set until [expr {[clock milliseconds] + $secs * 1000}]
@@ -114,16 +118,23 @@ lc_expect "Stopped" "^Z stops the foreground POUCH program"
 susp_expect_stopped 5 "the stopped pouch program stays silent"
 
 # POSITIVE 2: fg resumes it, and the counter has MOVED PAST where it stopped.
+# Two lines, because the stop can catch the program between its reading of the
+# terminal and its write: that line comes out after the resume with a `held`
+# from before the stop. The second is worked out after the resume.
 lc_send "fg"
 set n3 [susp_next_tick "post-resume tick"]
 if {$n3 <= $n2} {
     lc_fail "post-resume tick $n3 is not beyond the pre-stop $n2 -- this is replayed buffered output, not a resumed process"
 }
-lc_step "saw: ticks resumed and advanced past the stop ($n2 -> $n3)"
+set n4 [susp_next_tick "second post-resume tick"]
+if {$n4 <= $n3} {
+    lc_fail "ticks did not advance after the resume ($n3 -> $n4)"
+}
+lc_step "saw: ticks resumed and advanced past the stop ($n2 -> $n3 -> $n4)"
 
 # ^C -> interrupt -> the pouch program default-terminates (LS-5), fg returns.
-# The line just read said `held` and came after five quiet seconds, so the
-# program wrote it after the resume, holding the terminal.
+# The shell hands the terminal over before it continues the job, and the second
+# line above says the program holds it.
 send "\x03"
 sleep 1
 lc_run_expect "echo susp-fg | tr a-z A-Z" "SUSP-FG"

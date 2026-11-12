@@ -5,8 +5,10 @@
 // a pts foreground process group and ^Zs it. pty-4.exp already drives the whole
 // ladder (login -> ptyhost -> inner ut takes job control -> ^Z -> Stopped -> fg
 // -> re-stop -> bg -> ^C), but its subject is `debug-child fgtick`, a NATIVE
-// libthyla-rs program -- so the pouch boundary-line's note/disposition path is
-// never on the line. This program is that subject and nothing else.
+// libthyla-rs program -- so no program whose dispositions the kernel reads from
+// the Pouch note table is on the line. This program is that subject and nothing
+// else. It installs no handler: the stop it takes is the kernel's default,
+// applied when the key is posted.
 //
 // Output contract (the .exp matches on these, so they are ABI for the scenario):
 //   SUSP-READY
