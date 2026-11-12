@@ -1,13 +1,14 @@
 #!/usr/bin/expect -f
 # A session compositor's pane cannot reach the console renderer's place channel.
 #
-# login gives the bare `halcyon` name to a login that does not start the session
-# compositor and to no other (docs/SRV-SESSION-REGISTRY-DESIGN.md, the November 12
-# paragraphs): a pane's programs have the session's own place address, and `view` without
-# one must find no console channel to fall back to. The image runs BOTH the console
-# renderer and the session compositor, so the console renderer has posted the name and
-# serves it while the pane asks. The pane's shell runs `stat`, and the Instrument bar's
-# log line carries the exit status to the serial log.
+# login routes the bare `halcyon` name unless it would start the session compositor on a
+# successful authentication (docs/SRV-SESSION-REGISTRY-DESIGN.md, the November 12
+# paragraphs), so the login behind a pane has no such route: a pane's programs have the
+# session's own place address, and `view` without one must find no console channel to
+# fall back to. The image runs BOTH the console renderer and the session compositor, so
+# the console renderer has posted the name and serves it while the pane asks. The pane's
+# shell runs `stat`, and the Instrument bar's log line carries the exit status to the
+# serial log.
 #
 # Two controls, because the claim is a failure: `false` shows that the bar reports a
 # failing command at all, and `stat` of a resident route shows that a posted name the
