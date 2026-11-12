@@ -43,11 +43,13 @@
 //     writes until its ring is full, so the limit is what ends an orphan.
 //   * `debug-child fgtick` (the interactive scenarios' stoppable job) is tick
 //     mode for a driver that cannot ask the terminal who holds it. It writes
-//     FGTICK only while its own process group is the foreground group of the
-//     terminal on fd 0, so a driver that reads one knows that a stop or an
-//     interrupt key typed now reaches this job. In the background it writes
-//     nothing. It ends as tick mode does, and with FGNOTTY and status 2 when
-//     fd 0 is no terminal of its session.
+//     FGTICK only while it leads a process group of its own and that group is
+//     the foreground group of the terminal on fd 0, so a driver that reads one
+//     knows that a stop or an interrupt key typed now reaches this job. Run it
+//     alone, never in a pipeline: the shell mints a job's group from its first
+//     member's pid. In the background it writes at most the one FGTICK it had
+//     already decided on when it was stopped. It ends as tick mode does, and
+//     with FGNOTTY and status 2 when fd 0 is no terminal of its session.
 //   * `debug-child dirty` (5g, death wins in the exit close; jc-probe drives
 //     it) leaves a small write staged on a 9P file, writes one byte to stdout
 //     (its driver's pipe) once it has, and then spins as spin mode does.
@@ -78,7 +80,7 @@ use core::time::Duration;
 use libthyla_rs::fs::File;
 use libthyla_rs::io::Write;
 use libthyla_rs::thread;
-use libthyla_rs::{t_exits, t_getpgid, t_tty_get_fg, t_write};
+use libthyla_rs::{t_exits, t_getpgid, t_getpid, t_tty_get_fg, t_write};
 
 // MUST match debug-probe.
 const SENTINEL_REG: u64 = 0xDEB0_DEB0;
@@ -216,11 +218,18 @@ const FGTICK_MARK: &[u8] = b"FGTICK\n";
 const FGTICK_NOTTY: &[u8] = b"FGNOTTY\n";
 
 fn fgtick() -> ! {
-    // SAFETY: SVC wrapper; 0 names the caller.
-    let own = unsafe { t_getpgid(0) };
+    // SAFETY: SVC wrapper.
+    let me = unsafe { t_getpid() };
     for _ in 0..TICK_LIMIT {
-        // SAFETY: SVC wrapper on fd 0, the terminal the shell gave the job.
-        let fg = unsafe { t_tty_get_fg(0) };
+        // The shell puts a job in its group only after the spawn has returned,
+        // so this process starts in the shell's group, which holds the
+        // terminal: "my group is the foreground group" is true before the
+        // handoff, false in the middle of it, and true again after. The group
+        // is read every time and must be this process's own, which it is only
+        // from the middle on.
+        // SAFETY: SVC wrappers; 0 names the caller, fd 0 is the terminal the
+        // shell gave the job.
+        let (own, fg) = unsafe { (t_getpgid(0), t_tty_get_fg(0)) };
         if own <= 0 || fg < 0 {
             // SAFETY: SVC wrappers; FGTICK_NOTTY is a valid static buffer.
             unsafe {
@@ -229,7 +238,10 @@ fn fgtick() -> ! {
             }
         }
         // SAFETY: SVC wrapper; FGTICK_MARK is a valid static buffer.
-        if fg == own && unsafe { t_write(1, FGTICK_MARK.as_ptr(), FGTICK_MARK.len()) } <= 0 {
+        if own == me
+            && fg == own
+            && unsafe { t_write(1, FGTICK_MARK.as_ptr(), FGTICK_MARK.len()) } <= 0
+        {
             break;
         }
         let _ = libthyla_rs::time::sleep(TICK_EVERY);

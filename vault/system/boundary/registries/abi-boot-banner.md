@@ -88,6 +88,7 @@ mirrors:
   - "tools/interactive/ls-halcyon-session-instrument.exp"
   - "tools/interactive/ls-gfx-session-image.exp"
   - "tools/interactive/ls-halcyon.exp"
+  - "tools/interactive/pty-4.exp"
   - "tools/interactive/pty-susp-pouch.exp"
   - "tools/interactive/r5f9-ash.exp"
   - "tools/test-smp-classify.sh (the classifier's own fixtures — both literals)"

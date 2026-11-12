@@ -442,12 +442,19 @@ child still masked. Before 2026-11-12 the child unmasked at its twelfth tick,
 and a driver more than two seconds late typed its `^Z` at an unmasked child.
 `tools/interactive/pty-susp-pouch.exp` stops a Pouch program
 (`pouch-hello-susp`) with `^Z` and proves the stop by silence bracketed by
-advancing ticks. That program writes a tick only while its group is the
-terminal's foreground group (`tcgetpgrp`), so the scenario's key is typed at a
-job that can take it. The shell spawns a job, puts it in a group and then
-hands it the terminal, and a key typed before the last of those reaches the
-shell: `pty-4.exp` and `item10-ctrlc.exp` wait the same way on
-`debug-child fgtick` (`lc_expect_fgtick`).
+advancing ticks. That program writes a tick only while it leads a group of its
+own and that group is the terminal's foreground group (`tcgetpgrp`), so the
+scenario's key is typed at a job that can take it. The shell spawns a job,
+puts it in a group and then hands it the terminal, and a key typed before the
+last of those reaches the shell: `pty-4.exp` and `item10-ctrlc.exp` wait the
+same way on `debug-child fgtick` (`lc_expect_fgtick`). The group must be the
+program's own because a job is born in the shell's group, which holds the
+terminal (no spawn call takes a birth group; the shell's `setpgid` follows the
+spawn): "my group is the foreground group" is true before the handoff, false
+in the middle of it and true after it, and a tick from the first of those
+would be followed by a key typed in the second. `pty-4.exp` holds the token to
+its meaning with a job started in the background, which must write none until
+`fg`.
 
 ## Referenced by
 

@@ -773,8 +773,9 @@ proc lc_expect_re {pat phase} {
 }
 
 # Wait until the foreground job says it holds the terminal. The job is
-# `debug-child fgtick`, which writes FGTICK only while its own process group is
-# the terminal's foreground group. ut spawns a job, puts it in a group and then
+# `debug-child fgtick`, which writes FGTICK only while it leads a process group
+# of its own and that group is the terminal's foreground group (pty-4.exp's
+# background leg holds it to that). ut spawns a job, puts it in a group and then
 # hands it the terminal, and a ^Z or ^C typed before the last of those reaches
 # ut and never the job. `count` is 1 for a job just started. After a stop and a
 # `fg` it is 2: one FGTICK can have been inside its write when the stop landed

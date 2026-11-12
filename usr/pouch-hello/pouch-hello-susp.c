@@ -17,9 +17,12 @@
 // A TICK SAYS THE TERMINAL IS OURS. The shell spawns a job, puts it in a group
 // and then hands it the terminal, and a ^Z typed before the last of those
 // reaches the shell: the program runs on and the scenario waits for a stop
-// that never comes. So a tick is written only while this program's process
-// group is the terminal's foreground group, and the scenario types its stop
-// key after reading one.
+// that never comes. So a tick is written only while this program leads a
+// process group of its own and that group is the terminal's foreground group,
+// and the scenario types its stop key after reading one. The group must be its
+// own because it starts in the shell's, which holds the terminal: "my group is
+// the foreground group" is true before the handoff too, and false in the
+// middle of it. Run it alone, never in a pipeline.
 //
 // THE COUNTER IS THE POINT, not decoration. Proving "^Z stopped it" needs a
 // NEGATIVE assertion (no output while stopped), and a negative is satisfied by
@@ -81,7 +84,8 @@ int main(void) {
             printf("SUSP-NOTTY\n");
             return 2;
         }
-        if (fg == getpgrp()) printf("SUSP-TICK %lu\n", n++);
+        pid_t own = getpgrp();
+        if (own == getpid() && fg == own) printf("SUSP-TICK %lu\n", n++);
         tick_sleep();
     }
 }

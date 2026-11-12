@@ -119,8 +119,10 @@ lc_expect "&" "bg announces the backgrounded job"
 
 # fg the RUNNING job (harmless cont), then ^C -> interrupt -> the job
 # default-terminates (LS-5) -> fg returns. Post-resume signal delivery
-# through the same pts fan as the susp. In the background the job wrote
-# nothing; its FGTICKs say the terminal is its own again.
+# through the same pts fan as the susp. In the background the job wrote at
+# most the one FGTICK it had decided on before the stop, and the `fg` echo
+# above is read past it; the FGTICKs after it say the terminal is its own
+# again.
 lc_send "fg"
 lc_expect "debug-child fgtick" "fg echoes the running job"
 lc_expect_fgtick 2 "the foregrounded job holds the terminal"
@@ -130,6 +132,38 @@ sleep 1
 # $status is 128 + SIGINT (docs/ERRORS.md "The wait status"); an exit status
 # of 1 is what a shell that read the word as an exit would report.
 lc_run_expect_hardfail_re "echo pty-fg-\$status | tr a-z A-Z" "PTY-FG- 130" {PTY-FG- ?[0-9]+[\r\n]}
+
+# THE VEHICLE'S OWN CLAIM. An FGTICK says "this job holds the terminal", and
+# every wait above rests on it. A job started in the background never holds
+# the terminal, so it writes none until `fg`. ut puts a job in its group only
+# after the spawn has returned; until then the job sits in the shell's group,
+# which does hold the terminal, and a job that compared only its group with
+# the foreground group would tick there. On an unmodified shell that window is
+# a few instructions wide, so this is the leg a slowed shell turns red. The
+# FGTICK arm is armed from the command on: the ticks of that window come
+# before the job line. The two positives around the quiet window are the job
+# line and the ticks after `fg`.
+lc_send "debug-child fgtick &"
+set timeout $lc_cmd_timeout
+expect {
+    -re {FGTICK[\r\n]} { lc_fail "a job started in the background wrote FGTICK before its job line: the token does not mean the job holds the terminal" }
+    -re {\[\d+\][ \t]+\d+[\r\n]} { lc_step "saw: the background job's line" }
+    -re {EXTINCTION:} { lc_extinction_fail "kernel extinction starting the background job" }
+    timeout           { lc_fail "timeout (${lc_cmd_timeout}s) waiting for the background job's `\[N\] pid` line" }
+    eof               { lc_fail "unexpected EOF starting the background job" }
+}
+lc_within 2 {
+    -re {FGTICK[\r\n]} { lc_fail "a background job wrote FGTICK: the token does not mean the job holds the terminal" }
+    -re {EXTINCTION:} { lc_extinction_fail "kernel extinction with the job in the background" }
+    eof               { lc_fail "unexpected EOF with the job in the background" }
+    timeout           { lc_step "saw: a background job wrote no FGTICK (2s)" }
+}
+lc_send "fg"
+lc_expect "debug-child fgtick" "fg echoes the background job"
+lc_expect_fgtick 1 "the job brought forward holds the terminal"
+send "\x03"
+sleep 1
+lc_run_expect_hardfail_re "echo pty-bq-\$status | tr a-z A-Z" "PTY-BQ- 130" {PTY-BQ- ?[0-9]+[\r\n]}
 
 # Every other ut wait packs too (dec-2026-10-13-ut-status-packed): a death by
 # note reads 128 plus the signal outside job control as well. pouch-hello-fault
