@@ -206,7 +206,7 @@ fn connect() -> Result<(i64, String), &'static str> {
     const SRV: &[u8] = b"/srv/halcyon";
     let root = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, SRV.as_ptr(), SRV.len(), T_OREAD) };
     if root < 0 {
-        return Err("no /srv/halcyon (renderer not posting)");
+        return Err("no /srv/halcyon (not posted, or not in this login's view)");
     }
     Ok((root, String::from("place")))
 }
