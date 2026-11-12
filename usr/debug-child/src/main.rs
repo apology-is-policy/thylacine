@@ -34,6 +34,13 @@
 //     no syscall, so only an IRQ return can deliver a note to them. spin-tty
 //     takes `^C`'s default and dies; spin-note registers a handler that ends
 //     the loop, then writes HANDLED and exits 0.
+//   * `debug-child tick` (jc-probe's stoppable job) writes TICK to fd 1 every
+//     100 ms and reads nothing, so it holds no terminal read while it is
+//     stopped. A TICK is the job running: a driver that reads one after a
+//     point where the job was stopped knows it has resumed. `^C` ends it; so
+//     does a write that takes nothing or fails and, far past any driver's own
+//     bound, its tick limit. A terminal whose master is gone still takes
+//     writes until its ring is full, so the limit is what ends an orphan.
 //   * `debug-child dirty` (5g, death wins in the exit close; jc-probe drives
 //     it) leaves a small write staged on a 9P file, writes one byte to stdout
 //     (its driver's pipe) once it has, and then spins as spin mode does.
@@ -179,6 +186,23 @@ fn spin_caught(ptr: *mut u64) -> ! {
 // The pty modes (ARCH 8.8.3, #964). MUST match jc-probe.
 const SPIN_READY: &[u8] = b"SPINNING\n";
 const SPIN_HANDLED: &[u8] = b"HANDLED\n";
+const TICK_MARK: &[u8] = b"TICK\n";
+const TICK_EVERY: Duration = Duration::from_millis(100);
+/// 60 s of ticks: past jc-probe's watchdog, so the limit never ends the job
+/// inside the ladder, and short enough that an abandoned one does not linger.
+const TICK_LIMIT: u32 = 600;
+
+fn tick() -> ! {
+    for _ in 0..TICK_LIMIT {
+        // SAFETY: SVC wrapper; TICK_MARK is a valid static buffer.
+        if unsafe { t_write(1, TICK_MARK.as_ptr(), TICK_MARK.len()) } <= 0 {
+            break;
+        }
+        let _ = libthyla_rs::time::sleep(TICK_EVERY);
+    }
+    // SAFETY: `!`-returning SVC.
+    unsafe { t_exits(0) }
+}
 
 // spin-tty: the loop never traps and nothing ends it, so the only way out is a
 // note taken at an IRQ return.
@@ -345,6 +369,9 @@ pub extern "C" fn rs_main() -> i64 {
     }
     if libthyla_rs::env::args().operands().next() == Some(&b"dirty"[..]) {
         dirty(ptr);
+    }
+    if libthyla_rs::env::args().operands().next() == Some(&b"tick"[..]) {
+        tick();
     }
     if libthyla_rs::env::args().operands().next() == Some(&b"spin-tty"[..]) {
         spin_tty(ptr);

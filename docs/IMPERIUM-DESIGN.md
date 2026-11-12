@@ -663,7 +663,10 @@ can veto any of them:**
    IDENTITY-DESIGN's reserved ids state for every per-Proc surface. The rows
    themselves, with the
    peer pid, label, msize, mode and state, stay readable to every reader but
-   one running as none, which sees none of them.
+   one running as none, which sees none of them. A connection row's two
+   admission figures (its domain's live connection count and its credits) and
+   the file's admission summary line are readable on the same terms: none of
+   them moves per message.
 
 ### 11.4 The propagating legate scope -- kernel, I-25 STRENGTHENED, spec-first (IM-2)
 

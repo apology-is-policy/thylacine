@@ -34,11 +34,11 @@
 //                                           arm dequeues and stops us)
 //   driver `fg`  ->  ticks resume  ->  DONE
 //
-// The tick IS the clock. The driver counts ticks rather than sleeping, and the
-// unmask fires at a fixed TICK NUMBER -- so a dilated host stretches the
-// driver's window and the child's schedule by the same factor and the ordering
-// (^Z lands well before UNMASK_AT_TICK) holds by construction rather than by a
-// wall-clock margin that a loaded host could eat.
+// The driver counts ticks rather than sleeping, and the unmask fires at a
+// fixed TICK NUMBER. The ticks are wall-clock sleeps and the driver's steps
+// are compute, so the ordering (^Z lands before UNMASK_AT_TICK) is a margin of
+// about eight ticks (2 s), not a guarantee: a driver held up for longer than
+// that sends its `^Z` to an unmasked child.
 //
 // Every write is one t_write to fd 1: no stdio buffer exists that could flush
 // on resume and forge the exact output that reads as "it never stopped".
