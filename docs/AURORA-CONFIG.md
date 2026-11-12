@@ -295,9 +295,13 @@ things):
    be a mode; else the rect over 2, times 2, over 3, times 3, over 4, times
    4, the first that can; if none can, the mode that stands stays (at boot,
    when none stands yet, 1024×768). A whole factor keeps the host's picture
-   of the screen sharp, and the scale needs no rule of its own: the EDID's
-   millimetres under half the pixels are half the DPI
-   (`docs/HALCYON-SCALE.md` is unchanged). The rule is used in three
+   of the screen sharp, and a scale derived from the EDID needs no rule of
+   its own: the EDID's millimetres under half the pixels are half the DPI.
+   A scale the platform DECLARED is carried through a fitted mode by the
+   fit's factor (`docs/HALCYON-SCALE.md` section 3, amended 2026-11-12
+   under the operator's standing authorization of 2026-09-01; until then
+   it stood unchanged, and a 5120×2880 display declared at 200 came up at
+   2560×1440 with everything at twice its size). The rule is used in three
    places, and only there:
    - **at boot**, for the compositor's first mode (before this amendment
      the boot adopted any rect unchecked, and a display of 3456×2160 came
@@ -309,7 +313,9 @@ things):
      of events is one mode change.
 
    An explicit `mode W H` is NOT fitted: it is judged by the same test of
-   a size, refused if it cannot be a mode, and it PINS the mode. A pinned
+   a size, refused if it cannot be a mode, and it PINS the mode. (Under a
+   declared scale it keeps the declaration, where a fitted mode carries
+   it.) A pinned
    mode stands whatever the host's window does, until a `mode auto` that
    is accepted, which also resumes the following (one that is refused
    leaves the mode that stood, and the pin). A mode change that cannot be

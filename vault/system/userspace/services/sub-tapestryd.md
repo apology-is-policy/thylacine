@@ -3,7 +3,7 @@ id: sub-tapestryd
 type: sub
 title: "tapestryd — the compositor: the weave lifecycle, the present engine, and the retire ordering"
 parent: moc-userspace
-code: [tools/interactive/ls-display-follow.exp, tools/interactive/rfb_resize.py, usr/tapestryd/src/storage.rs, usr/kaua-term-probe/src/storage.rs, tools/interactive/tapestry-storage.exp, usr/kaua-term-probe/src/seat_control.rs, usr/kaua-term-probe/src/admission.rs, tools/interactive/interaction-seat.exp, usr/tapestryd/src/seat_coordinator.rs, usr/tapestryd/src/interaction.rs, usr/tapestryd/src/server.rs, usr/tapestryd/src/gpu.rs, usr/tapestryd/src/pane.rs, usr/tapestryd/src/va.rs, usr/tapestryd/src/input.rs, usr/tapestryd/src/main.rs, usr/tapestryd/src/chords.rs, usr/tapestryd/src/keymap.rs, usr/tapestryd/Cargo.toml, usr/tapestryd/src/motion.rs, usr/tapestryd/src/lib.rs]
+code: [tools/interactive/ls-halcyon-scale-fitted.exp, tools/interactive/ls-display-follow.exp, tools/interactive/rfb_resize.py, usr/tapestryd/src/storage.rs, usr/kaua-term-probe/src/storage.rs, tools/interactive/tapestry-storage.exp, usr/kaua-term-probe/src/seat_control.rs, usr/kaua-term-probe/src/admission.rs, tools/interactive/interaction-seat.exp, usr/tapestryd/src/seat_coordinator.rs, usr/tapestryd/src/interaction.rs, usr/tapestryd/src/server.rs, usr/tapestryd/src/gpu.rs, usr/tapestryd/src/pane.rs, usr/tapestryd/src/va.rs, usr/tapestryd/src/input.rs, usr/tapestryd/src/main.rs, usr/tapestryd/src/chords.rs, usr/tapestryd/src/keymap.rs, usr/tapestryd/Cargo.toml, usr/tapestryd/src/motion.rs, usr/tapestryd/src/lib.rs]
 audit: hard
 guarded-by: [inv-i40, inv-i5, inv-i34, inv-i1, inv-i45, inv-i9]
 validated-by: [spec-tapestry-storage, spec-tapestry-present, prose, gate-smp]
@@ -157,6 +157,38 @@ Before this the boot took the host's size unchecked. With the device made
 (`t_dma_create_weave(89579520) failed -1`), and there was no console and no
 session on it.
 
+**A declared scale through a fitted mode (2026-11-12).** `fitted_from` holds
+the host's rect the standing mode was fitted from. `Comp::new` sets it to the
+host's rect when `fit_mode` gave the first mode, and to `None` when the boot
+fell back to 1024x768, which is no fit. `follow_display` sets it to the rect
+the device told, at the point from which the mode is the one for the host,
+whether the mode changed or already stood. `set_mode` sets it to `None` once
+it has changed the mode; its push of the mode that stands returns before that
+and leaves it. With a declaration, `Comp::new` and `derive_scale` give
+`display::carried_pct(fitted_from, mode, declared)` ([[sub-libhalcyon]]): for a
+fitted mode the declaration times the mode's width over the rect's, brought to
+the nearest of the five values; for a mode asked for by size the declaration
+itself (`docs/HALCYON-SCALE.md` 3 as amended that day). Until then both gave
+the declaration whatever the mode. A 5120x2880 display declared at 200 came up
+at 2560x1440 with `scale 200 (declared)`, while [[sub-lictor]]'s screen for the
+same mode was at one (seen in a guest; the trusted screen's audit round, F1).
+The boot line keeps its form, `tapestryd: scale N (declared)`, with the carried
+number.
+
+What this does not do. A pinned mode keeps the rect it was fitted from: the
+host's later sizes are not read while it is pinned, so a `scale auto` then
+answers for the rect that was. A mode asked for by size is taken to be shown
+pixel for pixel, which a host that scales it to a window does not do. And the
+carry takes the rect the device told for the display's own.
+
+Tests. The rule, on a host (`carried_pct` and `nearest_pct`,
+[[sub-libhalcyon]]). The boot's use of it and `derive_scale`'s, in a guest:
+`tools/interactive/ls-halcyon-scale-fitted.exp` boots a 5120x2880 display
+declared at 200, reads the mode line, `tapestryd: scale 100 (declared)` and
+Lictor's line of its screen, then steps the scale with Super+= and has Super+0
+derive it again: 100, not 200. `follow_display`'s and `set_mode`'s writes of
+`fitted_from` are read from the code and run by no test.
+
 **When a change is followed.** [[sub-lictor]] counts the device's display
 events and every reply of the broker carries the count; `Gpu::display_events`
 reads it from the last reply this client had, of any kind. Two pumps run once
@@ -216,8 +248,9 @@ things.
 - `Done`: the fitted mode is the mode, the device took the bind of its screen
   where the display is composed, and the scale is the one the EDID gives,
   unless a verb's or a chord's override stands, or the platform declared a
-  scale, which `derive_scale` answers before it looks at the EDID. The pump
-  says `... followed, WxH at S%`.
+  scale, which `derive_scale` answers before it looks at the EDID: the
+  declaration carried to the fitted mode (above). The pump says
+  `... followed, WxH at S%`.
 
 An asking that was made and failed, `Failed` or `Unfinished`, is counted
 whatever the engine is afterwards. `Follow::retry` asks again up to six times

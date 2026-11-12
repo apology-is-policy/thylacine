@@ -131,6 +131,35 @@ processes that paint chrome and glyphs, and what the bakes need.
   (`docs/GRAPHICAL-SAK-OWNERSHIP.md`, "The trusted screen's scale"); the verb
   and the session's setting do not reach it.
 
+  **Carried through a fitted mode (amended 2026-11-12 under the
+  operator's standing authorization of 2026-09-01).** The declaration is
+  the DISPLAY's: it stands in for the millimetres the EDID cannot say. A
+  mode the compositor FITTED from the host's rect (`docs/AURORA-CONFIG.md`
+  3.4: at boot, by `mode auto`, after a display event that is followed) is
+  that rect over or times a whole number, and the host makes up the factor
+  when it shows the mode. Millimetres carry through such a mode by
+  themselves (half the pixels over the same millimetres are half the DPI),
+  and the declaration is carried the same way: the derived scale for a
+  fitted mode is the declaration times the mode's width over the rect's,
+  brought to the nearest of the five values
+  (`libhalcyon::display::carried_pct`). A 5120x2880 display declared at 200
+  whose mode is 2560x1440 derives 100, which is what Lictor's trusted
+  screen already reads for that mode. Before this the declaration stood
+  unchanged through the fit and that session came up with everything at
+  twice its size (seen in a guest 2026-11-12: `mode 2560x1440 for a display
+  of 5120x2880` beside `scale 200 (declared)`). At the rect's own size the
+  factor is one and nothing changes. A mode ASKED FOR BY SIZE (`mode W H`,
+  aurora's startup push of a persisted mode) is nobody's fit and keeps the
+  declaration as it is, as before: it is taken to be shown pixel for pixel,
+  which is what a host that sizes its window to the mode does, and the
+  compositor does not ask for the display's rect when it is told a mode. A
+  push of the mode that already stands changes nothing, so a fitted mode
+  stays whose fit it was. Prior art: mutter works a scale out per monitor
+  MODE, from that mode's pixels over the panel's size, and macOS gives each
+  display mode its own backing scale, one for the plain mode of a panel
+  whose native mode is at two. The boot line still says `(declared)`; the
+  number beside it is the carried one.
+
 ## 4. The authority and the channel
 
 - **tapestryd is the authority.** `Comp.scale: u16` (percent) is set at
@@ -310,3 +339,5 @@ LOGICAL pixels, scaled at the carve like the rest.
   the platform's declaration `thylacine.scale=<pct>` (section 3) as the
   derived scale's first source, so a HiDPI guest boots at 2.0 without the
   four chords; `scale auto` returns to the declaration, not the EDID.
+  (Since 2026-11-12 a fitted mode carries the declaration by its factor:
+  section 3.)

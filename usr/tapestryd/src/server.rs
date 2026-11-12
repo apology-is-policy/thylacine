@@ -1707,6 +1707,12 @@ pub struct Comp {
     /// display whose EDID cannot say, QEMU's, or lies). None = the EDID
     /// derives. Never written after probe.
     declared: Option<u16>,
+    /// The host's rect the standing mode was fitted from (`fit_mode`: at
+    /// probe, and whenever the host is followed), None for a mode asked for
+    /// by size. A declared scale is the display's, so it is carried through
+    /// a fitted mode by the fit's factor (`display::carried_pct`) and kept
+    /// as it is by a mode nobody fitted.
+    fitted_from: Option<(u32, u32)>,
     /// `Metrics::at(scale)`: the ONE table every carve and paint here reads
     /// (halcyond reads the same function at the same percent).
     pub metrics: Metrics,
@@ -2661,17 +2667,19 @@ impl Comp {
         // cannot be made would come up with a screen and no session on it,
         // so the first mode is found as `mode auto` finds one.
         let host = (gpu.width, gpu.height);
-        let first = display::fit_mode(host.0, host.1, |w, h| {
+        let fitted = display::fit_mode(host.0, host.1, |w, h| {
             mode_in_bounds(w, h) && mode_can_be_made(w, h)
-        })
-        .unwrap_or(MODE_DEFAULT);
+        });
+        let first = fitted.unwrap_or(MODE_DEFAULT);
         if first != host {
             say!("tapestryd: mode {}x{} for a display of {}x{}", first.0, first.1, host.0, host.1);
             gpu.width = first.0;
             gpu.height = first.1;
         }
+        // The default mode is no fit of the host's rect, so it carries nothing.
+        let fitted_from = fitted.map(|_| host);
         let (derived, src) = match declared {
-            Some(p) => (p, "declared"),
+            Some(p) => (display::carried_pct(fitted_from, first, p), "declared"),
             None => (
                 match gpu.edid_mm {
                     Some((mm_w, mm_h)) => scale::scale_pct(gpu.width, gpu.height, mm_w, mm_h),
@@ -2700,6 +2708,7 @@ impl Comp {
             scale,
             scale_override: None,
             declared,
+            fitted_from,
             metrics: bundle.at(scale).metrics,
             theme,
             bundle,
@@ -4760,7 +4769,8 @@ impl Comp {
         Some(p.content)
     }
 
-    /// HALCYON-SCALE 3: the platform's declaration while one stands, else
+    /// HALCYON-SCALE 3: the platform's declaration while one stands, carried
+    /// to the standing mode if that was fitted from the host's rect, else
     /// the scale the display's EDID implies for its current pixel geometry
     /// (100 without one). An EDID that may not be this display's is asked
     /// for again first; while it is not answered, the scale last derived
@@ -4768,7 +4778,7 @@ impl Comp {
     /// and the scale that stands may be an override's.
     fn derive_scale(&mut self) -> u16 {
         if let Some(p) = self.declared {
-            return p;
+            return display::carried_pct(self.fitted_from, (self.gpu.width, self.gpu.height), p);
         }
         if self.edid_stale && self.gpu.engine == Engine::Live {
             self.read_edid();
@@ -6246,7 +6256,12 @@ impl Comp {
         if !mode_can_be_made(w, h) {
             return Err(p9::E_NOMEM);
         }
-        self.change_mode(w, h)
+        self.change_mode(w, h)?;
+        // A mode asked for by size is nobody's fit. (The push of the mode
+        // that stands, above, changes nothing: that one is still whose fit
+        // it was.)
+        self.fitted_from = None;
+        Ok(())
     }
 
     /// The mode for a host that prefers `host_w x host_h`: that size, or it
@@ -6333,6 +6348,7 @@ impl Comp {
         // From here the mode is the one for the host: what fails now is
         // owed, not refused. The EDID held is the display's that was until
         // this one's is read, and nothing derives a scale from it meanwhile.
+        self.fitted_from = Some((host_w, host_h));
         self.edid_stale = true;
         if !self.composed_bind_holds() {
             return Followed::Unfinished(E_IO);

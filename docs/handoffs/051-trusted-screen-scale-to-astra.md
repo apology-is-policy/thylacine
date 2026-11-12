@@ -78,7 +78,8 @@ each way, so the two sets agree in their faces' means and not pixel for pixel).
 The change had an audit round (Opus 5.5 reviewing; no P0, P1 or P2, seven P3). What it changed
 is in this note as it now reads: the second scale `draw` used to take became the test-only
 switch, the full-screen test got a bound of its own for the type, the sets got their hashes, and
-the guest scenario was written. One finding is about the session and not this screen, and is
-open: tapestryd does not carry a declared scale through a mode it fitted to half its host, so at
-such a size the session is at twice the scale this screen is drawn at, and this screen's reading
-is the right one.
+the guest scenario was written. One finding was about the session and not this screen: tapestryd
+did not carry a declared scale through a mode it fitted to half its host, so at such a size the
+session was at twice the scale this screen is drawn at. This screen's reading was the right one
+and the session has it now (`libhalcyon::display::carried_pct`, HALCYON-SCALE.md 3 as amended
+2026-11-12); `tools/interactive/ls-halcyon-scale-fitted.exp` reads both lines in one boot.

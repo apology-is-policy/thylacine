@@ -52,6 +52,20 @@ pub fn step(pct: u16, dir: i8) -> u16 {
     }
 }
 
+/// The nearest of the five values to any percent: round half up to a step,
+/// then into the range. For a percent that was worked out, not chosen.
+pub const fn nearest_pct(pct: u16) -> u16 {
+    let step = SCALE_STEP as u32;
+    let snapped = (2 * pct as u32 + step) / (2 * step) * step;
+    if snapped < SCALE_MIN as u32 {
+        SCALE_MIN
+    } else if snapped > SCALE_MAX as u32 {
+        SCALE_MAX
+    } else {
+        snapped as u16
+    }
+}
+
 /// The scale for a `px_w x px_h` scanout of `mm_w x mm_h` millimetres:
 /// each axis' DPI snapped to the nearest 0.25 of the reference, the
 /// SMALLER of the two (a monitor lying about one axis must not blow the
@@ -239,6 +253,25 @@ mod tests {
         assert_eq!(step(100, -1), 100, "clamped at the bottom");
         assert_eq!(step(150, 0), 150);
         assert_eq!(step(7, 1), 125, "an invalid current counts as 100");
+    }
+
+    #[test]
+    fn any_percent_has_a_nearest_of_the_five() {
+        // Every percent there is lands on one of the five, and each of them on itself.
+        for p in 0..=u16::MAX {
+            assert!(is_valid_pct(nearest_pct(p)), "{}", p);
+        }
+        for p in [100u16, 125, 150, 175, 200] {
+            assert_eq!(nearest_pct(p), p);
+        }
+        // Half a step is 12.5: 112 is nearer 100, 113 nearer 125, and so at each boundary.
+        assert_eq!((nearest_pct(112), nearest_pct(113)), (100, 125));
+        assert_eq!((nearest_pct(137), nearest_pct(138)), (125, 150));
+        assert_eq!((nearest_pct(162), nearest_pct(163)), (150, 175));
+        assert_eq!((nearest_pct(187), nearest_pct(188)), (175, 200));
+        // Outside the range it is the end of it.
+        assert_eq!((nearest_pct(0), nearest_pct(75), nearest_pct(99)), (100, 100, 100));
+        assert_eq!((nearest_pct(213), nearest_pct(250), nearest_pct(u16::MAX)), (200, 200, 200));
     }
 
     #[test]

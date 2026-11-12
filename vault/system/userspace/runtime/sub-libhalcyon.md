@@ -635,8 +635,15 @@ for the display whose EDID cannot say (QEMU's synthetic one) or lies; a token
 that is not one of the five values is `Declared::Invalid`, said once and
 ignored, and the EDID stands.
 
-**Tests.** 7 host tests: the operator's snap rule, the five values and their
-steps, the pixel helpers' rounding, the EDID parse's fail-safe arms, an aspect
+**`nearest_pct(pct)`** is the nearest of the five values to any percent: round
+half up to a step of 25, then into 100..=200. It is for a percent that was
+worked out and not chosen, which is `display::carried_pct`'s; a percent a
+person gives is still refused when it is not one of the five. The sum is made
+in `u32`, so the largest `u16` there is lands on 200.
+
+**Tests.** 8 host tests: the operator's snap rule, the five values and their
+steps, every `u16` having a nearest of the five with each boundary between two
+of them, the pixel helpers' rounding, the EDID parse's fail-safe arms, an aspect
 ratio where the size goes being no size (and a size a millimetre off one being
 a size), a short
 millimetre axis never truncating off the table (the clamp-ordering regression),
@@ -657,9 +664,9 @@ host's size has a zero side. The caller's `can` is its own bound: the
 compositor's is the mode's range and a probe allocation of a screen and one
 full-screen surface held together, Lictor's is `render::fits`. The factor is whole on purpose: the host
 shows a guest pixel as k by k of its own (or k by k of the guest's as one), so
-nothing is filtered, and the scale needs no rule here, because the EDID's
-millimetres under half the pixels are half the DPI and `scale_pct` halves by
-itself. A division that reaches zero is never offered to `can`; a product past
+nothing is filtered, and a scale from the EDID needs no rule here, because the
+EDID's millimetres under half the pixels are half the DPI and `scale_pct`
+halves by itself (a declared scale has `carried_pct`, below). A division that reaches zero is never offered to `can`; a product past
 `u32` is skipped. The largest size a display is taken to report, 8192 a side,
 is 2048 at a quarter, which is why the factor stops at 4.
 
@@ -670,7 +677,19 @@ ratio of the two widths; with none declared it is what the display's
 millimetres make of the screen's own pixels; with neither it is 100. A screen
 made at half its display's size is at half its display's scale. It is not held
 to the session's five values: [[sub-lictor]] rounds it to a whole scale for its
-trusted screen, and is its only caller.
+trusted screen, and `carried_pct` brings it to one of the five.
+
+**`carried_pct(fitted_from, own, declared)`** is the scale a session derives
+while its platform declares one (`docs/HALCYON-SCALE.md` 3 as amended
+2026-11-12). The declaration is the display's. For a mode fitted from a host's
+rect (`fitted_from` is that rect) it is `scale::nearest_pct` of `own_pct`: the
+declaration by the fit's factor, and one of the five, so half a display
+declared at 200 is 100, never under 100 and never over 200. The rounding is
+needed and not only the range: a host of an odd width halves to a mode a pixel
+short of half, and 200 carried to it is 99. For a mode nobody fitted (`None`:
+one asked for by size) it is the declaration as it is, on the reading that such
+a mode is shown pixel for pixel. [[sub-tapestryd]] is its only caller, at its
+boot and in `derive_scale`.
 
 **`Follow`** is the timing. The device's driver counts the display events it
 takes; a compositor hands that count and a millisecond clock to `step` once a
@@ -718,8 +737,11 @@ at 6) and stays there; `reset` starts it afresh. It never gives up. Its caller
 decides when there is no point in trying, which for the compositor is a dead
 device.
 
-**Tests.** 11 host tests: a screen's scale each way it is known, at half and at
-twice its display's size, and with a display that has no width (`own_pct`);
+**Tests.** 12 host tests: a screen's scale each way it is known, at half and at
+twice its display's size, and with a display that has no width (`own_pct`); a
+declared scale through a fitted mode at its host's size, under it and over it,
+with an odd width and a factor that is not whole, and kept by a mode asked for
+by size (`carried_pct`);
 the fitted sizes for the Macs' full screens and for
 Lictor's limits, the order of the factors, and the refusals; an event followed
 at exactly the quiet time and once; a train; the wrap and a first count that is

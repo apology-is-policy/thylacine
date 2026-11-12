@@ -1,0 +1,111 @@
+#!/usr/bin/expect -f
+# ls-halcyon-scale-fitted -- a declared scale is carried through a fitted mode.
+#
+# The device is given a 5120x2880 display, which is no mode (a mode is at most
+# 3840x2160), and thylacine.scale=200 is on the kernel's command line. The
+# compositor fits the mode 2560x1440, half the display each way, and the host
+# makes up the factor when it shows it. The declaration is the display's, so
+# the session's scale for that mode is 100 (HALCYON-SCALE.md 3), which is what
+# Lictor's trusted screen reads for it too. Three things are read:
+#
+#   the boot's lines: the fitted mode, the scale said beside it, and Lictor's
+#   line of its screen. They are said before the login prompt, so they are
+#   looked for in the transcript;
+#
+#   the session's size;
+#
+#   a scale derived again while the session runs. Super+= steps it to 125 and
+#   Super+0 asks for the derived scale: 100 again, not the 200 declared. The
+#   boot and the reset derive in two places, and this is the second's test.
+#
+# Requires HALCYON_SESSION=y: the chords are the session compositor's.
+set ::env(THYLACINE_ACCEL) [expr {[info exists ::env(LS_CI_GFX_ACCEL)] ? $::env(LS_CI_GFX_ACCEL) : "hvf"}]
+set ::env(THYLACINE_SERIAL_SAK) 0
+set ::env(THYLACINE_GPU_RES) 5120x2880
+set ::env(THYLACINE_SCALE) 200
+catch {unset ::env(THYLACINE_HIDPI)}
+source [file join [file dirname [info script]] lib.exp]
+set repo $lc_repo
+set qmp [lc_qmp_sock]
+
+lc_require_image {SESSION}
+
+set transcript /tmp/ls-halcyon-scale-fitted-[pid].log
+catch {file delete -force $transcript}
+log_file -a $transcript
+
+lc_boot
+set timeout $lc_boot_timeout
+expect {
+    -ex "Thylacine login: " {}
+    -re {EXTINCTION:} { lc_extinction_fail "boot" }
+    timeout { lc_fail "no login" }
+    eof { lc_fail "EOF before login" }
+}
+lc_raw_send "michael\r" "login user"
+expect {
+    -ex "password: " {}
+    timeout { lc_fail "no password prompt" }
+    eof { lc_fail "EOF before password" }
+}
+lc_raw_send "correct-horse-battery-staple-v1\r" "login password"
+set timeout 60
+expect {
+    -re {halcyond: session up 2560x1440 px} { lc_step "the session is up on the fitted mode, 2560x1440" }
+    -re {halcyond: session up [^\r\n]*} { lc_fail "the session is not on the mode this scenario fits: $expect_out(0,string)" }
+    -re {halcyond: FAIL session[^\r\n]*} { lc_fail "the session failed: $expect_out(0,string)" }
+    -ex "Thylacine textual shell" { lc_fail "login gave a shell on an image whose bake record says SESSION" }
+    -re {EXTINCTION:} { lc_extinction_fail "session" }
+    timeout { lc_fail "no graphical session" }
+    eof { lc_fail "EOF at session start" }
+}
+
+# The boot's lines, each exactly and once. Closing the transcript writes out
+# what expect still holds of it.
+set lines {
+    "tapestryd: mode 2560x1440 for a display of 5120x2880"
+    "tapestryd: scale 100 (declared)"
+    "lictor: trusted screen 2560x1440 at 1x for a display of 5120x2880"
+}
+log_file
+set counts {}
+foreach want $lines {
+    if {[catch {exec grep -a -c -F -- $want $transcript} said]} { set said 0 }
+    lappend counts $said
+}
+if {[catch {exec grep -a -o -E {(tapestryd: (mode|scale) |lictor: trusted screen)[ -~]*} $transcript} others]} { set others "nothing" }
+log_file -a $transcript
+foreach want $lines said $counts {
+    if {$said != 1} {
+        lc_fail "the boot did not say, once: $want (it said: [join [split $others "\n"] {; }])"
+    }
+}
+lc_pass "the fitted mode carries the declared scale: 2560x1440 at 100 for a display of 5120x2880 declared at 200, and Lictor's screen at one"
+
+# The scale derived again, from where the session stands.
+after 6000
+if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -k "meta_l+equal"} e]} { lc_fail $e }
+set timeout 20
+expect {
+    -re {tapestryd: scale (\d+) -> (\d+) \(chord\)} {
+        if {$expect_out(1,string) != 100 || $expect_out(2,string) != 125} {
+            lc_fail "Super+= stepped $expect_out(1,string) -> $expect_out(2,string), want 100 -> 125"
+        }
+    }
+    timeout { lc_fail "Super+= never changed the scale" }
+    eof { lc_fail "EOF at the scale step" }
+}
+lc_step "Super+= stepped the scale 100 -> 125"
+if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -k "meta_l+0"} e]} { lc_fail $e }
+expect {
+    -re {tapestryd: scale (\d+) -> (\d+) \(chord-reset\)} {
+        if {$expect_out(1,string) != 125 || $expect_out(2,string) != 100} {
+            lc_fail "the scale derived again is $expect_out(2,string) (from $expect_out(1,string)), want 100: the declared 200 is the display's, and the mode is half of it"
+        }
+    }
+    timeout { lc_fail "Super+0 never reset the scale" }
+    eof { lc_fail "EOF at the scale reset" }
+}
+catch {file delete -force $transcript}
+lc_pass "a declared scale through a fitted mode: the boot's lines, the session's size, the scale derived again"
+lc_quit

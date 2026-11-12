@@ -24,6 +24,20 @@ pub fn own_pct(host: (u32, u32), own: (u32, u32), declared: Option<u16>, mm: Opt
     }
 }
 
+/// The scale a session derives while its platform DECLARES one, for a mode
+/// of `own` pixels. The declaration is the display's. A mode that was fitted
+/// from a host's rect (`fitted_from`) is that rect over or times a whole
+/// number, so the declaration is carried by the same factor and brought back
+/// to one of the five values: a mode at half its host's size under a
+/// declared 200 is at 100. A mode nobody fitted (None: one asked for by
+/// size) is taken to be shown pixel for pixel, and keeps the declaration.
+pub fn carried_pct(fitted_from: Option<(u32, u32)>, own: (u32, u32), declared: u16) -> u16 {
+    match fitted_from {
+        Some(host) => crate::scale::nearest_pct(own_pct(host, own, Some(declared), None)),
+        None => declared,
+    }
+}
+
 /// The largest whole number `fit_mode` divides or multiplies a host's size
 /// by. 8192 a side, the most a display is taken to report, is 2048 at 4.
 pub const FIT_MAX_FACTOR: u32 = 4;
@@ -319,6 +333,35 @@ mod tests {
         // A display with no width declares for itself; nothing overflows.
         assert_eq!(own_pct((0, 0), (1280, 800), Some(150), None), 150);
         assert_eq!(own_pct((1, 1), (u32::MAX, u32::MAX), Some(200), None), u16::MAX);
+    }
+
+    #[test]
+    fn a_declared_scale_is_carried_through_a_fitted_mode_and_kept_by_one_asked_for() {
+        // At its host's own size a fitted mode has the declaration, each of the five.
+        for pct in [100, 125, 150, 175, 200] {
+            assert_eq!(carried_pct(Some((2560, 1600)), (2560, 1600), pct), pct);
+        }
+        // The host over a whole number: the declaration over it, never under 100.
+        assert_eq!(carried_pct(Some((5120, 2880)), (2560, 1440), 200), 100);
+        assert_eq!(carried_pct(Some((7680, 4320)), (2560, 1440), 200), 100);
+        assert_eq!(carried_pct(Some((5120, 2880)), (2560, 1440), 150), 100);
+        // A host of an odd width halves to a mode a pixel short of half: still 100, not 75.
+        assert_eq!(own_pct((5121, 2880), (2560, 1440), Some(200), None), 99);
+        assert_eq!(carried_pct(Some((5121, 2880)), (2560, 1440), 200), 100);
+        // The host times a whole number: the declaration times it, never over 200.
+        assert_eq!(carried_pct(Some((640, 400)), (1280, 800), 100), 200);
+        assert_eq!(carried_pct(Some((640, 400)), (1920, 1200), 100), 200);
+        assert_eq!(carried_pct(Some((640, 400)), (1280, 800), 125), 200);
+        // What is carried is one of the five: 175 over 1.5 is 116, which is 125.
+        assert_eq!(own_pct((3840, 2400), (2560, 1600), Some(175), None), 116);
+        assert_eq!(carried_pct(Some((3840, 2400)), (2560, 1600), 175), 125);
+        // A host with no width is no factor: the declaration.
+        assert_eq!(carried_pct(Some((0, 0)), (1280, 800), 150), 150);
+        assert_eq!(carried_pct(Some((1, 1)), (u32::MAX, u32::MAX), 200), 200);
+        // A mode asked for by size keeps the declaration whatever its size.
+        assert_eq!(carried_pct(None, (2560, 1440), 200), 200);
+        assert_eq!(carried_pct(None, (1280, 800), 200), 200);
+        assert_eq!(carried_pct(None, (5120, 2880), 100), 100);
     }
 
     #[test]
