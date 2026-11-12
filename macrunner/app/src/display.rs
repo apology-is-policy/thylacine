@@ -690,8 +690,8 @@ impl Monitor {
 // A tablet's axis runs from 0 to this whatever the screen's size (QEMU's INPUT_EVENT_ABS_MAX).
 const AXIS_MAX: u64 = 0x7fff;
 // The display device the pointer's events are addressed to. A tablet bound to it (`display=gpu0`
-// on the tablet, tools/run-vm.sh) takes all of an event; with none bound QEMU picks a device for
-// each part, the tablet for a place and whichever pointer device came up last for a button.
+// on the tablet, tools/run-vm.sh) takes all of an event; with none bound a place goes to the
+// tablet and a button to the pointer device that came up last, whose report QEMU hands over first.
 const SCREEN: &str = "gpu0";
 // QEMU's names for the buttons, by the numbers the view counts them in (InputButton's order).
 const BUTTONS: [&str; 7] = [
@@ -716,8 +716,8 @@ fn axis(p: u32, n: u32) -> u64 {
 }
 const _: () = assert!(MAX_SIDE as u64 - 1 <= AXIS_MAX);
 
-// One input-send-event command: a place, a button going down or up, or both. QEMU hands the guest
-// what one command holds as one report, so a press cannot be seen before the move to its place.
+// One input-send-event command: a place, a button going down or up, or both. A tablet bound to
+// the display is handed all of it as one report: its driver cannot see a press before its place.
 fn pointer_event(to_screen: bool, at: Option<Place>, button: Option<(&str, bool)>) -> String {
     let mut events = Vec::new();
     if let Some(p) = at {

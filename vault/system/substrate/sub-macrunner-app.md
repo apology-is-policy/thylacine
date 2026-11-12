@@ -109,7 +109,8 @@ between. It does not start QEMU yet: it attaches to one that runs with
   `THYLACINE_DISPLAY=app`) a press, a release or a notch reaches the tablet's
   driver as one report with its place. With the tablet bound to nothing QEMU
   hands the place to the tablet and the button to the pointer device whose
-  driver came up last, which in a guest of ours is the mouse. A QEMU with no
+  driver came up last, which in a guest of ours is the mouse, and the button
+  first: there a press is not kept behind the move to its place. A QEMU with no
   device of that name is found out at the attach, said once, and sent its
   events unaddressed. Over the letterbox bars nothing is the guest's: a move,
   a press and a scroll there send nothing. A release is sent exactly when its
@@ -175,8 +176,16 @@ where the display connection makes one of a pixel as `x * 0x7fff / width`,
 which the compositor's `ax * (W - 1) / 32767` brings back a pixel short
 nearly everywhere (10 of 1280 as 9, the last column as 1277: OPEN-BUGS
 2026-11-12T08:49Z, a defect of every QEMU frontend against that line). And
-what one command holds reaches the guest as one report, so a press cannot be
-seen before the move to its place. `axis` is exact only against that one line
+what one command holds reaches a tablet bound to the display as one report:
+its driver cannot see a press before the move to its place, and a report QEMU
+has no room for (it drops a whole one) takes the press with its place, where
+two commands could lose the place and keep the press. That is the bound
+machine's alone. With the tablet bound to nothing the one command is two
+reports on two devices, and QEMU hands each device its report in the order
+the drivers came up in, last first: the mouse's button, then the tablet's
+place (seen in QEMU's trace of its queues, 10.0.2 and 11.1.3). Nothing
+orders two devices for a guest, so the app does not try to: the launcher
+binds the tablet. `axis` is exact only against that one line
 of the compositor; a unit test reads `usr/tapestryd/src/main.rs` and fails
 when the line is no longer there.
 
@@ -530,6 +539,15 @@ every step of a drag is a mode the guest sets at every step.
   tablet's driver is handed, on QEMU 10.0.2 and 11.1.3. That the compositor
   takes a button from the tablet was read in its source
   (`usr/tapestryd/src/main.rs`, the tablet's drain), not seen.
+- **On a machine whose tablet is bound to nothing a press can be seen before
+  its place.** The button's report is the mouse's and is handed over before
+  the tablet's with the place, and a compositor that reads its devices
+  between the two acts on the press where the pointer was. It matters only
+  for a press at a place the pointer was not already at (a move is sent for
+  every move of the Mac's pointer over the picture, so in use it nearly
+  always was). The app does not find out whether the tablet is bound and
+  says nothing of it; `tools/run-vm.sh` binds it under `THYLACINE_DISPLAY=app`,
+  and `--attach` to any other machine has this.
 - **The monitor is the app's while it runs**, and a stopped machine refuses
   the pointer: the app logs it and the window says nothing.
 - **`THYLACINE_ECHO_POINTER=1`** prints each place the guest says its pointer
