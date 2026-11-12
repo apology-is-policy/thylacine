@@ -1,40 +1,50 @@
 #!/usr/bin/expect -f
 # tools/interactive/ls-display-follow-declared.exp -- a declared scale through
-# every way the compositor comes by a mode (HALCYON-SCALE.md section 3 and
-# AURORA-CONFIG.md section 3.4, as amended 2026-11-12).
+# every way the compositor comes by a mode, and through a display that changes
+# under a mode that stands (HALCYON-SCALE.md section 3 and AURORA-CONFIG.md
+# section 3.4, as amended 2026-11-12).
 #
 # One boot of the gate image (`tools/build.sh kernel --config ci`: the settings
 # panel that asks for a mode by size is the console renderer's). The platform
 # declares 200 percent for a display of 3456x2160, which cannot be a mode. The
-# declaration is the display's: a mode the compositor fitted carries it by the
-# mode's width over the display's, and a mode asked for by size keeps it as it
-# is. Each leg reads the compositor's own line for the scale and the size of
-# the scanout QEMU dumps:
+# declaration is the display's, and the display is the host's rect as the
+# compositor last read it: whoever chose the mode, it carries the declaration
+# by its size over the rect's, the side that fills the rect deciding. Each leg
+# reads the compositor's own line for the scale and the size of the scanout
+# QEMU dumps:
 #
 #   the boot:    the first mode is half the display, and the scale is 100.
 #   a follow:    the host becomes 2000x1280 (a VNC viewer's resize, as in
 #                ls-display-follow), which can be a mode: the scale is 200.
-#                This leg knows whether a follow records the display its mode
-#                was fitted from. Carried from the boot's display the scale
-#                would be 125.
-#   a follow:    the host becomes 5120x2880 and the mode half of it: 100.
-#   by size:     the settings panel asks for 1600x900: 200. This leg knows
-#                whether a mode asked for by size forgets the fit before it.
-#                Carried from 5120x2880 the scale would stay 100.
-#   auto again:  the panel asks for `mode auto`. The mode is half the display
-#                again and the scale 100.
+#                This leg knows whether a follow records the display it read.
+#                Carried from the boot's display the scale would be 125.
+#   by size:     the settings panel asks for 1024x768. It is shown whole on
+#                2000x1280, so its 768 rows fill the 1280: 200 times 0.6 is
+#                120, and the nearest scale is 125. This leg knows whether a
+#                mode asked for by size is carried at all (kept as declared it
+#                would stay 200) and by which side (by its width, 100).
+#   under a pin: the host becomes 1600x1000. The mode is pinned and stands,
+#                and its display is read: 768 rows of 1000 at 200 is 153,
+#                which is 150. This leg knows whether a display event under a
+#                pinned mode reaches the scale. Not read, it would stay 125.
+#   auto again:  the panel asks for `mode auto`. The mode is the display's own
+#                size and the scale 200, and the compositor says it follows
+#                the host again.
+#   a follow:    the host becomes 5120x2880 and the mode half of it: 100. This
+#                leg knows that the following did resume.
 #
-# NOT asserted: the console's cells and its redraw (ls-display-follow's); what
-# a mode asked for by size should be under a host that scales it to a window
-# (this holds section 3 as it reads today); the `scale auto` verb, which no
-# program in the tree sends; a follow whose EDID is not answered.
+# NOT asserted: the console's cells and its redraw (ls-display-follow's); the
+# `scale auto` verb, which no program in the tree sends; a follow, or a read
+# under a pin, whose EDID is not answered; a host that shows a mode smaller
+# than its rect a pixel to a pixel and still reports the rect.
 #
-# The panel writes the mode it applied to this pool's /lib/aurora/config. When
-# the leg by size fails one of its own two checks, the panel is asked for auto
-# before the failure is reported, so that a later boot of the pool is not
-# pinned. Any other failure between that leg and the end of the next leaves
-# 1600x900 there until the pool is made again; a run on such a pool fails its
-# first follow, by the compositor's line that the mode is pinned.
+# The panel writes the mode it applied to this pool's /lib/aurora/config. From
+# the leg by size to the end of the leg that asks for auto, a failure of a
+# leg's own check asks the panel for auto, waits for the compositor to say it
+# was taken, and says in its report whether the pool is left pinned. A line
+# that must not be said in any wait fails at once, and says so too. A run on a
+# pool left pinned fails its first follow, by the compositor's line that the
+# mode is pinned.
 #
 # HVF like its ls-gfx siblings.
 
@@ -64,25 +74,40 @@ proc key {chord} {
 # The compositor's line for a scale that changed, read whole: the pattern ends
 # with the line's last character, so a line still arriving is not read short.
 # Answers what is wrong, or nothing: the caller may have a panel to put back
-# before it fails.
-proc scale_went {from to label} {
+# before it fails. `why` is the reason the line gives: `mode` for a mode that
+# changed, `display` for a display that changed under a mode that stands.
+proc scale_went {from to why label} {
     global timeout
     set ::what "the scale $label"
     set timeout 30
     expect {
         -re {tapestryd: scale (\d+) -> (\d+) \(([a-z-]+)\)} {
             set got "$expect_out(1,string) -> $expect_out(2,string) ($expect_out(3,string))"
-            if {$got ne "$from -> $to (mode)"} {
-                return "the scale went $got $label, want $from -> $to (mode)"
+            if {$got ne "$from -> $to ($why)"} {
+                return "the scale went $got $label, want $from -> $to ($why)"
             }
             lc_step "saw: the scale went $got $label"
             return ""
         }
         -re {tapestryd: display event \d+: followed, \d+x\d+ at (\d+)%} {
-            return "the event was followed at $expect_out(1,string)% and the scale did not change $label, want $from -> $to (mode)"
+            return "the event was followed at $expect_out(1,string)% and the scale did not change $label, want $from -> $to ($why)"
         }
-        timeout { return "the scale did not change in 30 s $label, want $from -> $to (mode)" }
+        -re {tapestryd: display event \d+: \d+x\d+ at (\d+)% on a display of \d+x\d+[\r\n]} {
+            return "the display was read at $expect_out(1,string)% and the scale did not change $label, want $from -> $to ($why)"
+        }
+        timeout { return "the scale did not change in 30 s $label, want $from -> $to ($why)" }
         eof     { lc_fail "qemu exited while waiting for the scale $label" }
+    }
+}
+# follow_expect, answering what is wrong instead of failing.
+proc said {re label} {
+    global timeout
+    set ::what $label
+    set timeout 30
+    expect {
+        -re $re { lc_step "saw: $label"; return "" }
+        timeout { return "timeout (30s) waiting for \[$re\] during '$label'" }
+        eof     { lc_fail "qemu exited during '$label'" }
     }
 }
 # wait_dims, answering what is wrong instead of failing.
@@ -98,29 +123,59 @@ proc dims_are {want label} {
     }
     return "the scanout never became $want with a picture on it ($label; last: width height colours = $d; $::dims_why)"
 }
-# The panel is open on its mode row with 1600x900 chosen, four to the right
-# of auto.
-proc panel_auto {} {
-    key "left"
-    key "left"
-    key "left"
+# The compositor's line for a `mode auto` it took: the mode follows the host
+# again, and the panel has written auto to the pool.
+set auto_taken {tapestryd: mode auto: (\d+x\d+) at (\d+)%, following the host[\r\n]}
+# What a failure says of the pool, while this run has it pinned.
+set pinned_by_me 0
+proc pool_note {} {
+    if {$::pinned_by_me} {
+        return "; this pool's /lib/aurora/config is LEFT PINNED at 1024x768: make the pool again before the next run"
+    }
+    return ""
+}
+# The panel is open on its mode row with 1024x768 chosen, one to the right of
+# auto. Ask it for auto, wait for the compositor to take it, and fail with
+# what went wrong and what became of the pool.
+proc unpin_and_fail {err} {
+    global timeout auto_taken
     key "left"
     key "ret"
+    set ::what "putting the pool back to auto"
+    set timeout 20
+    set pool "the panel was asked for auto and the compositor did not say it took it: this pool's /lib/aurora/config may be LEFT PINNED at 1024x768"
+    # No wait here may fail by itself: the report below is the failure.
+    expect_before
+    expect {
+        -re $auto_taken { set pool "the pool was put back to auto" }
+        timeout { }
+        eof     { }
+    }
+    key "esc"
+    lc_fail "$err; $pool"
 }
 
 # ---------- the boot: half the display, at half the declaration ----------
 lc_boot
 # What must not be said, in every wait of the run (as in ls-display-follow).
+# The leg under a pin expects the compositor's line that the mode is pinned.
 set what "the boot"
+set pin_expected 0
 expect_before {
-    -re {tapestryd: [^\r\n]*t_dma_create_weave\((\d+)\) failed -?\d+} { lc_fail "a surface or a screen could not be allocated during '$::what': $expect_out(0,string)" }
-    -re {tapestryd: mode rebind failed; old geometry retained} { lc_fail "the scanout was not rebound during '$::what'" }
-    -re {tapestryd: mode (\d+x\d+) is set; the display is not bound to its screen} { lc_fail "mode $expect_out(1,string) was set and the device is not known to scan its screen, during '$::what'" }
-    -re {tapestryd: mode (\d+x\d+) refused -- (screen|surface) weave} { lc_fail "$expect_out(1,string) could not be allocated ($expect_out(2,string)) during '$::what'" }
-    -re {tapestryd: no mode for a display of (\d+x\d+);} { lc_fail "no mode was found for a host of $expect_out(1,string) during '$::what'" }
-    -re {tapestryd: display event \d+: not followed[^\r\n]*[\r\n]} { lc_fail "during '$::what': [string trim $expect_out(0,string)]" }
-    -re {tapestryd: display event \d+: the mode is \d+x\d+, not finished[^\r\n]*[\r\n]} { lc_fail "during '$::what': [string trim $expect_out(0,string)]" }
-    -re {tapestryd: display event \d+: the mode is pinned and stands} { lc_fail "the mode is pinned during '$::what': this pool's /lib/aurora/config holds a fixed mode" }
+    -re {tapestryd: [^\r\n]*t_dma_create_weave\((\d+)\) failed -?\d+} { lc_fail "a surface or a screen could not be allocated during '$::what': $expect_out(0,string)[pool_note]" }
+    -re {tapestryd: mode rebind failed; old geometry retained} { lc_fail "the scanout was not rebound during '$::what'[pool_note]" }
+    -re {tapestryd: mode (\d+x\d+) is set; the display is not bound to its screen} { lc_fail "mode $expect_out(1,string) was set and the device is not known to scan its screen, during '$::what'[pool_note]" }
+    -re {tapestryd: mode (\d+x\d+) refused -- (screen|surface) weave} { lc_fail "$expect_out(1,string) could not be allocated ($expect_out(2,string)) during '$::what'[pool_note]" }
+    -re {tapestryd: no mode for a display of (\d+x\d+);} { lc_fail "no mode was found for a host of $expect_out(1,string) during '$::what'[pool_note]" }
+    -re {tapestryd: display event \d+: (not followed|its display not read)[^\r\n]*[\r\n]} { lc_fail "during '$::what': [string trim $expect_out(0,string)][pool_note]" }
+    -re {tapestryd: display event \d+: the mode is \d+x\d+, not finished[^\r\n]*[\r\n]} { lc_fail "during '$::what': [string trim $expect_out(0,string)][pool_note]" }
+    -re {tapestryd: display event \d+: the mode is pinned and stands[\r\n]} {
+        if {!$::pin_expected} {
+            lc_fail "the mode is pinned during '$::what': this pool's /lib/aurora/config holds a fixed mode"
+        }
+        lc_step "saw: the pinned mode stands"
+        exp_continue
+    }
     -re {EXTINCTION:} { lc_extinction_fail "extinction during '$::what'" }
 }
 set timeout $lc_boot_timeout
@@ -154,60 +209,89 @@ lc_pass "declared: half a display of 3456x2160 boots at 100, half the 200 declar
 tell 2000x1280
 follow_expect {tapestryd: display event \d+: asking the host} "the event is taken up"
 follow_expect [up 2000x1280] "a size that can be a mode is the mode"
-set err [scale_went 100 200 "after the host became 2000x1280"]
+set err [scale_went 100 200 mode "after the host became 2000x1280"]
 if {$err ne ""} { lc_fail "$err: a follow carries the declaration by the display it has now" }
 follow_expect {tapestryd: display event \d+: followed, 2000x1280 at 200%} "the event is followed, at 200"
 wait_dims "2000 1280" "followed to 2000x1280"
 lc_pass "declared: a display that is its own mode has the scale declared (200 at 2000x1280)"
 
-# ---------- a follow to a size that is halved ----------
+# ---------- a mode asked for by size is carried too ----------
+# F10 -> Tab (the mode row) -> Right (auto -> 1024x768) -> Enter:
+# ls-gfx-mode's recipe.
+key "f10"
+key "tab"
+key "right"
+set pinned_by_me 1
+key "ret"
+set err [said {tapestryd: mode 1024x768 is up \(scanout [a-z]+\)} "the panel's mode is up"]
+if {$err eq ""} {
+    set err [scale_went 200 125 mode "after 1024x768 was asked for by size"]
+    if {$err ne ""} {
+        set err "$err: a mode asked for by size is shown whole on its display, and 768 rows of 1280 at 200 is 120, which is 125"
+    }
+}
+if {$err eq ""} { set err [dims_are "1024 768" "the mode asked for by size"] }
+if {$err ne ""} { unpin_and_fail $err }
+lc_pass "declared: a mode asked for by size is carried by its size over the display's (125 at 1024x768 on 2000x1280)"
+
+# ---------- the display changes under the pinned mode ----------
+set pin_expected 1
+tell 1600x1000
+set err [scale_went 125 150 display "after the host became 1600x1000 under the pinned mode"]
+if {$err ne ""} {
+    set err "$err: the mode stands and its display is read, and 768 rows of 1000 at 200 is 153, which is 150"
+} else {
+    set err [said {tapestryd: display event \d+: 1024x768 at 150% on a display of 1600x1000[\r\n]} "the pinned mode's display is read"]
+}
+if {$err eq ""} { set err [dims_are "1024 768" "the pinned mode stands"] }
+if {$err ne ""} { unpin_and_fail $err }
+lc_pass "declared: a display that changes under a pinned mode changes the scale and not the mode (150 at 1024x768 on 1600x1000)"
+
+# ---------- mode auto fits again, and follows again ----------
+key "left"
+key "ret"
+set err [said {tapestryd: mode 1600x1000 is up \(scanout [a-z]+\)} "mode auto takes the display's own size"]
+if {$err eq ""} {
+    set err [scale_went 150 200 mode "after mode auto"]
+    if {$err ne ""} { set err "$err: a mode that is its display's size has the declaration" }
+}
+set pool "the compositor did not say it took mode auto: this pool's /lib/aurora/config may be LEFT PINNED at 1024x768"
+set what "mode auto being taken"
+set timeout 20
+expect {
+    -re $auto_taken {
+        set pool ""
+        set pinned_by_me 0
+        if {$err eq "" && "$expect_out(1,string) $expect_out(2,string)" ne "1600x1000 200"} {
+            set err "mode auto was taken at $expect_out(1,string) and $expect_out(2,string)%, want 1600x1000 and 200%"
+        }
+    }
+    timeout { }
+    eof     { lc_fail "qemu exited while mode auto was being taken" }
+}
+key "esc"
+if {$pool ne ""} {
+    if {$err eq ""} { set err "mode auto was applied and not said" }
+    lc_fail "$err; $pool"
+}
+if {$err ne ""} { lc_fail "$err; the pool was put back to auto" }
+set pin_expected 0
+wait_dims "1600 1000" "mode auto"
+lc_pass "declared: mode auto takes the display's size again, at 200, and says it follows the host"
+
+# ---------- and it does follow: a size that is halved ----------
 tell 5120x2880
 follow_expect {tapestryd: mode 2560x1440 for a display of 5120x2880} "a size that cannot be a mode is halved"
 follow_expect [up 2560x1440] "the halved mode is up"
-set err [scale_went 200 100 "after the host became 5120x2880"]
+set err [scale_went 200 100 mode "after the host became 5120x2880"]
 if {$err ne ""} { lc_fail "$err: half a display has half the declaration" }
 follow_expect {tapestryd: display event \d+: followed, 2560x1440 at 100%} "the event is followed, at 100"
 wait_dims "2560 1440" "followed to half of 5120x2880"
 lc_pass "declared: half a display of 5120x2880 is followed at 100"
 
-# ---------- a mode asked for by size keeps the declaration ----------
-# F10 -> Tab (the mode row) -> Right x4 (auto -> 1024x768 -> 1280x800 ->
-# 1280x720 -> 1600x900) -> Enter: ls-gfx-mode's recipe.
-key "f10"
-key "tab"
-key "right"
-key "right"
-key "right"
-key "right"
-key "ret"
-follow_expect {tapestryd: mode 1600x900 is up \(scanout [a-z]+\)} "the panel's mode is up"
-set err [scale_went 100 200 "after 1600x900 was asked for by size"]
-if {$err ne ""} {
-    set err "$err: a mode asked for by size keeps the declaration, whatever was fitted before it"
-} else {
-    set err [dims_are "1600 900" "the mode asked for by size"]
-}
-if {$err ne ""} {
-    panel_auto
-    key "esc"
-    after 3000
-    lc_fail $err
-}
-lc_pass "declared: a mode asked for by size has the scale declared (200 at 1600x900)"
-
-# ---------- mode auto fits again ----------
-panel_auto
-follow_expect {tapestryd: mode 2560x1440 for a display of 5120x2880} "mode auto asks the host and fits its size"
-follow_expect {tapestryd: mode 2560x1440 is up \(scanout [a-z]+\)} "the fitted mode is up"
-set err [scale_went 200 100 "after mode auto"]
-key "esc"
-if {$err ne ""} { lc_fail "$err: a mode fitted again carries the declaration again" }
-wait_dims "2560 1440" "mode auto"
-lc_pass "declared: mode auto fits half the display again, at 100"
-
 file delete -force $ppm
 set what "the shutdown"
 lc_quit
 file delete -force $::env(THYLACINE_VNC_SOCKET)
-lc_pass "ls-display-follow-declared: the boot, two follows, a mode by size and mode auto, each at the scale the declaration gives it"
+lc_pass "ls-display-follow-declared: the boot, a follow, a mode by size, a display read under the pin, mode auto and a follow again, each at the scale the declaration gives it"
 exit 0

@@ -157,64 +157,83 @@ Before this the boot took the host's size unchecked. With the device made
 (`t_dma_create_weave(89579520) failed -1`), and there was no console and no
 session on it.
 
-**A declared scale through a fitted mode (2026-11-12).** `fitted_from` holds
-the host's rect the standing mode was fitted from. `Comp::new` sets it to the
-host's rect when `fit_mode` gave the first mode, and to `None` when the boot
-fell back to 1024x768, which is no fit. `follow_display` sets it to the rect
-the device told, at the point from which the mode is the one for the host,
-whether the mode changed or already stood. `set_mode` sets it to `None` once
-it has changed the mode; its push of the mode that stands returns before that
-and leaves it. With a declaration, `Comp::new` and `derive_scale` give
-`display::carried_pct(fitted_from, mode, declared)` ([[sub-libhalcyon]]): for a
-fitted mode the declaration times the mode's width over the rect's, brought to
-the nearest of the five values; for a mode asked for by size the declaration
-itself (`docs/HALCYON-SCALE.md` 3 as amended that day). Until then both gave
-the declaration whatever the mode. A 5120x2880 display declared at 200 came up
-at 2560x1440 with `scale 200 (declared)`, while [[sub-lictor]]'s screen for the
-same mode was at one (seen in a guest; the trusted screen's audit round, F1).
-The boot line keeps its form, `tapestryd: scale N (declared)`, with the carried
-number.
+**A declared scale, carried to the mode (2026-11-12).** `display` holds the
+host's rect as it was last read: by `Comp::new` (the rect the broker started
+with; `None` only for a rect with no size), by `follow_display` (`mode auto`,
+and a display event while the mode follows the host) and by `display_under_pin`
+(a display event while the mode is pinned). All three write it in
+`display_read`, and nothing else does: `set_mode` leaves it. With a
+declaration, `Comp::new` and `derive_scale` give
+`display::carried_pct(display, mode, declared)` ([[sub-libhalcyon]]): the
+declaration times the larger of the mode's two shares of the rect, brought to
+the nearest of the five values, whoever chose the mode (`docs/HALCYON-SCALE.md`
+3 as amended twice that day). A 5120x2880 display declared at 200 comes up at
+2560x1440 with `scale 100 (declared)`, which is what [[sub-lictor]]'s screen for
+the same mode is at; 1024x768 asked for by size on a display of 2000x1280 is at
+125. The boot line keeps its form, `tapestryd: scale N (declared)`, with the
+carried number.
 
-What this does not do. A pinned mode keeps the rect it was fitted from: the
-host's later sizes are not read while it is pinned, so a `scale auto` then
-answers for the rect that was. A mode asked for by size is taken to be shown
-pixel for pixel. A host that scales the mode to its window does not do that,
-and QEMU's own window under `THYLACINE_HIDPI=1` (zoom-to-fit) and the Mac app
-are both such hosts: there the session is at the declaration and is enlarged
-again by the host (HALCYON-SCALE 3 has the choice this leaves). A carried
-scale is never under 100, so half a display declared under 200 is larger than
-was declared. [[sub-lictor]] fits its own screen by its own bound, so where it
+How it came to this. Until the first amendment both callers gave the
+declaration whatever the mode, and that 5120x2880 display came up with `scale
+200 (declared)` on 2560x1440 while the trusted screen was at one (seen in a
+guest; the trusted screen's audit round, F1). The first amendment kept a field
+`fitted_from`, the rect a mode was fitted from, which `set_mode` cleared: a
+mode asked for by size kept the declaration, on the reading that it is shown a
+pixel to a pixel. A host that scales the mode to its window does not show it
+so, and QEMU's own window under `THYLACINE_HIDPI=1` (zoom-to-fit) is such a
+host: there the session was at the declaration and enlarged again. The second
+amendment carries every mode. (The first text here named the Mac app as such a
+host too. It is not one: it declares nothing and tells its window in
+millimetres, so its scale is the EDID's, which a mode asked for by size has
+always followed.)
+
+What this does not do. The carry takes the rect the device told for the
+display's own, and takes it that the host shows the mode whole on that rect,
+as large as it goes: a host that showed a small mode a pixel to a pixel inside
+a rect it went on reporting would have the session too small. A carried scale
+is never under 100, so half a display declared under 200 is larger than was
+declared. [[sub-lictor]] fits its own screen by its own bound, so where it
 keeps a display this compositor halves (3840x2160, 3456x2160), a declaration
-of 100 or 125 has the session at twice the trusted screen's size. And the
-carry takes the rect the device told for the display's own.
+of 100 or 125 has the session at twice the trusted screen's size. `set_mode`
+asks the device nothing: a mode asked for by size is carried by the rect last
+read, and a host that changes its window for the mode says so in a display
+event, which is read under the pin (below).
 
-In `follow_display` a declared scale is derived again as soon as the device
-has taken the bind of the screen, before the EDID is asked: the carry needs
-the fit and not the millimetres. Until the second audit round on this (G5) it
-waited for both, and a host that doubled under a mode that stayed, with the
+In `display_read` a declared scale is derived again as soon as the device has
+taken the bind of the screen, before the EDID is asked: the carry needs the
+two sizes and not the millimetres. Until the second audit round on this (G5)
+it waited for both, and a host that doubled under a mode that stayed, with the
 EDID unanswered, left the session at twice its size. It still waits for the
-bind: a follow whose bind is not taken leaves the scale that stood until an
+bind: a read whose bind is not taken leaves the scale that stood until an
 asking succeeds.
 
-Tests. The rule, on a host (`carried_pct` and `nearest_pct`,
+Tests. The rule, on a host (`own_pct`, `carried_pct` and `nearest_pct`,
 [[sub-libhalcyon]]). The boot's use of it and `derive_scale`'s, in a guest:
 `tools/interactive/ls-halcyon-scale-fitted.exp` boots a 5120x2880 display
 declared at 200, reads the mode line, `tapestryd: scale 100 (declared)` and
 Lictor's line of its screen, then steps the scale with Super+= and has Super+0
-derive it again: 100, not 200. The other two writes of `fitted_from`, in a
-guest of the gate image: `tools/interactive/ls-display-follow-declared.exp` boots
-a 3456x2160 display declared at 200 (`scale 100 (declared)` on 1728x1080) and
-reads the compositor's line for the scale at each mode after it. A follow to
-2000x1280, which is its own mode: `scale 100 -> 200 (mode)` and `followed,
-2000x1280 at 200%`; without `follow_display`'s write the carry is from the
-boot's display and says 125. A follow to 5120x2880, halved: 100. Then 1600x900
-asked for by size from the console's settings panel: 200; without `set_mode`'s
-write it is carried from 5120x2880 and stays 100. Then `mode auto` from the
-panel: 2560x1440 and 100 again. A failure after the panel's mode was applied
-asks the panel for auto before it is reported, because the panel writes the
-mode to the pool's `/lib/aurora/config`. Run by no test: the `scale auto`
-verb, which no program in the tree sends, and the lines above about an EDID
-that is not answered.
+derive it again: 100, not 200. The writes of `display` and the carry of each
+kind of mode, in a guest of the gate image:
+`tools/interactive/ls-display-follow-declared.exp` boots a 3456x2160 display
+declared at 200 (`scale 100 (declared)` on 1728x1080) and reads the
+compositor's line for the scale after each step. A follow to 2000x1280, which
+is its own mode: `scale 100 -> 200 (mode)`; a follow that did not record the
+rect it read would carry from the boot's and say 125. Then 1024x768 asked for
+by size from the console's settings panel: `scale 200 -> 125 (mode)`, by its
+768 rows of 1280; kept as declared it would stay 200, and carried by its width
+alone it would be 100. Then the host becomes 1600x1000 under the pin: the
+pinned line, `scale 125 -> 150 (display)` and `display event N: 1024x768 at
+150% on a display of 1600x1000`, with the scanout still 1024x768; not read, it
+would stay 125. Then `mode auto` from the panel: 1600x1000, 200, and
+`tapestryd: mode auto: 1600x1000 at 200%, following the host`. Then a follow
+to 5120x2880, halved, at 100, which is also what shows that the following
+resumed. From the leg by size to the end of the leg that asks for auto, a
+failure of a leg's own check asks the panel for auto, waits for that line and
+says in its report whether the pool is left pinned, because the panel writes
+the mode to the pool's `/lib/aurora/config`; a line that must not be said
+fails at once and says the pool is left pinned. Run by no test: the `scale
+auto` verb, which no program in the tree sends; an EDID that is not answered,
+in a follow or under a pin; an event that leads to no mode.
 
 **When a change is followed.** [[sub-lictor]] counts the device's display
 events and every reply of the broker carries the count; `Gpu::display_events`
@@ -276,8 +295,12 @@ things.
   where the display is composed, and the scale is the one the EDID gives,
   unless a verb's or a chord's override stands, or the platform declared a
   scale, which `derive_scale` answers before it looks at the EDID: the
-  declaration carried to the fitted mode (above). The pump says
+  declaration carried to the mode (above). The pump says
   `... followed, WxH at S%`.
+- `NoMode`: the rect leads to no mode, and the mode that stood stands. It is
+  on the display that is now, so `display_read` is made for it as under a pin
+  (below), with the reason `display`; `NoMode(Some(errno))` is what that read
+  left owed, and the pump asks again for it as for an `Unfinished`.
 
 An asking that was made and failed, `Failed` or `Unfinished`, is counted
 whatever the engine is afterwards. `Follow::retry` asks again up to six times
@@ -293,11 +316,20 @@ mode stays the fitted one; `bind_pump` goes on asking for the bind, and the
 EDID is asked for again when a scale is next derived (a reset, `scale auto`, a
 `mode` verb) or at the next asking.
 
-An event under a pinned mode changes neither the mode nor the scale, and sets
-`edid_stale` all the same: the display behind the mode may be another one, so
-the millimetres held are not derived from until they are asked for again, at
-the next derivation. Until round 4 a reset under a pin derived from the
-millimetres of the display that was.
+An event under a pinned mode changes no mode. The pump says `... the mode is
+pinned and stands` and calls `display_under_pin`, which asks the device for
+the host's rect and hands it to `display_read`, as a follow does once its mode
+is settled: `display` is written, `edid_stale` set, a declared scale derived
+again once the bind holds, the EDID asked, and the scale derived again, each
+with the reason `display` in `tapestryd: scale A -> B (display)`. `Done` is
+said as `... WxH at S% on a display of WxH`. What fails is held, counted and
+asked again by the same `Follow` as a follow's asking, and `step` answers
+`Pinned` again for it while the pin stands; a rect that was not answered is
+said as `... its display not read (errno E)`. Until 2026-11-12 the arm set
+`edid_stale` and derived nothing, so a window resized or moved to another
+display under a pinned mode kept the scale it had until a reset, `scale auto`
+or a `mode` verb derived one. (Until round 4 a reset under a pin derived from
+the millimetres of the display that was.)
 
 Whether the EDID was answered is Lictor's to say. Its `query_edid` answers
 `Ok(None)` for a device that refuses the command or sends no block worth the
@@ -426,7 +458,9 @@ connection.
 `mode auto` answers Ok for `Done` and for `Unfinished`, and unpins for both:
 the mode is the host's, which is what was asked. For `Unfinished` it calls
 `Follow::again`, and the pass asks again after 150 ms, with all six askings,
-for what is owed. `NoDisplay` is `E_AGAIN`, `NoMode` `E_NOMEM`, `Failed` its
+for what is owed. A verb that is taken says `tapestryd: mode auto: WxH at S%,
+following the host`. `NoDisplay` is `E_AGAIN`, `NoMode` `E_NOMEM` (with
+`Follow::again` when its display's read left something owed), `Failed` its
 errno. A verb that is refused left the mode that stood and a pinned mode
 pinned; what it may have cost is an open menu (step 4).
 
@@ -434,7 +468,9 @@ pinned; what it may have cost is an open menu (step 4).
 not the host's size; `tapestryd: mode AxB -> WxH (scanout S)` and `tapestryd:
 mode WxH is up (scanout S)` around a change; `tapestryd: display event N:
 asking the host`, `... followed, WxH at S%`, `... the mode is pinned and
-stands`, `... no display to follow; WxH stands`, `... the device is stalled;
+stands`, `... WxH at S% on a display of WxH`, `... its display not read
+(errno E)` with or without `, to be asked again`, `... no display to follow;
+WxH stands`, `... the device is stalled;
 to be asked when it answers`, `... not followed (errno E), to be asked again`,
 `... not followed (errno E)`, `... the mode is WxH, not finished (errno E), to
 be asked again`, `... the mode is WxH, not finished (errno E)`, `... not
@@ -523,7 +559,7 @@ is longer than its header says, and the tool takes the padding out
 with every line of leg A said in the order wanted.
 
 Not reached by either: a pinned mode under an event (the two calls in the
-verbs); a stall that is standing when an asking comes, which holds the event
+verbs; `ls-display-follow-declared.exp` has one, above); a stall that is standing when an asking comes, which holds the event
 (noted and waited out by both scenarios, made by neither); an EDID that is not
 answered, so `Unfinished` by that way, `edid_stale`, and the asking again at
 a derivation; the direct state's

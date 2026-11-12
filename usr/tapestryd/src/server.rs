@@ -1569,21 +1569,23 @@ enum StallBind {
 
 /// What became of an asking of the host's display.
 enum Followed {
-    /// The mode is the one fitted to the host's display, the device took
-    /// the bind of its screen where the display is composed, and the scale
-    /// is the one its EDID gives.
+    /// The mode is the one fitted to the host's display (under a pin: the
+    /// one that stands), the device took the bind of its screen where the
+    /// display is composed, and the scale is the one for the two.
     Done,
     /// The host shows no display (its output is disabled, or it tells a
     /// size past what a display is taken to report): nothing to follow.
     NoDisplay,
-    /// The host's size leads to no mode that can be made.
-    NoMode,
+    /// The host's size leads to no mode that can be made: the one that
+    /// stood stands, on the display that is now. Some: the bind of its
+    /// screen or the EDID's answer is still owed, as in `Unfinished`.
+    NoMode(Option<u32>),
     /// The device did not answer, or the change was not made: the mode
     /// that stood stands. It may be made, later.
     Failed(u32),
-    /// The mode is the one fitted to the host's display, and the bind of
-    /// its screen or the EDID's answer is still owed: to be asked again,
-    /// and not a refusal.
+    /// The mode is the one fitted to the host's display (under a pin: the
+    /// one that stands), and the bind of its screen or the EDID's answer
+    /// is still owed: to be asked again, and not a refusal.
     Unfinished(u32),
 }
 
@@ -1707,12 +1709,12 @@ pub struct Comp {
     /// display whose EDID cannot say, QEMU's, or lies). None = the EDID
     /// derives. Never written after probe.
     declared: Option<u16>,
-    /// The host's rect the standing mode was fitted from (`fit_mode`: at
-    /// probe, and whenever the host is followed), None for a mode asked for
-    /// by size. A declared scale is the display's, so it is carried through
-    /// a fitted mode by the fit's factor (`display::carried_pct`) and kept
-    /// as it is by a mode nobody fitted.
-    fitted_from: Option<(u32, u32)>,
+    /// The host's display, in its pixels, as it was last read: at probe, by
+    /// `mode auto`, and at every display event, whether the mode follows it
+    /// or is pinned. A declared scale is the display's, so it is carried to
+    /// the standing mode by the mode's size over this (`display::carried_pct`),
+    /// whoever chose the mode. None: a display with no size.
+    display: Option<(u32, u32)>,
     /// `Metrics::at(scale)`: the ONE table every carve and paint here reads
     /// (halcyond reads the same function at the same percent).
     pub metrics: Metrics,
@@ -2676,10 +2678,9 @@ impl Comp {
             gpu.width = first.0;
             gpu.height = first.1;
         }
-        // The default mode is no fit of the host's rect, so it carries nothing.
-        let fitted_from = fitted.map(|_| host);
+        let shown_on = (host.0 > 0 && host.1 > 0).then_some(host);
         let (derived, src) = match declared {
-            Some(p) => (display::carried_pct(fitted_from, first, p), "declared"),
+            Some(p) => (display::carried_pct(shown_on, first, p), "declared"),
             None => (
                 match gpu.edid_mm {
                     Some((mm_w, mm_h)) => scale::scale_pct(gpu.width, gpu.height, mm_w, mm_h),
@@ -2708,7 +2709,7 @@ impl Comp {
             scale,
             scale_override: None,
             declared,
-            fitted_from,
+            display: shown_on,
             metrics: bundle.at(scale).metrics,
             theme,
             bundle,
@@ -4770,15 +4771,15 @@ impl Comp {
     }
 
     /// HALCYON-SCALE 3: the platform's declaration while one stands, carried
-    /// to the standing mode if that was fitted from the host's rect, else
-    /// the scale the display's EDID implies for its current pixel geometry
-    /// (100 without one). An EDID that may not be this display's is asked
-    /// for again first; while it is not answered, the scale last derived
-    /// from one that was: old millimetres over new pixels is no one's DPI,
-    /// and the scale that stands may be an override's.
+    /// to the standing mode by its size over the display's as last read,
+    /// else the scale the display's EDID implies for its current pixel
+    /// geometry (100 without one). An EDID that may not be this display's is
+    /// asked for again first; while it is not answered, the scale last
+    /// derived from one that was: old millimetres over new pixels is no
+    /// one's DPI, and the scale that stands may be an override's.
     fn derive_scale(&mut self) -> u16 {
         if let Some(p) = self.declared {
-            return display::carried_pct(self.fitted_from, (self.gpu.width, self.gpu.height), p);
+            return display::carried_pct(self.display, (self.gpu.width, self.gpu.height), p);
         }
         if self.edid_stale && self.gpu.engine == Engine::Live {
             self.read_edid();
@@ -4924,9 +4925,16 @@ impl Comp {
     /// millimetres over new pixels is a new DPI -- unless a verb/chord
     /// override is in force, which stands until `scale auto`.
     fn rescale_after_mode(&mut self) {
+        self.rescale("mode");
+    }
+
+    /// The scale derived again, for the reason said: `mode` for a mode that
+    /// changed, `display` for a display that changed under a mode that
+    /// stands.
+    fn rescale(&mut self, why: &str) {
         if self.scale_override.is_none() {
             let p = self.derive_scale();
-            self.apply_scale(p, "mode");
+            self.apply_scale(p, why);
         }
     }
 
@@ -6256,12 +6264,8 @@ impl Comp {
         if !mode_can_be_made(w, h) {
             return Err(p9::E_NOMEM);
         }
-        self.change_mode(w, h)?;
-        // A mode asked for by size is nobody's fit. (The push of the mode
-        // that stands, above, leaves the mode and whose fit it was; the
-        // verb pins it all the same.)
-        self.fitted_from = None;
-        Ok(())
+        // The display it is shown on is the one last read, and stays so.
+        self.change_mode(w, h)
     }
 
     /// The mode for a host that prefers `host_w x host_h`: that size, or it
@@ -6326,7 +6330,11 @@ impl Comp {
         let Some((w, h)) = self.mode_for_host(host_w, host_h) else {
             say!("tapestryd: no mode for a display of {}x{}; {}x{} stands",
                 host_w, host_h, self.gpu.width, self.gpu.height);
-            return Followed::NoMode;
+            // The mode that stands is shown on the display that is now.
+            return match self.display_read(host_w, host_h, "display") {
+                Followed::Unfinished(e) => Followed::NoMode(Some(e)),
+                _ => Followed::NoMode(None),
+            };
         };
         if (w, h) != (host_w, host_h) {
             say!("tapestryd: mode {}x{} for a display of {}x{}", w, h, host_w, host_h);
@@ -6346,17 +6354,34 @@ impl Comp {
             }
         }
         // From here the mode is the one for the host: what fails now is
-        // owed, not refused. The EDID held is the display's that was until
-        // this one's is read, and nothing derives a scale from it meanwhile.
-        self.fitted_from = Some((host_w, host_h));
+        // owed, not refused.
+        self.display_read(host_w, host_h, "mode")
+    }
+
+    /// A display event under a pinned mode: the mode stands, and the host
+    /// is asked what it is shown on now, for the scale.
+    fn display_under_pin(&mut self) -> Followed {
+        match self.gpu.query_display_info() {
+            Ok(Some((host_w, host_h))) => self.display_read(host_w, host_h, "display"),
+            Ok(None) => Followed::NoDisplay,
+            Err(_) => Followed::Failed(E_IO),
+        }
+    }
+
+    /// The host's display was read, and the mode is settled: the scale for
+    /// the two. `why` is what `apply_scale` says of a scale that changes.
+    /// The EDID held is the display's that was until this one's is read,
+    /// and nothing derives a scale from it meanwhile.
+    fn display_read(&mut self, host_w: u32, host_h: u32, why: &str) -> Followed {
+        self.display = Some((host_w, host_h));
         self.edid_stale = true;
         if !self.composed_bind_holds() {
             return Followed::Unfinished(E_IO);
         }
-        // A declared scale is carried by the fit alone, and the fit is
+        // A declared scale is carried by the two sizes alone, and both are
         // known: it does not wait for the EDID.
         if self.declared.is_some() {
-            self.rescale_after_mode();
+            self.rescale(why);
         }
         // The EDID is asked with it: a change of display is the one time
         // it changes, and it can change under a mode that does not. Not
@@ -6364,7 +6389,7 @@ impl Comp {
         if !self.read_edid() {
             return Followed::Unfinished(E_IO);
         }
-        self.rescale_after_mode();
+        self.rescale(why);
         Followed::Done
     }
 
@@ -6477,15 +6502,7 @@ impl Comp {
         let n = self.gpu.display_events();
         match self.follow.step(n, now_ms) {
             display::Step::Wait => {}
-            display::Step::Pinned => {
-                say!("tapestryd: display event {}: the mode is pinned and stands", n);
-                // The scale stands with it. But the display behind the mode
-                // may be another one now, so the millimetres held are not
-                // to be derived from: they are asked for when a scale next
-                // is (`derive_scale`).
-                self.edid_stale = true;
-            }
-            display::Step::Ask => match self.gpu.engine {
+            step @ (display::Step::Ask | display::Step::Pinned) => match self.gpu.engine {
                 Engine::Dead => say!("tapestryd: display event {}: not followed, the device is dead", n),
                 // Nothing asked of a stalled engine is answered, and the
                 // broker ends a stall itself: it answers again, or it
@@ -6497,8 +6514,16 @@ impl Comp {
                     }
                 }
                 Engine::Live => {
-                    say!("tapestryd: display event {}: asking the host", n);
-                    let followed = self.follow_display();
+                    // A pinned mode stands whatever the host's window does.
+                    // What it is shown on is the host's to say all the same.
+                    let pinned = step == display::Step::Pinned;
+                    let followed = if pinned {
+                        say!("tapestryd: display event {}: the mode is pinned and stands", n);
+                        self.display_under_pin()
+                    } else {
+                        say!("tapestryd: display event {}: asking the host", n);
+                        self.follow_display()
+                    };
                     // An asking that was made and failed is counted whatever
                     // the engine is afterwards: a stall that began inside
                     // every asking would otherwise have the change begun
@@ -6510,18 +6535,25 @@ impl Comp {
                             && comp.follow.retry(libthyla_rs::time::monotonic_ns() / 1_000_000)
                     };
                     match followed {
+                        Followed::Done if pinned => {
+                            let (dw, dh) = self.display.unwrap_or((0, 0));
+                            say!(
+                                "tapestryd: display event {}: {}x{} at {}% on a display of {}x{}",
+                                n, self.gpu.width, self.gpu.height, self.scale, dw, dh);
+                        }
                         Followed::Done => say!(
                             "tapestryd: display event {}: followed, {}x{} at {}%",
                             n, self.gpu.width, self.gpu.height, self.scale),
-                        Followed::NoMode => {}
+                        Followed::NoMode(None) => {}
                         Followed::NoDisplay => say!(
                             "tapestryd: display event {}: no display to follow; {}x{} stands",
                             n, self.gpu.width, self.gpu.height),
                         Followed::Failed(e) => {
                             let tail = if again(self) { ", to be asked again" } else { "" };
-                            say!("tapestryd: display event {}: not followed (errno {}){}", n, e, tail);
+                            let what = if pinned { "its display not read" } else { "not followed" };
+                            say!("tapestryd: display event {}: {} (errno {}){}", n, what, e, tail);
                         }
-                        Followed::Unfinished(e) => {
+                        Followed::Unfinished(e) | Followed::NoMode(Some(e)) => {
                             let tail = if again(self) { ", to be asked again" } else { "" };
                             say!(
                                 "tapestryd: display event {}: the mode is {}x{}, not finished (errno {}){}",
@@ -19713,11 +19745,21 @@ impl Conn {
                     Ok(())
                 }
                 Followed::NoDisplay => Err(p9::E_AGAIN),
-                Followed::NoMode => Err(p9::E_NOMEM),
+                // Refused: the mode that stood stands, pinned if it was.
+                // What its display's read left owed is the pass's to ask.
+                Followed::NoMode(owed) => {
+                    if owed.is_some() {
+                        comp.follow.again(libthyla_rs::time::monotonic_ns() / 1_000_000);
+                    }
+                    Err(p9::E_NOMEM)
+                }
                 Followed::Failed(e) => Err(e),
             };
             if r.is_ok() {
                 comp.follow.unpin();
+                say!(
+                    "tapestryd: mode auto: {}x{} at {}%, following the host",
+                    comp.gpu.width, comp.gpu.height, comp.scale);
             }
             return r;
         }

@@ -678,25 +678,33 @@ halves by itself (a declared scale has `carried_pct`, below). A division that re
 is 2048 at a quarter, which is why the factor stops at 4.
 
 **`own_pct(host, own, declared, mm)`** is the display scale, in `scale_pct`'s
-percent, of a screen of `own` pixels shown over the whole of a display of
-`host` pixels. A declared scale is the display's, so it is carried over by the
-ratio of the two widths; with none declared it is what the display's
+percent, of a screen of `own` pixels shown on a display of `host` pixels. A
+declared scale is the display's, so it is carried over by the larger of the
+screen's two shares of the display, width over width and height over height:
+the host is taken to show the screen whole and as large as its rect lets it,
+keeping its shape, so the side that fills the rect says how large a pixel of
+the screen is. For a screen that is its display over or times a whole number
+the two shares are one (until 2026-11-12 it was the widths' alone, which is
+the same there). A display with no width or no height carries nothing. With
+none declared it is what the display's
 millimetres make of the screen's own pixels; with neither it is 100. A screen
 made at half its display's size is at half its display's scale. It is not held
 to the session's five values: [[sub-lictor]] rounds it to a whole scale for its
 trusted screen, and `carried_pct` brings it to one of the five.
 
-**`carried_pct(fitted_from, own, declared)`** is the scale a session derives
-while its platform declares one (`docs/HALCYON-SCALE.md` 3 as amended
-2026-11-12). The declaration is the display's. For a mode fitted from a host's
-rect (`fitted_from` is that rect) it is `scale::nearest_pct` of `own_pct`: the
-declaration by the fit's factor, and one of the five, so half a display
-declared at 200 is 100, never under 100 and never over 200. The rounding is
-needed and not only the range: a host of an odd width halves to a mode a pixel
-short of half, and 200 carried to it is 99. For a mode nobody fitted (`None`:
-one asked for by size) it is the declaration as it is, on the reading that such
-a mode is shown pixel for pixel. [[sub-tapestryd]] is its only caller, at its
-boot and in `derive_scale`.
+**`carried_pct(display, own, declared)`** is the scale a session derives
+while its platform declares one (`docs/HALCYON-SCALE.md` 3 as amended twice on
+2026-11-12). The declaration is the display's, and `display` is the host's
+rect as it was last read. Whoever chose the mode, it is `scale::nearest_pct`
+of `own_pct`: the declaration by the mode's share of the display, and one of
+the five, so half a display declared at 200 is 100, never under 100 and never
+over 200, and 1024x768 on 2000x1280, which fills its height, is 120 and so
+125. The rounding is needed and not only the range: a display of odd sides
+halves to a mode a pixel short of half, and 200 carried to it is 99. `None` is
+a display that was never read, and gives the declaration as it is. (Between
+the two amendments `None` stood for a mode asked for by size, which kept the
+declaration.) [[sub-tapestryd]] is its only caller, at its boot and in
+`derive_scale`.
 
 **`Follow`** is the timing. The device's driver counts the display events it
 takes; a compositor hands that count and a millisecond clock to `step` once a
@@ -745,10 +753,11 @@ decides when there is no point in trying, which for the compositor is a dead
 device.
 
 **Tests.** 12 host tests: a screen's scale each way it is known, at half and at
-twice its display's size, and with a display that has no width (`own_pct`); a
-declared scale through a fitted mode at its host's size, under it and over it,
-with an odd width and a factor that is not whole, and kept by a mode asked for
-by size (`carried_pct`);
+twice its display's size, of another shape than its display each way, and
+with a display that has no width or no height (`own_pct`); a declared scale
+carried to a mode at its display's size, under it and over it, with odd sides
+and a factor that is not whole, to a mode of another shape, to one larger than
+its display, and kept where the display was never read (`carried_pct`);
 the fitted sizes for the Macs' full screens and for
 Lictor's limits, the order of the factors, and the refusals; an event followed
 at exactly the quiet time and once; a train; the wrap and a first count that is
