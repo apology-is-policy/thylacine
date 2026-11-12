@@ -312,6 +312,17 @@ proc lc_qmp_sock {} {
     return "$::lc_repo/build/qmp.sock"
 }
 
+# tools/interactive/vnc_capture.py reads the cursor plane and the EGL scanout with Pillow. A
+# host without it can say nothing about the guest, so the scenario SKIPs (77, which the
+# fleet counts) before a VM boots, instead of reporting the import error as a guest result.
+# The check makes the tool's own import: a Pillow whose C half does not load has a `PIL`.
+proc lc_require_host_pil {} {
+    if {[catch {exec python3 -c "from PIL import Image"} err]} {
+        puts "LS-CI SKIP: host python3 cannot import PIL.Image (Pillow); tools/interactive/vnc_capture.py needs it"
+        exit 77
+    }
+}
+
 proc lc_vnc_probe_noop {args} {}
 
 proc lc_port_bindable {port} {
@@ -770,6 +781,29 @@ proc lc_expect_re {pat phase} {
         timeout         { lc_fail "timeout (${lc_cmd_timeout}s) waiting for regex \[$pat\] during '$phase'" }
         eof             { lc_fail "unexpected EOF during '$phase'" }
     }
+}
+
+# Wait until the foreground job says it holds the terminal. The job is
+# `debug-child fgtick`, which writes FGTICK only while it leads a process group
+# of its own and that group is the terminal's foreground group (pty-4.exp's
+# background leg holds it to that). ut spawns a job, puts it in a group and then
+# hands it the terminal, and a ^Z or ^C typed before the last of those reaches
+# ut and never the job. `count` is 1 for a job just started. After a stop and a
+# `fg` it is 2: one FGTICK can have been inside its write when the stop landed
+# and reach us after the resume, and a second cannot.
+proc lc_expect_fgtick {count phase} {
+    global lc_cmd_timeout timeout
+    set timeout $lc_cmd_timeout
+    for {set i 0} {$i < $count} {incr i} {
+        expect {
+            -re {FGTICK[\r\n]} { }
+            -re {FGNOTTY}     { lc_fail "the job found no terminal of its session on fd 0, 1 or 2 during '$phase'" }
+            -re {EXTINCTION:} { lc_extinction_fail "kernel extinction during '$phase'" }
+            timeout           { lc_fail "timeout (${lc_cmd_timeout}s) waiting for the job to hold the terminal during '$phase'" }
+            eof               { lc_fail "unexpected EOF during '$phase'" }
+        }
+    }
+    lc_step "saw: $phase"
 }
 
 # Type a command line + Enter (CR -- a raw terminal sends CR; LS-1 made login +

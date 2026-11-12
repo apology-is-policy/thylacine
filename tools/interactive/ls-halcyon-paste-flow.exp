@@ -103,7 +103,7 @@ proc nora {name} {
     type "nora ~/$name\n"
     lc_within $lc_cmd_timeout {
         -re {halcyond: session tile leaf=[0-9]+ screenmode -> AltScreen} { lc_step "Nora holds its tile: $name" }
-        -re {nora: EXIT path=[a-z]+[^\r\n]*} { lc_fail "Nora left before it held its tile: $name" }
+        -re {(nora: EXIT path=[a-z]+[^\r\n]*)[\r\n]} { lc_fail "Nora left before it held its tile: $name ($expect_out(1,string))" }
         -re {EXTINCTION:} { lc_extinction_fail "opening $name" }
         timeout { lc_fail "Nora never took its tile: $name" }
         eof { lc_fail "EOF opening $name" }
@@ -123,7 +123,9 @@ proc leave {} {
     type ":wq\n"
     lc_within $lc_cmd_timeout {
         -ex "nora: EXIT path=quit code=0" { lc_step "Nora left" }
-        -re {nora: EXIT path=[a-z]+[^\r\n]*} { lc_fail "Nora left another way: $expect_out(0,string)" }
+        # The line's end is part of the pattern: without it this arm takes the first HALF of
+        # the line above when the serial hands it over in two reads.
+        -re {(nora: EXIT path=[a-z]+[^\r\n]*)[\r\n]} { lc_fail "Nora left another way: $expect_out(1,string)" }
         -re {EXTINCTION:} { lc_extinction_fail "leaving Nora" }
         timeout { lc_fail "Nora did not leave" }
         eof { lc_fail "EOF leaving Nora" }

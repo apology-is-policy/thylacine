@@ -3,56 +3,81 @@
 # group, and prove the stop by its EFFECT rather than by the shell's report.
 #
 # The gap this closes: pty-4.exp already drives the whole job-control ladder
-# through a real pts, but its subject is `sleep`, a NATIVE libthyla-rs coreutil.
-# So the pouch boundary-line's note path -- and the EL0 return tail's stop
-# WIRING -- were never on the line in-guest. The unit tests cannot reach that
-# tail at all: notes_deliver_at_el0_return takes no Thread argument (it reads
-# current_thread()), which is why test_notes.c:1732 records the identical hole
-# for its own decider and routes it here. This scenario is the only leg that
-# also exercises the lock order under real contention.
+# through a real pts, but its subject is `debug-child fgtick`, a NATIVE program.
+# A Pouch program's note dispositions are a table its runtime registers, and the
+# kernel reads that table to decide whether a tty:susp stops the program. This
+# is the only in-guest leg whose subject that table governs. The program
+# installs no handler, so its stop is the default one: applied when the key is
+# posted, with the program parked in its sleep or at its next return to EL0,
+# and lifted by `fg`. The stop a thread takes LATER, at the EL0 return tail
+# once it unmasks the note, is not on this path, and neither is the lock order
+# there: jc-probe's maskstop rung is that leg (the note over
+# test_notes_masked_susp_stops_at_delivery in kernel/test/test_notes.c).
 #
-# WHY THE PROGRAM COUNTS ITS TICKS. The load-bearing claim is a NEGATIVE -- a
+# WHY THE PROGRAM COUNTS ITS LINES. The load-bearing claim is a NEGATIVE -- a
 # stopped process emits nothing -- and a negative assertion is satisfied by a
 # fixture that broke for any unrelated reason: a failed exec, a crash, a shell
 # that never moved it into the foreground, a pts that dropped the bytes. Every
 # one of those produces silence, and silence is exactly what "the stop worked"
 # looks like. So the quiet window is BRACKETED by two positives:
 #
-#   before ^Z   ticks ADVANCE          -- the fixture works and it is running
-#   after  ^Z   ticks ABSENT           -- the claim under test
-#   after  fg   ticks ADVANCE AGAIN    -- it was stopped, not dead
+#   before ^Z   lines ADVANCE          -- the fixture works and it is running
+#   after  ^Z   lines ABSENT           -- the claim under test
+#   after  fg   lines ADVANCE AGAIN    -- it was stopped, not dead
 #
 # and the post-resume leg demands a number STRICTLY GREATER than the last seen
 # before the stop. That is what makes it non-vacuous: a replay of pre-stop bytes
 # buffered somewhere in the pts would show OLD numbers and must not satisfy it.
 # (/pouch-hello-susp sets _IONBF for the same reason -- a stdio buffer flushing
 # on resume would forge the exact output that reads as "it never stopped".)
+#
+# The program writes a line every 250 ms WHOEVER HOLDS THE TERMINAL, and says in
+# it whether it does (`held`, `away`). The shell takes the terminal back as
+# soon as a stop is reported, so a program that wrote only while it held the
+# terminal would be silent after `Stopped` even if it had never been parked.
 
 source [file join [file dirname [info script]] lib.exp]
 
-# Assert no SUSP-TICK arrives for `secs`. Only meaningful between the two
-# positive legs above -- alone it passes against a dead guest.
-proc susp_expect_quiet {secs phase} {
+# Assert at most ONE SUSP-TICK line arrives in `secs`. A stop is reported when
+# it is latched, not when the program parks, and the program parks at its next
+# return to EL0: so one write can still complete and reach us after `Stopped`,
+# however late -- the one it was inside, or one it entered on another CPU before
+# the stop reached it. A second cannot. A program that was never parked writes
+# four a second, `away` once the shell has the terminal back. Only meaningful
+# between the two positive legs above -- alone it passes against a dead guest.
+proc susp_expect_stopped {secs phase} {
     global timeout
-    set timeout $secs
-    expect {
-        -re {SUSP-TICK ([0-9]+)\r} {
-            lc_fail "$phase: a stopped process emitted SUSP-TICK $expect_out(1,string)"
+    set until [expr {[clock milliseconds] + $secs * 1000}]
+    set seen 0
+    while {1} {
+        set left [expr {($until - [clock milliseconds] + 999) / 1000}]
+        if {$left <= 0} { break }
+        set timeout $left
+        expect {
+            -re {SUSP-TICK ([0-9]+) (held|away)\r} {
+                incr seen
+                if {$seen > 1} {
+                    lc_fail "$phase: a stopped process emitted SUSP-TICK $expect_out(1,string) $expect_out(2,string), its second since the stop"
+                }
+            }
+            -re {EXTINCTION:} { lc_extinction_fail "kernel extinction during '$phase'" }
+            eof               { lc_fail "unexpected EOF during '$phase'" }
+            timeout           { break }
         }
-        -re {EXTINCTION:} { lc_extinction_fail "kernel extinction during '$phase'" }
-        eof               { lc_fail "unexpected EOF during '$phase'" }
-        timeout           { lc_step "saw: $phase (${secs}s quiet, no ticks)" }
     }
+    lc_step "saw: $phase (${secs}s, $seen line(s) in flight at the stop)"
 }
 
-# Consume one tick and return its number.
+# Consume lines up to one that says the program holds the terminal, and return
+# its number.
 proc susp_next_tick {phase} {
     global lc_cmd_timeout timeout
     set timeout $lc_cmd_timeout
     expect {
-        -re {SUSP-TICK ([0-9]+)\r} { return $expect_out(1,string) }
+        -re {SUSP-TICK ([0-9]+) held\r} { return $expect_out(1,string) }
+        -re {SUSP-NOTTY}  { lc_fail "the pouch program found no terminal on fd 0 during '$phase'" }
         -re {EXTINCTION:} { lc_extinction_fail "kernel extinction during '$phase'" }
-        timeout { lc_fail "timeout (${lc_cmd_timeout}s) waiting for a SUSP-TICK during '$phase'" }
+        timeout { lc_fail "timeout (${lc_cmd_timeout}s) waiting for a SUSP-TICK that holds the terminal during '$phase'" }
         eof     { lc_fail "unexpected EOF during '$phase'" }
     }
 }
@@ -74,7 +99,9 @@ sleep 1
 lc_send "pouch-hello-susp"
 lc_expect "SUSP-READY" "the pouch program reached main"
 
-# POSITIVE 1: it is running, and the counter advances.
+# POSITIVE 1: it is running, and the counter advances. Both lines say `held`,
+# so the ^Z below is typed at a job that can take it: no pause on a clock
+# stands between the spawn and the stop key.
 set n1 [susp_next_tick "first tick"]
 set n2 [susp_next_tick "second tick"]
 if {$n2 <= $n1} {
@@ -87,24 +114,27 @@ lc_step "saw: ticks advancing before the stop ($n1 -> $n2)"
 send "\x1a"
 lc_expect "Stopped" "^Z stops the foreground POUCH program"
 
-# Let at most one in-flight tick drain (250 ms cadence, unbuffered), then
-# demand real quiet. Without the drain this races a tick already on the wire
-# when the stop landed -- which would be a harness artifact, not a kernel bug.
-sleep 1
-
 # THE CLAIM: stopped means stopped.
-susp_expect_quiet 4 "the stopped pouch program stays silent"
+susp_expect_stopped 5 "the stopped pouch program stays silent"
 
 # POSITIVE 2: fg resumes it, and the counter has MOVED PAST where it stopped.
+# Two lines, because the stop can catch the program between its reading of the
+# terminal and its write: that line comes out after the resume with a `held`
+# from before the stop. The second is worked out after the resume.
 lc_send "fg"
 set n3 [susp_next_tick "post-resume tick"]
 if {$n3 <= $n2} {
     lc_fail "post-resume tick $n3 is not beyond the pre-stop $n2 -- this is replayed buffered output, not a resumed process"
 }
-lc_step "saw: ticks resumed and advanced past the stop ($n2 -> $n3)"
+set n4 [susp_next_tick "second post-resume tick"]
+if {$n4 <= $n3} {
+    lc_fail "ticks did not advance after the resume ($n3 -> $n4)"
+}
+lc_step "saw: ticks resumed and advanced past the stop ($n2 -> $n3 -> $n4)"
 
 # ^C -> interrupt -> the pouch program default-terminates (LS-5), fg returns.
-sleep 1
+# The shell hands the terminal over before it continues the job, and the second
+# line above says the program holds it.
 send "\x03"
 sleep 1
 lc_run_expect "echo susp-fg | tr a-z A-Z" "SUSP-FG"
@@ -115,4 +145,4 @@ lc_send "exit"
 sleep 1
 lc_run_expect "echo susp-outer | tr a-z A-Z" "SUSP-OUTER"
 
-lc_pass "PTY-SUSP-POUCH: ^Z stops a POUCH program in a pts foreground group -- proven by tick absence bracketed by advancing ticks either side"
+lc_pass "PTY-SUSP-POUCH: ^Z stops a POUCH program in a pts foreground group -- proven by the absence of its lines, which it writes whoever holds the terminal, bracketed by advancing lines either side"

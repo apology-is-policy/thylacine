@@ -50,7 +50,19 @@ lc_boot
 # an assertion). It prints before the interactive prompt (aurora comes up
 # during bringup; verified in the boot log against `Thylacine login: `), so it
 # is claimed HERE, between boot and login, while still in the buffer.
-lc_expect "#129 feed selftest PASS" "aurora held-input back-pressure selftest"
+#
+# aurora prints it at the end of bring-up and lc_boot returned at the spawn, so
+# this wait is the boot's and takes the boot budget: a command's is shorter than
+# the bring-up it would have to cover. The selftest's own FAIL line ends the
+# wait at once.
+set timeout $lc_boot_timeout
+expect {
+    -ex "#129 feed selftest PASS" { lc_step "saw: aurora held-input back-pressure selftest" }
+    -ex "#129 feed selftest FAIL" { lc_fail "aurora's held-input back-pressure selftest FAILED (aurora: #129 feed selftest FAIL)" }
+    -re {EXTINCTION:} { lc_extinction_fail "kernel extinction during 'aurora held-input back-pressure selftest'" }
+    timeout { lc_fail "timeout (${lc_boot_timeout}s) waiting for \[#129 feed selftest PASS\] during bring-up" }
+    eof { lc_fail "unexpected EOF during 'aurora held-input back-pressure selftest'" }
+}
 
 lc_login michael correct-horse-battery-staple-v1
 

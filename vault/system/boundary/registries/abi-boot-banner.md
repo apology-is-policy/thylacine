@@ -39,6 +39,7 @@ mirrors:
   - "tools/interactive/ls-graphical-sak-soak.exp (EXTINCTION: only -- the seat's return, cycled)"
   - "tools/interactive/git-shell.exp"
   - "tools/interactive/ls-halcyon-session-dosbox.exp"
+  - "tools/interactive/ls-halcyon-session-route.exp (EXTINCTION: only -- a session pane has no console place route)"
   - tools/interactive/pci-net-load.exp
   - "tools/interactive/im1-sak-lever.exp"
   - "tools/interactive/im3-lex-curiata.exp"
@@ -72,6 +73,7 @@ mirrors:
   - "tools/interactive/flood-174.exp"
   - "tools/interactive/freeze-172.exp"
   - "tools/interactive/ls-gfx-font.exp"
+  - "tools/interactive/ls-gfx.exp (EXTINCTION: only -- its bring-up wait for aurora's selftest line)"
   - "tools/warp/quarry-wedge.exp"
   - "tools/stall-watch.py (`kernel base:` — see below)"
   - "tools/check-arc-gates.sh"
@@ -88,6 +90,7 @@ mirrors:
   - "tools/interactive/ls-halcyon-session-instrument.exp"
   - "tools/interactive/ls-gfx-session-image.exp"
   - "tools/interactive/ls-halcyon.exp"
+  - "tools/interactive/pty-4.exp"
   - "tools/interactive/pty-susp-pouch.exp"
   - "tools/interactive/r5f9-ash.exp"
   - "tools/test-smp-classify.sh (the classifier's own fixtures — both literals)"

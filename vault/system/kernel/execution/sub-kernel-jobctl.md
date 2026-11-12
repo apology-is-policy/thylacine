@@ -3,7 +3,7 @@ id: sub-kernel-jobctl
 type: sub
 title: "Job control — the second owner of the stop park, the catchability gate, and the POSIX orphan rule"
 parent: moc-kernel-execution
-code: [kernel/proc.c, kernel/include/thylacine/proc.h]
+code: [kernel/proc.c, kernel/include/thylacine/proc.h, usr/susp-mask-child/src/main.rs, usr/pouch-hello/pouch-hello-susp.c]
 audit: hard
 guarded-by: [inv-i20, inv-i39, inv-i9, inv-i19]
 validated-by: [spec-pty-stop, spec-debug-stop, prose, gate-smp]
@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/PTY-DESIGN.md section 4"]
 created: 2026-08-03
-updated: 2026-10-27
+updated: 2026-11-12
 ---
 ## Purpose
 
@@ -428,6 +428,51 @@ shown `STOPPED` even with a flag set before the kill.
 From the terminal side, `pts.tty_tstp_stop_cont_seam` and
 `pts.teardown_hup_cont` drive the same machinery through the real entry
 points.
+
+**The delivered stop has two witnesses in the guest, and neither types its key
+on a clock.** `jc-probe`'s `maskstop` rung, which joey hosts on every boot,
+runs `/susp-mask-child`. The child masks the terminal family, so the fan posts
+the suspend where it would have stopped. The child reads the queued note back
+with `SYS_NOTE_WAIT`'s pending form, which takes nothing off the queue, writes
+`MASKHELD`, keeps ticking a counted number of times, and unmasks; the stop
+lands on that syscall's return to EL0, in `proc_job_stop_self`. The unmask
+follows the note by the child's own count, so no interval orders the driver's
+`^Z` against it: a driver held up for any time short of its watchdog finds the
+child still masked.
+`tools/interactive/pty-susp-pouch.exp` stops a Pouch program
+(`pouch-hello-susp`) with `^Z` and proves the stop by the absence of the
+program's lines, bracketed by advancing lines. The program writes a counted
+line every 250 ms whoever holds the terminal, because the shell takes the
+terminal back as soon as a stop is reported: a program that wrote only while
+it held the terminal would be silent after `Stopped` whether or not it was
+ever parked. At most one line may follow `Stopped`: the program parks at its
+next return to EL0, so one write can still complete after the latch, the one
+it was inside or one it entered on another CPU before the stop reached it.
+After `fg` the scenario reads two lines, since the first may carry a `held`
+worked out before the stop. The program installs no handler, so this leg is
+the default stop of a Proc whose dispositions the kernel reads from the Pouch
+note table; the stop taken later at the EL0 return tail is the mask rung's.
+The line says `held` only while the
+program leads a group of its own and that group is the terminal's foreground
+group (`tcgetpgrp`), and the scenario types its key after reading one, so the
+key is typed at a job that can take it. The shell spawns a job,
+puts it in a group and then hands it the terminal, and a key typed before the
+last of those reaches the shell: `pty-4.exp` and `item10-ctrlc.exp` wait the
+same way on `debug-child fgtick` (`lc_expect_fgtick`). The group must be the
+program's own because a job is born in the shell's group, which holds the
+terminal (no spawn call takes a birth group; the shell's `setpgid` follows the
+spawn): "my group is the foreground group" is true before the handoff, false
+in the middle of it and true after it, and a tick from the first of those
+would be followed by a key typed in the second. `pty-4.exp` holds the token to
+its meaning with a job started in the background, which must write none until
+`fg`. The shell gives a background job a pipe for fd 0, so `debug-child fgtick`
+asks the terminal through the first of fd 0, 1 and 2 that reaches it, and
+says `FGNOTTY` when none does. A slave answers only members of its session,
+so a slave that answers is the controlling terminal; a master would answer
+anyone, and a job has none on those three; the query needs read rights on
+the fd, which the terminal fds a job inherits from the shell carry. Both
+waits of that leg before `fg` fail on `FGNOTTY`, because a job that refused
+is as quiet as one that waits.
 
 ## Referenced by
 

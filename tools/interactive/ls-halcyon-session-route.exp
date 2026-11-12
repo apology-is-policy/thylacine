@@ -1,0 +1,140 @@
+#!/usr/bin/expect -f
+# A session compositor's pane cannot reach the console renderer's place channel.
+#
+# login routes the bare `halcyon` name unless it would start the session compositor on a
+# successful authentication (docs/SRV-SESSION-REGISTRY-DESIGN.md, the November 12
+# paragraphs), so the login behind a pane has no such route: a pane's programs have the
+# session's own place address, and `view` without one must find no console channel to
+# fall back to. The image runs BOTH the console renderer and the session compositor, so
+# the console renderer has posted the name and serves it while the pane asks. The pane's
+# shell runs `stat`, and the Instrument bar's log line carries the exit status to the
+# serial log.
+#
+# Two controls, because the claim is a failure: `false` shows that the bar reports a
+# failing command at all, and `stat` of a resident route shows that a posted name the
+# view routes does stat from this pane. `halcyon` is posted too, so the one difference
+# between the name that stats and the name that does not is the route. On an image with
+# no console renderer the name would be unposted as well as unrouted, and what a routed
+# name does while its service is offline would decide the result: the scenario does not
+# run there.
+#
+# Image: THYLACINE_HALCYON=1 THYLACINE_HALCYON_SESSION=1 THYLACINE_HALCYON_PROFILE=instrument
+#        tools/build.sh kernel --config ci
+set ::env(THYLACINE_ACCEL) [expr {[info exists ::env(LS_CI_GFX_ACCEL)] ? $::env(LS_CI_GFX_ACCEL) : "hvf"}]
+source [file join [file dirname [info script]] lib.exp]
+set repo $lc_repo
+set qmp [lc_qmp_sock]
+proc type {text} {
+    global repo qmp
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp $text} e]} { lc_fail $e }
+}
+# The bar's line for a command that has ended: `want` is Ok or Err.
+proc bar_ended {want what} {
+    set status [expr {$want eq "Ok" ? "0" : "\[1-9\]\[0-9\]*"}]
+    expect {
+        -re "halcyond: status bar \\d+ painted \[^\\r\\n\]*condition $want \[^\\r\\n\]*exit $status \[^\\r\\n\]*running false" {}
+        -re {snare:|EXTINCTION:} { lc_extinction_fail $what }
+        timeout { lc_fail $what }
+        eof { lc_fail "EOF: $what" }
+    }
+}
+# What the waits have read so far, for a line that may have gone by on the way to the
+# prompt: the console renderer saying that it posted the name.
+proc tbody {} {
+    global transcript
+    log_file
+    set f [open $transcript r]; set body [read $f]; close $f
+    log_file -a $transcript
+    return $body
+}
+set transcript /tmp/ls-halcyon-session-route-[pid].log
+catch {file delete -force $transcript}
+log_file -a $transcript
+set bake "THYLACINE_HALCYON=1 THYLACINE_HALCYON_SESSION=1 THYLACINE_HALCYON_PROFILE=instrument tools/build.sh kernel --config ci"
+lc_boot
+set timeout $lc_boot_timeout
+expect {
+    -ex "joey: halcyond spawned" {}
+    -ex "joey: aurora spawned" {
+        puts "\nLS-CI SKIP: no console renderer (halcyond) on this image -- this scenario asks whether a\
+ session pane reaches the place channel a console renderer has posted. Bake with: $bake"
+        lc_quit
+        exit 77
+    }
+    -re {EXTINCTION:} { lc_extinction_fail "boot" }
+    timeout { lc_fail "no renderer spawn line" }
+    eof { lc_fail "EOF before the renderer spawn" }
+}
+expect {
+    -ex "Thylacine login: " {}
+    -re {EXTINCTION:} { lc_extinction_fail "boot" }
+    timeout { lc_fail "no login" }
+    eof { lc_fail "EOF before login" }
+}
+lc_raw_send "michael\r" "login user"
+expect {
+    -ex "password: " {}
+    timeout { lc_fail "no password prompt" }
+    eof { lc_fail "EOF before password" }
+}
+lc_raw_send "correct-horse-battery-staple-v1\r" "login password"
+expect {
+    -ex "login: session compositor (halcyond) spawned" {}
+    -ex "Thylacine textual shell" {
+        puts "\nLS-CI SKIP: console (ut) login -- this scenario asks a session compositor's pane.\
+ Bake with: $bake"
+        lc_quit
+        exit 77
+    }
+    timeout { lc_fail "no graphical session" }
+    eof { lc_fail "EOF at session start" }
+}
+set timeout 60
+# The session compositor's theme line carries an inherited count. The console renderer says
+# a theme line too, without one, and it is not the one to read.
+expect {
+    -re {halcyond: theme [^\r\n]*inherited\); profile (instrument|legacy) } {
+        if {$expect_out(1,string) ne "instrument"} {
+            puts "\nLS-CI SKIP: legacy status bar -- this scenario reads a command's exit status from the\
+ bar's log line, which only the Instrument bar writes when a command ends.\
+ Bake with: $bake"
+            lc_quit
+            exit 77
+        }
+    }
+    -re {EXTINCTION:} { lc_extinction_fail "session" }
+    timeout { lc_fail "session did not report its graphics profile" }
+    eof { lc_fail "EOF before profile" }
+}
+# The pane's shell is at its prompt once the bar names it and shows nothing running.
+expect {
+    -re {halcyond: status bar [^\r\n]*context "ut[^\r\n]*running false} {}
+    -re {EXTINCTION:} { lc_extinction_fail "session" }
+    timeout { lc_fail "the pane's shell did not become ready" }
+    eof { lc_fail "EOF before the pane's shell" }
+}
+# Either the line has been read already, on the way to the prompt, or it is still to
+# come: the transcript holds only what a wait has read, so a line that is not in it can
+# only be waited for.
+if {[string first "halcyond: /srv/halcyon posted" [tbody]] < 0} {
+    set timeout 10
+    expect {
+        -ex "halcyond: /srv/halcyon posted" {}
+        -re {EXTINCTION:} { lc_extinction_fail "session" }
+        timeout { lc_fail "the console renderer never said it posted /srv/halcyon: a failing stat below would mean nothing" }
+        eof { lc_fail "EOF before the console renderer posted /srv/halcyon" }
+    }
+}
+lc_step "saw: the console renderer posted /srv/halcyon"
+set timeout 30
+type "false\n"
+bar_ended Err "the bar did not report a failing command (`false`): nothing below could be read"
+lc_step "saw: the bar reports a failing command"
+type "stat /srv/tapestry\n"
+bar_ended Ok "stat of a resident route (/srv/tapestry) did not succeed from the pane: a failing stat below would mean nothing"
+lc_step "saw: a resident route stats from the pane"
+type "stat /srv/halcyon\n"
+bar_ended Err "stat /srv/halcyon did not fail in a session compositor's pane: the session's view routes the console place channel"
+catch {file delete -force $transcript}
+lc_pass "session route: a posted resident name stats from the pane, the console renderer's posted place channel does not"
+lc_quit

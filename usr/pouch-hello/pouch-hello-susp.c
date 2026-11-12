@@ -4,19 +4,40 @@
 // Exists because the interactive suite had no leg that puts a POUCH program in
 // a pts foreground process group and ^Zs it. pty-4.exp already drives the whole
 // ladder (login -> ptyhost -> inner ut takes job control -> ^Z -> Stopped -> fg
-// -> re-stop -> bg -> ^C), but its subject is `sleep`, a NATIVE libthyla-rs
-// coreutil -- so the pouch boundary-line's note/disposition path is never on
-// the line. This program is that subject and nothing else.
+// -> re-stop -> bg -> ^C), but its subject is `debug-child fgtick`, a NATIVE
+// libthyla-rs program -- so no program whose dispositions the kernel reads from
+// the Pouch note table is on the line. This program is that subject and nothing
+// else. It installs no handler: the stop it takes is the kernel's default,
+// applied when the key is posted.
 //
 // Output contract (the .exp matches on these, so they are ABI for the scenario):
 //   SUSP-READY
-//   SUSP-TICK <n>          n strictly increasing from 1, forever
+//   SUSP-TICK <n> held     one line every 250 ms for as long as the program
+//   SUSP-TICK <n> away     runs, n strictly increasing from 1: `held` while it
+//                          holds the terminal, `away` while it does not
+//   SUSP-NOTTY             fd 0 is no terminal of this session; exit status 2
+//
+// A LINE SAYS THE PROGRAM RUNS; `held` SAYS THE TERMINAL IS OURS. The shell
+// spawns a job, puts it in a group and then hands it the terminal, and a ^Z
+// typed before the last of those reaches the shell: the program runs on and
+// the scenario waits for a stop that never comes. So a line says `held` only
+// while this program leads a process group of its own and that group is the
+// terminal's foreground group, and the scenario types its stop key after
+// reading one. The group must be its own because it starts in the shell's,
+// which holds the terminal: "my group is the foreground group" is true before
+// the handoff too, and false in the middle of it. Run it alone, never in a
+// pipeline.
+//
+// The line is written whoever holds the terminal, because the shell takes the
+// terminal back as soon as it hears of a stop. A program that wrote only while
+// it held the terminal would fall silent then whether or not it was ever
+// parked, and its silence would say nothing about the stop.
 //
 // THE COUNTER IS THE POINT, not decoration. Proving "^Z stopped it" needs a
 // NEGATIVE assertion (no output while stopped), and a negative is satisfied by
 // a fixture that broke for any other reason -- a crash, a failed spawn, a shell
 // that never put it in the foreground. So the scenario brackets the negative
-// with two positives: ticks ADVANCE before the stop, are ABSENT during it, and
+// with two positives: lines ADVANCE before the stop, are ABSENT during it, and
 // ADVANCE AGAIN after fg. The number is what makes the third leg real: a replay
 // of buffered pre-stop output would show OLD numbers, so the post-resume leg
 // demands one strictly greater than the last seen before ^Z. Without the
@@ -26,7 +47,8 @@
 //
 //   NO TERMINAL READ. A v1.0 pts has no foreground-read arbitration (TTIN), so
 //   a stopped job holding an outstanding terminal read steals the shell's
-//   input. This program only ever WRITES.
+//   input. This program only ever WRITES, and asks who holds the terminal
+//   (tcgetpgrp), which reads no input.
 //
 //   NEVER EXITS ON ITS OWN. A job with its own deadline races the stop window
 //   from both sides -- wall clock keeps running while stopped, which is the
@@ -42,6 +64,7 @@
 #include <errno.h>
 #include <stdio.h>
 #include <time.h>
+#include <unistd.h>
 
 // Slow enough that a human-scale expect window sees distinct ticks, fast enough
 // that the scenario is not dominated by waiting.
@@ -65,7 +88,13 @@ int main(void) {
     printf("SUSP-READY\n");
 
     for (unsigned long n = 1;; n++) {
-        printf("SUSP-TICK %lu\n", n);
+        pid_t fg = tcgetpgrp(STDIN_FILENO);
+        if (fg < 0) {
+            printf("SUSP-NOTTY\n");
+            return 2;
+        }
+        pid_t own = getpgrp();
+        printf("SUSP-TICK %lu %s\n", n, own == getpid() && fg == own ? "held" : "away");
         tick_sleep();
     }
 }

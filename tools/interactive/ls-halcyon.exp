@@ -988,7 +988,7 @@ menu_expect_dismissed "owner" "command-path menu"
 set timeout $lc_cmd_timeout
 expect {
     -ex "halcyond: menu ran: ls -l -- '$vref'" { lc_step "the verb ran on the quoted ref behind --" }
-    -re {halcyond: menu ran: [^\r\n]*} { lc_fail "the verb ran the wrong command: $expect_out(0,string)" }
+    -re {(halcyond: menu ran: [^\r\n]*)[\r\n]} { lc_fail "the verb ran the wrong command: $expect_out(1,string)" }
     timeout { lc_fail "no `menu ran:` line after choosing ls" }
     eof     { lc_fail "EOF waiting for the verb to run" }
 }

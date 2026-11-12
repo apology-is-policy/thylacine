@@ -137,6 +137,52 @@ is reserved before activation, not a claim that its service already runs.
 Missing optional residents may
 stay reserved/offline; no wildcard fallback. Add another resident only by an
 intentional login-policy update. No home-*, halcyon-* or boot-test service routes.
+
+November 12 login-policy update (PROPOSED by corona; implemented on the landing
+branch so that its proof exists; AWAITING THE OPERATOR'S RATIFICATION): login adds
+`halcyon`, the console renderer's inline-media place channel, to its manifest
+unless it would start the session compositor on a successful authentication,
+that is unless the image has the session lever and login was not passed
+`--no-session`. It decides before it authenticates anyone, so the rule is
+about what the login would run, not what it ends up running: a login that
+would start the compositor has no such route when authentication fails, when
+it serves `!recover`, or when the compositor fails and it falls back to the
+shell. Among the routed logins are the console getty's on an image without
+the session lever and joey's seeded boot logins (`--no-session`), whose
+shells run a fixed script on pipes: login does not know whether it sits on
+the console. HALCYON.md 14.7.2 keeps that channel for console mode
+("the console spike's global `/srv/halcyon` remains for console mode"), and
+with a private `/srv` per login the console shell could not open it: `view`
+reported `no /srv/halcyon` although the renderer had posted it (the whole-fleet
+run of November 12: ls-gfx-jpeg and ls-gfx-inline-view, 3 of 3 each; a tree
+without private registries passes both). The renderer is spawned by joey with
+MAY_POST_SERVICE, so its posting is a trusted one and a route can resolve it.
+
+What the route reaches, stated because nothing gates it. The place channel has
+no peer gate (HALCYON.md 14.7, the September 29 refinement) and serves one
+connection at a time (`placesrv` `MAX_CONNS`). So any process of a
+login that routes it can hold the only slot until it dies, and another's `view`
+then waits out the 5 s handshake deadline and fails; it can fill the
+listener's 16-entry accept backlog, charged to its own session's connection
+credits, so that the next connect fails at once; and it can place a raster
+into the console transcript. Console logins follow one another, so "another"
+is a process that outlived its own login and kept that login's view: it can do
+these things to the next user of the console. Every process could before this
+document, and can today on a tree without private registries; this update
+gives it back to the logins that route it and adds no gate. Closing it means
+admission at the place server by the console's current owner, which is not
+designed.
+
+A session compositor's login gets no such route, also on an image that runs
+halcyond as the console renderer too (the two build levers are independent):
+a pane's programs use the session's own `halcyon-<user>` address, and `view`
+without one must find no console channel behind the compositor
+(usr/view/src/main.rs `connect`). The fallback shell of a session whose
+compositor failed runs in that same view and has no inline media; `view`
+there reports `no /srv/halcyon`, which is true of its view and says nothing
+about the renderer. The bare
+name is the only one routed: a session's `halcyon-<user>` service stays a
+local posting, and the sentence above still forbids routing those.
 Existing byte-service gates still deny the ordinary shell's direct coordinator
 connection while admitting its sealed CAP_TCB_DIAL home proxy.
 

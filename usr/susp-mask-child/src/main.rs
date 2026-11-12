@@ -23,22 +23,25 @@
 //
 //   mask tty  ->  READY  ->  ticks         (the pgrp is stoppable-in-principle
 //                                           but every thread defers)
-//   driver sends ^Z       ->  ticks CONTINUE  (POSIX pending: the fan posts,
-//                                              proc_job_stop_pgrp does NOT stop
-//                                              us -- this is the arm assertion,
-//                                              see jc-probe's maskstop rung)
-//   UNMASK  ->  set_mask(NONE)             (the EL0 return from THIS syscall is
+//   driver sends ^Z       ->  HELD          (POSIX pending: the fan posts,
+//                                           proc_job_stop_pgrp does NOT stop
+//                                           us. We read the queued tty:susp
+//                                           back from the kernel and say so --
+//                                           the arm assertion, see jc-probe's
+//                                           maskstop rung)
+//   HOLD_TICKS more ticks ->  UNMASK  ->  set_mask(NONE)
+//                                          (the EL0 return from THIS syscall is
 //                                           the delivery point: the peek now
 //                                           yields tty:susp, handler_va == 0,
 //                                           default action STOP -> the tail's
 //                                           arm dequeues and stops us)
 //   driver `fg`  ->  ticks resume  ->  DONE
 //
-// The driver counts ticks rather than sleeping, and the unmask fires at a
-// fixed TICK NUMBER. The ticks are wall-clock sleeps and the driver's steps
-// are compute, so the ordering (^Z lands before UNMASK_AT_TICK) is a margin of
-// about eight ticks (2 s), not a guarantee: a driver held up for longer than
-// that sends its `^Z` to an unmasked child.
+// Nothing here waits on a clock for the driver. The unmask follows the `^Z` by
+// a count of our own ticks, and we learn that the `^Z` has come by asking the
+// kernel what is queued behind our mask (SYS_NOTE_WAIT's pending form, POSIX
+// sigpending), which takes nothing off the queue. A driver held up for any
+// time short of its own watchdog finds us still masked and still ticking.
 //
 // Every write is one t_write to fd 1: no stdio buffer exists that could flush
 // on resume and forge the exact output that reads as "it never stopped".
@@ -53,31 +56,35 @@ static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::Th
 
 use core::time::Duration;
 use libthyla_rs::notes::{self, NoteClass, NoteMask};
-use libthyla_rs::{t_exits, t_write};
+use libthyla_rs::{t_exits, t_note_wait, t_write, T_NOTE_TAKE_TTY_SUSP, T_NOTE_WAIT_PENDING};
 
 /// Tick cadence. Fast enough that the driver's per-leg waits are short, slow
 /// enough that a tick is never mistaken for the driver's own round-trip.
 const TICK: Duration = Duration::from_millis(250);
 
-/// The tick at which we unmask -- i.e. the tick at which the deferred stop
-/// lands. The driver sends `^Z` around tick 3-4 (it waits for two ticks, then
-/// settles), so the margin is ~8 ticks of the CHILD's own clock, not of the
-/// host's.
-const UNMASK_AT_TICK: u32 = 12;
+/// Ticks we keep running with the `^Z` queued before we unmask. The driver
+/// counts them between MASKHELD and MASKOFF. MUST match jc-probe.
+const HOLD_TICKS: u32 = 3;
 
-/// Total ticks before a clean exit. The 8 after the unmask are the post-resume
-/// window the driver's `fg` leg matches in.
+/// Ticks after the resume, before a clean exit: the window the driver's `fg`
+/// leg matches in.
 ///
 /// Both numbers are kept as small as the proof allows: this probe is boot-fatal
 /// via joey, so every second here is a second on EVERY boot of every gate --
 /// 40 of them in one SMP gate run.
-const TOTAL_TICKS: u32 = 20;
+const AFTER_TICKS: u32 = 4;
+
+/// Ticks we wait for the `^Z`: a minute, past the driver's watchdog, so the
+/// limit never ends us inside the ladder and an abandoned child does not
+/// linger.
+const WAIT_LIMIT_TICKS: u32 = 240;
 
 /// Markers. MUST match jc-probe's maskstop rung. Uppercase for the LS-CI/
 /// jc-probe idiom: the shell's line editor echoes the (lowercase) command name,
 /// so an uppercase token can only have come from this program's output.
 const M_READY: &[u8] = b"MASKREADY\n";
 const M_TICK: &[u8] = b"MTICK\n";
+const M_HELD: &[u8] = b"MASKHELD\n";
 const M_UNMASK: &[u8] = b"MASKOFF\n";
 const M_DONE: &[u8] = b"MASKDONE\n";
 const M_FAIL_MASK: &[u8] = b"MASKFAIL\n";
@@ -86,6 +93,25 @@ fn emit(b: &[u8]) {
     // SAFETY: SVC wrapper; `b` is a valid slice and fd 1 is our stdout (the
     // pts slave jc-probe's hosted ut handed us).
     let _ = unsafe { t_write(1, b.as_ptr(), b.len()) };
+}
+
+/// One tick: the marker, then the cadence. False when the terminal took
+/// nothing, which is a terminal whose master is gone.
+fn tick() -> bool {
+    // SAFETY: SVC wrapper; M_TICK is a valid static buffer.
+    if unsafe { t_write(1, M_TICK.as_ptr(), M_TICK.len()) } <= 0 {
+        return false;
+    }
+    let _ = libthyla_rs::time::sleep(TICK);
+    true
+}
+
+/// Whether a tty:susp is queued behind our mask. The pending form reads the
+/// queue and takes nothing from it.
+fn susp_held() -> bool {
+    // SAFETY: SVC wrapper; the pending form takes no pointer.
+    let word = unsafe { t_note_wait(T_NOTE_WAIT_PENDING, 0, core::ptr::null_mut(), 0) };
+    word > 0 && ((word as u64) & T_NOTE_TAKE_TTY_SUSP) != 0
 }
 
 #[no_mangle]
@@ -114,22 +140,42 @@ pub extern "C" fn rs_main() -> i64 {
     }
     emit(M_READY);
 
-    for n in 1..=TOTAL_TICKS {
-        emit(M_TICK);
-        let _ = libthyla_rs::time::sleep(TICK);
-        if n == UNMASK_AT_TICK {
-            // Announce BEFORE the syscall: the stop lands on that syscall's
-            // EL0 return, so anything printed after it would only appear once
-            // the driver had already resumed us -- too late to be the marker
-            // the driver waits on before expecting `Stopped`.
-            emit(M_UNMASK);
-            if notes::set_mask(NoteMask::NONE).is_err() {
-                emit(M_FAIL_MASK);
-                // SAFETY: `!`-returning SVC.
-                unsafe { t_exits(2) }
-            }
-            // <- the deferred tty:susp is delivered on the return from the
-            //    set_mask SVC above; execution resumes here only after `fg`.
+    // Tick until the `^Z` is queued. The kernel is the one that says so: the
+    // fan found every thread masked and posted the note where a stop would
+    // have parked us.
+    let mut waited = 0;
+    while !susp_held() {
+        if waited == WAIT_LIMIT_TICKS || !tick() {
+            // SAFETY: `!`-returning SVC.
+            unsafe { t_exits(3) }
+        }
+        waited += 1;
+    }
+    emit(M_HELD);
+    for _ in 0..HOLD_TICKS {
+        if !tick() {
+            // SAFETY: `!`-returning SVC.
+            unsafe { t_exits(3) }
+        }
+    }
+
+    // Announce BEFORE the syscall: the stop lands on that syscall's EL0
+    // return, so anything printed after it would only appear once the driver
+    // had already resumed us -- too late to be the marker the driver waits on
+    // before expecting `Stopped`.
+    emit(M_UNMASK);
+    if notes::set_mask(NoteMask::NONE).is_err() {
+        emit(M_FAIL_MASK);
+        // SAFETY: `!`-returning SVC.
+        unsafe { t_exits(2) }
+    }
+    // <- the deferred tty:susp is delivered on the return from the set_mask
+    //    SVC above; execution resumes here only after `fg`.
+
+    for _ in 0..AFTER_TICKS {
+        if !tick() {
+            // SAFETY: `!`-returning SVC.
+            unsafe { t_exits(3) }
         }
     }
 

@@ -62,9 +62,10 @@
 //          it inside the spin (HANDLED), and the prompt follows its exit.
 //   maskst `susp-mask-child` MASKS NOTE_BIT_TTY, so `^Z` finds no thread
 //          willing to take the stop and the fan POSTS the note instead
-//          (POSIX pending). It keeps ticking through the ^Z -- the ARM
-//          assertion, and the leg that must fail LOUDLY -- then unmasks, and
-//          the deferred stop lands on the EL0 return from that very syscall.
+//          (POSIX pending). It reads the queued note back from the kernel,
+//          says MASKHELD and keeps ticking -- the ARM assertion, and the leg
+//          that must fail LOUDLY -- then unmasks, and the deferred stop lands
+//          on the EL0 return from that very syscall.
 //          The ONLY leg that reaches the tail's NOTE_DFL_STOP arm: every rung
 //          above takes the POST-time stop, which consumes the signal before
 //          the note is ever left queued.
@@ -119,11 +120,15 @@ const TICK: &[u8] = b"TICK";
 const HANDOFF_POLL: Duration = Duration::from_millis(5);
 const HANDOFF_LIMIT: Duration = Duration::from_secs(8);
 
-/// A pause AFTER a job is known to hold the terminal, for two legs' own
-/// reasons (a spinner past its write's return tail; the mask rung's tick
-/// count). Nothing fails if it is too short: no signal waits on it to find
-/// its job. A handoff that takes longer than this is reported.
+/// A pause AFTER a job is known to hold the terminal, for the spin legs' own
+/// reason (a spinner past its write's return tail). Nothing fails if it is too
+/// short: no signal waits on it to find its job. A handoff that takes longer
+/// than this is reported.
 const SETTLE: Duration = Duration::from_millis(400);
+
+/// The ticks the masked child writes between MASKHELD and MASKOFF. MUST match
+/// susp-mask-child's HOLD_TICKS.
+const MASK_HOLD_TICKS: usize = 3;
 
 /// The silent-hang watchdog (PTY-4e F2): a mis-routed signal leaves the ladder
 /// blocked in `t_read` with no further bytes ever arriving -- ptyfs is
@@ -132,8 +137,7 @@ const SETTLE: Duration = Duration::from_millis(400);
 /// the 90 s boot timeout.
 ///
 /// Raised from 25 s when the maskstop rung landed: that rung waits on the
-/// CHILD's own 250 ms tick schedule (~5 s of it) plus a 2 s quiet window, so
-/// nominal completion went from ~2 s to ~11 s. The dominant new term is
+/// CHILD's own 250 ms ticks plus a 2 s quiet window. Its dominant term is
 /// wall-clock SLEEPING, which does not dilate under TCG the way compute does --
 /// but the margin is sized for the whole ladder dilating anyway.
 const WATCHDOG_SECS: u64 = 40;
@@ -796,36 +800,27 @@ fn run() -> i64 {
     if !d.read_until(pre, b"MTICK", 2, "maskstop-pre") {
         return 12;
     }
-    // THE ARM: from the ^Z all the way to the child's own unmask announcement,
-    // it must keep running. A `Stopped` anywhere in that span means the fan
-    // took the stop -- the deferral never happened, the precondition was never
-    // built, and read_until_unless says so by name instead of hanging.
-    settle();
+    // THE ARM: the child reads the queued tty:susp back from the kernel and
+    // says MASKHELD, which only a running child can do once the fan has posted
+    // the note. A `Stopped` first means the fan took the stop -- the deferral
+    // never happened, the precondition was never built, and read_until_unless
+    // says so by name instead of hanging. No clock orders the `^Z` against the
+    // unmask: the child unmasks a count of its own ticks after MASKHELD,
+    // however late the `^Z` came.
     let armed = d.mark();
     if !d.send(&[0x1a], "maskstop-susp")
+        || !d.read_until_unless(armed, b"MASKHELD", 1, "Stopped", "maskstop-held")
         || !d.read_until_unless(armed, b"MASKOFF", 1, "Stopped", "maskstop-armed")
     {
         return 12;
     }
-    // Belt-and-braces on the same claim. The LOAD-BEARING arm proof is the leg
-    // above -- reaching MASKOFF (tick 12) with no `Stopped` is already
-    // conclusive that the child ran through the ^Z. This counter is cheap
-    // corroboration, so its threshold is set to the smallest value that cannot
-    // be reached by accident, NOT to the tightest one the nominal timing allows.
-    //
-    // The floor: `armed` is acc.len(), i.e. bytes ALREADY READ, so ticks emitted
-    // during the settle() above are still in flight and land on this side of the
-    // mark. The settle is 400 ms at a 250 ms cadence, so at most 2 such
-    // stragglers exist, and 3 is therefore the smallest count a stopped child
-    // provably cannot produce.
-    //
-    // The ceiling is why it is not higher: `read_until` returns the moment its
-    // needle count is met, but a single 512-byte read can swallow ~85 buffered
-    // MTICKs at once, so on a dilated host `armed` can land much closer to tick
-    // 12 than the nominal schedule suggests. A threshold picked off the nominal
-    // count would then fail a healthy run -- a false RED, which costs more than
-    // the tightness buys.
-    if d.count_since(armed, b"MTICK") < 3 {
+    // And it kept running with the note queued: its own ticks between the two
+    // markers, each written after the kernel said the note was held. The
+    // child writes exactly this many, so the count has no stragglers to allow
+    // for.
+    let held = d.past(armed, b"MASKHELD").unwrap_or(armed);
+    let off = d.past(held, b"MASKOFF").unwrap_or(held);
+    if occurrences(&d.acc[held..off], b"MTICK") != MASK_HOLD_TICKS {
         t_putstr("jc-probe: FAIL (masked child did not keep running) at leg maskstop-armed\n");
         return 12;
     }
@@ -836,9 +831,10 @@ fn run() -> i64 {
     // to a 512-byte chunk that carried MASKOFF and `Stopped` together.
     // MASKDONE is the `bad` arm, and it is what makes the sabotage control
     // cheap: with the tail's stop arm deleted the child simply runs to
-    // completion, and this leg then names that in ~2 s instead of hanging out
-    // the 40 s watchdog. MASKDONE cannot legitimately precede `Stopped` -- the
-    // child stops at tick 12 and only reaches MASKDONE at tick 20, after `fg`.
+    // completion, and this leg then names that in about a second instead of
+    // hanging out the 40 s watchdog. MASKDONE cannot legitimately precede
+    // `Stopped` -- the child stops on its unmask and only reaches MASKDONE
+    // after `fg`.
     if !d.read_until_unless(armed, b"Stopped", 1, "MASKDONE", "maskstop-stop")
         || !d.read_until(armed, PROMPT, 1, "maskstop-prompt")
     {
@@ -864,7 +860,9 @@ fn run() -> i64 {
     // So both ends are `tr`-uppercased tokens, which no echo can forge, and the
     // two commands are sent back-to-back -- the second queues in the pts input
     // buffer while `sleep 2` holds the foreground, so MORE cannot appear until
-    // the sleep has finished. A running child would have put ~8 MTICKs inside.
+    // the sleep has finished. A running child would have put its remaining
+    // MTICKs inside, or have finished: MASKDONE since the `^Z` is the same
+    // failure, a child that was reported stopped and ran on.
     let m = d.mark();
     if !d.send(b"echo quiet | tr a-z A-Z\r", "maskstop-quiet-open")
         || !d.read_until(m, b"QUIET", 1, "maskstop-quiet-open")
@@ -878,7 +876,7 @@ fn run() -> i64 {
     {
         return 12;
     }
-    if d.count_since(quiet, b"MTICK") != 0 {
+    if d.count_since(quiet, b"MTICK") != 0 || d.count_since(armed, b"MASKDONE") != 0 {
         t_putstr("jc-probe: FAIL (a job-stopped child kept ticking) at leg maskstop-quiet\n");
         return 12;
     }

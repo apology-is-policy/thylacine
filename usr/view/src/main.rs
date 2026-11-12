@@ -206,7 +206,15 @@ fn connect() -> Result<(i64, String), &'static str> {
     const SRV: &[u8] = b"/srv/halcyon";
     let root = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, SRV.as_ptr(), SRV.len(), T_OREAD) };
     if root < 0 {
-        return Err("no /srv/halcyon (renderer not posting)");
+        // A name this view of /srv does not hold fails the walk. One it holds fails the open,
+        // and that failure does not say whether nobody serves the name or its one connection
+        // is taken.
+        let why = if matches!(Error::from((-root) as i32), Error::NotFound) {
+            "no /srv/halcyon (not posted, or not in this login's view)"
+        } else {
+            "/srv/halcyon did not connect (nobody serves it, or its one connection is taken)"
+        };
+        return Err(why);
     }
     Ok((root, String::from("place")))
 }
