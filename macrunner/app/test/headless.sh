@@ -90,7 +90,15 @@
 #            half strength blended once.
 # What the Mac does with its own pointer under a capture (hidden, held, put back) no leg tries: a
 # test that did would take the pointer from whoever is at the Mac.
-# The window opens twice more, for three seconds each.
+#
+# Last the captured click leg, on the first machine: the captured pointer's script for a guest
+# that is running (view.rs, scripted_captured_click), which the capture legs do not run.
+#   captured-click  the pointer to pixel 600,108 as the tablet's; then captured and moved 200
+#            guest pixels left and 100 down, in the whole points that is at the view's scale;
+#            then a left click. The script says each step, and the leg works out from the points
+#            and the scale it says what the mouse must be handed: one report on the tablet, the
+#            place, and three on the mouse, the motion, the press and the release.
+# The window opens three times more, for three seconds each.
 #
 #   macrunner/app/test/headless.sh       exit 0 pass, 1 fail, 77 skipped (not macOS, or no D-Bus display)
 #   THYLACINE_QEMU=<qemu-system-aarch64>  the QEMU to attach to (default: the one on PATH)
@@ -555,6 +563,64 @@ PY
     return $rc
 }
 
+# captured_click_leg: the paced captured-pointer script, on the machine with the tablet bound.
+captured_click_leg() {
+    local name=captured-click
+    local d=$repo/build/macrunner-app-test/$name
+    mkdir -p "$d" && cd "$d" || return 1
+    rm -f app.out heard.out moves.out
+    start_qemu "$name" || return 1
+    run_app 20 -- --exit-after 3 --scripted-captured-click 600,108,-200,100; local arc=$?
+    python3 -I "$here/as_input_guest.py" t.sock reports 640 480 > heard.out 2>&1
+    quit_qemu
+    local rc=0 got said want_seen want_mouse
+    [ "$arc" -eq 0 ] || { echo "$name: FAIL: the app exited $arc ($(tail -1 app.out))"; rc=1; }
+    # The script's three steps as it says them. From the second, the points it moved and the
+    # scale: they must be the whole points 200 pixels left and 100 down are at that scale, and
+    # they make the guest pixels the mouse is handed (no remainder is carried into a first move).
+    said=$(grep '^scripted: captured click: ' app.out | tr '\n' ';')
+    if ! python3 -I - "$said" > moves.out 2>&1 <<'PY'
+import math, re, sys
+m = re.fullmatch(r"scripted: captured click: the pointer to guest pixel 600,108 of 640x480;"
+                 r"scripted: captured click: captured, the Mac's pointer held: false; a move of (-?\d+),(-?\d+) points at ([0-9][0-9.]*) points to a guest pixel;"
+                 r"scripted: captured click: a left click;", sys.argv[1])
+if not m:
+    sys.exit("the script did not say its three steps as they were (%s)" % (sys.argv[1] or "it said nothing"))
+px, py, scale = int(m[1]), int(m[2]), float(m[3])
+def whole(v):  # Rust's f64::round: halves away from zero
+    return int(math.copysign(math.floor(abs(v) + 0.5), v))
+if (px, py) != (whole(-200 * scale), whole(100 * scale)):
+    sys.exit("the script moved %d,%d points, which is not 200 pixels left and 100 down at %r points to a pixel" % (px, py, scale))
+gx, gy = math.trunc(px / scale), math.trunc(py / scale)
+handed = " ".join("rel %s %d" % (a, v) for a, v in (("x", gx), ("y", gy)) if v)
+heard = " ".join("rel %#x %d" % (c, v) for c, v in ((0, gx), (1, gy)) if v)
+print("at 600,108;con -1: %s;con -1: press left;con -1: release left;" % handed)
+print("%s;press left;release left;" % heard)
+print("%d,%d guest pixels of %d,%d points at %r points to one" % (gx, gy, px, py, scale))
+PY
+    then
+        echo "$name: FAIL: $(tail -1 moves.out)"
+        return 1
+    fi
+    { read -r want_seen; read -r want_mouse; read -r said; } < moves.out
+    got=$(seen 640 480)
+    if [ "$got" = "$want_seen" ]; then
+        echo "$name: the place, then the captured move as $said, and the click, addressed to no display"
+    else
+        echo "$name: FAIL: input differs"; echo "  got:  $got"; echo "  want: $want_seen"; rc=1
+    fi
+    if [ "$(cat heard.out)" = "keyboard: nothing
+tablet: at 600,108;
+mouse: $want_mouse" ]; then
+        echo "$name: one report on the tablet's driver, the place, and three on the mouse's: the motion, the press and the release"
+    else
+        echo "$name: FAIL: the devices handed their driver something else"; sed 's/^/  got:  /' heard.out
+        echo "  want: tablet: at 600,108;"; echo "  want: mouse: $want_mouse"; rc=1
+    fi
+    said_of_qemu "$name" || rc=1
+    return $rc
+}
+
 # One run of the app against the size leg's QEMU: <out> <limit in seconds> <the app's arguments>.
 size_run() {
     local out=$1 limit=$2; shift 2
@@ -692,5 +758,6 @@ capture_leg capture ,display=gpu0,head=0 'at 320,240 press left;at 320,240 relea
 capture_leg capture-unbound "" 'at 320,240;at 320,240 press left;at 320,240 release left;' \
     'at 320,240;at 320,240;at 320,240;' 'press left;release left;' \
     "with the tablet bound to nothing the same, and of the click after it the place went ahead to the tablet's driver and the button to the mouse's" || rc=1
+captured_click_leg || rc=1
 [ $rc -eq 0 ] && echo "PASS: macrunner/app headless" || echo "FAIL: macrunner/app headless (evidence in $repo/build/macrunner-app-test)"
 exit $rc

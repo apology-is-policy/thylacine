@@ -273,6 +273,19 @@ fn main() {
             "--scripted-input" => opts.scripted_input = true,
             "--scripted-bar" => opts.scripted_bar = true,
             "--scripted-capture" => opts.scripted_capture = true,
+            "--scripted-captured-click" => {
+                opts.scripted_captured_click = args.get(i + 1).and_then(|s| {
+                    let mut n = s.split(',');
+                    let at = (n.next()?.parse().ok()?, n.next()?.parse().ok()?);
+                    let by = (n.next()?.parse().ok()?, n.next()?.parse().ok()?);
+                    n.next().is_none().then_some((at.0, at.1, by.0, by.1))
+                });
+                if opts.scripted_captured_click.is_none() {
+                    eprintln!("thylacine-mac: --scripted-captured-click takes <x>,<y>,<dx>,<dy>: a pixel of the guest's screen, and the guest pixels to move from it");
+                    std::process::exit(2);
+                }
+                i += 1;
+            }
             "--scripted-click" => {
                 opts.scripted_click = args.get(i + 1).and_then(|s| {
                     let (x, y) = s.split_once(',')?;
@@ -303,7 +316,7 @@ fn main() {
         i += 1;
     }
     let Some(qmp) = qmp else {
-        eprintln!("usage: thylacine-mac --attach <qmp socket> [--stats] [--no-activate] [--exit-after <s>] [--dump <ppm>] [--scripted-input] [--scripted-bar] [--scripted-capture] [--scripted-click <x>,<y>] [--resize-to <w>x<h>]");
+        eprintln!("usage: thylacine-mac --attach <qmp socket> [--stats] [--no-activate] [--exit-after <s>] [--dump <ppm>] [--scripted-input] [--scripted-bar] [--scripted-capture] [--scripted-click <x>,<y>] [--scripted-captured-click <x>,<y>,<dx>,<dy>] [--resize-to <w>x<h>]");
         std::process::exit(2);
     };
     let mtm = MainThreadMarker::new().expect("the main thread");

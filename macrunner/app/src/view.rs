@@ -767,6 +767,7 @@ pub struct Ivars {
     seized: Cell<bool>, // the Mac's pointer is held and hidden (a captured pointer's is, in a window that was key)
     skip: Cell<bool>,   // the next move has in it the jump the Mac's pointer was just made to take
     carry: Cell<(f64, f64)>, // the part of a guest pixel of a captured pointer's motion not sent yet
+    script_step: Cell<u8>,   // how many steps of the paced capture script have run
     worn: RefCell<Worn>,
     told: Cell<Option<UiInfo>>, // the size the guest's display was last told
     tellings: Cell<u32>,
@@ -777,13 +778,14 @@ pub struct Ivars {
 #[derive(Clone, Default)]
 pub struct Options {
     pub print_stats: bool,
-    pub exit_after: Option<f64>,            // seconds
-    pub dump: Option<String>,               // a PPM of the pipeline's output, written at exit_after
+    pub exit_after: Option<f64>,                               // seconds
+    pub dump: Option<String>, // a PPM of the pipeline's output, written at exit_after
     pub scripted_input: bool, // one second in, a fixed run of key and pointer events through the window
     pub resize_to: Option<(f64, f64)>, // one second in, the window's content set to this many points, and nudged a second later
     pub scripted_bar: bool, // one second in, the content set a point past the scanout each way; then clicks on the picture's corners and on the bars
     pub scripted_capture: bool, // one second in, the pointer captured (the Mac's is left alone: the window is not key), moved, clicked, scrolled and let go
     pub scripted_click: Option<(u32, u32)>, // one second in, the pointer to the middle of the picture; half a second on, a left click on this guest pixel; half a second on, the pointer to the last pixel
+    pub scripted_captured_click: Option<(u32, u32, i32, i32)>, // one second in, the pointer to this guest pixel; half a second on, captured and moved this many guest pixels; half a second on, a left click
 }
 
 define_class!(
@@ -856,6 +858,8 @@ define_class!(
 
         #[unsafe(method(captureScript:))]
         fn capture_script(&self, _timer: &NSTimer) { self.scripted_capture(); }
+        #[unsafe(method(capturedClick:))]
+        fn captured_click(&self, _timer: &NSTimer) { self.scripted_captured_click(); }
 
         // View > Capture Pointer, and its chord.
         #[unsafe(method(toggleCapture:))]
@@ -994,6 +998,7 @@ impl GuestView {
             seized: Cell::new(false),
             skip: Cell::new(false),
             carry: Cell::new((0.0, 0.0)),
+            script_step: Cell::new(0),
             worn: RefCell::new(Worn::default()),
             told: Cell::new(None),
             tellings: Cell::new(0),
@@ -1063,6 +1068,19 @@ impl GuestView {
                     None,
                     false,
                 );
+            }
+        }
+        if this.ivars().opts.scripted_captured_click.is_some() {
+            for secs in [1.0, 1.5, 2.0] {
+                unsafe {
+                    NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(
+                        secs,
+                        &*(Retained::as_ptr(&this) as *const AnyObject),
+                        sel!(capturedClick:),
+                        None,
+                        false,
+                    );
+                }
             }
         }
         if this.ivars().opts.scripted_click.is_some() {
@@ -1301,6 +1319,108 @@ impl GuestView {
         }
     }
 
+    // A move of the Mac's pointer as Core Graphics makes one, with how far the pointer went in
+    // the event, handed to the view. Handed back: the motion the event says it has, as AppKit
+    // reads it.
+    fn scripted_move(&self, dx: i64, dy: i64) -> (f64, f64) {
+        let cg = CGEvent::new_mouse_event(
+            None,
+            CGEventType::MouseMoved,
+            CGPoint::new(0.0, 0.0),
+            CGMouseButton::Left,
+        );
+        if let Some(cg) = &cg {
+            CGEvent::set_integer_value_field(Some(cg), CGEventField::MouseEventDeltaX, dx);
+            CGEvent::set_integer_value_field(Some(cg), CGEventField::MouseEventDeltaY, dy);
+        }
+        match cg.and_then(|cg| NSEvent::eventWithCGEvent(&cg)) {
+            Some(ev) => {
+                let _: () = unsafe { msg_send![self, mouseMoved: &*ev] };
+                (ev.deltaX(), ev.deltaY())
+            }
+            None => {
+                eprintln!("scripted: no motion event");
+                (0.0, 0.0)
+            }
+        }
+    }
+
+    // The captured pointer for a guest that is running, paced as the click script is and for
+    // its reason. The pointer goes to a guest pixel, as the tablet's; half a second on it is
+    // captured and moved a number of guest pixels; half a second on, a left click, which lands
+    // wherever the guest then has its pointer. The window is not key, so the Mac's pointer is
+    // left alone. The pointer stays captured: the picture a test takes at the end has the
+    // guest's own pointer in it.
+    fn scripted_captured_click(&self) {
+        let iv = self.ivars();
+        let step = iv.script_step.get();
+        iv.script_step.set(step.saturating_add(1));
+        let (Some(window), Some((gx, gy, dx, dy))) =
+            (self.window(), iv.opts.scripted_captured_click)
+        else {
+            return;
+        };
+        if let Some(r) = iv.renderer.borrow_mut().as_mut() {
+            r.upload(&iv.display, &mut iv.stats.borrow_mut());
+        }
+        let Some((rect, scale, (tw, th))) = self.picture() else {
+            eprintln!("scripted: no scanout, the captured pointer is not tried");
+            return;
+        };
+        let (gx, gy) = (gx.min(tw - 1), gy.min(th - 1));
+        let x = rect.origin.x + (gx as f64 + 0.5) * rect.size.width / tw as f64;
+        let y = rect.origin.y + rect.size.height - (gy as f64 + 0.5) * rect.size.height / th as f64;
+        let p = self.convertPoint_toView(NSPoint::new(x, y), None);
+        let wn = window.windowNumber();
+        let event = |ty: NSEventType| {
+            NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+                ty, p, NSEventModifierFlags::empty(), 0.0, wn, None, 0, 1, 1.0)
+        };
+        match step {
+            0 => {
+                let sent = event(NSEventType::MouseMoved).and_then(|ev| {
+                    let at = self.guest_point(&ev);
+                    self.pointer(&ev).then_some(at).flatten()
+                });
+                match sent {
+                    Some(at) if (at.x, at.y) == (gx, gy) => eprintln!(
+                        "scripted: captured click: the pointer to guest pixel {gx},{gy} of {tw}x{th}"
+                    ),
+                    Some(at) => eprintln!(
+                        "scripted: captured click: meant {gx},{gy} of {tw}x{th}, sent {},{}",
+                        at.x, at.y
+                    ),
+                    None => eprintln!(
+                        "scripted: captured click: meant {gx},{gy} of {tw}x{th}, sent nothing"
+                    ),
+                }
+            }
+            1 => {
+                self.capture(true);
+                let held = iv.seized.get();
+                // Whole points: an event's motion is a whole number of them.
+                let by = self.scripted_move(
+                    (dx as f64 * scale).round() as i64,
+                    (dy as f64 * scale).round() as i64,
+                );
+                eprintln!(
+                    "scripted: captured click: captured, the Mac's pointer held: {held}; a move of {},{} points at {scale} points to a guest pixel",
+                    by.0, by.1
+                );
+            }
+            _ => {
+                let down = event(NSEventType::LeftMouseDown)
+                    .is_some_and(|ev| self.button(&ev, button_code(0), true));
+                let up = event(NSEventType::LeftMouseUp)
+                    .is_some_and(|ev| self.button(&ev, button_code(0), false));
+                eprintln!(
+                    "scripted: captured click: a left click{}",
+                    if down && up { "" } else { ", NOT SENT" }
+                );
+            }
+        }
+    }
+
     // The captured pointer as a person would use it, without taking the Mac's: the window is not
     // key, so the Mac's pointer is left alone. A move is made as Core Graphics makes one, with how
     // far the pointer went in the event, and handed to the view, as the buttons and the notch are.
@@ -1338,29 +1458,7 @@ impl GuestView {
             ),
             None,
         );
-        // The motion the event says it has, as AppKit reads it back.
-        let moved = |dx: i64, dy: i64| {
-            let cg = CGEvent::new_mouse_event(
-                None,
-                CGEventType::MouseMoved,
-                CGPoint::new(0.0, 0.0),
-                CGMouseButton::Left,
-            );
-            if let Some(cg) = &cg {
-                CGEvent::set_integer_value_field(Some(cg), CGEventField::MouseEventDeltaX, dx);
-                CGEvent::set_integer_value_field(Some(cg), CGEventField::MouseEventDeltaY, dy);
-            }
-            match cg.and_then(|cg| NSEvent::eventWithCGEvent(&cg)) {
-                Some(ev) => {
-                    let _: () = unsafe { msg_send![self, mouseMoved: &*ev] };
-                    (ev.deltaX(), ev.deltaY())
-                }
-                None => {
-                    eprintln!("scripted: no motion event");
-                    (0.0, 0.0)
-                }
-            }
-        };
+        let moved = |dx: i64, dy: i64| self.scripted_move(dx, dy);
         let button = |ty: NSEventType| {
             let ev = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
                 ty, middle, none, 0.0, wn, None, 0, 1, 1.0);

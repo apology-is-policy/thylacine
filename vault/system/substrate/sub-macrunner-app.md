@@ -185,7 +185,14 @@ between. It does not start QEMU yet: it attaches to one that runs with
   a left click, and the pointer captured again; the moves are events Core
   Graphics made with the motion written into them, and the script says the
   motion AppKit read back from them, the view's points to a guest pixel, and
-  whether the Mac's pointer was held), `--scripted-click <x>,<y>` (the pointer script for a guest that is
+  whether the Mac's pointer was held), `--scripted-captured-click
+  <x>,<y>,<dx>,<dy>` (the captured pointer's script for a guest that is
+  running, paced as the click script is and for its reason: one second in
+  the pointer goes to that guest pixel as the tablet's; half a second later
+  it is captured and moved that many guest pixels, in the whole points they
+  are at the view's scale; half a second later a left click, which lands
+  wherever the guest then has its pointer; the pointer stays captured, so
+  `--dump` has the guest's own pointer in it), `--scripted-click <x>,<y>` (the pointer script for a guest that is
   running, with no keys in it: one second in the pointer goes to the middle
   of the picture, half a second later a left click on that guest pixel, half
   a second later the pointer to the last pixel; a step is said as the pixel
@@ -673,11 +680,28 @@ every step of a drag is a mode the guest sets at every step.
   sizes and the pointer share the input thread, which waits for each answer
   for as long as QEMU takes. The display keeps drawing, so the window looks
   alive, takes no input and says nothing.
-- **The pointer has not been tried in a live guest.** What is shown is with a
-  QEMU that has no guest and a scripted driver in its place: the reports the
-  tablet's driver is handed, on QEMU 10.0.2 and 11.1.3. That the compositor
-  takes a button from the tablet was read in its source
-  (`usr/tapestryd/src/main.rs`, the tablet's drain), not seen.
+- **The pointer in a live guest has been tried by script, once**
+  (2026-11-12: the Halcyon session at 2560x1600 under HVF, the QEMU on PATH, 10.0.2, the
+  app's window not key; `aux-gate/macrunner/m9/ptrA` and `ptrB`). Under the
+  launcher that binds the tablet and under the one that does not, the three
+  places the paced script sent were the places the guest then said its
+  pointer had (1280,800, 600,108, 2559,1599), QEMU refused nothing, and the
+  click on the left pane's header moved the keys there: the line typed
+  after it is in that pane. The app as it was before the pointer went over
+  the monitor was refused every position on the unbound machine ("Mouse is
+  not absolute", sixteen times and more) and moved nothing. Captured (the
+  paced captured script, the bound launcher only): the guest's pointer went
+  from 600,108 to exactly 1900,108 for a move of 650 points at half a point
+  to a pixel; the click after it landed on the right pane's header, so the
+  line typed next is in the right pane and no pixel of the left pane's
+  content changed; and the app's picture has the guest's own arrow (64x64,
+  hot spot 4,4) with its tip on 1900,108, where QEMU's frame of that
+  moment has none. The frames were looked at, not only counted. The two
+  pictures also differ at the two panes' carets, two bars of 4 by 49
+  pixels, which is what a blink between the two moments would leave; which
+  it was is not shown. What this was not: a person's hand, a key window,
+  the Mac's pointer held, a drag, a scroll, or a capture on the machine
+  whose tablet is bound to nothing.
 - **Nobody has captured the pointer by hand.** What the Mac does with its own
   pointer under a capture is written and has never run: hiding it, holding
   it, the jump to the middle of the picture and the move dropped after it,
@@ -686,7 +710,8 @@ every step of a drag is a mode the guest sets at every step.
   would take the pointer from whoever is at the Mac, so the windowed test
   captures in a window that is not key, where the app leaves the Mac's
   pointer alone. The chord, the menu item and its tick, and the title are
-  untried too. Nor has a captured pointer been tried in a live guest.
+  untried too. In a live guest a captured pointer has been tried by script
+  only (below).
 - **A captured pointer moves as the Mac's would have.** The motion is
   AppKit's, in points, with the Mac's acceleration, and not the device's own
   counts. A program that wants unaccelerated motion gets none.
