@@ -5,6 +5,13 @@
 use alloc::vec::Vec;
 
 pub const TRUSTED_ID_START: u32 = 0x8000_0000;
+/// The service's own resources. No client names one (`valid_id`), and each has
+/// one owner: the trusted screen's image is in one of the first two, and the
+/// normal cursor's plane is the third.
+pub const TRUSTED_IMAGES: [u32; 2] = [TRUSTED_ID_START + 1, TRUSTED_ID_START + 3];
+pub const TRUSTED_CURSOR: u32 = TRUSTED_ID_START + 2;
+const _: () = assert!(TRUSTED_IMAGES[0] != TRUSTED_IMAGES[1]
+    && TRUSTED_IMAGES[0] != TRUSTED_CURSOR && TRUSTED_IMAGES[1] != TRUSTED_CURSOR);
 pub const MAX_OBJECTS: usize = 4096;
 pub const MAX_ATTACHMENTS: usize = 16384;
 

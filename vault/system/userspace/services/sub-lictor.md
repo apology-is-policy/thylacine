@@ -185,19 +185,18 @@ gives a screen of 1280x800, 5120x2880 one of 2560x1440. Nothing in the device
 scales a screen that is not the host's size: QEMU makes the console's surface
 the size of the scanout, and whatever shows it (a window, a VNC viewer, the
 Mac app) decides how. The factor is whole so that a frontend scaling by whole
-pixels shows the screen sharp, and it is chosen once, at Lictor's start, as the
-first that fits. Before this a host
+pixels shows the screen sharp, and it is the first that fits, chosen at
+Lictor's start and again when its display changes. Before this a host
 outside the limits failed `Screen::new`, and with it the probe of the driver
 that is also the keyboard and the pointer. The screen says so when its size is
 not the host's or its scale is not one:
 `lictor: trusted screen WxH at Kx for a display of WxH`.
 `tools/interactive/ls-graphical-sak-scale.exp` reads that line, word for word.
 
-**What it does not do.** The trusted screen is made once and keeps the size of
-the boot whatever the host's window does afterwards; after a followed resize it
-is shown as the frontend shows a scanout of another size (`docs/handoffs/050`).
-Its scale, which it did not have when this section was written, is the next
-section's, and is the boot's too.
+**What it did not do, and now does.** When this section was written the
+trusted screen was made once and kept the size of the boot whatever the host's
+window did afterwards (`docs/handoffs/050`). It follows its display since
+2026-11-12: "The trusted screen follows its display", below.
 
 **Tests.** Host: `render::tests::the_sizes_it_fits_are_its_layouts_floor_to_its_rasters_pixels`
 (each limit at and past its edge, a pixel count that does not wrap, `render()`
@@ -250,7 +249,8 @@ display's scale as the session reads it, by the session's rule
 ([[sub-libhalcyon]]'s `scale`): the platform's `thylacine.scale` first, which
 `backend/screen.rs` `declared_scale` reads from `/hw/chosen/bootargs` at
 Lictor's start as the compositor does at its own, then the millimetres of the
-EDID Lictor reads at its start (`Gpu::edid_mm`), else 100. From millimetres
+EDID, which Lictor reads at its start (`Gpu::edid_mm`) and again each time it
+follows its display, else 100. From millimetres
 the percent is the session's reading, the pixels to the inch in quarters of the
 reference rounded half up, so a display at 1.375 of the reference (132 to the
 inch) reads as 150 and is drawn at two: on that path two begins at 137.5
@@ -266,9 +266,7 @@ It is compiled for the backend and for tests, so libhalcyon is a dev-dependency
 of the crate as well as the backend's optional one. Nothing a client says is
 asked: not the compositor's scale, not a session's setting, not a surface's.
 
-**What it does not do.** The size and the scale are the boot's. A window
-resized afterwards, or moved to a display of another scale, leaves the trusted
-screen as it was made. A scale between one and two is drawn at the nearer whole
+**What it does not do.** A scale between one and two is drawn at the nearer whole
 one: at 125% the screen is four fifths of the session's size, at 150% a third
 larger than it. There is no scale of three. `declared_scale` says nothing when
 the command line is too long or the value is not a scale; the compositor reads
@@ -310,6 +308,101 @@ outranks, the largest side, and the fallback. A wrong one of those passes it. Th
 (`const _` in `screen.rs`). The baker itself is checked by baking again and
 finding nothing changed, which needs fontTools and is no gate's step.
 
+## The trusted screen follows its display (2026-11-12)
+
+Written by aux while this dossier's keeper was away; `docs/handoffs/052` is the
+note left for her. The rules and the three decisions are in
+`docs/GRAPHICAL-SAK-OWNERSHIP.md`, "The trusted screen follows its display".
+
+**When.** `main.rs`'s pass calls `Screen::follow` after `Seat::step`, and only
+when the seat's phase is 0: no trusted episode is up, beginning, or owed its
+restoration. `follow` also returns at once while the screen is up (`active`).
+It has its own `libhalcyon::display::Follow` ([[sub-libhalcyon]]), the one the
+compositor uses, over the driver's own count of display events
+(`Gpu::display_events`): the count must have moved and then stood for the
+quiet time. A stalled engine puts the asking off, and a dead one ends it.
+Nothing here is on the way into secure attention: `paint` and `activate` use
+the image `follow` left, which is always a whole one.
+
+**What is asked.** `refit` sends GET_DISPLAY_INFO and GET_EDID, the two
+commands `Gpu::probe` sends, and hands their answers and the declaration read
+at start to `render::refit`. That is `geometry_for` put beside the screen that
+stands, and it answers one of three things (`render::Refit`). `Stands`:
+nothing is done and nothing said. `Scale(k)`: the same size at another scale,
+so `scale` is set and the next `paint` draws at it. `Size(size, k)`: a new
+image, made by `remake`. A device that shows no display (`Ok(None)`) gives
+nothing to follow to. A command that was not answered is a failure and is not
+read as "no EDID".
+
+**A new image.** `remake` makes the new image beside the one that stands and
+swaps only when the device has answered for it whole:
+
+1. The workspace (`Raster`) is replaced by a larger one if the new size needs
+   more. The old one is erased and unmapped by its `Drop`, after the new one
+   is had.
+2. `back(bytes)` adds backing until there is enough. The backing is whole
+   1 MiB chunks, chunk `i` mapped at `BASE` plus `i` MiB, so the image is one
+   run of memory at any size. A chunk is zeroed when it is mapped and is not
+   given back. `MOST` (34) is the chunks of the largest screen and `END` the
+   address past them: `back` refuses more, and `backend/gpu/cursor.rs` asserts
+   at compile time that its own window begins at or after `END`.
+3. The image is in one of two reserved resources (`objects::TRUSTED_IMAGES`;
+   `image` says which). The other, the spare, is created at the new size and
+   the first chunks of the backing are attached to it. Both resources then
+   name the same private memory. Only the image is transferred to, and only
+   the image is put on the scanout.
+4. When both commands were answered, `image`, `width`, `height`, `scale` and
+   `pixels` change together, and the resource that was the image is detached
+   and unreferenced.
+
+**A spare whose state is not known.** `spare_owed` is set before the spare's
+first command. It is cleared only when the release of the old resource was
+answered and no command stalled across it (`Gpu::stalls` unchanged). While it
+is set, the next `remake` first detaches and unreferences the spare. A refusal
+there is an answer: the device has no such resource, which is what is wanted.
+If either command was not answered, `remake` gives up. `Gpu::resource_unref`
+answers Ok for a release it has put off (a resource the display may still
+name, `condemn`); the device then refuses the next making of that ID, which
+is a failure like any other, and the ID is released again before each try.
+
+**A failure** leaves `image`, the size and the scale as they were, so the
+screen secure attention enters is the one that stood. `follow` says
+`lictor: trusted screen stays WxH at Kx: <why>`, and `, to be tried again`
+while `Follow::retry` has tries left (six, at the waits the compositor's
+following uses). The next display event asks again in any case. A success
+says the line the start says:
+`lictor: trusted screen WxH at Kx for a display of WxH`.
+
+**The reserved IDs.** `objects.rs` holds all three: `TRUSTED_IMAGES`
+(`TRUSTED_ID_START` plus 1 and plus 3) and `TRUSTED_CURSOR` (plus 2, the
+normal cursor's plane, as before), with a compile-time check that they
+differ. The first version of this code (f282857b0, never run) took plus 2 for
+the second image. The first making would have been refused, and the try after
+it would have released the cursor's resource and made the trusted image under
+the cursor's ID. It was found by reading, before any guest ran it.
+
+**What it does not do.** It does not follow while a trusted episode is up: a
+display that changes then is followed when the seat is normal again, and until
+the episode ends the screen is shown as the frontend shows a scanout of
+another size. Memory grown for a large display is kept for the rest of the
+boot. The backing handed to the device is whole chunks, so up to 1 MiB longer
+than the image. The commands block the service's pass as a client's do: a
+display that changes delays other work by eight commands at most.
+
+**Tests.** Host:
+`render::tests::a_display_that_changed_asks_for_the_screen_it_would_have_had_from_the_start`
+(`refit`: the three answers, and that each is `geometry_for`'s). Guest:
+`tools/interactive/ls-graphical-sak-follow.exp`, one boot of the session image
+on a 2560x1600 display declared at 200, told new sizes as a VNC viewer's
+resize tells them. It reads Lictor's line and a dump of the scanout under
+secure attention: 1600x1000 at one (the rule on device row 47); a change to
+3456x2160 while that screen is up, which must say nothing and leave the
+scanout; and after the episode 3456x2160 at two (the rule on rows 94 and 95),
+which needs 29 chunks of backing where the boot made 16. Not shown by any
+test: a failed making and its retries, the spare that is owed, memory that
+cannot be had, a display that changes during entry or restoration, and the
+EDID's millimetres on this path. `backend/screen.rs` is in no host build.
+
 ## Purpose
 
 Lictor owns the graphical seat's physical input and display transport. It is
@@ -345,7 +438,9 @@ normal fallback. Filesystem mode bits permit operations inside an already
 authenticated connection; the process-incarnation gate controls admission.
 
 The service resolves normal resource/context IDs through its owner ledger.
-Trusted IDs occupy a separate reserved range. Imported backing names a one-shot
+Trusted IDs occupy a separate reserved range, and `objects.rs` names each one
+in it: two for the trusted screen's image and one for the cursor's plane.
+Imported backing names a one-shot
 share and logical byte range, never caller-supplied physical addresses.
 `SYS_SEAT_IMPORT` claims only a share registered by the accepted connection's
 actual peer, pins a weave/GPU-BO and returns kernel-derived scatter segments.
@@ -601,7 +696,8 @@ capture proposal and its architectural findings.
 
 The service owns the GPU transport, private Screen DMA and bounded normal object
 ledger. Its CPU raster workspace is a separate private anonymous mapping,
-committed at startup and reused for every frame. It never competes with normal
+committed at startup, replaced by a larger one if a display that changes needs
+it, and reused for every frame. It never competes with normal
 broker allocations in the general heap; restoration erases both raster and DMA
 pixels. Geometry bounds cap each buffer at 4096 by 2160 pixels. Broker connections carry one sequenced transaction, a bounded fid table
 and partial input/output buffers. Kernel seat state holds process incarnations,

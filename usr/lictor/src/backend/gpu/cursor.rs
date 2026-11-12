@@ -5,7 +5,8 @@ use super::*;
 use libhalcyon::cursor::{self, Shape};
 
 const BASE: u64 = 0x0700_0000; // after the maximum private trusted framebuffer
-const RESOURCE: u32 = crate::objects::TRUSTED_ID_START + 2;
+const _: () = assert!(BASE >= crate::backend::screen::END);
+const RESOURCE: u32 = crate::objects::TRUSTED_CURSOR;
 const IMAGE_BYTES: usize = 64 * 64 * 4;
 const ALLOCATION: usize = IMAGE_BYTES + 4096;
 const REPLY: u64 = BASE + IMAGE_BYTES as u64 + 64;

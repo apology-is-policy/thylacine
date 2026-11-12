@@ -1,0 +1,255 @@
+#!/usr/bin/expect -f
+# ls-graphical-sak-follow -- the trusted screen follows its display.
+#
+# GRAPHICAL-SAK-OWNERSHIP.md, "The trusted screen follows its display". One
+# boot of the session image on a 2560x1600 display declared at 200 percent,
+# shown through a VNC server so that the display can be told a new size as a
+# host window's resize tells it (ls-display-follow's path, with no window).
+# Lictor says a line of its screen each time it makes one, and the screen is
+# read off a dump of the device's scanout while secure attention is up:
+#
+#   the boot:    2560x1600 at two. The line is read; that screen is
+#                ls-graphical-sak-scale's to read.
+#   smaller:     the display becomes 1600x1000. At two its 500 layout rows are
+#                under the 720 the layout needs, so the screen is 1600x1000 at
+#                one: the rail's rule is device row 47, and rows 94 and 95 are
+#                the background. This leg knows whether a display that changed
+#                reaches the trusted screen at all. Not followed, the scanout
+#                under secure attention is 2560x1600.
+#   while up:    with that screen up, the display becomes 3456x2160. Nothing
+#                is made while the trusted screen is up: Lictor says no line,
+#                and the scanout stays 1600x1000.
+#   afterwards:  the episode ends, and then Lictor makes 3456x2160 at two. The
+#                image's backing grows from 16 chunks to 29 and its workspace
+#                with it. Secure attention again: the scanout is 3456x2160, the
+#                rule is rows 94 and 95, and rows 46 and 47 are the rail's own
+#                colour. This leg knows that a change during an episode is not
+#                lost, and that an image larger than the boot's can be made.
+#
+# The session follows the same events by its own rule. Its line for each is
+# waited for before a key is pressed, so that secure attention is not asked
+# for in the middle of the session's change of mode. 3456x2160 is a trusted
+# screen and no mode of the session's, which takes half of it.
+#
+# NOT asserted: a following that fails (no memory, a device that does not
+# answer, a refusal) and its retries, which nothing here can cause; a display
+# that changes while entry or restoration is under way; the EDID's
+# millimetres, which a VNC viewer does not tell and the declaration outranks.
+#
+# LS_SAK_FOLLOW_SHOTS=<directory> keeps the two dumps there, as one.ppm and
+# two.ppm, to be put beside the host renderer's pictures of those screens. No
+# gate does that.
+#
+# Requires HALCYON_SESSION=y: the seat runs under the session compositor.
+set ::env(THYLACINE_ACCEL) [expr {[info exists ::env(LS_CI_GFX_ACCEL)] ? $::env(LS_CI_GFX_ACCEL) : "hvf"}]
+set ::env(THYLACINE_SERIAL_SAK) 0
+set ::env(THYLACINE_GPU_RES) 2560x1600
+set ::env(THYLACINE_SCALE) 200
+catch {unset ::env(THYLACINE_HIDPI)}
+set ::env(THYLACINE_VNC_SOCKET) /tmp/ls-graphical-sak-follow-[pid].sock
+set ::env(THYLACINE_DISPLAY) vnc-unix
+source [file join [file dirname [info script]] lib.exp]
+set repo $lc_repo
+set qmp [lc_qmp_sock]
+set ppm /tmp/ls-graphical-sak-follow-[pid].ppm
+set shot /tmp/ls-graphical-sak-follow-[pid].png
+set transcript /tmp/ls-graphical-sak-follow-[pid].log
+
+lc_require_image {SESSION}
+
+source [file join [file dirname [info script]] display-follow.tcl]
+catch {file delete -force $transcript $shot $ppm}
+log_file -a $transcript
+
+set RAIL {11 14 14}
+set RULE {75 81 77}
+set GROUND {8 11 12}
+
+proc key {chord} {
+    global repo qmp
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -k $chord} err]} {
+        lc_fail "qmp-sendtext -k $chord failed: $err"
+    }
+}
+# How many pixels of a rect of the dump are not the colour, and the rect's commonest.
+proc off {x0 y0 x1 y1 colour what} {
+    global repo shot
+    if {[catch {exec python3 $repo/tools/interactive/gfx_region.py $shot $x0 $y0 $x1 $y1 {*}$colour} out]} {
+        lc_fail "$what: gfx_region.py: $out"
+    }
+    lassign $out n total r g b
+    # The tool counts what of the rect the dump holds, so a dump of another
+    # size could be all the colour over the part it has.
+    if {$total != ($x1 - $x0) * ($y1 - $y0)} {
+        lc_fail "$what: the dump holds $total of the rect's [expr {($x1 - $x0) * ($y1 - $y0)}] pixels: it is not a dump of this screen"
+    }
+    if {$n != 0} {
+        lc_fail "$what: $n of $total pixels are not [join $colour ,] (the commonest there is $r,$g,$b)"
+    }
+    lc_step "$what: all $total pixels"
+}
+# Lictor's line of the screen it made and the session's line of the mode it
+# followed to, in whichever order they are said. One pattern takes every line
+# of either, the earliest first, so that a wait for one does not pass over the
+# other, and a line that is not the one wanted is read and not skipped. `also`
+# is the line that ends an episode, waited for with them, or "".
+proc settled {screen mode also label} {
+    set ::what $label
+    array set seen {lictor 0 session 0 also 0}
+    if {$also eq ""} { set seen(also) 1 }
+    while {!($seen(lictor) && $seen(session) && $seen(also))} {
+        set line ""
+        lc_within 45 {
+            -re {(lictor: trusted screen[^\r\n]*|tapestryd: display event \d+: [^\r\n]*|corvus: imperium: SAK with nothing pending[^\r\n]*)[\r\n]} {
+                set line $expect_out(1,string)
+            }
+            -re {lictor: seat failed[^\r\n]*[\r\n]} { lc_fail "$label: [string trim $expect_out(0,string)]" }
+            -re {halcyond: FAIL session[^\r\n]*[\r\n]} { lc_fail "$label: the session failed: [string trim $expect_out(0,string)]" }
+            -re {EXTINCTION:} { lc_extinction_fail $label }
+            timeout {
+                lc_fail "$label: 45s without a line of it (seen so far, 1 for seen: Lictor's screen $seen(lictor), the session's mode $seen(session), the episode's end $seen(also))"
+            }
+            eof { lc_fail "qemu exited during '$label'" }
+        }
+        if {[string match "lictor: trusted screen*" $line]} {
+            if {$line ne "lictor: trusted screen $screen"} {
+                lc_fail "$label: Lictor said '$line', want 'lictor: trusted screen $screen'"
+            }
+            if {$seen(lictor)} { lc_fail "$label: Lictor made its screen twice for one change" }
+            set seen(lictor) 1
+            lc_step "Lictor: $line"
+        } elseif {[string match "corvus:*" $line]} {
+            if {$seen(also)} { lc_fail "$label: an episode ended that this leg did not end: $line" }
+            set seen(also) 1
+            lc_step "saw: $line"
+        } elseif {[regexp {: followed, (\d+x\d+ at \d+%)$} $line -> got]} {
+            if {$got ne $mode} { lc_fail "$label: the session followed to $got, want $mode" }
+            if {$seen(session)} { lc_fail "$label: the session followed twice for one change" }
+            set seen(session) 1
+            lc_step "the session: $line"
+        } elseif {[regexp {: (asking the host|the device is stalled; to be asked when it answers)$} $line]} {
+            lc_step "note: $line"
+        } else {
+            lc_fail "$label: the session did not follow its display: $line"
+        }
+    }
+}
+# Secure attention, and the trusted screen up with its first whole frame on it.
+proc attention {label} {
+    set ::what "secure attention ($label)"
+    key "ctrl+alt+f10"
+    lc_within 30 {
+        -re {lictor: (seat failed|trusted screen)[^\r\n]*[\r\n]} { lc_fail "$label: [string trim $expect_out(0,string)]" }
+        -re {lictor: trusted scanout active generation=\d+[\r\n]} {
+            set ::up_at [clock seconds]
+            lc_step "the trusted screen is up ($label)"
+        }
+        -re {EXTINCTION:} { lc_extinction_fail $label }
+        timeout { lc_fail "$label: the trusted screen did not come up in 30s" }
+        eof { lc_fail "qemu exited during '$label'" }
+    }
+    after 3000
+}
+# The scanout's size, then the dump the rects are read from.
+proc dumped {w h name label} {
+    global repo qmp shot ppm
+    wait_dims [list $w $h] $label
+    if {[info exists ::env(LS_SAK_FOLLOW_SHOTS)]} {
+        if {[catch {file copy -force $ppm [file join $::env(LS_SAK_FOLLOW_SHOTS) $name.ppm]} e]} {
+            lc_fail "$label: the dump could not be kept: $e"
+        }
+    }
+    if {[catch {exec $repo/tools/screendump.sh -s $qmp $shot} e]} { lc_fail "$label: screendump: $e" }
+}
+
+lc_boot
+set timeout $lc_boot_timeout
+expect {
+    -ex "Thylacine login: " {}
+    -re {EXTINCTION:} { lc_extinction_fail "boot" }
+    timeout { lc_fail "no login" }
+    eof { lc_fail "EOF before login" }
+}
+lc_raw_send "michael\r" "login user"
+expect {
+    -ex "password: " {}
+    timeout { lc_fail "no password prompt" }
+    eof { lc_fail "EOF before password" }
+}
+lc_raw_send "correct-horse-battery-staple-v1\r" "login password"
+set timeout 60
+expect {
+    -re {halcyond: session up (\d+)x(\d+) px} {
+        # One arm, ended by the line's own " px": the serial comes in pieces,
+        # and an arm for any other size would take the first piece of this one.
+        if {$expect_out(1,string) != 2560 || $expect_out(2,string) != 1600} {
+            lc_fail "the display is not the one this scenario asks for: $expect_out(0,string)"
+        }
+        lc_step "the session is up on the 2560x1600 display"
+    }
+    -re {halcyond: FAIL session[^\r\n]*[\r\n]} { lc_fail "the session failed: [string trim $expect_out(0,string)]" }
+    -ex "Thylacine textual shell" { lc_fail "login gave a shell on an image whose bake record says SESSION" }
+    -re {EXTINCTION:} { lc_extinction_fail "session" }
+    timeout { lc_fail "no graphical session" }
+    eof { lc_fail "EOF at session start" }
+}
+
+# The boot's line: said once, before the login prompt, and no other since.
+# Closing the transcript writes out what expect still holds of it.
+set want "lictor: trusted screen 2560x1600 at 2x for a display of 2560x1600"
+log_file
+if {[catch {exec grep -a -o {lictor: trusted screen[ -~]*} $transcript} said]} { set said "nothing" }
+log_file -a $transcript
+if {$said ne $want} {
+    lc_fail "at its start Lictor did not say, once and only, '$want' (said: $said)"
+}
+lc_pass "the boot: $want"
+
+# Smaller. The session has settled on its first mode; nothing is waiting.
+after 6000
+tell 1600x1000
+settled "1600x1000 at 1x for a display of 1600x1000" "1600x1000 at 200%" "" "the display became 1600x1000"
+attention "on 1600x1000"
+dumped 1600 1000 one "the trusted screen on 1600x1000"
+off 0 47 1600 48 $RULE "at one the rail's rule is device row 47, the whole width"
+off 0 94 1600 96 $GROUND "device rows 94 and 95 are the background, the whole width"
+lc_pass "a display that became 1600x1000 has a trusted screen of 1600x1000 at one"
+
+# While it is up. The wait is twenty times the quiet time a following waits
+# out, and what follows it is the positive: the same change, made afterwards.
+tell 3456x2160
+set ::what "the display changed while the trusted screen was up"
+lc_within 4 {
+    -re {lictor: trusted screen[^\r\n]*[\r\n]} {
+        lc_fail "Lictor made a screen while its trusted screen was up: [string trim $expect_out(0,string)]"
+    }
+    -re {lictor: seat failed[^\r\n]*[\r\n]} { lc_fail "the display changed during the episode: [string trim $expect_out(0,string)]" }
+    -re {EXTINCTION:} { lc_extinction_fail "the display changed during the episode" }
+    timeout { lc_step "4s after the display changed Lictor has said nothing of its screen" }
+    eof { lc_fail "qemu exited after the display changed during the episode" }
+}
+set d [dims]
+if {[lrange $d 0 1] ne {1600 1000}} {
+    lc_fail "the scanout under secure attention is no longer 1600x1000 after the display changed (width height colours = $d; $::dims_why)"
+}
+# The prompt of an episode with nothing waiting ends by itself after 60s.
+set took [expr {[clock seconds] - $::up_at}]
+if {$took > 50} {
+    lc_fail "this episode's legs took ${took}s and its prompt ends by itself at 60: the display may have changed after the episode, which shows nothing"
+}
+lc_pass "a display that changes while the trusted screen is up leaves it as it is"
+
+# Afterwards.
+key "ret"
+settled "3456x2160 at 2x for a display of 3456x2160" "1728x1080 at 100%" 1 "the episode ended on a display that had become 3456x2160"
+attention "on 3456x2160"
+dumped 3456 2160 two "the trusted screen on 3456x2160"
+off 0 94 3456 96 $RULE "at two the rail's rule is device rows 94 and 95, the whole width"
+off 0 46 40 48 $RAIL "device rows 46 and 47 are the rail's, left of its type"
+lc_pass "the change made during the episode was followed after it: 3456x2160 at two, an image larger than the boot's"
+
+key "ret"
+lc_expect "corvus: imperium: SAK with nothing pending" "the second trusted episode ended"
+catch {file delete -force $transcript $shot $ppm}
+lc_pass "ls-graphical-sak-follow: the boot, a smaller display, a change while the screen was up, and a larger display after it"
+lc_quit

@@ -9,11 +9,15 @@ use crate::{gpu_api::Engine, model::Model, render::{self, Refit}, skein::Seg};
 use super::gpu::{Gpu, dsb_sy};
 /// The image is in one of these, and a display that changes has the next one
 /// made in the other.
-const RESOURCES: [u32; 2] = [crate::objects::TRUSTED_ID_START + 1, crate::objects::TRUSTED_ID_START + 2];
+const RESOURCES: [u32; 2] = crate::objects::TRUSTED_IMAGES;
 // The size taken where no other can be made is one the screen is drawn at.
 const _: () = assert!(render::fits(super::gpu::DEFAULT_DISPLAY_W, super::gpu::DEFAULT_DISPLAY_H));
 const CHUNK: usize = 1024 * 1024;
 const BASE: u64 = 0x0400_0000;
+/// The most chunks the largest screen's image is backed by, and the address
+/// past the last of them: nothing else of the service's is mapped below it.
+const MOST: usize = (render::MAX_PIXELS * 4).div_ceil(CHUNK);
+pub(crate) const END: u64 = BASE + (MOST * CHUNK) as u64;
 
 /// CPU-only, non-exportable raster workspace, committed before broker admission.
 /// A framebuffer is 35 MiB at the maximum supported geometry. Reserving it
@@ -134,6 +138,7 @@ impl Screen {
     /// Backing for an image of `bytes`: whole chunks, each mapped after the
     /// last, so that the image is one run of memory whatever its size.
     fn back(&mut self, bytes: usize) -> Result<(), Error> {
+        if bytes.div_ceil(CHUNK) > MOST { return Err(Error::Hardware); }
         while self._backing.len() < bytes.div_ceil(CHUNK) {
             let at = BASE + (self._backing.len() * CHUNK) as u64;
             let dma = unsafe { Dma::new(CHUNK, Rights::READ | Rights::WRITE | Rights::MAP,

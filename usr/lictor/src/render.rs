@@ -11,7 +11,7 @@ const RULE: u32 = 0xff343e39;
 const BORDER: u32 = 0xff59635e;
 pub const MIN_WIDTH: u32 = 800;
 pub const MIN_HEIGHT: u32 = 720;
-const MAX_PIXELS: usize = 4096 * 2160;
+pub(crate) const MAX_PIXELS: usize = 4096 * 2160;
 /// The sizes this screen can be drawn at: no smaller than its layout needs,
 /// and no more pixels than its raster holds.
 pub const fn fits(width: u32, height: u32) -> bool {
