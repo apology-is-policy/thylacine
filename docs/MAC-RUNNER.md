@@ -646,8 +646,31 @@ its own faulting instruction (a `snare:` for userspace, an extinction for the ke
 format)` mmaps the guest's 2D scanout resource (B2) and `UpdateMap(x,y,w,h)` marks damage;
 on each CADisplayLink tick (B6) with pending damage the app uploads the dirty rects into
 an IOSurface-backed `MTLTexture` and presents through a `CAMetalLayer` scaled to the view.
-Input goes back as `Keyboard.Press/Release` (qnum codes), `Mouse.SetAbsPosition`
-(virtio-tablet is absolute) and `RelMotion` when the pointer is captured. Resize: the app
+Keys go back as `Keyboard.Press/Release` (qnum codes) on the display connection. The
+pointer does NOT go back on it (amended 2026-11-12 under the standing 2026-09-01
+authorization; this paragraph first said `Mouse.SetAbsPosition`, and `RelMotion` when the
+pointer is captured). QEMU gives a console one pointer mode: that of the pointer device
+bound to the console, and with none bound that of the one whose driver came up last
+(`ui/input.c`, `qemu_input_is_absolute`). `SetAbsPosition` is refused in the one mode and
+`RelMotion` in the other. A guest of ours brings its mouse up after its tablet, so with the
+devices as our launchers declared them every position the app sent was refused ("Mouse is
+not absolute": seen with the app itself against a QEMU with no guest, 10.0.2 and 11.1.3).
+Binding the tablet to the display makes the console absolute for good, which cures that
+and rules `RelMotion` out for good. So the app keeps the monitor it attached through and
+sends the pointer as QMP `input-send-event`, which takes a position and relative motion
+alike: addressed to `gpu0` head 0; a press or a notch in one command with its place, which
+the guest is handed as one report; the axis value the app's own, `ceil(x * 32767 / (W - 1))`,
+the least value that the compositor's `ax * (W - 1) / 32767` brings back to x (QEMU's own
+`x * 0x7fff / W`, which every frontend of its uses, comes back a pixel short). The launcher
+binds the tablet to `gpu0` (`display=gpu0,head=0`, the tablet declared after the GPU,
+because a bind to a display that does not exist yet fails without a word), so that an
+event reaches one device whole; with the tablet bound to nothing QEMU hands the place to
+the tablet and the button to the mouse. Relative motion, when the pointer is captured, is
+to ride the same command unaddressed, where `rel` and `btn` reach the mouse. UTM changes
+the mode with HMP `mouse_set` at each capture instead: a race against a guest that brings
+a device up again, on an interface QEMU does not keep stable. What it costs: QEMU's monitor
+serves one client at a time, so the socket the app attached through is the app's while it
+runs, and the monitor refuses input for a machine that is stopped. Resize: the app
 calls `SetUIInfo(width_mm, height_mm, 0, 0, w_px, h_px)` on live-resize end (B4); the guest
 must act on `VIRTIO_GPU_EVENT_DISPLAY` (B5 -- the Lictor change, coordinated with Astra).
 HiDPI: the scanout is sized in backing pixels (`backingScaleFactor` x points) and the
