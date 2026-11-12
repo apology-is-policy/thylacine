@@ -219,9 +219,11 @@ fn tick() -> ! {
 const FGTICK_MARK: &[u8] = b"FGTICK\n";
 const FGTICK_NOTTY: &[u8] = b"FGNOTTY\n";
 
-// The terminal's foreground group, or a negative errno when no standard fd is a
-// terminal of this session. A slave answers only its own session, so whichever
-// fd answers is the controlling terminal.
+// The terminal's foreground group, or a negative errno when no standard fd
+// reaches a terminal of this session. A slave answers only members of its
+// session, so a slave that answers is the controlling terminal; a master would
+// answer anyone, and a job has none on fd 0-2. The kernel wants read rights on
+// the fd it is asked through, which the terminal fds a job inherits carry.
 fn terminal_fg() -> i64 {
     let mut fg = -1;
     for fd in 0..3 {

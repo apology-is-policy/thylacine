@@ -440,10 +440,16 @@ follows the note by the child's own count, so no interval orders the driver's
 `^Z` against it: a driver held up for any time short of its watchdog finds the
 child still masked.
 `tools/interactive/pty-susp-pouch.exp` stops a Pouch program
-(`pouch-hello-susp`) with `^Z` and proves the stop by silence bracketed by
-advancing ticks. That program writes a tick only while it leads a group of its
-own and that group is the terminal's foreground group (`tcgetpgrp`), so the
-scenario's key is typed at a job that can take it. The shell spawns a job,
+(`pouch-hello-susp`) with `^Z` and proves the stop by the absence of the
+program's lines, bracketed by advancing lines. The program writes a counted
+line every 250 ms whoever holds the terminal, because the shell takes the
+terminal back as soon as a stop is reported: a program that wrote only while
+it held the terminal would be silent after `Stopped` whether or not it was
+ever parked. At most one line may follow `Stopped`, the one that was inside
+its write when the stop was latched. The line says `held` only while the
+program leads a group of its own and that group is the terminal's foreground
+group (`tcgetpgrp`), and the scenario types its key after reading one, so the
+key is typed at a job that can take it. The shell spawns a job,
 puts it in a group and then hands it the terminal, and a key typed before the
 last of those reaches the shell: `pty-4.exp` and `item10-ctrlc.exp` wait the
 same way on `debug-child fgtick` (`lc_expect_fgtick`). The group must be the
@@ -454,10 +460,13 @@ in the middle of it and true after it, and a tick from the first of those
 would be followed by a key typed in the second. `pty-4.exp` holds the token to
 its meaning with a job started in the background, which must write none until
 `fg`. The shell gives a background job a pipe for fd 0, so `debug-child fgtick`
-asks the terminal through the first of fd 0, 1 and 2 that reaches it (a slave
-answers only its own session, so whichever answers is the controlling
-terminal), and says `FGNOTTY` when none does; every wait of that leg fails on
-`FGNOTTY`, because a job that refused is as quiet as one that waits.
+asks the terminal through the first of fd 0, 1 and 2 that reaches it, and
+says `FGNOTTY` when none does. A slave answers only members of its session,
+so a slave that answers is the controlling terminal; a master would answer
+anyone, and a job has none on those three; the query needs read rights on
+the fd, which the terminal fds a job inherits from the shell carry. Both
+waits of that leg before `fg` fail on `FGNOTTY`, because a job that refused
+is as quiet as one that waits.
 
 ## Referenced by
 
