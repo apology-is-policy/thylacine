@@ -106,7 +106,7 @@ void test_phys_leak_10k(void) {
 #define DMO_OWNERS 3
 #define DMO_HOLD   24       // past MAGAZINE_SIZE: refill and drain-on-full both run
 #define DMO_ITERS  4000u    // an owner's floor
-#define DMO_ITERS_MAX 4000000u   // its ceiling: a drainer that never releases FAILS, it does not hang
+#define DMO_ITERS_MAX 4000000u   // its ceiling: an owner never released ends here, and the counts fail the test
 #define DMO_BESIDE 64u
 #define DMO_IDLE   0xffffffffu
 
@@ -167,10 +167,12 @@ void test_phys_drain_meets_live_owners(void) {
 
     // A drain counts as beside an owner when that owner last reported a CPU
     // other than the drainer's: without one, nothing here raced.
-    // What a failure prints: how long the first drain took to come, and how many
-    // context switches this CPU made meanwhile (none = the thread never left it).
+    // What a failure prints: how long the first drain took to come (or, with no
+    // drain at all, how long the owners ran), and how many context switches the
+    // placing CPU made meanwhile (none = the thread never left it).
+    u32 placed_cpu = me;
     u64 drains = 0, beside = 0, placed_ns = timer_now_ns(), first_ns = 0;
-    u64 placed_ctxt = sched_cpu_ctxt(me), first_ctxt = 0;
+    u64 placed_ctxt = sched_cpu_ctxt(placed_cpu), first_ctxt = 0;
     for (u64 spin = 0; spin < 100000000ull &&
          __atomic_load_n(&g_dmo_running, __ATOMIC_ACQUIRE) != 0; spin++) {
         u32 me = smp_cpu_idx_self();
@@ -180,7 +182,7 @@ void test_phys_drain_meets_live_owners(void) {
         }
         if (drains == 0) {
             first_ns = timer_now_ns() - placed_ns;
-            first_ctxt = sched_cpu_ctxt(me) - placed_ctxt;
+            first_ctxt = sched_cpu_ctxt(placed_cpu) - placed_ctxt;
         }
         magazines_drain_all();
         drains++;
@@ -190,6 +192,10 @@ void test_phys_drain_meets_live_owners(void) {
         if (!smp) sched();
     }
     u32 left = __atomic_load_n(&g_dmo_running, __ATOMIC_ACQUIRE);
+    if (drains == 0) {
+        first_ns = timer_now_ns() - placed_ns;
+        first_ctxt = sched_cpu_ctxt(placed_cpu) - placed_ctxt;
+    }
     // The spin bound can end the loop with the owners still held.
     __atomic_store_n(&g_dmo_release, 1u, __ATOMIC_RELEASE);
     for (unsigned i = 0; i < DMO_OWNERS; i++)
@@ -198,7 +204,8 @@ void test_phys_drain_meets_live_owners(void) {
     if (left != 0u || drains == 0 || (smp && beside < DMO_BESIDE)) {
         uart_puts("  [drain_meets_live_owners: drains=");  uart_putdec(drains);
         uart_puts(" beside=");                             uart_putdec(beside);
-        uart_puts(" first drain after ");                  uart_putdec(first_ns / 1000u);
+        uart_puts(drains ? " first drain after " : " no drain in ");
+        uart_putdec(first_ns / 1000u);
         uart_puts(" us and ");                             uart_putdec(first_ctxt);
         uart_puts(" switches, owners left=");              uart_putdec(left);
         uart_puts("]\n");
