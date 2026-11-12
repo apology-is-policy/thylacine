@@ -2,9 +2,27 @@
 //! simulated authorization path. Run with --no-default-features on the host.
 use lictor::{model::{Model, State}, render};
 use std::{fs, io::Write, path::PathBuf};
+fn write(path: PathBuf, w: usize, h: usize, pixels: Vec<u32>) {
+    let mut file = fs::File::create(path).unwrap();
+    write!(file, "P6\n{w} {h}\n255\n").unwrap();
+    let rgb: Vec<u8> = pixels.into_iter().flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, p as u8]).collect();
+    file.write_all(&rgb).unwrap();
+}
+/// usage: render-preview <output directory> [WxH ...]
+/// Each size given is the screen with nothing waiting, at every scale it
+/// fits at, as `empty-WxH@K.ppm`: what a screendump of a guest is put beside.
 fn main() {
     let out = PathBuf::from(std::env::args().nth(1).expect("output directory"));
     fs::create_dir_all(&out).unwrap();
+    for size in std::env::args().skip(2) {
+        let (w, h) = size.split_once('x').expect("a size is WxH");
+        let (w, h): (usize, usize) = (w.parse().unwrap(), h.parse().unwrap());
+        for k in (1..=render::MAX_SCALE).filter(|&k| render::fits_at(w as u32, h as u32, k)) {
+            let mut pixels = vec![0; w * h];
+            render::render(&mut pixels, w as u32, h as u32, k, None, &Model::default(), 0).unwrap();
+            write(out.join(format!("empty-{w}x{h}@{k}.ppm")), w, h, pixels);
+        }
+    }
     for (name, w, h, caps, state) in [
         ("post", 1280, 800, 1 << 13, State::Pending),
         ("dac-chown", 1280, 800, (1 << 7) | (1 << 8), State::Pending),
@@ -23,10 +41,7 @@ fn main() {
             let mut pixels = vec![0; w * h];
             render::render(&mut pixels, w as u32, h as u32, k, None, &m, 0).unwrap();
             let at = if k == 1 { String::new() } else { format!("@{k}x") };
-            let mut file = fs::File::create(out.join(format!("{name}{at}.ppm"))).unwrap();
-            write!(file, "P6\n{w} {h}\n255\n").unwrap();
-            let rgb: Vec<u8> = pixels.into_iter().flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, p as u8]).collect();
-            file.write_all(&rgb).unwrap();
+            write(out.join(format!("{name}{at}.ppm")), w, h, pixels);
         }
     }
 }
