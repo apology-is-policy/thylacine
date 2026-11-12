@@ -149,11 +149,19 @@ commands (`set_scanout`, `set_scanout_blob`, `set_scanout_blob_then_flush`,
 had, of any kind, before it calls. Accepted, it clears the flag: the device
 takes its commands in order, so an accepted scanout command is the last word.
 Not accepted, with the stall count in its reply moved, it sets the flag. Not
-accepted otherwise (the device answered with a refusal, or the command was
-refused before it was sent), it leaves the flag as it was. For the probe,
-accepted means the device answered OK. A deadline that passed for another
-client of the broker between the two replies reads as this command's own,
-which errs to "not known" and costs the compositor one bind. A client whose
+accepted otherwise, it leaves the flag as it was: the device answered with a
+refusal, or the command was refused before it was sent, or it was sent and the
+engine died under it (a corrupt ring, a fence that does not match, the 30 s
+bound, an interrupt that failed), which moves no count and from which no
+engine returns, so nothing is asked of the flag again. For the probe, accepted
+means the device answered OK. A deadline that passed between the two replies
+for a command that was not this client's reads as this command's own. No
+other client sends the device work (the seat coordinator's client speaks only
+of the seat), so those are the broker's own: the trusted screen's commands and
+the test levers. That errs to "not known", and costs the compositor a bind and
+what follows one: composed, a repaint, a whole-buffer push and a CONFIGURE to
+every client; direct, a CONFIGURE and the bind of the client's present. A
+client whose
 connection to the broker failed adopts no reply, and its flag stays as it was;
 it has no broker to ask anything of. The flag was added after audit round 3 of
 the display section, where a compositor-side flag set by hand at each bind had
@@ -337,7 +345,12 @@ compositor by the count alone. The shot rides exactly the next synchronous
 submission (`Controlq::stall_shot_bound`): one refused, unfenced, or ended
 before its chain retired spends it and says `stall shot LOST`, rather than
 leaving it armed for whoever sends next. So does a command refused at staging
-(`Gpu::req`, while the engine takes no commands). The shot still rides the next
+(`Gpu::req`, while the engine takes no commands). A request the broker
+refuses by its own checks before any command is staged is no submission, and
+leaves the shot for the next one: a scanout command that names a resource
+which is not an ordinary one is such a request (`Device::execute`). The
+compositor's display half aims only at binds of a screen it has just made or
+of a client's slot, which are not refused there. The shot still rides the next
 synchronous command whoever sends it, so a seat takeover landing between the
 compositor's aim and its command would take it. That needs test-mode, the
 bootarg and the operator's chord, and vote 30 recovers the seat.

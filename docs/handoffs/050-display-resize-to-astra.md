@@ -130,9 +130,14 @@ resized or moved to a display with another scale.
   before it calls; accepted, it clears the flag; not accepted with the count moved, it
   sets it; a refusal that was answered leaves it. It is your `condemn_if_stalled` test,
   read from the client's side, and it errs to "not known" when another client's deadline
-  passed between two of this client's replies. The compositor reads `bound_res` as
-  knowledge only while the flag is clear, binds its screen again from its pass while your
-  engine is live (`bind_pump`), and then pushes everything again. A flag kept in the
+  passed between two of this client's replies (no other client sends your engine work, so
+  that is a command of your own: the trusted screen's, or a test lever's). The compositor
+  decides whether a bind is needed by `bound_res` only while the flag is clear, binds its
+  screen again from its pass while your engine is live (`bind_pump`), and then, where the
+  display stays composed, repaints and pushes everything again; where one client fills
+  the display it only begins the switch to that client again. Seven other readers of
+  `bound_res` in the compositor decide what may be let go, with or without the flag, and
+  what makes them safe is your condemn and not the field. A flag kept in the
   compositor and set by hand at each bind came first, and round 3 found a bind it had
   missed, which is why it moved to where every scanout command passes. It rests on two
   things of your engine that I read in your code and would want you to confirm: the
@@ -149,9 +154,12 @@ resized or moved to a display with another scale.
 - **Your stall lever has three more shots** (`TestArmLatch` gives six `TestStallNext`
   now, `backend/device.rs`). The compositor aims the new three at binds of the display's,
   chosen by the height of the host a display event tells, and
-  `tools/interactive/ls-display-stall.exp` runs them. So the paths above do run in a
-  guest. (An earlier version of this file said nothing here could make your engine
-  stall on a bind. That was wrong: your lever could, and I had not looked.)
+  `tools/interactive/ls-display-stall.exp` is the scenario for them; what it has shown
+  in a guest is under Measured. A request you refuse by your own checks before a command
+  is staged (a scanout command naming a resource that is not an ordinary one) leaves a
+  shot armed for the next synchronous command; the compositor aims at no such bind, and
+  I left that as it is. (An earlier version of this file said nothing here could make
+  your engine stall on a bind. That was wrong: your lever could, and I had not looked.)
 - One read of `events_read` for each ticket under MSI-X. A vector of its own for the
   configuration interrupt would remove it; `PciIrq::for_virtio` gives one vector to all.
 - The INTx branch (the ISR bit) is in no gate.
@@ -190,7 +198,19 @@ now); the scenario saw only changes begun from the direct state (a second scenar
 `ls-display-stall`, begins one from the composed state and stalls three binds); a scale
 reset, `scale auto` or `mode W H` between a change and its display's EDID used the old
 display's millimetres (the scale now stands until the EDID is read); and eight more
-sentences. A narrow fourth round on the proxy's flag and these fixes follows.
+sentences.
+
+Round 4, narrow, on the proxy's flag and those fixes: no P0, no P1, no P2, five P3. It
+found no way for the flag to miss a command your engine may still execute while the
+engine lives, and it re-derived the lines the stall scenario waits for. The P3s: a
+retired surface's GL frame can stay on the glass in the off state (a re-target, then a
+close before the next present; older than this work, open, and on a path that needs a
+GL host, so not changed here); nine more sentences; no red control took the proxy's flag
+away (one does now); a pinned mode kept the millimetres of the display that was, and a
+scale reset before a new display's EDID was read kept an override's value (the EDID is
+now asked for again whenever a scale is derived from a stale one, and a pinned event
+marks it stale); and a stall shot could stay armed for a later display's bind (the next
+aim and a failed change now clear it).
 
 ## Measured
 

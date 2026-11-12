@@ -208,10 +208,21 @@ def parse_ppm(path):
     w, h, maxval = toks
     if maxval != 255:
         raise RuntimeError(f"{path}: maxval {maxval} != 255")
-    px = data[i:]
+    px = unpadded(w, h, data[i:])
     if len(px) < w * h * 3:
         raise RuntimeError(f"{path}: truncated pixel data")
     return w, h, px
+
+
+def unpadded(w, h, px):
+    """The pixels as a P6 holds them. QEMU writes each row at pixman's
+    stride for it, the row rounded up to four bytes (ui/ui-qmp-cmds.c,
+    qemu_ppm_save), so a width that is not a multiple of four gets rows of
+    one to three bytes more than the header says."""
+    row, stride = w * 3, (w * 3 + 3) & ~3
+    if stride != row and len(px) == h * stride:
+        return b"".join(px[y * stride:y * stride + row] for y in range(h))
+    return px
 
 
 def sample(px, w, x, y):
@@ -229,6 +240,12 @@ else:
             and open(out, "rb").read(len(magic)) == magic):
         print(f"screendump: {out} is not a {fmt.upper()}", file=sys.stderr)
         sys.exit(1)
+    if fmt == "ppm":
+        # What a pixel tool is handed is a P6, whatever the width.
+        w, h, px = parse_ppm(out)
+        if os.path.getsize(out) != len(f"P6\n{w} {h}\n255\n") + len(px):
+            with open(out, "wb") as f:
+                f.write(f"P6\n{w} {h}\n255\n".encode() + px)
     print(f"screendump: wrote {out} "
           f"({os.path.getsize(out)} bytes; device={device} head={head})")
 

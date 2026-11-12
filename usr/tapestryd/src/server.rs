@@ -1902,9 +1902,13 @@ pub struct Comp {
     /// Said once per stretch in which a direct scanout is not known to be
     /// scanned.
     direct_unsettled_said: bool,
-    /// The mode was taken for a display whose EDID has not been read: the
-    /// millimetres held are those of the display that was.
+    /// The EDID held may be that of the display that was: a mode was taken
+    /// for a new one, or an event came under a pinned mode, and the EDID
+    /// has not been answered since.
     edid_stale: bool,
+    /// The scale last derived from an EDID that was this display's (100
+    /// with none): what `derive_scale` answers while the one held is stale.
+    scale_derived: u16,
     /// How many times the DEVICE refused a display unbind (round-2 F1).
     /// The self-test's `unbind=` arm consumes this: round-1 F5 rebuilt the
     /// witness to observe the ISSUE ORDER and round-1 F8 exposed the
@@ -2762,6 +2766,7 @@ impl Comp {
             bind_again: display::Backoff::new(),
             direct_unsettled_said: false,
             edid_stale: false,
+            scale_derived: scale,
             unbind_refused: 0,
             pending_direct: None,
             pending_bind_refused_said: false,
@@ -4757,18 +4762,39 @@ impl Comp {
 
     /// HALCYON-SCALE 3: the platform's declaration while one stands, else
     /// the scale the display's EDID implies for its current pixel geometry
-    /// (100 without one). While the EDID held is not this display's, the
-    /// scale that stands: old millimetres over new pixels is no one's DPI.
-    fn derive_scale(&self) -> u16 {
+    /// (100 without one). An EDID that may not be this display's is asked
+    /// for again first; while it is not answered, the scale last derived
+    /// from one that was: old millimetres over new pixels is no one's DPI,
+    /// and the scale that stands may be an override's.
+    fn derive_scale(&mut self) -> u16 {
         if let Some(p) = self.declared {
             return p;
         }
-        if self.edid_stale {
-            return self.scale;
+        if self.edid_stale && self.gpu.engine == Engine::Live {
+            self.read_edid();
         }
-        match self.gpu.edid_mm {
-            Some((mm_w, mm_h)) => scale::scale_pct(self.gpu.width, self.gpu.height, mm_w, mm_h),
-            None => scale::SCALE_MIN,
+        if !self.edid_stale {
+            self.scale_derived = match self.gpu.edid_mm {
+                Some((mm_w, mm_h)) => scale::scale_pct(self.gpu.width, self.gpu.height, mm_w, mm_h),
+                None => scale::SCALE_MIN,
+            };
+        }
+        self.scale_derived
+    }
+
+    /// Ask the display's EDID. True if it was answered: no EDID is an
+    /// answer (the scale is then 100), no answer is not.
+    fn read_edid(&mut self) -> bool {
+        match self.gpu.query_edid() {
+            Ok(mm) => {
+                self.gpu.edid_mm = mm;
+                self.edid_stale = false;
+                true
+            }
+            Err(_) => {
+                self.edid_stale = true;
+                false
+            }
         }
     }
 
@@ -6238,6 +6264,8 @@ impl Comp {
     /// size.
     #[cfg(feature = "test-mode")]
     fn test_stall_aim(&mut self, host_w: u32, host_h: u32) {
+        // A shot aimed for the display that was, which found no bind.
+        self.test_stall_bind = None;
         if !self.test_latch_armed || self.test_stall_host == (host_w, host_h) {
             return;
         }
@@ -6292,9 +6320,10 @@ impl Comp {
             #[cfg(feature = "test-mode")]
             self.test_stall_aim(host_w, host_h);
             let changed = self.change_mode(w, h);
-            // A change that reached no bind spends no shot on a later one.
+            // A change that reached no bind spends no shot on a later one,
+            // and one that failed is followed by no switch.
             #[cfg(feature = "test-mode")]
-            if self.test_stall_bind == Some(StallBind::Mode) {
+            if changed.is_err() || self.test_stall_bind == Some(StallBind::Mode) {
                 self.test_stall_bind = None;
             }
             if let Err(e) = changed {
@@ -6309,15 +6338,10 @@ impl Comp {
             return Followed::Unfinished(E_IO);
         }
         // The EDID is asked with it: a change of display is the one time
-        // it changes, and it can change under a mode that does not. No
-        // EDID is an answer (the scale is then 100); no answer is not, and
-        // the scale stands until there is one.
-        match self.gpu.query_edid() {
-            Ok(mm) => {
-                self.gpu.edid_mm = mm;
-                self.edid_stale = false;
-            }
-            Err(_) => return Followed::Unfinished(E_IO),
+        // it changes, and it can change under a mode that does not. Not
+        // answered, the scale stands until it is.
+        if !self.read_edid() {
+            return Followed::Unfinished(E_IO);
         }
         self.rescale_after_mode();
         Followed::Done
@@ -6434,6 +6458,11 @@ impl Comp {
             display::Step::Wait => {}
             display::Step::Pinned => {
                 say!("tapestryd: display event {}: the mode is pinned and stands", n);
+                // The scale stands with it. But the display behind the mode
+                // may be another one now, so the millimetres held are not
+                // to be derived from: they are asked for when a scale next
+                // is (`derive_scale`).
+                self.edid_stale = true;
             }
             display::Step::Ask => match self.gpu.engine {
                 Engine::Dead => say!("tapestryd: display event {}: not followed, the device is dead", n),

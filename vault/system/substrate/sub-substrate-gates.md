@@ -285,6 +285,19 @@ fixed-host-port trap: **the constraint was invisible precisely because nothing
 enforced it**; it only surfaced as a collision when someone tried the
 concurrency the tool never said it lacked.
 
+**QEMU's PPM is not a P6 at every width.** Its `screendump` writes each row at
+pixman's stride for the row, which is the row rounded up to four bytes
+(`ui/ui-qmp-cmds.c`, `qemu_ppm_save`, QEMU 11.1), so a display whose width is
+no multiple of four gets a file with one to three bytes more a row than its
+header says. It showed once the display followed its host, since a window can
+be any width: a scenario told the guest 1118, and its dump failed the
+scenario's own length check. A reader without one samples every row after the
+first at a growing offset. `screendump.sh` takes the
+padding out: `parse_ppm` for the checks it makes itself, and a `-P` capture is
+rewritten as the P6 its header describes, so `ppm-sample.py`,
+`ppm-colorfrac.py` and a scenario's own reader are handed one. A PPM taken
+from the monitor by any other way still has the padding.
+
 **The lean `--production` shape is built inside the gate loop, not by a target
 nobody runs (#228/#229).** #228's root cause was not that `--production` was
 broken but that NOTHING BUILT IT, so it stayed broken silently for weeks while

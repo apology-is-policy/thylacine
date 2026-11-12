@@ -204,10 +204,15 @@ things.
   (`reconcile()` entered the composed state and its bind failed), or the EDID
   was not answered. The scale is derived again only once the EDID is read: the
   millimetres of the display that was say nothing of this one. From the
-  change until that answer `edid_stale` stands, and `derive_scale` then
-  answers the scale that stands, so a scale reset (Super+0), `scale auto` and
-  an explicit `mode W H` made in between derive nothing from the old
-  millimetres over the new pixels. Until round 3 they did.
+  change until that answer `edid_stale` stands. `derive_scale` then asks for
+  the EDID again if the engine is live, and while it is still not answered it
+  gives `scale_derived`, the scale last derived from an EDID that was this
+  display's. So a scale reset (Super+0), `scale auto` and an explicit
+  `mode W H` made in between derive nothing from the old millimetres over the
+  new pixels, and a reset does drop an override. Until round 3 they derived
+  from the old millimetres. Until round 4 the answer was the scale that
+  stood, which just after an override is cleared is the override's own value,
+  so a reset made then changed nothing and answered Ok.
 - `Done`: the fitted mode is the mode, the device took the bind of its screen
   where the display is composed, and the scale is the one the EDID gives,
   unless a verb's or a chord's override stands, or the platform declared a
@@ -225,7 +230,14 @@ failure. It was held, uncounted, until audit round 2: a device that stalled
 inside every asking would then have had the change begun without end, a screen
 made and given up each time. When the askings of an `Unfinished` are spent the
 mode stays the fitted one; `bind_pump` goes on asking for the bind, and the
-scale stands until the next asking.
+EDID is asked for again when a scale is next derived (a reset, `scale auto`, a
+`mode` verb) or at the next asking.
+
+An event under a pinned mode changes neither the mode nor the scale, and sets
+`edid_stale` all the same: the display behind the mode may be another one, so
+the millimetres held are not derived from until they are asked for again, at
+the next derivation. Until round 4 a reset under a pin derived from the
+millimetres of the display that was.
 
 Whether the EDID was answered is Lictor's to say. Its `query_edid` answers
 `Ok(None)` for a device that refuses the command or sends no block worth the
@@ -254,27 +266,48 @@ passes, and the by-hand flag is gone.
 
 `bound_res` is what the device is taken to scan: the resource of the last bind
 that was accepted, or 0 after a disable, accepted or not (a disable that was
-refused has its resource parked at the broker). It is knowledge only through
-`scans(res)`, which is `bound_res == res` with the scanout not unsettled. Four
-places read it so. `composed_bound()` is true when the display is not
-composed, or has no screen, or `scans` the screen's resource. And the three
-places where the direct state skips a bind, because the device already scans
-the resource (a 2D present of the slot that is bound, a present of an adopted
-GL source, an image poke), bind when `scans` is false, so the first present
-after a bind that was not answered settles the scanout.
+refused has its resource parked at the broker). Whether a bind is needed is
+decided only through `scans(res)`, which is `bound_res == res` with the
+scanout not unsettled. Four places read it so. `composed_bound()` is true when
+the display is not composed, or has no screen, or `scans` the screen's
+resource. And the three places where the direct state skips a bind, because
+the device already scans the resource (a 2D present of the slot that is bound,
+a present of an adopted GL source, an image poke), bind when `scans` is false,
+so the first present after a bind that was not answered settles the scanout.
+
+Seven other places read `bound_res` without the flag, each to decide whether a
+resource may be let go or whether a disable is owed: `release_displaced_gen`,
+`storage_unbound` (which gates a storage offer's suspend and its abort),
+`retire`'s test of whether the dying surface's GL source is the one bound,
+`gl_evict_res`, the eviction at a context's retirement and at a buffer's
+destroy, and the `bound` field a client reads of its image. The field does not
+make them safe and does not need to: a resource the device may still scan was
+parked by the broker when its bind or its disable was not answered, and the
+broker defers its unref until a later scanout command is accepted
+(`docs/GPU-DESIGN.md` 4.5.15). What they can get wrong is what the glass
+shows. One case is known and open. A surface whose GL source was re-targeted
+(the scanout is then off, with a switch pending) and which retires before its
+next present leaves the old source's last frame shown, because `retire`
+compares the new source with `bound_res` and sends no disable; a switch whose
+bind was not answered leaves the new source's frame the same way. It ends when
+anything else is shown or the buffer is destroyed. Audit round 4 found it; its
+path runs only on a GL host, so it is not changed with this section.
 
 `composed_bind_holds()` binds the screen again when `composed_bound()` is
 false and says `tapestryd: scanout composed (WxH) res N bound, late`. An
 accepted bind settles what the device scans, because the device takes its
 commands in order: a bind sent earlier and never answered was executed before
-this one or never will be. Then everything is established again, because what
-was pushed while the device did not answer never reached the host: a pending
-switch to direct is forgotten, and `reconcile()` runs as a structural pass,
-which repaints the screen, pushes the whole buffer and sends every client a
-CONFIGURE to draw. If the layout wants the direct state, that pass begins the
-switch again with its own request to draw. Until round 3 the late bind was
-followed by a flush alone, and the glass showed what had last been pushed
-before the stall.
+this one or never will be. Then what the host holds is established again,
+because what was pushed while the device did not answer never reached it: a
+pending switch to direct is forgotten, and `reconcile()` runs with the
+geometry marked changed. Where the layout wants the composed state that is a
+structural pass, which repaints the screen, pushes the whole buffer and sends
+every client a CONFIGURE to draw. Where it wants the direct state (the one
+client shown fills the display), the pass only begins the switch again, with
+its request to draw: nothing is pushed, and the screen just bound shows what
+the host last held of it, the frame the display showed before the switch was
+tried, until the client's present makes the switch. Until round 3 the late
+bind was followed by a flush alone in both cases.
 
 It has three callers. `change_mode` begins with it, so no screen is made while
 the device is not known to scan the standing one. An accepted SET_SCANOUT has
@@ -289,7 +322,10 @@ with the engine live, it puts right whichever state shows something.
 - Direct and unsettled: it sends the client a CONFIGURE to draw
   (`tapestryd: scanout direct N is not known to be scanned; its client is
   asked to draw`, said once a stretch), and the client's present binds.
-- Off, or still the boot's scanout: nothing, since nothing is shown.
+- Off, or still the boot's scanout: nothing. The compositor shows nothing
+  then. The device may still show a resource whose bind or whose disable was
+  not answered, which the broker keeps parked, until the next scanout command
+  that is accepted.
 
 `display::Backoff` paces it. The first attempt of a stretch is made on the
 pass that finds it, unless a caller's own attempt has just failed, in which
@@ -343,7 +379,9 @@ to be asked when it answers`, `... not followed (errno E), to be asked again`,
 `... not followed (errno E)`, `... the mode is WxH, not finished (errno E), to
 be asked again`, `... the mode is WxH, not finished (errno E)`, `... not
 followed, the device is dead`; `tapestryd: scanout composed (WxH) res N bound,
-late` for a bind taken at a later asking, and `tapestryd: scanout direct N is
+late` for a bind of the screen made again after one that was not taken (by the
+pass, at a change's first step, or by the follow after its change), and
+`tapestryd: scanout direct N is
 not known to be scanned; its client is asked to draw`; under the stall lever,
 `tapestryd: test-latch-dead: the mode's bind retires past its deadline` and
 `... the bind of the switch to direct retires past its deadline`; and from the
@@ -385,8 +423,12 @@ synchronous command is executed and then reported as past its deadline, so the
 reply reads the engine live with the stall count moved, which is the state
 `scanout_unsettled` is derived from. The lever's display half is aimed by the
 host's size (`test_stall_aim`, once a size): a display event for a host 797
-pixels high stalls the first bind of its mode change, one for a host 787 high
-stalls the bind of the switch to direct that follows the change. Its legs:
+pixels high stalls the bind of its mode's new screen (the change's own bind
+from the composed state, the bind on entering it from the direct state; a bind
+that was owed before the change takes no shot), one for a host 787 high stalls
+the bind of the next 2D switch to direct, which is the one that follows the
+change. A shot is not kept for another display: the next aim clears one that
+found no bind, and so does a change that fails. Its legs:
 
 - A, from the direct state: the bind on entering the composed state is not
   answered. Wanted, in order: `BIND FAILED`, `mode WxH is set; the display is
@@ -394,8 +436,11 @@ stalls the bind of the switch to direct that follows the change. Its legs:
 - C: the change is made, the console draws, and the bind of the switch to
   direct is not answered. Wanted: `bind REFUSED`, then `bound, late` before
   any switch is made, then `scanout pending-direct` and the switch. Nothing is
-  typed in between, so without `bind_pump` the switch is made by no one and
-  `bound, late` is never said. This is round 3's finding.
+  typed in between. Without `bind_pump`, or without the proxy's flag, the
+  switch is still made, by the console's next present of its own (its cursor
+  blinks), with nothing having bound the screen meanwhile, and `bound, late`
+  is never said: the leg reads which of the two lines comes first. This is
+  round 3's finding.
 - B, from the composed state (the console's pane split by Super+H): the
   change's own bind is not answered. Wanted: `mode rebind failed`, `not
   followed (errno E), to be asked again`, then `bound, late` for the standing
@@ -410,10 +455,18 @@ The order of two lines that come from different passes is read with one
 pattern that is either of them, which matches the earlier; a list of two
 patterns is taken in the order listed.
 
+The dumps are taken with `tools/screendump.sh -P`, which hands out a true P6.
+QEMU writes each row of its PPM at pixman's stride, the row rounded up to four
+bytes, so at a width that is no multiple of four (1118 and 1238 here) its file
+is longer than its header says, and the tool takes the padding out
+([[sub-substrate-gates]]). The scenario's first run on a guest failed there,
+with every line of leg A said in the order wanted.
+
 Not reached by either: a pinned mode under an event (the two calls in the
 verbs); a stall that is standing when an asking comes, which holds the event
 (noted and waited out by both scenarios, made by neither); an EDID that is not
-answered, so `Unfinished` by that way and `edid_stale`; the direct state's
+answered, so `Unfinished` by that way, `edid_stale`, and the asking again at
+a derivation; the direct state's
 repair, where a present of the client's own is what binds; the later waits of
 `Backoff`; the adopted GL source and the image poke, whose bind no lever
 stalls; a follow across the trusted screen; and the scale a host's millimetres

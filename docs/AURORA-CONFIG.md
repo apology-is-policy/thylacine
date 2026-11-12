@@ -320,8 +320,11 @@ things):
    the millimetres held are the display's that was. An event's asking is
    made again a bounded number of times. Whatever is shown, a scanout
    command that the device did not answer leaves the compositor not knowing
-   what the device scans, and it settles that as soon as the device answers
-   (binding its screen again, or having the one client shown draw). (A
+   what the device scans, and it settles that once the device answers
+   again: it binds its screen again, at once or 300 ms after a bind of its
+   own that failed, or it asks the one client shown to draw, whose next
+   present settles it, and asks again at growing intervals, 9.6 s at most,
+   while that client does not. (A
    persisted fixed mode is pushed as `mode W H` at
    startup, so it is pinned; a persisted `auto` pushes nothing, and the
    boot's fitted mode follows the host.) No mode changes while the trusted

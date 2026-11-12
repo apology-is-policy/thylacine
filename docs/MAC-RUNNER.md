@@ -222,7 +222,7 @@ gives the first mode at boot. An event whose asking finds the device stalled wai
 to answer; an asking that was made and failed is made again, six times at most; and after a
 scanout command that the device did not answer, the compositor's pass binds the screen again
 (or has the one client shown draw, whose present binds) for as long as the device is live,
-then pushes everything again. Lictor's own trusted screen is made once, at boot, by the same rule against its
+and where the display is composed repaints and pushes everything again. Lictor's own trusted screen is made once, at boot, by the same rule against its
 own limits (800x720 at least, 4096x2160 pixels at most), and no longer fails for a host of
 another size. An explicit `mode W H` pins the mode until a `mode auto` that is accepted.
 

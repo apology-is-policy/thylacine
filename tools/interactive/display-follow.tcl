@@ -10,11 +10,19 @@
 # colours a sample of the picture has (a screen with nothing drawn on it has
 # the right geometry too), and a digest of all of it. The stale-file guard is
 # load-bearing: a dump that failed must never be answered from the one before.
+# Why a dump gave nothing is kept for the failure that follows it. The length
+# is checked against the header: tools/screendump.sh hands out a true P6 (QEMU
+# pads each row to four bytes, which a width that is no multiple of four shows).
+set dims_why ""
 proc dims {} {
     global repo qmp ppm
+    set ::dims_why ""
     file delete -force $ppm
-    if {[catch {exec $repo/tools/screendump.sh -s $qmp -P $ppm}]} { return "" }
-    if {![file exists $ppm]} { return "" }
+    if {[catch {exec $repo/tools/screendump.sh -s $qmp -P $ppm} out]} {
+        set ::dims_why "the dump failed: [lindex [split [string trim $out] "\n"] end]"
+        return ""
+    }
+    if {![file exists $ppm]} { set ::dims_why "the dump wrote no file"; return "" }
     if {[catch {exec python3 -I -c {
 import hashlib, re, sys
 d = open(sys.argv[1], 'rb').read()
@@ -23,7 +31,10 @@ w, h = int(m.group(1)), int(m.group(2))
 px = d[m.end():]
 assert len(px) == w * h * 3, (w, h, len(px))
 print(w, h, len({px[i:i + 3] for i in range(0, len(px), 3 * 101)}), hashlib.md5(px).hexdigest())
-} $ppm} out]} { return "" }
+} $ppm} out]} {
+        set ::dims_why "the dump could not be read: [lindex [split [string trim $out] "\n"] end]"
+        return ""
+    }
     return $out
 }
 proc wait_dims {want label} {
@@ -36,7 +47,7 @@ proc wait_dims {want label} {
         }
         after 700
     }
-    lc_fail "the scanout never became $want with a picture on it ($label; last: width height colours = $d)"
+    lc_fail "the scanout never became $want with a picture on it ($label; last: width height colours = $d; $::dims_why)"
 }
 # Tell QEMU a size as a VNC viewer that resized its window does: the path a
 # host window takes, without a window.
@@ -80,7 +91,7 @@ proc wait_redraw {label} {
     global timeout
     set ::what "the redraw ($label)"
     set before [lindex [dims] 3]
-    if {$before eq ""} { lc_fail "no dump to tell a redraw by ($label)" }
+    if {$before eq ""} { lc_fail "no dump to tell a redraw by ($label; $::dims_why)" }
     set tok "display-redraw-[incr ::redraw_n]"
     lc_send "echo $tok"
     set saved $timeout
