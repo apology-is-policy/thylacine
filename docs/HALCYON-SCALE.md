@@ -133,7 +133,8 @@ processes that paint chrome and glyphs, and what the bakes need.
   told otherwise; nothing is emitted otherwise, so every gate at 1.0 is
   untouched. The boot line names the source: `scale 200 (declared)`.
   Lictor's trusted screen reads the same declaration, and the EDID after it,
-  by itself and at its own start, and draws at the nearest whole scale
+  by itself, at its own start and after each change of its display, and
+  draws at the nearest whole scale
   (`docs/GRAPHICAL-SAK-OWNERSHIP.md`, "The trusted screen's scale"); the verb
   and the session's setting do not reach it.
 

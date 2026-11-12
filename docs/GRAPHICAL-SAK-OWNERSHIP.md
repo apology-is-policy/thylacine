@@ -194,6 +194,9 @@ it rather than allocating a framebuffer alongside normal broker bookkeeping.
 Both buffers are erased after restoration. This prevents normal resource churn
 from crowding out the allocation required for secure attention; inability to
 reserve the workspace fails service startup before normal clients are admitted.
+A display that changes afterwards may need more of both ("The trusted screen
+follows its display", below): they are then grown while the trusted screen is
+down, never on entry, and a growth that fails leaves the screen that stands.
 
 ### The trusted screen's scale
 
@@ -206,7 +209,8 @@ rule (`docs/HALCYON-SCALE.md` section 3): the platform's `thylacine.scale` on
 the kernel's command line first, then the display's millimetres from its EDID,
 else 100 percent; and it is carried to the screen's own pixels when the screen
 is not made at its display's size. Lictor reads both sources itself, at its
-start. The size and the scale are chosen once, there, by one pure function.
+start and again after each change of its display (the section after this
+one). The size and the scale are chosen by one pure function.
 
 The type is baked at each scale. The set at two has the box, the baseline, the
 bearing room and the advance of the set at one, times two, and only the outline
@@ -244,3 +248,57 @@ true 137.5 percent, 132 pixels to the inch. A display too small for the layout
 at two is drawn at one whatever its scale, which is every panel of 1920 by
 1080 or 1200 at 150 percent: 540 and 600 layout rows are under the 720 the
 layout needs.
+
+### The trusted screen follows its display
+
+The host's display is whatever its window happens to be, and it changes: the
+window is resized, made full screen, or moved to a display of another
+density. Until 2026-11-12 the trusted screen kept the size and the scale of
+the display Lictor started on, and the host fitted that picture to whatever
+the display had become: a screen made at one for a small window was shown
+enlarged and coarse on a Retina panel for the rest of the boot.
+
+Lictor is the device's driver and counts its display events. When the count
+has moved and stood for the session's quiet time (150 ms,
+`libhalcyon::display::Follow`), and the seat is in its normal phase, Lictor
+asks the device for its rect and its EDID, as it did at its start, and the
+same pure function says what the trusted screen for that display is
+(`render::refit`). If it is the one that stands, nothing is done. If only the
+scale differs, the next paint draws at it. If the size differs, a new image
+is made: the workspace and the backing are grown if the new size needs more
+(they are not given back, and never pass the 4096 by 2160 pixels of the
+largest screen), the second of two reserved resources is created at the new
+size over the same private backing, and only when the device has answered for
+it whole does it become the image; the first is then let go of. The two
+reserved resource IDs alternate, and neither is ever a client's.
+
+The rules that keep this out of the trusted path's critical section:
+
+- **Nothing is made on entry.** Secure attention finds an image that is
+  already whole, as before. Following happens only in the normal phase, never
+  while the trusted screen is up or its restoration is owed; a display that
+  changes then is followed once the seat is normal again.
+- **A following that fails leaves the screen that stands.** Memory that
+  cannot be had, a device that does not answer, an answer that is a refusal:
+  the image, its size and its scale stay as they were, which is a whole
+  trusted screen that the host fits to the display, as before this section.
+  It is tried again a bounded number of times, at the session's waits, and at
+  the next display event.
+- **A resource whose state is not known is not used.** A command the device
+  did not answer leaves the other reserved resource possibly made, or
+  possibly still there. It is let go of, and that answered for, before it is
+  made again; until then the screen stays as it is.
+- **Nothing a client says is asked,** as before: the rect and the EDID are
+  the device's, and the declaration is the kernel's command line.
+
+Decided by the implementing agent under the operator's standing authorization
+of 2026-09-01, and the operator's to change: that the trusted screen follows
+its display at all (the alternative is the boot's screen fitted by the host,
+which is what the session's own following exists to avoid); that it follows
+at the display's event and not on entry (entry must neither allocate nor wait
+on a device that has other work); and that memory is grown when a display
+needs it and kept (the alternative, the largest screen's 68 MiB reserved at
+every start, charges every small display for the few that grow). Prior art:
+Plan 9 from User Space reads the display's density again at every
+`getwindow`, so at every resize; a Linux guest's virtio-gpu driver reads the
+EDID and the display info again on the same event.
