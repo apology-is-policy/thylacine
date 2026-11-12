@@ -796,7 +796,7 @@ proc lc_expect_fgtick {count phase} {
     for {set i 0} {$i < $count} {incr i} {
         expect {
             -re {FGTICK[\r\n]} { }
-            -re {FGNOTTY}     { lc_fail "the job found no terminal of its session on fd 0 during '$phase'" }
+            -re {FGNOTTY}     { lc_fail "the job found no terminal of its session on fd 0, 1 or 2 during '$phase'" }
             -re {EXTINCTION:} { lc_extinction_fail "kernel extinction during '$phase'" }
             timeout           { lc_fail "timeout (${lc_cmd_timeout}s) waiting for the job to hold the terminal during '$phase'" }
             eof               { lc_fail "unexpected EOF during '$phase'" }

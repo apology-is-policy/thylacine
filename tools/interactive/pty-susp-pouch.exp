@@ -30,19 +30,32 @@
 
 source [file join [file dirname [info script]] lib.exp]
 
-# Assert no SUSP-TICK arrives for `secs`. Only meaningful between the two
-# positive legs above -- alone it passes against a dead guest.
-proc susp_expect_quiet {secs phase} {
+# Assert at most ONE SUSP-TICK arrives in `secs`. A stop is reported when it is
+# latched, not when the program parks, so one tick can have been inside its
+# write then and reach us after `Stopped`, however late; a second cannot. A
+# program that was never stopped writes four a second. Only meaningful between
+# the two positive legs above -- alone it passes against a dead guest.
+proc susp_expect_stopped {secs phase} {
     global timeout
-    set timeout $secs
-    expect {
-        -re {SUSP-TICK ([0-9]+)\r} {
-            lc_fail "$phase: a stopped process emitted SUSP-TICK $expect_out(1,string)"
+    set until [expr {[clock milliseconds] + $secs * 1000}]
+    set seen 0
+    while {1} {
+        set left [expr {($until - [clock milliseconds] + 999) / 1000}]
+        if {$left <= 0} { break }
+        set timeout $left
+        expect {
+            -re {SUSP-TICK ([0-9]+)\r} {
+                incr seen
+                if {$seen > 1} {
+                    lc_fail "$phase: a stopped process emitted SUSP-TICK $expect_out(1,string), its second since the stop"
+                }
+            }
+            -re {EXTINCTION:} { lc_extinction_fail "kernel extinction during '$phase'" }
+            eof               { lc_fail "unexpected EOF during '$phase'" }
+            timeout           { break }
         }
-        -re {EXTINCTION:} { lc_extinction_fail "kernel extinction during '$phase'" }
-        eof               { lc_fail "unexpected EOF during '$phase'" }
-        timeout           { lc_step "saw: $phase (${secs}s quiet, no ticks)" }
     }
+    lc_step "saw: $phase (${secs}s, $seen tick(s) in flight at the stop)"
 }
 
 # Consume one tick and return its number.
@@ -91,20 +104,8 @@ lc_step "saw: ticks advancing before the stop ($n1 -> $n2)"
 send "\x1a"
 lc_expect "Stopped" "^Z stops the foreground POUCH program"
 
-# At most one tick can have been inside its write when the stop landed and
-# reach us after `Stopped`. Take that one if it comes within a second, then
-# demand real quiet. A pause here would leave it in the buffer for the quiet
-# window to find -- a harness artifact, not a kernel bug -- and a process that
-# was never stopped writes a second tick, which the window does find.
-lc_within 1 {
-    -re {SUSP-TICK ([0-9]+)\r} { lc_step "saw: one tick in flight at the stop ($expect_out(1,string))" }
-    -re {EXTINCTION:} { lc_extinction_fail "kernel extinction after the stop" }
-    eof               { lc_fail "unexpected EOF after the stop" }
-    timeout           { }
-}
-
 # THE CLAIM: stopped means stopped.
-susp_expect_quiet 4 "the stopped pouch program stays silent"
+susp_expect_stopped 5 "the stopped pouch program stays silent"
 
 # POSITIVE 2: fg resumes it, and the counter has MOVED PAST where it stopped.
 lc_send "fg"

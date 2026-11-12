@@ -438,8 +438,7 @@ with `SYS_NOTE_WAIT`'s pending form, which takes nothing off the queue, writes
 lands on that syscall's return to EL0, in `proc_job_stop_self`. The unmask
 follows the note by the child's own count, so no interval orders the driver's
 `^Z` against it: a driver held up for any time short of its watchdog finds the
-child still masked. Before 2026-11-12 the child unmasked at its twelfth tick,
-and a driver more than two seconds late typed its `^Z` at an unmasked child.
+child still masked.
 `tools/interactive/pty-susp-pouch.exp` stops a Pouch program
 (`pouch-hello-susp`) with `^Z` and proves the stop by silence bracketed by
 advancing ticks. That program writes a tick only while it leads a group of its
@@ -454,7 +453,11 @@ spawn): "my group is the foreground group" is true before the handoff, false
 in the middle of it and true after it, and a tick from the first of those
 would be followed by a key typed in the second. `pty-4.exp` holds the token to
 its meaning with a job started in the background, which must write none until
-`fg`.
+`fg`. The shell gives a background job a pipe for fd 0, so `debug-child fgtick`
+asks the terminal through the first of fd 0, 1 and 2 that reaches it (a slave
+answers only its own session, so whichever answers is the controlling
+terminal), and says `FGNOTTY` when none does; every wait of that leg fails on
+`FGNOTTY`, because a job that refused is as quiet as one that waits.
 
 ## Referenced by
 

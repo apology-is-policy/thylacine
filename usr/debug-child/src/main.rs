@@ -44,12 +44,14 @@
 //   * `debug-child fgtick` (the interactive scenarios' stoppable job) is tick
 //     mode for a driver that cannot ask the terminal who holds it. It writes
 //     FGTICK only while it leads a process group of its own and that group is
-//     the foreground group of the terminal on fd 0, so a driver that reads one
+//     the foreground group of its terminal, so a driver that reads one
 //     knows that a stop or an interrupt key typed now reaches this job. Run it
 //     alone, never in a pipeline: the shell mints a job's group from its first
 //     member's pid. In the background it writes at most the one FGTICK it had
-//     already decided on when it was stopped. It ends as tick mode does, and
-//     with FGNOTTY and status 2 when fd 0 is no terminal of its session.
+//     already decided on when it was stopped. It asks the terminal through
+//     the first of fd 0, 1 and 2 that reaches it: a job the shell starts in
+//     the background has a pipe on fd 0. It ends as tick mode does, and with
+//     FGNOTTY and status 2 when none of the three is a terminal of its session.
 //   * `debug-child dirty` (5g, death wins in the exit close; jc-probe drives
 //     it) leaves a small write staged on a 9P file, writes one byte to stdout
 //     (its driver's pipe) once it has, and then spins as spin mode does.
@@ -217,6 +219,21 @@ fn tick() -> ! {
 const FGTICK_MARK: &[u8] = b"FGTICK\n";
 const FGTICK_NOTTY: &[u8] = b"FGNOTTY\n";
 
+// The terminal's foreground group, or a negative errno when no standard fd is a
+// terminal of this session. A slave answers only its own session, so whichever
+// fd answers is the controlling terminal.
+fn terminal_fg() -> i64 {
+    let mut fg = -1;
+    for fd in 0..3 {
+        // SAFETY: SVC wrapper.
+        fg = unsafe { t_tty_get_fg(fd) };
+        if fg >= 0 {
+            break;
+        }
+    }
+    fg
+}
+
 fn fgtick() -> ! {
     // SAFETY: SVC wrapper.
     let me = unsafe { t_getpid() };
@@ -227,9 +244,8 @@ fn fgtick() -> ! {
         // handoff, false in the middle of it, and true again after. The group
         // is read every time and must be this process's own, which it is only
         // from the middle on.
-        // SAFETY: SVC wrappers; 0 names the caller, fd 0 is the terminal the
-        // shell gave the job.
-        let (own, fg) = unsafe { (t_getpgid(0), t_tty_get_fg(0)) };
+        // SAFETY: SVC wrapper; 0 names the caller.
+        let (own, fg) = (unsafe { t_getpgid(0) }, terminal_fg());
         if own <= 0 || fg < 0 {
             // SAFETY: SVC wrappers; FGTICK_NOTTY is a valid static buffer.
             unsafe {
