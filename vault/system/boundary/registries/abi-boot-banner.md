@@ -73,6 +73,7 @@ mirrors:
   - "tools/interactive/flood-174.exp"
   - "tools/interactive/freeze-172.exp"
   - "tools/interactive/ls-gfx-font.exp"
+  - "tools/interactive/ls-gfx.exp (EXTINCTION: only -- its bring-up wait for aurora's selftest line)"
   - "tools/warp/quarry-wedge.exp"
   - "tools/stall-watch.py (`kernel base:` — see below)"
   - "tools/check-arc-gates.sh"

@@ -638,6 +638,19 @@ per full gate ≈ 3 s against a run measured in tens of minutes.
      scenarios call it when they take the EGL capture path. The preflight
      makes the consumer's own import (`from PIL import Image`), not a
      weaker one: a Pillow whose C half does not load still has a `PIL`.
+  8. **A line the guest prints during bring-up is awaited under the boot
+     budget.** `lc_boot` returns at the spawn on the socket transport, so a
+     wait that follows it is still the boot's. `ls-gfx` claimed aurora's
+     `#129 feed selftest PASS` with `lc_expect`, the command budget (30 s per
+     job, 90 s at three), for a line printed at the end of bring-up. A lone
+     HVF boot reaches the line before it at 76 s, and with three at a time
+     the scenarios that stop at that line took 83 to 90 s in the two
+     whole-fleet runs of 2026-11-12, so the second run failed one attempt
+     of `ls-gfx` with the boot still inside joey's job-control probe. The
+     wait takes `lc_boot_timeout` now and names the selftest's own FAIL
+     line; `pts-probe` already did the same for a line joey prints late. Of
+     the 121 scenarios that boot, no other has its first wait under the
+     command budget.
 - `ls-gfx-session-image`'s fail-fast arm waited for `leaf=N REFUSED`, a word
   halcyond never wrote (its line is `leaf=N cache refused`), so a refused raster
   showed as a 60 s timeout that blamed the routing. It matches the refusal line
