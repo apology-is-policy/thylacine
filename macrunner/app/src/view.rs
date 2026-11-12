@@ -11,25 +11,26 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadOnly};
 use objc2_app_kit::{
-    NSApplication, NSBitmapFormat, NSBitmapImageRep, NSCursor, NSDeviceRGBColorSpace, NSEvent,
-    NSEventModifierFlags, NSEventType, NSGraphicsContext, NSImage,
-    NSMenuDidBeginTrackingNotification, NSResponder, NSScreen, NSView,
+    NSApplication, NSBitmapFormat, NSBitmapImageRep, NSControlStateValueOff, NSControlStateValueOn,
+    NSCursor, NSDeviceRGBColorSpace, NSEvent, NSEventModifierFlags, NSEventType, NSGraphicsContext,
+    NSImage, NSMenuDidBeginTrackingNotification, NSMenuItem, NSResponder, NSScreen, NSView,
     NSWindowDidResignKeyNotification,
 };
 use objc2_core_foundation::{CGPoint, CGSize};
 use objc2_core_graphics::{
-    kCGColorSpaceSRGB, CGColorSpace, CGEvent, CGEventFlags, CGScrollEventUnit,
+    kCGColorSpaceSRGB, CGAssociateMouseAndMouseCursorPosition, CGColorSpace, CGEvent, CGEventField,
+    CGEventFlags, CGEventType, CGMouseButton, CGScrollEventUnit, CGWarpMouseCursorPosition,
 };
 use objc2_foundation::{
     ns_string, MainThreadMarker, NSNotificationCenter, NSObject, NSObjectProtocol, NSPoint, NSRect,
-    NSRunLoop, NSRunLoopCommonModes, NSSize, NSTimer,
+    NSRunLoop, NSRunLoopCommonModes, NSSize, NSString, NSTimer,
 };
 use objc2_metal::{
-    MTLClearColor, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue,
+    MTLBlendFactor, MTLClearColor, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue,
     MTLCreateSystemDefaultDevice, MTLDevice, MTLLibrary, MTLLoadAction, MTLOrigin, MTLPixelFormat,
     MTLPrimitiveType, MTLRegion, MTLRenderCommandEncoder, MTLRenderPassDescriptor,
     MTLRenderPipelineDescriptor, MTLRenderPipelineState, MTLSamplerDescriptor,
-    MTLSamplerMinMagFilter, MTLSamplerState, MTLSize, MTLStoreAction, MTLTexture,
+    MTLSamplerMinMagFilter, MTLSamplerState, MTLScissorRect, MTLSize, MTLStoreAction, MTLTexture,
     MTLTextureDescriptor, MTLTextureSwizzle, MTLTextureSwizzleChannels, MTLTextureUsage,
     MTLViewport,
 };
@@ -52,12 +53,17 @@ vertex V vs(uint vid [[vertex_id]]) {
 fragment float4 fs(V in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]]) {
     return float4(t.sample(s, in.uv).rgb, 1.0);
 }
+fragment float4 fp(V in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]]) {
+    return t.sample(s, in.uv);
+}
 "#;
 
 struct Renderer {
     device: Retained<ProtocolObject<dyn MTLDevice>>,
     queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
     pipeline: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
+    over: Retained<ProtocolObject<dyn MTLRenderPipelineState>>, // lays the guest's pointer on the picture
+    pointer: Option<Drawn>,
     nearest: Retained<ProtocolObject<dyn MTLSamplerState>>,
     linear: Retained<ProtocolObject<dyn MTLSamplerState>>,
     layer: Retained<CAMetalLayer>,
@@ -70,6 +76,14 @@ struct Renderer {
 }
 
 type Texture = Retained<ProtocolObject<dyn MTLTexture>>;
+
+// The guest's pointer as the picture's pass draws it, which it does while the Mac's is held: the
+// guest moves its own then, and the Mac's shows nothing of where.
+struct Drawn {
+    image: Arc<Pointer>,
+    texture: Texture,
+    at: (i32, i32), // the guest pixel the hot spot is on
+}
 
 // A BGRA texture takes a pixel's four bytes as blue, green, red and alpha, in that order. This is
 // which of them each colour is read from when the frame's bytes are in another order.
@@ -284,6 +298,27 @@ struct Worn {
 // the pointer within MAX_POINTER_POINTS a side. A guest may set a screen so small that its picture
 // is magnified many times over, and its pointer would be with it.
 const MAX_POINTER_POINTS: f64 = 256.0;
+
+pub const TITLE: &str = "Thylacine";
+// While the pointer is captured the window says how to get it back.
+const CAPTURED_TITLE: &str = "Thylacine \u{2014} \u{2303}\u{2318}G gives the pointer back";
+
+// The whole guest pixels in a move of `points`, where a guest pixel takes `scale` points of the
+// view. What is left over is kept in `carry` for the next move, so that slow motion is not lost.
+fn guest_motion(carry: &mut f64, points: f64, scale: f64) -> i32 {
+    if scale <= 0.0 || !scale.is_finite() || !points.is_finite() {
+        return 0;
+    }
+    let all = *carry + points / scale;
+    let whole = all.trunc().clamp(i32::MIN as f64, i32::MAX as f64);
+    // More than a number holds is not carried over.
+    *carry = if whole == all.trunc() {
+        all - whole
+    } else {
+        0.0
+    };
+    whole as i32
+}
 fn pointer_scale(w: u32, h: u32, scale: f64) -> f64 {
     scale.min(MAX_POINTER_POINTS / w.max(h).max(1) as f64)
 }
@@ -381,6 +416,23 @@ impl Renderer {
             d.setMagFilter(f);
             device.newSamplerStateWithDescriptor(&d).ok_or("no sampler")
         };
+        let fp = lib
+            .newFunctionWithName(ns_string!("fp"))
+            .ok_or("no pointer function")?;
+        let desc = MTLRenderPipelineDescriptor::new();
+        desc.setVertexFunction(Some(&vs));
+        desc.setFragmentFunction(Some(&fp));
+        let att = unsafe { desc.colorAttachments().objectAtIndexedSubscript(0) };
+        att.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
+        // The image's colours are already multiplied by its alpha.
+        att.setBlendingEnabled(true);
+        att.setSourceRGBBlendFactor(MTLBlendFactor::One);
+        att.setSourceAlphaBlendFactor(MTLBlendFactor::One);
+        att.setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+        att.setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+        let over = device
+            .newRenderPipelineStateWithDescriptor_error(&desc)
+            .map_err(|e| e.to_string())?;
         let nearest = sampler(MTLSamplerMinMagFilter::Nearest)?;
         let linear = sampler(MTLSamplerMinMagFilter::Linear)?;
         let layer = CAMetalLayer::new();
@@ -394,6 +446,8 @@ impl Renderer {
             device,
             queue,
             pipeline,
+            over,
+            pointer: None,
             nearest,
             linear,
             layer,
@@ -514,7 +568,49 @@ impl Renderer {
         true
     }
 
-    // One pass: clear to black, then the scanout letterboxed into a target of `size` pixels.
+    // What the next frame draws of the guest's pointer: nothing, or `image` with its hot spot on
+    // the guest pixel `at`. Returns whether that changes the frame.
+    fn set_pointer(&mut self, want: Option<(&Arc<Pointer>, (i32, i32))>) -> bool {
+        let Some((image, at)) = want else {
+            return self.pointer.take().is_some();
+        };
+        if let Some(drawn) = &mut self.pointer {
+            if Arc::ptr_eq(&drawn.image, image) {
+                let moved = drawn.at != at;
+                drawn.at = at;
+                return moved;
+            }
+        }
+        let d = unsafe {
+            MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(
+                MTLPixelFormat::BGRA8Unorm,
+                image.w as usize,
+                image.h as usize,
+                false,
+            )
+        };
+        let bgra = image.cut();
+        let all = Rect {
+            x: 0,
+            y: 0,
+            w: image.w,
+            h: image.h,
+        };
+        let texture = self.device.newTextureWithDescriptor(&d).filter(|t| {
+            // SAFETY: a Pointer holds w * h * 4 bytes, rows w * 4 apart, and `all` is the texture.
+            unsafe { replace(t, bgra.as_ptr(), bgra.len(), image.w as usize * 4, all) }
+        });
+        let had = self.pointer.take().is_some();
+        self.pointer = texture.map(|texture| Drawn {
+            image: image.clone(),
+            texture,
+            at,
+        });
+        had || self.pointer.is_some()
+    }
+
+    // One pass: clear to black, then the scanout letterboxed into a target of `size` pixels, and
+    // the guest's pointer on it if it is drawn here.
     fn draw(
         &self,
         cmd: &ProtocolObject<dyn MTLCommandBuffer>,
@@ -556,6 +652,39 @@ impl Renderer {
                         0,
                     );
                     enc.drawPrimitives_vertexStart_vertexCount(MTLPrimitiveType::Triangle, 0, 3);
+                }
+                if let Some(p) = &self.pointer {
+                    // An image pixel on a guest pixel, the hot spot on the guest's place. What
+                    // falls off the picture is not drawn: the bars are not the guest's.
+                    let within = |v: f64, most: u32| v.round().clamp(0.0, most as f64) as usize;
+                    let (left, top) = (within(x, size.0), within(y, size.1));
+                    enc.setScissorRect(MTLScissorRect {
+                        x: left,
+                        y: top,
+                        width: within(x + vw, size.0) - left,
+                        height: within(y + vh, size.1) - top,
+                    });
+                    enc.setViewport(MTLViewport {
+                        originX: x + (p.at.0 as f64 - p.image.hot_x as f64) * scale,
+                        originY: y + (p.at.1 as f64 - p.image.hot_y as f64) * scale,
+                        width: p.image.w as f64 * scale,
+                        height: p.image.h as f64 * scale,
+                        znear: 0.0,
+                        zfar: 1.0,
+                    });
+                    enc.setRenderPipelineState(&self.over);
+                    unsafe {
+                        enc.setFragmentTexture_atIndex(Some(&p.texture), 0);
+                        enc.setFragmentSamplerState_atIndex(
+                            Some(if whole { &self.nearest } else { &self.linear }),
+                            0,
+                        );
+                        enc.drawPrimitives_vertexStart_vertexCount(
+                            MTLPrimitiveType::Triangle,
+                            0,
+                            3,
+                        );
+                    }
                 }
             }
         }
@@ -634,6 +763,10 @@ pub struct Ivars {
     owed: Cell<bool>, // the texture changed and no frame has shown it yet
     ticks: Cell<u64>,
     scroll: Cell<f64>,
+    captured: Cell<bool>, // the pointer is captured: its moves are the guest's mouse's, and the guest's pointer is drawn
+    seized: Cell<bool>, // the Mac's pointer is held and hidden (a captured pointer's is, in a window that was key)
+    skip: Cell<bool>,   // the next move has in it the jump the Mac's pointer was just made to take
+    carry: Cell<(f64, f64)>, // the part of a guest pixel of a captured pointer's motion not sent yet
     worn: RefCell<Worn>,
     told: Cell<Option<UiInfo>>, // the size the guest's display was last told
     tellings: Cell<u32>,
@@ -649,6 +782,7 @@ pub struct Options {
     pub scripted_input: bool, // one second in, a fixed run of key and pointer events through the window
     pub resize_to: Option<(f64, f64)>, // one second in, the window's content set to this many points, and nudged a second later
     pub scripted_bar: bool, // one second in, the content set a point past the scanout each way; then clicks on the picture's corners and on the bars
+    pub scripted_capture: bool, // one second in, the pointer captured (the Mac's is left alone: the window is not key), moved, clicked, scrolled and let go
     pub scripted_click: Option<(u32, u32)>, // one second in, the pointer to the middle of the picture; half a second on, a left click on this guest pixel; half a second on, the pointer to the last pixel
 }
 
@@ -680,8 +814,8 @@ define_class!(
         #[unsafe(method(tick:))]
         fn tick(&self, _link: &CADisplayLink) {
             self.ivars().ticks.set(self.ivars().ticks.get() + 1);
-            self.frame();
             self.wear_pointer();
+            self.frame();
         }
 
         #[unsafe(method(resetCursorRects))]
@@ -719,6 +853,24 @@ define_class!(
 
         #[unsafe(method(clickLast:))]
         fn click_last(&self, _timer: &NSTimer) { self.scripted_click(2); }
+
+        #[unsafe(method(captureScript:))]
+        fn capture_script(&self, _timer: &NSTimer) { self.scripted_capture(); }
+
+        // View > Capture Pointer, and its chord.
+        #[unsafe(method(toggleCapture:))]
+        fn toggle_capture(&self, _sender: Option<&AnyObject>) {
+            self.capture(!self.ivars().captured.get());
+        }
+
+        #[unsafe(method(validateMenuItem:))]
+        fn validate_menu_item(&self, item: &NSMenuItem) -> bool {
+            if item.action() == Some(sel!(toggleCapture:)) {
+                let on = self.ivars().captured.get();
+                item.setState(if on { NSControlStateValueOn } else { NSControlStateValueOff });
+            }
+            true
+        }
 
         // Every change of the view's size comes through here, a step at a time while the window's
         // edge is dragged.
@@ -799,7 +951,13 @@ define_class!(
         fn scroll_wheel(&self, ev: &NSEvent) {
             self.settle_modifiers(ev);
             // A scroll over the bars is not the guest's: it would land wherever its pointer last was.
-            let Some(at) = self.guest_point(ev) else { return };
+            // A captured pointer is the guest's own, and a notch lands where the guest has it.
+            let at = if self.ivars().captured.get() {
+                None
+            } else {
+                let Some(at) = self.guest_point(ev) else { return };
+                Some(at)
+            };
             let mut acc = self.ivars().scroll.get();
             let n = notches(&mut acc, ev.scrollingDeltaY(), ev.hasPreciseScrollingDeltas());
             self.ivars().scroll.set(acc);
@@ -832,6 +990,10 @@ impl GuestView {
             owed: Cell::new(false),
             ticks: Cell::new(0),
             scroll: Cell::new(0.0),
+            captured: Cell::new(false),
+            seized: Cell::new(false),
+            skip: Cell::new(false),
+            carry: Cell::new((0.0, 0.0)),
             worn: RefCell::new(Worn::default()),
             told: Cell::new(None),
             tellings: Cell::new(0),
@@ -887,6 +1049,17 @@ impl GuestView {
                     1.0,
                     &*(Retained::as_ptr(&this) as *const AnyObject),
                     sel!(barSize:),
+                    None,
+                    false,
+                );
+            }
+        }
+        if this.ivars().opts.scripted_capture {
+            unsafe {
+                NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(
+                    1.0,
+                    &*(Retained::as_ptr(&this) as *const AnyObject),
+                    sel!(captureScript:),
                     None,
                     false,
                 );
@@ -1128,9 +1301,112 @@ impl GuestView {
         }
     }
 
+    // The captured pointer as a person would use it, without taking the Mac's: the window is not
+    // key, so the Mac's pointer is left alone. A move is made as Core Graphics makes one, with how
+    // far the pointer went in the event, and handed to the view, as the buttons and the notch are.
+    // A button between two moves keeps them two: adjacent moves may be sent as one.
+    fn scripted_capture(&self) {
+        let iv = self.ivars();
+        // The script does not wait for a frame to bring the picture.
+        if let Some(r) = iv.renderer.borrow_mut().as_mut() {
+            r.upload(&iv.display, &mut iv.stats.borrow_mut());
+        }
+        let (Some(window), Some((rect, scale, (tw, th)))) = (self.window(), self.picture()) else {
+            eprintln!("scripted: no scanout, the captured pointer is not tried");
+            return;
+        };
+        // A pointer as the guest would define one and where it would have it: three colours,
+        // white, a clear pixel, and a colour at half strength with its alpha multiplied in.
+        iv.display.define_pointer(
+            3,
+            2,
+            1,
+            1,
+            vec![
+                0, 0, 255, 255, 0, 255, 0, 255, 255, 0, 0, 255, // red, green, blue
+                255, 255, 255, 255, 30, 20, 10, 0, 20, 50, 100, 128, // white, clear, half
+            ],
+        );
+        iv.display.show_pointer(true);
+        iv.display.place_pointer(100, 60);
+        let wn = window.windowNumber();
+        let none = NSEventModifierFlags::empty();
+        let middle = self.convertPoint_toView(
+            NSPoint::new(
+                rect.origin.x + rect.size.width / 2.0,
+                rect.origin.y + rect.size.height / 2.0,
+            ),
+            None,
+        );
+        // The motion the event says it has, as AppKit reads it back.
+        let moved = |dx: i64, dy: i64| {
+            let cg = CGEvent::new_mouse_event(
+                None,
+                CGEventType::MouseMoved,
+                CGPoint::new(0.0, 0.0),
+                CGMouseButton::Left,
+            );
+            if let Some(cg) = &cg {
+                CGEvent::set_integer_value_field(Some(cg), CGEventField::MouseEventDeltaX, dx);
+                CGEvent::set_integer_value_field(Some(cg), CGEventField::MouseEventDeltaY, dy);
+            }
+            match cg.and_then(|cg| NSEvent::eventWithCGEvent(&cg)) {
+                Some(ev) => {
+                    let _: () = unsafe { msg_send![self, mouseMoved: &*ev] };
+                    (ev.deltaX(), ev.deltaY())
+                }
+                None => {
+                    eprintln!("scripted: no motion event");
+                    (0.0, 0.0)
+                }
+            }
+        };
+        let button = |ty: NSEventType| {
+            let ev = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+                ty, middle, none, 0.0, wn, None, 0, 1, 1.0);
+            let Some(ev) = ev else {
+                eprintln!("scripted: no mouse event");
+                return;
+            };
+            let _: () = match ty {
+                NSEventType::LeftMouseDown => unsafe { msg_send![self, mouseDown: &*ev] },
+                NSEventType::LeftMouseUp => unsafe { msg_send![self, mouseUp: &*ev] },
+                NSEventType::RightMouseDown => unsafe { msg_send![self, rightMouseDown: &*ev] },
+                _ => unsafe { msg_send![self, rightMouseUp: &*ev] },
+            };
+        };
+        self.capture(true);
+        let held = iv.seized.get();
+        let first = moved(51, -26);
+        button(NSEventType::LeftMouseDown);
+        let second = moved(-20, 10);
+        button(NSEventType::LeftMouseUp);
+        let notch = CGEvent::new_scroll_wheel_event2(None, CGScrollEventUnit::Line, 1, 1, 0, 0);
+        match notch.and_then(|cg| NSEvent::eventWithCGEvent(&cg)) {
+            Some(ev) => unsafe { msg_send![self, scrollWheel: &*ev] },
+            None => eprintln!("scripted: no scroll event"),
+        }
+        // Right goes down captured and comes up after the pointer was given back, over the
+        // picture: it comes up on the mouse. Then a click that is the tablet's again.
+        button(NSEventType::RightMouseDown);
+        self.capture(false);
+        button(NSEventType::RightMouseUp);
+        button(NSEventType::LeftMouseDown);
+        button(NSEventType::LeftMouseUp);
+        // Captured again and left so, for the picture a test takes at the end: the guest's
+        // pointer is in it.
+        self.capture(true);
+        eprintln!(
+            "scripted: captured pointer: the Mac's pointer held: {held}; moves of {},{} and {},{} points at {scale} points to a guest pixel; the guest's pointer drawn at 100,60 of {tw}x{th}",
+            first.0, first.1, second.0, second.1
+        );
+    }
+
     // Release everything the guest believes is held, keys and buttons: the window stopped being where
     // they go, and whatever is let go of from here on is let go of somewhere else.
     pub fn release_keys(&self) {
+        // The Mac's pointer goes back with them: a window that is not key has no claim on it.
+        self.capture(false);
         let held = self.ivars().held.borrow_mut().drain();
         for qnum in held {
             self.send(Input::Key { qnum, down: false });
@@ -1253,9 +1529,128 @@ impl GuestView {
         }
     }
 
-    // Whether a place was sent for the event: none is over a bar.
+    // Capture the pointer, or give it back. Captured, the Mac's pointer is held where it is and
+    // hidden, its moves go to the guest's mouse as motion, and the guest's own pointer is drawn
+    // in the picture. Nothing the guest holds is let go of either way: a button comes up on the
+    // device it went down on.
+    pub fn capture(&self, on: bool) {
+        let iv = self.ivars();
+        if iv.captured.replace(on) == on {
+            return;
+        }
+        iv.carry.set((0.0, 0.0));
+        self.send(Input::Capture(on));
+        self.seize(on);
+        // The guest's pointer comes into the picture, or goes from it.
+        iv.owed.set(true);
+        if let Some(window) = self.window() {
+            window.setTitle(&NSString::from_str(if on { CAPTURED_TITLE } else { TITLE }));
+        }
+    }
+
+    // The Mac's side of a capture. Only a key window's: a click goes to the window the Mac's
+    // pointer is over, and a window that is not key does not hold that pointer over itself.
+    fn seize(&self, on: bool) {
+        let iv = self.ivars();
+        let Some(window) = self.window() else { return };
+        let done = |what: &str, e: objc2_core_graphics::CGError| {
+            if e != objc2_core_graphics::CGError::Success {
+                eprintln!("pointer: {what} failed ({})", e.0);
+            }
+        };
+        if on {
+            if !window.isKeyWindow() {
+                return;
+            }
+            // Held over the middle of the picture, so that a click is this view's whatever the
+            // pointer was over when the chord was pressed: a menu, or another window.
+            let b = self.bounds();
+            let middle = match self.picture() {
+                Some((r, _, _)) => NSPoint::new(
+                    r.origin.x + r.size.width / 2.0,
+                    r.origin.y + r.size.height / 2.0,
+                ),
+                None => NSPoint::new(b.size.width / 2.0, b.size.height / 2.0),
+            };
+            NSCursor::hide();
+            if let Some(p) = self.on_screen(middle) {
+                done(
+                    "putting the Mac's pointer over the picture",
+                    CGWarpMouseCursorPosition(p),
+                );
+                iv.skip.set(true);
+            }
+            done(
+                "holding the Mac's pointer",
+                CGAssociateMouseAndMouseCursorPosition(false),
+            );
+            iv.seized.set(true);
+        } else if iv.seized.replace(false) {
+            // Back where the guest's pointer has got to, so that the next place sent is the one
+            // the guest already has it at.
+            let at = iv.display.shared.lock().unwrap().pointer_at;
+            let there = self.picture().map(|(r, _, (tw, th))| {
+                NSPoint::new(
+                    r.origin.x + (at.0 as f64 + 0.5) * r.size.width / tw as f64,
+                    r.origin.y + r.size.height - (at.1 as f64 + 0.5) * r.size.height / th as f64,
+                )
+            });
+            if let Some(p) = there.and_then(|p| self.on_screen(p)) {
+                done(
+                    "putting the Mac's pointer where the guest's is",
+                    CGWarpMouseCursorPosition(p),
+                );
+            }
+            // Straight after the move: it also ends the moment for which the system holds a
+            // pointer still after one.
+            done(
+                "letting go of the Mac's pointer",
+                CGAssociateMouseAndMouseCursorPosition(true),
+            );
+            NSCursor::unhide();
+        }
+    }
+
+    // A point of the view where the system counts the pointer's place from: the first screen's
+    // top left corner, down.
+    fn on_screen(&self, p: NSPoint) -> Option<CGPoint> {
+        let window = self.window()?;
+        let s = window.convertPointToScreen(self.convertPoint_toView(p, None));
+        let top = NSScreen::screens(self.mtm())
+            .firstObject()?
+            .frame()
+            .size
+            .height;
+        Some(CGPoint::new(s.x, top - s.y))
+    }
+
+    // A captured pointer's move. The event says how far the Mac's pointer would have gone, in
+    // points; the guest's mouse is moved as many guest pixels as that is in the picture.
+    fn motion(&self, ev: &NSEvent) -> bool {
+        let iv = self.ivars();
+        if iv.skip.replace(false) {
+            return false;
+        }
+        let Some((_, scale, _)) = self.picture() else {
+            return false;
+        };
+        let (mut cx, mut cy) = iv.carry.get();
+        let dx = guest_motion(&mut cx, ev.deltaX(), scale);
+        let dy = guest_motion(&mut cy, ev.deltaY(), scale);
+        iv.carry.set((cx, cy));
+        if (dx, dy) != (0, 0) {
+            self.send(Input::Rel { dx, dy });
+        }
+        true
+    }
+
+    // Whether a place was sent for the event: none is over a bar. For a captured pointer, whether
+    // its motion was taken.
     fn pointer(&self, ev: &NSEvent) -> bool {
         self.settle_modifiers(ev);
+        if self.ivars().captured.get() {
+            return self.motion(ev);
+        }
         let at = self.guest_point(ev);
         if let Some(at) = at {
             self.send(Input::Abs(at));
@@ -1266,12 +1661,15 @@ impl GuestView {
     // A press counts only over the picture: over the bars it would land wherever the guest's
     // pointer last was. A release is sent exactly when its press was, wherever it happens: with
     // its place over the picture, and with none off it. Whether the event was sent is handed back.
+    // A captured pointer's buttons have no place, and every press of one counts: the guest's
+    // pointer is wherever its mouse has moved it.
     fn button(&self, ev: &NSEvent, button: Option<u32>, down: bool) -> bool {
         self.settle_modifiers(ev);
         let Some(button) = button else { return false };
-        let at = self.guest_point(ev);
+        let captured = self.ivars().captured.get();
+        let at = if captured { None } else { self.guest_point(ev) };
         if down {
-            if at.is_none() || !self.ivars().pressed.borrow_mut().insert(button) {
+            if (!captured && at.is_none()) || !self.ivars().pressed.borrow_mut().insert(button) {
                 return false;
             }
         } else if !self.ivars().pressed.borrow_mut().remove(&button) {
@@ -1684,6 +2082,15 @@ impl GuestView {
         if iv.display.dirty.swap(false, Ordering::AcqRel) {
             changed |= r.upload(&iv.display, &mut stats);
         }
+        // A captured pointer is drawn: the image the guest shows, where the guest has it.
+        let drawn = match (iv.captured.get(), iv.worn.try_borrow()) {
+            (true, Ok(worn)) if worn.on => worn
+                .image
+                .clone()
+                .map(|image| (image, iv.display.shared.lock().unwrap().pointer_at)),
+            _ => None,
+        };
+        changed |= r.set_pointer(drawn.as_ref().map(|(image, at)| (image, *at)));
         if changed {
             iv.owed.set(true);
         }
@@ -1721,9 +2128,10 @@ impl GuestView {
 #[cfg(test)]
 mod tests {
     use super::{
-        button_code, fit, guest_pixel, notches, place, pointer_scale, replace, Renderer, Stats,
+        button_code, fit, guest_motion, guest_pixel, notches, place, pointer_scale, replace,
+        Renderer, Stats,
     };
-    use crate::display::{pixels, Display, Order, Rect};
+    use crate::display::{pixels, Display, Order, Pointer, Rect};
     use objc2::runtime::ProtocolObject;
     use objc2_metal::{
         MTLCommandBuffer, MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice, MTLOrigin,
@@ -1731,6 +2139,7 @@ mod tests {
     };
     use std::ptr::NonNull;
     use std::sync::atomic::Ordering;
+    use std::sync::Arc;
 
     fn texture(
         device: &ProtocolObject<dyn MTLDevice>,
@@ -2448,6 +2857,122 @@ mod tests {
         assert!(!r.upload_with(&display, &mut stats, |_, _, _, _| None));
         assert!(r.upload(&display, &mut stats));
         assert_eq!((r.tex_size, r.serial), ((8, 4), 4));
+    }
+
+    #[test]
+    fn a_captured_pointers_motion_is_whole_guest_pixels_and_none_of_it_is_lost() {
+        // Two points to a guest pixel: a point at a time is a pixel every other move.
+        let mut carry = 0.0;
+        let sent: Vec<i32> = (0..5).map(|_| guest_motion(&mut carry, 1.0, 2.0)).collect();
+        assert_eq!(sent, [0, 1, 0, 1, 0]);
+        // Back the other way, the half that was kept is used up first.
+        let back: Vec<i32> = (0..3)
+            .map(|_| guest_motion(&mut carry, -1.0, 2.0))
+            .collect();
+        assert_eq!(back, [0, 0, -1]);
+        assert_eq!(carry, 0.0);
+        // A picture shown at half its size: a point is two of its pixels.
+        assert_eq!(guest_motion(&mut carry, 3.0, 0.5), 6);
+        // Many small moves come to what one large move would.
+        let mut carry = 0.0;
+        let sum: i32 = (0..1000).map(|_| guest_motion(&mut carry, 0.3, 1.7)).sum();
+        assert_eq!(sum, 176);
+        assert!((sum as f64 + carry - 300.0 / 1.7).abs() < 1e-6);
+        // No picture to scale by, and a move that is no number: nothing sent, nothing kept.
+        let mut carry = 0.25;
+        assert_eq!(guest_motion(&mut carry, 5.0, 0.0), 0);
+        assert_eq!(guest_motion(&mut carry, f64::NAN, 1.0), 0);
+        assert_eq!(guest_motion(&mut carry, f64::INFINITY, 1.0), 0);
+        assert_eq!(guest_motion(&mut carry, 5.0, f64::NAN), 0);
+        assert_eq!(carry, 0.25);
+        // More than a number holds is the most it holds, and is not carried over.
+        assert_eq!(guest_motion(&mut carry, -1e300, 1.0), i32::MIN);
+        assert_eq!(carry, 0.0);
+    }
+
+    // The pointer a test defines: red, green, blue; white, a clear pixel, and a colour at half
+    // strength with its alpha multiplied in. Its hot spot is the clear pixel. B, G, R, A.
+    fn pointer() -> Arc<Pointer> {
+        let bgra = vec![
+            0, 0, 255, 255, 0, 255, 0, 255, 255, 0, 0, 255, // red, green, blue
+            255, 255, 255, 255, 30, 20, 10, 0, 20, 50, 100, 128, // white, clear, half
+        ];
+        Arc::new(Pointer::new(3, 2, 1, 1, bgra).unwrap())
+    }
+
+    // The picture's own pixel at (x, y), as `drawn` makes it.
+    fn own(x: u32, y: u32) -> [u8; 4] {
+        [x as u8, y as u8, 0x80, 255]
+    }
+
+    // The half-strength pixel laid over `under`: its colour as it is, and what its alpha leaves of
+    // the one below. A blend is allowed to round either way.
+    fn half_over(got: &[u8], under: [u8; 4]) {
+        for (c, (&g, &u)) in [20u8, 50, 100].iter().zip(got.iter().zip(&under)) {
+            let want = *c as f64 + u as f64 * (1.0 - 128.0 / 255.0);
+            assert!((g as f64 - want).abs() <= 1.0, "{got:?} over {under:?}");
+        }
+    }
+
+    #[test]
+    fn the_guests_pointer_is_drawn_with_its_hot_spot_on_its_place() {
+        let mut r = Renderer::new().unwrap();
+        let image = pointer();
+        // Nothing is drawn of a pointer until it is asked for, and asking twice is no news.
+        assert!(!r.set_pointer(None));
+        assert!(r.set_pointer(Some((&image, (5, 4)))));
+        assert!(!r.set_pointer(Some((&image, (5, 4)))));
+        let px = drawn(&mut r, 16, 8, 16, 8, false);
+        let at = |x: u32, y: u32| &px[(y * 16 + x) as usize * 4..][..4];
+        assert_eq!(at(4, 3), [0, 0, 255, 255]);
+        assert_eq!(at(5, 3), [0, 255, 0, 255]);
+        assert_eq!(at(6, 3), [255, 0, 0, 255]);
+        assert_eq!(at(4, 4), [255, 255, 255, 255]);
+        // The clear pixel, which is the hot spot, shows the picture; so does everything around.
+        assert_eq!(at(5, 4), own(5, 4));
+        half_over(at(6, 4), own(6, 4));
+        for (x, y) in [(3, 3), (7, 3), (3, 4), (7, 4), (4, 2), (5, 5), (6, 5)] {
+            assert_eq!(at(x, y), own(x, y), "{x},{y}");
+        }
+        // Moved: news, and drawn there. At two device pixels to a guest pixel an image pixel
+        // covers two by two.
+        assert!(r.set_pointer(Some((&image, (9, 2)))));
+        let px = drawn(&mut r, 16, 8, 32, 16, false);
+        let at = |x: u32, y: u32| &px[(y * 32 + x) as usize * 4..][..4];
+        for (x, y) in [(16, 2), (17, 2), (16, 3), (17, 3)] {
+            assert_eq!(at(x, y), [0, 0, 255, 255], "{x},{y}");
+        }
+        assert_eq!(at(18, 2), [0, 255, 0, 255]);
+        assert_eq!(at(15, 2), own(7, 1));
+        assert_eq!(at(18, 4), own(9, 2));
+        assert_eq!(at(16, 6), own(8, 3));
+        // In the picture's corner the part of the image that is off the picture is not drawn,
+        // and does not come back in on the other side.
+        assert!(r.set_pointer(Some((&image, (0, 0)))));
+        let px = drawn(&mut r, 16, 8, 16, 8, false);
+        let at = |x: u32, y: u32| &px[(y * 16 + x) as usize * 4..][..4];
+        assert_eq!(at(0, 0), own(0, 0));
+        half_over(at(1, 0), own(1, 0));
+        for (x, y) in [(2, 0), (0, 1), (1, 1), (15, 0), (15, 7), (0, 7), (14, 0)] {
+            assert_eq!(at(x, y), own(x, y), "{x},{y}");
+        }
+        // A view taller than the picture has bars, and they are not the guest's to draw on: the
+        // image's top row would be in the bar above.
+        let px = drawn(&mut r, 16, 8, 16, 12, false);
+        let at = |x: u32, y: u32| &px[(y * 16 + x) as usize * 4..][..4];
+        for x in 0..16 {
+            assert_eq!(at(x, 1)[..3], [0, 0, 0], "{x}");
+        }
+        assert_eq!(at(0, 2), own(0, 0));
+        half_over(at(1, 2), own(1, 0));
+        // Given back: news, and the picture is as the guest drew it.
+        assert!(r.set_pointer(None));
+        let px = drawn(&mut r, 16, 8, 16, 8, false);
+        for y in 0..8 {
+            for x in 0..16 {
+                assert_eq!(px[(y * 16 + x) as usize * 4..][..4], own(x, y), "{x},{y}");
+            }
+        }
     }
 
     #[test]

@@ -189,16 +189,24 @@ impl Pointer {
             bgra,
         })
     }
-    // The same rows as R, G, B, A. A colour stronger than its alpha is not one such an image can
-    // hold, and what is drawn of it is not defined: it is cut to the alpha.
-    pub fn rgba(&self) -> Vec<u8> {
+    // The rows with no colour stronger than its alpha. Such a colour is not one an image of
+    // colours multiplied by their alpha can hold, and what is drawn of it is not defined: it is
+    // cut to the alpha.
+    pub fn cut(&self) -> Vec<u8> {
         let mut out = self.bgra.clone();
         for px in out.chunks_exact_mut(4) {
-            px.swap(0, 2);
             let a = px[3];
             for c in &mut px[..3] {
                 *c = (*c).min(a);
             }
+        }
+        out
+    }
+    // The same as R, G, B, A.
+    pub fn rgba(&self) -> Vec<u8> {
+        let mut out = self.cut();
+        for px in out.chunks_exact_mut(4) {
+            px.swap(0, 2);
         }
         out
     }
@@ -211,6 +219,7 @@ pub struct Shared {
     pub update_calls: u64,
     pub pointer: Option<Arc<Pointer>>, // None until the guest defines one
     pub pointer_on: bool,              // the guest shows its pointer
+    pub pointer_at: (i32, i32),        // the pixel the guest has its pointer's hot spot on
 }
 impl Default for Shared {
     fn default() -> Shared {
@@ -221,6 +230,7 @@ impl Default for Shared {
             update_calls: 0,
             pointer: None,
             pointer_on: true,
+            pointer_at: (0, 0),
         }
     }
 }
@@ -251,6 +261,10 @@ impl Display {
     pub fn show_pointer(&self, on: bool) {
         show_pointer(&self.shared, &self.pointer_dirty, on);
     }
+    // And with its first two.
+    pub fn place_pointer(&self, x: i32, y: i32) {
+        place_pointer(&self.shared, x, y);
+    }
 }
 
 // An image that cannot be shown leaves the pointer the guest had.
@@ -267,6 +281,12 @@ fn show_pointer(shared: &Mutex<Shared>, dirty: &AtomicBool, on: bool) {
         s.pointer_on = on;
         dirty.store(true, Ordering::Release);
     }
+}
+
+// Where the guest has its pointer. It is no news to a view whose pointer is the Mac's; one that
+// draws the guest's pointer itself looks here each frame.
+fn place_pointer(shared: &Mutex<Shared>, x: i32, y: i32) {
+    shared.lock().unwrap().pointer_at = (x, y);
 }
 
 // A length in points as whole pixels at `scale` pixels to a point. The drawable and the size the
@@ -316,7 +336,8 @@ pub struct Place {
 }
 
 // A button or a notch goes with the place it happened at, so that the guest is handed both as one
-// report. A button let go of off the picture has no place.
+// report. A button let go of off the picture has no place, and nothing of a captured pointer has
+// one: that pointer is where the guest's mouse has moved it to.
 #[derive(Debug, PartialEq)]
 pub enum Input {
     Key {
@@ -324,6 +345,11 @@ pub enum Input {
         down: bool,
     },
     Abs(Place),
+    // A captured pointer's motion, in pixels of the guest's screen.
+    Rel {
+        dx: i32,
+        dy: i32,
+    },
     Button {
         button: u32,
         down: bool,
@@ -331,8 +357,10 @@ pub enum Input {
     },
     Wheel {
         up: bool,
-        at: Place,
+        at: Option<Place>,
     },
+    // Not sent: from here on the pointer is captured, or is not.
+    Capture(bool),
     Size(UiInfo),
     Sync, // not sent: answered once everything before it has been
 }
@@ -509,6 +537,7 @@ impl Listener {
             echo.send((x, y, on)).ok();
         }
         show_pointer(&self.0.shared, &self.0.pointer_dirty, on != 0);
+        place_pointer(&self.0.shared, x, y);
     }
     fn cursor_define(&mut self, width: i32, height: i32, hot_x: i32, hot_y: i32, data: Vec<u8>) {
         define_pointer(
@@ -741,10 +770,17 @@ fn pointer_event(to_screen: bool, at: Option<Place>, button: Option<(&str, bool)
         }
     }
     if let Some((name, down)) = button {
-        events.push(format!(
-            r#"{{"type":"btn","data":{{"down":{down},"button":"{name}"}}}}"#
-        ));
+        events.push(button_event(name, down));
     }
+    send_event(to_screen, &events)
+}
+
+fn button_event(name: &str, down: bool) -> String {
+    format!(r#"{{"type":"btn","data":{{"down":{down},"button":"{name}"}}}}"#)
+}
+
+// The command for `events`, addressed to the screen or to no display.
+fn send_event(to_screen: bool, events: &[String]) -> String {
     let to = if to_screen {
         format!(r#""device":"{SCREEN}","head":0,"#)
     } else {
@@ -756,36 +792,70 @@ fn pointer_event(to_screen: bool, at: Option<Place>, button: Option<(&str, bool)
     )
 }
 
+// One input-send-event command for the guest's mouse: motion, or a button going down or up. It is
+// addressed to no display, because a tablet bound to the display takes a button addressed to it.
+// With no address QEMU hands motion to the mouse, the one device that takes any, and a button to
+// the pointer device bound to no display whose driver came up last: the mouse again, in a guest
+// of ours.
+fn mouse_event(by: (i32, i32), button: Option<(&str, bool)>) -> String {
+    let mut events = Vec::new();
+    for (name, value) in [("x", by.0), ("y", by.1)] {
+        // QEMU passes a zero on to the guest as an event.
+        if value != 0 {
+            events.push(format!(
+                r#"{{"type":"rel","data":{{"axis":"{name}","value":{value}}}}}"#
+            ));
+        }
+    }
+    if let Some((name, down)) = button {
+        events.push(button_event(name, down));
+    }
+    send_event(false, &events)
+}
+
 // The pointer's way to the guest. QEMU's display connection gives a console one pointer mode: it
 // takes a position only while the console's pointer device is an absolute one (the device bound
 // to the console, or with none bound the one whose driver came up last, which in a guest of ours
 // is the mouse), and relative motion only while it is not. The monitor's input-send-event takes
-// either at any time.
+// either at any time: a position goes to the guest's tablet, and a captured pointer's motion to
+// its mouse.
 //
-// QEMU refuses an event while its machine is stopped. A refused place or press is nothing to the
-// guest: the next place stands for it, and the release of a press QEMU did not take is not sent.
-// A refused release is another matter, because the guest holds the button until it is told. It is
-// kept, and it goes before anything that happened after it.
+// QEMU refuses an event while its machine is stopped. A refused place, motion or press is nothing
+// to the guest: the next place stands for it, and the release of a press QEMU did not take is not
+// sent. A refused release is another matter, because the guest holds the button until it is told.
+// It is kept, and it goes before anything that happened after it.
 #[derive(Debug)]
 struct Pointing {
     monitor: Monitor,
     to_screen: bool,
     // A tablet is bound to the screen, which makes one report of a button and its place.
     bound: bool,
-    // The buttons the guest holds: QEMU took the press and has not taken the release.
-    down: [bool; BUTTONS.len()],
+    // The pointer is captured: a button that goes down, and a notch, are the mouse's.
+    captured: bool,
+    // The buttons the guest holds, each on the device it went down on: QEMU took the press and
+    // has not taken the release. The release goes to that device, however the pointer is sent
+    // by then.
+    down: [Option<Device>; BUTTONS.len()],
     // The releases QEMU refused, oldest first, each with the place it had.
     owed: Vec<(usize, Option<Place>)>,
-    // The place QEMU last took.
+    // The place QEMU last took, while the guest's pointer is still there.
     last: Option<Place>,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Device {
+    Tablet,
+    Mouse,
+}
+
 impl Pointing {
     fn new(monitor: Monitor, to_screen: bool, bound: bool) -> Pointing {
         Pointing {
             monitor,
             to_screen,
             bound,
-            down: [false; BUTTONS.len()],
+            captured: false,
+            down: [None; BUTTONS.len()],
             owed: Vec::new(),
             last: None,
         }
@@ -797,6 +867,16 @@ impl Pointing {
             .cmd(&pointer_event(self.to_screen, at, named), None, None)?;
         if at.is_some() {
             self.last = at;
+        }
+        Ok(())
+    }
+
+    fn mouse(&mut self, by: (i32, i32), button: Option<(usize, bool)>) -> Result<(), QmpError> {
+        let named = button.map(|(b, down)| (BUTTONS[b], down));
+        self.monitor.cmd(&mouse_event(by, named), None, None)?;
+        if by != (0, 0) {
+            // The guest's pointer has left the place it was last sent.
+            self.last = None;
         }
         Ok(())
     }
@@ -813,13 +893,36 @@ impl Pointing {
         self.cmd(at, Some(button))
     }
 
+    // A button or a notch on one of the two devices. The mouse has no places.
+    fn on(
+        &mut self,
+        device: Device,
+        at: Option<Place>,
+        button: (usize, bool),
+    ) -> Result<(), QmpError> {
+        match device {
+            Device::Tablet => self.with_place(at, button),
+            Device::Mouse => self.mouse((0, 0), Some(button)),
+        }
+    }
+
+    fn device(&self) -> Device {
+        if self.captured {
+            Device::Mouse
+        } else {
+            Device::Tablet
+        }
+    }
+
     // Send the releases QEMU refused. The first one it refuses again ends the try: it refuses for
     // as long as its machine is stopped.
     fn settle(&mut self) -> Result<(), QmpError> {
         while let Some(&(b, at)) = self.owed.first() {
-            self.with_place(at, (b, false))?;
+            if let Some(device) = self.down[b] {
+                self.on(device, at, (b, false))?;
+            }
             self.owed.remove(0);
-            self.down[b] = false;
+            self.down[b] = None;
         }
         Ok(())
     }
@@ -829,25 +932,35 @@ impl Pointing {
         self.cmd(Some(at), None)
     }
 
+    fn motion(&mut self, dx: i32, dy: i32) -> Result<(), QmpError> {
+        self.settle()?;
+        if (dx, dy) == (0, 0) {
+            return Ok(());
+        }
+        self.mouse((dx, dy), None)
+    }
+
     // A release of a button the guest holds is owed from here until QEMU takes it. A press of one
     // it holds, and a release of one it does not, are not sent.
     fn button(&mut self, b: usize, down: bool, at: Option<Place>) -> Result<(), QmpError> {
-        if !down && self.down[b] && !self.owed.iter().any(|&(o, _)| o == b) {
+        if !down && self.down[b].is_some() && !self.owed.iter().any(|&(o, _)| o == b) {
             self.owed.push((b, at));
         }
         self.settle()?;
-        if down && !self.down[b] {
-            self.with_place(at, (b, true))?;
-            self.down[b] = true;
+        if down && self.down[b].is_none() {
+            let device = self.device();
+            self.on(device, at, (b, true))?;
+            self.down[b] = Some(device);
         }
         Ok(())
     }
 
     // A notch is the wheel's button going down. Its coming up is no part of a notch, and a virtio
-    // tablet makes a key of it that no driver expects.
-    fn notch(&mut self, up: bool, at: Place) -> Result<(), QmpError> {
+    // tablet and a virtio mouse both make a key of it that no driver expects.
+    fn notch(&mut self, up: bool, at: Option<Place>) -> Result<(), QmpError> {
         self.settle()?;
-        self.with_place(Some(at), (if up { 3 } else { 4 }, true))
+        let device = self.device();
+        self.on(device, at, (if up { 3 } else { 4 }, true))
     }
 
     // The pointer's events are sent from here. Any other is handed back, for the display
@@ -858,6 +971,7 @@ impl Pointing {
     fn take(&mut self, ev: Input) -> Result<Option<Input>, QmpError> {
         match ev {
             Input::Abs(at) => self.place(at)?,
+            Input::Rel { dx, dy } => self.motion(dx, dy)?,
             Input::Button { button, down, at } => {
                 if button as usize >= BUTTONS.len() {
                     return Err(QmpError::Refused(format!("there is no button {button}")));
@@ -865,6 +979,7 @@ impl Pointing {
                 self.button(button as usize, down, at)?
             }
             Input::Wheel { up, at } => self.notch(up, at)?,
+            Input::Capture(on) => self.captured = on,
             other => {
                 return match self.settle() {
                     Err(QmpError::Io(e)) => Err(QmpError::Io(e)),
@@ -1005,16 +1120,23 @@ async fn serve(
 
 // The next event to send, given `first` and whatever is already queued behind it. Of a run of pointer
 // positions only the last is worth a call: the guest wants where the pointer is, not where it was while
-// QEMU was busy. An event of another kind ends the run and is handed back for the next turn.
+// QEMU was busy. A run of a captured pointer's motion is one motion, the sum, because the guest wants
+// all of it. An event of another kind ends the run and is handed back for the next turn.
 fn next_input(first: Input, mut more: impl FnMut() -> Option<Input>) -> (Input, Option<Input>) {
     let mut ev = first;
-    while matches!(ev, Input::Abs(_)) {
-        match more() {
-            Some(next @ Input::Abs(_)) => ev = next,
-            other => return (ev, other),
+    loop {
+        if !matches!(ev, Input::Abs(_) | Input::Rel { .. }) {
+            return (ev, None);
         }
+        ev = match (ev, more()) {
+            (Input::Abs(_), Some(next @ Input::Abs(_))) => next,
+            (Input::Rel { dx, dy }, Some(Input::Rel { dx: x, dy: y })) => Input::Rel {
+                dx: dx.saturating_add(x),
+                dy: dy.saturating_add(y),
+            },
+            (ev, other) => return (ev, other),
+        };
     }
-    (ev, None)
 }
 
 // Why an event did not reach the guest: QEMU is gone, or it answered that it will not take it.
@@ -1531,7 +1653,13 @@ mod tests {
         assert_eq!(syncs.load(Ordering::Acquire), 1);
         // With QEMU gone there is nothing to wait for, and the wait says so at once.
         gone.store(true, Ordering::Release);
-        display.input.send(Input::Wheel { up: true, at }).unwrap();
+        display
+            .input
+            .send(Input::Wheel {
+                up: true,
+                at: Some(at),
+            })
+            .unwrap();
         let begun = Instant::now();
         assert!(!display.drain(Duration::from_secs(5)));
         assert!(begun.elapsed() < Duration::from_secs(4));
@@ -1780,6 +1908,55 @@ mod tests {
         assert_eq!(next_input(abs(9), || None), (abs(9), None));
     }
 
+    #[test]
+    fn of_a_run_of_motion_the_sum_is_sent() {
+        let rel = |dx, dy| Input::Rel { dx, dy };
+        let press = || Input::Button {
+            button: 0,
+            down: true,
+            at: None,
+        };
+        let mut q: std::collections::VecDeque<Input> = [
+            rel(2, -1),
+            rel(-5, 4),
+            press(),
+            rel(1, 1),
+            abs_at(3),
+            rel(7, 7),
+        ]
+        .into();
+        // Three motions, then a press: all of the motion goes out as one, and the press is handed back.
+        assert_eq!(
+            next_input(rel(10, 10), || q.pop_front()),
+            (rel(7, 13), Some(press()))
+        );
+        // Motion and a position are two kinds: neither run takes the other in.
+        assert_eq!(
+            next_input(q.pop_front().unwrap(), || q.pop_front()),
+            (rel(1, 1), Some(abs_at(3)))
+        );
+        assert_eq!(
+            next_input(abs_at(3), || q.pop_front()),
+            (abs_at(3), Some(rel(7, 7)))
+        );
+        assert!(q.is_empty());
+        // More motion than a number holds stays at the most it holds.
+        let mut q: std::collections::VecDeque<Input> = [rel(i32::MAX, i32::MIN), rel(-1, 1)].into();
+        assert_eq!(
+            next_input(rel(1, -1), || q.pop_front()),
+            (rel(i32::MAX - 1, i32::MIN + 1), None)
+        );
+    }
+
+    fn abs_at(x: u32) -> Input {
+        Input::Abs(Place {
+            x,
+            y: 7,
+            w: 640,
+            h: 480,
+        })
+    }
+
     // The pixel the guest makes of an axis value on a screen `n` across, with the tablet's 32767
     // for `mx`: the compositor's own arithmetic, which the test below finds in its source.
     fn guest_pixel_of(value: u64, n: u32) -> u64 {
@@ -1939,7 +2116,7 @@ mod tests {
             Err(QmpError::Refused(why)) => assert_eq!(why, "VM not running"),
             other => panic!("{other:?}"),
         }
-        assert!(pointing.notch(true, at).is_ok());
+        assert!(pointing.notch(true, Some(at)).is_ok());
         // QEMU gone: the script is over and its end is closed.
         let seen = played.join().unwrap();
         match pointing.place(at).map_err(Unsent::from) {
@@ -2097,8 +2274,8 @@ mod tests {
         // The guest has that place by now, and the release is one command.
         assert!(pointing.button(2, false, Some(at(1))).is_ok());
         assert!(pointing.place(at(2)).is_ok());
-        assert!(pointing.notch(true, at(2)).is_ok());
-        assert!(pointing.notch(false, at(3)).is_ok());
+        assert!(pointing.notch(true, Some(at(2))).is_ok());
+        assert!(pointing.notch(false, Some(at(3))).is_ok());
         // A place QEMU refuses takes its button with it,
         refused(pointing.button(0, true, Some(at(4))));
         // and the guest was not told of that press.
@@ -2116,6 +2293,142 @@ mod tests {
                 pointer_event(true, Some(at(4)), None),
             ]
         );
+    }
+
+    #[test]
+    fn motion_and_a_button_for_the_mouse_are_addressed_to_no_display() {
+        // The commands that were tried by hand against QEMU 10.0.2 and 11.1.3, the tablet bound to
+        // gpu0 and bound to nothing, a driver for each device (aux-gate/macrunner/scale/rel/
+        // probe.out). The mouse reported `rel 0x0 5; rel 0x1 -3; syn` for the first of these and
+        // `key 0x110 1; syn` for the second; the tablet nothing.
+        assert_eq!(
+            mouse_event((5, -3), None),
+            r#"{"execute":"input-send-event","arguments":{"events":[{"type":"rel","data":{"axis":"x","value":5}},{"type":"rel","data":{"axis":"y","value":-3}}]}}"#
+        );
+        assert_eq!(
+            mouse_event((0, 0), Some(("left", true))),
+            r#"{"execute":"input-send-event","arguments":{"events":[{"type":"btn","data":{"down":true,"button":"left"}}]}}"#
+        );
+        // QEMU passes a zero on as an event: an axis that did not move is left out.
+        assert_eq!(
+            mouse_event((0, 9), None),
+            r#"{"execute":"input-send-event","arguments":{"events":[{"type":"rel","data":{"axis":"y","value":9}}]}}"#
+        );
+        // A notch for the mouse: it reported `rel 0x8 1; syn`.
+        assert_eq!(
+            mouse_event((0, 0), Some(("wheel-up", true))),
+            r#"{"execute":"input-send-event","arguments":{"events":[{"type":"btn","data":{"down":true,"button":"wheel-up"}}]}}"#
+        );
+    }
+
+    #[test]
+    fn a_captured_pointer_is_the_mouses_and_a_button_comes_up_where_it_went_down() {
+        let (monitor, played) = scripted(vec![DONE.to_string(); 9]);
+        let mut pointing = Pointing::new(monitor, true, true);
+        let sent = |p: &mut Pointing, ev: Input| assert_eq!(p.take(ev).unwrap(), None);
+        let button = |button, down, at| Input::Button { button, down, at };
+        // Left goes down on the tablet, and the pointer is captured while it is held.
+        sent(&mut pointing, button(0, true, Some(at(1))));
+        sent(&mut pointing, Input::Capture(true));
+        sent(&mut pointing, Input::Rel { dx: 5, dy: -3 });
+        // No motion is nothing to send.
+        sent(&mut pointing, Input::Rel { dx: 0, dy: 0 });
+        sent(&mut pointing, button(2, true, None));
+        sent(
+            &mut pointing,
+            Input::Wheel {
+                up: false,
+                at: None,
+            },
+        );
+        // Left comes up on the tablet, where the guest holds it,
+        sent(&mut pointing, button(0, false, None));
+        sent(&mut pointing, Input::Capture(false));
+        // and right on the mouse, though the pointer is the tablet's again and the release has a place.
+        sent(&mut pointing, Input::Abs(at(2)));
+        sent(&mut pointing, button(2, false, Some(at(2))));
+        sent(&mut pointing, button(1, true, Some(at(2))));
+        sent(
+            &mut pointing,
+            Input::Wheel {
+                up: true,
+                at: Some(at(2)),
+            },
+        );
+        assert_eq!(
+            played.join().unwrap(),
+            [
+                pointer_event(true, Some(at(1)), Some(("left", true))),
+                mouse_event((5, -3), None),
+                mouse_event((0, 0), Some(("right", true))),
+                mouse_event((0, 0), Some(("wheel-down", true))),
+                pointer_event(true, None, Some(("left", false))),
+                pointer_event(true, Some(at(2)), None),
+                mouse_event((0, 0), Some(("right", false))),
+                pointer_event(true, Some(at(2)), Some(("middle", true))),
+                pointer_event(true, Some(at(2)), Some(("wheel-up", true))),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_release_the_mouse_is_owed_goes_to_the_mouse_before_the_tablets_next_event() {
+        let (monitor, played) = scripted(vec![
+            DONE.into(),                // right goes down, captured
+            NOT_RUNNING.into(),         // and comes up while the machine is stopped
+            NOT_RUNNING.into(),         // motion finds the release still refused
+            format!("{RESUMED}{DONE}"), // a position, uncaptured: the release first
+            DONE.into(),                // that position
+        ]);
+        let mut pointing = Pointing::new(monitor, true, true);
+        assert_eq!(pointing.take(Input::Capture(true)).unwrap(), None);
+        assert!(pointing.button(2, true, None).is_ok());
+        refused(pointing.button(2, false, None));
+        refused(pointing.motion(4, 4));
+        assert_eq!(pointing.take(Input::Capture(false)).unwrap(), None);
+        assert!(pointing.place(at(6)).is_ok());
+        let up = mouse_event((0, 0), Some(("right", false)));
+        assert_eq!(
+            played.join().unwrap(),
+            [
+                mouse_event((0, 0), Some(("right", true))),
+                up.clone(),
+                up.clone(),
+                up,
+                pointer_event(true, Some(at(6)), None),
+            ]
+        );
+    }
+
+    #[test]
+    fn after_motion_a_place_the_guest_was_sent_before_goes_ahead_of_its_button_again() {
+        let (monitor, played) = scripted(vec![DONE.to_string(); 5]);
+        // No tablet bound to the screen: a place the guest does not have goes ahead of its button.
+        let mut pointing = Pointing::new(monitor, true, false);
+        assert!(pointing.place(at(1)).is_ok());
+        // The guest has that place,
+        assert!(pointing.notch(true, Some(at(1))).is_ok());
+        // until its mouse moves the pointer off it.
+        assert!(pointing.motion(3, 0).is_ok());
+        assert!(pointing.notch(true, Some(at(1))).is_ok());
+        assert_eq!(
+            played.join().unwrap(),
+            [
+                pointer_event(true, Some(at(1)), None),
+                pointer_event(true, Some(at(1)), Some(("wheel-up", true))),
+                mouse_event((3, 0), None),
+                pointer_event(true, Some(at(1)), None),
+                pointer_event(true, Some(at(1)), Some(("wheel-up", true))),
+            ]
+        );
+    }
+
+    #[test]
+    fn where_the_guest_has_its_pointer_is_kept() {
+        let (state, shared) = state(true);
+        assert_eq!(shared.lock().unwrap().pointer_at, (0, 0));
+        Listener(state).mouse_set(600, 108, 1);
+        assert_eq!(shared.lock().unwrap().pointer_at, (600, 108));
     }
 
     #[test]

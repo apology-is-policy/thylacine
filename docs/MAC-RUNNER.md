@@ -709,8 +709,8 @@ mouse and made up from consecutive positions of its tablet, and the made-up ones
 where the picture ends. Captured, the Mac's pointer is hidden and held where it is
 (`CGAssociateMouseAndMouseCursorPosition(false)`, as `utm:Platform/macOS/Display/
 VMMetalView.swift:343` and `qemu-11.1:ui/cocoa.m:1065` do), and each move goes to the
-guest's mouse: `rel` events in a command addressed to no display, with a button or a notch
-in the same command. Measured with no guest on QEMU 10.0.2 and 11.1.3, the tablet bound and
+guest's mouse: `rel` events in a command addressed to no display. A button or a notch goes
+the same way, in a command of its own. Measured with no guest on QEMU 10.0.2 and 11.1.3, the tablet bound and
 not: such a command is one report on the mouse; a notch is the wheel's button going down
 (its coming up is a stray key there too); QEMU passes any value on, and a zero as an event;
 and with the tablet bound a position addressed to no display is refused. What is sent is

@@ -23,8 +23,8 @@ use objc2_app_kit::{
     NSWindowCollectionBehavior, NSWindowDelegate, NSWindowStyleMask,
 };
 use objc2_foundation::{
-    ns_string, MainThreadMarker, NSNotification, NSNotificationCenter, NSObject, NSObjectProtocol,
-    NSPoint, NSRect, NSSize, NSString,
+    MainThreadMarker, NSNotification, NSNotificationCenter, NSObject, NSObjectProtocol, NSPoint,
+    NSRect, NSSize, NSString,
 };
 
 use view::{GuestView, Options};
@@ -104,7 +104,7 @@ define_class!(
                 )
             };
             unsafe { window.setReleasedWhenClosed(false) };
-            window.setTitle(ns_string!("Thylacine"));
+            window.setTitle(&NSString::from_str(view::TITLE));
             window.setCollectionBehavior(NSWindowCollectionBehavior::FullScreenPrimary);
             window.setAcceptsMouseMovedEvents(true);
             window.setContentView(Some(&view));
@@ -225,15 +225,25 @@ fn menu(mtm: MainThreadMarker) -> Retained<NSMenu> {
             NSEventModifierFlags::Command,
         )],
     );
+    // The view answers the second: it is the window's first responder.
     add(
         "View",
-        &[item(
-            mtm,
-            "Enter Full Screen",
-            sel!(toggleFullScreen:),
-            "f",
-            NSEventModifierFlags::Command | NSEventModifierFlags::Control,
-        )],
+        &[
+            item(
+                mtm,
+                "Enter Full Screen",
+                sel!(toggleFullScreen:),
+                "f",
+                NSEventModifierFlags::Command | NSEventModifierFlags::Control,
+            ),
+            item(
+                mtm,
+                "Capture Pointer",
+                sel!(toggleCapture:),
+                "g",
+                NSEventModifierFlags::Command | NSEventModifierFlags::Control,
+            ),
+        ],
     );
     bar
 }
@@ -262,6 +272,7 @@ fn main() {
             }
             "--scripted-input" => opts.scripted_input = true,
             "--scripted-bar" => opts.scripted_bar = true,
+            "--scripted-capture" => opts.scripted_capture = true,
             "--scripted-click" => {
                 opts.scripted_click = args.get(i + 1).and_then(|s| {
                     let (x, y) = s.split_once(',')?;
@@ -292,7 +303,7 @@ fn main() {
         i += 1;
     }
     let Some(qmp) = qmp else {
-        eprintln!("usage: thylacine-mac --attach <qmp socket> [--stats] [--no-activate] [--exit-after <s>] [--dump <ppm>] [--scripted-input] [--scripted-bar] [--scripted-click <x>,<y>] [--resize-to <w>x<h>]");
+        eprintln!("usage: thylacine-mac --attach <qmp socket> [--stats] [--no-activate] [--exit-after <s>] [--dump <ppm>] [--scripted-input] [--scripted-bar] [--scripted-capture] [--scripted-click <x>,<y>] [--resize-to <w>x<h>]");
         std::process::exit(2);
     };
     let mtm = MainThreadMarker::new().expect("the main thread");
