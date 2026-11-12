@@ -35,8 +35,14 @@ the session's own `halcyon-<user>`, a local posting and never a route, and
 image runs halcyond as the console renderer; the fallback shell of a session
 whose compositor failed has no inline media. Where no console halcyond posts
 the name the route is offline, and reserving it means the session cannot post
-`halcyon` itself. This is a login-policy update awaiting the operator's
-ratification (docs/SRV-SESSION-REGISTRY-DESIGN.md, the November 12 paragraphs).
+`halcyon` itself. The console shell's side is witnessed by the two gates that
+show a picture on the console renderer (ls-gfx-jpeg, ls-gfx-inline-view); the
+session's by `tools/interactive/ls-halcyon-session-route.exp`, which runs
+`stat` in a pane and reads the exit status off the Instrument bar's log line:
+a resident route stats, `/srv/halcyon` does not (a routed name walks even
+offline, an unrouted one has nothing to walk to). This is a login-policy
+update awaiting the operator's ratification
+(docs/SRV-SESSION-REGISTRY-DESIGN.md, the November 12 paragraphs).
 
 ## Resident cancellation route (October 2)
 
