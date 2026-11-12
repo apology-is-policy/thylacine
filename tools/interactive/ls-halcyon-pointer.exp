@@ -14,6 +14,7 @@ if {[info exists ::env(THYLACINE_GPU_DEV)] && $::env(THYLACINE_GPU_DEV) eq "virt
 }
 source [file join [file dirname [info script]] lib.exp]
 set repo $lc_repo
+lc_require_host_pil
 set qmp [lc_qmp_sock]
 set dir [expr {[info exists ::env(POINTER_SCREENSHOT_DIR)] ? $::env(POINTER_SCREENSHOT_DIR) : [file join $repo build hi0]}]
 file mkdir $dir
