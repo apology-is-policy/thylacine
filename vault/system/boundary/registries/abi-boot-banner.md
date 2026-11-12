@@ -39,6 +39,7 @@ mirrors:
   - "tools/interactive/ls-graphical-sak-soak.exp (EXTINCTION: only -- the seat's return, cycled)"
   - "tools/interactive/git-shell.exp"
   - "tools/interactive/ls-halcyon-session-dosbox.exp"
+  - "tools/interactive/ls-halcyon-session-route.exp (EXTINCTION: only -- a session pane has no console place route)"
   - tools/interactive/pci-net-load.exp
   - "tools/interactive/im1-sak-lever.exp"
   - "tools/interactive/im3-lex-curiata.exp"

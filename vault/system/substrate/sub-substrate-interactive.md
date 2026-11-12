@@ -25,6 +25,7 @@ code:
   - tools/interactive/ls-halcyon-paste-flow.exp
   - tools/interactive/ls-halcyon-session-media.exp
   - tools/interactive/ls-halcyon-session-dosbox.exp
+  - tools/interactive/ls-halcyon-session-route.exp
   - tools/interactive/pci-net-load.exp
   - tools/interactive/pci-net-load-peer.py
   - tools/interactive/gfx_media.py
