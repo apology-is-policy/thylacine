@@ -261,6 +261,7 @@ fn main() {
                 i += 1;
             }
             "--scripted-input" => opts.scripted_input = true,
+            "--scripted-bar" => opts.scripted_bar = true,
             "--resize-to" => {
                 opts.resize_to = args.get(i + 1).and_then(|s| {
                     let (w, h) = s.split_once('x')?;
@@ -280,7 +281,7 @@ fn main() {
         i += 1;
     }
     let Some(qmp) = qmp else {
-        eprintln!("usage: thylacine-mac --attach <qmp socket> [--stats] [--no-activate] [--exit-after <s>] [--dump <ppm>] [--scripted-input] [--resize-to <w>x<h>]");
+        eprintln!("usage: thylacine-mac --attach <qmp socket> [--stats] [--no-activate] [--exit-after <s>] [--dump <ppm>] [--scripted-input] [--scripted-bar] [--resize-to <w>x<h>]");
         std::process::exit(2);
     };
     let mtm = MainThreadMarker::new().expect("the main thread");

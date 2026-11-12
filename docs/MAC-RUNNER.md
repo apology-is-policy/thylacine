@@ -653,6 +653,14 @@ must act on `VIRTIO_GPU_EVENT_DISPLAY` (B5 -- the Lictor change, coordinated wit
 HiDPI: the scanout is sized in backing pixels (`backingScaleFactor` x points) and the
 millimetres encode the scale, so the guest renders at 200% into a 1:1 texture
 (`tree:tools/run-vm.sh:366-376` already does this by hand with `THYLACINE_HIDPI`).
+A picture of another size than the view is shown whole, centred, at one scale. A guest that
+could not make a mode of the view's size made one of that size over a whole number k and
+dropped the remainder (B5), so the view is k times its picture and under k pixels more: the
+app draws that picture at k, each guest pixel on k by k of the view's, and the remainder is a
+bar. The rule (decided 2026-11-12, under the standing 2026-09-01 authorization): the whole
+scale below the filling one is kept when filling the view would make the picture at most one
+of its own pixels larger; any other picture is filtered to fill, as a mode pinned in the
+guest is. The pointer is mapped through the same placement, found in the drawable's pixels.
 Cursor: Thylacine's pointer is NOT in the scanout. Lictor sends it down the virtio cursor
 queue (`usr/lictor/src/backend/gpu/cursor.rs`, a 64x64 image), and under `-display dbus`
 QEMU forwards it to the listener as `CursorDefine` (image and hot spot) and `MouseSet`

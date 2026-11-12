@@ -29,6 +29,15 @@
 # The window opens twice more, for a moment and for three seconds, the second time wider than the
 # screen.
 #
+# Then the bar leg, in a window again. Its content is set one point larger each way than the scanout
+# has pixels, which with a whole number of pixels to a point is a view one guest pixel past a whole
+# scale: what a guest's fitted mode leaves (docs/MAC-RUNNER.md 4.2).
+#   bar      the picture is drawn at the whole scale and the pointer is mapped where it is drawn: a
+#            click on each bar reaches QEMU as nothing, and one on the first pixel of the middle row
+#            and one on the last pixel of the last row arrive as those pixels. A picture stretched to
+#            fill the view would have both bar clicks land on its edge pixels.
+# The window opens once more, for three seconds.
+#
 #   macrunner/app/test/headless.sh       exit 0 pass, 1 fail, 77 skipped (not macOS, or no D-Bus display)
 #   THYLACINE_QEMU=<qemu-system-aarch64>  the QEMU to attach to (default: the one on PATH)
 #   THYLACINE_MAC_APP=<binary>            the app (default: target/release/thylacine-mac of this crate)
@@ -156,6 +165,44 @@ PY
     return $rc
 }
 
+bar_leg() {
+    local d=$repo/build/macrunner-app-test/bar
+    mkdir -p "$d" && cd "$d" || return 1
+    rm -f q.sock trace.log app.out qemu.out
+    "$qemu" -machine virt,accel=tcg -cpu cortex-a72 -m 256 -S -nodefaults -display dbus,p2p=on \
+        -device virtio-gpu-pci -device virtio-tablet-pci -device virtio-keyboard-pci \
+        -qmp unix:q.sock,server=on,wait=off -serial none -monitor none \
+        -trace 'dbus_*' -D trace.log > qemu.out 2>&1 &
+    qp=$!
+    local i; for i in $(seq 50); do [ -S q.sock ] && break; sleep 0.1; done
+    [ -S q.sock ] || { echo "bar: FAIL: QEMU gave no QMP socket ($(head -1 qemu.out))"; return 1; }
+    "$app" --attach q.sock --no-activate --exit-after 3 --scripted-bar > app.out 2>&1 &
+    ap=$!
+    ( sleep 20; kill "$ap" 2>/dev/null ) &
+    wd=$!
+    wait "$ap"; local arc=$?
+    kill "$wd" 2>/dev/null; wd=""; ap=""
+    kill "$qp" 2>/dev/null; wait "$qp" 2>/dev/null; qp=""
+    local rc=0 got view want_bar
+    [ "$arc" -eq 0 ] || { echo "bar: FAIL: the app exited $arc ($(tail -1 app.out))"; rc=1; }
+    # The script says what the view was: the leg is about a view one point past the 640x480
+    # scanout QEMU shows before a guest runs, at a whole number of pixels to a point.
+    view=$(grep '^scripted: bar: ' app.out)
+    case "$view" in
+        "scripted: bar: view 641x481 points at "[123]", scanout 640x480") ;;
+        *) echo "bar: FAIL: the view was not a point past the scanout at a whole scale (${view:-the script did not get that far})"; rc=1 ;;
+    esac
+    want_bar='mouse_set_pos x=0, y=240;mouse_press b2;mouse_set_pos x=0, y=240;mouse_release b2;'
+    want_bar+='mouse_set_pos x=639, y=479;mouse_press b2;mouse_set_pos x=639, y=479;mouse_release b2;'
+    got=$(grep 'dbus_kbd\|dbus_mouse' trace.log | sed 's/dbus_//; s/keycode //; s/button /b/' | tr '\n' ';')
+    if [ "$got" = "$want_bar" ]; then
+        echo "bar: two clicks on the bars sent nothing, and the corner pixels arrived as themselves"
+    else
+        echo "bar: FAIL: input differs"; echo "  got:  $got"; echo "  want: $want_bar"; rc=1
+    fi
+    return $rc
+}
+
 # One run of the app against the size leg's QEMU: <out> <limit in seconds> <the app's arguments>.
 size_run() {
     local out=$1 limit=$2; shift 2
@@ -275,5 +322,6 @@ rc=0
 pixels="mapped";          leg map || rc=1
 pixels="in the messages"; leg in-band THYLACINE_NO_MAP=1 || rc=1
 size_leg || rc=1
+bar_leg || rc=1
 [ $rc -eq 0 ] && echo "PASS: macrunner/app headless" || echo "FAIL: macrunner/app headless (evidence in $repo/build/macrunner-app-test)"
 exit $rc

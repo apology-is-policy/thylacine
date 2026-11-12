@@ -60,7 +60,14 @@ between. It does not start QEMU yet: it attaches to one that runs with
   is pinned.
 - **The picture** is the guest's scanout, letterboxed on black. A whole-number
   scale of one or more is sampled nearest, anything else is filtered. The
-  guest's alpha is ignored.
+  scale is the one that fills the view, unless the whole number below it is
+  within one of the picture's own pixels of filling it: then the picture is
+  drawn at that whole number, on the view's pixels, and what is left is a bar
+  (at most the scale's own number of pixels along the side that limits it).
+  That is what a guest's fitted mode needs: a view of 3025x1891 gives a mode
+  of 1512x945, drawn at 2 with one column and one row of bar, where filling
+  would be a scale of 2.0007 and every pixel filtered. The guest's alpha is
+  ignored.
 - **What a scanout can be:** one of the eight pixman formats with a byte a
   channel, which are the eight a virtio GPU lets a guest choose (the colours
   in four byte orders, each with alpha or with nothing in the fourth byte); 1
@@ -118,7 +125,10 @@ between. It does not start QEMU yet: it attaches to one that runs with
   `--exit-after <s>`, `--dump <ppm>` (and, beside it, `<name>-pointer.ppm`:
   what AppKit draws of the pointer over mid-grey), `--scripted-input`,
   `--resize-to <w>x<h>` (one second in, the window's content is set to that
-  many points, in three steps); and `THYLACINE_NO_MAP=1`, which stops the listener advertising `Unix.Map`.
+  many points, in three steps), `--scripted-bar` (one second in, the content
+  is set a point larger each way than the scanout has pixels; half a second
+  later, right clicks on the two bars and on the picture's pixels beside
+  them); and `THYLACINE_NO_MAP=1`, which stops the listener advertising `Unix.Map`.
 
 ## Mechanism
 
@@ -163,9 +173,16 @@ again. A display link does not tick while the display sleeps (0 ticks in 4 s
 with `CGDisplayIsAsleep` true), so nothing that must happen regardless may
 hang off it: a test's deadline has its own timer.
 
-**Where the picture is.** One function, `fit`, places a picture in an area:
-the drawing takes its viewport from it (in pixels, rounded to whole ones) and
-the pointer takes the picture's rectangle from it (in points). A position is
+**Where the picture is.** One function, `fit`, places a picture in an area
+of pixels, from the top left: the drawing takes its viewport from it (rounded
+to whole pixels; a whole scale's place is whole already, the odd pixel of a
+bar going to the right and the bottom) and the pointer takes the picture's
+rectangle from it through `place`, which finds it in the drawable's pixels,
+as the drawing does, and gives it in points from the bottom left, as AppKit
+counts. Until 2026-11-12 the pointer's place was found in points on its own,
+which agreed with the drawing only while both filled the view. The whole
+scale's test is made on products of whole numbers (`w * t <= k * (t + 1) *
+tw`, t the picture's longer side), so no rounding decides it. A position is
 mapped against the texture, which is what is on the glass: the texture for a
 new scanout replaces the old one only once that scanout is known to be the
 current one still.
@@ -400,8 +417,9 @@ every step of a drag is a mode the guest sets at every step.
   told is the window's, whatever it is, and the guest takes a mode that fits
   it ([[sub-tapestryd]], [[sub-lictor]]): the size itself where a screen and
   a full-screen surface of it can be made, else the size over a whole number,
-  up to four. The picture is then smaller than the view and is drawn over it
-  as any picture is. The bound is the kernel's 64 MiB a weave: three buffers
+  up to four. The picture is then smaller than the view and is drawn at that
+  whole number, a guest pixel to a square of the view's, with the division's
+  remainder as a bar. The bound is the kernel's 64 MiB a weave: three buffers
   of a full-screen surface pass it at 5.59 megapixels. This app's default
   window is under it; full screen on a 14- or 16-inch MacBook Pro is over and
   gets half as many pixels a side (measured 2026-11-11: told 3456x2160, a

@@ -156,15 +156,50 @@ fn notches(acc: &mut f64, dy: f64, precise: bool) -> i32 {
     n as i32
 }
 
-// Where a tw x th picture goes in a w x h area that shows all of it, centred, at one scale:
-// (x, y, width, height, scale). The drawing and the pointer both take the picture's place from here.
+// Where a tw x th picture goes in an area of w x h pixels that shows all of it, centred, at one
+// scale: (x, y, width, height, scale), from the top left. The drawing and the pointer both take the
+// picture's place from here.
+//
+// A guest that cannot make a mode of the view's size makes one of that size over a whole number and
+// drops the remainder, so the view is that many times its picture and a few pixels more. Filling the
+// view would filter every pixel of the picture to make it at most one of its own pixels larger. So
+// where the whole scale below the filling one comes that close, the picture is drawn at it, on the
+// area's pixels, and what is left over is a bar.
 fn fit(tw: f64, th: f64, w: f64, h: f64) -> Option<(f64, f64, f64, f64, f64)> {
     if tw <= 0.0 || th <= 0.0 || w <= 0.0 || h <= 0.0 {
         return None;
     }
-    let scale = (w / tw).min(h / th);
-    let (vw, vh) = (tw * scale, th * scale);
-    Some(((w - vw) / 2.0, (h - vh) / 2.0, vw, vh, scale))
+    let fill = (w / tw).min(h / th);
+    let whole = fill.floor();
+    // (fill - whole) * t <= whole, t the picture's longer side, as products: whole numbers of
+    // pixels are compared exactly.
+    let t = tw.max(th);
+    let near = w * t <= whole * (t + 1.0) * tw || h * t <= whole * (t + 1.0) * th;
+    if whole >= 1.0 && near {
+        let (vw, vh) = (tw * whole, th * whole);
+        return Some((
+            ((w - vw) / 2.0).floor(),
+            ((h - vh) / 2.0).floor(),
+            vw,
+            vh,
+            whole,
+        ));
+    }
+    let (vw, vh) = (tw * fill, th * fill);
+    Some(((w - vw) / 2.0, (h - vh) / 2.0, vw, vh, fill))
+}
+
+// The picture's place in a view of bw x bh points at `s` pixels to a point, as AppKit counts:
+// (x, y, width, height) in points from the bottom left, and the points a guest pixel takes. It is
+// found in the drawable's pixels, as the drawing finds it, so that a bar one pixel high is a bar to
+// the pointer too.
+fn place(tw: u32, th: u32, bw: f64, bh: f64, s: f64) -> Option<(f64, f64, f64, f64, f64)> {
+    if s <= 0.0 {
+        return None;
+    }
+    let (w, h) = (pixels(bw, s) as f64, pixels(bh, s) as f64);
+    let (x, y, vw, vh, scale) = fit(tw as f64, th as f64, w, h)?;
+    Some((x / s, (h - y - vh) / s, vw / s, vh / s, scale / s))
 }
 
 // QEMU's number for a button AppKit numbers `number` (left 0, right 1, middle 2, then the side
@@ -489,7 +524,7 @@ impl Renderer {
         if let Some(tex) = &self.texture {
             let (tw, th) = (self.tex_size.0 as f64, self.tex_size.1 as f64);
             if let Some((x, y, vw, vh, scale)) = fit(tw, th, size.0 as f64, size.1 as f64) {
-                // Whole pixels, so that a whole-number scale stays one.
+                // Whole pixels: a place that is not whole (a filling scale's) is rounded to them.
                 enc.setViewport(MTLViewport {
                     originX: x.floor(),
                     originY: y.floor(),
@@ -600,6 +635,7 @@ pub struct Options {
     pub dump: Option<String>,          // a PPM of the pipeline's output, written at exit_after
     pub scripted_input: bool, // one second in, a fixed run of key and pointer events through the window
     pub resize_to: Option<(f64, f64)>, // one second in, the window's content set to this many points, and nudged a second later
+    pub scripted_bar: bool, // one second in, the content set a point past the scanout each way; then clicks on the picture's corners and on the bars
 }
 
 define_class!(
@@ -654,6 +690,12 @@ define_class!(
 
         #[unsafe(method(resizeBack:))]
         fn resize_back(&self, _timer: &NSTimer) { self.scripted_resize_back(); }
+
+        #[unsafe(method(barSize:))]
+        fn bar_size(&self, _timer: &NSTimer) { self.scripted_bar_size(); }
+
+        #[unsafe(method(barClicks:))]
+        fn bar_clicks(&self, _timer: &NSTimer) { self.scripted_bar_clicks(); }
 
         // Every change of the view's size comes through here, a step at a time while the window's
         // edge is dragged.
@@ -822,6 +864,17 @@ impl GuestView {
                 );
             }
         }
+        if this.ivars().opts.scripted_bar {
+            unsafe {
+                NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(
+                    1.0,
+                    &*(Retained::as_ptr(&this) as *const AnyObject),
+                    sel!(barSize:),
+                    None,
+                    false,
+                );
+            }
+        }
         Ok(this)
     }
 
@@ -901,6 +954,77 @@ impl GuestView {
         eprintln!("scripted: content set a point wider and back, after {before} tellings");
     }
 
+    // The window's content set one point larger each way than the scanout has pixels. With a whole
+    // number of pixels to a point the view is then that many times the picture and one of the
+    // picture's own pixels more, which is the most a guest's fitted mode leaves.
+    fn scripted_bar_size(&self) {
+        let iv = self.ivars();
+        if let Some(r) = iv.renderer.borrow_mut().as_mut() {
+            r.upload(&iv.display, &mut iv.stats.borrow_mut());
+        }
+        let (tw, th) = iv
+            .renderer
+            .borrow()
+            .as_ref()
+            .map(|r| r.tex_size)
+            .unwrap_or((0, 0));
+        let Some(window) = self.window() else {
+            eprintln!("scripted: no window");
+            return;
+        };
+        if tw == 0 || th == 0 {
+            eprintln!("scripted: no scanout, the bar is not tried");
+            return;
+        }
+        window.setContentSize(NSSize::new(tw as f64 + 1.0, th as f64 + 1.0));
+        unsafe {
+            NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(
+                0.5,
+                &*(self as *const Self as *const AnyObject),
+                sel!(barClicks:),
+                None,
+                false,
+            );
+        }
+    }
+
+    // Right clicks on the bars and on the picture's first and last pixels beside them. The places
+    // are worked out here from the rule alone (a guest pixel is a point; of the remainder, the half
+    // rounded down is on the left and above), not through `place`: the caller reads QEMU's trace.
+    fn scripted_bar_clicks(&self) {
+        let Some(window) = self.window() else { return };
+        let (tw, th) = self
+            .ivars()
+            .renderer
+            .borrow()
+            .as_ref()
+            .map(|r| r.tex_size)
+            .unwrap_or((0, 0));
+        let s = window.backingScaleFactor();
+        let b = self.bounds();
+        let lead = (s / 2.0).floor() / s;
+        let wn = window.windowNumber();
+        let click = |x: f64, y_top: f64| {
+            let p = self.convertPoint_toView(NSPoint::new(x, b.size.height - y_top), None);
+            for ty in [NSEventType::RightMouseDown, NSEventType::RightMouseUp] {
+                let ev = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+                    ty, p, NSEventModifierFlags::empty(), 0.0, wn, None, 0, 1, 1.0);
+                match ev {
+                    Some(ev) => window.sendEvent(&ev),
+                    None => eprintln!("scripted: no mouse event"),
+                }
+            }
+        };
+        click(b.size.width - 0.25, b.size.height / 2.0); // the bar on the right
+        click(lead + 0.5, lead + (th / 2) as f64 + 0.5); // the first pixel of the middle row
+        click(lead + tw as f64 - 0.5, lead + th as f64 - 0.5); // the last pixel of the last row
+        click(b.size.width / 2.0, b.size.height - 0.25); // the bar below
+        eprintln!(
+            "scripted: bar: view {}x{} points at {s}, scanout {tw}x{th}",
+            b.size.width, b.size.height
+        );
+    }
+
     // Release everything the guest believes is held, keys and buttons: the window stopped being where
     // they go, and whatever is let go of from here on is let go of somewhere else.
     pub fn release_keys(&self) {
@@ -964,8 +1088,9 @@ impl GuestView {
     // None while there is no scanout, or while a frame is being drawn.
     fn picture(&self) -> Option<(NSRect, f64)> {
         let b = self.bounds();
+        let s = self.window().map(|w| w.backingScaleFactor()).unwrap_or(1.0);
         let (tw, th) = self.ivars().renderer.try_borrow().ok()?.as_ref()?.tex_size;
-        let (x, y, vw, vh, scale) = fit(tw as f64, th as f64, b.size.width, b.size.height)?;
+        let (x, y, vw, vh, scale) = place(tw, th, b.size.width, b.size.height, s)?;
         Some((NSRect::new(NSPoint::new(x, y), NSSize::new(vw, vh)), scale))
     }
 
@@ -1489,7 +1614,7 @@ impl GuestView {
 
 #[cfg(test)]
 mod tests {
-    use super::{button_code, fit, notches, pointer_scale, replace, Renderer, Stats};
+    use super::{button_code, fit, notches, place, pointer_scale, replace, Renderer, Stats};
     use crate::display::{Display, Order, Rect};
     use objc2::runtime::ProtocolObject;
     use objc2_metal::{
@@ -1567,6 +1692,73 @@ mod tests {
         ] {
             assert_eq!(fit(tw, th, w, h), None);
         }
+    }
+
+    #[test]
+    fn a_picture_a_pixel_of_its_own_short_of_the_view_keeps_a_whole_scale() {
+        // What a guest makes of 3025 x 1891 over two, and over four of 3027 x 1893: the remainder is
+        // a bar, on the right and at the bottom when it is one pixel.
+        assert_eq!(
+            fit(1512.0, 945.0, 3025.0, 1891.0),
+            Some((0.0, 0.0, 3024.0, 1890.0, 2.0))
+        );
+        assert_eq!(
+            fit(756.0, 473.0, 3027.0, 1893.0),
+            Some((1.0, 0.0, 3024.0, 1892.0, 4.0))
+        );
+        // A picture of another shape than the view: the side that limits it decides.
+        assert_eq!(
+            fit(1280.0, 800.0, 2561.0, 1700.0),
+            Some((0.0, 50.0, 2560.0, 1600.0, 2.0))
+        );
+        // The same on its side, where the height limits.
+        assert_eq!(
+            fit(800.0, 1280.0, 1700.0, 2561.0),
+            Some((50.0, 0.0, 1600.0, 2560.0, 2.0))
+        );
+        // A view one pixel larger than its picture each way shows it a pixel to a pixel.
+        assert_eq!(
+            fit(2560.0, 1600.0, 2561.0, 1601.0),
+            Some((0.0, 0.0, 2560.0, 1600.0, 1.0))
+        );
+        // The bound is one of the picture's own pixels, counted: at it, and one view pixel past it.
+        assert_eq!(fit(4.0, 2.0, 10.0, 91.0), Some((1.0, 43.0, 8.0, 4.0, 2.0)));
+        assert_eq!(
+            fit(4.0, 2.0, 11.0, 91.0),
+            Some((0.0, 42.75, 11.0, 5.5, 2.75))
+        );
+        // Past it the view is filled, as a picture pinned at a size of its own is.
+        assert_eq!(
+            fit(1280.0, 800.0, 2800.0, 1800.0),
+            Some((0.0, 25.0, 2800.0, 1750.0, 2.1875))
+        );
+        // A picture larger than the view is never at a whole scale: there is none below one.
+        assert_eq!(
+            fit(1280.0, 800.0, 640.0, 200.0),
+            Some((160.0, 0.0, 320.0, 200.0, 0.25))
+        );
+    }
+
+    #[test]
+    fn the_pointer_takes_the_place_the_drawing_takes() {
+        // 1512.5 x 945.5 points at two pixels to a point are 3025 x 1891 pixels: the picture is drawn
+        // from the top left corner and the odd row is a bar at the bottom, half a point high.
+        assert_eq!(
+            place(1512, 945, 1512.5, 945.5, 2.0),
+            Some((0.0, 0.5, 1512.0, 945.0, 1.0))
+        );
+        // One pixel to a point: a bar of one row above and two below.
+        assert_eq!(
+            place(100, 50, 201.0, 103.0, 1.0),
+            Some((0.0, 2.0, 200.0, 100.0, 2.0))
+        );
+        // Bars that are even stay even.
+        assert_eq!(
+            place(4, 2, 200.0, 150.0, 2.0),
+            Some((0.0, 25.0, 200.0, 100.0, 50.0))
+        );
+        assert_eq!(place(4, 2, 200.0, 150.0, 0.0), None);
+        assert_eq!(place(0, 2, 200.0, 150.0, 2.0), None);
     }
 
     #[test]
@@ -1731,12 +1923,14 @@ mod tests {
         assert!(unsafe { replace(&tex, src.as_ptr(), src.len(), tw as usize * 4, all) });
         r.texture = Some(tex);
         r.tex_size = (tw, th);
-        // Bars above and below, bars at the sides, no bars; then a size nothing divides.
+        // Bars above and below, bars at the sides, no bars; a size a pixel past nine times the
+        // picture, which is drawn at nine; then one that nothing divides, at a scale and a half.
         for (dw, dh, exact) in [
             (400u32, 300u32, true),
             (300, 400, true),
             (400, 200, true),
-            (37, 91, false),
+            (37, 91, true),
+            (6, 91, false),
         ] {
             let target = texture(&r.device, dw, dh, true);
             let cmd = r.queue.commandBuffer().unwrap();
