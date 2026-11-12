@@ -14,7 +14,7 @@ locks: [lock-proc-table]
 abis: []
 design: ["docs/ARCHITECTURE.md section 9.4", "docs/PROWL-DESIGN.md section 3.4", "docs/VIVARIUM.md section 6.17", "docs/IMPERIUM-DESIGN.md section 11.3 item 10"]
 created: 2026-08-02
-updated: 2026-11-09
+updated: 2026-11-12
 ---
 ## Session transport accounting
 
@@ -30,6 +30,20 @@ are sampled at different instants, not a transaction or a peak measurement.
 The detail walk retains the existing diagnostic-list-before-admission lock
 order. The summary releases admission before starting that walk. These are
 observations, not authorization inputs; see [[sub-kernel-srvconn]].
+
+The admission figures (the summary line, and the counts and credits each
+connection row carries between `msize` and the kind) move when a connection is
+made or freed, not once per message, so they are not among the counters
+IMPERIUM-DESIGN 11.3 item 10 withholds: every reader who sees a row sees them,
+and they add nothing to what the visible rows already tell. A reader running
+as none sees no row and no summary: the summary counts other Procs'
+connections and login sessions, and none owns nothing
+([[dec-2026-10-06-none-owns-nothing]]). `format_9p_admission` returns before
+its snapshot for a reader `ctl_9p_row_hidden` hides the rows from, so a none
+reader reads an empty file. The summary reached main's wall by a merge and was
+shown to none until the whole interactive fleet ran `cpu-gate` on the merged
+tree (2026-11-12): that scenario's row patterns predated the admission
+figures, failed three times in three, and reading why found the summary.
 
 ## Purpose
 
@@ -152,8 +166,8 @@ There are two owners:
   `format_procs_cb` skips every row `devproc_none_walled` refuses (Plan 9's
   `nonone`, [[dec-2026-10-06-none-owns-nothing]]), before the row starts, so
   the rows it does emit stay whole. `/ctl/9p-sessions` shows a none reader no
-  row at all (`ctl_9p_row_hidden`): none is no end, so it owns no row, and a
-  none hostowner counts as `sys`. A reader refused `/ctl/kernel-base` or
+  row at all and no admission summary (`ctl_9p_row_hidden`): none is no end,
+  so it owns no row, and a none hostowner counts as `sys`. A reader refused `/ctl/kernel-base` or
   `/ctl/kstack` reads `EACCES`, not -1.
 - **The machine-wide counters are the system principal's.** In `/ctl/cpu`, the
   `idle_ns`, `ctxt` and `intr` columns; in `/ctl/sched`, the `runnable:`,

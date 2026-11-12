@@ -900,7 +900,10 @@ static bool format_9p_sess_cb(const char *label, int id, u32 msize,
 
 // Emit the bounded global summary first; detail may fill the 4 KiB read buffer.
 // Snapshot takes only admission lock, before the diagnostic-list walk begins.
+// The summary counts other Procs' connections and login sessions, so a reader
+// the rows are hidden from gets none of it either.
 static bool format_9p_admission(struct ctl_9p_fmt *f) {
+    if (ctl_9p_row_hidden(f)) return true;
     struct srv_admission_snapshot s;
     srv_domain_snapshot(NULL, &s);
     size_t line = f->off;

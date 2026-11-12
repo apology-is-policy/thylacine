@@ -539,6 +539,7 @@ void test_devctl_read_9p_sessions_format(void) {
         r.principal_id = 0xC0FFEEu;
         size_t n = devctl_format_9p_sessions_for_test(&r, buf, sizeof buf);
         TEST_ASSERT(contains(buf, n, "conn peer=31337 msize="), "an ordinary reader sees the conn row");
+        TEST_ASSERT(contains(buf, n, "admission count="), "an ordinary reader sees the admission summary");
         TEST_ASSERT(contains(buf, n, " c2s=- s2c=- sframes=-\n"), "an ordinary reader sees its counters as '-'");
         TEST_ASSERT(!contains(buf, n, "c2s=3/0+3"), "an ordinary reader does not see the byte counts");
         r.caps = CAP_HOSTOWNER;
@@ -556,9 +557,13 @@ void test_devctl_read_9p_sessions_format(void) {
         r.principal_id = PRINCIPAL_NONE;
         n = devctl_format_9p_sessions_for_test(&r, buf, sizeof buf);
         TEST_ASSERT(!contains(buf, n, "conn peer=31337"), "a none reader sees no conn row");
+        // The summary counts everyone's connections and sessions: not none's to read.
+        TEST_ASSERT(!contains(buf, n, "admission"), "a none reader sees no admission summary");
+        TEST_ASSERT(n == 0, "a none reader reads an empty file");
         r.caps = CAP_HOSTOWNER;
         n = devctl_format_9p_sessions_for_test(&r, buf, sizeof buf);
         TEST_ASSERT(contains(buf, n, "conn peer=31337 msize="), "a none hostowner sees the conn row");
+        TEST_ASSERT(contains(buf, n, "admission count="), "a none hostowner sees the admission summary");
         r.caps = 0;
     }
 

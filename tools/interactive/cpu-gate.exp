@@ -57,12 +57,15 @@ lc_expect_re {cpu_ns: +-\r?\n} "kproc's status cpu_ns is withheld"
 # michael's home proxy runs as michael, dials the coordinator and serves login's
 # /home mount, so those rows are michael's and show numbers; a connection
 # between the system's own Procs reads "-". One read per assertion: the rows
-# come in registry order, and an expect consumes what it passes over.
+# come in registry order, and an expect consumes what it passes over. The
+# admission figures between msize and the kind (connection counts and ring
+# credits) move when a connection is made or freed, not per message, and every
+# reader who sees the row sees them.
 lc_send "cat /ctl/9p-sessions"
-lc_expect_re {conn peer=[0-9]+ msize=[0-9]+ (byte|9p) (ka|-) (live|torn) c2s=-E? s2c=-E? sframes=-\r?\n} \
+lc_expect_re {conn peer=[0-9]+ msize=[0-9]+ (session|boot)=[0-9]+ guests=[0-9]+ all=[0-9]+ domains=[0-9]+ credits=[0-9]+/[0-9]+ guestcredits=[0-9]+/[0-9]+ allcredits=[0-9]+/[0-9]+ (byte|9p) (ka|-) (live|torn) c2s=-E? s2c=-E? sframes=-\r?\n} \
     "a system connection's counters are withheld from michael"
 lc_send "cat /ctl/9p-sessions"
-lc_expect_re {conn peer=[0-9]+ msize=[0-9]+ (byte|9p) (ka|-) (live|torn) c2s=[0-9]+/[0-9]+\+[0-9]+E? s2c=[0-9]+/[0-9]+\+[0-9]+E? sframes=[0-9]+\r?\n} \
+lc_expect_re {conn peer=[0-9]+ msize=[0-9]+ (session|boot)=[0-9]+ guests=[0-9]+ all=[0-9]+ domains=[0-9]+ credits=[0-9]+/[0-9]+ guestcredits=[0-9]+/[0-9]+ allcredits=[0-9]+/[0-9]+ (byte|9p) (ka|-) (live|torn) c2s=[0-9]+/[0-9]+\+[0-9]+E? s2c=[0-9]+/[0-9]+\+[0-9]+E? sframes=[0-9]+\r?\n} \
     "a connection michael is an end of shows its counters"
 lc_send "cat /ctl/9p-sessions"
 lc_expect_re {sess [^ ]+ id=[^ ]+ msize=[0-9]+ rx=- own=- orph=- } \
