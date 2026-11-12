@@ -137,6 +137,23 @@ is reserved before activation, not a claim that its service already runs.
 Missing optional residents may
 stay reserved/offline; no wildcard fallback. Add another resident only by an
 intentional login-policy update. No home-*, halcyon-* or boot-test service routes.
+
+November 12 login-policy update (PROPOSED by corona; implemented on the landing
+branch so that its proof exists; AWAITING THE OPERATOR'S RATIFICATION): the
+manifest adds `halcyon`, the console renderer's inline-media place channel.
+HALCYON.md 14.7.2 keeps that channel for console mode ("the console spike's
+global `/srv/halcyon` remains for console mode"), and with a private `/srv` per
+login nothing in a session could open it: `view` in a console-mode login shell
+reported `no /srv/halcyon` although the renderer had posted it (the whole-fleet
+run of November 12: ls-gfx-jpeg and ls-gfx-inline-view, 3 of 3 each). The
+renderer is spawned by joey with MAY_POST_SERVICE, so its posting is a trusted
+one and a route can resolve it. The route gives a session what every login had
+before this document: the channel has no peer gate (HALCYON.md 14.7, the
+September 29 refinement, says so), and a route adds none and removes none. It
+is the bare name only: a session's own `halcyon-<user>` service stays a local
+posting, and the sentence above still forbids routing those. Under a session
+compositor nothing posts `halcyon` at boot, so the route is reserved and
+offline there, and a session cannot claim the name locally.
 Existing byte-service gates still deny the ordinary shell's direct coordinator
 connection while admitting its sealed CAP_TCB_DIAL home proxy.
 

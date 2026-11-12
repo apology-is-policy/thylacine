@@ -1097,9 +1097,12 @@ unsafe fn unbind_home(mut sess: HomeSession) {
 // session, and neither the boot source nor the factory role goes to children.
 unsafe fn private_service_registry() -> i64 {
     use libthyla_rs::{SrvRoute, t_srv_registry_new};
-    const NAMES: [&[u8]; 12] = [b"corvus", b"net", b"nocturne", b"nocturne-ctl",
-        b"lictor", b"tapestry", b"warp", b"stratum-fs", b"stratum-ctl", b"ptyfs", b"diorama", b"tapestry-interaction"];
-    let mut routes = [SrvRoute { name_len: 0, reserved: 0, name: [0; 32] }; 12];
+    // `halcyon` is the console renderer's place channel (HALCYON.md 14.7.2): a boot
+    // resident in console mode, absent (the route stays offline) under a session compositor.
+    const NAMES: [&[u8]; 13] = [b"corvus", b"net", b"nocturne", b"nocturne-ctl",
+        b"lictor", b"tapestry", b"warp", b"stratum-fs", b"stratum-ctl", b"ptyfs", b"diorama", b"tapestry-interaction",
+        b"halcyon"];
+    let mut routes = [SrvRoute { name_len: 0, reserved: 0, name: [0; 32] }; 13];
     for (r, name) in routes.iter_mut().zip(NAMES) {
         r.name_len = name.len() as u32;
         r.name[..name.len()].copy_from_slice(name);
