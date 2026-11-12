@@ -1508,6 +1508,22 @@ impl GuestView {
             }
         };
         let moved = |dx: i64, dy: i64| self.scripted_move(dx, dy);
+        // A notch up, stamped when it is made. Where it says it is is wherever the Mac's pointer
+        // happens to be, and nothing made here may depend on that.
+        let made_notch = || {
+            let cg = CGEvent::new_scroll_wheel_event2(None, CGScrollEventUnit::Line, 1, 1, 0, 0);
+            if let Some(cg) = &cg {
+                stamp(cg);
+            }
+            let ev = cg.and_then(|cg| NSEvent::eventWithCGEvent(&cg));
+            if ev.is_none() {
+                eprintln!("scripted: no scroll event");
+            }
+            ev
+        };
+        let scroll = |ev: &NSEvent| {
+            let _: () = unsafe { msg_send![self, scrollWheel: ev] };
+        };
         // Made with the pointer free and handed over captured: no motion of a captured pointer.
         let early = self.made_move(7, 7);
         self.capture(true);
@@ -1519,27 +1535,27 @@ impl GuestView {
         button(NSEventType::LeftMouseDown);
         let second = moved(-20, 10);
         button(NSEventType::LeftMouseUp);
-        let notch = CGEvent::new_scroll_wheel_event2(None, CGScrollEventUnit::Line, 1, 1, 0, 0);
-        if let Some(cg) = &notch {
-            stamp(cg);
-        }
-        match notch.and_then(|cg| NSEvent::eventWithCGEvent(&cg)) {
-            Some(ev) => unsafe { msg_send![self, scrollWheel: &*ev] },
-            None => eprintln!("scripted: no scroll event"),
+        if let Some(ev) = made_notch() {
+            scroll(&ev);
         }
         // Right goes down captured and comes up after the pointer was given back, over the
         // picture: it comes up on the mouse.
         button(NSEventType::RightMouseDown);
         // Made captured and handed over after the give-back. The move is no place: it says where
-        // the Mac's pointer was held. The press is sent, with no place for the same reason.
+        // the Mac's pointer was held. The press and the notch are sent, with no place for the
+        // same reason.
         let late = (
             made(NSEventType::MouseMoved),
             made(NSEventType::LeftMouseDown),
+            made_notch(),
         );
         self.capture(false);
         button(NSEventType::RightMouseUp);
         for ev in [&late.0, &late.1].into_iter().flatten() {
             hand(ev);
+        }
+        if let Some(ev) = &late.2 {
+            scroll(ev);
         }
         button(NSEventType::LeftMouseUp);
         // Then a click that is the tablet's again.

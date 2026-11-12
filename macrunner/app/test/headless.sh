@@ -770,17 +770,17 @@ bar_leg bar-unbound "" \
     "with the tablet bound to nothing each place went ahead of its press; the places reached the tablet's driver and the buttons the mouse's" || rc=1
 click_leg || rc=1
 stopped_leg || rc=1
-# After the mouse's events: the press made before the give-back, with no place; its release with
-# one; a click; and the click after the window moved.
+# After the mouse's events: the press and the notch made before the give-back, with no place; the
+# press's release with one; a click; and the click after the window moved.
 capture_leg capture ,display=gpu0,head=0 \
-    'press left;at 320,240 release left;at 320,240 press left;at 320,240 release left;at 320,240 press left;at 320,240 release left;' \
-    'press left;at 320,240 release left;at 320,240 press left;at 320,240 release left;at 320,240 press left;at 320,240 release left;' '' \
+    'press left;wheel-up;at 320,240 release left;at 320,240 press left;at 320,240 release left;at 320,240 press left;at 320,240 release left;' \
+    'press left;wheel-up;at 320,240 release left;at 320,240 press left;at 320,240 release left;at 320,240 press left;at 320,240 release left;' '' \
     "all of it reached the mouse's driver, the right button's release after the pointer was given back too; what was made before a change of hands was not taken for the new state's; the clicks after the give-back and after the window moved reached the tablet's" || rc=1
 # With the tablet bound to nothing the place of the first of those to have one goes ahead of it.
 capture_leg capture-unbound "" \
-    'press left;at 320,240;at 320,240 release left;at 320,240 press left;at 320,240 release left;at 320,240 press left;at 320,240 release left;' \
+    'press left;wheel-up;at 320,240;at 320,240 release left;at 320,240 press left;at 320,240 release left;at 320,240 press left;at 320,240 release left;' \
     'at 320,240;at 320,240;at 320,240;at 320,240;at 320,240;at 320,240;' \
-    'press left;release left;press left;release left;press left;release left;' \
+    'press left;wheel-up;release left;press left;release left;press left;release left;' \
     "with the tablet bound to nothing the same, the places to the tablet's driver and the buttons to the mouse's" || rc=1
 captured_click_leg || rc=1
 [ $rc -eq 0 ] && echo "PASS: macrunner/app headless" || echo "FAIL: macrunner/app headless (evidence in $repo/build/macrunner-app-test)"
