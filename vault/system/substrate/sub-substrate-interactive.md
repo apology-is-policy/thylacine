@@ -611,7 +611,10 @@ per full gate ≈ 3 s against a run measured in tens of minutes.
      `halcyond: theme ...; profile <word>` line. NOT tapestryd's boot line:
      the compositor is spawned before the pivot to the pool, so its startup
      read of `/lib/halcyon/profile` always misses and it says `built-in` on
-     every image, until a halcyond pushes the bundle.
+     every image, until a halcyond pushes the bundle. One image therefore does
+     not run the fleet: docs/agent/GATES.md lists the lever sets a whole-fleet
+     run bakes, and `ls-halcyon-session-route` runs on one of them only, the
+     image with both the console renderer and the session compositor.
 - **Two more (2026-11-12, the whole-fleet run before the async landing).**
 
   6. **A catch-all failure arm ends on the line's terminator.** An expect that

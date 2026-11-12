@@ -89,8 +89,10 @@ expect {
     eof { lc_fail "EOF at session start" }
 }
 set timeout 60
+# The session compositor's theme line carries an inherited count. The console renderer says
+# a theme line too, without one, and it is not the one to read.
 expect {
-    -re {halcyond: theme [^\r\n]*; profile (instrument|legacy) } {
+    -re {halcyond: theme [^\r\n]*inherited\); profile (instrument|legacy) } {
         if {$expect_out(1,string) ne "instrument"} {
             puts "\nLS-CI SKIP: legacy status bar -- this scenario reads a command's exit status from the\
  bar's log line, which only the Instrument bar writes when a command ends.\

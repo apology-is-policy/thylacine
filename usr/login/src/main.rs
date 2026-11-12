@@ -1111,11 +1111,12 @@ unsafe fn private_service_registry(console_place: bool) -> i64 {
         b"diorama",
         b"tapestry-interaction",
     ];
-    // The console renderer's place channel (HALCYON.md 14.7.2), for a login that will not
-    // start the session compositor: on the console its shell is the one the renderer draws.
-    // joey's seeded boot logins run theirs on pipes and are routed too: login does not know
-    // whether it sits on the console. A session compositor's panes have their own
-    // (`halcyon-<user>`), and `view` there must find no console channel to fall back to.
+    // The console renderer's place channel (HALCYON.md 14.7.2), unless this login would start
+    // the session compositor on a successful authentication: on the console its shell is the
+    // one the renderer draws. joey's seeded boot logins run theirs on pipes and are routed
+    // too: login does not know whether it sits on the console. A session compositor's panes
+    // have their own (`halcyon-<user>`), and `view` there must find no console channel to
+    // fall back to.
     const CONSOLE_PLACE: &[u8] = b"halcyon";
     let mut routes = [SrvRoute {
         name_len: 0,
