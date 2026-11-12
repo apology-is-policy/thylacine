@@ -2037,10 +2037,10 @@ pub struct Comp {
     ptr_x: u32,
     ptr_y: u32,
     /// The base the synthesized TEV_PTR_REL deltas are counted from: the
-    /// tablet's last display position, while nothing else has moved the
-    /// pointer since (tapestryd::motion). Separate from ptr_x/ptr_y, which
-    /// the mouse moves too. A position with no base only seeds it: the
-    /// jump to it is placement, not motion.
+    /// tablet's last display position and the mode it is a pixel of, while
+    /// nothing else has moved the pointer since (tapestryd::motion).
+    /// Separate from ptr_x/ptr_y, which the mouse moves too. A position
+    /// with no base only seeds it: the jump to it is placement, not motion.
     abs_last: AbsBase,
     /// HALCYON-INSTRUMENT 9.1 (I-3): the CHROME surface the pointer is over
     /// (slot, gen) as of the last routed motion -- the one that hears
@@ -10339,12 +10339,13 @@ impl Comp {
     /// drain). Also synthesizes the TEV_PTR_REL delta from the previous
     /// abs position -- the abs-only-frontend mouse-look path (QEMU cocoa
     /// with a tablet present never produces host rel events); the first
-    /// abs motion, and the first after motion from the relative device,
-    /// only seeds the base. Edge-stall is inherent to an abs source (the
+    /// abs motion, the first after motion from the relative device and the
+    /// first in another mode only seed the base. Edge-stall is inherent to an abs source (the
     /// host cursor stops at the window edge); the relative device is
     /// exact.
     pub fn ptr_move(&mut self, px: u32, py: u32, mods: u16) {
-        if let Some((dx, dy)) = self.abs_last.at(px, py) {
+        let mode = (self.gpu.width, self.gpu.height);
+        if let Some((dx, dy)) = self.abs_last.at(mode, px, py) {
             self.ptr_rel_emit(dx, dy, mods);
         }
         self.ptr_commit(px, py, mods);

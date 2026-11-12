@@ -3748,16 +3748,31 @@ worth of the stylus's motion at each turn from the mouse to it. The
 difference is taken wide and clamped; the subtraction it replaces could
 overflow on positions no display has.
 
+The base also carries the size of the screen its position is a pixel of.
+The tablet's drain scales a position by the mode of the moment (`main.rs`,
+the tablet arm) and `set_mode` leaves the base alone, so the first position
+after a change of mode was counted from a pixel of the old screen: a
+pointer that had not moved handed the focused program a jump (640,400 of
+1280x800 becomes 1280,800 of 2560x1600). A position on a screen of another
+size is a place now. This one is older than the capture and was read in
+the code, not seen in a guest; a frontend that sets the guest's mode from
+its window's size reaches it once a resize.
+
 What this does not order: the loop drains the tablet and then the mouse in
 each wake, so a position and motion that reach it within one wake are taken
 tablet first, whatever order they happened in. A person's chord keeps a
 capture's last motion and the first position after it well apart. A script
 has to pace itself.
 
-Tests: three host tests of `AbsBase` (the first position after motion from
-the mouse makes none, and the second exactly its own; the widest motion
-there is does not overflow), and the `relturn` leg of `tapestry-battery`
+Tests: four host tests of `AbsBase` (the first position after motion from
+the mouse makes none, and the second exactly its own; a position on a
+screen of another size makes none, which fails on `Some((640, 400))` with
+the comparison taken out; the widest motion there is does not overflow),
+and the `relturn` leg of `tapestry-battery`
 under `tools/interactive/ls-gfx-panes.exp`: motion from the mouse, then two
 tablet positions, and the first motion to arrive after them must be the
 second position's own 160 pixels. Counted from where the leg before it
-leaves the tablet, the first position would arrive as -640.
+leaves the tablet, the first position would arrive as -640. The mode's
+rule has its host test only: `mode W H` is the renderer's to say, so the
+battery cannot change the mode, and the line of `ptr_move` that hands the
+base the mode is read and compiled, not run against a change of mode.
