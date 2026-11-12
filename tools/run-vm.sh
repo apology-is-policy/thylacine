@@ -299,9 +299,15 @@ fi
 # pointer (EV_REL deltas -- mouse-look). QEMU's input routing sends rel
 # events to it uniquely (the tablet's handler masks BTN|ABS only; the
 # wheel rides BTN), so an untargeted QMP `rel` injection is deterministic.
-# Host frontends feed it only in relative/grabbed modes -- cocoa with a
-# tablet present sends absolute always (isAbsoluteEnabled), which is why
-# tapestryd ALSO synthesizes rel deltas from consecutive abs motion.
+# Host frontends feed it only in relative/grabbed modes, and which mode a
+# frontend is in is its console's: QEMU goes by the pointer device bound
+# to the console, or with none bound by the one whose driver came up last
+# (ui/input.c, qemu_input_is_absolute), which in a guest of ours is this
+# mouse. Read that way cocoa turns relative, and grabs the Mac's pointer,
+# once the guest's mouse is up (ui/cocoa.m asks qemu_input_is_absolute of
+# its console); that has not been looked at in a cocoa window. tapestryd
+# ALSO synthesizes rel deltas from consecutive abs motion, for a frontend
+# that stays absolute.
 # ORDERING IS LOAD-BEARING (mouse_flags expands AFTER gpu+rng, never
 # here): qemu-virt PCI INTx has only FOUR shared lines ((slot+pin)%4)
 # and KObj_IRQ is exclusive-per-INTID, so the IRQ-CLAIMING functions
@@ -577,11 +583,19 @@ fi
 #                             QemuConsole 0, see gpu_flags above)
 #   THYLACINE_DISPLAY=app     the Mac app's display (docs/MAC-RUNNER.md 4.2):
 #                             QEMU opens no window; the app attaches over
-#                             the QMP socket and draws gpu0 itself. The gpu
+#                             a QMP socket and draws gpu0 itself. The gpu
 #                             deployment, so serial goes quiet after boot.
+#                             The app keeps the monitor it attaches through
+#                             for as long as it runs, and a monitor serves
+#                             one client at a time: attach it to
+#                             build/qmp-gate.sock, and the tools' default,
+#                             build/qmp.sock, stays theirs.
 #   THYLACINE_DISPLAY=dbus    the same display with serial left live, for a
 #                             test that logs in over serial and looks at
-#                             the picture through a D-Bus client.
+#                             the picture through a D-Bus client. The
+#                             tablet is bound to nothing here, as in every
+#                             posture but app: a run that tries the app's
+#                             pointer uses app.
 case "${THYLACINE_DISPLAY:-none}" in
     none)  display_flags=(-nographic) ;;
     # DISPLAY-MODES.md the two production postures. console (mode 1): serial is

@@ -55,14 +55,23 @@
 # launcher. There QEMU's display connection refuses a position once the mouse's driver is up (the
 # leg asks QEMU that the mouse is the pointer device it goes by), which is how the pointer was sent
 # before and why it is not now. The app's events are taken all the same; QEMU hands the places to
-# the tablet and the buttons to the mouse, and the leg says so.
+# the tablet and the buttons to the mouse, and the leg says so. The app asks QEMU at the attach
+# what the tablet is bound to, says once that it is not the display, and sends a place the guest
+# was not sent yet ahead of its button, in a command of its own.
 #
 # Then the click leg, on the first machine: the pointer script a running guest is tried with
 # (view.rs, scripted_click), which the legs above do not run.
 #   click    the middle of the picture, a left click on pixel 600,108 and the last pixel, half a
 #            second apart, arrive as those pixels: four reports on the tablet, the press and the
-#            release each with the place, and nothing on the mouse.
-# The legs do not look at what is drawn. The window opens three times more, for three seconds each.
+#            release each with the place, and nothing on the mouse. The script says each step as
+#            the pixel the view sent, and the app prints the one place QEMU gives for a pointer
+#            when there is no guest to move it.
+#   stopped  the same script while that machine is stopped, which is when QEMU's monitor refuses
+#            the pointer: QEMU is handed nothing and the devices hand their driver nothing; the
+#            app says that QEMU refused, and is refused three events and not four, because the
+#            release of a press QEMU refused is not sent; and the app still finds the display
+#            and what the tablet is bound to, which a stopped machine answers another way.
+# The legs do not look at what is drawn. The window opens four times more, for three seconds each.
 #
 #   macrunner/app/test/headless.sh       exit 0 pass, 1 fail, 77 skipped (not macOS, or no D-Bus display)
 #   THYLACINE_QEMU=<qemu-system-aarch64>  the QEMU to attach to (default: the one on PATH)
@@ -133,14 +142,15 @@ for n, cmd in enumerate(['{"execute": "qmp_capabilities"}'] + sys.argv[1:]):
 PY
 }
 
-# start_qemu <leg> [the tablet's options]: in the leg's directory, the machine the header describes,
-# its input devices up. With no options the tablet is bound to the display.
+# start_qemu <leg> [the tablet's options [-S]]: in the leg's directory, the machine the header
+# describes, its input devices up. With no options the tablet is bound to the display. -S leaves
+# the machine stopped; its devices are brought up all the same.
 start_qemu() {
-    local tablet=${2-,display=gpu0,head=0}
+    local tablet=${2-,display=gpu0,head=0} stopped=${3-}
     rm -f q.sock t.sock trace.log qemu.out up.out mice.out
-    "$qemu" -machine virt,highmem=off -accel qtest -m 64 -nodefaults -display dbus,p2p=on \
+    "$qemu" -machine virt,highmem=off -accel qtest $stopped -m 64 -nodefaults -display dbus,p2p=on \
         -device virtio-gpu-pci,id=gpu0 -device virtio-keyboard-pci \
-        -device "virtio-tablet-pci$tablet" -device virtio-mouse-pci \
+        -device "virtio-tablet-pci,id=tab-pci0$tablet" -device virtio-mouse-pci \
         -qmp unix:q.sock,server=on,wait=off -qtest unix:t.sock,server=on,wait=off \
         -serial none -monitor none -trace 'dbus_*' -trace 'input_event_*' -D trace.log > qemu.out 2>&1 &
     qp=$!
@@ -233,15 +243,22 @@ run_app() {
     return $arc
 }
 
-# said_of_qemu <leg>: what the app must not have said of this machine.
+# said_of_qemu <leg> [unbound]: what the app must not have said of this machine, and of one whose
+# tablet is bound to nothing what it must have said, once and with QEMU's answer.
 said_of_qemu() {
-    local rc=0
+    local rc=0 said
     if grep -q '^input: QEMU refused' app.out; then
         echo "$1: FAIL: QEMU refused input ($(grep '^input: QEMU refused' app.out | tail -1))"; rc=1
     fi
-    if grep -q '^input: this QEMU has no device named' app.out; then
+    if grep -q '^input: gpu0 is not a display' app.out; then
         echo "$1: FAIL: the app did not find the display its events are addressed to"; rc=1
     fi
+    said=$(grep '^input: the tablet ' app.out)
+    case "${2-}:$said" in
+        :) ;;
+        'unbound:input: the tablet tab-pci0 is not known to be bound to gpu0 (its display is ""); '*) ;;
+        *) echo "$1: FAIL: what the app said of the tablet's binding is not this machine's (${said:-nothing})"; rc=1 ;;
+    esac
     return $rc
 }
 
@@ -301,9 +318,10 @@ PY
     return $rc
 }
 
-# bar_leg <name> <the tablet's options> <the tablet's reports> <the mouse's> <what that shows>
+# bar_leg <name> <the tablet's options> <what QEMU is handed> <the tablet's reports> <the mouse's>
+#         <what that shows>
 bar_leg() {
-    local name=$1 want_tablet=$3 want_mouse=$4
+    local name=$1 want_bar=$3 want_tablet=$4 want_mouse=$5
     local d=$repo/build/macrunner-app-test/$name
     mkdir -p "$d" && cd "$d" || return 1
     rm -f app.out heard.out
@@ -311,7 +329,7 @@ bar_leg() {
     run_app 20 -- --exit-after 3 --scripted-bar; local arc=$?
     python3 -I "$here/as_input_guest.py" t.sock reports 640 480 > heard.out 2>&1
     quit_qemu
-    local rc=0 got view want_bar
+    local rc=0 got view
     [ "$arc" -eq 0 ] || { echo "$name: FAIL: the app exited $arc ($(tail -1 app.out))"; rc=1; }
     # The script says what the view was: the leg is about a view one point past the 640x480
     # scanout QEMU shows before a guest runs, at a whole number of pixels to a point.
@@ -320,7 +338,6 @@ bar_leg() {
         "scripted: bar: view 641x481 points at "[123]", scanout 640x480") ;;
         *) echo "$name: FAIL: the view was not a point past the scanout at a whole scale (${view:-the script did not get that far})"; rc=1 ;;
     esac
-    want_bar='at 0,240 press right;at 0,240 release right;at 639,479 press right;at 639,479 release right;'
     got=$(seen 640 480)
     if [ "$got" = "$want_bar" ]; then
         echo "$name: two clicks on the bars sent nothing, and the corner pixels arrived as themselves"
@@ -330,12 +347,13 @@ bar_leg() {
     if [ "$(cat heard.out)" = "keyboard: nothing
 tablet: $want_tablet
 mouse: $want_mouse" ]; then
-        echo "$name: $5"
+        echo "$name: $6"
     else
         echo "$name: FAIL: the devices handed their driver something else"; sed 's/^/  got:  /' heard.out
         echo "  want: tablet: $want_tablet"; echo "  want: mouse: $want_mouse"; rc=1
     fi
-    said_of_qemu "$name" || rc=1
+    local how=""; [ -n "$2" ] || how=unbound
+    said_of_qemu "$name" $how || rc=1
     return $rc
 }
 
@@ -346,7 +364,7 @@ click_leg() {
     mkdir -p "$d" && cd "$d" || return 1
     rm -f app.out heard.out
     start_qemu "$name" || return 1
-    run_app 20 -- --exit-after 3 --scripted-click 600,108; local arc=$?
+    run_app 20 THYLACINE_ECHO_POINTER=1 -- --exit-after 3 --scripted-click 600,108; local arc=$?
     python3 -I "$here/as_input_guest.py" t.sock reports 640 480 > heard.out 2>&1
     quit_qemu
     local rc=0 got said want_click
@@ -371,7 +389,46 @@ mouse: nothing" ]; then
     said=$(grep '^scripted: pointer ' app.out | tr '\n' ';')
     [ "$said" = 'scripted: pointer to the middle, guest pixel 320,240 of 640x480;scripted: pointer a left click, guest pixel 600,108 of 640x480;scripted: pointer to the last pixel, guest pixel 639,479 of 640x480;' ] \
         || { echo "$name: FAIL: the script did not say its three steps as they were ($said)"; rc=1; }
+    # That caller reads the guest's account from what THYLACINE_ECHO_POINTER=1 prints. With no
+    # guest QEMU gives a pointer's place once, as the app registers with it.
+    said=$(grep '^pointer: ' app.out | tr '\n' ';')
+    [ "$said" = 'pointer: the guest has its pointer at 0,0, shown 0;' ] \
+        || { echo "$name: FAIL: the place QEMU gave for its pointer was not printed once as it was (${said:-nothing})"; rc=1; }
     said_of_qemu "$name" || rc=1
+    return $rc
+}
+
+# stopped_leg: the paced pointer script on the first machine while it is stopped.
+stopped_leg() {
+    local name=stopped
+    local d=$repo/build/macrunner-app-test/$name
+    mkdir -p "$d" && cd "$d" || return 1
+    rm -f app.out heard.out
+    start_qemu "$name" ,display=gpu0,head=0 -S || return 1
+    run_app 20 -- --exit-after 3 --scripted-click 600,108; local arc=$?
+    python3 -I "$here/as_input_guest.py" t.sock reports 640 480 > heard.out 2>&1
+    quit_qemu
+    local rc=0 got said
+    [ "$arc" -eq 0 ] || { echo "$name: FAIL: the app exited $arc ($(tail -1 app.out))"; rc=1; }
+    got=$(seen 640 480)
+    if [ -z "$got" ] && [ "$(cat heard.out)" = "keyboard: nothing
+tablet: nothing
+mouse: nothing" ]; then
+        echo "$name: QEMU was handed nothing for a machine that is stopped, and its devices handed their driver nothing"
+    else
+        echo "$name: FAIL: something reached a machine that is stopped"; echo "  got:  $got"; sed 's/^/  got:  /' heard.out; rc=1
+    fi
+    # The view sent the script's four events. QEMU refuses three of them: the release of a press
+    # it refused is not sent. The app says the first refusal and each doubling of their number,
+    # and of this machine nothing else: its display and its tablet's binding were found.
+    said=$(grep '^input: ' app.out | tr '\n' ';')
+    if [ "$said" = 'input: QEMU refused an event (VM not running); 1 so far;input: QEMU refused an event (VM not running); 2 so far;' ]; then
+        echo "$name: QEMU refused the two places and the press, and the app found the display and the tablet's binding all the same"
+    else
+        echo "$name: FAIL: what the app said of its input is not three refusals and nothing else"; echo "  got:  ${said:-nothing}"; rc=1
+    fi
+    [ "$(grep -c '^scripted: pointer ' app.out)" = 3 ] \
+        || { echo "$name: FAIL: the script did not run its three steps ($(grep '^scripted' app.out | tail -1))"; rc=1; }
     return $rc
 }
 
@@ -481,7 +538,7 @@ def told(run, points, tellings):
 told("a", None, 1)
 told("b", (4200.0, 700.0), 2)
 # This machine's display has no name, and the app found that out at the attach.
-unnamed = [l.strip() for l in open("app-a.out", errors="replace") if l.startswith("input: this QEMU has no device named gpu0")]
+unnamed = [l.strip() for l in open("app-a.out", errors="replace") if l.startswith("input: gpu0 is not a display of this QEMU (Device 'gpu0' not found)")]
 check("a: the app says this QEMU has no display named gpu0", len(unnamed) == 1, unnamed or "it did not say so")
 # The size told had stood when the content went a point wider and back: two tellings by then,
 # and (above) two at the end.
@@ -497,12 +554,14 @@ rc=0
 pixels="mapped";          leg map || rc=1
 pixels="in the messages"; leg in-band THYLACINE_NO_MAP=1 || rc=1
 size_leg || rc=1
-bar_leg bar ,display=gpu0,head=0 \
-    'at 0,240 press right;at 0,240 release right;at 639,479 press right;at 639,479 release right;' nothing \
+clicks='at 0,240 press right;at 0,240 release right;at 639,479 press right;at 639,479 release right;'
+bar_leg bar ,display=gpu0,head=0 "$clicks" "$clicks" nothing \
     "each click reached the tablet's driver as one report of a place and a button, and the mouse's nothing" || rc=1
 bar_leg bar-unbound "" \
-    'at 0,240;at 0,240;at 639,479;at 639,479;' 'press right;release right;press right;release right;' \
-    "with the tablet bound to nothing the places reached the tablet's driver and the buttons the mouse's" || rc=1
+    'at 0,240;at 0,240 press right;at 0,240 release right;at 639,479;at 639,479 press right;at 639,479 release right;' \
+    'at 0,240;at 0,240;at 0,240;at 639,479;at 639,479;at 639,479;' 'press right;release right;press right;release right;' \
+    "with the tablet bound to nothing each place went ahead of its press; the places reached the tablet's driver and the buttons the mouse's" || rc=1
 click_leg || rc=1
+stopped_leg || rc=1
 [ $rc -eq 0 ] && echo "PASS: macrunner/app headless" || echo "FAIL: macrunner/app headless (evidence in $repo/build/macrunner-app-test)"
 exit $rc

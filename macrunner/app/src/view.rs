@@ -1064,59 +1064,67 @@ impl GuestView {
     // compositor says where its pointer is once a frame, and the caller wants each place it was
     // sent to. The middle of the picture, a left click on the pixel asked for, the last pixel. The
     // events are handed to the view itself, because a window that is not active keeps a left click
-    // for its own activation and is given no moves; the points are worked out from the rule alone
-    // (the picture fitted and centred), not through `place`.
+    // for its own activation and is given no moves. A step aims at the middle of its pixel where
+    // the view has the picture now, and is said as done only if the view sent that pixel: what a
+    // step sent instead is said as that.
     fn scripted_click(&self, step: u8) {
-        let (Some(window), Some((cx, cy))) = (self.window(), self.ivars().opts.scripted_click)
-        else {
+        let iv = self.ivars();
+        let (Some(window), Some((cx, cy))) = (self.window(), iv.opts.scripted_click) else {
             return;
         };
-        let (tw, th) = self
-            .ivars()
-            .renderer
-            .borrow()
-            .as_ref()
-            .map(|r| r.tex_size)
-            .unwrap_or((0, 0));
-        if tw == 0 || th == 0 {
+        // The script does not wait for a frame to bring the picture: with the Mac's display
+        // asleep none comes.
+        if let Some(r) = iv.renderer.borrow_mut().as_mut() {
+            r.upload(&iv.display, &mut iv.stats.borrow_mut());
+        }
+        let Some((rect, _, (tw, th))) = self.picture() else {
             eprintln!("scripted: no scanout, the pointer is not tried");
             return;
-        }
+        };
         let (what, gx, gy) = match step {
             0 => ("to the middle", tw / 2, th / 2),
             1 => ("a left click", cx.min(tw - 1), cy.min(th - 1)),
             _ => ("to the last pixel", tw - 1, th - 1),
         };
-        let b = self.bounds();
-        let scale = (b.size.width / tw as f64).min(b.size.height / th as f64);
-        let x = (b.size.width - tw as f64 * scale) / 2.0 + (gx as f64 + 0.5) * scale;
-        let y_top = (b.size.height - th as f64 * scale) / 2.0 + (gy as f64 + 0.5) * scale;
-        let p = self.convertPoint_toView(NSPoint::new(x, b.size.height - y_top), None);
+        let meant = Place {
+            x: gx,
+            y: gy,
+            w: tw,
+            h: th,
+        };
+        let x = rect.origin.x + (gx as f64 + 0.5) * rect.size.width / tw as f64;
+        let y = rect.origin.y + rect.size.height - (gy as f64 + 0.5) * rect.size.height / th as f64;
+        let p = self.convertPoint_toView(NSPoint::new(x, y), None);
         let wn = window.windowNumber();
-        let event = |ty: NSEventType| {
-            NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
-                ty, p, NSEventModifierFlags::empty(), 0.0, wn, None, 0, 1, 1.0)
+        // What the view sent for one event: None if nothing, or else the place it gave it.
+        let sent = |ty: NSEventType, button: Option<bool>| {
+            let ev = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+                ty, p, NSEventModifierFlags::empty(), 0.0, wn, None, 0, 1, 1.0)?;
+            let at = self.guest_point(&ev);
+            match button {
+                Some(down) => self.button(&ev, button_code(0), down),
+                None => self.pointer(&ev),
+            }
+            .then_some(at)
         };
-        let sent = if step == 1 {
-            [
-                (NSEventType::LeftMouseDown, true),
-                (NSEventType::LeftMouseUp, false),
+        let all: Vec<Option<Option<Place>>> = if step == 1 {
+            vec![
+                sent(NSEventType::LeftMouseDown, Some(true)),
+                sent(NSEventType::LeftMouseUp, Some(false)),
             ]
-            .into_iter()
-            .all(|(ty, down)| {
-                event(ty)
-                    .map(|ev| self.button(&ev, button_code(0), down))
-                    .is_some()
-            })
         } else {
-            event(NSEventType::MouseMoved)
-                .map(|ev| self.pointer(&ev))
-                .is_some()
+            vec![sent(NSEventType::MouseMoved, None)]
         };
-        if sent {
-            eprintln!("scripted: pointer {what}, guest pixel {gx},{gy} of {tw}x{th}");
-        } else {
-            eprintln!("scripted: no mouse event");
+        match all.iter().find(|&&s| s != Some(Some(meant))) {
+            None => eprintln!("scripted: pointer {what}, guest pixel {gx},{gy} of {tw}x{th}"),
+            Some(other) => {
+                let other = match other {
+                    Some(Some(at)) => format!("{},{} of {}x{}", at.x, at.y, at.w, at.h),
+                    Some(None) => "an event with no place".into(),
+                    None => "nothing".into(),
+                };
+                eprintln!("scripted: pointer {what}: meant {gx},{gy} of {tw}x{th}, sent {other}");
+            }
         }
     }
 
@@ -1245,28 +1253,32 @@ impl GuestView {
         }
     }
 
-    fn pointer(&self, ev: &NSEvent) {
+    // Whether a place was sent for the event: none is over a bar.
+    fn pointer(&self, ev: &NSEvent) -> bool {
         self.settle_modifiers(ev);
-        if let Some(at) = self.guest_point(ev) {
+        let at = self.guest_point(ev);
+        if let Some(at) = at {
             self.send(Input::Abs(at));
         }
+        at.is_some()
     }
 
     // A press counts only over the picture: over the bars it would land wherever the guest's
     // pointer last was. A release is sent exactly when its press was, wherever it happens: with
-    // its place over the picture, and with none off it.
-    fn button(&self, ev: &NSEvent, button: Option<u32>, down: bool) {
+    // its place over the picture, and with none off it. Whether the event was sent is handed back.
+    fn button(&self, ev: &NSEvent, button: Option<u32>, down: bool) -> bool {
         self.settle_modifiers(ev);
-        let Some(button) = button else { return };
+        let Some(button) = button else { return false };
         let at = self.guest_point(ev);
         if down {
             if at.is_none() || !self.ivars().pressed.borrow_mut().insert(button) {
-                return;
+                return false;
             }
         } else if !self.ivars().pressed.borrow_mut().remove(&button) {
-            return;
+            return false;
         }
         self.send(Input::Button { button, down, at });
+        true
     }
 
     // A fixed run of events, each made as AppKit makes them and handed to the window, so that what reaches

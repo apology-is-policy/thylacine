@@ -342,7 +342,7 @@ struct State {
     dirty: Arc<AtomicBool>,
     pointer_dirty: Arc<AtomicBool>,
     map: bool,
-    echo: bool,
+    echo: Option<mpsc::Sender<(i32, i32, i32)>>,
     unshowable: AtomicU64,
 }
 
@@ -505,8 +505,8 @@ impl Listener {
     // The position is the guest repeating the one it was sent, so only whether it shows its pointer
     // is news. QEMU says so once when the listener registers, before any guest has spoken.
     fn mouse_set(&mut self, x: i32, y: i32, on: i32) {
-        if self.0.echo {
-            eprintln!("pointer: the guest has its pointer at {x},{y}, shown {on}");
+        if let Some(echo) = &self.0.echo {
+            echo.send((x, y, on)).ok();
         }
         show_pointer(&self.0.shared, &self.0.pointer_dirty, on != 0);
     }
@@ -655,13 +655,23 @@ struct Monitor {
     r: BufReader<UnixStream>,
 }
 impl Monitor {
-    // One command and its answer. With no deadline it waits for as long as QEMU takes.
     fn cmd(
         &mut self,
         json: &str,
         fd: Option<i32>,
         deadline: Option<Instant>,
     ) -> Result<(), QmpError> {
+        self.ask(json, fd, deadline).map(|_| ())
+    }
+
+    // One command and the line that answers it. With no deadline it waits for as long as QEMU
+    // takes.
+    fn ask(
+        &mut self,
+        json: &str,
+        fd: Option<i32>,
+        deadline: Option<Instant>,
+    ) -> Result<String, QmpError> {
         let line = format!("{json}\n");
         if let Some(deadline) = deadline {
             limit(&self.w, deadline)?;
@@ -680,7 +690,7 @@ impl Monitor {
             }
             match answer(&reply) {
                 None => continue,
-                Some(Ok(())) => return Ok(()),
+                Some(Ok(())) => return Ok(reply),
                 Some(Err(why)) => return Err(QmpError::Refused(why)),
             }
         }
@@ -693,6 +703,9 @@ const AXIS_MAX: u64 = 0x7fff;
 // on the tablet, tools/run-vm.sh) takes all of an event; with none bound a place goes to the
 // tablet and a button to the pointer device that came up last, whose report QEMU hands over first.
 const SCREEN: &str = "gpu0";
+// The tablet as tools/run-vm.sh names it. Another launcher's tablet is not looked for: one that
+// is not found is taken for one bound to nothing.
+const TABLET: &str = "tab-pci0";
 // QEMU's names for the buttons, by the numbers the view counts them in (InputButton's order).
 const BUTTONS: [&str; 7] = [
     "left",
@@ -748,16 +761,143 @@ fn pointer_event(to_screen: bool, at: Option<Place>, button: Option<(&str, bool)
 // to the console, or with none bound the one whose driver came up last, which in a guest of ours
 // is the mouse), and relative motion only while it is not. The monitor's input-send-event takes
 // either at any time.
+//
+// QEMU refuses an event while its machine is stopped. A refused place or press is nothing to the
+// guest: the next place stands for it, and the release of a press QEMU did not take is not sent.
+// A refused release is another matter, because the guest holds the button until it is told. It is
+// kept, and it goes before anything that happened after it.
 #[derive(Debug)]
 struct Pointing {
     monitor: Monitor,
     to_screen: bool,
+    // A tablet is bound to the screen, which makes one report of a button and its place.
+    bound: bool,
+    // The buttons the guest holds: QEMU took the press and has not taken the release.
+    down: [bool; BUTTONS.len()],
+    // The releases QEMU refused, oldest first, each with the place it had.
+    owed: Vec<(usize, Option<Place>)>,
+    // The place QEMU last took.
+    last: Option<Place>,
 }
 impl Pointing {
-    fn send(&mut self, at: Option<Place>, button: Option<(&str, bool)>) -> Result<(), QmpError> {
-        self.monitor
-            .cmd(&pointer_event(self.to_screen, at, button), None, None)
+    fn new(monitor: Monitor, to_screen: bool, bound: bool) -> Pointing {
+        Pointing {
+            monitor,
+            to_screen,
+            bound,
+            down: [false; BUTTONS.len()],
+            owed: Vec::new(),
+            last: None,
+        }
     }
+
+    fn cmd(&mut self, at: Option<Place>, button: Option<(usize, bool)>) -> Result<(), QmpError> {
+        let named = button.map(|(b, down)| (BUTTONS[b], down));
+        self.monitor
+            .cmd(&pointer_event(self.to_screen, at, named), None, None)?;
+        if at.is_some() {
+            self.last = at;
+        }
+        Ok(())
+    }
+
+    // A button or a notch with its place. With no tablet bound to the screen QEMU hands the place
+    // to the tablet and the button to another device, the button first. So there a place the guest
+    // was not sent yet goes ahead in a command of its own: the guest has that command's round trip
+    // to take the place in, which makes the button first unlikely and not impossible. The place
+    // goes with the button all the same, for a tablet that is bound and was not found to be.
+    fn with_place(&mut self, at: Option<Place>, button: (usize, bool)) -> Result<(), QmpError> {
+        if !self.bound && at.is_some() && at != self.last {
+            self.cmd(at, None)?;
+        }
+        self.cmd(at, Some(button))
+    }
+
+    // Send the releases QEMU refused. The first one it refuses again ends the try: it refuses for
+    // as long as its machine is stopped.
+    fn settle(&mut self) -> Result<(), QmpError> {
+        while let Some(&(b, at)) = self.owed.first() {
+            self.with_place(at, (b, false))?;
+            self.owed.remove(0);
+            self.down[b] = false;
+        }
+        Ok(())
+    }
+
+    fn place(&mut self, at: Place) -> Result<(), QmpError> {
+        self.settle()?;
+        self.cmd(Some(at), None)
+    }
+
+    // A release of a button the guest holds is owed from here until QEMU takes it. A press of one
+    // it holds, and a release of one it does not, are not sent.
+    fn button(&mut self, b: usize, down: bool, at: Option<Place>) -> Result<(), QmpError> {
+        if !down && self.down[b] && !self.owed.iter().any(|&(o, _)| o == b) {
+            self.owed.push((b, at));
+        }
+        self.settle()?;
+        if down && !self.down[b] {
+            self.with_place(at, (b, true))?;
+            self.down[b] = true;
+        }
+        Ok(())
+    }
+
+    // A notch is the wheel's button going down. Its coming up is no part of a notch, and a virtio
+    // tablet makes a key of it that no driver expects.
+    fn notch(&mut self, up: bool, at: Place) -> Result<(), QmpError> {
+        self.settle()?;
+        self.with_place(Some(at), (if up { 3 } else { 4 }, true))
+    }
+
+    // The pointer's events are sent from here. Any other is handed back, for the display
+    // connection, once the releases the guest is owed have been tried: they go before what
+    // happened after them. It is handed back whether or not QEMU took them this time. A key QEMU
+    // does not hand a stopped machine it drops without a word, and one kept back here would be
+    // lost to a machine that had just been continued.
+    fn take(&mut self, ev: Input) -> Result<Option<Input>, QmpError> {
+        match ev {
+            Input::Abs(at) => self.place(at)?,
+            Input::Button { button, down, at } => {
+                if button as usize >= BUTTONS.len() {
+                    return Err(QmpError::Refused(format!("there is no button {button}")));
+                }
+                self.button(button as usize, down, at)?
+            }
+            Input::Wheel { up, at } => self.notch(up, at)?,
+            other => {
+                return match self.settle() {
+                    Err(QmpError::Io(e)) => Err(QmpError::Io(e)),
+                    _ => Ok(Some(other)),
+                }
+            }
+        }
+        Ok(None)
+    }
+}
+
+// Whether the launcher's tablet is bound to the screen: if not, what QEMU answered instead.
+fn tablet_bound(monitor: &mut Monitor, deadline: Instant) -> Result<Result<(), String>, QmpError> {
+    for (property, bound) in [("display", format!("\"{SCREEN}\"")), ("head", "0".into())] {
+        let get = format!(
+            r#"{{"execute":"qom-get","arguments":{{"path":"/machine/peripheral/{TABLET}","property":"{property}"}}}}"#
+        );
+        match monitor.ask(&get, None, Some(deadline)) {
+            Ok(line) => {
+                let line = line.trim_end();
+                let value = line
+                    .strip_prefix("{\"return\": ")
+                    .and_then(|v| v.strip_suffix('}'))
+                    .unwrap_or(line);
+                if value != bound {
+                    return Ok(Err(format!("its {property} is {value}")));
+                }
+            }
+            Err(QmpError::Refused(why)) => return Ok(Err(why)),
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(Ok(()))
 }
 
 // Hand QEMU one end of a socket pair over QMP and make it a display client; returns our end, and
@@ -771,7 +911,10 @@ fn attach(qmp_path: &str, deadline: Instant) -> std::io::Result<(UnixStream, Poi
                     std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
                 ) =>
             {
-                format!("no answer in {} s", ATTACH_TIMEOUT.as_secs())
+                format!(
+                    "no answer in {} s: it is not answering, or another client holds this monitor (it serves one at a time)",
+                    ATTACH_TIMEOUT.as_secs()
+                )
             }
             QmpError::Io(e) => e.to_string(),
             QmpError::Refused(why) => why,
@@ -806,21 +949,30 @@ fn attach_qmp(qmp_path: &str, deadline: Instant) -> Result<(UnixStream, Pointing
         r#"{"execute":"add_client","arguments":{"protocol":"@dbus-display","fdname":"thylacine-display"}}"#,
         None,
     )?;
-    let screen = format!(
-        r#"{{"execute":"qom-get","arguments":{{"path":"/machine/peripheral/{SCREEN}","property":"type"}}}}"#
-    );
-    let to_screen = match monitor.cmd(&screen, None, Some(deadline)) {
+    // Whether the screen is a display of this QEMU: an event of nothing, addressed as the
+    // pointer's will be. QEMU looks for the display before it looks at whether its machine is
+    // running, so a stopped machine's refusal says the display is there.
+    let to_screen = match monitor.cmd(&pointer_event(true, None, None), None, Some(deadline)) {
         Ok(()) => true,
+        Err(QmpError::Refused(why)) if why == "VM not running" => true,
         Err(QmpError::Refused(why)) => {
-            eprintln!("input: this QEMU has no device named {SCREEN} ({why}); the pointer's events go to whichever device QEMU picks for each");
+            eprintln!("input: {SCREEN} is not a display of this QEMU ({why}); the pointer's events go to whichever device QEMU picks for each");
             false
         }
         Err(e) => return Err(e),
     };
+    let bound = to_screen
+        && match tablet_bound(&mut monitor, deadline)? {
+            Ok(()) => true,
+            Err(why) => {
+                eprintln!("input: the tablet {TABLET} is not known to be bound to {SCREEN} ({why}); a button's place is sent ahead of it, and a guest may still see the button first");
+                false
+            }
+        };
     // From here on a command waits for its answer for as long as QEMU takes.
     monitor.w.set_read_timeout(None)?;
     monitor.w.set_write_timeout(None)?;
-    Ok((ours, Pointing { monitor, to_screen }))
+    Ok((ours, Pointing::new(monitor, to_screen, bound)))
 }
 
 async fn serve(
@@ -902,23 +1054,15 @@ fn send_input(conn: &zbus::Connection, pointing: &mut Pointing, ev: Input) -> Re
             .map(|_| ())?
         };
     }
+    let Some(ev) = pointing.take(ev)? else {
+        return Ok(());
+    };
     match ev {
         Input::Key { qnum, down } => call!(
             "org.qemu.Display1.Keyboard",
             if down { "Press" } else { "Release" },
             &(qnum,)
         ),
-        Input::Abs(at) => pointing.send(Some(at), None)?,
-        Input::Button { button, down, at } => match BUTTONS.get(button as usize) {
-            Some(name) => pointing.send(at, Some((name, down)))?,
-            None => return Err(Unsent::Refused(format!("there is no button {button}"))),
-        },
-        // A notch is the wheel's button going down. Its coming up is no part of a notch, and a
-        // virtio tablet makes a key of it that no driver expects.
-        Input::Wheel { up, at } => {
-            let name = if up { "wheel-up" } else { "wheel-down" };
-            pointing.send(Some(at), Some((name, true)))?
-        }
         // QEMU keeps it for the guest's next question about its display, and raises the device's
         // display event. A console whose device takes no size refuses the call.
         Input::Size(u) => call!(
@@ -926,13 +1070,14 @@ fn send_input(conn: &zbus::Connection, pointing: &mut Pointing, ev: Input) -> Re
             "SetUIInfo",
             &(u.width_mm, u.height_mm, 0i32, 0i32, u.width, u.height)
         ),
-        Input::Sync => {}
+        // A Sync has nothing of its own to send, and the pointer's events did not come back.
+        _ => {}
     }
     Ok(())
 }
 
 // What the input thread does: the events in order, a run of positions as its last one, until the
-// window is gone or QEMU is.
+// window is gone or QEMU is. A Sync is answered once everything before it has been tried.
 fn pump(
     irx: mpsc::Receiver<Input>,
     stx: mpsc::Sender<()>,
@@ -943,10 +1088,7 @@ fn pump(
     while let Some(first) = held_back.take().or_else(|| irx.recv().ok()) {
         let (ev, rest) = next_input(first, || irx.try_recv().ok());
         held_back = rest;
-        if ev == Input::Sync {
-            stx.send(()).ok();
-            continue;
-        }
+        let sync = ev == Input::Sync;
         match send(ev) {
             Ok(()) => {}
             Err(Unsent::Gone(e)) => {
@@ -962,6 +1104,9 @@ fn pump(
                 }
             }
         }
+        if sync {
+            stx.send(()).ok();
+        }
     }
 }
 
@@ -975,8 +1120,22 @@ pub fn connect(qmp_path: &str) -> Result<Display, Box<dyn std::error::Error>> {
     // shareable surface takes, kept reachable so that it can be tried.
     let map = std::env::var_os("THYLACINE_NO_MAP").is_none_or(|v| v != "1");
     // THYLACINE_ECHO_POINTER=1 prints each place the guest says its pointer is at, for a test
-    // that wants to see where an event landed.
-    let echo = std::env::var_os("THYLACINE_ECHO_POINTER").is_some_and(|v| v == "1");
+    // that wants to see where an event landed. A thread of its own prints them: QEMU waits for
+    // the display thread, which must not wait for whoever reads the app's output.
+    let echo = match std::env::var_os("THYLACINE_ECHO_POINTER") {
+        Some(v) if v == "1" => {
+            let (tx, said) = mpsc::channel::<(i32, i32, i32)>();
+            std::thread::Builder::new()
+                .name("echo".into())
+                .spawn(move || {
+                    for (x, y, on) in said {
+                        eprintln!("pointer: the guest has its pointer at {x},{y}, shown {on}");
+                    }
+                })?;
+            Some(tx)
+        }
+        _ => None,
+    };
     let state = Arc::new(State {
         shared: shared.clone(),
         dirty: dirty.clone(),
@@ -1062,7 +1221,7 @@ mod tests {
             dirty: Arc::new(AtomicBool::new(false)),
             pointer_dirty: Arc::new(AtomicBool::new(false)),
             map,
-            echo: false,
+            echo: None,
             unshowable: AtomicU64::new(0),
         });
         (state, shared)
@@ -1156,11 +1315,40 @@ mod tests {
         "{\"timestamp\": {\"seconds\": 1794471987, \"microseconds\": 21641}, \"event\": \"STOP\"}\r\n";
     const NOT_RUNNING: &str =
         "{\"error\": {\"class\": \"GenericError\", \"desc\": \"VM not running\"}}\r\n";
-    const NO_SCREEN: &str = "{\"error\": {\"class\": \"DeviceNotFound\", \"desc\": \"Device '/machine/peripheral/gpu0' not found\"}}\r\n";
+    const RESUMED: &str =
+        "{\"timestamp\": {\"seconds\": 1794479739, \"microseconds\": 687903}, \"event\": \"RESUME\"}\r\n";
+    const NO_SCREEN: &str =
+        "{\"error\": {\"class\": \"DeviceNotFound\", \"desc\": \"Device 'gpu0' not found\"}}\r\n";
+    const NOT_A_SCREEN: &str = "{\"error\": {\"class\": \"GenericError\", \"desc\": \"Device gpu0 (head 0) is not bound to a QemuConsole\"}}\r\n";
+    const NO_TABLET: &str = "{\"error\": {\"class\": \"DeviceNotFound\", \"desc\": \"Device '/machine/peripheral/tab-pci0' not found\"}}\r\n";
+    const ON_SCREEN: &str = "{\"return\": \"gpu0\"}\r\n";
+    const ON_NOTHING: &str = "{\"return\": \"\"}\r\n";
+    const HEAD_0: &str = "{\"return\": 0}\r\n";
+    // Not seen from QEMU: made after HEAD_0.
+    const HEAD_1: &str = "{\"return\": 1}\r\n";
 
-    // A monitor that greets at once and answers every line after `delay`: done, or, asked about
-    // the screen when it has none, that there is no such device.
-    fn monitor(name: &str, delay: Duration, screen: bool) -> (String, std::thread::JoinHandle<()>) {
+    // What a QEMU answers the attach's questions: an event of nothing addressed to the screen,
+    // and what its tablet's display and head are.
+    #[derive(Clone, Copy)]
+    struct Machine {
+        probe: &'static str,
+        display: &'static str,
+        head: &'static str,
+    }
+    // The launcher's: the screen is a display, and the tablet is bound to it.
+    const OURS: Machine = Machine {
+        probe: DONE,
+        display: ON_SCREEN,
+        head: HEAD_0,
+    };
+
+    // A monitor that greets at once and answers every line after `delay`, as that machine's
+    // would. It hands back the commands it was sent.
+    fn monitor(
+        name: &str,
+        delay: Duration,
+        machine: Machine,
+    ) -> (String, std::thread::JoinHandle<Vec<String>>) {
         let path = std::env::temp_dir().join(format!("tm-{name}-{}", std::process::id()));
         let _ = std::fs::remove_file(&path);
         let listener = UnixListener::bind(&path).unwrap();
@@ -1168,19 +1356,26 @@ mod tests {
             let (s, _) = listener.accept().unwrap();
             let mut r = BufReader::new(s.try_clone().unwrap());
             (&s).write_all(b"{\"QMP\": {}}\r\n").unwrap();
+            let mut seen = Vec::new();
             let mut line = String::new();
             while r.read_line(&mut line).is_ok_and(|n| n > 0) {
-                let answer = if line.contains("qom-get") && !screen {
-                    NO_SCREEN
+                let answer = if line.contains("input-send-event") {
+                    machine.probe
+                } else if line.contains("\"property\":\"display\"") {
+                    machine.display
+                } else if line.contains("\"property\":\"head\"") {
+                    machine.head
                 } else {
                     DONE
                 };
+                seen.push(line.trim_end().to_string());
                 line.clear();
                 std::thread::sleep(delay);
                 if (&s).write_all(answer.as_bytes()).is_err() {
                     break;
                 }
             }
+            seen
         });
         (path.to_str().unwrap().to_string(), served)
     }
@@ -1188,20 +1383,44 @@ mod tests {
     #[test]
     fn the_whole_attach_has_one_deadline() {
         let step = Duration::from_millis(150);
-        // Four answers, each `step` late, fit in five seconds.
-        let (path, served) = monitor("fits", step, true);
+        // Six answers, each `step` late, fit in five seconds.
+        let (path, served) = monitor("fits", step, OURS);
         let begun = Instant::now();
         let (_display, pointing) = attach_qmp(&path, begun + Duration::from_secs(5)).unwrap();
-        assert!(begun.elapsed() >= 4 * step);
-        assert!(pointing.to_screen);
+        assert!(begun.elapsed() >= 6 * step);
+        assert!(pointing.to_screen && pointing.bound);
         // The monitor is kept, and after the attach it is waited on for as long as it takes.
         assert_eq!(pointing.monitor.w.read_timeout().unwrap(), None);
         assert_eq!(pointing.monitor.w.write_timeout().unwrap(), None);
         drop(pointing);
-        served.join().unwrap();
+        let seen = served.join().unwrap();
         std::fs::remove_file(&path).unwrap();
+        let asked: Vec<&str> = seen
+            .iter()
+            .map(|c| c.split('"').nth(3).unwrap_or(""))
+            .collect();
+        assert_eq!(
+            asked,
+            [
+                "qmp_capabilities",
+                "getfd",
+                "add_client",
+                "input-send-event",
+                "qom-get",
+                "qom-get"
+            ]
+        );
+        // The question about the screen is an event of nothing, addressed as the pointer's are.
+        assert_eq!(
+            seen[3],
+            r#"{"execute":"input-send-event","arguments":{"device":"gpu0","head":0,"events":[]}}"#
+        );
+        assert_eq!(
+            seen[4],
+            r#"{"execute":"qom-get","arguments":{"path":"/machine/peripheral/tab-pci0","property":"display"}}"#
+        );
         // They do not fit in two steps, though each of them alone does.
-        let (path, served) = monitor("late", step, true);
+        let (path, served) = monitor("late", step, OURS);
         match attach_qmp(&path, Instant::now() + 2 * step).unwrap_err() {
             QmpError::Io(e) => assert!(
                 matches!(
@@ -1217,14 +1436,37 @@ mod tests {
     }
 
     #[test]
-    fn a_qemu_without_the_screen_is_attached_to_and_sent_unaddressed_events() {
-        let (path, served) = monitor("bare", Duration::ZERO, false);
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let (_display, pointing) = attach_qmp(&path, deadline).unwrap();
-        assert!(!pointing.to_screen);
-        drop(pointing);
-        served.join().unwrap();
-        std::fs::remove_file(&path).unwrap();
+    fn the_attach_finds_out_what_the_pointers_events_will_reach() {
+        let m = |probe, display, head| Machine {
+            probe,
+            display,
+            head,
+        };
+        // (the machine, whether the screen is a display of it, whether the tablet is bound to
+        // that, how many questions it took)
+        for (name, machine, to_screen, bound, asked) in [
+            ("ours", OURS, true, true, 6),
+            // A stopped machine refuses the event after it has found the display.
+            ("stopped", m(NOT_RUNNING, ON_SCREEN, HEAD_0), true, true, 6),
+            ("unbound", m(DONE, ON_NOTHING, HEAD_0), true, false, 5),
+            ("head", m(DONE, ON_SCREEN, HEAD_1), true, false, 6),
+            ("anothers", m(DONE, NO_TABLET, NO_TABLET), true, false, 5),
+            // With no screen to be bound to, the tablet is not asked about.
+            ("bare", m(NO_SCREEN, NO_TABLET, NO_TABLET), false, false, 4),
+            ("rng", m(NOT_A_SCREEN, ON_NOTHING, HEAD_0), false, false, 4),
+        ] {
+            let (path, served) = monitor(name, Duration::ZERO, machine);
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let (_display, pointing) = attach_qmp(&path, deadline).unwrap();
+            assert_eq!(
+                (pointing.to_screen, pointing.bound),
+                (to_screen, bound),
+                "{name}"
+            );
+            drop(pointing);
+            assert_eq!(served.join().unwrap().len(), asked, "{name}");
+            std::fs::remove_file(&path).unwrap();
+        }
     }
 
     #[test]
@@ -1242,10 +1484,17 @@ mod tests {
         let record = sent.clone();
         let gone = Arc::new(AtomicBool::new(false));
         let is_gone = gone.clone();
+        let syncs = Arc::new(AtomicU64::new(0));
+        let synced_with = syncs.clone();
         let pumping = std::thread::spawn(move || {
             pump(irx, stx, |ev| {
                 if is_gone.load(Ordering::Acquire) {
                     return Err(Unsent::Gone("gone".into()));
+                }
+                // The sender is handed a Sync too: it has releases of its own to try by then.
+                if ev == Input::Sync {
+                    synced_with.fetch_add(1, Ordering::AcqRel);
+                    return Ok(());
                 }
                 // QEMU taking its time.
                 std::thread::sleep(Duration::from_millis(40));
@@ -1279,6 +1528,7 @@ mod tests {
         display.input.send(up).unwrap();
         assert!(display.drain(Duration::from_secs(5)));
         assert_eq!(sent.lock().unwrap().len(), 2);
+        assert_eq!(syncs.load(Ordering::Acquire), 1);
         // With QEMU gone there is nothing to wait for, and the wait says so at once.
         gone.store(true, Ordering::Release);
         display.input.send(Input::Wheel { up: true, at }).unwrap();
@@ -1644,6 +1894,11 @@ mod tests {
     fn scripted(script: Vec<String>) -> (Monitor, std::thread::JoinHandle<Vec<String>>) {
         let (ours, theirs) = UnixStream::pair().unwrap();
         let played = std::thread::spawn(move || {
+            // A test that sends fewer commands than its script answers fails here: it is not
+            // left waiting for one.
+            theirs
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
             let mut r = BufReader::new(theirs.try_clone().unwrap());
             let mut seen = Vec::new();
             for lines in script {
@@ -1670,10 +1925,7 @@ mod tests {
             NOT_RUNNING.into(),
             DONE.into(),
         ]);
-        let mut pointing = Pointing {
-            monitor,
-            to_screen: true,
-        };
+        let mut pointing = Pointing::new(monitor, true, true);
         let at = Place {
             x: 0,
             y: 0,
@@ -1681,22 +1933,189 @@ mod tests {
             h: 480,
         };
         // An event that came first is passed over, and the answer behind it is the command's.
-        assert!(pointing.send(Some(at), None).is_ok());
+        assert!(pointing.place(at).is_ok());
         // A refusal is QEMU's reason, and the connection is as good as before.
-        match pointing.send(Some(at), Some(("left", true))) {
+        match pointing.button(0, true, Some(at)) {
             Err(QmpError::Refused(why)) => assert_eq!(why, "VM not running"),
             other => panic!("{other:?}"),
         }
-        assert!(pointing.send(None, Some(("left", false))).is_ok());
+        assert!(pointing.notch(true, at).is_ok());
         // QEMU gone: the script is over and its end is closed.
         let seen = played.join().unwrap();
-        match pointing.send(Some(at), None).map_err(Unsent::from) {
+        match pointing.place(at).map_err(Unsent::from) {
             Err(Unsent::Gone(_)) => {}
             other => panic!("{other:?}"),
         }
         assert_eq!(seen.len(), 3);
         assert_eq!(seen[0], pointer_event(true, Some(at), None));
-        assert_eq!(seen[2], pointer_event(true, None, Some(("left", false))));
+        assert_eq!(
+            seen[2],
+            pointer_event(true, Some(at), Some(("wheel-up", true)))
+        );
+        assert_eq!((BUTTONS[3], BUTTONS[4]), ("wheel-up", "wheel-down"));
+    }
+
+    fn at(x: u32) -> Place {
+        Place {
+            x,
+            y: 7,
+            w: 640,
+            h: 480,
+        }
+    }
+
+    fn refused(r: Result<(), QmpError>) {
+        match r {
+            Err(QmpError::Refused(why)) => assert_eq!(why, "VM not running"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_release_qemu_refused_is_owed_and_goes_before_what_happened_after_it() {
+        let (monitor, played) = scripted(vec![
+            DONE.into(),                       // left goes down
+            format!("{STOPPED}{NOT_RUNNING}"), // and comes up while the machine is stopped
+            NOT_RUNNING.into(),                // the release again, for a press
+            NOT_RUNNING.into(),                // and for a second release
+            NOT_RUNNING.into(),                // and for a key
+            format!("{RESUMED}{DONE}"),        // and for a move, once the machine runs
+            DONE.into(),                       // that move
+            DONE.into(),                       // right goes down
+        ]);
+        let mut pointing = Pointing::new(monitor, true, true);
+        assert!(pointing.button(0, true, Some(at(1))).is_ok());
+        refused(pointing.button(0, false, Some(at(2))));
+        // Nothing of the pointer's goes ahead of the release: not a press of the same button,
+        refused(pointing.button(0, true, Some(at(3))));
+        // and its release, which the guest is owed no second time, is the first one tried again.
+        refused(pointing.button(0, false, None));
+        // A key is handed back to be sent whether or not QEMU took the release.
+        let key = Input::Key {
+            qnum: 30,
+            down: false,
+        };
+        assert_eq!(
+            pointing
+                .take(Input::Key {
+                    qnum: 30,
+                    down: false
+                })
+                .unwrap(),
+            Some(key)
+        );
+        assert!(pointing.take(Input::Abs(at(4))).unwrap().is_none());
+        // The guest was told left is up, and a release that comes now is no news to it.
+        assert!(pointing.button(0, false, Some(at(4))).is_ok());
+        assert!(pointing.button(2, true, Some(at(4))).is_ok());
+        let up = pointer_event(true, Some(at(2)), Some(("left", false)));
+        assert_eq!(
+            played.join().unwrap(),
+            [
+                pointer_event(true, Some(at(1)), Some(("left", true))),
+                up.clone(),
+                up.clone(),
+                up.clone(),
+                up.clone(),
+                up,
+                pointer_event(true, Some(at(4)), None),
+                pointer_event(true, Some(at(4)), Some(("right", true))),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_release_that_is_owed_is_tried_when_the_app_waits_for_its_input_to_be_sent() {
+        let (monitor, played) = scripted(vec![
+            DONE.into(),
+            NOT_RUNNING.into(),
+            NOT_RUNNING.into(),
+            DONE.into(),
+        ]);
+        let mut pointing = Pointing::new(monitor, true, true);
+        assert!(pointing.button(1, true, Some(at(1))).is_ok());
+        refused(pointing.button(1, false, None));
+        // QEMU refuses it again, and the wait is answered all the same.
+        assert_eq!(pointing.take(Input::Sync).unwrap(), Some(Input::Sync));
+        assert_eq!(pointing.take(Input::Sync).unwrap(), Some(Input::Sync));
+        // With nothing owed a Sync sends nothing: the script is over, and this does not find out.
+        assert_eq!(pointing.take(Input::Sync).unwrap(), Some(Input::Sync));
+        let up = pointer_event(true, None, Some(("middle", false)));
+        assert_eq!(
+            played.join().unwrap(),
+            [
+                pointer_event(true, Some(at(1)), Some(("middle", true))),
+                up.clone(),
+                up.clone(),
+                up
+            ]
+        );
+    }
+
+    #[test]
+    fn qemu_gone_is_found_out_by_a_release_that_is_owed() {
+        let (monitor, played) = scripted(vec![DONE.into(), NOT_RUNNING.into()]);
+        let mut pointing = Pointing::new(monitor, true, true);
+        assert!(pointing.button(0, true, None).is_ok());
+        refused(pointing.button(0, false, None));
+        // The script is over and its end is closed. A refusal does not keep a key back; QEMU
+        // gone is told whatever the event is.
+        played.join().unwrap();
+        let key = Input::Key {
+            qnum: 30,
+            down: true,
+        };
+        match pointing.take(key) {
+            Err(QmpError::Io(_)) => {}
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_release_of_a_press_qemu_refused_is_not_sent() {
+        let (monitor, played) = scripted(vec![NOT_RUNNING.into(), DONE.into()]);
+        let mut pointing = Pointing::new(monitor, true, true);
+        refused(pointing.button(2, true, Some(at(1))));
+        assert!(pointing.button(2, false, Some(at(1))).is_ok());
+        assert!(pointing.place(at(2)).is_ok());
+        assert_eq!(
+            played.join().unwrap(),
+            [
+                pointer_event(true, Some(at(1)), Some(("right", true))),
+                pointer_event(true, Some(at(2)), None),
+            ]
+        );
+    }
+
+    #[test]
+    fn with_no_tablet_bound_a_place_the_guest_was_not_sent_goes_ahead_of_its_button() {
+        let mut script = vec![DONE.to_string(); 8];
+        script[7] = NOT_RUNNING.into();
+        let (monitor, played) = scripted(script);
+        let mut pointing = Pointing::new(monitor, true, false);
+        assert!(pointing.button(2, true, Some(at(1))).is_ok());
+        // The guest has that place by now, and the release is one command.
+        assert!(pointing.button(2, false, Some(at(1))).is_ok());
+        assert!(pointing.place(at(2)).is_ok());
+        assert!(pointing.notch(true, at(2)).is_ok());
+        assert!(pointing.notch(false, at(3)).is_ok());
+        // A place QEMU refuses takes its button with it,
+        refused(pointing.button(0, true, Some(at(4))));
+        // and the guest was not told of that press.
+        assert!(pointing.button(0, false, Some(at(4))).is_ok());
+        assert_eq!(
+            played.join().unwrap(),
+            [
+                pointer_event(true, Some(at(1)), None),
+                pointer_event(true, Some(at(1)), Some(("right", true))),
+                pointer_event(true, Some(at(1)), Some(("right", false))),
+                pointer_event(true, Some(at(2)), None),
+                pointer_event(true, Some(at(2)), Some(("wheel-up", true))),
+                pointer_event(true, Some(at(3)), None),
+                pointer_event(true, Some(at(3)), Some(("wheel-down", true))),
+                pointer_event(true, Some(at(4)), None),
+            ]
+        );
     }
 
     #[test]

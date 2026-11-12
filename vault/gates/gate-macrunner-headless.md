@@ -2,9 +2,9 @@
 id: gate-macrunner-headless
 type: gate
 title: "The Mac app's headless test"
-proves: "On each pixel path (the scanout mapped from QEMU's memory; pixels sent in the D-Bus messages): that the Metal pipeline's output at 1:1 is byte-identical to QEMU's own screendump of QEMU's placeholder frame; that a scripted run of AppKit events reaches a QEMU whose input devices a scripted driver has brought up in our guest's order, the tablet bound to the display, as exactly 62 expected keys and pointer reports (each press, each release over the picture and each notch one report with its place), with nothing refused, and that a modifier whose release never came is let go of by a click and by a scroll over the bar, which send nothing and which the view itself reports; and that an image defined as the guest defines its pointer is what AppKit draws for the Mac's pointer (six pixels, one of them half-clear). And on a QEMU with no guest that is read as a guest's driver reads it (qtest): that its virtio GPU answers GET_DISPLAY_INFO and GET_EDID with the size the app told it for the window, in pixels and in the millimetres of as many points, and has its display event pending -- once as the app attaches, and once after the window's content is set to another size in three steps. That size is a mode too large for QEMU's EDID to have a detailed timing, and comes back as whole centimetres. And that a size which changes and comes back to what was told is not told again. And in a window one point larger each way than the scanout has pixels: that the pointer is mapped as for a picture at a whole scale (the leg does not look at what is drawn), a click on each bar reaching QEMU as nothing and a click on the first pixel of the middle row and on the last pixel of the last row as those pixels. And what the input devices then handed their driver: with the tablet bound to the display, every click on the tablet as one report of a place and a button, and nothing on the mouse; with the tablet bound to nothing, where QEMU's display connection refuses a position (the leg asks QEMU that the pointer device it goes by is the mouse), the places on the tablet and the buttons on the mouse. And that the paced pointer script a running guest is tried with (--scripted-click) sends what it says: the middle, a left click on a pixel and the last pixel, as four reports on the bound tablet."
-blind-to: "A guest: QEMU has none to run (it takes a tester's reads and writes in a guest's place), so the one frame is its 640x480 grey-on-black placeholder at offset 0 with rows exactly as wide as they are apart -- no colour (channel order of the picture is not shown), no damage after the first frame (partial uploads and in-band Update blits never run), no resize, no pointer the guest defined (the script defines one through the function CursorDefine calls; that the guest's image has its alpha multiplied in was read from its rasteriser, and this test cannot show it). The panel: the comparisons read back from Metal and from AppKit, not the glass, and a display that is asleep presents nothing. The letterbox as drawn (the picture is read back at 1:1; the crate's unit test draws it at five sizes, one of them a pixel past a whole scale). The bar leg reads where clicks land and not the picture at that size, and has run only at two pixels to a point. AppKit's own decisions: the script posts the lost-keys and menu notifications itself, hands the left click to the view (an inactive window keeps a left click), and its events are made by NSEvent, not by the window server. A trackpad's scroll (the script sends one wheel notch, made by Core Graphics and handed to the view), the middle and side buttons, drags, the ISO key exchange on a real keyboard, the application ceasing to be active, the two D-Bus methods that carry the guest's pointer and a pointer the guest hides, the cursor rectangles, any byte order but QEMU's own (the unit tests draw all four), Quit from the menu (the run leaves through terminate: by its own deadline). Whether the binary is the tree's: only that it is not older than the crate's sources. The size leg: a guest (what answers is QEMU's device model; whether Lictor boots at that size, and what scale the guest takes from those millimetres, needs one); a hand on the window's edge, full screen, and a move to another screen (the script sets the content's size three times in one turn of the run loop); a screen with one pixel to a point when the test runs on one with two, and the other way (the unit test has both); which screen the window is on (the app's pixels to a point must be those of SOME display Core Graphics lists); a device that takes no size; how long a size must stand before it is told, and the run-loop mode of that timer (any wait under some three quarters of a second, none included, gives the same two tellings); that the size is told before any input (no leg has both); the offsets (the app sends none, and QEMU's answer to a guest carries no position); that QEMU drops a repeat of a size (the app sends none). The input script: every modifier event in it but the pair of Shifts is made without the keyboard's own bit; the system's own modifier state is not what the script's events carry (the one scroll that must say no modifier is down is made to say so). The bar leg: which side an odd pixel of a bar goes to and the turn from AppKit's way up to the guest's (its bars are even at two pixels to a point); a filled picture; one pixel to a point; an odd pixel in a window (AppKit gives a window none at two pixels to a point). The pointer in a live guest: the driver is the test's own script, a device has 64 buffers and is read after the app has left, so only the bar legs' eight reports are read from the devices, and the long script's are read from QEMU's input layer, which does not say which device took them; that the compositor takes a button from a tablet; with the tablet bound to nothing, the order the two devices are handed their reports in (the mouse's button before the tablet's place: seen once by hand in QEMU's trace of its queues, and no leg reads it); relative motion; a machine that is stopped; a QEMU whose display has another name than gpu0 beyond the app saying so."
-invocation: "macrunner/app/test/headless.sh (THYLACINE_QEMU, THYLACINE_MAC_APP); about 35 s; a window opens seven times without taking focus (4 s, 4 s, a moment, 3 s, 3 s, 3 s, 3 s; the fourth is 4200 points wide); exit 77 off macOS or when a QEMU that runs has no D-Bus display, exit 1 when there is no QEMU, when it does not run, or when the app is older than its sources. The unit tests: cargo test --release in macrunner/app (53; one reads usr/tapestryd/src/main.rs for the line the pointer's axis value is exact against; six are the guest's own, compiled in with usr/lib/libhalcyon/src/scale.rs, which the test of the size told uses as the guest; four drive Metal, and with no Metal device they say so and pass without trying)."
+proves: "On each pixel path (the scanout mapped from QEMU's memory; pixels sent in the D-Bus messages): that the Metal pipeline's output at 1:1 is byte-identical to QEMU's own screendump of QEMU's placeholder frame; that a scripted run of AppKit events reaches a QEMU whose input devices a scripted driver has brought up in our guest's order, the tablet bound to the display, as exactly 62 expected keys and pointer reports (each press, each release over the picture and each notch one report with its place), with nothing refused, and that a modifier whose release never came is let go of by a click and by a scroll over the bar, which send nothing and which the view itself reports; and that an image defined as the guest defines its pointer is what AppKit draws for the Mac's pointer (six pixels, one of them half-clear). And on a QEMU with no guest that is read as a guest's driver reads it (qtest): that its virtio GPU answers GET_DISPLAY_INFO and GET_EDID with the size the app told it for the window, in pixels and in the millimetres of as many points, and has its display event pending -- once as the app attaches, and once after the window's content is set to another size in three steps. That size is a mode too large for QEMU's EDID to have a detailed timing, and comes back as whole centimetres. And that a size which changes and comes back to what was told is not told again. And in a window one point larger each way than the scanout has pixels: that the pointer is mapped as for a picture at a whole scale (the leg does not look at what is drawn), a click on each bar reaching QEMU as nothing and a click on the first pixel of the middle row and on the last pixel of the last row as those pixels. And what the input devices then handed their driver: with the tablet bound to the display, every click on the tablet as one report of a place and a button, and nothing on the mouse; with the tablet bound to nothing, where QEMU's display connection refuses a position (the leg asks QEMU that the pointer device it goes by is the mouse), the places on the tablet and the buttons on the mouse, each click's place sent once ahead of its press, and the app saying once what QEMU answered for the tablet's binding. And that the paced pointer script a running guest is tried with (--scripted-click) sends what it says: the middle, a left click on a pixel and the last pixel, as four reports on the bound tablet, and that the place QEMU gives for a pointer is printed. And that the same script against that machine STOPPED reaches nothing: QEMU refuses three events, not four (the release of a press it refused is not sent), and the app still finds the display and the tablet's binding."
+blind-to: "A guest: QEMU has none to run (it takes a tester's reads and writes in a guest's place), so the one frame is its 640x480 grey-on-black placeholder at offset 0 with rows exactly as wide as they are apart -- no colour (channel order of the picture is not shown), no damage after the first frame (partial uploads and in-band Update blits never run), no resize, no pointer the guest defined (the script defines one through the function CursorDefine calls; that the guest's image has its alpha multiplied in was read from its rasteriser, and this test cannot show it). The panel: the comparisons read back from Metal and from AppKit, not the glass, and a display that is asleep presents nothing. The letterbox as drawn (the picture is read back at 1:1; the crate's unit test draws it at five sizes, one of them a pixel past a whole scale). The bar leg reads where clicks land and not the picture at that size, and has run only at two pixels to a point. AppKit's own decisions: the script posts the lost-keys and menu notifications itself, hands the left click to the view (an inactive window keeps a left click), and its events are made by NSEvent, not by the window server. A trackpad's scroll (the script sends one wheel notch, made by Core Graphics and handed to the view), the middle and side buttons, drags, the ISO key exchange on a real keyboard, the application ceasing to be active, the two D-Bus methods that carry the guest's pointer and a pointer the guest hides, the cursor rectangles, any byte order but QEMU's own (the unit tests draw all four), Quit from the menu (the run leaves through terminate: by its own deadline). Whether the binary is the tree's: only that it is not older than the crate's sources. The size leg: a guest (what answers is QEMU's device model; whether Lictor boots at that size, and what scale the guest takes from those millimetres, needs one); a hand on the window's edge, full screen, and a move to another screen (the script sets the content's size three times in one turn of the run loop); a screen with one pixel to a point when the test runs on one with two, and the other way (the unit test has both); which screen the window is on (the app's pixels to a point must be those of SOME display Core Graphics lists); a device that takes no size; how long a size must stand before it is told, and the run-loop mode of that timer (any wait under some three quarters of a second, none included, gives the same two tellings); that the size is told before any input (no leg has both); the offsets (the app sends none, and QEMU's answer to a guest carries no position); that QEMU drops a repeat of a size (the app sends none). The input script: every modifier event in it but the pair of Shifts is made without the keyboard's own bit; the system's own modifier state is not what the script's events carry (the one scroll that must say no modifier is down is made to say so). The bar leg: which side an odd pixel of a bar goes to and the turn from AppKit's way up to the guest's (its bars are even at two pixels to a point); a filled picture; one pixel to a point; an odd pixel in a window (AppKit gives a window none at two pixels to a point). The pointer in a live guest: the driver is the test's own script, a device has 64 buffers and is read after the app has left, so only the bar legs' eight reports are read from the devices, and the long script's are read from QEMU's input layer, which does not say which device took them; that the compositor takes a button from a tablet; with the tablet bound to nothing, the order the two devices are handed their reports in (the mouse's button before the tablet's place: seen once by hand in QEMU's trace of its queues, and no leg reads it); relative motion; a machine that is stopped and then continued (that a release QEMU refused reaches the guest once it runs, before anything later, is the unit tests', against a scripted monitor that answers in lines taken from QEMU 10.0.2 and 11.1.3; no leg continues a machine under the app); keys while a machine is stopped; a tablet that is bound and has another name than tab-pci0; a QEMU whose display has another name than gpu0 beyond the app saying so; a script run with the Mac's display asleep."
+invocation: "macrunner/app/test/headless.sh (THYLACINE_QEMU, THYLACINE_MAC_APP); about 30 s; a window opens eight times without taking focus (4 s, 4 s, a moment, 3 s, 3 s, 3 s, 3 s, 3 s; the fourth is 4200 points wide); exit 77 off macOS or when a QEMU that runs has no D-Bus display, exit 1 when there is no QEMU, when it does not run, or when the app is older than its sources. The unit tests: cargo test --release in macrunner/app (58; one reads usr/tapestryd/src/main.rs for the line the pointer's axis value is exact against; six are the guest's own, compiled in with usr/lib/libhalcyon/src/scale.rs, which the test of the size told uses as the guest; four drive Metal, and with no Metal device they say so and pass without trying)."
 created: 2026-11-11
 updated: 2026-11-12
 ---
@@ -12,9 +12,10 @@ updated: 2026-11-12
 
 **The machine.** Every leg but `size` starts `qemu-system-aarch64 -accel qtest
 -nodefaults -display dbus,p2p=on` with a virtio GPU named `gpu0`, a keyboard,
-a tablet and a mouse, and the `dbus_*` and `input_event_*` trace events on.
-The machine has no guest and is not paused: QEMU's monitor refuses input for
-a machine that is stopped. `as_input_guest.py up` then brings each input
+a tablet named `tab-pci0` as the launcher names it, and a mouse, and the
+`dbus_*` and `input_event_*` trace events on.
+The machine has no guest and, but in `stopped`, is not paused: QEMU's monitor
+refuses input for a machine that is stopped. `as_input_guest.py up` then brings each input
 device up over the qtest socket as a driver does (features, an event queue of
 64 buffers, DRIVER_OK), in slot order, which is the order Lictor brings them
 up in; the leg wants it to answer keyboard, tablet, mouse. That leaves the
@@ -31,7 +32,9 @@ a 640x480 screen (`value * (side - 1) / 32767`, rounded down), so the test
 knows the guest's rule and not the app's. A report that is not for console 0
 says so. Any call on the display connection's pointer interface appears as
 its own trace line, which no expectation has. The app must not have logged a
-refusal, nor that it found no `gpu0`.
+refusal, nor that `gpu0` is no display of this QEMU, nor that the tablet is
+not bound to it (`said_of_qemu`); `bar-unbound` wants that last line, once
+and with QEMU's answer, and `stopped` has its own account of what was said.
 
 Two legs, `map` and `in-band` (`THYLACINE_NO_MAP=1`), run the app with
 `--attach q.sock --no-activate --exit-after 4 --dump app.ppm --scripted-input`
@@ -78,7 +81,8 @@ is taken so and (114, 89, 74) when the alpha is applied to it a second time.
 
 The third leg, `size`, draws and types nothing. QEMU is started paused, with
 `-accel qtest` and a GPU with no name made 1024x768, a size no window of the
-test has (the app must say that it found no `gpu0`), and
+test has (the app must say that `gpu0` is no display of it, with QEMU's
+reason, `Device 'gpu0' not found`), and
 `as_guest.py` speaks to the device over the qtest socket as a driver would:
 it resets it, takes the EDID feature, sets up the control queue in the
 machine's memory, and asks `GET_DISPLAY_INFO` and `GET_EDID`; it reads the
@@ -123,10 +127,14 @@ to nothing, as it is under every launcher but the app's. Before the app
 attaches the leg asks QEMU (`query-mice`) that the pointer device it goes by
 is one that is not absolute: the state in which QEMU's display connection
 refuses a position, and the app's pointer did nothing until 2026-11-12. The
-leg wants the same four reports to have reached QEMU with nothing refused,
-and the devices to have handed their driver the four places on the tablet and
-the two presses and releases on the mouse: QEMU's own routing, said so that a
-change in it is seen.
+app asks QEMU at the attach what the tablet is bound to, and the leg wants it
+to have said once that it is not the display, with QEMU's answer (`its
+display is ""`). From then on a place the guest was not sent yet goes ahead
+of its button, so the leg wants QEMU to have been handed six reports with
+nothing refused (each click's place alone, then its press and its release
+with the place), and the devices to have handed their driver six places on
+the tablet and the two presses and releases on the mouse: QEMU's own routing,
+said so that a change in it is seen.
 
 The sixth leg, `click`, is on the first machine again and runs the script
 none of the others does: `--scripted-click 600,108`, the pointer script for a
@@ -135,8 +143,22 @@ the last pixel, half a second apart, handed to the view itself). The leg
 wants QEMU to have been handed `at 320,240`, the press and the release each
 `at 600,108`, and `at 639,479`; the tablet's driver to have been handed those
 four reports and the mouse's nothing; and the script to have said each step
-with the pixel it meant, which is what a run with a guest compares the
-guest's own account with.
+as the pixel it meant, which it does only if that is the pixel the view sent
+for it, and which is what a run with a guest compares the guest's own account
+with. That account is what `THYLACINE_ECHO_POINTER=1` prints, so the leg runs
+with it and wants the one place QEMU gives for a pointer when no guest moves
+one (`0,0, shown 0`, as the app registers) printed once.
+
+The seventh leg, `stopped`, is the sixth on the same machine started paused
+(`-S`; its devices are brought up all the same). QEMU's monitor refuses the
+pointer for a stopped machine, and refuses it after it has looked for the
+display, so the app's question at the attach is answered "VM not running" and
+must be read as a display that is there. The leg wants QEMU's input layer and
+all three devices to have been handed nothing, the script to have run its
+three steps, and the app's lines about its input to be exactly two: the
+first refusal and the second (it says each doubling). Three events are
+refused, the two places and the press; a fourth refusal would be said, and
+there is none because the release of a press QEMU refused is not sent.
 
 Evidence stays in `build/macrunner-app-test/<leg>/`.
 
@@ -293,3 +315,30 @@ Evidence stays in `build/macrunner-app-test/<leg>/`.
   axis's last, whichever way it is rounded). Nothing else was put to it; the
   leg is there to hold the script to what it says, not to find a defect the
   other legs do not.
+- Audit round 2 on the pointer (2026-11-12) found by reading what no leg
+  had shown: a release QEMU refuses for a stopped machine was dropped. The
+  legs ran no stopped machine and the unit tests had no monitor that refuses
+  and then takes. Both exist now, and its other findings changed two legs
+  (the tablet has the launcher's name; `bar-unbound` wants the place ahead).
+- Twenty-two changes of the code as it is after that round, each built apart
+  and each as expected (`pmut.py`, `pmut-run3.txt`; QEMU 11.1.3). The eleven
+  above again, three of which the unit tests now see as well (a button after
+  its place and the two about a notch), because
+  what goes into one command is now made where a scripted monitor can read
+  it. Eleven new. Red in a leg and in the unit tests: no place ahead of a
+  button on the unbound machine, a place ahead even where the guest has it,
+  a tablet bound to nothing taken for a bound one (all `bar-unbound`); the
+  release of a refused press sent (`stopped`: a fourth refusal is said); a
+  stopped machine's display taken for none (`stopped`). Red in a leg alone:
+  the place QEMU gives for a pointer not printed, and the script aiming a
+  pixel to the right (`click`: it says `meant 320,240 of 640x480, sent
+  321,240`, and of the last pixel `sent nothing`). Red in the unit tests
+  alone: a refused release not sent again; a move ahead of a refused
+  release; the release not tried before a key or at a Sync; a tablet that
+  is not found taken for a bound one. The unchanged tree is green on QEMU
+  10.0.2 and 11.1.3 (binary ef213fced141ba30, 27 s a run).
+- The first run of those controls stalled, and that was a defect of a test:
+  with the release not tried at a Sync, a new unit test waited for ever on a
+  scripted monitor that was reading a command nobody would send. The
+  scripted monitor now gives up after ten seconds, and the same change is
+  red.

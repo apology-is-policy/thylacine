@@ -12,7 +12,7 @@ locks: []
 abis: [abi-boot-banner]
 design: ["docs/TOOLING.md", "docs/PORTABILITY.md"]
 created: 2026-08-01
-updated: 2026-11-11
+updated: 2026-11-12
 ---
 ## Purpose
 
@@ -293,7 +293,10 @@ sized for the slower TCG compat run. Idle cost under HVF was the subject of
   2D resource, so QMP `screendump` reads the picture the client is given.
   `gpu-headless` with a `-display` in `THYLACINE_QEMU_EXTRA` is not a
   substitute: it keeps `gpu-mmio0`, which takes console 0. The modes need a
-  QEMU built with the D-Bus display (`--enable-dbus-display`).
+  QEMU built with the D-Bus display (`--enable-dbus-display`). The Mac app
+  keeps the monitor it attaches through for as long as it runs, and a monitor
+  serves one client at a time: it is attached to `build/qmp-gate.sock`, and
+  the tools' default, `build/qmp.sock`, stays theirs ([[sub-macrunner-app]]).
 - **`app` alone binds the tablet to the display** (2026-11-12):
   `virtio-tablet-pci,...,display=gpu0,head=0`, declared after gpu0 because a
   bind to a display that does not exist yet fails without a word. In that
@@ -310,7 +313,12 @@ sized for the slower TCG compat run. Idle cost under HVF was the subject of
   button on the other, and a console's pointer mode
   (`qemu_input_is_absolute`, which the cocoa, VNC and D-Bus displays go by)
   is the mouse's, relative. Measured with no guest on QEMU 10.0.2 and
-  11.1.3; cocoa itself has not been measured.
+  11.1.3; cocoa itself has not been measured. Read that way the cocoa window
+  of the `gpu` posture turns relative, and grabs the Mac's pointer, once the
+  guest's mouse is up (`ui/cocoa.m` asks `qemu_input_is_absolute` of its
+  console); nobody has looked at one for it (OPEN-BUGS 2026-11-12T10:47Z).
+  `dbus`'s tablet is bound to nothing too: a run that tries the Mac app's
+  pointer uses `app`.
 - **Under cocoa, the guest's Super is the Mac's Cmd, and macOS takes some Cmd
   combos first** (2026-09-16, operator-found): Cmd+Tab (the app switcher),
   Cmd+H (Hide -- Halcyon's split), Cmd+Shift+Q (Log Out -- Halcyon's close).

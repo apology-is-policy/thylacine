@@ -34,11 +34,16 @@ between. It does not start QEMU yet: it attaches to one that runs with
 
 - **`thylacine-mac --attach <qmp socket>`** connects to QMP, hands QEMU one end
   of a socket pair (`getfd` under the name `thylacine-display`, then
-  `add_client` with protocol `@dbus-display`), asks whether there is a device
-  named `gpu0`, and keeps the monitor: the pointer's events go through it.
+  `add_client` with protocol `@dbus-display`), finds out what the pointer's
+  events will reach (whether `gpu0` head 0 is a display of this QEMU, and
+  whether the tablet `tab-pci0` is bound to it), and keeps the monitor: the
+  pointer's events go through it.
   QEMU's monitor serves one client at a time, so that socket serves nobody
-  else while the app runs; a tool that wants QEMU's monitor meanwhile uses
-  another (`tools/run-vm.sh` gives two). The socket's path is used as given,
+  else while the app runs: QEMU takes a second client's connect and does not
+  greet it while the app holds the monitor, so a tool pointed at the same
+  socket waits out its own timeout and says only that. `tools/run-vm.sh` gives two
+  monitors. Its tools default to `build/qmp.sock`, so the app is attached to
+  the other, `build/qmp-gate.sock`. The socket's path is used as given,
   so a caller with a long path starts the app in the socket's directory.
 - **The window** is 1280x800 points, titled Thylacine, resizable down to
   640x400 points, and goes
@@ -110,11 +115,22 @@ between. It does not start QEMU yet: it attaches to one that runs with
   driver as one report with its place. With the tablet bound to nothing QEMU
   hands the place to the tablet and the button to the pointer device whose
   driver came up last, which in a guest of ours is the mouse, and the button
-  first: there a press is not kept behind the move to its place. A QEMU with no
-  device of that name is found out at the attach, said once, and sent its
-  events unaddressed. Over the letterbox bars nothing is the guest's: a move,
+  first. The app asks QEMU at the attach what the tablet is bound to (the
+  `display` and `head` of `tab-pci0`, the launcher's name for it). If that is
+  not this display, or QEMU has no tablet of that name, the app says so once,
+  and from then on a place the guest was not sent yet goes ahead of its
+  button in a command of its own, and again with the button. A press before
+  its place is then unlikely and not impossible (Caveats). A QEMU for which
+  `gpu0` head 0 is no display is found out at the attach too (it refuses an
+  event of nothing addressed there), said once, and sent its events
+  unaddressed. Over the letterbox bars nothing is the guest's: a move,
   a press and a scroll there send nothing. A release is sent exactly when its
-  press was, with its place over the picture and with none off it. Buttons:
+  press was, with its place over the picture and with none off it. QEMU
+  refuses the pointer while its machine is stopped: a place or a press it
+  refuses is dropped, and so is the release of a press it refused, which the
+  guest never saw. A release it refuses is kept and goes to the guest before
+  the next event of any kind the app has for it, and nothing of the pointer's
+  goes ahead of it. Buttons:
   left, middle, right and the two side buttons (the view counts them in
   QEMU's numbers 0, 1, 2, 5, 6); any other button sends nothing. The wheel:
   one notch per wheel event, and one per ten points of trackpad scroll, at
@@ -148,10 +164,15 @@ between. It does not start QEMU yet: it attaches to one that runs with
   them), `--scripted-click <x>,<y>` (the pointer script for a guest that is
   running, with no keys in it: one second in the pointer goes to the middle
   of the picture, half a second later a left click on that guest pixel, half
-  a second later the pointer to the last pixel; each step is said with the
-  pixel it meant, and the steps are apart because a compositor says where
-  its pointer is once a frame); and `THYLACINE_NO_MAP=1`, which stops the
-  listener advertising `Unix.Map`.
+  a second later the pointer to the last pixel; a step is said as the pixel
+  it meant only if that is the pixel the view sent for it, and otherwise as
+  what it meant and what was sent; the steps are apart because a compositor
+  says where its pointer is once a frame); `THYLACINE_NO_MAP=1`, which stops
+  the listener advertising `Unix.Map`; and `THYLACINE_ECHO_POINTER=1`, which
+  prints each place QEMU gives for the guest's pointer (`MouseSet`), for a
+  test that wants to see where an event landed. A thread of its own prints
+  them, so that a reader of the app's output that stalls holds up no frame;
+  a place given as the app leaves can go unprinted.
 
 ## Mechanism
 
@@ -161,8 +182,13 @@ and the one QEMU calls the listener on) and never leaves `zbus::block_on`. An
 `input` thread talks to QEMU an event at a time, each answered before the
 next is sent: a key or the window's size is a call on the display connection,
 and a position, a button or a notch is one command on the monitor (a run of
-positions is sent as its last). One thread sends both kinds, so the guest
-sees keys and the pointer in the order they happened.
+positions is sent as its last). One thread sends both kinds, so QEMU takes
+keys and the pointer in the order they happened. A guest of ours does not
+keep that order between devices: Lictor drains its input devices one after
+another each pass (`usr/lictor/src/backend/seat.rs`), and the compositor
+takes the keyboard's events, then the tablet's, then the mouse's
+(`usr/tapestryd/src/main.rs`), so a key and a click that arrive in one pass
+are taken key first.
 
 **Why the pointer goes over the monitor.** QEMU's display connection gives a
 console one pointer mode (`ui/input.c`, `qemu_input_is_absolute`): that of the
@@ -190,10 +216,36 @@ machine's alone. With the tablet bound to nothing the one command is two
 reports on two devices, and QEMU hands each device its report in the order
 the drivers came up in, last first: the mouse's button, then the tablet's
 place (seen in QEMU's trace of its queues, 10.0.2 and 11.1.3). Nothing
-orders two devices for a guest, so the app does not try to: the launcher
-binds the tablet. `axis` is exact only against that one line
+orders two devices for a guest. The launcher binds the tablet; and where the
+app finds it is not bound (`tablet_bound`, at the attach) it sends a place
+the guest was not sent yet in a command of its own, then the place again
+with the button (`Pointing::with_place`). The guest then has a round trip
+through QEMU's monitor to take the place in before the button's report
+exists, where the two reports of one command are handed over in one pass of
+QEMU's input layer. The place stays in the second command for a tablet that
+is bound and was not found to be (one with another name): there the press
+is still one report with its place. `axis` is exact only against that one line
 of the compositor; a unit test reads `usr/tapestryd/src/main.rs` and fails
 when the line is no longer there.
+
+**A release QEMU refuses.** QEMU refuses `input-send-event` for a machine
+that is stopped (`ui/input.c`, "VM not running"), and by then the view has
+counted the button as let go of. So the input thread keeps an account of its
+own (`Pointing`): the buttons the guest holds, which are those whose press
+QEMU took and whose release it has not, and the releases QEMU refused,
+oldest first, each with the place it had. A press QEMU refuses is forgotten,
+and its release is not sent when it comes. A refused release is owed. Before
+every event of the pointer's the owed releases are tried again, and while
+QEMU refuses one the event is not sent (it is counted as refused, with
+QEMU's reason): nothing of the pointer's reaches the guest ahead of a
+release that happened before it. They are tried before a key or a size too,
+and when the app waits for its input to have been sent (quit); a key goes
+whether or not QEMU took them, because QEMU drops a key for a stopped
+machine without a word and one kept back by the app would be lost to a
+machine that had just been continued. QEMU's monitor says when the machine
+runs again (the RESUME event); the app reads the monitor only while it waits
+for an answer and passes events over, so an owed release waits for the app's
+next event (Caveats).
 
 **Why the D-Bus thread does nothing else.** QEMU's main loop calls the listener
 synchronously (`ui/dbus-listener.c`: the proxies are made with
@@ -355,7 +407,11 @@ serial that changes with every scanout the guest sets), the pending damage recta
 (its base, its length, and where in it the frame starts) and unmaps on drop.
 `view::Renderer` holds the Metal objects, the texture and the size and byte
 order it was made for; `view::Worn` the `NSCursor` and what it was made from;
-`keymap::Held` the keys that are down. `display::UiInfo` is a size as the
+`keymap::Held` the keys that are down. `display::Pointing`, the input
+thread's alone, is the monitor and what the attach found out (whether events
+are addressed to the display, whether the tablet is bound to it), the buttons
+the guest holds, the releases it is owed, and the place QEMU last took.
+`display::UiInfo` is a size as the
 guest is told it (millimetres and pixels); the view keeps the last one told,
 how many were, and the timer that waits for the size to stand.
 
@@ -397,7 +453,9 @@ app's own defence against a QEMU that sends something wrong.
 - A key or a button the guest saw go down is seen coming up, as far as the app
   is told: when its release arrives, when the keys are lost, a menu opens or
   the app quits, and, for a modifier, at the next event of any kind that shows
-  it up. What is left: an ordinary key or a button whose release some other
+  it up. A button's release that QEMU refuses is kept until QEMU takes it; a
+  key's has no such account (Caveats, a machine that is stopped).
+  What is left: an ordinary key or a button whose release some other
   part of the system takes while the window stays key and no menu opens stays
   down in the guest until the keys are next lost; and an app that is killed
   lets go of nothing (QEMU lifts the keys itself then, and not the buttons).
@@ -406,10 +464,12 @@ app's own defence against a QEMU that sends something wrong.
 
 - No QMP, no D-Bus display, no Metal device: a message and exit 1. An attach
   that is not done within 10 s is the same (`ATTACH_TIMEOUT`, one deadline for
-  the monitor's greeting, its four answers and the display connection
-  together; after the attach a command on the monitor waits for as long as
-  QEMU takes): QEMU
+  the monitor's greeting, its answers, six on a machine of the launcher's, and
+  the display connection together; after the attach a command on the monitor
+  waits for as long as QEMU takes): QEMU
   answers all of them from its main loop, and one that is hung never would.
+  A monitor another client holds gives no greeting either, and the message
+  names both.
   Until then the launch shows nothing: the attach runs on the main thread,
   before the window and the menu exist.
 - A mapping that cannot be made is logged, and from then on QEMU sends this
@@ -421,7 +481,8 @@ app's own defence against a QEMU that sends something wrong.
   the monitor, is logged with QEMU's reason (the first, and then each time
   the count doubles) and the next event is tried. The monitor refuses the
   pointer while the machine is stopped ("VM not running") and when the guest
-  has no device for it. An I/O error on either connection means QEMU is gone:
+  has no device for it; a release it refuses is kept for the guest
+  (Mechanism). An I/O error on either connection means QEMU is gone:
   it is logged and the input thread stops. The display thread stays parked
   and the window keeps its last frame; nothing in the window says so yet.
 - A console whose device takes no size answers `SetUIInfo` with an error. It
@@ -539,25 +600,46 @@ every step of a drag is a mode the guest sets at every step.
   pointer's image is given to AppKit as device RGB.
 - **The input queue has no bound.** Adjacent pointer positions are sent as
   one (`next_input`), so a stalled QEMU costs one stale position, not
-  thousands; keys and buttons behind it still queue and are replayed.
+  thousands; keys, buttons, sizes and notches (up to eight a scroll event)
+  behind it still queue and are replayed.
+- **A QEMU that stops answering its monitor takes the keys with it.** Keys,
+  sizes and the pointer share the input thread, which waits for each answer
+  for as long as QEMU takes. The display keeps drawing, so the window looks
+  alive, takes no input and says nothing.
 - **The pointer has not been tried in a live guest.** What is shown is with a
   QEMU that has no guest and a scripted driver in its place: the reports the
   tablet's driver is handed, on QEMU 10.0.2 and 11.1.3. That the compositor
   takes a button from the tablet was read in its source
   (`usr/tapestryd/src/main.rs`, the tablet's drain), not seen.
-- **On a machine whose tablet is bound to nothing a press can be seen before
-  its place.** The button's report is the mouse's and is handed over before
-  the tablet's with the place, and a compositor that reads its devices
-  between the two acts on the press where the pointer was. It matters only
-  for a press at a place the pointer was not already at (a move is sent for
-  every move of the Mac's pointer over the picture, so in use it nearly
-  always was). The app does not find out whether the tablet is bound and
-  says nothing of it; `tools/run-vm.sh` binds it under `THYLACINE_DISPLAY=app`,
-  and `--attach` to any other machine has this.
-- **The monitor is the app's while it runs**, and a stopped machine refuses
-  the pointer: the app logs it and the window says nothing.
-- **`THYLACINE_ECHO_POINTER=1`** prints each place the guest says its pointer
-  is at (`MouseSet`), for a test that wants to see where an event landed.
+- **On a machine whose tablet is bound to nothing a press can still be seen
+  before its place.** The button's report is the mouse's, and nothing orders
+  two devices for a guest. The app sends the place ahead (Contract), which
+  gives the guest a round trip through QEMU's monitor to take it in; a guest
+  that does not read its tablet in that time acts on the press where its
+  pointer was. It matters only for a press at a place the pointer was not
+  already at (a move is sent for every move of the Mac's pointer over the
+  picture, so in use it nearly always was). `tools/run-vm.sh` binds the
+  tablet under `THYLACINE_DISPLAY=app` and in no other posture. A tablet
+  that is bound and has another name than `tab-pci0` is taken for one bound
+  to nothing: the app says so, and each press at a new place costs it one
+  report more.
+- **A machine that is stopped.** QEMU refuses the pointer and drops keys
+  without a word. The app logs the refusals and the window says nothing. A
+  button's release is kept and sent once QEMU takes it (Mechanism). What
+  that leaves: the release waits for the app's next event (a move over the
+  picture, a key, a size, quit), because the app does not follow the
+  monitor's RESUME; keys have no account, so a key let go of while the
+  machine was stopped stays down in the guest until the window next loses
+  the keys, and one pressed then is lost; and an app that quits while the
+  machine is stopped waits its half second and leaves with the release
+  still owed. Following the machine's run state from the monitor's events
+  cures the three, and belongs with pausing (OPEN-BUGS 2026-11-12T10:47Z).
+- **`gpu0` head 0 and console 0 are taken to be one display.** The picture
+  is the display connection's `Console_0` and the pointer is addressed to
+  `gpu0` head 0. The attach checks that the second is a display, not that it
+  is the first. They are one under `tools/run-vm.sh`'s `app` posture, which
+  drops the other display device; on a machine with another display first
+  the app would draw one and point at the other.
 - **Not driven by any test:** a trackpad's scroll (the notch arithmetic has
   unit tests; the script sends one wheel notch); the middle and side buttons
   (their names have a unit test); the ISO exchange on a real keyboard, and
@@ -582,7 +664,11 @@ every step of a drag is a mode the guest sets at every step.
   is in (the size leg passes with any wait under some three quarters of a
   second, none included); that the size is told before any input (no leg has
   both); a console whose device takes no size; the half second the releases
-  are given at quit (that the wait ends when asked has a unit test). An
+  are given at quit (that the wait ends when asked has a unit test); a
+  machine that is stopped and continued under the app (the account of
+  releases has unit tests against a scripted monitor that answers in QEMU's
+  own lines, taken from 10.0.2 and 11.1.3); a display asleep while a script
+  runs. An
   upload of part of a frame, after the first, has no unit test and no
   headless leg (QEMU's placeholder is one frame); the guest run of M-3 drove
   it for 87 frames and the picture was QEMU's.
