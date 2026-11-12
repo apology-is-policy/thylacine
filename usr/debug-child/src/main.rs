@@ -38,8 +38,9 @@
 //     100 ms and reads nothing, so it holds no terminal read while it is
 //     stopped. A TICK is the job running: a driver that reads one after a
 //     point where the job was stopped knows it has resumed. `^C` ends it; so
-//     does a failed write (its terminal is gone) and, far past any driver's
-//     own bound, its tick limit.
+//     does a write that takes nothing or fails and, far past any driver's own
+//     bound, its tick limit. A terminal whose master is gone still takes
+//     writes until its ring is full, so the limit is what ends an orphan.
 //   * `debug-child dirty` (5g, death wins in the exit close; jc-probe drives
 //     it) leaves a small write staged on a 9P file, writes one byte to stdout
 //     (its driver's pipe) once it has, and then spins as spin mode does.
@@ -194,7 +195,7 @@ const TICK_LIMIT: u32 = 600;
 fn tick() -> ! {
     for _ in 0..TICK_LIMIT {
         // SAFETY: SVC wrapper; TICK_MARK is a valid static buffer.
-        if unsafe { t_write(1, TICK_MARK.as_ptr(), TICK_MARK.len()) } < 0 {
+        if unsafe { t_write(1, TICK_MARK.as_ptr(), TICK_MARK.len()) } <= 0 {
             break;
         }
         let _ = libthyla_rs::time::sleep(TICK_EVERY);

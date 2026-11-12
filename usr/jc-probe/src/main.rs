@@ -17,11 +17,11 @@
 // artifact that originally masked the re-stop leg (task #19). Its TICKs are
 // what `sleep` could not give: a sign the job is running again after `fg`.
 //
-// No signal is sent on a clock. Each one waits for the condition it needs: the
-// pts's foreground group is the job's (read from the master side), and for the
-// re-stop a TICK written after the job was stopped. The 400 ms settle this
-// replaced was wall-anchored while the shell's spawn and handoff are not, and
-// one boot in about 170 lost its `^Z` to the shell and went extinct here.
+// No signal waits on a clock to find its job. Each one is sent once the pts's
+// foreground group is the job's (read from the master side), and the re-stop
+// also once the job is seen running again. A wall-clock pause cannot stand in
+// for either: the shell's spawn and handoff are compute, and a `^Z` that
+// arrives before them goes to the shell, which ignores it.
 //
 // The matching discipline: the ut LINE EDITOR redraws the prompt on every
 // keystroke, so the master stream is full of escape noise WHILE ut is at its
@@ -113,16 +113,16 @@ const JOB_LINE: &[u8] = b"debug-child tick\r";
 const JOB_ECHO: &[u8] = b"debug-child tick";
 const TICK: &[u8] = b"TICK";
 
-/// The handoff wait's poll and its bound (4000 x 5 ms): a job that never takes
-/// the terminal is a named FAIL well inside the watchdog.
+/// The handoff wait's poll and its bound: a job that never takes the terminal
+/// is a named FAIL well inside the watchdog. The bound is elapsed time, not a
+/// count of polls, so a slow guest cannot stretch it past the watchdog.
 const HANDOFF_POLL: Duration = Duration::from_millis(5);
-const HANDOFF_TRIES: u32 = 4000;
+const HANDOFF_LIMIT: Duration = Duration::from_secs(8);
 
 /// A pause AFTER a job is known to hold the terminal, for two legs' own
 /// reasons (a spinner past its write's return tail; the mask rung's tick
-/// count). Nothing fails if it is too short: a signal no longer waits on it to
-/// find its job. It is also the old fixed settle's length, which
-/// `await_handoff` reports a handoff exceeding.
+/// count). Nothing fails if it is too short: no signal waits on it to find
+/// its job. A handoff that takes longer than this is reported.
 const SETTLE: Duration = Duration::from_millis(400);
 
 /// The silent-hang watchdog (PTY-4e F2): a mis-routed signal leaves the ladder
@@ -171,7 +171,7 @@ fn settle() {
 /// (SYS_TTY_GET_FG), so this is the condition itself, with no clock in it.
 fn await_terminal(mfd: i64, shell_fg: i64, to_job: bool, leg: &str) -> bool {
     let start = Instant::now();
-    for _ in 0..HANDOFF_TRIES {
+    loop {
         // SAFETY: SVC wrapper on the live master.
         let fg = unsafe { t_tty_get_fg(mfd) };
         if fg > 0 && (fg != shell_fg) == to_job {
@@ -180,6 +180,9 @@ fn await_terminal(mfd: i64, shell_fg: i64, to_job: bool, leg: &str) -> bool {
                 t_putstr(&format!("jc-probe: {} handoff took {} ms\n", leg, ms));
             }
             return true;
+        }
+        if start.elapsed() >= HANDOFF_LIMIT {
+            break;
         }
         let _ = libthyla_rs::time::sleep(HANDOFF_POLL);
     }
@@ -422,7 +425,7 @@ impl Driver {
     /// This exists for the maskstop rung's ARM ASSERTION, where the thing being
     /// asserted is that the child keeps RUNNING through a `^Z`. Without the
     /// `bad` arm a mask that never installed would stop the child, `want` would
-    /// never arrive, and the leg would hang into the 25 s watchdog -- a failure
+    /// never arrive, and the leg would hang into the watchdog -- a failure
     /// that names the leg but not the cause, and reads identically to a kernel
     /// bug in the path the rung is actually testing. `bad` is the shell's
     /// `Stopped` report, which is exactly the witness that the ^Z was applied at
@@ -618,8 +621,15 @@ fn run() -> i64 {
     // (c) A foreground job + `^Z`, sent once the job holds the terminal. The
     //     job is ended by `^C`, never by its own limit, so the stop window has
     //     no right edge and the later resumes prove RESUMPTION, never expiry.
+    //     Reading to the job's first TICK drains the editor's redraws: the
+    //     master's ring is 4 KiB, and a shell parked on a full one hands
+    //     nothing over.
     leg("stop");
-    if !d.send(JOB_LINE, "job") || !await_handoff(d.mfd, shell_fg, "stop") {
+    let m = d.mark();
+    if !d.send(JOB_LINE, "job")
+        || !d.read_until(m, TICK, 1, "stop-running")
+        || !await_handoff(d.mfd, shell_fg, "stop")
+    {
         return 5;
     }
     let stop_mark = d.mark();
@@ -654,10 +664,11 @@ fn run() -> i64 {
         return 7;
     }
     // ut hands the terminal over and THEN continues the job. A `^Z` between
-    // the two meets a job that is still stopped and is spent on it. Every TICK
-    // the job wrote before it stopped precedes the `Stopped` report already
-    // read, so one after `m` is the job running again.
-    if !await_handoff(d.mfd, shell_fg, "restop") || !d.read_until(m, TICK, 1, "restop-running") {
+    // the two meets a job that is still stopped and is spent on it. A stopped
+    // job writes nothing, and it can have had at most one write under way when
+    // the stop was posted, so the SECOND TICK after `m` comes from a job that
+    // has run on past the stop: it is running again.
+    if !await_handoff(d.mfd, shell_fg, "restop") || !d.read_until(m, TICK, 2, "restop-running") {
         return 7;
     }
     let restop_mark = d.mark();

@@ -12847,7 +12847,7 @@ int main(void) {
         // REAL /bin/ut on a freshly-minted pts (the ptyhost shape) and
         // scripts the ladder against the master: the session dance + prompt;
         // a clean fg run under jc (own pgrp + terminal handoff, proven by the
-        // tr-uppercase trick); `sleep 30` foregrounded on the pts + ^Z ->
+        // tr-uppercase trick); a ticking job foregrounded on the pts + ^Z ->
         // tty:susp default-STOP -> the WAIT_UNTRACED stop-report -> the
         // `[1]+ Stopped` line ON THE PTS (the reroute proof); `jobs` shows it
         // Stopped; `fg` -> SYS_TTY_CONT resume -> a SECOND ^Z re-stops it
