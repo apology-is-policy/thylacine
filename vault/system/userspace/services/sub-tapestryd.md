@@ -178,8 +178,23 @@ number.
 What this does not do. A pinned mode keeps the rect it was fitted from: the
 host's later sizes are not read while it is pinned, so a `scale auto` then
 answers for the rect that was. A mode asked for by size is taken to be shown
-pixel for pixel, which a host that scales it to a window does not do. And the
+pixel for pixel. A host that scales the mode to its window does not do that,
+and QEMU's own window under `THYLACINE_HIDPI=1` (zoom-to-fit) and the Mac app
+are both such hosts: there the session is at the declaration and is enlarged
+again by the host (HALCYON-SCALE 3 has the choice this leaves). A carried
+scale is never under 100, so half a display declared under 200 is larger than
+was declared. [[sub-lictor]] fits its own screen by its own bound, so where it
+keeps a display this compositor halves (3840x2160, 3456x2160), a declaration
+of 100 or 125 has the session at twice the trusted screen's size. And the
 carry takes the rect the device told for the display's own.
+
+In `follow_display` a declared scale is derived again as soon as the device
+has taken the bind of the screen, before the EDID is asked: the carry needs
+the fit and not the millimetres. Until the second audit round on this (G5) it
+waited for both, and a host that doubled under a mode that stayed, with the
+EDID unanswered, left the session at twice its size. It still waits for the
+bind: a follow whose bind is not taken leaves the scale that stood until an
+asking succeeds.
 
 Tests. The rule, on a host (`carried_pct` and `nearest_pct`,
 [[sub-libhalcyon]]). The boot's use of it and `derive_scale`'s, in a guest:

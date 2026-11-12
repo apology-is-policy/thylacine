@@ -816,8 +816,9 @@ struct tevent {              /* little-endian, 24 bytes, version-pinned wire */
   place and makes no delta, as is the first position after a change of
   mode, which is a pixel of another screen, and the first after a
   trusted-path episode, whose pointer travel is no client's (a pass of
-  the compositor can wait out a whole episode inside a request, so it
-  asks the seat again before it drains a pointer device). A frontend
+  the compositor can wait out a whole episode inside a request it makes
+  for an input event, so after a stage that handled input it asks the
+  seat again before it drains a pointer device). A frontend
   that moves ONE pointer through both devices (it captures the pointer,
   sends its motion through the mouse, and sends positions again from
   where the mouse left it) would otherwise have that motion counted

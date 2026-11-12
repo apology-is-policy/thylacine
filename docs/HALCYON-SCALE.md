@@ -144,21 +144,40 @@ processes that paint chrome and glyphs, and what the bakes need.
   brought to the nearest of the five values
   (`libhalcyon::display::carried_pct`). A 5120x2880 display declared at 200
   whose mode is 2560x1440 derives 100, which is what Lictor's trusted
-  screen already reads for that mode. Before this the declaration stood
-  unchanged through the fit and that session came up with everything at
-  twice its size (seen in a guest 2026-11-12: `mode 2560x1440 for a display
-  of 5120x2880` beside `scale 200 (declared)`). At the rect's own size the
-  factor is one and nothing changes. A mode ASKED FOR BY SIZE (`mode W H`,
-  aurora's startup push of a persisted mode) is nobody's fit and keeps the
-  declaration as it is, as before: it is taken to be shown pixel for pixel,
-  which is what a host that sizes its window to the mode does, and the
-  compositor does not ask for the display's rect when it is told a mode. A
-  push of the mode that already stands changes nothing, so a fitted mode
-  stays whose fit it was. Prior art: mutter works a scale out per monitor
-  MODE, from that mode's pixels over the panel's size, and macOS gives each
-  display mode its own backing scale, one for the plain mode of a panel
-  whose native mode is at two. The boot line still says `(declared)`; the
-  number beside it is the carried one.
+  screen reads for that mode. Before this the declaration stood unchanged
+  through the fit and that session came up with everything at twice its
+  size (seen in a guest 2026-11-12: `mode 2560x1440 for a display of
+  5120x2880` beside `scale 200 (declared)`). At the rect's own size the
+  factor is one and nothing changes. The boot line still says
+  `(declared)`; the number beside it is the carried one. Prior art: mutter
+  works a scale out per monitor MODE, from that mode's pixels over the
+  panel's size, and macOS gives each display mode its own backing scale
+  (on one panel, a mode at two pixels to a point beside modes at one).
+
+  What the carry does not reach (recorded 2026-11-12, the second audit
+  round on it):
+  - **The floor.** A scale is never under 100, so under a mode at half its
+    display a declaration of 100, 125, 150 or 175 gives a session at 2,
+    1.6, 1.33 and 1.14 times the size declared. Only 200 halves exactly.
+  - **The trusted screen fits by its own bound.** Lictor keeps a display
+    that tapestryd must halve (3840x2160 or 3456x2160 under the 64 MiB
+    weave). There a declaration of 100 or 125 has the session at twice
+    the trusted screen's size; from 150 the two agree. Where both fit
+    the same mode they agree at every declaration.
+  - **A mode ASKED FOR BY SIZE** (`mode W H`, aurora's startup push of a
+    persisted mode) is nobody's fit and keeps the declaration as it is,
+    as before this amendment. That is right for a host that sizes its
+    window to the mode and shows it pixel for pixel. It is wrong for a
+    host that scales the mode to its window, which QEMU's own window
+    does under `THYLACINE_HIDPI=1` (zoom-to-fit) and the Mac app does:
+    there the session is drawn at the declaration and then enlarged by
+    the display's size over the mode's. The compositor does not ask for
+    the display's rect when it is told a mode, so it cannot tell the two
+    hosts apart. The way out (the display's rect kept current, every
+    mode carried by its ratio to it) changes what this section ratified
+    for a `mode` change, and is the operator's to choose. A push of the
+    mode that already stands changes neither the mode nor whose fit it
+    was; the verb pins it all the same.
 
 ## 4. The authority and the channel
 

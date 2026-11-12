@@ -126,7 +126,8 @@ def header(kind):
 # The image size of a base EDID block and the mode it prefers, found where libhalcyon's
 # parse_edid_mm finds the size: in the first detailed timing when there is one (its pixel clock is
 # not zero), and otherwise in the whole centimetres of bytes 21 and 22, with no mode. A guest
-# takes the size only when both sides are 1 to 2000 mm; this says whatever is there.
+# takes the size only when both sides are 1 to 2000 mm and the pair is not 16:9 or 16:10 written
+# where a size goes; this says whatever is there.
 def edid_size(block):
     if block[:8] != bytes([0, 255, 255, 255, 255, 255, 255, 0]) or sum(block[:128]) % 256:
         sys.exit("as_guest: not an EDID block (%s...)" % block[:8].hex())

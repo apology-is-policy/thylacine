@@ -254,9 +254,9 @@ EDID Lictor reads at its start (`Gpu::edid_mm`), else 100. From millimetres
 the percent is the session's reading, the pixels to the inch in quarters of the
 reference rounded half up, so a display at 1.375 of the reference (132 to the
 inch) reads as 150 and is drawn at two: on that path two begins at 137.5
-percent. An EDID whose size is an aspect ratio written where the size goes
-says nothing ([[sub-libhalcyon]]'s `parse_edid_mm`), so such a display is at
-one unless the platform declares.
+percent. An EDID whose size is 16:9 or 16:10 written where the size goes
+says nothing ([[sub-libhalcyon]]'s `parse_edid_mm`: six pairs, and no other
+ratio), so such a display is at one unless the platform declares.
 `libhalcyon::display::own_pct` carries that to the screen's own pixels: a
 screen made at half its display's size is at half its display's scale, and the
 frontend that shows it makes up the rest. `render::geometry_for(host, declared,
@@ -298,12 +298,15 @@ over a face the ink's middle within three hundredths of a layout pixel).
 [[sub-libhalcyon]] has `own_pct`'s. Not pixel for pixel between the two sets:
 the set at one is sampled four times a pixel each way, so a thin stem's middle
 is up to 0.44 of a pixel from the finer set's; the faces' means are the test.
-`backend/screen.rs` is in no host build: `declared_scale`, the four values
-`Screen::new` hands `geometry_for`, and `paint` handing the scale to `render`
-are a guest's to show. `tools/interactive/ls-graphical-sak-scale.exp` is that
-test: a 2560x1600 display declared at 200, the line Lictor says of its screen,
-and the rail's rule read off a dump of the screen (device rows 94 and 95 at
-two; row 47 at one). The fallback's size is checked where it is compiled
+`backend/screen.rs` is in no host build, so what it does is a guest's to show.
+`tools/interactive/ls-graphical-sak-scale.exp` is the test of `declared_scale`,
+of the display's size and the declaration reaching `geometry_for`, and of
+`paint` handing the scale to `render`: a 2560x1600 display declared at 200, the
+line Lictor says of its screen, and the rail's rule read off a dump of the
+screen (device rows 94 and 95 at two; row 47 at one; the dump must hold the
+whole of each rect read). It does not show the other three values
+`Screen::new` hands over: the EDID's millimetres, which a declaration
+outranks, the largest side, and the fallback. A wrong one of those passes it. The fallback's size is checked where it is compiled
 (`const _` in `screen.rs`). The baker itself is checked by baking again and
 finding nothing changed, which needs fontTools and is no gate's step.
 

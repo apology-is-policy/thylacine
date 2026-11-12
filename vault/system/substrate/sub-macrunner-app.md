@@ -442,7 +442,14 @@ with one. The unit test for it compiles the guest's own source in
 takes the scale) and puts between the app and it a model of the two ways
 QEMU's EDID carries a size. It tries every pair of sides from 22 points to two
 metres, at one and at two pixels to a point; a side under a centimetre only
-against one of no more than 640 points. Under 22 points the rounding of the
+against one of no more than 640 points. For 266 of those views the size told
+is 16 by 9 or 16 by 10, in millimetres, in centimetres or in tens of them,
+which the guest reads as an aspect ratio written where the size goes and so
+as no size, and its scale is 100 then (`aspect_as_size`, 2026-11-12). The test
+counts them and holds each to a view the window cannot be: under 640 by 400
+points, or 160 cm wide. The guest's source is compiled into this test, so a
+change to `scale.rs` is not done until this crate's `cargo test` has run; that
+guard went in without it, and this test was red for two commits. Under 22 points the rounding of the
 millimetres is too much of the side (21 points at two pixels to a point read
 175%), and Caveats has the strip. With a guest, `docs/MAC-RUNNER.md` M-3:
 2560x1600 told, 200% taken. The telling is an

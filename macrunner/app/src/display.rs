@@ -1779,7 +1779,7 @@ mod tests {
                 _ => 13.5,
             };
         }
-        let mut tried = 0u32;
+        let (mut tried, mut no_size) = (0u32, 0u32);
         for scale in [1.0, 2.0] {
             let want = Some((100.0 * scale) as u16);
             for &w in &sides {
@@ -1787,12 +1787,28 @@ mod tests {
                     if w.min(h) < 38.0 && w.max(h) > 640.0 {
                         continue;
                     }
-                    assert_eq!(guest_scale_for(w, h, scale).0, want, "{w}x{h} at {scale}");
                     tried += 1;
+                    match guest_scale_for(w, h, scale).0 {
+                        got if got == want => {}
+                        // A size told as 16 by 9 or 16 by 10, in millimetres, in centimetres or
+                        // in tens of them, is one a guest reads as an aspect ratio written where
+                        // the size goes: no size, and its scale is 100 then. The window is none
+                        // of these views: it is at least 640 by 400 points, and the others are
+                        // 160 cm wide, which no display is in points.
+                        None => {
+                            assert!(
+                                (w < 640.0 && h < 400.0) || (w > 6000.0 && h > 3400.0),
+                                "{w}x{h} at {scale}: a view the window can be is told as no size"
+                            );
+                            no_size += 1;
+                        }
+                        got => panic!("{w}x{h} at {scale}: {got:?}, want {want:?}"),
+                    }
                 }
             }
         }
         assert!(tried > 2_000_000, "{tried}");
+        assert_eq!(no_size, 266, "the views told as an aspect ratio");
         // Under 22 points a side is a few millimetres, and rounding them is too much of it: 21
         // points are 5.56 mm, told as 6, and 42 pixels over 6 mm are not twice 96 to the inch.
         assert_eq!(guest_scale_for(21.0, 800.0, 2.0).0, Some(175));

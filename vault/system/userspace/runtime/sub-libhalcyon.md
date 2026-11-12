@@ -649,6 +649,13 @@ a size), a short
 millimetre axis never truncating off the table (the clamp-ordering regression),
 and the declaration being the last whole-word token with a table value.
 
+**`scale.rs` has a second crate's tests.** The Mac app compiles this file into
+its own unit tests (`macrunner/app/src/main.rs`, a `#[path]` module) and sweeps
+two million views through `parse_edid_mm` and `scale_pct`
+([[sub-macrunner-app]]). A change here is not done until `cargo test` has run
+in `macrunner/app`: the guard for an aspect ratio went in without it and that
+test was red for two commits (the second audit round's G1).
+
 ## `display` -- the mode for a host's size, and when to follow it (2026-11-11)
 
 `display.rs` holds the pure rules of `docs/AURORA-CONFIG.md` 3.4 as amended:

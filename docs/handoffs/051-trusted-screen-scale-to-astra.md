@@ -60,13 +60,16 @@ says; two from 150 percent.
   the backing and the resource again outside an episode, and `Trusted raster memory` in the same
   document says why that is a decision and not a patch.
 - A scale between one and two is drawn at the nearer whole one. There is no scale of three.
-- `backend/screen.rs` is in no host build, so `declared_scale`, the four values `Screen::new`
-  hands `geometry_for` and `paint` handing the scale to `render` are a guest's to show:
-  `tools/interactive/ls-graphical-sak-scale.exp`.
+- `backend/screen.rs` is in no host build, so what it does is a guest's to show.
+  `tools/interactive/ls-graphical-sak-scale.exp` shows `declared_scale`, the display's size and
+  the declaration reaching `geometry_for`, and `paint` handing the scale to `render`. It does
+  not show the other three values `Screen::new` hands over (the EDID's millimetres, which a
+  declaration outranks; the largest side; the fallback): a wrong one of those passes it.
 - From a display's millimetres two begins at a true 137.5 percent, because the session's rule
-  rounds to quarters before this one rounds to a whole scale. An EDID that has its aspect ratio
+  rounds to quarters before this one rounds to a whole scale. An EDID that has 16:9 or 16:10
   where its size goes is read as saying nothing (`libhalcyon::scale::parse_edid_mm`, changed
-  with this), so such a display is drawn at one unless the platform declares.
+  with this: the six pairs mutter knows, and no other ratio), so such a display is drawn at one
+  unless the platform declares.
 
 ## Where the evidence is
 
@@ -80,6 +83,9 @@ is in this note as it now reads: the second scale `draw` used to take became the
 switch, the full-screen test got a bound of its own for the type, the sets got their hashes, and
 the guest scenario was written. One finding was about the session and not this screen: tapestryd
 did not carry a declared scale through a mode it fitted to half its host, so at such a size the
-session was at twice the scale this screen is drawn at. This screen's reading was the right one
-and the session has it now (`libhalcyon::display::carried_pct`, HALCYON-SCALE.md 3 as amended
-2026-11-12); `tools/interactive/ls-halcyon-scale-fitted.exp` reads both lines in one boot.
+session was at twice the scale this screen is drawn at. This screen's reading was the right one,
+and where the two fit the same mode the session has it now (`libhalcyon::display::carried_pct`,
+HALCYON-SCALE.md 3 as amended 2026-11-12; `tools/interactive/ls-halcyon-scale-fitted.exp` reads
+both lines in one boot). Where they fit different sizes it has it only from a declaration of
+150: this screen keeps a display of 3840x2160 that tapestryd halves, and a session is never
+under 100, so a declaration of 100 or 125 has the session at twice this screen's size there.

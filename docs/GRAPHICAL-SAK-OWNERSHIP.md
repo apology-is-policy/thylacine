@@ -241,5 +241,6 @@ the session's type and at one a third smaller; larger is the readable side for
 a screen that asks for a key. From a display's millimetres the session's rule
 gives the percent in quarters, rounded half up, so on that path two begins at a
 true 137.5 percent, 132 pixels to the inch. A display too small for the layout
-at two is drawn at one whatever its scale, which is most panels of 1920 by
-1080 or 1200 at 150 percent.
+at two is drawn at one whatever its scale, which is every panel of 1920 by
+1080 or 1200 at 150 percent: 540 and 600 layout rows are under the 720 the
+layout needs.

@@ -51,9 +51,15 @@ expect {
 lc_raw_send "correct-horse-battery-staple-v1\r" "login password"
 set timeout 60
 expect {
-    -re {halcyond: session up 2560x1440 px} { lc_step "the session is up on the fitted mode, 2560x1440" }
-    -re {halcyond: session up [^\r\n]*} { lc_fail "the session is not on the mode this scenario fits: $expect_out(0,string)" }
-    -re {halcyond: FAIL session[^\r\n]*} { lc_fail "the session failed: $expect_out(0,string)" }
+    -re {halcyond: session up (\d+)x(\d+) px} {
+        # One arm, ended by the line's own " px": the serial comes in pieces,
+        # and an arm for any other size would take the first piece of this one.
+        if {$expect_out(1,string) != 2560 || $expect_out(2,string) != 1440} {
+            lc_fail "the session is not on the mode this scenario fits: $expect_out(0,string)"
+        }
+        lc_step "the session is up on the fitted mode, 2560x1440"
+    }
+    -re {halcyond: FAIL session[^\r\n]*[\r\n]} { lc_fail "the session failed: [string trim $expect_out(0,string)]" }
     -ex "Thylacine textual shell" { lc_fail "login gave a shell on an image whose bake record says SESSION" }
     -re {EXTINCTION:} { lc_extinction_fail "session" }
     timeout { lc_fail "no graphical session" }

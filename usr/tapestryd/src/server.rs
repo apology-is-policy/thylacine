@@ -6258,8 +6258,8 @@ impl Comp {
         }
         self.change_mode(w, h)?;
         // A mode asked for by size is nobody's fit. (The push of the mode
-        // that stands, above, changes nothing: that one is still whose fit
-        // it was.)
+        // that stands, above, leaves the mode and whose fit it was; the
+        // verb pins it all the same.)
         self.fitted_from = None;
         Ok(())
     }
@@ -6352,6 +6352,11 @@ impl Comp {
         self.edid_stale = true;
         if !self.composed_bind_holds() {
             return Followed::Unfinished(E_IO);
+        }
+        // A declared scale is carried by the fit alone, and the fit is
+        // known: it does not wait for the EDID.
+        if self.declared.is_some() {
+            self.rescale_after_mode();
         }
         // The EDID is asked with it: a change of display is the one time
         // it changes, and it can change under a mode that does not. Not
