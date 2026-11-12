@@ -287,7 +287,10 @@ The rules that keep this out of the trusted path's critical section:
 - **A resource whose state is not known is not used.** A command the device
   did not answer leaves the other reserved resource possibly made, or
   possibly still there. It is let go of, and that answered for, before it is
-  made again; until then the screen stays as it is.
+  made again; until then the screen stays as it is. The release is always the
+  device's to answer, never one the driver has put off for later, and one
+  that was not answered is asked again a bounded number of times, so that the
+  device does not hold the image that was until the display next changes.
 - **Nothing a client says is asked,** as before: the rect and the EDID are
   the device's, and the declaration is the kernel's command line.
 
