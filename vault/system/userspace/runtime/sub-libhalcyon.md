@@ -637,7 +637,8 @@ ignored, and the EDID stands.
 
 **`nearest_pct(pct)`** is the nearest of the five values to any percent: round
 half up to a step of 25, then into 100..=200. It is for a percent that was
-worked out and not chosen, which is `display::carried_pct`'s; a percent a
+worked out and not chosen. `display::carried_pct` keeps the same rule on the
+exact share, and calls this only for a display with no size; a percent a
 person gives is still refused when it is not one of the five. The sum is made
 in `u32`, so the largest `u16` there is lands on 200.
 
@@ -690,17 +691,22 @@ none declared it is what the display's
 millimetres make of the screen's own pixels; with neither it is 100. A screen
 made at half its display's size is at half its display's scale. It is not held
 to the session's five values: [[sub-lictor]] rounds it to a whole scale for its
-trusted screen, and `carried_pct` brings it to one of the five.
+trusted screen. A session's scale is `carried_pct`'s, which takes the same two
+shares and does not go through this whole percent.
 
 **`carried_pct(display, own, declared)`** is the scale a session derives
 while its platform declares one (`docs/HALCYON-SCALE.md` 3 as amended twice on
 2026-11-12). The declaration is the display's, and `display` is the host's
-rect as it was last read. Whoever chose the mode, it is `scale::nearest_pct`
-of `own_pct`: the declaration by the mode's share of the display, and one of
-the five, so half a display declared at 200 is 100, never under 100 and never
-over 200, and 1024x768 on 2000x1280, which fills its height, is 120 and so
-125. The rounding is needed and not only the range: a display of odd sides
-halves to a mode a pixel short of half, and 200 carried to it is 99. `None` is
+rect as it was last read. Whoever chose the mode, it is the declaration by
+the larger of the mode's two shares of the display, as `own_pct` takes them,
+brought to the nearest of the five: half a display declared at 200 is 100,
+never under 100 and never over 200, and 1024x768 on 2000x1280, which fills
+its height, is 120 and so 125. It is brought to its step in one division,
+half up, and not through `own_pct`'s whole percent, which has dropped the
+remainder: 1760x1100 on 2560x1600 at 200 is 137.5 and so 150, where 137 would
+be 125 (round R1 F4). The rounding is needed and not only the range: a display
+of odd sides halves to a mode a pixel short of half, and 200 carried to it is
+under 100 by a hair. A display with no width or no height is no factor. `None` is
 a display that was never read, and gives the declaration as it is. (Between
 the two amendments `None` stood for a mode asked for by size, which kept the
 declaration.) [[sub-tapestryd]] is its only caller, at its boot and in
@@ -756,8 +762,10 @@ device.
 twice its display's size, of another shape than its display each way, and
 with a display that has no width or no height (`own_pct`); a declared scale
 carried to a mode at its display's size, under it and over it, with odd sides
-and a factor that is not whole, to a mode of another shape, to one larger than
-its display, and kept where the display was never read (`carried_pct`);
+and a factor that is not whole, to a mode of another shape, to one wider than
+its display's shape, to one half way between two of the five, to one larger
+than its display, on a display with one side missing, and kept where the
+display was never read (`carried_pct`);
 the fitted sizes for the Macs' full screens and for
 Lictor's limits, the order of the factors, and the refusals; an event followed
 at exactly the quiet time and once; a train; the wrap and a first count that is

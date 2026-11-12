@@ -356,14 +356,35 @@ swaps only when the device has answered for it whole:
    and unreferenced.
 
 **A spare whose state is not known.** `spare_owed` is set before the spare's
-first command. It is cleared only when the release of the old resource was
-answered and no command stalled across it (`Gpu::stalls` unchanged). While it
-is set, the next `remake` first detaches and unreferences the spare. A refusal
-there is an answer: the device has no such resource, which is what is wanted.
-If either command was not answered, `remake` gives up. `Gpu::resource_unref`
-answers Ok for a release it has put off (a resource the display may still
-name, `condemn`); the device then refuses the next making of that ID, which
-is a failure like any other, and the ID is released again before each try.
+first command, and only `release_spare` clears it. That detaches and
+unreferences the reserved resource that is not the image, and clears the flag
+when both commands were answered: the engine live afterwards and no stall
+across them (`Gpu::stalls` unchanged). A refusal is an answer: the device has
+no such resource, which is what is wanted. It is called in three places. A
+making ends with it, for the image that was. The next making begins with it
+while the flag is set, and gives up if it is not answered. And `follow` calls
+it after any asking that succeeded with the flag still set, so that an image
+the device kept is not its memory until the display next changes (round R1
+F5). Not answered there, `follow` says
+`lictor: trusted screen WxH at Kx: the image before it was not let go of`,
+with `, to be tried again` while `Follow::retry` has tries left.
+
+The unreference is `Gpu::unref_own`, not `Gpu::resource_unref`. That one
+answers Ok for a release it has put off (`condemn`: a resource the display may
+still name, or any resource while its list has overflowed), which would clear
+the flag over a resource the device still holds. The display names no trusted
+resource while the seat is normal, because restoration's accepted bind drains
+the list, so `unref_own` always sends the command. It is no client's command:
+it moves neither the command ticks a reply carries (`cmd_seq`,
+`last_unref_seq`, which [[sub-tapestryd]]'s presentable self-test orders by;
+round R1 F3) nor the journal of retirements clients wait for.
+
+**The stall lever is a client's.** `test_stall_next` arms a shot for the next
+synchronous command, and `follow` runs before the pass serves its
+connections. It takes an armed shot off the lever while its own commands go
+and puts it back after (`test_stall_set_aside`, `test_stall_put_back`; test
+builds only), so the shot rides the command its client armed it for (round R1
+F2). The seat's commands on entry and the cursor plane's are not set aside.
 
 **A failure** leaves `image`, the size and the scale as they were, so the
 screen secure attention enters is the one that stood. `follow` says
@@ -399,9 +420,11 @@ secure attention: 1600x1000 at one (the rule on device row 47); a change to
 3456x2160 while that screen is up, which must say nothing and leave the
 scanout; and after the episode 3456x2160 at two (the rule on rows 94 and 95),
 which needs 29 chunks of backing where the boot made 16. Not shown by any
-test: a failed making and its retries, the spare that is owed, memory that
-cannot be had, a display that changes during entry or restoration, and the
-EDID's millimetres on this path. `backend/screen.rs` is in no host build.
+test: a failed making and its retries, the spare that is owed and its release
+asked again, the lever's shot set aside, memory that cannot be had, a display
+that changes during entry or restoration, and the EDID's millimetres on this
+path. `backend/screen.rs` is in no host build, and no lever stalls one of
+Lictor's own commands.
 
 ## Purpose
 

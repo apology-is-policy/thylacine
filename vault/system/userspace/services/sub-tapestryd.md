@@ -162,7 +162,12 @@ host's rect as it was last read: by `Comp::new` (the rect the broker started
 with; `None` only for a rect with no size), by `follow_display` (`mode auto`,
 and a display event while the mode follows the host) and by `display_under_pin`
 (a display event while the mode is pinned). All three write it in
-`display_read`, and nothing else does: `set_mode` leaves it. With a
+`display_read`, and nothing else does: `set_mode` leaves it. A followed
+change that fails (`change_mode`: a bind that is owed and refused, a screen
+that cannot be made) writes it too, before the change is asked again: the
+mode that stood is shown on the display that was read, so the rect is not
+lost when every asking fails (round R1 F1; read from the code, since no lever
+makes six askings fail). With a
 declaration, `Comp::new` and `derive_scale` give
 `display::carried_pct(display, mode, declared)` ([[sub-libhalcyon]]): the
 declaration times the larger of the mode's two shares of the rect, brought to

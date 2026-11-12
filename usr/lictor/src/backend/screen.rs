@@ -63,7 +63,8 @@ pub struct Screen {
     image: usize,
     /// The other one may be the device's: a making of it that was not
     /// finished, or a release of it that was not answered for. It is let go
-    /// of, and that answered for, before it is made again.
+    /// of, and that answered for, before it is made again, and `follow`
+    /// asks for that until it is.
     spare_owed: bool,
     /// When the host's display is asked about again.
     follow: Follow,
@@ -163,13 +164,37 @@ impl Screen {
             Engine::Stalled => { self.follow.hold(now_ms); return; }
             Engine::Live => {}
         }
-        if let Err(why) = self.refit(gpu) {
-            let again = !gpu.engine_dead()
-                && self.follow.retry(libthyla_rs::time::monotonic_ns() / 1_000_000);
-            crate::backend::diagnostic(&alloc::format!(
-                "lictor: trusted screen stays {}x{} at {}x: {}{}\n",
-                self.width, self.height, self.scale, why, if again { ", to be tried again" } else { "" }));
-        }
+        // A stall a client armed is for that client's next command.
+        #[cfg(feature = "test-mode")]
+        let shot = gpu.test_stall_set_aside();
+        let made = self.refit(gpu);
+        // The image before this one, where its making could not let go of
+        // it: held, it is the device's memory until the display next changes.
+        let kept = made.is_ok() && self.spare_owed && !self.release_spare(gpu);
+        #[cfg(feature = "test-mode")]
+        gpu.test_stall_put_back(shot);
+        if made.is_ok() && !kept { return; }
+        let again = !gpu.engine_dead()
+            && self.follow.retry(libthyla_rs::time::monotonic_ns() / 1_000_000);
+        let tail = if again { ", to be tried again" } else { "" };
+        crate::backend::diagnostic(&match made {
+            Err(why) => alloc::format!("lictor: trusted screen stays {}x{} at {}x: {}{}\n",
+                self.width, self.height, self.scale, why, tail),
+            Ok(()) => alloc::format!("lictor: trusted screen {}x{} at {}x: the image before it was not let go of{}\n",
+                self.width, self.height, self.scale, tail),
+        });
+    }
+    /// The reserved resource that is not the image, let go of. A refusal is
+    /// an answer: the device has no such resource, which is what is wanted.
+    /// Not answered, nothing is known of it, and it stays owed.
+    fn release_spare(&mut self, gpu: &mut Gpu) -> bool {
+        let spare = RESOURCES[1 - self.image];
+        let stalls = gpu.stalls();
+        let _ = gpu.detach_backing(spare);
+        let _ = gpu.unref_own(spare);
+        let answered = gpu.stalls() == stalls && matches!(gpu.engine(), Engine::Live);
+        if answered { self.spare_owed = false; }
+        answered
     }
     fn refit(&mut self, gpu: &mut Gpu) -> Result<(), &'static str> {
         // A host that shows no display has nothing to be followed to.
@@ -198,15 +223,8 @@ impl Screen {
         }
         self.back(bytes).map_err(|_| "no memory for its pixels")?;
         let spare = RESOURCES[1 - self.image];
-        if self.spare_owed {
-            // Either may be refused: the device has no such resource, which
-            // is what is wanted. Not answered, nothing is known.
-            let stalls = gpu.stalls();
-            let _ = gpu.detach_backing(spare);
-            let _ = gpu.resource_unref(spare);
-            if gpu.stalls() != stalls || gpu.engine_dead() {
-                return Err("the device did not answer for the image before the last");
-            }
+        if self.spare_owed && !self.release_spare(gpu) {
+            return Err("the device did not answer for the image before the last");
         }
         // From its first command the spare may be the device's, whatever is
         // answered.
@@ -215,12 +233,11 @@ impl Screen {
             || gpu.attach_backing(spare, &self.segments[..bytes.div_ceil(CHUNK)]).is_err() {
             return Err("the device did not make its image");
         }
-        let old = RESOURCES[self.image];
         self.image = 1 - self.image;
         (self.width, self.height, self.scale, self.pixels) = (width, height, scale, pixels);
-        let stalls = gpu.stalls();
-        let released = gpu.detach_backing(old).is_ok() && gpu.resource_unref(old).is_ok();
-        self.spare_owed = !released || gpu.stalls() != stalls;
+        // The image that was is the spare from here. Not answered for, it
+        // stays owed, and `follow` asks again.
+        let _ = self.release_spare(gpu);
         Ok(())
     }
     pub fn paint(&mut self, gpu: &mut Gpu, model: &Model, masked: usize,

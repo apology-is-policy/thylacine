@@ -70,10 +70,32 @@ They were made under the operator's standing authorization of 2026-09-01 and are
 - A making that fails is tried again six times at the compositor's waits, and then only at the
   next display event. Nothing drives that path in a test: there is no lever for a refused
   create or an unanswered attach on this lane.
-- `Gpu::resource_unref` answers Ok for a release it has put off (`condemn`). If that ever
-  happens to a trusted image, the next making of that ID is refused by the device and the
-  screen stays as it is until an accepted scanout drains the list. I did not change `condemn`.
+- The trusted images are released with a new `Gpu::unref_own`, not `Gpu::resource_unref`.
+  What I first wrote here was wrong, and the audit round showed it (R1 F6): at phase 0 no
+  trusted resource is in the condemned list, because restoration's accepted bind drains it,
+  so the deferral that could reach a trusted release was the overflow arm, which answers Ok,
+  records nothing and is drained by nothing. `unref_own` always sends the command. I did not
+  change `condemn` or `resource_unref`.
 - The commands are synchronous in the pass, as a client's are: up to eight for one change.
+
+## After the audit round (R1: 0 P0, 0 P1, 0 P2, 6 P3; Opus 5.5 reviewing)
+
+Four of its fixes are in your code:
+
+- `Gpu::unref_own` (above). It moves neither `cmd_seq`/`last_unref_seq` nor the retirement
+  journal. tapestryd's presentable self-test orders by those ticks, and a trusted release
+  between two of its requests would have moved them (F3).
+- `Gpu::test_stall_set_aside` and `test_stall_put_back` (test builds). `Screen::follow` runs
+  before the pass serves its connections, so its `GET_DISPLAY_INFO` could have taken a shot a
+  client armed for its own bind. It now takes the shot off the lever while its commands go
+  and puts it back (F2). The seat's commands on entry and the cursor plane's are as they were.
+- `Screen::release_spare` is the one place a spare is let go of, and `follow` calls it after
+  an asking that succeeded while the spare is still owed, with the same bounded retries. Before,
+  a release that stalled left the old image on the device until the display next changed (F5).
+- `resource_unref_raw` was split so that `unref_own` shares its wire half (`unref_wire`).
+
+None of the four is driven by a test: there is no lever that stalls one of Lictor's own
+commands. If you add one, a stall at each of `remake`'s commands is what it should reach.
 
 ## Where the evidence is
 

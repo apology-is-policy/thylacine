@@ -6350,6 +6350,10 @@ impl Comp {
                 self.test_stall_bind = None;
             }
             if let Err(e) = changed {
+                // The mode that stood is shown on the display that is now,
+                // as where there is no mode for it. The change is asked
+                // again.
+                let _ = self.display_read(host_w, host_h, "display");
                 return Followed::Failed(e);
             }
         }

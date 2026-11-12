@@ -3252,22 +3252,40 @@ impl Gpu {
         }
         self.cmd_seq = self.cmd_seq.wrapping_add(1);
         self.last_unref_seq = self.cmd_seq;
+        let result = self.unref_wire(resource_id);
+        if result.is_ok() && self.collect_retirements {
+            self.retired_resources.push(resource_id);
+        }
+        result
+    }
+
+    fn unref_wire(&mut self, resource_id: u32) -> Result<(), Error> {
         let req_va = self.req(REQ_OFF)?;
         unsafe {
             write_ctrl_hdr(req_va, VIRTIO_GPU_CMD_RESOURCE_UNREF);
             w32(req_va + 24, resource_id);
             w32(req_va + 28, 0);
         };
-        let result = self.ctrl.step(
+        self.ctrl.step(
             "RESOURCE_UNREF",
             GPU_CTRL_HDR_LEN + 8,
             GPU_CTRL_HDR_LEN,
             VIRTIO_GPU_RESP_OK_NODATA,
-        );
-        if result.is_ok() && self.collect_retirements {
-            self.retired_resources.push(resource_id);
+        )
+    }
+
+    /// Free one of the service's own resources (`objects::TRUSTED_ID_START`
+    /// and up). The display names none of them while the seat is normal
+    /// (restoration binds the client's resource or disables the scanout, and
+    /// that bind drains the list), so nothing is put off: the command is
+    /// always sent, and Ok or a refusal is the device's own answer. It is no
+    /// client's command, so it is in neither the ticks a reply carries nor
+    /// the journal of the retirements clients wait for.
+    pub fn unref_own(&mut self, resource_id: u32) -> Result<(), Error> {
+        if resource_id < crate::objects::TRUSTED_ID_START {
+            return Err(Error::BadField);
         }
-        result
+        self.unref_wire(resource_id)
     }
 
     /// RESOURCE_CREATE_BLOB for a GUEST-memory blob (Warp-6 V-1): the blob's
@@ -4646,13 +4664,26 @@ impl Gpu {
         self.ctrl.fenced_held()
     }
 
-    /// The stall lever's shot: the next synchronous command, whoever sends
-    /// it, retires and then reports its deadline missed. Its outcome is
-    /// unknown to its caller exactly as a late retirement leaves it; a
-    /// command that never gets that far spends the shot and says so.
+    /// The stall lever's shot: the next synchronous command a request
+    /// sends, whichever client's, retires and then reports its deadline
+    /// missed. Its outcome is unknown to its caller exactly as a late
+    /// retirement leaves it; a command that never gets that far spends the
+    /// shot and says so.
     #[cfg(feature = "test-mode")]
     pub fn test_stall_next(&mut self) {
         self.ctrl.test_stall_late = true;
+    }
+
+    /// The shot is for a client's command. The trusted screen's own
+    /// (`Screen::follow`) take it off the lever while they go and put it
+    /// back after, so it rides the command it was armed for.
+    #[cfg(feature = "test-mode")]
+    pub fn test_stall_set_aside(&mut self) -> bool {
+        core::mem::take(&mut self.ctrl.test_stall_late)
+    }
+    #[cfg(feature = "test-mode")]
+    pub fn test_stall_put_back(&mut self, armed: bool) {
+        self.ctrl.test_stall_late |= armed;
     }
 
     /// The latch lever's shot: a harmless display query whose wait reports
