@@ -8,14 +8,18 @@
 # session dance and takes job control -> stop / jobs / fg / re-stop / bg /
 # fg + ^C -> `exit` unwinds back to the outer prompt.
 #
-# The stoppable job is `sleep` (NOT `cat`): a v1.0 pts has no foreground-read
-# arbitration (TTIN), so a stopped job holding an outstanding terminal read
-# would steal the shell's input; `sleep` holds no terminal read and exercises
-# the whole stop/report/resume machinery cleanly (interactive `cat`-under-^Z is
-# the documented TTIN follow-up). The sleep is LONG (30 s, ended by ^C, never
-# by its deadline): a short sleep's wall clock keeps running WHILE stopped, so
-# both the stop window and the post-resume window would race the expiry (the
-# PTY-4e F2 right edge -- the artifact that originally masked the re-stop leg).
+# The stoppable job is `debug-child fgtick` (NOT `cat`): a v1.0 pts has no
+# foreground-read arbitration (TTIN), so a stopped job holding an outstanding
+# terminal read would steal the shell's input; this job holds no terminal read
+# and exercises the whole stop/report/resume machinery cleanly (interactive
+# `cat`-under-^Z is the documented TTIN follow-up). It writes FGTICK only while
+# it holds the terminal, so each stop key is typed when the job can take it
+# (lc_expect_fgtick) and no key waits on a clock: a key typed before ut has
+# handed the terminal over reaches ut, and the leg hangs on a job that runs on.
+# The job is ended by ^C, never by a deadline: its limit is a count of its own
+# ticks, which a stopped job does not spend, so neither the stop window nor the
+# post-resume window races an expiry (the PTY-4e F2 right edge -- the artifact
+# that originally masked the re-stop leg).
 #
 # Echo discipline: the outer console is RAW (-echo) under the dance and the
 # inner editor draws its own echo, so rendered text is always something a
@@ -90,35 +94,36 @@ set ::lc_fail_probe {
     lc_probe_capture "echo diag-alive | tr a-z A-Z\r" 3 "channel alive?"
 }
 
-lc_send "sleep 30"
-sleep 1
+lc_send "debug-child fgtick"
+lc_expect_fgtick 1 "the job holds the terminal"
 send "\x1a"
-lc_expect "Stopped" "^Z stops the foreground sleep"
+lc_expect "Stopped" "^Z stops the foreground job"
 set ::lc_fail_probe {}
 
 lc_send "jobs"
-lc_expect "Stopped" "jobs lists the stopped sleep"
+lc_expect "Stopped" "jobs lists the stopped job"
 
 # THE RE-STOP LEG (task #19): fg resumes (terminal + SYS_TTY_CONT; bi_fg
 # echoes the job's command line first), then a second ^Z must stop it AGAIN --
 # only a RUNNING job can stop, so the second Stopped is simultaneously the
 # resume proof and the re-stop regression.
 lc_send "fg"
-lc_expect "sleep 30" "fg echoes the resumed job"
-sleep 1
+lc_expect "debug-child fgtick" "fg echoes the resumed job"
+lc_expect_fgtick 2 "the resumed job holds the terminal"
 send "\x1a"
-lc_expect "Stopped" "a second ^Z re-stops the resumed sleep"
+lc_expect "Stopped" "a second ^Z re-stops the resumed job"
 
 # bg resumes the re-stopped job in the background (no terminal handoff).
 lc_send "bg"
 lc_expect "&" "bg announces the backgrounded job"
 
-# fg the RUNNING job (harmless cont), then ^C -> interrupt -> sleep
+# fg the RUNNING job (harmless cont), then ^C -> interrupt -> the job
 # default-terminates (LS-5) -> fg returns. Post-resume signal delivery
-# through the same pts fan as the susp.
+# through the same pts fan as the susp. In the background the job wrote
+# nothing; its FGTICKs say the terminal is its own again.
 lc_send "fg"
-lc_expect "sleep 30" "fg echoes the running job"
-sleep 1
+lc_expect "debug-child fgtick" "fg echoes the running job"
+lc_expect_fgtick 2 "the foregrounded job holds the terminal"
 send "\x03"
 sleep 1
 # The job died of the interrupt, so the packed wait reads it signalled and

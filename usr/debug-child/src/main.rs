@@ -41,6 +41,13 @@
 //     does a write that takes nothing or fails and, far past any driver's own
 //     bound, its tick limit. A terminal whose master is gone still takes
 //     writes until its ring is full, so the limit is what ends an orphan.
+//   * `debug-child fgtick` (the interactive scenarios' stoppable job) is tick
+//     mode for a driver that cannot ask the terminal who holds it. It writes
+//     FGTICK only while its own process group is the foreground group of the
+//     terminal on fd 0, so a driver that reads one knows that a stop or an
+//     interrupt key typed now reaches this job. In the background it writes
+//     nothing. It ends as tick mode does, and with FGNOTTY and status 2 when
+//     fd 0 is no terminal of its session.
 //   * `debug-child dirty` (5g, death wins in the exit close; jc-probe drives
 //     it) leaves a small write staged on a 9P file, writes one byte to stdout
 //     (its driver's pipe) once it has, and then spins as spin mode does.
@@ -71,7 +78,7 @@ use core::time::Duration;
 use libthyla_rs::fs::File;
 use libthyla_rs::io::Write;
 use libthyla_rs::thread;
-use libthyla_rs::{t_exits, t_write};
+use libthyla_rs::{t_exits, t_getpgid, t_tty_get_fg, t_write};
 
 // MUST match debug-probe.
 const SENTINEL_REG: u64 = 0xDEB0_DEB0;
@@ -196,6 +203,33 @@ fn tick() -> ! {
     for _ in 0..TICK_LIMIT {
         // SAFETY: SVC wrapper; TICK_MARK is a valid static buffer.
         if unsafe { t_write(1, TICK_MARK.as_ptr(), TICK_MARK.len()) } <= 0 {
+            break;
+        }
+        let _ = libthyla_rs::time::sleep(TICK_EVERY);
+    }
+    // SAFETY: `!`-returning SVC.
+    unsafe { t_exits(0) }
+}
+
+// The scenarios' token and refusal. MUST match tools/interactive/lib.exp.
+const FGTICK_MARK: &[u8] = b"FGTICK\n";
+const FGTICK_NOTTY: &[u8] = b"FGNOTTY\n";
+
+fn fgtick() -> ! {
+    // SAFETY: SVC wrapper; 0 names the caller.
+    let own = unsafe { t_getpgid(0) };
+    for _ in 0..TICK_LIMIT {
+        // SAFETY: SVC wrapper on fd 0, the terminal the shell gave the job.
+        let fg = unsafe { t_tty_get_fg(0) };
+        if own <= 0 || fg < 0 {
+            // SAFETY: SVC wrappers; FGTICK_NOTTY is a valid static buffer.
+            unsafe {
+                let _ = t_write(1, FGTICK_NOTTY.as_ptr(), FGTICK_NOTTY.len());
+                t_exits(2)
+            }
+        }
+        // SAFETY: SVC wrapper; FGTICK_MARK is a valid static buffer.
+        if fg == own && unsafe { t_write(1, FGTICK_MARK.as_ptr(), FGTICK_MARK.len()) } <= 0 {
             break;
         }
         let _ = libthyla_rs::time::sleep(TICK_EVERY);
@@ -372,6 +406,9 @@ pub extern "C" fn rs_main() -> i64 {
     }
     if libthyla_rs::env::args().operands().next() == Some(&b"tick"[..]) {
         tick();
+    }
+    if libthyla_rs::env::args().operands().next() == Some(&b"fgtick"[..]) {
+        fgtick();
     }
     if libthyla_rs::env::args().operands().next() == Some(&b"spin-tty"[..]) {
         spin_tty(ptr);

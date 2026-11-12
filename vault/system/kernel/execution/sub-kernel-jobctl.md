@@ -3,7 +3,7 @@ id: sub-kernel-jobctl
 type: sub
 title: "Job control — the second owner of the stop park, the catchability gate, and the POSIX orphan rule"
 parent: moc-kernel-execution
-code: [kernel/proc.c, kernel/include/thylacine/proc.h]
+code: [kernel/proc.c, kernel/include/thylacine/proc.h, usr/susp-mask-child/src/main.rs, usr/pouch-hello/pouch-hello-susp.c]
 audit: hard
 guarded-by: [inv-i20, inv-i39, inv-i9, inv-i19]
 validated-by: [spec-pty-stop, spec-debug-stop, prose, gate-smp]
@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/PTY-DESIGN.md section 4"]
 created: 2026-08-03
-updated: 2026-10-27
+updated: 2026-11-12
 ---
 ## Purpose
 
@@ -428,6 +428,26 @@ shown `STOPPED` even with a flag set before the kill.
 From the terminal side, `pts.tty_tstp_stop_cont_seam` and
 `pts.teardown_hup_cont` drive the same machinery through the real entry
 points.
+
+**The delivered stop has two witnesses in the guest, and neither types its key
+on a clock.** `jc-probe`'s `maskstop` rung, which joey hosts on every boot,
+runs `/susp-mask-child`. The child masks the terminal family, so the fan posts
+the suspend where it would have stopped. The child reads the queued note back
+with `SYS_NOTE_WAIT`'s pending form, which takes nothing off the queue, writes
+`MASKHELD`, keeps ticking a counted number of times, and unmasks; the stop
+lands on that syscall's return to EL0, in `proc_job_stop_self`. The unmask
+follows the note by the child's own count, so no interval orders the driver's
+`^Z` against it: a driver held up for any time short of its watchdog finds the
+child still masked. Before 2026-11-12 the child unmasked at its twelfth tick,
+and a driver more than two seconds late typed its `^Z` at an unmasked child.
+`tools/interactive/pty-susp-pouch.exp` stops a Pouch program
+(`pouch-hello-susp`) with `^Z` and proves the stop by silence bracketed by
+advancing ticks. That program writes a tick only while its group is the
+terminal's foreground group (`tcgetpgrp`), so the scenario's key is typed at a
+job that can take it. The shell spawns a job, puts it in a group and then
+hands it the terminal, and a key typed before the last of those reaches the
+shell: `pty-4.exp` and `item10-ctrlc.exp` wait the same way on
+`debug-child fgtick` (`lc_expect_fgtick`).
 
 ## Referenced by
 

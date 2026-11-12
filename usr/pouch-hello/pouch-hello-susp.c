@@ -10,7 +10,16 @@
 //
 // Output contract (the .exp matches on these, so they are ABI for the scenario):
 //   SUSP-READY
-//   SUSP-TICK <n>          n strictly increasing from 1, forever
+//   SUSP-TICK <n>          n strictly increasing from 1, forever, written only
+//                          while this program holds the terminal
+//   SUSP-NOTTY             fd 0 is no terminal of this session; exit status 2
+//
+// A TICK SAYS THE TERMINAL IS OURS. The shell spawns a job, puts it in a group
+// and then hands it the terminal, and a ^Z typed before the last of those
+// reaches the shell: the program runs on and the scenario waits for a stop
+// that never comes. So a tick is written only while this program's process
+// group is the terminal's foreground group, and the scenario types its stop
+// key after reading one.
 //
 // THE COUNTER IS THE POINT, not decoration. Proving "^Z stopped it" needs a
 // NEGATIVE assertion (no output while stopped), and a negative is satisfied by
@@ -26,7 +35,8 @@
 //
 //   NO TERMINAL READ. A v1.0 pts has no foreground-read arbitration (TTIN), so
 //   a stopped job holding an outstanding terminal read steals the shell's
-//   input. This program only ever WRITES.
+//   input. This program only ever WRITES, and asks who holds the terminal
+//   (tcgetpgrp), which reads no input.
 //
 //   NEVER EXITS ON ITS OWN. A job with its own deadline races the stop window
 //   from both sides -- wall clock keeps running while stopped, which is the
@@ -42,6 +52,7 @@
 #include <errno.h>
 #include <stdio.h>
 #include <time.h>
+#include <unistd.h>
 
 // Slow enough that a human-scale expect window sees distinct ticks, fast enough
 // that the scenario is not dominated by waiting.
@@ -64,8 +75,13 @@ int main(void) {
 
     printf("SUSP-READY\n");
 
-    for (unsigned long n = 1;; n++) {
-        printf("SUSP-TICK %lu\n", n);
+    for (unsigned long n = 1;;) {
+        pid_t fg = tcgetpgrp(STDIN_FILENO);
+        if (fg < 0) {
+            printf("SUSP-NOTTY\n");
+            return 2;
+        }
+        if (fg == getpgrp()) printf("SUSP-TICK %lu\n", n++);
         tick_sleep();
     }
 }

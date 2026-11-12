@@ -51,6 +51,7 @@ proc susp_next_tick {phase} {
     set timeout $lc_cmd_timeout
     expect {
         -re {SUSP-TICK ([0-9]+)\r} { return $expect_out(1,string) }
+        -re {SUSP-NOTTY}  { lc_fail "the pouch program found no terminal on fd 0 during '$phase'" }
         -re {EXTINCTION:} { lc_extinction_fail "kernel extinction during '$phase'" }
         timeout { lc_fail "timeout (${lc_cmd_timeout}s) waiting for a SUSP-TICK during '$phase'" }
         eof     { lc_fail "unexpected EOF during '$phase'" }
@@ -74,7 +75,10 @@ sleep 1
 lc_send "pouch-hello-susp"
 lc_expect "SUSP-READY" "the pouch program reached main"
 
-# POSITIVE 1: it is running, and the counter advances.
+# POSITIVE 1: it is running, and the counter advances. The program writes a
+# tick only while it holds the terminal, so these two also say that the ^Z
+# below is typed at a job that can take it: no pause on a clock stands between
+# the spawn and the stop key.
 set n1 [susp_next_tick "first tick"]
 set n2 [susp_next_tick "second tick"]
 if {$n2 <= $n1} {
@@ -87,10 +91,17 @@ lc_step "saw: ticks advancing before the stop ($n1 -> $n2)"
 send "\x1a"
 lc_expect "Stopped" "^Z stops the foreground POUCH program"
 
-# Let at most one in-flight tick drain (250 ms cadence, unbuffered), then
-# demand real quiet. Without the drain this races a tick already on the wire
-# when the stop landed -- which would be a harness artifact, not a kernel bug.
-sleep 1
+# At most one tick can have been inside its write when the stop landed and
+# reach us after `Stopped`. Take that one if it comes within a second, then
+# demand real quiet. A pause here would leave it in the buffer for the quiet
+# window to find -- a harness artifact, not a kernel bug -- and a process that
+# was never stopped writes a second tick, which the window does find.
+lc_within 1 {
+    -re {SUSP-TICK ([0-9]+)\r} { lc_step "saw: one tick in flight at the stop ($expect_out(1,string))" }
+    -re {EXTINCTION:} { lc_extinction_fail "kernel extinction after the stop" }
+    eof               { lc_fail "unexpected EOF after the stop" }
+    timeout           { }
+}
 
 # THE CLAIM: stopped means stopped.
 susp_expect_quiet 4 "the stopped pouch program stays silent"
@@ -104,7 +115,8 @@ if {$n3 <= $n2} {
 lc_step "saw: ticks resumed and advanced past the stop ($n2 -> $n3)"
 
 # ^C -> interrupt -> the pouch program default-terminates (LS-5), fg returns.
-sleep 1
+# The tick just read came after five quiet seconds, so the program wrote it
+# after the resume, holding the terminal.
 send "\x03"
 sleep 1
 lc_run_expect "echo susp-fg | tr a-z A-Z" "SUSP-FG"

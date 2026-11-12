@@ -61,7 +61,8 @@ set b1 [it_look {INNER-B} "hosted ut after TWO ^C at idle" 12]
 # C: a foreground job + ^C still interrupts and reprompts (a sanity leg -- the
 # fg-job path is wait_pids_interruptible, unchanged, but proves the bridge did
 # not regress fg interrupt).
-lc_send "sleep 20"; sleep 1
+lc_send "debug-child fgtick"
+lc_expect_fgtick 1 "the foreground job holds the terminal"
 send "\x03"; sleep 1
 lc_send "echo inner-c | tr a-z A-Z"
 set c1 [it_look {INNER-C} "hosted ut after ^C on a foreground sleep" 12]
