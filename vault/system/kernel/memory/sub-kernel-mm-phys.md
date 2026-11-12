@@ -502,19 +502,18 @@ send no idle-peer IPIs, and `sched()` steals only onto an empty tree, so a
 `ready()`d owner runs on the drainer's own CPU. Its first run did exactly
 that and never met its premise, a drain while an owner reports another
 CPU, which the test asserts before the stamps. The owners churn until the
-drainer releases them, which it does once 64 of its drains have run beside
-a live owner (an owner's floor is 4000 iterations, its ceiling four
-million, so a drainer that never releases fails the test and does not hang
-it). Until 2026-11-12 an owner ran 4000 iterations and stopped, and nothing
-orders one kthread's first instruction before another's last: on one boot
-of a 163-boot fleet run all three had finished before the drainer's first
-drain and the test failed `the drainer never drained`. What kept the
-drainer away that long on that boot was not established; a failure now
-prints how long the first drain took to come and how many context switches
-the drainer's CPU made meanwhile. With one CPU there is nothing to hold: an
-owner runs only when the drainer yields, after its first drain. It drains once more after
-joining the owners, because the next test's gauge reads the buddy without
-draining.
+drainer releases them, which it does once 64 of its drains have each run
+beside at least one live owner. A fixed iteration count is not enough,
+because nothing orders one kthread's first instruction before another's
+last: the owners can finish before the first drain. An owner's floor is
+4000 iterations; one never released ends five seconds after its first run,
+by the clock and not by a count, so a drainer that never comes fails the
+test (`the drainer never drained`) inside the boot's timeout on any
+emulator instead of hanging it. A failure prints how long after the owners
+were placed the first drain came (with no drain, how long they ran) and how
+many context switches the drainer's CPU made meanwhile; both are read
+before the first owner can run. With one CPU there is nothing to hold: an
+owner runs only when the drainer yields, after its first drain.
 
 On each of the three sabotaged trees (the pre-lock bodies, the drain
 unlocked, the alloc unlocked) the twin dies before any stamp is checked: a

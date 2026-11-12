@@ -631,7 +631,9 @@ per full gate ≈ 3 s against a run measured in tens of minutes.
      it the scenario booted, drove the guest, and reported the Python
      traceback as a guest failure, three attempts running. `lc_require_host_pil`
      (lib.exp) now exits 77 with the reason before a VM starts; the six SAK
-     scenarios call it when they take the EGL capture path.
+     scenarios call it when they take the EGL capture path. The preflight
+     makes the consumer's own import (`from PIL import Image`), not a
+     weaker one: a Pillow whose C half does not load still has a `PIL`.
 - `ls-gfx-session-image`'s fail-fast arm waited for `leaf=N REFUSED`, a word
   halcyond never wrote (its line is `leaf=N cache refused`), so a refused raster
   showed as a 60 s timeout that blamed the routing. It matches the refusal line

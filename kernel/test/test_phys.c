@@ -102,11 +102,13 @@ void test_phys_leak_10k(void) {
 // The owners churn until the drainer releases them, which it does once
 // DMO_BESIDE of its drains have run beside a live owner. Nothing orders one
 // kthread's first instruction before another's last, so a fixed iteration
-// count lets the owners finish before the first drain.
+// count lets the owners finish before the first drain. An owner never
+// released ends by the clock, not by a count: a count's wall time is the
+// emulator's, and the failure has to print inside the boot's own timeout.
 #define DMO_OWNERS 3
 #define DMO_HOLD   24       // past MAGAZINE_SIZE: refill and drain-on-full both run
 #define DMO_ITERS  4000u    // an owner's floor
-#define DMO_ITERS_MAX 4000000u   // its ceiling: an owner never released ends here, and the counts fail the test
+#define DMO_HELD_NS 5000000000ull   // an owner never released ends this long after its first run, and the counts fail the test
 #define DMO_BESIDE 64u
 #define DMO_IDLE   0xffffffffu
 
@@ -120,8 +122,10 @@ static volatile u64 *dmo_word(struct page *p) { return (volatile u64 *)pa_to_kva
 static void dmo_owner(void *arg) {
     u64 id = (u64)(uintptr_t)arg;
     struct page *held[DMO_HOLD];
-    for (u64 i = 0; i < DMO_ITERS_MAX &&
-         (i < DMO_ITERS || __atomic_load_n(&g_dmo_release, __ATOMIC_ACQUIRE) == 0u); i++) {
+    u64 born = timer_now_ns();
+    for (u64 i = 0; i < DMO_ITERS ||
+         (__atomic_load_n(&g_dmo_release, __ATOMIC_ACQUIRE) == 0u &&
+          timer_now_ns() - born < DMO_HELD_NS); i++) {
         __atomic_store_n(&g_dmo_cpu[id], smp_cpu_idx_self(), __ATOMIC_RELAXED);
         unsigned n = 1u + (unsigned)((i * 7u + id) % DMO_HOLD), k = 0;
         for (; k < n; k++) {
@@ -158,6 +162,13 @@ void test_phys_drain_meets_live_owners(void) {
     // own tree is empty, so a ready()d owner runs on this CPU and the secondaries
     // stay parked. Each owner is placed on a peer, which is woken to run it.
     unsigned me = smp_cpu_idx_self(), ncpu = smp_cpu_count();
+    // What a failure prints: how long after the owners were placed the first
+    // drain came (or, with no drain at all, how long the owners ran), and how
+    // many context switches the placing CPU made meanwhile (none = the thread
+    // never left it). Both are read before the first owner can run.
+    u32 placed_cpu = me;
+    u64 placed_ns = timer_now_ns(), first_ns = 0;
+    u64 placed_ctxt = sched_cpu_ctxt(placed_cpu), first_ctxt = 0;
     for (unsigned i = 0; i < DMO_OWNERS; i++) {
         if (!smp) { ready(t[i]); continue; }
         unsigned peer = (me + 1u + i % (ncpu - 1u)) % ncpu;
@@ -167,19 +178,16 @@ void test_phys_drain_meets_live_owners(void) {
 
     // A drain counts as beside an owner when that owner last reported a CPU
     // other than the drainer's: without one, nothing here raced.
-    // What a failure prints: how long the first drain took to come (or, with no
-    // drain at all, how long the owners ran), and how many context switches the
-    // placing CPU made meanwhile (none = the thread never left it).
-    u32 placed_cpu = me;
-    u64 drains = 0, beside = 0, placed_ns = timer_now_ns(), first_ns = 0;
-    u64 placed_ctxt = sched_cpu_ctxt(placed_cpu), first_ctxt = 0;
+    u64 drains = 0, beside = 0;
     for (u64 spin = 0; spin < 100000000ull &&
          __atomic_load_n(&g_dmo_running, __ATOMIC_ACQUIRE) != 0; spin++) {
         u32 me = smp_cpu_idx_self();
+        bool live = false;
         for (unsigned i = 0; i < DMO_OWNERS; i++) {
             u32 c = __atomic_load_n(&g_dmo_cpu[i], __ATOMIC_RELAXED);
-            if (c != DMO_IDLE && c != me) beside++;
+            if (c != DMO_IDLE && c != me) live = true;
         }
+        if (live) beside++;
         if (drains == 0) {
             first_ns = timer_now_ns() - placed_ns;
             first_ctxt = sched_cpu_ctxt(placed_cpu) - placed_ctxt;
