@@ -156,9 +156,10 @@ fn notches(acc: &mut f64, dy: f64, precise: bool) -> i32 {
     n as i32
 }
 
-// Where a tw x th picture goes in an area of w x h pixels that shows all of it, centred, at one
-// scale: (x, y, width, height, scale), from the top left. The drawing and the pointer both take the
-// picture's place from here.
+// Where a tw x th picture goes in an area of w x h pixels that shows all of it, centred:
+// (x, y, width, height, scale), from the top left, a rectangle of whole pixels inside the area. The
+// drawing and the pointer both take the picture's place from here, and stretch the picture over
+// that rectangle; the scale is the one the picture was placed for.
 //
 // A guest that cannot make a mode of the view's size makes one of that size over a whole number and
 // drops the remainder, so the view is that many times its picture and a few pixels more. Filling the
@@ -175,18 +176,17 @@ fn fit(tw: f64, th: f64, w: f64, h: f64) -> Option<(f64, f64, f64, f64, f64)> {
     // pixels are compared exactly.
     let t = tw.max(th);
     let near = w * t <= whole * (t + 1.0) * tw || h * t <= whole * (t + 1.0) * th;
-    if whole >= 1.0 && near {
-        let (vw, vh) = (tw * whole, th * whole);
-        return Some((
-            ((w - vw) / 2.0).floor(),
-            ((h - vh) / 2.0).floor(),
-            vw,
-            vh,
-            whole,
-        ));
-    }
-    let (vw, vh) = (tw * fill, th * fill);
-    Some(((w - vw) / 2.0, (h - vh) / 2.0, vw, vh, fill))
+    let (vw, vh, scale) = if whole >= 1.0 && near {
+        (tw * whole, th * whole, whole)
+    } else if w * th <= h * tw {
+        // Filled: the side that bounds the scale takes all of the area's, exactly, and the other
+        // the nearest whole number of pixels, which is never more than the area has.
+        (w, (th * w / tw).round().max(1.0), fill)
+    } else {
+        ((tw * h / th).round().max(1.0), h, fill)
+    };
+    let (x, y) = (((w - vw) / 2.0).floor(), ((h - vh) / 2.0).floor());
+    Some((x, y, vw, vh, scale))
 }
 
 // The picture's place in a view of bw x bh points at `s` pixels to a point, as AppKit counts:
@@ -200,6 +200,20 @@ fn place(tw: u32, th: u32, bw: f64, bh: f64, s: f64) -> Option<(f64, f64, f64, f
     let (w, h) = (pixels(bw, s) as f64, pixels(bh, s) as f64);
     let (x, y, vw, vh, scale) = fit(tw as f64, th as f64, w, h)?;
     Some((x / s, (h - y - vh) / s, vw / s, vh / s, scale / s))
+}
+
+// The scanout pixel under (px, py) of a view, which counts from its bottom left, where the picture
+// of a tw x th scanout has the rectangle `r` (`place`'s): None over a bar. The drawing stretches the
+// picture over that rectangle, each way by its own amount, and so does this.
+fn guest_pixel(px: f64, py: f64, r: (f64, f64, f64, f64), tw: u32, th: u32) -> Option<(u32, u32)> {
+    let (x, y, w, h) = r;
+    // The guest counts from the top left.
+    let (dx, dy) = (px - x, y + h - py);
+    if tw == 0 || th == 0 || !(dx >= 0.0 && dx < w && dy >= 0.0 && dy < h) {
+        return None;
+    }
+    let at = |d: f64, side: f64, n: u32| ((d * n as f64 / side) as u32).min(n - 1);
+    Some((at(dx, w, tw), at(dy, h, th)))
 }
 
 // QEMU's number for a button AppKit numbers `number` (left 0, right 1, middle 2, then the side
@@ -524,12 +538,11 @@ impl Renderer {
         if let Some(tex) = &self.texture {
             let (tw, th) = (self.tex_size.0 as f64, self.tex_size.1 as f64);
             if let Some((x, y, vw, vh, scale)) = fit(tw, th, size.0 as f64, size.1 as f64) {
-                // Whole pixels: a place that is not whole (a filling scale's) is rounded to them.
                 enc.setViewport(MTLViewport {
-                    originX: x.floor(),
-                    originY: y.floor(),
-                    width: vw.round(),
-                    height: vh.round(),
+                    originX: x,
+                    originY: y,
+                    width: vw,
+                    height: vh,
                     znear: 0.0,
                     zfar: 1.0,
                 });
@@ -673,7 +686,7 @@ define_class!(
         #[unsafe(method(resetCursorRects))]
         fn reset_cursor_rects(&self) {
             let Ok(worn) = self.ivars().worn.try_borrow() else { return };
-            if let (Some(cursor), Some((rect, _))) = (&worn.cursor, self.picture()) {
+            if let (Some(cursor), Some((rect, _, _))) = (&worn.cursor, self.picture()) {
                 self.addCursorRect_cursor(rect, cursor);
             }
         }
@@ -956,7 +969,8 @@ impl GuestView {
 
     // The window's content set one point larger each way than the scanout has pixels. With a whole
     // number of pixels to a point the view is then that many times the picture and one of the
-    // picture's own pixels more, which is the most a guest's fitted mode leaves.
+    // picture's own pixels more: the whole-scale rule's bound, which is more than a guest's fitted
+    // mode leaves (that is under one of its pixels).
     fn scripted_bar_size(&self) {
         let iv = self.ivars();
         if let Some(r) = iv.renderer.borrow_mut().as_mut() {
@@ -1084,27 +1098,23 @@ impl GuestView {
         }
     }
 
-    // Where the scanout is shown in the view, and how many view points a guest pixel takes.
-    // None while there is no scanout, or while a frame is being drawn.
-    fn picture(&self) -> Option<(NSRect, f64)> {
+    // Where the scanout is shown in the view, how many view points a guest pixel takes, and the
+    // scanout's size. None while there is no scanout, or while a frame is being drawn.
+    fn picture(&self) -> Option<(NSRect, f64, (u32, u32))> {
         let b = self.bounds();
         let s = self.window().map(|w| w.backingScaleFactor()).unwrap_or(1.0);
         let (tw, th) = self.ivars().renderer.try_borrow().ok()?.as_ref()?.tex_size;
         let (x, y, vw, vh, scale) = place(tw, th, b.size.width, b.size.height, s)?;
-        Some((NSRect::new(NSPoint::new(x, y), NSSize::new(vw, vh)), scale))
+        let rect = NSRect::new(NSPoint::new(x, y), NSSize::new(vw, vh));
+        Some((rect, scale, (tw, th)))
     }
 
     // The scanout pixel under a window event, if it is over the picture.
     fn guest_point(&self, ev: &NSEvent) -> Option<(u32, u32)> {
         let p = self.convertPoint_fromView(ev.locationInWindow(), None);
-        let (r, scale) = self.picture()?;
-        let x = (p.x - r.origin.x) / scale;
-        // AppKit's origin is the bottom left; the guest's is the top left.
-        let y = (r.origin.y + r.size.height - p.y) / scale;
-        if x < 0.0 || y < 0.0 || x >= r.size.width / scale || y >= r.size.height / scale {
-            return None;
-        }
-        Some((x as u32, y as u32))
+        let (r, _, (tw, th)) = self.picture()?;
+        let rect = (r.origin.x, r.origin.y, r.size.width, r.size.height);
+        guest_pixel(p.x, p.y, rect, tw, th)
     }
 
     // Bring the Mac's pointer up to the guest's: its image, whether it shows one, and the size a
@@ -1112,7 +1122,7 @@ impl GuestView {
     fn wear_pointer(&self) {
         let iv = self.ivars();
         let picture = self.picture();
-        let scale = picture.map_or(0.0, |(_, s)| s);
+        let scale = picture.map_or(0.0, |(_, s, _)| s);
         let cursor = {
             let mut worn = iv.worn.borrow_mut();
             let news = iv.display.pointer_dirty.swap(false, Ordering::AcqRel);
@@ -1140,7 +1150,7 @@ impl GuestView {
         window.invalidateCursorRectsForView(self);
         // The rectangles are only looked at when the pointer next moves; one that is resting on the
         // picture would keep its old image until then.
-        if let (Some(cursor), Some((rect, _)), true) = (cursor, picture, window.isKeyWindow()) {
+        if let (Some(cursor), Some((rect, _, _)), true) = (cursor, picture, window.isKeyWindow()) {
             let p = self.convertPoint_fromView(window.mouseLocationOutsideOfEventStream(), None);
             let inside = p.x >= rect.origin.x
                 && p.y >= rect.origin.y
@@ -1614,8 +1624,10 @@ impl GuestView {
 
 #[cfg(test)]
 mod tests {
-    use super::{button_code, fit, notches, place, pointer_scale, replace, Renderer, Stats};
-    use crate::display::{Display, Order, Rect};
+    use super::{
+        button_code, fit, guest_pixel, notches, place, pointer_scale, replace, Renderer, Stats,
+    };
+    use crate::display::{pixels, Display, Order, Rect};
     use objc2::runtime::ProtocolObject;
     use objc2_metal::{
         MTLCommandBuffer, MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice, MTLOrigin,
@@ -1725,9 +1737,9 @@ mod tests {
         assert_eq!(fit(4.0, 2.0, 10.0, 91.0), Some((1.0, 43.0, 8.0, 4.0, 2.0)));
         assert_eq!(
             fit(4.0, 2.0, 11.0, 91.0),
-            Some((0.0, 42.75, 11.0, 5.5, 2.75))
+            Some((0.0, 42.0, 11.0, 6.0, 2.75))
         );
-        // Past it the view is filled, as a picture pinned at a size of its own is.
+        // Past it the view is filled, as any picture far from a whole scale is.
         assert_eq!(
             fit(1280.0, 800.0, 2800.0, 1800.0),
             Some((0.0, 25.0, 2800.0, 1750.0, 2.1875))
@@ -1737,6 +1749,132 @@ mod tests {
             fit(1280.0, 800.0, 640.0, 200.0),
             Some((160.0, 0.0, 320.0, 200.0, 0.25))
         );
+    }
+
+    #[test]
+    fn a_filled_picture_has_whole_pixels_inside_the_view() {
+        // The height bounds the scale and 480 times it is a hair over 1000 in floating point: the
+        // picture takes the 1000 rows, from the first, and the nearest whole number of columns.
+        assert_eq!(
+            fit(640.0, 480.0, 1334.0, 1000.0),
+            Some((0.0, 0.0, 1333.0, 1000.0, 1000.0 / 480.0))
+        );
+        // A picture so flat that its height rounds to nothing is a row high.
+        assert_eq!(
+            fit(16384.0, 1.0, 100.0, 100.0),
+            Some((0.0, 49.0, 100.0, 1.0, 100.0 / 16384.0))
+        );
+        let mut filled = 0u32;
+        for (tw, th) in [
+            (640u32, 480u32),
+            (1024, 768),
+            (1280, 800),
+            (800, 1280),
+            (1512, 945),
+            (37, 91),
+            (16384, 1),
+            (1, 16384),
+        ] {
+            for w in (1u32..4000).step_by(7).chain([1334, 16384, 65535]) {
+                for h in [1u32, 2, 199, 480, 500, 767, 1000, 1117, 2160, 16384] {
+                    let at = format!("{tw}x{th} in {w}x{h}");
+                    let (x, y, vw, vh, scale) =
+                        fit(tw as f64, th as f64, w as f64, h as f64).unwrap();
+                    for v in [x, y, vw, vh] {
+                        assert_eq!(v, v.floor(), "{at}");
+                    }
+                    assert!(x >= 0.0 && y >= 0.0 && vw >= 1.0 && vh >= 1.0, "{at}");
+                    assert!(x + vw <= w as f64 && y + vh <= h as f64, "{at}");
+                    if scale < 1.0 || scale != scale.floor() {
+                        filled += 1;
+                        assert!(vw == w as f64 || vh == h as f64, "{at}");
+                        assert!(
+                            x <= (w as f64 - vw) / 2.0 && y <= (h as f64 - vh) / 2.0,
+                            "{at}"
+                        );
+                    } else {
+                        assert_eq!((vw, vh), (tw as f64 * scale, th as f64 * scale), "{at}");
+                    }
+                }
+            }
+        }
+        assert!(filled > 10000, "{filled}");
+    }
+
+    #[test]
+    fn every_picture_a_guest_fits_to_a_view_is_drawn_whole() {
+        // A view's size over k with the remainder dropped, as libhalcyon's fit_mode makes a mode.
+        let mut n = 0u32;
+        for long in 640u32..=8192 {
+            for short in [
+                200u32, 399, 400, 401, 480, 481, 720, 768, 945, 1117, 1964, 2234, 3384,
+            ] {
+                for (w, h) in [(long, short), (short, long)] {
+                    for k in 2..=4u32 {
+                        let (tw, th) = (w / k, h / k);
+                        n += 1;
+                        assert_eq!(
+                            fit(tw as f64, th as f64, w as f64, h as f64),
+                            Some((
+                                ((w - tw * k) / 2) as f64,
+                                ((h - th * k) / 2) as f64,
+                                (tw * k) as f64,
+                                (th * k) as f64,
+                                k as f64
+                            )),
+                            "{w}x{h} over {k}"
+                        );
+                    }
+                }
+            }
+        }
+        assert!(n > 500000, "{n}");
+    }
+
+    #[test]
+    fn a_pointer_over_the_picture_is_over_the_pixel_drawn_there() {
+        // A whole scale with half a point of bar on the right and below (two pixels to a point).
+        let (tw, th) = (1512, 945);
+        let (x, y, w, h, _) = place(tw, th, 1512.5, 945.5, 2.0).unwrap();
+        let r = (x, y, w, h);
+        assert_eq!(guest_pixel(0.25, 945.25, r, tw, th), Some((0, 0)));
+        assert_eq!(guest_pixel(1511.75, 0.75, r, tw, th), Some((1511, 944)));
+        assert_eq!(guest_pixel(1512.25, 500.0, r, tw, th), None);
+        assert_eq!(guest_pixel(100.0, 0.25, r, tw, th), None);
+        // The top edge is the first row's and the bottom edge is nobody's; left and right likewise.
+        assert_eq!(guest_pixel(0.0, 945.5, r, tw, th), Some((0, 0)));
+        assert_eq!(guest_pixel(0.0, 0.5, r, tw, th), None);
+        assert_eq!(guest_pixel(1512.0, 945.5, r, tw, th), None);
+        assert_eq!(guest_pixel(-0.25, 500.0, r, tw, th), None);
+        assert_eq!(guest_pixel(f64::NAN, 500.0, r, tw, th), None);
+        // A filled picture is stretched each way by its own amount: 640 columns over 1333 pixels
+        // and 480 rows over 1000. Its last column and its last row are the last ones drawn.
+        let (tw, th) = (640, 480);
+        let (x, y, w, h, _) = place(tw, th, 1334.0, 1000.0, 1.0).unwrap();
+        let r = (x, y, w, h);
+        assert_eq!(r, (0.0, 0.0, 1333.0, 1000.0));
+        assert_eq!(guest_pixel(1332.5, 0.5, r, tw, th), Some((639, 479)));
+        assert_eq!(guest_pixel(1333.5, 0.5, r, tw, th), None);
+        assert_eq!(guest_pixel(0.5, 999.5, r, tw, th), Some((0, 0)));
+        assert_eq!(guest_pixel(666.5, 500.5, r, tw, th), Some((320, 239)));
+        assert_eq!(guest_pixel(1.0, 1.0, r, 0, th), None);
+        // Three rows drawn as one, a hundred columns as ten: the two ways differ by thirty times.
+        let (x, y, w, h, _) = place(100, 3, 10.0, 10.0, 1.0).unwrap();
+        assert_eq!((x, y, w, h), (0.0, 5.0, 10.0, 1.0));
+        assert_eq!(guest_pixel(5.5, 5.5, (x, y, w, h), 100, 3), Some((55, 1)));
+        // Anywhere inside, to the last number below the far edges, is a pixel the scanout has.
+        for w in 1..4000u32 {
+            for n in [1u32, 3, 640, 1000, 1512, 16384] {
+                let side = w as f64;
+                let last = f64::from_bits(side.to_bits() - 1);
+                let r = (0.0, 0.0, side, side);
+                assert_eq!(
+                    guest_pixel(last, side - last, r, n, n),
+                    Some((n - 1, n - 1))
+                );
+                assert_eq!(guest_pixel(0.0, side, r, n, n), Some((0, 0)));
+            }
+        }
     }
 
     #[test]
@@ -1938,40 +2076,41 @@ mod tests {
             cmd.commit();
             cmd.waitUntilCompleted();
             let got = read(&target, dw, dh);
-            let (x0, y0, vw, vh, scale) = fit(tw as f64, th as f64, dw as f64, dh as f64).unwrap();
+            // The view at a pixel to a point, and each device pixel's middle as a pointer there.
+            let (x0, y0, vw, vh, _) = place(tw, th, dw as f64, dh as f64, 1.0).unwrap();
+            let rect = (x0, y0, vw, vh);
             let mut inside = 0;
             for py in 0..dh {
                 for px in 0..dw {
-                    // The guest pixel under the middle of this one, as the pointer is mapped.
-                    let (gx, gy) = (
-                        (px as f64 + 0.5 - x0) / scale,
-                        (py as f64 + 0.5 - y0) / scale,
-                    );
+                    let under = guest_pixel(px as f64 + 0.5, (dh - py) as f64 - 0.5, rect, tw, th);
                     let at = &got[(py as usize * dw as usize + px as usize) * 4..][..4];
-                    let over = gx >= 0.0 && gy >= 0.0 && gx < tw as f64 && gy < th as f64;
-                    // Away from an edge by more than the one device pixel the drawing rounds to.
-                    let clear = |g: f64, n: u32| g < -1.0 / scale || g > n as f64 + 1.0 / scale;
-                    if exact && over {
-                        inside += 1;
-                        assert_eq!(
-                            at,
-                            colour(gx as u32, gy as u32),
-                            "{dw}x{dh} at ({px}, {py})"
-                        );
-                    } else if exact || clear(gx, tw) || clear(gy, th) {
-                        assert_eq!(at, [0, 0, 0, 255], "{dw}x{dh} bar at ({px}, {py})");
+                    match under {
+                        Some((gx, gy)) if exact => {
+                            inside += 1;
+                            assert_eq!(at, colour(gx, gy), "{dw}x{dh} at ({px}, {py})");
+                        }
+                        // Filtered: some mixture of the picture's colours, none of which is black.
+                        Some(_) => {
+                            inside += 1;
+                            assert_ne!(at[..3], [0, 0, 0], "{dw}x{dh} at ({px}, {py})");
+                        }
+                        None => assert_eq!(at, [0, 0, 0, 255], "{dw}x{dh} bar at ({px}, {py})"),
                     }
                 }
             }
-            if exact {
-                assert_eq!(inside, (vw * vh) as u32, "{dw}x{dh}");
-            } else {
-                // The middle of each guest pixel shows that pixel, near enough.
+            assert_eq!(inside, (vw * vh) as u32, "{dw}x{dh}");
+            if !exact {
+                // The device pixel a guest pixel's middle falls in shows that pixel, near enough.
                 for y in 0..th {
                     for x in 0..tw {
-                        let px = (x0 + (x as f64 + 0.5) * scale) as usize;
-                        let py = (y0 + (y as f64 + 0.5) * scale) as usize;
-                        let at = &got[(py * dw as usize + px) * 4..][..4];
+                        let px = (x0 + (x as f64 + 0.5) * vw / tw as f64) as u32;
+                        let up = y0 + vh - (y as f64 + 0.5) * vh / th as f64;
+                        let py = dh - 1 - up as u32;
+                        assert_eq!(
+                            guest_pixel(px as f64 + 0.5, (dh - py) as f64 - 0.5, rect, tw, th),
+                            Some((x, y))
+                        );
+                        let at = &got[(py as usize * dw as usize + px as usize) * 4..][..4];
                         for (a, b) in at.iter().zip(colour(x, y)) {
                             assert!(
                                 (*a as i32 - b as i32).abs() <= 40,
@@ -1982,6 +2121,141 @@ mod tests {
                 }
             }
         }
+    }
+
+    // A tw x th scanout drawn into dw x dh device pixels and read back. Each of its pixels says
+    // which it is (and is never black), or all of them are white.
+    fn drawn(r: &mut Renderer, tw: u32, th: u32, dw: u32, dh: u32, white: bool) -> Vec<u8> {
+        let mut src = Vec::with_capacity(tw as usize * th as usize * 4);
+        for y in 0..th {
+            for x in 0..tw {
+                let own = [
+                    x as u8,
+                    y as u8,
+                    0x80 | (x >> 8) as u8 | ((y >> 8) << 3) as u8,
+                    255,
+                ];
+                src.extend_from_slice(if white { &[255; 4] } else { &own });
+            }
+        }
+        let tex = texture(&r.device, tw, th, false);
+        let all = Rect {
+            x: 0,
+            y: 0,
+            w: tw,
+            h: th,
+        };
+        assert!(unsafe { replace(&tex, src.as_ptr(), src.len(), tw as usize * 4, all) });
+        r.texture = Some(tex);
+        r.tex_size = (tw, th);
+        let target = texture(&r.device, dw, dh, true);
+        let cmd = r.queue.commandBuffer().unwrap();
+        r.draw(&cmd, &target, (dw, dh));
+        cmd.commit();
+        cmd.waitUntilCompleted();
+        read(&target, dw, dh)
+    }
+
+    // The scanout pixel a device pixel of `drawn` shows at a whole scale; None for a bar.
+    fn shown(at: &[u8]) -> Option<(u32, u32)> {
+        if at[..3] == [0, 0, 0] {
+            return None;
+        }
+        let r = at[2] as u32;
+        Some((
+            at[0] as u32 | (r & 7) << 8,
+            at[1] as u32 | (r >> 3 & 15) << 8,
+        ))
+    }
+
+    #[test]
+    fn at_a_whole_scale_every_device_pixel_shows_the_pixel_a_click_on_it_sends() {
+        let Ok(mut r) = Renderer::new() else {
+            eprintln!("no Metal device: not tried");
+            return;
+        };
+        let mut views = 0;
+        for (tw, th) in [(64u32, 48u32), (48, 64), (33, 17)] {
+            for k in 1..=4u32 {
+                // What is left over each way: nothing, one pixel, the most a fitted mode leaves,
+                // and a whole guest pixel, which is the rule's bound.
+                for (rw, rh) in [
+                    (0, 0),
+                    (1, 0),
+                    (0, 1),
+                    (1, 1),
+                    (k - 1, k - 1),
+                    (k, k),
+                    (k, 0),
+                    (1, k),
+                ] {
+                    let (dw, dh) = (tw * k + rw, th * k + rh);
+                    let got = drawn(&mut r, tw, th, dw, dh, false);
+                    for s in [1.0f64, 2.0] {
+                        let (x, y, w, h, scale) =
+                            place(tw, th, dw as f64 / s, dh as f64 / s, s).unwrap();
+                        assert_eq!(scale * s, k as f64, "{tw}x{th} in {dw}x{dh}");
+                        views += 1;
+                        for py in 0..dh {
+                            for px in 0..dw {
+                                let at = &got[(py as usize * dw as usize + px as usize) * 4..][..4];
+                                let click = ((px as f64 + 0.5) / s, ((dh - py) as f64 - 0.5) / s);
+                                assert_eq!(
+                                    shown(at),
+                                    guest_pixel(click.0, click.1, (x, y, w, h), tw, th),
+                                    "{tw}x{th} in {dw}x{dh} at {s}: device ({px}, {py})"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(views, 3 * 4 * 8 * 2);
+    }
+
+    #[test]
+    fn a_filled_picture_covers_exactly_the_device_pixels_a_click_is_sent_from() {
+        let Ok(mut r) = Renderer::new() else {
+            eprintln!("no Metal device: not tried");
+            return;
+        };
+        let mut views = 0;
+        for (tw, th) in [(640u32, 480u32), (1024, 768), (1280, 800), (800, 1280)] {
+            // Views in points with their pixels to a point. 1334 x 1000 is the one where 480 times
+            // the scale is a hair over 1000; 1280 x 800 at one is the window as it opens.
+            for (bw, bh, s) in [
+                (1280.0f64, 800.0f64, 1.0f64),
+                (1334.0, 1000.0, 1.0),
+                (667.0, 500.0, 2.0),
+                (1300.0, 850.0, 1.0),
+                (1728.0, 1117.0, 1.0),
+                (1000.5, 700.5, 2.0),
+                (333.0, 777.0, 1.0),
+            ] {
+                let (dw, dh) = (pixels(bw, s), pixels(bh, s));
+                let (x, y, w, h, scale) = place(tw, th, bw, bh, s).unwrap();
+                if scale * s >= 1.0 && scale * s == (scale * s).floor() {
+                    continue;
+                }
+                views += 1;
+                let got = drawn(&mut r, tw, th, dw, dh, true);
+                for py in 0..dh {
+                    for px in 0..dw {
+                        let at = &got[(py as usize * dw as usize + px as usize) * 4..][..4];
+                        let click = ((px as f64 + 0.5) / s, ((dh - py) as f64 - 0.5) / s);
+                        let sent = guest_pixel(click.0, click.1, (x, y, w, h), tw, th);
+                        assert_eq!(
+                            at[..3] == [255, 255, 255],
+                            sent.is_some(),
+                            "{tw}x{th} in {bw}x{bh} at {s}: device ({px}, {py}) is {at:?}, sent {sent:?}"
+                        );
+                        assert!(at[..3] == [255, 255, 255] || at[..3] == [0, 0, 0]);
+                    }
+                }
+            }
+        }
+        assert!(views >= 24, "{views}");
     }
 
     #[test]

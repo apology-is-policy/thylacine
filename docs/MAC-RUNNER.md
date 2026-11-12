@@ -659,8 +659,15 @@ dropped the remainder (B5), so the view is k times its picture and under k pixel
 app draws that picture at k, each guest pixel on k by k of the view's, and the remainder is a
 bar. The rule (decided 2026-11-12, under the standing 2026-09-01 authorization): the whole
 scale below the filling one is kept when filling the view would make the picture at most one
-of its own pixels larger; any other picture is filtered to fill, as a mode pinned in the
-guest is. The pointer is mapped through the same placement, found in the drawable's pixels.
+of its own pixels larger; any other picture is filtered to fill. The rule goes by that
+distance alone, so a mode pinned in the guest is drawn whole too where the view comes that
+close to a multiple of it. A view of whole points at two pixels to a point is even both ways
+and a halved mode divides it exactly, so there the rule changes nothing; what it changes is a
+view with an odd side in pixels, a mode over three, and a picture the view has just moved a
+little away from. A filled picture takes a rectangle of whole pixels too: the side that bounds
+the scale has all of the view's, the other the nearest whole number. The pointer is mapped
+through the same rectangle, found in the drawable's pixels, each way by the rectangle's extent
+over the scanout's.
 Cursor: Thylacine's pointer is NOT in the scanout. Lictor sends it down the virtio cursor
 queue (`usr/lictor/src/backend/gpu/cursor.rs`, a 64x64 image), and under `-display dbus`
 QEMU forwards it to the listener as `CursorDefine` (image and hot spot) and `MouseSet`

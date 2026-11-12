@@ -174,15 +174,26 @@ with `CGDisplayIsAsleep` true), so nothing that must happen regardless may
 hang off it: a test's deadline has its own timer.
 
 **Where the picture is.** One function, `fit`, places a picture in an area
-of pixels, from the top left: the drawing takes its viewport from it (rounded
-to whole pixels; a whole scale's place is whole already, the odd pixel of a
-bar going to the right and the bottom) and the pointer takes the picture's
-rectangle from it through `place`, which finds it in the drawable's pixels,
-as the drawing does, and gives it in points from the bottom left, as AppKit
-counts. Until 2026-11-12 the pointer's place was found in points on its own,
-which agreed with the drawing only while both filled the view. The whole
-scale's test is made on products of whole numbers (`w * t <= k * (t + 1) *
-tw`, t the picture's longer side), so no rounding decides it. A position is
+of pixels, from the top left, as a rectangle of whole pixels inside the area.
+At a whole scale that is the picture's size times the scale, the odd pixel of
+a bar going to the right and the bottom. Filled, the side that bounds the
+scale takes all of the area's and the other the nearest whole number of
+pixels. The drawing takes the rectangle as its viewport. The pointer takes it
+through `place`, which finds it in the drawable's pixels, as the drawing
+does, and gives it in points from the bottom left, as AppKit counts;
+`guest_pixel` then maps a point of it to a scanout pixel, each way by the
+rectangle's extent over the scanout's, which is what the drawing stretches
+the picture by. Until 2026-11-12 the pointer's place was found in points on
+its own, which agreed with the drawing only while both filled the view; and
+a filled place was not whole pixels: the drawing floored and rounded it and
+the pointer did not, so that an edge pixel could be drawn and send nothing,
+or be a bar and send a click, and a product a hair over the area's side (480
+times 1000/480) put the picture a pixel outside it (audit round 1, F1 and
+F2). The whole scale's test is made on products of whole numbers (`w * t <=
+k * (t + 1) * tw || h * t <= k * (t + 1) * th`, t the picture's longer
+side), so no rounding decides it. It goes by distance alone: a mode pinned in
+the guest is drawn whole too where the view comes that close to a multiple of
+it. A position is
 mapped against the texture, which is what is on the glass: the texture for a
 new scanout replaces the old one only once that scanout is known to be the
 current one still.
@@ -497,6 +508,11 @@ every step of a drag is a mode the guest sets at every step.
   upload of part of a frame, after the first, has no unit test and no
   headless leg (QEMU's placeholder is one frame); the guest run of M-3 drove
   it for 87 frames and the picture was QEMU's.
+- **Not seen with a guest:** a fitted mode shown at its whole scale. No guest
+  has run since the rule was written. It is in the unit tests, on Metal off
+  screen (every device pixel of 192 views against the pixel a click on it
+  sends, and 27 filled views for which pixels are picture), and in one window
+  at two pixels to a point; never in a window at one.
 - **Two keyboards of different kinds** are read through one call that answers
   for the keyboard last typed on. A key is sent as the place it went down as,
   so it cannot stick; which of two places a key pressed on the other keyboard

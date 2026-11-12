@@ -31,11 +31,14 @@
 #
 # Then the bar leg, in a window again. Its content is set one point larger each way than the scanout
 # has pixels, which with a whole number of pixels to a point is a view one guest pixel past a whole
-# scale: what a guest's fitted mode leaves (docs/MAC-RUNNER.md 4.2).
-#   bar      the picture is drawn at the whole scale and the pointer is mapped where it is drawn: a
-#            click on each bar reaches QEMU as nothing, and one on the first pixel of the middle row
-#            and one on the last pixel of the last row arrive as those pixels. A picture stretched to
-#            fill the view would have both bar clicks land on its edge pixels.
+# scale: the bound of the whole-scale rule (docs/MAC-RUNNER.md 4.2), and more than a guest's fitted
+# mode leaves, which is under a guest pixel.
+#   bar      the pointer is mapped as for a picture at the whole scale: a click on each bar reaches
+#            QEMU as nothing, and one on the first pixel of the middle row and one on the last pixel
+#            of the last row arrive as those pixels. A picture stretched to fill the view would have
+#            both bar clicks land on its edge pixels. The leg does not look at what is drawn, and
+#            with two pixels to a point its bars are a pixel on every side: which side an odd pixel
+#            goes to, and the turn from AppKit's way up to the guest's, are the unit tests'.
 # The window opens once more, for three seconds.
 #
 #   macrunner/app/test/headless.sh       exit 0 pass, 1 fail, 77 skipped (not macOS, or no D-Bus display)
