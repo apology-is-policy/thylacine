@@ -1095,23 +1095,49 @@ unsafe fn unbind_home(mut sess: HomeSession) {
 
 // Create the view before authenticating: Corvus itself is charged to this
 // session, and neither the boot source nor the factory role goes to children.
-unsafe fn private_service_registry() -> i64 {
-    use libthyla_rs::{SrvRoute, t_srv_registry_new};
-    // `halcyon` is the console renderer's place channel (HALCYON.md 14.7.2): a boot
-    // resident in console mode, absent (the route stays offline) under a session compositor.
-    const NAMES: [&[u8]; 13] = [b"corvus", b"net", b"nocturne", b"nocturne-ctl",
-        b"lictor", b"tapestry", b"warp", b"stratum-fs", b"stratum-ctl", b"ptyfs", b"diorama", b"tapestry-interaction",
-        b"halcyon"];
-    let mut routes = [SrvRoute { name_len: 0, reserved: 0, name: [0; 32] }; 13];
-    for (r, name) in routes.iter_mut().zip(NAMES) {
+unsafe fn private_service_registry(console_shell: bool) -> i64 {
+    use libthyla_rs::{t_srv_registry_new, SrvRoute};
+    const RESIDENT: [&[u8]; 12] = [
+        b"corvus",
+        b"net",
+        b"nocturne",
+        b"nocturne-ctl",
+        b"lictor",
+        b"tapestry",
+        b"warp",
+        b"stratum-fs",
+        b"stratum-ctl",
+        b"ptyfs",
+        b"diorama",
+        b"tapestry-interaction",
+    ];
+    // The console renderer's place channel (HALCYON.md 14.7.2) goes to the shell that runs
+    // on the console it renders. A session compositor's panes have their own
+    // (`halcyon-<user>`), and `view` there must find no console channel to fall back to.
+    const CONSOLE_PLACE: &[u8] = b"halcyon";
+    let mut routes = [SrvRoute {
+        name_len: 0,
+        reserved: 0,
+        name: [0; 32],
+    }; 13];
+    let names = RESIDENT
+        .iter()
+        .copied()
+        .chain(console_shell.then_some(CONSOLE_PLACE));
+    let count = RESIDENT.len() + usize::from(console_shell);
+    for (r, name) in routes.iter_mut().zip(names) {
         r.name_len = name.len() as u32;
         r.name[..name.len()].copy_from_slice(name);
     }
     let source = t_open(-1, b"/srv".as_ptr(), 4, T_OPATH);
-    if source < 0 { return source; }
-    let root = t_srv_registry_new(source, routes.as_ptr(), routes.len(), 0);
+    if source < 0 {
+        return source;
+    }
+    let root = t_srv_registry_new(source, routes.as_ptr(), count, 0);
     let _ = t_close(source);
-    if root < 0 { return root; }
+    if root < 0 {
+        return root;
+    }
     let rc = t_mount(b"/srv".as_ptr(), 4, root, T_MREPL);
     let _ = t_close(root);
     rc
@@ -1128,7 +1154,26 @@ pub extern "C" fn rs_main() -> i64 {
         let _ = t_set_dumpable(0);
         let _ = t_set_traceable(0);
     }
-    let registry_rc = unsafe { private_service_registry() };
+    // KT-1.5d-1a (HALCYON 14.12): the per-user session compositor. When the
+    // device selects the Halcyon session (the /lib/halcyon/session lever),
+    // login spawns /bin/halcyond --session AS the user instead of ut on
+    // /dev/cons -- a per-user compositor that hosts the session's terminals as
+    // kaua-term tiles it spawns as itself (zero identity delegation, I-22
+    // clean). Default (absent / any other token) is the proven ut path; the
+    // lever gates the in-development session path off the shippable default.
+    //
+    // --no-session forces the ut path regardless of the lever: joey's seeded
+    // boot-test login (do_login_e2e) passes it because that non-interactive
+    // login MUST spawn a shell that EXITS so the boot-test completes -- the
+    // session halcyond never exits, so a seeded login that entered the session
+    // would hang the boot before the interactive getty ever runs. The session
+    // is thus reserved for the interactive getty login (which passes no such
+    // flag), exactly as the session is an interactive, non-terminating thing.
+    let session_halcyon =
+        read_session_lever() && !env::args().operands().any(|a| a == b"--no-session");
+    // Read before the view is made: which names the view routes depends on what
+    // this login will run.
+    let registry_rc = unsafe { private_service_registry(!session_halcyon) };
     if registry_rc < 0 {
         t_putstr("login: private service registry failed\n");
         return 1;
@@ -1360,24 +1405,6 @@ pub extern "C" fn rs_main() -> i64 {
             let _ = c.wait();
         }
     }
-
-    // KT-1.5d-1a (HALCYON 14.12): the per-user session compositor. When the
-    // device selects the Halcyon session (the /lib/halcyon/session lever),
-    // login spawns /bin/halcyond --session AS the user instead of ut on
-    // /dev/cons -- a per-user compositor that hosts the session's terminals as
-    // kaua-term tiles it spawns as itself (zero identity delegation, I-22
-    // clean). Default (absent / any other token) is the proven ut path; the
-    // lever gates the in-development session path off the shippable default.
-    //
-    // --no-session forces the ut path regardless of the lever: joey's seeded
-    // boot-test login (do_login_e2e) passes it because that non-interactive
-    // login MUST spawn a shell that EXITS so the boot-test completes -- the
-    // session halcyond never exits, so a seeded login that entered the session
-    // would hang the boot before the interactive getty ever runs. The session
-    // is thus reserved for the interactive getty login (which passes no such
-    // flag), exactly as the session is an interactive, non-terminating thing.
-    let session_halcyon =
-        read_session_lever() && !env::args().operands().any(|a| a == b"--no-session");
 
     // Spawn the shell AS the user. fd 0/1/2 inherit login's (the tty), so the
     // shell reads + writes the same console. The shell gets the user's identity

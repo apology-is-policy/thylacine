@@ -139,21 +139,40 @@ stay reserved/offline; no wildcard fallback. Add another resident only by an
 intentional login-policy update. No home-*, halcyon-* or boot-test service routes.
 
 November 12 login-policy update (PROPOSED by corona; implemented on the landing
-branch so that its proof exists; AWAITING THE OPERATOR'S RATIFICATION): the
-manifest adds `halcyon`, the console renderer's inline-media place channel.
-HALCYON.md 14.7.2 keeps that channel for console mode ("the console spike's
-global `/srv/halcyon` remains for console mode"), and with a private `/srv` per
-login nothing in a session could open it: `view` in a console-mode login shell
+branch so that its proof exists; AWAITING THE OPERATOR'S RATIFICATION): a login
+that runs the shell on the console adds `halcyon`, the console renderer's
+inline-media place channel, to its manifest; a login that starts the session
+compositor does not. HALCYON.md 14.7.2 keeps that channel for console mode
+("the console spike's global `/srv/halcyon` remains for console mode"), and
+with a private `/srv` per login the console shell could not open it: `view`
 reported `no /srv/halcyon` although the renderer had posted it (the whole-fleet
-run of November 12: ls-gfx-jpeg and ls-gfx-inline-view, 3 of 3 each). The
-renderer is spawned by joey with MAY_POST_SERVICE, so its posting is a trusted
-one and a route can resolve it. The route gives a session what every login had
-before this document: the channel has no peer gate (HALCYON.md 14.7, the
-September 29 refinement, says so), and a route adds none and removes none. It
-is the bare name only: a session's own `halcyon-<user>` service stays a local
-posting, and the sentence above still forbids routing those. Under a session
-compositor nothing posts `halcyon` at boot, so the route is reserved and
-offline there, and a session cannot claim the name locally.
+run of November 12: ls-gfx-jpeg and ls-gfx-inline-view, 3 of 3 each; a tree
+without private registries passes both). The renderer is spawned by joey with
+MAY_POST_SERVICE, so its posting is a trusted one and a route can resolve it.
+
+What the route reaches, stated because nothing gates it. The place channel has
+no peer gate (HALCYON.md 14.7, the September 29 refinement) and serves one
+connection at a time (`placesrv` `MAX_CONNS`). So any process of a
+console-shell login can hold the only slot until it dies, and another's `view`
+then waits out the 5 s handshake deadline and fails; it can fill the
+listener's 16-entry accept backlog, charged to its own session's connection
+credits, so that the next connect fails at once; and it can place a raster
+into the console transcript. Console logins follow one another, so "another"
+is a process that outlived its own login and kept that login's view: it can do
+these things to the next user of the console. Every process could before this
+document, and can today on a tree without private registries; this update
+gives it back to console-shell logins only and adds no gate. Closing it means
+admission at the place server by the console's current owner, which is not
+designed.
+
+A session compositor's login gets no such route, also on an image that runs
+halcyond as the console renderer too (the two build levers are independent):
+a pane's programs use the session's own `halcyon-<user>` address, and `view`
+without one must find no console channel behind the compositor
+(usr/view/src/main.rs `connect`). The fallback shell of a session whose
+compositor failed runs in that same view and has no inline media. The bare
+name is the only one routed: a session's `halcyon-<user>` service stays a
+local posting, and the sentence above still forbids routing those.
 Existing byte-service gates still deny the ordinary shell's direct coordinator
 connection while admitting its sealed CAP_TCB_DIAL home proxy.
 

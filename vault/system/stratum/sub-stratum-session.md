@@ -17,22 +17,26 @@ design: ["docs/IDENTITY-DESIGN.md section 9.9", "docs/CORVUS-DESIGN.md"]
 created: 2026-08-02
 updated: 2026-11-12
 ---
-## Resident route to the console renderer's place channel (November 12)
+## Route to the console renderer's place channel
 
-Login's fixed resident service map now includes `halcyon`, the console
-renderer's inline-media place channel (HALCYON.md 14.7.2). Since each login got
-a private `/srv`, a console-mode login shell could not open it, and `view`
-reported `no /srv/halcyon` although halcyond had posted it; the gates that show
-a picture on the console renderer (ls-gfx-jpeg, ls-gfx-inline-view) failed on
-every boot. The renderer's posting is a trusted one (joey spawns it with
-MAY_POST_SERVICE), which a route may resolve; a capability-posted `halcyon`
-would be refused. The route is not authority and adds no gate: the console
-channel never had a peer gate, and every login could open it before the
-private registries. Under a session compositor nothing posts the name at boot;
-the route is then offline, and reserving it means a session cannot post
-`halcyon` itself. The session's own service is `halcyon-<user>`, a local
-posting, never a route. This is a login-policy update awaiting the operator's
-ratification (docs/SRV-SESSION-REGISTRY-DESIGN.md, the November 12 paragraph).
+A login that runs the shell on the console routes `halcyon`, the console
+renderer's inline-media place channel (HALCYON.md 14.7.2), beside the twelve
+resident names; a login that starts the session compositor routes the twelve
+only (`private_service_registry(console_shell)`; the session lever is read
+before the view is made). The renderer's posting is a trusted one (joey spawns
+it with MAY_POST_SERVICE), which a route may resolve; a capability-posted
+`halcyon` would be refused. The route is not authority and adds no gate: the
+place channel has no peer gate and serves one connection at a time, so any
+process of a console-shell login can hold its slot, fill its accept backlog or
+place into the console transcript, and a process that outlives its login keeps
+that reach against the next console user. A session compositor's panes use
+the session's own `halcyon-<user>`, a local posting and never a route, and
+`view` without that address finds no console channel there, also when the
+image runs halcyond as the console renderer; the fallback shell of a session
+whose compositor failed has no inline media. Where no console halcyond posts
+the name the route is offline, and reserving it means the session cannot post
+`halcyon` itself. This is a login-policy update awaiting the operator's
+ratification (docs/SRV-SESSION-REGISTRY-DESIGN.md, the November 12 paragraphs).
 
 ## Resident cancellation route (October 2)
 
