@@ -1550,6 +1550,32 @@ pub extern "C" fn rs_main() -> i64 {
         None => return 1,
     }
 
+    // The turn leg: one pointer moved through both devices, as a frontend
+    // that captures the pointer moves it. After motion from the mouse the
+    // tablet's next position says only where the pointer is: it makes no
+    // motion, and the position after it exactly its own. So the first REL
+    // to arrive after the two positions is the second's, 160; counted from
+    // the position the leg above left the tablet at, the first would have
+    // arrived as -640.
+    say!("battery: relturn ready");
+    match wait_rel(&mut a, "turn mouse") {
+        Some((5, 5)) => say!("battery: relturn mouse OK 5 5"),
+        Some((dx, dy)) => {
+            say!("tapestry-battery: FAIL turn mouse rel got ({}, {})", dx, dy);
+            return 1;
+        }
+        None => return 1,
+    }
+    say!("battery: relturn seed ready");
+    match wait_rel(&mut a, "turn") {
+        Some((160, 0)) => say!("battery: relturn OK 160"),
+        Some((dx, dy)) => {
+            say!("tapestry-battery: FAIL turn rel got ({}, {})", dx, dy);
+            return 1;
+        }
+        None => return 1,
+    }
+
     // The test-mode leg (section 18.6, G-6c): freeze the FRAME clock,
     // prove it holds still, then drive it one tick by hand.
     if !write_file(root, "ctl", "test-mode on") {

@@ -690,11 +690,15 @@ every step of a drag is a mode the guest sets at every step.
 - **A captured pointer moves as the Mac's would have.** The motion is
   AppKit's, in points, with the Mac's acceleration, and not the device's own
   counts. A program that wants unaccelerated motion gets none.
-- **A guest's compositor hands a program the captured motion a second time
-  when the pointer is given back** (OPEN-BUGS 2026-11-12T11:26Z). tapestryd
-  makes motion of two tablet positions that follow each other, and counts
-  the first position after a capture from the last one before it. The cure
-  is tapestryd's, and is the next commit on this branch.
+- **One pointer, two devices.** The guest's compositor makes motion of two
+  tablet positions that follow each other, and ends such a run at motion
+  from the mouse (`usr/tapestryd/src/motion.rs`), so the first position
+  after a capture is a place and a program is not handed the captured
+  motion twice. That has host tests and a leg of the compositor's battery;
+  the leg has not run in a guest yet. The compositor drains the tablet
+  before the mouse in each wake: a position and motion that reach it within
+  one wake are taken tablet first, whatever order they happened in. A
+  person's chord keeps them apart, and a script has to pace itself.
 - **On a machine whose tablet is bound to nothing a press can still be seen
   before its place.** The button's report is the mouse's, and nothing orders
   two devices for a guest. The app sends the place ahead (Contract), which

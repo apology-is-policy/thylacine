@@ -811,7 +811,14 @@ struct tevent {              /* little-endian, 24 bytes, version-pinned wire */
   device (virtio-mouse) and SYNTHESIZED from consecutive absolute motion —
   load-bearing under abs-only frontends (QEMU cocoa with a tablet present
   never produces host rel events; the edge-stall at the host window
-  boundary is inherent to the abs source). Deltas leak no placement (pure
+  boundary is inherent to the abs source). A run of absolute motion ends
+  at motion from the relative device: the position that follows it is a
+  place and makes no delta. A frontend that moves ONE pointer through both
+  devices (it captures the pointer, sends its motion through the mouse, and
+  sends positions again from where the mouse left it) would otherwise have
+  that motion counted twice. The two devices are drained one after the
+  other, the tablet first, so what both sent within one wake is not taken
+  in the order it happened. Deltas leak no placement (pure
   motion — D5-consistent). Queueing: back-of-queue REL records coalesce by
   SUMMATION (replacement would lose motion; an interleaved event starts a
   fresh record, preserving order) and the kind is droppable under stall

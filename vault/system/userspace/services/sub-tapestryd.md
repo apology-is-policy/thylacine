@@ -3,7 +3,7 @@ id: sub-tapestryd
 type: sub
 title: "tapestryd — the compositor: the weave lifecycle, the present engine, and the retire ordering"
 parent: moc-userspace
-code: [tools/interactive/ls-display-follow.exp, tools/interactive/rfb_resize.py, usr/tapestryd/src/storage.rs, usr/kaua-term-probe/src/storage.rs, tools/interactive/tapestry-storage.exp, usr/kaua-term-probe/src/seat_control.rs, usr/kaua-term-probe/src/admission.rs, tools/interactive/interaction-seat.exp, usr/tapestryd/src/seat_coordinator.rs, usr/tapestryd/src/interaction.rs, usr/tapestryd/src/server.rs, usr/tapestryd/src/gpu.rs, usr/tapestryd/src/pane.rs, usr/tapestryd/src/va.rs, usr/tapestryd/src/input.rs, usr/tapestryd/src/main.rs, usr/tapestryd/src/chords.rs, usr/tapestryd/src/keymap.rs, usr/tapestryd/Cargo.toml]
+code: [tools/interactive/ls-display-follow.exp, tools/interactive/rfb_resize.py, usr/tapestryd/src/storage.rs, usr/kaua-term-probe/src/storage.rs, tools/interactive/tapestry-storage.exp, usr/kaua-term-probe/src/seat_control.rs, usr/kaua-term-probe/src/admission.rs, tools/interactive/interaction-seat.exp, usr/tapestryd/src/seat_coordinator.rs, usr/tapestryd/src/interaction.rs, usr/tapestryd/src/server.rs, usr/tapestryd/src/gpu.rs, usr/tapestryd/src/pane.rs, usr/tapestryd/src/va.rs, usr/tapestryd/src/input.rs, usr/tapestryd/src/main.rs, usr/tapestryd/src/chords.rs, usr/tapestryd/src/keymap.rs, usr/tapestryd/Cargo.toml, usr/tapestryd/src/motion.rs, usr/tapestryd/src/lib.rs]
 audit: hard
 guarded-by: [inv-i40, inv-i5, inv-i34, inv-i1, inv-i45, inv-i9]
 validated-by: [spec-tapestry-storage, spec-tapestry-present, prose, gate-smp]
@@ -3725,3 +3725,39 @@ transcript for each bring-up leg (aimed, injected, retried, verified), for a
 conventions line with no CPU class, and for the health-step chain (aimed,
 injected, no verdict, revived, verified), with no latch line, and the
 scenario's 9/9 pixels through the 3D screen.
+
+## Made-up motion ends at the mouse's (2026-11-12)
+
+A tablet says where the pointer is, so the motion a program is handed for it
+(`TEV_PTR_REL`, the mouse-look stream) is made up: the difference between two
+of its positions that follow each other. Until 2026-11-12 that meant the
+tablet's last position whatever had happened since, on the reasoning that
+each device's motion is counted in its own frame. That is right for a stylus
+and a mouse in two hands, and wrong for one pointer moved through both
+devices, which is what a frontend that captures the pointer does
+(`macrunner/app`): it sends the captured motion through the mouse, and when
+it lets go it sends positions again, from where the mouse left the pointer.
+The first of those was counted from the position before the capture, and
+the focused program was handed all of the captured motion a second time.
+
+The base is `motion::AbsBase`, in the lib, where the host tests run it. A
+position with no base is a place and makes no motion, and `ptr_move_rel`
+forgets the base, so the position that follows motion from the mouse is a
+place again. The cost falls on two devices that really are two: one report's
+worth of the stylus's motion at each turn from the mouse to it. The
+difference is taken wide and clamped; the subtraction it replaces could
+overflow on positions no display has.
+
+What this does not order: the loop drains the tablet and then the mouse in
+each wake, so a position and motion that reach it within one wake are taken
+tablet first, whatever order they happened in. A person's chord keeps a
+capture's last motion and the first position after it well apart. A script
+has to pace itself.
+
+Tests: three host tests of `AbsBase` (the first position after motion from
+the mouse makes none, and the second exactly its own; the widest motion
+there is does not overflow), and the `relturn` leg of `tapestry-battery`
+under `tools/interactive/ls-gfx-panes.exp`: motion from the mouse, then two
+tablet positions, and the first motion to arrive after them must be the
+second position's own 160 pixels. Counted from where the leg before it
+leaves the tablet, the first position would arrive as -640.

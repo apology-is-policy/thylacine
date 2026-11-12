@@ -110,6 +110,7 @@ use libthyla_rs::{
     T_SRV_PEER_FLAG_CONSOLE_RENDERER,
 };
 use tapestryd::skein::{self, Seg};
+use tapestryd::motion::AbsBase;
 use tapestryd::va::VaWindow;
 
 /// Present-pressure window for the idle throttle (#164): two adjacent
@@ -2035,13 +2036,12 @@ pub struct Comp {
     /// by the input drain). Buttons/scroll route by it.
     ptr_x: u32,
     ptr_y: u32,
-    /// The last ABSOLUTE motion's display position -- the base for the
-    /// synthesized TEV_PTR_REL deltas. Separate from ptr_x/ptr_y so
-    /// relative-device motion never poisons the abs delta base (each
-    /// source's deltas are computed within its own frame); None until
-    /// the first abs motion (the seed emits no delta -- the initial
-    /// (0,0)->position jump is placement, not motion).
-    abs_last: Option<(u32, u32)>,
+    /// The base the synthesized TEV_PTR_REL deltas are counted from: the
+    /// tablet's last display position, while nothing else has moved the
+    /// pointer since (tapestryd::motion). Separate from ptr_x/ptr_y, which
+    /// the mouse moves too. A position with no base only seeds it: the
+    /// jump to it is placement, not motion.
+    abs_last: AbsBase,
     /// HALCYON-INSTRUMENT 9.1 (I-3): the CHROME surface the pointer is over
     /// (slot, gen) as of the last routed motion -- the one that hears
     /// TEV_PTR_LEAVE when the routing moves off it. None over content, the
@@ -2796,7 +2796,7 @@ impl Comp {
             cursor_sent: None,
             cursor_failed: false,
             ptr_x: 0,
-            abs_last: None,
+            abs_last: AbsBase::new(),
             ptr_over: None,
             track_hover: None,
             drag: None,
@@ -10339,27 +10339,28 @@ impl Comp {
     /// drain). Also synthesizes the TEV_PTR_REL delta from the previous
     /// abs position -- the abs-only-frontend mouse-look path (QEMU cocoa
     /// with a tablet present never produces host rel events); the first
-    /// abs motion only seeds the base. Edge-stall is inherent to an abs
-    /// source (the host cursor stops at the window edge); the relative
-    /// device is exact.
+    /// abs motion, and the first after motion from the relative device,
+    /// only seeds the base. Edge-stall is inherent to an abs source (the
+    /// host cursor stops at the window edge); the relative device is
+    /// exact.
     pub fn ptr_move(&mut self, px: u32, py: u32, mods: u16) {
-        if let Some((lx, ly)) = self.abs_last {
-            let (dx, dy) = (px as i32 - lx as i32, py as i32 - ly as i32);
-            if dx != 0 || dy != 0 {
-                self.ptr_rel_emit(dx, dy, mods);
-            }
+        if let Some((dx, dy)) = self.abs_last.at(px, py) {
+            self.ptr_rel_emit(dx, dy, mods);
         }
-        self.abs_last = Some((px, py));
         self.ptr_commit(px, py, mods);
     }
 
     /// RELATIVE pointer motion (the mouse drain): emit the EXACT deltas
     /// to the focused surface (unclamped -- mouse-look must not stall at
     /// the display edge), then accumulate into the pointer position so
-    /// button/click routing follows the relative device too. abs_last is
-    /// untouched (per-source delta frames).
+    /// button/click routing follows the relative device too. It ends the
+    /// run the abs deltas are counted in: a frontend that moves one pointer
+    /// through both devices sends positions again from where this motion
+    /// left the pointer, and counted from the position before it the first
+    /// of them would hand a program this motion a second time.
     pub fn ptr_move_rel(&mut self, dx: i32, dy: i32, mods: u16) {
         self.ptr_rel_emit(dx, dy, mods);
+        self.abs_last.forget();
         let (dw, dh) = (self.gpu.width as i32, self.gpu.height as i32);
         // Saturating (round-4 F2): `dx`/`dy` arrive from the device via a
         // saturating accumulator, so their ceiling IS i32::MAX -- a plain

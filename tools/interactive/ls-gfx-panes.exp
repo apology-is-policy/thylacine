@@ -465,6 +465,41 @@ expect {
     timeout { lc_fail "the synthesized rel never arrived" }
 }
 
+# The turn leg: one pointer moved through both devices, as a frontend that
+# captures the pointer moves it (macrunner/app). After motion from the mouse
+# the tablet's next position says only where the pointer is: it seeds the
+# base again and makes no motion, and the position after it makes exactly its
+# own, px(8192)-px(4096) = 319-159 = 160. Counted from where the leg above
+# left the tablet (799), the first position would have arrived as -640.
+expect {
+    -ex "battery: relturn ready" {}
+    -ex "tapestry-battery: FAIL" { lc_fail_detail "battery died before the turn leg" }
+    timeout { lc_fail "battery never reached the turn leg" }
+}
+if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -p "rel 5 5"} err]} {
+    lc_fail "qmp-sendtext rel (turn) failed: $err"
+}
+expect {
+    -ex "battery: relturn mouse OK 5 5" {}
+    -ex "tapestry-battery: FAIL" { lc_fail_detail "the turn leg's mouse motion failed" }
+    timeout { lc_fail "the turn leg's mouse motion never arrived" }
+}
+expect {
+    -ex "battery: relturn seed ready" {}
+    timeout { lc_fail "battery never reached the turn leg's positions" }
+}
+if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -p "abs 4096 16384"} err]} {
+    lc_fail "qmp-sendtext abs (turn, the place) failed: $err"
+}
+if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -p "abs 8192 16384"} err]} {
+    lc_fail "qmp-sendtext abs (turn, the motion) failed: $err"
+}
+expect {
+    -ex "battery: relturn OK 160" { lc_pass "panes: a position after mouse motion is a place, and the next its own motion (dx=160)" }
+    -ex "tapestry-battery: FAIL" { lc_fail_detail "the turn leg failed" }
+    timeout { lc_fail "the turn leg's motion never arrived" }
+}
+
 # The test-mode leg (18.6): in-guest frozen-clock + tick asserts.
 expect {
     -ex "battery: test-mode OK" { lc_pass "panes: test-mode freezes the clock; tick drives it" }
