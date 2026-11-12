@@ -1,7 +1,8 @@
 # Processes and memory
 
 Thylacine reports its processes and their memory through three text files and
-two commands. `/ctl/procs` lists every process in one snapshot, one line each.
+two commands. `/ctl/procs` lists the processes in one snapshot, one line each,
+as many as one read holds.
 `/proc/<pid>/status` describes one process, including its memory footprint.
 `/ctl/memory` reports the machine's pages and the user pool. `ps` prints the
 process list as a table, and `prowl` shows the processes, the CPUs and the pool
@@ -30,8 +31,16 @@ PID  PPID  NAME  STATE  THR  PAGES  TBL  KIDS  CPU
 `KIDS` counts its live children. `CPU` is the time it has spent on a CPU, in
 milliseconds under ten seconds and in seconds above. Another user's process
 shows `-` under `CPU`, unless the operator holds `CAP_HOSTOWNER`. `STATE` is `ALIVE`,
-`STOPPED`, `ZOMBIE` or `INVALID`. To pass the kernel's own text through for a
-script, with `CPU_NS` in nanoseconds, run `ps --color=never --beacon=never`.
+`STOPPED`, `ZOMBIE` or `INVALID`; a process stopped by job control, as after
+Ctrl-Z, is `STOPPED`. `NAME` is the last component of the path the program was
+started from, and shows `?` in place of a space or of any character outside
+printable ASCII.
+
+`ps` lists every process on the system, however many there are, in increasing
+order of process ID. For a script, `ps --color=never --beacon=never` prints the
+plain table: the header and the columns of `/ctl/procs`, with `CPU_NS` in
+nanoseconds. When a process's status cannot be read, `ps` prints the error and
+exits with status 1 without printing a table.
 
 ### Watch the system live
 
@@ -66,7 +75,8 @@ Read the process's status file:
 cat /proc/<pid>/status
 ```
 
-It reports `name`, `pid`, `state`, `threads`, `threadcap` (the most threads the
+It reports `name`, `pid`, `state` (the word `ps` shows under `STATE`),
+`threads`, `threadcap` (the most threads the
 process may run at once), `cpu_ns`, `ppid`, the owning `principal` and `gid`,
 then the memory lines: `pages` (the charge), `tables`,
 `file`, `children`, `peak` and `budget`. A zombie reports its final figures and
@@ -189,9 +199,30 @@ returned once the free space at the top of the heap passes 2 MiB. Freed small
 blocks that lie below a block still in use stay charged, and the program's later
 allocations reuse them.
 
-`/ctl/procs` is one snapshot taken under the process-table lock, and it stops
-when its buffer of 4 KiB fills, at some fifty to sixty processes; `ps` and
-`prowl` show what they received. `/ctl/procs`, `/ctl/memory` and `/proc/<pid>/status` are readable by
+`/ctl/procs` is one snapshot taken under the process-table lock. One read holds
+4 KiB, some fifty to sixty processes. When a process does not fit, the table
+stops after the last whole row and ends with this line:
+
+```text
+(cut: more processes than one read holds; /proc lists them all)
+```
+
+A table without that line holds every process the reader may see. `ps` and
+`prowl` take their rows from `/proc`: they list the directory, which has no
+such limit, and read each process's status file, so they show every process on
+a system of any size. Their rows are read one after another. Each row describes
+its process at one instant, a process that lives through the whole listing
+appears exactly once, and a process that starts or exits during the listing
+may be absent. When the set cannot be read, `prowl` shows an empty table and
+the error on its status line.
+
+A process's name is recorded when the program starts, from the last component
+of its path, and holds at most 31 characters. A space and every character
+outside printable ASCII are recorded as `?`, so a file name cannot add a line
+to a status file, a column to the process table, or a control sequence to the
+terminal that prints it.
+
+`/ctl/procs`, `/ctl/memory` and `/proc/<pid>/status` are readable by
 every process. `/proc/<pid>/sched` and `/proc/<pid>/account` are readable by the process's
 owner and by holders of `CAP_HOSTOWNER`.
 

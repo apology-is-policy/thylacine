@@ -21,7 +21,7 @@ design:
   - "docs/IMPERIUM-DESIGN.md section 11.3 item 10"
   - "docs/IDENTITY-DESIGN.md reserved ids (none owns nothing)"
 created: 2026-08-02
-updated: 2026-10-29
+updated: 2026-11-12
 ---
 ## Purpose
 
@@ -744,6 +744,28 @@ Read under `g_proc_table_lock`, as `exit:` is; `term_sig` is written before
 the ZOMBIE transition under the same lock ([[sub-kernel-death]]). Witness:
 `devproc.zombie_status_signal` (a `snare:abort` zombie shows `signal:  6`; an
 `exit(1)` zombie, one variable away, shows none).
+
+## `status` shows a job-stopped Proc STOPPED (2026-11-12)
+
+The `state:` line is `proc_state_word` ([[sub-kernel-proc]]), the word
+`/ctl/procs` prints in its STATE column: `ALIVE`, `ZOMBIE`, `INVALID`, and
+`STOPPED` for an ALIVE Proc under a job stop that is not dying (Plan 9's
+`Stopped`, the Unix `ps` T state). Before, `status` read `ALIVE` for a
+job-stopped Proc while `/ctl/procs` read `STOPPED`. The readers that moved
+from that table to `/proc` because one read of the table can be cut (`ps`,
+`prowl`; [[sub-kernel-devctl]], [[sub-libthyla-rs]]) need the same word from
+here. A debug stop still reads `ALIVE`: that stop is the debugger's own view
+(I-39), which `wait` reports. `dap-probe`, the one in-tree reader that
+compares the word with `ALIVE`, does so on a debug-held child. The flags are
+read atomically under `g_proc_table_lock`, which the read's table walk holds
+around `format_status`. Witness: `devproc.read_status_format` job-stops a
+linked Proc and reads `state:   STOPPED` through the real read path, then
+continues it and reads `state:   ALIVE`, one variable apart. Decided under
+the operator-away grant; ratification owed.
+
+The `name:` line prints `Proc.name`, which holds only printable ASCII
+graphics since the same day (`proc_set_name`, [[sub-kernel-proc]]): a file
+name with a newline in it cannot forge a second `state:` line here.
 
 ## `account` (2026-11-03; MM-1b)
 

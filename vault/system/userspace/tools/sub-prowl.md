@@ -16,7 +16,7 @@ hazards: []
 abis: []
 design: ["docs/PROWL-DESIGN.md", "docs/IMPERIUM-DESIGN.md section 11.3 item 10"]
 created: 2026-08-04
-updated: 2026-11-10
+updated: 2026-11-12
 ---
 ## Purpose
 
@@ -53,7 +53,7 @@ kernel's behalf.
 them.** The header's third row is the user pool from `/ctl/memory`, filled to
 charged over pool with the free physical count beside it; the table's `TBL`
 column is the page-table share of each process's charge, read from the
-`TABLES` column the kernel added to `/ctl/procs` for it; and the detail
+`tables:` line of each process's `/proc/<pid>/status`; and the detail
 pane's first line is the selected process's footprint from
 `/proc/<pid>/status` — charge, tables, file pages, peak and budget — which is
 readable by everyone, so it renders where the sched half below it is denied.
@@ -61,6 +61,20 @@ prowl adds no figure of its own: every number is a kernel counter, and the
 only arithmetic is the meter's fill. The parsers are exercised by the
 interactive gate alone (the manifest's "no host-tested lib half" stands; see
 Caveats).
+
+**The process set comes from `/proc`, which has no size bound (2026-11-12).**
+Each sample lists `/proc` and reads every pid's `status` through libthyla-rs's
+`procs::list` ([[sub-libthyla-rs]]); `sample::rows_from` turns those rows into
+the sampler's. prowl read `/ctl/procs` before, and one read of that table holds
+only the rows that fit 4 KiB, some sixty ([[sub-kernel-devctl]]): on a larger
+system the monitor showed a shorter list with no sign, and its header's process
+count was that list's length. The set is not one instant: each row is its
+process at the moment its status was read, a process alive through the sample
+appears once, and one that ends before its status is read is skipped. The tree
+view already treats a row whose parent is absent as a root. A set that cannot
+be read is shown as an empty table with the error on the status line, because
+a partial list would read as every process. The cost is one open and one read
+per process per sample where there was one read for all of them.
 
 ## Mechanism
 

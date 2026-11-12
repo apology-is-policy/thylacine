@@ -10,7 +10,7 @@ validated-by: [gate-smp]
 locks: [lock-proc-table]
 design: ["docs/ARCHITECTURE.md", "docs/IDENTITY-DESIGN.md", "docs/LINEAGE.md"]
 created: 2026-08-01
-updated: 2026-11-09
+updated: 2026-11-12
 ---
 ## Session posting ownership
 
@@ -151,6 +151,8 @@ explicit at both ends, and the paired ACQUIRE load lives in `devproc_debug_autho
 | `rfork_spawn_under` | `rfork_with_caps` with the two things a spawn's record can ask of the birth: the child published already marked UNBORN, for the `SPAWN_DEBUG_HELD` spawn ([[sub-kernel-birth-hold]]), and an account the child is born under instead of its parent's, set before it is published ([[sub-kernel-accounts]]); it takes the same flag word, `RFPROC` or `RFPROC\|RFCENVG`. `rfork_spawn_held` is its kernel-test wrapper |
 | `spawn_await_birth` / `spawn_birth_released` | the held spawn's synchronous return: the vfork park's discipline (`await_child_release`, shared with `vfork_await_release`) waiting until the child is not UNBORN, not ALIVE, or not in the list; the park sleeps death-only, so the caller's own latch does not return it (5g) |
 | `proc_find_by_pid` / `proc_for_each` | DFS from `kproc`; the callback runs under [[lock-proc-table]] |
+| `proc_set_name(p, path, len)` | stamp `Proc.name` with the path's basename, in the Proc's own exec path; only printable ASCII graphics are stored, any other byte as `?` |
+| `proc_state_word(p)` | the state word `/ctl/procs` and `/proc/<pid>/status` print: `ALIVE` / `ZOMBIE` / `INVALID`, and `STOPPED` for an ALIVE Proc under a job stop that is not dying; the caller pins `p` |
 | `wait_pid_for(want_pid, flags, status_out)` | reap a ZOMBIE child, or (PTY-1e) *report* a stopped/continued one; pid/pgrp selectors + `WNOHANG`; `WAIT_PID_NOTEINTR` (-2) when a caught note ends a Linux `wait4` |
 | `proc_setsid` / `setpgid` / `getpgid` / `getsid` | the POSIX session + process-group cores ([[sub-kernel-pts]] and [[sub-kernel-jobctl]] are what read them) |
 | `proc_page_charge` / `vma_charge` / `shared_map_charge` (+ uncharges) | **policy only** since L-2 — "has an address space" and "is exempt"; the counters and their arithmetic live on the `AddrSpace` ([[lock-vma]] for what the lock does and does not buy) |
@@ -872,6 +874,36 @@ ordinary sharing/elevation behavior. Final owner release drains VMAs before its
 total reference is dropped; kernel pins retain only the descriptor/account.
 See [[sub-kernel-addrspace]] and ASYNC-SERVICE-SELF-REVIEW.md for lifetime proof
 and native sharing/device tests. Private Loom is not activated here.
+
+## The Proc name has one alphabet (2026-11-12)
+
+`proc_set_name` stamps `Proc.name` with the basename of the exec path. The
+name is printed raw into text that is read by line and by column
+(`/proc/<pid>/status`, `/ctl/procs`, the console), and a file name may hold
+any byte but `/` and NUL. A newline in it would forge a `state:` line in
+`status`, a space a column in `/ctl/procs`, ESC a terminal command. So the
+stored name holds only the printable ASCII graphics (0x21 to 0x7e), and every
+other byte of the basename is stored as `?`. The substitution is at the one
+writer, so no reader has to escape. Only the label changes; the file the Proc
+runs is the one it was given. Witness: `devproc.read_status_format`'s
+`proc_set_name` leg (a space, a newline followed by a forged `state:` line,
+ESC, DEL, high bytes and a tab all store `?`; `!` and `~`, the first and last
+graphics, are kept), and `tools/interactive/ps-many.exp`, which runs a copy
+of `sleep` named `a b` and reads `a?b` in `status` and in `ps`. A bug fix
+taken under the operator-away grant; ratification owed.
+
+## The state word (2026-11-12)
+
+`proc_state_word(p)` is the word `/ctl/procs` and `/proc/<pid>/status` show
+for a Proc's state: `ALIVE`, `ZOMBIE`, `INVALID`, and `STOPPED` for an ALIVE
+Proc with `job_stop_req` set and no `group_exit_msg`. It replaced a
+`state_name` copy in each Dev and devctl's `procs_state_name`, which had the
+two files disagree about a job-stopped Proc. The debugger's stop is not shown
+(I-39: it is the debugger's own view), and a dying Proc is not stopped to any
+reader (DEBUG-FS-DESIGN 5g; [[sub-kernel-jobctl]]). Both flags are read
+atomically; the caller pins `p`, which both callers do by formatting inside a
+`proc_for_each` walk. `proc.dying_takes_no_stop` asks it of a live and a
+dying Proc with the same flag set.
 
 ## Provenance
 

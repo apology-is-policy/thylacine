@@ -304,24 +304,61 @@ the process table.
 A row is committed whole or not at all, in `/ctl/procs` and `/ctl/kstack`
 alike: the callback formats at the buffer's tail and, if any field does not
 fit, rolls the offset back to the row's start before it stops. A row cut
-mid-number would hand `ps` and `prowl` a plausible smaller figure, which is
-worse than a list that ends early. `devctl.procs_rows_whole` formats the list
-into every buffer size from one byte up and requires each result to end on a
-whole row of nine columns.
+mid-number would hand a parser a plausible smaller figure, which is worse
+than a list that ends early.
+
+### A cut process table says so (2026-11-12; operator vote 85)
+
+One read of `/ctl/procs` holds the rows that fit `DEVCTL_READ_BUF` (4 KiB,
+about sixty rows), not every Proc. A table that left a row out ends with one
+fixed line, `PROCS_CUT_LINE`:
+
+    (cut: more processes than one read holds; /proc lists them all)
+
+A short table with no sign reads as "no other Proc", and a gate that
+concludes that from a cut table is wrong without knowing it. The line always
+fits, because its room is reserved. `format_procs` renders nothing into a
+buffer that cannot hold the header and the line. `format_procs_cb` lets only
+the table's last row end inside the reserve (`in_reserve`): when another
+visible row follows a row that did, that row is taken back (`s->off =
+s->last`) and the table is cut there. So a table that exactly fits the buffer
+is whole and carries no line, and a cut one always has room for it. A
+`_Static_assert` keeps `DEVCTL_READ_BUF` at least the header plus the line.
+Rows a none reader is walled from are skipped before the reserve check, so
+they never cut its one-row table.
+
+The line is not a row: it starts with `(`, where a row starts with a pid. A
+reader that needs every Proc does not read this file. It lists `/proc`, a
+directory with no such bound, and reads each `status`
+([[sub-kernel-devproc]]); `ps`, `prowl`, diorama, halcyon and `srvfull-probe`
+do that through libthyla-rs's `procs` module ([[sub-libthyla-rs]]).
+`/ctl/9p-sessions` ends a cut render the same way, with a line of its own.
+
+`devctl.procs_rows_whole` links two Procs of its own, formats the table into
+every buffer size from one byte up, and compares each result's shape with the
+whole table's: every line whole, every row nine columns, the rows the whole
+table's first rows by pid, the cut line present exactly when a row is
+missing, and at least one size that holds rows and the line together. It
+compares shape, not bytes, because `CPU_NS` moves between two renders.
+`tools/interactive/ps-many.exp` reads the file on a freshly booted guest and
+requires no cut line, then with seventy more Procs and requires it last.
 
 ### The STATE column shows job-stop, never debug-stop
 
 An ALIVE Proc carrying `job_stop_req` (a `/proc/<pid>/ctl` suspend, or a Ctrl-Z
 through the pts path) renders `STOPPED` — the Unix `ps` T-state, via
-`procs_state_name`. The DEBUG stop (`debug_stop_req`, the attach-gated debugger
+`proc_state_word` ([[sub-kernel-proc]]), the one function
+`/proc/<pid>/status` asks too, so the two files cannot disagree about a
+Proc. The DEBUG stop (`debug_stop_req`, the attach-gated debugger
 stop) is deliberately **not** surfaced: it is the debugger's private I-39 view,
 not a job-control state a monitor should expose, so the render reads
 `job_stop_req` alone. That flag is read atomically — a cross-Proc reader holds
 `g_proc_table_lock` via `proc_for_each` but takes no per-Proc lock. A dying
 Proc (`group_exit_msg` set) is never shown `STOPPED`, whatever flag a stop made
 before the kill left: its last thread runs its exit close regardless, and a
-dying Proc is not stopped to any reader (DEBUG-FS-DESIGN 5g). The test hook
-`devctl_procs_state_name_for_test` exposes the word to `proc.dying_takes_no_stop`.
+dying Proc is not stopped to any reader (DEBUG-FS-DESIGN 5g).
+`proc.dying_takes_no_stop` asks `proc_state_word` of a live and a dying Proc
+with the same flag set.
 
 ### Offline CPUs render as a short row, not as a busy one
 
@@ -401,6 +438,9 @@ the same offset-aware multi-read that `/proc` wants would fix both.
   by a later edit.
 - **The process-list callback must keep stopping on overflow**, or an
   unprivileged reader re-acquires an unbounded global-lock hold.
+- **A cut process table ends with its cut line, and a whole one never carries
+  it.** The line's room stays reserved: only the table's last row may end
+  inside it.
 - **Sizes must stay 0** for generated leaves. Reporting a measured length invites
   the stat-then-read truncation the current shape exists to prevent.
 - **The offline-CPU row must stay short.** Emitting a numeric idle time for a

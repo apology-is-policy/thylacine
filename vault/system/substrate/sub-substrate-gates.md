@@ -22,7 +22,7 @@ locks: []
 abis: [abi-boot-banner]
 design: ["docs/TOOLING.md", "docs/PORTABILITY.md", "docs/DEBUGGING-PLAYBOOK.md"]
 created: 2026-08-01
-updated: 2026-11-10
+updated: 2026-11-12
 ---
 ## Purpose
 
@@ -483,6 +483,15 @@ feature, where every syscall answers ENOSYS and one that cannot return stops the
 and the guest target refuses that feature at compile time. Those stubs are aarch64
 instructions, so another host skips the pass and reports the tests stranded. Corvus's
 3 run from its new library half, the session table. Nothing is stranded at this point.
+
+libthyla-rs has a `host-test` entry of its own since 2026-11-12, for the tests
+of its `procs` module ([[sub-libthyla-rs]]). The crate has no pass without the
+stubs, because its `_start` is guest assembly, so the gate runs the `host-test`
+pass in place of the default one when the default pass's log carries a
+host-impossible signature. A failure of that pass is a FAIL whatever its log
+says: "could not compile `libthyla-rs`" is one of the NO-HOST signatures, and
+it is also what a broken test of libthyla-rs prints, so classifying the only
+pass by its log would file a red test under NO-HOST.
 
 **The declared count is anchored at the start of a line**, because a `#[test]`
 that a comment mentions is not a test -- libhalcyon's `theme.rs` has one, and the
