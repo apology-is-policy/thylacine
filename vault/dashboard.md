@@ -124,6 +124,7 @@ Generated — do not edit between the markers (`quaestor render`).
 
 ## Recent changes
 
+- 2026-11-12 [[chg-2026-11-12-aux-display-follow]] — The guest takes a mode for any host size and follows its window
 - 2026-11-11 [[chg-2026-11-11-aux-mac-app-audit-r3]] — The Mac app: audit round 3's seven findings
 - 2026-11-11 [[chg-2026-11-11-aux-mac-app-audit]] — The Mac app after its first window: the guest's pointer, and two audit rounds
 - 2026-11-11 [[chg-2026-11-11-aux-mac-app-size]] — The Mac app tells the guest the window's size
@@ -131,5 +132,4 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-11-11 [[chg-2026-11-11-aux-mac-guest-run]] — The Mac app measured with a guest, and a boot that has no rule for the host's size
 - 2026-11-10 [[chg-2026-11-10-aux-device-windows]] — The kernel never touches a device window on a user's behalf: /proc mem, claims over RAM, the CPU's address size, a bus error in a copy
 - 2026-11-10 [[chg-2026-11-10-aux-mmio-forms]] — Device accesses take one instruction form; GICv3 boots under HVF
-- 2026-11-09 [[chg-2026-11-09-aux-commit-death]] — A fatal note's unwind commits the death: no handler installed a moment later revokes it (vote 35)
 <!-- generated:end -->

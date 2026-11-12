@@ -1034,7 +1034,8 @@ probe's `SetUIInfo(338, 211, 0, 0, 2560, 1600)` on a paused QEMU gives `tapestry
 mm for 2560x1600 px`, `scale 200 (edid)` and `halcyond: session up 2560x1600`. With the app
 attached to the paused QEMU in the probe's place (its window 1280x800 points on this screen) the
 lines are `edid 339x212 mm`, `scale 200 (edid)` and `session up 2560x1600`, and the app's picture
-of that session is QEMU's byte for byte. Left of M-8: the latency of a follow.
+of that session is QEMU's byte for byte. Left of M-8 then: the latency of a follow (measured
+since; the paragraph after the next).
 
 **And a defect, measured in the same run.** With the device made 3456x2160 (full screen on a
 16-inch MacBook Pro), Lictor and tapestryd come up at that size (`scale 100`, from QEMU's own
@@ -1048,6 +1049,25 @@ window on a screen with one pixel to a point, full screen on a larger panel. So 
 windows and `xres`/`yres`. The fix is the guest's and belongs to this station's guest half: a mode
 for any host size (the host's size over or times a whole number, the first whose surfaces can be
 made).
+
+**The guest's half, measured 2026-11-11 and 12** (A3b; QEMU 11.1.3, HVF, an M2 Air; the bare image
+of 99cd8d55f and of 4dd462eb8). On the image from before it, a device of 640x400 and one of
+5120x2880 each came up with no compositor (`gpu up` four times, never `serving`): what was read
+above is measured. With it: 640x400 gives Lictor's trusted screen 1280x800 and a session at
+640x400; 3456x2160 a session at 1728x1080 with no allocation refused; 5120x2880 the trusted screen
+and the session at 2560x1440. The latency of a follow: with the probe telling `SetUIInfo(338, 211,
+0, 0, 2560, 1600)` to a session running at 1280x800, the scanout is 2560x1600 214.3 ms later on the
+first image and 282.2 ms on the second, on the probe's clock, one sample each; 150 ms of either is
+the time the compositor waits after the last event (`QUIET_MS`). That is to the scanout of the new
+size, not to a client's first frame at it, and two samples are not a distribution. The guest says
+`mode 1280x800 -> 2560x1600` and `scale 100 -> 200 (mode)`. With the app in the probe's place its
+window is followed as it attaches, and again after its content is set to 1000x640 points
+(2000x1280), and the app's frame after that is QEMU's dump byte for byte; the same with the GPU's
+driver on the interrupt line (`gpu PCI IRQ mode=Intx vector=65535`, by a local change that makes
+`auto` the line; that branch is in no gate). What a fitted mode costs: full screen on a 14- or
+16-inch MacBook Pro is a session of half as many pixels a side, because three buffers of a
+full-screen surface pass the kernel's 64 MiB a weave at 5.59 megapixels (3024x1890 needs 65.4 MiB,
+3456x2160 85.4). Whether to raise that bound is the kernel's question and is not decided.
 
 M-9 **Input under load.** 120 Hz host autorepeat of a held key into a guest with a 0.6 s
 GPU-busy client (H1's repro) on whatever fix corona's arc has by then. Verdict: lost

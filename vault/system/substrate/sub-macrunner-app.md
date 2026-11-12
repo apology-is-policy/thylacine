@@ -18,7 +18,7 @@ hazards: []
 abis: []
 design: ["docs/MAC-RUNNER.md"]
 created: 2026-11-11
-updated: 2026-11-11
+updated: 2026-11-12
 ---
 ## Purpose
 
@@ -55,9 +55,9 @@ between. It does not start QEMU yet: it attaches to one that runs with
   millimetres in the EDID (as whole centimetres only, when the mode is too
   large for a detailed timing: Caveats), and raises the device's display
   event. A guest that
-  has not started yet finds it when it first asks; a guest that is running is
-  not changed by it until it asks again, and Lictor does not follow the event
-  yet.
+  has not started yet finds it when it first asks; a guest that is running
+  takes the event and follows the window ([[sub-tapestryd]]), unless its mode
+  is pinned.
 - **The picture** is the guest's scanout, letterboxed on black. A whole-number
   scale of one or more is sampled nearest, anything else is filtered. The
   guest's alpha is ignored.
@@ -381,9 +381,7 @@ every step of a drag is a mode the guest sets at every step.
 
 ## Caveats
 
-- **Not there yet:** a guest that follows the window while it runs (the size
-  is told; Lictor does not follow the display event, and `mode auto` in the
-  guest takes it by hand), relative pointer motion
+- **Not there yet:** relative pointer motion
   and capturing the pointer (`docs/MAC-RUNNER.md` 4.2), the clipboard, starting
   and stopping QEMU, the XPC helper, the 9P server, a window that says it is
   connecting or that QEMU has gone.
@@ -398,19 +396,27 @@ every step of a drag is a mode the guest sets at every step.
   the guest changes its scanout's size QEMU sends no whole frame until the
   guest next flushes one, so an `Update` in between is cut to the old size.
   None of it applies while the scanout is mapped.
-- **A window of a size the guest cannot start at.** The size told is the
-  window's, whatever it is, and a guest that starts takes it (Lictor adopts up
-  to 8192 a side, `MAX_DISPLAY_DIM`). Measured 2026-11-11: told 3456x2160, the
-  guest comes up with no session and no display, because three buffers of a
-  full-screen surface are 89.6 MB against the kernel's 64 MiB a weave. The
-  bound is 5.59 megapixels: this app's default window is under it, full screen
-  on a 14- or 16-inch MacBook Pro is over. Read, not run: under 800x720
-  pixels, or over 4096x2160 in all, Lictor does not start, and it is the
-  keyboard and the pointer too; the window's least content, 640x400 points,
-  is that small on a screen with one pixel to a point. A guest that is running
-  is not affected: its `mode` refuses what it cannot make (and more than
-  3840x2160; the scale stops at 200%). The fix is the guest's, a mode for any
-  host size, and is not landed.
+- **A window the guest cannot make a mode of its own size for.** The size
+  told is the window's, whatever it is, and the guest takes a mode that fits
+  it ([[sub-tapestryd]], [[sub-lictor]]): the size itself where a screen and
+  a full-screen surface of it can be made, else the size over a whole number,
+  up to four. The picture is then smaller than the view and is drawn over it
+  as any picture is. The bound is the kernel's 64 MiB a weave: three buffers
+  of a full-screen surface pass it at 5.59 megapixels. This app's default
+  window is under it; full screen on a 14- or 16-inch MacBook Pro is over and
+  gets half as many pixels a side (measured 2026-11-11: told 3456x2160, a
+  session at 1728x1080, where the guest before had no session and no
+  display). Lictor's trusted screen takes the size times or over a whole
+  number, so that its renderer can draw it: not under 800x720, not over
+  4096x2160 pixels in all (measured: 640x400 told gives 1280x800, 5120x2880
+  gives 2560x1440; before, each gave a guest with no compositor, and Lictor
+  is the keyboard and the pointer too). The window's least content, 640x400
+  points, is that small on a screen with one pixel to a point. A guest that
+  is running follows the window: the scanout had the new size 214 ms and
+  282 ms after the size was told, one sample each, 150 ms of which is the
+  time the guest waits for the size to stop changing. A mode pinned in the
+  guest (`mode W H`, which refuses what it cannot make, and more than
+  3840x2160) stands whatever the window does; the scale stops at 200%.
 - **A large view's EDID has whole centimetres and no preferred timing.** QEMU
   is told no refresh rate and takes 75 Hz, and its EDID gets no detailed
   timing when a side is 4096 pixels or more, or the pixel clock would pass the

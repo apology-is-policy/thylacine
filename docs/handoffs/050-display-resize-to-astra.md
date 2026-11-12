@@ -222,5 +222,35 @@ followed. With this work: 640x400 gives your trusted screen 1280x800 and a sessi
 at 2560x1440. The Mac app's window was followed twice (1280x800 to 2560x1600 at 200%,
 then to 2000x1280), and a size told over the wire was on the scanout 214 ms later.
 
-Part 2, on the fixed code, has not run yet: the regression scenario, its two red
-controls, and a boot with every driver on the interrupt line.
+Part 2, on the commit that carries round 3's fixes (4dd462eb8). The bare image as in part
+1, the three sizes and the Mac app's window; the app's frame after the followed resize is
+QEMU's dump byte for byte at 2000x1280, and a size told over the wire was on the scanout
+282 ms later (one sample, as the 214 was). The same resize with the GPU's driver on the
+interrupt line (a local change that makes `auto` the line; `gpu PCI IRQ mode=Intx
+vector=65535`) gives the same bytes: the INTx branch has run that once and is in no gate.
+On the gate image `ls-gfx-mode` passes (9) and `ls-display-follow` passes (7) in its
+first run in a guest; with the first mode left unfitted it is red at the boot, and with
+the display pump not called it is red at the first follow after a green boot.
+`ls-display-stall`'s first run in a guest said every line of its first leg in the order
+derived, your lever's two among them (`retired past its deadline (INJECTED stall shot of
+test-latch-dead) -- engine stalled`, then `retired 0 ms after its deadline -- engine
+revived`), then `BIND FAILED`, `bound, late` and `followed`; and then it failed at reading
+the picture, for a reason that is neither yours nor the compositor's: QEMU writes each
+row of a PPM rounded up to four bytes, so a width that is no multiple of four (1118)
+gives a file longer than its header says. `tools/screendump.sh` now hands out a true P6.
+
+Part 3, on the commit that carries round 4's fixes (bfda0ba4c), 2026-11-12.
+`ls-display-stall` passes whole in a guest (7 passes): each of the three binds your lever
+stalls is put right, in the order derived. Entering the composed state: `BIND FAILED`,
+`the display is not bound to its screen`, `bound, late`, then `followed`. The switch to
+direct: `bind REFUSED`, then `bound, late`, then the switch begun and made again. The
+change's own bind, from the composed state: `not followed (errno 5), to be asked again`,
+then `bound, late` for the standing screen, and only then the second asking, which makes
+the change. Your engine said the same two lines at each (`engine stalled`, then `engine
+revived` 0 ms after the deadline). Two red controls, each an image of its own: with the
+compositor's pass not calling `bind_pump`, and with the proxy's flag never set, the
+scenario passes the boot and the first leg and is red at the second, where a later present
+makes the switch with nothing having bound the screen. On the same clean image
+`ls-display-follow` passes (7) and `ls-gfx-mode` passes (9). The bare image gives a session
+at 1728x1080 for a device of 3456x2160 and follows the Mac app's window, byte for byte
+again; the kernel's suite on it passes (2447 tests, none failed).
