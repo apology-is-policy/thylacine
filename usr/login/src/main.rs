@@ -1095,7 +1095,7 @@ unsafe fn unbind_home(mut sess: HomeSession) {
 
 // Create the view before authenticating: Corvus itself is charged to this
 // session, and neither the boot source nor the factory role goes to children.
-unsafe fn private_service_registry(shell_login: bool) -> i64 {
+unsafe fn private_service_registry(console_place: bool) -> i64 {
     use libthyla_rs::{t_srv_registry_new, SrvRoute};
     const RESIDENT: [&[u8]; 12] = [
         b"corvus",
@@ -1111,11 +1111,11 @@ unsafe fn private_service_registry(shell_login: bool) -> i64 {
         b"diorama",
         b"tapestry-interaction",
     ];
-    // The console renderer's place channel (HALCYON.md 14.7.2) goes to a login that runs the
-    // shell, which on the console is the shell the renderer draws. joey's seeded boot logins
-    // run theirs on pipes and are routed too: login does not know whether it sits on the
-    // console. A session compositor's panes have their own (`halcyon-<user>`), and `view`
-    // there must find no console channel to fall back to.
+    // The console renderer's place channel (HALCYON.md 14.7.2), for a login that will not
+    // start the session compositor: on the console its shell is the one the renderer draws.
+    // joey's seeded boot logins run theirs on pipes and are routed too: login does not know
+    // whether it sits on the console. A session compositor's panes have their own
+    // (`halcyon-<user>`), and `view` there must find no console channel to fall back to.
     const CONSOLE_PLACE: &[u8] = b"halcyon";
     let mut routes = [SrvRoute {
         name_len: 0,
@@ -1125,8 +1125,8 @@ unsafe fn private_service_registry(shell_login: bool) -> i64 {
     let names = RESIDENT
         .iter()
         .copied()
-        .chain(shell_login.then_some(CONSOLE_PLACE));
-    let count = RESIDENT.len() + usize::from(shell_login);
+        .chain(console_place.then_some(CONSOLE_PLACE));
+    let count = RESIDENT.len() + usize::from(console_place);
     for (r, name) in routes.iter_mut().zip(names) {
         r.name_len = name.len() as u32;
         r.name[..name.len()].copy_from_slice(name);

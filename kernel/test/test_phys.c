@@ -163,9 +163,10 @@ void test_phys_drain_meets_live_owners(void) {
     // stay parked. Each owner is placed on a peer, which is woken to run it.
     unsigned me = smp_cpu_idx_self(), ncpu = smp_cpu_count();
     // What a failure prints: how long after the owners were placed the first
-    // drain came (or, with no drain at all, how long the owners ran), and how
-    // many context switches the placing CPU made meanwhile (none = the thread
-    // never left it). Both are read before the first owner can run.
+    // drain came (or, with no drain at all, how long the drainer waited), and
+    // how many context switches the placing CPU made meanwhile (none = the
+    // thread never left it). Both origins are read before the first owner can
+    // run.
     u32 placed_cpu = me;
     u64 placed_ns = timer_now_ns(), first_ns = 0;
     u64 placed_ctxt = sched_cpu_ctxt(placed_cpu), first_ctxt = 0;
