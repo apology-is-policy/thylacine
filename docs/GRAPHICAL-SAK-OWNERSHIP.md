@@ -192,3 +192,44 @@ it rather than allocating a framebuffer alongside normal broker bookkeeping.
 Both buffers are erased after restoration. This prevents normal resource churn
 from crowding out the allocation required for secure attention; inability to
 reserve the workspace fails service startup before normal clients are admitted.
+
+### The trusted screen's scale
+
+The trusted screen is one layout, in layout pixels, drawn at a whole number of
+device pixels to a layout pixel: one or two. Its scale is the nearest whole one
+to its display's, two from 150 percent, taken only if what is left of the
+screen in layout pixels is still the 800 by 720 the layout needs; else it is
+one. The display's scale is the one the session derives, by the session's own
+rule (`docs/HALCYON-SCALE.md` section 3): the platform's `thylacine.scale` on
+the kernel's command line first, then the display's millimetres from its EDID,
+else 100 percent; and it is carried to the screen's own pixels when the screen
+is not made at its display's size. Lictor reads both sources itself, at its
+start. The size and the scale are chosen once, there, by one pure function.
+
+The type is baked at each scale. The set at two has the box, the baseline, the
+bearing room and the advance of the set at one, times two, and only the outline
+is drawn finer, so every word is on the same line and in the same place at both
+scales and the layout is verified once. Nothing is scaled at run time: a rule,
+a border and a field are whole layout pixels, and a glyph is a baked mask. The
+rule above about fixed baked fonts stands.
+
+Three decisions were made for this by the implementing agent under the
+operator's standing authorization of 2026-09-01 (a recommended design in line
+with the heritage is accepted while the operator is away), and are the
+operator's to change:
+
+1. **Whole scales, with the type baked at each.** A fractional scale needs
+either a rasteriser on the trusted path or masks resampled at run time, and the
+first is what the baked type exists to keep out. Plan 9's fonts are the
+precedent: a font is a set of bitmap subfonts made for one size, and a larger
+display is given a font made larger, not one stretched.
+
+2. **The scale's source is the platform, never a client.** The declaration and
+the EDID are the two things the session's own derivation starts from, and
+Lictor reads them itself. The compositor's scale, a session's setting and a
+surface's scale are not asked: they are a client's word, and the trusted screen
+must look the same whatever the session it suspended has been told.
+
+3. **Two from 150 percent.** At 150 the screen at two is a third larger than
+the session's type and at one a third smaller; larger is the readable side for
+a screen that asks for a key.

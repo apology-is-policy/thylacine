@@ -121,6 +121,10 @@ processes that paint chrome and glyphs, and what the bakes need.
   it from `THYLACINE_SCALE=<pct>`; `THYLACINE_HIDPI=1` implies 200 unless
   told otherwise; nothing is emitted otherwise, so every gate at 1.0 is
   untouched. The boot line names the source: `scale 200 (declared)`.
+  Lictor's trusted screen reads the same declaration, and the EDID after it,
+  by itself and at its own start, and draws at the nearest whole scale
+  (`docs/GRAPHICAL-SAK-OWNERSHIP.md`, "The trusted screen's scale"); the verb
+  and the session's setting do not reach it.
 
 ## 4. The authority and the channel
 
