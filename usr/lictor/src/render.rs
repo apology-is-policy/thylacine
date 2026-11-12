@@ -34,6 +34,21 @@ pub fn scale_at(width: u32, height: u32, pct: u16) -> usize {
     let nearest = ((pct as usize + 50) / 100).clamp(1, MAX_SCALE);
     (1..=nearest).rev().find(|&k| fits_at(width, height, k)).unwrap_or(1)
 }
+/// The trusted screen for a display of `host` pixels: its size, and its scale.
+/// The size is the display's own if this screen can be drawn at it (`fits`),
+/// else that over or times a whole number, the first that can
+/// (`libhalcyon::display::fit_mode`), else `fallback`; no side is longer than
+/// `side`. The scale is the nearest whole one to the display's, as the session
+/// reads it (a declared scale first, then the display's millimetres), carried
+/// to this screen's own pixels, that leaves the layout its room (`scale_at`).
+/// Nothing a client says is asked.
+#[cfg(any(feature = "backend", test))]
+pub fn geometry_for(host: (u32, u32), declared: Option<u16>, mm: Option<(u32, u32)>,
+                    side: u32, fallback: (u32, u32)) -> ((u32, u32), usize) {
+    let own = libhalcyon::display::fit_mode(host.0, host.1, |w, h| w <= side && h <= side && fits(w, h))
+        .unwrap_or(fallback);
+    (own, scale_at(own.0, own.1, libhalcyon::display::own_pct(host, own, declared, mm)))
+}
 const CAP_TEXT: &[(u64, &str, &str)] = &[
     (1 << 7, "CAP_DAC_OVERRIDE", "Bypass file permission checks."),
     (1 << 8, "CAP_CHOWN", "Change file ownership."),
@@ -379,6 +394,43 @@ mod tests {
         assert_eq!(scale_at(1599, 1440, 200), 1);
         // And a size that fits at none still has an answer, which render refuses.
         assert_eq!(scale_at(640, 400, 200), 1);
+    }
+    #[test]
+    fn a_displays_screen_is_a_size_it_fits_at_the_scale_of_its_own_pixels() {
+        let made = |host, declared, mm| geometry_for(host, declared, mm, 8192, (1024, 768));
+        // A display this screen fits: its size, at its scale. What is
+        // declared is asked before the millimetres; with neither it is one.
+        assert_eq!(made((2560, 1600), Some(200), None), ((2560, 1600), 2));
+        assert_eq!(made((2560, 1600), None, Some((339, 212))), ((2560, 1600), 2));
+        assert_eq!(made((2560, 1600), Some(100), Some((339, 212))), ((2560, 1600), 1));
+        assert_eq!(made((2560, 1600), None, None), ((2560, 1600), 1));
+        assert_eq!(made((3456, 2234), Some(200), None), ((3456, 2234), 2));
+        // One it fits, but not at the display's scale: the layout keeps its room.
+        assert_eq!(made((1280, 800), Some(200), None), ((1280, 800), 1));
+        // A display too small is doubled, and the screen's pixels are half the
+        // display's size each: twice its scale, which here leaves no room.
+        assert_eq!(made((640, 400), Some(100), None), ((1280, 800), 1));
+        // One with too many pixels is halved, and so is its scale: the
+        // frontend that shows the screen makes up the other half.
+        assert_eq!(made((5120, 2880), Some(200), None), ((2560, 1440), 1));
+        assert_eq!(made((5120, 2880), None, Some((597, 336))), ((2560, 1440), 1));
+        // Unless half of it is still fine: 7680 pixels across 708 mm are 275
+        // to the inch, and the 3840 of the screen 138, which is nearer two.
+        assert_eq!(made((7680, 4320), None, Some((708, 398))), ((3840, 2160), 2));
+        // No side is longer than a display is taken to report, though the
+        // pixels would fit; and where no whole factor gives a size, the fallback.
+        assert_eq!(made((8200, 1000), Some(200), None), ((1024, 768), 1));
+        assert_eq!(made((8192, 1000), None, None), ((8192, 1000), 1));
+        assert_eq!(made((0, 0), Some(200), None), ((1024, 768), 1));
+        // Every answer is one render takes.
+        for host in [(640, 400), (800, 720), (1280, 800), (2560, 1600), (3456, 2234), (5120, 2880), (7680, 4320), (8192, 8192), (1, 1), (0, 0)] {
+            for declared in [None, Some(100), Some(150), Some(200)] {
+                for mm in [None, Some((100, 100)), Some((339, 212)), Some((1, 1))] {
+                    let ((w, h), k) = made(host, declared, mm);
+                    assert!(fits_at(w, h, k), "{host:?} {declared:?} {mm:?}: {w}x{h} at {k}");
+                }
+            }
+        }
     }
     fn drawn(w: usize, h: usize, k: usize, m: &Model, masked: usize) -> Vec<u32> {
         let mut pixels = alloc::vec![0; w * h];

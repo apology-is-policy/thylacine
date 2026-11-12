@@ -74,30 +74,18 @@ pub fn declared_scale() -> Option<u16> {
     }
 }
 impl Screen {
-    /// The size for a host whose display is `host`: its own if the trusted
-    /// screen can be drawn at it (`render::fits`), else that over or times a
-    /// whole number, else the driver's default. No side is longer than the
-    /// longest a display is taken to report, which is also the longest a
-    /// client's scanout may be.
-    /// The host's size is whatever its window happens to be, and this driver
-    /// is the keyboard and the pointer too: it does not fail for a size.
-    pub fn size_for(host: (u32, u32)) -> (u32, u32) {
-        let side = super::gpu::MAX_DISPLAY_DIM;
-        libhalcyon::display::fit_mode(host.0, host.1, |w, h| w <= side && h <= side && render::fits(w, h))
-            .unwrap_or((super::gpu::DEFAULT_DISPLAY_W, super::gpu::DEFAULT_DISPLAY_H))
-    }
-    /// The scale a screen of `own` pixels is drawn at on the display `host`:
-    /// the nearest whole one to the display's, as the session reads it (a
-    /// declaration first, then the EDID's millimetres), that leaves the
-    /// layout its room. Nothing a client says is asked.
-    pub fn scale_for(host: (u32, u32), own: (u32, u32), declared: Option<u16>, mm: Option<(u32, u32)>) -> usize {
-        render::scale_at(own.0, own.1, libhalcyon::display::own_pct(host, own, declared, mm))
-    }
-    /// `declared` is the platform's `thylacine.scale`, if it has one (`declared_scale`).
+    /// The screen for the device's display, at the size and the scale
+    /// `render::geometry_for` gives it: no side longer than the longest a
+    /// display is taken to report, which is also the longest a client's
+    /// scanout may be, and the driver's default size where nothing else can
+    /// be made. The host's size is whatever its window happens to be, and
+    /// this driver is the keyboard and the pointer too: it does not fail for
+    /// a size. `declared` is the platform's `thylacine.scale`, if it has one
+    /// (`declared_scale`).
     pub fn new(gpu: &mut Gpu, declared: Option<u16>) -> Result<Self, Error> {
         let host = (gpu.width, gpu.height);
-        let (width, height) = Self::size_for(host);
-        let scale = Self::scale_for(host, (width, height), declared, gpu.edid_mm);
+        let ((width, height), scale) = render::geometry_for(host, declared, gpu.edid_mm,
+            super::gpu::MAX_DISPLAY_DIM, (super::gpu::DEFAULT_DISPLAY_W, super::gpu::DEFAULT_DISPLAY_H));
         if (width, height) != host || scale != 1 {
             crate::backend::diagnostic(&alloc::format!(
                 "lictor: trusted screen {}x{} at {}x for a display of {}x{}\n",

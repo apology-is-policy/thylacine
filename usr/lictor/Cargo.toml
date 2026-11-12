@@ -20,6 +20,10 @@ cornucopia = { path = "../lib/cornucopia" }
 libdriver = { path = "../lib/libdriver", default-features = false }
 libhalcyon = { path = "../lib/libhalcyon", optional = true }
 
+[dev-dependencies]
+# The screen's geometry asks libhalcyon, and is host-tested (render::geometry_for).
+libhalcyon = { path = "../lib/libhalcyon" }
+
 [[bin]]
 name = "lictor"
 path = "src/main.rs"
