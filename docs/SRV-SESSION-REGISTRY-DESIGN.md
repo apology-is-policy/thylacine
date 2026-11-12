@@ -140,9 +140,12 @@ intentional login-policy update. No home-*, halcyon-* or boot-test service route
 
 November 12 login-policy update (PROPOSED by corona; implemented on the landing
 branch so that its proof exists; AWAITING THE OPERATOR'S RATIFICATION): a login
-that runs the shell on the console adds `halcyon`, the console renderer's
-inline-media place channel, to its manifest; a login that starts the session
-compositor does not. HALCYON.md 14.7.2 keeps that channel for console mode
+that runs the shell adds `halcyon`, the console renderer's inline-media place
+channel, to its manifest; a login that starts the session compositor does
+not. The shell logins are the console getty's, on an image without the
+session lever, and joey's seeded boot logins (`--no-session`), whose shells
+run a fixed script on pipes: login does not know whether it sits on the
+console, so both are routed. HALCYON.md 14.7.2 keeps that channel for console mode
 ("the console spike's global `/srv/halcyon` remains for console mode"), and
 with a private `/srv` per login the console shell could not open it: `view`
 reported `no /srv/halcyon` although the renderer had posted it (the whole-fleet
@@ -153,7 +156,7 @@ MAY_POST_SERVICE, so its posting is a trusted one and a route can resolve it.
 What the route reaches, stated because nothing gates it. The place channel has
 no peer gate (HALCYON.md 14.7, the September 29 refinement) and serves one
 connection at a time (`placesrv` `MAX_CONNS`). So any process of a
-console-shell login can hold the only slot until it dies, and another's `view`
+shell login can hold the only slot until it dies, and another's `view`
 then waits out the 5 s handshake deadline and fails; it can fill the
 listener's 16-entry accept backlog, charged to its own session's connection
 credits, so that the next connect fails at once; and it can place a raster
@@ -161,7 +164,7 @@ into the console transcript. Console logins follow one another, so "another"
 is a process that outlived its own login and kept that login's view: it can do
 these things to the next user of the console. Every process could before this
 document, and can today on a tree without private registries; this update
-gives it back to console-shell logins only and adds no gate. Closing it means
+gives it back to shell logins only and adds no gate. Closing it means
 admission at the place server by the console's current owner, which is not
 designed.
 
