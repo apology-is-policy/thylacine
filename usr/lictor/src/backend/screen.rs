@@ -42,6 +42,8 @@ impl Drop for Raster {
 pub struct Screen {
     width: u32,
     height: u32,
+    /// Device pixels to a layout pixel (`render::fits_at`).
+    scale: usize,
     pixels: usize,
     active: bool,
     raster: Raster,
@@ -52,6 +54,24 @@ pub struct Screen {
     // Once attached these pins survive every error. The owning service must
     // reset/drop Gpu before dropping Screen, including on an unwinding exit.
     _backing: Vec<Dma>,
+}
+/// The platform's declared display scale, from the kernel's command line, as
+/// the compositor reads it at its own start. None when there is none, when
+/// it is not one of the scales there are, or when the line cannot be read.
+pub fn declared_scale() -> Option<u16> {
+    use libthyla_rs::{t_close, t_open, t_read, T_OREAD, T_WALK_OPEN_FROM_ROOT};
+    // SAFETY: a path literal and a buffer of this frame.
+    let fd = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/hw/chosen/bootargs".as_ptr(), 19, T_OREAD) };
+    if fd < 0 { return None; }
+    let mut buf = [0u8; 1024];
+    let n = unsafe { t_read(fd, buf.as_mut_ptr(), buf.len()) };
+    unsafe { t_close(fd); }
+    // A line that fills the buffer may have been cut inside the token.
+    if n <= 0 || n as usize >= buf.len() { return None; }
+    match libhalcyon::scale::declared_scale(&buf[..n as usize]) {
+        libhalcyon::scale::Declared::Scale(pct) => Some(pct),
+        _ => None,
+    }
 }
 impl Screen {
     /// The size for a host whose display is `host`: its own if the trusted
@@ -66,15 +86,25 @@ impl Screen {
         libhalcyon::display::fit_mode(host.0, host.1, |w, h| w <= side && h <= side && render::fits(w, h))
             .unwrap_or((super::gpu::DEFAULT_DISPLAY_W, super::gpu::DEFAULT_DISPLAY_H))
     }
-    pub fn new(gpu: &mut Gpu) -> Result<Self, Error> {
-        let (width, height) = Self::size_for((gpu.width, gpu.height));
-        if (width, height) != (gpu.width, gpu.height) {
+    /// The scale a screen of `own` pixels is drawn at on the display `host`:
+    /// the nearest whole one to the display's, as the session reads it (a
+    /// declaration first, then the EDID's millimetres), that leaves the
+    /// layout its room. Nothing a client says is asked.
+    pub fn scale_for(host: (u32, u32), own: (u32, u32), declared: Option<u16>, mm: Option<(u32, u32)>) -> usize {
+        render::scale_at(own.0, own.1, libhalcyon::display::own_pct(host, own, declared, mm))
+    }
+    /// `declared` is the platform's `thylacine.scale`, if it has one (`declared_scale`).
+    pub fn new(gpu: &mut Gpu, declared: Option<u16>) -> Result<Self, Error> {
+        let host = (gpu.width, gpu.height);
+        let (width, height) = Self::size_for(host);
+        let scale = Self::scale_for(host, (width, height), declared, gpu.edid_mm);
+        if (width, height) != host || scale != 1 {
             crate::backend::diagnostic(&alloc::format!(
-                "lictor: trusted screen {}x{} for a display of {}x{}\n",
-                width, height, gpu.width, gpu.height));
+                "lictor: trusted screen {}x{} at {}x for a display of {}x{}\n",
+                width, height, scale, host.0, host.1));
         }
         let pixels = (width as usize).checked_mul(height as usize).ok_or(Error::Hardware)?;
-        if !render::fits(width, height) {
+        if !render::fits_at(width, height, scale) {
             return Err(Error::Hardware);
         }
         let bytes = pixels.checked_mul(4).ok_or(Error::Hardware)?;
@@ -98,7 +128,7 @@ impl Screen {
             core::mem::forget(backing);
             return Err(Error::Hardware);
         }
-        Ok(Self { width, height, pixels, active: false, raster, _backing: backing,
+        Ok(Self { width, height, scale, pixels, active: false, raster, _backing: backing,
             #[cfg(feature = "test-mode")] test_stall_after_exclusion: false })
     }
     pub fn paint(&mut self, gpu: &mut Gpu, model: &Model, masked: usize,
@@ -106,7 +136,7 @@ impl Screen {
         // Rasterize away from scanout. Invalid content leaves the last complete
         // trusted image intact. CPU writes finish before the GPU upload begins.
         let next = self.raster.pixels(self.pixels);
-        render::render(next, self.width, self.height, backdrop, model, masked)
+        render::render(next, self.width, self.height, self.scale, backdrop, model, masked)
             .map_err(|_| Error::BadField)?;
         unsafe { core::ptr::copy_nonoverlapping(next.as_ptr(), BASE as *mut u32, self.pixels); }
         dsb_sy();

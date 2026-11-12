@@ -17,11 +17,16 @@ fn main() {
             request_deadline_ns: 1, propagating: true, user: b"michael".to_vec(),
             level: b"imperium".to_vec(), notice: Vec::new(),
         }};
-        let mut pixels = vec![0; w * h];
-        render::render(&mut pixels, w as u32, h as u32, None, &m, 0).unwrap();
-        let mut file = fs::File::create(out.join(format!("{name}.ppm"))).unwrap();
-        write!(file, "P6\n{w} {h}\n255\n").unwrap();
-        let rgb: Vec<u8> = pixels.into_iter().flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, p as u8]).collect();
-        file.write_all(&rgb).unwrap();
+        // At one pixel to a layout pixel, and the same screen at two.
+        for k in 1..=render::MAX_SCALE {
+            let (w, h) = (w * k, h * k);
+            let mut pixels = vec![0; w * h];
+            render::render(&mut pixels, w as u32, h as u32, k, None, &m, 0).unwrap();
+            let at = if k == 1 { String::new() } else { format!("@{k}x") };
+            let mut file = fs::File::create(out.join(format!("{name}{at}.ppm"))).unwrap();
+            write!(file, "P6\n{w} {h}\n255\n").unwrap();
+            let rgb: Vec<u8> = pixels.into_iter().flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, p as u8]).collect();
+            file.write_all(&rgb).unwrap();
+        }
     }
 }

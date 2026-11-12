@@ -33,7 +33,7 @@ impl Driver for Lictor {
             inputs.push(Input::new(InputDev::probe(index as u32, bar, dma)?));
         }
         if inputs.iter().filter(|i| i.keyboard).count() != 1 { return Err(Error::Hardware); }
-        let screen = Screen::new(&mut gpu)?;
+        let screen = Screen::new(&mut gpu, lictor::backend::screen::declared_scale())?;
         let device = Device::new(gpu, 0)?;
         Ok(Self { device, screen, inputs, seat: Seat::default() })
     }

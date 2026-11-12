@@ -7,6 +7,23 @@
 // be a mode (a surface has a cap, a trusted screen a floor), and a window
 // being dragged changes size many times before it rests.
 
+/// The display scale, in `scale::scale_pct`'s percent, of a screen of `own`
+/// pixels shown over the whole of a display of `host` pixels. A declared
+/// scale is the display's, so it is carried over to the screen's pixels;
+/// with none declared it is what the display's millimetres make of the
+/// screen's own pixels; with neither it is 100. A screen made at half its
+/// host's size is at half its host's scale, and the frontend makes up the rest.
+pub fn own_pct(host: (u32, u32), own: (u32, u32), declared: Option<u16>, mm: Option<(u32, u32)>) -> u16 {
+    match (declared, mm) {
+        (Some(pct), _) if host.0 > 0 => {
+            (pct as u64 * own.0 as u64 / host.0 as u64).min(u16::MAX as u64) as u16
+        }
+        (Some(pct), _) => pct,
+        (None, Some((w, h))) => crate::scale::scale_pct(own.0, own.1, w, h),
+        (None, None) => crate::scale::SCALE_MIN,
+    }
+}
+
 /// The largest whole number `fit_mode` divides or multiplies a host's size
 /// by. 8192 a side, the most a display is taken to report, is 2048 at 4.
 pub const FIT_MAX_FACTOR: u32 = 4;
@@ -282,6 +299,26 @@ mod tests {
         assert_eq!(fit_mode(800, 0, |_, _| true), None);
         assert_eq!(fit_mode(3, 1, |w, h| w * h == 0), None);
         assert_eq!(fit_mode(u32::MAX, u32::MAX, |w, _| w < 1 << 30), Some((u32::MAX / 4, u32::MAX / 4)));
+    }
+
+    #[test]
+    fn a_screens_scale_is_its_displays_carried_to_its_own_pixels() {
+        // The display's own size: what is declared, else what its millimetres say, else 100.
+        assert_eq!(own_pct((2560, 1600), (2560, 1600), Some(200), None), 200);
+        assert_eq!(own_pct((2560, 1600), (2560, 1600), Some(125), Some((339, 212))), 125);
+        assert_eq!(own_pct((2560, 1600), (2560, 1600), None, Some((339, 212))), 200);
+        assert_eq!(own_pct((1280, 800), (1280, 800), None, Some((339, 212))), 100);
+        assert_eq!(own_pct((2560, 1600), (2560, 1600), None, None), 100);
+        // A screen at half its host's size is at half its scale, either way it is known.
+        assert_eq!(own_pct((5120, 2880), (2560, 1440), Some(200), None), 100);
+        assert_eq!(own_pct((5120, 2880), (2560, 1440), None, Some((677, 381))), 100);
+        assert_eq!(scale_pct(5120, 2880, 677, 381), 200);
+        // And one at twice its host's size at twice.
+        assert_eq!(own_pct((640, 400), (1280, 800), Some(100), None), 200);
+        assert_eq!(own_pct((640, 400), (1280, 800), None, Some((169, 106))), 200);
+        // A display with no width declares for itself; nothing overflows.
+        assert_eq!(own_pct((0, 0), (1280, 800), Some(150), None), 150);
+        assert_eq!(own_pct((1, 1), (u32::MAX, u32::MAX), Some(200), None), u16::MAX);
     }
 
     #[test]
