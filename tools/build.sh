@@ -158,6 +158,8 @@ fi
 BC_DIR_CONFIGS="$REPO_ROOT/configs"
 # shellcheck disable=SC1090
 . "$REPO_ROOT/tools/build-config.sh"
+# shellcheck disable=SC1090
+. "$REPO_ROOT/tools/stratum-src.sh"
 bc_reset
 build_dir_override=""
 verbose=""
@@ -328,8 +330,11 @@ sysroot_is_stale() {
 # Stratum source edit (e.g. A-3's --bake-owner-uid flag) silently shipped a
 # stale host stratumd and the pool bake failed with "unknown option".
 stratum_host_tools_stale() {
-    local stratum_src="${STRATUM_SRC:-$HOME/projects/stratum/v2}"
+    local stratum_src; stratum_src="$(stratum_src_dir)"
     local hb="$BUILD_DIR/host-stratum"
+    # Tools configured from a tree that has since moved are not this tree's: with the
+    # build dir dropped, the checks below report them missing.
+    stratum_build_dir_fits "$hb" "$stratum_src"
     local sd="$hb/src/cmd/stratumd/stratumd"
     [[ -x "$hb/src/cmd/stratum-mkfs/stratum-mkfs" ]] || return 0
     [[ -x "$sd" ]]                                   || return 0
@@ -3442,7 +3447,8 @@ build_stratumd() {
     # portable POSIX with a thin Thylacine arm in peer_creds.c (the new
     # `__thylacine__` branch landed on the Stratum side).
     #
-    # Source: $STRATUM_SRC (defaults to ~/projects/stratum/v2). Build dir:
+    # Source: $STRATUM_SRC, else the checkout at ~/projects/stratum
+    # (tools/stratum-src.sh). Build dir:
     # $BUILD_DIR/pouch/stratumd-cmake. Output binary: $BUILD_DIR/pouch/
     # stratumd-cmake/src/cmd/stratumd/stratumd, copied alongside the pouch
     # hello binaries under $BUILD_DIR/pouch/progs/ for the ramfs step.
@@ -3470,7 +3476,7 @@ build_stratumd() {
     # integration; see Stratum's
     # docs/session-handoff-2026-05-24-thylacine-pouch-arm.md).
     local sysroot="$BUILD_DIR/sysroot"
-    local stratum_src="${STRATUM_SRC:-$HOME/projects/stratum/v2}"
+    local stratum_src; stratum_src="$(stratum_src_dir)"
     local stratumd_build="$BUILD_DIR/pouch/stratumd-cmake"
     local progs_out="$BUILD_DIR/pouch/progs"
     local toolchain="$REPO_ROOT/cmake/Toolchain-aarch64-pouch.cmake"
@@ -3478,7 +3484,7 @@ build_stratumd() {
 
     if [[ ! -d "$stratum_src" ]]; then
         echo "==> stratumd: source tree not found at $stratum_src" >&2
-        echo "    override with STRATUM_SRC=/path/to/stratum/v2" >&2
+        echo "    override with STRATUM_SRC=/path/to/stratum" >&2
         exit 1
     fi
     if [[ ! -f "$stratum_src/CMakeLists.txt" ]]; then
@@ -3495,6 +3501,7 @@ build_stratumd() {
     # Incremental: keep $stratumd_build across runs so CMake's cache +
     # ninja/make's dep tracking skip unchanged objects. The first build
     # is ~2-3 minutes; incremental on a no-source-change rebuild is <5s.
+    stratum_build_dir_fits "$stratumd_build" "$stratum_src"
     mkdir -p "$stratumd_build" "$progs_out"
 
     # Configure with the pouch toolchain. CMake's tool-probes (compiler,
@@ -3577,7 +3584,7 @@ build_stratum_host_tools() {
     # platform (Darwin on the dev box; Linux for CI). Disables PQ + io_uring
     # + libaio + tests + fuzzers to keep configuration fast (~10s) and
     # the build small (~30s cold for all three targets).
-    local stratum_src="${STRATUM_SRC:-$HOME/projects/stratum/v2}"
+    local stratum_src; stratum_src="$(stratum_src_dir)"
     local host_build="$BUILD_DIR/host-stratum"
     local mkfs_bin="$host_build/src/cmd/stratum-mkfs/stratum-mkfs"
     local stratumd_bin="$host_build/src/cmd/stratumd/stratumd"
@@ -3585,11 +3592,12 @@ build_stratum_host_tools() {
 
     if [[ ! -d "$stratum_src" ]]; then
         echo "==> stratum host tools: source tree not found at $stratum_src" >&2
-        echo "    override with STRATUM_SRC=/path/to/stratum/v2" >&2
+        echo "    override with STRATUM_SRC=/path/to/stratum" >&2
         exit 1
     fi
 
     echo "==> building stratum host tools (mkfs + stratumd + stratum-fs) from $stratum_src"
+    stratum_build_dir_fits "$host_build" "$stratum_src"
     mkdir -p "$host_build"
     # No --toolchain — use the host's default compiler. The host tools
     # run on Darwin/Linux x86_64/arm64, not on Thylacine.
@@ -3664,7 +3672,7 @@ build_stratum_pool_fixture() {
     # Size: 64 MiB. Matches stratum-mkfs's DEFAULT_DEVICE_BYTES, large
     # enough for the bootstrap pool + a single root inode with comfortable
     # headroom for tiny FS test writes.
-    local stratum_src="${STRATUM_SRC:-$HOME/projects/stratum/v2}"
+    local stratum_src; stratum_src="$(stratum_src_dir)"
     local host_build="$BUILD_DIR/host-stratum"
     local mkfs_bin="$host_build/src/cmd/stratum-mkfs/stratum-mkfs"
     local fixtures="$BUILD_DIR/fixtures"

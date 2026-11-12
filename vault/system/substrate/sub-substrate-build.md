@@ -23,6 +23,8 @@ code:
   - tools/check-audit-rows.py
   - tools/check-test-registry.py
   - tools/test-host-boundaries.sh
+  - tools/stratum-src.sh
+  - tools/test-stratum-src.sh
 audit: none
 guarded-by: []
 validated-by: [prose, gate-smp]
@@ -30,7 +32,7 @@ locks: []
 abis: []
 design: ["docs/TOOLING.md"]
 created: 2026-08-01
-updated: 2026-11-04
+updated: 2026-11-14
 ---
 ## Purpose
 
@@ -156,6 +158,19 @@ The lever selects a kernel, never a ramfs. `build/ramfs.cpio` is shared by every
 kernel dir, so its contents cannot differ by image. The bridge's EL0 probe,
 `loom-bridge-probe`, therefore sits in the curated `usr_bins` list of every
 image. The kernel test holds it to the verdict its own lever implies.
+
+Stratum's source is the one input found by a rule and not a fixed path.
+`stratum-src.sh` gives `$STRATUM_SRC` when it is set, else the checkout at
+`~/projects/stratum`: its root when the tree is there
+(`src/btree_engine/engine.c`), its `v2/` when the checkout still has the layout
+from before Stratum's tree moved to the repository's root. The second arm exists
+so that the day the shared checkout moves, a worktree whose branch already
+carries this rule keeps building; it goes once no checkout needs it. The same
+file drops a Stratum build directory (`build/host-stratum`,
+`build/pouch/stratumd-cmake`) whose `CMakeCache.txt` names another source tree,
+since CMake refuses to configure it and the directory is only a cache; trees
+are compared by their real paths, and nothing is dropped for a source that is
+not there. `test-stratum-src.sh` runs both rules against made-up checkouts.
 
 An input the manifest does not declare is invisible twice over: `forage.sh
 status` cannot report it missing, and whatever it feeds degrades without a
