@@ -1972,8 +1972,12 @@ impl GuestView {
         if let Some(r) = iv.renderer.borrow_mut().as_mut() {
             r.upload(&iv.display, &mut iv.stats.borrow_mut());
         }
-        // A display that sleeps gives no ticks, so the pointer is brought up to date here as well.
+        // A display that sleeps gives no ticks, so the pointer is brought up to date here as well,
+        // and with it what is drawn of the guest's own.
         self.wear_pointer();
+        if let Some(r) = iv.renderer.borrow_mut().as_mut() {
+            self.draw_pointer(r);
+        }
         let b = self.bounds();
         let told = match iv.told.get() {
             Some(t) => format!(
@@ -2060,6 +2064,20 @@ impl GuestView {
         NSApplication::sharedApplication(self.mtm()).terminate(None);
     }
 
+    // What the pass draws of the guest's pointer from here on. A captured pointer is drawn: the
+    // image the guest shows, where the guest has it. Whether that changes the frame.
+    fn draw_pointer(&self, r: &mut Renderer) -> bool {
+        let iv = self.ivars();
+        let drawn = match (iv.captured.get(), iv.worn.try_borrow()) {
+            (true, Ok(worn)) if worn.on => worn
+                .image
+                .clone()
+                .map(|image| (image, iv.display.shared.lock().unwrap().pointer_at)),
+            _ => None,
+        };
+        r.set_pointer(drawn.as_ref().map(|(image, at)| (image, *at)))
+    }
+
     fn frame(&self) {
         let iv = self.ivars();
         let mut guard = iv.renderer.borrow_mut();
@@ -2082,15 +2100,7 @@ impl GuestView {
         if iv.display.dirty.swap(false, Ordering::AcqRel) {
             changed |= r.upload(&iv.display, &mut stats);
         }
-        // A captured pointer is drawn: the image the guest shows, where the guest has it.
-        let drawn = match (iv.captured.get(), iv.worn.try_borrow()) {
-            (true, Ok(worn)) if worn.on => worn
-                .image
-                .clone()
-                .map(|image| (image, iv.display.shared.lock().unwrap().pointer_at)),
-            _ => None,
-        };
-        changed |= r.set_pointer(drawn.as_ref().map(|(image, at)| (image, *at)));
+        changed |= self.draw_pointer(r);
         if changed {
             iv.owed.set(true);
         }

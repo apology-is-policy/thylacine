@@ -147,7 +147,24 @@ between. It does not start QEMU yet: it attaches to one that runs with
   it is. The image is 1 to 256 pixels a side and exactly its bytes, its
   colours already multiplied by its alpha; one that is not an image leaves the
   last pointer standing.
-- **Everything the guest holds is let go of** (keys, then buttons) when the
+- **A captured pointer** (View > Capture Pointer, Control-Command-G, and the
+  same again to give it back; `docs/MAC-RUNNER.md` 4.2). While it is captured
+  the Mac's pointer is hidden and held over the middle of the picture, and
+  each of its moves goes to the guest's MOUSE as motion: the points AppKit
+  says the pointer would have gone, with the Mac's acceleration, as the guest
+  pixels they are in the view, whole ones, with what is left of a pixel kept
+  for the next move. A button and a notch go to the mouse too, with no place,
+  and every press counts, wherever the Mac takes its pointer to be. A button
+  comes up on the device it went down on, however the pointer is sent by
+  then. The guest's own pointer is drawn in the picture: the image it
+  defined, its hot spot on the place the guest says it has it (`MouseSet`),
+  and nothing of it on the bars. The app gives the pointer back by itself
+  wherever it lets go of the keys (below), and the Mac's pointer is then put
+  where the guest's is. Only a window that has the keys holds the Mac's
+  pointer; one that does not sends a captured pointer's events all the same
+  (a test's case). The window's title says how to get the pointer back.
+- **Everything the guest holds is let go of** (a captured pointer is given
+  back, then keys, then buttons) when the
   window stops being the key window, when the application stops being active,
   when a menu opens, and when the app quits. A modifier whose release the app
   never saw is let go of at the next event of any kind (a key, a click, a
@@ -161,7 +178,14 @@ between. It does not start QEMU yet: it attaches to one that runs with
   many points, in three steps), `--scripted-bar` (one second in, the content
   is set a point larger each way than the scanout has pixels; half a second
   later, right clicks on the two bars and on the picture's pixels beside
-  them), `--scripted-click <x>,<y>` (the pointer script for a guest that is
+  them), `--scripted-capture` (one second in, in a window that is not key, so
+  that the Mac's pointer is left alone: a pointer defined and placed as a
+  guest would, the pointer captured, a move, a left press, a move, the
+  release, a notch, a right press, the pointer given back, the right release,
+  a left click, and the pointer captured again; the moves are events Core
+  Graphics made with the motion written into them, and the script says the
+  motion AppKit read back from them, the view's points to a guest pixel, and
+  whether the Mac's pointer was held), `--scripted-click <x>,<y>` (the pointer script for a guest that is
   running, with no keys in it: one second in the pointer goes to the middle
   of the picture, half a second later a left click on that guest pixel, half
   a second later the pointer to the last pixel; a step is said as the pixel
@@ -246,6 +270,44 @@ machine that had just been continued. QEMU's monitor says when the machine
 runs again (the RESUME event); the app reads the monitor only while it waits
 for an answer and passes events over, so an owed release waits for the app's
 next event (Caveats).
+
+**The captured pointer.** Its motion is the guest's mouse's, and with a tablet
+bound to the display QEMU has one way to hand a mouse anything: an
+`input-send-event` addressed to no display. Asked of QEMU 10.0.2 and 11.1.3
+with no guest, the devices' own reports read back through qtest (2026-11-12):
+motion reaches the mouse whether or not the command names the display; a
+button named for the display goes to the tablet bound to it, and one named
+for none to the pointer device bound to no display whose driver came up last,
+which in a guest of ours is the mouse; an axis value of zero is handed on as
+an event, so an axis that did not move is left out; a wheel button's release
+makes a key no driver expects, as on the tablet. So a captured pointer's
+commands carry no address (`mouse_event`), and a button is a command of its
+own. `Pointing` keeps, for each button the guest holds, the device its press
+went to, and sends the release there: a button held when the pointer is given
+back comes up on the mouse. Motion from the mouse takes the guest's pointer
+away from the place the tablet last gave, so after it that place counts as
+not sent, and goes ahead of its button again on a machine whose tablet is
+bound to nothing. Motion waiting behind a slow QEMU is sent as its sum
+(`next_input`); an event of any other kind ends the run, so no motion moves
+across a button. The view makes guest pixels of points (`guest_motion`) and
+keeps the remainder, so that slow motion is not lost; the remainder is
+dropped when the pointer is captured and when it is given back.
+
+The Mac's side (`seize`) hides the pointer, puts it over the middle of the
+picture, so that a click is this view's whatever the pointer was over, and
+calls `CGAssociateMouseAndMouseCursorPosition(false)`. The move that follows
+that jump has the jump in its motion and is not sent. Giving back puts the
+pointer on the guest's place and associates it again, which also ends the
+moment for which the system holds a pointer still after a jump. Both were
+read in GLFW's source and have not run (Caveats).
+
+The guest's pointer is drawn in the picture's own pass, after the picture,
+by a second pipeline that blends a colour already multiplied by its alpha,
+with the scissor set to the picture. A colour stronger than its alpha, which
+such an image cannot hold, is cut to the alpha first (`Pointer::cut`), so a
+clear pixel adds nothing. `frame` and the end of a timed run bring what is
+drawn up to date by one rule (`draw_pointer`): a captured pointer that the
+guest shows is drawn where the guest last said it has it.
 
 **Why the D-Bus thread does nothing else.** QEMU's main loop calls the listener
 synchronously (`ui/dbus-listener.c`: the proxies are made with
@@ -403,14 +465,18 @@ cannot hold, is cut to the alpha before AppKit sees it.
 `display::Shared` (one mutex): the current `Scanout` (`Pixels::Mapped(Arc<Region>)`
 or `Pixels::Owned(Vec<u8>)`, width, height, stride, its byte `Order`, and a
 serial that changes with every scanout the guest sets), the pending damage rectangle, the guest's
-`Pointer` and whether it is shown, and two counters. `Region` is a mapping
+`Pointer`, whether it is shown and where the guest last said it has it, and two counters. `Region` is a mapping
 (its base, its length, and where in it the frame starts) and unmaps on drop.
 `view::Renderer` holds the Metal objects, the texture and the size and byte
-order it was made for; `view::Worn` the `NSCursor` and what it was made from;
+order it was made for, and the guest's pointer as the pass draws it (`Drawn`); `view::Worn` the `NSCursor` and what it was made from;
 `keymap::Held` the keys that are down. `display::Pointing`, the input
 thread's alone, is the monitor and what the attach found out (whether events
-are addressed to the display, whether the tablet is bound to it), the buttons
-the guest holds, the releases it is owed, and the place QEMU last took.
+are addressed to the display, whether the tablet is bound to it), whether
+the pointer is captured, the buttons the guest holds, each with the device
+its press went to, the releases it is owed, and the place QEMU last took
+while the guest's pointer is still there. The view keeps whether the pointer
+is captured, whether the Mac's is held, and the part of a guest pixel of its
+motion not sent yet.
 `display::UiInfo` is a size as the
 guest is told it (millimetres and pixels); the view keeps the last one told,
 how many were, and the timer that waits for the size to stand.
@@ -530,8 +596,9 @@ every step of a drag is a mode the guest sets at every step.
 
 ## Caveats
 
-- **Not there yet:** relative pointer motion
-  and capturing the pointer (`docs/MAC-RUNNER.md` 4.2), the clipboard, starting
+- **Not there yet:** a program in the guest asking for the pointer
+  (`docs/MAC-RUNNER.md` 4.2 has it as the end state; it needs the interop
+  service and a word of the compositor's protocol), the clipboard, starting
   and stopping QEMU, the XPC helper, the 9P server, a window that says it is
   connecting or that QEMU has gone.
 - **Where it departs from the design's text.** `docs/MAC-RUNNER.md` 4.2 has the
@@ -611,6 +678,23 @@ every step of a drag is a mode the guest sets at every step.
   tablet's driver is handed, on QEMU 10.0.2 and 11.1.3. That the compositor
   takes a button from the tablet was read in its source
   (`usr/tapestryd/src/main.rs`, the tablet's drain), not seen.
+- **Nobody has captured the pointer by hand.** What the Mac does with its own
+  pointer under a capture is written and has never run: hiding it, holding
+  it, the jump to the middle of the picture and the move dropped after it,
+  putting it back on the guest's place, and whether macOS asks for a
+  permission before it lets an app hold the pointer. A test that tried it
+  would take the pointer from whoever is at the Mac, so the windowed test
+  captures in a window that is not key, where the app leaves the Mac's
+  pointer alone. The chord, the menu item and its tick, and the title are
+  untried too. Nor has a captured pointer been tried in a live guest.
+- **A captured pointer moves as the Mac's would have.** The motion is
+  AppKit's, in points, with the Mac's acceleration, and not the device's own
+  counts. A program that wants unaccelerated motion gets none.
+- **A guest's compositor hands a program the captured motion a second time
+  when the pointer is given back** (OPEN-BUGS 2026-11-12T11:26Z). tapestryd
+  makes motion of two tablet positions that follow each other, and counts
+  the first position after a capture from the last one before it. The cure
+  is tapestryd's, and is the next commit on this branch.
 - **On a machine whose tablet is bound to nothing a press can still be seen
   before its place.** The button's report is the mouse's, and nothing orders
   two devices for a guest. The app sends the place ahead (Contract), which

@@ -73,6 +73,25 @@
 #            and what the tablet is bound to, which a stopped machine answers another way.
 # The legs do not look at what is drawn. The window opens four times more, for three seconds each.
 #
+# Then the capture legs, one on each of those two machines: the captured pointer as a person would
+# use it (view.rs, scripted_capture), except that the window is not key, so the Mac's own pointer
+# is left alone, and the script says that it was.
+#   capture  two moves, a left press between them and its release after, a notch and a right press
+#            reach the guest's mouse, and its tablet nothing of them. Each move arrives as the
+#            whole guest pixels its points make at the view's scale, the part of a pixel left over
+#            carried into the next: worked out here from the points and the scale the script says,
+#            and not taken from the app. The pointer is given back with the right button down, and
+#            that button's release still goes to the mouse. A click after it is the tablet's again,
+#            with its place. On the machine whose tablet is bound to nothing that click's place
+#            goes ahead of it, and its button reaches the mouse, as in the bar leg.
+#   drawn    with the pointer captured again, the picture read back is QEMU's screendump but for
+#            the guest's pointer: the image the script defined, its hot spot on the place the
+#            guest was said to have it at, the clear pixel showing the picture and the pixel at
+#            half strength blended once.
+# What the Mac does with its own pointer under a capture (hidden, held, put back) no leg tries: a
+# test that did would take the pointer from whoever is at the Mac.
+# The window opens twice more, for three seconds each.
+#
 #   macrunner/app/test/headless.sh       exit 0 pass, 1 fail, 77 skipped (not macOS, or no D-Bus display)
 #   THYLACINE_QEMU=<qemu-system-aarch64>  the QEMU to attach to (default: the one on PATH)
 #   THYLACINE_MAC_APP=<binary>            the app (default: target/release/thylacine-mac of this crate)
@@ -432,6 +451,110 @@ mouse: nothing" ]; then
     return $rc
 }
 
+# capture_leg <name> <the tablet's options> <what QEMU is handed after the mouse's events>
+#             <the tablet's reports> <the mouse's after its own> <what that shows>
+capture_leg() {
+    local name=$1 want_after=$3 want_tablet=$4 want_mouse_after=$5
+    local d=$repo/build/macrunner-app-test/$name
+    mkdir -p "$d" && cd "$d" || return 1
+    rm -f app.out heard.out app.ppm app-pointer.ppm screendump.ppm moves.out drawn.out
+    start_qemu "$name" "$2" || return 1
+    run_app 20 -- --exit-after 3 --scripted-capture --dump app.ppm; local arc=$?
+    python3 -I "$here/as_input_guest.py" t.sock reports 640 480 > heard.out 2>&1
+    qmp "{\"execute\": \"screendump\", \"arguments\": {\"filename\": \"$PWD/screendump.ppm\"}}" >> app.out 2>&1
+    quit_qemu
+    local rc=0 got said scale want_seen want_mouse
+    [ "$arc" -eq 0 ] || { echo "$name: FAIL: the app exited $arc ($(tail -1 app.out))"; rc=1; }
+    # The script says what it did: the Mac's pointer left alone, the two moves as AppKit read them
+    # back from the events it was handed, and the view's points to a guest pixel.
+    said=$(grep '^scripted: captured pointer: ' app.out)
+    scale=$(printf '%s\n' "$said" | sed -n "s/^scripted: captured pointer: the Mac's pointer held: false; moves of 51,-26 and -20,10 points at \([0-9][0-9.]*\) points to a guest pixel; the guest's pointer drawn at 100,60 of 640x480\$/\1/p")
+    if [ -z "$scale" ]; then
+        echo "$name: FAIL: the script did not say the capture it was to make (${said:-it did not get that far})"
+        return 1
+    fi
+    # Each move in whole guest pixels, what is left of a pixel carried into the next move; an axis
+    # that comes to nothing is not sent. First as QEMU's input layer is handed them, then as the
+    # mouse hands them to its driver.
+    python3 -I - "$scale" > moves.out <<'PY'
+import math, sys
+scale = float(sys.argv[1])
+carry, moves = [0.0, 0.0], []
+for move in ((51, -26), (-20, 10)):
+    whole = []
+    for i, points in enumerate(move):
+        pixels = carry[i] + points / scale
+        whole.append(math.trunc(pixels))
+        carry[i] = pixels - whole[i]
+    moves.append(whole)
+def handed(m):
+    parts = ["rel %s %d" % (axis, v) for axis, v in zip("xy", m) if v]
+    return "con -1: %s;" % " ".join(parts) if parts else ""
+def heard(m):
+    parts = ["rel %#x %d" % (code, v) for code, v in enumerate(m) if v]
+    return "%s;" % " ".join(parts) if parts else ""
+print(handed(moves[0]) + "con -1: press left;" + handed(moves[1])
+      + "con -1: release left;con -1: wheel-up;con -1: press right;con -1: release right;")
+print(heard(moves[0]) + "press left;" + heard(moves[1]) + "release left;wheel-up;press right;release right;")
+print("%d,%d and %d,%d" % (moves[0][0], moves[0][1], moves[1][0], moves[1][1]))
+PY
+    { read -r want_seen; read -r want_mouse; read -r said; } < moves.out
+    got=$(seen 640 480)
+    if [ "$got" = "$want_seen$want_after" ]; then
+        echo "$name: the captured pointer's moves arrived as $said guest pixels ($scale points to one), addressed to no display, with its buttons and its notch"
+    else
+        echo "$name: FAIL: input differs"; echo "  got:  $got"; echo "  want: $want_seen$want_after"; rc=1
+    fi
+    if [ "$(cat heard.out)" = "keyboard: nothing
+tablet: $want_tablet
+mouse: $want_mouse$want_mouse_after" ]; then
+        echo "$name: $6"
+    else
+        echo "$name: FAIL: the devices handed their driver something else"; sed 's/^/  got:  /' heard.out
+        echo "  want: tablet: $want_tablet"; echo "  want: mouse: $want_mouse$want_mouse_after"; rc=1
+    fi
+    if python3 -I - > drawn.out 2>&1 <<'PY'
+import sys
+W, H = 640, 480
+def ppm(path):
+    d = open(path, "rb").read()
+    head = b"P6\n%d %d\n255\n" % (W, H)
+    if not d.startswith(head) or len(d) != len(head) + W * H * 3:
+        sys.exit("%s is not a %dx%d picture" % (path, W, H))
+    return d[len(head):]
+app, qemu = ppm("app.ppm"), ppm("screendump.ppm")
+def px(d, x, y):
+    return tuple(d[(y * W + x) * 3:(y * W + x) * 3 + 3])
+# The 3x2 image with its hot spot, the clear pixel, on 100,60: red, green, blue; white, the picture,
+# and (100, 50, 20) with half the picture under it: the colour has its alpha multiplied in.
+want = {(99, 59): (255, 0, 0), (100, 59): (0, 255, 0), (101, 59): (0, 0, 255), (99, 60): (255, 255, 255),
+        (100, 60): px(qemu, 100, 60),
+        (101, 60): tuple(round(c + u * 127 / 255) for c, u in zip((100, 50, 20), px(qemu, 101, 60)))}
+slack = {(101, 60): 2}
+bad = []
+for at, w in sorted(want.items()):
+    g = px(app, *at)
+    if at != (100, 60) and px(qemu, *at) == w:
+        bad.append("QEMU's picture has %s at %d,%d already, which shows nothing" % (w, at[0], at[1]))
+    if any(abs(a - b) > slack.get(at, 0) for a, b in zip(g, w)):
+        bad.append("%d,%d is %s, want %s" % (at[0], at[1], g, w))
+others = [(i // 3 % W, i // 3 // W) for i in range(0, len(app), 3)
+          if app[i:i + 3] != qemu[i:i + 3] and (i // 3 % W, i // 3 // W) not in want]
+if others:
+    bad.append("%d pixels off the pointer differ from QEMU's screendump, the first at %d,%d" % (len(others), others[0][0], others[0][1]))
+print("; ".join(bad) if bad else "ok")
+sys.exit(1 if bad else 0)
+PY
+    then
+        echo "$name: the picture is QEMU's screendump but for the guest's pointer, drawn with its hot spot on 100,60"
+    else
+        echo "$name: FAIL: the guest's pointer is not drawn as defined ($(tail -1 drawn.out))"; rc=1
+    fi
+    local how=""; [ -n "$2" ] || how=unbound
+    said_of_qemu "$name" $how || rc=1
+    return $rc
+}
+
 # One run of the app against the size leg's QEMU: <out> <limit in seconds> <the app's arguments>.
 size_run() {
     local out=$1 limit=$2; shift 2
@@ -563,5 +686,11 @@ bar_leg bar-unbound "" \
     "with the tablet bound to nothing each place went ahead of its press; the places reached the tablet's driver and the buttons the mouse's" || rc=1
 click_leg || rc=1
 stopped_leg || rc=1
+capture_leg capture ,display=gpu0,head=0 'at 320,240 press left;at 320,240 release left;' \
+    'at 320,240 press left;at 320,240 release left;' '' \
+    "all of it reached the mouse's driver, the right button's release after the pointer was given back too; the click after that reached the tablet's with its place" || rc=1
+capture_leg capture-unbound "" 'at 320,240;at 320,240 press left;at 320,240 release left;' \
+    'at 320,240;at 320,240;at 320,240;' 'press left;release left;' \
+    "with the tablet bound to nothing the same, and of the click after it the place went ahead to the tablet's driver and the button to the mouse's" || rc=1
 [ $rc -eq 0 ] && echo "PASS: macrunner/app headless" || echo "FAIL: macrunner/app headless (evidence in $repo/build/macrunner-app-test)"
 exit $rc
