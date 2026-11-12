@@ -17,6 +17,7 @@
 set ::env(THYLACINE_ACCEL) [expr {[info exists ::env(LS_CI_GFX_ACCEL)] ? $::env(LS_CI_GFX_ACCEL) : "hvf"}]
 set ::env(THYLACINE_SERIAL_SAK) 0
 source [file join [file dirname [info script]] lib.exp]
+if {[info exists ::env(THYLACINE_EGL_VNC_SOCKET)]} { lc_require_host_pil }
 if {![info exists ::env(THYLACINE_GPU_DEV)] || ![string match virtio-gpu-gl* $::env(THYLACINE_GPU_DEV)]} {
     puts "\nLS-CI SKIP: this scenario needs a warp ctx, so a virgl device (THYLACINE_GPU_DEV=virtio-gpu-gl-pci)"
     exit 77

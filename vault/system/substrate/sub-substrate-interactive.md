@@ -60,7 +60,7 @@ locks: []
 abis: []
 design: ["docs/LIFE-SUPPORT.md"]
 created: 2026-08-01
-updated: 2026-11-04
+updated: 2026-11-12
 ---
 ## Purpose
 
@@ -611,6 +611,27 @@ per full gate ≈ 3 s against a run measured in tens of minutes.
      the compositor is spawned before the pivot to the pool, so its startup
      read of `/lib/halcyon/profile` always misses and it says `built-in` on
      every image, until a halcyond pushes the bundle.
+- **Two more (2026-11-12, the whole-fleet run before the async landing).**
+
+  6. **A catch-all failure arm ends on the line's terminator.** An expect that
+     accepts one exact line and fails on "any other line of that kind"
+     (`-ex "nora: EXIT path=quit code=0"`, then
+     `-re {nora: EXIT path=[a-z]+[^\r\n]*}`) fails a correct guest whenever
+     the serial delivers the accepted line in two reads: the second arm matches
+     the first half. `ls-halcyon-paste-flow` failed three attempts of three
+     that way on its first boot (`Nora left another way: nora: EXIT path=quit `,
+     and once `path=qu`). The arm is `-re {(...[^\r\n]*)[\r\n]}` and reports
+     capture 1; `ls-halcyon.exp`'s `menu ran:` arm had the same shape and was
+     passing on chunk boundaries. Rule 1 is the same hazard for a number; this
+     one is for a line. A scripted serial that splits the line shows both
+     states for no boot.
+  7. **A host tool's missing dependency is a SKIP before boot.**
+     `ls-halcyon-pointer` reads the cursor plane with
+     `tools/interactive/vnc_capture.py`, which needs Pillow; on a host without
+     it the scenario booted, drove the guest, and reported the Python
+     traceback as a guest failure, three attempts running. `lc_require_host_pil`
+     (lib.exp) now exits 77 with the reason before a VM starts; the six SAK
+     scenarios call it when they take the EGL capture path.
 - `ls-gfx-session-image`'s fail-fast arm waited for `leaf=N REFUSED`, a word
   halcyond never wrote (its line is `leaf=N cache refused`), so a refused raster
   showed as a 60 s timeout that blamed the routing. It matches the refusal line

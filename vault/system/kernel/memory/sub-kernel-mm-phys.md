@@ -3,13 +3,13 @@ id: sub-kernel-mm-phys
 type: sub
 parent: moc-kernel-memory
 title: "The page allocator — phys bootstrap, buddy, per-CPU magazines"
-code: ["mm/phys.c", "mm/phys.h", "mm/buddy.c", "mm/buddy.h", "mm/magazines.c", "mm/magazines.h", "kernel/include/thylacine/page.h"]
+code: ["mm/phys.c", "mm/phys.h", "mm/buddy.c", "mm/buddy.h", "mm/magazines.c", "mm/magazines.h", "kernel/include/thylacine/page.h", "kernel/test/test_phys.c"]
 audit: hard
 guarded-by: [inv-i32]
 validated-by: [gate-smp, spec-capacity, gate-magazines-tsan]
 locks: [lock-buddy-zone, lock-magazine-set]
 created: 2026-08-01
-updated: 2026-11-03
+updated: 2026-11-12
 ---
 
 ## Shared-memory accounting review
@@ -501,7 +501,18 @@ of the drainer's peers with `ready_on` and woken by IPI: in-kernel tests
 send no idle-peer IPIs, and `sched()` steals only onto an empty tree, so a
 `ready()`d owner runs on the drainer's own CPU. Its first run did exactly
 that and never met its premise, a drain while an owner reports another
-CPU, which the test asserts before the stamps. It drains once more after
+CPU, which the test asserts before the stamps. The owners churn until the
+drainer releases them, which it does once 64 of its drains have run beside
+a live owner (an owner's floor is 4000 iterations, its ceiling four
+million, so a drainer that never releases fails the test and does not hang
+it). Until 2026-11-12 an owner ran 4000 iterations and stopped, and nothing
+orders one kthread's first instruction before another's last: on one boot
+of a 163-boot fleet run all three had finished before the drainer's first
+drain and the test failed `the drainer never drained`. What kept the
+drainer away that long on that boot was not established; a failure now
+prints how long the first drain took to come and how many context switches
+the drainer's CPU made meanwhile. With one CPU there is nothing to hold: an
+owner runs only when the drainer yields, after its first drain. It drains once more after
 joining the owners, because the next test's gauge reads the buddy without
 draining.
 

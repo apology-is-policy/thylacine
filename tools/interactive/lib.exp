@@ -305,6 +305,16 @@ proc lc_vm_infra_check {} {
 # THYLACINE_QMP_SOCK at the scenario's own slot; run-vm.sh reads the same
 # variable, so both ends agree by construction. Unset, this is exactly the old
 # path, so a hand-run scenario behaves as it always did.
+# tools/interactive/vnc_capture.py reads the cursor plane and the EGL scanout with Pillow. A
+# host without it can say nothing about the guest, so the scenario SKIPs (77, which the
+# fleet counts) before a VM boots, instead of reporting the import error as a guest result.
+proc lc_require_host_pil {} {
+    if {[catch {exec python3 -c "import PIL"} err]} {
+        puts "LS-CI SKIP: host python3 has no PIL (Pillow); tools/interactive/vnc_capture.py needs it"
+        exit 77
+    }
+}
+
 proc lc_qmp_sock {} {
     if {[info exists ::env(THYLACINE_QMP_SOCK)] && $::env(THYLACINE_QMP_SOCK) ne ""} {
         return $::env(THYLACINE_QMP_SOCK)
