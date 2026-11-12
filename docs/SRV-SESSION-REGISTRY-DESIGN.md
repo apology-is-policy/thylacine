@@ -139,14 +139,18 @@ stay reserved/offline; no wildcard fallback. Add another resident only by an
 intentional login-policy update. No home-*, halcyon-* or boot-test service routes.
 
 November 12 login-policy update (PROPOSED by corona; implemented on the landing
-branch so that its proof exists; AWAITING THE OPERATOR'S RATIFICATION): a login
-that does not start the session compositor adds `halcyon`, the console
-renderer's inline-media place channel, to its manifest; a login that starts
-it does not, and has none when the compositor fails and it falls back to the
-shell. The logins that do not start it are the console getty's, on an image
-without the session lever, and joey's seeded boot logins (`--no-session`),
-whose shells run a fixed script on pipes: login does not know whether it
-sits on the console, so both are routed. HALCYON.md 14.7.2 keeps that channel for console mode
+branch so that its proof exists; AWAITING THE OPERATOR'S RATIFICATION): login adds
+`halcyon`, the console renderer's inline-media place channel, to its manifest
+unless it would start the session compositor on a successful authentication,
+that is unless the image has the session lever and login was not passed
+`--no-session`. It decides before it authenticates anyone, so the rule is
+about what the login would run, not what it ends up running: a login that
+would start the compositor has no such route when authentication fails, when
+it serves `!recover`, or when the compositor fails and it falls back to the
+shell. Among the routed logins are the console getty's on an image without
+the session lever and joey's seeded boot logins (`--no-session`), whose
+shells run a fixed script on pipes: login does not know whether it sits on
+the console. HALCYON.md 14.7.2 keeps that channel for console mode
 ("the console spike's global `/srv/halcyon` remains for console mode"), and
 with a private `/srv` per login the console shell could not open it: `view`
 reported `no /srv/halcyon` although the renderer had posted it (the whole-fleet

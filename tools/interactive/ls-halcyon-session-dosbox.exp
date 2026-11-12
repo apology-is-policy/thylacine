@@ -48,7 +48,7 @@ expect {
         # A lever the image lacks is a SKIP, never a FAIL: a full fleet run on
         # the gate image must not be red for a reason that is not a defect.
         puts "\nLS-CI SKIP: default (ut) image -- this scenario drives the session\
- compositor. Bake with: THYLACINE_HALCYON_SESSION=1 tools/build.sh kernel --config ci"
+ compositor. Bake with: THYLACINE_HALCYON_SESSION=1 THYLACINE_HALCYON_PROFILE=instrument tools/build.sh kernel --config ci"
         lc_quit
         exit 77
     }
@@ -56,6 +56,24 @@ expect {
     eof { lc_fail "EOF at session start" }
 }
 set timeout 60
+# The waits below read the pane count and the running flag off the bar's log line. The
+# legacy bar writes that line only when its condition state, notice or mode changes.
+# The session compositor's theme line carries an inherited count; a console renderer's
+# own theme line does not, and is not the one to read.
+expect {
+    -re {halcyond: theme [^\r\n]*inherited\); profile (instrument|legacy) } {
+        if {$expect_out(1,string) ne "instrument"} {
+            puts "\nLS-CI SKIP: legacy status bar -- this scenario reads the pane count and the\
+ running flag from the bar's log line, which only the Instrument bar writes when they change.\
+ Bake with: THYLACINE_HALCYON_SESSION=1 THYLACINE_HALCYON_PROFILE=instrument tools/build.sh kernel --config ci"
+            lc_quit
+            exit 77
+        }
+    }
+    -re {EXTINCTION:} { lc_extinction_fail "session" }
+    timeout { lc_fail "session did not report its graphics profile" }
+    eof { lc_fail "EOF before profile" }
+}
 expect {
     -re {halcyond: status bar [^\r\n]*running false panes 2} {}
     -re {EXTINCTION:} { lc_extinction_fail "session" }

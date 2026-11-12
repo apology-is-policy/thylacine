@@ -19,15 +19,18 @@ updated: 2026-11-12
 ---
 ## Route to the console renderer's place channel
 
-A login that does not start the session compositor routes `halcyon`, the
-console renderer's inline-media place channel (HALCYON.md 14.7.2), beside the
-twelve resident names; a login that starts it routes the twelve only
-(`private_service_registry(console_place)`; the session lever is read before
-the view is made, so a login whose compositor then fails runs its fallback
-shell without the route). The logins that do not start it are the console
-getty's, on an image without the session lever, and joey's seeded boot logins
+login routes `halcyon`, the console renderer's inline-media place channel
+(HALCYON.md 14.7.2), beside the twelve resident names unless it would start
+the session compositor on a successful authentication, that is unless the
+image has the session lever and login was not passed `--no-session`
+(`private_service_registry(console_place)`). The lever and the flag are read
+before the view is made and before anyone authenticates, so a login that
+would start the compositor routes the twelve only whatever happens next: when
+authentication fails, when it serves `!recover`, and when the compositor
+fails and it runs its fallback shell. Among the routed logins are the console
+getty's on an image without the session lever and joey's seeded boot logins
 (`--no-session`), whose shells run a fixed script on pipes: login does not
-know whether it sits on the console, so both are routed. The renderer's posting is a trusted one (joey spawns
+know whether it sits on the console. The renderer's posting is a trusted one (joey spawns
 it with MAY_POST_SERVICE), which a route may resolve; a capability-posted
 `halcyon` would be refused. The route is not authority and adds no gate: the
 place channel has no peer gate and serves one connection at a time, so any
@@ -46,7 +49,9 @@ session's by `tools/interactive/ls-halcyon-session-route.exp`, on an image
 that runs both the console renderer and the session compositor, so that the
 name is posted while the pane asks: the scenario runs `stat` in a pane and
 reads the exit status off the Instrument bar's log line, and a posted
-resident route stats where the posted `/srv/halcyon` does not. This is a login-policy
+resident route stats where the posted `/srv/halcyon` does not. On any other
+image it SKIPs and names its bake; docs/agent/GATES.md lists the images a
+whole-fleet run needs. This is a login-policy
 update awaiting the operator's ratification
 (docs/SRV-SESSION-REGISTRY-DESIGN.md, the November 12 paragraphs).
 
