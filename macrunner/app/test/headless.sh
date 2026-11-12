@@ -56,7 +56,13 @@
 # leg asks QEMU that the mouse is the pointer device it goes by), which is how the pointer was sent
 # before and why it is not now. The app's events are taken all the same; QEMU hands the places to
 # the tablet and the buttons to the mouse, and the leg says so.
-# The legs do not look at what is drawn. The window opens twice more, for three seconds each.
+#
+# Then the click leg, on the first machine: the pointer script a running guest is tried with
+# (view.rs, scripted_click), which the legs above do not run.
+#   click    the middle of the picture, a left click on pixel 600,108 and the last pixel, half a
+#            second apart, arrive as those pixels: four reports on the tablet, the press and the
+#            release each with the place, and nothing on the mouse.
+# The legs do not look at what is drawn. The window opens three times more, for three seconds each.
 #
 #   macrunner/app/test/headless.sh       exit 0 pass, 1 fail, 77 skipped (not macOS, or no D-Bus display)
 #   THYLACINE_QEMU=<qemu-system-aarch64>  the QEMU to attach to (default: the one on PATH)
@@ -333,6 +339,42 @@ mouse: $want_mouse" ]; then
     return $rc
 }
 
+# click_leg: the paced pointer script, on the machine with the tablet bound to the display.
+click_leg() {
+    local name=click
+    local d=$repo/build/macrunner-app-test/$name
+    mkdir -p "$d" && cd "$d" || return 1
+    rm -f app.out heard.out
+    start_qemu "$name" || return 1
+    run_app 20 -- --exit-after 3 --scripted-click 600,108; local arc=$?
+    python3 -I "$here/as_input_guest.py" t.sock reports 640 480 > heard.out 2>&1
+    quit_qemu
+    local rc=0 got said want_click
+    [ "$arc" -eq 0 ] || { echo "$name: FAIL: the app exited $arc ($(tail -1 app.out))"; rc=1; }
+    want_click='at 320,240;at 600,108 press left;at 600,108 release left;at 639,479;'
+    got=$(seen 640 480)
+    if [ "$got" = "$want_click" ]; then
+        echo "$name: the script's middle, its click and the last pixel arrived as themselves"
+    else
+        echo "$name: FAIL: input differs"; echo "  got:  $got"; echo "  want: $want_click"; rc=1
+    fi
+    if [ "$(cat heard.out)" = "keyboard: nothing
+tablet: $want_click
+mouse: nothing" ]; then
+        echo "$name: four reports on the tablet's driver, the press and the release each with the place"
+    else
+        echo "$name: FAIL: the devices handed their driver something else"; sed 's/^/  got:  /' heard.out
+        echo "  want: tablet: $want_click"; rc=1
+    fi
+    # The script says each step and the pixel it meant: what a caller with a guest compares the
+    # guest's own account with.
+    said=$(grep '^scripted: pointer ' app.out | tr '\n' ';')
+    [ "$said" = 'scripted: pointer to the middle, guest pixel 320,240 of 640x480;scripted: pointer a left click, guest pixel 600,108 of 640x480;scripted: pointer to the last pixel, guest pixel 639,479 of 640x480;' ] \
+        || { echo "$name: FAIL: the script did not say its three steps as they were ($said)"; rc=1; }
+    said_of_qemu "$name" || rc=1
+    return $rc
+}
+
 # One run of the app against the size leg's QEMU: <out> <limit in seconds> <the app's arguments>.
 size_run() {
     local out=$1 limit=$2; shift 2
@@ -461,5 +503,6 @@ bar_leg bar ,display=gpu0,head=0 \
 bar_leg bar-unbound "" \
     'at 0,240;at 0,240;at 639,479;at 639,479;' 'press right;release right;press right;release right;' \
     "with the tablet bound to nothing the places reached the tablet's driver and the buttons the mouse's" || rc=1
+click_leg || rc=1
 [ $rc -eq 0 ] && echo "PASS: macrunner/app headless" || echo "FAIL: macrunner/app headless (evidence in $repo/build/macrunner-app-test)"
 exit $rc

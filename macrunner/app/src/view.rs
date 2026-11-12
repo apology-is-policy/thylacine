@@ -644,11 +644,12 @@ pub struct Ivars {
 #[derive(Clone, Default)]
 pub struct Options {
     pub print_stats: bool,
-    pub exit_after: Option<f64>,       // seconds
-    pub dump: Option<String>,          // a PPM of the pipeline's output, written at exit_after
+    pub exit_after: Option<f64>,            // seconds
+    pub dump: Option<String>,               // a PPM of the pipeline's output, written at exit_after
     pub scripted_input: bool, // one second in, a fixed run of key and pointer events through the window
     pub resize_to: Option<(f64, f64)>, // one second in, the window's content set to this many points, and nudged a second later
     pub scripted_bar: bool, // one second in, the content set a point past the scanout each way; then clicks on the picture's corners and on the bars
+    pub scripted_click: Option<(u32, u32)>, // one second in, the pointer to the middle of the picture; half a second on, a left click on this guest pixel; half a second on, the pointer to the last pixel
 }
 
 define_class!(
@@ -709,6 +710,15 @@ define_class!(
 
         #[unsafe(method(barClicks:))]
         fn bar_clicks(&self, _timer: &NSTimer) { self.scripted_bar_clicks(); }
+
+        #[unsafe(method(clickMiddle:))]
+        fn click_middle(&self, _timer: &NSTimer) { self.scripted_click(0); }
+
+        #[unsafe(method(clickPress:))]
+        fn click_press(&self, _timer: &NSTimer) { self.scripted_click(1); }
+
+        #[unsafe(method(clickLast:))]
+        fn click_last(&self, _timer: &NSTimer) { self.scripted_click(2); }
 
         // Every change of the view's size comes through here, a step at a time while the window's
         // edge is dragged.
@@ -882,6 +892,23 @@ impl GuestView {
                 );
             }
         }
+        if this.ivars().opts.scripted_click.is_some() {
+            for (secs, step) in [
+                (1.0, sel!(clickMiddle:)),
+                (1.5, sel!(clickPress:)),
+                (2.0, sel!(clickLast:)),
+            ] {
+                unsafe {
+                    NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(
+                        secs,
+                        &*(Retained::as_ptr(&this) as *const AnyObject),
+                        step,
+                        None,
+                        false,
+                    );
+                }
+            }
+        }
         Ok(this)
     }
 
@@ -1031,6 +1058,66 @@ impl GuestView {
             "scripted: bar: view {}x{} points at {s}, scanout {tw}x{th}",
             b.size.width, b.size.height
         );
+    }
+
+    // The pointer script for a guest that is running, a step at a time and half a second apart: a
+    // compositor says where its pointer is once a frame, and the caller wants each place it was
+    // sent to. The middle of the picture, a left click on the pixel asked for, the last pixel. The
+    // events are handed to the view itself, because a window that is not active keeps a left click
+    // for its own activation and is given no moves; the points are worked out from the rule alone
+    // (the picture fitted and centred), not through `place`.
+    fn scripted_click(&self, step: u8) {
+        let (Some(window), Some((cx, cy))) = (self.window(), self.ivars().opts.scripted_click)
+        else {
+            return;
+        };
+        let (tw, th) = self
+            .ivars()
+            .renderer
+            .borrow()
+            .as_ref()
+            .map(|r| r.tex_size)
+            .unwrap_or((0, 0));
+        if tw == 0 || th == 0 {
+            eprintln!("scripted: no scanout, the pointer is not tried");
+            return;
+        }
+        let (what, gx, gy) = match step {
+            0 => ("to the middle", tw / 2, th / 2),
+            1 => ("a left click", cx.min(tw - 1), cy.min(th - 1)),
+            _ => ("to the last pixel", tw - 1, th - 1),
+        };
+        let b = self.bounds();
+        let scale = (b.size.width / tw as f64).min(b.size.height / th as f64);
+        let x = (b.size.width - tw as f64 * scale) / 2.0 + (gx as f64 + 0.5) * scale;
+        let y_top = (b.size.height - th as f64 * scale) / 2.0 + (gy as f64 + 0.5) * scale;
+        let p = self.convertPoint_toView(NSPoint::new(x, b.size.height - y_top), None);
+        let wn = window.windowNumber();
+        let event = |ty: NSEventType| {
+            NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+                ty, p, NSEventModifierFlags::empty(), 0.0, wn, None, 0, 1, 1.0)
+        };
+        let sent = if step == 1 {
+            [
+                (NSEventType::LeftMouseDown, true),
+                (NSEventType::LeftMouseUp, false),
+            ]
+            .into_iter()
+            .all(|(ty, down)| {
+                event(ty)
+                    .map(|ev| self.button(&ev, button_code(0), down))
+                    .is_some()
+            })
+        } else {
+            event(NSEventType::MouseMoved)
+                .map(|ev| self.pointer(&ev))
+                .is_some()
+        };
+        if sent {
+            eprintln!("scripted: pointer {what}, guest pixel {gx},{gy} of {tw}x{th}");
+        } else {
+            eprintln!("scripted: no mouse event");
+        }
     }
 
     // Release everything the guest believes is held, keys and buttons: the window stopped being where

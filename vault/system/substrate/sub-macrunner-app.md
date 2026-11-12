@@ -145,7 +145,13 @@ between. It does not start QEMU yet: it attaches to one that runs with
   many points, in three steps), `--scripted-bar` (one second in, the content
   is set a point larger each way than the scanout has pixels; half a second
   later, right clicks on the two bars and on the picture's pixels beside
-  them); and `THYLACINE_NO_MAP=1`, which stops the listener advertising `Unix.Map`.
+  them), `--scripted-click <x>,<y>` (the pointer script for a guest that is
+  running, with no keys in it: one second in the pointer goes to the middle
+  of the picture, half a second later a left click on that guest pixel, half
+  a second later the pointer to the last pixel; each step is said with the
+  pixel it meant, and the steps are apart because a compositor says where
+  its pointer is once a frame); and `THYLACINE_NO_MAP=1`, which stops the
+  listener advertising `Unix.Map`.
 
 ## Mechanism
 
