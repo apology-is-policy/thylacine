@@ -314,9 +314,12 @@ sized for the slower TCG compat run. Idle cost under HVF was the subject of
   (`qemu_input_is_absolute`, which the cocoa, VNC and D-Bus displays go by)
   is the mouse's, relative. Measured with no guest on QEMU 10.0.2 and
   11.1.3; cocoa itself has not been measured. Read that way the cocoa window
-  of the `gpu` posture turns relative, and grabs the Mac's pointer, once the
-  guest's mouse is up (`ui/cocoa.m` asks `qemu_input_is_absolute` of its
-  console); nobody has looked at one for it (OPEN-BUGS 2026-11-12T10:47Z).
+  of the `gpu` posture turns relative once the guest's mouse is up
+  (`ui/cocoa.m` asks `qemu_input_is_absolute` of its console), and holds the
+  Mac's pointer from that moment if the pointer is in the window already
+  (`notifyMouseModeChange`, for the grab it took at `mouseEntered`), or
+  else from the next click in the window (`mouseUp`); nobody has looked at
+  one for it (OPEN-BUGS 2026-11-12T10:47Z).
   `dbus`'s tablet is bound to nothing too: a run that tries the Mac app's
   pointer uses `app`.
 - **Under cocoa, the guest's Super is the Mac's Cmd, and macOS takes some Cmd

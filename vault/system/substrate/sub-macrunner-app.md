@@ -160,9 +160,20 @@ between. It does not start QEMU yet: it attaches to one that runs with
   defined, its hot spot on the place the guest says it has it (`MouseSet`),
   and nothing of it on the bars. The app gives the pointer back by itself
   wherever it lets go of the keys (below), and the Mac's pointer is then put
-  where the guest's is. Only a window that has the keys holds the Mac's
-  pointer; one that does not sends a captured pointer's events all the same
-  (a test's case). The window's title says how to get the pointer back.
+  where the guest's is. It also gives the pointer back, and keeps the keys,
+  when its window moves, changes size, changes screen, or enters or leaves
+  full screen: the Mac's pointer is held at a point of the screen, and a
+  window that has moved may no longer be under it. Only a window that has
+  the keys holds the Mac's pointer; one that does not sends a captured
+  pointer's events all the same (a test's case). A capture that cannot hold
+  the Mac's pointer (the view is on no screen, or Core Graphics refuses to
+  move or to hold the pointer) is not made, and the app says why. The
+  window's title says how to get the pointer back.
+- **An event made before the pointer changed hands** and taken after is not
+  read as one made after. For the five seconds before a capture or a
+  give-back: a move is dropped, and a press or a notch is sent with no
+  place. (A move made captured says where the Mac's pointer was held, and
+  one made free is no motion of a captured pointer.)
 - **Everything the guest holds is let go of** (a captured pointer is given
   back, then keys, then buttons) when the
   window stops being the key window, when the application stops being active,
@@ -180,12 +191,16 @@ between. It does not start QEMU yet: it attaches to one that runs with
   later, right clicks on the two bars and on the picture's pixels beside
   them), `--scripted-capture` (one second in, in a window that is not key, so
   that the Mac's pointer is left alone: a pointer defined and placed as a
-  guest would, the pointer captured, a move, a left press, a move, the
-  release, a notch, a right press, the pointer given back, the right release,
-  a left click, and the pointer captured again; the moves are events Core
-  Graphics made with the motion written into them, and the script says the
-  motion AppKit read back from them, the view's points to a guest pixel, and
-  whether the Mac's pointer was held), `--scripted-captured-click
+  guest would; a move made, the pointer captured, and that move handed over;
+  a move, a left press, a move, the release, a notch, a right press; a move,
+  a left press and a notch made, the pointer given back, the right release,
+  and those three handed over; the left release, a left click; the pointer
+  captured and the window moved by a point; a left click; and the pointer
+  captured again. The moves and notches are events Core Graphics made, with
+  the motion written into them and stamped by the script, and the script
+  says the motion AppKit read back from them, the view's points to a guest
+  pixel, whether the Mac's pointer was held, and whether the pointer was
+  given back when the window moved), `--scripted-captured-click
   <x>,<y>,<dx>,<dy>` (the captured pointer's script for a guest that is
   running, paced as the click script is and for its reason: one second in
   the pointer goes to that guest pixel as the tablet's; half a second later
@@ -300,13 +315,47 @@ across a button. The view makes guest pixels of points (`guest_motion`) and
 keeps the remainder, so that slow motion is not lost; the remainder is
 dropped when the pointer is captured and when it is given back.
 
-The Mac's side (`seize`) hides the pointer, puts it over the middle of the
-picture, so that a click is this view's whatever the pointer was over, and
-calls `CGAssociateMouseAndMouseCursorPosition(false)`. The move that follows
-that jump has the jump in its motion and is not sent. Giving back puts the
-pointer on the guest's place and associates it again, which also ends the
-moment for which the system holds a pointer still after a jump. Both were
-read in GLFW's source and have not run (Caveats).
+The Mac's side (`seize`) puts the pointer over the middle of the picture
+(of the view, before there is one), so that a click is this view's whatever
+the pointer was over, calls `CGAssociateMouseAndMouseCursorPosition(false)`
+and hides it. If the view is on no screen, or Core Graphics refuses either
+call, nothing stays held or
+hidden, the app says why on its standard error, and `capture` leaves the
+pointer free. The move that follows the jump has the jump in its motion and
+is not sent (`skip`, cleared at every capture, so that it cannot outlive
+the one it was set for). Giving back (`give_back`) needs no window and
+cannot fail part of the way: it puts the pointer on the guest's place when
+there is a picture on a screen, associates it again, which also ends the
+moment for which the system holds a pointer still after a jump, and unhides
+it. The jump in the next move and the held moment were read in GLFW's
+source and in SDL2's (`SDL_cocoamouse.m`, `Cocoa_HandleMouseWarp`) and have
+not run (Caveats).
+
+**An event made before a change of hands.** The Mac queues events, and one
+made under one state can be taken under the other: a move made free and
+taken captured is no motion of a captured pointer, and a move made captured
+and taken free says where the pointer was held, not where the person has
+it. The view keeps when the pointer last changed hands (`turned`, on
+`NSProcessInfo.systemUptime`) and reads each pointer event's own time
+(`NSEvent.timestamp`): one made in the five seconds before the change is
+stale (`stale`). A stale move is dropped. A stale press or notch is the
+person's all the same and is sent, with no place, so that it lands where
+the guest has its pointer. The five seconds are there because the rule
+rests on a premise nothing here shows: that the Mac stamps a real event on
+that clock. If it does not, an event's time is nowhere near the change, the
+rule does nothing, and the app behaves as it did without it. What is shown:
+Core Graphics stamps an event when it is posted, and one that is only made
+says zero; a script stamps its own (`stamp`), and what it stamps reads back
+as seconds on that clock (a unit test pins both).
+
+**A window that moves.** The Mac's pointer is held at a point of the
+screen, and nothing moves it while it is held. The window's delegate ends a
+capture when the window has moved, changed size or changed screen, and when
+it is about to enter or leave full screen (`give_pointer_back`); QEMU's own
+window lets go on leaving full screen (`qemu-11.1:ui/cocoa.m:1258-1262`).
+The keys are kept: the window is still where they go. Holding the pointer
+again over the picture's new place was weighed and not taken
+(`docs/MAC-RUNNER.md` 4.2).
 
 The guest's pointer is drawn in the picture's own pass, after the picture,
 by a second pipeline that blends a colour already multiplied by its alpha,
@@ -482,8 +531,9 @@ are addressed to the display, whether the tablet is bound to it), whether
 the pointer is captured, the buttons the guest holds, each with the device
 its press went to, the releases it is owed, and the place QEMU last took
 while the guest's pointer is still there. The view keeps whether the pointer
-is captured, whether the Mac's is held, and the part of a guest pixel of its
-motion not sent yet.
+is captured, whether the Mac's is held, when it last changed hands, whether
+the next move is the jump's, and the part of a guest pixel of its motion
+not sent yet.
 `display::UiInfo` is a size as the
 guest is told it (millimetres and pixels); the view keeps the last one told,
 how many were, and the timer that waits for the size to stand.
@@ -705,25 +755,56 @@ every step of a drag is a mode the guest sets at every step.
 - **Nobody has captured the pointer by hand.** What the Mac does with its own
   pointer under a capture is written and has never run: hiding it, holding
   it, the jump to the middle of the picture and the move dropped after it,
-  putting it back on the guest's place, and whether macOS asks for a
-  permission before it lets an app hold the pointer. A test that tried it
-  would take the pointer from whoever is at the Mac, so the windowed test
-  captures in a window that is not key, where the app leaves the Mac's
-  pointer alone. The chord, the menu item and its tick, and the title are
-  untried too. In a live guest a captured pointer has been tried by script
-  only (below).
+  the refusal of a capture that cannot hold it, putting it back on the
+  guest's place, and whether macOS asks for a permission before it lets an
+  app hold the pointer. A test that tried it would take the pointer from
+  whoever is at the Mac, so the windowed test captures in a window that is
+  not key, where the app leaves the Mac's pointer alone. The chord, the
+  menu item and its tick, and the title are untried too. In a live guest a
+  captured pointer has been tried by script only (below). Of the five
+  window events that end a capture only the move has run, by script; a
+  change of size or of screen and full screen either way have not. Not
+  known at all: what Mission Control, the screenshot bar, the lock screen
+  or a change of displays do to a pointer that is hidden and held; whether
+  the system gives the pointer back when the app dies; whether a key
+  equivalent posts the menu-tracking notice in an app that is active (in a
+  probe with no window it did not), which would give the pointer back at
+  the chord that had just captured it; and that a give-back for a guest
+  that never said where its pointer is puts the Mac's on the picture's
+  first pixel, which is where the app takes such a pointer to be.
+- **The rule for an event made before a change of hands rests on a premise
+  that is not shown:** that the Mac stamps a real event on the clock the
+  app reads (`NSProcessInfo.systemUptime`). The legs' events are stamped on
+  it by the script. If the premise is false the rule does nothing, and an
+  event made just before the chord is taken for one made after, as before
+  the rule: at a capture the guest's pointer can jump by the Mac pointer's
+  way to the middle, and at a give-back a program can be handed one made-up
+  motion. A second limit: a press made more than five seconds before the
+  change and taken after it has its place.
 - **A captured pointer moves as the Mac's would have.** The motion is
   AppKit's, in points, with the Mac's acceleration, and not the device's own
-  counts. A program that wants unaccelerated motion gets none.
+  counts. A program that wants unaccelerated motion gets none. And it moves
+  in the guest pixels a whole point is: at half a point to a guest pixel (a
+  2560x1600 guest in 1280x800 points) a mouse moves the guest's pointer two
+  pixels at a time, and motion alone cannot take it from an even pixel to
+  an odd one. Whether a trackpad's motion comes in parts of a point was not
+  settled.
 - **One pointer, two devices.** The guest's compositor makes motion of two
   tablet positions that follow each other, and ends such a run at motion
   from the mouse (`usr/tapestryd/src/motion.rs`), so the first position
   after a capture is a place and a program is not handed the captured
-  motion twice. That has host tests and a leg of the compositor's battery;
-  the leg has not run in a guest yet. The compositor drains the tablet
-  before the mouse in each wake: a position and motion that reach it within
-  one wake are taken tablet first, whatever order they happened in. A
-  person's chord keeps them apart, and a script has to pace itself.
+  motion twice. That has host tests and a leg of the compositor's battery,
+  which ran in a guest both ways (2026-11-12, `sub-tapestryd`: red without
+  the line on a motion of -640,0, green with it). The compositor drains the
+  tablet before the mouse in each wake: a position and motion that reach it
+  within one wake are taken tablet first, whatever order they happened in.
+  Nothing keeps them apart. A hand that moves through the chord puts the
+  last captured motion and the first position one report of the mouse
+  apart, well inside a wake, and behind a slow monitor the app's own queue
+  hands them over back to back. What that costs is small, because the base
+  is forgotten already: the position is a place, and the last motion moves
+  the guest's pointer off it until the next position. A script that wants
+  them in order paces itself.
 - **On a machine whose tablet is bound to nothing a press can still be seen
   before its place.** The button's report is the mouse's, and nothing orders
   two devices for a guest. The app sends the place ahead (Contract), which

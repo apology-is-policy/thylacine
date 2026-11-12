@@ -303,11 +303,12 @@ fi
 # frontend is in is its console's: QEMU goes by the pointer device bound
 # to the console, or with none bound by the one whose driver came up last
 # (ui/input.c, qemu_input_is_absolute), which in a guest of ours is this
-# mouse. Read that way cocoa turns relative, and grabs the Mac's pointer,
-# once the guest's mouse is up (ui/cocoa.m asks qemu_input_is_absolute of
-# its console); that has not been looked at in a cocoa window. tapestryd
-# ALSO synthesizes rel deltas from consecutive abs motion, for a frontend
-# that stays absolute.
+# mouse. Read that way cocoa turns relative once the guest's mouse is up
+# (ui/cocoa.m asks qemu_input_is_absolute of its console), and holds the
+# Mac's pointer from then if it is in the window already, or else from the
+# next click in it; that has not been looked at in a cocoa window.
+# tapestryd ALSO synthesizes rel deltas from consecutive abs motion, for a
+# frontend that stays absolute.
 # ORDERING IS LOAD-BEARING (mouse_flags expands AFTER gpu+rng, never
 # here): qemu-virt PCI INTx has only FOUR shared lines ((slot+pin)%4)
 # and KObj_IRQ is exclusive-per-INTID, so the IRQ-CLAIMING functions

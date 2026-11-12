@@ -706,10 +706,13 @@ The captured pointer (decided 2026-11-12, under the standing 2026-09-01 authoriz
 What it is for: the guest hands every motion to the surface that has the keys as deltas
 (`TEV_PTR_REL`, `docs/TAPESTRY.md`, "PTR_REL is the mouse-look stream"), exact from its
 mouse and made up from consecutive positions of its tablet, and the made-up ones stop
-where the picture ends. Captured, the Mac's pointer is hidden and held where it is
-(`CGAssociateMouseAndMouseCursorPosition(false)`, as `utm:Platform/macOS/Display/
-VMMetalView.swift:343` and `qemu-11.1:ui/cocoa.m:1065` do), and each move goes to the
-guest's mouse: `rel` events in a command addressed to no display. A button or a notch goes
+where the picture ends. Captured, the Mac's pointer is put over the middle of the picture,
+held there (`CGAssociateMouseAndMouseCursorPosition(false)`, as `utm:Platform/macOS/Display/
+VMMetalView.swift:343` and `qemu-11.1:ui/cocoa.m:1065` hold theirs) and hidden. Putting it
+there first is this app's own: QEMU's window holds the pointer where it is
+(`ui/cocoa.m:1056-1067`), and a pointer held over a menu or over another window would hand
+the next click to that. A capture that cannot hold the pointer is not made. Each move goes
+to the guest's mouse: `rel` events in a command addressed to no display. A button or a notch goes
 the same way, in a command of its own. Measured with no guest on QEMU 10.0.2 and 11.1.3, the tablet bound and
 not: such a command is one report on the mouse; a notch is the wheel's button going down
 (its coming up is a stray key there too); QEMU passes any value on, and a zero as an event;
@@ -722,7 +725,9 @@ capturing lets go of nothing. The guest's pointer is not the Mac's any longer, s
 draws it: the image of `CursorDefine` with its hot spot on the place of `MouseSet` (Lictor
 reports the hot spot's place; QEMU's cocoa window puts the image's corner there), in the
 pass that draws the picture. On release the Mac's pointer is put where the guest's is
-(`CGWarpMouseCursorPosition`) and let go. The guest has one thing to change for this: it
+(`CGWarpMouseCursorPosition`) and let go. An event the Mac made before the pointer changed
+hands, and the app takes after, is not read as one made after: a move is dropped, and a
+press or a notch is sent with no place. The guest has one thing to change for this: it
 makes a delta of the first position after the mouse's motion, from the last position
 before it, which is the whole captured motion a second time; a position that follows
 motion from the mouse is to seed and no more (`usr/tapestryd`, and the sentence of
@@ -731,8 +736,15 @@ motion from the mouse is to seed and no more (`usr/tapestryd`, and the sentence 
 Who captures: the person, with View > Capture Pointer, Control-Command-G (beside
 Control-Command-F for full screen), and the same lets go. The app lets go by itself when
 its window stops being key, when a menu opens and when it is left for another app; while
-captured the window's title says how to let go. Plan 9 has no capture, and no relative
-pointer for a program at all: one that wants motion past the edge writes the pointer back
+captured the window's title says how to let go. It also lets go when its window moves,
+changes size, changes screen, or enters or leaves full screen (decided 2026-11-12 after
+audit round 3, under the same authorization): the pointer is held at a point of the screen,
+a window that has moved may no longer be under that point, and the next click would then be
+another program's. QEMU's own window lets go on leaving full screen
+(`qemu-11.1:ui/cocoa.m:1258-1262`). Weighed and not taken: holding the pointer again over
+the picture's new place, which would keep a capture through a resize but has to follow a
+window through an animation, and which no test here can try. Plan 9 has no capture, and
+no relative pointer for a program at all: one that wants motion past the edge writes the pointer back
 to the middle (`mouse(3)`: "Writing the mouse file, in the same format, causes the mouse
 cursor to move to the position specified"; 9front's `games/doom/i_video.c` does so
 whenever the pointer leaves the inner part of its window), and drawterm on a Mac obeys
