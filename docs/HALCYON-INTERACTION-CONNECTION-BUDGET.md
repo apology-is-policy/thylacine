@@ -17,8 +17,8 @@ open their own EventRing connection to Tapestry; sharing Halcyon's connection
 with unrelated applications would erase the kernel peer distinction.
 
 A CPU1 graphical boot of the already-qualified paired image, with the welcome
-and shell tiles ready, reports session=6, guests=6, all=17, domains=1 in
-/ctl/9p-sessions. See baseline.png. This is one startup observation, not a
+and shell tiles ready, reports session=6 on the session's rows and guests=6,
+count=17, domains=1 on the summary line of /ctl/9p-sessions. See baseline.png. This is one startup observation, not a
 32-application or multi-user qualification. The diagnostic's bounded output
 can truncate details; row count is not the admission count.
 

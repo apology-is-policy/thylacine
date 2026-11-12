@@ -41,6 +41,33 @@ static bool contains(const char *haystack, size_t hlen, const char *needle) {
     return false;
 }
 
+static bool ends_with(const char *buf, size_t n, const char *s) {
+    size_t m = 0;
+    while (s[m]) m++;
+    if (m > n) return false;
+    for (size_t i = 0; i < m; i++) {
+        if (buf[n - m + i] != s[i]) return false;
+    }
+    return true;
+}
+
+// The line that begins with `head`, and its length without the newline.
+static const char *line_of(const char *buf, size_t n, const char *head, size_t *len) {
+    size_t h = 0;
+    while (head[h]) h++;
+    for (size_t i = 0; i + h <= n; i++) {
+        if (i && buf[i - 1] != '\n') continue;
+        size_t j = 0;
+        while (j < h && buf[i + j] == head[j]) j++;
+        if (j < h) continue;
+        size_t e = i;
+        while (e < n && buf[e] != '\n') e++;
+        *len = e - i;
+        return buf + i;
+    }
+    return NULL;
+}
+
 static struct Spoor *walk_one(struct Spoor *c, const char *name) {
     const char *names[1] = { name };
     struct Walkqid *wq = devctl.walk(c, NULL, names, 1);
@@ -540,6 +567,26 @@ void test_devctl_read_9p_sessions_format(void) {
         size_t n = devctl_format_9p_sessions_for_test(&r, buf, sizeof buf);
         TEST_ASSERT(contains(buf, n, "conn peer=31337 msize="), "an ordinary reader sees the conn row");
         TEST_ASSERT(contains(buf, n, "admission count="), "an ordinary reader sees the admission summary");
+        // The global figures are the summary's alone; a row carries its own domain's.
+        size_t rl = 0;
+        const char *row = line_of(buf, n, "conn peer=31337 ", &rl);
+        TEST_ASSERT(row != NULL && contains(row, rl, " credits="), "the conn row carries its own domain's credits");
+        TEST_ASSERT(row != NULL && !contains(row, rl, " guests=") && !contains(row, rl, " all=") &&
+                    !contains(row, rl, " domains=") && !contains(row, rl, "guestcredits=") &&
+                    !contains(row, rl, "allcredits="), "a conn row repeats no global figure");
+        // One row is live, so a buffer that holds the summary and not a row cuts,
+        // and one that does not hold the summary is the cut line alone.
+        {
+            static const char cut[] = "(cut: more rows than one read holds)\n";
+            char small[192];
+            size_t s = devctl_format_9p_sessions_for_test(&r, small, sizeof small);
+            TEST_ASSERT(s <= sizeof small && contains(small, s, "admission count="), "a short read keeps the summary");
+            TEST_ASSERT(ends_with(small, s, cut), "a render that left a row out ends with the cut line");
+            TEST_ASSERT(!contains(small, s, "conn peer="), "a row that does not fit is left out whole");
+            s = devctl_format_9p_sessions_for_test(&r, small, 64);
+            TEST_ASSERT(s == sizeof cut - 1 && ends_with(small, s, cut), "a read too short for the summary is the cut line alone");
+            TEST_ASSERT(!ends_with(buf, n, cut), "a render that holds every row has no cut line");
+        }
         TEST_ASSERT(contains(buf, n, " c2s=- s2c=- sframes=-\n"), "an ordinary reader sees its counters as '-'");
         TEST_ASSERT(!contains(buf, n, "c2s=3/0+3"), "an ordinary reader does not see the byte counts");
         r.caps = CAP_HOSTOWNER;
@@ -557,7 +604,6 @@ void test_devctl_read_9p_sessions_format(void) {
         r.principal_id = PRINCIPAL_NONE;
         n = devctl_format_9p_sessions_for_test(&r, buf, sizeof buf);
         TEST_ASSERT(!contains(buf, n, "conn peer=31337"), "a none reader sees no conn row");
-        // The summary counts everyone's connections and sessions: not none's to read.
         TEST_ASSERT(!contains(buf, n, "admission"), "a none reader sees no admission summary");
         TEST_ASSERT(n == 0, "a none reader reads an empty file");
         r.caps = CAP_HOSTOWNER;

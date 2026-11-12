@@ -12,7 +12,7 @@ hazards: [haz-single-waiter-rendez, haz-death-path-wake]
 abis: []
 design: []
 created: 2026-07-31
-updated: 2026-10-28
+updated: 2026-11-12
 ---
 ## Admission (October 1, D7)
 
@@ -30,8 +30,11 @@ A registry owns a refcounted `SrvDomain`; each admitted connection owns another
 reference. Connections do not retain the registry, so no registry/backlog cycle
 is introduced. The last domain reference returns its domain slot. A routed
 resident connection charges the requesting private view, not its boot provider.
-`/ctl/9p-sessions` exposes session/boot class and local, aggregate, global and
-retained-domain counts; they are observations, not authorization inputs.
+`/ctl/9p-sessions` exposes each connection's class (session or boot) with its
+own domain's live count and credits on the connection's row
+(`srvconn_ctl_row.domain_used`, `.domain_credits`), and the aggregate, global
+and retained-domain figures once, on the file's summary line; they are
+observations, not authorization inputs.
 
 The predecessor CAS reserved only the global count. The new single-lock
 transaction replaces it so an over-limit session cannot reserve boot margin,

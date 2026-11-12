@@ -21,9 +21,21 @@ updated: 2026-11-12
 `/ctl/9p-sessions` begins with a bounded admission summary: global/session/boot
 connection counts, global and session credit usage/limits, boot credits,
 per-domain limit, retained domains and bytes per credit. It precedes the detail
-walk, so truncating the 4 KiB read buffer does not hide the global summary.
-Each connection row retains existing count fields and adds local/session/global
-credits with explicit limits. Counts are never silently reinterpreted as credits.
+walk, so a cut read still holds the global summary. Each connection row carries
+its own admission domain's two figures between `msize` and the kind: the
+domain's live connection count (`session=` for a login session's domain,
+`boot=` for the boot class) and its credits with their limit. The global
+figures are the summary's alone; a row does not repeat them. Counts are never
+silently reinterpreted as credits.
+
+One read is the whole file. The render is bounded by the 4 KiB read buffer,
+connection rows first and session rows last. A row that does not fit is left
+out whole, and a render that left any row out ends with the line
+`(cut: more rows than one read holds)`, whose room no row may take, so a
+missing row is told apart from a row that does not exist. The line does not
+say how many are missing. The summary line is 133 bytes, a connection row 80
+to 110, a session row 105 to 115; the gate image's boot (15 connections, 10
+sessions) renders in about 2.5 KiB.
 
 Each snapshot is coherent under the admission lock. Summary and detail rows
 are sampled at different instants, not a transaction or a peak measurement.
@@ -31,19 +43,20 @@ The detail walk retains the existing diagnostic-list-before-admission lock
 order. The summary releases admission before starting that walk. These are
 observations, not authorization inputs; see [[sub-kernel-srvconn]].
 
-The admission figures (the summary line, and the counts and credits each
-connection row carries between `msize` and the kind) move when a connection is
-made or freed, not once per message, so they are not among the counters
-IMPERIUM-DESIGN 11.3 item 10 withholds: every reader who sees a row sees them,
-and they add nothing to what the visible rows already tell. A reader running
-as none sees no row and no summary: the summary counts other Procs'
-connections and login sessions, and none owns nothing
-([[dec-2026-10-06-none-owns-nothing]]). `format_9p_admission` returns before
-its snapshot for a reader `ctl_9p_row_hidden` hides the rows from, so a none
-reader reads an empty file. The summary reached main's wall by a merge and was
-shown to none until the whole interactive fleet ran `cpu-gate` on the merged
-tree (2026-11-12): that scenario's row patterns predated the admission
-figures, failed three times in three, and reading why found the summary.
+The admission figures (the summary line, and each connection row's two) are
+not among the counters IMPERIUM-DESIGN 11.3 item 10 withholds: none of them
+moves per message, per key or per byte. A connection's figures move when a
+connection is reserved or freed; the summary's `domains=` moves when a session
+domain is created or retired. Every reader who sees a row sees them. They tell
+such a reader which rows are a login session's and which the boot class's, how
+many live connections and credits that row's domain holds, and how many
+session domains are retained.
+
+A reader running as none reads an empty file. The none wall gives it no row of
+this file (`docs/AUDIT-TRIGGERS.md`, the none-wall row, item (c);
+[[dec-2026-10-06-none-owns-nothing]]), and the summary is part of the file.
+`format_9p_sessions` asks `ctl_9p_row_hidden` once, before any emitter runs, so
+a line added to the file stands behind the wall without a check of its own.
 
 ## Purpose
 
@@ -214,7 +227,8 @@ principal and to a hostowner. The counters are the ring byte counts, the
 server's frame count, the demux counters, the reader flag, the send waiters
 and the in-flight tags. Each moves once per message, and a pty-served terminal
 carries a message per key. Everyone else reads `-`. The row itself stays
-world-readable: peer pid, label, msize, mode and state.
+readable to every reader but one running as none: peer pid, label, msize, a
+connection's two admission figures, mode and state.
 
 The ends travel with the row. A `conn` row carries the connecting Proc's
 principal and the poster's, both stored in the `SrvConn` by value at the
