@@ -483,7 +483,11 @@ the device answered the bind or the flush with an error. Such a frame is given
 up (`presentation` becomes `None`; lictor says `the compositor's frame
 (resource N) was refused at the restore`), so a client that spoils its own
 frame, by detaching its backing on a device that wants one, loses the picture
-until it repaints and costs the episode nothing. `Waiting`: the device has not
+until it binds a frame again and costs the episode nothing. Its repaint after
+the episode does not bring the picture back: tapestryd binds its screen only
+when it enters composed mode (`let entering = self.scanout !=
+Scanout::Composed;`, usr/tapestryd/src/server.rs), so the output stays blank
+until its next mode change. `Waiting`: the device has not
 answered, because the engine takes no synchronous command or a stall began
 across the restore's commands (`gpu_api::met`); nothing is concluded from a
 stall, so RESTORING (the seat's phase 3) returns and asks again on the next

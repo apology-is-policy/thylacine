@@ -397,8 +397,7 @@ impl Device {
     /// The frame is the client's, so whether it can be bound again is the
     /// client's to spoil (a backing detached, on a device that wants one) and
     /// is not the episode's to pay for: a frame the device REFUSES is given up
-    /// and the output left blank, which the compositor repaints as after any
-    /// episode. A stall is no answer, so nothing is concluded from one and the
+    /// and the output left blank until the client binds a frame again. A stall is no answer, so nothing is concluded from one and the
     /// caller asks again. Only the disable, which names nothing of a client's,
     /// can leave the seat unrestored on a live engine.
     pub fn restore(&mut self) -> Result<Restored, Unrestored> {

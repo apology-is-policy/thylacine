@@ -29,7 +29,13 @@ leave you a note. This is the note. It follows 054.
   frame could not be bound again: the ledger no longer holds its resource, or
   the device answered the bind or the flush with an error. The frame is then
   given up: `presentation = Presentation::None`, one line on the console, and
-  the compositor repaints as it does after any episode.
+  the output stays blank until the compositor binds a frame again. Its repaint
+  after the episode does not do that: tapestryd binds its screen only when it
+  enters composed mode (`let entering = self.scanout != Scanout::Composed;`,
+  usr/tapestryd/src/server.rs), so a tapestryd whose frame was refused shows a
+  blank output until its next mode change. If it should come back sooner,
+  tapestryd would bind its screen again after each episode; this branch does
+  not change tapestryd.
 - `Unrestored::Waiting`: the device has not answered. The engine took no
   synchronous command at entry (`Gpu::takes_commands`, now `pub`), or a stall
   began across the restore's commands. `gpu_api::met(dead, stalls_before,
