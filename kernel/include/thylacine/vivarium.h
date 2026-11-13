@@ -1054,6 +1054,8 @@ enum viv_madvise_kind {
 enum {
     VIV_MAP_SHARED          = 0x01,
     VIV_MAP_PRIVATE         = 0x02,
+    VIV_MAP_SHARED_VALIDATE = 0x03,
+    VIV_MAP_TYPE            = 0x0f,    // the map-type field: do_mmap switches on it
     VIV_MAP_FIXED           = 0x10,
     VIV_MAP_ANONYMOUS       = 0x20,
     VIV_MAP_NORESERVE       = 0x4000,

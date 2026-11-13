@@ -68,6 +68,7 @@
 #include <thylacine/types.h>
 
 struct Vma;
+struct Burrow;
 
 struct AddrSpace {
     // Total lifetime references, including kernel descriptor pins. Accessed
@@ -174,14 +175,19 @@ struct AddrSpace {
     // guard admission are one exclusion domain. Each guard owns a kernel pin;
     // it persists until the final local ring borrow retires, not merely close.
     u32            private_rings;
+
+    // Vote 118: the private FILE Burrows whose payer record names this space
+    // (Burrow.file_paid_next/prev), under g_file_payer_lock (burrow.c), never
+    // as->lock. addrspace_destroy lapses them after the drain.
+    struct Burrow *file_paid;
 };
 
-_Static_assert(sizeof(struct AddrSpace) == 88,
-               "AddrSpace is 88 bytes: ref+lock (8) + pgtable_root (8) + "
+_Static_assert(sizeof(struct AddrSpace) == 96,
+               "AddrSpace is 96 bytes: ref+lock (8) + pgtable_root (8) + "
                "context_id (8) + vmas (8) + the three I-32 u32 axes + "
                "page_budget + page_peak + pgtable_pages + file_pages + "
                "guards_ever (32) + id (8) + caps_ever (8) + owners + "
-               "private_rings (8). "
+               "private_rings (8) + file_paid (8). "
                "Growth is fine -- this assert is a drift alarm, not an ABI.");
 
 // Allocate an address space with a fresh, empty L0 table. Returns NULL on OOM

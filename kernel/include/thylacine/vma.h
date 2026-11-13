@@ -67,6 +67,17 @@ struct AddrSpace;   // LINEAGE L-1/L-2: the *_in forms address by address space
 // setup path may stamp it, never registration of an ordinary user I/O buffer.
 #define VMA_FLAG_PRIVATE_RING (1u << 2)
 
+// VMA_FLAG_FILE_PAYER (vote 118; ARCH 25.4, the REVENANT private-page charge
+// addendum): this VMA maps a PRIVATE FILE Burrow into the space that pays for
+// its pages, so its leaves are not charged (the mint was) and their uninstall
+// refunds nothing. Set on a FRESH mapping into the payer's own space
+// (vma_file_payer_mark_fresh) or by vma_file_payer_adopt_in, which first
+// uninstalls -- and so refunds -- every leaf the space holds into the Burrow.
+// A split piece copies it (the piece's leaves were installed under it); a
+// fork's child does not get it (clone_one_vma keeps only the ceiling), and
+// it is never derived onto an existing mapping, whose leaves were charged.
+#define VMA_FLAG_FILE_PAYER   (1u << 3)
+
 
 // The permission CEILING (B-1a; ARCH 6.5 "The permission ceiling"; I-12): bits
 // 8..10 of `flags` hold the VMA_PROT_* set this mapping may never be raised past.
@@ -88,7 +99,8 @@ struct AddrSpace;   // LINEAGE L-1/L-2: the *_in forms address by address space
 // the state bits only (VMA_FLAG_STATE_MASK).
 #define VMA_FLAG_MAX_SHIFT  8
 #define VMA_FLAG_MAX_MASK   (7u << VMA_FLAG_MAX_SHIFT)
-#define VMA_FLAG_STATE_MASK (VMA_FLAG_SHARED_IN | VMA_FLAG_COW | VMA_FLAG_PRIVATE_RING)
+#define VMA_FLAG_STATE_MASK (VMA_FLAG_SHARED_IN | VMA_FLAG_COW | VMA_FLAG_PRIVATE_RING | \
+                             VMA_FLAG_FILE_PAYER)
 
 // VMA_MAGIC at offset 0 — SLUB freelist clobber defense (mirrors
 // struct Proc / struct Thread / struct Burrow / struct Handle pattern).
@@ -377,8 +389,18 @@ bool vma_range_is_mapped_in(struct AddrSpace *as, u64 lo, u64 hi);
 // and refunded here per leaf cleared; every other type's pages settle with
 // their own release. Tables the range empties are reclaimed
 // (mmu_uninstall_user_range). Returns the leaves cleared. CALLER MUST HOLD
-// as->lock; the range may cover holes and mappings of any type.
+// as->lock; the range may cover holes and mappings of any type. A payer
+// mapping of a private image (VMA_FLAG_FILE_PAYER) refunds no leaf: none was
+// charged (vote 118).
 long vma_uninstall_range_in(struct AddrSpace *as, u64 lo, u64 hi);
+
+// Vote 118. vma_file_payer_mark_fresh: `v` was just allocated and holds no
+// leaf; flag it if it maps a private image into that image's payer `as`.
+// vma_file_payer_adopt_in: `as` has become the payer of private image `b` (a
+// hand-over); uninstall every leaf of each of its unflagged mappings of `b`
+// (each refunded, it was charged) and flag them. CALLER HOLDS as->lock.
+void vma_file_payer_mark_fresh(struct AddrSpace *as, struct Vma *v);
+void vma_file_payer_adopt_in(struct AddrSpace *as, struct Burrow *b);
 void        vma_drain_in(struct AddrSpace *as);
 
 // B-1a: the permission change (ARCH 6.5 "The permission ceiling"). Move every

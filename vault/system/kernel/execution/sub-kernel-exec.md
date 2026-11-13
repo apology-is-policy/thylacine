@@ -563,6 +563,14 @@ refusal is `-T_E_NOMEM` ([[sub-kernel-vma]]), `burrow_map_in` propagates it
 otherwise; 0 stays the unambiguous failed sp) carry it to `exec_load_into`
 and the blob entry.
 
+**A private image's payer is the space being built (operator vote 118,
+2026-11-13).** `map_file_backed` passes `image_lookup_or_create` the detached
+address space and its I-32 verdict, so a segment read from a file whose Dev
+does not version its content ([[sub-kernel-image]]) charges every page a fault
+mints into it to the image the exec builds, not to the caller's outgoing one.
+A load that fails destroys that space, whose drain frees the image and whose
+teardown lapses any record left ([[sub-kernel-burrow]]).
+
 ## B-1b: the 8 MiB stack and its extent in the auxv (2026-09-23)
 
 `EXEC_USER_STACK_SIZE` is 8 MiB (decision 4 of the browser arc: JavaScriptCore

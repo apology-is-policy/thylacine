@@ -514,6 +514,48 @@ pages themselves stay the cache's, which is what the pool's reclaim strips
 under pressure ([[sub-kernel-image]]). `demand_page.file_pages_charge_the_holder`
 is the witness.
 
+### A private image's pages are its payer's (2026-11-13; operator vote 118)
+
+The posture above is a cached image's. A private image (vote 114) has one
+natural payer, the space that created the mapping ([[sub-kernel-image]]), and
+both fills charge every page they mint to it through the Burrow's payer record
+([[sub-kernel-burrow]]), whoever faulted. Every page is charged
+right before it is installed, under the faulting space's `as->lock`, and never
+across the read. The single fill charges its one page in `file_install_locked`,
+after the geometry checks and before `pagemap_install`, and refunds it when the
+slot went to a sibling or the node allocation failed. The cluster SIZES its
+window before the read by the payer's headroom, charging nothing
+(`burrow_file_mint_headroom`): a window cut short restarts at the faulting slot,
+one cut to a page takes the single fill, and with no headroom at all the fault
+answers `FAULT_UNHANDLED_USER`, as a refused leaf does. Its install then goes
+slot by slot (`file_cluster_install_slot`): the faulting slot first, so a payer
+short of headroom refuses the fault and not a read-ahead page; a resident slot
+is charged nothing; a read-ahead page is charged only while the payer can pay,
+and the read-ahead stops at the first it cannot. The first build charged the
+whole window before the read, resident slots included, and held it across the
+9P sleep, so the payer's own concurrent allocations were refused, and its Proc
+killed, while true usage fit (audit round 34 F1).
+
+The leaf rule moved with it. A payer mapping (`VMA_FLAG_FILE_PAYER`,
+[[sub-kernel-vma]]) installs its leaves uncharged, because the mint paid: in
+the resident-hit path (`file_charge`) and in both install tails
+(`leaf_charge`). Every other holder's leaves are charged exactly as above.
+Each path runs `file_payer_adopt_if_due` before it decides a leaf, and the
+fills run it right after the charge that may have made a hand-over, before
+anything can bail. A space that has just become the payer by minting into a
+lapsed record (its payer died) turns its unflagged mappings of the image into
+payer mappings in that same hold of its lock: the leaves it had paid for are
+uninstalled and so refunded, and they re-fault free.
+Witnesses: `demand_page.file_private_single_fill_charges`,
+`demand_page.file_private_charges_its_payer`,
+`demand_page.file_private_readahead_clamps_to_headroom` (an unaligned fault, so
+the restart at the faulting slot shows, then a window over partly resident
+slots), `demand_page.file_private_read_holds_no_charge` (the stub read charges
+the payer one page while it sleeps, under a three-page window: it lands),
+`demand_page.file_private_holder_pays_leaves`,
+`demand_page.file_private_payer_death_hands_over`, and the control
+`demand_page.file_cached_image_takes_no_payer`.
+
 ## The permission a fault is checked against can now change (B-1a, 2026-09-23)
 
 Step 2 -- `vma->prot` against the access, before any Burrow is resolved -- did

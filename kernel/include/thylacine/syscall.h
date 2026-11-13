@@ -4557,7 +4557,6 @@ void viv_sigaction_settled_for_test(struct Proc *p, enum viv_signote note,
                                     const struct viv_ksigaction *act);
 bool viv_linux_dispatch_for_test(struct exception_context *ctx, struct Proc *p);
 s64 viv_listen_for_test(struct Proc *p, u64 fd);
-void viv_mmap_zero_as_anon(struct Proc *p, u64 a[6]);
 s64 viv_pipe2_for_test(struct Proc *p, u64 fds_va, u64 flags);
 s64 viv_readv_for_test(struct Proc *p, u64 fd, u64 iov_va, u64 iovcnt);
 s64 viv_recvfrom_empty_for_test(struct Proc *p, u64 fd);

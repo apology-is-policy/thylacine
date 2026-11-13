@@ -297,6 +297,27 @@ writable at RW). A resident page costs one re-fault and nothing else: its slot
 and its charge stay, as Linux keeps a PROT_NONE mapping's contents;
 `SYS_BURROW_DECOMMIT` is how pages are returned.
 
+### A payer mapping pays no leaf (2026-11-13; operator vote 118)
+
+`VMA_FLAG_FILE_PAYER` marks a mapping of a private image ([[sub-kernel-image]])
+in the space that pays for its pages ([[sub-kernel-burrow]]). Its leaves are
+installed uncharged ([[sub-kernel-fault]]), and `vma_uninstall_range_in`
+refunds none of them. Only two places set it:
+
+- `vma_file_payer_mark_fresh` flags a just-allocated mapping, which holds no
+  leaf, when its Burrow's payer is the space being mapped into. `burrow_map_in`
+  and `vma_replace_range_in` call it after `vma_alloc`.
+- `vma_file_payer_adopt_in`, under `as->lock`, runs when a space has become
+  the payer by a hand-over. It uninstalls every leaf of each of the space's
+  unflagged mappings of the Burrow, each refunded because the mapping is still
+  unflagged, and then flags them.
+
+It is never derived onto an existing mapping: that mapping's leaves were
+charged, and their uninstall must refund them. A split piece copies it with
+the rest of `flags`, since the piece's leaves were installed under it.
+`clone_one_vma` keeps only the ceiling, so a fork's child is a holder, not the
+payer. It is one of the `VMA_FLAG_STATE_MASK` bits.
+
 ## Data structures
 
 `struct Vma` is 64 bytes, pinned by `_Static_assert`, with `magic` at offset 0

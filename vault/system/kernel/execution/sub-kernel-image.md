@@ -54,6 +54,19 @@ A private image is never registered, so it never answers a hit whatever the
 order; asking before the search also keeps an unversioned open from taking a
 versioned entry's Burrow (round 32 F4 corrected the reason given here).
 
+**A private image's pages are its payer's (operator vote 118, 2026-11-13).**
+`image_lookup_or_create` takes the address space the caller is about to map
+the image into and its I-32 verdict (`payer`, `payer_exempt`). The private arm
+hands both to `burrow_file_set_payer` before the Burrow is returned, so the
+image is born with a payer: the mapping cores pass the mapper's space, exec the
+space it is building. So does the BYPASS arm (audit round 34 F2): an image the
+full cache cannot register is never served to another mapper and never
+idle-reclaimable, a private image in all but how it got there. A cached image ignores both; its pages stay the system
+cache's, shared and idle-reclaimable (below). A NULL payer is legal and leaves
+the record lapsed, so the first faulter that mints pays; the unit tests that
+never fault pass it. The record, the mint charge and the refund are
+[[sub-kernel-burrow]]'s; the fills that charge are [[sub-kernel-fault]]'s.
+
 The key is seven fields: device class, device number, qid path, **qid version**,
 file offset, page-rounded size, and executability. Three of those carry
 arguments worth stating.

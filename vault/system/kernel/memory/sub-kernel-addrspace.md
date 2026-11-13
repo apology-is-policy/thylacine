@@ -286,10 +286,15 @@ telemetry) / `guards_ever` and `caps_ever` (2026-10-08,
 left it -- their `NODUMP` / `NOTRACE` / `DEBUG_TAINTED` bits and their caps,
 ORed in at each departure and never cleared; the I-39 image join weighs them,
 [[sub-kernel-proc]]; they replaced B-2b audit r2's `code_vmas`) / `id` (a u64
-from a global counter, never reused; the eager charge record's key, audit F4).
-The struct is 80 bytes.
-telemetry) / `id` (a u64 from a global counter, never reused; the eager
-charge record's key, audit F4) / `owners` (AS-2a: process/constructor owners, excluding kernel descriptor pins).
+from a global counter, never reused; the eager charge record's key, audit F4)
+/ `owners` (AS-2a: process/constructor owners, excluding kernel descriptor pins) /
+`file_paid` (vote 118: the private FILE Burrows whose payer record names this
+space, under `g_file_payer_lock`, never `as->lock`; [[sub-kernel-burrow]]).
+The struct is 96 bytes. `addrspace_destroy` calls
+`burrow_file_payers_lapse` after `vma_drain_in`: the private images only this
+space held were freed by the drain (refunding a count that dies with the
+space), and every record left -- an image surviving in a fork's child --
+lapses before a kernel pin could let the descriptor outlive its owners.
 
 `context_id` lives here because **the ASID names a translation table**,
 which is what the allocator always semantically meant. Two Procs sharing

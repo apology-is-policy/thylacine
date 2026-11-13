@@ -7130,33 +7130,46 @@ static bool exec_map_vouched(struct Proc *p, const struct Spoor *sp) {
     return !mount_noexec_covers(p->territory, sp->dc, sp->devno);
 }
 
-// A file mapping's descriptor, judged as Linux's mmap judges it and in its
-// order: one naming nothing, or opened O_PATH (#81: a navigation handle carries
-// no byte-I/O authority, and a mapping is byte I/O by another name), is EBADF;
-// one not open for reading is EACCES (ERRORS.md: a missing right is ACCES).
-// Returns a REF-HELD Spoor the caller spoor_clunks, or NULL with *err set.
-static struct Spoor *sys_lookup_mapping_spoor(struct Proc *p, u64 fd_raw, s64 *err) {
+// A file mapping's descriptor, Linux's fget half: one naming nothing, or opened
+// O_PATH (#81: a navigation handle carries no byte-I/O authority, and a mapping
+// is byte I/O by another name), is NULL -- the caller's EBADF. Whether it is
+// open for reading is reported, not judged: Linux asks that later (do_mmap's
+// FMODE_READ, after the length and window checks), so the phenotype judges it
+// where Linux does. Returns a REF-HELD Spoor the caller spoor_clunks.
+static struct Spoor *sys_get_mapping_spoor(struct Proc *p, u64 fd_raw, bool *readable) {
     struct Handle hh;
-    *err = -(s64)T_E_BADF;
     if (handle_get(p, sys_hidx_arg(fd_raw), &hh) < 0)  return NULL;
     struct Spoor *sp = (struct Spoor *)hh.obj;
     if (hh.kind != KOBJ_SPOOR || (sp->flag & CWALKONLY)) {
         handle_put(&hh);
         return NULL;
     }
-    if (!(hh.rights & RIGHT_READ)) {
-        handle_put(&hh);
-        *err = -(s64)T_E_ACCES;
-        return NULL;
-    }
+    *readable = (hh.rights & RIGHT_READ) != 0;
     return sp;                                       // ref TRANSFERRED to the caller
 }
 
-// Returns the mapped VA, or a negated T_E_* the caller passes straight out.
-VISIBLE_IF_KERNEL_TESTS
-s64 sys_mmap_file_for_proc(struct Proc *p, u64 fd_raw, u64 length_raw,
-                           bool exec, u64 offset) {
-    if (!p)                                          return -(s64)T_E_INVAL;
+// Both halves at once, for the native door: EBADF as above; one not open for
+// reading is EACCES (ERRORS.md: a missing right is ACCES; vote 116). Returns a
+// REF-HELD Spoor the caller spoor_clunks, or NULL with *err set.
+static struct Spoor *sys_lookup_mapping_spoor(struct Proc *p, u64 fd_raw, s64 *err) {
+    bool readable = false;
+    struct Spoor *sp = sys_get_mapping_spoor(p, fd_raw, &readable);
+    if (!sp) {
+        *err = -(s64)T_E_BADF;
+        return NULL;
+    }
+    if (!readable) {
+        spoor_clunk(sp);
+        *err = -(s64)T_E_ACCES;
+        return NULL;
+    }
+    return sp;
+}
+
+// The non-fixed file window: the length and the file range it names. Shared by
+// the native door (which asks it before the descriptor) and the phenotype
+// (which asks it after, in Linux's order). `*length_out` is written on success.
+static s64 mmap_file_window(u64 length_raw, u64 offset, u64 *length_out) {
     if (length_raw == 0)                             return -(s64)T_E_INVAL;
     if (length_raw > BURROW_ATTACH_MAX)              return -(s64)T_E_NOMEM;
     if (offset & (u64)(PAGE_SIZE - 1))               return -(s64)T_E_INVAL;
@@ -7165,6 +7178,21 @@ s64 sys_mmap_file_for_proc(struct Proc *p, u64 fd_raw, u64 length_raw,
     // A mapping whose file window would wrap past the end of the address space
     // cannot be described; refuse before it reaches the Burrow's own guards.
     if (offset + length < offset)                    return -(s64)T_E_INVAL;
+    *length_out = length;
+    return 0;
+}
+
+static s64 mmap_file_body(struct Proc *p, struct Spoor *sp, u64 length,
+                          bool exec, u64 offset);
+
+// Returns the mapped VA, or a negated T_E_* the caller passes straight out.
+VISIBLE_IF_KERNEL_TESTS
+s64 sys_mmap_file_for_proc(struct Proc *p, u64 fd_raw, u64 length_raw,
+                           bool exec, u64 offset) {
+    if (!p)                                          return -(s64)T_E_INVAL;
+    u64 length = 0;
+    s64 werr = mmap_file_window(length_raw, offset, &length);
+    if (werr != 0)                                   return werr;
 
     // T_RIGHT_READ, not T_RIGHT_EXEC, and deliberately: there is no per-handle
     // execute right on a Spoor to demand, so requiring one would fail every
@@ -7180,12 +7208,19 @@ s64 sys_mmap_file_for_proc(struct Proc *p, u64 fd_raw, u64 length_raw,
     // MNOEXEC vouching below (#217, ARCH 6.5); the wording is corrected here
     // rather than left standing as the in-code twin of a premise the D-close
     // arc round already falsified in scripture.
-    // #844: the ref is TRANSFERRED to us -- spoor_clunk on every path below.
+    // #844: the ref is TRANSFERRED to us, and the body consumes it.
     // An O_PATH handle (#81) is refused here too, as EBADF.
     s64 derr;
     struct Spoor *sp = sys_lookup_mapping_spoor(p, fd_raw, &derr);
     if (!sp)                                         return derr;
+    return mmap_file_body(p, sp, length, exec, offset);
+}
 
+// The non-fixed arm past its descriptor and window: CONSUMES `sp` (spoor_clunk
+// on every path). Its callers have judged the window and the descriptor, each
+// in its own order.
+static s64 mmap_file_body(struct Proc *p, struct Spoor *sp, u64 length,
+                          bool exec, u64 offset) {
     // A PLAIN FILE only. A directory has no byte stream to page from; a symlink
     // must be followed, not mapped (the #184 discipline, where the twin's
     // "a symlink fid is not byte-I/O-able" safety argument turned out FALSE
@@ -7237,7 +7272,8 @@ s64 sys_mmap_file_for_proc(struct Proc *p, u64 fd_raw, u64 length_raw,
     // ours to drop, exactly as map_file_backed does.
     spoor_ref(sp);
     struct Burrow *b = image_lookup_or_create(sp, offset, (size_t)length, exec,
-                                              file_limit);
+                                              file_limit, p->as,
+                                              proc_resource_exempt(p));
     if (!b) {
         spoor_clunk(sp);                 // the fresh ref it did not consume
         spoor_clunk(sp);                 // ours
@@ -7404,16 +7440,30 @@ struct Burrow *mmap_eager_copy_for_test(struct AddrSpace *as, bool exempt,
 // windows ride the shared Image cache exactly as D-3a does; a writable one gets
 // the eager private copy above. Returns `addr` on success (MAP_FIXED's contract:
 // the requested address or nothing).
-VISIBLE_IF_KERNEL_TESTS
-s64 sys_mmap_fixed_file_for_proc(struct Proc *p, u64 addr, u64 fd_raw,
-                                 u64 length_raw, u32 pr, u64 offset) {
-    if (!p)                                          return -(s64)T_E_INVAL;
+// The fixed arm's window and file range, shared like mmap_file_window. Both
+// outputs are written only on success.
+static s64 mmap_fixed_file_window(u64 addr, u64 length_raw, u32 pr, u64 offset,
+                                  u64 *length_out, u32 *prot_out) {
     if (offset & (u64)(PAGE_SIZE - 1))               return -(s64)T_E_INVAL;
-
     u64 length; u32 prot;
     s64 werr = mmap_fixed_window(addr, length_raw, pr, &length, &prot);
     if (werr != 0)                                   return werr;
     if (offset + length < offset)                    return -(s64)T_E_INVAL;
+    *length_out = length;
+    *prot_out   = prot;
+    return 0;
+}
+
+static s64 mmap_fixed_file_body(struct Proc *p, struct Spoor *sp, u64 addr,
+                                u64 length, u32 prot, u64 offset);
+
+VISIBLE_IF_KERNEL_TESTS
+s64 sys_mmap_fixed_file_for_proc(struct Proc *p, u64 addr, u64 fd_raw,
+                                 u64 length_raw, u32 pr, u64 offset) {
+    if (!p)                                          return -(s64)T_E_INVAL;
+    u64 length = 0; u32 prot = 0;
+    s64 werr = mmap_fixed_file_window(addr, length_raw, pr, offset, &length, &prot);
+    if (werr != 0)                                   return werr;
 
     // The same gates as the D-3a arm, and for the same reasons: READ is the
     // authority a mapping consumes; a directory has no byte stream; a symlink
@@ -7423,6 +7473,13 @@ s64 sys_mmap_fixed_file_for_proc(struct Proc *p, u64 addr, u64 fd_raw,
     s64 derr;
     struct Spoor *sp = sys_lookup_mapping_spoor(p, fd_raw, &derr);
     if (!sp)                                         return derr;
+    return mmap_fixed_file_body(p, sp, addr, length, prot, offset);
+}
+
+// The fixed arm past its descriptor and window: CONSUMES `sp`, as
+// mmap_file_body does.
+static s64 mmap_fixed_file_body(struct Proc *p, struct Spoor *sp, u64 addr,
+                                u64 length, u32 prot, u64 offset) {
     if ((sp->qid.type & (QTDIR | QTSYMLINK | QTAPPEND)) ||
         !sp->dev || !sp->dev->read) {
         spoor_clunk(sp);
@@ -7467,7 +7524,8 @@ s64 sys_mmap_fixed_file_for_proc(struct Proc *p, u64 addr, u64 fd_raw,
         // NULL, so hand it a fresh one and keep ours to drop.
         spoor_ref(sp);
         b = image_lookup_or_create(sp, offset, (size_t)length,
-                                   (prot & (u32)VMA_PROT_EXEC) != 0, fx_limit);
+                                   (prot & (u32)VMA_PROT_EXEC) != 0, fx_limit,
+                                   p->as, proc_resource_exempt(p));
         if (!b) {
             spoor_clunk(sp);             // the fresh ref it did not consume
             spoor_clunk(sp);             // ours
@@ -15706,26 +15764,112 @@ static s64 viv_rt_sigtimedwait(struct Thread *t, u64 set, u64 info_va, u64 ts_va
     return (s64)signum;
 }
 
-// Vote 115: Linux maps /dev/zero as anonymous memory (mmap_zero). So a
-// descriptor naming devzero that a file mapping would accept (open for
-// reading, not O_PATH) is rewritten into the anonymous call before any arm
-// judges it: it is then served exactly where MAP_ANONYMOUS is, and declined
-// exactly where that is (MAP_SHARED, PROT_EXEC). Any other descriptor is left
-// to the arms: in a shape a file arm admits, its lookup answers EBADF or EACCES
-// as Linux does; the read-write private shape no arm admits answers ENOSYS. The
-// descriptor is looked up once and not kept: an anonymous mapping holds no file.
-VISIBLE_IF_KERNEL_TESTS
-void viv_mmap_zero_as_anon(struct Proc *p, u64 a[6]) {
-    if ((s32)(u32)a[4] < 0) return;
-    s64 derr;
-    struct Spoor *sp = sys_lookup_mapping_spoor(p, (u64)(u32)a[4], &derr);
-    if (!sp) return;
-    bool zero = sp->dev == &devzero;
-    spoor_clunk(sp);
-    if (!zero) return;
-    a[3] = (u64)((u32)a[3] | (u32)VIV_MAP_ANONYMOUS);
-    a[4] = (u64)(u32)-1;
-    a[5] = 0;
+// mmap(addr, len, prot, flags, fd, offset), x0..x5, judged in Linux's order
+// (arm64 sys_mmap, ksys_mmap_pgoff, do_mmap): an unaligned offset is EINVAL
+// before anything else; an anonymous call reads neither fd nor offset; any
+// other call looks its descriptor up ONCE (fget: EBADF for nothing or O_PATH)
+// and holds that Spoor through every arm, so whatever is decided about the file
+// is decided about the file that gets mapped -- no peer's dup2 can swap it
+// between a look and the map. A zero length is EINVAL next, then each arm's
+// window, and only then the access mode (EACCES), where do_mmap asks FMODE_READ.
+// Vote 115: a readable /dev/zero is anonymous memory -- the anonymous call,
+// served and declined exactly where MAP_ANONYMOUS is (MAP_SHARED, PROT_EXEC).
+static s64 viv_mmap(struct Proc *p, const u64 *args) {
+    u64 a[6] = { args[0], args[1], args[2], args[3], args[4], args[5] };
+    if (a[5] & (u64)(PAGE_SIZE - 1))                 return -(s64)T_E_INVAL;
+
+    struct Spoor *sp = NULL;
+    bool readable = false;
+    if ((u32)a[3] & (u32)VIV_MAP_ANONYMOUS) {
+        a[4] = (u64)(u32)-1;
+        a[5] = 0;
+    } else {
+        // Linux reads the fd through fget(unsigned int).
+        sp = sys_get_mapping_spoor(p, (u64)(u32)a[4], &readable);
+        if (!sp)                                     return -(s64)T_E_BADF;
+    }
+    if (a[1] == 0) {
+        if (sp) spoor_clunk(sp);
+        return -(s64)T_E_INVAL;
+    }
+    if (sp && sp->dev == &devzero) {
+        spoor_clunk(sp);                             // an anonymous mapping holds no file
+        sp = NULL;
+        if (!readable)                               return -(s64)T_E_ACCES;
+        a[3] = (u64)((u32)a[3] | (u32)VIV_MAP_ANONYMOUS);
+        a[4] = (u64)(u32)-1;
+        a[5] = 0;
+    }
+
+    if (sp) {
+        // DISTRO D-3 and D-3b arm 2. The order of the two is free rather than
+        // load-bearing: vivarium_mmap_arms_disjoint pins that no tuple is
+        // admitted by both, so neither can shadow the other.
+        u64 length = 0;
+        u32 prot   = 0;
+        s64 err;
+        if (vivarium_mmap_file_decide(a[2], a[3], a[4], a[5]) == VIV_TRANSLATED) {
+            err = mmap_file_window(a[1], a[5], &length);
+            if (err == 0 && !readable) err = -(s64)T_E_ACCES;
+            if (err != 0) {
+                spoor_clunk(sp);
+                return err;
+            }
+            return mmap_file_body(p, sp, length, ((u32)a[2] & VIV_PROT_EXEC) != 0, a[5]);
+        }
+        if (vivarium_mmap_fixed_file_decide(a[0], a[2], a[3],
+                                            a[4], a[5]) == VIV_TRANSLATED) {
+            err = mmap_fixed_file_window(a[0], a[1], (u32)a[2], a[5], &length, &prot);
+            if (err == 0 && !readable) err = -(s64)T_E_ACCES;
+            if (err != 0) {
+                spoor_clunk(sp);
+                return err;
+            }
+            return mmap_fixed_file_body(p, sp, a[0], length, prot, a[5]);
+        }
+        // A shape no arm serves (read-write private without MAP_FIXED, shared).
+        // do_mmap's file branch switches on the map type before it asks
+        // FMODE_READ, and a type that is not shared, shared-validate or
+        // private is EINVAL whatever the descriptor (round 34 F5). Past that,
+        // an unreadable descriptor is EACCES in every served type, as Linux;
+        // a readable one is declined.
+        spoor_clunk(sp);
+        u32 mtype = (u32)a[3] & (u32)VIV_MAP_TYPE;
+        if (mtype != (u32)VIV_MAP_SHARED && mtype != (u32)VIV_MAP_PRIVATE &&
+            mtype != (u32)VIV_MAP_SHARED_VALIDATE)
+            return -(s64)T_E_INVAL;
+        return readable ? -(s64)T_E_NOSYS : -(s64)T_E_ACCES;
+    }
+
+    // DISTRO D-3b arm 3: the anonymous MAP_FIXED overlay.
+    if (vivarium_mmap_fixed_anon_decide(a[0], a[2], a[3],
+                                        a[4], a[5]) == VIV_TRANSLATED)
+        return sys_mmap_fixed_anon_for_proc(p, a[0], a[1], (u32)a[2]);
+
+    if (vivarium_mmap_decide(a[0], a[2], a[3], a[4], a[5]) != VIV_TRANSLATED)
+        return -(s64)T_E_NOSYS;                      // out of domain
+
+    // A length the reserve cannot satisfy is ENOMEM, precisely the set
+    // sys_burrow_reserve_for_proc refuses (over the lazy cap / no free gap /
+    // OOM). Translating its -1 rather than passing it through matters:
+    // Thylacine signals failure with a bare -1, and a Linux libc reads -1 as
+    // -EPERM.
+    // B-1a: the mint carries the Linux prot EXACTLY -- PROT_NONE, PROT_READ
+    // or PROT_READ|PROT_WRITE -- under an RW ceiling, through the same
+    // reservation SYS_BURROW_RESERVE mints. VIVARIUM 6.21's degradation
+    // ("PROT_NONE yields a writable mapping") ended with the ceiling: a guard
+    // page is protective and a read-only anonymous mapping is read-only.
+    // PROT_WRITE alone maps RW, as Linux/AArch64 does (no write-only AP).
+    u32 lpr   = (u32)a[2];
+    u64 nprot = 0;
+    if (lpr & VIV_PROT_READ)  nprot |= BURROW_PROT_READ;
+    if (lpr & VIV_PROT_WRITE) nprot |= BURROW_PROT_READ | BURROW_PROT_WRITE;
+    s64 rc = sys_burrow_reserve_for_proc(p, a[1], nprot, 0);
+    if (rc < 0) return -(s64)T_E_NOMEM;
+
+    // A user VA is below 2^47, so a successful return is never mistaken for
+    // an errno -- the [-4095,-1] band a Linux caller checks is unreachable.
+    return rc;
 }
 
 static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
@@ -16286,72 +16430,8 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         return viv_stat_copy_out(args[2], &ks);
     }
 
-    case VIV_LINUX_MMAP: {
-        // mmap(addr, len, prot, flags, fd, offset): x0..x5, copied so a
-        // /dev/zero descriptor can become the anonymous call (vote 115).
-        u64 a[6] = { args[0], args[1], args[2], args[3], args[4], args[5] };
-        viv_mmap_zero_as_anon(p, a);
-
-        // DISTRO D-3: the FILE arm is tried FIRST, and the order is free rather
-        // than load-bearing -- vivarium_mmap_arms_disjoint pins that no tuple is
-        // admitted by both, so neither order can shadow the other. Tried first
-        // only because it is the narrower domain, which reads better.
-        if (vivarium_mmap_file_decide(a[2], a[3], a[4], a[5])
-                == VIV_TRANSLATED) {
-            // `len` is judged in the shell, not the decide, for the same reason
-            // the anon arm judges it here: Linux answers EINVAL for 0 and ENOMEM
-            // for too-large, and sys_mmap_file_for_proc reproduces both.
-            // Linux reads the fd through fget(unsigned int).
-            return sys_mmap_file_for_proc(p, (u64)(u32)a[4], a[1],
-                                          ((u32)a[2] & VIV_PROT_EXEC) != 0,
-                                          a[5]);
-        }
-
-        // DISTRO D-3b: the two MAP_FIXED overlays. Same disjointness argument --
-        // all four arms demand EXACT equality against distinct flags words, so
-        // the ordering here cannot shadow anything.
-        if (vivarium_mmap_fixed_file_decide(a[0], a[2], a[3],
-                                            a[4], a[5]) == VIV_TRANSLATED) {
-            return sys_mmap_fixed_file_for_proc(p, a[0], (u64)(u32)a[4], a[1],
-                                                (u32)a[2], a[5]);
-        }
-        if (vivarium_mmap_fixed_anon_decide(a[0], a[2], a[3],
-                                            a[4], a[5]) == VIV_TRANSLATED) {
-            return sys_mmap_fixed_anon_for_proc(p, a[0], a[1],
-                                                (u32)a[2]);
-        }
-
-        if (vivarium_mmap_decide(a[0], a[2], a[3], a[4], a[5])
-                != VIV_TRANSLATED)
-            return -(s64)T_E_NOSYS;             // out of domain
-
-        // `len` is judged HERE, not in the pure decide, so each side's error
-        // semantics are reproduced exactly rather than collapsed to ENOSYS:
-        // Linux answers EINVAL for 0 ...
-        if (a[1] == 0) return -(s64)T_E_INVAL;
-
-        // ... and ENOMEM for a length it cannot satisfy, which is precisely the
-        // set sys_burrow_attach_lazy_for_proc refuses (0 / over the lazy cap /
-        // no free gap / OOM). Translating its -1 rather than passing it through
-        // matters: Thylacine signals failure with a bare -1, and a Linux libc
-        // reads -1 as -EPERM.
-        // B-1a: the mint carries the Linux prot EXACTLY -- PROT_NONE, PROT_READ
-        // or PROT_READ|PROT_WRITE -- under an RW ceiling, through the same
-        // reservation SYS_BURROW_RESERVE mints. VIVARIUM 6.21's degradation
-        // ("PROT_NONE yields a writable mapping") ended with the ceiling: a guard
-        // page is protective and a read-only anonymous mapping is read-only.
-        // PROT_WRITE alone maps RW, as Linux/AArch64 does (no write-only AP).
-        u32 lpr   = (u32)a[2];
-        u64 nprot = 0;
-        if (lpr & VIV_PROT_READ)  nprot |= BURROW_PROT_READ;
-        if (lpr & VIV_PROT_WRITE) nprot |= BURROW_PROT_READ | BURROW_PROT_WRITE;
-        s64 rc = sys_burrow_reserve_for_proc(p, a[1], nprot, 0);
-        if (rc < 0) return -(s64)T_E_NOMEM;
-
-        // A user VA is below 2^47, so a successful return is never mistaken for
-        // an errno -- the [-4095,-1] band a Linux caller checks is unreachable.
-        return rc;
-    }
+    case VIV_LINUX_MMAP:
+        return viv_mmap(p, args);
 
     case VIV_LINUX_MUNMAP: {
         // munmap(addr, len): x0 addr, x1 len.

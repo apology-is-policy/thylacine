@@ -220,6 +220,11 @@ void addrspace_destroy(struct AddrSpace *as) {
     // potentially sleeping FILE clunks, so a concurrent kernel unpin cannot
     // free the descriptor under it.
     vma_drain_in(as);
+    // Vote 118: after the drain, so the private images only this space held
+    // were freed (refunding a count that dies here anyway); what is left
+    // survives in another space's mapping, and its record lapses now, before
+    // a pin could let the descriptor outlive every owner.
+    burrow_file_payers_lapse(as);
     addrspace_lifetime_put(as);
 }
 
