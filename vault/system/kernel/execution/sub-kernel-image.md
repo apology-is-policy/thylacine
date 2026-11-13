@@ -3,7 +3,7 @@ id: sub-kernel-image
 type: sub
 parent: moc-kernel-execution
 title: "The Image cache — one copy of a binary's text, and a proof that eviction cannot race a mapper"
-code: [kernel/image.c, kernel/include/thylacine/image.h]
+code: [kernel/image.c, kernel/include/thylacine/image.h, kernel/test/test_image.c]
 audit: hard
 guarded-by: [inv-i36, inv-i7, inv-i32]
 validated-by: [prose, gate-smp]
@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/EXEC-LOAD-DESIGN.md"]
 created: 2026-08-03
-updated: 2026-09-23
+updated: 2026-11-13
 ---
 ## Purpose
 
@@ -42,6 +42,16 @@ consumed nothing.
 
 That asymmetry is the part a caller gets wrong. The function reads like a
 lookup and behaves like a transfer.
+
+**Only versioned content is cached (operator vote 114, round 31 F1).** Before
+the search, the lookup asks the Spoor's Dev `content_versioned`. A file that
+answers no -- every file of a dev9p session not latched cacheable, netd's
+among them -- is created un-registered, as a bypass is: its Burrow holds the
+Spoor exactly as long as a mapping does and never answers a hit, so whatever
+the server keeps for that open (a connection slot) goes with the last
+mapping, no later mapper is served its bytes, and none inherits its size.
+The question comes before the search because a private image must never be
+found.
 
 The key is seven fields: device class, device number, qid path, **qid version**,
 file offset, page-rounded size, and executability. Three of those carry
@@ -304,7 +314,11 @@ pool's reserve under pressure and charged its pages to their holders
 
 `image.*` drives it in isolation with synthetic Spoors: hit and miss, distinct
 files, the version discriminator, distinct offsets within one file, the
-executability split, table exhaustion, and the zero-length reject. The idle-evict
+executability split, table exhaustion, and the zero-length reject.
+`image.private_unless_versioned` holds two mappings of one identity off an
+unversioned Dev apart, each clunking its Spoor at its last unref and keeping
+its own size, with the versioned fake caching the same identity as the
+control. The idle-evict
 helper exists both for test isolation and as a real regression on the
 detach-under-lock / unref-outside lifetime.
 `demand_page.idle_image_reclaimed_under_pressure` drives the reclaim end to

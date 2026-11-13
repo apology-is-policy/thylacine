@@ -101,7 +101,8 @@ file's execute bit (Caveats) — it serves the binaries the machine executes fro
 `/env`'s Dev deliberately does not, because it serves per-process variable text,
 never code. It sets `may_back_mapping = true` beside it (operator vote 113,
 2026-11-13): file mapping is opt-in too, and a Dev that backs exec must back
-mappings. The vouch is the allowlist entry, not the enforcement: the check
+mappings. Its `content_versioned` answers yes for every file (vote 114): the
+archive is baked and read-only, so an image of it is shared and cached. The vouch is the allowlist entry, not the enforcement: the check
 lives on the exec/mmap path, and a Dev that forgot to set it would simply have
 its files refused as executable backing, fail-closed.
 

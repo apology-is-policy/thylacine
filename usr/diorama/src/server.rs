@@ -160,8 +160,8 @@ fn viv_runner() -> u32 {
 /// the Proc that made the pipe pair we are serving. Pure over the native
 /// /proc/<self>/status text ("ppid:    N", devproc's format_status) so the
 /// truth table is selftestable; the caller reads the live file. Our OWN status
-/// rather than the /ctl/procs table because one read of that table holds only
-/// the rows that fit it, and a healthy container must not fail its startup
+/// rather than the /ctl/procs table because that table holds only the rows
+/// that fit it, and a healthy container must not fail its startup
 /// check on a busy box.
 pub fn viv_runner_is_parent(status_text: &[u8], runner: u32) -> bool {
     runner != 0 && parse_kv_dec(status_text, b"ppid") == Some(runner as u64)
@@ -801,7 +801,7 @@ fn native_pid_exists(pid: u32) -> bool {
 // V-7 membership: the container's process tree is the runner's children other
 // than this server, and their descendants (docs/VIVARIUM.md section 7.2). It is
 // decided from the parent links in native /proc/<pid>/status -- not from a
-// table of every Proc: one read of /ctl/procs holds only the rows that fit it,
+// table of every Proc: the /ctl/procs table holds only the rows that fit it,
 // and a member past the cut would be absent from its own container.
 //
 // A parent is older than its child (pids are handed out ascending and never

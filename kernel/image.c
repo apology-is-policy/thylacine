@@ -33,6 +33,7 @@
 // always detached BEFORE the ref that frees is dropped).
 
 #include <thylacine/burrow.h>
+#include <thylacine/dev.h>           // Dev.content_versioned
 #include <thylacine/extinction.h>
 #include <thylacine/image.h>
 #include <thylacine/page.h>          // PAGE_SIZE
@@ -71,6 +72,7 @@ static u64 g_image_hits;          // returned an existing cached Burrow
 static u64 g_image_creates;       // registered a fresh Burrow
 static u64 g_image_evictions;     // dropped a victim to make room
 static u64 g_image_bypass;        // created un-cached (table full of live images)
+static u64 g_image_private;       // created un-cached (the file is not versioned content)
 static u64 g_image_reclaims;      // B-1a' audit F8: reclaim calls that freed a page
 static u64 g_image_reclaimed_pages;
 
@@ -145,6 +147,24 @@ struct Burrow *image_lookup_or_create(struct Spoor *spoor, u64 file_offset,
         return NULL;
 
     size_t size = page_round(length);
+
+    // Vote 114: only versioned content is shared and kept past its last unmap.
+    // Any other file maps privately: its own Burrow, never registered, so its
+    // Spoor -- and whatever state the server keeps for that open, a netd
+    // connection slot -- lives exactly as long as a mapping of it, and no
+    // later mapper is served this one's bytes. Asked before the search too:
+    // a private image must never answer a hit.
+    if (!spoor->dev || !spoor->dev->content_versioned ||
+        !spoor->dev->content_versioned(spoor)) {
+        struct Burrow *own = burrow_create_file(spoor, file_offset, length);
+        if (!own)
+            return NULL;                     // no ref taken; caller still owns spoor
+        own->file_limit = file_limit;        // private here, as on the miss arm
+        spin_lock(&g_image_lock);
+        g_image_private++;
+        spin_unlock(&g_image_lock);
+        return own;
+    }
 
     // --- pass 1: search the cache ---
     spin_lock(&g_image_lock);
@@ -301,6 +321,7 @@ int image_cache_evict_idle_for_test(void) {
 u64 image_cache_hits_for_test(void)      { return g_image_hits; }
 u64 image_cache_creates_for_test(void)   { return g_image_creates; }
 u64 image_cache_evictions_for_test(void) { return g_image_evictions; }
+u64 image_cache_private_for_test(void)   { return g_image_private; }
 u64 image_cache_reclaims_for_test(void)        { return g_image_reclaims; }
 u64 image_cache_reclaimed_pages_for_test(void) { return g_image_reclaimed_pages; }
 #endif

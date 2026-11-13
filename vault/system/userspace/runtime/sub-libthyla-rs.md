@@ -326,8 +326,8 @@ per-open snapshot) is an open design question, not settled here.
 ### The process set is read from `/proc` (`procs`)
 
 A program that reasons over EVERY Proc -- a listing, a monitor, "is there a
-Proc named X" -- does not read `/ctl/procs`: one read of that table holds only
-the rows that fit the kernel's buffer, and it ends with a cut line when some
+Proc named X" -- does not read `/ctl/procs`: that table holds only the rows
+that fit one page, and it ends with a cut line when some
 did not. `procs::pids` lists `/proc`, whose directory is whole at any number of
 Procs (ascending pids), and `procs::read_status` takes one
 `/proc/<pid>/status` with one read into a `STATUS_MAX` (2048, devproc's

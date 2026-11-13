@@ -65,8 +65,8 @@ Caveats).
 **The process set comes from `/proc`, which has no size bound (2026-11-12).**
 Each sample lists `/proc` and reads every pid's `status` through libthyla-rs's
 `procs::list` ([[sub-libthyla-rs]]); `sample::rows_from` turns those rows into
-the sampler's. prowl read `/ctl/procs` before, and one read of that table holds
-only the rows that fit 4 KiB, some sixty ([[sub-kernel-devctl]]): on a larger
+the sampler's. prowl read `/ctl/procs` before, and that table holds only the
+rows that fit one 4 KiB page, some sixty ([[sub-kernel-devctl]]): on a larger
 system the monitor showed a shorter list with no sign, and its header's process
 count was that list's length. The set is not one instant: each row is its
 process at the moment its status was read, a process alive through the sample

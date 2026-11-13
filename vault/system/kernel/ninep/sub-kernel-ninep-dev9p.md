@@ -273,10 +273,21 @@ pages; witnesses
 budget diagnostics + test bias.
 
 
-**File mappings** (operator vote 113, 2026-11-13). dev9p sets `may_back_mapping`
-beside `may_back_exec`: a served file is sized content versioned by `qid.vers`,
-which the Image cache keys on, so it may back a file mapping. File mapping is
-opt-in; only dev9p and devramfs set it.
+**File mappings** (operator votes 113 and 114, 2026-11-13). dev9p sets
+`may_back_mapping` beside `may_back_exec`, but a dev9p session is whatever server
+attached it. Stratum serves versioned content; netd serves stream and control
+files whose open holds a connection slot (`/net/tcp/clone` takes one of the
+box's 16) and whose bytes are rendered per read under a constant `qid.vers` of 0.
+So `content_versioned` answers per session, from the Larder's L1e latch
+(`p9_client.cacheable`, set when the server answers a Twalkgetattr): a latched
+session's images are shared and cached; any other session's mapping is private,
+its own Burrow freed with its last mapping, so it holds a slot no longer than an
+fd would and no mapper reads another's rendering (round 31 F1). A Haul or
+host-share export, which never latches, still maps and executes, unshared.
+`dev9p.content_versioned_follows_latch` holds the answer to the latch. The wire
+qid's append bit reaches the Spoor as `QTAPPEND` (round 31 F5), so both mapping
+cores refuse a Plan 9 server's append-only file; `dev9p.qid_type_from_wire` pins
+the translation.
 
 ## Mechanism
 

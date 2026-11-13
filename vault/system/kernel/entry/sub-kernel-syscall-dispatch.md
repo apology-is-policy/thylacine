@@ -1904,7 +1904,9 @@ The wrapper adds no syscall operation and is excluded from the production build.
 **`sys_burrow_map_file_for_proc(p, fd, offset, length, prot, flags, addr)`**
 is the native door onto the three cores the phenotype's file-backed `mmap`
 rows already used, so the vouching, the eager copy and the Image cache are each
-spelled once. It decides the native word and dispatches:
+spelled once. (The phenotype's row first turns a `/dev/zero` descriptor into
+the anonymous call, `viv_mmap_zero_as_anon`, vote 115; the native door does
+not, since native code asks for anonymous memory directly.) It decides the native word and dispatches:
 
 - no `BURROW_MAP_FIXED` -> `sys_mmap_file_for_proc` (arm 1: a kernel-chosen
   window, R or R|X, through the Image cache);

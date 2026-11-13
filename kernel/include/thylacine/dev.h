@@ -142,16 +142,16 @@ struct Dev {
     // both mapping cores with -T_E_NODEV, Linux's answer for a file whose driver
     // has no mmap, after the argument, handle and exec checks (an exec request
     // answers the exec floor's -T_E_PERM first: Linux checks noexec before mmap).
-    // A mapping is served from the Image cache, keyed on (dc, devno, qid.path,
-    // qid.vers) and holding a Spoor reference for as long as the entry is
-    // cached, past the mapper and past every close, and a later mapper of the
-    // same key is served the bytes the first one's Spoor read. So only a Dev
-    // whose files are sized content, versioned by qid.vers and the same for
-    // every reader, may opt in: dev9p and devramfs. Opt-in, as may_back_exec is,
-    // because a Dev whose open Spoor keeps state alive (a /ctl/procs snapshot, a
-    // pipe ring, a /srv connection, an /env variable's Env) or whose bytes
-    // depend on the reader must never be mappable by forgetting a flag (vote
-    // 113). A Dev that backs exec backs mappings too; dev_register enforces it.
+    // Only a Dev whose files are sized content may opt in: dev9p and devramfs.
+    // Opt-in, as may_back_exec is, because a Dev whose open Spoor keeps state
+    // alive (a /ctl/procs snapshot, a pipe ring, a /srv connection, an /env
+    // variable's Env) or whose bytes depend on the reader must never be
+    // mappable by forgetting a flag (vote 113). Whether a mapping is shared
+    // through the Image cache is a second question, asked per file of
+    // content_versioned below: dev9p reaches every userspace 9P server, and a
+    // session that has not proven itself a versioned content server maps
+    // privately (vote 114). A Dev that backs exec backs mappings too;
+    // dev_register enforces it.
     bool         may_back_mapping;
 
     // devno_per_walker -- this Dev's walk stamps a devno that depends on WHO is
@@ -406,6 +406,16 @@ struct Dev {
     // (DISTRO 4.6). Read lock-free, so the answer must be fixed before c's
     // session published. NULL-permitted: a NULL slot is never remote.
     bool           (*remote)(struct Spoor *c);
+
+    // content_versioned(c) -- are c's bytes versioned content, changed only
+    // with a qid.vers bump and the same for every reader of c's session? Then
+    // one Image of it may be shared between mappers and kept cached past its
+    // last unmap. Otherwise each mapping of it gets its own Burrow, never
+    // cached, which holds c only as long as a mapping does (vote 114; Linux
+    // holds a mapped file exactly as long as the mapping). NULL-permitted: a
+    // NULL slot is never versioned. Read lock-free; an answer may move from
+    // false to true, never back.
+    bool           (*content_versioned)(struct Spoor *c);
 
     // File locks (B-3h; ARCH 9.6.11). The lock state lives in the file's
     // server; these slots only forward to it. The first four are NULL-permitted

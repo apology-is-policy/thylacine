@@ -833,6 +833,32 @@ void test_dev9p_registered(void) {
                  "dev9p vtable slots are populated");
 }
 
+void test_dev9p_qid_type_from_wire(void) {
+    TEST_ASSERT(qid_type_p9_to_kernel(P9_QTAPPEND) == QTAPPEND,
+                 "an append-only qid reaches the Spoor as QTAPPEND");
+    TEST_ASSERT(qid_type_p9_to_kernel(P9_QTDIR | P9_QTSYMLINK | P9_QTPOLL) ==
+                 (QTDIR | QTSYMLINK | QTPOLL),
+                 "the other carried bits still map one to one");
+    TEST_ASSERT(qid_type_p9_to_kernel(0x20u) == 0,
+                 "EXCL is not carried");
+}
+
+// Vote 114: a dev9p file is versioned content only once its session has proven
+// it (the Larder's L1e latch); until then, and for a server that never does,
+// every mapping of it is private.
+void test_dev9p_content_versioned_follows_latch(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "root");
+    TEST_ASSERT(dev9p.content_versioned != NULL, "dev9p answers per session");
+    bool was = __atomic_load_n(&g_client.cacheable, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_client.cacheable, false, __ATOMIC_RELAXED);
+    TEST_ASSERT(!dev9p.content_versioned(root), "an unproven session is not versioned content");
+    __atomic_store_n(&g_client.cacheable, true, __ATOMIC_RELAXED);
+    TEST_ASSERT(dev9p.content_versioned(root), "a latched session is");
+    __atomic_store_n(&g_client.cacheable, was, __ATOMIC_RELAXED);
+    teardown(root);
+}
+
 void test_dev9p_attach_client_root_spoor(void) {
     struct Spoor *root = make_open_client_and_root();
     TEST_ASSERT(root != NULL,             "root Spoor allocated");

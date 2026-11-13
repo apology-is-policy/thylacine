@@ -15680,6 +15680,24 @@ static s64 viv_rt_sigtimedwait(struct Thread *t, u64 set, u64 info_va, u64 ts_va
     return (s64)signum;
 }
 
+// Vote 115: Linux maps /dev/zero as anonymous memory (mmap_zero). So a
+// descriptor naming devzero, open for reading, is rewritten into the anonymous
+// call before any arm judges it: it is then served exactly where MAP_ANONYMOUS
+// is, and declined exactly where that is (MAP_SHARED, PROT_EXEC). The
+// descriptor is looked up once and not kept: an anonymous mapping holds no file.
+VISIBLE_IF_KERNEL_TESTS
+void viv_mmap_zero_as_anon(struct Proc *p, u64 a[6]) {
+    if ((s32)(u32)a[4] < 0) return;
+    struct Spoor *sp = sys_lookup_spoor(p, sys_hidx_arg((u64)(u32)a[4]), RIGHT_READ);
+    if (!sp) return;
+    bool zero = sp->dev == &devzero;
+    spoor_clunk(sp);
+    if (!zero) return;
+    a[3] = (u64)((u32)a[3] | (u32)VIV_MAP_ANONYMOUS);
+    a[4] = (u64)(u32)-1;
+    a[5] = 0;
+}
+
 static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
                      u64 linux_nr, const u64 *args) {
     switch (linux_nr) {
@@ -16239,45 +16257,48 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
     }
 
     case VIV_LINUX_MMAP: {
-        // mmap(addr, len, prot, flags, fd, offset): x0..x5.
-        //
+        // mmap(addr, len, prot, flags, fd, offset): x0..x5, copied so a
+        // /dev/zero descriptor can become the anonymous call (vote 115).
+        u64 a[6] = { args[0], args[1], args[2], args[3], args[4], args[5] };
+        viv_mmap_zero_as_anon(p, a);
+
         // DISTRO D-3: the FILE arm is tried FIRST, and the order is free rather
         // than load-bearing -- vivarium_mmap_arms_disjoint pins that no tuple is
         // admitted by both, so neither order can shadow the other. Tried first
         // only because it is the narrower domain, which reads better.
-        if (vivarium_mmap_file_decide(args[2], args[3], args[4], args[5])
+        if (vivarium_mmap_file_decide(a[2], a[3], a[4], a[5])
                 == VIV_TRANSLATED) {
             // `len` is judged in the shell, not the decide, for the same reason
             // the anon arm judges it here: Linux answers EINVAL for 0 and ENOMEM
             // for too-large, and sys_mmap_file_for_proc reproduces both.
             // Linux reads the fd through fget(unsigned int).
-            return sys_mmap_file_for_proc(p, (u64)(u32)args[4], args[1],
-                                          ((u32)args[2] & VIV_PROT_EXEC) != 0,
-                                          args[5]);
+            return sys_mmap_file_for_proc(p, (u64)(u32)a[4], a[1],
+                                          ((u32)a[2] & VIV_PROT_EXEC) != 0,
+                                          a[5]);
         }
 
         // DISTRO D-3b: the two MAP_FIXED overlays. Same disjointness argument --
         // all four arms demand EXACT equality against distinct flags words, so
         // the ordering here cannot shadow anything.
-        if (vivarium_mmap_fixed_file_decide(args[0], args[2], args[3],
-                                            args[4], args[5]) == VIV_TRANSLATED) {
-            return sys_mmap_fixed_file_for_proc(p, args[0], (u64)(u32)args[4], args[1],
-                                                (u32)args[2], args[5]);
+        if (vivarium_mmap_fixed_file_decide(a[0], a[2], a[3],
+                                            a[4], a[5]) == VIV_TRANSLATED) {
+            return sys_mmap_fixed_file_for_proc(p, a[0], (u64)(u32)a[4], a[1],
+                                                (u32)a[2], a[5]);
         }
-        if (vivarium_mmap_fixed_anon_decide(args[0], args[2], args[3],
-                                            args[4], args[5]) == VIV_TRANSLATED) {
-            return sys_mmap_fixed_anon_for_proc(p, args[0], args[1],
-                                                (u32)args[2]);
+        if (vivarium_mmap_fixed_anon_decide(a[0], a[2], a[3],
+                                            a[4], a[5]) == VIV_TRANSLATED) {
+            return sys_mmap_fixed_anon_for_proc(p, a[0], a[1],
+                                                (u32)a[2]);
         }
 
-        if (vivarium_mmap_decide(args[0], args[2], args[3], args[4], args[5])
+        if (vivarium_mmap_decide(a[0], a[2], a[3], a[4], a[5])
                 != VIV_TRANSLATED)
             return -(s64)T_E_NOSYS;             // out of domain
 
         // `len` is judged HERE, not in the pure decide, so each side's error
         // semantics are reproduced exactly rather than collapsed to ENOSYS:
         // Linux answers EINVAL for 0 ...
-        if (args[1] == 0) return -(s64)T_E_INVAL;
+        if (a[1] == 0) return -(s64)T_E_INVAL;
 
         // ... and ENOMEM for a length it cannot satisfy, which is precisely the
         // set sys_burrow_attach_lazy_for_proc refuses (0 / over the lazy cap /
@@ -16290,11 +16311,11 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         // ("PROT_NONE yields a writable mapping") ended with the ceiling: a guard
         // page is protective and a read-only anonymous mapping is read-only.
         // PROT_WRITE alone maps RW, as Linux/AArch64 does (no write-only AP).
-        u32 lpr   = (u32)args[2];
+        u32 lpr   = (u32)a[2];
         u64 nprot = 0;
         if (lpr & VIV_PROT_READ)  nprot |= BURROW_PROT_READ;
         if (lpr & VIV_PROT_WRITE) nprot |= BURROW_PROT_READ | BURROW_PROT_WRITE;
-        s64 rc = sys_burrow_reserve_for_proc(p, args[1], nprot, 0);
+        s64 rc = sys_burrow_reserve_for_proc(p, a[1], nprot, 0);
         if (rc < 0) return -(s64)T_E_NOMEM;
 
         // A user VA is below 2^47, so a successful return is never mistaken for

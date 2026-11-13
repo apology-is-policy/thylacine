@@ -413,8 +413,8 @@ Linux virtualizes this with a pid namespace.
   enumeration test are different tests.
 
 - **Membership and the pid list are read per Proc, not from `/ctl/procs`.**
-  One read of `/ctl/procs` holds only the rows that fit the kernel's
-  4096-byte buffer, and its iteration is a pre-order DFS from kproc, so on
+  The `/ctl/procs` table holds only the rows that fit one 4096-byte
+  page, and its iteration is a pre-order DFS from kproc, so on
   a busy box the container's subtree could fall past the cut and the
   member set came out empty (Task #182, behind a 64-entry table). The
   root's enumeration now lists native `/proc` (`procs::pids`, whole at any
