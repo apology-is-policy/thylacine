@@ -742,6 +742,7 @@ struct test_case g_tests[] = {
     { "territory.fork_isolated",       test_namespace_fork_isolated,       false, NULL },
     { "territory.clone_copies_root_pheno", test_territory_clone_copies_root_pheno, false, NULL },
     { "territory.render_root_pheno", test_territory_render_root_pheno, false, NULL },
+    { "territory.render_escapes_names", test_territory_render_escapes_names, false, NULL },
     { "territory.cwd_join",            test_territory_cwd_join,            false, NULL },
     { "territory.cwd_dot",             test_territory_cwd_dot,             false, NULL },
     { "territory_mount.smoke",                            test_territory_mount_smoke,                            false, NULL },

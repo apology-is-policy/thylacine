@@ -846,10 +846,11 @@ announcement line names the channel (`npxf encrypted` or `PLAIN 9P`). It says
 nothing about reachability either; a mount whose connection has ended stays
 `remote` until it is unmounted.
 
-**Limits, recorded here rather than discovered later.** A mount-point name that
-contains whitespace breaks every parse of `/proc/<pid>/ns`, because the format
-has no quoting (Plan 9 quotes such names); this predates LR-1 and is queued.
-The list is rendered into a bounded buffer, whole lines only, and its `binds:`
+**Limits, recorded here rather than discovered later.** A name in
+`/proc/<pid>/ns` writes space, tab, newline and backslash as `\040 \011 \012
+\134` (operator vote 97, 2026-11-13; the escapes of Linux's mountinfo), so a
+mount-point name containing whitespace parses whole; the readers unescape
+(coreutils' `nsmount`, Halcyon's `ns_root_source`). The list is rendered into a bounded buffer, whole lines only, and its `binds:`
 line is written only when the list fit (#66b); the newest mounts are the ones
 cut. The tools read a missing `binds:` line as a cut list and say
 `mount list incomplete`, but they cannot name what was cut, so a remote mount

@@ -178,11 +178,20 @@ fn flags_cell(m: &Mount) -> String {
 /// Render the boxed namespace view: MOUNTPOINT / SOURCE / REALM / FLAGS, each
 /// cell colored by kind (mountpoint slate, source + realm by the realm, flags
 /// dim). A namespace-level `root: pheno-linux` rides the bottom rule.
+/// A name in a table cell: a control character (a tab or newline the kernel
+/// escaped, an escape sequence) would break the row or drive the terminal, so it
+/// shows as `?`.
+fn cell(name: &str) -> String {
+    name.chars().map(|c| if c.is_control() { '?' } else { c }).collect()
+}
+
 fn render(out: &mut io::OutSink, pid: i64, mounts: &[Mount], binds: Option<u64>, root_pheno: bool, on: bool) {
     let realms: Vec<(&'static str, &'static str)> = mounts.iter().map(entry_realm).collect();
     let flags: Vec<String> = mounts.iter().map(flags_cell).collect();
-    let mpw = mounts.iter().map(|m| m.point.chars().count()).max().unwrap_or(0).max(10); // "MOUNTPOINT"
-    let srcw = mounts.iter().map(|m| m.source.chars().count()).max().unwrap_or(0).max(6); // "SOURCE"
+    let points: Vec<String> = mounts.iter().map(|m| cell(&m.point)).collect();
+    let sources: Vec<String> = mounts.iter().map(|m| cell(&m.source)).collect();
+    let mpw = points.iter().map(|p| p.chars().count()).max().unwrap_or(0).max(10); // "MOUNTPOINT"
+    let srcw = sources.iter().map(|s| s.chars().count()).max().unwrap_or(0).max(6); // "SOURCE"
     let rw = realms.iter().map(|(r, _)| r.chars().count()).max().unwrap_or(0).max(5); // "REALM"
     let fw = flags.iter().map(|f| f.chars().count()).max().unwrap_or(0).max(5); // "FLAGS"
     let content_w = mpw + 2 + srcw + 2 + rw + 2 + fw;
@@ -207,11 +216,11 @@ fn render(out: &mut io::OutSink, pid: i64, mounts: &[Mount], binds: Option<u64>,
     );
     emit_row(out, total, &header, on);
     // entries
-    for ((m, (realm, rcolor)), fl) in mounts.iter().zip(&realms).zip(&flags) {
+    for (((point, source), (realm, rcolor)), fl) in points.iter().zip(&sources).zip(&realms).zip(&flags) {
         let body = format!(
             "{}{:<mpw$}{}  {}{:<srcw$}{}  {}{:<rw$}{}  {}{:<fw$}{}",
-            color::col(palette::SLATE, on), m.point, color::reset(on),
-            color::col(rcolor, on), m.source, color::reset(on),
+            color::col(palette::SLATE, on), point, color::reset(on),
+            color::col(rcolor, on), source, color::reset(on),
             color::col(rcolor, on), realm, color::reset(on),
             color::col(palette::DIM, on), fl, color::reset(on),
             mpw = mpw, srcw = srcw, rw = rw, fw = fw

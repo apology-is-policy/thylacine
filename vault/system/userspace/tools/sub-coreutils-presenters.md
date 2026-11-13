@@ -106,7 +106,10 @@ except that a line ending in ` remote` reads `remote`; `#9` and `#|` read
 the suffixes the boxed view used to drop (`noexec`, `pheno-linux`,
 `covered`, then any it does not know, as written), and the count cell says
 `mount list incomplete` instead of a bind count when the kernel cut the
-list. With colour off it passes the kernel text through
+list. Names come unescaped from `nsmount` (vote 97), and a control character
+in one -- a tab or newline the kernel escaped, or an escape sequence -- shows
+as `?` in its cell, so no name breaks a row or drives the terminal. With
+colour off it passes the kernel text through
 untouched, which is the right escape hatch for a tool whose subject is
 already text, and through the same failing-write path as the box, so a text
 it could not write is reported.

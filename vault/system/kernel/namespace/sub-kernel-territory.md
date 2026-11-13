@@ -3,7 +3,7 @@ id: sub-kernel-territory
 type: sub
 title: "Territory — the per-Proc namespace (mount table, root, cwd)"
 parent: moc-kernel-namespace
-code: ["kernel/territory.c", "kernel/include/thylacine/territory.h", "kernel/test/test_territory_mount.c", "kernel/test/test_territory_chroot.c", "kernel/test/test_territory_pivot_root.c", "kernel/test/test_sys_mount.c", "usr/symlink-probe/src/main.rs"]
+code: ["kernel/territory.c", "kernel/include/thylacine/territory.h", "kernel/test/test_territory.c", "kernel/test/test_territory_mount.c", "kernel/test/test_territory_chroot.c", "kernel/test/test_territory_pivot_root.c", "kernel/test/test_sys_mount.c", "usr/symlink-probe/src/main.rs"]
 audit: hard
 guarded-by: [inv-i1, inv-i3, inv-i33]
 validated-by: [spec-territory, gate-smp]
@@ -261,6 +261,13 @@ boot's literal `/bin`, so `dot_path` stays clean.
 
 **`territory_format_ns`** renders `/proc/<pid>/ns` under `ns_lock`: one
 `mount <point> <source>` line per entry in table order, then `binds: N`.
+`ns_emit_path` writes space, tab, newline and backslash in either name as
+`\040 \011 \012 \134` (operator vote 97, 2026-11-13; Linux's mountinfo
+escapes): unescaped, a name's tail moved into the next field, and a name
+holding a newline and the text of a line forged a mount line of its own.
+`territory.render_escapes_names` mounts a point whose name holds all four and
+a whole mount line's text, under a source whose name holds a space, and
+requires exactly one mount line, escaped, then `binds: 0`.
 The listing is as long as the table, so the function copies a window of
 it — the bytes from the read's offset, at most the caller's room, ending at
 the last line end among them (#66b F2: no partial line where a whole one

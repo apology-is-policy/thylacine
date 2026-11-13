@@ -4,21 +4,25 @@
 //!
 //! The kernel writes one `mount <point> <source>[ <suffix>]...` line per entry,
 //! then `binds: N`, then `root: pheno-linux` when the namespace carries the
-//! declaration. Names are not quoted, so a name containing whitespace splits
-//! into the wrong fields (the limit HAUL-DESIGN 4.8 records); a consumer must
-//! degrade on such a line, never panic.
+//! declaration. A name writes space, tab, newline and backslash as `\040 \011
+//! \012 \134` (operator vote 97), so the fields split on spaces and the lines
+//! on newlines; `parse_line` unescapes the point and the source. A consumer
+//! must still degrade on a malformed line, never panic.
 //!
 //! Pure (no libthyla-rs): host-tested.
 
 use crate::path;
+use alloc::borrow::Cow;
 use alloc::string::String;
 use alloc::vec::Vec;
 
 /// One `mount` line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Mount<'a> {
-    pub point: &'a str,
-    pub source: &'a str,
+    /// Unescaped: the name as the namespace holds it.
+    pub point: Cow<'a, str>,
+    /// Unescaped, as `point`.
+    pub source: Cow<'a, str>,
     pub noexec: bool,
     pub pheno_linux: bool,
     /// A union's covered entry: the directory underneath, not a member anyone
@@ -49,7 +53,7 @@ pub fn entry_realm(m: &Mount) -> &'static str {
     if m.remote {
         return "remote";
     }
-    source_realm(m.source)
+    source_realm(&m.source)
 }
 
 pub fn source_realm(src: &str) -> &'static str {
@@ -67,6 +71,33 @@ pub fn source_realm(src: &str) -> &'static str {
     }
 }
 
+/// A name as a mount line writes it, unescaped: a backslash and three octal
+/// digits below `\200` is that character (the kernel writes only `\040 \011
+/// \012 \134`); anything else stays as written.
+pub fn unescape(field: &str) -> Cow<'_, str> {
+    if !field.contains('\\') {
+        return Cow::Borrowed(field);
+    }
+    let b = field.as_bytes();
+    let mut out = String::with_capacity(field.len());
+    let (mut i, mut lit) = (0, 0);
+    while i < b.len() {
+        if b[i] == b'\\' && i + 4 <= b.len() && b[i + 1..i + 4].iter().all(|c| (b'0'..=b'7').contains(c)) {
+            let v = (b[i + 1] - b'0') as u32 * 64 + (b[i + 2] - b'0') as u32 * 8 + (b[i + 3] - b'0') as u32;
+            if v < 0o200 {
+                out.push_str(&field[lit..i]);
+                out.push(v as u8 as char);
+                i += 4;
+                lit = i;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    out.push_str(&field[lit..]);
+    Cow::Owned(out)
+}
+
 pub fn parse_line(line: &str) -> Line<'_> {
     if let Some(rest) = line.strip_prefix("mount ") {
         let mut fields = rest.split(' ').filter(|f| !f.is_empty());
@@ -75,8 +106,8 @@ pub fn parse_line(line: &str) -> Line<'_> {
             _ => return Line::Other(line),
         };
         let mut m = Mount {
-            point,
-            source,
+            point: unescape(point),
+            source: unescape(source),
             noexec: false,
             pheno_linux: false,
             covered: false,
@@ -132,7 +163,7 @@ impl MountRealms {
             if m.covered || !m.point.starts_with('/') {
                 continue;
             }
-            let point = path::normalize(m.point);
+            let point = path::normalize(&m.point);
             match points.iter_mut().find(|(p, _)| *p == point) {
                 Some(entry) => entry.1 |= m.remote,
                 None => points.push((point, m.remote)),
@@ -166,8 +197,8 @@ mod tests {
         assert_eq!(
             parse_line("mount /srv #s"),
             Line::Mount(Mount {
-                point: "/srv",
-                source: "#s",
+                point: Cow::Borrowed("/srv"),
+                source: Cow::Borrowed("#s"),
                 noexec: false,
                 pheno_linux: false,
                 covered: false,
@@ -182,7 +213,7 @@ mod tests {
         let Line::Mount(m) = parse_line("mount /u /u noexec pheno-linux covered remote shiny") else {
             panic!("not a mount line");
         };
-        assert_eq!((m.point, m.source), ("/u", "/u"));
+        assert_eq!((&*m.point, &*m.source), ("/u", "/u"));
         assert!(m.noexec && m.pheno_linux && m.covered && m.remote);
         assert_eq!(m.unknown, alloc::vec!["shiny"]);
     }
@@ -276,12 +307,26 @@ mod tests {
     }
 
     #[test]
-    fn a_name_with_a_space_cannot_lend_its_realm() {
-        // "/a b" is split: the point reads "/a", the source "b", and "#9" and
-        // "remote" become suffixes. The recorded limit: "/a" is misread, but
-        // no other point is affected and nothing panics.
-        let r = MountRealms::from_text("mount /a b #9 remote\nmount /c #s\n");
-        assert_eq!(r.realm("/a b"), None);
+    fn a_name_with_a_space_keeps_its_realm() {
+        let r = MountRealms::from_text("mount /a\\040b #9 remote\nmount /c #s\n");
+        assert_eq!(r.realm("/a b"), Some("remote"), "the escaped point is the name");
+        assert_eq!(r.realm("/a"), None, "no part of it is a point");
         assert_eq!(r.realm("/c"), Some("mount"));
+    }
+
+    #[test]
+    fn the_four_escapes_and_what_is_not_one() {
+        assert_eq!(unescape("/a\\040b\\011c\\012d\\134e"), "/a b\tc\nd\\e");
+        assert!(matches!(unescape("/plain"), Cow::Borrowed("/plain")), "nothing to undo borrows");
+        assert_eq!(unescape("/x\\04"), "/x\\04", "two digits at the end stay");
+        assert_eq!(unescape("/x\\08y"), "/x\\08y", "8 is not octal");
+        assert_eq!(unescape("/x\\200"), "/x\\200", "past ASCII stays");
+        assert_eq!(unescape("\\134134"), "\\134", "decoded once, left to right");
+        assert_eq!(unescape("/\u{e9}\\040\u{e9}"), "/\u{e9} \u{e9}", "beside a multi-byte character");
+        let Line::Mount(m) = parse_line("mount /a\\040b /s\\134p\\012q covered") else {
+            panic!("not a mount line");
+        };
+        assert_eq!((&*m.point, &*m.source), ("/a b", "/s\\p\nq"));
+        assert!(m.covered && m.unknown.is_empty(), "the suffixes stay suffixes");
     }
 }

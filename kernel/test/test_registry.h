@@ -258,6 +258,7 @@ void test_namespace_cycle_rejected(void);
 void test_namespace_fork_isolated(void);
 void test_territory_clone_copies_root_pheno(void);   // Design D F2/SA-1
 void test_territory_render_root_pheno(void);         // Design D audit F6
+void test_territory_render_escapes_names(void);     // vote 97: \040 \011 \012 \134 in a mount line
 void test_territory_cwd_join(void);
 void test_territory_cwd_dot(void);
 void test_territory_mount_smoke(void);

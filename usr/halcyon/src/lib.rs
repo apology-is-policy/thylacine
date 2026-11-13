@@ -554,6 +554,74 @@ fn wrap_tokens(tokens: &[String], indent: &str, width: usize) -> Vec<String> {
     out
 }
 
+/// A name as a `/proc/<pid>/ns` mount line writes it, unescaped: a backslash and
+/// three octal digits below `\200` is that character (the kernel writes space,
+/// tab, newline and backslash as `\040 \011 \012 \134`; operator vote 97), and
+/// anything else stays as written. coreutils' nsmount reads the same lines.
+fn ns_unescape(field: &str) -> String {
+    let b = field.as_bytes();
+    let mut out = String::with_capacity(field.len());
+    let (mut i, mut lit) = (0, 0);
+    while i < b.len() {
+        if b[i] == b'\\' && i + 4 <= b.len() && b[i + 1..i + 4].iter().all(|c| (b'0'..=b'7').contains(c)) {
+            let v = (b[i + 1] - b'0') as u32 * 64 + (b[i + 2] - b'0') as u32 * 8 + (b[i + 3] - b'0') as u32;
+            if v < 0o200 {
+                out.push_str(&field[lit..i]);
+                out.push(v as u8 as char);
+                i += 4;
+                lit = i;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    out.push_str(&field[lit..]);
+    out
+}
+
+/// What `/` is mounted from, per a namespace listing: the source of its
+/// `mount / <src>` line, unescaped. None when `/` has no such line, or when a
+/// union begun with `bind -a` lists the directory underneath first (`mount / /
+/// covered`): the root is then no mount's source.
+pub fn ns_root_source(text: &str) -> Option<String> {
+    for line in text.lines() {
+        let mut it = line.split(' ').filter(|f| !f.is_empty());
+        if it.next() == Some("mount") && it.next() == Some("/") {
+            let src = it.next()?;
+            if it.any(|flag| flag == "covered") {
+                return None;
+            }
+            return Some(ns_unescape(src));
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod ns_tests {
+    use super::*;
+
+    #[test]
+    fn the_root_source_unescaped() {
+        let text = "mount /srv #s\nmount / /srv/boot\\040disk remote\nbinds: 0\n";
+        assert_eq!(ns_root_source(text).as_deref(), Some("/srv/boot disk"));
+        assert_eq!(ns_root_source("mount / #r\nbinds: 0\n").as_deref(), Some("#r"));
+        assert_eq!(ns_root_source("mount / / covered\nmount / #r\n"), None, "a union's covered entry first");
+        assert_eq!(ns_root_source("mount /a\\040/ #9\nbinds: 0\n"), None, "an escaped space is not a field break");
+        assert_eq!(ns_root_source("mount /x #s\nbinds: 0\n"), None);
+        assert_eq!(ns_root_source("mount /\n"), None, "a line cut short");
+    }
+
+    #[test]
+    fn the_four_escapes_and_what_is_not_one() {
+        assert_eq!(ns_unescape("/a\\040b\\011c\\012d\\134e"), "/a b\tc\nd\\e");
+        assert_eq!(ns_unescape("/x\\04"), "/x\\04");
+        assert_eq!(ns_unescape("/x\\08y"), "/x\\08y");
+        assert_eq!(ns_unescape("/x\\200"), "/x\\200");
+        assert_eq!(ns_unescape("\\134134"), "\\134", "decoded once, left to right");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

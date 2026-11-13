@@ -69,6 +69,9 @@ deleted when the layer is unbound.
 
 `ns` lists the shell's mounts and binds, one entry each, with the name that was
 mounted onto, the source and the flags. `ns PID` lists those of process `PID`.
+A tab or newline in a name shows as `?` in the table. The file `ns` reads,
+`/proc/PID/ns`, writes a space in a name as `\040`, a tab as `\011`, a newline
+as `\012` and a backslash as `\134`, and `ns --color=never` prints it as it is.
 
 ### Command reference
 

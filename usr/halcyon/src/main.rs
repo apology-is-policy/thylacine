@@ -1443,24 +1443,14 @@ fn own_ns_path() -> String {
 }
 
 /// What `/` is mounted from, per this process's own namespace listing
-/// (`mount / <src>` in /proc/<pid>/ns -- devproc serves no `self`). The kernel
-/// serves that listing in windows, so it is read to the end.
+/// (`halcyon::ns_root_source`; devproc serves no `self`). The kernel serves that
+/// listing in windows, so it is read to the end. Shown in one line of text, so a
+/// control character in the name shows as `?`.
 fn root_source() -> Option<String> {
     let bytes = read_capped(&own_ns_path(), 64 * 1024).ok()?;
     let text = core::str::from_utf8(&bytes).ok()?;
-    for line in text.lines() {
-        let mut it = line.split_whitespace();
-        if it.next() == Some("mount") && it.next() == Some("/") {
-            let src = it.next()?;
-            // A union begun with `bind -a` lists the directory underneath first
-            // (`mount / / covered`): the root is then no mount's source.
-            if it.any(|flag| flag == "covered") {
-                return None;
-            }
-            return Some(String::from(src));
-        }
-    }
-    None
+    let src = halcyon::ns_root_source(text)?;
+    Some(src.chars().map(|c| if c.is_control() { '?' } else { c }).collect())
 }
 
 /// The loaded systems: init's children among every Proc /proc lists -- (name,

@@ -337,7 +337,12 @@ and turns the pure crate into acts: `layout save|restore|list|delete` and
 exercises is still adjudicated in [[sub-tapestryd]], not conferred by anything it
 holds (it takes no capability, no `SPAWN_PERM`, and adds no server verb -- the
 authority is the user's own principal). Its welcome transcript points at the tile's
-namespace listing by pid, `/proc/<pid>/ns`: devproc serves no `self`. The tour's
+namespace listing by pid, `/proc/<pid>/ns`: devproc serves no `self`. Its title
+deck says what `/` is mounted from: `ns_root_source`, in the pure lib and
+host-tested, takes the source of the `mount / <src>` line, unescaped (the
+kernel writes space, tab, newline and backslash as `\040 \011 \012 \134`,
+vote 97), and none for a union's covered entry; the herald shows a control
+character in it as `?`. The tour's
 "Loaded systems" list is init's children among every Proc `/proc` lists
 ([[sub-libthyla-rs]] `procs::list`), at most ten by pid; a set it cannot read
 whole shows no list. A tile's output is pixels, so the tour says one line on the
