@@ -22,6 +22,45 @@ needed the operator.
 
 
 ---
+## 2026-11-13 (aux): the input station's residue, /mnt/mac fixed by four votes, and a blank restore told to the compositor
+
+Stamped 2026-11-13T22:11Z. Branch aux-3-mac after 5d674a326's entry: 39d8ca95b (the input witnesses), 24890b0ab (the /mnt/mac scripture), a1ca01f53 (R4-F3's code), and this entry's commit (R4-F3's scenario, dossiers and Astra's handoff 057).
+
+### What it is
+
+- **The input station's residue.** Round R3's F6 and F8 had no regression test because the code sat in tapestryd's main loop and server. `tapestryd::pointer` (the tablet's and mouse's event decode) and `tapestryd::display_stall` (the display stall aim) are now modules with host tests, 11 of them; 14 mutants each turn one red (aux-gate resid/r5-mut.py). The tablet's axes across an episode (P3) were closed by reading QEMU 11.1.3's source: the tablet sends both axes in every frame, and frames arrive whole.
+- **The interop station's four questions**, asked at once (AskUserQuestion, about 18:25Z) and voted as recommended. M10: a channel per session; the new virtio-serial driver frames the one port and posts `/srv/mac`, and login mounts it in each session. M11: version 1 of the tree is `snarf` and `folders/<name>/`. M12: Quit presses the `virt` machine's power button. R4-F3: Lictor reports a blank restore. MAC-RUNNER 4.4 is rewritten as the contract (24890b0ab), from two read-only research agents (aux-gate resid/research-interop.md). E1 and TOOLING.md section 4 described the dev loop's host0 9P share as in use; nothing in the guest drives or mounts it, so both now say so.
+- **R4-F3.** A frame main's restore gives up left the compositor believing its bind, and a composed display stayed blank until a mode change. `Stats.restores_blank` counts every restore that ends `Blank` (corona's ask on yip call 0313: every one, not only a refused frame). The proxy marks the scanout unknown when the count moves, and tapestryd binds again and says why (a1ca01f53). This commit adds the witness `ls-graphical-sak-blank`. In episode 1 the lever refuses the restore's rebind; Lictor gives the frame up, and tapestryd binds the same resource again with nothing typed. Typing must then change the dumped scanout. Episode 2, the shot spent, rebinds its frame and nothing is bound.
+
+### Wrong turns, and what caught each
+
+- **A name already taken.** The display stall aim was first written as `StallAim` with a field `test_stall_aim`, and server.rs already had both for the warp lever. The build caught it; the module became `display_stall` and the field `test_stall_display`. Now in the traps: grep a name before adding it.
+- **A production check that finished in 0.78 s** read as a check, but it had rebuilt nothing. Touching the changed files forced `Checking tapestryd`.
+- **A colour count would have passed a blank output.** `ls-display-follow`'s first test of a picture is the number of colours in a sample. QEMU replaces a disabled scanout with a placeholder that has text on it, so that test passes on a blank output. The new scenario asks instead that typing change the dump, and its baseline shows that typing changes it on a bound screen.
+- **The handoff's number.** The plan said 056, and corona's captures note had taken it. Listing the directory caught it, so the note is 057.
+- **A premise checked before the wait was written.** The scenario waits for the rebind with nothing typed. That holds only if tapestryd hears the count on its own. It does: its fence pump calls `poll_completions` every pass (server.rs `warp_service_fences`), an invocation whose reply carries `Stats`, and `bind_pump` runs right after it (main.rs).
+
+### Evidence
+
+- Host, at a1ca01f53: lictor 128 host tests, tapestryd 143; the guest and production builds of both check (forced). Seven mutants of `gpu_api` (the rule three ways, the opcode both ways, the word, the field's place on the wire) each turn a test red (resid/r5-f3-mut.py, `R5-F3-MUT DONE bad=0`, the file restored by hash).
+- A scripted guest for `ls-graphical-sak-blank` (aux-gate scendry-blank/run.sh, `SCENDRY-BLANK DONE bad=0`): the clean run, the legal reordering (the bind before Lictor's closing line) and all of episode 1's lines in one write are green. Twenty faults are each red at their own text: no lever, a refused or doubled arming, no shot, no injected refusal, no bind (where the picture check reports the output stayed blank), a late or failed bind, the wrong resource, two binds, a bind before the frame was given up, the close before it, a stall, a failed seat, no corvus line, a frozen picture after the bind or at the baseline, and in the control a shot, a bind or a late bind.
+- check-expect-forms, check-console-lines, check-audit-rows, check-doc-tables pass; vault lint 0 fails.
+
+### Decided by the operator
+
+M10, M11, M12 and R4-F3, as above. Nothing was decided under the 2026-09-01 authorization: the session is Opus.
+
+### What "shown" covers
+
+R4-F3 on the host: the rule and the wire. The count in `Device::restore`, the proxy's adopt and tapestryd's line are guest code, and only the scenario, against a scripted guest, has been run over them. Not run in a guest, and not audited (round R5).
+
+### Open
+
+- R4-F3 in a guest: `ls-graphical-sak-blank` green, red with the proxy's marking taken out (the display must stay blank), and red with `restore_blanked` taken out (`bound, late`). Then round R5.
+- corona's bring-up and health-step aims onto `TestStallShot` (yip call 0313; next).
+- The interop build: the virtio-serial driver, login's mount, the app's 9P server, the power-key driver, each with its audit row.
+- HALCYON_SCALE and HALCYON_MOTION have no guest scenario; #880; Control-Command-G never pressed; one `--stats` run is asked of the operator; QEMU's `max_hostmem` default of 256 MiB against M9. The full CI gate is held. Codeberg is behind.
+
 ## 2026-11-13 (aux): main merged in, the close chord kept off the console, and what a guest found that the host checks did not
 
 Stamped 2026-11-13T16:12Z. Branch aux-3-mac after f8cc8b92d: dec586896 (the merge of main e28cc34ea), a4810d031 (R3-F9, the operator's vote), 54dd5cc2e (guest run 3's two scenario repairs), 5d674a326 (round R4's close), and this entry's commit.

@@ -382,7 +382,10 @@ a scanout command is accepted, what the device scans is not known.
 [[sub-lictor]]'s proxy keeps that as `Gpu::scanout_unsettled`, for every
 scanout command this compositor sends from anywhere in it: set when one was
 sent and the broker's stall count moved inside the call, cleared by one that
-is accepted, left as it is by a refusal that was answered.
+is accepted, left as it is by a refusal that was answered. A restore of the
+seat's that ended on a blank output unsettles it too (R4-F3): the broker counts
+those (`Stats::restores_blank`), every reply carries the count, and the proxy
+marks the scanout unknown on a reply where it moved.
 
 Round 2 had the compositor keep a flag of its own, set by hand at the three
 places that bind a screen. Round 3 found a fourth bind that nobody had marked:
@@ -423,7 +426,12 @@ anything else is shown or the buffer is destroyed. Audit round 4 found it; its
 path runs only on a GL host, so it is not changed with this section.
 
 `composed_bind_holds()` binds the screen again when `composed_bound()` is
-false and says `tapestryd: scanout composed (WxH) res N bound, late`. An
+false and says `tapestryd: scanout composed (WxH) res N bound, late`. It says
+`... bound again: the seat returned to a blank output` instead when the proxy's
+`restore_blanked` says a trusted episode's restore disabled the output (the frame
+given up at the restore, [[sub-lictor]]). The fence pump's call each pass carries
+the count, so that bind comes on the first pass after the seat returns
+(`ls-graphical-sak-blank`). An
 accepted bind settles what the device scans, because the device takes its
 commands in order: a bind sent earlier and never answered was executed before
 this one or never will be. Then what the host holds is established again,
@@ -1636,7 +1644,10 @@ composition health step (below), and three at binds of the display's
 broker the same way (`Request::TestArmChained`) to make each of the next two
 trusted takeovers wait on the device twice in series, and tapestryd says
 `test-latch-chained armed` on the console once the broker accepts it
-(`tools/interactive/ls-graphical-sak-chained.exp`). The battery and its expect
+(`tools/interactive/ls-graphical-sak-chained.exp`). `thylacine.test-latch-restore`
+arms `Request::TestArmRestore`, which has the next trusted episode's restore refuse
+its rebind of this compositor's frame, and tapestryd says `test-latch-restore armed`
+(`tools/interactive/ls-graphical-sak-blank.exp`). The battery and its expect
 scenario (`usr/tapestry-battery/src`, `tools/interactive/ls-gfx-panes.exp`)
 are UNOWNED -- their reference lives in `docs/reference/139-tapestryd.md`
 (the gate paragraph); the coverage sweep is

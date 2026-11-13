@@ -1,0 +1,251 @@
+#!/usr/bin/expect -f
+# ls-graphical-sak-blank -- a trusted episode whose restore gives the compositor's
+# frame up, and a compositor that binds its screen again (audit R4-F3; operator
+# vote 2026-11-13, "Lictor reports it").
+#
+# At the end of a trusted episode lictor binds the compositor's last frame again.
+# A frame the device refuses is the client's to lose, not the episode's, so lictor
+# gives it up and disables the output: the seat returns to a blank output. Nothing
+# told the compositor, which went on believing its bind, and a composed display
+# stayed blank until its next mode change. Lictor now counts every restore that
+# ends blank (Stats.restores_blank), every reply carries the count, the proxy marks
+# the scanout unknown when it moves, and tapestryd's next pass binds its screen
+# again and says why.
+#
+# THYLACINE_TEST_LATCH_RESTORE=1 puts thylacine.test-latch-restore on the kernel
+# command line: tapestryd arms lictor's lever, which has the first trusted
+# episode's rebind of the compositor's frame answered refused before it is sent.
+#
+# Episode 1 (the shot): an empty episode, the chord and then Return. The lever
+# refuses the rebind, lictor gives the frame up and closes the episode on a blank
+# output, and tapestryd binds the same resource again, saying the seat returned to
+# a blank output, with nothing typed. Then a command typed into the shell must
+# change the scanout QEMU dumps: a disabled output shows QEMU's placeholder, which
+# nothing the compositor draws can change (and which has text on it, so a count
+# of its colours would not tell it from a screen).
+#
+# Episode 2 (the control, one variable away): the lever has no shot left, the
+# restore rebinds the frame, the count does not move, and tapestryd binds nothing.
+#
+# Requires HALCYON_SESSION=y: the seat runs under the session compositor.
+set ::env(THYLACINE_ACCEL) [expr {[info exists ::env(LS_CI_GFX_ACCEL)] ? $::env(LS_CI_GFX_ACCEL) : "hvf"}]
+set ::env(THYLACINE_SERIAL_SAK) 0
+set ::env(THYLACINE_TEST_LATCH_RESTORE) 1
+source [file join [file dirname [info script]] lib.exp]
+set repo $lc_repo
+set qmp [lc_qmp_sock]
+set ppm /tmp/ls-graphical-sak-blank-[pid].ppm
+# The whole serial stream: the lever's arming is said before the login prompt,
+# and the counts at the end are over the whole run.
+set transcript /tmp/ls-graphical-sak-blank-[pid].log
+
+lc_require_image {SESSION}
+
+source [file join [file dirname [info script]] display-follow.tcl]
+catch {file delete -force $transcript $ppm}
+log_file -a $transcript
+
+set BOUND_AGAIN {tapestryd: scanout composed \(([0-9]+x[0-9]+)\) res ([0-9]+) bound again: the seat returned to a blank output}
+
+proc key {chord} {
+    global repo qmp
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -k $chord} e]} { lc_fail $e }
+    after 700
+}
+proc type {text} {
+    global repo qmp
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp $text} e]} { lc_fail $e }
+}
+proc witness {stage} {
+    type "caps-probe --seat-$stage\n"
+    global timeout
+    set timeout 30
+    expect {
+        -ex "seat-probe: PASS $stage (endpoint denied; GPU denied; DAC verified)" { lc_step "typing reaches the shell ($stage)" }
+        -ex "seat-probe: FAIL" { lc_fail "guest authority witness failed ($stage)" }
+        -re {EXTINCTION:} { lc_extinction_fail "seat $stage" }
+        timeout { lc_fail "no authority witness ($stage) -- typing did not reach the shell" }
+        eof { lc_fail "EOF ($stage)" }
+    }
+}
+# The digest of the scanout QEMU dumps (display-follow.tcl's `dims`).
+proc digest {label} {
+    set d [dims]
+    if {$d eq ""} { lc_fail "no dump of the scanout ($label; $::dims_why)" }
+    return [lindex $d 3]
+}
+# Typing reaches the shell, and the scanout's picture changes with it.
+proc shown {stage} {
+    set before [digest "before $stage"]
+    witness $stage
+    for {set i 0} {$i < 12} {incr i} {
+        if {[digest $stage] ne $before} {
+            lc_step "the scanout's picture changed with the typing ($stage)"
+            return
+        }
+        after 700
+    }
+    lc_fail "the scanout's picture did not change with the typing ($stage): the device does not scan the compositor's screen"
+}
+# For a failure's message: does the picture follow typing now?
+proc picture_now {} {
+    set before [lindex [dims] 3]
+    if {$before eq ""} { return "no dump: $::dims_why" }
+    type "caps-probe --seat-bound\n"
+    for {set i 0} {$i < 12} {incr i} {
+        after 700
+        set now [lindex [dims] 3]
+        if {$now ne "" && $now ne $before} { return "the picture changed once a command was typed" }
+    }
+    return "the picture did not change when a command was typed: the output stayed blank"
+}
+# The chord, the trusted scanout, then Return: an episode with nothing pending.
+proc episode {name} {
+    global timeout
+    key "ctrl+alt+f10"
+    set timeout 30
+    expect {
+        -re {EXTINCTION:} { lc_extinction_fail "the $name episode's takeover" }
+        -re {lictor: seat failed: [^\r\n]*} { lc_fail "the $name episode: $expect_out(0,string)" }
+        -ex "lictor: trusted scanout active" { lc_step "the $name episode: the trusted scanout is up" }
+        timeout { lc_fail "the $name episode: no trusted scanout within 30s of the chord" }
+        eof { lc_fail "EOF at the $name episode's takeover" }
+    }
+    after 1000
+    key "ret"
+}
+
+lc_boot
+set timeout $lc_boot_timeout
+expect {
+    -ex "tapestryd: test-latch-restore arm REFUSED by the broker" { lc_fail "the broker refused the restore lever" }
+    -ex "Thylacine login: " {}
+    -re {EXTINCTION:} { lc_extinction_fail "boot" }
+    timeout { lc_fail "no login" }
+    eof { lc_fail "EOF before login" }
+}
+lc_raw_send "michael\r" "login user"
+expect {
+    -ex "password: " {}
+    timeout { lc_fail "no password prompt" }
+    eof { lc_fail "EOF before password" }
+}
+lc_raw_send "correct-horse-battery-staple-v1\r" "login password"
+expect {
+    -ex "login: session compositor (halcyond) spawned" {}
+    timeout { lc_fail "no graphical session" }
+    eof { lc_fail "EOF at session start" }
+}
+set timeout 60
+expect {
+    -re {halcyond: status bar [^\r\n]*running false panes 2} {}
+    -re {EXTINCTION:} { lc_extinction_fail "session" }
+    timeout { lc_fail "welcome and shell did not become ready" }
+}
+after 1500
+key "meta_l+f"
+# The positive control for the picture witness: typing changes a bound screen.
+shown baseline
+
+# ---- episode 1: the restore's rebind refused; the compositor binds again ----
+episode shot
+set said 0
+set injected 0
+set refused 0
+set closed 0
+set bound 0
+set lres ""
+set tres ""
+set timeout 30
+expect {
+    -re {EXTINCTION:} { lc_extinction_fail "the shot episode's restore" }
+    -re {lictor: seat failed: [^\r\n]*} { lc_fail "the shot episode: $expect_out(0,string)" }
+    -re {lictor: restore met a stall[^\r\n]*} { lc_fail "the shot episode: the restore met a stall where the shot answers refused: $expect_out(0,string)" }
+    -re {lictor: episode closed: frame rebound generation=[0-9]+} {
+        lc_fail "the shot episode closed with the frame rebound -- the lever's shot did not fire (was it armed?)"
+    }
+    -re {tapestryd: scanout composed \([0-9]+x[0-9]+\) res [0-9]+ (bound, late|BIND FAILED)[^\r\n]*} {
+        lc_fail "the shot episode: tapestryd's bind did not say the seat returned to a blank output: $expect_out(0,string)"
+    }
+    -re {corvus: imperium: SAK with nothing pending|lictor: the restore's rebind refused \(INJECTED by test-latch-restore\)|lictor: the compositor's frame \(resource [0-9]+\) was refused at the restore; the seat returns to a blank output|lictor: episode closed: output blank generation=[0-9]+|tapestryd: scanout composed \([0-9]+x[0-9]+\) res [0-9]+ bound again: the seat returned to a blank output} {
+        # One alternation: the episode's end, lictor's restore and tapestryd's next
+        # pass are three processes, and the seat is NORMAL again (so tapestryd runs)
+        # before lictor says the episode closed.
+        set hit $expect_out(0,string)
+        if {[string match "corvus:*" $hit]} {
+            set said 1
+        } elseif {[string match "*INJECTED*" $hit]} {
+            set injected 1
+        } elseif {[string match "*was refused at the restore*" $hit]} {
+            if {!$injected} { lc_fail "the shot episode: lictor gave the frame up with no refusal injected: $hit" }
+            regexp {resource ([0-9]+)} $hit -> lres
+            set refused 1
+        } elseif {[string match "*episode closed*" $hit]} {
+            if {!$refused} { lc_fail "the shot episode closed on a blank output before lictor gave the compositor's frame up: $hit" }
+            set closed 1
+        } else {
+            if {!$refused} { lc_fail "the shot episode: tapestryd bound its screen again before lictor gave the frame up: $hit" }
+            if {$bound} { lc_fail "the shot episode: tapestryd bound its screen again twice for one blank restore: $hit" }
+            regexp {res ([0-9]+) bound again} $hit -> tres
+            set bound 1
+        }
+        if {!($said && $injected && $refused && $closed && $bound)} { exp_continue }
+    }
+    timeout {
+        if {$closed && !$bound} {
+            lc_fail "the shot episode closed on a blank output and tapestryd did not bind its screen again within 30s; [picture_now]"
+        }
+        lc_fail "the shot episode: within 30s: said=$said injected=$injected refused=$refused closed=$closed bound=$bound"
+    }
+    eof { lc_fail "EOF at the shot episode's restore" }
+}
+if {$lres ne $tres} { lc_fail "the shot episode: lictor gave resource $lres up and tapestryd bound resource $tres again" }
+lc_step "the shot episode: lictor gave the compositor's frame (resource $lres) up at the restore and closed on a blank output; tapestryd bound it again and said why"
+after 1500
+shown bound
+
+# ---- episode 2: the control -- no shot left, the frame rebound, nothing bound ----
+episode control
+set said 0
+set closed 0
+set timeout 30
+expect {
+    -re {EXTINCTION:} { lc_extinction_fail "the control episode's restore" }
+    -re {lictor: seat failed: [^\r\n]*} { lc_fail "the control episode: $expect_out(0,string)" }
+    -ex "INJECTED by test-latch-restore" { lc_fail "the control episode met the restore lever's shot: the lever has one" }
+    -re {lictor: the compositor's frame \(resource [0-9]+\) was refused at the restore[^\r\n]*} {
+        lc_fail "the control episode gave the compositor's frame up: $expect_out(0,string)"
+    }
+    -re {lictor: episode closed: output blank generation=[0-9]+} { lc_fail "the control episode closed on a blank output" }
+    -re {tapestryd: scanout composed \([0-9]+x[0-9]+\) res [0-9]+ (bound again|bound, late|BIND FAILED)[^\r\n]*} {
+        lc_fail "the control episode: tapestryd bound its screen though the restore rebound the frame: $expect_out(0,string)"
+    }
+    -re {corvus: imperium: SAK with nothing pending|lictor: episode closed: frame rebound generation=[0-9]+} {
+        if {[string match "corvus:*" $expect_out(0,string)]} { set said 1 } else { set closed 1 }
+        if {!($said && $closed)} { exp_continue }
+    }
+    timeout { lc_fail "the control episode: within 30s: said=$said closed=$closed" }
+    eof { lc_fail "EOF at the control episode's restore" }
+}
+lc_step "the control episode: the restore rebound the compositor's frame"
+after 1500
+shown control
+
+# Over the whole run: the lever armed once, one rebind and that one said why, no
+# late bind, and no episode failed. The control's silence is checked here too, over
+# the window its witness ran in.
+log_file
+set fh [open $transcript r]
+fconfigure $fh -translation binary
+set seen [read $fh]
+close $fh
+set armed [regexp -all {tapestryd: test-latch-restore armed} $seen]
+if {$armed != 1} { lc_fail "the restore lever was armed $armed times (the transcript)" }
+if {[regexp {lictor: seat failed: [^\r\n]*} $seen hit]} { lc_fail "a trusted episode failed: $hit" }
+set again [regexp -all $BOUND_AGAIN $seen]
+if {$again != 1} { lc_fail "tapestryd bound its screen again $again times over the run, not once" }
+set late [regexp -all {tapestryd: scanout composed \([0-9]+x[0-9]+\) res [0-9]+ bound, late} $seen]
+if {$late != 0} { lc_fail "tapestryd bound its screen late $late times over the run" }
+lc_pass "graphical SAK blank: a restore that gave the compositor's frame (resource $lres) up was told to the compositor, which bound its screen again by itself and said why, and the screen took typing again; the next episode rebound its frame and nothing was bound"
+catch {file delete -force $transcript $ppm}
+lc_quit

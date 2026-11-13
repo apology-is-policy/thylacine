@@ -593,7 +593,8 @@ counter tells a caller whether its command stalled, and a stalled bind
 condemns its resource, because the display may name it once the device
 catches up. Every reply carries the engine state (live, stalled, dead), the
 stall count and the count as its request began (`stalls_begun`, sampled by the
-serve loop) in its `Stats`, an error reply included, so a one-request span
+serve loop), and the count of restores that ended on a blank output
+(`restores_blank`, in the restore paragraph below) in its `Stats`, an error reply included, so a one-request span
 reads on its own reply, untouched by a stall met between two requests. The client keeps the last
 one (`rpc_client::Client::stats`), and the GPU proxy adopts it on every reply,
 so a caller reads a failed step against the state it left. The host-tested
@@ -628,7 +629,8 @@ start (`backend::bootargs`, read to the file's end; a line that cannot be read o
 that fills the 1024-byte buffer reads as none), and `TestArmLatch` is `BadField`
 unless the whole word is on that line (`gpu_api::bootarg_declared`,
 `TEST_LEVERS_WORD`). `TestArmChained` is refused the same way without
-`thylacine.test-latch-chained` (`TEST_CHAINED_WORD`). tapestryd asks only on a boot
+`thylacine.test-latch-chained` (`TEST_CHAINED_WORD`), and `TestArmRestore` without
+`thylacine.test-latch-restore` (`TEST_RESTORE_WORD`). tapestryd asks only on a boot
 it reads as declared, through the same matcher, so a stock image asks nothing and
 prints nothing. A refusal therefore marks a compositor that asked undeclared, or
 two readings that disagree: tapestryd says `arm REFUSED by the broker`, and Lictor
@@ -678,7 +680,8 @@ never has both kinds pending. The display's three aims (`ls-display-stall`,
 bring-up and health-step aims keep the arming's. A takeover needs test-mode, the bootarg and the
 operator's chord, and vote 30 recovers the seat. The bootarg is Lictor's own
 reading, not the compositor's: the latch, seat and stall-next shots fire only from
-counts `TestArmLatch` sets, and the chained shots only from `TestArmChained`'s.
+counts `TestArmLatch` sets, the chained shots only from `TestArmChained`'s, and the
+restore shot only from `TestArmRestore`'s.
 In a guest (2026-11-13, 12d96aa0d, aux-3-mac before it merged main): the lever
 scenarios arm on boots that declare the word; a compositor made to ask on a boot
 that declares nothing says `test-latch-dead arm REFUSED by the broker`; and with
@@ -914,11 +917,23 @@ so that frame counts as rebound). Such a frame is given
 up (`presentation` becomes `None`; lictor says `the compositor's frame
 (resource N) was refused at the restore`), so a client that spoils its own
 frame, by detaching its backing on a device that wants one, loses the picture
-until it binds a frame again and costs the episode nothing. Its repaint after
-the episode does not bring the picture back: tapestryd binds its screen only
-when it enters composed mode (`let entering = self.scanout !=
-Scanout::Composed;`, usr/tapestryd/src/server.rs), so the output stays blank
-until its next mode change. `Waiting`: the device has not
+until it binds a frame again and costs the episode nothing. The compositor is
+told (audit R4-F3; operator vote 2026-11-13, [[dec-2026-11-13-mac-interop]]): every
+restore that ends `Blank`, a frame given up or none presented, moves
+`Stats::restores_blank`, a wrapping count that every reply carries. The GPU proxy
+adopts it on every reply; when it moved, `gpu_api::scanout_unsettled_by_restore`
+(host-tested) marks the scanout unknown, and `Gpu::restore_blanked` names the cause
+until a scanout command is accepted. tapestryd's fence pump makes a call every pass,
+so on its first pass after the seat returns its `bind_pump` binds the screen again
+and says the seat returned to a blank output ([[sub-tapestryd]]). Before, its repaint
+left the output blank until its next mode change, because it binds its screen only
+when it enters composed mode. A restore that rebinds the frame leaves the count
+alone. The witness is `ls-graphical-sak-blank`, with its own lever,
+`Request::TestArmRestore` (opcode 74). Its shot, `SeatShot::RefuseRestore`, is taken
+before any other, so the 14 of `TestArmLatch` keep their order. It has the restore's
+rebind answered refused before it is sent (`Device::test_restore_refusal`), which
+`gpu_api::met` reads as `Met::Refused`; a second episode, the shot spent, rebinds its
+frame and nothing is bound. `Waiting`: the device has not
 answered, because the engine takes no synchronous command or a stall began
 across the restore's commands (`gpu_api::met`); nothing is concluded from a
 stall, so RESTORING (the seat's phase 3) returns and asks again on the next
@@ -1378,8 +1393,8 @@ Open after that review:
 
 - `test-mode` is still a default cargo feature of `lictor` and `tapestryd`, so
   every image carries the levers (the #880 strip-for-production class). Of the
-  armings a compositor can send, `TestArmLatch` and `TestArmChained` need their
-  word on the kernel's command line, read by Lictor. `ArmScanoutDisableRefusal`,
+  armings a compositor can send, `TestArmLatch`, `TestArmChained` and
+  `TestArmRestore` need their word on the kernel's command line, read by Lictor. `ArmScanoutDisableRefusal`,
   the compositor's self-test lever, is in every build and needs none; it is
   scoped instead: only a client's own disable spends it
   (`Gpu::set_scanout_client`), never a bind the broker issues for itself, so it
@@ -1419,6 +1434,11 @@ Open after that review:
   anything is granted (votes 30, 71, 72, 79); it must not make an authenticated
   episode fail, cancel its grant, keep the seat from returning, or make a broker
   command be skipped or act on another object.
+- The compositor told of a blank restore (R4-F3, the restore paragraph above) is
+  host-tested: seven mutants of `gpu_api` turn its tests red. Its scenario has run
+  against a scripted guest, every fault red. It is NOT YET RUN IN A GUEST, and is
+  not yet audited (round R5). Owed: `ls-graphical-sak-blank` in a guest, and red with
+  the proxy's marking taken out.
 - There is no layout under 800x720 layout pixels. A display smaller than that
   is given a screen of twice or more its size (since 2026-11-11; before that it
   refused the whole seat at startup), which the frontend shows scaled down.

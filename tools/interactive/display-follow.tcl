@@ -1,7 +1,7 @@
 # tools/interactive/display-follow.tcl -- what the scenarios about a display
 # that follows its host share (ls-display-follow.exp, ls-display-stall.exp,
 # ls-display-follow-declared.exp, ls-display-follow-edid.exp,
-# ls-graphical-sak-follow.exp, ls-graphical-sak-unmade.exp).
+# ls-graphical-sak-follow.exp, ls-graphical-sak-unmade.exp, ls-graphical-sak-blank.exp).
 #
 # Not a scenario: tools/test-interactive.sh runs every *.exp in this directory,
 # and this is not one. tools/check-expect-forms.py reads it with them. Sourced
