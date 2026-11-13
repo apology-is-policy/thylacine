@@ -104,9 +104,13 @@ processes that paint chrome and glyphs, and what the bakes need.
   the 1.0 the whole tree is built and gated at, said once on the boot
   line with the raw millimetres.
 - **Overrides, in precedence order**: the `scale <pct>` ctl verb (section
-  4) beats everything for the rest of the session; `scale auto`
-  re-derives. The user's `/env/HALCYON_SCALE` is not a third source: the
-  session compositor reads it at start and WRITES the verb (section 6).
+  4) beats everything until it is replaced or put down; `scale auto`
+  puts it down and re-derives. An override is the seat's, not a
+  session's: the compositor keeps it across a logout, so every session
+  states its scale at its start (section 6) and the override of the one
+  before it ends there. The user's `/env/HALCYON_SCALE` is not a third
+  source: the session compositor reads it at start and WRITES the verb
+  (section 6).
 - **The platform's declaration** (SC-5, 2026-09-08): `thylacine.scale=<pct>`
   on the kernel command line, read ONCE at boot from `/hw/chosen/bootargs`
   (the channel joey's opt-outs and aurora's display mode already ride;
@@ -309,12 +313,31 @@ LOGICAL pixels, scaled at the carve like the rest.
   cleared (heights depend on metrics now), every tile reflowed and its
   pts resized, chrome + status + menu repainted at their new surface
   sizes (the CONFIGUREs deliver those).
-- **The user's override**: `/env/HALCYON_SCALE=<pct>` (the `/env` device;
-  halcyond already reads `HALCYON_SESSION` and `HALCYON_PALETTE` there)
-  -- the session compositor writes `scale <pct>` once at start, after
-  `session on`. It is a preference, not a source: the compositor stays
-  the authority and the ctl the channel, so the carve and the paint can
-  never disagree.
+- **The session states its scale**: the session compositor writes the
+  verb once at start, after `session on`, whatever the user's word in
+  `/env/HALCYON_SCALE` (the `/env` device; halcyond already reads
+  `HALCYON_SESSION` and `HALCYON_PALETTE` there): `scale <pct>` when it
+  holds one of the five values; `scale auto` when it is absent, empty or
+  the word `auto`; `scale auto` and a line said when it holds anything
+  else (`libhalcyon::scale::stated`, host-tested). It is a preference,
+  not a source: the compositor stays the authority and the ctl the
+  channel, so the carve and the paint can never disagree.
+- **Why it is written with no preference to send** (2026-11-13, ratified
+  under the standing 2026-09-01 authorization): an override outlives the
+  session that set it (section 3), and until this rule nothing sent
+  `scale auto` -- a chord's step, or one user's preference, stood for
+  whoever logged in next. The rule is the tree's own twice over: login
+  resets the palette before every session's push so that the push of the
+  session before dies there (AURORA-CONFIG 3.2, reset-first), and the
+  session forwards the motion preference even when it agrees with the
+  default, because a preference sent only when it differs cannot be told
+  from silence. Turned down: the compositor putting the override down when
+  the session departs (that step runs while login prints its prompt and
+  says nothing, and it would make the compositor a second writer of what
+  a session states); an override per session beside one for the console
+  (two levels where one statement does). The limit: between two sessions
+  the last override stands on the login screen. Witness:
+  `tools/interactive/ls-halcyon-scale-session.exp`.
 - **A live control**: two chord actions, `ScaleStep(+1)` / `ScaleStep(-1)`
   (one 25% step, clamped) and `ScaleReset` (`scale auto`), on the RUNTIME
   chord table (`chords.rs`; remappable by the gated `chord` verb like the

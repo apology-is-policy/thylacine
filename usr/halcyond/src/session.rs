@@ -1500,44 +1500,46 @@ fn write_user_pick(home: Option<&str>, id: &str) -> bool {
     ok
 }
 
-/// HALCYON-SCALE 6: the user's `/env/HALCYON_SCALE` preference, written
-/// once as the gated `scale <pct>` verb (retried through the per-pass verb
-/// budget). Absent: nothing; unparsable or off the five values: said and
-/// ignored; refused (the seat is not ours): said -- the compositor's own
-/// scale stands either way.
+/// HALCYON-SCALE 6: the scale this session states at its start, written
+/// once as the gated `scale` verb (retried through the per-pass verb
+/// budget): the user's `/env/HALCYON_SCALE` when it holds one of the five
+/// values, `scale auto` otherwise. Sent whatever the word, as the motion
+/// verb is: an override is the seat's and stands until it is replaced or
+/// put down, so a session that said nothing would begin at the scale the
+/// one before it left. Refused (the seat is not ours): said -- the
+/// compositor's own scale stands.
 fn request_env_scale(ring: &EventRing) {
-    let Some(text) = read_file(libthyla_rs::T_WALK_OPEN_FROM_ROOT, HALCYON_SCALE_ENV_PATH) else {
-        return;
-    };
-    let want = text.trim();
-    let pct = match want.parse::<u16>() {
-        Ok(p) if scale::is_valid_pct(p) => p,
-        _ => {
+    let text = read_file(libthyla_rs::T_WALK_OPEN_FROM_ROOT, HALCYON_SCALE_ENV_PATH);
+    let (arg, why) = match scale::stated(text.as_deref()) {
+        scale::Stated::Pct(p) => (format!("{}", p), "set"),
+        scale::Stated::Auto if text.is_none() => (String::from("auto"), "absent"),
+        scale::Stated::Auto => (String::from("auto"), "set"),
+        scale::Stated::Unknown => {
             say!(
-                "halcyond: {} ignored: {:?} is not one of 100/125/150/175/200",
+                "halcyond: {} ignored: {:?} is not one of 100/125/150/175/200 or auto",
                 HALCYON_SCALE_ENV_PATH,
-                want
+                text.as_deref().unwrap_or("").trim()
             );
-            return;
+            (String::from("auto"), "ignored")
         }
     };
-    let cmd = format!("scale {}", pct);
+    let cmd = format!("scale {}", arg);
     for _ in 0..VERB_RETRIES {
         match ring.global_ctl(&cmd) {
             Ok(()) => {
-                say!("halcyond: scale {} requested ({})", pct, HALCYON_SCALE_ENV_PATH);
+                say!("halcyond: {} requested ({} {})", cmd, HALCYON_SCALE_ENV_PATH, why);
                 return;
             }
             Err(TapError::Busy) => {
                 let _ = sleep(Duration::from_millis(VERB_NAP_MS));
             }
             Err(e) => {
-                say!("halcyond: scale {} refused {:?} ({})", pct, e, HALCYON_SCALE_ENV_PATH);
+                say!("halcyond: {} refused {:?} ({} {})", cmd, e, HALCYON_SCALE_ENV_PATH, why);
                 return;
             }
         }
     }
-    say!("halcyond: scale {} not admitted (budget) ({})", pct, HALCYON_SCALE_ENV_PATH);
+    say!("halcyond: {} not admitted (budget) ({} {})", cmd, HALCYON_SCALE_ENV_PATH, why);
 }
 
 /// Forward the motion preference to the compositor as the gated `motion`
@@ -1726,9 +1728,9 @@ pub fn run(home: Option<String>) -> i64 {
         say!("halcyond: FAIL vendored face parse");
         return 1;
     }
-    // HALCYON-SCALE 6: the user's preference first -- written as the gated
-    // verb only once declared and hosting (the seat-held-while-hosting rule
-    // admits it; undeclared it would be refused) -- then the brain at the
+    // HALCYON-SCALE 6: the scale the session states first -- written as the
+    // gated verb only once declared and hosting (the seat-held-while-hosting
+    // rule admits it; undeclared it would be refused) -- then the brain at the
     // COMPOSITOR's scale, read off its ctl with the display (re-read on
     // every relayout below). The atlas bound follows the display area.
     if declared {

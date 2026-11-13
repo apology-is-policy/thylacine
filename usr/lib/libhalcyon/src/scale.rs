@@ -191,6 +191,34 @@ pub fn declared_scale(bootargs: &[u8]) -> Declared {
     out
 }
 
+/// The scale a session states at its start (HALCYON-SCALE 6): what
+/// `stated` made of the user's `/env/HALCYON_SCALE` word.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stated {
+    /// One of the five values: the session writes `scale <pct>`.
+    Pct(u16),
+    /// No word, an empty one, or `auto`: the session writes `scale auto`.
+    Auto,
+    /// A word that is none of those: the session says so and writes
+    /// `scale auto`.
+    Unknown,
+}
+
+/// What a session states of the scale, from the user's word alone. It states
+/// one whatever the word: an override is the seat's and stands until it is
+/// replaced or put down, so a session that said nothing would begin at the
+/// scale the one before it left.
+pub fn stated(word: Option<&str>) -> Stated {
+    let word = match word.map(str::trim) {
+        None | Some("") | Some("auto") => return Stated::Auto,
+        Some(word) => word,
+    };
+    match word.parse::<u16>() {
+        Ok(p) if is_valid_pct(p) => Stated::Pct(p),
+        _ => Stated::Unknown,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -362,5 +390,25 @@ mod tests {
         assert_eq!(declared_scale(b"xthylacine.scale=200"), None, "a letter before the key is another word");
         assert_eq!(declared_scale(b"thylacine.scalex=200"), None, "a longer key is another key");
         assert_eq!(declared_scale(b"thylacine.scale=150 thylacine.scale=bad"), Invalid, "the last token wins even when invalid");
+    }
+
+    #[test]
+    fn a_session_states_a_scale_whatever_the_users_word() {
+        use super::Stated::*;
+        // No word is not silence: the session puts the last one's override
+        // down.
+        assert_eq!(stated(Option::None), Auto);
+        assert_eq!(stated(Some("")), Auto, "an empty variable is an unset one");
+        assert_eq!(stated(Some(" \n")), Auto);
+        assert_eq!(stated(Some("auto")), Auto);
+        assert_eq!(stated(Some("auto\n")), Auto, "the word as echo writes it");
+        for (word, p) in [("100\n", 100u16), ("125\n", 125), ("150\n", 150), ("175\n", 175), ("200\n", 200)] {
+            assert_eq!(stated(Some(word)), Pct(p));
+        }
+        assert_eq!(stated(Some(" 150 ")), Pct(150));
+        // Off the table, or no number: said by the reader, and still stated.
+        for word in ["0", "99", "110", "225", "300", "99999", "1.5", "150%", "150 200", "AUTO", "automatic", "x"] {
+            assert_eq!(stated(Some(word)), Unknown, "{word:?}");
+        }
     }
 }

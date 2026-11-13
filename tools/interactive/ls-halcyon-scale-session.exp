@@ -1,0 +1,217 @@
+#!/usr/bin/expect -f
+# ls-halcyon-scale-session -- a scale chosen in one session ends with it.
+#
+# The compositor's scale override is the seat's: a chord sets it, and it
+# stands until it is replaced or put down. The compositor keeps it across a
+# logout, so a session states its scale at its start (HALCYON-SCALE 6): the
+# user's preference, else `scale auto`, which puts the override down. A
+# session that stated nothing would begin at the scale the one before it
+# left.
+#
+# One boot of the session image on a 1280x800 display declared at scale 100,
+# and two sessions of one user:
+#
+#   first:   the session begins at 100. Super+= makes it 125: the compositor
+#            says the chord's step and the session follows it. Every tile is
+#            closed, the session logs out, the login prompt returns.
+#   second:  the compositor says `scale 125 -> 100 (auto)`, which only the
+#            session's statement makes it say at this point, and the session
+#            begins at 100.
+#
+# The second session's first line about the scale is read whichever it is:
+# the compositor's change, the session's refusal, or the session beginning at
+# a scale. Beginning at 125 is the fault this scenario is for. Beginning at
+# 100 with no change said is a scale that moved before the session stated
+# one, which this scenario does not read.
+#
+# Requires the session image:
+#   THYLACINE_HALCYON_SESSION=1 THYLACINE_HALCYON_PROFILE=instrument tools/build.sh kernel --config ci
+set ::env(THYLACINE_ACCEL) [expr {[info exists ::env(LS_CI_GFX_ACCEL)] ? $::env(LS_CI_GFX_ACCEL) : "hvf"}]
+set ::env(THYLACINE_SERIAL_SAK) 0
+set ::env(THYLACINE_GPU_RES) 1280x800
+set ::env(THYLACINE_SCALE) 100
+source [file join [file dirname [info script]] lib.exp]
+set repo $lc_repo
+set qmp [lc_qmp_sock]
+
+proc key {chord} {
+    global repo qmp
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -k $chord} e]} {
+        lc_fail $e
+    }
+    after 1500
+}
+# The next line about the scale, the compositor's or the session's, whichever
+# comes first in the stream. One pattern: expect takes the first ARM that
+# matches anywhere in what it has read, not the first LINE.
+proc scale_line {what} {
+    set line ""
+    lc_within 60 {
+        -re {((?:tapestryd: scale \d+ -> \d+ \(|halcyond: scale auto refused|halcyond: scale auto not admitted|halcyond: scale \d+ \(cell|halcyond: scale \d+ -> \d+ \(cell)[^\r\n]*)[\r\n]} {
+            set line $expect_out(1,string)
+        }
+        -re {EXTINCTION:} {
+            lc_extinction_fail "$what"
+        }
+        timeout {
+            lc_fail "60s without $what"
+        }
+        eof {
+            lc_fail "EOF waiting for $what"
+        }
+    }
+    return $line
+}
+# The session began: its first line about the scale must be that it begins at
+# `pct`, unless `change` is the compositor's line that must come before it.
+proc begins_at {pct change which} {
+    set line [scale_line "the $which session's scale"]
+    if {$change ne ""} {
+        if {[regexp {^halcyond: scale auto (refused|not admitted)} $line]} {
+            lc_fail "the $which session's statement of its scale did not reach the compositor: '$line'"
+        } elseif {[regexp {^halcyond: scale (\d+) \(cell} $line -> got]} {
+            if {$got eq $pct} {
+                lc_fail "the $which session began at $pct and the compositor said no change: the scale moved before the session stated one, and this scenario does not read that"
+            }
+            lc_fail "the $which session began at $got, the scale the session before it left: it stated none, or the compositor did not act on it"
+        } elseif {$line ne $change} {
+            lc_fail "the $which session: read '$line' where '$change' was due"
+        }
+        lc_pass "the $which session stated its scale and the compositor put the override down: $change"
+        set line [scale_line "the $which session's scale after the compositor's change"]
+    }
+    if {![regexp {^halcyond: scale (\d+) \(cell} $line -> got]} {
+        lc_fail "the $which session: read '$line' where the session beginning at $pct was due"
+    } elseif {$got ne $pct} {
+        lc_fail "the $which session began at $got, not $pct"
+    }
+    lc_pass "the $which session began at $pct"
+}
+proc login {which} {
+    lc_raw_send "michael\r" "login user ($which session)"
+    expect {
+        -ex "password: " {
+        }
+        timeout {
+            lc_fail "no password prompt ($which session)"
+        }
+        eof {
+            lc_fail "EOF before password ($which session)"
+        }
+    }
+    lc_raw_send "correct-horse-battery-staple-v1\r" "login password ($which session)"
+    expect {
+        -ex "login: session compositor (halcyond) spawned" {
+        }
+        -ex "Thylacine textual shell" {
+            # A lever the image lacks is a SKIP, never a FAIL.
+            puts "\nLS-CI SKIP: default (ut) image -- this scenario drives the session\
+ compositor. Bake with: THYLACINE_HALCYON_SESSION=1 THYLACINE_HALCYON_PROFILE=instrument tools/build.sh kernel --config ci"
+            lc_quit
+            exit 77
+        }
+        timeout {
+            lc_fail "no graphical session ($which session)"
+        }
+        eof {
+            lc_fail "EOF at session start ($which session)"
+        }
+    }
+}
+proc ready {which} {
+    lc_within 60 {
+        -re {halcyond: status bar [^\r\n]*running false panes 2} {
+        }
+        -re {EXTINCTION:} {
+            lc_extinction_fail "the $which session"
+        }
+        timeout {
+            lc_fail "the $which session's welcome and shell did not become ready"
+        }
+        eof {
+            lc_fail "EOF before the $which session was ready"
+        }
+    }
+}
+
+lc_boot
+set timeout $lc_boot_timeout
+expect {
+    -ex "Thylacine login: " {
+    }
+    -re {EXTINCTION:} {
+        lc_extinction_fail "boot"
+    }
+    timeout {
+        lc_fail "no login"
+    }
+    eof {
+        lc_fail "EOF before login"
+    }
+}
+set timeout 60
+
+# The first session: nothing to put down, so the compositor says no change.
+login first
+begins_at 100 "" first
+ready first
+
+# A chord's step is the seat's override.
+after 1200
+key meta_l+equal
+set line [scale_line "the compositor's step at Super+="]
+if {$line ne "tapestryd: scale 100 -> 125 (chord)"} {
+    lc_fail "Super+=: read '$line' where 'tapestryd: scale 100 -> 125 (chord)' was due"
+}
+set line [scale_line "the session following the step"]
+if {![regexp {^halcyond: scale 100 -> 125 \(cell \d+x\d+\)$} $line]} {
+    lc_fail "Super+=: read '$line' where the session following to 125 was due"
+}
+lc_pass "Super+= made the scale 125 and the first session followed"
+
+# Every tile closed is the logout. A press that finds the session gone is one
+# the login screen is handed, and it has no such chord.
+set out ""
+for {set press 1} {$press <= 4 && $out eq ""} {incr press} {
+    after 1000
+    key meta_l+shift+q
+    lc_within 8 {
+        -re {halcyond: session logout \(code (\d+)\)[^\r\n]*[\r\n]} {
+            set out $expect_out(1,string)
+        }
+        -re {EXTINCTION:} {
+            lc_extinction_fail "the first session's logout"
+        }
+        timeout {
+        }
+        eof {
+            lc_fail "EOF at the first session's logout"
+        }
+    }
+}
+if {$out eq ""} {
+    lc_fail "four Super+Shift+Q and the first session did not log out"
+} elseif {$out ne "0"} {
+    lc_fail "the first session logged out with code $out"
+}
+lc_within 90 {
+    -ex "Thylacine login: " {
+    }
+    -re {EXTINCTION:} {
+        lc_extinction_fail "after the first session's logout"
+    }
+    timeout {
+        lc_fail "the login prompt did not return after the first session's logout"
+    }
+    eof {
+        lc_fail "EOF after the first session's logout"
+    }
+}
+lc_pass "the first session logged out at 125 and the login prompt returned"
+
+# The second session states its scale, and the override ends there.
+login second
+begins_at 100 "tapestryd: scale 125 -> 100 (auto)" second
+ready second
+lc_pass "a scale chosen in one session ended with it: the next session stated its own and began at 100"
+lc_quit

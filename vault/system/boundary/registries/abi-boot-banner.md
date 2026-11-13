@@ -35,6 +35,7 @@ mirrors:
   - "tools/interactive/ls-graphical-sak-follow.exp (EXTINCTION: only)"
   - "tools/interactive/ls-graphical-sak-unmade.exp (EXTINCTION: only)"
   - "tools/interactive/ls-graphical-sak-pointer.exp (EXTINCTION: only)"
+  - "tools/interactive/ls-halcyon-scale-session.exp (EXTINCTION: only)"
   - "tools/interactive/ls-halcyon-scale-fitted.exp (EXTINCTION: only)"
   - "tools/interactive/ls-gpu-dead.exp (EXTINCTION: only -- the dead-engine witness)"
   - "tools/interactive/ls-graphical-sak-dead.exp (EXTINCTION: only -- the dead-engine seat witness)"

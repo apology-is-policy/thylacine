@@ -38,7 +38,7 @@ hazards: []
 abis: [abi-halcyon-palette]
 design: ["docs/HALCYON.md section 13", "docs/HALCYON-VISUAL.md", "docs/HALCYON-INSTRUMENT.md", "docs/AURORA-CONFIG.md"]
 created: 2026-09-05
-updated: 2026-11-12
+updated: 2026-11-13
 ---
 ## Ordered ownership codec and journal
 
@@ -642,13 +642,24 @@ exact share, and calls this only for a display with no size; a percent a
 person gives is still refused when it is not one of the five. The sum is made
 in `u32`, so the largest `u16` there is lands on 200.
 
-**Tests.** 8 host tests: the operator's snap rule, the five values and their
+**`stated(word)`** is what a session states of the scale at its start
+(HALCYON-SCALE 6), from the user's `/env/HALCYON_SCALE` word alone: one of the
+five values is `Stated::Pct`; no word, an empty one or `auto` is `Stated::Auto`;
+anything else is `Stated::Unknown`, which the session says and then treats as
+`Auto`. There is no arm for saying nothing: an override is the seat's and
+outlives the session that set it, so [[sub-halcyond]] writes the verb at every
+start. It is the twin of `motion::stated`, and for the same reason: a
+preference sent only when it differs cannot be told from silence.
+
+**Tests.** 9 host tests: the operator's snap rule, the five values and their
 steps, every `u16` having a nearest of the five with each boundary between two
 of them, the pixel helpers' rounding, the EDID parse's fail-safe arms, an aspect
 ratio where the size goes being no size (and a size a millimetre off one being
 a size), a short
 millimetre axis never truncating off the table (the clamp-ordering regression),
-and the declaration being the last whole-word token with a table value.
+the declaration being the last whole-word token with a table value, and a
+session stating a scale whatever the user's word (eight mutants of `stated`,
+each red in that test).
 
 **`scale.rs` has a second crate's tests.** The Mac app compiles this file into
 its own unit tests (`macrunner/app/src/main.rs`, a `#[path]` module) and sweeps

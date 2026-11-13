@@ -58,7 +58,7 @@ hazards: [haz-budget-stored-not-derived]
 abis: [abi-halcyon-palette]
 design: ["docs/HALCYON.md", "docs/BEACON.md", "docs/KAUA-TERM.md", "docs/HALCYON-INSTRUMENT.md"]
 created: 2026-09-05
-updated: 2026-11-03
+updated: 2026-11-13
 ---
 ## Modal status presentation
 
@@ -2115,6 +2115,40 @@ headers, HALCYON 14.7.2 and these bullets; four repeatable lines still
 unthrottled; the size half of the raster key untested, with `LaidImage` carrying
 a size its raster could contradict (it now carries none); and view's 16-bit PNG
 peak misstated (zune holds the inflated stream beside its output).
+
+## The session states its scale (2026-11-13)
+
+`request_env_scale` writes the gated `scale` verb once at every session's
+start, after the declaration, whatever `/env/HALCYON_SCALE` holds
+(HALCYON-SCALE 6): `scale <pct>` for one of the five values, `scale auto` for
+no word, an empty one or `auto`, and `scale auto` with a line said for anything
+else. The rule is `libhalcyon::scale::stated`, pure and host-tested
+([[sub-libhalcyon]]); this function reads the file, sends the verb through the
+per-pass budget's retries, and says what became of it: `halcyond: scale auto
+requested (/env/HALCYON_SCALE absent)`, or `refused E`, or `not admitted
+(budget)`, the last word in the brackets being `absent`, `set` or `ignored`.
+
+Before this the function returned when the file was absent, and it has been
+absent in every session there has been: nothing in the tree puts
+`/env/HALCYON_SCALE` or `/env/HALCYON_MOTION` into a session's environment
+(login seeds HOME, USER, PATH and the names git and OpenSSL need, and neither
+of these). [[sub-tapestryd]]'s override is the seat's and it keeps it across a
+logout, so a chord's step stood for whoever logged in next, and `scale auto`
+had no sender. A session now puts the last one's override down by stating its
+own. `request_env_motion` beside it is sent on the same ground.
+
+What it does not do. The login screen between two sessions keeps the last
+override. A session compositor that is started again states `scale auto`
+again, which puts down a chord's step of that same session.
+
+`tools/interactive/ls-halcyon-scale-session.exp` drives it: one user's two
+sessions, Super+= to 125 in the first, and the second must make the compositor
+say `scale 125 -> 100 (auto)` and begin at 100. Against a scripted guest the
+scenario reads as wanted in 18 cases, 16 of them faults. NOT YET RUN IN A
+GUEST. Whether the verb is admitted where it is sent has the motion verb's
+word for it and no more (sent at the same point under the same rule, and a
+real boot's log shows it forwarded). The `scale <pct>` arm has run nowhere but
+in the host test, since nothing sets the variable.
 
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)

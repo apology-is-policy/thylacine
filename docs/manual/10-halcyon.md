@@ -259,7 +259,9 @@ it. Escape closes the picker without changing the theme.
 
 Super+= enlarges everything on the display by 25 percent, up to 200 percent,
 Super+- reduces it, down to 100 percent, and Super+0 restores the scale
-measured from the display. The scale applies to the whole display.
+measured from the display. The scale applies to the whole display. A scale
+chosen with these keys lasts until the session ends, and the next session
+starts again at the scale measured from the display.
 
 ### Save and restore layouts
 
