@@ -69,8 +69,8 @@
 _Static_assert(sizeof(((struct Burrow *)0)->file_devno) == sizeof(((struct Spoor *)0)->devno),
                "a FILE Burrow's key copy carries the whole devno");
 
-// B-1a': the pagemap's per-page hooks. A FILE slot's page is the Image cache's
-// alone (a plain free); an ANON_LAZY slot's page may be COW-shared with a
+// B-1a': the pagemap's per-page hooks. A FILE slot's page is its Burrow's alone,
+// never COW-shared (a plain free); an ANON_LAZY slot's page may be COW-shared with a
 // fork sibling's Burrow, so it leaves through its share count (the buddy gets
 // it only from the last holder); a clone takes one share per page it mirrors.
 static void file_put_page(struct page *pg, void *ctx) {
@@ -369,8 +369,8 @@ struct Burrow *burrow_create_file(struct Spoor *spoor, u64 file_offset, size_t l
 
     // The sparse per-page pagemap: page_count slots, none resident. The R-2
     // fault arm installs a slot on the first fault to that page (allocating
-    // the map's nodes on the way, uncharged for FILE -- the Image cache's
-    // posture, bounded by EXEC_FILE_MAX); burrow_free_internal destroys it.
+    // the map's nodes on the way, uncharged for FILE -- the system cache's
+    // posture, cached or private image alike, bounded by EXEC_FILE_MAX); burrow_free_internal destroys it.
     if (pagemap_init(&v->pm, page_count) != 0) {
         kmem_cache_free(g_vmo_cache, v);
         return NULL;     // no ref taken: caller still owns `spoor`

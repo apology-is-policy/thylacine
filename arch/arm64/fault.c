@@ -412,7 +412,7 @@ struct file_fault_req {
     u64            file_offset;  // byte offset in the backing file for this page
     u64            page_va;      // page-aligned fault VA (the PTE target)
     size_t         slot;         // page index within the Burrow's pagemap
-    bool           exec;         // mapping is executable -> I-cache sync the page-in
+    bool           exec;         // the Burrow's exec class -> I-cache sync the page-in
     bool           no_page_in;   // in: the faulter holds a counted lock, so a miss refuses
 };
 
@@ -937,8 +937,9 @@ static enum fault_result file_install_locked(struct Proc *p,
 
     // B-1a': the install-once takes v->lock itself and allocates the map's
     // missing nodes outside it, charged to no address space (a FILE Burrow's
-    // pages are the Image cache's, shared by every space that maps the file)
-    // but counted in the user pool like every user page; a node OOM or a pool
+    // pages are the system cache's: a cached image's are shared by every space
+    // that maps the file, a private image's are held by its mapping) but
+    // counted in the user pool like every user page; a node OOM or a pool
     // refusal installs nothing and the fault is refused under the same
     // per-Proc OOM policy as a page.
     struct page *resident = NULL;
@@ -962,7 +963,7 @@ static enum fault_result file_install_locked(struct Proc *p,
     // I-12 holds by construction). Each FILE slot is its own order-0 page, so
     // the PA is the slot page's PA (no contiguous-chunk offset). The asid arg
     // is vestigial (all-ASID tlbi); pass 0 (RW-1 B-F1).
-    // B-1a' audit F8: the page is the Image cache's, but the MAPPING is this
+    // B-1a' audit F8: the page is the system cache's, but the MAPPING is this
     // space's -- charged to the holder per leaf installed, like a COW-shared
     // page, and refunded per leaf cleared (vma_uninstall_range_in). A refused
     // charge installs nothing; a leaf a sibling already installed (rc 1) was
@@ -1124,7 +1125,8 @@ static enum fault_result file_install_cluster_locked(struct Proc *p,
         return FAULT_UNHANDLED_USER;     // impossible shape change; caller frees clpages
     // B-1a': one install-once per slot, each taking v->lock itself and
     // allocating the map's missing nodes outside it (no address-space charge
-    // -- the Image cache's posture -- but the pool's). A node OOM midway
+    // -- the system cache's posture, for a cached or a private image -- but
+    // the pool's). A node OOM midway
     // leaves the earlier slots adopted --
     // the bytes are the Burrow's -- and the rest in clpages for the caller to
     // free; the faulting slot decides the verdict below exactly as a lost
