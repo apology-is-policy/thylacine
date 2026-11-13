@@ -675,9 +675,13 @@ The arming's `TestStallNext` shots still ride the next synchronous command
 whoever sends it, so a seat takeover or the owed-free pass landing between the
 compositor's aim and its command would take one, and since both kinds share one
 flag, `test_stall_settle` spends a pending `TestStallNext` shot too; tapestryd
-never has both kinds pending. The display's three aims (`ls-display-stall`,
-`ls-display-follow-edid`) take `TestStallShot`s for that reason (round R4); the
-bring-up and health-step aims keep the arming's. A takeover needs test-mode, the bootarg and the
+never has both kinds pending. tapestryd's aims take `TestStallShot`s for that
+reason: the display's three (`ls-display-stall`, `ls-display-follow-edid`; round
+R4), and since 2026-11-13 the bring-up and health-step ones, each sent just before
+its step's first request (the compositor ctx's create, a blit-convention
+attempt's context create, the health step's first upload). Nothing in the tree
+sends `TestStallNext` now; the arming still gives three, and its scenarios do
+not spend them. A takeover needs test-mode, the bootarg and the
 operator's chord, and vote 30 recovers the seat. The bootarg is Lictor's own
 reading, not the compositor's: the latch, seat and stall-next shots fire only from
 counts `TestArmLatch` sets, the chained shots only from `TestArmChained`'s, and the
@@ -751,9 +755,9 @@ resources whose retirement has not finished. The readback leg's FREE arm
 witnesses a guest-backed free a stall met, its TAKEN arm a taken free, the
 hold on its repeat and the link detach, and its BUSY arm the owed-free barrier; the state machine's other paths (the
 HOST3D extent, a create's unwind, the display drain, the give-up) are
-host-tested in `gpu_api` and witnessed by no leg. tapestryd aims three of the arming's shots at the
-compositor context's create, at one blit-convention attempt, and at a
-composition health step once GPU composition runs, and three at binds of the
+host-tested in `gpu_api` and witnessed by no leg. tapestryd aims connection-bound shots
+(`TestStallShot`) at the compositor context's create, at one blit-convention attempt,
+and at a composition health step once GPU composition runs, and three at binds of the
 display's, chosen by the height of the host a display event tells
 ([[sub-tapestryd]], `ls-display-stall`).
 Only the designated compositor reaches the broker, and only the booting

@@ -1639,7 +1639,8 @@ refusal marks two readings that disagree one way: tapestryd found the word and t
 broker did not, and both say so. Where only the broker finds it, tapestryd never
 asks, and nothing is armed or said.
 The same arming lets tapestryd aim one stall at a
-composition health step (below), and three at binds of the display's
+composition health step (below), two at bring-up, and three at binds of the
+display's, each a connection-bound shot sent just before its step
 (`ls-display-stall`, in "The display follows its host"). `thylacine.test-latch-chained` arms the
 broker the same way (`Request::TestArmChained`) to make each of the next two
 trusted takeovers wait on the device twice in series, and tapestryd says
@@ -4015,9 +4016,10 @@ for the boot (OPEN-BUGS 2026-10-29T11:39Z).
 
 The witness is `tools/warp-host.sh composed-stall` on the GL host: the GL leg
 of `composed-screen.exp` with `thylacine.test-latch-dead`, armed now before
-any bring-up GPU step. tapestryd aims the broker's three stall shots
-here (`Gpu::test_stall_next`; the display's binds take connection-bound shots,
-"The display follows its host"): at the compositor ctx create, at the `slot S`
+any bring-up GPU step. tapestryd aims three connection-bound stall shots
+here (`Gpu::test_stall_shot`, each sent just before its step, whose first request
+it rides; the display's binds take theirs the same way, "The display follows its
+host"): at the compositor ctx create, at the `slot S`
 convention class's first attempt, and, once GPU composition runs, at the next
 health issue, whose first command then retires past its deadline. The broker revives the engine inside that same
 request, so the reply reads live and the moved stall count alone carries the

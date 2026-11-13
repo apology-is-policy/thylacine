@@ -5203,14 +5203,16 @@ impl Comp {
     }
 
     /// The lever's compositor half: once GPU composition runs, the next
-    /// health step's first command retires past its deadline.
+    /// health step's first command retires past its deadline. The shot is
+    /// bound to this connection's next request, the step's first upload,
+    /// so neither the broker's owed-free pass nor a takeover can take it.
     #[cfg(feature = "test-mode")]
     fn test_stall_health_step(&mut self) {
         if !self.test_latch_armed || self.test_stall_aimed || self.composed_gpu == 0 {
             return;
         }
         self.test_stall_aimed = true;
-        if self.gpu.test_stall_next() {
+        if self.gpu.test_stall_shot() {
             say!("tapestryd: test-latch-dead: the next health step retires past its deadline");
         } else {
             say!("tapestryd: test-latch-dead: health-step stall REFUSED by the broker");
@@ -5219,7 +5221,8 @@ impl Comp {
 
     /// The lever's bring-up halves: the compositor ctx's create (`conv`
     /// false) and one blit-convention attempt each retire past their
-    /// deadline, once per boot.
+    /// deadline, once per boot. Each shot is bound to this connection's
+    /// next request, which is that step's context create.
     #[cfg(feature = "test-mode")]
     fn test_stall_bringup(&mut self, conv: bool) {
         if !self.test_latch_armed {
@@ -5233,7 +5236,7 @@ impl Comp {
         if core::mem::replace(aimed, true) {
             return;
         }
-        if self.gpu.test_stall_next() {
+        if self.gpu.test_stall_shot() {
             say!("tapestryd: test-latch-dead: {} retires past its deadline", what);
         } else {
             say!("tapestryd: test-latch-dead: {} stall REFUSED by the broker", what);
