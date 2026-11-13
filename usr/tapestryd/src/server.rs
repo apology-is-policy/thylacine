@@ -6506,6 +6506,7 @@ impl Comp {
         // before it is sent, which is no attempt and must not lengthen the
         // wait for the next one.
         let sent = self.gpu.engine == Engine::Live;
+        let after_blank = self.gpu.restore_blanked;
         if self.gpu.set_scanout(res, w, h).is_err() {
             if sent {
                 self.bind_again.failed(libthyla_rs::time::monotonic_ns() / 1_000_000);
@@ -6516,7 +6517,11 @@ impl Comp {
         // After the bind, as in `reconcile` (#57): a flush reaches only a
         // scanout bound to the resource.
         let _ = self.gpu.flush(res, 0, 0, w, h);
-        say!("tapestryd: scanout composed ({}x{}) res {} bound, late", w, h, res);
+        if after_blank {
+            say!("tapestryd: scanout composed ({}x{}) res {} bound again: the seat returned to a blank output", w, h, res);
+        } else {
+            say!("tapestryd: scanout composed ({}x{}) res {} bound, late", w, h, res);
+        }
         // What the host holds of the screen is not known either: nothing
         // pushed while the device did not answer reached it. So all of it
         // is established again: a structural pass repaints, pushes the

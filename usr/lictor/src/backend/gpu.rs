@@ -2371,6 +2371,8 @@ pub struct Gpu {
     /// process's life -- the safe direction (a leaked resource id costs
     /// memory; a freed one the display still scans is a UAF).
     pub condemned_lost: u32,
+    /// Restores that ended on a blank output (`Stats::restores_blank`).
+    pub restores_blank: u32,
     pub num_capsets: u32,
     /// The fetched preferred capset (Warp-2c: served verbatim by the
     /// /dev/warp caps file; empty when no capset was fetchable). The id +
@@ -2609,6 +2611,7 @@ impl Gpu {
             fail_next_scanout_disable: false,
             injected_refusal: false,
             condemned_lost: 0,
+            restores_blank: 0,
             num_capsets: 0,
             capset_blob: alloc::vec::Vec::new(),
             capset_id: 0,

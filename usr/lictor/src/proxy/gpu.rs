@@ -40,6 +40,11 @@ pub struct Gpu {
     pub stalls: u32,
     /// The last reply's count as its request began (`Stats::stalls_begun`).
     pub stalls_begun: u32,
+    /// The last reply's count of restores that ended blank (`Stats::restores_blank`).
+    pub restores_blank: u32,
+    /// A restore left the output blank and no scanout command has been accepted
+    /// since: the compositor's next bind is a rebind, not a late one.
+    pub restore_blanked: bool,
     /// What the device scans is not known from when a scanout command was
     /// sent and not answered -- it may still be executed (GPU-DESIGN 4.5.15)
     /// -- until one is accepted: the device takes its commands in order, so
@@ -74,6 +79,8 @@ impl Gpu {
             engine: stats.engine,
             stalls: stats.stalls,
             stalls_begun: stats.stalls_begun,
+            restores_blank: stats.restores_blank,
+            restore_blanked: false,
             scanout_unsettled: false,
             num_capsets: info.num_capsets,
             capset_blob: info.capset_blob,
@@ -98,6 +105,10 @@ impl Gpu {
         self.cmd_seq = s.cmd_seq; self.last_scanout_seq = s.last_scanout_seq;
         self.last_unref_seq = s.last_unref_seq; self.condemned_lost = s.condemned_lost;
         self.engine = s.engine; self.stalls = s.stalls; self.stalls_begun = s.stalls_begun;
+        self.restore_blanked |= s.restores_blank != self.restores_blank;
+        self.scanout_unsettled = crate::gpu_api::scanout_unsettled_by_restore(
+            self.scanout_unsettled, self.restores_blank, s.restores_blank);
+        self.restores_blank = s.restores_blank;
     }
     /// A scanout command's verdict, read against its own request's span
     /// (`gpu_api::scanout_unsettled_after`): a stall the broker met between
@@ -105,6 +116,7 @@ impl Gpu {
     fn scanout_answered(&mut self, accepted: bool) {
         self.scanout_unsettled = crate::gpu_api::scanout_unsettled_after(
             self.scanout_unsettled, accepted, self.stalls_begun, self.stalls);
+        if accepted { self.restore_blanked = false; }
     }
     /// The broker's count of display events as of its last reply of any kind:
     /// a query's reply carries the count as an invocation's does, and no copy
@@ -323,6 +335,10 @@ impl Gpu {
     #[cfg(feature = "test-mode")]
     pub fn test_arm_chained(&mut self) -> bool {
         self.invoke::<()>(Request::TestArmChained).is_ok()
+    }
+    #[cfg(feature = "test-mode")]
+    pub fn test_arm_restore(&mut self) -> bool {
+        self.invoke::<()>(Request::TestArmRestore).is_ok()
     }
     #[cfg(feature = "test-mode")]
     pub fn test_stall_next(&mut self) -> bool {

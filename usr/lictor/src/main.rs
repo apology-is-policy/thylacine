@@ -45,6 +45,7 @@ impl Driver for Lictor {
             let line = lictor::backend::bootargs(&mut buf);
             device.test_declare(lictor::gpu_api::bootarg_declared(line, lictor::gpu_api::TEST_LEVERS_WORD));
             device.test_declare_chained(lictor::gpu_api::bootarg_declared(line, lictor::gpu_api::TEST_CHAINED_WORD));
+            device.test_declare_restore(lictor::gpu_api::bootarg_declared(line, lictor::gpu_api::TEST_RESTORE_WORD));
         }
         // The input devices go to their own thread, so a GPU wait here never leaves a
         // ring undrained. Last: nothing after it can fail the probe.

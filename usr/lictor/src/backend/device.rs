@@ -58,10 +58,13 @@ pub struct Device {
     /// The same for the chained shots (`TEST_CHAINED_WORD`).
     #[cfg(feature = "test-mode")]
     test_chained_declared: bool,
+    /// The same for the restore shot (`TEST_RESTORE_WORD`).
+    #[cfg(feature = "test-mode")]
+    test_restore_declared: bool,
     /// A refused arming has been said, per lever: a client that repeats the
     /// request gets the refusal and no second line.
     #[cfg(feature = "test-mode")]
-    test_refusal_said: [bool; 2],
+    test_refusal_said: [bool; 3],
     /// Latch lever shots left: 2 = the revive shot is next, 1 = the hold.
     #[cfg(feature = "test-mode")]
     test_latch_shots: u8,
@@ -77,6 +80,12 @@ pub struct Device {
     /// Chained shots left (`Request::TestArmChained`), taken before any seat shot.
     #[cfg(feature = "test-mode")]
     test_chained_shots: u8,
+    /// Restore shots left (`Request::TestArmRestore`), taken before any other.
+    #[cfg(feature = "test-mode")]
+    test_restore_shots: u8,
+    /// The next restore's rebind of the client's frame is refused (`SeatShot::RefuseRestore`).
+    #[cfg(feature = "test-mode")]
+    pub test_refuse_restore: bool,
     #[cfg(feature = "test-mode")]
     test_blind_armed: bool,
     /// Stall shots left for the compositor to aim (`Request::TestStallNext`).
@@ -154,6 +163,9 @@ pub enum SeatShot {
     /// A cursor stall held 8 s, then a controlq stall withheld for good: the
     /// takeover's bound from the chord kills the engine.
     CursorThenControl,
+    /// The device refuses the restore's rebind of the compositor's frame: the
+    /// restore gives the frame up and the seat returns to a blank output.
+    RefuseRestore,
 }
 impl Device {
     pub fn new(mut gpu: Gpu, owner: u64) -> Result<Self, Error> {
@@ -165,10 +177,13 @@ impl Device {
             taken_frees: 0,
             #[cfg(feature = "test-mode")] test_declared: false,
             #[cfg(feature = "test-mode")] test_chained_declared: false,
-            #[cfg(feature = "test-mode")] test_refusal_said: [false; 2],
+            #[cfg(feature = "test-mode")] test_restore_declared: false,
+            #[cfg(feature = "test-mode")] test_refusal_said: [false; 3],
             #[cfg(feature = "test-mode")] test_latch_shots: 0,
             #[cfg(feature = "test-mode")] test_seat_shots: 0,
             #[cfg(feature = "test-mode")] test_chained_shots: 0,
+            #[cfg(feature = "test-mode")] test_restore_shots: 0,
+            #[cfg(feature = "test-mode")] test_refuse_restore: false,
             #[cfg(feature = "test-mode")] test_blind_armed: false,
             #[cfg(feature = "test-mode")] test_stall_shots: 0,
             #[cfg(feature = "test-mode")] test_stall_shot_for: None,
@@ -183,6 +198,8 @@ impl Device {
     pub fn test_declare(&mut self, declared: bool) { self.test_declared = declared; }
     #[cfg(feature = "test-mode")]
     pub fn test_declare_chained(&mut self, declared: bool) { self.test_chained_declared = declared; }
+    #[cfg(feature = "test-mode")]
+    pub fn test_declare_restore(&mut self, declared: bool) { self.test_restore_declared = declared; }
     #[cfg(feature = "test-mode")]
     fn test_undeclared(&mut self, lever: usize, word: &[u8]) -> Error {
         if !core::mem::replace(&mut self.test_refusal_said[lever], true) {
@@ -432,7 +449,10 @@ impl Device {
             None => {}
         }
         match self.gpu.set_scanout_restore(0, 0, 0) {
-            Ok(()) => Ok(Restored::Blank),
+            Ok(()) => {
+                self.gpu.restores_blank = self.gpu.restores_blank.wrapping_add(1);
+                Ok(Restored::Blank)
+            }
             Err(_) => Err(match met(self.gpu.engine_dead(), stalls, self.gpu.stalls()) {
                 Met::Stalled => Unrestored::Waiting,
                 Met::Dead | Met::Refused => Unrestored::Lost,
@@ -441,11 +461,22 @@ impl Device {
     }
     fn rebind_image(&mut self, resource: u32, width: u32, height: u32) -> Result<(), Error> {
         self.check(resource, Kind::Resource)?;
+        self.test_restore_refusal()?;
         self.gpu.set_scanout_restore(resource, width, height)?;
         self.gpu.flush(resource, 0, 0, width, height)
     }
+    /// The restore shot: the rebind is answered as refused, before it is sent.
+    fn test_restore_refusal(&mut self) -> Result<(), Error> {
+        #[cfg(feature = "test-mode")]
+        if core::mem::take(&mut self.test_refuse_restore) {
+            super::diagnostic("lictor: the restore's rebind refused (INJECTED by test-latch-restore)\n");
+            return Err(Error::Hardware);
+        }
+        Ok(())
+    }
     fn rebind_blob(&mut self, resource: u32, width: u32, height: u32, format: u32, stride: u32) -> Result<(), Error> {
         self.check(resource, Kind::Resource)?;
+        self.test_restore_refusal()?;
         self.gpu.set_scanout_blob_restore(resource, width, height, format, stride)
     }
     /// The armed latch lever, asked of each pending request before the server
@@ -484,6 +515,10 @@ impl Device {
     /// order, so one boot walks every way an episode's return can go wrong.
     #[cfg(feature = "test-mode")]
     pub fn test_latch_seat_shot(&mut self) -> Option<SeatShot> {
+        if self.test_restore_shots > 0 {
+            self.test_restore_shots -= 1;
+            return Some(SeatShot::RefuseRestore);
+        }
         if self.test_chained_shots > 0 {
             let shot = if self.test_chained_shots == 2 { SeatShot::ControlThenCursor } else { SeatShot::CursorThenControl };
             self.test_chained_shots -= 1;
@@ -934,6 +969,13 @@ impl Device {
                 #[cfg(feature = "test-mode")] {
                     if !self.test_chained_declared { return Err(self.test_undeclared(1, crate::gpu_api::TEST_CHAINED_WORD)); }
                     self.test_chained_shots = 2; ().put(&mut out);
+                }
+                #[cfg(not(feature = "test-mode"))] { return Err(Error::BadField); }
+            }
+            Request::TestArmRestore => {
+                #[cfg(feature = "test-mode")] {
+                    if !self.test_restore_declared { return Err(self.test_undeclared(2, crate::gpu_api::TEST_RESTORE_WORD)); }
+                    self.test_restore_shots = 1; ().put(&mut out);
                 }
                 #[cfg(not(feature = "test-mode"))] { return Err(Error::BadField); }
             }

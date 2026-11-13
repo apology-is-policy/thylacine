@@ -362,6 +362,9 @@ pub enum Request {
     /// Test lever: the next two trusted takeovers each wait twice in series, the
     /// second wait outlasting the takeover's bound from the chord (vote 80).
     TestArmChained,
+    /// Test lever: the next trusted episode's restore has its rebind of the
+    /// compositor's frame refused, so the seat returns to a blank output.
+    TestArmRestore,
     /// Test lever: one stall shot outside the latch witness's budget, for the
     /// compositor to aim at a command of its own; the caller bounds how often.
     TestStallShot,
@@ -707,6 +710,8 @@ pub fn retirement_hold(
 pub const TEST_LEVERS_WORD: &[u8] = b"thylacine.test-latch-dead";
 /// The same for the chained seat shots, which are armed by a request of their own.
 pub const TEST_CHAINED_WORD: &[u8] = b"thylacine.test-latch-chained";
+/// The same for the restore shot, which is armed by a request of its own.
+pub const TEST_RESTORE_WORD: &[u8] = b"thylacine.test-latch-restore";
 /// Whether a kernel command line holds `word`, whole: ended by white space,
 /// a NUL (the FDT property carries one) or the line's end. The empty word is
 /// on no line: a split leaves empty pieces, and they declare nothing.
@@ -976,6 +981,7 @@ impl Wire for Request {
             Self::TestArmLatch => { 67u16.put(out); },
             Self::TestStallNext => { 68u16.put(out); },
             Self::TestArmChained => { 69u16.put(out); },
+            Self::TestArmRestore => { 74u16.put(out); },
             Self::TestStallShot => { 70u16.put(out); },
             Self::TestOwedDefer { ctx_id, on } => { 72u16.put(out); ctx_id.put(out); on.put(out); },
             Self::TestOwedStall { resource_id } => { 73u16.put(out); resource_id.put(out); },
@@ -1054,6 +1060,7 @@ impl Wire for Request {
             67 => Self::TestArmLatch,
             68 => Self::TestStallNext,
             69 => Self::TestArmChained,
+            74 => Self::TestArmRestore,
             70 => Self::TestStallShot,
             72 => Self::TestOwedDefer { ctx_id: <u32>::get(r)?, on: <bool>::get(r)? },
             73 => Self::TestOwedStall { resource_id: <u32>::get(r)? },
@@ -1088,9 +1095,13 @@ pub struct Stats {
     /// reply: the host's preferred rect or EDID may differ; ask again.
     pub display_events: u32,
     pub engine: Engine, pub stalls: u32, pub stalls_begun: u32,
+    /// The restores that ended on a blank output, wrapping: the client's frame
+    /// given up (`Device::restore`) or none presented. A change since the last
+    /// reply: scanout 0 is not what the client took it to be.
+    pub restores_blank: u32,
 }
 record!(Stats { cmd_seq: u64, last_scanout_seq: u64, last_unref_seq: u64, condemned_lost: u32,
-    display_events: u32, engine: Engine, stalls: u32, stalls_begun: u32 });
+    display_events: u32, engine: Engine, stalls: u32, stalls_begun: u32, restores_blank: u32 });
 /// Whether what the device scans is unknown after a scanout command: an
 /// accepted one is the last word; a refusal with a stall inside its own
 /// request (`Stats::stalls_begun` to `stalls`) may still be executed; one
@@ -1098,9 +1109,22 @@ record!(Stats { cmd_seq: u64, last_scanout_seq: u64, last_unref_seq: u64, condem
 pub fn scanout_unsettled_after(before: bool, accepted: bool, stalls_begun: u32, stalls: u32) -> bool {
     if accepted { false } else if stalls != stalls_begun { true } else { before }
 }
+/// Whether what the device scans is unknown after a reply: a restore that
+/// ended on a blank output since the last one (`Stats::restores_blank` moved)
+/// left scanout 0 without the client's frame, whatever the client took it to scan.
+pub fn scanout_unsettled_by_restore(before: bool, restores_seen: u32, restores_blank: u32) -> bool {
+    before || restores_seen != restores_blank
+}
 #[cfg(test)]
 mod scanout_verdict_tests {
     use super::*;
+    #[test]
+    fn a_restore_that_ended_blank_unsettles_the_scanout() {
+        assert!(!scanout_unsettled_by_restore(false, 3, 3), "no restore ended blank");
+        assert!(scanout_unsettled_by_restore(false, 3, 4), "one did");
+        assert!(scanout_unsettled_by_restore(true, 3, 3), "what was unknown stays so");
+        assert!(scanout_unsettled_by_restore(false, u32::MAX, 0), "the count wraps");
+    }
     #[test]
     fn a_scanout_is_unsettled_only_by_a_stall_inside_its_own_request() {
         assert!(!scanout_unsettled_after(true, true, 4, 5), "accepted is the last word");
@@ -1122,7 +1146,8 @@ impl From<&crate::backend::gpu::Gpu> for Stats {
     fn from(g: &crate::backend::gpu::Gpu) -> Self {
         Self { cmd_seq: g.cmd_seq, last_scanout_seq: g.last_scanout_seq,
             last_unref_seq: g.last_unref_seq, condemned_lost: g.condemned_lost,
-            display_events: g.display_events(), engine: g.engine(), stalls: g.stalls(), stalls_begun: g.stalls() }
+            display_events: g.display_events(), engine: g.engine(), stalls: g.stalls(), stalls_begun: g.stalls(),
+            restores_blank: g.restores_blank }
     }
 }
 /// A host allocation's description. The mapping arrives through authenticated
@@ -1143,7 +1168,7 @@ mod admission_tests {
         vec![Request::Info, Request::Submit3dSync { ctx_id: 1, stream: Vec::new() },
             Request::CtxCreate { ctx_id: 1, debug_name: Vec::new() },
             Request::Flush { resource_id: 1, x: 0, y: 0, w: 1, h: 1 }, Request::EngineDead,
-            Request::TestArmLatch, Request::TestStallNext, Request::TestArmChained, Request::TestStallShot,
+            Request::TestArmLatch, Request::TestStallNext, Request::TestArmChained, Request::TestArmRestore, Request::TestStallShot,
             Request::TestOwedDefer { ctx_id: 1, on: true }, Request::TestOwedStall { resource_id: 1 },
             Request::FreesOwed]
     }
@@ -1769,6 +1794,22 @@ mod cursor_wire_tests {
         r.finish().unwrap();
     }
     #[test]
+    fn the_restore_lever_has_its_own_opcode_and_word() {
+        let mut bytes = Vec::new();
+        Request::TestArmRestore.put(&mut bytes);
+        assert_eq!(bytes, [1, 0, 74, 0]);
+        let mut r = Reader::new(&bytes).unwrap();
+        assert!(matches!(Request::get(&mut r).unwrap(), Request::TestArmRestore));
+        r.finish().unwrap();
+        let all = b"thylacine.test-latch-dead thylacine.test-latch-chained thylacine.test-latch-restore\0";
+        assert!(bootarg_declared(all, TEST_RESTORE_WORD));
+        for other in [&b"thylacine.test-latch-dead\0"[..], b"thylacine.test-latch-chained\0"] {
+            assert!(!bootarg_declared(other, TEST_RESTORE_WORD));
+        }
+        let alone = b"thylacine.test-latch-restore\0";
+        assert!(!bootarg_declared(alone, TEST_LEVERS_WORD) && !bootarg_declared(alone, TEST_CHAINED_WORD));
+    }
+    #[test]
     fn the_owed_frees_query_has_its_own_opcode() {
         let mut bytes = Vec::new();
         Request::FreesOwed.put(&mut bytes);
@@ -1828,12 +1869,12 @@ mod cursor_wire_tests {
     fn stats_carry_the_engine_and_refuse_an_unknown_state() {
         let mut bytes = Vec::new();
         Stats { display_events: 0x0c0b_0a09, engine: Engine::Stalled, stalls: 0x0403_0201,
-            stalls_begun: 0x0807_0605, ..Stats::default() }.put(&mut bytes);
-        assert_eq!(&bytes[bytes.len() - 13..], [9, 10, 11, 12, 1, 1, 2, 3, 4, 5, 6, 7, 8]);
+            stalls_begun: 0x0807_0605, restores_blank: 0x100f_0e0d, ..Stats::default() }.put(&mut bytes);
+        assert_eq!(&bytes[bytes.len() - 17..], [9, 10, 11, 12, 1, 1, 2, 3, 4, 5, 6, 7, 8, 13, 14, 15, 16]);
         let s = Stats::get(&mut Reader::new(&bytes).unwrap()).unwrap();
-        assert_eq!((s.display_events, s.engine, s.stalls, s.stalls_begun),
-            (0x0c0b_0a09, Engine::Stalled, 0x0403_0201, 0x0807_0605));
-        let at = bytes.len() - 9;
+        assert_eq!((s.display_events, s.engine, s.stalls, s.stalls_begun, s.restores_blank),
+            (0x0c0b_0a09, Engine::Stalled, 0x0403_0201, 0x0807_0605, 0x100f_0e0d));
+        let at = bytes.len() - 13;
         bytes[at] = 3;
         assert!(Stats::get(&mut Reader::new(&bytes).unwrap()).is_err());
     }

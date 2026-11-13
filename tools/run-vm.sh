@@ -782,6 +782,12 @@ fi
 if [[ "${THYLACINE_TEST_LATCH_CHAINED:-0}" == "1" ]]; then
     append_tokens+=("thylacine.test-latch-chained")
 fi
+# Test lever (ls-graphical-sak-blank): a test-mode tapestryd has lictor refuse the next
+# trusted episode's rebind of its frame, so the seat returns to a blank output. Gated off
+# by default.
+if [[ "${THYLACINE_TEST_LATCH_RESTORE:-0}" == "1" ]]; then
+    append_tokens+=("thylacine.test-latch-restore")
+fi
 # Test levers: a test-mode halcyond holds session start at each window a chord can
 # land in (ls-graphical-sak-start), or fails with its first Join unread
 # (ls-graphical-sak-unread). Gated off by default.

@@ -408,6 +408,7 @@ impl Seat {
                         self.test_hold_restore |= shot == Some(SeatShot::HoldRestore);
                         self.test_stall_restore |= shot == Some(SeatShot::StallInRestore);
                         self.test_stall_inside |= shot == Some(SeatShot::StallInsideRestore);
+                        device.test_refuse_restore = shot == Some(SeatShot::RefuseRestore);
                     }
                     // A takeover that fails part-way may already have disabled
                     // outputs or bound the trusted image.

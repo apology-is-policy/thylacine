@@ -314,6 +314,12 @@ fn latch_dead_declared() -> bool {
 fn latch_chained_declared() -> bool {
     bootarg_declared(lictor::gpu_api::TEST_CHAINED_WORD)
 }
+/// Test lever: `thylacine.test-latch-restore` has lictor refuse the next trusted
+/// episode's rebind of this compositor's frame, so the seat returns to a blank output.
+#[cfg(feature = "test-mode")]
+fn latch_restore_declared() -> bool {
+    bootarg_declared(lictor::gpu_api::TEST_RESTORE_WORD)
+}
 /// Test lever: `thylacine.test-seat-start`, which halcyond also reads, refuses the
 /// boot's first seat reservation, so the client's retry is reached on every run.
 #[cfg(feature = "test-mode")]
@@ -497,6 +503,14 @@ impl Driver for Tapestryd {
                 say!("tapestryd: test-latch-chained armed (the next two trusted takeovers each wait twice in series)");
             } else {
                 say!("tapestryd: test-latch-chained arm REFUSED by the broker");
+            }
+        }
+        #[cfg(feature = "test-mode")]
+        if latch_restore_declared() {
+            if self.comp.gpu.test_arm_restore() {
+                say!("tapestryd: test-latch-restore armed (the next trusted episode's restore has its rebind of this compositor's frame refused)");
+            } else {
+                say!("tapestryd: test-latch-restore arm REFUSED by the broker");
             }
         }
 
