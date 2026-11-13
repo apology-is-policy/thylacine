@@ -357,6 +357,21 @@ size_t devctl_format_procs_for_test(const struct Proc *reader, char *buf, size_t
 // rather than silently reporting a shallower peak than the truth.
 enum { KSTACK_SCAN_BUDGET_WORDS = 131072u };
 
+// The table's end, whose room no row may take: the cut line when a row did not
+// fit, the budget line when the scan ran out, then the whole-system peak with
+// each of its numbers at its widest. A table short of a row with no sign
+// reads as "no other thread", and one without its peak has lost the figure
+// the file is for.
+#define KSTACK_HEAD_MAX    (sizeof("usable:    4294967295\nguard:     4294967295\n\n" \
+                                   "PID    NAME    PEAK    TID\n") - 1u)
+#define KSTACK_CUT_LINE    "(cut: more processes than one read holds)\n"
+#define KSTACK_BUDGET_LINE "\n(scan budget exhausted -- rows above are partial and " \
+                           "peak is a LOWER BOUND)\n"
+#define KSTACK_PEAK_MAX    (sizeof("\npeak:      4294967295    pid -2147483648" \
+                                   "    tid -2147483648\n") - 1u)
+#define KSTACK_TAIL_MAX    (sizeof(KSTACK_CUT_LINE) - 1u + \
+                            sizeof(KSTACK_BUDGET_LINE) - 1u + KSTACK_PEAK_MAX)
+
 struct kstack_fmt_state {
     char  *buf;
     size_t cap;
@@ -390,6 +405,11 @@ static int format_kstack_cb(struct Proc *p, void *arg) {
     }
     if (used == 0)
         return 0;                       // no kstack of its own; nothing to say
+    // Past the first row that did not fit the walk goes on for the peak alone,
+    // so the peak covers every Proc and the rows shown stay the walk's first.
+    // The scan budget bounds the hold, not the buffer.
+    if (s->overflow)
+        return 0;
 
     size_t row = s->off;
     n = fmt_sdec(s->buf, s->cap, s->off, p->pid);
@@ -428,7 +448,7 @@ static int format_kstack_cb(struct Proc *p, void *arg) {
 full:
     s->off = row;   // the rows that fit, each one whole
     s->overflow = true;
-    return 1;
+    return 0;
 }
 
 static size_t format_kstack(const struct Proc *reader, char *buf, size_t cap) {
@@ -443,21 +463,18 @@ static size_t format_kstack(const struct Proc *reader, char *buf, size_t cap) {
     if (!n) return 0; off += n;
     n = fmt_str(buf, cap, off, "\n\nPID    NAME    PEAK    TID\n");
     if (!n) return 0; off += n;
+    if (cap - off < KSTACK_TAIL_MAX) return 0;
 
-    struct kstack_fmt_state s = { buf, cap, off, false, 0, 0, 0,
+    // Rows end where the table's end begins, so the end always fits.
+    struct kstack_fmt_state s = { buf, cap - KSTACK_TAIL_MAX, off, false, 0, 0, 0,
                                   KSTACK_SCAN_BUDGET_WORDS, false };
     proc_for_each(format_kstack_cb, &s);
     off = s.off;
-    if (s.overflow) return off;
 
-    // The whole-system peak LAST, so a truncated read still loses the
-    // per-Proc rows before it loses the number a gate actually asserts on.
-    if (s.truncated) {
-        n = fmt_str(buf, cap, off,
-                    "\n(scan budget exhausted -- rows above are partial and "
-                    "peak is a LOWER BOUND)\n");
-        if (!n) return off; off += n;
-    }
+    // What is missing, then the whole-system peak: over every Proc the walk
+    // reached, its row shown or not.
+    if (s.overflow)  off += fmt_str(buf, cap, off, KSTACK_CUT_LINE);
+    if (s.truncated) off += fmt_str(buf, cap, off, KSTACK_BUDGET_LINE);
     n = fmt_str(buf, cap, off, "\npeak:      "); if (!n) return off; off += n;
     n = fmt_udec(buf, cap, off, (unsigned long)s.peak);
     if (!n) return off; off += n;
@@ -470,6 +487,14 @@ static size_t format_kstack(const struct Proc *reader, char *buf, size_t cap) {
     n = fmt_str(buf, cap, off, "\n");            if (!n) return off; off += n;
     return off;
 }
+
+#ifdef KERNEL_TESTS
+// Test hook: /ctl/kstack formatted into a buffer of the caller's size, so a
+// test can make any row the one that does not fit.
+size_t devctl_format_kstack_for_test(const struct Proc *reader, char *buf, size_t cap) {
+    return format_kstack(reader, buf, cap);
+}
+#endif
 
 static size_t format_memory(const struct Proc *reader, char *buf, size_t cap) {
     (void)reader;
@@ -1165,6 +1190,8 @@ static int devctl_close(struct Spoor *c) {
 #define DEVCTL_READ_BUF 4096
 _Static_assert(DEVCTL_READ_BUF >= sizeof(PROCS_HEADER) - 1u + PROCS_CUT_LEN,
                "/ctl/procs: the read buffer holds the header and the cut line");
+_Static_assert(DEVCTL_READ_BUF >= KSTACK_HEAD_MAX + KSTACK_TAIL_MAX,
+               "/ctl/kstack: the read buffer holds the header and the table's end");
 
 static long devctl_read(struct Spoor *c, void *buf, long n, s64 off) {
     if (!c || !buf) return -1;

@@ -1277,6 +1277,7 @@ void test_devctl_read_devices_format(void);
 void test_devctl_read_kernel_base_format(void);
 void test_devctl_kernel_base_gated(void);
 void test_devctl_kstack_gated(void);
+void test_devctl_kstack_ends_whole(void);      // /ctl/kstack: a cut table says so and keeps its peak
 void test_devctl_read_sched_format(void);
 void test_devctl_read_cons_format(void);
 void test_devctl_read_cpu_format(void);             // prowl-3b: /ctl/cpu read

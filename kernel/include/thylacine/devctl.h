@@ -15,6 +15,7 @@ struct Proc;
 // functions that are static in a production build (VISIBLE_IF_KERNEL_TESTS).
 size_t devctl_format_9p_sessions_for_test(const struct Proc *reader, char *buf, size_t cap);
 size_t devctl_format_procs_for_test(const struct Proc *reader, char *buf, size_t cap);
+size_t devctl_format_kstack_for_test(const struct Proc *reader, char *buf, size_t cap);
 bool devctl_kernel_base_readable(const struct Proc *caller);
 bool devctl_system_counters_readable(const struct Proc *reader);
 #endif // KERNEL_TESTS

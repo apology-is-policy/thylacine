@@ -14,7 +14,7 @@ locks: [lock-proc-table]
 abis: []
 design: ["docs/ARCHITECTURE.md section 9.4", "docs/PROWL-DESIGN.md section 3.4", "docs/VIVARIUM.md section 6.17", "docs/IMPERIUM-DESIGN.md section 11.3 item 10"]
 created: 2026-08-02
-updated: 2026-11-12
+updated: 2026-11-13
 ---
 ## Session transport accounting
 
@@ -303,9 +303,10 @@ the process table.
 
 A row is committed whole or not at all, in `/ctl/procs` and `/ctl/kstack`
 alike: the callback formats at the buffer's tail and, if any field does not
-fit, rolls the offset back to the row's start before it stops. A row cut
-mid-number would hand a parser a plausible smaller figure, which is worse
-than a list that ends early.
+fit, rolls the offset back to the row's start. A row cut mid-number would
+hand a parser a plausible smaller figure, which is worse than a list that
+ends early. `/ctl/procs` stops its walk at that row; `/ctl/kstack` walks on
+without rows, for its peak (below).
 
 ### A cut process table says so (2026-11-12; operator vote 85)
 
@@ -342,6 +343,36 @@ missing, and at least one size that holds rows and the line together. It
 compares shape, not bytes, because `CPU_NS` moves between two renders.
 `tools/interactive/ps-many.exp` reads the file on a freshly booted guest and
 requires no cut line, then with seventy more Procs and requires it last.
+
+### A cut kernel-stack table says so, and keeps its peak (2026-11-13)
+
+`/ctl/kstack` had the same silent end and a worse one beside it.
+`format_kstack` returned at the first row that did not fit, so past about a
+hundred Procs the file was a shorter table with no sign and without its
+`peak:` line, the one figure the file exists for. The table's end now has its
+room reserved before any row: `KSTACK_TAIL_MAX` is the cut line, the
+scan-budget line and the peak line with each number at its widest. Rows end
+where the end begins, so the end always fits, and a buffer too small for the
+header and the end renders nothing. A table that left a row out says, after
+its rows:
+
+    (cut: more processes than one read holds)
+
+Unlike `/ctl/procs`, the walk does not stop there. `format_kstack_cb` goes on
+without rendering, so the peak is taken over every Proc the walk reached, its
+row shown or not, and the rows shown stay the walk's first. The buffer never
+was this walk's bound: the reader holds `CAP_HOSTOWNER`, and the masked window
+is bounded by the scan budget plus one step for each Proc. A scan that runs
+out of budget still stops the walk and says the peak is a lower bound. A
+`_Static_assert` keeps the read buffer at least the widest header plus the
+end.
+
+`devctl.kstack_ends_whole` links a Proc of its own whose recorded peak is the
+whole stack (`reaped_kstack_peak`), formats the table into every buffer size
+up to the whole table's and a little past, and requires of each: the peak line
+last, every row five columns, the rows the whole table's first, the cut line
+exactly when a row is missing, and the peak naming that Proc whether or not
+its row was cut, with at least one size where it was.
 
 ### The STATE column shows job-stop, never debug-stop
 

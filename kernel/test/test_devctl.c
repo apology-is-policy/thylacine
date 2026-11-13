@@ -490,6 +490,149 @@ void test_devctl_kstack_gated(void) {
     if (k) spoor_clunk(k);
 }
 
+// The shape of one /ctl/kstack render: its rows' pids, whether the cut line
+// follows them, and the peak line's figures. The shape, not the bytes: a
+// running thread's own figure deepens between two renders.
+#define KSW_PIDS 32
+struct ksw_shape {
+    int  rows;
+    int  pids[KSW_PIDS];
+    bool cut;
+    bool bad;         // not the layout: a torn line, a row without five columns, no peak line last
+    u32  peak;
+    int  peak_pid;
+};
+
+static bool ksw_line_is(const char *buf, size_t ls, size_t le, const char *want) {
+    size_t k = 0;
+    for (; want[k]; k++)
+        if (ls + k >= le || buf[ls + k] != want[k]) return false;
+    return ls + k == le;
+}
+
+static bool ksw_line_starts(const char *buf, size_t ls, size_t le, const char *want) {
+    for (size_t k = 0; want[k]; k++)
+        if (ls + k >= le || buf[ls + k] != want[k]) return false;
+    return true;
+}
+
+// The decimal at token `want` (0-based) of the line, and how many tokens it has.
+static int ksw_tokens(const char *buf, size_t ls, size_t le, int want, u32 *out) {
+    int ntok = 0;
+    for (size_t k = ls; k < le; k++) {
+        if (buf[k] == ' ' || (k != ls && buf[k - 1] != ' ')) continue;
+        if (ntok == want) {
+            u32 v = 0;
+            for (size_t d = k; d < le && buf[d] >= '0' && buf[d] <= '9'; d++)
+                v = v * 10u + (u32)(buf[d] - '0');
+            *out = v;
+        }
+        ntok++;
+    }
+    return ntok;
+}
+
+static void ksw_shape_of(const char *buf, size_t got, struct ksw_shape *o) {
+    o->rows = 0;
+    o->cut = false;
+    o->bad = false;
+    o->peak = 0;
+    o->peak_pid = -1;
+    if (got == 0 || buf[got - 1] != '\n') { o->bad = true; return; }
+    bool table = false, peak_seen = false;
+    size_t ls = 0;
+    for (size_t i = 0; i < got; i++) {
+        if (buf[i] != '\n') continue;
+        u32 v = 0;
+        if (peak_seen) {
+            o->bad = true;                       // the peak line is the last
+        } else if (!table) {
+            if (ksw_line_is(buf, ls, i, "PID    NAME    PEAK    TID")) table = true;
+        } else if (ls < i && buf[ls] >= '0' && buf[ls] <= '9') {
+            if (o->cut || ksw_tokens(buf, ls, i, 0, &v) != 5) o->bad = true;
+            if (o->rows < KSW_PIDS) o->pids[o->rows] = (int)v;
+            o->rows++;
+        } else if (ksw_line_is(buf, ls, i, "(cut: more processes than one read holds)")) {
+            if (o->cut) o->bad = true;
+            o->cut = true;
+        } else if (ksw_line_starts(buf, ls, i, "peak:")) {
+            if (ksw_tokens(buf, ls, i, 1, &o->peak) != 6) o->bad = true;
+            (void)ksw_tokens(buf, ls, i, 3, &v);
+            o->peak_pid = (int)v;
+            peak_seen = true;
+        } else if (ls != i && !ksw_line_starts(buf, ls, i, "(scan budget exhausted")) {
+            o->bad = true;
+        }
+        ls = i + 1;
+    }
+    if (!peak_seen) o->bad = true;
+}
+
+static bool ksw_has(const struct ksw_shape *o, int pid) {
+    for (int i = 0; i < o->rows && i < KSW_PIDS; i++)
+        if (o->pids[i] == pid) return true;
+    return false;
+}
+
+// /ctl/kstack ends whole at every buffer size: the whole table's first rows,
+// the cut line exactly when a row is missing, and the peak line last -- over
+// every Proc, its row shown or not. A table that stopped at the first row
+// that did not fit said nothing and lost its peak.
+void test_devctl_kstack_ends_whole(void) {
+    static char buf[2048];
+    static char whole[2048];
+
+    // The deepest stack there can be, on a Proc of the test's own: a child of
+    // kproc, so the walk reaches it after kproc's row.
+    struct Proc *deep = proc_alloc();
+    TEST_ASSERT(deep != NULL, "proc_alloc for the deepest Proc");
+    deep->state = PROC_STATE_ALIVE;
+    deep->reaped_kstack_peak = THREAD_KSTACK_SIZE;
+    deep->reaped_kstack_tid = 1;
+    proc_test_link(deep);
+    int deep_pid = deep->pid;
+
+    struct ksw_shape ref, sh;
+    size_t full = devctl_format_kstack_for_test(NULL, whole, sizeof whole);
+    ksw_shape_of(whole, full, &ref);
+    bool ref_ok = full > 0 && !ref.bad && !ref.cut && ref.rows >= 2 && ksw_has(&ref, deep_pid) &&
+                  ref.peak == THREAD_KSTACK_SIZE && ref.peak_pid == deep_pid;
+
+    // Past `full` by the room the end reserves beyond what it used: there the
+    // whole table fits again.
+    int bad = 0, not_prefix = 0, silent = 0, lying = 0, low_peak = 0;
+    int sized = 0, cut_before_deep = 0, uncut = 0;
+    for (size_t cap = 1; ref_ok && cap <= sizeof buf && cap <= full + 256; cap++) {
+        size_t got = devctl_format_kstack_for_test(NULL, buf, cap);
+        if (got == 0) continue;                  // no room for the header and the table's end
+        sized++;
+        ksw_shape_of(buf, got, &sh);
+        if (sh.bad) { bad++; continue; }
+        if (sh.rows > ref.rows) { not_prefix++; continue; }
+        for (int i = 0; i < sh.rows && i < KSW_PIDS; i++)
+            if (sh.pids[i] != ref.pids[i]) { not_prefix++; break; }
+        if (!sh.cut && sh.rows != ref.rows) silent++;
+        if (sh.cut && sh.rows == ref.rows) lying++;
+        if (sh.peak != THREAD_KSTACK_SIZE || sh.peak_pid != deep_pid) low_peak++;
+        if (sh.cut && !ksw_has(&sh, deep_pid)) cut_before_deep++;
+        if (!sh.cut) uncut++;
+    }
+
+    proc_test_unlink(deep);
+    deep->state = PROC_STATE_ZOMBIE;
+    proc_free(deep);
+
+    TEST_ASSERT(ref_ok, "the whole kstack table, the deepest Proc's row and peak in it, fits 2 KiB uncut (enlarge the buffers if not)");
+    TEST_ASSERT(sized > 1, "some sizes fit the kstack header and the table's end");
+    TEST_EXPECT_EQ(bad, 0, "every size of /ctl/kstack ends on its peak line, each row whole");
+    TEST_EXPECT_EQ(not_prefix, 0, "the rows of a cut kstack table are the whole table's first rows");
+    TEST_EXPECT_EQ(silent, 0, "a kstack table short of a row ends its rows with the cut line");
+    TEST_EXPECT_EQ(lying, 0, "a kstack table with every row carries no cut line");
+    TEST_EXPECT_EQ(low_peak, 0, "the kstack peak is the deepest Proc's at every size, its row shown or not");
+    TEST_ASSERT(cut_before_deep > 0, "some size cuts the deepest Proc's row and still names it in the peak");
+    TEST_ASSERT(uncut > 0, "some size past the header holds the whole kstack table uncut");
+}
+
 void test_devctl_read_sched_format(void) {
     struct Spoor *c = open_ctl_leaf("sched");
     TEST_ASSERT(c != NULL, "open /ctl/sched");
