@@ -22,6 +22,50 @@ needed the operator.
 
 
 ---
+## 2026-11-13 (aux): main merged in, the close chord kept off the console, and what a guest found that the host checks did not
+
+Stamped 2026-11-13T16:12Z. Branch aux-3-mac after f8cc8b92d: dec586896 (the merge of main e28cc34ea), a4810d031 (R3-F9, the operator's vote), 54dd5cc2e (guest run 3's two scenario repairs), 5d674a326 (round R4's close), and this entry's commit.
+
+### What it is
+
+Main at e28cc34ea is corona's landing and the trusted seat's rounds 24 to 27. The merge had 23 conflicted files; each hunk was read on both sides and against the base, with rerere off (the shared repository has it on, and the first attempt let it resolve sub-kernel-poll.md silently; it was aborted and redone). Main's form of Lictor stands where both sides fixed the same thing: the unbind drill is read only by `Gpu::set_scanout_client`, and `backend::bootargs` is corona's text. Both sides' additions to `Stats` (`display_events`, `stalls_begun`) and to the trusted screen are kept. corona's three Lictor findings on this branch's base, carried as open in the entry below, come with it: the unbind drill in every build (their round 24) is read only by the client's bind, a detach of the presented resource (round 25, P1) meets the restore's fallback to a blank output for a refused frame, and the restore waits out a stall under the kernel's deadline (round 25, P2). That fallback is where round R4's open F3 sits.
+
+R3-F9, as the operator voted it (about 13:30Z): a close chord never closes a pane that hosts a system surface, with or without a session, in every profile, and the compositor says it refused (`tapestryd: chord close refused: pane <id> hosts a system surface`). HALCYON-INSTRUMENT 9.5 is amended; the manual's section 10 says it.
+
+### Wrong turns, and what caught each
+
+- **rerere.** The first merge resolved `vault/system/kernel/ipc-wake/sub-kernel-poll.md` from a recorded resolution and said nothing. Caught by reading the conflict list against the files changed on both sides; redone with `-c rerere.enabled=false`.
+- **The merge's witness was three-way, and needed four.** Every host check, each parent's checkers over the other's code, and main's five seat scenarios over this branch were green. Guest run 3 found two of THIS branch's scenarios red at lines MAIN had changed: `lictor: trusted scanout active generation=N` gained ` chains= took_ms=`, and `ls-graphical-sak-follow` waited for the line's end after N (the screen was up; the wait timed out); main's `unref_frees` takes an unref answered "no such resource" as a free done and says nothing, and `ls-graphical-sak-unmade`'s 28-line transcript wanted that line. Both are scenario lines, fixed in 54dd5cc2e; the census of every other literal line the two scenarios read found each with a writer. The lesson is in the memory: a merge is also each side's scenarios against every line the other side reworded or silenced.
+- **The stall shot's comment.** The merged comment claimed only a client's request could take the shot; main's owed-free pass can. Rewritten at the merge, and round R4's F1 then showed it was not only a comment: the display aims moved onto main's connection-bound shot.
+- **A run that never started.** Guest run 4's first start exited 126: the script was written without its execute bit, so its exit trap (the mac's release) never ran either. The lease was still held; it was started with `bash`.
+
+### Evidence
+
+- Host, on 5d674a326: lictor 126 host tests (2 new, each red under its mutant in its own target dir), tapestryd 132, libhalcyon 252 (unchanged since the merge); the guest and production builds of Lictor and tapestryd check (forced); check-expect-forms, check-audit-rows, check-doc-tables, check-console-lines pass; vault lint 0 fails.
+- A scripted guest for ls-halcyon-login-close (guest run 2's real boot to the login prompt, then each case's reactions): nine cases, the fix green and each fault red at its own text.
+- **Guest run 3** (2026-11-13, 14:18Z to 15:39Z, a4810d031, QEMU 10.0.2 with HVF; resid/live3-run3.out, `RESID-LIVE3 DONE bad=1`). Session image: ls-graphical-sak-pointer, -sak, -refused, ls-halcyon-pointer, -scale-session and ls-halcyon-login-close (F9) green; main's ls-graphical-sak-dead, -chained, -soak, -states and ls-graphical-keys-overrun green over this branch's code, so main's restore code has run in a guest; ls-graphical-sak-unmade and -follow red (above). Controls: noforget red at `680 0`; allwalls (every wall between an episode's input and the compositor down, main's tail_until too) red at `the trusted screen's Enter reached the fixture`; hostile green with no seat failed; hostile-old (main's restore bind reading the drill) `lictor: seat failed: normal scanout restoration`; f9-old (the refusal taken out) red at `read 'tapestryd: chord close: no rail'`. Gate image: ls-gfx-panes, ls-display-follow-edid, -declared, ls-display-stall, ls-display-follow, ls-gfx-console-close (F9) and ls-gpu-dead green.
+- **Guest run 4** (2026-11-13, 15:41Z to 16:11Z, 5d674a326, the same QEMU; resid/live4-run4.out, `RESID-LIVE4 DONE bad=0`). Session image: ls-graphical-sak-unmade green at 21 lines (seven makings refused, the spare's detach the only line of each release) and -follow green (generations 1 and 2 up and rebound); ls-graphical-sak, -pointer, main's -dead (its bind-stall leg is a late trusted bind, R4-F2's path; its deliberate seat failure at generation 4 as the scenario wants) and -states green. Control: -unmade with no cap red at `line 1 of 21 of Lictor's`, reading the 4096x2160 screen made: the transcript check discriminates. Gate image: ls-display-stall green with each shot at its own step (the mode's bind, the switch's bind, the mode's bind again, each followed by Lictor's INJECTED line), ls-display-follow-edid green with its shot at the EDID, ls-display-follow-declared, ls-display-follow and ls-gpu-dead (the stall budget, 3) green.
+
+### Round R4
+
+Opus 5.5 at max on the merge and F9, read-only, the same model at start and end (report: aux-gate resid/report-r4.md): 0 P0, 0 P1, 0 P2, 4 P3, a clean close. F1 (the self-audit found it first, as S1): `TestStallNext` arms at once, so main's owed-free pass or a takeover could take a shot aimed at a display bind; the aimed request then met a stalled engine and was refused before staging, with no line to say the shot went elsewhere, and the display scenarios would have stayed green on the wrong path. The aims now take main's `TestStallShot`. F2: a late trusted bind left the trusted image in the condemned list into phase 0 under main's restore, which binds without draining; the service's own ids no longer park (`objects::parks_on_late_bind`). F4: the proxy reads a scanout command against `Stats::stalls_begun`. F3 is open (below).
+
+### Decided by the operator
+
+R3-F9's rule (AskUserQuestion, about 13:30Z): "Never close system panes". Nothing was decided under the 2026-09-01 authorization: the session is Opus, and R4-F3's two designs are left unchosen.
+
+### What "shown" covers
+
+In a guest: the close chord refused at both login prompts and at the gate image's console, and red with the refusal taken out; main's restore and seat code over this branch's screen; R3-F1's fix in main's form by the hostile pair; every wall between an episode's input and the compositor, main's tail too, by allwalls; the display aims landing at their steps on the connection-bound shot; the two repaired scenarios. Not shown: that the owed-free pass cannot take a display aim's shot (structural: `test_stall_ride` arms the shot inside the aimed request; no lever puts an owed free between an aim and its step on the 2D device); R4-F2's and F4's predicates beyond host tests and mutants (a late trusted bind ran in sak-dead, and its parking is not observable on 2D); F9 during a session (the console's leaf is backgrounded and cannot be focused).
+
+### Open
+
+- **R4-F3** (P3, fail-safe): a frame main's restore gives up (`Met::Refused`, then a blank output) is never told to the compositor, so a composed display stays blank after the episode until a mode change. Two designs; either needs a seat shot in corona's sequence to witness. Raised with corona and main.
+- corona's bring-up and health-step stall aims still use `TestStallNext`, with R4-F1's hazard on a GL host (told corona).
+- F6 and F8 still have no regression test; the tablet's axes across an episode (P3); nothing puts HALCYON_SCALE or HALCYON_MOTION into /env; #880.
+- The app: Control-Command-G never pressed; one `--stats` run of binary 22370661c6670fc0 is asked of the operator; QEMU's `max_hostmem` default of 256 MiB against M9.
+- The full CI gate has not run (held by the operator). Codeberg is behind.
+
 ## 2026-11-13 (aux): three lines carried as "open", taken as work: the seat read with the events, a session that states its scale, a declared scale before an EDID that is not answered
 
 Stamped 2026-11-13T12:14Z. Branch aux-3-mac after 2a123658f: e11ef5b0e and 7cef80629 (the seat), ab497069d (the session's scale), a5f56dd09 (the EDID's order, and a helper five scenarios share), d62f032d6 and 7f1143217 (what guest run 1 sent back), ce4243c64 (round R3's close), and this entry's commit. The operator was away. Three decisions were taken under the standing 2026-09-01 authorization and are listed below; from about 08:36Z the session was Opus 5.5 and none was taken after that. No kernel file changed. The full CI gate has not run.

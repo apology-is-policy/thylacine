@@ -2619,8 +2619,10 @@ asked first there too, and that case is not driven. The environment's own
 image: the boot's prompt and the one a logout returns to, each followed by a
 login) and `ls-gfx-console-close` (gate image, after a login on the serial
 line); and before any guest, a scripted guest of nine cases, each fault red at
-its own text.
-NOT YET RUN IN A GUEST.
+its own text. In a guest (guest run 3, 2026-11-13, a4810d031, QEMU 10.0.2 with
+HVF): both green, and with the refusal taken out the session scenario is red at
+the first prompt, reading `tapestryd: chord close: no rail` where the refusal
+was due.
 
 
 ## The delivered history chord -- Super+K forgets a tile's history (2026-09-25, TC-1b)
