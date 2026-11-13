@@ -174,7 +174,7 @@ sleep 1
 ! kill -0 "$peer" 2>/dev/null && pass "T13 cancel --all stopped the peer's" || { fail "T13 --all left the peer"; kill "$peer" 2>/dev/null; }
 
 # ---- an EXPIRED lease in the way. yip's own line, and one line under it as the entry's detail.
-exp_line='EXPIRED -- main held it 14.2h, TTL ran out 13.4h ago. Not free: `steal` it with a reason, or ask them.'
+exp_line='EXPIRED -- main held it 14.2h, TTL ran out 13.4h ago. Not free: runner host pid 4242 alive, so it is not passed on -- ask them, or the operator.'
 setexp() { printf 'mac   %s\n        runner: host pid 4242 dead\npi    FREE\n' "$exp_line" > "$F/resources"; }
 ncalls() { grep -c '^call ' "$F/calls"; }
 
@@ -190,8 +190,9 @@ sleep 9
     && pass "T14 the ring is logged, once" || fail "T14 expired lines: $(grep -c '	expired-' "$THYLA_WAKE_DIR/log.tsv")"
 grep -q '^mac   EXPIRED -- main held it' "$F/call.body" && grep -q 'runner: host pid 4242 dead' "$F/call.body" \
     && grep -q 'yip release mac' "$F/call.body" && ! grep -q '^pi ' "$F/call.body" \
+    && grep -q 'passes it to the head of the queue once it has been expired ten minutes with none alive' "$F/call.body" \
     && pass "T14 the ring carries yip's entry for mac, and the way out" || fail "T14 body: $(cat "$F/call.body" 2>/dev/null)"
-grep -q '^\[thyla-wake\] mac is EXPIRED under main, which is not free: .*(main was rung once)\. yip: mac   EXPIRED -- main held it 14\.2h, TTL ran out 13\.4h ago\. .* -- T14$' "$o" \
+grep -q '^\[thyla-wake\] mac is EXPIRED under main (main was rung once)\. yip: mac   EXPIRED -- main held it 14\.2h, TTL ran out 13\.4h ago\. Not free: runner host pid 4242 alive, so it is not passed on -- ask them, or the operator\. A steal is yours to decide, .* -- T14$' "$o" \
     && [ "$(lines "$o")" = 1 ] && pass "T14 the pane was told once" || fail "T14 got: $(cat "$o")"
 ! grep -q release "$F/calls" && pass "T14 nothing released, nothing stolen" || fail "T14 a release behind an EXPIRED lease: $(tr '\n' ';' < "$F/calls")"
 setres "HELD by you for 0s, 6.0h left"
@@ -218,7 +219,7 @@ echo "== T16 watch behind an EXPIRED lease: the pane is told once, nobody is run
 o=$WORK/o16; : > "$o"; p=$(pane "python3 -I $T/fakebox.py $o empty"); sleep 1
 TMUX_PANE=$p "$W" watch mac --say "T16" >/dev/null || fail "T16 arm"
 sleep 8
-grep -q '^\[thyla-wake\] mac is EXPIRED under main, which is not free: .*(main was not rung: a watch claims nothing)\. .* -- T16$' "$o" \
+grep -q '^\[thyla-wake\] mac is EXPIRED under main (main was not rung: a watch claims nothing)\. yip: .* -- T16$' "$o" \
     && [ "$(lines "$o")" = 1 ] && pass "T16 told once across several looks" || fail "T16 got: $(cat "$o")"
 [ "$(ncalls)" = 0 ] && pass "T16 nobody rung" || fail "T16 a watch rang: $(tr '\n' ';' < "$F/calls")"
 "$W" cancel >/dev/null; sleep 1
@@ -228,7 +229,7 @@ echo "== T17 the ring fails: the pane is told that it did"
 o=$WORK/o17; : > "$o"; p=$(pane "python3 -I $T/fakebox.py $o empty"); sleep 1
 THYLA_WAKE_EXPIRED_POLL=2 TMUX_PANE=$p "$W" hold mac "T17" --say "T17" >/dev/null || fail "T17 arm"
 sleep 7
-grep -q '^\[thyla-wake\] mac is EXPIRED under main, .*(ringing main FAILED)\. .* -- T17$' "$o" && [ "$(lines "$o")" = 1 ] \
+grep -q '^\[thyla-wake\] mac is EXPIRED under main (ringing main FAILED)\. yip: .* -- T17$' "$o" && [ "$(lines "$o")" = 1 ] \
     && pass "T17 told, with the failed ring named" || fail "T17 got: $(cat "$o")"
 grep -q "	expired-ring-failed	main; " "$THYLA_WAKE_DIR/log.tsv" && pass "T17 the failure is logged" || fail "T17 no expired-ring-failed line"
 "$W" cancel >/dev/null; sleep 1; rm -f "$F/call.rc"

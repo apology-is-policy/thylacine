@@ -43,10 +43,13 @@
 # RELEASED when the agent is gone, and when its box stays unusable for
 # THYLA_WAKE_HELD_BOUND seconds; the agent is then told it was released.
 #
-# AN EXPIRED LEASE IS NOT A FREE ONE: yip hands it to nobody until its holder
-# releases or renews it, or someone steals it with a reason, so everything queued
-# behind it stands still -- and a holder whose turn ended with the lease does not
-# know (2026-11-10: a Mac idle for 13 h with two agents queued behind one). A
+# AN EXPIRED LEASE IS NOT A FREE ONE AT ONCE. yip passes it to the head of the
+# queue only when it has been expired ten minutes and every runner its holder
+# registered is verified dead (or none was registered); while a registered runner
+# may be alive it stays the holder's until they release or renew it, or someone
+# steals it with a reason, and everything queued behind it stands still -- and a
+# holder whose turn ended with the lease does not know (2026-11-10: a Mac idle for
+# 13 h with two agents queued behind one). yip's EXPIRED line says which case. A
 # waiter therefore says so, once per expiry: `hold` rings the holder with what
 # yip shows (they can release in one call), and both modes tell this pane. It
 # never steals: that takes a check of the holder's runners and a reason, and is
@@ -217,7 +220,7 @@ expired_look() {
         how="$holder was not rung: a watch claims nothing"
         if [ "$1" = ring ]; then
             if {
-                printf 'thyla-wake, for %s, %s: yip shows your %s lease EXPIRED. An expired lease is not a free one: nothing queued behind it moves until you release or renew it, and %s is queued.\n\n' "$ME" "$(stamp)" "$RES" "$ME"
+                printf 'thyla-wake, for %s, %s: yip shows your %s lease EXPIRED, and %s is queued behind it. yip keeps an expired lease for you while a runner you registered may be alive, and passes it to the head of the queue once it has been expired ten minutes with none alive; its line below says which.\n\n' "$ME" "$(stamp)" "$RES" "$ME"
                 res_block "$RES"
                 printf '\nIf your work on %s has ended: yip release %s. If it is still running: renew it with yip hold %s "<reason>" --now. One automatic ring per expiry; nothing was stolen.\n' "$RES" "$RES" "$RES"
             } | "$YIP" call "$holder" "$RES: your lease EXPIRED and $ME is queued behind it" >/dev/null 2>&1; then
@@ -228,7 +231,7 @@ expired_look() {
         else
             log expired-seen "$holder; $line"
         fi
-        EXPIRED_NOTE="$RES is EXPIRED under $holder, which is not free: nothing queued behind it moves until $holder releases or renews ($how). yip: ${line%%. Not free*}. A steal is yours to decide, after checking $holder's runners."
+        EXPIRED_NOTE="$RES is EXPIRED under $holder ($how). yip: $line A steal is yours to decide, after checking $holder's runners."
     fi
     [ -n "$EXPIRED_NOTE" ] || return 0
     deliver "$EXPIRED_NOTE" "$EXPIRED_BOUND"

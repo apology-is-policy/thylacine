@@ -227,7 +227,8 @@ authoritative.** A lease is a statement from whoever knows. It expires on
 unit of work, so a 40-minute gate in one blocking call beats not at all (a
 peer's beat read "36m ago" mid-gate; heartbeat expiry would have handed their
 cores away at minute 3). An expired lease is not an open one: taking it is a
-deliberate, recorded `steal`. **Holding is no licence to kill** — it means
+deliberate, recorded `steal`, or yip's own hand-on to the head of the queue once
+it has been expired ten minutes with every registered runner dead. **Holding is no licence to kill** — it means
 nobody else *starts*; killing a peer's gate at boot 39 of 40 destroys the work
 and the evidence, and the killer never sees what they destroyed. Identify by
 cwd, notify, grace, escalate.
@@ -792,7 +793,11 @@ been fixed by adding axes.
   depends on the heartbeat, so the "improvement" cannot be reintroduced.
 - **An expired lease is not an open one**: `steal` needs a reason, is refused
   while time remains, and records `stolen_from` + `steal_why` so a reclaim can
-  never read as an ordinary acquire in the log.
+  never read as an ordinary acquire in the log. Since yip 7b51147 (2026-11-13,
+  operator vote 105) a lease expired ten minutes with every runner its holder
+  registered verified dead, or none registered, passes to the head of the queue
+  at its next `hold` or `request`, recorded the same way; a runner that is alive
+  or cannot be checked keeps it.
 - **Release refuses to end someone else's claim** — the whole value is that
   the holder's word is authoritative.
 - **`ViolationAdvice`** is prose, on purpose (no mechanism): identify the owner
@@ -851,10 +856,12 @@ re-exec'd detached with `nohup … </dev/null &`:
   `THYLA_WAKE_HELD_BOUND` seconds (default 600), it releases the lease too, then
   types a line saying so once the box frees.
 - **An EXPIRED lease in the way is said, once.** yip shows a lease whose TTL ran
-  out as `EXPIRED`, which is not `FREE`: it goes to nobody until its holder
-  releases or renews it, so the queue behind it stands still, and a holder whose
-  turn ended with the lease does not know. (2026-11-10: the Mac idle for about
-  thirteen hours with two agents queued behind one.) While its `yip hold`
+  out as `EXPIRED`, which is not `FREE`. yip passes it to the head of the queue
+  ten minutes after expiry when no runner its holder registered is alive; while
+  one may be, it goes to nobody until its holder releases or renews it, so the
+  queue behind it stands still, and a holder whose turn ended with the lease does
+  not know. (2026-11-10: the Mac idle for about thirteen hours with two agents
+  queued behind one.) yip's EXPIRED line ends with which case it is. While its `yip hold`
   blocks, the watcher reads the resource's line every `THYLA_WAKE_EXPIRED_POLL`
   seconds (default 300). On finding it EXPIRED under another agent it opens one
   call to that agent, carrying yip's own entry for the resource and the two ways
