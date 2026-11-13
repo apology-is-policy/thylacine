@@ -9,15 +9,20 @@
 typedef uint64_t u64, paddr_t, caps_t;
 typedef uint32_t u32;
 typedef struct { u32 value; } spin_lock_t;
-static unsigned allocations, frees, tables, destroys, drains;
+static unsigned allocations, frees, tables, destroys, drains, lapses;
 static bool fail_alloc, fail_table, pause_drain, entered_drain, release_drain;
 static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t cv = PTHREAD_COND_INITIALIZER;
+// The last descriptor freed, compared and never read: a double that would
+// otherwise read it after the free must refuse before the sanitizer reports.
+static void *freed;
 static void *kzalloc(size_t n, unsigned flags) {
     (void)flags; if (fail_alloc) return NULL;
-    allocations++; return calloc(1, n);
+    allocations++; void *p = calloc(1, n);
+    if (p == freed) freed = NULL;
+    return p;
 }
-static void kfree(void *p) { frees++; free(p); }
+static void kfree(void *p) { frees++; freed = p; free(p); }
 static paddr_t proc_pgtable_create(void) { if (fail_table) return 0; tables++; return 4096; }
 static void proc_pgtable_destroy(paddr_t p) { CHECK(p == 4096, "page table identity"); destroys++; }
 static void spin_lock_init(spin_lock_t *p) { p->value = 0; }
@@ -56,6 +61,14 @@ void vma_drain_in(struct AddrSpace *as) {
     as->vmas = NULL;
     pthread_mutex_unlock(&mu);
 }
+static unsigned lapsed_at;
+// External, as burrow.h declares it. The records name the space, so they lapse
+// while its last owner still holds the descriptor; the cases check the order
+// against the drain, after their own drain checks.
+void burrow_file_payers_lapse(struct AddrSpace *as) {
+    CHECK(as != freed, "the payer records lapse before the last lifetime drop");
+    lapses++; lapsed_at = ++stamp;
+}
 /* ACTUAL_QUIESCE */
 
 /* ACTUAL_ADDRSPACE_LIFECYCLE */
@@ -66,8 +79,9 @@ void vma_drain_in(struct AddrSpace *as) {
 static void *drop_owner(void *p) { addrspace_unref(p); return NULL; }
 static void *drop_pin(void *p) { addrspace_unpin(p); return NULL; }
 static void reset_fixture(void) {
-    allocations = frees = tables = destroys = drains = 0;
-    stamp = resets = last_reset = drained_at = 0;
+    allocations = frees = tables = destroys = drains = lapses = 0;
+    stamp = resets = last_reset = drained_at = lapsed_at = 0;
+    freed = NULL;
     fail_alloc = fail_table = pause_drain = entered_drain = release_drain = false;
 }
 static void serial_cases(void) {
@@ -89,12 +103,14 @@ static void serial_cases(void) {
     CHECK(drains == 0 && destroys == 0 && a->vmas, "nonfinal owner preserves mappings");
     addrspace_unref(a);
     CHECK(drains == 1 && destroys == 0 && frees == 0 && a->vmas == NULL, "last owner drains before last pin");
+    CHECK(lapses == 1, "the last owner lapses its payer records once");
+    CHECK(lapsed_at > drained_at, "the payer records lapse after the drain");
     CHECK(addrspace_ref_count(a) == 1 && addrspace_owner_count(a) == 0, "ownerless descriptor remains pinned");
     addrspace_pin(a);
     addrspace_unpin(a);
     CHECK(frees == 0 && drains == 1, "kernel pins may transfer descriptor lifetime");
     addrspace_unpin(a);
-    CHECK(frees == 1 && destroys == 1 && drains == 1, "final pin frees once without another drain");
+    CHECK(frees == 1 && destroys == 1 && drains == 1 && lapses == 1, "final pin frees once without another drain");
 
     reset_fixture(); a = addrspace_alloc(32); a->vmas = &plain_vma;
     addrspace_pin(a); addrspace_unpin(a);
@@ -127,7 +143,7 @@ static void simultaneous_drops(void) {
         for (unsigned i = 0; i < 8; i++) CHECK(pthread_create(&t[i], NULL, drop_pin, a) == 0, "create pin teardown");
         addrspace_unref(a);
         for (unsigned i = 0; i < 8; i++) CHECK(pthread_join(t[i], NULL) == 0, "join pin teardown");
-        CHECK(drains == 1 && destroys == 1 && frees == 1, "concurrent final drops free exactly once");
+        CHECK(drains == 1 && lapses == 1 && destroys == 1 && frees == 1, "concurrent final drops free exactly once");
     }
 }
 static void private_guards(void) {
@@ -218,6 +234,7 @@ static void split_interval(void) {
           "the retained owner reference outlives a pin dropped between release and destroy");
     addrspace_destroy(a);
     CHECK(resets == 1 && drains == 1 && last_reset < drained_at, "destroy stops the mapped device before the drain");
+    CHECK(lapses == 1 && lapsed_at > drained_at, "destroy lapses the payer records once, after the drain");
     CHECK(frees == 1 && destroys == 1, "destroy frees exactly once");
 }
 int main(int argc, char **argv) {
