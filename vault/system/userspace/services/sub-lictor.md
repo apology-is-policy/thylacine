@@ -444,6 +444,12 @@ the 18.9 s of waits, then reads the 2048x1080 picture under secure attention,
 waits out 21 s with no eighth making, and has a display of 1280x800 made and
 shown. The cap is a measured number: a session that takes more of the device
 moves it, and the scenario says so where a refusal comes out of its place.
+In a guest on 2026-11-13 (QEMU 10.0.2, HVF, 74c60e75a) it is green, each refusal
+`resp_type=0x1201`, both dumps pixel for pixel the host renderer's pictures,
+and five faults are each red at the check that knows it: no cap; a give-up
+that lets go of the standing image (seen only by the picture leg, as a
+refused transfer); a release that names the standing image; a seventh asking
+again; a screen that takes the new size before it is made.
 Not shown by any test: a release of the spare that is not answered for (a
 stall), after which it stays owed and is asked for again; a making the device
 accepts and does not back; the lever's shot set aside; memory that cannot be
