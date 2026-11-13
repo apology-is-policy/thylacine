@@ -62,7 +62,7 @@ hazards: [haz-driver-panic-dos]
 abis: [abi-trusted-seat, abi-native-nonblock]
 design: ["docs/GRAPHICAL-SAK-OWNERSHIP.md", "docs/GRAPHICAL-SAK-PORTABILITY.md", "docs/HALCYON-TRUSTED-EPISODE.md"]
 created: 2026-09-18
-updated: 2026-11-10
+updated: 2026-11-13
 ---
 ## Clipboard cancellation progress boundary
 
@@ -232,7 +232,14 @@ A test-mode lever reproduces both ends of a stall on demand.
 `thylacine.test-latch-dead` on the kernel command line
 (`THYLACINE_TEST_LATCH_DEAD=1` to `tools/run-vm.sh`) makes tapestryd arm the
 broker with `TestArmLatch` once it serves, and its global ctl says
-`test-latch-dead armed` once the broker has taken it. `Device` then marks each
+`test-latch-dead armed` once the broker has taken it. Lictor does not take the
+compositor's word for the boot: it reads `/hw/chosen/bootargs` itself, once, at its
+start (`backend::bootargs`; a line that cannot be read or that fills the 1024-byte
+buffer reads as none), and `TestArmLatch` is `BadField` unless the whole word is on
+that line (`gpu_api::bootarg_declared`, `TEST_LEVERS_WORD`), so tapestryd prints
+`arm REFUSED by the broker` on a boot that did not declare it. `TestArmChained`
+is refused the same way without `thylacine.test-latch-chained`
+(`TEST_CHAINED_WORD`). `Device` then marks each
 resource created at 97 by 89. At a retirement of one, it stalls the engine
 through a harmless display query whose wait reports its deadline passed,
 exactly the state a slow command leaves. The lever has two shots, and each one
@@ -267,7 +274,9 @@ whoever sends it, so a seat takeover or the owed-free pass landing between the
 compositor's aim and its command would take one, and since both kinds share one
 flag, `test_stall_settle` spends a pending `TestStallNext` shot too; tapestryd
 never has both kinds pending. A takeover needs test-mode, the bootarg and the
-operator's chord, and vote 30 recovers the seat.
+operator's chord, and vote 30 recovers the seat. The bootarg is Lictor's own
+reading, not the compositor's: the latch, seat and stall-next shots fire only from
+counts `TestArmLatch` sets, and the chained shots only from `TestArmChained`'s.
 `CtxAttachResource` links the attachment in the ledger before the device
 answers, and a failure that left nothing (`left_nothing`) unlinks it, so the
 resource can still retire. `CtxDestroy` retires the context in the ledger before the
@@ -845,7 +854,11 @@ DEADLINE arm judges both.
 Open after that review:
 
 - `test-mode` is still a default cargo feature of `lictor` and `tapestryd`, so
-  every image carries the levers (the #880 strip-for-production class). The
+  every image carries the levers (the #880 strip-for-production class). The two
+  armings that break a trusted takeover (`TestArmLatch`, `TestArmChained`) need
+  their word on the kernel's command line, read by Lictor; `TestStallShot`,
+  `TestOwedDefer`, `TestOwedStall` and the context hold and abandon verbs need
+  none and are bounded instead (#178). The
   production compile is now VERIFIED (2026-09-21): `cargo check --release -p
   lictor --no-default-features --features backend`, and `-p tapestryd` /
   `-p halcyond` with `--features guest`. It did not build before that: the

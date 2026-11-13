@@ -33,6 +33,14 @@ pub struct Device {
     pub presentation: Presentation,
     refused_retirements: u64,
     taken_frees: u64,
+    /// The kernel's command line declared this boot one whose levers may be
+    /// armed (`TEST_LEVERS_WORD`). The compositor asks for the arming and is
+    /// not trusted to: every shot below breaks a trusted takeover.
+    #[cfg(feature = "test-mode")]
+    test_declared: bool,
+    /// The same for the chained shots (`TEST_CHAINED_WORD`).
+    #[cfg(feature = "test-mode")]
+    test_chained_declared: bool,
     /// Latch lever shots left: 2 = the revive shot is next, 1 = the hold.
     #[cfg(feature = "test-mode")]
     test_latch_shots: u8,
@@ -129,6 +137,8 @@ impl Device {
             retiring: Vec::new(), rings: Vec::new(), owner, presentation: Presentation::None,
             refused_retirements: 0,
             taken_frees: 0,
+            #[cfg(feature = "test-mode")] test_declared: false,
+            #[cfg(feature = "test-mode")] test_chained_declared: false,
             #[cfg(feature = "test-mode")] test_latch_shots: 0,
             #[cfg(feature = "test-mode")] test_seat_shots: 0,
             #[cfg(feature = "test-mode")] test_chained_shots: 0,
@@ -142,6 +152,10 @@ impl Device {
             #[cfg(feature = "test-mode")] test_latch_targets: Vec::new(),
             #[cfg(feature = "test-mode")] test_latch_fired: Vec::new() })
     }
+    #[cfg(feature = "test-mode")]
+    pub fn test_declare(&mut self, declared: bool) { self.test_declared = declared; }
+    #[cfg(feature = "test-mode")]
+    pub fn test_declare_chained(&mut self, declared: bool) { self.test_chained_declared = declared; }
     pub fn bind_owner(&mut self, owner: u64) -> bool {
         if owner == 0 || (self.owner != 0 && self.owner != owner) { return false; }
         self.owner = owner; true
@@ -833,6 +847,7 @@ impl Device {
             }
             Request::TestArmLatch => {
                 #[cfg(feature = "test-mode")] {
+                    if !self.test_declared { return Err(Error::BadField); }
                     self.test_latch_shots = 2; self.test_seat_shots = 12; self.test_stall_shots = 3;
                     self.test_blind_armed = true;
                     super::intake::test::arm();
@@ -841,7 +856,10 @@ impl Device {
                 #[cfg(not(feature = "test-mode"))] { return Err(Error::BadField); }
             }
             Request::TestArmChained => {
-                #[cfg(feature = "test-mode")] { self.test_chained_shots = 2; ().put(&mut out); }
+                #[cfg(feature = "test-mode")] {
+                    if !self.test_chained_declared { return Err(Error::BadField); }
+                    self.test_chained_shots = 2; ().put(&mut out);
+                }
                 #[cfg(not(feature = "test-mode"))] { return Err(Error::BadField); }
             }
             Request::TestStallNext => {
