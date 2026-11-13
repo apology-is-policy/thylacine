@@ -947,7 +947,11 @@ Open after that review:
   feature, like the four `Test*` verbs beside it; nothing in the tree sends it
   (the backend runs the selftest itself at init).
 - The restore's answer to a refused frame and to a stall (the paragraph on
-  restoration above) is WRITTEN AND NOT YET BUILT OR RUN IN A GUEST. It answers
+  restoration above) is BUILT AND RUN GREEN IN A GUEST, ITS WITNESSES NOT YET
+  SEEN RED (aux's run 3, a4810d031: sak-dead, -chained, -soak, -states and
+  keys-overrun; corona's q-procs5 at b272c3c54: every ls-graphical-* scenario on
+  the session image, 16 of 20 passed and 4 skipped for a missing optional host
+  artifact; no scenario on main yet makes the device refuse). It answers
   audit round 25: before it, `DetachBacking` of the resource on the display left
   the restore rebinding a resource the 2D device refuses (by QEMU's source; not
   yet run in a guest), RESTORING failed the episode after authentication and
@@ -955,7 +959,7 @@ Open after that review:
   never returned for the boot; and RESTORING failed on a stall where the other
   phases wait. `DetachBacking` itself is still not refused: tapestryd calls it at
   nine sites that were not read for this change, and the restore no longer
-  depends on what a client detaches. Owed before this item goes: the first build, a
+  depends on what a client detaches. Owed before this item goes: a
   compositor that detaches the displayed resource's backing in a guest, leg T,
   and the plain scenario's closing check, each seen red without its fix. Not
   witnessed and not planned to be: that the restore drains no free (read the

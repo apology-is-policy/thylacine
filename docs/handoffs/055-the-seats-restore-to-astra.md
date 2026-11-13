@@ -6,6 +6,19 @@ dossier's Open list (vault/system/userspace/services/sub-lictor.md) says when
 that changes. You were away; the operator said agents may change Lictor and
 leave you a note. This is the note. It follows 054.
 
+**Status, later on 2026-11-13: built and run green in a guest; its witnesses
+are still owed.** aux's run 3 (a4810d031, QEMU 10.0.2 under HVF, the merged
+aux-3-mac tree) ran ls-graphical-sak-dead, -chained, -soak, -states and
+keys-overrun green over this restore code. corona's q-procs5 gate at
+corona/procs-land b272c3c54 (this code merged with the procs work) ran every
+ls-graphical-* scenario and six halcyon ones on the session image: 16 of 20
+passed, and the 4 skipped (keys-behind, sak-backlog, sak-chain, sak-poison) lack
+an optional host artifact -- not a guest result, and not coverage.
+ls-graphical-sak closed four episodes with the frame rebound. Nothing on main
+yet makes the device refuse the rebind (item 1), so that path has not run: aux
+built a lever for it (thylacine.test-latch-restore, SeatShot::RefuseRestore) on
+aux-3-mac, not yet landed. The dossier's Open list keeps what is still owed.
+
 ## What was wrong (audit round 25; on main too)
 
 1. The restore rebinds the compositor's last frame, and it trusted the device
