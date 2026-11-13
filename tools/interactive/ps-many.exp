@@ -91,16 +91,15 @@ expect {
     eof               { lc_fail "qemu exited reading /ctl/procs (2)" }
 }
 set plain [string map [list "\\" ""] $cutline]
-set spliced 0
-foreach line [split [string map [list "\r" ""] $after_cut] "\n"] {
+set after_cut [string map [list "\r" ""] $after_cut]
+foreach line [split $after_cut "\n"] {
     if {$line eq ""} continue
     set at [expr {[string length $plain] - [string length $line]}]
     if {$at < 0 || [string range $plain $at end] ne $line} {
         lc_fail "/ctl/procs with seventy more Procs: `$line` follows the cut line and is not the end of a later rendering's (2)"
     }
-    incr spliced [string length $line]
 }
-lc_pass "ps-many(2): /ctl/procs with more rows than fit ends its table, after a whole row, with the cut line (cat's read to end of file added $spliced byte(s) of a later rendering)"
+lc_pass "ps-many(2): /ctl/procs with more rows than fit ends its table, after a whole row, with the cut line (cat's read to end of file added [string length $after_cut] byte(s) of a later rendering)"
 
 # ---- (3) ps lists every Proc alive throughout it ----------------------------
 set before [pids_of "ls /proc | cat" $ls_row "ls1"]
