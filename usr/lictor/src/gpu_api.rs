@@ -835,6 +835,17 @@ pub fn unref_frees(resp_type: u32) -> bool {
 /// retires.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Stall { Holding, Revived, Dead }
+/// What a failed command of the broker's own met at the device (GPU-DESIGN 4.5.15).
+/// Only `Refused` is the device's answer. A stall is other work ahead of the
+/// command, and nothing may be concluded from one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Met { Refused, Stalled, Dead }
+/// Asked of a command that failed after an engine that took commands staged it.
+/// `stalls` counts the stalls begun since boot, read before the command and
+/// after: one begun across it leaves the command, or one behind it, unanswered.
+pub fn met(dead: bool, stalls_before: u32, stalls_after: u32) -> Met {
+    if dead { Met::Dead } else if stalls_before != stalls_after { Met::Stalled } else { Met::Refused }
+}
 /// How often a takeover held up by the device renews the kernel's deadline (vote 71).
 pub const RENEW_EVERY_MS: u64 = 1000;
 /// Whether a takeover held up by the device renews now. `last` is the generation of
@@ -1142,6 +1153,16 @@ mod admission_tests {
         for line in [&b""[..], b"\0", b"a  b\0", b"thylacine.test-latch-dead\0"] {
             assert!(!bootarg_declared(line, b""), "the empty word, on {line:?}");
         }
+    }
+    #[test]
+    fn only_the_devices_answer_is_a_refusal() {
+        assert_eq!(met(false, 3, 3), Met::Refused);
+        // A stall begun across the command leaves it unanswered, at any count.
+        assert_eq!(met(false, 3, 4), Met::Stalled);
+        assert_eq!(met(false, u32::MAX, 0), Met::Stalled);
+        // A dead engine answers nothing, stall or no stall.
+        assert_eq!(met(true, 3, 3), Met::Dead);
+        assert_eq!(met(true, 3, 4), Met::Dead);
     }
     #[test]
     fn a_retirement_nothing_can_clear_runs_to_its_refusal() {
