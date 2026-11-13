@@ -728,26 +728,33 @@ witness cancelled
 # carried "active" across the refused RESTORED skips the takeover entirely.
 key "ctrl+alt+f10"
 set timeout 30
+# Expect takes the first ARM that matches anywhere in what it has read, not the
+# earliest line, so in each wait below the line that must not come first is listed
+# first: lines a single pass prints arrive in one read.
 expect {
-    -ex "lictor: trusted scanout active" { lc_step "restore-stall: the trusted scanout is up (a fresh takeover)" }
     -ex "INJECTED by test-latch-dead" { lc_fail "restore-stall: a shot fired inside the takeover" }
+    -ex "lictor: trusted scanout active" { lc_step "restore-stall: the trusted scanout is up (a fresh takeover)" }
     -re {EXTINCTION:} { lc_extinction_fail "restore-stall takeover" }
     timeout { lc_fail "restore-stall: no takeover within 30s of the chord (did the seat carry 'active' across leg R's refused RESTORED?)" }
 }
 after 1000
 key "ret"
+# The shot is the restore's first line and the seat cannot fail at it before it, so
+# its arm goes first: a failure printed in the same pass stays for the next wait.
 expect {
-    -re {lictor: seat failed: [^\r\n]*[\r\n]} { lc_fail "restore-stall: the episode failed instead of ending: $expect_out(0,string)" }
     -re {lictor: restore shot: a synchronous chain stalled ahead of the restore stalled=([01]) generation=[0-9]+} {
         if {$expect_out(1,string) != 1} { lc_fail "restore-stall: the shot stalled nothing, so this leg tests nothing" }
         lc_step "restore-stall: a stall stands as the restore begins"
     }
+    -re {lictor: seat failed: [^\r\n]*[\r\n]} { lc_fail "restore-stall: the episode failed before its restore: $expect_out(0,string)" }
     -re {EXTINCTION:} { lc_extinction_fail "restore-stall shot" }
     timeout { lc_fail "restore-stall: the empty episode never reached its restore within 30s -- did Enter end it?" }
 }
+# The wait line goes first for the same reason: the seat cannot fail ahead of it
+# without the restore having failed on the stall, which the second arm reports.
 expect {
-    -re {lictor: seat failed: [^\r\n]*[\r\n]} { lc_fail "restore-stall: the seat failed an ended episode on a stall: $expect_out(0,string)" }
     -re {lictor: restore met a stall, waiting for the device generation=[0-9]+} { lc_step "restore-stall: the restore waits for the device" }
+    -re {lictor: seat failed: [^\r\n]*[\r\n]} { lc_fail "restore-stall: the seat failed an ended episode on a stall: $expect_out(0,string)" }
     -re {EXTINCTION:} { lc_extinction_fail "restore-stall wait" }
     timeout { lc_fail "restore-stall: lictor never said the restore waited, so the stall was not in its way" }
 }
