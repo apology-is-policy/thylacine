@@ -2029,6 +2029,7 @@ void test_p9_attached_root_spoor_walk_read(void);
 void test_p9_attached_query_helpers(void);
 void test_p9_attached_walked_outlives_root_no_uaf(void);
 void test_p9_attached_ctl_registry(void);       // #210: sessions registry + demux counters
+void test_p9_attached_ctl_label_alphabet(void);
 void test_p9_closer_dying_close_delivers_tclunk(void);
 void test_p9_closer_exit_close_hands_off_tclunk(void);
 void test_p9_closer_dying_close_hands_off_staged_run(void);
