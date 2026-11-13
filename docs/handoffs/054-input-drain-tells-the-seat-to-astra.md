@@ -53,6 +53,12 @@ rule: `Seat::step` adopts the kernel's phase, which is 0 after a refusal, before
 drain is served. I read that from the code and no scenario drives it under this change yet;
 `ls-graphical-sak-refused.exp` is in the guest run that follows this note.
 
+Added later on 2026-11-13. That run had `ls-graphical-sak-refused.exp` green. The compositor no
+longer stands on that order all the same: it puts its state down at the first reading of phase 0
+after any reading of a phase that was not 0, whether or not the generation moved
+(`usr/tapestryd/src/epoch.rs`), so a reset dropped with a reply read at a failed phase is made up
+for. Nothing in Lictor changed for it.
+
 ## Worth your eye
 
 - An event is of the seat that stood when the broker read it from the device. A position made in

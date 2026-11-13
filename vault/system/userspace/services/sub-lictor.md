@@ -732,14 +732,20 @@ a phase that is not 0 lets go of it again. So the events of a reply at phase 0 a
 that reply's generation, and a client that deals with the pair before it hands the events on
 has no episode between its reading and its events. Until 2026-11-13 the reply was the events
 alone and the compositor asked `SeatState` beside it: two requests, neither ever parked, and
-a whole episode fits between two requests of a client kept off the processor.
+a whole episode fits between two requests of a client kept off the processor. A reply at a
+phase that is not 0 carries events only if the status read of that turn of the loop failed,
+which it does not for the seat's service: what `Seat::input` gathered at phase 0 in that
+turn, or the `SYN_DROPPED` it leaves after a chord the kernel refused. The compositor drops
+what such a reply carries and puts its state down at the next reading of phase 0, so it
+does not depend on that turn's order ([[sub-tapestryd]]).
 `proxy::input::InputDev::drain` returns the pair, is `must_use`, and returns `None` for a
 drain the broker did not answer. An event is of the seat that stood when the broker read it
 from the device, not when the hand made it: the device stamps nothing, so a position made in
 an episode's last milliseconds and read after RESTORED is the next seat's first. The witness
 is `tools/interactive/ls-graphical-sak-pointer.exp` (the pointer moved over the trusted
 screen makes no program's motion, and the Enter that ends the episode reaches no program).
-NOT YET RUN IN A GUEST.
+Its first form ran green in a guest on 2026-11-13; the form that tells that Enter from the
+one the scenario presses after it is NOT YET RUN IN A GUEST ([[sub-tapestryd]] has both).
 
 Until 2026-10-29 the restore was retried forever: every compositor request
 parked for good and the kernel refused the serial BREAK into the failed

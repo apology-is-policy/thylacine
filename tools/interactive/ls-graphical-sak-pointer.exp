@@ -21,15 +21,20 @@
 #            says nothing: no motion, and no mark for an Enter that was the
 #            trusted screen's.
 #   after:   the compositor says the seat is back. The pointer is put at
-#            1040,400 and Enter is pressed: the fixture says its first mark
-#            and no motion before it. Counted from 360 the position would
-#            have been a motion of 680, the pointer's way across the trusted
-#            screen. Then 1200,400: the fixture says 160 0.
+#            1040,400 and then at 1200,400, and the first thing the fixture
+#            says is one motion, 160 0. Counted from 360 the first position
+#            would have been a motion of 680, the pointer's way across the
+#            trusted screen; counted from the position made on the trusted
+#            screen, 40. Then Enter: the fixture says its first mark. Then
+#            Escape: it says it is done, and nothing between the two.
 #
-# The mark is what makes "no motion" a reading: the fixture is handed its
-# events in the order the compositor made them, so a motion made of the first
-# position would be said before the mark, and the mark shows the fixture
-# could speak.
+# The fixture is handed its events in the order the compositor made them, and
+# after the episode every line it says is read, in order. That is what makes
+# "no motion" and "no Enter" readings. What a broker that had kept the
+# episode's input would hand on, it hands on with the first events after the
+# seat's return, before anything pressed or moved after it: the trusted
+# screen's Enter would be a mark said before the motion, which is why the
+# positions come first and the key after them.
 #
 # Requires the session image:
 #   THYLACINE_HALCYON_SESSION=1 THYLACINE_HALCYON_PROFILE=instrument tools/build.sh kernel --config ci
@@ -72,7 +77,7 @@ proc move {x y} {
 proc next_line {what} {
     set line ""
     lc_within 30 {
-        -re {(rel-watch: rel -?\d+ -?\d+|rel-watch: mark \d+|corvus: imperium: SAK with nothing pending|tapestryd: seat back generation=\d+)[^\r\n]*[\r\n]} {
+        -re {(rel-watch: rel -?\d+ -?\d+|rel-watch: mark \d+|rel-watch: done|corvus: imperium: SAK with nothing pending|tapestryd: seat back generation=\d+)[^\r\n]*[\r\n]} {
             set line $expect_out(1,string)
         }
         -re {EXTINCTION:} {
@@ -182,30 +187,52 @@ while {!($ended && $back)} {
     if {[regexp {^rel-watch: rel (-?\d+) (-?\d+)$} $line -> gx gy]} {
         lc_fail "a motion of $gx $gy reached the fixture while the trusted screen was up"
     } elseif {[string match "rel-watch: mark *" $line]} {
-        lc_fail "an Enter pressed at the trusted screen reached the fixture"
+        lc_fail "the trusted screen's Enter reached the fixture: it said a mark before the seat was said to be back"
     } elseif {[string match "corvus: *" $line]} {
         set ended 1
-    } else {
+    } elseif {[string match "tapestryd: seat back *" $line]} {
+        if {$back} {
+            lc_fail "the seat was said to be back twice for one episode"
+        }
         set back 1
+    } else {
+        lc_fail "read '$line' while the episode's end and the seat's return were due"
     }
 }
 lc_pass "the episode ended, the compositor said the seat is back, and the fixture was handed nothing"
 
-# After: the first position is a place. The mark shows the fixture could
-# speak, and that it was handed no Enter before this one.
+# After: two positions before any key. The first line the fixture says must
+# be the second position's motion.
 move 1040 400
+move 1200 400
+set line [next_line "the fixture's first line after the episode"]
+if {[string match "rel-watch: mark *" $line]} {
+    lc_fail "the trusted screen's Enter reached the fixture: it said a mark after the seat came back, and no key had been pressed since"
+} elseif {[regexp {^rel-watch: rel (-?\d+) (-?\d+)$} $line -> gx gy]} {
+    if {"$gx $gy" eq "680 0"} {
+        lc_fail "the first position after the episode was handed on as a motion of 680 0: 680 0 is the pointer's way across the trusted screen"
+    } elseif {"$gx $gy" eq "40 0"} {
+        lc_fail "the first position after the episode was handed on as a motion of 40 0: it was counted from the position made on the trusted screen"
+    } elseif {"$gx $gy" ne "160 0"} {
+        lc_fail "after the episode the fixture's first motion is $gx $gy, want 160 0"
+    }
+} else {
+    lc_fail "after the episode the fixture's first line is '$line', want a motion of 160 0"
+}
+lc_pass "the first position after the episode is a place and the second its own motion: 160 0, with no mark and no motion before it"
+
+# The first Enter the fixture is handed is the one pressed now, and it is
+# handed nothing between that and its exit.
 key ret
 set line [next_line "the fixture's mark after the episode"]
-if {[regexp {^rel-watch: rel (-?\d+) (-?\d+)$} $line -> gx gy]} {
-    lc_fail "the first position after the episode was handed on as a motion of $gx $gy: 680 0 is the pointer's way across the trusted screen"
-} elseif {$line ne "rel-watch: mark 1"} {
-    lc_fail "after the episode the fixture's first line is '$line', want its first mark: an Enter pressed at the trusted screen reached it, or the seat came back twice"
+if {$line ne "rel-watch: mark 1"} {
+    lc_fail "after the episode's motion the fixture said '$line', want its first mark"
 }
-lc_pass "the first position after the episode is a place: the fixture said its first mark and no motion before it"
-move 1200 400
-motion 160 0 "the position after it"
-
 key esc
-lc_expect "rel-watch: done" "the fixture exited"
+set line [next_line "the fixture's exit"]
+if {$line ne "rel-watch: done"} {
+    lc_fail "after its first mark the fixture said '$line', want its exit: it was handed more than was pressed after the episode"
+}
+lc_pass "the Enter pressed after the episode is the fixture's first, and nothing follows it"
 lc_pass "the pointer's way across a trusted episode reached no program"
 lc_quit

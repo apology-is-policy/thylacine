@@ -18,6 +18,13 @@
 // and a whole episode fits between two requests of a thread that is kept off
 // the processor.
 //
+// What a drain brings while the phase is not 0 is handed to no program. That
+// can be the stream's own word for a loss (SYN_DROPPED, after a chord the
+// kernel refused, which moves no generation), so the reading that finds
+// phase 0 again is a return whether or not the generation moved: the state
+// is put down on what the pass did with the events, not on an argument about
+// when the broker can be read at such a phase.
+//
 // Pure: the bin's pass calls it, and the host tests run it.
 
 /// What a reading of the seat asks of the pass that took it.
@@ -25,20 +32,25 @@
 pub enum Reading {
     /// The seat is as the pass last dealt with it.
     Standing,
-    /// An episode has ended that the pass has not put its state down for.
-    /// Told once for an episode.
+    /// The seat is the compositor's again and the pass has not put its state
+    /// down for it: an episode ended, or a phase that was not 0 was read.
+    /// Told once.
     Resumed,
     /// An episode is on.
     Episode,
 }
 
-/// The generation the pass last put its state down for.
+/// The generation the pass last put its state down for, and whether a phase
+/// that was not 0 has been read since.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct SeatEpoch(u64);
+pub struct SeatEpoch {
+    generation: u64,
+    away: bool,
+}
 
 impl SeatEpoch {
     pub const fn new() -> Self {
-        SeatEpoch(0)
+        SeatEpoch { generation: 0, away: false }
     }
 
     /// The broker answered `generation` and `phase`. An episode that is on
@@ -46,9 +58,11 @@ impl SeatEpoch {
     /// reading that finds the seat back.
     pub fn read(&mut self, generation: u64, phase: u32) -> Reading {
         if phase != 0 {
+            self.away = true;
             Reading::Episode
-        } else if generation != self.0 {
-            self.0 = generation;
+        } else if generation != self.generation || self.away {
+            self.generation = generation;
+            self.away = false;
             Reading::Resumed
         } else {
             Reading::Standing
@@ -104,13 +118,27 @@ mod tests {
     }
 
     #[test]
-    fn a_phase_that_comes_back_with_no_new_generation_is_no_return() {
-        // A chord the kernel refused: the broker reads a failed phase for a
-        // pass and the generation does not move. The keyboard's stream says
-        // what was lost (SYN_DROPPED); the seat did not change hands.
+    fn a_phase_that_comes_back_with_no_new_generation_is_a_return_too() {
+        // A chord the kernel refused moves no generation, and the stream's
+        // word for what was lost (SYN_DROPPED) is in the reply the broker
+        // gives next. Read at a phase that is not 0, that reply is handed to
+        // no program, so the word goes with it: the state is put down by the
+        // reading that finds phase 0 again.
         let mut epoch = SeatEpoch::new();
         assert_eq!(epoch.read(5, 0), Reading::Resumed);
         assert_eq!(epoch.read(5, 4), Reading::Episode);
+        assert_eq!(epoch.read(5, 0), Reading::Resumed);
         assert_eq!(epoch.read(5, 0), Reading::Standing);
+        // Once for it, however many readings found the phase away.
+        for phase in [4, 4, 1] {
+            assert_eq!(epoch.read(5, phase), Reading::Episode);
+        }
+        assert_eq!(epoch.read(5, 0), Reading::Resumed);
+        assert_eq!(epoch.read(5, 0), Reading::Standing);
+        // A generation that moved while the phase was away is the same one
+        // return, not two.
+        assert_eq!(epoch.read(6, 2), Reading::Episode);
+        assert_eq!(epoch.read(6, 0), Reading::Resumed);
+        assert_eq!(epoch.read(6, 0), Reading::Standing);
     }
 }

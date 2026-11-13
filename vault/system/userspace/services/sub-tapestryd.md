@@ -3913,8 +3913,10 @@ base, and the pass reaches it from a reading of the seat.
 
 A reading is the seat's generation and phase, and the rule for one is
 `epoch::SeatEpoch`, in the lib, where the host tests run it: a phase that
-is not 0 is an episode that is on; a generation the pass has not dealt
-with, at phase 0, is a seat that has come back, told once. The broker
+is not 0 is an episode that is on; phase 0 is a seat that has come back,
+told once, when its generation is one the pass has not dealt with, or when
+a phase that was not 0 has been read since the pass last dealt with one,
+whatever the generation. The broker
 answers a reading alone (`SeatState`) and with every drain of an input
 device, in the reply that carries the events and from the one thread that
 gathers them (sub-lictor, "A drain is answered with the seat it is of").
@@ -3940,12 +3942,42 @@ about which stages can wait, and a new stage would have voided it unseen.
 Now the case of an episode inside a pass is the ordinary case read at
 another drain: the same function, called on the same kind of reply.
 
+The rule's second half does not wait for a generation. What a drain brings
+at a phase that is not 0 is handed to no program, and it can be the
+stream's own word for a loss: a chord the kernel refuses moves no
+generation, and Lictor answers it with `SYN_DROPPED` in the keyboard's next
+reply. Lictor as built is not read at such a phase after a refusal
+(`Seat::step` takes the kernel's phase before any request is served, and
+the kernel's status read does not fail for the seat's service:
+`kernel/proc.c` `proc_seat_op`), so no reply of today's carries that word
+at a phase that is not 0. The compositor does not stand on that. Having
+handed a drain to nobody, it puts its state down when the phase is 0 again,
+which is what the word would have had it do (`seat_resumed` is what
+`SYN_DROPPED` runs). Until 2026-11-13 the rule read a return only off a
+generation that had moved, and its host test pinned that, with a comment
+that the stream would say what was lost; the stream's word is in the reply
+that was dropped. Host tests (4) and ten mutants (`emut2.py`); no guest
+reaches it, because no lever makes the broker answer a drain at a failed
+phase.
+
 `tools/interactive/ls-graphical-sak-pointer.exp` puts the pointer down
-twice, moves it over the trusted screen, and reads that the first position
-after the episode makes no motion and the second its own, with a fixture
-(`tapestry-battery --rel-watch`) that says every motion and marks every
-Enter it is handed. NOT YET RUN IN A GUEST. No scenario makes the reading
-that finds the seat back a pointer drain's.
+twice, moves it over the trusted screen, and after the episode reads every
+line of a fixture (`tapestry-battery --rel-watch`, which says every motion
+and marks every Enter it is handed) in order: two positions before any key,
+and the first thing said must be the second's motion, 160 0; then an Enter,
+which must be the fixture's first mark; then its exit, with nothing between.
+The positions come before the key because of what the first guest run's
+control showed (2026-11-13, `bothwalls`: a broker that keeps an episode's
+input, and a compositor that hands a drain's events on during one). Nothing
+was handed on while the episode was on. The kept Enter and the kept
+position were handed on with the first events after the seat's return,
+before anything pressed or moved after it; the control's log has that
+order, and the pass was not traced further. The scenario as first written
+pressed its own Enter first, read the kept Enter's mark as that one, and
+failed a step later on a motion of 40 0. THE FORM THAT READS EVERY LINE IS
+NOT YET RUN IN A GUEST; against a scripted guest it reads as wanted in 14
+cases, 12 of them faults. No scenario makes the reading that finds the seat
+back a pointer drain's.
 
 A drain the broker does not answer is said once (`tapestryd: the broker did
 not answer the keyboard's drain; its input is not read`); the compositor
