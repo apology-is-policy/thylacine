@@ -1113,9 +1113,10 @@ dead engine -- the retirement refused, the ctl still answered
 the command line itself and refuses an arming whose word it does not find, and
 tapestryd names the word by the broker's constant and matches it with the broker's
 own function (`lictor::gpu_api::TEST_LEVERS_WORD`, `bootarg_declared`). The two
-still read the file separately (tapestryd in one read, the broker to its end), and
-where their readings differ the broker's decides: the arming is refused and both
-say so.
+still read the file separately (tapestryd in one read, the broker to its end). A
+refusal marks two readings that disagree one way: tapestryd found the word and the
+broker did not, and both say so. Where only the broker finds it, tapestryd never
+asks, and nothing is armed or said.
 The same arming lets tapestryd aim one stall at a
 composition health step (below). `thylacine.test-latch-chained` arms the
 broker the same way (`Request::TestArmChained`) to make each of the next two

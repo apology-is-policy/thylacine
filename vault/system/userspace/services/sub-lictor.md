@@ -476,8 +476,11 @@ refused. A serving `cursor_command` stalls the same way. A chain past
 `FENCE_ABANDON_MS` is abandoned rather than poisoned: a well-formed late retirement
 frees the lane (`cursor_queue::Queue::abandon`). A restore that returns an error in
 FAILED (the seat's phase 4) is asked again every pass; in RESTORING (phase 3) any
-error from it, a stall included, fails the episode and so cancels its grant. Both
-are defects, on the Open list below. Restoration stays owed until the
+error from it, a stall included, fails the episode and so cancels its grant.
+Asking again while the engine is stalled is the intended wait. The defects, on the
+Open list below, are that FAILED asks a rebind the device REFUSED again with no
+fallback, and that RESTORING fails on a stall or on a refused rebind. Restoration
+stays owed until the
 kernel acknowledges RESTORED: when the kernel refuses it (a grantee that
 exited before the commit), the seat fails and rebinds again before it
 returns. `Seat.active` names the generation whose trusted scanout is up, so
@@ -867,9 +870,11 @@ Open after that review:
   scoped instead: only a client's own disable spends it
   (`Gpu::set_scanout_client`), never a bind the broker issues for itself, so it
   cannot refuse the seat's restore. The others need no word and cannot reach a
-  takeover, each for its own reason. A `TestStallShot` rides its connection's next
-  runnable request and is spent there; only a phase-0 request can stage a command,
-  and that request's reap revives the stall; nothing bounds how often it is sent. `TestOwedDefer` and `TestOwedStall` act only in the
+  takeover, each for its own reason. A `TestStallShot` arms one slot, the latest
+  sender's: it rides that connection's next runnable request and is spent there, and
+  a later shot from any connection silently replaces an unspent one. Only a phase-0
+  request can stage a command, and that request's reap revives the stall; nothing
+  bounds how often it is sent. `TestOwedDefer` and `TestOwedStall` act only in the
   phase-0 owed-free pass and are counted per boot. The context hold and abandon
   verbs touch only fenced chains, which a takeover does not wait for
   (`takeover_clear`, vote 50); Lictor takes any context id for them, and it is
@@ -884,13 +889,18 @@ Open after that review:
 - The restore trusts what the compositor left on the device (audit round 25, on
   main as well; OPEN). `DetachBacking` of the resource on the display is neither
   refused nor reflected in the presentation, so the restore rebinds a resource the
-  2D device then refuses; RESTORING fails the episode after authentication, and
-  FAILED asks the same refused rebind again every pass with no bound, so the seat
-  never returns for the boot. Separately, RESTORING fails on a stall (a pending
-  synchronous command, or a deferred free drained inside the rebind missing its
-  deadline) where the other phases wait. The rule both break: a client must not be
-  able to make a command the broker issues for itself fail, stall, be skipped or
-  act on another object.
+  2D device then refuses (by QEMU's source; not yet run in a guest); RESTORING
+  fails the episode after authentication, and FAILED asks the same refused rebind
+  again every pass with no bound, so the seat never returns for the boot.
+  Separately, RESTORING fails on a stall where the other phases wait: a pending
+  synchronous command, or a deferred free drained inside an Image rebind missing
+  its deadline, which fails the flush that follows (the disable and blob arms
+  return Ok over it). What the design holds, and these break: a client may delay a
+  command the broker issues for itself -- the exclusion, the trusted bind, the
+  restore -- within the kernel's deadline, and may make a takeover fail before
+  anything is granted (votes 30, 71, 72, 79); it must not make an authenticated
+  episode fail, cancel its grant, keep the seat from returning, or make a broker
+  command be skipped or act on another object.
 - A display smaller than 800x720 refuses the whole seat at startup. There is no
   reduced layout.
 - The main loop polls at 100 Hz whether or not anything is happening, and the
