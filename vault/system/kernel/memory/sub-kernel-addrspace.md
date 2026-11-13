@@ -626,7 +626,14 @@ declaration and lifecycle, the release/destroy pair with it, and the actual
 `addrspace_quiesce_mapped_devices`; allocator, VMA drain, page-table destruction
 and the device resets are host doubles, and its VMA list is real nodes the walk
 can follow. The drain double has the kernel's external linkage, so a mutant
-that removes destroy's only drain still compiles and meets its assertion. Its mutants carry the last-owner/last-pin counterexamples onto the
+that removes destroy's only drain still compiles and meets its assertion; so
+does the double for `burrow_file_payers_lapse`, which refuses a lapse after
+the last lifetime drop (it compares the space against the last pointer the
+`kfree` double freed, and so refuses before it would read freed memory); the
+cases count one lapse to each destroy and, after their own drain checks, see
+it stamped after the drain. Three mutants are
+the lapse's: none, before the drain, after the lifetime drop; the missing one
+also runs on the release/destroy case alone. Its mutants carry the last-owner/last-pin counterexamples onto the
 split: a release that drains while another owner remains, a destroy without its
 drain or with its lifetime drop first, a last-owner release that drops the
 lifetime destroy still needs, a release that calls itself last one owner early.

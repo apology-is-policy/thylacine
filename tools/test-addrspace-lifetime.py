@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Actual AddrSpace declaration/lifecycle and mapped-device quiesce under
 controlled owner/pin schedules. Acquire Yip before running. Allocator, VMA
-drain, page-table destruction and the device resets are host doubles; native
+drain, the payer-record lapse, page-table destruction and the device resets
+are host doubles; native
 tests separately cover process authority and the devices themselves. The
 source slice stops before clone helpers: this does not qualify the MMU.
 """
@@ -10,8 +11,11 @@ import argparse,os,shlex,subprocess,tempfile,importlib.util
 ROOT=Path(__file__).resolve().parent.parent
 spec=importlib.util.spec_from_file_location('progress_fixture',ROOT/'tools/test-9p-client-progress.py');helper=importlib.util.module_from_spec(spec);spec.loader.exec_module(helper)
 spec=importlib.util.spec_from_file_location('host_sanitizer_cc',ROOT/'tools/host-sanitizer-cc.py');sanitizer_cc=importlib.util.module_from_spec(spec);spec.loader.exec_module(sanitizer_cc)
-# Destroy's tail: the last owner's drain, then its lifetime reference.
-DESTROY_TAIL='    vma_drain_in(as);\n    addrspace_lifetime_put(as);\n}'
+# Destroy's tail: the last owner's drain, the lapse of the payer records that
+# name the space, then its lifetime reference.
+DRAIN='    vma_drain_in(as);\n'
+LAPSE='    burrow_file_payers_lapse(as);\n'
+LAPSE_PUT=LAPSE+'    addrspace_lifetime_put(as);\n}'
 QUIESCE='int reset = addrspace_quiesce_mapped_devices(as);'
 MUTANTS=[
  ('private-sharing','if (as->private_rings) { spin_unlock(&as->lock); return false; }','if (false) { spin_unlock(&as->lock); return false; }','private guard refuses sharing'),
@@ -20,15 +24,19 @@ MUTANTS=[
  ('guard-leak','    --as->private_rings;','    (void)as->private_rings;','final guard releases pin and exclusion'),
  ('pin-as-owner','void addrspace_pin(struct AddrSpace *as) {\n    addrspace_lifetime_get(as);','void addrspace_pin(struct AddrSpace *as) {\n    addrspace_ref(as);','pin is not an owner'),
  ('no-owner-get','int pre = __atomic_fetch_add(&as->owners, 1, __ATOMIC_ACQ_REL);','int pre = __atomic_load_n(&as->owners, __ATOMIC_ACQUIRE);','owner increments both counts'),
- ('skip-drain',DESTROY_TAIL,'    addrspace_lifetime_put(as);\n}','last owner drains before last pin'),
+ ('skip-drain',DRAIN,'','last owner drains before last pin'),
  ('drain-every-owner','    if (pre == 1) return true;\n','    if (pre == 1) return true;\n    vma_drain_in(as);\n','nonfinal owner preserves mappings'),
  ('pin-leak','void addrspace_unpin(struct AddrSpace *as) {\n    addrspace_lifetime_put(as);','void addrspace_unpin(struct AddrSpace *as) {\n    (void)as;','final pin frees once without another drain'),
- ('drop-before-drain',DESTROY_TAIL,'    addrspace_lifetime_put(as);\n    vma_drain_in(as);\n}','extinction: AddrSpace final lifetime drop before mapping drain'),
+ ('drop-before-drain',[(DRAIN,'    addrspace_lifetime_put(as);\n'+DRAIN),(LAPSE_PUT,LAPSE+'}')],None,'extinction: AddrSpace final lifetime drop before mapping drain'),
  ('early-destroy','if (pre > 1) return;','if (false) return;','extinction: AddrSpace final lifetime drop with live owners'),
  ('release-drops-lifetime','    if (pre == 1) return true;\n','    if (pre == 1) { addrspace_lifetime_put(as); return true; }\n','last owner drains before last pin'),
  ('release-early-last','if (pre == 1) return true;','if (pre <= 2) return true;','extinction: addrspace_destroy of an AddrSpace still owned'),
  ('no-quiesce',QUIESCE,'int reset = 0;','last owner stops each mapped device once, before the drain'),
- ('quiesce-after-drain',[(QUIESCE,'int reset = 0;'),(DESTROY_TAIL,'    vma_drain_in(as);\n    reset += addrspace_quiesce_mapped_devices(as);\n    addrspace_lifetime_put(as);\n}')],None,'last owner stops each mapped device once, before the drain'),
+ ('quiesce-after-drain',[(QUIESCE,'int reset = 0;'),(DRAIN,DRAIN+'    reset += addrspace_quiesce_mapped_devices(as);\n')],None,'last owner stops each mapped device once, before the drain'),
+ ('skip-lapse',LAPSE,'','the last owner lapses its payer records once'),
+ ('lapse-before-drain',[(LAPSE,''),(DRAIN,LAPSE+DRAIN)],None,'the payer records lapse after the drain'),
+ ('lapse-after-put',LAPSE_PUT,'    addrspace_lifetime_put(as);\n'+LAPSE+'}','the payer records lapse before the last lifetime drop'),
+ ('skip-lapse@split',LAPSE,'','destroy lapses the payer records once, after the drain','split'),
  # The release/destroy interval. A fifth element runs the fixture on that case
  # alone, past earlier cases that stop the same mutant first.
  ('release-drops-lifetime@split','    if (pre == 1) return true;\n','    if (pre == 1) { addrspace_lifetime_put(as); return true; }\n',"between release and destroy the last owner's lifetime is held",'split'),
