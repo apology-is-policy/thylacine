@@ -3,7 +3,7 @@ id: sub-tapestryd
 type: sub
 title: "tapestryd — the compositor: the weave lifecycle, the present engine, and the retire ordering"
 parent: moc-userspace
-code: [usr/tapestryd/src/epoch.rs, tools/interactive/ls-halcyon-login-close.exp, tools/interactive/ls-gfx-console-close.exp, tools/interactive/ls-halcyon-scale-fitted.exp, tools/interactive/ls-display-follow-declared.exp, tools/interactive/ls-display-follow.exp, tools/interactive/rfb_resize.py, usr/tapestryd/src/storage.rs, usr/kaua-term-probe/src/storage.rs, tools/interactive/tapestry-storage.exp, usr/kaua-term-probe/src/seat_control.rs, usr/kaua-term-probe/src/admission.rs, tools/interactive/interaction-seat.exp, usr/tapestryd/src/seat_coordinator.rs, usr/tapestryd/src/interaction.rs, usr/tapestryd/src/server.rs, usr/tapestryd/src/gpu.rs, usr/tapestryd/src/pane.rs, usr/tapestryd/src/va.rs, usr/tapestryd/src/input.rs, usr/tapestryd/src/main.rs, usr/tapestryd/src/chords.rs, usr/tapestryd/src/keymap.rs, usr/tapestryd/Cargo.toml, usr/tapestryd/src/motion.rs, usr/tapestryd/src/lib.rs, usr/tapestryd/src/warp_ids.rs]
+code: [usr/tapestryd/src/epoch.rs, usr/tapestryd/src/pointer.rs, usr/tapestryd/src/display_stall.rs, tools/interactive/ls-halcyon-login-close.exp, tools/interactive/ls-gfx-console-close.exp, tools/interactive/ls-halcyon-scale-fitted.exp, tools/interactive/ls-display-follow-declared.exp, tools/interactive/ls-display-follow.exp, tools/interactive/rfb_resize.py, usr/tapestryd/src/storage.rs, usr/kaua-term-probe/src/storage.rs, tools/interactive/tapestry-storage.exp, usr/kaua-term-probe/src/seat_control.rs, usr/kaua-term-probe/src/admission.rs, tools/interactive/interaction-seat.exp, usr/tapestryd/src/seat_coordinator.rs, usr/tapestryd/src/interaction.rs, usr/tapestryd/src/server.rs, usr/tapestryd/src/gpu.rs, usr/tapestryd/src/pane.rs, usr/tapestryd/src/va.rs, usr/tapestryd/src/input.rs, usr/tapestryd/src/main.rs, usr/tapestryd/src/chords.rs, usr/tapestryd/src/keymap.rs, usr/tapestryd/Cargo.toml, usr/tapestryd/src/motion.rs, usr/tapestryd/src/lib.rs, usr/tapestryd/src/warp_ids.rs]
 audit: hard
 guarded-by: [inv-i40, inv-i5, inv-i34, inv-i1, inv-i45, inv-i9]
 validated-by: [spec-tapestry-storage, spec-tapestry-present, prose, gate-smp]
@@ -573,7 +573,12 @@ declared scale is derived; `ls-display-follow-edid.exp`'s). A shot is not kept
 for another display: a display event for another host clears a pending one,
 the next aim clears one that found no step, and so does a change that fails.
 Until round R3 F8 an aim whose change ended before its step (the EDID's, when
-the bind did not yet hold) could fire at a later display's step. Its legs:
+the bind did not yet hold) could fire at a later display's step. The aim's
+state is `tapestryd::display_stall` (2026-11-13): seven mutants, F8's clear
+taken out among them, each turn one of its five host tests red. That `follow_display`
+hands it every display it asks for is one line of the bin, read and not run:
+no scenario asks for a display other than the aimed one while a shot waits.
+Its legs:
 
 - A, from the direct state: the bind on entering the composed state is not
   answered. Wanted, in order: `BIND FAILED`, `mode WxH is set; the display is
@@ -4142,7 +4147,24 @@ button still held (`Comp::buttons_dropped`, the button half of
 `seat_resumed`), which ends a divider drag too, and the mouse's does the same.
 Until round R3 F6 only the keyboard's reset anything, and a release lost in a
 pointer's dropped batch left the button held, or a divider drag taking every
-motion until Escape. No guest makes a pointer's batch overflow.
+motion until Escape. No guest makes a pointer's batch overflow. Both pointer
+streams are read by `tapestryd::pointer` (2026-11-13). Its six host tests turn
+red when either stream's `SYN_DROPPED` lets nothing go, when every frame's end
+is taken for a loss, when a click is handed on before its frame's move, when a
+frame split from its end moves nothing, and when a place lands past the
+display (seven mutants). That a `Dropped` reaches `buttons_dropped` is one
+line of the bin for each device, read and not run.
+
+The tablet keeps each axis as the device last gave it. QEMU's virtio tablet
+sends both in every frame: in 11.1.3, `ui/dbus-console.c` (the Mac app's
+pointer) and `ui/cocoa.m` queue X and Y for every motion,
+`hw/input/virtio-input-hid.c` forwards each without filtering, and
+`virtio_input_send` hands a frame to the guest whole or, with the queue
+short, drops it whole. A frame cut short by a ring boundary, a dropped batch
+or an episode therefore leaves at most one place half old, and the device's
+next frame replaces it. virtio-input cannot read the axes back (its
+`ABS_INFO` carries the range alone), so a device that sent only the axis
+that changed would need another answer; Thylacine drives no such device.
 
 What this does not order: the loop drains the tablet and then the mouse in
 each wake, so a position and motion that reach it within one wake are taken

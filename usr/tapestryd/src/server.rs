@@ -1581,23 +1581,10 @@ fn mode_can_be_made(w: u32, h: u32) -> bool {
 }
 
 /// The stall lever's display half (`thylacine.test-latch-dead`): a display
-/// event for a host of one of these heights has one command retire past its
-/// deadline -- the first bind of the mode change it leads to, the bind of
-/// the switch to direct that follows the change, or the EDID query the
-/// change ends with.
+/// event for a host of a lever height has one command retire past its
+/// deadline (`tapestryd::display_stall`).
 #[cfg(feature = "test-mode")]
-const TEST_STALL_MODE_H: u32 = 797;
-#[cfg(feature = "test-mode")]
-const TEST_STALL_SWITCH_H: u32 = 787;
-#[cfg(feature = "test-mode")]
-const TEST_STALL_EDID_H: u32 = 1277;
-#[cfg(feature = "test-mode")]
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum StallStep {
-    Mode,
-    Switch,
-    Edid,
-}
+use tapestryd::display_stall::{Aim as DisplayStall, Step as StallStep};
 
 /// What became of an asking of the host's display.
 enum Followed {
@@ -1851,12 +1838,9 @@ pub struct Comp {
     #[cfg(feature = "test-mode")]
     test_stall_conv_aimed: bool,
     /// The lever's display half: which step the next shot is for, and the
-    /// host size it was aimed by (one shot a size, so the asking that
-    /// follows the stall is not stalled too).
+    /// host size it was aimed by.
     #[cfg(feature = "test-mode")]
-    test_stall_step: Option<StallStep>,
-    #[cfg(feature = "test-mode")]
-    test_stall_host: (u32, u32),
+    test_stall_display: DisplayStall,
     /// The connection whose next device-context create, its ctx's destroy, or
     /// its next BO's free meets a stall shot (`warp-stall-create`, `-destroy`,
     /// `-free`), and the shots this boot has left.
@@ -2824,9 +2808,7 @@ impl Comp {
             #[cfg(feature = "test-mode")]
             test_stall_ctx_aimed: false,
             #[cfg(feature = "test-mode")]
-            test_stall_step: None,
-            #[cfg(feature = "test-mode")]
-            test_stall_host: (0, 0),
+            test_stall_display: DisplayStall::new(),
             #[cfg(feature = "test-mode")]
             test_stall_conv_aimed: false,
             #[cfg(feature = "test-mode")]
@@ -6379,18 +6361,7 @@ impl Comp {
     /// size.
     #[cfg(feature = "test-mode")]
     fn test_stall_aim_host(&mut self, host_w: u32, host_h: u32) {
-        // A shot aimed for the display that was, which found no step.
-        self.test_stall_step = None;
-        if !self.test_latch_armed || self.test_stall_host == (host_w, host_h) {
-            return;
-        }
-        self.test_stall_step = match host_h {
-            TEST_STALL_MODE_H => Some(StallStep::Mode),
-            TEST_STALL_SWITCH_H => Some(StallStep::Switch),
-            TEST_STALL_EDID_H => Some(StallStep::Edid),
-            _ => return,
-        };
-        self.test_stall_host = (host_w, host_h);
+        self.test_stall_display.aim((host_w, host_h), self.test_latch_armed);
     }
 
     /// The shot, called just before the step it is for. It is bound to
@@ -6398,10 +6369,9 @@ impl Comp {
     /// pass nor a takeover between the two can take it.
     #[cfg(feature = "test-mode")]
     fn test_stall_shot(&mut self, which: StallStep) {
-        if self.test_stall_step != Some(which) {
+        if !self.test_stall_display.take(which) {
             return;
         }
-        self.test_stall_step = None;
         let what = match which {
             StallStep::Mode => "the mode's bind",
             StallStep::Switch => "the bind of the switch to direct",
@@ -6429,9 +6399,7 @@ impl Comp {
         };
         // A shot aimed for another display is not this one's.
         #[cfg(feature = "test-mode")]
-        if (host_w, host_h) != self.test_stall_host {
-            self.test_stall_step = None;
-        }
+        self.test_stall_display.followed((host_w, host_h));
         let Some((w, h)) = self.mode_for_host(host_w, host_h) else {
             say!("tapestryd: no mode for a display of {}x{}; {}x{} stands",
                 host_w, host_h, self.gpu.width, self.gpu.height);
@@ -6451,9 +6419,7 @@ impl Comp {
             // A change that reached no bind spends no shot on a later one,
             // and one that failed is followed by no switch and no EDID.
             #[cfg(feature = "test-mode")]
-            if changed.is_err() || self.test_stall_step == Some(StallStep::Mode) {
-                self.test_stall_step = None;
-            }
+            self.test_stall_display.changed(changed.is_ok());
             if let Err(e) = changed {
                 // The mode that stood is shown on the display that is now,
                 // as where there is no mode for it. The change is asked

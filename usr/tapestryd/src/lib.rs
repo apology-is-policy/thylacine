@@ -13,10 +13,12 @@
 extern crate alloc;
 
 pub mod chords;
+pub mod display_stall;
 pub mod epoch;
 pub mod keymap;
 pub mod motion;
 pub mod pane;
+pub mod pointer;
 pub mod skein;
 pub mod va;
 pub mod warp_ids;

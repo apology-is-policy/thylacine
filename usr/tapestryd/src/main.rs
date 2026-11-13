@@ -73,6 +73,13 @@ use crate::input::{
 use crate::server::{Comp, Conn, MAX_CONNS, MAX_WARP_CONNS, ROOT_TAPESTRY, ROOT_WARP};
 const _: () = assert!(MAX_CONNS + 2 + libhalcyon::layout::MAX_PANES <= 64);
 use tapestryd::epoch::{Reading, SeatEpoch};
+use tapestryd::pointer::{self, Ptr, Tablet};
+const _: () = assert!(
+    pointer::EV_SYN == EV_SYN && pointer::EV_KEY == EV_KEY && pointer::EV_REL == EV_REL
+        && pointer::EV_ABS == EV_ABS && pointer::ABS_X == ABS_X && pointer::ABS_Y == ABS_Y
+        && pointer::REL_X == REL_X && pointer::REL_Y == REL_Y && pointer::REL_WHEEL == REL_WHEEL
+        && pointer::BTN_LEFT == BTN_LEFT
+);
 use tapestryd::keymap::{self, Mods};
 
 // =============================================================================
@@ -339,10 +346,9 @@ struct Tapestryd {
     /// deltas accumulate into the pointer position AND reach the focused
     /// surface as exact TEV_PTR_REL (mouse-look).
     mouse: Option<InputDev>,
-    /// The tablet's raw absolute position + per-axis inclusive max
-    /// (ABS_INFO); scaled to display px at the SYN commit.
-    tab_ax: u32,
-    tab_ay: u32,
+    /// The tablet's axes as the device last gave each, and each one's
+    /// inclusive max (ABS_INFO); scaled to display px at the SYN commit.
+    tab: Tablet,
     tab_max: (u32, u32),
     mods: Mods,
 }
@@ -451,8 +457,7 @@ impl Driver for Tapestryd {
             kbd,
             tablet,
             mouse,
-            tab_ax: 0,
-            tab_ay: 0,
+            tab: Tablet::new(),
             tab_max,
             mods: Mods::default(),
         })
@@ -600,7 +605,7 @@ impl Driver for Tapestryd {
             // the focused surface's events. Modifier keys always flow
             // (clients see mods; Mods::update identifies them).
             for ev in &raw_events {
-                if ev.etype == EV_SYN && ev.code == 3 {
+                if ev.etype == EV_SYN && ev.code == pointer::SYN_DROPPED {
                     #[cfg(feature = "test-mode")]
                     say!("tapestryd: input reset (SYN_DROPPED)");
                     self.mods = Mods::default(); self.comp.seat_resumed(); continue;
@@ -650,53 +655,19 @@ impl Driver for Tapestryd {
                 input_seen |= !raw_events.is_empty();
                 let mask = self.mods.mask();
                 let (dw, dh) = (self.comp.gpu.width, self.comp.gpu.height);
-                let mut moved = false;
-                let commit = |c: &mut Comp, ax: u32, ay: u32, moved: &mut bool| {
-                    if !*moved {
-                        return;
+                let (mx, my) = self.tab_max;
+                let comp = &mut self.comp;
+                self.tab.read(raw_events.iter().map(|e| (e.etype, e.code, e.value)), |p| match p {
+                    Ptr::At(ax, ay) => comp.ptr_move(pointer::place(ax, mx, dw), pointer::place(ay, my, dh), mask),
+                    Ptr::Button(code, down) => comp.ptr_btn(code, down, mask),
+                    Ptr::Scroll(delta) => comp.ptr_scroll(delta, mask),
+                    Ptr::Dropped => {
+                        #[cfg(feature = "test-mode")]
+                        say!("tapestryd: pointer reset (SYN_DROPPED)");
+                        comp.buttons_dropped();
                     }
-                    *moved = false;
-                    let (mx, my) = self.tab_max;
-                    let px =
-                        (ax.min(mx) as u64 * dw.saturating_sub(1) as u64 / mx.max(1) as u64) as u32;
-                    let py =
-                        (ay.min(my) as u64 * dh.saturating_sub(1) as u64 / my.max(1) as u64) as u32;
-                    c.ptr_move(px, py, mask);
-                };
-                for ev in &raw_events {
-                    match ev.etype {
-                        EV_ABS if ev.code == ABS_X => {
-                            self.tab_ax = ev.value;
-                            moved = true;
-                        }
-                        EV_ABS if ev.code == ABS_Y => {
-                            self.tab_ay = ev.value;
-                            moved = true;
-                        }
-                        EV_SYN => {
-                            commit(&mut self.comp, self.tab_ax, self.tab_ay, &mut moved);
-                            if ev.code == 3 {
-                                #[cfg(feature = "test-mode")]
-                                say!("tapestryd: pointer reset (SYN_DROPPED)");
-                                self.comp.buttons_dropped();
-                            }
-                        }
-                        EV_KEY if ev.code >= BTN_LEFT => {
-                            // A button click must land AT its position even
-                            // if the device batched MOVE+BTN in one frame.
-                            commit(&mut self.comp, self.tab_ax, self.tab_ay, &mut moved);
-                            self.comp.ptr_btn(ev.code, ev.value != 0, mask);
-                        }
-                        EV_REL if ev.code == REL_WHEEL => {
-                            commit(&mut self.comp, self.tab_ax, self.tab_ay, &mut moved);
-                            self.comp.ptr_scroll(ev.value as i32, mask);
-                        }
-                        _ => {}
-                    }
-                }
-                // A trailing ABS run without its SYN (ring-boundary split):
-                // commit anyway -- the next drain's SYN is a no-op then.
-                commit(&mut self.comp, self.tab_ax, self.tab_ay, &mut moved);
+                    Ptr::By(..) => {}
+                });
             }
             // (1c) The mouse drain: REL_X/REL_Y deltas accumulate per SYN
             // frame then commit as ONE ptr_move_rel (exact deltas to the
@@ -718,38 +689,18 @@ impl Driver for Tapestryd {
                 }
                 input_seen |= !raw_events.is_empty();
                 let mask = self.mods.mask();
-                let (mut dx, mut dy) = (0i32, 0i32);
-                let commit = |c: &mut Comp, dx: &mut i32, dy: &mut i32| {
-                    if *dx != 0 || *dy != 0 {
-                        c.ptr_move_rel(*dx, *dy, mask);
-                        *dx = 0;
-                        *dy = 0;
+                let comp = &mut self.comp;
+                pointer::mouse(raw_events.iter().map(|e| (e.etype, e.code, e.value)), |p| match p {
+                    Ptr::By(dx, dy) => comp.ptr_move_rel(dx, dy, mask),
+                    Ptr::Button(code, down) => comp.ptr_btn(code, down, mask),
+                    Ptr::Scroll(delta) => comp.ptr_scroll(delta, mask),
+                    Ptr::Dropped => {
+                        #[cfg(feature = "test-mode")]
+                        say!("tapestryd: pointer reset (SYN_DROPPED)");
+                        comp.buttons_dropped();
                     }
-                };
-                for ev in &raw_events {
-                    match ev.etype {
-                        EV_REL if ev.code == REL_X => dx = dx.saturating_add(ev.value as i32),
-                        EV_REL if ev.code == REL_Y => dy = dy.saturating_add(ev.value as i32),
-                        EV_SYN => {
-                            commit(&mut self.comp, &mut dx, &mut dy);
-                            if ev.code == 3 {
-                                #[cfg(feature = "test-mode")]
-                                say!("tapestryd: pointer reset (SYN_DROPPED)");
-                                self.comp.buttons_dropped();
-                            }
-                        }
-                        EV_KEY if ev.code >= BTN_LEFT => {
-                            commit(&mut self.comp, &mut dx, &mut dy);
-                            self.comp.ptr_btn(ev.code, ev.value != 0, mask);
-                        }
-                        EV_REL if ev.code == REL_WHEEL => {
-                            commit(&mut self.comp, &mut dx, &mut dy);
-                            self.comp.ptr_scroll(ev.value as i32, mask);
-                        }
-                        _ => {}
-                    }
-                }
-                commit(&mut self.comp, &mut dx, &mut dy);
+                    Ptr::At(..) => {}
+                });
             }
 
             // (2) The FRAME tick (catch-up bounded to one tick per pass --
