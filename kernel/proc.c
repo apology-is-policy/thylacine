@@ -252,7 +252,7 @@ void proc_init(void) {
     g_proc_cache = kmem_cache_create("proc",
                                      sizeof(struct Proc),
                                      8,
-                                     KMEM_CACHE_PANIC_ON_FAIL);
+                                     0);
     if (!g_proc_cache) {
         extinction("kmem_cache_create(proc) returned NULL");
     }
@@ -1612,7 +1612,7 @@ static void rfork_rollback_unpublished(struct Proc *child, struct Thread *ct) {
 
 static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
                           caps_t caps_mask, const struct fork_context *fc,
-                          bool birth_hold, bool init) {
+                          bool birth_hold, bool init, struct MemoryAccount *account) {
     // RFPROC alone, or RFPROC|RFMEM (LINEAGE L-3). The remaining reserved flags
     // -- RFNAMEG, RFFDG, RFCRED, RFNOTEG, RFNOWAIT, RFREND, RFENVG -- still
     // extinct: each shares a different per-Proc structure and each arrives with
@@ -1822,9 +1822,11 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
     // a raise from the build root down to cc1. A raise is a spawn-time decision
     // (sys_spawn_args.page_budget, authority-gated); rfork alone never widens it.
     child->page_budget    = parent->page_budget;
-    // The same aggregate account, so a fork resets nothing (section 4).
+    // The same aggregate account, so a fork resets nothing (section 4), or the descendant
+    // a spawn named. This is the only writer, before the Proc is published, so no reader of
+    // child->account can meet a change: a Proc's account is set at birth and never again.
     account_unref(child->account);
-    child->account = parent->account;
+    child->account = account ? account : parent->account;
     account_ref(child->account);
     // The thread budget likewise (ARCH 7.3.5): a Go program a build driver
     // spawned keeps the budget the driver was given.
@@ -2226,12 +2228,12 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
 }
 
 int rfork(unsigned flags, void (*entry)(void *), void *arg) {
-    return rfork_internal(flags, entry, arg, CAP_NONE, NULL, false, false);
+    return rfork_internal(flags, entry, arg, CAP_NONE, NULL, false, false, NULL);
 }
 
 int rfork_forked(unsigned flags, const struct fork_context *fc) {
     if (!fc) extinction("rfork_forked with NULL fork_context");
-    return rfork_internal(flags, NULL, NULL, CAP_NONE, fc, false, false);
+    return rfork_internal(flags, NULL, NULL, CAP_NONE, fc, false, false, NULL);
 }
 
 // The caps-bearing fork: identical to rfork_forked but with an explicit
@@ -2247,23 +2249,30 @@ int rfork_forked(unsigned flags, const struct fork_context *fc) {
 int rfork_forked_with_caps(unsigned flags, const struct fork_context *fc,
                            caps_t caps_mask) {
     if (!fc) extinction("rfork_forked_with_caps with NULL fork_context");
-    return rfork_internal(flags, NULL, NULL, caps_mask, fc, false, false);
+    return rfork_internal(flags, NULL, NULL, caps_mask, fc, false, false, NULL);
 }
 
 int rfork_with_caps(unsigned flags, void (*entry)(void *), void *arg,
                     caps_t caps_mask) {
-    return rfork_internal(flags, entry, arg, caps_mask, NULL, false, false);
+    return rfork_internal(flags, entry, arg, caps_mask, NULL, false, false, NULL);
 }
 
+int rfork_spawn_under(unsigned flags, void (*entry)(void *), void *arg,
+                      caps_t caps_mask, bool held, struct MemoryAccount *account) {
+    return rfork_internal(flags, entry, arg, caps_mask, NULL, held, false, account);
+}
+
+#ifdef KERNEL_TESTS
 int rfork_spawn_held(unsigned flags, void (*entry)(void *), void *arg,
                      caps_t caps_mask) {
-    return rfork_internal(flags, entry, arg, caps_mask, NULL, true, false);
+    return rfork_internal(flags, entry, arg, caps_mask, NULL, true, false, NULL);
 }
+#endif
 
 int rfork_init(void (*entry)(void *), void *arg, caps_t caps_mask) {
     if (__atomic_exchange_n(&g_init_id_taken, true, __ATOMIC_RELAXED))
         extinction("rfork_init: init's pid is already taken");
-    return rfork_internal(RFPROC, entry, arg, caps_mask, NULL, false, true);
+    return rfork_internal(RFPROC, entry, arg, caps_mask, NULL, false, true, NULL);
 }
 
 // =============================================================================
@@ -2340,7 +2349,7 @@ static struct Proc *g_console_trusted_proc;   // BSS NULL
 static struct {
     struct Proc *service;
     struct Proc *client;
-    u64 generation, frame_sequence, visible_sequence, deadline;
+    u64 generation, frame_sequence, visible_sequence, deadline, quiesce_limit;
     u64 grant_stripes;
     u32 grant_session;
     u32 phase, frame_len, masked_len;
@@ -2861,6 +2870,19 @@ void proc_test_seat_expire(void) {
     g_seat.deadline = 0;
     proc_table_lock_release(lock);
 }
+// The renewal limit is 35 s of wall clock: a test moves it instead.
+void proc_test_seat_limit(u64 limit) {
+    irq_state_t lock = proc_table_lock_acquire();
+    g_seat.quiesce_limit = limit;
+    proc_table_lock_release(lock);
+}
+u64 proc_test_seat_deadline(u64 *limit) {
+    irq_state_t lock = proc_table_lock_acquire();
+    u64 deadline = g_seat.deadline;
+    if (limit) *limit = g_seat.quiesce_limit;
+    proc_table_lock_release(lock);
+    return deadline;
+}
 #endif
 
 bool proc_is_seat_service(struct Proc *p) {
@@ -3152,7 +3174,8 @@ int proc_seat_op(struct Proc *p, u32 op, struct seat_message *m) {
             g_seat.key_head = g_seat.key_len = 0;
             seat_zero(g_seat.frame, sizeof(g_seat.frame));
             seat_zero(g_seat.keys, sizeof(g_seat.keys));
-            g_seat.deadline = now + 5000000000ull;
+            g_seat.deadline = now + SEAT_QUIESCE_NS;
+            g_seat.quiesce_limit = now + SEAT_QUIESCE_LIMIT_NS;
         } else if (g_seat.phase == SEAT_EXCLUSIVE && m->value == 1 &&
                 g_seat.frame_sequence != 0 && g_seat.visible_sequence == g_seat.frame_sequence) {
             if (m->length > sizeof(g_seat.keys) - g_seat.key_len) {
@@ -3168,6 +3191,14 @@ int proc_seat_op(struct Proc *p, u32 op, struct seat_message *m) {
     }
     if (!m->generation || m->generation != g_seat.generation) goto done;
     if (op == SEAT_FAIL && service) { proc_seat_fail_locked(); rc = 0; goto status; }
+    // An expired quiesce has already failed above, so a renewal only ever extends a
+    // live one, and never past the limit the chord set.
+    if (op == SEAT_RENEW && service && g_seat.phase == SEAT_QUIESCING) {
+        if (now >= g_seat.quiesce_limit) goto done;
+        u64 renewed = now + SEAT_QUIESCE_NS;
+        g_seat.deadline = renewed < g_seat.quiesce_limit ? renewed : g_seat.quiesce_limit;
+        rc = 0; goto status;
+    }
     // RESTORED closes RESTORING (the episode ended; commit its grant) and also
     // FAILED (nothing to commit: the failure already cancelled the grant and
     // zeroed its identity, so this arm can release no authority). Without the

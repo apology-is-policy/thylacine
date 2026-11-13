@@ -529,11 +529,12 @@ Lictor owns a private 64x64 cursor resource and 20 KiB DMA allocation (pixels
 plus disjoint request/reply scratch). Only a fenced controlq completion permits
 cursorq to use newly uploaded pixels. One cursor chain is outstanding at a
 time; its used-ring retirement, never an interrupt alone, permits descriptor
-reuse. Unexpected IDs, lengths, index progress, errors or timeout poison the
-lane and retain its backing until device reset. A queue fault also prevents
-trusted takeover. Cursor updates are coalesced at Tapestry's frame boundary.
-The cursor wait shares controlq's sticky readback deadline allowance: both
-queues share the device loop, and a GPU readback can delay either queue.
+reuse. Unexpected IDs, lengths, index progress or errors poison the lane and
+retain its backing until device reset. A chain that outlives its bound abandons
+the lane until it retires (`GPU-DESIGN.md` 4.5.15). Either prevents trusted
+takeover. Cursor updates are coalesced at Tapestry's frame boundary. Both queues
+share the device loop, so a GPU readback can delay either; a cursor command
+stalls at its ordinary bound rather than wait it out, and Tapestry retries.
 Completion is still required; a timeout never qualifies a trusted takeover.
 
 Before selecting trusted scanout, Lictor replaces the cached cursor image with

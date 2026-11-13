@@ -3419,10 +3419,10 @@ unsafe fn handle_clearance_revoke(handle: i64, payload: &[u8], response: &mut Ve
 // grant (SYS_CAP_GRANT_IMPERIUM, PROPAGATING when the level says so); then it
 // stages the reply, answers the parked read, ENDs the episode, closes the
 // console handle and wipes every buffer. A SAK with nothing pending shows a
-// "nothing pending" panel and ENDs on any key.
+// "nothing pending" panel and ENDs on Enter or Esc.
 //
 // Bounds: one slot; 60 s from the request to a SAK else TIMEOUT; 60 s for the
-// key prompt else TIMEOUT; wrong keys counted per (user, level) (the RECOVER
+// key prompt, timed from the SAK so the requester cannot aim it, else TIMEOUT; wrong keys counted per (user, level) (the RECOVER
 // discipline) -- past IMPERIUM_FAIL_MAX the key is not even asked for. The
 // episode blocks corvus's other clients for its duration (their 9P messages
 // wait in the kernel rings): a documented residue, simpler to audit than a
@@ -3446,6 +3446,7 @@ static mut IMPERIUM_PENDING: Option<ImperiumPending> = None;
 
 const IMPERIUM_REQUEST_TIMEOUT_NS: u64 = 60 * 1_000_000_000;
 const IMPERIUM_PROMPT_TIMEOUT_MS: u64 = 60_000;
+const PANEL_SWALLOW_MAX: usize = 4096;
 const IMPERIUM_PROMPT_SLICE_MS: u64 = 1000;
 // Wrong keys per (user, level) before the level locks until restart. A decline
 // (empty key / Ctrl-C) or a prompt timeout is not a wrong key and is not
@@ -3911,11 +3912,19 @@ unsafe fn console_read_key(fd: &mut EpisodeIo, timeout_ms: u64) -> KeyRead {
     }
 }
 
-// Dismiss an informational panel: any byte, or the bound.
-unsafe fn console_wait_any_key(fd: &mut EpisodeIo, timeout_ms: u64) {
+// Dismiss an informational panel: Enter, Esc, or the bound. Every other byte is
+// swallowed, so the rest of a key still being typed when a panel comes up never
+// reaches the surface the episode returns to. The swallow cap bounds the loop
+// when a broken clock leaves only the idle fallback, which a flood never feeds.
+unsafe fn console_wait_dismiss(fd: &mut EpisodeIo, timeout_ms: u64) {
     let start = monotonic_ns();
     let mut idle: u64 = 0;
-    let _ = console_next_byte(fd, start, timeout_ms, &mut idle);
+    for _ in 0..PANEL_SWALLOW_MAX {
+        match console_next_byte(fd, start, timeout_ms, &mut idle) {
+            NextByte::Byte(0x0d | 0x0a | 0x1b) | NextByte::Timeout | NextByte::Error => return,
+            NextByte::Byte(_) => {}
+        }
+    }
 }
 
 fn caps_names(caps: u64, out: &mut Vec<&'static [u8]>) {
@@ -3995,8 +4004,12 @@ unsafe fn verdict(fd: &mut EpisodeIo, out: &mut Vec<u8>, line: &[u8], state: lic
     fd.model.state = state;
     fd.model.notice = line.to_vec();
     out.clear();
-    provincia::compose_verdict(line, out);
-    if console_write_all(fd, out) && fd.generation != 0 { console_wait_any_key(fd, 10_000); }
+    provincia::compose_verdict_panel(line, out);
+    // A verdict closes on Enter or Esc on both media (vote 70). It waits even when the
+    // frame was not confirmed: whatever is typed meanwhile is swallowed, and a medium
+    // that failed ends the wait at once.
+    let _ = console_write_all(fd, out);
+    console_wait_dismiss(fd, 10_000);
 }
 
 // The `sak` note arrived: the kernel opened an episode, which may already be over.
@@ -4022,7 +4035,7 @@ unsafe fn episode_consume(conns: &mut Vec<Conn>) {
         None => {
             provincia::compose_nothing_pending(&mut out);
             let _ = console_write_all(fd, &out);
-            console_wait_any_key(fd, IMPERIUM_PROMPT_TIMEOUT_MS);
+            console_wait_dismiss(fd, IMPERIUM_PROMPT_TIMEOUT_MS);
             out.clear();
             provincia::compose_verdict(b"trusted path: done", &mut out);
             let _ = console_write_all(fd, &out);
@@ -4066,6 +4079,13 @@ unsafe fn episode_confer(
     conns: &mut Vec<Conn>,
     out: &mut Vec<u8>,
 ) -> ImperiumOutcome {
+    // 0. The request's window runs from the request to the SAK; past it the
+    //    request is answered TIMEOUT and nothing is asked.
+    if monotonic_ns() >= p.deadline_ns {
+        verdict(fd, out, b"imperium TIMEOUT: request expired", lictor::model::State::Expired);
+        t_putstr("corvus: imperium: SAK after the request's window\n");
+        return ImperiumOutcome::Timeout;
+    }
     // 1. The rate limit, BEFORE the provincia and any KDF: a locked subject is
     //    told so and asked nothing.
     if imperium_fail_count(&p.user, p.level) >= IMPERIUM_FAIL_MAX {
@@ -4073,7 +4093,7 @@ unsafe fn episode_confer(
         out.clear();
         provincia::compose_locked(&p.user, p.level, out);
         let _ = console_write_all(fd, out);
-        console_wait_any_key(fd, IMPERIUM_PROMPT_TIMEOUT_MS);
+        console_wait_dismiss(fd, IMPERIUM_PROMPT_TIMEOUT_MS);
         // One console write: another process's line can land between two, and
         // the seat scenarios read these three verdict lines whole.
         t_putstr(&alloc::format!("corvus: imperium: RATE-LIMITED {}\n", bytes_text(&p.user)));
@@ -4100,9 +4120,10 @@ unsafe fn episode_confer(
         t_putstr("corvus: imperium: console write FAILED\n");
         return ImperiumOutcome::Internal;
     }
-    // 3. The key.
-    let remaining = p.deadline_ns.saturating_sub(monotonic_ns()) / 1_000_000;
-    let mut key = match console_read_key(fd, remaining.min(IMPERIUM_PROMPT_TIMEOUT_MS)) {
+    // 3. The key, on its own clock from the SAK: the request's window ended when
+    //    the person answered it, and a prompt cut to the window's remainder would
+    //    let the requester time a verdict into the middle of the typing.
+    let mut key = match console_read_key(fd, IMPERIUM_PROMPT_TIMEOUT_MS) {
         KeyRead::Key(k) => k,
         KeyRead::Declined => {
             verdict(fd, out, b"imperium DECLINED", lictor::model::State::Cancelled);
@@ -4176,10 +4197,6 @@ unsafe fn episode_confer(
     if !user_eligible_for(&p.user, p.level) {
         verdict(fd, out, b"imperium DENIED: eligibility revoked", lictor::model::State::Denied);
         return ImperiumOutcome::Denied;
-    }
-    if monotonic_ns() >= p.deadline_ns {
-        verdict(fd, out, b"imperium TIMEOUT: request expired", lictor::model::State::Expired);
-        return ImperiumOutcome::Timeout;
     }
     // 6. The grant. The kernel bounds a PROPAGATING mask to
     //    CAP_GRANTABLE_IMPERIUM and refuses its redeem into an existing scope
@@ -4676,7 +4693,7 @@ fn drain_response(conn: &mut Conn, out: &mut [u8], cap: usize) -> usize {
 // never collides in practice, and a confused client gets the latest
 // response).
 unsafe fn try_dispatch_verb(conn: &mut Conn) {
-    while conn.pending_request.len() >= REQ_HDR_LEN {
+    if conn.pending_request.len() >= REQ_HDR_LEN {
         let verb_id = conn.pending_request[0];
         let protocol_version = conn.pending_request[1];
         let payload_len = (conn.pending_request[2] as usize)
@@ -4715,8 +4732,8 @@ unsafe fn try_dispatch_verb(conn: &mut Conn) {
 
         // Have a full frame. Dispatch.
         // SAFETY: copy the payload out before touching pending_request
-        // again (handlers don't mutate pending_request but we re-enter
-        // the loop after, so be defensive).
+        // again (handlers don't mutate pending_request, but the frame is
+        // drained below, so be defensive).
         let payload = &conn.pending_request[REQ_HDR_LEN..REQ_HDR_LEN + payload_len];
         let mut payload_owned = Vec::with_capacity(payload.len());
         payload_owned.extend_from_slice(payload);
@@ -4782,7 +4799,7 @@ unsafe fn try_dispatch_verb(conn: &mut Conn) {
 
         // Process at most one frame per Twrite at v1.0 (strict request-
         // response; a queued second request before the first response
-        // drains is a client protocol error — let the loop handle it).
+        // drains is a client protocol error, left for the next Twrite).
         return;
     }
 }
@@ -5225,8 +5242,17 @@ unsafe fn srv_server_loop(listener: i64, notes: &Notes) -> i64 {
     let notes_fd = notes.as_raw_fd();
 
     loop {
-        // Build pollfd list.
-        pollfds[0] = TPollFd { fd: listener as i32, events: T_POLLIN, revents: 0 };
+        // Build pollfd list. The listener is asked about only while there is
+        // room to accept: at a full pool a waiting connect would keep it
+        // readable, the accept would be skipped, and every poll would return
+        // at once. Unasked, it parks the loop; its hang-up is reported either
+        // way, and a conn that closes re-arms it on the next pass.
+        let room = conns.len() < MAX_CONNS;
+        pollfds[0] = TPollFd {
+            fd: listener as i32,
+            events: if room { T_POLLIN } else { 0 },
+            revents: 0,
+        };
         pollfds[1] = TPollFd { fd: notes_fd, events: T_POLLIN, revents: 0 };
         let nfds = POLL_FIXED + conns.len();
         for (i, c) in conns.iter().enumerate() {
@@ -5247,49 +5273,42 @@ unsafe fn srv_server_loop(listener: i64, notes: &Notes) -> i64 {
         // show "nothing pending" and strand the request until its timeout.
         let sak_ready = pollfds[1].revents & T_POLLIN != 0;
 
-        // Accept new connections.
-        if pollfds[0].revents & T_POLLIN != 0 {
-            if conns.len() < MAX_CONNS {
-                let h = t_srv_accept(listener);
-                if h >= 0 {
-                    let mut peer = TSrvPeerInfo::default();
-                    // F4 close (P5-corvus-srv-impl audit): fail-closed
-                    // on a non-zero `t_srv_peer` rc. The pre-audit code
-                    // discarded the return and left `peer` at zeros —
-                    // future admin verbs (P5-hostowner-b) that read
-                    // `caps`/`stripes` for gating would have aliased a
-                    // failed-read with a fail-closed value rather than
-                    // explicitly catching it. Better to refuse the
-                    // accept now than to admit an unknown-identity
-                    // conn into the loop. The handle is closed so the
-                    // kernel-side SrvConn tears down promptly.
-                    if t_srv_peer(h, &mut peer) != 0 {
-                        let _ = t_close(h);
-                        // Continue — the kernel's tear-down on
-                        // `t_close` will surface to a subsequent
-                        // listener-side state; corvus's loop will
-                        // re-poll.
-                    } else {
-                        conns.push(Conn::new(h, peer, next_conn_id));
-                        // Skip the 0 sentinel on the 2^64 wrap so a recycled
-                        // id can never alias the "no owner" value and falsely
-                        // pass the SESSION_CLOSE / close_conn ownership gate.
-                        next_conn_id = next_conn_id.wrapping_add(1);
-                        if next_conn_id == 0 {
-                            next_conn_id = 1;
-                        }
+        // Accept new connections. Reached only with room: a full pool leaves
+        // the listener unasked, and the kernel's accept backlog holds the
+        // connects that wait (SRV_ACCEPT_BACKLOG, kernel/devsrv.c).
+        if room && pollfds[0].revents & T_POLLIN != 0 {
+            let h = t_srv_accept(listener);
+            if h >= 0 {
+                let mut peer = TSrvPeerInfo::default();
+                // F4 close (P5-corvus-srv-impl audit): fail-closed
+                // on a non-zero `t_srv_peer` rc. The pre-audit code
+                // discarded the return and left `peer` at zeros —
+                // future admin verbs (P5-hostowner-b) that read
+                // `caps`/`stripes` for gating would have aliased a
+                // failed-read with a fail-closed value rather than
+                // explicitly catching it. Better to refuse the
+                // accept now than to admit an unknown-identity
+                // conn into the loop. The handle is closed so the
+                // kernel-side SrvConn tears down promptly.
+                if t_srv_peer(h, &mut peer) != 0 {
+                    let _ = t_close(h);
+                    // Continue — the kernel's tear-down on
+                    // `t_close` will surface to a subsequent
+                    // listener-side state; corvus's loop will
+                    // re-poll.
+                } else {
+                    conns.push(Conn::new(h, peer, next_conn_id));
+                    // Skip the 0 sentinel on the 2^64 wrap so a recycled
+                    // id can never alias the "no owner" value and falsely
+                    // pass the SESSION_CLOSE / close_conn ownership gate.
+                    next_conn_id = next_conn_id.wrapping_add(1);
+                    if next_conn_id == 0 {
+                        next_conn_id = 1;
                     }
                 }
-                // else: listener torn down; loop will pick it up via
-                // POLLHUP on the listener (T_POLLHUP isn't requested
-                // here — at v1.0 corvus only ever sees POLLIN on the
-                // listener).
-            } else {
-                // Backlog full; defer accept (the listener's accept
-                // backlog absorbs up to SRV_ACCEPT_BACKLOG = 16 per
-                // kernel/devsrv.c). Continue serving extant conns; the
-                // backlog will drain as conns close.
             }
+            // else: the listener was torn down; its POLLHUP, reported
+            // whether asked for or not, ends the loop below.
         }
         if pollfds[0].revents & T_POLLHUP != 0 {
             // Listener torn down (admin/proc exit / unposted). Drain

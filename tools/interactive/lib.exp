@@ -772,6 +772,29 @@ proc lc_expect_re {pat phase} {
     }
 }
 
+# Wait until the foreground job says it holds the terminal. The job is
+# `debug-child fgtick`, which writes FGTICK only while it leads a process group
+# of its own and that group is the terminal's foreground group (pty-4.exp's
+# background leg holds it to that). ut spawns a job, puts it in a group and then
+# hands it the terminal, and a ^Z or ^C typed before the last of those reaches
+# ut and never the job. `count` is 1 for a job just started. After a stop and a
+# `fg` it is 2: one FGTICK can have been inside its write when the stop landed
+# and reach us after the resume, and a second cannot.
+proc lc_expect_fgtick {count phase} {
+    global lc_cmd_timeout timeout
+    set timeout $lc_cmd_timeout
+    for {set i 0} {$i < $count} {incr i} {
+        expect {
+            -re {FGTICK[\r\n]} { }
+            -re {FGNOTTY}     { lc_fail "the job found no terminal of its session on fd 0, 1 or 2 during '$phase'" }
+            -re {EXTINCTION:} { lc_extinction_fail "kernel extinction during '$phase'" }
+            timeout           { lc_fail "timeout (${lc_cmd_timeout}s) waiting for the job to hold the terminal during '$phase'" }
+            eof               { lc_fail "unexpected EOF during '$phase'" }
+        }
+    }
+    lc_step "saw: $phase"
+}
+
 # Type a command line + Enter (CR -- a raw terminal sends CR; LS-1 made login +
 # the editor accept it).
 proc lc_send {line} {

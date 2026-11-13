@@ -602,7 +602,7 @@ static void poll_scan_one(struct Proc *p, struct pollfd *pfd, struct Spoor *pre,
         break;
     default:
         // Every other kobj kind (Burrow / Mmio / Irq / Dma / Interrupt /
-        // Process / Thread) lacks readiness semantics in v1.0.
+        // Process / Thread / Account) lacks readiness semantics in v1.0.
         revents = POLLNVAL;
         break;
     }

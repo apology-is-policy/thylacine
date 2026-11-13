@@ -90,7 +90,11 @@ thread has exactly one final switch-out and nothing else frees a user thread,
 so no claim is needed. A CPU holds at most one exited thread not yet freed: the
 one running its tail, or the one its resume path is freeing. A kernel thread is
 freed by its joiner; a thread that never ran, by its creator; either free
-returns the pool charge in `thread_destroy`.
+returns the pool charge in `thread_destroy`. The joiner's free folds the
+thread's `run_ns` into the Proc in the hold that unlinks it, as the reap does
+(`proc.cpu_ns_survives_thread_free`): before 2026-11-10 it did not, and the
+kernel Proc's `cpu_ns` fell at every kernel-thread free, which a monitor reads
+as a reused pid.
 
 `thread_create_user` deliberately does **not** validate its four user-VA
 arguments; the syscall handler owns those bounds. A malformed address faults

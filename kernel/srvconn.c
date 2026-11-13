@@ -1296,12 +1296,7 @@ void srvconn_ctl_iterate(srvconn_ctl_cb cb, void *arg) {
         struct srv_admission_snapshot admission;
         srv_domain_snapshot(cn->domain, &admission);
         row.domain_used = admission.local_count;
-        row.sessions_used = admission.session_count;
-        row.global_used = admission.global_count;
-        row.domains_retained = admission.domains;
         row.domain_credits = admission.local_credits;
-        row.session_credits = admission.session_credits;
-        row.global_credits = admission.global_credits;
         row.peer_pid        = cn->peer_pid;
         row.peer_principal  = cn->peer_principal;
         row.server_principal = cn->server_principal;

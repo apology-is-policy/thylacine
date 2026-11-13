@@ -308,6 +308,12 @@ void test_handles_kind_classifiers(void) {
     TEST_ASSERT(!kobj_kind_is_transferable(KOBJ_MMIO),
         "MMIO must NOT be transferable");
 
+    // MM-1c: an account's control stays with the Proc that holds it.
+    TEST_ASSERT(!kobj_kind_is_transferable(KOBJ_ACCOUNT),
+        "ACCOUNT must NOT be transferable");
+    TEST_ASSERT(!kobj_kind_is_hw(KOBJ_ACCOUNT),  "ACCOUNT must NOT be hw");
+    TEST_ASSERT(!kobj_kind_is_srv(KOBJ_ACCOUNT), "ACCOUNT must NOT be srv");
+
     // KOBJ_INVALID is neither.
     TEST_ASSERT(!kobj_kind_is_transferable(KOBJ_INVALID),
         "KOBJ_INVALID must NOT be transferable");

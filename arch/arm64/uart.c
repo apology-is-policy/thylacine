@@ -92,52 +92,21 @@ static inline uint32_t mmio_read32(uintptr_t base, uintptr_t off) {
     return io_read32((const volatile void *)(base + off));
 }
 
-// #174 RX backpressure state. g_uart_rx_lock serializes the RX FIFO drain, the
-// IMSC.RXIM/RTIM mask/unmask, and g_rx_paused -- so the IRQ handler (which
-// pauses on a full cons ring) and the cons reader's uart_rx_pump (which resumes)
-// never race on the FIFO or the mask register. Lock order: g_uart_rx_lock ->
-// g_cons.lock (cons_rx_input, called under the RX lock, takes g_cons.lock);
-// the cons reader RELEASES g_cons.lock before calling uart_rx_pump, so there is
-// no g_cons.lock -> g_uart_rx_lock edge -- the order is acyclic. g_rx_paused is
-// additionally an ACQUIRE/RELEASE atomic so uart_rx_pump's fast path (not
-// paused) needs no lock.
+// g_uart_rx_lock serializes the PL011 RX FIFO drain. Lock order g_uart_rx_lock
+// -> g_cons.lock (cons_rx_receive, called under it, takes g_cons.lock); nothing
+// holding g_cons.lock takes it.
+//
+// Vote 73 (operator, 2026-11-05) retired the #174 pause. RX is never masked for
+// back-pressure: a masked PL011 leaves a BREAK and a Ctrl-C unread in its FIFO
+// for as long as nobody reads the console (QEMU's PL011 takes a break into the
+// FIFO whatever its depth, and masking only gates the IRQ). The drain hands
+// every byte to cons_rx_receive, which never refuses; what the line discipline
+// cannot take waits in the console's bounded side queue (kernel/cons.c). The
+// #129 holdback, the pause latch and the reader's pump went with it.
 static spin_lock_t g_uart_rx_lock = SPIN_LOCK_INIT;
-static bool        g_rx_paused;            // true: RX masked, bytes held in FIFO
 
-// #129: the 1-byte holdback. cons_rx_can_accept() is a LOCKLESS pre-check, so a
-// second producer (cons_feed_write -- the graphical keyboard) can consume the
-// room between that check and the push. When that happens cons_rx_input REFUSES
-// the byte -- but by then it has already been read out of DR and cannot be put
-// back, which is the one way the #174 "leave it in the FIFO" guarantee can be
-// escaped. So the drain parks it here and re-offers it before touching the FIFO
-// again. Without this the fix would merely NARROW the loss window instead of
-// closing it, and it would go on being invisible in the way #95 was.
-// Written only under g_uart_rx_lock, like g_rx_paused.
-static bool        g_rx_held_valid;
-static uint8_t     g_rx_held_byte;
-static bool        g_rx_held_break;
-
-#ifdef KERNEL_TESTS
-// #136-audit F2: TEST-OWNED, and only ever set by uart_test_rx_force_hold.
-// The #133 leaked-state backstop must key on this and NOT on g_rx_held_valid ||
-// g_rx_paused, because BOTH of those are ordinary PRODUCTION state: g_rx_paused
-// is the #174 back-pressure latch the live IRQ path sets, so a human typing at
-// the serial console during the test phase (RX is enabled from main.c long
-// before test_run_all) would redden an innocent test AND have its real held
-// keystroke discarded by the sweep. Contrast g_uart_tx_test_stalled, which
-// production never sets -- that one is correctly test-owned as-is.
-static bool        g_rx_test_armed;
-#endif // KERNEL_TESTS
-
-// Mask or unmask the PL011 RX + RX-timeout interrupts. Caller holds
-// g_uart_rx_lock. Masking (not clearing ICR) is what makes resumption
-// wedge-safe: it gates the GIC line without touching int_level, so nothing is
-// stranded by the QEMU "RXRIS is receive-set, not level-recomputed" quirk that
-// caused #172 -- resumption is driven by uart_rx_pump reading the FIFO, never by
-// hoping the interrupt re-fires.
-// #75: IMSC is a SHARED read-modify-write register -- the RX path masks
-// RXIM|RTIM under g_uart_rx_lock, and the TX path (cons.c, under its own ring
-// lock) masks TXIM. Two different outer locks doing RMW on one register lose
+// #75: IMSC is a SHARED read-modify-write register -- the RX bring-up unmasks
+// RXIM|RTIM, and the TX path (cons.c, under its own ring lock) masks TXIM. Two different outer locks doing RMW on one register lose
 // updates (a dropped TXIM re-arm is a silently wedged console; a dropped RXIM
 // unmask is a dead keyboard). g_uart_imsc_lock serializes EVERY IMSC RMW. It is
 // a pure LEAF -- it takes nothing and is only ever held across two MMIO
@@ -152,11 +121,6 @@ static void uart_imsc_update(uint32_t set, uint32_t clear) {
     imsc &= ~clear;
     mmio_write32(base, PL011_IMSC, imsc);
     spin_unlock_irqrestore(&g_uart_imsc_lock, s);
-}
-
-static void uart_rx_set_enabled(bool en) {
-    if (en) uart_imsc_update(PL011_IMSC_RXIM | PL011_IMSC_RTIM, 0u);
-    else    uart_imsc_update(0u, PL011_IMSC_RXIM | PL011_IMSC_RTIM);
 }
 
 // #75-audit F2 (test-only; production never sets this). Emulates the #67
@@ -356,225 +320,34 @@ bool uart_rx_path_enabled(void) {
 // main loop are serialized). 64 = 4 PL011 FIFO depths: a normal burst drains in
 // one IRQ.
 //
-// #136-audit F4: what one budget unit COSTS changed at #129, so the old
-// "well under a 1ms timer tick" line no longer described this loop. A plain
-// iteration is still ~2 MMIO (FR + DR), but a REFUSAL now also runs
-// uart_rx_pause_and_recheck -> up to two uart_imsc_update calls (mask, then
-// unmask if the recheck lifts), each an IMSC read + write under
-// g_uart_imsc_lock: ~4 extra MMIO and 2 extra lock round-trips. Since all
-// three arms decrement before calling it, the worst case is 64 such
-// iterations -- ~320 MMIO rather than ~128, all IRQ-masked, and under HVF
-// every PL011 MMIO is a vmexit. Still bounded and still sub-tick, but with
-// far less headroom than the original figure implied, and it needs a peer
-// producer repeatedly taking 257 slots inside the window to get there.
-// If this loop grows another MMIO-bearing arm, re-derive the figure rather
-// than inheriting this comment.
+// An iteration is two MMIO (FR + DR) and one cons_rx_receive under g_cons.lock;
+// nothing in the loop masks or unmasks. If it grows an MMIO-bearing arm,
+// re-derive the cost rather than inheriting this comment.
 #define UART_RX_DRAIN_MAX  64u
 
-// The shared PL011 RX FIFO drain core. Caller holds g_uart_rx_lock. Clears the
-// RX + RX-timeout interrupts FIRST, then drains the FIFO into the console -- but
-// BEFORE reading each byte it checks cons_rx_can_accept(): when the cons ring is
-// full it STOPS, leaving the byte in the FIFO (it is NOT read out, so NOT lost),
-// masks RX, and latches g_rx_paused (#174 backpressure). The FIFO then fills,
-// QEMU's can_receive goes 0, and the host serial buffers the overflow -- nothing
-// is dropped. uart_rx_pump (the reader-side resume) drains the held bytes once
-// ring space frees.
+// The PL011 RX FIFO drain. Caller holds g_uart_rx_lock. Clears the RX and
+// RX-timeout interrupts FIRST, then hands every byte in the FIFO to the console.
 //
 // Clear-FIRST is the #172 fix: the QEMU PL011 RX interrupt is RECEIVE-driven and
 // NOT recomputed from the FIFO level on an ICR clear (confirmed via gdb: FIFO
 // FULL yet RXRIS clear), so clearing AFTER the drain would strand a byte
 // arriving in the post-drain window and wedge the FIFO. Clearing first re-arms
 // for any drain-window arrival; the drain reads every byte already latched.
-// UART_RX_DRAIN_MAX is the separate unbounded-drain livelock bound; both stay.
-//
-// Returns true iff it reached FIFO-empty (RXFE). false means either backpressure
-// (g_rx_paused now set + RX masked) OR budget-hit with the FIFO non-empty -- the
-// pump treats both as "stay paused / retry", the handler ignores it (a budget-hit
-// re-fires per #172; a backpressure-pause is resumed by the reader's pump).
-// Publish the RX pause, then RE-OBSERVE the room the pause was based on.
-// Returns true iff the pause was immediately LIFTED (room appeared in the
-// window), in which case the caller must keep draining rather than reporting
-// paused. Caller holds g_uart_rx_lock.
-//
-// #129-audit F1. Masking and latching is a CHECK-THEN-ACT, and the observer on
-// the other side is lockless: uart_rx_pump's fast path reads g_rx_paused WITHOUT
-// g_uart_rx_lock and returns immediately on false. So a reader that drained the
-// ring between our room check and the store below saw `false`, did nothing, and
-// then parked in sleep() on an empty ring -- while we went on to mask RX. The
-// terminal state is fatal, not merely slow: RX masked means uart_irq_handler's
-// RX arm is gated off (it dispatches on MIS), uart_rx_pump's ONLY caller is
-// cons_input_read (i.e. the thread now parked), and on a serial-only console
-// cons_feed_write does not exist -- so NO producer remains to make
-// cons_data_ready true. The console is dead until reboot, and because RX is
-// masked the PL011 never raises DR.BE again, which puts the I-27 SAK out of
-// reach too.
-//
-// Publish-then-re-observe is the same register-then-observe discipline the rest
-// of the tree uses for exactly this shape. It is EXACT here, not conservative:
-// cons_rx_can_accept() reserving CONS_LINE_MAX + 1 implies cons_rx_input accepts
-// on both refusable arms (raw needs 1 <= room, a flush needs line_len + 1 <=
-// CONS_LINE_MAX + 1 <= room), so a true reading means there is genuinely room
-// for whatever we re-offer.
-static bool uart_rx_pause_and_recheck(void) {
-    uart_rx_set_enabled(false);
-    __atomic_store_n(&g_rx_paused, true, __ATOMIC_RELEASE);
-    // #136-audit F3: the StoreLoad barrier the publish/re-observe pair needs.
-    // A release store followed by a RELAXED load (cons_rx_can_accept reads
-    // g_cons.count __ATOMIC_RELAXED) compiles to `stlrb` + a plain `ldr`, and
-    // ARMv8 orders STLR->LDAR but NOT STLR->LDR: the load may be satisfied
-    // before the release store is globally observed. Store-buffering is
-    // forbidden only when BOTH sides are ordered -- the reader's side is
-    // (count store -> spin_unlock release -> ldar g_rx_paused), ours was not.
-    // This is the same shape as the Weft-4 readiness ring, whose own comment
-    // (kernel/weft.c "the StoreLoad barrier before the wait_active load") and
-    // spec (weft_readiness.tla + buggy_lost_wake) name the requirement; that
-    // one uses seq-cst on both sides. A fence here rather than promoting
-    // cons_count_load keeps every other reader (poll, cons_data_ready, the
-    // lockless pre-check below) unperturbed.
-    __atomic_thread_fence(__ATOMIC_SEQ_CST);
-    if (!cons_rx_can_accept()) return false;         // the pause stands
-    uart_rx_set_enabled(true);
-    __atomic_store_n(&g_rx_paused, false, __ATOMIC_RELEASE);
-    return true;                                     // lifted -- keep draining
-}
-
-#ifdef KERNEL_TESTS
-// #129-audit F2 (test-only; production never calls these). The 1-byte holdback
-// is the mechanism that makes a refusal LOSSLESS for the serial producer, and it
-// is entered only when a peer producer takes the room between the lockless
-// pre-check and the under-lock push -- an SMP interleaving no deterministic test
-// in the suite can produce. Four of its properties fail SILENTLY (re-offer
-// before the FIFO; cleared only on acceptance; never overwritten while valid;
-// held implies paused), each losing or doubling a keystroke with no counter and
-// no log -- the #95 signature the counters exist to make decidable. The bp
-// counters do NOT cover it: they are incremented inside cons_rx_input and say
-// nothing about whether the holdback later delivered the byte. So seed and
-// inspect it directly, in the uart_test_tx_stall precedent.
-void uart_test_rx_force_hold(uint8_t b, bool brk) {
-    irq_state_t s = spin_lock_irqsave(&g_uart_rx_lock);
-    g_rx_held_byte  = b;
-    g_rx_held_break = brk;
-    g_rx_held_valid = true;
-    g_rx_test_armed = true;          // #136-audit F2: THIS is what the sweep keys on
-    uart_rx_set_enabled(false);
-    __atomic_store_n(&g_rx_paused, true, __ATOMIC_RELEASE);
-    spin_unlock_irqrestore(&g_uart_rx_lock, s);
-}
-
-bool uart_test_rx_held(uint8_t *b, bool *brk) {
-    irq_state_t s = spin_lock_irqsave(&g_uart_rx_lock);
-    bool v = g_rx_held_valid;
-    if (b)   *b   = g_rx_held_byte;
-    if (brk) *brk = g_rx_held_break;
-    spin_unlock_irqrestore(&g_uart_rx_lock, s);
-    return v;
-}
-
-// #129-audit F2 + the #133 backstop: release a test-seeded holdback and resume
-// RX. The holdback is NEW global console state that a failing TEST_ASSERT can
-// leave armed, and a stranded pause is not a cosmetic leak -- RX stays masked,
-// so console input is dead for the REST OF THE BOOT and every later test that
-// reads the console mis-reports. Per-site cleanup cannot cover a site that does
-// not exist yet, so the runner sweeps this like the other five.
-// Returns true iff anything was actually released (the runner reddens the test).
-bool uart_test_rx_release_hold(void) {
-    irq_state_t s = spin_lock_irqsave(&g_uart_rx_lock);
-    // #136-audit F2: key on the TEST-owned flag, never on g_rx_held_valid ||
-    // g_rx_paused. Those two are production state, so the old predicate both
-    // reddened innocent tests when a human typed into a near-full ring during
-    // the test phase AND discarded the real keystroke the holdback was holding
-    // losslessly -- a backstop causing the exact loss it exists to detect.
-    // When NOT armed we touch nothing: production owns that state.
-    bool owned = g_rx_test_armed;
-    if (owned) {
-        g_rx_test_armed = false;
-        g_rx_held_valid = false;
-        if (g_rx_paused) {
-            uart_rx_set_enabled(true);
-            __atomic_store_n(&g_rx_paused, false, __ATOMIC_RELEASE);
-        }
-    }
-    spin_unlock_irqrestore(&g_uart_rx_lock, s);
-    return owned;
-}
-
-bool uart_test_rx_paused(void) {
-    return __atomic_load_n(&g_rx_paused, __ATOMIC_ACQUIRE);
-}
-#endif // KERNEL_TESTS
-
-static bool uart_rx_drain_locked(void) {
+// UART_RX_DRAIN_MAX is the separate livelock bound; a budget hit leaves the
+// rest to the re-fire, as #172 has it.
+static void uart_rx_drain_locked(void) {
     uintptr_t base = pl011_base;
     mmio_write32(base, PL011_ICR, PL011_ICR_RXIC | PL011_ICR_RTIC);   // #172 clear-first
-
-    unsigned budget = UART_RX_DRAIN_MAX;
-
-    while (budget != 0u) {
-        // #129: a byte refused on a previous pass outranks the FIFO -- offering
-        // the FIFO first would deliver it out of order.
-        if (g_rx_held_valid) {
-            if (!cons_rx_input(g_rx_held_byte, g_rx_held_break)) {
-                budget--;                          // bound the pause/lift retry
-                if (uart_rx_pause_and_recheck()) continue;
-                return false;                      // still no room: keep holding
-            }
-            g_rx_held_valid = false;
-            budget--;
-            continue;
-        }
-
-        if (mmio_read32(base, PL011_FR) & PL011_FR_RXFE) return true;   // FIFO drained
-        if (!cons_rx_can_accept()) {
-            // #174: cons ring full -> backpressure. Leave the byte in the FIFO
-            // (do NOT read DR), mask RX so the IRQ neither re-fires nor
-            // livelocks, latch paused. uart_rx_pump resumes from the reader side.
-            budget--;                              // bound the pause/lift retry
-            if (uart_rx_pause_and_recheck()) continue;
-            return false;
-        }
-        budget--;
+    for (unsigned budget = UART_RX_DRAIN_MAX; budget != 0u; budget--) {
+        if (mmio_read32(base, PL011_FR) & PL011_FR_RXFE) return;
         uint32_t dr = mmio_read32(base, PL011_DR);
-        if (!cons_rx_input((uint8_t)(dr & 0xffu), (dr & PL011_DR_BE) != 0u)) {
-            // #129: the pre-check passed but the under-lock check refused -- a
-            // peer producer took the room in between. The byte is already out of
-            // DR, so park it (the FIFO can no longer hold it for us) and pause
-            // exactly as the gate path does. The loop re-offers it above.
-            g_rx_held_byte  = (uint8_t)(dr & 0xffu);
-            g_rx_held_break = (dr & PL011_DR_BE) != 0u;
-            g_rx_held_valid = true;
-            if (uart_rx_pause_and_recheck()) continue;
-            return false;
-        }
+        cons_rx_receive((uint8_t)(dr & 0xffu), (dr & PL011_DR_BE) != 0u);
     }
-
-    // #136-audit F1: restore the holdback invariant at the ONE exit that can
-    // break it. ARCH sect 25.4 (the LS-8 #129 addendum) states the holdback
-    // "can never be stranded (g_rx_held_valid && !g_rx_paused must stay
-    // unreachable)" -- and falling out of the loop reaches exactly that state:
-    // the last budget unit is spent on a refusal whose pause_and_recheck then
-    // LIFTS (unmask + paused=false) and `continue`s into a failed loop test.
-    //
-    // Every other exit is already sound: the three `return false`s ran only
-    // because pause_and_recheck returned false, i.e. the pause STANDS; the
-    // `return true` is the RXFE arm, reachable only with nothing held.
-    //
-    // Why the stranded state does not self-heal, and so must not be left: the
-    // held byte lives in a SOFTWARE variable, not the FIFO, so it raises
-    // neither RXRIS nor the RX timeout -- the hardware re-fire that covers the
-    // ordinary budget-hit exit does not cover it. And uart_rx_pump, the
-    // reader's only route in, short-circuits on !g_rx_paused. The byte would
-    // then wait for an unrelated later arrival: a keystroke that vanishes and
-    // reappears when the user types again, with no counter and no log.
-    if (g_rx_held_valid && !__atomic_load_n(&g_rx_paused, __ATOMIC_RELAXED)) {
-        uart_rx_set_enabled(false);
-        __atomic_store_n(&g_rx_paused, true, __ATOMIC_RELEASE);
-    }
-    return false;   // budget hit, FIFO non-empty: re-fire (#172) / pump-retry
 }
 
 // A-4c-1: PL011 RX IRQ handler (GIC dispatch target; IRQ context, IRQs masked at
-// PSTATE). Drains the FIFO under g_uart_rx_lock via the shared core; on a full
-// cons ring it pauses RX (#174) rather than dropping bytes. After the handler
+// PSTATE). Drains the FIFO under g_uart_rx_lock into the console, which never
+// refuses a byte (vote 73). After the handler
 // returns + the GIC EOIs, the exception-return window lets the lower-INTID timer
 // (27 < the UART SPI 33, equal GIC priority -> the timer wins the tie) interleave
 // so the scheduler runs.
@@ -582,8 +355,7 @@ static bool uart_rx_drain_locked(void) {
 // handler dispatches on MIS (masked interrupt status) and services whichever
 // sources are pending. TX is serviced FIRST: it is the cheap, non-blocking arm
 // (pop ring -> FIFO while there is room) and draining it promptly is what keeps
-// a blocked writer's room-wait short. RX keeps its own lock + backpressure
-// discipline entirely unchanged.
+// a blocked writer's room-wait short. RX keeps its own lock.
 //
 // TXIC is cleared by the drain in cons.c under the ring lock (the ring's state
 // and the interrupt's state must be decided together -- see uart_tx_irq_set_enabled).
@@ -597,7 +369,7 @@ void uart_irq_handler(uint32_t intid, void *arg) {
 
     if (mis & (PL011_IMSC_RXIM | PL011_IMSC_RTIM)) {
         irq_state_t s = spin_lock_irqsave(&g_uart_rx_lock);
-        (void)uart_rx_drain_locked();
+        uart_rx_drain_locked();
         spin_unlock_irqrestore(&g_uart_rx_lock, s);
     }
 }
@@ -621,32 +393,6 @@ void uart_tx_drain_sync(void) {
     for (uint32_t i = 0; i < UART_TX_SPIN_MAX_ITERS; i++) {
         if (uart_tx_fifo_empty()) return;
     }
-}
-
-// #174 backpressure resume (process context; the cons reader calls this after it
-// frees ring space). No-op unless RX is paused. While paused, RX is masked so the
-// IRQ handler cannot run -- this pump is then the SOLE FIFO drainer (and the cons
-// single-reader guard means at most one pump runs at a time), so there is no FIFO
-// race. It drains held bytes into the freed ring space; when the FIFO empties it
-// unmasks RX and clears paused (resumption is reader-driven, never int_level-
-// driven -> no #172 wedge). If the ring refills mid-pump it re-pauses; if the
-// budget is hit with the FIFO still non-empty (a sustained HVF refill) it stays
-// paused for the next reader read -- never stranding a byte.
-void uart_rx_pump(void) {
-    if (!__atomic_load_n(&g_rx_paused, __ATOMIC_ACQUIRE)) return;   // fast path: not paused
-    irq_state_t s = spin_lock_irqsave(&g_uart_rx_lock);
-    if (g_rx_paused) {
-        if (uart_rx_drain_locked()) {
-            // FIFO drained with ring space remaining -> resume normal IRQ-driven
-            // RX. Unmask BEFORE clearing paused so a fresh arrival re-fires the
-            // (now-unmasked) IRQ instead of waiting for the next pump.
-            uart_rx_set_enabled(true);
-            __atomic_store_n(&g_rx_paused, false, __ATOMIC_RELEASE);
-        }
-        // else: ring refilled (drain re-latched paused) or budget hit -> stay
-        // paused; the next reader read pumps again. No byte stranded.
-    }
-    spin_unlock_irqrestore(&g_uart_rx_lock, s);
 }
 
 void uart_puts(const char *s) {

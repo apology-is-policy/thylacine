@@ -653,9 +653,13 @@ impl Driver for NetD {
                     .clamp(IDLE_POLL_MIN_MS, IDLE_POLL_MAX_MS)
             };
 
+            // The listener is asked about only while there is room to accept:
+            // at a full pool a waiting connect would keep it readable with the
+            // accept skipped, and every poll would return at once.
+            let room = conns.len() < server::MAX_CONNS;
             pollfds[0] = TPollFd {
                 fd: listener as i32,
-                events: T_POLLIN,
+                events: if room { T_POLLIN } else { 0 },
                 revents: 0,
             };
             let nc = conns.len().min(server::MAX_CONNS);
@@ -680,7 +684,7 @@ impl Driver for NetD {
 
             // Accept a new connection (one per tick is enough; the listener
             // re-fires next iteration if more are pending).
-            if pollfds[0].revents & T_POLLIN != 0 && conns.len() < server::MAX_CONNS {
+            if room && pollfds[0].revents & T_POLLIN != 0 {
                 let h = unsafe { t_srv_accept(listener) };
                 if h >= 0 {
                     conns.push(server::Conn::new(h));

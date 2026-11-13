@@ -713,7 +713,7 @@ static size_t format_cpu(const struct Proc *reader, char *buf, size_t cap) {
 // Do not read these as five of a kind -- #129 split them into two classes:
 //
 //   rx_bp_raw     -- ring full in raw/cbreak mode: the byte was REFUSED, and the
-//   rx_bp_flush      producer (PL011 FIFO / holdback, or cons_feed_write's short
+//   rx_bp_flush      producer (the serial side queue, or cons_feed_write's short
 //                    count) still holds it. NOT loss. Non-zero means the console
 //                    was pushed harder than the reader drained -- a load signal,
 //                    normal on a busy or briefly-stalled console.
@@ -731,6 +731,10 @@ static size_t format_cpu(const struct Proc *reader, char *buf, size_t cap) {
 //                    PROMPT_MODE before it drains, so a ring's worth of pasted
 //                    complete lines into a non-reading job plus a trailing
 //                    partial line meets a full ring at the re-arm.
+//   rx_drop_side  -- a real drop: a serial byte that met a FULL side queue
+//                    (vote 73). The serial drain reads every byte so a BREAK
+//                    or a Ctrl-C is never stuck behind it; past the queue's
+//                    4096 entries, the newest is dropped.
 //   tx_*          -- the output side (#75/#126), unchanged.
 static size_t format_cons(const struct Proc *reader, char *buf, size_t cap) {
     (void)reader;
@@ -738,19 +742,20 @@ static size_t format_cons(const struct Proc *reader, char *buf, size_t cap) {
     u32 tx_dropped = 0, tx_room_waits = 0;
     cons_rx_counters(&rx_bp_raw, &rx_bp_flush, &rx_drop_line, &rx_drop_ring);
     u32 rx_drop_modeflush = cons_rx_drop_modeflush();
+    u32 rx_drop_side = cons_rx_drop_side();
     cons_tx_drops(&tx_dropped, &tx_room_waits);
 
-    static const char *const labels[7] = {
+    static const char *const labels[8] = {
         "rx_bp_raw:     ", "rx_bp_flush:   ",
         "rx_drop_line:  ", "rx_drop_ring:  ",
-        "rx_drop_modeflush: ",
+        "rx_drop_modeflush: ", "rx_drop_side:  ",
         "tx_dropped:    ", "tx_room_waits: ",
     };
-    u32 vals[7] = { rx_bp_raw, rx_bp_flush, rx_drop_line, rx_drop_ring,
-                    rx_drop_modeflush, tx_dropped, tx_room_waits };
+    u32 vals[8] = { rx_bp_raw, rx_bp_flush, rx_drop_line, rx_drop_ring,
+                    rx_drop_modeflush, rx_drop_side, tx_dropped, tx_room_waits };
 
     size_t off = 0, n;
-    for (int i = 0; i < 7; i++) {
+    for (int i = 0; i < 8; i++) {
         n = fmt_str(buf, cap, off, labels[i]);              if (!n) return off; off += n;
         n = fmt_udec(buf, cap, off, (unsigned long)vals[i]); if (!n) return off; off += n;
         n = fmt_str(buf, cap, off, "\n");                   if (!n) return off; off += n;
@@ -791,10 +796,11 @@ static bool ctl_9p_shown(const struct ctl_9p_fmt *f, u32 end_a, u32 end_b) {
     return f->who == end_a || f->who == end_b;
 }
 
-// A reader running as none is no end, so it has no row of its own, and the rows
-// name other Procs' connections (peer pid, label, mode, liveness): Plan 9's
-// nonone() keeps them from none (IDENTITY-DESIGN's reserved ids). A hostowner
-// reader is `sys`, as the wall exempts it.
+// A reader running as none is no end, so it has no row of its own, and every
+// line names or counts other Procs' connections (peer pid, label, mode,
+// liveness): Plan 9's nonone() keeps them from none (IDENTITY-DESIGN's reserved
+// ids). A hostowner reader is `sys`, as the wall exempts it. Asked once, by
+// format_9p_sessions, so no emitter can stand outside it.
 static bool ctl_9p_row_hidden(const struct ctl_9p_fmt *f) {
     return !f->sys && f->who == PRINCIPAL_NONE;
 }
@@ -803,7 +809,6 @@ static bool ctl_9p_row_hidden(const struct ctl_9p_fmt *f) {
 // are: the reader gets the rows that fit, each one whole.
 static bool format_9p_conn_cb(const struct srvconn_ctl_row *row, void *arg) {
     struct ctl_9p_fmt *f = (struct ctl_9p_fmt *)arg;
-    if (ctl_9p_row_hidden(f)) return true;
     bool shown = ctl_9p_shown(f, row->peer_principal, row->server_principal);
     size_t line = f->off;
     size_t n;
@@ -814,16 +819,11 @@ static bool format_9p_conn_cb(const struct srvconn_ctl_row *row, void *arg) {
 #define EMIT_GDEC(v) do { if (shown) EMIT_DEC(v); else EMIT_STR("-"); } while (0)
     EMIT_STR("conn peer=");   EMIT_DEC(row->peer_pid);
     EMIT_STR(" msize=");      EMIT_DEC(row->msize);
+    // Its own domain's figures only: the summary line carries the global ones
+    // once, and a row that repeated them crowded the session rows out of the read.
     EMIT_STR(row->session_domain ? " session=" : " boot="); EMIT_DEC(row->domain_used);
-    EMIT_STR(" guests="); EMIT_DEC(row->sessions_used);
-    EMIT_STR(" all="); EMIT_DEC(row->global_used);
-    EMIT_STR(" domains="); EMIT_DEC(row->domains_retained);
     EMIT_STR(" credits="); EMIT_DEC(row->domain_credits);
     EMIT_STR("/"); EMIT_DEC(row->session_domain ? SRV_CREDITS_DOMAIN : SRV_CREDITS_GLOBAL);
-    EMIT_STR(" guestcredits="); EMIT_DEC(row->session_credits);
-    EMIT_STR("/"); EMIT_DEC(SRV_CREDITS_SESSIONS);
-    EMIT_STR(" allcredits="); EMIT_DEC(row->global_credits);
-    EMIT_STR("/"); EMIT_DEC(SRV_CREDITS_GLOBAL);
     EMIT_STR(row->byte_mode ? " byte" : " 9p");
     EMIT_STR(row->kernel_attached ? " ka" : " -");
     EMIT_STR(row->state == 1 ? " live" : " torn");
@@ -858,7 +858,6 @@ static bool format_9p_sess_cb(const char *label, int id, u32 msize,
                               u32 owner, u32 server,
                               const struct p9_client_ctl *snap, void *arg) {
     struct ctl_9p_fmt *f = (struct ctl_9p_fmt *)arg;
-    if (ctl_9p_row_hidden(f)) return true;
     bool shown = ctl_9p_shown(f, owner, server);
     size_t line = f->off;
     size_t n;
@@ -919,11 +918,20 @@ static bool format_9p_admission(struct ctl_9p_fmt *f) {
 #undef EMIT_GDEC
 }
 
+// One read is all of this file a reader gets, and the session rows come last.
+// A render that left a row out says so on its last line, whose room no row may
+// take: rows that are missing are then never mistaken for rows that do not exist.
+#define P9S_CUT_LINE "(cut: more rows than one read holds)\n"
+#define P9S_CUT_LEN  (sizeof(P9S_CUT_LINE) - 1u)
+
 static size_t format_9p_sessions(const struct Proc *reader, char *buf, size_t cap) {
     struct ctl_9p_fmt f = { buf, cap, 0, false, devctl_system_counters_readable(reader),
         reader ? __atomic_load_n(&reader->principal_id, __ATOMIC_ACQUIRE) : PRINCIPAL_INVALID };
+    if (ctl_9p_row_hidden(&f) || cap < P9S_CUT_LEN) return 0;
+    f.cap = cap - P9S_CUT_LEN;
     if (format_9p_admission(&f)) srvconn_ctl_iterate(format_9p_conn_cb, &f);
     if (!f.full) p9_attached_ctl_iterate(format_9p_sess_cb, &f);
+    if (f.full) f.off += fmt_str(buf, cap, f.off, P9S_CUT_LINE);
     return f.off;
 }
 
@@ -1154,10 +1162,11 @@ static int devctl_close(struct Spoor *c) {
 // proc lines; a 2 KiB frame on the 16 KiB kstack is safe on the shallow Dev-read
 // path. Every /ctl leaf shares this cap (all fit comfortably).
 //
-// #210 bumped 2048 -> 4096: /ctl/9p-sessions emits ~120 bytes per live
-// conn + per session; a busy boot (fs + stratumd + corvus + ptyfs + warp
-// x2 + login sessions) runs ~15 rows ≈ 1.8 KiB and 2048 would truncate
-// under exactly the multi-session load the file exists to diagnose. The
+// #210 bumped 2048 -> 4096: /ctl/9p-sessions emits a 133-byte summary, 80 to
+// 110 bytes per live conn and 105 to 115 per session; the gate image's boot
+// (15 conns, 10 sessions) is about 2.5 KiB and 2048 would cut it under exactly
+// the multi-session load the file exists to diagnose. Past 4096 the render
+// ends with its cut line (P9S_CUT_LINE). The
 // caveat stands: the fmt re-runs per read() at each offset, so counters
 // may advance between pages — read the whole file in one call (any read
 // with n >= the content size) for a consistent snapshot.

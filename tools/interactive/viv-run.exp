@@ -50,9 +50,29 @@ lc_login michael correct-horse-battery-staple-v1
 
 # --- 1. the console ut ------------------------------------------------------
 lc_send "viv run /vivarium/probe"
+set timeout $lc_cmd_timeout
+expect {
+    -re {viv-probe: reach total_kb=([0-9]+) [^\r\n]*\r?\n} { set reach_total_kb $expect_out(1,string) }
+    -re {viv-probe: FAIL[^\r\n]*[\r\n]} { lc_fail "the probe failed before its reach line: $expect_out(0,string)" }
+    -re {EXTINCTION:} { lc_extinction_fail "the probe container" }
+    timeout { lc_fail "no reach line from the probe container" }
+    eof { lc_fail "EOF waiting for the probe's reach line" }
+}
 lc_expect "viv-probe: FAIL: principal is not the invoker's" \
     "the probe container ran from the console shell (legs 1-5 held; leg 6 is the fixture's SYSTEM expectation)"
 sleep 1
+# The container's total is the machine's: the figure one variable away, from outside it.
+lc_send "cat /ctl/memory"
+set timeout $lc_cmd_timeout
+expect {
+    -re {total: +([0-9]+) pages} { set machine_pages $expect_out(1,string) }
+    -re {EXTINCTION:} { lc_extinction_fail "reading /ctl/memory" }
+    timeout { lc_fail "no total from /ctl/memory" }
+    eof { lc_fail "EOF reading /ctl/memory" }
+}
+if {$reach_total_kb != $machine_pages * 4} {
+    lc_fail "the container read total_kb=$reach_total_kb, the machine has $machine_pages pages"
+}
 lc_run_expect "echo viv-console | tr a-z A-Z" "VIV-CONSOLE"
 
 # --- M8 at the console ut ----------------------------------------------------

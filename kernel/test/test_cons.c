@@ -233,42 +233,6 @@ void test_cons_ring_full_refuses(void) {
     cons_test_reset();
 }
 
-// #174/#129 backpressure predicate: cons_rx_can_accept() is what the PL011 RX
-// drain checks BEFORE reading a byte out of the FIFO -- on false it leaves the
-// byte in the FIFO and masks RX rather than pulling in a byte the ring may not
-// be able to take.
-//
-// #129 changed the RESERVATION, and this test pins the change rather than the
-// number. The predicate must go false while the ring STILL HAS ROOM, because the
-// byte it authorizes may be a canonical terminator that flushes CONS_LINE_MAX + 1
-// bytes at once. A test that only checked "false at capacity" would pass on the
-// pre-#129 one-byte gate -- the bug -- so the load-bearing assertion is the one
-// that fails on that gate: refusal while free room is still positive.
-void test_cons_rx_can_accept_boundary(void) {
-    const u32 reserve    = CONS_LINE_MAX + 1u;      // the worst-case cooked flush
-    // The predicate is `count + reserve <= CONS_RING_SIZE`, so the highest count
-    // it still accepts at is CONS_RING_SIZE - reserve; one more push crosses it.
-    const u32 accept_max = 512u - reserve;          // CONS_RING_SIZE - reserve
-
-    cons_test_reset();
-    TEST_ASSERT(cons_rx_can_accept(), "empty ring accepts");
-    for (u32 i = 0; i <= accept_max; i++) {
-        TEST_ASSERT(cons_rx_can_accept(), "at or below the reservation, accepts");
-        cons_rx_input((u8)(0x80u | (i & 0x7fu)), false);
-    }
-    // count == accept_max + 1: fewer than `reserve` slots remain, so a maximal
-    // flush no longer provably fits and admitting another byte is unsafe.
-    TEST_ASSERT(!cons_rx_can_accept(),
-                "refuses while the ring still has room -- reserving, not full");
-
-    // The pin: the ring is NOT full here. A one-byte gate would have said yes.
-    TEST_ASSERT(cons_rx_input((u8)0xAAu, false),
-                "the ring itself still accepts -- the gate is reserving, not full");
-
-    cons_test_reset();
-    TEST_ASSERT(cons_rx_can_accept(), "reset frees the ring");
-}
-
 // #129: the sizing regression. A maximal cooked line (CONS_LINE_MAX chars +
 // Enter = CONS_LINE_MAX + 1 ring bytes) must survive INTACT on an empty ring.
 //
@@ -298,6 +262,76 @@ void test_cons_full_line_fits_ring(void) {
     for (u32 i = 0; i < CONS_LINE_MAX; i++) if (lbuf[i] != 'A') all_a = false;
     TEST_ASSERT(all_a, "every line byte is intact");
     cons_settle_mgr();
+}
+
+static void cons_feed_text(const char *s) {
+    while (*s) (void)cons_rx_input((u8)*s++, false);
+}
+
+// A canonical read ends at its line, and a read shorter than the line leaves the rest
+// for the next. A raw read takes what is there, newlines and all.
+void test_cons_read_ends_at_its_line(void) {
+    static u8 first[16], second[16], head[16], tail[16], whole[16];
+    cons_test_reset();
+    sched();
+    cons_test_set_termios(CONS_ICANON);
+    cons_feed_text("one\ntwo\n");
+    long first_n = cons_drain(first, (long)sizeof(first));
+    long second_n = (cons_test_rx_count() > 0u) ? cons_drain(second, (long)sizeof(second)) : -1;
+    cons_feed_text("abc\n");
+    long head_n = cons_drain(head, 2);
+    long tail_n = (cons_test_rx_count() > 0u) ? cons_drain(tail, (long)sizeof(tail)) : -1;
+    cons_test_set_termios(0u);
+    cons_feed_text("a\nb");
+    long whole_n = cons_drain(whole, (long)sizeof(whole));
+    cons_settle_mgr();
+
+    TEST_EXPECT_EQ(first_n, 4L, "the first read takes the first line and no more");
+    TEST_ASSERT(first[0] == 'o' && first[3] == '\n', "and it is one + NL");
+    TEST_EXPECT_EQ(second_n, 4L, "the second line waited for the second read");
+    TEST_ASSERT(second[0] == 't' && second[3] == '\n', "and it is two + NL");
+    TEST_EXPECT_EQ(head_n, 2L, "a read shorter than the line takes what it asked for");
+    TEST_EXPECT_EQ(tail_n, 2L, "the rest of that line stays for the next read");
+    TEST_ASSERT(tail[0] == 'c' && tail[1] == '\n', "and it is c + NL");
+    TEST_EXPECT_EQ(whole_n, 3L, "a raw read does not stop at a newline");
+}
+
+// A control byte in a canonical line echoes as ^X and erases as two columns. A tab
+// echoes as itself, and raw echo is unchanged. The line itself holds the byte.
+void test_cons_control_byte_echoes_as_caret(void) {
+    static u8 caret[16], erase[16], tab[16], raw[16], line[16];
+    cons_test_reset();
+    sched();
+    cons_test_set_termios(CONS_ICANON | CONS_ECHO);
+    cons_test_echo_capture(true);
+    (void)cons_rx_input(0x1bu, false);
+    u32 caret_n = cons_test_echo_captured(caret, sizeof(caret));
+    cons_test_echo_capture(true);
+    (void)cons_rx_input(0x7fu, false);
+    u32 erase_n = cons_test_echo_captured(erase, sizeof(erase));
+    cons_test_echo_capture(true);
+    (void)cons_rx_input((u8)'\t', false);
+    u32 tab_n = cons_test_echo_captured(tab, sizeof(tab));
+    (void)cons_rx_input(0x01u, false);
+    (void)cons_rx_input((u8)'\n', false);
+    long line_n = cons_drain(line, (long)sizeof(line));
+    cons_test_set_termios(CONS_ECHO);
+    cons_test_echo_capture(true);
+    (void)cons_rx_input(0x1bu, false);
+    u32 raw_n = cons_test_echo_captured(raw, sizeof(raw));
+    cons_settle_mgr();
+
+    TEST_EXPECT_EQ((long)caret_n, 2L, "a control byte echoes in two columns");
+    TEST_ASSERT(caret[0] == '^' && caret[1] == '[', "and they read ^[");
+    TEST_EXPECT_EQ((long)erase_n, 6L, "erasing it takes back both columns");
+    TEST_ASSERT(erase[0] == '\b' && erase[1] == ' ' && erase[3] == '\b' && erase[5] == '\b',
+                "back, space, back, twice");
+    TEST_EXPECT_EQ((long)tab_n, 1L, "a tab echoes as itself");
+    TEST_EXPECT_EQ((long)tab[0], (long)'\t', "and it is the tab");
+    TEST_EXPECT_EQ(line_n, 3L, "the line holds tab, the control byte and its newline");
+    TEST_EXPECT_EQ((long)line[1], 1L, "the line holds the byte itself, not its caret");
+    TEST_EXPECT_EQ((long)raw_n, 1L, "raw echo stays one byte");
+    TEST_EXPECT_EQ((long)raw[0], 0x1bL, "and it is the byte");
 }
 
 // #129 (I-27): a full ring must NEVER block the SAK or a cooked Ctrl-C. Both are
@@ -522,106 +556,173 @@ void test_cons_serial_silent_sak_restores(void) {
     TEST_ASSERT(cleared, "F2: SAK cleared serial_silent -- trusted serial path restored");
 }
 
-// #129-audit F2: the 1-byte UART holdback -- the mechanism that makes a refusal
-// LOSSLESS for the serial producer -- had no coverage of any kind. It is entered
-// only when a peer producer takes the room between the lockless pre-check and
-// the under-lock push, an SMP interleaving no deterministic test produces, so it
-// is seeded directly through the test hooks.
-//
-// Pins the four properties whose failures are ALL SILENT (a lost or doubled
-// keystroke, no counter, no log -- the #95 signature): re-offered before the
-// FIFO; cleared only on acceptance; never delivered twice; held implies paused.
-void test_cons_rx_holdback_reoffer(void) {
-    static u8 hbuf[1024];
-    cons_test_reset();
-
-    // Seed a held byte, then fill the ring so the re-offer MUST be refused.
-    uart_test_rx_force_hold((u8)'H', false);
-    bool seeded  = uart_test_rx_held(NULL, NULL);
-    bool paused0 = uart_test_rx_paused();
+// Vote 73: the serial side queue. cons_rx_receive is the PL011 drain's entry and
+// never refuses. Behind a full raw ring, a BREAK and an ISIG Ctrl-C act as read
+// while data waits its turn; the reader's drain moves it, in order, and the
+// queued Ctrl-C never becomes data. Sample under the mgr hold, reset (which
+// clears both flags) before releasing it, then assert (#133).
+void test_cons_rx_side_sak_and_intr_behind_full_ring(void) {
+    static u8 sbuf[1024];
+    cons_test_reset();                           // raw + ISIG, the boot default
+    cons_test_mgr_hold(true);
     while (cons_rx_input((u8)0xAAu, false)) { }
-
-    // A pump against a full ring keeps holding -- not dropped, not delivered.
-    uart_rx_pump();
-    bool still_held = uart_test_rx_held(NULL, NULL);
-    bool paused1    = uart_test_rx_paused();
-
-    // Drain the filler. Observe depth with cons_test_rx_count, NEVER by draining
-    // an empty ring: cons_drain is devcons.read, which PARKS when there is
-    // nothing to read, so a wrong expectation would hang the boot instead of
-    // failing (#133 -- a test's failure must not destroy the run).
-    u32 before = cons_test_rx_count();
-    long drained = (before > 0u) ? cons_drain(hbuf, (long)sizeof(hbuf)) : 0;
-
-    // Pump: the held byte lands, exactly once.
-    uart_rx_pump();
-    bool cleared = !uart_test_rx_held(NULL, NULL);
-    u32  depth   = cons_test_rx_count();
-    long got     = (depth > 0u) ? cons_drain(hbuf, (long)sizeof(hbuf)) : 0;
-    long first   = (got > 0) ? (long)hbuf[0] : -1;
-
-    // A second pump must not resurrect it -- and a pump that SUCCEEDS must leave
-    // RX unpaused, or the console stays deaf with nothing left to wake it (the
-    // #129-audit F1 terminal state, reached here by the ordinary route).
-    uart_rx_pump();
-    u32  again    = cons_test_rx_count();
-    bool resumed  = !uart_test_rx_paused();
-
+    cons_rx_receive((u8)'a', false);
+    cons_rx_receive((u8)'b', false);
+    cons_rx_receive(0x03u, false);
+    bool intr   = cons_test_intr_pending();
+    cons_test_intr_consume();                    // posted, as console_mgr would
+    cons_rx_receive(0x00u, true);
+    bool sak    = cons_test_sak_pending();
+    cons_rx_receive((u8)'c', false);
+    u32  queued = cons_test_side_count();
+    u32  ring0  = cons_test_rx_count();
+    long first  = cons_drain(sbuf, (long)sizeof(sbuf));
+    u32  ring1  = cons_test_rx_count();
+    long second = (ring1 > 0u) ? cons_drain(sbuf, (long)sizeof(sbuf)) : 0;
+    bool abc    = second == 3 && sbuf[0] == (u8)'a' && sbuf[1] == (u8)'b' && sbuf[2] == (u8)'c';
+    u32  left   = cons_test_side_count();
+    bool again  = cons_test_intr_pending();
     cons_test_reset();
-    uart_test_rx_release_hold();     // belt-and-braces; the runner also sweeps
+    cons_test_mgr_hold(false);
 
-    TEST_ASSERT(seeded,  "seeded: a byte is held");
-    TEST_ASSERT(paused0, "seeded: RX is paused (held implies paused)");
-    TEST_ASSERT(still_held, "a REFUSED re-offer KEEPS the byte");
-    TEST_ASSERT(paused1,    "and stays paused");
-    TEST_EXPECT_EQ(drained, 512L, "the filler drained");
-    TEST_ASSERT(cleared, "an ACCEPTED re-offer clears the hold");
-    TEST_EXPECT_EQ((long)depth, 1L, "the held byte reached the ring, exactly ONCE");
-    TEST_EXPECT_EQ(first, (long)'H', "and it is the byte that was held");
-    TEST_EXPECT_EQ((long)again, 0L, "a cleared hold is not re-delivered");
-    TEST_ASSERT(resumed, "a drained pump RESUMES RX -- it does not leave it masked");
+    TEST_ASSERT(intr, "a Ctrl-C behind a full ring signals as read");
+    TEST_ASSERT(!again, "and only then: its move raised no second interrupt");
+    TEST_ASSERT(sak,  "a BREAK behind a full ring is the SAK as read");
+    TEST_EXPECT_EQ((long)queued, 4L, "a, b, the signalled Ctrl-C and c wait; the BREAK does not");
+    TEST_EXPECT_EQ((long)ring0, 512L, "nothing jumped the queue into the ring");
+    TEST_EXPECT_EQ(first, 512L, "the reader drains the filler");
+    TEST_EXPECT_EQ((long)ring1, 3L, "and its drain moved the queue: three data bytes");
+    TEST_ASSERT(abc, "a, b, c in order; the queued Ctrl-C is not data");
+    TEST_EXPECT_EQ((long)left, 0L, "the queue is empty after the move");
+    cons_settle_mgr();
 }
 
-// #136-audit F1: the drain must never fall out of its budget loop with a byte
-// HELD and RX UNPAUSED. ARCH sect 25.4 (the LS-8 #129 addendum) states that
-// state -- `g_rx_held_valid && !g_rx_paused` -- "must stay unreachable", and
-// pre-fix it was reachable: the last budget unit is spent on a refusal whose
-// pause_and_recheck then LIFTS, and the `continue` lands on a failed loop test.
-//
-// The stranded byte is not recovered by anything scheduled: it lives in a
-// software variable, not the FIFO, so it raises neither RXRIS nor the RX
-// timeout (the hardware re-fire that covers the ordinary budget-hit exit), and
-// uart_rx_pump short-circuits on !g_rx_paused. It waits for an unrelated later
-// arrival -- a keystroke that vanishes and reappears when the user types again.
-//
-// Reaching it deterministically needs the PEER-PRODUCER divergence, which is
-// what cons_test_force_full models: cons_ring_room() reports full so the push
-// arms refuse, while cons_rx_can_accept() (which reads the count, not the room)
-// still reports room so the recheck lifts. Every iteration therefore burns one
-// budget unit and lifts, until the loop falls out -- the exact shape.
-//
-// '\n' is the held byte deliberately: with the default CANONICAL termios a
-// plain character is buffered into the line and never consults the room, so it
-// would be ACCEPTED on iteration 1 and never reach the strand. The terminator
-// takes the flush arm (`room < line_len + 1` -> `0 < 1`), which refuses.
-void test_cons_rx_holdback_not_stranded(void) {
+// Vote 73: a Ctrl-C that has to wait signals at once but discards in order. The
+// partial line typed before it goes and the line after it survives, exactly as
+// with room in the ring. Without the in-order marker "xyz" would survive into
+// the next line. A canonical read ends at its line, so the two lines take two reads.
+void test_cons_rx_side_cooked_intr_in_order(void) {
+    static u8 cbuf[1024];
+    cons_test_reset();
+    cons_test_mgr_hold(true);
+    for (u32 i = 0; i < 512u - 3u; i++) cons_rx_input((u8)(0x80u | (i & 0x7fu)), false);
+    cons_test_set_termios(CONS_ICANON | CONS_ISIG);   // cooked, no echo; room 3
+    const char *in = "abc\nxyz";
+    for (int i = 0; in[i]; i++) cons_rx_receive((u8)in[i], false);
+    u32  line   = cons_test_line_len();
+    cons_rx_receive(0x03u, false);
+    bool intr   = cons_test_intr_pending();
+    cons_rx_receive((u8)'q', false);
+    cons_rx_receive((u8)'\n', false);
+    u32  queued = cons_test_side_count();
+    long first  = cons_drain(cbuf, (long)sizeof(cbuf));
+    long second = 0;
+    for (int r = 0; r < 2 && cons_test_rx_count() > 0u; r++)
+        second += cons_drain(cbuf + second, (long)sizeof(cbuf) - second);
+    const char *want = "abc\nq\n";
+    bool exact  = second == 6;
+    for (int i = 0; exact && i < 6; i++) exact = cbuf[i] == (u8)want[i];
+    u32  line1  = cons_test_line_len();
+    cons_test_reset();
+    cons_test_mgr_hold(false);
+
+    TEST_EXPECT_EQ((long)line, 3L, "abc assembles: ordinary cooked bytes need no ring room");
+    TEST_ASSERT(intr, "the waiting Ctrl-C signalled as read");
+    TEST_EXPECT_EQ((long)queued, 7L, "the refused Enter, x y z, the Ctrl-C, q, Enter wait");
+    TEST_EXPECT_EQ(first, 509L, "the reader drains the filler");
+    TEST_ASSERT(exact, "abc NL q NL: the Ctrl-C discarded xyz in its place, nothing else");
+    TEST_EXPECT_EQ((long)line1, 0L, "nothing left assembling");
+    cons_settle_mgr();
+}
+
+// Vote 73, the audit's second half: with more than 255 bytes committed and
+// unread, cooked typing still assembles and nothing waits. The old drain
+// reserved a whole line's room before reading any byte, so RX paused here.
+void test_cons_rx_side_cooked_typing_past_half(void) {
+    cons_test_reset();
+    for (u32 i = 0; i < 300u; i++) cons_rx_input((u8)'A', false);
+    cons_test_set_termios(CONS_ICANON | CONS_ISIG);
+    for (int i = 0; i < 10; i++) cons_rx_receive((u8)'t', false);
+    u32 line   = cons_test_line_len();
+    u32 queued = cons_test_side_count();
+    u32 ring   = cons_test_rx_count();
     cons_test_reset();
 
-    uart_test_rx_force_hold((u8)'\n', false);
-    cons_test_force_full(true);
-    uart_rx_pump();                  // burns the budget lifting + re-refusing
-    cons_test_force_full(false);
+    TEST_EXPECT_EQ((long)line, 10L, "ten typed bytes assemble behind 300 unread");
+    TEST_EXPECT_EQ((long)queued, 0L, "none of them waits");
+    TEST_EXPECT_EQ((long)ring, 300L, "the ring is untouched");
+}
 
-    bool held   = uart_test_rx_held(NULL, NULL);
-    bool paused = uart_test_rx_paused();
-
-    uart_test_rx_release_hold();
+// Vote 73 decides a waiting byte when the drain reads it. A Ctrl-C read with ISIG
+// clear is data, and stays data when ISIG is set before it moves into the ring.
+void test_cons_rx_side_literal_intr_stays_data(void) {
+    static u8 lbuf[1024];
     cons_test_reset();
+    cons_test_mgr_hold(true);
+    cons_test_set_termios(0u);                   // raw, ISIG clear
+    while (cons_rx_input((u8)0xAAu, false)) { }
+    cons_rx_receive(0x03u, false);
+    bool intr0  = cons_test_intr_pending();
+    u32  queued = cons_test_side_count();
+    cons_test_set_termios(CONS_ISIG);
+    long first  = cons_drain(lbuf, (long)sizeof(lbuf));
+    u32  ring1  = cons_test_rx_count();
+    long second = (ring1 > 0u) ? cons_drain(lbuf, (long)sizeof(lbuf)) : 0;
+    bool data   = second == 1 && lbuf[0] == 0x03u;
+    bool intr1  = cons_test_intr_pending();
+    cons_test_reset();
+    cons_test_mgr_hold(false);
 
-    // Sample first, assert after (#133): a TEST_ASSERT is fail-and-return, so
-    // asserting before the release would strand RX masked for the rest of boot.
-    TEST_ASSERT(!(held && !paused),
-                "the drain never exits with a byte HELD and RX UNPAUSED");
+    TEST_ASSERT(!intr0, "a Ctrl-C read with ISIG clear signals nothing");
+    TEST_EXPECT_EQ((long)queued, 1L, "it waits behind the full ring");
+    TEST_EXPECT_EQ(first, 512L, "the reader drains the filler");
+    TEST_ASSERT(data, "the move hands it on as data");
+    TEST_ASSERT(!intr1, "ISIG set meanwhile does not make it an interrupt");
+    cons_settle_mgr();
+}
+
+// Vote 73: past the queue's capacity the newest byte is dropped and counted; a
+// Ctrl-C there takes the newest entry's place (that byte counted), a second
+// adds nothing, and the SAK still acts. What drains is the queue's data in
+// order and nothing else.
+void test_cons_rx_side_full_drops_and_counts(void) {
+    static u8 fbuf[1024];
+    cons_test_reset();
+    cons_test_mgr_hold(true);
+    while (cons_rx_input((u8)0xAAu, false)) { }
+    for (u32 i = 0; i < 4095u; i++) cons_rx_receive((u8)'d', false);
+    cons_rx_receive((u8)'e', false);
+    for (int i = 0; i < 5; i++) cons_rx_receive((u8)'f', false);
+    u32  full    = cons_test_side_count();
+    u32  drops5  = cons_rx_drop_side();
+    cons_rx_receive(0x03u, false);
+    cons_rx_receive(0x03u, false);
+    bool intr    = cons_test_intr_pending();
+    u32  drops6  = cons_rx_drop_side();
+    cons_rx_receive(0x00u, true);
+    bool sak     = cons_test_sak_pending();
+    long filler  = cons_drain(fbuf, (long)sizeof(fbuf));
+    long total   = 0;
+    bool only_d  = true;
+    for (int round = 0; round < 64 && cons_test_rx_count() > 0u; round++) {
+        long n = cons_drain(fbuf, (long)sizeof(fbuf));
+        for (long i = 0; i < n; i++) if (fbuf[i] != (u8)'d') only_d = false;
+        total += n;
+    }
+    u32  left    = cons_test_side_count();
+    cons_test_reset();
+    cons_test_mgr_hold(false);
+
+    TEST_EXPECT_EQ((long)full, 4096L, "the queue holds its capacity");
+    TEST_EXPECT_EQ((long)drops5, 5L, "the five past it are dropped and counted");
+    TEST_ASSERT(intr, "a Ctrl-C at a full queue still signals");
+    TEST_EXPECT_EQ((long)drops6, 6L, "it displaced the newest byte, counted; the second added nothing");
+    TEST_ASSERT(sak, "the SAK acts at a full queue");
+    TEST_EXPECT_EQ(filler, 512L, "the filler drains first");
+    TEST_EXPECT_EQ(total, 4095L, "then the 4095 queued data bytes");
+    TEST_ASSERT(only_d, "all of them d: the displaced e, the dropped f and both Ctrl-Cs are not data");
+    TEST_EXPECT_EQ((long)left, 0L, "the queue empties");
+    cons_settle_mgr();
 }
 
 // #129 defect (1): cons_feed_write -- the graphical console's keyboard -- must
@@ -657,6 +758,47 @@ void test_cons_feed_write_short_on_full(void) {
     TEST_EXPECT_EQ(cons_feed_write(feed, 1L), 0L, "full ring -> 0 accepted, not -1");
     cons_test_reset();
     cons_settle_mgr();
+}
+
+// #129's rule for a lone Ctrl-C holds for one behind a refused terminator in one
+// write: it is not held up, and it takes the line with it. A raw one waits its turn.
+void test_cons_feed_intr_behind_refused_line(void) {
+    static const u8 cooked[] = { 'x', '\n', 'w', 0x03u, 'y' };
+    static const u8 raw[] = { 'q', 0x03u };
+    static const u8 lone[] = { 0x03u };
+    static u8 sink[1024];
+
+    cons_test_reset();
+    cons_test_mgr_hold(true);
+    while (cons_rx_input((u8)0xAAu, false)) { }
+    cons_test_set_termios(CONS_ICANON | CONS_ISIG);
+    long cooked_took = cons_feed_write(cooked, (long)sizeof(cooked));
+    bool cooked_intr = cons_test_intr_pending();
+    cons_test_mgr_hold(false);
+    long full = cons_drain(sink, (long)sizeof(sink));
+    (void)cons_rx_input((u8)'\n', false);
+    long line = (cons_test_rx_count() > 0u) ? cons_drain(sink, (long)sizeof(sink)) : -1;
+    u8 first = sink[0];
+
+    cons_test_reset();
+    cons_test_mgr_hold(true);
+    while (cons_rx_input((u8)0xAAu, false)) { }
+    long raw_took = cons_feed_write(raw, (long)sizeof(raw));
+    bool raw_intr = cons_test_intr_pending();
+    long lone_took = cons_feed_write(lone, (long)sizeof(lone));
+    bool lone_intr = cons_test_intr_pending();
+    cons_test_mgr_hold(false);
+    cons_settle_mgr();
+
+    TEST_EXPECT_EQ(cooked_took, 5L, "the Ctrl-C behind the refused line is not held up");
+    TEST_ASSERT(cooked_intr, "the Ctrl-C behind the refused line raised its note");
+    TEST_EXPECT_EQ(full, 512L, "the committed lines stand");
+    TEST_EXPECT_EQ(line, 2L, "it took the line with it, and what followed it cooks");
+    TEST_EXPECT_EQ((long)first, (long)'y', "what followed it is the line");
+    TEST_EXPECT_EQ(raw_took, 0L, "a raw Ctrl-C waits its turn behind a refused byte");
+    TEST_ASSERT(!raw_intr, "a raw Ctrl-C behind a refused byte raises nothing yet");
+    TEST_EXPECT_EQ(lone_took, 1L, "alone, a raw Ctrl-C goes");
+    TEST_ASSERT(lone_intr, "alone, a raw Ctrl-C raises its note");
 }
 
 // #95/#129: the input counters must actually COUNT, per site.
@@ -1893,6 +2035,7 @@ void test_cons_cook_isig_discards_pending_line(void) {
     cons_rx_input((u8)'\n', false);
     u32  c_cnt = cons_test_rx_count();
     long c_n   = (c_cnt > 0u) ? cons_drain(c_buf, (long)sizeof(c_buf)) : -1;
+    long c2_n  = (cons_test_rx_count() > 0u) ? cons_drain(&c_buf[2], (long)sizeof(c_buf) - 2) : -1;
 
     // ---- TEAR DOWN, then ASSERT. ------------------------------------------
     cons_settle_mgr();
@@ -1914,7 +2057,8 @@ void test_cons_cook_isig_discards_pending_line(void) {
                 "B: ab 03 cd NL in order -- the discard is gated on ISIG-consumption, not on the byte");
 
     TEST_EXPECT_EQ((long)c_cnt, 4L, "C: the committed x+NL and the later y+NL are both in the ring");
-    TEST_EXPECT_EQ(c_n, 4L, "C: drained 4 bytes");
+    TEST_EXPECT_EQ(c_n, 2L, "C: the first read took its line");
+    TEST_EXPECT_EQ(c2_n, 2L, "C: and the second read the next");
     TEST_ASSERT(c_buf[0] == 'x' && c_buf[1] == '\n' && c_buf[2] == 'y' && c_buf[3] == '\n',
                 "C: x NL y NL -- the ^C discarded only the pending ab, never the ring");
 }
@@ -3237,6 +3381,32 @@ void test_cons_episode_discards_pending_input(void) {
     TEST_ASSERT(err == NULL, err ? err : "discards pending input");
 }
 
+// Vote 73: serial bytes the ring had no room for before the SAK wait in the
+// side queue; BEGIN discards them with the ring, so the trusted reader's first
+// byte is still a post-SAK byte.
+void test_cons_rx_side_discarded_at_begin(void) {
+    struct ep_fixture f;
+    TEST_ASSERT(ep_setup(&f, false, true), "fixture (armed)");
+    cons_test_set_termios(CONS_ISIG);          // raw: a full ring refuses the next byte
+    while (cons_rx_input((u8)0xAAu, false)) { }
+    cons_rx_receive((u8)'k', false);
+    const char *err = NULL;
+    if (cons_test_side_count() != 1u)          err = "a pre-SAK byte waits in the side queue";
+    if (!err) {
+        cons_test_sak_dispatch();
+        if (!cons_episode_active())            err = "episode open";
+        else if (cons_test_side_count() != 0u) err = "BEGIN discarded the side queue";
+        else if (cons_test_rx_count() != 0u)   err = "BEGIN discarded the ring";
+    }
+    if (!err) {
+        cons_rx_receive((u8)'z', false);
+        if (cons_test_rx_count() != 1u)        err = "a post-BEGIN byte goes straight to the ring";
+        else if (cons_test_side_count() != 0u) err = "...not to the queue";
+    }
+    ep_teardown(&f);
+    TEST_ASSERT(err == NULL, err ? err : "the side queue is pre-SAK input");
+}
+
 // The reader FREEZE, end to end on a real parked reader. A non-attached
 // kthread parks on data holding the slot; BEGIN makes it VACATE (slot free,
 // parked on the episode list); a key byte lands and it does NOT take it; the
@@ -4250,6 +4420,78 @@ cleanup:
     ep_teardown(&f);
     if (service) { service->state = PROC_STATE_ZOMBIE; proc_free(service); }
     TEST_ASSERT(err == NULL, err ? err : "graphical seat deadline and death");
+#undef SEAT_CHECK
+}
+
+// A takeover behind a GPU backlog: the service renews the quiesce deadline while
+// its engine still retires work. Only the service, only its own generation, only
+// while QUIESCING, never past the chord's limit, and never an expired quiesce.
+void test_cons_graphical_seat_renew(void) {
+    struct ep_fixture f;
+    struct Proc *service = NULL;
+    const char *err = NULL;
+    struct seat_message m;
+    u64 generation = 0, limit = 0, d0 = 0, d1 = 0, near = 0, after = 0;
+    proc_test_seat_reset();
+    bool setup = ep_setup(&f, true, true);
+    service = proc_alloc();
+#define SEAT_CHECK(test, why) do { if (!(test)) { err = why; goto cleanup; } } while (0)
+    SEAT_CHECK(setup && service, "seat fixture");
+    SEAT_CHECK(proc_set_seat_service(service) == 0, "service");
+    SEAT_CHECK(seat_test_chord(service, &generation), "chord");
+    d0 = proc_test_seat_deadline(&limit);
+    SEAT_CHECK(d0 != 0 && limit > d0 && limit - d0 == SEAT_QUIESCE_LIMIT_NS - SEAT_QUIESCE_NS,
+               "the chord sets the deadline and the limit");
+
+    seat_zero(&m, sizeof(m));
+    m.generation = generation;
+    SEAT_CHECK(proc_seat_op(service, SEAT_RENEW, &m) == 0 && m.phase == SEAT_QUIESCING, "the service renews");
+    after = timer_now_ns();
+    d1 = proc_test_seat_deadline(NULL);
+    SEAT_CHECK(d1 >= d0 && d1 <= after + SEAT_QUIESCE_NS && d1 < limit,
+               "a renewal moves the deadline on by one window, short of the limit");
+
+    seat_zero(&m, sizeof(m));
+    m.generation = generation;
+    SEAT_CHECK(proc_seat_op(f.trusted, SEAT_RENEW, &m) == -1, "Corvus cannot renew");
+    seat_zero(&m, sizeof(m));
+    m.generation = generation + 1;
+    SEAT_CHECK(proc_seat_op(service, SEAT_RENEW, &m) == -1, "another generation cannot be renewed");
+    SEAT_CHECK(proc_test_seat_deadline(NULL) == d1, "refused renewals leave the deadline");
+
+    // Capped: a limit one second out takes the deadline no further than it.
+    near = timer_now_ns() + 1000000000ull;
+    proc_test_seat_limit(near);
+    seat_zero(&m, sizeof(m));
+    m.generation = generation;
+    SEAT_CHECK(proc_seat_op(service, SEAT_RENEW, &m) == 0 && proc_test_seat_deadline(NULL) == near,
+               "a renewal stops at the limit");
+    // Spent: a limit in the past refuses, and the deadline stays.
+    proc_test_seat_limit(1);
+    seat_zero(&m, sizeof(m));
+    m.generation = generation;
+    SEAT_CHECK(proc_seat_op(service, SEAT_RENEW, &m) == -1 && proc_test_seat_deadline(NULL) == near,
+               "a spent limit refuses the renewal");
+    // Expired: the op fails the seat first, so a renewal cannot revive it.
+    proc_test_seat_limit(timer_now_ns() + SEAT_QUIESCE_LIMIT_NS);
+    proc_test_seat_expire();
+    seat_zero(&m, sizeof(m));
+    m.generation = generation;
+    SEAT_CHECK(proc_seat_op(service, SEAT_RENEW, &m) == -1, "an expired quiesce is not renewed");
+    SEAT_CHECK(proc_seat_op(service, SEAT_STATUS, &m) == 0 && m.phase == SEAT_FAILED,
+               "the expiry failed the seat");
+    SEAT_CHECK(seat_test_recover(service, generation), "recovered");
+
+    // Not QUIESCING: an open episode is not a takeover.
+    SEAT_CHECK(seat_test_open(service, f.trusted, &generation) && cons_episode_active(), "episode opens");
+    seat_zero(&m, sizeof(m));
+    m.generation = generation;
+    SEAT_CHECK(proc_seat_op(service, SEAT_RENEW, &m) == -1, "an exclusive seat is not renewed");
+cleanup:
+    proc_test_seat_reset();
+    ep_teardown(&f);
+    if (service) { service->state = PROC_STATE_ZOMBIE; proc_free(service); }
+    TEST_ASSERT(err == NULL, err ? err : "graphical seat renew");
 #undef SEAT_CHECK
 }
 

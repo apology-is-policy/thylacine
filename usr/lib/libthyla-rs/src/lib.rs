@@ -612,10 +612,13 @@ pub const T_SPAWN_EXT_THREADS: u32 = 1 << 1;
 // NUL-terminated "NAME=VALUE" records (ARCH 9.7), after the cwd and thread tails
 // whose bits are set.
 pub const T_SPAWN_EXT_ENV: u32 = 1 << 2;
+// T_SPAWN_EXT_ACCOUNT: a TSpawnExtAccount names the memory account the child is born
+// under, by a control handle of the spawner's, after every lower tail whose bit is set.
+pub const T_SPAWN_EXT_ACCOUNT: u32 = 1 << 3;
 // Every bit the kernel knows (mirror SPAWN_EXT_FLAGS_ALL); a bit outside it is
 // refused with -1. tools/check-spawn-args-mirrors.py holds the members and this
 // mask to the kernel's.
-pub const T_SPAWN_EXT_FLAGS_ALL: u32 = T_SPAWN_EXT_CWD | T_SPAWN_EXT_THREADS | T_SPAWN_EXT_ENV;
+pub const T_SPAWN_EXT_FLAGS_ALL: u32 = T_SPAWN_EXT_CWD | T_SPAWN_EXT_THREADS | T_SPAWN_EXT_ENV | T_SPAWN_EXT_ACCOUNT;
 
 /// The T_SPAWN_EXT_CWD tail, directly after the record (mirror
 /// `struct sys_spawn_ext_cwd`; tools/check-spawn-args-mirrors.py compares them).
@@ -650,6 +653,18 @@ pub struct TSpawnExtEnv {
 const _: () = assert!(core::mem::size_of::<TSpawnExtEnv>() == 16);
 const _: () = assert!(core::mem::offset_of!(TSpawnExtEnv, env_len) == 8);
 const _: () = assert!(core::mem::offset_of!(TSpawnExtEnv, env_flags) == 12);
+
+/// The T_SPAWN_EXT_ACCOUNT tail (mirror `struct sys_spawn_ext_account`;
+/// tools/check-spawn-args-mirrors.py compares them).
+#[repr(C)]
+pub struct TSpawnExtAccount {
+    pub account_h:     u32, // 0 — the spawner's control handle
+    pub account_flags: u32, // 4 — must be 0
+    pub incarnation:   u64, // 8 — the account's
+}
+const _: () = assert!(core::mem::size_of::<TSpawnExtAccount>() == 16);
+const _: () = assert!(core::mem::offset_of!(TSpawnExtAccount, account_flags) == 4);
+const _: () = assert!(core::mem::offset_of!(TSpawnExtAccount, incarnation) == 8);
 
 // VIVARIUM V-1b: pheno_flags bits (mirror SPAWN_PHENO_* in the kernel header).
 pub const T_SPAWN_PHENO_LINUX: u32 = 1 << 0;
@@ -2481,22 +2496,57 @@ pub unsafe fn t_account(handle: i64, op: u64, rec: *mut u8, rec_size: u64) -> i6
     x0
 }
 
-/// Reads the caller's own account into `q`. Returns 0 or a negated errno.
-pub fn t_account_query(q: &mut account::AccountQuery) -> i64 {
+/// Reads the account `handle` names into `q`, with `expected` its incarnation, or the
+/// caller's own with `ACCOUNT_SELF` and 0. Returns 0 or a negated errno.
+pub fn t_account_query_of(handle: i32, expected: u64, q: &mut account::AccountQuery) -> i64 {
     let size = core::mem::size_of::<account::AccountQuery>();
     *q = account::AccountQuery::default();
     q.h.version = account::ACCOUNT_VERSION;
     q.h.size = size as u32;
+    q.h.incarnation = expected;
     let rec = q as *mut account::AccountQuery as *mut u8;
     // SAFETY: rec is the whole of an exclusively borrowed record of that size.
-    unsafe {
-        t_account(
-            account::ACCOUNT_SELF as i64,
-            account::ACCOUNT_QUERY as u64,
-            rec,
-            size as u64,
-        )
+    unsafe { t_account(handle as i64, account::ACCOUNT_QUERY as u64, rec, size as u64) }
+}
+
+/// Reads the caller's own account into `q`. Returns 0 or a negated errno.
+pub fn t_account_query(q: &mut account::AccountQuery) -> i64 {
+    t_account_query_of(account::ACCOUNT_SELF, 0, q)
+}
+
+/// Makes a child of the account `parent` names, with `expected` its incarnation, or of the
+/// caller's own with `ACCOUNT_SELF` and 0. Returns the child's control handle or a negated
+/// errno, and writes its incarnation to `created`.
+pub fn t_account_child(parent: i32, expected: u64, created: &mut u64) -> i64 {
+    let size = core::mem::size_of::<account::AccountChildRec>();
+    let mut r = account::AccountChildRec::default();
+    r.h.version = account::ACCOUNT_VERSION;
+    r.h.size = size as u32;
+    r.h.incarnation = expected;
+    let rec = &mut r as *mut account::AccountChildRec as *mut u8;
+    // SAFETY: rec is the whole of a local record of that size.
+    let h = unsafe { t_account(parent as i64, account::ACCOUNT_CHILD as u64, rec, size as u64) };
+    if h >= 0 {
+        *created = r.created;
     }
+    h
+}
+
+/// Replaces the limit vector of the account a control handle names, whose incarnation is
+/// `expected`. Returns 0 or a negated errno.
+pub fn t_account_set_limits(
+    handle: i32,
+    expected: u64,
+    limit: &[u64; account::ACCOUNT_CLASSES],
+) -> i64 {
+    let size = core::mem::size_of::<account::AccountLimitsRec>();
+    let mut r = account::AccountLimitsRec { limit: *limit, ..Default::default() };
+    r.h.version = account::ACCOUNT_VERSION;
+    r.h.size = size as u32;
+    r.h.incarnation = expected;
+    let rec = &mut r as *mut account::AccountLimitsRec as *mut u8;
+    // SAFETY: rec is the whole of a local record of that size.
+    unsafe { t_account(handle as i64, account::ACCOUNT_SET_LIMITS as u64, rec, size as u64) }
 }
 
 // =============================================================================

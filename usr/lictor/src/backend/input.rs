@@ -6,14 +6,12 @@
 // so the RESIDENT input claim rides its own PCI function; the MMIO keyboard
 // stays wired for the one-shot P4-K kernel-test probe (the gpu0/gpu-mmio0
 // split, applied to kbd). The transport machinery mirrors gpu.rs (netdev
-// VirtioNetPci lineage); the eventq layout + drain + recycle discipline are
-// the audited P4-K-events probe's, verbatim.
+// VirtioNetPci lineage); the eventq's drain + recycle discipline is the audited
+// P4-K-events probe's, verbatim.
 //
-// POLL-MODE, deliberately IRQ-free: tapestryd's single-threaded serve loop
-// blocks in t_poll on its 9P conns (the netd shape) and cannot also block in
-// SYS_IRQ_WAIT; instead the eventq is drained on every loop tick (<= the
-// FRAME period, so worst-case input latency is one frame -- fine for stage
-// 0). The avail ring carries VIRTQ_AVAIL_F_NO_INTERRUPT so the device
+// POLL-MODE, deliberately IRQ-free: Lictor's input thread (intake.rs) drains
+// the eventq every few milliseconds, whatever the serve loop is waiting on.
+// The avail ring carries VIRTQ_AVAIL_F_NO_INTERRUPT so the device
 // suppresses eventq interrupts entirely; no IRQ is claimed for the function.
 // (A stray assertion would also be harmless: nothing waits on the line, and
 // the GPU's own INTx is a different function/pin.)
@@ -28,6 +26,7 @@ use libthyla_rs::virtio_rmb;
 use libthyla_rs::{T_PROT_READ, T_PROT_WRITE};
 
 use super::gpu::{dsb_sy, prewarm, PAGE_SIZE};
+use crate::eventq::{self, DEPTH_MAX};
 
 /// The VirtIO device id for an input device (VIRTIO 1.2 section 5.8).
 pub const VIRTIO_DEVICE_ID_INPUT: u32 = 18;
@@ -93,23 +92,24 @@ const INPUT_CFG_SUBSEL_OFF: u64 = 1;
 const INPUT_CFG_SIZE_OFF: u64 = 2;
 const INPUT_CFG_PAYLOAD_OFF: u64 = 8;
 
-// Eventq DMA layout (single page; the P4-K probe layout, verbatim).
-const QUEUE_SIZE: u16 = 16;
+// Eventq DMA layout: one page, sized for the deepest ring.
 pub const INPUT_DMA_SIZE: usize = PAGE_SIZE as usize;
 
 const DESC_OFF: u64 = 0x000;
-const AVAIL_OFF: u64 = 0x100;
-const USED_OFF: u64 = 0x200;
-const EVENT_POOL_OFF: u64 = 0x300;
+const AVAIL_OFF: u64 = 0x400;
+const USED_OFF: u64 = 0x500;
+const EVENT_POOL_OFF: u64 = 0x800;
 
 const VIRTQ_DESC_F_WRITE: u16 = 2;
 const VIRTQ_AVAIL_F_NO_INTERRUPT: u16 = 1;
 
 const _: () = {
-    assert!(
-        EVENT_POOL_OFF + (QUEUE_SIZE as u64) * (VIRTIO_INPUT_EVENT_LEN as u64)
-            <= INPUT_DMA_SIZE as u64
-    );
+    let depth = DEPTH_MAX as u64;
+    assert!(DESC_OFF + depth * 16 <= AVAIL_OFF);
+    assert!(AVAIL_OFF + 6 + depth * 2 <= USED_OFF);
+    assert!(USED_OFF & 3 == 0);
+    assert!(USED_OFF + 6 + depth * 8 <= EVENT_POOL_OFF);
+    assert!(EVENT_POOL_OFF + depth * (VIRTIO_INPUT_EVENT_LEN as u64) <= INPUT_DMA_SIZE as u64);
 };
 
 /// A raw virtio_input_event record.
@@ -118,6 +118,17 @@ pub struct RawInputEvent {
     pub etype: u16,
     pub code: u16,
     pub value: u32,
+}
+
+/// What one drain pass found, in ring order. The ring's own notes travel with the events
+/// because the thread that drains it must never print: a console write parks during a
+/// trusted episode, and that thread must not.
+#[derive(Clone, Copy)]
+pub enum Report {
+    Event(RawInputEvent),
+    /// Test-mode only: the device had at most three descriptors left at this pass.
+    Low { free: u16, depth: u16, avail: u16, used: u16 },
+    Malformed { id: u32, len: u32 },
 }
 
 #[inline(always)]
@@ -149,15 +160,15 @@ unsafe fn w8(addr: u64, v: u8) {
     mmio_write8(addr, v)
 }
 
-fn populate_eventq(dma_va: u64, dma_pa: u64) {
+fn populate_eventq(dma_va: u64, dma_pa: u64, depth: u16) {
     let avail_va = dma_va + AVAIL_OFF;
     let event_pool_pa = dma_pa + EVENT_POOL_OFF;
 
-    for i in 0..(QUEUE_SIZE as u64) * (VIRTIO_INPUT_EVENT_LEN as u64) {
+    for i in 0..(depth as u64) * (VIRTIO_INPUT_EVENT_LEN as u64) {
         unsafe { w8(dma_va + EVENT_POOL_OFF + i, 0) };
     }
 
-    for k in 0..QUEUE_SIZE {
+    for k in 0..depth {
         let d_off = DESC_OFF + (k as u64) * 16;
         let buf_pa = event_pool_pa + (k as u64) * (VIRTIO_INPUT_EVENT_LEN as u64);
         unsafe {
@@ -173,7 +184,7 @@ fn populate_eventq(dma_va: u64, dma_pa: u64) {
     // 2.7.7.1); the serve loop drains on its own cadence.
     unsafe { w16(avail_va + 0, VIRTQ_AVAIL_F_NO_INTERRUPT) };
     dsb_sy();
-    unsafe { w16(avail_va + 2, QUEUE_SIZE) };
+    unsafe { w16(avail_va + 2, depth) };
     dsb_sy();
 }
 
@@ -184,6 +195,7 @@ fn populate_eventq(dma_va: u64, dma_pa: u64) {
 /// the EV_BITS config probe, never assumed from ordering.
 pub struct InputDev {
     dma_va: u64,
+    depth: u16,
     last_used_idx: u16,
     avail_idx: u16,
     pci: PciDev,
@@ -221,6 +233,7 @@ impl InputDev {
         })?;
         prewarm(dma.base_va() as u64, INPUT_DMA_SIZE);
         let dma_pa = dma.paddr();
+        let depth;
 
         unsafe {
             w8(common + CCFG_DEVICE_STATUS, 0);
@@ -258,12 +271,16 @@ impl InputDev {
 
             // eventq (queue 0) only.
             w16(common + CCFG_QUEUE_SELECT, INPUT_QUEUE_EVENT);
-            if r16(common + CCFG_QUEUE_SIZE) < QUEUE_SIZE {
-                say!("tapestryd: input eventq size below QUEUE_SIZE");
-                w8(common + CCFG_DEVICE_STATUS, STATUS_FAILED);
-                return Err(Error::Hardware);
-            }
-            w16(common + CCFG_QUEUE_SIZE, QUEUE_SIZE);
+            let offered = r16(common + CCFG_QUEUE_SIZE);
+            depth = match eventq::depth(offered) {
+                Some(depth) => depth,
+                None => {
+                    say!("tapestryd: input eventq offers {}, no usable ring", offered);
+                    w8(common + CCFG_DEVICE_STATUS, STATUS_FAILED);
+                    return Err(Error::Hardware);
+                }
+            };
+            w16(common + CCFG_QUEUE_SIZE, depth);
             w64(common + CCFG_QUEUE_DESC, dma_pa + DESC_OFF);
             w64(common + CCFG_QUEUE_DRIVER, dma_pa + AVAIL_OFF);
             w64(common + CCFG_QUEUE_DEVICE, dma_pa + USED_OFF);
@@ -271,7 +288,7 @@ impl InputDev {
             // No notify doorbell: the eventq is device-filled (RX-only) and
             // virtio-input has no notify-on-RX semantic; poll-mode skips it.
 
-            populate_eventq(dma_va, dma_pa);
+            populate_eventq(dma_va, dma_pa, depth);
             w16(common + CCFG_QUEUE_ENABLE, 1);
 
             w8(
@@ -280,11 +297,12 @@ impl InputDev {
             );
         }
 
-        say!("tapestryd: input[{}] up (poll-mode eventq)", nth);
+        say!("tapestryd: input[{}] up (poll-mode eventq, depth {})", nth, depth);
         Ok(InputDev {
             dma_va,
+            depth,
             last_used_idx: 0,
-            avail_idx: QUEUE_SIZE,
+            avail_idx: depth,
             pci,
             _dma: dma,
         })
@@ -350,9 +368,9 @@ impl InputDev {
     }
 
     /// Drain every pending eventq record, invoking `f` per record; recycle
-    /// each descriptor back to the device. Bounded by the ring size per call
-    /// (a device cannot outrun the recycle within one drain pass).
-    pub fn drain(&mut self, mut f: impl FnMut(RawInputEvent)) {
+    /// each descriptor back to the device. Bounded by the ring size per call.
+    /// Answers whether the device may have dropped a report since the last drain.
+    pub fn drain(&mut self, mut f: impl FnMut(Report)) -> bool {
         let used_va = self.dma_va + USED_OFF;
         let avail_va = self.dma_va + AVAIL_OFF;
         let pool_va = self.dma_va + EVENT_POOL_OFF;
@@ -368,17 +386,11 @@ impl InputDev {
         {
             let free = self.avail_idx.wrapping_sub(cur_used);
             if free <= 3 {
-                say!(
-                    "tapestryd: input eventq LOW: {} free of {} (avail {} used {})",
-                    free,
-                    QUEUE_SIZE,
-                    self.avail_idx,
-                    cur_used
-                );
+                f(Report::Low { free, depth: self.depth, avail: self.avail_idx, used: cur_used });
             }
         }
         if cur_used == self.last_used_idx {
-            return;
+            return eventq::may_have_dropped(self.avail_idx, cur_used);
         }
         // VIRTIO 1.2 2.7.13.2: order the used.idx observation before the
         // used.ring / event-pool reads (the P4-K phantom-EV_SYN lesson).
@@ -387,31 +399,27 @@ impl InputDev {
         let mut idx = self.last_used_idx;
         let entry_avail = self.avail_idx;
         let mut consumed = 0u16;
-        while idx != cur_used && consumed < QUEUE_SIZE {
-            let slot = (idx % QUEUE_SIZE) as u64;
+        while idx != cur_used && consumed < self.depth {
+            let slot = (idx % self.depth) as u64;
             let elem_va = used_va + 4 + slot * 8;
             let desc_id = unsafe { r32(elem_va + 0) };
             let used_len = unsafe { r32(elem_va + 4) };
 
-            if desc_id < QUEUE_SIZE as u32 && used_len == VIRTIO_INPUT_EVENT_LEN {
+            if desc_id < self.depth as u32 && used_len == VIRTIO_INPUT_EVENT_LEN {
                 let evt_va = pool_va + (desc_id as u64) * (VIRTIO_INPUT_EVENT_LEN as u64);
                 let ev = RawInputEvent {
                     etype: unsafe { r16(evt_va + 0) },
                     code: unsafe { r16(evt_va + 2) },
                     value: unsafe { r32(evt_va + 4) },
                 };
-                f(ev);
+                f(Report::Event(ev));
 
                 // Recycle: re-publish this descriptor to the avail ring.
-                let avail_slot = (self.avail_idx % QUEUE_SIZE) as u64;
+                let avail_slot = (self.avail_idx % self.depth) as u64;
                 unsafe { w16(avail_va + 4 + avail_slot * 2, desc_id as u16) };
                 self.avail_idx = self.avail_idx.wrapping_add(1);
             } else {
-                say!(
-                    "tapestryd: input malformed used elem id={} len={}",
-                    desc_id,
-                    used_len
-                );
+                f(Report::Malformed { id: desc_id, len: used_len });
             }
             idx = idx.wrapping_add(1);
             consumed += 1;
@@ -425,5 +433,8 @@ impl InputDev {
             dsb_sy();
             // No notify: virtio-input's eventq has no notify-on-RX semantic.
         }
+        // The device kept consuming through this whole pass on what it had at entry, so
+        // what that left it is known only now.
+        eventq::may_have_dropped(entry_avail, unsafe { r16(used_va + 2) })
     }
 }

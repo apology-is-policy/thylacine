@@ -650,8 +650,8 @@ u64 srvconn_total_freed(void);
 // the reply-undrained arm of the loss discriminator.
 struct srvconn_ctl_row {
     bool session_domain;
-    u32 domain_used, sessions_used, global_used, domains_retained;
-    u32 domain_credits, session_credits, global_credits;
+    u32 domain_used;       // the conn's own domain (or the boot class): count, credits
+    u32 domain_credits;
     int  peer_pid;
     u32  peer_principal;   // the conn's two ends: who may read its counters
     u32  server_principal;

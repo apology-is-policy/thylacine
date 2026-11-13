@@ -214,7 +214,7 @@ pub fn compose_key_prompt(out: &mut Vec<u8>) {
 pub fn compose_nothing_pending(out: &mut Vec<u8>) {
     let mut g = Grid::new(PROVINCIA_COLS, 5);
     g.frame(b"TRUSTED PATH");
-    g.put(3, 2, b"nothing pending -- press any key", ATTR_BOLD);
+    g.put(3, 2, b"nothing pending -- press Enter", ATTR_BOLD);
     out.extend_from_slice(b"\r\n");
     g.rasterize(out);
 }
@@ -229,9 +229,20 @@ pub fn compose_locked(user: &[u8], level: &[u8], out: &mut Vec<u8>) {
     x += user.len();
     g.put(x, 2, b" / ", ATTR_NONE);
     g.put(x + 3, 2, level, ATTR_BOLD);
-    g.put(3, 3, b"locked until corvus restarts -- press any key", ATTR_NONE);
+    g.put(3, 3, b"locked until corvus restarts -- press Enter", ATTR_NONE);
     out.extend_from_slice(b"\r\n");
     g.rasterize(out);
+}
+
+// A verdict panel on the serial console: the outcome, then how to leave it. Enter
+// or Esc closes it (vote 70); the graphical panel draws the model's notice.
+pub fn compose_verdict_panel(line: &[u8], out: &mut Vec<u8>) {
+    out.extend_from_slice(b"\r\n");
+    let mut g = Grid::new(PROVINCIA_COLS, 2);
+    g.put(0, 0, line, ATTR_BOLD);
+    g.put(0, 1, b"press Enter", ATTR_NONE);
+    g.rasterize(out);
+    out.extend_from_slice(b"\r\n");
 }
 
 // The one-line verdict after the prompt, then a blank line so the shell's

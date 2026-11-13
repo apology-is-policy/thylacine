@@ -3,7 +3,7 @@ id: sub-tapestryd
 type: sub
 title: "tapestryd — the compositor: the weave lifecycle, the present engine, and the retire ordering"
 parent: moc-userspace
-code: [usr/tapestryd/src/epoch.rs, tools/interactive/ls-halcyon-scale-fitted.exp, tools/interactive/ls-display-follow-declared.exp, tools/interactive/ls-display-follow.exp, tools/interactive/rfb_resize.py, usr/tapestryd/src/storage.rs, usr/kaua-term-probe/src/storage.rs, tools/interactive/tapestry-storage.exp, usr/kaua-term-probe/src/seat_control.rs, usr/kaua-term-probe/src/admission.rs, tools/interactive/interaction-seat.exp, usr/tapestryd/src/seat_coordinator.rs, usr/tapestryd/src/interaction.rs, usr/tapestryd/src/server.rs, usr/tapestryd/src/gpu.rs, usr/tapestryd/src/pane.rs, usr/tapestryd/src/va.rs, usr/tapestryd/src/input.rs, usr/tapestryd/src/main.rs, usr/tapestryd/src/chords.rs, usr/tapestryd/src/keymap.rs, usr/tapestryd/Cargo.toml, usr/tapestryd/src/motion.rs, usr/tapestryd/src/lib.rs]
+code: [usr/tapestryd/src/epoch.rs, tools/interactive/ls-halcyon-scale-fitted.exp, tools/interactive/ls-display-follow-declared.exp, tools/interactive/ls-display-follow.exp, tools/interactive/rfb_resize.py, usr/tapestryd/src/storage.rs, usr/kaua-term-probe/src/storage.rs, tools/interactive/tapestry-storage.exp, usr/kaua-term-probe/src/seat_control.rs, usr/kaua-term-probe/src/admission.rs, tools/interactive/interaction-seat.exp, usr/tapestryd/src/seat_coordinator.rs, usr/tapestryd/src/interaction.rs, usr/tapestryd/src/server.rs, usr/tapestryd/src/gpu.rs, usr/tapestryd/src/pane.rs, usr/tapestryd/src/va.rs, usr/tapestryd/src/input.rs, usr/tapestryd/src/main.rs, usr/tapestryd/src/chords.rs, usr/tapestryd/src/keymap.rs, usr/tapestryd/Cargo.toml, usr/tapestryd/src/motion.rs, usr/tapestryd/src/lib.rs, usr/tapestryd/src/warp_ids.rs]
 audit: hard
 guarded-by: [inv-i40, inv-i5, inv-i34, inv-i1, inv-i45, inv-i9]
 validated-by: [spec-tapestry-storage, spec-tapestry-present, prose, gate-smp]
@@ -834,6 +834,40 @@ context does not free its slot either, because `dev_ctx = slot + 1`:
 handing the slot on would hand a live device context id to the next
 client, and a stale stream would execute against a stranger's context.
 
+**Readbacks park in the broker (operator vote 81, GPU-DESIGN 4.5.13).**
+QEMU decodes a `TRANSFER_FROM_HOST_3D` synchronously under its big lock, and on
+V3D a readback of a busy BO held that lock for the BO's whole queue, freezing
+every vCPU that touched emulated hardware. Lictor now holds a readback, the
+client's or the compositor's, until its context's earlier chains retire, and
+holds that context's later chains behind it. The seam sees no change in its
+counts: a parked chain has its fence id and its slot, and it counts in
+`fences_in_flight`, `ctx_fences_in_flight` and the outstanding count that
+`warp_fences_pending` reads. Each tag carries how long the chain was parked and
+how long it took from publication to retirement. The ctx ctl reports both for
+the context's last readback (`readback-parked-ms`, `readback-exec-ms`), and the
+warp ctl reports both for the last landed compositor readback
+(`rb-last-parked-ms`, `rb-last-exec-ms`); a refused readback reports neither,
+since it ran for no time. Any chain parked behind an abandoned chain of its
+context, and every parked chain on a dead engine, is released (`released` on
+its tag). A released chain is not a completion and is never counted: counted,
+the dense `fence_signaled` would pass the abandoned fence ahead of it, and paid
+at a later vindication it would resume a stream that lacks the released draws.
+A released client chain instead raises `WarpCtx::released`, which ends the
+context's fence stream for good: both fence-file readers answer EOF,
+`warp_fenced_admit` and `verify` refuse with E_IO, and the compose path treats
+the context as poisoned. The ctx ctl reports `released N`, after the prefix a
+client parses (a client learns of it from the EOF). Device liveness
+stays `fence_poisoned`'s, so the vindication still un-poisons and reclaims, and
+destroy takes the ordinary path. The latch takes effect only at the next
+pump, so a chain admitted in between from the older view reaches Lictor, which
+keeps the same latch at the release and releases that chain too (sub-lictor). A
+compositor readback is counted `rb_dropped` by `comp_readback_retired`, before
+`cost readback-wait` (a completed readback's sample), and `gl_adoption` already
+refuses the poisoned context, so the reserved slot is not held for every other
+surface. The test build's warp ctl census prints a `fenced-parked` row per
+parked chain (slot, fence, ctx, ring, rb, comp, parked_ms) after the
+`fenced-held` rows (Lictor's `fenced_held` returns both, as `gpu_api::HeldRow`).
+
 ### The coherent ring lane
 
 Warp-6 V-3a adds a third client transport beside the synchronous ring and
@@ -1067,11 +1101,55 @@ CLAIM + the `warp-prove` cross-Proc leg are 1c-2b). Four pieces, all in
 **lazily** created on the first host3d ring mint (`wctx_venus_ensure` →
 `gpu.ctx_create_venus`, capset-4) and destroyed with the warp ctx in
 `wctx_finish` (condemn-slot-on-refuse, before the `dev_ctx` destroy — else a
-reused slot could re-mint the venus id into a live host ctx). A client that mints
+reused slot could re-mint the venus id into a live host ctx). Both destroys go
+through `warp_ctx_destroy_id`: one a stall refused before staging or met
+(`failure_cause` says `Stall`) is owed (`warp_ctx_destroy_owed`,
+`warp_ctx_venus_destroy_owed`), not final, since Lictor leaves the id
+destroyable; only an answered refusal or a dead engine is final, and an
+answered refusal condemns the slot for good, an owed venus one included. A
+create a stall met (`wctx_mint`, `wctx_venus_ensure`) owes its id a destroy
+too, its dev slot condemned meanwhile, and so do the vindication's destroys,
+since no later vindication of that ctx comes. A create's or a destroy's
+failure is read on that reply's own span (`Gpu::stalls_begun`, the count as
+the broker began the request), as Lictor reads it, so a stall the broker met
+between two requests never has the seam owe a destroy for an id Lictor
+released. `warp_destroy_owed` runs them from
+`warp_service_fences` once the engine is live, and a completed dev destroy frees
+the slot (and a vindicated slot's parked backings). A slot is minted again only
+once no destroy of it is owed, the venus one included, and `wctx_mint` never
+reissues a pub a slot still carries (live, condemned or owing a destroy;
+`warp_ctx_slot_pub`, `warp_ids::next_ctx_pub`), because Lictor's
+released-stream record names the pub. The warp ctl reports the gauges
+`ctx-owed`, `venus-owed` and `slots-condemned`, and the monotone `gpu-stalls`,
+`owed-incurred` (each debt once), `owed-ran` and `destroy-failed`, which a
+recovery inside one serve pass cannot hide, and Lictor's owed frees as
+`frees-owed`, then monotone `frees-incurred`, `frees-paid` and `frees-leaked`,
+then `frees-retiring`, then monotone `frees-stood-down` and `frees-parked-first` ([[sub-lictor]]). A BO destroyed on a poisoned ctx still
+sends its device frees: the broker takes the unref as a debt and pays it once
+the chain retires, the same proof the vindication frees the parked backing's
+guest half on, and once the chains already on the device that can reach the BO
+retire and the device answers a repeat in time (a later chain that could reach
+it parks until the free is paid, except for one window after the device was too
+slow to answer the repeat of a free that ctx holds), so the uncharge there is
+honest within that delay, however busy the ctx is kept; the readback leg's
+TAKEN, BUSY, APART and LIFT arms witness it. The test-mode
+`warp-defer-frees on|off` has the broker pass over the owed frees the caller's
+own GL device ctx can reach (the broker bounds the arms), which the BUSY, APART
+and LIFT arms use. The test-mode bo ctl verb `stall-repay` aims one stall shot at
+the broker's next repeat of that BO's free, should it be owed (the broker bounds
+the shots, twelve a boot, each gone in two seconds), which the YIELD, APART and
+LIFT arms use. The test-mode `warp-stall-create`, `warp-stall-destroy` and
+`warp-stall-free` verbs arm one stall shot at the caller's own next create
+(of its GL ctx; the venus create is not aimed), its own ctx's destroy, or the
+free of the next BO it destroys (`TEST_STALL_SHOTS` per boot, one connection
+at a time), which the readback leg's CREATE, DESTROY, FREE, YIELD and APART arms use. The
+free is the last command a BO's retire sends, so the proxy sends the shot
+just before it (`Gpu::test_stall_at_next_unref`). A client that mints
 only V-3a guest-blob rings pays no venus ctx. Section 0.6 ratifies one venus ctx
 per client (V-3b-2's forward reuses it, no rework). The id is a **dedicated band**
 `WARP_VENUS_CTX_BASE (0x200) + slot`, pinned disjoint by a `const _` gap assert +
-a `conv_attempt` `debug_assert`. The band matters because the recon's first
+a `conv_attempt` `debug_assert`; the compose probe's `COMPOSE_PROBE_CTX` sits
+above the band, pinned by its own `const _` assert. The band matters because the recon's first
 choice — `COMPOSITOR_CTX + 1 + slot` — **aliases `CONV_PROBE_CTX_BASE`
 (`COMPOSITOR_CTX + 1`)**, the conv-probe throwaway ids: an enumerate-mirrors catch
 found by grepping every `ctx_create*` id before writing, not after a collision.
@@ -1209,6 +1287,21 @@ Bounds — F9: 8 surfaces globally, **4 per connection**, dimensions ≤ the
 display (the weave is tapestryd's own DMA allocation, so the client's
 page budget does not bound it), 8 connections, 32 fids, a 128-entry
 per-surface event queue, 64 rects per present.
+
+The 8 connections are one pool over both roots (`MAX_CONNS`), of which at most
+4 are warp (`MAX_WARP_CONNS`). A connect at a full pool is accepted and closed
+at once, so the client sees EOF instead of waiting on the kernel's handshake
+deadline; a warp connect at a spent warp budget waits, because that listener is
+not polled. Both are said on the console in every build, each at powers of two
+(the refusal with the counts; the spent budget by spell, since a client can
+open and close a spell at will). The serve pass services the connections that
+hung up **before** it accepts, and a connection whose handle reports the
+hang-up is torn down in that pass whatever its last bytes held, so a client
+that closes one connection and opens another gets the slot it just left;
+accepting first refused it at a full pool. A connection stands for as long as
+any fid of its session is open, a BO's `map` fd included, not only its root.
+The pool is first-come with no bound per peer: one client can take every free
+slot (the C-6 leg's REOPEN arm does), and the others are then refused.
 
 `Comp` holds the surfaces, the pane `Layout`, the `Gpu`, the scanout
 mode (`Off` / `Direct(n)` / `Composed`), and the mapping window (`va`, a
@@ -1521,9 +1614,21 @@ to stall the GPU engine when a 97x89 surface retires; the global ctl
 says `test-latch-dead armed` only once the broker has accepted it, and
 `tools/interactive/ls-gpu-dead.exp` asks that state, then watches the compositor survive a
 dead engine -- the retirement refused, the ctl still answered
-([[sub-lictor]]). The same arming lets tapestryd aim one stall at a
+([[sub-lictor]]). The word is not tapestryd's to vouch for: the broker reads
+the command line itself and refuses an arming whose word it does not find, and
+tapestryd names the word by the broker's constant and matches it with the broker's
+own function (`lictor::gpu_api::TEST_LEVERS_WORD`, `bootarg_declared`). The two
+still read the file separately (tapestryd in one read, the broker to its end). A
+refusal marks two readings that disagree one way: tapestryd found the word and the
+broker did not, and both say so. Where only the broker finds it, tapestryd never
+asks, and nothing is armed or said.
+The same arming lets tapestryd aim one stall at a
 composition health step (below), and three at binds of the display's
-(`ls-display-stall`, in "The display follows its host"). The battery and its expect
+(`ls-display-stall`, in "The display follows its host"). `thylacine.test-latch-chained` arms the
+broker the same way (`Request::TestArmChained`) to make each of the next two
+trusted takeovers wait on the device twice in series, and tapestryd says
+`test-latch-chained armed` on the console once the broker accepts it
+(`tools/interactive/ls-graphical-sak-chained.exp`). The battery and its expect
 scenario (`usr/tapestry-battery/src`, `tools/interactive/ls-gfx-panes.exp`)
 are UNOWNED -- their reference lives in `docs/reference/139-tapestryd.md`
 (the gate paragraph); the coverage sweep is
@@ -2544,7 +2649,7 @@ X,Y` speaks for the crossing off a track.
 the recycle and BEFORE the nothing-new early return, because the device can
 only deliver into descriptors this driver has published and it has not yet
 consumed: `avail_idx - cur_used` is exactly what the transport had to work with
-while the serve loop was away, and `QUEUE_SIZE` is 16. At zero it had none, and
+while the serve loop was away, and the ring is as deep as `eventq::depth` chose. At zero it had none, and
 an event it could not place did not arrive -- a guest-side fact that holds
 whatever the transport chooses to do with such an event.
 
@@ -2552,7 +2657,7 @@ whatever the transport chooses to do with such an event.
 stating plainly: the input devices are POLL-MODE and are NOT in the pollfd set,
 so nothing about an arriving event wakes the serve loop. The drain interval IS
 the pass period -- bounded by the frame tick, so <= ~67 ms at `IDLE_HZ` -- and a
-HELD pass is therefore the only condition under which a 16-deep eventq can run
+HELD pass is therefore the only condition under which the eventq can run
 out of descriptors between drains. `serve pass took N ms` names such a pass.
 
 **Calibration (the control that makes a future firing mean something).** On a
@@ -3603,7 +3708,10 @@ frame boundary, then sends changed shape/scale/position through Lictor. It never
 paints over a stale CPU mirror of accelerated content or restores saved pointer
 background pixels. Preferences live in surface incarnations and vanish with
 them. A seat generation change invalidates the last-sent pointer state because
-Lictor hid it during the trusted episode. The portable cursor raster lives in
+Lictor hid it during the trusted episode. A refused update is retried after
+`CURSOR_RETRY_MS`, never latched: a cursor stall behind a client's readback comes
+back by itself. A refusal also forgets the last-sent state, since a stalled command's
+outcome is unknown. The portable cursor raster lives in
 [[sub-libhalcyon]]; VirtIO queue ownership and exclusion live in [[sub-lictor]].
 
 HI-0 runtime checkpoint (2026-09-24): `ls-halcyon-pointer` passes on QEMU/KVM

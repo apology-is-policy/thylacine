@@ -10,6 +10,10 @@ const RESOURCE: u32 = crate::objects::TRUSTED_CURSOR;
 const IMAGE_BYTES: usize = 64 * 64 * 4;
 const ALLOCATION: usize = IMAGE_BYTES + 4096;
 const REPLY: u64 = BASE + IMAGE_BYTES as u64 + 64;
+/// Long enough past an abandonment for the kernel to fail the takeover it held up
+/// and for the seat to restore, so a pointer update meets the abandoned lane.
+#[cfg(feature = "test-mode")]
+const TEST_ABANDON_RELEASE_MS: u64 = 10_000;
 
 pub(super) struct Plane {
     notify: u64,
@@ -22,8 +26,8 @@ pub(super) struct Plane {
     image: Option<(Shape, u16)>,
     visible: bool,
     /// The outstanding chain missed its deadline (GPU-DESIGN 4.5.15): the
-    /// completion pump retires it late, or poisons the lane at
-    /// FENCE_ABANDON_MS.
+    /// completion pump retires it late, or abandons the lane at
+    /// FENCE_ABANDON_MS, or at a waiting takeover's bound, until it does.
     stalled: Option<Instant>,
     /// The next cursor command misses its deadline at once, and its
     /// retirement is held until released (the test-latch-dead lever).
@@ -31,6 +35,13 @@ pub(super) struct Plane {
     test_stall_next: bool,
     #[cfg(feature = "test-mode")]
     test_hold: bool,
+    /// The hold outlasts the abandonment bound and the seat's restore.
+    #[cfg(feature = "test-mode")]
+    test_abandon: bool,
+    /// When the lane was abandoned under that hold; the hold ends
+    /// TEST_ABANDON_RELEASE_MS later.
+    #[cfg(feature = "test-mode")]
+    test_abandon_release: Option<Instant>,
 }
 impl Plane {
     pub(super) fn new(notify: u64) -> Self {
@@ -49,6 +60,10 @@ impl Plane {
             test_stall_next: false,
             #[cfg(feature = "test-mode")]
             test_hold: false,
+            #[cfg(feature = "test-mode")]
+            test_abandon: false,
+            #[cfg(feature = "test-mode")]
+            test_abandon_release: None,
         }
     }
 }
@@ -133,14 +148,10 @@ impl Gpu {
             w16(self.cursor.notify, GPU_QUEUE_CURSOR);
         }
         let since = Instant::now();
-        // Both queues share the device loop. A synchronous GPU readback can
-        // hold that loop beyond the ordinary command bound; keep the larger
-        // deadline even when the completion pump retires the readback first.
-        let mut deadline_ms = if self.ctrl.readback_in_flight() || !self.ctrl.serving {
-            FENCE_ABANDON_MS
-        } else {
-            SUBMIT_DEADLINE_MS
-        };
+        // Both queues share the device loop, so a client's readback can hold this
+        // chain for as long as that client queued ahead of it. A stall ends by
+        // itself; waiting here would stop the serve loop for all of it.
+        let deadline_ms = if self.ctrl.serving { SUBMIT_DEADLINE_MS } else { FENCE_ABANDON_MS };
         #[cfg(feature = "test-mode")]
         if core::mem::take(&mut self.cursor.test_stall_next) && deadline_ms < FENCE_ABANDON_MS {
             self.cursor.test_hold = true;
@@ -152,9 +163,6 @@ impl Gpu {
             if let Some(result) = self.cursor_retire() {
                 return result.map_err(|_| Error::Hardware);
             }
-            if self.ctrl.readback_in_flight() {
-                deadline_ms = FENCE_ABANDON_MS;
-            }
             let missed = since.elapsed().as_millis() >= u128::from(deadline_ms);
             if missed && deadline_ms < FENCE_ABANDON_MS {
                 self.cursor.stalled = Some(Instant::now());
@@ -164,7 +172,12 @@ impl Gpu {
                 );
                 return Err(Error::Hardware);
             }
-            if missed || self.ctrl.service_completions(1_000_000).is_err() {
+            if missed {
+                self.cursor.queue.abandon();
+                say!("lictor: cursor chain never retired in {} ms -- cursor queue abandoned until it retires", deadline_ms);
+                return Err(Error::Hardware);
+            }
+            if self.ctrl.service_completions(1_000_000).is_err() {
                 self.cursor.queue.poison();
                 say!("lictor: cursor queue failed; backing retained, trusted takeover unavailable");
                 return Err(Error::Hardware);
@@ -196,9 +209,27 @@ impl Gpu {
         Some(self.cursor.queue.complete(index, head, len, ok))
     }
 
-    /// The completion pump's half of a cursor stall: a late retirement
-    /// revives the lane, one outstanding FENCE_ABANDON_MS poisons it.
+    /// The completion pump's half of a cursor stall: a late retirement revives
+    /// the lane, one outstanding FENCE_ABANDON_MS, or while a takeover has waited
+    /// TAKEOVER_BOUND_MS from its chord (vote 80), abandons it, and a retirement
+    /// after that still revives it.
     pub(super) fn cursor_settle(&mut self) {
+        if self.cursor.queue.abandoned() {
+            #[cfg(feature = "test-mode")]
+            if self.cursor.test_abandon_release
+                .is_some_and(|at| at.elapsed().as_millis() as u64 >= TEST_ABANDON_RELEASE_MS)
+            {
+                self.cursor.test_abandon_release = None;
+                self.cursor.test_hold = false;
+                say!("lictor: cursor chain retirement released (test-latch-dead)");
+            }
+            match self.cursor_retire() {
+                Some(Ok(())) => say!("lictor: abandoned cursor chain retired -- cursor queue revived"),
+                Some(Err(())) => say!("lictor: cursor queue failed; backing retained, trusted takeover unavailable"),
+                None => {}
+            }
+            return;
+        }
         let Some(t0) = self.cursor.stalled else { return };
         let ms = t0.elapsed().as_millis() as u64;
         match self.cursor_retire() {
@@ -210,10 +241,19 @@ impl Gpu {
                 self.cursor.stalled = None;
                 say!("lictor: cursor queue failed; backing retained, trusted takeover unavailable");
             }
-            None if crate::gpu_api::stall_verdict(true, ms) == crate::gpu_api::Stall::Dead => {
+            None if crate::gpu_api::stall_verdict(true, ms, self.ctrl.takeover_ms()) == crate::gpu_api::Stall::Dead => {
                 self.cursor.stalled = None;
-                self.cursor.queue.poison();
-                say!("lictor: cursor chain never retired in {} ms -- cursor queue dead", ms);
+                self.cursor.queue.abandon();
+                if ms < FENCE_ABANDON_MS {
+                    say!("lictor: cursor chain never retired in {} ms, the takeover {} ms from its chord -- cursor queue abandoned at the takeover's bound until it retires",
+                         ms, self.ctrl.takeover_ms().unwrap_or(0));
+                } else {
+                    say!("lictor: cursor chain never retired in {} ms -- cursor queue abandoned until it retires", ms);
+                }
+                #[cfg(feature = "test-mode")]
+                if core::mem::take(&mut self.cursor.test_abandon) {
+                    self.cursor.test_abandon_release = Some(Instant::now());
+                }
             }
             None => {}
         }
@@ -295,6 +335,8 @@ impl Gpu {
             // transfer() verifies the echoed controlq fence before returning.
             let stalls = self.ctrl.stalls;
             if self.transfer(RESOURCE, 0, 0, 0, 64, 64).is_err() {
+                // A stalled upload can still land, so nothing says what the host holds.
+                self.cursor.uploaded = false;
                 self.cursor_step_failed(stalls);
                 return Err(Error::Hardware);
             }
@@ -308,6 +350,11 @@ impl Gpu {
 
     /// Arm (or disarm) the lever's cursor stall for the next cursor command.
     #[cfg(feature = "test-mode")]
+    pub fn test_cursor_abandon_next(&mut self) {
+        self.cursor.test_abandon = true;
+    }
+
+    #[cfg(feature = "test-mode")]
     pub fn test_cursor_stall_next(&mut self, on: bool) {
         self.cursor.test_stall_next = on;
     }
@@ -316,8 +363,28 @@ impl Gpu {
     /// retires the chain late, the way a slow device does.
     #[cfg(feature = "test-mode")]
     pub fn test_cursor_release(&mut self) {
+        if self.cursor.test_abandon || self.cursor.test_abandon_release.is_some() {
+            return;
+        }
         if core::mem::take(&mut self.cursor.test_hold) {
             say!("lictor: cursor chain retirement released (test-latch-dead)");
+        }
+    }
+
+    /// The lane waits on a chain past its deadline. The chain need not be a device
+    /// fault: it shares the host loop a client's readback holds.
+    pub(super) fn cursor_stalled(&self) -> bool {
+        self.cursor.stalled.is_some()
+    }
+
+    /// Why the lane takes no chain: abandoned until a late retirement, or failed.
+    pub fn cursor_out_of_service(&self) -> Option<&'static str> {
+        if self.cursor.queue.poisoned() {
+            Some("failed")
+        } else if self.cursor.queue.abandoned() {
+            Some("abandoned")
+        } else {
+            None
         }
     }
 
@@ -331,12 +398,15 @@ impl Gpu {
                 core::ptr::write_bytes(BASE as *mut u8, 0, IMAGE_BYTES);
             }
             dsb_sy();
+            // A stalled upload can still land, so the host's copy is unknown from here
+            // until one is answered.
+            self.cursor.image = None;
+            self.cursor.uploaded = false;
             let stalls = self.ctrl.stalls;
             if self.transfer(RESOURCE, 0, 0, 0, 64, 64).is_err() {
                 self.cursor_step_failed(stalls);
                 return Err(Error::Hardware);
             }
-            self.cursor.image = None;
             self.cursor.uploaded = true;
         }
         self.cursor_command(output, RESOURCE, 0, 0, (0, 0), true)?;

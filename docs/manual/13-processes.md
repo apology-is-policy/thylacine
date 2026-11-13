@@ -196,8 +196,9 @@ every process. `/proc/<pid>/sched` and `/proc/<pid>/account` are readable by the
 owner and by holders of `CAP_HOSTOWNER`.
 
 `/proc/<pid>/account` shows the memory account the process is charged to, in bytes: each
-class's use and limit, the room left and the class that is tightest. Until sessions have
-accounts of their own, every process shares one account, so it shows the whole machine.
+class's use and limit, the room left and the class that is tightest. A login session has an
+account of its own, and the services started at boot share another, so it shows what that
+session or those services hold, and the room left before something fills.
 It is for reading: a program that needs these figures asks the kernel with `SYS_ACCOUNT`.
 
 A listing of `/proc` is generated from the process table as it is read, in

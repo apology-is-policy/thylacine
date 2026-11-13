@@ -53,7 +53,8 @@ states. Secret input and authorization are forbidden before exclusive state.
 The service acknowledgement covers all of the following, with a bounded deadline:
 
 1. Stop admitting ordinary presentation, cursor changes, modesets and input
-   delivery. Drain or safely retire earlier work; a submitted fence is not a
+   delivery. Earlier work need not retire if it cannot reach the trusted image
+   (`TRUSTED-PATH.md`), and a submitted fence is not a
    completed display transition. No unbounded GPU wait in the authentication path.
 2. Take control of every plane and visible output in the seat. Display the trusted
    scene on the chosen output and trusted neutral content on other outputs. Do not
@@ -64,6 +65,8 @@ The service acknowledgement covers all of the following, with a bounded deadline
    this from documented completion semantics, not a sleep or successful submit.
 4. Route only admitted physical input to the episode. Drop pre-entry events and
    require the attention chord to be released before accepting secret keystrokes.
+   A device that cannot say what is down may count a release it had to assume after
+   its report ring overran, provided the chord's keys produce no input to the episode.
    USB enumeration, controller queues and HID decoding on this path are TCB.
 
 A GPU command fence may prove command completion without proving physical scanout.
@@ -94,6 +97,11 @@ explicit existing trust assumption; this is not protection from their compromise
 Normal GPU contexts may survive an episode only if their ongoing execution cannot
 modify/read trusted resources, alter scanout, or prevent bounded takeover. Otherwise
 submission must be quiesced or the acceleration mode rejected for trusted episodes.
+The QEMU virgl backend does not meet the last of these: its one host FIFO puts the
+trusted paint behind a client's queued work, so a backlog past the episode's deadline
+prevents that takeover (`TRUSTED-PATH.md`). What this backend should do about that is an
+open operator vote. A backend that presents without the client's GPU queue has no such
+limit.
 Resetting a device is failure recovery, not the normal workspace-preserving design.
 Cache clean/invalidate, DMA ownership transfers, memory attributes, MMIO barriers,
 interrupt acknowledgement and fences are backend duties, tested independently of

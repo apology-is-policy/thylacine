@@ -92,6 +92,7 @@ const QUEUE_SIZE_USZ: usize = QUEUE_SIZE as usize;
 
 const PAGE: usize = 4096;
 // DMA pool layout (page offsets). Each queue: desc page, avail page, used page.
+#[allow(clippy::erasing_op)] // page 0, written like the rows under it
 const CTRLQ_DESC_OFF: usize = 0 * PAGE;
 const CTRLQ_AVAIL_OFF: usize = 1 * PAGE;
 const CTRLQ_USED_OFF: usize = 2 * PAGE;

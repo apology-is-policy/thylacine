@@ -18,7 +18,7 @@
 // The grammar follows scripture sections 6.1-6.14 + 7.3 + 17.10:
 //
 //   - **Atoms**: Word, SingleQuoted, DoubleQuoted, Var, VarLen,
-//     VarNoSplit, Subst, Backtick, ProcSubIn, ProcSubOut, Regex.
+//     VarNoSplit, Subst, Backtick, ProcSubIn, ProcSubOut.
 //     Integer literal in arith context (Word("42") -> Integer(42)).
 //
 //   - **Var indexing**: `$var(N)` / `$var(M N)` per scripture 6.9.
@@ -41,9 +41,9 @@
 //   - **String comparison** (scripture 6.14): `==` and `!=` as
 //     comparison operators in cond and arith contexts.
 //
-//   - **Match operators** (scripture 7.3): `matches`, `in`, `=~`
-//     as match-binary operators in cond context. Right operand is
-//     the pattern (glob word, list, regex literal).
+//   - **Match operators** (scripture 7.3): `matches` and `in` as
+//     match-binary operators in cond context. Right operand is the
+//     pattern (glob word or list).
 //
 // === Context handling ===
 //
@@ -557,7 +557,6 @@ impl ExprParser {
                 let sub = parse_subscript(&body, tok.span)?;
                 ExprKind::ProcSubOut(Box::new(sub))
             }
-            TokenKind::Regex(s) => ExprKind::Regex(s),
             other => ExprKind::Word(String::from(
                 TokenKind::reserved_word_text(&other)
                     .expect("is_value_token_kind gates the dispatch above"),
@@ -635,7 +634,7 @@ impl ExprParser {
     //   3.  `|`
     //   4.  `^` (xor)
     //   5.  `&`
-    //   6.  `== !=`, `matches`, `in`, `=~`
+    //   6.  `== !=`, `matches`, `in`
     //   7.  `< <= > >=`
     //   8.  `<< >>`   (inside `(( ))`, which is where `<<` is not a heredoc)
     //   9.  `+ -`
@@ -763,7 +762,6 @@ impl ExprParser {
             let op = match self.peek_kind() {
                 Some(TokenKind::DoubleEqual) => Some(EqOrMatch::Eq),
                 Some(TokenKind::NotEqual) => Some(EqOrMatch::Ne),
-                Some(TokenKind::EqualTilde) => Some(EqOrMatch::Regex),
                 Some(TokenKind::Word(w)) if self.ctx == ExprContext::Cond && w == "matches" => {
                     Some(EqOrMatch::Matches)
                 }
@@ -784,7 +782,6 @@ impl ExprParser {
                 EqOrMatch::Ne => bin(BinOp::Ne, left, right),
                 EqOrMatch::Matches => match_expr(MatchOp::Glob, left, right),
                 EqOrMatch::In => match_expr(MatchOp::In, left, right),
-                EqOrMatch::Regex => match_expr(MatchOp::Regex, left, right),
             };
         }
         Ok(left)
@@ -1307,7 +1304,6 @@ enum EqOrMatch {
     Ne,
     Matches,
     In,
-    Regex,
 }
 
 fn bin(op: BinOp, left: Expr, right: Expr) -> Expr {
@@ -1340,7 +1336,6 @@ fn is_value_token_kind(k: &TokenKind) -> bool {
             | TokenKind::Backtick(_)
             | TokenKind::ProcSubIn(_)
             | TokenKind::ProcSubOut(_)
-            | TokenKind::Regex(_)
     ) || TokenKind::reserved_word_text(k).is_some()
 }
 
@@ -1982,12 +1977,11 @@ mod tests {
     }
 
     #[test]
-    fn cond_regex() {
-        let e = expr_ok("$x =~ /foo/", ExprContext::Cond);
-        match &e.kind {
-            ExprKind::Match(MatchOp::Regex, _, _) => {}
-            other => panic!("got {:?}", other),
-        }
+    fn cond_equal_tilde_is_refused() {
+        // Vote 78 struck `=~`; the glob match one variable away still parses.
+        let _ = expr_err("$x =~ /foo/", ExprContext::Cond);
+        let e = expr_ok("$x matches /foo/", ExprContext::Cond);
+        assert!(matches!(e.kind, ExprKind::Match(MatchOp::Glob, _, _)));
     }
 
     #[test]
@@ -2242,21 +2236,6 @@ mod tests {
             ExprKind::DoubleQuoted(parts) => {
                 assert!(!parts.is_empty());
             }
-            other => panic!("got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn value_regex_preserves_body() {
-        // Regex is normally only after `=~`; we feed a Word followed
-        // by `=~ /pat/` to exercise the Regex token through the
-        // Match path.
-        let e = expr_ok("$x =~ /foo/", ExprContext::Cond);
-        match &e.kind {
-            ExprKind::Match(MatchOp::Regex, _, right) => match &right.kind {
-                ExprKind::Regex(s) => assert_eq!(s, "foo"),
-                other => panic!("got {:?}", other),
-            },
             other => panic!("got {:?}", other),
         }
     }

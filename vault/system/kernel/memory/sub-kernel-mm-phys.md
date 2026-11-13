@@ -3,13 +3,13 @@ id: sub-kernel-mm-phys
 type: sub
 parent: moc-kernel-memory
 title: "The page allocator — phys bootstrap, buddy, per-CPU magazines"
-code: ["mm/phys.c", "mm/phys.h", "mm/buddy.c", "mm/buddy.h", "mm/magazines.c", "mm/magazines.h", "kernel/include/thylacine/page.h"]
+code: ["mm/phys.c", "mm/phys.h", "mm/buddy.c", "mm/buddy.h", "mm/magazines.c", "mm/magazines.h", "kernel/include/thylacine/page.h", "kernel/test/test_phys.c"]
 audit: hard
 guarded-by: [inv-i32]
 validated-by: [gate-smp, spec-capacity, gate-magazines-tsan]
 locks: [lock-buddy-zone, lock-magazine-set]
 created: 2026-08-01
-updated: 2026-11-10
+updated: 2026-11-12
 ---
 
 ## Shared-memory accounting review
@@ -514,19 +514,30 @@ of the drainer's peers with `ready_on` and woken by IPI: in-kernel tests
 send no idle-peer IPIs, and `sched()` steals only onto an empty tree, so a
 `ready()`d owner runs on the drainer's own CPU. Its first run did exactly
 that and never met its premise, a drain while an owner reports another
-CPU, which the test asserts before the stamps. It drains once more after
-joining the owners, because the next test's gauge reads the buddy without
-draining.
+CPU, which the test asserts before the stamps. The owners churn until the
+drainer releases them, which it does once 64 of its drains have each begun
+while at least one owner last reported a CPU other than the drainer's. A fixed iteration count is not enough,
+because nothing orders one kthread's first instruction before another's
+last: the owners can finish before the first drain. An owner's floor is
+4000 iterations; one never released ends five seconds after its first run,
+by the clock and not by a count, so a drainer that never comes fails the
+test (`the drainer never drained`) inside the boot's timeout on any
+emulator instead of hanging it. A failure prints how long after the owners
+were placed the first drain came (with no drain, how long the drainer
+waited) and how many context switches the placing CPU made meanwhile; both
+origins are read before the first owner can run. With one CPU there is nothing to hold: an
+owner runs only when the drainer yields, after its first drain.
 
-On each of the three sabotaged trees (the pre-lock bodies, the drain
-unlocked, the alloc unlocked) the twin dies before any stamp is checked: a
-page freed into the buddy twice is still linked after its first pop clears
-its links, so a later refill's pop in `buddy_alloc`, under an owner's
-`mag_alloc`, writes through NULL. On the locked tree it passes in every gate
-leg (2026-10-22, at 7062e8926: CONTROL, CONTROL-Q and UBSan 1901/1901; SMP
-five configurations of ten boots each). The kill is evidence only beside that
-pass, since the criterion admitting a fault was widened after the first run
-that showed one.
+The evidence of 2026-10-22, at 7062e8926, is for the test as it stood before
+its release gate and its owners' clock. On each of the three sabotaged trees
+(the pre-lock bodies, the drain unlocked, the alloc unlocked) the twin died
+before any stamp was checked: a page freed into the buddy twice is still
+linked after its first pop clears its links, so a later refill's pop in
+`buddy_alloc`, under an owner's `mag_alloc`, writes through NULL. On the
+locked tree it passed in every gate leg (CONTROL, CONTROL-Q and UBSan
+1901/1901; SMP five configurations of ten boots each). The kill is evidence
+only beside that pass, since the criterion admitting a fault was widened
+after the first run that showed one.
 
 The drain is now safe, not a measurement: the Loom private fixture's
 unpinned-reap release witness stays removed, because it needs a stable

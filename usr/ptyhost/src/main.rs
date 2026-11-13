@@ -80,8 +80,8 @@ extern "C" fn pump_in(arg: u64) {
                 unsafe { t_thread_exit() }
             }
             if w == 0 {
-                // A raw-mode master accepts what fits and answers 0 when its
-                // ring is full: back-pressure, not an error. Wait it out
+                // A master accepts what fits and answers 0 when its ring is
+                // full: back-pressure, not an error. Wait it out
                 // briefly; a ring full past the bound drops the rest.
                 zeros += 1;
                 if zeros > 200 {

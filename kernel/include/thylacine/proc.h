@@ -1796,9 +1796,9 @@ void proc_set_name(struct Proc *p, const char *path, size_t len);
 //   call this from inside proc_for_each, under g_proc_table_lock -- and holds
 //   no threads_lock of its own. Each run_ns is read __atomic (a single-writer coherent
 //   snapshot); the sum is a snapshot-of-snapshots, exact enough for the
-//   diff-across-polls %CPU the reader derives. Does NOT include the currently-
-//   running thread's in-flight slice since its last switch-in (< 1 slice; the
-//   design accepts the lag). Returns 0 for a NULL p.
+//   diff-across-polls %CPU the reader derives. Does NOT include a running
+//   thread's time since its last fold (its switch-in or the last tick on its
+//   CPU, so under a tick). Returns 0 for a NULL p.
 u64 proc_cpu_ns(struct Proc *p);
 
 // proc_kstack_peak -- the deepest kernel stack any of p's threads has ever
@@ -1984,12 +1984,19 @@ int rfork_forked_with_caps(unsigned flags, const struct fork_context *fc,
 int rfork_with_caps(unsigned flags, void (*entry)(void *), void *arg,
                     caps_t caps_mask);
 
-// The birth hold (DEBUG-FS-DESIGN 5f): rfork_with_caps(flags, ...) whose child
-// is published already marked BIRTH_HOLD_UNBORN. The SPAWN_DEBUG_HELD spawn's
-// fork; `flags` is RFPROC, or RFPROC|RFCENVG. Same return contract as
+// SYS_SPAWN_FULL_ARGV's fork: rfork_with_caps(flags, ...), with the child born under
+// `account` (NULL: the parent's; the caller holds a reference across the call) and, when
+// `held` (SPAWN_DEBUG_HELD, DEBUG-FS-DESIGN 5f), published already marked
+// BIRTH_HOLD_UNBORN. `flags` is RFPROC, or RFPROC|RFCENVG. Same return contract as
 // rfork_with_caps.
+int rfork_spawn_under(unsigned flags, void (*entry)(void *), void *arg,
+                      caps_t caps_mask, bool held, struct MemoryAccount *account);
+
+#ifdef KERNEL_TESTS
+// rfork_spawn_under with `held` true and the parent's account.
 int rfork_spawn_held(unsigned flags, void (*entry)(void *), void *arg,
                      caps_t caps_mask);
+#endif
 
 // rfork_with_caps(RFPROC, ...) for init: the child takes PROC_ID_INIT as its
 // pid, so init is pid 1 however many kernel threads boot started before it
@@ -3280,6 +3287,8 @@ void proc_release_territory_at_exit_for_test(struct Proc *p);
 void proc_test_orphan_rule(struct Proc *dying);
 u32 proc_test_release_leaked(int *pids, u32 max);
 void proc_test_seat_expire(void);
+u64 proc_test_seat_deadline(u64 *limit);
+void proc_test_seat_limit(u64 limit);
 void proc_test_seat_reset(void);
 int proc_test_serial_sak(int posture);
 void proc_test_set_init(struct Proc *p);

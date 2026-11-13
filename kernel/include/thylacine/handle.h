@@ -69,17 +69,19 @@ enum kobj_kind {
     KOBJ_SRV        = 9,    // a /srv service or connection object, non-transferable (P5-corvus-srv)
     KOBJ_LOOM       = 10,   // a Loom ring (KObj_Loom), non-transferable (Loom-2a)
     KOBJ_PCI        = 11,   // a claimed VirtIO-PCI function (KObj_PCI), hardware, non-transferable (pci-1b)
-    KOBJ_KIND_COUNT = 12,
+    KOBJ_ACCOUNT    = 12,   // control of a memory account (MM-1c), non-transferable
+    KOBJ_KIND_COUNT = 13,
 };
 
 // _Static_assert pins KIND_COUNT — adding a new kind requires bumping
-// this constant + extending the transferable/hw/srv/loom masks below +
+// this constant + extending the transferable/hw/srv/loom/account masks below +
 // reviewing every switch over kobj_kind in the kernel (per ARCH §18.3 typed
 // transferability).
-_Static_assert(KOBJ_KIND_COUNT == 12,
+_Static_assert(KOBJ_KIND_COUNT == 13,
                "kobj_kind drift: when adding a new kind, update "
                "KOBJ_KIND_TRANSFERABLE_MASK / KOBJ_KIND_HW_MASK / "
-               "KOBJ_KIND_SRV_MASK / KOBJ_KIND_LOOM_MASK + every switch over "
+               "KOBJ_KIND_SRV_MASK / KOBJ_KIND_LOOM_MASK / "
+               "KOBJ_KIND_ACCOUNT_MASK + every switch over "
                "kobj_kind (handle_release_obj, handle_acquire_obj).");
 
 // Per ARCH §28 I-4 + I-5 + §18.2: handles are partitioned into three
@@ -119,6 +121,12 @@ _Static_assert(KOBJ_KIND_COUNT == 12,
 #define KOBJ_KIND_LOOM_MASK \
     (1u << KOBJ_LOOM)
 
+// MM-1c: KObj_Account is non-transferable + non-hardware, a fifth partition, so a
+// budget's control stays with the Proc that subdivided it and authority can only narrow
+// down the Proc tree (operator vote 58). docs/SHARED-MEMORY-ACCOUNTING.md section 13.
+#define KOBJ_KIND_ACCOUNT_MASK \
+    (1u << KOBJ_ACCOUNT)
+
 _Static_assert((KOBJ_KIND_TRANSFERABLE_MASK & KOBJ_KIND_HW_MASK) == 0,
                "transferable + hw kind masks must be disjoint");
 _Static_assert((KOBJ_KIND_TRANSFERABLE_MASK & KOBJ_KIND_SRV_MASK) == 0,
@@ -131,11 +139,19 @@ _Static_assert((KOBJ_KIND_HW_MASK & KOBJ_KIND_LOOM_MASK) == 0,
                "hw + loom kind masks must be disjoint");
 _Static_assert((KOBJ_KIND_SRV_MASK & KOBJ_KIND_LOOM_MASK) == 0,
                "srv + loom kind masks must be disjoint");
+_Static_assert((KOBJ_KIND_TRANSFERABLE_MASK & KOBJ_KIND_ACCOUNT_MASK) == 0,
+               "transferable + account kind masks must be disjoint");
+_Static_assert((KOBJ_KIND_HW_MASK & KOBJ_KIND_ACCOUNT_MASK) == 0,
+               "hw + account kind masks must be disjoint");
+_Static_assert((KOBJ_KIND_SRV_MASK & KOBJ_KIND_ACCOUNT_MASK) == 0,
+               "srv + account kind masks must be disjoint");
+_Static_assert((KOBJ_KIND_LOOM_MASK & KOBJ_KIND_ACCOUNT_MASK) == 0,
+               "loom + account kind masks must be disjoint");
 _Static_assert((KOBJ_KIND_TRANSFERABLE_MASK | KOBJ_KIND_HW_MASK |
-                KOBJ_KIND_SRV_MASK | KOBJ_KIND_LOOM_MASK)
+                KOBJ_KIND_SRV_MASK | KOBJ_KIND_LOOM_MASK | KOBJ_KIND_ACCOUNT_MASK)
                    == (((1u << KOBJ_KIND_COUNT) - 1u) & ~(1u << KOBJ_INVALID)),
                "every kobj_kind except KOBJ_INVALID must be classified "
-               "into exactly one of the four partitions");
+               "into exactly one of the five partitions");
 
 // Per ARCH §18.2. Handle rights — bitmask of what the holder can do.
 typedef u32 rights_t;
@@ -672,9 +688,9 @@ int handle_close_on_exec(struct Proc *p);
 // Type classifiers. Map to specs/handles.tla's TxKObjs / HwKObjs /
 // SrvKObjs partitions. kobj_kind_is_transferable returns true for
 // Process / Thread / BURROW / Spoor; kobj_kind_is_hw for MMIO / IRQ /
-// DMA / Interrupt; kobj_kind_is_srv for Srv. Exactly one is true for
-// every kind except KOBJ_INVALID (and any out-of-range value), for
-// which all three return false.
+// DMA / Interrupt / PCI; kobj_kind_is_srv for Srv. At most one is true,
+// and none is for KOBJ_INVALID, for any out-of-range value, and for the
+// two kinds these three do not name: Loom and Account.
 bool kobj_kind_is_transferable(enum kobj_kind k);
 bool kobj_kind_is_hw(enum kobj_kind k);
 bool kobj_kind_is_srv(enum kobj_kind k);

@@ -141,11 +141,19 @@ the one genuinely new kernel mechanism.
 - At **switch-in** (in `sched()`, around `cpu_switch_context`): `switched_in_at =
   timer_now_ns()`.
 - At **switch-out**: `run_ns += timer_now_ns() - switched_in_at`.
+- At every **tick** a thread is running on (`sched_tick`): the same fold, and
+  `switched_in_at` moves to now. Without it a thread that is never switched
+  out -- one looping inside a syscall body or under a plain lock, which
+  `preempt_check_irq` will not preempt -- would be charged nothing and read as
+  idle; a preemptible thread was charged, but up to a slice late.
+  Busy CPUs tick at 1 kHz, so a running thread's `run_ns` is at most a tick old.
 - Per-process CPU time = sum of `run_ns` over `p->threads` (computed at read time
   in devproc, under the proc-table lock, atomics on the counters).
 - **Cost:** one `CNTVCT` read + one add + a couple of stores on the context-switch
   path — the tickless/timer paths already read `CNTVCT`, so the marginal cost is
-  an add and two stores. Negligible, but it *is* the hot path.
+  an add and two stores. Negligible, but it *is* the hot path. The tick fold
+  adds the same again (one `CNTVCT` read and its conversion, an add, two
+  stores) to every tick a thread is running on.
 - **Read-only:** no scheduling decision reads `run_ns`. EEVDF placement, I-8
   (liveness), I-17 (latency), the `vd_t` math — all untouched. This is telemetry,
   not policy.

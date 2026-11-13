@@ -12,7 +12,7 @@ locks: []
 abis: []
 design: ["docs/reference/86-pouch-stratumd-boot.md (the 16c design section)"]
 created: 2026-08-02
-updated: 2026-11-02
+updated: 2026-11-10
 ---
 ## Session factory handoff
 
@@ -125,7 +125,40 @@ fall back to within dlmalloc's kept top of the base with no trim asked for and
 to the base after one; a 32 MiB block returns every page while a small block
 stays live; a reservation switch releases the emptied first reservation; and the
 churn is timed on either side of dlmalloc's trim threshold. Boot-fatal
-(`joey: /heap-probe FAILED`). The CL-5 probe (`probe_cl5_page_budget`)
+(`joey: /heap-probe FAILED`). **The full-pool rung (2026-11-10).** After the
+login E2E, under `THYLA_BOOT_PROBES`, joey spawns `/bin/srvfull-probe` and
+requires status 0. Per server (`/srv/corvus` always; `/srv/net` wherever it is
+posted, else a `NOT PROBED` line -- and `tools/test.sh` requires netd's OK line
+on every boot where netd served `/net`) the probe opens one
+connection of its own and starts a holder child with a pipe at its fd 0. The
+holder writes a byte when it starts and one per connect that returns; when no
+byte has come for 250 ms the probe takes it to be waiting at a full pool and
+reads the server's `cpu_ns` from `/proc/<pid>/status` twice, 400 ms apart (one
+read call each: the kernel renders these files afresh on every read, so a
+paged read stitches two renders). It then closes its own connection, the
+holder's waiting connect must be served, and the holder reports the instants
+that connect began and returned. The inference is checked against that
+report: the attempt is judged only if the connect began before the first
+reading, returned after the probe began to free its slot, and returned within
+one quiet of it; and only if the holder completed no further connect after the
+quiet (one that did had stalled between connects, and nothing was waiting).
+An attempt that fails a check is taken again with twice the quiet (three
+attempts), and so is one whose waiting connect was served before the quiet had
+passed. Two ends are not retaken: a holder whose waiting connect is refused
+with no later connect (`REARM`: the server did not serve it once a slot
+freed), and a holder that ends any other way. The probe cannot see the pool's
+size; "one waiting at a full pool" is a connect that outlasts the quiet and
+the window after every earlier one returned inside the quiet, and that the
+probe's own free then serves at once. The server's pid comes from one read of
+`/ctl/procs`, which the kernel cuts to the rows that fit 4096 bytes without
+saying so: a table that ends within 512 bytes of that bound is refused as
+unreadable rather than searched. The waiting connect waits about 650 ms
+however long the holder took to start. The bar is a quarter of the window: a server
+that keeps asking about a listener it cannot accept from never sleeps and
+takes all of it ([[sub-corvus]], [[sub-netd-nic]]). It runs in joey's ladder
+because only the system principal or a hostowner reads another Proc's CPU
+time. Boot-fatal (`joey: srvfull PROBE FAILED`); it adds about a second per
+server to the boot. The CL-5 probe (`probe_cl5_page_budget`)
 reads joey's OWN `budget:` from its status file (`proc_status_field`) rather
 than restating a constant, asks for one page more (refused: a raise without
 authority) and for `0xFFFFFFFF` (refused at validation: over the hard maximum
@@ -346,6 +379,12 @@ to `/`, so the services and sessions it starts from then on inherit the disk
 root; its post-pivot spawns name `/bin/<prog>`, which also resolves before the
 pivot. A pre-pivot probe therefore sees `/bin` as its working directory (the
 `coreutil-smoke` `pwd` leg).
+
+**The resident services share a memory account (MM-1c, vote 58).** Joey makes it in `main`
+before its probes, and a failure is fatal. Corvus, ptyfs, diorama and the console renderer are
+born under it through `joey_spawn_service`, and `stratumd` through its own record. Under
+`THYLA_BOOT_PROBES`, `joey_service_is_on_its_account` checks that on ptyfs and is boot-fatal
+([[sub-kernel-accounts]]).
 
 **`/dev/pts` is grafted separately, after the swap, once ptyfs is up** — it is
 not one of the carried handles because its tree does not exist until joey

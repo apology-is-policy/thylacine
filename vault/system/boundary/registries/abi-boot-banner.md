@@ -18,6 +18,7 @@ mirrors:
   - "tools/interactive/ls-halcyon-clipboard-async.exp"
   - "tools/interactive/ls-nora-stopped-copy.exp"
   - "tools/interactive/ls-ut-paste.exp"
+  - "tools/interactive/ls-session-account.exp"
   - "tools/interactive/ls-halcyon-paste-flow.exp"
   - "tools/interactive/ls-halcyon-pointer.exp"
   - "tools/interactive/ls-display-follow.exp (EXTINCTION: only)"
@@ -29,6 +30,10 @@ mirrors:
   - "tools/interactive/ls-graphical-sak-states.exp"
   - "tools/interactive/ls-graphical-sak-recover.exp"
   - "tools/interactive/ls-graphical-sak-poison.exp"
+  - "tools/interactive/ls-graphical-sak-chain.exp"
+  - "tools/interactive/ls-graphical-sak-backlog.exp"
+  - "tools/interactive/ls-graphical-keys-overrun.exp"
+  - "tools/interactive/ls-graphical-keys-behind.exp"
   - "tools/interactive/ls-graphical-sak-start.exp"
   - "tools/interactive/ls-graphical-sak-refused.exp"
   - "tools/interactive/ls-graphical-sak-unread.exp"
@@ -40,14 +45,17 @@ mirrors:
   - "tools/interactive/ls-halcyon-scale-fitted.exp (EXTINCTION: only)"
   - "tools/interactive/ls-gpu-dead.exp (EXTINCTION: only -- the dead-engine witness)"
   - "tools/interactive/ls-graphical-sak-dead.exp (EXTINCTION: only -- the dead-engine seat witness)"
+  - "tools/interactive/ls-graphical-sak-chained.exp (EXTINCTION: only -- two takeover waits in series, ended by the bound from the chord)"
   - "tools/interactive/ls-graphical-sak-soak.exp (EXTINCTION: only -- the seat's return, cycled)"
   - "tools/interactive/git-shell.exp"
   - "tools/interactive/ls-halcyon-session-dosbox.exp"
+  - "tools/interactive/ls-halcyon-session-route.exp (EXTINCTION: only -- a session pane has no console place route)"
   - tools/interactive/pci-net-load.exp
   - "tools/interactive/im1-sak-lever.exp"
   - "tools/interactive/im3-lex-curiata.exp"
   - "tools/interactive/ls-bghome-stall.exp"
   - "tools/interactive/ls-imperium.exp"
+  - "tools/interactive/viv-run.exp"
   - "tools/interactive/haul-post.exp"
   - "tools/interactive/haul-cape.exp"
   - "tools/interactive/haul-links.exp"
@@ -75,6 +83,7 @@ mirrors:
   - "tools/interactive/flood-174.exp"
   - "tools/interactive/freeze-172.exp"
   - "tools/interactive/ls-gfx-font.exp"
+  - "tools/interactive/ls-gfx.exp (EXTINCTION: only -- its bring-up wait for aurora's selftest line)"
   - "tools/warp/quarry-wedge.exp"
   - "tools/stall-watch.py (`kernel base:` — see below)"
   - "tools/check-arc-gates.sh"
@@ -91,6 +100,7 @@ mirrors:
   - "tools/interactive/ls-halcyon-session-instrument.exp"
   - "tools/interactive/ls-gfx-session-image.exp"
   - "tools/interactive/ls-halcyon.exp"
+  - "tools/interactive/pty-4.exp"
   - "tools/interactive/pty-susp-pouch.exp"
   - "tools/interactive/r5f9-ash.exp"
   - "tools/test-smp-classify.sh (the classifier's own fixtures — both literals)"
@@ -106,6 +116,7 @@ mirrors:
   - "tools/interactive/ls-gfx-throttle.exp"
   - "tools/interactive/im1-sak-lever.exp"
   - "tools/interactive/im3-lex-curiata.exp"
+  - "tools/interactive/ls-serial-sak-typeahead.exp"
   - "tools/interactive/ls-imperium.exp"
   - "tools/interactive/ls-bghome-stall.exp"
   - "tools/interactive/s7-nora-probe.exp"
@@ -122,7 +133,7 @@ literal-mentions:
   - "tools/interactive/go8d.exp (a prose note)"
   - "tools/check-console-lines.py (exempts the base line by its text; a reword only drops the exemption, and the check then fails)"
 created: 2026-08-01
-updated: 2026-11-03
+updated: 2026-11-09
 ---
 ## The surface
 
@@ -566,6 +577,11 @@ session. It is a new mirror of the unchanged prefix.
 
 The opt-in `ls-ut-paste` scenario fails on `EXTINCTION:` during its probe's run. It is a
 new mirror of the unchanged prefix.
+
+### Session-account consumer (November 4)
+
+The `ls-session-account` scenario fails on `EXTINCTION:` while it reads an account. It
+is a new mirror of the unchanged prefix.
 
 ### Existing PTY-envelope consumer (October 4)
 

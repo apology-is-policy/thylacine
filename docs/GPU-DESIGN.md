@@ -2344,7 +2344,9 @@ latency — owed with C-6's gate. Where it stops being ours to accept: Venus
 its own fences for, and v3d-native (Warp-7) puts the queue in our hands.
 Until then it sits with the host-side exposures §9.2 documents as TRUSTED —
 recorded HERE because "trusted host" must not read as "no client can reach
-it".
+it". (Since operator vote 81, the readback half no longer reaches QEMU: Lictor
+parks a readback until its context's earlier chains retire. Uploads and the
+egl-headless flush remain; see "Readbacks wait in Lictor" below.)
 
 **What this does NOT change.** The blit arm (the composed path every
 composable client takes on the GL host) stays on the sync slot exactly as
@@ -2495,6 +2497,278 @@ and require the gate to go RED; (c) state here what raises the stale wakes
 during the stall — and if nothing does on this host, say that the widening is
 INERT here and name the lane where it is not.
 
+Superseded on 2026-11-09 by operator vote 72: the widening is gone, so a
+synchronous command behind a readback stalls at `SUBMIT_DEADLINE_MS` on every
+lane, and the DEADLINE arm asks that the engine revive after the readback rather
+than that every present behind it succeed.
+
+**Readbacks wait in Lictor, never in QEMU (operator vote 81, 2026-11-09).**
+
+*What the Pi showed.* Vote 72a's first 900 ms judgment on thyla-pi (QEMU
+10.0.11, virglrenderer 1.1.0, V3D, KVM) went red, and red identically with vote
+72a taken out. A host-side sampler of QEMU's threads and QEMU's own MMIO trace
+(work/nov03-mm1/pi-sample, pi-trace) found the cause:
+- Within 3-7 ms of decoding a client's `TRANSFER_FROM_HOST_3D` of a busy BO,
+  QEMU's main thread entered V3D's wait-BO ioctl. It stayed there 859-907 ms,
+  holding the big QEMU lock.
+- No vCPU completed an emulated MMIO write inside any hold.
+- The queued GPU notify and console writes landed within milliseconds after
+  each hold ended.
+
+Lictor's queue notify comes before every timed wait, and in the guest it froze
+for ~860 ms, so no guest deadline can bound the hold. Vote 72a is sound, but on
+this lane it never got to act. Consequence 1 above understated the stall. It is
+not only the device's: every vCPU that touches emulated hardware stops with it,
+including the console, every virtio device's notify and input delivery.
+`ioeventfd=on` does not take the GPU notify off the lock on this QEMU (737
+userspace notify writes in each arm), and the console and MSI-X-table exits
+need the lock anyway.
+
+*The rule.* Lictor hands QEMU a `TRANSFER_FROM_HOST_3D` only once the GPU work
+it would wait on has retired.
+- **Park.** A readback whose context has fenced chains in flight, or abandoned
+  and not yet retired, is parked. It is staged in its slot, and its owner is
+  told its fence id as usual, but it is not published.
+- **Queue behind it.** Every later fenced submission of that context (a
+  submit, a transfer either way, another readback) parks behind it, in order.
+- **Publish.** When the last chain of the context ahead of the readback
+  retires, the completion pump publishes the readback. It then publishes the
+  chains parked behind it, in order, up to the next parked readback, which
+  waits for the chains just published.
+
+The client sees no change. Its fence for the readback signals when the bytes
+have landed: after everything it submitted before the readback, and before
+anything it submitted after.
+
+*Which fences.* The vote's "fences submitted before it" are the readback's own
+context's. vrend executes the readback on the resource's context and waits only
+for the jobs that reference the resource (mesa v3d's map waits on that BO), and a
+client's resource is written by its own stream. C-6 run 2 measured that a
+client-context readback is not ordered behind another context's work: it waited
+84 ms against a 1335 ms queue on vrend's blitter context. The compositor's own
+reads of a client resource (the blit arm samples composable BOs) ride the
+synchronous slot. Those chains retire before the serve loop goes on, and a
+stalled one refuses every submission, a parked readback's publication included,
+so none is outstanding when a readback publishes. Waiting on every context's
+chains instead would let one client's backlog delay another client's readback
+and, through the barrier, that client's later submits. That was rejected.
+
+*Why this is not the quiescence gate rejected above.* That gate skipped the
+readback while the context had work in flight and composed from stale pages, so
+a single-buffered client at its throttle depth was never composed. A parked
+readback is never skipped. The barrier makes the context quiesce at the
+readback by holding back what was submitted after it. The cost falls on that
+context alone: one pipeline bubble per readback, while QEMU decodes a transfer
+whose work is done, and the overlap the client loses between its readback and
+its next frame.
+
+*Ids.* The owner id is minted at submission, because the owner is told it then.
+The wire id (`crate::fence`) is taken at publication and written into the staged
+header at that point. The device therefore sees wire ids in publication order,
+and the sequence still rewinds only on an idle device.
+
+*Accounting.* A parked chain holds its slot and counts in its context's
+`fences_in_flight`, which the share, `verify`'s gate and every quiesce predicate
+read. It is not on the device, though: no abandonment clock runs for it,
+`device_idle` does not see it, and the hold lever cannot reach it. Its wait is
+bounded by its prefix, because each chain ahead of it is abandoned at
+`FENCE_ABANDON_MS` if it never retires. A chain parked behind an owed free
+(4.5.15) waits for that free's repeat instead. The repeat waits for the chains
+on the device that can reach the resource and for its turn in the owed-free pass,
+and the barrier lets the chain go for one window after a repeat the device is too
+slow to answer.
+- **Abandoned prefix.** A readback must not run while a chain abandoned ahead of
+  it may still be running. That chain may never retire, though, and a parked
+  chain has no abandonment clock of its own. Left parked, it would count in the
+  lane until its context died: tapestryd's poll stays at 1 ms while any fenced
+  chain is outstanding (the bound audit F6 put on it), and slots held by parked
+  chains hide the lane's exhaustion from its clients. So when a context has an
+  abandoned chain not yet retired, the completion pump releases every parked
+  chain of that context as refused (`ok = false`, not abandoned). The device
+  never saw them, so their slots return to the pool. The context is already
+  poisoned: its fence stream is over and the seam refuses its fenced work, so
+  nothing it could still do needs them. The compositor's readback is released
+  the same way, and that frees the reserved slot for every other surface;
+  `gl_adoption` refuses the poisoned context, and its surface keeps its last
+  frame. A released chain's tag says so (`released`), and it is not a
+  completion. The seam counts fences densely (a count of N means everything up
+  to N finished), so counting a released chain would carry the count past the
+  abandoned fence ahead of it, and a wait on either would return as if it had
+  finished. Nor can the count be paid later, at the vindication: a client that
+  never waited inside the poisoned window would then resume over a readback
+  that never ran and submits whose draws never executed, and could not tell.
+  So a released client chain is never counted, and it ends its context's fence
+  stream for good (`released` on the context): a waiter reads EOF, fenced work
+  is refused, `verify` is refused, the context is not composed, and the client
+  must make a new context. Device liveness stays the poison's: the vindication
+  still un-poisons the context, so its memory is reclaimed and its destroy runs
+  the ordinary path. Lictor keeps the same latch where the release happens: a
+  context with a released client chain parks every later chain, and the pump
+  releases it in turn, until a destroy of the device context the released chain
+  rode completes. The record names the seam context's pub, so it holds the
+  context's chains on both its device contexts, GL and venus, and tapestryd never
+  reissues a pub while a slot that carried it has a context, is condemned, or owes
+  a destroy (section 4.5.15).
+  The seam latches only on its next pump, and Lictor's own loop runs the pump's
+  release in between, so the seam can admit one more chain from the older view.
+  Published, that chain would run after a readback that never ran, and its
+  completion would count past it. (First written as "keeps it parked until its
+  late retirement", which round 1's F1 found pinned the poll; then as "counts as
+  signaled", which round 2's F1 found passed the abandoned fence; then as "owed
+  until the vindication", which round 2's F5 found resumed a broken stream; then
+  with the latch in the seam alone, which round 3's F1 found admitted a chain
+  from the seam's older view.)
+- **The harness hold.** A chain whose retirement the test hold swallowed
+  (#177) has finished on the device, so nothing parked waits for it. Otherwise
+  a held client would park the compositor's readback on the reserved slot: the
+  cross-client wedge that ROUND F4 closed.
+- **Stalled engine.** Nothing publishes while the engine is stalled. At revival
+  the pump runs its plan: a poisoned or released context's parked chains are
+  released, and the rest go by the rules above, except that for a synchronous
+  deadline after a revival no owed free holds a chain back (4.5.15).
+- **Dead engine.** A parked chain is released (`ok = false`, `released`, not
+  abandoned). The device never saw it, so its slot returns to the pool and
+  nothing it named is at risk. The seam ends its context's fence stream for
+  good, as for any released client chain.
+
+*The compositor readback.* `comp-rb` rides the client's context, so it parks
+like the client's own readback. The reserved slot holds it while it is parked,
+and the client's later submits queue behind it. `Cost::ReadbackWait` (issue to
+retire) now includes the park. The arm is otherwise unchanged: one compositor
+readback in flight, latest wins.
+
+*What it shows.* Each retired readback's tag carries how long it was parked and
+how long it took from publication to retirement (`parked_ms`, `exec_ms`). The
+second number is the one QEMU spent decoding it, so it is short when the rule
+holds and the whole queue when it does not. The context's ctl reports both for
+its last readback (`readback-parked-ms`, `readback-exec-ms`), and the warp ctl
+reports both for the last compositor readback that landed. A released or
+refused readback reports neither. A released one is no sample of `cost
+readback-wait`, which counts readbacks that retired; a refused one retired, so
+it is a sample. In a test build the warp ctl's census
+names each parked chain on its own row (`fenced-parked slot= fence= ctx= ring=
+rb= comp= parked_ms=`) beside the `fenced-held` rows of the chains on the
+device, so a slot held by a parked chain is never an anonymous missing count.
+The boot log says a readback that parked or ran 20 ms or more only when its park
+or its run at least doubles the last one said, so no client can flood the
+console from Lictor's serve loop.
+DEADLINE re-sentinels the backing before its queue and requires that no
+compositor readback was issued meanwhile, so the pixel ORDER reads is the
+client readback's own.
+
+*What it does not reach (weighed, as the vote asks for the egl-headless
+flush).* Any device step whose decode needs a GPU result is in the same class.
+The census:
+- **RESOURCE_FLUSH on egl-headless.** QEMU's display backend blits the scanout
+  and reads it back inside the flush's decode (`egl_scanout_flush`, then
+  `egl_fb_read`). The blit is a new job at the tail of V3D's single queue, which
+  all of QEMU's contexts share through one DRM file. Its readback therefore waits
+  for every job queued before it, from every context; this is the C-6 FLIGHT
+  REPORT's 1012 ms. Parking the flush behind its prefix cannot bound that unless
+  no context publishes while it waits. Only a device-wide drain before every
+  flush would, which costs every client a pipeline bubble at every display
+  update. That is not adopted here. It goes to the operator, with a measurement
+  of the flush holds that remain once readbacks park. A synchronous step queued
+  behind a client's backlog retires behind it through its own fence, so a flush
+  normally follows a drained queue. A flush still holds QEMU when a client
+  publishes between the step before it and the flush.
+- **TRANSFER_TO_HOST_3D into a busy resource.** mesa's write map waits for the
+  jobs that read the resource. Lictor cannot see which resources a chain's
+  opaque stream names, so parking uploads would drain the context at every
+  upload: a bubble every frame for a client that streams textures. mesa's guest
+  virgl driver already waits guest-side on a resource it knows is busy. Uploads
+  are not parked, and a client that uploads into a busy resource holds QEMU for
+  its own queue (F2b's lever, narrowed to uploads).
+- **The synchronous readbacks** (`verify`'s probe; the slot and BO import
+  witnesses; the blit-convention, screen and composability probes; `probe_screen`).
+  `verify` refuses a context with fences in flight, a parked chain included. The
+  others run once per event (an import, an adoption, bring-up, a test ctl),
+  never per frame, and each reads after a copy the compositor queued, so each can
+  hold QEMU once for whatever V3D has queued at that moment. They are not
+  parked; the count of such events bounds them.
+
+*The gate (C-6, `warp-prove readback`).* ARM, LIVE and F2B are unchanged.
+- **DEEP.** DEEP keeps its claim, because issue-to-retire still includes the
+  queue. Its CONSTRUCTED check moves to the fence timeline. A round is
+  constructed only if none of its heavy submits had retired when the readback was
+  issued. The old check compared the issue time against the time the last
+  retirement was observed, and it passed a readback issued after three of four
+  submits had retired: QEMU's holds delayed the sends, then the observation.
+- **DEADLINE**, redesigned. Six heavy submits, then the client's own
+  `transfer_from`, then one heavy submit `S_after` in a colour no queue index
+  uses, then ten presents of the bystander B. It requires four things:
+  - **PARKED**: the readback was parked at least `RB_PARK_FLOOR_MS` and took
+    under `RB_EXEC_BOUND_MS` from publication to retirement. This is the
+    positive control that the rule ran, and its discriminator.
+  - **ORDER**: the pixel the readback landed names the queue's last draw, not
+    `S_after`'s colour. This shows stream order and no tearing.
+  - **BOUND**: vote 72a, now able to act. The queue stood past
+    `RB_F2B_BOUND_MS` after B's first present, a present was refused while the
+    engine stalled, and none took longer than the bound.
+  - **HEALTH**: the engine is alive afterwards and nothing is poisoned.
+
+  The mutant with parking disabled must go red on PARKED, and on the Pi on
+  BOUND. The mutant whose later submits do not queue behind a parked readback
+  must go red on ORDER.
+- **ABANDON**. On its own connection, a context holds its retirements (the
+  harness hold), queues three heavy submits, then a readback, which parks, then
+  abandons its chains. The abandon must take exactly the three, which shows the
+  readback was parked and not on the device. Within two seconds, the context's
+  fences in flight must reach zero (the parked readback was released) while its
+  `fence-signaled` has not moved. The hold then comes off, the replay vindicates
+  the queue, and `fence-signaled` must rise by exactly three, the queue alone;
+  the context's `released` must read 1, a later submit must be refused (the
+  stream stays over), and `fenced-free` must be back where it was before the
+  hold (the slots came back, not only the counts). A mutant that never releases
+  a parked chain, one that counts a released chain at once, and one that
+  forgets to return a released chain's slot must each go red here.
+- **CLEAN** now waits, bounded, for the reserved slot idle and the whole client
+  pool free (`fenced-free` equal to `fenced-pool`), and says PASS.
+- **REOPEN** fills tapestryd's connection pool (the connect past it is refused:
+  the control), then 32 times closes one connection and opens another at once.
+  None may be refused, and one more than the pool is still refused afterwards;
+  both refusals must come inside a second, since a listener left unpolled at a
+  full pool would answer at the 5 s handshake deadline instead. It closes the
+  oldest and the newest of its connections in turn. A connection of an earlier
+  arm that leaves late, during the pairs, frees a slot and turns the arm red on
+  a sound build; the line then reads "taken".
+  Every arm above opens its own connection right after the last one's close; on
+  the Pi the pass that accepted before it serviced the hang-up refused DESTROY's
+  and FREE's connects. A build that accepts first must go red here. The arms
+  also close each BO's `map` fd with their connection: an open one keeps the
+  session, and so tapestryd's conn, standing until the process exits.
+- **Stalls during a leg's sends.** Another client's synchronous step waiting
+  behind a leg's queue stalls the engine, and a send it refuses is resent after
+  the revival, which comes only once the queue has retired, so the readback
+  publishes unparked. DEADLINE and ABANDON count the stall refusals their own
+  sends met, and an attempt that met any is unconstructed: it runs again, up to
+  four times, rather than being judged. On every run that client is the console
+  renderer. It paints every line said on the console (the leg's own just before
+  each window, and tapestryd's idle-throttle line up to 500 ms after a burst of
+  presents), and it flips its cursor every 30 frames on its own. On the Pi at f02c10862, every one of
+  DEADLINE's four attempts met a stall this way, and one round of DEEP had its
+  sends held up behind such a present.
+  So each such window (DEADLINE's and ABANDON's attempts, and the LIVE/DEEP
+  rounds) now opens just after a console present, once the console has gone
+  quiet for 700 ms. The next flip is then a whole cursor period away (2 s at
+  the idle rate), which is longer than the sends take. Both waits are bounded
+  (6 s for the quiet, 2.5 s for the present): past a bound the window opens
+  anyway and the stall rule decides. An unconstructed attempt's line says what the
+  settle saw and how many presents were served in its window. On a console
+  that quiet, DEADLINE's sends take about as long as the queue's first submit
+  runs on V3D: at 1c86ffbcf one of the six had retired at every take, with no
+  stall and no present in the window. "None retired" had held on earlier runs
+  only because console work in front of the queue delayed its head. So the
+  head may have retired (at most one of six), and the leg says which attempt
+  was constructed and how many had.
+
+*Witnesses whose premise was the hold.* `ls-graphical-sak-chain`'s readback and
+pointer legs, and `ls-graphical-keys-behind`'s readback leg, stood a client
+readback in the host loop. With readbacks parked, what a seat step meets behind
+such a client is the client's backlog, through the step's own fence: the stall at
+`SUBMIT_DEADLINE_MS` and the refusal are unchanged, and the host loop is not
+held. Their comments say so, and they are re-run on the Pi.
+
 ### 4.5.14 The owed round on C-6b (2026-08-18, OPUS fallback): 1 P0 / 3 P1 / 3 P2 / 3 P3
 
 The C-0d Fable close was dirty, so a follow-up was owed on its fixes plus C-6b.
@@ -2532,8 +2806,9 @@ a general floor would reject legitimate compressed textures).
 #### 4.5.15 The synchronous deadline is a two-stage latch: STALLED, then DEAD (decided 2026-10-29, operator vote 29)
 
 **What it replaces.** A synchronous chain that saw `SUBMIT_DEADLINE_MS`
-(500 ms) of stale wakes latched `Controlq.dead`, permanently (§4.5.13 widens
-the deadline to `FENCE_ABANDON_MS` while a readback is in flight). The latch
+(500 ms) of stale wakes latched `Controlq.dead`, permanently (§4.5.13 widened
+the deadline to `FENCE_ABANDON_MS` while a readback was in flight, until vote
+72 removed the widening). The latch
 answers the #31 cascade: a late completion writing a response buffer that the
 next command has already reused. Because it was permanent, any host stall past
 500 ms cost the display for the boot. It was measured on thyla-pi on
@@ -2590,23 +2865,141 @@ block the serve loop, and seat input with it. Neither was taken.
     pins kept;
   - the 30 s park bound.
   A stall is not a poisoned chain. It is the one non-quiescent state
-  that comes back by itself. A seat episode whose restoration meets a stall
+  that comes back by itself. A takeover that meets a stall starts over when the
+  engine revives, under the kernel's deadline: the command it stalled on has no answer
+  yet, and everything it repeats is idempotent (TRUSTED-PATH, vote 50's audit). A stall
+  a takeover still waits on 33 s after its chord (`TAKEOVER_BOUND_MS`) is death whatever
+  its own age, and a cursor stall then is abandonment, so two waits in series still end
+  inside the kernel's 35 s limit (vote 80). A frame
+  paint that meets one stays owed: the next pass paints it again, and Corvus reads no
+  key until it is visible. A seat episode whose restoration meets a stall
   fails at once, so its grant is cancelled. The seat's return to normal then
   waits for the stall: it rebinds once the engine revives, or goes back
   without its display once the engine dies (TRUSTED-PATH §7, vote 30).
-- **Restoring a scanout needs only the control queue's quiescence.** A late
-  cursor chain can touch only a cursor plane, and a cursor queue that is not
-  idle already keeps any later takeover out. So a poisoned cursor queue on a
-  live engine does not cost the display.
+- **Restoring a scanout needs only synchronous quiescence.** A late cursor chain
+  can touch only a cursor plane, and a cursor queue that is not idle already keeps
+  any later takeover out. A client's fenced chain, in flight or poisoned, could
+  equally have been running with that frame on the glass before the episode, so
+  rebinding adds nothing for it to reach. Neither costs the display. (Vote 50: a
+  chain that had to retire first would strand the trusted scene behind a client's
+  poison, since this refusal repeats every pass.)
+- **Takeover waits for no fenced chain.** `Gpu::takeover_clear` asks that the cursor
+  queue is idle and no synchronous chain is outstanding. A fenced chain cannot reach
+  the trusted image: `Objects::valid_id` refuses a trusted id on every named route,
+  a ctx-0 transfer included, the trusted resource is never attached to a context, and
+  only the broker binds scanouts (TRUSTED-PATH, vote 50). The trusted paint still
+  retires behind what the host has queued, since a synchronous chain is fenced, so a
+  client's backlog delays a takeover: on V3D, behind the C-6 gate's queue, synchronous
+  commands retired 241 to 311 ms after their 500 ms deadline.
+- **No serving synchronous command waits past `SUBMIT_DEADLINE_MS`, readback or
+  not** (operator vote 72, 2026-11-05). The wait used to widen to `FENCE_ABANDON_MS`
+  while any readback was in flight, outside a trusted episode; one transfer from any
+  client then stopped the serve loop for as long as that client queued, so a chord went
+  unseen and keys were lost. The widening predated the recoverable stall (vote 29),
+  which already keeps a busy device from latching `dead`. A command behind a readback
+  now stalls the engine at 500 ms; submissions are refused until the chain retires, so a
+  bystander's present answers an error for that long instead of blocking, and the C-6
+  gate's DEADLINE arm counts a recovered stall as survival. Only bring-up, before the
+  serve loop, still waits the abandonment bound. Since vote 81 a readback no longer
+  holds the host loop (Lictor parks it until its context's earlier chains retire).
+  What a synchronous command meets behind a client is therefore that client's
+  backlog, through the command's own fence, and the stall and the refusal are as
+  above.
+- **Input does not wait for the serve loop** (operator vote 72, second half). A
+  synchronous wait still holds the serve loop up to `SUBMIT_DEADLINE_MS`, so Lictor's
+  input thread (`backend/intake.rs`) drains every eventq every 4 ms into a 4096-entry
+  queue, and the serve loop takes it whole each pass. The thread never prints and never
+  calls the seat endpoint; every seat decision stays on the serve loop. A full queue
+  drops the entry and releases that device's held keys where it was dropped.
+- **The cursor lane stalls and comes back.** A serving `cursor_command` never widens:
+  it stalls at `SUBMIT_DEADLINE_MS`, so a client's readback cannot hold the serve loop
+  through a pointer motion. A chain that outlives `FENCE_ABANDON_MS` is abandoned, not
+  poisoned: `Queue::idle` stays false, so takeover stays out, and a well-formed late
+  retirement frees the lane. While the lane's stall stands a takeover waits on it and
+  renews the kernel's deadline, as behind the control queue (vote 79); the
+  abandonment ends that wait. A malformed entry, an unsolicited one, or a step of the
+  plane's own that the device refused poisons it, until device reset. Tapestry retries a
+  refused pointer update (`CURSOR_RETRY_MS`) rather than latching it, and forgets what it
+  last sent, since a stalled command's outcome is unknown.
 - **An unknown outcome keeps what it named.** A stalled command may have
   executed, so every guest resource it named stays referenced:
   - a stalled ATTACH keeps its pins, as `Device::attach` already does for any
     error;
-  - a stalled DETACH or UNREF releases nothing;
+  - a stalled DETACH releases nothing;
+  - a free the device has not acknowledged is owed. A stalled UNREF, one
+    refused before staging, and one the device refused all leave the
+    resource possibly on the device, so lictor keeps its id retiring and its
+    pins held, and repeats the free while the engine takes commands, standing
+    down for one window after a repeat that meets a stall (the retirement
+    paragraph below). A free
+    a chain could still reach is owed too, unsent (the retirement paragraph
+    below). The repeat runs while the seat is normal, after the seat's look
+    at the chord in each serve pass and never inside a request, where a
+    stall it met would read as that request's. Each free waits until no
+    chain on the device can reach its resource, as a first try waits (one
+    yet to publish that could parks until the free is paid: the retirement
+    paragraph below), and goes whole: a
+    CTX_DETACH_RESOURCE for each context link lictor's ledger still records
+    (a retired id names none), the unmap a mapped blob needs, then the free.
+    A pass looks at sixteen owed frees at most for a parked context's turn
+    (below), only frees that hold a parked chain back, and sixteen in rotation, and stops at eight
+    device commands or `SUBMIT_DEADLINE_MS` spent, so a pass adds at most
+    about a second before the seat's next look at the chord; a free cut
+    short keeps what it reached. The device answers a repeat of a free that ran with "no such
+    resource", which lictor reads as gone, as it reads a first free
+    answered so (QEMU v10.0 `virgl_cmd_resource_unref`); any other refusal
+    leaves the resource and its backing in place. QEMU refuses a free of
+    an existing resource only when the host unmap fails, which clears the
+    mapping, so the next repeat runs; three answered refusals give the free
+    up, its id, pins and extent kept. A stall or a death is never an
+    answer. A mapped HOST3D blob's unmap is owed the same way (a repeat of
+    one that ran is answered OK), and its extent returns only once both are
+    acknowledged. A create whose unwind left a free owed keeps its id
+    retiring until it is paid. Only frees made while serving are owed; a
+    bring-up probe's refused free, a ring's teardown included, is said and
+    leaked as before. The state machine (`gpu_api::OwedFree`) and the
+    answer each response reads as (`gpu_api::unref_frees`) are host-tested.
+    The readback leg witnesses three paths: FREE, a guest-backed free a stall
+    meets (`warp-stall-free`), repaid once the engine lives, its id retired;
+    TAKEN, a free a poisoned chain holds, left unpaid while the poison
+    stands and paid once the vindication retires the chain, its link
+    detached and its id retired; and BUSY, the same free still owed once
+    its context is live again (`warp-defer-frees` has the pass skip it a
+    while), paid although the context's next chain is held, because that
+    chain parks behind it; APART and LIFT, which free's stall lowers that
+    chain's barrier (the retirement paragraph below). The HOST3D extent's order, a create's
+    unwind, the display drain's owing and the give-up have no leg (the
+    readback host runs virgl without venus);
   - a stalled CREATE consumes its id, because the reservation precedes the
-    command and is never undone;
-  - a stalled hostmem MAP or UNMAP leaks its extent (`mint_host3d_ring`,
-    `drop_host3d_ring`).
+    command and is never undone. A warp context's id is its slot's
+    (`slot + 1`, and `WARP_VENUS_CTX_BASE + slot` for its venus one). A GL
+    create a stall met condemns that slot and owes the id a destroy; a venus
+    create a stall met owes the venus id a destroy and fails that slot's
+    venus mints until it runs, without condemning a slot whose GL context
+    lives on. Once the engine is live the destroy runs,
+    ordered after the create, and its completion frees the id whichever
+    way the create went. A destroy a stall refused before staging, or one a
+    stall met, leaves the id named but destroyable: lictor un-retires the
+    context and tapestryd owes the destroy the same way. A repeat of one
+    that ran is harmless: QEMU's CTX_DESTROY has no error path and
+    virglrenderer only drops the handle from its table (QEMU v10.0
+    `virgl_cmd_context_destroy`, virglrenderer 1.1.0 `virgl_context_remove`),
+    and no create can take the id meanwhile. The vindication's destroys are
+    owed the same way, since no later vindication of that context comes.
+    An answered refusal, or a dead engine, condemns the slot, which a later
+    vindication of a live context may recover; lictor's ledger keeps a
+    refused id named, and a condemned slot holds its pub. A slot is reused only once each device
+    context it carried is gone or refused for good. tapestryd reads a
+    create's or a destroy's failure on that reply's own span
+    (`Stats::stalls_begun`), as lictor reads it, so a stall lictor met
+    between two requests never has tapestryd owe a destroy for an id lictor
+    released. The readback leg's CREATE and DESTROY arms witness the GL
+    band, aiming one stall shot at their own next create or their own ctx's
+    destroy (`warp-stall-create`, `warp-stall-destroy`; twenty shots per
+    boot across these, FREE, YIELD and APART). The venus band runs the same code, but no
+    leg drives it: the readback host runs virgl without venus;
+  - a refused detach of a HOST3D ring's guest mapping leaks its extent until
+    restart (`drop_host3d_ring`); nothing has been asked of the device.
   A stalled SET_SCANOUT is the case a permanent latch never had to answer: once
   the device catches up, the display may name the resource the bind carried, so
   that resource is *condemned*. Its free is then deferred to the next accepted
@@ -2620,10 +3013,10 @@ block the serve loop, and seat input with it. Neither was taken.
   read as a device refusal and cost 3D for the boot.
 - **The cursor queue follows the same two stages.** A missed deadline leaves
   its chain outstanding, so the queue is not idle: cursor commands are refused
-  and `all_work_retired` is false. The completion pump retires the chain when
+  and `takeover_clear` is false. The completion pump retires the chain when
   its used entry arrives, with the validation an on-time completion gets, and a
   malformed entry still poisons the queue. A chain outstanding for
-  `FENCE_ABANDON_MS` poisons it permanently, as before.
+  `FENCE_ABANDON_MS` abandons the queue until that chain retires.
 
 **What a stall costs tapestryd.** During a stall, every request tapestryd makes
 other than a retirement fails at once, and the present path skips frames. A
@@ -2639,10 +3032,128 @@ holding the resource and for chains naming it directly. `CtxDetachResource` and
 device-wide sync work, and a dead engine refuses them. A cursor chain touches only a
 cursor plane, so the cursor queue holds no retirement, and a poisoned cursor queue
 on a live engine costs a surface nothing. A context holds what is attached to it and
-any host blob minted under it, attached or not. A poisoned slot may never
-end, so a retirement that only a poisoned holder blocks is refused at once. One
+any host blob minted under it, attached or not, until its destroy completes: a
+context later given the same id holds none of them. A poisoned slot may never
+end, so a retirement that only a poisoned holder blocks is admitted at once. One
 that a chain in flight blocks still parks, within the bound, which keeps the barrier
 for the short case. Another client's poison then costs a surface nothing.
+
+A HOST3D ring or device-memory blob (`RetireHost3dRing`, `DropHost3dRing`) is the
+exception after admission. The retirement waits for its chains as any does, but
+its free waits for the clients' mappings, not for chains: freed at once when only
+lictor maps it, otherwise parked and freed at a later mint once the last client
+mapping and claimed pin are gone, with no second look at the chains (its owed
+repeat, if one is owed, waits for them as any repeat does). Its backing is host
+memory, so a chain still running cannot write guest memory. The extent returns to
+the allocator only once the unmap and the free are both acknowledged, a re-mint
+maps a fresh blob, and the id stays named in the ledger until the free is
+journaled. A SUBMIT_3D's commands are decoded in controlq order, before the free.
+Commands the ring itself carries are decoded later, by the renderer's ring
+thread, but they resolve resource ids through the context's table, which the free
+empties, so a late one misses. That thread is the trusted host half (8 and 9.2),
+and no chain gate could cover it, since it is not a chain.
+
+Admitted with a holder still there, a retirement is refused, its pins kept, except
+a resource's free: lictor takes that as a debt. The ledger entry retires and the free
+is owed unsent; the owed-free pass sends it once no chain on the device can reach
+the resource,
+after detaching the resource's context links, which the holder's refused
+`CtxDetachResource` left. The refused `DetachBacking` needs no repeat: QEMU's free
+detaches the guest backing itself (QEMU v10.0 `virgl_cmd_resource_unref`). The
+answer is still a refusal, since nothing has been freed yet. A refused free used to
+be final, and no client asks again, so the entry and its pins stayed for the boot
+while tapestryd's vindication uncharged the context: a client repeating poison and
+destroy pinned a context's backing cap each time, uncharged, and spent a ledger entry
+per buffer toward `MAX_OBJECTS`. A resource on the display, a dead engine, or a debt
+at its bound is refused as before.
+
+Once the poison clears, the context is live and may render again, and every chain
+of it can reach the resource until the pass has detached it. A free that waited for
+every chain on the device that can reach it would wait for as long as the context
+kept one there, while tapestryd had already uncharged it. So a chain that can reach
+an owed free does not go to the device: it parks, as a readback does (4.5.13), with
+its context's later chains behind it, until the free is paid (`gpu_api::OwedReach`,
+which lictor builds before every completion pump, the only place a parked chain
+publishes). The free then waits only on the chains already on the device, and those
+end. Its repeat does not wait on a parked chain: none is on the device, none
+publishes while the pass runs, and one that can reach the free waits for it, so
+counting it would hold each on the other for good. Only frees no poisoned chain
+reaches hold chains back: one a poisoned chain reaches waits for the vindication
+whatever else runs, and a chain parked behind it would wait as long with no clock of
+its own. Another context that holds the resource parks too, until the chains on the
+device that reach the resource retire, or are abandoned at their bound, which
+poisons them and lets it go. In practice that is only the owner's: the compositor's
+context, which holds adopted BOs, puts no fenced chain on the device, and the
+convention probe's context is tapestryd's own and synchronous. The compositor's
+readback of a client's BO rides the client's context as a transfer, though, so it
+waits behind that context's parked chains as any readback does (4.5.13), holding
+the reserved slot meanwhile: other surfaces' readbacks are refused until the
+client's free is paid or the context goes in a stand-down's window (below), which
+under a load that stalls every repeat comes at least once in as many windows as
+there are contexts with parked chains (longer only while more than sixteen of
+the frees the context waits on wait in turn for chains on the device, which end),
+and for up to 2 s per arm of the test lever below.
+
+The pass stands down for one window after any of its commands meets a stall,
+and a free's barrier only after that free's own repeat met one
+(`gpu_api::owed_stands_down`, `gpu_api::owed_barrier`): from that stall until
+another stall begins, or until the engine has run `OWED_QUIET_MS`, a synchronous
+deadline, since that stall revived. The revival's window goes to the requests,
+and every context that holds that free goes to the device, whatever other owed
+free it holds (`OwedReach::of`); a transfer naming another owed free still parks.
+The free then waits for those chains as for any. Without it, under a load that
+makes every synchronous command miss its deadline, a repeat would stall the
+engine again at each revival, before any request of that serve pass ran, and the
+chains held back for it would wait for as long as the load lasted. An ordinary
+destroy under such a load leaves exactly that state, no poison needed: its detach
+stalls, so the link stays, and its free stalls and is owed. Two destroys leave
+two such frees on one context, which is why the stand-down lets the context go
+rather than only its chains that reach no other owed free: otherwise the two
+frees would stand down in turn and the context would never go. Any other stall
+leaves the pass and every barrier up: at its revival the chains a barrier holds
+stay parked, and the pass takes its turn ahead of the requests, after whatever
+else that revival's pump published (a readback's run, say). Standing down after
+every stall instead, a workload needs only one slow command per revival, queued
+behind the very chains the lowered barrier had just let go, to keep the pass from
+ever running and the barrier lifted for good. Lowering every barrier when the
+pass met a stall at any one free fails the same way: a context busy enough to
+make the pass's repeat of another client's free stall had its chains let past its
+own free at every such revival. A free is tried only while no chain on the device
+can reach it, so the work of the contexts its stand-down lets go cannot have
+caused its stall. So the requests get the window after each stall of the pass's
+own, and a context's chains go only after a stall met by a free it holds.
+
+Under such a load the pass tries one free a window, so the free it tries decides
+which context goes. Each pass first tries one free a parked chain waits on,
+taking the contexts with parked chains in turn, then the rest in rotation
+(`gpu_api::OwedPass`). In plain rotation a context would wait for its own free's
+turn once per owed free, and another client can owe hundreds of cheap ones on an
+idle context; taken in turn, it waits once per context with a parked chain, and
+the seam's context slots bound those. A turn looks only at frees that hold a
+parked chain back, never one a poisoned chain reaches, and at sixteen at most;
+the rotation has its own sixteen, so a turn never spends it. A context whose
+turn the contexts before it cut short starts the next turn, with all sixteen
+looks. Only a context more than sixteen of whose frees, ahead in the queue, wait
+in turn for chains on the device waits longer, and those chains end. A free is
+paid once the device answers a
+repeat in time. A device that answers none in time leaves it owed, its id
+retiring and its pins held: the debt's bound, never a reuse. The predicates and
+the order are host-tested. The readback leg witnesses the wiring with a test
+lever (the bo ctl's `stall-repay`: one stall shot on the pass's next repeat of
+that BO's free, twelve a boot, each gone in 2 s if no repeat takes it). In YIELD
+the free is paid no sooner than a window after its repeat's own stall, while in
+FREE, after a stall that met the client's own free rather than the pass, the
+repay comes at the pass's next turn. In LIFT a context holds two owed frees with
+a chain parked behind them: the pass tries the first as that context's turn (the
+warp ctl's `frees-parked-first`), its repeat meets the shot, the chain goes to
+the device in the window though the context holds the other free, and the
+context's next chain, sent once the window has closed, parks again. In APART a
+chain parked behind a deferred free stays parked through the window after
+another client's free's repeat stalls. No leg drives a sustained load, so none
+shows the turn serving one context among several. The readback leg's BUSY arm
+witnesses the barrier with a test lever (`warp-defer-frees`: the caller's own
+context, sixteen arms a boot of 2 s at most) that has the pass skip the context's
+frees while its next chain goes in; APART and LIFT use it too.
 
 The global rule this replaces was measured on the GL host: after one abandoned
 fence on an unrelated client's context, a plain new surface met a refused retirement
@@ -2654,16 +3165,17 @@ tables, and a transfer naming a context looks up again in that context's table. 
 chain reaches only what its context holds. The order of detaching holds: after
 `CtxDetachResource`, no new chain of that context can name the resource. Host
 behaviour here is I-45's trusted half. Refusing on any poison, globally, was the
-smaller change and was not taken: a refused pin is not retried and has no charge
-behind it, so a client could leak pins at full speed. Scoped, the only pins refused
-are the poisoned holder's own.
+smaller change and was not taken: a refused pin had no charge behind it, so a client
+could leak pins at full speed. Scoped, only the poisoned holder's own retirements
+wait on its poison, and its frees are paid once the poison clears and the chains
+already on the device that can reach them retire.
 
 **A stall takes no composition verdict.** The composition health tick
 (§4.5.12) fails closed: a failed step latches GPU composition OFF, sticky. A
 stall says nothing about the compositor's context, though, so a step that met
 one must not decide it. Every broker reply carries the engine state (live,
-stalled, dead) and the monotone stall count, an error reply included, and the
-proxy adopts them on every reply. The tick reads its failure against them
+stalled, dead), the monotone stall count and that count as the request began,
+an error reply included, and the proxy adopts them on every reply. The tick reads its failure against them
 (`gpu_api::failure_cause`):
 - a stall began during the tick, or the engine is still stalled: some step's
   outcome is unknown, so the tick takes no verdict. That present is composed by
@@ -2700,7 +3212,10 @@ request revives the engine, so the reply already reads live with the stall
 count moved: the count, not the engine state, is what tells the compositor its
 step met a stall. A command that is refused, at staging or at submission, or
 ends before its chain retires, spends the shot and says `stall shot LOST`, so
-the shot never lands on a later command. tapestryd aims them at the compositor context's create, at one
+the shot never lands on a later command. The compositor's own shot
+(`TestStallShot`, which tapestryd bounds) is bound to its connection: it rides
+that connection's next request, whatever it is, and the broker spends it at
+that request's end if no synchronous command took it. tapestryd aims them at the compositor context's create, at one
 blit-convention attempt, and at a health step once GPU composition runs.
 `tools/warp-host.sh composed-stall` (the GL host) asks that each bring-up step
 retries and succeeds, with no blit class left to the CPU, and that the health

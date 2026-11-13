@@ -40,9 +40,9 @@ anywhere.
 | 20 | `T_E_NOTDIR` | ENOTDIR | X-search on a non-directory component — precedes the X-check, so 0755 and 0644 answer alike; distinct from `NOENT` ("safe to create") |
 | 21 | `T_E_ISDIR` | EISDIR | write/create names a directory — the 9P server, or `SYS_OPEN_CREATE`'s lexical leaf rows |
 | 22 | `T_E_INVAL` | EINVAL | structurally malformed argument |
-| 24 | `T_E_MFILE` | EMFILE | a per-Proc table is full (the socket table `VIV_SOCK_MAX`); no free handle at or above a dup floor (HANDLE_DUP_TO's DUP_LOWEST, F_DUPFD) |
+| 24 | `T_E_MFILE` | EMFILE | a per-Proc table is full (the socket table `VIV_SOCK_MAX`); no free handle at or above a dup floor (HANDLE_DUP_TO's DUP_LOWEST, F_DUPFD); no slot for SYS_ACCOUNT CHILD's handle |
 | 25 | `T_E_NOTTY` | ENOTTY | a `TC*`/`TIOC*` op on a non-tty fd; `isatty()` reads it via a failed `TIOCGWINSZ` |
-| 28 | `T_E_NOSPC` | ENOSPC | bounded terminal interaction binding pool or identifier capacity exhausted |
+| 28 | `T_E_NOSPC` | ENOSPC | bounded terminal interaction binding pool or identifier capacity exhausted; a memory account's child past the tree's depth |
 | 32 | `T_E_PIPE` | EPIPE | write to a closed read end |
 | 34 | `T_E_RANGE` | ERANGE | in-range for the type, past an implementation limit |
 | 37 | `T_E_NOLCK` | ENOLCK | `SYS_FILE_LOCK`: the Dev serves no locks, the server refuses (Rlock ERROR/GRACE/undefined status, a Tlock/Tgetlock Rlerror ENOSYS), or the Proc's lock-owner table is full (I-32) |
@@ -58,7 +58,7 @@ anywhere.
 | 107 | `T_E_NOTCONN` | ENOTCONN | `getpeername()`/`shutdown()` on an entry still FRESH |
 | 110 | `T_E_TIMEDOUT` | ETIMEDOUT | a `tsleep`/`torpor_wait` deadline elapsed |
 | 111 | `T_E_CONNREFUSED` | ECONNREFUSED | netd rejected the dial, or the data open failed after connect |
-| 116 | `T_E_STALE` | ESTALE | the descriptor's file has died on its server (Stratum kills an unlinked file's fids and reuses the number), or a loose cached open's re-walk no longer reaches its file (renamed, unlinked or replaced since the open): `SYS_FILE_LOCK`, and `SYS_WSTAT` on such an open; also a server's answer for its own dead handle when its client must tell that from a lost link: `tapestryd`'s present on a dormant pixel generation and HIN1's `BadHandle` (vote 66) |
+| 116 | `T_E_STALE` | ESTALE | the descriptor's file has died on its server (Stratum kills an unlinked file's fids and reuses the number), or a loose cached open's re-walk no longer reaches its file (renamed, unlinked or replaced since the open): `SYS_FILE_LOCK`, and `SYS_WSTAT` on such an open; also a server's answer for its own dead handle when its client must tell that from a lost link: `tapestryd`'s present on a dormant pixel generation and HIN1's `BadHandle` (vote 66); and `SYS_ACCOUNT` or the spawn account tail naming an account by an incarnation that is not its own (vote 76) |
 | 125 | `T_E_CANCELED` | ECANCELED | a Loom chain op cancelled by a failed predecessor |
 
 The **socket family** (24 remapped to EMFILE for the socket table, and 88/93/97/98/103/106/107/111) was appended at VIVARIUM V-5, its values read directly from `third_party/musl/arch/generic/bits/errno.h` because a Linux guest's libc compares against exactly those numbers — collapsing them to `EINVAL` would make a guest retry a connection that can never succeed. `INTR` (4), `2BIG` (7), `CHILD` (10) and `NOTTY` (25) each landed under the same append-under-ratified-scripture precedent the `-1` and change-protocol sections describe.

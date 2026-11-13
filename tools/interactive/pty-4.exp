@@ -8,14 +8,18 @@
 # session dance and takes job control -> stop / jobs / fg / re-stop / bg /
 # fg + ^C -> `exit` unwinds back to the outer prompt.
 #
-# The stoppable job is `sleep` (NOT `cat`): a v1.0 pts has no foreground-read
-# arbitration (TTIN), so a stopped job holding an outstanding terminal read
-# would steal the shell's input; `sleep` holds no terminal read and exercises
-# the whole stop/report/resume machinery cleanly (interactive `cat`-under-^Z is
-# the documented TTIN follow-up). The sleep is LONG (30 s, ended by ^C, never
-# by its deadline): a short sleep's wall clock keeps running WHILE stopped, so
-# both the stop window and the post-resume window would race the expiry (the
-# PTY-4e F2 right edge -- the artifact that originally masked the re-stop leg).
+# The stoppable job is `debug-child fgtick` (NOT `cat`): a v1.0 pts has no
+# foreground-read arbitration (TTIN), so a stopped job holding an outstanding
+# terminal read would steal the shell's input; this job holds no terminal read
+# and exercises the whole stop/report/resume machinery cleanly (interactive
+# `cat`-under-^Z is the documented TTIN follow-up). It writes FGTICK only while
+# it holds the terminal, so each stop key is typed when the job can take it
+# (lc_expect_fgtick) and no key waits on a clock: a key typed before ut has
+# handed the terminal over reaches ut, and the leg hangs on a job that runs on.
+# The job is ended by ^C, never by a deadline: its limit is a count of its own
+# ticks, which a stopped job does not spend, so neither the stop window nor the
+# post-resume window races an expiry (the PTY-4e F2 right edge -- the artifact
+# that originally masked the re-stop leg).
 #
 # Echo discipline: the outer console is RAW (-echo) under the dance and the
 # inner editor draws its own echo, so rendered text is always something a
@@ -54,11 +58,12 @@ expect {
 sleep 1
 lc_run_expect "echo pty-inner | tr a-z A-Z" "PTY-INNER"
 
-# sleep 30 + ^Z: the INNER pts cooks 0x1a (VSUSP) -> tty:susp -> the default
-# STOP -> the WAIT_UNTRACED report -> the inner ut takes the terminal back and
-# prints the Stopped line (emit_line -> the pts -> the host -> here). The
-# settle covers spawn + pgrp + terminal handoff; the 30 s deadline can never
-# expire inside the ladder.
+# A ticking job + ^Z: the INNER pts cooks 0x1a (VSUSP) -> tty:susp -> the
+# default STOP -> the WAIT_UNTRACED report -> the inner ut takes the terminal
+# back and prints the Stopped line (emit_line -> the pts -> the host -> here).
+# The key is typed once the job has said it holds the terminal
+# (lc_expect_fgtick); the job ends itself after 600 ticks of 100 ms, counted
+# only while it runs.
 # THE FAILURE-TIME PROBE for this leg (lib.exp `lc_fail_probe`). 2026-08-16
 # this leg burned a retry: echo stopped at `sleep `, `Stopped` never came,
 # guest ALIVE -- and the capture alone cannot say why (see lib.exp). If it
@@ -66,15 +71,15 @@ lc_run_expect "echo pty-inner | tr a-z A-Z" "PTY-INNER"
 #
 #   1. listen 2 s              -- is anything STILL arriving?
 #   2. "\r", 2 s               -- does the editor answer? (a shell is reading)
-#   3. "jobs\r", 3 s           -- `Stopped ... sleep 30` here => the stop
-#                                 HAPPENED and the earlier line was LOST on
-#                                 the way out (OUTPUT loss). A prompt and no
-#                                 job => `sleep` ran with no arg / the line
-#                                 never arrived whole (INPUT truncation).
-#                                 Silence => nobody is reading the terminal.
-#   4. "\x03", 3 s             -- if sleep 30 was RUNNING in the foreground
-#                                 (the ^Z byte itself lost, not the `30`),
-#                                 this ends it and the prompt returns.
+#   3. "jobs\r", 3 s           -- `Stopped ... debug-child fgtick` here =>
+#                                 the stop HAPPENED and the earlier line was
+#                                 LOST on the way out (OUTPUT loss). A prompt
+#                                 and no job => the line never arrived whole
+#                                 (INPUT truncation). Silence => nobody is
+#                                 reading the terminal.
+#   4. "\x03", 3 s             -- if the job was RUNNING in the foreground
+#                                 (the ^Z byte itself lost), this ends it and
+#                                 the prompt returns.
 #   5. "jobs\r", 3 s           -- ...and then jobs is empty.
 #   6. "echo diag-alive | tr a-z A-Z\r", 3 s -- DIAG-ALIVE => the channel is
 #                                 alive end to end; silence => a stall class,
@@ -90,41 +95,82 @@ set ::lc_fail_probe {
     lc_probe_capture "echo diag-alive | tr a-z A-Z\r" 3 "channel alive?"
 }
 
-lc_send "sleep 30"
-sleep 1
+# `fg` writes the job's command on a line of its own. The wait is anchored on
+# the line start: the `jobs` and `bg` lines before it end in the same words.
+set fg_echo {\ndebug-child fgtick[^\r\n]*\r}
+
+lc_send "debug-child fgtick"
+lc_expect_fgtick 1 "the job holds the terminal"
 send "\x1a"
-lc_expect "Stopped" "^Z stops the foreground sleep"
+lc_expect "Stopped" "^Z stops the foreground job"
 set ::lc_fail_probe {}
 
 lc_send "jobs"
-lc_expect "Stopped" "jobs lists the stopped sleep"
+lc_expect "Stopped" "jobs lists the stopped job"
 
 # THE RE-STOP LEG (task #19): fg resumes (terminal + SYS_TTY_CONT; bi_fg
 # echoes the job's command line first), then a second ^Z must stop it AGAIN --
 # only a RUNNING job can stop, so the second Stopped is simultaneously the
 # resume proof and the re-stop regression.
 lc_send "fg"
-lc_expect "sleep 30" "fg echoes the resumed job"
-sleep 1
+lc_expect_re $fg_echo "fg echoes the resumed job"
+lc_expect_fgtick 2 "the resumed job holds the terminal"
 send "\x1a"
-lc_expect "Stopped" "a second ^Z re-stops the resumed sleep"
+lc_expect "Stopped" "a second ^Z re-stops the resumed job"
 
 # bg resumes the re-stopped job in the background (no terminal handoff).
 lc_send "bg"
 lc_expect "&" "bg announces the backgrounded job"
 
-# fg the RUNNING job (harmless cont), then ^C -> interrupt -> sleep
+# fg the RUNNING job (harmless cont), then ^C -> interrupt -> the job
 # default-terminates (LS-5) -> fg returns. Post-resume signal delivery
-# through the same pts fan as the susp.
+# through the same pts fan as the susp. In the background the job wrote at
+# most the one FGTICK it had decided on before the stop, and the `fg` echo
+# above is read past it; the FGTICKs after it say the terminal is its own
+# again.
 lc_send "fg"
-lc_expect "sleep 30" "fg echoes the running job"
-sleep 1
+lc_expect_re $fg_echo "fg echoes the running job"
+lc_expect_fgtick 2 "the foregrounded job holds the terminal"
 send "\x03"
 sleep 1
 # The job died of the interrupt, so the packed wait reads it signalled and
 # $status is 128 + SIGINT (docs/ERRORS.md "The wait status"); an exit status
 # of 1 is what a shell that read the word as an exit would report.
 lc_run_expect_hardfail_re "echo pty-fg-\$status | tr a-z A-Z" "PTY-FG- 130" {PTY-FG- ?[0-9]+[\r\n]}
+
+# THE VEHICLE'S OWN CLAIM. An FGTICK says "this job holds the terminal", and
+# every wait above rests on it. A job started in the background never holds
+# the terminal, so it writes none until `fg`. ut puts a job in its group only
+# after the spawn has returned; until then the job sits in the shell's group,
+# which does hold the terminal, and a job that compared only its group with
+# the foreground group would tick there. On an unmodified shell that window is
+# a few instructions wide, so this is the leg a slowed shell turns red. The
+# FGTICK arm is armed from the command on: the ticks of that window come
+# before the job line. The two positives around the quiet window are the job
+# line and the ticks after `fg`.
+lc_send "debug-child fgtick &"
+set timeout $lc_cmd_timeout
+expect {
+    -re {FGTICK[\r\n]} { lc_fail "a job started in the background wrote FGTICK before its job line: the token does not mean the job holds the terminal" }
+    -re {FGNOTTY}     { lc_fail "the background job found no terminal of its session on fd 0, 1 or 2: the quiet below would mean nothing" }
+    -re {\[\d+\][ \t]+\d+[\r\n]} { lc_step "saw: the background job's line" }
+    -re {EXTINCTION:} { lc_extinction_fail "kernel extinction starting the background job" }
+    timeout           { lc_fail "timeout (${lc_cmd_timeout}s) waiting for the background job's `\[N\] pid` line" }
+    eof               { lc_fail "unexpected EOF starting the background job" }
+}
+lc_within 2 {
+    -re {FGTICK[\r\n]} { lc_fail "a background job wrote FGTICK: the token does not mean the job holds the terminal" }
+    -re {FGNOTTY}     { lc_fail "the background job found no terminal of its session on fd 0, 1 or 2: its quiet means nothing" }
+    -re {EXTINCTION:} { lc_extinction_fail "kernel extinction with the job in the background" }
+    eof               { lc_fail "unexpected EOF with the job in the background" }
+    timeout           { lc_step "saw: a background job wrote no FGTICK (2s)" }
+}
+lc_send "fg"
+lc_expect_re $fg_echo "fg echoes the background job"
+lc_expect_fgtick 1 "the job brought forward holds the terminal"
+send "\x03"
+sleep 1
+lc_run_expect_hardfail_re "echo pty-bq-\$status | tr a-z A-Z" "PTY-BQ- 130" {PTY-BQ- ?[0-9]+[\r\n]}
 
 # Every other ut wait packs too (dec-2026-10-13-ut-status-packed): a death by
 # note reads 128 plus the signal outside job control as well. pouch-hello-fault

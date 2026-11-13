@@ -34,6 +34,24 @@
 //     no syscall, so only an IRQ return can deliver a note to them. spin-tty
 //     takes `^C`'s default and dies; spin-note registers a handler that ends
 //     the loop, then writes HANDLED and exits 0.
+//   * `debug-child tick` (jc-probe's stoppable job) writes TICK to fd 1 every
+//     100 ms and reads nothing, so it holds no terminal read while it is
+//     stopped. A TICK is the job running: a driver that reads one after a
+//     point where the job was stopped knows it has resumed. `^C` ends it; so
+//     does a write that takes nothing or fails and, far past any driver's own
+//     bound, its tick limit. A terminal whose master is gone still takes
+//     writes until its ring is full, so the limit is what ends an orphan.
+//   * `debug-child fgtick` (the interactive scenarios' stoppable job) is tick
+//     mode for a driver that cannot ask the terminal who holds it. It writes
+//     FGTICK only while it leads a process group of its own and that group is
+//     the foreground group of its terminal, so a driver that reads one
+//     knows that a stop or an interrupt key typed now reaches this job. Run it
+//     alone, never in a pipeline: the shell mints a job's group from its first
+//     member's pid. In the background it writes at most the one FGTICK it had
+//     already decided on when it was stopped. It asks the terminal through
+//     the first of fd 0, 1 and 2 that reaches it: a job the shell starts in
+//     the background has a pipe on fd 0. It ends as tick mode does, and with
+//     FGNOTTY and status 2 when none of the three is a terminal of its session.
 //   * `debug-child dirty` (5g, death wins in the exit close; jc-probe drives
 //     it) leaves a small write staged on a 9P file, writes one byte to stdout
 //     (its driver's pipe) once it has, and then spins as spin mode does.
@@ -64,7 +82,7 @@ use core::time::Duration;
 use libthyla_rs::fs::File;
 use libthyla_rs::io::Write;
 use libthyla_rs::thread;
-use libthyla_rs::{t_exits, t_write};
+use libthyla_rs::{t_exits, t_getpgid, t_getpid, t_tty_get_fg, t_write};
 
 // MUST match debug-probe.
 const SENTINEL_REG: u64 = 0xDEB0_DEB0;
@@ -179,6 +197,76 @@ fn spin_caught(ptr: *mut u64) -> ! {
 // The pty modes (ARCH 8.8.3, #964). MUST match jc-probe.
 const SPIN_READY: &[u8] = b"SPINNING\n";
 const SPIN_HANDLED: &[u8] = b"HANDLED\n";
+const TICK_MARK: &[u8] = b"TICK\n";
+const TICK_EVERY: Duration = Duration::from_millis(100);
+/// 60 s of ticks: past jc-probe's watchdog, so the limit never ends the job
+/// inside the ladder, and short enough that an abandoned one does not linger.
+const TICK_LIMIT: u32 = 600;
+
+fn tick() -> ! {
+    for _ in 0..TICK_LIMIT {
+        // SAFETY: SVC wrapper; TICK_MARK is a valid static buffer.
+        if unsafe { t_write(1, TICK_MARK.as_ptr(), TICK_MARK.len()) } <= 0 {
+            break;
+        }
+        let _ = libthyla_rs::time::sleep(TICK_EVERY);
+    }
+    // SAFETY: `!`-returning SVC.
+    unsafe { t_exits(0) }
+}
+
+// The scenarios' token and refusal. MUST match tools/interactive/lib.exp.
+const FGTICK_MARK: &[u8] = b"FGTICK\n";
+const FGTICK_NOTTY: &[u8] = b"FGNOTTY\n";
+
+// The terminal's foreground group, or a negative errno when no standard fd
+// reaches a terminal of this session. A slave answers only members of its
+// session, so a slave that answers is the controlling terminal; a master would
+// answer anyone, and a job has none on fd 0-2. The kernel wants read rights on
+// the fd it is asked through, which the terminal fds a job inherits carry.
+fn terminal_fg() -> i64 {
+    let mut fg = -1;
+    for fd in 0..3 {
+        // SAFETY: SVC wrapper.
+        fg = unsafe { t_tty_get_fg(fd) };
+        if fg >= 0 {
+            break;
+        }
+    }
+    fg
+}
+
+fn fgtick() -> ! {
+    // SAFETY: SVC wrapper.
+    let me = unsafe { t_getpid() };
+    for _ in 0..TICK_LIMIT {
+        // The shell puts a job in its group only after the spawn has returned,
+        // so this process starts in the shell's group, which holds the
+        // terminal: "my group is the foreground group" is true before the
+        // handoff, false in the middle of it, and true again after. The group
+        // is read every time and must be this process's own, which it is only
+        // from the middle on.
+        // SAFETY: SVC wrapper; 0 names the caller.
+        let (own, fg) = (unsafe { t_getpgid(0) }, terminal_fg());
+        if own <= 0 || fg < 0 {
+            // SAFETY: SVC wrappers; FGTICK_NOTTY is a valid static buffer.
+            unsafe {
+                let _ = t_write(1, FGTICK_NOTTY.as_ptr(), FGTICK_NOTTY.len());
+                t_exits(2)
+            }
+        }
+        // SAFETY: SVC wrapper; FGTICK_MARK is a valid static buffer.
+        if own == me
+            && fg == own
+            && unsafe { t_write(1, FGTICK_MARK.as_ptr(), FGTICK_MARK.len()) } <= 0
+        {
+            break;
+        }
+        let _ = libthyla_rs::time::sleep(TICK_EVERY);
+    }
+    // SAFETY: `!`-returning SVC.
+    unsafe { t_exits(0) }
+}
 
 // spin-tty: the loop never traps and nothing ends it, so the only way out is a
 // note taken at an IRQ return.
@@ -345,6 +433,12 @@ pub extern "C" fn rs_main() -> i64 {
     }
     if libthyla_rs::env::args().operands().next() == Some(&b"dirty"[..]) {
         dirty(ptr);
+    }
+    if libthyla_rs::env::args().operands().next() == Some(&b"tick"[..]) {
+        tick();
+    }
+    if libthyla_rs::env::args().operands().next() == Some(&b"fgtick"[..]) {
+        fgtick();
     }
     if libthyla_rs::env::args().operands().next() == Some(&b"spin-tty"[..]) {
         spin_tty(ptr);

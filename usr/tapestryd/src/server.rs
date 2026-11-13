@@ -341,6 +341,9 @@ const WARP_CTX_FENCE_MAX: usize = crate::gpu::FENCED_SLOTS / 2;
 /// been named at least once before the abandonment machinery could touch it.
 #[cfg(feature = "test-mode")]
 const WARP_WATCH_MS: u64 = 30_000;
+/// How long the pointer waits to try the backend again after a refusal. A refusal
+/// costs the backend nothing: it answers from its lane's state.
+const CURSOR_RETRY_MS: u128 = 250;
 const _: () = {
     // Round-6 F2: the share is a DIVISION, so it silently degenerates.
     // At FENCED_SLOTS = 1 the cap is 0 and `fences_in_flight >= 0` is
@@ -1231,7 +1234,8 @@ const CONV_PROBE_CTX_SPAN: u32 = CONV_PROBE_ATTEMPTS * (1 + BRINGUP_STALL_RETRIE
 /// clear, by construction, every other ctx id in this daemon: dev_ctx
 /// (`1..=MAX_WARP_CTXS`), the gpu probe ids (all `< COMPOSITOR_CTX`, i.e. <= 203),
 /// `COMPOSITOR_CTX` (0x100) itself, and the conv-probe throwaways
-/// (`CONV_PROBE_CTX_BASE + seq`). The GUARANTEE against the conv range is
+/// (`CONV_PROBE_CTX_BASE + seq`); the compose probe's `COMPOSE_PROBE_CTX` sits
+/// above it. The GUARANTEE against the conv range is
 /// STRUCTURAL: `seq` is a function-local counter reset per `comp_measure_conventions`
 /// run, spent only by a create that made (or a stall may have made) a context, and
 /// `conv_attempt_once` refuses an attempt past `CONV_PROBE_CTX_SPAN`, which the
@@ -1247,6 +1251,30 @@ const _: () = assert!(
         && MAX_WARP_CTXS < 0x100,
     "venus ctx band must clear COMPOSITOR_CTX + the conv-probe range and not wrap"
 );
+/// The composition probe's throwaway context (`warp_present_compose_probe`),
+/// above every band here: the conv range ends under the venus band, which ends
+/// under this.
+const COMPOSE_PROBE_CTX: u32 = CONV_PROBE_CTX_BASE + 900;
+const _: () = assert!(
+    COMPOSE_PROBE_CTX >= WARP_VENUS_CTX_BASE + MAX_WARP_CTXS as u32,
+    "the compose probe ctx must clear the venus band"
+);
+/// Stall shots a boot's `warp-stall-create` / `-destroy` / `-free` lever has. A
+/// stall is engine-wide, so the lever cannot act on its caller's ctx alone the way
+/// `warp-hold` does (#178); it aims at the caller's own next device-context create,
+/// its own ctx's destroy, or the free of the next BO it destroys, and is bounded in
+/// count instead, and a client spending the shots denies only the lever. Five
+/// readback arms of four attempts each: CREATE, DESTROY, FREE, YIELD, APART.
+#[cfg(feature = "test-mode")]
+const TEST_STALL_SHOTS: u8 = 20;
+/// What an armed stall shot meets.
+#[cfg(feature = "test-mode")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StallAim {
+    Create,
+    Destroy,
+    Free,
+}
 
 /// The renderer's MEASURED blit-box conventions (Warp-C C-3, GPU-DESIGN
 /// 4.5.11): how a box named in guest rows must be issued so the rows land
@@ -1829,6 +1857,13 @@ pub struct Comp {
     test_stall_step: Option<StallStep>,
     #[cfg(feature = "test-mode")]
     test_stall_host: (u32, u32),
+    /// The connection whose next device-context create, its ctx's destroy, or
+    /// its next BO's free meets a stall shot (`warp-stall-create`, `-destroy`,
+    /// `-free`), and the shots this boot has left.
+    #[cfg(feature = "test-mode")]
+    test_stall_aim: Option<(u64, StallAim)>,
+    #[cfg(feature = "test-mode")]
+    test_stall_left: u8,
     /// A health copy met a GPU stall and no copy has verified since.
     comp_health_unknown: bool,
     /// Health copies (the per-tick step or the attach-time copy) that met a
@@ -1873,7 +1908,8 @@ pub struct Comp {
     rb_wanted: VecDeque<(usize, u32)>,
     /// The C-6 census (global ctl `comp-readback`): issued; landed (composed
     /// at completion); dropped (the surface moved on -- retired, resized,
-    /// re-adopted -- between issue and completion, or the engine died);
+    /// re-adopted -- between issue and completion, or the engine died, or
+    /// it was released unpublished behind an abandoned chain (vote 81));
     /// coalesced (presents that enqueued instead of issuing); abandoned
     /// (never retired in FENCE_ABANDON_MS -- the client's ctx poisoned, its
     /// backing possibly still being written).
@@ -1882,6 +1918,10 @@ pub struct Comp {
     rb_dropped: u64,
     rb_coalesced: u64,
     rb_abandoned: u64,
+    /// The last landed compositor readback's wait in Lictor and its run on the
+    /// device (operator vote 81: parked, then publication to retirement).
+    rb_last_parked_ms: u32,
+    rb_last_exec_ms: u32,
     /// Warp-C C-4: the present-path cost census (see `Cost`).
     cost: [CostCell; Cost::COUNT],
     /// The arm the present being dispatched took -- set inside `present`,
@@ -2043,7 +2083,9 @@ pub struct Comp {
     chords: Chords,
     /// Last hardware-acknowledged normal pointer, invalidated at seat resume.
     cursor_sent: Option<(u8, u16, u32, u32)>,
-    cursor_failed: bool,
+    /// When the pointer backend last refused an update, if the last answer was
+    /// a refusal. A stall ends by itself, so this retries rather than latches.
+    cursor_refused: Option<Instant>,
     /// The pointer's last display position (G-7c; tablet-absolute, scaled
     /// by the input drain). Buttons/scroll route by it.
     ptr_x: u32,
@@ -2135,6 +2177,21 @@ pub struct Comp {
     /// abandoned chain. The vindication destroys WARP_VENUS_CTX_BASE+slot once
     /// the device is proven finished, exactly as dev_ctx is deferred.
     warp_ctx_venus_vindicate: [bool; MAX_WARP_CTXS],
+    /// A destroy owed on each slot's device context (`slot + 1`) and on its
+    /// venus one: a create a stall met may exist host-side, and lictor keeps
+    /// its reservation, and a standing stall refuses a destroy before staging.
+    /// `warp_destroy_owed` runs them once the engine is live (GPU-DESIGN 4.5.15).
+    warp_ctx_destroy_owed: [bool; MAX_WARP_CTXS],
+    warp_ctx_venus_destroy_owed: [bool; MAX_WARP_CTXS],
+    /// The pub each slot last carried (0: none yet), held from reissue while
+    /// the slot has a ctx, is condemned, or owes a destroy.
+    warp_ctx_slot_pub: [u32; MAX_WARP_CTXS],
+    /// Monotone, for the warp ctl: destroys owed (each debt once), owed
+    /// destroys completed, and device-context destroys that did not complete.
+    /// A recovery inside one serve pass leaves the gauges as they were.
+    warp_owed_incurred: u32,
+    warp_owed_ran: u32,
+    warp_destroy_failed: u32,
     warp_ctx_seq: u32,
     warp_bo_seq: u32,
     warp_ring_seq: u32,
@@ -2227,6 +2284,18 @@ struct CtxProbe {
 
 /// A GPU-seam rendering context (Warp-2c). Owned by one conn; the DEVICE
 /// ctx id is its slot + 1 (reused only after the synchronous CTX_DESTROY).
+/// How a warp device-context destroy ended (GPU-DESIGN 4.5.15).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WarpDestroy {
+    /// The context is gone; its id may be minted again.
+    Done,
+    /// A stall refused it before staging or met it: lictor keeps the id named
+    /// and destroyable, and the destroy is owed until the engine is live.
+    Owed,
+    /// The device or lictor answered a refusal, or the engine is dead: the host
+    /// may still hold the context.
+    Refused,
+}
 struct WarpCtx {
     owner_conn: u64,
     pub_id: u32,
@@ -2255,6 +2324,10 @@ struct WarpCtx {
     /// so the client's share is not shortened by a fence it did not issue,
     /// and never counted in `fence_signaled` (the client's #210 ledger).
     comp_rb_in_flight: u32,
+    /// The client's last retired readback: how long Lictor parked it behind the
+    /// ctx's earlier chains, and publication to retirement (vote 81).
+    rb_parked_ms: u32,
+    rb_exec_ms: u32,
     fence_signaled: u64,
     fence_reported: u64,
     /// Multi-queue F3: the dense per-TIMELINE completion counts. A
@@ -2267,6 +2340,13 @@ struct WarpCtx {
     /// -- the server's single reported cursor would let two parked readers
     /// steal each other's wakes).
     timeline_signaled: [u64; WARP_TIMELINES],
+    /// Chains of this context released unpublished (vote 81): never run, so
+    /// never counted. Nonzero latches the fence stream over for good (EOF, no
+    /// fenced work): its count can never catch up honestly, and resuming it
+    /// at a vindication would answer later waits over draws and readbacks
+    /// that never ran. Device liveness stays `fence_poisoned`'s, so destroy
+    /// and reclamation follow the vindication as before.
+    released: u64,
     /// #210 ledger reconciliation: every fenced write that REACHED the
     /// dispatch funnel (rx), split by outcome (minted / E_AGAIN refused /
     /// other error). The client's `issued` counts its successful fenced
@@ -2749,6 +2829,10 @@ impl Comp {
             test_stall_host: (0, 0),
             #[cfg(feature = "test-mode")]
             test_stall_conv_aimed: false,
+            #[cfg(feature = "test-mode")]
+            test_stall_aim: None,
+            #[cfg(feature = "test-mode")]
+            test_stall_left: TEST_STALL_SHOTS,
             comp_health_unknown: false,
             comp_health_stalls: 0,
             comp_repaint_pending: false,
@@ -2764,6 +2848,8 @@ impl Comp {
             rb_dropped: 0,
             rb_coalesced: 0,
             rb_abandoned: 0,
+            rb_last_parked_ms: 0,
+            rb_last_exec_ms: 0,
             cost: [CostCell::default(); Cost::COUNT],
             cost_arm: Cost::PresentOther,
             probe_tick: u64::MAX,
@@ -2808,7 +2894,7 @@ impl Comp {
             chord_down: [0; KEYCODE_SPAN / 64],
             chords: Chords::new(),
             cursor_sent: None,
-            cursor_failed: false,
+            cursor_refused: None,
             ptr_x: 0,
             abs_last: AbsBase::new(),
             ptr_over: None,
@@ -2824,6 +2910,12 @@ impl Comp {
             warp_ctx_leaked_probe: core::array::from_fn(|_| None),
             warp_ctx_vindicate: [0; MAX_WARP_CTXS],
             warp_ctx_venus_vindicate: [false; MAX_WARP_CTXS],
+            warp_ctx_destroy_owed: [false; MAX_WARP_CTXS],
+            warp_ctx_venus_destroy_owed: [false; MAX_WARP_CTXS],
+            warp_ctx_slot_pub: [0; MAX_WARP_CTXS],
+            warp_owed_incurred: 0,
+            warp_owed_ran: 0,
+            warp_destroy_failed: 0,
             warp_ctx_seq: 0,
             warp_bo_seq: 0,
             warp_ring_seq: 0,
@@ -6286,7 +6378,7 @@ impl Comp {
     /// The lever's display half, aimed: a host of a lever height, once a
     /// size.
     #[cfg(feature = "test-mode")]
-    fn test_stall_aim(&mut self, host_w: u32, host_h: u32) {
+    fn test_stall_aim_host(&mut self, host_w: u32, host_h: u32) {
         // A shot aimed for the display that was, which found no step.
         self.test_stall_step = None;
         if !self.test_latch_armed || self.test_stall_host == (host_w, host_h) {
@@ -6352,7 +6444,7 @@ impl Comp {
         }
         if (w, h) != (self.gpu.width, self.gpu.height) {
             #[cfg(feature = "test-mode")]
-            self.test_stall_aim(host_w, host_h);
+            self.test_stall_aim_host(host_w, host_h);
             let changed = self.change_mode(w, h);
             // A change that reached no bind spends no shot on a later one,
             // and one that failed is followed by no switch and no EDID.
@@ -10521,7 +10613,10 @@ impl Comp {
     /// stale client's shape latched on another surface. No saved backdrop.
     fn cursor_sync(&mut self) {
         use libhalcyon::cursor::Shape;
-        if self.cursor_failed || self.gpu.width == 0 || self.gpu.height == 0 {
+        if self.gpu.width == 0 || self.gpu.height == 0 {
+            return;
+        }
+        if self.cursor_refused.is_some_and(|t| t.elapsed().as_millis() < CURSOR_RETRY_MS) {
             return;
         }
         self.ptr_x = self.ptr_x.min(self.gpu.width - 1);
@@ -10551,10 +10646,20 @@ impl Comp {
             return;
         }
         match self.gpu.cursor(state.0, state.1, state.2, state.3, true) {
-            Ok(()) => self.cursor_sent = Some(state),
+            Ok(()) => {
+                self.cursor_sent = Some(state);
+                if self.cursor_refused.take().is_some() {
+                    say!("tapestryd: pointer backend accepted an update again");
+                }
+            }
             Err(_) => {
-                self.cursor_failed = true;
-                say!("tapestryd: pointer backend failed; cursor updates stopped");
+                // A stalled command's outcome is unknown, so the plane may hold this
+                // state or the last: only an accepted update says which.
+                self.cursor_sent = None;
+                if self.cursor_refused.is_none() {
+                    say!("tapestryd: pointer backend refused an update; retrying");
+                }
+                self.cursor_refused = Some(Instant::now());
             }
         }
     }
@@ -11401,6 +11506,16 @@ impl Comp {
             .map(|c| c.pub_id)
     }
 
+    /// The GL device ctx of this conn's ctx, if it has one (#178).
+    #[cfg(feature = "test-mode")]
+    fn wctx_dev_of_conn(&self, conn: u64) -> Option<u32> {
+        self.warp_ctxs
+            .iter()
+            .flatten()
+            .find(|c| c.owner_conn == conn)
+            .map(|c| c.dev_ctx)
+    }
+
     /// Warp-4: the ACTIVE GL adoption for surface `n`, or None. Active =
     /// the surface names a live ctx (`glsrc`), that ctx's consent names
     /// this surface INCARNATION back (slot + gen), the consented BO is
@@ -11433,7 +11548,8 @@ impl Comp {
         // time, so gating on those would collapse composition to the 2D
         // weave constantly. Returning `None` degrades to a stale frame,
         // which both call sites already handle.
-        if c.fence_poisoned {
+        // A stream with released chains lacks their draws for good (vote 81).
+        if c.fence_poisoned || c.released > 0 {
             return None;
         }
         let (slot, gen, src) = c.present_to?;
@@ -11811,8 +11927,12 @@ impl Comp {
         {
             return None; // one ctx per client
         }
-        let slot = (0..MAX_WARP_CTXS)
-            .find(|&i| self.warp_ctxs[i].is_none() && !self.warp_ctx_slot_poisoned[i])?;
+        // A slot is reused only once every device context it carried is gone
+        // or refused for good: an owed venus destroy holds it too, so the pub
+        // it last carried stays held (below) while the broker may name it.
+        let slot = (0..MAX_WARP_CTXS).find(|&i| {
+            self.warp_ctxs[i].is_none() && !self.warp_ctx_slot_poisoned[i] && !self.warp_ctx_venus_destroy_owed[i]
+        })?;
         // Heap rows BEFORE any device state (#204): a failed allocation
         // fails the mint with nothing to unwind. The graveyard row is
         // reserved to the full cap here so `warp_park_leaked` -- which has
@@ -11836,7 +11956,20 @@ impl Comp {
             return None;
         }
         let dev_ctx = (slot as u32) + 1;
+        #[cfg(feature = "test-mode")]
+        self.test_stall_take(conn, StallAim::Create);
         if self.gpu.ctx_create(dev_ctx, b"warp").is_err() {
+            // A create a stall met may exist host-side, and lictor keeps its
+            // reservation (GPU-DESIGN 4.5.15), so this id would be refused for
+            // good and every later mint would pick this slot again. Condemn it;
+            // the destroy owed for it runs once the engine is live. Judged on
+            // the reply's own span, as lictor judges it: a stall met between
+            // two requests leaves lictor releasing the id.
+            if self.gpu.stalls != self.gpu.stalls_begun || self.gpu.engine == Engine::Dead {
+                self.warp_ctx_slot_poisoned[slot] = true;
+                self.warp_owe(slot, false);
+                say!("tapestryd: warp ctx slot {} create met a stall -- condemned, its destroy owed", slot);
+            }
             return None;
         }
         // Never mint 0: it is `warp_ctx_vindicate`'s "no condemned slot"
@@ -11845,12 +11978,22 @@ impl Comp {
         // ctx_destroy a live host context and un-poison a legitimately
         // condemned one. Same 2^32 family as the deferred res_seq wrap, but
         // that one was dispositioned "verified to fail closed" -- this
-        // sibling fails OPEN, and skipping the value costs nothing.
-        self.warp_ctx_seq = self.warp_ctx_seq.wrapping_add(1);
-        if self.warp_ctx_seq == 0 {
-            self.warp_ctx_seq = 1;
-        }
-        let pub_id = self.warp_ctx_seq;
+        // sibling fails OPEN, and skipping the value costs nothing. Nor a pub
+        // a slot still carries: a live ctx's, or a condemned or owed slot's,
+        // whose released-stream record in the broker outlives the ctx until
+        // its device context's destroy completes (vote 81 r4 F4).
+        let held = |p: u32| {
+            (0..MAX_WARP_CTXS).any(|s| {
+                self.warp_ctx_slot_pub[s] == p
+                    && (self.warp_ctxs[s].is_some()
+                        || self.warp_ctx_slot_poisoned[s]
+                        || self.warp_ctx_destroy_owed[s]
+                        || self.warp_ctx_venus_destroy_owed[s])
+            })
+        };
+        let pub_id = tapestryd::warp_ids::next_ctx_pub(self.warp_ctx_seq, held);
+        self.warp_ctx_seq = pub_id;
+        self.warp_ctx_slot_pub[slot] = pub_id;
         self.warp_ctxs[slot] = Some(WarpCtx {
             owner_conn: conn,
             pub_id,
@@ -11860,9 +12003,12 @@ impl Comp {
             rings: 1,
             fences_in_flight: 0,
             comp_rb_in_flight: 0,
+            rb_parked_ms: 0,
+            rb_exec_ms: 0,
             fence_signaled: 0,
             fence_reported: 0,
             timeline_signaled: [0; WARP_TIMELINES],
+            released: 0,
             fenced_rx: 0,
             fenced_minted: 0,
             fenced_again: 0,
@@ -13133,8 +13279,16 @@ impl Comp {
             return Ok(v);
         }
         let slot = self.wctx_slot(ctx_pub).ok_or(p9::E_NOENT)?;
+        if self.warp_ctx_venus_destroy_owed[slot] {
+            return Err(E_IO);
+        }
         let v = WARP_VENUS_CTX_BASE + slot as u32;
         if self.gpu.ctx_create_venus(v).is_err() {
+            // As in `wctx_mint`: the id is owed a destroy before it is tried again.
+            if self.gpu.stalls != self.gpu.stalls_begun || self.gpu.engine == Engine::Dead {
+                self.warp_owe(slot, true);
+                say!("tapestryd: warp ctx slot {} venus-ctx create met a stall -- its destroy owed", slot);
+            }
             return Err(E_IO);
         }
         self.warp_ctxs[slot].as_mut().unwrap().venus_ctx = Some(v);
@@ -14210,11 +14364,7 @@ impl Comp {
             Some(t) => t,
             None => return "noscaffold",
         };
-        let ctx = CONV_PROBE_CTX_BASE + 900;
-        debug_assert!(
-            ctx < WARP_VENUS_CTX_BASE,
-            "compose probe ctx climbed into the venus band"
-        );
+        let ctx = COMPOSE_PROBE_CTX;
         let mut verdict = "noscaffold";
         if self.gpu.ctx_create(ctx, b"tapestry-cmp").is_ok() {
             // The presentable must attach at all. W-3a measured this layer
@@ -14558,9 +14708,10 @@ impl Comp {
                 unsafe { t_close(b.dma_fd) };
             }
         }
-        // The probe rides the same proof (#240 audit F3). Its device-side
-        // refs went at the park -- as a BO's do -- so only the guest backing
-        // was waiting on this.
+        // The probe rides the same proof (#240 audit F3). Its device frees
+        // went to the broker at the park, as a BO's do: one a chain could
+        // still reach the broker owes and pays once none can, so only the
+        // guest backing waited on this.
         if let Some(p) = self.warp_ctx_leaked_probe[slot].take() {
             for (va, fd) in [(p.mark_va, p.mark_fd), (p.sent_va, p.sent_fd)] {
                 Self::warp_probe_undo_guest(&mut self.va, va, fd, p.size);
@@ -14750,8 +14901,20 @@ impl Comp {
             // no live device work. (The WEDGE arm above defers the venus destroy
             // to the vindication -- F1.) A refused destroy condemns the slot
             // exactly as dev_ctx does.
-            if let Some(v) = c.venus_ctx {
-                if self.gpu.ctx_destroy(v).is_err() {
+            let venus_r = match c.venus_ctx {
+                Some(v) => {
+                    debug_assert_eq!(v, WARP_VENUS_CTX_BASE + slot as u32);
+                    self.warp_ctx_destroy_id(slot, true)
+                }
+                None => WarpDestroy::Done,
+            };
+            match venus_r {
+                WarpDestroy::Done => {}
+                WarpDestroy::Owed => say!(
+                    "tapestryd: warp ctx slot {} venus-ctx destroy met a stall on clean retire -- owed",
+                    slot
+                ),
+                WarpDestroy::Refused => {
                     self.warp_ctx_slot_poisoned[slot] = true;
                     say!(
                         "tapestryd: warp ctx slot {} venus-ctx destroy REFUSED on clean retire -- condemned",
@@ -14766,13 +14929,154 @@ impl Comp {
             // slot rather than mint into a live id. No `warp_ctx_vindicate`
             // stamp: nothing can prove this one safe later, and a permanent
             // condemnation that `warp_poisoned_slots` reports is honest.
-            if self.gpu.ctx_destroy(c.dev_ctx).is_err() {
-                self.warp_ctx_slot_poisoned[slot] = true;
-                say!(
-                    "tapestryd: warp ctx slot {} destroy REFUSED on clean retire -- condemned",
-                    slot
-                );
+            debug_assert_eq!(c.dev_ctx, slot as u32 + 1);
+            #[cfg(feature = "test-mode")]
+            self.test_stall_take(c.owner_conn, StallAim::Destroy);
+            match self.warp_ctx_destroy_id(slot, false) {
+                WarpDestroy::Done => {}
+                WarpDestroy::Owed => {
+                    self.warp_ctx_slot_poisoned[slot] = true;
+                    // A refused venus destroy keeps the slot condemned for good.
+                    if venus_r == WarpDestroy::Refused {
+                        self.warp_ctx_destroy_owed[slot] = false;
+                    }
+                    say!(
+                        "tapestryd: warp ctx slot {} destroy met a stall on clean retire -- condemned until it runs",
+                        slot
+                    );
+                }
+                WarpDestroy::Refused => {
+                    self.warp_ctx_slot_poisoned[slot] = true;
+                    say!(
+                        "tapestryd: warp ctx slot {} destroy REFUSED on clean retire -- condemned",
+                        slot
+                    );
+                }
             }
+        }
+    }
+
+    /// Destroy slot `slot`'s device context (`venus`: its venus one). One a
+    /// stall refused or met is owed: lictor leaves the id destroyable, and a
+    /// repeat of a destroy that ran is harmless. An answered refusal is final.
+    fn warp_ctx_destroy_id(&mut self, slot: usize, venus: bool) -> WarpDestroy {
+        let id = if venus { WARP_VENUS_CTX_BASE + slot as u32 } else { slot as u32 + 1 };
+        let r = if self.gpu.ctx_destroy(id).is_ok() {
+            WarpDestroy::Done
+        } else if failure_cause(self.gpu.stalls_begun, self.gpu.stalls, self.gpu.engine) == FailureCause::Stall {
+            WarpDestroy::Owed
+        } else {
+            WarpDestroy::Refused
+        };
+        if r == WarpDestroy::Owed {
+            self.warp_owe(slot, venus);
+        } else if venus {
+            self.warp_ctx_venus_destroy_owed[slot] = false;
+        } else {
+            self.warp_ctx_destroy_owed[slot] = false;
+        }
+        if r != WarpDestroy::Done {
+            self.warp_destroy_failed = self.warp_destroy_failed.wrapping_add(1);
+        }
+        r
+    }
+
+    /// Owe slot `slot`'s device-context destroy (`venus`: its venus one),
+    /// counting each new debt once however often a stall meets its runs.
+    fn warp_owe(&mut self, slot: usize, venus: bool) {
+        let owed = if venus { &mut self.warp_ctx_venus_destroy_owed[slot] } else { &mut self.warp_ctx_destroy_owed[slot] };
+        if !*owed {
+            *owed = true;
+            self.warp_owed_incurred = self.warp_owed_incurred.wrapping_add(1);
+        }
+    }
+
+    /// Run the owed destroys once the engine is live. Ordered after the create's
+    /// revival, a completed destroy leaves the id free whichever way that create
+    /// went, so a slot with no context in it is mintable again. One a stall
+    /// meets again stays owed. An answered refusal leaves its slot condemned
+    /// for good, its pub held: lictor keeps a refused id named.
+    fn warp_destroy_owed(&mut self) {
+        for slot in 0..MAX_WARP_CTXS {
+            for venus in [true, false] {
+                let owed = if venus { self.warp_ctx_venus_destroy_owed[slot] } else { self.warp_ctx_destroy_owed[slot] };
+                if !owed || self.gpu.engine != Engine::Live {
+                    continue;
+                }
+                let r = self.warp_ctx_destroy_id(slot, venus);
+                if r == WarpDestroy::Done {
+                    self.warp_owed_ran = self.warp_owed_ran.wrapping_add(1);
+                }
+                match r {
+                    WarpDestroy::Done if !venus => {
+                        // A destroy a vindication owed leaves the backings that
+                        // vindication proved free of the device.
+                        if self.warp_ctx_vindicate[slot] != 0 {
+                            self.warp_free_leaked(slot);
+                            self.warp_ctx_vindicate[slot] = 0;
+                        }
+                        debug_assert!(self.warp_ctxs[slot].is_none() && self.warp_ctx_leaked[slot].is_empty());
+                        self.warp_ctx_slot_poisoned[slot] = false;
+                        say!("tapestryd: warp ctx slot {} owed destroy ran -- recovered", slot);
+                    }
+                    WarpDestroy::Done => {
+                        say!("tapestryd: warp ctx slot {} owed venus-ctx destroy ran", slot)
+                    }
+                    WarpDestroy::Owed => {}
+                    WarpDestroy::Refused if venus => {
+                        // As on clean retire: condemned for good, so a dev
+                        // destroy still owed must not recover the slot.
+                        self.warp_ctx_slot_poisoned[slot] = true;
+                        self.warp_ctx_destroy_owed[slot] = false;
+                        say!("tapestryd: warp ctx slot {} owed venus-ctx destroy REFUSED -- condemned", slot);
+                    }
+                    WarpDestroy::Refused => {
+                        say!("tapestryd: warp ctx slot {} owed destroy REFUSED -- stays condemned", slot)
+                    }
+                }
+            }
+        }
+    }
+
+    /// Arm the stall lever for `conn`: one connection at a time, re-arming
+    /// one's own aim costs nothing, and each other arm spends a shot of the
+    /// boot's.
+    #[cfg(feature = "test-mode")]
+    fn test_stall_arm(&mut self, conn: u64, aim: StallAim) -> Result<(), u32> {
+        match self.test_stall_aim {
+            Some(armed) if armed == (conn, aim) => return Ok(()),
+            Some(_) => return Err(p9::E_AGAIN),
+            None => {}
+        }
+        if self.test_stall_left == 0 {
+            return Err(p9::E_PERM);
+        }
+        self.test_stall_left -= 1;
+        self.test_stall_aim = Some((conn, aim));
+        Ok(())
+    }
+
+    /// Aim the armed shot at `conn`'s create, destroy or BO free. The broker
+    /// binds a shot to this connection's next request and spends it there,
+    /// so none is left for another command.
+    #[cfg(feature = "test-mode")]
+    fn test_stall_take(&mut self, conn: u64, aim: StallAim) {
+        if self.test_stall_aim != Some((conn, aim)) {
+            return;
+        }
+        self.test_stall_aim = None;
+        if aim == StallAim::Free {
+            // The free is the last command a BO's retire sends: the client
+            // sends the shot just before it (`Gpu::test_stall_at_next_unref`).
+            self.gpu.test_stall_at_next_unref();
+            say!("tapestryd: warp-stall: the BO's free retires past its deadline");
+            return;
+        }
+        let what = if aim == StallAim::Create { "the next device ctx create" } else { "the ctx's destroy" };
+        if self.gpu.test_stall_shot() {
+            say!("tapestryd: warp-stall: {} retires past its deadline", what);
+        } else {
+            say!("tapestryd: warp-stall: stall shot at {} REFUSED by the broker", what);
         }
     }
 
@@ -15629,7 +15933,13 @@ impl Comp {
                 let mut b = self.warp_ctxs[slot].as_mut().unwrap().bos[j]
                     .take()
                     .unwrap();
+                #[cfg(feature = "test-mode")]
+                self.test_stall_take(conn, StallAim::Free);
                 let leaked = Self::wbo_retire(&mut self.gpu, &mut self.va, dev_ctx, &mut b, poisoned);
+                #[cfg(feature = "test-mode")]
+                if self.gpu.test_stall_unref_unspent() {
+                    say!("tapestryd: warp-stall: stall shot at the BO's free LOST -- the retire sent none");
+                }
                 if leaked > 0 {
                     self.warp_park_leaked(slot, b);
                 }
@@ -15652,6 +15962,10 @@ impl Comp {
 
     /// Conn teardown, warp half: retire every ctx this conn owns.
     fn warp_retire_conn(&mut self, conn: u64) {
+        #[cfg(feature = "test-mode")]
+        if self.test_stall_aim.is_some_and(|(c, _)| c == conn) {
+            self.test_stall_aim = None;
+        }
         // The hold release lives in `wctx_retire` (round-8 F1), which this
         // calls -- one chokepoint rather than three that must agree.
         for i in 0..MAX_WARP_CTXS {
@@ -15852,6 +16166,12 @@ impl Comp {
             self.rb_abandoned += 1;
             return;
         }
+        // Vote 81: released unpublished, so the device never ran it and its
+        // park behind a chain that never retired is no completed wait either.
+        if tag.released {
+            self.rb_dropped += 1;
+            return;
+        }
         // The stall the device paid for this frame's backlog (F2b's
         // measurement): `cost readback-wait` carries n / sum / max.
         self.cost_add(Cost::ReadbackWait, rec.issued);
@@ -15864,6 +16184,10 @@ impl Comp {
             self.rb_dropped += 1;
             return;
         }
+        // Only a readback that landed reports its timing: a refused or released
+        // one ran for no time, and a zero there would read as the rule holding.
+        self.rb_last_parked_ms = tag.parked_ms;
+        self.rb_last_exec_ms = tag.exec_ms;
         let same_gen = self.surf(rec.surf).map_or(false, |s| s.gen == rec.gen);
         let same_adoption = self.gl_adoption(rec.surf).map_or(false, |g| {
             // The kind pin (W-3c-2): img and bo pub ids are separate
@@ -15909,6 +16233,9 @@ impl Comp {
                 c.fences_in_flight = c.fences_in_flight.saturating_sub(1);
                 if tag.comp {
                     c.comp_rb_in_flight = c.comp_rb_in_flight.saturating_sub(1);
+                } else if tag.readback && tag.ok {
+                    c.rb_parked_ms = tag.parked_ms;
+                    c.rb_exec_ms = tag.exec_ms;
                 }
                 if tag.abandoned {
                     // NOT a completion: the chain may still be live
@@ -15918,6 +16245,17 @@ impl Comp {
                     // poisons the client's ctx the same way -- the device
                     // may still be writing that client's BO backing.
                     c.fence_poisoned = true;
+                } else if tag.released {
+                    // Vote 81: a parked chain the device never saw, released
+                    // because its context's prefix was abandoned or the
+                    // engine died. Its fence never signals and is never
+                    // counted: the dense count would pass the abandoned fence
+                    // ahead of it. A client chain latches this context's
+                    // stream over (`released`); a compositor readback's
+                    // release touches only the compositor's census.
+                    if !tag.comp {
+                        c.released += 1;
+                    }
                 } else if !tag.comp {
                     // #210 ROOT CAUSE FIX: count completions DENSELY per
                     // ctx instead of publishing the device-GLOBAL max
@@ -16029,7 +16367,15 @@ impl Comp {
             // and can be freed HERE rather than waiting for it to die.
             // Both counters reset with them: an uncharge is honest exactly
             // when it is paired with the drop that FREES (the #130/#131
-            // rule), and these pages are genuinely returned. Without this
+            // rule), and these pages are genuinely returned -- the guest half
+            // here, and the broker's pins when it pays the frees it took at
+            // the park: on this same proof nothing on the device reaches the
+            // BOs, and a later chain that could parks until they are paid
+            // (GPU-DESIGN 4.5.15; such a chain goes only in the window after
+            // the device was too slow to answer the repeat of a free its ctx
+            // holds), so a busy ctx cannot hold them off: the pins go once
+            // the chains already on the device retire and the device answers
+            // a repeat in time. Without this
             // a vindicated-but-still-live ctx stayed charged for memory it
             // no longer held, and once `leaked_count` hit the cap it could
             // never build another backing -- bricked while healthy.
@@ -16065,43 +16411,53 @@ impl Comp {
             // refuse and never reached the venus arm, so a healthy-engine dev
             // mismatch stranded venus_ctx too (both host ctxs leaked where the
             // venus one could have been reclaimed). Each id is independently
-            // condemn-on-refuse; the slot recovers only when BOTH are gone.
-            let dev_ok = self.gpu.ctx_destroy((slot as u32) + 1).is_ok();
-            if !dev_ok {
-                say!(
+            // condemn-on-refuse. No later vindication of this ctx comes, so a
+            // destroy a stall refused or met is owed (`warp_destroy_owed` then
+            // recovers the slot) rather than left for one.
+            let dev_r = self.warp_ctx_destroy_id(slot, false);
+            match dev_r {
+                WarpDestroy::Done => {}
+                WarpDestroy::Owed => say!(
+                    "tapestryd: warp ctx slot {} dev-ctx destroy met a stall at vindication -- owed",
+                    slot
+                ),
+                WarpDestroy::Refused => say!(
                     "tapestryd: warp ctx slot {} dev-ctx destroy REFUSED at vindication -- slot stays condemned",
                     slot
-                );
+                ),
             }
             // V-3b-2 F1: destroy the venus_ctx the leak arm deferred, now that
             // the device is provably finished (the poisoned-slot gate above
-            // covers venus chains -- same pub_id). The flag clears on success, so
-            // this is idempotent under the multi-chain vindication that reaches
-            // here only once no poisoned slot for this ctx remains; a refused
-            // venus destroy leaves the flag set for the next retry. dev_ctx =
-            // slot+1 needs no such flag -- the `warp_ctx_vindicate` stamp is its
-            // own "owed" marker, cleared only at the recovery below.
-            let mut venus_ok = true;
+            // covers venus chains -- same pub_id). The flag clears once the
+            // destroy is done or owed, so this runs once per vindicated ctx;
+            // an answered refusal keeps it and the slot condemned for good.
+            let mut venus_r = WarpDestroy::Done;
             if self.warp_ctx_venus_vindicate[slot] {
-                if self
-                    .gpu
-                    .ctx_destroy(WARP_VENUS_CTX_BASE + slot as u32)
-                    .is_ok()
-                {
-                    self.warp_ctx_venus_vindicate[slot] = false;
-                } else {
-                    venus_ok = false;
-                    say!(
+                venus_r = self.warp_ctx_destroy_id(slot, true);
+                match venus_r {
+                    WarpDestroy::Done => self.warp_ctx_venus_vindicate[slot] = false,
+                    WarpDestroy::Owed => {
+                        self.warp_ctx_venus_vindicate[slot] = false;
+                        say!(
+                            "tapestryd: warp ctx slot {} venus-ctx destroy met a stall at vindication -- owed",
+                            slot
+                        );
+                    }
+                    WarpDestroy::Refused => say!(
                         "tapestryd: warp ctx slot {} venus-ctx destroy REFUSED at vindication -- slot stays condemned",
                         slot
-                    );
+                    ),
                 }
             }
-            // A refused destroy on EITHER id leaves the slot poisoned (never
-            // recycled, so neither derived id can re-mint into a live host ctx);
-            // a later vindication retries whatever remains. Recover only when
-            // both host ctxs are provably gone.
-            if !dev_ok || !venus_ok {
+            // An answered refusal on EITHER id leaves the slot poisoned for good
+            // (never recycled, so neither derived id can re-mint into a live
+            // host ctx); an owed dev destroy recovers it when it runs, and an
+            // owed venus one fails that slot's venus mints until it runs.
+            if venus_r == WarpDestroy::Refused {
+                self.warp_ctx_destroy_owed[slot] = false;
+                continue;
+            }
+            if dev_r != WarpDestroy::Done {
                 continue;
             }
             // Only now are the parked backings provably free of the device.
@@ -16113,6 +16469,7 @@ impl Comp {
                 slot
             );
         }
+        self.warp_destroy_owed();
         self.warp_pump_retires();
         // C-6: a completion or a vindication may have freed the reserved
         // slot; issue the next wanted readback (after the retires above, so
@@ -16208,7 +16565,7 @@ impl Comp {
     /// its issued-minus-signaled model never sees a fence it did not issue.
     fn warp_fenced_admit(&mut self, ctx_pub: u32, conn: u64) -> Result<u32, u32> {
         let c = self.wctx(ctx_pub, conn).ok_or(p9::E_NOENT)?;
-        if c.fence_poisoned {
+        if c.fence_poisoned || c.released > 0 {
             return Err(E_IO);
         }
         let own = c.fences_in_flight.saturating_sub(c.comp_rb_in_flight);
@@ -17321,9 +17678,9 @@ impl Conn {
                 Some((shape, scale, x, y)) => {
                     let name = libhalcyon::cursor::Shape::from_code(shape).unwrap().name();
                     let _ = core::fmt::write(&mut s, format_args!("cursor {} {} {} {} {}\n",
-                        name, scale, x, y, if comp.cursor_failed { "failed" } else { "ready" }));
+                        name, scale, x, y, if comp.cursor_refused.is_some() { "failed" } else { "ready" }));
                 }
-                None => s.push_str(if comp.cursor_failed { "cursor failed\n" } else { "cursor pending\n" }),
+                None => s.push_str(if comp.cursor_refused.is_some() { "cursor failed\n" } else { "cursor pending\n" }),
             }
             // Warp-C C-3: which composed-pixel path presents are taking,
             // and whether the GPU one latched off. Both paths must stay
@@ -17724,6 +18081,35 @@ impl Conn {
                 // The fixed-size prefix ends HERE; everything below grows
                 // with the live-ctx count and is deliberately non-critical.
                 gcrit_end = s.len();
+                // Destroys owed on warp device contexts (GPU-DESIGN 4.5.15) and
+                // the slots condemned meanwhile or for good; then, monotone, the
+                // engine's stalls as the seam last saw them, the debts incurred
+                // and paid, and the destroys that did not complete.
+                let _ = core::fmt::write(
+                    &mut s,
+                    format_args!(
+                        "ctx-owed {} venus-owed {} slots-condemned {} gpu-stalls {} owed-incurred {} owed-ran {} destroy-failed {}\n",
+                        comp.warp_ctx_destroy_owed.iter().filter(|&&o| o).count(),
+                        comp.warp_ctx_venus_destroy_owed.iter().filter(|&&o| o).count(),
+                        comp.warp_ctx_slot_poisoned.iter().filter(|&&o| o).count(),
+                        comp.gpu.stalls,
+                        comp.warp_owed_incurred,
+                        comp.warp_owed_ran,
+                        comp.warp_destroy_failed
+                    ),
+                );
+                // The broker's owed frees; then, monotone, those owed, paid
+                // by a repeat, and given up; then its retirements unfinished;
+                // then, monotone, the times its pass stood down, and the
+                // frees it tried first as a parked context's turn.
+                let f = comp.gpu.frees_owed();
+                let _ = core::fmt::write(
+                    &mut s,
+                    format_args!(
+                        "frees-owed {} frees-incurred {} frees-paid {} frees-leaked {} frees-retiring {} frees-stood-down {} frees-parked-first {}\n",
+                        f.owed, f.incurred, f.paid, f.leaked, f.retiring, f.stood_down, f.parked_first
+                    ),
+                );
                 // W-4 stall observability: one row per HELD fenced slot, so a
                 // wedged chain is NAMED (op class + owner + age), not just a
                 // missing count. Empty when all slots are free. BELOW the
@@ -17733,12 +18119,17 @@ impl Conn {
                 // 512-byte snapshot -- the round-2 F6 blindness, reintroduced
                 // by rows built for the same hunt. The unbounded thing goes
                 // last.
-                for (i, fid, cpub, ridx, rb, cm, age) in comp.gpu.fenced_held() {
+                // Vote 81: a parked chain holds its slot without being on
+                // the device, so it gets its own row (age = time parked).
+                for (i, fid, cpub, ridx, rb, cm, age, parked) in comp.gpu.fenced_held() {
                     let _ = core::fmt::write(
                         &mut s,
                         format_args!(
-                            "fenced-held slot={} fence={} ctx={} ring={} rb={} comp={} age_ms={}\n",
-                            i, fid, cpub, ridx, rb as u32, cm as u32, age
+                            "{} slot={} fence={} ctx={} ring={} rb={} comp={} {}={}\n",
+                            if parked { "fenced-parked" } else { "fenced-held" },
+                            i, fid, cpub, ridx, rb as u32, cm as u32,
+                            if parked { "parked_ms" } else { "age_ms" },
+                            age
                         ),
                     );
                 }
@@ -17759,6 +18150,15 @@ impl Conn {
                     );
                 }
             }
+            // Vote 81: the last landed compositor readback's park and its run on
+            // the device. Below the fixed prefix: a census, not a client key.
+            let _ = core::fmt::write(
+                &mut s,
+                format_args!(
+                    "rb-last-parked-ms {} rb-last-exec-ms {}\n",
+                    comp.rb_last_parked_ms, comp.rb_last_exec_ms
+                ),
+            );
             // ROUND-3 F4: the per-ctx ctl got a runtime width report and its
             // global sibling -- widened by six lines in the same arc -- got
             // only an ordering convention. Same check, same reason: a
@@ -17925,6 +18325,18 @@ impl Conn {
                         let refused = comp.wctx(id, self.conn_id).map_or(0, |c| c.create_refused);
                         let _ =
                             core::fmt::write(&mut s, format_args!("create-refused {}\n", refused));
+                        // Vote 81: the last readback's park and its run on the device.
+                        let (parked, exec) =
+                            comp.wctx(id, self.conn_id).map_or((0, 0), |c| (c.rb_parked_ms, c.rb_exec_ms));
+                        let _ = core::fmt::write(
+                            &mut s,
+                            format_args!("readback-parked-ms {}\nreadback-exec-ms {}\n", parked, exec),
+                        );
+                        // Vote 81: the released chains that ended the stream. A
+                        // client learns that from the fence file's EOF, so the
+                        // count stays out of the prefix it parses.
+                        let released = comp.wctx(id, self.conn_id).map_or(0, |c| c.released);
+                        let _ = core::fmt::write(&mut s, format_args!("released {}\n", released));
                     }
                     // Audit F11: the "keep the client-critical keys inside a
                     // 255-byte snapshot" discipline above was a comment with
@@ -17985,7 +18397,8 @@ impl Conn {
                         return p9::build_rread(&mut self.out_buf, tag, &[]);
                     }
                     let c = comp.wctx(id, self.conn_id).unwrap();
-                    if c.fence_poisoned {
+                    // Vote 81: released chains end the stream for good too.
+                    if c.fence_poisoned || c.released > 0 {
                         // Stream over: a fence of this ctx was abandoned
                         // and can never signal (round-2 F7). UNCONDITIONAL
                         // since round-5 F2 -- the old `&& fence_signaled <=
@@ -18650,6 +19063,39 @@ impl Conn {
                     Err(e) => self.err(tag, e),
                 };
             }
+            if s == "warp-stall-create" || s == "warp-stall-destroy" || s == "warp-stall-free" {
+                // The caller's own next create, which a conn with its one ctx
+                // has none of; its own ctx's destroy; or the free of the next
+                // BO it destroys.
+                let aim = match s {
+                    "warp-stall-create" => StallAim::Create,
+                    "warp-stall-destroy" => StallAim::Destroy,
+                    _ => StallAim::Free,
+                };
+                if comp.wctx_of_conn(self.conn_id).is_some() != (aim != StallAim::Create) {
+                    return self.err(tag, p9::E_INVAL);
+                }
+                return match comp.test_stall_arm(self.conn_id, aim) {
+                    Ok(()) => p9::build_rwrite(&mut self.out_buf, tag, a.count),
+                    Err(e) => self.err(tag, e),
+                };
+            }
+            if s == "warp-defer-frees on" || s == "warp-defer-frees off" {
+                // The broker passes over the owed frees the caller's own GL
+                // device ctx can reach, so a chain of it submitted meanwhile
+                // meets one (#178: its own ctx only; the broker bounds the
+                // arms, sixteen a boot of two seconds at most). It only delays
+                // frees that ctx can reach.
+                let dev = match comp.wctx_dev_of_conn(self.conn_id) {
+                    Some(d) => d,
+                    None => return self.err(tag, p9::E_INVAL),
+                };
+                return if comp.gpu.test_owed_defer(dev, s.ends_with(" on")) {
+                    p9::build_rwrite(&mut self.out_buf, tag, a.count)
+                } else {
+                    self.err(tag, p9::E_AGAIN)
+                };
+            }
             if s == "warp-hold on" || s == "warp-hold off" || s == "warp-abandon" {
                 // #178: both levers act ONLY on the caller's own ctx. They
                 // ship (`default = ["test-mode"]`) and this ctl is mode
@@ -18960,6 +19406,9 @@ impl Conn {
             // the fenced lane sitting beside it.
             Some("verify") => {
                 let c = comp.wctx(id, self.conn_id).ok_or(p9::E_NOENT)?;
+                if c.released > 0 {
+                    return Err(E_IO);
+                }
                 if c.fences_in_flight > 0 || c.fence_poisoned {
                     return Err(p9::E_AGAIN);
                 }
@@ -19196,6 +19645,22 @@ impl Conn {
                     Ok(())
                 } else {
                     Err(p9::E_NOENT)
+                }
+            }
+            // A test lever: one stall shot on the broker's next repeat of this
+            // BO's free, should the free be owed (#178: the caller's own BO;
+            // the broker bounds the shots, twelve a boot, each gone in 2 s).
+            #[cfg(feature = "test-mode")]
+            Some("stall-repay") => {
+                let res = comp
+                    .wbo(id, self.conn_id)
+                    .map(|(_, b)| b.res_id)
+                    .filter(|&r| r != 0)
+                    .ok_or(p9::E_NOENT)?;
+                if comp.gpu.test_owed_stall(res) {
+                    Ok(())
+                } else {
+                    Err(p9::E_AGAIN)
                 }
             }
             _ => Err(p9::E_INVAL),
@@ -21425,7 +21890,7 @@ impl Conn {
                 // stranded the reader with neither record nor EOF
                 // (round-2 F7) -- end the stream so the client learns.
                 // Unconditional since round-5 F2 -- see the h_read twin.
-                Some(c) if c.fence_poisoned => None,
+                Some(c) if c.fence_poisoned || c.released > 0 => None,
                 Some(c) if c.fence_signaled > c.fence_reported => Some(c.fence_signaled),
                 Some(_) => {
                     i += 1;

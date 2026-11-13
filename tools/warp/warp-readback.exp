@@ -9,8 +9,8 @@
 # Separate from warp-prove.exp for the same reason warp-reject.exp is: the leg
 # stalls the device for seconds, twice, by design, and the Warp-2 gate's value
 # is being cheap enough to run every time. `warp-prove readback` prints
-# `C6-READBACK DONE` ONLY when every verdict arm (ARM / DEEP / LIVE / DEADLINE
-# / CLEAN) passed, else `C6-READBACK INCOMPLETE(<arm>)`, so the scenario is
+# `C6-READBACK DONE` ONLY when every verdict arm (ARM / GUARD / DEEP / LIVE /
+# DEADLINE / ABANDON / CREATE / DESTROY / FREE / TAKEN / BUSY / YIELD / APART / LIFT / REOPEN / CLEAN) passed, else `C6-READBACK INCOMPLETE(<arm>)`, so the scenario is
 # self-gating; the F2B line is a MEASUREMENT (data, not a verdict) and
 # warp-host.sh prints it. The #186 caveat holds for READERS of the transcript:
 # lc_expect writes its own pattern into its timeout text, so the DONE token
@@ -48,13 +48,16 @@ set ::env(THYLACINE_DISK_IMG) $work/disk-readback.img
 lc_boot
 lc_login michael correct-horse-battery-staple-v1
 
-# Two device stalls of a few seconds each plus a 35 s landing bound per phase;
-# the floor covers the worst case. `set timeout` is dead here -- lc_expect
-# resets it from lc_cmd_timeout.
-if {$lc_cmd_timeout < 240} { set lc_cmd_timeout 240 }
+# Two device stalls of a few seconds each plus a 35 s landing bound per phase,
+# then the owed-free arms, whose attempts at their bounds add up to a minute
+# each. A ceiling, not a measurement: the leg's runtime is unmeasured.
+# `set timeout` is dead here -- lc_expect resets it from lc_cmd_timeout.
+if {$lc_cmd_timeout < 480} { set lc_cmd_timeout 480 }
 # Wait on the LAST line the leg prints (the completion token), so every
 # measured line lands in the transcript first. INCOMPLETE(<arm>) -- and the
-# prover's own `FAIL --` on an instrument fault -- fail the scenario at once.
-lc_run_expect_hardfail_re "warp-prove readback" "C6-READBACK DONE" {warp-prove: (FAIL --|C6-READBACK INCOMPLETE)}
+# prover's own `FAIL --` on an instrument fault -- fail the scenario at once,
+# on the whole line: matched at the token, the scenario ends before the rest
+# of the line arrives, and the transcript keeps the token and not the reason.
+lc_run_expect_hardfail_re "warp-prove readback" "C6-READBACK DONE" {warp-prove: (FAIL --|C6-READBACK INCOMPLETE)[^\r\n]*[\r\n]}
 
-lc_pass "warp-prove readback: the compositor readback arm is fenced + deferred (ARM/DEEP/LIVE/DEADLINE/CLEAN)"
+lc_pass "warp-prove readback: the compositor readback arm is fenced + deferred (ARM/GUARD/DEEP/LIVE/DEADLINE/ABANDON/CREATE/DESTROY/FREE/TAKEN/BUSY/YIELD/APART/LIFT/REOPEN/CLEAN)"

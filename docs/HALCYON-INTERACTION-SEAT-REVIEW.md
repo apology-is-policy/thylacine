@@ -115,6 +115,12 @@ and scanout exclusion begins immediately; secret input starts only after the
 aggregate acknowledgement. This adds a normal-session responsiveness dependency
 to SAK and is the substantive policy choice approved on October 2.
 
+**Not covered by that approval:** on a backend with one host FIFO, an unprivileged
+client's queued GPU work can also prevent SAK from opening, and scanout exclusion
+then does not begin at once either, since the trusted paint comes first
+(`TRUSTED-PATH.md`). October 2 approved stalled session brokers, not this. What it
+should do is an open operator vote.
+
 The broker already holds its session's clipboard; this acknowledgement is a
 cleanup obligation of that existing trusted implementation, not a new claim
 that a malicious clipboard owner cannot retain data. Tapestry cannot fabricate

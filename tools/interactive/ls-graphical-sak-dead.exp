@@ -7,27 +7,85 @@
 # command line: tapestryd arms lictor's lever, whose seat half fires one shot
 # per trusted takeover, in the order of the legs below.
 #
-# Leg 1 (part-way): shot 1 stalls the engine after the outputs are disabled
-# and before the trusted image is bound, and the device retires the chain.
-# The takeover fails with the outputs already dark. lictor must restore
-# normal output once the engine revives -- until 2026-10-29 it restored only
-# after a completed takeover, so this seat went back to normal with no
-# restore (OPEN-BUGS 08:39Z) -- and typing must reach the shell again.
+# Leg S (stall): shot 1 stalls the engine after the outputs are disabled and
+# before the trusted image is bound, and the device retires the chain. A stall is
+# no answer from the device, so the takeover starts over once the engine revives,
+# and the trusted scanout comes up (vote 50's audit, F1), which the glass must show.
+# A seat that failed the episode here would deny the SAK to any client with work
+# queued ahead of it.
 #
-# Leg C (cursor): shot 2 stalls the cursor queue inside the takeover and
-# holds its retirement until the seat has restored. The restore needs only
-# the control queue, so it must go through with the cursor chain still
-# outstanding; a restore that waited on the cursor queue would wait until the
-# cursor lane died at 30 s, and then forever.
+# Leg P (paint): shot 2 stalls the takeover's first paint, before anything is displaced.
+# The same rule: the takeover starts over, and the chain scenario's real client may never
+# reach this arm, so the lever is its witness.
 #
-# Leg R (refused): shot 3 has the kernel's RESTORED refused after a completed
+# Leg 1 (withheld): shot 3 is the same stall with its retirement withheld for 8 s,
+# past the kernel's five-second deadline, with no retirement in between. The engine
+# is alive and the control queue holds the takeover up, so lictor renews the
+# deadline (vote 71) and the takeover completes once the chain retires. Until the
+# vote-71 audit the renewal waited for a retirement, so this chord failed at 5 s with
+# the outputs dark. Leg A keeps the witness that a takeover failed part-way restores
+# normal output (OPEN-BUGS 08:39Z).
+#
+# Leg A (answer): shot 4 has the device refuse the trusted bind. That is an answer,
+# not a stall, so the takeover fails at once and does not start over.
+#
+# Leg W (wait): shot 5 stands a readback ahead of the takeover for longer than a
+# command's ordinary bound, with no client or host involved. No wait in an episode
+# may widen behind it, since the serve loop would stop with the kernel's deadline
+# running: the command must stall at its bound and the takeover must start over.
+#
+# Leg F (frame): shot 6 stalls the engine on the episode's first frame, and the
+# device retires the chain. The frame stays owed: the next pass paints it, and the
+# episode goes on. Lictor says nothing while an episode is open, so all of this is
+# silent until it ends. A key reaches corvus only once lictor has called the frame
+# visible, so the key that ends the episode says the seat went on, and lictor's line
+# after it says what it did: the stall was real, a paint failed on it, and VISIBLE
+# never went out over a paint that failed. The frame's pixels look like the takeover's,
+# so the glass cannot tell them apart here.
+#
+# Leg G (answer): shot 7 has the device refuse that frame. An answer is no stall, so
+# the episode fails at once and the seat comes back.
+#
+# Leg H (held): shot 8 keeps the ordinary return's restore waiting while keys are
+# typed at the trusted screen they still show, and stops lictor's input thread for
+# that time, so those keys are still in the ring when the seat returns. Lictor must
+# keep them from the compositor until a pass of the input thread begun after the
+# return has been taken, say so, and the next line typed must reach the shell whole.
+# Red before the vote-72b audit: the return took only what the thread had moved.
+#
+# Leg C (cursor): shot 9 stalls the cursor queue inside the takeover and holds its
+# retirement 8 s. A cursor chain waits on the host loop a client's readback holds, so
+# the stalled lane holds the takeover up and Lictor renews the kernel's deadline
+# (vote 79): the lane revives and the takeover completes.
+#
+# Leg X (abandoned): shot 10 is that stall held past the abandonment bound. The wait
+# ends there: no renewal follows the abandonment, Lictor names the lane as what holds
+# the takeover, and the kernel fails the chord; the restore needs only the control queue,
+# so it goes through with the cursor chain still outstanding. The lane is abandoned,
+# not lost: tapestryd keeps being refused and keeps retrying a pointer update, the
+# late retirement (10 s after the abandonment) frees the lane, and the update goes
+# through. The next leg's chord shows that takeover is back as well.
+#
+# Leg R (refused): shot 11 has the kernel's RESTORED refused after a completed
 # restore (as the kernel refuses it when a grantee exits before the commit).
 # Restoration must stay owed -- lictor rebinds again before the seat returns
-# -- and the NEXT takeover (leg 2) must exclude and bind afresh: a seat that
+# -- and the NEXT takeover (leg T) must exclude and bind afresh: a seat that
 # carried "active" across the refusal skipped both and acknowledged a frame
 # that was on no scanout (vote-30 audit F1).
 #
-# Leg 2 (dead): shot 2 stalls the engine with the trusted scanout up and its
+# Leg T (restore stall): shot 12 stalls the engine just before the ordinary
+# return's restore, and the device retires the chain. A stall is no answer, so
+# the restore must wait for the device and then rebind the compositor's frame;
+# until the restore chunk the seat failed an ended episode here and cancelled its
+# grant.
+#
+# Leg B (bind stall): shot 13 makes the restore's own first command, the rebind,
+# retire late, so the stall begins inside the restore. Only the stall count the
+# restore reads before staging tells that from a refusal, so the same wait and
+# rebind must follow; a seat that read it as a refusal would give the frame up
+# or fail the episode.
+#
+# Leg 2 (dead): shot 14 stalls the engine with the trusted scanout up and its
 # chain's retirement withheld, so the engine dies 30 s later. Until vote 30
 # the failed seat retried its restore forever: every compositor request
 # parked for good and the serial SAK was refused (OPEN-BUGS 04:20Z). The seat
@@ -68,6 +126,27 @@ proc witness {stage} {
     }
 }
 
+# How much of the glass is the trusted screen's ground. A log line says what lictor
+# asked the device for; this reads what reached the glass.
+proc ground {name} {
+    global repo qmp
+    after 1000
+    set out [file join $repo build sak-dead-$name.png]
+    if {[info exists ::env(THYLACINE_EGL_VNC_SOCKET)]} {
+        if {[catch {exec python3 $repo/tools/interactive/vnc_capture.py $::env(THYLACINE_EGL_VNC_SOCKET) $out} e]} { lc_fail $e }
+    } else {
+        if {[catch {exec $repo/tools/screendump.sh -s $qmp $out} e]} { lc_fail $e }
+    }
+    if {[catch {exec python3 $repo/tools/interactive/sak_glass.py $repo/usr/lictor/src/render.rs $out} r]} { lc_fail $r }
+    if {![regexp {^ground ([0-9]+)\n(.*)$} $r -> pct top]} { lc_fail "an unread capture: $r" }
+    lc_pass "SAK-DEAD glass $name ground=$pct% $top"
+    return $pct
+}
+proc pointer {x y} {
+    global repo qmp
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -p "abs $x $y"} e]} { lc_fail $e }
+}
+
 # The seat's return re-enables the session's own participant, not only the
 # pixels: typing proves the shell, and this proves the link. A recovery moves the
 # generation under whatever the link has in flight, so this leg is where a client
@@ -80,6 +159,19 @@ proc rejoined {stage} {
         -re {EXTINCTION:} { lc_extinction_fail "rejoin ($stage)" }
         timeout { lc_fail "no seat link rejoin within 15s ($stage) -- the session's participant stayed disabled" }
         eof { lc_fail "EOF ($stage)" }
+    }
+}
+
+# What the seat's return could still say, read before a witness's match discards it.
+proc settled {leg} {
+    global timeout
+    after 1500
+    set timeout 1
+    expect {
+        -re {lictor: seat failed: [^\r\n]*[\r\n]} { lc_fail "$leg: the seat failed as the episode ended: $expect_out(0,string)" }
+        -re {lictor: kernel closed trusted seat \(scanout [a-z]+\)} { lc_fail "$leg: the kernel closed the seat as the episode ended: $expect_out(0,string)" }
+        -re {EXTINCTION:} { lc_extinction_fail "after the episode ($leg)" }
+        timeout {}
     }
 }
 
@@ -138,48 +230,337 @@ key "meta_l+f"
 # The positive control for leg 2's silence: the same keys reach the shell.
 witness baseline
 
-# ---- leg 1: a takeover that fails part-way ----
+# ---- leg S: a stall inside the takeover delays it ----
 key "ctrl+alt+f10"
 set timeout 30
 expect {
     -ex "INJECTED by test-latch-dead, retirement withheld" {
-        lc_fail "part-way: the first takeover withheld its retirement -- the lever fired out of order"
+        lc_fail "stall: the first takeover withheld its retirement -- the lever fired out of order"
     }
     -ex "INJECTED by test-latch-dead) -- engine stalled" {
-        lc_step "part-way: lictor stalled the engine inside the takeover"
+        lc_step "stall: lictor stalled the engine inside the takeover"
     }
-    -ex "lictor: trusted scanout active" { lc_fail "part-way: the takeover completed -- no shot fired inside it (was the lever armed?)" }
+    -ex "lictor: trusted scanout active" { lc_fail "stall: the takeover completed -- no shot fired inside it (was the lever armed?)" }
     -re {EXTINCTION:} { lc_extinction_fail "first takeover" }
-    timeout { lc_fail "part-way: no injected stall within 30s of the chord (was the lever armed?)" }
+    timeout { lc_fail "stall: no injected stall within 30s of the chord (was the lever armed?)" }
 }
 set revived 0
-set restored 0
+set stalls 0
 expect {
-    -ex "lictor: trusted scanout active" { lc_fail "part-way: the takeover completed although its engine had stalled" }
-    -re {input withheld|engine dead} { lc_fail "part-way: the engine died or input was withheld on a stall the device retired" }
+    -re {lictor: seat failed: [^\r\n]*[\r\n]} { lc_fail "stall: the seat failed the episode on a stall the device retired: $expect_out(0,string)" }
+    -re {input withheld|engine dead} { lc_fail "stall: the engine died or input was withheld on a stall the device retired" }
+    -re {lictor: takeover met a stall, starting over generation=[0-9]+} {
+        incr stalls
+        exp_continue
+    }
     -re {gpu synchronous chain retired [0-9]+ ms after its deadline -- engine revived} {
         set revived 1
         exp_continue
     }
+    -ex "lictor: trusted scanout active" {
+        if {!$revived} { lc_fail "stall: the takeover completed although lictor never said the engine revived" }
+    }
+    -re {EXTINCTION:} { lc_extinction_fail "after the stall" }
+    timeout { lc_fail "stall: within 30s: revived=$revived and no trusted scanout" }
+}
+if {!$stalls} { lc_fail "stall: the takeover completed although lictor never said it started over" }
+if {[ground stall] < 30} { lc_fail "stall: lictor said the scanout is up, and the glass is not the trusted screen" }
+after 1000
+key "ret"
+expect {
+    -re {lictor: seat failed: [^\r\n]*[\r\n]} { lc_fail "stall: the episode failed after the takeover: $expect_out(0,string)" }
+    -re {lictor: kernel closed trusted seat \(scanout [a-z]+\)} { lc_fail "stall: the episode failed instead of ending: $expect_out(0,string)" }
+    -ex "lictor: trusted seat recovered; nothing was conferred" { lc_fail "stall: the seat recovered from a failure instead of ending the episode" }
+    -ex "corvus: imperium: SAK with nothing pending" { lc_step "stall: the empty episode ended" }
+    -re {EXTINCTION:} { lc_extinction_fail "the end of the stalled episode" }
+    timeout { lc_fail "stall: the episode did not end within 30s" }
+}
+settled stall
+witness control
+
+# ---- leg P: a stall on the takeover's first paint ----
+key "ctrl+alt+f10"
+set timeout 30
+expect {
+    -ex "INJECTED by test-latch-dead, retirement withheld" { lc_fail "paint: the shot withheld its retirement -- the lever fired out of order" }
+    -ex "INJECTED by test-latch-dead) -- engine stalled" { lc_step "paint: lictor stalled the engine on the first paint" }
+    -ex "lictor: trusted scanout active" { lc_fail "paint: the takeover completed -- no shot fired inside it" }
+    -re {EXTINCTION:} { lc_extinction_fail "paint takeover" }
+    timeout { lc_fail "paint: no injected stall within 30s of the chord" }
+}
+set revived 0
+set stalls 0
+expect {
+    -re {lictor: seat failed: [^\r\n]*[\r\n]} { lc_fail "paint: the seat failed the episode on a stall the device retired: $expect_out(0,string)" }
+    -re {lictor: takeover met a stall, starting over generation=[0-9]+} {
+        incr stalls
+        exp_continue
+    }
+    -re {gpu synchronous chain retired [0-9]+ ms after its deadline -- engine revived} {
+        set revived 1
+        exp_continue
+    }
+    -ex "lictor: trusted scanout active" {
+        if {!$revived} { lc_fail "paint: the takeover completed although lictor never said the engine revived" }
+    }
+    -re {EXTINCTION:} { lc_extinction_fail "after the first paint's stall" }
+    timeout { lc_fail "paint: within 30s: revived=$revived and no trusted scanout" }
+}
+if {!$stalls} { lc_fail "paint: the takeover completed although lictor never said it started over" }
+after 1000
+key "ret"
+expect {
+    -re {lictor: seat failed: [^\r\n]*[\r\n]} { lc_fail "paint: the episode failed after the takeover: $expect_out(0,string)" }
+    -re {lictor: kernel closed trusted seat \(scanout [a-z]+\)} { lc_fail "paint: the episode failed instead of ending: $expect_out(0,string)" }
+    -ex "corvus: imperium: SAK with nothing pending" { lc_step "paint: the empty episode ended" }
+    -re {EXTINCTION:} { lc_extinction_fail "the end of the paint leg's episode" }
+    timeout { lc_fail "paint: the episode did not end within 30s" }
+}
+settled paint
+witness painted
+
+# ---- leg 1: a stall withheld past the kernel's five seconds delays the takeover ----
+# Vote 71: while the engine is alive and the control queue holds the takeover up,
+# Lictor renews the kernel's deadline, so a chord behind a client's work ends in the
+# trusted screen or a dead engine. The lever withholds the stalled chain's retirement
+# for 8 s, past the first deadline, with no retirement in between: a renewal that
+# waited for one fails the chord here. Red before: the seat closed at 5 s, displaced.
+key "ctrl+alt+f10"
+set timeout 30
+expect {
+    -re {EXTINCTION:} { lc_extinction_fail "withheld takeover" }
+    -ex "INJECTED by test-latch-dead) -- engine stalled" {
+        lc_fail "withheld: the retirement was not withheld -- the lever fired out of order"
+    }
+    -ex "INJECTED by test-latch-dead, retirement withheld" {
+        lc_step "withheld: lictor stalled the engine inside the takeover"
+    }
+    -ex "lictor: trusted scanout active" { lc_fail "withheld: the takeover completed -- no shot fired inside it (was the lever armed?)" }
+    timeout { lc_fail "withheld: no injected stall within 30s of the chord (was the lever armed?)" }
+}
+set renewed 0
+set released 0
+set revived 0
+expect {
+    -re {EXTINCTION:} { lc_extinction_fail "the withheld takeover" }
+    -re {lictor: seat failed: [^\r\n]*[\r\n]} { lc_fail "withheld: the seat failed: $expect_out(0,string)" }
+    -re {lictor: kernel closed trusted seat \(scanout [a-z]+\)} {
+        lc_fail "withheld: the kernel closed the seat behind a live engine's stall (renewed=$renewed) -- the chord ended in neither the trusted screen nor a dead engine"
+    }
+    -re {input withheld|engine dead} { lc_fail "withheld: the engine died on a stall released inside the abandonment bound" }
+    -re {lictor: takeover renewed behind a draining backlog generation=[0-9]+ chains=[0-9]+|gpu synchronous chain retirement released \(test-latch-dead\)|gpu synchronous chain retired [0-9]+ ms after its deadline -- engine revived} {
+        # One alternation: lictor prints a release and a renewal in the same pass, and
+        # separate arms would let the one listed first discard the other.
+        set hit $expect_out(0,string)
+        if {[string match "*takeover renewed*" $hit]} {
+            incr renewed
+        } elseif {[string match "*retirement released*" $hit]} {
+            set released 1
+        } else {
+            set revived 1
+        }
+        exp_continue
+    }
+    -ex "lictor: trusted scanout active" {
+        if {!$renewed || !$released || !$revived} {
+            lc_fail "withheld: the trusted scanout came up with renewed=$renewed released=$released revived=$revived"
+        }
+        lc_step "withheld: renewed $renewed times behind the stall, which retired at 8 s, and the takeover completed"
+    }
+    timeout { lc_fail "withheld: within 30s: renewed=$renewed released=$released revived=$revived and no trusted scanout" }
+}
+after 1000
+key "ret"
+expect {
+    -re {EXTINCTION:} { lc_extinction_fail "the end of the withheld episode" }
+    -re {lictor: seat failed: [^\r\n]*[\r\n]} { lc_fail "withheld: the episode failed after the takeover: $expect_out(0,string)" }
+    -re {lictor: kernel closed trusted seat \(scanout [a-z]+\)} { lc_fail "withheld: the episode failed instead of ending: $expect_out(0,string)" }
+    -ex "corvus: imperium: SAK with nothing pending" { lc_step "withheld: the empty episode ended" }
+    timeout { lc_fail "withheld: the episode did not end within 30s" }
+}
+settled withheld
+witness restored
+
+# ---- leg A: the device answers the takeover ----
+key "ctrl+alt+f10"
+set timeout 30
+expect {
+    -ex "lictor: trusted bind refused (INJECTED by test-latch-dead)" { lc_step "answer: the device refused the trusted bind" }
+    -ex "INJECTED by test-latch-dead" { lc_fail "answer: another shot fired where the refusal was due" }
+    -ex "lictor: trusted scanout active" { lc_fail "answer: the takeover completed -- the refusal did not fire inside it" }
+    -re {EXTINCTION:} { lc_extinction_fail "answered takeover" }
+    timeout { lc_fail "answer: no refusal within 30s of the chord" }
+}
+set failed 0
+set restored 0
+expect {
+    -re {lictor: takeover met a stall, starting over generation=[0-9]+} { lc_fail "answer: the seat took the device's answer for a stall" }
+    -ex "lictor: trusted scanout active" { lc_fail "answer: the takeover started over after the device refused it" }
+    -ex "lictor: seat failed: private scanout activation" {
+        set failed 1
+        exp_continue
+    }
     -re {lictor: normal scanout restored generation=[0-9]+} {
         set restored 1
-        lc_step "part-way: lictor restored normal output after the failed takeover"
         exp_continue
     }
     -ex "lictor: trusted seat recovered; nothing was conferred" {
-        if {!$restored} {
-            lc_fail "part-way: the seat went back to normal with no restore of the outputs it had disabled"
-        }
+        if {!$failed} { lc_fail "answer: the seat recovered, but never said it failed the takeover" }
+        if {!$restored} { lc_fail "answer: the seat went back to normal with no restore of the outputs it had disabled" }
     }
-    -re {EXTINCTION:} { lc_extinction_fail "after the first takeover" }
-    timeout { lc_fail "part-way: within 30s: revived=$revived restored=$restored and no recovery" }
+    -re {EXTINCTION:} { lc_extinction_fail "after the refusal" }
+    timeout { lc_fail "answer: within 30s: failed=$failed restored=$restored and no recovery" }
 }
-if {!$revived} { lc_fail "part-way: the seat restored, but lictor never said the engine revived -- which path ran it?" }
-rejoined part-way
+rejoined answered
 after 1500
-witness restored
+witness answered
+
+# ---- leg W: a wait behind a readback in an episode ----
+key "ctrl+alt+f10"
+set timeout 30
+expect {
+    -ex "lictor: a readback stands ahead of the takeover (INJECTED by test-latch-dead)" { lc_step "wait: a readback stands ahead of the takeover" }
+    -ex "INJECTED by test-latch-dead" { lc_fail "wait: another shot fired where the readback was due" }
+    -ex "lictor: trusted scanout active" { lc_fail "wait: the takeover completed -- the shot did not fire inside it" }
+    -re {EXTINCTION:} { lc_extinction_fail "the takeover behind a readback" }
+    timeout { lc_fail "wait: no shot within 30s of the chord" }
+}
+set missed 0
+set stalls 0
+expect {
+    -re {lictor: seat failed: [^\r\n]*[\r\n]} { lc_fail "wait: the seat failed the episode on a stall: $expect_out(0,string)" }
+    -re {lictor: gpu synchronous command missed its [0-9]+ ms deadline} {
+        set missed 1
+        exp_continue
+    }
+    -re {lictor: takeover met a stall, starting over generation=[0-9]+} {
+        incr stalls
+        exp_continue
+    }
+    -ex "lictor: trusted scanout active" {
+        if {!$missed || !$stalls} { lc_fail "wait: the takeover waited out the readback instead of stalling at its bound (missed=$missed stalls=$stalls)" }
+    }
+    -re {EXTINCTION:} { lc_extinction_fail "the takeover's stall behind a readback" }
+    timeout { lc_fail "wait: within 30s: missed=$missed stalls=$stalls and no trusted scanout" }
+}
+after 1000
+key "ret"
+expect {
+    -re {lictor: seat failed: [^\r\n]*[\r\n]} { lc_fail "wait: the episode failed after the takeover: $expect_out(0,string)" }
+    -re {lictor: kernel closed trusted seat \(scanout [a-z]+\)} { lc_fail "wait: the episode failed instead of ending: $expect_out(0,string)" }
+    -ex "lictor: trusted seat recovered; nothing was conferred" { lc_fail "wait: the seat recovered from a failure instead of ending the episode" }
+    -ex "corvus: imperium: SAK with nothing pending" { lc_step "wait: the empty episode ended" }
+    -re {EXTINCTION:} { lc_extinction_fail "the end of the episode behind a readback" }
+    timeout { lc_fail "wait: the episode did not end within 30s" }
+}
+settled wait
+witness readback
+
+# ---- leg F: a stall on the episode's first frame ----
+key "ctrl+alt+f10"
+set timeout 30
+expect {
+    -ex "lictor: trusted scanout active" { lc_step "frame: the trusted scanout is up" }
+    -ex "INJECTED by test-latch-dead" { lc_fail "frame: a shot fired inside the takeover where the frame's was due" }
+    -re {EXTINCTION:} { lc_extinction_fail "frame takeover" }
+    timeout { lc_fail "frame: no takeover within 30s of the chord" }
+}
+after 2500
+key "ret"
+set ended 0
+set stalled -1
+set retries 0
+set unpainted 0
+expect {
+    -re {lictor: seat failed: [^\r\n]*[\r\n]} { lc_fail "frame: the seat failed the episode on a stall the device retired: $expect_out(0,string)" }
+    -re {lictor: kernel closed trusted seat \(scanout [a-z]+\)} { lc_fail "frame: the episode failed instead of ending: $expect_out(0,string)" }
+    -ex "lictor: trusted seat recovered; nothing was conferred" { lc_fail "frame: the seat recovered from a failure instead of ending the episode" }
+    -re {corvus: imperium: SAK with nothing pending|lictor: frame stall shot: stalled=([01]) retries=([0-9]+) unpainted=([01])} {
+        if {[string match corvus* $expect_out(0,string)]} {
+            set ended 1
+        } else {
+            set stalled $expect_out(1,string)
+            set retries $expect_out(2,string)
+            set unpainted $expect_out(3,string)
+        }
+        if {!$ended || $stalled < 0} { exp_continue }
+    }
+    -re {EXTINCTION:} { lc_extinction_fail "the end of the frame's episode" }
+    timeout { lc_fail "frame: the episode did not end within 30s (ended=$ended stalled=$stalled)" }
+}
+if {$stalled != 1} { lc_fail "frame: the shot did not stall the engine (stalled=$stalled)" }
+if {$retries < 1} { lc_fail "frame: the engine stalled and no paint met it (retries=$retries)" }
+if {$unpainted != 0} { lc_fail "frame: lictor told the kernel a frame was visible over a paint that failed" }
+lc_step "frame: the episode went on past the stall and ended"
+settled frame
+witness framed
+
+# ---- leg G: the device answers the episode's first frame ----
+key "ctrl+alt+f10"
+set timeout 30
+expect {
+    -ex "lictor: trusted scanout active" { lc_step "frame answer: the trusted scanout is up" }
+    -ex "INJECTED by test-latch-dead" { lc_fail "frame answer: a shot fired inside the takeover where the refusal was due" }
+    -re {EXTINCTION:} { lc_extinction_fail "frame answer takeover" }
+    timeout { lc_fail "frame answer: no takeover within 30s of the chord" }
+}
+set failed 0
+set restored 0
+expect {
+    -ex "lictor: seat failed: private frame paint" {
+        set failed 1
+        exp_continue
+    }
+    -re {lictor: normal scanout restored generation=[0-9]+} {
+        set restored 1
+        exp_continue
+    }
+    -ex "lictor: trusted seat recovered; nothing was conferred" {
+        if {!$failed} { lc_fail "frame answer: the seat recovered, but never said the device refused the frame" }
+        if {!$restored} { lc_fail "frame answer: the seat went back to normal with no restore" }
+    }
+    -re {EXTINCTION:} { lc_extinction_fail "after the refused frame" }
+    timeout { lc_fail "frame answer: within 30s: failed=$failed restored=$restored and no recovery" }
+}
+rejoined frameanswer
+after 1500
+witness refused
+
+# ---- leg H: keys typed while the restore waits ----
+key "ctrl+alt+f10"
+set timeout 30
+expect {
+    -ex "lictor: trusted scanout active" { lc_step "held: the trusted scanout is up" }
+    -ex "INJECTED by test-latch-dead" { lc_fail "held: a shot fired inside the takeover" }
+    -re {EXTINCTION:} { lc_extinction_fail "held takeover" }
+    timeout { lc_fail "held: no takeover within 30s of the chord" }
+}
+after 2500
+key "ret"
+expect {
+    -re {lictor: seat failed: [^\r\n]*[\r\n]} { lc_fail "held: the episode failed instead of ending: $expect_out(0,string)" }
+    -ex "lictor: restore held (INJECTED by test-latch-dead)" { lc_step "held: the restore is waiting" }
+    -re {EXTINCTION:} { lc_extinction_fail "held restore" }
+    timeout { lc_fail "held: the episode's restore never began within 30s" }
+}
+type "xqxq"
+expect {
+    -re {lictor: seat failed: [^\r\n]*[\r\n]} { lc_fail "held: the seat failed its return: $expect_out(0,string)" }
+    -re {lictor: ([0-9]+) input events pressed at a trusted screen kept from the compositor} {
+        lc_step "held: lictor kept $expect_out(1,string) events from the compositor"
+    }
+    -re {EXTINCTION:} { lc_extinction_fail "after the held restore" }
+    timeout { lc_fail "held: lictor never said it kept the keys typed during the restore, so this leg tests nothing" }
+}
+settled held
+witness held
 
 # ---- leg C: a cursor chain stalls inside the takeover ----
+# Vote 79: a cursor chain waits on the host loop a client's readback holds, so a stalled
+# cursor lane holds the takeover up like the control queue, and Lictor renews the
+# kernel's deadline while its stall stands. The lever holds the cursor chain 8 s, past
+# the first deadline: the lane revives and the takeover completes. Red before: nothing
+# renewed, and the kernel closed the seat at 5 s.
 key "ctrl+alt+f10"
 set timeout 30
 expect {
@@ -191,30 +572,132 @@ expect {
     -re {EXTINCTION:} { lc_extinction_fail "cursor takeover" }
     timeout { lc_fail "cursor: no injected cursor stall within 30s of the chord" }
 }
-set restored 0
-set timeout 20
+set renewed 0
+set released 0
+set revived 0
+set timeout 30
 expect {
-    -re {cursor queue dead|cursor queue failed} { lc_fail "cursor: the cursor queue died before the seat restored past it" }
-    -re {lictor: normal scanout restored generation=[0-9]+} {
-        set restored 1
-        lc_step "cursor: normal output restored with the cursor chain still outstanding"
+    -re {EXTINCTION:} { lc_extinction_fail "the cursor-held takeover" }
+    -re {lictor: seat failed: [^\r\n]*[\r\n]} { lc_fail "cursor: the seat failed: $expect_out(0,string)" }
+    -re {lictor: kernel closed trusted seat \(scanout [a-z]+\)} {
+        lc_fail "cursor: the kernel closed the seat behind a stalled cursor lane (renewed=$renewed) -- the chord ended in neither the trusted screen nor the lane's abandonment"
+    }
+    -re {cursor queue abandoned|cursor queue failed} { lc_fail "cursor: the cursor queue died on a chain released inside the abandonment bound" }
+    -re {lictor: takeover renewed behind a draining backlog generation=[0-9]+ chains=[0-9]+|lictor: cursor chain retirement released \(test-latch-dead\)|cursor chain retired [0-9]+ ms after its deadline -- cursor queue revived} {
+        # One alternation, as in leg 1: the release and a renewal share a pass.
+        set hit $expect_out(0,string)
+        if {[string match "*takeover renewed*" $hit]} {
+            incr renewed
+        } elseif {[string match "*retirement released*" $hit]} {
+            set released 1
+        } else {
+            set revived 1
+        }
+        exp_continue
+    }
+    -ex "lictor: trusted scanout active" {
+        if {!$renewed || !$released || !$revived} {
+            lc_fail "cursor: the trusted scanout came up with renewed=$renewed released=$released revived=$revived"
+        }
+        lc_step "cursor: renewed $renewed times behind the stalled cursor lane, which revived at 8 s, and the takeover completed"
+    }
+    timeout { lc_fail "cursor: within 30s: renewed=$renewed released=$released revived=$revived and no trusted scanout" }
+}
+after 1000
+key "ret"
+expect {
+    -re {EXTINCTION:} { lc_extinction_fail "the end of the cursor episode" }
+    -re {lictor: seat failed: [^\r\n]*[\r\n]} { lc_fail "cursor: the episode failed after the takeover: $expect_out(0,string)" }
+    -re {lictor: kernel closed trusted seat \(scanout [a-z]+\)} { lc_fail "cursor: the episode failed instead of ending: $expect_out(0,string)" }
+    -ex "corvus: imperium: SAK with nothing pending" { lc_step "cursor: the empty episode ended" }
+    timeout { lc_fail "cursor: the episode did not end within 30s" }
+}
+settled cursor
+witness pointer
+
+# ---- leg X: a cursor chain outlives the abandonment bound ----
+# Vote 79: the wait behind a stalled cursor lane ends at its abandonment. The lever holds
+# the chain past FENCE_ABANDON_MS: renewals run until the lane is abandoned, then stop,
+# and the kernel fails the chord, which restores past the outstanding chain. The lane
+# is abandoned, not lost (vote 50): the hold ends 10 s after the abandonment, tapestryd
+# is refused and retries a pointer update meanwhile, the late retirement frees the lane,
+# and the update goes through. The next leg's chord shows that takeover is back too.
+key "ctrl+alt+f10"
+set timeout 30
+expect {
+    -ex "cursor chain missed its deadline (INJECTED by test-latch-dead, retirement held)" {
+        lc_step "abandon: lictor stalled the cursor queue inside the takeover"
+    }
+    -ex "synchronous command missed its deadline (INJECTED" { lc_fail "abandon: a control-queue shot fired where the cursor shot was due" }
+    -ex "lictor: trusted scanout active" { lc_fail "abandon: the takeover completed -- the cursor shot did not fire inside it" }
+    -re {EXTINCTION:} { lc_extinction_fail "abandon takeover" }
+    timeout { lc_fail "abandon: no injected cursor stall within 30s of the chord" }
+}
+set renewed 0
+set never 0
+set held 0
+set restored 0
+set timeout 50
+expect {
+    -re {EXTINCTION:} { lc_extinction_fail "after the abandon stall" }
+    -ex "lictor: trusted scanout active" { lc_fail "abandon: the takeover completed although the cursor chain never retired" }
+    -re {cursor queue failed} { lc_fail "abandon: the cursor queue failed where it was only abandoned" }
+    -ex "lictor: cursor chain retirement released (test-latch-dead)" { lc_fail "abandon: the hold ended before the seat restored past the abandoned lane" }
+    -re {lictor: takeover renewed behind a draining backlog generation=[0-9]+ chains=[0-9]+|cursor chain never retired in [0-9]+ ms -- cursor queue abandoned until it retires|lictor: takeover held by a cursor lane out of service \(abandoned\)|lictor: normal scanout restored generation=[0-9]+} {
+        # One alternation: lictor prints these in pass order, and the abandonment and a
+        # renewal can share a read. Reap runs before renew, so with the wait ended no
+        # renewal can follow the abandonment line.
+        set hit $expect_out(0,string)
+        if {[string match "*takeover renewed*" $hit]} {
+            if {$never} { lc_fail "abandon: a renewal after the lane was abandoned (renewed=$renewed) -- the abandonment did not end the wait" }
+            incr renewed
+        } elseif {[string match "*never retired*" $hit]} {
+            set never 1
+        } elseif {[string match "*out of service*" $hit]} {
+            set held 1
+        } else {
+            set restored 1
+        }
         exp_continue
     }
     -ex "lictor: trusted seat recovered; nothing was conferred" {
-        if {!$restored} { lc_fail "cursor: the seat went back to normal with no restore" }
+        if {!$restored} { lc_fail "abandon: the seat went back to normal with no restore" }
+        if {!$never} { lc_fail "abandon: the seat gave up before the cursor lane was abandoned (renewed=$renewed) -- the wait behind the lane ended early" }
+        if {!$renewed} { lc_fail "abandon: the lane was abandoned with no renewal behind it" }
+        if {!$held} { lc_fail "abandon: the chord failed behind the abandoned lane and lictor never said why" }
+        lc_step "abandon: renewed $renewed times until the lane was abandoned, then none; lictor named the lane, and the chord failed past the outstanding chain"
     }
-    -re {EXTINCTION:} { lc_extinction_fail "after the cursor stall" }
-    timeout { lc_fail "cursor: within 20s: restored=$restored and no recovery (the restore waits on the stalled cursor queue)" }
+    timeout { lc_fail "abandon: within 50s: renewed=$renewed never=$never held=$held restored=$restored and no recovery" }
 }
-set timeout 15
+after 1500
+pointer 9000 9000
+set refused 0
+set released 0
+set revived 0
+set timeout 30
 expect {
-    -re {cursor chain retired [0-9]+ ms after its deadline -- cursor queue revived} {
-        lc_step "cursor: the released chain retired and the cursor queue revived"
+    -re {cursor queue failed} { lc_fail "abandon: a well-formed late retirement failed the cursor queue" }
+    -re {EXTINCTION:} { lc_extinction_fail "abandon revival" }
+    -ex "tapestryd: pointer backend refused an update; retrying" {
+        set refused 1
+        exp_continue
     }
-    -re {cursor queue dead|cursor queue failed} { lc_fail "cursor: the cursor queue died after its retirement was released" }
-    -re {EXTINCTION:} { lc_extinction_fail "cursor revival" }
-    timeout { lc_fail "cursor: the cursor queue never revived after its retirement was released (15s)" }
+    -ex "lictor: cursor chain retirement released (test-latch-dead)" {
+        set released 1
+        exp_continue
+    }
+    -ex "abandoned cursor chain retired -- cursor queue revived" {
+        set revived 1
+        exp_continue
+    }
+    -ex "tapestryd: pointer backend accepted an update again" {
+        lc_step "abandon: the late retirement freed the lane and the pointer update went through"
+    }
+    timeout { lc_fail "abandon: within 30s: refused=$refused released=$released revived=$revived and no accepted update" }
 }
+if {!$refused} { lc_fail "abandon: the update was accepted, but tapestryd never said it had been refused" }
+if {!$released} { lc_fail "abandon: the lane came back, but the lever never said it released the chain" }
+if {!$revived} { lc_fail "abandon: the update was accepted, but lictor never said the lane revived" }
 
 # ---- leg R: the kernel refuses RESTORED after a completed restore ----
 key "ctrl+alt+f10"
@@ -251,15 +734,98 @@ rejoined refused
 after 1500
 witness cancelled
 
-# ---- leg 2: the engine dies under the trusted scanout ----
+# ---- leg T: a stall stands as the restore begins ----
 # A fresh "trusted scanout active" here is also leg R's verdict: a seat that
 # carried "active" across the refused RESTORED skips the takeover entirely.
+key "ctrl+alt+f10"
+set timeout 30
+# Expect takes the first ARM that matches anywhere in what it has read, not the
+# earliest line, so in each wait below the line that must not come first is listed
+# first: lines a single pass prints arrive in one read.
+expect {
+    -ex "INJECTED by test-latch-dead" { lc_fail "restore-stall: a shot fired inside the takeover" }
+    -ex "lictor: trusted scanout active" { lc_step "restore-stall: the trusted scanout is up (a fresh takeover)" }
+    -re {EXTINCTION:} { lc_extinction_fail "restore-stall takeover" }
+    timeout { lc_fail "restore-stall: no takeover within 30s of the chord (did the seat carry 'active' across leg R's refused RESTORED?)" }
+}
+after 1000
+key "ret"
+# The shot is the restore's first line and the seat cannot fail at it before it, so
+# its arm goes first: a failure printed in the same pass stays for the next wait.
+expect {
+    -re {lictor: restore shot: a synchronous chain stalled ahead of the restore stalled=([01]) generation=[0-9]+} {
+        if {$expect_out(1,string) != 1} { lc_fail "restore-stall: the shot stalled nothing, so this leg tests nothing" }
+        lc_step "restore-stall: a stall stands as the restore begins"
+    }
+    -re {lictor: seat failed: [^\r\n]*[\r\n]} { lc_fail "restore-stall: the episode failed before its restore: $expect_out(0,string)" }
+    -re {EXTINCTION:} { lc_extinction_fail "restore-stall shot" }
+    timeout { lc_fail "restore-stall: the empty episode never reached its restore within 30s -- did Enter end it?" }
+}
+# The wait line goes first for the same reason: the seat cannot fail ahead of it
+# without the restore having failed on the stall, which the second arm reports.
+expect {
+    -re {lictor: restore met a stall, waiting for the device generation=[0-9]+} { lc_step "restore-stall: the restore waits for the device" }
+    -re {lictor: seat failed: [^\r\n]*[\r\n]} { lc_fail "restore-stall: the seat failed an ended episode on a stall: $expect_out(0,string)" }
+    -re {EXTINCTION:} { lc_extinction_fail "restore-stall wait" }
+    timeout { lc_fail "restore-stall: lictor never said the restore waited, so the stall was not in its way" }
+}
+expect {
+    -re {lictor: seat failed: [^\r\n]*[\r\n]} { lc_fail "restore-stall: the seat failed after waiting: $expect_out(0,string)" }
+    -ex "lictor: trusted seat recovered; nothing was conferred" { lc_fail "restore-stall: the seat came back through a failure, not through its restore" }
+    -re {lictor: episode closed: frame rebound generation=[0-9]+} { lc_step "restore-stall: the stall retired and the episode closed with the frame rebound" }
+    -re {EXTINCTION:} { lc_extinction_fail "after the restore's stall" }
+    timeout { lc_fail "restore-stall: the episode never closed within 30s" }
+}
+settled restore-stall
+witness waited
+
+# ---- leg B: a stall begins on the restore's own first command ----
+key "ctrl+alt+f10"
+set timeout 30
+expect {
+    -ex "INJECTED by test-latch-dead" { lc_fail "bind-stall: a shot fired inside the takeover" }
+    -ex "lictor: trusted scanout active" { lc_step "bind-stall: the trusted scanout is up" }
+    -re {EXTINCTION:} { lc_extinction_fail "bind-stall takeover" }
+    timeout { lc_fail "bind-stall: no takeover within 30s of the chord" }
+}
+after 1000
+key "ret"
+# The shot's line comes before the restore runs, so nothing the restore prints can
+# precede it; each later wait lists first the line that must not come first, as in
+# leg T.
+expect {
+    -re {lictor: restore shot: the restore's first command will stall generation=[0-9]+} {
+        lc_step "bind-stall: the restore's first command is armed to stall"
+    }
+    -re {lictor: seat failed: [^\r\n]*[\r\n]} { lc_fail "bind-stall: the episode failed before its restore: $expect_out(0,string)" }
+    -re {EXTINCTION:} { lc_extinction_fail "bind-stall shot" }
+    timeout { lc_fail "bind-stall: the empty episode never reached its restore within 30s -- did Enter end it?" }
+}
+expect {
+    -ex "lictor: stall shot LOST" { lc_fail "bind-stall: the shot rode no command that retired, so this leg tests nothing" }
+    -re {lictor: restore met a stall, waiting for the device generation=[0-9]+} { lc_step "bind-stall: the restore waits for the device" }
+    -re {lictor: seat failed: [^\r\n]*[\r\n]} { lc_fail "bind-stall: the seat failed an ended episode on a stall begun in its restore: $expect_out(0,string)" }
+    -re {EXTINCTION:} { lc_extinction_fail "bind-stall wait" }
+    timeout { lc_fail "bind-stall: lictor never said the restore waited, so the stall was read as something else" }
+}
+expect {
+    -re {lictor: seat failed: [^\r\n]*[\r\n]} { lc_fail "bind-stall: the seat failed after waiting: $expect_out(0,string)" }
+    -ex "lictor: trusted seat recovered; nothing was conferred" { lc_fail "bind-stall: the seat came back through a failure, not through its restore" }
+    -re {lictor: episode closed: output blank generation=[0-9]+} { lc_fail "bind-stall: the restore gave the frame up, so it read the stall as a refusal" }
+    -re {lictor: episode closed: frame rebound generation=[0-9]+} { lc_step "bind-stall: the stall retired and the episode closed with the frame rebound" }
+    -re {EXTINCTION:} { lc_extinction_fail "after the bind's stall" }
+    timeout { lc_fail "bind-stall: the episode never closed within 30s" }
+}
+settled bind-stall
+witness bound
+
+# ---- leg 2: the engine dies under the trusted scanout ----
 key "ctrl+alt+f10"
 set timeout 30
 expect {
     -ex "lictor: trusted scanout active" { lc_step "dead: the trusted scanout is up (a fresh takeover)" }
     -re {EXTINCTION:} { lc_extinction_fail "second takeover" }
-    timeout { lc_fail "dead: no takeover within 30s of the chord (did the seat carry 'active' across leg R's refused RESTORED?)" }
+    timeout { lc_fail "dead: no takeover within 30s of the chord" }
 }
 expect {
     -ex "INJECTED by test-latch-dead, retirement withheld" { lc_step "dead: lictor stalled the engine with the chain's retirement withheld" }
@@ -307,5 +873,5 @@ expect {
     timeout {}
 }
 if {!$withheld} { lc_fail "dead: lictor never withheld the keys typed after the display was lost" }
-lc_pass "graphical SAK dead: part-way, cursor-stalled and refused-RESTORED takeovers restore normal output; a dead engine returns the seat without its display and withholds input"
+lc_pass "graphical SAK dead: a stalled takeover starts over; a stalled frame stays owed; keys typed at a trusted screen stay out of the compositor; a stall withheld past the deadline is waited out, and so is a stalled cursor lane, whose abandonment fails the chord; answered, abandoned and refused-RESTORED takeovers restore normal output; a dead engine returns the seat without its display and withholds input"
 lc_quit

@@ -10,6 +10,7 @@
 #include "../../mm/phys.h"
 #include "../../mm/magazines.h"
 #include "../../arch/arm64/gic.h"    // drain_meets_live_owners: wake each owner's CPU
+#include "../../arch/arm64/uart.h"
 #include <thylacine/page.h>
 #include <thylacine/proc.h>
 #include <thylacine/sched.h>
@@ -97,14 +98,23 @@ void test_phys_leak_10k(void) {
 // holds and checks the stamps before freeing them: a drain that frees a page
 // its owner is popping hands that page to a second owner, whose stamp
 // overwrites the first. The suite's drains run with live peers too.
+//
+// The owners churn until the drainer releases them, which it does once
+// DMO_BESIDE of its drains have run beside a live owner. Nothing orders one
+// kthread's first instruction before another's last, so a fixed iteration
+// count lets the owners finish before the first drain. An owner never
+// released ends by the clock, not by a count: a count's wall time is the
+// emulator's, and the failure has to print inside the boot's own timeout.
 #define DMO_OWNERS 3
 #define DMO_HOLD   24       // past MAGAZINE_SIZE: refill and drain-on-full both run
-#define DMO_ITERS  4000u
+#define DMO_ITERS  4000u    // an owner's floor
+#define DMO_HELD_NS 5000000000ull   // an owner never released ends this long after its first run, and the counts fail the test
+#define DMO_BESIDE 64u
 #define DMO_IDLE   0xffffffffu
 
 static volatile bool g_dmo_exited[DMO_OWNERS];
 static volatile u32  g_dmo_cpu[DMO_OWNERS];
-static volatile u32  g_dmo_running, g_dmo_bad, g_dmo_short;
+static volatile u32  g_dmo_running, g_dmo_bad, g_dmo_short, g_dmo_release;
 
 static u64 dmo_stamp(u64 id, u64 iter, u64 k) { return id << 56 | iter << 8 | k; }
 static volatile u64 *dmo_word(struct page *p) { return (volatile u64 *)pa_to_kva(page_to_pa(p)); }
@@ -112,7 +122,10 @@ static volatile u64 *dmo_word(struct page *p) { return (volatile u64 *)pa_to_kva
 static void dmo_owner(void *arg) {
     u64 id = (u64)(uintptr_t)arg;
     struct page *held[DMO_HOLD];
-    for (u64 i = 0; i < DMO_ITERS; i++) {
+    u64 born = timer_now_ns();
+    for (u64 i = 0; i < DMO_ITERS ||
+         (__atomic_load_n(&g_dmo_release, __ATOMIC_ACQUIRE) == 0u &&
+          timer_now_ns() - born < DMO_HELD_NS); i++) {
         __atomic_store_n(&g_dmo_cpu[id], smp_cpu_idx_self(), __ATOMIC_RELAXED);
         unsigned n = 1u + (unsigned)((i * 7u + id) % DMO_HOLD), k = 0;
         for (; k < n; k++) {
@@ -132,9 +145,13 @@ static void dmo_owner(void *arg) {
 
 void test_phys_drain_meets_live_owners(void) {
     struct Thread *t[DMO_OWNERS];
+    bool smp = smp_cpu_online_count() > 1;
     g_dmo_bad = 0;
     g_dmo_short = 0;
     __atomic_store_n(&g_dmo_running, DMO_OWNERS, __ATOMIC_RELAXED);
+    // With one CPU an owner runs only when the drainer yields, after its first
+    // drain, so there is nothing to hold.
+    __atomic_store_n(&g_dmo_release, smp ? 0u : 1u, __ATOMIC_RELEASE);
     for (unsigned i = 0; i < DMO_OWNERS; i++) {
         g_dmo_exited[i] = false;
         g_dmo_cpu[i] = DMO_IDLE;
@@ -145,7 +162,14 @@ void test_phys_drain_meets_live_owners(void) {
     // own tree is empty, so a ready()d owner runs on this CPU and the secondaries
     // stay parked. Each owner is placed on a peer, which is woken to run it.
     unsigned me = smp_cpu_idx_self(), ncpu = smp_cpu_count();
-    bool smp = smp_cpu_online_count() > 1;
+    // What a failure prints: how long after the owners were placed the first
+    // drain came (or, with no drain at all, how long the drainer waited), and
+    // how many context switches the placing CPU made meanwhile (none = the
+    // thread never left it). Both origins are read before the first owner can
+    // run.
+    u32 placed_cpu = me;
+    u64 placed_ns = timer_now_ns(), first_ns = 0;
+    u64 placed_ctxt = sched_cpu_ctxt(placed_cpu), first_ctxt = 0;
     for (unsigned i = 0; i < DMO_OWNERS; i++) {
         if (!smp) { ready(t[i]); continue; }
         unsigned peer = (me + 1u + i % (ncpu - 1u)) % ncpu;
@@ -159,25 +183,47 @@ void test_phys_drain_meets_live_owners(void) {
     for (u64 spin = 0; spin < 100000000ull &&
          __atomic_load_n(&g_dmo_running, __ATOMIC_ACQUIRE) != 0; spin++) {
         u32 me = smp_cpu_idx_self();
+        bool live = false;
         for (unsigned i = 0; i < DMO_OWNERS; i++) {
             u32 c = __atomic_load_n(&g_dmo_cpu[i], __ATOMIC_RELAXED);
-            if (c != DMO_IDLE && c != me) beside++;
+            if (c != DMO_IDLE && c != me) live = true;
+        }
+        if (live) beside++;
+        if (drains == 0) {
+            first_ns = timer_now_ns() - placed_ns;
+            first_ctxt = sched_cpu_ctxt(placed_cpu) - placed_ctxt;
         }
         magazines_drain_all();
         drains++;
+        if (beside >= DMO_BESIDE) __atomic_store_n(&g_dmo_release, 1u, __ATOMIC_RELEASE);
         // With one CPU the owners run only when the drainer yields; with more, a
         // yield onto an empty tree would steal back an owner not yet started.
         if (!smp) sched();
     }
     u32 left = __atomic_load_n(&g_dmo_running, __ATOMIC_ACQUIRE);
+    if (drains == 0) {
+        first_ns = timer_now_ns() - placed_ns;
+        first_ctxt = sched_cpu_ctxt(placed_cpu) - placed_ctxt;
+    }
+    // The spin bound can end the loop with the owners still held.
+    __atomic_store_n(&g_dmo_release, 1u, __ATOMIC_RELEASE);
     for (unsigned i = 0; i < DMO_OWNERS; i++)
         test_kthread_join_free(t[i], &g_dmo_exited[i]);
 
+    if (left != 0u || drains == 0 || (smp && beside < DMO_BESIDE)) {
+        uart_puts("  [drain_meets_live_owners: drains=");  uart_putdec(drains);
+        uart_puts(" beside=");                             uart_putdec(beside);
+        uart_puts(drains ? " first drain after " : " no drain in ");
+        uart_putdec(first_ns / 1000u);
+        uart_puts(" us and ");                             uart_putdec(first_ctxt);
+        uart_puts(" switches, owners left=");              uart_putdec(left);
+        uart_puts("]\n");
+    }
     TEST_EXPECT_EQ(left, 0u, "every owner must finish its churn");
     TEST_ASSERT(drains > 0, "the drainer never drained");
     // The premise comes before the stamps, so a stamp failure is reported only
-    // when a drain did run beside a live owner.
-    if (smp) TEST_ASSERT(beside > 0, "no drain ran beside an owner on another CPU");
+    // when drains did run beside live owners.
+    if (smp) TEST_ASSERT(beside >= DMO_BESIDE, "too few drains ran beside an owner on another CPU");
     TEST_EXPECT_EQ(g_dmo_bad, 0u, "no page may be handed to two owners");
     TEST_EXPECT_EQ(g_dmo_short, 0u, "every owner allocation must succeed");
 }

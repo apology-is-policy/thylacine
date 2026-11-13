@@ -88,7 +88,9 @@ its own generation is how Corvus knows the grant committed
 scanned here (`seat_attention_held`: Control + Alt + Delete or F10). Episode
 transitions, pending-grant commit/cancellation and death serialize under the
 process-table lock. The three phase deadlines (5 s quiesce, 90 s exclusive, 5 s
-restoring) are checked LAZILY, at the next seat operation by the service or
+restoring) are checked LAZILY; the service may renew a live quiesce by 5 s at a time
+while its GPU engine still retires work ahead of the trusted paint, never past 35 s
+from the chord (`SEAT_RENEW`, [[dec-2026-11-05-sak-waits-on-backlog]]). They are checked at the next seat operation by the service or
 Corvus -- there is no kernel timer, so a seat whose two operators are both
 wedged stays frozen on the trusted scene: fail-closed for I-27, and an
 availability loss only if TCB processes hang. `proc_test_seat_expire`
@@ -146,7 +148,7 @@ explicit at both ends, and the paired ACQUIRE load lives in `devproc_debug_autho
 | `rfork_init` | `rfork_with_caps` taking `PROC_ID_INIT` (1), init's pid, exactly once; a second call extincts. joey's start ([[sub-kernel-joey]]) |
 | `proc_id_alloc` / `proc_id_space_spent` | the one id space pids and tids draw from (thread-model C6, ARCH 7.3.4): a 64-bit counter seeded at 2 (0 is kproc's and its boot thread's, 1 is init's); a draw past `PROC_ID_LAST` (2^31 - 1) answers -1, a user's past `PROC_ID_USER_LAST` (the last 2^20 ids are the TCB's, vote 10), and a refused draw leaves the counter unmoved; nothing is reused |
 | `proc_spawn_thread_budget_resolve` | the spawn's thread budget (ARCH 7.3.5): 0 inherits the parent's; past `proc_thread_budget_hard_max()` refused; at or below the parent's own allowed; above it only with `PROC_FLAG_MAY_RAISE_THREAD_BUDGET`. 0 means refused |
-| `rfork_spawn_held` | `rfork_with_caps` with the child published already marked UNBORN, for the `SPAWN_DEBUG_HELD` spawn ([[sub-kernel-birth-hold]]); it takes the same flag word, `RFPROC` or `RFPROC\|RFCENVG` |
+| `rfork_spawn_under` | `rfork_with_caps` with the two things a spawn's record can ask of the birth: the child published already marked UNBORN, for the `SPAWN_DEBUG_HELD` spawn ([[sub-kernel-birth-hold]]), and an account the child is born under instead of its parent's, set before it is published ([[sub-kernel-accounts]]); it takes the same flag word, `RFPROC` or `RFPROC\|RFCENVG`. `rfork_spawn_held` is its kernel-test wrapper |
 | `spawn_await_birth` / `spawn_birth_released` | the held spawn's synchronous return: the vfork park's discipline (`await_child_release`, shared with `vfork_await_release`) waiting until the child is not UNBORN, not ALIVE, or not in the list; the park sleeps death-only, so the caller's own latch does not return it (5g) |
 | `proc_find_by_pid` / `proc_for_each` | DFS from `kproc`; the callback runs under [[lock-proc-table]] |
 | `wait_pid_for(want_pid, flags, status_out)` | reap a ZOMBIE child, or (PTY-1e) *report* a stopped/continued one; pid/pgrp selectors + `WNOHANG`; `WAIT_PID_NOTEINTR` (-2) when a caught note ends a Linux `wait4` |

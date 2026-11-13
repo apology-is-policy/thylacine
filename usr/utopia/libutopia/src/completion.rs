@@ -464,8 +464,6 @@ struct Level {
     command: Option<String>,
     /// The next word is a redirect's target, never a command.
     target_next: bool,
-    /// The next token may be a `/regex/` (it follows `=~`).
-    regex_next: bool,
     after: After,
 }
 
@@ -477,7 +475,6 @@ impl Level {
             command_next: commands,
             command: None,
             target_next: false,
-            regex_next: false,
             after: After::Break,
         }
     }
@@ -567,22 +564,9 @@ fn skip_heredoc_tag(b: &[u8], mut i: usize) -> Option<usize> {
     (i < b.len()).then_some(i)
 }
 
-/// Past a `/regex/` whose opening `/` ends before `i`; `None` when it reaches
-/// the cursor.
-fn skip_regex(b: &[u8], mut i: usize) -> Option<usize> {
-    loop {
-        match *b.get(i)? {
-            b'\n' => return Some(i),
-            b'\\' if b.get(i + 1) == Some(&b'/') => i += 2,
-            b'/' => return Some(i + 1),
-            _ => i += 1,
-        }
-    }
-}
-
 /// The word the cursor ends, read with the lexer's rules over the line up to
 /// the cursor. `None` when the cursor is somewhere a name does not complete:
-/// in a comment, a `$var`, a heredoc tag or a regex, in a double quote that
+/// in a comment, a `$var` or a heredoc tag, in a double quote that
 /// expands, or in a word glued to what precedes it.
 fn word_at(buffer: &str, cursor: usize) -> Option<WordAt> {
     let s = buffer.get(..cursor)?;
@@ -662,17 +646,14 @@ fn word_at(buffer: &str, cursor: usize) -> Option<WordAt> {
             return None;
         };
         let c = b[i];
-        let regex_next = core::mem::replace(&mut lv.regex_next, false);
         match c {
             b' ' | b'\t' => {
                 i += 1;
                 lv.after = After::Break;
-                lv.regex_next = regex_next;
             }
             b'\\' if b.get(i + 1) == Some(&b'\n') => {
                 i += 2;
                 lv.after = After::Break;
-                lv.regex_next = regex_next;
             }
             // A comment runs to the newline; one reaching the cursor holds it.
             b'#' => i += s[i..].find('\n')?,
@@ -697,11 +678,6 @@ fn word_at(buffer: &str, cursor: usize) -> Option<WordAt> {
                 Some(b'>') => {
                     i += 2;
                     lv.begin_command();
-                }
-                Some(b'~') => {
-                    i += 2;
-                    lv.after = After::Break;
-                    lv.regex_next = true;
                 }
                 Some(b'=') => {
                     i += 2;
@@ -797,10 +773,6 @@ fn word_at(buffer: &str, cursor: usize) -> Option<WordAt> {
             },
             b'~' => {
                 i += 1;
-                lv.value_done(None);
-            }
-            b'/' if regex_next => {
-                i = skip_regex(b, i + 1)?;
                 lv.value_done(None);
             }
             b'\'' => {
@@ -1612,7 +1584,6 @@ mod tests {
             "cat # fo",        // a comment
             "cat a#fo",        // `#` ends a word and starts a comment
             "cat <<EO",        // a heredoc tag
-            "if ($x =~ /fo",   // a regex
             "cat x?",          // a `?` ending a word is the operator
             "cat !",           // `!` alone
             "cat a)",          // after an unmatched `)`

@@ -9,7 +9,7 @@ guarded-by: [inv-i9]
 validated-by: [spec-poll, spec-poll-walk, spec-poll-owed, spec-poll-defer, spec-tsleep, gate-smp]
 locks: [lock-poll-list, lock-rendez, lock-wait, lock-timerwait]
 created: 2026-08-01
-updated: 2026-11-09
+updated: 2026-11-10
 ---
 ## Purpose
 
@@ -104,7 +104,7 @@ client's lock are deferred past it (Concurrency below).
   `POLLNVAL`, never always-ready (a buggy caller must not spin on fake
   readiness); `KOBJ_SRV` dispatches through `srv_handle_poll` (magic
   discriminates listener vs connection); every other kobj kind ⇒
-  `POLLNVAL`. No `RIGHT_READ`/`RIGHT_WRITE` gate — polling asks about
+  `POLLNVAL`, `KOBJ_ACCOUNT` among them until MM-3 gives it pressure to report. No `RIGHT_READ`/`RIGHT_WRITE` gate — polling asks about
   readiness, not access, and POSIX permits polling a write-only fd.
 - The `Dev.poll` vtable op: `dev->poll(spoor, events, pw)` returns
   current revents and, iff `pw != NULL`, registers it — **atomically
@@ -290,7 +290,11 @@ counts "committed to the slow path", not "actually parked" (a
 producer racing register-to-tsleep still increments it) —
 and `poll_total_resleeps`: wakes whose re-sample found nothing asked
 about, so the poller slept again. It is the tests' witness that a walk
-for someone else's edge did not end a poll. `struct poll_snap` (NP-4c,
+for someone else's edge did not end a poll, and
+`poll.devsrv_listener_unasked_parks` uses it for the case a full server
+relies on: a listener left in the set and asked nothing does not report a
+waiting connect, a second connect's wake sleeps again without returning,
+and only the service's death (POLLHUP, reported unasked) ends the wait. `struct poll_snap` (NP-4c,
 one per fd on the frame): the poller's `rendez`, the Dev's request `op`,
 `revents`, an atomic `state` (NONE / UNSENT / SENT / ANSWERED / EXPIRED)
 and `remote`. `poll_total_snap_failsafes` (zero on a healthy system) and

@@ -72,7 +72,7 @@ bool uart_rx_path_enabled(void);
 // PL011 IRQ handler (GIC dispatch target; runs in IRQ context). The PL011 SPI
 // is ONE line shared by RX, RX-timeout and TX, so this dispatches on MIS.
 // RX: drains the RX FIFO, splitting each 12-bit DR entry into a data byte + a
-// break flag, and hands each to cons_rx_input; clears the RX interrupts on exit.
+// break flag, and hands each to cons_rx_receive; clears the RX interrupts first.
 // TX (#75 / P1-F): calls cons_tx_drain_from_irq to pop the cons TX ring into
 // the FIFO. TX is serviced first -- it is the cheap non-blocking arm, and
 // draining promptly is what keeps a blocked writer's room-wait short.
@@ -117,22 +117,6 @@ bool uart_test_tx_stalled(void);
 // runs IRQ-masked and must never spin unboundedly).
 void uart_tx_drain_sync(void);
 
-// #174 backpressure resume. The cons reader calls this AFTER draining ring
-// bytes (freeing space). If RX was paused (the ring filled and the handler
-// masked RX, leaving bytes in the FIFO -- no loss), this drains the FIFO into
-// the freed ring space and unmasks RX once the FIFO empties. A no-op (one
-// atomic read) when not paused. Reader-driven resumption -- NEVER relies on the
-// QEMU PL011 int_level re-fire (the #172 wedge trap). Runs in process context.
-void uart_rx_pump(void);
-
-#ifdef KERNEL_TESTS
-// #129-audit F2 (test-only): seed / inspect the 1-byte RX holdback and its
-// pause latch, so the lossless-refusal path is drivable without an SMP race.
-void uart_test_rx_force_hold(uint8_t b, bool brk);
-bool uart_test_rx_held(uint8_t *b, bool *brk);
-bool uart_test_rx_paused(void);
-bool uart_test_rx_release_hold(void);
-#endif // KERNEL_TESTS
 
 // Print an unsigned 64-bit integer in hexadecimal, prefixed with "0x" and
 // zero-padded to 16 hex digits (i.e. "0x0000000040080000"). Used for the

@@ -323,17 +323,19 @@ is PTY-2b.
 assembly line + the collected-signal set folded into `Pts` (`tio`/`line`/
 `sigs`); the input cook (`master_write`: ICRNL → ISIG [the standard
 VINTR/VQUIT/VSUSP trio → `SYS_TTY_SIGNAL` INT/QUIT/TSTP, consumed, never a
-byte, never echoed] → ICANON [erase `\b \b`, NL flushes the line WITH its
-newline; overflow past `LINE_MAX`=256 drops un-echoed] → raw); the output cook
+byte, never echoed] → ICANON [erase `\b \b` per column, NL flushes the line WITH
+its newline; a control byte echoes as `^X`; overflow past `LINE_MAX`=4095 (N_TTY's)
+drops un-echoed; a read ends at its line] → raw); the output cook
 (`slave_write`: ONLCR, pair-atomic back-pressure); the single `echo()`
 chokepoint (echo rides the output transform toward the master; ECHO-off is the
 hard no-leak guarantee, per-pts). **A fresh pts is FULL COOKED**
 (`TIO_DEFAULT` = ICANON|ECHO|ISIG|ICRNL|ONLCR — the Linux fresh-pts posture;
 the "CONS_ICANON-default" above realized as the cooked set; the kernel
 console's ISIG-only boot word is a console posture, not the pts one). Ring-full
-policy: the cooked flush + the echo DROP on full (tty input overrun / the
-best-effort echo — the cons reference posture); the raw input + the output
-path back-pressure via a short count (the 2a contract). `h_write` raises the
+policy: the echo DROPS on full (the best-effort echo — the cons reference
+posture); the raw input, the output path and a cooked flush back-pressure via a
+short count (the 2a contract), a flush whole or not at all, its newline
+re-offered (the console's #129). `h_write` raises the
 collected classes AFTER the ring work (the syscall stays out of the pure cook,
 so the selftest asserts classes directly). The selftest carries the full
 cooked truth table (ICRNL+flush+echo+ONLCR, assembly-holds, erase + empty-line
@@ -449,8 +451,18 @@ discarded (the kernel console's TX ring carries kernel diagnostics no signal
 character may eat; a pts's s2m carries the job's last output the shell is
 about to read). Plan 9's `devcons` has no such flush — this is a POSIX-shape
 choice, made because both ldiscs already model termios and every consumer of
-a pts is a POSIX program. Tests: `cons.cook_isig_discards_pending_line` (kernel)
-and ptyfs selftest leg (e4) pin it in each ldisc.
+a pts is a POSIX program. Behind a terminator the ring refused, in one write, the
+signal does not wait for a reader that may never come: that line is still the
+pending assembly, and what the write held between them was never committed, so
+they share the disposition (ptyfs, and the console's feed). Raw mode has no
+assembly and no such disposition: a signal behind a byte the ring cannot take
+waits its turn, because counting past that byte would leave a hole in the stream
+the reader cannot see (`CookData`, `SignalXorByte`; Linux's `n_tty` keeps it in
+order too). Alone, it goes. Operator vote 74 (2026-11-06) kept this order over POSIX's
+counted discard: a raw-mode program that stops reading is left by closing its terminal
+(the hangup) or by the SAK, never by skipping the bytes ahead of the signal. Tests: `cons.cook_isig_discards_pending_line` and
+`cons.feed_intr_behind_refused_line` (kernel) and ptyfs selftest leg (e4) and
+step 12 pin it in each ldisc.
 
 *As-built (PTY-2d)*: the teardown legs. Drain-then-EOF was structural since 2a
 (`ring_drain` serves Data while non-empty regardless of the peer's closure;

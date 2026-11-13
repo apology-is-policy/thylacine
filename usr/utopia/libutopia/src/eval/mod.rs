@@ -42,7 +42,7 @@
 //
 //   pub fn eval_expr(env: &Env, expr: &Expr) -> EvalResult<Value>
 //     -- the recursive expression walker. Covers every ExprKind
-//        variant EXCEPT Subst/Backtick/ProcSub/Match::Regex
+//        variant EXCEPT Subst/Backtick/ProcSub
 //        (NotImplemented at v1.0).
 //
 //   pub mod glob (re-exported as eval::glob)

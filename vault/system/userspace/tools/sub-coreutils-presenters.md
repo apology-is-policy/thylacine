@@ -28,7 +28,7 @@ hazards: []
 abis: []
 design: []
 created: 2026-08-04
-updated: 2026-10-06
+updated: 2026-11-11
 ---
 ## Purpose
 
@@ -120,9 +120,10 @@ ping summary and a long listing share one visual language, and they share
 the connection plumbing — dial-string resolution and the byte pumps — from
 the library rather than each reimplementing back-pressure.
 
-**`ps` presents the kernel's process table.** It reads `/ctl/procs` in one
-atomic slurp — the kernel renders the whole table under `g_proc_table_lock`,
-so there is no readdir race to lose a row to — and offers three
+**`ps` presents the kernel's process table.** It reads `/ctl/procs` with one
+`read` (`io::read_rendered`) — the kernel renders the whole table under
+`g_proc_table_lock` on every read, so one read is one consistent table and a
+second would continue a different one — and offers three
 realizations of the same nine columns (PID PPID NAME STATE THREADS PAGES
 TABLES CHILDREN CPU; TABLES since prowl-6, and the end-anchored parse moved
 with it). Colour off *and* beacon off: the kernel text passes through

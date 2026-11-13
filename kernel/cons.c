@@ -33,13 +33,14 @@
 // A-4c-1: kernel UART console RX (the first kernel console INPUT path).
 // =============================================================================
 //
-// uart_rx_handler (IRQ context) calls cons_rx_input per received byte. Data
-// bytes fill g_cons.ring; devcons_read drains it, blocking on
+// uart_irq_handler (IRQ context) calls cons_rx_receive per received byte (vote
+// 73: it never refuses; what the ring cannot take waits in the side queue).
+// Data bytes fill g_cons.ring; devcons_read drains it, blocking on
 // g_cons_data_rendez when empty. Ctrl-C (0x03) is cooked-consumed -> the
 // console_mgr kthread posts the `interrupt` note to the console owner. A serial
 // BREAK is the A-4c-2 SAK; A-4c-1 discards it.
 //
-// IRQ-safety (IDENTITY-DESIGN.md section 9.8 "As-built"): cons_rx_input runs in
+// IRQ-safety (IDENTITY-DESIGN.md section 9.8 "As-built"): cons_rx_receive runs in
 // IRQ context, so it does ONLY ring + flag mutation (under an irqsave lock) +
 // wakeup() -- the one wake it makes: notes_post takes a plain spin_lock, and a
 // poll_waiter_list_wake walk is O(pollers) nested wakeups, kept out of IRQ
@@ -77,6 +78,21 @@ _Static_assert(CONS_LINE_MAX + 1u <= CONS_RING_SIZE,
 // #95's drop test asserts against it, and a test hardcoding the number would
 // agree with the code only by coincidence.
 #define CONS_ECHO_MAX     8u    // max echo bytes one cons_rx_input byte produces
+
+// Vote 73: serial input the line discipline has not taken yet waits in a side
+// queue (cons_side_offer_locked). 4096 entries: the graphical feed's bound and
+// n_tty's read buffer. An entry is a byte, plus CONS_SIDE_SIGNALLED for an ISIG
+// character acted on when it was read. A move hands over at most a batch per
+// lock hold, which bounds the echo it stages.
+#define CONS_SIDE_SIZE      4096u  // power of two (mask-indexed)
+#define CONS_SIDE_SIGNALLED 0x100u
+#define CONS_SIDE_LITERAL   0x200u
+#define CONS_SIDE_BATCH     16u
+_Static_assert(((CONS_SIDE_SIGNALLED | CONS_SIDE_LITERAL) & 0xffu) == 0u &&
+               (CONS_SIDE_SIGNALLED | CONS_SIDE_LITERAL) <= 0xffffu,
+               "a side-queue entry's marks sit above its byte, inside its u16");
+_Static_assert((CONS_SIDE_SIZE & (CONS_SIDE_SIZE - 1u)) == 0u,
+               "CONS_SIDE_SIZE must be a power of two (the queue is mask-indexed)");
 
 struct cons_input {
     spin_lock_t lock;                  // ring + head/tail + reader_busy; taken irqsave
@@ -149,9 +165,9 @@ struct cons_input {
     // that is wrong in the most expensive way: read at 3am, believed, and
     // pointing at data loss that did not happen.
     //
-    //   rx_bp_raw    -- raw/cbreak arm, ring full: the byte was REFUSED. The
-    //                   UART holds it in the FIFO (or in the 1-byte holdback)
-    //                   and cons_feed_write returns a short count. Non-zero
+    //   rx_bp_raw    -- raw/cbreak arm, ring full: the byte was REFUSED. A
+    //                   serial byte waits in the side queue (vote 73) and
+    //                   cons_feed_write returns a short count. Non-zero
     //                   means back-pressure engaged, NOT that input was lost.
     //   rx_bp_flush  -- cooked arm, an Enter whose line_len + 1 bytes did not
     //                   fit: REFUSED with the line intact, retried on the next
@@ -178,6 +194,9 @@ struct cons_input {
     //                   into a non-reading foreground job fills the ring by
     //                   Enter-flushes and the trailing partial line meets a
     //                   full ring at the re-arm (the ccb597b8 round, F4).
+    //   rx_drop_side -- vote 73: a serial byte that met a FULL side queue. A
+    //                   real drop, the price of reading every byte so a BREAK or
+    //                   a Ctrl-C is never stuck behind it.
     //
     // Counting is NOT a fix for any of them; it is what makes the next
     // occurrence decidable instead of unexplained.
@@ -186,6 +205,13 @@ struct cons_input {
     u32         rx_drop_line;
     u32         rx_drop_ring;
     u32         rx_drop_modeflush;
+    u32         rx_drop_side;
+
+    // Vote 73: the serial side queue (cons_side_offer_locked), under this lock so
+    // BEGIN discards it with the ring.
+    u16         side[CONS_SIDE_SIZE];
+    u32         side_head;
+    u32         side_count;
 
     // #95: set by any drop site, drained by console_mgr, which emits ONE loud
     // line in process context (the intr/sak/pollwake deferred-relay pattern --
@@ -1203,6 +1229,12 @@ static void cons_echo_stage(u8 b, u32 tio, u8 *echo, int *necho) {
     }
 }
 
+// A control byte in a canonical line echoes as ^X, two columns, as N_TTY's ECHOCTL
+// does: echoed as itself it would drive the terminal, not show what is in the line.
+static bool cons_echoes_as_caret(u8 b) {
+    return b < 0x20u && b != (u8)'\t';
+}
+
 // Enqueue one byte to the RX ring under g_cons.lock. Returns true iff a byte was
 // actually enqueued (-> a data-Rendez wake is owed). On the empty->non-empty
 // edge it arms the LS-8a deferred poll-wake (poll_wake_pending) and sets
@@ -1224,49 +1256,11 @@ static bool cons_ring_push(u8 byte, bool *wake_mgr) {
 // Free slots in the RX ring. Caller holds g_cons.lock, which is what makes this
 // EXACT rather than advisory -- #129's whole correctness argument is that the
 // room check and the push it authorizes happen in one lock hold, so no second
-// producer can consume the room in between. cons_rx_can_accept() below is the
-// lockless PRE-check; this is the decision.
-// #136-audit F1 (test-only; production never sets this). See cons.h.
-static bool g_cons_test_force_full;
-#ifdef KERNEL_TESTS
-void cons_test_force_full(bool on) { g_cons_test_force_full = on; }
-#endif
-
+// producer can consume the room in between.
 static u32 cons_ring_room(void) {
-    if (g_cons_test_force_full) return 0u;
     return CONS_RING_SIZE - cons_count_load();
 }
 
-// #174 / #129: the lockless PRE-check the PL011 drain runs BEFORE reading a byte
-// out of the FIFO -- on false it leaves the byte in the FIFO and masks RX rather
-// than pulling in a byte the ring cannot take.
-//
-// #129 makes it reserve the WORST-CASE COOKED FLUSH (CONS_LINE_MAX + 1), not one
-// byte. The one-byte form was the bug: it answered "is there room for this
-// byte?" when the question the drain is really asking is "is there room for
-// everything this byte will cause?", and in canonical mode a single admitted
-// byte can be the terminator that flushes an entire assembled line. That is the
-// same category error as #126 on the TX side -- a per-ITEM bound standing in for
-// a per-OPERATION bound -- and it reads as correct right up until the item and
-// the operation differ by 256x.
-//
-// Deliberately UNCONDITIONAL (it does not consult ICANON or line_len):
-//   - Reading line_len here would be a lockless read of a field another producer
-//     mutates, so a stale-low value would re-open exactly the hole being closed.
-//   - Gating on the CURRENT mode is not sound either: termios can flip between
-//     this check and the push, so a byte admitted under a raw-mode check can
-//     meet a cooked-mode flush. Reserving unconditionally is immune to both.
-// The cost is 257 slots of headroom, which is why CONS_RING_SIZE doubled: usable
-// depth before pausing stays 255 bytes, unchanged from the pre-#129 ring.
-//
-// This is now an OPTIMIZATION, not the correctness mechanism. It keeps the
-// common case off the refusal path; cons_rx_input's under-lock room check is
-// what actually guarantees no overrun, and the drain's 1-byte holdback is what
-// makes a refusal lossless. Being stale is therefore harmless in both
-// directions: stale-true costs one refusal-and-hold, stale-false pauses early.
-bool cons_rx_can_accept(void) {
-    return cons_count_load() + CONS_LINE_MAX + 1u <= CONS_RING_SIZE;
-}
 
 // #95: record ONE dropped input byte at `site` and arm console_mgr's deferred
 // one-shot report. Caller holds g_cons.lock (every drop site does). The mgr wake
@@ -1312,21 +1306,47 @@ static void cons_deliver_partial_line_locked(bool *wake_data, bool *wake_mgr) {
     g_cons.line_len = 0u;
 }
 
-// `feed`: the byte comes from the renderer's feed, which an open episode
-// refuses. Asked under the lock BEGIN discards the ring under, so a byte that
-// passed cons_feed_write's lockless check while BEGIN ran is not the first
-// byte the trusted reader sees.
-static bool cons_rx_accept(u8 byte, bool is_break, bool feed) {
-    bool wake_data = false, wake_mgr = false;
-    bool accepted = true;
+// What a lock hold of input processing leaves for after the unlock: the echo
+// to emit and the two wakes. One take's echo: the side queue's mover stops after
+// a take that echoes (cons_side_move_locked).
+struct cons_rx_fx {
     u8   echo[CONS_ECHO_MAX];
-    int  necho = 0;
+    int  necho;
+    bool wake_data;
+    bool wake_mgr;
+};
 
-    irq_state_t s = spin_lock_irqsave(&g_cons.lock);
-    if (feed && cons_episode_active_load()) {
-        spin_unlock_irqrestore(&g_cons.lock, s);
-        return false;
-    }
+static void cons_rx_fx_init(struct cons_rx_fx *fx) {
+    fx->necho = 0;
+    fx->wake_data = false;
+    fx->wake_mgr = false;
+}
+
+// Echo is emitted with the lock RELEASED: cons_emit -> uart_putc is lock-free
+// (it polls TXFF; no lock/sleep), so the staged bytes go out without holding
+// g_cons.lock across the UART busy-wait. wakeup() is IRQ-safe (irqsave); a
+// wake with no waiter is a no-op. The producer set the condition under
+// g_cons.lock and the wakeup takes the Rendez lock the sleeper's cond-check +
+// sleep-transition hold -> no lost wakeup (I-9; cons_poll.tla for the
+// poll-edge relay).
+static void cons_rx_fx_release(const struct cons_rx_fx *fx) {
+    cons_emit_bulk(fx->echo, (u32)fx->necho);   // ONE unit: a peer's push cannot land inside "\b \b"
+    if (fx->wake_data) wakeup(&g_cons_data_rendez);
+    if (fx->wake_mgr)  wakeup(&g_cons_mgr_rendez);
+}
+
+// One input byte through the line discipline. Caller holds g_cons.lock, and
+// fx->echo is empty. Returns false iff the byte was REFUSED, changing nothing.
+// `marks`: 0 for a byte taken as read; for one that waited in the side queue,
+// what the serial drain decided when it read it (cons_side_offer_locked).
+// SIGNALLED: an ISIG character it acted on, never data whatever the mode is now;
+// only its discard of the pending line is left, and it happens here, in the
+// character's place in the stream. LITERAL: a Ctrl-C read with ISIG clear, data
+// whatever the mode is now.
+static bool cons_rx_take_locked(u8 byte, bool is_break, u32 marks,
+                                struct cons_rx_fx *fx) {
+    bool accepted = true;
+    bool signalled = (marks & CONS_SIDE_SIGNALLED) != 0u;
     u32 tio = cons_termios_load();
 
     if (is_break) {
@@ -1339,18 +1359,23 @@ static bool cons_rx_accept(u8 byte, bool is_break, bool feed) {
         // -- not IRQ-safe). The recognizer is stateless: one flag, no multi-byte
         // state machine to starve or partially-spoof.
         cons_sak_store(true);
-        wake_mgr = true;
+        fx->wake_mgr = true;
     } else {
         // LS-8b: ICRNL -- translate an input CR to NL BEFORE ISIG / canon /
         // echo see the byte (so Enter-as-CR terminates a canonical line + echoes
         // as a newline).
         if (byte == (u8)'\r' && (tio & CONS_ICRNL)) byte = (u8)'\n';
 
-        if (byte == 0x03u && (tio & CONS_ISIG)) {
+        if (signalled) {
+            // The interrupt went when the drain read it. The bytes typed before
+            // it are discarded and the ones after survive, as if the ring had
+            // had room.
+            if (tio & CONS_ICANON) g_cons.line_len = 0u;
+        } else if (byte == 0x03u && (tio & CONS_ISIG) && !(marks & CONS_SIDE_LITERAL)) {
             // ISIG: Ctrl-C is cooked-consumed -> the deferred `interrupt` note
             // (the LS-5 path). ISIG clear -> 0x03 falls through as a data byte.
             cons_intr_store(true);
-            wake_mgr = true;
+            fx->wake_mgr = true;
             // POSIX NOFLSH-clear: the INTR character discards the pending
             // canonical assembly (PTY-DESIGN "ISIG characters DISCARD the
             // pending line", operator-voted 2026-08-17). An I-20 disposition
@@ -1367,9 +1392,12 @@ static bool cons_rx_accept(u8 byte, bool is_break, bool feed) {
                 if (g_cons.line_len > 0u) {
                     g_cons.line_len--;
                     if (tio & CONS_ECHO) {            // visually erase: back, space, back
-                        echo[necho++] = (u8)'\b';
-                        echo[necho++] = (u8)' ';
-                        echo[necho++] = (u8)'\b';
+                        int columns = cons_echoes_as_caret(g_cons.line[g_cons.line_len]) ? 2 : 1;
+                        for (int i = 0; i < columns; i++) {
+                            fx->echo[fx->necho++] = (u8)'\b';
+                            fx->echo[fx->necho++] = (u8)' ';
+                            fx->echo[fx->necho++] = (u8)'\b';
+                        }
                     }
                 }
                 // empty line + erase: nothing to erase, nothing echoed (never
@@ -1394,23 +1422,28 @@ static bool cons_rx_accept(u8 byte, bool is_break, bool feed) {
                     accepted = false;
                 } else {
                     for (u32 i = 0; i < g_cons.line_len; i++)
-                        if (cons_ring_push(g_cons.line[i], &wake_mgr)) wake_data = true;
-                        else cons_rx_note_drop(&g_cons.rx_drop_ring, &wake_mgr);
-                    if (cons_ring_push((u8)'\n', &wake_mgr)) wake_data = true;
-                    else cons_rx_note_drop(&g_cons.rx_drop_ring, &wake_mgr);
+                        if (cons_ring_push(g_cons.line[i], &fx->wake_mgr)) fx->wake_data = true;
+                        else cons_rx_note_drop(&g_cons.rx_drop_ring, &fx->wake_mgr);
+                    if (cons_ring_push((u8)'\n', &fx->wake_mgr)) fx->wake_data = true;
+                    else cons_rx_note_drop(&g_cons.rx_drop_ring, &fx->wake_mgr);
                     g_cons.line_len = 0u;
-                    if (tio & CONS_ECHO) cons_echo_stage((u8)'\n', tio, echo, &necho);
+                    if (tio & CONS_ECHO) cons_echo_stage((u8)'\n', tio, fx->echo, &fx->necho);
                 }
             } else {                                  // ordinary char: buffer it
                 if (g_cons.line_len < CONS_LINE_MAX) {
                     g_cons.line[g_cons.line_len++] = byte;
-                    if (tio & CONS_ECHO) cons_echo_stage(byte, tio, echo, &necho);
+                    if ((tio & CONS_ECHO) && cons_echoes_as_caret(byte)) {
+                        fx->echo[fx->necho++] = (u8)'^';
+                        fx->echo[fx->necho++] = (u8)(byte + 0x40u);
+                    } else if (tio & CONS_ECHO) {
+                        cons_echo_stage(byte, tio, fx->echo, &fx->necho);
+                    }
                 } else {
                     // Line buffer full -> drop (bounded; Enter still delivers
                     // what fits). A dropped byte is NOT echoed. #95: counted,
                     // because "Enter still delivers what fits" is exactly the
                     // truncated-command shape and was previously silent.
-                    cons_rx_note_drop(&g_cons.rx_drop_line, &wake_mgr);
+                    cons_rx_note_drop(&g_cons.rx_drop_line, &fx->wake_mgr);
                 }
             }
         } else {
@@ -1423,29 +1456,143 @@ static bool cons_rx_accept(u8 byte, bool is_break, bool feed) {
                 g_cons.rx_bp_raw++;
                 accepted = false;
             } else {
-                if (cons_ring_push(byte, &wake_mgr)) wake_data = true;
-                else cons_rx_note_drop(&g_cons.rx_drop_ring, &wake_mgr);
-                if (tio & CONS_ECHO) cons_echo_stage(byte, tio, echo, &necho);
+                if (cons_ring_push(byte, &fx->wake_mgr)) fx->wake_data = true;
+                else cons_rx_note_drop(&g_cons.rx_drop_ring, &fx->wake_mgr);
+                if (tio & CONS_ECHO) cons_echo_stage(byte, tio, fx->echo, &fx->necho);
             }
         }
     }
-    spin_unlock_irqrestore(&g_cons.lock, s);
+    return accepted;
+}
 
-    // Echo is emitted with the lock RELEASED: cons_emit -> uart_putc is lock-free
-    // (it polls TXFF; no lock/sleep), so the staged bytes go out without holding
-    // g_cons.lock across the UART busy-wait. wakeup() is IRQ-safe (irqsave); a
-    // wake with no waiter is a no-op. The producer set the condition under
-    // g_cons.lock and the wakeup takes the Rendez lock the sleeper's cond-check +
-    // sleep-transition hold -> no lost wakeup (I-9; cons_poll.tla for the
-    // poll-edge relay).
-    cons_emit_bulk(echo, (u32)necho);   // ONE unit: a peer's push cannot land inside "\b \b"
-    if (wake_data) wakeup(&g_cons_data_rendez);
-    if (wake_mgr)  wakeup(&g_cons_mgr_rendez);
+// `feed`: the byte comes from the renderer's feed, which an open episode
+// refuses. Asked under the lock BEGIN discards the ring under, so a byte that
+// passed cons_feed_write's lockless check while BEGIN ran is not the first
+// byte the trusted reader sees.
+static bool cons_rx_accept(u8 byte, bool is_break, bool feed) {
+    struct cons_rx_fx fx;
+    cons_rx_fx_init(&fx);
+    irq_state_t s = spin_lock_irqsave(&g_cons.lock);
+    if (feed && cons_episode_active_load()) {
+        spin_unlock_irqrestore(&g_cons.lock, s);
+        return false;
+    }
+    bool accepted = cons_rx_take_locked(byte, is_break, 0u, &fx);
+    spin_unlock_irqrestore(&g_cons.lock, s);
+    cons_rx_fx_release(&fx);
     return accepted;
 }
 
 bool cons_rx_input(u8 byte, bool is_break) {
     return cons_rx_accept(byte, is_break, /*feed=*/false);
+}
+
+// The ISIG arm for a Ctrl-C a feed holds behind a refused terminator (see
+// cons_feed_write). The mode is read under the lock that discards the line, so a
+// mode write racing this orders wholly before or after it. False: it is not a
+// signal here, and nothing changed.
+static bool cons_feed_intr_past_refusal(void) {
+    bool raised = false;
+    irq_state_t s = spin_lock_irqsave(&g_cons.lock);
+    u32 tio = cons_termios_load();
+    if (!cons_episode_active_load() && (tio & CONS_ICANON) && (tio & CONS_ISIG)) {
+        cons_intr_store(true);
+        g_cons.line_len = 0u;
+        raised = true;
+    }
+    spin_unlock_irqrestore(&g_cons.lock, s);
+    if (raised) wakeup(&g_cons_mgr_rendez);
+    return raised;
+}
+
+// Vote 73 (operator, 2026-11-05): the serial side queue. The PL011 drain hands
+// every byte it reads to cons_rx_receive, which never refuses, so the drain
+// never leaves a byte in the FIFO and never masks RX. A BREAK or a Ctrl-C
+// behind a full ring is therefore read when it arrives, whether or not anyone
+// reads the console. What the line discipline refuses waits here, in order,
+// and moves into it when the reader frees room (cons_side_move). A paste stays
+// lossless up to the queue; past it the newest byte is dropped and counted.
+//
+// Invariant: once the reader's move has run, a non-empty queue means a
+// non-empty ring. Only a refusal starts the queue, and both refusing arms need
+// the ring more than half full; the reader moves after every drain until a
+// refusal (the ring past half full again) or an empty queue. So poll's
+// "count > 0" and the reader's sleep cannot strand a queued byte.
+static void cons_side_push_locked(u16 e) {
+    g_cons.side[(g_cons.side_head + g_cons.side_count) & (CONS_SIDE_SIZE - 1u)] = e;
+    g_cons.side_count++;
+}
+
+// A byte the line discipline cannot take now. A BREAK never comes here (it is
+// acted on as read). An ISIG character is acted on as read and keeps its place
+// as a SIGNALLED entry, so its discard of the pending line lands in order. A
+// full queue drops the newest byte; a signalled character takes the newest
+// entry's place instead, and the byte it displaces is counted.
+static void cons_side_offer_locked(u8 byte, struct cons_rx_fx *fx) {
+    u16 e = byte;
+    if (byte == 0x03u && (cons_termios_load() & CONS_ISIG)) {
+        cons_intr_store(true);
+        fx->wake_mgr = true;
+        e |= CONS_SIDE_SIGNALLED;
+    } else if (byte == 0x03u) {
+        e |= CONS_SIDE_LITERAL;              // read as data: an ISIG set later finds it data
+    }
+    if (g_cons.side_count < CONS_SIDE_SIZE) {
+        cons_side_push_locked(e);
+        return;
+    }
+    if (e & CONS_SIDE_SIGNALLED) {
+        u32 last = (g_cons.side_head + CONS_SIDE_SIZE - 1u) & (CONS_SIDE_SIZE - 1u);
+        if (g_cons.side[last] & CONS_SIDE_SIGNALLED) return;   // its discard is already queued
+        g_cons.side[last] = e;
+    }
+    cons_rx_note_drop(&g_cons.rx_drop_side, &fx->wake_mgr);
+}
+
+// Hand queued entries to the line discipline, in order, until it refuses one,
+// the queue empties, a batch is spent or a take echoes. Caller holds
+// g_cons.lock. True iff entries are left that the discipline may still take.
+// One echoing take per hold: the echo goes out after the unlock, where a BEGIN
+// can land first, so what a pre-SAK echo may leave past BEGIN stays
+// CONS_ECHO_MAX bytes (IMPERIUM-DESIGN, the bounded pre-SAK residue).
+static bool cons_side_move_locked(struct cons_rx_fx *fx) {
+    for (u32 i = 0; i < CONS_SIDE_BATCH && fx->necho == 0; i++) {
+        if (g_cons.side_count == 0u) return false;
+        u16 e = g_cons.side[g_cons.side_head];
+        if (!cons_rx_take_locked((u8)(e & 0xffu), false,
+                                 (u32)e & (CONS_SIDE_SIGNALLED | CONS_SIDE_LITERAL), fx))
+            return false;
+        g_cons.side_head = (g_cons.side_head + 1u) & (CONS_SIDE_SIZE - 1u);
+        g_cons.side_count--;
+    }
+    return g_cons.side_count != 0u;
+}
+
+// The reader's half, after a drain freed room: a batch per lock hold. Called
+// with g_cons.lock released. The single-reader guard makes this the only
+// mover; the drain only ever appends behind it.
+static void cons_side_move(void) {
+    bool more = true;
+    while (more) {
+        struct cons_rx_fx fx;
+        cons_rx_fx_init(&fx);
+        irq_state_t s = spin_lock_irqsave(&g_cons.lock);
+        more = cons_side_move_locked(&fx);
+        spin_unlock_irqrestore(&g_cons.lock, s);
+        cons_rx_fx_release(&fx);
+    }
+}
+
+void cons_rx_receive(u8 byte, bool is_break) {
+    struct cons_rx_fx fx;
+    cons_rx_fx_init(&fx);
+    irq_state_t s = spin_lock_irqsave(&g_cons.lock);
+    if (is_break)
+        (void)cons_rx_take_locked(0x00u, true, 0u, &fx);   // the SAK, as read
+    else if (g_cons.side_count != 0u || !cons_rx_take_locked(byte, false, 0u, &fx))
+        cons_side_offer_locked(byte, &fx);
+    spin_unlock_irqrestore(&g_cons.lock, s);
+    cons_rx_fx_release(&fx);
 }
 
 // (The reader's data cond is cons_data_or_vacate, with the episode block: it
@@ -1520,6 +1667,7 @@ static void cons_service_deferred(void) {
     bool do_drop_report = cons_dropreport_load();
     u32  d_line = g_cons.rx_drop_line, d_ring = g_cons.rx_drop_ring;
     u32  d_mode = g_cons.rx_drop_modeflush;
+    u32  d_side = g_cons.rx_drop_side;
     u32  b_raw = g_cons.rx_bp_raw, b_flush = g_cons.rx_bp_flush;
     cons_dropreport_store(false);
     if (do_drop_report) g_cons.drop_reported = true;
@@ -1551,6 +1699,8 @@ static void cons_service_deferred(void) {
         cons_diag_line_putdec(&l, d_ring);
         cons_diag_line_puts(&l, " modeflush=");
         cons_diag_line_putdec(&l, d_mode);
+        cons_diag_line_puts(&l, " side=");
+        cons_diag_line_putdec(&l, d_side);
         cons_diag_line_puts(&l, " (bp raw=");
         cons_diag_line_putdec(&l, b_raw);
         cons_diag_line_puts(&l, " flush=");
@@ -1635,6 +1785,9 @@ void cons_test_reset(void) {
     g_cons.rx_drop_line = 0u;
     g_cons.rx_drop_ring = 0u;
     g_cons.rx_drop_modeflush = 0u;
+    g_cons.rx_drop_side = 0u;
+    g_cons.side_head = 0u;                      // vote 73: the side queue empty
+    g_cons.side_count = 0u;
     cons_dropreport_store(false);
     g_cons.drop_reported = false;
     spin_unlock_irqrestore(&g_cons.lock, s);
@@ -1693,9 +1846,30 @@ u32 cons_rx_drop_modeflush(void) {
     return v;
 }
 
+// Vote 73: serial bytes that met a full side queue.
+u32 cons_rx_drop_side(void) {
+    irq_state_t s = spin_lock_irqsave(&g_cons.lock);
+    u32 v = g_cons.rx_drop_side;
+    spin_unlock_irqrestore(&g_cons.lock, s);
+    return v;
+}
+
+#ifdef KERNEL_TESTS
+u32 cons_test_side_count(void) {
+    irq_state_t s = spin_lock_irqsave(&g_cons.lock);
+    u32 v = g_cons.side_count;
+    spin_unlock_irqrestore(&g_cons.lock, s);
+    return v;
+}
+#endif
+
 #ifdef KERNEL_TESTS
 bool cons_test_intr_pending(void) {
     return cons_intr_load();
+}
+
+void cons_test_intr_consume(void) {
+    cons_intr_store(false);
 }
 
 bool cons_test_sak_pending(void) {
@@ -1905,9 +2079,8 @@ static int devcons_close(struct Spoor *c) {
 // ring's committed lines -- because a SAK is the operator's declaration that
 // what came before is not for the trusted prompt: pre-SAK bytes must never be
 // the first bytes of the secret, whether the shell had drained them or not.
-// (Documented residue: a PL011 holdback byte parked by #174 RX back-pressure
-// -- reachable only with a FULL ring at the instant of the SAK -- is pumped
-// into the ring by the attached reader's first drain.)
+// The serial side queue goes with them (vote 73), so no pre-SAK byte is left
+// anywhere for the attached reader's first drain to bring in.
 //
 // No kernel timeout, by design: an episode ended behind the consumer's back
 // would route the next keystrokes -- the secret -- to the shell. The consumer
@@ -2053,13 +2226,16 @@ bool cons_episode_begin(void) {
     g_cons.episode_saved_termios = cons_termios_load();
     cons_termios_store(g_cons.episode_saved_termios
                        & ~(CONS_ICANON | CONS_ECHO | CONS_ISIG | CONS_ICRNL));
-    // Discard: the cooked partial line AND the ring. Not delivered, not
-    // counted as a drop -- the operator's SAK abandoned them (the I-20 "ISIG
-    // characters discard the pending line" disposition, widened to the
-    // committed lines by the argument in the header).
+    // Discard: the cooked partial line, the ring AND the side queue (serial
+    // bytes read before the SAK that the ring had no room for, vote 73). Not
+    // delivered, not counted as a drop -- the operator's SAK abandoned them (the
+    // I-20 "ISIG characters discard the pending line" disposition, widened to
+    // the committed lines by the argument in the header).
     g_cons.line_len = 0u;
     g_cons.head = g_cons.tail = 0u;
     cons_count_store(0u);
+    g_cons.side_head = 0u;
+    g_cons.side_count = 0u;
     cons_episode_active_store(true);
     spin_unlock_irqrestore(&g_cons.lock, s);
     cons_episode_wake_all();
@@ -2262,21 +2438,21 @@ long cons_input_read(void *buf, long n) {
             continue;
         }
         u32 c = cons_count_load();
-        while (c > 0u && got < n) {
-            out[got++] = g_cons.ring[g_cons.head];
+        // A canonical read ends at its line: a reader taking one line leaves the
+        // next for whoever reads after it.
+        bool canonical = (cons_termios_load() & CONS_ICANON) != 0u;
+        bool line_ended = false;
+        while (c > 0u && got < n && !line_ended) {
+            u8 b = g_cons.ring[g_cons.head];
+            out[got++] = b;
             g_cons.head = (g_cons.head + 1u) & (CONS_RING_SIZE - 1u);
             c--;
+            line_ended = canonical && b == (u8)'\n';
         }
         cons_count_store(c);
         spin_unlock_irqrestore(&g_cons.lock, s);
-        // #174: having freed ring space, resume RX backpressure -- drain any FIFO
-        // bytes the handler held while the ring was full + unmask RX. No-op (one
-        // atomic read) when RX is not paused. Runs with g_cons.lock RELEASED:
-        // uart_rx_pump takes g_uart_rx_lock then re-enters cons_rx_input
-        // (g_cons.lock), so the lock order g_uart_rx_lock -> g_cons.lock holds and
-        // there is no g_cons.lock -> g_uart_rx_lock edge. The cons single-reader
-        // guard (reader_busy) means at most one pump runs at a time.
-        uart_rx_pump();
+        // Vote 73: having freed ring space, move what the side queue holds.
+        cons_side_move();
         if (got > 0) break;            // read() returns as soon as >= 1 byte is ready
         int sl = sleep_noteintr(&g_cons_data_rendez, cons_data_or_vacate, rp);
         if (sl == SLEEP_INTR) break;
@@ -2605,6 +2781,13 @@ short cons_drain_poll(short events, struct poll_waiter *pw) {
 // path into the RX ring during the prompt is exactly the spoof the episode
 // exists to exclude. A loop that finds one opening stops short (the renderer
 // retries and is refused).
+//
+// #129's rule for a lone Ctrl-C holds for one behind a refused terminator in the
+// same write, or a renderer that keeps re-offering the terminator never reaches
+// it: a reader that never comes must not hold it up. The refused line is still the
+// pending assembly and goes with it; what the write held between them was never
+// committed. Raw mode has no assembly, and consuming past a refused byte would
+// leave a hole in the stream, so there it waits its turn.
 long cons_feed_write(const void *buf, long n) {
     if (!buf || n < 0) return -1;
     if (cons_episode_active_load()) return -1;
@@ -2613,7 +2796,11 @@ long cons_feed_write(const void *buf, long n) {
     for (; i < n; i++) {
         if (cons_episode_active_load()) break;
         cons_test_window();
-        if (!cons_rx_accept(bytes[i], /*is_break=*/false, /*feed=*/true)) break;
+        if (cons_rx_accept(bytes[i], /*is_break=*/false, /*feed=*/true)) continue;
+        long at = i + 1;
+        while (at < n && bytes[at] != 0x03u) at++;
+        if (at == n || !cons_feed_intr_past_refusal()) break;
+        i = at;
     }
     return i;
 }

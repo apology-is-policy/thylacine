@@ -94,7 +94,7 @@ impl Value {
     /// Collapse to a single scalar string by joining elements with a
     /// space. The conventional flattening when a context expects ONE
     /// string from a value (e.g., the scrutinee of `case`, the
-    /// argument of `cd`, the right-hand side of `=~`). Empty values
+    /// argument of `cd`). Empty values
     /// collapse to "".
     pub fn as_scalar(&self) -> String {
         self.joined(" ")

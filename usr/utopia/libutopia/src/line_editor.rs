@@ -2912,7 +2912,7 @@ mod tests {
 
     #[test]
     fn what_the_lexer_closes_is_closed() {
-        for line in ["echo $(a # )", r#"echo "$(echo "'")""#, "if ($x =~ /(/) { y }"] {
+        for line in ["echo $(a # )", r#"echo "$(echo "'")""#] {
             let mut le = LineEditor::new();
             feed(&mut le, line.as_bytes());
             assert!(matches!(le.feed_byte(b'\r'), EditorAction::Accept(_)), "{line}");

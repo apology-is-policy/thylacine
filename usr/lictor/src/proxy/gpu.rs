@@ -5,7 +5,7 @@ use core::cell::RefCell;
 use libdriver::Error;
 use libthyla_rs::{t_open, t_close, t_weft_map, t_burrow_detach, t_weft_share,
     t_weft_unshare, T_WALK_OPEN_FROM_ROOT, T_OREAD};
-use crate::{rpc_client::Client, gpu_api::{Info, Stats, Request, BufferRef, RingInfo}, wire::Wire};
+use crate::{rpc_client::Client, gpu_api::{Info, Stats, Frees, Request, BufferRef, RingInfo}, wire::Wire};
 pub use crate::gpu_api::{HostRing, FenceTag, FenceVindication, FencedErr, Engine, FailureCause, failure_cause};
 pub const PAGE_SIZE: u64 = 4096;
 pub const RING_DMA_SIZE: usize = 8192;
@@ -38,6 +38,8 @@ pub struct Gpu {
     pub condemned_lost: u32,
     pub engine: Engine,
     pub stalls: u32,
+    /// The last reply's count as its request began (`Stats::stalls_begun`).
+    pub stalls_begun: u32,
     /// What the device scans is not known from when a scanout command was
     /// sent and not answered -- it may still be executed (GPU-DESIGN 4.5.15)
     /// -- until one is accepted: the device takes its commands in order, so
@@ -49,6 +51,8 @@ pub struct Gpu {
     pub capset_id: u32,
     pub capset_ver: u32,
     pub venus_capset_blob: alloc::vec::Vec<u8>,
+    #[cfg(feature = "test-mode")]
+    test_shot_at_unref: bool,
 }
 impl Gpu {
     pub fn probe(_bar: u64, _ring: u64, _flane: u64, _blob_probe: u64) -> Result<Self, Error> {
@@ -69,12 +73,15 @@ impl Gpu {
             condemned_lost: info.condemned_lost,
             engine: stats.engine,
             stalls: stats.stalls,
+            stalls_begun: stats.stalls_begun,
             scanout_unsettled: false,
             num_capsets: info.num_capsets,
             capset_blob: info.capset_blob,
             capset_id: info.capset_id,
             capset_ver: info.capset_ver,
             venus_capset_blob: info.venus_capset_blob,
+            #[cfg(feature = "test-mode")]
+            test_shot_at_unref: false,
         })
     }
     /// Adopts the reply's Stats on an error too: a failed step is read
@@ -90,7 +97,7 @@ impl Gpu {
     fn adopt(&mut self, s: Stats) {
         self.cmd_seq = s.cmd_seq; self.last_scanout_seq = s.last_scanout_seq;
         self.last_unref_seq = s.last_unref_seq; self.condemned_lost = s.condemned_lost;
-        self.engine = s.engine; self.stalls = s.stalls;
+        self.engine = s.engine; self.stalls = s.stalls; self.stalls_begun = s.stalls_begun;
     }
     /// The stall count of the broker's last reply of any kind, a query's
     /// included, to read a scanout command's own reply against.
@@ -180,6 +187,10 @@ impl Gpu {
         self.invoke(Request::DetachBacking { resource_id }).unwrap_or(Err(Error::Hardware))
     }
     pub fn resource_unref(&mut self, resource_id: u32) -> Result<(), Error> {
+        #[cfg(feature = "test-mode")]
+        if core::mem::take(&mut self.test_shot_at_unref) && !self.test_stall_shot() {
+            let _ = libthyla_rs::t_putstr("lictor client: stall shot at a free REFUSED by the broker\n");
+        }
         self.invoke(Request::ResourceUnref { resource_id }).unwrap_or(Err(Error::Hardware))
     }
     pub fn condemn(&mut self, res_id: u32) -> () {
@@ -320,15 +331,42 @@ impl Gpu {
         self.invoke::<()>(Request::TestArmLatch).is_ok()
     }
     #[cfg(feature = "test-mode")]
+    pub fn test_arm_chained(&mut self) -> bool {
+        self.invoke::<()>(Request::TestArmChained).is_ok()
+    }
+    #[cfg(feature = "test-mode")]
     pub fn test_stall_next(&mut self) -> bool {
         self.invoke(Request::TestStallNext).unwrap_or(false)
     }
+    /// The shot rides this connection's next request, whatever it is.
+    #[cfg(feature = "test-mode")]
+    pub fn test_stall_shot(&mut self) -> bool {
+        self.invoke::<()>(Request::TestStallShot).is_ok()
+    }
+    /// For a bounded time the broker's owed-free pass passes over the frees
+    /// a stream on device context `ctx_id` can reach (`on`), or no longer.
+    #[cfg(feature = "test-mode")]
+    pub fn test_owed_defer(&mut self, ctx_id: u32, on: bool) -> bool {
+        self.invoke(Request::TestOwedDefer { ctx_id, on }).unwrap_or(false)
+    }
+    /// One stall shot on the broker's owed-free pass: its next command for
+    /// `resource_id`'s free, if the free is owed and repeated soon enough.
+    #[cfg(feature = "test-mode")]
+    pub fn test_owed_stall(&mut self, resource_id: u32) -> bool {
+        self.invoke(Request::TestOwedStall { resource_id }).unwrap_or(false)
+    }
+    /// Aim a stall shot at the next resource free this client sends.
+    #[cfg(feature = "test-mode")]
+    pub fn test_stall_at_next_unref(&mut self) { self.test_shot_at_unref = true; }
+    /// Disarm an aim no free took; true when one was left.
+    #[cfg(feature = "test-mode")]
+    pub fn test_stall_unref_unspent(&mut self) -> bool { core::mem::take(&mut self.test_shot_at_unref) }
     #[cfg(feature = "test-mode")]
     pub fn test_abandoned_total(&self) -> u32 {
         self.query(Request::TestAbandonedTotal).unwrap_or(u32::MAX)
     }
     #[cfg(feature = "test-mode")]
-    pub fn fenced_held(&self) -> Vec<(usize, u64, u32, u8, bool, bool, u64)> {
+    pub fn fenced_held(&self) -> Vec<crate::gpu_api::HeldRow> {
         self.query(Request::FencedHeld).unwrap_or(Vec::new())
     }
     #[cfg(feature = "test-mode")]
@@ -344,10 +382,15 @@ impl Gpu {
     pub fn ctx_has_poisoned_slot(&self, ctx_pub: u32) -> bool {
         self.query(Request::CtxHasPoisonedSlot { ctx_pub }).unwrap_or(true)
     }
+    /// Fenced chains whose completion is still owed, parked ones included.
     pub fn fenced_in_flight(&self) -> u32 {
         self.query(Request::FencedInFlight).unwrap_or(u32::MAX)
     }
     pub fn engine_dead(&self) -> bool {
         self.query(Request::EngineDead).unwrap_or(true)
+    }
+    /// The broker's owed frees; an unanswered query reads `owed` u32::MAX.
+    pub fn frees_owed(&self) -> Frees {
+        self.query(Request::FreesOwed).unwrap_or(Frees { owed: u32::MAX, ..Frees::default() })
     }
 }

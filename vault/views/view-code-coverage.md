@@ -65,23 +65,22 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**733 owned · 38 unowned · 771 files (95% owned) · ~10308 unswept lines.**
+**738 owned · 36 unowned · 774 files (95% owned) · ~12012 unswept lines.**
 
-Excluded as harness and counted here rather than dropped: **97 files, ~49439 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
+Excluded as harness and counted here rather than dropped: **98 files, ~50827 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
 | area | owned | unowned | unswept lines |
 |---|---:|---:|---:|
-| usr/warp-prove | 0 | 1 | 4434 |
-| usr/pouch-hello | 24 | 14 | 2076 |
+| usr/warp-prove | 0 | 1 | 6348 |
+| usr/pouch-hello | 25 | 13 | 2005 |
 | usr/ports | 19 | 5 | 1691 |
 | kernel | 196 | 10 | 1227 |
 | usr/gl-sdl-prove | 0 | 1 | 262 |
 | usr/libthyla-rs | 36 | 1 | 196 |
 | arch | 41 | 2 | 146 |
-| usr/susp-mask-child | 0 | 1 | 139 |
 | usr/lib | 130 | 1 | 72 |
 | usr/bus-probe-child | 0 | 1 | 63 |
-| usr/tapestryd | 14 | 1 | 2 |
+| usr/tapestryd | 15 | 1 | 2 |
 | mm | 8 | 0 | 0 |
 | usr/aurora | 5 | 0 | 0 |
 | usr/coreutils | 67 | 0 | 0 |
@@ -98,7 +97,7 @@ Excluded as harness and counted here rather than dropped: **97 files, ~49439 lin
 | usr/joey | 1 | 0 | 0 |
 | usr/kaua-term | 4 | 0 | 0 |
 | usr/lantern | 4 | 0 | 0 |
-| usr/lictor | 31 | 0 | 0 |
+| usr/lictor | 33 | 0 | 0 |
 | usr/login | 1 | 0 | 0 |
 | usr/loom-fixture | 1 | 0 | 0 |
 | usr/loom-stress | 1 | 0 | 0 |
@@ -116,6 +115,7 @@ Excluded as harness and counted here rather than dropped: **97 files, ~49439 lin
 | usr/ptyhost | 1 | 0 | 0 |
 | usr/quarry | 1 | 0 | 0 |
 | usr/sntp | 1 | 0 | 0 |
+| usr/susp-mask-child | 1 | 0 | 0 |
 | usr/utopia | 32 | 0 | 0 |
 | usr/view | 2 | 0 | 0 |
 | usr/virtio-blk-rw | 1 | 0 | 0 |
@@ -131,7 +131,7 @@ Excluded as harness and counted here rather than dropped: **97 files, ~49439 lin
 
 | file | lines |
 |---|---:|
-| usr/warp-prove/src/main.rs | 4434 |
+| usr/warp-prove/src/main.rs | 6348 |
 | usr/ports/gnumake/config.h | 1357 |
 | usr/pouch-hello/pouch-hello-net.c | 618 |
 | kernel/include/thylacine/spinlock.h | 287 |
@@ -143,7 +143,6 @@ Excluded as harness and counted here rather than dropped: **97 files, ~49439 lin
 | usr/pouch-hello/pouch-hello-sodium.c | 196 |
 | usr/ports/gnumake/generated/glob.h | 163 |
 | kernel/cpio.c | 154 |
-| usr/susp-mask-child/src/main.rs | 139 |
 | usr/pouch-hello/pouch-hello-reentry.c | 133 |
 | usr/pouch-hello/pouch-hello-mallocng-torture.c | 126 |
 | kernel/include/thylacine/9p_transport_loopback.h | 102 |
@@ -154,7 +153,6 @@ Excluded as harness and counted here rather than dropped: **97 files, ~49439 lin
 | arch/arm64/psci.c | 78 |
 | kernel/include/thylacine/vdso.h | 73 |
 | usr/lib/pouch/compiler-rt/aarch64-thylacine.c | 72 |
-| usr/pouch-hello/pouch-hello-susp.c | 71 |
 | arch/arm64/psci.h | 68 |
 | kernel/vdso.c | 68 |
 | usr/ports/gnumake/generated/fnmatch.h | 64 |

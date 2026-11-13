@@ -1633,7 +1633,6 @@ fn is_value_token(k: &TokenKind) -> bool {
             | TokenKind::Backtick(_)
             | TokenKind::ProcSubIn(_)
             | TokenKind::ProcSubOut(_)
-            | TokenKind::Regex(_)
             // A word-position `~` is a value: it expands to $home when it
             // leads a word (`~`, `~/foo`), and is a literal tilde mid-word
             // (`a~b`). Arithmetic context uses a SEPARATE predicate

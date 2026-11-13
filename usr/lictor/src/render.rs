@@ -280,7 +280,7 @@ fn draw(pixels: &mut [u32], width: u32, height: u32, k: usize, #[cfg(test)] coar
         cy += 32 + lines.len().saturating_sub(1) * 20;
         c.text(tx, cy, if model.state == State::Failed { "No authority was conferred. Release all keys to return." }
             else if !model.notice.is_empty() { "Release the secure attention keys." }
-            else { "Your workspace is suspended. Press any key to return." }, Font::Body, QUIET, 0);
+            else { "Your workspace is suspended. Press Enter to return." }, Font::Body, QUIET, 0);
         return Ok(());
     }
     let body = if dense { Font::Label } else { Font::Body };
@@ -347,7 +347,7 @@ fn draw(pixels: &mut [u32], width: u32, height: u32, k: usize, #[cfg(test)] coar
         c.text(bx + 63, by + 10, "Confer authority", Font::Body, 0xff121813, 0);
     } else {
         c.text(tx, action_y + 19, if model.state == State::Verifying { "Please wait for the authorization verdict." }
-            else { "Press any key to return to your workspace." }, Font::Body, QUIET, 0);
+            else { "Press Enter to return to your workspace." }, Font::Body, QUIET, 0);
     }
     Ok(())
 }

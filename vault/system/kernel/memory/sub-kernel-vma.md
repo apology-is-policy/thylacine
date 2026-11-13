@@ -84,6 +84,10 @@ chain, on `deferred_free_next`, of Burrows whose last mapping went, for
 its detach's errno; and `vma_drain_in` hands `burrow_free_deferred` its whole
 chain in one call (the function walks `deferred_free_next` itself since B-1a').
 
+`vma_args_ok` answers the rejections below without allocating, so a caller can
+tell a refused shape from a slab shortfall, `vma_alloc`'s other NULL. `burrow_map_in`
+does.
+
 **Five rejections at `vma_alloc`**, and the order they are written in is not
 the order they matter in:
 
@@ -892,4 +896,3 @@ they keep existing clone semantics. No user mapping flag or permission ceiling
 is added. Native split/clone tests and two intended source mutations distinguish
 private omission from accidentally omitting ordinary lazy buffers.
 
-`vma_args_ok` holds `vma_alloc`'s argument checks, so a caller can ask first and read a later NULL as the slab's refusal. `burrow_map_in` does.

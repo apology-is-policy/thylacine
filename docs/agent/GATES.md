@@ -258,6 +258,23 @@ make test-loom-client               # or: tools/test-loom-client.sh [--out DIR]
 # A bare build is the Halcyon-default image since 2026-09-09, where login
 # spawns the session compositor and the 35 shell-driving scenarios find no
 # `ut` prompt. See "Build + test commands" above.
+# ONE IMAGE DOES NOT RUN THE FLEET. A scenario that reads a lever the image lacks SKIPs
+# (77) and prints its bake line; the harness reports SKIPPED, which is not coverage. A
+# whole-fleet run is one pass per image, and a scenario that skipped on every one of them
+# has not run. The levers go before `tools/build.sh kernel --config ci`:
+#   (none)                                             the shell-driving scenarios
+#   THYLACINE_HALCYON=1 THYLACINE_HALCYON_SESSION=0    halcyond as the console renderer:
+#       ls-halcyon, ls-gfx-gallery, ls-gfx-jpeg, ls-gfx-inline-view (and, with
+#       THYLACINE_HALCYON_PROFILE=instrument added, ls-halcyon-instrument)
+#   THYLACINE_HALCYON_SESSION=1                        the session compositor, legacy bar
+#   THYLACINE_HALCYON_SESSION=1 THYLACINE_HALCYON_PROFILE=instrument
+#       the session compositor with the Instrument bar: the ls-graphical-* scenarios and
+#       the ones that read the bar's log line
+#   THYLACINE_HALCYON=1 THYLACINE_HALCYON_SESSION=1 THYLACINE_HALCYON_PROFILE=instrument
+#       both renderers. ls-halcyon-session-route runs ONLY here: it needs the console
+#       renderer's place channel posted while a session pane asks for it.
+# Other scenarios name further levers in their own SKIP line (the clipboard and readiness
+# qualifications; the bare default image for ls-halcyon-manual).
 tools/test-interactive.sh               # full set (or: make test-interactive)
 tools/test-interactive.sh ls-ci         # one scenario by name
 

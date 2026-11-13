@@ -140,7 +140,7 @@ config-file comments are generated from, and any future full TUI would reuse —
 it once, in the schema.
 
 - **compile-shape** — `BUILD_TYPE`, `TESTS`, `BOOT_PROBES`, `DEV_ACCOUNTS`,
-  `SANITIZE`, `TICKLESS`, `PRIVATE_ASYNC_QUAL`. KASLR (I-16) and the hardening
+  `SANITIZE`, `TICKLESS`, `PRIVATE_ASYNC_QUAL`, `READINESS_QUAL`. KASLR (I-16) and the hardening
   flags are not symbols: every image has both. `HARDENING_FULL` and `KASLR` were
   symbols nothing applied, retired 2026-10-27 by operator vote; a profile that
   still names one loads with an unknown-symbol warning and the line is ignored.
@@ -464,6 +464,17 @@ untouched by this arc. git-on-viv remains the active mission; this is the detour
   yet. Next: the configurator core (lane 2), account decoupling folded in (lane 3),
   the wizard (lane 4), the manifest + forage (lane 5). The account-gate move is
   audit-bearing at impl.
+
+## Native readiness qualification option (November 9)
+
+`READINESS_QUAL` is a compile-group bool, default `n` and in no preset; its
+environment shim is `THYLACINE_READINESS_QUALIFICATION=1`. The build maps it to
+`kaua-term-probe/readiness-qualification` and logs the choice. That feature turns
+on libthyla-rs's `poll-worker-test` hooks, and Cargo unifies features across the
+workspace build, so every binary in such an image carries them; it is a fixture
+image for `readiness-qualification.exp` and `service-readiness-failure.exp`, which
+skip unless the same variable is set when they run. Until this option the two
+scenarios named a probe build no recipe produced, so every fleet run skipped them.
 
 ## Native interaction qualification option (October 3)
 

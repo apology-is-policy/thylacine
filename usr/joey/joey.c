@@ -24,6 +24,7 @@
 // joey returns non-zero on any failed assertion — that is the boot-path
 // regression signal.
 
+#include <thyla/account.h>
 #include <thyla/syscall.h>
 #include <thyla/poll.h>
 #include "../pouch-hello/pouch-census.h"
@@ -76,6 +77,50 @@ static const char *itoa_dec(long v, char *buf, size_t buf_sz) {
 }
 
 // =============================================================================
+// The resident services' memory account (SHARED-MEMORY-ACCOUNTING section 13): joey keeps
+// its control and each service is born under it, so what services hold is apart from what
+// sessions hold. -1 until main makes it, and a service spawn then refuses.
+static long g_services_account = -1;
+static unsigned long long g_services_incarnation;
+
+// A spawn record with the account tail behind it, at +104 as the kernel reads it.
+struct joey_service_record {
+    struct t_sys_spawn_args a;
+    struct t_sys_spawn_ext_account acct;
+};
+
+static int joey_services_account_init(void) {
+    struct t_account_child_rec r = {
+        .h = { .version = T_ACCOUNT_VERSION, .size = sizeof(r) },
+    };
+    long h = t_account(T_ACCOUNT_SELF, T_ACCOUNT_CHILD, &r, sizeof(r));
+    if (h < 0) return -1;
+    g_services_account = h;
+    g_services_incarnation = r.created;
+    return 0;
+}
+
+// t_spawn_with_perms' shape (no argv), under the services' account.
+static long joey_spawn_service(const char *name, size_t name_len,
+                               const unsigned int *fds, unsigned int fd_count,
+                               unsigned long cap_mask, unsigned long perm_flags) {
+    if (g_services_account < 0) return -1;
+    struct joey_service_record rec = {
+        .a = {
+            .name_va    = (unsigned long)name,
+            .fd_list_va = (unsigned long)fds,
+            .name_len   = (unsigned int)name_len,
+            .fd_count   = fd_count,
+            .perm_flags = (unsigned int)perm_flags,
+            .ext_flags  = T_SPAWN_EXT_ACCOUNT,
+            .cap_mask   = cap_mask,
+        },
+        .acct = { .account_h = (unsigned int)g_services_account,
+                  .incarnation = g_services_incarnation },
+    };
+    return t_spawn_full_argv(&rec.a);
+}
+
 // #80: the long-lived-daemon registry -- what makes the reaper's line decidable
 // =============================================================================
 // reap_adopted_orphans (below) drains joey's ready zombies with a wait-ANY, so
@@ -491,6 +536,30 @@ static int smoke_drain(long rd, unsigned char *acc, size_t acc_cap,
         if (n < 0) return -1;
         if (n == 0) return 0;  // EOF -- write side fully closed
         (void)t_puts((const char *)buf, (size_t)n);
+        for (long i = 0; i < n && *acc_len < acc_cap; i++)
+            acc[(*acc_len)++] = buf[i];
+    }
+}
+
+// smoke_drain_head -- smoke_drain, echoing only the first echo_cap bytes, for a child
+// whose EXPECTED failure prints far more than the check reads: a Go runtime throw dumps
+// every goroutine whatever GOTRACEBACK says, and the boot log pays for each byte.
+// *unechoed counts what was read and not echoed.
+static int smoke_drain_head(long rd, unsigned char *acc, size_t acc_cap,
+                            size_t *acc_len, size_t echo_cap, size_t *unechoed) {
+    size_t echoed = 0;
+    *acc_len = 0;
+    *unechoed = 0;
+    for (;;) {
+        unsigned char buf[256];
+        long n = t_read(rd, buf, sizeof(buf));
+        if (n < 0) return -1;
+        if (n == 0) return 0;
+        size_t show = (size_t)n;
+        if (show > echo_cap - echoed) show = echo_cap - echoed;
+        if (show) (void)t_puts((const char *)buf, show);
+        echoed += show;
+        *unechoed += (size_t)n - show;
         for (long i = 0; i < n && *acc_len < acc_cap; i++)
             acc[(*acc_len)++] = buf[i];
     }
@@ -2523,14 +2592,14 @@ static int do_corvus_bringup(long storage_dup_fd) {
     // console-attached, so the kernel's console-attached-caller gate on
     // perm-granting accepts it. Inert until a SAK fires (no SAK at boot -- the
     // automated harness cannot inject a BREAK).
-    long corvus_pid = t_spawn_with_perms(
+    long corvus_pid = joey_spawn_service(
         corvus_name, sizeof(corvus_name) - 1,
         corvus_fds, 1,
         T_CAP_LOCK_PAGES | T_CAP_CSPRNG_READ | T_CAP_GRANT_HOSTOWNER
             | T_CAP_GRANT_CLEARANCE,
         T_SPAWN_PERM_MAY_POST_SERVICE | T_SPAWN_PERM_CONSOLE_TRUSTED);
     if (corvus_pid <= 0) {
-        t_putstr("joey: t_spawn_with_perms(\"corvus\") FAILED\n");
+        t_putstr("joey: joey_spawn_service(\"corvus\") FAILED\n");
         return 1;
     }
     joey_daemon_record(corvus_pid, "corvus");   // #80
@@ -5405,9 +5474,10 @@ static int probe_spawn_env(void) {
 // One run of go-threads (300 goroutines locked to 300 Ms at once) as a user,
 // who is not exempt from the thread budget: `budget` 0 inherits joey's, else
 // a SPAWN_EXT_THREADS tail sets it. Drained to EOF first (EOF is the child's
-// exit), since a Go fatal error can print past the pipe's ring. Returns 0 with
-// *status and whether the output named a refused thread create, -1 if the run
-// could not be made or reaped.
+// exit), since a Go fatal error can print past the pipe's ring. A budgeted run is
+// meant to die in a runtime throw, whose dump of 300 goroutines is about 440 KB, so
+// only what the check reads is echoed. Returns 0 with *status and whether the output
+// named a refused thread create, -1 if the run could not be made or reaped.
 static int go_threads_run(unsigned int budget, int *status, int *refused) {
     long rd = -1, wr = -1;
     if (t_pipe(&rd, &wr) < 0) return -1;
@@ -5436,10 +5506,17 @@ static int go_threads_run(unsigned int budget, int *status, int *refused) {
         return -1;
     }
     unsigned char acc[2048];
-    size_t len = 0;
-    int drained = smoke_drain(rd, acc, sizeof(acc), &len);
+    size_t len = 0, unechoed = 0;
+    int drained = smoke_drain_head(rd, acc, sizeof(acc), &len,
+                                   budget ? sizeof(acc) : (size_t)-1, &unechoed);
     (void)t_close(rd);
     long reaped = reap_bounded(pid, status, PROBE_REAP_MAX_SEC);
+    if (unechoed) {
+        char nb[24];
+        t_putstr("\njoey: go-threads: ");
+        t_putstr(itoa_dec((long)unechoed, nb, sizeof(nb)));
+        t_putstr(" more bytes of the budgeted run's output not echoed\n");
+    }
     if (drained < 0 || reaped != pid) return -1;
     static const char needle[] = "failed to create new OS thread";
     *refused = mem_contains(acc, len, needle, sizeof(needle) - 1);
@@ -6546,6 +6623,47 @@ static void sd_stderr_drain_main(void *arg) {
     t_thread_exit();
 }
 
+#if THYLA_BOOT_PROBES
+// What the service's own /proc/<pid>/account says: a spawn that dropped its tail leaves the
+// service on joey's account and nothing else notices, because nothing refuses yet.
+static int joey_service_is_on_its_account(long pid) {
+    char num[24], path[64], text[256];
+    const char *n = itoa_dec(pid, num, sizeof(num));
+    static const char pre[] = "/proc/", post[] = "/account";
+    size_t len = 0;
+    for (size_t i = 0; i < sizeof(pre) - 1; i++) path[len++] = pre[i];
+    for (size_t i = 0; n[i]; i++) path[len++] = n[i];
+    for (size_t i = 0; i < sizeof(post) - 1; i++) path[len++] = post[i];
+    long fd = t_open(T_WALK_OPEN_FROM_ROOT, path, len, T_OREAD);
+    long got = fd >= 0 ? t_read(fd, text, sizeof(text)) : -1;
+    if (fd >= 0) (void)t_close(fd);
+    static const char key[] = "incarnation: ";
+    unsigned long long seen = 0;
+    int digits = 0;
+    if (got > (long)sizeof(key) - 1) {
+        for (long i = (long)sizeof(key) - 1; i < got && text[i] >= '0' && text[i] <= '9'; i++) {
+            seen = seen * 10 + (unsigned long long)(text[i] - '0');
+            digits++;
+        }
+    }
+    if (digits == 0 || seen != g_services_incarnation) {
+        t_putstr("joey: a service is not on the services account FAILED\n");
+        return -1;
+    }
+    return 0;
+}
+
+// Each daemon joey has recorded so far. A dropped tail on any one spawn leaves only that
+// service behind.
+static int joey_services_are_on_their_account(void) {
+    for (unsigned int i = 0; i < g_joey_daemon_count; i++) {
+        if (joey_service_is_on_its_account(g_joey_daemons[i].pid) != 0) return -1;
+    }
+    t_putstr("joey: services account witnessed on its running services\n");
+    return 0;
+}
+#endif
+
 int main(void) {
     char buf[24];
     t_putstr("joey: hello from /bin/joey (real userspace binary, loaded from ramfs)\n");
@@ -6556,6 +6674,11 @@ int main(void) {
     // does not lean on that.
     if (t_chdir("/bin", 4) < 0) {
         t_putstr("joey: t_chdir(/bin) FAILED\n");
+        return 1;
+    }
+
+    if (joey_services_account_init() != 0) {
+        t_putstr("joey: services account FAILED\n");
         return 1;
     }
 
@@ -7633,7 +7756,7 @@ int main(void) {
         // whose manifest declares `caps = ["csprng"]` (tapestryd, which mints
         // the one-shot placement claims). I-2: a child holds at most its
         // parent's caps, so the warden must hold the bit to pass it down.
-        struct t_sys_spawn_args wreq = {
+        struct joey_service_record wrec = { .a = {
             .name_va       = (unsigned long)wd_name,
             .argv_data_va  = (unsigned long)wd_argv,
             .name_len      = sizeof(wd_name) - 1,
@@ -7641,12 +7764,18 @@ int main(void) {
             .argc          = wd_argc,
             .cap_mask      = T_CAP_HW_CREATE | T_CAP_CSPRNG_READ,
             .perm_flags    = T_SPAWN_PERM_MAY_POST_SERVICE | T_SPAWN_PERM_SEAT_MANAGER,
-        };
-        long wd_pid = t_spawn_full_argv(&wreq);
+            .ext_flags     = T_SPAWN_EXT_ACCOUNT,
+        }, .acct = { .account_h = (unsigned int)g_services_account,
+                     .incarnation = g_services_incarnation } };
+        long wd_pid = g_services_account < 0 ? -1 : t_spawn_full_argv(&wrec.a);
         if (wd_pid <= 0) {
             t_putstr("joey: t_spawn(\"warden\") FAILED\n");
             return 1;
         }
+#if THYLA_BOOT_PROBES
+        // The drivers it binds outlive it and are born under what it was born under.
+        if (joey_service_is_on_its_account(wd_pid) != 0) return 1;
+#endif
         int wd_status = -1;
         long wd_reaped = t_wait_pid_for((int)wd_pid, 0, &wd_status);
         if (wd_reaped != wd_pid || wd_status != 0) {
@@ -8103,7 +8232,7 @@ int main(void) {
         // "--ctl-listen"(13) + "/srv/stratum-ctl"(17) + "--corvus-socket"(16) +
         // "/srv/corvus/ctl"(16) + "--system-uid"(13) + "4294967294"(11) +
         // "--fs-workers"(13) + "4"(2) = 177.
-        struct t_sys_spawn_args sd_req = {
+        struct joey_service_record sd_rec = { .a = {
             .name_va       = (unsigned long)sd_name,
             .argv_data_va  = (unsigned long)sd_argv_data,
             .fd_list_va    = 0,
@@ -8112,7 +8241,7 @@ int main(void) {
             .argc          = 14,
             .fd_count      = 0,
             .perm_flags    = (unsigned int)T_SPAWN_PERM_MAY_POST_SERVICE,
-            .ext_flags     = 0,
+            .ext_flags     = T_SPAWN_EXT_ACCOUNT,
             // F1 fix validation (P6 hardening #2): grant CAP_CSPRNG_READ
             // so stratumd's libsodium sodium_init reaches getrandom
             // successfully and progresses into stm_fs_mount. Pre-F1-fix,
@@ -8125,7 +8254,8 @@ int main(void) {
             // `reason="snare:abort"` user-fault line (F1 wasn't, mallocng
             // still asserts -- but cleanly, NOT as kernel extinction).
             .cap_mask      = T_CAP_HW_CREATE | T_CAP_CSPRNG_READ,
-        };
+        }, .acct = { .account_h = (unsigned int)g_services_account,
+                     .incarnation = g_services_incarnation } };
 
         // Install a pipe whose write-end becomes stratumd's fd 1 + fd 2
         // (both stdout and stderr). Joey reads from the rd-end to capture
@@ -8142,10 +8272,10 @@ int main(void) {
         // pipe's write-end so stratumd's libc stderr writes are captured.
         unsigned int sd_fds[3] = { (unsigned int)sd_wr, (unsigned int)sd_wr,
                                     (unsigned int)sd_wr };
-        sd_req.fd_list_va = (unsigned long)sd_fds;
-        sd_req.fd_count = 3;
+        sd_rec.a.fd_list_va = (unsigned long)sd_fds;
+        sd_rec.a.fd_count = 3;
 
-        long sd_pid = t_spawn_full_argv(&sd_req);
+        long sd_pid = g_services_account < 0 ? -1 : t_spawn_full_argv(&sd_rec.a);
         if (sd_pid <= 0) {
             t_putstr("joey: stratumd-boot t_spawn_full_argv FAILED\n");
             (void)t_close(sd_rd);
@@ -11486,6 +11616,32 @@ int main(void) {
     if (do_login_e2e() != 0) {
         return 1;
     }
+
+    // === A server at a full pool waits ===
+    // Spawn /bin/srvfull-probe: per server (corvus, and netd where /srv/net is
+    // posted) it fills the connection pool, leaves one connect waiting, and
+    // reads the server's CPU time across that wait -- a loop that keeps asking
+    // about a listener it cannot accept from never sleeps. It then frees a slot
+    // and requires the waiting connect to be served. Run by joey because only
+    // the system principal (or a hostowner) reads another Proc's CPU time, and
+    // here because corvus is up and the login E2Es are reaped. Standing
+    // connections (joey's /net mount, a held login) only shorten the fill.
+    {
+        const char sf_name[] = "/bin/srvfull-probe";
+        long sf_pid = t_spawn(sf_name, sizeof(sf_name) - 1);
+        if (sf_pid <= 0) {
+            t_putstr("joey: t_spawn(\"srvfull-probe\") FAILED\n");
+            return 1;
+        }
+        int sf_status = -1;
+        long sf_reaped = t_wait_pid_for((int)sf_pid, 0, &sf_status);
+        if (sf_reaped != sf_pid || sf_status != 0) {
+            t_putstr("joey: srvfull PROBE FAILED\n");
+            return 1;
+        }
+        t_putstr("joey: srvfull PROBE OK (a server at a full pool waits, "
+                 "and serves the waiting connect)\n");
+    }
 #endif /* THYLA_BOOT_PROBES (login + recover boot-test E2Es) */
 
     // === PTY-2a: spawn /bin/ptyfs + mount /dev/pts (the pseudoterminal server) ===
@@ -11502,11 +11658,11 @@ int main(void) {
     {
         char pbuf[24];
         const char ptyfs_name[] = "/bin/ptyfs"; // #58: post-pivot /bin bind
-        long ptyfs_pid = t_spawn_with_perms(ptyfs_name, sizeof(ptyfs_name) - 1,
+        long ptyfs_pid = joey_spawn_service(ptyfs_name, sizeof(ptyfs_name) - 1,
                                             NULL, 0, 0,
                                             T_SPAWN_PERM_MAY_POST_SERVICE);
         if (ptyfs_pid <= 0) {
-            t_putstr("joey: t_spawn_with_perms(\"ptyfs\") FAILED\n");
+            t_putstr("joey: joey_spawn_service(\"ptyfs\") FAILED\n");
             return 1;
         }
         joey_daemon_record(ptyfs_pid, "ptyfs");   // #80
@@ -11645,14 +11801,17 @@ int main(void) {
         // that, and is therefore the meaningful gate.
         {
             const char dio_name[] = "/bin/diorama";
-            long dio_pid = t_spawn_with_perms(dio_name, sizeof(dio_name) - 1,
+            long dio_pid = joey_spawn_service(dio_name, sizeof(dio_name) - 1,
                                               NULL, 0, 0,
                                               T_SPAWN_PERM_MAY_POST_SERVICE);
             if (dio_pid <= 0) {
-                t_putstr("joey: t_spawn_with_perms(\"diorama\") FAILED\n");
+                t_putstr("joey: joey_spawn_service(\"diorama\") FAILED\n");
                 return 1;
             }
             joey_daemon_record(dio_pid, "diorama");   // #80
+#if THYLA_BOOT_PROBES
+            if (joey_services_are_on_their_account() != 0) return 1;
+#endif
             // Bounded liveness connect (the ptyfs/corvus idiom): its selftest
             // runs BEFORE the post, so a successful connect also gates a silent
             // selftest failure.
@@ -12688,7 +12847,7 @@ int main(void) {
         // REAL /bin/ut on a freshly-minted pts (the ptyhost shape) and
         // scripts the ladder against the master: the session dance + prompt;
         // a clean fg run under jc (own pgrp + terminal handoff, proven by the
-        // tr-uppercase trick); `sleep 30` foregrounded on the pts + ^Z ->
+        // tr-uppercase trick); a ticking job foregrounded on the pts + ^Z ->
         // tty:susp default-STOP -> the WAIT_UNTRACED stop-report -> the
         // `[1]+ Stopped` line ON THE PTS (the reroute proof); `jobs` shows it
         // Stopped; `fg` -> SYS_TTY_CONT resume -> a SECOND ^Z re-stops it
@@ -12839,16 +12998,19 @@ int main(void) {
                 // MAY_POST_SERVICE (I-47): halcyond posts /srv/halcyon for the
                 // inline-media place channel. Harmless to aurora, which posts no
                 // service; the bit is a capability to post, not an obligation.
-                long aur_pid = t_spawn_with_perms(
+                long aur_pid = joey_spawn_service(
                     rname, rname_len,
                     /*fds=*/(const unsigned int *)0, /*fd_count=*/0,
                     /*cap_mask=*/0,
                     T_SPAWN_PERM_CONSOLE_RENDERER | T_SPAWN_PERM_MAY_POST_SERVICE);
                 if (aur_pid <= 0) {
-                    t_putstr("joey: t_spawn_with_perms(console renderer) FAILED\n");
+                    t_putstr("joey: joey_spawn_service(console renderer) FAILED\n");
                     return 1;
                 }
                 joey_daemon_record(aur_pid, rlabel);   // #80
+#if THYLA_BOOT_PROBES
+                if (joey_services_are_on_their_account() != 0) return 1;
+#endif
                 const char *spawned[] = {
                     "joey: ", rlabel, " spawned pid=", itoa_dec(aur_pid, dbuf, sizeof(dbuf)),
                     " (the console renderer; the gate's scanout owner)\n",

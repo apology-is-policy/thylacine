@@ -114,7 +114,6 @@ struct test_thread_view test_thread_view(struct Proc *p, int tid) {
         v.state           = (int)__atomic_load_n(&x->state, __ATOMIC_ACQUIRE);
         v.blocked_on      = __atomic_load_n(&x->rendez_blocked_on, __ATOMIC_ACQUIRE);
         v.on_debug_rendez = v.blocked_on == &x->debug_rendez;
-        v.switched_in_at  = __atomic_load_n(&x->switched_in_at, __ATOMIC_RELAXED);
         v.nsched          = __atomic_load_n(&x->nsched, __ATOMIC_RELAXED);
     }
     proc_threads_unlock(p, s);
@@ -290,14 +289,15 @@ static bool test_caught_blocked(struct Proc *p, int tid) {
 }
 
 // Yield until the call returns or the thread sleeps -- with `seen` not 0, a
-// sleep after a switch-in later than `seen`: the thread ran, and rode out what
-// woke it. switched_in_at is stamped at every switch-in, so that is a positive
+// sleep after a dispatch later than `seen`: the thread ran, and rode out what
+// woke it. nsched moves at a switch-in and nowhere else (the switch-in stamp
+// also moves at every tick the thread stays on its CPU), so that is a positive
 // signal, not a quiet interval. Bounded; true iff it slept.
 static bool test_caught_settle(struct Proc *p, int tid, u64 seen) {
     u64 dl = timer_now_ns() + TEST_YIELD_BUDGET_NS;
     while (!test_caught_returned() && timer_now_ns() < dl) {
         if (test_caught_blocked(p, tid) &&
-            (seen == 0 || test_thread_view(p, tid).switched_in_at != seen))
+            (seen == 0 || test_thread_view(p, tid).nsched != seen))
             return true;
         sched();
     }
@@ -346,7 +346,7 @@ struct test_caught_leg test_caught_run(struct Proc *p, long (*call)(void *arg),
     } else if (leg.parked) {
         leg.prepped = !prep || (prep(arg) && test_caught_settle(p, tid, 0));
         if (leg.prepped) {
-            u64 seen     = test_thread_view(p, tid).switched_in_at;
+            u64 seen     = test_thread_view(p, tid).nsched;
             leg.posted   = test_caught_post(p);
             test_caught_wake_holder(p, tid);
             leg.rode_out = test_caught_settle(p, tid, seen);
@@ -400,6 +400,12 @@ struct test_case g_tests[] = {
     { "slub.leak_10k",                 test_slub_leak_10k,                 false, NULL },
     { "slub.kmalloc_overflow_guard",   test_slub_kmalloc_overflow_guard,   false, NULL },
     { "slub.cache_destroy_guards",     test_slub_cache_destroy_guards,     false, NULL },
+    { "slab_refusal.proc",             test_slab_refusal_proc,             false, NULL },
+    { "slab_refusal.territory",        test_slab_refusal_territory,        false, NULL },
+    { "slab_refusal.thread",           test_slab_refusal_thread,           false, NULL },
+    { "slab_refusal.thread_charge",    test_slab_refusal_thread_charge,    false, NULL },
+    { "slab_refusal.vma",              test_slab_refusal_vma,              false, NULL },
+    { "slab_refusal.clone",            test_slab_refusal_clone,            false, NULL },
     { "gic.its_commands", test_gic_its_commands, false, NULL },
     { "gic.irq_barrier", test_gic_irq_barrier, false, NULL },
     { "gic.init_smoke",                test_gic_init_smoke,                false, NULL },
@@ -997,6 +1003,8 @@ struct test_case g_tests[] = {
     { "vdso.mono_matches_timer",       test_vdso_mono_matches_timer,       false, NULL },
     { "vdso.maps_ro_read",             test_vdso_maps_ro_read,             false, NULL },
     { "vdso.maps_ro_write_faults",     test_vdso_maps_ro_write_faults,     false, NULL },
+    { "exec.vma_refused_says_enomem",  test_exec_vma_refused_says_enomem,  false, NULL },
+    { "exec.load_vma_refused_says_enomem", test_exec_load_vma_refused_says_enomem, false, NULL },
     { "exec.setup_smoke",              test_exec_setup_smoke,              false, NULL },
     { "exec.setup_says_nomem_on_a_refused_vma", test_exec_setup_says_nomem_on_a_refused_vma, false, NULL },
     { "exec.interp_argv_shape",        test_exec_interp_argv_shape,        false, NULL },
@@ -1311,6 +1319,12 @@ struct test_case g_tests[] = {
     { "account.wrong_order_release_is_counted", test_account_wrong_order_release_is_counted, false, NULL },
     { "account.grown_node_has_the_maps_sponsor", test_account_grown_node_has_the_maps_sponsor, false, NULL },
     { "account.query_reports_bytes_up_the_chain", test_account_query_reports_bytes_up_the_chain, false, NULL },
+    { "account.child_costs_its_parent_meta", test_account_child_costs_its_parent_meta, false, NULL },
+    { "account.limits_change_whole_or_not_at_all", test_account_limits_change_whole_or_not_at_all, false, NULL },
+    { "account.limit_bounds_the_room", test_account_limit_bounds_the_room, false, NULL },
+    { "account.query_stops_at_the_nearest_limit", test_account_query_stops_at_the_nearest_limit, false, NULL },
+    { "account.handle_is_the_control", test_account_handle_is_the_control, false, NULL },
+    { "account.fork_does_not_copy_the_handle", test_account_fork_does_not_copy_the_handle, false, NULL },
     { "account.syscall_refuses_by_name", test_account_syscall_refuses_by_name, false, NULL },
     { "vma.range_is_mapped",              test_vma_range_is_mapped,              false, NULL },
     { "pagemap.grow_keeps_every_page",    test_pagemap_grow_keeps_every_page,    false, NULL },
@@ -1636,6 +1650,8 @@ struct test_case g_tests[] = {
     { "devproc.account_read_gated",    test_devproc_account_read_gated,    false, NULL },
     { "devproc.read_imperium_format",  test_devproc_read_imperium_format,  false, NULL },
     { "proc.cpu_ns_accounting",        test_proc_cpu_ns_accounting,        false, NULL },
+    { "proc.cpu_ns_running_thread",    test_proc_cpu_ns_running_thread,    false, NULL },
+    { "proc.cpu_ns_survives_thread_free", test_proc_cpu_ns_survives_thread_free, false, NULL },
     { "scheduler.prowl_counters",      test_sched_prowl_counters,          false, NULL },
     { "devproc.read_cmdline_kproc",    test_devproc_read_cmdline_kproc,    false, NULL },
     { "devproc.read_ns_format",        test_devproc_read_ns_format,        false, NULL },
@@ -1724,15 +1740,20 @@ struct test_case g_tests[] = {
     { "cons.ring_unclaimed_on_clean_boot",     test_cons_ring_unclaimed_on_clean_boot,     false, NULL },
     { "cons.ring_fill_drain",          test_cons_ring_fill_drain,          false, NULL },
     { "cons.ring_full_refuses",        test_cons_ring_full_refuses,        false, NULL },
-    { "cons.rx_can_accept_boundary",   test_cons_rx_can_accept_boundary,   false, NULL },
     { "cons.full_line_fits_ring",      test_cons_full_line_fits_ring,      false, NULL },
+    { "cons.read_ends_at_its_line",    test_cons_read_ends_at_its_line,    false, NULL },
+    { "cons.feed_intr_behind_refused_line", test_cons_feed_intr_behind_refused_line, false, NULL },
+    { "cons.control_byte_echoes_as_caret", test_cons_control_byte_echoes_as_caret, false, NULL },
     { "cons.full_ring_never_blocks_sak", test_cons_full_ring_never_blocks_sak, false, NULL },
     { "cons.feed_write_short_on_full", test_cons_feed_write_short_on_full, false, NULL },
     { "cons.refused_byte_is_not_echoed", test_cons_refused_byte_is_not_echoed, false, NULL },
     { "cons.serial_silent_gate",       test_cons_serial_silent_gate,       false, NULL },
     { "cons.serial_silent_sak_restores", test_cons_serial_silent_sak_restores, false, NULL },
-    { "cons.rx_holdback_reoffer",      test_cons_rx_holdback_reoffer,      false, NULL },
-    { "cons.rx_holdback_not_stranded", test_cons_rx_holdback_not_stranded, false, NULL },
+    { "cons.rx_side_sak_and_intr_behind_full_ring", test_cons_rx_side_sak_and_intr_behind_full_ring, false, NULL },
+    { "cons.rx_side_cooked_intr_in_order", test_cons_rx_side_cooked_intr_in_order, false, NULL },
+    { "cons.rx_side_cooked_typing_past_half", test_cons_rx_side_cooked_typing_past_half, false, NULL },
+    { "cons.rx_side_literal_intr_stays_data", test_cons_rx_side_literal_intr_stays_data, false, NULL },
+    { "cons.rx_side_full_drops_and_counts", test_cons_rx_side_full_drops_and_counts, false, NULL },
     { "cons.rx_drop_counters",         test_cons_rx_drop_counters,         false, NULL },
     { "cons.ctrlc_consumed",           test_cons_ctrlc_consumed,           false, NULL },
     { "cons.break_sets_sak",           test_cons_break_sets_sak,           false, NULL },
@@ -1751,6 +1772,7 @@ struct test_case g_tests[] = {
     // IM-1: the trusted EPISODE (IMPERIUM-DESIGN.md 11.3; I-27 on serial).
     { "cons.episode_requires_arm",     test_cons_episode_requires_arm,     false, NULL },
     { "cons.episode_begins_on_sak",    test_cons_episode_begins_on_sak,    false, NULL },
+    { "cons.rx_side_discarded_at_begin", test_cons_rx_side_discarded_at_begin, false, NULL },
     { "cons.episode_discards_pending_input",
                                        test_cons_episode_discards_pending_input, false, NULL },
     { "cons.episode_freezes_nonattached_reader",
@@ -1769,6 +1791,7 @@ struct test_case g_tests[] = {
     { "cons.graphical_seat_gate", test_cons_graphical_seat_gate, false, NULL },
     { "cons.graphical_seat_grant_and_failure", test_cons_graphical_seat_grant_and_failure, false, NULL },
     { "cons.graphical_seat_deadline_and_death", test_cons_graphical_seat_deadline_and_death, false, NULL },
+    { "cons.graphical_seat_renew", test_cons_graphical_seat_renew, false, NULL },
     { "cons.graphical_seat_episode_medium", test_cons_graphical_seat_episode_medium, false, NULL },
     { "cons.graphical_seat_service_death", test_cons_graphical_seat_service_death, false, NULL },
     { "cons.graphical_seat_service_death_grant", test_cons_graphical_seat_service_death_grant, false, NULL },
@@ -3095,6 +3118,7 @@ struct test_case g_tests[] = {
     { "poll.devsrv_listener_empty_not_ready",   test_poll_devsrv_listener_empty_not_ready,   false, NULL },
     { "poll.devsrv_listener_block_then_wake",   test_poll_devsrv_listener_block_then_wake,   false, NULL },
     { "poll.devsrv_listener_pollhup_on_tombstone", test_poll_devsrv_listener_pollhup_on_tombstone, false, NULL },
+    { "poll.devsrv_listener_unasked_parks",     test_poll_devsrv_listener_unasked_parks,     false, NULL },
     { "poll.devsrv_conn_pollin_on_send",        test_poll_devsrv_conn_pollin_on_send,        false, NULL },
     { "poll.devsrv_conn_pollout_immediate",     test_poll_devsrv_conn_pollout_immediate,     false, NULL },
     { "poll.devsrv_conn_pollhup_on_teardown",   test_poll_devsrv_conn_pollhup_on_teardown,   false, NULL },
@@ -3262,6 +3286,7 @@ struct test_case g_tests[] = {
     { "spawn_env.install_refills",             test_spawn_env_install_refills,             false, NULL },
     { "spawn_env.child_gets_block",            test_spawn_env_child_gets_block,            false, NULL },
     { "spawn_env.refusals",                    test_spawn_env_refusals,                    false, NULL },
+    { "spawn_env.account_tail",                test_spawn_env_account_tail,                false, NULL },
     { "userspace.stratumd_stub_round_trip",            test_stratumd_stub_round_trip,                      false, NULL },
     { "userspace.stratumd_stub_fs_round_trip",         test_stratumd_stub_fs_round_trip,                   false, NULL },
     { "userspace.stratumd_stub_walk_round_trip",       test_stratumd_stub_walk_round_trip,                 false, NULL },
@@ -3744,25 +3769,22 @@ void test_run_all(void) {
         // The UART stall lives in the arch layer, not the cons layer, so it gets
         // a bit here rather than in the CONS_TEST_OWNED_* set.
         #define TEST_OWNED_UART_TX_STALL (1u << 4)
-        // #129-audit F2: the RX holdback + its pause latch is the SIXTH piece of
-        // global console state a failing test can leave armed -- and the worst,
-        // because a stranded pause leaves RX MASKED, so console input is dead for
-        // the rest of the boot and every later console test mis-reports.
-        // Per-site cleanup cannot cover a site that does not exist yet (#133).
-        #define TEST_OWNED_UART_RX_HOLD  (1u << 5)
+        // Bit 5 is free: it swept the RX holdback, which vote 73 retired. The
+        // side queue that replaced it is production state (a person typing
+        // into a full ring fills it), so cons_test_reset clears it and no sweep
+        // keys on it (the #136-audit F2 lesson).
         u32 owned = cons_test_release_owned_state();
         if (uart_test_tx_stalled()) {
             uart_test_tx_stall(false);
             owned |= TEST_OWNED_UART_TX_STALL;
         }
-        if (uart_test_rx_release_hold()) owned |= TEST_OWNED_UART_RX_HOLD;
         if (owned != 0) {
             // Bit 6 = CONS_TEST_OWNED_EPISODE (cons.h; IM-1): the table spans
-            // the cons set AND the two arch bits above, so it is indexed by
-            // the UNION's bit numbers.
+            // the cons set AND the arch bit above, so it is indexed by the
+            // UNION's bit numbers.
             static const char *const names[7] = {
                 "echo-capture", "tx-role", "mgr-hold", "reader-busy", "uart-tx-stall",
-                "uart-rx-hold", "episode"
+                "-", "episode"
             };
             uart_puts("LEAKED-STATE(");
             bool first = true;

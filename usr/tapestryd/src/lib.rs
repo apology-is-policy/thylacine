@@ -19,5 +19,6 @@ pub mod motion;
 pub mod pane;
 pub mod skein;
 pub mod va;
+pub mod warp_ids;
 
 pub mod storage;

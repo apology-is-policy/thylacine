@@ -1,18 +1,31 @@
 //! Single outstanding cursor chain. Completion is a used-entry proof, never an
-//! IRQ. Poison is permanent until device reset: late DMA must not reach reused
-//! descriptors or freed backing, and cannot qualify a trusted handover.
+//! IRQ. Poison is permanent until device reset: after a malformed entry nothing
+//! says what the device did, so late DMA could reach reused descriptors or freed
+//! backing, and cannot qualify a trusted handover. A chain that only outlived its
+//! bound is abandoned instead: a well-formed entry, however late, proves the device
+//! is finished with it, so the lane comes back.
 #[derive(Default)]
 pub struct Queue {
     pub published: u16,
     pub retired: u16,
     failed: bool,
+    abandoned: bool,
 }
 impl Queue {
     pub fn idle(&self) -> bool {
-        !self.failed && self.published == self.retired
+        !self.failed && !self.abandoned && self.published == self.retired
     }
     pub fn poison(&mut self) {
         self.failed = true;
+    }
+    pub fn poisoned(&self) -> bool {
+        self.failed
+    }
+    pub fn abandon(&mut self) {
+        self.abandoned = true;
+    }
+    pub fn abandoned(&self) -> bool {
+        self.abandoned && !self.failed
     }
     pub fn begin(&mut self) -> Result<u16, ()> {
         if !self.idle() {
@@ -33,6 +46,7 @@ impl Queue {
             return Err(());
         }
         self.retired = index;
+        self.abandoned = false;
         Ok(())
     }
 }
@@ -45,6 +59,7 @@ mod tests {
             published: u16::MAX,
             retired: u16::MAX,
             failed: false,
+            abandoned: false,
         };
         assert_eq!(q.begin(), Ok(u16::MAX));
         assert!(!q.idle());
@@ -75,6 +90,27 @@ mod tests {
         q.begin().unwrap();
         q.poison();
         assert!(q.complete(1, 0, 0, true).is_err());
+        assert!(!q.idle());
+    }
+    #[test]
+    fn an_abandoned_chain_frees_the_lane_only_by_retiring_well_formed() {
+        let mut q = Queue::default();
+        q.begin().unwrap();
+        q.abandon();
+        assert!(!q.idle());
+        assert!(q.abandoned());
+        assert!(q.begin().is_err());
+        assert!(q.complete(1, 0, 24, true).is_ok());
+        assert!(q.idle());
+        assert!(!q.abandoned());
+        assert_eq!(q.begin(), Ok(1));
+
+        let mut q = Queue::default();
+        q.begin().unwrap();
+        q.abandon();
+        assert!(q.complete(1, 1, 24, true).is_err());
+        assert!(q.poisoned());
+        assert!(!q.abandoned());
         assert!(!q.idle());
     }
 }

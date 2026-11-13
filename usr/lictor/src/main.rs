@@ -6,7 +6,7 @@ extern crate alloc;
 use alloc::{vec::Vec, vec};
 use libdriver::{driver::{run, Driver}, resource::BoundResources, Error};
 use libthyla_rs::{io::Write, *};
-use lictor::{backend::{gpu::Gpu, input::InputDev, screen::Screen, device::Device,
+use lictor::{backend::{gpu::Gpu, input::InputDev, intake, screen::Screen, device::Device,
     server::Conn, seat::{Seat, Input}}, endpoint as ep, gpu_api::{admit, Request, Stats}, wire::Wire};
 #[global_allocator]
 static ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
@@ -29,8 +29,11 @@ impl Driver for Lictor {
         let count = resources.pci_extra.len();
         if resources.pci.is_none() || count == 0 || count > windows.len() { return Err(Error::Hardware); }
         let mut inputs = Vec::new();
+        let mut devices = Vec::new();
         for (index, &(bar, dma)) in windows[..count].iter().enumerate() {
-            inputs.push(Input::new(InputDev::probe(index as u32, bar, dma)?));
+            let device = InputDev::probe(index as u32, bar, dma)?;
+            inputs.push(Input::new(&device));
+            devices.push(device);
         }
         if inputs.iter().filter(|i| i.keyboard).count() != 1 { return Err(Error::Hardware); }
         let screen = Screen::new(&mut gpu, lictor::backend::screen::declared_scale())?;
@@ -38,10 +41,14 @@ impl Driver for Lictor {
         let mut device = Device::new(gpu, 0)?;
         #[cfg(feature = "test-mode")]
         {
-            let mut line = [0u8; 1024];
-            device.test_declare(lictor::gpu_api::bootarg_declared(
-                lictor::backend::bootargs(&mut line), lictor::gpu_api::TEST_LEVERS_WORD));
+            let mut buf = [0u8; 1024];
+            let line = lictor::backend::bootargs(&mut buf);
+            device.test_declare(lictor::gpu_api::bootarg_declared(line, lictor::gpu_api::TEST_LEVERS_WORD));
+            device.test_declare_chained(lictor::gpu_api::bootarg_declared(line, lictor::gpu_api::TEST_CHAINED_WORD));
         }
+        // The input devices go to their own thread, so a GPU wait here never leaves a
+        // ring undrained. Last: nothing after it can fail the probe.
+        intake::start(devices)?;
         Ok(Self { device, screen, inputs, seat: Seat::default() })
     }
     fn serve(mut self, _resources: &BoundResources) -> Result<(), Error> {
@@ -59,8 +66,14 @@ impl Driver for Lictor {
         let mut witnessed_park = 0;
         loop {
             self.seat.input(&mut self.inputs);
+            #[cfg(feature = "test-mode")]
+            if core::mem::take(&mut self.seat.test_blind) { self.device.test_blind_loop(); }
             self.device.reap();
             self.seat.step(&mut self.device, &mut self.screen, &mut self.inputs);
+            // After the seat's look at the chord, so a pass's device time
+            // never stands before it; outside any request, so a stall met
+            // here is no request's.
+            if self.seat.phase == 0 { self.device.pay_owed_frees(); }
             // Only while no trusted episode is up, beginning or owed its
             // restoration: entering one must find the screen whole.
             if self.seat.phase == 0 { self.screen.follow(&mut self.device.gpu); }
@@ -89,10 +102,12 @@ impl Driver for Lictor {
                     continue;
                 }
                 let (sequence, request) = conn.pending.take().unwrap();
+                let stalls_begun = self.device.gpu.stalls();
+                #[cfg(feature = "test-mode")]
+                let shot = self.device.test_stall_ride(conn.fd);
                 let result = match request {
                     Request::InputInfo { index } => {
-                        let info = self.inputs.get(index as usize).map(|i| (i.device.supports_abs(),
-                            i.device.supports_rel(), i.device.abs_max(0), i.device.abs_max(1)));
+                        let info = self.inputs.get(index as usize).map(|i| i.info);
                         let mut bytes = Vec::new(); info.put(&mut bytes); Ok(bytes)
                     }
                     Request::InputDrain { index } => {
@@ -125,8 +140,12 @@ impl Driver for Lictor {
                     request if self.seat.phase == 0 => self.device.execute(conn.fd, request),
                     _ => Err(Error::Hardware),
                 };
-                conn.finish(sequence, Stats::from(&self.device.gpu), result);
+                #[cfg(feature = "test-mode")]
+                if shot { self.device.test_stall_settle(); }
+                conn.finish(sequence, Stats { stalls_begun, ..Stats::from(&self.device.gpu) }, result);
             }
+            #[cfg(feature = "test-mode")]
+            for conn in conns.iter().filter(|c| !c.alive()) { self.device.test_stall_forget(conn.fd); }
             conns.retain(Conn::alive);
             let mut poll = vec![TPollFd { fd: listener as i32, events: T_POLLIN, revents: 0 }];
             let base = poll.len();

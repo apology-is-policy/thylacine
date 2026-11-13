@@ -59,6 +59,9 @@ bc_def compile TICKLESS bool y "varinv:no_tickless" \
 bc_def compile PRIVATE_ASYNC_QUAL bool n "var:private_async_qual" \
   "Private async qualification kernel" \
   "Routes the reserved private Loom service ABI (setup PRIVATE_SERVICE, register ops 2..9, ENTER, poll) to the kernel's private stack so its native clients can be qualified (docs/ASYNC-SERVICE-ABI.md, Qualification bridge). NOT a release default and in no preset: off, every private route returns EOPNOTSUPP. Builds into its own kernel dir so it never replaces the image it is not."
+bc_def compile READINESS_QUAL bool n "env:THYLACINE_READINESS_QUALIFICATION" \
+  "Native readiness qualification probe (development only)" \
+  "Builds kaua-term-probe with its readiness-qualification Cargo feature, the fixture tools/interactive/readiness-qualification.exp and service-readiness-failure.exp boot (run them with THYLACINE_READINESS_QUALIFICATION=1 as well). The feature turns on libthyla-rs's poll-worker-test hooks, and Cargo unifies that across the workspace, so every binary in the image carries them: NOT a release default and in no preset."
 
 # bake-content ----------------------------------------------------------------
 bc_def bake CHUNK_GOROOT bool y "env:THYLACINE_BAKE_GOROOT" \

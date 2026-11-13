@@ -59,6 +59,25 @@ const GALLERY_MAX_PIXELS: u64 = 12 * 1024 * 1024;
 const CONNECT_TRIES: u32 = 25;
 const CONNECT_DELAY_MS: u64 = 200;
 
+// A present refused while the compositor's GPU engine is stalled behind another
+// client's work goes through once the engine revives; past the engine's
+// abandonment bound (30 s) it is dead and the refusal stands.
+const PRESENT_RETRY_MS: u64 = 31_000;
+const PRESENT_RETRY_DELAY_MS: u64 = 100;
+
+fn present_retrying(surf: &mut Surface) -> Result<(), TapError> {
+    let start = libthyla_rs::time::Instant::now();
+    loop {
+        match surf.present(None) {
+            Ok(()) => return Ok(()),
+            Err(e) if start.elapsed().as_millis() as u64 >= PRESENT_RETRY_MS => return Err(e),
+            Err(_) => {
+                let _ = sleep(Duration::from_millis(PRESENT_RETRY_DELAY_MS));
+            }
+        }
+    }
+}
+
 /// Reject an over-budget image from its headers BEFORE the heap-hungry decode
 /// (the heap grows to hold whatever the decode asks, so the pixel budget is its
 /// only bound). `Err(code)` bails with that exit code; a failed dimension read
@@ -184,7 +203,7 @@ pub extern "C" fn rs_main() -> i64 {
 
     let (mut dw, mut dh) = (surf.w, surf.h);
     let fit = gallery::paint(surf.pixels(), dw, dh, &raster.argb, raster.w, raster.h);
-    if let Err(e) = surf.present(None) {
+    if let Err(e) = present_retrying(&mut surf) {
         eprintln!("gallery: present failed: {:?}", e);
         return 1;
     }
@@ -231,7 +250,7 @@ pub extern "C" fn rs_main() -> i64 {
                         dh = surf.h;
                     }
                     let _ = gallery::paint(surf.pixels(), dw, dh, &raster.argb, raster.w, raster.h);
-                    if let Err(e) = surf.present(None) {
+                    if let Err(e) = present_retrying(&mut surf) {
                         eprintln!("gallery: re-present failed: {:?}", e);
                         return 1;
                     }

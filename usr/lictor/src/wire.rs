@@ -96,6 +96,7 @@ tuple!(A, B);
 tuple!(A, B, C);
 tuple!(A, B, C, D);
 tuple!(A, B, C, D, E, F, G);
+tuple!(A, B, C, D, E, F, G, H);
 
 #[cfg(test)]
 mod tests {

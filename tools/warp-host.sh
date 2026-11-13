@@ -962,7 +962,7 @@ readback)
     # quotes; #186). F2B is a MEASUREMENT: printed, not required.
     grep -E "C6-RB|C6-READBACK" "$out" || true
     ok=1
-    for pat in "C6-RB ARM PASS" "C6-RB GUARD PASS" "C6-RB DEEP PASS" "C6-RB LIVE PASS" "C6-RB DEADLINE PASS" "LS-CI PASS: warp-prove readback"; do
+    for pat in "C6-RB ARM PASS" "C6-RB GUARD PASS" "C6-RB DEEP PASS" "C6-RB LIVE PASS" "C6-RB DEADLINE PASS" "C6-RB ABANDON PASS" "C6-RB CREATE PASS" "C6-RB DESTROY PASS" "C6-RB FREE PASS" "C6-RB TAKEN PASS" "C6-RB BUSY PASS" "C6-RB YIELD PASS" "C6-RB APART PASS" "C6-RB LIFT PASS" "C6-RB REOPEN PASS" "C6-RB CLEAN PASS" "LS-CI PASS: warp-prove readback"; do
         if ! grep -q "$pat" "$out"; then
             echo "C-6 GATE FAIL -- missing: $pat"
             ok=0

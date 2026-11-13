@@ -304,7 +304,7 @@ It removes escapes and quotes to give the text a name must begin with; tracks
 `$(`, `{`, `(`, `((`, `` `{ `` and process substitutions as nested levels; knows
 the command position, the command a word belongs to, and a redirect's target;
 and answers nothing where the lexer reads no standalone literal word -- a
-comment, a `$var`, a double quote that expands, a heredoc tag, a `/regex/`, and
+comment, a `$var`, a double quote that expands, a heredoc tag, and
 a word glued to what precedes it. That last is `$home/fo`, `~/fo`, `'a'b` and
 `a^b`: ut joins adjacent pieces only with `^`, `~` and `=`, so `$home/fo` is two
 words here (HAUL-DESIGN.md records the same fact for `$host!$port`), and

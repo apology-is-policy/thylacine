@@ -48,7 +48,8 @@ proc capture {name x y visible} {
         # The fixture paints a flat scene. Inspect the separately captured raw
         # framebuffer, not the VNC-viewer composition: old pointer pixels must
         # never be baked into accelerated scene content or left as trails.
-        if {[catch {exec python3 -c {from PIL import Image; import sys; e=Image.open(sys.argv[1]).crop((16,100,1264,740)).getextrema(); assert e==((23,23),(33,33),(29,29)),e} $out.framebuffer.png} e]} { lc_fail $e }
+        if {[catch {exec python3 $repo/tools/interactive/png_extrema.py $out.framebuffer.png 16 100 1264 740} e]
+            || $e ne "((23, 23), (33, 33), (29, 29))"} { lc_fail "raw scene $name: per-channel extrema $e, want ((23, 23), (33, 33), (29, 29))" }
         lc_pass "raw scene $name has no cursor pixels or trails"
     }
 }

@@ -7,7 +7,7 @@ code:
   - arch/arm64/uart.c
   - arch/arm64/uart.h
 audit: hard
-guarded-by: [inv-i9, inv-i15, inv-i27]
+guarded-by: [inv-i15, inv-i27]
 validated-by: [prose, gate-smp, gate-interactive]
 locks: []
 abis: []
@@ -46,8 +46,7 @@ FIFO push, safe under a lock and from IRQ context), armed and cleared by
 crash dump by `uart_tx_drain_sync`, and probed empty by `uart_tx_fifo_empty`.
 
 The RX path is `uart_rx_init` (bring-up), `uart_irq_handler` (the GIC dispatch
-target for the shared PL011 SPI), `uart_rx_pump` (the reader-side backpressure
-resume), and `uart_rx_path_enabled` (tests build only; the #943 regression predicate — RX is live
+target for the shared PL011 SPI), and `uart_rx_path_enabled` (tests build only; the #943 regression predicate — RX is live
 iff `UARTEN` and `RXE` are both set).
 
 The base starts at the QEMU virt fallback (`0x09000000`), is set by
@@ -83,7 +82,7 @@ pre-`timer_init` is covered by the iteration backstop. `uart_selftest_tx_bounded
 revert-probes the bound: it points the base at a scratch region whose FR reads
 full forever and confirms `uart_putc` returns having dropped the byte.
 
-### The RX drain: clear first, bound the loop, and never lose a byte
+### The RX drain: clear first, bound the loop, read every byte
 
 `uart_rx_drain_locked` (under `g_uart_rx_lock`) is the shared RX core.
 
@@ -98,39 +97,20 @@ full forever and confirms `uart_putc` returns having dropped the byte.
   became true and the handler never returned (IRQs masked → whole-OS freeze,
   reproduced holding an arrow key).
 - **The break is the SAK's (I-27).** Each byte read from `DR` carries the
-  `DR.BE` break flag, passed to `cons_rx_input` as the break bit — this is where
+  `DR.BE` break flag, passed to `cons_rx_receive` as the break bit — this is where
   the serial SAK's break condition enters the trusted path.
-- **Backpressure without loss (#174).** When the console ring is full the drain
-  **stops before reading `DR`**, leaving the byte in the FIFO (not lost), masks
-  RX, and latches `g_rx_paused`. The FIFO then fills, QEMU's `can_receive` goes
-  false, and the host buffers the overflow. `uart_rx_pump` resumes from the
-  reader side once ring space frees.
-- **The 1-byte holdback (#129).** `cons_rx_can_accept` is a lockless pre-check, so
-  a second producer (the graphical keyboard's feed) can take the room between the
-  check and the under-lock push — and by then the byte is already out of `DR` and
-  cannot be put back. So the drain parks it in `g_rx_held_*` and re-offers it
-  before touching the FIFO again, which is what makes a refusal lossless rather
-  than merely narrowing the window. The one loop exit that could strand a held
-  byte (`g_rx_held_valid && !g_rx_paused`) re-latches the pause (#136-F1),
-  because a software-held byte raises no hardware interrupt and `uart_rx_pump`
-  short-circuits on `!g_rx_paused` — it would otherwise vanish and reappear on
-  the next unrelated keystroke.
-
-### Publish-then-re-observe: a lost wake here is a dead console
-
-`uart_rx_pause_and_recheck` masks RX and stores `g_rx_paused = true`, then
-**re-reads** the room the pause was based on. Without that, a reader that drained
-the ring between the drain's room-check and the store sees `false`, does nothing,
-and parks on an empty ring — while the drain masks RX. The terminal state is
-fatal, not slow: RX masked means the IRQ arm is gated off, `uart_rx_pump`'s only
-caller is the parked reader, and on a serial-only console no other producer
-exists — the console is dead until reboot, and the masked PL011 never raises
-`DR.BE` again, putting the SAK out of reach too. This is the I-9
-register-then-observe discipline, and it needs an explicit **StoreLoad fence**
-(#136-F3): a release store followed by a relaxed load compiles to `stlrb` + `ldr`,
-and ARMv8 orders `STLR→LDAR` but not `STLR→LDR`, so store-buffering could satisfy
-the load before the store is observed. The same shape as the Weft-4 readiness
-ring; a fence here keeps every other reader unperturbed.
+- **Every byte is read (vote 73, 2026-11-05).** The drain hands each byte to
+  `cons_rx_receive`, which never refuses, and RX is never masked for
+  back-pressure. What the console's line discipline cannot take waits in its
+  bounded side queue ([[sub-kernel-cons]]), so a BREAK or a Ctrl-C behind a full
+  ring is read on arrival whether or not anyone reads the console. QEMU's PL011
+  takes a break into the FIFO whatever its depth, and masking only gates the
+  IRQ, so a masked drain left the SAK unread for as long as no reader came.
+  Vote 73 retired the #174 pause, the #129 one-byte holdback and the
+  publish-then-re-observe recheck that guarded them
+  ([[chg-2026-11-09-serial-side-queue]]). The cost is the queue's bound: a flood
+  past ring and queue drops its newest bytes, counted, where the pause held
+  them in the host.
 
 ### One SPI, dispatched on MIS; TX first
 
@@ -138,7 +118,7 @@ The PL011 RX, RX-timeout and TX sources share one interrupt line, so
 `uart_irq_handler` reads the masked-interrupt-status register and services
 whichever are pending. TX is serviced first — it is the cheap non-blocking arm,
 and draining it promptly keeps a blocked writer's room-wait short — then RX under
-its own lock and backpressure discipline.
+its own lock.
 
 **Register accesses have one instruction form.** Under a hypervisor every PL011
 access traps and is emulated from the abort's instruction syndrome, which exists
@@ -152,32 +132,26 @@ self-test swaps in.
 
 None heap-owned. Module statics: `pl011_base` (volatile, documenting shared MMIO
 state rather than needing the qualifier — the writer runs single-threaded before
-IRQs); the backpressure latch `g_rx_paused` (acquire/release atomic); the 1-byte
-holdback (`g_rx_held_valid` / `_byte` / `_break`, written only under the RX lock);
-and two test-owned flags (`g_rx_test_armed`, `g_uart_tx_test_stalled`) that
-production never sets. All PL011 register offsets are `#define`d against the
+IRQs), and one test-owned flag (`g_uart_tx_test_stalled`) that production never
+sets. All PL011 register offsets are `#define`d against the
 PrimeCell TRM.
 
 ## Concurrency
 
 Two locks, and the split is load-bearing:
 
-- **`g_uart_rx_lock`** serializes the RX FIFO drain, the RX IMSC mask/unmask, and
-  `g_rx_paused` — so the IRQ handler (which pauses on a full ring) and the cons
-  reader's `uart_rx_pump` (which resumes) never race on the FIFO or the mask.
+- **`g_uart_rx_lock`** serializes the RX FIFO drain.
 - **`g_uart_imsc_lock`** is a pure **leaf** that serializes *every* IMSC
-  read-modify-write. IMSC is one shared register: the RX path masks `RXIM|RTIM`
-  under the RX lock, the TX path masks `TXIM` under the cons ring lock (a
-  different outer lock), and two outer locks doing RMW on one register lose
+  read-modify-write. IMSC is one shared register: the RX bring-up unmasks
+  `RXIM|RTIM`, the TX path masks `TXIM` under the cons ring lock (a different
+  outer lock), and two outer locks doing RMW on one register lose
   updates — a dropped `TXIM` re-arm is a silently wedged console, a dropped
   `RXIM` unmask is a dead keyboard. The leaf takes nothing and is held across two
   MMIO accesses, so nesting it inside either outer lock adds no cycle.
 
 **Lock order: `g_uart_rx_lock` → `g_cons.lock`** (the RX drain calls
-`cons_rx_input` under the RX lock). It is acyclic because the cons reader
-*releases* `g_cons.lock` before calling `uart_rx_pump`, so there is no
-`g_cons.lock → g_uart_rx_lock` edge. `g_rx_paused` is additionally an
-acquire/release atomic so `uart_rx_pump`'s not-paused fast path needs no lock.
+`cons_rx_receive` under the RX lock). Nothing holding `g_cons.lock` takes the RX
+lock, so the order is acyclic.
 
 ## Invariants enforced
 
@@ -186,29 +160,24 @@ is the argued recovery-window exception.
 
 **[[inv-i27]]** — the RX half of the trusted path. `DR.BE` break detection is
 what feeds the serial SAK's attention condition into the console; the mint gate
-on the `/dev/cons` path is [[sub-kernel-devdev]]'s complementary half.
-
-**[[inv-i9]]** — the RX backpressure pause is a no-lost-wakeup site. A lost wake
-between the reader and the drain deadlocks a dead console, so the pause publishes
-then re-observes, behind a StoreLoad fence.
+on the `/dev/cons` path is [[sub-kernel-devdev]]'s complementary half. Since
+vote 73 the drain reads every byte, so no state of the console ring or of its
+reader keeps a break from reaching the console.
 
 ## Error paths
 
 `uart_putc` drops the byte on the bounded-spin timeout (a stalled consumer is not
-reading it). The RX drain returns false on backpressure (byte held in the FIFO or
-in the 1-byte holdback, RX masked, `g_rx_paused` set) or a budget hit with the
-FIFO non-empty — the handler ignores the distinction (a budget hit re-fires per
-#172; a pause is resumed by the pump). `uart_remap_to_vmalloc` extincts on a NULL
+reading it). The RX drain stops at its budget with the FIFO non-empty and leaves
+the rest to the re-fire (#172); it has no failure return, since the console never
+refuses a byte. `uart_remap_to_vmalloc` extincts on a NULL
 mapping.
 
 ## Performance
 
 The healthy TX path adds nothing — `TXFF` is clear on entry, the spin body never
-runs, no timer is read. The RX drain is bounded at 64 iterations; #136-F4
-re-derived the per-iteration cost after #129, which is higher than the old "well
-under a timer tick" line implied (~320 MMIO worst case, each a vmexit under HVF)
-but still sub-tick, and reachable only with a peer producer repeatedly taking the
-room inside the window.
+runs, no timer is read. The RX drain is bounded at 64 iterations of two
+MMIO (FR, DR) and one `cons_rx_receive` under the console lock; nothing in the
+loop masks or unmasks.
 
 ## Prosecution
 
@@ -218,12 +187,9 @@ room inside the window.
 - **The RX drain must clear first and stay bounded.** Clearing after the drain
   strands a drain-window arrival (#172); an unbounded drain livelocks under a
   fast refiller (#172).
-- **The backpressure pause must publish then re-observe, behind the fence.** A
-  relaxed re-read, or none, reintroduces the dead-console lost-wake (#129-F1 /
-  #136-F3).
-- **The 1-byte holdback must re-offer before the FIFO and re-latch at the one
-  loop exit.** A software-held byte raises no interrupt, so a strand is silent
-  loss (#136-F1).
+- **The drain must never leave a byte in the FIFO for back-pressure.** A byte
+  left there keeps everything behind it unread, a break included; what the
+  console cannot take belongs in its side queue (vote 73).
 - **Every IMSC write must go through the leaf lock.** Two outer locks RMW-ing one
   register lose a `TXIM` or `RXIM` update — a wedged console or a dead keyboard.
 - **`DR.BE` must keep reaching the console as the break bit**, or the serial SAK
@@ -236,13 +202,9 @@ room inside the window.
   spin is the live direct TX path rather than a compatibility shim. The ring
   drain (`uart_tx_try_putc` + the cons TX ring) is the buffered path that did
   land.
-- **The test hooks** (`uart_test_tx_stall`, `uart_test_rx_force_hold` /
-  `_held` / `_release_hold`, `uart_selftest_tx_bounded`) live in the production
-  file for access to the static base and PL011 offsets — the same precedent as
-  other test-only hooks in production files. The #133 leaked-state backstop keys
-  on the test-owned `g_rx_test_armed`, never on the production `g_rx_paused` /
-  `g_rx_held_valid`, so a human typing during the test phase neither reddens an
-  innocent test nor loses a real keystroke (#136-F2).
+- **The test hooks** (`uart_test_tx_stall`, `uart_selftest_tx_bounded`) live in
+  the production file for access to the static base and PL011 offsets — the same
+  precedent as other test-only hooks in production files.
 
 ## Caveats
 

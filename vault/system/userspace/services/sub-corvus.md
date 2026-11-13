@@ -18,7 +18,7 @@ hazards: []
 abis: []
 design: ["docs/CORVUS-DESIGN.md", "docs/IDENTITY-DESIGN.md", "docs/USER-AUTHORITY-DESIGN.md"]
 created: 2026-08-04
-updated: 2026-11-02
+updated: 2026-11-10
 ---
 
 ## Administrative authority specification
@@ -86,7 +86,17 @@ imperium level includes DAC_OVERRIDE, CHOWN, KILL and POST_SERVICE; the tool
 can restrict it, never expand it. The pending peer is revalidated before
 conferral, and the propagating grant is redeemed through the kernel. Key
 state, eligibility and rate limits remain corvus-owned. See [[sub-imperium]]
-and `docs/IMPERIUM-DESIGN.md §11` for the integrated contract.
+and `docs/IMPERIUM-DESIGN.md §11` for the integrated contract. The request's
+60-s window runs from the request to the SAK; a SAK past it answers TIMEOUT
+without a prompt, and the key prompt then has its own 60 s from the SAK, so a
+requester cannot time a verdict into the person's typing. Every trusted panel
+closes only on Enter or Esc, or its bound, and swallows every other byte
+(`console_wait_dismiss`), so the rest of a key typed into a panel never reaches
+the surface the episode returns to ([[dec-2026-11-05-panels-enter-or-esc]]). A
+verdict waits on both media, and waits even when its frame was not confirmed
+visible; on serial it says `press Enter` under the outcome (`compose_verdict_panel`;
+`im3-lex-curiata` arm 1 types a letter at it). Until vote 70's audit a serial verdict
+did not wait at all.
 
 
 Graphical service ownership was approved on 2026-09-18; see
@@ -355,6 +365,25 @@ corvus is single-threaded. One `poll` over the listener and every live
 connection, then a service pass; no locks, no shared mutable state across
 threads, and none of the wait/wake reasoning the kernel notes carry.
 
+**A full table waits.** The listener stays in the poll set at index 0 and is
+asked about (`POLLIN`) only while `conns.len() < MAX_CONNS`. At eight
+connections it is asked nothing: a connect that waits on the kernel's accept
+backlog is then not an event, the poll parks (for good, or until a pending
+imperium request's expiry), and the waiting client is bounded by its own
+handshake deadline. The listener's
+hang-up is reported whether asked or not, so the teardown arm is unchanged.
+A connection that closes ends the poll through its own entry; the next pass
+has room, asks again, and accepts what waited. This rests on two kernel
+properties the suite holds: a listener reports `POLLIN` only when asked
+(`svc_listener_poll`), and a wake that finds nothing asked about sleeps again
+rather than returning (`poll.devsrv_listener_unasked_parks`,
+[[sub-kernel-poll]]). On the device, `/bin/srvfull-probe` in joey's ladder
+fills the table, leaves one connect waiting, reads corvus's CPU time across
+the wait (a quarter of the window is the bar; a loop that never sleeps takes
+all of it, whether it returns to EL0 or turns inside the kernel, since a
+running thread is charged at every tick), then frees a slot and requires the
+waiting connect to be served ([[sub-stratum-boot]]).
+
 Up to eight connections interleave at request granularity. D7 removes the
 single global AUTH slot: independent owners, including the same principal,
 may authenticate concurrently. WRAP/UNWRAP and token-bearing clearance calls
@@ -591,22 +620,6 @@ AUTH attempts are bounded only by the cost of Argon2id itself.
   **false at the unknown-verb arm**, which stages and continues. That is the
   one a real client reaches. A new fail-stop condition written on the
   strength of that comment would silently keep the connection open.
-
-- **A full connection table plus a waiting connection is a spin, and the
-  comment calls it a deferral** (task #149, **still open; both ends
-  verified in the kernel 2026-08-16**). When the table is full corvus
-  declines to accept and continues. The listener's readiness probe sets
-  POLLIN whenever the accept backlog is non-empty — level-triggered, under
-  the registry lock — so the infinite-timeout poll returns immediately every
-  iteration, no work is done, and the loop burns a processor until a slot
-  frees. Same root as the caveat above: while the per-process cap existed
-  this branch was unreachable, so writing it as benign cost nothing.
-
-  The two constants make the window as wide as it can be rather than as
-  narrow: corvus serves **8** connections and the kernel's accept backlog
-  holds **16**, so the spin is reachable across a range twice corvus's own
-  capacity. The comment's "the backlog will drain as conns close" is true
-  and describes the outcome, not the cost of arriving at it.
 
 - **The file header describes a daemon four arcs younger than this one**
   (task #150, **still open, re-read 2026-08-16**). It states that storage is

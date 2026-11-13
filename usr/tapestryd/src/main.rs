@@ -134,7 +134,7 @@ const IDLE_HZ: u32 = 15;
 const IDLE_AFTER_MS: u64 = 1000;
 // I-6: a serve pass longer than this is said under test-mode. At IDLE_HZ the
 // poll is bounded to ~67 ms, so anything past 250 ms means the loop was held
-// somewhere -- the only condition under which the 16-deep input eventq can
+// somewhere -- the only condition under which the input eventq can
 // run out of descriptors between drains.
 #[cfg(feature = "test-mode")]
 const SLOW_PASS_MS: u64 = 250;
@@ -298,7 +298,14 @@ fn declared_scale() -> Option<u16> {
 /// compositor ride it out. Per boot, and set by whoever boots the machine.
 #[cfg(feature = "test-mode")]
 fn latch_dead_declared() -> bool {
-    bootarg_declared(b"thylacine.test-latch-dead")
+    bootarg_declared(lictor::gpu_api::TEST_LEVERS_WORD)
+}
+/// Test lever: `thylacine.test-latch-chained` has lictor make each of the next two
+/// trusted takeovers wait twice in series, the second wait outlasting the takeover's
+/// bound from the chord (vote 80).
+#[cfg(feature = "test-mode")]
+fn latch_chained_declared() -> bool {
+    bootarg_declared(lictor::gpu_api::TEST_CHAINED_WORD)
 }
 /// Test lever: `thylacine.test-seat-start`, which halcyond also reads, refuses the
 /// boot's first seat reservation, so the client's retry is reached on every run.
@@ -318,11 +325,9 @@ fn bootarg_declared(word: &[u8]) -> bool {
     let mut buf = [0u8; 1024];
     let n = unsafe { t_read(fd, buf.as_mut_ptr(), buf.len()) };
     unsafe { t_close(fd) };
-    n > 0
-        && (n as usize) < buf.len()
-        && buf[..n as usize]
-            .split(|b| b.is_ascii_whitespace() || *b == 0)
-            .any(|w| w == word)
+    // The broker's own rule for a word: it refuses an arming this one would ask for
+    // on a line it reads otherwise.
+    n > 0 && (n as usize) < buf.len() && lictor::gpu_api::bootarg_declared(&buf[..n as usize], word)
 }
 
 struct Tapestryd {
@@ -481,6 +486,14 @@ impl Driver for Tapestryd {
                 say!("tapestryd: test-latch-dead arm REFUSED by the broker");
             }
         }
+        #[cfg(feature = "test-mode")]
+        if latch_chained_declared() {
+            if self.comp.gpu.test_arm_chained() {
+                say!("tapestryd: test-latch-chained armed (the next two trusted takeovers each wait twice in series)");
+            } else {
+                say!("tapestryd: test-latch-chained arm REFUSED by the broker");
+            }
+        }
 
         // V-3b-1c-2a: prove the server host3d-ring path (venus-gated,
         // self-skipping) as bring-up evidence, before READY like the gpu probes.
@@ -522,6 +535,11 @@ impl Driver for Tapestryd {
             self.comp.gpu.height
         );
         let mut conns: Vec<Conn> = Vec::new();
+        // Connections refused because the pool was full, and whether the warp
+        // listener's budget being spent has been said since it last had room.
+        let mut refused_conns: u32 = 0;
+        let mut warp_budget_said = false;
+        let mut warp_budget_spells: u32 = 0;
         let mut raw_events: Vec<RawInputEvent> = Vec::new();
 
         // The FRAME clock (section 18.4): a synthesized fixed-rate tick
@@ -537,7 +555,7 @@ impl Driver for Tapestryd {
         // I-6: the pass clock. The input devices are poll-mode and are NOT in
         // the pollfd set, so nothing about an arriving event wakes this loop
         // -- the drain interval IS the pass period, and a held pass is the
-        // only way the 16-deep eventq can fill. This names such a pass.
+        // only way the eventq can fill. This names such a pass.
         #[cfg(feature = "test-mode")]
         let mut pass_mark = Instant::now();
 
@@ -884,6 +902,18 @@ impl Driver for Tapestryd {
             // (audit F7: it must never starve the tapestry listener).
             let arm_tapestry = true;
             let arm_warp = warp_conns < MAX_WARP_CONNS;
+            // Unarmed, a warp connect waits on the kernel's handshake deadline
+            // with nothing said here.
+            if arm_warp {
+                warp_budget_said = false;
+            } else if !core::mem::replace(&mut warp_budget_said, true) {
+                // A client can open and close a spell at will: said at powers
+                // of two, like the refusals.
+                warp_budget_spells = warp_budget_spells.wrapping_add(1);
+                if warp_budget_spells.is_power_of_two() {
+                    say!("tapestryd: warp connections at their budget ({}): a new warp connect waits (spell {})", MAX_WARP_CONNS, warp_budget_spells);
+                }
+            }
             let mut pollfds: Vec<TPollFd> = Vec::new();
             if arm_tapestry {
                 pollfds.push(TPollFd {
@@ -931,7 +961,38 @@ impl Driver for Tapestryd {
                 continue;
             }
 
-            // (5) Accept (one per listener per pass).
+            // (5) Service ready conns (backward, remove-safe), before the
+            // accept: a conn that hung up gives its slot back first, so a
+            // client that closes one connection and opens another is not
+            // refused at a full pool for the slot it just left. The poll
+            // results cover exactly the conns that stand here. A conn that
+            // hung up goes this pass whatever its last bytes held (a partial
+            // frame, a read that parks): both directions closed together, so
+            // no request can follow and no reply be read.
+            let nc = interaction_base - conn_base;
+            let mut i = nc;
+            while i > 0 {
+                i -= 1;
+                let re = pollfds[conn_base + i].revents;
+                if re & (T_POLLIN | T_POLLHUP) != 0
+                    && (!conns[i].service(&mut self.comp) || re & T_POLLHUP != 0)
+                {
+                    let mut c = conns.remove(i);
+                    c.teardown(&mut self.comp);
+                    // H-4b-2: on the LAST conn of a real user principal, reap
+                    // its empty layout scaffolding (occupied tiles are already
+                    // gone via teardown's retire_conn). `conns` no longer holds
+                    // `c`, so this scans only the survivors; reap_session_empties
+                    // itself no-ops for the environment / system / unknown.
+                    let gone_principal = c.peer_principal();
+                    if conns.iter().all(|o| o.peer_principal() != gone_principal) {
+                        self.comp.reap_session_empties(gone_principal);
+                    }
+                    unsafe { t_close(c.raw_fd()) };
+                }
+            }
+
+            // (6) Accept (one per listener per pass).
             // Accept from each ARMED listener. The arming above already
             // encodes both budgets, and `conn_base` is derived from how
             // many were pushed -- never a hardcoded 2 (round-2 F2). The
@@ -949,6 +1010,11 @@ impl Driver for Tapestryd {
                         } else {
                             // Refuse fast: the pool is full.
                             unsafe { t_close(h) };
+                            refused_conns = refused_conns.wrapping_add(1);
+                            if refused_conns.is_power_of_two() {
+                                let warp_now = conns.iter().filter(|c| c.root() == ROOT_WARP).count();
+                                say!("tapestryd: tapestry connect refused -- the pool is full ({} of {}, {} warp; {} refused so far)", conns.len(), MAX_CONNS, warp_now, refused_conns);
+                            }
                         }
                     }
                 }
@@ -963,31 +1029,12 @@ impl Driver for Tapestryd {
                         } else { unsafe { t_close(h) }; }
                     } else {
                         unsafe { t_close(h) };
+                        refused_conns = refused_conns.wrapping_add(1);
+                        if refused_conns.is_power_of_two() {
+                            let warp_now = conns.iter().filter(|c| c.root() == ROOT_WARP).count();
+                            say!("tapestryd: warp connect refused -- the pool is full ({} of {}, {} warp; {} refused so far)", conns.len(), MAX_CONNS, warp_now, refused_conns);
+                        }
                     }
-                }
-            }
-
-            // (6) Service ready conns (backward, remove-safe).
-            // Watches follow the old connection set. Newly accepted connections
-            // have no poll result in this iteration.
-            let nc = interaction_base - conn_base;
-            let mut i = nc;
-            while i > 0 {
-                i -= 1;
-                let re = pollfds[conn_base + i].revents;
-                if re & (T_POLLIN | T_POLLHUP) != 0 && !conns[i].service(&mut self.comp) {
-                    let mut c = conns.remove(i);
-                    c.teardown(&mut self.comp);
-                    // H-4b-2: on the LAST conn of a real user principal, reap
-                    // its empty layout scaffolding (occupied tiles are already
-                    // gone via teardown's retire_conn). `conns` no longer holds
-                    // `c`, so this scans only the survivors; reap_session_empties
-                    // itself no-ops for the environment / system / unknown.
-                    let gone_principal = c.peer_principal();
-                    if conns.iter().all(|o| o.peer_principal() != gone_principal) {
-                        self.comp.reap_session_empties(gone_principal);
-                    }
-                    unsafe { t_close(c.raw_fd()) };
                 }
             }
         }

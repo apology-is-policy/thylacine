@@ -27,7 +27,7 @@
 # -p sends ONE pointer op to the virtio tablet (G-7c): `abs X Y` moves
 # (QEMU's absolute axis range is 0..32767, scaled by the guest to the
 # display), `btn left|right|middle down|up` clicks, `wheel up|down`
-# scrolls one notch.
+# scrolls one notch. THYLACINE_QMP_PACE_MS sets the gap between typed characters (default 30).
 
 set -euo pipefail
 
@@ -49,7 +49,7 @@ shift $((OPTIND - 1))
 [[ $# -eq 1 ]] || { echo "usage: qmp-sendtext.sh [-s SOCK] [-k|-p] TEXT|CHORD|PTR" >&2; exit 2; }
 
 exec python3 - "$sock" "$mode" "$1" <<'PYEOF'
-import json, socket, sys, time
+import json, os, socket, sys, time
 
 sock_path, mode, text = sys.argv[1], sys.argv[2], sys.argv[3]
 
@@ -216,6 +216,7 @@ if mode == "chord":
     print(f"qmp-sendtext: chorded {text!r}")
     sys.exit(0)
 text = text.replace("\\n", "\n")
+PACE_S = int(os.environ.get("THYLACINE_QMP_PACE_MS", "30")) / 1000.0
 for ch in text:
     q = QCODE.get(ch)
     shifted = q is None and ch in SHIFTED
@@ -230,6 +231,6 @@ for ch in text:
     key(q, False)
     if shifted:
         key("shift", False)
-    time.sleep(0.03)  # keystroke pacing (the guest drains per FRAME tick)
+    time.sleep(PACE_S)  # keystroke pacing (the guest drains per FRAME tick)
 print(f"qmp-sendtext: typed {text!r}")
 PYEOF

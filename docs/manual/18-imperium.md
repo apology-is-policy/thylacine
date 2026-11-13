@@ -31,7 +31,7 @@ capabilities. Enter the Imperium key in that dialog and press Enter. The field
 shows masked characters; it does not send the key into the terminal transcript.
 Escape cancels the request.
 
-After a successful verdict, press a key to return. The elevated shell opens in
+After the verdict, press Enter to return; other keys do nothing there. The elevated shell opens in
 the original terminal, in the directory where you ran `imperium`. Inspect its
 authority with:
 
@@ -83,6 +83,16 @@ released. Holding the attention keys for more than five seconds is the usual
 cause. The pending request is cancelled and must be issued again. The key prompt
 is never moved into an ordinary terminal.
 
+If another program has more than five seconds of graphics work queued, the trusted
+display may not appear at all: the screen stays as it was and no authority is
+conferred. A screen that did not change after the attention keys is not the trusted
+path, so do not type a key into anything on it. Press the attention keys again.
+
+A program that keeps drawing can fill its queue again after each attempt, so if the
+second press changes nothing, stop that program or restart the machine. Use a serial
+recovery session if you have one. Keys pressed while the display is this far behind
+can be lost, so a key can seem stuck: tap Ctrl and Alt once before you try again.
+
 If the graphics device stops responding during an episode, the display cannot
 return for the rest of the boot. The trusted dialog, or whatever the screen last
 showed, may stay frozen. Keys typed after that go nowhere. They never reach the
@@ -114,6 +124,13 @@ sends BREAK, the serial secure-attention gesture. The development launcher
 `tools/run-vm.sh` enables this recovery posture by default; set
 `THYLACINE_SERIAL_SAK=0` to test graphical-only operation. Boot firmware that
 omits the token leaves serial authorization disabled.
+
+BREAK and Ctrl–C act as soon as they arrive, even while a program that reads
+nothing holds the console and earlier typing is still waiting. About 4,600 typed
+bytes wait, in order, for the next program that reads; past that the newest
+keystrokes are dropped, and `/ctl/cons` counts them as `rx_drop_side`. When BREAK
+opens the trusted dialog it discards the typing that was still waiting, so none
+of it reaches the dialog or, afterwards, the shell.
 
 ## Technical Details
 

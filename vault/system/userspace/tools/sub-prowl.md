@@ -16,7 +16,7 @@ hazards: []
 abis: []
 design: ["docs/PROWL-DESIGN.md", "docs/IMPERIUM-DESIGN.md section 11.3 item 10"]
 created: 2026-08-04
-updated: 2026-10-08
+updated: 2026-11-10
 ---
 ## Purpose
 
@@ -34,7 +34,10 @@ place where those surfaces' limits become visible to a person.
 Poll the process table and the per-CPU counters roughly every one and a
 half seconds; diff the cumulative nanosecond counters against the previous
 poll and divide by the measured wall interval. One hundred percent means
-one core fully busy, so a process across two cores reads two hundred.
+one core fully busy, so a process across two cores reads two hundred. The
+kernel brings a running thread's counter up to date at every tick as well as
+at its switch-out, so a process that never leaves its core reads busy, not
+idle ([[sub-kernel-sched]]).
 
 Keys navigate, sort, toggle a tree view and a per-thread detail pane, and
 apply three control verbs. Kill is confirm-gated; suspend and resume are

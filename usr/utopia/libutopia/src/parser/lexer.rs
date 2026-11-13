@@ -56,9 +56,8 @@
 //    lexer queues pending heredoc specs at `<<TAG` time and
 //    drains them at the next `\n`.
 //
-// 8. Regex literals: `/pattern/` AFTER `=~`. The lexer sets a
-//    one-shot flag when emitting EqualTilde; the next opening
-//    `/` is scanned as a Regex literal (with `\/` -> `/` escape).
+// 8. (No regex literal: `=~` was struck by operator vote 78, so `=` and
+//    `~` lex as themselves and `/` begins an ordinary word.)
 //
 // 9. Parentheses: `((` is the arithmetic opener and `(` is any other, and a
 //    closer belongs to its opener. `)))` closing `((` and `(` is `)` then `))`,
@@ -108,9 +107,6 @@ struct Lexer<'a> {
     tokens: Vec<Token>,
     pending_heredocs: Vec<HeredocSpec>,
     heredoc_bodies: Vec<Span>,
-    /// Set by emitting EqualTilde; consumed by the next opening `/`
-    /// to lex a Regex literal. Per scripture section 7.3.
-    expect_regex_after: bool,
     /// The parentheses still open, innermost last.
     opens: Vec<Opener>,
     /// How many of `opens` are `Two`, read at every `<` and `(`.
@@ -142,7 +138,6 @@ impl<'a> Lexer<'a> {
             tokens: Vec::new(),
             pending_heredocs: Vec::new(),
             heredoc_bodies: Vec::new(),
-            expect_regex_after: false,
             opens: Vec::new(),
             twos_open: 0,
         }
@@ -183,17 +178,6 @@ impl<'a> Lexer<'a> {
             self.skip_whitespace_and_continuations_and_comments();
             if self.pos >= self.bytes.len() {
                 break;
-            }
-            // Single-shot regex peek: if the previous emitted token
-            // was EqualTilde AND the next non-whitespace byte is
-            // `/`, scan as Regex. Whitespace was already skipped
-            // above; we just need to check the current byte.
-            if self.expect_regex_after {
-                self.expect_regex_after = false;
-                if self.peek_byte() == Some(b'/') {
-                    self.scan_regex()?;
-                    continue;
-                }
             }
             self.scan_next_token()?;
         }
@@ -238,11 +222,6 @@ impl<'a> Lexer<'a> {
             },
             b'=' => match self.peek_byte_at(1) {
                 Some(b'=') => self.emit_single(TokenKind::DoubleEqual, 2),
-                Some(b'~') => {
-                    let r = self.emit_single(TokenKind::EqualTilde, 2);
-                    self.expect_regex_after = true;
-                    r
-                }
                 Some(b'>') => self.emit_single(TokenKind::FatArrow, 2),
                 _ => self.emit_single(TokenKind::Equal, 1),
             },
@@ -844,45 +823,6 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    // -----------------------------------------------------------------
-    // Regex literal (after `=~`)
-    // -----------------------------------------------------------------
-
-    fn scan_regex(&mut self) -> ParseResult<()> {
-        let start = self.pos;
-        debug_assert_eq!(self.bytes[self.pos], b'/');
-        self.pos += 1; // consume opening /
-        let mut text = String::new();
-        loop {
-            if self.pos >= self.bytes.len() {
-                return Err(ParseError {
-                    kind: ParseErrorKind::UnterminatedRegex,
-                    span: Span::new(start, self.pos),
-                });
-            }
-            let b = self.bytes[self.pos];
-            if b == b'\n' {
-                return Err(ParseError {
-                    kind: ParseErrorKind::UnterminatedRegex,
-                    span: Span::new(start, self.pos),
-                });
-            }
-            if b == b'\\' && self.peek_byte_at(1) == Some(b'/') {
-                text.push('/');
-                self.pos += 2;
-                continue;
-            }
-            if b == b'/' {
-                self.pos += 1; // consume closing /
-                let span = Span::new(start, self.pos);
-                self.tokens.push(Token::new(TokenKind::Regex(text), span));
-                return Ok(());
-            }
-            let char_len = self.peek_char_len();
-            text.push_str(&self.source[self.pos..self.pos + char_len]);
-            self.pos += char_len;
-        }
-    }
 
     // -----------------------------------------------------------------
     // Helpers
@@ -1835,35 +1775,19 @@ mod tests {
     }
 
     #[test]
-    fn regex_after_match_op() {
+    fn equal_tilde_is_no_operator() {
+        // Vote 78 struck `=~`: `=` and `~` are themselves, and the slash
+        // after them begins a word as anywhere else. (A `^` in the word
+        // would lex as rc's join, Caret, which says nothing of `=~`.)
         assert_eq!(
-            kinds_no_eof("$x =~ /^foo/"),
+            kinds_no_eof("$x =~ /foo/"),
             vec![
                 TokenKind::Var("x".into()),
-                TokenKind::EqualTilde,
-                TokenKind::Regex("^foo".into()),
+                TokenKind::Equal,
+                TokenKind::Tilde,
+                TokenKind::Word("/foo/".into()),
             ]
         );
-    }
-
-    #[test]
-    fn regex_escaped_slash() {
-        assert_eq!(
-            kinds_no_eof("$x =~ /a\\/b/"),
-            vec![
-                TokenKind::Var("x".into()),
-                TokenKind::EqualTilde,
-                TokenKind::Regex("a/b".into()),
-            ]
-        );
-    }
-
-    #[test]
-    fn regex_unterminated_errors() {
-        match err("$x =~ /abc") {
-            ParseErrorKind::UnterminatedRegex => {}
-            other => panic!("expected UnterminatedRegex, got {:?}", other),
-        }
     }
 
     #[test]

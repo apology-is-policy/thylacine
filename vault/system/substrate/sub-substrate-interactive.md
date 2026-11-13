@@ -25,6 +25,7 @@ code:
   - tools/interactive/ls-halcyon-paste-flow.exp
   - tools/interactive/ls-halcyon-session-media.exp
   - tools/interactive/ls-halcyon-session-dosbox.exp
+  - tools/interactive/ls-halcyon-session-route.exp
   - tools/interactive/pci-net-load.exp
   - tools/interactive/pci-net-load-peer.py
   - tools/interactive/gfx_media.py
@@ -60,7 +61,7 @@ locks: []
 abis: []
 design: ["docs/LIFE-SUPPORT.md"]
 created: 2026-08-01
-updated: 2026-11-10
+updated: 2026-11-12
 ---
 ## Purpose
 
@@ -611,7 +612,52 @@ per full gate ≈ 3 s against a run measured in tens of minutes.
      `halcyond: theme ...; profile <word>` line. NOT tapestryd's boot line:
      the compositor is spawned before the pivot to the pool, so its startup
      read of `/lib/halcyon/profile` always misses and it says `built-in` on
-     every image, until a halcyond pushes the bundle.
+     every image, until a halcyond pushes the bundle. One image therefore does
+     not run the fleet: docs/agent/GATES.md lists the lever sets a whole-fleet
+     run bakes, and `ls-halcyon-session-route` runs on one of them only, the
+     image with both the console renderer and the session compositor.
+- **Two more (2026-11-12, the whole-fleet run before the async landing).**
+
+  6. **A catch-all failure arm ends on the line's terminator.** An expect that
+     accepts one exact line and fails on "any other line of that kind"
+     (`-ex "nora: EXIT path=quit code=0"`, then
+     `-re {nora: EXIT path=[a-z]+[^\r\n]*}`) fails a correct guest whenever
+     the serial delivers the accepted line in two reads: the second arm matches
+     the first half. `ls-halcyon-paste-flow` failed three attempts of three
+     that way on its first boot (`Nora left another way: nora: EXIT path=quit `,
+     and once `path=qu`). The arm is `-re {(...[^\r\n]*)[\r\n]}` and reports
+     capture 1; `ls-halcyon.exp`'s `menu ran:` arm had the same shape and was
+     passing on chunk boundaries. Rule 1 is the same hazard for a number; this
+     one is for a line. A scripted serial that splits the line shows both
+     states for no boot.
+  7. **A host tool's missing dependency is a SKIP before boot.**
+     `ls-halcyon-pointer` once read the cursor plane with a
+     `tools/interactive/vnc_capture.py` that needed Pillow; on a host without
+     it the scenario booted, drove the guest, and reported the Python
+     traceback as a guest failure, three attempts running, and a preflight
+     (`lc_require_host_pil`) then made it a SKIP. Since 2026-11-13 (vote 96)
+     no capture needs anything past Python's standard library:
+     vnc_capture.py writes its PNGs itself (`def write_png(path, width,
+     height, pixels, channels)`), with Pillow's rounding where it composes
+     the cursor, so a capture is the same bytes as before, and
+     ls-halcyon-pointer reads its flat scene with
+     `tools/interactive/png_extrema.py` (gfx_fp's `read_png`). The
+     preflight went with the dependency. The rule stands for the next host
+     tool a scenario adds: exit 77 with the reason before a VM starts, and
+     make the consumer's own import, not a weaker one.
+  8. **A line the guest prints during bring-up is awaited under the boot
+     budget.** `lc_boot` returns at the spawn on the socket transport, so a
+     wait that follows it is still the boot's. `ls-gfx` claimed aurora's
+     `#129 feed selftest PASS` with `lc_expect`, the command budget (30 s per
+     job, 90 s at three), for a line printed at the end of bring-up. A lone
+     HVF boot reaches the line before it at 76 s, and with three at a time
+     the scenarios that stop at that line took 83 to 90 s in the two
+     whole-fleet runs of 2026-11-12, so the second run failed one attempt
+     of `ls-gfx` with the boot still inside joey's job-control probe. The
+     wait takes `lc_boot_timeout` now and names the selftest's own FAIL
+     line; `pts-probe` already did the same for a line joey prints late. Of
+     the 121 scenarios that boot, no other has its first wait under the
+     command budget.
 - `ls-gfx-session-image`'s fail-fast arm waited for `leaf=N REFUSED`, a word
   halcyond never wrote (its line is `leaf=N cache refused`), so a refused raster
   showed as a 60 s timeout that blamed the routing. It matches the refusal line
@@ -683,7 +729,9 @@ honors the requested accelerator, so the same scenario can run under KVM/HVF.
 ## Controlled native readiness fixture
 
 readiness-qualification and service-readiness-failure require a probe built with
-`--features readiness-qualification` and THYLACINE_READINESS_QUALIFICATION=1.
+`--features readiness-qualification`, which a bake with `READINESS_QUAL=y`
+(`THYLACINE_READINESS_QUALIFICATION=1`, [[sub-substrate-build]]) produces, and the
+same variable set when they run.
 Absent the explicit fixture flag they exit 77 (SKIP, not PASS) before boot.
 The first controls before/after-poll schedules and acquisition rollback; the
 second uses the same CI Imperium enrollment as service-wire and checks registry

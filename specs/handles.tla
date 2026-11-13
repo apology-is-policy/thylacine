@@ -133,6 +133,14 @@
 (*                                handles.cfg keeps SrvKObjs empty, so     *)
 (*                                its state space and runtime are          *)
 (*                                unchanged by P5-corvus-srv.              *)
+(*   handles_account.cfg          AccountKObjs non-empty, all bug flags    *)
+(*                                FALSE — TLC proves AccountHandlesAtOrigin*)
+(*                                with a session open to carry it. The     *)
+(*                                main handles.cfg keeps AccountKObjs      *)
+(*                                empty, so its graph is unchanged.        *)
+(*   handles_buggy_account.cfg    BUGGY_ACCOUNT_TRANSFER=TRUE — counter-   *)
+(*                                example where an account's control       *)
+(*                                handle reaches a second proc.            *)
 (*   handles_buggy_srv_walk_tx.cfg                                         *)
 (*                                BUGGY_SRV_WALK_TX=TRUE — P5-corvus-srv   *)
 (*                                counterexample where a KObj_Srv handle   *)
@@ -181,6 +189,12 @@
 (*                        statement for /srv connection Spoors. Proven    *)
 (*                        structurally (parallels HwHandlesAtOrigin).     *)
 (*                                                                         *)
+(*   AccountHandlesAtOrigin — every KObj_Account handle is held by the    *)
+(*                        proc that made it: the control of an account    *)
+(*                        stays with its creator, and a child is told     *)
+(*                        which account it is born under without holding  *)
+(*                        one. Bug class BuggyAccountTransfer violates it.*)
+(*                                                                         *)
 (* See ARCHITECTURE.md §13 (capabilities), §18 (handles), §28 invariants. *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets
@@ -190,6 +204,7 @@ CONSTANTS
     TxKObjs,                \* SUBSET KObjs — transferable kobjs (Tx universe)
     HwKObjs,                \* SUBSET KObjs — hardware/non-transferable kobjs
     SrvKObjs,               \* SUBSET KObjs — /srv connection kobjs (KObj_Srv; non-transferable)
+    AccountKObjs,           \* SUBSET KObjs — memory account control kobjs (KObj_Account; non-transferable)
     Rights,                 \* set of right labels (must include RightTransfer)
     RightTransfer,          \* the "RIGHT_TRANSFER" element of Rights
     Caps,                   \* set of capability labels (must include CapHwCreate)
@@ -205,9 +220,10 @@ CONSTANTS
     BUGGY_RFORK_ELEVATE,    \* P4-Ic3: enables BuggyRforkElevate (rfork grants > parent)
     BUGGY_SPAWN_FDS_ELEVATE,\* R15-c F232: enables BuggySpawnFdsElevate (spawn-with-fds installs child rights > parent slot rights)
     BUGGY_RFORK_HOSTOWNER,  \* P5-hostowner: enables BuggyRforkNoStrip (rfork omits the elevation-only-cap strip)
-    BUGGY_SRV_WALK_TX       \* P5-corvus-srv: enables BuggySrvWalkTx (KObj_Srv walk-child minted transferable)
+    BUGGY_SRV_WALK_TX,      \* P5-corvus-srv: enables BuggySrvWalkTx (KObj_Srv walk-child minted transferable)
+    BUGGY_ACCOUNT_TRANSFER  \* MM-1c: enables BuggyAccountTransfer (an account's control crosses to another proc)
 
-KObjs == TxKObjs \cup HwKObjs \cup SrvKObjs
+KObjs == TxKObjs \cup HwKObjs \cup SrvKObjs \cup AccountKObjs
 
 ASSUME Cardinality(Procs) >= 2
 ASSUME Cardinality(KObjs) >= 1
@@ -217,6 +233,9 @@ ASSUME CapHwCreate \in Caps
 ASSUME TxKObjs \cap HwKObjs = {}
 ASSUME TxKObjs \cap SrvKObjs = {}
 ASSUME HwKObjs \cap SrvKObjs = {}
+ASSUME TxKObjs \cap AccountKObjs = {}
+ASSUME HwKObjs \cap AccountKObjs = {}
+ASSUME SrvKObjs \cap AccountKObjs = {}
 ASSUME BUGGY_ELEVATE \in BOOLEAN
 ASSUME BUGGY_HW_TRANSFER \in BOOLEAN
 ASSUME BUGGY_DIRECT_TRANSFER \in BOOLEAN
@@ -228,6 +247,7 @@ ASSUME BUGGY_RFORK_ELEVATE \in BOOLEAN
 ASSUME BUGGY_SPAWN_FDS_ELEVATE \in BOOLEAN
 ASSUME BUGGY_RFORK_HOSTOWNER \in BOOLEAN
 ASSUME BUGGY_SRV_WALK_TX \in BOOLEAN
+ASSUME BUGGY_ACCOUNT_TRANSFER \in BOOLEAN
 ASSUME CapHostowner \in Caps
 ASSUME CapHostowner # CapHwCreate
 
@@ -916,6 +936,32 @@ BuggySrvWalkTx(p, h, k) ==
     /\ UNCHANGED <<proc_caps, proc_ceiling, sessions, spawn_inherits>>
 
 (***************************************************************************)
+(* BuggyAccountTransfer(src, dst, h, new_rights) — MM-1c bug class: the    *)
+(* handle that controls a memory account reaches another proc. KObj_Account*)
+(* has no case in any path that crosses a Proc boundary: fork copies only  *)
+(* transferable kinds and spawn's descriptor array takes only Spoors.      *)
+(* SPAWN_EXT_ACCOUNT names the handle to place the child and gives the     *)
+(* child no handle. A buggy variant would hand a sandboxed child the means *)
+(* to raise its own limits, which section 13 of SHARED-MEMORY-ACCOUNTING   *)
+(* rules out: nobody adjusts the account they are charged to.              *)
+(*                                                                         *)
+(* Caught by AccountHandlesAtOrigin (handles_buggy_account.cfg).           *)
+(***************************************************************************)
+BuggyAccountTransfer(src, dst, h, new_rights) ==
+    /\ BUGGY_ACCOUNT_TRANSFER
+    /\ src # dst
+    /\ h \in handles[src]
+    /\ h.kobj \in AccountKObjs
+    /\ <<src, dst>> \in sessions
+    /\ new_rights \subseteq h.rights
+    /\ new_rights # {}
+    /\ handles' = [handles EXCEPT ![dst] = @ \cup {[kobj |-> h.kobj,
+                                                    rights |-> new_rights,
+                                                    origin_proc |-> h.origin_proc,
+                                                    via |-> "9p"]}]
+    /\ UNCHANGED <<origin_rights, kobjs_alive, proc_caps, proc_ceiling, sessions, spawn_inherits>>
+
+(***************************************************************************)
 (* Next: disjunction of all actions. \E ranges over actual handles in a  *)
 (* proc (h \in handles[p]) rather than over the full HandleRecord type, *)
 (* keeping TLC's exploration tight.                                        *)
@@ -951,6 +997,8 @@ Next ==
            BuggyRforkNoStrip(parent, child, granted)
     \/ \E p \in Procs : \E h \in handles[p] : \E k \in KObjs : WalkDerive(p, h, k)
     \/ \E p \in Procs : \E h \in handles[p] : \E k \in KObjs : BuggySrvWalkTx(p, h, k)
+    \/ \E src \in Procs : \E dst \in Procs : \E h \in handles[src] : \E nr \in SUBSET Rights :
+           BuggyAccountTransfer(src, dst, h, nr)
 
 Spec == Init /\ [][Next]_vars
 
@@ -1117,6 +1165,16 @@ SrvHandlesAtOrigin ==
     \A p \in Procs : \A h \in handles[p] :
         (h.kobj \in SrvKObjs) => h.origin_proc = p
 
+(***************************************************************************)
+(* AccountHandlesAtOrigin — MM-1c. Every KObj_Account handle is held by    *)
+(* the proc that made it. Absent from KOBJ_KIND_TRANSFERABLE_MASK, it is   *)
+(* not in TxKObjs, so HandleDup / HandleTransferVia9P / RforkWithFds       *)
+(* structurally cannot move it.                                            *)
+(***************************************************************************)
+AccountHandlesAtOrigin ==
+    \A p \in Procs : \A h \in handles[p] :
+        (h.kobj \in AccountKObjs) => h.origin_proc = p
+
 Invariants ==
     /\ TypeOk
     /\ RightsCeiling
@@ -1129,5 +1187,6 @@ Invariants ==
     /\ SpawnFdsRightsMonotonic
     /\ WalkChildIsSrv
     /\ SrvHandlesAtOrigin
+    /\ AccountHandlesAtOrigin
 
 ====

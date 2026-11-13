@@ -78,6 +78,31 @@ impl Objects {
             && self.check(owner, res, Kind::Resource).is_ok()
             && self.attachments.iter().any(|a| a.owner == owner && a.ctx == ctx && a.res == res)
     }
+    /// The contexts a stream on which can reach a resource `owed` names:
+    /// `holds` asked of a set of resources at once.
+    pub fn holders(&self, owed: impl Fn(u32) -> bool) -> Vec<u32> {
+        let mut ctxs: Vec<u32> = self.attachments.iter().filter(|a| owed(a.res)).map(|a| a.ctx)
+            .chain(self.entries.iter().filter(|o| o.born_in != 0 && owed(o.id)).map(|o| o.born_in))
+            .filter(|&c| c != 0)
+            .collect();
+        ctxs.sort_unstable();
+        ctxs.dedup();
+        ctxs
+    }
+    /// What a stream on `ctx` can reach: `holds(ctx, _)` as a set.
+    pub fn held_by(&self, ctx: u32) -> Vec<u32> {
+        if ctx == 0 { return Vec::new(); }
+        let mut res: Vec<u32> = self.attachments.iter().filter(|a| a.ctx == ctx).map(|a| a.res)
+            .chain(self.entries.iter().filter(|o| o.born_in == ctx).map(|o| o.id))
+            .collect();
+        res.sort_unstable();
+        res.dedup();
+        res
+    }
+    /// The contexts the ledger links `res` to.
+    pub fn links(&self, owner: u64, res: u32) -> Vec<u32> {
+        self.attachments.iter().filter(|a| a.owner == owner && a.res == res).map(|a| a.ctx).collect()
+    }
     /// Call only after backend detach completion. A failed detach retains the
     /// relationship, preventing premature reuse or backing release.
     pub fn detached(&mut self, owner: u64, ctx: u32, res: u32) -> Result<(), Error> {
@@ -87,13 +112,18 @@ impl Objects {
         Ok(())
     }
     /// A completed backend context destroy removes all of that context's
-    /// attachment references. This must never run on a mere submission or
+    /// attachment references, and every blob's birth in it: the device's
+    /// table for the context went with it, so a context later given the same
+    /// id reaches none of them. This must never run on a mere submission or
     /// timeout; callers retain both context and backing pins in those cases.
     pub fn context_destroyed(&mut self, owner: u64, ctx: u32) -> Result<(), Error> {
         let object = self.entries.iter().find(|o| o.id == ctx && o.kind == Kind::Context)
             .ok_or(Error::Missing)?;
         if object.owner != owner { return Err(Error::WrongOwner); }
         self.attachments.retain(|a| !(a.owner == owner && a.ctx == ctx));
+        for o in self.entries.iter_mut().filter(|o| o.born_in == ctx) {
+            o.born_in = 0;
+        }
         Ok(())
     }
 
@@ -104,6 +134,19 @@ impl Objects {
         let object = self.entries.iter_mut().find(|o| o.id == id && o.kind == kind).unwrap();
         object.retiring = true;
         Ok(Retirement { owner, id, kind, serial: object.serial })
+    }
+    /// Undo a retirement whose device command may be issued again: one that
+    /// left nothing behind (refused before staging, or by the device), or a
+    /// context destroy a stall met, which is harmless to repeat. The object
+    /// lives on and may be retired again; a stale ticket undoes nothing.
+    pub fn unretire(&mut self, ticket: Retirement) -> Result<(), Error> {
+        let Retirement { owner, id, kind, serial } = ticket;
+        let o = self.entries.iter_mut().find(|o| o.id == id && o.kind == kind).ok_or(Error::Missing)?;
+        if o.owner != owner { return Err(Error::WrongOwner); }
+        if o.serial != serial { return Err(Error::Missing); }
+        if !o.retiring { return Err(Error::Busy); }
+        o.retiring = false;
+        Ok(())
     }
     /// Invoked only after the backend proves retirement (including scanout and
     /// fence references) and has detached all context links. Repeated/stale retire
@@ -125,6 +168,22 @@ impl Objects {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_retirement_that_left_nothing_is_undone_and_only_by_its_own_ticket() {
+        let mut o = Objects::default();
+        o.reserve(1, 3, Kind::Context).unwrap();
+        let ticket = o.retire(1, 3, Kind::Context).unwrap();
+        assert_eq!(o.check(1, 3, Kind::Context), Err(Error::Busy), "retiring: no admission");
+        o.unretire(ticket).unwrap();
+        o.check(1, 3, Kind::Context).unwrap();
+        assert_eq!(o.unretire(ticket), Err(Error::Busy), "not retiring any more");
+        let again = o.retire(1, 3, Kind::Context).unwrap();
+        o.retired(again).unwrap();
+        o.reserve(1, 3, Kind::Context).unwrap();
+        let fresh = o.retire(1, 3, Kind::Context).unwrap();
+        assert_eq!(o.unretire(ticket), Err(Error::Missing), "a stale ticket names an older object");
+        o.unretire(fresh).unwrap();
+    }
     #[test]
     fn trusted_ids_and_other_owners_never_enter_normal_contexts() {
         let mut o = Objects::default();
@@ -203,6 +262,21 @@ mod tests {
         assert_eq!(o.reserve_in(1, 7, 3), Err(Error::Busy));
     }
     #[test]
+    fn a_blob_born_in_a_destroyed_context_is_held_by_no_context_given_its_id() {
+        let mut o = Objects::default();
+        o.reserve(1, 3, Kind::Context).unwrap();
+        o.reserve_in(1, 7, 3).unwrap();
+        o.retire(1, 7, Kind::Resource).unwrap();
+        let ticket = o.retire(1, 3, Kind::Context).unwrap();
+        assert!(o.holds(3, 7), "a destroy not yet answered proves nothing");
+        o.context_destroyed(1, 3).unwrap();
+        o.retired(ticket).unwrap();
+        o.reserve(1, 3, Kind::Context).unwrap();
+        assert!(!o.holds(3, 7), "the new context 3 never had 7");
+        assert!(o.holders(|r| r == 7).is_empty());
+        assert!(o.held_by(3).is_empty());
+    }
+    #[test]
     fn no_chain_with_no_context_holds_anything() {
         let mut o = Objects::default();
         o.reserve(1, 7, Kind::Resource).unwrap();
@@ -216,6 +290,32 @@ mod tests {
         assert!(!o.holds(3, 7), "7 here is a context");
         o.reserve_in(1, 7, 3).unwrap();
         assert!(o.holds(3, 7));
+    }
+    #[test]
+    fn the_holders_of_a_set_are_the_contexts_that_hold_one_of_it() {
+        let mut o = Objects::default();
+        for ctx in [3, 4, 5] { o.reserve(1, ctx, Kind::Context).unwrap(); }
+        o.reserve(1, 10, Kind::Resource).unwrap();
+        o.reserve(1, 11, Kind::Resource).unwrap();
+        o.reserve_in(1, 12, 5).unwrap();
+        o.attach(1, 3, 10).unwrap();
+        o.attach(1, 4, 11).unwrap();
+        o.attach(1, 4, 10).unwrap();
+        let owed = |r: u32| r == 10 || r == 12;
+        let want: Vec<u32> = (0..8).filter(|&c| [10, 12].iter().any(|&r| o.holds(c, r))).collect();
+        assert_eq!(want, [3, 4, 5]);
+        assert_eq!(o.holders(owed), want);
+        assert_eq!(o.holders(|r| r == 11), [4]);
+        for ctx in 0..8 {
+            let want: Vec<u32> = (0..16).filter(|&r| o.holds(ctx, r)).collect();
+            assert_eq!(o.held_by(ctx), want, "ctx {ctx}");
+        }
+        assert_eq!(o.held_by(4), [10, 11]);
+        assert!(o.holders(|r| r == 3).is_empty(), "3 is a context, held by none");
+        let ticket = o.retire(1, 12, Kind::Resource).unwrap();
+        assert_eq!(o.holders(owed), want, "a retiring resource is held until it retires");
+        o.retired(ticket).unwrap();
+        assert_eq!(o.holders(owed), [3, 4]);
     }
     #[test]
     fn object_budget_is_global_and_zero_owner_is_invalid() {

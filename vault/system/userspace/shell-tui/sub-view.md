@@ -158,7 +158,15 @@ connects on OPEN and the resolver WALKS intermediate components without opening
 them, so a SINGLE deep open of the full address cannot cross the service to reach
 the token dir (proven at the session-image E2E -- the deep open never connected;
 the two-step does). Absent that env (console mode, the spike), it opens the
-global `/srv/halcyon` two-step (root fid -> `place` O_WRONLY). `place_on_halcyon` then
+global `/srv/halcyon` two-step (root fid -> `place` O_WRONLY). When that open
+fails the report gives one of two reasons. A name that does not walk
+(`T_E_NOENT`) reads `no /srv/halcyon (not posted, or not in this login's
+view)`: nothing posted it in a view that does not route it, and login routes
+it only when it would not start the session compositor. Any other failure
+reads `/srv/halcyon did not connect (nobody serves it, or its one connection
+is taken)`: the name is in the view, and the open's error does not say whether
+a routed name has no poster, the channel's single connection is held, or its
+accept backlog is full. `place_on_halcyon` then
 writes the `inlinewire` header then the ARGB payload in bounded chunks
 (`write_all` loops on the returned count -- a 9P fid caps a Twrite at the
 negotiated msize). The payload is the `&[u32]` reinterpreted as its LE bytes

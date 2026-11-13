@@ -979,9 +979,8 @@ refused. The operator voted Plan 9's shape under a DoS cap (ARCH 9.1).
   `unmount`'s member and covered entry, the shed's dropped entries) is
   chained in removal order on a `struct mount_dead`, with any point it left
   empty, and `mount_dead_release` drops each entry's `mp_path`, clunks its
-  source and frees the nodes once the lock is dropped. The node caches are
-  created without `KMEM_CACHE_PANIC_ON_FAIL`: an allocation failure refuses
-  a mount or a spawn, never panics.
+  source and frees the nodes once the lock is dropped. An allocation failure
+  refuses a mount or a spawn, never panics.
 - **Passes, not arrays.** The cycle check and the shed walk the points as a
   graph. `mvisit_next` opens a pass by bumping `Territory.mvisit`; when it
   wraps it clears every point's mark first. A point reached is marked with

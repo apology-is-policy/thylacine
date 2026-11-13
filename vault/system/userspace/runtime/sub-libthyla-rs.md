@@ -50,7 +50,7 @@ design:
   - "docs/UTOPIA-SHELL-DESIGN.md section 15"
   - "docs/ARCHITECTURE.md section 3.5"
 created: 2026-08-03
-updated: 2026-11-10
+updated: 2026-11-11
 ---
 ## Dedicated service owner (October 2)
 
@@ -263,6 +263,60 @@ the ported libc's splitter, and this — each getting it wrong differently. That
 is the argument for the principle: when N layers each normalize, they each
 normalize wrong, and the fix is not to fix N implementations but to have one.
 
+### A kernel-rendered file is read with one read
+
+devctl renders a `/ctl` leaf, and devproc most `/proc/<pid>` text files
+(status, sched, maps, cmdline, exe, cwd, imperium, account), WHOLE on every
+`read` and copies out from the caller's offset; nothing ties a second read to
+the first rendering. A reader that loops to end-of-file therefore mixes
+renderings whenever the file grew in between -- and it grows whenever a number
+in it gains a digit, which a running Proc's `CPU_NS` can do at any scheduler
+tick. `io::slurp` reads 8 KiB at a time, so it returns the first rendering
+followed by the tail of the second; `Read::read_to_end`, a ported program's
+stdio and Go's `os.ReadFile` read 1 KiB or less at a time, so their seams fall
+inside the table. `cat /ctl/procs` has been seen to end in such a fragment
+line, and `ps`, reading the same way, met a line it could not parse and fell
+back to its verbatim output (2026-11-11).
+
+`io::read_rendered` reads such a file with ONE read into a `RENDERED_MAX`
+buffer, twice `KERNEL_RENDER_MAX` (4096, devctl's `DEVCTL_READ_BUF`; devproc's
+`DEVPROC_READ_BUF` is 2048), and refuses a read that fills it (`OutOfRange`).
+`ps` and Halcyon's `ctl_field` and loaded-systems list call it. prowl's
+`read_ctl_file`, diorama's `read_native`, joey's status readers and the probes
+that parse such text (capacity-probe, cpubench, exec-probe, lsp-probe,
+srvfull-probe, u-job-test) do the same thing with one `read` into a buffer of
+their own, sized to the kernel's and without the refusal. Its host tests feed
+it a reader whose second read answers from a longer rendering (`read_rendered`
+returns the first, and `slurp` beside it returns the splice), a rendering of
+exactly `KERNEL_RENDER_MAX` bytes (returned whole), and a reader that fills
+any buffer (refused).
+
+Two `/proc/<pid>` files are NOT of this kind and must be read to end-of-file:
+`ns` and `environ` are served in windows. Each read returns the bytes from the
+caller's offset on -- at most 2048 of `ns`, ending at a line end, and at most
+8192 of `environ` -- so one read is one window. `ns`, `ls`'s mount realms and
+Halcyon's `root_source` read `ns` to the end (`io::slurp`, `slurp_capped`), and
+a listing without its `binds:` line was cut; `env` and joey's
+spawn-environment witness read `environ` to the end. The host test
+`a_windowed_file_needs_the_loop` shows `read_rendered` returning only the
+first window of such a file.
+
+A read longer than the kernel's 4 KiB stack scratch (`SYS_RW_STACK`) goes
+through a transient bounce buffer charged to the caller, and when that charge
+or its allocation is refused the kernel shortens the read to 4 KiB instead of
+failing it (`sys_read_handler`). 4 KiB still holds any whole rendering today's
+buffers produce. A render buffer grown past 4 KiB would break that: a
+shortened read would return a cut rendering that does not fill the 8 KiB
+buffer, so the refusal would not see it.
+
+The refusal never fires against today's kernel, and it is not a completeness
+check: when a table outgrows the kernel's own buffer the kernel drops whole
+rows and the read still looks complete (srvfull-probe checks the margin
+instead). A generic reader -- `cat`, a ported program's stdio -- still loops
+and can still show a spliced tail. Whether the kernel should hand a
+read-to-EOF reader one rendering (a length latched at the first read, or a
+per-open snapshot) is an open design question, not settled here.
+
 ### The 9P serving codec (`ninep`)
 
 `ninep` is the `no_std`/`no_alloc` 9P2000.L wire codec for a native program that
@@ -429,6 +483,12 @@ None crossing a boundary; every ABI record belongs to
   instruction words as their in-memory bytes, which is the instruction stream
   only on a little-endian target, and a const assertion says so. `destroy`
   reports the kernel's answer; `Drop` makes the same call and discards it.
+
+- `Command::account(handle)` -- the memory account the child is born under, a handle from
+  `t_account_child`, sent as the `T_SPAWN_EXT_ACCOUNT` tail. `spawn` packs every tail with one
+  `SpawnRecord`, in bit order. Without the call, the child is on the caller's account.
+  `t_account_child` and `t_account_set_limits` are the two control calls, and `t_account_query_of`
+  reads an account through its handle ([[abi-memory-account]]).
 
 ## Concurrency
 

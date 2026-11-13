@@ -694,7 +694,9 @@ impl Render {
 // holds no authority that would show it a code address (`deputy_check`).
 // ---------------------------------------------------------------------------
 
-/// Read a whole native file into `out`. Returns the byte count, or None if the
+/// Read a native file into `out` with ONE read: every file read here is one the
+/// kernel renders afresh on each read (/ctl, /proc/<pid>), so a second read
+/// would continue a different rendering. Returns the byte count, or None if the
 /// file is unreachable -- which is a legitimate outcome (a nameless Proc's
 /// /proc/<pid>/exe is EMPTY, not an error), so callers degrade rather than fail.
 fn read_native(path: &[u8], out: &mut [u8]) -> Option<usize> {
@@ -702,19 +704,9 @@ fn read_native(path: &[u8], out: &mut [u8]) -> Option<usize> {
     if fd < 0 {
         return None;
     }
-    let mut total = 0usize;
-    loop {
-        if total >= out.len() {
-            break;
-        }
-        let n = unsafe { libthyla_rs::t_read(fd, out.as_mut_ptr().add(total), out.len() - total) };
-        if n <= 0 {
-            break;
-        }
-        total += n as usize;
-    }
+    let n = unsafe { libthyla_rs::t_read(fd, out.as_mut_ptr(), out.len()) };
     let _ = unsafe { t_close(fd) };
-    Some(total)
+    Some(if n > 0 { n as usize } else { 0 })
 }
 
 /// Read a native file into `out` starting at byte `off`. Same degrade-to-None
@@ -801,14 +793,15 @@ fn native_pid_exists(pid: u32) -> bool {
 }
 
 // V-7 membership. VIV_PROCS_MAX bounds both the (pid, ppid) table and the
-// member set; /ctl/procs is read into the same 2048-byte window as
-// native_pid_list (the kernel render is itself bounded at DEVCTL_READ_BUF and
-// stops at buffer-full, so a truncated tail loses rows fail-closed -- a member
-// past the cut disappears from the view, never the reverse).
+// member set; /ctl/procs is read with one read into a RENDER_MAX window, as
+// native_pid_list reads it. The kernel's render stops at a whole row when its
+// own buffer fills, and the parsers take only rows that end in a newline
+// (`whole_lines`), so a table cut by either buffer loses rows fail-closed -- a
+// member past the cut disappears from the view, never the reverse.
 const VIV_PROCS_MAX: usize = 64;
 
 fn viv_read_pairs(pairs: &mut [(u32, u32)]) -> usize {
-    let mut buf = [0u8; 2048];
+    let mut buf = [0u8; RENDER_MAX]; // the kernel's DEVCTL_READ_BUF
     let got = match read_native(b"/ctl/procs", &mut buf) {
         Some(n) => n,
         None => return 0, // unreadable source -> empty set, fail-closed
@@ -848,6 +841,14 @@ fn viv_is_member(pid: u32) -> bool {
     members[..n].contains(&pid)
 }
 
+/// The rows of a kernel table that END in a newline. A read that filled its
+/// window can stop mid-row, and a cut row must not parse as a shorter one:
+/// "57    41    sh" cut to "57    4" would name pid 57 a child of pid 4.
+fn whole_lines(text: &[u8]) -> impl Iterator<Item = &[u8]> {
+    let end = text.iter().rposition(|&c| c == b'\n').map_or(0, |i| i + 1);
+    text[..end].split(|&c| c == b'\n')
+}
+
 /// The (pid, ppid) pairs from /ctl/procs -- columns 1 and 2 of every row that
 /// parses (the header's "PID" fails the decimal parse and is skipped by the
 /// same rule as any junk, the parse_pid_list discipline). NOT split_fields:
@@ -877,7 +878,7 @@ pub fn parse_pid_ppid_list(text: &[u8], out: &mut [(u32, u32)]) -> usize {
         parse_pid(tok)
     }
     let mut n = 0usize;
-    for line in text.split(|&c| c == b'\n') {
+    for line in whole_lines(text) {
         if n >= out.len() {
             break;
         }
@@ -942,7 +943,7 @@ fn native_pid_list(out: &mut [u32]) -> usize {
     if viv_runner() != 0 {
         return viv_members(out);
     }
-    let mut buf = [0u8; 2048]; // matches the kernel's DEVCTL_READ_BUF
+    let mut buf = [0u8; RENDER_MAX]; // the kernel's DEVCTL_READ_BUF
     let got = match read_native(b"/ctl/procs", &mut buf) {
         Some(n) => n,
         None => return 0,
@@ -964,7 +965,7 @@ fn native_cpu_count() -> u64 {
 /// out of sync with the kernel's format.
 pub fn parse_pid_list(text: &[u8], out: &mut [u32]) -> usize {
     let mut n = 0usize;
-    for line in text.split(|&c| c == b'\n') {
+    for line in whole_lines(text) {
         if n >= out.len() {
             break;
         }
@@ -1122,8 +1123,8 @@ pub fn parse_cpu_cols(text: &[u8], want: u64) -> CpuCols {
     out
 }
 
-/// A /ctl/cpu render is bounded by the kernel's own 2 KiB leaf buffer; the
-/// widened V-4c-2b row is ~90 B x <= 8 CPUs plus two header lines.
+/// The window for a /ctl/cpu render: the widened V-4c-2b row is ~90 B x <= 8
+/// CPUs plus two header lines. (The kernel's leaf buffer is 4 KiB.)
 const CTL_CPU_MAX: usize = 2048;
 
 /// CPU `want`'s cumulative idle-park ns (column 1): Some(Some(ns)) measured,
@@ -3004,6 +3005,20 @@ pub fn selftest() -> Result<(), &'static str> {
         let cyclic = [(40u32, 41u32), (41u32, 40u32), (10u32, 1u32), (11u32, 10u32)];
         if compute_members(&cyclic, 10, 11, &mut m) != 0 {
             return Err("vivarium cycle handled wrong");
+        }
+        // A window that ends mid-row: host pid 57's row "57    41    sh ..."
+        // cut to "57    4" is no row, or 57 would read as the runner's child.
+        let cut = b"PID    PPID    NAME    STATE    THREADS\n\
+                    4    1    viv    ALIVE    1\n\
+                    5    4    diorama    ALIVE    1\n\
+                    57    4";
+        let np = parse_pid_ppid_list(cut, &mut pairs);
+        if np != 2 || compute_members(&pairs[..np], 4, 5, &mut m) != 0 {
+            return Err("a cut row parsed as a member");
+        }
+        let mut pids = [0u32; 8];
+        if parse_pid_list(cut, &mut pids) != 2 {
+            return Err("a cut row parsed as a pid");
         }
     }
 

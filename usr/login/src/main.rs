@@ -38,10 +38,11 @@ static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::Th
 
 use alloc::string::String;
 use alloc::vec::Vec;
+use libthyla_rs::account::ACCOUNT_SELF;
 use libthyla_rs::env;
 use libthyla_rs::process::{Child, Command, Stdio};
 use libthyla_rs::{
-    t_attach_9p_srv, t_close, t_explicit_bzero, t_mount, t_open, t_poll, t_putstr, t_read,
+    t_account_child, t_attach_9p_srv, t_close, t_explicit_bzero, t_mount, t_open, t_poll, t_putstr, t_read,
     t_readdir, t_set_dumpable, t_set_traceable, t_torpor_wait, t_unmount, t_walk_create,
     t_walk_open, t_write, TPollFd, T_CAP_CSPRNG_READ, T_CAP_LOCK_PAGES, T_CAP_TCB_DIAL, T_MREPL, T_OPATH, T_ORDWR,
     T_OREAD, T_OWRITE, T_POLLIN, T_SPAWN_PERM_CONSOLE_OWNER, T_SPAWN_PERM_MAY_POST_SERVICE,
@@ -853,7 +854,13 @@ unsafe fn drain_proxy_stderr(fd: i64) {
 // attach it, and mount it at /home/<user>. Returns the session handle (torn down
 // at logout) or None on any failure -- a home that cannot be bound is a failed
 // login (the boot E2E gates the whole path).
-unsafe fn bind_home(user: &[u8], pid: u32, gid: u32, supp: &[u32]) -> Option<HomeSession> {
+unsafe fn bind_home(
+    user: &[u8],
+    pid: u32,
+    gid: u32,
+    supp: &[u32],
+    session_account: (u32, u64),
+) -> Option<HomeSession> {
     let user_str = core::str::from_utf8(user).ok()?;
 
     // "/srv/home-<user>" (the proxy's session-namespace service) and the
@@ -872,6 +879,7 @@ unsafe fn bind_home(user: &[u8], pid: u32, gid: u32, supp: &[u32]) -> Option<Hom
     // boot-log diagnostics; stdin/stdout inherit login's.
     let mut cmd = Command::new("/bin/stratumd"); // #58: post-pivot /bin bind
     cmd.identity(pid, gid, supp)
+        .account(session_account.0, session_account.1)
         // T_CAP_TCB_DIAL (U): the proxy dials the SYSTEM coordinator at
         // COORD_FS_PATH, a TCB byte service. It runs as the USER (below), so
         // identity cannot admit it -- only this capability can, and the user's
@@ -1087,20 +1095,52 @@ unsafe fn unbind_home(mut sess: HomeSession) {
 
 // Create the view before authenticating: Corvus itself is charged to this
 // session, and neither the boot source nor the factory role goes to children.
-unsafe fn private_service_registry() -> i64 {
-    use libthyla_rs::{SrvRoute, t_srv_registry_new};
-    const NAMES: [&[u8]; 12] = [b"corvus", b"net", b"nocturne", b"nocturne-ctl",
-        b"lictor", b"tapestry", b"warp", b"stratum-fs", b"stratum-ctl", b"ptyfs", b"diorama", b"tapestry-interaction"];
-    let mut routes = [SrvRoute { name_len: 0, reserved: 0, name: [0; 32] }; 12];
-    for (r, name) in routes.iter_mut().zip(NAMES) {
+unsafe fn private_service_registry(console_place: bool) -> i64 {
+    use libthyla_rs::{t_srv_registry_new, SrvRoute};
+    const RESIDENT: [&[u8]; 12] = [
+        b"corvus",
+        b"net",
+        b"nocturne",
+        b"nocturne-ctl",
+        b"lictor",
+        b"tapestry",
+        b"warp",
+        b"stratum-fs",
+        b"stratum-ctl",
+        b"ptyfs",
+        b"diorama",
+        b"tapestry-interaction",
+    ];
+    // The console renderer's place channel (HALCYON.md 14.7.2), unless this login would start
+    // the session compositor on a successful authentication: on the console its shell is the
+    // one the renderer draws. joey's seeded boot logins run theirs on pipes and are routed
+    // too: login does not know whether it sits on the console. A session compositor's panes
+    // have their own (`halcyon-<user>`), and `view` there must find no console channel to
+    // fall back to.
+    const CONSOLE_PLACE: &[u8] = b"halcyon";
+    let mut routes = [SrvRoute {
+        name_len: 0,
+        reserved: 0,
+        name: [0; 32],
+    }; 13];
+    let names = RESIDENT
+        .iter()
+        .copied()
+        .chain(console_place.then_some(CONSOLE_PLACE));
+    let count = RESIDENT.len() + usize::from(console_place);
+    for (r, name) in routes.iter_mut().zip(names) {
         r.name_len = name.len() as u32;
         r.name[..name.len()].copy_from_slice(name);
     }
     let source = t_open(-1, b"/srv".as_ptr(), 4, T_OPATH);
-    if source < 0 { return source; }
-    let root = t_srv_registry_new(source, routes.as_ptr(), routes.len(), 0);
+    if source < 0 {
+        return source;
+    }
+    let root = t_srv_registry_new(source, routes.as_ptr(), count, 0);
     let _ = t_close(source);
-    if root < 0 { return root; }
+    if root < 0 {
+        return root;
+    }
     let rc = t_mount(b"/srv".as_ptr(), 4, root, T_MREPL);
     let _ = t_close(root);
     rc
@@ -1117,7 +1157,26 @@ pub extern "C" fn rs_main() -> i64 {
         let _ = t_set_dumpable(0);
         let _ = t_set_traceable(0);
     }
-    let registry_rc = unsafe { private_service_registry() };
+    // KT-1.5d-1a (HALCYON 14.12): the per-user session compositor. When the
+    // device selects the Halcyon session (the /lib/halcyon/session lever),
+    // login spawns /bin/halcyond --session AS the user instead of ut on
+    // /dev/cons -- a per-user compositor that hosts the session's terminals as
+    // kaua-term tiles it spawns as itself (zero identity delegation, I-22
+    // clean). Default (absent / any other token) is the proven ut path; the
+    // lever gates the in-development session path off the shippable default.
+    //
+    // --no-session forces the ut path regardless of the lever: joey's seeded
+    // boot-test login (do_login_e2e) passes it because that non-interactive
+    // login MUST spawn a shell that EXITS so the boot-test completes -- the
+    // session halcyond never exits, so a seeded login that entered the session
+    // would hang the boot before the interactive getty ever runs. The session
+    // is thus reserved for the interactive getty login (which passes no such
+    // flag), exactly as the session is an interactive, non-terminating thing.
+    let session_halcyon =
+        read_session_lever() && !env::args().operands().any(|a| a == b"--no-session");
+    // Read before the view is made: which names the view routes depends on what
+    // this login will run.
+    let registry_rc = unsafe { private_service_registry(!session_halcyon) };
     if registry_rc < 0 {
         t_putstr("login: private service registry failed\n");
         return 1;
@@ -1285,10 +1344,26 @@ pub extern "C" fn rs_main() -> i64 {
         }
     }
 
+    // The session's memory account (SHARED-MEMORY-ACCOUNTING section 13). Everything this
+    // session runs is born under it, and this Proc keeps its control, which is why it is
+    // made here and not by anything the session runs. Refused only when kernel memory is
+    // gone, since login is exempt from the pool, and a session then would be no safer.
+    let mut session_incarnation = 0u64;
+    let session_account = t_account_child(ACCOUNT_SELF, 0, &mut session_incarnation);
+    if session_account < 0 {
+        t_putstr("login: session account failed\n");
+        let _ = unsafe { evict_dek(ctl, dsid) };
+        let _ = unsafe { t_close(ctl) };
+        unsafe { session_close(conn, &token) };
+        let _ = unsafe { t_close(conn) };
+        return 1;
+    }
+    let session_account = (session_account as u32, session_incarnation);
+
     // A-5b: bind the user's encrypted home at /home/<user> BEFORE spawning the
     // shell, so the shell inherits the mount (the kernel deep-copies the mount
     // table on spawn). FATAL: a home that cannot be bound is a failed login.
-    let home = match unsafe { bind_home(&user, pid, gid, &supp) } {
+    let home = match unsafe { bind_home(&user, pid, gid, &supp, session_account) } {
         Some(h) => h,
         None => {
             t_putstr("login: home bind failed\n");
@@ -1324,6 +1399,7 @@ pub extern "C" fn rs_main() -> i64 {
         let mut push_cmd = Command::new("/bin/aurora-push");
         push_cmd
             .identity(pid, gid, &supp)
+            .account(session_account.0, session_account.1)
             .caps(0)
             .stdin(Stdio::Inherit)
             .stdout(Stdio::Inherit)
@@ -1332,24 +1408,6 @@ pub extern "C" fn rs_main() -> i64 {
             let _ = c.wait();
         }
     }
-
-    // KT-1.5d-1a (HALCYON 14.12): the per-user session compositor. When the
-    // device selects the Halcyon session (the /lib/halcyon/session lever),
-    // login spawns /bin/halcyond --session AS the user instead of ut on
-    // /dev/cons -- a per-user compositor that hosts the session's terminals as
-    // kaua-term tiles it spawns as itself (zero identity delegation, I-22
-    // clean). Default (absent / any other token) is the proven ut path; the
-    // lever gates the in-development session path off the shippable default.
-    //
-    // --no-session forces the ut path regardless of the lever: joey's seeded
-    // boot-test login (do_login_e2e) passes it because that non-interactive
-    // login MUST spawn a shell that EXITS so the boot-test completes -- the
-    // session halcyond never exits, so a seeded login that entered the session
-    // would hang the boot before the interactive getty ever runs. The session
-    // is thus reserved for the interactive getty login (which passes no such
-    // flag), exactly as the session is an interactive, non-terminating thing.
-    let session_halcyon =
-        read_session_lever() && !env::args().operands().any(|a| a == b"--no-session");
 
     // Spawn the shell AS the user. fd 0/1/2 inherit login's (the tty), so the
     // shell reads + writes the same console. The shell gets the user's identity
@@ -1362,6 +1420,7 @@ pub extern "C" fn rs_main() -> i64 {
     let mut shell_cmd = Command::new(SHELL);
     shell_cmd
         .identity(pid, gid, &supp)
+        .account(session_account.0, session_account.1)
         .caps(SHELL_CAPS)
         // CONSOLE_OWNER: the shell receives Ctrl-C (LS-5). SESSION_HANGUP
         // (arm-6): the shell is the login session leader -- on its exit (logout)
@@ -1406,6 +1465,7 @@ pub extern "C" fn rs_main() -> i64 {
         let mut hal = Command::new("/bin/halcyond");
         hal.arg("--session")
             .identity(pid, gid, &supp)
+            .account(session_account.0, session_account.1)
             .caps(SHELL_CAPS)
             // SESSION_HANGUP (arm-6): halcyond is the graphical login session
             // leader ("its exit IS logout"), so it takes the same session

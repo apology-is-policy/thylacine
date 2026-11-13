@@ -13,8 +13,10 @@ code:
   - usr/lictor/src/backend/gpu.rs
   - usr/lictor/src/backend/gpu/cursor.rs
   - usr/lictor/src/cursor_queue.rs
+  - usr/lictor/src/eventq.rs
   - usr/lictor/src/backend/import.rs
   - usr/lictor/src/backend/input.rs
+  - usr/lictor/src/backend/intake.rs
   - usr/lictor/src/backend/mod.rs
   - usr/lictor/src/backend/screen.rs
   - usr/lictor/src/backend/seat.rs
@@ -40,9 +42,12 @@ code:
   - usr/lictor/examples/render-preview.rs
   - tools/bake-lictor.py
   - tools/interactive/ls-graphical-sak.exp
+  - tools/interactive/ls-graphical-keys-overrun.exp
+  - tools/interactive/ls-graphical-keys-behind.exp
   - tools/interactive/ls-graphical-sak-states.exp
   - tools/interactive/ls-graphical-sak-recover.exp
   - tools/interactive/ls-graphical-sak-dead.exp
+  - tools/interactive/ls-graphical-sak-chained.exp
   - tools/interactive/ls-graphical-sak-soak.exp
   - tools/interactive/ls-graphical-sak-start.exp
   - tools/interactive/ls-graphical-sak-refused.exp
@@ -74,7 +79,7 @@ failure/restoration path. No clipboard payload, new kernel role or syscall enter
 Lictor. Native healthy/stalled physical F10 probes and graphical regressions
 are pinned in HALCYON-INTERACTION-STATUS; no Pi/minimum-mode qualification is
 claimed. The test-mode parked-RPC marker is emitted only in QUIESCING, before
-this sole hardware-owner thread can ACK into EXCLUSIVE.
+the serve thread, the only one that calls the seat endpoint, can ACK into EXCLUSIVE.
 
 ## October 1 production-debt recheck
 
@@ -519,7 +524,8 @@ context's resource, retire or drop of a host ring) runs only once every chain th
 can reach its object has really retired (GPU-DESIGN 4.5.15, vote 49). Each pending
 request asks `Device::retirement_hold`. For a resource the answer reads every stream
 on a context holding it (`Objects::holds`: attached, or a host blob minted under
-that context) and every fenced transfer naming it. For a context, or a detach from
+that context until its destroy completes, so a context given the id later holds
+none) and every fenced transfer naming it. For a context, or a detach from
 one, it reads that context's chains, transfers included. Each slot's `fslot_reach`
 records what its chain can reach and survives abandonment, because an abandoned
 chain still can. Device-wide synchronous work holds every retirement, and a dead
@@ -532,7 +538,14 @@ parked `PARK_BOUND_MS` (30 s, asserted equal to the fenced abandonment bound) is
 admitted whatever the cause. Either way `Device::execute`
 refuses it before any ledger change, says so (at the 1st, 2nd, 4th, ... refusal, with
 the cause: a non-quiescent engine, or a poisoned chain that can reach the object),
-and the compositor degrades instead of blocking on a reply that never comes.
+and the compositor degrades instead of blocking on a reply that never comes. A
+resource's free is the exception (`Device::take_unref`): on a live engine it is
+taken as a debt, its ledger entry retired and its free owed unsent, and the owed-free
+pass below detaches its context links and frees it once no chain can reach it. The
+reply is still a refusal. A refused free used to be final, and no client asks
+again, so the entry and its pins stayed for the boot while tapestryd's vindication
+uncharged the context (vote 81 audit r6 F1). A resource on the display, a dead
+engine or a debt at its bound is refused as before.
 Another client's poison reaches nothing of this one's, so it refuses and parks nothing
 here (`tools/warp/warp-poison-retire.exp`). Scoping relies on the host resolving a
 stream's ids through its context's table (I-45's trusted half).
@@ -563,11 +576,15 @@ vote 29). A chain that sees 500 ms of stale wakes STALLS the engine:
 The completion pump settles a stall (`settle_stall`, decided by the
 host-tested `gpu_api::stall_verdict`). A late retirement, drained by the
 ordinary path, revives the engine, and the parked retirement then runs. A chain
-still outstanding after 30 s latches the engine dead, permanently. The stall
+still outstanding after 30 s latches the engine dead, permanently, and so does one
+still outstanding `TAKEOVER_BOUND_MS` (33 s) after a chord whose takeover waits on it
+(vote 80, below), whatever the stall's own age; Lictor says which bound fired. The stall
 counter tells a caller whether its command stalled, and a stalled bind
 condemns its resource, because the display may name it once the device
-catches up. Every reply carries the engine state (live, stalled, dead) and the
-stall count in its `Stats`, an error reply included. The client keeps the last
+catches up. Every reply carries the engine state (live, stalled, dead), the
+stall count and the count as its request began (`stalls_begun`, sampled by the
+serve loop) in its `Stats`, an error reply included, so a one-request span
+reads on its own reply, untouched by a stall met between two requests. The client keeps the last
 one (`rpc_client::Client::stats`), and the GPU proxy adopts it on every reply,
 so a caller reads a failed step against the state it left. The host-tested
 `gpu_api::failure_cause` decides what such a failure says: a stall begun inside
@@ -595,7 +612,18 @@ A test-mode lever reproduces both ends of a stall on demand.
 `thylacine.test-latch-dead` on the kernel command line
 (`THYLACINE_TEST_LATCH_DEAD=1` to `tools/run-vm.sh`) makes tapestryd arm the
 broker with `TestArmLatch` once it serves, and its global ctl says
-`test-latch-dead armed` once the broker has taken it. `Device` then marks each
+`test-latch-dead armed` once the broker has taken it. Lictor does not take the
+compositor's word for the boot: it reads `/hw/chosen/bootargs` itself, once, at its
+start (`backend::bootargs`, read to the file's end; a line that cannot be read or
+that fills the 1024-byte buffer reads as none), and `TestArmLatch` is `BadField`
+unless the whole word is on that line (`gpu_api::bootarg_declared`,
+`TEST_LEVERS_WORD`). `TestArmChained` is refused the same way without
+`thylacine.test-latch-chained` (`TEST_CHAINED_WORD`). tapestryd asks only on a boot
+it reads as declared, through the same matcher, so a stock image asks nothing and
+prints nothing. A refusal therefore marks a compositor that asked undeclared, or
+two readings that disagree: tapestryd says `arm REFUSED by the broker`, and Lictor
+says `test lever arming refused: this boot's command line does not declare` and
+the word, once per lever for the boot. `Device` then marks each
 resource created at 97 by 89. At a retirement of one, it stalls the engine
 through a harmless display query whose wait reports its deadline passed,
 exactly the state a slow command leaves. The lever has two shots, and each one
@@ -612,7 +640,16 @@ retirement shots' so a scenario waiting on one cannot match the other. The pump
 at the end of that same request (`Device::execute`'s trailing reap) revives the
 engine, so the reply already reads `Engine::Live` with the stall count moved: a
 stall of known length, with no race against the device, carried to the
-compositor by the count alone. The shot rides exactly the next synchronous
+compositor by the count alone. `Request::TestStallShot` (opcode 70) gives one
+more shot outside that budget, with no arming, bound to the connection that
+asked: it rides that connection's next request, whatever it is, and the serve
+loop spends it at that request's end if no synchronous command took it
+(`Device::test_stall_ride`, `test_stall_settle`; forgotten with the
+connection), so neither a seat takeover nor another client can take it.
+tapestryd's test-mode `warp-stall-create`, `warp-stall-destroy` and
+`warp-stall-free` verbs aim it at a client's own next device-context create,
+its own ctx's destroy, or the free of the next BO it destroys, and bound it to
+twenty per boot. Within a request a shot rides exactly the next synchronous
 submission (`Controlq::stall_shot_bound`): one refused, unfenced, or ended
 before its chain retired spends it and says `stall shot LOST`, rather than
 leaving it armed for whoever sends next. So does a command refused at staging
@@ -621,41 +658,85 @@ refuses by its own checks before any command is staged is no submission, and
 leaves the shot for the next one: a scanout command that names a resource
 which is not an ordinary one is such a request (`Device::execute`). The
 compositor's display half aims only at binds of a screen it has just made or
-of a client's slot, which are not refused there. The shot still rides the next
-synchronous command whoever sends it, so a seat takeover landing between the
-compositor's aim and its command would take it. That needs test-mode, the
-bootarg and the operator's chord, and vote 30 recovers the seat.
-The bootarg is Lictor's own to read. `Request::TestArmLatch` is refused
-(`BadField`) on a boot whose command line does not hold
-`thylacine.test-latch-dead` (`gpu_api::bootarg_declared` over
-`backend::bootargs`, read once at start; `Device::test_declare`), so the
-compositor, which asks for the arming and is not trusted to, cannot arm the
-latch, seat and stall shots by its own word. Until 2026-11-13 only tapestryd
-read the word, and `TestArmLatch` armed all three for any client (round R2 F1).
-In a guest (2026-11-13, 12d96aa0d): the lever scenarios arm on boots that
-declare the word; a compositor made to ask on a boot that declares nothing
-says `test-latch-dead arm REFUSED by the broker`; and with the refusal taken
-out of Lictor the same compositor arms, and the first secure attention fails
-at an injected stall and recovers with nothing conferred.
+of a client's slot, which are not refused there.
+The arming's `TestStallNext` shots still ride the next synchronous command
+whoever sends it, so a seat takeover or the owed-free pass landing between the
+compositor's aim and its command would take one, and since both kinds share one
+flag, `test_stall_settle` spends a pending `TestStallNext` shot too; tapestryd
+never has both kinds pending. A takeover needs test-mode, the bootarg and the
+operator's chord, and vote 30 recovers the seat. The bootarg is Lictor's own
+reading, not the compositor's: the latch, seat and stall-next shots fire only from
+counts `TestArmLatch` sets, and the chained shots only from `TestArmChained`'s.
+In a guest (2026-11-13, 12d96aa0d, aux-3-mac before it merged main): the lever
+scenarios arm on boots that declare the word; a compositor made to ask on a boot
+that declares nothing says `test-latch-dead arm REFUSED by the broker`; and with
+the refusal taken out of Lictor the same compositor arms, and the first secure
+attention fails at an injected stall and recovers with nothing conferred.
 
 The unbind drill is the compositor's alone. `ArmScanoutDisableRefusal` makes
-the client's own next display disable (`SetScanout` naming resource 0) report
-the device's refusal without the command being issued, so
-`warp_img_selftest` drives its condemn, defer and drain chain with a real
-refusal, and `TakeInjectedRefusal` says whether the last refusal was the
-drill's. Both are read in `Device`'s `SetScanout` arm and nowhere else, and
-the drill needs no word on the boot line, because what it refuses is the
-caller's own request. Until 2026-11-13 it sat in `Gpu::set_scanout`, which
-`Device::restore` calls to put the display back after an episode: a
-compositor that left the presentation at none with the drill armed failed
-the restoration, and the seat's failure cancelled the grant the user had just
-made, in every image (round R3 F1). In a guest (2026-11-13, ce4243c64) a
-compositor made to disable the display and arm the drill on every pass failed
-no seat across an episode, and with the drill read in `restore` again the same
-compositor failed it: `lictor: seat failed: normal scanout restoration`.
+the client's own next display disable (`SetScanout` naming resource 0, which
+`Device` sends through `Gpu::set_scanout_client`) report the device's refusal
+without the command being issued, so `warp_img_selftest` drives its condemn,
+defer and drain chain with a real refusal, and `TakeInjectedRefusal` says
+whether the last refusal was the drill's. The drill needs no word on the boot
+line, because what it refuses is the caller's own request. The broker's own
+binds never read it: the trusted screen's (`Gpu::set_scanout`) and the seat's
+restore (`Gpu::set_scanout_restore`). Until 2026-11-13 it was read by every
+`Gpu::set_scanout`, which `Device::restore` called to put the display back after
+an episode: a compositor that left the presentation at none with the drill
+armed failed the restoration, and the seat's failure cancelled the grant the
+user had just made, in every image. Round R3 F1 on aux-3-mac and corona's round
+24 found it apart, and this is corona's form of the fix. In a guest
+(2026-11-13, ce4243c64, aux-3-mac's form, the drill read in `Device`'s
+`SetScanout` arm) a compositor made to disable the display and arm the drill on
+every pass failed no seat across an episode, and with the drill read in
+`restore` again the same compositor failed it: `lictor: seat failed: normal
+scanout restoration`.
 `CtxAttachResource` links the attachment in the ledger before the device
 answers, and a failure that left nothing (`left_nothing`) unlinks it, so the
-resource can still retire. tapestryd aims three at the
+resource can still retire. `CtxDestroy` retires the context in the ledger before the
+device answers, and any failure but a dead engine un-retires it
+(`Objects::unretire`): a destroy a stall refused before staging, or one a stall
+met, can be sent again. The id stays named either way, and a repeat of a destroy
+that ran is harmless, since QEMU's CTX_DESTROY has no error path and
+virglrenderer only drops the handle from its table (QEMU v10.0
+`virgl_cmd_context_destroy`, virglrenderer 1.1.0 `virgl_context_remove`).
+A free the device has not acknowledged is owed (`Gpu::unref_or_owe`,
+`free_mapped_or_owe`): a stalled `RESOURCE_UNREF`, one refused before staging,
+or one the device refused may leave the resource on the device, so its id
+stays retiring and its pins held. A taken free (above) is owed unsent
+(`Gpu::owe_unsent_free`, never for a resource the display may still scan).
+The serve loop repeats owed frees after the seat's step, on a NORMAL seat,
+while the engine takes commands and the pass is not standing down (below)
+(`Device::pay_owed_frees`), and never inside a request, where a stall it met
+would read as that request's. Each waits until
+no chain on the device can reach it (`Gpu::owed_free_hold`: `retirement_hold`
+less the parked chains; see Parked readbacks, owed frees) and goes whole
+(`gpu_api::OwedFree::next`): a `CTX_DETACH_RESOURCE` for each context link
+the ledger still records (`Objects::links`; each acknowledged one is dropped
+from the ledger, since `Objects::retired` refuses a linked id), the unmap a
+mapped blob needs, then the unref. A pass looks at `OWED_FREES_EXAMINED` (16)
+owed frees at most for a parked context's turn and as many rotating through
+them, and stops at
+`OWED_COMMANDS_PER_PASS` (8) commands or `SUBMIT_DEADLINE_MS` spent, so a pass
+adds at most about a second before the seat's next look at the chord. An unref
+answered "no such resource" reads as gone, a first free's as a repeat's (QEMU
+v10.0 `virgl_cmd_resource_unref`; `gpu_api::unref_frees`, host-tested to read
+no other answer so). QEMU refuses an existing resource's free only when its
+host unmap fails, which clears the mapping, so three answered refusals give a
+free up, its id, pins and extent kept; a stall or a death is never an answer
+(`gpu_api::Answer`). A mapped HOST3D blob's unmap is owed with its free, and
+its extent returns once both are acknowledged (a repeat of an unmap that ran is
+answered OK); a create whose unwind left a free owed retires its id when the
+free is paid. Only frees made while serving are owed, so a bring-up probe
+keeps its own posture, and a ring teardown at bring-up says its extent is
+leaked rather than owed. `Request::FreesOwed` (opcode 71) reports `Frees`:
+owed now, then monotone incurred, paid and given up, then `retiring`, the
+resources whose retirement has not finished. The readback leg's FREE arm
+witnesses a guest-backed free a stall met, its TAKEN arm a taken free, the
+hold on its repeat and the link detach, and its BUSY arm the owed-free barrier; the state machine's other paths (the
+HOST3D extent, a create's unwind, the display drain, the give-up) are
+host-tested in `gpu_api` and witnessed by no leg. tapestryd aims three of the arming's shots at the
 compositor context's create, at one blit-convention attempt, and at a
 composition health step once GPU composition runs, and three at binds of the
 display's, chosen by the height of the host a display event tells
@@ -670,9 +751,34 @@ the display's.
 
 Physical Ctrl-Alt-F10 (with Ctrl-Alt-Delete retained for compatibility)
 starts a kernel generation (the kernel scans the chord; [[abi-trusted-seat]]). Normal hardware requests
-park while the service drains all outstanding work, excludes every advertised
+park while the service waits out the synchronous work and the cursor queue, excludes every advertised
 scanout and selects private, non-shareable trusted backing. Held keys and buttons
-must be released before Corvus can receive input. Operation 65 admits only
+must be released before Corvus can receive input, and the kernel refuses RESTORED
+while its own table shows a key down. Both read the device's reports, and a device
+with no room for a report drops it whole and tells nobody, so a release can go
+missing behind an input thread that stopped draining. The device cannot be asked
+what is down. So the eventq is as deep as QEMU offers and one page holds (`eventq.rs`,
+64 against 16 before), and when a drain finds less than a report's worth free, every
+key this side holds is released through the normal path, to the kernel and the
+compositor alike. That count is taken after the recycle is published, against what
+was offered before it: the device moves it, it never goes back, and a drop at any
+moment before the read leaves it at least that close, so it can overstate a drop and
+never miss one. A key still down loses one press, and reads as released to both gates,
+so after an overrun the chord can be physically down when ACK goes out; Delete and F10
+have no rune, so nothing reaches Corvus from them. A release that
+never came would park the seat on every chord until that key was pressed again. This
+recovers the seat, not the keystrokes: a report the device dropped is gone
+(`ls-graphical-keys-overrun`, and `ls-graphical-keys-behind` for a real client's
+queue). The same release runs where an entry found the input queue full (see
+Concurrency). Whatever the devices had placed as the seat returns was pressed at a trusted
+screen, and the input thread may not have moved it yet: until a pass of the input
+thread begun after the return has been taken (`intake::passes`, `Seat::tail_until`), what
+it hands over reaches the kernel and `held`, not the compositor, and the seat says how
+much it kept back (`ls-graphical-sak-dead` leg H, whose lever stops the input thread
+through the held restore). A paint in phase 2 retries after a
+stall and fails the episode on an answer, and in neither case does VISIBLE go out for
+it (legs F and G). The takeover line reports how many fenced chains stood on the device
+when the takeover reached it and how long it took. Operation 65 admits only
 standard normal pointer shapes, scale and position from the authenticated
 compositor. Private cursor DMA never enters the normal object ledger. Before
 trusted scanout every cursor plane receives a transparent image followed by a
@@ -682,19 +788,24 @@ misses its deadline stalls the lane, exactly as the controlq stalls:
 - the queue is not idle, so cursor commands are refused and quiescence waits;
 - the completion pump retires the chain late (`cursor_settle`), with the same
   validation an on-time chain gets;
-- a malformed entry, or a chain outstanding for 30 s, fails the queue.
+- a malformed entry fails the queue, and a chain outstanding for 30 s abandons it
+  until that chain retires.
 A controlq step on the plane that stalled (the image upload, the plane's
 one-time create and attach) is not the lane's failure, since the controlq's own
 stall holds quiescence. A stalled create or attach is taken as done, because
-repeating it would collide with what it made. A failed cursor queue retains its
-backing until GPU reset and prevents trusted acknowledgement.
-Cursor waits share controlq's sticky allowance for an outstanding GPU readback;
-the two queues share the device loop, so a delayed readback is not itself proof
-of a dead cursor queue. Input latency under that load remains a runtime gate.
+repeating it would collide with what it made. A failed or abandoned cursor queue
+prevents trusted acknowledgement, and a failed one retains its backing until GPU
+reset. The two queues share the device loop, so a host-synchronous step (an
+egl-headless flush, an upload into a busy resource) can delay a cursor chain, which
+stalls at its ordinary bound rather than hold the serve loop. A readback no longer
+can: it is parked until its work is done (vote 81, below).
+Input latency under that load remains a runtime gate.
 See `docs/HALCYON-INTERACTION.md` section 14.
 
 Corvus sends bounded semantic frames containing identity, exact capabilities,
-term and verdict. Lictor uses baked fonts and colors. Corvus receives key bytes
+term and verdict. Lictor uses baked fonts and colors. Its panels say "Press
+Enter to return": Corvus closes them only on Enter or Esc
+([[dec-2026-11-05-panels-enter-or-esc]]). Corvus receives key bytes
 only after Lictor acknowledges the current frame's actual presentation. The
 ordinary compositor receives neither those bytes nor the trusted framebuffer.
 The current backend uses the approved neutral backdrop when a completed private
@@ -708,17 +819,128 @@ a successful graphical grant.
 
 A failed seat is recoverable. The kernel has already cancelled the grant and
 scrubbed the key queue, so Lictor shows the failure notice for 1.5 s, waits
-for every key to come up, rebinds the last normal presentation and reports
-RESTORED; the kernel returns the seat to normal and releases nothing. Normal
+for every key to come up, restores scanout 0 as the ordinary return does
+(`Device::restore`, below: the last normal presentation bound again, or the
+output blank when the device refuses it) and reports RESTORED; the kernel
+returns the seat to normal and releases nothing. A dead engine restores nothing,
+so the seat returns without its display and its input withheld. Normal
 broker requests park through a failure exactly as through an episode, so the
 compositor never sees an error for a display that is about to return.
 Restoration is owed from the moment a takeover begins (`Seat.displaced`, set
 before `exclude_all_outputs`), not only once it completes: a takeover that
 fails part-way may already have disabled outputs or bound the trusted image.
-`Device::restore` needs only the control queue's quiescence
-(`Gpu::controlq_retired`), so a cursor queue poisoned on a live engine does not
-cost the display. A restore refused by a stalled engine is retried every
-pass until the engine revives or dies. Restoration stays owed until the
+`Device::restore` needs only an engine that takes a synchronous command
+(`Gpu::takes_commands`: alive, no stall standing, no synchronous chain
+outstanding), so neither a cursor queue poisoned on a live engine
+nor a client's poisoned chain costs the display. Takeover itself asks that and an
+idle cursor queue (`Gpu::takeover_clear`, vote 50): a fenced chain, in flight or
+poisoned, cannot reach the trusted image, whose id `Objects::valid_id` refuses on
+every named route and which is never attached to a context, so a client's poison
+does not deny the SAK. Its backlog can: the paint is fenced, so it retires behind
+what the host has queued. A takeover that meets a stall starts over when the engine
+revives (`Gpu::stall_pending`), under the kernel's five-second deadline, and says so; a
+device's answer fails it at once. While the engine is alive and the device holds the
+takeover up (`Gpu::takeover_waiting`: the cursor lane stalled behind its chain, or, with
+the lane idle, the control queue stalled behind a chain or with a command not yet
+retired), the takeover renews that deadline at once when first seen and then at most
+once a second (`gpu_api::renew_due`; `SEAT_RENEW`, up to 35 s from the chord: vote 71), so a backlog delays the SAK rather than failing
+it. One chain that runs for seconds retires nothing and is renewed all the same; one
+that never retires kills the engine at `FENCE_ABANDON_MS`, inside the 35 s. A cursor
+chain waits on the host loop whatever holds it, so the lane's stall renews too
+(vote 79); its abandonment at the same bound ends the wait and the kernel's deadline
+fails the chord, and the lane comes back on the late retirement. An abandoned or failed
+lane holds the takeover past anything the control queue does, so it renews nothing, and
+Lictor says once per chord that the lane holds it. The two waits can run in series (the
+paint and the activation each wait for an idle lane), each bounded 30 s from its own
+stall, so the second could still stand at the kernel's limit with the engine alive and
+nothing on the glass. Every wait is therefore bounded from the chord too (vote 80,
+[[dec-2026-11-09-takeover-bound-from-chord]]): the seat stamps a generation's first
+sight in QUIESCING, which is the reply to the key that made the chord, and hands that
+instant to the device only across the phase-1 reap, the one pump after a STATUS that read
+the takeover still waiting (`Gpu::bound_takeover` set before it and cleared after it, round
+5; round 4 had cleared it at the end of each step). Every other pump runs without it: the
+kernel fails an expired chord lazily, at a call, and a later pump could otherwise kill a
+stall only the restore waits on (round 4 F1). At `TAKEOVER_BOUND_MS` from it a control stall
+still standing kills the engine (`settle_stall`) and a cursor stall abandons the lane
+(`cursor_settle`), both through `gpu_api::stall_verdict`, whose host test reads
+`SEAT_QUIESCE_LIMIT_NS` out of `seat.h` and asserts the bound plus one renewal interval
+falls inside it (and that a renewal a pass late still lands inside `SEAT_QUIESCE_NS`).
+No renewal follows either end, so the kernel's limit fails the chord by 35 s unless an
+abandoned chain retires first and the takeover goes through: every chord ends in the
+trusted screen, a dead engine, or a logged failure. The cost falls on a takeover still
+waiting at 33 s: a second wait in series dies younger than 30 s, and a takeover's own
+command stalling after 33 s dies at the next seat step's reap if the chord is still live,
+otherwise the restore waits on it. The phase term of `waiting_chord` is redundant (the
+reap it bounds is phase 1's); the activation term keeps a stall in phase 1 after
+activation clear, which no witness constructs (it needs the chord held past 33 s after
+the trusted screen is up). Witnesses:
+`ls-graphical-sak-dead` leg 1 (a stall withheld 8 s, no retirement in between), leg C
+(a cursor chain held 8 s: the takeover completes), leg X (one held past the abandonment:
+no renewal follows it, Lictor names the lane, the chord fails, then the lane revives),
+`ls-graphical-sak-chained` (its own lever, `Request::TestArmChained`: a control stall
+held 8 s and then a cursor stall held past every bound, which the takeover's bound
+abandons before the kernel closes the seat, after which, at 34 s, a control stall is
+withheld and the seat failed behind it, and that stall must survive to its release and
+the restore; then a cursor stall held 8 s and a control stall withheld for good, which
+the bound kills, last because the engine stays dead) and
+`ls-graphical-sak-backlog` (a client's deep queue, on a virgl device). Every lever raises
+its hold within milliseconds of the chord, so renewal at first sight rests on
+`gpu_api`'s host test alone, which fails on the old rule of arming first. A frame paint that meets a stall stays owed and the
+next pass paints it again. Once serving, no synchronous command waits past
+`SUBMIT_DEADLINE_MS`, a client's readback ahead of it or not (operator vote 72): one
+transfer cannot stop this loop for as long as its client queued; the command stalls
+the engine, which revives when the chain retires, and what a client sent meanwhile is
+refused. A serving `cursor_command` stalls the same way. A chain past
+`FENCE_ABANDON_MS` is abandoned rather than poisoned: a well-formed late retirement
+frees the lane (`cursor_queue::Queue::abandon`). A restore says one of four things (`Device::restore`, `Restored`,
+`Unrestored`). `Rebound`: the compositor's last frame is bound again. `Blank`:
+scanout 0 is disabled, because the compositor had bound nothing or because its
+frame could not be bound again -- the ledger no longer holds the resource, or
+the device answered the bind, or an image frame's flush, with an error (a blob
+frame's bind and flush go as one chain, and a flush error there is only logged,
+so that frame counts as rebound). Such a frame is given
+up (`presentation` becomes `None`; lictor says `the compositor's frame
+(resource N) was refused at the restore`), so a client that spoils its own
+frame, by detaching its backing on a device that wants one, loses the picture
+until it binds a frame again and costs the episode nothing. Its repaint after
+the episode does not bring the picture back: tapestryd binds its screen only
+when it enters composed mode (`let entering = self.scanout !=
+Scanout::Composed;`, usr/tapestryd/src/server.rs), so the output stays blank
+until its next mode change. `Waiting`: the device has not
+answered, because the engine takes no synchronous command or a stall began
+across the restore's commands (`gpu_api::met`); nothing is concluded from a
+stall, so RESTORING (the seat's phase 3) returns and asks again on the next
+pass, inside the five seconds the kernel gives it at END, and says `restore met
+a stall, waiting for the device` once a generation. Nothing of a client's joins
+the device's timeline meanwhile: from the STATUS that first reads the chord
+until the seat is NORMAL again, Lictor publishes no chain a client parked
+(`Gpu::hold_parked`, set by `Seat::step` from each STATUS before any pump; round
+27 F1). The takeover's synchronous chains are fenced on that timeline
+(`fence_sync`), so what a client put there before the chord has retired once the
+takeover is up. Before round 27 a client could park a readback behind a
+ring-timeline chain (a `ring_idx` above 0, which the takeover does not wait for)
+and so choose when the chains behind it reached the device; published inside the
+episode, they put the restore's fenced commands behind fresh client work until
+the kernel's five seconds ran out. Not yet shown on any host: whether a display
+path can make a restore bind wait behind ring-timeline work that writes the
+displayed resource (OPEN-BUGS, 2026-11-13). `Lost`: the engine is dead, or the
+device refused the disable, which names nothing of a client's; only then does
+Lictor fail the episode. The kernel fails it itself when its five seconds run out
+first, at Lictor's next call: RESTORED then finds the seat FAILED, takes it,
+retires the generation and returns NORMAL with the grant cancelled. FAILED
+(phase 4) restores the same way and asks again every pass while the restore
+waits, or is lost on a live engine; with the engine dead it returns the seat
+without its display. The restore's binds drain no parked free
+(`Gpu::set_scanout_restore`, `Gpu::set_scanout_blob_restore`): those frees are a
+client's and wait for a later bind that drains them -- a client's accepted image
+or blob bind, or the next takeover's trusted bind (a client's blob probe drains
+nothing) -- so one the device is slow to take cannot stand between an ended
+episode and its return. An episode that closes through its restore says
+`episode closed: frame rebound` or `episode closed: output blank`; one whose
+generation moved at RESTORED says `seat failed: the kernel's deadline passed
+before the restore was acknowledged` instead (round 27 F3), so a check counting
+failures sees the grant the kernel cancelled. Restoration
+stays owed until the
 kernel acknowledges RESTORED: when the kernel refuses it (a grantee that
 exited before the commit), the seat fails and rebinds again before it
 returns. `Seat.active` names the generation whose trusted scanout is up, so
@@ -825,6 +1047,26 @@ generation, phase, semantic frame/visibility sequence, held keys and secret FIFO
 
 ## Concurrency
 
+Lictor runs two threads. The input thread (`backend/intake.rs`, operator vote 72,
+2026-11-05) owns the virtio-input devices from the end of probe. Every 4 ms it drains
+each eventq into one queue of 4096 entries behind a futex `Mutex`, so a serve loop held
+in a synchronous GPU wait (up to `SUBMIT_DEADLINE_MS` behind a stall) leaves no ring
+undrained. It never calls the seat endpoint and never prints: a console write parks in
+the exclusive phase, and the thread that drains the rings must not park there. The
+ring's own notes (the test-mode low-water line, a malformed used element) travel in the
+queue, and the serve thread prints them. The serve thread swaps the whole queue out
+each pass and keeps every seat decision: what a key means, the kernel INPUT call, the
+compositor batches, the held-key table. An eventq overrun travels as an entry at its
+place in the order. An entry that finds the queue full is dropped and marks its device;
+the mark is set only while the queue is full and is taken with the entries, so the loss
+follows everything taken with it, and the serve thread releases that device's held keys
+there (`lictor: input queue overran`). A lost diagnostic note marks nothing. InputInfo
+answers from values read at probe, since the device belongs to the input thread.
+Nothing joins the thread: `t_exit_group` ends it with the process, and no input DMA is
+released before then. Under the armed test latch, F8 stops the input thread at the pass
+that read it, before that batch is queued, and the serve loop resumes it after its own
+five-second stop, so `ls-graphical-keys-overrun` still overruns the ring.
+
 The event loop polls physical input independently of broker reply progress.
 Accepted endpoints are nonblocking, so a stalled normal reader cannot park the
 trusted pump. Kernel transitions serialize under the process-table lock;
@@ -882,18 +1124,32 @@ past the quiesce deadline, and after each the link must rejoin, typing must reac
 the shell and the next chord must take (8 cycles by default, `LS_SOAK_CYCLES` for
 a hunt). `ls-graphical-sak-dead` fires the
 `test-latch-dead` lever's seat half, one shot per trusted takeover
-(`Device::test_latch_seat_shot`, `SeatShot`). The first stalls the engine between disabling the outputs and binding the
-trusted image, and the device retires it, so the takeover fails part-way and
-lictor must say `normal scanout restored` before the seat recovers, and typing
-must reach the shell. The second stalls the cursor queue inside exclusion and
-holds its retirement until the seat restores, so the restore must go through
-on the control queue alone (`Gpu::test_cursor_stall_next`). The third has the
-kernel's RESTORED refused after a completed restore: lictor must rebind again
-before the seat returns, and the next takeover must exclude and bind afresh.
-The fourth stalls the engine under the trusted scanout with the
-retirement withheld, so the engine dies at 30 s. The seat must recover with
-its display lost, and a key typed afterwards must draw lictor's
-`input withheld` line, while the shell stays silent. Ordinary test descendants are refused trusted-seat
+(`Device::test_latch_seat_shot`, `SeatShot`: fourteen, in firing order; the
+scenario's header describes each leg). A stall between disabling the outputs and
+binding the trusted image (leg S) or on the takeover's first paint (leg P) is no
+answer, so the takeover starts over once the engine revives and the trusted
+scanout comes up. A refused trusted bind (leg A) or a refused first frame (leg G)
+is an answer, so the takeover or the episode fails at once, and lictor must say
+`normal scanout restored` before the seat recovers and typing reaches the shell.
+A cursor stall held 8 s inside exclusion (leg C) is waited out; one held past the
+abandonment bound (leg X) ends the wait, and the restore goes through on the
+control queue alone (`Gpu::test_cursor_stall_next`). Leg R has the kernel's
+RESTORED refused after a completed restore: lictor must rebind again before the
+seat returns, and the next takeover must exclude and bind afresh. A stall standing
+as an ended episode's restore begins (`SeatShot::StallInRestore`, leg T) and one
+begun by the restore's own first command (`SeatShot::StallInsideRestore`, leg B,
+round 27 F2) must each make lictor say the restore waits; the seat must not fail,
+and the episode must close with the frame rebound. Leg T's stall stops the
+restore at its entry check (`Gpu::takes_commands`); only leg B reaches the stall
+count the restore reads before staging (`gpu_api::met`), which is what tells a
+stall from a refusal there. The last shot (leg 2) stalls the engine under the
+trusted scanout with the retirement withheld, so the engine dies at 30 s. The seat
+must recover with its display lost, and a key typed afterwards must draw lictor's
+`input withheld` line, while the shell stays silent. `ls-graphical-sak` reads its
+whole transcript at the end and requires that no seat failed and that each of its
+four episodes closed with the frame rebound: a seat that fails at the restore
+recovers by itself, so nothing else in it would notice an episode whose grant was
+cancelled there. Ordinary test descendants are refused trusted-seat
 operations and GPU claims at every stage. The run disables serial authorization.
 Broader accelerated/backend and SMP verification remains in progress. Host tests exercise framing,
 semantic validation, ownership/retirement, keymaps and rendering rejection.
@@ -986,10 +1242,145 @@ every gate that reaches the desktop has crossed a real rewind on the real
 device; `ls-graphical-sak` asserts the witness line. A device that is never
 once idle across the last 2^31 ids still fails closed.
 
+**Parked readbacks (operator vote 81, GPU-DESIGN 4.5.13).** On thyla-pi, QEMU
+decoding a client's readback of a busy BO sat in V3D's wait-BO ioctl for the
+BO's whole queue holding QEMU's big lock, so no vCPU completed an emulated MMIO
+write, and this loop's queue notify froze before any timed wait began. The
+fenced lane therefore parks a `TRANSFER_FROM_HOST_3D` while its context has a
+chain the device may still run (in flight, or abandoned and not yet retired),
+and parks every later chain of that context behind it (`gpu_api::must_park`).
+The completion pump publishes a parked readback once its context is clear, with
+the chains behind it, up to that context's next readback (`gpu_api::unpark_plan`);
+a chain that can reach an owed free stays until the free is paid (Owed frees,
+below).
+- **Ids.** The owner id is minted at submission; the wire id is taken at
+  publication (`Controlq::publish_staged`), so the device sees wire ids in
+  publication order.
+- **What the lane counts.** A parked chain holds its slot (`fslot_parked`) and
+  counts for its context (`ctx_fences_in_flight`), and for the compositor's pump
+  (`fenced_outstanding`). It is not on the device: `fenced_in_flight`, which the
+  seat's takeover lines count, `device_idle` and the abandonment clock leave it
+  out. The test build's stall census (`fenced_held`, `Request::FencedHeld`)
+  returns parked chains as well, flagged (`gpu_api::HeldRow`; the wire carries
+  an 8-tuple), so a slot a parked chain holds is named, not missing.
+- **Retirements.** A retirement that a parked chain can reach parks
+  (`retirement_hold` counts parked reaches as in flight), so no detach or unref
+  runs under a chain that has yet to publish. An owed free's repeat is the
+  exception (next).
+- **Owed frees.** A chain that can reach an owed free parks, and the pump keeps
+  it, with its context's later chains, until the free is paid
+  (`gpu_api::OwedReach`, an argument to `must_park` and `unpark_plan`). Without
+  it, a context live again after its vindication and kept rendering held its
+  taken free off for good (vote 81 audit r7 F1). `Device::refresh_owed_reach`
+  builds it before every completion pump, the only place a parked chain
+  publishes, from the owed ids no poisoned chain reaches (`OwedReach::of`: one
+  that is reached waits for the vindication anyway, and a chain parked behind
+  it would have no clock) and the contexts that hold one (`Objects::held_by`,
+  `Objects::holders`). Every serve pass begins with a pump, so a chain commits
+  against a reach at most a pass old; a stale reach only lets a chain go to the
+  device, where the free waits for it as for any, or keeps one parked until the
+  next pump. A stall one of the pass's own commands meets stands the pass down
+  (`Gpu::owed_stood_down`, `gpu_api::owed_stands_down`) until another stall
+  begins or the engine has run `OWED_QUIET_MS` (a synchronous deadline) since
+  that stall revived (`Controlq::revived_at`), so that revival's window goes to
+  the requests (vote 81 audit r8 F4 and a self-found twin: the pass ran before
+  the requests in each serve pass and re-stalled the engine at every revival).
+  The same stall stands down the barrier of the free whose command met it, and
+  no other (`OwedFree::stood_down`, `gpu_api::owed_barrier`), and every context
+  that holds that free goes to the device for the window, whatever other owed
+  free it holds (`OwedReach::of`; audit r11 F1: a context holding two owed frees
+  never went, the two standing down in turn); a transfer naming another owed free
+  still parks. A free is tried only while no chain on the device can reach it,
+  so the work of the contexts its stand-down lets go cannot have caused its
+  stall. Each pass first tries one free a parked chain waits on, taking the
+  contexts with parked chains in turn (`gpu_api::OwedPass`, `Gpu::owed_turn`),
+  then the rest in rotation: under a load that stalls every repeat a pass tries
+  one free a window, and in plain rotation a context would wait once per owed
+  free, which another client can make hundreds (audit r11 F1 addendum); in turn,
+  once per context with a parked chain. The turn has its own looks and the
+  rotation its own, set once the turn's pick is out (audit r12 F1: a shared
+  budget let one context whose frees all waited on chains spend the whole
+  pass, every pass). A turn out of looks inside a context that had them all
+  moves the cursor past it; inside one the contexts before it cut short, the
+  next turn starts at it (audit r13 F1: a context cut short went last again in
+  the next pass). A turn looks only at frees that hold a parked chain back
+  (`OwedReach::bars`), never one a poisoned chain reaches. Any other stall leaves the
+  pass and every barrier up: at its revival the chains a barrier holds stay
+  parked, and the pass takes its turn ahead of the requests after whatever else
+  that pump published, a readback's run say (audit r9 F1: standing down after
+  every stall, a workload with one slow command per revival kept every owed free
+  unpaid and the barrier lifted for good; audit r10 F1: one stand-down lowering
+  every barrier, a context busy enough to stall the pass's repeat of another
+  client's free had its chains let past its own free at every such revival).
+  `Gpu::owed_barrier` (the owed ids the barrier holds chains back for, and apart
+  from them each free standing down) is empty once the engine is dead.
+  `FreesOwed` counts the pass's stand-downs (`Frees::stood_down`) and the frees
+  it tried as a parked context's turn (`Frees::parked_first`), both monotone.
+  The pay pass's hold leaves parked chains out (`Controlq::owed_free_hold`): none
+  is on the device or publishes
+  during the pass, and one that can reach the free waits for it. The test-mode
+  `Request::TestOwedDefer` (opcode 72; a context of the caller's,
+  `TEST_OWED_DEFERS` (16) arms a boot of `TEST_OWED_DEFER_MS` (2 s) at most, one
+  context at a time, ended early only by its own, cleared at that context's
+  destroy) has the pass skip the frees a context can reach, for the readback
+  leg's BUSY, APART and LIFT arms. The test-mode `Request::TestOwedStall`
+  (opcode 73; a live resource of the caller's, `TEST_OWED_STALLS` (12) shots a
+  boot, one at a time, gone unspent after `TEST_OWED_DEFER_MS`) rides one stall
+  shot on the pass's next command for that resource's owed free, for the YIELD,
+  APART and LIFT arms.
+- **Stall and death.** Nothing publishes while the engine refuses. A dead
+  engine releases every parked chain as refused (`ok = false`, not abandoned):
+  the device never saw it.
+- **Abandoned prefix.** When a context has an abandoned chain not yet retired
+  (`ctx_poisoned`), the pump releases every parked chain of that context as
+  refused (`gpu_api::Unpark::Release`). The abandoned chain may never retire and
+  a parked chain has no abandonment clock, so a chain left parked would keep
+  `fenced_outstanding` above zero, and tapestryd's poll at 1 ms, until the
+  context died. For the compositor's readback the release also frees the one
+  reserved slot for every other surface. A released tag carries `released`, so
+  the seam can tell it from a chain the device answered with an error.
+- **Released context.** `gpu_api::release_tag` builds the released tag and
+  records a client chain's context in `Controlq::released`
+  (`gpu_api::Released`, one entry per device context). From then on
+  `must_park` parks every chain of that context and `unpark_plan` releases it,
+  until a `ctx_destroy` of the device context the released chain rode completes
+  and forgets it (a destroy whose outcome is unknown keeps the record). The
+  entry is held by pub, because a seam context's chains ride two device
+  contexts (GL and venus), and tapestryd reissues no pub while an entry may
+  still name it. tapestryd latches the stream only when its next pump takes the
+  released tag, and Lictor runs the pump's release in the reap that trails a
+  request, so tapestryd can admit one more chain from its older view.
+  Published, that chain would run after a readback that never ran and its
+  completion would count past it. A compositor readback's release records
+  nothing, the same as tapestryd.
+- **The harness hold.** A chain whose retirement the test hold swallowed
+  (`held_retires`) has finished on the device, so nothing waits for it.
+
+Each tag carries `parked_ms` and `exec_ms` (publication to retirement), and a
+test build says a readback that parked or ran 20 ms or more when its park or its
+run at least doubles the last one said (`Controlq::rb_said`), so the say is
+bounded per boot. The C-6 gate's
+DEADLINE arm judges both.
+
 Open after that review:
 
 - `test-mode` is still a default cargo feature of `lictor` and `tapestryd`, so
-  every image carries the levers (the #880 strip-for-production class). The
+  every image carries the levers (the #880 strip-for-production class). Of the
+  armings a compositor can send, `TestArmLatch` and `TestArmChained` need their
+  word on the kernel's command line, read by Lictor. `ArmScanoutDisableRefusal`,
+  the compositor's self-test lever, is in every build and needs none; it is
+  scoped instead: only a client's own disable spends it
+  (`Gpu::set_scanout_client`), never a bind the broker issues for itself, so it
+  cannot refuse the seat's restore. The others need no word and cannot reach a
+  takeover, each for its own reason. A `TestStallShot` arms one slot, the latest
+  sender's: it rides that connection's next runnable request and is spent there, and
+  a later shot from any connection silently replaces an unspent one. Only a phase-0
+  request can stage a command, and that request's reap revives the stall; nothing
+  bounds how often it is sent. `TestOwedDefer` and `TestOwedStall` act only in the
+  phase-0 owed-free pass and are counted per boot. The context hold and abandon
+  verbs touch only fenced chains, which a takeover does not wait for
+  (`takeover_clear`, vote 50); Lictor takes any context id for them, and it is
+  tapestryd's ctl that keeps a session client to its own (#178). The
   production compile is now VERIFIED (2026-09-21): `cargo check --release -p
   lictor --no-default-features --features backend`, and `-p tapestryd` /
   `-p halcyond` with `--features guest`. It did not build before that: the
@@ -997,18 +1388,25 @@ Open after that review:
   request in every build. The verb is now refused (`BadField`) without the
   feature, like the four `Test*` verbs beside it; nothing in the tree sends it
   (the backend runs the selftest itself at init).
-- The context-hold verbs are in every image too, and need no arming.
-  `TestHoldCtx` reaches any client that has a warp context, so on a virgl
-  device, through tapestryd's `warp-hold`; a held context's retirements are
-  swallowed, `Gpu::all_work_retired` stays false, and a trusted takeover then
-  fails at the kernel's quiesce deadline for as long as the hold stands. The
-  failure is recoverable and authorization stays closed, as with a hung GL
-  chain, but the verb makes it free. On this tree it stands, read from the
-  code and not run here. It is corona's entry of 2026-11-03 (a poisoned
-  fence denies the graphical SAK), and corona's landing branch cures it: the
-  seat asks `Gpu::takeover_clear` (vote 50), which reads no fenced slot, with
-  `ls-graphical-sak-poison` for its scenario. It reaches this tree with main.
-  The verbs themselves close with #880.
+- The restore's answer to a refused frame and to a stall (the paragraph on
+  restoration above) is WRITTEN AND NOT YET BUILT OR RUN IN A GUEST. It answers
+  audit round 25: before it, `DetachBacking` of the resource on the display left
+  the restore rebinding a resource the 2D device refuses (by QEMU's source; not
+  yet run in a guest), RESTORING failed the episode after authentication and
+  FAILED asked the same refused rebind every pass with no bound, so the seat
+  never returned for the boot; and RESTORING failed on a stall where the other
+  phases wait. `DetachBacking` itself is still not refused: tapestryd calls it at
+  nine sites that were not read for this change, and the restore no longer
+  depends on what a client detaches. Owed before this item goes: the first build, a
+  compositor that detaches the displayed resource's backing in a guest, leg T,
+  and the plain scenario's closing check, each seen red without its fix. Not
+  witnessed and not planned to be: that the restore drains no free (read the
+  two `_restore` binds). What the design holds: a client may delay a
+  command the broker issues for itself -- the exclusion, the trusted bind, the
+  restore -- within the kernel's deadline, and may make a takeover fail before
+  anything is granted (votes 30, 71, 72, 79); it must not make an authenticated
+  episode fail, cancel its grant, keep the seat from returning, or make a broker
+  command be skipped or act on another object.
 - There is no layout under 800x720 layout pixels. A display smaller than that
   is given a screen of twice or more its size (since 2026-11-11; before that it
   refused the whole seat at startup), which the frontend shows scaled down.

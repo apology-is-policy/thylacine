@@ -50,3 +50,14 @@ seat failed: `lictor: seat failed: normal scanout restoration`). Both on ce4243c
 corona's landing, on main at 7da0341f4, closes it in `Gpu`: `set_scanout_client` reads the
 drill and `set_scanout`, which `restore` calls, does not (corona's round 24). When aux-3-mac
 merges main, main's form stands and this branch's `Device` form goes.
+
+## At the merge (2026-11-13)
+
+aux-3-mac merged main e28cc34ea that day. In `device.rs` and `gpu.rs` main's form stands:
+`Device` holds no drill, `SetScanout` goes through `Gpu::set_scanout_client`, and `restore`
+binds through `Gpu::set_scanout_restore`. The other Lictor changes the merge brought together:
+- `Gpu::unref_wire` (the trusted screen's `unref_own` shares it) now judges an unref's answer as
+  main does (`gpu_api::unref_frees`).
+- `Stats` carries both `display_events` (aux) and `stalls_begun` (main).
+- `TestArmLatch` gives 14 seat shots (main) and 6 stall shots (aux: three for the display's binds).
+- The trusted screen's `follow` runs after main's owed-free pass, at phase 0.

@@ -70,6 +70,12 @@ the slave binding with the same registry; a ctl open registers nothing.
 set as `consctl`. A fresh pts is **full cooked** — the Linux fresh-pts
 posture, unlike the boot console, which comes up ISIG-only.
 
+A canonical read ends at its line, so `head -n 1; next` leaves the second
+line for `next`, and a control byte in a canonical line echoes as `^X`, so an
+arrow key in a cooked window neither moves the cursor nor puts a terminal
+emulator in an OSC. The line bound is N_TTY's, 4095 bytes, so a line and its
+newline fit an empty ring; a longer one still runs truncated.
+
 Input (a master write — the emulator's keystrokes), in order:
 
 1. **ICRNL** — CR folds to NL.
@@ -78,7 +84,7 @@ Input (a master write — the emulator's keystrokes), in order:
    echoed. The set (rather than a queue) dedups repeats and cannot
    overflow, so a distinct class can never be lost behind a same-class
    run — the G-3-era F2 fix.
-3. **ICANON** — erase pops the last unflushed byte and echoes `\b \b`;
+3. **ICANON** — erase pops the last unflushed byte and echoes `\b \b` per column;
    NL flushes the line *including its newline*; anything else assembles.
 4. **raw** — straight into `m2s`.
 
@@ -97,12 +103,12 @@ the selftest assert classes on a local pts with no kernel registration.
 the five flags, and `winsize <cols> <rows>` (decimal, canonical,
 ≤ 65535). **Two passes** — everything validates before anything applies,
 so one malformed token rejects the whole write with the mode unchanged
-(the tcsetattr-atomic posture). A flag change resets the assembly line
-(TCSAFLUSH). A winsize write raises `tty:winch` **only if the size
+(the tcsetattr-atomic posture). A flag change keeps the assembly line:
+the same line continues. A winsize write raises `tty:winch` **only if the size
 actually changed** — the Linux `TIOCSWINSZ` behaviour.
 
-A ctl write that *clears* `ICANON` is the one exception to "a flag change
-resets the assembly": it delivers the pending canonical line to the slave
+A ctl write that *clears* `ICANON` is the one exception to "the same line
+continues": it delivers the pending canonical line to the slave
 as raw bytes (`deliver_partial_line`) rather than discarding it, because
 discarding it dropped the head of a type-ahead line between a job's last
 output and the shell's prompt-mode re-arm — "mode writes deliver, never
@@ -145,7 +151,7 @@ to polling fd 0, never fails the pts dance.
 ## Data structures
 
 `Pts`: the two `VecDeque` rings (`m2s`, `s2m`, 4 KiB each — the classic
-tty buffer size), the termios word, a 256-byte ICANON assembly line, the
+tty buffer size), the termios word, a 4095-byte ICANON assembly line, the
 3-bit signal set, the winsize pair, the kernel `pts_id`, and **two
 distinct counts**:
 
@@ -299,7 +305,7 @@ the POSIX value is the 9P ecode.
 
 Terminal-scale, and deliberately so: 4 KiB per direction, a 32 KiB
 negotiated msize matching the kernel client's proposal so a full data
-frame crosses in one op, a 256-byte canonical line. Reads are
+frame crosses in one op, a 4095-byte canonical line. Reads are
 one-`t_read`-per-serviced-event with a partial frame waiting for the
 next readable event. `read_ready` keeps a parked read allocation-free.
 The global FRAME coalescing that a compositor needs has no analogue here
@@ -329,27 +335,38 @@ The global FRAME coalescing that a compositor needs has no analogue here
   `FILE_RW`, and the fix (per-pts owner + `0600`) needs either
   per-session submounts or per-op principal forwarding, because the
   shared kernel mount arrives as SYSTEM.
-- **The cooked arm drops where the raw arm back-pressures.** A byte past
-  `LINE_MAX` is consumed and discarded un-echoed; a line flush into a
-  full `m2s` discards the tail; `echo()` drops on full unconditionally.
-  All three are the classic tty-overrun semantic that the kernel console
-  reference also carries. They matter because the model does not cover
-  them — see [[spec-pty]] and task #48.
+- **A cooked line goes whole or waits.** A newline whose line and terminator
+  do not both fit in `m2s` is refused: nothing moves, nothing echoes, the line
+  stays assembled, and the write returns short, so the writer re-offers the
+  newline (`kaua-term` and `ptyhost` wait out a count of 0 for 200 ms, then
+  drop the rest of that buffer). This is the kernel console's `#129` rule.
+  `LINE_MAX` plus the newline fits an empty ring, so no line waits for ever
+  behind a reader that reads. A signal byte is not held up, even behind the
+  refused newline in one write: it discards that line and whatever the write
+  held between them, none of it committed, as an erase would and not counted.
+  Raw mode has no assembly: a signal behind a byte the ring cannot take waits
+  its turn, since counting past that byte would leave a hole in the stream the
+  reader cannot see. Alone, it goes.
+  Until 2026-11-05 a short flush lost the tail and the newline, so the head ran
+  on into the next line, though the echo had shown them apart.
+- **Three sites still drop.** A byte past `LINE_MAX` is consumed and discarded
+  un-echoed; an echo unit drops on full, whole, so half a caret or half an
+  erase never shows, and it is counted but not reported; a mode write's flush
+  truncates into a full ring. The first two are the classic tty-overrun semantic
+  that the kernel console reference also carries. They matter because the model
+  does not cover them — see [[spec-pty]] and task #48.
 
-  **Since `#95` (`c0c76977`) each site is counted**: `drop_flush` (the
-  cooked line into `m2s` — the one that carries *command* bytes),
-  `drop_line` (assembly overflow past `LINE_MAX`), `drop_echo` (the
-  deliberate best-effort echo, counted separately so it can never be
-  mistaken for the other two), and — since the `ccb597b8` round (F2) —
-  `drop_modeflush` (a ctl write clearing `ICANON` pushing the pending
-  line into a full `m2s` as raw, via `deliver_partial_line`). The fourth
-  is **not** bookkeeping symmetry: it carries `#95`'s *exact* observed
-  shape where `drop_flush` cannot. A short cooked flush loses the line's
-  tail **and** its newline, so the line never runs; a short mode-flush
-  loses the tail but the terminator then arrives raw in the new mode, so
-  the truncated command **runs** — precisely the `sleep 30`->`sleep 3`
-  signature below. Folding it into `drop_flush` would have falsified that
-  row (the kernel twin is `rx_drop_modeflush`). Previously every site discarded
+  **Since `#95` (`c0c76977`) each site is counted**: `drop_line` (assembly
+  overflow past `LINE_MAX`), `drop_echo` (the deliberate best-effort echo,
+  counted separately so it can never be mistaken for the others, and never
+  reported, since no input is lost), and — since
+  the `ccb597b8` round (F2) — `drop_modeflush` (a ctl write clearing `ICANON`
+  pushing the pending line into a full `m2s` as raw, via `deliver_partial_line`).
+  A mode write has no writer to refuse, so that one is a real drop, and it
+  carries `#95`'s *exact* observed shape: it loses the tail but the terminator
+  then arrives raw in the new mode, so the truncated command **runs** —
+  precisely the `sleep 30`->`sleep 3` signature below (the kernel twin is
+  `rx_drop_modeflush`). Previously every site discarded
   `ring_push`'s return, so a loss left nothing behind — `#95` was found
   as `sleep 30` arriving as `sleep 3`, which is the failure mode that
   matters: a truncated command still *runs*. Counting is unconditional;
