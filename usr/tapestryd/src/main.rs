@@ -297,14 +297,14 @@ fn declared_scale() -> Option<u16> {
 /// compositor ride it out. Per boot, and set by whoever boots the machine.
 #[cfg(feature = "test-mode")]
 fn latch_dead_declared() -> bool {
-    bootarg_declared(b"thylacine.test-latch-dead")
+    bootarg_declared(lictor::gpu_api::TEST_LEVERS_WORD)
 }
 /// Test lever: `thylacine.test-latch-chained` has lictor make each of the next two
 /// trusted takeovers wait twice in series, the second wait outlasting the takeover's
 /// bound from the chord (vote 80).
 #[cfg(feature = "test-mode")]
 fn latch_chained_declared() -> bool {
-    bootarg_declared(b"thylacine.test-latch-chained")
+    bootarg_declared(lictor::gpu_api::TEST_CHAINED_WORD)
 }
 /// Test lever: `thylacine.test-seat-start`, which halcyond also reads, refuses the
 /// boot's first seat reservation, so the client's retry is reached on every run.
@@ -324,11 +324,9 @@ fn bootarg_declared(word: &[u8]) -> bool {
     let mut buf = [0u8; 1024];
     let n = unsafe { t_read(fd, buf.as_mut_ptr(), buf.len()) };
     unsafe { t_close(fd) };
-    n > 0
-        && (n as usize) < buf.len()
-        && buf[..n as usize]
-            .split(|b| b.is_ascii_whitespace() || *b == 0)
-            .any(|w| w == word)
+    // The broker's own rule for a word: it refuses an arming this one would ask for
+    // on a line it reads otherwise.
+    n > 0 && (n as usize) < buf.len() && lictor::gpu_api::bootarg_declared(&buf[..n as usize], word)
 }
 
 struct Tapestryd {

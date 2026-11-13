@@ -12,7 +12,7 @@ hazards: [haz-driver-panic-dos]
 abis: []
 design: ["docs/TAPESTRY.md", "docs/AURORA-CONFIG.md"]
 created: 2026-08-02
-updated: 2026-11-10
+updated: 2026-11-13
 ---
 ## Cooperative hidden storage (October 4)
 
@@ -1109,7 +1109,15 @@ to stall the GPU engine when a 97x89 surface retires; the global ctl
 says `test-latch-dead armed` only once the broker has accepted it, and
 `tools/interactive/ls-gpu-dead.exp` asks that state, then watches the compositor survive a
 dead engine -- the retirement refused, the ctl still answered
-([[sub-lictor]]). The same arming lets tapestryd aim one stall at a
+([[sub-lictor]]). The word is not tapestryd's to vouch for: the broker reads
+the command line itself and refuses an arming whose word it does not find, and
+tapestryd names the word by the broker's constant and matches it with the broker's
+own function (`lictor::gpu_api::TEST_LEVERS_WORD`, `bootarg_declared`). The two
+still read the file separately (tapestryd in one read, the broker to its end). A
+refusal marks two readings that disagree one way: tapestryd found the word and the
+broker did not, and both say so. Where only the broker finds it, tapestryd never
+asks, and nothing is armed or said.
+The same arming lets tapestryd aim one stall at a
 composition health step (below). `thylacine.test-latch-chained` arms the
 broker the same way (`Request::TestArmChained`) to make each of the next two
 trusted takeovers wait on the device twice in series, and tapestryd says

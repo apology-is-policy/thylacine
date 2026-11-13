@@ -37,7 +37,15 @@ impl Driver for Lictor {
         }
         if inputs.iter().filter(|i| i.keyboard).count() != 1 { return Err(Error::Hardware); }
         let screen = Screen::new(&mut gpu)?;
-        let device = Device::new(gpu, 0)?;
+        #[cfg_attr(not(feature = "test-mode"), allow(unused_mut))]
+        let mut device = Device::new(gpu, 0)?;
+        #[cfg(feature = "test-mode")]
+        {
+            let mut buf = [0u8; 1024];
+            let line = lictor::backend::bootargs(&mut buf);
+            device.test_declare(lictor::gpu_api::bootarg_declared(line, lictor::gpu_api::TEST_LEVERS_WORD));
+            device.test_declare_chained(lictor::gpu_api::bootarg_declared(line, lictor::gpu_api::TEST_CHAINED_WORD));
+        }
         // The input devices go to their own thread, so a GPU wait here never leaves a
         // ring undrained. Last: nothing after it can fail the probe.
         intake::start(devices)?;

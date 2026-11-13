@@ -4,7 +4,6 @@
 set ::env(THYLACINE_ACCEL) [expr {[info exists ::env(LS_CI_GFX_ACCEL)] ? $::env(LS_CI_GFX_ACCEL) : "hvf"}]
 set ::env(THYLACINE_SERIAL_SAK) 0
 source [file join [file dirname [info script]] lib.exp]
-if {[info exists ::env(THYLACINE_EGL_VNC_SOCKET)]} { lc_require_host_pil }
 set repo $lc_repo
 set qmp [lc_qmp_sock]
 
@@ -147,6 +146,18 @@ lc_expect "corvus: imperium: DECLINED at the prompt" "operator cancellation"
 after 1000
 witness cancelled
 capture final
+# Each of the four episodes above must have closed through its restore. A seat
+# that fails at the restore cancels the episode's grant and then recovers by
+# itself, and the chords after it work, so nothing above would notice it.
+log_file
+set fh [open $transcript r]
+fconfigure $fh -translation binary
+set seen [read $fh]
+close $fh
+if {[regexp {lictor: seat failed: [^\r\n]*} $seen hit]} { lc_fail "a trusted episode failed: $hit" }
+set closed [regexp -all {lictor: episode closed: frame rebound generation=[0-9]+} $seen]
+if {$closed != 4} { lc_fail "$closed of the 4 trusted episodes closed with the compositor's frame rebound" }
+lc_pass "all four trusted episodes closed through their restore, the compositor's frame rebound, and the seat never failed"
 # Test builds start the GPU wire fence sequence just short of its rewind point
 # (usr/lictor/src/fence.rs), so a session that reached the desktop has crossed
 # a REAL rewind against the real device, and every present, takeover and
