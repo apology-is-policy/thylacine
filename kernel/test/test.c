@@ -2947,6 +2947,7 @@ struct test_case g_tests[] = {
                                        test_p9_attached_walked_outlives_root_no_uaf,
                                                                            false, NULL },
     { "p9_attached.ctl_registry",      test_p9_attached_ctl_registry,      false, NULL },
+    { "p9_attached.ctl_label_alphabet", test_p9_attached_ctl_label_alphabet, false, NULL },
     { "p9_closer.dying_close_delivers_tclunk",
                                        test_p9_closer_dying_close_delivers_tclunk, false, NULL },
     { "p9_closer.exit_close_hands_off_tclunk",
