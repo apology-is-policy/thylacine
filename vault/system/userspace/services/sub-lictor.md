@@ -428,11 +428,27 @@ change. The leg's first version read only those two, and a Lictor made to
 follow while its screen is up passed it. The leg as it is
 fails that Lictor in a guest (2026-11-13): no line in the 4 s, a dump still
 1600x1000, and the rule's row black across. The dump is taken as it is, with
-no wait for a picture, which a scanout with no image nearly lacks. Not shown by any
-test: a failed making and its retries, the spare that is owed and its release
-asked again, the lever's shot set aside, memory that cannot be had, a display
-that changes during entry or restoration, and the EDID's millimetres on this
-path. `backend/screen.rs` is in no host build, and no lever stalls one of
+no wait for a picture, which a scanout with no image nearly lacks.
+`tools/interactive/ls-graphical-sak-unmade.exp` is the making that fails, and
+it is the device that fails it: one boot of the session image at 1280x800 on a
+device given a cap on what its images may take (QEMU's `max_hostmem`), set
+between what the session holds and what it holds with the largest trusted
+image. The display grows to 2048x1080 and both follow. It then becomes
+4096x2160, which leaves the session's mode as it is, and the device answers
+the making of the 35.4 MB image "out of memory" seven times: the first, and
+six more after waits that double. The scenario reads all 26 lines in their
+order (from the second making on, the spare let go of and refused twice as a
+resource the device has not; the making refused; the screen said to stay
+2048x1080 at one, six times to be tried again and the seventh not), requires
+the 18.9 s of waits, then reads the 2048x1080 picture under secure attention,
+waits out 21 s with no eighth making, and has a display of 1280x800 made and
+shown. The cap is a measured number: a session that takes more of the device
+moves it, and the scenario says so where a refusal comes out of its place.
+Not shown by any test: a release of the spare that is not answered for (a
+stall), after which it stays owed and is asked for again; a making the device
+accepts and does not back; the lever's shot set aside; memory that cannot be
+had; a display that changes during entry or restoration; and the EDID's
+millimetres on this path. `backend/screen.rs` is in no host build, and no lever stalls one of
 Lictor's own commands.
 
 ## Purpose

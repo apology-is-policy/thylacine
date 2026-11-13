@@ -1,0 +1,407 @@
+#!/usr/bin/expect -f
+# ls-graphical-sak-unmade -- a trusted screen the device would not make.
+#
+# GRAPHICAL-SAK-OWNERSHIP.md, "The trusted screen follows its display": what
+# cannot be made leaves the screen that stands. One boot of the session image
+# on a 1280x800 display with nothing declared, shown through a VNC server so
+# that the display can be told a size, on a device given a cap on the memory
+# its images may take (QEMU's `max_hostmem`, 256 MiB where none is given).
+# The session fits under the cap at every moment of this boot, and the
+# session with a trusted image of 4096x2160 does not, so it is the device
+# that refuses, as a host short of memory would:
+#
+#   the boot:    Lictor says nothing of its screen: 1280x800 at one is the
+#                display's own. No command of the device's is refused.
+#   grown:       the display becomes 2048x1080, and the session and the
+#                trusted screen follow to it, at one. This is where the
+#                refusal is made from: the session keeps this mode through
+#                the next change, so what the device holds does not move
+#                while the largest image is asked for.
+#   refused:     the display becomes 4096x2160. The session's mode is half
+#                of that, the one it has. The trusted screen for it is an
+#                image of 35.4 MB, and the device answers the making "out of
+#                memory" seven times: the first, and six more after waits
+#                that double from 0.3 s, 18.9 s in all. Before each of the
+#                six Lictor lets go of the spare the making before it may
+#                have left with the device, which answers twice that it has
+#                no such resource. Each time Lictor says its screen stays
+#                2048x1080 at one, six times "to be tried again" and the
+#                seventh not. Every line is read and each is the next one
+#                wanted, so a refusal more than these (one of the session's
+#                own, were the cap not to fit it) fails here.
+#   stands:      secure attention. The scanout is 2048x1080, the rail's rule
+#                is device row 47 and rows 94 and 95 are the background: the
+#                screen that stood is whole after seven makings that failed.
+#   given up:    21 s from the seventh line without another making. Were
+#                they to go on, the eighth would be 19.2 s after it, and one
+#                put off by the episode would come when the episode ends.
+#   afterwards:  the display becomes 1280x800. Lictor lets go of the spare
+#                once more and makes that screen, at one: an event given up
+#                on does not hold the next. Secure attention: 1280x800, the
+#                rule on row 47.
+#
+# The cap is 79691776 bytes (76 MiB). Measured 2026-11-13 on QEMU 10.0.2 with
+# this image, by one traced boot of this sequence with no cap (QEMU's trace
+# events virtio_gpu_cmd_res_create_2d and virtio_gpu_cmd_res_unref, four bytes
+# a pixel): under a cap the device would hold 67.3 MB at the most (71.4 MB,
+# had Lictor's making come at the session's fullest moment), and 56.1 MB,
+# without a change, for as long as the largest image is asked for; with that
+# image, 91.5 MB. A cap over the first figure and at most the last refuses
+# that image and nothing else, and this one is 8 MB from the nearer of the
+# two. Asked for straight from the boot's display, where the session grows at
+# the same change, the same image leaves about 5 MB between them, which is
+# less than one more full-screen buffer of the session's: that is what the
+# second step is for. A session that takes more of the device moves the
+# figures: a refusal out of its place below, or the largest image made, says
+# that before it says anything of Lictor.
+#
+# NOT asserted: a making the device accepts and then does not back; a release
+# that is not answered for (a stall), after which the spare stays owed; memory
+# the guest cannot give; a display that changes while entry or restoration is
+# under way; what the session does when a making of its own is refused.
+#
+# LS_SAK_UNMADE_CAP=<bytes> gives the device another cap, and 0 none. With
+# none the image is made, and the scenario fails at the first line of Lictor's
+# it reads: the control that the cap is what refuses. No gate sets it.
+# LS_SAK_UNMADE_SHOTS=<directory> keeps the two dumps there, as stood.ppm and
+# after.ppm, to be put beside the host renderer's pictures of those screens.
+# No gate does that.
+#
+# Requires HALCYON_SESSION=y: the seat runs under the session compositor.
+set ::env(THYLACINE_ACCEL) [expr {[info exists ::env(LS_CI_GFX_ACCEL)] ? $::env(LS_CI_GFX_ACCEL) : "hvf"}]
+set ::env(THYLACINE_SERIAL_SAK) 0
+set ::env(THYLACINE_GPU_RES) 1280x800
+catch {unset ::env(THYLACINE_SCALE)}
+catch {unset ::env(THYLACINE_HIDPI)}
+set ::env(THYLACINE_VNC_SOCKET) /tmp/ls-graphical-sak-unmade-[pid].sock
+set ::env(THYLACINE_DISPLAY) vnc-unix
+set cap 79691776
+if {[info exists ::env(LS_SAK_UNMADE_CAP)]} {
+    set cap $::env(LS_SAK_UNMADE_CAP)
+}
+if {$cap != 0} {
+    # The resident device is the PCI one; what the caller passes stays.
+    set extra "-global virtio-gpu-pci.max_hostmem=$cap"
+    if {[info exists ::env(THYLACINE_QEMU_EXTRA)]} {
+        set extra "$::env(THYLACINE_QEMU_EXTRA) $extra"
+    }
+    set ::env(THYLACINE_QEMU_EXTRA) $extra
+}
+source [file join [file dirname [info script]] lib.exp]
+set repo $lc_repo
+set qmp [lc_qmp_sock]
+set ppm /tmp/ls-graphical-sak-unmade-[pid].ppm
+set shot /tmp/ls-graphical-sak-unmade-[pid].png
+set transcript /tmp/ls-graphical-sak-unmade-[pid].log
+
+lc_require_image {SESSION}
+
+source [file join [file dirname [info script]] display-follow.tcl]
+catch {file delete -force $transcript $shot $ppm}
+log_file -a $transcript
+
+set RULE {75 81 77}
+set GROUND {8 11 12}
+# What Lictor's driver says of a command the device answered otherwise than
+# asked, and Lictor of a making that failed. 0x1201 is the device's "out of
+# memory" and 0x1203 its "no such resource"; 0x1100 is its plain yes.
+set REFUSED "tapestryd: gpu RESOURCE_CREATE_2D resp_type=0x1201 (expected 0x1100)"
+set NO_SPARE [list \
+    "tapestryd: gpu DETACH_BACKING resp_type=0x1203 (expected 0x1100)" \
+    "tapestryd: gpu RESOURCE_UNREF resp_type=0x1203 (expected 0x1100)"]
+set STAYS "lictor: trusted screen stays 2048x1080 at 1x: the device did not make its image"
+
+proc key {chord} {
+    global repo qmp
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -k $chord} err]} {
+        lc_fail "qmp-sendtext -k $chord failed: $err"
+    }
+}
+# How many pixels of a rect of the dump are not the colour, and the rect's commonest.
+proc off {x0 y0 x1 y1 colour what} {
+    global repo shot
+    if {[catch {exec python3 $repo/tools/interactive/gfx_region.py $shot $x0 $y0 $x1 $y1 {*}$colour} out]} {
+        lc_fail "$what: gfx_region.py: $out"
+    }
+    lassign $out n total r g b
+    # The tool counts what of the rect the dump holds, so a dump of another
+    # size could be all the colour over the part it has.
+    if {$total != ($x1 - $x0) * ($y1 - $y0)} {
+        lc_fail "$what: the dump holds $total of the rect's [expr {($x1 - $x0) * ($y1 - $y0)}] pixels: it is not a dump of this screen"
+    }
+    if {$n != 0} {
+        lc_fail "$what: $n of $total pixels are not [join $colour ,] (the commonest there is $r,$g,$b)"
+    }
+    lc_step "$what: all $total pixels"
+}
+# Lictor's lines and its driver's, each the next of `lines`, and the session's
+# line of the mode it followed to, wherever among them it is said. One pattern
+# takes every line of any of the three kinds, the earliest first, so that none
+# is passed over: a line that is not the next one wanted fails, and so does one
+# more than the list holds.
+proc told {lines mode label} {
+    set ::what $label
+    set total [llength $lines]
+    set at 0
+    set session 0
+    while {$at < $total || !$session} {
+        set line ""
+        lc_within 45 {
+            -re {(lictor: trusted screen[^\r\n]*|tapestryd: gpu [^\r\n]*|tapestryd: display event \d+: [^\r\n]*)[\r\n]} {
+                set line $expect_out(1,string)
+            }
+            -re {lictor: seat failed[^\r\n]*[\r\n]} {
+                lc_fail "$label: [string trim $expect_out(0,string)]"
+            }
+            -re {halcyond: FAIL session[^\r\n]*[\r\n]} {
+                lc_fail "$label: the session failed: [string trim $expect_out(0,string)]"
+            }
+            -re {EXTINCTION:} {
+                lc_extinction_fail $label
+            }
+            timeout {
+                lc_fail "$label: 45s without a line of it ($at of the $total lines of Lictor's read; the session's mode, 1 for seen: $session)"
+            }
+            eof {
+                lc_fail "qemu exited during '$label'"
+            }
+        }
+        if {[string match "tapestryd: display event*" $line]} {
+            if {[regexp {: followed, (\d+x\d+ at \d+%)$} $line -> got]} {
+                if {$got ne $mode} {
+                    lc_fail "$label: the session followed to $got, want $mode"
+                }
+                if {$session} {
+                    lc_fail "$label: the session followed twice for one change"
+                }
+                set session 1
+                lc_step "the session: $line"
+            } elseif {[regexp {: (asking the host|the device is stalled; to be asked when it answers)$} $line]} {
+                lc_step "note: $line"
+            } else {
+                lc_fail "$label: the session did not follow its display: $line"
+            }
+            continue
+        }
+        if {$at == $total} {
+            lc_fail "$label: a line more than the $total wanted of Lictor's: $line"
+        }
+        set want [lindex $lines $at]
+        if {$line ne $want} {
+            lc_fail "$label: line [expr {$at + 1}] of $total of Lictor's: read '$line', want '$want'"
+        }
+        incr at
+        if {[string match "lictor: *" $line]} {
+            lc_step "Lictor (line $at of $total): $line"
+        }
+    }
+}
+# Secure attention, and the trusted screen up with its first whole frame on it.
+proc attention {label} {
+    set ::what "secure attention ($label)"
+    key "ctrl+alt+f10"
+    lc_within 30 {
+        -re {(lictor: seat failed[^\r\n]*|lictor: trusted screen[^\r\n]*|tapestryd: gpu [^\r\n]*)[\r\n]} {
+            lc_fail "$label: $expect_out(1,string)"
+        }
+        -re {lictor: trusted scanout active generation=\d+[\r\n]} {
+            lc_step "the trusted screen is up ($label)"
+        }
+        -re {EXTINCTION:} {
+            lc_extinction_fail $label
+        }
+        timeout {
+            lc_fail "$label: the trusted screen did not come up in 30s"
+        }
+        eof {
+            lc_fail "qemu exited during '$label'"
+        }
+    }
+    after 3000
+}
+# The episode's end. Lictor makes nothing while its screen is up and says
+# nothing in the exclusive phase, so a line of a making here was put off by
+# the episode, and none is owed.
+proc ended {label} {
+    set ::what $label
+    key "ret"
+    lc_within 30 {
+        -re {(lictor: seat failed[^\r\n]*|lictor: trusted screen[^\r\n]*|tapestryd: gpu [^\r\n]*)[\r\n]} {
+            lc_fail "$label: a line of Lictor's at the episode's end, and none is owed: $expect_out(1,string)"
+        }
+        -re {corvus: imperium: SAK with nothing pending[^\r\n]*[\r\n]} {
+            lc_step $label
+        }
+        -re {EXTINCTION:} {
+            lc_extinction_fail $label
+        }
+        timeout {
+            lc_fail "$label: the episode did not end in 30s"
+        }
+        eof {
+            lc_fail "qemu exited during '$label'"
+        }
+    }
+}
+# The scanout's size once it has a picture on it, then the dump the rects are
+# read from. The dump `dims` read last is the one kept.
+proc dumped {w h name label} {
+    global repo qmp shot ppm
+    wait_dims [list $w $h] $label
+    if {[info exists ::env(LS_SAK_UNMADE_SHOTS)]} {
+        if {[catch {file copy -force $ppm [file join $::env(LS_SAK_UNMADE_SHOTS) $name.ppm]} e]} {
+            lc_fail "$label: the dump could not be kept: $e"
+        }
+    }
+    if {[catch {exec $repo/tools/screendump.sh -s $qmp $shot} e]} {
+        lc_fail "$label: screendump: $e"
+    }
+}
+
+lc_boot
+set timeout $lc_boot_timeout
+expect {
+    -ex "Thylacine login: " {}
+    -re {EXTINCTION:} {
+        lc_extinction_fail "boot"
+    }
+    timeout {
+        lc_fail "no login"
+    }
+    eof {
+        lc_fail "EOF before login"
+    }
+}
+lc_raw_send "michael\r" "login user"
+expect {
+    -ex "password: " {}
+    timeout {
+        lc_fail "no password prompt"
+    }
+    eof {
+        lc_fail "EOF before password"
+    }
+}
+lc_raw_send "correct-horse-battery-staple-v1\r" "login password"
+set timeout 60
+expect {
+    -re {halcyond: session up (\d+)x(\d+) px} {
+        # One arm, ended by the line's own " px": the serial comes in pieces,
+        # and an arm for any other size would take the first piece of this one.
+        if {$expect_out(1,string) != 1280 || $expect_out(2,string) != 800} {
+            lc_fail "the display is not the one this scenario asks for: $expect_out(0,string)"
+        }
+        lc_step "the session is up on the 1280x800 display"
+    }
+    -re {halcyond: FAIL session[^\r\n]*[\r\n]} {
+        lc_fail "the session failed: [string trim $expect_out(0,string)]"
+    }
+    -ex "Thylacine textual shell" {
+        lc_fail "login gave a shell on an image whose bake record says SESSION"
+    }
+    -re {EXTINCTION:} {
+        lc_extinction_fail "session"
+    }
+    timeout {
+        lc_fail "no graphical session"
+    }
+    eof {
+        lc_fail "EOF at session start"
+    }
+}
+
+# The boot, read off the transcript: closing it writes out what expect still
+# holds of it. The session's own line is looked for the same way first, so
+# that a transcript with nothing in it does not read as a quiet boot. The
+# waits here and after the next display are the ones the cap was measured
+# with: the session's start holds more of the device than the session does.
+after 8000
+log_file
+if {[catch {exec grep -a -c {halcyond: session up 1280x800 px} $transcript} up]} {
+    lc_fail "the transcript does not hold the session's start, so nothing can be read off it: $up"
+}
+if {[catch {exec grep -a -o {lictor: trusted screen[ -~]*} $transcript} said]} {
+    set said "nothing"
+}
+if {[catch {exec grep -a -o {tapestryd: gpu [ -~]*resp_type=[ -~]*} $transcript} refusals]} {
+    set refusals "none"
+}
+log_file -a $transcript
+if {$refusals ne "none"} {
+    lc_fail "the device answered otherwise than asked before the display changed, and under this cap the session is to fit: [lindex [split $refusals \n] 0]"
+}
+if {$said ne "nothing"} {
+    lc_fail "at its start Lictor said a line of its screen, and 1280x800 at one is the display's own: $said"
+}
+lc_pass "the boot: 1280x800 at one, nothing said of it and nothing refused"
+
+# Grown.
+tell 2048x1080
+told [list "lictor: trusted screen 2048x1080 at 1x for a display of 2048x1080"] "2048x1080 at 100%" "the display became 2048x1080"
+after 6000
+lc_pass "a display that became 2048x1080 has the session's mode and a trusted screen of that size, at one"
+
+# Refused. The session has settled on the mode it keeps; nothing is waiting.
+set lines {}
+for {set n 1} {$n <= 7} {incr n} {
+    if {$n > 1} {
+        lappend lines {*}$NO_SPARE
+    }
+    lappend lines $REFUSED
+    lappend lines [expr {$n < 7 ? "$STAYS, to be tried again" : $STAYS}]
+}
+set began [clock milliseconds]
+tell 4096x2160
+told $lines "2048x1080 at 100%" "the display became 4096x2160"
+set gave_up [clock milliseconds]
+# The first making is 150 ms after the display's event and the six waits are
+# 18.9 s, so less than that from before the display was told is makings that
+# did not wait.
+if {$gave_up - $began < 18900} {
+    lc_fail "seven makings in [expr {$gave_up - $began}] ms from before the display was told: the six waits between them are 18900 ms"
+}
+lc_pass "a trusted screen the device would not make: seven makings refused over [expr {($gave_up - $began) / 1000}]s, the screen said to stay 2048x1080 at one"
+
+# Stands.
+attention "on a display of 4096x2160"
+dumped 2048 1080 stood "the trusted screen that stood"
+off 0 47 2048 48 $RULE "the rail's rule of the screen that stood is device row 47, the whole width"
+off 0 94 2048 96 $GROUND "and device rows 94 and 95 are its background, the whole width"
+ended "the episode on the screen that stood ended"
+lc_pass "secure attention after seven makings that failed: the 2048x1080 screen, whole"
+
+# Given up.
+set left [expr {21 - ([clock milliseconds] - $gave_up) / 1000}]
+if {$left < 2} {
+    set left 2
+}
+set ::what "after the seventh making"
+lc_within $left {
+    -re {(lictor: trusted screen[^\r\n]*|tapestryd: gpu [^\r\n]*)[\r\n]} {
+        lc_fail "a making after the seventh, which was not to be tried again: $expect_out(1,string)"
+    }
+    -re {EXTINCTION:} {
+        lc_extinction_fail "after the seventh making"
+    }
+    timeout {
+        lc_step "[expr {([clock milliseconds] - $gave_up) / 1000}]s after the seventh making, and no other"
+    }
+    eof {
+        lc_fail "qemu exited after the seventh making"
+    }
+}
+lc_pass "the event was given up on at the seventh making"
+
+# Afterwards.
+tell 1280x800
+told [concat $NO_SPARE [list "lictor: trusted screen 1280x800 at 1x for a display of 1280x800"]] "1280x800 at 100%" "the display became 1280x800"
+attention "on 1280x800"
+dumped 1280 800 after "the trusted screen on 1280x800"
+off 0 47 1280 48 $RULE "at one the rail's rule is device row 47, the whole width"
+off 0 94 1280 96 $GROUND "device rows 94 and 95 are the background, the whole width"
+ended "the second trusted episode ended"
+lc_pass "the next display was followed: 1280x800 at one, made after the spare was let go of once more"
+
+catch {file delete -force $transcript $shot $ppm}
+lc_pass "ls-graphical-sak-unmade: under a cap, a display followed, seven makings refused for the next, the screen that stood, and the display after it followed"
+lc_quit
